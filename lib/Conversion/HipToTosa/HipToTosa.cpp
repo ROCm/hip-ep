@@ -2515,9 +2515,10 @@ LogicalResult reshapeQdqParam(ConversionPatternRewriter &rewriter, Location loc,
     return success();
   }
 
+  // A per-tensor parameter ignores the axis, which can then be out of range.
   if (axis < 0)
     axis += rank;
-  if (axis < 0 || axis >= rank)
+  if (paramType.getRank() == 1 && (axis < 0 || axis >= rank))
     return rewriter.notifyMatchFailure(op, "qdq axis out of range");
 
   if (paramType.getRank() == rank) {

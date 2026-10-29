@@ -3,6 +3,8 @@
  * Licensed under the MIT License.
  */
 
+#include "QuantizedEpilogue.h"
+
 #include "hip/Conversion/HipToTosa/HipToTosaLegality.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
@@ -230,6 +232,41 @@ static bool isAnchorOp(Operation *op) {
   return isa<MatmulOp, ConvOp, GemmOp, QuantConvOp, QuantMatmulOp>(op);
 }
 
+// Anchors whose result is requantized to 8 bits, so the dequantize, pointwise,
+// and quantize ops after it can run in its epilogue.
+static bool isQuantizedAnchor(Operation *op) {
+  return isa<QuantConvOp, QuantMatmulOp, QLinearConvOp, QLinearMatMulOp>(op);
+}
+
+// A rank-0 value the kernel can recompute from inline scalar constants: such a
+// constant, or a dequantize or reciprocal of them (a QLinearAdd's constant
+// operand, a Div's divisor).
+static bool isConstantScalarExpr(Value v) {
+  if (isInlineScalarConstant(v))
+    return true;
+  Operation *def = v.getDefiningOp();
+  auto type = dyn_cast<RankedTensorType>(v.getType());
+  if (!def || !type || type.getRank() != 0)
+    return false;
+  bool isDequantize = isa<DequantizeLinearOp>(def) && isTosaLowerableQdq(def);
+  if (!isDequantize && !isa<ReciprocalOp>(def))
+    return false;
+  return llvm::all_of(
+      cast<DestinationStyleOpInterface>(def).getDpsInputs(), [](Value input) {
+        return isa<ContextType>(input.getType()) || isConstantScalarExpr(input);
+      });
+}
+
+// The ops isConstantScalarExpr walked, which the kernel clones.
+static void collectConstantScalarExpr(Value v, SetVector<Operation *> &ops) {
+  Operation *def = v.getDefiningOp();
+  if (!ops.insert(def) || isInlineScalarConstant(v))
+    return;
+  for (Value input : cast<DestinationStyleOpInterface>(def).getDpsInputs())
+    if (!isa<ContextType>(input.getType()))
+      collectConstantScalarExpr(input, ops);
+}
+
 // The ops one rock.kernel holds and the values it reads from outside, grown
 // outward from an anchor. The steps run in the order matchAndRewrite calls
 // them; kernel argument order follows insertion order, so reordering them
@@ -274,6 +311,7 @@ public:
 
 private:
   Operation *nextOnChain(const SetVector<Operation *> &chain) const;
+  void growQuantizedEpilogue(SetVector<Operation *> &chain) const;
 
   Operation *anchor;
   const FusionPolicy &policy;
@@ -369,11 +407,150 @@ KernelRegion::nextOnChain(const SetVector<Operation *> &chain) const {
   return nullptr;
 }
 
+// Past the requantize of a quantized anchor, its readers form a graph of
+// dequantizes, pointwise ops, and quantizes, not a chain. The kernel takes the
+// closure of that graph: every op whose operands are kernel values, inline
+// scalars, values the kernel can recompute from them, or inputs that do not
+// depend on the kernel. A dequantize outside that only the kernel reads (the
+// other side of a residual add) joins too, so the kernel reads its 8-bit
+// input. A value that a dequantize widened is never written out: whatever
+// would return it, or reads it outside, stays outside, and each result is an
+// 8-bit value or one from before the first dequantize.
+//
+// Before:
+//   %y  = <quant_conv, requantize>             -> tensor<1x16x8x8xui8>
+//   %d0 = hip.dequantize_linear ins(%y, ...)
+//   %c  = hip.dequantize_linear ins(%three, ...) : tensor<f32>
+//   %a  = hip.add ins(%d0, %c)
+//   %t  = hip.quantize_linear ins(%a, ...)
+//   %d1 = hip.dequantize_linear ins(%t, ...)
+//   %r  = hip.reciprocal ins(%six)
+//   %m  = hip.mul ins(%d1, %r)
+//   %t2 = hip.quantize_linear ins(%m, ...)
+//   %d2 = hip.dequantize_linear ins(%y, ...)
+//   %d3 = hip.dequantize_linear ins(%t2, ...)
+//   %h  = hip.mul ins(%d2, %d3)
+//   %z  = hip.quantize_linear ins(%h, ...)    // read by the next conv
+// After:
+//   %z = hip.rocmlir @rocMlir0(...)            // all of the above
+void KernelRegion::growQuantizedEpilogue(SetVector<Operation *> &chain) const {
+  Block *block = anchor->getBlock();
+  auto admits = [&](Operation *op) {
+    return op->getBlock() == block && op->getNumResults() == 1 &&
+           isa<DestinationStyleOpInterface>(op) &&
+           (policy.allowsEpilogue(op) ||
+            (isa<DequantizeLinearOp>(op) && isTosaLowerableQdq(op)));
+  };
+  auto pullableDequantize = [&](Value value, Operation *user) -> Operation * {
+    auto dequantize = value.getDefiningOp<DequantizeLinearOp>();
+    if (!dequantize || dequantize->getBlock() != block ||
+        !isTosaLowerableQdq(dequantize) ||
+        !isStaticTensor(dequantize.getInput()) ||
+        !isKernelIOValue(dequantize.getInput()))
+      return nullptr;
+    bool onlyKernelReads = llvm::all_of(dequantize->getUsers(), [&](auto *u) {
+      return u == user || chain.contains(u);
+    });
+    return onlyKernelReads ? dequantize.getOperation() : nullptr;
+  };
+
+  bool grew = true;
+  while (grew) {
+    grew = false;
+    SmallVector<Operation *> users;
+    for (Operation *op : chain)
+      for (Operation *user : op->getUsers())
+        if (!chain.contains(user) && admits(user))
+          users.push_back(user);
+    llvm::sort(users, [](Operation *a, Operation *b) {
+      return a->isBeforeInBlock(b);
+    });
+    users.erase(llvm::unique(users), users.end());
+    for (Operation *user : users) {
+      if (chain.contains(user))
+        continue;
+      SmallVector<Operation *> pulled;
+      bool joins = true;
+      for (Value input :
+           cast<DestinationStyleOpInterface>(user).getDpsInputs()) {
+        if (isa<ContextType>(input.getType()))
+          continue;
+        Operation *def = input.getDefiningOp();
+        if (def && chain.contains(def)) {
+          joins = keepsChainShape(user, input);
+        } else if (!isConstantScalarExpr(input)) {
+          joins = isStaticTensor(input) && isKernelIOValue(input) &&
+                  !dependsOnChain(input, anchor, chain);
+          if (Operation *dequantize = pullableDequantize(input, user))
+            pulled.push_back(dequantize);
+        }
+        if (!joins)
+          break;
+      }
+      if (!joins)
+        continue;
+      chain.insert_range(pulled);
+      chain.insert(user);
+      grew = true;
+    }
+  }
+
+  auto cut = [&](Operation *root) {
+    SmallVector<Operation *> worklist = {root};
+    while (!worklist.empty()) {
+      Operation *op = worklist.pop_back_val();
+      if (op == anchor || !chain.remove(op))
+        continue;
+      llvm::append_range(worklist, op->getUsers());
+    }
+  };
+  auto byBlockOrder = [&] {
+    SmallVector<Operation *> ordered(chain.begin(), chain.end());
+    llvm::sort(ordered, [&](Operation *a, Operation *b) {
+      return a == anchor || (b != anchor && a->isBeforeInBlock(b));
+    });
+    return ordered;
+  };
+  bool cutAny = true;
+  while (cutAny) {
+    cutAny = false;
+    DenseSet<Operation *> dequantized;
+    for (Operation *op : byBlockOrder()) {
+      if (isa<DequantizeLinearOp>(op) ||
+          (!isa<QuantizeLinearOp>(op) &&
+           llvm::any_of(op->getOperands(), [&](Value v) {
+             return dequantized.contains(v.getDefiningOp());
+           })))
+        dequantized.insert(op);
+    }
+    for (Operation *op : byBlockOrder()) {
+      if (!dequantized.contains(op) ||
+          !isa<FloatType>(getElementTypeOrSelf(op->getResult(0).getType())))
+        continue;
+      bool written =
+          op->use_empty() || llvm::any_of(op->getUsers(), [&](Operation *user) {
+            return !chain.contains(user);
+          });
+      if (written) {
+        cut(op);
+        cutAny = true;
+        break;
+      }
+    }
+  }
+  SmallVector<Operation *> ordered = byBlockOrder();
+  chain.clear();
+  chain.insert_range(ordered);
+}
+
 void KernelRegion::growForward() {
   SetVector<Operation *> chain;
   chain.insert(anchor);
   while (Operation *next = nextOnChain(chain))
     chain.insert(next);
+  if (isQuantizedAnchor(anchor) && policy.multiOutput &&
+      policy.quantizeEpilogue)
+    growQuantizedEpilogue(chain);
   // A chain value read outside becomes a kernel result, which needs an init,
   // so a view with an outside reader ends the chain. A view whose readers all
   // joined the chain stays inside, as in an erf GELU after a matmul:
@@ -445,12 +622,16 @@ bool KernelRegion::takeContext() {
 
 // Pointwise scalar literals belong in the outlined subgraph, not the kernel
 // ABI. A rank-0 buffer argument has no index for rock.transforms_to_ptr. Clone
-// only inline constants: a dynamic Clip bound remains an argument.
+// only inline constants, and for a quantized anchor the dequantizes and
+// reciprocals of them its epilogue reads: a dynamic Clip bound remains an
+// argument.
 void KernelRegion::cloneInlineScalars() {
   SetVector<Value> kernelOperands;
+  bool quantized = isQuantizedAnchor(anchor);
   for (Value operand : operands) {
-    if (isInlineScalarConstant(operand)) {
-      ops.insert(operand.getDefiningOp());
+    if (isInlineScalarConstant(operand) ||
+        (quantized && isConstantScalarExpr(operand))) {
+      collectConstantScalarExpr(operand, ops);
       continue;
     }
     kernelOperands.insert(operand);
@@ -505,6 +686,12 @@ static std::optional<SmallVector<Value>> getDataInputs(Operation *producer,
 //   %c0 = hip.conv ins(%x, %w0, %b0)
 //   %r  = hip.max ins(%c0, %zero)       // claimed by %c0's epilogue
 //   %c1 = hip.conv ins(%r, %w1, %b1)    // so %c1 does not take %r
+//
+// A quantized anchor's epilogue reaches past dequantizes and quantizes, so the
+// walk does too, and a QLinear op that DecomposeQLinearConv or
+// DecomposeQLinearMatMul will turn into an anchor already claims its epilogue.
+static bool isPlannedQLinear(Operation *op);
+
 static bool isClaimedByForwardChain(Operation *op, const FusionPolicy &policy) {
   SmallVector<Operation *> worklist = {op};
   DenseSet<Operation *> visited;
@@ -516,7 +703,7 @@ static bool isClaimedByForwardChain(Operation *op, const FusionPolicy &policy) {
       Operation *def = operand.getDefiningOp();
       if (!def || def->getBlock() != op->getBlock())
         continue;
-      if (isAnchorOp(def)) {
+      if (isAnchorOp(def) || isPlannedQLinear(def)) {
         if (!llvm::all_of(def->getOperands(), [](Value v) {
               auto type = dyn_cast<TensorType>(v.getType());
               return !type || type.hasStaticShape();
@@ -528,7 +715,8 @@ static bool isClaimedByForwardChain(Operation *op, const FusionPolicy &policy) {
           return true;
         continue;
       }
-      if (policy.allowsEpilogue(def) || policy.allowsForwardView(def))
+      if (policy.allowsEpilogue(def) || policy.allowsForwardView(def) ||
+          isTosaLowerableQdq(def))
         worklist.push_back(def);
     }
   }
@@ -1138,6 +1326,15 @@ static std::optional<QLinearPlan> planQLinearMatMul(QLinearMatMulOp op) {
   return plan;
 }
 
+static bool isPlannedQLinear(Operation *op) {
+  if (auto conv = dyn_cast<QLinearConvOp>(op))
+    return conv->getNumResults() == 1 && planQLinearConv(conv).has_value();
+  if (auto matmul = dyn_cast<QLinearMatMulOp>(op))
+    return matmul->getNumResults() == 1 &&
+           planQLinearMatMul(matmul).has_value();
+  return false;
+}
+
 // The epilogue that both QLinear rewrites share: add the corrected bias, cast
 // to f32, scale, and quantize with unit scale, which rounds half to even,
 // adds the zero point, and saturates, as ORT CPU does.
@@ -1568,6 +1765,10 @@ public:
       signalPassFailure();
       return;
     }
+    for (RocMlirOp dispatch : funcOp.getOps<RocMlirOp>())
+      if (auto kernel = SymbolTable::lookupNearestSymbolFrom<func::FuncOp>(
+              dispatch, dispatch.getKernelAttr()))
+        rewriteQuantizedBinaryOps(kernel);
     if (fuseGemmGemm)
       fuseGemmGemmKernels(funcOp, counter, gemmGemmAccelTypes);
   }
