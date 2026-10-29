@@ -11,6 +11,8 @@
 #include "matmul_dispatch.h"
 #include "runtime_types.h"
 
+#include <hipblaslt/hipblaslt-ext.hpp>
+
 #include <algorithm>
 #include <atomic>
 #include <cassert>
@@ -311,7 +313,12 @@ static MatmulCacheEntry *queryOrCreateMatmul(MatmulAlgoTable &table,
       entry.use_default_algo = true;
       entry.tuned = true;
     } else {
-      hipdnn_ep_real::orderUnrankedCandidates(entry.candidates, returned);
+      hipdnn_ep_real::orderUnrankedCandidates(
+          entry.candidates, returned,
+          [handle](const hipblasLtMatmulHeuristicResult_t &candidate) {
+            hipblasLtMatmulAlgo_t algo = candidate.algo;
+            return hipblaslt_ext::getKernelNameFromAlgo(handle, algo);
+          });
       entry.num_candidates = returned;
       entry.algo = entry.candidates[0].algo;
       entry.workspace_size = entry.candidates[0].workspaceSize;
