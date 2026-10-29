@@ -21,7 +21,7 @@ if not defined CONDA_PREFIX (
 REM --- LLVM/MLIR build output (contains mlir-translate, llc) ---
 set LLVM_BIN=C:\Users\chiz\work\gpu\llvm-project\build\Debug\bin
 
-REM --- TheRock ROCm dist (contains amdhip64, hipblaslt) ---
+REM --- TheRock ROCm dist (contains amdhip64) ---
 set THEROCK_DIST=C:\Users\chiz\work\gpu\TheRock\build\dist\rocm
 
 REM --- MLIR tools build output ---
@@ -36,15 +36,6 @@ if not defined ORT_HOME set ORT_HOME=C:\Users\chiz\work\onnxruntime
 REM --- Generate import libraries from TheRock DLLs (one-time, cached in build dir) ---
 if not exist "%SRC_DIR%\build" mkdir "%SRC_DIR%\build"
 pushd "%SRC_DIR%\build"
-if not exist hipblaslt.lib (
-  echo Generating hipblaslt.lib from libhipblaslt.dll...
-  dumpbin /EXPORTS "%THEROCK_DIST%\bin\libhipblaslt.dll" | findstr /R "^  *[0-9]" > _exports_raw.txt
-  echo LIBRARY libhipblaslt.dll > hipblaslt.def
-  echo EXPORTS >> hipblaslt.def
-  for /f "tokens=4" %%a in (_exports_raw.txt) do echo   %%a >> hipblaslt.def
-  lib /def:hipblaslt.def /out:hipblaslt.lib /machine:x64 >nul 2>&1
-  del _exports_raw.txt hipblaslt.def hipblaslt.exp 2>nul
-)
 if not exist amdhip64.lib (
   echo Generating amdhip64.lib from amdhip64_7.dll...
   dumpbin /EXPORTS "%THEROCK_DIST%\bin\amdhip64_7.dll" | findstr /R "^  *[0-9]" > _exports_raw.txt
