@@ -484,9 +484,8 @@ static std::optional<SmallVector<Value>> getDataInputs(Operation *producer,
 // graph. Such an op belongs to that anchor's epilogue: there it runs once per
 // output element, while as a prologue of the next kernel it would rerun on
 // every load of that kernel's input. Checking the claim keeps the result
-// independent of the order the greedy driver visits anchors in, which is
-// MIGraphX's order: epilogues first (find_mlir_fused_ops), then the leftover
-// pointwise ops as prologues (find_pointwise_mlir).
+// independent of the order the greedy driver visits anchors in: epilogues
+// first, then the leftover pointwise ops as prologues.
 //
 //   %c0 = hip.conv ins(%x, %w0, %b0)
 //   %r  = hip.max ins(%c0, %zero)       // claimed by %c0's epilogue
@@ -695,9 +694,9 @@ template <typename AnchorOp>
 class FuseAnchorPointwise : public OpRewritePattern<AnchorOp> {
 public:
   FuseAnchorPointwise(MLIRContext *context, int *counter, bool fuseViews,
-                      PatternBenefit benefit = 1)
+                      StringRef arch, PatternBenefit benefit = 1)
       : OpRewritePattern<AnchorOp>(context, benefit), counter(counter),
-        policy(getFusionPolicy(fuseViews)) {}
+        policy(getFusionPolicy(fuseViews)), arch(arch.str()) {}
 
   LogicalResult matchAndRewrite(AnchorOp anchorOp,
                                 PatternRewriter &rewriter) const override {
@@ -761,7 +760,8 @@ public:
                                      "rocMlir" + std::to_string((*counter)++),
                                      funcType);
       newFunc->setAttr("rock.kernel", rewriter.getUnitAttr());
-      newFunc->setAttr("rock.arch", rewriter.getStringAttr("gfx1151"));
+      if (!arch.empty())
+        newFunc->setAttr("rock.arch", rewriter.getStringAttr(arch));
       auto *funcBlock = newFunc.addEntryBlock();
       rewriter.setInsertionPointToStart(funcBlock);
       IRMapping mapping;
@@ -837,6 +837,7 @@ public:
 private:
   int *counter = nullptr;
   FusionPolicy policy;
+  std::string arch;
 };
 
 // The kernel's one matmul or gemm, if it has exactly one and no convolution.
@@ -884,16 +885,24 @@ static std::optional<std::array<int64_t, 3>> getGemmDims(Operation *anchor) {
                                 transA ? aRows : aCols};
 }
 
-// WMMA on gfx11 and gfx12 has no fp32 path, so an fp32 gemm-gemm kernel would
-// fall back to a slow non-matrix-core lowering.
-static bool isGemmGemmSupported(Operation *anchor, StringRef arch) {
-  auto type = cast<ShapedType>(anchor->getResult(0).getType());
-  bool wmma = arch.starts_with("gfx11") || arch.starts_with("gfx12");
-  return !(wmma && type.getElementType().isF32());
+// A gemm-gemm kernel without matrix acceleration for its element types falls
+// back to a slow lowering, so both gemms must read types the target
+// accelerates. `accelTypes` holds them as printed (f16, bf16, ...).
+static bool isGemmGemmSupported(Operation *anchor,
+                                ArrayRef<std::string> accelTypes) {
+  Value b = isa<MatmulOp>(anchor) ? cast<MatmulOp>(anchor).getB()
+                                  : cast<GemmOp>(anchor).getInputB();
+  auto isAccelerated = [&](Value operand) {
+    std::string name;
+    llvm::raw_string_ostream os(name);
+    getElementTypeOrSelf(operand.getType()).print(os);
+    return llvm::is_contained(accelTypes, name);
+  };
+  return isAccelerated(getGemmAOperand(anchor).get()) && isAccelerated(b);
 }
 
-// MIGraphX's find_mlir_fused_geg_ops::check_heuristic for gemm0
-// (m x k) @ (k x n) followed by gemm1 (m x n) @ (n x g). Fusing keeps the
+// The shape gate for gemm0 (m x k) @ (k x n) followed by gemm1
+// (m x n) @ (n x g). Fusing keeps the
 // m x n intermediate on chip, which pays only for a column-vector
 // intermediate or a skinny-k MLP bottom over a large batch. Both gates cap g
 // at 256, so rocMLIR's LDS estimate for its conservative default perf config,
@@ -961,8 +970,7 @@ static bool feedsGemmA(BlockArgument arg, Operation *anchor) {
 
 // Gemm-pointwise-gemm: merge two outlined kernels when the first kernel's
 // only result feeds the second kernel's gemm A operand, so rocMLIR lowers the
-// pair to one rock.gemm_elementwise_gemm. Mirrors MIGraphX's
-// find_mlir_fused_geg_ops; convolutions stay out (its CEG mode is opt-in).
+// pair to one rock.gemm_elementwise_gemm. Convolutions stay out.
 //
 // Before:
 //   %h = hip.rocmlir @rocMlir0 ins(%x, %w0) outs(%e0)   // matmul -> sigmoid
@@ -970,18 +978,16 @@ static bool feedsGemmA(BlockArgument arg, Operation *anchor) {
 // After:
 //   %y = hip.rocmlir @rocMlir2 ins(%x, %w0, %w1) outs(%e1)
 //   // @rocMlir2: matmul -> sigmoid -> matmul
-static bool fuseGemmGemmPair(RocMlirOp second, int &counter) {
+static bool fuseGemmGemmPair(RocMlirOp second, int &counter,
+                             ArrayRef<std::string> accelTypes) {
   auto module = second->getParentOfType<ModuleOp>();
   auto secondKernel = SymbolTable::lookupNearestSymbolFrom<func::FuncOp>(
       second, second.getKernelAttr());
   if (!secondKernel)
     return false;
   Operation *secondAnchor = getSoleGemmAnchor(secondKernel);
-  if (!secondAnchor)
+  if (!secondAnchor || !isGemmGemmSupported(secondAnchor, accelTypes))
     return false;
-  StringRef arch = "";
-  if (auto archAttr = secondKernel->getAttrOfType<StringAttr>("rock.arch"))
-    arch = archAttr.getValue();
 
   for (auto [index, input] : llvm::enumerate(second.getInputs())) {
     auto first = input.getDefiningOp<RocMlirOp>();
@@ -994,8 +1000,7 @@ static bool fuseGemmGemmPair(RocMlirOp second, int &counter) {
       continue;
     Operation *firstAnchor = getSoleGemmAnchor(firstKernel);
     if (!firstAnchor || !endsInGemmPointwise(firstKernel, firstAnchor) ||
-        !isGemmGemmSupported(firstAnchor, arch) ||
-        !isGemmGemmSupported(secondAnchor, arch))
+        !isGemmGemmSupported(firstAnchor, accelTypes))
       continue;
     if (!feedsGemmA(secondKernel.getArgument(index), secondAnchor))
       continue;
@@ -1074,12 +1079,13 @@ static bool fuseGemmGemmPair(RocMlirOp second, int &counter) {
   return false;
 }
 
-static void fuseGemmGemmKernels(func::FuncOp funcOp, int &counter) {
+static void fuseGemmGemmKernels(func::FuncOp funcOp, int &counter,
+                                ArrayRef<std::string> accelTypes) {
   bool changed = true;
   while (changed) {
     changed = false;
     for (auto op : llvm::make_early_inc_range(funcOp.getOps<RocMlirOp>()))
-      if (fuseGemmGemmPair(op, counter)) {
+      if (fuseGemmGemmPair(op, counter, accelTypes)) {
         changed = true;
         break;
       }
@@ -1099,14 +1105,14 @@ public:
     RewritePatternSet patterns(ctx);
     int counter = 0;
     patterns.add<FuseAnchorPointwise<MatmulOp>, FuseAnchorPointwise<ConvOp>,
-                 FuseAnchorPointwise<GemmOp>>(ctx, &counter, fuseViews);
+                 FuseAnchorPointwise<GemmOp>>(ctx, &counter, fuseViews, arch);
 
     if (failed(applyPatternsGreedily(funcOp, std::move(patterns)))) {
       signalPassFailure();
       return;
     }
     if (fuseGemmGemm)
-      fuseGemmGemmKernels(funcOp, counter);
+      fuseGemmGemmKernels(funcOp, counter, gemmGemmAccelTypes);
   }
 };
 

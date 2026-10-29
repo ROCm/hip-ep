@@ -8091,11 +8091,10 @@ static bool isSignednessNeutral(Operation *op) {
 }
 
 // rocMLIR's TOSA pipeline takes only signless integers. Its rocmlir custom
-// ops (unsigned_cast, unsigned_div, unsigned_max) carry the unsigned meaning,
-// which is how MIGraphXToTosa hands it unsigned data. A ui8 kernel argument
-// becomes i8 with the same bytes, so the caller's buffer needs no change. A
-// kernel with any other op on an unsigned value -- a tosa.clamp or
-// tosa.maximum, whose meaning would change -- is left as it is.
+// ops (unsigned_cast, unsigned_div, unsigned_max) carry the unsigned meaning.
+// A ui8 kernel argument becomes i8 with the same bytes, so the caller's buffer
+// needs no change. A kernel with any other op on an unsigned value -- a
+// tosa.clamp or tosa.maximum, whose meaning would change -- is left as it is.
 //
 // Before:
 //   func @k(%x: tensor<4xui8>) -> tensor<4xf32>

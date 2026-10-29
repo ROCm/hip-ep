@@ -183,8 +183,16 @@ def FuseROCMlirPass : Pass<"hip-fuse-rocmlir", "mlir::func::FuncOp"> {
            "keeps every kernel a forward-only pointwise chain.">,
     Option<"fuseGemmGemm", "fuse-geg", "bool", /*default=*/"true",
            "Merge a matmul/gemm kernel into the next one when its only "
-           "result feeds that gemm's A operand and MIGraphX's "
-           "gemm-elementwise-gemm shape gates pass.">
+           "result feeds that gemm's A operand and the gemm-elementwise-gemm "
+           "shape gates pass.">,
+    Option<"arch", "arch", "std::string", /*default=*/"\"\"",
+           "Target GPU architecture, stamped as rock.arch on each outlined "
+           "kernel. Empty leaves rock.arch unset.">,
+    ListOption<"gemmGemmAccelTypes", "gemm-gemm-accel-types", "std::string",
+               "Gemm element types (as printed, e.g. f16) that have matrix "
+               "acceleration on the target. Both gemms of a "
+               "gemm-elementwise-gemm kernel must read a listed type; an "
+               "empty list merges no pair.">
   ];
   let dependentDialects = [
     "mlir::arith::ArithDialect",
