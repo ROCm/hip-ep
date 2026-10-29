@@ -520,6 +520,9 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
           static_cast<int>(transB), static_cast<int>(transA), abDtype, abDtype,
           alpha, hblA_ld, hblB_ld, N,
           /*strideA=*/0, /*strideB=*/0, /*strideD=*/0);
+      if (entry.ck_instance == kCkSelectStreamError) {
+        return -1;
+      }
     }
     {
       std::lock_guard<std::mutex> lk(table.mu);

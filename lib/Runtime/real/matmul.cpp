@@ -199,6 +199,10 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
             static_cast<int>(transB), /*transB=*/0, abDtype, abDtype,
             /*alpha=*/1.0f, hblA_ld, hblB_ld, /*ldd=*/N,
             /*strideA=*/b_batch_stride, /*strideB=*/M * K, /*strideD=*/M * N);
+        if (entry->ck_instance == kCkSelectStreamError) {
+          entry->ck_instance = -1;
+          return -1;
+        }
       }
       entry->resolved.store(true, std::memory_order_release);
       // ck_instance=-1 is reserved for a shape CK was offered and refused, so

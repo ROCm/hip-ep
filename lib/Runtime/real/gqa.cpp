@@ -1038,16 +1038,17 @@ struct GqaGemmCacheEntry {
   // the reference GEMM fallback.
   int ck_instance = -1;
   bool ck_probed = false;
+  std::unordered_map<uint64_t, int> *families = nullptr;
 };
 
 struct GqaGemmCache {
   std::unordered_map<GqaGemmKey, GqaGemmCacheEntry, GqaGemmKeyHash> entries;
+  std::unordered_map<uint64_t, int> families;
 };
 
 // Per-instance GQA op-state (see op-state-slots-design.md): owns this
-// instance's per-GEMM-shape routing cache. Replaces the former shared
-// RuntimeState::gqa_gemm_cache, so concurrent sessions (and distinct GQA
-// layers) no longer share one routing map.
+// instance's per-GEMM-shape routing cache, so sessions and GQA layers do not
+// share one routing map.
 struct GqaState : OpStateT<GqaState> {
   GqaGemmCache cache;
 };
@@ -1076,6 +1077,7 @@ static GqaGemmCacheEntry *queryOrCreateGemmState(RuntimeState *state,
   }
   GqaGemmCacheEntry entry = {};
   entry.key = key;
+  entry.families = &cache->families;
   auto [ins, _] = cache->entries.emplace(key, entry);
   return &ins->second;
 }
@@ -1099,11 +1101,37 @@ static int gqaRunGemm(GqaGemmCacheEntry *st, hipStream_t stream, const void *A,
       key.inputFp32 ? key.outputFp32 : (key.outputFp32 || alpha == 1.0f);
 
   if (ck_eligible && !st->ck_probed) {
-    st->ck_probed = true;
-    st->ck_instance = ckSelectGemmInstance(
+    const uint64_t family = ckGemmFamilyKey(
+        key.m, key.n, key.k, key.batch, key.transA ? 1 : 0, abDtype, dDtype,
+        lda, /*ldb=*/key.k, /*ldd=*/key.m, strideA, strideB, strideC);
+    auto known = st->families->find(family);
+    if (known != st->families->end() &&
+        hip_ck_gemm_run(stream, known->second, A, B, /*bias=*/nullptr, D, key.m,
+                        key.n, key.k, key.batch, key.transA ? 1 : 0,
+                        /*transB=*/0, abDtype, dDtype, alpha, lda,
+                        /*ldb=*/key.k, /*ldd=*/key.m, strideA, strideB,
+                        strideC) == 0) {
+      st->ck_probed = true;
+      st->ck_instance = known->second;
+      RUNTIME_DEBUG_LOG("[GQA] CK instance %d for m=%lld n=%lld k=%lld "
+                        "batch=%lld transA=%d inFp32=%d outFp32=%d (family)\n",
+                        st->ck_instance, (long long)key.m, (long long)key.n,
+                        (long long)key.k, (long long)key.batch, (int)key.transA,
+                        (int)key.inputFp32, (int)key.outputFp32);
+      return 0;
+    }
+    const int chosen = ckSelectGemmInstance(
         stream, A, B, /*bias=*/nullptr, D, key.m, key.n, key.k, key.batch,
         key.transA ? 1 : 0, /*transB=*/0, abDtype, dDtype, alpha, lda,
         /*ldb=*/key.k, /*ldd=*/key.m, strideA, strideB, strideC);
+    if (chosen == kCkSelectStreamError) {
+      return -1;
+    }
+    st->ck_probed = true;
+    st->ck_instance = chosen;
+    if (chosen >= 0) {
+      (*st->families)[family] = chosen;
+    }
     RUNTIME_DEBUG_LOG("[GQA] CK instance %d for m=%lld n=%lld k=%lld "
                       "batch=%lld transA=%d inFp32=%d outFp32=%d\n",
                       st->ck_instance, (long long)key.m, (long long)key.n,

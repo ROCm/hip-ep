@@ -10,12 +10,18 @@
 #include <hip/hip_runtime.h>
 
 #include <cstdint>
+#include <cstdio>
+#include <initializer_list>
 
-// Returns the CK instance to serve this problem, or -1 when none is found. Up
-// to three instances proposed by the offline table are checked first: a single
-// accepted one wins outright, several are timed against each other. Without an
-// accepted proposal every accepting instance is timed and the fastest wins.
-// Arguments mirror hip_ck_gemm_run minus the instance.
+// The stream already carried an error, so no instance was judged; the caller
+// must fail the op and must not cache a route.
+constexpr int kCkSelectStreamError = -2;
+
+// Returns the CK instance to serve this problem, -1 when none is found, or
+// kCkSelectStreamError. Up to three instances proposed by the offline table are
+// checked first: a single accepted one wins outright, several are timed against
+// each other. Without an accepted proposal every accepting instance is timed
+// and the fastest wins. Arguments mirror hip_ck_gemm_run minus the instance.
 //
 // Probe and timing launches overwrite `output`, so the caller must not have
 // seeded it with anything the real call still needs.
@@ -26,6 +32,11 @@ inline int ckSelectGemmInstance(hipStream_t stream, const void *A,
                                 float alpha, int64_t lda, int64_t ldb,
                                 int64_t ldd, int64_t strideA, int64_t strideB,
                                 int64_t strideD) {
+  if (hipStreamSynchronize(stream) != hipSuccess) {
+    fprintf(stderr, "[ck-gemm] stream failed before instance selection: %s\n",
+            hipGetErrorString(hipGetLastError()));
+    return kCkSelectStreamError;
+  }
   auto launch = [&](int instance) {
     return hip_ck_gemm_run(stream, instance, A, B, bias, output, m, n, k, batch,
                            transA, transB, abDtype, dDtype, alpha, lda, ldb,
@@ -130,6 +141,47 @@ inline int ckSelectGemmInstance(hipStream_t stream, const void *A,
   (void)hipEventDestroy(start);
   (void)hipEventDestroy(stop);
   return best;
+}
+
+// Groups shapes that can share a chosen instance: n, batch, transposes and
+// dtypes exactly, m and k by power of two and alignment, leading dimensions and
+// strides by alignment. Attention decode grows the key extent by one every
+// step, so its exact shape is new each token while its family is not. A family
+// only proposes an instance; hip_ck_gemm_run still validates it.
+inline uint64_t ckGemmFamilyKey(int64_t m, int64_t n, int64_t k, int64_t batch,
+                                int transA, int abDtype, int dDtype,
+                                int64_t lda, int64_t ldb, int64_t ldd,
+                                int64_t strideA, int64_t strideB,
+                                int64_t strideD) {
+  auto align = [](int64_t x) -> uint64_t {
+    return x % 8 == 0 ? 3 : x % 4 == 0 ? 2 : x % 2 == 0 ? 1 : 0;
+  };
+  auto log2Floor = [](int64_t x) -> uint64_t {
+    uint64_t b = 0;
+    while (x > 1) {
+      x >>= 1;
+      ++b;
+    }
+    return b;
+  };
+  uint64_t h = 1469598103934665603ull;
+  auto mix = [&h](uint64_t v) {
+    h ^= v;
+    h *= 1099511628211ull;
+  };
+  mix(log2Floor(m));
+  mix(align(m));
+  mix(static_cast<uint64_t>(n));
+  mix(log2Floor(k));
+  mix(align(k));
+  mix(static_cast<uint64_t>(batch));
+  mix(static_cast<uint64_t>(transA));
+  mix(static_cast<uint64_t>(abDtype));
+  mix(static_cast<uint64_t>(dDtype));
+  for (int64_t v : {lda, ldb, ldd, strideA, strideB, strideD}) {
+    mix(align(v));
+  }
+  return h;
 }
 
 #endif // HIPDNN_EP_CK_GEMM_SELECT_H
