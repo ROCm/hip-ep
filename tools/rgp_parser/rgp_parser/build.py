@@ -355,10 +355,10 @@ def build_trace(
             ki.tile,
             ki.label,
         )
-        occ_pct, limiter, waves_cu = occ_calc.theoretical_occupancy(
+        occ_pct, limiter, waves_wgp = occ_calc.theoretical_occupancy(
             d.vgpr, d.sgpr, d.lds, d.workgroup, wave_size=WAVE
         )
-        d.occ_pct, d.occ_limiter, d.occ_theoretical = occ_pct, limiter, waves_cu
+        d.occ_pct, d.occ_limiter, d.occ_theoretical = occ_pct, limiter, waves_wgp
 
     # --- idle gaps per queue (execution-window based, real dispatches only) -----
     for q in queues:

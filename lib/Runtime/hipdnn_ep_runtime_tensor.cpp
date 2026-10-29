@@ -440,6 +440,14 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
     }
   }
 
+  // Same Run boundary as the PERF block below, but deliberately outside it: the
+  // RGP fence needs a Run index to position a capture on a phase, and PERF's
+  // per-inference stream sync would distort the very throughput the capture is
+  // taken to measure. Costs one load when the fence is not armed.
+  if (index == 0) {
+    rgp_fence_note_run();
+  }
+
   // PERF: at the start of each new inference, flush the previous inference's
   // timing breakdown (one line, easy to grep) and open a new window. We
   // piggy-back on prepare_input(0) instead of using a dedicated sync hook
@@ -616,6 +624,10 @@ int hipdnn_ep_tensor_finalize_output(RuntimeState *state,
 
 // Synchronize GPU stream once (called after all finalize_output calls).
 int hipdnn_ep_stream_sync(RuntimeState *state) {
+  const bool timeline = host_timeline_enabled();
+  const double timelineEnterUs =
+      timeline ? op_profile_us_since_epoch(std::chrono::steady_clock::now())
+               : 0.0;
   // Per-Compute entry trace; gated on HIPDNN_EP_DEBUG to keep the hot path
   // silent (fires once per Compute -> tens of thousands of lines on a
   // multi-token decode).
@@ -650,6 +662,10 @@ int hipdnn_ep_stream_sync(RuntimeState *state) {
     fprintf(stderr, "hipdnn_ep_stream_sync: stream sync failed\n");
     return HIPDNN_EP_ERR_STREAM_SYNC_FAILED;
   }
+  if (timeline)
+    host_timeline_record_sync(
+        state->stream, timelineEnterUs,
+        op_profile_us_since_epoch(std::chrono::steady_clock::now()));
 
   // PERF: compute and log timing breakdown
   if (hipdnn_ep_perf_enabled() && g_perf.initialized) {

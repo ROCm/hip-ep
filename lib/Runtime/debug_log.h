@@ -54,11 +54,12 @@ inline bool hipdnn_ep_perf_enabled() {
   // can sample the H2D / Compute / D2H phases), which serializes the GPU
   // pipeline and skews measurements. Users who only want the per-call
   // [Runtime DEBUG] traces should not pay that cost.
-  // A set HIPDNN_EP_TRACE_FILE also implies PERF (the trace needs the profiler
-  // running).
+  // A set HIPDNN_EP_TRACE_FILE or HIPDNN_EP_PERF_OPS also implies PERF (both
+  // need the profiler running; PERF_OPS only narrows which ops it times).
   static const bool enabled =
       hipdnn_ep::env_enabled("HIPDNN_EP_PERF") ||
-      !hipdnn_ep::env_string("HIPDNN_EP_TRACE_FILE").empty();
+      !hipdnn_ep::env_string("HIPDNN_EP_TRACE_FILE").empty() ||
+      !hipdnn_ep::env_string("HIPDNN_EP_PERF_OPS").empty();
   return enabled;
 }
 
