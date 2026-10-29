@@ -447,9 +447,10 @@ int wrap_hipblasLtGemm(void *handle, void *stream, int64_t m, int64_t n,
 int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
                          const void *B, void *output, int64_t M, int64_t N,
                          int64_t K, int64_t batch_count, int64_t elem_size,
-                         int64_t b_batch_stride, int64_t transA,
-                         int64_t transB) {
+                         int64_t b_batch_stride, int64_t a_batch_stride,
+                         int64_t transA, int64_t transB) {
   (void)b_batch_stride;
+  (void)a_batch_stride;
   (void)transA;
   (void)transB;
   (void)op_state_slot;

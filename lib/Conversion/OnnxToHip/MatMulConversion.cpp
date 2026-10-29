@@ -43,7 +43,9 @@ MatMulToHip::matchAndRewrite(mlir::Operation *op,
     transB = attr.getValue().getSExtValue();
 
   // MatMul: result[..., M, N] = A[..., M, K] @ B[..., K, N].
-  // Batch and M dims come from A; N comes from B's last dim.
+  // M comes from A, N from B's last dim, and each batch dim from the operand
+  // that holds it after right-aligning the batch dims, B where A's is a
+  // static 1 (A broadcast against per-batch B).
   llvm::SmallVector<mlir::Value> dynSizes;
   const int64_t rank = resultType.getRank();
   const auto aType = mlir::cast<mlir::RankedTensorType>(a.getType());
@@ -60,7 +62,13 @@ MatMulToHip::matchAndRewrite(mlir::Operation *op,
       int64_t aDim = transA ? aRank - 1 : aRank - 2;
       dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc, a, aDim));
     } else {
-      dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc, a, dimIdx));
+      const int64_t aDim = dimIdx - (rank - aRank);
+      const int64_t bDim = dimIdx - (rank - bRank);
+      const bool bHas = bDim >= 0 && bDim < bRank - 2;
+      const bool useA = aDim >= 0 && aDim < aRank - 2 &&
+                        !(bHas && aType.getDimSize(aDim) == 1);
+      dynSizes.push_back(mlir::tensor::DimOp::create(
+          rewriter, loc, useA ? a : b, useA ? aDim : bDim));
     }
   }
 

@@ -44,11 +44,13 @@ static bool autotune_enabled() {
 }
 
 struct MatmulCacheKey {
-  int64_t M, N, K, batch_count, elem_size, b_batch_stride, transA, transB;
+  int64_t M, N, K, batch_count, elem_size, b_batch_stride, a_batch_stride,
+      transA, transB;
   bool operator==(const MatmulCacheKey &o) const {
     return M == o.M && N == o.N && K == o.K && batch_count == o.batch_count &&
            elem_size == o.elem_size && b_batch_stride == o.b_batch_stride &&
-           transA == o.transA && transB == o.transB;
+           a_batch_stride == o.a_batch_stride && transA == o.transA &&
+           transB == o.transB;
   }
 };
 
@@ -61,6 +63,7 @@ struct MatmulCacheKeyHash {
     hash_combine_val(h, k.batch_count);
     hash_combine_val(h, k.elem_size);
     hash_combine_val(h, k.b_batch_stride);
+    hash_combine_val(h, k.a_batch_stride);
     hash_combine_val(h, k.transA);
     hash_combine_val(h, k.transB);
     return h;
@@ -215,19 +218,18 @@ static MatmulCacheEntry *queryOrCreateMatmul(MatmulAlgoTable &table,
 
   if (key.batch_count > 1) {
     int64_t bc = key.batch_count;
-    // layA → user's B. The stride is whatever the compiler computed —
-    // 0 for broadcast B (rank-2 [K,N] or rank-N [1,...,1,K,N]), K*N for
-    // per-batch B (rank-N with leading-dim product > 1). Setting sA = K*N
-    // for a broadcast weight reads K*N elements PAST the end of the
-    // buffer on batch 1+ and feeds garbage into the GEMM — typical symptom
-    // on vision models is image-0 correct, image-1+ NaN (the OOB read
-    // often lands in a fp16-NaN pattern from adjacent pool slots /
-    // constants). Mis-setting sA = 0 for a per-batch B does the opposite:
-    // every batch reads matrix 0 instead of its own.
-    // layB → user's A and layC → output are always per-batch (the BATCH
-    // partition comes from A's leading dim by construction).
+    // layA → user's B, layB → user's A. The strides are whatever the
+    // compiler computed — 0 for a broadcast operand (rank-2 or rank-N with
+    // leading-dim product 1), K*N (B) / M*K (A) for a per-batch one. A
+    // per-batch stride on a broadcast weight reads K*N elements PAST the end
+    // of the buffer on batch 1+ and feeds garbage into the GEMM — typical
+    // symptom on vision models is image-0 correct, image-1+ NaN (the OOB
+    // read often lands in a fp16-NaN pattern from adjacent pool slots /
+    // constants). A zero stride on a per-batch operand does the opposite:
+    // every batch reads matrix 0 instead of its own. layC → output is always
+    // per-batch.
     int64_t sA = key.b_batch_stride;
-    int64_t sB = M * K, sC = M * N;
+    int64_t sB = key.a_batch_stride, sC = M * N;
     MATMUL_CACHE_CHECK(hipblasLtMatrixLayoutSetAttribute(
         entry.layA, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &bc, sizeof(bc)));
     MATMUL_CACHE_CHECK(hipblasLtMatrixLayoutSetAttribute(
@@ -432,7 +434,7 @@ static void autotuneMatmul(hipblasLtHandle_t handle, hipStream_t stream,
 //===----------------------------------------------------------------------===//
 //
 // ONNX MatMul semantics: output = A @ B (row-major)
-//   A: [batch_count x M x K]
+//   A: [batch_count x M x K]  (or [M x K] with broadcast)
 //   B: [batch_count x K x N]  (or [K x N] with broadcast)
 //   output: [batch_count x M x N]
 //
@@ -452,8 +454,8 @@ static void autotuneMatmul(hipblasLtHandle_t handle, hipStream_t stream,
 int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
                          const void *B, void *output, int64_t M, int64_t N,
                          int64_t K, int64_t batch_count, int64_t elem_size,
-                         int64_t b_batch_stride, int64_t transA,
-                         int64_t transB) {
+                         int64_t b_batch_stride, int64_t a_batch_stride,
+                         int64_t transA, int64_t transB) {
   OP_PROFILE(
       "matmul",
       [&] {
@@ -486,12 +488,14 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
 
   const char *type_name = (elem_size == 2) ? "f16" : "f32";
   RUNTIME_DEBUG_LOG("[REAL] wrap_hipblasLtMatmul: M=%lld, N=%lld, K=%lld, "
-                    "batch=%lld, b_batch_stride=%lld, transA=%lld, "
-                    "transB=%lld, elem_size=%lld (%s), total_bytes=%lld\n",
+                    "batch=%lld, b_batch_stride=%lld, a_batch_stride=%lld, "
+                    "transA=%lld, transB=%lld, elem_size=%lld (%s), "
+                    "total_bytes=%lld\n",
                     (long long)M, (long long)N, (long long)K,
                     (long long)batch_count, (long long)b_batch_stride,
-                    (long long)transA, (long long)transB, (long long)elem_size,
-                    type_name, (long long)(batch_count * M * N * elem_size));
+                    (long long)a_batch_stride, (long long)transA,
+                    (long long)transB, (long long)elem_size, type_name,
+                    (long long)(batch_count * M * N * elem_size));
 
   MatmulState *ms = MatmulState::get_op_state(state, op_state_slot);
   if (!ms || !ms->table) {
@@ -500,8 +504,9 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
     return -1;
   }
 
-  MatmulCacheKey key{M,      N,     K, batch_count, elem_size, b_batch_stride,
-                     transA, transB};
+  MatmulCacheKey key{
+      M,      N,     K, batch_count, elem_size, b_batch_stride, a_batch_stride,
+      transA, transB};
   MatmulCacheEntry *cached = queryOrCreateMatmul(*ms->table, handle, key);
   if (!cached) {
     fprintf(stderr,

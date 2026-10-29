@@ -24,7 +24,7 @@
 // CHECK:       llvm.func @wrap_expand(!llvm.ptr, !llvm.ptr<1>, !llvm.ptr, !llvm.ptr<1>, !llvm.ptr, i64, !llvm.ptr, i64, i64) -> i32
 // CHECK-NEXT:  llvm.func @hipdnn_ep_alloc_output(!llvm.ptr, i64, !llvm.ptr, i64, i64) -> !llvm.ptr
 // CHECK-NEXT:  llvm.func @wrap_cast(!llvm.ptr, !llvm.ptr<1>, !llvm.ptr<1>, i64, i64, i64) -> i32
-// CHECK-NEXT:  llvm.func @wrap_hipblasLtMatmul(!llvm.ptr, i32, !llvm.ptr<1>, !llvm.ptr<1>, !llvm.ptr<1>, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+// CHECK-NEXT:  llvm.func @wrap_hipblasLtMatmul(!llvm.ptr, i32, !llvm.ptr<1>, !llvm.ptr<1>, !llvm.ptr<1>, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
 // CHECK-NEXT:  llvm.func @hipdnn_ep_get_pool_base(!llvm.ptr, i32, i64) -> !llvm.ptr<1>
 // CHECK-NEXT:  llvm.func @free(!llvm.ptr)
 // CHECK-NEXT:  llvm.func @malloc(i64) -> !llvm.ptr
@@ -287,6 +287,7 @@
 // CHECK-NEXT:    %[[V217:.*]] = llvm.extractvalue %[[V50]][3, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
 // CHECK-NEXT:    %[[V218:.*]] = llvm.mlir.constant(1 : i64) : i64
 // CHECK-NEXT:    %[[V219:.*]] = llvm.mlir.constant(0 : i64) : i64
+// CHECK-NEXT:    %[[V219A:.*]] = llvm.mlir.constant(0 : i64) : i64
 // CHECK-NEXT:    %[[V220:.*]] = llvm.mlir.constant(0 : i32) : i32
 // CHECK-NEXT:    %[[V221:.*]] = llvm.extractvalue %[[V15]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
 // CHECK-NEXT:    %[[V222:.*]] = llvm.extractvalue %[[V50]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
@@ -294,7 +295,7 @@
 // CHECK-NEXT:    %[[V224:.*]] = llvm.mlir.constant(2 : i64) : i64
 // CHECK-NEXT:    %[[V225:.*]] = llvm.mlir.constant(0 : i64) : i64
 // CHECK-NEXT:    %[[V226:.*]] = llvm.mlir.constant(0 : i64) : i64
-// CHECK-NEXT:    %[[V227:.*]] = llvm.call @wrap_hipblasLtMatmul(%[[ARG0]], %[[V220]], %[[V221]], %[[V222]], %[[V223]], %[[V215]], %[[V217]], %[[V216]], %[[V218]], %[[V224]], %[[V219]], %[[V225]], %[[V226]]) : (!llvm.ptr, i32, !llvm.ptr<1>, !llvm.ptr<1>, !llvm.ptr<1>, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+// CHECK-NEXT:    %[[V227:.*]] = llvm.call @wrap_hipblasLtMatmul(%[[ARG0]], %[[V220]], %[[V221]], %[[V222]], %[[V223]], %[[V215]], %[[V217]], %[[V216]], %[[V218]], %[[V224]], %[[V219]], %[[V219A]], %[[V225]], %[[V226]]) : (!llvm.ptr, i32, !llvm.ptr<1>, !llvm.ptr<1>, !llvm.ptr<1>, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
 // CHECK-NEXT:    %[[V228:.*]] = llvm.mlir.constant(1 : i64) : i64
 // CHECK-NEXT:    %[[V229:.*]] = llvm.extractvalue %[[V192]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
 // CHECK-NEXT:    %[[V230:.*]] = llvm.mul %[[V228]], %[[V229]] : i64
@@ -595,6 +596,7 @@
 // CHECK-NEXT:    %[[V491:.*]] = llvm.extractvalue %[[V35]][3, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
 // CHECK-NEXT:    %[[V492:.*]] = llvm.mlir.constant(1 : i64) : i64
 // CHECK-NEXT:    %[[V493:.*]] = llvm.mlir.constant(0 : i64) : i64
+// CHECK-NEXT:    %[[V493A:.*]] = llvm.mlir.constant(0 : i64) : i64
 // CHECK-NEXT:    %[[V494:.*]] = llvm.mlir.constant(1 : i32) : i32
 // CHECK-NEXT:    %[[V495:.*]] = llvm.extractvalue %[[V438]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
 // CHECK-NEXT:    %[[V496:.*]] = llvm.extractvalue %[[V35]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
@@ -602,7 +604,7 @@
 // CHECK-NEXT:    %[[V498:.*]] = llvm.mlir.constant(4 : i64) : i64
 // CHECK-NEXT:    %[[V499:.*]] = llvm.mlir.constant(0 : i64) : i64
 // CHECK-NEXT:    %[[V500:.*]] = llvm.mlir.constant(0 : i64) : i64
-// CHECK-NEXT:    %[[V501:.*]] = llvm.call @wrap_hipblasLtMatmul(%[[ARG0]], %[[V494]], %[[V495]], %[[V496]], %[[V497]], %[[V489]], %[[V491]], %[[V490]], %[[V492]], %[[V498]], %[[V493]], %[[V499]], %[[V500]]) : (!llvm.ptr, i32, !llvm.ptr<1>, !llvm.ptr<1>, !llvm.ptr<1>, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+// CHECK-NEXT:    %[[V501:.*]] = llvm.call @wrap_hipblasLtMatmul(%[[ARG0]], %[[V494]], %[[V495]], %[[V496]], %[[V497]], %[[V489]], %[[V491]], %[[V490]], %[[V492]], %[[V498]], %[[V493]], %[[V493A]], %[[V499]], %[[V500]]) : (!llvm.ptr, i32, !llvm.ptr<1>, !llvm.ptr<1>, !llvm.ptr<1>, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
 // CHECK-NEXT:    %[[V502:.*]] = llvm.extractvalue %[[V324]][0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
 // CHECK-NEXT:    llvm.call @free(%[[V502]]) : (!llvm.ptr) -> ()
 // CHECK-NEXT:    %[[V503:.*]] = llvm.extractvalue %[[V392]][0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>

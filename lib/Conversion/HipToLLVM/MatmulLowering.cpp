@@ -13,7 +13,8 @@ namespace {
 
 // hip.hipblaslt.matmul(handle) ins(A, B) outs(C)
 //   -> hip_hipblaslt_matmul(handle, A, B, C, rankA, rankB, batch, M, K, N)
-// Rank-generic: batch from A if 3D, B broadcast if rankB < rankA.
+// Rank-generic: batch from the larger leading product, the other operand
+// broadcast when its leading dims multiply to 1.
 struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -63,91 +64,123 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
     Value N = transB ? BDesc.size(rewriter, loc, BRank - 2)
                      : BDesc.size(rewriter, loc, BRank - 1);
 
-    // Compute batch count from leading dimensions of A
-    Value batchCount;
-    if (ARank == 2) {
-      batchCount = createI64Const(1);
-    } else {
-      batchCount = ADesc.size(rewriter, loc, 0);
-      for (int64_t i = 1; i < ARank - 2; ++i) {
-        Value dim = ADesc.size(rewriter, loc, i);
-        batchCount = LLVM::MulOp::create(rewriter, loc, batchCount, dim);
-      }
-    }
-
-    // Compute element size in bytes
-    unsigned elemBits = AType.getElementType().getIntOrFloatBitWidth();
-    Value elemSize = createI64Const(elemBits / 8);
-
-    // b_batch_stride: the per-batch stride (in elements) for hipBLASLt's
-    // STRIDED_BATCH_OFFSET on layA when batch_count > 1. Two distinct B
-    // memref shapes both reach this site with batch_count > 1 and need
-    // DIFFERENT strides:
-    //   * Rank-2 broadcast weight `[K, N]` → one matrix shared across all
-    //     batches → stride = 0.
-    //   * Rank-N per-batch weight `[d_0, ..., d_{N-3}, K, N]` whose leading
-    //     dims hold more than one matrix → stride = K * N.
-    //   * Rank-N weight whose leading dims multiply to 1 (e.g. `[1, K, N]`,
-    //     `[1, 1, K, N]`) → still ONE matrix; stride = 0.
-    // Previously encoded as a `b_batched` bool keyed on `BRank > 2`. That
-    // misclassified the `[1, K, N]` leading-one case as per-batch, causing
-    // OOB reads of `K*N` elements past the end of the weight on every batch
-    // beyond the first.
+    // Batch layout. One strided-batched GEMM covers three shapes:
+    //   * equal batch dims: A and B both per-batch;
+    //   * B's leading dims multiply to 1 (`[K, N]`, `[1, K, N]`, ...): one
+    //     weight shared by every batch of A, B stride 0;
+    //   * A's leading dims multiply to 1 (e.g. `[1, 1, T, K] x [1, H, K, N]`):
+    //     one activation against per-batch weights, A stride 0.
+    // The batch count is the larger leading product. Any other broadcast
+    // (`[2, 1, M, K] x [1, 3, K, N]`) needs one stride per batch dim and is
+    // rejected when the shapes show it. A per-batch operand advances M*K
+    // (A) or K*N (B); stepping a single matrix by that reads past its end on
+    // every batch after the first, and stride 0 on a per-batch operand makes
+    // every batch read matrix 0.
     //
-    // Leading-dim product is computed at compile time when all leading dims
-    // are static (the common case for shipping models). When any leading dim
-    // is dynamic we emit a runtime `select` over the leading-product so the
-    // descriptor cache picks the right pre-built layout per call.
+    // Leading-dim products fold at compile time when all leading dims are
+    // static (the common case for shipping models); otherwise the stride and
+    // count are runtime `select`s over the products, and the descriptor
+    // cache picks the matching layout per call.
     //
     // Before:
     //   hip.matmul ins(%A, %B : memref<2x128x4096xf16>,
     //   memref<1x4096x1024xf16>)
     // After:
     //   %stride = llvm.mlir.constant(0 : i64) : i64   // leading product is 1
-    //   llvm.call @wrap_hipblasLtMatmul(..., %stride) : (...) -> i32
-    Value bBatchStride;
-    if (BRank == 2) {
-      bBatchStride = createI64Const(0);
-    } else {
-      bool allLeadingStatic = true;
-      int64_t staticLeadingProduct = 1;
-      for (int64_t i : llvm::seq<int64_t>(0, BRank - 2)) {
-        if (BType.isDynamicDim(i)) {
-          allLeadingStatic = false;
+    //   llvm.call @wrap_hipblasLtMatmul(..., %stride, ...) : (...) -> i32
+    struct Leading {
+      std::optional<int64_t> staticProduct;
+      Value product; // set only when a leading dim is dynamic
+    };
+    auto leadingProduct = [&](MemRefType type, MemRefDescriptor &desc,
+                              int64_t rank) -> Leading {
+      std::optional<int64_t> staticProduct = 1;
+      for (int64_t i : llvm::seq<int64_t>(0, rank - 2)) {
+        if (type.isDynamicDim(i)) {
+          staticProduct.reset();
           break;
         }
-        staticLeadingProduct *= BType.getDimSize(i);
+        *staticProduct *= type.getDimSize(i);
       }
-      if (allLeadingStatic) {
-        bBatchStride = (staticLeadingProduct <= 1)
-                           ? createI64Const(0)
-                           : LLVM::MulOp::create(rewriter, loc, K, N).getRes();
-      } else {
-        Value one = createI64Const(1);
-        Value zero = createI64Const(0);
-        Value leadingProduct = one;
-        for (int64_t i : llvm::seq<int64_t>(0, BRank - 2)) {
-          Value dim = BDesc.size(rewriter, loc, i);
-          leadingProduct =
-              LLVM::MulOp::create(rewriter, loc, leadingProduct, dim).getRes();
-        }
-        Value isBroadcast = LLVM::ICmpOp::create(
-            rewriter, loc, LLVM::ICmpPredicate::sle, leadingProduct, one);
-        Value kn = LLVM::MulOp::create(rewriter, loc, K, N).getRes();
-        bBatchStride =
-            LLVM::SelectOp::create(rewriter, loc, isBroadcast, zero, kn)
-                .getRes();
+      if (staticProduct)
+        return {staticProduct, Value()};
+      Value product = createI64Const(1);
+      for (int64_t i : llvm::seq<int64_t>(0, rank - 2))
+        product = LLVM::MulOp::create(rewriter, loc, product,
+                                      desc.size(rewriter, loc, i))
+                      .getRes();
+      return {std::nullopt, product};
+    };
+    auto productValue = [&](const Leading &lead) -> Value {
+      return lead.product ? lead.product : createI64Const(*lead.staticProduct);
+    };
+    Leading aLead = leadingProduct(AType, ADesc, ARank);
+    Leading bLead = leadingProduct(BType, BDesc, BRank);
+
+    if (aLead.staticProduct && bLead.staticProduct &&
+        *aLead.staticProduct > 1 && *bLead.staticProduct > 1) {
+      ArrayRef<int64_t> aBatch = AType.getShape().drop_back(2);
+      ArrayRef<int64_t> bBatch = BType.getShape().drop_back(2);
+      size_t batchRank = std::max(aBatch.size(), bBatch.size());
+      auto aligned = [&](ArrayRef<int64_t> batch, size_t i) -> int64_t {
+        size_t pad = batchRank - batch.size();
+        return i < pad ? 1 : batch[i - pad];
+      };
+      for (size_t i = 0; i < batchRank; ++i) {
+        if (aligned(aBatch, i) != aligned(bBatch, i))
+          return op.emitOpError(
+              "batch broadcast between two multi-matrix operands is not "
+              "supported by the strided-batched GEMM");
       }
     }
+
+    auto batchStride = [&](const Leading &lead, Value rows,
+                           Value cols) -> Value {
+      if (lead.staticProduct && *lead.staticProduct <= 1)
+        return createI64Const(0);
+      Value matrixElems =
+          LLVM::MulOp::create(rewriter, loc, rows, cols).getRes();
+      if (lead.staticProduct)
+        return matrixElems;
+      Value isBroadcast =
+          LLVM::ICmpOp::create(rewriter, loc, LLVM::ICmpPredicate::sle,
+                               lead.product, createI64Const(1));
+      return LLVM::SelectOp::create(rewriter, loc, isBroadcast,
+                                    createI64Const(0), matrixElems)
+          .getRes();
+    };
+    Value batchCount;
+    if (aLead.staticProduct && bLead.staticProduct) {
+      batchCount =
+          createI64Const(std::max(*aLead.staticProduct, *bLead.staticProduct));
+    } else if (bLead.staticProduct && *bLead.staticProduct <= 1) {
+      batchCount = aLead.product;
+    } else if (aLead.staticProduct && *aLead.staticProduct <= 1) {
+      batchCount = bLead.product;
+    } else {
+      Value aProduct = productValue(aLead), bProduct = productValue(bLead);
+      Value aLarger = LLVM::ICmpOp::create(
+          rewriter, loc, LLVM::ICmpPredicate::sge, aProduct, bProduct);
+      batchCount =
+          LLVM::SelectOp::create(rewriter, loc, aLarger, aProduct, bProduct)
+              .getRes();
+    }
+    Value bBatchStride = batchStride(bLead, K, N);
+    Value aBatchStride = batchStride(aLead, M, K);
+
+    // Compute element size in bytes
+    unsigned elemBits = AType.getElementType().getIntOrFloatBitWidth();
+    Value elemSize = createI64Const(elemBits / 8);
 
     // Runtime signature:
     // int wrap_hipblasLtMatmul(RuntimeState* state,
     //                          const void* A, const void* B, void* output,
     //                          int64_t M, int64_t N, int64_t K,
     //                          int64_t batch_count, int64_t elem_size,
-    //                          int64_t b_batch_stride, int64_t transA,
-    //                          int64_t transB, int op_state_slot)
-    SmallVector<Type, 13> paramTypes = {
+    //                          int64_t b_batch_stride, int64_t a_batch_stride,
+    //                          int64_t transA, int64_t transB,
+    //                          int op_state_slot)
+    SmallVector<Type, 14> paramTypes = {
         ptrType, // state
         i32Type, // op_state_slot
         ptrType, // A
@@ -159,6 +192,7 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
         i64Type, // batch_count
         i64Type, // elem_size
         i64Type, // b_batch_stride
+        i64Type, // a_batch_stride
         i64Type, // transA
         i64Type  // transB
     };
@@ -168,7 +202,7 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 13> args = {statePtr,
+    SmallVector<Value, 14> args = {statePtr,
                                    getOpStateSlotValue(op, rewriter, loc),
                                    APtr,
                                    BPtr,
@@ -179,6 +213,7 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
                                    batchCount,
                                    elemSize,
                                    bBatchStride,
+                                   aBatchStride,
                                    createI64Const(transA),
                                    createI64Const(transB)};
 

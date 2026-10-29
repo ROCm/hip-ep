@@ -164,50 +164,92 @@ struct MatMulLowering : ConvertOpToLLVMPattern<MatMulOp> {
     Value n =
         bRank == 1 ? createI64Const(1) : bDesc.size(rewriter, loc, bRank - 1);
 
-    Value batchCount = createI64Const(1);
-    for (int64_t i : llvm::seq<int64_t>(0, std::max<int64_t>(aRank - 2, 0))) {
-      batchCount = LLVM::MulOp::create(rewriter, loc, batchCount,
-                                       aDesc.size(rewriter, loc, i));
-    }
-
-    Value bBatchStride;
-    if (bRank <= 2) {
-      bBatchStride = createI64Const(0);
-    } else {
-      bool allLeadingStatic = true;
-      int64_t staticLeadingProduct = 1;
-      for (int64_t i : llvm::seq<int64_t>(0, bRank - 2)) {
-        if (bType.isDynamicDim(i)) {
-          allLeadingStatic = false;
+    // One strided-batched GEMM: the batch count is the larger leading
+    // product and an operand whose leading dims multiply to 1 is broadcast
+    // with stride 0 (A as well as B, e.g. [1, 1, T, K] x [1, H, K, N]).
+    // Broadcasts between two multi-matrix operands would need a stride per
+    // batch dim and are rejected when the shapes show them.
+    struct Leading {
+      std::optional<int64_t> staticProduct;
+      Value product; // set only when a leading dim is dynamic
+    };
+    auto leadingProduct = [&](MemRefType type, MemRefDescriptor &desc,
+                              int64_t rank) -> Leading {
+      int64_t batchRank = std::max<int64_t>(rank - 2, 0);
+      std::optional<int64_t> staticProduct = 1;
+      for (int64_t i : llvm::seq<int64_t>(0, batchRank)) {
+        if (type.isDynamicDim(i)) {
+          staticProduct.reset();
           break;
         }
-        staticLeadingProduct *= bType.getDimSize(i);
+        *staticProduct *= type.getDimSize(i);
       }
-      if (allLeadingStatic) {
-        bBatchStride =
-            staticLeadingProduct <= 1
-                ? createI64Const(0)
-                : LLVM::MulOp::create(rewriter, loc, k, n).getResult();
-      } else {
-        Value one = createI64Const(1);
-        Value zero = createI64Const(0);
-        Value leadingProduct = one;
-        for (int64_t i : llvm::seq<int64_t>(0, bRank - 2)) {
-          leadingProduct = LLVM::MulOp::create(rewriter, loc, leadingProduct,
-                                               bDesc.size(rewriter, loc, i));
-        }
-        Value isBroadcast = LLVM::ICmpOp::create(
-            rewriter, loc, LLVM::ICmpPredicate::sle, leadingProduct, one);
-        Value kn = LLVM::MulOp::create(rewriter, loc, k, n);
-        bBatchStride =
-            LLVM::SelectOp::create(rewriter, loc, isBroadcast, zero, kn);
+      if (staticProduct)
+        return {staticProduct, Value()};
+      Value product = createI64Const(1);
+      for (int64_t i : llvm::seq<int64_t>(0, batchRank))
+        product = LLVM::MulOp::create(rewriter, loc, product,
+                                      desc.size(rewriter, loc, i));
+      return {std::nullopt, product};
+    };
+    auto productValue = [&](const Leading &lead) -> Value {
+      return lead.product ? lead.product : createI64Const(*lead.staticProduct);
+    };
+    Leading aLead = leadingProduct(aType, aDesc, aRank);
+    Leading bLead = leadingProduct(bType, bDesc, bRank);
+
+    if (aLead.staticProduct && bLead.staticProduct &&
+        *aLead.staticProduct > 1 && *bLead.staticProduct > 1) {
+      ArrayRef<int64_t> aBatch = aType.getShape().drop_back(2);
+      ArrayRef<int64_t> bBatch = bType.getShape().drop_back(2);
+      size_t batchRank = std::max(aBatch.size(), bBatch.size());
+      auto aligned = [&](ArrayRef<int64_t> batch, size_t i) -> int64_t {
+        size_t pad = batchRank - batch.size();
+        return i < pad ? 1 : batch[i - pad];
+      };
+      for (size_t i = 0; i < batchRank; ++i) {
+        if (aligned(aBatch, i) != aligned(bBatch, i))
+          return op.emitOpError(
+              "batch broadcast between two multi-matrix operands is not "
+              "supported by the strided-batched GEMM");
       }
     }
+
+    auto batchStride = [&](const Leading &lead, Value rows,
+                           Value cols) -> Value {
+      if (lead.staticProduct && *lead.staticProduct <= 1)
+        return createI64Const(0);
+      Value matrixElems = LLVM::MulOp::create(rewriter, loc, rows, cols);
+      if (lead.staticProduct)
+        return matrixElems;
+      Value isBroadcast =
+          LLVM::ICmpOp::create(rewriter, loc, LLVM::ICmpPredicate::sle,
+                               lead.product, createI64Const(1));
+      return LLVM::SelectOp::create(rewriter, loc, isBroadcast,
+                                    createI64Const(0), matrixElems);
+    };
+    Value batchCount;
+    if (aLead.staticProduct && bLead.staticProduct) {
+      batchCount =
+          createI64Const(std::max(*aLead.staticProduct, *bLead.staticProduct));
+    } else if (bLead.staticProduct && *bLead.staticProduct <= 1) {
+      batchCount = aLead.product;
+    } else if (aLead.staticProduct && *aLead.staticProduct <= 1) {
+      batchCount = bLead.product;
+    } else {
+      Value aProduct = productValue(aLead), bProduct = productValue(bLead);
+      Value aLarger = LLVM::ICmpOp::create(
+          rewriter, loc, LLVM::ICmpPredicate::sge, aProduct, bProduct);
+      batchCount =
+          LLVM::SelectOp::create(rewriter, loc, aLarger, aProduct, bProduct);
+    }
+    Value bBatchStride = batchStride(bLead, k, n);
+    Value aBatchStride = batchStride(aLead, m, k);
 
     int64_t elementSize = aType.getElementType().getIntOrFloatBitWidth() / 8;
     using MatMulCall =
         RuntimeFunc<i32, hostPtr, slotIndex, devicePtr, devicePtr, devicePtr,
-                    i64, i64, i64, i64, i64, i64, i64, i64>;
+                    i64, i64, i64, i64, i64, i64, i64, i64, i64>;
     auto matMulFunc = MatMulCall::lookupOrCreateFn(rewriter, loc, module,
                                                    kWrapHipblasLtMatmul);
     if (failed(matMulFunc)) {
@@ -216,7 +258,8 @@ struct MatMulLowering : ConvertOpToLLVMPattern<MatMulOp> {
     if (failed(matMulFunc->call(
             adaptor.getCtx(), SlotIndex{op.getOperation()}, adaptor.getA(),
             adaptor.getB(), adaptor.getInit(), m, n, k, batchCount, elementSize,
-            bBatchStride, static_cast<int64_t>(0), static_cast<int64_t>(0)))) {
+            bBatchStride, aBatchStride, static_cast<int64_t>(0),
+            static_cast<int64_t>(0)))) {
       return failure();
     }
     rewriter.eraseOp(op);

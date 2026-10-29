@@ -40,7 +40,43 @@ def _make_matmul_model(input_shape: list[int], weight_shape: list[int]):
     return make_model_from_nodes([node], [X], [Y], initializers=[w_init])
 
 
+def _make_batched_matmul_model(input_shape: list[int], weight_shape: list[int]):
+    """MatMul whose output batch dims broadcast over both operands' leading dims."""
+    batch = list(np.broadcast_shapes(tuple(input_shape[:-2]), tuple(weight_shape[:-2])))
+    output_shape = batch + [input_shape[-2], weight_shape[-1]]
+    X = helper.make_tensor_value_info("X", TensorProto.FLOAT16, input_shape)
+    Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT16, output_shape)
+    node = helper.make_node("MatMul", ["X", "W"], ["Y"])
+
+    rng = np.random.default_rng(123)
+    w_data = rng.uniform(-0.5, 0.5, weight_shape).astype(np.float16)
+    w_init = numpy_helper.from_array(w_data, name="W")
+    return make_model_from_nodes([node], [X], [Y], initializers=[w_init])
+
+
 class TestMatMul:
+    @pytest.mark.parametrize(
+        "input_shape,weight_shape",
+        [
+            # one activation against per-head weights (A broadcast)
+            ([1, 1, 16, 64], [1, 4, 64, 32]),
+            ([16, 64], [4, 64, 32]),
+            ([1, 1, 128, 320], [1, 32, 320, 128]),
+            # per-batch on both sides, and a broadcast weight
+            ([2, 3, 16, 64], [2, 3, 64, 32]),
+            ([2, 3, 16, 64], [1, 1, 64, 32]),
+        ],
+    )
+    def test_matmul_batch_broadcast(self, model_runner, input_shape, weight_shape):
+        """Every output batch must be computed, whichever operand carries it."""
+        model = _make_batched_matmul_model(input_shape, weight_shape)
+
+        rng = np.random.default_rng(42)
+        x = rng.uniform(-1, 1, input_shape).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x], reference="cpu")
+        compare_outputs(actual, expected, atol=2e-2)
+
     @pytest.mark.parametrize(
         "input_shape,weight_shape",
         [

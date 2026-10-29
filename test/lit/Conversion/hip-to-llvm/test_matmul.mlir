@@ -24,10 +24,11 @@ module {
 // CHECK-LABEL: llvm.func @test_matmul_rank2_b
 // CHECK-NOT: llvm.icmp
 // CHECK-NOT: llvm.select
-// CHECK: llvm.call @wrap_hipblasLtMatmul({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
-// Verify 11 parameters:
+// CHECK: llvm.call @wrap_hipblasLtMatmul({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+// Verify 14 parameters:
 // - 4 pointers: state, A, B, output
-// - 6 i64: M=128, N=1024, K=4096, batch_count=1, elem_size=2, b_batch_stride=0
+// - 9 i64: M=128, N=1024, K=4096, batch_count=1, elem_size=2,
+//   b_batch_stride=0, a_batch_stride=0, transA, transB
 //   (B is rank-2 [K, N] = broadcast weight → stride = 0, compile-time const)
 // - 1 i32: op_state_slot (-1 here — --assign-op-state-slots not run in this RUN)
 
@@ -54,7 +55,7 @@ module {
 // CHECK-LABEL: llvm.func @test_matmul_rank3_leading_one_b
 // CHECK-NOT: llvm.icmp
 // CHECK-NOT: llvm.select
-// CHECK: llvm.call @wrap_hipblasLtMatmul({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+// CHECK: llvm.call @wrap_hipblasLtMatmul({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
 
 // ----- transB=1 (fused Q @ K^T) ----------------------------------------------
 module {
@@ -72,4 +73,54 @@ module {
 
 // CHECK-LABEL: llvm.func @test_matmul_trans_b
 // CHECK: llvm.mlir.constant(1 : i64)
-// CHECK: llvm.call @wrap_hipblasLtMatmul({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+// CHECK: llvm.call @wrap_hipblasLtMatmul({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+
+// ----- Broadcast A [1, 1, M, K] against per-batch B [1, H, K, N] -------------
+// One activation multiplied by H weight matrices: the batch count comes from
+// B (4), A's stride is 0 and B's is K*N. Taking the count from A alone ran a
+// single GEMM and left batches 1+ of the output unwritten.
+
+module {
+  func.func @test_matmul_broadcast_a(%ctx: !hip.context,
+                                      %A: memref<1x1x16x64xf16, 1>,
+                                      %B: memref<1x4x64x32xf16, 1>,
+                                      %output: memref<1x4x16x32xf16, 1>) {
+    hip.matmul(%ctx)
+        ins(%A, %B : memref<1x1x16x64xf16, 1>, memref<1x4x64x32xf16, 1>)
+        outs(%output : memref<1x4x16x32xf16, 1>)
+    return
+  }
+}
+
+// CHECK-LABEL: llvm.func @test_matmul_broadcast_a
+// CHECK-NOT: llvm.icmp
+// CHECK-NOT: llvm.select
+// CHECK-DAG: %[[BATCH:.*]] = llvm.mlir.constant(4 : i64) : i64
+// CHECK-DAG: %[[BSTRIDE:.*]] = llvm.mul %{{.*}}, %{{.*}} : i64
+// CHECK-DAG: %[[ASTRIDE:.*]] = llvm.mlir.constant(0 : i64) : i64
+// CHECK: llvm.call @wrap_hipblasLtMatmul(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %[[BATCH]], %{{.*}}, %[[BSTRIDE]], %[[ASTRIDE]], %{{.*}}, %{{.*}})
+
+// ----- Dynamic leading dims on both sides ------------------------------------
+// The count is the larger runtime product and each stride is 0 when its
+// operand's product is 1.
+
+module {
+  func.func @test_matmul_dynamic_both(%ctx: !hip.context,
+                                       %A: memref<?x16x64xf16, 1>,
+                                       %B: memref<?x64x32xf16, 1>,
+                                       %output: memref<?x16x32xf16, 1>) {
+    hip.matmul(%ctx)
+        ins(%A, %B : memref<?x16x64xf16, 1>, memref<?x64x32xf16, 1>)
+        outs(%output : memref<?x16x32xf16, 1>)
+    return
+  }
+}
+
+// CHECK-LABEL: llvm.func @test_matmul_dynamic_both
+// CHECK: %[[A_LARGER:.*]] = llvm.icmp "sge" %[[AP:.*]], %[[BP:.*]] : i64
+// CHECK: %[[DBATCH:.*]] = llvm.select %[[A_LARGER]], %[[AP]], %[[BP]] : i1, i64
+// CHECK: llvm.icmp "sle" %[[BP]], %{{.*}} : i64
+// CHECK: %[[DBSTRIDE:.*]] = llvm.select
+// CHECK: llvm.icmp "sle" %[[AP]], %{{.*}} : i64
+// CHECK: %[[DASTRIDE:.*]] = llvm.select
+// CHECK: llvm.call @wrap_hipblasLtMatmul(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %[[DBATCH]], %{{.*}}, %[[DBSTRIDE]], %[[DASTRIDE]], %{{.*}}, %{{.*}})

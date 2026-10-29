@@ -815,22 +815,24 @@ int wrap_hipblasLtGemm(void *handle, // hipBLASLt handle
 // MatMul operation wrapper (batched matrix multiplication)
 // Called by generated IR for onnx.MatMul lowering
 // Computes output = A @ B for each batch
-// A: [batch_count x M x K], B: [K x N] (broadcast) or [batch_count x K x N]
+// A: [batch_count x M x K] or [M x K] (broadcast)
+// B: [batch_count x K x N] or [K x N] (broadcast)
 // output: [batch_count x M x N]
 //
-// `b_batch_stride` is hipBLASLt's STRIDED_BATCH_OFFSET on layA when
-// `batch_count > 1`: the per-batch advance in elements through B. It MUST be:
-//   * 0   when B is a broadcast weight — one matrix reused across all
-//         batches. Includes both rank-2 `[K, N]` and rank-N
-//         `[1, ..., 1, K, N]` (any leading-dim product == 1).
-//   * K*N when B is per-batch — leading-dim product > 1, so the buffer
-//         actually holds multiple `[K, N]` matrices laid out contiguously.
-// Mis-setting this to K*N for a broadcast B causes hipBLASLt to step K*N
-// elements past the end of the weight buffer on every batch beyond the
-// first, reading uninitialised memory into the GEMM and producing wrong
-// (often NaN) outputs for batch > 0. For batch_count == 1 the value is
-// ignored. Always pass an exact stride; the compiler computes 0 vs K*N
-// at compile time when B's leading dims are static, else at runtime.
+// `b_batch_stride` / `a_batch_stride` are the per-batch advance in elements
+// through B / A when `batch_count > 1` (hipBLASLt's STRIDED_BATCH_OFFSET on
+// layA / layB, which hold B / A under the row->col trick). Each MUST be:
+//   * 0   when the operand is broadcast — one matrix reused across all
+//         batches. Includes both rank-2 and rank-N `[1, ..., 1, rows, cols]`
+//         (any leading-dim product == 1).
+//   * K*N (B) / M*K (A) when the operand is per-batch — leading-dim product
+//         > 1, so the buffer holds multiple matrices laid out contiguously.
+// A per-batch stride on a broadcast operand steps past the end of its buffer
+// on every batch beyond the first, reading uninitialised memory into the GEMM
+// and producing wrong (often NaN) outputs for batch > 0. For
+// batch_count == 1 the values are ignored. Always pass exact strides; the
+// compiler computes them at compile time when the leading dims are static,
+// else at runtime.
 int wrap_hipblasLtMatmul(
     RuntimeState *state,
     int op_state_slot,      // per-instance op-state slot (shared algo table)
@@ -843,6 +845,7 @@ int wrap_hipblasLtMatmul(
     int64_t batch_count,    // Number of batches
     int64_t elem_size,      // Element size in bytes (2=f16, 4=f32)
     int64_t b_batch_stride, // 0 = broadcast (any rank); K*N = per-batch
+    int64_t a_batch_stride, // 0 = broadcast (any rank); M*K = per-batch
     int64_t transA,         // 1 = swap A's last two dims before multiply
     int64_t transB);        // 1 = swap B's last two dims before multiply
 
