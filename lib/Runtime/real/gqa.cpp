@@ -1368,8 +1368,8 @@ static int gqa_forward_hipblaslt(
     void *present_value, int64_t B, int64_t sq, int64_t skv,
     int64_t past_buf_seq, int64_t H, int64_t G, int64_t d, float scale,
     int64_t do_rotary, int64_t local_window_size, bool no_causal,
-    int64_t element_size_bytes, int op_state_slot, bool kv_bnsd,
-    bool reuse_past_kv = false,
+    bool derive_seqlens_from_attention_bias, int64_t element_size_bytes,
+    int op_state_slot, bool kv_bnsd, bool reuse_past_kv = false,
     std::optional<int32_t> host_length = std::nullopt) {
 
   void *const out_present_key = present_key;
@@ -1408,10 +1408,13 @@ static int gqa_forward_hipblaslt(
   // its own D2H). On B>1 this returns kSeqlensKNotRead and both downstream
   // paths fall back to their legacy per-call reads. Stored in seqlens_k_pre;
   // total_seq_pre is the derived total_seq (-1 means unknown / not applicable).
-  const int32_t sharedMaskSeqlens = read_shared_mask_seqlens(
-      stream, attention_bias, attn_bias_batch, attn_bias_num_heads, B,
-      attn_bias_seq_q, attn_bias_seq_kv, past_buf_seq, element_size_bytes,
-      state);
+  const int32_t sharedMaskSeqlens =
+      derive_seqlens_from_attention_bias
+          ? read_shared_mask_seqlens(stream, attention_bias, attn_bias_batch,
+                                     attn_bias_num_heads, B, attn_bias_seq_q,
+                                     attn_bias_seq_kv, past_buf_seq,
+                                     element_size_bytes, state)
+          : kSeqlensKNotRead;
   int32_t seqlens_k_pre =
       sharedMaskSeqlens != kSeqlensKNotRead
           ? sharedMaskSeqlens
@@ -3022,11 +3025,12 @@ int wrap_group_query_attention_host_length(
     void *attention_bias, void *head_sink, void *k_scale, void *v_scale,
     // Outputs
     void *output, void *present_key, void *present_value, void *output_qk,
-    // Attributes (13)
+    // Attributes (14)
     int64_t num_heads, int64_t kv_num_heads, float scale, int64_t do_rotary,
     int64_t rotary_interleaved, float softcap, int64_t local_window_size,
     int64_t smooth_softmax, int64_t qk_output, int64_t k_quant_type,
     int64_t v_quant_type, int64_t kv_cache_bit_width, int32_t no_causal,
+    int32_t derive_seqlens_from_attention_bias,
     // Shape values (12)
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
@@ -3309,7 +3313,8 @@ int wrap_group_query_attention_host_length(
         attention_bias, attn_bias_batch, attn_bias_num_heads, attn_bias_seq_q,
         attn_bias_seq_kv, output, present_key, present_value, batch_size,
         seq_len_q, seq_len_kv, past_buf_seq, num_heads, kv_num_heads, head_dim,
-        scale, do_rotary, local_window_size, no_causal != 0, element_size_bytes,
+        scale, do_rotary, local_window_size, no_causal != 0,
+        derive_seqlens_from_attention_bias != 0, element_size_bytes,
         op_state_slot, kv_bnsd != 0, reuse_past_kv, host_length);
     if (lrc != 0)
       fprintf(stderr,

@@ -582,6 +582,8 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
       rewriter.getNamedAttr("softcap", rewriter.getF32FloatAttr(softcap)));
   attrs.push_back(
       rewriter.getNamedAttr("no_causal", rewriter.getBoolAttr(noCausal)));
+  attrs.push_back(rewriter.getNamedAttr("derive_seqlens_from_attention_bias",
+                                        rewriter.getBoolAttr(bool(attnMask))));
   // AttentionWindowFold recovers the window during pre-lowering from the
   // additive mask, which is the only place a pre-opset-25 export can put it,
   // and stamps the result here. Absent the stamp the op keeps hip.gqa's -1

@@ -149,6 +149,10 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     Value noCausal = LLVM::ConstantOp::create(
         rewriter, loc, i32Type,
         rewriter.getI32IntegerAttr(op.getNoCausal() ? 1 : 0));
+    Value deriveSeqlensFromAttentionBias = LLVM::ConstantOp::create(
+        rewriter, loc, i32Type,
+        rewriter.getI32IntegerAttr(op.getDeriveSeqlensFromAttentionBias() ? 1
+                                                                          : 0));
 
     // Extract shape info from query memref: [batch, seq_q, num_heads *
     // head_dim]. Uses getMemRefDimSize() to handle both static and dynamic
@@ -272,7 +276,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     }
 
     // Both runtime entry points accept the optional host length.
-    SmallVector<Type, 47> paramTypes = {
+    SmallVector<Type, 48> paramTypes = {
         ptrType, // state
         i32Type, // op_state_slot
         // Inputs (14 pointers - some may be nullptr)
@@ -295,7 +299,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         ptrType, // present_key
         ptrType, // present_value
         ptrType, // output_qk
-        // Attributes (12 values)
+        // Attributes (14 values)
         i64Type, // num_heads
         i64Type, // kv_num_heads
         f32Type, // scale
@@ -309,6 +313,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         i64Type, // v_quant_type
         i64Type, // kv_cache_bit_width
         i32Type, // no_causal
+        i32Type, // derive_seqlens_from_attention_bias
         // Shape info (12 values)
         i64Type, // batch_size
         i64Type, // seq_len_q
@@ -331,7 +336,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 47> args = {
+    SmallVector<Value, 48> args = {
         statePtr,
         // Per-instance op-state slot (threaded by --assign-op-state-slots)
         getOpStateSlotValue(op, rewriter, loc),
@@ -341,10 +346,10 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         attentionBiasPtr, headSinkPtr, kScalePtr, vScalePtr,
         // Outputs (4 pointers)
         outputPtr, presentKeyPtr, presentValuePtr, outputQkPtr,
-        // Attributes (13 values)
+        // Attributes (14 values)
         numHeads, kvNumHeads, scale, doRotary, rotaryInterleaved, softcap,
         localWindowSize, smoothSoftmax, qkOutput, kQuantType, vQuantType,
-        kvCacheBitWidth, noCausal,
+        kvCacheBitWidth, noCausal, deriveSeqlensFromAttentionBias,
         // Shape info (12 values)
         batchSizeVal, seqLenQVal, seqLenKVVal, pastBufSeqVal, headDimVal,
         elemSizeVal, attnBiasBatchVal, attnBiasNumHeadsVal, attnBiasSeqQVal,

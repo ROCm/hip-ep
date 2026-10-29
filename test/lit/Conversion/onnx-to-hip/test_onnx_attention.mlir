@@ -125,6 +125,7 @@ module {
     // CHECK: tensor.from_elements %{{.*}} : tensor<1xi32>
     // CHECK: tensor.empty(%{{.*}}, %[[CAPACITY]]) : tensor<?x8x?x256xf16>
     // CHECK: hip.gqa(%[[CTX2]])
+    // CHECK-SAME: derive_seqlens_from_attention_bias = true
     // CHECK-SAME: no_causal = true
     // CHECK-NOT: onnx.Attention
 
