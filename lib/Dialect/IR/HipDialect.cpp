@@ -905,6 +905,37 @@ LogicalResult QLinearMatMulOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// QuantMatmulOp: i8 x i8 -> i32 rank-2 matrix product
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange QuantMatmulOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void QuantMatmulOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult QuantMatmulOp::verify() {
+  auto aType = dyn_cast<ShapedType>(getA().getType());
+  auto bType = dyn_cast<ShapedType>(getB().getType());
+  auto outputType = dyn_cast<ShapedType>(getOutput().getType());
+  if (!aType || !bType || !outputType || !aType.hasRank() || !bType.hasRank() ||
+      !outputType.hasRank() || aType.getRank() != 2 || bType.getRank() != 2 ||
+      outputType.getRank() != 2)
+    return emitOpError("a, b, and output must be rank 2");
+  if (!isEightBitInt(aType.getElementType()))
+    return emitOpError("a must be i8 or ui8");
+  if (!bType.getElementType().isSignlessInteger(8))
+    return emitOpError("b must be i8");
+  if (!outputType.getElementType().isSignlessInteger(32))
+    return emitOpError("output must be i32");
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // QLpNormalizationOp: quantized ins(input), outs(output)
 //===----------------------------------------------------------------------===//
 
