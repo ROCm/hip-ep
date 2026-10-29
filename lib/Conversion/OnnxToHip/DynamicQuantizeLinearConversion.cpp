@@ -63,9 +63,9 @@ static bool isSingleElement(mlir::RankedTensorType type) {
   return type.hasStaticShape() && type.getNumElements() == 1;
 }
 
-/// Fold the last axis, repeating until the value is rank 0. One axis per
-/// reduce matches the HIP reduce lowering, which infers a single reduced
-/// axis from the trailing shape.
+/// Fold the last axis, repeating until the value is rank 0. Each reduce
+/// carries that axis in `reduced_axes`; the LLVM lowering uses it for the
+/// inner stride.
 template <typename ReduceOp>
 static mlir::Value reduceToScalar(mlir::PatternRewriter &rewriter,
                                   mlir::Location loc, mlir::Value context,
@@ -86,10 +86,12 @@ static mlir::Value reduceToScalar(mlir::PatternRewriter &rewriter,
     mlir::Value axes =
         mlir::arith::ConstantOp::create(rewriter, loc, axesType, axesAttr);
 
-    auto reduced = ReduceOp::create(rewriter, loc, context, current, axes, init,
-                                    rewriter.getI64IntegerAttr(/*keepdims=*/0),
-                                    rewriter.getI64IntegerAttr(
-                                        /*noop_with_empty_axes=*/0));
+    auto reduced =
+        ReduceOp::create(rewriter, loc, context, current, axes, init,
+                         rewriter.getI64IntegerAttr(/*keepdims=*/0),
+                         rewriter.getI64IntegerAttr(/*noop_with_empty_axes=*/0),
+                         getConstantReducedAxesAttr(rewriter, current, axes,
+                                                    /*noopWithEmptyAxes=*/0));
     current = reduced->getResult(0);
   }
   return current;
