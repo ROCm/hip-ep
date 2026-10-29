@@ -273,7 +273,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
           fc2_zero_points, fc2_bias, d_fc2_buf, d_act_buf, output, d_a_qb_in,
           d_a_scale_in, d_a_qb_mid, d_a_scale_mid, hidden_size, inter_size, k,
           block_size, activation_alpha, activation_beta, swiglu_limit,
-          elem_size));
+          elem_size, num_experts));
       return 0;
     }
     RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: fused decode path (k=%lld)\n",
@@ -283,7 +283,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
         fc1_scales, fc1_zero_points, fc1_bias, fc2_weights, fc2_scales,
         fc2_zero_points, fc2_bias, d_fc2_buf, d_act_buf, output, hidden_size,
         inter_size, k, block_size, activation_alpha, activation_beta,
-        swiglu_limit, elem_size));
+        swiglu_limit, elem_size, num_experts));
     return 0;
   }
 

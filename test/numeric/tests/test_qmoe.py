@@ -343,6 +343,67 @@ class TestQMoE:
         compare_outputs(actual, expected, atol=1e-1, rtol=1e-2, cos_threshold=0.99)
 
 
+# More decode calls than the fused decode would spend choosing a tiling if it
+# chose on real calls (12 candidates x 9 rounds).
+DETERMINISM_CALLS = 129
+
+
+class TestQMoEDecodeDeterminism:
+    """The fused decode must give the same output for the same input on every
+    call, including the first ones of a shape. Its GEMV tiling sets the
+    reduction order, so a tiling chosen by sampling candidates on real calls
+    would make those calls differ in the low bits.
+
+    The tiling choice is cached per shape for the process, so the case uses a
+    shape no other test here uses. The reduction order only shows in the
+    fp16 output for some shapes; on gfx1151 a tiling sampled on real calls
+    made about 80 of the first 129 calls differ from the first for this one.
+
+    Only the dp4a decode (the default) is reachable here: with 32-aligned
+    blocks and sizes the EP takes it, and the fp decode is the fallback for
+    other block sizes. The kernel unit test qmoe_decode/Xfp16_Wu4_Yfp16 runs
+    both.
+    """
+
+    @pytest.mark.parametrize(
+        "hidden,intermediate,num_experts,top_k,block_size",
+        [
+            # 32-aligned blocks and sizes: the dp4a fused decode (the default).
+            (HIDDEN, HIDDEN, 16, 2, 32),
+        ],
+    )
+    def test_qmoe_decode_repeatable(
+        self, model_runner, hidden, intermediate, num_experts, top_k, block_size
+    ):
+        backend = model_runner.backend
+        if not hasattr(backend, "create_session"):
+            pytest.skip("backend does not expose an ORT session")
+        model = _make_qmoe_model(
+            1, 1, hidden, intermediate, num_experts, top_k, block_size
+        )
+        sub = model_runner._next_subdir()
+        path = sub / "model.onnx"
+        path.write_bytes(model.SerializeToString())
+        sess = backend.create_session(str(path))
+
+        rng = np.random.default_rng(7)
+        x = rng.uniform(-1, 1, [1, 1, hidden]).astype(np.float16)
+        router = (rng.standard_normal([1, num_experts]) * 1.2).astype(np.float16)
+        feeds = {i.name: v for i, v in zip(sess.get_inputs(), [x, router])}
+
+        first = sess.run(None, feeds)[0]
+        assert np.isfinite(first).all()
+        for call in range(1, DETERMINISM_CALLS):
+            out = sess.run(None, feeds)[0]
+            diff = np.flatnonzero(out.view(np.uint16) != first.view(np.uint16))
+            assert diff.size == 0, (
+                f"call {call} differs from call 0 at {diff.size} of {out.size} "
+                f"values (max |diff| "
+                f"{np.abs(out.astype(np.float32) - first.astype(np.float32)).max()})"
+            )
+        del sess
+
+
 @dataclass(frozen=True)
 class Relu2Config:
     seq_len: int

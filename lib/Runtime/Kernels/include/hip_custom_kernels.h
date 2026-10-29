@@ -3137,6 +3137,10 @@ HIP_KERNEL_API int hip_qmoe_reduce_sorted_pairs(
  *
  * Constraints: fp16 only (element_size_bytes == 2); hidden_size and
  * inter_size both multiples of 32; block_size > 0 and even.
+ *
+ * num_experts (E) lets the first call of a shape time the GEMV tile
+ * configurations on other experts' weights before computing; every call
+ * then uses the configuration chosen, so equal inputs give equal results.
  */
 HIP_KERNEL_API int hip_qmoe_decode_fused(
     void* stream,
@@ -3153,7 +3157,7 @@ HIP_KERNEL_API int hip_qmoe_decode_fused(
     int64_t hidden_size, int64_t inter_size,
     int64_t k, int64_t block_size,
     float swiglu_alpha, float swiglu_beta, float swiglu_limit,
-    int64_t element_size_bytes);
+    int64_t element_size_bytes, int64_t num_experts);
 
 // W4A8 dp4a decode variant of hip_qmoe_decode_fused (env-gated via
 // HIPDNN_EP_MATMUL_DP4A). Additionally takes 4 scratch buffers: quantized
@@ -3176,7 +3180,7 @@ HIP_KERNEL_API int hip_qmoe_decode_fused_dp4a(
     int64_t hidden_size, int64_t inter_size,
     int64_t k, int64_t block_size,
     float swiglu_alpha, float swiglu_beta, float swiglu_limit,
-    int64_t element_size_bytes);
+    int64_t element_size_bytes, int64_t num_experts);
 
 /* =========================================================================
  * com.amd QMoE Sub-Kernels (LatentMoE)

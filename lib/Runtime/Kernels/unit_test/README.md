@@ -90,7 +90,7 @@ controller from that `bin` directory:
 | `--mode` | `lookup`, `autotune` | `lookup` | `lookup` uses the tables embedded in `custom_kernels_<arch>.dll` and falls through to autotune on a miss, like production. `autotune` bypasses the tables (production's `online` mode). |
 | `--coverage` | `1`, `2`, `3` | `3` | Shape tier; see "Shape coverage". `1` suits a per-PR job, `3` a nightly one. |
 
-The controller runs the 16 leaves serially, with `bin` as the working
+The controller runs the 17 leaves serially, with `bin` as the working
 directory so every leaf finds `custom_kernels_<arch>.dll`. It prints one
 `[<op>/<leaf>] PASS|FAIL (<ms> ms)` line per leaf and finally
 `Combined report: <path>`.
@@ -193,7 +193,7 @@ Concretely:
   never drops a categorical situation.
 
 A tier3 (default) run of one leaf is on the order of tens to ~150 cases, and
-the whole 16-leaf suite at tier3 is budgeted at **up to ~30 min total**
+the whole 17-leaf suite at tier3 is budgeted at **up to ~30 min total**
 (measured ~20-25 min in practice) — this is intentionally wider than a
 "finishes in a minute" smoke test, because the shape axis (M=1 vs M>1,
 multiple K/N/seq scenarios) needs real coverage too, not just the categorical
@@ -256,6 +256,7 @@ unit_test/
   gqa/decode/Xfp16_Wi8_Yfp16/
   gqa/prefill/Xfp16_Wfp16_Yfp16/
   gqa/prefill/Xfp16_Wi8_Yfp16/
+  qmoe_decode/Xfp16_Wu4_Yfp16/
   qmoe_ragged_mm/Xfp16_Wu4_Yfp16/
   gather_block_quantized/Xi64_W{u4,u8,fp8}_Yfp16/
 ```
@@ -362,6 +363,12 @@ COVERAGE=N` (any leaf, or the top-level aggregator) builds and runs it.
   (`genCase()`'s `O(M*K*N)`, no BLAS) is now multithreaded over `N` to keep
   this affordable; see the comment above `genCase()` in any
   `matmul_nbits/*/test_matmul_nbits*.cpp`.
+- **qmoe_decode** (the fused single-token decode): `{fp, dp4a}` x block
+  size `{32,64,128}` x zero points `{off,on}` x bias `{off,on}` (24 combos)
+  on a shape list COVERAGE thins (tier1 = 1 shape, tier2 = 2 with
+  GPT-OSS-20B, tier3 = 3), each checked against a CPU reference and then
+  for 128 more bit-identical calls. Every tier also runs a first call made
+  over a pending HIP error and the rejected arguments.
 - **qmoe_ragged_mm**: routing `{balanced, empty experts, skewed}` x input
   `{contiguous, FC1 gather}` x bias `{off,on}` x zero points `{off,on}` (24
   combos) on a shape list COVERAGE thins (tier1 = 1 shape, tier2 = 2, tier3 =
