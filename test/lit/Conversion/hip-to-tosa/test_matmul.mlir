@@ -168,16 +168,41 @@ func.func @trans_both_unbatched_b(%ctx: !hip.context, %a: tensor<8x16x3xf32>,
 
 // -----
 
-// A size-1 batch on B is the case tosa.matmul cannot express: it refuses to
-// broadcast it up to A's, and folding A's batch into M would multiply every
-// batch by the one B, which is a different computation. hip.matmul is
-// unconditionally illegal here, so there is nothing to fall back to.
-func.func @batch_mismatch(%ctx: !hip.context, %a: tensor<8x4x16xf32>,
-                          %b: tensor<1x16x32xf32>, %init: tensor<8x4x32xf32>)
-    -> tensor<8x4x32xf32> attributes {rock.kernel} {
-  // expected-error @+1 {{failed to legalize operation 'hip.matmul'}}
-  %r = hip.matmul(%ctx) ins(%a, %b : tensor<8x4x16xf32>, tensor<1x16x32xf32>)
-      outs(%init : tensor<8x4x32xf32>)
-      {transA = 0 : i64, transB = 0 : i64} : tensor<8x4x32xf32>
-  return %r : tensor<8x4x32xf32>
+// A B operand with only unit batch dimensions is also the same matrix for
+// every A batch. Drop that prefix before lowering to tosa.matmul.
+
+// CHECK-LABEL: func.func @unit_broadcast_batch_first
+// CHECK: %[[A:.*]] = tosa.reshape %arg1, {{.*}} -> tensor<1x120x96xf32>
+// CHECK: %[[B:.*]] = tosa.reshape %arg2, {{.*}} -> tensor<1x96x119xf32>
+// CHECK: %[[MM:.*]] = tosa.matmul %[[A]], %[[B]]
+// CHECK-SAME: -> tensor<1x120x119xf32>
+// CHECK: tosa.reshape %[[MM]], {{.*}} -> tensor<1x2x60x119xf32>
+// CHECK-NOT: hip.matmul
+func.func @unit_broadcast_batch_first(
+    %ctx: !hip.context, %a: tensor<1x2x60x96xf32>,
+    %b: tensor<1x1x96x119xf32>, %init: tensor<1x2x60x119xf32>)
+    -> tensor<1x2x60x119xf32> attributes {rock.kernel} {
+  %r = hip.matmul(%ctx) ins(%a, %b :
+      tensor<1x2x60x96xf32>, tensor<1x1x96x119xf32>)
+      outs(%init : tensor<1x2x60x119xf32>)
+      {transA = 0 : i64, transB = 0 : i64} : tensor<1x2x60x119xf32>
+  return %r : tensor<1x2x60x119xf32>
+}
+
+// CHECK-LABEL: func.func @unit_broadcast_batch_second
+// CHECK: %[[A:.*]] = tosa.reshape %arg1, {{.*}} -> tensor<1x120x119xf32>
+// CHECK: %[[B:.*]] = tosa.reshape %arg2, {{.*}} -> tensor<1x119x96xf32>
+// CHECK: %[[MM:.*]] = tosa.matmul %[[A]], %[[B]]
+// CHECK-SAME: -> tensor<1x120x96xf32>
+// CHECK: tosa.reshape %[[MM]], {{.*}} -> tensor<1x2x60x96xf32>
+// CHECK-NOT: hip.matmul
+func.func @unit_broadcast_batch_second(
+    %ctx: !hip.context, %a: tensor<1x2x60x119xf32>,
+    %b: tensor<1x1x119x96xf32>, %init: tensor<1x2x60x96xf32>)
+    -> tensor<1x2x60x96xf32> attributes {rock.kernel} {
+  %r = hip.matmul(%ctx) ins(%a, %b :
+      tensor<1x2x60x119xf32>, tensor<1x1x119x96xf32>)
+      outs(%init : tensor<1x2x60x96xf32>)
+      {transA = 0 : i64, transB = 0 : i64} : tensor<1x2x60x96xf32>
+  return %r : tensor<1x2x60x96xf32>
 }
