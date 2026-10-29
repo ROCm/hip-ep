@@ -2,19 +2,26 @@
 // Licensed under the MIT License.
 
 // Gemm-pointwise-gemm: two outlined matmul kernels merge into one when the
-// first kernel's only result feeds the second gemm's A operand and MIGraphX's
-// shape gates pass. fuse-geg=false keeps them apart.
+// first kernel's only result feeds the second gemm's A operand, both gemms
+// read a type in gemm-gemm-accel-types, and the shape gates pass.
+// fuse-geg=false keeps them apart, and so does an empty type list.
 
-// RUN: hip-mlir-opt --split-input-file --hip-fuse-rocmlir %s \
+// RUN: hip-mlir-opt --split-input-file \
+// RUN:   --hip-fuse-rocmlir="arch=gfx1151 gemm-gemm-accel-types=f16,bf16" %s \
 // RUN:   | hip-mlir-opt --split-input-file | FileCheck %s
-// RUN: hip-mlir-opt --split-input-file --hip-fuse-rocmlir="fuse-geg=false" %s \
+// RUN: hip-mlir-opt --split-input-file \
+// RUN:   --hip-fuse-rocmlir="fuse-geg=false gemm-gemm-accel-types=f16,bf16" %s \
 // RUN:   | hip-mlir-opt --split-input-file | FileCheck %s --check-prefix=NOGEG
+// RUN: hip-mlir-opt --split-input-file --hip-fuse-rocmlir %s \
+// RUN:   | hip-mlir-opt --split-input-file \
+// RUN:   | FileCheck %s --check-prefixes=NOGEG,NOARCH
 
 // A column-vector intermediate (n == 1) passes the gate: one kernel runs
 // matmul -> sigmoid -> matmul, and the dispatch reads x and both weights.
 
 // CHECK-LABEL: func.func @rocMlir
 // CHECK-SAME: (%[[X:.*]]: tensor<512x64xf16>, %[[W0:.*]]: tensor<64x1xf16>, %[[W1:.*]]: tensor<1x32xf16>) -> tensor<512x32xf16>
+// CHECK-SAME: rock.arch = "gfx1151"
 // CHECK: %[[M0:.*]] = hip.matmul({{.*}}) ins(%[[X]], %[[W0]]
 // CHECK: %[[S:.*]] = hip.sigmoid({{.*}}) ins(%[[M0]]
 // CHECK: %[[M1:.*]] = hip.matmul({{.*}}) ins(%[[S]], %[[W1]]
@@ -25,6 +32,7 @@
 // CHECK-SAME: ins(%{{.*}}, %{{.*}}, %{{.*}} : tensor<512x64xf16>, tensor<64x1xf16>, tensor<1x32xf16>)
 // CHECK-NOT: hip.rocmlir
 
+// NOARCH-NOT: rock.arch
 // NOGEG-LABEL: func.func @main_graph
 // NOGEG: hip.rocmlir
 // NOGEG: hip.rocmlir
@@ -65,7 +73,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<512x64xf16>,
 
 // -----
 
-// WMMA has no fp32 path on gfx11, so an fp32 pair stays apart.
+// f32 is not in gemm-gemm-accel-types, so an fp32 pair stays apart.
 
 // CHECK-LABEL: func.func @main_graph
 // CHECK: hip.rocmlir

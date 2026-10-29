@@ -435,6 +435,10 @@ bool CompilerDriver::runMLIRPasses(
       fuseOpts.fuseViews = !(fuseViews == "0" || fuseViews == "off");
       std::string fuseGeg = hip_get_env("HIPDNN_EP_ROCMLIR_FUSE_GEG");
       fuseOpts.fuseGemmGemm = !(fuseGeg == "0" || fuseGeg == "off");
+      fuseOpts.arch = mlir::hip::resolveRocMlirArch();
+      std::vector<std::string> accelTypes = mlir::hip::getRocMlirGemmAccelTypes(
+          *module.getContext(), fuseOpts.arch);
+      fuseOpts.gemmGemmAccelTypes.assign(accelTypes.begin(), accelTypes.end());
       headPm.addNestedPass<mlir::func::FuncOp>(
           mlir::hip::createFuseROCMlirPass(fuseOpts));
       headPm.addPass(mlir::func::createDuplicateFunctionEliminationPass());
