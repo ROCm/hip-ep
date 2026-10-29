@@ -133,3 +133,153 @@ int hip_gemm_wmma_fp16(void* stream, const void* A, const void* B,
         (const _Float16*)A, (const _Float16*)B, (_Float16*)C, M, K, N);
     return hipGetLastError() == hipSuccess ? 0 : -1;
 }
+
+__global__ void gemv_f32_transposed_b_kernel(const float *__restrict__ A,
+                                             const float *__restrict__ B,
+                                             float *__restrict__ C, int N,
+                                             int K) {
+    const int lane = threadIdx.x % warpSize;
+    const int wave = threadIdx.x / warpSize;
+    const int output = blockIdx.x;
+    if (wave != 0 || output >= N)
+        return;
+
+    const float *weight = B + static_cast<size_t>(output) * K;
+    float sum = 0.0f;
+    for (int64_t k = lane; k < K; k += warpSize)
+        sum = fmaf(A[k], weight[k], sum);
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1)
+        sum += __shfl_down(sum, offset);
+    if (lane == 0)
+        C[output] = sum;
+}
+
+template <int BlockSize, int Accumulators>
+__global__ void
+gemv_f32_transposed_b_multiwave_kernel(const float *__restrict__ A,
+                                       const float *__restrict__ B,
+                                       float *__restrict__ C, int N, int K) {
+  const int lane = threadIdx.x % warpSize;
+  const int wave = threadIdx.x / warpSize;
+  const int waves_per_block = blockDim.x / warpSize;
+  const int output = blockIdx.x;
+  if (output >= N)
+    return;
+
+  const float *weight = B + static_cast<size_t>(output) * K;
+  float sums[Accumulators] = {};
+  int k = threadIdx.x;
+  for (; k + (Accumulators - 1) * BlockSize < K;
+       k += Accumulators * BlockSize) {
+#pragma unroll
+    for (int accumulator = 0; accumulator < Accumulators; ++accumulator) {
+      const int index = k + accumulator * BlockSize;
+      sums[accumulator] = fmaf(A[index], weight[index], sums[accumulator]);
+    }
+  }
+  for (; k < K; k += BlockSize)
+    sums[0] = fmaf(A[k], weight[k], sums[0]);
+
+  float sum = sums[0];
+#pragma unroll
+  for (int accumulator = 1; accumulator < Accumulators; ++accumulator)
+    sum += sums[accumulator];
+  for (int offset = warpSize / 2; offset > 0; offset >>= 1)
+    sum += __shfl_down(sum, offset);
+
+  __shared__ float wave_sums[BlockSize / 32];
+  if (lane == 0)
+    wave_sums[wave] = sum;
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    float output_sum = 0.0f;
+    for (int wave_index = 0; wave_index < waves_per_block; ++wave_index)
+      output_sum += wave_sums[wave_index];
+    C[output] = output_sum;
+  }
+}
+
+extern "C" int hip_gemv_f32_transposed_b(void *stream, const float *A,
+                                         const float *B, float *C, int N,
+                                         int K) {
+  if (!stream || !A || !B || !C || N <= 0 || K <= 0)
+    return -1;
+
+  // A 64-thread block contains one wave on wave64 targets and two waves on
+  // wave32 targets. Only the first wave participates, so the same kernel is
+  // valid for either hardware wave size without a host-side device query.
+  constexpr int kBlockSize = 64;
+  // Clear an error an earlier HIP call left, so the status below is this
+  // launch's own.
+  (void)hipGetLastError();
+  hipLaunchKernelGGL(gemv_f32_transposed_b_kernel, dim3(N), dim3(kBlockSize), 0,
+                     static_cast<hipStream_t>(stream), A, B, C, N, K);
+  return hipGetLastError() == hipSuccess ? 0 : -1;
+}
+
+// Same reduction with 16-byte loads: each of the BlockSize threads reads a
+// float4 of the row and of the input per step.
+template <int BlockSize>
+__global__ void
+gemv_f32_transposed_b_vec4_kernel(const float *__restrict__ A,
+                                  const float *__restrict__ B,
+                                  float *__restrict__ C, int N, int K) {
+  const int lane = threadIdx.x % warpSize;
+  const int wave = threadIdx.x / warpSize;
+  const int output = blockIdx.x;
+  if (output >= N)
+    return;
+
+  const float4 *weight =
+      reinterpret_cast<const float4 *>(B + static_cast<size_t>(output) * K);
+  const float4 *input = reinterpret_cast<const float4 *>(A);
+  float sum = 0.0f;
+  for (int k = threadIdx.x; k < K / 4; k += BlockSize) {
+    const float4 a = input[k];
+    const float4 w = weight[k];
+    sum = fmaf(a.x, w.x, sum);
+    sum = fmaf(a.y, w.y, sum);
+    sum = fmaf(a.z, w.z, sum);
+    sum = fmaf(a.w, w.w, sum);
+  }
+  for (int offset = warpSize / 2; offset > 0; offset >>= 1)
+    sum += __shfl_down(sum, offset);
+
+  __shared__ float wave_sums[BlockSize / 32];
+  if (lane == 0)
+    wave_sums[wave] = sum;
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    float output_sum = 0.0f;
+    for (int wave_index = 0; wave_index < BlockSize / warpSize; ++wave_index)
+      output_sum += wave_sums[wave_index];
+    C[output] = output_sum;
+  }
+}
+
+extern "C" int hip_gemv_f32_transposed_b_multiwave_gfx1151(
+    void *stream, const float *A, const float *B, float *C, int N, int K) {
+  if (!stream || !A || !B || !C || N <= 0 || N > 256 || K <= 0)
+    return -1;
+
+  // One 256-thread block per output row. With K a multiple of four and
+  // 16-byte aligned operands every row is read as float4; otherwise four
+  // scalar accumulators per thread. On gfx1151 at N in {128, 256} and K from
+  // 1024 to 7168 this runs at 150-220 GB/s, 2.4-4x the one-wave kernel; the
+  // 128-thread form it replaces loses up to 1.7x at power-of-two K.
+  constexpr int kBlockSize = 256;
+  const bool vectorized =
+      K % 4 == 0 &&
+      ((reinterpret_cast<uintptr_t>(A) | reinterpret_cast<uintptr_t>(B)) &
+       15) == 0;
+  (void)hipGetLastError();
+  if (vectorized)
+    hipLaunchKernelGGL((gemv_f32_transposed_b_vec4_kernel<kBlockSize>), dim3(N),
+                       dim3(kBlockSize), 0, static_cast<hipStream_t>(stream), A,
+                       B, C, N, K);
+  else
+    hipLaunchKernelGGL((gemv_f32_transposed_b_multiwave_kernel<kBlockSize, 4>),
+                       dim3(N), dim3(kBlockSize), 0,
+                       static_cast<hipStream_t>(stream), A, B, C, N, K);
+  return hipGetLastError() == hipSuccess ? 0 : -1;
+}

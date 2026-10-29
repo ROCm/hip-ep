@@ -12,6 +12,9 @@ Weight shapes mirror Llama-3.1-8B projections:
 The 4096x4096 and 4096x14336 CPU MatMuls are seconds each on a single
 core, which is exactly where ``reference="cache"`` pays for itself:
 first run computes once, every subsequent run loads from disk.
+
+``TestMatMulF32TransposedWeight`` covers fp32 MatMul against a transposed
+[N, K] weight, around the shapes the runtime sends to its decode GEMV.
 """
 
 import numpy as np
@@ -89,3 +92,52 @@ class TestMatMul:
 
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=1e-3)
+
+
+def _make_transposed_weight_matmul_model(m: int, n: int, k: int):
+    """Build an fp32 ``MatMul(X, Transpose(W))`` model with W stored as [N, K].
+
+    The Transpose folds into the MatMul as ``transB``. W is a graph input, not
+    an initializer, so ONNX Runtime cannot fold the Transpose into a constant
+    before the EP sees it.
+    """
+    X = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, m, k])
+    W = helper.make_tensor_value_info("W", TensorProto.FLOAT, [n, k])
+    Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1, m, n])
+    nodes = [
+        helper.make_node("Transpose", ["W"], ["Wt"], perm=[1, 0]),
+        helper.make_node("MatMul", ["X", "Wt"], ["Y"]),
+    ]
+    return make_model_from_nodes(nodes, [X, W], [Y])
+
+
+class TestMatMulF32TransposedWeight:
+    """fp32 MatMul with a transposed [N, K] weight.
+
+    On gfx1151, one row with ``1 <= N <= 256`` and ``K >= 256`` runs the
+    multi-wave F32 transposed-B GEMV instead of hipBLASLt (float4 body when K
+    is a multiple of 4, scalar body otherwise); the other cases sit just
+    outside that range on each axis and stay on hipBLASLt.
+    """
+
+    @pytest.mark.parametrize(
+        "m,n,k",
+        [
+            (1, 1, 256),
+            (1, 7, 1001),
+            (1, 128, 1024),
+            (1, 256, 4096),
+            (1, 257, 4096),
+            (1, 128, 255),
+            (2, 128, 1024),
+        ],
+    )
+    def test_matmul_f32_transposed_weight(self, model_runner, m, n, k):
+        model = _make_transposed_weight_matmul_model(m, n, k)
+
+        rng = np.random.default_rng(42)
+        x = rng.uniform(-1, 1, [1, m, k]).astype(np.float32)
+        w = rng.uniform(-1, 1, [n, k]).astype(np.float32)
+
+        actual, expected = model_runner.run_sample(model, [x, w], reference="cpu")
+        compare_outputs(actual, expected, atol=1e-4)
