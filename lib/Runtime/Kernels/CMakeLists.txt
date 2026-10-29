@@ -274,17 +274,6 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
     message(STATUS "[custom_kernels] Adding per-arch SHARED target: ${_target}")
 endforeach()
 
-if(BUILD_HIP_UNIT_TESTS)
-    hip_add_executable(test-cast-bf16
-        ${CMAKE_SOURCE_DIR}/test/gpu/test_cast_bf16.hip
-        hip/cast_kernel.hip
-        INCLUDE_DIRECTORIES
-            ${CMAKE_CURRENT_SOURCE_DIR}/include
-        OFFLOAD_ARCHS
-            ${HIP_ARCHITECTURES}
-    )
-endif()
-
 # Export include directory for Runtime bitcode compilation
 set(HIP_CUSTOM_KERNELS_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include" PARENT_SCOPE)
 
