@@ -121,16 +121,17 @@ struct MhaGemmCacheEntry {
   // the reference GEMM fallback.
   int ck_instance = -1;
   bool ck_probed = false;
+  std::unordered_map<uint64_t, int> *families = nullptr;
 };
 
 struct MhaGemmCache {
   std::unordered_map<MhaGemmKey, MhaGemmCacheEntry, MhaGemmKeyHash> entries;
+  std::unordered_map<uint64_t, int> families;
 };
 
 // Per-instance MultiHeadAttention op-state (see op-state-slots-design.md):
-// owns this instance's per-GEMM-shape routing cache. Replaces the former
-// shared RuntimeState::mha_gemm_cache, so concurrent sessions (and distinct
-// MHA layers) no longer share one routing map.
+// owns this instance's per-GEMM-shape routing cache, so sessions and MHA layers
+// do not share one routing map.
 struct MhaState : OpStateT<MhaState> {
   MhaGemmCache cache;
 };
@@ -162,6 +163,7 @@ MhaGemmCacheEntry *queryOrCreateMhaGemm(RuntimeState *state,
   }
   MhaGemmCacheEntry entry = {};
   entry.key = key;
+  entry.families = &cache->families;
   auto [ins, _] = cache->entries.emplace(key, entry);
   return &ins->second;
 }
@@ -174,16 +176,43 @@ static int mhaRunGemm(MhaGemmCacheEntry *st, hipStream_t stream, const void *A,
                       const void *B, void *D, float alpha) {
   const MhaGemmKey &key = st->key;
   const int64_t lda = key.transA ? key.k : key.m;
+  const int dDtype = key.outputFp32 ? HIP_DTYPE_FLOAT32 : HIP_DTYPE_FLOAT16;
 
   // hip_ck_gemm_run refuses alpha != 1 with fp16 output, so skip the probe for
   // that case.
   if ((key.outputFp32 || alpha == 1.0f) && !st->ck_probed) {
-    st->ck_probed = true;
-    st->ck_instance = ckSelectGemmInstance(
+    const uint64_t family =
+        ckGemmFamilyKey(key.m, key.n, key.k, key.batch, key.transA ? 1 : 0,
+                        HIP_DTYPE_FLOAT16, dDtype, lda, /*ldb=*/key.k,
+                        /*ldd=*/key.m, key.strideA, key.strideB, key.strideC);
+    auto known = st->families->find(family);
+    if (known != st->families->end() &&
+        hip_ck_gemm_run(stream, known->second, A, B, /*bias=*/nullptr, D, key.m,
+                        key.n, key.k, key.batch, key.transA ? 1 : 0,
+                        /*transB=*/0, HIP_DTYPE_FLOAT16, dDtype, alpha, lda,
+                        /*ldb=*/key.k, /*ldd=*/key.m, key.strideA, key.strideB,
+                        key.strideC) == 0) {
+      st->ck_probed = true;
+      st->ck_instance = known->second;
+      RUNTIME_DEBUG_LOG("[MHA] CK instance %d for m=%lld n=%lld k=%lld "
+                        "batch=%lld transA=%d outFp32=%d (family)\n",
+                        st->ck_instance, (long long)key.m, (long long)key.n,
+                        (long long)key.k, (long long)key.batch, (int)key.transA,
+                        (int)key.outputFp32);
+      return 0;
+    }
+    const int chosen = ckSelectGemmInstance(
         stream, A, B, /*bias=*/nullptr, D, key.m, key.n, key.k, key.batch,
-        key.transA ? 1 : 0, /*transB=*/0, HIP_DTYPE_FLOAT16,
-        key.outputFp32 ? HIP_DTYPE_FLOAT32 : HIP_DTYPE_FLOAT16, alpha, lda,
+        key.transA ? 1 : 0, /*transB=*/0, HIP_DTYPE_FLOAT16, dDtype, alpha, lda,
         /*ldb=*/key.k, /*ldd=*/key.m, key.strideA, key.strideB, key.strideC);
+    if (chosen == kCkSelectStreamError) {
+      return -1;
+    }
+    st->ck_probed = true;
+    st->ck_instance = chosen;
+    if (chosen >= 0) {
+      (*st->families)[family] = chosen;
+    }
     RUNTIME_DEBUG_LOG("[MHA] CK instance %d for m=%lld n=%lld k=%lld "
                       "batch=%lld transA=%d outFp32=%d\n",
                       st->ck_instance, (long long)key.m, (long long)key.n,
@@ -194,9 +223,7 @@ static int mhaRunGemm(MhaGemmCacheEntry *st, hipStream_t stream, const void *A,
   if (st->ck_instance >= 0) {
     if (hip_ck_gemm_run(stream, st->ck_instance, A, B, /*bias=*/nullptr, D,
                         key.m, key.n, key.k, key.batch, key.transA ? 1 : 0,
-                        /*transB=*/0, HIP_DTYPE_FLOAT16,
-                        key.outputFp32 ? HIP_DTYPE_FLOAT32 : HIP_DTYPE_FLOAT16,
-                        alpha, lda,
+                        /*transB=*/0, HIP_DTYPE_FLOAT16, dDtype, alpha, lda,
                         /*ldb=*/key.k, /*ldd=*/key.m, key.strideA, key.strideB,
                         key.strideC) != 0) {
       // This geometry was accepted when the instance was chosen, so a non-zero
@@ -210,7 +237,6 @@ static int mhaRunGemm(MhaGemmCacheEntry *st, hipStream_t stream, const void *A,
     return 0;
   }
 
-  const int dDtype = key.outputFp32 ? HIP_DTYPE_FLOAT32 : HIP_DTYPE_FLOAT16;
   if (hip_ref_gemm_run(stream, A, B, D, key.m, key.n, key.k, key.batch,
                        key.transA ? 1 : 0, /*transB=*/0, HIP_DTYPE_FLOAT16,
                        dDtype, alpha, lda, /*ldb=*/key.k, /*ldd=*/key.m,

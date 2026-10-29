@@ -388,6 +388,9 @@ int matmul_nbits_prefill_gemm(MatmulNbitsState *mst, RuntimeState *state,
           stream, Bfp16, A, bias, Y, m, n, K, /*batch=*/1, /*transA=*/1,
           /*transB=*/0, HIP_DTYPE_FLOAT16, HIP_DTYPE_FLOAT16, /*alpha=*/1.0f,
           /*lda=*/K, /*ldb=*/K, /*ldd=*/N, 0, 0, 0);
+      if (ck_instance == kCkSelectStreamError) {
+        return -1;
+      }
       mst->prefill_ck.emplace(key, ck_instance);
     }
   }
