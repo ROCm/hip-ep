@@ -700,14 +700,14 @@ static bool isEightBitInt(Type type) {
   return integer && integer.getWidth() == 8;
 }
 
-static LogicalResult verifyPositivePair(QLinearConvOp op, ArrayAttr attr,
+static LogicalResult verifyPositivePair(Operation *op, ArrayAttr attr,
                                         StringRef name) {
   if (attr.size() != 2)
-    return op.emitOpError() << name << " must have 2 entries";
+    return op->emitOpError() << name << " must have 2 entries";
   for (Attribute entry : attr) {
     auto intAttr = dyn_cast<IntegerAttr>(entry);
     if (!intAttr || intAttr.getInt() <= 0)
-      return op.emitOpError() << name << " entries must be positive";
+      return op->emitOpError() << name << " entries must be positive";
   }
   return success();
 }
@@ -771,6 +771,49 @@ LogicalResult QLinearConvOp::verify() {
     if (!isa<IntegerAttr>(entry))
       return emitOpError("pads entries must be integers");
   }
+  if (getGroup() < 1)
+    return emitOpError("group must be positive");
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// QuantConvOp: i8 x i8 -> i32 grouped 2D convolution
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange QuantConvOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void QuantConvOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult QuantConvOp::verify() {
+  auto inputType = dyn_cast<ShapedType>(getInput().getType());
+  auto weightsType = dyn_cast<ShapedType>(getWeights().getType());
+  auto outputType = dyn_cast<ShapedType>(getOutput().getType());
+  if (!inputType || !weightsType || !outputType || !inputType.hasRank() ||
+      !weightsType.hasRank() || !outputType.hasRank() ||
+      inputType.getRank() != 4 || weightsType.getRank() != 4 ||
+      outputType.getRank() != 4)
+    return emitOpError("input, weights, and output must be rank 4");
+  if (!isEightBitInt(inputType.getElementType()))
+    return emitOpError("input must be i8 or ui8");
+  if (!weightsType.getElementType().isSignlessInteger(8))
+    return emitOpError("weights must be i8");
+  if (!outputType.getElementType().isSignlessInteger(32))
+    return emitOpError("output must be i32");
+  if (failed(verifyPositivePair(*this, getKernelShape(), "kernel_shape")) ||
+      failed(verifyPositivePair(*this, getStrides(), "strides")) ||
+      failed(verifyPositivePair(*this, getDilations(), "dilations")))
+    return failure();
+  if (getPads().size() != 4 || llvm::any_of(getPads(), [](Attribute entry) {
+        auto intAttr = dyn_cast<IntegerAttr>(entry);
+        return !intAttr || intAttr.getInt() < 0;
+      }))
+    return emitOpError("pads must have 4 non-negative entries");
   if (getGroup() < 1)
     return emitOpError("group must be positive");
   return success();
