@@ -6149,7 +6149,7 @@ def Hip_QuantConvOp : Hip_DpsOp_AutoReifyInfer<"quant_conv"> {
 
     The op has no zero points, scales, or bias. hip-fuse-rocmlir creates it
     inside a rocMLIR kernel, together with the constant zero-point correction
-    and the requantize epilogue. The op has no lowering outside a rocMLIR
+    and the f32 scale epilogue. The op has no lowering outside a rocMLIR
     kernel.
   }];
 
