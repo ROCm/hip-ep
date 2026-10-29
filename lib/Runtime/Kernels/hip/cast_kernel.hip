@@ -214,6 +214,9 @@ extern "C" int hip_cast(
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
   constexpr int kBlockSize = 256;
   int grid_size = static_cast<int>((num_elements + kBlockSize - 1) / kBlockSize);
+  // Clear an error an earlier HIP call left, so the status returned below is
+  // this launch's own.
+  (void)hipGetLastError();
 
   if (input_dtype == HIP_DTYPE_INT64 && output_dtype == HIP_DTYPE_INT32) {
     CUSTOM_KERNELS_DEBUG_LOG("[custom_kernels] hip_cast: INT64->INT32, "

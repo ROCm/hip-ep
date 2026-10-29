@@ -1407,8 +1407,10 @@ HIP_KERNEL_API int hip_gqa_flash_decode_configured(
  *   output_dtype - destination data type (hip_dtype_t value cast to int)
  *
  * Supported conversions include F32 <-> F16, F32 <-> BF16, and the integer
- * conversion pairs required by the HIP lowering.
- * Returns: 0 on success, non-zero on failure
+ * conversion pairs required by the HIP lowering. F32 -> BF16 rounds to
+ * nearest even.
+ * Returns: 0 on success or when num_elements <= 0, -1 for an unsupported
+ * pair (nothing is written), or the HIP error of a failed launch.
  */
 HIP_KERNEL_API int hip_cast(
     void* stream,
