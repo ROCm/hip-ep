@@ -128,7 +128,14 @@ def _make_gqa_model(
 
 
 def _make_gqa_fixed_cache_model(
-    batch, seq_len, cache_size, hidden, kv_hidden, num_heads, kv_num_heads
+    batch,
+    seq_len,
+    cache_size,
+    hidden,
+    kv_hidden,
+    num_heads,
+    kv_num_heads,
+    with_attention_bias=False,
 ):
     """Build a GQA ONNX model with pre-allocated fixed-size KV cache.
 
@@ -159,6 +166,11 @@ def _make_gqa_fixed_cache_model(
     )
     seqlens_k = helper.make_tensor_value_info("seqlens_k", TensorProto.INT32, [batch])
     total_seq = helper.make_tensor_value_info("total_seq", TensorProto.INT32, [])
+    attention_bias = helper.make_tensor_value_info(
+        "attention_bias",
+        TensorProto.FLOAT16,
+        [batch, 1, seq_len, cache_size],
+    )
 
     output = helper.make_tensor_value_info(
         "output", TensorProto.FLOAT16, [batch, seq_len, hidden]
@@ -175,19 +187,25 @@ def _make_gqa_fixed_cache_model(
     )
 
     scale = 1.0 / np.sqrt(head_dim).item()
+    node_inputs = [
+        "query",
+        "key",
+        "value",
+        "past_key",
+        "past_value",
+        "seqlens_k",
+        "total_seq",
+        "",
+        "",
+    ]
+    graph_inputs = [query, key, value, past_key, past_value, seqlens_k, total_seq]
+    if with_attention_bias:
+        node_inputs.extend(["", "attention_bias"])
+        graph_inputs.append(attention_bias)
+
     node = helper.make_node(
         "GroupQueryAttention",
-        [
-            "query",
-            "key",
-            "value",
-            "past_key",
-            "past_value",
-            "seqlens_k",
-            "total_seq",
-            "",
-            "",
-        ],
+        node_inputs,
         ["output", "present_key", "present_value"],
         domain="com.microsoft",
         num_heads=num_heads,
@@ -201,7 +219,7 @@ def _make_gqa_fixed_cache_model(
     ms_opset = helper.make_opsetid("com.microsoft", 1)
     return make_model_from_nodes(
         [node],
-        [query, key, value, past_key, past_value, seqlens_k, total_seq],
+        graph_inputs,
         [output, present_key, present_value],
         extra_opsets=[ms_opset],
     )
@@ -590,6 +608,59 @@ class TestGroupQueryAttention:
         actual, expected = model_runner.run_sample(
             model,
             [q, k, v, pk, pv, seqlens, total],
+        )
+        compare_outputs(actual, expected, atol=1e-3)
+
+    def test_gqa_decode_fixed_cache_attention_bias_honors_seqlens(self, model_runner):
+        """An additive bias must not replace GQA's explicit live sequence length.
+
+        The all-zero bias spans the full fixed cache, while seqlens_k marks only
+        the first five slots (four past plus the current token) as live. This
+        distinguishes normal additive-bias semantics from treating every
+        attention_bias as a padding mask that owns the cache length.
+        """
+        batch = 1
+        seq_len = 1
+        cache_size = 16
+        hidden = 256
+        kv_hidden = 128
+        num_heads = 4
+        kv_num_heads = 2
+        head_dim = hidden // num_heads
+        past_valid = 4
+
+        model = _make_gqa_fixed_cache_model(
+            batch,
+            seq_len,
+            cache_size,
+            hidden,
+            kv_hidden,
+            num_heads,
+            kv_num_heads,
+            with_attention_bias=True,
+        )
+
+        rng = np.random.default_rng(42)
+        q = rng.uniform(-1, 1, [batch, seq_len, hidden]).astype(np.float16)
+        k = rng.uniform(-1, 1, [batch, seq_len, kv_hidden]).astype(np.float16)
+        v = rng.uniform(-1, 1, [batch, seq_len, kv_hidden]).astype(np.float16)
+        pk = rng.uniform(
+            -1,
+            1,
+            [batch, kv_num_heads, cache_size, head_dim],
+        ).astype(np.float16)
+        pv = rng.uniform(
+            -1,
+            1,
+            [batch, kv_num_heads, cache_size, head_dim],
+        ).astype(np.float16)
+        seqlens = np.array([past_valid], dtype=np.int32)
+        total = np.array(cache_size, dtype=np.int32)
+        bias = np.zeros([batch, 1, seq_len, cache_size], dtype=np.float16)
+
+        actual, expected = model_runner.run_sample(
+            model,
+            [q, k, v, pk, pv, seqlens, total, bias],
         )
         compare_outputs(actual, expected, atol=1e-3)
 
