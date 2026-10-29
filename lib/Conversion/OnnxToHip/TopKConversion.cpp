@@ -99,12 +99,12 @@ TopKToHip::matchAndRewrite(mlir::Operation *op,
     axis += xType.getRank();
 
   bool largest = true;
-  if (auto largestAttr = op->getAttrOfType<mlir::BoolAttr>("largest"))
-    largest = largestAttr.getValue();
+  if (auto largestAttr = op->getAttrOfType<mlir::IntegerAttr>("largest"))
+    largest = largestAttr.getSInt() != 0;
 
   bool sorted = true;
-  if (auto sortedAttr = op->getAttrOfType<mlir::BoolAttr>("sorted"))
-    sorted = sortedAttr.getValue();
+  if (auto sortedAttr = op->getAttrOfType<mlir::IntegerAttr>("sorted"))
+    sorted = sortedAttr.getSInt() != 0;
 
   // TopK's two results share an IDENTICAL shape; only the element type differs
   // (values inherit x's element type, indices are integer). Some exports drop
