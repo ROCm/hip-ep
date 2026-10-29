@@ -73,6 +73,31 @@ static Type getRocMlirKernelArgumentType(Value operand,
   return type;
 }
 
+// rocMLIR regularizes pointwise fusion in the anchor's iteration space. A
+// pointwise result that grows that space needs inverse transforms for its
+// additional operands. A broadcast is not invertible, except for an inline
+// scalar constant that can be rebuilt in the anchor's shape.
+static bool canFuseGrowingPointwiseOp(Value source, Operation *candidate) {
+  auto sourceType = dyn_cast<RankedTensorType>(source.getType());
+  if (!sourceType || candidate->getNumResults() != 1)
+    return false;
+  auto resultType =
+      dyn_cast<RankedTensorType>(candidate->getResult(0).getType());
+  if (!resultType || resultType.getNumElements() <= sourceType.getNumElements())
+    return true;
+
+  auto candidateDps = dyn_cast<DestinationStyleOpInterface>(candidate);
+  if (!candidateDps)
+    return false;
+  for (Value operand : candidateDps.getDpsInputs()) {
+    if (operand == source || isa<ContextType>(operand.getType()))
+      continue;
+    if (!isInlineScalarConstant(operand))
+      return false;
+  }
+  return true;
+}
+
 template <typename AnchorOp>
 class FuseAnchorPointwise : public OpRewritePattern<AnchorOp> {
 public:
@@ -114,7 +139,9 @@ public:
       }
       ops.insert(endOp);
       prevOp = endOp;
-    } while (endOp->hasOneUse() && isaPointwiseOp(*endOp->user_begin()));
+    } while (
+        endOp->hasOneUse() && isaPointwiseOp(*endOp->user_begin()) &&
+        canFuseGrowingPointwiseOp(endOp->getResult(0), *endOp->user_begin()));
 
     // Remove the hip.context operand
     auto context = operands.front();
