@@ -250,6 +250,10 @@ extern "C" int8_t hipdnn_ep_op_state_construct_matmul_nbits(RuntimeState *state,
 // is orders of magnitude too slow. Instead we dequantize the (constant) int4
 // weight to fp16 once, cache it, and run a Composable Kernel fp16 GEMM for
 // every subsequent prefill call.
+//
+// The CK registry builds only WMMA and DL instances (CK_USE_XDL is off), so on
+// CDNA no instance accepts the shape and this GEMM runs on the reference
+// kernel, as does every other GEMM there.
 // ---------------------------------------------------------------------------
 
 namespace {
