@@ -177,7 +177,8 @@ static int32_t read_shared_mask_seqlens(
       pastCapacity != keyCapacity || (elementSize != 2 && elementSize != 4))
     return kSeqlensKNotRead;
 
-  if (state->attention_mask_seqlens_cached_valid &&
+  const bool cacheEnabled = gqa_cache_seqlens_enabled();
+  if (cacheEnabled && state->attention_mask_seqlens_cached_valid &&
       state->attention_mask_seqlens_cached_ptr == attentionBias &&
       state->attention_mask_seqlens_cached_bias_batch == biasBatch &&
       state->attention_mask_seqlens_cached_bias_heads == biasHeads &&
@@ -206,14 +207,16 @@ static int32_t read_shared_mask_seqlens(
   if (lastValid < 0)
     return kSeqlensKNotRead;
 
-  state->attention_mask_seqlens_cached_valid = true;
-  state->attention_mask_seqlens_cached_val = lastValid;
-  state->attention_mask_seqlens_cached_ptr = attentionBias;
-  state->attention_mask_seqlens_cached_bias_batch = biasBatch;
-  state->attention_mask_seqlens_cached_bias_heads = biasHeads;
-  state->attention_mask_seqlens_cached_query_seq = querySeq;
-  state->attention_mask_seqlens_cached_key_capacity = keyCapacity;
-  state->attention_mask_seqlens_cached_element_size = elementSize;
+  if (cacheEnabled) {
+    state->attention_mask_seqlens_cached_valid = true;
+    state->attention_mask_seqlens_cached_val = lastValid;
+    state->attention_mask_seqlens_cached_ptr = attentionBias;
+    state->attention_mask_seqlens_cached_bias_batch = biasBatch;
+    state->attention_mask_seqlens_cached_bias_heads = biasHeads;
+    state->attention_mask_seqlens_cached_query_seq = querySeq;
+    state->attention_mask_seqlens_cached_key_capacity = keyCapacity;
+    state->attention_mask_seqlens_cached_element_size = elementSize;
+  }
   return lastValid;
 }
 
