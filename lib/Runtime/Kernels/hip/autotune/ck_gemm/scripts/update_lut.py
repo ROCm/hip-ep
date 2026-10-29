@@ -4,7 +4,7 @@
     python update_lut.py extract --logs <HIPDNN_EP_DEBUG logs...> --out shapes/<name>.csv
     ck_gemm_autotune_sweep.exe <shapes.csv> <winners.csv>
     python update_lut.py build --winners <winners.csv>... --rocm-version <n>  # -> lut/<arch>.json
-    python update_lut.py compile --flatc <flatc>             # -> lut/<arch>.fb
+    python update_lut.py compile --arch <arch> --flatc <flatc>  # -> lut/<arch>.fb
 
 extract turns the per-op debug lines into hip_ck_gemm_run's column-major
 arguments using the same operand swap each call site applies, so a shape in the
@@ -211,10 +211,33 @@ def prune(points: dict[tuple, str]) -> dict[tuple, str]:
     return kept_all
 
 
+def winners_arch(path: str) -> str | None:
+    with open(path, newline="") as f:
+        first = f.readline().strip()
+    prefix = "# gpu_arch="
+    return first[len(prefix):] if first.startswith(prefix) else None
+
+
 def cmd_build(args) -> int:
+    archs = {winners_arch(p) for p in args.winners}
+    if None in archs:
+        print("[build] a winners file has no '# gpu_arch=' line; re-run the "
+              "sweep with the current tool", file=sys.stderr)
+        return 1
+    if len(archs) != 1:
+        print(f"[build] winners swept on different GPUs: {sorted(archs)}",
+              file=sys.stderr)
+        return 1
+    swept = archs.pop()
+    if args.arch and args.arch != swept:
+        print(f"[build] --arch {args.arch} but the winners were swept on "
+              f"{swept}", file=sys.stderr)
+        return 1
+    args.arch = swept
     points: dict[tuple, str] = {}
     for path in args.winners:
         with open(path, newline="") as f:
+            f.readline()
             for r in csv.DictReader(f):
                 if not r["instance"] or r["instance"] == "-":
                     continue
@@ -275,7 +298,8 @@ def main() -> int:
     ap.add_argument("--logs", nargs="+", default=[])
     ap.add_argument("--out", default=None)
     ap.add_argument("--winners", nargs="+", default=[])
-    ap.add_argument("--arch", default="gfx1151")
+    ap.add_argument("--arch", default=None,
+                    help="build: defaults to the arch recorded by the sweep")
     ap.add_argument("--flatc", default="flatc")
     ap.add_argument("--rocm-version", type=int)
     ap.add_argument("--model-key", default="")
@@ -290,6 +314,8 @@ def main() -> int:
         if not args.winners or args.rocm_version is None:
             ap.error("build needs --winners and --rocm-version")
         return cmd_build(args)
+    if not args.arch:
+        ap.error("compile needs --arch")
     return cmd_compile(args)
 
 

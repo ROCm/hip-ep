@@ -84,7 +84,6 @@ int main(int argc, char **argv) {
   for (size_t i = 0; i < cols.size(); ++i) {
     col[cols[i]] = i;
   }
-  out << header << ",instance\n";
 
   hipStream_t stream = nullptr;
   if (hipStreamCreate(&stream) != hipSuccess) {
@@ -92,8 +91,15 @@ int main(int argc, char **argv) {
     return 1;
   }
   hipDeviceProp_t props;
-  (void)hipGetDeviceProperties(&props, 0);
-  fprintf(stderr, "#SWEEP arch=%s\n", props.gcnArchName);
+  if (hipGetDeviceProperties(&props, 0) != hipSuccess) {
+    fprintf(stderr, "hipGetDeviceProperties failed\n");
+    return 1;
+  }
+  std::string arch = props.gcnArchName;
+  arch = arch.substr(0, arch.find(':'));
+  fprintf(stderr, "#SWEEP arch=%s\n", arch.c_str());
+  out << "# gpu_arch=" << arch << "\n";
+  out << header << ",instance\n";
 
   std::string line;
   int row = 0;
