@@ -586,7 +586,7 @@ void GemmFp16U4ImplX(
 
     // ks_begin/ks_end let the caller run the K-step's WMMA in two pieces and put
     // the shared-memory store for the *next* tile between them.
-    auto computeWMMA = [&](int buf, int ks_begin, int ks_end)
+    auto computeWMMABody = [&](int buf, int ks_begin, int ks_end)
         __attribute__((always_inline))
     {
 #pragma unroll
@@ -603,6 +603,17 @@ void GemmFp16U4ImplX(
                     acc[wm][wn] = HIPDNN_WMMA_F32_16X16X16_F16(a_frag, b_frag[wn], acc[wm][wn]);
             }
         }
+    };
+    /* The extra inline level is deliberate. With the body called directly, the
+     * scheduler sinks the second PGR 2 step's global loads below that step's
+     * WMMAs and LDS stores, and the next waits stall on them; through this
+     * wrapper the loads stay right after the barrier, as in the configurable
+     * core the entries were tuned with.
+     *   Before: barrier, ds_load, WMMA x16, ds_store, global_load x5
+     *   After:  barrier, ds_load, global_load x5, WMMA x16, ds_store */
+    auto computeWMMA = [&](int buf, int ks_begin, int ks_end) __attribute__((always_inline))
+    {
+        computeWMMABody(buf, ks_begin, ks_end);
     };
 
     /* Interleave pattern for the store-first step: per WMMA, a share of the
