@@ -113,7 +113,10 @@ packed `__half2` path for fp16 rows of even width.
 `b` of shape `[K, N]`, with per-tensor f32 scales and zero points. `hip.qmatmul`
 is a different op, the DequantizeLinear + MatMul + QuantizeLinear fusion, and
 does not accept `QLinearMatMul`. Rank other than 2, f16 or bf16 scales, and
-per-row or per-column quantization, stay `onnx.QLinearMatMul`.
+per-row or per-column quantization, stay `onnx.QLinearMatMul`. With
+`HIPDNN_EP_ROCMLIR=1`, `hip-fuse-rocmlir` moves a `hip.qlinear_matmul` with
+constant parameters and a zero B zero point to a rocMLIR kernel, in the same
+form as `QLinearConv` below.
 
 `QLinearConv` is the native ONNX op: 8-bit activations and weights, grouped 2D
 windows, and an optional int32 bias. Input and output quantization is

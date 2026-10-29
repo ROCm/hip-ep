@@ -6221,6 +6221,40 @@ def Hip_QLinearMatMulOp : Hip_DpsOp_AutoReifyInfer<"qlinear_matmul"> {
   }];
 }
 
+// The integer core of hip.qlinear_matmul, as MIGraphX's quant_dot.
+def Hip_QuantMatmulOp : Hip_DpsOp_AutoReifyInfer<"quant_matmul"> {
+  let summary = "8-bit rank-2 matrix product with an i32 result";
+  let description = [{
+    Computes the integer matrix product
+
+      acc = matmul(a - offset, b)
+
+    with exact i32 accumulation. `a` is [M, K], `b` is [K, N], and `acc` is
+    [M, N]. `offset` is 128 for a ui8 `a` and 0 for an i8 `a`, so
+    `a - offset` is always an i8 value. `b` is i8.
+
+    The op has no zero points or scales. hip-fuse-rocmlir creates it inside
+    a rocMLIR kernel, together with the constant zero-point correction and
+    the requantize epilogue. The op has no lowering outside a rocMLIR
+    kernel.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$a,
+    Hip_TensorOrMemRef:$b,
+    Hip_TensorOrMemRef:$output
+  );
+
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $a `,` $b `:` type($a) `,` type($b) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_QLpNormalizationOp : Hip_DpsOp_AutoReifyInfer<"qlpnormalization"> {
   let summary = "Quantized LpNormalization (L2) with integrated QDQ";
   let description = [{

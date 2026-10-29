@@ -265,6 +265,16 @@ analyzeConvWindow(Operation *op, RankedTensorType inputType,
   return window;
 }
 
+// The zero point of an integer tosa.conv2d or tosa.matmul operand. The
+// zero-point-free builders leave it null for integer types.
+static Value createZeroPoint(ConversionPatternRewriter &rewriter, Location loc,
+                             Type elem) {
+  auto type = RankedTensorType::get({1}, elem);
+  return tosa::ConstOp::create(
+      rewriter, loc, type,
+      DenseElementsAttr::get(type, rewriter.getZeroAttr(elem)));
+}
+
 // hip.conv uses ONNX's channel-first layouts, while TOSA convolution is
 // channel-last. Keep the TOSA op semantically valid by transposing to its
 // canonical layouts and transpose the result back:
@@ -322,23 +332,17 @@ static Value emitChannelLastConv(Value input, Value weights, Value bias,
 
   Value convResult;
   if (isa<IntegerType>(accType)) {
-    // The zero-point-free builder leaves an integer conv's zero points null;
-    // they are 0 here. quant_conv and an i32 conv are always 2D.
     assert(spatialRank == 2 && "integer convolution is 2D");
     Type inElem = cast<RankedTensorType>(input.getType()).getElementType();
     Type wElem = cast<RankedTensorType>(weight.getType()).getElementType();
-    auto zeroPoint = [&](Type elem) -> Value {
-      auto type = RankedTensorType::get({1}, elem);
-      return tosa::ConstOp::create(
-          rewriter, loc, type,
-          DenseElementsAttr::get(type, rewriter.getZeroAttr(elem)));
-    };
-    auto conv = tosa::Conv2DOp::create(
-        rewriter, loc, channelLastType, input, weight, bias, zeroPoint(inElem),
-        zeroPoint(wElem), rewriter.getDenseI64ArrayAttr(tosaPads),
-        rewriter.getDenseI64ArrayAttr(window.strides),
-        rewriter.getDenseI64ArrayAttr(window.dilations),
-        TypeAttr::get(accType));
+    auto conv =
+        tosa::Conv2DOp::create(rewriter, loc, channelLastType, input, weight,
+                               bias, createZeroPoint(rewriter, loc, inElem),
+                               createZeroPoint(rewriter, loc, wElem),
+                               rewriter.getDenseI64ArrayAttr(tosaPads),
+                               rewriter.getDenseI64ArrayAttr(window.strides),
+                               rewriter.getDenseI64ArrayAttr(window.dilations),
+                               TypeAttr::get(accType));
     conv->setAttr("group", rewriter.getI64IntegerAttr(window.group));
     convResult = conv.getResult();
   } else if (spatialRank == 2) {
@@ -443,6 +447,26 @@ struct ConvConverter final : public OpConversionPattern<hip::ConvOp> {
 Value emitTosaCast(ConversionPatternRewriter &rewriter, Location loc,
                    Value input, Type resElemType);
 
+// `value - 128` as i8 for a ui8 tensor, `value` for an i8 tensor. The ui8 path
+// widens through unsigned_cast, which keeps the kernel eligible for
+// makeUnsignedIntegersSignless.
+static Value rebiasToSignedByte(ConversionPatternRewriter &rewriter,
+                                Location loc, Value value) {
+  auto type = cast<RankedTensorType>(value.getType());
+  if (!type.getElementType().isUnsignedInteger(8))
+    return value;
+  auto wideType = type.clone(rewriter.getI32Type());
+  Value wide = emitTosaCast(rewriter, loc, value, rewriter.getI32Type());
+  auto offsetType = RankedTensorType::get(
+      SmallVector<int64_t>(type.getRank(), 1), rewriter.getI32Type());
+  Value offset = tosa::ConstOp::create(
+      rewriter, loc, offsetType,
+      DenseElementsAttr::get(offsetType, rewriter.getI32IntegerAttr(128)));
+  Value shifted = tosa::SubOp::create(rewriter, loc, wideType, wide, offset);
+  return tosa::CastOp::create(rewriter, loc, type.clone(rewriter.getI8Type()),
+                              shifted);
+}
+
 // The integer core of a QLinearConv: i8 x i8 -> i32 with zero points 0, the
 // form MIGraphX gives rocMLIR for quant_convolution. A ui8 input becomes
 // x - 128 as i8 through an unsigned widen, which keeps the kernel eligible for
@@ -495,20 +519,7 @@ struct QuantConvConverter final : public OpConversionPattern<hip::QuantConvOp> {
       return failure();
 
     Location loc = op.getLoc();
-    Value input = adaptor.getInput();
-    if (inputElement.isUnsignedInteger(8)) {
-      auto wideType = inputType.clone(rewriter.getI32Type());
-      Value wide = emitTosaCast(rewriter, loc, input, rewriter.getI32Type());
-      auto offsetType = RankedTensorType::get(
-          SmallVector<int64_t>(inputType.getRank(), 1), rewriter.getI32Type());
-      Value offset = tosa::ConstOp::create(
-          rewriter, loc, offsetType,
-          DenseElementsAttr::get(offsetType, rewriter.getI32IntegerAttr(128)));
-      Value shifted =
-          tosa::SubOp::create(rewriter, loc, wideType, wide, offset);
-      input = tosa::CastOp::create(
-          rewriter, loc, inputType.clone(rewriter.getI8Type()), shifted);
-    }
+    Value input = rebiasToSignedByte(rewriter, loc, adaptor.getInput());
 
     Type accType = rewriter.getI32Type();
     auto biasType = RankedTensorType::get({resultType.getDimSize(1)}, accType);
@@ -518,6 +529,65 @@ struct QuantConvConverter final : public OpConversionPattern<hip::QuantConvOp> {
     rewriter.replaceOp(op, emitChannelLastConv(input, adaptor.getWeights(),
                                                bias, resultType, *window,
                                                accType, rewriter, loc));
+    return success();
+  }
+};
+
+// The integer core of a QLinearMatMul: i8 x i8 -> i32 with zero points 0, the
+// form MIGraphX gives rocMLIR for quant_dot.
+//
+// Before:
+//   %acc = hip.quant_matmul(%ctx) ins(%a, %b : tensor<4x64xui8>,
+//            tensor<64x16xi8>) outs(%e : tensor<4x16xi32>)
+// After:
+//   %aw  = tosa.custom %a {operator_name = "unsigned_cast"} -> i32
+//   %as  = tosa.sub %aw, %c128 : tensor<4x64xi32>
+//   %a8  = tosa.cast %as : tensor<4x64xi8>
+//   %a3  = tosa.reshape %a8 : tensor<1x4x64xi8>
+//   %b3  = tosa.reshape %b : tensor<1x64x16xi8>
+//   %m   = tosa.matmul %a3, %b3, %zp, %zp : tensor<1x4x16xi32>
+//   %acc = tosa.reshape %m : tensor<4x16xi32>
+struct QuantMatmulConverter final
+    : public OpConversionPattern<hip::QuantMatmulOp> {
+  using OpConversionPattern<hip::QuantMatmulOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(hip::QuantMatmulOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (op.getNumResults() != 1)
+      return rewriter.notifyMatchFailure(op, "expected tensor mode");
+
+    auto aType = dyn_cast<RankedTensorType>(adaptor.getA().getType());
+    auto bType = dyn_cast<RankedTensorType>(adaptor.getB().getType());
+    auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    if (!aType || !bType || !resultType || !aType.hasStaticShape() ||
+        !bType.hasStaticShape() || !resultType.hasStaticShape() ||
+        aType.getRank() != 2 || bType.getRank() != 2 ||
+        resultType.getRank() != 2)
+      return rewriter.notifyMatchFailure(
+          op, "expected static rank-2 operands and result");
+    Type aElement = aType.getElementType();
+    if (!(aElement.isUnsignedInteger(8) || aElement.isSignlessInteger(8)) ||
+        !bType.getElementType().isSignlessInteger(8) ||
+        !resultType.getElementType().isSignlessInteger(32))
+      return rewriter.notifyMatchFailure(
+          op, "expected an i8 or ui8 a, an i8 b, and an i32 result");
+    int64_t m = aType.getDimSize(0), k = aType.getDimSize(1);
+    int64_t n = bType.getDimSize(1);
+    if (bType.getDimSize(0) != k || resultType.getDimSize(0) != m ||
+        resultType.getDimSize(1) != n)
+      return rewriter.notifyMatchFailure(op, "shapes disagree");
+
+    Location loc = op.getLoc();
+    Value a = reshapeTo(rebiasToSignedByte(rewriter, loc, adaptor.getA()),
+                        {1, m, k}, rewriter);
+    Value b = reshapeTo(adaptor.getB(), {1, k, n}, rewriter);
+    Value zeroPoint = createZeroPoint(rewriter, loc, rewriter.getI8Type());
+    Value product =
+        tosa::MatMulOp::create(rewriter, loc, resultType.clone({1, m, n}), a, b,
+                               zeroPoint, zeroPoint)
+            .getResult();
+    rewriter.replaceOp(op, reshapeTo(product, resultType.getShape(), rewriter));
     return success();
   }
 };
@@ -8426,9 +8496,10 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
 
     RewritePatternSet patterns(ctx);
     patterns.add<
-        ConvConverter, QuantConvConverter, CausalConvWithStateConverter,
-        MatMulConverter, GemmConverter, TransposeConverter, TileConverter,
-        PadConverter, ResizeConverter, ConstantConverter, ExpandConverter,
+        ConvConverter, QuantConvConverter, QuantMatmulConverter,
+        CausalConvWithStateConverter, MatMulConverter, GemmConverter,
+        TransposeConverter, TileConverter, PadConverter, ResizeConverter,
+        ConstantConverter, ExpandConverter,
         ReshapeConverter<tensor::CollapseShapeOp>,
         ReshapeConverter<tensor::ExpandShapeOp>, ExtractSliceConverter,
         InsertSliceConcatConverter, DivConverter,
