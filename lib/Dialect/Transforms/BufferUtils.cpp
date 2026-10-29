@@ -17,11 +17,16 @@
 
 using namespace mlir;
 
+int64_t mlir::hip::getElementStorageBytes(MemRefType type) {
+  // Round per element, not per buffer: an i1 element takes a whole byte.
+  return static_cast<int64_t>(
+      llvm::divideCeil(type.getElementTypeBitWidth(), 8));
+}
+
 int64_t mlir::hip::getStaticByteSize(MemRefType type) {
   if (!type.hasStaticShape())
     return 0;
-  int64_t totalBits = type.getNumElements() * type.getElementTypeBitWidth();
-  return static_cast<int64_t>(llvm::divideCeil(totalBits, 8));
+  return type.getNumElements() * getElementStorageBytes(type);
 }
 
 Value mlir::hip::emitAlignUp(OpBuilder &builder, Location loc, Value value,
