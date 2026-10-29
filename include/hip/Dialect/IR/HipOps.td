@@ -785,7 +785,7 @@ def Hip_MatmulOp : Hip_DpsOp_WithInfer<"matmul", "Output", [OpStateOpInterface]>
   }];
 
   // OpStateOpInterface: construct this matmul instance's per-session state
-  // (MatmulState), which holds a shared_ptr to the device-wide hipBLASLt algo
+  // (MatmulState), which holds a shared_ptr to the device-wide GEMM routing
   // table. No compile-time params — the table fills lazily per call. The
   // construct fn stores the state into op_states[slot] itself.
   let extraClassDeclaration = [{
@@ -4166,8 +4166,8 @@ def Hip_GqaOp : Hip_DpsOp_AutoReify<"gqa", [AttrSizedOperandSegments, OpStateOpI
     attr-dict (`:` type($result_tensors)^)?
   }];
 
-  // OpStateOpInterface: construct this GQA instance's per-session hipBLASLt
-  // GEMM descriptor/algo cache (GqaState). No compile-time params — the cache
+  // OpStateOpInterface: construct this GQA instance's per-session GEMM
+  // routing cache (GqaState). No compile-time params — the cache
   // fills lazily per GEMM shape. The construct fn stores the state into
   // op_states[slot] itself.
   let extraClassDeclaration = [{
@@ -4434,8 +4434,8 @@ def Hip_MultiHeadAttentionOp : Hip_DpsOp_AutoReify<"multi_head_attention", [Attr
     attr-dict (`:` type($result_tensors)^)?
   }];
 
-  // OpStateOpInterface: construct this MHA instance's per-session hipBLASLt
-  // GEMM descriptor/algo cache (MhaState). No compile-time params — the cache
+  // OpStateOpInterface: construct this MHA instance's per-session GEMM
+  // routing cache (MhaState). No compile-time params — the cache
   // fills lazily per GEMM shape. The construct fn stores the state into
   // op_states[slot] itself.
   let extraClassDeclaration = [{
@@ -4821,7 +4821,7 @@ def Hip_GemmOp : Hip_DpsOp_WithInfer<"gemm", "Output", [OpStateOpInterface]> {
   }];
 
   // OpStateOpInterface: construct this instance's per-session GemmState, which
-  // holds a shared_ptr to the device-wide hipBLASLt algo table shared across
+  // holds a shared_ptr to the device-wide GEMM routing table shared across
   // sessions via WeakStore.
   let extraClassDeclaration = [{
     ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,

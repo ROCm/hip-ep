@@ -67,7 +67,7 @@ bool hipsrPipelineRequested() {
   return !hip_get_env("HIPDNN_EP_HIPSR").empty();
 }
 
-// Offload eligible subgraphs to rocMLIR instead of the hipBLASLt/hipDNN
+// Offload eligible subgraphs to rocMLIR instead of the runtime GEMM / hipDNN
 // library path. Opt-in because it compiles GPU kernels during session
 // creation: a graph with many outlined kernels pays that serially, once per
 // session. hip_env_is_on, not std::getenv -- this code is linked into the
