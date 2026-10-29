@@ -1176,11 +1176,11 @@ static Value emitRequantizeEpilogue(PatternRewriter &rewriter, Location loc,
       .getResult(0);
 }
 
-// With rocMLIR on, a QLinearConv that planQLinearConv accepts becomes the
-// MIGraphX form: an i8 x i8 -> i32 convolution with zero points 0, a constant
-// correction, and an f32 requantize. FuseAnchorPointwise<QuantConvOp> then
-// outlines the chain as one rocMLIR kernel; a quantize whose scale is 1
-// rounds half to even, adds the zero point, and saturates, as ORT does.
+// With rocMLIR on, a QLinearConv that planQLinearConv accepts becomes an
+// i8 x i8 -> i32 convolution with zero points 0, a constant correction, and an
+// f32 requantize. FuseAnchorPointwise<QuantConvOp> then outlines the chain as
+// one rocMLIR kernel; a quantize whose scale is 1 rounds half to even, adds the
+// zero point, and saturates, as ORT does.
 //
 // Before:
 //   %y = hip.qlinear_conv(%ctx) ins(%x, %xs, %xz, %w, %ws, %wz, %ys, %yz, %b)
@@ -1234,7 +1234,7 @@ private:
   FusionPolicy policy;
 };
 
-// The QLinearMatMul form of DecomposeQLinearConv, as MIGraphX's quant_dot.
+// The QLinearMatMul form of DecomposeQLinearConv.
 //
 // Before:
 //   %y = hip.qlinear_matmul(%ctx) ins(%a, %as, %az, %b, %bs, %bz, %ys, %yz)

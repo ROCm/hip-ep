@@ -470,7 +470,7 @@ static Value rebiasToSignedByte(ConversionPatternRewriter &rewriter,
 }
 
 // The integer core of a QLinearConv: i8 x i8 -> i32 with zero points 0, the
-// form MIGraphX gives rocMLIR for quant_convolution. A ui8 input becomes
+// form rocMLIR's quantized convolution takes. A ui8 input becomes
 // x - 128 as i8 through an unsigned widen, which keeps the kernel eligible for
 // makeUnsignedIntegersSignless. TOSA then pads that value with 0, which
 // matches the op's padding.
@@ -536,7 +536,7 @@ struct QuantConvConverter final : public OpConversionPattern<hip::QuantConvOp> {
 };
 
 // The integer core of a QLinearMatMul: i8 x i8 -> i32 with zero points 0, the
-// form MIGraphX gives rocMLIR for quant_dot.
+// form rocMLIR's quantized gemm takes.
 //
 // Before:
 //   %acc = hip.quant_matmul(%ctx) ins(%a, %b : tensor<4x64xui8>,
