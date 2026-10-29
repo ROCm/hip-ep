@@ -20,7 +20,10 @@
 // ORDER-DAG: memref.global "private" @hip_ext_constant_1{{.*}}hip.external_data = {index = 1 : i64, offset = 64 : i64, size = 4 : i64}
 // ORDER-DAG: memref.global "private" @hip_ext_constant_sample_plugin_weight_2{{.*}}hip.external_data = {index = 2 : i64, offset = 128 : i64, size = 8 : i64}
 
-// LATE: error: hip.constant survived past hip-externalize-constants
+// `hip-externalize-constants` runs before BeforeBufferization, so plugins
+// cannot introduce `hip.constant` at that slot. ONNX plugins must use
+// AfterConvertOnnxToHip.
+// LATE: error: hip.constant was introduced after hip-externalize-constants
 
 //--- ordered.mlir
 module {

@@ -89,7 +89,8 @@ see [below](#passes-that-are-not-individually-nameable)). Prefer, in order:
 
 | Name | Options | What it builds |
 |---|---|---|
-| `onnx-to-hip-pipeline` | `externalize-output-dir`, `externalize-min-num-elements`, `skip-constant-data` | ONNX dialect → fully bufferized, pooled HIP memref IR with resolved extern constants. |
+| `hip-tensor-to-bufferized-pipeline` | `externalize-output-dir`, `externalize-min-num-elements`, `skip-constant-data` | Tensor-form HIP IR (with `!hip.context`, graph metadata and `hip.constant` carriers) → fully bufferized, pooled HIP memref IR with resolved extern constants. Source-neutral: any frontend that produces tensor-form HIP IR can run it. |
+| `onnx-to-hip-pipeline` | `externalize-output-dir`, `externalize-min-num-elements`, `skip-constant-data` | ONNX dialect → fully bufferized, pooled HIP memref IR with resolved extern constants: the ONNX head (through `convert-onnx-to-hip`) followed by `hip-tensor-to-bufferized-pipeline`. |
 | `hip-to-llvm-pipeline` | `constants-file` | HIP memref IR → LLVM dialect + the C-ABI interface (`inference_init/compute/cleanup`, metadata). |
 | `hipdnn-pipeline` | `constants-file`, `constants-dir`, `externalize-min-num-elements` | The full ONNX→HIP→LLVM→interface flow (chains the two above). |
 | `rocmlir-pipeline` | — | Prepare HIP tensor IR for rocMLIR kernel offload: split `hip.conv_transpose` into plain convolutions, outline the rocMLIR-eligible ops into `rock.kernel` funcs, then lower those bodies to TOSA. Not part of the default compile — `hip-rocmlir-compiler` runs it. |
@@ -217,7 +218,7 @@ override (so a hand-listed pipeline omitting them will trip the
 | `compile-hipdnn-graphs` | Requires a live runtime handle. Only present on the handle-bearing pipeline overload. |
 | `expand-strided-metadata` | MLIR utility pass added directly inside `hip-to-llvm-pipeline`. |
 | `lower-affine` | Added directly before buffer-reuse normalization in `onnx-to-hip-pipeline`, and after strided-metadata expansion in `hip-to-llvm-pipeline`. |
-| `convert-linalg-to-loops` | Added directly inside the ONNX→HIP tail. |
+| `convert-linalg-to-loops` | Added directly inside `hip-tensor-to-bufferized-pipeline`. |
 
 ---
 
@@ -238,6 +239,7 @@ ONNX → HIP  (buildOnnxToHipPipeline)
   [outline-onnx-to-hipdnn + compile-hipdnn-graphs]   (handle overload only)
   convert-onnx-to-hip
   «slot: AfterConvertOnnxToHip»  (supported hip.constant producer boundary)
+  ── hip-tensor-to-bufferized-pipeline (buildHipTensorToBufferizedPipeline) ──
   hip-infer-shapes
   hip-fusion-transform               (must precede externalization: its patterns
                                       read hip.constant payloads)

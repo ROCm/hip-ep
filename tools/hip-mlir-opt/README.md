@@ -60,6 +60,8 @@ hip-mlir-opt after_onnx_to_hip.mlir --convert-hip-to-llvm > after_hip_to_llvm.ml
 
 ## Pipelines
 
+- `--hip-tensor-to-bufferized-pipeline` - Lower tensor-form HIP IR to
+  bufferized, pooled HIP memref IR
 - `--onnx-to-hip-pipeline` - Lower ONNX IR to bufferized HIP memref IR
 - `--hip-to-llvm-pipeline` - Lower HIP memref IR to LLVM dialect and generate C interface
 

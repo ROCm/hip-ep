@@ -394,15 +394,16 @@ bool CompilerDriver::runMLIRPasses(
     COMPILER_DEBUG_LOG("[CompilerDriver] HIPDNN_EP_HIPSR set\n");
   } else if (rocMlirPipelineRequested()) {
 #ifdef ENABLE_ROCMLIRTRITON
-    // rocMLIR sits between the ONNX->HIP head and its tail: fuse-rocmlir
-    // needs tensor-level HIP IR, and each kernel's compiled binary has to be
-    // embedded in its hip.rocmlir dispatch before the tail bufferizes that op
-    // like any other DPS op. Embedding is not a pass, so the head runs here
-    // on its own rather than through `pm`, which then carries the tail.
+    // rocMLIR sits between the ONNX->HIP head and the tensor-to-bufferized
+    // pipeline: fuse-rocmlir needs tensor-level HIP IR, and each kernel's
+    // compiled binary has to be embedded in its hip.rocmlir dispatch before
+    // that pipeline bufferizes the op like any other DPS op. Embedding is not
+    // a pass, so the head runs here on its own rather than through `pm`, which
+    // then carries the tensor-to-bufferized and HIP-to-LLVM pipelines.
     //
     // Consequence worth knowing: HIPDNN_EP_IR_DUMP_PATH is attached to `pm`
-    // below, so it captures the tail only. The head and the outlining are not
-    // in that dump.
+    // below, so it captures only what follows the head. The head and the
+    // outlining are not in that dump.
     mlir::hip::registerRocMlirDialects(*module.getContext());
 
     {
@@ -478,11 +479,11 @@ bool CompilerDriver::runMLIRPasses(
       return false;
     }
 
-    mlir::hip::OnnxToHipPipelineOptions tailOpts;
-    tailOpts.externalizeMinNumElements =
+    mlir::hip::HipTensorToBufferizedPipelineOptions tensorOpts;
+    tensorOpts.externalizeMinNumElements =
         mlir::hip::kDefaultExternalizeMinNumElements;
-    tailOpts.skipConstantData = options.skip_constant_data;
-    mlir::hip::buildOnnxToHipPipelineTail(pm, tailOpts, fileSystem_);
+    tensorOpts.skipConstantData = options.skip_constant_data;
+    mlir::hip::buildHipTensorToBufferizedPipeline(pm, tensorOpts, fileSystem_);
 
     mlir::hip::HipToLLVMPipelineOptions rocMlirLlvmOpts;
     rocMlirLlvmOpts.constantsFile = options.constants_file;

@@ -87,9 +87,11 @@ struct VerifyNoConstantCarriersPass
   void runOnOperation() override {
     bool found = false;
     getOperation().walk([&](mlir::hip::ConstantOp op) {
-      op.emitError("hip.constant survived past hip-externalize-constants; "
-                   "plugins must emit carriers at AfterConvertOnnxToHip, not "
-                   "at BeforeBufferization");
+      op.emitError("hip.constant was introduced after "
+                   "hip-externalize-constants; create constants before the "
+                   "tensor-to-bufferized pipeline (in the frontend, or at the "
+                   "AfterConvertOnnxToHip plugin slot), not at "
+                   "BeforeBufferization");
       found = true;
     });
     if (found)
@@ -103,15 +105,15 @@ std::unique_ptr<Pass> createVerifyNoConstantCarriersPass() {
 
 } // namespace
 
-/// Common tail of the ONNX-to-HIP pipeline after the OnnxToHip pass.
+/// Source-neutral pipeline from tensor-form HIP IR to bufferized HIP IR.
 ///
 /// Graph outputs use the output-allocator ABI: `hip-use-output-allocator` runs
 /// at slot 4.5, rewriting each returned `memref.alloc` into `hip.alloc_output`
 /// (allocated in-graph at runtime via the EP's output-allocator callback).
 /// It must run before pool-allocs (slot 6); the reason is at that slot. See
 /// docs/design/output-allocator-design.md.
-void mlir::hip::buildOnnxToHipPipelineTail(
-    OpPassManager &pm, const mlir::hip::OnnxToHipPipelineOptions &options,
+void mlir::hip::buildHipTensorToBufferizedPipeline(
+    OpPassManager &pm, const HipTensorToBufferizedPipelineOptions &options,
     morphizen::FileSystem *fs) {
   // 1b. Refine `?` (kDynamic) dims on HIP DPS op result types using each
   //     op's `ReifyRankedShapedTypeOpInterface` impl. Placed here so the
@@ -428,7 +430,7 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
                                        const OnnxToHipPipelineOptions &options,
                                        morphizen::FileSystem *fs) {
   buildOnnxToHipPipelineHead(pm);
-  buildOnnxToHipPipelineTail(pm, options, fs);
+  buildHipTensorToBufferizedPipeline(pm, options, fs);
 }
 
 void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
@@ -437,7 +439,7 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
                                        hipdnnHandle_t handle,
                                        CompiledGraphMap output_graphs) {
   buildOnnxToHipPipelineHead(pm, handle, std::move(output_graphs));
-  buildOnnxToHipPipelineTail(pm, options, fs);
+  buildHipTensorToBufferizedPipeline(pm, options, fs);
 }
 
 void mlir::hip::buildHipToLLVMPipeline(
@@ -532,6 +534,13 @@ void mlir::hip::buildRocMlirPipeline(
 }
 
 void mlir::hip::registerHipPipelines() {
+  PassPipelineRegistration<HipTensorToBufferizedPipelineOptions>(
+      "hip-tensor-to-bufferized-pipeline",
+      "Lower tensor-form HIP IR to bufferized, pooled HIP memref IR",
+      [](OpPassManager &pm, const HipTensorToBufferizedPipelineOptions &opts) {
+        buildHipTensorToBufferizedPipeline(pm, opts);
+      });
+
   PassPipelineRegistration<OnnxToHipPipelineOptions>(
       "onnx-to-hip-pipeline",
       "Lower ONNX IR to bufferized HIP memref IR with optional constant "

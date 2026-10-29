@@ -82,14 +82,14 @@ enum class PipelineSlot {
   /// After `ConvertOnnxToHipPass` in `buildOnnxToHipPipeline`. The
   /// most common slot for vendor lowerings of `onnx.Custom` ops.
   AfterConvertOnnxToHip,
-  /// In `buildOnnxToHipPipelineTail`, before bufferization.
+  /// In `buildHipTensorToBufferizedPipeline`, before bufferization.
   BeforeBufferization,
-  /// In `buildOnnxToHipPipelineTail`, after pool allocation.
+  /// In `buildHipTensorToBufferizedPipeline`, after pool allocation.
   AfterPoolAllocs,
-  /// In `buildOnnxToHipPipelineTail`, before the final HIP→LLVM
+  /// In `buildHipToLLVMPipeline`, before the final HIP→LLVM
   /// conversion.
   BeforeConvertHipToLLVM,
-  /// In `buildOnnxToHipPipelineTail`, after `GenerateInterfacePass`.
+  /// In `buildHipToLLVMPipeline`, after `GenerateInterfacePass`.
   AfterGenerateInterface,
 };
 
