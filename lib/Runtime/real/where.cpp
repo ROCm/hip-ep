@@ -4,9 +4,11 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../op_profile.h"
 #include "hip_custom_kernels.h"
 
 #include <cstdio>
+#include <string>
 
 // Map HIPDNN_EP_DATATYPE_* to hip_dtype_t (X/Y element type for Where).
 // The condition tensor is always 1-byte bool; only the X/Y dtype is needed
@@ -33,6 +35,18 @@ int wrap_where(RuntimeState *state, void *condition, void *x, void *y,
                const int64_t *x_shape, int64_t x_rank, const int64_t *y_shape,
                int64_t y_rank, const int64_t *out_shape, int64_t out_rank,
                int64_t data_type) {
+  OP_PROFILE(
+      "where",
+      [&] {
+        int64_t n = 1;
+        for (int64_t i = 0; i < out_rank; ++i)
+          n *= out_shape[i];
+        char b[64];
+        snprintf(b, sizeof(b), "n=%lld:c%lld", (long long)n,
+                 (long long)cond_rank);
+        return std::string(b);
+      },
+      state);
   if (!state || !condition || !x || !y || !output) {
     fprintf(stderr, "wrap_where: null tensor argument\n");
     return -1;
