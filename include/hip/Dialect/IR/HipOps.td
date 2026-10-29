@@ -6135,6 +6135,46 @@ def Hip_QLinearConvOp : Hip_DpsOp_AutoReifyInfer<"qlinear_conv"> {
   }];
 }
 
+// The integer core of hip.qlinear_conv, as MIGraphX's quant_convolution.
+def Hip_QuantConvOp : Hip_DpsOp_AutoReifyInfer<"quant_conv"> {
+  let summary = "8-bit grouped 2D convolution with an i32 result";
+  let description = [{
+    Computes the integer convolution
+
+      acc = conv(x - offset, w)
+
+    with exact i32 accumulation. `offset` is 128 for a ui8 input and 0 for an
+    i8 input, so `x - offset` is always an i8 value. Padding contributes 0
+    to the sum. The weights are i8.
+
+    The op has no zero points, scales, or bias. hip-fuse-rocmlir creates it
+    inside a rocMLIR kernel, together with the constant zero-point correction
+    and the requantize epilogue. The op has no lowering outside a rocMLIR
+    kernel.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$weights,
+    Hip_TensorOrMemRef:$output,
+    I64ArrayAttr:$kernel_shape,
+    I64ArrayAttr:$strides,
+    I64ArrayAttr:$pads,
+    I64ArrayAttr:$dilations,
+    I64Attr:$group
+  );
+
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `,` $weights `:`
+        type($input) `,` type($weights) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 // Native onnx.QLinearMatMul. Distinct from hip.qmatmul, which fuses
 // DequantizeLinear + MatMul + QuantizeLinear.
 def Hip_QLinearMatMulOp : Hip_DpsOp_AutoReifyInfer<"qlinear_matmul"> {
