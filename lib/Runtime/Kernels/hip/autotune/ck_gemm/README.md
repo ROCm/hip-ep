@@ -32,6 +32,7 @@ The resolver ranks in float32 and the script in float64, so a rival point with a
 `shapes/survey.csv` and the winners CSV keep every shape; only `lut/<arch>.json` / `.fb` are pruned. `--keep-all` skips pruning.
 
 For `lut/gfx1151`: 993 measured shapes, 352 kept, 9,944 bytes (25,328 unpruned).
+For `lut/gfx1171`: 993 measured shapes, 301 kept, 8,712 bytes (25,244 unpruned).
 
 ## Files
 
@@ -77,6 +78,8 @@ python scripts/update_lut.py compile --arch gfx1151 --flatc <build>/bin/flatc.ex
 ```
 
 The sweep writes the device it ran on as the first line of `winners.csv` (`# gpu_arch=gfx1151`). `build` names the table after it and refuses a mismatching `--arch` or winners from different GPUs. Exit code `-1073741515` (`0xC0000135`) from the sweep means a DLL is missing from `PATH`. A `custom_kernels_*.dll` next to an executable wins over `PATH`, so do not leave a copy from an earlier build there.
+
+The HIP runtime must come from `<rocm>` too, and `PATH` is not enough for that: Windows searches `System32` first, where the display driver installs its own `amdhip64_7.dll`. That runtime may not accept `gfx11-7-generic` code objects (`AMD_LOG_LEVEL=1` prints `No compatible code objects found for: gfx1171`), so every instance is refused and every winner is `-`. Copy `amdhip64_7.dll`, `amd_comgr*.dll` and `hiprtc*.dll` from `<rocm>/bin` next to `ck_gemm_sweep.exe`.
 
 `--rocm-version` is the SDK version in the `therock_windows` tarball name in `cmake/deps.txt` as `major*10000 + minor*100 + patch` (7.16.0 is `71600`). It is a record only; the loader checks `kernel_abi` and `gpu_arch`. `--model-key` records the CI builds or models the shapes came from.
 
