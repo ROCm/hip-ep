@@ -188,6 +188,9 @@ static constexpr int kFlashDecodeMaxSplits = 64;
 static inline bool flash_decode_geometry_ok(int64_t H, int64_t G, int64_t d) {
   if (G <= 0)
     return false;
+  // Absorbed multi-head latent attention (gqa_flash_decode_wide_kernel).
+  if (d == 320 && H == 32 * G)
+    return true;
   if (d != 64 && d != 96 && d != 128 && d != 256)
     return false;
   int64_t hpg = H / G;
@@ -568,8 +571,8 @@ static int gqa_forward_fused(
     if (!flash_decode_geometry_ok(H, G, d)) {
       fprintf(stderr,
               "gqa_forward_fused (decode): unsupported geometry H=%lld G=%lld "
-              "d=%lld (HpG must be 1/2/3/4/5/6/8/16 and d 64/96/128/256, or "
-              "HpG 9 at d 128)\n",
+              "d=%lld (HpG must be 1/2/3/4/5/6/8/16 and d 64/96/128/256, "
+              "HpG 9 at d 128, or HpG 32 at d 320)\n",
               (long long)H, (long long)G, (long long)d);
       return -1;
     }
@@ -673,6 +676,14 @@ static int gqa_forward_fused(
     {
       char *ws = static_cast<char *>(hipdnn_ep_state_get_workspace(state));
       void *partials = ws + off_partials;
+      // One tensor feeding both key and value (absorbed latent attention)
+      // fills both caches with the same rows, so decode can read V from the
+      // K cache; the kernels take Vcache == Kcache as that signal. Rope or a
+      // quantized cache would make the two caches differ.
+      const void *decode_v_cache =
+          (key != nullptr && key == value && !need_rope && !kv_quantized)
+              ? present_key
+              : present_value;
       // Decode is bandwidth-bound: a quantized cache is read directly (e.g.
       // int8 halves the DRAM traffic). One entry serves every format --
       // kv_dtype selects the code path inside the kernel; scales feed dequant.
@@ -698,7 +709,7 @@ static int gqa_forward_fused(
                           static_cast<int>(key_bias != nullptr));
       } else if (online_tune) {
         drc = hip_gqa_flash_decode(
-            stream, qSrc, present_key, present_value, output, partials,
+            stream, qSrc, present_key, decode_v_cache, output, partials,
             static_cast<int>(B), static_cast<int>(H), static_cast<int>(G),
             static_cast<int>(d), static_cast<int>(skv),
             static_cast<int>(present_seq), kFlashDecodeMaxSplits, scale,
@@ -728,7 +739,7 @@ static int gqa_forward_fused(
         hip_gqa_autotune_resolve_decode(state->gqa_autotune_policy, &request,
                                         &selected);
         drc = hip_gqa_flash_decode_configured(
-            stream, qSrc, present_key, present_value, output, partials,
+            stream, qSrc, present_key, decode_v_cache, output, partials,
             static_cast<int>(B), static_cast<int>(H), static_cast<int>(G),
             static_cast<int>(d), effective_skv, static_cast<int>(present_seq),
             kFlashDecodeMaxSplits, scale, seqlens_k_ptr,
