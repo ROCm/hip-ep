@@ -150,6 +150,15 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
   add_kernel_package_ut(${_arch}
     hipdnn-kernel-ut-gather-block-quantized-xi64-wfp8-yfp16
     gather_block_quantized/Xi64_Wfp8_Yfp16/test_gather_block_quantized_fp8.cpp)
+  add_kernel_package_ut(${_arch}
+    hipdnn-kernel-ut-gemm-xfp16-wfp16-yfp16
+    gemm/Xfp16_Wfp16_Yfp16/test_gemm.cpp)
+  add_kernel_package_ut(${_arch}
+    hipdnn-kernel-ut-gemm-xfp16-wfp16-yfp32
+    gemm/Xfp16_Wfp16_Yfp32/test_gemm.cpp)
+  add_kernel_package_ut(${_arch}
+    hipdnn-kernel-ut-gemm-xfp32-wfp32-yfp32
+    gemm/Xfp32_Wfp32_Yfp32/test_gemm.cpp)
 endforeach()
 
 # One package-facing entry point finds the live GPU arch, invokes every leaf

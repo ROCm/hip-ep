@@ -37,6 +37,7 @@ endif
 # Keep in sync with unit_test/CMakeLists.txt and kernel_ut_main.cpp.
 LEAVES := gather_block_quantized/Xi64_Wfp8_Yfp16 \
 	gather_block_quantized/Xi64_Wu4_Yfp16 gather_block_quantized/Xi64_Wu8_Yfp16 \
+	gemm/Xfp16_Wfp16_Yfp16 gemm/Xfp16_Wfp16_Yfp32 gemm/Xfp32_Wfp32_Yfp32 \
 	gqa/decode/Xfp16_Wfp16_Yfp16 gqa/decode/Xfp16_Wi8_Yfp16 \
 	gqa/prefill/Xfp16_Wfp16_Yfp16 gqa/prefill/Xfp16_Wi8_Yfp16 \
 	matmul_nbits/Xfp16_Wu2_Yfp16 matmul_nbits/Xfp16_Wu3_Yfp16 \
