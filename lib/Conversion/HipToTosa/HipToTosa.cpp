@@ -447,9 +447,9 @@ struct ConvConverter final : public OpConversionPattern<hip::ConvOp> {
 Value emitTosaCast(ConversionPatternRewriter &rewriter, Location loc,
                    Value input, Type resElemType);
 
-// `value - 128` as i8 for a ui8 tensor, `value` for an i8 tensor. The ui8 path
-// widens through unsigned_cast, which keeps the kernel eligible for
-// makeUnsignedIntegersSignless.
+// `value - getSignedRebiasOffset(ui8)` as i8 for a ui8 tensor, `value` for an
+// i8 tensor. The ui8 path widens through unsigned_cast, which keeps the kernel
+// eligible for makeUnsignedIntegersSignless.
 static Value rebiasToSignedByte(ConversionPatternRewriter &rewriter,
                                 Location loc, Value value) {
   auto type = cast<RankedTensorType>(value.getType());
@@ -461,7 +461,9 @@ static Value rebiasToSignedByte(ConversionPatternRewriter &rewriter,
       SmallVector<int64_t>(type.getRank(), 1), rewriter.getI32Type());
   Value offset = tosa::ConstOp::create(
       rewriter, loc, offsetType,
-      DenseElementsAttr::get(offsetType, rewriter.getI32IntegerAttr(128)));
+      DenseElementsAttr::get(
+          offsetType, rewriter.getI32IntegerAttr(
+                          getSignedRebiasOffset(type.getElementType()))));
   Value shifted = tosa::SubOp::create(rewriter, loc, wideType, wide, offset);
   return tosa::CastOp::create(rewriter, loc, type.clone(rewriter.getI8Type()),
                               shifted);
@@ -8626,6 +8628,14 @@ bool isTosaLowerableQdq(Operation *op) {
   };
   return isScalarOrPerAxis(scale) &&
          (!zeroPoint || isScalarOrPerAxis(zeroPoint));
+}
+
+int64_t getSignedRebiasOffset(Type elementType) {
+  auto intType = dyn_cast<IntegerType>(elementType);
+  if (!intType || !intType.isUnsigned())
+    return 0;
+  assert(intType.getWidth() < 64 && "offset must fit in int64_t");
+  return int64_t{1} << (intType.getWidth() - 1);
 }
 
 } // namespace mlir::hip

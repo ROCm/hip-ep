@@ -34,6 +34,11 @@ bool isTosaLowerableExpand(ExpandOp op);
 // hip.dequantize_linear. False for any other op.
 bool isTosaLowerableQdq(Operation *op);
 
+// The offset that maps an unsigned integer onto the signed integer of the
+// same width, x - offset: 2^(width - 1). 0 for a signless or signed integer,
+// which the integer conv and matmul kernels take as is.
+int64_t getSignedRebiasOffset(Type elementType);
+
 } // namespace mlir::hip
 
 #endif // HIP_CONVERSION_HIPTOTOSA_HIPTOTOSALEGALITY_H

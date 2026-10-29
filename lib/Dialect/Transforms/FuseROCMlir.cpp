@@ -886,7 +886,8 @@ static bool isQuantizedByte(Type type) {
 static constexpr int64_t kMaxQLinearConvCorrection = int64_t{1} << 22;
 
 // The constants that turn a hip.qlinear_conv into hip.quant_conv and an
-// epilogue. With z' = x_zp - offset (offset is 128 for a ui8 input, else 0):
+// epilogue. With z' = x_zp - offset (offset is getSignedRebiasOffset of the
+// input type: 128 for ui8, 0 for i8):
 //
 //   conv(x - x_zp, w) = conv(x - offset, w) - z' * sum(w over the taps that
 //                       read the input, not the padding)
@@ -997,7 +998,7 @@ static std::optional<QLinearPlan> planQLinearConv(QLinearConvOp op) {
   int64_t padTop = attrValue(op.getPads(), 0);
   int64_t padLeft = attrValue(op.getPads(), 1);
 
-  int64_t offset = inputElement.isUnsignedInteger() ? 128 : 0;
+  int64_t offset = getSignedRebiasOffset(inputElement);
   int64_t zpShift = getIntValues(inputZp).front() - offset;
 
   // The taps along one axis that read the input at output position `o`; a
@@ -1102,7 +1103,7 @@ static std::optional<QLinearPlan> planQLinearMatMul(QLinearMatMulOp op) {
     return std::nullopt;
 
   int64_t n = bType.getDimSize(1);
-  int64_t offset = aElement.isUnsignedInteger() ? 128 : 0;
+  int64_t offset = getSignedRebiasOffset(aElement);
   int64_t zpShift = getIntValues(aZp).front() - offset;
 
   QLinearPlan plan;
