@@ -4,8 +4,8 @@
  */
 //===- SkipNormCastFold.cpp - Fold Casts around SkipSimplifiedLayerNorm ---===//
 //
-// Pre-lowering pattern for fp16 models whose residual stream is kept in fp32
-// (gpt-oss): every SkipSimplifiedLayerNormalization is wrapped as
+// Pre-lowering pattern for fp16 models whose residual stream is kept in fp32,
+// where every SkipSimplifiedLayerNormalization is wrapped as
 //
 //   %s  = onnx.Cast(%skip16)  : f16 -> f32
 //   %g  = onnx.Cast(%gamma16) : f16 -> f32

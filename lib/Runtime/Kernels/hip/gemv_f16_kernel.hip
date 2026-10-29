@@ -87,6 +87,7 @@ extern "C" int hip_gemv_f16_kn(void* stream, const void* a, const void* B,
   const auto* pa = static_cast<const __half*>(a);
   const auto* pB = static_cast<const __half*>(B);
   auto* po = static_cast<__half*>(out);
+  (void)hipGetLastError();
   if (N <= 32)
     launch_gemv_f16_kn<1>(s, pa, pB, po, K, N);
   else if (N <= 128)

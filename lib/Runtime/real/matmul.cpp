@@ -490,8 +490,9 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
   // faster on the GPU; from N=1024 hipBLASLt's kernels match it, and K above
   // 8192 is unmeasured. With M=1 the activation is K contiguous elements
   // whatever transA says.
-  if (elem_size == 2 && M == 1 && batch_count == 1 && !transB && N <= 512 &&
-      K <= 8192 && N % 8 == 0 && reinterpret_cast<uintptr_t>(B) % 16 == 0) {
+  if (elem_size == 2 && M == 1 && batch_count == 1 && !transB && N > 0 &&
+      N <= 512 && K > 0 && K <= 8192 && N % 8 == 0 &&
+      reinterpret_cast<uintptr_t>(B) % 16 == 0) {
     RUNTIME_DEBUG_LOG("[REAL] wrap_hipblasLtMatmul: GEMV N=%lld K=%lld\n",
                       (long long)N, (long long)K);
     return hip_gemv_f16_kn(stream, A, B, output, K, N) == 0 ? 0 : -1;

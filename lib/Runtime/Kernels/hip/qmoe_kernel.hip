@@ -475,8 +475,10 @@ extern "C" int hip_qmoe_topk_routing(
     return -1;
   }
   (void)hipGetLastError();
-  if (num_experts <= 256 && k <= kMaxK) {
-    // One 32-lane group per token, up to 8 experts per lane.
+  if (num_experts <= 256 && k <= kMaxK && k <= num_experts) {
+    // One 32-lane group per token, up to 8 experts per lane. With
+    // k > num_experts the argmax would pick padding lanes, whose indices lie
+    // past num_experts; the block kernel keeps every index in range.
     const auto* probs = static_cast<const __half*>(router_probs);
     const auto* rw = static_cast<const __half*>(router_weights);
     auto* idx = static_cast<int32_t*>(expert_indices);
