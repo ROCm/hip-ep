@@ -332,6 +332,67 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x4x4x8xf32>,
 
 // -----
 
+// rocMLIR cannot load an i64 tensor, so a cast from i64 stays outside and the
+// kernel takes its f32 result.
+
+// CHECK-LABEL: func.func @rocMlir
+// CHECK-SAME: (%{{[a-z0-9]+}}: tensor<4x8xf32>, %{{[a-z0-9]+}}: tensor<8x16xf32>)
+// CHECK-NOT: hip.cast
+// CHECK: hip.matmul
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK: %[[CAST:.*]] = hip.cast({{.*}}) ins(%{{.*}} : tensor<4x8xi64>)
+// CHECK: hip.rocmlir({{.*}}) @rocMlir{{[0-9]*}} ins(%[[CAST]],
+func.func @main_graph(%ctx: !hip.context, %x: tensor<4x8xi64>,
+                      %w: tensor<8x16xf32>) -> tensor<4x16xf32> {
+  %fe = tensor.empty() : tensor<4x8xf32>
+  %f = hip.cast(%ctx) ins(%x : tensor<4x8xi64>)
+      outs(%fe : tensor<4x8xf32>) {to = 1 : i64} : tensor<4x8xf32>
+  %e = tensor.empty() : tensor<4x16xf32>
+  %m = hip.matmul(%ctx) ins(%f, %w : tensor<4x8xf32>, tensor<8x16xf32>)
+      outs(%e : tensor<4x16xf32>) : tensor<4x16xf32>
+  return %m : tensor<4x16xf32>
+}
+
+// -----
+
+// Nor can it store one: a cast to i64 ends the forward chain.
+
+// CHECK-LABEL: func.func @rocMlir
+// CHECK-SAME: -> tensor<4x16xf32>
+// CHECK-NOT: hip.cast
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK: %[[K:.*]] = hip.rocmlir
+// CHECK: hip.cast({{.*}}) ins(%[[K]] : tensor<4x16xf32>)
+func.func @main_graph(%ctx: !hip.context, %x: tensor<4x8xf32>,
+                      %w: tensor<8x16xf32>) -> tensor<4x16xi64> {
+  %e = tensor.empty() : tensor<4x16xf32>
+  %m = hip.matmul(%ctx) ins(%x, %w : tensor<4x8xf32>, tensor<8x16xf32>)
+      outs(%e : tensor<4x16xf32>) : tensor<4x16xf32>
+  %ie = tensor.empty() : tensor<4x16xi64>
+  %i = hip.cast(%ctx) ins(%m : tensor<4x16xf32>)
+      outs(%ie : tensor<4x16xi64>) {to = 7 : i64} : tensor<4x16xi64>
+  return %i : tensor<4x16xi64>
+}
+
+// -----
+
+// An anchor that reads an i64 tensor itself does not become a kernel.
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.matmul
+func.func @main_graph(%ctx: !hip.context, %x: tensor<4x8xi64>,
+                      %w: tensor<8x16xi64>) -> tensor<4x16xi64> {
+  %e = tensor.empty() : tensor<4x16xi64>
+  %m = hip.matmul(%ctx) ins(%x, %w : tensor<4x8xi64>, tensor<8x16xi64>)
+      outs(%e : tensor<4x16xi64>) : tensor<4x16xi64>
+  return %m : tensor<4x16xi64>
+}
+
+// -----
+
 // A transpose with a reader outside the kernel would keep running for that
 // reader, so absorbing it saves nothing. It stays outside, and so does the
 // cast that feeds it.

@@ -65,6 +65,17 @@ static bool isStaticTensor(Value v) {
   return type && type.hasStaticShape();
 }
 
+// rock.blockwise_load and rock.blockwise_store take integers of at most 32
+// bits, so a wider integer tensor cannot be a kernel argument or result.
+static constexpr unsigned kMaxKernelIntegerWidth = 32;
+
+static bool isKernelIOType(Type type) {
+  auto intType = dyn_cast<IntegerType>(getElementTypeOrSelf(type));
+  return !intType || intType.getWidth() <= kMaxKernelIntegerWidth;
+}
+
+static bool isKernelIOValue(Value v) { return isKernelIOType(v.getType()); }
+
 // Elementwise ops HipToTosa lowers to TOSA elementwise ops, which rocMLIR
 // fuses into the anchor's epilogue or prologue.
 static bool isFusablePointwise(Operation *op) {
@@ -309,6 +320,12 @@ KernelRegion::nextOnChain(const SetVector<Operation *> &chain) const {
     return nullptr;
   Value value = tail->getResult(0);
   auto canTake = [&](Operation *user) {
+    auto loadable = [&](Value v) {
+      return isKernelIOValue(v) || isInlineScalarConstant(v) ||
+             chain.contains(v.getDefiningOp());
+    };
+    if (!llvm::all_of(user->getOperands(), loadable))
+      return false;
     return (policy.allowsEpilogue(user) && keepsChainShape(user, value)) ||
            policy.allowsForwardView(user);
   };
@@ -362,8 +379,11 @@ void KernelRegion::growForward() {
       chain.pop_back();
   }
   // A view outside the kernel is free, and one with no init cannot supply the
-  // dispatch's outs.
-  while (!isa<DestinationStyleOpInterface>(chain.back()))
+  // dispatch's outs. The end's result is stored, so it must be a type the
+  // kernel can store; a wider integer may still live inside the chain.
+  while (!isa<DestinationStyleOpInterface>(chain.back()) ||
+         (chain.back() != anchor &&
+          !llvm::all_of(chain.back()->getResultTypes(), isKernelIOType)))
     chain.pop_back();
 
   for (Operation *op : chain) {
@@ -551,7 +571,8 @@ void KernelRegion::absorbInputProducers(
                   (allowPointwise && policy.activationPrologue &&
                    isFusablePrologue(producer) && inputs.size() == 1 &&
                    !isClaimedByForwardChain(producer, policy));
-    if (!absorb || !llvm::all_of(inputs, isStaticTensor))
+    if (!absorb || !llvm::all_of(inputs, isStaticTensor) ||
+        !llvm::all_of(inputs, isKernelIOValue))
       continue;
 
     ops.insert(producer);
@@ -708,6 +729,11 @@ public:
     region.absorbInputProducers(getInputRoots(anchorOp));
     region.absorbOperandFreeProducers();
     region.collectRemainingOperands();
+    if (!llvm::all_of(region.getOperands(), isKernelIOValue) ||
+        !llvm::all_of(region.getResults(), isKernelIOValue))
+      return rewriter.notifyMatchFailure(
+          anchorOp,
+          "a kernel argument or result has an integer wider than 32 bits");
 
     std::optional<SmallVector<Operation *>> moved = region.readersToMove();
     if (!moved)
