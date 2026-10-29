@@ -270,6 +270,35 @@ HIP_KERNEL_API int hip_qgemm(
     void* workspace,
     size_t workspace_bytes);
 
+/* hip_qgemm over the rows of a prefill window that hold tokens.
+ *
+ * `live_seqlens` is GQA's seqlens_k on the device, one int32, or null for every
+ * row. Rows m >= min(live_seqlens[0] + 1, M) of Y are not computed and their
+ * contents are unspecified: a tile that starts past them returns before reading
+ * A or B, so a short prompt in a long window pays for its own row tiles only.
+ * Rows inside the last live tile are computed anyway -- their values are
+ * whatever the padding rows of A make them, which no consumer of a padded
+ * window reads. The count is read on the device, never by the host. hip_qgemm
+ * is this with a null pointer. */
+HIP_KERNEL_API int hip_qgemm_live_rows(
+    void* stream,
+    const void* A,
+    const void* B,
+    const void* C,
+    const void* B_scales,
+    const void* B_zero_points,
+    void* Y,
+    int64_t M, int64_t N, int64_t K,
+    int trans_a, int trans_b,
+    int a_dtype, int b_dtype, int c_dtype, int y_dtype,
+    int b_bits,
+    int64_t c_dim0, int64_t c_dim1,
+    float M_ab, float M_c,
+    int64_t a_zp, int64_t b_zp, int64_t c_zp, int64_t y_zp,
+    void* workspace,
+    size_t workspace_bytes,
+    const int32_t* live_seqlens);
+
 /* Scratch hip_qgemm wants for this shape, or 0 when the shape does not call
  * for a grid-level k split. */
 HIP_KERNEL_API size_t hip_qgemm_workspace_bytes(

@@ -43,7 +43,11 @@ namespace {
 //                         9, 5, -1, 9,    // a/b/c/y dtype; -1 is "no bias"
 //                         4, 0, 0,        // b_bits, c_dim0, c_dim1
 //                         0.5, 0.0,       // M_ab, M_c
-//                         32768, 0, 0, 32768)
+//                         32768, 0, 0, 32768,
+//                         null)           // live_seqlens; see below
+//
+// With `live_rows(%seqlens_k)` the last argument is that buffer instead, and
+// the kernel computes only the rows below seqlens_k[0] + 1.
 struct QGemmOpLowering : public ConvertOpToLLVMPattern<QGemmOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -160,8 +164,9 @@ struct QGemmOpLowering : public ConvertOpToLLVMPattern<QGemmOp> {
     //                int64_t b_bits, int64_t c_dim0, int64_t c_dim1,
     //                float M_ab, float M_c,
     //                int64_t A_zero_point, int64_t B_zero_point,
-    //                int64_t C_zero_point, int64_t Y_zero_point)
-    SmallVector<Type, 25> paramTypes = {
+    //                int64_t C_zero_point, int64_t Y_zero_point,
+    //                const void* live_seqlens)
+    SmallVector<Type, 26> paramTypes = {
         ptrType, // state
         ptrType, // A
         ptrType, // B
@@ -186,7 +191,8 @@ struct QGemmOpLowering : public ConvertOpToLLVMPattern<QGemmOp> {
         i64Type, // A_zero_point
         i64Type, // B_zero_point
         i64Type, // C_zero_point
-        i64Type  // Y_zero_point
+        i64Type, // Y_zero_point
+        ptrType  // live_seqlens (nullable): rows to compute, read on device
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
@@ -194,7 +200,7 @@ struct QGemmOpLowering : public ConvertOpToLLVMPattern<QGemmOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 25> args = {
+    SmallVector<Value, 26> args = {
         adaptor.getCtx(),
         extractContiguousMemRefPtr(adaptor.getA(), rewriter, loc),
         extractContiguousMemRefPtr(adaptor.getB(), rewriter, loc),
@@ -219,7 +225,8 @@ struct QGemmOpLowering : public ConvertOpToLLVMPattern<QGemmOp> {
         createI64Const(op.getAZeroPoint()),
         createI64Const(op.getBZeroPoint()),
         createI64Const(op.getCZeroPoint()),
-        createI64Const(op.getYZeroPoint())};
+        createI64Const(op.getYZeroPoint()),
+        extractOptionalMemRefPtr(adaptor.getLiveSeqlens(), rewriter, loc)};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);

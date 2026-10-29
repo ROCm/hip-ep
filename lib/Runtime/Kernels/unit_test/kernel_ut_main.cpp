@@ -30,6 +30,7 @@ struct Leaf {
 };
 
 static const Leaf kLeaves[] = {
+    {"qgemm", "Xint_Wint_Yint", "hipdnn-kernel-ut-qgemm-xint-wint-yint.exe"},
     {"matmul_nbits", "Xfp16_Wu2_Yfp16",
      "hipdnn-kernel-ut-matmul-nbits-xfp16-wu2-yfp16.exe"},
     {"matmul_nbits", "Xfp16_Wu3_Yfp16",

@@ -2197,7 +2197,7 @@ int wrap_qgemm(RuntimeState *state, const void *A, const void *B, const void *C,
                int64_t c_data_type, int64_t y_data_type, int64_t b_bits,
                int64_t c_dim0, int64_t c_dim1, float M_ab, float M_c,
                int64_t A_zero_point, int64_t B_zero_point, int64_t C_zero_point,
-               int64_t Y_zero_point) {
+               int64_t Y_zero_point, const void *live_seqlens) {
   (void)A;
   (void)B;
   (void)B_zero_points;
@@ -2210,6 +2210,7 @@ int wrap_qgemm(RuntimeState *state, const void *A, const void *B, const void *C,
   (void)B_zero_point;
   (void)C_zero_point;
   (void)Y_zero_point;
+  (void)live_seqlens;
   if (!state)
     return -1;
   MOCK_PRINT("[MOCK] wrap_qgemm(M=%lld, N=%lld, K=%lld, trans=(%lld,%lld), "

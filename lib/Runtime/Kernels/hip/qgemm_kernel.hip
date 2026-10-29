@@ -913,17 +913,33 @@ __device__ QGemmMicroTile<QGemmAPlanes<TA>::kCount> qgemm_accumulate_k_range(
   return out;
 }
 
+// The rows of a prefill window that hold tokens: seqlens_k + 1, or all M of
+// them when the count is meaningless or past the window -- a full window, or a
+// later chunk whose seqlens_k counts the past as well.
+__device__ __forceinline__ int64_t
+qgemm_live_rows(const int32_t *__restrict__ live_seqlens, int64_t M) {
+  const int64_t live = static_cast<int64_t>(live_seqlens[0]) + 1;
+  return (live < 1 || live > M) ? M : live;
+}
+
 // Y[m, n] = requantize(sum_k A[m, k] * B[k, n])
 //
 // Grid: (ceil(N/kTileN), ceil(M/kTileM)). One block owns a whole output tile
 // and the whole reduction, so it can requantize in place.
+//
+// With live_seqlens, a block whose row tile starts past the live rows returns
+// before touching A or B. The test is block-uniform, so no barrier is skipped
+// by part of a block.
 template <typename TA, typename TB, typename TY>
 __global__ __launch_bounds__(kTiledBlock) void qgemm_tiled_kernel(
     const TA *__restrict__ A, const uint8_t *__restrict__ B,
     TY *__restrict__ Y, int64_t M, int64_t N, int64_t K, QGemmRequant requant,
-    int b_bits, bool need_row_a, bool need_col_b, bool trans_a, bool trans_b) {
+    int b_bits, bool need_row_a, bool need_col_b, bool trans_a, bool trans_b,
+    const int32_t *__restrict__ live_seqlens) {
   const int64_t m_base = static_cast<int64_t>(blockIdx.y) * kTileM;
   const int64_t n_base = static_cast<int64_t>(blockIdx.x) * kTileN;
+  if (live_seqlens && m_base >= qgemm_live_rows(live_seqlens, M))
+    return;
 
   const auto mt = qgemm_accumulate_k_range<TA, TB>(
       A, B, M, N, K, m_base, n_base, 0, K, b_bits, need_row_a, need_col_b,
@@ -1040,14 +1056,15 @@ template <int kWmmaWaves>
 __global__ __launch_bounds__(kWmmaWaves * kWmmaWave) void
 qgemm_tiled_wmma_w4_kernel(
     const uint16_t *__restrict__ A, const uint8_t *__restrict__ B,
-    uint16_t *__restrict__ Y, int64_t N, int64_t K, QGemmRequant requant,
-    bool need_row_a, bool need_col_b) {
+    uint16_t *__restrict__ Y, int64_t M, int64_t N, int64_t K,
+    QGemmRequant requant, bool need_row_a, bool need_col_b,
+    const int32_t *__restrict__ live_seqlens) {
 #if !QGEMM_HAS_WMMA
   // gfx12 and gfx1170 use the WMMA128b builtin, and the host pass has no
   // AMDGPU builtins, so the body only exists for the gfx11 encoding.
   // qgemm_device_has_wmma() must not launch this empty image.
-  (void)A; (void)B; (void)Y; (void)N; (void)K;
-  (void)requant; (void)need_row_a; (void)need_col_b;
+  (void)A; (void)B; (void)Y; (void)M; (void)N; (void)K;
+  (void)requant; (void)need_row_a; (void)need_col_b; (void)live_seqlens;
 #else
   constexpr int kWmmaBlock = kWmmaWaves * kWmmaWave;
   constexpr int kWmmaMPerWave = kWmmaMFrag / kWmmaWaves;
@@ -1060,6 +1077,9 @@ qgemm_tiled_wmma_w4_kernel(
   const int frag_row = lane % kWmmaFrag; // this lane's A row / B column
   const int64_t m_base = static_cast<int64_t>(blockIdx.y) * kWmmaTileM;
   const int64_t n_base = static_cast<int64_t>(blockIdx.x) * kWmmaTileN;
+  // Block-uniform, and ahead of every barrier: see qgemm_tiled_kernel.
+  if (live_seqlens && m_base >= qgemm_live_rows(live_seqlens, M))
+    return;
 
   __shared__ __align__(16)
       QGemmByte a_lds[kPlaneLo + 1][kWmmaTileM][kWmmaARowStride];
@@ -1236,7 +1256,7 @@ __global__ __launch_bounds__(kTiledBlock) void qgemm_splitk_partial_kernel(
     int64_t *__restrict__ acc_ws, int64_t *__restrict__ row_a_ws,
     int64_t *__restrict__ col_b_ws, int64_t M, int64_t N, int64_t K,
     int64_t k_chunk, int b_bits, bool need_row_a, bool need_col_b,
-    bool trans_a, bool trans_b) {
+    bool trans_a, bool trans_b, const int32_t *__restrict__ live_seqlens) {
   const int64_t k_begin = static_cast<int64_t>(blockIdx.z) * k_chunk;
   if (k_begin >= K)
     return;
@@ -1244,6 +1264,11 @@ __global__ __launch_bounds__(kTiledBlock) void qgemm_splitk_partial_kernel(
 
   const int64_t m_base = static_cast<int64_t>(blockIdx.y) * kTileM;
   const int64_t n_base = static_cast<int64_t>(blockIdx.x) * kTileN;
+  // Row tile 0 is always live, so the blocks that elect colB below still run.
+  // The epilogue still writes every row; past the live ones it requantizes
+  // the zeroed accumulators, which is as unspecified as leaving them alone.
+  if (live_seqlens && m_base >= qgemm_live_rows(live_seqlens, M))
+    return;
 
   // rowA does not depend on n and colB does not depend on m, so every block
   // column would otherwise add the same rowA slice again (and every block row
@@ -1608,6 +1633,8 @@ struct QGemmArgs {
   int32_t y_zp;
   void *workspace;
   size_t workspace_bytes;
+  // GQA seqlens_k on the device, or null: rows past it are not computed.
+  const int32_t *live_seqlens;
 };
 
 //===----------------------------------------------------------------------===//
@@ -2157,12 +2184,14 @@ int qgemm_launch_tiled(const QGemmArgs &g, const QGemmRequant &requant,
       auto *wy = reinterpret_cast<uint16_t *>(y_ptr);
       if (g.K >= kWmmaWideBlockMinK)
         hipLaunchKernelGGL(HIP_KERNEL_NAME(qgemm_tiled_wmma_w4_kernel<8>), grid,
-                           dim3(8 * kWmmaWave), 0, g.stream, wa, g.B, wy, g.N,
-                           g.K, requant, need_row_a, need_col_b);
+                           dim3(8 * kWmmaWave), 0, g.stream, wa, g.B, wy, g.M,
+                           g.N, g.K, requant, need_row_a, need_col_b,
+                           g.live_seqlens);
       else
         hipLaunchKernelGGL(HIP_KERNEL_NAME(qgemm_tiled_wmma_w4_kernel<4>), grid,
-                           dim3(4 * kWmmaWave), 0, g.stream, wa, g.B, wy, g.N,
-                           g.K, requant, need_row_a, need_col_b);
+                           dim3(4 * kWmmaWave), 0, g.stream, wa, g.B, wy, g.M,
+                           g.N, g.K, requant, need_row_a, need_col_b,
+                           g.live_seqlens);
       return static_cast<int>(hipGetLastError());
     }
   }
@@ -2192,7 +2221,7 @@ int qgemm_launch_tiled(const QGemmArgs &g, const QGemmRequant &requant,
         dim3(grid_xy.x, grid_xy.y, static_cast<unsigned>(plan.splits)),
         dim3(kTiledBlock), 0, g.stream, a_ptr, g.B, acc_ws, row_a_ws, col_b_ws,
         g.M, g.N, g.K, plan.k_chunk, g.b_bits, need_row_a, need_col_b,
-        g.trans_a, g.trans_b);
+        g.trans_a, g.trans_b, g.live_seqlens);
     const hipError_t launched = hipGetLastError();
     if (launched != hipSuccess)
       return static_cast<int>(launched);
@@ -2210,7 +2239,7 @@ int qgemm_launch_tiled(const QGemmArgs &g, const QGemmRequant &requant,
   hipLaunchKernelGGL(HIP_KERNEL_NAME(qgemm_tiled_kernel<TA, TB, TY>), grid_xy,
                      dim3(kTiledBlock), 0, g.stream, a_ptr, g.B, y_ptr, g.M,
                      g.N, g.K, requant, g.b_bits, need_row_a, need_col_b,
-                     g.trans_a, g.trans_b);
+                     g.trans_a, g.trans_b, g.live_seqlens);
   return static_cast<int>(hipGetLastError());
 }
 
@@ -2294,15 +2323,15 @@ extern "C" size_t hip_qgemm_workspace_bytes(int64_t M, int64_t N, int64_t K) {
   return plan.enabled ? qgemm_splitk_scratch_bytes(M, N) : 0;
 }
 
-extern "C" int hip_qgemm(void *stream, const void *A, const void *B,
-                         const void *C, const void *B_scales,
-                         const void *B_zero_points, void *Y, int64_t M,
-                         int64_t N, int64_t K, int trans_a, int trans_b,
-                         int a_dtype, int b_dtype, int c_dtype, int y_dtype,
-                         int b_bits, int64_t c_dim0, int64_t c_dim1,
-                         float M_ab, float M_c, int64_t a_zp, int64_t b_zp,
-                         int64_t c_zp, int64_t y_zp, void *workspace,
-                         size_t workspace_bytes) {
+extern "C" int
+hip_qgemm_live_rows(void *stream, const void *A, const void *B, const void *C,
+                    const void *B_scales, const void *B_zero_points, void *Y,
+                    int64_t M, int64_t N, int64_t K, int trans_a, int trans_b,
+                    int a_dtype, int b_dtype, int c_dtype, int y_dtype,
+                    int b_bits, int64_t c_dim0, int64_t c_dim1, float M_ab,
+                    float M_c, int64_t a_zp, int64_t b_zp, int64_t c_zp,
+                    int64_t y_zp, void *workspace, size_t workspace_bytes,
+                    const int32_t *live_seqlens) {
   if (!A || !B || !Y) {
     fprintf(stderr, "[custom_kernels] hip_qgemm: null tensor argument\n");
     return -1;
@@ -2397,7 +2426,8 @@ extern "C" int hip_qgemm(void *stream, const void *A, const void *B,
                        static_cast<int32_t>(c_zp),
                        static_cast<int32_t>(y_zp),
                        workspace,
-                       workspace_bytes};
+                       workspace_bytes,
+                       live_seqlens};
 
   const int err = qgemm_dispatch_a(args);
   if (err != hipSuccess) {
@@ -2405,4 +2435,20 @@ extern "C" int hip_qgemm(void *stream, const void *A, const void *B,
             hipGetErrorString(static_cast<hipError_t>(err)));
   }
   return err;
+}
+
+extern "C" int hip_qgemm(void *stream, const void *A, const void *B,
+                         const void *C, const void *B_scales,
+                         const void *B_zero_points, void *Y, int64_t M,
+                         int64_t N, int64_t K, int trans_a, int trans_b,
+                         int a_dtype, int b_dtype, int c_dtype, int y_dtype,
+                         int b_bits, int64_t c_dim0, int64_t c_dim1,
+                         float M_ab, float M_c, int64_t a_zp, int64_t b_zp,
+                         int64_t c_zp, int64_t y_zp, void *workspace,
+                         size_t workspace_bytes) {
+  return hip_qgemm_live_rows(stream, A, B, C, B_scales, B_zero_points, Y, M, N,
+                             K, trans_a, trans_b, a_dtype, b_dtype, c_dtype,
+                             y_dtype, b_bits, c_dim0, c_dim1, M_ab, M_c, a_zp,
+                             b_zp, c_zp, y_zp, workspace, workspace_bytes,
+                             /*live_seqlens=*/nullptr);
 }

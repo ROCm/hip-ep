@@ -5944,6 +5944,14 @@ def Hip_QGemmOp : Hip_DpsOp_WithInfer<"qgemm", "Y", [AttrSizedOperandSegments]> 
     * `$C` -- optional bias of rank 2 or less, 8-, 16- or 32-bit integer element
       type. When it is absent the `beta * c` term is dropped and `beta` is
       ignored.
+    * `$live_seqlens` -- optional GQA-style `seqlens_k`, one int32: the rows of
+      a prefill window that hold tokens, as `seqlens_k[0] + 1`. Rows of Y from
+      `min(seqlens_k[0] + 1, M)` on are not computed and hold unspecified
+      values, so a short prompt in a long window pays for its own rows only.
+      The value is read on the device, never by the host. Meant for a
+      row-padded window whose padding rows no consumer reads. A window that
+      follows a past holds fewer tokens than `seqlens_k[0] + 1`, so there the
+      count errs toward computing more rows, never fewer.
     * `$Y` -- quantized output buffer and DPS init, [M, N], 8- or 16-bit integer
       element type.
 
@@ -5989,6 +5997,7 @@ def Hip_QGemmOp : Hip_DpsOp_WithInfer<"qgemm", "Y", [AttrSizedOperandSegments]> 
     Optional<Hip_TensorOrMemRef>:$B_scales,      // f32 [N], per-N-channel
     Optional<Hip_TensorOrMemRef>:$B_zero_points, // [N], B's storage type
     Optional<Hip_TensorOrMemRef>:$C,   // Bias (quantized), broadcast to [M, N]
+    Optional<Hip_TensorOrMemRef>:$live_seqlens, // int32 seqlens_k: rows to compute
     Hip_TensorOrMemRef:$Y,             // Output buffer (quantized), DPS init
     F32Attr:$A_scale,
     I64Attr:$A_zero_point,
@@ -6012,6 +6021,7 @@ def Hip_QGemmOp : Hip_DpsOp_WithInfer<"qgemm", "Y", [AttrSizedOperandSegments]> 
     `)`
     (`b_per_channel` `(` $B_scales^ `,` $B_zero_points `:`
         type($B_scales) `,` type($B_zero_points) `)`)?
+    (`live_rows` `(` $live_seqlens^ `:` type($live_seqlens) `)`)?
     `outs` `(` $Y `:` type($Y) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];

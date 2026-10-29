@@ -26,7 +26,8 @@
 // hip.qgemm has more than one optional operand group, so it needs
 // AttrSizedOperandSegments, and PDL does not synthesize the segment sizes the
 // way an ODS builder would. Each rewrite writes them out; the entries follow
-// the operand declaration order ctx, A, B, B_scales, B_zero_points, C, Y.
+// the operand declaration order ctx, A, B, B_scales, B_zero_points, C,
+// live_seqlens, Y.
 //===----------------------------------------------------------------------===//
 
 // ===== Per-tensor B, with bias =====
@@ -111,7 +112,7 @@ Pattern HipQGemm with benefit(10) {
 
     let init = BuildInit(y_type, gemm_init);
     let qgemm = op<hip.qgemm>(ctx, a, b, c, init) {
-      operandSegmentSizes = attr<"array<i32: 1, 1, 1, 0, 0, 1, 1>">,
+      operandSegmentSizes = attr<"array<i32: 1, 1, 1, 0, 0, 1, 0, 1>">,
       A_scale = a_scale_attr,
       A_zero_point = a_zp_attr,
       B_scale = b_scale_attr,
@@ -179,7 +180,7 @@ Pattern HipQGemmNoBias with benefit(10) {
 
     let init = BuildInit(y_type, gemm_init);
     let qgemm = op<hip.qgemm>(ctx, a, b, init) {
-      operandSegmentSizes = attr<"array<i32: 1, 1, 1, 0, 0, 0, 1>">,
+      operandSegmentSizes = attr<"array<i32: 1, 1, 1, 0, 0, 0, 0, 1>">,
       A_scale = a_scale_attr,
       A_zero_point = a_zp_attr,
       B_scale = b_scale_attr,
@@ -261,7 +262,7 @@ Pattern HipQGemmPerChannelWeight with benefit(9) {
     // B_scale / B_zero_point stay unset: the operands replace them, and their
     // identity defaults are what keep the folded coefficient free of B.
     let qgemm = op<hip.qgemm>(ctx, a, b, b_scales, b_zero_points, c, init) {
-      operandSegmentSizes = attr<"array<i32: 1, 1, 1, 1, 1, 1, 1>">,
+      operandSegmentSizes = attr<"array<i32: 1, 1, 1, 1, 1, 1, 0, 1>">,
       A_scale = a_scale_attr,
       A_zero_point = a_zp_attr,
       B_bits = b_bits_attr,
@@ -318,7 +319,7 @@ Pattern HipQGemmNoBiasPerChannelWeight with benefit(9) {
 
     let init = BuildInit(y_type, gemm_init);
     let qgemm = op<hip.qgemm>(ctx, a, b, b_scales, b_zero_points, init) {
-      operandSegmentSizes = attr<"array<i32: 1, 1, 1, 1, 1, 0, 1>">,
+      operandSegmentSizes = attr<"array<i32: 1, 1, 1, 1, 1, 0, 0, 1>">,
       A_scale = a_scale_attr,
       A_zero_point = a_zp_attr,
       B_bits = b_bits_attr,
