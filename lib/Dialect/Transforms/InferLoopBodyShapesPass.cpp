@@ -281,7 +281,8 @@ static bool preservesShape(StringRef name) {
 
 static bool broadcastsShape(StringRef name) {
   static constexpr StringRef kOps[] = {"onnx.Add", "onnx.Mul", "onnx.Sub",
-                                       "onnx.Pow", "onnx.Div"};
+                                       "onnx.Pow", "onnx.Div", "onnx.Max",
+                                       "onnx.Min"};
   return named(name, kOps);
 }
 

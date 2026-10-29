@@ -27,6 +27,8 @@
 //     `slice_keeps_stored_shape`).
 //   - a constant Slice that feeds hip.loop updates the loop result and the
 //     body signature to the refined v_init (`loop_follows_refined_slice`).
+//   - binary Min and Max broadcast like Add, so an unranked tail after a
+//     ranked producer gets a rank (`min_max_broadcast`).
 
 // -----------------------------------------------------------------------
 // Forward Concat rule: Concat((1x?x1152, ?x?x?), axis=1) -> 1x?x1152.
@@ -358,4 +360,26 @@ func.func private @body_slice_carry(%ctx: !hip.context, %iter: tensor<i64>,
                                     %cond_in: tensor<ui8>,
                                     %acc: tensor<?x?x?xf16>) -> tensor<?x?x?xf16> {
   return %acc : tensor<?x?x?xf16>
+}
+
+// Binary Min/Max use the same broadcast rule as Add. The result rank comes
+// from the ranked producers; the unranked tail then follows.
+// CHECK-LABEL: func.func @min_max_broadcast
+// CHECK:         "onnx.Min"{{.*}} -> tensor<1x3x512x512xf32>
+// CHECK:         "onnx.Sub"{{.*}} -> tensor<1x3x512x512xf32>
+// CHECK:         "onnx.Add"{{.*}} -> tensor<1x3x512x512xf32>
+// CHECK:         "onnx.Max"{{.*}} -> tensor<1x3x512x512xf32>
+// CHECK:         "onnx.Transpose"{{.*}} -> tensor<1x512x512x3xf32>
+func.func @min_max_broadcast(%lhs: tensor<1x3x512x512xf32>,
+                             %rhs: tensor<1x3x512x512xf32>,
+                             %bias: tensor<1x1x1x1xf32>) -> tensor<*xf32> {
+  %min = "onnx.Min"(%lhs, %rhs)
+      : (tensor<1x3x512x512xf32>, tensor<1x3x512x512xf32>) -> tensor<*xf32>
+  %sub = "onnx.Sub"(%min, %min) : (tensor<*xf32>, tensor<*xf32>) -> tensor<*xf32>
+  %add = "onnx.Add"(%bias, %sub)
+      : (tensor<1x1x1x1xf32>, tensor<*xf32>) -> tensor<*xf32>
+  %max = "onnx.Max"(%min, %add) : (tensor<*xf32>, tensor<*xf32>) -> tensor<*xf32>
+  %y = "onnx.Transpose"(%max) {perm = [0, 2, 3, 1]}
+      : (tensor<*xf32>) -> tensor<*xf32>
+  return %y : tensor<*xf32>
 }
