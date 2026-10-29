@@ -39,6 +39,7 @@ add_dependencies(HipsrDialectIR
   HipsrAttrsIncGen
   HipsrTypesIncGen
   HipOpStateInterfaceIncGen
+  HipElementMoveInterfaceIncGen
 )
 
 target_link_libraries(HipsrDialectIR PUBLIC

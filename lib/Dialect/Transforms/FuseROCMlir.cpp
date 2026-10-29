@@ -4,6 +4,7 @@
  */
 
 #include "QuantizedEpilogue.h"
+#include "SinkQuantize.h"
 
 #include "hip/Conversion/HipToTosa/HipToTosaLegality.h"
 #include "hip/Dialect/IR/HipDialect.h"
@@ -1977,10 +1978,18 @@ class FuseROCMlirPass : public impl::FuseROCMlirPassBase<FuseROCMlirPass> {
 public:
   using impl::FuseROCMlirPassBase<FuseROCMlirPass>::FuseROCMlirPassBase;
 
+  void getDependentDialects(DialectRegistry &registry) const override {
+    impl::FuseROCMlirPassBase<FuseROCMlirPass>::getDependentDialects(registry);
+    registerElementMoveExternalModels(registry);
+  }
+
   void runOnOperation() override {
     auto funcOp = getOperation();
     if (funcOp.getSymName() != "main_graph")
       return;
+    // Before outlining, so an anchor's 8-bit result feeds the moved ops and a
+    // requantize left on one input joins that anchor's epilogue.
+    sinkQuantizeThroughElementMoves(funcOp);
 
     MLIRContext *ctx = &getContext();
     RewritePatternSet patterns(ctx);
