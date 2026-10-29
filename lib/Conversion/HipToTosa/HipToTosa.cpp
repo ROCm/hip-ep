@@ -2325,8 +2325,9 @@ LogicalResult matchQdqCommon(Operation *op, Value input, Value scale,
     return rewriter.notifyMatchFailure(op, "qdq cannot change the shape");
   if (blockSize != 0)
     return rewriter.notifyMatchFailure(op, "blocked qdq is not a tosa mul");
-  if (op->hasAttr("packed_int4"))
-    return rewriter.notifyMatchFailure(op, "packed_int4 is not tosa");
+  if (auto bits = op->getAttrOfType<IntegerAttr>("packed_bits");
+      bits && bits.getInt() != 0)
+    return rewriter.notifyMatchFailure(op, "packed sub-byte data is not tosa");
 
   Location loc = op->getLoc();
   scaleOut = scale;
