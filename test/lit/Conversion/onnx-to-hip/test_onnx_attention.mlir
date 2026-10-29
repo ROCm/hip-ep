@@ -75,7 +75,7 @@ module {
     // Mask is threaded as the final hip.gqa input (attention_bias).
     // CHECK-SAME: ins({{.*}}tensor<1x1x1x128xf16>) outs
     // Attributes print alphabetically; no_causal = true is present (is_causal=0).
-    // CHECK-SAME: {kv_num_heads = 8 : i64, no_causal = true, num_heads = 16 : i64
+    // CHECK-SAME: {derive_seqlens_from_attention_bias = true, kv_num_heads = 8 : i64, no_causal = true, num_heads = 16 : i64
     // CHECK-NOT: onnx.Attention
 
     return %out#0, %out#1, %out#2
@@ -181,8 +181,8 @@ module {
     // Mask is threaded as the final hip.gqa input (attention_bias).
     // CHECK-SAME: ins({{.*}}tensor<?x1x?x?xf16>) outs
     // Attributes print alphabetically; no_causal defaults to false and is
-    // omitted, so the dict goes straight from kv_num_heads to num_heads.
-    // CHECK-SAME: {kv_num_heads = 1 : i64, num_heads = 8 : i64
+    // omitted.
+    // CHECK-SAME: {derive_seqlens_from_attention_bias = true, kv_num_heads = 1 : i64, num_heads = 8 : i64
     // CHECK-NOT: onnx.Attention
 
     return %out#0, %out#1, %out#2
@@ -292,7 +292,7 @@ module {
     // CHECK: tensor.collapse_shape
     // CHECK: hip.gqa(%[[CTX5]])
     // Attributes print alphabetically; no_causal = true is present (is_causal=0).
-    // CHECK-SAME: {kv_num_heads = 8 : i64, no_causal = true, num_heads = 16 : i64
+    // CHECK-SAME: {derive_seqlens_from_attention_bias = true, kv_num_heads = 8 : i64, no_causal = true, num_heads = 16 : i64
     // Output BSHD -> BNSH: expand to rank-4 then transpose(perm=[0,2,1,3]).
     // CHECK: tensor.expand_shape
     // CHECK: hip.transpose(%[[CTX5]])
@@ -345,7 +345,7 @@ module {
     // CHECK: hip.gqa(%[[CTX6]])
     // Mask is threaded as attention_bias; no past_key/past_value operands.
     // CHECK-SAME: ins({{.*}}tensor<1x1x1x?xf16>) outs
-    // CHECK-SAME: {kv_num_heads = 1 : i64, no_causal = true, num_heads = 8 : i64
+    // CHECK-SAME: {derive_seqlens_from_attention_bias = true, kv_num_heads = 1 : i64, no_causal = true, num_heads = 8 : i64
     // CHECK-NOT: onnx.Attention
 
     return %y : tensor<1x1x2048xf16>
@@ -559,7 +559,7 @@ module {
     // CHECK: hip.gqa(%[[CTXW]])
     // Attributes print alphabetically, so the recovered window lands between
     // kv_num_heads and no_causal.
-    // CHECK-SAME: {kv_num_heads = 8 : i64, local_window_size = 1024 : i64, no_causal = true, num_heads = 16 : i64
+    // CHECK-SAME: {derive_seqlens_from_attention_bias = true, kv_num_heads = 8 : i64, local_window_size = 1024 : i64, no_causal = true, num_heads = 16 : i64
     // CHECK-NOT: onnx.Attention
 
     return %out#0, %out#1, %out#2
@@ -637,7 +637,7 @@ module {
     // No local_window_size: the dict goes straight from kv_num_heads to
     // no_causal, so the attribute is absent and the -1 default stands.
     // CHECK: hip.gqa(%[[CTXG2]])
-    // CHECK-SAME: {kv_num_heads = 2 : i64, no_causal = true, num_heads = 16 : i64
+    // CHECK-SAME: {derive_seqlens_from_attention_bias = true, kv_num_heads = 2 : i64, no_causal = true, num_heads = 16 : i64
     // CHECK-NOT: onnx.Attention
 
     return %out#0, %out#1, %out#2
