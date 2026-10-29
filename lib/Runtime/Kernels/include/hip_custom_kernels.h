@@ -1945,7 +1945,9 @@ HIP_KERNEL_API int hip_gather_nd(
  *
  * Bounded to rank <= 8 (matches kPadMaxRank / kGatherNDMaxRank).
  *
- * Supported dtypes: f16, f32, i32, i64.
+ * Supported dtypes: every 1, 2, 4 and 8 byte dtype (u8, i8, f16, bf16,
+ * i16, u16, f32, i32, i64, f64). A slice only moves elements, so each size
+ * runs one unsigned instantiation.
  */
 HIP_KERNEL_API int hip_slice(
     void* stream,
