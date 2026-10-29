@@ -461,6 +461,23 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
   return 0;
 }
 
+int wrap_matmul_i32(RuntimeState *state, const void *A, const void *B,
+                    void *output, int64_t M, int64_t N, int64_t K,
+                    int64_t batch_count, int64_t b_batch_stride) {
+  (void)A;
+  (void)B;
+  (void)output;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_matmul_i32\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_matmul_i32(M=%lld, N=%lld, K=%lld, batch=%lld, "
+             "b_batch_stride=%lld)\n",
+             (long long)M, (long long)N, (long long)K, (long long)batch_count,
+             (long long)b_batch_stride);
+  return 0;
+}
+
 // RocMLIR dispatch (hip.rocmlir). Empty for now: the generated IR builds the
 // kernargs buffer and passes the embedded GPU binary + launch geometry, but
 // this wrapper does not yet load the module or launch the kernel.

@@ -112,6 +112,16 @@ public:
     SetVector<Value> operands;
     SetVector<Operation *> ops;
 
+    // An i32 matmul or convolution has an exact HIP kernel. Outlining it
+    // asks rocMLIR to compile a non-quantized integer tosa op, which this
+    // pipeline does not establish. Leave the op in main_graph.
+    for (Type type : anchorOp->getOperandTypes()) {
+      auto shaped = dyn_cast<ShapedType>(type);
+      if (shaped && shaped.getElementType().isInteger(32))
+        return rewriter.notifyMatchFailure(
+            anchorOp, "i32 anchor stays on the HIP kernel");
+    }
+
     // Fail on dynamic shapes
     for (Value operand : anchorOp->getOperands()) {
       if (auto tensorType = dyn_cast<TensorType>(operand.getType());
