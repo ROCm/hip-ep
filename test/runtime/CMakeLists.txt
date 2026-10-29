@@ -24,6 +24,7 @@ target_compile_features(test-output-allocator PRIVATE cxx_std_17)
 # lib/Runtime/mock -> runtime_types.h resolves to the GPU-free mock typedefs
 #   (void* handles), so nothing here needs the HIP/hipBLASLt SDK.
 target_include_directories(test-output-allocator PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/lib/Runtime
     ${CMAKE_SOURCE_DIR}/lib/Runtime/mock
 )
@@ -36,6 +37,39 @@ target_compile_definitions(test-output-allocator PRIVATE HIPDNN_EP_RT_NO_EXPORT)
 add_test(NAME OutputAllocatorUnitTest COMMAND test-output-allocator)
 
 set_target_properties(test-output-allocator PROPERTIES FOLDER "runtime-tests")
+
+# The plugin-visible RuntimeState accessors (hip/Runtime/PluginAPI.h), compiled
+# natively against the mock runtime types with HIP supplied by the test. The C
+# source compiles the public header as C.
+add_executable(test-plugin-api
+    test_plugin_api.cpp
+    test_plugin_api_c.c
+    ${CMAKE_SOURCE_DIR}/lib/Runtime/runtime_plugin_api.cpp
+)
+target_compile_features(test-plugin-api PRIVATE cxx_std_17)
+target_include_directories(test-plugin-api PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/lib/Runtime
+    ${CMAKE_SOURCE_DIR}/lib/Runtime/mock
+)
+add_test(NAME PluginApiUnitTest COMMAND test-plugin-api)
+set_target_properties(test-plugin-api PROPERTIES FOLDER "runtime-tests")
+
+# Every accessor PluginAPI.h declares is defined once in the linked runtime
+# bitcode (real or mock, whichever this build makes).
+if(TARGET HipRuntime)
+    find_program(HIPDNN_LLVM_NM NAMES llvm-nm
+        PATHS ${LLVM_BINARY_DIR}/bin ${LLVM_TOOLS_BINARY_DIR})
+    if(HIPDNN_LLVM_NM)
+        add_test(NAME PluginApiBitcodeSymbols
+            COMMAND ${CMAKE_COMMAND} -DNM=${HIPDNN_LLVM_NM}
+                    -DBC=${CMAKE_BINARY_DIR}/lib/Runtime/runtime.bc
+                    -DHEADER=${CMAKE_SOURCE_DIR}/include/hip/Runtime/PluginAPI.h
+                    -P ${CMAKE_CURRENT_SOURCE_DIR}/check_plugin_api_symbols.cmake)
+    else()
+        message(STATUS "llvm-nm not found: PluginApiBitcodeSymbols not registered")
+    endif()
+endif()
 
 # GQA offline autotune tests are GPU-free: they link the real embedded table
 # (lut/gfx1151.fb) and drive the same resolver that ships in

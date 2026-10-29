@@ -5,6 +5,7 @@
 #ifndef HIP_EP_RUNTIME_H
 #define HIP_EP_RUNTIME_H
 
+#include "hip/Runtime/PluginAPI.h"
 #include "hip/datatype_abi.h"
 #include "hipdnn_ep_errors.h"
 #include <stdbool.h>
@@ -163,8 +164,8 @@ static inline const char *hipdnn_ep_pool_mode_name(int64_t mode) {
   }
 }
 
-// Opaque handle for runtime state
-typedef struct RuntimeState RuntimeState;
+// RuntimeState, the opaque per-session handle, and its plugin-visible
+// accessors are declared in hip/Runtime/PluginAPI.h.
 
 //===----------------------------------------------------------------------===//
 // RuntimeState: Opaque Execution State
@@ -269,11 +270,6 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
 // Returns 0 always (best-effort)
 int hipdnn_ep_state_cleanup(RuntimeState *state);
 
-// Get GPU stream from state (for passing to HIP operations)
-// Returns: hipStream_t cast to void* (NULL on error)
-// Ownership: Caller does NOT own stream (destroyed in cleanup)
-void *hipdnn_ep_state_get_stream(RuntimeState *state);
-
 // Current inference session stream (hipStream_t as void*), set per Compute by
 // hipdnn_ep_runtime_begin_compute. Lets ABI-fixed runtime helpers that don't
 // receive `state` -- notably memrefCopy (MLIR memref.copy lowering) -- issue
@@ -338,11 +334,6 @@ void *hipdnn_ep_get_pool_base(RuntimeState *state, int domain_id,
 // Returns: host-mapped base pointer (NULL on allocation failure)
 void *hipdnn_ep_get_host_scratch_base(RuntimeState *state, size_t needed_size);
 
-// Shared workspace management (lazily grown, reused across MatMul/GQA/Conv)
-void *hipdnn_ep_state_get_workspace(RuntimeState *state);
-size_t hipdnn_ep_state_get_workspace_size(RuntimeState *state);
-int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size);
-
 // Per-session scratch for wrap_qmoe transient buffers (device + pinned-host
 // mirror for routing readback). Replaces the per-call hipMalloc/hipFree storm
 // (8 buffers x N MoE layers per inference). Same grow-on-demand policy as
@@ -397,9 +388,7 @@ int hipdnn_ep_state_ensure_qsigmoid_scratch(RuntimeState *state,
 // conv_scratch: never shrinks, freed in hipdnn_ep_state_cleanup). Single buffer
 // reused across all matmul_nbits calls in the session -- safe because the
 // stream is serialised. See runtime_state_internal.h for design rationale.
-void *hipdnn_ep_state_get_matmul_dp4a_scratch(RuntimeState *state);
-int hipdnn_ep_state_ensure_matmul_dp4a_scratch(RuntimeState *state,
-                                               size_t needed_size);
+// The accessors are in hip/Runtime/PluginAPI.h.
 
 // Per-session scratch for the linear-attention chunk-parallel gated_delta
 // prefill (hip_linear_attention_prefill_chunked). Lazily grown via
@@ -424,10 +413,9 @@ bool hipdnn_ep_op_states_alloc(RuntimeState *state, int64_t n);
 // runtime-invalid inputs (e.g. Range delta==0, ArgMax of an empty axis) and
 // need to propagate an error code back through main_graph. Generated graphs
 // discard most wrap_* statuses, so a nonzero status must also be stored here.
-void *hipdnn_ep_state_get_error_flag_device_ptr(RuntimeState *state);
-int hipdnn_ep_state_reset_error_flag(RuntimeState *state);
+// Getting, resetting and reading the flag are in hip/Runtime/PluginAPI.h;
+// setting it from a host wrapper stays runtime-internal.
 int hipdnn_ep_state_set_error_flag(RuntimeState *state, int code);
-int hipdnn_ep_state_read_and_clear_error_flag(RuntimeState *state);
 // Mark the start of a new Compute() call. Invalidates per-forward-pass
 // runtime caches -- today: the GQA seqlens_k cache (see
 // runtime_state_internal.h for the canonical list).

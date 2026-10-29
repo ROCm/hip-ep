@@ -235,6 +235,7 @@ tools/hip-compiler/
 lib/Runtime/                   (compiled to runtime.bc bitcode by CMake)
   hipdnn_ep_runtime.h     Runtime C API header
   hipdnn_ep_runtime_state.cpp   Runtime state management
+  runtime_plugin_api.cpp  Plugin-visible state accessors (hip/Runtime/PluginAPI.h)
   hipdnn_ep_runtime_tensor.cpp  Tensor descriptor helpers
   real/                   Real GPU runtime (HIP / hipBLASLt / custom kernels)
     hip.cpp               HIP device management
