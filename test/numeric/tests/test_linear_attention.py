@@ -52,7 +52,8 @@ from onnx import TensorProto, helper
 from framework.comparator import compare_outputs
 from framework.onnx_utils import make_model_from_nodes
 
-SEQ_LENS = [1, 128]
+# 2..16 run the one-launch burst kernel (speculative verify), 128 the chunked scan.
+SEQ_LENS = [1, 2, 5, 16, 128]
 
 # Chunk-opt model footprint (Qwen3.5 GatedDeltaNet)
 CHUNK_OPT_Q_DIM = 2048

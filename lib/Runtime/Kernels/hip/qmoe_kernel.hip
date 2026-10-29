@@ -1127,12 +1127,14 @@ __global__ void qmoe_decode_fc2_kernel(
 
 // Reduce: output[n] = sum over slot of slot_buf[slot, n]. Pure sum.
 __global__ void qmoe_decode_reduce_kernel(
-    const __half* __restrict__ slot_buf,  // [k, hidden]
-    __half*       __restrict__ output,    // [hidden]
+    const __half* __restrict__ slot_buf,  // [tokens, k, hidden]
+    __half*       __restrict__ output,    // [tokens, hidden]
     int hidden,
     int k) {
   int n = blockIdx.x * blockDim.x + threadIdx.x;
   if (n >= hidden) return;
+  slot_buf += static_cast<size_t>(blockIdx.y) * k * hidden;
+  output   += static_cast<size_t>(blockIdx.y) * hidden;
   float acc = 0.0f;
   #pragma unroll 4
   for (int s = 0; s < k; s++) {
@@ -1586,11 +1588,17 @@ __global__ void qmoe_decode_fc1_dp4a_kernel(
     const __half*  __restrict__ fc1_b,           // [E, fusion_inter] or null
     __half*        __restrict__ act_out,         // [k, inter]
     int hidden, int fusion_inter, int n_blk_in, int block_size,
-    float swiglu_alpha, float swiglu_beta, float swiglu_limit) {
+    float swiglu_alpha, float swiglu_beta, float swiglu_limit,
+    int k_per_tok) {
   const int n_base = blockIdx.x * TILE_N;
   const int slot   = blockIdx.y;
   const int tid    = threadIdx.x;
   const int E      = expert_indices[slot];
+  // Burst mode: slot = token * k_per_tok + j, each token has its own
+  // quantized input row.
+  const int tok    = slot / k_per_tok;
+  a_qb    += static_cast<size_t>(tok) * hidden;
+  a_scale += static_cast<size_t>(tok) * n_blk_in;
 
   const size_t   W_row_bytes = static_cast<size_t>(hidden) / 2;
   const uint8_t* W = fc1_w + static_cast<size_t>(E) * fusion_inter * W_row_bytes;
@@ -1884,7 +1892,7 @@ static hipError_t launch_qmoe_fc1_dp4a(
     const void* a_scale, const void* expert_indices, const void* fc1_weights,
     const void* fc1_scales, const void* fc1_zero_points, const void* fc1_bias,
     void* act_out, int hidden_size, int n_blk_in, int block_size,
-    float swiglu_alpha, float swiglu_beta, float swiglu_limit) {
+    float swiglu_alpha, float swiglu_beta, float swiglu_limit, int k_per_tok) {
   dim3 grid(static_cast<unsigned>((fusion_inter + TN - 1) / TN),
             static_cast<unsigned>(k));
   hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_decode_fc1_dp4a_kernel<BS, TN>), grid,
@@ -1897,7 +1905,7 @@ static hipError_t launch_qmoe_fc1_dp4a(
                      static_cast<const __half*>(fc1_bias),
                      static_cast<__half*>(act_out), hidden_size, fusion_inter,
                      n_blk_in, block_size, swiglu_alpha, swiglu_beta,
-                     swiglu_limit);
+                     swiglu_limit, k_per_tok);
   return hipGetLastError();
 }
 
@@ -1929,19 +1937,19 @@ static hipError_t dispatch_qmoe_fc1_dp4a(
     const void* a_scale, const void* expert_indices, const void* fc1_weights,
     const void* fc1_scales, const void* fc1_zero_points, const void* fc1_bias,
     void* act_out, int hidden_size, int n_blk_in, int block_size,
-    float swiglu_alpha, float swiglu_beta, float swiglu_limit) {
+    float swiglu_alpha, float swiglu_beta, float swiglu_limit, int k_per_tok) {
 #define X(B, T)                                                                \
   if (bs == (B) && tn == (T))                                                  \
     return launch_qmoe_fc1_dp4a<B, T>(                                         \
         s, k, fusion_inter, a_qb, a_scale, expert_indices, fc1_weights,        \
         fc1_scales, fc1_zero_points, fc1_bias, act_out, hidden_size, n_blk_in, \
-        block_size, swiglu_alpha, swiglu_beta, swiglu_limit);
+        block_size, swiglu_alpha, swiglu_beta, swiglu_limit, k_per_tok);
   QMOE_CFG_LIST(X)
 #undef X
   return launch_qmoe_fc1_dp4a<64, 8>(
       s, k, fusion_inter, a_qb, a_scale, expert_indices, fc1_weights,
       fc1_scales, fc1_zero_points, fc1_bias, act_out, hidden_size, n_blk_in,
-      block_size, swiglu_alpha, swiglu_beta, swiglu_limit);
+      block_size, swiglu_alpha, swiglu_beta, swiglu_limit, k_per_tok);
 }
 
 static hipError_t dispatch_qmoe_fc2_dp4a(
@@ -1986,7 +1994,12 @@ extern "C" int hip_qmoe_decode_fused_dp4a(
     int64_t hidden_size, int64_t inter_size,
     int64_t k, int64_t block_size,
     float swiglu_alpha, float swiglu_beta, float swiglu_limit,
-    int64_t element_size_bytes) {
+    int64_t element_size_bytes, int64_t num_tokens) {
+  if (num_tokens < 1) {
+    fprintf(stderr, "[custom_kernels] hip_qmoe_decode_fused_dp4a: num_tokens "
+                    "must be >= 1 (got %lld)\n", (long long)num_tokens);
+    return -1;
+  }
   if (element_size_bytes != 2) {
     fprintf(stderr, "[custom_kernels] hip_qmoe_decode_fused_dp4a: only fp16 "
                     "supported (got element_size %lld)\n",
@@ -2011,10 +2024,15 @@ extern "C" int hip_qmoe_decode_fused_dp4a(
   const int fusion_inter = static_cast<int>(2 * inter_size);
   const int n_blk_in  = static_cast<int>((hidden_size + block_size - 1) / block_size);
   const int n_blk_mid = static_cast<int>((inter_size  + block_size - 1) / block_size);
+  const int T = static_cast<int>(num_tokens);
+  const int slots = T * static_cast<int>(k);
+  // The best tile config depends on how many slots are in flight, so bursts
+  // tune separately from single-token decode.
+  const uint64_t burst_key = static_cast<uint64_t>(T - 1) << 58;
 
-  // Quantize the shared [hidden] input once (grid = n_blk_in groups x 1 row).
+  // Quantize each token's [hidden] input once (grid = n_blk_in groups x T rows).
   {
-    dim3 grid(static_cast<unsigned>(n_blk_in), 1u);
+    dim3 grid(static_cast<unsigned>(n_blk_in), static_cast<unsigned>(T));
     hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_quant_act_i8_kernel<128>), grid,
                        dim3(128), 0, s, static_cast<const __half*>(input),
                        static_cast<int8_t*>(a_qb_in),
@@ -2033,16 +2051,18 @@ extern "C" int hip_qmoe_decode_fused_dp4a(
   int s1 = -1;
   const uint64_t key1 =
       qmoe_cfg_key(fusion_inter, static_cast<int>(hidden_size),
-                   static_cast<int>(block_size), fc1_zero_points != nullptr);
+                   static_cast<int>(block_size), fc1_zero_points != nullptr) ^
+      burst_key;
   const QmoeCfg c1 = qmoe_tune_pick(g_qmoe_fc1_dp4a_state, key1, &s1);
   {
     hipEvent_t me0 = nullptr, me1 = nullptr;
     if (s1 >= 0) { hipEventCreate(&me0); hipEventCreate(&me1); hipEventRecord(me0, s); }
     hipError_t e = dispatch_qmoe_fc1_dp4a(
-        c1.bs, c1.tn, s, static_cast<int>(k), fusion_inter, a_qb_in,
+        c1.bs, c1.tn, s, slots, fusion_inter, a_qb_in,
         a_scale_in, expert_indices, fc1_weights, fc1_scales, fc1_zero_points,
         fc1_bias, act_out, static_cast<int>(hidden_size), n_blk_in,
-        static_cast<int>(block_size), swiglu_alpha, swiglu_beta, swiglu_limit);
+        static_cast<int>(block_size), swiglu_alpha, swiglu_beta, swiglu_limit,
+        static_cast<int>(k));
     if (e != hipSuccess) {
       fprintf(stderr, "[custom_kernels] qmoe_decode_fc1_dp4a failed: %s\n",
               hipGetErrorString(e));
@@ -2058,9 +2078,9 @@ extern "C" int hip_qmoe_decode_fused_dp4a(
     }
   }
 
-  // Quantize the k [inter] expert-slot activations (grid = n_blk_mid x k).
+  // Quantize the T*k [inter] expert-slot activations (grid = n_blk_mid x slots).
   {
-    dim3 grid(static_cast<unsigned>(n_blk_mid), static_cast<unsigned>(k));
+    dim3 grid(static_cast<unsigned>(n_blk_mid), static_cast<unsigned>(slots));
     hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_quant_act_i8_kernel<128>), grid,
                        dim3(128), 0, s, static_cast<const __half*>(act_out),
                        static_cast<int8_t*>(a_qb_mid),
@@ -2079,13 +2099,14 @@ extern "C" int hip_qmoe_decode_fused_dp4a(
   int s2 = -1;
   const uint64_t key2 =
       qmoe_cfg_key(static_cast<int>(hidden_size), static_cast<int>(inter_size),
-                   static_cast<int>(block_size), fc2_zero_points != nullptr);
+                   static_cast<int>(block_size), fc2_zero_points != nullptr) ^
+      burst_key;
   const QmoeCfg c2 = qmoe_tune_pick(g_qmoe_fc2_dp4a_state, key2, &s2);
   {
     hipEvent_t me0 = nullptr, me1 = nullptr;
     if (s2 >= 0) { hipEventCreate(&me0); hipEventCreate(&me1); hipEventRecord(me0, s); }
     hipError_t e = dispatch_qmoe_fc2_dp4a(
-        c2.bs, c2.tn, s, static_cast<int>(k), a_qb_mid, a_scale_mid,
+        c2.bs, c2.tn, s, slots, a_qb_mid, a_scale_mid,
         expert_indices, expert_weights, fc2_weights, fc2_scales,
         fc2_zero_points, fc2_bias, slot_buf, static_cast<int>(inter_size),
         static_cast<int>(hidden_size), n_blk_mid, static_cast<int>(block_size));
@@ -2105,10 +2126,11 @@ extern "C" int hip_qmoe_decode_fused_dp4a(
     }
   }
 
-  // Reduce: output[n] = sum over slot of slot_buf[slot, n].
+  // Reduce: output[t, n] = sum over token t's k slots of slot_buf[slot, n].
   {
     int grid = static_cast<int>((hidden_size + kBlock - 1) / kBlock);
-    hipLaunchKernelGGL(qmoe_decode_reduce_kernel, dim3(grid), dim3(kBlock), 0, s,
+    hipLaunchKernelGGL(qmoe_decode_reduce_kernel,
+                       dim3(grid, static_cast<unsigned>(T)), dim3(kBlock), 0, s,
                        static_cast<const __half*>(slot_buf),
                        static_cast<__half*>(output),
                        static_cast<int>(hidden_size), static_cast<int>(k));
