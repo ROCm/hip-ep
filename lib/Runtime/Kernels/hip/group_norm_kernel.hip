@@ -38,15 +38,19 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 
 namespace {
 
 constexpr int kBlock = 256;
 // Below this many elements per group the fused kernel's launch saving beats
-// the parallelism of the split path.
+// the parallelism of the split path. HIPDNN_EP_GROUPNORM_SPLIT_SIZE overrides
+// it.
 constexpr int64_t kMinSplitCount = 16384;
-// Target resident blocks per reported unit (a CU, or a WGP on RDNA).
-constexpr int64_t kBlocksPerUnit = 16;
+// The split targets this many rounds of the blocks a unit (a CU, or a WGP on
+// RDNA) holds at once, so a unit that finishes its first round early still
+// has work.
+constexpr int64_t kResidentRounds = 2;
 // Each thread should stream at least this many vectors per split block.
 constexpr int64_t kMinVectorsPerThread = 4;
 // Partials per group. Bounds the workspace and the finalize merge length.
@@ -519,22 +523,49 @@ __global__ void __launch_bounds__(kBlock)
   }
 }
 
-int deviceUnitCount() {
-  constexpr int kMaxDevices = 64;
-  static int cached[kMaxDevices] = {};
+// The number of split blocks that keeps the current device busy.
+hipError_t splitTargetBlocks(int64_t &blocks) {
   int dev = 0;
-  if (hipGetDevice(&dev) != hipSuccess)
-    dev = 0;
-  if (dev >= 0 && dev < kMaxDevices && cached[dev] > 0)
-    return cached[dev];
-  hipDeviceProp_t prop{};
-  int units = 16; // assume a small part rather than over-split a big one
-  if (hipGetDeviceProperties(&prop, dev) == hipSuccess &&
-      prop.multiProcessorCount > 0)
-    units = prop.multiProcessorCount;
-  if (dev >= 0 && dev < kMaxDevices)
-    cached[dev] = units;
-  return units;
+  hipError_t err = hipGetDevice(&dev);
+  if (err != hipSuccess)
+    return err;
+  int units = 0, threadsPerUnit = 0;
+  err = hipDeviceGetAttribute(&units, hipDeviceAttributeMultiprocessorCount,
+                              dev);
+  if (err != hipSuccess)
+    return err;
+  err = hipDeviceGetAttribute(&threadsPerUnit,
+                              hipDeviceAttributeMaxThreadsPerMultiProcessor,
+                              dev);
+  if (err != hipSuccess)
+    return err;
+  if (units <= 0 || threadsPerUnit < kBlock)
+    return hipErrorInvalidDevice;
+  blocks = int64_t(units) * (threadsPerUnit / kBlock) * kResidentRounds;
+  return hipSuccess;
+}
+
+// Read once: the env lookup would otherwise run on every launch.
+int64_t minSplitCount() {
+  static const int64_t value = [] {
+    char buf[32] = {};
+#ifdef _WIN32
+    unsigned long len = GetEnvironmentVariableA(
+        "HIPDNN_EP_GROUPNORM_SPLIT_SIZE", buf, sizeof(buf));
+    if (len == 0 || len >= sizeof(buf))
+      return kMinSplitCount;
+#else
+    const char *v = getenv("HIPDNN_EP_GROUPNORM_SPLIT_SIZE");
+    if (!v)
+      return kMinSplitCount;
+    snprintf(buf, sizeof(buf), "%s", v);
+#endif
+    char *end = nullptr;
+    long long parsed = strtoll(buf, &end, 10);
+    return end != buf && *end == '\0' && parsed > 0 ? int64_t(parsed)
+                                                    : kMinSplitCount;
+  }();
+  return value;
 }
 
 int64_t ceilDiv(int64_t a, int64_t b) { return (a + b - 1) / b; }
@@ -599,11 +630,13 @@ void layoutPartials(Plan &plan, int64_t partials, int64_t spatial,
   }
 }
 
-// `aligned(v)` tells whether all tensors allow v-wide vector access.
+// `aligned(v)` tells whether all tensors allow v-wide vector access. Fails
+// only when the device cannot be queried.
 template <typename AlignFn>
-Plan makePlan(int64_t n, int64_t c, int64_t spatial, int64_t groups,
-              int channelsLast, int elemSize, AlignFn aligned) {
-  Plan plan;
+hipError_t makePlan(int64_t n, int64_t c, int64_t spatial, int64_t groups,
+                    int channelsLast, int elemSize, AlignFn aligned,
+                    Plan &plan) {
+  plan = Plan{};
   const int64_t cpg = c / groups;
   const int64_t groupSize = cpg * spatial;
   int vec = 16 / elemSize;
@@ -612,10 +645,12 @@ Plan makePlan(int64_t n, int64_t c, int64_t spatial, int64_t groups,
     vec /= 2;
   plan.vec = vec;
 
-  if (groupSize < kMinSplitCount || cpg > INT32_MAX)
-    return plan;
+  if (groupSize < minSplitCount() || cpg > INT32_MAX)
+    return hipSuccess;
 
-  const int64_t targetBlocks = int64_t(deviceUnitCount()) * kBlocksPerUnit;
+  int64_t targetBlocks = 0;
+  if (hipError_t err = splitTargetBlocks(targetBlocks); err != hipSuccess)
+    return err;
   int64_t partials;
   int64_t maxPartials = kMaxPartials;
   if (channelsLast) {
@@ -654,7 +689,7 @@ Plan makePlan(int64_t n, int64_t c, int64_t spatial, int64_t groups,
   partials = std::max<int64_t>(1, std::min(partials, maxPartials));
   layoutPartials(plan, partials, spatial, groupSize, channelsLast);
   plan.split = true;
-  return plan;
+  return hipSuccess;
 }
 
 // Shrinks the split so that its partials fit in `bytes`, or falls back to the
@@ -804,8 +839,12 @@ extern "C" size_t hip_group_norm_workspace_bytes(int64_t n, int64_t c,
   int elemSize = elemSizeOf(hip_dtype);
   if (elemSize == 0)
     return 0;
-  Plan plan = makePlan(n, c, spatial, groups, channels_last, elemSize,
-                       [](int) { return true; });
+  // A failed device query leaves the plan unsplit; hip_group_norm then
+  // reports the same failure.
+  Plan plan;
+  if (makePlan(n, c, spatial, groups, channels_last, elemSize,
+               [](int) { return true; }, plan) != hipSuccess)
+    return 0;
   return workspaceBytesFor(plan, n * groups, accSizeOf(hip_dtype));
 }
 
@@ -832,8 +871,15 @@ extern "C" int hip_group_norm(void *stream, const void *input,
              reinterpret_cast<uintptr_t>(output)) &
             mask) == 0;
   };
-  Plan plan =
-      makePlan(n, c, spatial, groups, channels_last, elemSize, aligned);
+  Plan plan;
+  if (hipError_t err = makePlan(n, c, spatial, groups, channels_last,
+                                elemSize, aligned, plan);
+      err != hipSuccess) {
+    fprintf(stderr,
+            "[custom_kernels] hip_group_norm: device query failed: %s\n",
+            hipGetErrorString(err));
+    return static_cast<int>(err);
+  }
   if (!workspace)
     workspace_bytes = 0;
   fitWorkspace(plan, n * groups, accSizeOf(hip_dtype), workspace_bytes,
