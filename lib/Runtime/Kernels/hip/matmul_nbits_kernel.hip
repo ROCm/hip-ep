@@ -5107,7 +5107,8 @@ static constexpr bool wmmaConfigIsExt(const WmmaConfig& c) { return c.ext; }
 // Measured prefill winners, reachable only through a LUT that names them; see
 // "Extended WMMA entries" in docs/design/custom_kernel_design.md. (geometry,
 // swizzle, variant) must be unique among them so the LUT can name each one
-// (checked below).
+// (checked below). The swizzle is a launch argument, so entries that differ
+// only in it share one set of kernels.
 #define WMMA_EXT_CONFIGS(X)                     \
     X( 32,  32, 1, 2, 64,   0,  4)              \
     X(128,  64, 2, 4, 64,   3,  4)              \
@@ -5136,7 +5137,15 @@ static constexpr bool wmmaConfigIsExt(const WmmaConfig& c) { return c.ext; }
     X(128, 128, 4, 4, 32,  65,  4)              \
     X(128, 128, 2, 4, 32,  33,  4)              \
     X(128, 256, 2, 4, 32,  94,  4)              \
-    X(128, 128, 4, 4, 32,  33,  4)
+    X(128, 128, 4, 4, 32,  33,  4)              \
+    X(128, 128, 2, 4, 64,  67, 16)              \
+    X(128,  64, 2, 4, 64, 131,  8)              \
+    X(128, 128, 2, 4, 64,  94,  8)              \
+    X(128, 128, 4, 4, 32, 100,  1)              \
+    X(128, 128, 4, 4, 32, 196, 16)              \
+    X(128, 128, 4, 4, 32,   3,  1)              \
+    X(128, 128, 2, 4, 64, 225,  1)              \
+    X(128,  64, 2, 4, 64,   3,  1)
 
 static constexpr WmmaConfig kWmmaConfigs[] = {
     // --- fused dequant + GEMM ---

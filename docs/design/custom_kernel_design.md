@@ -289,6 +289,8 @@ Four execution paths, auto-dispatched by shape:
 | 64 | XOR-swizzle 16-byte LDS chunks instead of padding rows |
 | 128 | CU mode: the kernel's waves share one CU and its half of the LDS instead of spreading over the WGP |
 
+An entry's swizzle (`WmmaConfig::swizzle_n`) is the tile-mapping width, a launch argument: groups of that many N-tiles are walked down all M-tiles (1 is plain row-major), which decides whether a group's B columns or the current A rows are reused from cache. Entries that differ only in it run the same kernels, so a width costs no build size.
+
 What the measurements behind these options showed (gfx1151, int4 prefill shapes of the models used to build its table):
 
 - Once B rows are padded (the per-call repack for aliasing strides), the fused dequant VALU work limits int4 at large M. Options that let the next tile's dequant overlap the current WMMAs (store-first, two-deep prefetch) help most. Moving dequant later, by keeping int4 B in LDS and dequantizing at fragment load, did not help.
