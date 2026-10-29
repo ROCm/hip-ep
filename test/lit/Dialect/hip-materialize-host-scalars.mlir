@@ -240,3 +240,63 @@ func.func @no_context_arg_left_alone(%x: i64) -> i64 {
   memref.dealloc %a : memref<i64>
   return %v : i64
 }
+
+// --- Inline constant global read by a hip op: the folded `Shape(ids)[1]`
+//     of Whisper decoder_with_past, added on the GPU to the past length. The
+//     global lowers to host JIT-module storage, so it MUST be replaced by a
+//     host-filled scratch view. It lands after the alloc candidate. ---
+memref.global "private" constant @__constant_xi64 : memref<i64> = dense<1>
+// CHECK-LABEL: func.func @constant_global_hip_consumer
+// CHECK-SAME:    (%[[CTX:.*]]: !hip.context
+// CHECK:         %[[SCRATCH:.*]] = hip.get_host_scratch(%[[CTX]], %c128)
+// CHECK:         %[[A:.*]] = memref.view %[[SCRATCH]][%c0{{.*}}][] : memref<?xi8> to memref<i64>
+// CHECK-NOT:     memref.get_global
+// CHECK:         %[[G:.*]] = memref.view %[[SCRATCH]][%c64{{.*}}][] : memref<?xi8> to memref<i64>
+// CHECK:         %[[ONE:.*]] = arith.constant 1 : i64
+// CHECK:         memref.store %[[ONE]], %[[G]][] : memref<i64>
+// CHECK:         hip.add(%[[CTX]]) ins(%[[A]], %[[G]] : memref<i64>, memref<i64>)
+func.func @constant_global_hip_consumer(%ctx: !hip.context, %x: i64,
+                                        %out: memref<i64>) {
+  %a = memref.alloc() : memref<i64>
+  memref.store %x, %a[] : memref<i64>
+  %g = memref.get_global @__constant_xi64 : memref<i64>
+  hip.add(%ctx) ins(%a, %g : memref<i64>, memref<i64>) outs(%out : memref<i64>)
+  return
+}
+
+// --- A non-splat constant is stored element by element. ---
+memref.global "private" constant @__constant_2xi64 : memref<2xi64> = dense<[7, -3]>
+// CHECK-LABEL: func.func @constant_global_vector
+// CHECK:         %[[G:.*]] = memref.view %{{.*}} : memref<?xi8> to memref<2xi64>
+// CHECK:         %[[V0:.*]] = arith.constant 7 : i64
+// CHECK:         memref.store %[[V0]], %[[G]][%c0{{.*}}] : memref<2xi64>
+// CHECK:         %[[V1:.*]] = arith.constant -3 : i64
+// CHECK:         memref.store %[[V1]], %[[G]][%c1{{.*}}] : memref<2xi64>
+// CHECK:         hip.cast{{.*}} ins(%[[G]] : memref<2xi64>)
+func.func @constant_global_vector(%ctx: !hip.context, %out: memref<2xi32>) {
+  %g = memref.get_global @__constant_2xi64 : memref<2xi64>
+  hip.cast(%ctx) ins(%g : memref<2xi64>) outs(%out : memref<2xi32>) {to = 6 : i64}
+  return
+}
+
+// --- A constant global only the host reads stays a global. ---
+// CHECK-LABEL: func.func @constant_global_host_only_left_alone
+// CHECK-NOT:   hip.get_host_scratch
+// CHECK:       memref.get_global @__constant_xi64
+func.func @constant_global_host_only_left_alone(%ctx: !hip.context) -> i64 {
+  %g = memref.get_global @__constant_xi64 : memref<i64>
+  %v = memref.load %g[] : memref<i64>
+  return %v : i64
+}
+
+// --- An externalized constant is uploaded to the device by the runtime and
+//     must not be touched. ---
+memref.global "private" @hip_ext_constant_0 : memref<i64> {hip.external_data = {index = 0 : i64, offset = 0 : i64, size = 8 : i64}}
+// CHECK-LABEL: func.func @external_global_left_alone
+// CHECK-NOT:   hip.get_host_scratch
+// CHECK:       memref.get_global @hip_ext_constant_0
+func.func @external_global_left_alone(%ctx: !hip.context, %out: memref<i32>) {
+  %g = memref.get_global @hip_ext_constant_0 : memref<i64>
+  hip.cast(%ctx) ins(%g : memref<i64>) outs(%out : memref<i32>) {to = 6 : i64}
+  return
+}

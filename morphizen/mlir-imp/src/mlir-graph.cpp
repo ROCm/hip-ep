@@ -244,7 +244,9 @@ void MLIRGraph::initialize_node_args_map() {
   MY_LOG(1) << "Initializing node args map and constant initializers";
   // Walk all operations and extract their results. Block::walk does not
   // include the parent op, so no need to skip the FuncOp self-visit anymore.
-  entry_block_->walk([&](mlir::Operation *op) {
+  // Pre-order so a region-bearing op (If/Loop/Scan) claims its result names
+  // before same-named values inside its bodies; emplace keeps the first.
+  entry_block_->walk<mlir::WalkOrder::PreOrder>([&](mlir::Operation *op) {
     // Skip return operations (terminators) - both onnx.Return and func.return
     if (onnx_mlir::isReturnOp(op)) {
       return;
@@ -669,12 +671,19 @@ MLIRNodeArgIndex MLIRGraph::get_node_arg_index(const std::string &name) const {
   // the local map answers next time and resolve(true) sees the binding.
   // const_cast: the lazy alias mutates node_args_map_ / value_map_ behind a
   // logically-const view.
+  //
+  // An outer NodeArg without a Value has not been produced yet (e.g. the
+  // owning If/Loop's own outputs, which are declared before its bodies are
+  // imported), so it cannot be a capture. A body value with the same name
+  // shadows it and must resolve locally instead.
   if (parent_graph_ != nullptr) {
     auto outer = parent_graph_->get_node_arg_index(name);
     if (outer.is_valid()) {
-      auto outer_value = outer.get_node_arg().getValue();
-      const_cast<MLIRGraph *>(this)->register_captured_alias(name, outer_value);
-      return node_args_map_.at(name);
+      if (auto outer_value = outer.get_node_arg().getValue()) {
+        const_cast<MLIRGraph *>(this)->register_captured_alias(name,
+                                                               outer_value);
+        return node_args_map_.at(name);
+      }
     }
   }
   return MLIRNodeArgIndex::invalid();
@@ -794,6 +803,11 @@ MLIRGraph::add_node(const std::string &name, const std::string &op_type,
       if (auto mlir_value = input_node_arg->getValue()) {
         mlir_input_args.push_back(mlir_value);
         continue;
+      }
+      if (!input.get_name().empty()) {
+        LOG(WARNING) << "add_node: input '" << input.get_name() << "' of "
+                     << op_type << " '" << name
+                     << "' has no producer; substituting none";
       }
     }
     mlir_input_args.push_back(none_->getResult(0));
