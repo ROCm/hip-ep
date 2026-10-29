@@ -57,13 +57,17 @@ __global__ void gather_rows_vec_kernel(const uint4* __restrict__ data,
                                        uint32_t indices_num,
                                        uint32_t total_vecs) {
   uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-  if (tid >= total_vecs) return;
+  if (tid >= total_vecs) {
+    return;
+  }
   uint32_t v = tid % vecs_per_row;
   uint32_t row = tid / vecs_per_row;
   uint32_t idx_off = row % indices_num;
   uint32_t outer_off = row / indices_num;
   int64_t index_val = static_cast<int64_t>(indices[idx_off]);
-  if (index_val < 0) index_val += axis_size;
+  if (index_val < 0) {
+    index_val += axis_size;
+  }
   if (index_val < 0 || index_val >= axis_size) {
     output[tid] = make_uint4(0, 0, 0, 0);
     return;
@@ -157,7 +161,9 @@ extern "C" int hip_gather(
   const int64_t row_bytes = inner_size * element_size_bytes;
   const int64_t data_vecs = data_num_elements * element_size_bytes / 16;
   const int64_t out_vecs = output_num_elements * element_size_bytes / 16;
-  if (row_bytes % 16 == 0 &&
+  if ((element_size_bytes == 2 || element_size_bytes == 4 ||
+       element_size_bytes == 8) &&
+      row_bytes % 16 == 0 &&
       reinterpret_cast<uintptr_t>(data) % 16 == 0 &&
       reinterpret_cast<uintptr_t>(output) % 16 == 0 &&
       data_vecs <= static_cast<int64_t>(UINT32_MAX) &&

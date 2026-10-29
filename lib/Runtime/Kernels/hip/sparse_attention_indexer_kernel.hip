@@ -794,7 +794,8 @@ hipError_t launchAll(hipStream_t stream, const Layout &l, const T *query,
           : 0;
   constexpr int kWide = 16 / sizeof(T);
   const bool wide = ((reinterpret_cast<uintptr_t>(query) |
-                      reinterpret_cast<uintptr_t>(past_key) |
+                      (past_len > 0 ? reinterpret_cast<uintptr_t>(past_key)
+                                    : 0) |
                       reinterpret_cast<uintptr_t>(present)) %
                      16) == 0;
   const unsigned present_blocks = gridFor(
@@ -912,7 +913,8 @@ extern "C" int hip_sparse_attention_indexer(
   const uintptr_t vec_align = 4u * static_cast<unsigned>(element_size_bytes);
   if (reinterpret_cast<uintptr_t>(query) % vec_align != 0 ||
       reinterpret_cast<uintptr_t>(present_key) % vec_align != 0 ||
-      reinterpret_cast<uintptr_t>(past_key) % vec_align != 0) {
+      (past_len > 0 &&
+       reinterpret_cast<uintptr_t>(past_key) % vec_align != 0)) {
     fprintf(stderr, "[custom_kernels] hip_sparse_attention_indexer: query, "
                     "past_key and present_key must be aligned to 4 "
                     "elements\n");

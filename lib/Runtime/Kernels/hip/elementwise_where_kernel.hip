@@ -88,8 +88,9 @@ __global__ void where_suffix_vec_kernel(const bool *__restrict__ condition,
                                         uint32_t cond_numel) {
   constexpr int kVec = 16 / sizeof(T);
   uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-  if (tid >= total_vecs)
+  if (tid >= total_vecs) {
     return;
+  }
   const uint32_t c0 = (tid * kVec) % cond_numel;
   uint4 xv = x[tid];
   uint4 yv = y[tid];
@@ -168,7 +169,7 @@ static int launch_where(hipStream_t stream, const void *condition,
   constexpr int kBlockSize = 256;
   constexpr int64_t kVec = 16 / sizeof(T);
   if (suffix_cond_numel > 0 && suffix_cond_numel % kVec == 0 &&
-      total % kVec == 0 && total / kVec <= static_cast<int64_t>(UINT32_MAX) &&
+      total % kVec == 0 && total <= static_cast<int64_t>(UINT32_MAX) &&
       reinterpret_cast<uintptr_t>(x) % 16 == 0 &&
       reinterpret_cast<uintptr_t>(y) % 16 == 0 &&
       reinterpret_cast<uintptr_t>(output) % 16 == 0) {

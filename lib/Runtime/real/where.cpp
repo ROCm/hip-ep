@@ -39,8 +39,9 @@ int wrap_where(RuntimeState *state, void *condition, void *x, void *y,
       "where",
       [&] {
         int64_t n = 1;
-        for (int64_t i = 0; i < out_rank; ++i)
+        for (int64_t i = 0; i < out_rank; ++i) {
           n *= out_shape[i];
+        }
         char b[64];
         snprintf(b, sizeof(b), "n=%lld:c%lld", (long long)n,
                  (long long)cond_rank);
