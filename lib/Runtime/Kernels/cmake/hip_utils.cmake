@@ -446,6 +446,10 @@ function(hip_add_executable TARGET_NAME)
 
         # Create custom target for HIP compilation
         add_custom_target(${TARGET_NAME}_hip_compile DEPENDS ${hip_objs})
+        # hipcc runs under this target, so generated headers must precede it.
+        if(ARG_DEPENDS)
+            add_dependencies(${TARGET_NAME}_hip_compile ${ARG_DEPENDS})
+        endif()
 
         # Create executable (empty source, objects added)
         file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/${TARGET_NAME}_dummy.cpp" "// Auto-generated\n")
@@ -543,6 +547,10 @@ function(hip_add_library TARGET_NAME)
 
         # Create custom target for HIP compilation
         add_custom_target(${TARGET_NAME}_hip_compile DEPENDS ${hip_objs})
+        # hipcc runs under this target, so generated headers must precede it.
+        if(ARG_DEPENDS)
+            add_dependencies(${TARGET_NAME}_hip_compile ${ARG_DEPENDS})
+        endif()
 
         # For shared libraries, we need a dummy C++ file to ensure proper CRT linkage
         if(ARG_SHARED)
