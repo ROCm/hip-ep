@@ -109,6 +109,9 @@ int main(int argc, char **argv) {
   // the tool and the EP.
   mlir::hip::registerHipBufferizableOpInterfaceModels(registry);
   mlir::hipsr::registerBufferizableOpInterfaceExternalModels(registry);
+  // Same as hip::compiler::registerAllDialects: the hip.cast canonicalizer
+  // needs the tensor view ops' ElementMoveOpInterface models.
+  mlir::hip::registerElementMoveExternalModels(registry);
 
   // Registers every nameable HIP / pipeline / standard-MLIR pass the tool and
   // the EP share. Defined once (InitAllPasses.h) so the two never drift; see
