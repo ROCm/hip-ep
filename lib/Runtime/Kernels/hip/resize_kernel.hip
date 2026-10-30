@@ -165,15 +165,66 @@ __device__ inline float fetch(const T* base, int64_t i0, int64_t i1, int64_t i2,
 }
 
 template <typename T>
-__global__ void resize_linear_kernel(const T* __restrict__ input,
-                                     T* __restrict__ output,
-                                     int spatial_rank,
-                                     int64_t N, int64_t C,
-                                     int64_t in0, int64_t in1, int64_t in2,
-                                     int64_t out0, int64_t out1, int64_t out2,
-                                     int coord_transform,
-                                     float s0, float s1, float s2,
-                                     int64_t total_outputs) {
+__device__ inline float fetch_2d(const T* base, int64_t i0, int64_t i1,
+                                 int64_t in0, int64_t in1) {
+  if (i0 < 0) i0 = 0;
+  if (i0 >= in0) i0 = in0 - 1;
+  if (i1 < 0) i1 = 0;
+  if (i1 >= in1) i1 = in1 - 1;
+  return to_float<T>(base[i0 * in1 + i1]);
+}
+
+// Bilinear Resize over two spatial axes. Keep this separate from the
+// trilinear implementation so rank-2 Resize does not calculate an unused
+// third coordinate or fetch duplicate corners along a unit axis.
+template <typename T>
+__global__ void resize_linear_2d_kernel(const T* __restrict__ input,
+                                        T* __restrict__ output,
+                                        int64_t N, int64_t C,
+                                        int64_t in0, int64_t in1,
+                                        int64_t out0, int64_t out1,
+                                        int coord_transform, float s0,
+                                        float s1, int64_t total_outputs) {
+  int64_t tid = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (tid >= total_outputs) return;
+
+  int64_t plane = out0 * out1;
+  int64_t n = tid / (C * plane);
+  int64_t rem = tid - n * C * plane;
+  int64_t c = rem / plane;
+  rem -= c * plane;
+  int64_t o0 = rem / out1;
+  int64_t o1 = rem - o0 * out1;
+
+  float x0 = coord_to_input(static_cast<int>(o0), static_cast<int>(out0),
+                            static_cast<int>(in0), coord_transform, s0);
+  float x1 = coord_to_input(static_cast<int>(o1), static_cast<int>(out1),
+                            static_cast<int>(in1), coord_transform, s1);
+  int64_t lo0 = static_cast<int64_t>(floorf(x0));
+  int64_t lo1 = static_cast<int64_t>(floorf(x1));
+  float t0 = x0 - static_cast<float>(lo0);
+  float t1 = x1 - static_cast<float>(lo1);
+
+  const T* base = input + (n * C + c) * (in0 * in1);
+  float c00 = fetch_2d(base, lo0, lo1, in0, in1);
+  float c01 = fetch_2d(base, lo0, lo1 + 1, in0, in1);
+  float c10 = fetch_2d(base, lo0 + 1, lo1, in0, in1);
+  float c11 = fetch_2d(base, lo0 + 1, lo1 + 1, in0, in1);
+  float c0 = c00 * (1.0f - t1) + c01 * t1;
+  float c1 = c10 * (1.0f - t1) + c11 * t1;
+  output[tid] = from_float<T>(c0 * (1.0f - t0) + c1 * t0);
+}
+
+template <typename T>
+__global__ void resize_linear_3d_kernel(const T* __restrict__ input,
+                                        T* __restrict__ output,
+                                        int spatial_rank,
+                                        int64_t N, int64_t C,
+                                        int64_t in0, int64_t in1, int64_t in2,
+                                        int64_t out0, int64_t out1,
+                                        int64_t out2, int coord_transform,
+                                        float s0, float s1, float s2,
+                                        int64_t total_outputs) {
   int64_t tid = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (tid >= total_outputs) return;
 
@@ -281,13 +332,22 @@ static int launch(hipStream_t stream, const void* input, void* output,
                        out0, out1, out2,
                        coord_transform, nearest_mode, s0, s1, s2, total);
   } else {
-    hipLaunchKernelGGL(resize_linear_kernel<T>,
-                       dim3(static_cast<unsigned>(grid)), dim3(block),
-                       0, stream,
-                       static_cast<const T*>(input), static_cast<T*>(output),
-                       spatial_rank, N, C, in0, in1, in2,
-                       out0, out1, out2,
-                       coord_transform, s0, s1, s2, total);
+    if (spatial_rank == 2) {
+      hipLaunchKernelGGL(resize_linear_2d_kernel<T>,
+                         dim3(static_cast<unsigned>(grid)), dim3(block),
+                         0, stream,
+                         static_cast<const T*>(input), static_cast<T*>(output),
+                         N, C, in0, in1, out0, out1, coord_transform, s0, s1,
+                         total);
+    } else {
+      hipLaunchKernelGGL(resize_linear_3d_kernel<T>,
+                         dim3(static_cast<unsigned>(grid)), dim3(block),
+                         0, stream,
+                         static_cast<const T*>(input), static_cast<T*>(output),
+                         spatial_rank, N, C, in0, in1, in2,
+                         out0, out1, out2,
+                         coord_transform, s0, s1, s2, total);
+    }
   }
 
   hipError_t err = hipGetLastError();
