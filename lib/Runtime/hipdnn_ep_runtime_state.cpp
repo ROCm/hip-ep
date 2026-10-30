@@ -554,6 +554,8 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->seqlens_k_cached_valid = false;
   state->seqlens_k_cached_val = 0;
   state->seqlens_k_cached_ptr = nullptr;
+  state->seqlens_hint_total = -1;
+  state->seqlens_hint_advanced = false;
   state->loop_iter_cpu_buf = nullptr;
   state->loop_iter_capacity = 0;
   state->loop_iter_dev = nullptr;
@@ -1428,6 +1430,7 @@ extern "C"
   }
   state->seqlens_k_cached_valid = false;
   state->seqlens_k_cached_ptr = nullptr;
+  state->seqlens_hint_advanced = false;
   // Publish the session stream for ABI-fixed helpers (memrefCopy) that run
   // before/within main_graph and otherwise default to stream 0.
   hipdnn_ep_set_current_stream(static_cast<void *>(state->stream));

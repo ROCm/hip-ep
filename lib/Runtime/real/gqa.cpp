@@ -165,7 +165,24 @@ static int32_t read_seqlens_k_for_dispatch(hipStream_t stream,
     state->seqlens_k_cached_ptr = seqlens_k_ptr;
     state->seqlens_k_cached_valid = true;
   }
+  if (state) {
+    state->seqlens_hint_total =
+        seqlens_k_val >= 0 ? static_cast<int64_t>(seqlens_k_val) + 1 : -1;
+    state->seqlens_hint_advanced = true;
+  }
   return seqlens_k_val;
+}
+
+// Estimated B == 1 total_seq for a decode that skips the blocking read: the
+// last real value advanced by sq once per forward pass. Only for choices that
+// cannot change results; -1 when nothing has been read yet.
+static int64_t seqlens_hint_advance(RuntimeState *state, int64_t sq) {
+  if (!state)
+    return -1;
+  if (!state->seqlens_hint_advanced && state->seqlens_hint_total > 0)
+    state->seqlens_hint_total += sq;
+  state->seqlens_hint_advanced = true;
+  return state->seqlens_hint_total;
 }
 
 // FA-2 split-K decode workspace capacity, in splits (matches gqa_kernel.hip).
@@ -362,8 +379,18 @@ static int gqa_forward_fused(
   const bool packed_qkv = (!key && !value);
 
   // B==1 pre-read (cached per Compute) feeds host past_len where needed.
+  // Decode over an in-place cache needs no host length -- the append, RoPE and
+  // attention kernels read seqlens_k on the device -- so it skips the blocking
+  // read and gives the tuning lookup the host estimate instead, paying the
+  // read only to seed that estimate.
+  const bool in_place_decode =
+      sq == 1 && B == 1 && seqlens_k_ptr && past_key && past_key == present_key;
+  const int64_t len_hint =
+      in_place_decode ? seqlens_hint_advance(state, sq) : -1;
   const int32_t seqlens_k_pre =
-      read_seqlens_k_for_dispatch(stream, seqlens_k_ptr, B, state);
+      (in_place_decode && len_hint > 0)
+          ? kSeqlensKNotRead
+          : read_seqlens_k_for_dispatch(stream, seqlens_k_ptr, B, state);
 
   const size_t Q_full_bytes = static_cast<size_t>(B) * sq * H * d * elem_sz;
   const size_t K_full_bytes = static_cast<size_t>(B) * sq * G * d * elem_sz;
@@ -526,14 +553,17 @@ static int gqa_forward_fused(
             use_smooth_softmax ? 1 : 0, kv_dtype,
             kv_quantized ? k_scale : nullptr, kv_quantized ? v_scale : nullptr);
       } else {
-        // B==1 already paid (and caches) the seqlens_k read above, so the LUT
-        // sees the length the kernel will actually scan without adding a sync.
+        // B==1 either paid (and caches) the seqlens_k read above or, for an
+        // in-place decode, carries the host estimate, so the LUT sees the
+        // length the kernel will scan without adding a sync.
         // For B>1 this is the host-known shape length, which is the upper
         // bound; the nearest-neighbour lookup answers it from the closest
         // measured length either way.
         int effective_skv = static_cast<int>(skv);
         if (seqlens_k_pre != kSeqlensKNotRead && seqlens_k_pre >= 0)
           effective_skv = seqlens_k_pre + 1;
+        else if (len_hint > 0)
+          effective_skv = static_cast<int>(std::min<int64_t>(len_hint, skv));
         const hipdnn_ep::GqaDecodeRequest request{
             kv_dtype,
             static_cast<int>(B),
@@ -1190,6 +1220,18 @@ cache_done:
   return &ins->second;
 }
 
+static int ensure_gqa_fp32_adapter_scratch(RuntimeState *state, size_t needed);
+
+// HIPDNN_EP_GQA_F32_DECODE=0 keeps fp32 sq == 1 on the score/softmax/value
+// GEMM chain instead of hip_gqa_decode_f32.
+static bool gqa_f32_decode_enabled() {
+  static const bool enabled = [] {
+    const char *v = std::getenv("HIPDNN_EP_GQA_F32_DECODE");
+    return !v || std::strcmp(v, "0") != 0;
+  }();
+  return enabled;
+}
+
 //===----------------------------------------------------------------------===//
 // 12-step hipBLASLt GQA pipeline (Step 0 + Steps 1-11; fp16 + fp32)
 //===----------------------------------------------------------------------===//
@@ -1215,6 +1257,82 @@ static int gqa_forward_hipblaslt(
     present_key = const_cast<void *>(past_key);
     present_value = const_cast<void *>(past_value);
     skv = past_buf_seq;
+  }
+
+  // Single-token decode over an in-place cache (or a KV-sharing layer reading
+  // another layer's cache) needs no host-side length: the K RoPE, the append
+  // and hip_gqa_decode_f32 all take it from seqlens_k on the device. Skipping
+  // the blocking readback keeps the GPU queue fed across the layer. Only the
+  // split grid is planned on the host, from the length estimate, which the
+  // kernel does not rely on for correctness.
+  {
+    const bool rope = do_rotary && cos_cache && sin_cache;
+    const bool aligned =
+        ((reinterpret_cast<uintptr_t>(query) |
+          reinterpret_cast<uintptr_t>(present_key) |
+          reinterpret_cast<uintptr_t>(present_value) |
+          reinterpret_cast<uintptr_t>(output) |
+          reinterpret_cast<uintptr_t>(rope ? cos_cache : nullptr) |
+          reinterpret_cast<uintptr_t>(rope ? sin_cache : nullptr)) %
+         16) == 0;
+    const bool present_copy_needed = reuse_past_kv && out_present_key &&
+                                     out_present_seq > 0 &&
+                                     out_present_key != past_key;
+    if (sq == 1 && B == 1 && seqlens_k_ptr && past_key && !no_causal &&
+        (reuse_past_kv || (past_key == present_key && key && value)) &&
+        !present_copy_needed && !attention_bias && !head_sink &&
+        !use_smooth_softmax &&
+        (element_size_bytes == 2 || element_size_bytes == 4) && aligned &&
+        gqa_f32_decode_enabled() &&
+        hip_gqa_decode_f32_supported(static_cast<int>(H), static_cast<int>(G),
+                                     static_cast<int>(d), rope ? 1 : 0)) {
+      const int elem = static_cast<int>(element_size_bytes);
+      if (!reuse_past_kv) {
+        const void *kSrc = key;
+        if (rope) {
+          const size_t k_bytes = static_cast<size_t>(G) * d * elem;
+          if (hipdnn_ep_state_ensure_workspace(state, k_bytes) != 0)
+            return -1;
+          void *k_roped = hipdnn_ep_state_get_workspace(state);
+          if (hip_gqa_rope(stream, key, k_roped, cos_cache, sin_cache, 1, 1,
+                           static_cast<int>(G), static_cast<int>(d),
+                           static_cast<int>(d / 2), /*past_len=*/0,
+                           seqlens_k_ptr, elem) != 0)
+            return -1;
+          kSrc = k_roped;
+        }
+        if (update_kv_cache(
+                stream, past_key, past_value, kSrc, value, present_key,
+                present_value, 1, /*past_len=*/0, 1, static_cast<int>(G),
+                static_cast<int>(d), static_cast<int>(past_buf_seq),
+                static_cast<int>(skv), seqlens_k_ptr, elem,
+                /*copy_lo=*/0, /*no_causal=*/false, /*skv=*/-1,
+                KvCacheFormat::Fp16, nullptr, nullptr, kv_bnsd) != 0)
+          return -1;
+      }
+      const int64_t hint = seqlens_hint_advance(state, sq);
+      int64_t plan_len = hint > 0 ? std::min(hint, skv) : skv;
+      if (local_window_size > 0)
+        plan_len = std::min(plan_len, local_window_size);
+      const size_t part_bytes = hip_gqa_decode_f32_partial_bytes(
+          1, static_cast<int>(H), static_cast<int>(d),
+          static_cast<int>(plan_len));
+      if (part_bytes && ensure_gqa_fp32_adapter_scratch(state, part_bytes) != 0)
+        return -1;
+      const int rc = hip_gqa_decode_f32(
+          stream, query, present_key, present_value, output,
+          part_bytes ? state->gqa_fp32_adapter_scratch : nullptr, 1,
+          static_cast<int>(H), static_cast<int>(G), static_cast<int>(d), skv,
+          static_cast<int>(plan_len), scale, rope ? cos_cache : nullptr,
+          rope ? sin_cache : nullptr, /*rope_pos=*/0, seqlens_k_ptr,
+          local_window_size > 0 ? static_cast<int>(local_window_size) : 0,
+          element_size_bytes == 2 ? 1 : 0);
+      RUNTIME_DEBUG_LOG("[REAL] GQA device-length decode rc=%d d=%lld "
+                        "window=%lld plan_len=%lld reuse=%d\n",
+                        rc, (long long)d, (long long)local_window_size,
+                        (long long)plan_len, static_cast<int>(reuse_past_kv));
+      return rc == 0 ? 0 : -1;
+    }
   }
 
   // Bidirectional no-past path. The discriminator is the ABSENCE of a past KV
@@ -2279,6 +2397,15 @@ static int gqa_forward_hipblaslt(
       vSrc = d_Vsplit;
     }
 
+    // Decode may take hip_gqa_decode_f32 in place of Steps 8-10 (see below);
+    // that kernel can also apply the Q RoPE itself. fp16 lands here only for
+    // what the fused path does not template (d = 512, zero-length new KV).
+    const bool try_f32_decode =
+        sq == 1 && (gemm_fp32 || elem_sz == 2) && use_no_expand &&
+        !attention_bias && !head_sink && !use_smooth_softmax &&
+        chunks.size() == 1 && chunks[0].kv_off == 0 && gqa_f32_decode_enabled();
+    const bool defer_q_rope = need_rope && try_f32_decode && d >= 256;
+
     // ---- Steps 1-2: RoPE (optional) ----
     // Reads qSrc/kSrc so packed-QKV split output feeds RoPE; V is never RoPE'd.
     if (need_rope) {
@@ -2286,12 +2413,14 @@ static int gqa_forward_hipblaslt(
       void *d_Qroped = ws + off_Qroped;
       void *d_Kroped = ws + off_Kroped;
 
-      HIP_CHECK(hip_gqa_rope(stream, qSrc, d_Qroped, cos_cache, sin_cache,
-                             static_cast<int>(B), static_cast<int>(sq),
-                             static_cast<int>(H), static_cast<int>(d), half_rot,
-                             static_cast<int>(past_len), nullptr,
-                             static_cast<int>(elem_sz)));
-      qSrc = d_Qroped;
+      if (!defer_q_rope) {
+        HIP_CHECK(hip_gqa_rope(stream, qSrc, d_Qroped, cos_cache, sin_cache,
+                               static_cast<int>(B), static_cast<int>(sq),
+                               static_cast<int>(H), static_cast<int>(d),
+                               half_rot, static_cast<int>(past_len), nullptr,
+                               static_cast<int>(elem_sz)));
+        qSrc = d_Qroped;
+      }
       if (!reuse_past_kv) {
         HIP_CHECK(hip_gqa_rope(stream, kSrc, d_Kroped, cos_cache, sin_cache,
                                static_cast<int>(B), static_cast<int>(sq),
@@ -2420,7 +2549,6 @@ static int gqa_forward_hipblaslt(
     const void *scoreA =
         (use_no_expand ? static_cast<const char *>(present_key) + kv_byte_off
                        : static_cast<const char *>(d_Kexp));
-    const void *scoreBBase = need_transpose ? d_Qtrans : qSrc;
     const void *valueA =
         (use_no_expand ? static_cast<const char *>(present_value) + kv_byte_off
                        : static_cast<const char *>(d_Vexp));
@@ -2429,7 +2557,50 @@ static int gqa_forward_hipblaslt(
     float beta = 0.0f;
     float valAlpha = 1.0f;
 
+    // fp32 decode: one flash-decode kernel instead of Steps 8-10. At sq == 1
+    // the narrowed key range is exactly the window and nothing is causal, so
+    // Step 9's mask writes nothing and can be dropped.
+    bool fused_f32_decode = false;
+    if (try_f32_decode) {
+      const size_t part_bytes = hip_gqa_decode_f32_partial_bytes(
+          static_cast<int>(B), static_cast<int>(H), static_cast<int>(d),
+          static_cast<int>(kv_span));
+      if (part_bytes == 0 ||
+          ensure_gqa_fp32_adapter_scratch(state, part_bytes) == 0) {
+        void *part = part_bytes ? state->gqa_fp32_adapter_scratch : nullptr;
+        const int rc = hip_gqa_decode_f32(
+            stream, qSrc, scoreA, valueA, output, part, static_cast<int>(B),
+            static_cast<int>(H), static_cast<int>(G), static_cast<int>(d),
+            static_cast<long long>(present_seq), static_cast<int>(kv_span),
+            scale, defer_q_rope ? cos_cache : nullptr,
+            defer_q_rope ? sin_cache : nullptr, static_cast<int>(past_len),
+            /*seqlens_k=*/nullptr, /*window=*/0, gemm_fp32 ? 0 : 1);
+        RUNTIME_DEBUG_LOG("[REAL] hip_gqa_decode_f32 rc=%d rope=%d "
+                          "kv_span=%lld\n",
+                          rc, static_cast<int>(defer_q_rope),
+                          (long long)kv_span);
+        if (rc == 0)
+          fused_f32_decode = true;
+        else if (rc != -2)
+          return -1;
+      }
+    }
+    // The GEMM chain below needs the rotated Q the fused kernel would have
+    // produced itself.
+    if (!fused_f32_decode && defer_q_rope) {
+      void *d_Qroped = ws + off_Qroped;
+      HIP_CHECK(hip_gqa_rope(
+          stream, qSrc, d_Qroped, cos_cache, sin_cache, static_cast<int>(B),
+          static_cast<int>(sq), static_cast<int>(H), static_cast<int>(d),
+          static_cast<int>(d / 2), static_cast<int>(past_len), nullptr,
+          static_cast<int>(elem_sz)));
+      qSrc = d_Qroped;
+    }
+    const void *scoreBBase = need_transpose ? d_Qtrans : qSrc;
+
     for (const GqaChunkPlan &cp : chunks) {
+      if (fused_f32_decode)
+        break;
       const int64_t q0 = cp.q0;
       const int64_t c = cp.c;
       // Key positions this chunk actually scores, and where they start.

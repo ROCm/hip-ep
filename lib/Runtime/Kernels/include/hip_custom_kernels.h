@@ -1191,6 +1191,37 @@ HIP_KERNEL_API int hip_gqa_softmax_f32_to_f32(
     int input_batch_stride, int output_batch_stride,
     const void* head_sink, int num_heads, int use_smooth_softmax);
 
+/* Single-query (sq == 1) GQA decode: out = softmax(scale * q K^T) V over keys
+ * [0, kv_len) of a BNSD cache. q / out are [B, H, D]; k_cache / v_cache point
+ * at key 0 of (b=0, g=0) and advance cache_seq * D elements per (b, g).
+ * `partial` must hold hip_gqa_decode_f32_partial_bytes() bytes (it may be null
+ * when that is 0). When rope_cos is non-null, q is rotated first with the
+ * non-interleaved RoPE of hip_gqa_rope at position rope_pos (half_rot = D / 2;
+ * tables are [pos, D / 2]). Returns -2 for geometries it does not implement
+ * (D not in {128, 256, 512}, RoPE at D = 128, too many heads per group,
+ * wave64, misalignment) so the caller can fall back; nothing has been launched
+ * in that case. q, the caches, out and the RoPE tables are fp32, or all fp16
+ * when fp16 != 0; accumulation is fp32 either way.
+ *
+ * With a non-null seqlens_k (int32 [B], device) the key range and RoPE
+ * position come from the device instead: total = seqlens_k[b] + 1, keys
+ * [max(0, total - window), total) for window > 0, else [0, total), q rotated
+ * at total - 1; rope_pos is ignored and kv_len only sizes the split grid (any
+ * value is correct, an accurate one is fastest). k_cache / v_cache then point
+ * at row 0. hip_gqa_decode_f32_partial_bytes must be given the same kv_len. */
+HIP_KERNEL_API size_t hip_gqa_decode_f32_partial_bytes(int B, int H, int D,
+                                                       int kv_len);
+HIP_KERNEL_API int hip_gqa_decode_f32_supported(int H, int G, int D, int rope);
+HIP_KERNEL_API int hip_gqa_decode_f32(void* stream, const void* q,
+                                      const void* k_cache, const void* v_cache,
+                                      void* out, void* partial, int B, int H,
+                                      int G, int D, long long cache_seq,
+                                      int kv_len, float scale,
+                                      const void* rope_cos,
+                                      const void* rope_sin, int rope_pos,
+                                      const void* seqlens_k, int window,
+                                      int fp16);
+
 /* Same as hip_gqa_softmax_f32_to_f32 / _f16, with the external additive mask
  * folded into the score read so a preceding hip_gqa_add_attention_bias_f32 pass
  * over the same buffer is not needed. output_fp32 picks the probability dtype
