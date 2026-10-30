@@ -565,7 +565,8 @@ int wrap_hipblasLtMatmulTyped(RuntimeState *state, int op_state_slot,
   // physical [N,K] weight layout directly. F32 decode uses this path only for
   // the measured small-N range; BF16-to-F32 decode uses the GEMV for N >=
   // 1024 and even K, and BF16-to-F32 with more rows the custom WMMA GEMM for
-  // K % 8 == 0. Every other shape retains tuned hipBLASLt.
+  // K % 8 == 0 when it fills the GPU (see useBf16F32TransposedBGemm). Every
+  // other shape retains tuned hipBLASLt.
   if (input_data_type == HIPDNN_EP_DATATYPE_FLOAT &&
       output_data_type == HIPDNN_EP_DATATYPE_FLOAT &&
       hipdnn_ep_real::useF32TransposedBDecodeGemv(
