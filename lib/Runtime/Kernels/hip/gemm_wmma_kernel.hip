@@ -519,6 +519,9 @@ extern "C" int hip_gemv_bf16_f32_transposed_b(void *stream, const void *A,
 
     const auto *input = static_cast<const __hip_bfloat162 *>(A);
     const auto *weight = static_cast<const __hip_bfloat162 *>(B);
+    // Clear an error an earlier HIP call left, so the status below is this
+    // launch's own.
+    (void)hipGetLastError();
     // gfx1151 benefits from more waves on long rows. Independent accumulator
     // chains hide dot-product latency while every wave contributes useful
     // work to the same output row.
@@ -546,6 +549,9 @@ extern "C" int hip_gemm_bf16_f32_transposed_b(void *stream, const void *A,
   const auto *input = static_cast<const uint16_t *>(A);
   const auto *weight = static_cast<const uint16_t *>(B);
   const auto hipStream = static_cast<hipStream_t>(stream);
+  // Clear an error an earlier HIP call left, so the status below is this
+  // launch's own.
+  (void)hipGetLastError();
   // 128 x 64 tiles keep eight waves busy on 2x2 WMMA tiles each for prompt-
   // sized M; short M takes 64 x 64 tiles so fewer rows are padding.
   if (M >= 128) {
