@@ -81,6 +81,15 @@ struct AutotuneOptions {
   // `log` because the per-candidate lines are one per config per kernel --
   // useful when tuning by hand, far too much for a normal compile.
   bool verbose = false;
+  // rocMLIR LUT FlatBuffer (.fb). Empty skips the lookup. Consulted before
+  // the search: an identical problem string is compiled as stored, and a conv
+  // miss takes the nearest legal gemm/attn tile. A tile that fails to compile
+  // is skipped for the next nearest row.
+  std::string problemCachePath;
+  // Where to write this compile's winners. Empty skips the dump. The autotuner
+  // does not write the file itself; hip-rocmlir-compiler calls
+  // dumpProblemCache when this is set.
+  std::string problemCacheDumpPath;
 };
 
 // Wall times accumulated by one autotuner. perfConfig compiles for the whole
@@ -116,6 +125,11 @@ public:
   void installInto(RocMlirEmbedOptions &opts);
 
   const AutotunePhaseTimes &phaseTimes() const;
+
+  // LUT JSON (configs, points, fallbacks), same document shape as the
+  // MatMulNBits and GQA tables. problem_cache_to_fb.py compiles it to a .fb.
+  // False when the device cannot be queried or the file cannot be written.
+  bool dumpProblemCache(StringRef path) const;
 
 private:
   struct Impl;

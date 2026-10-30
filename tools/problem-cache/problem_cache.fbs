@@ -1,0 +1,63 @@
+// Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+// Licensed under the MIT License.
+
+// rocMLIR conv/gemm offline autotune lookup table.
+//
+// Same document shape as the MatMulNBits and GQA LUTs: a JSON file checked by
+// review, compiled with `flatc --binary --strict-json` to a `.fb`. A lookup
+// matches the categorical fields of the rocMLIR problem string exactly, then
+// takes the nearest measured point in log space over the implicit GEMM
+// (M, N, K). Distance 0 is an exact hit, not a separate tier.
+//
+// The answer is a rocMLIR perfConfig string (`gemm:` / `attn:`), not a tile
+// enum. Those strings are de-duplicated into `configs` and referenced by
+// index, for the same reason the other tables de-duplicate their payloads:
+// many points share a few dozen winners.
+//
+// `problem` stays on the point so an identical problem string, including a
+// gemm key that has no conv geometry, is returned as stored. M/N/K are 0 on
+// those rows; they do not participate in a nearest borrow.
+
+namespace hipdnn_ep.rocmlir_autotune.fbs;
+
+table RocmlirTuneConfig {
+  perf_config: string;
+}
+
+table RocmlirTunePoint {
+  problem: string;
+  // Index into RocmlirAutotuneLut.configs.
+  config: uint16;
+  // Implicit GEMM of a conv problem. Zero when `problem` is not a conv.
+  m: uint32;
+  n: uint32;
+  k: uint32;
+}
+
+// Unused today. Present so the JSON document has the same three arrays as
+// the other LUTs; an empty list is the normal file.
+table RocmlirTuneFallback {
+  kind: string;
+  config: uint16;
+}
+
+table RocmlirAutotuneLut {
+  schema_version: uint32 = 1;
+  gpu_arch: string;         // e.g. "gfx1151"
+  rocm_version: int32;      // advisory; 0 when the dump does not know it
+  kernel_abi: string;       // "rocmlir-conv-v1"
+  model_key: string;
+
+  // d = sqrt( (wm*log2(M/Mp))^2 + (wn*log2(N/Np))^2 + (wk*log2(K/Kp))^2 )
+  // Stored in the table so a later fit does not require a code change.
+  weight_m: float = 1.0;
+  weight_n: float = 1.0;
+  weight_k: float = 1.0;
+
+  configs: [RocmlirTuneConfig];
+  points: [RocmlirTunePoint];
+  fallbacks: [RocmlirTuneFallback];
+}
+
+root_type RocmlirAutotuneLut;
+file_identifier "RCAL";
