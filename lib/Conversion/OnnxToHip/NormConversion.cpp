@@ -17,6 +17,8 @@
 //   - onnx.Custom(EngramGate, com.microsoft)            -> hip.engram_gate
 //   - onnx.Custom(SkipSimplifiedLayerNormalization)     -> hip.skip_rms_norm
 //   - onnx.Custom(SkipLayerNormalization)               -> add + layer_norm
+//   - onnx.Custom(EmbedLayerNormalization)              -> gather + add +
+//   layer_norm
 //   - onnx.LayerNormalization (standard, opset 17+)     -> hip.layer_norm
 //   - onnx.InstanceNormalization                        -> hip.instance_norm
 //   - onnx.BatchNormalization (inference)               -> hip.batch_norm
@@ -877,6 +879,325 @@ SkipLayerNormToHip::matchAndRewrite(mlir::Operation *op,
 }
 
 //===----------------------------------------------------------------------===//
+// onnx.Custom(EmbedLayerNormalization) -> gather + add + layer_norm
+//===----------------------------------------------------------------------===//
+
+/// com.microsoft.EmbedLayerNormalization -> hip.gather + hip.add +
+/// hip.layer_norm.
+///
+/// The contrib op looks up word, position, and optional segment rows, adds
+/// them, and applies standard LayerNorm. No fused hip op exists, so this
+/// composes the same ops SkipLayerNormalization already lowers to. hip ops are
+/// emitted directly: the greedy driver does not revisit a fresh onnx op.
+///
+///   word = Gather(word_embedding, input_ids, axis=0)
+///   pos  = Gather(position_embedding, position_ids or [0 .. S), axis=0)
+///   sum  = word + pos [+ Gather(segment_embedding, segment_ids)]
+///   Y    = LayerNorm(sum, gamma, beta, epsilon)
+///   mask_index[b] = number of ones in mask[b, :]   (0 when mask is absent)
+///   embedding_sum = sum                            (the pre-norm add)
+///
+/// epsilon defaults to 1e-12, the contrib-op default. The variance is reduced
+/// in f32 (stash_type 1), matching the other LayerNorm lowerings. A missing
+/// position-id input is the range `0 .. sequence-1`, which needs a static
+/// sequence length. mask_index matches the runtime count of ones, so a 0/1
+/// attention mask's row sum is that count.
+struct EmbedLayerNormToHip : public mlir::RewritePattern {
+  EmbedLayerNormToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override;
+};
+
+/// True when both extents are equal, or either one is still dynamic.
+static bool dimsAgree(int64_t lhs, int64_t rhs) {
+  return mlir::ShapedType::isDynamic(lhs) || mlir::ShapedType::isDynamic(rhs) ||
+         lhs == rhs;
+}
+
+/// Gather rows of a `[rows, hidden]` table with rank-2 i32 indices.
+/// The result shape is the index shape with `hidden` appended.
+static mlir::FailureOr<mlir::Value>
+gatherEmbeddingRows(mlir::PatternRewriter &rewriter, mlir::Location loc,
+                    mlir::Value context, mlir::Value table, mlir::Value indices,
+                    mlir::Type elemType, int64_t hidden) {
+  auto idxType = mlir::dyn_cast<mlir::RankedTensorType>(indices.getType());
+  auto tableType = mlir::dyn_cast<mlir::RankedTensorType>(table.getType());
+  if (!idxType || idxType.getRank() != 2 ||
+      !idxType.getElementType().isInteger(32) || !tableType ||
+      tableType.getRank() != 2 || tableType.getElementType() != elemType ||
+      tableType.getDimSize(1) != hidden)
+    return mlir::failure();
+
+  llvm::SmallVector<int64_t> shape(idxType.getShape().begin(),
+                                   idxType.getShape().end());
+  shape.push_back(hidden);
+  auto resultType = mlir::RankedTensorType::get(shape, elemType);
+  llvm::SmallVector<mlir::Value> dynSizes;
+  for (int64_t dim : llvm::seq<int64_t>(0, idxType.getRank())) {
+    if (resultType.isDynamicDim(dim))
+      dynSizes.push_back(
+          mlir::tensor::DimOp::create(rewriter, loc, indices, dim));
+  }
+  mlir::Value init = mlir::tensor::EmptyOp::create(
+      rewriter, loc, resultType.getShape(), elemType, dynSizes);
+  return mlir::hip::GatherOp::create(rewriter, loc, context, table, indices,
+                                     init,
+                                     rewriter.getI64IntegerAttr(/*axis=*/0))
+      .getResult(0);
+}
+
+mlir::LogicalResult
+EmbedLayerNormToHip::matchAndRewrite(mlir::Operation *op,
+                                     mlir::PatternRewriter &rewriter) const {
+  auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
+  if (!funcNameAttr || funcNameAttr.getValue() != "EmbedLayerNormalization")
+    return rewriter.notifyMatchFailure(
+        op, "not an EmbedLayerNormalization operation");
+
+  auto domainAttr = op->getAttrOfType<mlir::StringAttr>("domain_name");
+  if (!domainAttr || domainAttr.getValue() != "com.microsoft")
+    return rewriter.notifyMatchFailure(
+        op, "domain must be com.microsoft for EmbedLayerNormalization");
+
+  size_t numOps = op->getNumOperands();
+  unsigned numResults = op->getNumResults();
+  if (numOps < 7 || numOps > 9 || numResults < 1 || numResults > 3)
+    return rewriter.notifyMatchFailure(
+        op, "EmbedLayerNormalization expects 7-9 operands and 1-3 results");
+
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return rewriter.notifyMatchFailure(op, "missing context argument");
+  mlir::Value context = *ctxOrFailure;
+  mlir::Location loc = op->getLoc();
+
+  mlir::Value inputIds = getOptionalOperand(op, 0);
+  mlir::Value segmentIds = getOptionalOperand(op, 1);
+  mlir::Value wordEmbedding = getOptionalOperand(op, 2);
+  mlir::Value positionEmbedding = getOptionalOperand(op, 3);
+  mlir::Value segmentEmbedding = getOptionalOperand(op, 4);
+  mlir::Value gamma = getOptionalOperand(op, 5);
+  mlir::Value beta = getOptionalOperand(op, 6);
+  mlir::Value mask = getOptionalOperand(op, 7);
+  mlir::Value positionIds = getOptionalOperand(op, 8);
+  if (!inputIds || !wordEmbedding || !positionEmbedding || !gamma || !beta)
+    return rewriter.notifyMatchFailure(
+        op, "EmbedLayerNormalization is missing a required input");
+  if ((segmentIds && !segmentEmbedding) || (!segmentIds && segmentEmbedding))
+    return rewriter.notifyMatchFailure(
+        op, "segment ids and segment embedding must be provided together");
+
+  auto idType = mlir::dyn_cast<mlir::RankedTensorType>(inputIds.getType());
+  auto wordType =
+      mlir::dyn_cast<mlir::RankedTensorType>(wordEmbedding.getType());
+  auto outputType =
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  if (!idType || idType.getRank() != 2 ||
+      !idType.getElementType().isInteger(32) || !wordType ||
+      wordType.getRank() != 2 || !outputType || outputType.getRank() != 3)
+    return rewriter.notifyMatchFailure(
+        op, "EmbedLayerNormalization expects rank-2 ids and a rank-3 output");
+
+  mlir::Type elemType = wordType.getElementType();
+  if ((!elemType.isF16() && !elemType.isF32()) ||
+      outputType.getElementType() != elemType)
+    return rewriter.notifyMatchFailure(
+        op, "EmbedLayerNormalization supports only f16 and f32");
+  int64_t hidden = wordType.getDimSize(1);
+  if (mlir::ShapedType::isDynamic(hidden) ||
+      outputType.getDimSize(2) != hidden ||
+      !dimsAgree(outputType.getDimSize(0), idType.getDimSize(0)) ||
+      !dimsAgree(outputType.getDimSize(1), idType.getDimSize(1)))
+    return rewriter.notifyMatchFailure(
+        op, "EmbedLayerNormalization output shape does not match the ids");
+
+  auto checkVector = [&](mlir::Value v, mlir::StringRef name) {
+    auto t = mlir::dyn_cast<mlir::RankedTensorType>(v.getType());
+    if (!t || t.getRank() != 1 || t.getElementType() != elemType ||
+        (t.hasStaticShape() && t.getDimSize(0) != hidden)) {
+      return rewriter.notifyMatchFailure(
+          op, llvm::Twine(name) +
+                  " must be a hidden-sized vector of the embedding type");
+    }
+    return mlir::success();
+  };
+  if (mlir::failed(checkVector(gamma, "gamma")) ||
+      mlir::failed(checkVector(beta, "beta")))
+    return mlir::failure();
+
+  auto checkIds = [&](mlir::Value v, bool allowBroadcastBatch,
+                      mlir::StringRef name) {
+    if (!v)
+      return mlir::success();
+    auto t = mlir::dyn_cast<mlir::RankedTensorType>(v.getType());
+    if (!t || t.getRank() != 2 || !t.getElementType().isInteger(32) ||
+        !dimsAgree(t.getDimSize(1), idType.getDimSize(1)))
+      return rewriter.notifyMatchFailure(op, llvm::Twine(name) +
+                                                 " must be rank-2 i32");
+    int64_t batch = t.getDimSize(0);
+    bool batchOk = dimsAgree(batch, idType.getDimSize(0)) ||
+                   (allowBroadcastBatch && batch == 1);
+    if (!batchOk)
+      return rewriter.notifyMatchFailure(op, llvm::Twine(name) +
+                                                 " batch does not match");
+    return mlir::success();
+  };
+  if (mlir::failed(
+          checkIds(segmentIds, /*allowBroadcastBatch=*/false, "segment ids")) ||
+      mlir::failed(checkIds(mask, /*allowBroadcastBatch=*/false, "mask")) ||
+      mlir::failed(
+          checkIds(positionIds, /*allowBroadcastBatch=*/true, "position ids")))
+    return mlir::failure();
+
+  // Position ids default to 0 .. S-1, one shared row, when the sequence
+  // length is known. A dynamic sequence has no compile-time range.
+  if (!positionIds) {
+    if (idType.isDynamicDim(1))
+      return rewriter.notifyMatchFailure(
+          op, "position ids are required when the sequence length is dynamic");
+    int64_t seq = idType.getDimSize(1);
+    if (!llvm::isInt<32>(seq))
+      return rewriter.notifyMatchFailure(op, "sequence length exceeds i32");
+    auto iotaType =
+        mlir::RankedTensorType::get({1, seq}, rewriter.getI32Type());
+    llvm::SmallVector<int32_t> iota(static_cast<size_t>(seq));
+    for (int64_t i : llvm::seq<int64_t>(0, seq))
+      iota[static_cast<size_t>(i)] = static_cast<int32_t>(i);
+    positionIds = mlir::arith::ConstantOp::create(
+        rewriter, loc, iotaType,
+        mlir::DenseIntElementsAttr::get(iotaType, iota));
+  }
+
+  auto wordOr = gatherEmbeddingRows(rewriter, loc, context, wordEmbedding,
+                                    inputIds, elemType, hidden);
+  if (mlir::failed(wordOr))
+    return rewriter.notifyMatchFailure(op, "word embedding gather is invalid");
+  auto posOr = gatherEmbeddingRows(rewriter, loc, context, positionEmbedding,
+                                   positionIds, elemType, hidden);
+  if (mlir::failed(posOr))
+    return rewriter.notifyMatchFailure(op,
+                                       "position embedding gather is invalid");
+
+  auto addRows = [&](mlir::Value lhs,
+                     mlir::Value rhs) -> mlir::FailureOr<mlir::Value> {
+    auto initOr =
+        createBroadcastEmptyTensor(rewriter, loc, outputType, {lhs, rhs});
+    if (mlir::failed(initOr))
+      return mlir::failure();
+    return mlir::hip::AddOp::create(rewriter, loc, outputType, context, lhs,
+                                    rhs, *initOr)
+        .getResult(0);
+  };
+  auto sumOr = addRows(*wordOr, *posOr);
+  if (mlir::failed(sumOr))
+    return rewriter.notifyMatchFailure(
+        op, "cannot add word and position embeddings");
+  mlir::Value sum = *sumOr;
+  if (segmentIds) {
+    auto segOr = gatherEmbeddingRows(rewriter, loc, context, segmentEmbedding,
+                                     segmentIds, elemType, hidden);
+    if (mlir::failed(segOr))
+      return rewriter.notifyMatchFailure(op,
+                                         "segment embedding gather is invalid");
+    auto withSeg = addRows(sum, *segOr);
+    if (mlir::failed(withSeg))
+      return rewriter.notifyMatchFailure(op,
+                                         "cannot add the segment embedding");
+    sum = *withSeg;
+  }
+
+  // Contrib default is 1e-12. stash_type 1 reduces the variance in f32.
+  float epsilon = 1.0e-12f;
+  if (auto epsAttr = op->getAttrOfType<mlir::FloatAttr>("epsilon"))
+    epsilon = epsAttr.getValue().convertToFloat();
+
+  mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, sum);
+  llvm::SmallVector<mlir::Value> lnOperands = {context, sum, gamma, beta,
+                                               outputInit};
+  llvm::SmallVector<mlir::NamedAttribute> lnAttrs = {
+      rewriter.getNamedAttr("axis", rewriter.getI64IntegerAttr(-1)),
+      rewriter.getNamedAttr("epsilon", rewriter.getF32FloatAttr(epsilon)),
+      rewriter.getNamedAttr("stash_type", rewriter.getI64IntegerAttr(1))};
+  mlir::OperationState lnState(loc, "hip.layer_norm");
+  lnState.addOperands(lnOperands);
+  lnState.addAttributes(lnAttrs);
+  lnState.addTypes(outputType);
+  // [ctx, input, scale, bias, outputs]
+  lnState.addAttribute("operand_segment_sizes",
+                       rewriter.getDenseI32ArrayAttr({1, 1, 1, 1, 1}));
+  mlir::Value normalized = rewriter.create(lnState)->getResult(0);
+
+  mlir::Value maskIndex;
+  if (numResults > 1 &&
+      !mlir::isa<mlir::NoneType>(op->getResult(1).getType())) {
+    auto maskIndexType =
+        mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(1).getType());
+    if (!maskIndexType || maskIndexType.getRank() != 1 ||
+        !maskIndexType.getElementType().isInteger(32) ||
+        !dimsAgree(maskIndexType.getDimSize(0), idType.getDimSize(0)))
+      return rewriter.notifyMatchFailure(
+          op, "mask_index must be a rank-1 i32 tensor of the batch extent");
+    if (mask) {
+      auto axesType = mlir::RankedTensorType::get({1}, rewriter.getI64Type());
+      mlir::Value axes = mlir::arith::ConstantOp::create(
+          rewriter, loc, axesType,
+          mlir::DenseIntElementsAttr::get(axesType,
+                                          llvm::ArrayRef<int64_t>{1}));
+      llvm::SmallVector<mlir::Value> dynSizes;
+      if (maskIndexType.isDynamicDim(0))
+        dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc, mask, 0));
+      mlir::Value init = mlir::tensor::EmptyOp::create(
+          rewriter, loc, maskIndexType.getShape(),
+          maskIndexType.getElementType(), dynSizes);
+      maskIndex = mlir::hip::ReduceSumOp::create(
+                      rewriter, loc, context, mask, axes, init,
+                      rewriter.getI64IntegerAttr(/*keepdims=*/0),
+                      rewriter.getI64IntegerAttr(/*noop_with_empty_axes=*/0),
+                      getConstantReducedAxesAttr(rewriter, mask, axes,
+                                                 /*noopWithEmptyAxes=*/0))
+                      .getResult(0);
+    } else {
+      llvm::SmallVector<mlir::Value> dynSizes;
+      if (maskIndexType.isDynamicDim(0))
+        dynSizes.push_back(
+            mlir::tensor::DimOp::create(rewriter, loc, inputIds, 0));
+      mlir::Value empty = mlir::tensor::EmptyOp::create(
+          rewriter, loc, maskIndexType.getShape(),
+          maskIndexType.getElementType(), dynSizes);
+      mlir::Value zero = mlir::arith::ConstantIntOp::create(
+          rewriter, loc, rewriter.getI32Type(), 0);
+      maskIndex =
+          mlir::linalg::FillOp::create(rewriter, loc, mlir::ValueRange{zero},
+                                       mlir::ValueRange{empty})
+              .getResult(0);
+    }
+  }
+
+  mlir::Value embeddingSum;
+  if (numResults > 2 &&
+      !mlir::isa<mlir::NoneType>(op->getResult(2).getType())) {
+    auto sumType =
+        mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(2).getType());
+    if (!sumType || sumType != outputType)
+      return rewriter.notifyMatchFailure(
+          op, "embedding_sum must match the normalized output type");
+    embeddingSum = sum;
+  }
+
+  llvm::SmallVector<mlir::Value> replacements;
+  replacements.push_back(normalized);
+  if (numResults > 1)
+    replacements.push_back(maskIndex);
+  if (numResults > 2)
+    replacements.push_back(embeddingSum);
+  rewriter.replaceOp(op, replacements);
+  return mlir::success();
+}
+
+//===----------------------------------------------------------------------===//
 // onnx.LayerNormalization (standard ONNX opset 17+) -> hip.layer_norm
 //===----------------------------------------------------------------------===//
 
@@ -1310,8 +1631,9 @@ void populateNormConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx) {
   patterns.add<SimplifiedLayerNormToHip, RMSNormalizationToHip,
                BranchwiseRMSNormToHip, GatedRMSNormToHip, EngramGateToHip,
-               SkipSimplifiedLayerNormToHip, SkipLayerNormToHip, LayerNormToHip,
-               InstanceNormToHip, BatchNormToHip, GroupNormToHip>(ctx);
+               SkipSimplifiedLayerNormToHip, SkipLayerNormToHip,
+               EmbedLayerNormToHip, LayerNormToHip, InstanceNormToHip,
+               BatchNormToHip, GroupNormToHip>(ctx);
 }
 
 } // namespace hip
