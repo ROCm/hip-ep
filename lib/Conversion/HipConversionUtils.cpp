@@ -52,14 +52,24 @@ FailureOr<Value> createBroadcastEmptyTensor(OpBuilder &builder, Location loc,
   // Use the same extents for the destination and result shape queries.
   // Before: empty(dim(a, 0)) for a: tensor<?xf32>, b: tensor<?xf32>.
   // After:  empty(select(dim(a, 0) == 1, dim(b, 0), dim(a, 0))).
-  // A folded extent can contradict the imported result type. Keep all new
-  // operations detached until these checks pass.
+  return createEmptyTensorFromReifiedShape(
+      builder, loc, resultType, [&](OpBuilder &shapeBuilder) {
+        return reifyBroadcastResultShape(shapeBuilder, loc, operands,
+                                         [&] { return emitError(loc); });
+      });
+}
+
+FailureOr<Value> createEmptyTensorFromReifiedShape(
+    OpBuilder &builder, Location loc, RankedTensorType resultType,
+    function_ref<FailureOr<SmallVector<OpFoldResult>>(OpBuilder &)> reify) {
+  // A folded extent can contradict the result type. Keep all new operations
+  // detached until the shape and type agree.
   Block pending;
   OpBuilder shapeBuilder(builder.getContext());
   shapeBuilder.setInsertionPointToEnd(&pending);
-  auto shape = reifyBroadcastResultShape(shapeBuilder, loc, operands,
-                                         [&] { return emitError(loc); });
-  if (failed(shape))
+  auto shape = reify(shapeBuilder);
+  if (failed(shape) ||
+      shape->size() != static_cast<size_t>(resultType.getRank()))
     return failure();
 
   llvm::SmallVector<Value> dynSizes;

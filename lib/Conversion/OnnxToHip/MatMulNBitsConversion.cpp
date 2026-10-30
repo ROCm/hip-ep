@@ -136,13 +136,20 @@ MatMulNBitsToHip::matchAndRewrite(mlir::Operation *op,
   auto scaleElemSizeAttr = rewriter.getI64IntegerAttr(scaleElemSize);
 
   auto rt = mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  mlir::Value init = createEmptyTensor(rewriter, loc, rt, A);
+  // The output width is N, not A's contraction extent K.
+  auto init = createEmptyTensorFromReifiedShape(
+      rewriter, loc, rt, [&](OpBuilder &builder) {
+        return reifyMatMulNBitsResultShape(builder, loc, A, NAttr.getInt());
+      });
+  if (failed(init))
+    return rewriter.notifyMatchFailure(op,
+                                       "incompatible MatMulNBits result shape");
 
   // Result type inferred from `init` via InferTypeOpInterface — DPS contract:
   // result type == outs operand type.
   auto hipOp = mlir::hip::MatMulNBitsOp::create(
-      rewriter, loc, context, A, B, scales, zeroPoints, gIdx, bias, init, KAttr,
-      NAttr, bitsAttr, blockSizeAttr, accuracyLevelAttr, zpElemSizeAttr,
+      rewriter, loc, context, A, B, scales, zeroPoints, gIdx, bias, *init,
+      KAttr, NAttr, bitsAttr, blockSizeAttr, accuracyLevelAttr, zpElemSizeAttr,
       scaleElemSizeAttr);
   rewriter.replaceOp(op, hipOp->getResults());
   return mlir::success();

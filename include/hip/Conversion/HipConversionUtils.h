@@ -17,6 +17,13 @@ namespace hip {
 bool isResultTypeCompatibleWithInferredShape(
     RankedTensorType resultType, llvm::ArrayRef<int64_t> inferredShape);
 
+/// Build a destination from the shared shape rule.
+/// The callback must emit through the supplied builder.
+/// Keep the result type and encoding. Leave IR unchanged on failure.
+FailureOr<Value> createEmptyTensorFromReifiedShape(
+    OpBuilder &builder, Location loc, RankedTensorType resultType,
+    function_ref<FailureOr<SmallVector<OpFoldResult>>(OpBuilder &)> reify);
+
 /// Build a tensor.empty with the exact NumPy broadcast shape.
 /// Keep the imported result type and encoding. Reject known shape conflicts.
 /// On failure, leave the IR unchanged.

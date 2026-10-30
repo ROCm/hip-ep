@@ -3,6 +3,17 @@
 
 // RUN: hip-mlir-opt --split-input-file --verify-diagnostics %s | FileCheck %s
 
+func.func @invalid_transpose(%ctx: !hip.context, %a: tensor<4x2xf32>,
+                             %b: tensor<4x8xf32>, %out: tensor<2x8xf32>) -> tensor<2x8xf32> {
+  // expected-error @+1 {{matmul transA and transB must be 0 or 1}}
+  %r = hip.matmul(%ctx)
+    ins(%a, %b : tensor<4x2xf32>, tensor<4x8xf32>)
+    outs(%out : tensor<2x8xf32>) {transA = 2 : i64} : tensor<2x8xf32>
+  return %r : tensor<2x8xf32>
+}
+
+// -----
+
 // CHECK-LABEL: func.func @matmul_2d_static
 // CHECK:         hip.matmul
 func.func @matmul_2d_static(%ctx: !hip.context,

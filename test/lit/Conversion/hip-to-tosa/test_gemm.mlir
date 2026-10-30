@@ -205,7 +205,7 @@ func.func @gemm_bad_c(%ctx: !hip.context, %a: tensor<4x8xf32>,
                       %b: tensor<8x16xf32>, %c: tensor<7xf32>,
                       %init: tensor<4x16xf32>) -> tensor<4x16xf32>
     attributes {rock.kernel} {
-  // expected-error @+1 {{failed to legalize operation 'hip.gemm'}}
+  // expected-error @+1 {{gemm C dimension 7 is not broadcastable to output dimension 16}}
   %r = hip.gemm(%ctx) ins(%a, %b, %c :
       tensor<4x8xf32>, tensor<8x16xf32>, tensor<7xf32>)
       outs(%init : tensor<4x16xf32>) : tensor<4x16xf32>
