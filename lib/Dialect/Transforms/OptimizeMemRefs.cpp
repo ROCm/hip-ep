@@ -38,6 +38,16 @@
 //     proving value-equivalence in general would require alias analysis;
 //     SSA identity is sound and cheap, and CSE should run first to
 //     maximize opportunities).
+//   - Buffers the host reads or writes (memref.load / memref.store on any
+//     alias) never share a slot. Op order is only stream order for device
+//     ops; a host store runs as soon as it is reached, so it would race a
+//     device op that still has to read the slot's previous value:
+//
+//       hip.reduce_sum ... outs(%a)          // device
+//       hip.sub ins(%a, ...) ...             // device, still queued
+//       memref.store %n, %b[]                // host, %b reusing %a
+//
+//     lets hip.sub read %n instead of the sum.
 //
 //===----------------------------------------------------------------------===//
 
@@ -126,6 +136,16 @@ static bool canReuse(const Slot &slot, MemRefType neededType,
   return false;
 }
 
+/// Returns true if the host loads from or stores to any alias of \p alloc.
+static bool isHostAccessed(Value alloc,
+                           const BufferViewFlowAnalysis &aliasAnalysis) {
+  for (Value alias : aliasAnalysis.resolve(alloc))
+    for (Operation *user : alias.getUsers())
+      if (isa<memref::LoadOp, memref::StoreOp>(user))
+        return true;
+  return false;
+}
+
 //===----------------------------------------------------------------------===//
 // Pass
 //===----------------------------------------------------------------------===//
@@ -175,7 +195,7 @@ void OptimizeMemRefsPass::runOnOperation() {
       continue;
 
     Value result = allocOp.getResult();
-    if (result.use_empty())
+    if (result.use_empty() || isHostAccessed(result, aliasAnalysis))
       continue;
 
     unsigned lastUse = findLastAliasedUseIndex(result, aliasAnalysis, block,

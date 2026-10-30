@@ -187,6 +187,39 @@ func.func @no_allocs(
   return
 }
 
+// The GQA preamble: seqlens_k = ReduceSum(mask) - 1 on the device, then the
+// host stores Shape(mask)[1] for total_sequence_length. %sum is dead after
+// hip.sub in op order, but hip.sub is only queued; were %total to reuse %sum,
+// the host store could land before hip.sub reads the sum. Host-accessed
+// buffers therefore never share a slot, in either direction.
+// CHECK-LABEL: func.func @no_reuse_host_store
+// CHECK:         %[[SUM:.*]] = memref.alloc(){{.*}}: memref<1x1xi64>
+// CHECK:         hip.reduce_sum{{.*}}outs(%[[SUM]] :
+// CHECK:         hip.sub{{.*}}ins(%[[SUM]],
+// CHECK:         %[[TOTAL:.*]] = memref.alloc(){{.*}}: memref<i64>
+// CHECK-NOT:     memref.reinterpret_cast
+// CHECK:         memref.store %{{.*}}, %[[TOTAL]][]
+// CHECK:         hip.cast{{.*}}ins(%[[TOTAL]] :
+func.func @no_reuse_host_store(
+    %ctx: !hip.context,
+    %mask: memref<1x?xi64>,
+    %one: memref<1xi64>,
+    %seqlens: memref<1x1xi32>,
+    %total_out: memref<i32>) {
+  %c1 = arith.constant 1 : index
+  %sum = memref.alloc() {alignment = 64 : i64} : memref<1x1xi64>
+  hip.reduce_sum(%ctx) ins(%mask, %one : memref<1x?xi64>, memref<1xi64>) outs(%sum : memref<1x1xi64>) {reduced_axes = array<i64: 1>}
+  %sub = memref.alloc() {alignment = 64 : i64} : memref<1x1xi64>
+  hip.sub(%ctx) ins(%sum, %one : memref<1x1xi64>, memref<1xi64>) outs(%sub : memref<1x1xi64>)
+  hip.cast(%ctx) ins(%sub : memref<1x1xi64>) outs(%seqlens : memref<1x1xi32>) {to = 6 : i64}
+  %dim = memref.dim %mask, %c1 : memref<1x?xi64>
+  %n = arith.index_cast %dim : index to i64
+  %total = memref.alloc() {alignment = 64 : i64} : memref<i64>
+  memref.store %n, %total[] : memref<i64>
+  hip.cast(%ctx) ins(%total : memref<i64>) outs(%total_out : memref<i32>) {to = 6 : i64}
+  return
+}
+
 // alloc0 (memref<64xf32>) and alloc1 (memref<64xf16>) have different element
 // types.  canReuse requires matching element types, so reuse is blocked even
 // though alloc0 is dead and the byte-sizes would fit (256 bytes >= 128 bytes).
