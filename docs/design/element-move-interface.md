@@ -2,12 +2,14 @@
 Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 Licensed under the MIT License.
 -->
-# ElementMoveOpInterface and quantize sinking
+# ElementMoveOpInterface, quantize sinking and the cast round-trip fold
 
 `ElementMoveOpInterface` (`include/hip/Dialect/IR/HipElementMoveInterface.td`)
 marks ops whose result elements are copies of elements of some operands, or
 are selected among them by comparison, with no arithmetic. `hip-fuse-rocmlir`
-uses it to run those ops on 8-bit values in quantized graphs.
+uses it to run those ops on 8-bit values in quantized graphs. The `hip.cast`
+canonicalizer uses it to run those ops on the narrow float type of a cast
+round trip.
 
 ## Why a quantize commutes with these ops
 
@@ -77,6 +79,46 @@ ui8. Otherwise every value becomes i8 and every zero point in the set drops by
 128. The QLinear and dequantized-conv planners compute the same correction
 `x_zp - offset` for both types, so the integer math does not change.
 
+## Cast round trip through element moves
+
+An exporter often wraps an op that has no low-precision form in a pair of
+casts. The op then moves wide elements that hold only narrow values:
+
+```text
+%w = hip.cast %x  : f16 -> f32
+%r = hip.resize %w {mode = 0}      // nearest
+%y = hip.cast %r  : f32 -> f16
+```
+
+An exact widening (f16 or bf16 to f32 or f64, f32 to f64) commutes with an op
+that only moves elements, and the narrow cast of a widened value gives the
+value back:
+
+```text
+narrow(f(widen(x))) = f(x)
+```
+
+`FoldCastRoundTripThroughElementMoves` (`lib/Dialect/IR/HipCastCanonicalize.cpp`)
+is a `hip.cast` canonicalization pattern. From the outer cast, it walks back
+through a chain of ops that implement the interface. Each op in the chain
+must return `movesElements() == true`, have one result, one moved operand,
+one reader and a static shape. The chain must end at an inner `hip.cast`
+with one reader. The pattern applies only if:
+
+- the chain has at least one op;
+- the inner cast is an exact float widening;
+- the outer cast gives back the type of the inner cast input.
+
+The rewrite rebuilds each op of the chain on the narrow type through
+`cloneWithElementType`, and erases the two casts. A narrowing inner cast, an
+integer source, a linear resize or a value with a second reader stops the
+fold, because the result can change in those cases.
+
+The pattern runs in every canonicalizer run, on the default path and on the
+rocMLIR path. On the rocMLIR path, the canonicalizer after
+`hip-decompose-conv-transpose` folds the casts before `hip-fuse-rocmlir`
+plans the kernels.
+
 ## Contract for an op that implements the interface
 
 - Every result element is a copy of one element of the moved operands, or one
@@ -86,8 +128,10 @@ ui8. Otherwise every value becomes i8 and every zero point in the set drops by
   result. Shapes, indices and offsets stay as they are.
 - `cloneWithElementType()` builds the same op on the given moved values, with
   the given result element type. A HIP DPS op writes into a new empty init.
-- The 8-bit form must lower both inside a rocMLIR kernel (HipToTosa) and on
-  the HIP runtime, because the rebuilt op can stay outside a kernel.
+- Every element type that a caller rebuilds the op on must lower both inside
+  a rocMLIR kernel (HipToTosa) and on the HIP runtime, because the rebuilt op
+  can stay outside a kernel. The quantize users rebuild ops on i8 and ui8.
+  The cast fold rebuilds ops on f16 and bf16.
 
 ## Ops that implement it
 
@@ -97,11 +141,12 @@ ui8. Otherwise every value becomes i8 and every zero point in the set drops by
 | `tensor.extract_slice` | source | External model |
 | `tensor.expand_shape`, `tensor.collapse_shape` | source | External models |
 | `hip.transpose` | input | |
-| `hip.resize` | input | Nearest mode only; the runtime kernel takes i8 and ui8 for nearest |
+| `hip.resize` | input | Nearest mode only; the runtime kernel takes i8, ui8, f16 and bf16 for nearest |
 
-The tensor external models are registered by
-`registerElementMoveExternalModels`, which `hip-fuse-rocmlir` adds to its
-dependent dialect registry, so every tool that runs the pass has them.
+`registerElementMoveExternalModels` registers the tensor external models.
+`registerAllDialects` and `hip-mlir-opt` call it, because the `hip.cast`
+canonicalizer runs in every pipeline. `hip-fuse-rocmlir` also adds it to its
+dependent dialect registry.
 
 Ops such as `hip.slice`, `hip.gather`, `hip.pad` and a max `hip.pool` can
 implement the interface when their runtime kernels take 8-bit types. A pad

@@ -10,14 +10,16 @@ include "mlir/IR/OpBase.td"
 
 // Interface for ops whose every result element is a copy of one element of
 // their moved operands, or one selected among them by comparison, with no
-// arithmetic. A per-tensor quantize then commutes with the op:
+// arithmetic. A per-tensor quantize or an exact widening cast then commutes
+// with the op:
 //   q(f(x1, x2, ...)) == f(q(x1), q(x2), ...)
-// so hip-fuse-rocmlir can run the op on the quantized values (see
-// docs/design/element-move-interface.md).
+// so hip-fuse-rocmlir can run the op on the quantized values, and a cast
+// round trip around it folds away (see docs/design/element-move-interface.md).
 //
-// An op may implement the interface only when its 8-bit form lowers both
-// inside a rocMLIR kernel and on the HIP runtime, since the rebuilt op may
-// stay outside a kernel.
+// An op may implement the interface only when every element type that a
+// caller rebuilds it on (8-bit integers for the quantize users, f16 and bf16
+// for the cast fold) lowers both inside a rocMLIR kernel and on the HIP
+// runtime, since the rebuilt op may stay outside a kernel.
 def ElementMoveOpInterface : OpInterface<"ElementMoveOpInterface"> {
   let description = [{
     Marks ops that only move or select elements, and rebuilds them on another

@@ -3633,6 +3633,10 @@ def Hip_CastOp : Hip_DpsOp_AutoReifyInfer<"cast"> {
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+
+  // Folds a widening and narrowing cast pair around ops that only move
+  // elements. See lib/Dialect/IR/HipCastCanonicalize.cpp.
+  let hasCanonicalizer = 1;
 }
 
 def Hip_ReduceSumOp : Hip_DpsOp_Reduction<"reduce_sum"> {
