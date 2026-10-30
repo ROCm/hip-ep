@@ -155,6 +155,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 |---|---|
 | If | Outlined then/else functions with runtime branch dispatch. The condition is a single-element `i1`, `i8`, or `ui8` tensor, including a unit shape such as `tensor<1xui8>` |
 | Loop | Outlined loop body with runtime loop dispatch |
+| Scan | Outlined body with runtime scan dispatch. Supports ranked scan inputs, state variables, outer-scope captures, dynamic or zero sequence lengths, and stacked outputs. Input/output axes must be 0 and directions must be forward |
 
 ## Compiler-optimized operations
 

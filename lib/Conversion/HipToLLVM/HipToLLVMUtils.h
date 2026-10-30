@@ -580,6 +580,8 @@ void populateSizeLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateLoopLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
+void populateScanLoweringPatterns(const LLVMTypeConverter &converter,
+                                  RewritePatternSet &patterns);
 void populateIfLoweringPatterns(const LLVMTypeConverter &converter,
                                 RewritePatternSet &patterns);
 void populatePoolLoweringPatterns(const LLVMTypeConverter &converter,

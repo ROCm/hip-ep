@@ -275,3 +275,19 @@ hipdnn_ep_run_loop(RuntimeState *state, HipdnnEpLoopBodyFn body_fn,
       state, body_fn, max_trip_count, cond_init, num_loop_carried, num_captures,
       loop_carried_descs, capture_descs);
 }
+
+extern "C" int hipdnn_ep_run_scan(RuntimeState *state,
+                                  HipdnnEpScanBodyFn body_fn,
+                                  int64_t trip_count, void **state_descs,
+                                  void **scan_input_descs, void **capture_descs,
+                                  void **scan_output_descs) {
+  if (!state || !body_fn || trip_count < 0)
+    return -1;
+  for (int64_t i = 0; i < trip_count; ++i) {
+    int rc = body_fn(state, i, state_descs, scan_input_descs, capture_descs,
+                     scan_output_descs);
+    if (rc != 0)
+      return rc;
+  }
+  return 0;
+}

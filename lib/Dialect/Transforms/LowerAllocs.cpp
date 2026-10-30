@@ -22,6 +22,7 @@
 #include "mlir/Dialect/Arith/Transforms/BufferViewFlowOpInterfaceImpl.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Interfaces/ViewLikeInterface.h"
 
 #include "llvm/ADT/Statistic.h"
@@ -166,16 +167,76 @@ void LowerAllocsPass::runOnOperation() {
   // subviews, casts) of each hip.alloc.  hip.free is placed after the
   // last user of any alias, ensuring all transitive consumers have
   // completed before the memory is released.
+  DenseSet<Value> freedValues;
   for (AllocOp hipAlloc : hipAllocs) {
     if (isAliasInSet(hipAlloc.getResult(), aliasAnalysis, returnedValues))
       continue;
     if (deallocated.contains(hipAlloc.getResult()))
       continue;
 
+    Value freeValue = hipAlloc.getResult();
+    Block *freeBlock = &entry;
+    scf::IfOp ownerIf;
+    bool freeInThen = false;
+    bool freeInElse = false;
+    if (hipAlloc->getBlock() != &entry) {
+      // A nested allocation may escape through an scf.if result. Free the
+      // visible result after its entry-block users rather than referencing
+      // the branch-local allocation outside its defining region.
+      for (Value alias : aliasAnalysis.resolve(hipAlloc.getResult())) {
+        Operation *definingOp = alias.getDefiningOp();
+        if (definingOp && definingOp->getBlock() == &entry) {
+          freeValue = alias;
+          break;
+        }
+        for (OpOperand &use : alias.getUses()) {
+          auto yield = dyn_cast<scf::YieldOp>(use.getOwner());
+          if (!yield)
+            continue;
+          auto ifOp = dyn_cast<scf::IfOp>(yield->getParentOp());
+          if (ifOp && ifOp->getBlock() == &entry) {
+            unsigned resultIndex = use.getOperandNumber();
+            freeValue = ifOp.getResult(resultIndex);
+            ownerIf = ifOp;
+            auto thenYield =
+                cast<scf::YieldOp>(ifOp.thenBlock()->getTerminator());
+            auto elseYield =
+                cast<scf::YieldOp>(ifOp.elseBlock()->getTerminator());
+            freeInThen =
+                traceToHipAlloc(thenYield.getOperand(resultIndex)) != nullptr;
+            freeInElse =
+                traceToHipAlloc(elseYield.getOperand(resultIndex)) != nullptr;
+            break;
+          }
+        }
+        if (freeValue != hipAlloc.getResult())
+          break;
+      }
+      if (freeValue == hipAlloc.getResult()) {
+        freeBlock = hipAlloc->getBlock();
+      }
+    }
+    if (!freedValues.insert(freeValue).second)
+      continue;
     Operation *lastUser =
-        findLastAliasedUser(hipAlloc.getResult(), aliasAnalysis, entry);
+        findLastAliasedUser(freeValue, aliasAnalysis, *freeBlock);
     builder.setInsertionPointAfter(lastUser);
-    FreeOp::create(builder, hipAlloc.getLoc(), ctx, hipAlloc.getResult());
+    if (ownerIf && freeInThen != freeInElse) {
+      // If the other branch yields a borrowed buffer, preserve the original
+      // ownership condition so that buffer is never released.
+      auto freeIf = scf::IfOp::create(builder, hipAlloc.getLoc(), TypeRange{},
+                                      ownerIf.getCondition(),
+                                      /*withElseRegion=*/!freeInThen);
+      if (freeInThen) {
+        builder.setInsertionPointToStart(&freeIf.getThenRegion().front());
+        FreeOp::create(builder, hipAlloc.getLoc(), ctx, freeValue);
+      } else {
+        builder.setInsertionPointToStart(&freeIf.getElseRegion().front());
+        FreeOp::create(builder, hipAlloc.getLoc(), ctx, freeValue);
+      }
+    } else {
+      FreeOp::create(builder, hipAlloc.getLoc(), ctx, freeValue);
+    }
     ++NumFreesInserted;
     LLVM_DEBUG(llvm::dbgs()
                << "  Inserted hip.free after " << *lastUser << "\n");

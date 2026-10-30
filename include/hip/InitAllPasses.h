@@ -213,6 +213,9 @@ inline void registerAllPasses() {
       return mlir::hip::createOnnxLoopOutlinePass();
     });
     mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
+      return mlir::hip::createOnnxScanOutlinePass();
+    });
+    mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
       return mlir::hip::createOnnxIfOutlinePass();
     });
     // Standard MLIR passes used by the production flow or supported custom/test

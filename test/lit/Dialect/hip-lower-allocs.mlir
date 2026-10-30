@@ -179,3 +179,51 @@ func.func @pool_view_returned_no_free(
   hip.miopen.softmax(%ctx) ins(%view0 : memref<8x8xf32>) outs(%view1 : memref<8x8xf32>)
   return %view1 : memref<8x8xf32>
 }
+
+// Allocations yielded from mutually exclusive branches share one visible
+// scf.if result. Free that result once, after its last entry-block user.
+// CHECK-LABEL: func.func @nested_if_yield_free
+// CHECK: %[[IF_RESULT:.*]] = scf.if
+// CHECK: hip.alloc
+// CHECK: } else {
+// CHECK: hip.alloc
+// CHECK: hip.miopen.softmax
+// CHECK: hip.free(%{{.*}}, %[[IF_RESULT:.*]]) : memref<8x8xf32>
+// CHECK: return
+func.func @nested_if_yield_free(
+    %ctx: !hip.context,
+    %condition: i1,
+    %out: memref<8x8xf32>) {
+  %value = scf.if %condition -> (memref<8x8xf32>) {
+    %then_alloc = memref.alloc() : memref<8x8xf32>
+    scf.yield %then_alloc : memref<8x8xf32>
+  } else {
+    %else_alloc = memref.alloc() : memref<8x8xf32>
+    scf.yield %else_alloc : memref<8x8xf32>
+  }
+  hip.miopen.softmax(%ctx) ins(%value : memref<8x8xf32>) outs(%out : memref<8x8xf32>)
+  return
+}
+
+// When only one branch owns the yielded buffer, guard the free with the same
+// condition so the borrowed alternative is never released.
+// CHECK-LABEL: func.func @nested_if_borrowed_else
+// CHECK: %[[VALUE:.*]] = scf.if %[[COND:.*]]
+// CHECK: hip.miopen.softmax
+// CHECK: scf.if %[[COND]]
+// CHECK: hip.free(%{{.*}}, %[[VALUE]]) : memref<8x8xf32>
+// CHECK: return
+func.func @nested_if_borrowed_else(
+    %ctx: !hip.context,
+    %condition: i1,
+    %borrowed: memref<8x8xf32>,
+    %out: memref<8x8xf32>) {
+  %value = scf.if %condition -> (memref<8x8xf32>) {
+    %owned = memref.alloc() : memref<8x8xf32>
+    scf.yield %owned : memref<8x8xf32>
+  } else {
+    scf.yield %borrowed : memref<8x8xf32>
+  }
+  hip.miopen.softmax(%ctx) ins(%value : memref<8x8xf32>) outs(%out : memref<8x8xf32>)
+  return
+}

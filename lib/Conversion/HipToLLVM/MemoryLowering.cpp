@@ -707,8 +707,14 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
     if (!srcTy || !dstTy)
       return rewriter.notifyMatchFailure(op, "expected ranked memrefs");
 
-    if (srcTy.getShape() != dstTy.getShape())
-      return rewriter.notifyMatchFailure(op, "copy shape mismatch");
+    if (srcTy.getRank() != dstTy.getRank())
+      return rewriter.notifyMatchFailure(op, "copy rank mismatch");
+    for (auto [srcDim, dstDim] :
+         llvm::zip(srcTy.getShape(), dstTy.getShape())) {
+      if (!ShapedType::isDynamic(srcDim) && !ShapedType::isDynamic(dstDim) &&
+          srcDim != dstDim)
+        return rewriter.notifyMatchFailure(op, "copy shape mismatch");
+    }
 
     FailureOr<int64_t> elemBytesOr = tryElemSizeBytes(srcTy.getElementType());
     if (failed(elemBytesOr))

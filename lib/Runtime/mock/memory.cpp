@@ -34,12 +34,12 @@ int wrap_hipMemcpyAsync(RuntimeState *state, void *dst_ptr, const void *src_ptr,
     fprintf(stderr, "wrap_hipMemcpyAsync: null state\n");
     return -1;
   }
+  if (size_bytes == 0) {
+    return 0; // No-op for zero-sized copy, even with null data pointers.
+  }
   if (!dst_ptr || !src_ptr) {
     fprintf(stderr, "wrap_hipMemcpyAsync: null pointer\n");
     return -1;
-  }
-  if (size_bytes == 0) {
-    return 0; // No-op for zero-sized copy
   }
 
   MOCK_PRINT("[MOCK] wrap_hipMemcpyAsync(dst=%p, src=%p, size=%zu)\n", dst_ptr,
