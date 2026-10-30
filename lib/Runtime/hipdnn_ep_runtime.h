@@ -2078,6 +2078,11 @@ int wrap_sigmoid(RuntimeState *state, void *input, void *output,
 int wrap_tanh(RuntimeState *state, void *input, void *output,
               int64_t num_elements, int64_t data_type);
 
+// Row-wise softmax over a contiguous [rows, cols] buffer (last axis).
+// data_type: HIPDNN_EP_DATATYPE_* (supports FLOAT, HALF, BFLOAT16)
+int hip_miopen_softmax(RuntimeState *state, const void *input, void *output,
+                       int64_t rows, int64_t cols, int64_t data_type);
+
 int wrap_log(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);
 
