@@ -75,6 +75,7 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -4406,6 +4407,7 @@ __global__ void dequant_u4_to_fp16(
  * ======================================================================= */
 
 #include "matmul_nbits_wmma_core.h"
+#include "matmul_nbits_wmma_core_x.h"
 
 /* WMMA kernel entry points with per-variant GPU attributes */
 
@@ -4457,6 +4459,50 @@ void MatMulNBitsWMMA_ZP(
         M, N, K, A, lda, B_packed, scales, zeros,
         group_size, num_groups_k, C, ldc, swizzle_n, b_row_bytes);
 }
+
+// GemmFp16U4ImplX entries. VARIANT packs the pipeline options of
+// matmul_nbits_wmma_core_x.h in bits 0-6 (see WmmaConfig::variant); bit 7
+// selects the CU-mode build of the same kernel.
+#define WMMAX_VARIANT_ARGS(V) \
+    ((V) & 1) ? 2 : 1, ((V) >> 1) & 1, ((V) >> 2) & 1, ((V) >> 3) & 3, \
+    ((V) >> 5) & 1, ((V) >> 6) & 1
+constexpr int kWmmaVariantCuMode = 128;
+
+// CU mode is a per-kernel property (the descriptor's workgroup_processor_mode):
+// the workgroup's waves share one CU and its half of the LDS instead of
+// spreading over the WGP. It changes the kernel attributes only, so each
+// entry point is defined once per mode from the same body. waves_per_eu is 1,
+// as in the measurements: on gfx11 every value up to 6 allows 256 VGPRs.
+#define MATMUL_NBITS_WMMAX_KERNEL(NAME, USE_ZEROS, MODE_ATTR)                    \
+    template <int BM_T, int BN_T, int WT_M, int WT_N, bool BC, int BK_T,        \
+              int VARIANT>                                                      \
+    __global__ __attribute__((amdgpu_flat_work_group_size(                      \
+        GEMM_WG_SZ(BM_T, BN_T, WT_M, WT_N), GEMM_WG_SZ(BM_T, BN_T, WT_M, WT_N)))) \
+    __attribute__((amdgpu_waves_per_eu(1))) MODE_ATTR void NAME(               \
+        int M, int N, int K, const _Float16* __restrict__ A, int lda,           \
+        const unsigned char* __restrict__ B_packed,                             \
+        const _Float16* __restrict__ scales, const _Float16* __restrict__ zeros, \
+        int group_size, int num_groups_k, _Float16* __restrict__ C, int ldc,    \
+        int swizzle_n, int b_row_bytes)                                         \
+    {                                                                           \
+        GemmFp16U4ImplX<BM_T, BN_T, WT_M, WT_N, USE_ZEROS, BC, BK_T,            \
+                        WMMAX_VARIANT_ARGS(VARIANT)>(                           \
+            M, N, K, A, lda, B_packed, scales, zeros, group_size, num_groups_k, \
+            C, ldc, swizzle_n, b_row_bytes);                                    \
+    }
+// A device-code attribute: the host pass only sees the launch stub.
+#if defined(__HIP_DEVICE_COMPILE__)
+#define MATMUL_NBITS_CU_MODE __attribute__((target("cumode")))
+#else
+#define MATMUL_NBITS_CU_MODE
+#endif
+MATMUL_NBITS_WMMAX_KERNEL(MatMulNBitsWMMAX_NoZP, false, )
+MATMUL_NBITS_WMMAX_KERNEL(MatMulNBitsWMMAX_ZP, true, )
+MATMUL_NBITS_WMMAX_KERNEL(MatMulNBitsWMMAX_NoZP_CU, false, MATMUL_NBITS_CU_MODE)
+MATMUL_NBITS_WMMAX_KERNEL(MatMulNBitsWMMAX_ZP_CU, true, MATMUL_NBITS_CU_MODE)
+#undef MATMUL_NBITS_CU_MODE
+#undef MATMUL_NBITS_WMMAX_KERNEL
+#undef WMMAX_VARIANT_ARGS
 
 // Specialized ragged-batch WMMA entry for QMoE prefill. Each z slice is one
 // expert whose A/C rows begin at expert_row_offsets[e], while expert_counts
@@ -5045,7 +5091,52 @@ struct WmmaConfig {
     // 0 means the default bm/(wt_m*wt_n). WT2x4 needs it set explicitly: the
     // default would be 16, and a K-step of 16 doubles the barrier count.
     int  bk = 0;
+    // Extended entry (WMMA_EXT_CONFIGS): selected only through the LUT, or by
+    // the sweep on a device whose LUT names extended configs.
+    bool ext = false;
+    // Pipeline options of GemmFp16U4ImplX, bitwise: 1 two-deep global
+    // prefetch, 2 uniform base + 32-bit offsets, 4 store-first, 8/16/24
+    // sched_group_barrier mode 1/2/3, 32 staged epilogue, 64 XOR LDS swizzle,
+    // 128 CU mode. 0 on an extended entry runs the shipped core.
+    int  variant = 0;
 };
+
+static constexpr bool wmmaConfigIsExt(const WmmaConfig& c) { return c.ext; }
+
+// Extended fused int4 entries: (bm, bn, wt_m, wt_n, bk, variant, swizzle).
+// Measured prefill winners, reachable only through a LUT that names them; see
+// "Extended WMMA entries" in docs/design/custom_kernel_design.md. (geometry,
+// swizzle, variant) must be unique among them so the LUT can name each one
+// (checked below).
+#define WMMA_EXT_CONFIGS(X)                     \
+    X( 32,  32, 1, 2, 64,   0,  4)              \
+    X(128,  64, 2, 4, 64,   3,  4)              \
+    X(128, 128, 2, 4, 32, 116,  4)              \
+    X(128, 128, 2, 4, 64, 124,  4)              \
+    X(128, 128, 2, 4, 64, 100,  4)              \
+    X(128, 128, 4, 4, 32,   1,  4)              \
+    X(128, 128, 4, 4, 32,   3,  4)              \
+    X(128, 128, 2, 4, 64,  67,  4)              \
+    X(128, 256, 2, 4, 32,  92,  4)              \
+    X( 64,  64, 2, 2, 32, 129,  4)              \
+    X(128, 128, 4, 4, 32, 102,  4)              \
+    X(128,  64, 2, 4, 64, 131,  4)              \
+    X(128, 128, 4, 4, 32,  92,  4)              \
+    X(128, 128, 2, 4, 64, 193,  4)              \
+    X(128, 128, 4, 4, 32, 100,  4)              \
+    X(128, 128, 2, 4, 64,  94,  4)              \
+    X(128, 256, 2, 4, 32, 126,  4)              \
+    X(128, 128, 2, 4, 64,  97,  4)              \
+    X(128, 256, 2, 4, 32, 124,  4)              \
+    X(128, 128, 4, 4, 32,  35,  4)              \
+    X(128, 128, 4, 4, 32,  60,  4)              \
+    X(128, 128, 2, 4, 64,  92,  4)              \
+    X( 64,  64, 2, 2, 32,   1,  4)              \
+    X(128,  64, 2, 4, 64,   6,  4)              \
+    X(128, 128, 4, 4, 32,  65,  4)              \
+    X(128, 128, 2, 4, 32,  33,  4)              \
+    X(128, 256, 2, 4, 32,  94,  4)              \
+    X(128, 128, 4, 4, 32,  33,  4)
 
 static constexpr WmmaConfig kWmmaConfigs[] = {
     // --- fused dequant + GEMM ---
@@ -5090,9 +5181,29 @@ static constexpr WmmaConfig kWmmaConfigs[] = {
     // --- WT_M=2, WT_N=1 separate dequant (BN=32 — for small N) ---
     { 64,  32,  4, false, 2, 1}, { 64,  32,  8, false, 2, 1},
     {128,  32,  4, false, 2, 1}, {128,  32,  8, false, 2, 1},
+    // --- extended fused entries; appended so existing indices keep their
+    //     meaning for HIPDNN_MATMUL_NBITS_WMMA_CFG and profiling scripts ---
+#define WMMA_EXT_ENTRY(BM, BN, WM, WN, BK, VAR, SW) \
+    {BM, BN, SW, true, WM, WN, BK, true, VAR},
+    WMMA_EXT_CONFIGS(WMMA_EXT_ENTRY)
+#undef WMMA_EXT_ENTRY
 };
 static constexpr int kNumWmmaConfigs =
     static_cast<int>(sizeof(kWmmaConfigs) / sizeof(kWmmaConfigs[0]));
+
+static constexpr bool wmmaExtConfigsUnique() {
+    for (int i = 0; i < kNumWmmaConfigs; i++)
+        for (int j = i + 1; j < kNumWmmaConfigs; j++) {
+            const WmmaConfig& a = kWmmaConfigs[i];
+            const WmmaConfig& b = kWmmaConfigs[j];
+            if (a.ext && b.ext && a.bm == b.bm && a.bn == b.bn &&
+                a.swizzle_n == b.swizzle_n && a.wt_m == b.wt_m &&
+                a.wt_n == b.wt_n && a.bk == b.bk && a.variant == b.variant)
+                return false;
+        }
+    return true;
+}
+static_assert(wmmaExtConfigsUnique(), "two extended WMMA entries share a LUT name");
 
 static constexpr int wmmaThreads(const WmmaConfig& c) {
     return (c.bm / (16 * c.wt_m)) * (c.bn / (16 * c.wt_n)) * 32;
@@ -5107,7 +5218,9 @@ static constexpr int wmmaBNibblesPerThread(const WmmaConfig& c) {
     return c.bn * wmmaBk(c) / wmmaThreads(c);
 }
 static bool wmmaConfigApplies(const WmmaConfig& c, int N, int gs) {
-    if (c.bn < 64 && N > 2 * c.bn) return false;
+    // The narrow-tile policy predates the extended entries; those were measured
+    // at wide N and only reach a shape through the LUT or the sweep timing.
+    if (!wmmaConfigIsExt(c) && c.bn < 64 && N > 2 * c.bn) return false;
     return gs % wmmaBNibblesPerThread(c) == 0;
 }
 
@@ -5155,6 +5268,7 @@ static int wmmaConfigFromGeometry(const matmul_lut::WmmaAnswer& g, int N, int gs
             c.wt_m != g.wt_m || c.wt_n != g.wt_n || c.fused != g.fused)
             continue;
         if (wmmaBk(c) != g.bk) continue;
+        if (c.ext != g.ext || c.variant != g.variant) continue;
         if (!wmmaConfigApplies(c, N, gs)) continue;
         return cid;
     }
@@ -5214,6 +5328,40 @@ static void launchDequant(
                        B_packed, scales, zeros, B_fp16, N, K, gs, ngk);
 }
 
+template <int BM, int BN, int WM, int WN, int BK, int VAR>
+static void launchWmmaExt(
+    hipStream_t stream, int M, int N, int K,
+    const _Float16* A, int lda, const unsigned char* B,
+    const _Float16* scales, const _Float16* zeros, int gs, int ngk,
+    _Float16* C, int ldc, bool has_zp, int swizzle_n, int b_row_bytes)
+{
+    const bool bc = (M % BM != 0) || (N % BN != 0);
+    dim3 grid(static_cast<unsigned>((N + BN - 1) / BN),
+              static_cast<unsigned>((M + BM - 1) / BM));
+    dim3 block(GEMM_WG_SZ(BM, BN, WM, WN));
+#define WMMA_EXT_LAUNCH(KERNEL)                                                \
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(KERNEL), grid, block, 0, stream, M, N, \
+                       K, A, lda, B, scales, zeros, gs, ngk, C, ldc,           \
+                       swizzle_n, b_row_bytes)
+    if constexpr (VAR == 0) {
+        if (has_zp && bc)  WMMA_EXT_LAUNCH((MatMulNBitsWMMA_ZP<BM, BN, WM, WN, 1, true, BK>));
+        else if (has_zp)   WMMA_EXT_LAUNCH((MatMulNBitsWMMA_ZP<BM, BN, WM, WN, 1, false, BK>));
+        else if (bc)       WMMA_EXT_LAUNCH((MatMulNBitsWMMA_NoZP<BM, BN, WM, WN, 1, true, BK>));
+        else               WMMA_EXT_LAUNCH((MatMulNBitsWMMA_NoZP<BM, BN, WM, WN, 1, false, BK>));
+    } else if constexpr ((VAR & kWmmaVariantCuMode) != 0) {
+        if (has_zp && bc)  WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_ZP_CU<BM, BN, WM, WN, true, BK, VAR>));
+        else if (has_zp)   WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_ZP_CU<BM, BN, WM, WN, false, BK, VAR>));
+        else if (bc)       WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_NoZP_CU<BM, BN, WM, WN, true, BK, VAR>));
+        else               WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_NoZP_CU<BM, BN, WM, WN, false, BK, VAR>));
+    } else {
+        if (has_zp && bc)  WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_ZP<BM, BN, WM, WN, true, BK, VAR>));
+        else if (has_zp)   WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_ZP<BM, BN, WM, WN, false, BK, VAR>));
+        else if (bc)       WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_NoZP<BM, BN, WM, WN, true, BK, VAR>));
+        else               WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_NoZP<BM, BN, WM, WN, false, BK, VAR>));
+    }
+#undef WMMA_EXT_LAUNCH
+}
+
 static void launchWmmaConfig(
     int config_id, hipStream_t stream,
     int M, int N, int K,
@@ -5229,6 +5377,20 @@ static void launchWmmaConfig(
 
     auto& c = kWmmaConfigs[config_id];
     bool need_bc = (M % c.bm != 0) || (N % c.bn != 0);
+
+    if (wmmaConfigIsExt(c)) {
+#define WMMA_EXT_CASE(BM, BN, WM, WN, BK, VAR, SW)                             \
+        if (c.bm == BM && c.bn == BN && c.wt_m == WM && c.wt_n == WN &&      \
+            wmmaBk(c) == BK && c.variant == VAR) {                           \
+            launchWmmaExt<BM, BN, WM, WN, BK, VAR>(                          \
+                stream, M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc,  \
+                has_zp, c.swizzle_n, b_row_bytes);                           \
+            return;                                                          \
+        }
+        WMMA_EXT_CONFIGS(WMMA_EXT_CASE)
+#undef WMMA_EXT_CASE
+        return;
+    }
 
     if (!c.fused) {
         launchDequant(stream, B, scales, zeros, B_fp16_buf, N, K, gs, ngk);
@@ -5609,6 +5771,10 @@ static _Float16* ensureOutColBuffer(int M, int N) {
     return g_out_col_buf;
 }
 
+// Set by the offline sweep driver (hip_matmul_nbits_u4_wmma_sweep_extended)
+// to measure the extended entries on a device whose table does not name them.
+static std::atomic<bool> g_wmma_sweep_extended{false};
+
 /* b_row_bytes = 0 means the arrival stride, num_groups_k * (group_size/2).
  *
  * A non-zero stride has to be measured with rather than assumed away: a
@@ -5643,9 +5809,15 @@ static int tuneWmmaConfig(
     constexpr int ITERS  = 5;
     constexpr int kFloorIters = 15;  // extra iters for sub-0.1ms configs
 
+    // Extended entries are timed only on a device whose LUT names them, i.e.
+    // one they were measured on, or when the sweep driver measures them;
+    // elsewhere the runtime sweep keeps the original table.
+    const bool ext_ok = matmul_lut::extendedConfigsMeasured() ||
+                        g_wmma_sweep_extended.load(std::memory_order_relaxed);
     auto candidate = [&](int cid) {
-        return wmmaConfigSupported(kWmmaConfigs[cid], N, K, gs) &&
-               !(fused_only && !kWmmaConfigs[cid].fused);
+        const WmmaConfig& cfg = kWmmaConfigs[cid];
+        return wmmaConfigSupported(cfg, N, K, gs) &&
+               !(fused_only && !cfg.fused) && !(cfg.ext && !ext_ok);
     };
 
     /* The offline LUT sweep ranks configs by the timings logged here, so this
@@ -5676,12 +5848,12 @@ static int tuneWmmaConfig(
 
         MATMUL_NBITS_AUTOTUNE_LOG(
             "[custom_kernels]   wmma config[%2d] %s bm=%3d bn=%3d sw=%d "
-            "wt=%dx%d bk=%2d : %.4f ms\n",
+            "wt=%dx%d bk=%2d ext=%d var=%d : %.4f ms\n",
             cid, kWmmaConfigs[cid].fused ? "fused " : "dq+gem",
             kWmmaConfigs[cid].bm, kWmmaConfigs[cid].bn,
             kWmmaConfigs[cid].swizzle_n, kWmmaConfigs[cid].wt_m,
             kWmmaConfigs[cid].wt_n, wmmaBk(kWmmaConfigs[cid]),
-            cfg_ms);
+            kWmmaConfigs[cid].ext ? 1 : 0, kWmmaConfigs[cid].variant, cfg_ms);
 
         if (cfg_ms < best_ms) {
             best_ms = cfg_ms;
@@ -5697,12 +5869,14 @@ static int tuneWmmaConfig(
     // ordering -- indices shift whenever the table is edited.
     MATMUL_NBITS_AUTOTUNE_LOG(
         "[custom_kernels] WMMA autotune: M=%d N=%d K=%d gs=%d zp=%s -> "
-        "best config[%d] %s bm=%d bn=%d sw=%d wt=%dx%d bk=%d (%.4f ms/iter)\n",
+        "best config[%d] %s bm=%d bn=%d sw=%d wt=%dx%d bk=%d ext=%d var=%d "
+        "(%.4f ms/iter)\n",
         M, N, K, gs, has_zp ? "yes" : "no",
         best_id, kWmmaConfigs[best_id].fused ? "fused" : "dq+gemm",
         kWmmaConfigs[best_id].bm, kWmmaConfigs[best_id].bn,
         kWmmaConfigs[best_id].swizzle_n, kWmmaConfigs[best_id].wt_m,
         kWmmaConfigs[best_id].wt_n, wmmaBk(kWmmaConfigs[best_id]),
+        kWmmaConfigs[best_id].ext ? 1 : 0, kWmmaConfigs[best_id].variant,
         best_ms);
 
     return best_id;
@@ -6059,6 +6233,52 @@ extern "C" int hip_matmul_nbits_u4_wmma_stride(
 
     launchWmmaConfig(id, s, M, N, K, ap, lda, bp, sp, zp, group_size, ngk, cp,
                      ldc, has_zp, nullptr, b_row_bytes);
+    return static_cast<int>(hipGetLastError());
+}
+
+extern "C" int hip_matmul_nbits_u4_wmma_config_count() {
+    return kNumWmmaConfigs;
+}
+
+extern "C" int hip_matmul_nbits_u4_wmma_config_desc(
+    int cfg, HipMatmulNBitsWmmaConfigDesc* out)
+{
+    if (cfg < 0 || cfg >= kNumWmmaConfigs || !out) return -1;
+    const WmmaConfig& c = kWmmaConfigs[cfg];
+    out->bm = c.bm;
+    out->bn = c.bn;
+    out->wt_m = c.wt_m;
+    out->wt_n = c.wt_n;
+    out->bk = wmmaBk(c);
+    out->swizzle_n = c.swizzle_n;
+    out->fused = c.fused ? 1 : 0;
+    out->ext = c.ext ? 1 : 0;
+    out->variant = c.variant;
+    return 0;
+}
+
+extern "C" void hip_matmul_nbits_u4_wmma_sweep_extended(int enable) {
+    g_wmma_sweep_extended.store(enable != 0, std::memory_order_relaxed);
+}
+
+extern "C" int hip_matmul_nbits_u4_wmma_run_config(
+    void* stream, int cfg, int M, int N, int K, int group_size,
+    const void* A, int lda, const void* B, const void* scales,
+    const void* zeros, void* C, int ldc, int b_row_bytes)
+{
+    if (cfg < 0 || cfg >= kNumWmmaConfigs || group_size <= 0) return -2;
+    // WMMA kernels compile to a trap on wave64 (CDNA) devices.
+    if (hipdnn_device_is_wave64()) return -2;
+    const WmmaConfig& c = kWmmaConfigs[cfg];
+    if (!c.fused || !wmmaConfigSupported(c, N, K, group_size)) return -2;
+    (void)hipGetLastError();
+    launchWmmaConfig(cfg, static_cast<hipStream_t>(stream), M, N, K,
+                     static_cast<const _Float16*>(A), lda,
+                     static_cast<const unsigned char*>(B),
+                     static_cast<const _Float16*>(scales),
+                     static_cast<const _Float16*>(zeros), group_size,
+                     (K + group_size - 1) / group_size, static_cast<_Float16*>(C),
+                     ldc, zeros != nullptr, nullptr, b_row_bytes);
     return static_cast<int>(hipGetLastError());
 }
 

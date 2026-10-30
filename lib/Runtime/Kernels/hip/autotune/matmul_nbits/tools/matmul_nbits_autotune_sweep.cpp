@@ -17,13 +17,11 @@
  * Shape list is CSV with a header, columns K,N,block_size,has_zp (extra columns
  * ignored) -- i.e. what extract_shapes.py emits.
  *
- * Build (from the repo root) for the release target at the release -O2, so the
- * sweep times the code custom_kernels_<arch>.dll runs (gfx11-generic or gfx1170);
- * the table is still per chip (update_lut.py --arch):
- *   clang++ -x hip --offload-arch=gfx11-generic -O2 -std=c++17 -w \
- *       -I lib/Runtime/Kernels/include \
- *       lib/Runtime/Kernels/hip/autotune/matmul_nbits/tools/matmul_nbits_autotune_sweep.cpp \
- *       lib/Runtime/Kernels/hip/matmul_nbits_kernel.hip -o matmul_nbits_sweep.exe
+ * Build it as "Regenerating" in ../README.md describes: for the release target
+ * at the release -O2, so the sweep times the code custom_kernels_<arch>.dll runs
+ * (gfx11-generic or gfx1170; the table is still per chip, update_lut.py --arch),
+ * and linked with tools/empty_lut_data.cpp, so the shapes it measures do not hit
+ * the shipped table.
  */
 #include <hip/hip_runtime.h>
 
@@ -53,6 +51,7 @@ extern "C" int hip_matmul_nbits_u4_wmma_stride(
     void* stream, int cfg, int M, int N, int K, int group_size,
     const void* A, int lda, const void* B, const void* scales,
     const void* zeros, void* C, int ldc, int b_row_bytes);
+extern "C" void hip_matmul_nbits_u4_wmma_sweep_extended(int enable);
 extern "C" int hip_matmul_nbits_dp4a(
     void* stream_v, const void* A, const void* B, const void* scales,
     const void* zp_u8, const void* bias, void* out,
@@ -163,6 +162,9 @@ int main(int argc, char** argv) {
   const char* shapes_path = nullptr;
   std::vector<int> m_list = {1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096};
   bool do_prefill = true, do_decode = true, do_dp4a = true, do_padrow = true;
+  // Also time the extended WMMA entries (WMMA_EXT_CONFIGS). Only for a device
+  // whose table is meant to name them.
+  bool extended = false;
   int limit = 0;
   /* Skip (M, N) pairs whose C alone would exceed this. Sized to pass every real
    * prefill shape below big_n at the full M ladder -- the widest is N~32768 x
@@ -201,10 +203,12 @@ int main(int argc, char** argv) {
     else if (a == "--no-decode") do_decode = false;
     else if (a == "--no-dp4a") do_dp4a = false;
     else if (a == "--no-padrow") do_padrow = false;
+    else if (a == "--extended") extended = true;
     else {
       std::fprintf(stderr,
                    "usage: %s --shapes shapes.csv [--m 1,8,128] [--limit N]\n"
-                   "          [--no-prefill] [--no-decode] [--no-dp4a] [--no-padrow]\n",
+                   "          [--no-prefill] [--no-decode] [--no-dp4a] [--no-padrow]\n"
+                   "          [--extended]\n",
                    argv[0]);
       return 1;
     }
@@ -220,8 +224,9 @@ int main(int argc, char** argv) {
   if (limit > 0 && static_cast<int>(shapes.size()) > limit)
     shapes.resize(limit);
 
-  std::fprintf(stderr, "#SWEEP arch=%s shapes=%zu\n", props.gcnArchName,
-               shapes.size());
+  hip_matmul_nbits_u4_wmma_sweep_extended(extended ? 1 : 0);
+  std::fprintf(stderr, "#SWEEP arch=%s shapes=%zu extended=%d\n",
+               props.gcnArchName, shapes.size(), extended ? 1 : 0);
 
   Buffers buf;
   std::vector<uint16_t> h_a, h_sc, h_zpf;
@@ -240,7 +245,7 @@ int main(int argc, char** argv) {
     // below print k_pad rather than s.k.
     const int k_pad = k32 ? s.k : ((s.k + 31) & ~31);
     std::vector<int> ms;
-    if (s.n >= big_n) {
+    if (big_n > 0 && s.n >= big_n) {
       ms.push_back(1);
       std::fprintf(stderr, "#BIGN N=%d K=%d: M=1 only (vocab projection)\n",
                    s.n, s.k);
@@ -330,7 +335,8 @@ int main(int argc, char** argv) {
                                                s.k) == 0) {
           HIP_OK(hipDeviceSynchronize());
           std::fprintf(stderr,
-                       "#SHAPE path=prefill_padrow M=%d N=%d K=%d gs=%d zp=%d\n",
+                       "#SHAPE path=prefill_padrow M=%d N=%d K=%d gs=%d zp=%d "
+                       "pad=128\n",
                        m, s.n, s.k, s.gs, int(s.zp));
           hip_matmul_nbits_u4_wmma_stride(nullptr, -1, m, s.n, s.k, s.gs, buf.a,
                                           s.k, buf.bpad, buf.sc, zp_f, buf.out,
