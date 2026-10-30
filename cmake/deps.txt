@@ -22,7 +22,9 @@ flatbuffers;https://github.com/google/flatbuffers.git;v25.12.19
 cpptrace;https://github.com/jeremy-rifkin/cpptrace.git;v0.8.3
 ##
 therock_windows;https://github.com/ROCm/hip-ep/releases/download/v0.5.1;rocm-dist-windows-gfx115x-gfx1170-7.16.0-hipblaslt-gfx1170-trimmed
-## Linux 7.13 includes zstd symbol isolation for compressed HIP fat binaries:
-## https://github.com/ROCm/TheRock/pull/4251
-therock_linux;https://repo.amd.com/rocm/tarball;therock-dist-linux-gfx1151-7.13.0
+## Linux 10.1 (HIP 7.16) carries the tuned gfx1151 hipBLASLt tables
+## (https://github.com/ROCm/rocm-libraries/pull/7581), so the solution choice no
+## longer depends on heap order, and keeps the 7.13 zstd symbol isolation
+## (https://github.com/ROCm/TheRock/pull/4251).
+therock_linux;https://stable.repo.amd.com/rocm/core/tarball;therock-dist-linux-gfx1151-10.1.0
 migraphx_windows;https://github.com/ROCm/hip-ep/releases/download/v0.5.1;migraphx-sdk-windows-7bb0654e
