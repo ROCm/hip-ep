@@ -10,6 +10,7 @@
 
 using hipdnn_ep_real::MatmulDerivedSizes;
 using hipdnn_ep_real::useBf16F32TransposedBDecodeGemv;
+using hipdnn_ep_real::useBf16F32TransposedBGemm;
 using hipdnn_ep_real::useF32TransposedBDecodeGemv;
 using hipdnn_ep_real::useF32TransposedBMultiwaveGfx1151;
 using hipdnn_ep_real::validateMatmulArguments;
@@ -105,6 +106,55 @@ int main() {
           true, 1, 128,
           static_cast<int64_t>(std::numeric_limits<int>::max()) + 1, 1, 4, 0,
           1))
+    return 1;
+
+  // The bf16 WMMA GEMM's tile count follows the launcher's tile shapes.
+  if (hipdnn_ep_real::bf16GemmTileCount(2, 64) != 1 ||
+      hipdnn_ep_real::bf16GemmTileCount(127, 64) != 2 ||
+      hipdnn_ep_real::bf16GemmTileCount(128, 64) != 1 ||
+      hipdnn_ep_real::bf16GemmTileCount(129, 65) != 4 ||
+      hipdnn_ep_real::bf16GemmTileCount(512, 3072) != 192)
+    return 1;
+
+  // Prefill-sized bf16 projections with enough tiles, and short M only with
+  // K <= 4096, take the WMMA GEMM.
+  constexpr int64_t kMaxGemmN = hipdnn_ep_real::kBf16GemmMaxN;
+  if (!useBf16F32TransposedBGemm(true, 512, 3072, 3072, 1, 0, 1) ||
+      !useBf16F32TransposedBGemm(true, 2, 3072, 3072, 1, 0, 1) ||
+      !useBf16F32TransposedBGemm(true, 2, 4096, 4096, 1, 0, 1) ||
+      !useBf16F32TransposedBGemm(true, 64, 4096, 14336, 1, 0, 1) ||
+      !useBf16F32TransposedBGemm(true, 2048, 64, 3072, 1, 0, 1) ||
+      !useBf16F32TransposedBGemm(true, 256, 256, 3072, 1, 0, 1) ||
+      !useBf16F32TransposedBGemm(true, 128, 449, 3072, 1, 0, 1) ||
+      !useBf16F32TransposedBGemm(true, 2, kMaxGemmN, 8, 1, 0, 1))
+    return 1;
+
+  // Too few tiles, short M with a long K, decode, batched, the wrong
+  // transposes, K not a multiple of 8, and sizes the launcher cannot take
+  // stay on hipBLASLt.
+  if (useBf16F32TransposedBGemm(false, 512, 3072, 3072, 1, 0, 1) ||
+      useBf16F32TransposedBGemm(true, 128, 64, 3072, 1, 0, 1) ||
+      useBf16F32TransposedBGemm(true, 512, 64, 3072, 1, 0, 1) ||
+      useBf16F32TransposedBGemm(true, 32, 256, 3072, 1, 0, 1) ||
+      useBf16F32TransposedBGemm(true, 128, 448, 3072, 1, 0, 1) ||
+      useBf16F32TransposedBGemm(true, 2, 4096, 14336, 1, 0, 1) ||
+      useBf16F32TransposedBGemm(true, 32, 3072, 8192, 1, 0, 1) ||
+      useBf16F32TransposedBGemm(true, 63, 3072, 4104, 1, 0, 1) ||
+      useBf16F32TransposedBGemm(true, 1, 3072, 3072, 1, 0, 1) ||
+      useBf16F32TransposedBGemm(true, 512, 3072, 3072, 2, 0, 1) ||
+      useBf16F32TransposedBGemm(true, 512, 3072, 3072, 1, 1, 1) ||
+      useBf16F32TransposedBGemm(true, 512, 3072, 3072, 1, 0, 0) ||
+      useBf16F32TransposedBGemm(true, 512, 3072, 3076, 1, 0, 1) ||
+      useBf16F32TransposedBGemm(true, 2, kMaxGemmN + 1, 8, 1, 0, 1) ||
+      useBf16F32TransposedBGemm(
+          true, static_cast<int64_t>(std::numeric_limits<int>::max()) + 1, 3072,
+          3072, 1, 0, 1))
+    return 1;
+
+  alignas(16) uint8_t vectors[48] = {};
+  if (!hipdnn_ep_real::hasBf16VectorAlignment(vectors, vectors + 16) ||
+      hipdnn_ep_real::hasBf16VectorAlignment(vectors + 8, vectors + 16) ||
+      hipdnn_ep_real::hasBf16VectorAlignment(vectors, vectors + 24))
     return 1;
 
   if (!hipdnn_ep_real::isGfx1151("gfx1151") ||
