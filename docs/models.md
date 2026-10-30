@@ -93,9 +93,9 @@ Review the license of a model before you download or use it.
 
 `quant_scheme` and `precision` describe the weights of the export. In every export, the activations are fp16.
 
-- `int4` and `uint4` denote 4-bit weights, signed and unsigned, as the model card of the export names them.
+- `int4` and `uint4` both denote 4-bit weights; each entry uses the name that the model card of the export gives.
 - The quantization method follows the weight type when the model card names it. `RTN` (round to nearest) rounds each weight to the nearest 4-bit value. `AWQ` (activation-aware weight quantization) and `k-quant` search for the scales that reduce the quantization error. `int4` alone means that the model card does not name the method.
-- `precision` describes each part of the export, separated by semicolons: the text decoder first, then the other parts. The words `text decoder` are omitted when the export has no other part.
+- `precision` describes each part of the export, separated by semicolons: the text decoder first, then the other parts. Parts with the same precision are named together, as in `fp16 vision encoder and embedding`. The words `text decoder` are omitted when the export has no other part.
 - `group N` means that each group of N consecutive weights shares one scale. `asymmetric` means that each group also has a zero point; otherwise, the quantization is symmetric.
 - `with QMoE experts` means that the expert weights of the mixture of experts are quantized in the same way and run as the `com.microsoft::QMoE` operator. `with symmetric QMoE experts` means the same, except that the expert weights have no zero points.
 - `fp16` marks the parts whose weights are not quantized.
@@ -130,10 +130,10 @@ hf download amd/Qwen3.6-35B-A3B_gpuep_1.0_gpu_128 --local-dir models/qwen3.6-35b
 
 The `hf` command requires `huggingface_hub` 0.34 or later; with an earlier version, run `huggingface-cli download` with the same arguments. When `subdir` is not empty, add `--include "<subdir>/*"` and use `models/<id>/<subdir>` in place of `models/<id>`.
 
-Then pass the folder to an ONNX Runtime GenAI application, for example `model_benchmark -i models/qwen3.6-35b-a3b`, set up as described in [OGA end-to-end benchmarking](quick_start.md#oga-end-to-end-benchmarking-with-model_benchmark).
+Then run the folder with an ONNX Runtime GenAI (OGA) application, for example `model_benchmark -i models/qwen3.6-35b-a3b`; [OGA end-to-end benchmarking](quick_start.md#oga-end-to-end-benchmarking-with-model_benchmark) describes the setup.
 
 ## Adding, changing or removing a model
 
 1. Add an entry when AMD makes the GPU EP export of a model public on Hugging Face, at the position that the order above gives it. Remove the entry when the export is no longer public.
-2. Take the fields of the base model from its Hugging Face model card and `config.json`. For a model in `site/_data/models.yml`, use the `id`, `name`, `family` and `task` given there. Write `params` as the model card gives it, with `params_billions` to match; `architecture` from the layer types and the experts in `config.json`; `model_type` as `vlm` when `config.json` defines a vision encoder, otherwise `llm`; and `license` from the license identifier on the model card.
+2. Take the fields of the base model from its Hugging Face model card and `config.json`. For a model in `site/_data/models.yml`, use the `id`, `name`, `family` and `task` given there. Set `params` to the count that the model card gives, and `params_billions` to match; derive `architecture` from the layer types and the experts in `config.json`; set `model_type` to `vlm` when `config.json` defines a vision encoder, otherwise to `llm`; and set `license` to the license identifier on the model card.
 3. Take the fields of the export from its repo: the weight type and the method from the quantization section of its model card; the group sizes, the zero points and the QMoE experts from the `MatMulNBits` and `QMoE` nodes of its ONNX models; `subdir` from the folder that holds `genai_config.json`; `onnx_files` from the `filename` of each model in that file; and `path` from `hf_repo` and `subdir`. The model card of the export must give the same license as that of the base model. A model that `genai_config.json` loads from another section takes the name of that section as its role; add the role to the table above.
