@@ -12,7 +12,7 @@
 // CHECK-SAME: hipdnn.output_count = 1
 // CHECK-NOT: onnx.Custom
 // CHECK-DAG: llvm.func @wrap_dequant_bnb4
-// CHECK-DAG: llvm.func @wrap_hipblasLtMatmul
+// CHECK-DAG: llvm.func @wrap_hipblasLtMatmulTyped
 // CHECK: llvm.func @inference_init
 // CHECK: llvm.func @inference_compute
 // CHECK: llvm.func @inference_cleanup

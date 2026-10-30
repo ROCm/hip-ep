@@ -1,12 +1,12 @@
 // RUN: hip-mlir-opt %s --hipdnn-pipeline | FileCheck %s
 
 // Binary einsum through the full pipeline:
-//   onnx.Einsum -> transpose / reshape + hip.matmul -> wrap_hipblasLtMatmul
+//   onnx.Einsum -> transpose / reshape + hip.matmul -> wrap_hipblasLtMatmulTyped
 //
 // CHECK: module attributes {
 // CHECK-SAME: hipdnn.input_count = 2
 // CHECK-SAME: hipdnn.output_count = 1
-// CHECK: llvm.func @wrap_hipblasLtMatmul
+// CHECK: llvm.func @wrap_hipblasLtMatmulTyped
 // CHECK: llvm.func @inference_init
 // CHECK: llvm.func @inference_compute
 // CHECK: llvm.func @inference_cleanup
