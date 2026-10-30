@@ -2,7 +2,7 @@
 Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 Licensed under the MIT License.
 -->
-# Experimental Ring attention
+# Experimental Ring attention for Strix Halo
 
 `HIP_EP_ENABLE_RING_ATTENTION=ON` enables one Ring implementation with KV-sharing prefill and partitioned decode. The default is `OFF`, preserving existing GQA. The former three-way `HIP_EP_GQA_IMPL` option is removed; configuration rejects it rather than silently building the default.
 
@@ -13,6 +13,8 @@ python3 build.py --config Release --hip_arch gfx1151 \
 ```
 
 Rebuild/install the compiler, runtime and native kernels together. Point the application at that installation's EP library and configuration, and use a fresh model compilation cache when switching builds. The ONNX GroupQueryAttention interface, runtime signature, cache layout and cache-update helper are unchanged. This is a build-time option, not an environment-variable selector.
+
+The supported hardware is Strix Halo (`gfx1151`). Ring is compiled for both the dedicated `gfx1151` target and `gfx11-generic`, which includes Strix Halo in the release package. In either build, the runtime device guard enables Ring only on `gfx1151`; other GPUs retain existing GQA routing. The build option remains OFF by default. Broader Ring hardware support requires separate validation.
 
 ## Supported contract
 

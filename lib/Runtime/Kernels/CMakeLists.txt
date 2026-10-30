@@ -246,7 +246,9 @@ endif()
 
 foreach(_arch IN LISTS HIP_ARCHITECTURES)
     set(_ring_device_enabled 0)
-    if(_arch STREQUAL "gfx1151")
+    # gfx11-generic also runs on Strix Halo. Compile Ring into that release
+    # slice, but retain the gfx1151-only device guard in ring_gqa.hip.
+    if(_arch STREQUAL "gfx1151" OR _arch STREQUAL "gfx11-generic")
         set(_ring_device_enabled 1)
     endif()
     set(_ring_compile_options "")
