@@ -138,8 +138,8 @@ ONNX file → ort-bridge → mlir-imp → MLIR module → onnx-to-hip-pipeline
                                                     ├─ hip-resolve-tensor-dims
                                                     ├─ one-shot-bufferize
                                                     ├─ hip-use-output-allocator
-                                                    ├─ hip-optimize-memrefs
                                                     ├─ hip-materialize-host-scalars
+                                                    ├─ hip-optimize-memrefs
                                                     ├─ hip-resolve-memref-dims
                                                     ├─ hip-pool-allocs
                                                     └─ ...

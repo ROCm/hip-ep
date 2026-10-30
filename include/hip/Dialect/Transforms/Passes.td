@@ -385,11 +385,13 @@ def MaterializeHostScalarsPass
     `tensor.from_elements` lowering emits `memref.alloc + memref.store`
     which, once absorbed by `hip-pool-allocs`, becomes a host store into
     device memory and SEGVs.  (Other targets silently worked because hipMalloc
-    returned UMA-mapped host memory there, masking the bug.)  This pass runs
-    BEFORE `hip-pool-allocs` so candidates never enter the GPU pool.
+    returned UMA-mapped host memory there, masking the bug.) Run this pass
+    after linalg-to-loops and before `hip-optimize-memrefs`. Otherwise, buffer
+    reuse can merge a candidate into a larger allocation that exceeds the
+    size limit. The scratch views remain separate during pooling.
 
     Pipeline placement is load-bearing — see Pipelines.cpp for the exact
-    ordering and the static-shape lockdown LIT under `test/lit/Pipeline/`.
+    ordering and `test/lit/Pipeline/nonzero-host-shape-buffer.mlir`.
   }];
   let dependentDialects = [
     "mlir::hip::HipDialect",

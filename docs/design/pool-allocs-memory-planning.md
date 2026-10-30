@@ -47,9 +47,9 @@ The default domain ID is zero and is omitted from textual IR. Additional domains
 → hip-fix-loop-accumulator-offset
 → lower-affine → CSE → canonicalize
 → convert-linalg-to-loops
+→ hip-materialize-host-scalars
 → hip-optimize-memrefs
 → hip-promote-strided-operands
-→ hip-materialize-host-scalars
 → hip-resolve-memref-dims
 → CSE → canonicalize
 → hip-hoist-alloc-size-arith
@@ -67,7 +67,7 @@ The default domain ID is zero and is omitted from textual IR. Additional domains
 
 `convert-linalg-to-loops` must run before host-scalar materialization: a rank-zero `linalg.fill` must become `memref.store` before the host-I/O candidate scan.
 
-`hip-materialize-host-scalars` redirects small integer/index buffers with host accesses to host-mapped scratch. It runs after allocation-producing rewrites and before PoolAllocs so host-written memory never becomes a view into device-only pool storage.
+`hip-materialize-host-scalars` redirects small buffers with host accesses to host-mapped scratch. It runs after linalg-to-loops and before OptimizeMemRefs. Otherwise, buffer reuse can merge a small shape buffer into a larger allocation that exceeds the pass's 16-element limit. PoolAllocs would then place the host access in device-only storage. Later layout promotion creates copy-only temporaries, not new host loads or stores.
 
 ### Pool-quality preconditions
 

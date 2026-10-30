@@ -19,7 +19,9 @@
 // which, once absorbed by `hip-pool-allocs`, becomes a host store into
 // device memory and SEGVs.  Other targets silently worked because hipMalloc
 // returned UMA-mapped host memory there, masking the bug.  This pass runs
-// BEFORE `hip-pool-allocs` so candidates never enter the GPU pool.
+// after linalg-to-loops and before `hip-optimize-memrefs`. Buffer reuse can
+// otherwise merge a candidate into a larger allocation that exceeds the size
+// limit. The scratch views remain separate when `hip-pool-allocs` runs.
 //
 // Example IR (canonical seqlens_k pattern, edited for brevity)
 // ------------------------------------------------------------
