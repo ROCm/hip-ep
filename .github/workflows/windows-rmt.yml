@@ -31,12 +31,6 @@ jobs:
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
       HIP_ARCHITECTURES: "gfx11-generic;gfx1170"
       SCCACHE_CACHE_SIZE: "200M"
-      ONNXRUNTIME_VERSION: "1.31.0"
-      ONNXRUNTIME_PR_PATCHES: ""
-      OGA_VERSION: "0.17.0"
-      OGA_PR_PATCHES: "2685 2691 2705 2712 2763"
-      AMDGPU_EP_REF: "f3dccce2a142567da050da1032617fb39db4086a"
-      AMDGPU_PR_PATCHES: ""
 
     steps:
       - name: Checkout
@@ -51,16 +45,26 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Read the cache producer's quoted dependency pins instead of
+          # maintaining another copy that can request obsolete cache entries.
+          for name in ONNXRUNTIME_VERSION ONNXRUNTIME_PR_PATCHES OGA_VERSION OGA_PR_PATCHES AMDGPU_EP_REF AMDGPU_PR_PATCHES; do
+            mapfile -t values < <(tr -d '\r' < .github/workflows/windows-deps.yml | sed -n "s/^  ${name}: \"\(.*\)\"$/\1/p")
+            if [ "${#values[@]}" -ne 1 ]; then
+              echo "::error::Expected one quoted $name pin in windows-deps.yml"
+              exit 1
+            fi
+            printf -v "$name" '%s' "${values[0]}"
+          done
           DEPS_HASH=$(git rev-parse --short=12 HEAD:cmake/deps.txt)
-          EP_REF="${{ env.AMDGPU_EP_REF }}"
-          AMDPR_KEY="${{ env.AMDGPU_PR_PATCHES }}"
+          EP_REF="$AMDGPU_EP_REF"
+          AMDPR_KEY="$AMDGPU_PR_PATCHES"
           AMDPR_KEY="${AMDPR_KEY// /-}"
           LINE=$(grep -E '^rocmlirtriton;' cmake/deps.txt)
           echo "url=$(echo "$LINE" | cut -d';' -f2)" >> "$GITHUB_OUTPUT"
           echo "commit=$(echo "$LINE" | cut -d';' -f3)" >> "$GITHUB_OUTPUT"
-          echo "ort=dep-ort-${{ env.ONNXRUNTIME_VERSION }}-ortpr-${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
-          echo "amdgpu=windows-amdgpu-${EP_REF:0:7}-amdpr${AMDPR_KEY}-deps${DEPS_HASH}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
-          echo "oga=windows-oga-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
+          echo "ort=dep-ort-${ONNXRUNTIME_VERSION}-ortpr-${ONNXRUNTIME_PR_PATCHES}" >> "$GITHUB_OUTPUT"
+          echo "amdgpu=windows-amdgpu-${EP_REF:0:7}-amdpr${AMDPR_KEY}-deps${DEPS_HASH}-ort${ONNXRUNTIME_VERSION}-ortpr${ONNXRUNTIME_PR_PATCHES}" >> "$GITHUB_OUTPUT"
+          echo "oga=windows-oga-${OGA_VERSION}-pr${OGA_PR_PATCHES}-ort${ONNXRUNTIME_VERSION}-ortpr${ONNXRUNTIME_PR_PATCHES}" >> "$GITHUB_OUTPUT"
           echo "llvm=dep-llvm-rocmlirtriton-amdgpu-$(echo "$LINE" | cut -d';' -f3)" >> "$GITHUB_OUTPUT"
 
       - name: Restore ort-install
