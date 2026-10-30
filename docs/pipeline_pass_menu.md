@@ -214,7 +214,7 @@ override (so a hand-listed pipeline omitting them will trip the
 | Pass | Why it is not nameable |
 |---|---|
 | `generate-interface` | Requires a `CompilationOptionsT` (not a no-arg pass). Emitted by `hip-to-llvm-pipeline`. |
-| `compile-hipdnn-graphs` | Requires a live runtime handle. Only present on the handle-bearing pipeline overload. |
+| `compile-hipdnn-graphs` | Requires a live hipDNN handle, which exists only when built with `BUILD_HIPDNN_GRAPH=ON` (default OFF). |
 | `expand-strided-metadata` | MLIR utility pass added directly inside `hip-to-llvm-pipeline`. |
 | `lower-affine` | Added directly before buffer-reuse normalization in `onnx-to-hip-pipeline`, and after strided-metadata expansion in `hip-to-llvm-pipeline`. |
 | `convert-linalg-to-loops` | Added directly inside the ONNX→HIP tail. |
@@ -235,7 +235,7 @@ ONNX → HIP  (buildOnnxToHipPipeline)
   onnx-if-outline
   hip-infer-loop-body-shapes
   «slot: AfterOnnxLoopOutline»
-  [outline-onnx-to-hipdnn + compile-hipdnn-graphs]   (handle overload only)
+  [outline-onnx-to-hipdnn + compile-hipdnn-graphs]   (BUILD_HIPDNN_GRAPH=ON only)
   convert-onnx-to-hip
   «slot: AfterConvertOnnxToHip»  (supported hip.constant producer boundary)
   hip-infer-shapes

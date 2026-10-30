@@ -466,19 +466,6 @@ bool installSearchGenerators(llvm::orc::LLJIT &jit) {
     }
   }
 
-#ifdef _WIN32
-  const char *const kHipdnnBackend = "hipdnn_backend.dll";
-#else
-  const char *const kHipdnnBackend = "libhipdnn_backend.so";
-#endif
-  if (!loadFirst({kHipdnnBackend})) {
-    if (hipdnn_ep::env_enabled("HIPDNN_EP_DEBUG")) {
-      LOG(INFO) << "LlvmIrJit: Load(" << kHipdnnBackend
-                << ") failed: " << last_load_error
-                << "; hipDNN graph models will fail at lookup.";
-    }
-  }
-
 #ifdef HIPDNN_EP_LOAD_KERNEL_DLLS
   {
     const std::string arch = detectCustomKernelArch();
