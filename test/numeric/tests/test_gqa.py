@@ -199,12 +199,16 @@ def _make_gqa_fixed_cache_model(
     )
 
     ms_opset = helper.make_opsetid("com.microsoft", 1)
-    return make_model_from_nodes(
+    model = make_model_from_nodes(
         [node],
         [query, key, value, past_key, past_value, seqlens_k, total_seq],
         [output, present_key, present_value],
         extra_opsets=[ms_opset],
     )
+    # Opset 17 and these FP16 tensors only require IR 8. Do not inherit the
+    # installed ONNX package's latest IR, which can exceed the bundled ORT.
+    model.ir_version = 8
+    return model
 
 
 def _make_gqa_packed_rotary_model(
