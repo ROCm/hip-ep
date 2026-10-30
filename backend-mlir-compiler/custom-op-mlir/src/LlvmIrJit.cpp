@@ -373,6 +373,7 @@ std::string genericTargetFor(llvm::StringRef arch) {
       .Cases({"gfx1100", "gfx1101", "gfx1102", "gfx1103", "gfx1150", "gfx1151",
               "gfx1152", "gfx1153"},
              "gfx11-generic")
+      .Cases({"gfx1170", "gfx1171", "gfx1172"}, "gfx11-7-generic")
       .Cases({"gfx1200", "gfx1201"}, "gfx12-generic")
       .Default("");
 }
