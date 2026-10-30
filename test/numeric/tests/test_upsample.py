@@ -13,6 +13,13 @@ are the linear nodes in ul_deeplabv3_fp16.
 Resize pytorch_half_pixel maps every output of a length-1 axis to input 0.
 Other lengths use half_pixel. When floor(input * scale) rounds, the
 coordinate transform must use the supplied scale, not output / input.
+
+The runtime kernel writes the widest store of 16, 8, 4 or 2 bytes that tiles
+the output row, and one element otherwise.
+TestResizeRowKernel covers each width for f32, f16 and 8-bit types, ranks 1 to
+3, downsampling, and a scale of 3, where a reciprocal multiply would floor to
+the wrong source index. The ONNX importer reads bf16 tensors as f32, so a bf16
+Resize cannot reach the bf16 kernel from a model.
 """
 
 from __future__ import annotations
@@ -224,3 +231,87 @@ class TestResize:
         actual, reference = model_runner.run_sample(model, [x])
         compare_outputs(actual, reference, atol=0)
         np.testing.assert_array_equal(actual[0].reshape(-1), [0, 0, 1, 1, 2, 2, 3, 3])
+
+
+class TestResizeRowKernel:
+    @pytest.mark.parametrize(
+        "shape,scales,coord,nearest_mode",
+        [
+            # 14 outputs per row: 2-element stores, not the f32 vector of 4.
+            ([1, 3, 5, 7], [1.0, 1.0, 2.0, 2.0], "asymmetric", "floor"),
+            ([1, 2, 4, 5], [1.0, 1.0, 3.0, 3.0], "asymmetric", "floor"),
+            ([1, 2, 4, 6], [1.0, 1.0, 3.0, 3.0], "half_pixel", "round_prefer_floor"),
+            ([1, 2, 16, 32], [1.0, 1.0, 0.5, 0.5], "asymmetric", "floor"),
+            ([1, 2, 16, 32], [1.0, 1.0, 0.5, 0.5], "half_pixel", "round_prefer_ceil"),
+            ([1, 3, 12, 16], [1.0, 1.0, 2.0, 2.0], "align_corners", "ceil"),
+            ([1, 3, 12, 16], [1.0, 1.0, 2.0, 2.0], "pytorch_half_pixel", "floor"),
+            ([1, 2, 3, 5, 8], [1.0, 1.0, 2.0, 2.0, 2.0], "asymmetric", "floor"),
+            (
+                [1, 2, 3, 5, 7],
+                [1.0, 1.0, 1.5, 2.0, 1.5],
+                "half_pixel",
+                "round_prefer_floor",
+            ),
+            ([1, 4, 50], [1.0, 1.0, 2.5], "half_pixel", "round_prefer_floor"),
+            ([1, 4, 48], [1.0, 1.0, 2.0], "asymmetric", "floor"),
+        ],
+    )
+    def test_nearest_f32(self, model_runner, shape, scales, coord, nearest_mode):
+        model = _make_resize_scales_model(
+            shape, scales, np.float32, "nearest", coord, nearest_mode=nearest_mode
+        )
+        rng = np.random.default_rng(401)
+        x = rng.uniform(-2.0, 2.0, shape).astype(np.float32)
+        actual, reference = model_runner.run_sample(model, [x])
+        compare_outputs(actual, reference, atol=0)
+
+    @pytest.mark.parametrize(
+        "shape,scales,coord",
+        [
+            ([1, 3, 5, 7], [1.0, 1.0, 2.0, 2.0], "half_pixel"),
+            ([1, 2, 4, 5], [1.0, 1.0, 3.0, 3.0], "asymmetric"),
+            ([1, 2, 16, 32], [1.0, 1.0, 0.5, 0.5], "half_pixel"),
+            ([1, 3, 12, 16], [1.0, 1.0, 2.0, 2.0], "asymmetric"),
+            ([1, 3, 12, 16], [1.0, 1.0, 2.0, 2.0], "half_pixel"),
+            ([1, 3, 12, 16], [1.0, 1.0, 2.0, 2.0], "align_corners"),
+            ([1, 3, 12, 16], [1.0, 1.0, 2.0, 2.0], "pytorch_half_pixel"),
+            ([1, 2, 3, 5, 8], [1.0, 1.0, 2.0, 2.0, 2.0], "half_pixel"),
+            ([1, 2, 3, 5, 7], [1.0, 1.0, 1.5, 2.0, 1.5], "asymmetric"),
+            ([1, 4, 50], [1.0, 1.0, 2.5], "half_pixel"),
+            ([1, 4, 48], [1.0, 1.0, 2.0], "asymmetric"),
+        ],
+    )
+    def test_linear_f32(self, model_runner, shape, scales, coord):
+        model = _make_resize_scales_model(shape, scales, np.float32, "linear", coord)
+        rng = np.random.default_rng(402)
+        x = rng.uniform(-2.0, 2.0, shape).astype(np.float32)
+        actual, reference = model_runner.run_sample(model, [x])
+        compare_outputs(actual, reference, atol=1e-5, rtol=1e-5)
+
+    # 14, 20 and 24 outputs per row use 2-, 4- and 8-element f16 stores.
+    @pytest.mark.parametrize("width", [7, 10, 12])
+    @pytest.mark.parametrize("mode", ["nearest", "linear"])
+    def test_f16(self, model_runner, width, mode):
+        shape = [1, 4, 6, width]
+        scales = [1.0, 1.0, 2.0, 2.0]
+        model = _make_resize_scales_model(shape, scales, np.float16, mode, "half_pixel")
+        rng = np.random.default_rng(403)
+        x = rng.uniform(-2.0, 2.0, shape).astype(np.float16)
+        actual, reference = model_runner.run_sample(model, [x])
+        atol = 0 if mode == "nearest" else 1e-2
+        compare_outputs(actual, reference, atol=atol, rtol=atol)
+
+    # 20, 32, 40 and 50 outputs per row use 4-, 16-, 8- and 2-byte stores.
+    @pytest.mark.parametrize("width", [10, 16, 20, 25])
+    @pytest.mark.parametrize("dtype", [np.int8, np.uint8])
+    def test_nearest_8bit(self, model_runner, width, dtype):
+        shape = [1, 4, 6, width]
+        scales = [1.0, 1.0, 2.0, 2.0]
+        model = _make_resize_scales_model(
+            shape, scales, dtype, "nearest", "asymmetric", nearest_mode="floor"
+        )
+        rng = np.random.default_rng(405)
+        info = np.iinfo(dtype)
+        x = rng.integers(info.min, info.max + 1, shape).astype(dtype)
+        actual, reference = model_runner.run_sample(model, [x])
+        compare_outputs(actual, reference, atol=0)
