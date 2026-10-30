@@ -217,9 +217,10 @@ def DecomposeMultiHeadAttentionPass
     hip.matmul, a scale hip.mul, hip.miopen.softmax, and a value hip.matmul.
 
     hip-fuse-rocmlir then outlines each matmul. The softmax stays between
-    them, because it is not a pointwise epilogue. Packed QKV, bias, masks,
-    past key or value, causal masking, and dynamic shapes stay as
-    hip.multi_head_attention and use the runtime kernel.
+    them, because it is not a pointwise epilogue. The element type must be
+    f16, bf16, or f32, which is what HIP-to-TOSA can lower. Packed QKV, bias,
+    masks, past key or value, causal masking, dynamic shapes, and any other
+    float type stay as hip.multi_head_attention and use the runtime kernel.
   }];
   let dependentDialects = [
     "mlir::hip::HipDialect",
