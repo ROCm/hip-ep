@@ -140,7 +140,8 @@ jobs:
             --cmake_generator Ninja \
             --hip_arch "${{ env.HIP_ARCHITECTURES }}" \
             --cmake_prefix_path "${{ runner.workspace }}/ort-install;${{ runner.workspace }}/llvm-install" \
-            --cmake_extra_defines CMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON HIP_EP_ENABLE_RING_ATTENTION=OFF
+            --cmake_extra_defines CMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON \
+            --cmake_extra_defines HIP_EP_ENABLE_RING_ATTENTION=OFF
 
       # -----------------------------------------------------------------------
       # Stage GPU test package:
@@ -358,7 +359,9 @@ jobs:
             --hip_arch "${{ env.HIP_ARCHITECTURES }}" \
             --cmake_prefix_path "${{ runner.workspace }}/ort-install;${{ runner.workspace }}/llvm-install" \
             --skip_wheel \
-            --cmake_extra_defines CMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON HIP_EP_ENABLE_RING_ATTENTION=ON BUILD_PYTHON_WHEEL=OFF
+            --cmake_extra_defines CMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON \
+            --cmake_extra_defines HIP_EP_ENABLE_RING_ATTENTION=ON \
+            --cmake_extra_defines BUILD_PYTHON_WHEEL=OFF
           CACHE="../build/$(basename "$PWD")/CMakeCache.txt"
           grep -q '^HIP_EP_ENABLE_RING_ATTENTION:BOOL=ON$' "$CACHE"
           mkdir -p ring-overlay/bin ring-overlay/lib
