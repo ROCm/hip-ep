@@ -90,7 +90,7 @@ controller from that `bin` directory:
 | `--mode` | `lookup`, `autotune` | `lookup` | `lookup` uses the tables embedded in `custom_kernels_<arch>.dll` and falls through to autotune on a miss, like production. `autotune` bypasses the tables (production's `online` mode). |
 | `--coverage` | `1`, `2`, `3` | `3` | Shape tier; see "Shape coverage". `1` suits a per-PR job, `3` a nightly one. |
 
-The controller runs the 17 leaves serially, with `bin` as the working
+The controller runs the 19 leaves serially, with `bin` as the working
 directory so every leaf finds `custom_kernels_<arch>.dll`. It prints one
 `[<op>/<leaf>] PASS|FAIL (<ms> ms)` line per leaf and finally
 `Combined report: <path>`.
@@ -193,7 +193,7 @@ Concretely:
   never drops a categorical situation.
 
 A tier3 (default) run of one leaf is on the order of tens to ~150 cases, and
-the whole 17-leaf suite at tier3 is budgeted at **up to ~30 min total**
+the whole 19-leaf suite at tier3 is budgeted at **up to ~30 min total**
 (measured ~20-25 min in practice) — this is intentionally wider than a
 "finishes in a minute" smoke test, because the shape axis (M=1 vs M>1,
 multiple K/N/seq scenarios) needs real coverage too, not just the categorical
@@ -258,7 +258,8 @@ unit_test/
   gqa/prefill/Xfp16_Wi8_Yfp16/
   qmoe_ragged_mm/Xfp16_Wu4_Yfp16/
   gather_block_quantized/Xi64_W{u4,u8,fp8}_Yfp16/
-  gemv_transposed_b/Xfp32_Wfp32_Yfp32/
+  gemv_transposed_b/X{fp32_Wfp32,bf16_Wbf16}_Yfp32/
+  gemm_transposed_b/Xbf16_Wbf16_Yfp32/
 ```
 
 `unit_test/` holds one directory per op and nothing else besides the four
@@ -389,6 +390,25 @@ COVERAGE=N` (any leaf, or the top-level aggregator) builds and runs it.
   up to `256x14336`). Outputs are compared with a double-precision reference
   within the fp32 error bound of the kernels' sums, and each case records its
   mean launch time.
+- **gemv_transposed_b** (bf16 -> fp32): `hip_gemv_bf16_f32_transposed_b` on
+  the smallest shape the runtime dispatches to it (`1024x256`), partial
+  blocks, a sub-wave reduction and `K` on both sides of the 128-/512-thread
+  block switch (8 cases), plus a launch after a failed HIP call on each body
+  and the arguments it must refuse (13 more), at every tier; COVERAGE
+  thins the typical decode projection sizes (tier1 = 1 case, tier2 = 3,
+  tier3 = 5, up to `14336x4096`). Outputs are compared with a
+  double-precision reference within the fp32 error bound of the kernel's
+  sums, and each case records its mean launch time.
+- **gemm_transposed_b** (bf16 -> fp32): `hip_gemm_bf16_f32_transposed_b` on
+  both tile shapes, the smallest `M` the runtime dispatches to it (2),
+  partial tiles in `M` and `N`, `K` a multiple of the 64-wide slice and not,
+  and the smallest `K` (8 cases), plus a launch after a failed HIP call on
+  each tile shape and the arguments it must refuse (14 more), at every tier;
+  COVERAGE thins the typical prefill projection sizes (tier1 = 1 case,
+  tier2 = 3, tier3 = 5, up to `512x14336x4096`). Outputs are compared with a
+  double-precision reference within an error bound for the fp32 WMMA
+  accumulation, and each case records its mean launch time. Devices without
+  the gfx11 WMMA encoding skip it.
 
 A new op's test cpp should follow whichever of the above shapes fit it best:
 if the kernel's dispatch paths are better covered by a small hand-picked

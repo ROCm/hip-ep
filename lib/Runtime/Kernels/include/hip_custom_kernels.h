@@ -3923,6 +3923,25 @@ HIP_KERNEL_API int hip_gemv_f32_transposed_b(void* stream, const float* A,
 HIP_KERNEL_API int hip_gemv_f32_transposed_b_multiwave_gfx1151(
     void *stream, const float *A, const float *B, float *C, int N, int K);
 
+/* BF16-input, F32-output GEMV for C[1,N] = A[1,K] * transpose(B[N,K]).
+ * This decode-oriented path consumes the physical transposed-B layout
+ * directly and accumulates in F32. Returns 0 once the kernel is launched, -1
+ * for a null stream or pointer, N <= 0, K <= 0, an odd K or A or B not 4-byte
+ * aligned (nothing is written), or a failed launch. */
+HIP_KERNEL_API int hip_gemv_bf16_f32_transposed_b(
+    void* stream, const void* A, const void* B, float* C, int N, int K);
+
+/* BF16-input, F32-output GEMM for C[M,N] = A[M,K] * transpose(B[N,K]), the
+ * prefill counterpart of the GEMV above: WMMA tiles staged through shared
+ * memory, F32 accumulation. Returns 0 once the kernel is launched, -1 for a
+ * null stream or pointer, M, N or K <= 0, K not a multiple of 8, A or B not
+ * 16-byte aligned or a wave64 device (nothing is written), or a failed
+ * launch. Only the gfx11 WMMA encoding (RDNA3/3.5) is implemented: on a wave32
+ * device without it (gfx1170, gfx12) the kernel traps, so callers launch it
+ * on gfx11 parts only. */
+HIP_KERNEL_API int hip_gemm_bf16_f32_transposed_b(
+    void* stream, const void* A, const void* B, float* C, int M, int N, int K);
+
 #ifdef __cplusplus
 }
 #endif
