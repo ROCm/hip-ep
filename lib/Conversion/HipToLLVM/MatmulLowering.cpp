@@ -75,9 +75,14 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
       }
     }
 
-    // Compute element size in bytes
-    unsigned elemBits = AType.getElementType().getIntOrFloatBitWidth();
-    Value elemSize = createI64Const(elemBits / 8);
+    auto outputType = cast<MemRefType>(op.getOutput().getType());
+    const int64_t inputDataType = getHipdnnDataType(AType.getElementType());
+    const int64_t outputDataType =
+        getHipdnnDataType(outputType.getElementType());
+    if (inputDataType < 0 || outputDataType < 0)
+      return rewriter.notifyMatchFailure(op, "unsupported matmul element type");
+    Value inputDataTypeVal = createI64Const(inputDataType);
+    Value outputDataTypeVal = createI64Const(outputDataType);
 
     // b_batch_stride: the per-batch stride (in elements) for hipBLASLt's
     // STRIDED_BATCH_OFFSET on layA when batch_count > 1. Two distinct B
@@ -104,7 +109,7 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
     //   memref<1x4096x1024xf16>)
     // After:
     //   %stride = llvm.mlir.constant(0 : i64) : i64   // leading product is 1
-    //   llvm.call @wrap_hipblasLtMatmul(..., %stride) : (...) -> i32
+    //   llvm.call @wrap_hipblasLtMatmulTyped(..., %stride) : (...) -> i32
     Value bBatchStride;
     if (BRank == 2) {
       bBatchStride = createI64Const(0);
@@ -141,13 +146,15 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
     }
 
     // Runtime signature:
-    // int wrap_hipblasLtMatmul(RuntimeState* state,
+    // int wrap_hipblasLtMatmulTyped(RuntimeState* state,
     //                          const void* A, const void* B, void* output,
     //                          int64_t M, int64_t N, int64_t K,
-    //                          int64_t batch_count, int64_t elem_size,
+    //                          int64_t batch_count,
+    //                          int64_t input_data_type,
+    //                          int64_t output_data_type,
     //                          int64_t b_batch_stride, int64_t transA,
-    //                          int64_t transB, int op_state_slot)
-    SmallVector<Type, 13> paramTypes = {
+    //                          int64_t transB)
+    SmallVector<Type, 14> paramTypes = {
         ptrType, // state
         i32Type, // op_state_slot
         ptrType, // A
@@ -157,18 +164,19 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
         i64Type, // N
         i64Type, // K
         i64Type, // batch_count
-        i64Type, // elem_size
+        i64Type, // input_data_type
+        i64Type, // output_data_type
         i64Type, // b_batch_stride
         i64Type, // transA
         i64Type  // transB
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kWrapHipblasltMatmul, paramTypes, i32Type);
+        rewriter, module, kWrapHipblasltMatmulTyped, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 13> args = {statePtr,
+    SmallVector<Value, 14> args = {statePtr,
                                    getOpStateSlotValue(op, rewriter, loc),
                                    APtr,
                                    BPtr,
@@ -177,7 +185,8 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
                                    N,
                                    K,
                                    batchCount,
-                                   elemSize,
+                                   inputDataTypeVal,
+                                   outputDataTypeVal,
                                    bBatchStride,
                                    createI64Const(transA),
                                    createI64Const(transB)};

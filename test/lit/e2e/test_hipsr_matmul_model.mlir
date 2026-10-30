@@ -21,7 +21,7 @@
 // CHECK-SAME: hipdnn.num_op_state_slots = 1
 // CHECK-SAME: hipdnn.output_count = 1
 // CHECK-SAME: hipdnn.output_shapes = [array<i64: 2, 3>]
-// CHECK-DAG: llvm.func @wrap_hipblasLtMatmul
+// CHECK-DAG: llvm.func @wrap_hipblasLtMatmulTyped
 // CHECK-DAG: llvm.func @hipdnn_ep_op_state_construct_matmul
 // CHECK-DAG: llvm.func @hipdnn_ep_alloc_output
 // CHECK-DAG: llvm.func private @main_graph(%{{.*}}: !llvm.ptr, %{{.*}}: !llvm.ptr) -> i32

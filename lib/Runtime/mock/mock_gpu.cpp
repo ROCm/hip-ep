@@ -439,24 +439,27 @@ int wrap_hipblasLtGemm(void *handle, void *stream, int64_t m, int64_t n,
   return 0;
 }
 
-int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
-                         const void *B, void *output, int64_t M, int64_t N,
-                         int64_t K, int64_t batch_count, int64_t elem_size,
-                         int64_t b_batch_stride, int64_t transA,
-                         int64_t transB) {
+int wrap_hipblasLtMatmulTyped(RuntimeState *state, int op_state_slot,
+                              const void *A, const void *B, void *output,
+                              int64_t M, int64_t N, int64_t K,
+                              int64_t batch_count, int64_t input_data_type,
+                              int64_t output_data_type, int64_t b_batch_stride,
+                              int64_t transA, int64_t transB) {
   (void)b_batch_stride;
   (void)transA;
   (void)transB;
   (void)op_state_slot;
   if (!state) {
-    fprintf(stderr, "Invalid state in wrap_hipblasLtMatmul\n");
+    fprintf(stderr, "Invalid state in wrap_hipblasLtMatmulTyped\n");
     return -1;
   }
 
-  MOCK_PRINT("[MOCK] wrap_hipblasLtMatmul(M=%lld, N=%lld, K=%lld, "
-             "batch=%lld, elem_size=%lld, transA=%lld, transB=%lld)\n",
+  MOCK_PRINT("[MOCK] wrap_hipblasLtMatmulTyped(M=%lld, N=%lld, K=%lld, "
+             "batch=%lld, input_type=%lld, output_type=%lld, transA=%lld, "
+             "transB=%lld)\n",
              (long long)M, (long long)N, (long long)K, (long long)batch_count,
-             (long long)elem_size, (long long)transA, (long long)transB);
+             (long long)input_data_type, (long long)output_data_type,
+             (long long)transA, (long long)transB);
 
   return 0;
 }
@@ -482,6 +485,21 @@ int wrap_rocmlir(RuntimeState *state, const char *kernel_binary,
              func_name ? func_name : "(null)", (long long)block_size,
              (long long)grid_size, size);
   return 0;
+}
+
+int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
+                         const void *B, void *output, int64_t M, int64_t N,
+                         int64_t K, int64_t batch_count, int64_t elem_size,
+                         int64_t b_batch_stride, int64_t transA,
+                         int64_t transB) {
+  const int64_t dataType = elem_size == 2   ? HIPDNN_EP_DATATYPE_HALF
+                           : elem_size == 4 ? HIPDNN_EP_DATATYPE_FLOAT
+                                            : -1;
+  if (dataType < 0)
+    return -1;
+  return wrap_hipblasLtMatmulTyped(state, op_state_slot, A, B, output, M, N, K,
+                                   batch_count, dataType, dataType,
+                                   b_batch_stride, transA, transB);
 }
 
 int wrap_group_query_attention(

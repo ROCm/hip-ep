@@ -898,6 +898,20 @@ LogicalResult MatmulOp::verify() {
                                 /*numInits=*/1)))
     return failure();
 
+  Type aElementType = cast<ShapedType>(getA().getType()).getElementType();
+  Type bElementType = cast<ShapedType>(getB().getType()).getElementType();
+  Type outputElementType =
+      cast<ShapedType>(getOutput().getType()).getElementType();
+  if (aElementType != bElementType)
+    return emitOpError("requires A and B to have the same element type");
+  if (!aElementType.isF16() && !aElementType.isBF16() && !aElementType.isF32())
+    return emitOpError("supports only f16, bf16, or f32 inputs");
+  if (outputElementType != aElementType &&
+      !(aElementType.isBF16() && outputElementType.isF32()))
+    return emitOpError(
+        "requires output type to match the inputs, except bf16 inputs may "
+        "produce f32 output");
+
   return mlir::hip::verifyHipOpShape(*this, [&] {
     return mlir::hip::inferMatmulShape(
         detail::getShapeOf(getA()), detail::getShapeOf(getB()),

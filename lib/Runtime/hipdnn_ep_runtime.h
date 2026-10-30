@@ -831,20 +831,29 @@ int wrap_hipblasLtGemm(void *handle, // hipBLASLt handle
 // (often NaN) outputs for batch > 0. For batch_count == 1 the value is
 // ignored. Always pass an exact stride; the compiler computes 0 vs K*N
 // at compile time when B's leading dims are static, else at runtime.
-int wrap_hipblasLtMatmul(
+// Legacy same-type entry point. Retained for callers compiled against the
+// element-size ABI; new generated code uses the typed entry point below.
+int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
+                         const void *B, void *output, int64_t M, int64_t N,
+                         int64_t K, int64_t batch_count, int64_t elem_size,
+                         int64_t b_batch_stride, int64_t transA,
+                         int64_t transB);
+
+int wrap_hipblasLtMatmulTyped(
     RuntimeState *state,
-    int op_state_slot,      // per-instance op-state slot (shared algo table)
-    const void *A,          // Matrix A GPU pointer
-    const void *B,          // Matrix B GPU pointer
-    void *output,           // Output GPU pointer
-    int64_t M,              // Rows of A (per batch)
-    int64_t N,              // Columns of B
-    int64_t K,              // Columns of A / Rows of B
-    int64_t batch_count,    // Number of batches
-    int64_t elem_size,      // Element size in bytes (2=f16, 4=f32)
-    int64_t b_batch_stride, // 0 = broadcast (any rank); K*N = per-batch
-    int64_t transA,         // 1 = swap A's last two dims before multiply
-    int64_t transB);        // 1 = swap B's last two dims before multiply
+    int op_state_slot,        // per-instance op-state slot (shared algo table)
+    const void *A,            // Matrix A GPU pointer
+    const void *B,            // Matrix B GPU pointer
+    void *output,             // Output GPU pointer
+    int64_t M,                // Rows of A (per batch)
+    int64_t N,                // Columns of B
+    int64_t K,                // Columns of A / Rows of B
+    int64_t batch_count,      // Number of batches
+    int64_t input_data_type,  // HIPDNN_EP_DATATYPE_* for A and B
+    int64_t output_data_type, // HIPDNN_EP_DATATYPE_* for output
+    int64_t b_batch_stride,   // 0 = broadcast (any rank); K*N = per-batch
+    int64_t transA,           // 1 = swap A's last two dims before multiply
+    int64_t transB);          // 1 = swap B's last two dims before multiply
 
 // RocMLIR dispatch wrapper (hip.rocmlir). Launches a pre-compiled GPU kernel
 // embedded (as an ELF/HSACO blob) in `kernel_binary` at compile time. The

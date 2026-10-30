@@ -31,6 +31,46 @@ func.func @matmul_3d_broadcast(%ctx: !hip.context,
 
 // -----
 
+// CHECK-LABEL: func.func @matmul_bf16_f32
+// CHECK:         hip.matmul
+func.func @matmul_bf16_f32(%ctx: !hip.context,
+                            %a: memref<2x4x8xbf16, 1>,
+                            %b: memref<8x16xbf16, 1>,
+                            %c: memref<2x4x16xf32, 1>) {
+  hip.matmul(%ctx)
+    ins(%a, %b : memref<2x4x8xbf16, 1>, memref<8x16xbf16, 1>)
+    outs(%c : memref<2x4x16xf32, 1>)
+  return
+}
+
+// -----
+
+func.func @matmul_mismatched_inputs(%ctx: !hip.context,
+                                    %a: memref<2x4x8xbf16, 1>,
+                                    %b: memref<8x16xf16, 1>,
+                                    %c: memref<2x4x16xf32, 1>) {
+  // expected-error @below {{requires A and B to have the same element type}}
+  hip.matmul(%ctx)
+    ins(%a, %b : memref<2x4x8xbf16, 1>, memref<8x16xf16, 1>)
+    outs(%c : memref<2x4x16xf32, 1>)
+  return
+}
+
+// -----
+
+func.func @matmul_unsupported_mixed_output(%ctx: !hip.context,
+                                           %a: memref<2x4x8xf16, 1>,
+                                           %b: memref<8x16xf16, 1>,
+                                           %c: memref<2x4x16xf32, 1>) {
+  // expected-error @below {{requires output type to match the inputs, except bf16 inputs may produce f32 output}}
+  hip.matmul(%ctx)
+    ins(%a, %b : memref<2x4x8xf16, 1>, memref<8x16xf16, 1>)
+    outs(%c : memref<2x4x16xf32, 1>)
+  return
+}
+
+// -----
+
 // CHECK-LABEL: func.func @matmul_dynamic_batch
 // CHECK:         hip.matmul
 func.func @matmul_dynamic_batch(%ctx: !hip.context,

@@ -742,6 +742,10 @@ def Hip_MatmulOp : Hip_DpsOp_WithInfer<"matmul", "Output", [OpStateOpInterface]>
       B:      [..., K, N]
       output: [broadcast(A.batch, B.batch), M, N]
 
+    A and B have the same f16, bf16, or f32 element type. The output normally
+    has the same type; bf16 inputs may instead produce f32 output while the
+    multiplication still accumulates in f32.
+
     `?` (kDynamic) is permitted on any dim and behaves as a wildcard for
     verification; `reifyResultShapes` lifts dynamic dims into `tensor.dim`
     / `memref.dim` of the corresponding operand. See

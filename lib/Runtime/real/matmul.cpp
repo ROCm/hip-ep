@@ -24,7 +24,7 @@
 //===----------------------------------------------------------------------===//
 // Per-shape descriptor cache with multi-algorithm auto-tune.
 //
-// On the first call for each unique (M, N, K, batch, elem_size) shape we
+// On the first call for each unique shape and input/output type pair we
 // create descriptors, request up to MAX_ALGO_CANDIDATES algorithms from the
 // heuristic, and store them. On the first actual matmul call (when real GPU
 // pointers are available), we benchmark each candidate and cache the winner.
@@ -45,11 +45,14 @@ static bool autotune_enabled() {
 }
 
 struct MatmulCacheKey {
-  int64_t M, N, K, batch_count, elem_size, b_batch_stride, transA, transB;
+  int64_t M, N, K, batch_count, input_data_type, output_data_type;
+  int64_t b_batch_stride, transA, transB;
   bool operator==(const MatmulCacheKey &o) const {
     return M == o.M && N == o.N && K == o.K && batch_count == o.batch_count &&
-           elem_size == o.elem_size && b_batch_stride == o.b_batch_stride &&
-           transA == o.transA && transB == o.transB;
+           input_data_type == o.input_data_type &&
+           output_data_type == o.output_data_type &&
+           b_batch_stride == o.b_batch_stride && transA == o.transA &&
+           transB == o.transB;
   }
 };
 
@@ -60,7 +63,8 @@ struct MatmulCacheKeyHash {
     hash_combine_val(h, k.N);
     hash_combine_val(h, k.K);
     hash_combine_val(h, k.batch_count);
-    hash_combine_val(h, k.elem_size);
+    hash_combine_val(h, k.input_data_type);
+    hash_combine_val(h, k.output_data_type);
     hash_combine_val(h, k.b_batch_stride);
     hash_combine_val(h, k.transA);
     hash_combine_val(h, k.transB);
@@ -69,7 +73,7 @@ struct MatmulCacheKeyHash {
 };
 
 /// Cached hipBLASLt descriptors + multi-algorithm auto-tune state for a
-/// single (M, N, K, batch, elem_size) shape. Descriptors are created in
+/// single shape and input/output type pair. Descriptors are created in
 /// queryOrCreateMatmul() and owned by the MatmulAlgoTable, which frees them
 /// when the last session sharing it is destroyed.
 struct MatmulCacheEntry {
@@ -145,6 +149,22 @@ extern "C" int8_t hipdnn_ep_op_state_construct_matmul(RuntimeState *state,
   return 0;
 }
 
+static bool resolveMatmulDataType(int64_t typeCode, hipDataType &dataType) {
+  switch (typeCode) {
+  case HIPDNN_EP_DATATYPE_HALF:
+    dataType = HIP_R_16F;
+    return true;
+  case HIPDNN_EP_DATATYPE_BFLOAT16:
+    dataType = HIP_R_16BF;
+    return true;
+  case HIPDNN_EP_DATATYPE_FLOAT:
+    dataType = HIP_R_32F;
+    return true;
+  default:
+    return false;
+  }
+}
+
 static MatmulCacheEntry *queryOrCreateMatmul(MatmulAlgoTable &table,
                                              hipblasLtHandle_t handle,
                                              const MatmulCacheKey &key) {
@@ -157,7 +177,11 @@ static MatmulCacheEntry *queryOrCreateMatmul(MatmulAlgoTable &table,
   if (it != table.map.end())
     return it->second.get();
 
-  hipDataType dt = (key.elem_size == 2) ? HIP_R_16F : HIP_R_32F;
+  hipDataType inputDataType;
+  hipDataType outputDataType;
+  if (!resolveMatmulDataType(key.input_data_type, inputDataType) ||
+      !resolveMatmulDataType(key.output_data_type, outputDataType))
+    return nullptr;
   int64_t M = key.M, N = key.N, K = key.K;
   int64_t transA = key.transA;
   int64_t transB = key.transB;
@@ -213,11 +237,12 @@ static MatmulCacheEntry *queryOrCreateMatmul(MatmulAlgoTable &table,
     hblB_cols = K;
     hblB_ld = M;
   }
-  MATMUL_CACHE_CHECK(hipblasLtMatrixLayoutCreate(&entry.layA, dt, hblA_rows,
-                                                 hblA_cols, hblA_ld));
-  MATMUL_CACHE_CHECK(hipblasLtMatrixLayoutCreate(&entry.layB, dt, hblB_rows,
-                                                 hblB_cols, hblB_ld));
-  MATMUL_CACHE_CHECK(hipblasLtMatrixLayoutCreate(&entry.layC, dt, N, M, N));
+  MATMUL_CACHE_CHECK(hipblasLtMatrixLayoutCreate(
+      &entry.layA, inputDataType, hblA_rows, hblA_cols, hblA_ld));
+  MATMUL_CACHE_CHECK(hipblasLtMatrixLayoutCreate(
+      &entry.layB, inputDataType, hblB_rows, hblB_cols, hblB_ld));
+  MATMUL_CACHE_CHECK(
+      hipblasLtMatrixLayoutCreate(&entry.layC, outputDataType, N, M, N));
 
   if (key.batch_count > 1) {
     int64_t bc = key.batch_count;
@@ -452,14 +477,16 @@ static void autotuneMatmul(hipblasLtHandle_t handle, hipStream_t stream,
 //   B_ptr = A (column-major view is A^T: K rows, M cols, ld = K)
 //   C_ptr = output (column-major view is C^T: N rows, M cols, ld = N)
 //
-// Both fp16 and fp32 use HIPBLAS_COMPUTE_32F for accumulation precision.
+// FP16, BF16, and FP32 inputs use HIPBLAS_COMPUTE_32F accumulation. BF16
+// inputs may retain that precision in an FP32 output.
 //===----------------------------------------------------------------------===//
 
-int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
-                         const void *B, void *output, int64_t M, int64_t N,
-                         int64_t K, int64_t batch_count, int64_t elem_size,
-                         int64_t b_batch_stride, int64_t transA,
-                         int64_t transB) {
+int wrap_hipblasLtMatmulTyped(RuntimeState *state, int op_state_slot,
+                              const void *A, const void *B, void *output,
+                              int64_t M, int64_t N, int64_t K,
+                              int64_t batch_count, int64_t input_data_type,
+                              int64_t output_data_type, int64_t b_batch_stride,
+                              int64_t transA, int64_t transB) {
   OP_PROFILE(
       "matmul",
       [&] {
@@ -470,7 +497,7 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
       },
       state);
   if (!state || !A || !B || !output) {
-    fprintf(stderr, "Invalid arguments to wrap_hipblasLtMatmul\n");
+    fprintf(stderr, "Invalid arguments to wrap_hipblasLtMatmulTyped\n");
     return -1;
   }
 
@@ -480,19 +507,37 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
       static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
 
   if (!handle || !stream) {
-    fprintf(stderr, "wrap_hipblasLtMatmul: null handle or stream\n");
+    fprintf(stderr, "wrap_hipblasLtMatmulTyped: null handle or stream\n");
     return -1;
   }
 
-  if (elem_size != 2 && elem_size != 4) {
-    fprintf(stderr, "wrap_hipblasLtMatmul: unsupported elem_size %lld\n",
-            (long long)elem_size);
+  hipDataType resolvedInputType;
+  hipDataType resolvedOutputType;
+  if (!resolveMatmulDataType(input_data_type, resolvedInputType) ||
+      !resolveMatmulDataType(output_data_type, resolvedOutputType)) {
+    fprintf(stderr,
+            "wrap_hipblasLtMatmulTyped: unsupported input/output data types "
+            "%lld/%lld\n",
+            (long long)input_data_type, (long long)output_data_type);
+    return -1;
+  }
+  (void)resolvedInputType;
+  (void)resolvedOutputType;
+  const bool sameType = input_data_type == output_data_type;
+  const bool bf16ToF32 = input_data_type == HIPDNN_EP_DATATYPE_BFLOAT16 &&
+                         output_data_type == HIPDNN_EP_DATATYPE_FLOAT;
+  if (!sameType && !bf16ToF32) {
+    fprintf(stderr,
+            "wrap_hipblasLtMatmulTyped: unsupported input/output type "
+            "combination %s/%s\n",
+            hipdnn_ep_datatype_name(input_data_type),
+            hipdnn_ep_datatype_name(output_data_type));
     return -1;
   }
 
   MatmulState *ms = MatmulState::get_op_state(state, op_state_slot);
   if (!ms || !ms->table) {
-    fprintf(stderr, "wrap_hipblasLtMatmul: missing op-state for slot %d\n",
+    fprintf(stderr, "wrap_hipblasLtMatmulTyped: missing op-state for slot %d\n",
             op_state_slot);
     return -1;
   }
@@ -501,9 +546,11 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
   // transB is set, B is physically [N,K], which the GEMV kernel consumes
   // directly on the target where this policy was measured. Other targets,
   // prefill, and wider projections retain the tuned GEMM path below.
-  if (hipdnn_ep_real::useF32TransposedBDecodeGemv(ms->use_f32_decode_gemv, M, N,
-                                                  K, batch_count, elem_size,
-                                                  transA, transB)) {
+  if (input_data_type == HIPDNN_EP_DATATYPE_FLOAT &&
+      output_data_type == HIPDNN_EP_DATATYPE_FLOAT &&
+      hipdnn_ep_real::useF32TransposedBDecodeGemv(
+          ms->use_f32_decode_gemv, M, N, K, batch_count,
+          /*elementSizeBytes=*/4, transA, transB)) {
     if (hipdnn_ep_real::useF32TransposedBMultiwaveGfx1151(N, K)) {
       return hip_gemv_f32_transposed_b_multiwave_gfx1151(
           stream, static_cast<const float *>(A), static_cast<const float *>(B),
@@ -515,21 +562,31 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
         static_cast<float *>(output), static_cast<int>(N), static_cast<int>(K));
   }
 
-  const char *type_name = (elem_size == 2) ? "f16" : "f32";
-  RUNTIME_DEBUG_LOG("[REAL] wrap_hipblasLtMatmul: M=%lld, N=%lld, K=%lld, "
+  const int64_t output_element_size = hipdnn_ep_datatype_size(output_data_type);
+  RUNTIME_DEBUG_LOG("[REAL] wrap_hipblasLtMatmulTyped: M=%lld, N=%lld, K=%lld, "
                     "batch=%lld, b_batch_stride=%lld, transA=%lld, "
-                    "transB=%lld, elem_size=%lld (%s), total_bytes=%lld\n",
+                    "transB=%lld, input_type=%s, output_type=%s, "
+                    "total_output_bytes=%lld\n",
                     (long long)M, (long long)N, (long long)K,
                     (long long)batch_count, (long long)b_batch_stride,
-                    (long long)transA, (long long)transB, (long long)elem_size,
-                    type_name, (long long)(batch_count * M * N * elem_size));
+                    (long long)transA, (long long)transB,
+                    hipdnn_ep_datatype_name(input_data_type),
+                    hipdnn_ep_datatype_name(output_data_type),
+                    (long long)(batch_count * M * N * output_element_size));
 
-  MatmulCacheKey key{M,      N,     K, batch_count, elem_size, b_batch_stride,
-                     transA, transB};
+  MatmulCacheKey key{M,
+                     N,
+                     K,
+                     batch_count,
+                     input_data_type,
+                     output_data_type,
+                     b_batch_stride,
+                     transA,
+                     transB};
   MatmulCacheEntry *cached = queryOrCreateMatmul(*ms->table, handle, key);
   if (!cached) {
     fprintf(stderr,
-            "wrap_hipblasLtMatmul: failed to create/find cached "
+            "wrap_hipblasLtMatmulTyped: failed to create/find cached "
             "descriptors for M=%lld N=%lld K=%lld batch=%lld\n",
             (long long)M, (long long)N, (long long)K, (long long)batch_count);
     return -1;
@@ -582,10 +639,34 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
                       algo_ptr, call_ws_ptr, call_ws_size, stream);
 
   if (st != HIPBLAS_STATUS_SUCCESS) {
-    fprintf(stderr, "wrap_hipblasLtMatmul: hipblasLtMatmul failed (%d)\n", st);
+    fprintf(stderr, "wrap_hipblasLtMatmulTyped: hipblasLtMatmul failed (%d)\n",
+            st);
     return -1;
   }
 
-  RUNTIME_DEBUG_LOG("[REAL] wrap_hipblasLtMatmul: completed successfully\n");
+  RUNTIME_DEBUG_LOG(
+      "[REAL] wrap_hipblasLtMatmulTyped: completed successfully\n");
   return 0;
+}
+
+int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
+                         const void *B, void *output, int64_t M, int64_t N,
+                         int64_t K, int64_t batch_count, int64_t elem_size,
+                         int64_t b_batch_stride, int64_t transA,
+                         int64_t transB) {
+  int64_t dataType;
+  if (elem_size == 2) {
+    dataType = HIPDNN_EP_DATATYPE_HALF;
+  } else if (elem_size == 4) {
+    dataType = HIPDNN_EP_DATATYPE_FLOAT;
+  } else {
+    fprintf(stderr,
+            "wrap_hipblasLtMatmul: unsupported element size %lld; expected "
+            "2 or 4 bytes\n",
+            (long long)elem_size);
+    return -1;
+  }
+  return wrap_hipblasLtMatmulTyped(state, op_state_slot, A, B, output, M, N, K,
+                                   batch_count, dataType, dataType,
+                                   b_batch_stride, transA, transB);
 }

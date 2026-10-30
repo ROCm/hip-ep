@@ -53,6 +53,8 @@ inline constexpr const char *kWrapConvTranspose = "wrap_conv_transpose";
 inline constexpr const char *kWrapHipblasltMatmul = "wrap_hipblasLtMatmul";
 inline constexpr const char *kWrapRocMlir = "wrap_rocmlir";
 inline constexpr const char *kWrapRmsNorm = "wrap_rms_norm";
+inline constexpr const char *kWrapHipblasltMatmulTyped =
+    "wrap_hipblasLtMatmulTyped";
 inline constexpr const char *kWrapSkipSimplifiedLayerNorm =
     "wrap_skip_simplified_layer_norm";
 inline constexpr const char *kWrapLayerNormalization =
