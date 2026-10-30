@@ -113,7 +113,10 @@ packed `__half2` path for fp16 rows of even width.
 `b` of shape `[K, N]`, with per-tensor f32 scales and zero points. `hip.qmatmul`
 is a different op, the DequantizeLinear + MatMul + QuantizeLinear fusion, and
 does not accept `QLinearMatMul`. Rank other than 2, f16 or bf16 scales, and
-per-row or per-column quantization, stay `onnx.QLinearMatMul`.
+per-row or per-column quantization, stay `onnx.QLinearMatMul`. With
+`HIPDNN_EP_ROCMLIR=1`, `hip-fuse-rocmlir` moves a `hip.qlinear_matmul` with
+constant parameters and a zero B zero point to a rocMLIR kernel, in the same
+form as `QLinearConv` below.
 
 `QLinearConv` is the native ONNX op: 8-bit activations and weights, grouped 2D
 windows, and an optional int32 bias. Input and output quantization is
@@ -122,6 +125,11 @@ keeps the `pads` attribute. `VALID` uses no padding. `SAME_UPPER` and
 `SAME_LOWER` split the pad budget, with the extra pad at the end or the
 beginning, and the kernel receives those explicit pads. `hip.qconv` is a
 different op, the W4A16 1x1 QDQ fusion, and does not accept `QLinearConv`.
+With `HIPDNN_EP_ROCMLIR=1`, `hip-fuse-rocmlir` moves a `hip.qlinear_conv`
+with constant parameters and a zero weight zero point to a rocMLIR kernel
+(see `docs/pipeline_pass_menu.md`). Initializers above the ORT bridge clone
+threshold are not inline constants, so large weights need
+`XLNX_ABI_2_0_CLONE_EXTERNAL_DATA_THRESHOLD` raised for this route.
 
 QuantizeLinear and DequantizeLinear storage is int8/uint8/int16/uint16 plus
 int4/uint4. DequantizeLinear additionally accepts int32, which is where a QDQ
