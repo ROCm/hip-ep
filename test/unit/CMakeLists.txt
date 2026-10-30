@@ -94,3 +94,39 @@ add_test(NAME QLpNormalizationRefUnit
 set_target_properties(test-qlpnormalization-ref PROPERTIES
   FOLDER "mlir/Test/Dialect/Hipsr"
 )
+
+# GPU-free check that a HIP-to-TOSA failure falls back per kernel: a static
+# conv+leaky_relu stays a rocMLIR dispatch, and a fused kernel whose sub TOSA
+# refuses is inlined as hip.conv, hip.sub, and hip.mul.
+if(ENABLE_ROCMLIRTRITON)
+  if(CMAKE_LINK_GROUP_USING_RESCAN_SUPPORTED)
+    set(_rocmlir_link_closure "$<LINK_GROUP:RESCAN,${HIPDNN_ROCMLIR_LINK_LIBS}>")
+  else()
+    set(_rocmlir_link_closure "${HIPDNN_ROCMLIR_LINK_LIBS}")
+  endif()
+
+  add_executable(test-rocmlir-tosa-fallback test_rocmlir_tosa_fallback.cpp)
+  target_compile_features(test-rocmlir-tosa-fallback PRIVATE cxx_std_17)
+  target_include_directories(test-rocmlir-tosa-fallback PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_BINARY_DIR}/include
+    ${MLIR_INCLUDE_DIRS}
+    ${LLVM_INCLUDE_DIRS}
+  )
+  target_link_libraries(test-rocmlir-tosa-fallback PRIVATE
+    LibHipCompiler
+    HipDialectIR
+    HipDialectTransforms
+    HipToTosa
+    "${_rocmlir_link_closure}"
+    MLIRIR
+    MLIRParser
+    MLIRPass
+    MLIRSupport
+    ${llvm_libs}
+  )
+  add_test(NAME RocMlirTosaFallbackUnit COMMAND test-rocmlir-tosa-fallback)
+  set_target_properties(test-rocmlir-tosa-fallback PROPERTIES
+    FOLDER "mlir/Test/Dialect/Hipsr"
+  )
+endif()
