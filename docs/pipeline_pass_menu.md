@@ -167,15 +167,19 @@ against HIP **tensor** IR (before bufferization) and are reached through
 | Name | Anchor | One-liner |
 |---|---|---|
 | `hip-decompose-conv-transpose` | func.func | Rewrite `hip.conv_transpose` into one stride-1 `hip.conv` per stride residue (MIOpen backward-data v4r1), reassembled with `tensor.insert_slice`. Reads the filter from an inline or file-backed `hip.constant`. Leaves unsupported cases (grouped, dilated, dynamic, non-constant, memory-address-backed or non-f16/bf16/f32 weights, stride > kernel, > 64 residues) for the MIOpen path. |
+| `hip-decompose-multi-head-attention` | func.func | Rewrite a static f16, bf16, or f32 `hip.multi_head_attention` with separate query, key, and value into two `hip.matmul`s, a scale `hip.mul`, and `hip.miopen.softmax`. Packed QKV, bias, masks, past key or value, causal masking, dynamic shapes, and any other float type stay on the runtime kernel. |
 | `hip-fuse-rocmlir` | func.func | Outline rocMLIR-eligible op groups into `rock.kernel` funcs around a gemm/convolution/attention anchor. |
 | `convert-hip-to-tosa` | func.func | Lower the outlined kernel bodies from HIP ops to TOSA. |
 
-Order matters: `hip-decompose-conv-transpose` must run **before**
-`hip-fuse-rocmlir`, because rocMLIR has no transposed-convolution anchor and
-would otherwise refuse to outline the op at all. The registered pipeline runs
+Order matters: `hip-decompose-conv-transpose` and
+`hip-decompose-multi-head-attention` must run **before**
+`hip-fuse-rocmlir`. rocMLIR has no transposed-convolution anchor, and
+`hip.multi_head_attention` is not an outlining anchor, so both would
+otherwise stay outside a `rock.kernel`. The registered pipeline runs
 
 ```
 func.func(hip-decompose-conv-transpose)
+func.func(hip-decompose-multi-head-attention)
 func.func(hip-fuse-rocmlir)
 duplicate-function-elimination
 func.func(convert-hip-to-tosa)

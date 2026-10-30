@@ -337,6 +337,8 @@ int main(int argc, char **argv) {
   // plain convolutions before fuse-rocmlir outlines a kernel around it.
   pm.addNestedPass<mlir::func::FuncOp>(
       mlir::hip::createDecomposeConvTransposePass());
+  pm.addNestedPass<mlir::func::FuncOp>(
+      mlir::hip::createDecomposeMultiHeadAttentionPass());
   pm.addPass(mlir::createCanonicalizerPass());
   pm.addNestedPass<mlir::func::FuncOp>(mlir::hip::createFuseROCMlirPass());
   pm.addPass(mlir::func::createDuplicateFunctionEliminationPass());

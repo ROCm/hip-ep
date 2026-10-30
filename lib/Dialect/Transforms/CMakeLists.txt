@@ -31,6 +31,7 @@ add_library(HipDialectTransforms STATIC
   AssignOpStateSlots.cpp
   BufferUtils.cpp
   DecomposeConvTranspose.cpp
+  DecomposeMultiHeadAttention.cpp
   ExternalizeConstants.cpp
   FixLoopAccumulatorOffset.cpp
   FuseROCMlir.cpp

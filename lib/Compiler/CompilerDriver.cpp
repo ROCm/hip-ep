@@ -426,6 +426,11 @@ bool CompilerDriver::runMLIRPasses(
       // outline a kernel around it.
       headPm.addNestedPass<mlir::func::FuncOp>(
           mlir::hip::createDecomposeConvTransposePass());
+      // rocMLIR never sees hip.multi_head_attention: HipToTosa's converter
+      // runs only inside an outlined kernel, and this op is not an anchor.
+      // Split the static separate-QKV form into matmuls first.
+      headPm.addNestedPass<mlir::func::FuncOp>(
+          mlir::hip::createDecomposeMultiHeadAttentionPass());
       headPm.addPass(mlir::createCanonicalizerPass());
       headPm.addNestedPass<mlir::func::FuncOp>(
           mlir::hip::createFuseROCMlirPass());
