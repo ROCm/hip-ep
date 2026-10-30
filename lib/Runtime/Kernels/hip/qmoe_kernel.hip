@@ -147,6 +147,96 @@ __global__ void topk_routing_kernel(
   }
 }
 
+// Same contract as topk_routing_kernel for num_experts <= 32 * EPL: one
+// 32-lane group per token holds EPL experts per lane in registers and reduces
+// with shuffles, so there is no LDS and no block barrier. A 32-thread block is
+// a full wave on wave32 and the low half of one on wave64; the xor offsets
+// stay below 32 either way.
+template <int EPL>
+__global__ void topk_routing_wave_kernel(
+    const __half* __restrict__ router_probs,
+    const __half* __restrict__ router_weights,
+    int32_t* __restrict__ expert_indices,
+    __half* __restrict__ expert_weights,
+    int num_experts, int k, int normalize) {
+  const int token = static_cast<int>(blockIdx.x);
+  const int lane = static_cast<int>(threadIdx.x);
+  const int ne = num_experts;
+  const __half* logits = router_probs + static_cast<int64_t>(token) * ne;
+
+  float v[EPL];
+  float max_logit = -INFINITY;
+#pragma unroll
+  for (int j = 0; j < EPL; j++) {
+    const int e = lane + 32 * j;
+    v[j] = e < ne ? static_cast<float>(logits[e]) : -INFINITY;
+    max_logit = fmaxf(max_logit, v[j]);
+  }
+#pragma unroll
+  for (int off = 16; off > 0; off >>= 1)
+    max_logit = fmaxf(max_logit, __shfl_xor(max_logit, off));
+
+  // exp(logit - max) >= 0 for real experts; -1 marks padding and, below,
+  // experts already selected.
+  float exp_sum = 0.0f;
+#pragma unroll
+  for (int j = 0; j < EPL; j++) {
+    v[j] = (lane + 32 * j) < ne ? expf(v[j] - max_logit) : -1.0f;
+    exp_sum += fmaxf(v[j], 0.0f);
+  }
+#pragma unroll
+  for (int off = 16; off > 0; off >>= 1)
+    exp_sum += __shfl_xor(exp_sum, off);
+
+  // k rounds of argmax; ties resolve to the lower expert index, as in
+  // topk_routing_kernel. Each lane scans its experts in ascending index order,
+  // so a strict > keeps the lowest index among its own ties. The winner of
+  // round i is wave-uniform after the shuffles; lane i keeps it.
+  float my_w = 0.0f, w_total = 0.0f;
+  int my_idx = 0;
+  for (int i = 0; i < k; i++) {
+    float bv = -2.0f;
+    int bi = ne;
+#pragma unroll
+    for (int j = 0; j < EPL; j++) {
+      if (v[j] > bv) {
+        bv = v[j];
+        bi = lane + 32 * j;
+      }
+    }
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1) {
+      const float ov = __shfl_xor(bv, off);
+      const int oi = __shfl_xor(bi, off);
+      if (ov > bv || (ov == bv && oi < bi)) {
+        bv = ov;
+        bi = oi;
+      }
+    }
+#pragma unroll
+    for (int j = 0; j < EPL; j++)
+      if (bi == lane + 32 * j) v[j] = -1.0f;
+    const float wi = router_weights
+                         ? static_cast<float>(
+                               router_weights[static_cast<int64_t>(token) * ne + bi])
+                         : bv / exp_sum;
+    w_total += wi;
+    if (lane == i) {
+      my_w = wi;
+      my_idx = bi;
+    }
+  }
+
+  // Optional renormalization of the top-k weights to sum to 1. A zero sum
+  // yields zero weights (only reachable with router_weights).
+  if (lane < k) {
+    const float scale = normalize ? (w_total != 0.0f ? 1.0f / w_total : 0.0f)
+                                  : 1.0f;
+    expert_indices[token * k + lane] = my_idx;
+    expert_weights[token * k + lane] = static_cast<__half>(my_w * scale);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Gather (fp16 only): collect rows by index.
 // output[i, :] = input[token_ids[i], :]
@@ -384,19 +474,43 @@ extern "C" int hip_qmoe_topk_routing(
             (long long)element_size_bytes);
     return -1;
   }
-  // One block per token, kRoutingBlock threads cooperating over experts.
-  // Dynamic shared memory holds num_experts fp32 exp values (no expert cap;
-  // e.g. 256 experts = 1 KB, well within the per-block shared limit).
-  const size_t shmem = static_cast<size_t>(num_experts) * sizeof(float);
   (void)hipGetLastError();
-  hipLaunchKernelGGL(topk_routing_kernel,
-                     dim3(static_cast<unsigned>(num_tokens)),
-                     dim3(kRoutingBlock), shmem, s,
-                     static_cast<const __half*>(router_probs),
-                     static_cast<const __half*>(router_weights),
-                     static_cast<int32_t*>(expert_indices),
-                     static_cast<__half*>(expert_weights), num_tokens,
-                     num_experts, k, normalize);
+  if (num_experts <= 256 && k <= kMaxK && k <= num_experts) {
+    // One 32-lane group per token, up to 8 experts per lane. With
+    // k > num_experts the argmax would pick padding lanes, whose indices lie
+    // past num_experts; the block kernel keeps every index in range.
+    const auto* probs = static_cast<const __half*>(router_probs);
+    const auto* rw = static_cast<const __half*>(router_weights);
+    auto* idx = static_cast<int32_t*>(expert_indices);
+    auto* w = static_cast<__half*>(expert_weights);
+    const int ne = static_cast<int>(num_experts), ik = static_cast<int>(k);
+    const int nz = normalize ? 1 : 0;
+    const dim3 grid(static_cast<unsigned>(num_tokens)), block(32);
+    if (num_experts <= 32)
+      hipLaunchKernelGGL(HIP_KERNEL_NAME(topk_routing_wave_kernel<1>), grid,
+                         block, 0, s, probs, rw, idx, w, ne, ik, nz);
+    else if (num_experts <= 64)
+      hipLaunchKernelGGL(HIP_KERNEL_NAME(topk_routing_wave_kernel<2>), grid,
+                         block, 0, s, probs, rw, idx, w, ne, ik, nz);
+    else if (num_experts <= 128)
+      hipLaunchKernelGGL(HIP_KERNEL_NAME(topk_routing_wave_kernel<4>), grid,
+                         block, 0, s, probs, rw, idx, w, ne, ik, nz);
+    else
+      hipLaunchKernelGGL(HIP_KERNEL_NAME(topk_routing_wave_kernel<8>), grid,
+                         block, 0, s, probs, rw, idx, w, ne, ik, nz);
+  } else {
+    // One block per token, kRoutingBlock threads cooperating over experts.
+    // Dynamic shared memory holds num_experts fp32 exp values (no expert cap).
+    const size_t shmem = static_cast<size_t>(num_experts) * sizeof(float);
+    hipLaunchKernelGGL(topk_routing_kernel,
+                       dim3(static_cast<unsigned>(num_tokens)),
+                       dim3(kRoutingBlock), shmem, s,
+                       static_cast<const __half*>(router_probs),
+                       static_cast<const __half*>(router_weights),
+                       static_cast<int32_t*>(expert_indices),
+                       static_cast<__half*>(expert_weights), num_tokens,
+                       num_experts, k, normalize);
+  }
 
   hipError_t err = hipGetLastError();
   if (err != hipSuccess)
