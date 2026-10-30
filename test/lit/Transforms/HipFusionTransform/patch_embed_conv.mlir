@@ -89,3 +89,24 @@ func.func @patch_embed_takes_over_without_qdq(%ctx: !hip.context,
        dilations = [1, 1], group = 1 : i64} : tensor<1x4x1x1xf32>
   return %y : tensor<1x4x1x1xf32>
 }
+
+// -----
+
+// The same single-patch 1x1 geometry in i32. hip.gemm rejects integer
+// element types, so this conv stays hip.conv and lowers to the integer
+// convolution kernel.
+// CHECK-LABEL: func.func @integer_conv_stays_conv
+// CHECK-NOT:     hip.gemm
+// CHECK:         hip.conv
+// CHECK-NOT:     hip.gemm
+func.func @integer_conv_stays_conv(%ctx: !hip.context,
+                                   %x: tensor<1x259x1x1xi32>,
+                                   %w: tensor<1x259x1x1xi32>) -> tensor<1x1x1x1xi32> {
+  %init = tensor.empty() : tensor<1x1x1x1xi32>
+  %y = hip.conv(%ctx)
+      ins(%x, %w : tensor<1x259x1x1xi32>, tensor<1x259x1x1xi32>)
+      outs(%init : tensor<1x1x1x1xi32>)
+      {kernel_shape = [1, 1], strides = [1, 1], pads = [0, 0, 0, 0],
+       dilations = [1, 1], group = 1 : i64} : tensor<1x1x1x1xi32>
+  return %y : tensor<1x1x1x1xi32>
+}
