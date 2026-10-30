@@ -51,6 +51,8 @@ Workspace sizing and launch dispatch use the same helper. Scratch is runtime-own
 
 ## Validation
 
+Windows CI preserves the default-GQA packages, then rebuilds with Ring ON and publishes a separate library overlay. The Ring job runs the ONNX Ring regressions on the StrixHalo runner using the `gfx11-generic` library. It requires the runtime support query to succeed, zero skipped or failed cases, and runtime diagnostics confirming both Ring prefill and decode dispatch. Results and diagnostics are uploaded as `ring-test-results`. This validates Strix Halo only; it is not a hardware test matrix for other gfx11 devices.
+
 Use `HIPDNN_EP_STRICT=1`, disable ORT CPU fallback, and temporarily enable `HIPDNN_EP_DEBUG=1` to confirm `Ring GQA q=... past=... capacity=...` dispatch. Disable debug for timing. Numeric tests cover geometry, cache aliasing, prefill/decode transitions, partition boundaries, long contexts and probability underflow. LIT tests check Ring-only type restrictions. Kernel checks alone do not establish full-model accuracy or performance.
 
 See [validation results](ring-attention-unified-results.md) for hardware, model, accuracy, timing and memory scope. Historical measurements in [the earlier main refresh](ring-attention-main-refresh.md) retain their original build options and are not results for the unified implementation.

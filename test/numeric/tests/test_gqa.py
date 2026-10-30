@@ -1103,6 +1103,8 @@ def test_gqa_ring_prefill_probability_precision(model_runner, tmp_path, past, de
     libraries = [
         ep_path.parent / "custom_kernels_gfx1151.dll",
         ep_path.parent / "libcustom_kernels_gfx1151.so",
+        ep_path.parent / "custom_kernels_gfx11-generic.dll",
+        ep_path.parent / "libcustom_kernels_gfx11-generic.so",
     ]
     library = next((path for path in libraries if path.exists()), None)
     if library is None:

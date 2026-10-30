@@ -140,7 +140,7 @@ jobs:
             --cmake_generator Ninja \
             --hip_arch "${{ env.HIP_ARCHITECTURES }}" \
             --cmake_prefix_path "${{ runner.workspace }}/ort-install;${{ runner.workspace }}/llvm-install" \
-            --cmake_extra_defines CMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON
+            --cmake_extra_defines CMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON HIP_EP_ENABLE_RING_ATTENTION=OFF
 
       # -----------------------------------------------------------------------
       # Stage GPU test package:
@@ -345,6 +345,33 @@ jobs:
           name: hip-python-package
           path: wheelpkg/
           retention-days: ${{ (github.ref == 'refs/heads/main' || contains(github.ref, 'release')) && 14 || 3 }}
+
+      # Preserve the already-uploaded default-GQA packages. Reuse the build
+      # tree for the opt-in variant and publish only its replacement libraries.
+      - name: Build Ring-enabled libraries
+        shell: bash
+        run: |
+          set -euo pipefail
+          python build.py \
+            --config Release \
+            --cmake_generator Ninja \
+            --hip_arch "${{ env.HIP_ARCHITECTURES }}" \
+            --cmake_prefix_path "${{ runner.workspace }}/ort-install;${{ runner.workspace }}/llvm-install" \
+            --skip_wheel \
+            --cmake_extra_defines CMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON HIP_EP_ENABLE_RING_ATTENTION=ON BUILD_PYTHON_WHEEL=OFF
+          CACHE="../build/$(basename "$PWD")/CMakeCache.txt"
+          grep -q '^HIP_EP_ENABLE_RING_ATTENTION:BOOL=ON$' "$CACHE"
+          mkdir -p ring-overlay/bin ring-overlay/lib
+          cp "${{ runner.workspace }}/install/bin/"*.dll ring-overlay/bin/
+          cp "${{ runner.workspace }}/install/lib/"*.lib ring-overlay/lib/
+          cp "$CACHE" ring-overlay/CMakeCache.txt
+
+      - name: Upload Ring-enabled libraries
+        uses: actions/upload-artifact@v4
+        with:
+          name: ring-test-overlay
+          path: ring-overlay/
+          retention-days: 3
 
       - name: Save sccache directory
         if: always() && github.ref_name == 'main'
