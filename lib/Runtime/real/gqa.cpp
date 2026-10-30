@@ -121,6 +121,29 @@ static bool gqa_cache_seqlens_enabled() {
 // they already implement.
 static constexpr int32_t kSeqlensKNotRead = -2;
 
+// A window whose seqlens_k counts fewer tokens than it has rows is padded.
+// GQA's inputs do not say on which side the padding is or whether a past
+// precedes it, so such a window is read as a first prompt - tokens in rows
+// 0..seqlens_k, padding after them, no past - only when
+// total_sequence_length equals the window, as ORT marks a first prompt. Any
+// other padded window is rejected before RoPE and the KV-cache write. Two
+// layouts carry the same scalars and so are not told apart: a first prompt
+// padded before its tokens, and a padded continuation that reports the window
+// as its total; neither is supported. False too when the scalar cannot be
+// read.
+static bool gqa_padded_window_is_first_prompt(hipStream_t stream,
+                                              const void *total_seq_len,
+                                              int64_t sq) {
+  if (!total_seq_len)
+    return false;
+  int32_t total = 0;
+  if (hipMemcpyAsync(&total, total_seq_len, sizeof(total), hipMemcpyDefault,
+                     stream) != hipSuccess ||
+      hipStreamSynchronize(stream) != hipSuccess)
+    return false;
+  return total == sq;
+}
+
 // Read seqlens_k_val from device (or the per-Compute() cache when
 // HIPDNN_EP_GQA_CACHE_SEQLENS=1) once per call before the fused/decomposed
 // dispatch decision. Two purposes:
@@ -351,7 +374,7 @@ static int gqa_forward_fused(
     const void *k_scale = nullptr, const void *v_scale = nullptr,
     KvCacheFormat kv_format = KvCacheFormat::Fp16,
     const void *head_sink = nullptr, bool use_smooth_softmax = false,
-    int local_window_size = -1) {
+    int local_window_size = -1, const void *total_seq_len = nullptr) {
 
   // Any non-fp16 cache reads/writes quantized bytes on the concat/append/decode
   // path; the specific scheme is carried by kv_format (extensible to INT4/FP8).
@@ -616,14 +639,23 @@ static int gqa_forward_fused(
     } else {
       total_seq = static_cast<int64_t>(seqlens_k_val) + 1;
       past_len = total_seq - sq;
-      if (total_seq < 1 || past_len < 0 || total_seq > present_seq ||
+      // A padded first prompt has no past; the kernels clamp the same way
+      // when they derive the past from seqlens_k on the device. All sq rows
+      // are still appended, so they have to fit.
+      if (past_len < 0 &&
+          gqa_padded_window_is_first_prompt(stream, total_seq_len, sq))
+        past_len = 0;
+      if (total_seq < 1 || past_len < 0 || past_len + sq > present_seq ||
           past_len > past_buf_seq) {
         fprintf(
             stderr,
             "gqa_forward_fused (prefill): invalid seqlens_k[0]+1=%lld "
-            "(sq=%lld, past_len=%lld, present_seq=%lld, past_buf_seq=%lld)\n",
+            "(sq=%lld, past_len=%lld, present_seq=%lld, past_buf_seq=%lld)%s\n",
             (long long)total_seq, (long long)sq, (long long)past_len,
-            (long long)present_seq, (long long)past_buf_seq);
+            (long long)present_seq, (long long)past_buf_seq,
+            past_len < 0
+                ? "; a padded first prompt needs total_sequence_length = sq"
+                : "");
         return -1;
       }
     }
@@ -2761,7 +2793,7 @@ static int gqa_forward_fused_from_fp32(
     int64_t past_buf_seq, int64_t H, int64_t G, int64_t d, float scale,
     int64_t do_rotary, const void *k_scale, const void *v_scale,
     KvCacheFormat kv_format, const void *head_sink, bool use_smooth_softmax,
-    int local_window_size) {
+    int local_window_size, const void *total_seq_len) {
   const bool packed_qkv = (!key && !value);
   const bool need_rope = do_rotary && cos_cache && sin_cache;
 
@@ -2822,12 +2854,12 @@ static int gqa_forward_fused_from_fp32(
   if (sin16 && gqa_cast_f32_to_f16(stream, sin_cache, sin16, rope_elems) != 0)
     return -1;
 
-  int rc = gqa_forward_fused(state, stream, q16, k16, v16, past_key, past_value,
-                             seqlens_k, cos16 ? cos16 : cos_cache,
-                             sin16 ? sin16 : sin_cache, out16, present_key,
-                             present_value, B, sq, skv, past_buf_seq, H, G, d,
-                             scale, do_rotary, k_scale, v_scale, kv_format,
-                             head_sink, use_smooth_softmax, local_window_size);
+  int rc = gqa_forward_fused(
+      state, stream, q16, k16, v16, past_key, past_value, seqlens_k,
+      cos16 ? cos16 : cos_cache, sin16 ? sin16 : sin_cache, out16, present_key,
+      present_value, B, sq, skv, past_buf_seq, H, G, d, scale, do_rotary,
+      k_scale, v_scale, kv_format, head_sink, use_smooth_softmax,
+      local_window_size, total_seq_len);
   if (rc != 0)
     return rc;
   return gqa_cast_f16_to_f32(stream, out16, output, out_elems);
@@ -2947,7 +2979,8 @@ int wrap_group_query_attention(
   if (scale == 0.0f && head_dim > 0)
     scale = 1.0f / sqrtf(static_cast<float>(head_dim));
 
-  (void)total_seq_len;      // runtime derives total_seq from seqlens_k
+  // total_seq_len only marks a padded window as a first prompt (see
+  // gqa_padded_window_is_first_prompt); total_seq comes from seqlens_k.
   (void)rotary_interleaved; // interleaved layout handled inside hip_gqa_rope
   (void)softcap;            // softcap not applied on either path
   (void)kv_cache_bit_width; // validated above for the int8 KV path
@@ -3061,7 +3094,7 @@ int wrap_group_query_attention(
         cos_cache, sin_cache, output, present_key, present_value, batch_size,
         seq_len_q, seq_len_kv, past_buf_seq, num_heads, kv_num_heads, head_dim,
         scale, do_rotary, k_scale, v_scale, kv_format, head_sink,
-        has_smooth_softmax, static_cast<int>(local_window_size));
+        has_smooth_softmax, static_cast<int>(local_window_size), total_seq_len);
     if (arc != 0)
       fprintf(stderr,
               "wrap_group_query_attention: fp32 adapter / gqa_forward_fused "
@@ -3115,7 +3148,7 @@ int wrap_group_query_attention(
       cos_cache, sin_cache, output, present_key, present_value, batch_size,
       seq_len_q, seq_len_kv, past_buf_seq, num_heads, kv_num_heads, head_dim,
       scale, do_rotary, k_scale, v_scale, kv_format, head_sink,
-      has_smooth_softmax, static_cast<int>(local_window_size));
+      has_smooth_softmax, static_cast<int>(local_window_size), total_seq_len);
   if (rc != 0)
     fprintf(stderr,
             "wrap_group_query_attention: gqa_forward_fused failed "
