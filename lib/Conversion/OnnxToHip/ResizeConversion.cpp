@@ -450,15 +450,15 @@ struct ResizeToHip : public mlir::RewritePattern {
     // A static identity Resize preserves values exactly for all supported
     // coordinate and nearest modes when scales are absent or all one. Keep
     // graph outputs as distinct runtime-owned allocations.
-    bool staticIdentityShape =
-        inputType.hasStaticShape() && outputType.hasStaticShape() &&
-        inputType.getShape() == outputType.getShape();
-    bool unitScales =
-        isAbsent(scales) ||
-        (scalesFolded &&
-         llvm::all_of(scaleVec, [](double scale) { return scale == 1.0; }));
-    bool isGraphOutput = llvm::any_of(
-        op->getResult(0).getUsers(), [](mlir::Operation *user) {
+    bool staticIdentityShape = inputType.hasStaticShape() &&
+                               outputType.hasStaticShape() &&
+                               inputType.getShape() == outputType.getShape();
+    bool unitScales = isAbsent(scales) ||
+                      (scalesFolded && llvm::all_of(scaleVec, [](double scale) {
+                         return scale == 1.0;
+                       }));
+    bool isGraphOutput =
+        llvm::any_of(op->getResult(0).getUsers(), [](mlir::Operation *user) {
           return mlir::isa<mlir::func::ReturnOp>(user);
         });
     if (staticIdentityShape && unitScales && !isGraphOutput) {
