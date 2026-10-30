@@ -928,9 +928,10 @@ public:
                                 PatternRewriter &rewriter) const override {
     // An i32 matmul or convolution has an exact HIP kernel. Outlining it
     // asks rocMLIR to compile a non-quantized integer tosa op, which this
-    // pipeline does not establish. Leave the op in main_graph.
-    for (Type type : anchorOp->getOperandTypes()) {
-      auto shaped = dyn_cast<ShapedType>(type);
+    // pipeline does not establish. Leave the op in main_graph. The i32
+    // accumulator of a quantized anchor is its init, not an input.
+    for (Value input : anchorOp.getDpsInputs()) {
+      auto shaped = dyn_cast<ShapedType>(input.getType());
       if (shaped && shaped.getElementType().isInteger(32))
         return rewriter.notifyMatchFailure(
             anchorOp, "i32 anchor stays on the HIP kernel");
