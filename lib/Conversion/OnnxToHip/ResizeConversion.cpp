@@ -6,6 +6,7 @@
 #include "../ResizeLayout.h"
 #include "OnnxToHipUtils.h"
 
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinAttributes.h"
 
 #include <cmath>
@@ -445,6 +446,25 @@ struct ResizeToHip : public mlir::RewritePattern {
     mlir::Value scales = operands.size() > 2 ? operands[2] : mlir::Value();
     llvm::SmallVector<double> scaleVec;
     bool scalesFolded = foldScales(scales, rank, scaleVec);
+
+    // A static identity Resize preserves values exactly for all supported
+    // coordinate and nearest modes when scales are absent or all one. Keep
+    // graph outputs as distinct runtime-owned allocations.
+    bool staticIdentityShape = inputType.hasStaticShape() &&
+                               outputType.hasStaticShape() &&
+                               inputType.getShape() == outputType.getShape();
+    bool unitScales = isAbsent(scales) ||
+                      (scalesFolded && llvm::all_of(scaleVec, [](double scale) {
+                         return scale == 1.0;
+                       }));
+    bool isGraphOutput =
+        llvm::any_of(op->getResult(0).getUsers(), [](mlir::Operation *user) {
+          return mlir::isa<mlir::func::ReturnOp>(user);
+        });
+    if (staticIdentityShape && unitScales && !isGraphOutput) {
+      rewriter.replaceOp(op, input);
+      return mlir::success();
+    }
 
     // ONNX samples with the supplied scale. Record it when the extent ratio
     // the kernel would use differs; align_corners does not read the scale.
