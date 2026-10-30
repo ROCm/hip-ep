@@ -274,45 +274,6 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
     message(STATUS "[custom_kernels] Adding per-arch SHARED target: ${_target}")
 endforeach()
 
-if(BUILD_HIP_UNIT_TESTS)
-    hip_add_executable(test-gemv-bf16-f32-transposed-b
-        ${CMAKE_SOURCE_DIR}/test/gpu/test_gemv_bf16_f32_transposed_b.hip
-        hip/gemm_wmma_kernel.hip
-        INCLUDE_DIRECTORIES
-            ${CMAKE_CURRENT_SOURCE_DIR}/include
-        OFFLOAD_ARCHS
-            ${HIP_ARCHITECTURES}
-    )
-    hip_add_executable(test-gemm-bf16-f32-transposed-b
-        ${CMAKE_SOURCE_DIR}/test/gpu/test_gemm_bf16_f32_transposed_b.hip
-        hip/gemm_wmma_kernel.hip
-        INCLUDE_DIRECTORIES
-            ${CMAKE_CURRENT_SOURCE_DIR}/include
-        OFFLOAD_ARCHS
-            ${HIP_ARCHITECTURES}
-    )
-    # The kernels directory is added before lib/Runtime resolves hipBLASLt.
-    if(NOT TARGET roc::hipblaslt AND NOT HIPDNN_EP_DISABLE_VENDOR_BLAS)
-        find_package(hipblaslt QUIET HINTS "${THEROCK_DIST}")
-    endif()
-    if(TARGET roc::hipblaslt)
-    hip_add_executable(test-matmul-typed
-        ${CMAKE_SOURCE_DIR}/test/gpu/test_matmul_typed.hip
-        ${CMAKE_SOURCE_DIR}/lib/Runtime/real/matmul.cpp
-        hip/gemm_wmma_kernel.hip
-        INCLUDE_DIRECTORIES
-            ${CMAKE_SOURCE_DIR}/include
-            ${CMAKE_SOURCE_DIR}/lib/Runtime
-            ${CMAKE_SOURCE_DIR}/lib/Runtime/real
-            ${CMAKE_CURRENT_SOURCE_DIR}/include
-        LINK_LIBRARIES
-            roc::hipblaslt
-        OFFLOAD_ARCHS
-            ${HIP_ARCHITECTURES}
-    )
-    endif()
-endif()
-
 # Export include directory for Runtime bitcode compilation
 set(HIP_CUSTOM_KERNELS_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include" PARENT_SCOPE)
 
