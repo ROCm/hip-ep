@@ -1155,7 +1155,9 @@ EmbedLayerNormToHip::matchAndRewrite(mlir::Operation *op,
       maskIndex = mlir::hip::ReduceSumOp::create(
                       rewriter, loc, context, mask, axes, init,
                       rewriter.getI64IntegerAttr(/*keepdims=*/0),
-                      rewriter.getI64IntegerAttr(/*noop_with_empty_axes=*/0))
+                      rewriter.getI64IntegerAttr(/*noop_with_empty_axes=*/0),
+                      getConstantReducedAxesAttr(rewriter, mask, axes,
+                                                 /*noopWithEmptyAxes=*/0))
                       .getResult(0);
     } else {
       llvm::SmallVector<mlir::Value> dynSizes;

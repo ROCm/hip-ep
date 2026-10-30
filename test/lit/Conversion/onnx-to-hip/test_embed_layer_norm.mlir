@@ -103,7 +103,7 @@ module {
 // CHECK: %[[SEG:.*]] = hip.gather({{.*}}) ins({{.*}}, {{.*}} : tensor<2x8xf16>, tensor<1x4xi32>) outs({{.*}} : tensor<1x4x8xf16>)
 // CHECK: %[[SUM:.*]] = hip.add({{.*}}) ins(%[[WP]], %[[SEG]] : tensor<1x4x8xf16>, tensor<1x4x8xf16>) outs({{.*}} : tensor<1x4x8xf16>)
 // CHECK: %[[OUT:.*]] = hip.layer_norm({{.*}}) ins(%[[SUM]], {{.*}}, {{.*}} : tensor<1x4x8xf16>, tensor<8xf16>, tensor<8xf16>) outs({{.*}} : tensor<1x4x8xf16>)
-// CHECK: %[[MASK:.*]] = hip.reduce_sum({{.*}}) ins({{.*}}, {{.*}} : tensor<1x4xi32>, tensor<1xi64>) outs({{.*}} : tensor<1xi32>) {keepdims = 0 : i64}
+// CHECK: %[[MASK:.*]] = hip.reduce_sum({{.*}}) ins({{.*}}, {{.*}} : tensor<1x4xi32>, tensor<1xi64>) outs({{.*}} : tensor<1xi32>) {keepdims = 0 : i64, reduced_axes = array<i64: 1>}
 // CHECK: return %[[OUT]], %[[MASK]] : tensor<1x4x8xf16>, tensor<1xi32>
 // CHECK-NOT: onnx.Custom
 
@@ -122,7 +122,7 @@ module {
 // CHECK: %[[SEG2:.*]] = hip.gather({{.*}}) ins({{.*}}, {{.*}} : tensor<2x8xf32>, tensor<?x4xi32>) outs({{.*}} : tensor<?x4x8xf32>)
 // CHECK: %[[SUM2:.*]] = hip.add({{.*}}) ins(%[[WP2]], %[[SEG2]] : tensor<?x4x8xf32>, tensor<?x4x8xf32>) outs({{.*}} : tensor<?x4x8xf32>)
 // CHECK: %[[OUT2:.*]] = hip.layer_norm({{.*}}) ins(%[[SUM2]], {{.*}}, {{.*}} : tensor<?x4x8xf32>, tensor<8xf32>, tensor<8xf32>) outs({{.*}} : tensor<?x4x8xf32>)
-// CHECK: %[[MASK2:.*]] = hip.reduce_sum({{.*}}) ins({{.*}} : tensor<?x4xi32>, tensor<1xi64>) outs({{.*}} : tensor<?xi32>) {keepdims = 0 : i64}
+// CHECK: %[[MASK2:.*]] = hip.reduce_sum({{.*}}) ins({{.*}} : tensor<?x4xi32>, tensor<1xi64>) outs({{.*}} : tensor<?xi32>) {keepdims = 0 : i64, reduced_axes = array<i64: 1>}
 // CHECK: return %[[OUT2]], %[[MASK2]], %[[SUM2]] : tensor<?x4x8xf32>, tensor<?xi32>, tensor<?x4x8xf32>
 // CHECK-NOT: onnx.Custom
 
