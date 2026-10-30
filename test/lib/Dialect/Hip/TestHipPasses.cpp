@@ -6,24 +6,57 @@
 #include "Dialect/Hip/TestHipPasses.h"
 
 #include "hip/Dialect/IR/HipDialect.h"
+#include "hip/Dialect/IR/HipShapeInference.h"
 
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/Dialect.h"
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "mlir/Pass/Pass.h"
 
 #include <iterator>
 
 namespace {
 
+/// Shared body of the malformed-reifier fixtures: a successful reification
+/// that breaks the contract in the way named by the op's `kind` attribute.
+mlir::LogicalResult
+reifyMalformedShapes(mlir::Operation *op, mlir::OpBuilder &builder,
+                     mlir::ReifiedRankedShapedTypeDims &reified) {
+  auto kind = op->getAttrOfType<mlir::StringAttr>("kind");
+  if (!kind)
+    return op->emitOpError("requires a string 'kind' attribute");
+
+  reified.clear();
+  if (kind.getValue() == "result_count")
+    return mlir::success();
+  if (kind.getValue() == "rank") {
+    reified.push_back({builder.getIndexAttr(1)});
+    return mlir::success();
+  }
+  if (kind.getValue() == "static_contradiction") {
+    reified.push_back({builder.getIndexAttr(3), builder.getIndexAttr(4)});
+    return mlir::success();
+  }
+  if (kind.getValue() == "negative_extent") {
+    reified.push_back({builder.getIndexAttr(-2)});
+    return mlir::success();
+  }
+  return op->emitOpError("unknown malformed-reifier fixture kind '")
+         << kind.getValue() << "'";
+}
+
+/// Reifies but is not destination-style, so --hip-infer-shapes must skip it.
+/// Its reifier is malformed: visiting it at all would report an error.
 class TestMalformedReifyOp final
     : public mlir::Op<TestMalformedReifyOp, mlir::OpTrait::ZeroOperands,
                       mlir::OpTrait::VariadicResults,
                       mlir::ReifyRankedShapedTypeOpInterface::Trait> {
 public:
   using Op::Op;
-
   static llvm::StringRef getOperationName() {
     return "hip.test_malformed_reify";
   }
@@ -31,32 +64,108 @@ public:
     static const llvm::StringRef names[] = {"kind"};
     return names;
   }
-
   mlir::LogicalResult
   reifyResultShapes(mlir::OpBuilder &builder,
                     mlir::ReifiedRankedShapedTypeDims &reified) {
-    auto kind = (*this)->getAttrOfType<mlir::StringAttr>("kind");
-    if (!kind)
-      return emitOpError("requires a string 'kind' attribute");
-
-    reified.clear();
-    if (kind.getValue() == "result_count")
-      return mlir::success();
-    if (kind.getValue() == "rank") {
-      reified.push_back({builder.getIndexAttr(1)});
-      return mlir::success();
-    }
-    if (kind.getValue() == "static_contradiction") {
-      reified.push_back({builder.getIndexAttr(3), builder.getIndexAttr(4)});
-      return mlir::success();
-    }
-    if (kind.getValue() == "negative_extent") {
-      reified.push_back({builder.getIndexAttr(-2)});
-      return mlir::success();
-    }
-    return emitOpError("unknown malformed-reifier fixture kind '")
-           << kind.getValue() << "'";
+    return reifyMalformedShapes(*this, builder, reified);
   }
+};
+
+/// The destination-style form of the fixture above: one destination per
+/// result, so --hip-infer-shapes visits it and must reject its reification.
+class TestMalformedReifyDpsOp final
+    : public mlir::Op<TestMalformedReifyDpsOp, mlir::OpTrait::VariadicOperands,
+                      mlir::OpTrait::VariadicResults,
+                      mlir::DestinationStyleOpInterface::Trait,
+                      mlir::ReifyRankedShapedTypeOpInterface::Trait> {
+public:
+  using Op::Op;
+  static llvm::StringRef getOperationName() {
+    return "hip.test_malformed_reify_dps";
+  }
+  static llvm::ArrayRef<llvm::StringRef> getAttributeNames() {
+    static const llvm::StringRef names[] = {"kind"};
+    return names;
+  }
+  mlir::MutableOperandRange getDpsInitsMutable() {
+    return mlir::MutableOperandRange(*this);
+  }
+  mlir::LogicalResult
+  reifyResultShapes(mlir::OpBuilder &builder,
+                    mlir::ReifiedRankedShapedTypeDims &reified) {
+    return reifyMalformedShapes(*this, builder, reified);
+  }
+};
+
+/// `%y = <dialect>.like(%x, %init)`: a destination-style op whose single
+/// result has the shape of `%x`. Its reifier reads `%x`'s static extents, so
+/// --hip-infer-shapes can refine `?` result dims whenever `%x` is static.
+template <typename ConcreteOp>
+class TestLikeOpBase
+    : public mlir::Op<ConcreteOp, mlir::OpTrait::NOperands<2>::Impl,
+                      mlir::OpTrait::OneResult,
+                      mlir::DestinationStyleOpInterface::Trait,
+                      mlir::ReifyRankedShapedTypeOpInterface::Trait> {
+public:
+  using mlir::Op<ConcreteOp, mlir::OpTrait::NOperands<2>::Impl,
+                 mlir::OpTrait::OneResult,
+                 mlir::DestinationStyleOpInterface::Trait,
+                 mlir::ReifyRankedShapedTypeOpInterface::Trait>::Op;
+  static llvm::ArrayRef<llvm::StringRef> getAttributeNames() { return {}; }
+  mlir::MutableOperandRange getDpsInitsMutable() {
+    return mlir::MutableOperandRange(this->getOperation(), 1, 1);
+  }
+  mlir::LogicalResult
+  reifyResultShapes(mlir::OpBuilder &builder,
+                    mlir::ReifiedRankedShapedTypeDims &reified) {
+    mlir::Value input = this->getOperation()->getOperand(0);
+    reified.assign(1,
+                   mlir::tensor::getMixedSizes(builder, this->getLoc(), input));
+    return mlir::success();
+  }
+};
+
+class TestOptInLikeOp final : public TestLikeOpBase<TestOptInLikeOp> {
+public:
+  using TestLikeOpBase::TestLikeOpBase;
+  static llvm::StringRef getOperationName() { return "test_shape_opt_in.like"; }
+};
+
+class TestUnmarkedLikeOp final : public TestLikeOpBase<TestUnmarkedLikeOp> {
+public:
+  using TestLikeOpBase::TestLikeOpBase;
+  static llvm::StringRef getOperationName() {
+    return "test_shape_unmarked.like";
+  }
+};
+
+/// A non-HIP dialect that opts into --hip-infer-shapes.
+class TestShapeOptInDialect final : public mlir::Dialect {
+public:
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(TestShapeOptInDialect)
+
+  explicit TestShapeOptInDialect(mlir::MLIRContext *context)
+      : Dialect(getDialectNamespace(), context,
+                mlir::TypeID::get<TestShapeOptInDialect>()) {
+    getContext()->loadDialect<mlir::tensor::TensorDialect>();
+    addOperations<TestOptInLikeOp>();
+    addInterfaces<mlir::hip::ShapeInferenceDialectInterface>();
+  }
+  static llvm::StringRef getDialectNamespace() { return "test_shape_opt_in"; }
+};
+
+/// The same operation in a dialect that does not opt in.
+class TestShapeUnmarkedDialect final : public mlir::Dialect {
+public:
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(TestShapeUnmarkedDialect)
+
+  explicit TestShapeUnmarkedDialect(mlir::MLIRContext *context)
+      : Dialect(getDialectNamespace(), context,
+                mlir::TypeID::get<TestShapeUnmarkedDialect>()) {
+    getContext()->loadDialect<mlir::tensor::TensorDialect>();
+    addOperations<TestUnmarkedLikeOp>();
+  }
+  static llvm::StringRef getDialectNamespace() { return "test_shape_unmarked"; }
 };
 
 /// Probe the HipDpsOp shared default on a zero-result memref-mode operation.
@@ -162,6 +271,8 @@ struct TestHipDpsDefaultReifyPass final
 void mlir::hip::test::registerHipTestPasses(DialectRegistry &registry) {
   registry.addExtension(+[](MLIRContext *, HipDialect *dialect) {
     RegisteredOperationName::insert<TestMalformedReifyOp>(*dialect);
+    RegisteredOperationName::insert<TestMalformedReifyDpsOp>(*dialect);
   });
+  registry.insert<TestShapeOptInDialect, TestShapeUnmarkedDialect>();
   PassRegistration<TestHipDpsDefaultReifyPass>();
 }

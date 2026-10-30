@@ -5,6 +5,8 @@
 #ifndef HIP_DIALECT_H
 #define HIP_DIALECT_H
 
+#include "hip/Dialect/IR/HipShapeInference.h"
+
 #include "mlir/Bytecode/BytecodeOpInterface.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/Dialect.h"

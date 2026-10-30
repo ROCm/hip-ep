@@ -2,16 +2,17 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-//===- InferShapesPass.cpp - Static shape refinement for HIP DPS ops ------===//
+//===- InferShapesPass.cpp - Shape refinement for target DPS ops ----------===//
 //
-// Module-level pass: drive `ReifyRankedShapedTypeOpInterface` on every
-// HIP-dialect op that implements it, narrow `?` dims in the op's result
+// Module-level pass: drive `ReifyRankedShapedTypeOpInterface` on every DPS op
+// in an explicitly opted-in target dialect, narrow `?` dims in the op's result
 // type, rebuild the `tensor.empty` producer of any refined DPS init, and
 // emit a `tensor.cast` on every non-DPS-init use to preserve the
 // consumer's signature. The cast is a per-op propagation barrier:
 // downstream consumers refine locally against the OLD operand type,
-// no whole-chain narrowing. Upstream interface ops (e.g. `tensor::EmptyOp`)
-// are intentionally skipped — they have their own folders.
+// no whole-chain narrowing. Unmarked dialects, including standard MLIR
+// dialects, are intentionally skipped — their operations have their own
+// folders.
 //
 // The pass runs in two phases:
 //   Phase 1: per-func reify walk. Each `func.func` (main_graph + every
@@ -44,6 +45,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "hip/Dialect/IR/HipDialect.h"
+#include "hip/Dialect/IR/HipShapeInference.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -309,16 +311,19 @@ static LogicalResult refineOneResult(RewriterBase &rewriter,
 /// safe order for in-place result-type narrowing followed by cast
 /// insertion.
 ///
-/// HIP-dialect ops only. Upstream ops with the same interface (e.g.
-/// `tensor.empty`) carry operand-shape invariants this pass would
-/// desync, and they have their own canonicalizers anyway.
+/// Only DPS operations in explicitly opted-in target dialects. Operations in
+/// standard or otherwise unmarked dialects may carry invariants this pass
+/// would desynchronize, and they retain their own canonicalizers.
 static LogicalResult refineFuncBody(func::FuncOp funcOp, IRRewriter &rewriter) {
-  HipDialect *hipDialect = funcOp->getContext()->getLoadedDialect<HipDialect>();
   SmallVector<ReifyRankedShapedTypeOpInterface> ops;
   funcOp.walk([&](ReifyRankedShapedTypeOpInterface reifyOp) {
     Operation *op = reifyOp.getOperation();
-    if (op->getDialect() != hipDialect)
+    Dialect *dialect = op->getDialect();
+    if (!dialect ||
+        !dialect->getRegisteredInterface<ShapeInferenceDialectInterface>() ||
+        !isa<DestinationStyleOpInterface>(op)) {
       return;
+    }
     // memref-mode DPS ops have no tensor results; their shapes are pinned
     // at bufferization time.
     if (llvm::none_of(op->getResults(), [](Value v) {
@@ -523,8 +528,8 @@ void InferShapesPass::runOnOperation() {
   ModuleOp module = getOperation();
   IRRewriter rewriter(&getContext());
 
-  // Phase 1: per-func reify walk. Refines all hip-dialect Hip_DpsOp
-  // result types in-place; cast insertion preserves consumer
+  // Phase 1: per-func reify walk. Refines eligible target-dialect DPS result
+  // types in-place; cast insertion preserves consumer
   // signatures except on DPS-init uses (which propagate refinement
   // directly — `hip.loop`'s `$v_init` operands are DPS-init by
   // `LoopOp::getDpsInitsMutable`, see HipDialect.cpp).
