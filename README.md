@@ -11,7 +11,7 @@ The provider integrates with ONNX Runtime through the MorphiZen pass framework. 
 See the [HIP EP website](https://rocm.github.io/hip-ep/) for documentation and benchmarks.
 
 ## What's new — October 2026
-- **Faster** — 1.85× prefill and 1.13× decode at 16K context vs v0.3; TTFT 39% better than llama.cpp Vulkan at similar decode speed.
+- **Faster** — 1.85× prefill and 1.13× decode at 16K context vs v0.3, averaged across the 15 models we track.
 - **Speculative decoding** — EAGLE4, DFLASH2, and MTP, delivering up to 2.3× the decode TPS on Qwen3.8-27B.
 - **Broad model support**
   - **New models:** Qwen3.8-Flash-Next, Qwen3.8-27B, Qwen3.5-122B-A10B, Nemotron-3-Super-120B, Mistral-Small-4-119B, Laguna-S-2.1, Gemma 4.
