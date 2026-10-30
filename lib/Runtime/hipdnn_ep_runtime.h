@@ -846,6 +846,14 @@ int wrap_hipblasLtMatmul(
     int64_t transA,         // 1 = swap A's last two dims before multiply
     int64_t transB);        // 1 = swap B's last two dims before multiply
 
+// Int32 matmul. hipBLASLt has no int32 GEMM, and feeding i32 bits to the f32
+// entry point reads them as floats. Neither operand is transposed. The kernel
+// accumulates in int64 and wraps to int32. b_batch_stride is 0 when B is one
+// matrix shared by every batch, and K*N when B holds one matrix per batch.
+int wrap_matmul_i32(RuntimeState *state, const void *A, const void *B,
+                    void *output, int64_t M, int64_t N, int64_t K,
+                    int64_t batch_count, int64_t b_batch_stride);
+
 // RocMLIR dispatch wrapper (hip.rocmlir). Launches a pre-compiled GPU kernel
 // embedded (as an ELF/HSACO blob) in `kernel_binary` at compile time. The
 // generated IR stages the operand data pointers (inputs first, then output)
@@ -1591,6 +1599,16 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
                                     int64_t input_num_elements,
                                     int64_t gamma_num_elements,
                                     int64_t element_size_bytes, float epsilon);
+
+// Same op with an element size per tensor (bias shares skip's); emitted only
+// when they differ, e.g. an fp32 residual with fp16 skip/gamma/output. A
+// sum_element_size is ignored when input_skip_bias_sum is nullptr.
+int wrap_skip_simplified_layer_norm_mixed(
+    RuntimeState *state, void *input, void *skip, void *gamma, void *bias,
+    void *output, void *input_skip_bias_sum, int64_t input_num_elements,
+    int64_t gamma_num_elements, int64_t input_element_size,
+    int64_t skip_element_size, int64_t gamma_element_size,
+    int64_t output_element_size, int64_t sum_element_size, float epsilon);
 
 // MatMulNBits operation wrapper (quantized N-bit matrix multiplication)
 // Dequantizes packed int4 weights and computes Y = A @ dequant(B)^T + bias

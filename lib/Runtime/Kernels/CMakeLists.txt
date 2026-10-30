@@ -90,11 +90,13 @@ set(_kernel_sources
     hip/reduce_sum_kernel.hip
     hip/pool_kernel.hip
     hip/conv_kernel.hip
+    hip/matmul_i32_kernel.hip
     hip/conv_transpose_kernel.hip
     hip/resize_kernel.hip
     hip/grid_sample_kernel.hip
     hip/global_pool_kernel.hip
     hip/matmul_nbits_kernel.hip
+    hip/gemv_f16_kernel.hip
     hip/dequant_bnb4_kernel.hip
     hip/qmoe_kernel.hip
     hip/qmoe_ragged_mm_kernel.hip
