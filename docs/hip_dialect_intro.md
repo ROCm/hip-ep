@@ -66,7 +66,10 @@ Rank-generic: for 3D input `[B,S,D]`, the lowering flattens `N = B*S, D = D` and
 passes them to the runtime: `wrap_rms_norm(state, input, weight, output, ...)`.
 
 `skip_rms_norm` fuses Add + RMSNorm into a single kernel:
-`residual = x + skip; output = RMSNorm(residual) * weight`.
+`residual = x + skip; output = RMSNorm(residual) * weight`. An optional
+`quant_outs(%a_quant, %a_scale)` clause with `quant_block_size` also writes
+`output` as the int8 activation `hip.quantize_act` would produce; fusion adds it
+when that output feeds a `hip.quantize_act`.
 
 ### Rotary Positional Embeddings
 
@@ -112,6 +115,8 @@ Ops with no hipBLASLt equivalent. Implemented as pure C++ kernels.
 | `hip.gather` | `(%ctx) ins(%indices, %table : ...) outs(%output : ...)` | Embedding table lookup | Stub |
 | `hip.silu` | `(%ctx) ins(%input : ...) outs(%output : ...)` | SiLU activation: `x * sigmoid(x)` | Stub |
 | `hip.gqa` | `(%ctx, %layer, %start_pos, %seq_len) ins(%q, %k, %v : ...) outs(%kv_cache, %output : ...)` | Grouped query attention with KV cache | Stub |
+| `hip.quantize_act` | `(%ctx) ins(%A : ...) outs(%a_quant, %a_scale : ...) {block_size}` | Per-block int8 copy of an fp16 activation, read by `hip.matmul_nbits ... quantized(%a_quant, %a_scale)` on the W4A8 dp4a path; formed by `hip-fusion-transform`, see [custom_kernel_design.md](design/custom_kernel_design.md#shared-int8-activation-hipquantize_act) | Full impl |
+| `hip.matmul_nbits_group` | `(%ctx) ins(%A : ...) quantized(%a_quant, %a_scale : ...) weights(...) scales(...) [zero_points(...)] outs(...) [up_tmp(%t : ...)] {K, N = [...], epilogue}` | Up to three int4 projections of one shared int8 activation; `epilogue = 1` fuses `silu(gate) * up` into one output. Single launch at M = 1, per-projection kernels otherwise; formed by `hip-fusion-transform`, see [custom_kernel_design.md](design/custom_kernel_design.md#projection-groups-hipmatmul_nbits_group) | Full impl |
 
 ---
 
