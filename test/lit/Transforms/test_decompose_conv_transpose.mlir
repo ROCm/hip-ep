@@ -384,4 +384,31 @@ module {
 
   // CHECK-LABEL: func.func @result_too_large
   // CHECK: hip.conv_transpose
+
+  // --------------------------------------------------------------------------
+  // 15. A 1-D transpose with dynamic width expands to a rank-4 [N, C, 1, W]
+  // view, decomposes through 2-D hip.conv residues, and collapses the
+  // artificial height dimension. The temporary width comes from tensor.dim.
+  // --------------------------------------------------------------------------
+  func.func @dynamic_1d(%ctx: !hip.context, %x: tensor<?x2x?xf32>,
+                        %init: tensor<?x3x?xf32>)
+      -> tensor<?x3x?xf32> {
+    %w = hip.constant {value = dense<1.000000e+00> : tensor<2x3x16xf32>}
+        : tensor<2x3x16xf32>
+    %y = hip.conv_transpose(%ctx) ins(%x, %w : tensor<?x2x?xf32>,
+                                              tensor<2x3x16xf32>)
+        outs(%init : tensor<?x3x?xf32>)
+        {kernel_shape = [16], strides = [8], pads = [4, 4],
+         dilations = [1], output_padding = [0], group = 1 : i64}
+        : tensor<?x3x?xf32>
+    return %y : tensor<?x3x?xf32>
+  }
+
+  // CHECK-LABEL: func.func @dynamic_1d
+  // CHECK-NOT: hip.conv_transpose
+  // CHECK: tensor.expand_shape {{.*}} : tensor<?x2x?xf32> into tensor<?x2x1x?xf32>
+  // CHECK: tensor.dim {{.*}}, %{{.*}} : tensor<?x2x?xf32>
+  // CHECK-COUNT-8: hip.conv
+  // CHECK: kernel_shape = [1, 2]
+  // CHECK: tensor.collapse_shape {{.*}} : tensor<?x3x1x?xf32> into tensor<?x3x?xf32>
 }

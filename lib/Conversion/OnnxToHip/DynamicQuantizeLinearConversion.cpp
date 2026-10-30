@@ -63,9 +63,10 @@ static bool isSingleElement(mlir::RankedTensorType type) {
   return type.hasStaticShape() && type.getNumElements() == 1;
 }
 
-/// Fold the last axis, repeating until the value is rank 0. One axis per
-/// reduce matches the HIP reduce lowering, which infers a single reduced
-/// axis from the trailing shape.
+/// Fold the last axis, repeating until the value is rank 0. Each reduce
+/// carries that axis in `reduced_axes`; the LLVM lowering uses it for the
+/// inner stride. One axis per reduce matches the HIP reduce lowering, which
+/// infers a single reduced axis from the trailing shape.
 template <typename ReduceOp>
 static mlir::Value reduceToScalar(mlir::PatternRewriter &rewriter,
                                   mlir::Location loc, mlir::Value context,
