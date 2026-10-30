@@ -357,6 +357,8 @@ int main(int argc, char **argv) {
   // plain convolutions before the rocMLIR fusion outlines a kernel around it.
   pm.addNestedPass<mlir::func::FuncOp>(
       mlir::hip::createDecomposeConvTransposePass());
+  pm.addNestedPass<mlir::func::FuncOp>(
+      mlir::hip::createDecomposeMultiHeadAttentionPass());
   pm.addPass(mlir::createCanonicalizerPass());
   mlir::hip::addRocMlirFusionPasses(pm,
                                     mlir::hip::FuseRocMlirAnchorPassOptions());
