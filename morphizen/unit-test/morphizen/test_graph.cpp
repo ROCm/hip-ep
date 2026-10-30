@@ -386,6 +386,41 @@ TEST_F(GraphTest, TryFuseIsolatedNodeWithOptionalInput) {
   std::filesystem::remove(path);
 }
 
+#ifdef MORPHIZEN_ENABLE_MLIR_BACKEND
+TEST_F(GraphTest, OptionalOutputCanonicalizationPreservesRegions) {
+  auto path = CMAKE_CURRENT_BINARY_PATH /
+              std::filesystem::path("region_preservation_test.onnx");
+  std::vector<std::pair<std::string, int64_t>> opset = {{"", 17}};
+  auto model = morphizen_cxx::Model::create(path, opset);
+  auto graph = model->main_graph();
+
+  auto output = graph.new_node_arg("output", {1, 8},
+                                   ONNX_NAMESPACE::TensorProto_DataType_FLOAT);
+  auto unused = graph.new_node_arg("unused", {1, 8},
+                                   ONNX_NAMESPACE::TensorProto_DataType_FLOAT);
+
+  auto &body = MORPHIZEN_ORT_API_EXT(graph_new_subgraph)(graph);
+  morphizen::AttributeProtoPtr body_attr(
+      MORPHIZEN_ORT_API_EXT(attr_proto_new_graph)("body", body));
+  auto attrs = morphizen::NodeAttributesBuilder()
+                   .add("body", std::move(body_attr))
+                   .build();
+
+  graph.add_node("region_holder", "", "RegionHolder", "", {}, {output, unused},
+                 std::move(attrs));
+  graph.set_outputs({output});
+  ASSERT_TRUE(graph.resolve(true));
+
+  auto serialized = graph.save_string();
+  ASSERT_NE(serialized.get(), nullptr);
+  EXPECT_NE(serialized->find("\"onnx.RegionHolder\""), std::string::npos);
+  EXPECT_NE(serialized->find("\"onnx.Yield\""), std::string::npos);
+  EXPECT_NE(serialized->find("none"), std::string::npos);
+
+  std::filesystem::remove(path);
+}
+#endif
+
 TEST_F(GraphTest, NewConstantInitializer) {
 #ifdef MORPHIZEN_ENABLE_BOOST
   auto SAMPLE_ONNX = CMAKE_CURRENT_BINARY_PATH / "sample.onnx";

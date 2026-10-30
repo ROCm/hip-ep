@@ -1417,7 +1417,6 @@ void MLIRGraph::canonicalize_optional_outputs() {
   // (e.g. TopK whose Values are unused) leaves the node without an identity.
   auto *ctx = entry_block_->getParentOp()->getContext();
   auto noneType = mlir::NoneType::get(ctx);
-  mlir::OpBuilder builder(ctx);
 
   // Collect the set of values used by the terminator (onnx.Return / onnx.Yield)
   llvm::DenseSet<mlir::Value> terminator_operands;
@@ -1446,47 +1445,18 @@ void MLIRGraph::canonicalize_optional_outputs() {
   });
 
   for (auto *op : ops_to_process) {
-    llvm::SmallVector<mlir::Type> newTypes;
-    llvm::SmallVector<unsigned> unused_indices;
     for (unsigned i = 0; i < op->getNumResults(); ++i) {
       auto result = op->getResult(i);
       if (i > 0 && result.use_empty() &&
           !terminator_operands.contains(result) &&
           !mlir::isa<mlir::NoneType>(result.getType())) {
-        newTypes.push_back(noneType);
-        unused_indices.push_back(i);
-      } else {
-        newTypes.push_back(result.getType());
+        // Only the result type changes. Mutating it in place preserves all
+        // operation state, including regions, successors, properties, and
+        // discardable attributes.
+        result.setType(noneType);
+        MY_LOG(1) << "Canonicalized unused result #" << i << " of "
+                  << op->getName().getStringRef().str() << " to none";
       }
-    }
-
-    // Rebuild the operation with updated result types
-    builder.setInsertionPoint(op);
-    mlir::OperationState state(op->getLoc(), op->getName().getStringRef());
-    state.addOperands(op->getOperands());
-    state.addTypes(newTypes);
-    state.addAttributes(op->getAttrs());
-    // Copy inherent/discardable attributes and properties.
-    if (op->getPropertiesStorageSize())
-      state.propertiesAttr = op->getPropertiesAsAttribute();
-    // Loop / If / Scan carry their body in regions. Dropping them here
-    // leaves onnx.Loop with zero regions and onnx-loop-outline rejects it.
-    for (mlir::Region &region : op->getRegions()) {
-      mlir::Region *dest = state.addRegion();
-      dest->takeBody(region);
-    }
-
-    auto *newOp = builder.create(state);
-
-    // Replace all uses of old results with new results
-    for (unsigned i = 0; i < op->getNumResults(); ++i)
-      op->getResult(i).replaceAllUsesWith(newOp->getResult(i));
-
-    op->erase();
-
-    for (unsigned idx : unused_indices) {
-      MY_LOG(1) << "Canonicalized unused result #" << idx << " of "
-                << newOp->getName().getStringRef().str() << " to none";
     }
   }
 }
