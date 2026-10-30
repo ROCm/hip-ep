@@ -4,6 +4,7 @@
  */
 
 #include "QuantizedEpilogue.h"
+#include "RebiasUnsignedQuantize.h"
 #include "SinkQuantize.h"
 
 #include "hip/Conversion/HipToTosa/HipToTosaLegality.h"
@@ -1990,6 +1991,9 @@ public:
     // Before outlining, so an anchor's 8-bit result feeds the moved ops and a
     // requantize left on one input joins that anchor's epilogue.
     sinkQuantizeThroughElementMoves(funcOp);
+    // After the sinking, which fixes each tree's final shape, and before the
+    // QLinear and dequantized-conv rewrites, which then plan on i8 inputs.
+    rebiasUnsignedQuantizedTrees(funcOp, isPlannedQLinear);
 
     MLIRContext *ctx = &getContext();
     RewritePatternSet patterns(ctx);

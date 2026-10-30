@@ -48,6 +48,7 @@ add_library(HipDialectTransforms STATIC
   PoolAllocs.cpp
   PromoteStridedHipOperands.cpp
   QuantizedEpilogue.cpp
+  RebiasUnsignedQuantize.cpp
   RelaxMultiDynExpandShape.cpp
   ResolveExternConstants.cpp
   ResolveMemRefDims.cpp

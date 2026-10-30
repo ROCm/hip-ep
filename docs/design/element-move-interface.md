@@ -49,6 +49,34 @@ A Concat needs no special code: `ConcatDecompose` emits a chain of
 `tensor.insert_slice` ops into a `tensor.empty`, and `insert_slice` moves the
 elements of both its source and its destination.
 
+## Rebias of ui8 trees to i8
+
+rocMLIR's integer conv and gemm take only signed bytes, so a ui8 input costs
+the kernel a widen, a subtraction of 128 and a narrow on each load.
+`rebiasUnsignedQuantizedTrees` (`lib/Dialect/Transforms/RebiasUnsignedQuantize.cpp`)
+runs right after the sinking and removes that cost where it can:
+
+```text
+Q_i8(x, s, z - 128)     = Q_ui8(x, s, z) - 128
+DQ_i8(q - 128, s, z - 128) = DQ_ui8(q, s, z)
+```
+
+It collects each connected set of static ui8 values:
+
+- producers: per-tensor `hip.quantize_linear` ops with an inline scalar zero
+  point (or none, which is 0), and the results of `hip.qlinear_conv` and
+  `hip.qlinear_matmul` ops that will become integer anchors;
+- interior: the ops that implement this interface, in both directions, with
+  `tensor.empty` destinations replaced by i8 ones;
+- readers: per-tensor `hip.dequantize_linear` ops with an inline scalar zero
+  point, and the data operand of the QLinear anchors.
+
+If any value has another producer or reader (a function argument, a return,
+`hip.qadd`, a pool), or if no reader feeds an integer anchor, the set keeps
+ui8. Otherwise every value becomes i8 and every zero point in the set drops by
+128. The QLinear and dequantized-conv planners compute the same correction
+`x_zp - offset` for both types, so the integer math does not change.
+
 ## Contract for an op that implements the interface
 
 - Every result element is a copy of one element of the moved operands, or one
