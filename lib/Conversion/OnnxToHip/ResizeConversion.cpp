@@ -6,6 +6,7 @@
 #include "../ResizeLayout.h"
 #include "OnnxToHipUtils.h"
 
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinAttributes.h"
 
 #include <cmath>
@@ -31,8 +32,8 @@ namespace {
 //   * keep_aspect_ratio_policy = "stretch"           (default)
 //   * roi must be absent: none, or a 0-element tensor (no tf_crop_and_resize)
 //   * rank in [3, 5], input and output ranks equal
-//   * matching float types, or matching int8/uint8 when mode is nearest.
-//     Nearest copies samples. Linear on integer codes is rejected.
+//   * matching float types, or matching int8/uint8. Nearest copies samples.
+//     Linear interpolates the stored integer codes and truncates toward zero.
 //
 // The runtime kernel is unchanged: a copied prefix of at most two axes and a
 // trailing window of at most three.  Channels-first `1x3x16x16 -> 1x3x32x32`
@@ -349,9 +350,6 @@ struct ResizeToHip : public mlir::RewritePattern {
     else
       return rewriter.notifyMatchFailure(op, "Resize mode must be "
                                              "'nearest' or 'linear'");
-    if (int8Elem && modeId != 0)
-      return rewriter.notifyMatchFailure(
-          op, "Resize int8/uint8 supports nearest only");
 
     std::string ct = getStrAttr("coordinate_transformation_mode", "half_pixel");
     int64_t coordId;
@@ -445,6 +443,25 @@ struct ResizeToHip : public mlir::RewritePattern {
     mlir::Value scales = operands.size() > 2 ? operands[2] : mlir::Value();
     llvm::SmallVector<double> scaleVec;
     bool scalesFolded = foldScales(scales, rank, scaleVec);
+
+    // A static identity Resize preserves values exactly for all supported
+    // coordinate and nearest modes when scales are absent or all one. Keep
+    // graph outputs as distinct runtime-owned allocations.
+    bool staticIdentityShape = inputType.hasStaticShape() &&
+                               outputType.hasStaticShape() &&
+                               inputType.getShape() == outputType.getShape();
+    bool unitScales = isAbsent(scales) ||
+                      (scalesFolded && llvm::all_of(scaleVec, [](double scale) {
+                         return scale == 1.0;
+                       }));
+    bool isGraphOutput =
+        llvm::any_of(op->getResult(0).getUsers(), [](mlir::Operation *user) {
+          return mlir::isa<mlir::func::ReturnOp>(user);
+        });
+    if (staticIdentityShape && unitScales && !isGraphOutput) {
+      rewriter.replaceOp(op, input);
+      return mlir::success();
+    }
 
     // ONNX samples with the supplied scale. Record it when the extent ratio
     // the kernel would use differs; align_corners does not read the scale.

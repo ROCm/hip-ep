@@ -1717,8 +1717,10 @@ HIP_KERNEL_API int hip_pool(
  *  nearest_mode:       0 = round_prefer_floor (only used when mode=nearest)
  *
  * Supported hip_dtypes: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
- * HIP_DTYPE_BFLOAT16, HIP_DTYPE_FLOAT64 for every mode. HIP_DTYPE_INT8 and
- * HIP_DTYPE_UINT8 are nearest only (index copy, no interpolation).
+ * HIP_DTYPE_BFLOAT16, HIP_DTYPE_FLOAT64, HIP_DTYPE_INT8, and
+ * HIP_DTYPE_UINT8 for every mode. Integer linear interpolates the stored
+ * codes in float and truncates toward zero on the store. Nearest copies
+ * one sample.
  * Returns: 0 on success, non-zero on failure.
  */
 HIP_KERNEL_API int hip_resize(
