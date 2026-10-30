@@ -90,7 +90,7 @@ controller from that `bin` directory:
 | `--mode` | `lookup`, `autotune` | `lookup` | `lookup` uses the tables embedded in `custom_kernels_<arch>.dll` and falls through to autotune on a miss, like production. `autotune` bypasses the tables (production's `online` mode). |
 | `--coverage` | `1`, `2`, `3` | `3` | Shape tier; see "Shape coverage". `1` suits a per-PR job, `3` a nightly one. |
 
-The controller runs the 16 leaves serially, with `bin` as the working
+The controller runs the 18 leaves serially, with `bin` as the working
 directory so every leaf finds `custom_kernels_<arch>.dll`. It prints one
 `[<op>/<leaf>] PASS|FAIL (<ms> ms)` line per leaf and finally
 `Combined report: <path>`.
@@ -193,7 +193,7 @@ Concretely:
   never drops a categorical situation.
 
 A tier3 (default) run of one leaf is on the order of tens to ~150 cases, and
-the whole 16-leaf suite at tier3 is budgeted at **up to ~30 min total**
+the whole 18-leaf suite at tier3 is budgeted at **up to ~30 min total**
 (measured ~20-25 min in practice) — this is intentionally wider than a
 "finishes in a minute" smoke test, because the shape axis (M=1 vs M>1,
 multiple K/N/seq scenarios) needs real coverage too, not just the categorical
@@ -258,6 +258,7 @@ unit_test/
   gqa/prefill/Xfp16_Wi8_Yfp16/
   qmoe_ragged_mm/Xfp16_Wu4_Yfp16/
   gather_block_quantized/Xi64_W{u4,u8,fp8}_Yfp16/
+  cast/X{fp32,bf16}_Y{bf16,fp32}/
 ```
 
 `unit_test/` holds one directory per op and nothing else besides the four
@@ -378,6 +379,17 @@ COVERAGE=N` (any leaf, or the top-level aggregator) builds and runs it.
   `{16,32,64,128}`, `{1,16,2048}` indices). Every index list includes the first
   and last rows, negative and out-of-range indices. Outputs are compared
   bit-exactly with the CPU reference.
+- **cast** (fp32 to bf16 and bf16 to fp32 as separate leaves; there is no
+  weight tensor, so the names carry only `X` and `Y`): fp32 to bf16 runs
+  special values (ties, overflow to infinity, NaNs, subnormals) and every
+  sign, exponent and upper mantissa with six low halves that cover each
+  rounding situation; bf16 to fp32 runs every bf16 bit pattern. Both also
+  run random tensors around the 256-thread block, each with aligned and
+  misaligned pointers, a launch after a failed HIP call and the calls
+  `hip_cast` must refuse, at every tier; COVERAGE adds larger random tensors
+  (tier2 = `4194307` elements, tier3 = also `16777217`). Outputs are compared
+  bit-exactly with a round-to-nearest-even (fp32 to bf16) or widening (bf16
+  to fp32) reference.
 
 A new op's test cpp should follow whichever of the above shapes fit it best:
 if the kernel's dispatch paths are better covered by a small hand-picked
