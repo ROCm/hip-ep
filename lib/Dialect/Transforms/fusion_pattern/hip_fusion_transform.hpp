@@ -31,6 +31,7 @@
 #include "hip/Dialect/IR/HipDialect.h"
 
 #include "patch_embed_conv_to_gemm.hpp"
+#include "qdq_chain_fusion.hpp"
 #include "swiglu_fusion.hpp"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -432,8 +433,8 @@ canRequantizeLayoutOp(mlir::PatternRewriter &, mlir::PDLResultList &,
   // narrow integer storage, since this rewrite creates no quantized-specific
   // op or kernel. Extending the mechanism is an entry here.
   llvm::StringRef name = layout->getName().getStringRef();
-  if (name != "hip.transpose" && name != "tensor.collapse_shape" &&
-      name != "tensor.expand_shape")
+  if (name != "hip.transpose" && name != "hip.gather" &&
+      name != "tensor.collapse_shape" && name != "tensor.expand_shape")
     return mlir::failure();
 
   // A DPS op's init decides its result type, so a retyped result needs a
@@ -853,6 +854,11 @@ inline mlir::LogicalResult run(mlir::ModuleOp module,
       patterns, mlir::PatternBenefit(kPatchEmbedConvToGemmBenefit));
   populateSwigluFusionPattern(patterns,
                               mlir::PatternBenefit(kSwigluFusionBenefit));
+  // Conversion sizes each DPS init from `tensor.dim` of the producer's result,
+  // and those shape-only reads count as uses, so HasSingleUseResult would
+  // reject every dynamically shaped chain. Folding them onto the producer's
+  // own init leaves only the data consumers.
+  mlir::tensor::DimOp::getCanonicalizationPatterns(patterns, ctx);
 
   // pdl patterns here
   if (pdlBuffer.getBufferSize() != 0) {
@@ -876,11 +882,19 @@ inline mlir::LogicalResult run(mlir::ModuleOp module,
   // per function.
   mlir::FrozenRewritePatternSet frozen(std::move(patterns));
 
+  // Second phase: chains built from the ops the first phase fused, and Q/DQ
+  // round trips that must not preempt a first-phase fusion consuming the DQ.
+  mlir::RewritePatternSet chainPatterns(ctx);
+  populateQdqChainFusionPatterns(chainPatterns);
+  mlir::tensor::DimOp::getCanonicalizationPatterns(chainPatterns, ctx);
+  mlir::FrozenRewritePatternSet frozenChains(std::move(chainPatterns));
+
   mlir::LogicalResult result = mlir::success();
   module.walk([&](mlir::func::FuncOp funcOp) {
     if (funcOp.isDeclaration())
       return;
-    if (mlir::failed(mlir::applyPatternsGreedily(funcOp, frozen)))
+    if (mlir::failed(mlir::applyPatternsGreedily(funcOp, frozen)) ||
+        mlir::failed(mlir::applyPatternsGreedily(funcOp, frozenChains)))
       result = mlir::failure();
   });
   return result;

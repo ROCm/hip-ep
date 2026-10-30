@@ -335,6 +335,86 @@ static int update_kv_cache(hipStream_t stream, const void *past_key,
   return 0;
 }
 
+// fp16 flash prefill over a BNSD fp16 KV of stride attn_max_seq.
+static int launch_flash_prefill(RuntimeState *state, hipStream_t stream,
+                                const void *q, const void *k, const void *v,
+                                void *output, int64_t B, int64_t H, int64_t G,
+                                int64_t sq, int64_t total_seq, int64_t d,
+                                int attn_max_seq, int64_t past_len, float scale,
+                                int local_window_size, const void *head_sink,
+                                bool use_smooth_softmax,
+                                const char *cache_kind) {
+  // d64, d96 and d128 run v6x, d256 runs v8x (d256 prefill never has a window
+  // or a sink here). hip_gqa_flash_prefill_v2 applies the same split when
+  // tuning online.
+  const bool v8x_prefill = d == 256;
+  const char *fused_prefill_kernel = v8x_prefill ? "v8x" : "v6x";
+  int fp_rc;
+  if (hip_gqa_autotune_mode(state->gqa_autotune_policy) ==
+      static_cast<int>(hipdnn_ep::GqaAutotuneMode::Online)) {
+    fp_rc = hip_gqa_flash_prefill(
+        stream, q, k, v, output, static_cast<int>(B), static_cast<int>(H),
+        static_cast<int>(G), static_cast<int>(sq), static_cast<int>(total_seq),
+        static_cast<int>(d), attn_max_seq, static_cast<int>(past_len), scale,
+        local_window_size, head_sink, static_cast<int>(H),
+        use_smooth_softmax ? 1 : 0);
+  } else {
+    const hipdnn_ep::GqaPrefillVariant variant =
+        v8x_prefill ? hipdnn_ep::GqaPrefillVariant::V8x
+                    : hipdnn_ep::GqaPrefillVariant::V6x;
+    const hipdnn_ep::GqaPrefillRequest request{variant,
+                                               static_cast<int>(B),
+                                               static_cast<int>(H),
+                                               static_cast<int>(G),
+                                               static_cast<int>(d),
+                                               static_cast<int>(sq),
+                                               static_cast<int>(total_seq),
+                                               local_window_size};
+    hipdnn_ep::GqaPrefillResult selected;
+    hip_gqa_autotune_resolve_prefill(state->gqa_autotune_policy, &request,
+                                     &selected);
+    auto launch_configured = [&](const hipdnn_ep::GqaPrefillConfig &config) {
+      return hip_gqa_flash_prefill_v3_configured(
+          stream, q, k, v, output, static_cast<int>(B), static_cast<int>(H),
+          static_cast<int>(G), static_cast<int>(sq),
+          static_cast<int>(total_seq), static_cast<int>(d), attn_max_seq,
+          static_cast<int>(past_len), scale, local_window_size, head_sink,
+          static_cast<int>(H), use_smooth_softmax ? 1 : 0, config.hb, config.qw,
+          config.mt, config.bkv, config.nd);
+    };
+    fp_rc = launch_configured(selected.config);
+    if (fp_rc != 0 && selected.source != hipdnn_ep::GqaTuneSource::Heuristic) {
+      // Ask for the compiled-in heuristic directly. Re-running resolve_* would
+      // just hand back the same neighbourhood's nearest point that was already
+      // rejected.
+      RUNTIME_DEBUG_LOG(
+          "[REAL] rejected GQA prefill config (source=%s); using heuristic\n",
+          hipdnn_ep::gqa_tune_source_name(selected.source));
+      hipdnn_ep::GqaPrefillConfig heuristic;
+      hip_gqa_autotune_fallback_prefill(&request, &heuristic);
+      selected = {heuristic, hipdnn_ep::GqaTuneSource::Heuristic, 0.0f};
+      fp_rc = launch_configured(selected.config);
+    }
+    RUNTIME_DEBUG_LOG("[REAL] GQA prefill config source=%s %s "
+                      "hb=%d qw=%d mt=%d bkv=%d nd=%d\n",
+                      hipdnn_ep::gqa_tune_source_name(selected.source),
+                      fused_prefill_kernel, selected.config.hb,
+                      selected.config.qw, selected.config.mt,
+                      selected.config.bkv, selected.config.nd);
+  }
+  // window is logged because it selects the HAS_WINDOW instantiation, so a
+  // dispatch that looks identical here can be two different kernels.
+  RUNTIME_DEBUG_LOG(
+      "[REAL] GQA fused prefill (%s d=%lld -> %s): B=%lld sq=%lld "
+      "total_seq=%lld H=%lld G=%lld past_len=%lld sink=%d smooth=%d window=%d "
+      "rc=%d\n",
+      cache_kind, (long long)d, fused_prefill_kernel, (long long)B,
+      (long long)sq, (long long)total_seq, (long long)H, (long long)G,
+      (long long)past_len, static_cast<int>(head_sink != nullptr),
+      static_cast<int>(use_smooth_softmax), local_window_size, fp_rc);
+  return fp_rc;
+}
+
 //===----------------------------------------------------------------------===//
 // Fused-only forward: fp16, causal, GQA. No hipBLASLt, no decomposed fallback.
 //===----------------------------------------------------------------------===//
@@ -737,75 +817,148 @@ static int gqa_forward_fused(
     attn_max_seq = static_cast<int>(total_seq);
   }
 
-  // d64, d96 and d128 run v6x, d256 runs v8x (d256 prefill never has a window
-  // or a sink here). hip_gqa_flash_prefill_v2 applies the same split when
-  // tuning online.
-  const bool v8x_prefill = d == 256;
-  const char *fused_prefill_kernel = v8x_prefill ? "v8x" : "v6x";
-  int fp_rc;
-  if (hip_gqa_autotune_mode(state->gqa_autotune_policy) ==
-      static_cast<int>(hipdnn_ep::GqaAutotuneMode::Online)) {
-    fp_rc = hip_gqa_flash_prefill(
-        stream, qSrc, kAttn, vAttn, output, static_cast<int>(B),
-        static_cast<int>(H), static_cast<int>(G), static_cast<int>(sq),
-        static_cast<int>(total_seq), static_cast<int>(d), attn_max_seq,
-        static_cast<int>(past_len), scale, local_window_size, head_sink,
-        static_cast<int>(H), use_smooth_softmax ? 1 : 0);
-  } else {
-    const hipdnn_ep::GqaPrefillVariant variant =
-        v8x_prefill ? hipdnn_ep::GqaPrefillVariant::V8x
-                    : hipdnn_ep::GqaPrefillVariant::V6x;
-    const hipdnn_ep::GqaPrefillRequest request{variant,
-                                               static_cast<int>(B),
-                                               static_cast<int>(H),
-                                               static_cast<int>(G),
-                                               static_cast<int>(d),
-                                               static_cast<int>(sq),
-                                               static_cast<int>(total_seq),
-                                               local_window_size};
-    hipdnn_ep::GqaPrefillResult selected;
-    hip_gqa_autotune_resolve_prefill(state->gqa_autotune_policy, &request,
-                                     &selected);
-    auto launch_configured = [&](const hipdnn_ep::GqaPrefillConfig &config) {
-      return hip_gqa_flash_prefill_v3_configured(
-          stream, qSrc, kAttn, vAttn, output, static_cast<int>(B),
-          static_cast<int>(H), static_cast<int>(G), static_cast<int>(sq),
-          static_cast<int>(total_seq), static_cast<int>(d), attn_max_seq,
-          static_cast<int>(past_len), scale, local_window_size, head_sink,
-          static_cast<int>(H), use_smooth_softmax ? 1 : 0, config.hb, config.qw,
-          config.mt, config.bkv, config.nd);
-    };
-    fp_rc = launch_configured(selected.config);
-    if (fp_rc != 0 && selected.source != hipdnn_ep::GqaTuneSource::Heuristic) {
-      // Ask for the compiled-in heuristic directly. Re-running resolve_* would
-      // just hand back the same neighbourhood's nearest point that was already
-      // rejected.
-      RUNTIME_DEBUG_LOG(
-          "[REAL] rejected GQA prefill config (source=%s); using heuristic\n",
-          hipdnn_ep::gqa_tune_source_name(selected.source));
-      hipdnn_ep::GqaPrefillConfig heuristic;
-      hip_gqa_autotune_fallback_prefill(&request, &heuristic);
-      selected = {heuristic, hipdnn_ep::GqaTuneSource::Heuristic, 0.0f};
-      fp_rc = launch_configured(selected.config);
-    }
-    RUNTIME_DEBUG_LOG("[REAL] GQA prefill config source=%s %s "
-                      "hb=%d qw=%d mt=%d bkv=%d nd=%d\n",
-                      hipdnn_ep::gqa_tune_source_name(selected.source),
-                      fused_prefill_kernel, selected.config.hb,
-                      selected.config.qw, selected.config.mt,
-                      selected.config.bkv, selected.config.nd);
-  }
-  // window is logged because it selects the HAS_WINDOW instantiation, so a
-  // dispatch that looks identical here can be two different kernels.
-  RUNTIME_DEBUG_LOG(
-      "[REAL] GQA fused prefill (%s d=%lld -> %s): B=%lld sq=%lld "
-      "total_seq=%lld H=%lld G=%lld past_len=%lld sink=%d smooth=%d window=%d "
-      "rc=%d\n",
-      kv_quantized ? "quant" : "fp16", (long long)d, fused_prefill_kernel,
-      (long long)B, (long long)sq, (long long)total_seq, (long long)H,
-      (long long)G, (long long)past_len, static_cast<int>(head_sink != nullptr),
-      static_cast<int>(use_smooth_softmax), local_window_size, fp_rc);
+  const int fp_rc = launch_flash_prefill(
+      state, stream, qSrc, kAttn, vAttn, output, B, H, G, sq, total_seq, d,
+      attn_max_seq, past_len, scale, local_window_size, head_sink,
+      use_smooth_softmax, kv_quantized ? "quant" : "fp16");
   return fp_rc != 0 ? -1 : 0;
+}
+
+// fp32 activations over an unquantized fp32 KV cache, prefill only. Split,
+// RoPE and the cache append stay fp32, so the cache holds exactly what the
+// decomposed path would write and decode is unaffected. Only the attention
+// itself runs on the fp16 flash kernel: roped Q and the cache rows
+// [0, total_seq) are cast into fp16 scratch, and the output is cast back. The
+// decomposed fallback instead materializes fp32 score matrices, quadratic in
+// sq, which dominates long-prompt TTFT for W*A32 exports.
+static int gqa_prefill_fp32_cache_via_fp16(
+    RuntimeState *state, hipStream_t stream, const void *query, const void *key,
+    const void *value, const void *past_key, const void *past_value,
+    const void *seqlens_k_ptr, const void *cos_cache, const void *sin_cache,
+    void *output, void *present_key, void *present_value, int64_t B, int64_t sq,
+    int64_t skv, int64_t past_buf_seq, int64_t H, int64_t G, int64_t d,
+    float scale, int64_t do_rotary, bool use_smooth_softmax,
+    int local_window_size) {
+  constexpr int kElem32 = 4;
+  const int64_t present_seq = skv;
+  const bool packed_qkv = (!key && !value);
+  const bool need_rope = do_rotary && cos_cache && sin_cache;
+
+  int64_t past_len = skv - sq;
+  if (seqlens_k_ptr) {
+    const int32_t seqlens_k_val =
+        read_seqlens_k_for_dispatch(stream, seqlens_k_ptr, B, state);
+    if (seqlens_k_val == kSeqlensKNotRead)
+      return -1;
+    past_len = seqlens_k_val < 0 ? 0 : seqlens_k_val + 1 - sq;
+  }
+  const int64_t total_seq = past_len + sq;
+  if (past_len < 0 || total_seq > present_seq || past_len > past_buf_seq) {
+    fprintf(stderr,
+            "gqa_prefill_fp32_cache_via_fp16: invalid lengths (sq=%lld, "
+            "past_len=%lld, present_seq=%lld, past_buf_seq=%lld)\n",
+            (long long)sq, (long long)past_len, (long long)present_seq,
+            (long long)past_buf_seq);
+    return -1;
+  }
+
+  const int64_t q_elems = B * sq * H * d;
+  const int64_t knew_elems = B * sq * G * d;
+  const int64_t kv16_elems = B * G * total_seq * d;
+  const size_t q32_bytes = static_cast<size_t>(q_elems) * kElem32;
+  const size_t knew32_bytes = static_cast<size_t>(knew_elems) * kElem32;
+  const size_t split_bytes =
+      packed_qkv ? (q32_bytes + knew32_bytes + knew32_bytes) : 0;
+  const size_t rope_bytes = need_rope ? (q32_bytes + knew32_bytes) : 0;
+  const size_t q16_bytes = static_cast<size_t>(q_elems) * 2;
+  const size_t kv16_bytes = static_cast<size_t>(kv16_elems) * 2;
+  const size_t off_split = 0;
+  const size_t off_rope = off_split + split_bytes;
+  const size_t off_q16 = off_rope + rope_bytes;
+  const size_t off_k16 = off_q16 + q16_bytes;
+  const size_t off_v16 = off_k16 + kv16_bytes;
+  const size_t off_out16 = off_v16 + kv16_bytes;
+  const size_t total_ws_bytes = off_out16 + q16_bytes;
+  if (hipdnn_ep_state_ensure_workspace(state, total_ws_bytes) != 0)
+    return -1;
+  char *ws = static_cast<char *>(hipdnn_ep_state_get_workspace(state));
+
+  const void *qSrc = query;
+  const void *kSrc = key;
+  const void *vSrc = value;
+  if (packed_qkv) {
+    void *d_Q = ws + off_split;
+    void *d_K = ws + off_split + q32_bytes;
+    void *d_V = ws + off_split + q32_bytes + knew32_bytes;
+    if (hip_gqa_split_qkv(stream, query, d_Q, d_K, d_V, static_cast<int>(B),
+                          static_cast<int>(sq), static_cast<int>(H),
+                          static_cast<int>(G), static_cast<int>(d),
+                          kElem32) != 0)
+      return -1;
+    qSrc = d_Q;
+    kSrc = d_K;
+    vSrc = d_V;
+  }
+  if (need_rope) {
+    void *d_Qroped = ws + off_rope;
+    void *d_Kroped = ws + off_rope + q32_bytes;
+    const int half_rot = static_cast<int>(d / 2);
+    if (hip_gqa_rope(stream, qSrc, d_Qroped, cos_cache, sin_cache,
+                     static_cast<int>(B), static_cast<int>(sq),
+                     static_cast<int>(H), static_cast<int>(d), half_rot,
+                     static_cast<int>(past_len), nullptr, kElem32) != 0)
+      return -1;
+    if (hip_gqa_rope(stream, kSrc, d_Kroped, cos_cache, sin_cache,
+                     static_cast<int>(B), static_cast<int>(sq),
+                     static_cast<int>(G), static_cast<int>(d), half_rot,
+                     static_cast<int>(past_len), nullptr, kElem32) != 0)
+      return -1;
+    qSrc = d_Qroped;
+    kSrc = d_Kroped;
+  }
+  if (update_kv_cache(stream, past_key, past_value, kSrc, vSrc, present_key,
+                      present_value, static_cast<int>(B),
+                      static_cast<int>(past_len), static_cast<int>(sq),
+                      static_cast<int>(G), static_cast<int>(d),
+                      static_cast<int>(past_buf_seq),
+                      static_cast<int>(present_seq), seqlens_k_ptr, kElem32,
+                      /*copy_lo=*/0) != 0)
+    return -1;
+
+  void *q16 = ws + off_q16;
+  char *k16 = ws + off_k16;
+  char *v16 = ws + off_v16;
+  void *out16 = ws + off_out16;
+  if (hip_cast(stream, qSrc, q16, q_elems, HIP_DTYPE_FLOAT32,
+               HIP_DTYPE_FLOAT16) != 0)
+    return -1;
+  // The cache is BNSD with a present_seq stride; the fp16 copy is compact, so
+  // each (batch, kv-head) row block is cast separately unless the two coincide.
+  const int64_t blocks = total_seq == present_seq ? 1 : B * G;
+  const int64_t block_elems =
+      total_seq == present_seq ? kv16_elems : total_seq * d;
+  for (int64_t blk = 0; blk < blocks; ++blk) {
+    const size_t src_off = static_cast<size_t>(blk) * present_seq * d * kElem32;
+    const size_t dst_off = static_cast<size_t>(blk) * block_elems * 2;
+    if (hip_cast(stream, static_cast<const char *>(present_key) + src_off,
+                 k16 + dst_off, block_elems, HIP_DTYPE_FLOAT32,
+                 HIP_DTYPE_FLOAT16) != 0)
+      return -1;
+    if (hip_cast(stream, static_cast<const char *>(present_value) + src_off,
+                 v16 + dst_off, block_elems, HIP_DTYPE_FLOAT32,
+                 HIP_DTYPE_FLOAT16) != 0)
+      return -1;
+  }
+
+  if (launch_flash_prefill(
+          state, stream, q16, k16, v16, out16, B, H, G, sq, total_seq, d,
+          static_cast<int>(total_seq), past_len, scale, local_window_size,
+          /*head_sink=*/nullptr, use_smooth_softmax, "fp32-cache") != 0)
+    return -1;
+  return hip_cast(stream, out16, output, q_elems, HIP_DTYPE_FLOAT16,
+                  HIP_DTYPE_FLOAT32) != 0
+             ? -1
+             : 0;
 }
 
 //===----------------------------------------------------------------------===//
@@ -940,6 +1093,19 @@ static constexpr int64_t kWindowChunkRows = kScoreChunkAlign;
 static bool gqa_fused_decode_disabled() {
   static const bool disabled = [] {
     const char *v = std::getenv("HIPDNN_EP_GQA_DISABLE_FUSED_DECODE");
+    return v && std::strcmp(v, "0") != 0;
+  }();
+  return disabled;
+}
+
+// Env-var gate to send fp32-cache prefill back through the decomposed
+// hipBLASLt pipeline instead of gqa_prefill_fp32_cache_via_fp16. Default off.
+// Set HIPDNN_EP_GQA_DISABLE_FP32_CACHE_FLASH_PREFILL=1 to A/B the fp16
+// attention numerics or speed against the all-fp32 path.
+static bool gqa_fp32_cache_flash_prefill_disabled() {
+  static const bool disabled = [] {
+    const char *v =
+        std::getenv("HIPDNN_EP_GQA_DISABLE_FP32_CACHE_FLASH_PREFILL");
     return v && std::strcmp(v, "0") != 0;
   }();
   return disabled;
@@ -3068,6 +3234,31 @@ int wrap_group_query_attention(
               "failed (rc=%d)\n",
               arc);
     return arc;
+  }
+
+  // head_sink is a fused __half buffer, so a sink keeps the decomposed path.
+  const bool fp32_cache_flash_prefill =
+      !kv_quantized && fused_geometry && element_size_bytes == 4 &&
+      !is_decode && batch_size == 1 && head_sink == nullptr &&
+      !gqa_fp32_cache_flash_prefill_disabled();
+  if (fp32_cache_flash_prefill) {
+    RUNTIME_DEBUG_LOG(
+        "[REAL] wrap_group_query_attention: fp32-cache prefill on fp16 flash "
+        "(d=%lld sq=%lld packed=%d)\n",
+        (long long)head_dim, (long long)seq_len_q,
+        static_cast<int>(key == nullptr && value == nullptr));
+    int frc = gqa_prefill_fp32_cache_via_fp16(
+        state, stream, query, key, value, past_key, past_value, seqlens_k,
+        cos_cache, sin_cache, output, present_key, present_value, batch_size,
+        seq_len_q, seq_len_kv, past_buf_seq, num_heads, kv_num_heads, head_dim,
+        scale, do_rotary, has_smooth_softmax,
+        static_cast<int>(local_window_size));
+    if (frc != 0)
+      fprintf(stderr,
+              "wrap_group_query_attention: fp32-cache flash prefill failed "
+              "(rc=%d)\n",
+              frc);
+    return frc;
   }
 
   if (!fused_supported) {

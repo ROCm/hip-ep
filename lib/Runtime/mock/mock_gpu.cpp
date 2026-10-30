@@ -2377,6 +2377,48 @@ int wrap_qsigmoid(RuntimeState *state, const void *input, void *output,
   return 0;
 }
 
+int wrap_qswiglu(RuntimeState *state, const void *gate, const void *up,
+                 void *output, int64_t num_elements, float gate_scale,
+                 int64_t gate_zp, float sigmoid_scale, int64_t sigmoid_zp,
+                 float m_silu, int64_t silu_zp, float up_scale, int64_t up_zp,
+                 float m_mul, int64_t mul_zp, float dq_scale, int64_t dq_zp) {
+  (void)gate;
+  (void)up;
+  (void)output;
+  (void)gate_scale;
+  (void)gate_zp;
+  (void)sigmoid_scale;
+  (void)sigmoid_zp;
+  (void)m_silu;
+  (void)silu_zp;
+  (void)up_scale;
+  (void)up_zp;
+  (void)m_mul;
+  (void)mul_zp;
+  (void)dq_scale;
+  (void)dq_zp;
+  if (!state)
+    return -1;
+  MOCK_PRINT("[MOCK] wrap_qswiglu(num_elements=%lld)\n",
+             (long long)num_elements);
+  return 0;
+}
+
+int wrap_fake_quantize(RuntimeState *state, const void *input, void *output,
+                       int64_t num_elements, float scale, int64_t zero_point,
+                       int64_t qmin, int64_t qmax) {
+  (void)input;
+  (void)output;
+  (void)scale;
+  (void)zero_point;
+  if (!state)
+    return -1;
+  MOCK_PRINT(
+      "[MOCK] wrap_fake_quantize(num_elements=%lld, range=[%lld,%lld])\n",
+      (long long)num_elements, (long long)qmin, (long long)qmax);
+  return 0;
+}
+
 int wrap_and(RuntimeState *state, void *a, void *b, void *output, int64_t a_n,
              int64_t a_c, int64_t a_h, int64_t a_w, int64_t b_n, int64_t b_c,
              int64_t b_h, int64_t b_w, int64_t out_n, int64_t out_c,

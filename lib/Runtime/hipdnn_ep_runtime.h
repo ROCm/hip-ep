@@ -1141,6 +1141,21 @@ int wrap_qsigmoid(RuntimeState *state, const void *input, void *output,
                   int64_t num_elements, int64_t data_type, float input_scale,
                   int64_t input_zp, float output_scale, int64_t output_zp);
 
+// Fused SwiGLU over f32 gate/up with every intermediate requantized to a
+// UINT16 per-tensor code, bit-identical to Q, qsigmoid, qmul, Q, qmul, DQ.
+// m_silu / m_mul are the folded qmul coefficients (s_lhs * s_rhs / s_out).
+int wrap_qswiglu(RuntimeState *state, const void *gate, const void *up,
+                 void *output, int64_t num_elements, float gate_scale,
+                 int64_t gate_zp, float sigmoid_scale, int64_t sigmoid_zp,
+                 float m_silu, int64_t silu_zp, float up_scale, int64_t up_zp,
+                 float m_mul, int64_t mul_zp, float dq_scale, int64_t dq_zp);
+
+// Per-tensor QuantizeLinear followed by DequantizeLinear on f32, without
+// storing the integer codes. [qmin, qmax] is the storage type's range.
+int wrap_fake_quantize(RuntimeState *state, const void *input, void *output,
+                       int64_t num_elements, float scale, int64_t zero_point,
+                       int64_t qmin, int64_t qmax);
+
 // Element-wise Where wrapper (NumPy-style multidirectional broadcasting,
 // arbitrary rank). Computes output[i] = condition[i] ? x[i] : y[i] with
 // per-operand broadcasting.

@@ -2536,6 +2536,37 @@ HIP_KERNEL_API int hip_matmul_nbits(
     const void* pre_unpacked_zp_u8,
     const void* pre_unpacked_zp_fp16);
 
+/* hip_matmul_nbits with a uniform zero point.
+ *
+ * A finite `uniform_zp` asserts that every group's zero point equals it (see
+ * hip_matmul_nbits_fp16_uniform_value). bits=2 then passes it to the kernels
+ * as a scalar and never reads `zero_points`, saving one fp16 per group per
+ * output row -- as many bytes as the fp16 scales. NaN means no such guarantee
+ * and behaves exactly like hip_matmul_nbits; other bit widths ignore it. */
+HIP_KERNEL_API int hip_matmul_nbits_ex(
+    void* stream,
+    const void* A,
+    const void* B,
+    const void* scales,
+    const void* zero_points,
+    const void* bias,
+    void* output,
+    int64_t M, int64_t N, int64_t K,
+    int64_t batch_count,
+    int64_t bits,
+    int64_t block_size,
+    int64_t element_size_bytes,
+    int64_t zp_elem_size,
+    const void* pre_unpacked_zp_u8,
+    const void* pre_unpacked_zp_fp16,
+    float uniform_zp);
+
+/* Checks whether all `n` fp16 values at device pointer `values` are equal.
+ * Synchronizes `stream`. Returns 1 and stores the common value in *value when
+ * they are, 0 when they are not (or n <= 0), and a negative value on error. */
+HIP_KERNEL_API int hip_matmul_nbits_fp16_uniform_value(
+    void* stream, const void* values, int64_t n, float* value);
+
 // Bitsandbytes FP4/NF4 dequant. Writes row-major [N, K] f32.
 // quant_type 0 is FP4 and 1 is NF4. Even indices read the high nibble.
 HIP_KERNEL_API int hip_dequant_bnb4(
@@ -2850,6 +2881,20 @@ HIP_KERNEL_API int hip_qsigmoid_prepare_params(
     uint16_t input_zp,
     void* output_zp_device,
     uint16_t output_zp);
+
+// f32 SwiGLU with UINT16 per-tensor requantization of every intermediate;
+// see wrap_qswiglu in hipdnn_ep_runtime.h for the parameter meaning.
+HIP_KERNEL_API int hip_qswiglu(
+    void* stream, const float* gate, const float* up, float* output,
+    int64_t num_elements, float gate_scale, int32_t gate_zp,
+    float sigmoid_scale, int32_t sigmoid_zp, float m_silu, int32_t silu_zp,
+    float up_scale, int32_t up_zp, float m_mul, int32_t mul_zp,
+    float dq_scale, int32_t dq_zp);
+
+// f32 -> per-tensor Q -> DQ -> f32 without storing the codes.
+HIP_KERNEL_API int hip_fake_quantize(
+    void* stream, const float* input, float* output, int64_t num_elements,
+    float scale, int32_t zero_point, int32_t qmin, int32_t qmax);
 
 HIP_KERNEL_API int hip_quantize_linear(
     void* stream,

@@ -128,7 +128,14 @@ def _make_gqa_model(
 
 
 def _make_gqa_fixed_cache_model(
-    batch, seq_len, cache_size, hidden, kv_hidden, num_heads, kv_num_heads
+    batch,
+    seq_len,
+    cache_size,
+    hidden,
+    kv_hidden,
+    num_heads,
+    kv_num_heads,
+    elem_type=TensorProto.FLOAT16,
 ):
     """Build a GQA ONNX model with pre-allocated fixed-size KV cache.
 
@@ -138,39 +145,35 @@ def _make_gqa_fixed_cache_model(
     """
     head_dim = hidden // num_heads
 
-    query = helper.make_tensor_value_info(
-        "query", TensorProto.FLOAT16, [batch, seq_len, hidden]
-    )
-    key = helper.make_tensor_value_info(
-        "key", TensorProto.FLOAT16, [batch, seq_len, kv_hidden]
-    )
+    query = helper.make_tensor_value_info("query", elem_type, [batch, seq_len, hidden])
+    key = helper.make_tensor_value_info("key", elem_type, [batch, seq_len, kv_hidden])
     value = helper.make_tensor_value_info(
-        "value", TensorProto.FLOAT16, [batch, seq_len, kv_hidden]
+        "value", elem_type, [batch, seq_len, kv_hidden]
     )
     past_key = helper.make_tensor_value_info(
         "past_key",
-        TensorProto.FLOAT16,
+        elem_type,
         [batch, kv_num_heads, cache_size, head_dim],
     )
     past_value = helper.make_tensor_value_info(
         "past_value",
-        TensorProto.FLOAT16,
+        elem_type,
         [batch, kv_num_heads, cache_size, head_dim],
     )
     seqlens_k = helper.make_tensor_value_info("seqlens_k", TensorProto.INT32, [batch])
     total_seq = helper.make_tensor_value_info("total_seq", TensorProto.INT32, [])
 
     output = helper.make_tensor_value_info(
-        "output", TensorProto.FLOAT16, [batch, seq_len, hidden]
+        "output", elem_type, [batch, seq_len, hidden]
     )
     present_key = helper.make_tensor_value_info(
         "present_key",
-        TensorProto.FLOAT16,
+        elem_type,
         [batch, kv_num_heads, cache_size, head_dim],
     )
     present_value = helper.make_tensor_value_info(
         "present_value",
-        TensorProto.FLOAT16,
+        elem_type,
         [batch, kv_num_heads, cache_size, head_dim],
     )
 
@@ -550,6 +553,62 @@ class TestGroupQueryAttention:
             [q, k, v, pk, pv, seqlens, total],
         )
         compare_outputs(actual, expected, atol=1e-3)
+
+    @pytest.mark.parametrize("past_valid", [0, 64])
+    @pytest.mark.parametrize(
+        "num_heads,kv_num_heads",
+        [(LLAMA_NUM_HEADS, LLAMA_KV_NUM_HEADS), (40, 10)],
+    )
+    def test_gqa_prefill_fixed_cache_fp32(
+        self, model_runner, past_valid, num_heads, kv_num_heads
+    ):
+        """fp32 prefill into a pre-allocated fp32 KV cache (W*A32 exports).
+
+        (40, 10) is the Phi-4 geometry. The attention runs on the fp16 flash
+        kernel while the cache stays fp32, so the output tolerance is fp16's
+        and the written cache rows must match exactly.
+        """
+        seq_len = 128
+        hidden = num_heads * LLAMA_HEAD_DIM
+        kv_hidden = kv_num_heads * LLAMA_HEAD_DIM
+
+        model = _make_gqa_fixed_cache_model(
+            1,
+            seq_len,
+            LLAMA_CACHE_SIZE,
+            hidden,
+            kv_hidden,
+            num_heads,
+            kv_num_heads,
+            elem_type=TensorProto.FLOAT,
+        )
+
+        rng = np.random.default_rng(42)
+        q = rng.uniform(-1, 1, [1, seq_len, hidden]).astype(np.float32)
+        k = rng.uniform(-1, 1, [1, seq_len, kv_hidden]).astype(np.float32)
+        v = rng.uniform(-1, 1, [1, seq_len, kv_hidden]).astype(np.float32)
+        cache_shape = [1, kv_num_heads, LLAMA_CACHE_SIZE, LLAMA_HEAD_DIM]
+        pk = rng.uniform(-1, 1, cache_shape).astype(np.float32)
+        pv = rng.uniform(-1, 1, cache_shape).astype(np.float32)
+        if past_valid == 0:
+            pk[:] = 0
+            pv[:] = 0
+        seqlens = np.array([past_valid + seq_len - 1], dtype=np.int32)
+        total = np.array(LLAMA_CACHE_SIZE, dtype=np.int32)
+
+        actual, expected = model_runner.run_sample(
+            model,
+            [q, k, v, pk, pv, seqlens, total],
+        )
+        compare_outputs(actual[:1], expected[:1], atol=5e-3, rtol=1e-2)
+        # With separate past/present buffers only rows [0, total) of present
+        # are written; the tail holds whatever the allocator left there.
+        total_rows = past_valid + seq_len
+        compare_outputs(
+            [a[:, :, :total_rows] for a in actual[1:]],
+            [e[:, :, :total_rows] for e in expected[1:]],
+            atol=0,
+        )
 
     @pytest.mark.parametrize("past_valid", [1, 64, 128, 200, 255])
     def test_gqa_decode_fixed_cache_llama_shape(self, model_runner, past_valid):

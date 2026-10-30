@@ -76,11 +76,13 @@
 #include <hip/hip_fp16.h>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <type_traits>
@@ -3958,7 +3960,8 @@ __global__ void matmul_nbits_kernel_u2(
     const __half* __restrict__ bias,
     __half* __restrict__ output,
     int64_t M, int64_t N, int64_t K,
-    int64_t block_size) {
+    int64_t block_size,
+    float default_zp) {
   int64_t n = static_cast<int64_t>(blockIdx.x) * kBlockDim + threadIdx.x;
   int64_t m = static_cast<int64_t>(blockIdx.y) * kBlockDim + threadIdx.y;
   int64_t batch = blockIdx.z;
@@ -3978,7 +3981,7 @@ __global__ void matmul_nbits_kernel_u2(
     float scale_val = static_cast<float>(s_row[grp]);
     float zp_val = (zp != nullptr)
                        ? static_cast<float>(zp[n * k_blocks + grp])
-                       : 2.0f;
+                       : default_zp;
 
     int64_t bit   = k * 2;
     int64_t byte0 = bit >> 3;
@@ -4012,16 +4015,25 @@ __global__ void matmul_nbits_kernel_u2(
  * ======================================================================= */
 
 // See matmul_nbits_gemv_kernel_u3 for the __launch_bounds__.
-template <int BLOCK_SIZE, int TILE_N, typename ZPT = uint8_t>
+//
+// AT/CT are the activation and output element types (fp16 or fp32), so an fp32
+// graph reads A and writes the result directly instead of round-tripping both
+// through fp16 scratch. `default_zp` stands in for every group's zero point
+// when `zp` is null: 2 for the ONNX default, or the single value of a
+// zero-point tensor the caller found to be uniform, whose per-group reads would
+// otherwise cost as many bytes per row as the scales.
+template <int BLOCK_SIZE, int TILE_N, typename ZPT = uint8_t,
+          typename AT = __half, typename CT = __half>
 __global__ __launch_bounds__(BLOCK_SIZE) void matmul_nbits_gemv_kernel_u2(
-    const __half* __restrict__ A,
+    const AT* __restrict__ A,
     const uint8_t* __restrict__ B,
     const __half* __restrict__ scales,
     const ZPT* __restrict__ zp,
     const __half* __restrict__ bias,
-    __half* __restrict__ output,
+    CT* __restrict__ output,
     int64_t M, int64_t N, int64_t K,
-    int64_t block_size)
+    int64_t block_size,
+    float default_zp)
 {
     const int64_t n_base = static_cast<int64_t>(blockIdx.x) * TILE_N;
     const int64_t m      = blockIdx.y;
@@ -4035,7 +4047,7 @@ __global__ __launch_bounds__(BLOCK_SIZE) void matmul_nbits_gemv_kernel_u2(
     const int      bs_shift = __builtin_ctzll(
                                   static_cast<unsigned long long>(block_size));
 
-    const __half* a_base = A + batch * M * K + m * K;
+    const AT* a_base = A + batch * M * K + m * K;
 
     const uint8_t* b_base_arr[TILE_N];
     const __half*  s_rows[TILE_N];
@@ -4088,7 +4100,7 @@ __global__ __launch_bounds__(BLOCK_SIZE) void matmul_nbits_gemv_kernel_u2(
         } else {
 #pragma unroll
             for (int tn = 0; tn < TILE_N; tn++)
-                zv[tn] = 2.0f;  // 2^(bits-1)
+                zv[tn] = default_zp;
         }
 
 #pragma unroll
@@ -4123,7 +4135,7 @@ __global__ __launch_bounds__(BLOCK_SIZE) void matmul_nbits_gemv_kernel_u2(
                 float sv = static_cast<float>(s_rows[tn][grp]);
                 float zv = has_zp
                               ? static_cast<float>(zp[n_idx[tn] * k_blocks + grp])
-                              : 2.0f;
+                              : default_zp;
                 float qval = static_cast<float>(
                                  (b_base_arr[tn][byte0] >> shift) & 0x3);
                 partial[tn] += a_val * (qval - zv) * sv;
@@ -4158,7 +4170,7 @@ __global__ __launch_bounds__(BLOCK_SIZE) void matmul_nbits_gemv_kernel_u2(
                     if (bias)
                         val += static_cast<float>(bias[n]);
                     output[batch * M * N + m * N + n] =
-                        static_cast<__half>(val);
+                        static_cast<CT>(val);
                 }
             }
         }
@@ -4186,7 +4198,7 @@ __global__ __launch_bounds__(BLOCK_SIZE) void matmul_nbits_gemv_kernel_u2(
                         if (bias)
                             val += static_cast<float>(bias[n]);
                         output[batch * M * N + m * N + n] =
-                            static_cast<__half>(val);
+                            static_cast<CT>(val);
                     }
                 }
             }
@@ -4200,14 +4212,14 @@ __global__ __launch_bounds__(BLOCK_SIZE) void matmul_nbits_gemv_kernel_u2(
  * into a dedicated map -- the u2 decode cost differs from u3/u4.
  * ----------------------------------------------------------------------- */
 
-template <typename ZPT = uint8_t>
+template <typename ZPT = uint8_t, typename AT = __half, typename CT = __half>
 static void launchGemvConfigU2(
     int config_id, hipStream_t stream,
-    const __half* A, const uint8_t* B,
+    const AT* A, const uint8_t* B,
     const __half* sc, const ZPT* zp,
-    const __half* bi, __half* out,
+    const __half* bi, CT* out,
     int64_t M, int64_t N, int64_t K,
-    int64_t batch, int64_t bs)
+    int64_t batch, int64_t bs, float default_zp)
 {
     auto& c = kGemvConfigs[config_id];
     dim3 grid(static_cast<unsigned>((N + c.tile_n - 1) / c.tile_n),
@@ -4218,8 +4230,9 @@ static void launchGemvConfigU2(
 #define GEMV_U2_CASE(ID, BS, TN) \
     case ID: \
         hipLaunchKernelGGL( \
-            HIP_KERNEL_NAME(matmul_nbits_gemv_kernel_u2<BS, TN, ZPT>), \
-            grid, block, 0, stream, A, B, sc, zp, bi, out, M, N, K, bs); \
+            HIP_KERNEL_NAME(matmul_nbits_gemv_kernel_u2<BS, TN, ZPT, AT, CT>), \
+            grid, block, 0, stream, A, B, sc, zp, bi, out, M, N, K, bs, \
+            default_zp); \
         break
 
     switch (config_id) {
@@ -4245,14 +4258,19 @@ static void launchGemvConfigU2(
 #undef GEMV_U2_CASE
 }
 
-template <typename ZPT = uint8_t>
+// Probes on rotating copies of the weight with burst timing (see the dp4a
+// tuner's notes on GemvWeightRotation): repeated launches on one copy keep a
+// 2-bit weight -- at most a few tens of MB -- resident in the Infinity Cache,
+// which ranks configs by cache behaviour and lets sub-physical timer glitches
+// win the minimum.
+template <typename ZPT = uint8_t, typename AT = __half, typename CT = __half>
 static int tuneGemvConfigU2(
     hipStream_t stream,
-    const __half* A, const uint8_t* B,
+    const AT* A, const uint8_t* B,
     const __half* sc, const ZPT* zp,
-    const __half* bi, __half* out,
+    const __half* bi, CT* out,
     int64_t M, int64_t N, int64_t K,
-    int64_t batch, int64_t bs)
+    int64_t batch, int64_t bs, float default_zp)
 {
     hipEvent_t ev0, ev1;
     hipEventCreate(&ev0);
@@ -4260,20 +4278,27 @@ static int tuneGemvConfigU2(
 
     float best_ms = 1e30f;
     int   best_id = 8;
-    constexpr int WARMUP = 3;
-    constexpr int ITERS  = 5;
-    constexpr int kFloorIters = 15;  // extra iters for sub-0.1ms configs
+
+    const int64_t k_blocks = (K + bs - 1) / bs;
+    const GemvWeightRotation rot(
+        stream, B, static_cast<size_t>(N) * ((K * 2) / 8),
+        sc, static_cast<size_t>(N) * k_blocks * sizeof(__half),
+        reinterpret_cast<const uint8_t*>(zp),
+        zp ? static_cast<size_t>(N) * k_blocks * sizeof(ZPT) : 0);
 
     settleClock(ev0, ev1, stream, [&]{
         launchGemvConfigU2(best_id, stream, A, B, sc, zp, bi, out,
-                           M, N, K, batch, bs);
+                           M, N, K, batch, bs, default_zp);
     });
 
     for (int cid = 0; cid < kNumGemvConfigs; cid++) {
-        float cfg_best_ms = timeConfigPeak(ev0, ev1, stream, WARMUP, ITERS,
-                                            kFloorIters, 0.1f, nullptr, [&]{
-            launchGemvConfigU2(cid, stream, A, B, sc, zp, bi, out,
-                               M, N, K, batch, bs);
+        float cfg_best_ms = timeConfigRotated(ev0, ev1, stream, rot.copies(),
+                                              [&](int i) {
+            const uint8_t* Bi; const __half* sci; const uint8_t* zpi;
+            rot.get(i, Bi, sci, zpi);
+            launchGemvConfigU2(cid, stream, A, Bi, sci,
+                               reinterpret_cast<const ZPT*>(zpi), bi, out,
+                               M, N, K, batch, bs, default_zp);
         });
 
         MATMUL_NBITS_AUTOTUNE_LOG(
@@ -4292,10 +4317,11 @@ static int tuneGemvConfigU2(
 
     MATMUL_NBITS_AUTOTUNE_LOG(
         "[custom_kernels] GEMV-u2 autotune: M=%lld N=%lld K=%lld bs=%lld -> "
-        "best config[%d] threads=%d tile_n=%d (%.4f ms/iter)\n",
+        "best config[%d] threads=%d tile_n=%d (%.4f ms/iter; %d weight "
+        "copies)\n",
         (long long)M, (long long)N, (long long)K, (long long)bs,
         best_id, kGemvConfigs[best_id].threads,
-        kGemvConfigs[best_id].tile_n, best_ms);
+        kGemvConfigs[best_id].tile_n, best_ms, rot.copies());
 
     return best_id;
 }
@@ -4304,26 +4330,30 @@ static std::unordered_map<std::string, int> gemv_u2_cache;
 static std::mutex gemv_u2_tune_mutex;
 
 static std::string gemvU2CacheKey(int64_t M, int64_t N, int64_t K,
-                                  int64_t bs, bool has_zp, bool zp_fp16) {
+                                  int64_t bs, bool has_zp, bool zp_fp16,
+                                  bool f32_io) {
     return std::to_string(M) + "_" + std::to_string(N) + "_" +
            std::to_string(K) + "_" + std::to_string(bs) + "_" +
-           (has_zp ? "1" : "0") + "_" + (zp_fp16 ? "f16" : "u8");
+           (has_zp ? "1" : "0") + "_" + (zp_fp16 ? "f16" : "u8") +
+           (f32_io ? "_f32io" : "");
 }
 
-template <typename ZPT = uint8_t>
+template <typename ZPT = uint8_t, typename AT = __half, typename CT = __half>
 static int getOrTuneGemvConfigU2(
     hipStream_t stream,
-    const __half* A, const uint8_t* B,
+    const AT* A, const uint8_t* B,
     const __half* sc, const ZPT* zp,
-    const __half* bi, __half* out,
+    const __half* bi, CT* out,
     int64_t M, int64_t N, int64_t K,
-    int64_t batch, int64_t bs)
+    int64_t batch, int64_t bs, float default_zp)
 {
     const bool has_zp = (zp != nullptr);
-    // fp16 (fractional) and uint8 (integer) zero-points compile to distinct
-    // kernels with different perf, so they must not share a tuned config.
+    // fp16 (fractional) and uint8 (integer) zero-points, and fp16 vs fp32
+    // activations, compile to distinct kernels with different perf, so they
+    // must not share a tuned config.
     std::string key = gemvU2CacheKey(M, N, K, bs, has_zp,
-                                     !std::is_same<ZPT, uint8_t>::value);
+                                     !std::is_same<ZPT, uint8_t>::value,
+                                     std::is_same<AT, float>::value);
 
     std::lock_guard<std::mutex> lock(gemv_u2_tune_mutex);
 
@@ -4331,8 +4361,8 @@ static int getOrTuneGemvConfigU2(
     if (it != gemv_u2_cache.end())
         return it->second;
 
-    int best = tuneGemvConfigU2<ZPT>(stream, A, B, sc, zp, bi, out,
-                                     M, N, K, batch, bs);
+    int best = tuneGemvConfigU2<ZPT, AT, CT>(stream, A, B, sc, zp, bi, out,
+                                             M, N, K, batch, bs, default_zp);
     gemv_u2_cache[key] = best;
 
     MATMUL_NBITS_AUTOTUNE_LOG(
@@ -5007,7 +5037,8 @@ extern "C" int hip_matmul_nbits_wmma_smallm_grouped(
 
 template <int BM_T = 128, int BN_T = 128, int WT_M = 2, int WT_N = 2,
           int WAVES_EU = 8, bool BC = false,
-          int BK_T = BM_T / (WT_M * WT_N)>
+          int BK_T = BM_T / (WT_M * WT_N),
+          typename AT = _Float16, typename CT = _Float16>
 __global__
 __attribute__((amdgpu_flat_work_group_size(
     GEMM_WG_SZ(BM_T, BN_T, WT_M, WT_N),
@@ -5015,12 +5046,13 @@ __attribute__((amdgpu_flat_work_group_size(
 __attribute__((amdgpu_waves_per_eu(WAVES_EU)))
 void MatMulNBitsFp16GEMM(
     int M, int N, int K,
-    const _Float16* __restrict__ A, int lda,
+    const AT* __restrict__ A, int lda,
     const _Float16* __restrict__ B_fp16,
-    _Float16* __restrict__ C, int ldc,
+    CT* __restrict__ C, int ldc,
     int swizzle_n = 4)
 {
-    GemmFp16U4Impl<BM_T, BN_T, WT_M, WT_N, false, BC, false, BK_T>(
+    GemmFp16U4Impl<BM_T, BN_T, WT_M, WT_N, false, BC, false, BK_T,
+                   false, false, false, false, false, AT, CT>(
         M, N, K, A, lda, B_fp16, nullptr, nullptr,
         0, 0, C, ldc, swizzle_n);
 }
@@ -7432,18 +7464,24 @@ static int getOrTuneWmmaConfigU3(
  * ======================================================================= */
 
 template <int BM_T, int BN_T, int WT_M, int WT_N, bool USE_ZEROS,
-          bool BOUNDS_CHECK = false, typename ZPT = unsigned char>
+          bool BOUNDS_CHECK = false, typename ZPT = unsigned char,
+          typename AT = _Float16, typename CT = _Float16>
 __device__ __forceinline__
 void GemmFp16U2Impl(
     int M, int N, int K,
-    const _Float16* __restrict__ A, int lda,
+    const AT* __restrict__ A, int lda,
     const unsigned char* __restrict__ B,
     const _Float16* __restrict__ scales,
     const ZPT* __restrict__ zeros,
     int group_size, int num_groups_k,
-    _Float16* __restrict__ C, int ldc,
-    int swizzle_n = 4)
+    CT* __restrict__ C, int ldc,
+    int swizzle_n,
+    float default_zp)
 {
+    // fp32 A is held as loaded (two floats per row) and rounded to fp16 when
+    // staged into shared memory, keeping the load off the critical path.
+    constexpr bool kAF32 = std::is_same<AT, float>::value;
+    using APair = typename std::conditional<kAF32, float2, uint32_t>::type;
     constexpr int WM_L   = BM_T / (WT_M * 16);
     constexpr int WN_L   = BN_T / (WT_N * 16);
     constexpr int THR_L  = WM_L * WN_L * 32;
@@ -7520,9 +7558,14 @@ void GemmFp16U2Impl(
             for (int e = 0; e < 8; e++)
                 acc[i][j][e] = 0.0f;
 
-    uint32_t pf_a1[A_VL], pf_a2[A_VL];
+    APair    pf_a1[A_VL], pf_a2[A_VL];
     int      pf_am[A_VL], pf_ak[A_VL];
     uint32_t pf_b2 = 0;  // low 16 bits = 8 packed 2-bit values
+
+    const APair a_zero = {};
+    auto loadAPair = [&](int row, int k) __attribute__((always_inline)) {
+        return *reinterpret_cast<const APair*>(&A[row * lda + k]);
+    };
 
     auto issueLoads = [&](int t) __attribute__((always_inline)) {
 #pragma unroll
@@ -7531,24 +7574,19 @@ void GemmFp16U2Impl(
             pf_ak[ld]  = (vid % A_GRP_K) * 2;
             pf_am[ld]  = (vid / A_GRP_K) * 2;
             if constexpr (!BOUNDS_CHECK) {
-                pf_a1[ld] = *reinterpret_cast<const uint32_t*>(
-                                  &A[(row0 + pf_am[ld]) * lda + t + pf_ak[ld]]);
-                pf_a2[ld] = *reinterpret_cast<const uint32_t*>(
-                                  &A[(row0 + pf_am[ld] + 1) * lda + t + pf_ak[ld]]);
+                pf_a1[ld] = loadAPair(row0 + pf_am[ld], t + pf_ak[ld]);
+                pf_a2[ld] = loadAPair(row0 + pf_am[ld] + 1, t + pf_ak[ld]);
             } else {
                 int row_a = row0 + pf_am[ld];
                 if (row_a + 1 < M) {
-                    pf_a1[ld] = *reinterpret_cast<const uint32_t*>(
-                                      &A[row_a * lda + t + pf_ak[ld]]);
-                    pf_a2[ld] = *reinterpret_cast<const uint32_t*>(
-                                      &A[(row_a + 1) * lda + t + pf_ak[ld]]);
+                    pf_a1[ld] = loadAPair(row_a, t + pf_ak[ld]);
+                    pf_a2[ld] = loadAPair(row_a + 1, t + pf_ak[ld]);
                 } else if (row_a < M) {
-                    pf_a1[ld] = *reinterpret_cast<const uint32_t*>(
-                                      &A[row_a * lda + t + pf_ak[ld]]);
-                    pf_a2[ld] = 0;
+                    pf_a1[ld] = loadAPair(row_a, t + pf_ak[ld]);
+                    pf_a2[ld] = a_zero;
                 } else {
-                    pf_a1[ld] = 0;
-                    pf_a2[ld] = 0;
+                    pf_a1[ld] = a_zero;
+                    pf_a2[ld] = a_zero;
                 }
             }
         }
@@ -7568,8 +7606,7 @@ void GemmFp16U2Impl(
                                         zeros[grp + b_gid_base]);
                     neg_zs = -zp_h * cached_s;
                 } else {
-                    // Default zp = 2^(bits-1) = 2 for bits=2.
-                    neg_zs = (_Float16)(-2) * cached_s;
+                    neg_zs = -static_cast<_Float16>(default_zp) * cached_s;
                 }
             }
         }
@@ -7597,12 +7634,20 @@ void GemmFp16U2Impl(
             *reinterpret_cast<uint2*>(&smB[buf][b_col][b_k8 + 4]) = zero2;
         }
 
+        auto toHalfPair = [](APair v) __attribute__((always_inline)) {
+            if constexpr (kAF32)
+                return __builtin_bit_cast(
+                    uint32_t, half2v{static_cast<_Float16>(v.x),
+                                     static_cast<_Float16>(v.y)});
+            else
+                return v;
+        };
 #pragma unroll
         for (int ld = 0; ld < A_VL; ld++) {
             *reinterpret_cast<uint32_t*>(&smA[buf][pf_am[ld]    ][pf_ak[ld]]) =
-                pf_a1[ld];
+                toHalfPair(pf_a1[ld]);
             *reinterpret_cast<uint32_t*>(&smA[buf][pf_am[ld] + 1][pf_ak[ld]]) =
-                pf_a2[ld];
+                toHalfPair(pf_a2[ld]);
         }
     };
 
@@ -7663,16 +7708,16 @@ void GemmFp16U2Impl(
             int nbase = col0 + (wcol * WT_N + wn) * WMMA_TILE;
             // Row pointer once per tile: see the epilogue of GemmFp16U4Impl.
             const int r0 = hipdnn_wmma_acc_row(sub, 0);
-            _Float16* crow = C + static_cast<int64_t>(mbase + r0) * ldc + nbase + lane;
+            CT* crow = C + static_cast<int64_t>(mbase + r0) * ldc + nbase + lane;
 #pragma unroll
             for (int e = 0; e < 8; e++) {
                 int r = hipdnn_wmma_acc_row(sub, e);
-                _Float16* cp = crow + static_cast<int64_t>(r - r0) * ldc;
+                CT* cp = crow + static_cast<int64_t>(r - r0) * ldc;
                 if constexpr (BOUNDS_CHECK) {
                     if (mbase + r < M && nbase + lane < N)
-                        *cp = (_Float16)acc[wm][wn][e];
+                        *cp = static_cast<CT>(acc[wm][wn][e]);
                 } else {
-                    *cp = (_Float16)acc[wm][wn][e];
+                    *cp = static_cast<CT>(acc[wm][wn][e]);
                 }
             }
         }
@@ -7680,7 +7725,8 @@ void GemmFp16U2Impl(
 }
 
 template <int BM_T = 128, int BN_T = 128, int WT_M = 2, int WT_N = 2,
-          int WAVES_EU = 8, bool BC = false, typename ZPT = unsigned char>
+          int WAVES_EU = 8, bool BC = false, typename ZPT = unsigned char,
+          typename AT = _Float16, typename CT = _Float16>
 __global__
 __attribute__((amdgpu_flat_work_group_size(
     GEMM_WG_SZ(BM_T, BN_T, WT_M, WT_N),
@@ -7688,21 +7734,23 @@ __attribute__((amdgpu_flat_work_group_size(
 __attribute__((amdgpu_waves_per_eu(WAVES_EU)))
 void MatMulNBitsWMMA_U2_NoZP(
     int M, int N, int K,
-    const _Float16* __restrict__ A, int lda,
+    const AT* __restrict__ A, int lda,
     const unsigned char* __restrict__ B,
     const _Float16* __restrict__ scales,
     const ZPT* __restrict__ zeros,
     int group_size, int num_groups_k,
-    _Float16* __restrict__ C, int ldc,
-    int swizzle_n = 4)
+    CT* __restrict__ C, int ldc,
+    int swizzle_n,
+    float default_zp)
 {
-    GemmFp16U2Impl<BM_T, BN_T, WT_M, WT_N, false, BC, ZPT>(
+    GemmFp16U2Impl<BM_T, BN_T, WT_M, WT_N, false, BC, ZPT, AT, CT>(
         M, N, K, A, lda, B, scales, zeros,
-        group_size, num_groups_k, C, ldc, swizzle_n);
+        group_size, num_groups_k, C, ldc, swizzle_n, default_zp);
 }
 
 template <int BM_T = 128, int BN_T = 128, int WT_M = 2, int WT_N = 2,
-          int WAVES_EU = 8, bool BC = false, typename ZPT = unsigned char>
+          int WAVES_EU = 8, bool BC = false, typename ZPT = unsigned char,
+          typename AT = _Float16, typename CT = _Float16>
 __global__
 __attribute__((amdgpu_flat_work_group_size(
     GEMM_WG_SZ(BM_T, BN_T, WT_M, WT_N),
@@ -7710,17 +7758,18 @@ __attribute__((amdgpu_flat_work_group_size(
 __attribute__((amdgpu_waves_per_eu(WAVES_EU)))
 void MatMulNBitsWMMA_U2_ZP(
     int M, int N, int K,
-    const _Float16* __restrict__ A, int lda,
+    const AT* __restrict__ A, int lda,
     const unsigned char* __restrict__ B,
     const _Float16* __restrict__ scales,
     const ZPT* __restrict__ zeros,
     int group_size, int num_groups_k,
-    _Float16* __restrict__ C, int ldc,
-    int swizzle_n = 4)
+    CT* __restrict__ C, int ldc,
+    int swizzle_n,
+    float default_zp)
 {
-    GemmFp16U2Impl<BM_T, BN_T, WT_M, WT_N, true, BC, ZPT>(
+    GemmFp16U2Impl<BM_T, BN_T, WT_M, WT_N, true, BC, ZPT, AT, CT>(
         M, N, K, A, lda, B, scales, zeros,
-        group_size, num_groups_k, C, ldc, swizzle_n);
+        group_size, num_groups_k, C, ldc, swizzle_n, default_zp);
 }
 
 /* -----------------------------------------------------------------------
@@ -7735,7 +7784,8 @@ __global__ void dequant_u2_to_fp16(
     const _Float16* __restrict__ scales,       // [N, num_groups_k]
     const ZPT* __restrict__ zeros,             // [N, num_groups_k] or null
     _Float16* __restrict__ B_fp16,             // [N, K]
-    int N, int K, int group_size, int num_groups_k)
+    int N, int K, int group_size, int num_groups_k,
+    float default_zp)
 {
     int n  = static_cast<int>(blockIdx.y);
     int k8 = (static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x) * 8;
@@ -7743,9 +7793,8 @@ __global__ void dequant_u2_to_fp16(
 
     int grp = k8 / group_size;
     _Float16 scale = scales[n * num_groups_k + grp];
-    // Default zp = 2^(bits-1) = 2 for bits=2 (matches the fused u2 path).
     _Float16 zp = zeros ? static_cast<_Float16>(zeros[n * num_groups_k + grp])
-                        : (_Float16)2;
+                        : static_cast<_Float16>(default_zp);
     _Float16 nzs = -zp * scale;
 
     const int row_bytes = (K * 2) >> 3;
@@ -7767,7 +7816,7 @@ static void launchDequantU2(
     hipStream_t stream,
     const unsigned char* B, const _Float16* scales,
     const ZPT* zeros, _Float16* B_fp16,
-    int N, int K, int gs, int ngk)
+    int N, int K, int gs, int ngk, float default_zp)
 {
     constexpr int DQ_THR = 256;
     int k_groups = (K + DQ_THR * 8 - 1) / (DQ_THR * 8);
@@ -7775,7 +7824,7 @@ static void launchDequantU2(
     dim3 dq_block(DQ_THR);
     hipLaunchKernelGGL(HIP_KERNEL_NAME(dequant_u2_to_fp16<ZPT>),
                        dq_grid, dq_block, 0, stream,
-                       B, scales, zeros, B_fp16, N, K, gs, ngk);
+                       B, scales, zeros, B_fp16, N, K, gs, ngk, default_zp);
 }
 
 struct WmmaConfigU2 {
@@ -7808,22 +7857,24 @@ static constexpr WmmaConfigU2 kWmmaU2Configs[] = {
 static constexpr int kNumWmmaU2Configs =
     static_cast<int>(sizeof(kWmmaU2Configs) / sizeof(kWmmaU2Configs[0]));
 
-template <typename ZPT = unsigned char>
+template <typename ZPT = unsigned char, typename AT = _Float16,
+          typename CT = _Float16>
 static void launchWmmaConfigU2(
     int config_id, hipStream_t stream,
     int M, int N, int K,
-    const _Float16* A, int lda,
+    const AT* A, int lda,
     const unsigned char* B,
     const _Float16* scales, const ZPT* zeros,
     int gs, int ngk,
-    _Float16* C, int ldc, bool has_zp,
-    _Float16* B_fp16_buf = nullptr)
+    CT* C, int ldc, bool has_zp,
+    _Float16* B_fp16_buf, float default_zp)
 {
     auto& c = kWmmaU2Configs[config_id];
     bool need_bc = (M % c.bm != 0) || (N % c.bn != 0);
 
     if (!c.fused) {
-        launchDequantU2(stream, B, scales, zeros, B_fp16_buf, N, K, gs, ngk);
+        launchDequantU2(stream, B, scales, zeros, B_fp16_buf, N, K, gs, ngk,
+                        default_zp);
 
 #define U2_FP16_GEMM_LAUNCH(BM_V, BN_V, BC_V) do {                            \
     constexpr int WM_  = BM_V / (2 * 16);                                     \
@@ -7833,7 +7884,8 @@ static void launchWmmaConfigU2(
                static_cast<unsigned>((M + BM_V - 1) / BM_V));                 \
     dim3 block_(THR_);                                                        \
     hipLaunchKernelGGL(                                                       \
-        HIP_KERNEL_NAME(MatMulNBitsFp16GEMM<BM_V, BN_V, 2, 2, 8, BC_V>),      \
+        HIP_KERNEL_NAME(MatMulNBitsFp16GEMM<BM_V, BN_V, 2, 2, 8, BC_V,        \
+                                            BM_V / 4, AT, CT>),               \
         grid_, block_, 0, stream,                                             \
         M, N, K, A, lda, B_fp16_buf, C, ldc, c.swizzle_n);                    \
 } while (0)
@@ -7850,7 +7902,8 @@ static void launchWmmaConfigU2(
                static_cast<unsigned>((M + BM_V - 1) / BM_V));                 \
     dim3 block_(THR_);                                                        \
     hipLaunchKernelGGL(                                                       \
-        HIP_KERNEL_NAME(MatMulNBitsFp16GEMM<BM_V, BN_V, 4, 2, 6, BC_V>),      \
+        HIP_KERNEL_NAME(MatMulNBitsFp16GEMM<BM_V, BN_V, 4, 2, 6, BC_V,        \
+                                            BM_V / 8, AT, CT>),               \
         grid_, block_, 0, stream,                                             \
         M, N, K, A, lda, B_fp16_buf, C, ldc, c.swizzle_n);                    \
 } while (0)
@@ -7884,15 +7937,19 @@ static void launchWmmaConfigU2(
     if (has_zp) {                                                             \
         hipLaunchKernelGGL(                                                   \
             HIP_KERNEL_NAME(                                                  \
-                MatMulNBitsWMMA_U2_ZP<BM_V, BN_V, 2, 2, 8, BC_V, ZPT>),       \
+                MatMulNBitsWMMA_U2_ZP<BM_V, BN_V, 2, 2, 8, BC_V, ZPT,         \
+                                      AT, CT>),                               \
             grid_, block_, 0, stream,                                         \
-            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n); \
+            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n,  \
+            default_zp);                                                      \
     } else {                                                                  \
         hipLaunchKernelGGL(                                                   \
             HIP_KERNEL_NAME(                                                  \
-                MatMulNBitsWMMA_U2_NoZP<BM_V, BN_V, 2, 2, 8, BC_V, ZPT>),     \
+                MatMulNBitsWMMA_U2_NoZP<BM_V, BN_V, 2, 2, 8, BC_V, ZPT,       \
+                                        AT, CT>),                             \
             grid_, block_, 0, stream,                                         \
-            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n); \
+            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n,  \
+            default_zp);                                                      \
     }                                                                         \
 } while (0)
 
@@ -7910,15 +7967,19 @@ static void launchWmmaConfigU2(
     if (has_zp) {                                                             \
         hipLaunchKernelGGL(                                                   \
             HIP_KERNEL_NAME(                                                  \
-                MatMulNBitsWMMA_U2_ZP<BM_V, BN_V, 4, 2, 6, BC_V, ZPT>),       \
+                MatMulNBitsWMMA_U2_ZP<BM_V, BN_V, 4, 2, 6, BC_V, ZPT,         \
+                                      AT, CT>),                               \
             grid_, block_, 0, stream,                                         \
-            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n); \
+            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n,  \
+            default_zp);                                                      \
     } else {                                                                  \
         hipLaunchKernelGGL(                                                   \
             HIP_KERNEL_NAME(                                                  \
-                MatMulNBitsWMMA_U2_NoZP<BM_V, BN_V, 4, 2, 6, BC_V, ZPT>),     \
+                MatMulNBitsWMMA_U2_NoZP<BM_V, BN_V, 4, 2, 6, BC_V, ZPT,       \
+                                        AT, CT>),                             \
             grid_, block_, 0, stream,                                         \
-            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n); \
+            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n,  \
+            default_zp);                                                      \
     }                                                                         \
 } while (0)
 
@@ -7940,15 +8001,16 @@ static void launchWmmaConfigU2(
 #undef WMMA_U2_LAUNCH
 }
 
-template <typename ZPT = unsigned char>
+template <typename ZPT = unsigned char, typename AT = _Float16,
+          typename CT = _Float16>
 static int tuneWmmaConfigU2(
     hipStream_t stream,
     int M, int N, int K,
-    const _Float16* A, int lda,
+    const AT* A, int lda,
     const unsigned char* B,
     const _Float16* scales, const ZPT* zeros,
     int gs, int ngk,
-    _Float16* C, int ldc, bool has_zp)
+    CT* C, int ldc, bool has_zp, float default_zp)
 {
     hipEvent_t ev0, ev1;
     hipEventCreate(&ev0);
@@ -7968,7 +8030,8 @@ static int tuneWmmaConfigU2(
         for (int i = 0; i < 200 && stable < 3 && total < 200.0f; i++) {
             hipEventRecord(ev0, stream);
             launchWmmaConfigU2(12, stream, M, N, K, A, lda, B,
-                               scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf);
+                               scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf,
+                               default_zp);
             hipEventRecord(ev1, stream);
             hipEventSynchronize(ev1);
             hipEventElapsedTime(&cur, ev0, ev1);
@@ -7985,12 +8048,14 @@ static int tuneWmmaConfigU2(
 
         for (int w = 0; w < WARMUP; w++)
             launchWmmaConfigU2(cid, stream, M, N, K, A, lda, B,
-                               scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf);
+                               scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf,
+                               default_zp);
 
         hipEventRecord(ev0, stream);
         for (int i = 0; i < ITERS; i++)
             launchWmmaConfigU2(cid, stream, M, N, K, A, lda, B,
-                               scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf);
+                               scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf,
+                               default_zp);
         hipEventRecord(ev1, stream);
         hipEventSynchronize(ev1);
 
@@ -8026,26 +8091,31 @@ static std::unordered_map<std::string, int> wmma_u2_cache;
 static std::mutex wmma_u2_tune_mutex;
 
 static std::string wmmaU2CacheKey(int M, int N, int K, int gs, bool has_zp,
-                                  bool zp_fp16) {
+                                  bool zp_fp16, bool f32_io) {
     return std::to_string(M) + "_" + std::to_string(N) + "_" +
            std::to_string(K) + "_" + std::to_string(gs) + "_" +
-           (has_zp ? "1" : "0") + "_" + (zp_fp16 ? "f16" : "u8");
+           (has_zp ? "1" : "0") + "_" + (zp_fp16 ? "f16" : "u8") +
+           (f32_io ? "_f32io" : "");
 }
 
-template <typename ZPT = unsigned char>
+template <typename ZPT = unsigned char, typename AT = _Float16,
+          typename CT = _Float16>
 static int getOrTuneWmmaConfigU2(
     hipStream_t stream,
     int M, int N, int K,
-    const _Float16* A, int lda,
+    const AT* A, int lda,
     const unsigned char* B,
     const _Float16* scales, const ZPT* zeros,
     int gs, int ngk,
-    _Float16* C, int ldc, bool has_zp)
+    CT* C, int ldc, bool has_zp, float default_zp)
 {
-    // fp16 (fractional) and uint8 (integer) zero-points compile to distinct
-    // kernels, so they must not share a tuned config.
+    // fp16 (fractional) and uint8 (integer) zero-points, and fp16 vs fp32
+    // activations, compile to distinct kernels, so they must not share a
+    // tuned config.
     std::string key = wmmaU2CacheKey(M, N, K, gs, has_zp,
-                                     !std::is_same<ZPT, unsigned char>::value);
+                                     !std::is_same<ZPT, unsigned char>::value,
+                                     std::is_same<AT, float>::value ||
+                                         std::is_same<CT, float>::value);
 
     std::lock_guard<std::mutex> lock(wmma_u2_tune_mutex);
 
@@ -8053,8 +8123,9 @@ static int getOrTuneWmmaConfigU2(
     if (it != wmma_u2_cache.end())
         return it->second;
 
-    int best = tuneWmmaConfigU2<ZPT>(stream, M, N, K, A, lda, B,
-                                     scales, zeros, gs, ngk, C, ldc, has_zp);
+    int best = tuneWmmaConfigU2<ZPT, AT, CT>(stream, M, N, K, A, lda, B,
+                                             scales, zeros, gs, ngk, C, ldc,
+                                             has_zp, default_zp);
     wmma_u2_cache[key] = best;
 
     MATMUL_NBITS_AUTOTUNE_LOG(
@@ -8348,6 +8419,67 @@ static void launchCastFp16ToFp32(hipStream_t stream, const _Float16* src,
 // lib/Runtime/real/matmul_nbits.cpp's lookup_or_convert_scale_fp16, which
 // caches the converted buffer per weight pointer -- scales are model
 // constants, so this is a one-time cost per session).
+// Bitwise comparison against element 0: any differing element (including a
+// signed zero or a NaN payload) counts as non-uniform, which is the safe answer.
+__global__ void fp16_all_equal_kernel(const uint16_t* __restrict__ v,
+                                      int64_t n, int* __restrict__ mismatch)
+{
+    const uint16_t first = v[0];
+    const int64_t stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         i < n; i += stride) {
+        if (v[i] != first) {
+            *mismatch = 1;
+            return;
+        }
+    }
+}
+
+extern "C" int hip_matmul_nbits_fp16_uniform_value(
+    void* stream, const void* values, int64_t n, float* value)
+{
+    if (!values || !value || n <= 0) return 0;
+    hipStream_t s = static_cast<hipStream_t>(stream);
+
+    int* d_mismatch = nullptr;
+    if (hipMalloc(&d_mismatch, sizeof(int)) != hipSuccess) return -1;
+    (void)hipGetLastError();
+    hipMemsetAsync(d_mismatch, 0, sizeof(int), s);
+    constexpr int THR = 256;
+    const int64_t blocks = std::min<int64_t>((n + THR - 1) / THR, 1024);
+    hipLaunchKernelGGL(fp16_all_equal_kernel, dim3(static_cast<unsigned>(blocks)),
+                       dim3(THR), 0, s,
+                       static_cast<const uint16_t*>(values), n, d_mismatch);
+    hipError_t err = hipGetLastError();
+
+    int mismatch = 1;
+    uint16_t first = 0;
+    if (err == hipSuccess)
+        err = hipMemcpyAsync(&mismatch, d_mismatch, sizeof(int),
+                             hipMemcpyDeviceToHost, s);
+    if (err == hipSuccess)
+        err = hipMemcpyAsync(&first, values, sizeof(first),
+                             hipMemcpyDeviceToHost, s);
+    if (err == hipSuccess) err = hipStreamSynchronize(s);
+    (void)hipFree(d_mismatch);
+    if (err != hipSuccess) {
+        fprintf(stderr,
+                "[custom_kernels] hip_matmul_nbits_fp16_uniform_value: %s\n",
+                hipGetErrorString(err));
+        return -1;
+    }
+    if (mismatch) return 0;
+    // Host-side fp16 decode: the host toolchain has no _Float16 conversion
+    // runtime, and only finite values matter (others are rejected by callers).
+    const int exp = (first >> 10) & 0x1f;
+    const int man = first & 0x3ff;
+    float mag = exp == 0 ? std::ldexp(static_cast<float>(man), -24)
+                         : std::ldexp(static_cast<float>(man | 0x400), exp - 25);
+    if (exp == 0x1f) mag = std::numeric_limits<float>::quiet_NaN();
+    *value = (first & 0x8000) ? -mag : mag;
+    return 1;
+}
+
 extern "C" void hip_matmul_nbits_convert_scale_fp32_to_fp16(
     void* stream, const void* scale_fp32, void* scale_fp16_out, int64_t n_elems)
 {
@@ -8384,6 +8516,175 @@ static _Float16* ensureFp32CastCBuffer(size_t elems) {
     return g_fp32cast_c_buf;
 }
 
+/* bits=2 zero-point source for the u2 kernels.
+ *   zp_elem_size==1: the ONNX packed 2-bit integer stream (4 per byte),
+ *     unpacked by the runtime wrapper to one uint8 per group and handed back
+ *     via pre_unpacked_zp_u8 (direct callers may instead pass
+ *     one-byte-per-group zp with pre_unpacked_zp_u8 null); default zp = 2.
+ *   zp_elem_size==2: per-group FP16 zero-points [N, num_groups_k], used
+ *     directly. AMD Quark 2-bit uses a *fractional* zero-point (1.5) so the
+ *     non-uniform levels [-1,-1/3,1/3,1] fit (q-1.5)*scale; it must be read
+ *     as fp16, never rounded to an integer.
+ * A finite `uniform_zp` is the caller's guarantee that every group's zero
+ * point equals it; the kernels then take it as a scalar and never read the
+ * zero-point tensor. */
+struct U2ZeroPoints {
+  const void* z = nullptr;  // per-group zero points, or null
+  bool fp16 = false;        // z holds fp16 values (else uint8)
+  float default_zp = 2.0f;  // used for every group when z is null
+};
+
+static bool resolveU2ZeroPoints(const void* zero_points, int64_t zp_elem_size,
+                                const void* pre_unpacked_zp_u8,
+                                float uniform_zp, U2ZeroPoints* out) {
+  if (zero_points && zp_elem_size != 1 && zp_elem_size != 2) {
+    fprintf(stderr,
+            "[custom_kernels] hip_matmul_nbits bits=2: zero_points must be "
+            "uint8 (zp_elem_size=1) or fp16 (zp_elem_size=2), got "
+            "zp_elem_size=%lld\n",
+            (long long)zp_elem_size);
+    return false;
+  }
+  if (zero_points && std::isfinite(uniform_zp)) {
+    out->default_zp = uniform_zp;
+    return true;
+  }
+  out->fp16 = (zero_points != nullptr) && (zp_elem_size == 2);
+  out->z = out->fp16 ? zero_points
+                     : ((zero_points && pre_unpacked_zp_u8) ? pre_unpacked_zp_u8
+                                                            : zero_points);
+  return true;
+}
+
+static constexpr int kU2NotEligible = -2;
+
+/* bits=2 WMMA (prefill) and GEMV (decode) fast paths. F32 selects fp32
+ * activations and output. GEMV reads A once, so it consumes fp32 A directly.
+ * The WMMA kernels re-read each A tile once per N block, which makes fp32 A
+ * twice as expensive as a single up-front fp32->fp16 cast once A outgrows the
+ * last-level cache; so WMMA casts A to fp16 scratch and writes fp32 C
+ * directly from its epilogue. Returns kU2NotEligible when neither path
+ * applies to the shape (or, for fp32, when there is a bias, whose epilogue is
+ * fp16-only), so the caller can fall back. */
+template <bool F32>
+static int runMatmulNBitsU2Fast(
+    hipStream_t stream, const void* A, const void* B, const void* scales,
+    const U2ZeroPoints& zp, const void* bias, void* output,
+    int64_t M, int64_t N, int64_t K, int64_t batch_count, int64_t block_size) {
+  using WmmaCT = typename std::conditional<F32, float, _Float16>::type;
+  using GemvT = typename std::conditional<F32, float, __half>::type;
+
+  const bool u2_data_format = (batch_count == 1) && (K % 32 == 0);
+  const bool use_wmma =
+      u2_data_format && (M >= kBlockDim) &&
+      (block_size >= 32) && (block_size % 32 == 0) &&
+      !hipdnn_device_is_wave64();  // WMMA is RDNA-only; wave64 uses GEMV/naive
+  const bool is_pow2_bs = (block_size & (block_size - 1)) == 0;
+  const bool use_gemv =
+      !use_wmma && is_pow2_bs && (block_size >= 32) && (K % 32 == 0);
+  if (!use_wmma && !use_gemv) return kU2NotEligible;
+  if (F32 && bias) return kU2NotEligible;
+
+  const bool has_zp = (zp.z != nullptr);
+
+  if (use_wmma) {
+    int iM  = static_cast<int>(M);
+    int iN  = static_cast<int>(N);
+    int iK  = static_cast<int>(K);
+    int gs  = static_cast<int>(block_size);
+    int ngk = static_cast<int>((K + block_size - 1) / block_size);
+    int lda = iK;
+    int ldc = iN;
+
+    const _Float16* a_ptr = static_cast<const _Float16*>(A);
+    if constexpr (F32) {
+      const int64_t a_elems = M * K;
+      _Float16* a_fp16 = ensureFp32CastABuffer(static_cast<size_t>(a_elems));
+      if (!a_fp16) {
+        fprintf(stderr,
+                "[custom_kernels] hip_matmul_nbits: fp32 cast scratch alloc "
+                "failed\n");
+        return -1;
+      }
+      launchCastFp32ToFp16(stream, static_cast<const float*>(A), a_fp16,
+                           a_elems);
+      a_ptr = a_fp16;
+    }
+    const auto* b_ptr = static_cast<const unsigned char*>(B);
+    const auto* s_ptr = static_cast<const _Float16*>(scales);
+    auto*       o_ptr = static_cast<WmmaCT*>(output);
+    const float dzp = zp.default_zp;
+
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] hip_matmul_nbits: u2 WMMA M=%d N=%d K=%d "
+        "bs=%d zp=%s%s io=%s bias=%s\n",
+        iM, iN, iK, gs, has_zp ? "yes" : "null", zp.fp16 ? "(fp16)" : "",
+        F32 ? "fp32" : "fp16", bias ? "yes" : "null");
+
+    auto run = [&](auto* z_ptr) {
+      using ZT = typename std::remove_cv<
+          typename std::remove_pointer<decltype(z_ptr)>::type>::type;
+      int cfg_id = getOrTuneWmmaConfigU2<ZT, _Float16, WmmaCT>(
+          stream, iM, iN, iK, a_ptr, lda, b_ptr, s_ptr, z_ptr, gs, ngk,
+          o_ptr, ldc, has_zp, dzp);
+      _Float16* dq_buf = kWmmaU2Configs[cfg_id].fused
+                             ? nullptr : ensureDqBuffer(iN, iK);
+      launchWmmaConfigU2<ZT, _Float16, WmmaCT>(
+          cfg_id, stream, iM, iN, iK, a_ptr, lda, b_ptr, s_ptr, z_ptr, gs,
+          ngk, o_ptr, ldc, has_zp, dq_buf, dzp);
+    };
+    if (zp.fp16) run(static_cast<const _Float16*>(zp.z));
+    else         run(static_cast<const unsigned char*>(zp.z));
+
+    if constexpr (!F32) {
+      if (bias) {
+        dim3 bias_grid(static_cast<unsigned>((iN + 255) / 256),
+                       static_cast<unsigned>(iM));
+        dim3 bias_block(256);
+        hipLaunchKernelGGL(
+            matmul_nbits_add_bias_rowmajor, bias_grid, bias_block,
+            0, stream,
+            o_ptr, static_cast<const _Float16*>(bias), iM, iN, ldc);
+      }
+    }
+  } else {
+    const auto* a_ptr  = static_cast<const GemvT*>(A);
+    const auto* b_ptr  = static_cast<const uint8_t*>(B);
+    const auto* sc_ptr = static_cast<const __half*>(scales);
+    const auto* bi_ptr = static_cast<const __half*>(bias);
+    auto*       o_ptr  = static_cast<GemvT*>(output);
+
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] hip_matmul_nbits: u2 GEMV M=%lld N=%lld "
+        "K=%lld batch=%lld bs=%lld zp=%s%s io=%s bias=%s\n",
+        (long long)M, (long long)N, (long long)K, (long long)batch_count,
+        (long long)block_size, has_zp ? "yes" : "null",
+        zp.fp16 ? "(fp16)" : "", F32 ? "fp32" : "fp16",
+        bias ? "yes" : "null");
+
+    auto run = [&](auto* zp_ptr) {
+      using ZT = typename std::remove_cv<
+          typename std::remove_pointer<decltype(zp_ptr)>::type>::type;
+      int cfg_id = getOrTuneGemvConfigU2<ZT, GemvT, GemvT>(
+          stream, a_ptr, b_ptr, sc_ptr, zp_ptr, bi_ptr, o_ptr,
+          M, N, K, batch_count, block_size, zp.default_zp);
+      launchGemvConfigU2<ZT, GemvT, GemvT>(
+          cfg_id, stream, a_ptr, b_ptr, sc_ptr, zp_ptr, bi_ptr, o_ptr,
+          M, N, K, batch_count, block_size, zp.default_zp);
+    };
+    if (zp.fp16) run(static_cast<const __half*>(zp.z));
+    else         run(static_cast<const uint8_t*>(zp.z));
+  }
+
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess) {
+    fprintf(stderr,
+            "[custom_kernels] hip_matmul_nbits u2 launch failed: %s\n",
+            hipGetErrorString(err));
+  }
+  return static_cast<int>(err);
+}
+
 extern "C" int hip_matmul_nbits(
     void* stream,
     const void* A,
@@ -8400,6 +8701,30 @@ extern "C" int hip_matmul_nbits(
     int64_t zp_elem_size,
     const void* pre_unpacked_zp_u8,
     const void* pre_unpacked_zp_fp16) {
+  return hip_matmul_nbits_ex(stream, A, B, scales, zero_points, bias, output,
+                             M, N, K, batch_count, bits, block_size,
+                             element_size_bytes, zp_elem_size,
+                             pre_unpacked_zp_u8, pre_unpacked_zp_fp16,
+                             std::numeric_limits<float>::quiet_NaN());
+}
+
+extern "C" int hip_matmul_nbits_ex(
+    void* stream,
+    const void* A,
+    const void* B,
+    const void* scales,
+    const void* zero_points,
+    const void* bias,
+    void* output,
+    int64_t M, int64_t N, int64_t K,
+    int64_t batch_count,
+    int64_t bits,
+    int64_t block_size,
+    int64_t element_size_bytes,
+    int64_t zp_elem_size,
+    const void* pre_unpacked_zp_u8,
+    const void* pre_unpacked_zp_fp16,
+    float uniform_zp) {
   if (bits != 2 && bits != 3 && bits != 4 && bits != 8) {
     fprintf(stderr,
             "[custom_kernels] hip_matmul_nbits: only bits=2, bits=3, bits=4 "
@@ -8410,10 +8735,21 @@ extern "C" int hip_matmul_nbits(
 
   if (M <= 0 || N <= 0 || K <= 0 || batch_count <= 0) return 0;
 
-  // All bits widths (2/3/4/8) route fp32 A/C through the shared fp16 cast
-  // scratch: cast A to fp16, run the unchanged fp16 compute path, cast the
-  // fp16 result back to fp32. bits=8 is included so the int8 dispatch below
-  // stays fp16-only (no element-type template, no code-size growth).
+  // bits=2 reads and writes fp32 directly on its fast paths. Every other
+  // case routes fp32 A/C through the shared fp16 cast scratch: cast A to
+  // fp16, run the unchanged fp16 compute path, cast the fp16 result back to
+  // fp32. bits=8 is included so the int8 dispatch below stays fp16-only (no
+  // element-type template, no code-size growth).
+  if (element_size_bytes == 4 && bits == 2) {
+    U2ZeroPoints zp;
+    if (!resolveU2ZeroPoints(zero_points, zp_elem_size, pre_unpacked_zp_u8,
+                             uniform_zp, &zp))
+      return -1;
+    int rc = runMatmulNBitsU2Fast<true>(
+        static_cast<hipStream_t>(stream), A, B, scales, zp, bias, output,
+        M, N, K, batch_count, block_size);
+    if (rc != kU2NotEligible) return rc;
+  }
   if (element_size_bytes == 4) {
     hipStream_t cast_stream = static_cast<hipStream_t>(stream);
     const int64_t a_elems = batch_count * M * K;
@@ -8429,11 +8765,11 @@ extern "C" int hip_matmul_nbits(
 
     launchCastFp32ToFp16(cast_stream, static_cast<const float*>(A), a_fp16, a_elems);
 
-    int rc = hip_matmul_nbits(
+    int rc = hip_matmul_nbits_ex(
         stream, a_fp16, B, scales, zero_points, bias, c_fp16,
         M, N, K, batch_count, bits, block_size,
         /*element_size_bytes=*/2, zp_elem_size,
-        pre_unpacked_zp_u8, pre_unpacked_zp_fp16);
+        pre_unpacked_zp_u8, pre_unpacked_zp_fp16, uniform_zp);
     if (rc != 0) return rc;
 
     launchCastFp16ToFp32(cast_stream, c_fp16, static_cast<float*>(output), c_elems);
@@ -8623,159 +8959,45 @@ extern "C" int hip_matmul_nbits(
    * bits=3 (WMMA fast path / GEMV / naive), specialized for the 2-bit decode.
    * ------------------------------------------------------------------- */
   if (bits == 2) {
-    // zero_points arrive in one of two element types:
-    //   zp_elem_size==1: the ONNX packed 2-bit integer stream (4 per byte),
-    //     unpacked by the runtime wrapper to one uint8 per group and handed
-    //     back via pre_unpacked_zp_u8 (direct callers may instead pass
-    //     one-byte-per-group zp with pre_unpacked_zp_u8 null); default zp = 2.
-    //   zp_elem_size==2: per-group FP16 zero-points [N, num_groups_k], used
-    //     directly. AMD Quark 2-bit uses a *fractional* zero-point (1.5) so the
-    //     non-uniform levels [-1,-1/3,1/3,1] fit (q-1.5)*scale; it must be read
-    //     as fp16, never rounded to an integer. The u2 kernels are templated on
-    //     the zp element type, so the (already float) dequant math handles the
-    //     fractional value at no extra cost to the uint8 path.
-    if (zero_points && zp_elem_size != 1 && zp_elem_size != 2) {
-      fprintf(stderr,
-              "[custom_kernels] hip_matmul_nbits bits=2: zero_points must be "
-              "uint8 (zp_elem_size=1) or fp16 (zp_elem_size=2), got "
-              "zp_elem_size=%lld\n",
-              (long long)zp_elem_size);
+    U2ZeroPoints zp;
+    if (!resolveU2ZeroPoints(zero_points, zp_elem_size, pre_unpacked_zp_u8,
+                             uniform_zp, &zp))
       return -1;
-    }
-    const bool zp_fp16 = (zero_points != nullptr) && (zp_elem_size == 2);
+    int rc = runMatmulNBitsU2Fast<false>(hip_stream, A, B, scales, zp, bias,
+                                         output, M, N, K, batch_count,
+                                         block_size);
+    if (rc != kU2NotEligible) return rc;
 
-    // uint8 path: prefer the wrapper's one-byte-per-group unpack; fp16 path:
-    // zero_points is already [N, num_groups_k] fp16 and used directly.
-    const void* z_u2 = zp_fp16 ? zero_points
-                       : ((zero_points && pre_unpacked_zp_u8)
-                              ? pre_unpacked_zp_u8
-                              : zero_points);
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] hip_matmul_nbits: u2 naive M=%lld N=%lld K=%lld "
+        "batch=%lld bs=%lld zp=%s%s bias=%s\n",
+        (long long)M, (long long)N, (long long)K, (long long)batch_count,
+        (long long)block_size, zp.z ? "yes" : "null",
+        zp.fp16 ? "(fp16)" : "", bias ? "yes" : "null");
 
-    constexpr int kU2GemvMinBs = 32;
-    const bool u2_data_format = (batch_count == 1) && (K % 32 == 0);
-    const bool use_wmma_u2 =
-        u2_data_format && (M >= kBlockDim) &&
-        (block_size >= 32) && (block_size % 32 == 0) &&
-        !hipdnn_device_is_wave64();  // WMMA is RDNA-only; wave64 uses GEMV/naive
-    const bool is_pow2_bs = (block_size & (block_size - 1)) == 0;
-    const bool use_gemv_u2 =
-        !use_wmma_u2 && is_pow2_bs && (block_size >= kU2GemvMinBs) &&
-        (K % 32 == 0);
+    dim3 blk(kBlockDim, kBlockDim);
+    dim3 grd(static_cast<unsigned>((N + kBlockDim - 1) / kBlockDim),
+             static_cast<unsigned>((M + kBlockDim - 1) / kBlockDim),
+             static_cast<unsigned>(batch_count));
 
-    if (use_wmma_u2) {
-      int iM  = static_cast<int>(M);
-      int iN  = static_cast<int>(N);
-      int iK  = static_cast<int>(K);
-      int gs  = static_cast<int>(block_size);
-      int ngk = static_cast<int>((K + block_size - 1) / block_size);
-      int lda = iK;
-      int ldc = iN;
-
-      const auto* a_ptr = static_cast<const _Float16*>(A);
-      const auto* b_ptr = static_cast<const unsigned char*>(B);
-      const auto* s_ptr = static_cast<const _Float16*>(scales);
-      auto*       o_ptr = static_cast<_Float16*>(output);
-
-      const bool has_zp = (z_u2 != nullptr);
-
-      CUSTOM_KERNELS_DEBUG_LOG(
-          "[custom_kernels] hip_matmul_nbits: u2 WMMA M=%d N=%d K=%d "
-          "bs=%d zp=%s%s bias=%s\n",
-          iM, iN, iK, gs, has_zp ? "yes" : "null", zp_fp16 ? "(fp16)" : "",
-          bias ? "yes" : "null");
-
-      if (zp_fp16) {
-        const auto* z_ptr = static_cast<const _Float16*>(z_u2);
-        int cfg_id = getOrTuneWmmaConfigU2<_Float16>(
-            hip_stream, iM, iN, iK, a_ptr, lda, b_ptr,
-            s_ptr, z_ptr, gs, ngk, o_ptr, ldc, has_zp);
-        _Float16* dq_buf = kWmmaU2Configs[cfg_id].fused
-                               ? nullptr : ensureDqBuffer(iN, iK);
-        launchWmmaConfigU2<_Float16>(cfg_id, hip_stream, iM, iN, iK, a_ptr, lda,
-                                     b_ptr, s_ptr, z_ptr, gs, ngk, o_ptr, ldc,
-                                     has_zp, dq_buf);
-      } else {
-        const auto* z_ptr = static_cast<const unsigned char*>(z_u2);
-        int cfg_id = getOrTuneWmmaConfigU2(
-            hip_stream, iM, iN, iK, a_ptr, lda, b_ptr,
-            s_ptr, z_ptr, gs, ngk, o_ptr, ldc, has_zp);
-        _Float16* dq_buf = kWmmaU2Configs[cfg_id].fused
-                               ? nullptr : ensureDqBuffer(iN, iK);
-        launchWmmaConfigU2(cfg_id, hip_stream, iM, iN, iK, a_ptr, lda, b_ptr,
-                           s_ptr, z_ptr, gs, ngk, o_ptr, ldc, has_zp, dq_buf);
-      }
-
-      if (bias) {
-        dim3 bias_grid(static_cast<unsigned>((iN + 255) / 256),
-                       static_cast<unsigned>(iM));
-        dim3 bias_block(256);
-        hipLaunchKernelGGL(
-            matmul_nbits_add_bias_rowmajor, bias_grid, bias_block,
-            0, hip_stream,
-            o_ptr, static_cast<const _Float16*>(bias), iM, iN, ldc);
-      }
-    } else if (use_gemv_u2) {
-      const auto* a_ptr  = static_cast<const __half*>(A);
-      const auto* b_ptr  = static_cast<const uint8_t*>(B);
-      const auto* sc_ptr = static_cast<const __half*>(scales);
-      const auto* bi_ptr = static_cast<const __half*>(bias);
-      auto*       o_ptr  = static_cast<__half*>(output);
-
-      CUSTOM_KERNELS_DEBUG_LOG(
-          "[custom_kernels] hip_matmul_nbits: u2 GEMV M=%lld N=%lld "
-          "K=%lld batch=%lld bs=%lld zp=%s%s bias=%s\n",
-          (long long)M, (long long)N, (long long)K, (long long)batch_count,
-          (long long)block_size, zero_points ? "yes" : "null",
-          zp_fp16 ? "(fp16)" : "", bias ? "yes" : "null");
-
-      if (zp_fp16) {
-        const auto* zp_ptr = static_cast<const __half*>(z_u2);
-        int cfg_id = getOrTuneGemvConfigU2<__half>(
-            hip_stream, a_ptr, b_ptr, sc_ptr, zp_ptr, bi_ptr, o_ptr,
-            M, N, K, batch_count, block_size);
-        launchGemvConfigU2<__half>(cfg_id, hip_stream, a_ptr, b_ptr, sc_ptr,
-                                   zp_ptr, bi_ptr, o_ptr, M, N, K, batch_count,
-                                   block_size);
-      } else {
-        const auto* zp_ptr = static_cast<const uint8_t*>(z_u2);
-        int cfg_id = getOrTuneGemvConfigU2(
-            hip_stream, a_ptr, b_ptr, sc_ptr, zp_ptr, bi_ptr, o_ptr,
-            M, N, K, batch_count, block_size);
-        launchGemvConfigU2(cfg_id, hip_stream, a_ptr, b_ptr, sc_ptr, zp_ptr,
-                           bi_ptr, o_ptr, M, N, K, batch_count, block_size);
-      }
+    if (zp.fp16) {
+      hipLaunchKernelGGL(
+          HIP_KERNEL_NAME(matmul_nbits_kernel_u2<__half>), grd, blk, 0,
+          hip_stream,
+          static_cast<const __half*>(A), static_cast<const uint8_t*>(B),
+          static_cast<const __half*>(scales),
+          static_cast<const __half*>(zp.z),
+          static_cast<const __half*>(bias), static_cast<__half*>(output),
+          M, N, K, block_size, zp.default_zp);
     } else {
-      CUSTOM_KERNELS_DEBUG_LOG(
-          "[custom_kernels] hip_matmul_nbits: u2 naive M=%lld N=%lld K=%lld "
-          "batch=%lld bs=%lld zp=%s%s bias=%s\n",
-          (long long)M, (long long)N, (long long)K, (long long)batch_count,
-          (long long)block_size, zero_points ? "yes" : "null",
-          zp_fp16 ? "(fp16)" : "", bias ? "yes" : "null");
-
-      dim3 blk(kBlockDim, kBlockDim);
-      dim3 grd(static_cast<unsigned>((N + kBlockDim - 1) / kBlockDim),
-               static_cast<unsigned>((M + kBlockDim - 1) / kBlockDim),
-               static_cast<unsigned>(batch_count));
-
-      if (zp_fp16) {
-        hipLaunchKernelGGL(
-            HIP_KERNEL_NAME(matmul_nbits_kernel_u2<__half>), grd, blk, 0,
-            hip_stream,
-            static_cast<const __half*>(A), static_cast<const uint8_t*>(B),
-            static_cast<const __half*>(scales),
-            static_cast<const __half*>(z_u2),
-            static_cast<const __half*>(bias), static_cast<__half*>(output),
-            M, N, K, block_size);
-      } else {
-        hipLaunchKernelGGL(
-            HIP_KERNEL_NAME(matmul_nbits_kernel_u2<uint8_t>), grd, blk, 0,
-            hip_stream,
-            static_cast<const __half*>(A), static_cast<const uint8_t*>(B),
-            static_cast<const __half*>(scales),
-            static_cast<const uint8_t*>(z_u2),
-            static_cast<const __half*>(bias), static_cast<__half*>(output),
-            M, N, K, block_size);
-      }
+      hipLaunchKernelGGL(
+          HIP_KERNEL_NAME(matmul_nbits_kernel_u2<uint8_t>), grd, blk, 0,
+          hip_stream,
+          static_cast<const __half*>(A), static_cast<const uint8_t*>(B),
+          static_cast<const __half*>(scales),
+          static_cast<const uint8_t*>(zp.z),
+          static_cast<const __half*>(bias), static_cast<__half*>(output),
+          M, N, K, block_size, zp.default_zp);
     }
 
     hipError_t err = hipGetLastError();

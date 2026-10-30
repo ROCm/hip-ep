@@ -117,15 +117,17 @@ func.func @swiglu_dynamic_bf16(%ctx: !hip.context,
 // -----
 
 // Dynamic export: convert-onnx-to-hip sizes the outer mul's init with
-// tensor.dim of the inner product. Those queries are not value uses. The
-// fused op retargets them to the gate. The projections share one activation,
-// which is what makes the dynamic axes equal.
+// tensor.dim of the inner product. Those queries are not value uses; they
+// fold onto the gate's init, so the fused op is sized from it. The
+// projections share one activation, which is what makes the dynamic axes
+// equal.
 // CHECK-LABEL: func.func @swiglu_dim_of_intermediate
 // CHECK-SAME: (%[[CTX:arg[0-9]+]]: !hip.context, %[[HIDDEN:arg[0-9]+]]: tensor<?x?x4096xf16>,
 // CHECK-NOT: hip.sigmoid
 // CHECK-NOT: {{hip\.mul\(}}
-// CHECK: %[[GATE:.*]] = hip.matmul
-// CHECK: tensor.dim %[[GATE]]
+// CHECK: %[[GINIT:.*]] = tensor.empty
+// CHECK: %[[GATE:.*]] = hip.matmul({{.*}} outs(%[[GINIT]]
+// CHECK: tensor.dim %[[GINIT]]
 // CHECK: hip.swiglu(%[[CTX]]) ins(%[[GATE]], %{{.*}} : tensor<?x?x14336xf16>, tensor<?x?x14336xf16>)
 func.func @swiglu_dim_of_intermediate(%ctx: !hip.context,
                                       %hidden: tensor<?x?x4096xf16>,
