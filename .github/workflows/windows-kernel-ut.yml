@@ -110,7 +110,6 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          PR_FROM_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
         run: |
           $csv = "kernel-ut-package/bin/out/results.csv"
           $runUrl = "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
@@ -145,10 +144,7 @@ jobs:
           Write-Host $summary
           Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary
 
-          # Fork PR tokens cannot write comments. The summary and artifact above
-          # remain available, and the separate GPU test step still gates the job.
-          if ("${{ github.event_name }}" -eq "pull_request" -and $prNumber -and $env:PR_FROM_FORK -ne "true") {
-            $PSNativeCommandUseErrorActionPreference = $false
+          if ("${{ github.event_name }}" -eq "pull_request" -and $prNumber) {
             $marker = "<!-- morphizen-kernel-ut-results -->"
             $body = "$marker`n$summary"
             $env:KUT_MARKER = $marker
@@ -157,7 +153,7 @@ jobs:
               --jq '.[] | select(.body != null and (.body | startswith($ENV.KUT_MARKER))) | .id'
             if ($LASTEXITCODE -ne 0) {
               Write-Host "WARNING: gh api unreachable, skipping kernel UT PR comment"
-              exit 0
+              return
             }
             $existing = @($ids) | Select-Object -First 1
 
@@ -172,6 +168,3 @@ jobs:
               if ($LASTEXITCODE -ne 0) { Write-Host "WARNING: Failed to create kernel UT PR comment" }
             }
           }
-          # Comment publication is advisory. Do not propagate gh's exit code
-          # through the PowerShell runner after reporting a publication warning.
-          exit 0
