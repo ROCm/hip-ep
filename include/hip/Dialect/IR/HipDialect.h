@@ -32,6 +32,19 @@
 // precede HipOps.h.inc — stateful ops reference `OpStateOpInterface::Trait`.
 #include "hip/Dialect/IR/HipOpStateInterface.h.inc"
 
+// Generated header for `ElementMoveOpInterface`. Must precede HipOps.h.inc.
+#include "hip/Dialect/IR/HipElementMoveInterface.h.inc"
+
+namespace mlir {
+class DialectRegistry;
+namespace hip {
+/// Attaches ElementMoveOpInterface to the tensor view ops
+/// (insert_slice, extract_slice, expand_shape, collapse_shape). Defined in
+/// lib/Dialect/IR/HipElementMoveInterface.cpp.
+void registerElementMoveExternalModels(DialectRegistry &registry);
+} // namespace hip
+} // namespace mlir
+
 namespace mlir {
 namespace hip {
 /// Discardable attribute names stamped on `hip.alloc_output` by

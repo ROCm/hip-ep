@@ -9,6 +9,7 @@
 include "hip/Dialect/IR/HipDialect.td"
 include "hip/Dialect/IR/HipDpsOpInterface.td"
 include "hip/Dialect/IR/HipOpStateInterface.td"
+include "hip/Dialect/IR/HipElementMoveInterface.td"
 include "hip/Dialect/IR/HipTypes.td"
 include "mlir/Interfaces/DestinationStyleOpInterface.td"
 include "mlir/Interfaces/InferTypeOpInterface.td"
@@ -2160,7 +2161,8 @@ def Hip_MiopenSoftmaxOp : Hip_DpsOp_AutoReifyInfer<"miopen.softmax"> {
 
 // ===== Custom HIP kernel ops (no library equivalent) =========================
 
-def Hip_TransposeOp : Hip_DpsOp_WithInfer<"transpose"> {
+def Hip_TransposeOp : Hip_DpsOp_WithInfer<"transpose", "Output",
+    [DeclareOpInterfaceMethods<ElementMoveOpInterface>]> {
   let summary = "N-D transpose with arbitrary permutation (ONNX Transpose)";
   let description = [{
     Permutes the dimensions of the input tensor according to the `perm`
@@ -5487,7 +5489,8 @@ def Hip_PoolOp : Hip_DpsOp_AutoReify<"pool"> {
   }];
 }
 
-def Hip_ResizeOp : Hip_DpsOp_AutoReify<"resize"> {
+def Hip_ResizeOp : Hip_DpsOp_AutoReify<"resize",
+    [DeclareOpInterfaceMethods<ElementMoveOpInterface>]> {
   let summary = "Spatial resize / interpolation (ONNX Resize)";
   let description = [{
     Implements a subset of ONNX Resize that covers the common image / volume
@@ -6149,7 +6152,7 @@ def Hip_QuantConvOp : Hip_DpsOp_AutoReifyInfer<"quant_conv"> {
 
     The op has no zero points, scales, or bias. hip-fuse-rocmlir creates it
     inside a rocMLIR kernel, together with the constant zero-point correction
-    and the requantize epilogue. The op has no lowering outside a rocMLIR
+    and the f32 scale epilogue. The op has no lowering outside a rocMLIR
     kernel.
   }];
 

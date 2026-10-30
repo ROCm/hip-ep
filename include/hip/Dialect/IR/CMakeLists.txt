@@ -33,7 +33,19 @@ mlir_tablegen(HipOpStateInterface.h.inc -gen-op-interface-decls)
 mlir_tablegen(HipOpStateInterface.cpp.inc -gen-op-interface-defs)
 add_public_tablegen_target(HipOpStateInterfaceIncGen)
 
+# ElementMoveOpInterface: ops that only move or select elements, so a
+# per-tensor quantize commutes with them. Pairs with
+# lib/Dialect/IR/HipElementMoveInterface.cpp, which also attaches the
+# interface to the tensor view ops.
+set(LLVM_TARGET_DEFINITIONS HipElementMoveInterface.td)
+mlir_tablegen(HipElementMoveInterface.h.inc -gen-op-interface-decls)
+mlir_tablegen(HipElementMoveInterface.cpp.inc -gen-op-interface-defs)
+add_public_tablegen_target(HipElementMoveInterfaceIncGen)
+
 set(LLVM_TARGET_DEFINITIONS HipOps.td)
 mlir_tablegen(HipOps.h.inc -gen-op-decls)
 mlir_tablegen(HipOps.cpp.inc -gen-op-defs)
 add_public_tablegen_target(HipOpsIncGen)
+# HipDialect.h includes the interface header; targets that depend only on
+# HipOpsIncGen need it generated too.
+add_dependencies(HipOpsIncGen HipElementMoveInterfaceIncGen)

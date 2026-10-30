@@ -4,6 +4,8 @@
  */
 
 #include "QuantizedEpilogue.h"
+#include "RebiasUnsignedQuantize.h"
+#include "SinkQuantize.h"
 
 #include "hip/Conversion/HipToTosa/HipToTosaLegality.h"
 #include "hip/Dialect/IR/HipDialect.h"
@@ -232,10 +234,15 @@ static bool isAnchorOp(Operation *op) {
   return isa<MatmulOp, ConvOp, GemmOp, QuantConvOp, QuantMatmulOp>(op);
 }
 
-// Anchors whose result is requantized to 8 bits, so the dequantize, pointwise,
+// Whether DecomposeQLinearConv, DecomposeQLinearMatMul or
+// DecomposeDequantizedConv will turn `op` into an integer anchor.
+static bool isPlannedQLinear(Operation *op);
+
+// Anchors whose result is computed in integers, so the dequantize, pointwise,
 // and quantize ops after it can run in its epilogue.
 static bool isQuantizedAnchor(Operation *op) {
-  return isa<QuantConvOp, QuantMatmulOp, QLinearConvOp, QLinearMatMulOp>(op);
+  return isa<QuantConvOp, QuantMatmulOp, QLinearConvOp, QLinearMatMulOp>(op) ||
+         (isa<ConvOp>(op) && isPlannedQLinear(op));
 }
 
 // A rank-0 value the kernel can recompute from inline scalar constants: such a
@@ -688,10 +695,8 @@ static std::optional<SmallVector<Value>> getDataInputs(Operation *producer,
 //   %c1 = hip.conv ins(%r, %w1, %b1)    // so %c1 does not take %r
 //
 // A quantized anchor's epilogue reaches past dequantizes and quantizes, so the
-// walk does too, and a QLinear op that DecomposeQLinearConv or
-// DecomposeQLinearMatMul will turn into an anchor already claims its epilogue.
-static bool isPlannedQLinear(Operation *op);
-
+// walk does too, and an op that will become an integer anchor already claims
+// its epilogue.
 static bool isClaimedByForwardChain(Operation *op, const FusionPolicy &policy) {
   SmallVector<Operation *> worklist = {op};
   DenseSet<Operation *> visited;
@@ -1123,72 +1128,34 @@ static DenseElementsAttr getScalarZeroPoint(DenseElementsAttr zp,
                                 *zp.getValues<APInt>().begin());
 }
 
-// The rocMLIR route needs every quantization parameter, the weights, and the
-// bias as inline constants, a weight zero point of 0 (rocMLIR has no
-// zero-point operand), and static shapes. Anything else keeps the HIP kernel.
-static std::optional<QLinearPlan> planQLinearConv(QLinearConvOp op) {
-  auto inputType = dyn_cast<RankedTensorType>(op.getInput().getType());
-  auto weightType = dyn_cast<RankedTensorType>(op.getWeights().getType());
-  auto resultType = dyn_cast<RankedTensorType>(op.getOutput().getType());
-  if (!inputType || !weightType || !resultType || !inputType.hasStaticShape() ||
-      !weightType.hasStaticShape() || !resultType.hasStaticShape())
-    return std::nullopt;
-  Type inputElement = inputType.getElementType();
-  Type outputElement = resultType.getElementType();
-  if (!isQuantizedByte(inputElement) || !isQuantizedByte(outputElement) ||
-      !weightType.getElementType().isSignlessInteger(8))
-    return std::nullopt;
-
-  DenseElementsAttr inputScale = getInlineDense(op.getInputScale());
-  DenseElementsAttr inputZp = getInlineDense(op.getInputZeroPoint());
-  DenseElementsAttr weightScale = getInlineDense(op.getWeightScale());
-  DenseElementsAttr weightZp = getInlineDense(op.getWeightZeroPoint());
-  DenseElementsAttr outputScale = getInlineDense(op.getOutputScale());
-  DenseElementsAttr outputZp = getInlineDense(op.getOutputZeroPoint());
-  DenseElementsAttr weights = getInlineDense(op.getWeights());
-  DenseElementsAttr bias;
-  if (Value biasValue = op.getBias()) {
-    bias = getInlineDense(biasValue);
-    if (!bias)
-      return std::nullopt;
-  }
-  if (!inputScale || !inputZp || !weightScale || !weightZp || !outputScale ||
-      !outputZp || !weights || inputScale.getNumElements() != 1 ||
-      inputZp.getNumElements() != 1 || outputScale.getNumElements() != 1 ||
-      outputZp.getNumElements() != 1)
-    return std::nullopt;
-  if (llvm::any_of(getIntValues(weightZp), [](int64_t v) { return v != 0; }))
-    return std::nullopt;
-
+// The i32 bias of an integer conv on a rebiased input: B - z' * sum(w) over
+// the taps that each output reads, with z' = x_zp - offset. Null when every
+// entry is 0. The weights must be inline only when z' is not 0.
+static FailureOr<DenseElementsAttr>
+getConvCorrectedBias(RankedTensorType inputType, RankedTensorType weightType,
+                     RankedTensorType resultType, int64_t inputZeroPoint,
+                     DenseElementsAttr weights, ArrayRef<int64_t> biasValues,
+                     ArrayAttr strides, ArrayAttr dilations, ArrayAttr pads) {
   ArrayRef<int64_t> inShape = inputType.getShape();
   ArrayRef<int64_t> wShape = weightType.getShape();
   ArrayRef<int64_t> outShape = resultType.getShape();
   int64_t channels = wShape[0];
   int64_t outH = outShape[2], outW = outShape[3];
-  SmallVector<float> weightScales =
-      llvm::to_vector(weightScale.getValues<float>());
-  if (weightScales.size() != 1 &&
-      static_cast<int64_t>(weightScales.size()) != channels)
-    return std::nullopt;
-  SmallVector<int64_t> biasValues(channels, 0);
-  if (bias) {
-    if (bias.getNumElements() != channels)
-      return std::nullopt;
-    biasValues = getIntValues(bias);
-  }
 
   auto attrValue = [](ArrayAttr attr, unsigned index) {
     return cast<IntegerAttr>(attr[index]).getInt();
   };
-  int64_t strideH = attrValue(op.getStrides(), 0);
-  int64_t strideW = attrValue(op.getStrides(), 1);
-  int64_t dilationH = attrValue(op.getDilations(), 0);
-  int64_t dilationW = attrValue(op.getDilations(), 1);
-  int64_t padTop = attrValue(op.getPads(), 0);
-  int64_t padLeft = attrValue(op.getPads(), 1);
+  int64_t strideH = attrValue(strides, 0);
+  int64_t strideW = attrValue(strides, 1);
+  int64_t dilationH = attrValue(dilations, 0);
+  int64_t dilationW = attrValue(dilations, 1);
+  int64_t padTop = attrValue(pads, 0);
+  int64_t padLeft = attrValue(pads, 1);
 
-  int64_t offset = getSignedRebiasOffset(inputElement);
-  int64_t zpShift = getIntValues(inputZp).front() - offset;
+  int64_t offset = getSignedRebiasOffset(inputType.getElementType());
+  int64_t zpShift = inputZeroPoint - offset;
+  if (zpShift != 0 && !weights)
+    return failure();
 
   // The taps along one axis that read the input at output position `o`; a
   // contiguous range because the taps are equally spaced.
@@ -1237,7 +1204,7 @@ static std::optional<QLinearPlan> planQLinearConv(QLinearConvOp op) {
       zpShift == 0 || (llvm::all_equal(rowTaps) && llvm::all_equal(colTaps));
   int64_t planeSize = uniform ? 1 : outH * outW;
   if (channels * planeSize > kMaxQLinearConvCorrection)
-    return std::nullopt;
+    return failure();
   SmallVector<int32_t> biasData;
   biasData.reserve(channels * planeSize);
   bool allZero = true;
@@ -1246,24 +1213,222 @@ static std::optional<QLinearPlan> planQLinearConv(QLinearConvOp op) {
       int64_t value = correctedBias(k, position / outW, position % outW);
       if (value < std::numeric_limits<int32_t>::min() ||
           value > std::numeric_limits<int32_t>::max())
-        return std::nullopt;
+        return failure();
       allZero &= value == 0;
       biasData.push_back(static_cast<int32_t>(value));
     }
+  if (allZero)
+    return DenseElementsAttr();
+  SmallVector<int64_t> shape = {1, channels, uniform ? 1 : outH,
+                                uniform ? 1 : outW};
+  return DenseElementsAttr::get(
+      RankedTensorType::get(shape,
+                            IntegerType::get(inputType.getContext(), 32)),
+      ArrayRef<int32_t>(biasData));
+}
+
+// The rocMLIR route needs every quantization parameter, the weights, and the
+// bias as inline constants, a weight zero point of 0 (rocMLIR has no
+// zero-point operand), and static shapes. Anything else keeps the HIP kernel.
+static std::optional<QLinearPlan> planQLinearConv(QLinearConvOp op) {
+  auto inputType = dyn_cast<RankedTensorType>(op.getInput().getType());
+  auto weightType = dyn_cast<RankedTensorType>(op.getWeights().getType());
+  auto resultType = dyn_cast<RankedTensorType>(op.getOutput().getType());
+  if (!inputType || !weightType || !resultType || !inputType.hasStaticShape() ||
+      !weightType.hasStaticShape() || !resultType.hasStaticShape())
+    return std::nullopt;
+  Type inputElement = inputType.getElementType();
+  Type outputElement = resultType.getElementType();
+  if (!isQuantizedByte(inputElement) || !isQuantizedByte(outputElement) ||
+      !weightType.getElementType().isSignlessInteger(8))
+    return std::nullopt;
+
+  DenseElementsAttr inputScale = getInlineDense(op.getInputScale());
+  DenseElementsAttr inputZp = getInlineDense(op.getInputZeroPoint());
+  DenseElementsAttr weightScale = getInlineDense(op.getWeightScale());
+  DenseElementsAttr weightZp = getInlineDense(op.getWeightZeroPoint());
+  DenseElementsAttr outputScale = getInlineDense(op.getOutputScale());
+  DenseElementsAttr outputZp = getInlineDense(op.getOutputZeroPoint());
+  DenseElementsAttr weights = getInlineDense(op.getWeights());
+  DenseElementsAttr bias;
+  if (Value biasValue = op.getBias()) {
+    bias = getInlineDense(biasValue);
+    if (!bias)
+      return std::nullopt;
+  }
+  if (!inputScale || !inputZp || !weightScale || !weightZp || !outputScale ||
+      !outputZp || !weights || inputScale.getNumElements() != 1 ||
+      inputZp.getNumElements() != 1 || outputScale.getNumElements() != 1 ||
+      outputZp.getNumElements() != 1)
+    return std::nullopt;
+  if (llvm::any_of(getIntValues(weightZp), [](int64_t v) { return v != 0; }))
+    return std::nullopt;
+
+  int64_t channels = weightType.getDimSize(0);
+  SmallVector<float> weightScales =
+      llvm::to_vector(weightScale.getValues<float>());
+  if (weightScales.size() != 1 &&
+      static_cast<int64_t>(weightScales.size()) != channels)
+    return std::nullopt;
+  SmallVector<int64_t> biasValues(channels, 0);
+  if (bias) {
+    if (bias.getNumElements() != channels)
+      return std::nullopt;
+    biasValues = getIntValues(bias);
+  }
+
+  FailureOr<DenseElementsAttr> correctedBias = getConvCorrectedBias(
+      inputType, weightType, resultType, getIntValues(inputZp).front(), weights,
+      biasValues, op.getStrides(), op.getDilations(), op.getPads());
+  if (failed(correctedBias))
+    return std::nullopt;
 
   QLinearPlan plan;
-  if (!allZero) {
-    SmallVector<int64_t> shape = {1, channels, uniform ? 1 : outH,
-                                  uniform ? 1 : outW};
-    plan.bias = DenseElementsAttr::get(
-        RankedTensorType::get(shape, IntegerType::get(op.getContext(), 32)),
-        ArrayRef<int32_t>(biasData));
-  }
+  plan.bias = *correctedBias;
   plan.multiplier = getRequantMultiplier(inputScale, weightScales, outputScale,
                                          {1, channels, 1, 1});
   if (!plan.multiplier)
     return std::nullopt;
   plan.outputZeroPoint = getScalarZeroPoint(outputZp, outputElement);
+  return plan;
+}
+
+// A conv of dequantized operands as an integer conv: hip.quant_conv on the
+// quantized input and weights, the zero-point correction, a multiply by
+// x_scale * w_scale, and the float bias. The result stays f32, so whatever
+// reads the conv (an activation, a quantize) becomes the epilogue.
+struct DequantizedConvPlan {
+  Value input;
+  Value weights;
+  // i32, as QLinearPlan::bias without a conv bias. Null when every entry is 0.
+  DenseElementsAttr correction;
+  // f32, rank 0 or [1, K, 1, 1].
+  DenseElementsAttr multiplier;
+  // f32 [1, K, 1, 1]. Null without a conv bias.
+  DenseElementsAttr bias;
+};
+
+// The f32 values of a constant conv bias: an inline f32 constant or a
+// dequantize of one with inline parameters, as (b - zp) * scale.
+static DenseElementsAttr getConstantConvBias(Value bias, int64_t channels) {
+  auto biasType = RankedTensorType::get({1, channels, 1, 1},
+                                        Float32Type::get(bias.getContext()));
+  if (DenseElementsAttr values = getInlineDense(bias)) {
+    if (!values.getElementType().isF32() || values.getNumElements() != channels)
+      return {};
+    return values.reshape(biasType);
+  }
+  auto dequantize = bias.getDefiningOp<DequantizeLinearOp>();
+  if (!dequantize || dequantize.getPackedInt4() ||
+      dequantize.getBlockSize() != 0)
+    return {};
+  DenseElementsAttr data = getInlineDense(dequantize.getInput());
+  DenseElementsAttr scale = getInlineDense(dequantize.getScale());
+  DenseElementsAttr zeroPoint;
+  if (Value zp = dequantize.getZeroPoint()) {
+    zeroPoint = getInlineDense(zp);
+    if (!zeroPoint)
+      return {};
+  }
+  if (!data || !scale || !isa<IntegerType>(data.getElementType()) ||
+      !scale.getElementType().isF32() || data.getNumElements() != channels)
+    return {};
+  auto perChannel = [&](DenseElementsAttr attr) {
+    return attr.getNumElements() == 1 || attr.getNumElements() == channels;
+  };
+  if (!perChannel(scale) || (zeroPoint && !perChannel(zeroPoint)))
+    return {};
+  SmallVector<int64_t> ints = getIntValues(data);
+  SmallVector<float> scales = llvm::to_vector(scale.getValues<float>());
+  SmallVector<int64_t> zps =
+      zeroPoint ? getIntValues(zeroPoint) : SmallVector<int64_t>{0};
+  SmallVector<float> values;
+  for (int64_t k : llvm::seq<int64_t>(channels)) {
+    int64_t zp = zps[zps.size() == 1 ? 0 : k];
+    float s = scales[scales.size() == 1 ? 0 : k];
+    values.push_back(static_cast<float>(ints[k] - zp) * s);
+  }
+  return DenseElementsAttr::get(biasType, ArrayRef<float>(values));
+}
+
+// conv(DQ(x), DQ(w), bias) with static 2-D shapes and an f32 result, where
+// DQ(x) is per-tensor with inline parameters on u8 or i8, and DQ(w) is
+// per-tensor or per-output-channel on i8 with inline scales and a zero weight
+// zero point. The bias, if any, is constant. The weights must be inline only
+// when the input zero point needs a correction. Anything else keeps the float
+// conv.
+static std::optional<DequantizedConvPlan> planDequantizedConv(ConvOp op) {
+  if (op->getNumResults() != 1)
+    return std::nullopt;
+  auto resultType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
+  auto input = op.getInput().getDefiningOp<DequantizeLinearOp>();
+  auto weights = op.getWeights().getDefiningOp<DequantizeLinearOp>();
+  if (!resultType || !resultType.hasStaticShape() ||
+      resultType.getRank() != 4 || !resultType.getElementType().isF32() ||
+      !input || !weights)
+    return std::nullopt;
+  for (DequantizeLinearOp dequantize : {input, weights})
+    if (dequantize.getPackedInt4() || dequantize.getBlockSize() != 0 ||
+        dequantize->getNumResults() != 1)
+      return std::nullopt;
+  auto inputType = dyn_cast<RankedTensorType>(input.getInput().getType());
+  auto weightType = dyn_cast<RankedTensorType>(weights.getInput().getType());
+  if (!inputType || !weightType || !inputType.hasStaticShape() ||
+      !weightType.hasStaticShape() || inputType.getRank() != 4 ||
+      weightType.getRank() != 4 ||
+      !isQuantizedByte(inputType.getElementType()) ||
+      !weightType.getElementType().isSignlessInteger(8))
+    return std::nullopt;
+
+  DenseElementsAttr inputScale = getInlineDense(input.getScale());
+  DenseElementsAttr weightScale = getInlineDense(weights.getScale());
+  if (!inputScale || !weightScale || inputScale.getNumElements() != 1 ||
+      !inputScale.getElementType().isF32() ||
+      !weightScale.getElementType().isF32())
+    return std::nullopt;
+  int64_t inputZp = 0;
+  if (Value zp = input.getZeroPoint()) {
+    DenseElementsAttr attr = getInlineDense(zp);
+    if (!attr || attr.getNumElements() != 1)
+      return std::nullopt;
+    inputZp = getIntValues(attr).front();
+  }
+  if (Value zp = weights.getZeroPoint()) {
+    DenseElementsAttr attr = getInlineDense(zp);
+    if (!attr ||
+        llvm::any_of(getIntValues(attr), [](int64_t v) { return v != 0; }))
+      return std::nullopt;
+  }
+  int64_t channels = weightType.getDimSize(0);
+  SmallVector<float> weightScales =
+      llvm::to_vector(weightScale.getValues<float>());
+  int64_t axis =
+      weights.getAxis() < 0 ? weights.getAxis() + 4 : weights.getAxis();
+  if (weightScales.size() != 1 &&
+      (static_cast<int64_t>(weightScales.size()) != channels || axis != 0))
+    return std::nullopt;
+
+  DequantizedConvPlan plan;
+  plan.input = input.getInput();
+  plan.weights = weights.getInput();
+  if (Value bias = op.getBias()) {
+    plan.bias = getConstantConvBias(bias, channels);
+    if (!plan.bias)
+      return std::nullopt;
+  }
+  FailureOr<DenseElementsAttr> correction = getConvCorrectedBias(
+      inputType, weightType, resultType, inputZp,
+      getInlineDense(weights.getInput()), SmallVector<int64_t>(channels, 0),
+      op.getStrides(), op.getDilations(), op.getPads());
+  if (failed(correction))
+    return std::nullopt;
+  plan.correction = *correction;
+  auto unitScale = DenseElementsAttr::get(
+      RankedTensorType::get({}, Float32Type::get(op.getContext())), 1.0f);
+  plan.multiplier = getRequantMultiplier(inputScale, weightScales, unitScale,
+                                         {1, channels, 1, 1});
+  if (!plan.multiplier)
+    return std::nullopt;
   return plan;
 }
 
@@ -1333,37 +1498,56 @@ static bool isPlannedQLinear(Operation *op) {
   if (auto matmul = dyn_cast<QLinearMatMulOp>(op))
     return matmul->getNumResults() == 1 &&
            planQLinearMatMul(matmul).has_value();
+  if (auto conv = dyn_cast<ConvOp>(op))
+    return planDequantizedConv(conv).has_value();
   return false;
 }
 
 // The epilogue that both QLinear rewrites share: add the corrected bias, cast
 // to f32, scale, and quantize with unit scale, which rounds half to even,
 // adds the zero point, and saturates, as ORT CPU does.
+static Value emitTensorEmpty(PatternRewriter &rewriter, Location loc,
+                             RankedTensorType type) {
+  return tensor::EmptyOp::create(rewriter, loc, type.getShape(),
+                                 type.getElementType());
+}
+
+static Value emitConstant(PatternRewriter &rewriter, Location loc,
+                          DenseElementsAttr value) {
+  return ConstantOp::create(rewriter, loc,
+                            cast<RankedTensorType>(value.getType()), value);
+}
+
+// (acc + bias) in i32, then cast to f32 and multiplied by `multiplier`.
+static Value emitScaledAccumulator(PatternRewriter &rewriter, Location loc,
+                                   Value ctx, Value acc, DenseElementsAttr bias,
+                                   DenseElementsAttr multiplier) {
+  auto accType = cast<RankedTensorType>(acc.getType());
+  auto floatType = accType.clone(rewriter.getF32Type());
+  if (bias)
+    acc = AddOp::create(rewriter, loc, TypeRange{accType}, ctx, acc,
+                        emitConstant(rewriter, loc, bias),
+                        emitTensorEmpty(rewriter, loc, accType))
+              .getResult(0);
+  Value scaled = CastOp::create(rewriter, loc, TypeRange{floatType}, ctx, acc,
+                                emitTensorEmpty(rewriter, loc, floatType),
+                                rewriter.getI64IntegerAttr(/*ONNX FLOAT=*/1))
+                     .getResult(0);
+  return MulOp::create(rewriter, loc, TypeRange{floatType}, ctx, scaled,
+                       emitConstant(rewriter, loc, multiplier),
+                       emitTensorEmpty(rewriter, loc, floatType))
+      .getResult(0);
+}
+
 static Value emitRequantizeEpilogue(PatternRewriter &rewriter, Location loc,
                                     Value ctx, Value acc,
                                     const QLinearPlan &plan, Value output) {
-  auto accType = cast<RankedTensorType>(acc.getType());
   auto resultType = cast<RankedTensorType>(output.getType());
-  auto floatType = accType.clone(rewriter.getF32Type());
-  auto empty = [&](RankedTensorType type) -> Value {
-    return tensor::EmptyOp::create(rewriter, loc, type.getShape(),
-                                   type.getElementType());
+  auto constant = [&](DenseElementsAttr value) {
+    return emitConstant(rewriter, loc, value);
   };
-  auto constant = [&](DenseElementsAttr value) -> Value {
-    return ConstantOp::create(rewriter, loc,
-                              cast<RankedTensorType>(value.getType()), value);
-  };
-  if (plan.bias)
-    acc = AddOp::create(rewriter, loc, TypeRange{accType}, ctx, acc,
-                        constant(plan.bias), empty(accType))
-              .getResult(0);
-  Value scaled = CastOp::create(rewriter, loc, TypeRange{floatType}, ctx, acc,
-                                empty(floatType),
-                                rewriter.getI64IntegerAttr(/*ONNX FLOAT=*/1))
-                     .getResult(0);
-  scaled = MulOp::create(rewriter, loc, TypeRange{floatType}, ctx, scaled,
-                         constant(plan.multiplier), empty(floatType))
-               .getResult(0);
+  Value scaled = emitScaledAccumulator(rewriter, loc, ctx, acc, plan.bias,
+                                       plan.multiplier);
   Value one = constant(DenseElementsAttr::get(
       RankedTensorType::get({}, rewriter.getF32Type()), 1.0f));
   return QuantizeLinearOp::create(
@@ -1425,6 +1609,65 @@ public:
             .getResult(0);
     rewriter.replaceOp(op, emitRequantizeEpilogue(rewriter, loc, op.getCtx(),
                                                   acc, *plan, op.getOutput()));
+    return success();
+  }
+
+private:
+  FusionPolicy policy;
+};
+
+// With rocMLIR on, a conv that planDequantizedConv accepts reads the integer
+// operands of its dequantizes through hip.quant_conv. The i32 sum is exact,
+// then the kernel scales it by x_scale * w_scale and adds the bias in f32, so
+// the activation and quantize after the conv form its epilogue.
+//
+// Before:
+//   %dx = hip.dequantize_linear(%ctx) ins(%x, %xs) zero_point(%xz)
+//   %dw = hip.dequantize_linear(%ctx) ins(%w, %ws) zero_point(%wz)
+//   %db = hip.dequantize_linear(%ctx) ins(%b, %bs) zero_point(%bz)
+//   %c  = hip.conv(%ctx) ins(%dx, %dw, %db) outs(%e : tensor<1x32x8x8xf32>)
+// After:
+//   %acc = hip.quant_conv(%ctx) ins(%x, %w) outs(%e0 : tensor<1x32x8x8xi32>)
+//   %f   = hip.cast(%ctx) ins(%acc) outs(%e1 : tensor<1x32x8x8xf32>)
+//   %s   = hip.mul(%ctx) ins(%f, %m : ..., tensor<f32>)
+//   %c   = hip.add(%ctx) ins(%s, %bias : ..., tensor<1x32x1x1xf32>)
+//
+// The rewrite runs only when the conv would outline, so a declined conv leaves
+// the IR unchanged and keeps its float kernel.
+class DecomposeDequantizedConv : public OpRewritePattern<ConvOp> {
+public:
+  DecomposeDequantizedConv(MLIRContext *context, bool fuseViews)
+      : OpRewritePattern<ConvOp>(context, /*benefit=*/2),
+        policy(getFusionPolicy(fuseViews)) {}
+
+  LogicalResult matchAndRewrite(ConvOp op,
+                                PatternRewriter &rewriter) const override {
+    std::optional<DequantizedConvPlan> plan = planDequantizedConv(op);
+    if (!plan)
+      return rewriter.notifyMatchFailure(op, "not a conv of dequantizes");
+    KernelRegion region(op, policy);
+    std::optional<SmallVector<Operation *>> moved;
+    if (const char *reason = growRegion(region, getInputRoots(op), moved))
+      return rewriter.notifyMatchFailure(op, reason);
+
+    Location loc = op.getLoc();
+    Value ctx = op.getCtx();
+    auto resultType = cast<RankedTensorType>(op->getResult(0).getType());
+    auto accType = resultType.clone(rewriter.getI32Type());
+    Value acc =
+        QuantConvOp::create(
+            rewriter, loc, TypeRange{accType}, ctx, plan->input, plan->weights,
+            emitTensorEmpty(rewriter, loc, accType), op.getKernelShape(),
+            op.getStrides(), op.getPads(), op.getDilations(), op.getGroupAttr())
+            .getResult(0);
+    Value result = emitScaledAccumulator(rewriter, loc, ctx, acc,
+                                         plan->correction, plan->multiplier);
+    if (plan->bias)
+      result = AddOp::create(rewriter, loc, TypeRange{resultType}, ctx, result,
+                             emitConstant(rewriter, loc, plan->bias),
+                             emitTensorEmpty(rewriter, loc, resultType))
+                   .getResult(0);
+    rewriter.replaceOp(op, result);
     return success();
   }
 
@@ -1736,10 +1979,21 @@ class FuseROCMlirPass : public impl::FuseROCMlirPassBase<FuseROCMlirPass> {
 public:
   using impl::FuseROCMlirPassBase<FuseROCMlirPass>::FuseROCMlirPassBase;
 
+  void getDependentDialects(DialectRegistry &registry) const override {
+    impl::FuseROCMlirPassBase<FuseROCMlirPass>::getDependentDialects(registry);
+    registerElementMoveExternalModels(registry);
+  }
+
   void runOnOperation() override {
     auto funcOp = getOperation();
     if (funcOp.getSymName() != "main_graph")
       return;
+    // Before outlining, so an anchor's 8-bit result feeds the moved ops and a
+    // requantize left on one input joins that anchor's epilogue.
+    sinkQuantizeThroughElementMoves(funcOp);
+    // After the sinking, which fixes each tree's final shape, and before the
+    // QLinear and dequantized-conv rewrites, which then plan on i8 inputs.
+    rebiasUnsignedQuantizedTrees(funcOp, isPlannedQLinear);
 
     MLIRContext *ctx = &getContext();
     RewritePatternSet patterns(ctx);
@@ -1748,7 +2002,8 @@ public:
                  FuseAnchorPointwise<GemmOp>, FuseAnchorPointwise<QuantConvOp>,
                  FuseAnchorPointwise<QuantMatmulOp>>(ctx, &counter, fuseViews,
                                                      arch);
-    patterns.add<DecomposeQLinearConv, DecomposeQLinearMatMul>(ctx, fuseViews);
+    patterns.add<DecomposeQLinearConv, DecomposeQLinearMatMul,
+                 DecomposeDequantizedConv>(ctx, fuseViews);
 
     if (failed(applyPatternsGreedily(funcOp, std::move(patterns)))) {
       signalPassFailure();
