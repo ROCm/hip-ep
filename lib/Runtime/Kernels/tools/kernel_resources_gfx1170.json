@@ -936,12 +936,6 @@
 "_ZN12_GLOBAL__N_118grid_sample_kernelIdEEvPKT_S3_PS1_xxxxxxiiix":[18,0,0,16,1401,0,0],
 "_ZN12_GLOBAL__N_118grid_sample_kernelIfEEvPKT_S3_PS1_xxxxxxiiix":[18,0,0,16,1401,0,0]
 },
-"group_norm_kernel":{
-"_Z21hip_group_norm_kernelI14__hip_bfloat16EvPKT_S3_S3_PS1_xxxiif":[20,0,0,16,1072,7,36],
-"_Z21hip_group_norm_kernelI6__halfEvPKT_S3_S3_PS1_xxxiif":[20,0,0,16,1059,7,36],
-"_Z21hip_group_norm_kernelIdEvPKT_S2_S2_PS0_xxxiif":[27,0,0,16,1092,7,72],
-"_Z21hip_group_norm_kernelIfEvPKT_S2_S2_PS0_xxxiif":[20,0,0,16,1058,7,36]
-},
 "instance_norm_kernel":{
 "_Z24hip_instance_norm_kernelI14__hip_bfloat16EvPKT_S3_S3_PS1_xxxf":[16,0,0,16,425,7,36],
 "_Z24hip_instance_norm_kernelI6__halfEvPKT_S3_S3_PS1_xxxf":[16,0,0,16,413,7,36],

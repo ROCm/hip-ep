@@ -20,7 +20,7 @@ import pytest
 from onnx import TensorProto, helper, numpy_helper
 
 from framework.comparator import compare_outputs
-from framework.onnx_utils import make_model_from_nodes
+from framework.onnx_utils import fp64_normalize_last_axis, make_model_from_nodes
 
 SEQ_LENS = [1, 128]
 HIDDEN = 4096
@@ -591,6 +591,47 @@ class TestLayerNormalization:
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=1e-5, rtol=1e-5)
 
+    # |mean| / stddev near 260 with sparse outliers: E[x^2] - mean^2 in fp32
+    # misses the tolerance on these rows. The reference is fp64 for the same
+    # reason as test_instance_norm_large_offset.
+    @pytest.mark.parametrize("input_shape", [[4, 1152], [3, 4096], [2, 7, 4097]])
+    def test_layer_norm_large_offset(self, model_runner, input_shape):
+        model = _make_layer_norm_model(input_shape, np.float32, with_bias=True)
+        rng = np.random.default_rng(1106)
+        x = rng.uniform(-1, 1, input_shape) + 200.0
+        x.flat[::61] += 4.0
+        actual, expected = model_runner.run_sample(
+            model,
+            [x.astype(np.float32)],
+            reference_model=_fp64_layer_norm_reference(model, input_shape),
+        )
+        compare_outputs(actual, expected, atol=2e-4, rtol=2e-4)
+
+
+def _fp64_layer_norm_reference(model, input_shape: list[int]):
+    """*model*'s fp32 last-axis LayerNormalization recomputed in fp64 from
+    primitives, with the same scale and bias initializers."""
+    inits = {i.name: numpy_helper.to_array(i) for i in model.graph.initializer}
+    norm_nodes, norm_inits = fp64_normalize_last_axis("xd", "nd", 1e-5)
+    nodes = [
+        helper.make_node("Cast", ["X"], ["xd"], to=TensorProto.DOUBLE),
+        *norm_nodes,
+        helper.make_node("Mul", ["nd", "scale"], ["scaled"]),
+        helper.make_node("Add", ["scaled", "bias"], ["yd"]),
+        helper.make_node("Cast", ["yd"], ["Y"], to=TensorProto.FLOAT),
+    ]
+    initializers = [
+        numpy_helper.from_array(inits["scale"].astype(np.float64), "scale"),
+        numpy_helper.from_array(inits["bias"].astype(np.float64), "bias"),
+        *norm_inits,
+    ]
+    return make_model_from_nodes(
+        nodes,
+        [helper.make_tensor_value_info("X", TensorProto.FLOAT, input_shape)],
+        [helper.make_tensor_value_info("Y", TensorProto.FLOAT, input_shape)],
+        initializers=initializers,
+    )
+
 
 def _make_instance_norm_model(input_shape: list[int], dtype=np.float32):
     """Build an ONNX InstanceNormalization model (scale/B as initializers)."""
@@ -615,6 +656,40 @@ def _make_instance_norm_model(input_shape: list[int], dtype=np.float32):
         epsilon=1e-5,
     )
     return make_model_from_nodes([node], [X], [Y], initializers=[scale_init, bias_init])
+
+
+def _fp64_instance_norm_reference(model, input_shape: list[int]):
+    """*model*'s fp32 InstanceNormalization recomputed in fp64 from primitives,
+    with the same scale and B initializers."""
+    inits = {i.name: numpy_helper.to_array(i) for i in model.graph.initializer}
+    affine_shape = [input_shape[1]] + [1] * (len(input_shape) - 2)
+    norm_nodes, norm_inits = fp64_normalize_last_axis("xg", "ng", 1e-5)
+    nodes = [
+        helper.make_node("Cast", ["X"], ["xd"], to=TensorProto.DOUBLE),
+        helper.make_node("Reshape", ["xd", "rows"], ["xg"]),
+        *norm_nodes,
+        helper.make_node("Reshape", ["ng", "shape"], ["nr"]),
+        helper.make_node("Mul", ["nr", "scale"], ["scaled"]),
+        helper.make_node("Add", ["scaled", "B"], ["yd"]),
+        helper.make_node("Cast", ["yd"], ["Y"], to=TensorProto.FLOAT),
+    ]
+    initializers = [
+        numpy_helper.from_array(np.array([0, 0, -1], np.int64), "rows"),
+        numpy_helper.from_array(np.array(input_shape, np.int64), "shape"),
+        numpy_helper.from_array(
+            inits["scale"].astype(np.float64).reshape(affine_shape), "scale"
+        ),
+        numpy_helper.from_array(
+            inits["B"].astype(np.float64).reshape(affine_shape), "B"
+        ),
+        *norm_inits,
+    ]
+    return make_model_from_nodes(
+        nodes,
+        [helper.make_tensor_value_info("X", TensorProto.FLOAT, input_shape)],
+        [helper.make_tensor_value_info("Y", TensorProto.FLOAT, input_shape)],
+        initializers=initializers,
+    )
 
 
 class TestInstanceNormalization:
@@ -648,6 +723,48 @@ class TestInstanceNormalization:
         x = rng.uniform(-2, 2, input_shape).astype(np.float16)
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=2e-3, rtol=1e-3)
+
+    # Rows of 16K elements or more take GroupNorm's split reduction (one
+    # channel per group), as in a Reshape(N, 32, -1) + InstanceNormalization
+    # GroupNorm decomposition. The CPU reference sums long rows in fp32, so
+    # the tolerance is looser than for the short rows above.
+    @pytest.mark.parametrize(
+        "input_shape, dtype",
+        [
+            ([1, 32, 36864], np.float32),
+            ([2, 32, 20001], np.float32),
+            ([1, 32, 147456], np.float16),
+            ([1, 8, 64, 64], np.float16),
+        ],
+    )
+    def test_instance_norm_long_rows(self, model_runner, input_shape, dtype):
+        model = _make_instance_norm_model(input_shape, dtype)
+        rng = np.random.default_rng(9)
+        x = (rng.uniform(-1, 1, input_shape) + 2.0).astype(dtype)
+        actual, expected = model_runner.run_sample(model, [x])
+        atol = 1e-4 if dtype == np.float32 else 4e-3
+        compare_outputs(actual, expected, atol=atol, rtol=atol)
+
+    # |mean| / stddev near 260 with sparse outliers, on both the per-row
+    # kernel (short rows) and the split reduction (long rows): E[x^2] - mean^2
+    # in fp32 would miss the tolerance by about 7x on these inputs. The
+    # reference is fp64: ORT CPU's fp32 mean of the long rows is itself off by
+    # more than the tolerance.
+    @pytest.mark.parametrize(
+        "input_shape",
+        [[2, 16, 4096], [1, 3, 17, 19], [1, 32, 36864]],
+    )
+    def test_instance_norm_large_offset(self, model_runner, input_shape):
+        model = _make_instance_norm_model(input_shape, np.float32)
+        rng = np.random.default_rng(10)
+        x = rng.uniform(-1, 1, input_shape) + 200.0
+        x.flat[::61] += 4.0
+        actual, expected = model_runner.run_sample(
+            model,
+            [x.astype(np.float32)],
+            reference_model=_fp64_instance_norm_reference(model, input_shape),
+        )
+        compare_outputs(actual, expected, atol=2e-4, rtol=2e-4)
 
 
 def _make_batch_norm_model(input_shape: list[int], dtype=np.float32):
@@ -723,79 +840,54 @@ class TestBatchNormalization:
         compare_outputs(actual, expected, atol=2e-3, rtol=1e-3)
 
 
-def _make_group_norm_model(
-    input_shape: list[int],
-    groups: int,
-    *,
-    channels_last: int = 0,
-    activation: int = 0,
-    dtype=np.float32,
-    epsilon: float = 1e-5,
-):
-    """Build a com.microsoft.GroupNorm model. Channel axis is 1, or -1 when
-    channels_last is set."""
-    channels = input_shape[-1] if channels_last else input_shape[1]
-    tp = _TENSOR_PROTO[dtype]
-    X = helper.make_tensor_value_info("X", tp, input_shape)
-    Y = helper.make_tensor_value_info("Y", tp, input_shape)
-    rng = np.random.default_rng(11)
-    gamma = numpy_helper.from_array(
-        rng.uniform(0.5, 1.5, [channels]).astype(dtype), name="gamma"
-    )
-    beta = numpy_helper.from_array(
-        rng.uniform(-0.5, 0.5, [channels]).astype(dtype), name="beta"
-    )
-    node = helper.make_node(
-        "GroupNorm",
-        ["X", "gamma", "beta"],
-        ["Y"],
-        domain="com.microsoft",
-        groups=groups,
-        epsilon=epsilon,
-        activation=activation,
-        channels_last=channels_last,
-    )
-    ms_opset = helper.make_opsetid("com.microsoft", 1)
-    return make_model_from_nodes(
-        [node],
-        [X],
-        [Y],
-        initializers=[gamma, beta],
-        extra_opsets=[ms_opset],
-    )
+def _plant_special_rows(x: np.ndarray, row_len: int) -> np.ndarray:
+    """Row 1 gets a NaN, row 2 starts with +Inf (the kernels' shift value), and
+    row 3 becomes one repeated large value."""
+    rows = x.reshape(-1, row_len)
+    rows[1, row_len // 2] = np.nan
+    rows[2, 0] = np.inf
+    rows[3, :] = 200.0
+    return x
 
 
-class TestGroupNorm:
-    """com.microsoft GroupNorm: per-group stats, optional SiLU."""
+def _check_special_rows(actual, expected, row_len, constant_row_want, atol):
+    """Rows 1 and 2 must be all NaN, row 3 exactly *constant_row_want* (the
+    bias), and every other row must match the reference."""
+    got = actual[0].reshape(-1, row_len)
+    want = expected[0].reshape(-1, row_len)
+    assert np.isnan(got[1]).all() and np.isnan(got[2]).all()
+    np.testing.assert_allclose(got[3], constant_row_want, rtol=0, atol=1e-6)
+    keep = np.r_[0, 4 : got.shape[0]]
+    compare_outputs([got[keep]], [want[keep]], atol=atol, rtol=atol)
 
-    def test_group_norm_nchw_f32(self, model_runner):
-        shape = [1, 8, 4, 4]
-        model = _make_group_norm_model(shape, groups=4, activation=0)
+
+class TestNormSpecialValues:
+    """NaN and Inf stay inside their normalization row, and a row without
+    spread yields exactly the bias. ORT CPU's results on these rows are not
+    used: its mean of a constant row is rounded, not exact."""
+
+    @pytest.mark.parametrize("input_shape", [[2, 4, 64], [1, 32, 20000]])
+    def test_instance_norm_special_values(self, model_runner, input_shape):
+        model = _make_instance_norm_model(input_shape, np.float32)
+        bias = numpy_helper.to_array(
+            next(i for i in model.graph.initializer if i.name == "B")
+        )
+        rng = np.random.default_rng(11)
+        x = rng.uniform(-2, 2, input_shape).astype(np.float32)
+        x = _plant_special_rows(x, input_shape[-1])
+        actual, expected = model_runner.run_sample(model, [x])
+        _check_special_rows(
+            actual, expected, input_shape[-1], bias[3 % input_shape[1]], 1e-4
+        )
+
+    @pytest.mark.parametrize("input_shape", [[4, 1152], [6, 4097]])
+    def test_layer_norm_special_values(self, model_runner, input_shape):
+        model = _make_layer_norm_model(input_shape, np.float32, with_bias=True)
+        bias = numpy_helper.to_array(
+            next(i for i in model.graph.initializer if i.name == "bias")
+        )
         rng = np.random.default_rng(12)
-        x = rng.uniform(-2, 2, shape).astype(np.float32)
+        x = rng.uniform(-2, 2, input_shape).astype(np.float32)
+        x = _plant_special_rows(x, input_shape[-1])
         actual, expected = model_runner.run_sample(model, [x])
-        compare_outputs(actual, expected, atol=1e-5, rtol=1e-5)
-
-    def test_group_norm_nchw_silu_f32(self, model_runner):
-        shape = [2, 8, 4, 4]
-        model = _make_group_norm_model(shape, groups=4, activation=1)
-        rng = np.random.default_rng(13)
-        x = rng.uniform(-2, 2, shape).astype(np.float32)
-        actual, expected = model_runner.run_sample(model, [x])
-        compare_outputs(actual, expected, atol=1e-5, rtol=1e-5)
-
-    def test_group_norm_nhwc_f32(self, model_runner):
-        shape = [1, 4, 4, 8]
-        model = _make_group_norm_model(shape, groups=4, channels_last=1, activation=0)
-        rng = np.random.default_rng(14)
-        x = rng.uniform(-2, 2, shape).astype(np.float32)
-        actual, expected = model_runner.run_sample(model, [x])
-        compare_outputs(actual, expected, atol=1e-5, rtol=1e-5)
-
-    def test_group_norm_nchw_silu_f16(self, model_runner):
-        shape = [1, 8, 4, 4]
-        model = _make_group_norm_model(shape, groups=2, activation=1, dtype=np.float16)
-        rng = np.random.default_rng(15)
-        x = rng.uniform(-2, 2, shape).astype(np.float16)
-        actual, expected = model_runner.run_sample(model, [x])
-        compare_outputs(actual, expected, atol=2e-3, rtol=1e-3)
+        _check_special_rows(actual, expected, input_shape[-1], bias, 1e-5)

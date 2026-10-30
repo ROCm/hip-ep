@@ -89,9 +89,10 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Compress | Custom HIP kernel; a dynamic selected extent is scanned and read back before allocation |
 | OneHot | Custom HIP kernel |
 | LayerNormalization | Custom HIP kernel |
-| InstanceNormalization | Custom HIP kernel |
+| InstanceNormalization | Custom HIP kernel. Rows of 16K elements or more use the GroupNorm split reduction with one channel per group |
 | BatchNormalization | Custom HIP kernel; inference only (`training_mode` stays on ONNX) |
-| GroupNorm (`com.microsoft`) | Custom HIP kernel; optional SiLU, NCHW or NHWC |
+| GroupNorm (`com.microsoft`) | Custom HIP kernel; optional SiLU, NCHW or NHWC; f16, bf16, f32 and f64. Groups of 16K elements or more (`HIPDNN_EP_GROUPNORM_SPLIT_SIZE` overrides the threshold) use a split reduction over the runtime workspace, sized from the device's unit count and threads per unit; the result is deterministic |
+| GroupNormalization | Same kernel as GroupNorm, NCHW, for the opset-21 per-channel scale and bias. The opset-18 per-group form is not supported |
 | SkipLayerNormalization (`com.microsoft`) | Decomposed to Add + LayerNormalization, including the optional input bias |
 | RMSNormalization | Custom HIP kernel |
 | SimplifiedLayerNormalization | Custom HIP kernel |
@@ -178,4 +179,4 @@ These operations are handled through standard MLIR transformations and generally
 
 ## Fusion and preprocessing
 
-The frontend also recognizes or simplifies selected patterns before operation conversion, including approximate/FastGelu chains, Erf-based Gelu chains, supported Pow forms, LpNormalization decompositions, CastLike simplification, and model-exporter cleanup patterns.
+The frontend also recognizes or simplifies selected patterns before operation conversion, including approximate/FastGelu chains, Erf-based Gelu chains, the exported GroupNorm decomposition (Reshape to `[0, G, -1]`, InstanceNormalization with unit scale and zero bias, Reshape back, per-channel Mul/Add and an optional SiLU, fused into one GroupNorm; the unit scale and zero bias must be inline constants, so an initializer above the ORT bridge copy threshold keeps the unfused form), supported Pow forms, LpNormalization decompositions, CastLike simplification, and model-exporter cleanup patterns.

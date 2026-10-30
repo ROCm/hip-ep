@@ -83,7 +83,19 @@ HIPDNN_EP_RT_EXPORT int wrap_group_norm(RuntimeState *state, void *input,
       (long long)channels_last, (long long)activation, (long long)data_type,
       (double)epsilon);
 
+  // A failed workspace grow is not fatal: the kernel falls back to its
+  // one-block-per-group path.
+  void *workspace = nullptr;
+  size_t workspace_bytes = hip_group_norm_workspace_bytes(
+      n, c, spatial, groups, static_cast<int>(channels_last), hip_dtype);
+  if (workspace_bytes > 0 &&
+      hipdnn_ep_state_ensure_workspace(state, workspace_bytes) == 0)
+    workspace = hipdnn_ep_state_get_workspace(state);
+  else
+    workspace_bytes = 0;
+
   return hip_group_norm(stream, input, scale, bias, output, n, c, spatial,
                         groups, static_cast<int>(channels_last),
-                        static_cast<int>(activation), epsilon, hip_dtype);
+                        static_cast<int>(activation), epsilon, workspace,
+                        workspace_bytes, hip_dtype);
 }

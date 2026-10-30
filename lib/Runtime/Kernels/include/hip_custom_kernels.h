@@ -2188,7 +2188,21 @@ HIP_KERNEL_API int hip_batch_norm(
  * Mean/var over each (N, group). channels_last 0 is NCHW, 1 is NHWC.
  * activation 1 applies SiLU after the affine transform.
  * `hip_dtype`: FLOAT16, BFLOAT16, FLOAT32, or FLOAT64.
+ *
+ * Large groups use a split reduction whose partials live in `workspace`
+ * (device memory, 256-byte aligned). Query the size with
+ * hip_group_norm_workspace_bytes for the current device. A null or smaller
+ * workspace is valid: the kernel shrinks the split or uses a slower
+ * one-block-per-group path.
  */
+HIP_KERNEL_API size_t hip_group_norm_workspace_bytes(
+    int64_t n,
+    int64_t c,
+    int64_t spatial,
+    int64_t groups,
+    int channels_last,
+    int hip_dtype);
+
 HIP_KERNEL_API int hip_group_norm(
     void* stream,
     const void* input,
@@ -2202,6 +2216,8 @@ HIP_KERNEL_API int hip_group_norm(
     int channels_last,
     int activation,
     float epsilon,
+    void* workspace,
+    size_t workspace_bytes,
     int hip_dtype);
 
 /* =========================================================================

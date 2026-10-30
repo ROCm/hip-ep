@@ -72,6 +72,18 @@ wrap_instance_normalization(RuntimeState *state, void *input, void *scale,
       (long long)n, (long long)c, (long long)spatial, (long long)data_type,
       (double)epsilon);
 
+  // InstanceNorm is GroupNorm with one channel per group. Rows large enough
+  // for GroupNorm's split reduction take it, so a small N * C still fills the
+  // device; the others keep the one-block-per-row kernel.
+  size_t workspace_bytes = hip_group_norm_workspace_bytes(
+      n, c, spatial, /*groups=*/c, /*channels_last=*/0, hip_dtype);
+  if (workspace_bytes > 0 &&
+      hipdnn_ep_state_ensure_workspace(state, workspace_bytes) == 0) {
+    return hip_group_norm(stream, input, scale, bias, output, n, c, spatial,
+                          /*groups=*/c, /*channels_last=*/0, /*activation=*/0,
+                          epsilon, hipdnn_ep_state_get_workspace(state),
+                          workspace_bytes, hip_dtype);
+  }
   return hip_instance_norm(stream, input, scale, bias, output, n, c, spatial,
                            epsilon, hip_dtype);
 }
