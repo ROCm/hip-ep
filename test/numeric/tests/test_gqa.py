@@ -817,18 +817,61 @@ class TestGroupQueryAttention:
         compare_outputs(actual, expected, atol=1e-3)
 
 
-def _ring_fp32_reference(query, key_cache, value_cache, past):
-    qlen = query.shape[1]
+def _ring_fp32_reference(query, key_cache, value_cache, past, scale=0.0625):
+    batch, qlen = query.shape[:2]
     total = past + qlen
-    q = query.reshape(1, qlen, 24, 256).transpose(0, 2, 1, 3).astype(np.float32)
+    q = query.reshape(batch, qlen, 24, 256).transpose(0, 2, 1, 3).astype(np.float32)
     k = np.repeat(key_cache[:, :, :total].astype(np.float32), 6, axis=1)
     v = np.repeat(value_cache[:, :, :total].astype(np.float32), 6, axis=1)
-    scores = (q @ k.transpose(0, 1, 3, 2)) * np.float32(0.0625)
+    scores = (q @ k.transpose(0, 1, 3, 2)) * np.float32(scale)
     mask = np.arange(total)[None, :] > past + np.arange(qlen)[:, None]
     scores = np.where(mask, -np.inf, scores)
     weights = np.exp(scores - scores.max(axis=-1, keepdims=True))
     weights /= weights.sum(axis=-1, keepdims=True)
-    return (weights @ v).transpose(0, 2, 1, 3).reshape(1, qlen, 6144)
+    return (weights @ v).transpose(0, 2, 1, 3).reshape(batch, qlen, 6144)
+
+
+@pytest.mark.parametrize(
+    "batch,qlen,scale", [(2, 1, 0.0625), (2, 17, 0.0625), (1, 17, 0.03125)]
+)
+def test_gqa_ring_runtime_fallback(model_runner, tmp_path, batch, qlen, scale):
+    """FP16 candidates outside Ring's runtime contract retain existing GQA."""
+    import onnx
+
+    past, capacity = 3, qlen + 22
+    total = past + qlen
+    model = _make_gqa_fixed_cache_model(
+        batch, "query_length", capacity, 6144, 1024, 24, 4
+    )
+    for attr in model.graph.node[0].attribute:
+        if attr.name == "scale":
+            attr.f = scale
+    rng = np.random.default_rng(989)
+    query = rng.standard_normal((batch, qlen, 6144)).astype(np.float16)
+    key = rng.standard_normal((batch, qlen, 1024)).astype(np.float16)
+    value = rng.standard_normal((batch, qlen, 1024)).astype(np.float16)
+    old_k = rng.standard_normal((batch, 4, capacity, 256)).astype(np.float16)
+    old_v = rng.standard_normal((batch, 4, capacity, 256)).astype(np.float16)
+    path = tmp_path / "ring_runtime_fallback.onnx"
+    onnx.save(model, path)
+    actual = model_runner.backend.run(
+        str(path),
+        [
+            query,
+            key,
+            value,
+            old_k,
+            old_v,
+            np.full(batch, total - 1, dtype=np.int32),
+            np.array(capacity, dtype=np.int32),
+        ],
+    )
+    old_k[:, :, past:total] = key.reshape(batch, qlen, 4, 256).transpose(0, 2, 1, 3)
+    old_v[:, :, past:total] = value.reshape(batch, qlen, 4, 256).transpose(0, 2, 1, 3)
+    expected = _ring_fp32_reference(query, old_k, old_v, past, scale)
+    np.testing.assert_allclose(actual[0], expected, atol=0.005, rtol=0.005)
+    np.testing.assert_array_equal(actual[1][:, :, :total], old_k[:, :, :total])
+    np.testing.assert_array_equal(actual[2][:, :, :total], old_v[:, :, :total])
 
 
 @pytest.mark.parametrize("dynamic", [False, True])
@@ -891,9 +934,11 @@ def test_gqa_ring_shared_cache_transitions(model_runner, tmp_path):
     session = ort.InferenceSession(str(path), sess_options=options)
     expected_k = np.full((1, 4, capacity, 256), 7.0, dtype=np.float16)
     expected_v = expected_k.copy()
+    memory_info = backend._ep_device.memory_info(ort.OrtDeviceMemoryType.DEFAULT)
+    assert memory_info is not None, "requires the HIP EP's GPU allocator"
     caches = [
         ort.OrtValue.ortvalue_from_shape_and_type(
-            list(expected_k.shape), np.float16, device_type="gpu", vendor_id=0x1002
+            list(expected_k.shape), np.float16, memory_info=memory_info
         )
         for _ in range(2)
     ]

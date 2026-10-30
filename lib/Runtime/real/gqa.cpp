@@ -3051,30 +3051,6 @@ int wrap_group_query_attention(
   // decomposed hipBLASLt fallback.
   //===------------------------------------------------------------------===//
 
-#if HIP_EP_RING_ENABLED != 0
-  // No existing route implements softcap; do not silently drop it in a Ring
-  // build. Other unsupported Ring features retain their existing GQA route.
-  if (softcap != 0.0f) {
-    fprintf(stderr, "Ring GQA builds do not support softcap\n");
-    return -1;
-  }
-  if (element_size_bytes == 2 && batch_size == 1 && num_heads == 24 &&
-      kv_num_heads == 4 && head_dim == 256 && seq_len_q >= 1 &&
-      seq_len_q <= HIP_EP_RING_MAX_QUERY_LENGTH &&
-      seq_len_new_kv == seq_len_q && key && value && seqlens_k && !kv_bnsd &&
-      !reuse_past_kv && !kv_quantized && !do_rotary && no_causal == 0 &&
-      scale == 0.0625f && local_window_size <= 0 && !head_sink &&
-      smooth_softmax <= 0 && !attention_bias &&
-      hip_gqa_ring_device_supported()) {
-    int ring_rc =
-        gqa_forward_ring(state, stream, query, key, value, past_key, past_value,
-                         seqlens_k, output, present_key, present_value,
-                         seq_len_q, seq_len_kv, past_buf_seq);
-    if (ring_rc != 1)
-      return ring_rc;
-  }
-#endif
-
   const bool is_decode = (seq_len_q == 1);
   const bool decode_geometry_ok =
       !is_decode || flash_decode_geometry_ok(num_heads, kv_num_heads, head_dim);
@@ -3237,4 +3213,66 @@ int wrap_group_query_attention(
             "(rc=%d)\n",
             rc);
   return rc;
+}
+
+// The legacy ABI does not encode dtype: only compiler-proven FP16 operands
+// may enter this wrapper. All ineligible calls keep the original wrapper.
+int wrap_group_query_attention_ring_f16(
+    RuntimeState *state, int op_state_slot,
+    // Inputs 1-7 (core GQA)
+    void *query, void *key, void *value, void *past_key, void *past_value,
+    void *seqlens_k, void *total_seq_len,
+    // Inputs 8-10 (RoPE)
+    void *cos_cache, void *sin_cache, void *position_ids,
+    // Inputs 11-14 (advanced features)
+    void *attention_bias, void *head_sink, void *k_scale, void *v_scale,
+    // Outputs
+    void *output, void *present_key, void *present_value, void *output_qk,
+    // Attributes (13)
+    int64_t num_heads, int64_t kv_num_heads, float scale, int64_t do_rotary,
+    int64_t rotary_interleaved, float softcap, int64_t local_window_size,
+    int64_t smooth_softmax, int64_t qk_output, int64_t k_quant_type,
+    int64_t v_quant_type, int64_t kv_cache_bit_width, int32_t no_causal,
+    // Shape values (6)
+    int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
+    int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
+    int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
+    int64_t seq_len_new_kv) {
+#if HIP_EP_RING_ENABLED != 0
+  // Only the compiler's proven-FP16 calls use this entry. Recheck runtime
+  // geometry/features/device before reading lengths or modifying the cache.
+  // Any noncandidate retains the original entry point and its diagnostics.
+  if (state && query && output && present_key && present_value &&
+      !position_ids && !output_qk && qk_output == 0 && softcap == 0.0f &&
+      element_size_bytes == 2 && batch_size == 1 && num_heads == 24 &&
+      kv_num_heads == 4 && head_dim == 256 && seq_len_q >= 1 &&
+      seq_len_q <= HIP_EP_RING_MAX_QUERY_LENGTH &&
+      seq_len_new_kv == seq_len_q && key && value && seqlens_k && !kv_bnsd &&
+      k_quant_type == 0 && v_quant_type == 0 && !do_rotary && no_causal == 0 &&
+      (scale == 0.0f || scale == 0.0625f) && local_window_size <= 0 &&
+      !head_sink && smooth_softmax <= 0 && !attention_bias &&
+      hip_gqa_ring_device_supported()) {
+    hipStream_t stream =
+        static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
+    if (stream) {
+      OP_PROFILE(
+          "gqa", [] { return std::string("ring_f16"); }, state);
+      int rc =
+          gqa_forward_ring(state, stream, query, key, value, past_key,
+                           past_value, seqlens_k, output, present_key,
+                           present_value, seq_len_q, seq_len_kv, past_buf_seq);
+      if (rc != 1)
+        return rc;
+    }
+  }
+#endif
+  return wrap_group_query_attention(
+      state, op_state_slot, query, key, value, past_key, past_value, seqlens_k,
+      total_seq_len, cos_cache, sin_cache, position_ids, attention_bias,
+      head_sink, k_scale, v_scale, output, present_key, present_value,
+      output_qk, num_heads, kv_num_heads, scale, do_rotary, rotary_interleaved,
+      softcap, local_window_size, smooth_softmax, qk_output, k_quant_type,
+      v_quant_type, kv_cache_bit_width, no_causal, batch_size, seq_len_q,
+      seq_len_kv, past_buf_seq, head_dim, element_size_bytes, attn_bias_batch,
+      attn_bias_num_heads, kv_bnsd, seq_len_new_kv);
 }

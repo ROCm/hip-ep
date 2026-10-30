@@ -1,10 +1,9 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-// RUN: %if ring-gqa %{ not hip-mlir-opt --split-input-file --assign-op-state-slots --convert-hip-to-llvm %s 2>&1 | FileCheck %s --check-prefix=REJECT %} %else %{ hip-mlir-opt --split-input-file --assign-op-state-slots --convert-hip-to-llvm %s | FileCheck %s --check-prefix=DEFAULT %}
-// Ring builds must reject softcap before the runtime can return with unwritten
-// outputs. Cover FP16 and the FP32 fallback, and both signs of nonzero softcap.
-// Default builds retain their existing lowering behavior.
+// RUN: hip-mlir-opt --split-input-file --assign-op-state-slots --convert-hip-to-llvm %s | FileCheck %s
+// Nonzero softcap retains upstream GQA lowering in both Ring ON and OFF builds.
+// This verifies routing compatibility, not upstream softcap implementation.
 
 module {
   func.func @softcap_f16(%ctx: !hip.context,
@@ -32,9 +31,8 @@ module {
   }
 }
 
-// REJECT: error: 'hip.gqa' op Ring GQA builds do not support nonzero softcap
-// DEFAULT-LABEL: llvm.func @softcap_f16
-// DEFAULT: llvm.call @wrap_group_query_attention
+// CHECK-LABEL: llvm.func @softcap_f16
+// CHECK: llvm.call @wrap_group_query_attention(
 
 // -----
 
@@ -64,6 +62,5 @@ module {
   }
 }
 
-// REJECT: error: 'hip.gqa' op Ring GQA builds do not support nonzero softcap
-// DEFAULT-LABEL: llvm.func @softcap_f32
-// DEFAULT: llvm.call @wrap_group_query_attention
+// CHECK-LABEL: llvm.func @softcap_f32
+// CHECK: llvm.call @wrap_group_query_attention(
