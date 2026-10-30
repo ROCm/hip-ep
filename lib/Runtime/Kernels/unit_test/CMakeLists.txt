@@ -156,6 +156,9 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
   add_kernel_package_ut(${_arch}
     hipdnn-kernel-ut-gemv-transposed-b-xbf16-wbf16-yfp32
     gemv_transposed_b/Xbf16_Wbf16_Yfp32/test_gemv_bf16_transposed_b.cpp)
+  add_kernel_package_ut(${_arch}
+    hipdnn-kernel-ut-gemm-transposed-b-xbf16-wbf16-yfp32
+    gemm_transposed_b/Xbf16_Wbf16_Yfp32/test_gemm_bf16_transposed_b.cpp)
 endforeach()
 
 # One package-facing entry point finds the live GPU arch, invokes every leaf

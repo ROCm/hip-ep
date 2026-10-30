@@ -66,6 +66,8 @@ static const Leaf kLeaves[] = {
      "hipdnn-kernel-ut-gemv-transposed-b-xfp32-wfp32-yfp32.exe"},
     {"gemv_transposed_b", "Xbf16_Wbf16_Yfp32",
      "hipdnn-kernel-ut-gemv-transposed-b-xbf16-wbf16-yfp32.exe"},
+    {"gemm_transposed_b", "Xbf16_Wbf16_Yfp32",
+     "hipdnn-kernel-ut-gemm-transposed-b-xbf16-wbf16-yfp32.exe"},
 };
 
 static std::string executableDirectory() {
