@@ -56,6 +56,8 @@ static const Leaf kLeaves[] = {
      "hipdnn-kernel-ut-gqa-prefill-xfp16-wi8-yfp16.exe"},
     {"qmoe_ragged_mm", "Xfp16_Wu4_Yfp16",
      "hipdnn-kernel-ut-qmoe-ragged-mm-xfp16-wu4-yfp16.exe"},
+    {"qmoe_ragged_mm", "Xfp16_Wu2_Yfp16",
+     "hipdnn-kernel-ut-qmoe-ragged-mm-xfp16-wu2-yfp16.exe"},
     {"gather_block_quantized", "Xi64_Wu4_Yfp16",
      "hipdnn-kernel-ut-gather-block-quantized-xi64-wu4-yfp16.exe"},
     {"gather_block_quantized", "Xi64_Wu8_Yfp16",

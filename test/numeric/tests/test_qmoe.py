@@ -76,19 +76,22 @@ def _make_qmoe_model(
     num_experts: int,
     top_k: int,
     block_size: int = 32,
+    expert_weight_bits: int = EXPERT_WEIGHT_BITS,
     gate_up_scale_range: tuple[float, float] = (0.001, 0.05),
     gate_up_bias_range: tuple[float, float] = (-1.0, 0.5),
     down_scale_range: tuple[float, float] = (0.001, 0.02),
     down_bias_range: tuple[float, float] = (-0.5, 0.5),
     seed: int = 42,
     with_mix_weights: bool = False,
+    with_zero_points: bool = False,
     normalize_routing_weights: int = 1,
+    swiglu_limit: float | None = 7.0,
 ):
     """Build a QMoE ONNX model with random quantized expert weights.
 
     Gate/up projection: hidden -> intermediate (per expert, fused).
     Down projection:    intermediate // 2 -> hidden (per expert).
-    Weights are 4-bit quantized (packed into uint8).
+    Weights are packed into uint8.
 
     Scale and bias ranges are tuneable to match real model distributions.
     Scales are always positive (matching the real GPT-OSS-20B pattern).
@@ -98,10 +101,11 @@ def _make_qmoe_model(
     experts and the mixing weights are gathered from it.
     """
     down_in = intermediate // 2
-    packed_gate_up = hidden // 2
-    packed_down = down_in // 2
-    gate_up_num_blocks = hidden // block_size
-    down_num_blocks = down_in // block_size
+    values_per_byte = 8 // expert_weight_bits
+    packed_gate_up = (hidden + values_per_byte - 1) // values_per_byte
+    packed_down = (down_in + values_per_byte - 1) // values_per_byte
+    gate_up_num_blocks = (hidden + block_size - 1) // block_size
+    down_num_blocks = (down_in + block_size - 1) // block_size
 
     x = helper.make_tensor_value_info(
         "input",
@@ -155,6 +159,20 @@ def _make_qmoe_model(
         [num_experts, hidden],
     ).astype(np.float16)
 
+    def make_zero_points(shape: tuple[int, int, int]) -> np.ndarray:
+        values_per_byte = 8 // expert_weight_bits
+        values = rng.integers(0, 1 << expert_weight_bits, shape, dtype=np.uint8)
+        packed_shape = (
+            *shape[:-1],
+            (shape[-1] + values_per_byte - 1) // values_per_byte,
+        )
+        packed = np.zeros(packed_shape, dtype=np.uint8)
+        for i in range(shape[-1]):
+            packed[..., i // values_per_byte] |= values[..., i] << (
+                (i % values_per_byte) * expert_weight_bits
+            )
+        return packed
+
     initializers = [
         numpy_helper.from_array(gate_up_qw, name="gate_up_qweight"),
         numpy_helper.from_array(gate_up_scales, name="gate_up_scales"),
@@ -163,6 +181,17 @@ def _make_qmoe_model(
         numpy_helper.from_array(down_scales, name="down_scales"),
         numpy_helper.from_array(down_bias, name="down_bias"),
     ]
+    if with_zero_points:
+        initializers += [
+            numpy_helper.from_array(
+                make_zero_points((num_experts, intermediate, gate_up_num_blocks)),
+                name="gate_up_zero_points",
+            ),
+            numpy_helper.from_array(
+                make_zero_points((num_experts, hidden, down_num_blocks)),
+                name="down_zero_points",
+            ),
+        ]
 
     node_inputs = [
         "input",
@@ -177,10 +206,14 @@ def _make_qmoe_model(
         "",
         "",
     ]
+    node_inputs += [
+        "gate_up_zero_points" if with_zero_points else "",
+        "down_zero_points" if with_zero_points else "",
+        "",
+    ]
     graph_inputs = [x, router]
     if with_mix_weights:
-        # fc1/fc2/fc3 zero points (inputs 11-13) stay absent.
-        node_inputs += ["", "", "", "mix_weights"]
+        node_inputs.append("mix_weights")
         graph_inputs.append(
             helper.make_tensor_value_info(
                 "mix_weights",
@@ -189,21 +222,25 @@ def _make_qmoe_model(
             )
         )
 
+    attributes = {
+        "activation_type": "swiglu",
+        "activation_alpha": 1.702,
+        "activation_beta": 1.0,
+        "expert_weight_bits": expert_weight_bits,
+        "k": top_k,
+        "normalize_routing_weights": normalize_routing_weights,
+        "swiglu_fusion": 1,
+        "use_sparse_mixer": 0,
+        "block_size": block_size,
+    }
+    if swiglu_limit is not None:
+        attributes["swiglu_limit"] = swiglu_limit
     node = helper.make_node(
         "QMoE",
         node_inputs,
         ["output"],
         domain="com.microsoft",
-        activation_type="swiglu",
-        activation_alpha=1.702,
-        activation_beta=1.0,
-        expert_weight_bits=4,
-        k=top_k,
-        normalize_routing_weights=normalize_routing_weights,
-        swiglu_fusion=1,
-        use_sparse_mixer=0,
-        block_size=block_size,
-        swiglu_limit=7.0,
+        **attributes,
     )
 
     ms_opset = helper.make_opsetid("com.microsoft", 1)
@@ -218,6 +255,60 @@ def _make_qmoe_model(
 
 
 class TestQMoE:
+    @pytest.mark.parametrize("seq_len", [1, 8])
+    @pytest.mark.parametrize("with_zero_points", [False, True])
+    @pytest.mark.parametrize("swiglu_limit", [7.0, None])
+    def test_two_bit(self, model_runner, seq_len, with_zero_points, swiglu_limit):
+        hidden = 64
+        intermediate = 128
+        num_experts = 4
+        top_k = 2
+        model = _make_qmoe_model(
+            1,
+            seq_len,
+            hidden,
+            intermediate,
+            num_experts,
+            top_k,
+            block_size=32,
+            expert_weight_bits=2,
+            with_zero_points=with_zero_points,
+            swiglu_limit=swiglu_limit,
+        )
+
+        rng = np.random.default_rng(17)
+        x = rng.uniform(-1, 1, [1, seq_len, hidden]).astype(np.float16)
+        router = rng.standard_normal([seq_len, num_experts]).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x, router])
+        compare_outputs(actual, expected, atol=1e-1, rtol=2e-2, cos_threshold=0.99)
+
+    @pytest.mark.parametrize("seq_len", [1, 8])
+    @pytest.mark.parametrize("expert_weight_bits", [2, 4])
+    def test_partial_quantization_block(
+        self, model_runner, seq_len, expert_weight_bits
+    ):
+        hidden = 96
+        intermediate = 192
+        num_experts = 4
+        model = _make_qmoe_model(
+            1,
+            seq_len,
+            hidden,
+            intermediate,
+            num_experts,
+            top_k=2,
+            block_size=64,
+            expert_weight_bits=expert_weight_bits,
+        )
+
+        rng = np.random.default_rng(23)
+        x = rng.uniform(-1, 1, [1, seq_len, hidden]).astype(np.float16)
+        router = rng.standard_normal([seq_len, num_experts]).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x, router])
+        compare_outputs(actual, expected, atol=1e-1, rtol=2e-2, cos_threshold=0.99)
+
     @pytest.mark.parametrize(
         "seq_len,hidden,intermediate,num_experts,top_k",
         [

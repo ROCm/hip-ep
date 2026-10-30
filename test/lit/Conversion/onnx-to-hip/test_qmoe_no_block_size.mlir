@@ -66,9 +66,8 @@ module {
   // ===== Test 2: Per-channel scales [E, N, 1], derive block_size = 2880 =====
   //
   // With one scale per output row (k_blocks=1), the derived block_size
-  // collapses to hidden_size. Conversion still succeeds; this documents the
-  // contract that the pass is shape-driven and does not impose its own
-  // even/positive constraint on the derived value (the runtime does).
+  // collapses to hidden_size. Reject it because the kernels require a
+  // power-of-two block size.
   func.func @test_per_channel(
       %input: tensor<1x128x2880xf16>,
       %router_probs: tensor<128x32xf16>) -> tensor<1x128x2880xf16> {
@@ -93,7 +92,6 @@ module {
   }
 
   // CHECK-LABEL: func.func @test_per_channel
-  // CHECK: hip.qmoe
-  // CHECK-SAME: block_size = 2880
-  // CHECK-NOT: onnx.Custom
+  // CHECK-NOT: hip.qmoe
+  // CHECK: onnx.Custom
 }

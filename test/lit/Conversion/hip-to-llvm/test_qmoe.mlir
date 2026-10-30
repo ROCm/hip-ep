@@ -128,4 +128,31 @@ module {
   // CHECK-NOT: llvm.sdiv
   // CHECK: llvm.mlir.constant(5 : i64)
   // CHECK: llvm.call @wrap_qmoe
+
+  func.func @test_qmoe_two_bit(%ctx: !hip.context,
+      %input: memref<1x4x64xf16, 1>,
+      %router: memref<4x8xf16, 1>,
+      %fc1_w: memref<8x128x16xui8, 1>,
+      %fc1_s: memref<8x128x2xf16, 1>,
+      %fc2_w: memref<8x64x16xui8, 1>,
+      %fc2_s: memref<8x64x2xf16, 1>,
+      %output: memref<1x4x64xf16, 1>) {
+    hip.qmoe(%ctx) ins(
+        %input, %router, %fc1_w, %fc1_s, %fc2_w, %fc2_s :
+        memref<1x4x64xf16, 1>, memref<4x8xf16, 1>,
+        memref<8x128x16xui8, 1>, memref<8x128x2xf16, 1>,
+        memref<8x64x16xui8, 1>, memref<8x64x2xf16, 1>)
+        outs(%output : memref<1x4x64xf16, 1>)
+        {expert_weight_bits = 2 : i64, k = 2 : i64, block_size = 32 : i64,
+         normalize_routing_weights = 1 : i64, swiglu_fusion = 1 : i64,
+         use_sparse_mixer = 0 : i64,
+         activation_alpha = 1.000000e+00 : f32,
+         activation_beta = 0.000000e+00 : f32,
+         swiglu_limit = 7.000000e+00 : f32, activation_type = "swiglu"}
+    return
+  }
+
+  // CHECK-LABEL: llvm.func @test_qmoe_two_bit
+  // CHECK: llvm.mlir.constant(2 : i64)
+  // CHECK: llvm.call @wrap_qmoe
 }
