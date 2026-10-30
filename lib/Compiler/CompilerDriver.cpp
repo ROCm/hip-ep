@@ -794,13 +794,6 @@ void CompilerDriver::discoverInTreeLibraries(
 
   // hipDNN graph runtime: only needed when hipDNN graphs are compiled
   if (hipdnnHandle_) {
-    std::string hipdnn_backend_lib = lib_dir + "/hipdnn_backend.lib";
-    if (llvm::sys::fs::exists(hipdnn_backend_lib))
-      libraries.push_back("hipdnn_backend");
-    else
-      COMPILER_DEBUG_LOG(
-          "  WARNING: hipdnn_backend import library not found\n");
-
 #ifdef HIPDNN_GRAPH_RUNTIME_LIB_PATH
     {
       std::string runtime_lib = HIPDNN_GRAPH_RUNTIME_LIB_PATH;
