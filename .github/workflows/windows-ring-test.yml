@@ -38,6 +38,13 @@ jobs:
           name: ring-test-overlay
           path: ring-overlay
 
+      # Match the CPython ABI used to build the packaged ORT wheel.
+      - name: Setup Python 3.14
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: "3.14"
+          architecture: x64
+
       - name: Install Ring overlay and numeric test dependencies
         shell: pwsh
         run: |
