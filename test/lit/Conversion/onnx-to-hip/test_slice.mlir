@@ -448,4 +448,28 @@ module {
     // CHECK: hip.slice
     return %r : tensor<?x?xi64>
   }
+
+  // Test 19: a dynamic Slice end of Shape(data)[last] / 2. Integer Div must
+  // resolve like the other shape arithmetic so the native Slice is allocated
+  // at half the source width. Leaving the full source extent makes the
+  // following hip.matmul see a contraction dimension that does not match B.
+  func.func @test_slice_native_shape_div_extent(%input: tensor<?x2560xf32>)
+      -> tensor<?x?xf32> {
+    // CHECK-LABEL: func.func @test_slice_native_shape_div_extent
+    %zero = arith.constant dense<[0]> : tensor<1xi64>
+    %axis = arith.constant dense<[1]> : tensor<1xi64>
+    %two = arith.constant dense<[2]> : tensor<1xi64>
+    %shape = "onnx.Shape"(%input) {start = 1 : si64, end = 2 : si64}
+        : (tensor<?x2560xf32>) -> tensor<1xi64>
+    %half = "onnx.Div"(%shape, %two) : (tensor<1xi64>, tensor<1xi64>)
+        -> tensor<1xi64>
+    %r = "onnx.Slice"(%input, %zero, %half, %axis)
+        : (tensor<?x2560xf32>, tensor<1xi64>, tensor<1xi64>,
+           tensor<1xi64>) -> tensor<?x?xf32>
+
+    // CHECK: arith.divsi %{{.*}}, %{{.*}} : index
+    // CHECK: tensor.empty(%{{.*}}, %{{.*}}) : tensor<?x?xf32>
+    // CHECK: hip.slice
+    return %r : tensor<?x?xf32>
+  }
 }
