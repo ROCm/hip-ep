@@ -97,8 +97,9 @@ shapes -- broadcasting is resolved before conversion.
 | `hip.miopen.softmax` | `(%ctx) ins(%input : ...) outs(%output : ...)` | `hip_miopen_softmax` |
 
 Row-wise softmax over the last dimension. Rank-generic: for 3D `[B,S,D]`, the
-lowering flattens `rows = B*S, cols = D` and passes `elem_size_bytes` (2 for
-fp16, 4 for fp32) so the runtime dispatches the matching dtype.
+lowering flattens `rows = B*S, cols = D` (a rank-1 input is one row) and
+passes the `HIPDNN_EP_DATATYPE_*` code of the element type (f16, bf16 or f32)
+so the runtime dispatches the matching kernel.
 
 ---
 
