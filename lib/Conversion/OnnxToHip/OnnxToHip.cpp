@@ -613,6 +613,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
         mlir::RewritePatternSet preLoweringPatterns(ctx);
         populateGatherShapeFoldPatterns(preLoweringPatterns, ctx);
         populateTransposeMatMulFoldPatterns(preLoweringPatterns, ctx);
+        populateSkipNormCastFoldPatterns(preLoweringPatterns, ctx);
         populateGatherBlockQuantizedPreparePatterns(preLoweringPatterns, ctx);
         populateReshapeShapeFoldPatterns(preLoweringPatterns, ctx);
         populatePadShapeFoldPatterns(preLoweringPatterns, ctx);
@@ -621,6 +622,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
         populateAttentionWindowFoldPatterns(preLoweringPatterns, ctx);
         populateFastGeluFusionPatterns(preLoweringPatterns, ctx);
         populateErfGeluFusionPatterns(preLoweringPatterns, ctx);
+        populateLayerNormFusionPatterns(preLoweringPatterns, ctx);
         populateProjectorOpsRewritePatterns(preLoweringPatterns, ctx);
         populateLpNormalizationConversionPatterns(preLoweringPatterns, ctx);
         populatePowDecompositionPatterns(preLoweringPatterns, ctx);

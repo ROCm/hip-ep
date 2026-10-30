@@ -51,6 +51,7 @@ add_library(OnnxToHip STATIC
   OneHotConversion.cpp
   GatherShapeFold.cpp
   TransposeMatMulFold.cpp
+  SkipNormCastFold.cpp
   ReshapeShapeFold.cpp
   PadShapeFold.cpp
   SliceShapeFold.cpp
@@ -69,6 +70,7 @@ add_library(OnnxToHip STATIC
   RangeConversion.cpp
   FastGeluFusion.cpp
   ErfGeluFusion.cpp
+  LayerNormFusion.cpp
   ProjectorOpsRewrites.cpp
   LpNormalizationConversion.cpp
   EqualConversion.cpp

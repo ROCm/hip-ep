@@ -87,7 +87,6 @@ ReduceMeanToHip::matchAndRewrite(mlir::Operation *op,
         op, "ReduceMean: cannot infer unranked result (need ranked input and "
             "static axes)");
   mlir::RankedTensorType resultType = *resultTypeOr;
-  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, data);
 
   // axes is always required in HIP dialect; create empty tensor<0xi64> when not
   // provided
@@ -105,14 +104,17 @@ ReduceMeanToHip::matchAndRewrite(mlir::Operation *op,
         mlir::arith::ConstantOp::create(rewriter, loc, axesType, axesAttr);
   }
 
+  mlir::DenseI64ArrayAttr reducedAxes = getConstantReducedAxesAttr(
+      rewriter, data, axesOperand, noopWithEmptyAxes);
+  mlir::Value init = createReduceInitTensor(rewriter, loc, resultType, data,
+                                            reducedAxes, keepdims);
+
   // Create hip.reduce_mean operation (axes always provided, may be empty)
   auto keepdimsAttr = rewriter.getI64IntegerAttr(keepdims);
   auto noopWithEmptyAxesAttr = rewriter.getI64IntegerAttr(noopWithEmptyAxes);
   auto hipOp = mlir::hip::ReduceMeanOp::create(
       rewriter, loc, context, data, axesOperand, init, keepdimsAttr,
-      noopWithEmptyAxesAttr,
-      getConstantReducedAxesAttr(rewriter, data, axesOperand,
-                                 noopWithEmptyAxes));
+      noopWithEmptyAxesAttr, reducedAxes);
 
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
