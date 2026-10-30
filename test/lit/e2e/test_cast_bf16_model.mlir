@@ -14,7 +14,32 @@
 // CHECK-SAME: hipdnn.input_count = 4
 // CHECK-SAME: hipdnn.output_count = 4
 // CHECK: llvm.func @wrap_cast
-// CHECK-COUNT-4: llvm.call @wrap_cast
+//
+// Each cast passes (src, dst) as HIPDNN_EP_DATATYPE_* constants emitted right
+// before the call: FLOAT=0, HALF=1, BFLOAT16=2, INT64=4. Anchor on the output
+// allocation of each cast so the constants cannot match an earlier value.
+//
+// f32 -> bf16
+// CHECK: llvm.call @hipdnn_ep_alloc_output
+// CHECK: [[S0:%[0-9]+]] = llvm.mlir.constant(0 : i64) : i64
+// CHECK-NEXT: [[D0:%[0-9]+]] = llvm.mlir.constant(2 : i64) : i64
+// CHECK-NEXT: llvm.call @wrap_cast({{.*}}, [[S0]], [[D0]])
+// bf16 -> f32
+// CHECK: llvm.call @hipdnn_ep_alloc_output
+// CHECK: [[S1:%[0-9]+]] = llvm.mlir.constant(2 : i64) : i64
+// CHECK-NEXT: [[D1:%[0-9]+]] = llvm.mlir.constant(0 : i64) : i64
+// CHECK-NEXT: llvm.call @wrap_cast({{.*}}, [[S1]], [[D1]])
+// i64 -> bf16
+// CHECK: llvm.call @hipdnn_ep_alloc_output
+// CHECK: [[S2:%[0-9]+]] = llvm.mlir.constant(4 : i64) : i64
+// CHECK-NEXT: [[D2:%[0-9]+]] = llvm.mlir.constant(2 : i64) : i64
+// CHECK-NEXT: llvm.call @wrap_cast({{.*}}, [[S2]], [[D2]])
+// bf16 -> f16
+// CHECK: llvm.call @hipdnn_ep_alloc_output
+// CHECK: [[S3:%[0-9]+]] = llvm.mlir.constant(2 : i64) : i64
+// CHECK-NEXT: [[D3:%[0-9]+]] = llvm.mlir.constant(1 : i64) : i64
+// CHECK-NEXT: llvm.call @wrap_cast({{.*}}, [[S3]], [[D3]])
+// CHECK-NOT: llvm.call @wrap_cast
 // CHECK: llvm.func @inference_init
 // CHECK: llvm.func @inference_compute
 // CHECK: llvm.func @inference_cleanup
