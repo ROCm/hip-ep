@@ -30,10 +30,9 @@ func.func @gqa_duplicate_present_inits(
   // CHECK: hip.gqa(%{{.*}}) ins(
   // CHECK-SAME: outs(%[[EO]], %[[EKV]], %[[FRESH]] :
   %r:3 = hip.gqa(%ctx)
-      ins(%query, %key, %value, %past_key, %past_value, %seqlens_k, %total_seq_len :
-          tensor<1x1x4096xf16>, tensor<1x1x1024xf16>, tensor<1x1x1024xf16>,
-          tensor<1x8x127x128xf16>, tensor<1x8x127x128xf16>,
-          tensor<1xi32>, tensor<i32>)
+      ins(%query, %seqlens_k, %total_seq_len : tensor<1x1x4096xf16>, tensor<1xi32>, tensor<i32>)
+      key(%key : tensor<1x1x1024xf16>) value(%value : tensor<1x1x1024xf16>)
+      past_key(%past_key : tensor<1x8x127x128xf16>) past_value(%past_value : tensor<1x8x127x128xf16>)
       outs(%eo, %ekv, %ekv :
            tensor<1x1x4096xf16>, tensor<1x8x128x128xf16>, tensor<1x8x128x128xf16>)
       {num_heads = 32 : i64, kv_num_heads = 8 : i64,
@@ -92,10 +91,9 @@ func.func @no_duplicate_left_alone(
   %ev = tensor.empty() : tensor<1x8x128x128xf16>
   // CHECK-NOT: bufferization.alloc_tensor
   %r:3 = hip.gqa(%ctx)
-      ins(%query, %key, %value, %past_key, %past_value, %seqlens_k, %total_seq_len :
-          tensor<1x1x4096xf16>, tensor<1x1x1024xf16>, tensor<1x1x1024xf16>,
-          tensor<1x8x127x128xf16>, tensor<1x8x127x128xf16>,
-          tensor<1xi32>, tensor<i32>)
+      ins(%query, %seqlens_k, %total_seq_len : tensor<1x1x4096xf16>, tensor<1xi32>, tensor<i32>)
+      key(%key : tensor<1x1x1024xf16>) value(%value : tensor<1x1x1024xf16>)
+      past_key(%past_key : tensor<1x8x127x128xf16>) past_value(%past_value : tensor<1x8x127x128xf16>)
       outs(%eo, %ek, %ev :
            tensor<1x1x4096xf16>, tensor<1x8x128x128xf16>, tensor<1x8x128x128xf16>)
       {num_heads = 32 : i64, kv_num_heads = 8 : i64,
@@ -126,10 +124,9 @@ func.func @non_empty_duplicate_left_alone(
   %eo = tensor.empty() : tensor<1x1x4096xf16>
   // CHECK-NOT: bufferization.alloc_tensor
   %r:3 = hip.gqa(%ctx)
-      ins(%query, %key, %value, %past_key, %past_value, %seqlens_k, %total_seq_len :
-          tensor<1x1x4096xf16>, tensor<1x1x1024xf16>, tensor<1x1x1024xf16>,
-          tensor<1x8x127x128xf16>, tensor<1x8x127x128xf16>,
-          tensor<1xi32>, tensor<i32>)
+      ins(%query, %seqlens_k, %total_seq_len : tensor<1x1x4096xf16>, tensor<1xi32>, tensor<i32>)
+      key(%key : tensor<1x1x1024xf16>) value(%value : tensor<1x1x1024xf16>)
+      past_key(%past_key : tensor<1x8x127x128xf16>) past_value(%past_value : tensor<1x8x127x128xf16>)
       outs(%eo, %kv_buf, %kv_buf :
            tensor<1x1x4096xf16>, tensor<1x8x128x128xf16>, tensor<1x8x128x128xf16>)
       {num_heads = 32 : i64, kv_num_heads = 8 : i64,

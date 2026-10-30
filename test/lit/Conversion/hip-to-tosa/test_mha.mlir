@@ -25,7 +25,7 @@ func.func @mha_self(%ctx: !hip.context, %q: tensor<1x4x16xf16>,
                     %k: tensor<1x4x16xf16>, %v: tensor<1x4x16xf16>,
                     %o: tensor<1x4x16xf16>) -> tensor<1x4x16xf16>
     attributes {rock.kernel} {
-  %r = hip.multi_head_attention(%ctx) ins(%q, %k, %v : tensor<1x4x16xf16>, tensor<1x4x16xf16>, tensor<1x4x16xf16>)
+  %r = hip.multi_head_attention(%ctx) ins(%q : tensor<1x4x16xf16>) key(%k : tensor<1x4x16xf16>) value(%v : tensor<1x4x16xf16>)
       outs(%o : tensor<1x4x16xf16>)
       {num_heads = 2 : i64, scale = 3.53553391e-01 : f32}
       : tensor<1x4x16xf16>
@@ -39,7 +39,7 @@ func.func @mha_cross(%ctx: !hip.context, %q: tensor<1x2x16xf16>,
                      %k: tensor<1x4x16xf16>, %v: tensor<1x4x16xf16>,
                      %o: tensor<1x2x16xf16>) -> tensor<1x2x16xf16>
     attributes {rock.kernel} {
-  %r = hip.multi_head_attention(%ctx) ins(%q, %k, %v : tensor<1x2x16xf16>, tensor<1x4x16xf16>, tensor<1x4x16xf16>)
+  %r = hip.multi_head_attention(%ctx) ins(%q : tensor<1x2x16xf16>) key(%k : tensor<1x4x16xf16>) value(%v : tensor<1x4x16xf16>)
       outs(%o : tensor<1x2x16xf16>)
       {num_heads = 2 : i64}
       : tensor<1x2x16xf16>
@@ -68,7 +68,7 @@ func.func @mha_packed_kv(%ctx: !hip.context, %q: tensor<1x4x16xf16>,
                          %kv: tensor<1x4x2x2x8xf16>,
                          %o: tensor<1x4x16xf16>) -> tensor<1x4x16xf16>
     attributes {rock.kernel} {
-  %r = hip.multi_head_attention(%ctx) ins(%q, %kv : tensor<1x4x16xf16>, tensor<1x4x2x2x8xf16>)
+  %r = hip.multi_head_attention(%ctx) ins(%q : tensor<1x4x16xf16>) key(%kv : tensor<1x4x2x2x8xf16>)
       outs(%o : tensor<1x4x16xf16>)
       {num_heads = 2 : i64}
       : tensor<1x4x16xf16>
@@ -84,7 +84,7 @@ func.func @mha_qkv_bias(%ctx: !hip.context, %q: tensor<1x4x16xf16>,
                         %bias: tensor<48xf16>, %o: tensor<1x4x16xf16>)
     -> tensor<1x4x16xf16>
     attributes {rock.kernel} {
-  %r = hip.multi_head_attention(%ctx) ins(%q, %k, %v, %bias : tensor<1x4x16xf16>, tensor<1x4x16xf16>, tensor<1x4x16xf16>, tensor<48xf16>)
+  %r = hip.multi_head_attention(%ctx) ins(%q : tensor<1x4x16xf16>) key(%k : tensor<1x4x16xf16>) value(%v : tensor<1x4x16xf16>) bias(%bias : tensor<48xf16>)
       outs(%o : tensor<1x4x16xf16>)
       {num_heads = 2 : i64}
       : tensor<1x4x16xf16>
@@ -134,7 +134,7 @@ func.func @mha_unidirectional(%ctx: !hip.context, %q: tensor<1x4x16xf16>,
                               %k: tensor<1x4x16xf16>, %v: tensor<1x4x16xf16>,
                               %o: tensor<1x4x16xf16>) -> tensor<1x4x16xf16>
     attributes {rock.kernel} {
-  %r = hip.multi_head_attention(%ctx) ins(%q, %k, %v : tensor<1x4x16xf16>, tensor<1x4x16xf16>, tensor<1x4x16xf16>)
+  %r = hip.multi_head_attention(%ctx) ins(%q : tensor<1x4x16xf16>) key(%k : tensor<1x4x16xf16>) value(%v : tensor<1x4x16xf16>)
       outs(%o : tensor<1x4x16xf16>)
       {num_heads = 2 : i64, unidirectional = 1 : i64}
       : tensor<1x4x16xf16>
@@ -166,7 +166,7 @@ func.func @mha_poison_ctx(%q: tensor<1x4x16xf16>, %k: tensor<1x4x16xf16>,
     -> tensor<1x4x16xf16>
     attributes {rock.kernel} {
   %ctx = ub.poison : !hip.context
-  %r = hip.multi_head_attention(%ctx) ins(%q, %k, %v : tensor<1x4x16xf16>, tensor<1x4x16xf16>, tensor<1x4x16xf16>)
+  %r = hip.multi_head_attention(%ctx) ins(%q : tensor<1x4x16xf16>) key(%k : tensor<1x4x16xf16>) value(%v : tensor<1x4x16xf16>)
       outs(%o : tensor<1x4x16xf16>)
       {num_heads = 2 : i64}
       : tensor<1x4x16xf16>
@@ -178,7 +178,7 @@ func.func @mha_poison_ctx(%q: tensor<1x4x16xf16>, %k: tensor<1x4x16xf16>,
 func.func @no_rock_kernel(%ctx: !hip.context, %q: tensor<1x4x16xf16>,
                           %k: tensor<1x4x16xf16>, %v: tensor<1x4x16xf16>,
                           %o: tensor<1x4x16xf16>) -> tensor<1x4x16xf16> {
-  %r = hip.multi_head_attention(%ctx) ins(%q, %k, %v : tensor<1x4x16xf16>, tensor<1x4x16xf16>, tensor<1x4x16xf16>)
+  %r = hip.multi_head_attention(%ctx) ins(%q : tensor<1x4x16xf16>) key(%k : tensor<1x4x16xf16>) value(%v : tensor<1x4x16xf16>)
       outs(%o : tensor<1x4x16xf16>)
       {num_heads = 2 : i64}
       : tensor<1x4x16xf16>

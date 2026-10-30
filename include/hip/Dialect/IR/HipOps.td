@@ -4049,13 +4049,21 @@ def Hip_GqaOp : Hip_DpsOp_AutoReify<"gqa", [AttrSizedOperandSegments, OpStateOpI
     Example:
     ```mlir
     hip.gqa(%ctx)
-        ins(%query, %key, %value, %past_key, %past_value,
-            %seqlens_k, %total_seq_len :
-            tensor<1x128x4096xf16>, ...)
+        ins(%query, %seqlens_k, %total_seq_len :
+            tensor<1x1x4096xf16>, tensor<1xi32>, tensor<i32>)
+        key(%key : tensor<1x1x1024xf16>)
+        value(%value : tensor<1x1x1024xf16>)
+        past_key(%past_key : tensor<1x8x127x128xf16>)
+        past_value(%past_value : tensor<1x8x127x128xf16>)
         outs(%output, %present_key, %present_value :
-             tensor<1x128x4096xf16>, ...)
+             tensor<1x1x4096xf16>, tensor<1x8x128x128xf16>,
+             tensor<1x8x128x128xf16>)
         {num_heads = 32, kv_num_heads = 8, scale = 0.0884}
     ```
+
+    Optional operands are written as named clauses after `ins(...)` (and
+    `output_qk(...)` after `outs(...)`), so a printed op parses back to the
+    same operands whichever of them are present.
   }];
 
   let arguments = (ins
@@ -4128,41 +4136,25 @@ def Hip_GqaOp : Hip_DpsOp_AutoReify<"gqa", [AttrSizedOperandSegments, OpStateOpI
 
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(`
-        $query
-        ( `,` $key^ )?
-        ( `,` $value^ )?
-        ( `,` $past_key^ )?
-        ( `,` $past_value^ )?
-        `,` $seqlens_k `,` $total_seq_len
-        ( `,` $cos_cache^ )?
-        ( `,` $sin_cache^ )?
-        ( `,` $position_ids^ )?
-        ( `,` $attention_bias^ )?
-        ( `,` $head_sink^ )?
-        ( `,` $k_scale^ )?
-        ( `,` $v_scale^ )?
-        `:`
-        type($query)
-        ( `,` type($key)^ )?
-        ( `,` type($value)^ )?
-        ( `,` type($past_key)^ )?
-        ( `,` type($past_value)^ )?
-        `,` type($seqlens_k) `,` type($total_seq_len)
-        ( `,` type($cos_cache)^ )?
-        ( `,` type($sin_cache)^ )?
-        ( `,` type($position_ids)^ )?
-        ( `,` type($attention_bias)^ )?
-        ( `,` type($head_sink)^ )?
-        ( `,` type($k_scale)^ )?
-        ( `,` type($v_scale)^ )?
+        $query `,` $seqlens_k `,` $total_seq_len `:`
+        type($query) `,` type($seqlens_k) `,` type($total_seq_len)
     `)`
+    (`key` `(` $key^ `:` type($key) `)`)?
+    (`value` `(` $value^ `:` type($value) `)`)?
+    (`past_key` `(` $past_key^ `:` type($past_key) `)`)?
+    (`past_value` `(` $past_value^ `:` type($past_value) `)`)?
+    (`cos_cache` `(` $cos_cache^ `:` type($cos_cache) `)`)?
+    (`sin_cache` `(` $sin_cache^ `:` type($sin_cache) `)`)?
+    (`position_ids` `(` $position_ids^ `:` type($position_ids) `)`)?
+    (`attention_bias` `(` $attention_bias^ `:` type($attention_bias) `)`)?
+    (`head_sink` `(` $head_sink^ `:` type($head_sink) `)`)?
+    (`k_scale` `(` $k_scale^ `:` type($k_scale) `)`)?
+    (`v_scale` `(` $v_scale^ `:` type($v_scale) `)`)?
     `outs` `(`
-        $output `,` $present_key `,` $present_value
-        ( `,` $output_qk^ )?
-        `:`
+        $output `,` $present_key `,` $present_value `:`
         type($output) `,` type($present_key) `,` type($present_value)
-        ( `,` type($output_qk)^ )?
     `)`
+    (`output_qk` `(` $output_qk^ `:` type($output_qk) `)`)?
     attr-dict (`:` type($result_tensors)^)?
   }];
 
@@ -4342,9 +4334,9 @@ def Hip_MultiHeadAttentionOp : Hip_DpsOp_AutoReify<"multi_head_attention", [Attr
     Example (basic self-attention with separate Q/K/V):
     ```mlir
     hip.multi_head_attention(%ctx)
-        ins(%query, %key, %value :
-            memref<1x128x4096xf16, 1>, memref<1x128x4096xf16, 1>,
-            memref<1x128x4096xf16, 1>)
+        ins(%query : memref<1x128x4096xf16, 1>)
+        key(%key : memref<1x128x4096xf16, 1>)
+        value(%value : memref<1x128x4096xf16, 1>)
         outs(%output : memref<1x128x4096xf16, 1>)
         {num_heads = 32 : i64, scale = 0.0 : f32,
          mask_filter_value = -1.000000e+04 : f32, unidirectional = 0 : i64}
@@ -4397,40 +4389,20 @@ def Hip_MultiHeadAttentionOp : Hip_DpsOp_AutoReify<"multi_head_attention", [Attr
   );
 
   let assemblyFormat = [{
-    `(` $ctx `)` `ins` `(`
-        $query
-        ( `,` $key^ )?
-        ( `,` $value^ )?
-        ( `,` $bias^ )?
-        ( `,` $key_padding_mask^ )?
-        ( `,` $attention_bias^ )?
-        ( `,` $past_key^ )?
-        ( `,` $past_value^ )?
-        ( `,` $past_sequence_length^ )?
-        ( `,` $cache_indirection^ )?
-        `:`
-        type($query)
-        ( `,` type($key)^ )?
-        ( `,` type($value)^ )?
-        ( `,` type($bias)^ )?
-        ( `,` type($key_padding_mask)^ )?
-        ( `,` type($attention_bias)^ )?
-        ( `,` type($past_key)^ )?
-        ( `,` type($past_value)^ )?
-        ( `,` type($past_sequence_length)^ )?
-        ( `,` type($cache_indirection)^ )?
-    `)`
-    `outs` `(`
-        $output
-        ( `,` $present_key^ )?
-        ( `,` $present_value^ )?
-        ( `,` $qk^ )?
-        `:`
-        type($output)
-        ( `,` type($present_key)^ )?
-        ( `,` type($present_value)^ )?
-        ( `,` type($qk)^ )?
-    `)`
+    `(` $ctx `)` `ins` `(` $query `:` type($query) `)`
+    (`key` `(` $key^ `:` type($key) `)`)?
+    (`value` `(` $value^ `:` type($value) `)`)?
+    (`bias` `(` $bias^ `:` type($bias) `)`)?
+    (`key_padding_mask` `(` $key_padding_mask^ `:` type($key_padding_mask) `)`)?
+    (`attention_bias` `(` $attention_bias^ `:` type($attention_bias) `)`)?
+    (`past_key` `(` $past_key^ `:` type($past_key) `)`)?
+    (`past_value` `(` $past_value^ `:` type($past_value) `)`)?
+    (`past_sequence_length` `(` $past_sequence_length^ `:` type($past_sequence_length) `)`)?
+    (`cache_indirection` `(` $cache_indirection^ `:` type($cache_indirection) `)`)?
+    `outs` `(` $output `:` type($output) `)`
+    (`present_key` `(` $present_key^ `:` type($present_key) `)`)?
+    (`present_value` `(` $present_value^ `:` type($present_value) `)`)?
+    (`qk` `(` $qk^ `:` type($qk) `)`)?
     attr-dict (`:` type($result_tensors)^)?
   }];
 

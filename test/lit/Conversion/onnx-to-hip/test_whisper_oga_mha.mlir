@@ -45,8 +45,10 @@ module {
     // CHECK: %[[T:.*]] = arith.addi %[[P]], %[[S]]
     // CHECK: tensor.empty(%{{.*}}, %[[T]]) : tensor<?x6x?x64xf16>
     // CHECK: tensor.empty(%{{.*}}, %[[T]]) : tensor<?x6x?x64xf16>
-    // Positional operands: query, key, value, past_key, past_value, seqlens_k, total.
-    // CHECK: hip.gqa(%{{.*}}) ins(%{{[^,]+}}, %{{[^,]+}}, %{{[^,]+}}, %{{[^,]+}}, %{{[^,]+}}, %{{[^,]+}}, %{{[^,]+}} : {{.*}})
+    // Named operands: ins carries query, seqlens_k and total_seq_len; the
+    // optional key/value and past tensors use their keyword clauses.
+    // CHECK: hip.gqa(%{{.*}}) ins(%{{[^,]+}}, %{{[^,]+}}, %{{[^,]+}} :
+    // CHECK-SAME: key({{[^)]*}}) value({{[^)]*}}) past_key({{[^)]*}}) past_value({{[^)]*}}) outs(
     // CHECK-SAME: {kv_num_heads = 6 : i64, num_heads = 6 : i64
     %o, %pk2, %pv2 = "onnx.Custom"(%q, %k, %v, %n, %n, %n, %pk, %pv)
          <{function_name = "MultiHeadAttention"}>
@@ -57,9 +59,11 @@ module {
          -> (tensor<?x?x384xf16>, tensor<?x6x?x64xf16>, tensor<?x6x?x64xf16>)
 
     // Two cross-attention layers share the one seqlens_k.
-    // CHECK: hip.gqa(%{{.*}}) ins(%{{[^,]+}}, %{{[^,]+}}, %{{[^,]+}}, %[[CROSS]], %{{[^,]+}} : {{.*}})
+    // CHECK: hip.gqa(%{{.*}}) ins(%{{[^,]+}}, %[[CROSS]], %{{[^,]+}} :
+    // CHECK-SAME: key({{[^)]*}}) value({{[^)]*}}) outs(
     // CHECK-SAME: no_causal = true
-    // CHECK: hip.gqa(%{{.*}}) ins(%{{[^,]+}}, %{{[^,]+}}, %{{[^,]+}}, %[[CROSS]], %{{[^,]+}} : {{.*}})
+    // CHECK: hip.gqa(%{{.*}}) ins(%{{[^,]+}}, %[[CROSS]], %{{[^,]+}} :
+    // CHECK-SAME: key({{[^)]*}}) value({{[^)]*}}) outs(
     // CHECK-SAME: no_causal = true
     // CHECK-NOT: hip.multi_head_attention
     %c0 = "onnx.Custom"(%o, %ck0, %cv0, %n, %n, %n, %n, %n)

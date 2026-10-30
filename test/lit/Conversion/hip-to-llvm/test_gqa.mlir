@@ -21,10 +21,12 @@ module {
                                 %present_key: memref<1x8x128x128xf16, 1>,
                                 %present_value: memref<1x8x128x128xf16, 1>) {
     hip.gqa(%ctx)
-        ins(%query, %key, %value, %past_key, %past_value, %seqlens_k, %total_seq_len :
-            memref<1x1x4096xf16, 1>, memref<1x1x1024xf16, 1>, memref<1x1x1024xf16, 1>,
-            memref<1x8x127x128xf16, 1>, memref<1x8x127x128xf16, 1>,
-            memref<1x1xi32, 1>, memref<i32, 1>)
+        ins(%query, %seqlens_k, %total_seq_len :
+            memref<1x1x4096xf16, 1>, memref<1x1xi32, 1>, memref<i32, 1>)
+        key(%key : memref<1x1x1024xf16, 1>)
+        value(%value : memref<1x1x1024xf16, 1>)
+        past_key(%past_key : memref<1x8x127x128xf16, 1>)
+        past_value(%past_value : memref<1x8x127x128xf16, 1>)
         outs(%output, %present_key, %present_value :
              memref<1x1x4096xf16, 1>, memref<1x8x128x128xf16, 1>, memref<1x8x128x128xf16, 1>)
         {num_heads = 32 : i64, kv_num_heads = 8 : i64,
