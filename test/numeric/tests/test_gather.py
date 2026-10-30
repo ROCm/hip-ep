@@ -140,6 +140,24 @@ class TestGather:
         actual, expected = model_runner.run_sample(model, [ids])
         compare_outputs(actual, expected, atol=0)
 
+    @pytest.mark.parametrize(
+        "dtype,inner", [(np.float16, 32), (np.float32, 4), (np.float16, 12)]
+    )
+    def test_gather_middle_axis_negative_indices(self, model_runner, dtype, inner):
+        data_shape = [3, 50, inner]
+        tp = helper.np_dtype_to_tensor_dtype(np.dtype(dtype))
+        data = helper.make_tensor_value_info("data", tp, data_shape)
+        indices = helper.make_tensor_value_info("indices", TensorProto.INT64, [2, 5])
+        output = helper.make_tensor_value_info("output", tp, [3, 2, 5, inner])
+        node = helper.make_node("Gather", ["data", "indices"], ["output"], axis=1)
+        model = make_model_from_nodes([node], [data, indices], [output])
+
+        rng = np.random.default_rng(7)
+        x = rng.uniform(-1, 1, data_shape).astype(dtype)
+        ids = rng.integers(-50, 50, [2, 5], dtype=np.int64)
+        actual, expected = model_runner.run_sample(model, [x, ids])
+        compare_outputs(actual, expected, atol=0)
+
     @pytest.mark.parametrize("seq_len", SEQ_LENS)
     def test_gather_embedding_gpt_oss_shape(self, model_runner, seq_len):
         """Embedding lookup: [201088, 2880] f16 gather by [1, S] i64.

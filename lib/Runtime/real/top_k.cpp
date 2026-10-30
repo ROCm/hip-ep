@@ -46,12 +46,21 @@ int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
     return -1;
   }
 
+  void *workspace = nullptr;
+  size_t workspace_bytes = 0;
+  const size_t needed = hip_top_k_workspace_bytes(axis, rank, x_shape, k_val);
+  if (needed > 0 && hipdnn_ep_state_ensure_workspace(state, needed) == 0) {
+    workspace = hipdnn_ep_state_get_workspace(state);
+    workspace_bytes = hipdnn_ep_state_get_workspace_size(state);
+  }
+
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_top_k: axis=%lld, k=%lld, rank=%lld, largest=%lld, "
-      "sorted=%lld -> hip_top_k\n",
+      "sorted=%lld, workspace=%zu/%zu -> hip_top_k\n",
       (long long)axis, (long long)k_val, (long long)rank, (long long)largest,
-      (long long)sorted);
+      (long long)sorted, workspace_bytes, needed);
 
   return hip_top_k(stream, x, values, indices, axis, largest, sorted, rank,
-                   x_shape, k_val, static_cast<int>(element_size_bytes));
+                   x_shape, k_val, static_cast<int>(element_size_bytes),
+                   workspace, workspace_bytes);
 }
