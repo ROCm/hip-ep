@@ -36,6 +36,8 @@
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 #include <cstdint>
+#include <cstring>
+#include <cstdlib>
 #include <cstdio>
 
 static constexpr int kRmsNormBlockSize = 256;
@@ -125,6 +127,59 @@ __global__ void hip_rms_norm_kernel(const T *__restrict__ input,
       float g = rms_load(g_row + i);
       rms_store(y_row + i, v * inv_rms * g);
     }
+  }
+}
+
+// One logical wave per narrow row, eight rows per block. The shuffle tree
+// reproduces the original 256-thread VEC2 reduction: unused lanes contributed
+// zero, then offsets64/32 (width256) or32 (width128) joined each lane's pairs.
+// Keep loaded pairs in registers for the output pass; no block barriers/LDS.
+template <int NORM>
+__global__ __launch_bounds__(256)
+void hip_rms_norm_narrow_kernel(const __half *__restrict__ input,
+                                const __half *__restrict__ scale,
+                                __half *__restrict__ output, int64_t outer,
+                                int64_t scale_rows, float epsilon) {
+  static_assert(NORM == 128 || NORM == 256, "narrow VEC2 reduction width");
+  constexpr int kWave = 32;
+  constexpr int kRowsPerBlock = 8;
+  constexpr int kPairsPerLane = NORM / (2 * kWave);
+  const int lane = threadIdx.x % kWave;
+  const int64_t row = static_cast<int64_t>(blockIdx.x) * kRowsPerBlock +
+                      threadIdx.x / kWave;
+  if (row >= outer)
+    return;
+  const __half2 *x = reinterpret_cast<const __half2 *>(input + row * NORM);
+  const __half2 *g = reinterpret_cast<const __half2 *>(
+      scale + (scale_rows == 1 ? 0 : row % scale_rows) * NORM);
+  __half2 *y = reinterpret_cast<__half2 *>(output + row * NORM);
+  float2 values[kPairsPerLane];
+  float partial[kPairsPerLane];
+#pragma unroll
+  for (int i = 0; i < kPairsPerLane; ++i) {
+    values[i] = __half22float2(x[lane + i * kWave]);
+    // Match the existing per-thread half2 contribution before the tree.
+    float local_sumsq = 0.0f;
+    local_sumsq += values[i].x * values[i].x + values[i].y * values[i].y;
+    partial[i] = local_sumsq;
+  }
+  float sumsq;
+  if constexpr (NORM == 128)
+    sumsq = partial[0] + partial[1];
+  else
+    sumsq = (partial[0] + partial[2]) + (partial[1] + partial[3]);
+#pragma unroll
+  for (int offset = 16; offset > 0; offset >>= 1)
+    sumsq += __shfl_down(sumsq, offset, kWave);
+  sumsq = __shfl(sumsq, 0, kWave);
+  const float inv_rms = rsqrtf(sumsq / static_cast<float>(NORM) + epsilon);
+#pragma unroll
+  for (int i = 0; i < kPairsPerLane; ++i) {
+    float2 gain = __half22float2(g[lane + i * kWave]);
+    float2 result;
+    result.x = values[i].x * inv_rms * gain.x;
+    result.y = values[i].y * inv_rms * gain.y;
+    y[lane + i * kWave] = __float22half2_rn(result);
   }
 }
 
@@ -271,6 +326,31 @@ inline bool rms_can_vectorize(const void *input, const void *scale,
 
 } // namespace
 
+// Keep the narrow launch local to the target chip.
+static bool rms_narrow_enabled() {
+#ifdef _WIN32
+  char control[8];
+  const auto n = GetEnvironmentVariableA("HIPDNN_RMS_QWEN_NARROW", control,
+                                        sizeof(control));
+  if (n > 0 && n < sizeof(control) && std::atoi(control) == 0) return false;
+#else
+  const char *control = std::getenv("HIPDNN_RMS_QWEN_NARROW");
+  if (control && std::atoi(control) == 0) return false;
+#endif
+  thread_local int cached_device = -1;
+  thread_local bool supported = false;
+  int device = -1;
+  if (hipGetDevice(&device) != hipSuccess) return false;
+  if (device != cached_device) {
+    hipDeviceProp_t prop{};
+    supported = hipGetDeviceProperties(&prop, device) == hipSuccess &&
+                std::strncmp(prop.gcnArchName, "gfx1151", 7) == 0 &&
+                (prop.gcnArchName[7] == '\0' || prop.gcnArchName[7] == ':');
+    cached_device = device;
+  }
+  return supported;
+}
+
 extern "C" int hip_rms_norm(void *stream, const void *input, const void *scale,
                             void *output, int64_t outer, int64_t norm_size,
                             int64_t scale_rows, float epsilon, int hip_dtype) {
@@ -302,8 +382,33 @@ extern "C" int hip_rms_norm(void *stream, const void *input, const void *scale,
       hip_dtype, (long long)outer, (long long)norm_size, (long long)scale_rows,
       epsilon, vec2 ? "yes" : "no");
 
+  const bool narrow = vec2 && outer >= 128 &&
+                      (norm_size == 128 || norm_size == 256) &&
+                      rms_narrow_enabled();
+  CUSTOM_KERNELS_DEBUG_LOG(
+      "[custom_kernels] rms_narrow: dtype=%d outer=%lld width=%lld "
+      "scale_rows=%lld vec2=%d narrow=%d\n",
+      hip_dtype, (long long)outer, (long long)norm_size, (long long)scale_rows,
+      (int)vec2, (int)narrow);
   if (hip_dtype == HIP_DTYPE_FLOAT16) {
-    if (vec2) {
+    if (narrow) {
+      dim3 narrow_grid(static_cast<unsigned int>((outer + 7) / 8));
+      if (norm_size == 128) {
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_rms_norm_narrow_kernel<128>),
+                           narrow_grid, block, 0, hip_stream,
+                           static_cast<const __half *>(input),
+                           static_cast<const __half *>(scale),
+                           static_cast<__half *>(output), outer, scale_rows,
+                           epsilon);
+      } else {
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_rms_norm_narrow_kernel<256>),
+                           narrow_grid, block, 0, hip_stream,
+                           static_cast<const __half *>(input),
+                           static_cast<const __half *>(scale),
+                           static_cast<__half *>(output), outer, scale_rows,
+                           epsilon);
+      }
+    } else if (vec2) {
       hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_rms_norm_kernel<__half, true>),
                          grid, block, 0, hip_stream,
                          static_cast<const __half *>(input),

@@ -3038,3 +3038,13 @@ int wrap_hipStreamSynchronize(void *stream) {
   HIP_CHECK(hipStreamSynchronize(static_cast<hipStream_t>(stream)));
   return 0;
 }
+
+int wrap_swiglu_promoted(RuntimeState *state, void *gate, void *up,
+                         void *output, int64_t num_elements,
+                         int64_t data_type) {
+  if (!state || !gate || !up || !output || data_type != 1)
+    return -1;
+  MOCK_PRINT("[MOCK] wrap_swiglu_promoted(num_elements=%lld)\n",
+             (long long)num_elements);
+  return 0;
+}

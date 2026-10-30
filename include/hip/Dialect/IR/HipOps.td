@@ -2866,7 +2866,8 @@ def Hip_SwigluOp : Hip_DpsOp_AutoReify<"swiglu"> {
 
     The operands and output must have identical shapes; this operation does
     not perform broadcasting. The fused runtime kernel supports f16, f32,
-    bf16, and f64.
+    bf16, and f64. With promote_activation, f16 inputs and output use f32
+    sigmoid and multiply intermediates; only the final result rounds to f16.
 
     Example:
     ```mlir
@@ -2880,7 +2881,8 @@ def Hip_SwigluOp : Hip_DpsOp_AutoReify<"swiglu"> {
     Hip_ContextType:$ctx,
     Hip_TensorOrMemRef:$gate,
     Hip_TensorOrMemRef:$up,
-    Hip_TensorOrMemRef:$output
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<BoolAttr, "false">:$promote_activation
   );
 
   let assemblyFormat = [{

@@ -861,6 +861,11 @@ HIP_KERNEL_API int hip_swiglu(void *stream, const void *gate, const void *up,
                               void *output, int64_t num_elements,
                               int hip_dtype);
 
+// Half input/output, with FP32 activation intermediates.
+HIP_KERNEL_API int hip_swiglu_promoted(void *stream, const void *gate,
+                                      const void *up, void *output,
+                                      int64_t num_elements, int hip_dtype);
+
 /* =========================================================================
  * Softplus activation
  * =========================================================================
