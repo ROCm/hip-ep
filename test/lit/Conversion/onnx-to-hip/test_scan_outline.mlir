@@ -59,7 +59,7 @@ module {
   // CHECK: scf.yield
   // CHECK: %[[HAS_TAIL:.*]] = arith.cmpi ugt
   // CHECK: scf.if %[[HAS_TAIL]]
-  // CHECK: %[[SCAN:.*]]:2 = hip.scan(%{{.*}})
+  // CHECK: %[[SCAN:[^ ]+]]:2 = hip.scan(%{{[^)]+}})
   // CHECK-SAME: scan_inputs(%{{.*}} : tensor<?x4xf32>)
   // CHECK-SAME: captures(%{{.*}} : tensor<4xf32>)
   // CHECK-SAME: outs(%{{.*}}, %{{.*}} : tensor<4xf32>, tensor<?x4xf32>)
@@ -84,7 +84,10 @@ module {
   // CHECK: return
 
   // CHECK-LABEL: func.func private @main_graph_scan_body_n0
-  // CHECK-SAME: (!hip.context, tensor<4xf32>, tensor<4xf32>, tensor<4xf32>)
+  // CHECK-SAME: (%{{[^:]+}}: !hip.context,
+  // CHECK-SAME: %{{[^:]+}}: tensor<4xf32>,
+  // CHECK-SAME: %{{[^:]+}}: tensor<4xf32>,
+  // CHECK-SAME: %{{[^:]+}}: tensor<4xf32>)
   // CHECK-SAME: -> (tensor<4xf32>, tensor<4xf32>)
   // CHECK-SAME: attributes {hip.scan_num_state_variables = 1 : i32}
   // CHECK: "onnx.Add"

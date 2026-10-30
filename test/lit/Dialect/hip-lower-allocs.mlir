@@ -411,13 +411,17 @@ func.func @nested_if_yield_free(
   return
 }
 
-// When only one branch owns the yielded buffer, guard the free with the same
-// condition so the borrowed alternative is never released.
+// When only one branch owns the yielded buffer, the free is skipped when the
+// result is the borrowed alternative, so that buffer is never released.
 // CHECK-LABEL: func.func @nested_if_borrowed_else
-// CHECK: %[[VALUE:.*]] = scf.if %[[COND:.*]]
+// CHECK-SAME: %{{[^:]*}}: i1, %[[BORROWED:[^:]*]]: memref<8x8xf32>
+// CHECK: %[[VALUE:[^ ]+]] = scf.if
 // CHECK: hip.miopen.softmax
-// CHECK: scf.if %[[COND]]
-// CHECK: hip.free(%{{.*}}, %[[VALUE]]) : memref<8x8xf32>
+// CHECK: memref.extract_strided_metadata %[[VALUE]]
+// CHECK: memref.extract_strided_metadata %[[BORROWED]]
+// CHECK: arith.cmpi eq
+// CHECK: scf.if
+// CHECK-NEXT: hip.free(%{{.*}}, %[[VALUE]]) : memref<8x8xf32>
 // CHECK: return
 func.func @nested_if_borrowed_else(
     %ctx: !hip.context,

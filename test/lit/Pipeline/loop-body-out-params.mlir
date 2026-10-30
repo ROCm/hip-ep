@@ -64,7 +64,7 @@ module {
 }
 
 // OUTPARAMS-LABEL: func.func @main_graph
-// OUTPARAMS: %[[CALLER_SCRATCH:.*]] = memref.alloc() : memref<i64>
+// OUTPARAMS: %[[CALLER_SCRATCH:[^ ]+]] = memref.alloc() : memref<i64>
 // OUTPARAMS: hip.scan
 // OUTPARAMS-SAME: state_scratch(%[[CALLER_SCRATCH]] : memref<i64>)
 
@@ -77,9 +77,12 @@ module {
 // out-param at the terminator. The ordinary scan-output allocation is hoisted
 // directly into its out-param.
 // OUTPARAMS-LABEL: func.func private @main_graph_scan_body_n0
-// OUTPARAMS-SAME: %[[STATE_SCRATCH:.*]]: memref<i64>
-// OUTPARAMS-SAME: %[[STATE_OUT:.*]]: memref<i64> {bufferize.result}
-// OUTPARAMS-SAME: %[[SCAN_OUT:.*]]: memref<4xi64> {bufferize.result})
+// OUTPARAMS-SAME: (%{{[^:]+}}: !hip.context,
+// OUTPARAMS-SAME: %{{[^:]+}}: memref<i64>,
+// OUTPARAMS-SAME: %{{[^:]+}}: memref<3xi64>,
+// OUTPARAMS-SAME: %[[STATE_SCRATCH:[^:]+]]: memref<i64>
+// OUTPARAMS-SAME: %[[STATE_OUT:[^:]+]]: memref<i64> {bufferize.result}
+// OUTPARAMS-SAME: %[[SCAN_OUT:[^:]+]]: memref<4xi64> {bufferize.result})
 // OUTPARAMS-NOT: memref.alloc() : memref<i64>
 // OUTPARAMS-NOT: memref.alloc() : memref<4xi64>
 // OUTPARAMS: memref.copy %[[STATE_SCRATCH]], %[[STATE_OUT]]
