@@ -67,6 +67,8 @@ The default domain ID is zero and is omitted from textual IR. Additional domains
 
 `convert-linalg-to-loops` must run before host-scalar materialization: a rank-zero `linalg.fill` must become `memref.store` before the host-I/O candidate scan.
 
+`hip-optimize-memrefs` leaves buffers the host reads or writes (`memref.load` / `memref.store`, directly or through a view) out of its slot reuse. Op order is not execution order across the host/device boundary: a host store takes effect at once, while a preceding hip op is only enqueued. Two host-fed scalars sharing a slot let the second store overwrite the first before its consumer kernel runs; a GQA decode step read its step length instead of the total sequence length that way, nondeterministically.
+
 `hip-materialize-host-scalars` redirects small integer/index buffers with host accesses to host-mapped scratch. It runs after allocation-producing rewrites and before PoolAllocs so host-written memory never becomes a view into device-only pool storage.
 
 ### Pool-quality preconditions
