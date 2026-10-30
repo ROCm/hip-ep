@@ -1840,8 +1840,8 @@ HIP_KERNEL_API int hip_global_pool(
  *                     on the FP path (matches ORT _Min<float>).
  * - hip_reduce_prod : Mul op, init = 1.
  *
- * Supported hip_dtypes: HIP_DTYPE_INT32, HIP_DTYPE_INT64, HIP_DTYPE_FLOAT16
- * (FP16 accumulates in float, narrows on write).
+ * Supported hip_dtypes: HIP_DTYPE_INT32, HIP_DTYPE_INT64, HIP_DTYPE_FLOAT32,
+ * HIP_DTYPE_FLOAT16 (FP16 accumulates in float, narrows on write).
  */
 /* `inner_size`: see hip_reduce_sum (strided non-trailing-axis support). */
 HIP_KERNEL_API int hip_reduce_max(
@@ -2368,6 +2368,29 @@ HIP_KERNEL_API int hip_skip_rms_norm(
     float epsilon,
     int hip_dtype);
 
+/* hip_skip_rms_norm with a dtype per tensor (bias shares skip's). Besides the
+ * all-equal case, which forwards to hip_skip_rms_norm, the supported
+ * combination is input FLOAT32, skip FLOAT16, gamma FLOAT16, output FLOAT16,
+ * sum FLOAT32: an fp32 residual stream in an fp16 model, with the Casts on
+ * skip, gamma and output folded in. Pass sum_dtype = input_dtype when
+ * input_skip_bias_sum is null. Returns -1 for any other combination. */
+HIP_KERNEL_API int hip_skip_rms_norm_mixed(
+    void* stream,
+    const void* input,
+    const void* skip,
+    const void* gamma,
+    const void* bias,              // optional
+    void* output,
+    void* input_skip_bias_sum,     // optional
+    int64_t outer,
+    int64_t norm_size,
+    float epsilon,
+    int input_dtype,
+    int skip_dtype,
+    int gamma_dtype,
+    int output_dtype,
+    int sum_dtype);
+
 /* =========================================================================
  * Range (1-D sequence generation)
  * =========================================================================
@@ -2593,7 +2616,7 @@ HIP_KERNEL_API int hip_matmul_nbits_grouped_wmma(
  *                        e's rows start at expert_row_offsets[e] (int32,
  *                        device). A is [rows, K], output [rows, N].
  *   B, scales          : expert-major MatMulNBits layout
- *                        ([E, N, ceil(K/bs)*bs/2] packed, fp16 [E, N, ceil(K/bs)])
+ *                        ([E, N, ceil(K/2)] packed, fp16 [E, N, ceil(K/bs)])
  *   zero_points        : nullptr for symmetric (zp = 8); with zp_packed_u4 != 0
  *                        the packed uint8 tensor [E, N, ceil(ceil(K/bs)/2)],
  *                        otherwise fp16 [E, N, ceil(K/bs)]. Both give
@@ -3052,10 +3075,11 @@ HIP_KERNEL_API int hip_qmoe_build_row_tiles(
     int64_t split_rows, int64_t rows_small, int64_t rows_big, void* tiles_small,
     void* num_small, void* tiles_big, void* num_big);
 
-/* One-launch ragged W4A16 MatMulNBits over every row group/expert.
+/* One-launch ragged quantized MatMulNBits over every row group/expert.
  * input_row_ids may be null for already-sorted input rows; otherwise it maps
  * each sorted output row to a source input row (FC1 fused gather).
  * zero_points_u8 is already unpacked [E,N,ceil(K/block_size)] or null.
+ * block_size must be a power of two and at least 32.
  */
 HIP_KERNEL_API int hip_qmoe_ragged_matmul_nbits(
     void* stream,
@@ -3073,6 +3097,7 @@ HIP_KERNEL_API int hip_qmoe_ragged_matmul_nbits(
     int64_t num_experts,
     int64_t N,
     int64_t K,
+    int64_t bits,
     int64_t block_size,
     int64_t element_size_bytes);
 
@@ -3131,20 +3156,21 @@ HIP_KERNEL_API int hip_qmoe_reduce_sorted_pairs(
  *   input            - GPU [hidden]              fp16
  *   expert_indices   - GPU [k]                   int32 (from topk_routing)
  *   expert_weights   - GPU [k]                   fp16  (from topk_routing)
- *   fc1_weights      - GPU [E, 2*inter, K_pack]  uint8 (per-expert nibbles)
+ *   fc1_weights      - GPU [E, 2*inter, K_pack]  uint8
  *   fc1_scales       - GPU [E, 2*inter, n_blk]   fp16
- *   fc1_zero_points  - GPU [E, 2*inter, ceil(n_blk/2)] uint8 (packed nibbles)
+ *   fc1_zero_points  - GPU [E, 2*inter, packed blocks] uint8
  *   fc1_bias         - GPU [E, 2*inter] or null  fp16
  *   fc2_weights      - GPU [E, hidden, K_pack]   uint8
  *   fc2_scales       - GPU [E, hidden, n_blk]    fp16
- *   fc2_zero_points  - GPU [E, hidden, ceil(n_blk/2)] uint8
+ *   fc2_zero_points  - GPU [E, hidden, packed blocks] uint8
  *   fc2_bias         - GPU [E, hidden] or null   fp16
  *   slot_buf         - GPU [k, hidden]           fp16  (transient scratch)
  *   act_out          - GPU [k, inter]            fp16  (transient scratch)
  *   output           - GPU [hidden]              fp16  (final, weighted sum)
  *
  * Constraints: fp16 only (element_size_bytes == 2); hidden_size and
- * inter_size both multiples of 32; block_size > 0 and even.
+ * inter_size both multiples of 32; block_size is a power of two and at
+ * least 32.
  */
 HIP_KERNEL_API int hip_qmoe_decode_fused(
     void* stream,
@@ -3159,7 +3185,7 @@ HIP_KERNEL_API int hip_qmoe_decode_fused(
     void* act_out,
     void* output,
     int64_t hidden_size, int64_t inter_size,
-    int64_t k, int64_t block_size,
+    int64_t k, int64_t expert_weight_bits, int64_t block_size,
     float swiglu_alpha, float swiglu_beta, float swiglu_limit,
     int64_t element_size_bytes);
 
@@ -3744,6 +3770,21 @@ HIP_KERNEL_API int hip_gated_delta_net(
     float scale,
     int element_size_bytes);
 
+/* Exact int32 matmul. A is [batch, M, K]. b_batch_stride is 0 when every
+ * batch reuses one [K, N] matrix and K*N when B is batch-contiguous.
+ * Accumulates in int64 and stores a wrapping int32. transA/transB are not
+ * supported. Returns 0 on success. */
+HIP_KERNEL_API int hip_matmul_i32(
+    void* stream,
+    const void* a,
+    const void* b,
+    void* c,
+    int64_t m,
+    int64_t n,
+    int64_t k,
+    int64_t batch,
+    int64_t b_batch_stride);
+
 // com.microsoft DynamicSparseAttention, attention_mode=selected_only over the
 // main cache, fp16, no rotary / qk-norm / sink.
 //   query            [B, S, N*D]
@@ -3853,11 +3894,15 @@ HIP_KERNEL_API int hip_sparse_attention_indexer(
  * spatial_rank < 3 the trailing slots in `in_d`, `out_d`, `k`, `s` and `dil`
  * must be 1 and those in `p` must be 0 (the lowering does this).
  *
- * Accumulation is in float for every dtype, so a fp16 convolution with a
- * contraction extent in the thousands does not lose the reduction to rounding.
+ * Float dtypes accumulate in float, so a fp16 convolution with a contraction
+ * extent in the thousands does not lose the reduction to rounding.
+ * HIP_DTYPE_INT32 is a spatial-rank-2 convolution that accumulates in int64
+ * and stores a wrapping int32. Its trailing spatial slots must be the identity
+ * (extent / kernel / stride / dilation 1, pad 0).
  *
  * Supported hip_dtypes: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
- * HIP_DTYPE_BFLOAT16. All of input / weights / bias / output share the dtype.
+ * HIP_DTYPE_BFLOAT16, HIP_DTYPE_INT32. All of input / weights / bias / output
+ * share the dtype.
  * Returns: 0 on success, non-zero on failure.
  */
 HIP_KERNEL_API int hip_conv(
@@ -3920,6 +3965,12 @@ HIP_KERNEL_API int hip_conv_transpose(
     int64_t pad_top, int64_t pad_left,
     int64_t dil_h, int64_t dil_w,
     int64_t group);
+
+// fp16 GEMV out[N] = a[K] . B[K, N] with B row-major (N contiguous), fp32
+// accumulation. For narrow decode MatMuls such as an MoE router (N=128).
+// N must be a multiple of 8 and B 16-byte aligned; returns -1 otherwise.
+HIP_KERNEL_API int hip_gemv_f16_kn(void* stream, const void* a, const void* B,
+                                   void* out, int64_t K, int64_t N);
 
 /* =========================================================================
  * WMMA GEMM (Small-M Matrix Multiply via Wave Matrix Multiply-Accumulate)

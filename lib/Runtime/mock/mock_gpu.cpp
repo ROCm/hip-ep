@@ -466,6 +466,23 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
   return 0;
 }
 
+int wrap_matmul_i32(RuntimeState *state, const void *A, const void *B,
+                    void *output, int64_t M, int64_t N, int64_t K,
+                    int64_t batch_count, int64_t b_batch_stride) {
+  (void)A;
+  (void)B;
+  (void)output;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_matmul_i32\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_matmul_i32(M=%lld, N=%lld, K=%lld, batch=%lld, "
+             "b_batch_stride=%lld)\n",
+             (long long)M, (long long)N, (long long)K, (long long)batch_count,
+             (long long)b_batch_stride);
+  return 0;
+}
+
 // RocMLIR dispatch (hip.rocmlir). Empty for now: the generated IR builds the
 // kernargs buffer and passes the embedded GPU binary + launch geometry, but
 // this wrapper does not yet load the module or launch the kernel.
@@ -1723,6 +1740,30 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
              (long long)input_num_elements, (long long)gamma_num_elements,
              (long long)element_size_bytes, (double)epsilon,
              bias ? "yes" : "no", input_skip_bias_sum ? "yes" : "no");
+
+  return 0;
+}
+
+int wrap_skip_simplified_layer_norm_mixed(
+    RuntimeState *state, void *input, void *skip, void *gamma, void *bias,
+    void *output, void *input_skip_bias_sum, int64_t input_num_elements,
+    int64_t gamma_num_elements, int64_t input_element_size,
+    int64_t skip_element_size, int64_t gamma_element_size,
+    int64_t output_element_size, int64_t sum_element_size, float epsilon) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_skip_simplified_layer_norm_mixed\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_skip_simplified_layer_norm_mixed("
+             "input_num_elements=%lld, gamma_num_elements=%lld, "
+             "element_sizes=%lld/%lld/%lld/%lld/%lld, epsilon=%f, bias=%s, "
+             "input_skip_bias_sum=%s)\n",
+             (long long)input_num_elements, (long long)gamma_num_elements,
+             (long long)input_element_size, (long long)skip_element_size,
+             (long long)gamma_element_size, (long long)output_element_size,
+             (long long)sum_element_size, (double)epsilon, bias ? "yes" : "no",
+             input_skip_bias_sum ? "yes" : "no");
 
   return 0;
 }
