@@ -204,11 +204,11 @@ struct ConvConverter final : public OpConversionPattern<hip::ConvOp> {
     Type accType;
     if (elementType.isF16() || elementType.isBF16() || elementType.isF32())
       accType = rewriter.getF32Type();
-    else if (elementType.isInteger(32))
+    else if (elementType.isInteger(32) && spatialRank == 2)
       accType = rewriter.getI32Type();
     else
       return rewriter.notifyMatchFailure(
-          op, "only f16, bf16, f32, and i32 convolution are supported");
+          op, "only f16, bf16, f32, and 2D i32 convolution are supported");
 
     ArrayRef<int64_t> inputShape = inputType.getShape();
     ArrayRef<int64_t> weightShape = weightType.getShape();

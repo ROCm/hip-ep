@@ -105,6 +105,32 @@ class TestWhere:
         actual, expected = model_runner.run_sample(model, [cond, x, y])
         compare_outputs(actual, expected, atol=1e-4)
 
+    @pytest.mark.parametrize(
+        "dtype,cond_shape,out_shape",
+        [
+            (np.float16, [32], [1, 16392, 32]),
+            (np.int64, [6, 8], [2, 6, 8]),
+            (np.float32, [1, 6, 8], [3, 1, 6, 8]),
+            (np.float16, [4, 1, 8], [4, 6, 8]),
+        ],
+    )
+    def test_where_leading_broadcast_condition(
+        self, model_runner, dtype, cond_shape, out_shape
+    ):
+        rng = np.random.default_rng(45)
+        cond = rng.integers(0, 2, cond_shape).astype(np.bool_)
+        if np.issubdtype(dtype, np.integer):
+            x = rng.integers(-100, 100, out_shape).astype(dtype)
+            y = rng.integers(-100, 100, out_shape).astype(dtype)
+        else:
+            x = rng.uniform(-1, 1, out_shape).astype(dtype)
+            y = rng.uniform(-1, 1, out_shape).astype(dtype)
+        model = _make_where_model(
+            cond_shape, out_shape, out_shape, out_shape, dtype, cond_init=cond
+        )
+        actual, expected = model_runner.run_sample(model, [x, y])
+        compare_outputs(actual, expected, atol=0)
+
     @pytest.mark.parametrize("seq_len", SEQ_LENS)
     def test_where_qwen9b_rope_mask_shape(self, model_runner, seq_len):
         """RoPE mask Where as it appears in Qwen3.5-9B text.onnx.
