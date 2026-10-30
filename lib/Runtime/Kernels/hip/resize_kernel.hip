@@ -240,6 +240,61 @@ __global__ void resize_linear_2d_kernel(const T* __restrict__ input,
   output[tid] = from_float<T>(c0 * (1.0f - t0) + c1 * t0);
 }
 
+// Common image upsampling case: half-pixel coordinates with a uniform 2x or
+// 4x scale. The output-to-input mapping uses 32-bit integer quotient/remainder
+// operations, which compile to shifts and masks for Scale. The interior path
+// skips the four bounds checks needed only on the image border.
+template <typename T, uint32_t Scale>
+__global__ void resize_linear_2d_pow2_kernel(
+    const T* __restrict__ input, T* __restrict__ output, uint32_t N,
+    uint32_t C, uint32_t in0, uint32_t in1, uint32_t out0, uint32_t out1,
+    uint32_t total_outputs) {
+  uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+  if (tid >= total_outputs) return;
+
+  uint32_t plane = out0 * out1;
+  uint32_t n = tid / (C * plane);
+  uint32_t rem = tid - n * C * plane;
+  uint32_t c = rem / plane;
+  rem -= c * plane;
+  uint32_t o0 = rem / out1;
+  uint32_t o1 = rem - o0 * out1;
+
+  uint32_t r0 = o0 % Scale;
+  uint32_t r1 = o1 % Scale;
+  int32_t lo0 = static_cast<int32_t>(o0 / Scale) +
+                ((2 * r0 + 1 < Scale) ? -1 : 0);
+  int32_t lo1 = static_cast<int32_t>(o1 / Scale) +
+                ((2 * r1 + 1 < Scale) ? -1 : 0);
+  float t0 = static_cast<float>((2 * r0 + 1 + Scale) % (2 * Scale)) /
+             static_cast<float>(2 * Scale);
+  float t1 = static_cast<float>((2 * r1 + 1 + Scale) % (2 * Scale)) /
+             static_cast<float>(2 * Scale);
+
+  const T* base = input + (n * C + c) * (in0 * in1);
+  float c00;
+  float c01;
+  float c10;
+  float c11;
+  if (lo0 >= 0 && lo0 + 1 < static_cast<int32_t>(in0) && lo1 >= 0 &&
+      lo1 + 1 < static_cast<int32_t>(in1)) {
+    const T* row0 = base + static_cast<uint32_t>(lo0) * in1;
+    const T* row1 = row0 + in1;
+    c00 = to_float<T>(row0[lo1]);
+    c01 = to_float<T>(row0[lo1 + 1]);
+    c10 = to_float<T>(row1[lo1]);
+    c11 = to_float<T>(row1[lo1 + 1]);
+  } else {
+    c00 = fetch_2d(base, lo0, lo1, in0, in1);
+    c01 = fetch_2d(base, lo0, lo1 + 1, in0, in1);
+    c10 = fetch_2d(base, lo0 + 1, lo1, in0, in1);
+    c11 = fetch_2d(base, lo0 + 1, lo1 + 1, in0, in1);
+  }
+  float c0 = c00 * (1.0f - t1) + c01 * t1;
+  float c1 = c10 * (1.0f - t1) + c11 * t1;
+  output[tid] = from_float<T>(c0 * (1.0f - t0) + c1 * t0);
+}
+
 template <typename T>
 __global__ void resize_linear_3d_kernel(const T* __restrict__ input,
                                         T* __restrict__ output,
@@ -353,6 +408,28 @@ static bool get_integer_upsample_scale(int64_t in_dim, int64_t out_dim,
   return integer_scale > 0 && out_dim % in_dim == 0;
 }
 
+static bool can_launch_linear_pow2_2d(int64_t N, int64_t C, int64_t in0,
+                                      int64_t in1, int64_t out0, int64_t out1,
+                                      int coord_transform, float s0, float s1,
+                                      int64_t &scale) {
+  if ((coord_transform != 0 && coord_transform != 3) || out0 <= 1 ||
+      out1 <= 1 || N <= 0 || C <= 0 || in0 <= 0 || in1 <= 0 ||
+      out0 > UINT32_MAX || out1 > UINT32_MAX || in0 > UINT32_MAX ||
+      in1 > UINT32_MAX || N > UINT32_MAX || C > UINT32_MAX)
+    return false;
+  if (static_cast<uint64_t>(N) * static_cast<uint64_t>(C) *
+          static_cast<uint64_t>(out0) * static_cast<uint64_t>(out1) >
+      UINT32_MAX)
+    return false;
+  int64_t scale0 = 0;
+  int64_t scale1 = 0;
+  if (!get_integer_upsample_scale(in0, out0, s0, scale0) ||
+      !get_integer_upsample_scale(in1, out1, s1, scale1) || scale0 != scale1)
+    return false;
+  scale = scale0;
+  return scale == 2 || scale == 4;
+}
+
 template <typename T>
 static int launch(hipStream_t stream, const void* input, void* output,
                   int spatial_rank, int64_t N, int64_t C,
@@ -390,12 +467,38 @@ static int launch(hipStream_t stream, const void* input, void* output,
     }
   } else {
     if (spatial_rank == 2) {
-      hipLaunchKernelGGL(resize_linear_2d_kernel<T>,
-                         dim3(static_cast<unsigned>(grid)), dim3(block),
-                         0, stream,
-                         static_cast<const T*>(input), static_cast<T*>(output),
-                         N, C, in0, in1, out0, out1, coord_transform, s0, s1,
-                         total);
+      int64_t scale = 0;
+      if (can_launch_linear_pow2_2d(N, C, in0, in1, out0, out1,
+                                    coord_transform, s0, s1, scale)) {
+        constexpr int pow2Block = 256;
+        int64_t pow2Grid = (total + pow2Block - 1) / pow2Block;
+        if (scale == 2) {
+          hipLaunchKernelGGL(
+              (resize_linear_2d_pow2_kernel<T, 2>),
+              dim3(static_cast<unsigned>(pow2Grid)), dim3(pow2Block),
+              0, stream, static_cast<const T*>(input),
+              static_cast<T*>(output), static_cast<uint32_t>(N),
+              static_cast<uint32_t>(C), static_cast<uint32_t>(in0),
+              static_cast<uint32_t>(in1), static_cast<uint32_t>(out0),
+              static_cast<uint32_t>(out1), static_cast<uint32_t>(total));
+        } else {
+          hipLaunchKernelGGL(
+              (resize_linear_2d_pow2_kernel<T, 4>),
+              dim3(static_cast<unsigned>(pow2Grid)), dim3(pow2Block),
+              0, stream, static_cast<const T*>(input),
+              static_cast<T*>(output), static_cast<uint32_t>(N),
+              static_cast<uint32_t>(C), static_cast<uint32_t>(in0),
+              static_cast<uint32_t>(in1), static_cast<uint32_t>(out0),
+              static_cast<uint32_t>(out1), static_cast<uint32_t>(total));
+        }
+      } else {
+        hipLaunchKernelGGL(resize_linear_2d_kernel<T>,
+                           dim3(static_cast<unsigned>(grid)), dim3(block),
+                           0, stream,
+                           static_cast<const T*>(input),
+                           static_cast<T*>(output), N, C, in0, in1, out0, out1,
+                           coord_transform, s0, s1, total);
+      }
     } else {
       hipLaunchKernelGGL(resize_linear_3d_kernel<T>,
                          dim3(static_cast<unsigned>(grid)), dim3(block),
