@@ -4,17 +4,17 @@ Licensed under the MIT License.
 -->
 # Experimental Ring attention for Strix Halo
 
-`HIP_EP_ENABLE_RING_ATTENTION=ON` enables one Ring implementation with KV-sharing prefill and partitioned decode. The default is `OFF`, preserving existing GQA. The former three-way `HIP_EP_GQA_IMPL` option is removed; configuration rejects it rather than silently building the default.
+Ring is compiled into normal builds by default (`HIP_EP_ENABLE_RING_ATTENTION=ON`), but inference uses existing GQA unless explicitly opted in. Set this environment variable before starting the inference process:
 
-```bash
-python3 build.py --config Release --hip_arch gfx1151 \
-  --build_dir ../build/hip-ep-ring --install_dir ../install/hip-ep-ring \
-  --cmake_extra_defines HIP_EP_ENABLE_RING_ATTENTION=ON
+```powershell
+$env:HIPDNN_EP_USE_RING_ATTENTION = "1"
 ```
 
-Rebuild/install the compiler, runtime and native kernels together. Point the application at that installation's EP library and configuration, and use a fresh model compilation cache when switching builds. The ONNX GroupQueryAttention interface, runtime signature, cache layout and cache-update helper are unchanged. This is a build-time option, not an environment-variable selector.
+On Linux, use `export HIPDNN_EP_USE_RING_ATTENTION=1`. Unset the variable or set it to `0` to retain existing GQA. Only the exact value `1` enables Ring; the setting is cached on first use. Switching dispatch does not require rebuilding or recompiling models compiled with Ring support included. Older model compilation caches must be regenerated once to include the FP16 Ring entry point.
 
-The supported hardware is Strix Halo (`gfx1151`). Ring is compiled for both the dedicated `gfx1151` target and `gfx11-generic`, which includes Strix Halo in the release package. In either build, the runtime device guard enables Ring only on `gfx1151`; other GPUs retain existing GQA routing. The build option remains OFF by default. Broader Ring hardware support requires separate validation.
+`HIP_EP_ENABLE_RING_ATTENTION=OFF` excludes Ring from the build entirely. The former three-way `HIP_EP_GQA_IMPL` option is removed and rejected at configuration. Rebuild/install the compiler, runtime and native kernels together when changing build options. The ONNX interface and original GQA ABI remain unchanged.
+
+Ring supports Strix Halo (`gfx1151`). Its kernels are built into the dedicated `gfx1151` and release `gfx11-generic` libraries. Even with runtime opt-in, other GPUs and unsupported attention contracts retain existing GQA. Broader hardware support requires separate validation.
 
 ## Supported contract
 
@@ -51,9 +51,15 @@ Workspace sizing and launch dispatch use the same helper. Scratch is runtime-own
 
 ## Validation
 
-Windows CI preserves the default-GQA packages, then rebuilds with Ring ON and publishes a separate library overlay. The Ring job runs the ONNX Ring regressions on the StrixHalo runner using the `gfx11-generic` library. It requires the runtime support query to succeed, zero skipped or failed cases, and runtime diagnostics confirming both Ring prefill and decode dispatch. Results and diagnostics are uploaded as `ring-test-results`. This validates Strix Halo only; it is not a hardware test matrix for other gfx11 devices.
+Windows CI builds one package containing GQA and Ring. The existing kernel unit-test job runs one Ring executable on Strix Halo, directly calling the packaged kernels without enabling Ring for model inference. Its short tier covers prefill, decode, partition boundaries, workspace sizing and probability precision. Coverage tiers 2/3 extend through 128K/256K. The existing kernel-change filter controls PR execution; there is no second EP build or unconditional Ring ONNX job. Other architectures do not run this gfx1151-only kernel test.
 
-Use `HIPDNN_EP_STRICT=1`, disable ORT CPU fallback, and temporarily enable `HIPDNN_EP_DEBUG=1` to confirm `Ring GQA q=... past=... capacity=...` dispatch. Disable debug for timing. Numeric tests cover geometry, cache aliasing, prefill/decode transitions, partition boundaries, long contexts and probability underflow. LIT tests check FP16 selection and unchanged fallback routing with Ring ON and OFF. Kernel checks alone do not establish full-model accuracy or performance.
+The full ONNX suite remains available on demand. This command explicitly opts its child process into Ring and requires zero skips/failures plus diagnostics proving prefill and decode dispatch:
+
+```powershell
+python test/numeric/run_ring_ci.py --package <gpu-test-package> --output ring-results
+```
+
+For manual application checks, set `HIPDNN_EP_USE_RING_ATTENTION=1` and `HIPDNN_EP_STRICT=1`, disable ORT CPU fallback, and temporarily enable `HIPDNN_EP_DEBUG=1` to confirm `Ring GQA q=... past=... capacity=...` dispatch. Disable debug for timing. Numeric tests cover geometry, cache aliasing, prefill/decode transitions, partition boundaries, long contexts and probability underflow. LIT tests check FP16 selection and unchanged fallback routing with Ring ON and OFF. Kernel checks alone do not establish full-model accuracy or performance.
 
 See [PR #1366](https://github.com/ROCm/hip-ep/pull/1366) for benchmark tables, hardware, model, accuracy, timing and memory scope, and links to the archived measurement data. Each benchmark retains its recorded source revision and build configuration.
 

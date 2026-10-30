@@ -52,10 +52,3 @@ jobs:
       contents: read
       pull-requests: write
       actions: read
-
-  ring_test:
-    needs: build_real
-    uses: ./.github/workflows/windows-ring-test.yml
-    permissions:
-      contents: read
-      actions: read

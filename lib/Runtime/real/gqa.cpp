@@ -340,6 +340,16 @@ static int update_kv_cache(hipStream_t stream, const void *past_key,
 //===----------------------------------------------------------------------===//
 
 #if HIP_EP_RING_ENABLED != 0
+// Set before starting inference. Only an explicit "1" opts into Ring;
+// compiling the implementation never changes the default GQA selection.
+static bool gqa_ring_requested() {
+  static const bool enabled = [] {
+    const char *value = std::getenv("HIPDNN_EP_USE_RING_ATTENTION");
+    return value && std::strcmp(value, "1") == 0;
+  }();
+  return enabled;
+}
+
 // Return 1 for a valid call outside Ring's context bound, 0 on success, and
 // -1 on failure. Validate every writable range before updating either cache.
 static int gqa_forward_ring(RuntimeState *state, hipStream_t stream,
@@ -3242,11 +3252,11 @@ int wrap_group_query_attention_ring_f16(
   // Only the compiler's proven-FP16 calls use this entry. Recheck runtime
   // geometry/features/device before reading lengths or modifying the cache.
   // Any noncandidate retains the original entry point and its diagnostics.
-  if (state && query && output && present_key && present_value &&
-      !position_ids && !output_qk && qk_output == 0 && softcap == 0.0f &&
-      element_size_bytes == 2 && batch_size == 1 && num_heads == 24 &&
-      kv_num_heads == 4 && head_dim == 256 && seq_len_q >= 1 &&
-      seq_len_q <= HIP_EP_RING_MAX_QUERY_LENGTH &&
+  if (gqa_ring_requested() && state && query && output && present_key &&
+      present_value && !position_ids && !output_qk && qk_output == 0 &&
+      softcap == 0.0f && element_size_bytes == 2 && batch_size == 1 &&
+      num_heads == 24 && kv_num_heads == 4 && head_dim == 256 &&
+      seq_len_q >= 1 && seq_len_q <= HIP_EP_RING_MAX_QUERY_LENGTH &&
       seq_len_new_kv == seq_len_q && key && value && seqlens_k && !kv_bnsd &&
       k_quant_type == 0 && v_quant_type == 0 && !do_rotary && no_causal == 0 &&
       (scale == 0.0f || scale == 0.0625f) && local_window_size <= 0 &&

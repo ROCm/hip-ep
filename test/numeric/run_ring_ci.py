@@ -37,6 +37,7 @@ def worker(package, output):
     os.environ["PATH"] = str(bin_dir) + os.pathsep + os.environ.get("PATH", "")
     os.environ["HIPDNN_EP_STRICT"] = "1"
     os.environ["HIPDNN_EP_DEBUG"] = "1"
+    os.environ["HIPDNN_EP_USE_RING_ATTENTION"] = "1"
     ort_library = ctypes.CDLL(str(bin_dir / "onnxruntime.dll"))
     kernels = ctypes.CDLL(str(bin_dir / "custom_kernels_gfx11-generic.dll"))
     supported = kernels.hip_gqa_ring_device_supported

@@ -1141,8 +1141,12 @@ def test_gqa_ring_decode_regimes_probability_precision(model_runner, tmp_path, t
 def test_gqa_ring_prefill_probability_precision(model_runner, tmp_path, past, delta):
     """Tiny prefill probabilities must contribute when multiplied by large V."""
     import ctypes
+    import os
 
     import onnx
+
+    if os.environ.get("HIPDNN_EP_USE_RING_ATTENTION") != "1":
+        pytest.skip("requires explicit Ring runtime opt-in")
 
     # This regression tests Ring's precision contract. The unchanged default
     # prefill narrows probabilities to FP16 and does not implement this fix.
