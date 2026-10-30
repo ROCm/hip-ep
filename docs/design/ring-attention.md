@@ -55,6 +55,6 @@ Windows CI preserves the default-GQA packages, then rebuilds with Ring ON and pu
 
 Use `HIPDNN_EP_STRICT=1`, disable ORT CPU fallback, and temporarily enable `HIPDNN_EP_DEBUG=1` to confirm `Ring GQA q=... past=... capacity=...` dispatch. Disable debug for timing. Numeric tests cover geometry, cache aliasing, prefill/decode transitions, partition boundaries, long contexts and probability underflow. LIT tests check Ring-only type restrictions. Kernel checks alone do not establish full-model accuracy or performance.
 
-See [validation results](ring-attention-unified-results.md) for hardware, model, accuracy, timing and memory scope. Historical measurements in [the earlier main refresh](ring-attention-main-refresh.md) retain their original build options and are not results for the unified implementation.
+See [PR #1366](https://github.com/ROCm/hip-ep/pull/1366) for benchmark tables, hardware, model, accuracy, timing and memory scope, and links to the archived measurement data. Each benchmark retains its recorded source revision and build configuration.
 
 The kernels derive from contributor-supplied METIS exports, authorized for MIT contribution. WMMA score ownership and V swizzle also derive from hip-ep v8x (MIT).
