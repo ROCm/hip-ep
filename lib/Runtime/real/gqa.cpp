@@ -2741,13 +2741,15 @@ static int ensure_gqa_fp32_adapter_scratch(RuntimeState *state, size_t needed) {
   if (state->gqa_fp32_adapter_scratch) {
     if (state->stream && hipStreamSynchronize(state->stream) != hipSuccess)
       return -1;
-    if (hipFree(state->gqa_fp32_adapter_scratch) != hipSuccess)
+    if (hipdnn_ep_state_device_free(state, state->gqa_fp32_adapter_scratch) !=
+        hipSuccess)
       return -1;
     state->gqa_fp32_adapter_scratch = nullptr;
     state->gqa_fp32_adapter_scratch_size = 0;
   }
 
-  if (hipMalloc(&state->gqa_fp32_adapter_scratch, alloc_size) != hipSuccess) {
+  if (hipdnn_ep_state_device_alloc(state, &state->gqa_fp32_adapter_scratch,
+                                   alloc_size) != hipSuccess) {
     fprintf(stderr,
             "wrap_group_query_attention: fp32 adapter scratch alloc failed "
             "(%zu bytes)\n",

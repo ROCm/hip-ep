@@ -77,6 +77,11 @@ extern "C" hipError_t hipStreamSynchronize(hipStream_t stream) {
   return hipSuccess;
 }
 
+extern "C" hipError_t hipDeviceSynchronize() {
+  MOCK_PRINT("[MOCK] hipDeviceSynchronize()\n");
+  return hipSuccess;
+}
+
 extern "C" hipError_t hipEventCreate(hipEvent_t *event) {
   *event = malloc(sizeof(void *));
   return hipSuccess;
@@ -1265,6 +1270,29 @@ int wrap_resize(RuntimeState *state, void *input, void *output,
              (long long)out1, (long long)out2, (long long)mode,
              (long long)coord_transform, (long long)nearest_mode,
              input ? "yes" : "null", output ? "yes" : "null");
+  return 0;
+}
+
+int wrap_resize_scaled(RuntimeState *state, void *input, void *output,
+                       int64_t data_type, int64_t spatial_rank, int64_t N,
+                       int64_t C, int64_t in0, int64_t in1, int64_t in2,
+                       int64_t out0, int64_t out1, int64_t out2, int64_t mode,
+                       int64_t coord_transform, int64_t nearest_mode,
+                       double scale0, double scale1, double scale2) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_resize_scaled\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_resize_scaled(dtype=%s(%lld), rank=%lld, N=%lld, "
+             "C=%lld, in=[%lld,%lld,%lld], out=[%lld,%lld,%lld], mode=%lld, "
+             "coord_transform=%lld, nearest_mode=%lld, scales=[%g,%g,%g], "
+             "in=%s, out=%s)\n",
+             hipdnn_ep_datatype_name(data_type), (long long)data_type,
+             (long long)spatial_rank, (long long)N, (long long)C,
+             (long long)in0, (long long)in1, (long long)in2, (long long)out0,
+             (long long)out1, (long long)out2, (long long)mode,
+             (long long)coord_transform, (long long)nearest_mode, scale0,
+             scale1, scale2, input ? "yes" : "null", output ? "yes" : "null");
   return 0;
 }
 
@@ -2853,15 +2881,21 @@ int wrap_sign(RuntimeState *state, void *input, void *output,
 }
 
 int wrap_mod(RuntimeState *state, void *lhs, void *rhs, void *output,
-             int64_t num_elements, int64_t data_type, int64_t fmod) {
+             int64_t a_n, int64_t a_c, int64_t a_h, int64_t a_w, int64_t b_n,
+             int64_t b_c, int64_t b_h, int64_t b_w, int64_t out_n,
+             int64_t out_c, int64_t out_h, int64_t out_w, int64_t data_type,
+             int64_t fmod) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_mod\n");
     return -1;
   }
-  MOCK_PRINT("[MOCK] wrap_mod(num_elements=%lld, data_type=%s(%lld), "
-             "fmod=%lld)\n",
-             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
-             (long long)data_type, (long long)fmod);
+  MOCK_PRINT("[MOCK] wrap_mod a=[%lld,%lld,%lld,%lld] b=[%lld,%lld,%lld,%lld] "
+             "out=[%lld,%lld,%lld,%lld] dtype=%s fmod=%lld\n",
+             (long long)a_n, (long long)a_c, (long long)a_h, (long long)a_w,
+             (long long)b_n, (long long)b_c, (long long)b_h, (long long)b_w,
+             (long long)out_n, (long long)out_c, (long long)out_h,
+             (long long)out_w, hipdnn_ep_datatype_name(data_type),
+             (long long)fmod);
   return 0;
 }
 

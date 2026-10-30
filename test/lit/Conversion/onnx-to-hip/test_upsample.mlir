@@ -29,7 +29,7 @@ module {
   }
 
   // Classifier upsample: 65 -> 512, scale 7.890625, linear.
-  // floor(65 * 7.890625) = 512.
+  // floor(65 * 7.890625) = 512, which rounds, so the scales are kept.
   func.func @upsample_linear_65_to_512(%arg0: tensor<1x21x65x65xf32>)
       -> tensor<1x21x512x512xf32> {
     // CHECK-LABEL: func.func @upsample_linear_65_to_512
@@ -42,6 +42,7 @@ module {
     // CHECK-SAME: coord_transform = 1
     // CHECK-SAME: mode = 1
     // CHECK-SAME: nearest_mode = 2
+    // CHECK-SAME: scales = [1.000000e+00, 1.000000e+00, 7.890625, 7.890625]
     return %y : tensor<1x21x512x512xf32>
   }
 

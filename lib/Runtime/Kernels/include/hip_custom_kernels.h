@@ -1470,11 +1470,19 @@ HIP_KERNEL_API int hip_gather_elements(
     int element_size_bytes,
     int indices_element_size_bytes);
 
+/* Scratch hip_top_k wants for this shape, or 0 when it needs none (only the
+ * chunked two-pass path for long last-axis rows with 2 <= k <= 32 does). With
+ * a smaller or null workspace those rows take the one-pass kernel. */
+HIP_KERNEL_API size_t hip_top_k_workspace_bytes(int64_t axis, int64_t rank,
+                                                const int64_t* x_shape,
+                                                int64_t k);
+
 HIP_KERNEL_API int hip_top_k(void* stream, const void* data, void* values,
                              void* indices, int64_t axis, int64_t largest,
                              int64_t sorted, int64_t rank,
                              const int64_t* x_shape, int64_t k,
-                             int element_size_bytes);
+                             int element_size_bytes, void* workspace,
+                             size_t workspace_bytes);
 
 // Fill `output` with Normal(mean, scale) samples. `shape` has `rank` dims
 // (rank 0 is one element). `seed` selects the counter-hash generator.
@@ -1708,11 +1716,12 @@ HIP_KERNEL_API int hip_pool(
  *
  * Resamples the trailing spatial axes of an `(N, C, D_1, ..., D_k)` input
  * onto an `(N, C, O_1, ..., O_k)` output grid.  Per-axis scale is computed
- * inside the kernel as `scale = in_dim / out_dim`.  The (N, C) prefix is
- * pass-through.
+ * inside the kernel as `scale = in_dim / out_dim` (hip_resize_scaled below
+ * takes the ONNX scales instead).  The (N, C) prefix is pass-through.
  *
  *  mode:               0 = nearest, 1 = linear (N-linear)
- *  coord_transform:    0 = half_pixel, 1 = asymmetric, 2 = align_corners
+ *  coord_transform:    0 = half_pixel, 1 = asymmetric, 2 = align_corners,
+ *                      3 = pytorch_half_pixel
  *  nearest_mode:       0 = round_prefer_floor (only used when mode=nearest)
  *
  * Supported hip_dtypes: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
@@ -1732,6 +1741,25 @@ HIP_KERNEL_API int hip_resize(
     int mode,
     int coord_transform,
     int nearest_mode);
+
+/* hip_resize, but window axis i samples with ONNX scale `scale<i>`
+ * (output / input) when it is > 0.  ONNX uses the supplied scale, which
+ * differs from out_dim / in_dim when floor(in_dim * scale) rounds.
+ * align_corners ignores the scales.
+ */
+HIP_KERNEL_API int hip_resize_scaled(
+    void* stream,
+    const void* input,
+    void* output,
+    int hip_dtype,
+    int spatial_rank,
+    int64_t N, int64_t C,
+    int64_t in_d0, int64_t in_d1, int64_t in_d2,
+    int64_t out_d0, int64_t out_d1, int64_t out_d2,
+    int mode,
+    int coord_transform,
+    int nearest_mode,
+    float scale0, float scale1, float scale2);
 
 /* =========================================================================
  * GridSample (ONNX 4-D NCHW)
@@ -3139,6 +3167,9 @@ HIP_KERNEL_API int hip_qmoe_decode_fused(
 // HIPDNN_EP_MATMUL_DP4A). Additionally takes 4 scratch buffers: quantized
 // int8 activations + per-group scales for the fc1 input ([hidden]) and the
 // fc2 slot activations ([k, inter]). fp16 only; block_size a multiple of 32.
+// num_tokens > 1 serves a short burst (speculative verify) in the same
+// launches: input/output are [num_tokens, hidden], expert_indices/weights
+// [num_tokens, k], and every scratch buffer is num_tokens times larger.
 HIP_KERNEL_API int hip_qmoe_decode_fused_dp4a(
     void* stream,
     const void* input,
@@ -3156,7 +3187,7 @@ HIP_KERNEL_API int hip_qmoe_decode_fused_dp4a(
     int64_t hidden_size, int64_t inter_size,
     int64_t k, int64_t block_size,
     float swiglu_alpha, float swiglu_beta, float swiglu_limit,
-    int64_t element_size_bytes);
+    int64_t element_size_bytes, int64_t num_tokens);
 
 /* =========================================================================
  * com.amd QMoE Sub-Kernels (LatentMoE)
@@ -3449,6 +3480,36 @@ HIP_KERNEL_API int hip_linear_attention_decode(
     const void* value,
     const void* decay,
     const void* beta,
+    void* state,
+    void* output,
+    int64_t B,
+    int64_t seq_len,
+    int64_t Hq,
+    int64_t Hkv,
+    int64_t Nk,
+    int64_t dk,
+    int64_t dv,
+    float scale,
+    int64_t update_rule,
+    int64_t decay_per_key_dim,
+    int64_t beta_per_head,
+    int64_t type);
+
+// Short-burst linear attention: runs all seq_len time steps of the packed
+// [B, T, H*D] inputs in one launch with the state held in registers (fp32
+// between steps). Same parameters as hip_linear_attention_decode, but the
+// pointers are at time step 0 and the initial state is read from past_state
+// (null = zeros, may alias state), so no past->present copy is needed.
+// Returns 0 on success, 1 when the shape is not supported or
+// HIPDNN_EP_LA_COLS=0 (caller falls back), <0 on launch error.
+HIP_KERNEL_API int hip_linear_attention_burst(
+    void* stream,
+    const void* query,
+    const void* key,
+    const void* value,
+    const void* decay,
+    const void* beta,
+    const void* past_state,
     void* state,
     void* output,
     int64_t B,

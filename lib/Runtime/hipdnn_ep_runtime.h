@@ -1432,9 +1432,10 @@ int wrap_pool(RuntimeState *state, void *input, void *output, void *indices,
 // Resize wrapper (uses custom HIP kernel).
 // Spatial-axis-only resize over (N, C, D_1[, D_2[, D_3]]) input; (N, C)
 // pass-through.  `mode` (0=nearest, 1=linear), `coord_transform`
-// (0=half_pixel, 1=asymmetric, 2=align_corners) and `nearest_mode`
-// (0=round_prefer_floor) are pre-resolved at compile time from the ONNX
-// string attributes.  data_type: HIPDNN_EP_DATATYPE_* (FLOAT, HALF,
+// (0=half_pixel, 1=asymmetric, 2=align_corners, 3=pytorch_half_pixel) and
+// `nearest_mode` (0=round_prefer_floor) are pre-resolved at compile time
+// from the ONNX string attributes.  data_type: HIPDNN_EP_DATATYPE_* (FLOAT,
+// HALF,
 // BFLOAT16, DOUBLE).
 
 int wrap_resize(RuntimeState *state, void *input, void *output,
@@ -1442,6 +1443,15 @@ int wrap_resize(RuntimeState *state, void *input, void *output,
                 int64_t in0, int64_t in1, int64_t in2, int64_t out0,
                 int64_t out1, int64_t out2, int64_t mode,
                 int64_t coord_transform, int64_t nearest_mode);
+// wrap_resize, but window axis i samples with ONNX scale `scale<i>` (output /
+// input) when it is > 0 instead of out<i> / in<i>. Emitted when hip.resize
+// carries `scales`.
+int wrap_resize_scaled(RuntimeState *state, void *input, void *output,
+                       int64_t data_type, int64_t spatial_rank, int64_t N,
+                       int64_t C, int64_t in0, int64_t in1, int64_t in2,
+                       int64_t out0, int64_t out1, int64_t out2, int64_t mode,
+                       int64_t coord_transform, int64_t nearest_mode,
+                       double scale0, double scale1, double scale2);
 
 // GridSample (4-D NCHW). grid is (N, H_out, W_out, 2) with last dim (x, y).
 // mode: 0=nearest, 1=bilinear; padding_mode: 0=zeros, 1=border, 2=reflection;
@@ -2146,8 +2156,14 @@ int wrap_sign(RuntimeState *state, void *input, void *output,
 // Mod operation wrapper (element-wise modulo / fmod).
 //   fmod = 0  -> integer modulo (Python %); requires integer data_type
 //   fmod = 1  -> C fmod         ; requires float data_type
+// Operand shapes are passed as 4D (N, C, H, W), left-padded with 1 by the
+// compiler; ONNX multidirectional broadcast is materialised via hip_expand
+// when an operand does not already match the output shape.
 int wrap_mod(RuntimeState *state, void *lhs, void *rhs, void *output,
-             int64_t num_elements, int64_t data_type, int64_t fmod);
+             int64_t a_n, int64_t a_c, int64_t a_h, int64_t a_w, int64_t b_n,
+             int64_t b_c, int64_t b_h, int64_t b_w, int64_t out_n,
+             int64_t out_c, int64_t out_h, int64_t out_w, int64_t data_type,
+             int64_t fmod);
 
 // Slice operation wrapper (ONNX Slice native fallback).
 //
