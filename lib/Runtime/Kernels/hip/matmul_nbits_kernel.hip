@@ -4928,7 +4928,7 @@ static bool smallMWmmaPlan(int cfg, int64_t N, int64_t K, int64_t bits,
     p->group_shift = 0;
     while ((32LL << p->group_shift) < block_size) p->group_shift++;
     p->ngk = static_cast<int>((K + block_size - 1) / block_size);
-    p->b_row_bytes = p->ngk * static_cast<int>(block_size / 2);
+    p->b_row_bytes = static_cast<int>((K + 1) / 2);
     p->zp_mode = !zero_points ? 0 : zp_packed_u4 ? kSmallMZpU4 : kSmallMZpFp16;
     p->zp_stride = zp_packed_u4 ? (p->ngk + 1) / 2 : p->ngk;
     return true;

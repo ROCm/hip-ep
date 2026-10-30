@@ -4,6 +4,7 @@
  */
 
 #include "hip_custom_kernels.h"
+#include "hip_arch_compat.h"
 #include "debug_log.h"
 
 #include <hip/hip_runtime.h>
@@ -611,7 +612,10 @@ conv_tiled_kernel(const T *__restrict__ x, const T *__restrict__ w,
 // WMMA tiled kernel (fp16)
 // ---------------------------------------------------------------------------
 
-typedef _Float16 half16 __attribute__((ext_vector_type(16)));
+// One WMMA A/B fragment. Its width is HIPDNN_WMMA_FRAG_ELEMS: 16 on gfx11, 8
+// on the gfx12-style encoding gfx117x and gfx12xx use (see hip_arch_compat.h).
+typedef _Float16 half16
+    __attribute__((ext_vector_type(HIPDNN_WMMA_FRAG_ELEMS)));
 typedef _Float16 half8 __attribute__((ext_vector_type(8)));
 typedef float float8 __attribute__((ext_vector_type(8)));
 
@@ -643,35 +647,45 @@ __device__ __forceinline__ half8 loadRun8(const _Float16 *__restrict__ p,
   return v;
 }
 
-// RDNA3-family wave32 builtin. Where it is absent, trap: this file still has
-// to compile for other architectures, and a silent wrong answer is worse than
-// an abort that names the reason.
-#if !defined(__has_builtin) ||                                                 \
-    !__has_builtin(__builtin_amdgcn_wmma_f32_16x16x16_f16_w32)
+// Where neither WMMA encoding exists, trap: this file still has to compile for
+// other architectures, and a silent wrong answer is worse than an abort that
+// names the reason.
+#if !HIPDNN_HAS_WMMA
 static __device__ __forceinline__ float8 conv_wmma_unavailable(half16, half16,
                                                               float8 c) {
   __builtin_trap();
   return c;
 }
-#define __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, b, c)                    \
+#undef HIPDNN_WMMA_F32_16X16X16_F16
+#define HIPDNN_WMMA_F32_16X16X16_F16(a, b, c)                                  \
   conv_wmma_unavailable((a), (b), (c))
 #endif
 
 constexpr int kWmma = 16; // 16x16x16 tile, so BK is fixed at 16
 
+// This lane's A or B fragment out of a K-contiguous LDS row: all 16 k on gfx11,
+// where both lane halves carry the same data, or the half of them selected by
+// `pair` on the gfx12-style encoding. Either way it is 16-byte reads at a 0- or
+// 16-byte offset, so the rows' alignment carries over.
+__device__ __forceinline__ half16 loadWmmaFrag(const _Float16 *row, int pair) {
+  half16 f;
+  const _Float16 *p = row + hipdnn_wmma_k_off(pair);
+#pragma unroll
+  for (int h = 0; h < HIPDNN_WMMA_FRAG_ELEMS / 8; ++h)
+    *(reinterpret_cast<half8 *>(&f) + h) =
+        *reinterpret_cast<const half8 *>(p + 8 * h);
+  return f;
+}
+
 // The blocked GEMM again, with the register tile replaced by WMMA fragments.
-//
-// Fragment layout (wave32), matching the in-tree WMMA GEMM:
-//   a_frag[e] at lane m  = A_tile[m][k = e]      lane -> M row, element -> K
-//   b_frag[e] at lane n  = B_tile[k = e][n]      element -> K row, lane -> N
-//   c_frag[e]            -> row (e*2 + pair), col lane,  pair = (tid % 32) / 16
-// Lanes 0-15 and 16-31 must hold identical a/b data, which indexing by
-// `tid % 16` gives for free.
+// Lane % 16 is the M row of A and the N column of B and C; which K run a lane
+// loads and which output rows it holds depend on the encoding, and come from
+// loadWmmaFrag and hipdnn_wmma_acc_row.
 //
 // The LDS tiles are stored K-contiguous (`[tile][BK + pad]`) rather than
-// K-major as in the scalar kernel, because a fragment is 16 consecutive K for
-// one row or column -- that way loading one is two 16-byte reads instead of
-// sixteen 2-byte ones. The padding is what keeps that from serialising: it
+// K-major as in the scalar kernel, because a fragment is a run of consecutive K
+// for one row or column -- that way loading one is 16-byte reads instead of
+// 2-byte ones. The padding is what keeps that from serialising: it
 // makes the row stride an odd multiple of 16 bytes, so the 32 lanes of a
 // fragment load land on 32 distinct banks.
 // VEC selects the vectorised im2col stage. It is a template parameter rather
@@ -855,27 +869,18 @@ void conv_wmma_kernel(const __half *__restrict__ x,
 
     half16 aFrag[WM], bFrag[WN];
 #pragma unroll
-    for (int i = 0; i < WM; ++i) {
-      const _Float16 *p = &As[waveM * WM * kWmma + i * kWmma + lane16][0];
-      *reinterpret_cast<half8 *>(&aFrag[i]) =
-          *reinterpret_cast<const half8 *>(p);
-      *(reinterpret_cast<half8 *>(&aFrag[i]) + 1) =
-          *reinterpret_cast<const half8 *>(p + 8);
-    }
+    for (int i = 0; i < WM; ++i)
+      aFrag[i] = loadWmmaFrag(
+          &As[waveM * WM * kWmma + i * kWmma + lane16][0], pair);
 #pragma unroll
-    for (int j = 0; j < WN; ++j) {
-      const _Float16 *p = &Bs[bsRow(waveN * WN * kWmma + j * kWmma + lane16)];
-      *reinterpret_cast<half8 *>(&bFrag[j]) =
-          *reinterpret_cast<const half8 *>(p);
-      *(reinterpret_cast<half8 *>(&bFrag[j]) + 1) =
-          *reinterpret_cast<const half8 *>(p + 8);
-    }
+    for (int j = 0; j < WN; ++j)
+      bFrag[j] = loadWmmaFrag(
+          &Bs[bsRow(waveN * WN * kWmma + j * kWmma + lane16)], pair);
 #pragma unroll
     for (int i = 0; i < WM; ++i)
 #pragma unroll
       for (int j = 0; j < WN; ++j)
-        acc[i][j] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
-            aFrag[i], bFrag[j], acc[i][j]);
+        acc[i][j] = HIPDNN_WMMA_F32_16X16X16_F16(aFrag[i], bFrag[j], acc[i][j]);
     if (tid < kWmma) ks[cur ^ 1][tid] = makeKSlice(pr, kBase + kWmma + tid);
     __syncthreads();
     cur ^= 1;
@@ -890,8 +895,8 @@ void conv_wmma_kernel(const __half *__restrict__ x,
       if (o >= pr.Nout) continue;
 #pragma unroll
       for (int e = 0; e < 8; ++e) {
-        const int64_t m =
-            m0 + waveM * WM * kWmma + i * kWmma + e * 2 + pair;
+        const int64_t m = m0 + waveM * WM * kWmma + i * kWmma +
+                          hipdnn_wmma_acc_row(pair, e);
         if (m >= pr.MPerGroup) continue;
         const int64_t oc = g * pr.MPerGroup + m;
         const float bv = bias ? to_float<__half>(bias[oc]) : 0.0f;
@@ -926,7 +931,7 @@ void conv_wmma_kernel(const __half *__restrict__ x,
 //   * Padding is resolved once, at staging time. A window element outside the
 //     input is written as zero, so the inner loop has no bounds test at all --
 //     where conv_wmma_kernel tests every element of every tap.
-//   * The contraction is reordered. A WMMA fragment is 16 consecutive k, and
+//   * The contraction is reordered. A WMMA step contracts 16 consecutive k, and
 //     the 16 that are cheap to read here are 16 *channels* at one tap, not 16
 //     entries of the flattened (channel, tap) axis. So the k loop runs taps
 //     outside and channel slices inside, and the window is staged once per
@@ -1061,13 +1066,9 @@ conv_window_kernel(const __half *__restrict__ x, const __half *__restrict__ w,
 
       half16 aFrag[WM], bFrag[WN];
 #pragma unroll
-      for (int i = 0; i < WM; ++i) {
-        const _Float16 *p = &As[buf][waveM * WM * kWmma + i * kWmma + lane16][0];
-        *reinterpret_cast<half8 *>(&aFrag[i]) =
-            *reinterpret_cast<const half8 *>(p);
-        *(reinterpret_cast<half8 *>(&aFrag[i]) + 1) =
-            *reinterpret_cast<const half8 *>(p + 8);
-      }
+      for (int i = 0; i < WM; ++i)
+        aFrag[i] = loadWmmaFrag(
+            &As[buf][waveM * WM * kWmma + i * kWmma + lane16][0], pair);
 #pragma unroll
       for (int j = 0; j < WN; ++j) {
         // This lane's output position inside the tile, and the window element
@@ -1075,18 +1076,15 @@ conv_window_kernel(const __half *__restrict__ x, const __half *__restrict__ w,
         // tile row, so the row term is uniform and only the column varies.
         const int n = waveN * WN * kWmma + j * kWmma + lane16;
         const int oh = n / TW, ow = n - oh * TW;
-        const _Float16 *p = &win[((oh + tr) * WW + (ow + tc)) * kLdsK];
-        *reinterpret_cast<half8 *>(&bFrag[j]) =
-            *reinterpret_cast<const half8 *>(p);
-        *(reinterpret_cast<half8 *>(&bFrag[j]) + 1) =
-            *reinterpret_cast<const half8 *>(p + 8);
+        bFrag[j] =
+            loadWmmaFrag(&win[((oh + tr) * WW + (ow + tc)) * kLdsK], pair);
       }
 #pragma unroll
       for (int i = 0; i < WM; ++i)
 #pragma unroll
         for (int j = 0; j < WN; ++j)
-          acc[i][j] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
-              aFrag[i], bFrag[j], acc[i][j]);
+          acc[i][j] =
+              HIPDNN_WMMA_F32_16X16X16_F16(aFrag[i], bFrag[j], acc[i][j]);
       buf ^= 1; // next tap stages the buffer this one is not reading
     }
   }
@@ -1102,7 +1100,8 @@ conv_window_kernel(const __half *__restrict__ x, const __half *__restrict__ w,
     for (int i = 0; i < WM; ++i) {
 #pragma unroll
       for (int e = 0; e < 8; ++e) {
-        const int64_t m = m0 + waveM * WM * kWmma + i * kWmma + e * 2 + pair;
+        const int64_t m = m0 + waveM * WM * kWmma + i * kWmma +
+                          hipdnn_wmma_acc_row(pair, e);
         if (m >= pr.MPerGroup) continue;
         const int64_t oc = g * pr.MPerGroup + m;
         const float bv = bias ? to_float<__half>(bias[oc]) : 0.0f;
@@ -1654,6 +1653,98 @@ static int launch(hipStream_t stream, const void *x, const void *w,
 
 } // namespace
 
+// Rank-2 NCHW convolution accumulated in int64. The float conv kernel converts
+// every dtype through to_float, which is not an int32 dot product. Stores the
+// low 32 bits, matching an ONNX int32 accumulator that is allowed to wrap.
+__global__ void conv_i32_nchw_kernel(
+    const int32_t *__restrict__ input, const int32_t *__restrict__ weight,
+    const int32_t *__restrict__ bias, int32_t *__restrict__ output, int64_t N,
+    int64_t Cin, int64_t Cout, int64_t H, int64_t W, int64_t OH, int64_t OW,
+    int64_t KH, int64_t KW, int64_t SH, int64_t SW, int64_t PH, int64_t PW,
+    int64_t DH, int64_t DW, int64_t group) {
+  const int64_t total = N * Cout * OH * OW;
+  const int64_t stride =
+      static_cast<int64_t>(gridDim.x) * static_cast<int64_t>(blockDim.x);
+  const int64_t coutPerGroup = Cout / group;
+  const int64_t cinPerGroup = Cin / group;
+  for (int64_t idx =
+           static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+       idx < total; idx += stride) {
+    int64_t ow = idx % OW;
+    int64_t tmp = idx / OW;
+    int64_t oh = tmp % OH;
+    tmp /= OH;
+    int64_t oc = tmp % Cout;
+    int64_t n = tmp / Cout;
+    int64_t g = oc / coutPerGroup;
+    int64_t icBase = g * cinPerGroup;
+    int64_t acc = 0;
+    for (int64_t ic = 0; ic < cinPerGroup; ++ic) {
+      for (int64_t kh = 0; kh < KH; ++kh) {
+        int64_t ih = oh * SH - PH + kh * DH;
+        if (ih < 0 || ih >= H)
+          continue;
+        for (int64_t kw = 0; kw < KW; ++kw) {
+          int64_t iw = ow * SW - PW + kw * DW;
+          if (iw < 0 || iw >= W)
+            continue;
+          int64_t inOff = ((n * Cin + (icBase + ic)) * H + ih) * W + iw;
+          int64_t wOff = ((oc * cinPerGroup + ic) * KH + kh) * KW + kw;
+          acc += static_cast<int64_t>(input[inOff]) *
+                 static_cast<int64_t>(weight[wOff]);
+        }
+      }
+    }
+    if (bias)
+      acc += bias[oc];
+    output[((n * Cout + oc) * OH + oh) * OW + ow] = static_cast<int32_t>(acc);
+  }
+}
+
+static int launch_conv_i32(void *stream, const void *input, const void *weights,
+                           const void *bias, void *output, int spatial_rank,
+                           int64_t N, int64_t Cin, int64_t Cout, int64_t in_d0,
+                           int64_t in_d1, int64_t in_d2, int64_t out_d0,
+                           int64_t out_d1, int64_t out_d2, int64_t k0,
+                           int64_t k1, int64_t k2, int64_t s0, int64_t s1,
+                           int64_t s2, int64_t p0, int64_t p1, int64_t p2,
+                           int64_t dil0, int64_t dil1, int64_t dil2,
+                           int64_t group) {
+  if (spatial_rank != 2 || in_d2 != 1 || out_d2 != 1 || k2 != 1 || s2 != 1 ||
+      dil2 != 1 || p2 != 0) {
+    fprintf(stderr,
+            "[custom_kernels] hip_conv: i32 supports spatial rank 2 only\n");
+    return -1;
+  }
+  if (N < 0 || Cin < 0 || Cout < 0 || in_d0 < 0 || in_d1 < 0 || out_d0 < 0 ||
+      out_d1 < 0 || k0 < 1 || k1 < 1 || s0 < 1 || s1 < 1 || dil0 < 1 ||
+      dil1 < 1) {
+    fprintf(stderr, "[custom_kernels] hip_conv: invalid i32 geometry\n");
+    return -1;
+  }
+  if (N == 0 || Cout == 0 || out_d0 == 0 || out_d1 == 0)
+    return 0;
+
+  constexpr int kBlock = 256;
+  const int64_t total = N * Cout * out_d0 * out_d1;
+  int64_t grid = (total + kBlock - 1) / kBlock;
+  if (grid > 65535)
+    grid = 65535;
+  hipStream_t hipStream = static_cast<hipStream_t>(stream);
+  (void)hipGetLastError();
+  hipLaunchKernelGGL(
+      conv_i32_nchw_kernel, dim3(static_cast<unsigned>(grid)), dim3(kBlock), 0,
+      hipStream, static_cast<const int32_t *>(input),
+      static_cast<const int32_t *>(weights), static_cast<const int32_t *>(bias),
+      static_cast<int32_t *>(output), N, Cin, Cout, in_d0, in_d1, out_d0,
+      out_d1, k0, k1, s0, s1, p0, p1, dil0, dil1, group);
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess)
+    fprintf(stderr, "[custom_kernels] hip_conv i32 launch failed: %s\n",
+            hipGetErrorString(err));
+  return static_cast<int>(err);
+}
+
 extern "C" int hip_conv(void *stream, const void *input, const void *weights,
                         const void *bias, void *output, int hip_dtype,
                         int spatial_rank, int64_t N, int64_t Cin, int64_t Cout,
@@ -1679,6 +1770,11 @@ extern "C" int hip_conv(void *stream, const void *input, const void *weights,
             (long long)group, (long long)Cin, (long long)Cout);
     return -1;
   }
+  if (hip_dtype == HIP_DTYPE_INT32)
+    return launch_conv_i32(stream, input, weights, bias, output, spatial_rank,
+                           N, Cin, Cout, in_d0, in_d1, in_d2, out_d0, out_d1,
+                           out_d2, k0, k1, k2, s0, s1, s2, p0, p1, p2, dil0,
+                           dil1, dil2, group);
 
   ConvParams pr{};
   pr.N = N;

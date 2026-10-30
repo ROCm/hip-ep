@@ -634,8 +634,7 @@ bool run_case(const Shape& shape, Routing routing, bool gather, bool use_bias,
   }
 
   const int k_blocks = (shape.k + shape.block_size - 1) / shape.block_size;
-  const int blob_size = shape.block_size / 2;
-  const int weight_row_bytes = k_blocks * blob_size;
+  const int weight_row_bytes = (shape.k + 1) / 2;
   std::vector<uint8_t> weights(
       static_cast<size_t>(shape.experts) * shape.n * weight_row_bytes, 0);
   std::vector<__half> scales(
@@ -652,13 +651,14 @@ bool run_case(const Shape& shape, Routing routing, bool gather, bool use_bias,
             float_to_half(scale_value(expert, n, group));
         zero_points[expert_n * k_blocks + group] = static_cast<uint8_t>(
             3 + ((expert * 5 + n * 3 + group) % 10));
-        for (int offset = 0; offset < shape.block_size; offset += 2) {
-          const int k0 = group * shape.block_size + offset;
-          const uint8_t low = k0 < shape.k ? quant_value(expert, n, k0) : 8;
+        const int group_end =
+            std::min(shape.k, (group + 1) * shape.block_size);
+        for (int k0 = group * shape.block_size; k0 < group_end; k0 += 2) {
+          const uint8_t low = quant_value(expert, n, k0);
           const uint8_t high = k0 + 1 < shape.k
                                    ? quant_value(expert, n, k0 + 1)
                                    : 8;
-          weights[expert_n * weight_row_bytes + group * blob_size + offset / 2] =
+          weights[expert_n * weight_row_bytes + k0 / 2] =
               static_cast<uint8_t>(low | (high << 4));
         }
       }
@@ -675,11 +675,10 @@ bool run_case(const Shape& shape, Routing routing, bool gather, bool use_bias,
       const size_t expert_n = static_cast<size_t>(expert) * shape.n + n;
       for (int k = 0; k < shape.k; ++k) {
         const int group = k / shape.block_size;
-        const int offset = k - group * shape.block_size;
-        const uint8_t packed = weights[expert_n * weight_row_bytes +
-                                       group * blob_size + offset / 2];
-        const float q = (offset & 1) ? static_cast<float>(packed >> 4)
-                                     : static_cast<float>(packed & 0x0f);
+        const uint8_t packed =
+            weights[expert_n * weight_row_bytes + k / 2];
+        const float q = (k & 1) ? static_cast<float>(packed >> 4)
+                                : static_cast<float>(packed & 0x0f);
         const float zero_point =
             use_zero_points
                 ? static_cast<float>(zero_points[expert_n * k_blocks + group])
@@ -739,8 +738,8 @@ bool run_case(const Shape& shape, Routing routing, bool gather, bool use_bias,
       d_scales.get(),
       use_zero_points ? static_cast<const void*>(d_zero_points.get()) : nullptr,
       use_bias ? static_cast<const void*>(d_bias.get()) : nullptr,
-      output, shape.rows, shape.experts, shape.n, shape.k, shape.block_size,
-      sizeof(__half));
+      output, shape.rows, shape.experts, shape.n, shape.k, 4,
+      shape.block_size, sizeof(__half));
   if (status != static_cast<int>(hipSuccess)) {
     std::cerr << "FAIL launch status=" << status << " shape=" << shape.name
               << '\n';
@@ -791,7 +790,8 @@ bool run_case(const Shape& shape, Routing routing, bool gather, bool use_bias,
             expert_weights.part(c, 1),
             use_zero_points ? expert_weights.part(c, 2) : nullptr,
             use_bias ? expert_weights.part(c, 3) : nullptr, output, shape.rows,
-            shape.experts, shape.n, shape.k, shape.block_size, sizeof(__half));
+            shape.experts, shape.n, shape.k, 4, shape.block_size,
+            sizeof(__half));
       });
 
   std::cout << (pass ? "PASS" : "FAIL") << " relL2=" << metrics.rel_l2
@@ -1066,7 +1066,7 @@ PackedMatrix make_matrix(int experts, int n, int k, int block_size,
   matrix.k = k;
   matrix.block_size = block_size;
   matrix.k_blocks = (k + block_size - 1) / block_size;
-  matrix.row_bytes = matrix.k_blocks * (block_size / 2);
+  matrix.row_bytes = (k + 1) / 2;
   matrix.weights.resize(static_cast<size_t>(experts) * n * matrix.row_bytes, 0);
   matrix.scales.resize(static_cast<size_t>(experts) * n * matrix.k_blocks);
   matrix.zero_points.resize(
@@ -1082,21 +1082,17 @@ PackedMatrix make_matrix(int experts, int n, int k, int block_size,
                 ((expert * 3 + col + group + seed) % 5)));
         matrix.zero_points[expert_col * matrix.k_blocks + group] =
             static_cast<uint8_t>(2 + ((expert + col * 3 + group + seed) % 12));
-        for (int offset = 0; offset < block_size; offset += 2) {
-          const int k0 = group * block_size + offset;
-          const uint8_t low = k0 < k
-                                  ? static_cast<uint8_t>(
-                                        (expert * 7 + col * 5 + k0 * 3 + seed) &
-                                        0x0f)
-                                  : 8;
+        const int group_end = std::min(k, (group + 1) * block_size);
+        for (int k0 = group * block_size; k0 < group_end; k0 += 2) {
+          const uint8_t low = static_cast<uint8_t>(
+              (expert * 7 + col * 5 + k0 * 3 + seed) & 0x0f);
           const uint8_t high = k0 + 1 < k
                                    ? static_cast<uint8_t>(
                                          (expert * 7 + col * 5 +
                                           (k0 + 1) * 3 + seed) &
                                          0x0f)
                                    : 8;
-          matrix.weights[expert_col * matrix.row_bytes +
-                         group * (block_size / 2) + offset / 2] =
+          matrix.weights[expert_col * matrix.row_bytes + k0 / 2] =
               static_cast<uint8_t>(low | (high << 4));
         }
       }
@@ -1109,18 +1105,15 @@ PackedMatrix make_matrix(int experts, int n, int k, int block_size,
 
 void cpu_matrix_row(const __half* input, int expert,
                     const PackedMatrix& matrix, __half* output) {
-  const int blob_size = matrix.block_size / 2;
   for (int col = 0; col < matrix.n; ++col) {
     const size_t expert_col = static_cast<size_t>(expert) * matrix.n + col;
     float accumulator = 0.0f;
     for (int k = 0; k < matrix.k; ++k) {
       const int group = k / matrix.block_size;
-      const int offset = k - group * matrix.block_size;
       const uint8_t packed =
-          matrix.weights[expert_col * matrix.row_bytes + group * blob_size +
-                         offset / 2];
-      const float q = (offset & 1) ? static_cast<float>(packed >> 4)
-                                   : static_cast<float>(packed & 0x0f);
+          matrix.weights[expert_col * matrix.row_bytes + k / 2];
+      const float q = (k & 1) ? static_cast<float>(packed >> 4)
+                              : static_cast<float>(packed & 0x0f);
       const float weight =
           (q - static_cast<float>(
                    matrix.zero_points[expert_col * matrix.k_blocks + group])) *
@@ -1129,6 +1122,88 @@ void cpu_matrix_row(const __half* input, int expert,
     }
     output[col] = float_to_half(accumulator + half_to_float(matrix.bias[expert_col]));
   }
+}
+
+bool run_grouped_partial_block_case(hipStream_t stream) {
+  constexpr int experts = 2;
+  constexpr int rows = 3;
+  constexpr int n = 64;
+  constexpr int k = 96;
+  constexpr int block_size = 64;
+  constexpr int tile_rows = 16;
+  const PackedMatrix matrix = make_matrix(experts, n, k, block_size, 13);
+
+  std::vector<__half> input(static_cast<size_t>(rows) * k);
+  for (int row = 0; row < rows; ++row)
+    for (int col = 0; col < k; ++col)
+      input[static_cast<size_t>(row) * k + col] =
+          float_to_half(input_value(row + 7, col));
+
+  const std::vector<int32_t> expert_offsets = {0, 1, 3};
+  const std::vector<int32_t> row_tiles = {0, 0, 1, 1, 0, 2};
+  const std::vector<int32_t> num_row_tiles = {2};
+  std::vector<__half> expected(static_cast<size_t>(rows) * n);
+  for (int row = 0; row < rows; ++row) {
+    const int expert = row < expert_offsets[1] ? 0 : 1;
+    for (int col = 0; col < n; ++col) {
+      const size_t expert_col = static_cast<size_t>(expert) * n + col;
+      float accumulator = 0.0f;
+      for (int col_k = 0; col_k < k; ++col_k) {
+        const uint8_t packed =
+            matrix.weights[expert_col * matrix.row_bytes + col_k / 2];
+        const float q = (col_k & 1) ? static_cast<float>(packed >> 4)
+                                    : static_cast<float>(packed & 0x0f);
+        const float scale = half_to_float(
+            matrix.scales[expert_col * matrix.k_blocks +
+                          col_k / block_size]);
+        accumulator += half_to_float(input[static_cast<size_t>(row) * k +
+                                           col_k]) *
+                       (q - 8.0f) * scale;
+      }
+      expected[static_cast<size_t>(row) * n + col] =
+          float_to_half(accumulator + half_to_float(matrix.bias[expert_col]));
+    }
+  }
+
+  DeviceBuffer<__half> d_input(input.size());
+  DeviceBuffer<uint8_t> d_weights(matrix.weights.size());
+  DeviceBuffer<__half> d_scales(matrix.scales.size());
+  DeviceBuffer<__half> d_bias(matrix.bias.size());
+  DeviceBuffer<int32_t> d_expert_offsets(expert_offsets.size());
+  DeviceBuffer<int32_t> d_row_tiles(row_tiles.size());
+  DeviceBuffer<int32_t> d_num_row_tiles(num_row_tiles.size());
+  DeviceBuffer<__half> d_output(expected.size());
+  upload(d_input, input);
+  upload(d_weights, matrix.weights);
+  upload(d_scales, matrix.scales);
+  upload(d_bias, matrix.bias);
+  upload(d_expert_offsets, expert_offsets);
+  upload(d_row_tiles, row_tiles);
+  upload(d_num_row_tiles, num_row_tiles);
+
+  const int status = hip_matmul_nbits_wmma_smallm_grouped(
+      reinterpret_cast<void*>(stream), -1, d_input.get(), d_weights.get(),
+      d_scales.get(), nullptr, /*zp_packed_u4=*/1, d_bias.get(),
+      d_expert_offsets.get(), d_row_tiles.get(), d_num_row_tiles.get(),
+      d_output.get(), num_row_tiles[0], tile_rows, n, k, 4, block_size,
+      sizeof(__half));
+  if (status != static_cast<int>(hipSuccess))
+    return false;
+  HIP_CHECK(hipStreamSynchronize(stream));
+
+  std::vector<__half> actual(expected.size());
+  HIP_CHECK(hipMemcpy(actual.data(), d_output.get(),
+                      actual.size() * sizeof(__half), hipMemcpyDeviceToHost));
+  const Metrics metrics = compare(actual, expected);
+  const bool pass =
+      metrics.finite && metrics.max_abs <= 0.05 && metrics.rel_l2 <= 0.01;
+  std::cout << (pass ? "PASS" : "FAIL") << " relL2=" << metrics.rel_l2
+            << " n=" << actual.size() << " shape=grouped_partial_block"
+            << " maxAbs=" << metrics.max_abs << '\n';
+  ResultRow result("grouped_partial_block",
+                   "fixed:K=96 block_size=64 packed_stride=48");
+  result.finish(metrics.rel_l2, pass);
+  return pass;
 }
 
 bool run_pipeline_case(hipStream_t stream) {
@@ -1321,7 +1396,7 @@ bool run_pipeline_case(hipStream_t stream) {
         d_groups.get(), d_group_count.get(), d_fc1_queue.get(),
         d_fc1_weights.get(), d_fc1_scales.get(), d_fc1_zero_points.get(),
         d_fc1_bias.get(), d_fc1_output.get(), pairs, experts, fusion_inter,
-        hidden, block_size, sizeof(__half));
+        hidden, 4, block_size, sizeof(__half));
     if (status != static_cast<int>(hipSuccess)) return false;
     status = hip_qmoe_swiglu(reinterpret_cast<void*>(stream), d_fc1_output.get(),
                              d_act.get(), pairs, inter, alpha, beta, limit,
@@ -1331,7 +1406,7 @@ bool run_pipeline_case(hipStream_t stream) {
         reinterpret_cast<void*>(stream), d_act.get(), nullptr, d_groups.get(),
         d_group_count.get(), d_fc2_queue.get(), d_fc2_weights.get(),
         d_fc2_scales.get(), d_fc2_zero_points.get(), d_fc2_bias.get(),
-        d_fc2_output.get(), pairs, experts, hidden, inter, block_size,
+        d_fc2_output.get(), pairs, experts, hidden, inter, 4, block_size,
         sizeof(__half));
     if (status != static_cast<int>(hipSuccess)) return false;
     status = hip_qmoe_reduce_sorted_pairs(
@@ -1464,11 +1539,12 @@ int main(int argc, char** argv) {
   constexpr int task_policy_cases = 2;
   constexpr int launcher_cases = 1;
   constexpr int pipeline_cases = 1;
+  constexpr int grouped_partial_block_cases = 1;
   std::cout << "qmoe_ragged_mm coverage=" << coverage
             << " cases=" << shape_count * category_count + model_shape_cases +
                                adaptive_shape_cases + descriptor_cases +
                                task_policy_cases + launcher_cases +
-                               pipeline_cases
+                               pipeline_cases + grouped_partial_block_cases
             << '\n';
 
   hipStream_t stream = nullptr;
@@ -1516,6 +1592,7 @@ int main(int argc, char** argv) {
                all_pass;
   }
   all_pass = run_pipeline_case(stream) && all_pass;
+  all_pass = run_grouped_partial_block_case(stream) && all_pass;
   HIP_CHECK(hipStreamDestroy(stream));
 
   std::cout << (all_pass ? "ALL PASS" : "SOME FAIL") << '\n';
