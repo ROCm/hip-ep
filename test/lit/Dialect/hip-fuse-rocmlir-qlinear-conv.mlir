@@ -287,3 +287,40 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x2x3x3xui8>)
           pads = [0, 0, 0, 0], strides = [1, 1]} : tensor<1x2x3x3xui8>
   return %y : tensor<1x2x3x3xui8>
 }
+
+// -----
+
+// The i32 accumulator of hip.quant_conv is its init, so the quantized conv
+// is outlined. A conv with i32 inputs keeps its HIP kernel.
+
+// CHECK-LABEL: func.func @rocMlir
+// CHECK: hip.quant_conv
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK: hip.rocmlir(%{{.*}}) @rocMlir
+// CHECK: hip.conv(%{{.*}}) ins(%{{.*}}, %{{.*}} : tensor<1x2x3x3xi32>, tensor<2x2x1x1xi32>)
+// CHECK-NOT: hip.rocmlir
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x2x3x3xui8>,
+                      %xi: tensor<1x2x3x3xi32>, %wi: tensor<2x2x1x1xi32>)
+    -> (tensor<1x2x3x3xui8>, tensor<1x2x3x3xi32>) {
+  %xs = hip.constant {value = dense<0.5> : tensor<f32>} : tensor<f32>
+  %xz = hip.constant {value = dense<0> : tensor<ui8>} : tensor<ui8>
+  %w = hip.constant {value = dense<1> : tensor<2x2x1x1xi8>} : tensor<2x2x1x1xi8>
+  %ws = hip.constant {value = dense<0.25> : tensor<f32>} : tensor<f32>
+  %wz = hip.constant {value = dense<0> : tensor<i8>} : tensor<i8>
+  %ys = hip.constant {value = dense<0.0625> : tensor<f32>} : tensor<f32>
+  %yz = hip.constant {value = dense<0> : tensor<ui8>} : tensor<ui8>
+  %e = tensor.empty() : tensor<1x2x3x3xui8>
+  %y = hip.qlinear_conv(%ctx) ins(%x, %xs, %xz, %w, %ws, %wz, %ys, %yz :
+         tensor<1x2x3x3xui8>, tensor<f32>, tensor<ui8>, tensor<2x2x1x1xi8>,
+         tensor<f32>, tensor<i8>, tensor<f32>, tensor<ui8>)
+         outs(%e : tensor<1x2x3x3xui8>)
+         {dilations = [1, 1], group = 1 : i64, kernel_shape = [1, 1],
+          pads = [0, 0, 0, 0], strides = [1, 1]} : tensor<1x2x3x3xui8>
+  %ei = tensor.empty() : tensor<1x2x3x3xi32>
+  %c = hip.conv(%ctx) ins(%xi, %wi : tensor<1x2x3x3xi32>, tensor<2x2x1x1xi32>)
+         outs(%ei : tensor<1x2x3x3xi32>)
+         {dilations = [1, 1], group = 1 : i64, kernel_shape = [1, 1],
+          pads = [0, 0, 0, 0], strides = [1, 1]} : tensor<1x2x3x3xi32>
+  return %y, %c : tensor<1x2x3x3xui8>, tensor<1x2x3x3xi32>
+}

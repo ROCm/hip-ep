@@ -335,14 +335,15 @@ static Value emitChannelLastConv(Value input, Value weights, Value bias,
     assert(spatialRank == 2 && "integer convolution is 2D");
     Type inElem = cast<RankedTensorType>(input.getType()).getElementType();
     Type wElem = cast<RankedTensorType>(weight.getType()).getElementType();
-    auto conv =
-        tosa::Conv2DOp::create(rewriter, loc, channelLastType, input, weight,
-                               bias, createZeroPoint(rewriter, loc, inElem),
-                               createZeroPoint(rewriter, loc, wElem),
-                               rewriter.getDenseI64ArrayAttr(tosaPads),
-                               rewriter.getDenseI64ArrayAttr(window.strides),
-                               rewriter.getDenseI64ArrayAttr(window.dilations),
-                               TypeAttr::get(accType));
+    Value inputZp = createZeroPoint(rewriter, loc, inElem);
+    Value weightZp =
+        inElem == wElem ? inputZp : createZeroPoint(rewriter, loc, wElem);
+    auto conv = tosa::Conv2DOp::create(
+        rewriter, loc, channelLastType, input, weight, bias, inputZp, weightZp,
+        rewriter.getDenseI64ArrayAttr(tosaPads),
+        rewriter.getDenseI64ArrayAttr(window.strides),
+        rewriter.getDenseI64ArrayAttr(window.dilations),
+        TypeAttr::get(accType));
     conv->setAttr("group", rewriter.getI64IntegerAttr(window.group));
     convResult = conv.getResult();
   } else if (spatialRank == 2) {
