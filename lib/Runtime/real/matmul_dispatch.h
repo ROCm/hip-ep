@@ -7,7 +7,6 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <iterator>
 #include <limits>
 #include <string_view>
 #include <vector>
@@ -20,6 +19,21 @@ struct MacroTile {
   int depth = 0;
 };
 
+// matmul.cpp is compiled into the runtime bitcode, which the EP JIT-links. MSVC
+// lowers std::lexicographical_compare and std::string_view::find(substring) to
+// its vectorized helpers (__std_mismatch_1, __std_search_1), which that JIT
+// cannot materialize (see chrome_trace.cpp), so the helpers below use plain
+// loops.
+
+// Whether serialized algorithm `a` sorts before `b`, byte by byte.
+template <typename Algo>
+inline bool algoBytesLess(const Algo &a, const Algo &b) {
+  for (size_t i = 0; i < sizeof(a.data); i++)
+    if (a.data[i] != b.data[i])
+      return a.data[i] < b.data[i];
+  return false;
+}
+
 // Reads the macro tile out of a Tensile kernel name ("..._MT16x16x8_SN_...").
 inline bool parseMacroTile(std::string_view kernelName, MacroTile &tile) {
   const auto readInt = [&](size_t &pos, int &value) {
@@ -30,8 +44,10 @@ inline bool parseMacroTile(std::string_view kernelName, MacroTile &tile) {
       value = value * 10 + (kernelName[pos++] - '0');
     return pos > start && value > 0;
   };
-  for (size_t at = kernelName.find("_MT"); at != std::string_view::npos;
-       at = kernelName.find("_MT", at + 1)) {
+  for (size_t at = 0; at + 3 <= kernelName.size(); at++) {
+    if (kernelName[at] != '_' || kernelName[at + 1] != 'M' ||
+        kernelName[at + 2] != 'T')
+      continue;
     size_t pos = at + 3;
     MacroTile parsed;
     if (readInt(pos, parsed.m) && pos < kernelName.size() &&
@@ -86,9 +102,7 @@ inline void orderUnrankedCandidates(HeuristicResult *candidates, int count,
       return a.area > b.area;
     if (a.depth != b.depth)
       return a.depth < b.depth;
-    return std::lexicographical_compare(
-        std::begin(a.result.algo.data), std::end(a.result.algo.data),
-        std::begin(b.result.algo.data), std::end(b.result.algo.data));
+    return algoBytesLess(a.result.algo, b.result.algo);
   });
   for (int i = 0; i < count; i++)
     candidates[i] = keyed[static_cast<size_t>(i)].result;
