@@ -88,11 +88,17 @@ struct OpProfileCpuScope {
 // RAII keeps ranges balanced across early returns and cleanup gotos.
 struct OpRoctxScope {
   bool active = false;
-  // Owns the "<op> <shape>" label until the pop: ROCTx may keep the pointer.
+  // Owns the "hip_ep.op.<op> <shape>" label until the pop: ROCTx may keep the
+  // pointer. The prefix is the operator level of ktrace's ROCTx naming.
   std::string label;
 
-  explicit OpRoctxScope(const char *name)
-      : active(hipdnn_ep_roctx_range_push(name) >= 0) {}
+  explicit OpRoctxScope(const char *name) {
+    if (!hipdnn_ep_roctx_enabled() || !name)
+      return;
+    label = "hip_ep.op.";
+    label += name;
+    active = hipdnn_ep_roctx_range_push(label.c_str()) >= 0;
+  }
 
   explicit OpRoctxScope(const std::string &name) : OpRoctxScope(name.c_str()) {}
 
@@ -103,7 +109,8 @@ struct OpRoctxScope {
   OpRoctxScope(const char *name, ShapeFn &&shape_fn) {
     if (!hipdnn_ep_roctx_enabled() || !name)
       return;
-    label = name;
+    label = "hip_ep.op.";
+    label += name;
     std::string shape = shape_fn();
     if (!shape.empty()) {
       label += ' ';
@@ -169,7 +176,8 @@ struct OpProfileScope {
   OpRoctxScope HIPDNN_EP_DETAIL_CONCAT(_opRoctxScope_, __LINE__)(opname,       \
                                                                  shape_fn)
 // Names the step whose kernel launches follow, within the enclosing operator
-// range, until the next mark. `step` must be a string literal.
+// range, until the next mark. `step` is the full name,
+// hip_ep.op.<op>.<stage>.<step>, and must have static storage.
 #define OP_ROCTX_MARK(step) hipdnn_ep_roctx_mark(step)
 
 #define OP_PROFILE(opname, shape_fn, state_arg)                                \

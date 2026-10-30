@@ -515,9 +515,10 @@ void MorphiZenEP::update_input_output_argument_indice(
 }
 // Names a compiled subgraph after the model file it came from, so a trace can
 // tell a VLM's vision encoder from its embedding and decoder sessions:
-// "vision.onnx" -> "hip-ep.vision#0", "vision_encoder/model.onnx" ->
-// "hip-ep.vision_encoder#0". The index separates the subgraphs of one model
-// when nodes outside them run on another EP.
+// "vision.onnx" -> "hip_ep.graph.vision sub=0", "vision_encoder/model.onnx" ->
+// "hip_ep.graph.vision_encoder sub=0". The index separates the subgraphs of one
+// model when nodes outside them run on another EP. The model name is reduced to
+// [a-z0-9_], the path segment charset of ktrace's ROCTx naming convention.
 static std::string subgraph_roctx_label(const OrtApi &ort_api,
                                         const OrtGraph *graph, size_t index) {
   std::string model = "subgraph";
@@ -541,7 +542,13 @@ static std::string subgraph_roctx_label(const OrtApi &ort_api,
     }
   } catch (...) {
   }
-  return "hip-ep." + model + "#" + std::to_string(index);
+  for (char &c : model) {
+    if (c >= 'A' && c <= 'Z')
+      c = static_cast<char>(c - 'A' + 'a');
+    else if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'))
+      c = '_';
+  }
+  return "hip_ep.graph." + model + " sub=" + std::to_string(index);
 }
 
 OrtStatus *MorphiZenEP::Compile(const OrtGraph **graphs,

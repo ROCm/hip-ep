@@ -116,8 +116,8 @@ private:
 struct MorphiZenEP_ComputeInfo : public OrtNodeComputeInfo {
   morphizen::ExecutionProvider *morphizen_ep =
       nullptr; // Pointer to the MorphiZenEP instance
-  // "hip-ep.<model>#<subgraph>" ROCTx range around each Compute; empty when
-  // ROCTx is off.
+  // "hip_ep.graph.<model> sub=<subgraph>" ROCTx range around each Compute;
+  // empty when ROCTx is off.
   std::string roctx_label;
 };
 } // namespace morphizen
