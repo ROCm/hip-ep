@@ -255,3 +255,20 @@ func.func @conv_i32(%ctx: !hip.context, %input: tensor<1x4x3x3xi32>,
        pads = [0, 0, 0, 0], strides = [1, 1]} : tensor<1x2x3x3xi32>
   return %result : tensor<1x2x3x3xi32>
 }
+
+// i32 convolution lowering is supported only by the 2D runtime path.
+// -----
+func.func @conv3d_i32(
+    %ctx: !hip.context, %input: tensor<1x4x5x7x9xi32>,
+    %weight: tensor<6x4x3x1x1xi32>, %init: tensor<1x6x5x7x9xi32>)
+    -> tensor<1x6x5x7x9xi32> attributes {rock.kernel} {
+  // expected-error @+1 {{failed to legalize operation 'hip.conv'}}
+  %result = hip.conv(%ctx) ins(
+      %input, %weight :
+      tensor<1x4x5x7x9xi32>, tensor<6x4x3x1x1xi32>)
+      outs(%init : tensor<1x6x5x7x9xi32>)
+      {dilations = [1, 1, 1], group = 1 : i64, kernel_shape = [3, 1, 1],
+       pads = [1, 0, 0, 1, 0, 0], strides = [1, 1, 1]} :
+      tensor<1x6x5x7x9xi32>
+  return %result : tensor<1x6x5x7x9xi32>
+}

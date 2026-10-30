@@ -189,9 +189,10 @@ mlir::LogicalResult DynamicQuantizeLinearToHip::matchAndRewrite(
 
   // Force the range through 0, matching the ONNX reference (an all-positive
   // tensor still has x_min 0, an all-negative tensor still has x_max 0).
-  mlir::Value minAdj = mlir::hip::MinOp::create(rewriter, loc, context, xMin,
-                                                zero, scalarInit(xMin))
-                           ->getResult(0);
+  mlir::Value minAdj =
+      mlir::hip::MinOp::create(rewriter, loc, scalarF32, context, xMin, zero,
+                               scalarInit(xMin))
+          ->getResult(0);
   mlir::Value maxAdj =
       mlir::hip::MaxOp::create(rewriter, loc, scalarF32, context, xMax, zero,
                                scalarInit(xMax))
@@ -225,9 +226,10 @@ mlir::LogicalResult DynamicQuantizeLinearToHip::matchAndRewrite(
       mlir::hip::RoundOp::create(rewriter, loc, scalarF32, context, zpDiv,
                                  scalarInit(zpDiv))
           ->getResult(0);
-  mlir::Value zpHi = mlir::hip::MinOp::create(rewriter, loc, context, zpRound,
-                                              c255, scalarInit(zpRound))
-                         ->getResult(0);
+  mlir::Value zpHi =
+      mlir::hip::MinOp::create(rewriter, loc, scalarF32, context, zpRound, c255,
+                               scalarInit(zpRound))
+          ->getResult(0);
   mlir::Value zpLo = mlir::hip::MaxOp::create(rewriter, loc, scalarF32, context,
                                               zpHi, zero, scalarInit(zpHi))
                          ->getResult(0);
