@@ -20,8 +20,12 @@ using namespace mlir;
 int64_t mlir::hip::getStaticByteSize(MemRefType type) {
   if (!type.hasStaticShape())
     return 0;
-  int64_t totalBits = type.getNumElements() * type.getElementTypeBitWidth();
-  return static_cast<int64_t>(llvm::divideCeil(totalBits, 8));
+  // Round the element width up before multiplying. divideCeil of the whole
+  // allocation's bit count packs i1 eight-per-byte; Less/And/Not/Where then
+  // write one byte per element past the end of that slot.
+  int64_t elemBytes =
+      static_cast<int64_t>(llvm::divideCeil(type.getElementTypeBitWidth(), 8));
+  return type.getNumElements() * elemBytes;
 }
 
 Value mlir::hip::emitAlignUp(OpBuilder &builder, Location loc, Value value,
