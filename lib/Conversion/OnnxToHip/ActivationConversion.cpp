@@ -19,9 +19,38 @@ struct SoftmaxToHip : public mlir::RewritePattern {
                   mlir::PatternRewriter &rewriter) const override;
 };
 
+// hip.miopen.softmax normalizes over the last dimension only. A normalized
+// `axis` of rank-1 means exactly that under both the opset < 13 rule (flatten
+// from `axis`) and the opset >= 13 rule (one axis), so it is the only value
+// accepted. A missing `axis` defaults to 1 before opset 13 and to -1 from it;
+// the two agree only for rank <= 2, and the op carries no opset, so a missing
+// `axis` on a higher rank is rejected rather than guessed.
+//
+// Before: %y = "onnx.Softmax"(%x) {axis = 2 : si64}
+//              : (tensor<2x8x64xf16>) -> tensor<2x8x64xf16>
+// After:  %y = hip.miopen.softmax(%ctx) ins(%x) outs(%init)
+// Not matched: axis = 1 on the same input (falls back to another provider).
 mlir::LogicalResult
 SoftmaxToHip::matchAndRewrite(mlir::Operation *op,
                               mlir::PatternRewriter &rewriter) const {
+  auto inputType =
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getOperand(0).getType());
+  if (!inputType || inputType.getRank() < 1)
+    return rewriter.notifyMatchFailure(op, "softmax.unranked_or_scalar");
+  const int64_t rank = inputType.getRank();
+  if (auto axisAttr = op->getAttrOfType<mlir::IntegerAttr>("axis")) {
+    int64_t axis = axisAttr.getSInt();
+    if (axis < 0)
+      axis += rank;
+    if (axis != rank - 1)
+      return rewriter.notifyMatchFailure(op, "softmax.axis_not_last");
+  } else if (rank > 2) {
+    return rewriter.notifyMatchFailure(op, "softmax.default_axis_ambiguous");
+  }
+  mlir::Type elemType = inputType.getElementType();
+  if (!elemType.isF16() && !elemType.isBF16() && !elemType.isF32())
+    return rewriter.notifyMatchFailure(op, "softmax.unsupported_dtype");
+
   auto ctxOrFailure = getContextArg(op, rewriter);
   if (mlir::failed(ctxOrFailure))
     return mlir::failure();
