@@ -86,10 +86,12 @@ static mlir::Value reduceToScalar(mlir::PatternRewriter &rewriter,
     mlir::Value axes =
         mlir::arith::ConstantOp::create(rewriter, loc, axesType, axesAttr);
 
-    auto reduced = ReduceOp::create(rewriter, loc, context, current, axes, init,
-                                    rewriter.getI64IntegerAttr(/*keepdims=*/0),
-                                    rewriter.getI64IntegerAttr(
-                                        /*noop_with_empty_axes=*/0));
+    auto reduced =
+        ReduceOp::create(rewriter, loc, context, current, axes, init,
+                         rewriter.getI64IntegerAttr(/*keepdims=*/0),
+                         rewriter.getI64IntegerAttr(/*noop_with_empty_axes=*/0),
+                         getConstantReducedAxesAttr(rewriter, current, axes,
+                                                    /*noopWithEmptyAxes=*/0));
     current = reduced->getResult(0);
   }
   return current;
