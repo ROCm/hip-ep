@@ -272,6 +272,69 @@ static int64_t scratchBytes(MemRefType type) {
   return bytes == 0 ? 1 : bytes; // rank-0 with i1 etc. — never zero-sized
 }
 
+/// Appends every (user, aliased value) pair reaching \p buffer, directly or
+/// through views of it.
+static void
+collectAliasUses(Value buffer,
+                 SmallVectorImpl<std::pair<Operation *, Value>> &uses) {
+  for (Operation *user : buffer.getUsers()) {
+    uses.push_back({user, buffer});
+    if (auto view = dyn_cast<ViewLikeOpInterface>(user))
+      if (view.getViewSource() == buffer)
+        collectAliasUses(view->getResult(0), uses);
+  }
+}
+
+/// Host loads from \p allocOp that may run before an async copy into it lands.
+/// memref.copy lowers to an async hipMemcpy on the stream, so a later
+/// memref.load reads the scratch before the copy completes.
+static SmallVector<memref::LoadOp>
+findLoadsAfterAsyncWrites(memref::AllocOp allocOp) {
+  SmallVector<std::pair<Operation *, Value>> uses;
+  collectAliasUses(allocOp.getResult(), uses);
+  Block *block = allocOp->getBlock();
+  SmallVector<Operation *> writers;
+  for (auto [user, val] : uses) {
+    auto copy = dyn_cast<memref::CopyOp>(user);
+    if (copy && copy.getTarget() == val)
+      if (Operation *a = block->findAncestorOpInBlock(*user))
+        writers.push_back(a);
+  }
+  SmallVector<memref::LoadOp> loads;
+  for (auto [user, val] : uses) {
+    auto load = dyn_cast<memref::LoadOp>(user);
+    if (!load || !isa<IntegerType, FloatType>(load.getType()))
+      continue;
+    Operation *at = block->findAncestorOpInBlock(*load);
+    if (!at)
+      continue;
+    if (llvm::any_of(writers, [&](Operation *w) {
+          return w == at || w->isBeforeInBlock(at);
+        }))
+      loads.push_back(load);
+  }
+  return loads;
+}
+
+/// Replaces \p load with a stream-synchronized hip.readback_scalar of the same
+/// element.
+static void rewriteAsReadback(memref::LoadOp load, Value ctx) {
+  OpBuilder b(load);
+  Location loc = load.getLoc();
+  Value src = load.getMemRef();
+  int64_t rank = load.getMemRefType().getRank();
+  if (rank > 0) {
+    SmallVector<OpFoldResult> offsets(load.getIndices());
+    SmallVector<OpFoldResult> ones(rank, b.getIndexAttr(1));
+    Value elem = memref::SubViewOp::create(b, loc, src, offsets, ones, ones);
+    src = memref::CollapseShapeOp::create(b, loc, elem,
+                                          ArrayRef<ReassociationIndices>{});
+  }
+  Value v = ReadbackScalarOp::create(b, loc, load.getType(), ctx, src);
+  load.replaceAllUsesWith(v);
+  load.erase();
+}
+
 struct MaterializeHostScalarsPass
     : public impl::MaterializeHostScalarsPassBase<MaterializeHostScalarsPass> {
 
@@ -346,6 +409,9 @@ void MaterializeHostScalarsPass::runOnOperation() {
   // Deallocs of the candidate are erased — the scratch buffer is owned by
   // the runtime (released in hipdnn_ep_state_cleanup), like the pool.
   for (auto [allocOp, offset] : llvm::zip(candidates, offsets)) {
+    for (memref::LoadOp load : findLoadsAfterAsyncWrites(allocOp))
+      rewriteAsReadback(load, ctx);
+
     builder.setInsertionPoint(allocOp);
     Value offsetVal =
         arith::ConstantIndexOp::create(builder, allocOp.getLoc(), offset);
