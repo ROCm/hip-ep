@@ -3154,14 +3154,21 @@ static inline bool flash_decode_ring_supported(int d, int hpg) {
 // with the split count at 2k and 8k keys, on both the generic and the
 // chip-specific code object. Eight lanes per key (the most elements per lane),
 // a two-row ring and nontemporal loads stay within a few percent of the best
-// everywhere; one wave per KV head pays off only at HpG 4, where it reads each
-// row once for four heads.
+// everywhere. At HpG 4 and 5 one wave serves every query head of the KV head,
+// so it reads each row once. With a wave per query head the HpG waves of a
+// block re-read the same rows, and nontemporal loads send those re-reads back
+// to DRAM: at HpG 5 that ran 1.7x / 2.4x slower than one wave per KV head at
+// 8k / 16k keys (generic code object, gfx1151).
 template <int D, int HPG> struct RingDefault {
   static constexpr int kLpk = 8, kRing = 2, kQpw = 1;
   static constexpr bool kNt = true;
 };
 template <> struct RingDefault<128, 4> {
   static constexpr int kLpk = 8, kRing = 2, kQpw = 4;
+  static constexpr bool kNt = true;
+};
+template <> struct RingDefault<128, 5> {
+  static constexpr int kLpk = 8, kRing = 2, kQpw = 5;
   static constexpr bool kNt = true;
 };
 
@@ -3958,8 +3965,8 @@ static int deviceComputeUnits() {
 // concurrent streams than that lose DRAM locality faster than they add
 // bandwidth, and every extra split adds a partials row to the in-kernel
 // reduce. Swept with fused splits 1-16 at 2k and 8k keys (D96 HpG1, D128
-// HpG 1/4/5): within 8% of the best split at HpG 1 and 4; HpG5 lands 14% /
-// 28% off at 2k / 8k.
+// HpG 1/4/5): within 8% of the best split at HpG 1 and 4. HpG 5 (one wave per
+// KV head) is within 3% of the best swept split from 2k to 16k keys.
 static int fusedDecodeLaunchSplits(int B, int G, int hpg, int max_seq,
                                    int splits) {
   int s = splits;
