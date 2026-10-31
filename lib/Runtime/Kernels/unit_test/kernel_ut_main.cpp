@@ -34,6 +34,10 @@ static const Leaf kLeaves[] = {
     {"gqa/ring", "Xfp16_Wfp16_Yfp16",
      "hipdnn-kernel-ut-gqa-ring-xfp16-wfp16-yfp16.exe"},
 #endif
+#if HIP_EP_KV_PARETO_ENABLED
+    {"gqa/kv_pareto", "Xfp16_Wi8_Yfp16",
+     "hipdnn-kernel-ut-gqa-kv-pareto-xfp16-wi8-yfp16.exe"},
+#endif
     {"matmul_nbits", "Xfp16_Wu2_Yfp16",
      "hipdnn-kernel-ut-matmul-nbits-xfp16-wu2-yfp16.exe"},
     {"matmul_nbits", "Xfp16_Wu3_Yfp16",
@@ -275,6 +279,12 @@ int main(int argc, char** argv) {
     // On gfx1151 a missing executable or failed device guard must fail CI.
     if (std::strcmp(leaf.op, "gqa/ring") == 0 && detectedArch() != "gfx1151") {
       std::printf("[gqa/ring] not applicable on this GPU (requires gfx1151)\n");
+      continue;
+    }
+    // KV-Pareto's generic package slice is validated only on Strix Halo.
+    // On gfx1151 a missing executable or failed device guard must fail CI.
+    if (std::strcmp(leaf.op, "gqa/kv_pareto") == 0 && detectedArch() != "gfx1151") {
+      std::printf("[gqa/kv_pareto] not applicable on this GPU (requires gfx1151)\n");
       continue;
     }
     // Do not predict a table hit from the leaf name. Every leaf receives the
