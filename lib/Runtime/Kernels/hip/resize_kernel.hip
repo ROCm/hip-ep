@@ -51,6 +51,20 @@ template <> __device__ inline hip_bfloat16 from_float<hip_bfloat16>(float v) {
 template <> __device__ inline double from_float<double>(float v) {
   return static_cast<double>(v);
 }
+// Integer linear interpolates the stored codes. A convex blend stays inside
+// the input range, and the store truncates toward zero.
+template <> __device__ inline float to_float<uint8_t>(uint8_t v) {
+  return static_cast<float>(v);
+}
+template <> __device__ inline float to_float<int8_t>(int8_t v) {
+  return static_cast<float>(v);
+}
+template <> __device__ inline uint8_t from_float<uint8_t>(float v) {
+  return static_cast<uint8_t>(v);
+}
+template <> __device__ inline int8_t from_float<int8_t>(float v) {
+  return static_cast<int8_t>(v);
+}
 
 // Map output coord -> continuous input coord per the chosen mode.
 // `onnx_scale` is the supplied ONNX scale (output / input), or 0 to use
@@ -231,35 +245,6 @@ __global__ void resize_linear_kernel(const T* __restrict__ input,
   output[tid] = from_float<T>(v);
 }
 
-// Nearest is an index copy, so integer element types do not need to_float.
-// Kept separate from launch<> so integer dtypes do not instantiate the
-// linear kernel.
-template <typename T>
-static int launch_nearest(hipStream_t stream, const void* input, void* output,
-                          int spatial_rank, int64_t N, int64_t C,
-                          int64_t in0, int64_t in1, int64_t in2,
-                          int64_t out0, int64_t out1, int64_t out2,
-                          int coord_transform, int nearest_mode,
-                          float s0, float s1, float s2) {
-  int64_t total = N * C * out0 * out1 * out2;
-  if (total <= 0) return 0;
-  int block = 256;
-  int64_t grid = (total + block - 1) / block;
-  hipLaunchKernelGGL(resize_nearest_kernel<T>,
-                     dim3(static_cast<unsigned>(grid)), dim3(block),
-                     0, stream,
-                     static_cast<const T*>(input), static_cast<T*>(output),
-                     spatial_rank, N, C, in0, in1, in2,
-                     out0, out1, out2,
-                     coord_transform, nearest_mode, s0, s1, s2, total);
-  hipError_t err = hipGetLastError();
-  if (err != hipSuccess) {
-    fprintf(stderr, "[custom_kernels] hip_resize launch failed: %s\n",
-            hipGetErrorString(err));
-  }
-  return static_cast<int>(err);
-}
-
 template <typename T>
 static int launch(hipStream_t stream, const void* input, void* output,
                   int spatial_rank, int64_t N, int64_t C,
@@ -346,23 +331,13 @@ static int resize_dispatch(void* stream, const void* input, void* output,
                             in_d0, in_d1, in_d2, out_d0, out_d1, out_d2,
                             mode, coord_transform, nearest_mode, s0, s1, s2);
     case HIP_DTYPE_INT8:
+      return launch<int8_t>(hip_stream, input, output, spatial_rank, N, C,
+                            in_d0, in_d1, in_d2, out_d0, out_d1, out_d2,
+                            mode, coord_transform, nearest_mode, s0, s1, s2);
     case HIP_DTYPE_UINT8:
-      if (mode != 0) {
-        fprintf(stderr,
-                "[custom_kernels] hip_resize: integer dtype=%d supports "
-                "nearest only\n",
-                hip_dtype);
-        return -1;
-      }
-      if (hip_dtype == HIP_DTYPE_UINT8) {
-        return launch_nearest<uint8_t>(
-            hip_stream, input, output, spatial_rank, N, C, in_d0, in_d1,
-            in_d2, out_d0, out_d1, out_d2, coord_transform, nearest_mode,
-            s0, s1, s2);
-      }
-      return launch_nearest<int8_t>(
-          hip_stream, input, output, spatial_rank, N, C, in_d0, in_d1, in_d2,
-          out_d0, out_d1, out_d2, coord_transform, nearest_mode, s0, s1, s2);
+      return launch<uint8_t>(hip_stream, input, output, spatial_rank, N, C,
+                             in_d0, in_d1, in_d2, out_d0, out_d1, out_d2,
+                             mode, coord_transform, nearest_mode, s0, s1, s2);
     default:
       fprintf(stderr,
               "[custom_kernels] hip_resize: unsupported dtype=%d\n",
