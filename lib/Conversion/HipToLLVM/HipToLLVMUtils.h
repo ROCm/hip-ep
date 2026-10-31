@@ -37,6 +37,14 @@
 namespace mlir {
 namespace hip {
 
+// True only for the flat stream-ordered copy path in MemoryLowering.cpp.
+// Other layouts can use host copies and require a separate ordering proof.
+bool hasFlatRuntimeCopyLowering(MemRefType source, MemRefType target);
+
+// Prove scalar values and joint wait removal before conversion erases stores.
+// Empty results keep all existing readbacks. This analysis does not change IR.
+DenseMap<Operation *, Value> collectHostScalarValues(ModuleOp module);
+
 inline constexpr const char *kHipMalloc = "hip_device_malloc";
 inline constexpr const char *kHipFree = "hip_device_free";
 inline constexpr const char *kHipGetPoolBase = "hipdnn_ep_get_pool_base";
@@ -113,6 +121,8 @@ inline constexpr const char *kWrapReduceL2 = "wrap_reduce_l2";
 inline constexpr const char *kWrapReduceMax = "wrap_reduce_max";
 inline constexpr const char *kWrapReduceMin = "wrap_reduce_min";
 inline constexpr const char *kWrapGQA = "wrap_group_query_attention";
+inline constexpr const char *kWrapGQAHostLength =
+    "wrap_group_query_attention_host_length";
 inline constexpr const char *kWrapMultiHeadAttention =
     "wrap_multi_head_attention";
 inline constexpr const char *kWrapMatMulNBits = "wrap_matmul_nbits";
@@ -503,8 +513,9 @@ void populateTransposeLoweringPatterns(const LLVMTypeConverter &converter,
                                        RewritePatternSet &patterns);
 void populateRopeLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
-void populateGqaLoweringPatterns(const LLVMTypeConverter &converter,
-                                 RewritePatternSet &patterns);
+void populateGqaLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns,
+    const DenseMap<Operation *, Value> &hostScalars);
 void populateMultiHeadAttentionLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns);
 void populateMatMulNBitsLoweringPatterns(const LLVMTypeConverter &converter,
@@ -570,12 +581,14 @@ void populateNonZeroLoweringPatterns(const LLVMTypeConverter &converter,
 // Generic data-dependent-shape readback primitive (hip.readback_dim). Not tied
 // to any single operator; any op that computes a runtime extent into a device
 // i32 scalar can be sliced/sized via this.
-void populateReadbackDimLoweringPatterns(const LLVMTypeConverter &converter,
-                                         RewritePatternSet &patterns);
+void populateReadbackDimLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns,
+    const DenseMap<Operation *, Value> &hostScalars);
 // hip.readback_scalar: generic synchronized host-readback of a single device
 // scalar of arbitrary element type (the i64/f32/f16 sibling of readback_dim).
-void populateReadbackScalarLoweringPatterns(const LLVMTypeConverter &converter,
-                                            RewritePatternSet &patterns);
+void populateReadbackScalarLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns,
+    const DenseMap<Operation *, Value> &hostScalars);
 void populateSizeLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateLoopLoweringPatterns(const LLVMTypeConverter &converter,

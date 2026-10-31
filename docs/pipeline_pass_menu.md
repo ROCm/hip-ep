@@ -257,9 +257,9 @@ ONNX → HIP  (buildOnnxToHipPipeline)
   lower-affine
   cse ; canonicalize
   func.func(convert-linalg-to-loops)
+  func.func(hip-materialize-host-scalars)
   func.func(hip-optimize-memrefs)
   func.func(hip-promote-strided-operands)
-  func.func(hip-materialize-host-scalars)
   func.func(hip-resolve-memref-dims)
   func.func(cse)
   func.func(canonicalize)

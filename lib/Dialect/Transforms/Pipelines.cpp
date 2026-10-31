@@ -284,7 +284,7 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   //     translation.
   //
   //     Placement is load-bearing: it MUST run BEFORE MaterializeHostScalars
-  //     (6b).  The rank-0 fill bufferizes to `memref.alloc + linalg.fill`;
+  //     (5b).  The rank-0 fill bufferizes to `memref.alloc + linalg.fill`;
   //     only AFTER this pass does it become `memref.alloc + memref.store`,
   //     which is the shape MaterializeHostScalars recognises as a tiny
   //     host-fed scalar and redirects to host-mapped scratch.  If this ran
@@ -295,12 +295,18 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   //     device memory.  No-op on graphs that emit no linalg ops.
   pm.addNestedPass<func::FuncOp>(createConvertLinalgToLoopsPass());
 
-  // 6. HIP-specific buffer optimizations
+  // 5b. Assign host-accessible storage before buffer reuse. Otherwise, reuse
+  // can merge a tiny host-written shape buffer into a larger allocation that
+  // exceeds the host-scalar pass's size limit. Pooling would then place the
+  // host store in device memory. Later layout promotion creates copy-only
+  // temporaries; it does not introduce host loads or stores.
+  pm.addNestedPass<func::FuncOp>(mlir::hip::createMaterializeHostScalarsPass());
+
+  // 6. Reuse compatible buffers after host-scalar placement.
   pm.addNestedPass<func::FuncOp>(mlir::hip::createOptimizeMemRefsPass());
 
   // The remaining pre-pooling passes have two distinct roles:
-  //   - Correctness/ABI passes that must introduce or redirect allocations
-  //     before pooling (6a and 6b).
+  //   - Correctness/ABI preparation before pooling (6a).
   //   - Shape preconditions used only to improve pool quality (grouped in 6c).
 
   // 6a. Correctness/ABI: materialize identity-layout temporaries for
@@ -311,15 +317,6 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   //     per-inference allocations.
   pm.addNestedPass<func::FuncOp>(
       mlir::hip::createPromoteStridedHipOperandsPass());
-
-  // 6b. Correctness/ABI: redirect tiny host-fed memref.alloc ops (bufferized
-  //     `tensor.from_elements` shape arithmetic) from the GPU pool to
-  //     runtime-owned host-mapped scratch. Must run after 6a so its candidate
-  //     analysis sees the final allocation set, and before pooling so
-  //     host-written buffers never become views into device memory. See
-  //     MaterializeHostScalars.cpp; pipeline-static-shape-lockdown.mlir locks
-  //     down this ordering.
-  pm.addNestedPass<func::FuncOp>(mlir::hip::createMaterializeHostScalarsPass());
 
   // 6c. Pool quality: normalize dynamic allocation sizes after all view and
   //     allocation rewrites, immediately before hip-pool-allocs.

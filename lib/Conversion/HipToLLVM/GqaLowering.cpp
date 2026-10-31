@@ -13,7 +13,11 @@ namespace {
 // total_seq_len,
 //         output, present_key, present_value) {attributes...}
 struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
-  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+  GqaOpLowering(const LLVMTypeConverter &converter,
+                const DenseMap<Operation *, Value> &hostScalars)
+      : ConvertOpToLLVMPattern<GqaOp>(converter), hostLengths(hostScalars) {}
+
+  DenseMap<Operation *, Value> hostLengths;
 
   LogicalResult
   matchAndRewrite(GqaOp op, OpAdaptor adaptor,
@@ -269,8 +273,16 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         i64Type  // seq_len_new_kv
     };
 
-    FailureOr<LLVM::LLVMFuncOp> funcOp =
-        LLVM::lookupOrCreateFn(rewriter, module, kWrapGQA, paramTypes, i32Type);
+    Value hostLength;
+    if (Value original = hostLengths.lookup(op)) {
+      hostLength = rewriter.getRemappedValue(original);
+      if (!hostLength)
+        return rewriter.notifyMatchFailure(op, "cannot convert host length");
+      paramTypes.push_back(i32Type);
+    }
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, hostLength ? kWrapGQAHostLength : kWrapGQA,
+        paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 
@@ -292,6 +304,8 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         batchSizeVal, seqLenQVal, seqLenKVVal, pastBufSeqVal, headDimVal,
         elemSizeVal, attnBiasBatchVal, attnBiasNumHeadsVal, kvBnsdVal,
         seqLenNewKVVal};
+    if (hostLength)
+      args.push_back(hostLength);
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 
@@ -302,9 +316,10 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
 
 } // namespace
 
-void populateGqaLoweringPatterns(const LLVMTypeConverter &converter,
-                                 RewritePatternSet &patterns) {
-  patterns.add<GqaOpLowering>(converter);
+void populateGqaLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns,
+    const DenseMap<Operation *, Value> &hostScalars) {
+  patterns.add<GqaOpLowering>(converter, hostScalars);
 }
 
 } // namespace hip

@@ -11,7 +11,7 @@ namespace {
 
 // hip.readback_dim(ctx, scalar) : index
 //   -> %c = hipdnn_ep_readback_i32(state, scalar_ptr)   // D2H + stream sync
-//      sext %c : i32 to i64                              // index ABI
+//      zext %c : i32 to i64                              // index ABI
 //
 // Generic host-readback primitive for data-dependent dynamic shapes (NOT
 // specific to any one operator): `scalar` is a device i32 buffer that some
@@ -21,7 +21,12 @@ namespace {
 // host-side index arithmetic (tensor.extract_slice size, tensor.empty
 // dynsize, hip.alloc_output extent, ...).
 struct ReadbackDimOpLowering : public ConvertOpToLLVMPattern<ReadbackDimOp> {
-  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+  ReadbackDimOpLowering(const LLVMTypeConverter &converter,
+                        const DenseMap<Operation *, Value> &hostScalars)
+      : ConvertOpToLLVMPattern<ReadbackDimOp>(converter),
+        hostScalars(hostScalars) {}
+
+  DenseMap<Operation *, Value> hostScalars;
 
   LogicalResult
   matchAndRewrite(ReadbackDimOp op, OpAdaptor adaptor,
@@ -31,6 +36,14 @@ struct ReadbackDimOpLowering : public ConvertOpToLLVMPattern<ReadbackDimOp> {
     Type ptrType = getPtrType();
     Type i32Type = rewriter.getI32Type();
     Type i64Type = rewriter.getI64Type();
+
+    if (Value original = hostScalars.lookup(op)) {
+      Value value = rewriter.getRemappedValue(original);
+      if (!value)
+        return rewriter.notifyMatchFailure(op, "cannot convert host extent");
+      rewriter.replaceOpWithNewOp<LLVM::ZExtOp>(op, i64Type, value);
+      return success();
+    }
 
     Value statePtr = adaptor.getCtx();
     // The scalar may be a `memref.view` into the host-scratch buffer with a
@@ -68,9 +81,10 @@ struct ReadbackDimOpLowering : public ConvertOpToLLVMPattern<ReadbackDimOp> {
 
 } // namespace
 
-void populateReadbackDimLoweringPatterns(const LLVMTypeConverter &converter,
-                                         RewritePatternSet &patterns) {
-  patterns.add<ReadbackDimOpLowering>(converter);
+void populateReadbackDimLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns,
+    const DenseMap<Operation *, Value> &hostScalars) {
+  patterns.add<ReadbackDimOpLowering>(converter, hostScalars);
 }
 
 } // namespace hip

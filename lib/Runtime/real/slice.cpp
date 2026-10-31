@@ -81,7 +81,7 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
       },
       state);
 
-  if (!state || !starts || !ends || !output || !data_shape || !output_shape) {
+  if (!state || !starts || !ends || !data_shape || !output_shape) {
     RUNTIME_DEBUG_LOG("[REAL] wrap_slice: null required argument\n");
     return -1;
   }
@@ -90,6 +90,20 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
         stderr,
         "[REAL] wrap_slice: invalid ranks (data_rank=%lld, output_rank=%lld)\n",
         (long long)data_rank, (long long)output_rank);
+    return -1;
+  }
+  // Empty tensors can have a null data pointer. Check the output shape before
+  // requiring storage. Keep the bounds checks below for nonempty inputs.
+  bool empty_output = false;
+  for (int64_t d = 0; d < output_rank; ++d) {
+    if (output_shape[d] < 0) {
+      fprintf(stderr, "[REAL] wrap_slice: negative output extent\n");
+      return -1;
+    }
+    empty_output |= output_shape[d] == 0;
+  }
+  if (!output && !empty_output) {
+    RUNTIME_DEBUG_LOG("[REAL] wrap_slice: null nonempty output\n");
     return -1;
   }
   // Empty input fast path: ORT passes a null `data` pointer for a tensor
