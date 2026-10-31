@@ -12,8 +12,9 @@ That is exact for every query that is a real token, the only rows a generator
 reads; a padded query's own row is not (a fully masked row is
 implementation-defined, and a right-padded query's clamped position puts its
 window elsewhere), and no real token ever attends to it. The comparison is
-therefore restricted to real-token rows of Y; present_key / present_value are
-compared whole.
+therefore restricted to real-token rows of Y. present_key / present_value are
+compared from the oldest key the window keeps: a sliding layer does not copy
+the past below it into present, since no later step reads it.
 
 Head geometry follows the targets of the fused key-bias kernels: head_dim
 128, 6 query heads per KV head on full-attention layers and 9 on sliding ones.
@@ -117,9 +118,10 @@ def _run(model_runner, batch, seq, past, q_heads, window, pad, left):
     model = _make_model(q_heads, window)
     actual, expected = model_runner.run_sample(model, [q, k, v, pk, pv, mask])
     real = mask[:, past:].astype(bool)
+    kept = max(0, past - window + 1) if window else 0
     compare_outputs(
-        [actual[0][real]] + list(actual[1:]),
-        [expected[0][real]] + list(expected[1:]),
+        [actual[0][real]] + [p[:, :, kept:] for p in actual[1:]],
+        [expected[0][real]] + [p[:, :, kept:] for p in expected[1:]],
         atol=1e-2,
         rtol=1e-2,
         cos_threshold=0.999,
