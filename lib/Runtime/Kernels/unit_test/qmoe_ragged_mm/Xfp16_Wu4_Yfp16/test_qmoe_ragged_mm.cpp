@@ -1365,6 +1365,7 @@ bool run_pipeline_case(hipStream_t stream) {
   DeviceBuffer<__half> d_fc2_bias(fc2.bias.size());
   DeviceBuffer<__half> d_fc1_output(static_cast<size_t>(pairs) * fusion_inter);
   DeviceBuffer<__half> d_act(static_cast<size_t>(pairs) * inter);
+  DeviceBuffer<float> d_row_scale(pairs);
   DeviceBuffer<__half> d_fc2_output(static_cast<size_t>(pairs) * hidden);
   DeviceBuffer<__half> d_output(static_cast<size_t>(tokens) * hidden);
 
@@ -1399,8 +1400,8 @@ bool run_pipeline_case(hipStream_t stream) {
         hidden, 4, block_size, sizeof(__half));
     if (status != static_cast<int>(hipSuccess)) return false;
     status = hip_qmoe_swiglu(reinterpret_cast<void*>(stream), d_fc1_output.get(),
-                             d_act.get(), pairs, inter, alpha, beta, limit,
-                             sizeof(__half));
+                             d_act.get(), d_row_scale.get(), pairs, inter,
+                             alpha, beta, limit, sizeof(__half));
     if (status != static_cast<int>(hipSuccess)) return false;
     status = hip_qmoe_ragged_matmul_nbits(
         reinterpret_cast<void*>(stream), d_act.get(), nullptr, d_groups.get(),
@@ -1412,7 +1413,8 @@ bool run_pipeline_case(hipStream_t stream) {
     status = hip_qmoe_reduce_sorted_pairs(
         reinterpret_cast<void*>(stream), d_fc2_output.get(),
         d_pair_to_sorted.get(), d_expert_indices.get(), d_expert_weights.get(),
-        d_output.get(), tokens, hidden, top_k, sizeof(__half));
+        d_row_scale.get(), d_fc2_bias.get(), d_output.get(), tokens, hidden,
+        top_k, sizeof(__half));
     if (status != static_cast<int>(hipSuccess)) return false;
     HIP_CHECK(hipStreamSynchronize(stream));
 

@@ -747,6 +747,8 @@ __global__ void qmoe_reduce_sorted_pairs_kernel(
     const int32_t *__restrict__ pair_to_sorted,
     const int32_t *__restrict__ expert_indices,
     const __half *__restrict__ expert_weights,
+    const float *__restrict__ row_scale,
+    const __half *__restrict__ fc2_bias,
     __half *__restrict__ output,
     int64_t num_tokens,
     int64_t width,
@@ -785,9 +787,18 @@ __global__ void qmoe_reduce_sorted_pairs_kernel(
     const int32_t sorted_row = pair_to_sorted[pair];
     const float old_value = static_cast<float>(accum);
     const float weight = static_cast<float>(expert_weights[pair]);
-    const float value =
-        static_cast<float>(sorted_expert_output[
-            static_cast<int64_t>(sorted_row) * width + col]);
+    float value = static_cast<float>(
+        sorted_expert_output[static_cast<int64_t>(sorted_row) * width + col]);
+    // The fc2 GEMM saw act / s but added the unscaled bias b, so the true
+    // value is s * v - (s - 1) * b. s is a power of two, so s == 1 rows are
+    // bit-identical to the unscaled path.
+    if (row_scale) {
+      const float s = row_scale[sorted_row];
+      value *= s;
+      if (fc2_bias && s != 1.0f)
+        value -= (s - 1.0f) *
+                 static_cast<float>(fc2_bias[best_expert * width + col]);
+    }
     accum = __float2half(old_value + weight * value);
   }
   output[idx] = accum;
@@ -936,8 +947,9 @@ extern "C" int hip_qmoe_ragged_matmul_nbits(
 extern "C" int hip_qmoe_reduce_sorted_pairs(
     void *stream, const void *sorted_expert_output,
     const void *pair_to_sorted, const void *expert_indices,
-    const void *expert_weights, void *output, int64_t num_tokens,
-    int64_t width, int64_t k, int64_t element_size_bytes) {
+    const void *expert_weights, const void *row_scale, const void *fc2_bias,
+    void *output, int64_t num_tokens, int64_t width, int64_t k,
+    int64_t element_size_bytes) {
   if (!stream || !sorted_expert_output || !pair_to_sorted ||
       !expert_indices || !expert_weights || !output) {
     fprintf(stderr,
@@ -957,13 +969,16 @@ extern "C" int hip_qmoe_reduce_sorted_pairs(
   const int64_t elems = num_tokens * width;
   const int grid = static_cast<int>((elems + block - 1) / block);
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
+  (void)hipGetLastError();
   hipLaunchKernelGGL(
       qmoe_reduce_sorted_pairs_kernel, dim3(grid), dim3(block), 0, hip_stream,
       static_cast<const __half *>(sorted_expert_output),
       static_cast<const int32_t *>(pair_to_sorted),
       static_cast<const int32_t *>(expert_indices),
       static_cast<const __half *>(expert_weights),
-      static_cast<__half *>(output), num_tokens, width, static_cast<int>(k));
+      static_cast<const float *>(row_scale),
+      static_cast<const __half *>(fc2_bias), static_cast<__half *>(output),
+      num_tokens, width, static_cast<int>(k));
 
   hipError_t err = hipGetLastError();
   if (err != hipSuccess) {
