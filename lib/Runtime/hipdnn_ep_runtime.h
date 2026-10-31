@@ -914,6 +914,27 @@ int wrap_group_query_attention(
     // over past_key/past_value only (a layer sharing another layer's cache).
     int64_t seq_len_new_kv);
 
+// Versioned GQA ABI: the dense arguments plus the four physical BNSD cache
+// widths (past/present key/value; 0 when absent). Emitted when a cache's last
+// dimension is dynamic or differs from head_dim, e.g. KV-Pareto packed caches
+// selected by the kv_cache_codec provider option (opt-in at runtime with
+// HIPDNN_EP_USE_KV_PARETO=1). Without kv_cache_codec it runs existing GQA.
+int wrap_group_query_attention_v2(
+    RuntimeState *state, int op_state_slot, void *query, void *key, void *value,
+    void *past_key, void *past_value, void *seqlens_k, void *total_seq_len,
+    void *cos_cache, void *sin_cache, void *position_ids, void *attention_bias,
+    void *head_sink, void *k_scale, void *v_scale, void *output,
+    void *present_key, void *present_value, void *output_qk, int64_t num_heads,
+    int64_t kv_num_heads, float scale, int64_t do_rotary,
+    int64_t rotary_interleaved, float softcap, int64_t local_window_size,
+    int64_t smooth_softmax, int64_t qk_output, int64_t k_quant_type,
+    int64_t v_quant_type, int64_t kv_cache_bit_width, int32_t no_causal,
+    int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
+    int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
+    int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
+    int64_t seq_len_new_kv, int64_t past_key_width, int64_t past_value_width,
+    int64_t present_key_width, int64_t present_value_width);
+
 // MultiHeadAttention operation wrapper (com.microsoft.MultiHeadAttention v1).
 // Called by generated IR for onnx.Custom(MultiHeadAttention) lowering.
 //

@@ -218,8 +218,37 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
       }
     }
 
+    // Physical cache width can differ from the logical head dimension when the
+    // cache holds a packed codec (KV-Pareto k8v8_g32_planar_v1: 140 FP16
+    // carriers = 280 bytes per token and KV head). The dense ABI cannot
+    // describe that, so such caches use wrap_group_query_attention_v2, which
+    // also receives the four physical BNSD widths; the runtime rejects packed
+    // widths unless a supported codec is enabled. Static dense shapes keep the
+    // existing ABI.
+    bool widthABI = queryType.isDynamicDim(2);
+    int64_t logicalWidth =
+        widthABI ? -1 : queryType.getDimSize(2) / headDimDivisor;
+    for (Value cache : {op.getPastKey(), op.getPastValue(), op.getPresentKey(),
+                        op.getPresentValue()}) {
+      if (!cache)
+        continue;
+      auto type = cast<MemRefType>(cache.getType());
+      if (type.getRank() == 4 &&
+          (type.isDynamicDim(3) || type.getDimSize(3) != logicalWidth))
+        widthABI = true;
+    }
+    auto cacheWidth = [&](Value original, Value converted) -> Value {
+      if (!original)
+        return createI64Const(0);
+      auto type = cast<MemRefType>(original.getType());
+      // Only rank-4 BNSD caches carry a width; others report 0.
+      return type.getRank() == 4
+                 ? getMemRefDimSize(type, 3, converted, rewriter, loc)
+                 : createI64Const(0);
+    };
+
     // Function signature matches wrap_group_query_attention() in gqa.cpp
-    SmallVector<Type, 42> paramTypes = {
+    SmallVector<Type, 46> paramTypes = {
         ptrType, // state
         i32Type, // op_state_slot
         // Inputs (14 pointers - some may be nullptr)
@@ -269,12 +298,15 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         i64Type  // seq_len_new_kv
     };
 
-    FailureOr<LLVM::LLVMFuncOp> funcOp =
-        LLVM::lookupOrCreateFn(rewriter, module, kWrapGQA, paramTypes, i32Type);
+    if (widthABI)
+      paramTypes.append(4, i64Type); // past/present key/value widths
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, widthABI ? kWrapGQAV2 : kWrapGQA, paramTypes,
+        i32Type);
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 42> args = {
+    SmallVector<Value, 46> args = {
         statePtr,
         // Per-instance op-state slot (threaded by --assign-op-state-slots)
         getOpStateSlotValue(op, rewriter, loc),
@@ -293,6 +325,13 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         elemSizeVal, attnBiasBatchVal, attnBiasNumHeadsVal, kvBnsdVal,
         seqLenNewKVVal};
 
+    if (widthABI) {
+      args.push_back(cacheWidth(op.getPastKey(), adaptor.getPastKey()));
+      args.push_back(cacheWidth(op.getPastValue(), adaptor.getPastValue()));
+      args.push_back(cacheWidth(op.getPresentKey(), adaptor.getPresentKey()));
+      args.push_back(
+          cacheWidth(op.getPresentValue(), adaptor.getPresentValue()));
+    }
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 
     rewriter.eraseOp(op);

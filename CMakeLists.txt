@@ -30,6 +30,15 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# KV-Pareto compressed KV-cache codecs: compiled by default so CI builds and
+# tests the kernels; inference stays opt-in (HIPDNN_EP_USE_KV_PARETO=1).
+option(HIP_EP_ENABLE_KV_PARETO "Build KV-Pareto KV-cache codecs (runtime opt-in)" ON)
+if(HIP_EP_ENABLE_KV_PARETO)
+  set(HIP_EP_KV_PARETO_ENABLED 1)
+else()
+  set(HIP_EP_KV_PARETO_ENABLED 0)
+endif()
+
 if(WIN32)
   if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR CMAKE_C_COMPILER_ID STREQUAL "Clang" )
     add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:-fms-extensions;-fms-compatibility;-fdelayed-template-parsing>")

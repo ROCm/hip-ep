@@ -167,6 +167,9 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
     # NOTE: -I and path are separate list items to handle paths with spaces
     # (e.g., "C:/Program Files/..."). Clang supports "-I" "<path>" as two args.
     set(COMPILE_FLAGS "")
+    if(HIP_EP_KV_PARETO_ENABLED)
+        list(APPEND COMPILE_FLAGS "-DHIP_EP_KV_PARETO_ENABLED=${HIP_EP_KV_PARETO_ENABLED}")
+    endif()
 
     # PIC is required when this bitcode is later linked into the per-model
     # shared library on Linux (ELF .so). Without -fPIC the IR omits dso_local
