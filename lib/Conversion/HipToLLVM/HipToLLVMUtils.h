@@ -113,6 +113,8 @@ inline constexpr const char *kWrapReduceL2 = "wrap_reduce_l2";
 inline constexpr const char *kWrapReduceMax = "wrap_reduce_max";
 inline constexpr const char *kWrapReduceMin = "wrap_reduce_min";
 inline constexpr const char *kWrapGQA = "wrap_group_query_attention";
+inline constexpr const char *kWrapGQARingF16 =
+    "wrap_group_query_attention_ring_f16";
 inline constexpr const char *kWrapMultiHeadAttention =
     "wrap_multi_head_attention";
 inline constexpr const char *kWrapMatMulNBits = "wrap_matmul_nbits";

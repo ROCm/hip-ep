@@ -30,6 +30,10 @@ struct Leaf {
 };
 
 static const Leaf kLeaves[] = {
+#if HIP_EP_RING_ENABLED
+    {"gqa/ring", "Xfp16_Wfp16_Yfp16",
+     "hipdnn-kernel-ut-gqa-ring-xfp16-wfp16-yfp16.exe"},
+#endif
     {"matmul_nbits", "Xfp16_Wu2_Yfp16",
      "hipdnn-kernel-ut-matmul-nbits-xfp16-wu2-yfp16.exe"},
     {"matmul_nbits", "Xfp16_Wu3_Yfp16",
@@ -267,6 +271,12 @@ int main(int argc, char** argv) {
 
   bool passed = true;
   for (const Leaf& leaf : kLeaves) {
+    // Ring's generic package slice is validated only on Strix Halo.
+    // On gfx1151 a missing executable or failed device guard must fail CI.
+    if (std::strcmp(leaf.op, "gqa/ring") == 0 && detectedArch() != "gfx1151") {
+      std::printf("[gqa/ring] not applicable on this GPU (requires gfx1151)\n");
+      continue;
+    }
     // Do not predict a table hit from the leaf name. Every leaf receives the
     // requested mode; the DLL resolver matches its actual request (dtype/bits,
     // shape, and arch) and falls through to autotune on a miss.
