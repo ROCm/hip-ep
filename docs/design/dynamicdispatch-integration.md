@@ -583,6 +583,24 @@ that passes these checks can still fail when its DD op is created.
 The QDQ tensors are zero-filled and the f16 weights are reinterpreted as uint8,
 so NPU results are not numerically meaningful yet.
 
+### Benchmark Model
+
+`tools/dd-model/make_dd_matmul_model.py` writes a model made only of supported
+MatMuls (a fan-out of `[1, 1024] x [1024, 384]` MatMuls joined by a Concat),
+using standard operators that the CPU, DirectML and VitisAI execution providers
+also load:
+
+```bash
+python tools/dd-model/make_dd_matmul_model.py -o dd_matmul_fanout.onnx
+set HIPEP_USE_DYNAMIC_DISPATCH=1
+onnxruntime_perf_test -t 20 -c 1 -s -I --plugin_ep_libs "AMDGPUExecutionProvider|<install>\bin\amdgpu-ep.dll" --plugin_eps "AMDGPUExecutionProvider" dd_matmul_fanout.onnx
+```
+
+Each MatMul creates one DD op, logged as
+`[DD] wrap_dd_matmul: dd_combined_gemm_create`. The runtime logs each op's
+first `dd_op_execute`, every failed one, and its `dd_op_destroy`; set
+`HIPDNN_EP_DEBUG=1` to log every execute (not for benchmarking).
+
 ## Debugging Integration Issues
 
 ### "DynamicDispatch headers not found"
