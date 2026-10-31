@@ -1,0 +1,870 @@
+{
+  "schema_version": 2,
+  "measured_source": "cd6d2871af7074912009c938ed245b5bdbd45dfb",
+  "manifest": {
+    "integration": "f44de752b940553b3fca2141a358708168370e43",
+    "package_revision": "cd6d2871af7074912009c938ed245b5bdbd45dfb",
+    "genai_version": "0.19.0",
+    "ort_version": "1.31.0",
+    "dependency_status": "GenAI 0.19 target",
+    "genai_module": "/home/rohrajes/hip-ep-e2e/genai019-package/onnxruntime_genai/__init__.py",
+    "model_dir": "/var/tmp/models/Qwen3.8-27B_gpuep_1.0_gpu_128",
+    "model_revision": "9b37cf56a001720ba7ce98ff80ea651b02e5931b",
+    "args": {
+      "out": "/home/rohrajes/hip-ep-e2e/benchmark-runs/pr1402-refresh/model-campaign-genai019-warmed",
+      "model_dir": "/var/tmp/models/Qwen3.8-27B_gpuep_1.0_gpu_128",
+      "genai_version": "0.19.0",
+      "prompts": [
+        128,
+        256,
+        512,
+        1024,
+        2048,
+        4096,
+        8192,
+        16384,
+        32768,
+        65536
+      ],
+      "skip_eight_turn": false,
+      "min_gbps": 130,
+      "rounds": 3
+    },
+    "protocol": "three fresh process/model rounds per length/mode, rotating modes, one untimed same-length prefill plus four selected warm-up tokens for single-turn or one untimed full eight-turn conversation, one measured request/conversation per round, four initial tokens per turn excluded, 124 timed decode steps, 128 total output tokens, TTFT through first-token selection, medians of three round results",
+    "memory_scope": "0.5s sampled whole-device Linux GTT/VRAM and child process RSS; includes other processes; does not count requested HIP allocations",
+    "binaries": {
+      "HIPEP_EP_LIBRARY": {
+        "path": "/home/rohrajes/hip-ep-e2e/hipep-discovery/artifacts/kv-pareto-pr1402-package/lib/libhipgpu.so",
+        "sha256": "020459ef08e29e9c425e037fa0919eed0cf58ca23a4e8de894425e8bfd77b5f3"
+      },
+      "HIPEP_KERNEL_LIBRARY": {
+        "path": "/home/rohrajes/hip-ep-e2e/hipep-discovery/artifacts/kv-pareto-pr1402-package/lib/libcustom_kernels_gfx1151.so",
+        "sha256": "26245663804c6f2bffcfe4ba0b3a04fda427b8e5d39ac8857a79ea6d406bef39"
+      }
+    },
+    "genai_binaries": {
+      "onnxruntime_genai.cpython-312-x86_64-linux-gnu.so": {
+        "path": "/home/rohrajes/hip-ep-e2e/genai019-package/onnxruntime_genai/onnxruntime_genai.cpython-312-x86_64-linux-gnu.so",
+        "sha256": "04f7b19e23ee895a8a27ac00702d8086358f9ac381c2ef1dd978f77b34921469"
+      },
+      "libonnxruntime-genai.so": {
+        "path": "/home/rohrajes/hip-ep-e2e/genai019-package/onnxruntime_genai/libonnxruntime-genai.so",
+        "sha256": "951cdbb57949a4b9c754f17802e76460d538fd24571f747fde2461474650fc5a"
+      }
+    },
+    "documentation_only_changes_since_build": [
+      "docs/design/kv-pareto-current-performance.md",
+      "docs/design/kv-pareto-kernel-performance.json",
+      "docs/design/kv-pareto-model-performance.json",
+      "docs/design/kv-pareto.md"
+    ],
+    "drivers": {
+      "native_gqa/genai_warmed_bench.py": "f7fd108f6684d26195d45fa10f09f85e05fc6b2c51c768c6fec335c98a45480f",
+      "scripts/prepare_genai_model.py": "0f4f0bfdc758b90172fb46885a44f2a89925f8e94a4175db3a5a62387043b0bd",
+      "scripts/run_kv_pareto_warmed_model_campaign.py": "4da16dedbdcf7fd6fa6af276f226f58ea1a013ab41f4be70672ea5d090f30b48"
+    },
+    "weights": [
+      {
+        "file": "/var/tmp/models/Qwen3.8-27B_gpuep_1.0_gpu_128/vision.onnx.data",
+        "bytes": 921713632,
+        "inode": 10879029,
+        "device": 64513
+      },
+      {
+        "file": "/var/tmp/models/Qwen3.8-27B_gpuep_1.0_gpu_128/text.onnx.data",
+        "bytes": 13394313216,
+        "inode": 10879017,
+        "device": 64513
+      },
+      {
+        "file": "/var/tmp/models/Qwen3.8-27B_gpuep_1.0_gpu_128/embedding.onnx.data",
+        "bytes": 2542796800,
+        "inode": 10878998,
+        "device": 64513
+      }
+    ],
+    "genai_source_revision": "331d6ebb9fab31e4a3bc04c2b873457181813408",
+    "genai_source_patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "recoveries": [
+      {
+        "started": 1794984893.2622938,
+        "completed_legs_preserved": 96,
+        "missing_cases": [
+          {
+            "round": 3,
+            "prompt": 4096,
+            "turns": 8,
+            "mode": "stock"
+          },
+          {
+            "round": 3,
+            "prompt": 4096,
+            "turns": 8,
+            "mode": "ring"
+          },
+          {
+            "round": 3,
+            "prompt": 4096,
+            "turns": 8,
+            "mode": "k8v8"
+          }
+        ],
+        "interrupted_label": "r3-stock-p4096-t8",
+        "interrupted_log": "r3-stock-p4096-t8.log",
+        "reason": "Recorded statuses remained running after the benchmark and finalizer processes disappeared; exact cause unknown.",
+        "controller": "/home/rohrajes/hip-ep-e2e/benchmark-runs/pr1402-refresh/resume_warmed_model_campaign.py",
+        "controller_sha256": "71c32fde76da9d2c1de8c747084bc741949bd482b33e33bf2ef8c86efb3771ca",
+        "original_controller_sha256": "4da16dedbdcf7fd6fa6af276f226f58ea1a013ab41f4be70672ea5d090f30b48",
+        "method": "Execute captured controller with only output-directory resume guard, state restoration, completed-case skips and unique resumed labels. Timed driver and measurement/sampling/aggregation code unchanged."
+      }
+    ]
+  },
+  "summary": [
+    {
+      "prompt": 128,
+      "turn": 1,
+      "turns": 1,
+      "stock": {
+        "prefill_s": 0.285193413,
+        "ttft_s": 0.285329317,
+        "decode_ms": 66.48100250806452,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 16.001922607421875
+      },
+      "ring": {
+        "prefill_s": 0.288208647,
+        "ttft_s": 0.288342618,
+        "decode_ms": 66.57913806451612,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 16.002059936523438
+      },
+      "k8v8": {
+        "prefill_s": 0.293283375,
+        "ttft_s": 0.29341986,
+        "decode_ms": 66.33799362096774,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 15.992202758789062
+      },
+      "context": 128
+    },
+    {
+      "prompt": 256,
+      "turn": 1,
+      "turns": 1,
+      "stock": {
+        "prefill_s": 0.479091602,
+        "ttft_s": 0.479227327,
+        "decode_ms": 66.49662226612904,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 16.056610107421875
+      },
+      "ring": {
+        "prefill_s": 0.47596976,
+        "ttft_s": 0.476103581,
+        "decode_ms": 66.64150450806453,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 16.056747436523438
+      },
+      "k8v8": {
+        "prefill_s": 0.475021615,
+        "ttft_s": 0.475158572,
+        "decode_ms": 66.63800958870968,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 16.044937133789062
+      },
+      "context": 256
+    },
+    {
+      "prompt": 512,
+      "turn": 1,
+      "turns": 1,
+      "stock": {
+        "prefill_s": 0.934568678,
+        "ttft_s": 0.934706115,
+        "decode_ms": 66.59233728225807,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 16.212860107421875
+      },
+      "ring": {
+        "prefill_s": 0.941485584,
+        "ttft_s": 0.941619484,
+        "decode_ms": 66.80782691129032,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 16.212997436523438
+      },
+      "k8v8": {
+        "prefill_s": 0.943847414,
+        "ttft_s": 0.943987747,
+        "decode_ms": 66.39081005645163,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 16.193374633789062
+      },
+      "context": 512
+    },
+    {
+      "prompt": 1024,
+      "turn": 1,
+      "turns": 1,
+      "stock": {
+        "prefill_s": 2.093217356,
+        "ttft_s": 2.093354833,
+        "decode_ms": 66.84168333870969,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 16.609344482421875
+      },
+      "ring": {
+        "prefill_s": 2.066742704,
+        "ttft_s": 2.0668795,
+        "decode_ms": 66.96456854032257,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 16.609481811523438
+      },
+      "k8v8": {
+        "prefill_s": 2.054814248,
+        "ttft_s": 2.054951625,
+        "decode_ms": 66.55263673387098,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 16.529312133789062
+      },
+      "context": 1024
+    },
+    {
+      "prompt": 2048,
+      "turn": 1,
+      "turns": 1,
+      "stock": {
+        "prefill_s": 4.256044756,
+        "ttft_s": 4.256183386,
+        "decode_ms": 67.1758994919355,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 17.185516357421875
+      },
+      "ring": {
+        "prefill_s": 4.252121644,
+        "ttft_s": 4.2522586,
+        "decode_ms": 67.26822166935483,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 17.185653686523438
+      },
+      "k8v8": {
+        "prefill_s": 4.332757205,
+        "ttft_s": 4.332906996,
+        "decode_ms": 66.66211316935485,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 17.123062133789062
+      },
+      "context": 2048
+    },
+    {
+      "prompt": 4096,
+      "turn": 1,
+      "turns": 1,
+      "stock": {
+        "prefill_s": 8.406179557,
+        "ttft_s": 8.406327444,
+        "decode_ms": 67.81489116129032,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 18.318328857421875
+      },
+      "ring": {
+        "prefill_s": 8.500896184,
+        "ttft_s": 8.501045443,
+        "decode_ms": 67.86260879032258,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 18.318466186523438
+      },
+      "k8v8": {
+        "prefill_s": 8.394910004,
+        "ttft_s": 8.395050437,
+        "decode_ms": 66.99712056451612,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 18.193374633789062
+      },
+      "context": 4096
+    },
+    {
+      "prompt": 8192,
+      "turn": 1,
+      "turns": 1,
+      "stock": {
+        "prefill_s": 17.759483431,
+        "ttft_s": 17.759632591,
+        "decode_ms": 69.06405745967743,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 20.574188232421875
+      },
+      "ring": {
+        "prefill_s": 17.896101683,
+        "ttft_s": 17.89624956,
+        "decode_ms": 69.15278642741936,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 20.574325561523438
+      },
+      "k8v8": {
+        "prefill_s": 17.91351293,
+        "ttft_s": 17.913661088,
+        "decode_ms": 67.66898380645164,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 20.324234008789062
+      },
+      "context": 8192
+    },
+    {
+      "prompt": 16384,
+      "turn": 1,
+      "turns": 1,
+      "stock": {
+        "prefill_s": 38.812752414,
+        "ttft_s": 38.812902254,
+        "decode_ms": 71.3941276451613,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 25.269500732421875
+      },
+      "ring": {
+        "prefill_s": 39.073282596,
+        "ttft_s": 39.073440011,
+        "decode_ms": 71.59906277419354,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 25.269638061523438
+      },
+      "k8v8": {
+        "prefill_s": 38.744146317,
+        "ttft_s": 38.744296428,
+        "decode_ms": 68.89436926612903,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 24.832046508789062
+      },
+      "context": 16384
+    },
+    {
+      "prompt": 32768,
+      "turn": 1,
+      "turns": 1,
+      "stock": {
+        "prefill_s": 81.72152268,
+        "ttft_s": 81.721702506,
+        "decode_ms": 76.25696431451614,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 34.330047607421875
+      },
+      "ring": {
+        "prefill_s": 84.537829588,
+        "ttft_s": 84.538011118,
+        "decode_ms": 76.31785608870968,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 34.33018493652344
+      },
+      "k8v8": {
+        "prefill_s": 82.215627102,
+        "ttft_s": 82.215810014,
+        "decode_ms": 71.43533008064516,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 33.51759338378906
+      },
+      "context": 32768
+    },
+    {
+      "prompt": 65536,
+      "turn": 1,
+      "turns": 1,
+      "stock": {
+        "prefill_s": 188.999715495,
+        "ttft_s": 188.999897676,
+        "decode_ms": 89.02802949193548,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 52.449188232421875
+      },
+      "ring": {
+        "prefill_s": 198.652223685,
+        "ttft_s": 198.652412499,
+        "decode_ms": 85.98276665322581,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 52.44932556152344
+      },
+      "k8v8": {
+        "prefill_s": 187.458453288,
+        "ttft_s": 187.45863068,
+        "decode_ms": 76.56222463709676,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 50.88673400878906
+      },
+      "context": 65536
+    },
+    {
+      "prompt": 4096,
+      "turn": 1,
+      "turns": 8,
+      "stock": {
+        "prefill_s": 8.893129798,
+        "ttft_s": 8.893304555,
+        "decode_ms": 67.72191227419354,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 20.130828857421875
+      },
+      "ring": {
+        "prefill_s": 8.892758414,
+        "ttft_s": 8.89293263,
+        "decode_ms": 67.91054598387097,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 20.130966186523438
+      },
+      "k8v8": {
+        "prefill_s": 8.929638991,
+        "ttft_s": 8.929813468,
+        "decode_ms": 67.0102935967742,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 19.355484008789062
+      },
+      "context": 4096
+    },
+    {
+      "prompt": 4096,
+      "turn": 2,
+      "turns": 8,
+      "stock": {
+        "prefill_s": 9.208438206,
+        "ttft_s": 9.208606842,
+        "decode_ms": 68.98007338709678,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 20.130828857421875
+      },
+      "ring": {
+        "prefill_s": 9.232777681,
+        "ttft_s": 9.232956385,
+        "decode_ms": 69.23129254032258,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 20.130966186523438
+      },
+      "k8v8": {
+        "prefill_s": 9.252824391,
+        "ttft_s": 9.253005591,
+        "decode_ms": 67.6537436532258,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 19.355484008789062
+      },
+      "context": 8320
+    },
+    {
+      "prompt": 4096,
+      "turn": 3,
+      "turns": 8,
+      "stock": {
+        "prefill_s": 9.46260082,
+        "ttft_s": 9.462775597,
+        "decode_ms": 70.21083417741934,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 20.130828857421875
+      },
+      "ring": {
+        "prefill_s": 9.606005313,
+        "ttft_s": 9.606182625,
+        "decode_ms": 70.43580377419354,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 20.130966186523438
+      },
+      "k8v8": {
+        "prefill_s": 9.523874985,
+        "ttft_s": 9.524051765,
+        "decode_ms": 68.30331873387095,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 19.355484008789062
+      },
+      "context": 12544
+    },
+    {
+      "prompt": 4096,
+      "turn": 4,
+      "turns": 8,
+      "stock": {
+        "prefill_s": 9.714227488,
+        "ttft_s": 9.714407935,
+        "decode_ms": 71.51882179032256,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 20.130828857421875
+      },
+      "ring": {
+        "prefill_s": 9.9197316,
+        "ttft_s": 9.919910725,
+        "decode_ms": 71.7080664919355,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 20.130966186523438
+      },
+      "k8v8": {
+        "prefill_s": 9.725327213,
+        "ttft_s": 9.725505276,
+        "decode_ms": 68.97464747580644,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 19.355484008789062
+      },
+      "context": 16768
+    },
+    {
+      "prompt": 4096,
+      "turn": 5,
+      "turns": 8,
+      "stock": {
+        "prefill_s": 9.99020408,
+        "ttft_s": 9.99038027,
+        "decode_ms": 72.76164016129034,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 20.130828857421875
+      },
+      "ring": {
+        "prefill_s": 10.274916133,
+        "ttft_s": 10.27508552,
+        "decode_ms": 72.88406145967741,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 20.130966186523438
+      },
+      "k8v8": {
+        "prefill_s": 10.107047651,
+        "ttft_s": 10.107224201,
+        "decode_ms": 69.64043980645161,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 19.355484008789062
+      },
+      "context": 20992
+    },
+    {
+      "prompt": 4096,
+      "turn": 6,
+      "turns": 8,
+      "stock": {
+        "prefill_s": 10.250087071,
+        "ttft_s": 10.250254755,
+        "decode_ms": 73.96107075806451,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 20.130828857421875
+      },
+      "ring": {
+        "prefill_s": 10.653150415,
+        "ttft_s": 10.653326755,
+        "decode_ms": 74.18196109677417,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 20.130966186523438
+      },
+      "k8v8": {
+        "prefill_s": 10.261939474,
+        "ttft_s": 10.262119381,
+        "decode_ms": 70.23622566935484,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 19.355484008789062
+      },
+      "context": 25216
+    },
+    {
+      "prompt": 4096,
+      "turn": 7,
+      "turns": 8,
+      "stock": {
+        "prefill_s": 10.529027771,
+        "ttft_s": 10.529210092,
+        "decode_ms": 75.25628853225807,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 20.130828857421875
+      },
+      "ring": {
+        "prefill_s": 10.972348904,
+        "ttft_s": 10.972514835,
+        "decode_ms": 75.39753126612904,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 20.130966186523438
+      },
+      "k8v8": {
+        "prefill_s": 10.52714639,
+        "ttft_s": 10.527326717,
+        "decode_ms": 70.91940391935483,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 19.355484008789062
+      },
+      "context": 29440
+    },
+    {
+      "prompt": 4096,
+      "turn": 8,
+      "turns": 8,
+      "stock": {
+        "prefill_s": 10.808495778,
+        "ttft_s": 10.808677077,
+        "decode_ms": 76.54016634677419,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 20.130828857421875
+      },
+      "ring": {
+        "prefill_s": 11.346024304,
+        "ttft_s": 11.34619312,
+        "decode_ms": 76.60248191129034,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 20.130966186523438
+      },
+      "k8v8": {
+        "prefill_s": 10.795033592,
+        "ttft_s": 10.795212617,
+        "decode_ms": 71.5437686048387,
+        "rounds": 3,
+        "peak_sampled_gtt_gib": 19.355484008789062
+      },
+      "context": 33664
+    }
+  ],
+  "integration_qualification": {
+    "genai019-qualified-h16": {
+      "genai_version": "0.19.0",
+      "amdgpu_ep_path": "/home/rohrajes/hip-ep-e2e/hipep-discovery/artifacts/kv-pareto-pr1402-package/lib/libhipgpu.so",
+      "cases": [
+        {
+          "case": "stock",
+          "heads": 16,
+          "provider_options": {},
+          "allocation_mode": "custom-config",
+          "genai_provider_options": [
+            {
+              "AMDGPU": {
+                "profile": "hip",
+                "config_file": "/home/rohrajes/hip-ep-e2e/benchmark-runs/pr1402-refresh/genai019-qualified-h16/h16-stock/morphizen_config.json"
+              }
+            }
+          ],
+          "cache_shape": [
+            1,
+            4,
+            64,
+            256
+          ],
+          "status": "passed",
+          "worst_abs_error": 0.0002717702890124851,
+          "tokens": 20,
+          "codec_rows_byte_exact": false,
+          "append_turns": 2,
+          "pending_token_append": true,
+          "append_abs_errors": [
+            0.00024042848238581271,
+            0.0002717702890124851
+          ]
+        },
+        {
+          "case": "k8v8",
+          "heads": 16,
+          "provider_options": {
+            "kvCacheQuantizationBits": "8",
+            "kv_cache_codec": "k8v8_g32_planar_v1"
+          },
+          "allocation_mode": "custom-config",
+          "genai_provider_options": [
+            {
+              "AMDGPU": {
+                "profile": "hip",
+                "config_file": "/home/rohrajes/hip-ep-e2e/benchmark-runs/pr1402-refresh/genai019-qualified-h16/h16-k8v8/morphizen_config.json"
+              }
+            }
+          ],
+          "cache_shape": [
+            1,
+            4,
+            64,
+            140
+          ],
+          "status": "passed",
+          "worst_abs_error": 0.0005787450080957379,
+          "tokens": 20,
+          "codec_rows_byte_exact": true,
+          "append_turns": 2,
+          "pending_token_append": true,
+          "append_abs_errors": [
+            0.00036230443878570995,
+            0.00023221988500887747
+          ]
+        },
+        {
+          "case": "bits8",
+          "heads": 16,
+          "provider_options": {
+            "kvCacheQuantizationBits": "8"
+          },
+          "allocation_mode": "custom-config",
+          "genai_provider_options": [
+            {
+              "AMDGPU": {
+                "profile": "hip",
+                "config_file": "/home/rohrajes/hip-ep-e2e/benchmark-runs/pr1402-refresh/genai019-qualified-h16/h16-bits8/morphizen_config.json"
+              }
+            }
+          ],
+          "status": "rejected",
+          "error": "Non-zero status code returned while running AMDGPUExecutionProvider_4635298064308220062_0 node. Name:'AMDGPUExecutionProvider_AMDGPUExecutionProvider_4635298064308220062_0_0' Status Message: inference_compute (allocator) failed with code: -1",
+          "cache_shape": [
+            1,
+            4,
+            64,
+            140
+          ]
+        },
+        {
+          "case": "invalid",
+          "heads": 16,
+          "provider_options": {
+            "kvCacheQuantizationBits": "8",
+            "kv_cache_codec": "invalid"
+          },
+          "allocation_mode": "custom-config",
+          "genai_provider_options": [
+            {
+              "AMDGPU": {
+                "profile": "hip",
+                "config_file": "/home/rohrajes/hip-ep-e2e/benchmark-runs/pr1402-refresh/genai019-qualified-h16/h16-invalid/morphizen_config.json"
+              }
+            }
+          ],
+          "status": "rejected",
+          "error": "Non-zero status code returned while running AMDGPUExecutionProvider_8680904956471092667_0 node. Name:'AMDGPUExecutionProvider_AMDGPUExecutionProvider_8680904956471092667_0_0' Status Message: inference_compute (allocator) failed with code: -1",
+          "cache_shape": [
+            1,
+            4,
+            64,
+            140
+          ]
+        }
+      ],
+      "status": "passed"
+    },
+    "genai019-qualified-h24": {
+      "genai_version": "0.19.0",
+      "amdgpu_ep_path": "/home/rohrajes/hip-ep-e2e/hipep-discovery/artifacts/kv-pareto-pr1402-package/lib/libhipgpu.so",
+      "cases": [
+        {
+          "case": "stock",
+          "heads": 24,
+          "provider_options": {},
+          "allocation_mode": "custom-config",
+          "genai_provider_options": [
+            {
+              "AMDGPU": {
+                "profile": "hip",
+                "config_file": "/home/rohrajes/hip-ep-e2e/benchmark-runs/pr1402-refresh/genai019-qualified-h24/h24-stock/morphizen_config.json"
+              }
+            }
+          ],
+          "cache_shape": [
+            1,
+            4,
+            64,
+            256
+          ],
+          "status": "passed",
+          "worst_abs_error": 0.00039626624413591216,
+          "tokens": 20,
+          "codec_rows_byte_exact": false,
+          "append_turns": 2,
+          "pending_token_append": true,
+          "append_abs_errors": [
+            0.00026910666329743593,
+            0.0001456611827911347
+          ]
+        },
+        {
+          "case": "k8v8",
+          "heads": 24,
+          "provider_options": {
+            "kvCacheQuantizationBits": "8",
+            "kv_cache_codec": "k8v8_g32_planar_v1"
+          },
+          "allocation_mode": "custom-config",
+          "genai_provider_options": [
+            {
+              "AMDGPU": {
+                "profile": "hip",
+                "config_file": "/home/rohrajes/hip-ep-e2e/benchmark-runs/pr1402-refresh/genai019-qualified-h24/h24-k8v8/morphizen_config.json"
+              }
+            }
+          ],
+          "cache_shape": [
+            1,
+            4,
+            64,
+            140
+          ],
+          "status": "passed",
+          "worst_abs_error": 0.0004894206040246818,
+          "tokens": 20,
+          "codec_rows_byte_exact": true,
+          "append_turns": 2,
+          "pending_token_append": true,
+          "append_abs_errors": [
+            0.0004824051180733688,
+            0.00017413595365012302
+          ]
+        },
+        {
+          "case": "bits8",
+          "heads": 24,
+          "provider_options": {
+            "kvCacheQuantizationBits": "8"
+          },
+          "allocation_mode": "custom-config",
+          "genai_provider_options": [
+            {
+              "AMDGPU": {
+                "profile": "hip",
+                "config_file": "/home/rohrajes/hip-ep-e2e/benchmark-runs/pr1402-refresh/genai019-qualified-h24/h24-bits8/morphizen_config.json"
+              }
+            }
+          ],
+          "status": "rejected",
+          "error": "Non-zero status code returned while running AMDGPUExecutionProvider_427212542108057448_0 node. Name:'AMDGPUExecutionProvider_AMDGPUExecutionProvider_427212542108057448_0_0' Status Message: inference_compute (allocator) failed with code: -1",
+          "cache_shape": [
+            1,
+            4,
+            64,
+            140
+          ]
+        },
+        {
+          "case": "invalid",
+          "heads": 24,
+          "provider_options": {
+            "kvCacheQuantizationBits": "8",
+            "kv_cache_codec": "invalid"
+          },
+          "allocation_mode": "custom-config",
+          "genai_provider_options": [
+            {
+              "AMDGPU": {
+                "profile": "hip",
+                "config_file": "/home/rohrajes/hip-ep-e2e/benchmark-runs/pr1402-refresh/genai019-qualified-h24/h24-invalid/morphizen_config.json"
+              }
+            }
+          ],
+          "status": "rejected",
+          "error": "Non-zero status code returned while running AMDGPUExecutionProvider_13735863438274079413_0 node. Name:'AMDGPUExecutionProvider_AMDGPUExecutionProvider_13735863438274079413_0_0' Status Message: inference_compute (allocator) failed with code: -1",
+          "cache_shape": [
+            1,
+            4,
+            64,
+            140
+          ]
+        }
+      ],
+      "status": "passed"
+    }
+  },
+  "round_receipts": [
+    {
+      "round": 1,
+      "file": "kv-pareto-model-performance-round1.json",
+      "sha256": "abfd6a7f4f1417ce25f43617ab3dd0cbf7d226d82caf35491fa993807d4113da",
+      "processes": 33
+    },
+    {
+      "round": 2,
+      "file": "kv-pareto-model-performance-round2.json",
+      "sha256": "7f7c7d7a366416560fd825b51b2553cb998139ff7e590481a67e279fb0eeedbd",
+      "processes": 33
+    },
+    {
+      "round": 3,
+      "file": "kv-pareto-model-performance-round3.json",
+      "sha256": "7e8f41dabefc0bc167d5de3920a39468dc5beaed61df5b49f6f9a7d84a77e4dc",
+      "processes": 33
+    }
+  ]
+}
