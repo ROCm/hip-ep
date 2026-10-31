@@ -270,6 +270,9 @@ shell before invoking pytest:
 |---|---|
 | `HIPDNN_EP_DEBUG=1` | Verbose debug logging from the EP DLL. |
 | `HIPDNN_EP_PERF=1` | Per-op GPU/CPU profiling output. **Do not use for tok/s measurements** -- adds ~58% overhead (see CLAUDE.md). |
+| `HIPDNN_EP_ROCTX=1` | Emit ROCTx annotations for a tracer such as ktrace; disabled by default, read once per process. Names follow ktrace's ROCTx naming convention (`docs/roctx-naming.md` in ktrace). Ranges: every compiled subgraph run, `hip_ep.graph.<model> sub=<idx>` (`hip_ep.graph.vision_encoder sub=0`, `hip_ep.graph.decoder sub=0`), and every `OP_PROFILE` / `OP_PROFILE_CPU` operator, `hip_ep.op.<op> <shape>` (`hip_ep.op.matmul_nbits m=1,n=2560,k=10240`). Marks: `OP_ROCTX_MARK` steps inside QMoE and GQA, `hip_ep.op.<op>.<stage>.<step>` (`hip_ep.op.qmoe.prefill.fc1_small`, `hip_ep.op.gqa.kv.append`, `hip_ep.op.gqa.attn.flash_decode`), name the kernels launched after them. With it unset nothing is loaded and each instrumented op costs one no-op call. |
+| `HIPDNN_EP_ROCTX_LIB=<path>` | Explicit path to `roctx64.dll` / `libroctx64.so`. Unset, the loader search path is used (`roctx64.dll`; `libroctx64.so`, then `libroctx64.so.4`), so set it for the `roctx64.dll` bundled with ktrace, which is not on `PATH`. If the library, `roctxRangePushA` or `roctxRangePop` is missing, annotation becomes a no-op; without `roctxMarkA` only the marks are skipped. |
+| `HIPDNN_EP_ROCTX_VERBOSE=1` | Print one line to stderr saying whether the runtime loaded the ROCTx library (`[hip-ep roctx] enabled: <lib>` or `disabled: could not load range API from <lib>`). Use it when a capture shows no operator ranges. Subgraph ranges are resolved separately by the EP bridge and print nothing. |
 | `HIPDNN_EP_GQA_*` | Various GQA path toggles (`HIPDNN_EP_GQA_FLASH_DECODE`, `HIPDNN_EP_GQA_CACHE_SEQLENS`, ...). |
 
 These are read by the DLL directly; the framework neither sets them
