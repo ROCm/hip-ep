@@ -283,11 +283,41 @@ extern "C" int hipdnn_ep_run_scan(RuntimeState *state,
                                   void **scan_output_descs) {
   if (!state || !body_fn || trip_count < 0)
     return -1;
+  if (state->scan_pool_active) {
+    fprintf(stderr, "hipdnn_ep_run_scan: nested Scan is not supported\n");
+    return -1;
+  }
+
+  // hip-pool-allocs assigns domain ids independently in every function, so an
+  // outlined body and its parent both start at domain zero. Running the body
+  // against the parent's domain array would let body temporaries overwrite
+  // captured parent values. Swap in a cached Scan-only domain set for the
+  // duration of the driver; descriptors passed through the ABI retain direct
+  // pointers to parent buffers and remain valid.
+  int parentNumPoolDomains = state->num_pool_domains;
+  void **parentPoolBase = state->pool_base;
+  size_t *parentPoolSize = state->pool_size;
+  state->num_pool_domains = state->num_scan_pool_domains;
+  state->pool_base = state->scan_pool_base;
+  state->pool_size = state->scan_pool_size;
+  state->scan_pool_active = true;
+
+  int result = 0;
   for (int64_t i = 0; i < trip_count; ++i) {
     int rc = body_fn(state, i, state_descs, scan_input_descs, capture_descs,
                      scan_output_descs);
-    if (rc != 0)
-      return rc;
+    if (rc != 0) {
+      result = rc;
+      break;
+    }
   }
-  return 0;
+
+  state->num_scan_pool_domains = state->num_pool_domains;
+  state->scan_pool_base = state->pool_base;
+  state->scan_pool_size = state->pool_size;
+  state->num_pool_domains = parentNumPoolDomains;
+  state->pool_base = parentPoolBase;
+  state->pool_size = parentPoolSize;
+  state->scan_pool_active = false;
+  return result;
 }

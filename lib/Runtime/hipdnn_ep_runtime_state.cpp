@@ -512,6 +512,10 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->num_pool_domains = 0;
   state->pool_base = nullptr;
   state->pool_size = nullptr;
+  state->num_scan_pool_domains = 0;
+  state->scan_pool_base = nullptr;
+  state->scan_pool_size = nullptr;
+  state->scan_pool_active = false;
   state->buffer_offsets = nullptr;
   state->num_buffers = 0;
   state->workspace = nullptr;
@@ -1220,6 +1224,22 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     state->pool_size = nullptr;
   }
   state->num_pool_domains = 0;
+  if (state->scan_pool_base) {
+    for (int i = 0; i < state->num_scan_pool_domains; ++i) {
+      if (state->scan_pool_base[i]) {
+        HIP_CLEANUP(
+            hipdnn_ep_state_device_free(state, state->scan_pool_base[i]));
+      }
+    }
+    free(state->scan_pool_base);
+    state->scan_pool_base = nullptr;
+  }
+  if (state->scan_pool_size) {
+    free(state->scan_pool_size);
+    state->scan_pool_size = nullptr;
+  }
+  state->num_scan_pool_domains = 0;
+  state->scan_pool_active = false;
   if (state->buffer_offsets) {
     free(state->buffer_offsets);
   }

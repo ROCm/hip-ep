@@ -46,7 +46,7 @@ def _make_stateful_scan_model(sequence_length: int):
     body = helper.make_graph(
         [
             helper.make_node("Add", ["state_in", "slice_in"], ["state_out"]),
-            helper.make_node("Add", ["state_out", "bias"], ["value_out"]),
+            helper.make_node("Add", ["state_out", "bias_capture"], ["value_out"]),
         ],
         "scan_body",
         [state_in, slice_in],
@@ -60,6 +60,7 @@ def _make_stateful_scan_model(sequence_length: int):
         "sequence", TensorProto.FLOAT, [sequence_length, 4]
     )
     bias = helper.make_tensor_value_info("bias", TensorProto.FLOAT, [4])
+    bias_extra = helper.make_tensor_value_info("bias_extra", TensorProto.FLOAT, [4])
     final_state = helper.make_tensor_value_info("final_state", TensorProto.FLOAT, [4])
     stacked = helper.make_tensor_value_info(
         "stacked", TensorProto.FLOAT, [sequence_length, 4]
@@ -71,9 +72,10 @@ def _make_stateful_scan_model(sequence_length: int):
         body=body,
         num_scan_inputs=1,
     )
+    capture_producer = helper.make_node("Add", ["bias", "bias_extra"], ["bias_capture"])
     return make_model_from_nodes(
-        [scan],
-        [initial_state, sequence, bias],
+        [capture_producer, scan],
+        [initial_state, sequence, bias, bias_extra],
         [final_state, stacked],
     )
 
@@ -94,10 +96,11 @@ class TestScan:
         initial_state = rng.standard_normal(4).astype(np.float32)
         sequence = rng.standard_normal((3, 4)).astype(np.float32)
         bias = rng.standard_normal(4).astype(np.float32)
+        bias_extra = rng.standard_normal(4).astype(np.float32)
 
         actual, expected = model_runner.run_sample(
             model,
-            [initial_state, sequence, bias],
+            [initial_state, sequence, bias, bias_extra],
             reference="cpu",
         )
         compare_outputs(actual, expected, atol=1e-6, rtol=1e-6)
