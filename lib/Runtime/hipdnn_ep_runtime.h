@@ -912,7 +912,11 @@ int wrap_group_query_attention(
     // Sequence length of the key/value operands (seq_len_q for packed QKV).
     // 0 with a causal past cache means the call appends nothing and attends
     // over past_key/past_value only (a layer sharing another layer's cache).
-    int64_t seq_len_new_kv);
+    int64_t seq_len_new_kv,
+    // hip.gqa key_bias: fp16 [key_bias_batch (1 or batch), key_bias_len] bias
+    // per key, added to every query row's scores on top of the causal and
+    // window masks; null when absent. key_bias_len must cover seq_len_kv.
+    void *key_bias, int64_t key_bias_batch, int64_t key_bias_len);
 
 // MultiHeadAttention operation wrapper (com.microsoft.MultiHeadAttention v1).
 // Called by generated IR for onnx.Custom(MultiHeadAttention) lowering.
@@ -1762,6 +1766,13 @@ int wrap_dequantize_linear(
 // results.
 // Optional pointer args: pass nullptr if the corresponding input is absent.
 #define HIPDNN_EP_QMOE_ACTIVATION_RELU2 5
+// routing_type: SOFTMAX routes by softmax(router_probs) (or router_weights);
+// SIGMOID_BIAS reads fp32 logits in router_probs, selects the top-k of
+// sigmoid + correction_bias, and weights by the selected sigmoid scores,
+// normalized over k when normalize_routing_weights, times
+// routed_scaling_factor.
+#define HIPDNN_EP_QMOE_ROUTING_SOFTMAX 0
+#define HIPDNN_EP_QMOE_ROUTING_SIGMOID_BIAS 1
 
 int wrap_qmoe(
     RuntimeState *state,
@@ -1787,7 +1798,10 @@ int wrap_qmoe(
     int64_t activation_type, // 0=relu,1=gelu,2=silu,3=swiglu,4=identity,
                              // 5=relu2
     float activation_alpha, float activation_beta, float swiglu_limit,
-    int64_t normalize_routing_weights, int64_t elem_size);
+    int64_t normalize_routing_weights, int64_t elem_size,
+    const void *correction_bias, // (nullable) [num_experts] fp32
+    int64_t routing_type,        // HIPDNN_EP_QMOE_ROUTING_*
+    float routed_scaling_factor);
 
 // com.amd QMoE operation wrapper (LatentMoE).
 //

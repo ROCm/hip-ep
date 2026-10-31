@@ -35,9 +35,10 @@ module {
 }
 
 // CHECK-LABEL: llvm.func @test_gqa_lowering
-// CHECK: llvm.call @wrap_group_query_attention({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, f32, i64, i64, f32, i64, i64, i64, i64, i64, i64, i32, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+// CHECK: llvm.call @wrap_group_query_attention({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, f32, i64, i64, f32, i64, i64, i64, i64, i64, i64, i32, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, !llvm.ptr, i64, i64) -> i32
 
-// Verify 43 parameters (full MS GQA spec signature + no_causal + op_state_slot):
+// Verify 46 parameters (full MS GQA spec signature + no_causal + op_state_slot
+// + key bias):
 // - 19 pointers: state, query, key, value, past_key, past_value, seqlens_k, total_seq_len,
 //                cos_cache(NULL), sin_cache(NULL), position_ids(NULL), attention_bias(NULL),
 //                head_sink(NULL), k_scale(NULL), v_scale(NULL),
@@ -53,5 +54,6 @@ module {
 //                   MultiHeadAttention cross-attn lowering emits)
 // - 1 key length param: seq_len_new_kv=1 (key dim 1; 0 means attend over the
 //                       past cache only)
+// - 3 key bias params: key_bias(NULL), key_bias_batch=0, key_bias_len=0
 // - 1 i32: op_state_slot (per-instance GqaState; threaded by
 //          --assign-op-state-slots, replaces shared RuntimeState::gqa_gemm_cache)

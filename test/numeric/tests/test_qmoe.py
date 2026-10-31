@@ -743,3 +743,145 @@ class TestQMoERelu2:
         )
         actual, expected = _run_relu2(model_runner, cfg)
         compare_outputs(actual, expected, atol=1e-1, rtol=1e-2, cos_threshold=0.99)
+
+
+def _make_sigmoid_bias_qmoe_model(
+    hidden: int,
+    inter: int,
+    num_experts: int,
+    top_k: int,
+    block_size: int,
+    scale: float,
+    seed: int = 7,
+):
+    """QMoE fed by the sigmoid + correction-bias router that exporters emit
+    outside the op: TopK over sigmoid(logits) + bias picks the experts, the
+    mixing weights are the picked sigmoid scores renormalised and scaled, and
+    two ScatterElements spread both into the dense router_probs (-inf except
+    1.0 at the picks) and router_weights inputs. The compiler folds the chain
+    into the op, so the reference is the unfused graph on ORT CPU. Symmetric
+    int4 experts without bias or zero points, swiglu with default attributes.
+    """
+    rng = np.random.default_rng(seed)
+    e = num_experts
+    inits = [
+        numpy_helper.from_array(
+            rng.uniform(-0.2, 0.2, [e]).astype(np.float32), "correction_bias"
+        ),
+        numpy_helper.from_array(np.array([top_k], np.int64), "k"),
+        numpy_helper.from_array(np.array([-1], np.int64), "axes"),
+        numpy_helper.from_array(np.array(scale, np.float32), "scale"),
+        numpy_helper.from_array(np.array(-np.inf, np.float16), "neg_inf"),
+        numpy_helper.from_array(np.array(1.0, np.float16), "one"),
+        numpy_helper.from_array(np.array(0.0, np.float16), "zero"),
+        numpy_helper.from_array(np.array([0], np.int64), "s0"),
+        numpy_helper.from_array(np.array([-1], np.int64), "s1"),
+        numpy_helper.from_array(np.array([e], np.int64), "num_e"),
+        numpy_helper.from_array(np.array([-1, e], np.int64), "flat"),
+    ]
+    for name, n, k in (("fc1", 2 * inter, hidden), ("fc2", hidden, inter)):
+        inits.append(
+            numpy_helper.from_array(
+                rng.integers(0, 256, [e, n, k // 2], dtype=np.uint8), f"{name}_w"
+            )
+        )
+        inits.append(
+            numpy_helper.from_array(
+                rng.uniform(0.002, 0.02, [e, n, k // block_size]).astype(np.float16),
+                f"{name}_s",
+            )
+        )
+
+    nodes = [
+        helper.make_node("Sigmoid", ["logits"], ["sig"]),
+        helper.make_node("Add", ["sig", "correction_bias"], ["sel"]),
+        helper.make_node(
+            "TopK", ["sel", "k"], ["top_v", "idx"], axis=-1, largest=1, sorted=1
+        ),
+        helper.make_node("GatherElements", ["sig", "idx"], ["g"], axis=-1),
+        helper.make_node("ReduceSum", ["g", "axes"], ["g_sum"], keepdims=1),
+        helper.make_node("Div", ["g", "g_sum"], ["g_norm"]),
+        helper.make_node("Mul", ["g_norm", "scale"], ["g_scaled"]),
+        helper.make_node("Cast", ["g_scaled"], ["w"], to=TensorProto.FLOAT16),
+        helper.make_node("Shape", ["idx"], ["idx_shape"]),
+        helper.make_node("Slice", ["idx_shape", "s0", "s1"], ["lead"]),
+        helper.make_node("Concat", ["lead", "num_e"], ["dense_shape"], axis=0),
+        helper.make_node("Expand", ["neg_inf", "dense_shape"], ["probs_fill"]),
+        helper.make_node("Expand", ["one", "idx_shape"], ["probs_upd"]),
+        helper.make_node(
+            "ScatterElements", ["probs_fill", "idx", "probs_upd"], ["probs"], axis=-1
+        ),
+        helper.make_node("Expand", ["zero", "dense_shape"], ["wts_fill"]),
+        helper.make_node("ScatterElements", ["wts_fill", "idx", "w"], ["wts"], axis=-1),
+        helper.make_node("Reshape", ["probs", "flat"], ["probs_2d"]),
+        helper.make_node("Reshape", ["wts", "flat"], ["wts_2d"]),
+        helper.make_node(
+            "QMoE",
+            ["input", "probs_2d", "fc1_w", "fc1_s", "", "fc2_w", "fc2_s"]
+            + [""] * 7
+            + ["wts_2d"],
+            ["output"],
+            domain="com.microsoft",
+            activation_type="swiglu",
+            expert_weight_bits=4,
+            k=top_k,
+            normalize_routing_weights=0,
+            swiglu_fusion=1,
+            block_size=block_size,
+        ),
+    ]
+    # A symbolic token count, as in the exports: with static shapes ORT folds
+    # the Shape/Expand fills into initializers before the EP sees the graph.
+    inputs = [
+        helper.make_tensor_value_info("input", TensorProto.FLOAT16, [1, "T", hidden]),
+        helper.make_tensor_value_info("logits", TensorProto.FLOAT, [1, "T", e]),
+    ]
+    output = helper.make_tensor_value_info(
+        "output", TensorProto.FLOAT16, [1, "T", hidden]
+    )
+    return make_model_from_nodes(
+        nodes,
+        inputs,
+        [output],
+        initializers=inits,
+        opset=21,
+        extra_opsets=[helper.make_opsetid("com.microsoft", 1)],
+    )
+
+
+class TestQMoESigmoidBiasRouting:
+    """256 experts, top-10, block 128: the routing geometry of the sigmoid +
+    correction-bias MoE exports, at a reduced hidden size so the ORT CPU
+    reference stays small. seq_len 1 and 5 take the fused decode kernels, 9
+    and up the grouped prefill path; every token count goes through the
+    folded routing kernel."""
+
+    @pytest.mark.parametrize("seq_len", [1, 5, 9, 128, 512])
+    def test_qmoe_sigmoid_bias_routing(self, model_runner, seq_len):
+        e, k = 256, 10
+        model = _make_sigmoid_bias_qmoe_model(
+            hidden=512, inter=256, num_experts=e, top_k=k, block_size=128, scale=2.5
+        )
+        rng = np.random.default_rng(seq_len)
+        x = rng.uniform(-1, 1, [1, seq_len, 512]).astype(np.float16)
+        logits = (rng.standard_normal([1, seq_len, e]) * 2.0).astype(np.float32)
+        # A tie at the k-th selection score makes the expert choice
+        # backend-defined.
+        bias = numpy_helper.to_array(
+            next(i for i in model.graph.initializer if i.name == "correction_bias")
+        )
+        sel = 1.0 / (1.0 + np.exp(-logits[0])) + bias
+        ranked = -np.sort(-sel, axis=1)
+        assert not (ranked[:, k - 1] == ranked[:, k]).any()
+
+        actual, expected = model_runner.run_sample(model, [x, logits])
+        if seq_len <= FUSED_MAX_TOKENS:
+            # W4A8 decode (HIPDNN_EP_MATMUL_DP4A, default on): ten int8-quantized
+            # expert paths per token measure cosine ~0.99988 here, and 0.9999
+            # or better with HIPDNN_EP_MATMUL_DP4A=0.
+            scale = float(np.abs(expected[0].astype(np.float32)).max())
+            compare_outputs(
+                actual, expected, atol=2e-2 * scale, rtol=1e-2, cos_threshold=0.9995
+            )
+        else:
+            _compare_gpt_oss_shape(actual, expected, seq_len)

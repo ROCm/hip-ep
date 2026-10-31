@@ -203,3 +203,27 @@ func.func @no_reuse_different_element_type(
   hip.miopen.softmax(%ctx) ins(%c : memref<64xf16>) outs(%alloc1 : memref<64xf16>)
   return %alloc1 : memref<64xf16>
 }
+
+// alloc0 is dead after hip.expand reads it, and alloc1 would fit, but both are
+// host-stored.  HIP ops run asynchronously, so storing into alloc0's slot
+// could land before hip.expand reads it.  Host-accessed buffers are not reused.
+// CHECK-LABEL: func.func @no_reuse_host_accessed
+// CHECK:         %[[A:.*]] = memref.alloc() : memref<1xi32>
+// CHECK:         hip.expand(%{{.*}}) ins(%[[A]],
+// CHECK:         %[[B:.*]] = memref.alloc() : memref<i32>
+// CHECK:         memref.store %{{.*}}, %[[B]][]
+// CHECK:         return %[[B]]
+func.func @no_reuse_host_accessed(
+    %ctx: !hip.context, %x: i32, %y: i32,
+    %out: memref<4xi32>) -> memref<i32> {
+  %c0 = arith.constant 0 : index
+  %c4 = arith.constant 4 : i64
+  %alloc0 = memref.alloc() : memref<1xi32>
+  memref.store %x, %alloc0[%c0] : memref<1xi32>
+  %shape = memref.alloc() : memref<1xi64>
+  memref.store %c4, %shape[%c0] : memref<1xi64>
+  hip.expand(%ctx) ins(%alloc0, %shape : memref<1xi32>, memref<1xi64>) outs(%out : memref<4xi32>)
+  %alloc1 = memref.alloc() : memref<i32>
+  memref.store %y, %alloc1[] : memref<i32>
+  return %alloc1 : memref<i32>
+}

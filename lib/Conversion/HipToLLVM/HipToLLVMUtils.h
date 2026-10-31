@@ -209,6 +209,11 @@ inline constexpr int64_t kQMoEAmdRoutingSigmoid = 0;
 // HIPDNN_EP_QMOE_ACTIVATION_RELU2 in lib/Runtime/hipdnn_ep_runtime.h.
 inline constexpr int64_t kQMoEActivationRelu2 = 5;
 
+// hip.qmoe / wrap_qmoe routing_type. Must match HIPDNN_EP_QMOE_ROUTING_* in
+// lib/Runtime/hipdnn_ep_runtime.h.
+inline constexpr int64_t kQMoERoutingSoftmax = 0;
+inline constexpr int64_t kQMoERoutingSigmoidBias = 1;
+
 // Window-pool reduction mode constants (hip.pool / wrap_pool).
 // Values must match HIPDNN_EP_POOL_* in lib/Runtime/hipdnn_ep_runtime.h
 // and the `pool_mode` constants used in OnnxToHip/PoolConversion.cpp.

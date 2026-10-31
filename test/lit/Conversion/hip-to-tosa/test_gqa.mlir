@@ -35,7 +35,7 @@ func.func @mha_prefill(%ctx: !hip.context, %q: tensor<1x4x16xf16>,
     -> (tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>)
     attributes {rock.kernel} {
   %r:3 = "hip.gqa"(%ctx, %q, %k, %v, %seqlens, %total, %o, %pk, %pv) {
-      operandSegmentSizes = array<i32: 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0>,
+      operandSegmentSizes = array<i32: 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0>,
       num_heads = 2 : i64, kv_num_heads = 2 : i64, scale = 3.53553391e-01 : f32
     } : (!hip.context, tensor<1x4x16xf16>, tensor<1x4x16xf16>, tensor<1x4x16xf16>, tensor<1xi32>, tensor<i32>, tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>) -> (tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>)
   return %r#0, %r#1, %r#2 : tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>
@@ -54,7 +54,7 @@ func.func @gqa_prefill(%ctx: !hip.context, %q: tensor<1x4x32xf16>,
     -> (tensor<1x4x32xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>)
     attributes {rock.kernel} {
   %r:3 = "hip.gqa"(%ctx, %q, %k, %v, %seqlens, %total, %o, %pk, %pv) {
-      operandSegmentSizes = array<i32: 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0>,
+      operandSegmentSizes = array<i32: 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0>,
       num_heads = 4 : i64, kv_num_heads = 2 : i64, scale = 3.53553391e-01 : f32
     } : (!hip.context, tensor<1x4x32xf16>, tensor<1x4x16xf16>, tensor<1x4x16xf16>, tensor<1xi32>, tensor<i32>, tensor<1x4x32xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>) -> (tensor<1x4x32xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>)
   return %r#0, %r#1, %r#2 : tensor<1x4x32xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>
@@ -71,7 +71,7 @@ func.func @mha_prefill_poison(%q: tensor<1x4x16xf16>, %k: tensor<1x4x16xf16>,
     attributes {rock.kernel} {
   %ctx = ub.poison : !hip.context
   %r:3 = "hip.gqa"(%ctx, %q, %k, %v, %seqlens, %total, %o, %pk, %pv) {
-      operandSegmentSizes = array<i32: 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0>,
+      operandSegmentSizes = array<i32: 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0>,
       num_heads = 2 : i64, kv_num_heads = 2 : i64, scale = 3.53553391e-01 : f32
     } : (!hip.context, tensor<1x4x16xf16>, tensor<1x4x16xf16>, tensor<1x4x16xf16>, tensor<1xi32>, tensor<i32>, tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>) -> (tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>)
   return %r#0, %r#1, %r#2 : tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>
@@ -112,7 +112,7 @@ func.func @no_causal(%ctx: !hip.context, %q: tensor<1x4x16xf16>,
     -> (tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>)
     attributes {rock.kernel} {
   %r:3 = "hip.gqa"(%ctx, %q, %k, %v, %seqlens, %total, %o, %pk, %pv) {
-      operandSegmentSizes = array<i32: 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0>,
+      operandSegmentSizes = array<i32: 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0>,
       num_heads = 2 : i64, kv_num_heads = 2 : i64, no_causal = true
     } : (!hip.context, tensor<1x4x16xf16>, tensor<1x4x16xf16>, tensor<1x4x16xf16>, tensor<1xi32>, tensor<i32>, tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>) -> (tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>)
   return %r#0, %r#1, %r#2 : tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>
@@ -131,7 +131,7 @@ func.func @bias(%ctx: !hip.context, %q: tensor<1x4x16xf16>,
     -> (tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>)
     attributes {rock.kernel} {
   %r:3 = "hip.gqa"(%ctx, %q, %k, %v, %seqlens, %total, %bias, %o, %pk, %pv) {
-      operandSegmentSizes = array<i32: 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 0>,
+      operandSegmentSizes = array<i32: 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 0>,
       num_heads = 2 : i64, kv_num_heads = 2 : i64, no_causal = true
     } : (!hip.context, tensor<1x4x16xf16>, tensor<1x4x16xf16>, tensor<1x4x16xf16>, tensor<1xi32>, tensor<i32>, tensor<1x1x4x4xf16>, tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>) -> (tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>)
   return %r#0, %r#1, %r#2 : tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>
@@ -149,7 +149,7 @@ func.func @window(%ctx: !hip.context, %q: tensor<1x4x16xf16>,
     -> (tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>)
     attributes {rock.kernel} {
   %r:3 = "hip.gqa"(%ctx, %q, %k, %v, %seqlens, %total, %o, %pk, %pv) {
-      operandSegmentSizes = array<i32: 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0>,
+      operandSegmentSizes = array<i32: 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0>,
       num_heads = 2 : i64, kv_num_heads = 2 : i64, local_window_size = 2 : i64, no_causal = true
     } : (!hip.context, tensor<1x4x16xf16>, tensor<1x4x16xf16>, tensor<1x4x16xf16>, tensor<1xi32>, tensor<i32>, tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>) -> (tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>)
   return %r#0, %r#1, %r#2 : tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>
@@ -167,7 +167,7 @@ func.func @packed_qkv(%ctx: !hip.context, %qkv: tensor<1x4x48xf16>,
     -> (tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>)
     attributes {rock.kernel} {
   %r:3 = "hip.gqa"(%ctx, %qkv, %seqlens, %total, %o, %pk, %pv) {
-      operandSegmentSizes = array<i32: 1, 1, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0>,
+      operandSegmentSizes = array<i32: 1, 1, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0>,
       num_heads = 2 : i64, kv_num_heads = 2 : i64
     } : (!hip.context, tensor<1x4x48xf16>, tensor<1xi32>, tensor<i32>, tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>) -> (tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>)
   return %r#0, %r#1, %r#2 : tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>
@@ -185,7 +185,7 @@ func.func @scale_zero(%ctx: !hip.context, %q: tensor<1x4x16xf16>,
     -> (tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>)
     attributes {rock.kernel} {
   %r:3 = "hip.gqa"(%ctx, %q, %k, %v, %seqlens, %total, %o, %pk, %pv) {
-      operandSegmentSizes = array<i32: 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0>,
+      operandSegmentSizes = array<i32: 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0>,
       num_heads = 2 : i64, kv_num_heads = 2 : i64, scale = 0.000000e+00 : f32, no_causal = true
     } : (!hip.context, tensor<1x4x16xf16>, tensor<1x4x16xf16>, tensor<1x4x16xf16>, tensor<1xi32>, tensor<i32>, tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>) -> (tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>)
   return %r#0, %r#1, %r#2 : tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>
@@ -208,7 +208,7 @@ func.func @seqlens_prefill_sentinel(%ctx: !hip.context, %q: tensor<1x4x16xf16>,
     attributes {rock.kernel} {
   %seqlens = arith.constant dense<-1> : tensor<1xi32>
   %r:3 = "hip.gqa"(%ctx, %q, %k, %v, %seqlens, %total, %o, %pk, %pv) {
-      operandSegmentSizes = array<i32: 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0>,
+      operandSegmentSizes = array<i32: 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0>,
       num_heads = 2 : i64, kv_num_heads = 2 : i64, no_causal = true
     } : (!hip.context, tensor<1x4x16xf16>, tensor<1x4x16xf16>, tensor<1x4x16xf16>, tensor<1xi32>, tensor<i32>, tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>) -> (tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>)
   return %r#0, %r#1, %r#2 : tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>
@@ -227,7 +227,7 @@ func.func @rope_prefill(%ctx: !hip.context, %q: tensor<1x4x16xf16>,
     -> (tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>)
     attributes {rock.kernel} {
   %r:3 = "hip.gqa"(%ctx, %q, %k, %v, %seqlens, %total, %cos, %sin, %o, %pk, %pv) {
-      operandSegmentSizes = array<i32: 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 1, 0>,
+      operandSegmentSizes = array<i32: 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0>,
       num_heads = 2 : i64, kv_num_heads = 2 : i64, do_rotary = 1 : i64, no_causal = true
     } : (!hip.context, tensor<1x4x16xf16>, tensor<1x4x16xf16>, tensor<1x4x16xf16>, tensor<1xi32>, tensor<i32>, tensor<4x4xf16>, tensor<4x4xf16>, tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>) -> (tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>)
   return %r#0, %r#1, %r#2 : tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>
@@ -247,7 +247,7 @@ func.func @rope_prefill_with_position_ids(%ctx: !hip.context, %q: tensor<1x4x16x
     -> (tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>)
     attributes {rock.kernel} {
   %r:3 = "hip.gqa"(%ctx, %q, %k, %v, %seqlens, %total, %cos, %sin, %pos, %o, %pk, %pv) {
-      operandSegmentSizes = array<i32: 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 0>,
+      operandSegmentSizes = array<i32: 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 1, 0>,
       num_heads = 2 : i64, kv_num_heads = 2 : i64, do_rotary = 1 : i64, no_causal = true
     } : (!hip.context, tensor<1x4x16xf16>, tensor<1x4x16xf16>, tensor<1x4x16xf16>, tensor<1xi32>, tensor<i32>, tensor<4x4xf16>, tensor<4x4xf16>, tensor<1x4xi64>, tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>) -> (tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>)
   return %r#0, %r#1, %r#2 : tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>
@@ -272,7 +272,7 @@ func.func @decode_rope_with_position_ids(%ctx: !hip.context, %q: tensor<1x1x16xf
     -> (tensor<1x1x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>)
     attributes {rock.kernel} {
   %r:3 = "hip.gqa"(%ctx, %q, %k, %v, %past_k, %past_v, %seqlens, %total, %cos, %sin, %pos, %o, %pk, %pv) {
-      operandSegmentSizes = array<i32: 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 0>,
+      operandSegmentSizes = array<i32: 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 1, 0>,
       num_heads = 2 : i64, kv_num_heads = 2 : i64, do_rotary = 1 : i64
     } : (!hip.context, tensor<1x1x16xf16>, tensor<1x1x16xf16>, tensor<1x1x16xf16>, tensor<1x2x3x8xf16>, tensor<1x2x3x8xf16>, tensor<1xi32>, tensor<i32>, tensor<8x4xf16>, tensor<8x4xf16>, tensor<1x1xi64>, tensor<1x1x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>) -> (tensor<1x1x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>)
   return %r#0, %r#1, %r#2 : tensor<1x1x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>
@@ -292,7 +292,7 @@ func.func @head_sink(%ctx: !hip.context, %q: tensor<1x4x16xf16>,
     -> (tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>)
     attributes {rock.kernel} {
   %r:3 = "hip.gqa"(%ctx, %q, %k, %v, %seqlens, %total, %sink, %o, %pk, %pv) {
-      operandSegmentSizes = array<i32: 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1, 1, 0>,
+      operandSegmentSizes = array<i32: 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 0>,
       num_heads = 2 : i64, kv_num_heads = 2 : i64, no_causal = true
     } : (!hip.context, tensor<1x4x16xf16>, tensor<1x4x16xf16>, tensor<1x4x16xf16>, tensor<1xi32>, tensor<i32>, tensor<2xf16>, tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>) -> (tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>)
   return %r#0, %r#1, %r#2 : tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>
@@ -312,7 +312,7 @@ func.func @int8_kv(%ctx: !hip.context, %q: tensor<1x1x16xf16>,
     -> (tensor<1x1x16xf16>, tensor<1x2x4x8xi8>, tensor<1x2x4x8xi8>)
     attributes {rock.kernel} {
   %r:3 = "hip.gqa"(%ctx, %q, %k, %v, %past_k, %past_v, %seqlens, %total, %k_scale, %v_scale, %o, %pk, %pv) {
-      operandSegmentSizes = array<i32: 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 0>,
+      operandSegmentSizes = array<i32: 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 0, 1, 1, 1, 0>,
       num_heads = 2 : i64, kv_num_heads = 2 : i64, k_quant_type = "PER_CHANNEL", v_quant_type = "PER_CHANNEL", kv_cache_bit_width = 8 : i64
     } : (!hip.context, tensor<1x1x16xf16>, tensor<1x1x16xf16>, tensor<1x1x16xf16>, tensor<1x2x3x8xi8>, tensor<1x2x3x8xi8>, tensor<1xi32>, tensor<i32>, tensor<1x2x1x8xf32>, tensor<1x2x1x8xf32>, tensor<1x1x16xf16>, tensor<1x2x4x8xi8>, tensor<1x2x4x8xi8>) -> (tensor<1x1x16xf16>, tensor<1x2x4x8xi8>, tensor<1x2x4x8xi8>)
   return %r#0, %r#1, %r#2 : tensor<1x1x16xf16>, tensor<1x2x4x8xi8>, tensor<1x2x4x8xi8>
@@ -327,7 +327,7 @@ func.func @no_rock_kernel(%ctx: !hip.context, %q: tensor<1x4x16xf16>,
                           %pv: tensor<1x2x4x8xf16>)
     -> (tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>) {
   %r:3 = "hip.gqa"(%ctx, %q, %k, %v, %seqlens, %total, %o, %pk, %pv) {
-      operandSegmentSizes = array<i32: 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0>,
+      operandSegmentSizes = array<i32: 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0>,
       num_heads = 2 : i64, kv_num_heads = 2 : i64, scale = 3.53553391e-01 : f32
     } : (!hip.context, tensor<1x4x16xf16>, tensor<1x4x16xf16>, tensor<1x4x16xf16>, tensor<1xi32>, tensor<i32>, tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>) -> (tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>)
   return %r#0, %r#1, %r#2 : tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>
@@ -364,7 +364,7 @@ func.func @int4_rejected(%ctx: !hip.context, %q: tensor<1x4x16xf16>,
     attributes {rock.kernel} {
   // expected-error@+1 {{failed to legalize operation 'hip.gqa'}}
   %r:3 = "hip.gqa"(%ctx, %q, %k, %v, %seqlens, %total, %k_scale, %v_scale, %o, %pk, %pv) {
-      operandSegmentSizes = array<i32: 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 0>,
+      operandSegmentSizes = array<i32: 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 1, 1, 0, 1, 1, 1, 0>,
       num_heads = 2 : i64, kv_num_heads = 2 : i64, k_quant_type = "PER_CHANNEL", v_quant_type = "PER_CHANNEL", kv_cache_bit_width = 4 : i64
     } : (!hip.context, tensor<1x4x16xf16>, tensor<1x4x16xf16>, tensor<1x4x16xf16>, tensor<1xi32>, tensor<i32>, tensor<8xf16>, tensor<8xf16>, tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>) -> (tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>)
   return %r#0, %r#1, %r#2 : tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>

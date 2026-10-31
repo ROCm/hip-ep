@@ -367,7 +367,8 @@ extern "C" int hip_gqa_flash_decode(
     int B, int H, int G, int d, int skv, int max_seq, int max_splits,
     float scale, const void* seqlens_k, int local_window_size,
     const void* head_sink, int use_smooth_softmax,
-    int kv_dtype, const void* k_scale, const void* v_scale);
+    int kv_dtype, const void* k_scale, const void* v_scale,
+    const void* key_bias, int key_bias_stride);
 
 #ifdef HIPDNN_LUT_LINKED_EXTERNALLY
 // Lookup-only sibling: dispatches an explicit config instead of autotuning.
@@ -379,7 +380,8 @@ extern "C" int hip_gqa_flash_decode_configured(
     float scale, const void* seqlens_k, int local_window_size,
     const void* head_sink, int use_smooth_softmax,
     int kv_dtype, const void* k_scale, const void* v_scale,
-    int use_wmma, int splits, int bkv);
+    int use_wmma, int splits, int bkv, const void* key_bias,
+    int key_bias_stride);
 #endif
 
 static constexpr int MAX_SPLITS = 64;
@@ -637,11 +639,12 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
           nullptr, dQ, k8, v8, dO8, dPart, B, H, G, D, c.total, kv_rows,
           MAX_SPLITS, scale, dSeq, 0, nullptr, 0, HIP_KV_DTYPE_INT8, dKsc,
           dVsc, selected_config.use_wmma ? 1 : 0, selected_config.splits,
-          selected_config.bkv);
+          selected_config.bkv, nullptr, 0);
 #endif
     return hip_gqa_flash_decode(nullptr, dQ, k8, v8, dO8, dPart, B, H, G, D,
                                 c.total, kv_rows, MAX_SPLITS, scale, dSeq, 0,
-                                nullptr, 0, HIP_KV_DTYPE_INT8, dKsc, dVsc);
+                                nullptr, 0, HIP_KV_DTYPE_INT8, dKsc, dVsc,
+                                nullptr, 0);
   };
 
   // Warmup + correctness fetch for the int8 kernel (kv_dtype = INT8). Every
@@ -667,7 +670,7 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
         HIP_CHECK((hipError_t)hip_gqa_flash_decode(
             nullptr, dQ, dKh, dVh, dO16, dPart, B, H, G, D, c.total, max_seq,
             MAX_SPLITS, scale, dSeq, 0, nullptr, 0, HIP_KV_DTYPE_FP16, nullptr,
-            nullptr));
+            nullptr, nullptr, 0));
         HIP_CHECK(hipDeviceSynchronize());
       });
 
@@ -711,7 +714,7 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
           hip_gqa_flash_decode(nullptr, dQ, kv16.k(i), kv16.v(i), dO16, dPart,
                                B, H, G, D, c.total, kv16.rows(), MAX_SPLITS,
                                scale, dSeq, 0, nullptr, 0, HIP_KV_DTYPE_FP16,
-                               nullptr, nullptr);
+                               nullptr, nullptr, nullptr, 0);
         });
       });
 

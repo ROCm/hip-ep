@@ -238,23 +238,130 @@ __global__ void topk_routing_wave_kernel(
 }
 
 // ---------------------------------------------------------------------------
+// Sigmoid + correction-bias routing over fp32 logits: the experts are the
+// top-k of sigmoid(logit) + bias in descending order, ties to the lower index
+// (ONNX TopK), and each weight is its unbiased sigmoid score, divided by the
+// sum over the k selected when `normalize`, times `scale`, rounded once to
+// fp16. Same output layout as topk_routing_kernel. A NaN score sorts last.
+// ---------------------------------------------------------------------------
+__global__ void qmoe_sigmoid_bias_route_kernel(
+    const float* __restrict__ logits,
+    const float* __restrict__ correction_bias,
+    int32_t* __restrict__ expert_indices,
+    __half* __restrict__ expert_weights,
+    int64_t num_tokens,
+    int64_t num_experts,
+    int64_t k,
+    int64_t normalize,
+    float scale) {
+  const int token = static_cast<int>(blockIdx.x);
+  if (token >= num_tokens) return;
+
+  const float* row = logits + static_cast<int64_t>(token) * num_experts;
+  const int tid = static_cast<int>(threadIdx.x);
+  const int nthreads = static_cast<int>(blockDim.x);
+  const int ik = static_cast<int>(k < kMaxK ? k : kMaxK);
+  const int ne = static_cast<int>(num_experts);
+
+  extern __shared__ float s_dyn[];
+  float* s_prob = s_dyn;                                 // [ne] sigmoid
+  float* s_sel = s_dyn + ne;                             // [ne] sigmoid + bias
+  int* s_taken = reinterpret_cast<int*>(s_dyn + 2 * ne); // [ne]
+  __shared__ float s_red[kRoutingBlock];
+  __shared__ int s_idx[kRoutingBlock];
+  __shared__ float s_w[kMaxK];
+
+  for (int e = tid; e < ne; e += nthreads) {
+    const float p = 1.0f / (1.0f + expf(-row[e]));
+    const float sel = p + correction_bias[e];
+    s_prob[e] = p;
+    s_sel[e] = sel == sel ? sel : -INFINITY;
+    s_taken[e] = 0;
+  }
+  __syncthreads();
+
+  for (int i = 0; i < ik; i++) {
+    float bv = -INFINITY;
+    int bi = ne;
+    for (int e = tid; e < ne; e += nthreads) {
+      const float v = s_sel[e];
+      if (!s_taken[e] && (v > bv || (v == bv && e < bi))) {
+        bv = v;
+        bi = e;
+      }
+    }
+    s_red[tid] = bv;
+    s_idx[tid] = bi;
+    __syncthreads();
+    for (int s = nthreads / 2; s > 0; s >>= 1) {
+      if (tid < s) {
+        const float ov = s_red[tid + s];
+        const int oi = s_idx[tid + s];
+        if (oi < ne && (s_idx[tid] >= ne || ov > s_red[tid] ||
+                        (ov == s_red[tid] && oi < s_idx[tid]))) {
+          s_red[tid] = ov;
+          s_idx[tid] = oi;
+        }
+      }
+      __syncthreads();
+    }
+    if (tid == 0) {
+      const int win = s_idx[0];
+      expert_indices[static_cast<int64_t>(token) * k + i] = win;
+      s_w[i] = s_prob[win];
+      s_taken[win] = 1;
+    }
+    __syncthreads();
+  }
+
+  if (tid == 0) {
+    float sum = 0.0f;
+    for (int i = 0; i < ik; i++) sum += s_w[i];
+    for (int i = 0; i < ik; i++) {
+      const float w = normalize ? s_w[i] / sum : s_w[i];
+      expert_weights[static_cast<int64_t>(token) * k + i] =
+          static_cast<__half>(w * scale);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Gather (fp16 only): collect rows by index.
 // output[i, :] = input[token_ids[i], :]
 // ---------------------------------------------------------------------------
+template <int kVec>
+struct alignas(2 * kVec) HalfVec {
+  __half h[kVec];
+};
+
+// Vector width for kernels that move fp16 rows: 8 when every row and base
+// pointer allows 16-byte accesses, else 1.
+static int half_vec_width(int64_t width, const void* a, const void* b) {
+  return width % 8 == 0 &&
+                 ((reinterpret_cast<uintptr_t>(a) |
+                   reinterpret_cast<uintptr_t>(b)) & 15) == 0
+             ? 8
+             : 1;
+}
+
+template <int kVec>
 __global__ void gather_tokens_kernel(
     const __half* __restrict__ input,
     __half* __restrict__ gathered,
     const int32_t* __restrict__ token_ids,
     int64_t width,
     int64_t count) {
+  using Vec = HalfVec<kVec>;
+  const int64_t vec_width = width / kVec;
   int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (idx >= count * width) return;
+  if (idx >= count * vec_width) return;
 
-  int64_t row = idx / width;
-  int64_t col = idx % width;
+  int64_t row = idx / vec_width;
+  int64_t col = idx - row * vec_width;
   int64_t src_row = static_cast<int64_t>(token_ids[row]);
 
-  gathered[idx] = input[src_row * width + col];
+  reinterpret_cast<Vec*>(gathered)[idx] =
+      reinterpret_cast<const Vec*>(input)[src_row * vec_width + col];
 }
 
 // ---------------------------------------------------------------------------
@@ -283,6 +390,9 @@ __global__ void add_bias_kernel(
 //   L = clamp(linear, -limit, limit)
 //   out = G * sigmoid(alpha * G) * (L + beta)
 // ---------------------------------------------------------------------------
+// Each thread produces kVec contiguous outputs from 2 * kVec interleaved
+// inputs; output columns never straddle rows because inter_size % kVec == 0.
+template <int kVec>
 __global__ void swiglu_kernel(
     const __half* __restrict__ input,
     __half* __restrict__ output,
@@ -291,20 +401,25 @@ __global__ void swiglu_kernel(
     float alpha,
     float beta,
     float limit) {
+  using In = HalfVec<2 * kVec>;
+  using Out = HalfVec<kVec>;
   int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (idx >= n * inter_size) return;
+  if (idx >= n * inter_size / kVec) return;
 
-  int64_t row = idx / inter_size;
-  int64_t col = idx % inter_size;
+  const In in = reinterpret_cast<const In*>(input)[idx];
+  Out out;
+#pragma unroll
+  for (int j = 0; j < kVec; ++j) {
+    float g = static_cast<float>(in.h[2 * j]);
+    float l = static_cast<float>(in.h[2 * j + 1]);
 
-  float g = static_cast<float>(input[row * 2 * inter_size + 2 * col]);
-  float l = static_cast<float>(input[row * 2 * inter_size + 2 * col + 1]);
+    float G = fminf(g, limit);
+    float L = fmaxf(fminf(l, limit), -limit);
 
-  float G = fminf(g, limit);
-  float L = fmaxf(fminf(l, limit), -limit);
-
-  float sigmoid_val = 1.0f / (1.0f + expf(-alpha * G));
-  output[idx] = static_cast<__half>(G * sigmoid_val * (L + beta));
+    float sigmoid_val = 1.0f / (1.0f + expf(-alpha * G));
+    out.h[j] = static_cast<__half>(G * sigmoid_val * (L + beta));
+  }
+  reinterpret_cast<Out*>(output)[idx] = out;
 }
 
 // ---------------------------------------------------------------------------
@@ -352,13 +467,18 @@ __global__ void scatter_add_kernel(
 //   sorted_token_ids [num_tokens * k]   int32 — token ids grouped by expert
 //   sorted_weights   [num_tokens * k]   fp16  — weights aligned with sorted ids
 //
-// One block, one thread per expert. num_experts is small in practice (32 for
-// gpt-oss-20b); each thread does num_tokens*k cheap comparisons. Two passes
-// (count + scatter) guarantee deterministic in-expert ordering identical to
-// the host version (token-major), which keeps numerical reproducibility for
-// the downstream weighted scatter_add.
+// One block per expert. Every block builds the whole expert histogram in LDS,
+// so block e derives its own offset (pairs routed below e) and row-group base
+// without a second launch or a grid-wide barrier. The in-expert order is the
+// host loop's token-major pair order, which keeps the downstream reductions
+// reproducible: threads own contiguous pair slices, and an exclusive scan of
+// their match counts places each thread's writes in ascending pair order.
+// Pairs naming no expert in [0, num_experts) are dropped, and the unused tail
+// of sorted_token_ids is zeroed so fixed-size gathers stay in bounds.
 // ---------------------------------------------------------------------------
-__global__ void bucket_tokens_kernel(
+static constexpr int kBucketBlock = 256;
+
+__global__ void __launch_bounds__(kBucketBlock) bucket_tokens_kernel(
     const int32_t* __restrict__ expert_indices,
     const __half* __restrict__ expert_weights,
     int32_t* __restrict__ expert_counts,
@@ -374,76 +494,99 @@ __global__ void bucket_tokens_kernel(
     int k,
     int num_experts,
     int row_group_size) {
-  int eid = static_cast<int>(threadIdx.x);
-  const bool active = eid < num_experts;
+  extern __shared__ int32_t s_hist[];  // [num_experts]
+  __shared__ int32_t s_scan[kBucketBlock];
+  __shared__ int32_t s_below[kBucketBlock];
+  __shared__ int32_t s_groups_below[kBucketBlock];
 
-  // Pass 1: count occurrences of this eid across all (token, slot) pairs.
-  int local_count = 0;
-  int total_pairs = num_tokens * k;
-  if (active) {
-    for (int i = 0; i < total_pairs; i++) {
-      if (expert_indices[i] == eid) local_count++;
-    }
-    expert_counts[eid] = local_count;
-  }
-
+  const int e = static_cast<int>(blockIdx.x);
+  const int tid = static_cast<int>(threadIdx.x);
+  const int total_pairs = num_tokens * k;
+  for (int x = tid; x < num_experts; x += kBucketBlock) s_hist[x] = 0;
   __syncthreads();
 
-  // Pass 2: serial prefix sum on a single thread. num_experts is small (~32)
-  // so a parallel scan would cost more in __syncthreads + LDS than it saves.
-  if (eid == 0) {
-    int sum = 0;
-    expert_offsets[0] = 0;
-    for (int e = 0; e < num_experts; e++) {
-      sum += expert_counts[e];
-      expert_offsets[e + 1] = sum;
+  const int chunk = (total_pairs + kBucketBlock - 1) / kBucketBlock;
+  const int lo = min(tid * chunk, total_pairs);
+  const int hi = min(lo + chunk, total_pairs);
+  int mine = 0;
+  for (int i = lo; i < hi; ++i) {
+    const int x = expert_indices[i];
+    if (x >= 0 && x < num_experts) {
+      atomicAdd(&s_hist[x], 1);
+      mine += x == e;
+    }
+  }
+  s_scan[tid] = mine;
+  __syncthreads();
+
+  const bool emit_groups =
+      row_groups && row_group_count && fc1_queue_head && fc2_queue_head;
+  int below = 0;
+  int groups_below = 0;
+  for (int x = tid; x < e; x += kBucketBlock) {
+    const int c = s_hist[x];
+    below += c;
+    if (emit_groups) groups_below += (c + row_group_size - 1) / row_group_size;
+  }
+  s_below[tid] = below;
+  s_groups_below[tid] = groups_below;
+  __syncthreads();
+  for (int off = kBucketBlock / 2; off > 0; off >>= 1) {
+    if (tid < off) {
+      s_below[tid] += s_below[tid + off];
+      s_groups_below[tid] += s_groups_below[tid + off];
+    }
+    __syncthreads();
+  }
+  for (int off = 1; off < kBucketBlock; off <<= 1) {
+    const int v = tid >= off ? s_scan[tid - off] : 0;
+    __syncthreads();
+    s_scan[tid] += v;
+    __syncthreads();
+  }
+
+  const int offset = s_below[0];
+  const int count = s_hist[e];
+  int w = offset + s_scan[tid] - mine;
+  for (int i = lo; i < hi && w < offset + s_scan[tid]; ++i) {
+    if (expert_indices[i] == e) {
+      sorted_token_ids[w] = i / k;
+      sorted_weights[w] = expert_weights[i];
+      if (pair_to_sorted) pair_to_sorted[i] = w;
+      ++w;
     }
   }
 
-  __syncthreads();
-
-  // Pass 3: scatter (token_id, weight) pairs into the sorted layout.
-  // Iterate (t, s) in the same order as the host loop being replaced so the
-  // per-expert ordering is bit-identical (matters for scatter_add reductions).
-  if (active) {
-    int write_pos = expert_offsets[eid];
-    for (int t = 0; t < num_tokens; t++) {
-      for (int s = 0; s < k; s++) {
-        int idx = t * k + s;
-        if (expert_indices[idx] == eid) {
-          sorted_token_ids[write_pos] = t;
-          sorted_weights[write_pos] = expert_weights[idx];
-          if (pair_to_sorted) pair_to_sorted[idx] = write_pos;
-          write_pos++;
-        }
-      }
-    }
+  const bool last = e == num_experts - 1;
+  if (tid == 0) {
+    expert_counts[e] = count;
+    expert_offsets[e] = offset;
+    if (last) expert_offsets[num_experts] = offset + count;
   }
-
-  __syncthreads();
+  if (last) {
+    for (int i = offset + count + tid; i < total_pairs; i += kBucketBlock)
+      sorted_token_ids[i] = 0;
+  }
 
   // The ragged path additionally emits adaptive row groups and resets both
   // persistent work queues. Descriptors are
   // {expert,row_begin,row_count,reserved}; the ragged MatMul selects its
   // stage-specific task kind so FC1 and FC2 are not coupled here.
-  if (eid == 0 && row_groups && row_group_count && fc1_queue_head &&
-      fc2_queue_head) {
-    int group = 0;
-    for (int expert = 0; expert < num_experts; ++expert) {
-      const int begin = expert_offsets[expert];
-      const int end = expert_offsets[expert + 1];
-      for (int row = begin; row < end; row += row_group_size) {
-        const int rows = min(row_group_size, end - row);
-        row_groups[group * 4 + 0] = expert;
-        row_groups[group * 4 + 1] = row;
-        row_groups[group * 4 + 2] = rows;
-        row_groups[group * 4 + 3] = 0;
-        ++group;
-      }
+  if (emit_groups) {
+    const int base = s_groups_below[0];
+    const int groups = (count + row_group_size - 1) / row_group_size;
+    for (int g = tid; g < groups; g += kBucketBlock) {
+      int32_t* d = row_groups + 4 * (base + g);
+      d[0] = e;
+      d[1] = offset + g * row_group_size;
+      d[2] = min(row_group_size, count - g * row_group_size);
+      d[3] = 0;
     }
-    *row_group_count = group;
-    *fc1_queue_head = 0;
-    *fc2_queue_head = 0;
+    if (last && tid == 0) *row_group_count = base + groups;
+    if (e == 0 && tid == 0) {
+      *fc1_queue_head = 0;
+      *fc2_queue_head = 0;
+    }
   }
 }
 
@@ -519,6 +662,48 @@ extern "C" int hip_qmoe_topk_routing(
   return static_cast<int>(err);
 }
 
+extern "C" int hip_qmoe_sigmoid_bias_routing(
+    void* stream,
+    const void* logits,
+    const void* correction_bias,
+    void* expert_indices,
+    void* expert_weights,
+    int64_t num_tokens,
+    int64_t num_experts,
+    int64_t k,
+    int64_t normalize,
+    float scale,
+    int64_t element_size_bytes) {
+  if (num_tokens <= 0) return 0;
+  if (element_size_bytes != 2 || !logits || !correction_bias || k <= 0 ||
+      k > kMaxK || k > num_experts) {
+    fprintf(stderr,
+            "[custom_kernels] hip_qmoe_sigmoid_bias_routing: unsupported "
+            "element_size=%lld k=%lld experts=%lld\n",
+            (long long)element_size_bytes, (long long)k,
+            (long long)num_experts);
+    return -1;
+  }
+  // s_prob, s_sel and s_taken, one 4-byte slot per expert each.
+  const size_t shmem = 3 * static_cast<size_t>(num_experts) * sizeof(float);
+  (void)hipGetLastError();
+  hipLaunchKernelGGL(qmoe_sigmoid_bias_route_kernel,
+                     dim3(static_cast<unsigned>(num_tokens)),
+                     dim3(kRoutingBlock), shmem,
+                     static_cast<hipStream_t>(stream),
+                     static_cast<const float*>(logits),
+                     static_cast<const float*>(correction_bias),
+                     static_cast<int32_t*>(expert_indices),
+                     static_cast<__half*>(expert_weights), num_tokens,
+                     num_experts, k, normalize, scale);
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess)
+    fprintf(stderr,
+            "[custom_kernels] hip_qmoe_sigmoid_bias_routing failed: %s\n",
+            hipGetErrorString(err));
+  return static_cast<int>(err);
+}
+
 extern "C" int hip_qmoe_gather_tokens(
     void* stream,
     const void* input,
@@ -542,10 +727,21 @@ extern "C" int hip_qmoe_gather_tokens(
     return -1;
   }
 
-  hipLaunchKernelGGL(gather_tokens_kernel, dim3(grid), dim3(kBlock),
-                     0, s, static_cast<const __half*>(input),
-                     static_cast<__half*>(gathered),
-                     static_cast<const int32_t*>(token_ids), width, count);
+  (void)hipGetLastError();
+  if (half_vec_width(width, input, gathered) == 8) {
+    const int64_t vec_total = total / 8;
+    hipLaunchKernelGGL(gather_tokens_kernel<8>,
+                       dim3(static_cast<unsigned>((vec_total + kBlock - 1) /
+                                                  kBlock)),
+                       dim3(kBlock), 0, s, static_cast<const __half*>(input),
+                       static_cast<__half*>(gathered),
+                       static_cast<const int32_t*>(token_ids), width, count);
+  } else {
+    hipLaunchKernelGGL(gather_tokens_kernel<1>, dim3(grid), dim3(kBlock), 0, s,
+                       static_cast<const __half*>(input),
+                       static_cast<__half*>(gathered),
+                       static_cast<const int32_t*>(token_ids), width, count);
+  }
 
   hipError_t err = hipGetLastError();
   if (err != hipSuccess)
@@ -612,10 +808,24 @@ extern "C" int hip_qmoe_swiglu(
     return -1;
   }
 
-  hipLaunchKernelGGL(swiglu_kernel, dim3(grid), dim3(kBlock), 0, s,
-                     static_cast<const __half*>(input),
-                     static_cast<__half*>(output), n, inter_size, alpha,
-                     beta, limit);
+  (void)hipGetLastError();
+  // Four outputs per thread: a 16-byte load of interleaved gate/up pairs.
+  if (inter_size % 4 == 0 &&
+      ((reinterpret_cast<uintptr_t>(input) & 15) |
+       (reinterpret_cast<uintptr_t>(output) & 7)) == 0) {
+    const int64_t vec_total = total / 4;
+    hipLaunchKernelGGL(swiglu_kernel<4>,
+                       dim3(static_cast<unsigned>((vec_total + kBlock - 1) /
+                                                  kBlock)),
+                       dim3(kBlock), 0, s, static_cast<const __half*>(input),
+                       static_cast<__half*>(output), n, inter_size, alpha,
+                       beta, limit);
+  } else {
+    hipLaunchKernelGGL(swiglu_kernel<1>, dim3(grid), dim3(kBlock), 0, s,
+                       static_cast<const __half*>(input),
+                       static_cast<__half*>(output), n, inter_size, alpha,
+                       beta, limit);
+  }
 
   hipError_t err = hipGetLastError();
   if (err != hipSuccess)
@@ -686,18 +896,17 @@ extern "C" int hip_qmoe_bucket_tokens(
     return -1;
   }
 
-  // One block, one thread per expert. Block dim must be a multiple of the
-  // wave size (32 on RDNA3) and <= 1024 (max block size). gpt-oss-20b has 32.
+  // One block per expert, each holding a num_experts-entry LDS histogram.
   if (num_experts > 1024) {
     fprintf(stderr,
             "[custom_kernels] hip_qmoe_bucket_tokens: num_experts=%lld > 1024 "
-            "not supported (would exceed max block size)\n",
+            "not supported\n",
             (long long)num_experts);
     return -1;
   }
-  int block_dim = static_cast<int>(((num_experts + 31) / 32) * 32);
-
-  hipLaunchKernelGGL(bucket_tokens_kernel, dim3(1), dim3(block_dim), 0, s,
+  (void)hipGetLastError();
+  hipLaunchKernelGGL(bucket_tokens_kernel, dim3(static_cast<unsigned>(num_experts)),
+                     dim3(kBucketBlock), num_experts * sizeof(int32_t), s,
                      static_cast<const int32_t*>(expert_indices),
                      static_cast<const __half*>(expert_weights),
                      static_cast<int32_t*>(expert_counts),
@@ -751,9 +960,10 @@ extern "C" int hip_qmoe_bucket_tokens_ragged(
   }
 
   hipStream_t s = static_cast<hipStream_t>(stream);
-  const int block_dim = static_cast<int>(((num_experts + 31) / 32) * 32);
+  (void)hipGetLastError();
   hipLaunchKernelGGL(
-      bucket_tokens_kernel, dim3(1), dim3(block_dim), 0, s,
+      bucket_tokens_kernel, dim3(static_cast<unsigned>(num_experts)),
+      dim3(kBucketBlock), num_experts * sizeof(int32_t), s,
       static_cast<const int32_t*>(expert_indices),
       static_cast<const __half*>(expert_weights),
       static_cast<int32_t*>(expert_counts),
@@ -829,6 +1039,7 @@ extern "C" int hip_qmoe_build_row_tiles(
     return -1;
   hipStream_t s = static_cast<hipStream_t>(stream);
   const size_t shmem = 2 * static_cast<size_t>(num_experts) * sizeof(int32_t);
+  (void)hipGetLastError();
   hipLaunchKernelGGL(qmoe_build_row_tiles_kernel, dim3(1), dim3(kBlock), shmem,
                      s, static_cast<const int32_t*>(expert_counts),
                      static_cast<int>(num_experts), static_cast<int>(split_rows),
