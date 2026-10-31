@@ -282,29 +282,72 @@ __global__ void add_bias_kernel(
 //   G = min(gate, limit)
 //   L = clamp(linear, -limit, limit)
 //   out = G * sigmoid(alpha * G) * (L + beta)
+//
+// The product can leave the fp16 range while gate/linear fit (an activation
+// of ~8e5 from inputs of ~1e3). Each row is therefore computed in fp32 and
+// stored as out / s, s a power of two (exact) that brings the row's largest
+// |out| to at most kSwigluRowMax; row_scale[row] = s and the routed-pair
+// reduce multiplies it back in, since fc2 is linear in its input row. The
+// bound leaves fc2's fp16 output room above it. s is 1 for every row already
+// within the bound, so those rows are stored exactly as before. With
+// row_scale null no row is scaled.
 // ---------------------------------------------------------------------------
-__global__ void swiglu_kernel(
+constexpr float kSwigluRowMax = 1024.0f;
+constexpr int kSwigluBlock = 256;
+
+__device__ __forceinline__ float swiglu_value(const __half* in, int64_t col,
+                                              float alpha, float beta,
+                                              float limit) {
+  const float g = static_cast<float>(in[2 * col]);
+  const float l = static_cast<float>(in[2 * col + 1]);
+  const float G = fminf(g, limit);
+  const float L = fmaxf(fminf(l, limit), -limit);
+  const float sigmoid_val = 1.0f / (1.0f + expf(-alpha * G));
+  return G * sigmoid_val * (L + beta);
+}
+
+__global__ void __launch_bounds__(kSwigluBlock) swiglu_kernel(
     const __half* __restrict__ input,
     __half* __restrict__ output,
-    int64_t n,
+    float* __restrict__ row_scale,
     int64_t inter_size,
     float alpha,
     float beta,
     float limit) {
-  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (idx >= n * inter_size) return;
+  const int64_t row = blockIdx.x;
+  const int tid = threadIdx.x;
+  const __half* in = input + row * 2 * inter_size;
+  __half* out = output + row * inter_size;
 
-  int64_t row = idx / inter_size;
-  int64_t col = idx % inter_size;
+  float inv_scale = 1.0f;
+  if (row_scale) {
+    float local_max = 0.0f;
+    for (int64_t col = tid; col < inter_size; col += kSwigluBlock)
+      local_max = fmaxf(local_max,
+                        fabsf(swiglu_value(in, col, alpha, beta, limit)));
+    constexpr int WARP_SIZE = HIPDNN_WAVE_SIZE;
+    constexpr int NUM_WARPS = kSwigluBlock / WARP_SIZE;
+    for (int off = WARP_SIZE >> 1; off > 0; off >>= 1)
+      local_max = fmaxf(local_max, __shfl_down(local_max, off));
+    __shared__ float smax[NUM_WARPS];
+    if ((tid & (WARP_SIZE - 1)) == 0)
+      smax[tid / WARP_SIZE] = local_max;
+    __syncthreads();
+    float row_max = 0.0f;
+#pragma unroll
+    for (int i = 0; i < NUM_WARPS; i++)
+      row_max = fmaxf(row_max, smax[i]);
+    float scale = 1.0f;
+    if (row_max > kSwigluRowMax && isfinite(row_max))
+      scale = exp2f(ceilf(log2f(row_max / kSwigluRowMax)));
+    inv_scale = 1.0f / scale;
+    if (tid == 0)
+      row_scale[row] = scale;
+  }
 
-  float g = static_cast<float>(input[row * 2 * inter_size + 2 * col]);
-  float l = static_cast<float>(input[row * 2 * inter_size + 2 * col + 1]);
-
-  float G = fminf(g, limit);
-  float L = fmaxf(fminf(l, limit), -limit);
-
-  float sigmoid_val = 1.0f / (1.0f + expf(-alpha * G));
-  output[idx] = static_cast<__half>(G * sigmoid_val * (L + beta));
+  for (int64_t col = tid; col < inter_size; col += kSwigluBlock)
+    out[col] = static_cast<__half>(
+        swiglu_value(in, col, alpha, beta, limit) * inv_scale);
 }
 
 // ---------------------------------------------------------------------------
@@ -591,6 +634,7 @@ extern "C" int hip_qmoe_swiglu(
     void* stream,
     const void* input,
     void* output,
+    void* row_scale,
     int64_t n,
     int64_t inter_size,
     float alpha,
@@ -600,8 +644,6 @@ extern "C" int hip_qmoe_swiglu(
   if (n <= 0 || inter_size <= 0) return 0;
 
   hipStream_t s = static_cast<hipStream_t>(stream);
-  int64_t total = n * inter_size;
-  int grid = static_cast<int>((total + kBlock - 1) / kBlock);
 
   // fp16 only — see hip_qmoe_topk_routing for rationale.
   if (element_size_bytes != 2) {
@@ -612,10 +654,13 @@ extern "C" int hip_qmoe_swiglu(
     return -1;
   }
 
-  hipLaunchKernelGGL(swiglu_kernel, dim3(grid), dim3(kBlock), 0, s,
+  (void)hipGetLastError();
+  hipLaunchKernelGGL(swiglu_kernel, dim3(static_cast<unsigned>(n)),
+                     dim3(kSwigluBlock), 0, s,
                      static_cast<const __half*>(input),
-                     static_cast<__half*>(output), n, inter_size, alpha,
-                     beta, limit);
+                     static_cast<__half*>(output),
+                     static_cast<float*>(row_scale), inter_size, alpha, beta,
+                     limit);
 
   hipError_t err = hipGetLastError();
   if (err != hipSuccess)
@@ -878,7 +923,7 @@ __global__ void qmoe_decode_fc1_kernel(
     const __half*  __restrict__ fc1_s,           // [E, fusion_inter, n_blk_in]
     const uint8_t* __restrict__ fc1_zp_packed,   // [E, fusion_inter, packed blocks] or null
     const __half*  __restrict__ fc1_b,           // [E, fusion_inter] or null
-    __half*        __restrict__ act_out,         // [k, inter]
+    float*         __restrict__ act_out,         // [k, inter]
     int hidden,
     int fusion_inter,
     int n_blk_in,
@@ -1048,8 +1093,7 @@ __global__ void qmoe_decode_fc1_kernel(
           float G = fminf(g, swiglu_limit);
           float L = fmaxf(fminf(l, swiglu_limit), -swiglu_limit);
           float sig = 1.0f / (1.0f + expf(-swiglu_alpha * G));
-          act_out[slot * inter + sw_base + p] =
-              static_cast<__half>(G * sig * (L + swiglu_beta));
+          act_out[slot * inter + sw_base + p] = G * sig * (L + swiglu_beta);
         }
       }
     }
@@ -1085,8 +1129,7 @@ __global__ void qmoe_decode_fc1_kernel(
             float G = fminf(g, swiglu_limit);
             float L = fmaxf(fminf(l, swiglu_limit), -swiglu_limit);
             float sig = 1.0f / (1.0f + expf(-swiglu_alpha * G));
-            act_out[slot * inter + sw_base + p] =
-                static_cast<__half>(G * sig * (L + swiglu_beta));
+            act_out[slot * inter + sw_base + p] = G * sig * (L + swiglu_beta);
           }
         }
       }
@@ -1098,14 +1141,14 @@ __global__ void qmoe_decode_fc1_kernel(
 // weight so the reduce kernel is a pure sum). Per (slot, output-tile).
 template <int BLOCK_SIZE, int TILE_N>
 __global__ void qmoe_decode_fc2_kernel(
-    const __half*  __restrict__ act_out,         // [k, inter]
+    const float*   __restrict__ act_out,         // [k, inter]
     const int32_t* __restrict__ expert_indices,  // [k]
     const __half*  __restrict__ expert_weights,  // [k]
     const uint8_t* __restrict__ fc2_w,           // [E, hidden, inter/2]
     const __half*  __restrict__ fc2_s,           // [E, hidden, n_blk_mid]
     const uint8_t* __restrict__ fc2_zp_packed,   // [E, hidden, ceil(n_blk_mid/2)] or null
     const __half*  __restrict__ fc2_b,           // [E, hidden] or null
-    __half*        __restrict__ slot_buf,        // [k, hidden]
+    float*         __restrict__ slot_buf,        // [k, hidden]
     int inter,
     int hidden,
     int n_blk_mid,
@@ -1120,7 +1163,7 @@ __global__ void qmoe_decode_fc2_kernel(
   // block (threads stride uniquely through K-tiles); LDS would just add a
   // __syncthreads + duplicated traffic. The 5760-byte slot activation is
   // shared across the (hidden/TILE_N) blocks of this slot via L2/MALL cache.
-  const __half* a_in = act_out + slot * inter;
+  const float* a_in = act_out + slot * inter;
 
   const size_t  W_row_bytes = (static_cast<size_t>(inter) * static_cast<size_t>(bits)) / 8;
   const uint8_t* W = fc2_w + static_cast<size_t>(E) * hidden * W_row_bytes;
@@ -1248,7 +1291,7 @@ __global__ void qmoe_decode_fc2_kernel(
         if (n < hidden) {
           float v = partial[t];
           if (Bv) v += static_cast<float>(Bv[n]);
-          slot_buf[slot * hidden + n] = static_cast<__half>(wt * v);
+          slot_buf[slot * hidden + n] = wt * v;
         }
       }
     }
@@ -1270,7 +1313,7 @@ __global__ void qmoe_decode_fc2_kernel(
           int n = n_base + t;
           if (n < hidden) {
             if (Bv) v += static_cast<float>(Bv[n]);
-            slot_buf[slot * hidden + n] = static_cast<__half>(wt * v);
+            slot_buf[slot * hidden + n] = wt * v;
           }
         }
       }
@@ -1280,7 +1323,7 @@ __global__ void qmoe_decode_fc2_kernel(
 
 // Reduce: output[n] = sum over slot of slot_buf[slot, n]. Pure sum.
 __global__ void qmoe_decode_reduce_kernel(
-    const __half* __restrict__ slot_buf,  // [tokens, k, hidden]
+    const float*  __restrict__ slot_buf,  // [tokens, k, hidden]
     __half*       __restrict__ output,    // [tokens, hidden]
     int hidden,
     int k) {
@@ -1291,7 +1334,7 @@ __global__ void qmoe_decode_reduce_kernel(
   float acc = 0.0f;
   #pragma unroll 4
   for (int s = 0; s < k; s++) {
-    acc += static_cast<float>(slot_buf[s * hidden + n]);
+    acc += slot_buf[s * hidden + n];
   }
   output[n] = static_cast<__half>(acc);
 }
@@ -1328,7 +1371,7 @@ static hipError_t launch_qmoe_fc1(
                      static_cast<const __half*>(fc1_scales),
                      static_cast<const uint8_t*>(fc1_zero_points),
                      static_cast<const __half*>(fc1_bias),
-                     static_cast<__half*>(act_out), hidden_size, fusion_inter,
+                     static_cast<float*>(act_out), hidden_size, fusion_inter,
                      n_blk_in, block_size, bits, swiglu_alpha, swiglu_beta,
                      swiglu_limit);
   return hipGetLastError();
@@ -1343,14 +1386,14 @@ static hipError_t launch_qmoe_fc2(
   dim3 grid(static_cast<unsigned>((hidden_size + TN - 1) / TN),
             static_cast<unsigned>(k));
   hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_decode_fc2_kernel<BS, TN>), grid,
-                     dim3(BS), 0, s, static_cast<const __half*>(act_out),
+                     dim3(BS), 0, s, static_cast<const float*>(act_out),
                      static_cast<const int32_t*>(expert_indices),
                      static_cast<const __half*>(expert_weights),
                      static_cast<const uint8_t*>(fc2_weights),
                      static_cast<const __half*>(fc2_scales),
                      static_cast<const uint8_t*>(fc2_zero_points),
                      static_cast<const __half*>(fc2_bias),
-                     static_cast<__half*>(slot_buf), inter_size, hidden_size,
+                     static_cast<float*>(slot_buf), inter_size, hidden_size,
                      n_blk_mid, block_size, bits);
   return hipGetLastError();
 }
@@ -1644,7 +1687,7 @@ extern "C" int hip_qmoe_decode_fused(
   {
     int grid = static_cast<int>((hidden_size + kBlock - 1) / kBlock);
     hipLaunchKernelGGL(qmoe_decode_reduce_kernel, dim3(grid), dim3(kBlock), 0, s,
-                       static_cast<const __half*>(slot_buf),
+                       static_cast<const float*>(slot_buf),
                        static_cast<__half*>(output),
                        static_cast<int>(hidden_size), static_cast<int>(k));
     hipError_t e = hipGetLastError();
@@ -1685,9 +1728,10 @@ extern "C" int hip_qmoe_decode_fused(
 // grid = (n_blk groups, rows); row r activation = A + r*row_len, quantized
 // into a_qb + r*row_len (int8) with per-group scale a_scale[r*n_blk + grp].
 // Requires row_len % 8 == 0 (guaranteed: block_size is a power of two >= 32).
-template <int BLOCK_SIZE>
+// TIn is __half for the fc1 input and float for the fc2 slot activations.
+template <int BLOCK_SIZE, typename TIn>
 __global__ void qmoe_quant_act_i8_kernel(
-    const __half* __restrict__ A,
+    const TIn*    __restrict__ A,
     int8_t*       __restrict__ a_qb,
     float*        __restrict__ a_scale,
     int row_len, int block_size, int n_blk) {
@@ -1696,7 +1740,7 @@ __global__ void qmoe_quant_act_i8_kernel(
   const int tid = threadIdx.x;
   const int g0  = grp * block_size;
   const int g1  = min(g0 + block_size, row_len);
-  const __half* Arow = A + static_cast<size_t>(row) * row_len;
+  const TIn* Arow = A + static_cast<size_t>(row) * row_len;
   int8_t*       qrow = a_qb + static_cast<size_t>(row) * row_len;
 
   float local_max = 0.0f;
@@ -1752,7 +1796,7 @@ __global__ void qmoe_decode_fc1_dp4a_kernel(
     const __half*  __restrict__ fc1_s,           // [E, fusion_inter, n_blk_in]
     const uint8_t* __restrict__ fc1_zp_packed,   // [E, fusion_inter, ceil/2] or null
     const __half*  __restrict__ fc1_b,           // [E, fusion_inter] or null
-    __half*        __restrict__ act_out,         // [k, inter]
+    float*         __restrict__ act_out,         // [k, inter]
     int hidden, int fusion_inter, int n_blk_in, int block_size,
     float swiglu_alpha, float swiglu_beta, float swiglu_limit,
     int k_per_tok) {
@@ -1866,8 +1910,7 @@ __global__ void qmoe_decode_fc1_dp4a_kernel(
           float G = fminf(g, swiglu_limit);
           float L = fmaxf(fminf(l, swiglu_limit), -swiglu_limit);
           float sig = 1.0f / (1.0f + expf(-swiglu_alpha * G));
-          act_out[slot * inter + sw_base + p] =
-              static_cast<__half>(G * sig * (L + swiglu_beta));
+          act_out[slot * inter + sw_base + p] = G * sig * (L + swiglu_beta);
         }
       }
     }
@@ -1900,8 +1943,7 @@ __global__ void qmoe_decode_fc1_dp4a_kernel(
             float G = fminf(g, swiglu_limit);
             float L = fmaxf(fminf(l, swiglu_limit), -swiglu_limit);
             float sig = 1.0f / (1.0f + expf(-swiglu_alpha * G));
-            act_out[slot * inter + sw_base + p] =
-                static_cast<__half>(G * sig * (L + swiglu_beta));
+            act_out[slot * inter + sw_base + p] = G * sig * (L + swiglu_beta);
           }
         }
       }
@@ -1921,7 +1963,7 @@ __global__ void qmoe_decode_fc2_dp4a_kernel(
     const __half*  __restrict__ fc2_s,           // [E, hidden, n_blk_mid]
     const uint8_t* __restrict__ fc2_zp_packed,   // [E, hidden, ceil/2] or null
     const __half*  __restrict__ fc2_b,           // [E, hidden] or null
-    __half*        __restrict__ slot_buf,        // [k, hidden]
+    float*         __restrict__ slot_buf,        // [k, hidden]
     int inter, int hidden, int n_blk_mid, int block_size) {
   const int n_base = blockIdx.x * TILE_N;
   const int slot   = blockIdx.y;
@@ -2022,7 +2064,7 @@ __global__ void qmoe_decode_fc2_dp4a_kernel(
         if (n < hidden) {
           float v = partial[t];
           if (Bv) v += static_cast<float>(Bv[n]);
-          slot_buf[slot * hidden + n] = static_cast<__half>(wt * v);
+          slot_buf[slot * hidden + n] = wt * v;
         }
       }
     }
@@ -2044,7 +2086,7 @@ __global__ void qmoe_decode_fc2_dp4a_kernel(
           int n = n_base + t;
           if (n < hidden) {
             if (Bv) v += static_cast<float>(Bv[n]);
-            slot_buf[slot * hidden + n] = static_cast<__half>(wt * v);
+            slot_buf[slot * hidden + n] = wt * v;
           }
         }
       }
@@ -2069,7 +2111,7 @@ static hipError_t launch_qmoe_fc1_dp4a(
                      static_cast<const __half*>(fc1_scales),
                      static_cast<const uint8_t*>(fc1_zero_points),
                      static_cast<const __half*>(fc1_bias),
-                     static_cast<__half*>(act_out), hidden_size, fusion_inter,
+                     static_cast<float*>(act_out), hidden_size, fusion_inter,
                      n_blk_in, block_size, swiglu_alpha, swiglu_beta,
                      swiglu_limit, k_per_tok);
   return hipGetLastError();
@@ -2093,7 +2135,7 @@ static hipError_t launch_qmoe_fc2_dp4a(
                      static_cast<const __half*>(fc2_scales),
                      static_cast<const uint8_t*>(fc2_zero_points),
                      static_cast<const __half*>(fc2_bias),
-                     static_cast<__half*>(slot_buf), inter_size, hidden_size,
+                     static_cast<float*>(slot_buf), inter_size, hidden_size,
                      n_blk_mid, block_size);
   return hipGetLastError();
 }
@@ -2199,8 +2241,8 @@ extern "C" int hip_qmoe_decode_fused_dp4a(
   // Quantize each token's [hidden] input once (grid = n_blk_in groups x T rows).
   {
     dim3 grid(static_cast<unsigned>(n_blk_in), static_cast<unsigned>(T));
-    hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_quant_act_i8_kernel<128>), grid,
-                       dim3(128), 0, s, static_cast<const __half*>(input),
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_quant_act_i8_kernel<128, __half>),
+                       grid, dim3(128), 0, s, static_cast<const __half*>(input),
                        static_cast<int8_t*>(a_qb_in),
                        static_cast<float*>(a_scale_in),
                        static_cast<int>(hidden_size),
@@ -2248,8 +2290,8 @@ extern "C" int hip_qmoe_decode_fused_dp4a(
   // Quantize the T*k [inter] expert-slot activations (grid = n_blk_mid x slots).
   {
     dim3 grid(static_cast<unsigned>(n_blk_mid), static_cast<unsigned>(slots));
-    hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_quant_act_i8_kernel<128>), grid,
-                       dim3(128), 0, s, static_cast<const __half*>(act_out),
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_quant_act_i8_kernel<128, float>),
+                       grid, dim3(128), 0, s, static_cast<const float*>(act_out),
                        static_cast<int8_t*>(a_qb_mid),
                        static_cast<float*>(a_scale_mid),
                        static_cast<int>(inter_size),
@@ -2298,7 +2340,7 @@ extern "C" int hip_qmoe_decode_fused_dp4a(
     int grid = static_cast<int>((hidden_size + kBlock - 1) / kBlock);
     hipLaunchKernelGGL(qmoe_decode_reduce_kernel,
                        dim3(grid, static_cast<unsigned>(T)), dim3(kBlock), 0, s,
-                       static_cast<const __half*>(slot_buf),
+                       static_cast<const float*>(slot_buf),
                        static_cast<__half*>(output),
                        static_cast<int>(hidden_size), static_cast<int>(k));
     hipError_t e = hipGetLastError();
