@@ -603,6 +603,17 @@ static bool run_case(const Case& c, int iters) {
   HIP_CHECK(hipMemcpy(dK, Kh.data(), kn * sizeof(__half), hipMemcpyHostToDevice));
   HIP_CHECK(hipMemcpy(dV, Vh.data(), kn * sizeof(__half), hipMemcpyHostToDevice));
   HIP_CHECK(hipMemcpy(dSink, sinkh.data(), (size_t)H * sizeof(__half), hipMemcpyHostToDevice));
+  // A windowed call over a separate past buffer leaves the cache rows below
+  // past_len - window + 1, rounded down to 64 (window_copy_lo in gqa.cpp),
+  // unwritten, so they can hold NaN. Poison them (0xFFFF is an fp16 NaN): a
+  // kernel read below that bound then fails the case. The reference never
+  // reads them.
+  if (c.window > 0 && past_len - c.window + 1 >= 64) {
+    const int unwritten = (past_len - c.window + 1) / 64 * 64;
+    const size_t row_bytes = (size_t)D * sizeof(__half);
+    HIP_CHECK(hipMemset2D(dK, max_seq * row_bytes, 0xFF, unwritten * row_bytes, B * G));
+    HIP_CHECK(hipMemset2D(dV, max_seq * row_bytes, 0xFF, unwritten * row_bytes, B * G));
+  }
   __half* dKb = nullptr;
   if (!Kb.empty()) {
     std::vector<__half> Kbh(Kb.size());

@@ -218,6 +218,30 @@ static inline int kv_dtype_abi(KvCacheFormat f) {
   }
 }
 
+// Granule the sliding-window write-skip is rounded down to. The windowed v6x
+// prefill loads whole BKV-key tiles from floor(lo / BKV) * BKV, so the keys of
+// its first tile below lo are masked but still read, and a masked key still
+// multiplies its V row by 0, which keeps a NaN a NaN. Every windowed v6x BKV
+// (32, 64) divides this, so a tile never straddles the write bound.
+constexpr int64_t kWindowCopyAlign = 64;
+
+// First past position a sliding-window call (window > 0) copies into a
+// separate present buffer. A call's query rows sit at [past_len, past_len +
+// sq), so the oldest key any of them attends to is past_len - window + 1, the
+// same bound the decode kernels clamp kv_lo to and the decomposed pipeline
+// narrows its GEMMs to. Rounding it down covers the v6x tile reads above.
+//
+// It holds across calls too: the next call has a larger past_len, so its bound
+// is at least this one, and whichever path serves it -- fused or decomposed,
+// prefill or decode -- reads only what this call wrote. Every separate-buffer
+// concat of a windowed call must take its bound from here for that to hold.
+static int64_t window_copy_lo(int64_t past_len, int64_t window) {
+  if (window <= 0)
+    return 0;
+  const int64_t lo = past_len - window + 1;
+  return lo > 0 ? lo / kWindowCopyAlign * kWindowCopyAlign : 0;
+}
+
 //===----------------------------------------------------------------------===//
 // KV cache update: concat past+new, append new tokens in place, or (no_causal)
 // the bidirectional copy/append branch used by the decomposed pipeline.
@@ -239,12 +263,11 @@ static inline int kv_dtype_abi(KvCacheFormat f) {
 //
 // copy_lo bounds the separate-buffer concat from below: past positions
 // [0, copy_lo) are not copied into present and are left whatever the allocator
-// held. It exists for the one caller that can prove it will not read them back
-// -- a sliding-window layer at decode passes the same lower bound it scores
-// from -- and must be 0 for everyone else. It is required rather than defaulted
-// so that a new call site has to say which it is. The append branches ignore
-// it: they only ever write the new tokens, and an in-place cache has no prefix
-// to copy in the first place.
+// held. A sliding-window call passes window_copy_lo() below, which no read of
+// this call or any later one goes beneath; everyone else passes 0. It is
+// required rather than defaulted so that a new call site has to say which it
+// is. The append branches ignore it: they only ever write the new tokens, and
+// an in-place cache has no prefix to copy in the first place.
 static int update_kv_cache(hipStream_t stream, const void *past_key,
                            const void *past_value, const void *new_key,
                            const void *new_value, void *present_key,
@@ -496,20 +519,16 @@ static int gqa_forward_fused(
     // quantize-and-append with the static per-channel scale; fp16 cache: plain
     // append. update_kv_cache dispatches on kv_format internally.
     //
-    // copy_lo stays 0 here even though this path knows its window. Narrowing
-    // the concat needs a separate growing present buffer, and this path never
-    // gets one: seq_len_kv reaches the runtime as the present_key memref's
-    // sequence dim, which for a GroupQueryAttention export with a growing cache
-    // arrives one short of the declared present, and the seqlens_k check above
-    // then rejects the call before it can reach the concat. When the cache is
-    // instead in-place there is no prefix to copy and update_kv_cache appends.
-    // So a bound here would be unreachable, and therefore untestable, code.
+    // A growing present (an onnx.Attention export whose present is past + seq)
+    // takes the separate-buffer concat every step; on a sliding-window layer
+    // the prefix below the window is never read again, so it is not copied.
     if (update_kv_cache(
             stream, past_key, past_value, kSrc, vSrc, present_key,
             present_value, static_cast<int>(B), static_cast<int>(past_len),
             static_cast<int>(sq), static_cast<int>(G), static_cast<int>(d),
             static_cast<int>(past_buf_seq), static_cast<int>(present_seq),
-            seqlens_k_ptr, static_cast<int>(elem_sz), /*copy_lo=*/0,
+            seqlens_k_ptr, static_cast<int>(elem_sz),
+            static_cast<int>(window_copy_lo(past_len, local_window_size)),
             /*no_causal=*/false, /*skv=*/-1, kv_format, k_scale, v_scale) != 0)
       return -1;
 
@@ -705,13 +724,15 @@ static int gqa_forward_fused(
 
   if (present_key && present_value) {
     // Quantized cache: quantize-and-append/concat; fp16: plain. update_kv_cache
-    // dispatches on kv_format internally.
+    // dispatches on kv_format internally. The windowed v6x prefill starts at
+    // the tile holding past_len - window + 1, which window_copy_lo covers.
     if (update_kv_cache(
             stream, past_key, past_value, kSrc, vSrc, present_key,
             present_value, static_cast<int>(B), static_cast<int>(past_len),
             static_cast<int>(sq), static_cast<int>(G), static_cast<int>(d),
             static_cast<int>(past_buf_seq), static_cast<int>(present_seq),
-            seqlens_k_ptr, static_cast<int>(elem_sz), /*copy_lo=*/0,
+            seqlens_k_ptr, static_cast<int>(elem_sz),
+            static_cast<int>(window_copy_lo(past_len, local_window_size)),
             /*no_causal=*/false, /*skv=*/-1, kv_format, k_scale, v_scale) != 0)
       return -1;
   }
@@ -1695,16 +1716,16 @@ static int gqa_forward_hipblaslt(
   //
   // Applying it to prefill as well as decode is what closes the invariant
   // rather than just widening the optimisation. The KV copy below skips writing
-  // [0, kv_lo), so some prefix of `present` is never written on a narrowed
-  // step. Every subsequent call reads from its own kv_lo, and because
-  // past_len' == total_seq > past_len, its kv_lo is strictly greater than this
-  // call's: each read range is a strict subset of the previous write range, for
-  // decode and prefill alike. Leaving prefill unnarrowed would break exactly
-  // that -- a continuation prefill would read from 0 into memory a narrowed
-  // decode never wrote, and unwritten memory can hold a non-finite bit pattern
-  // that no finite mask suppresses (the softmax's first pass reduces with
-  // fmaxf, which ignores NaN, but the second pass accumulates it, so one such
-  // key poisons its whole output row).
+  // [0, kv_lo) rounded down (window_copy_lo), so some prefix of `present` is
+  // never written on a narrowed step. Every subsequent call reads from its own
+  // kv_lo, and because past_len' == total_seq > past_len, its kv_lo is strictly
+  // greater than this call's: each read range is a strict subset of the
+  // previous write range, for decode and prefill alike. Leaving prefill
+  // unnarrowed would break exactly that -- a continuation prefill would read
+  // from 0 into memory a narrowed decode never wrote, and unwritten memory can
+  // hold a non-finite bit pattern that no finite mask suppresses (the softmax's
+  // first pass reduces with fmaxf, which ignores NaN, but the second pass
+  // accumulates it, so one such key poisons its whole output row).
   //
   // Restrictions:
   //  - Not under bidirectional_no_past, which is the one branch where
@@ -2357,21 +2378,21 @@ static int gqa_forward_hipblaslt(
       // +1 convention). An onnx.Attention with a past KV cache keeps the
       // standard decode KV path (bidirectional_no_past=false).
       //
-      // copy_lo is kv_lo, deliberately the identical value and not a separately
-      // derived one: the bytes this skips writing are then exactly the bytes
-      // the Score and Value GEMMs below skip reading, so the narrowing cannot
-      // be half-applied, and a wrong window is wrong identically for both. That
-      // equality is why this needs no gate of its own -- kv_lo is already 0
-      // whenever no window applies.
+      // copy_lo is kv_lo rounded down by window_copy_lo, and is gated on kv_lo
+      // so that it is 0 whenever narrowing is inactive. The Score and Value
+      // GEMMs below read from kv_lo, inside what this writes. The rounding is
+      // for the fused path: one layer can take this pipeline on one call and
+      // the fused kernels on the next, whose windowed prefill reads whole
+      // tiles below its bound, and both paths writing from the same rounded
+      // bound keeps every later read inside an earlier write.
       //
       // It holds across calls as well as within one. This call writes
-      // [kv_lo, total_seq); the next call has past_len' == total_seq >
-      // past_len, so its own kv_lo == past_len' - W + 1 is strictly greater
-      // than this call's, and its read range is a strict subset of what this
-      // call wrote. That is an induction over calls, not a claim about one
-      // step's stride, so it covers a prefill following a decode as well as
-      // decode following decode -- which is the reason the bound above is
-      // applied at every sq rather than only at sq == 1.
+      // [copy_lo, total_seq); the next call has past_len' == total_seq >
+      // past_len, so its own bound is at least this call's, and its read range
+      // is a subset of what this call wrote. That is an induction over calls,
+      // not a claim about one step's stride, so it covers a prefill following
+      // a decode as well as decode following decode -- which is the reason the
+      // bound above is applied at every sq rather than only at sq == 1.
       //
       // Only the separate-buffer concat can skip anything. When the cache is
       // in-place (past_key == present_key) the prefix is already there and
@@ -2382,7 +2403,9 @@ static int gqa_forward_hipblaslt(
           static_cast<int>(G), static_cast<int>(d),
           static_cast<int>(past_buf_seq), static_cast<int>(present_seq),
           (use_no_expand && !bidirectional_no_past) ? seqlens_k_ptr : nullptr,
-          static_cast<int>(elem_sz), static_cast<int>(kv_lo),
+          static_cast<int>(elem_sz),
+          static_cast<int>(
+              kv_lo > 0 ? window_copy_lo(past_len, local_window_size) : 0),
           bidirectional_no_past, static_cast<int>(skv), KvCacheFormat::Fp16,
           /*k_scale=*/nullptr, /*v_scale=*/nullptr, kv_bnsd));
     }
