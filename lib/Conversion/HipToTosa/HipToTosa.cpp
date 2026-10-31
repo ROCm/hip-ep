@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 
+#include "hip/Conversion/HipToTosa/HipToTosaLegality.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
@@ -2589,16 +2590,17 @@ struct QuantizeLinearConverter final
     auto inv = tosa::ReciprocalOp::create(rewriter, loc, scaleType, scale);
     Value scaled = emitTosaMul(rewriter, loc, input, inv, inputType);
 
-    if (!zp) {
-      rewriter.replaceOp(op, emitTosaCast(rewriter, loc, scaled, outElem));
-      return success();
-    }
-
+    // QuantizeLinear rounds half to even, which is tosa.cast's float-to-int
+    // rounding. emitTosaCast would emit fp_to_int_cast, which truncates as
+    // ONNX Cast does. Widening to i32 lets the zero point saturate in the
+    // clamp instead of wrapping.
     Type biasElem = rewriter.getI32Type();
     auto i32Type = RankedTensorType::get(resultType.getShape(), biasElem);
-    Value asI32 = emitTosaCast(rewriter, loc, scaled, biasElem);
-    Value zpI32 = emitTosaCast(rewriter, loc, zp, biasElem);
-    Value biased = tosa::AddOp::create(rewriter, loc, i32Type, asI32, zpI32);
+    Value biased = tosa::CastOp::create(rewriter, loc, i32Type, scaled);
+    if (zp) {
+      Value zpI32 = emitTosaCast(rewriter, loc, zp, biasElem);
+      biased = tosa::AddOp::create(rewriter, loc, i32Type, biased, zpI32);
+    }
 
     unsigned width = outElem.getIntOrFloatBitWidth();
     APInt minI = outElem.isUnsignedInteger() ? APInt::getMinValue(width)
@@ -8063,6 +8065,80 @@ struct QMoEConverter final : public OpConversionPattern<hip::QMoEOp> {
   }
 };
 
+static bool isUnsignedTensor(Type type) {
+  auto tensor = dyn_cast<RankedTensorType>(type);
+  return tensor && tensor.getElementType().isUnsignedInteger();
+}
+
+static Type getSignlessType(Type type) {
+  if (!isUnsignedTensor(type))
+    return type;
+  auto tensor = cast<RankedTensorType>(type);
+  return tensor.clone(IntegerType::get(
+      type.getContext(), tensor.getElementType().getIntOrFloatBitWidth()));
+}
+
+// Ops whose meaning does not depend on integer signedness: they move bits, or
+// name their unsignedness in a rocmlir custom op.
+static bool isSignednessNeutral(Operation *op) {
+  if (auto custom = dyn_cast<tosa::CustomOp>(op))
+    return custom.getDomainName() == kRockCustomOpDomain;
+  if (auto constant = dyn_cast<tosa::ConstOp>(op))
+    return isa<DenseElementsAttr>(constant.getValues());
+  return isa<tosa::ReshapeOp, tosa::TransposeOp, tosa::SliceOp, tosa::ConcatOp,
+             tosa::TileOp, tosa::IdentityOp, tensor::EmptyOp, func::ReturnOp>(
+      op);
+}
+
+// rocMLIR's TOSA pipeline takes only signless integers. Its rocmlir custom
+// ops (unsigned_cast, unsigned_div, unsigned_max) carry the unsigned meaning.
+// A ui8 kernel argument becomes i8 with the same bytes, so the caller's buffer
+// needs no change. A kernel with any other op on an unsigned value -- a
+// tosa.clamp or tosa.maximum, whose meaning would change -- is left as it is.
+//
+// Before:
+//   func @k(%x: tensor<4xui8>) -> tensor<4xf32>
+//     %y = tosa.custom %x {operator_name = "unsigned_cast"}
+//          : (tensor<4xui8>) -> tensor<4xf32>
+// After:
+//   func @k(%x: tensor<4xi8>) -> tensor<4xf32>
+//     %y = tosa.custom %x {operator_name = "unsigned_cast"}
+//          : (tensor<4xi8>) -> tensor<4xf32>
+static void makeUnsignedIntegersSignless(func::FuncOp func) {
+  bool hasUnsigned = llvm::any_of(func.getArgumentTypes(), isUnsignedTensor) ||
+                     llvm::any_of(func.getResultTypes(), isUnsignedTensor);
+  WalkResult walk = func.walk([&](Operation *op) {
+    if (op == func.getOperation())
+      return WalkResult::advance();
+    if (llvm::none_of(op->getOperandTypes(), isUnsignedTensor) &&
+        llvm::none_of(op->getResultTypes(), isUnsignedTensor))
+      return WalkResult::advance();
+    hasUnsigned = true;
+    return isSignednessNeutral(op) ? WalkResult::advance()
+                                   : WalkResult::interrupt();
+  });
+  if (!hasUnsigned || walk.wasInterrupted())
+    return;
+
+  func.walk([&](Operation *op) {
+    if (auto constant = dyn_cast<tosa::ConstOp>(op);
+        constant && isUnsignedTensor(constant.getType())) {
+      auto values = cast<DenseElementsAttr>(constant.getValues());
+      constant.setValuesAttr(values.bitcast(
+          cast<RankedTensorType>(getSignlessType(constant.getType()))
+              .getElementType()));
+    }
+    for (Value result : op->getResults())
+      result.setType(getSignlessType(result.getType()));
+  });
+  for (BlockArgument arg : func.getArguments())
+    arg.setType(getSignlessType(arg.getType()));
+  SmallVector<Type> results =
+      llvm::map_to_vector(func.getResultTypes(), getSignlessType);
+  func.setType(FunctionType::get(func.getContext(),
+                                 func.getBody().getArgumentTypes(), results));
+}
+
 class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
   void runOnOperation() override {
     auto funcOp = getOperation();
@@ -8263,10 +8339,83 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         PoolConverter>(ctx);
 
     if (failed(applyPartialConversion(funcOp, conversion, std::move(patterns))))
-      signalPassFailure();
+      return signalPassFailure();
+    makeUnsignedIntegersSignless(funcOp);
   }
 };
 
 } // namespace
+
+bool isTosaLowerableReshape(Operation *op) {
+  if (auto expand = dyn_cast_if_present<tensor::ExpandShapeOp>(op))
+    return isStaticReshape(expand);
+  if (auto collapse = dyn_cast_if_present<tensor::CollapseShapeOp>(op))
+    return isStaticReshape(collapse);
+  return false;
+}
+
+bool isTosaLowerableSlice(tensor::ExtractSliceOp op) {
+  return isTosaExpressibleSlice(op);
+}
+
+bool isTosaLowerableExpand(ExpandOp op) { return isTosaExpressibleExpand(op); }
+
+// A subset of what matchQdqCommon and the two converters accept: the
+// per-tensor and per-axis forms, which are all hip-fuse-rocmlir needs.
+bool isTosaLowerableQdq(Operation *op) {
+  Value input, scale, zeroPoint;
+  int64_t axis, blockSize;
+  if (auto dq = dyn_cast_if_present<DequantizeLinearOp>(op)) {
+    if (dq.getPackedInt4())
+      return false;
+    input = dq.getInput();
+    scale = dq.getScale();
+    zeroPoint = dq.getZeroPoint();
+    axis = dq.getAxis();
+    blockSize = dq.getBlockSize();
+  } else if (auto q = dyn_cast_if_present<QuantizeLinearOp>(op)) {
+    if (q.getSaturate() == 0)
+      return false;
+    input = q.getInput();
+    scale = q.getScale();
+    zeroPoint = q.getZeroPoint();
+    axis = q.getAxis();
+    blockSize = q.getBlockSize();
+  } else {
+    return false;
+  }
+  if (op->getNumResults() != 1 || blockSize != 0)
+    return false;
+  auto inputType = dyn_cast<RankedTensorType>(input.getType());
+  auto resultType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
+  auto scaleType = dyn_cast<RankedTensorType>(scale.getType());
+  if (!inputType || !inputType.hasStaticShape() || !resultType ||
+      resultType.getShape() != inputType.getShape() || !scaleType)
+    return false;
+
+  Type floatElem = isa<DequantizeLinearOp>(op) ? resultType.getElementType()
+                                               : inputType.getElementType();
+  Type intElem = isa<DequantizeLinearOp>(op) ? inputType.getElementType()
+                                             : resultType.getElementType();
+  if (!isa<FloatType>(floatElem) || !isa<IntegerType>(intElem) ||
+      scaleType.getElementType() != floatElem)
+    return false;
+
+  int64_t rank = inputType.getRank();
+  if (axis < 0)
+    axis += rank;
+  auto isScalarOrPerAxis = [&](Value param) {
+    auto type = dyn_cast<RankedTensorType>(param.getType());
+    if (!type || !type.hasStaticShape())
+      return false;
+    if (type.getRank() == 0)
+      return true;
+    return rank > 0 && type.getRank() == 1 && axis >= 0 && axis < rank &&
+           (type.getDimSize(0) == 1 ||
+            type.getDimSize(0) == inputType.getDimSize(axis));
+  };
+  return isScalarOrPerAxis(scale) &&
+         (!zeroPoint || isScalarOrPerAxis(zeroPoint));
+}
 
 } // namespace mlir::hip

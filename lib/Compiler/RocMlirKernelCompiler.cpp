@@ -21,6 +21,7 @@
 #include "mlir/Transforms/Passes.h"
 
 // rocMLIR (rocmlirTriton) C++ API -- linked in-tree, same LLVM/MLIR as us.
+#include "mlir/Dialect/Rock/IR/AmdArchDb.h"
 #include "mlir/Dialect/Rock/IR/Rock.h"
 #include "mlir/Dialect/Rock/IR/RockTuningParamAttrInterface.h"
 #include "mlir/Dialect/Rock/Pipelines/Pipelines.h"
@@ -239,6 +240,30 @@ std::string resolveRocMlirArch() {
 #endif
 }
 
+std::vector<std::string> getRocMlirGemmAccelTypes(MLIRContext &context,
+                                                  StringRef arch) {
+  Builder b(&context);
+  Type candidates[] = {b.getF32Type(),
+                       b.getF16Type(),
+                       b.getBF16Type(),
+                       b.getI8Type(),
+                       b.getType<Float8E4M3FNType>(),
+                       b.getType<Float8E5M2Type>(),
+                       b.getType<Float8E4M3FNUZType>(),
+                       b.getType<Float8E5M2FNUZType>()};
+  std::vector<std::string> accelerated;
+  for (Type type : candidates) {
+    if (rock::getMatrixAccelKind(arch, type, type) ==
+        rock::MatrixAccelKind::None)
+      continue;
+    std::string name;
+    llvm::raw_string_ostream os(name);
+    type.print(os);
+    accelerated.push_back(std::move(name));
+  }
+  return accelerated;
+}
+
 void registerRocMlirDialects(MLIRContext &context) {
   DialectRegistry rockRegistry;
   registerRocMLIRDialects(rockRegistry);
@@ -269,10 +294,10 @@ OwningOpRef<ModuleOp> takeRocMlirKernelsAsTosaModule(ModuleOp module,
   for (auto func : llvm::make_early_inc_range(module.getOps<func::FuncOp>())) {
     if (!func->hasAttr("rock.kernel"))
       continue;
-    // fuse-rocmlir stamps a fixed rock.arch, and the rock tuning passes read
-    // it from the func. Point it at the arch we are actually compiling for,
-    // or the tuning parameters get chosen for a different chip than the
-    // backend emits code for.
+    // The rock tuning passes read rock.arch from the func, and fuse-rocmlir
+    // leaves it unset when it ran without an arch option. Point it at the
+    // arch we are actually compiling for, or the tuning parameters get
+    // chosen for a different chip than the backend emits code for.
     if (!arch.empty())
       func->setAttr("rock.arch", builder.getStringAttr(arch));
     func->remove();

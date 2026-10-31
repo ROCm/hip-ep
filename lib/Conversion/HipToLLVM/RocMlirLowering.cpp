@@ -11,20 +11,22 @@ namespace mlir {
 namespace hip {
 namespace {
 
-// hip.rocmlir(ctx) @callee ins(%in...) outs(%out)
+// hip.rocmlir(ctx) @callee ins(%in...) outs(%out...)
 //   {kernel_binary, grid_size, block_size}
 //     ->
-//   %kernargs = alloca [N x ptr]            (N = #inputs + 1 output)
+//   %kernargs = alloca [N x ptr]            (N = #inputs + #outputs)
 //   store in0_ptr,  kernargs[0]
 //   ...
-//   store out_ptr,  kernargs[N-1]
+//   store outK_ptr, kernargs[N-1]
 //   wrap_rocmlir(state, kernel_binary_str, func_name_str,
 //                block_size, grid_size, kernargs, N * sizeof(void*))
 //
 // The compiled GPU kernel (embedded in `kernel_binary`) takes the operand data
-// pointers positionally: inputs in order, then the output. We stage those bare
-// pointers into a contiguous kernargs buffer and hand it, together with the
-// launch geometry and the module/function names, to the runtime wrapper.
+// pointers positionally: inputs in order, then one output per kernel result,
+// in result order (rocMLIR appends an output argument per func result). We
+// stage those bare pointers into a contiguous kernargs buffer and hand it,
+// together with the launch geometry and the module/function names, to the
+// runtime wrapper.
 struct RocMlirOpLowering : public ConvertOpToLLVMPattern<RocMlirOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -70,12 +72,12 @@ struct RocMlirOpLowering : public ConvertOpToLLVMPattern<RocMlirOp> {
     Value funcName = globalString(module, rewriter, loc,
                                   (callee + "_name").str(), funcNameStr);
 
-    // Operand data pointers, in kernel-arg order: inputs first, then output.
+    // Operand data pointers, in kernel-arg order: inputs first, then outputs.
     SmallVector<Value> argPtrs;
     for (Value in : adaptor.getInputs())
       argPtrs.push_back(extractContiguousMemRefPtr(in, rewriter, loc));
-    argPtrs.push_back(
-        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc));
+    for (Value out : adaptor.getOutputs())
+      argPtrs.push_back(extractContiguousMemRefPtr(out, rewriter, loc));
 
     // alloc(kernargs, size): stack buffer of N pointer slots.
     int64_t numArgs = static_cast<int64_t>(argPtrs.size());
