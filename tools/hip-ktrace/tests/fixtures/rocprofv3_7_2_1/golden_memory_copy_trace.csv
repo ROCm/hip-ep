@@ -1,0 +1,3 @@
+"Kind","Direction","Stream_Id","Source_Agent_Id","Destination_Agent_Id","Correlation_Id","Start_Timestamp","End_Timestamp"
+"MEMORY_COPY","MEMORY_COPY_HOST_TO_DEVICE",9,"Agent 0","Agent 1",3,1000001000,1000001200
+"MEMORY_COPY","MEMORY_COPY_DEVICE_TO_HOST",9,"Agent 1","Agent 0",4,1000001300,1000001500
