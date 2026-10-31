@@ -77,11 +77,9 @@ module {
 
 // -----
 
-// A write through a derived alias keeps the readback path.
+// The alias store is disjoint from the length and precedes its readers.
 // CHECK-LABEL: llvm.func @alias_store(
-// CHECK-NOT: llvm.call @wrap_group_query_attention_host_length
-// CHECK: llvm.call @wrap_group_query_attention(
-// CHECK-NOT: llvm.call @wrap_group_query_attention_host_length
+// CHECK: llvm.call @wrap_group_query_attention_host_length({{.*}}, %arg1)
 module {
   func.func @alias_store(%ctx: !hip.context, %length: i32, %dim: i64,
       %q: memref<1x1x64xf16>, %total: memref<i32>,
@@ -117,11 +115,9 @@ module {
 
 // -----
 
-// A copy must not write through a derived alias.
+// The copy writes another region. It does not change the length.
 // CHECK-LABEL: llvm.func @alias_copy_target(
-// CHECK-NOT: llvm.call @wrap_group_query_attention_host_length
-// CHECK: llvm.call @wrap_group_query_attention(
-// CHECK-NOT: llvm.call @wrap_group_query_attention_host_length
+// CHECK: llvm.call @wrap_group_query_attention_host_length({{.*}}, %arg1)
 module {
   func.func @alias_copy_target(%ctx: !hip.context, %length: i32, %dim: i64,
       %q: memref<1x1x64xf16>, %total: memref<i32>,
@@ -157,11 +153,9 @@ module {
 
 // -----
 
-// An alias can address another slot. Require all stores before its read.
+// The pending alias reader cannot overlap the later length store.
 // CHECK-LABEL: llvm.func @alias_before_store(
-// CHECK-NOT: llvm.call @wrap_group_query_attention_host_length
-// CHECK: llvm.call @wrap_group_query_attention(
-// CHECK-NOT: llvm.call @wrap_group_query_attention_host_length
+// CHECK: llvm.call @wrap_group_query_attention_host_length({{.*}}, %arg1)
 module {
   func.func @alias_before_store(%ctx: !hip.context, %length: i32, %dim: i64,
       %q: memref<1x1x64xf16>, %total: memref<i32>,

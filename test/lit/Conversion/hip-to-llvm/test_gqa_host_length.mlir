@@ -161,10 +161,10 @@ module {
 
 // -----
 
-// Different view values can name overlapping storage.
+// Different views name the same bytes. Forward the last exact store.
 // CHECK-LABEL: llvm.func @overlap(
-// CHECK-NOT: llvm.call @wrap_group_query_attention_host_length
-// CHECK: llvm.call @wrap_group_query_attention(
+// CHECK: llvm.store %arg2,
+// CHECK: llvm.call @wrap_group_query_attention_host_length({{.*}}, %arg2)
 module {
   func.func @overlap(%ctx: !hip.context, %a: i32, %b: i32,
       %q: memref<1x1x64xf16>, %total: memref<i32>,

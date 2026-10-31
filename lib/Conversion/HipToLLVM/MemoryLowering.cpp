@@ -781,8 +781,7 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
     // and a differing stride on a dimension of extent 1 moves nothing.
     // Leaving such a copy to the default MemRef->LLVM lowering would emit host
     // loads and stores, which fault on these device pointers.
-    if (isCopyContiguousElems(shape, srcStrides) &&
-        isCopyContiguousElems(shape, dstStrides)) {
+    if (hasFlatRuntimeCopyLowering(srcTy, dstTy)) {
       int64_t numElems = 1;
       for (int64_t d : shape)
         numElems *= d;
@@ -942,6 +941,18 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
 };
 
 } // namespace
+
+bool hasFlatRuntimeCopyLowering(MemRefType source, MemRefType target) {
+  if (!source || !target || source.getShape() != target.getShape() ||
+      failed(tryElemSizeBytes(source.getElementType())))
+    return false;
+  auto sourceStrides = tryStaticStridesElems(source);
+  auto targetStrides = tryStaticStridesElems(target);
+  if (failed(sourceStrides) || failed(targetStrides))
+    return source.getLayout().isIdentity() && target.getLayout().isIdentity();
+  return isCopyContiguousElems(source.getShape(), *sourceStrides) &&
+         isCopyContiguousElems(target.getShape(), *targetStrides);
+}
 
 void populateMemoryLoweringPatterns(const LLVMTypeConverter &converter,
                                     RewritePatternSet &patterns) {

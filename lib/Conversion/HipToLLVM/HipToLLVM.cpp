@@ -231,6 +231,7 @@ void ConvertHipToLLVMPass::runOnOperation() {
   });
 
   RewritePatternSet patterns(ctx);
+  const auto hostScalars = collectHostScalarValues(module);
 
   // HIP dialect-specific lowerings
   populateMemoryLoweringPatterns(typeConverter, patterns);
@@ -258,7 +259,7 @@ void ConvertHipToLLVMPass::runOnOperation() {
   populateReduceLoweringPatterns(typeConverter, patterns);
   populateTransposeLoweringPatterns(typeConverter, patterns);
   populateRopeLoweringPatterns(typeConverter, patterns);
-  populateGqaLoweringPatterns(typeConverter, patterns, module);
+  populateGqaLoweringPatterns(typeConverter, patterns, hostScalars);
   populateMultiHeadAttentionLoweringPatterns(typeConverter, patterns);
   populateMatMulNBitsLoweringPatterns(typeConverter, patterns);
   populateDequantBnb4LoweringPatterns(typeConverter, patterns);
@@ -292,8 +293,8 @@ void ConvertHipToLLVMPass::runOnOperation() {
   populateSliceLoweringPatterns(typeConverter, patterns);
   populateScatterNDLoweringPatterns(typeConverter, patterns);
   populateNonZeroLoweringPatterns(typeConverter, patterns);
-  populateReadbackDimLoweringPatterns(typeConverter, patterns);
-  populateReadbackScalarLoweringPatterns(typeConverter, patterns);
+  populateReadbackDimLoweringPatterns(typeConverter, patterns, hostScalars);
+  populateReadbackScalarLoweringPatterns(typeConverter, patterns, hostScalars);
   populateSizeLoweringPatterns(typeConverter, patterns);
   populatePoolLoweringPatterns(typeConverter, patterns);
   populateResizeLoweringPatterns(typeConverter, patterns);

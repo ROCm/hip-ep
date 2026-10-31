@@ -361,37 +361,27 @@ def HoistAllocSizeArithPass
 
 def MaterializeHostScalarsPass
     : Pass<"hip-materialize-host-scalars", "mlir::func::FuncOp"> {
-  let summary = "Redirect tiny host-fed memref.alloc ops to a host-mapped "
+  let summary = "Redirect small host-accessed memref.alloc ops to a host-mapped "
                 "scratch buffer";
   let description = [{
-    Walks `memref.alloc` ops in the function and redirects ones that look
-    like host-fed scalar staging buffers — small static-shape, integer-or-
-    index memrefs (up to 16 elements) that have at least one host I/O user
-    (memref.store / load) — away from the GPU pool.  They are replaced with
-    `memref.view` ops over a single per-function
-    `hip.get_host_scratch(%ctx, %total_size)` buffer
-    (hipHostMalloc(hipHostMallocMapped), host-writable AND GPU-readable at
-    the same VA on UMA targets).
+    Place small static buffers (up to 16 elements) in runtime-owned mapped
+    scratch instead of the device pool. Follow aliases to find host loads
+    and stores. Integer and index buffers qualify. Float buffers also need
+    a HIP consumer. Reject unknown users.
 
-    Hip-dialect users are explicitly accepted (the implementation classifies
-    `hip.*` ops as legal users alongside memref.store/load/dim/dealloc).
-    The canonical
-    `tensor.from_elements -> reduce_sum + sub + cast -> seqlens_k` GQA
-    pattern produces an alloc with a host store followed by `hip.cast`
-    reading it; rejecting it left the host store crashing inside the GPU
-    pool, so the pass intentionally allows it.
+    A small copy-filled integer shape buffer can also qualify when it has
+    an explicit scalar readback. Require bounded contiguous aliases, scalar
+    copies, and supported read-only consumers. Keep the copies and readback.
+    Do not move general kernel destinations under this rule.
 
-    Why: on some targets the GPU pool is real device memory; the bufferized
-    `tensor.from_elements` lowering emits `memref.alloc + memref.store`
-    which, once absorbed by `hip-pool-allocs`, becomes a host store into
-    device memory and SEGVs.  (Other targets silently worked because hipMalloc
-    returned UMA-mapped host memory there, masking the bug.) Run this pass
-    after linalg-to-loops and before `hip-optimize-memrefs`. Otherwise, buffer
-    reuse can merge a candidate into a larger allocation that exceeds the
-    size limit. The scratch views remain separate during pooling.
+    Replace each allocation with a separate aligned `memref.view` of one
+    `hip.get_host_scratch` buffer. Keep payload accesses in their original
+    order. HIP-to-LLVM checks redundant readbacks separately.
 
-    Pipeline placement is load-bearing — see Pipelines.cpp for the exact
-    ordering and `test/lit/Pipeline/nonzero-host-shape-buffer.mlir`.
+    Run after linalg-to-loops and before `hip-optimize-memrefs`. Buffer reuse
+    can otherwise merge a host-written buffer into an allocation above the
+    size limit. Pooling would then put its host store in device memory.
+    See Pipelines.cpp and `test/lit/Pipeline/nonzero-host-shape-buffer.mlir`.
   }];
   let dependentDialects = [
     "mlir::hip::HipDialect",

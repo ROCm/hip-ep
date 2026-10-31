@@ -28,11 +28,23 @@ namespace {
 // operand's element type and sign.
 struct ReadbackScalarOpLowering
     : public ConvertOpToLLVMPattern<ReadbackScalarOp> {
-  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+  ReadbackScalarOpLowering(const LLVMTypeConverter &converter,
+                           const DenseMap<Operation *, Value> &hostScalars)
+      : ConvertOpToLLVMPattern<ReadbackScalarOp>(converter),
+        hostScalars(hostScalars) {}
+
+  DenseMap<Operation *, Value> hostScalars;
 
   LogicalResult
   matchAndRewrite(ReadbackScalarOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    if (Value original = hostScalars.lookup(op)) {
+      Value value = rewriter.getRemappedValue(original);
+      if (!value)
+        return rewriter.notifyMatchFailure(op, "cannot convert host scalar");
+      rewriter.replaceOp(op, value);
+      return success();
+    }
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type ptrType = getPtrType();
@@ -104,9 +116,10 @@ struct ReadbackScalarOpLowering
 
 } // namespace
 
-void populateReadbackScalarLoweringPatterns(const LLVMTypeConverter &converter,
-                                            RewritePatternSet &patterns) {
-  patterns.add<ReadbackScalarOpLowering>(converter);
+void populateReadbackScalarLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns,
+    const DenseMap<Operation *, Value> &hostScalars) {
+  patterns.add<ReadbackScalarOpLowering>(converter, hostScalars);
 }
 
 } // namespace hip
