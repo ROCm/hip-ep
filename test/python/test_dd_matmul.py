@@ -15,12 +15,16 @@ hip-ep <-> DD DLL boundary.
 Numerics are not checked: the runtime zero-fills the QDQ tensors and
 reinterprets the f16 weights as uint8.
 
+To compare devices in Task Manager, set HIPEP_DD_TEST_SECONDS (e.g. 5): the
+GPU test runs first, then the NPU test, each looping for that long.
+
 Requires a runtime built with DynamicDispatch, DD_ROOT pointing at the DD repo
 (xclbins), and the DD and XRT DLLs reachable via DYNAMICDISPATCH_ROOT/bin and
 XILINX_XRT.
 """
 
 import os
+import re
 import subprocess
 import sys
 import textwrap
@@ -34,18 +38,25 @@ EP_BIN, THEROCK_BIN = _ep_runtime_dirs(REPO_ROOT)
 EP_DLL = EP_BIN / EP_DLL_NAME
 
 M, K, N = 1, 1024, 384
-# Raise (e.g. HIPEP_DD_TEST_RUNS=20000) to keep the NPU busy long enough to
-# observe in Task Manager.
+# When RUN_SECONDS is set, each worker loops for that much inference time
+# (session setup excluded) and NUM_RUNS is ignored.
 NUM_RUNS = int(os.environ.get("HIPEP_DD_TEST_RUNS", "2"))
+RUN_SECONDS = float(os.environ.get("HIPEP_DD_TEST_SECONDS", "0"))
+# The GPU test is not tied to a DD kernel shape, so it uses a square MatMul
+# large enough to show up as GPU compute rather than launch overhead.
+GPU_SIZE = int(os.environ.get("HIPEP_GPU_TEST_SIZE", "2048"))
 
 _WORKER = textwrap.dedent(
     """
+    import gc
     import sys
+    import time
     import numpy as np
     import onnxruntime as ort
     from onnx import TensorProto, helper
 
     ep_dll, M, K, N, runs = sys.argv[1], *map(int, sys.argv[2:6])
+    seconds = float(sys.argv[6])
 
     a = helper.make_tensor_value_info("A", TensorProto.FLOAT16, [M, K])
     b = helper.make_tensor_value_info("B", TensorProto.FLOAT16, [K, N])
@@ -69,15 +80,26 @@ _WORKER = textwrap.dedent(
     rng = np.random.default_rng(0)
     feeds = {"A": rng.random((M, K), dtype=np.float32).astype(np.float16),
              "B": rng.random((K, N), dtype=np.float32).astype(np.float16)}
-    for _ in range(runs):
+    done = 0
+    start = time.perf_counter()
+    while done < runs or time.perf_counter() - start < seconds:
         (out,) = sess.run(None, feeds)
         assert out.shape == (M, N), out.shape
-    print("RUN_OK", flush=True)
+        done += 1
+    elapsed = time.perf_counter() - start
+
+    # Release DD ops and their XRT contexts while the process is fully alive;
+    # teardown during interpreter shutdown/DLL unload can wedge the NPU driver.
+    del out, sess
+    gc.collect()
+    print("SESSION_RELEASED", file=sys.stderr, flush=True)
+    print(f"RUN_OK runs={done} seconds={elapsed:.2f} "
+          f"ms_per_run={1000 * elapsed / done:.3f}", flush=True)
     """
 )
 
 
-def _run_worker(use_dd=True):
+def _run_worker(use_dd=True, m=M, k=K, n=N):
     env = dict(os.environ)
     env["HIPEP_USE_DYNAMIC_DISPATCH"] = "1" if use_dd else "0"
     # A compile failure must not silently fall back to the CPU.
@@ -97,16 +119,37 @@ def _run_worker(use_dd=True):
             "-c",
             _WORKER,
             str(EP_DLL),
-            str(M),
-            str(K),
-            str(N),
-            str(NUM_RUNS),
+            str(m),
+            str(k),
+            str(n),
+            str(1 if RUN_SECONDS > 0 else NUM_RUNS),
+            str(RUN_SECONDS),
         ],
         capture_output=True,
         text=True,
         env=env,
         timeout=600,
     )
+
+
+def _completed_runs(proc, log):
+    match = re.search(r"RUN_OK runs=(\d+).*", proc.stdout)
+    assert match, f"inference failed (rc={proc.returncode}):\n{log}"
+    print(match.group(0))
+    return int(match.group(1))
+
+
+# Defined first so pytest runs the GPU phase before the NPU phase.
+@pytest.mark.skipif(
+    not EP_DLL.exists(), reason=f"{EP_DLL} not found (set HIPEP_EP_BIN)"
+)
+def test_matmul_gpu_fallback():
+    """A MatMul with HIPEP_USE_DYNAMIC_DISPATCH=0 runs on the GPU."""
+    proc = _run_worker(use_dd=False, m=GPU_SIZE, k=GPU_SIZE, n=GPU_SIZE)
+    log = proc.stdout + "\n" + proc.stderr
+
+    assert "[DD]" not in log, f"DynamicDispatch was used with DD disabled:\n{log}"
+    _completed_runs(proc, log)
 
 
 @pytest.mark.skipif(
@@ -128,19 +171,12 @@ def test_dd_matmul_call_sequence():
     assert log.count("dd_combined_gemm_create model=") == 1, (
         f"handle was not cached across inferences:\n{log}"
     )
-    assert log.count("dd_combined_gemm_execute rc=0") == NUM_RUNS, (
-        f"dd_combined_gemm_execute did not succeed {NUM_RUNS} times:\n{log}"
+    _completed_runs(proc, log)
+    # The runtime logs an op's first execute and every failure.
+    executes = re.findall(r"dd_op_execute rc=(-?\d+)", log)
+    assert executes == ["0"], f"dd_op_execute failed:\n{log}"
+    assert "copy failed" not in log, f"DD tensor staging failed:\n{log}"
+    destroyed = proc.stderr.find("wrap_dd_matmul: dd_op_destroy")
+    assert 0 <= destroyed < proc.stderr.find("SESSION_RELEASED"), (
+        f"DD op was not destroyed when the session was released:\n{log}"
     )
-    assert "RUN_OK" in proc.stdout, f"inference failed (rc={proc.returncode}):\n{log}"
-
-
-@pytest.mark.skipif(
-    not EP_DLL.exists(), reason=f"{EP_DLL} not found (set HIPEP_EP_BIN)"
-)
-def test_matmul_gpu_fallback():
-    """The same MatMul with HIPEP_USE_DYNAMIC_DISPATCH=0 runs on the GPU."""
-    proc = _run_worker(use_dd=False)
-    log = proc.stdout + "\n" + proc.stderr
-
-    assert "[DD]" not in log, f"DynamicDispatch was used with DD disabled:\n{log}"
-    assert "RUN_OK" in proc.stdout, f"inference failed (rc={proc.returncode}):\n{log}"

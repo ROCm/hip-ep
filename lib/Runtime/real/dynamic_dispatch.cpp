@@ -4,6 +4,7 @@
  */
 
 #include "dynamic_dispatch.h"
+#include "../debug_log.h"
 #include "../hipdnn_ep_errors.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_state.h"
@@ -105,6 +106,16 @@ bool copy_on_stream(RuntimeState *state, void *dst, const void *src,
   return true;
 }
 
+// Callers ignore the wrappers' return codes, so every failure is logged.
+// Successes are logged on an op's first execute, or always with
+// HIPDNN_EP_DEBUG=1, to keep benchmark output quiet.
+void log_execute(const char *op, int rc, bool &first_execute) {
+  if (rc != DD_OK || first_execute || hipdnn_ep_debug_enabled()) {
+    dd_log("[DD] %s: dd_op_execute rc=%d\n", op, rc);
+  }
+  first_execute = false;
+}
+
 bool to_host(RuntimeState *state, void *dst, const void *src, size_t bytes,
              const char *what) {
   return copy_on_stream(state, dst, src, bytes, hipMemcpyDeviceToHost, what);
@@ -136,30 +147,38 @@ bool to_device(RuntimeState *state, void *dst, const void *src, size_t bytes,
 //===----------------------------------------------------------------------===//
 
 struct DDGemmState : OpStateT<DDGemmState> {
-  dd_gemm_handle_t handle = nullptr;
+  dd_op_handle_t handle = nullptr;
   DDGemmShape shape{};
   std::vector<uint8_t> weights;
   std::vector<int64_t> qdq;
   std::vector<int32_t> qdq_params;
   std::vector<uint16_t> in_host;
   std::vector<uint16_t> out_host;
+  bool first_execute = true;
 
   static void destroy(OpState *p) { delete static_cast<DDGemmState *>(p); }
   DDGemmState() { deletor = &destroy; }
-  ~DDGemmState() { dd_combined_gemm_destroy(handle); }
+  ~DDGemmState() {
+    dd_op_destroy(handle);
+    dd_log("[DD] wrap_dd_matmul: dd_op_destroy\n");
+  }
 };
 
 struct DDConvState : OpStateT<DDConvState> {
-  dd_conv_handle_t handle = nullptr;
+  dd_op_handle_t handle = nullptr;
   std::vector<uint8_t> weights;
   std::vector<int64_t> qdq;
   std::vector<int32_t> qdq_params;
   std::vector<uint16_t> in_host;
   std::vector<uint16_t> out_host;
+  bool first_execute = true;
 
   static void destroy(OpState *p) { delete static_cast<DDConvState *>(p); }
   DDConvState() { deletor = &destroy; }
-  ~DDConvState() { dd_iconv_destroy(handle); }
+  ~DDConvState() {
+    dd_op_destroy(handle);
+    dd_log("[DD] wrap_dd_conv2d: dd_op_destroy\n");
+  }
 };
 
 template <class T> static T *find_dd_state(RuntimeState *state, int32_t slot) {
@@ -224,11 +243,9 @@ static std::unique_ptr<DDGemmState> create_gemm_state(RuntimeState *state,
       make_dd_tensor(gemm->qdq.data(), {B, N}, "int64"),
       make_dd_tensor(gemm->qdq_params.data(), {B, kQdqParamSize}, "int32"),
   };
-  int rc = dd_combined_gemm_initialize_weights(gemm->handle, consts, 3);
+  int rc = dd_op_initialize_weights(gemm->handle, consts, 3);
   if (rc != DD_OK) {
-    dd_log("[DD] wrap_dd_matmul: dd_combined_gemm_initialize_weights "
-           "failed: rc=%d\n",
-           rc);
+    dd_log("[DD] wrap_dd_matmul: dd_op_initialize_weights failed: rc=%d\n", rc);
     return nullptr;
   }
   return gemm;
@@ -299,8 +316,8 @@ int wrap_dd_matmul(RuntimeState *state, int32_t op_state_slot,
                      {size_t(s.bin), size_t(s.m), size_t(s.k)}, "uint16");
   dd_tensor_t out = make_dd_tensor(
       gemm->out_host.data(), {size_t(s.b), size_t(s.m), size_t(s.n)}, "uint16");
-  int rc = dd_combined_gemm_execute(gemm->handle, &in, &out);
-  dd_log("[DD] wrap_dd_matmul: dd_combined_gemm_execute rc=%d\n", rc);
+  int rc = dd_op_execute(gemm->handle, &in, &out);
+  log_execute("wrap_dd_matmul", rc, gemm->first_execute);
   if (rc != DD_OK) {
     return -1;
   }
@@ -403,10 +420,9 @@ int wrap_dd_conv2d(RuntimeState *state, int32_t op_state_slot,
         make_dd_tensor(created->qdq.data(), {size_t(k)}, "int64"),
         make_dd_tensor(created->qdq_params.data(), {kQdqParamSize}, "int32"),
     };
-    int rc = dd_iconv_initialize_weights(created->handle, consts, 3);
+    int rc = dd_op_initialize_weights(created->handle, consts, 3);
     if (rc != DD_OK) {
-      dd_log("[DD] wrap_dd_conv2d: dd_iconv_initialize_weights failed: "
-             "rc=%d\n",
+      dd_log("[DD] wrap_dd_conv2d: dd_op_initialize_weights failed: rc=%d\n",
              rc);
       return -1;
     }
@@ -431,8 +447,8 @@ int wrap_dd_conv2d(RuntimeState *state, int32_t op_state_slot,
   dd_tensor_t out = make_dd_tensor(
       conv->out_host.data(),
       {size_t(n), size_t(k), size_t(out_h), size_t(out_w)}, "uint16");
-  int rc = dd_iconv_execute(conv->handle, &in, &out);
-  dd_log("[DD] wrap_dd_conv2d: dd_iconv_execute rc=%d\n", rc);
+  int rc = dd_op_execute(conv->handle, &in, &out);
+  log_execute("wrap_dd_conv2d", rc, conv->first_execute);
   if (rc != DD_OK) {
     return -1;
   }

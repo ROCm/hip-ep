@@ -51,13 +51,8 @@ struct DDGemmState : OpStateT<DDGemmState> {
 **After:**
 ```cpp
 struct DDGemmState : OpStateT<DDGemmState> {
-  dd_gemm_handle_t handle;
-  DDGemmState(dd_gemm_handle_t h) : handle(h) {}
-  ~DDGemmState() {
-    if (handle) {
-      dd_combined_gemm_destroy(handle);
-    }
-  }
+  dd_op_handle_t handle = nullptr;
+  ~DDGemmState() { dd_op_destroy(handle); }  // NULL is ignored
 };
 ```
 
@@ -65,13 +60,14 @@ struct DDGemmState : OpStateT<DDGemmState> {
 
 **Key changes:**
 - Use `dd_combined_gemm_create()` instead of C++ constructor
-- Use `dd_combined_gemm_initialize_weights()` for weights
-- Use `dd_combined_gemm_execute()` instead of virtual function call
+- Use the type-independent `dd_op_initialize_weights()`, `dd_op_execute()`
+  and `dd_op_destroy()` on the returned `dd_op_handle_t`
 - Use `dd_tensor_t` struct instead of C++ `Tensor` class
 
-**Current API** (DD commit `57b0f8604`, "Pass full op configuration through
-the C API wrappers"): `create` takes a config struct, and
-`initialize_weights` takes an array of const-param tensors.
+**Current API**: each op has its own `dd_<op>_create` taking a config struct
+and returning a `dd_op_handle_t`; the remaining lifecycle steps are shared
+`dd_op_*` entry points. `initialize_weights` takes an array of const-param
+tensors. `wrap_dd_conv2d` uses the same pattern with `dd_iconv_create`.
 
 ```cpp
 dd_combined_gemm_config_t cfg{};
@@ -80,12 +76,13 @@ cfg.design_param = "8x4";
 cfg.model_name = "8x4_PSMU_ST1_v3.2";      // selects the xclbin; required
 int shape[5] = {1, 6, 1, 1024, 64};        // Bin, B, M, K, N
 std::copy(shape, shape + 5, cfg.input_shape);
-dd_gemm_handle_t h = dd_combined_gemm_create(&cfg);
+dd_op_handle_t h = dd_combined_gemm_create(&cfg);
 
 dd_tensor_t consts[3] = {weights /*[B,K,N] uint8*/, qdq /*[B,N] int64*/,
                          qdq_params /*[B,16] int32*/};
-dd_combined_gemm_initialize_weights(h, consts, 3);
-dd_combined_gemm_execute(h, &input /*[Bin,M,K]*/, &output /*[B,M,N]*/);
+dd_op_initialize_weights(h, consts, 3);
+dd_op_execute(h, &input /*[Bin,M,K]*/, &output /*[B,M,N]*/);
+dd_op_destroy(h);
 ```
 
 ### 4. Current hardcoded mapping in `wrap_dd_matmul` / `wrap_dd_conv2d`
