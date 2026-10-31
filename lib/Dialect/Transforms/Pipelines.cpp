@@ -423,6 +423,12 @@ void mlir::hip::buildOnnxToHipPipelineHead(OpPassManager &pm,
 
   pm.addPass(createConvertOnnxToHipPass());
 
+  // Fold constant-parameter BatchNorm into the producing convolutions while
+  // the conv -> add -> batch_norm chain is still as converted: this head is
+  // shared with the rocMLIR flow, so it runs before any conv rewrite or kernel
+  // outlining there.
+  pm.addNestedPass<func::FuncOp>(createFoldBatchNormPass());
+
   // Plugin slot: AfterConvertOnnxToHip. The most common slot for
   // vendor lowerings of `onnx.Custom` ops or vendor-specific hip.*
   // canonicalisations. This is the supported plugin boundary for emitting

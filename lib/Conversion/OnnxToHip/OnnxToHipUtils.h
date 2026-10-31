@@ -606,6 +606,12 @@ void populateSpaceToDepthConversionPatterns(RewritePatternSet &patterns,
 
 void populateQdqConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
+void populateDynamicQuantizeLinearConversionPatterns(
+    RewritePatternSet &patterns, MLIRContext *ctx);
+void populateConvIntegerConversionPatterns(RewritePatternSet &patterns,
+                                           MLIRContext *ctx);
+void populateMatMulIntegerConversionPatterns(RewritePatternSet &patterns,
+                                             MLIRContext *ctx);
 
 /// Canonicalize com.microsoft QuantizeLinear / DequantizeLinear represented as
 /// onnx.Custom into native ONNX QDQ ops. Must run before QDQ conversion, which
@@ -619,6 +625,13 @@ void populateCustomQdqCanonicalizationPatterns(RewritePatternSet &patterns,
 /// must run while ONNX ops are still present. See TransposeMatMulFold.cpp.
 void populateTransposeMatMulFoldPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
+
+/// Pre-lowering pattern set: fold the f16->f32 Casts on skip/gamma and the
+/// f32->f16 Cast on the output of an fp32 SkipSimplifiedLayerNormalization
+/// into the norm itself (mixed-dtype hip.skip_rms_norm). See
+/// SkipNormCastFold.cpp.
+void populateSkipNormCastFoldPatterns(RewritePatternSet &patterns,
+                                      MLIRContext *ctx);
 
 /// Pre-lowering pattern set: collapse the Gather(Shape(x), const_idx)
 /// idiom into tensor.from_elements over a tensor.dim of x. Must run
