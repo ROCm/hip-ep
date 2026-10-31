@@ -237,6 +237,26 @@ def DecomposeConvTransposePass
   ];
 }
 
+def FoldBatchNormPass
+    : Pass<"hip-fold-batchnorm", "mlir::func::FuncOp"> {
+  let summary = "Fold constant-parameter hip.batch_norm into hip.conv weights";
+  let description = [{
+    Inference BatchNorm with constant parameters is the per-channel affine map
+    `y = s * x + t`, `s = scale / sqrt(var + eps)`, `t = B - mean * s`. When
+    its input is a `hip.conv`, or a `hip.add` of two `hip.conv`s, the scale is
+    multiplied into each filter per output channel and the shift is added to
+    one conv's bias (any existing biases are scaled by `s`). The batch norm
+    disappears, so a following pointwise op fuses straight into the conv.
+
+    Every intermediate result must have the batch norm as its only consumer,
+    and the filters, biases, and batch-norm parameters must be readable at
+    compile time. The rewritten filters are emitted as new inline
+    `hip.constant`s; the originals are left for their other users, if any.
+    Inline and file-backed carriers are read; memory-address carriers are
+    not, so a batch norm over memory-backed weights is left in place.
+  }];
+}
+
 def PromoteStridedHipOperandsPass
     : Pass<"hip-promote-strided-operands", "mlir::func::FuncOp"> {
   let summary = "Materialize identity-layout temporaries for DPS-input memrefs "
