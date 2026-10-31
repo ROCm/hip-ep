@@ -392,6 +392,7 @@ void mlir::hip::buildOnnxToHipPipelineHead(OpPassManager &pm,
   // every Python perf test under `test/python/` on a Loop-heavy
   // model end-to-end, then delete this TODO.
   pm.addPass(createOnnxLoopOutlinePass());
+  pm.addPass(createOnnxScanOutlinePass());
   pm.addPass(createOnnxIfOutlinePass());
 
   // Rank-establish unranked tensors inside outlined loop bodies (e.g. a
@@ -401,7 +402,7 @@ void mlir::hip::buildOnnxToHipPipelineHead(OpPassManager &pm,
   // func signature and later bufferization.
   pm.addPass(createInferLoopBodyShapesPass());
 
-  // Plugin slot: AfterOnnxLoopOutline. Operate on outlined ONNX loop
+  // Plugin slot: AfterOnnxLoopOutline. Operate on outlined ONNX control-flow
   // bodies before the main lowering runs.
   addPluginPassesForSlot(pm,
                          ::hip::compiler::PipelineSlot::AfterOnnxLoopOutline);

@@ -42,6 +42,13 @@ int wrap_hipFree(void *ptr) {
 // Signature: (i64) -> ptr.  Returns nullptr on failure (callers check), no
 // HIP_CHECK that would terminate the host process from inside the model DLL.
 extern "C" void *hip_device_malloc(int64_t size) {
+  if (size == 0)
+    return nullptr;
+  if (size < 0) {
+    fprintf(stderr, "hip_device_malloc(%lld) failed: negative size\n",
+            (long long)size);
+    return nullptr;
+  }
   void *ptr = nullptr;
   hipError_t err = hipMalloc(&ptr, size);
   if (err != hipSuccess) {

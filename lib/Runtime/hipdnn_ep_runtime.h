@@ -2266,6 +2266,19 @@ int hipdnn_ep_run_loop(RuntimeState *state, HipdnnEpLoopBodyFn body_fn,
                        int32_t num_loop_carried, int32_t num_captures,
                        void **loop_carried_descs, void **capture_descs);
 
+// ONNX Scan driver. Descriptor slicing is performed by the generated
+// trampoline; the runtime only supplies the monotonically increasing
+// iteration number and preserves stream submission order.
+typedef int (*HipdnnEpScanBodyFn)(RuntimeState *state, int64_t iteration,
+                                  void **state_descs, void **scan_input_descs,
+                                  void **capture_descs,
+                                  void **scan_output_descs);
+
+int hipdnn_ep_run_scan(RuntimeState *state, HipdnnEpScanBodyFn body_fn,
+                       int64_t trip_count, void **state_descs,
+                       void **scan_input_descs, void **capture_descs,
+                       void **scan_output_descs);
+
 // ONNX If driver. Dispatches to exactly one of the two branch trampolines
 // based on `cond`. Each trampoline writes branch outputs into the shared
 // `output_descs` buffers (DPS / out-param ABI).

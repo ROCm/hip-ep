@@ -133,6 +133,7 @@ the selected perfConfig string are printed only with `--verbose`.
 | `simplify-onnx` | module | Pre-lowering ONNX cleanups (`CastLike`→`Cast`, drop dead type-donor args). |
 | `hip-add-context-arg` | module | Inject the `!hip.context` argument into functions. |
 | `onnx-loop-outline` | module | Outline `onnx.Loop` bodies into separate `func.func` ops. |
+| `onnx-scan-outline` | module | Outline supported forward, axis-0 `onnx.Scan` bodies and materialize their state and stacked outputs. |
 | `onnx-if-outline` | module | Outline `onnx.If` branches before ONNX-to-HIP conversion. |
 | `hip-infer-loop-body-shapes` | module | Rank-establish unranked tensors inside outlined loop bodies. |
 | `outline-onnx-to-hipdnn` | module | Outline subgraphs targeted at hipDNN graph compilation. |
@@ -233,9 +234,10 @@ ONNX → HIP  (buildOnnxToHipPipeline)
   «slot: AfterSimplifyOnnx»
   hip-add-context-arg
   onnx-loop-outline
+  onnx-scan-outline
   onnx-if-outline
   hip-infer-loop-body-shapes
-  «slot: AfterOnnxLoopOutline»
+  «slot: AfterOnnxLoopOutline»  (after Loop / Scan / If outlining)
   [outline-onnx-to-hipdnn + compile-hipdnn-graphs]   (BUILD_HIPDNN_GRAPH=ON only)
   convert-onnx-to-hip
   func.func(hip-fold-batchnorm)      (shared with the rocMLIR head, so it runs

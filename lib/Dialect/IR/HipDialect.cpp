@@ -327,6 +327,97 @@ LoopOp::inferReturnTypes(MLIRContext *context, std::optional<Location> location,
 }
 
 //===----------------------------------------------------------------------===//
+// ScanOp: outlined-body scan (DPS)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ScanOp::getDpsInitsMutable() { return getInitsMutable(); }
+
+void ScanOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  for (OpOperand &operand : getScanInputsMutable())
+    if (isa<MemRefType>(operand.get().getType()))
+      effects.emplace_back(MemoryEffects::Read::get(), &operand,
+                           SideEffects::DefaultResource::get());
+  for (OpOperand &operand : getCapturesMutable())
+    if (isa<MemRefType>(operand.get().getType()))
+      effects.emplace_back(MemoryEffects::Read::get(), &operand,
+                           SideEffects::DefaultResource::get());
+  for (OpOperand &operand : getStateScratchMutable())
+    if (isa<MemRefType>(operand.get().getType()))
+      effects.emplace_back(MemoryEffects::Write::get(), &operand,
+                           SideEffects::DefaultResource::get());
+  for (auto [i, operand] : llvm::enumerate(getInitsMutable())) {
+    if (!isa<MemRefType>(operand.get().getType()))
+      continue;
+    if (i < getNumStateVariables())
+      effects.emplace_back(MemoryEffects::Read::get(), &operand,
+                           SideEffects::DefaultResource::get());
+    effects.emplace_back(MemoryEffects::Write::get(), &operand,
+                         SideEffects::DefaultResource::get());
+  }
+}
+
+LogicalResult ScanOp::verify() {
+  uint32_t numState = getNumStateVariables();
+  uint32_t numScanInputs = getNumScanInputs();
+  uint32_t numScanOutputs = getNumScanOutputs();
+  if (numScanInputs == 0)
+    return emitOpError("requires at least one scan input");
+  if (numScanInputs != getScanInputs().size())
+    return emitOpError("num_scan_inputs (")
+           << numScanInputs << ") must equal the scan_inputs count ("
+           << getScanInputs().size() << ")";
+  if (numState + numScanOutputs != getInits().size())
+    return emitOpError("expected ")
+           << (numState + numScanOutputs) << " init operands, got "
+           << getInits().size();
+
+  bool tensorMode =
+      getInits().empty() || isa<RankedTensorType>(getInits().front().getType());
+  if (tensorMode) {
+    if (!getStateScratch().empty())
+      return emitOpError("tensor mode must not have state scratch operands");
+    if (getNumResults() != getInits().size())
+      return emitOpError("tensor mode result count must equal init count");
+    for (auto [result, init] : llvm::zip(getOutputs(), getInits()))
+      if (result.getType() != init.getType())
+        return emitOpError("result and init types must match");
+  } else {
+    if (getNumResults() != 0)
+      return emitOpError("memref mode must have no results");
+    if (!getStateScratch().empty() && getStateScratch().size() != numState)
+      return emitOpError("memref mode state scratch count must be zero or ")
+             << numState;
+    for (auto [scratch, init] :
+         llvm::zip(getStateScratch(), getInits().take_front(numState)))
+      if (scratch.getType() != init.getType())
+        return emitOpError("state scratch and state init types must match");
+  }
+  return success();
+}
+
+LogicalResult ScanOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  if (!symbolTable.lookupNearestSymbolFrom<func::FuncOp>(*this,
+                                                         getBodyFuncAttr()))
+    return emitOpError("body_func '")
+           << getBodyFunc() << "' does not reference a func.func";
+  return success();
+}
+
+LogicalResult
+ScanOp::inferReturnTypes(MLIRContext *context, std::optional<Location> location,
+                         ValueRange operands, DictionaryAttr attributes,
+                         PropertyRef properties, RegionRange regions,
+                         SmallVectorImpl<Type> &inferredReturnTypes) {
+  ScanOpAdaptor adaptor(operands, attributes, properties, regions);
+  for (Value init : adaptor.getInits())
+    if (isa<RankedTensorType>(init.getType()))
+      inferredReturnTypes.push_back(init.getType());
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // IfOp: outlined then/else conditional (DPS)
 //===----------------------------------------------------------------------===//
 

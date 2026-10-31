@@ -66,6 +66,7 @@ add_library(HipToLLVM STATIC
   ReadbackScalarLowering.cpp
   SizeLowering.cpp
   LoopLowering.cpp
+  ScanLowering.cpp
   IfLowering.cpp
   PoolLowering.cpp
   ResizeLowering.cpp

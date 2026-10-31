@@ -348,6 +348,7 @@ int main(int argc, char **argv) {
     pm.addPass(mlir::hip::createSimplifyOnnxPass());
     pm.addPass(mlir::hip::createHipAddContextArgPass());
     pm.addPass(mlir::hip::createOnnxLoopOutlinePass());
+    pm.addPass(mlir::hip::createOnnxScanOutlinePass());
     pm.addPass(mlir::hip::createOnnxIfOutlinePass());
     pm.addPass(mlir::hip::createInferLoopBodyShapesPass());
     pm.addPass(mlir::hip::createConvertOnnxToHipPass());
