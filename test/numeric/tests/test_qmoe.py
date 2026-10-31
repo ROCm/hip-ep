@@ -342,6 +342,40 @@ class TestQMoE:
         actual, expected = model_runner.run_sample(model, [x, router])
         compare_outputs(actual, expected, atol=5e-2, rtol=1e-2, cos_threshold=0.999)
 
+    @pytest.mark.parametrize("seq_len", [1, 5, 9, 37])
+    def test_qmoe_activation_beyond_fp16(self, model_runner, seq_len):
+        """SwiGLU activations of ~1.2e5 (past fp16's 65504) whose down
+        projection still fits fp16. ORT CPU keeps the activation in fp32; the
+        GPU must too (decode) or scale the row (prefill) instead of storing
+        inf, which the int8 / fp16 fc2 input turns into a NaN row. The large
+        down bias catches a prefill row scale applied to the bias as well.
+        """
+        hidden = 64
+        intermediate = 128
+        model = _make_qmoe_model(
+            1,
+            seq_len,
+            hidden,
+            intermediate,
+            num_experts=4,
+            top_k=2,
+            gate_up_bias_range=(300.0, 400.0),
+            down_scale_range=(0.001, 0.002),
+            down_bias_range=(200.0, 400.0),
+            swiglu_limit=None,
+        )
+
+        rng = np.random.default_rng(31)
+        x = rng.uniform(-1, 1, [1, seq_len, hidden]).astype(np.float16)
+        router = rng.standard_normal([seq_len, 4]).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x, router])
+        assert np.isfinite(expected[0]).all()
+        scale = float(np.abs(expected[0].astype(np.float32)).max())
+        compare_outputs(
+            actual, expected, atol=2e-2 * scale, rtol=1e-2, cos_threshold=0.999
+        )
+
     @pytest.mark.parametrize("seq_len", [1, 37])
     @pytest.mark.parametrize("top_k", [4, 8])
     @pytest.mark.parametrize("num_experts", [64, 128, 256])

@@ -760,12 +760,16 @@ __global__ void __launch_bounds__(kReduceBlock) qmoe_reduce_sorted_pairs_kernel(
     const int32_t *__restrict__ pair_to_sorted,
     const int32_t *__restrict__ expert_indices,
     const __half *__restrict__ expert_weights,
+    const float *__restrict__ row_scale,
+    const __half *__restrict__ fc2_bias,
     __half *__restrict__ output,
     int64_t num_tokens,
     int64_t width,
     int k) {
   __shared__ int64_t s_row_base[kMaxTopK];
   __shared__ float s_weight[kMaxTopK];
+  __shared__ float s_scale[kMaxTopK];
+  __shared__ int64_t s_bias_base[kMaxTopK];
   __shared__ int s_count;
 
   const int64_t token = blockIdx.x;
@@ -779,9 +783,11 @@ __global__ void __launch_bounds__(kReduceBlock) qmoe_reduce_sorted_pairs_kernel(
       rank += other < expert || (other == expert && slot < tid);
     }
     if (expert != INT32_MAX) {
-      s_row_base[rank] =
-          static_cast<int64_t>(pair_to_sorted[token * k + tid]) * width;
+      const int32_t sorted_row = pair_to_sorted[token * k + tid];
+      s_row_base[rank] = static_cast<int64_t>(sorted_row) * width;
       s_weight[rank] = static_cast<float>(expert_weights[token * k + tid]);
+      s_scale[rank] = row_scale ? row_scale[sorted_row] : 1.0f;
+      s_bias_base[rank] = static_cast<int64_t>(expert) * width;
     }
   }
   if (tid == 0) {
@@ -810,10 +816,27 @@ __global__ void __launch_bounds__(kReduceBlock) qmoe_reduce_sorted_pairs_kernel(
     for (int r = 0; r < kMaxTopK; ++r) {
       if (r >= n) break;
       const float weight = s_weight[r];
+      const float s = s_scale[r];
+      float value[kVec];
+#pragma unroll
+      for (int j = 0; j < kVec; ++j) value[j] = static_cast<float>(v[r].h[j]);
+      // The fc2 GEMM saw act / s but added the unscaled bias b, so the true
+      // value is s * v - (s - 1) * b. s is a power of two, so s == 1 rows are
+      // bit-identical to the unscaled path. s is uniform across the block.
+      if (s != 1.0f) {
+        Vec b;
+        if (fc2_bias)
+          b = *reinterpret_cast<const Vec *>(fc2_bias + s_bias_base[r] +
+                                             c * kVec);
+#pragma unroll
+        for (int j = 0; j < kVec; ++j) {
+          value[j] *= s;
+          if (fc2_bias) value[j] -= (s - 1.0f) * static_cast<float>(b.h[j]);
+        }
+      }
 #pragma unroll
       for (int j = 0; j < kVec; ++j)
-        acc.h[j] = __float2half(static_cast<float>(acc.h[j]) +
-                                weight * static_cast<float>(v[r].h[j]));
+        acc.h[j] = __float2half(static_cast<float>(acc.h[j]) + weight * value[j]);
     }
     *reinterpret_cast<Vec *>(out_row + c * kVec) = acc;
   }
@@ -962,8 +985,9 @@ extern "C" int hip_qmoe_ragged_matmul_nbits(
 extern "C" int hip_qmoe_reduce_sorted_pairs(
     void *stream, const void *sorted_expert_output,
     const void *pair_to_sorted, const void *expert_indices,
-    const void *expert_weights, void *output, int64_t num_tokens,
-    int64_t width, int64_t k, int64_t element_size_bytes) {
+    const void *expert_weights, const void *row_scale, const void *fc2_bias,
+    void *output, int64_t num_tokens, int64_t width, int64_t k,
+    int64_t element_size_bytes) {
   if (!stream || !sorted_expert_output || !pair_to_sorted ||
       !expert_indices || !expert_weights || !output) {
     fprintf(stderr,
@@ -983,7 +1007,8 @@ extern "C" int hip_qmoe_reduce_sorted_pairs(
   const bool vec8 =
       width % 8 == 0 &&
       ((reinterpret_cast<uintptr_t>(sorted_expert_output) |
-        reinterpret_cast<uintptr_t>(output)) &
+        reinterpret_cast<uintptr_t>(output) |
+        reinterpret_cast<uintptr_t>(fc2_bias)) &
        15) == 0;
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
   const dim3 grid(static_cast<unsigned>(num_tokens));
@@ -995,7 +1020,9 @@ extern "C" int hip_qmoe_reduce_sorted_pairs(
         static_cast<const int32_t *>(pair_to_sorted),
         static_cast<const int32_t *>(expert_indices),
         static_cast<const __half *>(expert_weights),
-        static_cast<__half *>(output), num_tokens, width, static_cast<int>(k));
+        static_cast<const float *>(row_scale),
+        static_cast<const __half *>(fc2_bias), static_cast<__half *>(output),
+        num_tokens, width, static_cast<int>(k));
   } else {
     hipLaunchKernelGGL(
         qmoe_reduce_sorted_pairs_kernel<1>, grid, dim3(kReduceBlock), 0,
@@ -1003,7 +1030,9 @@ extern "C" int hip_qmoe_reduce_sorted_pairs(
         static_cast<const int32_t *>(pair_to_sorted),
         static_cast<const int32_t *>(expert_indices),
         static_cast<const __half *>(expert_weights),
-        static_cast<__half *>(output), num_tokens, width, static_cast<int>(k));
+        static_cast<const float *>(row_scale),
+        static_cast<const __half *>(fc2_bias), static_cast<__half *>(output),
+        num_tokens, width, static_cast<int>(k));
   }
 
   hipError_t err = hipGetLastError();
