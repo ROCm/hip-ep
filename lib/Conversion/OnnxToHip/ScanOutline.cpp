@@ -220,6 +220,22 @@ LogicalResult OnnxScanOutlinePass::outlineScan(Operation *scanOp,
   llvm::SetVector<Value> capturedSet;
   getUsedValuesDefinedAbove(bodyRegion, capturedSet);
   SmallVector<Value> captures(capturedSet.begin(), capturedSet.end());
+  SmallVector<Value> runtimeCaptures;
+  runtimeCaptures.reserve(captures.size());
+  OpBuilder captureBuilder(scanOp);
+  for (Value capture : captures) {
+    auto type = dyn_cast<RankedTensorType>(capture.getType());
+    Operation *producer = capture.getDefiningOp();
+    if (!type || type.getRank() != 0 || !producer ||
+        producer->getBlock() != scanOp->getBlock()) {
+      runtimeCaptures.push_back(capture);
+      continue;
+    }
+    OpBuilder::InsertionGuard guard(captureBuilder);
+    captureBuilder.setInsertionPointAfter(producer);
+    runtimeCaptures.push_back(bufferization::AllocTensorOp::create(
+        captureBuilder, loc, type, ValueRange{}, capture));
+  }
 
   auto parentFn = scanOp->getParentOfType<func::FuncOp>();
   if (!parentFn || parentFn.getNumArguments() == 0 ||
@@ -321,8 +337,8 @@ LogicalResult OnnxScanOutlinePass::outlineScan(Operation *scanOp,
              << i;
     firstMapping.map(bodyBlock.getArgument(numState + i), *slice);
   }
-  for (Value capture : captures)
-    firstMapping.map(capture, capture);
+  for (auto [capture, runtimeCapture] : llvm::zip(captures, runtimeCaptures))
+    firstMapping.map(capture, runtimeCapture);
   for (Operation &bodyOp : bodyBlock)
     if (&bodyOp != yieldOp)
       outerBuilder.clone(bodyOp, firstMapping);
@@ -417,7 +433,7 @@ LogicalResult OnnxScanOutlinePass::outlineScan(Operation *scanOp,
   OperationState tailState(loc, "hip.scan");
   tailState.addOperands(context);
   tailState.addOperands(tailInputs);
-  tailState.addOperands(captures);
+  tailState.addOperands(runtimeCaptures);
   tailState.addOperands(tailInits);
   tailState.addTypes(llvm::to_vector(
       llvm::map_range(tailInits, [](Value value) { return value.getType(); })));
@@ -431,7 +447,7 @@ LogicalResult OnnxScanOutlinePass::outlineScan(Operation *scanOp,
   tailState.addAttribute("operand_segment_sizes",
                          outerBuilder.getDenseI32ArrayAttr(
                              {1, static_cast<int32_t>(numScanInputs),
-                              static_cast<int32_t>(captures.size()), 0,
+                              static_cast<int32_t>(runtimeCaptures.size()), 0,
                               static_cast<int32_t>(tailInits.size())}));
   Operation *tailScan = outerBuilder.create(tailState);
   scf::YieldOp::create(outerBuilder, loc, tailScan->getResults());
