@@ -517,17 +517,20 @@ int wrap_group_query_attention(
     void *attention_bias, void *head_sink, void *k_scale, void *v_scale,
     // Outputs
     void *output, void *present_key, void *present_value, void *output_qk,
-    // Attributes (13)
+    // Attributes (14)
     int64_t num_heads, int64_t kv_num_heads, float scale, int64_t do_rotary,
     int64_t rotary_interleaved, float softcap, int64_t local_window_size,
     int64_t smooth_softmax, int64_t qk_output, int64_t k_quant_type,
     int64_t v_quant_type, int64_t kv_cache_bit_width,
     // Whisper bidirectional-attention flag (mock stub ignores it).
     int32_t no_causal,
-    // Shape values (6)
+    // Mask-derived live-length flag (mock stub ignores it).
+    int32_t derive_seqlens_from_attention_bias,
+    // Shape values (12)
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
     int64_t attn_bias_batch, int64_t attn_bias_num_heads,
+    int64_t attn_bias_seq_q, int64_t attn_bias_seq_kv,
     // key/value layout: 0 = rank-3 BSHD, 1 = rank-4 BNSD (mock stub ignores
     // it).
     int64_t kv_bnsd,
@@ -536,6 +539,24 @@ int wrap_group_query_attention(
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_group_query_attention\n");
     return -1;
+  }
+  if (attention_bias != nullptr) {
+    const bool leading_extents_ok =
+        (attn_bias_batch == 1 || attn_bias_batch == batch_size) &&
+        (attn_bias_num_heads == 1 || attn_bias_num_heads == num_heads);
+    const bool query_extent_ok = attn_bias_seq_q == seq_len_q;
+    const int64_t cache_extent =
+        past_buf_seq > seq_len_kv ? past_buf_seq : seq_len_kv;
+    const bool kv_extent_ok = past_key != nullptr
+                                  ? attn_bias_seq_kv != 1 &&
+                                        attn_bias_seq_kv >= seq_len_new_kv &&
+                                        attn_bias_seq_kv <= cache_extent
+                                  : attn_bias_seq_kv == seq_len_new_kv;
+    if (!leading_extents_ok || !query_extent_ok || !kv_extent_ok) {
+      fprintf(stderr,
+              "Invalid attention bias shape in wrap_group_query_attention\n");
+      return -1;
+    }
   }
   (void)op_state_slot;
 
@@ -551,13 +572,10 @@ int wrap_group_query_attention(
   (void)v_quant_type;
   (void)kv_cache_bit_width;
   (void)no_causal;
-  (void)past_buf_seq;
+  (void)derive_seqlens_from_attention_bias;
   (void)present_key;
   (void)present_value;
-  (void)attn_bias_batch;
-  (void)attn_bias_num_heads;
   (void)kv_bnsd;
-  (void)seq_len_new_kv;
 
   MOCK_PRINT("[MOCK] wrap_group_query_attention(\n");
   MOCK_PRINT("[MOCK]   num_heads=%lld, kv_num_heads=%lld,\n",
@@ -567,9 +585,11 @@ int wrap_group_query_attention(
   MOCK_PRINT("[MOCK]   do_rotary=%lld, rotary_interleaved=%lld,\n",
              (long long)do_rotary, (long long)rotary_interleaved);
   MOCK_PRINT("[MOCK]   attention_bias=%p, attn_bias_batch=%lld, "
-             "attn_bias_num_heads=%lld,\n",
+             "attn_bias_num_heads=%lld, attn_bias_seq_q=%lld, "
+             "attn_bias_seq_kv=%lld,\n",
              attention_bias, (long long)attn_bias_batch,
-             (long long)attn_bias_num_heads);
+             (long long)attn_bias_num_heads, (long long)attn_bias_seq_q,
+             (long long)attn_bias_seq_kv);
   MOCK_PRINT("[MOCK]   batch=%lld, seq_q=%lld, seq_kv=%lld, "
              "past_buf_seq=%lld, head_dim=%lld, elem_size=%lld)\n",
              (long long)batch_size, (long long)seq_len_q, (long long)seq_len_kv,

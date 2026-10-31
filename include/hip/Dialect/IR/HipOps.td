@@ -4124,7 +4124,11 @@ def Hip_GqaOp : Hip_DpsOp_AutoReify<"gqa", [AttrSizedOperandSegments, OpStateOpI
     // Whisper / bidirectional-attention enabler: when true, the causal mask
     // step in the runtime is skipped. Default false preserves all existing
     // Llama / gpt-oss callers' behaviour.
-    DefaultValuedAttr<BoolAttr, "false">:$no_causal
+    DefaultValuedAttr<BoolAttr, "false">:$no_causal,
+
+    // Allows masks synthesized for ONNX Attention to provide the live KV
+    // length when the cache has a larger physical capacity.
+    DefaultValuedAttr<BoolAttr, "false">:$derive_seqlens_from_attention_bias
   );
 
   let assemblyFormat = [{

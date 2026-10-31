@@ -9,9 +9,10 @@
 //   - is_causal=1 WITH an external attn_mask -> no_causal=false AND the mask
 //     threaded as attention_bias (runtime adds the mask, then the built-in
 //     causal triangle applies on top -- both, mirroring the ONNX reference)
-//   - present KV seq extent = past_seq + current_seq (concat semantics),
-//     and seqlens_k = total_seq - 1 (ORT convention total_seq = seqlens_k + 1)
-//   - present_key/value DPS inits sized to the past+current total
+//   - cached attention uses the full mask key extent as the logical KV length;
+//     no-past attention uses K's sequence extent
+//   - present KV capacity preserves a preallocated past buffer while growing
+//     normally when the logical length is larger
 //
 //   - a sliding window baked into the additive mask recovered from the mask's
 //     producing subgraph and stamped as local_window_size, since
@@ -64,9 +65,8 @@ module {
         -> (tensor<1x1x2048xf16>, tensor<1x8x128x128xf16>,
             tensor<1x8x128x128xf16>)
 
-    // present KV seq = past_seq (127) + current_seq (1); seqlens_k = total - 1.
-    // CHECK: tensor.dim %{{.*}}, %c2
-    // CHECK: arith.addi
+    // The mask key extent is the logical total; capacity remains 128.
+    // CHECK: tensor.dim %{{.*}}, %c3
     // CHECK: arith.subi
     // CHECK: tensor.from_elements %{{.*}} : tensor<1xi32>
     // CHECK: tensor.empty() : tensor<1x1x2048xf16>
@@ -75,7 +75,7 @@ module {
     // Mask is threaded as the final hip.gqa input (attention_bias).
     // CHECK-SAME: ins({{.*}}tensor<1x1x1x128xf16>) outs
     // Attributes print alphabetically; no_causal = true is present (is_causal=0).
-    // CHECK-SAME: {kv_num_heads = 8 : i64, no_causal = true, num_heads = 16 : i64
+    // CHECK-SAME: {derive_seqlens_from_attention_bias = true, kv_num_heads = 8 : i64, no_causal = true, num_heads = 16 : i64
     // CHECK-NOT: onnx.Attention
 
     return %out#0, %out#1, %out#2
@@ -86,10 +86,9 @@ module {
 
 // -----
 
-// Dynamic-shape prefill with an EMPTY past: present seq is computed at
-// runtime as past_seq + current_seq (NOT dim(past_key, 2) alone), so the
-// present buffer is sized to the real KV length even when past_seq == 0.
-// Mirrors the Gemma-4 decoder self-attn (16 query heads, 8 KV heads, d=256).
+// Dynamic-shape prefill or shared-cache execution. The mask carries the
+// logical KV length while past_key may hold either the valid prefix or a larger
+// preallocated capacity.
 module {
   func.func @main_graph(
       %query: tensor<?x?x4096xf16>,
@@ -117,15 +116,16 @@ module {
         -> (tensor<?x?x4096xf16>, tensor<?x8x?x256xf16>,
             tensor<?x8x?x256xf16>)
 
-    // present seq extent = past + current, materialised as arith.addi and fed
-    // into the present tensor.empty (dynamic seq dim), NOT dim(past_key, 2).
-    // CHECK: %[[CUR:.*]] = tensor.dim %{{.*}}, %c1
+    // seqlens_k uses the logical mask extent. Present capacity is the larger
+    // of that extent and the past buffer extent.
     // CHECK: %[[PAST:.*]] = tensor.dim %{{.*}}, %c2
-    // CHECK: %[[TOT:.*]] = arith.addi %[[PAST]], %[[CUR]]
-    // CHECK: arith.subi %[[TOT]], %{{.*}}
+    // CHECK: %[[LOGICAL:.*]] = tensor.dim %{{.*}}, %c3
+    // CHECK: %[[CAPACITY:.*]] = arith.maxsi %[[PAST]], %[[LOGICAL]]
+    // CHECK: arith.subi %[[LOGICAL]], %{{.*}}
     // CHECK: tensor.from_elements %{{.*}} : tensor<1xi32>
-    // CHECK: tensor.empty(%{{.*}}, %[[TOT]]) : tensor<?x8x?x256xf16>
+    // CHECK: tensor.empty(%{{.*}}, %[[CAPACITY]]) : tensor<?x8x?x256xf16>
     // CHECK: hip.gqa(%[[CTX2]])
+    // CHECK-SAME: derive_seqlens_from_attention_bias = true
     // CHECK-SAME: no_causal = true
     // CHECK-NOT: onnx.Attention
 
@@ -170,19 +170,19 @@ module {
         -> (tensor<?x?x2048xf16>, tensor<?x1x?x256xf16>,
             tensor<?x1x?x256xf16>)
 
-    // present seq extent = past + current; mask threaded as attention_bias (8
-    // hip.gqa ins: q, k, v, past_k, past_v, seqlens_k, total_seq, mask).
-    // CHECK: %[[CURG:.*]] = tensor.dim %{{.*}}, %c1
+    // The mask key extent drives the logical length while present capacity
+    // preserves a larger shared past buffer.
     // CHECK: %[[PASTG:.*]] = tensor.dim %{{.*}}, %c2
-    // CHECK: %[[TOTG:.*]] = arith.addi %[[PASTG]], %[[CURG]]
+    // CHECK: %[[LOGICALG:.*]] = tensor.dim %{{.*}}, %c3
+    // CHECK: %[[CAPACITYG:.*]] = arith.maxsi %[[PASTG]], %[[LOGICALG]]
     // CHECK: tensor.from_elements %{{.*}} : tensor<1xi32>
-    // CHECK: tensor.empty(%{{.*}}, %[[TOTG]]) : tensor<?x1x?x256xf16>
+    // CHECK: tensor.empty(%{{.*}}, %[[CAPACITYG]]) : tensor<?x1x?x256xf16>
     // CHECK: hip.gqa(%[[CTXG]])
     // Mask is threaded as the final hip.gqa input (attention_bias).
     // CHECK-SAME: ins({{.*}}tensor<?x1x?x?xf16>) outs
     // Attributes print alphabetically; no_causal defaults to false and is
-    // omitted, so the dict goes straight from kv_num_heads to num_heads.
-    // CHECK-SAME: {kv_num_heads = 1 : i64, num_heads = 8 : i64
+    // omitted.
+    // CHECK-SAME: {derive_seqlens_from_attention_bias = true, kv_num_heads = 1 : i64, num_heads = 8 : i64
     // CHECK-NOT: onnx.Attention
 
     return %out#0, %out#1, %out#2
@@ -292,7 +292,7 @@ module {
     // CHECK: tensor.collapse_shape
     // CHECK: hip.gqa(%[[CTX5]])
     // Attributes print alphabetically; no_causal = true is present (is_causal=0).
-    // CHECK-SAME: {kv_num_heads = 8 : i64, no_causal = true, num_heads = 16 : i64
+    // CHECK-SAME: {derive_seqlens_from_attention_bias = true, kv_num_heads = 8 : i64, no_causal = true, num_heads = 16 : i64
     // Output BSHD -> BNSH: expand to rank-4 then transpose(perm=[0,2,1,3]).
     // CHECK: tensor.expand_shape
     // CHECK: hip.transpose(%[[CTX5]])
@@ -311,9 +311,10 @@ module {
 // history length while the query is a single decode token. is_causal=0 with the
 // external mask carrying causality.
 //
-// The KV extent must come from K (dim 1), not the query: sizing present from the
-// query collapsed it to 1 token, so the runtime saw total_seq (the full history,
-// from seqlens_k) exceed present_seq and rejected the call outright
+// The KV extent must come from the mask key dimension, not the query: sizing
+// present from the query collapsed it to 1 token, so the runtime saw total_seq
+// (the full history, from seqlens_k) exceed present_seq and rejected the call
+// outright
 // ("invalid seqlens_k[0]+1=N ... present_seq=1"), zeroing the layer's output.
 module {
   func.func @main_graph(
@@ -336,21 +337,88 @@ module {
            tensor<1x1x1x?xf16>)
         -> tensor<1x1x2048xf16>
 
-    // The synthesized present buffers are sized from K's seq extent (dynamic),
-    // NOT the query's static 1. past is the 0 constant (no past operand), so
-    // the total is 0 + dim(K, 1) and seqlens_k = total - 1.
-    // CHECK: %[[KVLEN:.*]] = tensor.dim %{{.*}}, %c1 : tensor<1x?x256xf16>
-    // CHECK: %[[TOT:.*]] = arith.addi %c0, %[[KVLEN]]
+    // Without a past cache, K carries the full logical history.
+    // CHECK: %[[TOT:.*]] = tensor.dim %{{.*}}, %c1 : tensor<1x?x256xf16>
     // CHECK: arith.subi %[[TOT]], %c1
     // CHECK: tensor.from_elements %{{.*}} : tensor<1xi32>
     // CHECK: tensor.empty(%[[TOT]]) : tensor<1x1x?x256xf16>
     // CHECK: hip.gqa(%[[CTX6]])
     // Mask is threaded as attention_bias; no past_key/past_value operands.
     // CHECK-SAME: ins({{.*}}tensor<1x1x1x?xf16>) outs
-    // CHECK-SAME: {kv_num_heads = 1 : i64, no_causal = true, num_heads = 8 : i64
+    // CHECK-SAME: {derive_seqlens_from_attention_bias = true, kv_num_heads = 1 : i64, no_causal = true, num_heads = 8 : i64
     // CHECK-NOT: onnx.Attention
 
     return %y : tensor<1x1x2048xf16>
+  }
+}
+
+// -----
+
+// A key-broadcast mask cannot provide the logical KV length for a cached
+// attention, and the runtime does not broadcast the key extent.
+module {
+  func.func @main_graph(
+      %query: tensor<1x1x2048xf16>,
+      %key: tensor<1x1x1024xf16>,
+      %value: tensor<1x1x1024xf16>,
+      %attn_mask: tensor<1x1x1x1xf16>,
+      %past_key: tensor<1x8x127x128xf16>,
+      %past_value: tensor<1x8x127x128xf16>)
+      -> (tensor<1x1x2048xf16>, tensor<1x8x128x128xf16>,
+          tensor<1x8x128x128xf16>) {
+    %out:3 = "onnx.Attention"(%query, %key, %value, %attn_mask, %past_key,
+                              %past_value)
+        {q_num_heads = 16 : si64,
+         kv_num_heads = 8 : si64,
+         is_causal = 1 : si64}
+        : (tensor<1x1x2048xf16>, tensor<1x1x1024xf16>,
+           tensor<1x1x1024xf16>, tensor<1x1x1x1xf16>,
+           tensor<1x8x127x128xf16>, tensor<1x8x127x128xf16>)
+        -> (tensor<1x1x2048xf16>, tensor<1x8x128x128xf16>,
+            tensor<1x8x128x128xf16>)
+
+    // CHECK-LABEL: func.func @main_graph
+    // CHECK-NOT: hip.gqa
+    // CHECK: onnx.Attention
+
+    return %out#0, %out#1, %out#2
+        : tensor<1x1x2048xf16>, tensor<1x8x128x128xf16>,
+          tensor<1x8x128x128xf16>
+  }
+}
+
+// -----
+
+// Only rank-4 additive masks have an unambiguous batch/head layout in the
+// runtime contract.
+module {
+  func.func @main_graph(
+      %query: tensor<1x1x2048xf16>,
+      %key: tensor<1x1x1024xf16>,
+      %value: tensor<1x1x1024xf16>,
+      %attn_mask: tensor<1x1x128xf16>,
+      %past_key: tensor<1x8x127x128xf16>,
+      %past_value: tensor<1x8x127x128xf16>)
+      -> (tensor<1x1x2048xf16>, tensor<1x8x128x128xf16>,
+          tensor<1x8x128x128xf16>) {
+    %out:3 = "onnx.Attention"(%query, %key, %value, %attn_mask, %past_key,
+                              %past_value)
+        {q_num_heads = 16 : si64,
+         kv_num_heads = 8 : si64,
+         is_causal = 1 : si64}
+        : (tensor<1x1x2048xf16>, tensor<1x1x1024xf16>,
+           tensor<1x1x1024xf16>, tensor<1x1x128xf16>,
+           tensor<1x8x127x128xf16>, tensor<1x8x127x128xf16>)
+        -> (tensor<1x1x2048xf16>, tensor<1x8x128x128xf16>,
+            tensor<1x8x128x128xf16>)
+
+    // CHECK-LABEL: func.func @main_graph
+    // CHECK-NOT: hip.gqa
+    // CHECK: onnx.Attention
+
+    return %out#0, %out#1, %out#2
+        : tensor<1x1x2048xf16>, tensor<1x8x128x128xf16>,
+          tensor<1x8x128x128xf16>
   }
 }
 
@@ -491,7 +559,7 @@ module {
     // CHECK: hip.gqa(%[[CTXW]])
     // Attributes print alphabetically, so the recovered window lands between
     // kv_num_heads and no_causal.
-    // CHECK-SAME: {kv_num_heads = 8 : i64, local_window_size = 1024 : i64, no_causal = true, num_heads = 16 : i64
+    // CHECK-SAME: {derive_seqlens_from_attention_bias = true, kv_num_heads = 8 : i64, local_window_size = 1024 : i64, no_causal = true, num_heads = 16 : i64
     // CHECK-NOT: onnx.Attention
 
     return %out#0, %out#1, %out#2
@@ -569,7 +637,7 @@ module {
     // No local_window_size: the dict goes straight from kv_num_heads to
     // no_causal, so the attribute is absent and the -1 default stands.
     // CHECK: hip.gqa(%[[CTXG2]])
-    // CHECK-SAME: {kv_num_heads = 2 : i64, no_causal = true, num_heads = 16 : i64
+    // CHECK-SAME: {derive_seqlens_from_attention_bias = true, kv_num_heads = 2 : i64, no_causal = true, num_heads = 16 : i64
     // CHECK-NOT: onnx.Attention
 
     return %out#0, %out#1, %out#2
@@ -662,7 +730,7 @@ module {
             tensor<?x8x?x256xf16>)
 
     // CHECK: hip.gqa(%[[CTXU]])
-    // CHECK-SAME: {kv_num_heads = 8 : i64, no_causal = true, num_heads = 16 : i64
+    // CHECK-SAME: {derive_seqlens_from_attention_bias = true, kv_num_heads = 8 : i64, no_causal = true, num_heads = 16 : i64
     // CHECK-NOT: onnx.Attention
 
     return %out#0, %out#1, %out#2
@@ -775,10 +843,10 @@ module {
         -> (tensor<?x?x4096xf16>, tensor<?x8x?x256xf16>,
             tensor<?x8x?x256xf16>)
 
-    // No local_window_size: the dict goes straight from kv_num_heads to
-    // no_causal.
+    // No local_window_size: the dict goes from the derived-length flag to
+    // kv_num_heads and no_causal.
     // CHECK: hip.gqa(%[[CTXNP]])
-    // CHECK-SAME: {kv_num_heads = 8 : i64, no_causal = true, num_heads = 16 : i64
+    // CHECK-SAME: {derive_seqlens_from_attention_bias = true, kv_num_heads = 8 : i64, no_causal = true, num_heads = 16 : i64
     // CHECK-NOT: onnx.Attention
 
     return %out#0, %out#1, %out#2
@@ -871,7 +939,7 @@ module {
             tensor<?x8x?x256xf16>)
 
     // CHECK: hip.gqa(%[[CTXNS]])
-    // CHECK-SAME: {kv_num_heads = 8 : i64, no_causal = true, num_heads = 16 : i64
+    // CHECK-SAME: {derive_seqlens_from_attention_bias = true, kv_num_heads = 8 : i64, no_causal = true, num_heads = 16 : i64
     // CHECK-NOT: onnx.Attention
 
     return %out#0, %out#1, %out#2
@@ -966,7 +1034,7 @@ module {
             tensor<?x8x?x256xf16>)
 
     // CHECK: hip.gqa(%[[CTXTS]])
-    // CHECK-SAME: {kv_num_heads = 8 : i64, no_causal = true, num_heads = 16 : i64
+    // CHECK-SAME: {derive_seqlens_from_attention_bias = true, kv_num_heads = 8 : i64, no_causal = true, num_heads = 16 : i64
     // CHECK-NOT: onnx.Attention
 
     return %out#0, %out#1, %out#2
