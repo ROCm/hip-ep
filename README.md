@@ -10,7 +10,25 @@ The provider integrates with ONNX Runtime through the MorphiZen pass framework. 
 
 See the [HIP EP website](https://rocm.github.io/hip-ep/) for documentation and benchmarks.
 
-## Highlights
+## What's new — October 2026
+- **Faster** — 1.85× prefill and 1.13× decode at 16K context vs v0.3, averaged across the 15 models we track.
+- **Speculative decoding** — EAGLE4, DFLASH2, and MTP, delivering up to 2.3× the decode TPS on Qwen3.8-27B.
+- **Broad model support**
+  - **New models:** Qwen3.8-Flash-Next, Qwen3.8-27B, Qwen3.5-122B-A10B, Nemotron-3-Super-120B, Mistral-Small-4-119B, Laguna-S-2.1, Gemma 4.
+  - Agile PyTorch-to-OGA flow brings up a new model in under a day.
+  - Released models are listed in [models.json](docs/models.json).
+
+| New model (Strix Halo) | Input (tokens) | TTFT (s) | Decode TPS |
+|---|---|--:|--:|
+| Qwen3.8-Flash-Next | 16K text + 1.8K image | 37.60 | 19.93 |
+| Qwen3.5-122B-A10B | 16K text + 1.8K image | 44.55 | 21.05 |
+| Nemotron-3-Super-120B-A12B | 16K text | 82.39 | 20.44 |
+| Mistral-Small-4-119B-2603 | 16K text + 2.4K image | 27.47 | 11.67 |
+| Laguna-S-2.1 (118B) | 16K text | 40.36 | 9.51 |
+| Gemma 4 26B-A4B | 16K text + 0.25K image | 16.76 | 35.85 |
+| Qwen3.8-27B | 16K text + 1.8K image | 42.24 | 13.17 |
+
+## Key features
 
 - **MLIR compiler pipeline** — lowers ONNX graphs to HIP and LLVM IR.
 - **ROCm execution backends** — dispatches to hipBLASLt and custom HIP kernels.

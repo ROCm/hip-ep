@@ -453,6 +453,7 @@ bool CompilerDriver::runMLIRPasses(
     if (mlir::hip::rocMlirAutotuneFromEnv(autotuneSpace)) {
       mlir::hip::AutotuneOptions autotuneOpts;
       autotuneOpts.space = autotuneSpace;
+      mlir::hip::rocMlirAutotuneBenchmarkFromEnv(autotuneOpts.benchmark);
       autotuneOpts.log = embedOpts.log;
       autotuneOpts.logPrefix = "[CompilerDriver/rocmlir-autotune]";
       autotuner.emplace(embedOpts.arch, autotuneOpts);
