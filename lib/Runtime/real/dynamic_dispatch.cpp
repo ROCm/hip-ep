@@ -9,6 +9,7 @@
 #include "../hipdnn_ep_runtime.h"
 #include "../op_state.h"
 #include "../runtime_state_internal.h"
+#include "hip/dynamic_dispatch_support.h"
 
 #include <algorithm>
 #include <cstdarg>
@@ -41,25 +42,7 @@ constexpr const char *kDesignParam = "8x4";
 constexpr const char *kGemmModelName = "8x4_PSMU_ST1_v3.2";
 constexpr const char *kConvModelName = "8x4PSP1";
 
-// combined_gemm only runs exact {Bin, B, M, K, N} shapes. With Bin == 1 and
-// M == 1 the [B, 1, N] output is byte-identical to a 2-D [1, B * N] result, so
-// a 2-D GEMM [1, K] x [K, B * N] maps onto these kernels.
-struct DDGemmShape {
-  int bin, b, m, k, n;
-};
-constexpr DDGemmShape kGemmShapes[] = {
-    {1, 3, 1, 1024, 64},
-    {1, 6, 1, 1024, 64},
-};
-
-const DDGemmShape *find_gemm_shape(int64_t M, int64_t N, int64_t K) {
-  for (const DDGemmShape &s : kGemmShapes) {
-    if (M == s.m && K == s.k && N == int64_t(s.b) * s.n) {
-      return &s;
-    }
-  }
-  return nullptr;
-}
+using hip_dd::GemmShape;
 
 dd_tensor_t make_dd_tensor(const void *data,
                            std::initializer_list<size_t> shape,
@@ -72,8 +55,6 @@ dd_tensor_t make_dd_tensor(const void *data,
   t.dtype = dtype;
   return t;
 }
-
-size_t round_up8(int64_t n) { return (size_t(n) + 7) / 8 * 8; }
 
 bool skip_op_state_cache() {
   const char *env = std::getenv("HIPEP_DD_DEBUG_NO_GET_OP_STATE");
@@ -148,7 +129,7 @@ bool to_device(RuntimeState *state, void *dst, const void *src, size_t bytes,
 
 struct DDGemmState : OpStateT<DDGemmState> {
   dd_op_handle_t handle = nullptr;
-  DDGemmShape shape{};
+  GemmShape shape{};
   std::vector<uint8_t> weights;
   std::vector<int64_t> qdq;
   std::vector<int32_t> qdq_params;
@@ -201,7 +182,7 @@ static void store_dd_state(RuntimeState *state, int32_t slot,
 //===----------------------------------------------------------------------===//
 
 static std::unique_ptr<DDGemmState> create_gemm_state(RuntimeState *state,
-                                                      const DDGemmShape &s,
+                                                      const GemmShape &s,
                                                       const void *weights_dev) {
   dd_combined_gemm_config_t cfg{};
   cfg.a_dtype = "uint16";
@@ -270,12 +251,12 @@ int wrap_dd_matmul(RuntimeState *state, int32_t op_state_slot,
     dd_log("[DD] wrap_dd_matmul: transA/transB not supported\n");
     return HIPDNN_EP_ERR_INVALID_DIMENSION;
   }
-  const DDGemmShape *shape = find_gemm_shape(M, N, K);
+  const GemmShape *shape = hip_dd::findGemmShape(M, N, K);
   if (!shape) {
     dd_log("[DD] wrap_dd_matmul: no combined_gemm kernel for M=%lld N=%lld "
            "K=%lld; supported (M, K, N):",
            (long long)M, (long long)N, (long long)K);
-    for (const DDGemmShape &s : kGemmShapes) {
+    for (const GemmShape &s : hip_dd::kGemmShapes) {
       dd_log(" (%d, %d, %d)", s.m, s.k, s.b * s.n);
     }
     dd_log("\n");
@@ -304,7 +285,7 @@ int wrap_dd_matmul(RuntimeState *state, int32_t op_state_slot,
     }
   }
 
-  const DDGemmShape &s = gemm->shape;
+  const GemmShape &s = gemm->shape;
   const size_t in_bytes = gemm->in_host.size() * sizeof(uint16_t);
   const size_t out_bytes = gemm->out_host.size() * sizeof(uint16_t);
   if (!to_host(state, gemm->in_host.data(), input_a, in_bytes,
@@ -349,27 +330,16 @@ int wrap_dd_conv2d(RuntimeState *state, int32_t op_state_slot,
            (long long)data_type);
     return HIPDNN_EP_ERR_INVALID_DIMENSION;
   }
-  if (n != 1 || dilation_h != 1 || dilation_w != 1 || group != 1) {
-    dd_log("[DD] wrap_dd_conv2d: unsupported n=%lld dilation=(%lld, %lld) "
-           "group=%lld\n",
-           (long long)n, (long long)dilation_h, (long long)dilation_w,
-           (long long)group);
+  const bool has_padding = pad_top || pad_left || pad_bottom || pad_right;
+  if (!hip_dd::isConvSupported(n, c, k, dilation_h, dilation_w, group,
+                               bias != nullptr, has_padding)) {
+    dd_log("[DD] wrap_dd_conv2d: unsupported n=%lld c=%lld k=%lld "
+           "dilation=(%lld, %lld) group=%lld bias=%d padding=%d\n",
+           (long long)n, (long long)c, (long long)k, (long long)dilation_h,
+           (long long)dilation_w, (long long)group, bias != nullptr,
+           has_padding);
     return HIPDNN_EP_ERR_INVALID_DIMENSION;
   }
-  // iconv reads/writes activations padded to a multiple of 8 channels; the
-  // EP's buffers are unpadded, so other channel counts would overrun them.
-  if (round_up8(c) != size_t(c) || round_up8(k) != size_t(k)) {
-    dd_log("[DD] wrap_dd_conv2d: channels must be multiples of 8 "
-           "(c=%lld k=%lld)\n",
-           (long long)c, (long long)k);
-    return HIPDNN_EP_ERR_INVALID_DIMENSION;
-  }
-  // TODO: bias and padding are not expressible in dd_iconv_config_t.
-  (void)bias;
-  (void)pad_top;
-  (void)pad_left;
-  (void)pad_bottom;
-  (void)pad_right;
 
   const bool cache = op_state_slot >= 0 && !skip_op_state_cache();
   DDConvState *conv =

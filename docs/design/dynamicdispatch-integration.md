@@ -1,3 +1,7 @@
+<!--
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+Licensed under the MIT License.
+-->
 # DynamicDispatch Integration Guide
 
 This document covers known issues, workarounds, and requirements for integrating the DynamicDispatch library (XRT/NPU backend) into hip-ep.
@@ -209,8 +213,8 @@ template class ryzenai::dynamic_dispatch::iconv<uint16_t, uint8_t, uint16_t>;
 
 **Symptoms**:
 ```
-dyn_dispatch_core.lib(utils.obj) : error LNK2019: unresolved external symbol 
-__std_find_first_of_trivial_pos_1 referenced in function "unsigned __int64 __cdecl 
+dyn_dispatch_core.lib(utils.obj) : error LNK2019: unresolved external symbol
+__std_find_first_of_trivial_pos_1 referenced in function "unsigned __int64 __cdecl
 std::_Find_first_of_pos_vectorized<char,char>(...)"
 ```
 
@@ -310,7 +314,7 @@ The DLL should have been built with `/MD` and will load `msvcrt.dll` at runtime 
 
 **Symptoms**:
 ```
-dyn_dispatch_core.lib(combined_gemm.obj) : error LNK2038: mismatch detected for 'RuntimeLibrary': 
+dyn_dispatch_core.lib(combined_gemm.obj) : error LNK2038: mismatch detected for 'RuntimeLibrary':
 value 'MD_DynamicRelease' doesn't match value 'MT_StaticRelease' in main.obj
 ```
 
@@ -558,6 +562,26 @@ Missing transitive dependencies in a static build will cause unresolved external
 ### At Runtime
 
 With `HIPEP_USE_DYNAMIC_DISPATCH=1`, DD operations should dispatch to NPU. Check logs for DD initialization messages.
+
+## Which Operations Run on the NPU
+
+DD kernels exist only for a few exact shapes, listed in
+`include/hip/dynamic_dispatch_support.h`. That header is shared by the
+HipToLLVM lowering and the runtime wrappers. With `HIPEP_USE_DYNAMIC_DISPATCH=1`,
+the DD lowering patterns are registered alongside the GPU patterns with a
+higher benefit. They match only operations DD can run; every other operation in
+the same graph lowers to the GPU as usual.
+
+| Operation | Runs on the NPU when |
+|---|---|
+| `hip.matmul`, `hip.gemm` | f16, rank 2, static shape, no transpose, no bias, alpha 1, and `[1, 1024] x [1024, N]` with N in {192, 384} (combined_gemm `{1, B, 1, 1024, 64}`, B in {3, 6}) |
+| `hip.conv` | f16, static shape, N = 1, input and output channels multiples of 8, no dilation, group 1, no bias, no padding |
+
+iconv's supported spatial shapes are only known to DD at run time, so a Conv
+that passes these checks can still fail when its DD op is created.
+
+The QDQ tensors are zero-filled and the f16 weights are reinterpreted as uint8,
+so NPU results are not numerically meaningful yet.
 
 ## Debugging Integration Issues
 

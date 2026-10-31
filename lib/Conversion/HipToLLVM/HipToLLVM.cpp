@@ -238,24 +238,14 @@ void ConvertHipToLLVMPass::runOnOperation() {
   // HIP dialect-specific lowerings
   populateMemoryLoweringPatterns(typeConverter, patterns);
 
-  // Backend selection: DynamicDispatch (NPU/IPU) vs GPU (MIOpen/hipBLASLt)
+  // DynamicDispatch (NPU) patterns take precedence over the GPU patterns for
+  // the shapes DD supports; the GPU patterns lower everything else.
   if (useDynamicDispatch) {
-    COMPILER_DEBUG_LOG("[HipToLLVM] Selecting DynamicDispatch Conv lowering patterns\n");
-
-    // NPU/IPU path via DynamicDispatch (XRT)
     populateDynamicDispatchConvLoweringPatterns(typeConverter, patterns);
-  } else {
-    COMPILER_DEBUG_LOG("[HipToLLVM] Selecting GPU (MIOpen) Conv lowering patterns\n");
-    // GPU path via MIOpen
-    populateConvLoweringPatterns(typeConverter, patterns);
+    populateDynamicDispatchGemmLoweringPatterns(typeConverter, patterns);
   }
+  populateConvLoweringPatterns(typeConverter, patterns);
   populateConvTransposeLoweringPatterns(typeConverter, patterns);
-
-  // Backend selection for Matmul: DynamicDispatch (NPU/IPU) vs GPU (hipBLASLt)
-  // Note: This is separate from GEMM lowering. Matmul uses hipBLASLt on GPU,
-  // while GEMM can use either hipBLASLt or custom kernels.
-  // DynamicDispatch matmul patterns are added later with GEMM patterns (see line ~290)
-  // and handle only rank-2 operations; GPU patterns are needed as fallback for batched matmuls.
   populateMatmulLoweringPatterns(typeConverter, patterns);
 
   populateElementwiseLoweringPatterns(typeConverter, patterns);
@@ -281,17 +271,7 @@ void ConvertHipToLLVMPass::runOnOperation() {
   populateQMoELoweringPatterns(typeConverter, patterns);
   populateGatherBlockQuantizedLoweringPatterns(typeConverter, patterns);
 
-  // Backend selection for GEMM: DynamicDispatch (NPU/IPU) vs GPU (hipBLASLt)
-  if (useDynamicDispatch) {
-    COMPILER_DEBUG_LOG("[HipToLLVM] Selecting DynamicDispatch GEMM lowering patterns\n");
-    // NPU/IPU path via DynamicDispatch (XRT)
-    // Note: This also adds MatmulOpDynamicDispatchLowering
-    populateDynamicDispatchGemmLoweringPatterns(typeConverter, patterns);
-  } else {
-    COMPILER_DEBUG_LOG("[HipToLLVM] Selecting GPU (hipBLASLt) GEMM lowering patterns\n");
-    // GPU path via hipBLASLt
-    populateGemmLoweringPatterns(typeConverter, patterns);
-  }
+  populateGemmLoweringPatterns(typeConverter, patterns);
 
   populateLinearAttentionLoweringPatterns(typeConverter, patterns);
   populateGraphLoweringPatterns(typeConverter, patterns);

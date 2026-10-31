@@ -4,6 +4,7 @@
  */
 
 #include "HipToLLVMUtils.h"
+#include "hip/dynamic_dispatch_support.h"
 
 namespace mlir {
 namespace hip {
@@ -21,7 +22,33 @@ namespace {
 // Pattern:
 //   hip.gemm → wrap_dd_matmul (NPU) instead of wrap_gemm (GPU/hipBLASLt)
 //   hip.conv → wrap_dd_conv2d (NPU) instead of wrap_miopenConvolutionForward
+//
+// DD kernels only exist for a few exact shapes
+// (hip/dynamic_dispatch_support.h). These patterns are registered alongside the
+// GPU patterns with a higher benefit and fail to match any op DD cannot run, so
+// it lowers to the GPU.
 //===----------------------------------------------------------------------===//
+
+constexpr unsigned kDynamicDispatchBenefit = 2;
+
+// Returns the static dims of a memref, or std::nullopt if any is dynamic.
+std::optional<SmallVector<int64_t, 4>> staticShape(MemRefType type) {
+  if (!type.hasStaticShape()) {
+    return std::nullopt;
+  }
+  return SmallVector<int64_t, 4>(type.getShape());
+}
+
+bool isDDGemmSupported(MemRefType aType, MemRefType bType, bool transA,
+                       bool transB) {
+  auto a = staticShape(aType);
+  auto b = staticShape(bType);
+  if (!a || !b || a->size() != 2 || b->size() != 2 ||
+      !aType.getElementType().isF16() || transA || transB) {
+    return false;
+  }
+  return hip_dd::findGemmShape((*a)[0], (*b)[1], (*a)[1]) != nullptr;
+}
 
 // DynamicDispatch runtime function names
 inline constexpr const char *kWrapDDMatMul = "wrap_dd_matmul";
@@ -59,6 +86,14 @@ struct GemmOpDynamicDispatchLowering : public ConvertOpToLLVMPattern<GemmOp> {
       return LLVM::ConstantOp::create(rewriter, loc, i64Type,
                                       rewriter.getI64IntegerAttr(value));
     };
+
+    // combined_gemm has no bias or scaling.
+    if (op.getInputC() || adaptor.getAlpha().convertToDouble() != 1.0 ||
+        !isDDGemmSupported(cast<MemRefType>(op.getInputA().getType()),
+                           cast<MemRefType>(op.getInputB().getType()),
+                           adaptor.getTransA(), adaptor.getTransB())) {
+      return rewriter.notifyMatchFailure(op, "shape not supported by DD");
+    }
 
     // Extract element type and map to HIPDNN_EP_DATATYPE_*
     auto AType = cast<MemRefType>(op.getInputA().getType());
@@ -204,10 +239,22 @@ struct ConvOpDynamicDispatchLowering : public ConvertOpToLLVMPattern<ConvOp> {
     auto weightsType = cast<MemRefType>(op.getWeights().getType());
     auto outputType = cast<MemRefType>(op.getOutput().getType());
 
-    // Verify ranks
-    if (inputType.getRank() != 4 || weightsType.getRank() != 4 ||
-        outputType.getRank() != 4) {
-      return op.emitError("DynamicDispatch Conv requires rank-4 tensors");
+    auto in = staticShape(inputType);
+    auto wt = staticShape(weightsType);
+    if (!in || !wt || in->size() != 4 || wt->size() != 4 ||
+        outputType.getRank() != 4 || !outputType.getElementType().isF16()) {
+      return rewriter.notifyMatchFailure(op, "shape not supported by DD");
+    }
+    auto attrI64 = [](Attribute attr) {
+      return cast<IntegerAttr>(attr).getInt();
+    };
+    bool hasPadding = llvm::any_of(
+        op.getPads(), [&](Attribute pad) { return attrI64(pad) != 0; });
+    if (!hip_dd::isConvSupported((*in)[0], (*in)[1], (*wt)[0],
+                                 attrI64(op.getDilations()[0]),
+                                 attrI64(op.getDilations()[1]), op.getGroup(),
+                                 static_cast<bool>(op.getBias()), hasPadding)) {
+      return rewriter.notifyMatchFailure(op, "conv not supported by DD");
     }
 
     // Extract element type and map to HIPDNN_EP_DATATYPE_*
@@ -326,8 +373,7 @@ struct ConvOpDynamicDispatchLowering : public ConvertOpToLLVMPattern<ConvOp> {
 // Lowers hip.matmul to wrap_dd_matmul (NPU execution via DynamicDispatch)
 // Similar to GemmOp but supports batched N-D x N-D operations
 //
-// For now, we only support rank-2 (non-batched) matmul via DynamicDispatch.
-// Batched operations will fall back to GPU.
+// Only rank-2 matmuls with a DD kernel shape match; others lower to the GPU.
 //===----------------------------------------------------------------------===//
 
 struct MatmulOpDynamicDispatchLowering
@@ -343,10 +389,8 @@ struct MatmulOpDynamicDispatchLowering
     auto AType = cast<MemRefType>(op.getA().getType());
     auto BType = cast<MemRefType>(op.getB().getType());
 
-    // For now, only support rank-2 matmul (no batching)
-    // Batched operations require more complex handling in DynamicDispatch
-    if (AType.getRank() != 2 || BType.getRank() != 2) {
-      return failure(); // Let GPU patterns handle batched matmul
+    if (!isDDGemmSupported(AType, BType, /*transA=*/false, /*transB=*/false)) {
+      return rewriter.notifyMatchFailure(op, "shape not supported by DD");
     }
 
     Type ptrType = getPtrType();
@@ -363,7 +407,8 @@ struct MatmulOpDynamicDispatchLowering
     Type elemType = AType.getElementType();
     int64_t dataType = getHipdnnDataType(elemType);
     if (dataType < 0) {
-      return op.emitError("Unsupported element type for DynamicDispatch Matmul");
+      return op.emitError(
+          "Unsupported element type for DynamicDispatch Matmul");
     }
     Value dataTypeVal = createI64Const(dataType);
 
@@ -416,13 +461,13 @@ struct MatmulOpDynamicDispatchLowering
     }
 
     SmallVector<Value, 16> args = {
-        statePtr,    getOpStateSlotValue(op, rewriter, loc),
-        APtr,        BPtr,
-        nullBias,    outputPtr,
-        M,           N,
-        K,           alpha,
-        beta,        transA,
-        transB,      dataTypeVal};
+        statePtr, getOpStateSlotValue(op, rewriter, loc),
+        APtr,     BPtr,
+        nullBias, outputPtr,
+        M,        N,
+        K,        alpha,
+        beta,     transA,
+        transB,   dataTypeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
@@ -438,13 +483,16 @@ struct MatmulOpDynamicDispatchLowering
 
 void populateDynamicDispatchGemmLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
-  patterns.add<GemmOpDynamicDispatchLowering>(converter);
-  patterns.add<MatmulOpDynamicDispatchLowering>(converter);
+  patterns.add<GemmOpDynamicDispatchLowering>(converter,
+                                              kDynamicDispatchBenefit);
+  patterns.add<MatmulOpDynamicDispatchLowering>(converter,
+                                                kDynamicDispatchBenefit);
 }
 
 void populateDynamicDispatchConvLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
-  patterns.add<ConvOpDynamicDispatchLowering>(converter);
+  patterns.add<ConvOpDynamicDispatchLowering>(converter,
+                                              kDynamicDispatchBenefit);
 }
 
 } // namespace hip

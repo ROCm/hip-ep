@@ -3,123 +3,140 @@
 
 // ============================================================================
 // TEST PURPOSE:
-// Verify HIP gemm operation is correctly lowered to DynamicDispatch backend
-// when --use-dynamic-dispatch option is enabled.
+// With --use-dynamic-dispatch, hip.gemm / hip.matmul lower to wrap_dd_matmul
+// (NPU) only for the shapes DynamicDispatch has kernels for
+// (include/hip/dynamic_dispatch_support.h): f16, rank 2, no transpose, no
+// bias, alpha 1, and [M, K] x [K, N] in {[1,1024]x[1024,192],
+// [1,1024]x[1024,384]}. Everything else lowers to the GPU path.
 //
-// This test validates:
-// - hip.gemm → llvm.call @wrap_dd_matmul (NPU/IPU backend)
-// - Function signature matches DynamicDispatch C ABI
-// - 14-param signature: state, op_state_slot, input_a, input_b, bias, output,
-//                        M, N, K, alpha, beta, transA, transB, data_type
-// - Optional bias (input C): present → pointer, absent → null pointer
-// - Data type passed as i64 constant
-// - alpha/beta passed as f64 (not f32 like GPU backend)
-//
-// Expected: wrap_dd_matmul(state, op_state_slot, A_ptr, B_ptr, bias_ptr, output_ptr,
-//             M, N, K, alpha, beta, transA, transB, data_type)
+// wrap_dd_matmul signature: state, op_state_slot, input_a, input_b, bias,
+// output, M, N, K, alpha, beta, transA, transB, data_type.
 // ============================================================================
 
 // RUN: hip-mlir-opt %s --convert-hip-to-llvm="use-dynamic-dispatch=true" | FileCheck %s
 
 module {
-  // Test 1: f16 GEMM with bias, default attributes
-  // A=[128,256], B=[256,512], C=[512] (bias), Y=[128,512]
-  // M=128, K=256, N=512, typeCode=0 (f16), alpha=1.0, beta=0.0
-  func.func @dd_gemm_f16_with_bias(
-      %ctx: !hip.context,
-      %a: memref<128x256xf16, 1>,
-      %b: memref<256x512xf16, 1>,
-      %c: memref<512xf16, 1>,
-      %y: memref<128x512xf16, 1>) {
-    // CHECK-DAG: llvm.func @wrap_dd_matmul(!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f64, f64, i64, i64, i64) -> i32
-    // CHECK-LABEL: llvm.func @dd_gemm_f16_with_bias
-    // CHECK: llvm.call @wrap_dd_matmul({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f64, f64, i64, i64, i64) -> i32
+  // CHECK-DAG: llvm.func @wrap_dd_matmul(!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f64, f64, i64, i64, i64) -> i32
 
-    hip.gemm(%ctx) ins(%a, %b, %c : memref<128x256xf16, 1>, memref<256x512xf16, 1>, memref<512xf16, 1>)
+  // CHECK-LABEL: llvm.func @dd_gemm_n384
+  // CHECK: llvm.call @wrap_dd_matmul({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f64, f64, i64, i64, i64) -> i32
+  func.func @dd_gemm_n384(%ctx: !hip.context,
+                          %a: memref<1x1024xf16, 1>,
+                          %b: memref<1024x384xf16, 1>,
+                          %y: memref<1x384xf16, 1>) {
+    hip.gemm(%ctx) ins(%a, %b : memref<1x1024xf16, 1>, memref<1024x384xf16, 1>)
+                   outs(%y : memref<1x384xf16, 1>)
+    return
+  }
+
+  // CHECK-LABEL: llvm.func @dd_gemm_n192
+  // CHECK: llvm.call @wrap_dd_matmul(
+  func.func @dd_gemm_n192(%ctx: !hip.context,
+                          %a: memref<1x1024xf16, 1>,
+                          %b: memref<1024x192xf16, 1>,
+                          %y: memref<1x192xf16, 1>) {
+    hip.gemm(%ctx) ins(%a, %b : memref<1x1024xf16, 1>, memref<1024x192xf16, 1>)
+                   outs(%y : memref<1x192xf16, 1>)
+    return
+  }
+
+  // CHECK-LABEL: llvm.func @dd_matmul_n384
+  // CHECK: llvm.call @wrap_dd_matmul(
+  func.func @dd_matmul_n384(%ctx: !hip.context,
+                            %a: memref<1x1024xf16, 1>,
+                            %b: memref<1024x384xf16, 1>,
+                            %y: memref<1x384xf16, 1>) {
+    hip.matmul(%ctx) ins(%a, %b : memref<1x1024xf16, 1>, memref<1024x384xf16, 1>)
+                     outs(%y : memref<1x384xf16, 1>)
+    return
+  }
+
+  // ----- GPU fallbacks -------------------------------------------------------
+
+  // CHECK-LABEL: llvm.func @gpu_gemm_unsupported_shape
+  // CHECK-NOT: wrap_dd_matmul
+  // CHECK: llvm.call @wrap_gemm
+  func.func @gpu_gemm_unsupported_shape(%ctx: !hip.context,
+                                        %a: memref<128x256xf16, 1>,
+                                        %b: memref<256x512xf16, 1>,
+                                        %y: memref<128x512xf16, 1>) {
+    hip.gemm(%ctx) ins(%a, %b : memref<128x256xf16, 1>, memref<256x512xf16, 1>)
                    outs(%y : memref<128x512xf16, 1>)
-
     return
   }
 
-  // Test 2: f32 GEMM without bias
-  // A=[64,128], B=[128,256], Y=[64,256]
-  // M=64, K=128, N=256, typeCode=1 (f32), no bias (null pointer)
-  func.func @dd_gemm_f32_no_bias(
-      %ctx: !hip.context,
-      %a: memref<64x128xf32, 1>,
-      %b: memref<128x256xf32, 1>,
-      %y: memref<64x256xf32, 1>) {
-    // CHECK-LABEL: llvm.func @dd_gemm_f32_no_bias
-
-    hip.gemm(%ctx) ins(%a, %b : memref<64x128xf32, 1>, memref<128x256xf32, 1>)
-                   outs(%y : memref<64x256xf32, 1>)
-
-    // CHECK: llvm.call @wrap_dd_matmul({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f64, f64, i64, i64, i64) -> i32
-
+  // CHECK-LABEL: llvm.func @gpu_gemm_with_bias
+  // CHECK-NOT: wrap_dd_matmul
+  // CHECK: llvm.call @wrap_gemm
+  func.func @gpu_gemm_with_bias(%ctx: !hip.context,
+                                %a: memref<1x1024xf16, 1>,
+                                %b: memref<1024x384xf16, 1>,
+                                %c: memref<384xf16, 1>,
+                                %y: memref<1x384xf16, 1>) {
+    hip.gemm(%ctx) ins(%a, %b, %c : memref<1x1024xf16, 1>, memref<1024x384xf16, 1>, memref<384xf16, 1>)
+                   outs(%y : memref<1x384xf16, 1>)
     return
   }
 
-  // Test 3: transB flag
-  // A=[32,64], B=[128,64]^T (transB=1), Y=[32,128]
-  // M=32, K=64, N=128, transB=1
-  func.func @dd_gemm_transB(
-      %ctx: !hip.context,
-      %a: memref<32x64xf16, 1>,
-      %b: memref<128x64xf16, 1>,
-      %y: memref<32x128xf16, 1>) {
-    // CHECK-LABEL: llvm.func @dd_gemm_transB
-
-    hip.gemm(%ctx) ins(%a, %b : memref<32x64xf16, 1>, memref<128x64xf16, 1>)
-                   outs(%y : memref<32x128xf16, 1>)
+  // CHECK-LABEL: llvm.func @gpu_gemm_transB
+  // CHECK-NOT: wrap_dd_matmul
+  // CHECK: llvm.call @wrap_gemm
+  func.func @gpu_gemm_transB(%ctx: !hip.context,
+                             %a: memref<1x1024xf16, 1>,
+                             %b: memref<384x1024xf16, 1>,
+                             %y: memref<1x384xf16, 1>) {
+    hip.gemm(%ctx) ins(%a, %b : memref<1x1024xf16, 1>, memref<384x1024xf16, 1>)
+                   outs(%y : memref<1x384xf16, 1>)
                    {transB = 1 : i64}
-
-    // Verify transB=1 is passed as i64 constant
-    // CHECK: llvm.mlir.constant(1 : i64) : i64
-    // CHECK: llvm.call @wrap_dd_matmul({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f64, f64, i64, i64, i64) -> i32
-
     return
   }
 
-  // Test 4: Custom alpha/beta
-  // A=[16,32], B=[32,64], C=[64], Y=[16,64]
-  // alpha=2.0, beta=0.5
-  func.func @dd_gemm_custom_alpha_beta(
-      %ctx: !hip.context,
-      %a: memref<16x32xf32, 1>,
-      %b: memref<32x64xf32, 1>,
-      %c: memref<64xf32, 1>,
-      %y: memref<16x64xf32, 1>) {
-    // CHECK-LABEL: llvm.func @dd_gemm_custom_alpha_beta
-
-    hip.gemm(%ctx) ins(%a, %b, %c : memref<16x32xf32, 1>, memref<32x64xf32, 1>, memref<64xf32, 1>)
-                   outs(%y : memref<16x64xf32, 1>)
-                   {alpha = 2.0 : f32, beta = 0.5 : f32}
-
-    // Verify alpha=2.0, beta=0.5 passed as f64
-    // CHECK-DAG: llvm.mlir.constant(2.000000e+00 : f64) : f64
-    // CHECK-DAG: llvm.mlir.constant(5.000000e-01 : f64) : f64
-    // CHECK: llvm.call @wrap_dd_matmul({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f64, f64, i64, i64, i64) -> i32
-
+  // CHECK-LABEL: llvm.func @gpu_gemm_alpha
+  // CHECK-NOT: wrap_dd_matmul
+  // CHECK: llvm.call @wrap_gemm
+  func.func @gpu_gemm_alpha(%ctx: !hip.context,
+                            %a: memref<1x1024xf16, 1>,
+                            %b: memref<1024x384xf16, 1>,
+                            %y: memref<1x384xf16, 1>) {
+    hip.gemm(%ctx) ins(%a, %b : memref<1x1024xf16, 1>, memref<1024x384xf16, 1>)
+                   outs(%y : memref<1x384xf16, 1>)
+                   {alpha = 2.0 : f32}
     return
   }
 
-  // Test 5: bfloat16 data type
-  // A=[8,16], B=[16,32], Y=[8,32]
-  // data_type should be HIPDNN_EP_DATATYPE_BFLOAT16
-  func.func @dd_gemm_bf16(
-      %ctx: !hip.context,
-      %a: memref<8x16xbf16, 1>,
-      %b: memref<16x32xbf16, 1>,
-      %y: memref<8x32xbf16, 1>) {
-    // CHECK-LABEL: llvm.func @dd_gemm_bf16
+  // CHECK-LABEL: llvm.func @gpu_gemm_f32
+  // CHECK-NOT: wrap_dd_matmul
+  // CHECK: llvm.call @wrap_gemm
+  func.func @gpu_gemm_f32(%ctx: !hip.context,
+                          %a: memref<1x1024xf32, 1>,
+                          %b: memref<1024x384xf32, 1>,
+                          %y: memref<1x384xf32, 1>) {
+    hip.gemm(%ctx) ins(%a, %b : memref<1x1024xf32, 1>, memref<1024x384xf32, 1>)
+                   outs(%y : memref<1x384xf32, 1>)
+    return
+  }
 
-    hip.gemm(%ctx) ins(%a, %b : memref<8x16xbf16, 1>, memref<16x32xbf16, 1>)
-                   outs(%y : memref<8x32xbf16, 1>)
+  // CHECK-LABEL: llvm.func @gpu_matmul_unsupported_shape
+  // CHECK-NOT: wrap_dd_matmul
+  // CHECK: llvm.call @wrap_hipblasLtMatmul
+  func.func @gpu_matmul_unsupported_shape(%ctx: !hip.context,
+                                          %a: memref<1x2048xf16, 1>,
+                                          %b: memref<2048x384xf16, 1>,
+                                          %y: memref<1x384xf16, 1>) {
+    hip.matmul(%ctx) ins(%a, %b : memref<1x2048xf16, 1>, memref<2048x384xf16, 1>)
+                     outs(%y : memref<1x384xf16, 1>)
+    return
+  }
 
-    // Verify bfloat16 data type constant (HIPDNN_EP_DATATYPE_BFLOAT16 = 2)
-    // CHECK: llvm.mlir.constant(2 : i64) : i64
-    // CHECK: llvm.call @wrap_dd_matmul({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f64, f64, i64, i64, i64) -> i32
-
+  // CHECK-LABEL: llvm.func @gpu_matmul_rank3
+  // CHECK-NOT: wrap_dd_matmul
+  // CHECK: llvm.call @wrap_hipblasLtMatmul
+  func.func @gpu_matmul_rank3(%ctx: !hip.context,
+                              %a: memref<1x1x1024xf16, 1>,
+                              %b: memref<1024x384xf16, 1>,
+                              %y: memref<1x1x384xf16, 1>) {
+    hip.matmul(%ctx) ins(%a, %b : memref<1x1x1024xf16, 1>, memref<1024x384xf16, 1>)
+                     outs(%y : memref<1x1x384xf16, 1>)
     return
   }
 }
