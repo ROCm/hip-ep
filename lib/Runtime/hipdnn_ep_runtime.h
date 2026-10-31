@@ -914,6 +914,24 @@ int wrap_group_query_attention(
     // over past_key/past_value only (a layer sharing another layer's cache).
     int64_t seq_len_new_kv);
 
+// The extra scalar is the raw seqlens_k[0] value, including the -1 sentinel.
+// Use it only when the compiler proves the host store and buffer lifetime.
+// Keep the original entry point above compatible with existing artifacts.
+int wrap_group_query_attention_host_length(
+    RuntimeState *state, int op_state_slot, void *query, void *key, void *value,
+    void *past_key, void *past_value, void *seqlens_k, void *total_seq_len,
+    void *cos_cache, void *sin_cache, void *position_ids, void *attention_bias,
+    void *head_sink, void *k_scale, void *v_scale, void *output,
+    void *present_key, void *present_value, void *output_qk, int64_t num_heads,
+    int64_t kv_num_heads, float scale, int64_t do_rotary,
+    int64_t rotary_interleaved, float softcap, int64_t local_window_size,
+    int64_t smooth_softmax, int64_t qk_output, int64_t k_quant_type,
+    int64_t v_quant_type, int64_t kv_cache_bit_width, int32_t no_causal,
+    int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
+    int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
+    int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
+    int64_t seq_len_new_kv, int32_t host_length);
+
 // MultiHeadAttention operation wrapper (com.microsoft.MultiHeadAttention v1).
 // Called by generated IR for onnx.Custom(MultiHeadAttention) lowering.
 //

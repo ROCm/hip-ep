@@ -323,6 +323,15 @@ All selected allocations in a function share one `hip.get_host_scratch` buffer. 
 
 Functions without `!hip.context` as argument zero are skipped.
 
+HIP-to-LLVM lowering can pass a host-built GQA sequence length directly to
+runtime dispatch. It proves that the scratch slots do not overlap, that each
+slot has one host store before all readers, and that no other use can change
+or expose the storage. Called bodies and control flow keep the readback path.
+The GPU still receives the length buffer. The runtime uses the scalar only
+for batch one and keeps the original entry point for existing artifacts.
+This removes a redundant readback without using pointer identity as proof of
+equal lengths. The inference entry point still synchronizes before it returns.
+
 ## Diagnostics and tests
 
 Hard failures include:

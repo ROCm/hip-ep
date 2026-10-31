@@ -258,7 +258,7 @@ void ConvertHipToLLVMPass::runOnOperation() {
   populateReduceLoweringPatterns(typeConverter, patterns);
   populateTransposeLoweringPatterns(typeConverter, patterns);
   populateRopeLoweringPatterns(typeConverter, patterns);
-  populateGqaLoweringPatterns(typeConverter, patterns);
+  populateGqaLoweringPatterns(typeConverter, patterns, module);
   populateMultiHeadAttentionLoweringPatterns(typeConverter, patterns);
   populateMatMulNBitsLoweringPatterns(typeConverter, patterns);
   populateDequantBnb4LoweringPatterns(typeConverter, patterns);
