@@ -53,9 +53,13 @@ def load(path, layers):
         d = _field(r, ("dur_us", "duration_us", "duration", "gpu_time_us", "time_us"))
         if d is not None:
             busy[name] += float(d)
-    # topk_routing runs exactly once per layer per decode step, so it measures
+    # The router runs exactly once per layer per decode step, so it measures
     # how much of a step this window actually holds.
-    router = sum(v for k, v in count.items() if k.startswith("topk_routing"))
+    router = sum(
+        v
+        for k, v in count.items()
+        if k.startswith(("topk_routing", "qmoe_sigmoid_bias_route"))
+    )
     steps = (router / layers) if router else 1.0
     return count, busy, steps
 

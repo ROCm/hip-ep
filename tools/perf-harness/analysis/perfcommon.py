@@ -269,15 +269,15 @@ GEMM_FAMILIES = (
 # and it holds across both phases: on gemma-4-12b it counts 5 in a prefill
 # window and 28 in a decode window, matching softmax_f32_to_out and
 # elementwise_gelu_f16 in each. softmax is kept as a second fallback for models
-# whose norm is fused away. topk_routing_sigmoid_bias is the router qmoe runs
+# whose norm is fused away. qmoe_sigmoid_bias_route is the router qmoe runs
 # instead when the compiler folded a sigmoid + correction-bias routing chain.
 LAYER_MARKERS = (
     "topk_routing",
-    "topk_routing_sigmoid_bias",
+    "qmoe_sigmoid_bias_route",
     "skip_rms_norm",
     "softmax_f32_to_out",
 )
-ROUTING_FAMILIES = frozenset({"topk_routing", "topk_routing_sigmoid_bias"})
+ROUTING_FAMILIES = frozenset({"topk_routing", "qmoe_sigmoid_bias_route"})
 
 
 def markers_per_layer(marker: str, spec: "ModelSpec") -> int:
@@ -320,7 +320,7 @@ OP_KERNEL_FAMILIES: dict[str, dict[str, tuple[str, ...]]] = {
     "qmoe": {
         "exact": (
             "topk_routing",
-            "topk_routing_sigmoid_bias",
+            "qmoe_sigmoid_bias_route",
             "bucket_tokens",
             "gather_tokens",
             "scatter_add",
