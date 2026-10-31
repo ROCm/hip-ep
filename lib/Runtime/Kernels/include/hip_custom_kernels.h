@@ -1406,8 +1406,18 @@ HIP_KERNEL_API int hip_gqa_flash_decode_configured(
  *   input_dtype  - source data type (hip_dtype_t value cast to int)
  *   output_dtype - destination data type (hip_dtype_t value cast to int)
  *
- * Currently supported conversions: INT64 -> INT32
- * Returns: 0 on success, non-zero on failure
+ * Supported conversions:
+ *   INT64 -> INT32, UINT8; INT32 -> INT64, UINT8; UINT8 -> INT64, INT32
+ *   INT8 -> INT16; INT16 -> UINT8
+ *   FLOAT32 <-> FLOAT16; FLOAT32 -> INT64, INT32
+ *   FLOAT16 -> INT64, INT32, UINT8; INT64/INT32/UINT8 -> FLOAT16, FLOAT32
+ *   BFLOAT16 <-> FLOAT32, FLOAT16, FLOAT64, INT64, INT32, INT16, INT8, UINT8
+ *   (FLOAT64 is kernel-only for now: wrap_cast does not map
+ *   HIPDNN_EP_DATATYPE_DOUBLE yet, so model graphs cannot reach it.)
+ * bf16 conversions go through fp32: fp32 -> bf16 rounds to nearest even
+ * (same as PyTorch and ONNX), bf16 -> fp32 is exact, float -> integer
+ * truncates toward zero.
+ * Returns: 0 on success, non-zero on failure (-1 for an unsupported pair)
  */
 HIP_KERNEL_API int hip_cast(
     void* stream,

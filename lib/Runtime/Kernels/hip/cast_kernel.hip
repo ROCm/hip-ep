@@ -4,6 +4,7 @@
  */
 
 #include "hip_custom_kernels.h"
+#include "hip_dtype_utils.h"
 #include "debug_log.h"
 
 #include <hip/hip_runtime.h>
@@ -146,6 +147,21 @@ __global__ void cast_int_to_int_kernel(
   }
 }
 
+// Generic cast through fp32 (used for the bf16 paths). Matches PyTorch
+// torch.aten.to.dtype and ONNX Cast: fp32 -> bf16 rounds to nearest even and
+// keeps NaN, bf16 -> fp32 is exact, float -> integer truncates.
+template <typename Src, typename Dst>
+__global__ void cast_via_float_kernel(
+    const Src* __restrict__ input,
+    Dst* __restrict__ output,
+    int64_t num_elements) {
+  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    output[idx] = hip_dtype::CastIO<Dst>::store(
+        hip_dtype::CastIO<Src>::load(input[idx]));
+  }
+}
+
 __global__ void cast_ui8_to_f16_kernel(
     const uint8_t* __restrict__ input,
     __half* __restrict__ output,
@@ -191,6 +207,41 @@ __global__ void cast_f16_to_ui8_kernel(
   if (idx < num_elements) {
     output[idx] = static_cast<uint8_t>(__half2float(input[idx]));
   }
+}
+
+template <typename Src, typename Dst>
+static int launch_cast_via_float(hipStream_t stream, const void* input,
+                                 void* output, int64_t num_elements,
+                                 int grid_size, int block_size) {
+  hipLaunchKernelGGL(HIP_KERNEL_NAME(cast_via_float_kernel<Src, Dst>),
+                     dim3(grid_size), dim3(block_size), 0, stream,
+                     static_cast<const Src*>(input),
+                     static_cast<Dst*>(output), num_elements);
+  return 0;
+}
+
+// Launches a cast where one side is bf16. Returns -1 without launching when
+// neither side is bf16 or the other dtype is unsupported, so hip_cast()
+// reports it through its existing "unsupported conversion" branch.
+static int launch_cast_bf16(hipStream_t stream, const void* input,
+                            void* output, int64_t num_elements,
+                            int input_dtype, int output_dtype,
+                            int grid_size, int block_size) {
+  if (input_dtype == HIP_DTYPE_BFLOAT16) {
+    return hip_dtype::dispatch_dtype(output_dtype, [&](auto dst) {
+      using Dst = typename decltype(dst)::type;
+      return launch_cast_via_float<__hip_bfloat16, Dst>(
+          stream, input, output, num_elements, grid_size, block_size);
+    });
+  }
+  if (output_dtype == HIP_DTYPE_BFLOAT16) {
+    return hip_dtype::dispatch_dtype(input_dtype, [&](auto src) {
+      using Src = typename decltype(src)::type;
+      return launch_cast_via_float<Src, __hip_bfloat16>(
+          stream, input, output, num_elements, grid_size, block_size);
+    });
+  }
+  return -1;
 }
 
 extern "C" int hip_cast(
@@ -346,6 +397,10 @@ extern "C" int hip_cast(
                        dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
                        static_cast<const int16_t*>(input),
                        static_cast<uint8_t*>(output), num_elements);
+  } else if (launch_cast_bf16(hip_stream, input, output, num_elements,
+                              input_dtype, output_dtype, grid_size,
+                              kBlockSize) == 0) {
+    // bf16 <-> {f32, f16, f64, i64, i32, i16, i8, u8} launched.
   } else {
     fprintf(stderr,
             "[custom_kernels] hip_cast: unsupported conversion "
