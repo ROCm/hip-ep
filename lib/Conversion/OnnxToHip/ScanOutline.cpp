@@ -152,6 +152,18 @@ LogicalResult OnnxScanOutlinePass::outlineScan(Operation *scanOp,
 
   ValueRange stateInitials = scanOp->getOperands().take_front(numState);
   ValueRange scanInputs = scanOp->getOperands().drop_front(numState);
+  auto replaceResult = [&](OpResult oldResult,
+                           Value newResult) -> LogicalResult {
+    if (isa<NoneType>(oldResult.getType())) {
+      if (!oldResult.use_empty())
+        return scanOp->emitOpError("none-typed result unexpectedly has users");
+      return success();
+    }
+    if (!newResult || oldResult.getType() != newResult.getType())
+      return scanOp->emitOpError("result type changed while outlining Scan");
+    oldResult.replaceAllUsesWith(newResult);
+    return success();
+  };
   auto firstInputType =
       dyn_cast<RankedTensorType>(scanInputs.front().getType());
   if (!firstInputType || firstInputType.getRank() == 0)
@@ -180,8 +192,12 @@ LogicalResult OnnxScanOutlinePass::outlineScan(Operation *scanOp,
     }
     SmallVector<Value> zeroResults(stateInitials.begin(), stateInitials.end());
     for (unsigned i = 0; i < numScanOutputs; ++i) {
-      auto resultType =
-          dyn_cast<RankedTensorType>(scanOp->getResult(numState + i).getType());
+      OpResult oldResult = scanOp->getResult(numState + i);
+      if (isa<NoneType>(oldResult.getType())) {
+        zeroResults.push_back(Value());
+        continue;
+      }
+      auto resultType = dyn_cast<RankedTensorType>(oldResult.getType());
       if (!resultType)
         return scanOp->emitOpError("scan output must be a ranked tensor at #")
                << i;
@@ -193,8 +209,10 @@ LogicalResult OnnxScanOutlinePass::outlineScan(Operation *scanOp,
           builder, loc, resultType, dynSizes));
     }
     for (auto [oldResult, newResult] :
-         llvm::zip(scanOp->getResults(), zeroResults))
-      oldResult.replaceAllUsesWith(newResult);
+         llvm::zip(scanOp->getResults(), zeroResults)) {
+      if (failed(replaceResult(oldResult, newResult)))
+        return failure();
+    }
     scanOp->erase();
     return success();
   }
@@ -361,10 +379,12 @@ LogicalResult OnnxScanOutlinePass::outlineScan(Operation *scanOp,
   for (unsigned i = 0; i < numScanOutputs; ++i) {
     Value firstOutput = firstYields[numState + i];
     auto bodyOutputType = dyn_cast<RankedTensorType>(firstOutput.getType());
-    auto resultType =
-        dyn_cast<RankedTensorType>(scanOp->getResult(numState + i).getType());
-    if (!bodyOutputType || !resultType ||
-        resultType.getRank() != bodyOutputType.getRank() + 1)
+    Type resultType = scanOp->getResult(numState + i).getType();
+    auto rankedResultType = dyn_cast<RankedTensorType>(resultType);
+    if (!bodyOutputType ||
+        (!isa<NoneType>(resultType) &&
+         (!rankedResultType ||
+          rankedResultType.getRank() != bodyOutputType.getRank() + 1)))
       return scanOp->emitOpError("scan output/body output rank mismatch at #")
              << i;
     bodyOutputTypes.push_back(bodyOutputType);
@@ -420,15 +440,18 @@ LogicalResult OnnxScanOutlinePass::outlineScan(Operation *scanOp,
   scf::YieldOp::create(outerBuilder, loc, tailInits);
   outerBuilder.setInsertionPointAfter(tailIf);
 
-  SmallVector<Value> results;
-  results.append(tailIf.getResults().begin(),
-                 tailIf.getResults().begin() + numState);
+  for (unsigned i = 0; i < numState; ++i) {
+    if (failed(replaceResult(scanOp->getResult(i), tailIf.getResult(i))))
+      return failure();
+  }
   for (unsigned i = 0; i < numScanOutputs; ++i) {
+    OpResult oldResult = scanOp->getResult(numState + i);
+    if (isa<NoneType>(oldResult.getType()))
+      continue;
     Value firstOutput = firstYields[numState + i];
     Value tailOutput = tailIf.getResult(numState + i);
     RankedTensorType bodyType = bodyOutputTypes[i];
-    auto resultType =
-        cast<RankedTensorType>(scanOp->getResult(numState + i).getType());
+    auto resultType = cast<RankedTensorType>(oldResult.getType());
 
     SmallVector<Value> dynSizes;
     for (int64_t dim = 0; dim < resultType.getRank(); ++dim) {
@@ -481,12 +504,8 @@ LogicalResult OnnxScanOutlinePass::outlineScan(Operation *scanOp,
         tensor::InsertSliceOp::create(outerBuilder, loc, tailOutput, stacked,
                                       tailOffsets, tailSizes, firstStrides)
             .getResult();
-    results.push_back(stacked);
-  }
-  for (auto [oldResult, newResult] : llvm::zip(scanOp->getResults(), results)) {
-    if (oldResult.getType() != newResult.getType())
-      return scanOp->emitOpError("result type changed while outlining Scan");
-    oldResult.replaceAllUsesWith(newResult);
+    if (failed(replaceResult(oldResult, stacked)))
+      return failure();
   }
   scanOp->erase();
   return success();

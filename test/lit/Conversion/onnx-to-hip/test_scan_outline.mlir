@@ -39,12 +39,38 @@ module {
 
   func.func @statically_empty(%sequence: tensor<0x4xf32>)
       -> tensor<0x4xf32> {
-    %scan_output = "onnx.Scan"(%sequence) ({
+    %scan_output, %unused = "onnx.Scan"(%sequence) ({
       ^bb0(%slice: tensor<4xf32>):
-        "onnx.Yield"(%slice) : (tensor<4xf32>) -> ()
+        "onnx.Yield"(%slice, %slice)
+            : (tensor<4xf32>, tensor<4xf32>) -> ()
       }) {num_scan_inputs = 1 : si64}
-      : (tensor<0x4xf32>) -> tensor<0x4xf32>
+      : (tensor<0x4xf32>) -> (tensor<0x4xf32>, none)
     return %scan_output : tensor<0x4xf32>
+  }
+
+  func.func @omitted_outputs(%state0: tensor<4xf32>,
+                             %state1: tensor<4xf32>,
+                             %sequence: tensor<?x4xf32>)
+      -> (tensor<4xf32>, tensor<?x4xf32>) {
+    %state0_final, %unused_state, %scan_output, %unused_scan =
+        "onnx.Scan"(%state0, %state1, %sequence) ({
+        ^bb0(%state0_in: tensor<4xf32>, %state1_in: tensor<4xf32>,
+             %slice: tensor<4xf32>):
+          %state0_next = "onnx.Add"(%state0_in, %slice)
+              : (tensor<4xf32>, tensor<4xf32>) -> tensor<4xf32>
+          %state1_next = "onnx.Add"(%state1_in, %slice)
+              : (tensor<4xf32>, tensor<4xf32>) -> tensor<4xf32>
+          %scan0 = "onnx.Add"(%state0_next, %state1_next)
+              : (tensor<4xf32>, tensor<4xf32>) -> tensor<4xf32>
+          %scan1 = "onnx.Neg"(%slice) : (tensor<4xf32>) -> tensor<4xf32>
+          "onnx.Yield"(%state0_next, %state1_next, %scan0, %scan1)
+              : (tensor<4xf32>, tensor<4xf32>, tensor<4xf32>, tensor<4xf32>)
+                -> ()
+        }) {num_scan_inputs = 1 : si64}
+        : (tensor<4xf32>, tensor<4xf32>, tensor<?x4xf32>)
+          -> (tensor<4xf32>, none, tensor<?x4xf32>, none)
+    return %state0_final, %scan_output
+        : tensor<4xf32>, tensor<?x4xf32>
   }
 
   // Iteration zero executes once in the non-empty branch. hip.scan consumes
@@ -81,6 +107,14 @@ module {
   // CHECK-LABEL: func.func @statically_empty(
   // CHECK-NOT: hip.scan
   // CHECK: bufferization.alloc_tensor()
+  // CHECK: return
+
+  // Omitted state and scan outputs remain internal tensor values, while their
+  // none-typed outer results need no replacement.
+  // CHECK-LABEL: func.func @omitted_outputs(
+  // CHECK-NOT: "onnx.Scan"
+  // CHECK: hip.scan
+  // CHECK-NOT: "onnx.Scan"
   // CHECK: return
 
   // CHECK-LABEL: func.func private @main_graph_scan_body_n0
