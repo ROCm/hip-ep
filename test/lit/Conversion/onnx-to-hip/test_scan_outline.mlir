@@ -73,6 +73,22 @@ module {
         : tensor<4xf32>, tensor<?x4xf32>
   }
 
+  func.func @scalar_capture(%sequence: tensor<?x1xi64>,
+                            %capture_source: tensor<2xi64>)
+      -> tensor<?x1xi64> {
+    %capture = "onnx.ReduceMax"(%capture_source)
+        {keepdims = 0 : si64, noop_with_empty_axes = 0 : si64}
+        : (tensor<2xi64>) -> tensor<i64>
+    %scan_output = "onnx.Scan"(%sequence) ({
+      ^bb0(%slice: tensor<1xi64>):
+        %sum = "onnx.Add"(%slice, %capture)
+            : (tensor<1xi64>, tensor<i64>) -> tensor<1xi64>
+        "onnx.Yield"(%sum) : (tensor<1xi64>) -> ()
+      }) {num_scan_inputs = 1 : si64}
+      : (tensor<?x1xi64>) -> tensor<?x1xi64>
+    return %scan_output : tensor<?x1xi64>
+  }
+
   // Iteration zero executes once in the non-empty branch. hip.scan consumes
   // only a non-empty tail. The empty branch returns initial states and empty
   // body outputs without touching the body.
@@ -116,6 +132,14 @@ module {
   // CHECK: hip.scan
   // CHECK-NOT: "onnx.Scan"
   // CHECK: return
+
+  // Scalar captures are copied immediately after their producer so parent
+  // buffer reuse cannot overwrite them before the first or tail iteration.
+  // CHECK-LABEL: func.func @scalar_capture(
+  // CHECK: %[[CAPTURE:.*]] = "onnx.ReduceMax"
+  // CHECK-NEXT: %[[SNAPSHOT:.*]] = bufferization.alloc_tensor() copy(%[[CAPTURE]])
+  // CHECK: hip.scan
+  // CHECK-SAME: captures(%[[SNAPSHOT]]
 
   // CHECK-LABEL: func.func private @main_graph_scan_body_n0
   // CHECK-SAME: (%{{[^:]+}}: !hip.context,
