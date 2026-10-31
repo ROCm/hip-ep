@@ -10,6 +10,7 @@
 #include "mlir/Interfaces/CallInterfaces.h"
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "llvm/ADT/DenseSet.h"
 
 #include <limits>
 
@@ -26,9 +27,9 @@ namespace {
 //   llvm.store %length, %slot_ptr : i32, !llvm.ptr
 //   llvm.call @wrap_group_query_attention_host_length(..., %length)
 //
-// Keep the buffer for GPU readers. Require disjoint scratch slots with one
-// host store each, before all readers. No slot can change while a GPU reader
-// is pending. Unknown uses and control flow keep the readback path.
+// Keep the buffer for GPU readers. Require disjoint scratch slots with all
+// host stores before their readers. No slot can change while a GPU reader is
+// pending. Unknown uses and control flow keep the readback path.
 static DenseMap<Operation *, Value> collectHostLengths(ModuleOp module) {
   DenseMap<Operation *, Value> lengths;
   SmallVector<GetHostScratchOp> scratches;
@@ -55,9 +56,10 @@ static DenseMap<Operation *, Value> collectHostLengths(ModuleOp module) {
     memref::ViewOp view;
     int64_t begin;
     int64_t end;
-    memref::StoreOp store;
+    SmallVector<memref::StoreOp> stores;
   };
   SmallVector<Slot> slots;
+  SmallVector<Operation *> aliasReaders;
   for (Operation *user : scratch.getResult().getUsers()) {
     auto view = dyn_cast<memref::ViewOp>(user);
     if (!view || view->getBlock() != &func.front())
@@ -79,39 +81,65 @@ static DenseMap<Operation *, Value> collectHostLengths(ModuleOp module) {
                                   bytesPerElement)
       return lengths;
     Slot slot{view, *offset, *offset + count * bytesPerElement, {}};
-    for (Operation *use : view.getResult().getUsers()) {
-      if (use->getBlock() != &func.front())
-        return lengths;
-      if (auto store = dyn_cast<memref::StoreOp>(use)) {
-        if (slot.store || store.getMemRef() != view.getResult())
-          return lengths;
-        slot.store = store;
+    SmallVector<Operation *> readers;
+    SmallVector<Value> worklist{view.getResult()};
+    DenseSet<Value> visited;
+    while (!worklist.empty()) {
+      Value value = worklist.pop_back_val();
+      if (!visited.insert(value).second)
         continue;
-      }
-      if (isa<memref::LoadOp, memref::DimOp>(use))
-        continue;
-      // Buffer-form DPS operations do not return aliases. Their effects
-      // must say that they only read this slot. Reject copies and views.
-      auto effects = dyn_cast<MemoryEffectOpInterface>(use);
-      if (!isa<DestinationStyleOpInterface>(use) || use->getNumResults() ||
-          use->getNumRegions() || !effects)
-        return lengths;
-      SmallVector<MemoryEffects::EffectInstance> instances;
-      effects.getEffects(instances);
-      for (const auto &effect : instances) {
-        if ((!effect.getValue() || effect.getValue() == view.getResult()) &&
-            !isa<MemoryEffects::Read>(effect.getEffect()))
+      for (Operation *use : value.getUsers()) {
+        if (use->getBlock() != &func.front())
           return lengths;
+        if (auto store = dyn_cast<memref::StoreOp>(use)) {
+          if (value != view.getResult() || store.getMemRef() != value)
+            return lengths;
+          slot.stores.push_back(store);
+          continue;
+        }
+        if (isa<memref::DimOp>(use))
+          continue;
+        // These operations build descriptors. They do not read memory.
+        if (auto metadata = dyn_cast<memref::ExtractStridedMetadataOp>(use)) {
+          worklist.push_back(metadata.getBaseBuffer());
+          continue;
+        }
+        if (auto alias = dyn_cast<memref::ReinterpretCastOp>(use)) {
+          worklist.push_back(alias.getResult());
+          continue;
+        }
+        if (auto copy = dyn_cast<memref::CopyOp>(use)) {
+          if (copy.getSource() != value || copy.getTarget() == value)
+            return lengths;
+        } else if (!isa<memref::LoadOp>(use)) {
+          // Buffer-form DPS operations do not return aliases. Their effects
+          // must say that they only read this value.
+          auto effects = dyn_cast<MemoryEffectOpInterface>(use);
+          if (!isa<DestinationStyleOpInterface>(use) || use->getNumResults() ||
+              use->getNumRegions() || !effects)
+            return lengths;
+          SmallVector<MemoryEffects::EffectInstance> instances;
+          effects.getEffects(instances);
+          for (const auto &effect : instances) {
+            if ((!effect.getValue() || effect.getValue() == value) &&
+                !isa<MemoryEffects::Read>(effect.getEffect()))
+              return lengths;
+          }
+        }
+        readers.push_back(use);
+        if (value != view.getResult())
+          aliasReaders.push_back(use);
       }
     }
-    if (!slot.store)
+    if (slot.stores.empty())
       return lengths;
-    for (Operation *use : view.getResult().getUsers()) {
-      if (use != slot.store && !isa<memref::DimOp>(use) &&
-          !slot.store->isBeforeInBlock(use))
-        return lengths;
+    for (memref::StoreOp store : slot.stores) {
+      for (Operation *reader : readers) {
+        if (!store->isBeforeInBlock(reader))
+          return lengths;
+      }
     }
-    slots.push_back(slot);
+    slots.push_back(std::move(slot));
   }
   llvm::sort(slots,
              [](const Slot &a, const Slot &b) { return a.begin < b.begin; });
@@ -119,15 +147,26 @@ static DenseMap<Operation *, Value> collectHostLengths(ModuleOp module) {
     if (slots[i].begin < slots[i - 1].end)
       return lengths;
   }
+  // An extracted base can address other slots in the backing allocation.
+  // Without a range proof, require all stores before every aliased reader.
   for (Slot &slot : slots) {
-    if (slot.view.getType().getShape() != ArrayRef<int64_t>{1} ||
+    for (memref::StoreOp store : slot.stores) {
+      for (Operation *reader : aliasReaders) {
+        if (!store->isBeforeInBlock(reader))
+          return lengths;
+      }
+    }
+  }
+  for (Slot &slot : slots) {
+    if (slot.stores.size() != 1 ||
+        slot.view.getType().getShape() != ArrayRef<int64_t>{1} ||
         !slot.view.getType().getElementType().isInteger(32) ||
-        !matchPattern(slot.store.getIndices().front(), m_Zero()))
+        !matchPattern(slot.stores.front().getIndices().front(), m_Zero()))
       continue;
     for (Operation *user : slot.view.getResult().getUsers()) {
       if (auto gqa = dyn_cast<GqaOp>(user)) {
         if (gqa.getSeqlensK() == slot.view.getResult())
-          lengths[gqa] = slot.store.getValue();
+          lengths[gqa] = slot.stores.front().getValue();
       }
     }
   }
