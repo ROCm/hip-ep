@@ -2834,10 +2834,11 @@ static int gqa_forward_fused_from_fp32(
 }
 
 //===----------------------------------------------------------------------===//
-// Public wrapper called by generated IR. ABI MUST stay identical to the
-// HipToLLVM lowering (kWrapGQA = "wrap_group_query_attention", 43 params).
+// Dense GQA body. The public kWrapGQA entry point (end of file) rejects
+// quantized-cache provider options before delegating here; KV cache codecs
+// call it directly with their own dense FP16 scratch caches.
 //===----------------------------------------------------------------------===//
-int wrap_group_query_attention(
+static int gqa_dense_impl(
     RuntimeState *state, int op_state_slot,
     // Inputs 1-7 (core GQA)
     void *query, void *key, void *value, void *past_key, void *past_value,
@@ -3122,4 +3123,332 @@ int wrap_group_query_attention(
             "(rc=%d)\n",
             rc);
   return rc;
+}
+
+//===----------------------------------------------------------------------===//
+// KV-Pareto: compressed KV-cache codecs inside the GQA cache tensors
+// (experimental; docs/design/kv-pareto.md).
+//
+// The graph keeps the stock com.microsoft GroupQueryAttention node. The
+// kv_cache_codec provider option (with kvCacheQuantizationBits) selects the
+// format; the cache tensors' physical last dimension differs from head_dim, so
+// the compiler emits wrap_group_query_attention_v2 with the four physical
+// widths. Compiled by default (HIP_EP_ENABLE_KV_PARETO=ON) but used only when
+// the process sets HIPDNN_EP_USE_KV_PARETO=1 before inference. Calls without
+// kv_cache_codec keep the existing GQA path. A packed cache cannot be read as
+// dense FP16, so a codec request is rejected, never redirected, when
+// KV-Pareto is disabled, not built or unsupported on this device.
+// Errors are reported on stderr, raise the runtime's device error flag and
+// return -1 (no exceptions cross the runtime ABI).
+//===----------------------------------------------------------------------===//
+#if HIP_EP_KV_PARETO_ENABLED != 0
+static const char kK8V8Codec[] = "k8v8_g32_planar_v1";
+// 280 B per token and KV head: 256 INT8 codes + 8 BF16 scales + 8 INT8 zeros.
+static constexpr int64_t kK8V8Width = HIP_EP_KV_PARETO_K8V8_WIDTH;
+static constexpr int64_t kK8V8MaxCapacity = HIP_EP_KV_PARETO_MAX_CAPACITY;
+static constexpr int64_t kK8V8MaxPrefill = HIP_EP_KV_PARETO_MAX_NEW_TOKENS;
+
+// Set before starting inference. Only an explicit "1" opts in; the value is
+// cached on first use. Building KV-Pareto never changes the default path.
+static bool kv_pareto_requested() {
+  static const bool enabled = [] {
+    const char *value = std::getenv("HIPDNN_EP_USE_KV_PARETO");
+    return value && std::strcmp(value, "1") == 0;
+  }();
+  return enabled;
+}
+#endif
+
+static int gqa_codec_error(RuntimeState *state, const char *message) {
+  fprintf(stderr, "GQA KV cache codec: %s\n", message);
+  if (void *flag =
+          state ? hipdnn_ep_state_get_error_flag_device_ptr(state) : nullptr)
+    (void)hipMemsetAsync(
+        flag, 0xff, sizeof(int),
+        static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state)));
+  return -1;
+}
+
+static const char *gqa_provider_option(RuntimeState *state, const char *key) {
+  return state ? hipdnn_ep_runtime_get_provider_option(state, key) : nullptr;
+}
+
+//===----------------------------------------------------------------------===//
+// Public dense GQA entry point (kWrapGQA, 43 params).
+//===----------------------------------------------------------------------===//
+int wrap_group_query_attention(
+    RuntimeState *state, int op_state_slot, void *query, void *key, void *value,
+    void *past_key, void *past_value, void *seqlens_k, void *total_seq_len,
+    void *cos_cache, void *sin_cache, void *position_ids, void *attention_bias,
+    void *head_sink, void *k_scale, void *v_scale, void *output,
+    void *present_key, void *present_value, void *output_qk, int64_t num_heads,
+    int64_t kv_num_heads, float scale, int64_t do_rotary,
+    int64_t rotary_interleaved, float softcap, int64_t local_window_size,
+    int64_t smooth_softmax, int64_t qk_output, int64_t k_quant_type,
+    int64_t v_quant_type, int64_t kv_cache_bit_width, int32_t no_causal,
+    int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
+    int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
+    int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
+    int64_t seq_len_new_kv) {
+  // A codec cache must never reach the dense path: it would be read as FP16
+  // rows of head_dim elements. Calls without kv_cache_codec are unchanged.
+  const char *codec = gqa_provider_option(state, "kv_cache_codec");
+  if (codec && *codec)
+    return gqa_codec_error(state, "kv_cache_codec requires a packed cache "
+                                  "(physical cache width != head_dim)");
+  return gqa_dense_impl(
+      state, op_state_slot, query, key, value, past_key, past_value, seqlens_k,
+      total_seq_len, cos_cache, sin_cache, position_ids, attention_bias,
+      head_sink, k_scale, v_scale, output, present_key, present_value,
+      output_qk, num_heads, kv_num_heads, scale, do_rotary, rotary_interleaved,
+      softcap, local_window_size, smooth_softmax, qk_output, k_quant_type,
+      v_quant_type, kv_cache_bit_width, no_causal, batch_size, seq_len_q,
+      seq_len_kv, past_buf_seq, head_dim, element_size_bytes, attn_bias_batch,
+      attn_bias_num_heads, kv_bnsd, seq_len_new_kv);
+}
+
+#if HIP_EP_KV_PARETO_ENABLED != 0
+//===----------------------------------------------------------------------===//
+// KV-Pareto per-token codec k8v8_g32_planar_v1: Qwen3.8-27B H24/G4/D256 and
+// Qwen3.5-4B H16/G4/D256. The runtime only validates the contract and hands the
+// call to hip_kv_pareto_k8v8_gqa (Kernels/hip/kv_pareto/kv_pareto_k8v8.hip),
+// which picks prefill or decode itself. Prefill semantics: [dequantized packed
+// history | direct FP16 new K/V]; decode: packed history + direct FP16 current
+// token. The new rows are encoded into the shared cache; old packed rows are
+// never rewritten.
+//===----------------------------------------------------------------------===//
+static int k8v8_forward(
+    RuntimeState *state, int op_state_slot, void *query, void *key, void *value,
+    void *past_key, void *past_value, void *seqlens_k, void *total_seq_len,
+    void *cos_cache, void *sin_cache, void *position_ids, void *attention_bias,
+    void *head_sink, void *k_scale, void *v_scale, void *output,
+    void *present_key, void *present_value, void *output_qk, int64_t num_heads,
+    int64_t kv_num_heads, float scale, int64_t do_rotary,
+    int64_t rotary_interleaved, float softcap, int64_t local_window_size,
+    int64_t smooth_softmax, int64_t qk_output, int64_t k_quant_type,
+    int64_t v_quant_type, int64_t kv_cache_bit_width, int32_t no_causal,
+    int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
+    int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
+    int64_t kv_bnsd, int64_t seq_len_new_kv, const int64_t widths[4]) {
+  if (batch_size != 1 ||
+      !hip_kv_pareto_k8v8_supported(int(num_heads), int(kv_num_heads),
+                                    int(head_dim)) ||
+      element_size_bytes != 2 || !key || !value || kv_bnsd || do_rotary ||
+      rotary_interleaved || cos_cache || sin_cache || position_ids ||
+      attention_bias || head_sink || k_scale || v_scale || output_qk ||
+      qk_output || k_quant_type || v_quant_type || softcap != 0.0f ||
+      local_window_size > 0 || smooth_softmax > 0 || no_causal ||
+      seq_len_q < 1 || seq_len_q > kK8V8MaxPrefill ||
+      seq_len_new_kv != seq_len_q) {
+    fprintf(stderr,
+            "KV-Pareto contract: B=%lld H=%lld G=%lld D=%lld bytes=%lld q=%lld "
+            "new_kv=%lld separate_kv=%d bnsd=%lld rotary=%lld "
+            "bias/sink/scales/qk=%d quant=%lld/%lld softcap=%g window=%lld "
+            "smooth=%lld causal=%d\n",
+            (long long)batch_size, (long long)num_heads,
+            (long long)kv_num_heads, (long long)head_dim,
+            (long long)element_size_bytes, (long long)seq_len_q,
+            (long long)seq_len_new_kv, int(key && value), (long long)kv_bnsd,
+            (long long)do_rotary,
+            int(bool(attention_bias) || bool(head_sink) || bool(k_scale) ||
+                bool(v_scale) || bool(output_qk) || qk_output),
+            (long long)k_quant_type, (long long)v_quant_type, double(softcap),
+            (long long)local_window_size, (long long)smooth_softmax,
+            int(!no_causal));
+    return gqa_codec_error(
+        state, "k8v8_g32_planar_v1 supports B1, H16 or H24 / G4 / D256 FP16, "
+               "separate Q/K/V, external RoPE, causal, no bias/sink/window/"
+               "softcap, 1..262144 new tokens per call");
+  }
+  if (!hip_kv_pareto_device_supported())
+    return gqa_codec_error(state, "KV-Pareto is validated on gfx1151 (Strix "
+                                  "Halo) only; this device or kernel library "
+                                  "does not support it");
+  if (scale == 0.0f)
+    scale = 1.0f / 16.0f; // 1/sqrt(256)
+  if (!std::isfinite(scale) || scale <= 0.0f)
+    return gqa_codec_error(state, "invalid attention scale");
+  if (!present_key || !present_value || past_key != present_key ||
+      past_value != present_value)
+    return gqa_codec_error(state, "requires shared past/present cache "
+                                  "buffers (past_present_share_buffer)");
+  for (int i = 0; i < 4; ++i)
+    if (widths[i] != kK8V8Width)
+      return gqa_codec_error(state,
+                             "cache physical width must be 140 FP16 carriers");
+  const int64_t capacity = seq_len_kv;
+  if (capacity < 1 || capacity > kK8V8MaxCapacity || past_buf_seq != capacity)
+    return gqa_codec_error(state, "cache capacity must be 1..262272 and equal "
+                                  "for past and present");
+  (void)op_state_slot;
+  (void)total_seq_len;
+  (void)kv_cache_bit_width;
+  hipStream_t stream =
+      static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
+  const int32_t last = read_seqlens_k_for_dispatch(stream, seqlens_k, 1, state);
+  if (last < -1)
+    return gqa_codec_error(state, "failed or invalid sequence-length read");
+  const int64_t sq = seq_len_q;
+  const int64_t total = last == -1 ? sq : int64_t(last) + 1;
+  const int64_t past = total - sq;
+  if (past < 0 || total > capacity)
+    return gqa_codec_error(state, "invalid lengths or cache capacity overflow");
+
+  struct Range {
+    const void *p;
+    size_t bytes;
+  };
+  auto overlaps = [](Range a, Range b) {
+    if (!a.p || !b.p || !a.bytes || !b.bytes)
+      return false;
+    const uintptr_t x = reinterpret_cast<uintptr_t>(a.p);
+    const uintptr_t y = reinterpret_cast<uintptr_t>(b.p);
+    return a.bytes > UINTPTR_MAX - x || b.bytes > UINTPTR_MAX - y ||
+           (x < y + b.bytes && y < x + a.bytes);
+  };
+  const size_t qbytes = size_t(sq) * num_heads * 256 * 2;
+  const size_t kvbytes = size_t(sq) * 4 * 256 * 2;
+  const size_t cachebytes = size_t(capacity) * 4 * kK8V8Width * 2;
+  const Range q{query, qbytes}, k{key, kvbytes}, v{value, kvbytes},
+      o{output, qbytes}, kc{present_key, cachebytes},
+      vc{present_value, cachebytes};
+  if (overlaps(kc, vc))
+    return gqa_codec_error(state, "key and value caches overlap");
+  for (Range r : {q, k, v, o})
+    if (overlaps(kc, r) || overlaps(vc, r))
+      return gqa_codec_error(state, "packed cache overlaps an activation");
+  for (Range r : {q, k, v})
+    if (overlaps(o, r))
+      return gqa_codec_error(state, "output overlaps an input");
+
+  const bool decode = sq == 1 && past > 0;
+  const size_t bytes =
+      hip_kv_pareto_k8v8_workspace(int(num_heads), int(sq), int(past));
+  if (!bytes || hipdnn_ep_state_ensure_workspace(state, bytes) != 0)
+    return gqa_codec_error(state, "cannot reserve KV-Pareto workspace");
+  void *workspace = hipdnn_ep_state_get_workspace(state);
+  for (Range r : {q, k, v, o, kc, vc})
+    if (!workspace || overlaps({workspace, bytes}, r))
+      return gqa_codec_error(state, "invalid KV-Pareto workspace range");
+
+  // Prefill attention reuses the dense v8x kernel; resolve its launch config
+  // with exactly the dense path's policy (offline LUT / heuristic, or online).
+  int config[5] = {0, 0, 0, 0, 0};
+  const int *prefill_config = nullptr;
+  hipdnn_ep::GqaPrefillRequest request{hipdnn_ep::GqaPrefillVariant::V8x,
+                                       1,
+                                       int(num_heads),
+                                       int(kv_num_heads),
+                                       int(head_dim),
+                                       int(sq),
+                                       int(total),
+                                       -1};
+  if (!decode && hip_gqa_autotune_mode(state->gqa_autotune_policy) !=
+                     static_cast<int>(hipdnn_ep::GqaAutotuneMode::Online)) {
+    hipdnn_ep::GqaPrefillResult selected;
+    hip_gqa_autotune_resolve_prefill(state->gqa_autotune_policy, &request,
+                                     &selected);
+    config[0] = selected.config.hb;
+    config[1] = selected.config.qw;
+    config[2] = selected.config.mt;
+    config[3] = selected.config.bkv;
+    config[4] = selected.config.nd;
+    prefill_config = config;
+  }
+  int rc = hip_kv_pareto_k8v8_gqa(stream, query, key, value, present_key,
+                                  present_value, output, int(num_heads),
+                                  int(sq), int(past), int(capacity), scale,
+                                  workspace, bytes, prefill_config);
+  if (rc != 0 && prefill_config) {
+    // Same fallback as the dense path: retry with the compiled-in heuristic.
+    // The stage is idempotent (old rows untouched, new rows re-encoded).
+    hipdnn_ep::GqaPrefillConfig heuristic;
+    hip_gqa_autotune_fallback_prefill(&request, &heuristic);
+    config[0] = heuristic.hb;
+    config[1] = heuristic.qw;
+    config[2] = heuristic.mt;
+    config[3] = heuristic.bkv;
+    config[4] = heuristic.nd;
+    rc = hip_kv_pareto_k8v8_gqa(stream, query, key, value, present_key,
+                                present_value, output, int(num_heads), int(sq),
+                                int(past), int(capacity), scale, workspace,
+                                bytes, config);
+  }
+  if (rc != 0)
+    return gqa_codec_error(state, decode ? "KV-Pareto decode failed"
+                                         : "KV-Pareto prefill failed");
+  RUNTIME_DEBUG_LOG(
+      "[REAL] KV-Pareto %s q=%lld past=%lld capacity=%lld H=%lld\n",
+      decode ? "decode" : "prefill", (long long)sq, (long long)past,
+      (long long)capacity, (long long)num_heads);
+  return 0;
+}
+#endif // HIP_EP_KV_PARETO_ENABLED
+
+//===----------------------------------------------------------------------===//
+// wrap_group_query_attention_v2: dense ABI plus physical BNSD cache widths.
+//===----------------------------------------------------------------------===//
+int wrap_group_query_attention_v2(
+    RuntimeState *state, int op_state_slot, void *query, void *key, void *value,
+    void *past_key, void *past_value, void *seqlens_k, void *total_seq_len,
+    void *cos_cache, void *sin_cache, void *position_ids, void *attention_bias,
+    void *head_sink, void *k_scale, void *v_scale, void *output,
+    void *present_key, void *present_value, void *output_qk, int64_t num_heads,
+    int64_t kv_num_heads, float scale, int64_t do_rotary,
+    int64_t rotary_interleaved, float softcap, int64_t local_window_size,
+    int64_t smooth_softmax, int64_t qk_output, int64_t k_quant_type,
+    int64_t v_quant_type, int64_t kv_cache_bit_width, int32_t no_causal,
+    int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
+    int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
+    int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
+    int64_t seq_len_new_kv, int64_t past_key_width, int64_t past_value_width,
+    int64_t present_key_width, int64_t present_value_width) {
+  const char *codec = gqa_provider_option(state, "kv_cache_codec");
+  const int64_t widths[4] = {past_key_width, past_value_width,
+                             present_key_width, present_value_width};
+  if (!codec || !*codec) {
+    // Dynamic dense widths reach v2 too; they must still equal head_dim.
+    for (int64_t width : widths)
+      if (width && width != head_dim)
+        return gqa_codec_error(state, "cache physical width differs from "
+                                      "head_dim without a cache codec");
+    return gqa_dense_impl(
+        state, op_state_slot, query, key, value, past_key, past_value,
+        seqlens_k, total_seq_len, cos_cache, sin_cache, position_ids,
+        attention_bias, head_sink, k_scale, v_scale, output, present_key,
+        present_value, output_qk, num_heads, kv_num_heads, scale, do_rotary,
+        rotary_interleaved, softcap, local_window_size, smooth_softmax,
+        qk_output, k_quant_type, v_quant_type, kv_cache_bit_width, no_causal,
+        batch_size, seq_len_q, seq_len_kv, past_buf_seq, head_dim,
+        element_size_bytes, attn_bias_batch, attn_bias_num_heads, kv_bnsd,
+        seq_len_new_kv);
+  }
+#if HIP_EP_KV_PARETO_ENABLED != 0
+  if (!kv_pareto_requested())
+    return gqa_codec_error(state, "kv_cache_codec selects a KV-Pareto cache, "
+                                  "which is disabled; set "
+                                  "HIPDNN_EP_USE_KV_PARETO=1 before starting "
+                                  "inference");
+  const char *bits = gqa_provider_option(state, "kvCacheQuantizationBits");
+  if (!bits || std::strcmp(bits, "8") != 0 ||
+      std::strcmp(codec, kK8V8Codec) != 0)
+    return gqa_codec_error(state, "unsupported cache codec; KV-Pareto "
+                                  "supports kvCacheQuantizationBits=8 with "
+                                  "kv_cache_codec=k8v8_g32_planar_v1");
+  (void)attn_bias_batch;
+  (void)attn_bias_num_heads;
+  return k8v8_forward(
+      state, op_state_slot, query, key, value, past_key, past_value, seqlens_k,
+      total_seq_len, cos_cache, sin_cache, position_ids, attention_bias,
+      head_sink, k_scale, v_scale, output, present_key, present_value,
+      output_qk, num_heads, kv_num_heads, scale, do_rotary, rotary_interleaved,
+      softcap, local_window_size, smooth_softmax, qk_output, k_quant_type,
+      v_quant_type, kv_cache_bit_width, no_causal, batch_size, seq_len_q,
+      seq_len_kv, past_buf_seq, head_dim, element_size_bytes, kv_bnsd,
+      seq_len_new_kv, widths);
+#else
+  return gqa_codec_error(state, "kv_cache_codec selects a KV-Pareto cache, "
+                                "but this build excludes it "
+                                "(HIP_EP_ENABLE_KV_PARETO=OFF)");
+#endif
 }

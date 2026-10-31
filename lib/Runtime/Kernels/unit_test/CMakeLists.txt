@@ -102,6 +102,11 @@ function(add_kernel_package_ut arch executable_name source_file)
 endfunction()
 
 foreach(_arch IN LISTS HIP_ARCHITECTURES)
+  if(HIP_EP_KV_PARETO_ENABLED AND (_arch STREQUAL "gfx1151" OR _arch STREQUAL "gfx11-generic"))
+    add_kernel_package_ut(${_arch}
+      hipdnn-kernel-ut-gqa-kv-pareto-xfp16-wi8-yfp16
+      gqa/kv_pareto/Xfp16_Wi8_Yfp16/test_gqa_kv_pareto.cpp)
+  endif()
   add_kernel_package_ut(${_arch}
     hipdnn-kernel-ut-matmul-nbits-xfp16-wu2-yfp16
     matmul_nbits/Xfp16_Wu2_Yfp16/test_matmul_nbits_u2.cpp)
@@ -163,6 +168,7 @@ hip_add_executable(hipdnn-kernel-ut
   COMPILE_OPTIONS
     -O3
     -std=c++17
+    -DHIP_EP_KV_PARETO_ENABLED=${HIP_EP_KV_PARETO_ENABLED}
   OFFLOAD_ARCHS
     ${_kernel_ut_primary_arch}
 )

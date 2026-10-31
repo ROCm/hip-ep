@@ -3999,6 +3999,55 @@ HIP_KERNEL_API int hip_gemv_f16_kn(void* stream, const void* a, const void* B,
 HIP_KERNEL_API int hip_gemm_wmma_fp16(void* stream, const void* A, const void* B,
                        void* C, int M, int K, int N);
 
+/* =========================================================================
+ * KV-Pareto KV-cache codecs (hip/kv_pareto/). Experimental: compiled by
+ * default (HIP_EP_ENABLE_KV_PARETO=ON), inference opt-in through
+ * HIPDNN_EP_USE_KV_PARETO=1. Implemented: per-token k8v8_g32_planar_v1.
+ * =========================================================================
+ *
+ * The codec lives inside the GQA cache tensors: each [1, 4, C, 140] FP16
+ * carrier tensor holds 4*C*280 bytes as a planar block of INT8 payload
+ * [4][C][256], BF16 scales [4][C][8] and INT8 zero points [4][C][8] (asymmetric
+ * per token, KV head and 32-channel group). Geometry: batch 1, 4 KV heads,
+ * head dimension 256, 16 or 24 query heads, FP16 activations, causal,
+ * C <= 262272 (a 256K prompt plus 128 generated tokens), at most 262144 new
+ * tokens per call. Return 0 on success and -1 on invalid arguments, an
+ * unsupported device or a launch failure. */
+#define HIP_EP_KV_PARETO_K8V8_WIDTH 140 /* FP16 carriers per token and head */
+/* Validated bounds, the same as Ring attention's (hip-ep PR #1366). */
+#define HIP_EP_KV_PARETO_MAX_CAPACITY 262272
+#define HIP_EP_KV_PARETO_MAX_NEW_TOKENS 262144
+/* 1 when this kernel library carries KV-Pareto device code and the current
+ * device is a validated target (gfx1151). */
+HIP_KERNEL_API int hip_kv_pareto_device_supported(void);
+HIP_KERNEL_API int hip_kv_pareto_k8v8_supported(int num_heads, int kv_num_heads,
+                                                int head_dim);
+/* Workspace bytes hip_kv_pareto_k8v8_gqa needs for this call (0 = unsupported). */
+HIP_KERNEL_API size_t hip_kv_pareto_k8v8_workspace(int num_heads, int seq_q,
+                                                   int past);
+/* Quantize `count` BSHD FP16 K/V tokens into cache rows [start, start+count). */
+HIP_KERNEL_API int hip_kv_pareto_k8v8_encode(void* stream, const void* key,
+                                             const void* value, void* k_cache,
+                                             void* v_cache, int start,
+                                             int count, int capacity);
+/* One GQA call over a K8V8 KV-Pareto cache; picks the phase itself.
+ * Q/K/V/output are BSHD FP16 with seq_q rows; `past` packed rows are already
+ * in the cache.
+ *   seq_q == 1 && past > 0: decode over packed history + direct current K/V;
+ *                           writes packed row `past`.
+ *   otherwise:              prefill over [dequantized history | direct new
+ *                           K/V]; writes packed rows [past, past + seq_q).
+ * prefill_config: optional {hb, qw, mt, bkv, nd} for the v8x flash prefill
+ * (hip_gqa_flash_prefill_v3_configured); NULL self-tunes online. */
+HIP_KERNEL_API int hip_kv_pareto_k8v8_gqa(void* stream, const void* query,
+                                          const void* key, const void* value,
+                                          void* k_cache, void* v_cache,
+                                          void* output, int num_heads,
+                                          int seq_q, int past, int capacity,
+                                          float scale, void* workspace,
+                                          size_t bytes,
+                                          const int* prefill_config);
+
 #ifdef __cplusplus
 }
 #endif
