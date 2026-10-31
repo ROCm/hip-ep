@@ -76,7 +76,9 @@ namespace {
 ///   %cur       = tensor.dim %k, %c1        // incoming KV tokens
 ///   %past      = tensor.dim %past_k, %c2   // valid past KV length (0 prefill)
 ///   %tot       = arith.addi %past, %cur    // present seq = past + current
-///   %seqlens_k = tensor.from_elements (%tot - 1)  : tensor<1xi32>
+///   %s1        = tensor.from_elements (%tot - 1)  : tensor<1xi32>
+///   %seqlens_k = hip.expand(%ctx) ins(%s1, [%B]) outs(tensor.empty(%B))
+///                                                  : tensor<?xi32>
 ///   %total_seq = tensor.from_elements %tot        : tensor<i32>
 ///   %pk_init   = tensor.empty(%B, %tot)    // present sized to %tot, NOT %past
 ///   %y, %pk, %pv = hip.gqa(%ctx)
@@ -233,6 +235,22 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
   // skipped and the mask (if any) carries all masking.
   bool noCausal = (isCausal == 0);
 
+  // AttentionWindowFold stamps `hipdnn.key_bias_mask` when it has reduced the
+  // mask to one additive value per key, [B, 1, 1, T]. That row travels as
+  // hip.gqa's `key_bias` [B, T], which the fused kernels apply, instead of a
+  // full `attention_bias` they cannot.
+  bool keyBiasMask = false;
+  if (attnMask && op->hasAttr("hipdnn.key_bias_mask")) {
+    auto maskType = mlir::cast<mlir::RankedTensorType>(attnMask.getType());
+    if (maskType.getRank() != 4 || maskType.getDimSize(1) != 1 ||
+        maskType.getDimSize(2) != 1 || !maskType.getElementType().isF16() ||
+        isCausal != 1)
+      return rewriter.notifyMatchFailure(
+          op, "hipdnn.key_bias_mask needs is_causal=1 and an f16 [B,1,1,T] "
+              "mask");
+    keyBiasMask = true;
+  }
+
   auto ctxOrFailure = getContextArg(op, rewriter);
   if (mlir::failed(ctxOrFailure))
     return rewriter.notifyMatchFailure(op, "missing context argument");
@@ -362,9 +380,35 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
           .getResult();
   mlir::Value seqlensKI32 =
       mlir::arith::IndexCastOp::create(rewriter, loc, i32Ty, totalKvM1Idx);
-  auto seqlensKType = mlir::RankedTensorType::get({1}, i32Ty);
+  // One entry per batch row: the runtime reads B of them. Only a static tiny
+  // host-written buffer is staged out of the GPU pool, so the value is written
+  // on the host as [1] and broadcast to [B] on the device.
+  const int64_t seqlensBatch = queryType.getDimSize(0);
   mlir::Value seqlensK = mlir::tensor::FromElementsOp::create(
-      rewriter, loc, seqlensKType, mlir::ValueRange{seqlensKI32});
+      rewriter, loc, mlir::RankedTensorType::get({1}, i32Ty),
+      mlir::ValueRange{seqlensKI32});
+  if (seqlensBatch != 1) {
+    llvm::SmallVector<mlir::Value> seqlensDyn;
+    mlir::Value batchIdx;
+    if (seqlensBatch == kDyn) {
+      batchIdx = mlir::tensor::DimOp::create(rewriter, loc, q3, 0).getResult();
+      seqlensDyn.push_back(batchIdx);
+    } else {
+      batchIdx =
+          mlir::arith::ConstantIndexOp::create(rewriter, loc, seqlensBatch);
+    }
+    mlir::Value batchI64 = mlir::arith::IndexCastOp::create(
+        rewriter, loc, rewriter.getI64Type(), batchIdx);
+    mlir::Value seqlensShape = mlir::tensor::FromElementsOp::create(
+        rewriter, loc, mlir::RankedTensorType::get({1}, rewriter.getI64Type()),
+        mlir::ValueRange{batchI64});
+    mlir::Value seqlensInit = mlir::tensor::EmptyOp::create(
+        rewriter, loc, llvm::ArrayRef<int64_t>{seqlensBatch}, i32Ty,
+        seqlensDyn);
+    seqlensK = mlir::hip::ExpandOp::create(rewriter, loc, context, seqlensK,
+                                           seqlensShape, seqlensInit)
+                   ->getResult(0);
+  }
 
   // === hip.gqa output type + init =====================================
   //
@@ -505,32 +549,42 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
     operands.push_back(pastValue);
   operands.push_back(seqlensK);
   operands.push_back(totalSeqLen);
-  if (attnMask)
+  if (attnMask && !keyBiasMask)
     operands.push_back(attnMask);
+  if (keyBiasMask) {
+    auto maskType = mlir::cast<mlir::RankedTensorType>(attnMask.getType());
+    auto rowType = mlir::RankedTensorType::get(
+        {maskType.getDimSize(0), maskType.getDimSize(3)},
+        maskType.getElementType());
+    llvm::SmallVector<mlir::ReassociationIndices> re = {{0, 1, 2}, {3}};
+    operands.push_back(mlir::tensor::CollapseShapeOp::create(
+        rewriter, loc, rowType, attnMask, re));
+  }
   operands.push_back(outputInit);
   operands.push_back(presentKeyInit);
   operands.push_back(presentValueInit);
 
   llvm::SmallVector<int32_t> segmentSizes;
-  segmentSizes.push_back(1);                 // ctx
-  segmentSizes.push_back(1);                 // query
-  segmentSizes.push_back(1);                 // key
-  segmentSizes.push_back(1);                 // value
-  segmentSizes.push_back(pastKey ? 1 : 0);   // past_key
-  segmentSizes.push_back(pastValue ? 1 : 0); // past_value
-  segmentSizes.push_back(1);                 // seqlens_k
-  segmentSizes.push_back(1);                 // total_seq_len
-  segmentSizes.push_back(0);                 // cos_cache
-  segmentSizes.push_back(0);                 // sin_cache
-  segmentSizes.push_back(0);                 // position_ids
-  segmentSizes.push_back(attnMask ? 1 : 0);  // attention_bias
-  segmentSizes.push_back(0);                 // head_sink
-  segmentSizes.push_back(0);                 // k_scale
-  segmentSizes.push_back(0);                 // v_scale
-  segmentSizes.push_back(1);                 // output
-  segmentSizes.push_back(1);                 // present_key
-  segmentSizes.push_back(1);                 // present_value
-  segmentSizes.push_back(0);                 // output_qk
+  segmentSizes.push_back(1);                                // ctx
+  segmentSizes.push_back(1);                                // query
+  segmentSizes.push_back(1);                                // key
+  segmentSizes.push_back(1);                                // value
+  segmentSizes.push_back(pastKey ? 1 : 0);                  // past_key
+  segmentSizes.push_back(pastValue ? 1 : 0);                // past_value
+  segmentSizes.push_back(1);                                // seqlens_k
+  segmentSizes.push_back(1);                                // total_seq_len
+  segmentSizes.push_back(0);                                // cos_cache
+  segmentSizes.push_back(0);                                // sin_cache
+  segmentSizes.push_back(0);                                // position_ids
+  segmentSizes.push_back(attnMask && !keyBiasMask ? 1 : 0); // attention_bias
+  segmentSizes.push_back(0);                                // head_sink
+  segmentSizes.push_back(0);                                // k_scale
+  segmentSizes.push_back(0);                                // v_scale
+  segmentSizes.push_back(keyBiasMask ? 1 : 0);              // key_bias
+  segmentSizes.push_back(1);                                // output
+  segmentSizes.push_back(1);                                // present_key
+  segmentSizes.push_back(1);                                // present_value
+  segmentSizes.push_back(0);                                // output_qk
 
   llvm::SmallVector<mlir::NamedAttribute> attrs;
   attrs.push_back(rewriter.getNamedAttr("num_heads",

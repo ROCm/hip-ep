@@ -28,7 +28,9 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
               int64_t k, int64_t expert_weight_bits, int64_t block_size,
               int64_t swiglu_fusion, int64_t activation_type,
               float activation_alpha, float activation_beta, float swiglu_limit,
-              int64_t normalize_routing_weights, int64_t elem_size) {
+              int64_t normalize_routing_weights, int64_t elem_size,
+              const void *correction_bias, int64_t routing_type,
+              float routed_scaling_factor) {
   OP_PROFILE(
       "qmoe",
       [&] {
@@ -53,6 +55,17 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
             "wrap_qmoe: unsupported swiglu_fusion=%lld activation_type=%lld "
             "(supported: swiglu_fusion=1, or swiglu_fusion=0 with relu2)\n",
             (long long)swiglu_fusion, (long long)activation_type);
+    return -1;
+  }
+
+  const bool sigmoid_bias = routing_type == HIPDNN_EP_QMOE_ROUTING_SIGMOID_BIAS;
+  if ((routing_type != HIPDNN_EP_QMOE_ROUTING_SOFTMAX && !sigmoid_bias) ||
+      (sigmoid_bias && (!correction_bias || router_weights))) {
+    fprintf(stderr,
+            "wrap_qmoe: invalid routing_type=%lld (correction_bias=%s, "
+            "router_weights=%s)\n",
+            (long long)routing_type, correction_bias ? "yes" : "null",
+            router_weights ? "yes" : "null");
     return -1;
   }
 
@@ -242,14 +255,23 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   int32_t *d_num_tiles =
       reinterpret_cast<int32_t *>(scratch_base + off_num_tiles);
 
-  RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: topk_routing(tokens=%lld, experts=%lld, "
+  RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: %s routing(tokens=%lld, experts=%lld, "
                     "k=%lld, normalize=%lld, router_weights=%s)\n",
+                    sigmoid_bias ? "sigmoid_bias" : "topk",
                     (long long)num_tokens, (long long)num_experts, (long long)k,
                     (long long)normalize_routing_weights,
                     router_weights ? "yes" : "no");
-  HIP_CHECK(hip_qmoe_topk_routing(
-      stream, router_probs, router_weights, d_expert_indices, d_expert_weights,
-      num_tokens, num_experts, k, normalize_routing_weights, elem_size));
+  if (sigmoid_bias) {
+    HIP_CHECK(hip_qmoe_sigmoid_bias_routing(
+        stream, router_probs, correction_bias, d_expert_indices,
+        d_expert_weights, num_tokens, num_experts, k, normalize_routing_weights,
+        routed_scaling_factor, elem_size));
+  } else {
+    HIP_CHECK(hip_qmoe_topk_routing(stream, router_probs, router_weights,
+                                    d_expert_indices, d_expert_weights,
+                                    num_tokens, num_experts, k,
+                                    normalize_routing_weights, elem_size));
+  }
 
   // Fused path: one token's MoE collapses to three back-to-back kernel
   // launches (FC1+SwiGLU, FC2, weighted reduce) with zero D2H,
@@ -392,13 +414,8 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
         "[REAL] wrap_qmoe: device %s prefill rows=%lld experts=%lld\n",
         grouped ? "grouped" : "ragged", (long long)routed_rows,
         (long long)num_experts);
-    if (grouped) {
-      // Routing slots that name no expert leave the tail of the sorted ids
-      // unwritten; zero it so the fixed-size gather below stays in bounds.
-      HIP_CHECK(hipMemsetAsync(d_sorted_token_ids, 0,
-                               routed_rows * sizeof(int32_t),
-                               static_cast<hipStream_t>(stream)));
-    }
+    // Bucketing zeroes the sorted-id tail left by routing slots that name no
+    // expert, so the fixed-size gather below stays in bounds.
     HIP_CHECK(hip_qmoe_bucket_tokens_ragged(
         stream, d_expert_indices, d_expert_weights, d_expert_counts,
         d_expert_offsets, d_sorted_token_ids, d_sorted_weights,

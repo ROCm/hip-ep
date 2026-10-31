@@ -38,6 +38,20 @@
 //     proving value-equivalence in general would require alias analysis;
 //     SSA identity is sound and cheap, and CSE should run first to
 //     maximize opportunities).
+//   - Host-accessed buffers (any alias read or written by memref.load/store)
+//     take no part in reuse.  HIP ops run asynchronously in stream order, so a
+//     host store into a slot whose previous owner a HIP op still has to read
+//     overtakes that read:
+//
+//       Before:
+//         %a = memref.alloc() : memref<1xi32>
+//         memref.store %x, %a[%c0] : memref<1xi32>
+//         hip.expand(%ctx) ins(%a, ...) outs(...)
+//         %b = memref.alloc() : memref<i32>
+//         memref.store %y, %b[] : memref<i32>
+//
+//       After: unchanged.  Reusing %a for %b would let the store of %y land
+//       before hip.expand reads %x.
 //
 //===----------------------------------------------------------------------===//
 
@@ -126,6 +140,15 @@ static bool canReuse(const Slot &slot, MemRefType neededType,
   return false;
 }
 
+static bool hasHostAccess(Value allocResult,
+                          const BufferViewFlowAnalysis &aliasAnalysis) {
+  for (Value alias : aliasAnalysis.resolve(allocResult))
+    for (Operation *user : alias.getUsers())
+      if (isa<memref::LoadOp, memref::StoreOp>(user))
+        return true;
+  return false;
+}
+
 //===----------------------------------------------------------------------===//
 // Pass
 //===----------------------------------------------------------------------===//
@@ -175,7 +198,7 @@ void OptimizeMemRefsPass::runOnOperation() {
       continue;
 
     Value result = allocOp.getResult();
-    if (result.use_empty())
+    if (result.use_empty() || hasHostAccess(result, aliasAnalysis))
       continue;
 
     unsigned lastUse = findLastAliasedUseIndex(result, aliasAnalysis, block,

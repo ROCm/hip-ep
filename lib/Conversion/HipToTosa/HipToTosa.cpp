@@ -6861,6 +6861,18 @@ struct GqaConverter final : public OpConversionPattern<GqaOp> {
         failed(addAttentionBias(scores, adaptor.getAttentionBias(), qkTy, batch,
                                 numHeads, rewriter, loc, op)))
       return failure();
+    if (Value keyBias = adaptor.getKeyBias()) {
+      auto kbTy = dyn_cast<RankedTensorType>(keyBias.getType());
+      if (!kbTy || !kbTy.hasStaticShape() || kbTy.getRank() != 2)
+        return rewriter.notifyMatchFailure(op, "key_bias must be static");
+      if (kbTy.getElementType() != attnElem)
+        keyBias = emitTosaCast(rewriter, loc, keyBias, attnElem);
+      keyBias = reshapeTo(
+          keyBias, {kbTy.getDimSize(0), 1, 1, kbTy.getDimSize(1)}, rewriter);
+      if (failed(addAttentionBias(scores, keyBias, qkTy, batch, numHeads,
+                                  rewriter, loc, op)))
+        return failure();
+    }
 
     Value kIdx = createArangeI32(rewriter, loc, seqKv);
     kIdx = reshapeTo(kIdx, {1, 1, seqKv}, rewriter);
@@ -7721,6 +7733,8 @@ std::optional<QMoEPlan> planQMoE(hip::QMoEOp op) {
     return std::nullopt;
   // router_weights overrides router_probs and skips the softmax; not modelled.
   if (op.getRouterWeights())
+    return std::nullopt;
+  if (op.getRoutingType() != "softmax")
     return std::nullopt;
   if (op.getExpertWeightBits() != 4)
     return std::nullopt;

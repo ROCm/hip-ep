@@ -376,7 +376,8 @@ extern "C" int hip_gqa_flash_prefill(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
     void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
     int past_len, float scale, int local_window_size, const void* head_sink,
-    int num_heads, int smooth_softmax);
+    int num_heads, int smooth_softmax, const void* key_bias,
+    int key_bias_stride);
 
 #ifdef HIPDNN_LUT_LINKED_EXTERNALLY
 #include "gqa_autotune.h"
@@ -387,7 +388,8 @@ extern "C" int hip_gqa_flash_prefill_v3_configured(
     int B, int Hq, int G, int sq, int skv, int d, int max_seq, int past_len,
     float scale, int local_window_size, const void* head_sink,
     int num_heads, int smooth_softmax,
-    int hb, int qw, int mt, int bkv, int nd);
+    int hb, int qw, int mt, int bkv, int nd,
+    const void* key_bias, int key_bias_stride);
 
 static void* gqa_policy() {
   static void* p = hip_gqa_autotune_create(nullptr);
@@ -440,7 +442,24 @@ struct Case {
   // Sliding window; <= 0 is full attention. Convention matches
   // causal_mask_kernel_impl: key k is masked when k < past_len + q - window + 1.
   int window;
+  // > 0: a key_bias row per batch masks batch b's last b*pad keys (right
+  // padding, so every query row keeps a real key).
+  int pad;
 };
+
+// The ONNX mask value for a padded key: the fp16 lower bound.
+static constexpr float kPadBias = -65504.0f;
+
+// key_bias rows [B, skv]: 0 for a real key, kPadBias for padding. Empty when
+// the case has no padding.
+static std::vector<float> make_key_bias(const Case& c, int skv) {
+  if (c.pad <= 0) return {};
+  std::vector<float> kb((size_t)c.B * skv, 0.0f);
+  for (int b = 0; b < c.B; ++b)
+    for (int k = std::max(0, skv - b * c.pad); k < skv; ++k)
+      kb[(size_t)b * skv + k] = kPadBias;
+  return kb;
+}
 
 // CPU fp32 reference: causal GQA attention. Q/O BSHD, K/V cache BNSD. O(sq^2)
 // per (b,hq) -- threaded over the B*H (batch, query-head) pairs (each is
@@ -452,7 +471,8 @@ static void cpu_reference(const std::vector<float>& Q,
                           const std::vector<float>& V, std::vector<float>& O,
                           int B, int H, int G, int D, int sq, int max_seq,
                           int past_len, float scale, int sink_mode,
-                          const std::vector<float>& sink, int window) {
+                          const std::vector<float>& sink, int window,
+                          const std::vector<float>& kb) {
   const int HPG = H / G;
   const int total = past_len + sq;
   auto bhRange = [&](int idx0, int idx1) {
@@ -472,7 +492,7 @@ static void cpu_reference(const std::vector<float>& Q,
           const float* kp = &K[((size_t)(b * G + hkv) * max_seq + k) * D];
           float dot = 0.0f;
           for (int e = 0; e < D; ++e) dot += q[e] * kp[e];
-          scores[k] = dot * scale;
+          scores[k] = dot * scale + (kb.empty() ? 0.0f : kb[(size_t)b * total + k]);
           if (scores[k] > m) m = scores[k];
         }
         float l = 0.0f;
@@ -533,6 +553,7 @@ static std::string case_shape(const Case& c) {
   if (c.window > 0) s += "_win" + std::to_string(c.window);
   if (c.sink_mode == kSinkPerHead || c.sink_mode == kSinkBoth) s += "_sink";
   if (c.sink_mode == kSinkSmooth || c.sink_mode == kSinkBoth) s += "_smooth";
+  if (c.pad > 0) s += "_pad" + std::to_string(c.pad);
   return s;
 }
 
@@ -564,8 +585,9 @@ static bool run_case(const Case& c, int iters) {
     sinkf[h] = __half2float(sinkh[h]);
   }
 
+  const std::vector<float> Kb = make_key_bias(c, skv);
   cpu_reference(Qf, Kf, Vf, Oref, B, H, G, D, sq, max_seq, past_len, scale,
-                c.sink_mode, sinkf, c.window);
+                c.sink_mode, sinkf, c.window, Kb);
 
   std::vector<__half> Qh(qn), Kh(kn), Vh(kn);
   for (size_t i = 0; i < qn; ++i) Qh[i] = __float2half(Qf[i]);
@@ -581,6 +603,15 @@ static bool run_case(const Case& c, int iters) {
   HIP_CHECK(hipMemcpy(dK, Kh.data(), kn * sizeof(__half), hipMemcpyHostToDevice));
   HIP_CHECK(hipMemcpy(dV, Vh.data(), kn * sizeof(__half), hipMemcpyHostToDevice));
   HIP_CHECK(hipMemcpy(dSink, sinkh.data(), (size_t)H * sizeof(__half), hipMemcpyHostToDevice));
+  __half* dKb = nullptr;
+  if (!Kb.empty()) {
+    std::vector<__half> Kbh(Kb.size());
+    for (size_t i = 0; i < Kb.size(); ++i) Kbh[i] = __float2half(Kb[i]);
+    HIP_CHECK(hipMalloc(&dKb, Kbh.size() * sizeof(__half)));
+    HIP_CHECK(hipMemcpy(dKb, Kbh.data(), Kbh.size() * sizeof(__half),
+                        hipMemcpyHostToDevice));
+  }
+  const int kb_stride = B > 1 ? skv : 0;
 
   // Route through the unified entry (same path the runtime takes); it dispatches
   // v6x / v8x by head dim internally.
@@ -619,17 +650,17 @@ static bool run_case(const Case& c, int iters) {
           nullptr, dQ, k, v, dO, B, H, G, sq, skv, D, kv_rows, past_len,
           scale, window_arg, sink_arg, H, smooth_arg, lut_res.config.hb,
           lut_res.config.qw, lut_res.config.mt, lut_res.config.bkv,
-          lut_res.config.nd);
+          lut_res.config.nd, dKb, kb_stride);
     }
     return hip_gqa_flash_prefill(nullptr, dQ, k, v, dO, B, H, G, sq, skv, D,
                                   kv_rows, past_len, scale, window_arg,
-                                  sink_arg, H, smooth_arg);
+                                  sink_arg, H, smooth_arg, dKb, kb_stride);
   };
 #else
   auto launch = [&](const void* k, const void* v, int kv_rows) {
     return hip_gqa_flash_prefill(nullptr, dQ, k, v, dO, B, H, G, sq, skv, D,
                                     kv_rows, past_len, scale, window_arg,
-                                    sink_arg, H, smooth_arg);
+                                    sink_arg, H, smooth_arg, dKb, kb_stride);
   };
 #endif
 
@@ -669,6 +700,7 @@ static bool run_case(const Case& c, int iters) {
       csv.write(row);
     }
     hipFree(dQ); hipFree(dK); hipFree(dV); hipFree(dO); hipFree(dSink);
+    if (dKb) hipFree(dKb);
     return ok;
   }
   if (rc != 0) { fprintf(stderr, "%s: kernel returned %d\n", c.name, rc); return false; }
@@ -733,6 +765,7 @@ static bool run_case(const Case& c, int iters) {
   }
 
   hipFree(dQ); hipFree(dK); hipFree(dV); hipFree(dO); hipFree(dSink);
+  if (dKb) hipFree(dKb);
   return pass;
 }
 
@@ -755,6 +788,7 @@ int main(int argc, char** argv) {
     else if (a == "--sq") { next(single.sq); have_single = true; }
     else if (a == "--past") { next(single.past); have_single = true; }
     else if (a == "--window") { next(single.window); have_single = true; }
+    else if (a == "--pad") { next(single.pad); have_single = true; }
   }
 
   if (have_single) {
@@ -899,33 +933,47 @@ int main(int argc, char** argv) {
       // window have to follow each wave's own rows.
       {"hpg3-d64-both",  1, 24,  8,  64, 1000, 512,  kSinkBoth,   false, 0},
       {"mha-d64-both",   2, 16, 16,  64, 777,  300,  kSinkBoth,   false, 128},
+
+      // ---- Per-key bias (key-padding mask), appended so indices 0-74 are
+      // unchanged. Laguna-S: full layers H48 G8 (hpg6), sliding layers H72 G8
+      // (hpg9) with a 512-key window; batch 2 pads batch 1. ----
+      {"laguna-s-full",  1, 48,  8, 128, 1000, 0,    kSinkNone,   false, 0},
+      {"laguna-s-pad",   2, 48,  8, 128, 1000, 0,    kSinkNone,   false, 0,   250},
+      {"laguna-s-swa",   1, 72,  8, 128, 1000, 0,    kSinkNone,   false, 512},
+      {"laguna-s-swa-pd",2, 72,  8, 128, 1000, 1000, kSinkNone,   false, 512, 300},
+      // Only d128 builds a key-bias instance; the other head dims decline.
+      {"pad-d64-win",    2, 64,  8,  64, 777,  0,    kSinkNone,   true,  128, 200},
+      {"pad-d96",        2, 32, 32,  96, 512,  0,    kSinkNone,   true,  0,   100},
+      {"pad-d256",       2, 16,  2, 256, 512,  0,    kSinkNone,   true,  0,   100},
   };
   const size_t kNumCases = sizeof(cases) / sizeof(cases[0]);
 
-  // tier1 (26 rows) still touches D{64,96,128,256}, every sink_mode, window
+  // tier1 (28 rows) still touches D{64,96,128,256}, every sink_mode, window
   // on/off, window 1, a window wider than the sequence, chunked-prefill
   // (past>0), batch 2, the d128-must-decline case and 2 of the sq=128 rows
   // (the cheapest shape), plus one row per prefill route the first rows
   // miss: a d256 group of 6, a group of 2, the declined d256 window, a d128
   // group not divisible by 4 with and without a window, d128 MHA, d96
-  // plain / windowed / with a sink, a d256 group of 5, a d64 group of 3 and
-  // d64 MHA with the sink, smooth and a window together.
-  static const size_t kTier1[] = {0,  3,  7,  9,  11, 13, 15, 17, 18,
-                                  23, 24, 25, 29, 30, 40, 43, 44, 47,
-                                  50, 55, 56, 64, 66, 69, 73, 74};
+  // plain / windowed / with a sink, a d256 group of 5, a d64 group of 3,
+  // d64 MHA with the sink, smooth and a window together, and the key bias
+  // with and without a window.
+  static const size_t kTier1[] = {0,  3,  7,  9,  11, 13, 15, 17, 18, 23,
+                                  24, 25, 29, 30, 40, 43, 44, 47, 50, 55,
+                                  56, 64, 66, 69, 73, 74, 76, 78};
   // tier2 (~65% by case count, but includes ALL the cheap sq=128 additions
   // since they cost almost nothing -- see kTier2 vs tier3 wall time in
   // RESULT.md) still excludes the 2 new expensive sq=8192 rows (kept
   // tier3-only, a deliberate budget trade-off documented in RESULT.md).
-  // The prefill routing and head_dim 96 rows (39-74) are all in tier2, and
-  // so is every tier1 row.
+  // The prefill routing, head_dim 96 and key bias rows (39-81) are all in
+  // tier2, and so is every tier1 row.
   static const size_t kTier2[] = {0,  1,  3,  4,  6,  7,  9,  10, 11, 12,
                                   13, 14, 15, 16, 17, 18, 19, 20, 21, 23,
                                   24, 25, 26, 28, 29, 30, 31, 32, 33, 34,
                                   35, 36, 39, 40, 41, 42, 43, 44, 45, 46,
                                   47, 48, 49, 50, 51, 52, 53, 54, 55, 56,
                                   57, 58, 59, 60, 61, 62, 63, 64, 65, 66,
-                                  67, 68, 69, 70, 71, 72, 73, 74};
+                                  67, 68, 69, 70, 71, 72, 73, 74, 75, 76,
+                                  77, 78, 79, 80, 81};
   const size_t* idxs = coverage_tier == 1 ? kTier1
                      : coverage_tier == 2 ? kTier2
                                           : nullptr;

@@ -2652,6 +2652,39 @@ LogicalResult DequantBnb4Op::verify() {
 
 MutableOperandRange QMoEOp::getDpsInitsMutable() { return getOutputMutable(); }
 
+LogicalResult QMoEOp::verify() {
+  StringRef routing = getRoutingType();
+  if (routing == "softmax") {
+    if (getCorrectionBias())
+      return emitOpError("correction_bias requires routing_type sigmoid_bias");
+    return success();
+  }
+  if (routing != "sigmoid_bias")
+    return emitOpError("routing_type must be softmax or sigmoid_bias, got ")
+           << routing;
+  if (getRouterWeights())
+    return emitOpError("sigmoid_bias routing computes its own weights; "
+                       "router_weights must be absent");
+  auto logitsTy = dyn_cast<ShapedType>(getRouterProbs().getType());
+  auto biasTy = getCorrectionBias()
+                    ? dyn_cast<ShapedType>(getCorrectionBias().getType())
+                    : ShapedType();
+  if (!logitsTy || !logitsTy.getElementType().isF32())
+    return emitOpError("sigmoid_bias routing needs fp32 router logits");
+  if (!biasTy || biasTy.getRank() != 1 || !biasTy.getElementType().isF32())
+    return emitOpError("sigmoid_bias routing needs a rank-1 fp32 "
+                       "correction_bias");
+  if (logitsTy.hasRank() && logitsTy.getRank() > 0) {
+    int64_t experts = logitsTy.getDimSize(logitsTy.getRank() - 1);
+    int64_t biasLen = biasTy.getDimSize(0);
+    if (!ShapedType::isDynamic(experts) && !ShapedType::isDynamic(biasLen) &&
+        experts != biasLen)
+      return emitOpError("correction_bias length ")
+             << biasLen << " does not match " << experts << " experts";
+  }
+  return success();
+}
+
 void QMoEOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
@@ -3394,6 +3427,8 @@ MutableOperandRange GqaOp::getDpsInitsMutable() {
     ++numInputs;
   if (getVScale())
     ++numInputs;
+  if (getKeyBias())
+    ++numInputs;
 
   // DPS inits: output, present_key, present_value, [output_qk]
   unsigned numInits = 3;
@@ -3479,6 +3514,21 @@ LogicalResult GqaOp::verify() {
                        "(found key=")
            << (hasKey ? "present" : "absent")
            << ", value=" << (hasValue ? "present" : "absent") << ")";
+  }
+
+  // key_bias is one fp16 row per batch entry, [B, T]. It refines the mask the
+  // runtime already applies, so it cannot stand in for a full attention_bias.
+  if (Value keyBias = getKeyBias()) {
+    auto type = dyn_cast<ShapedType>(keyBias.getType());
+    if (!type || !type.hasRank() || type.getRank() != 2 ||
+        !type.getElementType().isF16())
+      return emitOpError("key_bias must be a rank-2 f16 [batch, total_seq_len]"
+                         " tensor or memref");
+    if (getAttentionBias())
+      return emitOpError("key_bias and attention_bias are mutually exclusive");
+    if (getNoCausal())
+      return emitOpError("key_bias requires causal attention (no_causal must "
+                         "be false)");
   }
 
   return success();

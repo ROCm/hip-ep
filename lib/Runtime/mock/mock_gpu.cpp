@@ -532,7 +532,9 @@ int wrap_group_query_attention(
     // it).
     int64_t kv_bnsd,
     // key/value sequence length (mock stub ignores it).
-    int64_t seq_len_new_kv) {
+    int64_t seq_len_new_kv,
+    // Per-key bias row [key_bias_batch, key_bias_len] (mock stub logs it).
+    void *key_bias, int64_t key_bias_batch, int64_t key_bias_len) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_group_query_attention\n");
     return -1;
@@ -570,6 +572,8 @@ int wrap_group_query_attention(
              "attn_bias_num_heads=%lld,\n",
              attention_bias, (long long)attn_bias_batch,
              (long long)attn_bias_num_heads);
+  MOCK_PRINT("[MOCK]   key_bias=%p, key_bias_batch=%lld, key_bias_len=%lld,\n",
+             key_bias, (long long)key_bias_batch, (long long)key_bias_len);
   MOCK_PRINT("[MOCK]   batch=%lld, seq_q=%lld, seq_kv=%lld, "
              "past_buf_seq=%lld, head_dim=%lld, elem_size=%lld)\n",
              (long long)batch_size, (long long)seq_len_q, (long long)seq_len_kv,
@@ -1956,7 +1960,9 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
               int64_t k, int64_t expert_weight_bits, int64_t block_size,
               int64_t swiglu_fusion, int64_t activation_type,
               float activation_alpha, float activation_beta, float swiglu_limit,
-              int64_t normalize_routing_weights, int64_t elem_size) {
+              int64_t normalize_routing_weights, int64_t elem_size,
+              const void *correction_bias, int64_t routing_type,
+              float routed_scaling_factor) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_qmoe\n");
     return -1;
@@ -1983,6 +1989,10 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
              fc1_bias ? "yes" : "null", fc2_bias ? "yes" : "null",
              fc3_weights ? "yes" : "null", fc1_zero_points ? "yes" : "null",
              fc2_zero_points ? "yes" : "null", router_weights ? "yes" : "null");
+  MOCK_PRINT("[MOCK]   routing_type=%lld, correction_bias=%s, "
+             "routed_scaling_factor=%f\n",
+             (long long)routing_type, correction_bias ? "yes" : "null",
+             (double)routed_scaling_factor);
 
   return 0;
 }

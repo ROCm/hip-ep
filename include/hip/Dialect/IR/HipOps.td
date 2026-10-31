@@ -954,6 +954,16 @@ def Hip_QMoEOp : Hip_DpsOp_WithInfer<"qmoe", "Output", [AttrSizedOperandSegments
       fc1/fc2/fc3_zero_points: per-block zero points (optional)
       router_weights: alternative aggregation weights (optional, ONNX v1.25+, takes precedence over router_probs)
 
+    Routing (`routing_type`):
+      "softmax" (default): experts are the top-k of softmax(router_probs);
+        weights are those probabilities (or router_weights when present),
+        renormalized over k when normalize_routing_weights=1.
+      "sigmoid_bias": router_probs holds fp32 router logits. With
+        s = sigmoid(router_probs), experts are the top-k of
+        s + correction_bias (ties to the lower index), and the weights are
+        s / sum_k(s) * routed_scaling_factor (no sum when
+        normalize_routing_weights=0). router_weights must be absent.
+
     Uses destination-passing style: output buffer is provided as argument.
 
     Example:
@@ -987,6 +997,7 @@ def Hip_QMoEOp : Hip_DpsOp_WithInfer<"qmoe", "Output", [AttrSizedOperandSegments
     Optional<Hip_TensorOrMemRef>:$fc2_zero_points,        // fc2 dequant zero points
     Optional<Hip_TensorOrMemRef>:$fc3_zero_points,        // fc3 dequant zero points
     Optional<Hip_TensorOrMemRef>:$router_weights,         // [num_tokens, num_experts] alternative routing weights (ONNX v1.25+)
+    Optional<Hip_TensorOrMemRef>:$correction_bias,        // [num_experts] fp32, sigmoid_bias routing only
     Hip_TensorOrMemRef:$output,                 // DPS init [batch, seq, hidden]
     I64Attr:$expert_weight_bits,
     I64Attr:$k,
@@ -997,8 +1008,11 @@ def Hip_QMoEOp : Hip_DpsOp_WithInfer<"qmoe", "Output", [AttrSizedOperandSegments
     F32Attr:$activation_alpha,
     F32Attr:$activation_beta,
     F32Attr:$swiglu_limit,
-    StrAttr:$activation_type
+    StrAttr:$activation_type,
+    DefaultValuedStrAttr<StrAttr, "softmax">:$routing_type,
+    DefaultValuedAttr<F32Attr, "1.0f">:$routed_scaling_factor
   );
+  let hasVerifier = 1;
 
   let assemblyFormat = [{
     `(` $handle `)` `ins` `(`
@@ -1018,6 +1032,7 @@ def Hip_QMoEOp : Hip_DpsOp_WithInfer<"qmoe", "Output", [AttrSizedOperandSegments
     (`fc2_zero_points` `(` $fc2_zero_points^ `:` type($fc2_zero_points) `)`)?
     (`fc3_zero_points` `(` $fc3_zero_points^ `:` type($fc3_zero_points) `)`)?
     (`router_weights` `(` $router_weights^ `:` type($router_weights) `)`)?
+    (`correction_bias` `(` $correction_bias^ `:` type($correction_bias) `)`)?
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
@@ -4095,6 +4110,12 @@ def Hip_GqaOp : Hip_DpsOp_AutoReify<"gqa", [AttrSizedOperandSegments, OpStateOpI
     Optional<Hip_TensorOrMemRef>:$k_scale,        // Broadcastable to present_key shape
     Optional<Hip_TensorOrMemRef>:$v_scale,        // Broadcastable to present_value shape
 
+    // HIP extension (not in the MS spec): an additive fp16 bias per key,
+    // [batch, total_seq_len], added to every query row's scores on top of the
+    // causal and window masks. It carries a key-padding mask in a form the
+    // fused flash kernels apply directly, which a full attention_bias is not.
+    Optional<Hip_TensorOrMemRef>:$key_bias,
+
     // === DPS-style output buffers ===
     Hip_TensorOrMemRef:$output,        // 3D (batch, seq_len, hidden_size)
     Hip_TensorOrMemRef:$present_key,   // 4D BNSH format
@@ -4157,6 +4178,7 @@ def Hip_GqaOp : Hip_DpsOp_AutoReify<"gqa", [AttrSizedOperandSegments, OpStateOpI
         ( `,` type($k_scale)^ )?
         ( `,` type($v_scale)^ )?
     `)`
+    ( `key_bias` `(` $key_bias^ `:` type($key_bias) `)` )?
     `outs` `(`
         $output `,` $present_key `,` $present_value
         ( `,` $output_qk^ )?

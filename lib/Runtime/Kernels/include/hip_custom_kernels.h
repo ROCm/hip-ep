@@ -1263,27 +1263,38 @@ HIP_KERNEL_API int hip_gqa_flash_prefill_v2(
  *                       decomposed path when head_sink is null. head_sink takes
  *                       precedence when both are supplied.
  *
- * Sinks are implemented at d == 64 and d == 96, and windows at d == 64, 96
- * and 128 (all by v6x). Returns 0 on success and -1 when the request cannot
- * be served exactly (a sink with d == 128 or 256, a window with d == 256), so
- * the caller falls back to the decomposed path instead of silently dropping
- * either. A request with neither keeps v2's head-dim coverage. */
+ *   key_bias          : [B, key_bias_stride] __half additive bias per key, or
+ *                       null. Added to every query row's scaled scores, in the
+ *                       units of an ONNX additive mask; key_bias_stride == 0
+ *                       shares one row across the batch. Carries a key-padding
+ *                       mask on top of the built-in causal and window masks.
+ *
+ * Sinks are implemented at d == 64 and d == 96, windows at d == 64, 96 and
+ * 128, and key_bias at d == 128 (all by v6x). Returns 0 on success, -1 when
+ * the request cannot be served exactly (a sink with d == 128 or 256, a window
+ * with d == 256, key_bias with any d but 128), so the caller falls back to the
+ * decomposed path instead of
+ * silently dropping it, and the HIP error of a failed launch otherwise. A
+ * request with none of them keeps v2's head-dim coverage. */
 HIP_KERNEL_API int hip_gqa_flash_prefill(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
     void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
     int past_len, float scale, int local_window_size, const void* head_sink,
-    int num_heads, int smooth_softmax);
+    int num_heads, int smooth_softmax, const void* key_bias,
+    int key_bias_stride);
 
-/* Lookup-only v3 variant. The final five fields are the explicit launch
+/* Lookup-only v3 variant. hb / qw / mt / bkv / nd are the explicit launch
  * config (hipdnn_ep::GqaPrefillConfig): v6x uses hb / qw / mt / bkv, v8x uses
- * nd / hb / bkv; unused fields are zero. This entry validates the tuple against
- * the configs built for the shape and never invokes an online autotuner. */
+ * nd / hb / bkv; unused fields are zero. key_bias is as for
+ * hip_gqa_flash_prefill. This entry validates the tuple against the configs
+ * built for the shape and never invokes an online autotuner. */
 HIP_KERNEL_API int hip_gqa_flash_prefill_v3_configured(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
     void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
     int past_len, float scale, int local_window_size, const void* head_sink,
     int num_heads, int smooth_softmax,
-    int hb, int qw, int mt, int bkv, int nd);
+    int hb, int qw, int mt, int bkv, int nd,
+    const void* key_bias, int key_bias_stride);
 
 /* NB: prefill is compute-bound, so there is deliberately NO separate int8
  * prefill kernel. The runtime (real/gqa.cpp) dequantizes the int8 KV cache to an
@@ -1306,7 +1317,7 @@ HIP_KERNEL_API int hip_mha_flash_prefill(
     void* O, int B, int N, int sq, int skv, int d, int max_seq, float scale);
 
 /* FA-2 split-K GQA decode (sq == 1, d in {64, 96, 128, 256},
- * HPG=H/G in {1,2,3,4,5,6,8,16}):
+ * HPG=H/G in {1,2,3,4,5,6,8,16}, and HPG=9 at d == 128):
  * GQA-aware kernel that loads K/V tiles into LDS once and reuses them
  * across the query heads of each KV group, then a second kernel
  * merges K_SPLITS partial (m, l, O) per query head. fp16 d == 96 runs a
@@ -1353,7 +1364,10 @@ HIP_KERNEL_API int hip_mha_flash_prefill(
  *     INT8 [B,G,max_seq,d] (BNSD); k_scale/v_scale are fp32 [G,d] (one scale per
  *     (kv_head, head_dim) channel, no zero point; dequant x_fp16 = x_i8 *
  *     scale[g*d + c]). The int8 read is 1 byte/elem, halving the DRAM traffic on
- *     the bandwidth-bound decode. Both scales are required for INT8. */
+ *     the bandwidth-bound decode. Both scales are required for INT8.
+ *
+ * key_bias: optional [B, key_bias_stride] __half additive bias per key, as for
+ * hip_gqa_flash_prefill (key_bias_stride == 0 shares one row). */
 HIP_KERNEL_API int hip_gqa_flash_decode(
     void* stream,
     const void* Q, const void* Kcache, const void* Vcache,
@@ -1367,7 +1381,9 @@ HIP_KERNEL_API int hip_gqa_flash_decode(
     int use_smooth_softmax,
     int kv_dtype,
     const void* k_scale,
-    const void* v_scale);
+    const void* v_scale,
+    const void* key_bias,
+    int key_bias_stride);
 
 /* Lookup-only variant of hip_gqa_flash_decode. The caller supplies a
  * validated offline-LUT or heuristic configuration, so this entry never runs
@@ -1389,7 +1405,9 @@ HIP_KERNEL_API int hip_gqa_flash_decode_configured(
     const void* v_scale,
     int use_wmma,
     int splits,
-    int bkv);
+    int bkv,
+    const void* key_bias,
+    int key_bias_stride);
 
 /* =========================================================================
  * Cast (Element Type Conversion)
@@ -2950,6 +2968,30 @@ HIP_KERNEL_API int hip_qmoe_topk_routing(
     int64_t normalize,
     int64_t element_size_bytes);
 
+/* Sigmoid + correction-bias top-k routing.
+ *   logits          - GPU [num_tokens, num_experts] fp32 router logits
+ *   correction_bias - GPU [num_experts] fp32; selection only
+ *   expert_indices  - GPU [num_tokens, k] int32 (output), in descending
+ *                     sigmoid + bias order, ties to the lower expert index
+ *   expert_weights  - GPU [num_tokens, k] fp16 (output):
+ *                     s / sum_k(s) * scale (no sum when normalize == 0),
+ *                     s = sigmoid(logit) of the selected expert
+ * Same output layout as hip_qmoe_topk_routing. element_size_bytes is that
+ * of expert_weights; only fp16 is supported.
+ */
+HIP_KERNEL_API int hip_qmoe_sigmoid_bias_routing(
+    void* stream,
+    const void* logits,
+    const void* correction_bias,
+    void* expert_indices,
+    void* expert_weights,
+    int64_t num_tokens,
+    int64_t num_experts,
+    int64_t k,
+    int64_t normalize,
+    float scale,
+    int64_t element_size_bytes);
+
 /* Gather rows: gathered[i,:] = input[token_ids[i],:]
  *   token_ids - GPU [count] int32
  */
@@ -3016,9 +3058,11 @@ HIP_KERNEL_API int hip_qmoe_scatter_add(
  *   expert_weights   - GPU [num_tokens * k] fp16  (input from topk_routing)
  *   expert_counts    - GPU [num_experts]      int32 (output)
  *   expert_offsets   - GPU [num_experts + 1]  int32 (output, exclusive scan)
- *   sorted_token_ids - GPU [num_tokens * k]   int32 (output, grouped by eid)
+ *   sorted_token_ids - GPU [num_tokens * k]   int32 (output, grouped by eid;
+ *                      entries past the last routed pair are zeroed)
  *   sorted_weights   - GPU [num_tokens * k]   fp16  (output, aligned w/ ids)
  *
+ * Pairs whose expert id is outside [0, num_experts) are dropped.
  * Constraints: fp16 only; num_experts <= 1024.
  */
 HIP_KERNEL_API int hip_qmoe_bucket_tokens(

@@ -218,6 +218,21 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
       }
     }
 
+    // key_bias [B or 1, T]: one fp16 row per batch entry, applied by the fused
+    // kernels per key. The runtime checks T against the KV length it scores.
+    Value keyBiasPtr = nullPtr;
+    Value keyBiasBatchVal = createI64Const(0);
+    Value keyBiasLenVal = createI64Const(0);
+    if (op.getKeyBias()) {
+      auto kbType = cast<MemRefType>(op.getKeyBias().getType());
+      keyBiasPtr =
+          extractContiguousMemRefPtr(adaptor.getKeyBias(), rewriter, loc);
+      keyBiasBatchVal =
+          getMemRefDimSize(kbType, 0, adaptor.getKeyBias(), rewriter, loc);
+      keyBiasLenVal =
+          getMemRefDimSize(kbType, 1, adaptor.getKeyBias(), rewriter, loc);
+    }
+
     // Function signature matches wrap_group_query_attention() in gqa.cpp
     SmallVector<Type, 42> paramTypes = {
         ptrType, // state
@@ -266,7 +281,10 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         i64Type, // attn_bias_batch
         i64Type, // attn_bias_num_heads
         i64Type, // kv_bnsd
-        i64Type  // seq_len_new_kv
+        i64Type, // seq_len_new_kv
+        ptrType, // key_bias
+        i64Type, // key_bias_batch
+        i64Type  // key_bias_len
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp =
@@ -291,7 +309,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         // Shape info (10 values)
         batchSizeVal, seqLenQVal, seqLenKVVal, pastBufSeqVal, headDimVal,
         elemSizeVal, attnBiasBatchVal, attnBiasNumHeadsVal, kvBnsdVal,
-        seqLenNewKVVal};
+        seqLenNewKVVal, keyBiasPtr, keyBiasBatchVal, keyBiasLenVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 
