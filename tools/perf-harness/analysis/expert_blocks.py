@@ -31,6 +31,51 @@ from perfcommon import (
 )
 
 
+def report_grouped(blocks, spec, dev, k: float, chunk_us: float) -> None:
+    """The grouped prefill path: one block per layer covering every expert.
+
+    The M buckets mean nothing here (each block is all topk*chunk pairs), so
+    report the layer's MoE against the floor of streaming every routed expert's
+    weights once. The active-expert count is not in the dispatch stream; it is
+    bounded by min(experts, pairs), which at prefill chunk sizes is every expert,
+    so the floor is an upper bound on what is recoverable only if routing really
+    touches them all.
+    """
+    n = len(blocks)
+    us = sum(b.dur_us for b in blocks)
+    pairs = sum(b.m for b in blocks) / n
+    active = min(spec.experts, pairs) if spec.experts else 1
+    floor_layer_us = active * spec.expert_weight_bytes / dev.bw_bytes_s * 1e6
+    meas = sum(b.mem_bytes for b in blocks)
+    meas_gbps = meas / (us * 1e-6) / 1e9 if us else 0.0
+    gemm_us = sum(b.gemm_us for b in blocks)
+    print(
+        f"grouped path: {n} layer blocks, {pairs:.0f} (token, expert) pairs each, "
+        f"<= {active:.0f} experts active"
+    )
+    print(
+        f"  {us / n:9.1f} us/layer  ({us * k / 1000:.2f} ms/chunk, "
+        f"{100 * us * k / chunk_us:.1f}% of chunk)"
+    )
+    print(
+        f"  floor {floor_layer_us:9.1f} us/layer streaming {active:.0f} experts once "
+        f"at {dev.bw_bytes_s / 1e9:.0f} GB/s -> x{us / n / floor_layer_us:.2f}"
+    )
+    eff = active * spec.expert_weight_bytes / (us / n * 1e-6) / 1e9
+    print(
+        f"  effective weight rate {eff:.0f} GB/s"
+        + (f", SPM-measured {meas_gbps:.0f} GB/s" if meas_gbps else "")
+        + f"; GEMMs are {100 * gemm_us / us:.0f}% of the block"
+    )
+    fam = defaultdict(float)
+    for b in blocks:
+        for f, t in b.fam_us.items():
+            fam[f] += t
+    print(f"\n  {'family':40} {'us/layer':>9} {'%block':>7}")
+    for f, t in sorted(fam.items(), key=lambda kv: -kv[1]):
+        print(f"  {f:40} {t / n:9.1f} {100 * t / us:7.1f}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -67,6 +112,11 @@ def main() -> None:
             f"one expert = {spec.expert_weight_bytes / 1e6:.1f} MB of weights+scales "
             f"-> {floor_us:.1f} us at {dev.bw_bytes_s / 1e9:.0f} GB/s\n"
         )
+
+        grouped = [b for b in cap.blocks if b.grouped]
+        if grouped:
+            report_grouped(grouped, spec, dev, k, chunk_us)
+            continue
 
         print(
             f"{'M range':>10} {'blocks':>7} {'tokens':>7} {'ms/chunk':>9} {'%chunk':>7} "

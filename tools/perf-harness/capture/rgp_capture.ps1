@@ -156,7 +156,13 @@ $pi.UseShellExecute        = $false
 $pi.RedirectStandardInput  = $true
 $pi.RedirectStandardOutput = $true
 $pi.RedirectStandardError  = $true
+# The stdin writer takes [Console]::InputEncoding and writes its preamble as the
+# process starts; a UTF-8 console would prefix a BOM to the first command, which
+# the panel then rejects ("Unknown command: ?capture").
+$savedInEnc = $null
+try { $savedInEnc = [Console]::InputEncoding; [Console]::InputEncoding = New-Object System.Text.UTF8Encoding($false) } catch {}
 $panel = [System.Diagnostics.Process]::Start($pi)
+if ($savedInEnc) { try { [Console]::InputEncoding = $savedInEnc } catch {} }
 $pOut = $panel.StandardOutput; $pErr = $panel.StandardError
 $pOutTask = $pOut.ReadLineAsync(); $pErrTask = $pErr.ReadLineAsync()
 $posDesc = if ($PSCmdlet.ParameterSetName -eq 'Fence') {

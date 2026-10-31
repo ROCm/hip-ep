@@ -425,7 +425,9 @@ def main() -> None:
     # Global layers: context grows one chunk at a time, so both the FLOPs and
     # the KV read grow linearly with chunk index.
     ctx = [i * c for i in range(1, spec.chunks + 1)]
-    full_flop = sum(nfull * 2 * 2 * c * t * spec.heads * spec.full_hd for t in ctx)
+    full_flop = sum(
+        nfull * 2 * 2 * c * t * spec.full_q_heads * spec.full_hd for t in ctx
+    )
     full_kv_b = sum(nfull * t * spec.full_kv * spec.full_hd * 2 * 2 for t in ctx)
 
     # Sliding layers: each query sees at most `sliding_window` keys, so the cost

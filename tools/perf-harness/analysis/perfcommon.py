@@ -88,6 +88,7 @@ class ModelSpec:
     # layers. These default to the sliding values, i.e. homogeneous.
     full_kv_heads: int = 0  # 0 -> same as kv_heads
     full_head_dim: int = 0  # 0 -> same as head_dim
+    full_heads: int = 0  # 0 -> same as heads (query heads on global layers)
     # Some MoE models also carry a dense MLP per layer alongside the experts.
     dense_inter: int = 0  # 0 -> no dense MLP
     # Asymmetric int4 exports carry a 4-bit zero point per block (two per byte)
@@ -105,6 +106,10 @@ class ModelSpec:
     @property
     def full_hd(self) -> int:
         return self.full_head_dim or self.head_dim
+
+    @property
+    def full_q_heads(self) -> int:
+        return self.full_heads or self.heads
 
     def fp16(self, n: float) -> float:
         return n * 2
@@ -226,6 +231,7 @@ INT4_FAMILIES = frozenset(
     {
         "MatMulNBitsWMMA_NoZP",
         "MatMulNBitsWMMA_ZP",
+        "MatMulNBitsWMMA_SmallM_Grouped",
         "MatMulNBitsFp16GEMM",
         "matmul_nbits_gemv",
         "matmul_nbits_gemv_dp4a",
@@ -243,6 +249,8 @@ INT4_FAMILIES = frozenset(
 GEMM_FAMILIES = (
     "MatMulNBitsWMMA_NoZP",
     "MatMulNBitsWMMA_ZP",
+    # The qmoe prefill grouped path: every expert's rows in one launch per FC.
+    "MatMulNBitsWMMA_SmallM_Grouped",
     "MatMulNBitsFp16GEMM",
     "matmul_nbits_gemv",
     "matmul_nbits_gemv_dp4a",
@@ -261,8 +269,15 @@ GEMM_FAMILIES = (
 # and it holds across both phases: on gemma-4-12b it counts 5 in a prefill
 # window and 28 in a decode window, matching softmax_f32_to_out and
 # elementwise_gelu_f16 in each. softmax is kept as a second fallback for models
-# whose norm is fused away.
-LAYER_MARKERS = ("topk_routing", "skip_rms_norm", "softmax_f32_to_out")
+# whose norm is fused away. topk_routing_sigmoid_bias is the router qmoe runs
+# instead when the compiler folded a sigmoid + correction-bias routing chain.
+LAYER_MARKERS = (
+    "topk_routing",
+    "topk_routing_sigmoid_bias",
+    "skip_rms_norm",
+    "softmax_f32_to_out",
+)
+ROUTING_FAMILIES = frozenset({"topk_routing", "topk_routing_sigmoid_bias"})
 
 
 def markers_per_layer(marker: str, spec: "ModelSpec") -> int:
@@ -305,6 +320,7 @@ OP_KERNEL_FAMILIES: dict[str, dict[str, tuple[str, ...]]] = {
     "qmoe": {
         "exact": (
             "topk_routing",
+            "topk_routing_sigmoid_bias",
             "bucket_tokens",
             "gather_tokens",
             "scatter_add",
@@ -515,6 +531,12 @@ class ExpertBlock:
     # what the hardware actually moved instead of being believed on its own -- see
     # `achieved_gbps` and the note on ModelSpec.expert_weight_bytes.
     mem_bytes: float = 0.0
+    # Per-family time inside the block. On the grouped prefill path one block is
+    # a whole layer's MoE (every expert's rows gathered by one launch), so the
+    # split between routing, bucketing, the two GEMMs and the reduce is the
+    # only per-stage view the capture gives.
+    fam_us: dict = field(default_factory=lambda: collections.defaultdict(float))
+    grouped: bool = False
 
     @property
     def achieved_gbps(self) -> float:
@@ -561,7 +583,7 @@ class Capture:
         out, region = [], "dense"
         for r in self.rows:
             fam = r["family"]
-            if fam == "topk_routing":
+            if fam in ROUTING_FAMILIES:
                 region = "qmoe"
             elif fam in DENSE_MARKERS:
                 region = "dense"
@@ -571,27 +593,52 @@ class Capture:
     def _expert_blocks(self) -> list[ExpertBlock]:
         out: list[ExpertBlock] = []
         cur: ExpertBlock | None = None
+        # Routing and bucketing run between topk_routing and the first gather.
+        # The per-expert loop leaves them out of every block; the grouped path
+        # folds them into its one block, since they are part of serving it.
+        pre: list[dict] = []
+
+        def add(blk: ExpertBlock, r: dict) -> None:
+            fam, dur = r["family"], float(r["dur_us"])
+            blk.dur_us += dur
+            blk.fam_us[fam] += dur
+            # mem_gbps is absent without -Counters and 0 where the parser
+            # could not classify; either way it contributes nothing.
+            try:
+                blk.mem_bytes += float(r.get("mem_gbps") or 0.0) * 1e9 * dur * 1e-6
+            except ValueError:
+                pass
+            if fam in GEMM_FAMILIES:
+                blk.kernels.add(fam)
+                blk.gemm_us += dur
+            elif fam == "dequant_u4_to_fp16":
+                blk.dequant_us += dur
+
         for i, r in enumerate(self.rows):
             if self.regions[i] != "qmoe" or i in self.lm_head_idx:
                 continue
-            fam, dur = r["family"], float(r["dur_us"])
-            if fam == "gather_tokens":
+            fam = r["family"]
+            if fam in ROUTING_FAMILIES:
                 if cur:
                     out.append(cur)
-                cur = ExpertBlock(m=round(int(r["threads"]) / self.spec.hidden))
+                cur, pre = None, [r]
+            elif fam == "gather_tokens":
+                if cur:
+                    out.append(cur)
+                m = round(int(r["threads"]) / self.spec.hidden)
+                # One expert sees each token at most once, so a gather wider
+                # than a chunk can only be the grouped path's single gather of
+                # every (token, expert) pair.
+                cur = ExpertBlock(m=m, grouped=m > self.spec.chunk_tokens)
+                if cur.grouped:
+                    for p in pre:
+                        add(cur, p)
+                pre = []
+                add(cur, r)
             elif cur is not None:
-                cur.dur_us += dur
-                # mem_gbps is absent without -Counters and 0 where the parser
-                # could not classify; either way it contributes nothing.
-                try:
-                    cur.mem_bytes += float(r.get("mem_gbps") or 0.0) * 1e9 * dur * 1e-6
-                except ValueError:
-                    pass
-                if fam in GEMM_FAMILIES:
-                    cur.kernels.add(fam)
-                    cur.gemm_us += dur
-                elif fam == "dequant_u4_to_fp16":
-                    cur.dequant_us += dur
+                add(cur, r)
+            else:
+                pre.append(r)
         if cur:
             out.append(cur)
         return out
@@ -795,6 +842,61 @@ PRESETS: dict[str, dict] = {
     # and 16 full GQA (24 q / 4 kv heads of 256). The linear-attention state has
     # no term here, so its KV floor is wrong; the preset is for step counting
     # and the int4 projection bytes. Shapes from text.onnx's MatMulNBits.
+    # Laguna-S-2.1, rtn int4 g128 + fp16 lm_head/router, checked against
+    # model.onnx. 48 layers: 12 global (48 q heads) and 36 sliding-512 (72 q
+    # heads), kv8 x 128 throughout, each with a per-head output gate (g_proj
+    # n=48/72). Layer 0 is a dense MLP (inter 12288); the other 47 are 256
+    # experts top-10 (inter 1024) plus a shared expert (inter 1024, carried as
+    # dense_inter). qkv_n / o_proj_k are the per-layer averages over the two
+    # attention geometries, q+k+v+g: (12*8240 + 36*11336)/48 and
+    # (12*6144 + 36*9216)/48. The router is a plain fp32 MatMul [3072,256];
+    # router_fp16 charges it at fp16, half its real bytes.
+    "laguna-s": dict(
+        hidden=3072,
+        inter=1024,
+        vocab=100352,
+        layers=48,
+        qkv_n=10562,
+        o_proj_k=8448,
+        router_n=256,
+        experts=256,
+        topk=10,
+        group_size=128,
+        heads=72,
+        full_heads=48,
+        kv_heads=8,
+        head_dim=128,
+        sliding_window=512,
+        full_attn_layers=12,
+        dense_inter=1024,
+        lm_head_fp16=True,
+        router_fp16=True,
+    ),
+    # Laguna-XS-2.1: 40 layers, 10 global (48 q heads) and 30 sliding-512 (64 q
+    # heads), kv8 x 128; 256 experts top-8 (inter 512) plus a shared expert
+    # (inter 512). qkv_n = (10*8240 + 30*10288)/40, o_proj_k =
+    # (10*6144 + 30*8192)/40.
+    "laguna-xs": dict(
+        hidden=2048,
+        inter=512,
+        vocab=100352,
+        layers=40,
+        qkv_n=9776,
+        o_proj_k=7680,
+        router_n=256,
+        experts=256,
+        topk=8,
+        group_size=128,
+        heads=64,
+        full_heads=48,
+        kv_heads=8,
+        head_dim=128,
+        sliding_window=512,
+        full_attn_layers=10,
+        dense_inter=512,
+        lm_head_fp16=True,
+        router_fp16=True,
+    ),
     "qwen3.8-27b": dict(
         hidden=5120,
         inter=17408,
