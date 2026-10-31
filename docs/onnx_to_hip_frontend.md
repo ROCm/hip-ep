@@ -152,7 +152,7 @@ runtime coverage.
 
 | ONNX | HIP | Backend |
 |---|---|---|
-| `Softmax` | `hip.miopen.softmax` | `hip_miopen_softmax`, custom HIP kernel |
+| `Softmax` | `hip.miopen.softmax` | `hip_miopen_softmax`, custom HIP kernel. Last axis only (normalized `axis == rank-1`); a missing `axis` is accepted for rank <= 2 only, where the opset defaults agree. f16/bf16/f32 |
 
 ### Element-wise Tensor Ops
 
