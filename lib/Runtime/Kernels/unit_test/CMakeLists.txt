@@ -142,6 +142,9 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
     hipdnn-kernel-ut-qmoe-ragged-mm-xfp16-wu4-yfp16
     qmoe_ragged_mm/Xfp16_Wu4_Yfp16/test_qmoe_ragged_mm.cpp)
   add_kernel_package_ut(${_arch}
+    hipdnn-kernel-ut-qmoe-ragged-mm-xfp16-wu2-yfp16
+    qmoe_ragged_mm/Xfp16_Wu2_Yfp16/test_qmoe_ragged_mm_u2.cpp)
+  add_kernel_package_ut(${_arch}
     hipdnn-kernel-ut-gather-block-quantized-xi64-wu4-yfp16
     gather_block_quantized/Xi64_Wu4_Yfp16/test_gather_block_quantized_u4.cpp)
   add_kernel_package_ut(${_arch}

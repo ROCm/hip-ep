@@ -5,10 +5,9 @@
 
 #include "OnnxToHipUtils.h"
 
+#include "hip/Dialect/IR/HipConstantData.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
-#include "llvm/Support/FileSystem.h"
-#include "llvm/Support/MemoryBuffer.h"
 
 #include <cstring>
 
@@ -59,47 +58,6 @@ Value convOutExtent(PatternRewriter &rewriter, Location loc, Value inExtent,
   Value adjusted = arith::AddIOp::create(rewriter, loc, inExtent, i64(addend));
   Value divided = arith::DivSIOp::create(rewriter, loc, adjusted, i64(stride));
   return arith::AddIOp::create(rewriter, loc, divided, i64(1));
-}
-
-// Inline and file-backed filters are readable here. Memory-address carriers
-// are process-local and are not dereferenced from a pass that also runs on
-// textual IR, so those stay a runtime transpose.
-FailureOr<DenseElementsAttr> readWeightConstant(ConstantOp constant,
-                                                RankedTensorType type) {
-  switch (constant.getSourceKind()) {
-  case ConstantOp::SourceKind::Inline: {
-    auto value = dyn_cast<DenseElementsAttr>(constant.getValueAttr());
-    if (!value || value.getType() != type)
-      return failure();
-    return value;
-  }
-  case ConstantOp::SourceKind::Memory:
-    return failure();
-  case ConstantOp::SourceKind::File:
-    break;
-  }
-
-  StringRef path = constant.getLocationAttr().getValue();
-  const int64_t offset = constant.getOffsetAttr().getInt();
-  const int64_t size = constant.getSizeAttr().getInt();
-  const int64_t elementBytes = (type.getElementTypeBitWidth() + 7) / 8;
-  if (size != type.getNumElements() * elementBytes)
-    return failure();
-  uint64_t fileSize = 0;
-  if (llvm::sys::fs::file_size(path, fileSize) ||
-      static_cast<uint64_t>(offset) + static_cast<uint64_t>(size) > fileSize)
-    return failure();
-  llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> buffer =
-      llvm::MemoryBuffer::getFileSlice(path, static_cast<uint64_t>(size),
-                                       offset);
-  if (!buffer || (*buffer)->getBufferSize() != static_cast<uint64_t>(size))
-    return failure();
-  DenseElementsAttr value = DenseElementsAttr::getFromRawBuffer(
-      type,
-      ArrayRef<char>((*buffer)->getBufferStart(), static_cast<size_t>(size)));
-  if (!value)
-    return failure();
-  return value;
 }
 
 // [M, kH, kW, C/group] -> [M, C/group, kH, kW], preserving element bits.
@@ -289,8 +247,11 @@ LogicalResult NhwcConvToHip::matchAndRewrite(Operation *op,
   ConstantOp deadWeight;
   if (weightType.hasStaticShape()) {
     if (auto weightConst = weights.getDefiningOp<ConstantOp>()) {
+      // Memory-address carriers are process-local and are not dereferenced
+      // from a pattern that also runs on textual IR, so those stay a runtime
+      // transpose.
       FailureOr<DenseElementsAttr> data =
-          readWeightConstant(weightConst, weightType);
+          readConstantData(weightConst, weightType);
       FailureOr<DenseElementsAttr> transposed =
           succeeded(data) ? transposeOhwiToOihw(*data, weightType)
                           : FailureOr<DenseElementsAttr>(failure());

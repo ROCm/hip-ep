@@ -28,6 +28,7 @@ if(ENABLE_ROCMLIRTRITON)
   # ever compile position 0 of the tuning space. It resolves HIP at call time
   # (see the file header), so it adds no import-table dependency.
   target_sources(LibHipCompiler PRIVATE
+    AdaptiveBenchmark.cpp
     RocMlirKernelCompiler.cpp
     RocMlirAutotune.cpp
   )

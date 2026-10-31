@@ -5,9 +5,50 @@
 
 #include "HipToLLVMUtils.h"
 
+#include "mlir/IR/SymbolTable.h"
+
+#include <optional>
+
 namespace mlir {
 namespace hip {
 namespace {
+
+// The single axis stored in a constant axes memref, or failure when that
+// memref is not a one-element constant. keepdims=0 deletes the axis, so
+// matching input and output shapes from the trailing end is ambiguous when
+// the deleted extent equals a surviving neighbor. By the time this pattern
+// runs, the constant may still be a memref.global or already an
+// llvm.mlir.global.
+static FailureOr<int64_t> constantReducedAxis(Value axes, int64_t rank) {
+  Value root = axes;
+  while (auto castOp = root.getDefiningOp<memref::CastOp>())
+    root = castOp.getSource();
+  auto getGlobal = root.getDefiningOp<memref::GetGlobalOp>();
+  if (!getGlobal)
+    return failure();
+  auto module = getGlobal->getParentOfType<ModuleOp>();
+  if (!module)
+    return failure();
+  Operation *sym = SymbolTable::lookupSymbolIn(module, getGlobal.getNameAttr());
+  if (!sym)
+    return failure();
+  Attribute init;
+  if (auto global = dyn_cast<memref::GlobalOp>(sym))
+    init = global.getInitialValueAttr();
+  else if (auto global = dyn_cast<LLVM::GlobalOp>(sym)) {
+    if (std::optional<Attribute> value = global.getValue())
+      init = *value;
+  }
+  auto dense = dyn_cast_or_null<DenseIntElementsAttr>(init);
+  if (!dense || dense.getNumElements() != 1)
+    return failure();
+  int64_t axis = (*dense.getValues<APInt>().begin()).getSExtValue();
+  if (axis < 0)
+    axis += rank;
+  if (axis < 0 || axis >= rank)
+    return failure();
+  return axis;
+}
 
 // Generic template for reduction-style ops with the shared
 //   (data, axes, output, keepdims, noop_with_empty_axes)
@@ -121,11 +162,11 @@ struct ReduceOpLowering : public ConvertOpToLLVMPattern<OpTy> {
     // channel-axis LayerNorm2d, axes=[1]) reads the right elements; it handles
     // one contiguous run of reduced axes.
     //
-    // `reduced_axes` gives the axes directly. Without it (`axes` known only at
-    // runtime) the axis is inferred from the shapes: the first trailing
-    // mismatch for static shapes, inferSingleReducedAxis otherwise. Shapes
-    // alone cannot always identify the axis (e.g. [2,4,4] -> [2,4] or
-    // [?,4,4] -> [?,4]), so that path can pick the wrong stride.
+    // `reduced_axes` gives the axes directly. Without that attribute, a
+    // one-element constant axes memref still names the axis. Shape inference
+    // is only the fallback: the first trailing mismatch for static shapes,
+    // inferSingleReducedAxis otherwise. Shapes alone cannot always identify
+    // the axis (e.g. [1,6,5,5] -> [1,6,5] or [4,4,4] -> [4,4]).
     auto innerSizeAfter = [&](int64_t axis) -> Value {
       int64_t staticInner = 1;
       SmallVector<int64_t> dynamicDims;
@@ -161,6 +202,10 @@ struct ReduceOpLowering : public ConvertOpToLLVMPattern<OpTy> {
         }
         innerSizeVal = innerSizeAfter(axes->back());
       }
+    } else if (FailureOr<int64_t> axis =
+                   constantReducedAxis(op.getAxes(), dataType.getRank());
+               succeeded(axis)) {
+      innerSizeVal = innerSizeAfter(*axis);
     } else if (dataType.hasStaticShape() && outputType.hasStaticShape()) {
       int64_t innerSize = 1;
       llvm::ArrayRef<int64_t> inShape = dataType.getShape();
