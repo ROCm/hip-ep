@@ -49,7 +49,7 @@ module {
   // CHECK-DAG: %[[ST:.*]] = tensor.empty() : tensor<1x1024x4xf16>
   // activation="none", ndim=1 and channels_last=false are the op's declared
   // defaults, so the printer elides them from the attr-dict.
-  // CHECK: hip.causal_conv_with_state(%[[CTX]]) ins(%[[IN]], %[[W]], %[[B]] : tensor<1x1024x750xf16>, tensor<1024x1x5xf16>, tensor<1024xf16>) outs(%[[OUT]], %[[ST]] : tensor<1x1024x750xf16>, tensor<1x1024x4xf16>)
+  // CHECK: hip.causal_conv_with_state(%[[CTX]]) ins(%[[IN]], %[[W]] : tensor<1x1024x750xf16>, tensor<1024x1x5xf16>) bias(%[[B]] : tensor<1024xf16>) outs(%[[OUT]], %[[ST]] : tensor<1x1024x750xf16>, tensor<1x1024x4xf16>)
   // CHECK-NOT: hip.conv(
 
   // --------------------------------------------------------------------------

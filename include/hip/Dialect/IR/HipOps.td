@@ -3879,9 +3879,9 @@ def Hip_CausalConvWithStateOp : Hip_DpsOp_AutoReify<"causal_conv_with_state", [A
     Example (1D):
     ```mlir
     hip.causal_conv_with_state(%ctx)
-        ins(%input, %weight, %bias, %past_state :
-            tensor<1x64x128xf16>, tensor<64x1x4xf16>,
-            tensor<64xf16>, tensor<1x64x3xf16>)
+        ins(%input, %weight : tensor<1x64x128xf16>, tensor<64x1x4xf16>)
+        bias(%bias : tensor<64xf16>)
+        past_state(%past_state : tensor<1x64x3xf16>)
         outs(%output, %present_state :
              tensor<1x64x128xf16>, tensor<1x64x3xf16>)
         {activation = "silu", ndim = 1 : i64}
@@ -3913,14 +3913,10 @@ def Hip_CausalConvWithStateOp : Hip_DpsOp_AutoReify<"causal_conv_with_state", [A
 
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(`
-        $input `,` $weight
-        (`,` $bias^)?
-        (`,` $past_state^)?
-        `:`
-        type($input) `,` type($weight)
-        (`,` type($bias)^)?
-        (`,` type($past_state)^)?
+        $input `,` $weight `:` type($input) `,` type($weight)
     `)`
+    (`bias` `(` $bias^ `:` type($bias) `)`)?
+    (`past_state` `(` $past_state^ `:` type($past_state) `)`)?
     `outs` `(`
         $output `,` $present_state
         `:`
