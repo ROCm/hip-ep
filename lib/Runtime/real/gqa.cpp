@@ -338,6 +338,106 @@ static int update_kv_cache(hipStream_t stream, const void *past_key,
 //===----------------------------------------------------------------------===//
 // Fused-only forward: fp16, causal, GQA. No hipBLASLt, no decomposed fallback.
 //===----------------------------------------------------------------------===//
+
+#if HIP_EP_RING_ENABLED != 0
+// Set before starting inference. Only an explicit "1" opts into Ring;
+// compiling the implementation never changes the default GQA selection.
+static bool gqa_ring_requested() {
+  static const bool enabled = [] {
+    const char *value = std::getenv("HIPDNN_EP_USE_RING_ATTENTION");
+    return value && std::strcmp(value, "1") == 0;
+  }();
+  return enabled;
+}
+
+// Return 1 for a valid call outside Ring's context bound, 0 on success, and
+// -1 on failure. Validate every writable range before updating either cache.
+static int gqa_forward_ring(RuntimeState *state, hipStream_t stream,
+                            const void *query, const void *key,
+                            const void *value, const void *past_key,
+                            const void *past_value, const void *seqlens_k,
+                            void *output, void *present_key,
+                            void *present_value, int64_t sq, int64_t capacity,
+                            int64_t past_capacity) {
+  int32_t last = read_seqlens_k_for_dispatch(stream, seqlens_k, 1, state);
+  if (last < -1) {
+    fprintf(stderr, "Ring GQA: failed or invalid sequence-length read\n");
+    return -1;
+  }
+  int64_t total = last == -1 ? sq : int64_t(last) + 1;
+  int64_t past = total - sq;
+  if (past < 0 || total > capacity || capacity > INT32_MAX ||
+      past_capacity < 0 || past_capacity > INT32_MAX ||
+      (past && (!past_key || !past_value || past > past_capacity)) ||
+      ((past_key == present_key) != (past_value == present_value)) ||
+      (past_key == present_key && past_capacity != capacity)) {
+    fprintf(stderr,
+            "Ring GQA: invalid cache lengths or inconsistent cache aliases\n");
+    return -1;
+  }
+  if (total > HIP_EP_RING_MAX_KV_LENGTH)
+    return 1;
+
+  struct Range {
+    const void *ptr;
+    size_t bytes;
+  };
+  auto overlaps = [](Range a, Range b) {
+    if (!a.ptr || !b.ptr || !a.bytes || !b.bytes)
+      return false;
+    uintptr_t x = reinterpret_cast<uintptr_t>(a.ptr);
+    uintptr_t y = reinterpret_cast<uintptr_t>(b.ptr);
+    if (a.bytes > UINTPTR_MAX - x || b.bytes > UINTPTR_MAX - y)
+      return true;
+    return x < y + b.bytes && y < x + a.bytes;
+  };
+  const size_t qbytes = size_t(sq) * 24 * 256 * 2;
+  const size_t newbytes = size_t(sq) * 4 * 256 * 2;
+  const size_t cachebytes = size_t(capacity) * 4 * 256 * 2;
+  const size_t pastbytes = size_t(past_capacity) * 4 * 256 * 2;
+  Range q{query, qbytes}, k{key, newbytes}, v{value, newbytes},
+      o{output, qbytes};
+  Range pk{present_key, cachebytes}, pv{present_value, cachebytes};
+  Range oldk{past_key, pastbytes}, oldv{past_value, pastbytes};
+  bool invalid = overlaps(pk, pv) || overlaps(pk, oldv) || overlaps(pv, oldk) ||
+                 (past_key != present_key && overlaps(pk, oldk)) ||
+                 (past_value != present_value && overlaps(pv, oldv));
+  for (Range input : {q, k, v, o})
+    invalid |= overlaps(pk, input) || overlaps(pv, input);
+  for (Range input : {q, k, v, oldk, oldv})
+    invalid |= overlaps(o, input);
+  if (invalid) {
+    fprintf(stderr, "Ring GQA: overlapping input/output/cache buffers\n");
+    return -1;
+  }
+  const size_t bytes = hip_gqa_ring_workspace(int(sq), int(total));
+  if (bytes && hipdnn_ep_state_ensure_workspace(state, bytes) != 0)
+    return -1;
+  void *workspace = bytes ? hipdnn_ep_state_get_workspace(state) : nullptr;
+  if (bytes && !workspace)
+    return -1;
+  for (Range input : {q, k, v, o, pk, pv, oldk, oldv}) {
+    if (overlaps({workspace, bytes}, input)) {
+      fprintf(stderr, "Ring GQA: workspace overlaps an input or output\n");
+      return -1;
+    }
+  }
+  // Pass the validated host length to the same cache-update helper used by
+  // existing GQA; append exactly once and avoid a second device length read.
+  if (update_kv_cache(stream, past_key, past_value, key, value, present_key,
+                      present_value, 1, int(past), int(sq), 4, 256,
+                      int(past_capacity), int(capacity), nullptr, 2, 0) != 0)
+    return -1;
+  RUNTIME_DEBUG_LOG("[REAL] Ring GQA q=%lld past=%lld capacity=%lld\n",
+                    (long long)sq, (long long)past, (long long)capacity);
+  return hip_gqa_ring_attention(stream, query, present_key, present_value,
+                                output, int(sq), int(past), int(capacity),
+                                workspace, bytes) == 0
+             ? 0
+             : -1;
+}
+#endif
+
 static int gqa_forward_fused(
     RuntimeState *state, hipStream_t stream,
     const void *query,    // BSHD [B, sq, H, d] or packed [B, sq, (H+2G)*d]
@@ -2960,6 +3060,7 @@ int wrap_group_query_attention(
   // head_dim 64, 96 or 128. Everything else uses the feature-complete
   // decomposed hipBLASLt fallback.
   //===------------------------------------------------------------------===//
+
   const bool is_decode = (seq_len_q == 1);
   const bool decode_geometry_ok =
       !is_decode || flash_decode_geometry_ok(num_heads, kv_num_heads, head_dim);
@@ -3122,4 +3223,66 @@ int wrap_group_query_attention(
             "(rc=%d)\n",
             rc);
   return rc;
+}
+
+// The legacy ABI does not encode dtype: only compiler-proven FP16 operands
+// may enter this wrapper. All ineligible calls keep the original wrapper.
+int wrap_group_query_attention_ring_f16(
+    RuntimeState *state, int op_state_slot,
+    // Inputs 1-7 (core GQA)
+    void *query, void *key, void *value, void *past_key, void *past_value,
+    void *seqlens_k, void *total_seq_len,
+    // Inputs 8-10 (RoPE)
+    void *cos_cache, void *sin_cache, void *position_ids,
+    // Inputs 11-14 (advanced features)
+    void *attention_bias, void *head_sink, void *k_scale, void *v_scale,
+    // Outputs
+    void *output, void *present_key, void *present_value, void *output_qk,
+    // Attributes (13)
+    int64_t num_heads, int64_t kv_num_heads, float scale, int64_t do_rotary,
+    int64_t rotary_interleaved, float softcap, int64_t local_window_size,
+    int64_t smooth_softmax, int64_t qk_output, int64_t k_quant_type,
+    int64_t v_quant_type, int64_t kv_cache_bit_width, int32_t no_causal,
+    // Shape values (6)
+    int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
+    int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
+    int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
+    int64_t seq_len_new_kv) {
+#if HIP_EP_RING_ENABLED != 0
+  // Only the compiler's proven-FP16 calls use this entry. Recheck runtime
+  // geometry/features/device before reading lengths or modifying the cache.
+  // Any noncandidate retains the original entry point and its diagnostics.
+  if (gqa_ring_requested() && state && query && output && present_key &&
+      present_value && !position_ids && !output_qk && qk_output == 0 &&
+      softcap == 0.0f && element_size_bytes == 2 && batch_size == 1 &&
+      num_heads == 24 && kv_num_heads == 4 && head_dim == 256 &&
+      seq_len_q >= 1 && seq_len_q <= HIP_EP_RING_MAX_QUERY_LENGTH &&
+      seq_len_new_kv == seq_len_q && key && value && seqlens_k && !kv_bnsd &&
+      k_quant_type == 0 && v_quant_type == 0 && !do_rotary && no_causal == 0 &&
+      (scale == 0.0f || scale == 0.0625f) && local_window_size <= 0 &&
+      !head_sink && smooth_softmax <= 0 && !attention_bias &&
+      hip_gqa_ring_device_supported()) {
+    hipStream_t stream =
+        static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
+    if (stream) {
+      OP_PROFILE(
+          "gqa", [] { return std::string("ring_f16"); }, state);
+      int rc =
+          gqa_forward_ring(state, stream, query, key, value, past_key,
+                           past_value, seqlens_k, output, present_key,
+                           present_value, seq_len_q, seq_len_kv, past_buf_seq);
+      if (rc != 1)
+        return rc;
+    }
+  }
+#endif
+  return wrap_group_query_attention(
+      state, op_state_slot, query, key, value, past_key, past_value, seqlens_k,
+      total_seq_len, cos_cache, sin_cache, position_ids, attention_bias,
+      head_sink, k_scale, v_scale, output, present_key, present_value,
+      output_qk, num_heads, kv_num_heads, scale, do_rotary, rotary_interleaved,
+      softcap, local_window_size, smooth_softmax, qk_output, k_quant_type,
+      v_quant_type, kv_cache_bit_width, no_causal, batch_size, seq_len_q,
+      seq_len_kv, past_buf_seq, head_dim, element_size_bytes, attn_bias_batch,
+      attn_bias_num_heads, kv_bnsd, seq_len_new_kv);
 }
