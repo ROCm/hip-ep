@@ -158,7 +158,7 @@ The earlier TurboQuant-vs-Ring-KV checks also observed sequence divergence at 25
 
 The Windows synthetic source history is byte-identical across compared variants, but differs from the archived Linux source despite the same seed/distribution. No 256K prefill or semantic 256K accuracy claim is made.
 
-Depends on [Ring attention PR #1252](https://github.com/ROCm/hip-ep/pull/1252). Merge that PR first, then rebase this contribution onto main. The numerical limitations above must be resolved or explicitly scoped before release.
+These historical measurements used the earlier Ring contribution. The current branch incorporates merged [Ring PR #1366](https://github.com/ROCm/hip-ep/pull/1366); that dependency no longer awaits merge. The numerical limitations above must be resolved or explicitly scoped before release.
 
 ## Build and test validation
 

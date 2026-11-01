@@ -12,10 +12,10 @@ source change, even though its directory is inside the original checkout.
 
 ## Required patches and changes outside HIP-EP
 
-Two source contributions are needed: Ring PR #1252, then this TurboQuant PR.
+Ring PR #1366 is already merged and incorporated into this TurboQuant branch.
 Multi-turn use through **ONNX Runtime GenAI v0.17.0** additionally requires the
-[companion patch](https://github.com/amdrajeevp1/hip-ep/blob/rajeevp/turboquant-kv4/tools/turboquant/patches/onnxruntime-genai-0.17-amdgpu-append.patch).
-The patch file is included here, but its four target files belong to the separate GenAI repository:
+[companion patch](../../tools/turboquant/patches/onnxruntime-genai-0.17-amdgpu-append.patch).
+The full patch below targets stock v0.17.0. Current HIP-EP CI already applies GenAI #2691, which supplies AMDGPU continuous decoding; that stack needs only [the two-file pending-token patch](../../tools/turboquant/patches/onnxruntime-genai-0.17-pending-append.patch). Do not apply the full patch twice. The full patch has four target files in the separate GenAI repository:
 
 | GenAI file | Change |
 | --- | --- |
@@ -51,13 +51,36 @@ patch, model-weight change or production ONNX graph rewrite is required by this
 implementation. The original model files and stock GenAI package were preserved;
 small ONNX graphs were generated only for integration tests.
 
-[External-file audit and full helper inventory](https://github.com/amdrajeevp1/hip-ep/blob/rajeevp/turboquant-kv4/docs/design/turboquant-external-files.md)
+[External-file audit and full helper inventory](#historical-local-file-locations)
 lists exact source files and local artifact locations. Comparing the isolated
 GenAI source tree with its v0.17.0 archive found exactly the four changes above,
 with no added or missing source files. This audits the current Windows setup;
 it does not claim a fresh machine-wide or lx01 audit.
 
-## Local file locations
+## Current PR1366-aligned local deployment
+
+The current upstream branch is `WORK/hip-ep-upstream`; its build tree is
+`WORK/build/upstream` and deployed HIP-EP is `WORK/install/turboquant_upstream131`.
+It uses the existing Ring interpreter and ORT 1.31 SDK/runtime. The isolated
+GenAI package is `WORK/install/genai_append131`; only its core DLL differs from
+Ring's package. The retained companion DLL was built with the 1.30 SDK and is
+validated against the 1.31 runtime. No ORT core or new GenAI source compatibility
+patch was added for this alignment.
+
+`WORK/torch-reference-venv` adds Transformers 5.22.1 for state-aware BF16 append
+and reuses Ring's NumPy 2.4.3 dependency paths. It does not patch PyTorch or the
+model implementation. BF16 weights are in the user's Hugging Face cache.
+The current model remains `WORK/models/qwen-original`; generated codec files
+remain under `WORK/reference/codec`. Current receipts, logs, private model hard
+links and raw logits are under `WORK/results/upstream-pr1366`. Judge requests
+and raw responses are private `LOCAL/judge-requests` / `LOCAL/judge-responses`
+artifacts. Experimental results and reports remain local pending author review
+and a separate publication decision.
+
+The detailed inventory below records the earlier profiling deployment; its
+frozen installations are preserved and are not the new current build.
+
+## Historical local file locations
 
 | Location | Files or purpose | Required to run TurboQuant? |
 | --- | --- | --- |

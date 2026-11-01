@@ -7,7 +7,7 @@ Licensed under the MIT License.
 This is an experimental, explicit-opt-in MSE-only QR codec for the Qwen
 24-query-head / 4-KV-head / dimension-256 geometry. Read
 [`turboquant-kv-cache.md`](../../docs/design/turboquant-kv-cache.md) and the
-[validation results](../../docs/design/turboquant-validation.md) before use.
+[historical validation](../../docs/design/turboquant-validation.md) before use.
 The strict encoder gate and some full-model comparisons currently fail; this
 is not a production-quality accuracy claim.
 
@@ -15,8 +15,10 @@ is not a production-quality accuracy claim.
 
 This walkthrough covers Radeon 8060S (`gfx1151`), batch one, Qwen3.8-27B with
 24 query heads, four KV heads, head dimension 256, FP16 activations/cache carrier,
-and external RoPE. INT4 **weights** alone do not enable compressed KV. The tested
-environment used Python 3.13, ORT 1.30.0, GenAI 0.17.0 and TheRock 7.15.26333.
+and external RoPE. INT4 **weights** alone do not enable compressed KV. The
+current environment uses Python 3.13, ORT 1.31.0, NumPy 2.4.3, GenAI 0.17.0
+with the append companion, and TheRock 7.15.26333, aligned with Ring PR1366.
+Older performance tables used ORT 1.30 and are not current-main measurements.
 Other configurations need separate validation. See the
 [Windows build prerequisites](../../docs/quick_start.md) for MSVC, Ninja, SDK and
 dependency setup. This walkthrough is not a new Linux qualification.
@@ -37,23 +39,26 @@ $Repo = "$WorkRoot/hip-ep"
 $Python = "$WorkRoot/venv/Scripts/python.exe"
 $HipBuild = "$WorkRoot/build/turboquant"
 $HipInstall = "$WorkRoot/install/turboquant"
-$OrtSdk = "$WorkRoot/deps/onnxruntime-sdk/onnxruntime-win-x64-1.30.0"
+$OrtSdk = "$WorkRoot/deps/onnxruntime-sdk/onnxruntime-win-x64-1.31.0"
 $BasePython = & $Python -c 'import sys; print(sys.base_prefix)'
 $RocmDevel = "$BasePython/Lib/site-packages/_rocm_sdk_devel"
 $RocmCore = "$BasePython/Lib/site-packages/_rocm_sdk_core"
 Set-Location $Repo
-& $Python -m pip install numpy scipy pytest onnx psutil
-& $Python -c 'import torch, onnxruntime, onnxruntime_genai; print(torch.__version__, onnxruntime.__version__, onnxruntime_genai.__version__)'
+$env:OMP_NUM_THREADS = "2"
+$env:OPENBLAS_NUM_THREADS = "2"
+& $Python -c 'import numpy, torch, onnxruntime, onnxruntime_genai; print(numpy.__version__, numpy.__file__); print(torch.__version__, onnxruntime.__version__, onnxruntime.__file__, onnxruntime_genai.__version__)'
 ```
 
 Use the compatible PyTorch already supplied with the ROCm environment; the codec
 generator only uses its CPU operations. Do not upgrade a working ROCm/ORT/GenAI
 stack merely to run this command. Stop on a failed command before continuing.
 
-Upstream now defaults to ORT 1.31. The recorded TurboQuant/GenAI 0.17 results
-used ORT 1.30.0; prepare that matching SDK and pass the explicit override below
-to reproduce this environment. The CI build against ORT 1.31 is separate from
-the recorded model qualification.
+Use the established Ring Python dependency paths, including its NumPy/OpenBLAS
+build, instead of inheriting a different Conda NumPy or upgrading dependencies.
+Verify imported paths as well as versions. Required setup packages include
+SciPy, pytest, ONNX and psutil. Do not use `KMP_DUPLICATE_LIB_OK` to bypass an
+OpenMP conflict. HIP-EP builds against the ORT 1.31 SDK and uses the 1.31 runtime.
+The retained GenAI companion has separate SDK provenance described in step 3.
 
 ### 2. Build Ring-KV plus TurboQuant and generate the codec
 
@@ -62,6 +67,7 @@ the recorded model qualification.
   --build_dir $HipBuild --install_dir $HipInstall --therock_dist $RocmDevel `
   --cmake_extra_defines HIP_EP_ENABLE_RING_ATTENTION=ON `
   --cmake_extra_defines HIP_EP_ENABLE_TURBOQUANT=ON `
+  --cmake_extra_defines ENABLE_ROCMLIRTRITON=OFF `
   --cmake_extra_defines "FETCHCONTENT_SOURCE_DIR_ONNXRUNTIME=$OrtSdk" `
   --cmake_extra_defines HIP_EP_GENERATE_TQ_CODEC=ON `
   --cmake_extra_defines "Python3_EXECUTABLE=$Python" `
@@ -100,20 +106,25 @@ Single-turn use can use stock GenAI 0.17, but repeated prompt append on AMDGPU
 requires this patch. Start from a separate **v0.17.0** source tree and a matching
 ORT 1.30.0 SDK containing headers and libraries. Use an SDK prepared through the
 quick start or the matching official ORT release archive; the Python wheel alone
-is not the C++ SDK. Set `$OrtSdk` to its extracted root.
+is not the C++ SDK. Set `$GenaiOrtSdk` to its extracted root. This retained
+companion is loaded with the Ring ORT 1.31 runtime; only the GenAI core DLL
+differs from the original Ring Python package. Its release C API is validated
+by the append integration test. Stock v0.17 experimental ModelPackage headers
+prevent a straightforward rebuild with the 1.31 SDK, so do not silently treat
+these SDKs as interchangeable or claim the companion was rebuilt with 1.31.
 
 ```powershell
 $GenaiSource = "$WorkRoot/deps/genai-append-src"
 $GenaiBuild = "$WorkRoot/build/genai-append"
 $GenaiPackageRoot = "$WorkRoot/install/genai_append"
-$OrtSdk = "$WorkRoot/deps/onnxruntime-sdk/onnxruntime-win-x64-1.30.0"
+$GenaiOrtSdk = "$WorkRoot/deps/onnxruntime-sdk/onnxruntime-win-x64-1.30.0"
 # Clone only if this source directory does not already exist.
 git clone --branch v0.17.0 --depth 1 https://github.com/microsoft/onnxruntime-genai.git $GenaiSource
 $Patch = "$Repo/tools/turboquant/patches/onnxruntime-genai-0.17-amdgpu-append.patch"
 git -C $GenaiSource apply --check $Patch
 git -C $GenaiSource apply $Patch
 cmake -S $GenaiSource -B $GenaiBuild -G Ninja -DCMAKE_BUILD_TYPE=Release `
-  "-DORT_HOME=$OrtSdk" -DUSE_CUDA=OFF -DUSE_DML=OFF -DENABLE_PYTHON=OFF `
+  "-DORT_HOME=$GenaiOrtSdk" -DUSE_CUDA=OFF -DUSE_DML=OFF -DENABLE_PYTHON=OFF `
   -DENABLE_TESTS=OFF -DENABLE_MODEL_BENCHMARK=OFF -DENABLE_TELEMETRY=OFF
 cmake --build $GenaiBuild --target onnxruntime-genai --parallel 12
 ```

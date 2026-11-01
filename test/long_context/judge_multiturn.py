@@ -6,7 +6,7 @@
 
 Adapter contract: read one JSON request from stdin, write JSON to stdout with
 scores for every candidate (0..4), winners (a list) and reason. Adapter is responsible for using
-the pinned judge model, temperature zero, context admission and NO truncation.
+the pinned judge model, recorded sampling settings, context admission and NO truncation.
 The default only writes packets. No conversation is sent to a service implicitly.
 """
 

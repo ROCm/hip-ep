@@ -4,7 +4,7 @@ Licensed under the MIT License.
 -->
 # Experimental 4-bit TurboQuant KV cache
 
-This opt-in implementation depends on [Ring attention PR #1252](https://github.com/ROCm/hip-ep/pull/1252). Merge that PR before this contribution and rebase onto main afterward. The parent is `63a00f5e35e54aff1d423525a9c8992fd8dea927`. Existing GQA remains the default build selection; enabling Ring alone does not enable KV compression.
+This opt-in implementation incorporates main at `9900502325dcfaab713831d05d93c2df6859849b`, including merged [Ring attention PR #1366](https://github.com/ROCm/hip-ep/pull/1366). Ring and TurboQuant compile by default. Existing GQA remains the default runtime path; dense Ring requires its runtime opt-in, and TurboQuant requires explicit codec provider options. Enabling Ring alone does not enable KV compression.
 
 The feature is **not ready for release**. Full-model generated sequences diverge at some tested prompt lengths even when first-step logits pass the numerical screen. The synthetic 256K comparison fails its numerical gate. Strict encoder parity has two centroid-boundary code-byte differences at 4K on Windows. The Windows codec export also differs from the frozen Linux artifact. See [measured validation](turboquant-validation.md) for results and limitations.
 
