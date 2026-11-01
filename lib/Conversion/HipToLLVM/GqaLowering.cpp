@@ -22,6 +22,31 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
   LogicalResult
   matchAndRewrite(GqaOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    const char *callee = kWrapGQAHostLength;
+#if HIP_EP_RING_ENABLED != 0
+    // Prove the element types before lowering erases them. A two-byte element
+    // size alone cannot distinguish FP16 from BF16. Ineligible calls retain
+    // the original GQA entry point and its existing behavior.
+    auto isF16 = [](Value value) {
+      return value &&
+             cast<MemRefType>(value.getType()).getElementType().isF16();
+    };
+    bool ringTypes = true;
+    for (Value value :
+         {op.getQuery(), op.getKey(), op.getValue(), op.getOutput(),
+          op.getPresentKey(), op.getPresentValue()})
+      ringTypes &= isF16(value);
+    for (Value value : {op.getPastKey(), op.getPastValue()})
+      ringTypes &= !value || isF16(value);
+    if (ringTypes && op.getSoftcap().isZero() && op.getNumHeads() == 24 &&
+        op.getKvNumHeads() == 4 && op.getKQuantType() == "NONE" &&
+        op.getVQuantType() == "NONE" && !op.getDoRotary() &&
+        !op.getNoCausal() && op.getLocalWindowSizeAttr().getInt() <= 0 &&
+        op.getSmoothSoftmaxAttr().getInt() <= 0 && !op.getQkOutput() &&
+        !op.getHeadSink() && !op.getAttentionBias() && !op.getPositionIds() &&
+        !op.getOutputQk())
+      callee = kWrapGQARingF16;
+#endif
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type ptrType = getPtrType();
@@ -233,7 +258,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
       }
     }
 
-    // Matches wrap_group_query_attention_host_length() in gqa.cpp.
+    // Both runtime entry points accept the optional host length.
     SmallVector<Type, 45> paramTypes = {
         ptrType, // state
         i32Type, // op_state_slot
@@ -286,8 +311,8 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         i32Type  // host_length_value
     };
 
-    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kWrapGQAHostLength, paramTypes, i32Type);
+    FailureOr<LLVM::LLVMFuncOp> funcOp =
+        LLVM::lookupOrCreateFn(rewriter, module, callee, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 

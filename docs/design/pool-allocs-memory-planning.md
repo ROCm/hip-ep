@@ -342,8 +342,8 @@ is rejected if placement relied on its mapped-input support.
 
 This analysis can replace scalar and dimension readbacks, or supply a GQA host
 length for batch one. GPU inputs and the final inference wait stay unchanged.
-All GQA calls use one runtime entry point with an explicit host-length presence
-flag. Without a proven value, the runtime retains its existing readback path.
+GQA and its opt-in Ring path accept an explicit host-length presence flag.
+Without a proven value, the runtime retains its existing readback path.
 `--convert-hip-to-llvm='report-host-scalars=true'` reports the forwarded count
 or the reason the analysis was rejected, including in Release builds.
 

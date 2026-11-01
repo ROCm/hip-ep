@@ -244,7 +244,23 @@ endfunction()
 # One SHARED target per arch. Each builds a fatbin with that single slice;
 # OFFLOAD_ARCHS narrows the global list to one element so the resulting
 # DLL/SO is not bloated with code for archs the consumer won't load.
+if(HIP_EP_RING_ENABLED)
+    list(APPEND _kernel_sources hip/ring/ring_gqa.hip)
+endif()
+
 foreach(_arch IN LISTS HIP_ARCHITECTURES)
+    set(_ring_device_enabled 0)
+    # gfx11-generic also runs on Strix Halo. Compile Ring into that release
+    # slice, but retain the gfx1151-only device guard in ring_gqa.hip.
+    if(_arch STREQUAL "gfx1151" OR _arch STREQUAL "gfx11-generic")
+        set(_ring_device_enabled 1)
+    endif()
+    set(_ring_compile_options "")
+    if(HIP_EP_RING_ENABLED)
+        list(APPEND _ring_compile_options
+            -DHIP_EP_RING_ENABLED=${HIP_EP_RING_ENABLED}
+            -DHIP_EP_RING_DEVICE_ENABLED=${_ring_device_enabled})
+    endif()
     set(_target custom_kernels_${_arch})
     _matmul_nbits_lut_data_source(${_arch} _matmul_lut_src)
     _gqa_lut_data_source(${_arch} _gqa_lut_src)
@@ -259,11 +275,15 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
             # flatbuffers is header-only for reading, so no link library needed.
             ${CMAKE_BINARY_DIR}/schemas
             $<TARGET_PROPERTY:flatbuffers::flatbuffers,INTERFACE_INCLUDE_DIRECTORIES>
+        COMPILE_OPTIONS ${_ring_compile_options}
         OFFLOAD_ARCHS
             ${_arch}
         DEPENDS
             HipSchemas
     )
+    if(HIP_EP_RING_ENABLED AND NOT WIN32)
+        target_compile_options(${_target} PRIVATE ${_ring_compile_options})
+    endif()
     set_target_properties(${_target} PROPERTIES
         OUTPUT_NAME custom_kernels_${_arch}
         FOLDER "custom_kernels"
