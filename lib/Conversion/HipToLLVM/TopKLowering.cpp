@@ -105,11 +105,8 @@ struct TopKOpLowering : public ConvertOpToLLVMPattern<TopKOp> {
 } // namespace
 
 void populateTopKLoweringPatterns(const LLVMTypeConverter &converter,
-                                  RuntimeLoweringPatterns &patterns) {
-  // The runtime reads K before it waits for the context stream.
-  patterns.addWithEarlyRead<TopKOpLowering>(
-      [](Operation *op) -> Value { return cast<TopKOp>(op).getK(); },
-      converter);
+                                  RewritePatternSet &patterns) {
+  patterns.add<TopKOpLowering>(converter);
 }
 
 } // namespace hip

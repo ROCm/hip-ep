@@ -317,9 +317,9 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
 } // namespace
 
 void populateGqaLoweringPatterns(
-    const LLVMTypeConverter &converter, RuntimeLoweringPatterns &patterns,
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns,
     const DenseMap<Operation *, Value> &hostScalars) {
-  patterns.addOrdered<GqaOpLowering>(converter, hostScalars);
+  patterns.add<GqaOpLowering>(converter, hostScalars);
 }
 
 } // namespace hip

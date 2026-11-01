@@ -90,8 +90,8 @@ struct ExpandOpLowering : public ConvertOpToLLVMPattern<ExpandOp> {
 } // namespace
 
 void populateExpandLoweringPatterns(const LLVMTypeConverter &converter,
-                                    RuntimeLoweringPatterns &patterns) {
-  patterns.addOrdered<ExpandOpLowering>(converter);
+                                    RewritePatternSet &patterns) {
+  patterns.add<ExpandOpLowering>(converter);
 }
 
 } // namespace hip

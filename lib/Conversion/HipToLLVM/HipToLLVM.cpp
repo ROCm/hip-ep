@@ -5,6 +5,7 @@
 
 #include "HipToLLVMUtils.h"
 #include "hip/Conversion/HipToLLVM/Passes.h"
+#include "hip/Dialect/IR/RuntimeAccessOpInterface.h"
 
 #include "mlir/Conversion/ConvertToLLVM/ToLLVMInterface.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -221,7 +222,7 @@ private:
 
 static void
 populateLoweringPatterns(LLVMTypeConverter &typeConverter,
-                         RuntimeLoweringPatterns &patterns,
+                         RewritePatternSet &patterns,
                          LLVMConversionTarget &target,
                          const DenseMap<Operation *, Value> &hostScalars) {
   MLIRContext *ctx = &typeConverter.getContext();
@@ -332,7 +333,7 @@ populateLoweringPatterns(LLVMTypeConverter &typeConverter,
 // patterns above handle those cases without querying an unresolved promise.
 static void populateDialectLowerings(Dialect *dialect,
                                      LLVMTypeConverter &typeConverter,
-                                     RuntimeLoweringPatterns &patterns,
+                                     RewritePatternSet &patterns,
                                      LLVMConversionTarget &target) {
   if (!dialect || dialect->hasPromisedInterface(
                       dialect->getTypeID(),
@@ -347,20 +348,45 @@ void ConvertHipToLLVMPass::runOnOperation() {
   ModuleOp module = getOperation();
   MLIRContext *ctx = module.getContext();
   LLVMTypeConverter typeConverter(ctx);
+  // Scratch placement and the runtime memref ABI both use 64-bit indices.
+  if (typeConverter.getIndexTypeBitwidth() != 64) {
+    module.emitError("HIP runtime requires 64-bit indices");
+    return signalPassFailure();
+  }
   // Patterns borrow this map. Fill it after all lowerings are registered.
   DenseMap<Operation *, Value> hostScalars;
-  RuntimeLoweringPatterns patterns(ctx);
+  RewritePatternSet patterns(ctx), alternatives(ctx);
   LLVMConversionTarget target(*ctx);
   populateLoweringPatterns(typeConverter, patterns, target, hostScalars);
   DenseSet<Dialect *> seenDialects;
+  SmallVector<Operation *> mappedInputOps;
+  bool hasScratch = false;
   module.walk([&](Operation *op) {
     Dialect *dialect = op->getDialect();
     if (seenDialects.insert(dialect).second)
-      populateDialectLowerings(dialect, typeConverter, patterns, target);
+      populateDialectLowerings(dialect, typeConverter, alternatives, target);
+    hasScratch |= isa<GetHostScratchOp>(op);
+    if (auto access = dyn_cast<RuntimeAccessOpInterface>(op))
+      if (access.supportsHostMappedInputs())
+        mappedInputOps.push_back(op);
   });
 
-  hostScalars =
-      collectHostScalarValues(module, patterns.finalizeAccessContracts());
+  RuntimeAccessOverrides overrides(alternatives);
+  // Placement may have relied on mapped-input support before a plugin was
+  // loaded. Reject overrides of that contract when host scratch is present.
+  if (hasScratch)
+    for (Operation *op : mappedInputOps)
+      if (overrides.contains(op->getName())) {
+        op->emitError("alternative lowering has no host-mapped input contract");
+        return signalPassFailure();
+      }
+
+  hostScalars = collectHostScalarValues(module, overrides,
+                                        typeConverter.getIndexTypeBitwidth());
+  // Preserve native-before-plugin order for equal-benefit patterns.
+  for (auto &pattern : alternatives.getNativePatterns())
+    patterns.add(std::move(pattern));
+  patterns.add(std::move(alternatives.getPDLPatterns()));
   if (failed(applyPartialConversion(module, target, std::move(patterns))))
     signalPassFailure();
 
@@ -377,24 +403,6 @@ void ConvertHipToLLVMPass::runOnOperation() {
 }
 
 } // namespace
-
-DenseSet<OperationName> getHostMappedInputOps(MLIRContext *ctx) {
-  LLVMTypeConverter typeConverter(ctx);
-  DenseMap<Operation *, Value> hostScalars;
-  RuntimeLoweringPatterns patterns(ctx);
-  LLVMConversionTarget target(*ctx);
-  populateLoweringPatterns(typeConverter, patterns, target, hostScalars);
-  // Query loaded dialects without inspecting IR. Their alternative lowerings
-  // can only narrow the contract.
-  for (Dialect *dialect : ctx->getLoadedDialects())
-    populateDialectLowerings(dialect, typeConverter, patterns, target);
-
-  DenseSet<OperationName> result;
-  for (const auto &entry : patterns.finalizeAccessContracts())
-    if (entry.second.hostMappedInputs)
-      result.insert(entry.first);
-  return result;
-}
 
 } // namespace hip
 } // namespace mlir

@@ -112,8 +112,8 @@ struct NonZeroOpLowering : public ConvertOpToLLVMPattern<NonZeroOp> {
 } // namespace
 
 void populateNonZeroLoweringPatterns(const LLVMTypeConverter &converter,
-                                     RuntimeLoweringPatterns &patterns) {
-  patterns.addOrdered<NonZeroOpLowering>(converter);
+                                     RewritePatternSet &patterns) {
+  patterns.add<NonZeroOpLowering>(converter);
 }
 
 } // namespace hip

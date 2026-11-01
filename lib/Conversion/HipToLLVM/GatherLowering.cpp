@@ -139,8 +139,8 @@ struct GatherOpLowering : public ConvertOpToLLVMPattern<GatherOp> {
 } // namespace
 
 void populateGatherLoweringPatterns(const LLVMTypeConverter &converter,
-                                    RuntimeLoweringPatterns &patterns) {
-  patterns.addOrdered<GatherOpLowering>(converter);
+                                    RewritePatternSet &patterns) {
+  patterns.add<GatherOpLowering>(converter);
 }
 
 } // namespace hip

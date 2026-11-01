@@ -22,8 +22,8 @@ target_include_directories(test-runtime-lowering-contracts PRIVATE
   ${LLVM_INCLUDE_DIRS}
 )
 target_link_libraries(test-runtime-lowering-contracts PRIVATE
-  MLIRIR
-  MLIRSideEffectInterfaces
+  HipToLLVM
+  MLIRParser
 )
 add_test(NAME RuntimeLoweringContractsUnit
   COMMAND test-runtime-lowering-contracts

@@ -198,8 +198,8 @@ struct WhereOpLowering : public ConvertOpToLLVMPattern<WhereOp> {
 } // namespace
 
 void populateWhereLoweringPatterns(const LLVMTypeConverter &converter,
-                                   RuntimeLoweringPatterns &patterns) {
-  patterns.addOrdered<WhereOpLowering>(converter);
+                                   RewritePatternSet &patterns) {
+  patterns.add<WhereOpLowering>(converter);
 }
 
 } // namespace hip

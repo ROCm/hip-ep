@@ -331,9 +331,11 @@ Functions without `!hip.context` as argument zero are skipped.
 HIP-to-LLVM tracks scalar values by scratch byte range. Writes invalidate
 overlapping values. A removed wait never clears pending GPU accesses. Unknown
 aliases, effects, calls, or control flow keep the readback path. Memory effects
-describe accesses; backend lowering contracts establish stream ordering and
-mapped-input support. Only guarantees shared by all registered alternatives
-are used.
+describe accesses; backend-registered `RuntimeAccessOpInterface` models
+establish stream ordering and mapped-input support. Placement queries the
+interface without constructing LLVM lowering patterns. Plugin alternatives
+disable forwarding for the operations they can replace. With host scratch
+present, overrides of mapped-input contracts are rejected before lowering.
 
 This analysis can replace scalar and dimension readbacks, or supply a GQA host
 length for batch one. GPU inputs and the final inference wait stay unchanged.

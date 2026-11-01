@@ -6,6 +6,7 @@
 add_library(HipToLLVM STATIC
   HipToLLVM.cpp
   HostScalarAnalysis.cpp
+  RuntimeAccessInterface.cpp
   MemoryLowering.cpp
   ConvLowering.cpp
   ConvTransposeLowering.cpp

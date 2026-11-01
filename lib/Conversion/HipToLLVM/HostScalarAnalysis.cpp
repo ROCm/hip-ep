@@ -4,13 +4,23 @@
  */
 
 #include "HipToLLVMUtils.h"
+#include "hip/Dialect/IR/RuntimeAccessOpInterface.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/Interfaces/CallInterfaces.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "llvm/ADT/Statistic.h"
+#include "llvm/Support/Debug.h"
 #include "llvm/Support/MathExtras.h"
 
-namespace mlir::hip {
+#define DEBUG_TYPE "hip-host-scalar-analysis"
+
+STATISTIC(NumHostScalarsForwarded, "Number of proven host scalars forwarded");
+STATISTIC(NumHostScalarBailouts, "Number of rejected host-scalar analyses");
+
+using namespace mlir;
+using namespace mlir::hip;
+
 namespace {
 
 // All ranges refer to the one private runtime scratch allocation. Other
@@ -36,12 +46,13 @@ struct Descriptor {
   SmallVector<int64_t> sizes;
   SmallVector<int64_t> strides;
 };
+} // namespace
 
-// Match the current 64-bit index ABI. Reject padded and unsupported widths.
-static std::optional<int64_t> storageWidth(Type type) {
+// Reject padded and unsupported widths.
+static std::optional<int64_t> storageWidth(Type type, unsigned indexBitwidth) {
   if (!type.isIntOrIndexOrFloat())
     return std::nullopt;
-  unsigned bits = type.isIndex() ? 64 : type.getIntOrFloatBitWidth();
+  unsigned bits = type.isIndex() ? indexBitwidth : type.getIntOrFloatBitWidth();
   if (bits != 1 && bits != 8 && bits != 16 && bits != 32 && bits != 64)
     return std::nullopt;
   return (bits + 7) / 8;
@@ -49,9 +60,11 @@ static std::optional<int64_t> storageWidth(Type type) {
 
 // Keep the aligned pointer and descriptor offset separate. Reinterpretation
 // replaces the offset; it does not add to the previous descriptor's offset.
+namespace {
 class ScratchRanges {
 public:
-  explicit ScratchRanges(int64_t capacity) : capacity(capacity) {}
+  ScratchRanges(int64_t capacity, unsigned indexBitwidth)
+      : capacity(capacity), indexBitwidth(indexBitwidth) {}
 
   DenseMap<Value, Descriptor> descriptors;
 
@@ -125,7 +138,7 @@ public:
     Value result;
     if (auto view = dyn_cast<memref::ViewOp>(op)) {
       auto shift = getConstantIntValue(view.getByteShift());
-      auto width = storageWidth(view.getType().getElementType());
+      auto width = storageWidth(view.getType().getElementType(), indexBitwidth);
       if (!shift || !width || !view.getType().hasStaticShape() ||
           !view.getType().getLayout().isIdentity() ||
           llvm::AddOverflow(d.base, *shift, d.base))
@@ -168,6 +181,7 @@ public:
 
 private:
   int64_t capacity;
+  unsigned indexBitwidth;
 };
 
 struct Accesses {
@@ -180,9 +194,10 @@ struct Accesses {
   Value source;
   Type requestedType;
 };
+} // namespace
 
 static LogicalResult summarize(Operation *op, Value ctx, ScratchRanges &ranges,
-                               const RuntimeAccessContracts &contracts,
+                               const RuntimeAccessOverrides &overrides,
                                Accesses &accesses) {
   if (op->getNumRegions() || isa<CallOpInterface>(op))
     return failure();
@@ -261,15 +276,12 @@ static LogicalResult summarize(Operation *op, Value ctx, ScratchRanges &ranges,
     accesses.requestedType = IntegerType::get(op->getContext(), 32);
     return addRange(read.getScalar(), false, false);
   }
-  auto contract = contracts.find(op->getName());
-  if (contract == contracts.end())
+  auto contract = dyn_cast<RuntimeAccessOpInterface>(op);
+  if (!contract || overrides.contains(op->getName()))
     return failure();
   // Do not depend on default stream ordering for an early host read.
   // Require an unchanged constant or a checked scratch read.
-  if (auto read = contract->second.earlyHostRead) {
-    Value value = read(op);
-    if (!value)
-      return failure();
+  if (Value value = contract.getEarlyHostRead()) {
     if (auto it = ranges.descriptors.find(value);
         it != ranges.descriptors.end()) {
       auto bytes = ranges.range(it->second);
@@ -306,10 +318,12 @@ static LogicalResult summarize(Operation *op, Value ctx, ScratchRanges &ranges,
   return success();
 }
 
+namespace {
 struct Fact {
   ByteRange bytes;
   Value value;
 };
+} // namespace
 
 static bool conflicts(ArrayRef<ByteRange> a, ArrayRef<ByteRange> b) {
   return llvm::any_of(a, [&](ByteRange x) {
@@ -317,28 +331,36 @@ static bool conflicts(ArrayRef<ByteRange> a, ArrayRef<ByteRange> b) {
   });
 }
 
-} // namespace
-
 DenseMap<Operation *, Value>
-collectHostScalarValues(ModuleOp module,
-                        const RuntimeAccessContracts &contracts) {
+mlir::hip::collectHostScalarValues(ModuleOp module,
+                                   const RuntimeAccessOverrides &overrides,
+                                   unsigned indexBitwidth) {
+  auto reject = [&](Operation *op, StringRef reason) {
+    ++NumHostScalarBailouts;
+    LLVM_DEBUG(llvm::dbgs()
+               << "Host-scalar forwarding skipped: " << reason << " ("
+               << op->getName() << " at " << op->getLoc() << ")\n");
+    return DenseMap<Operation *, Value>();
+  };
   SmallVector<GetHostScratchOp> scratches;
   module.walk([&](GetHostScratchOp op) { scratches.push_back(op); });
+  if (scratches.empty())
+    return DenseMap<Operation *, Value>();
   // Scratch belongs to the runtime state. Another request can resize it.
   if (scratches.size() != 1)
-    return DenseMap<Operation *, Value>();
+    return reject(module, "multiple scratch requests");
   GetHostScratchOp scratch = scratches.front();
   auto func = scratch->getParentOfType<func::FuncOp>();
   auto capacity = getConstantIntValue(scratch.getScratchSize());
   if (!func || !llvm::hasSingleElement(func.getBody()) ||
       scratch->getBlock() != &func.front() || func.getNumArguments() == 0 ||
       scratch.getCtx() != func.getArgument(0) || !capacity || *capacity <= 0)
-    return DenseMap<Operation *, Value>();
+    return reject(scratch, "unsupported scratch owner or capacity");
   auto uses = SymbolTable::getSymbolUses(func, module);
   if (!uses || !uses->empty())
-    return DenseMap<Operation *, Value>();
+    return reject(func, "scratch owner may be called");
 
-  ScratchRanges ranges(*capacity);
+  ScratchRanges ranges(*capacity, indexBitwidth);
   ranges.descriptors[scratch.getResult()] = Descriptor{
       IntegerType::get(module.getContext(), 8), 1, 0, 0, {*capacity}, {1}};
   DenseMap<Operation *, Value> replacements;
@@ -348,8 +370,8 @@ collectHostScalarValues(ModuleOp module,
   // justify another removal. Any later conflict rejects all replacements.
   for (Operation &op : func.front()) {
     Accesses event;
-    if (failed(summarize(&op, scratch.getCtx(), ranges, contracts, event)))
-      return DenseMap<Operation *, Value>();
+    if (failed(summarize(&op, scratch.getCtx(), ranges, overrides, event)))
+      return reject(&op, "unsupported access or lowering contract");
     auto bytes = event.source ? ranges.scalar(event.source, event.requestedType)
                               : std::nullopt;
     if (bytes) {
@@ -372,7 +394,7 @@ collectHostScalarValues(ModuleOp module,
     if (bytes && isa<ReadbackScalarOp>(op) && !replacements.contains(&op))
       facts.push_back({*bytes, op.getResult(0)});
     if (conflicts(event.earlyHostReads, pendingWrites))
-      return DenseMap<Operation *, Value>();
+      return reject(&op, "early host read overlaps a pending device write");
     if (event.readback) {
       if (!replacements.contains(&op)) {
         pendingReads.clear();
@@ -382,7 +404,7 @@ collectHostScalarValues(ModuleOp module,
       if (conflicts(event.reads, pendingWrites) ||
           conflicts(event.writes, pendingReads) ||
           conflicts(event.writes, pendingWrites))
-        return DenseMap<Operation *, Value>();
+        return reject(&op, "host access overlaps pending device work");
     } else {
       llvm::append_range(pendingReads, event.reads);
       llvm::append_range(pendingWrites, event.writes);
@@ -390,7 +412,8 @@ collectHostScalarValues(ModuleOp module,
   }
   // The invocation's completion wait protects the remaining device users.
   // No stack payloads, releases, escapes, or calls were accepted above.
+  NumHostScalarsForwarded += replacements.size();
+  LLVM_DEBUG(llvm::dbgs() << "Host-scalar forwarding: " << func.getSymName()
+                          << ": " << replacements.size() << " values\n");
   return replacements;
 }
-
-} // namespace mlir::hip

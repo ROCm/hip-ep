@@ -89,8 +89,8 @@ struct AndOpLowering : public ConvertOpToLLVMPattern<AndOp> {
 } // namespace
 
 void populateAndLoweringPatterns(const LLVMTypeConverter &converter,
-                                 RuntimeLoweringPatterns &patterns) {
-  patterns.addOrdered<AndOpLowering>(converter);
+                                 RewritePatternSet &patterns) {
+  patterns.add<AndOpLowering>(converter);
 }
 
 } // namespace hip

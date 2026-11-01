@@ -5,9 +5,7 @@
 #ifndef HIP_COMPILER_CONVERSION_HIPTOLLVM_PASSES_H
 #define HIP_COMPILER_CONVERSION_HIPTOLLVM_PASSES_H
 
-#include "mlir/IR/OperationSupport.h"
 #include "mlir/Pass/Pass.h"
-#include "llvm/ADT/DenseSet.h"
 #include <memory>
 
 namespace mlir {
@@ -17,9 +15,8 @@ namespace hip {
 /// Lowers HIP GPU operations to LLVM calls to MIOpen/HIP runtime.
 std::unique_ptr<Pass> createConvertHipToLLVMPass();
 
-/// Return operations whose registered lowerings accept host-mapped inputs.
-/// Include all loaded dialect alternatives. Unknown contracts are excluded.
-DenseSet<OperationName> getHostMappedInputOps(MLIRContext *context);
+/// Register access guarantees provided by the native HIP runtime lowerings.
+void registerRuntimeAccessOpInterfaceExternalModels(DialectRegistry &registry);
 
 } // namespace hip
 } // namespace mlir

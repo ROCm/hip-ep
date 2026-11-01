@@ -20,8 +20,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "hip/Conversion/HipToLLVM/Passes.h"
 #include "hip/Dialect/IR/HipDialect.h"
+#include "hip/Dialect/IR/RuntimeAccessOpInterface.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -48,7 +48,8 @@ namespace hip {
 
 namespace {
 
-/// Follow aliases and reject users that do not support mapped storage.
+/// Preserve host-I/O placement through aliases and existing HIP consumers.
+/// This is not a proof that arbitrary device-filled buffers can be mapped.
 static bool classifyHostScalarUsers(Value memrefVal, bool &sawHostIO,
                                     bool &sawHipUser) {
   for (Operation *user : memrefVal.getUsers()) {
@@ -59,7 +60,7 @@ static bool classifyHostScalarUsers(Value memrefVal, bool &sawHostIO,
     if (isa<memref::DimOp, memref::DeallocOp>(user))
       continue;
     // Keep the existing placement rule for HIP consumers of host-fed data.
-    if (user->getDialect() && user->getDialect()->getNamespace() == "hip") {
+    if (isa_and_nonnull<HipDialect>(user->getDialect())) {
       sawHipUser = true;
       continue;
     }
@@ -83,9 +84,7 @@ static bool classifyHostScalarUsers(Value memrefVal, bool &sawHostIO,
 // readback observes it. Preserve every copy and readback. This avoids a new
 // device-pool slot when early placement separates it from a host-written
 // buffer.
-static bool
-isCopyReadbackCandidate(memref::AllocOp allocOp,
-                        const DenseSet<OperationName> &mappedInputOps) {
+static bool isCopyReadbackCandidate(memref::AllocOp allocOp) {
   auto func = allocOp->getParentOfType<func::FuncOp>();
   auto rootType = allocOp.getType();
   if (!func || !llvm::hasSingleElement(func.getBody()) ||
@@ -153,7 +152,8 @@ isCopyReadbackCandidate(memref::AllocOp allocOp,
       }
       // Query the backend contract. Memory effects alone do not establish
       // mapped-input support. Keep kernel destinations in device storage.
-      if (mappedInputOps.contains(user->getName()) &&
+      auto access = dyn_cast<RuntimeAccessOpInterface>(user);
+      if (access && access.supportsHostMappedInputs() &&
           user->getNumOperands() != 0 &&
           user->getOperand(0) == func.getArgument(0) &&
           type.getLayout().isIdentity()) {
@@ -175,9 +175,7 @@ isCopyReadbackCandidate(memref::AllocOp allocOp,
 
 // Keep the existing size limit. Host I/O or a bounded copy/readback chain
 // must require the small buffer. Float buffers also need a HIP consumer.
-static bool
-isHostScalarCandidate(memref::AllocOp allocOp,
-                      const DenseSet<OperationName> &mappedInputOps) {
+static bool isHostScalarCandidate(memref::AllocOp allocOp) {
   MemRefType type = allocOp.getType();
   if (!type.hasStaticShape())
     return false;
@@ -193,21 +191,13 @@ isHostScalarCandidate(memref::AllocOp allocOp,
   if (!classifyHostScalarUsers(allocOp.getResult(), hasHostIO, hasHipUser))
     return false;
   return (hasHostIO && (!isFloat || hasHipUser)) ||
-         isCopyReadbackCandidate(allocOp, mappedInputOps);
+         isCopyReadbackCandidate(allocOp);
 }
 
 struct MaterializeHostScalarsPass
     : public impl::MaterializeHostScalarsPassBase<MaterializeHostScalarsPass> {
 
-  LogicalResult initialize(MLIRContext *context) override {
-    mappedInputOps = getHostMappedInputOps(context);
-    return success();
-  }
-
   void runOnOperation() override;
-
-private:
-  DenseSet<OperationName> mappedInputOps;
 };
 
 void MaterializeHostScalarsPass::runOnOperation() {
@@ -224,7 +214,7 @@ void MaterializeHostScalarsPass::runOnOperation() {
   // Collect candidates before rewriting. Keep their traversal order.
   SmallVector<memref::AllocOp> candidates;
   funcOp.walk([&](memref::AllocOp op) {
-    if (isHostScalarCandidate(op, mappedInputOps))
+    if (isHostScalarCandidate(op))
       candidates.push_back(op);
   });
   if (candidates.empty())

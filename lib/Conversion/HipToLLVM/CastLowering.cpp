@@ -89,8 +89,8 @@ struct CastOpLowering : public ConvertOpToLLVMPattern<CastOp> {
 } // namespace
 
 void populateCastLoweringPatterns(const LLVMTypeConverter &converter,
-                                  RuntimeLoweringPatterns &patterns) {
-  patterns.addOrderedMapped<CastOpLowering>(converter);
+                                  RewritePatternSet &patterns) {
+  patterns.add<CastOpLowering>(converter);
 }
 
 } // namespace hip

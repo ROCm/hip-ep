@@ -208,8 +208,8 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
 } // namespace
 
 void populateQMoELoweringPatterns(const LLVMTypeConverter &converter,
-                                  RuntimeLoweringPatterns &patterns) {
-  patterns.addOrdered<QMoEOpLowering>(converter);
+                                  RewritePatternSet &patterns) {
+  patterns.add<QMoEOpLowering>(converter);
 }
 
 } // namespace hip

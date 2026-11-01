@@ -243,9 +243,8 @@ struct MRotaryEmbeddingOpLowering
 } // namespace
 
 void populateRopeLoweringPatterns(const LLVMTypeConverter &converter,
-                                  RuntimeLoweringPatterns &patterns) {
-  patterns.addOrdered<RopeOpLowering>(converter);
-  patterns.add<MRotaryEmbeddingOpLowering>(converter);
+                                  RewritePatternSet &patterns) {
+  patterns.add<RopeOpLowering, MRotaryEmbeddingOpLowering>(converter);
 }
 
 } // namespace hip

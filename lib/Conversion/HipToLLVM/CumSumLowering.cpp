@@ -102,8 +102,8 @@ struct CumSumOpLowering : public ConvertOpToLLVMPattern<CumSumOp> {
 } // namespace
 
 void populateCumSumLoweringPatterns(const LLVMTypeConverter &converter,
-                                    RuntimeLoweringPatterns &patterns) {
-  patterns.addOrdered<CumSumOpLowering>(converter);
+                                    RewritePatternSet &patterns) {
+  patterns.add<CumSumOpLowering>(converter);
 }
 
 } // namespace hip
