@@ -67,7 +67,7 @@ The default domain ID is zero and is omitted from textual IR. Additional domains
 
 `convert-linalg-to-loops` must run before host-scalar materialization: a rank-zero `linalg.fill` must become `memref.store` before the host-I/O candidate scan.
 
-`hip-materialize-host-scalars` redirects small buffers with host accesses to host-mapped scratch. It runs after linalg-to-loops and before OptimizeMemRefs. Otherwise, buffer reuse can merge a small shape buffer into a larger allocation that exceeds the pass's 16-element limit. PoolAllocs would then place the host access in device-only storage. Later layout promotion creates copy-only temporaries, not new host loads or stores.
+`hip-materialize-host-scalars` must run before OptimizeMemRefs so buffer reuse cannot hide host-accessed candidates. See [Host scalar scratch](#host-scalar-scratch) for the placement rules.
 
 ### Pool-quality preconditions
 
@@ -319,10 +319,14 @@ GPU-free coverage of the offset allocator: `test/runtime/test_transient_arena.cp
 
 `hip-materialize-host-scalars` selects static allocations of at most 16 elements
 with host reads or writes through supported aliases. Float buffers also need a
-HIP consumer. Bounded copy-filled integer buffers with an explicit readback can
-also qualify when their backend readers support mapped inputs. This keeps them
-out of the device pool when early placement prevents reuse with a host-written
-buffer. Copies and payload accesses stay in their original order.
+HIP consumer. Placement precedes buffer reuse: merging a candidate into a larger
+allocation can put it above the size limit and leave its host accesses targeting
+device memory.
+
+Small copy-filled integer buffers with an explicit readback also qualify when
+their aliases are bounded and their backend readers support mapped inputs. This
+avoids extra device-pool storage when early placement separates them from
+host-written buffers. Copies and payload accesses stay in their original order.
 
 All selected allocations in a function share one `hip.get_host_scratch` buffer. Their offsets are aligned to 64 bytes, independently of PoolAllocs' default 256-byte alignment.
 
@@ -330,16 +334,18 @@ Functions without `!hip.context` as argument zero are skipped.
 
 HIP-to-LLVM tracks scalar values by scratch byte range. Writes invalidate
 overlapping values. A removed wait never clears pending GPU accesses. Unknown
-aliases, effects, calls, or control flow keep the readback path. Memory effects
-describe accesses; backend-registered `RuntimeAccessOpInterface` models
-establish stream ordering and mapped-input support. Placement queries the
-interface without constructing LLVM lowering patterns. Plugin alternatives
-disable forwarding for the operations they can replace. With host scratch
-present, overrides of mapped-input contracts are rejected before lowering.
+aliases, effects, calls, or control flow retain every readback in the function.
+Backend-registered `RuntimeAccessOpInterface` models establish stream ordering
+and mapped-input support; memory effects describe the accesses. Plugin overrides
+invalidate the native contract. An override consuming scratch-derived storage
+is rejected if placement relied on its mapped-input support.
 
 This analysis can replace scalar and dimension readbacks, or supply a GQA host
 length for batch one. GPU inputs and the final inference wait stay unchanged.
-The original GQA entry point remains available for existing compiled artifacts.
+All GQA calls use one runtime entry point with an explicit host-length presence
+flag. Without a proven value, the runtime retains its existing readback path.
+`--convert-hip-to-llvm='report-host-scalars=true'` reports the forwarded count
+or the reason the analysis was rejected, including in Release builds.
 
 ## Diagnostics and tests
 

@@ -1,15 +1,17 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-// RUN: hip-mlir-opt --split-input-file --convert-hip-to-llvm %s | FileCheck %s
+// RUN: hip-mlir-opt --split-input-file --convert-hip-to-llvm %s | FileCheck %s --implicit-check-not='@wrap_group_query_attention('
 
 // Forward each stored value, including truncation. Keep stores for GPU readers.
 // CHECK-LABEL: llvm.func @distinct_lengths(
 // CHECK: %[[A:.*]] = llvm.trunc {{.*}} : i64 to i32
 // CHECK: llvm.store %[[A]],
-// CHECK: llvm.call @wrap_group_query_attention_host_length({{.*}}, %[[A]])
+// CHECK: %[[PRESENT_A:.*]] = llvm.mlir.constant(1 : i32) : i32
+// CHECK: llvm.call @wrap_group_query_attention_host_length({{.*}}, %[[PRESENT_A]], %[[A]])
 // CHECK: llvm.store %[[B:arg[0-9]+]],
-// CHECK: llvm.call @wrap_group_query_attention_host_length({{.*}}, %[[B]])
+// CHECK: %[[PRESENT_B:.*]] = llvm.mlir.constant(1 : i32) : i32
+// CHECK: llvm.call @wrap_group_query_attention_host_length({{.*}}, %[[PRESENT_B]], %[[B]])
 func.func @distinct_lengths(%ctx: !hip.context, %a: i64, %b: i32,
     %q: memref<1x1x64xf16>, %total: memref<i32>, %out: memref<1x1x64xf16>,
     %pk: memref<1x1x128x64xf16>, %pv: memref<1x1x128x64xf16>) {
@@ -41,8 +43,8 @@ func.func @distinct_lengths(%ctx: !hip.context, %a: i64, %b: i32,
 
 // A later store can race with an earlier GPU reader.
 // CHECK-LABEL: llvm.func @rewritten_slot(
-// CHECK-NOT: llvm.call @wrap_group_query_attention_host_length
-// CHECK: llvm.call @wrap_group_query_attention(
+// CHECK: %[[ABSENT:.*]] = llvm.mlir.constant(0 : i32) : i32
+// CHECK: llvm.call @wrap_group_query_attention_host_length({{.*}}, %[[ABSENT]], %[[ABSENT]])
 func.func @rewritten_slot(%ctx: !hip.context, %a: i32, %b: i32, %q: memref<1x1x64xf16>,
     %total: memref<i32>, %out: memref<1x1x64xf16>, %pk: memref<1x1x128x64xf16>,
     %pv: memref<1x1x128x64xf16>) {
@@ -65,8 +67,9 @@ func.func @rewritten_slot(%ctx: !hip.context, %a: i32, %b: i32, %q: memref<1x1x6
 
 // A host-mapped pointer does not prove a host-produced value.
 // CHECK-LABEL: llvm.func @device_writer(
-// CHECK-NOT: llvm.call @wrap_group_query_attention_host_length
-// CHECK: llvm.call @wrap_group_query_attention(
+// CHECK: llvm.call @wrap_cast
+// CHECK: %[[ABSENT:.*]] = llvm.mlir.constant(0 : i32) : i32
+// CHECK: llvm.call @wrap_group_query_attention_host_length({{.*}}, %[[ABSENT]], %[[ABSENT]])
 func.func @device_writer(%ctx: !hip.context, %a: i32, %source: memref<1xi64>,
     %q: memref<1x1x64xf16>, %total: memref<i32>, %out: memref<1x1x64xf16>,
     %pk: memref<1x1x128x64xf16>, %pv: memref<1x1x128x64xf16>) {
@@ -90,8 +93,8 @@ func.func @device_writer(%ctx: !hip.context, %a: i32, %source: memref<1xi64>,
 
 // Keep multi-element length inputs on the existing path.
 // CHECK-LABEL: llvm.func @multi_element(
-// CHECK-NOT: llvm.call @wrap_group_query_attention_host_length
-// CHECK: llvm.call @wrap_group_query_attention(
+// CHECK: %[[ABSENT:.*]] = llvm.mlir.constant(0 : i32) : i32
+// CHECK: llvm.call @wrap_group_query_attention_host_length({{.*}}, %[[ABSENT]], %[[ABSENT]])
 func.func @multi_element(%ctx: !hip.context, %a: i32, %b: i32, %q: memref<1x1x64xf16>,
     %total: memref<i32>, %out: memref<1x1x64xf16>, %pk: memref<1x1x128x64xf16>,
     %pv: memref<1x1x128x64xf16>) {

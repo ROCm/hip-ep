@@ -2,6 +2,20 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
+//===- HostScalarAnalysis.cpp - Prove scalar and wait forwarding ----------===//
+//
+// Track exact typed values and pending device accesses in one scratch owner.
+// Writes invalidate overlapping values. Only retained readbacks clear pending
+// work; a later host/device conflict discards every proposed replacement.
+// Unsupported aliases, calls, regions, or runtime contracts also reject the
+// whole analysis. No IR is changed until conversion consumes the result.
+//
+// Before: memref.store %n, %slot[%c0] : memref<1xi32>
+//         %v = hip.readback_scalar(%ctx, %slot : memref<1xi32>) -> i32
+// After:  keep the store; use %n in place of %v, provided removing the wait
+//         leaves every later host access ordered with pending device work.
+//
+//===----------------------------------------------------------------------===//
 
 #include "HipToLLVMUtils.h"
 #include "hip/Dialect/IR/RuntimeAccessOpInterface.h"
@@ -334,9 +348,12 @@ static bool conflicts(ArrayRef<ByteRange> a, ArrayRef<ByteRange> b) {
 DenseMap<Operation *, Value>
 mlir::hip::collectHostScalarValues(ModuleOp module,
                                    const RuntimeAccessOverrides &overrides,
-                                   unsigned indexBitwidth) {
+                                   unsigned indexBitwidth, bool report) {
   auto reject = [&](Operation *op, StringRef reason) {
     ++NumHostScalarBailouts;
+    if (report)
+      emitRemark(op->getLoc(), "host-scalar forwarding skipped: ")
+          << reason << " (" << op->getName() << ")";
     LLVM_DEBUG(llvm::dbgs()
                << "Host-scalar forwarding skipped: " << reason << " ("
                << op->getName() << " at " << op->getLoc() << ")\n");
@@ -413,6 +430,9 @@ mlir::hip::collectHostScalarValues(ModuleOp module,
   // The invocation's completion wait protects the remaining device users.
   // No stack payloads, releases, escapes, or calls were accepted above.
   NumHostScalarsForwarded += replacements.size();
+  if (report)
+    emitRemark(func.getLoc(), "host scalars forwarded: ")
+        << replacements.size() << " in @" << func.getSymName();
   LLVM_DEBUG(llvm::dbgs() << "Host-scalar forwarding: " << func.getSymName()
                           << ": " << replacements.size() << " values\n");
   return replacements;

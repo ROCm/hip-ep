@@ -9,6 +9,7 @@
 #include "hip/Dialect/IR/RuntimeAccessOpInterface.h"
 #include "mlir/Conversion/ConvertToLLVM/ToLLVMInterface.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -54,8 +55,8 @@ struct OverrideDialect : Dialect {
 
 int main() {
   MLIRContext ctx;
-  ctx.loadDialect<HipDialect, arith::ArithDialect, func::FuncDialect,
-                  memref::MemRefDialect>();
+  ctx.loadDialect<HipDialect, arith::ArithDialect, cf::ControlFlowDialect,
+                  func::FuncDialect, memref::MemRefDialect>();
   OperationName name(CastOp::getOperationName(), &ctx);
   int failures = 0;
   auto check = [&](bool ok, const char *label) {
@@ -101,42 +102,74 @@ int main() {
         "PDL alternatives reject native contracts");
 #endif
 
-  auto module = parseSourceString<ModuleOp>(R"mlir(
-    func.func @mapped(%ctx: !hip.context, %out: memref<1xf32>) {
+  // A late-loaded plugin must not invalidate placement, but unrelated operands
+  // and copies into independent storage do not depend on the mapped contract.
+  ctx.getOrLoadDialect<OverrideDialect>();
+  auto checkLowering = [&](StringRef aliases, StringRef input,
+                           bool expectFailure, const char *label) {
+    auto module = parseSourceString<ModuleOp>(
+        (Twine(R"mlir(
+    func.func @mapped(%ctx: !hip.context, %in: memref<1xi32>, %out: memref<1xf32>) {
       %c0 = arith.constant 0 : index
       %size = arith.constant 64 : index
       %scratch = hip.get_host_scratch(%ctx, %size) : memref<?xi8>
       %a = memref.view %scratch[%c0][] : memref<?xi8> to memref<1xi32>
-      hip.cast(%ctx) ins(%a : memref<1xi32>) outs(%out : memref<1xf32>)
+    )mlir") +
+         aliases + "\nhip.cast(%ctx) ins(" + input +
+         R"mlir( : memref<1xi32>) outs(%out : memref<1xf32>)
           {to = 1 : i64}
       return
     }
-  )mlir",
-                                            &ctx);
-  if (!module)
-    return 1;
-  module->walk([&](CastOp op) {
-    auto access = cast<RuntimeAccessOpInterface>(op.getOperation());
-    check(access.supportsHostMappedInputs() && !access.getEarlyHostRead(),
-          "Cast retains its ordered mapped-input contract");
-  });
+  )mlir")
+            .str(),
+        &ctx);
+    if (!module) {
+      check(false, label);
+      return;
+    }
+    module->walk([&](CastOp op) {
+      auto access = cast<RuntimeAccessOpInterface>(op.getOperation());
+      check(access.supportsHostMappedInputs() && !access.getEarlyHostRead(),
+            "Cast retains its ordered mapped-input contract");
+    });
 
-  // A plugin loaded after placement cannot silently invalidate its contract.
-  ctx.getOrLoadDialect<OverrideDialect>();
-  module->getBody()->push_back(Operation::create(
-      OperationState(UnknownLoc::get(&ctx), "override.anchor")));
-  bool diagnosed = false;
-  ScopedDiagnosticHandler handler(&ctx, [&](Diagnostic &diag) {
-    diagnosed |=
-        diag.str().find("no host-mapped input contract") != std::string::npos;
-    return success();
-  });
-  PassManager pm(&ctx);
-  pm.addPass(createConvertHipToLLVMPass());
-  check(failed(pm.run(*module)) && diagnosed,
-        "lowering diagnoses an override of a mapped-input contract");
-  bool retained = false;
-  module->walk([&](CastOp) { retained = true; });
-  check(retained, "contract failure occurs before IR conversion");
+    module->getBody()->push_back(Operation::create(
+        OperationState(UnknownLoc::get(&ctx), "override.anchor")));
+    bool diagnosed = false;
+    ScopedDiagnosticHandler handler(&ctx, [&](Diagnostic &diag) {
+      diagnosed |=
+          diag.str().find("no host-mapped input contract") != std::string::npos;
+      return success();
+    });
+    PassManager pm(&ctx);
+    pm.addPass(createConvertHipToLLVMPass());
+    bool failedLowering = failed(pm.run(*module));
+    check(failedLowering == expectFailure && diagnosed == expectFailure, label);
+    bool retained = false;
+    module->walk([&](CastOp) { retained = true; });
+    check(retained == expectFailure,
+          "only a contract failure retains the original Cast");
+  };
+  checkLowering("", "%a", true, "direct scratch consumer rejects an override");
+  checkLowering(R"mlir(
+    %b = memref.cast %a : memref<1xi32> to memref<?xi32>
+    %alias = memref.cast %b : memref<?xi32> to memref<1xi32>
+  )mlir",
+                "%alias", true, "scratch aliases reject an override");
+  checkLowering(R"mlir(
+    %base, %offset, %size0, %stride = memref.extract_strided_metadata %a
+        : memref<1xi32> -> memref<i32>, index, index, index
+    %alias = memref.reinterpret_cast %base to offset: [0], sizes: [1], strides: [1]
+        : memref<i32> to memref<1xi32>
+  )mlir",
+                "%alias", true, "metadata aliases reject an override");
+  checkLowering(R"mlir(
+    cf.br ^use(%a : memref<1xi32>)
+  ^use(%alias: memref<1xi32>):
+  )mlir",
+                "%alias", true, "block argument aliases reject an override");
+  checkLowering("", "%in", false, "unrelated input permits an override");
+  checkLowering("memref.copy %a, %in : memref<1xi32> to memref<1xi32>", "%in",
+                false, "a copied value is not a scratch alias");
   return failures != 0;
 }

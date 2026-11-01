@@ -19,6 +19,8 @@ struct OrderedAccess
   bool supportsHostMappedInputs(Operation *) const { return Mapped; }
 };
 
+template <typename Op> using MappedInputAccess = OrderedAccess<Op, true>;
+
 struct TopKAccess
     : RuntimeAccessOpInterface::ExternalModel<TopKAccess, TopKOp> {
   Value getEarlyHostRead(Operation *op) const {
@@ -28,48 +30,23 @@ struct TopKAccess
 };
 } // namespace
 
+template <template <typename> class Model, typename... Ops>
+static void attachAll(MLIRContext *ctx) {
+  (Ops::template attachInterface<Model<Ops>>(*ctx), ...);
+}
+
 void mlir::hip::registerRuntimeAccessOpInterfaceExternalModels(
     DialectRegistry &registry) {
   registry.addExtension(+[](MLIRContext *ctx, HipDialect *) {
     // Register only guarantees audited against the native lowering/runtime.
     // An unregistered op provides no ordering or mapped-input guarantee.
-    CastOp::attachInterface<OrderedAccess<CastOp, true>>(*ctx);
-    AddOp::attachInterface<OrderedAccess<AddOp, true>>(*ctx);
-    PadOp::attachInterface<OrderedAccess<PadOp, true>>(*ctx);
-    SliceOp::attachInterface<OrderedAccess<SliceOp, true>>(*ctx);
+    attachAll<MappedInputAccess, CastOp, AddOp, PadOp, SliceOp>(ctx);
     TopKOp::attachInterface<TopKAccess>(*ctx);
-    MulOp::attachInterface<OrderedAccess<MulOp>>(*ctx);
-    MinOp::attachInterface<OrderedAccess<MinOp>>(*ctx);
-    MaxOp::attachInterface<OrderedAccess<MaxOp>>(*ctx);
-    SubOp::attachInterface<OrderedAccess<SubOp>>(*ctx);
-    GqaOp::attachInterface<OrderedAccess<GqaOp>>(*ctx);
-    NonZeroOp::attachInterface<OrderedAccess<NonZeroOp>>(*ctx);
-    AndOp::attachInterface<OrderedAccess<AndOp>>(*ctx);
-    OrOp::attachInterface<OrderedAccess<OrOp>>(*ctx);
-    NotOp::attachInterface<OrderedAccess<NotOp>>(*ctx);
-    EqualOp::attachInterface<OrderedAccess<EqualOp>>(*ctx);
-    LessOp::attachInterface<OrderedAccess<LessOp>>(*ctx);
-    WhereOp::attachInterface<OrderedAccess<WhereOp>>(*ctx);
-    ExpandOp::attachInterface<OrderedAccess<ExpandOp>>(*ctx);
-    GatherOp::attachInterface<OrderedAccess<GatherOp>>(*ctx);
-    GatherElementsOp::attachInterface<OrderedAccess<GatherElementsOp>>(*ctx);
-    ScatterElementsOp::attachInterface<OrderedAccess<ScatterElementsOp>>(*ctx);
-    CumSumOp::attachInterface<OrderedAccess<CumSumOp>>(*ctx);
-    GeluOp::attachInterface<OrderedAccess<GeluOp>>(*ctx);
-    SigmoidOp::attachInterface<OrderedAccess<SigmoidOp>>(*ctx);
-    TanhOp::attachInterface<OrderedAccess<TanhOp>>(*ctx);
-    SoftplusOp::attachInterface<OrderedAccess<SoftplusOp>>(*ctx);
-    SwishOp::attachInterface<OrderedAccess<SwishOp>>(*ctx);
-    SqrtOp::attachInterface<OrderedAccess<SqrtOp>>(*ctx);
-    ReciprocalOp::attachInterface<OrderedAccess<ReciprocalOp>>(*ctx);
-    ReduceMeanOp::attachInterface<OrderedAccess<ReduceMeanOp>>(*ctx);
-    ReduceSumOp::attachInterface<OrderedAccess<ReduceSumOp>>(*ctx);
-    RmsNormOp::attachInterface<OrderedAccess<RmsNormOp>>(*ctx);
-    SkipRmsNormOp::attachInterface<OrderedAccess<SkipRmsNormOp>>(*ctx);
-    RopeOp::attachInterface<OrderedAccess<RopeOp>>(*ctx);
-    MatmulOp::attachInterface<OrderedAccess<MatmulOp>>(*ctx);
-    MatMulNBitsOp::attachInterface<OrderedAccess<MatMulNBitsOp>>(*ctx);
-    QMoEOp::attachInterface<OrderedAccess<QMoEOp>>(*ctx);
-    MiopenSoftmaxOp::attachInterface<OrderedAccess<MiopenSoftmaxOp>>(*ctx);
+    attachAll<OrderedAccess, MulOp, MinOp, MaxOp, SubOp, GqaOp, NonZeroOp,
+              AndOp, OrOp, NotOp, EqualOp, LessOp, WhereOp, ExpandOp, GatherOp,
+              GatherElementsOp, ScatterElementsOp, CumSumOp, GeluOp, SigmoidOp,
+              TanhOp, SoftplusOp, SwishOp, SqrtOp, ReciprocalOp, ReduceMeanOp,
+              ReduceSumOp, RmsNormOp, SkipRmsNormOp, RopeOp, MatmulOp,
+              MatMulNBitsOp, QMoEOp, MiopenSoftmaxOp>(ctx);
   });
 }

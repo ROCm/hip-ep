@@ -29,6 +29,17 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     Type i64Type = rewriter.getI64Type();
     Type f32Type = rewriter.getF32Type();
 
+    Value hostLength;
+    if (Value original = hostLengths.lookup(op)) {
+      hostLength = rewriter.getRemappedValue(original);
+      if (!hostLength)
+        return rewriter.notifyMatchFailure(op, "cannot convert host length");
+    }
+    Value hasHostLength = LLVM::ConstantOp::create(
+        rewriter, loc, i32Type, rewriter.getI32IntegerAttr(hostLength ? 1 : 0));
+    if (!hostLength)
+      hostLength = hasHostLength;
+
     auto createI64Const = [&](int64_t value) -> Value {
       return LLVM::ConstantOp::create(rewriter, loc, i64Type,
                                       rewriter.getI64IntegerAttr(value));
@@ -109,7 +120,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     Value kQuantType = createI64Const(quantTypeToEnum(op.getKQuantType()));
     Value vQuantType = createI64Const(quantTypeToEnum(op.getVQuantType()));
 
-    // no_causal: emit as i32 (matches wrap_group_query_attention signature).
+    // no_causal: emit as i32 (matches the runtime signature).
     Value noCausal = LLVM::ConstantOp::create(
         rewriter, loc, i32Type,
         rewriter.getI32IntegerAttr(op.getNoCausal() ? 1 : 0));
@@ -222,8 +233,8 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
       }
     }
 
-    // Function signature matches wrap_group_query_attention() in gqa.cpp
-    SmallVector<Type, 42> paramTypes = {
+    // Matches wrap_group_query_attention_host_length() in gqa.cpp.
+    SmallVector<Type, 45> paramTypes = {
         ptrType, // state
         i32Type, // op_state_slot
         // Inputs (14 pointers - some may be nullptr)
@@ -270,23 +281,17 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         i64Type, // attn_bias_batch
         i64Type, // attn_bias_num_heads
         i64Type, // kv_bnsd
-        i64Type  // seq_len_new_kv
+        i64Type, // seq_len_new_kv
+        i32Type, // has_host_length
+        i32Type  // host_length_value
     };
 
-    Value hostLength;
-    if (Value original = hostLengths.lookup(op)) {
-      hostLength = rewriter.getRemappedValue(original);
-      if (!hostLength)
-        return rewriter.notifyMatchFailure(op, "cannot convert host length");
-      paramTypes.push_back(i32Type);
-    }
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, hostLength ? kWrapGQAHostLength : kWrapGQA,
-        paramTypes, i32Type);
+        rewriter, module, kWrapGQAHostLength, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 42> args = {
+    SmallVector<Value, 45> args = {
         statePtr,
         // Per-instance op-state slot (threaded by --assign-op-state-slots)
         getOpStateSlotValue(op, rewriter, loc),
@@ -303,9 +308,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         // Shape info (10 values)
         batchSizeVal, seqLenQVal, seqLenKVVal, pastBufSeqVal, headDimVal,
         elemSizeVal, attnBiasBatchVal, attnBiasNumHeadsVal, kvBnsdVal,
-        seqLenNewKVVal};
-    if (hostLength)
-      args.push_back(hostLength);
+        seqLenNewKVVal, hasHostLength, hostLength};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 

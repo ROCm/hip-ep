@@ -142,6 +142,8 @@ def GenerateOpStateInitPass
 
 def ConvertHipToLLVMPass : Pass<"convert-hip-to-llvm", "mlir::ModuleOp"> {
   let summary = "Convert HIP dialect to LLVM dialect";
+  let options = [Option<"reportHostScalars", "report-host-scalars", "bool",
+                        "false", "Report host-scalar forwarding or rejection">];
   let description = [{
     Lowers HIP dialect operations to LLVM dialect by converting each HIP op
     into calls to the HIP runtime C API (hipCreateHandle, hipblasltMatmul,
@@ -407,7 +409,6 @@ def MaterializeHostScalarsPass
   let dependentDialects = [
     "mlir::hip::HipDialect",
     "mlir::arith::ArithDialect",
-    "mlir::LLVM::LLVMDialect",
     "mlir::memref::MemRefDialect"
   ];
 }

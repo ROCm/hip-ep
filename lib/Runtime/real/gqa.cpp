@@ -7,9 +7,8 @@
 // GQA runtime wrapper (self-contained: optimized fused fast path + legacy
 // decomposed hipBLASLt fallback).
 //
-// The generated IR calls `wrap_group_query_attention` (43-arg ABI, kept in
-// lockstep with the HipToLLVM lowering so the symbol keeps resolving). Path
-// selection:
+// The generated IR calls `wrap_group_query_attention_host_length`.
+// Path selection:
 //
 //   * Common fp16 causal GQA (head_dim in {64,96,128,256}, templated decode
 //     geometry) -> optimized fused custom kernels:
@@ -2843,10 +2842,10 @@ static int gqa_forward_fused_from_fp32(
 }
 
 //===----------------------------------------------------------------------===//
-// Both public entry points use this implementation. A host length avoids the
-// readback only for batch one. Other batches retain per-element validation.
+// A proven host length avoids the readback only for batch one. Otherwise,
+// retain the existing readback and per-element validation.
 //===----------------------------------------------------------------------===//
-static int group_query_attention(
+int wrap_group_query_attention_host_length(
     RuntimeState *state, int op_state_slot,
     // Inputs 1-7 (core GQA)
     void *query, void *key, void *value, void *past_key, void *past_value,
@@ -2866,7 +2865,11 @@ static int group_query_attention(
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
     int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
-    int64_t seq_len_new_kv, std::optional<int32_t> host_length) {
+    int64_t seq_len_new_kv, int32_t has_host_length,
+    int32_t host_length_value) {
+  const std::optional<int32_t> host_length =
+      has_host_length ? std::optional<int32_t>(host_length_value)
+                      : std::nullopt;
   OP_PROFILE(
       "gqa",
       [&] {
@@ -3131,58 +3134,4 @@ static int group_query_attention(
             "(rc=%d)\n",
             rc);
   return rc;
-}
-
-// Bitcode artifacts resolve this entry point when they load the runtime.
-// Keep its signature. Calls without a proven host value also use this path.
-int wrap_group_query_attention(
-    RuntimeState *state, int op_state_slot, void *query, void *key, void *value,
-    void *past_key, void *past_value, void *seqlens_k, void *total_seq_len,
-    void *cos_cache, void *sin_cache, void *position_ids, void *attention_bias,
-    void *head_sink, void *k_scale, void *v_scale, void *output,
-    void *present_key, void *present_value, void *output_qk, int64_t num_heads,
-    int64_t kv_num_heads, float scale, int64_t do_rotary,
-    int64_t rotary_interleaved, float softcap, int64_t local_window_size,
-    int64_t smooth_softmax, int64_t qk_output, int64_t k_quant_type,
-    int64_t v_quant_type, int64_t kv_cache_bit_width, int32_t no_causal,
-    int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
-    int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
-    int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
-    int64_t seq_len_new_kv) {
-  return group_query_attention(
-      state, op_state_slot, query, key, value, past_key, past_value, seqlens_k,
-      total_seq_len, cos_cache, sin_cache, position_ids, attention_bias,
-      head_sink, k_scale, v_scale, output, present_key, present_value,
-      output_qk, num_heads, kv_num_heads, scale, do_rotary, rotary_interleaved,
-      softcap, local_window_size, smooth_softmax, qk_output, k_quant_type,
-      v_quant_type, kv_cache_bit_width, no_causal, batch_size, seq_len_q,
-      seq_len_kv, past_buf_seq, head_dim, element_size_bytes, attn_bias_batch,
-      attn_bias_num_heads, kv_bnsd, seq_len_new_kv, std::nullopt);
-}
-
-// This entry point adds a host value without changing the original ABI.
-// The compiler proves that it equals the single stored i32 value.
-int wrap_group_query_attention_host_length(
-    RuntimeState *state, int op_state_slot, void *query, void *key, void *value,
-    void *past_key, void *past_value, void *seqlens_k, void *total_seq_len,
-    void *cos_cache, void *sin_cache, void *position_ids, void *attention_bias,
-    void *head_sink, void *k_scale, void *v_scale, void *output,
-    void *present_key, void *present_value, void *output_qk, int64_t num_heads,
-    int64_t kv_num_heads, float scale, int64_t do_rotary,
-    int64_t rotary_interleaved, float softcap, int64_t local_window_size,
-    int64_t smooth_softmax, int64_t qk_output, int64_t k_quant_type,
-    int64_t v_quant_type, int64_t kv_cache_bit_width, int32_t no_causal,
-    int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
-    int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
-    int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
-    int64_t seq_len_new_kv, int32_t host_length) {
-  return group_query_attention(
-      state, op_state_slot, query, key, value, past_key, past_value, seqlens_k,
-      total_seq_len, cos_cache, sin_cache, position_ids, attention_bias,
-      head_sink, k_scale, v_scale, output, present_key, present_value,
-      output_qk, num_heads, kv_num_heads, scale, do_rotary, rotary_interleaved,
-      softcap, local_window_size, smooth_softmax, qk_output, k_quant_type,
-      v_quant_type, kv_cache_bit_width, no_causal, batch_size, seq_len_q,
-      seq_len_kv, past_buf_seq, head_dim, element_size_bytes, attn_bias_batch,
-      attn_bias_num_heads, kv_bnsd, seq_len_new_kv, host_length);
 }

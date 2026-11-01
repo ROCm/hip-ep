@@ -2,8 +2,7 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-//===- MaterializeHostScalars.cpp - place small host-accessed buffers
-//-------===//
+//===- MaterializeHostScalars.cpp - Place host scalar buffers ------------===//
 //
 // Place small static buffers in runtime-owned mapped scratch before buffer
 // reuse and device pooling. Each candidate gets a separate aligned region.
@@ -14,6 +13,12 @@
 // exceeds the size limit. Pooling would then put host stores in device memory.
 // HIP-to-LLVM checks redundant readbacks separately.
 //
+// Before: %a = memref.alloc() : memref<1xi32>
+//         memref.store %n, %a[%c0] : memref<1xi32>
+// After:  %a = memref.view %scratch[%offset][]
+//             : memref<?xi8> to memref<1xi32>
+//         memref.store %n, %a[%c0] : memref<1xi32>
+//
 // Limits: at most 16 elements; context in argument zero; no unknown consumers.
 // Float buffers need a HIP consumer. This bounded rule does not make all host
 // accesses safe. Larger and unsupported allocations need separate handling.
@@ -22,12 +27,13 @@
 
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/IR/RuntimeAccessOpInterface.h"
+#include "hip/Dialect/Transforms/BufferUtils.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Interfaces/DataLayoutInterfaces.h"
 #include "mlir/Interfaces/ViewLikeInterface.h"
 
 #include "llvm/ADT/SmallPtrSet.h"
@@ -45,8 +51,6 @@ namespace hip {
 
 #define GEN_PASS_DEF_MATERIALIZEHOSTSCALARSPASS
 #include "hip/Dialect/Transforms/Passes.h.inc"
-
-namespace {
 
 /// Preserve host-I/O placement through aliases and existing HIP consumers.
 /// This is not a proof that arbitrary device-filled buffers can be mapped.
@@ -110,12 +114,8 @@ static bool isCopyReadbackCandidate(memref::AllocOp allocOp) {
         offset > rootType.getNumElements() ||
         type.getNumElements() > rootType.getNumElements() - offset)
       return false;
-    int64_t stride = 1;
-    for (int64_t i = type.getRank(); i > 0; --i) {
-      if (type.getDimSize(i - 1) != 1 && strides[i - 1] != stride)
-        return false;
-      stride *= type.getDimSize(i - 1);
-    }
+    if (!isContiguousRowMajor(type.getShape(), strides))
+      return false;
     for (Operation *user : value.getUsers()) {
       if (user->getBlock() != allocOp->getBlock())
         return false;
@@ -173,8 +173,6 @@ static bool isCopyReadbackCandidate(memref::AllocOp allocOp) {
   return hasCopy && hasReadback;
 }
 
-// Keep the existing size limit. Host I/O or a bounded copy/readback chain
-// must require the small buffer. Float buffers also need a HIP consumer.
 static bool isHostScalarCandidate(memref::AllocOp allocOp) {
   MemRefType type = allocOp.getType();
   if (!type.hasStaticShape())
@@ -194,6 +192,7 @@ static bool isHostScalarCandidate(memref::AllocOp allocOp) {
          isCopyReadbackCandidate(allocOp);
 }
 
+namespace {
 struct MaterializeHostScalarsPass
     : public impl::MaterializeHostScalarsPassBase<MaterializeHostScalarsPass> {
 
@@ -205,7 +204,6 @@ void MaterializeHostScalarsPass::runOnOperation() {
   if (funcOp.empty())
     return;
 
-  // Scratch belongs to the runtime context in argument zero.
   if (funcOp.getNumArguments() == 0 ||
       !isa<ContextType>(funcOp.getArgument(0).getType()))
     return;
@@ -220,16 +218,18 @@ void MaterializeHostScalarsPass::runOnOperation() {
   if (candidates.empty())
     return;
 
-  // Give each candidate a separate aligned region.
   constexpr int64_t kAlign = 64;
   SmallVector<int64_t> offsets;
   offsets.reserve(candidates.size());
   int64_t total = 0;
+  // Match the default layout used by HIP-to-LLVM, including element padding.
+  const DataLayout dataLayout;
   for (memref::AllocOp allocOp : candidates) {
     MemRefType ty = allocOp.getType();
     Type elemTy = ty.getElementType();
-    unsigned bits = elemTy.isIndex() ? 64 : elemTy.getIntOrFloatBitWidth();
-    int64_t elemBytes = static_cast<int64_t>((bits + 7) / 8);
+    int64_t elemBytes =
+        llvm::alignTo(dataLayout.getTypeSize(elemTy).getFixedValue(),
+                      dataLayout.getTypeABIAlignment(elemTy));
     int64_t bytes = std::max(int64_t{1}, ty.getNumElements() * elemBytes);
     int64_t off = llvm::alignTo(total, kAlign);
     offsets.push_back(off);

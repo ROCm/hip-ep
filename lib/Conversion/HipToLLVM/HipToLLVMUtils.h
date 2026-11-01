@@ -47,7 +47,7 @@ bool hasFlatRuntimeCopyLowering(MemRefType source, MemRefType target);
 DenseMap<Operation *, Value>
 collectHostScalarValues(ModuleOp module,
                         const RuntimeAccessOverrides &overrides,
-                        unsigned indexBitwidth);
+                        unsigned indexBitwidth, bool report);
 
 inline constexpr const char *kHipMalloc = "hip_device_malloc";
 inline constexpr const char *kHipFree = "hip_device_free";
@@ -124,7 +124,6 @@ inline constexpr const char *kWrapReduceMean = "wrap_reduce_mean";
 inline constexpr const char *kWrapReduceL2 = "wrap_reduce_l2";
 inline constexpr const char *kWrapReduceMax = "wrap_reduce_max";
 inline constexpr const char *kWrapReduceMin = "wrap_reduce_min";
-inline constexpr const char *kWrapGQA = "wrap_group_query_attention";
 inline constexpr const char *kWrapGQAHostLength =
     "wrap_group_query_attention_host_length";
 inline constexpr const char *kWrapMultiHeadAttention =

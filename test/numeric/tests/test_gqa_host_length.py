@@ -6,12 +6,13 @@
 """Check GQA lengths computed from two different past-cache shapes."""
 
 import numpy as np
+import pytest
 from onnx import TensorProto, helper
 
 from framework.onnx_utils import make_model_from_nodes
 
 
-def make_host_length_case(seq_len=1, dtype=np.float16):
+def make_host_length_case(seq_len=1, dtype=np.float16, past_lengths=(2, 5)):
     """Return a graph, inputs, and a NumPy reference for two GQA calls."""
     tp = TensorProto.FLOAT16 if dtype == np.float16 else TensorProto.FLOAT
     tensor = helper.make_tensor_value_info
@@ -21,7 +22,7 @@ def make_host_length_case(seq_len=1, dtype=np.float16):
     data = [rng.uniform(-0.5, 0.5, (1, seq_len, 64)).astype(dtype) for _ in inputs]
     q, k, v = data
     outputs, expected = [], []
-    for layer, past_len in enumerate((2, 5)):
+    for layer, past_len in enumerate(past_lengths):
         suffix = str(layer)
         pk, pv = "pk" + suffix, "pv" + suffix
         inputs.extend(
@@ -73,10 +74,13 @@ def make_host_length_case(seq_len=1, dtype=np.float16):
     return model, data, expected
 
 
-def test_gqa_host_lengths(model_runner):
+@pytest.mark.parametrize("past_lengths", [(0, 1), (2, 5)])
+def test_gqa_host_lengths(model_runner, past_lengths):
     for dtype in (np.float16, np.float32):
         for seq_len in (1, 4):
-            model, inputs, expected = make_host_length_case(seq_len, dtype)
+            model, inputs, expected = make_host_length_case(
+                seq_len, dtype, past_lengths
+            )
             actual, reference = model_runner.run_sample(
                 model, inputs, name=f"host_lengths_{np.dtype(dtype).name}_{seq_len}"
             )

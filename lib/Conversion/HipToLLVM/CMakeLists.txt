@@ -96,6 +96,7 @@ target_link_libraries(HipToLLVM PUBLIC
   MLIRLLVMDialect
   MLIRLLVMCommonConversion
   MLIRMemRefDialect
+  MLIRBufferizationTransforms
   MLIRTransforms
   MLIRArithTransforms
   # convert-hip-to-llvm populates the standard dialect->LLVM lowering patterns

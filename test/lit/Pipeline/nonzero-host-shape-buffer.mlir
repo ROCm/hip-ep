@@ -3,9 +3,8 @@
 //
 // RUN: hip-mlir-opt --onnx-to-hip-pipeline %s | FileCheck %s
 //
-// NonZero reserves 180 i64 elements. Shape creates a separate one-element
-// buffer for Slice. Assign host-accessible storage before buffer reuse can
-// merge that scalar buffer into the larger allocation.
+// Assign host storage before reuse can merge the one-element Slice bound
+// into an allocation above the host-scalar size limit.
 //
 // CHECK-LABEL: func.func @main_graph
 // CHECK: %[[SCRATCH:.*]] = hip.get_host_scratch

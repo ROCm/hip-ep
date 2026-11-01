@@ -2,6 +2,9 @@
 // Licensed under the MIT License.
 
 // RUN: hip-mlir-opt --split-input-file --convert-hip-to-llvm %s | FileCheck %s
+// RUN: hip-mlir-opt --split-input-file --convert-hip-to-llvm='report-host-scalars=true' %s -o %t 2>&1 | FileCheck %s --check-prefix=REPORT
+
+// REPORT: remark: host-scalar forwarding skipped: unsupported access or lowering contract
 
 // Do not forward through an unproved alias.
 // CHECK-LABEL: llvm.func @alias(
