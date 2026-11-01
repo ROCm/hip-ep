@@ -13,6 +13,8 @@ import argparse
 import hashlib
 import inspect
 import json
+import os
+import sys
 from pathlib import Path
 import time
 
@@ -45,6 +47,11 @@ def main():
         "status": "running",
         "mode": "pytorch-bf16",
         "track": args.track,
+        "python": sys.executable,
+        "thread_settings": {
+            key: os.environ.get(key)
+            for key in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS")
+        },
         "torch": torch.__version__,
         "hip_runtime": torch.version.hip,
         "numpy": np.__version__,
@@ -165,6 +172,12 @@ def main():
             assert control["status"] == "passed"
         eos = model.generation_config.eos_token_id
         eos = set(eos if isinstance(eos, list) else [eos])
+        oga_eos = json.loads((args.oga_model / "genai_config.json").read_text())[
+            "model"
+        ]["eos_token_id"]
+        assert eos == set(oga_eos if isinstance(oga_eos, list) else [oga_eos]), (
+            "Stop tokens differ"
+        )
         end_token = tokenizer.encode("<|im_end|>", add_special_tokens=False)[0]
         sequence = []
         for turn in fixture["turns"]:

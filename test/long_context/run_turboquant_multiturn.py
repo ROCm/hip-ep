@@ -116,6 +116,7 @@ def worker(args):
     dirs = [args.install / "bin"] + args.dll_dir
     handles = [os.add_dll_directory(str(p)) for p in dirs] if os.name == "nt" else []
     import onnxruntime_genai as og
+    import onnxruntime as ort
 
     capacity = prepare_model(args, out / "model", mode)
     report = {
@@ -125,12 +126,47 @@ def worker(args):
         "capacity": capacity,
         "genai_version": og.__version__,
         "genai_module": og.__file__,
+        "python": sys.executable,
+        "numpy_version": np.__version__,
+        "numpy_module": np.__file__,
+        "ort_version": ort.__version__,
+        "ort_module": ort.__file__,
+        "thread_settings": {
+            key: os.environ.get(key)
+            for key in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS")
+        },
         "turns": [],
         "timing_scope": "diagnostic including tracing/readback",
     }
     save(out / "receipt.json", report)
     try:
         model = og.Model(str(out / "model"))
+        # Capture actual native runtime paths when psutil is installed. The
+        # campaign's environment audit checks these against its pinned stack.
+        try:
+            import psutil
+
+            report["loaded_runtime_libraries"] = sorted(
+                {
+                    m.path
+                    for m in psutil.Process().memory_maps()
+                    if Path(m.path).suffix.lower() == ".dll"
+                    and any(
+                        name in Path(m.path).name.lower()
+                        for name in (
+                            "onnxruntime",
+                            "hipgpu",
+                            "custom_kernels",
+                            "amdhip64",
+                            "libomp",
+                            "openblas",
+                        )
+                    )
+                }
+            )
+        except ImportError:
+            report["loaded_runtime_libraries"] = None
+        save(out / "receipt.json", report)
         tokenizer = og.Tokenizer(model)
         end_tokens = list(tokenizer.encode("<|im_end|>"))
         assert len(end_tokens) == 1, "Expected Qwen's single chat end token"

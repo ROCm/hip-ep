@@ -115,10 +115,15 @@ patch is not a claim that every CI dependency combination has been tested.
 
 Omit both `--torch-model` and `--torch-python` for the three OGA paths alone.
 For four paths, use the matching original BF16 checkpoint and an isolated Python
-environment with GPU-enabled PyTorch and Transformers 5.22.1. The validated
-Windows environment uses the PyPI NumPy 2.5.2 wheel inside that environment;
-inheriting Conda's OpenMP-enabled BLAS conflicted with PyTorch's OpenMP runtime
-during large logit-vector comparisons. No duplicate-OpenMP override is used. Earlier versions
+environment that reuses the established Ring dependency paths: NumPy 2.4.3,
+ORT 1.31.0, GenAI 0.17.0, HIP 7.15, and `OMP_NUM_THREADS=2` /
+`OPENBLAS_NUM_THREADS=2`. Verify imported module paths as well as versions;
+creating a system-site-packages venv alone can expose the base Conda NumPy
+instead of Ring's NumPy. Do not replace the validated NumPy or allow duplicate
+OpenMP runtimes. Keep the Ring environment unchanged.
+
+The additional BF16-only dependency is Transformers 5.22.1 in the isolated
+reference environment. Earlier Transformers versions
 may reset Qwen3.5 recurrent state on a multi-token append; the reference checks
 the state-aware implementation and records its source hash. It validates exact
 vocabulary-to-ID equality, BF16 GPU parameter placement, cache length, finite
@@ -137,3 +142,20 @@ closest isolation of KV compression effects; BF16 versus any OGA arm additionall
 includes weight quantization and framework/kernel arithmetic differences. Report
 these comparisons separately. This eight-question ledger fixture cannot establish
 general long-context answer quality, even when the judge assigns perfect scores.
+
+### Environment consistency
+
+Use the same Release/MSVC/gfx1151 build settings, ROCm toolchain, ORT 1.31 SDK,
+Python dependency environment and model revision as the PR1366 Ring campaign.
+Keep `ENABLE_ROCMLIRTRITON=OFF` for that comparison. The feature-specific GenAI
+append companion is applied to all OGA arms and loaded with the same ORT 1.31
+runtime. The retained v0.17 companion binary was built with the 1.30 SDK; its
+release C API is validated against the 1.31 runtime by the integration test.
+This feature-specific binary difference is recorded explicitly. The original Ring installation remains unchanged.
+
+Strict mode and two-thread OpenMP/OpenBLAS settings follow that campaign's
+numeric checks. Dispatch diagnostics intentionally enable debug logging; they
+are not the debug-disabled performance campaign. Before a long run, record the
+Python executable, imported package paths/versions, build cache, loaded runtime
+DLL paths and thread settings. Fail early if the pinned environment drifts.
+The unrelated Windows RMT infrastructure failure is outside this feature's scope.
