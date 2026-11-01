@@ -325,6 +325,84 @@ __global__ void qmoe_sigmoid_bias_route_kernel(
   }
 }
 
+// Same contract as qmoe_sigmoid_bias_route_kernel for num_experts <= 32 * EPL
+// and k <= 32, laid out like topk_routing_wave_kernel: one 32-lane group per
+// token keeps EPL experts per lane in registers and reduces with shuffles.
+// Selected experts are tracked in a bitmask rather than by overwriting the
+// score, because a NaN score is stored as -inf and must stay selectable.
+template <int EPL>
+__global__ void qmoe_sigmoid_bias_route_wave_kernel(
+    const float* __restrict__ logits,
+    const float* __restrict__ correction_bias,
+    int32_t* __restrict__ expert_indices,
+    __half* __restrict__ expert_weights,
+    int num_experts, int k, int normalize, float scale) {
+  const int token = static_cast<int>(blockIdx.x);
+  const int lane = static_cast<int>(threadIdx.x);
+  const int ne = num_experts;
+  const float* row = logits + static_cast<int64_t>(token) * ne;
+
+  float prob[EPL], sel[EPL];
+  unsigned live = 0;
+#pragma unroll
+  for (int j = 0; j < EPL; j++) {
+    const int e = lane + 32 * j;
+    prob[j] = 0.0f;
+    sel[j] = -INFINITY;
+    if (e < ne) {
+      const float p = 1.0f / (1.0f + expf(-row[e]));
+      const float s = p + correction_bias[e];
+      prob[j] = p;
+      sel[j] = s == s ? s : -INFINITY;
+      live |= 1u << j;
+    }
+  }
+
+  // k rounds of argmax with ties to the lower expert index. Each lane scans
+  // its experts in ascending index order; bi == ne marks "nothing left".
+  float my_w = 0.0f, sum = 0.0f;
+  int my_idx = 0;
+  for (int i = 0; i < k; i++) {
+    float bv = -INFINITY, bp = 0.0f;
+    int bi = ne;
+#pragma unroll
+    for (int j = 0; j < EPL; j++) {
+      if ((live >> j & 1u) && (bi == ne || sel[j] > bv)) {
+        bv = sel[j];
+        bp = prob[j];
+        bi = lane + 32 * j;
+      }
+    }
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1) {
+      const float ov = __shfl_xor(bv, off);
+      const float op = __shfl_xor(bp, off);
+      const int oi = __shfl_xor(bi, off);
+      if (oi < ne &&
+          (bi >= ne || ov > bv || (ov == bv && oi < bi))) {
+        bv = ov;
+        bp = op;
+        bi = oi;
+      }
+    }
+#pragma unroll
+    for (int j = 0; j < EPL; j++)
+      if (bi == lane + 32 * j) live &= ~(1u << j);
+    sum += bp;
+    if (lane == i) {
+      my_w = bp;
+      my_idx = bi;
+    }
+  }
+
+  if (lane < k) {
+    const float w = normalize ? my_w / sum : my_w;
+    expert_indices[static_cast<int64_t>(token) * k + lane] = my_idx;
+    expert_weights[static_cast<int64_t>(token) * k + lane] =
+        static_cast<__half>(w * scale);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Gather (fp16 only): collect rows by index.
 // output[i, :] = input[token_ids[i], :]
@@ -684,18 +762,36 @@ extern "C" int hip_qmoe_sigmoid_bias_routing(
             (long long)num_experts);
     return -1;
   }
-  // s_prob, s_sel and s_taken, one 4-byte slot per expert each.
-  const size_t shmem = 3 * static_cast<size_t>(num_experts) * sizeof(float);
+  hipStream_t s = static_cast<hipStream_t>(stream);
+  const auto* lg = static_cast<const float*>(logits);
+  const auto* cb = static_cast<const float*>(correction_bias);
+  auto* idx = static_cast<int32_t*>(expert_indices);
+  auto* w = static_cast<__half*>(expert_weights);
   (void)hipGetLastError();
-  hipLaunchKernelGGL(qmoe_sigmoid_bias_route_kernel,
-                     dim3(static_cast<unsigned>(num_tokens)),
-                     dim3(kRoutingBlock), shmem,
-                     static_cast<hipStream_t>(stream),
-                     static_cast<const float*>(logits),
-                     static_cast<const float*>(correction_bias),
-                     static_cast<int32_t*>(expert_indices),
-                     static_cast<__half*>(expert_weights), num_tokens,
-                     num_experts, k, normalize, scale);
+  if (num_experts <= 256) {
+    const dim3 grid(static_cast<unsigned>(num_tokens)), block(32);
+    const int ne = static_cast<int>(num_experts), ik = static_cast<int>(k);
+    const int nz = normalize ? 1 : 0;
+    if (num_experts <= 32)
+      hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_sigmoid_bias_route_wave_kernel<1>),
+                         grid, block, 0, s, lg, cb, idx, w, ne, ik, nz, scale);
+    else if (num_experts <= 64)
+      hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_sigmoid_bias_route_wave_kernel<2>),
+                         grid, block, 0, s, lg, cb, idx, w, ne, ik, nz, scale);
+    else if (num_experts <= 128)
+      hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_sigmoid_bias_route_wave_kernel<4>),
+                         grid, block, 0, s, lg, cb, idx, w, ne, ik, nz, scale);
+    else
+      hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_sigmoid_bias_route_wave_kernel<8>),
+                         grid, block, 0, s, lg, cb, idx, w, ne, ik, nz, scale);
+  } else {
+    // s_prob, s_sel and s_taken, one 4-byte slot per expert each.
+    const size_t shmem = 3 * static_cast<size_t>(num_experts) * sizeof(float);
+    hipLaunchKernelGGL(qmoe_sigmoid_bias_route_kernel,
+                       dim3(static_cast<unsigned>(num_tokens)),
+                       dim3(kRoutingBlock), shmem, s, lg, cb, idx, w,
+                       num_tokens, num_experts, k, normalize, scale);
+  }
   hipError_t err = hipGetLastError();
   if (err != hipSuccess)
     fprintf(stderr,

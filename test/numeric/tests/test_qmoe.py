@@ -850,15 +850,17 @@ def _make_sigmoid_bias_qmoe_model(
 
 
 class TestQMoESigmoidBiasRouting:
-    """256 experts, top-10, block 128: the routing geometry of the sigmoid +
-    correction-bias MoE exports, at a reduced hidden size so the ORT CPU
-    reference stays small. seq_len 1 and 5 take the fused decode kernels, 9
-    and up the grouped prefill path; every token count goes through the
-    folded routing kernel."""
+    """Top-10, block 128: the routing geometry of the sigmoid +
+    correction-bias MoE exports (256 experts), at a reduced hidden size so the
+    ORT CPU reference stays small. seq_len 1 and 5 take the fused decode
+    kernels, 9 and up the grouped prefill path; every token count goes
+    through the folded routing kernel. Up to 256 experts route with one wave
+    per token, 384 with the block kernel."""
 
+    @pytest.mark.parametrize("num_experts", [100, 256, 384])
     @pytest.mark.parametrize("seq_len", [1, 5, 9, 128, 512])
-    def test_qmoe_sigmoid_bias_routing(self, model_runner, seq_len):
-        e, k = 256, 10
+    def test_qmoe_sigmoid_bias_routing(self, model_runner, seq_len, num_experts):
+        e, k = num_experts, 10
         model = _make_sigmoid_bias_qmoe_model(
             hidden=512, inter=256, num_experts=e, top_k=k, block_size=128, scale=2.5
         )
