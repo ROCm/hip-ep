@@ -34,18 +34,16 @@ def make_host_length_case(seq_len=1, dtype=np.float16):
         out, present_k, present_v = [
             name + suffix for name in ("out", "present_k", "present_v")
         ]
-        nodes.extend(
-            [
-                helper.make_node(
-                    "Attention",
-                    ["q", "k", "v", "", pk, pv],
-                    [out, present_k, present_v],
-                    q_num_heads=1,
-                    kv_num_heads=1,
-                    scale=0.125,
-                    is_causal=1,
-                ),
-            ]
+        nodes.append(
+            helper.make_node(
+                "Attention",
+                ["q", "k", "v", "", pk, pv],
+                [out, present_k, present_v],
+                q_num_heads=1,
+                kv_num_heads=1,
+                scale=0.125,
+                is_causal=1,
+            )
         )
         outputs.extend(
             [

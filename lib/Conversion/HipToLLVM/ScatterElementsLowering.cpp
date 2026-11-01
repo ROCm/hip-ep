@@ -132,9 +132,9 @@ struct ScatterElementsOpLowering
 
 } // namespace
 
-void populateScatterElementsLoweringPatterns(const LLVMTypeConverter &converter,
-                                             RewritePatternSet &patterns) {
-  patterns.add<ScatterElementsOpLowering>(converter);
+void populateScatterElementsLoweringPatterns(
+    const LLVMTypeConverter &converter, RuntimeLoweringPatterns &patterns) {
+  patterns.addOrdered<ScatterElementsOpLowering>(converter);
 }
 
 } // namespace hip

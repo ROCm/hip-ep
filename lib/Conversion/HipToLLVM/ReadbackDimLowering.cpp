@@ -26,7 +26,7 @@ struct ReadbackDimOpLowering : public ConvertOpToLLVMPattern<ReadbackDimOp> {
       : ConvertOpToLLVMPattern<ReadbackDimOp>(converter),
         hostScalars(hostScalars) {}
 
-  DenseMap<Operation *, Value> hostScalars;
+  const DenseMap<Operation *, Value> &hostScalars;
 
   LogicalResult
   matchAndRewrite(ReadbackDimOp op, OpAdaptor adaptor,

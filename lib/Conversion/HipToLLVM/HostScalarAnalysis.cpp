@@ -47,17 +47,6 @@ static std::optional<int64_t> storageWidth(Type type) {
   return (bits + 7) / 8;
 }
 
-static bool getConstants(ArrayRef<OpFoldResult> values,
-                         SmallVectorImpl<int64_t> &result) {
-  for (OpFoldResult value : values) {
-    auto constant = getConstantIntValue(value);
-    if (!constant)
-      return false;
-    result.push_back(*constant);
-  }
-  return true;
-}
-
 // Keep the aligned pointer and descriptor offset separate. Reinterpretation
 // replaces the offset; it does not add to the previous descriptor's offset.
 class ScratchRanges {
@@ -161,14 +150,14 @@ public:
       result = metadata.getBaseBuffer();
     } else {
       auto alias = cast<memref::ReinterpretCastOp>(op);
-      SmallVector<int64_t> offsets;
-      d.sizes.clear();
-      d.strides.clear();
-      if (!getConstants(alias.getMixedOffsets(), offsets) ||
-          !getConstants(alias.getMixedSizes(), d.sizes) ||
-          !getConstants(alias.getMixedStrides(), d.strides))
+      auto offset = getConstantIntValue(alias.getMixedOffsets().front());
+      auto sizes = getConstantIntValues(alias.getMixedSizes());
+      auto strides = getConstantIntValues(alias.getMixedStrides());
+      if (!offset || !sizes || !strides)
         return failure();
-      d.offset = offsets.front();
+      d.offset = *offset;
+      d.sizes = std::move(*sizes);
+      d.strides = std::move(*strides);
       result = alias.getResult();
     }
     // Metadata can name the end of an empty view. Check payload bounds at
@@ -181,21 +170,7 @@ private:
   int64_t capacity;
 };
 
-// These lowerings use this context's stream for payload accesses. Their
-// internal host reads use an ordered copy and wait. Do not infer this contract
-// from a dialect name or from MemoryEffectsOpInterface alone. Add operations
-// here only after checking their lowering and runtime implementation.
-static bool hasOrderedPayloadAccesses(Operation *op) {
-  return isa<CastOp, AddOp, MulOp, MinOp, MaxOp, SubOp, GqaOp, PadOp, SliceOp,
-             NonZeroOp, AndOp, OrOp, NotOp, EqualOp, LessOp, WhereOp, ExpandOp,
-             GatherOp, GatherElementsOp, ScatterElementsOp, CumSumOp, GeluOp,
-             SigmoidOp, TanhOp, SoftplusOp, SwishOp, SqrtOp, ReciprocalOp,
-             ReduceMeanOp, ReduceSumOp, RmsNormOp, SkipRmsNormOp, RopeOp,
-             MatmulOp, MatMulNBitsOp, QMoEOp, MiopenSoftmaxOp>(op);
-}
-
 struct Accesses {
-  Operation *op;
   SmallVector<ByteRange> reads;
   SmallVector<ByteRange> writes;
   SmallVector<ByteRange> earlyHostReads;
@@ -207,6 +182,7 @@ struct Accesses {
 };
 
 static LogicalResult summarize(Operation *op, Value ctx, ScratchRanges &ranges,
+                               const RuntimeAccessContracts &contracts,
                                Accesses &accesses) {
   if (op->getNumRegions() || isa<CallOpInterface>(op))
     return failure();
@@ -285,20 +261,24 @@ static LogicalResult summarize(Operation *op, Value ctx, ScratchRanges &ranges,
     accesses.requestedType = IntegerType::get(op->getContext(), 32);
     return addRange(read.getScalar(), false, false);
   }
-  // TopK copies K before its context-stream wait. Do not depend on default
-  // stream ordering. Require an unchanged constant or a checked scratch read.
-  if (auto topk = dyn_cast<TopKOp>(op)) {
-    Value k = topk.getK();
-    if (auto it = ranges.descriptors.find(k); it != ranges.descriptors.end()) {
+  auto contract = contracts.find(op->getName());
+  if (contract == contracts.end())
+    return failure();
+  // Do not depend on default stream ordering for an early host read.
+  // Require an unchanged constant or a checked scratch read.
+  if (auto read = contract->second.earlyHostRead) {
+    Value value = read(op);
+    if (!value)
+      return failure();
+    if (auto it = ranges.descriptors.find(value);
+        it != ranges.descriptors.end()) {
       auto bytes = ranges.range(it->second);
       if (!bytes)
         return failure();
       accesses.earlyHostReads.push_back(*bytes);
-    } else if (!k.getDefiningOp<GetConstantOp>()) {
+    } else if (!value.getDefiningOp<GetConstantOp>()) {
       return failure();
     }
-  } else if (!hasOrderedPayloadAccesses(op)) {
-    return failure();
   }
   if (op->getNumResults())
     return failure();
@@ -339,7 +319,9 @@ static bool conflicts(ArrayRef<ByteRange> a, ArrayRef<ByteRange> b) {
 
 } // namespace
 
-DenseMap<Operation *, Value> collectHostScalarValues(ModuleOp module) {
+DenseMap<Operation *, Value>
+collectHostScalarValues(ModuleOp module,
+                        const RuntimeAccessContracts &contracts) {
   SmallVector<GetHostScratchOp> scratches;
   module.walk([&](GetHostScratchOp op) { scratches.push_back(op); });
   // Scratch belongs to the runtime state. Another request can resize it.
@@ -359,26 +341,22 @@ DenseMap<Operation *, Value> collectHostScalarValues(ModuleOp module) {
   ScratchRanges ranges(*capacity);
   ranges.descriptors[scratch.getResult()] = Descriptor{
       IntegerType::get(module.getContext(), 8), 1, 0, 0, {*capacity}, {1}};
-  SmallVector<Accesses> events;
-  for (Operation &op : func.front()) {
-    Accesses event{&op};
-    if (failed(summarize(&op, scratch.getCtx(), ranges, event)))
-      return DenseMap<Operation *, Value>();
-    events.push_back(std::move(event));
-  }
-
-  // First propose replacements from exact stored bits. A retained scalar
-  // readback supplies a new witness. A removed readback never supplies one.
   DenseMap<Operation *, Value> replacements;
   SmallVector<Fact> facts;
-  for (const Accesses &event : events) {
+  SmallVector<ByteRange> pendingReads, pendingWrites;
+  // Track values and pending accesses together. A removed wait must not
+  // justify another removal. Any later conflict rejects all replacements.
+  for (Operation &op : func.front()) {
+    Accesses event;
+    if (failed(summarize(&op, scratch.getCtx(), ranges, contracts, event)))
+      return DenseMap<Operation *, Value>();
     auto bytes = event.source ? ranges.scalar(event.source, event.requestedType)
                               : std::nullopt;
     if (bytes) {
       for (const Fact &fact : facts) {
         if (fact.bytes == *bytes &&
             fact.value.getType() == event.requestedType) {
-          replacements[event.op] = fact.value;
+          replacements[&op] = fact.value;
           break;
         }
       }
@@ -390,19 +368,13 @@ DenseMap<Operation *, Value> collectHostScalarValues(ModuleOp module) {
     });
     if (event.stored)
       facts.push_back({event.writes.front(), event.stored});
-    if (bytes && isa<ReadbackScalarOp>(event.op) &&
-        !replacements.contains(event.op))
-      facts.push_back({*bytes, event.op->getResult(0)});
-  }
-
-  // Validate all removals together. Two individually removable waits can
-  // protect the same later host access. Neither removed wait clears work.
-  SmallVector<ByteRange> pendingReads, pendingWrites;
-  for (const Accesses &event : events) {
+    // Only a retained scalar readback supplies a new value.
+    if (bytes && isa<ReadbackScalarOp>(op) && !replacements.contains(&op))
+      facts.push_back({*bytes, op.getResult(0)});
     if (conflicts(event.earlyHostReads, pendingWrites))
       return DenseMap<Operation *, Value>();
     if (event.readback) {
-      if (!replacements.contains(event.op)) {
+      if (!replacements.contains(&op)) {
         pendingReads.clear();
         pendingWrites.clear();
       }

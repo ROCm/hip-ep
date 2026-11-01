@@ -86,8 +86,8 @@ struct OrOpLowering : public ConvertOpToLLVMPattern<OrOp> {
 } // namespace
 
 void populateOrLoweringPatterns(const LLVMTypeConverter &converter,
-                                RewritePatternSet &patterns) {
-  patterns.add<OrOpLowering>(converter);
+                                RuntimeLoweringPatterns &patterns) {
+  patterns.addOrdered<OrOpLowering>(converter);
 }
 
 } // namespace hip

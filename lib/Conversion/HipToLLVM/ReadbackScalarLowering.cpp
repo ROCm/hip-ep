@@ -33,7 +33,7 @@ struct ReadbackScalarOpLowering
       : ConvertOpToLLVMPattern<ReadbackScalarOp>(converter),
         hostScalars(hostScalars) {}
 
-  DenseMap<Operation *, Value> hostScalars;
+  const DenseMap<Operation *, Value> &hostScalars;
 
   LogicalResult
   matchAndRewrite(ReadbackScalarOp op, OpAdaptor adaptor,

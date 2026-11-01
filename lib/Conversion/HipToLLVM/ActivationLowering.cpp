@@ -710,11 +710,11 @@ struct PReluOpLowering : public ConvertOpToLLVMPattern<PReluOp> {
 } // namespace
 
 void populateActivationLoweringPatterns(const LLVMTypeConverter &converter,
-                                        RewritePatternSet &patterns) {
-  patterns.add<SoftplusOpLowering, GeluOpLowering, LeakyReluOpLowering,
-               PReluOpLowering, LRNOpLowering, SwishOpLowering, PowOpLowering,
-               SwigluOpLowering, SiluOpLowering, MiopenSoftmaxOpLowering>(
-      converter);
+                                        RuntimeLoweringPatterns &patterns) {
+  patterns.addOrdered<SoftplusOpLowering, GeluOpLowering, SwishOpLowering,
+                      MiopenSoftmaxOpLowering>(converter);
+  patterns.add<LeakyReluOpLowering, PReluOpLowering, LRNOpLowering,
+               PowOpLowering, SwigluOpLowering, SiluOpLowering>(converter);
 }
 
 } // namespace hip

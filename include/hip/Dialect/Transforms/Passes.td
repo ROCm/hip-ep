@@ -391,7 +391,8 @@ def MaterializeHostScalarsPass
 
     A small copy-filled integer shape buffer can also qualify when it has
     an explicit scalar readback. Require bounded contiguous aliases, scalar
-    copies, and supported read-only consumers. Keep the copies and readback.
+    copies, and read-only consumers whose backend lowerings accept mapped
+    inputs. Keep the copies and readback.
     Do not move general kernel destinations under this rule.
 
     Replace each allocation with a separate aligned `memref.view` of one
@@ -406,6 +407,7 @@ def MaterializeHostScalarsPass
   let dependentDialects = [
     "mlir::hip::HipDialect",
     "mlir::arith::ArithDialect",
+    "mlir::LLVM::LLVMDialect",
     "mlir::memref::MemRefDialect"
   ];
 }

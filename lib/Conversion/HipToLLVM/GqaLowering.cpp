@@ -17,7 +17,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
                 const DenseMap<Operation *, Value> &hostScalars)
       : ConvertOpToLLVMPattern<GqaOp>(converter), hostLengths(hostScalars) {}
 
-  DenseMap<Operation *, Value> hostLengths;
+  const DenseMap<Operation *, Value> &hostLengths;
 
   LogicalResult
   matchAndRewrite(GqaOp op, OpAdaptor adaptor,
@@ -317,9 +317,9 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
 } // namespace
 
 void populateGqaLoweringPatterns(
-    const LLVMTypeConverter &converter, RewritePatternSet &patterns,
+    const LLVMTypeConverter &converter, RuntimeLoweringPatterns &patterns,
     const DenseMap<Operation *, Value> &hostScalars) {
-  patterns.add<GqaOpLowering>(converter, hostScalars);
+  patterns.addOrdered<GqaOpLowering>(converter, hostScalars);
 }
 
 } // namespace hip

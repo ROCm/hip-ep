@@ -212,8 +212,8 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
 } // namespace
 
 void populateMatmulLoweringPatterns(const LLVMTypeConverter &converter,
-                                    RewritePatternSet &patterns) {
-  patterns.add<MatmulOpLowering>(converter);
+                                    RuntimeLoweringPatterns &patterns) {
+  patterns.addOrdered<MatmulOpLowering>(converter);
 }
 
 } // namespace hip

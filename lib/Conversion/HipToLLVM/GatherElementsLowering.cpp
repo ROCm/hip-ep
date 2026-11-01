@@ -116,8 +116,8 @@ struct GatherElementsOpLowering
 } // namespace
 
 void populateGatherElementsLoweringPatterns(const LLVMTypeConverter &converter,
-                                            RewritePatternSet &patterns) {
-  patterns.add<GatherElementsOpLowering>(converter);
+                                            RuntimeLoweringPatterns &patterns) {
+  patterns.addOrdered<GatherElementsOpLowering>(converter);
 }
 
 } // namespace hip

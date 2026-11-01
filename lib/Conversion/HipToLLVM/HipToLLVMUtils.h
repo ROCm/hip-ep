@@ -6,6 +6,7 @@
 #ifndef HIP_CONVERSION_HIPTOLLVM_UTILS_H
 #define HIP_CONVERSION_HIPTOLLVM_UTILS_H
 
+#include "RuntimeLoweringPatterns.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 #include "hip/datatype_abi.h"
@@ -43,7 +44,9 @@ bool hasFlatRuntimeCopyLowering(MemRefType source, MemRefType target);
 
 // Prove scalar values and joint wait removal before conversion erases stores.
 // Empty results keep all existing readbacks. This analysis does not change IR.
-DenseMap<Operation *, Value> collectHostScalarValues(ModuleOp module);
+DenseMap<Operation *, Value>
+collectHostScalarValues(ModuleOp module,
+                        const RuntimeAccessContracts &contracts);
 
 inline constexpr const char *kHipMalloc = "hip_device_malloc";
 inline constexpr const char *kHipFree = "hip_device_free";
@@ -466,15 +469,15 @@ void populateConvLoweringPatterns(const LLVMTypeConverter &converter,
 void populateConvTransposeLoweringPatterns(const LLVMTypeConverter &converter,
                                            RewritePatternSet &patterns);
 void populateMatmulLoweringPatterns(const LLVMTypeConverter &converter,
-                                    RewritePatternSet &patterns);
+                                    RuntimeLoweringPatterns &patterns);
 void populateRocMlirLoweringPatterns(const LLVMTypeConverter &converter,
                                      RewritePatternSet &patterns);
 void populateElementwiseLoweringPatterns(const LLVMTypeConverter &converter,
-                                         RewritePatternSet &patterns);
+                                         RuntimeLoweringPatterns &patterns);
 void populatePowerLoweringPatterns(const LLVMTypeConverter &converter,
-                                   RewritePatternSet &patterns);
+                                   RuntimeLoweringPatterns &patterns);
 void populateActivationLoweringPatterns(const LLVMTypeConverter &converter,
-                                        RewritePatternSet &patterns);
+                                        RuntimeLoweringPatterns &patterns);
 void populateBiasGeluLoweringPatterns(const LLVMTypeConverter &converter,
                                       RewritePatternSet &patterns);
 void populateFastGeluLoweringPatterns(const LLVMTypeConverter &converter,
@@ -482,19 +485,19 @@ void populateFastGeluLoweringPatterns(const LLVMTypeConverter &converter,
 void populateTriluLoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);
 void populateNormLoweringPatterns(const LLVMTypeConverter &converter,
-                                  RewritePatternSet &patterns);
+                                  RuntimeLoweringPatterns &patterns);
 void populateGatherLoweringPatterns(const LLVMTypeConverter &converter,
-                                    RewritePatternSet &patterns);
+                                    RuntimeLoweringPatterns &patterns);
 void populateGatherElementsLoweringPatterns(const LLVMTypeConverter &converter,
-                                            RewritePatternSet &patterns);
+                                            RuntimeLoweringPatterns &patterns);
 void populateTopKLoweringPatterns(const LLVMTypeConverter &converter,
-                                  RewritePatternSet &patterns);
+                                  RuntimeLoweringPatterns &patterns);
 void populateRandomNormalLikeLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns);
 void populateArgMaxLoweringPatterns(const LLVMTypeConverter &converter,
                                     RewritePatternSet &patterns);
 void populateScatterElementsLoweringPatterns(const LLVMTypeConverter &converter,
-                                             RewritePatternSet &patterns);
+                                             RuntimeLoweringPatterns &patterns);
 void populateCompressLoweringPatterns(const LLVMTypeConverter &converter,
                                       RewritePatternSet &patterns);
 void populateOneHotLoweringPatterns(const LLVMTypeConverter &converter,
@@ -502,28 +505,28 @@ void populateOneHotLoweringPatterns(const LLVMTypeConverter &converter,
 void populateRangeLoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);
 void populateCastLoweringPatterns(const LLVMTypeConverter &converter,
-                                  RewritePatternSet &patterns);
+                                  RuntimeLoweringPatterns &patterns);
 // Shared lowering for hip.reduce_sum / hip.reduce_max / hip.reduce_prod.
 // All three use the same wrap_reduce_{sum,max,prod} signature, so we
 // template a single ReduceOpLowering and register all variants from one
 // populate function.
 void populateReduceLoweringPatterns(const LLVMTypeConverter &converter,
-                                    RewritePatternSet &patterns);
+                                    RuntimeLoweringPatterns &patterns);
 void populateTransposeLoweringPatterns(const LLVMTypeConverter &converter,
                                        RewritePatternSet &patterns);
 void populateRopeLoweringPatterns(const LLVMTypeConverter &converter,
-                                  RewritePatternSet &patterns);
+                                  RuntimeLoweringPatterns &patterns);
 void populateGqaLoweringPatterns(
-    const LLVMTypeConverter &converter, RewritePatternSet &patterns,
+    const LLVMTypeConverter &converter, RuntimeLoweringPatterns &patterns,
     const DenseMap<Operation *, Value> &hostScalars);
 void populateMultiHeadAttentionLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns);
 void populateMatMulNBitsLoweringPatterns(const LLVMTypeConverter &converter,
-                                         RewritePatternSet &patterns);
+                                         RuntimeLoweringPatterns &patterns);
 void populateDequantBnb4LoweringPatterns(const LLVMTypeConverter &converter,
                                          RewritePatternSet &patterns);
 void populateQMoELoweringPatterns(const LLVMTypeConverter &converter,
-                                  RewritePatternSet &patterns);
+                                  RuntimeLoweringPatterns &patterns);
 void populateQMoEAmdLoweringPatterns(const LLVMTypeConverter &converter,
                                      RewritePatternSet &patterns);
 void populateGatherBlockQuantizedLoweringPatterns(
@@ -539,7 +542,7 @@ void populateNGramHashMappingLoweringPatterns(
 void populateGemmLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateWhereLoweringPatterns(const LLVMTypeConverter &converter,
-                                   RewritePatternSet &patterns);
+                                   RuntimeLoweringPatterns &patterns);
 void populateLinearAttentionLoweringPatterns(const LLVMTypeConverter &converter,
                                              RewritePatternSet &patterns);
 void populateGatedDeltaNetLoweringPatterns(const LLVMTypeConverter &converter,
@@ -549,35 +552,35 @@ void populateDynamicSparseAttentionLoweringPatterns(
 void populateSparseAttentionIndexerLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns);
 void populateEqualLoweringPatterns(const LLVMTypeConverter &converter,
-                                   RewritePatternSet &patterns);
+                                   RuntimeLoweringPatterns &patterns);
 void populateOrLoweringPatterns(const LLVMTypeConverter &converter,
-                                RewritePatternSet &patterns);
+                                RuntimeLoweringPatterns &patterns);
 void populateAndLoweringPatterns(const LLVMTypeConverter &converter,
-                                 RewritePatternSet &patterns);
+                                 RuntimeLoweringPatterns &patterns);
 void populateDivLoweringPatterns(const LLVMTypeConverter &converter,
                                  RewritePatternSet &patterns);
 void populateUnaryElementwiseLoweringPatterns(
-    const LLVMTypeConverter &converter, RewritePatternSet &patterns);
+    const LLVMTypeConverter &converter, RuntimeLoweringPatterns &patterns);
 void populateCumSumLoweringPatterns(const LLVMTypeConverter &converter,
-                                    RewritePatternSet &patterns);
+                                    RuntimeLoweringPatterns &patterns);
 void populatePadLoweringPatterns(const LLVMTypeConverter &converter,
-                                 RewritePatternSet &patterns);
+                                 RuntimeLoweringPatterns &patterns);
 void populateTileLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateExpandLoweringPatterns(const LLVMTypeConverter &converter,
-                                    RewritePatternSet &patterns);
+                                    RuntimeLoweringPatterns &patterns);
 void populateLessLoweringPatterns(const LLVMTypeConverter &converter,
-                                  RewritePatternSet &patterns);
+                                  RuntimeLoweringPatterns &patterns);
 void populateGatherNDLoweringPatterns(const LLVMTypeConverter &converter,
                                       RewritePatternSet &patterns);
 void populateModLoweringPatterns(const LLVMTypeConverter &converter,
                                  RewritePatternSet &patterns);
 void populateSliceLoweringPatterns(const LLVMTypeConverter &converter,
-                                   RewritePatternSet &patterns);
+                                   RuntimeLoweringPatterns &patterns);
 void populateScatterNDLoweringPatterns(const LLVMTypeConverter &converter,
                                        RewritePatternSet &patterns);
 void populateNonZeroLoweringPatterns(const LLVMTypeConverter &converter,
-                                     RewritePatternSet &patterns);
+                                     RuntimeLoweringPatterns &patterns);
 // Generic data-dependent-shape readback primitive (hip.readback_dim). Not tied
 // to any single operator; any op that computes a runtime extent into a device
 // i32 scalar can be sliced/sized via this.

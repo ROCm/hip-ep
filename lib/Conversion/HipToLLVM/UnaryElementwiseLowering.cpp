@@ -144,13 +144,13 @@ struct IsNaNOpLowering : public ConvertOpToLLVMPattern<IsNaNOp> {
 } // namespace
 
 void populateUnaryElementwiseLoweringPatterns(
-    const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
+    const LLVMTypeConverter &converter, RuntimeLoweringPatterns &patterns) {
   patterns.insert<UnaryElementwiseOpLowering<AbsOp>>(converter, kWrapAbs,
                                                      "abs");
   patterns.insert<UnaryElementwiseOpLowering<NegOp>>(converter, kWrapNeg,
                                                      "neg");
-  patterns.insert<UnaryElementwiseOpLowering<NotOp>>(converter, kWrapNot,
-                                                     "not");
+  patterns.addOrdered<UnaryElementwiseOpLowering<NotOp>>(converter, kWrapNot,
+                                                         "not");
   patterns.add<IsNaNOpLowering>(converter);
   patterns.insert<UnaryElementwiseOpLowering<CosOp>>(converter, kWrapCos,
                                                      "cos");
@@ -168,10 +168,10 @@ void populateUnaryElementwiseLoweringPatterns(
                                                        "floor");
   patterns.insert<UnaryElementwiseOpLowering<ExpOp>>(converter, kWrapExp,
                                                      "exp");
-  patterns.insert<UnaryElementwiseOpLowering<SigmoidOp>>(
+  patterns.addOrdered<UnaryElementwiseOpLowering<SigmoidOp>>(
       converter, kWrapSigmoid, "sigmoid");
-  patterns.insert<UnaryElementwiseOpLowering<TanhOp>>(converter, kWrapTanh,
-                                                      "tanh");
+  patterns.addOrdered<UnaryElementwiseOpLowering<TanhOp>>(converter, kWrapTanh,
+                                                          "tanh");
   patterns.insert<UnaryElementwiseOpLowering<LogOp>>(converter, kWrapLog,
                                                      "log");
   patterns.insert<UnaryElementwiseOpLowering<SignOp>>(converter, kWrapSign,

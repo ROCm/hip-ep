@@ -221,11 +221,13 @@ struct SubOpLowering : public ConvertOpToLLVMPattern<SubOp> {
 } // namespace
 
 void populateElementwiseLoweringPatterns(const LLVMTypeConverter &converter,
-                                         RewritePatternSet &patterns) {
-  patterns.add<ElementwiseOpLowering<MulOp, kTensorOpMul>,
-               ElementwiseOpLowering<AddOp, kTensorOpAdd>,
-               ElementwiseOpLowering<MinOp, kTensorOpMin>,
-               ElementwiseOpLowering<MaxOp, kTensorOpMax>, SubOpLowering>(
+                                         RuntimeLoweringPatterns &patterns) {
+  patterns
+      .addOrdered<ElementwiseOpLowering<MulOp, kTensorOpMul>,
+                  ElementwiseOpLowering<MinOp, kTensorOpMin>,
+                  ElementwiseOpLowering<MaxOp, kTensorOpMax>, SubOpLowering>(
+          converter);
+  patterns.addOrderedMapped<ElementwiseOpLowering<AddOp, kTensorOpAdd>>(
       converter);
   patterns.insert<MiopenBinaryOpLowering<MiopenAddOp>>(converter, kMiopenAdd);
 }

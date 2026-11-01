@@ -9,19 +9,10 @@
 // reuse and device pooling. Each candidate gets a separate aligned region.
 // Keep all payload operations and their order.
 //
-// Host-written buffers must remain host-accessible. Buffer reuse can otherwise
-// merge them into larger allocations that exceed this pass's size limit.
-// The resulting host store would access device-pool memory.
-//
-// Follow aliases to find host loads, stores, and supported consumers. A small
-// copy-filled shape buffer can also use scratch if it has an explicit readback
-// and bounded aliases. This preserves its placement when early materialization
-// prevents reuse with a later host-written buffer.
-//
 // Run after linalg-to-loops so host stores are visible. Run before
-// OptimizeMemRefs and PoolAllocs so candidates still have separate allocations.
-// This pass changes storage placement only. HIP-to-LLVM separately proves
-// whether a readback and its synchronization can be removed.
+// OptimizeMemRefs: reuse can merge a candidate into a larger allocation that
+// exceeds the size limit. Pooling would then put host stores in device memory.
+// HIP-to-LLVM checks redundant readbacks separately.
 //
 // Limits: at most 16 elements; context in argument zero; no unknown consumers.
 // Float buffers need a HIP consumer. This bounded rule does not make all host
@@ -29,17 +20,20 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "hip/Conversion/HipToLLVM/Passes.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Interfaces/ViewLikeInterface.h"
 
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/MathExtras.h"
 
 #define DEBUG_TYPE "hip-materialize-host-scalars"
 
@@ -54,49 +48,22 @@ namespace hip {
 
 namespace {
 
-// Round \p x up to a multiple of \p align (align must be a power of two).
-static int64_t roundUp(int64_t x, int64_t align) {
-  return (x + align - 1) & ~(align - 1);
-}
-
-/// Classify every transitive user of \p memrefVal and decide whether they are
-/// all compatible with the backing buffer living in host-mapped scratch (see
-/// the file header for the rationale behind each category). Sets \p sawHostIO
-/// when a `memref.store`/`load` is found anywhere in the chain. Returns false
-/// at the first user we cannot vouch for -- an op of an unknown dialect, or a
-/// view whose own users escape.
-///
-/// View/descriptor ops are recognized generically via `ViewLikeOpInterface`
-/// (reinterpret_cast, expand/collapse_shape, subview, view, cast, AND reshape)
-/// instead of a hand-maintained `isa<>` list. They touch no memory themselves,
-/// so the backing buffer is still a host-staged scalar; we recurse into the
-/// view's result. The recursion is gated on `getViewSource() == memrefVal`:
-/// this matters for `memref.reshape`, whose viewed source is the DATA operand,
-/// not the shape operand -- when our buffer is the shape operand the reshape
-/// result aliases the data (not us), so it is a terminal accept, not a recurse.
-/// `memref.copy` is not view-like (it carries Read/Write memory effects); it is
-/// a terminal host-mapping-safe use and does not itself flag host I/O.
+/// Follow aliases and reject users that do not support mapped storage.
 static bool classifyHostScalarUsers(Value memrefVal, bool &sawHostIO,
                                     bool &sawHipUser) {
   for (Operation *user : memrefVal.getUsers()) {
-    // Host I/O — the SEGV trigger we're staging away from the GPU pool.
     if (isa<memref::StoreOp, memref::LoadOp>(user)) {
       sawHostIO = true;
       continue;
     }
-    // Metadata-only / lifetime users: harmless.
     if (isa<memref::DimOp, memref::DeallocOp>(user))
       continue;
-    // hip.* consumers are host-mapping-safe (hipHostMallocMapped is
-    // GPU-readable at the same VA on UMA targets).
+    // Keep the existing placement rule for HIP consumers of host-fed data.
     if (user->getDialect() && user->getDialect()->getNamespace() == "hip") {
       sawHipUser = true;
       continue;
     }
-    // View/alias ops: recurse ONLY into the result that actually aliases this
-    // buffer. getViewSource() pins which operand is the viewed one — critical
-    // for memref.reshape, where our buffer may be the SHAPE operand (then the
-    // result aliases the DATA, not us → terminal accept, not a recurse).
+    // A reshape result aliases its data operand, not its shape operand.
     if (auto view = dyn_cast<ViewLikeOpInterface>(user)) {
       if (view.getViewSource() == memrefVal) {
         if (!classifyHostScalarUsers(view->getResult(0), sawHostIO, sawHipUser))
@@ -104,12 +71,10 @@ static bool classifyHostScalarUsers(Value memrefVal, bool &sawHostIO,
       }
       continue;
     }
-    // memref.copy is not view-like; it's a terminal host-mapping-safe use
-    // (Read src / Write dst) and does NOT itself flag host I/O.
     if (isa<memref::CopyOp>(user))
       continue;
 
-    return false; // genuinely unknown user → reject candidate
+    return false;
   }
   return true;
 }
@@ -118,7 +83,9 @@ static bool classifyHostScalarUsers(Value memrefVal, bool &sawHostIO,
 // readback observes it. Preserve every copy and readback. This avoids a new
 // device-pool slot when early placement separates it from a host-written
 // buffer.
-static bool isCopyReadbackCandidate(memref::AllocOp allocOp) {
+static bool
+isCopyReadbackCandidate(memref::AllocOp allocOp,
+                        const DenseSet<OperationName> &mappedInputOps) {
   auto func = allocOp->getParentOfType<func::FuncOp>();
   auto rootType = allocOp.getType();
   if (!func || !llvm::hasSingleElement(func.getBody()) ||
@@ -184,12 +151,15 @@ static bool isCopyReadbackCandidate(memref::AllocOp allocOp) {
         hasReadback = true;
         continue;
       }
-      // These wrappers accept mapped input storage. Do not move kernel
-      // destinations or extend this list without checking the runtime.
-      if (isa<PadOp, SliceOp, AddOp, CastOp>(user) &&
+      // Query the backend contract. Memory effects alone do not establish
+      // mapped-input support. Keep kernel destinations in device storage.
+      if (mappedInputOps.contains(user->getName()) &&
+          user->getNumOperands() != 0 &&
           user->getOperand(0) == func.getArgument(0) &&
           type.getLayout().isIdentity()) {
-        auto effects = cast<MemoryEffectOpInterface>(user);
+        auto effects = dyn_cast<MemoryEffectOpInterface>(user);
+        if (!effects)
+          return false;
         SmallVector<MemoryEffects::EffectInstance> instances;
         effects.getEffectsOnValue(value, instances);
         if (llvm::all_of(instances, [](const auto &effect) {
@@ -205,7 +175,9 @@ static bool isCopyReadbackCandidate(memref::AllocOp allocOp) {
 
 // Keep the existing size limit. Host I/O or a bounded copy/readback chain
 // must require the small buffer. Float buffers also need a HIP consumer.
-static bool isHostScalarCandidate(memref::AllocOp allocOp) {
+static bool
+isHostScalarCandidate(memref::AllocOp allocOp,
+                      const DenseSet<OperationName> &mappedInputOps) {
   MemRefType type = allocOp.getType();
   if (!type.hasStaticShape())
     return false;
@@ -221,13 +193,21 @@ static bool isHostScalarCandidate(memref::AllocOp allocOp) {
   if (!classifyHostScalarUsers(allocOp.getResult(), hasHostIO, hasHipUser))
     return false;
   return (hasHostIO && (!isFloat || hasHipUser)) ||
-         isCopyReadbackCandidate(allocOp);
+         isCopyReadbackCandidate(allocOp, mappedInputOps);
 }
 
 struct MaterializeHostScalarsPass
     : public impl::MaterializeHostScalarsPassBase<MaterializeHostScalarsPass> {
 
+  LogicalResult initialize(MLIRContext *context) override {
+    mappedInputOps = getHostMappedInputOps(context);
+    return success();
+  }
+
   void runOnOperation() override;
+
+private:
+  DenseSet<OperationName> mappedInputOps;
 };
 
 void MaterializeHostScalarsPass::runOnOperation() {
@@ -235,30 +215,22 @@ void MaterializeHostScalarsPass::runOnOperation() {
   if (funcOp.empty())
     return;
 
-  // Need !hip.context as arg 0 to call hip.get_host_scratch. If absent (e.g.
-  // utility funcs or pre-context-arg passes), silently skip — we're a
-  // best-effort mitigation, not a correctness requirement on every function.
+  // Scratch belongs to the runtime context in argument zero.
   if (funcOp.getNumArguments() == 0 ||
       !isa<ContextType>(funcOp.getArgument(0).getType()))
     return;
   Value ctx = funcOp.getArgument(0);
 
-  // Collect candidates.  The walk order here determines the per-candidate
-  // scratch offsets computed below; any refactor that changes the traversal
-  // (sorting, reverse-walk, parallel collection) changes the scratch layout
-  // and therefore the LIT IR snapshots.  Keep `funcOp.walk` (post-order,
-  // deterministic).
+  // Collect candidates before rewriting. Keep their traversal order.
   SmallVector<memref::AllocOp> candidates;
   funcOp.walk([&](memref::AllocOp op) {
-    if (isHostScalarCandidate(op))
+    if (isHostScalarCandidate(op, mappedInputOps))
       candidates.push_back(op);
   });
   if (candidates.empty())
     return;
 
-  // Compute byte size per candidate and aligned offsets. 64-byte alignment
-  // matches the runtime pool and is comfortably above the largest scalar
-  // alignment; gives every candidate its own cache line.
+  // Give each candidate a separate aligned region.
   constexpr int64_t kAlign = 64;
   SmallVector<int64_t> offsets;
   offsets.reserve(candidates.size());
@@ -268,16 +240,13 @@ void MaterializeHostScalarsPass::runOnOperation() {
     Type elemTy = ty.getElementType();
     unsigned bits = elemTy.isIndex() ? 64 : elemTy.getIntOrFloatBitWidth();
     int64_t elemBytes = static_cast<int64_t>((bits + 7) / 8);
-    int64_t bytes = ty.getNumElements() * elemBytes;
-    if (bytes == 0)
-      bytes = 1; // rank-0 with i1 etc. — never zero-sized
-    int64_t off = roundUp(total, kAlign);
+    int64_t bytes = std::max(int64_t{1}, ty.getNumElements() * elemBytes);
+    int64_t off = llvm::alignTo(total, kAlign);
     offsets.push_back(off);
     total = off + bytes;
   }
-  total = roundUp(total, kAlign);
+  total = llvm::alignTo(total, kAlign);
 
-  // Emit hip.get_host_scratch(%ctx, %total) at function entry.
   Block &entry = funcOp.getBody().front();
   OpBuilder builder(funcOp.getContext());
   builder.setInsertionPointToStart(&entry);
@@ -288,9 +257,7 @@ void MaterializeHostScalarsPass::runOnOperation() {
   Value scratch =
       GetHostScratchOp::create(builder, loc, scratchType, ctx, totalSize);
 
-  // Replace each candidate with a memref.view over the scratch buffer.
-  // Deallocs of the candidate are erased — the scratch buffer is owned by
-  // the runtime (released in hipdnn_ep_state_cleanup), like the pool.
+  // The runtime owns scratch. Replace allocations and erase their deallocs.
   for (auto [allocOp, offset] : llvm::zip(candidates, offsets)) {
     builder.setInsertionPoint(allocOp);
     Value offsetVal =
@@ -299,7 +266,6 @@ void MaterializeHostScalarsPass::runOnOperation() {
                                        allocOp.getType(), scratch, offsetVal,
                                        /*sizes=*/ValueRange{});
 
-    // Erase deallocs first (they reference the alloc's result).
     SmallVector<memref::DeallocOp> deallocs;
     for (Operation *user : allocOp->getUsers())
       if (auto d = dyn_cast<memref::DeallocOp>(user))

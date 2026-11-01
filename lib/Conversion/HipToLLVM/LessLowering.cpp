@@ -83,8 +83,8 @@ struct LessOpLowering : public ConvertOpToLLVMPattern<LessOp> {
 } // namespace
 
 void populateLessLoweringPatterns(const LLVMTypeConverter &converter,
-                                  RewritePatternSet &patterns) {
-  patterns.add<LessOpLowering>(converter);
+                                  RuntimeLoweringPatterns &patterns) {
+  patterns.addOrdered<LessOpLowering>(converter);
 }
 
 } // namespace hip

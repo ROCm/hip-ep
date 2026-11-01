@@ -110,3 +110,18 @@ func.func @non_flat_copy(%ctx: !hip.context, %src: memref<4xi64, strided<[2]>>) 
   %v = hip.readback_scalar(%ctx, %part : memref<i64>) -> i64
   return %v : i64
 }
+
+// -----
+
+// Read effects do not prove mapped-input support. Mul has no placement contract.
+// CHECK-LABEL: func.func @undeclared_reader
+// CHECK-NOT: hip.get_host_scratch
+// CHECK: hip.get_pool
+func.func @undeclared_reader(%ctx: !hip.context, %src: memref<1xi64>,
+    %out: memref<1xi64>) -> i64 {
+  %a = memref.alloc() : memref<1xi64>
+  memref.copy %src, %a : memref<1xi64> to memref<1xi64>
+  %v = hip.readback_scalar(%ctx, %a : memref<1xi64>) -> i64
+  hip.mul(%ctx) ins(%a, %src : memref<1xi64>, memref<1xi64>) outs(%out : memref<1xi64>)
+  return %v : i64
+}

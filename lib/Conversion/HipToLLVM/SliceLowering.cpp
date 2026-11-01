@@ -129,8 +129,8 @@ struct SliceOpLowering : public ConvertOpToLLVMPattern<SliceOp> {
 } // namespace
 
 void populateSliceLoweringPatterns(const LLVMTypeConverter &converter,
-                                   RewritePatternSet &patterns) {
-  patterns.add<SliceOpLowering>(converter);
+                                   RuntimeLoweringPatterns &patterns) {
+  patterns.addOrderedMapped<SliceOpLowering>(converter);
 }
 
 } // namespace hip

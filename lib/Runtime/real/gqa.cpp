@@ -3133,7 +3133,8 @@ static int group_query_attention(
   return rc;
 }
 
-// Keep the existing entry point for previously compiled model artifacts.
+// Bitcode artifacts resolve this entry point when they load the runtime.
+// Keep its signature. Calls without a proven host value also use this path.
 int wrap_group_query_attention(
     RuntimeState *state, int op_state_slot, void *query, void *key, void *value,
     void *past_key, void *past_value, void *seqlens_k, void *total_seq_len,
@@ -3159,7 +3160,8 @@ int wrap_group_query_attention(
       attn_bias_num_heads, kv_bnsd, seq_len_new_kv, std::nullopt);
 }
 
-// The compiler proves that host_length equals the single stored i32 value.
+// This entry point adds a host value without changing the original ABI.
+// The compiler proves that it equals the single stored i32 value.
 int wrap_group_query_attention_host_length(
     RuntimeState *state, int op_state_slot, void *query, void *key, void *value,
     void *past_key, void *past_value, void *seqlens_k, void *total_seq_len,

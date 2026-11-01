@@ -896,11 +896,11 @@ struct HyperConnectionPostMixNormOpLowering
 } // namespace
 
 void populateNormLoweringPatterns(const LLVMTypeConverter &converter,
-                                  RewritePatternSet &patterns) {
+                                  RuntimeLoweringPatterns &patterns) {
+  patterns.addOrdered<RmsNormOpLowering, SkipRmsNormOpLowering>(converter);
   patterns
-      .add<RmsNormOpLowering, SkipRmsNormOpLowering, LayerNormOpLowering,
-           InstanceNormOpLowering, BatchNormOpLowering, GroupNormOpLowering,
-           GatedRmsNormOpLowering, EngramGateOpLowering,
+      .add<LayerNormOpLowering, InstanceNormOpLowering, BatchNormOpLowering,
+           GroupNormOpLowering, GatedRmsNormOpLowering, EngramGateOpLowering,
            HyperConnectionPreMixOpLowering, HyperConnectionPostMixOpLowering,
            HyperConnectionPostMixNormOpLowering>(converter);
 }

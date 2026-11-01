@@ -317,20 +317,27 @@ GPU-free coverage of the offset allocator: `test/runtime/test_transient_arena.cp
 
 ## Host scalar scratch
 
-`hip-materialize-host-scalars` selects static-shape integer/index allocations of at most 16 elements with host reads or writes, including accesses reachable through supported view/alias operations. Accepted descriptor-only and terminal users include memref dimension/deallocation operations, supported views, memref copies, reshape shape operands, and HIP operations.
+`hip-materialize-host-scalars` selects static allocations of at most 16 elements
+with host reads or writes through supported aliases. Float buffers also need a
+HIP consumer. Bounded copy-filled integer buffers with an explicit readback can
+also qualify when their backend readers support mapped inputs. This keeps them
+out of the device pool when early placement prevents reuse with a host-written
+buffer. Copies and payload accesses stay in their original order.
 
 All selected allocations in a function share one `hip.get_host_scratch` buffer. Their offsets are aligned to 64 bytes, independently of PoolAllocs' default 256-byte alignment.
 
 Functions without `!hip.context` as argument zero are skipped.
 
-HIP-to-LLVM lowering can pass a host-built GQA sequence length directly to
-runtime dispatch. It proves that the scratch slots do not overlap, that each
-slot has one host store before all readers, and that no other use can change
-or expose the storage. Called bodies and control flow keep the readback path.
-The GPU still receives the length buffer. The runtime uses the scalar only
-for batch one and keeps the original entry point for existing artifacts.
-This removes a redundant readback without using pointer identity as proof of
-equal lengths. The inference entry point still synchronizes before it returns.
+HIP-to-LLVM tracks scalar values by scratch byte range. Writes invalidate
+overlapping values. A removed wait never clears pending GPU accesses. Unknown
+aliases, effects, calls, or control flow keep the readback path. Memory effects
+describe accesses; backend lowering contracts establish stream ordering and
+mapped-input support. Only guarantees shared by all registered alternatives
+are used.
+
+This analysis can replace scalar and dimension readbacks, or supply a GQA host
+length for batch one. GPU inputs and the final inference wait stay unchanged.
+The original GQA entry point remains available for existing compiled artifacts.
 
 ## Diagnostics and tests
 
