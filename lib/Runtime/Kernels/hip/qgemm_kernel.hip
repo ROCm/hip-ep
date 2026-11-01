@@ -58,9 +58,11 @@
 
 #include <hip/hip_runtime.h>
 
-// v_wmma_i32_16x16x16_iu8 is a gfx11 instruction: gfx12 renames the builtin and
-// the host pass has no AMDGPU builtins at all. __has_builtin is target-aware
-// here, so it gates the device code; qgemm_device_has_wmma() gates dispatch.
+// v_wmma_i32_16x16x16_iu8 is the gfx11 WMMA256b instruction. gfx12 renames the
+// builtin, and gfx1170 is numbered gfx11 but only implements that gfx12
+// encoding, so __has_builtin is false for both and the device body is empty.
+// __has_builtin is target-aware and gates the device code;
+// qgemm_device_has_wmma() gates dispatch.
 #if defined(__has_builtin) &&                                                      __has_builtin(__builtin_amdgcn_wmma_i32_16x16x16_iu8_w32)
 #define QGEMM_HAS_WMMA 1
 #else
@@ -1041,9 +1043,9 @@ qgemm_tiled_wmma_w4_kernel(
     uint16_t *__restrict__ Y, int64_t N, int64_t K, QGemmRequant requant,
     bool need_row_a, bool need_col_b) {
 #if !QGEMM_HAS_WMMA
-  // gfx12 spells the builtin differently and the host pass has no AMDGPU
-  // builtins, so the body only exists where it can be built. Dispatch is held
-  // off any such target by qgemm_device_has_wmma().
+  // gfx12 and gfx1170 use the WMMA128b builtin, and the host pass has no
+  // AMDGPU builtins, so the body only exists for the gfx11 encoding.
+  // qgemm_device_has_wmma() must not launch this empty image.
   (void)A; (void)B; (void)Y; (void)N; (void)K;
   (void)requant; (void)need_row_a; (void)need_col_b;
 #else
@@ -1663,8 +1665,10 @@ int qgemm_device_cu_count() {
   return count;
 }
 
-// The WMMA path is compiled only where the gfx11 builtin exists, so on any
-// other target the kernel body is empty and must never be dispatched.
+// The WMMA path is compiled only where the gfx11 WMMA256b builtin exists.
+// gfx1170 reports a gfx11 name but its image of this kernel is empty: the
+// hardware implements the gfx12 WMMA128b encoding instead. gcnArchName may
+// carry a feature suffix such as "gfx1151:xnack-".
 bool qgemm_device_has_wmma() {
   static const bool has = [] {
     int device = 0;
@@ -1674,6 +1678,8 @@ bool qgemm_device_has_wmma() {
     if (hipGetDeviceProperties(&props, device) != hipSuccess)
       return false;
     const std::string arch(props.gcnArchName);
+    if (arch.rfind("gfx117", 0) == 0)
+      return false;
     return arch.rfind("gfx11", 0) == 0;
   }();
   return has;

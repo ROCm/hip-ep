@@ -294,4 +294,158 @@ module {
     // CHECK: hip.slice
     return %r : tensor<?x?xf16>
   }
+
+  // Test 12: the opset<10 `Slice-1` form, where starts/ends/axes are
+  // attributes and `data` is the only operand. Nothing upgrades opsets in this
+  // pipeline, so without SliceLegacyAttrsToOperands this reaches
+  // SliceDecompose with one operand and is rejected by its arity check -- which
+  // is how both Topaz models (drw-v1, prap-v3, both opset 9) failed to
+  // bufferize. This is drw-v1's channel extraction verbatim: take channel 3 of
+  // a 4-channel NHWC image.
+  func.func @test_slice_legacy_attrs_channel(%input: tensor<1x256x256x4xf32>)
+      -> tensor<1x256x256x1xf32> {
+    // CHECK-LABEL: func.func @test_slice_legacy_attrs_channel
+    // `ends` keeps the exporter's INT32_MAX sentinel on the untouched axes;
+    // SliceDecompose's per-axis clamp maps it onto the dim.
+    %r = "onnx.Slice"(%input) {
+        starts = [0, 0, 0, 3],
+        ends = [2147483647, 2147483647, 2147483647, 4],
+        axes = [0, 1, 2, 3]
+      } : (tensor<1x256x256x4xf32>) -> tensor<1x256x256x1xf32>
+
+    // CHECK-NOT: onnx.Slice
+    // CHECK-NOT: hip.slice
+    // CHECK: tensor.extract_slice {{.*}}[0, 0, 0, 3] [1, 256, 256, 1] [1, 1, 1, 1]
+
+    return %r : tensor<1x256x256x1xf32>
+  }
+
+  // Test 13: legacy form naming fewer axes than the data has dims, as prap-v3
+  // does -- two of four axes here, so the explicit short `axes` list is what
+  // is actually under test. The rewrite must pass it through as written: if it
+  // instead expanded `axes` to the data rank, starts/ends/axes would mismatch,
+  // SliceDecompose would fall through, and the CHECK-NOTs below would fire.
+  // The untouched trailing axes must survive at full extent.
+  func.func @test_slice_legacy_attrs_partial_axes(%input: tensor<8x6x4x2xf32>)
+      -> tensor<8x5x4x2xf32> {
+    // CHECK-LABEL: func.func @test_slice_legacy_attrs_partial_axes
+    %r = "onnx.Slice"(%input) {
+        starts = [0, 1],
+        ends = [2147483647, 2147483647],
+        axes = [0, 1]
+      } : (tensor<8x6x4x2xf32>) -> tensor<8x5x4x2xf32>
+
+    // CHECK-NOT: onnx.Slice
+    // CHECK-NOT: hip.slice
+    // CHECK: tensor.extract_slice {{.*}}[0, 1, 0, 0] [8, 5, 4, 2] [1, 1, 1, 1]
+
+    return %r : tensor<8x5x4x2xf32>
+  }
+
+  // Test 14: legacy form with `axes` omitted entirely, which ONNX defines as
+  // the leading dims.
+  func.func @test_slice_legacy_attrs_default_axes(%input: tensor<4x6xf32>)
+      -> tensor<2x6xf32> {
+    // CHECK-LABEL: func.func @test_slice_legacy_attrs_default_axes
+    %r = "onnx.Slice"(%input) {
+        starts = [1],
+        ends = [3]
+      } : (tensor<4x6xf32>) -> tensor<2x6xf32>
+
+    // CHECK-NOT: onnx.Slice
+    // CHECK: tensor.extract_slice {{.*}}[1, 0] [2, 6] [1, 1]
+
+    return %r : tensor<2x6xf32>
+  }
+
+  // Test 15: Slice of a length-3 vector from index 3 through INT64_MAX. ONNX
+  // clamps both bounds to 3 and the result is empty. extract_slice cannot use
+  // offset 3 on a dim of 3, so the view is taken at offset 0 with size 0.
+  func.func @test_slice_decompose_empty_past_end(%input: tensor<3xi64>)
+      -> tensor<0xi64> {
+    // CHECK-LABEL: func.func @test_slice_decompose_empty_past_end
+    %starts = arith.constant dense<3> : tensor<1xi64>
+    %ends = arith.constant dense<9223372036854775807> : tensor<1xi64>
+    %r = "onnx.Slice"(%input, %starts, %ends)
+        : (tensor<3xi64>, tensor<1xi64>, tensor<1xi64>) -> tensor<0xi64>
+
+    // CHECK-NOT: onnx.Slice
+    // CHECK-NOT: hip.slice
+    // CHECK: tensor.extract_slice {{.*}}[0] [0] [1] : tensor<3xi64> to tensor<0xi64>
+
+    return %r : tensor<0xi64>
+  }
+
+  // Test 16: slicing an already-empty axis. offset 0 is still out of range
+  // on a dim of 0, so the result is tensor.empty.
+  func.func @test_slice_decompose_empty_source(%input: tensor<0xi64>)
+      -> tensor<0xi64> {
+    // CHECK-LABEL: func.func @test_slice_decompose_empty_source
+    %starts = arith.constant dense<0> : tensor<1xi64>
+    %ends = arith.constant dense<0> : tensor<1xi64>
+    %r = "onnx.Slice"(%input, %starts, %ends)
+        : (tensor<0xi64>, tensor<1xi64>, tensor<1xi64>) -> tensor<0xi64>
+
+    // CHECK-NOT: onnx.Slice
+    // CHECK-NOT: tensor.extract_slice
+    // CHECK: tensor.empty() : tensor<0xi64>
+
+    return %r : tensor<0xi64>
+  }
+
+  // Test 17: keep the last Shape(ids)[1] positions of the mask,
+  // Slice(attn, -Shape(ids)[1], INT64_MAX). At decode that is 1 of
+  // Shape(attn)[1] columns.
+  func.func @test_slice_native_neg_shape_start(
+      %attn: tensor<?x?xi64>, %ids: tensor<?x?xi64>) -> tensor<?x?xi64> {
+    // CHECK-LABEL: func.func @test_slice_native_neg_shape_start
+    %axes = arith.constant dense<[1]> : tensor<1xi64>
+    %ends = arith.constant dense<9223372036854775807> : tensor<1xi64>
+    %ids_len = "onnx.Shape"(%ids) {start = 1 : si64, end = 2 : si64}
+        : (tensor<?x?xi64>) -> tensor<1xi64>
+    %starts = "onnx.Neg"(%ids_len) : (tensor<1xi64>) -> tensor<1xi64>
+    %r = "onnx.Slice"(%attn, %starts, %ends, %axes)
+        : (tensor<?x?xi64>, tensor<1xi64>, tensor<1xi64>,
+           tensor<1xi64>) -> tensor<?x?xi64>
+
+    // CHECK: %[[D0:.*]] = tensor.dim %arg1, %{{.*}} : tensor<?x?xi64>
+    // CHECK: %[[D1:.*]] = tensor.dim %arg1, %{{.*}} : tensor<?x?xi64>
+    // CHECK: %[[IDS:.*]] = tensor.dim %arg2, %{{.*}} : tensor<?x?xi64>
+    // CHECK: %[[NEG:.*]] = arith.subi %{{.*}}, %[[IDS]] : index
+    // CHECK: arith.addi %[[NEG]], %[[D1]] : index
+    // CHECK: %[[CAP:.*]] = arith.select %{{.*}}, %[[D1]], %{{.*}} : index
+    // CHECK: tensor.empty(%[[D0]], %[[CAP]]) : tensor<?x?xi64>
+    // CHECK: hip.slice
+    return %r : tensor<?x?xi64>
+  }
+
+  // Test 18: test 17 in the post-conversion spelling (hip.neg over a
+  // from_elements of the packed dim).
+  func.func @test_slice_native_lowered_neg_shape_start(
+      %ctx: !hip.context, %attn: tensor<?x?xi64>, %ids: tensor<?x?xi64>)
+      -> tensor<?x?xi64> {
+    // CHECK-LABEL: func.func @test_slice_native_lowered_neg_shape_start
+    %c1 = arith.constant 1 : index
+    %axes = arith.constant dense<[1]> : tensor<1xi64>
+    %ends = arith.constant dense<9223372036854775807> : tensor<1xi64>
+    %ids_dim = tensor.dim %ids, %c1 : tensor<?x?xi64>
+    %ids_i64 = arith.index_cast %ids_dim : index to i64
+    %ids_len = tensor.from_elements %ids_i64 : tensor<1xi64>
+    %neg_init = tensor.empty() : tensor<1xi64>
+    %starts = hip.neg(%ctx) ins(%ids_len : tensor<1xi64>)
+        outs(%neg_init : tensor<1xi64>) : tensor<1xi64>
+    %r = "onnx.Slice"(%attn, %starts, %ends, %axes)
+        : (tensor<?x?xi64>, tensor<1xi64>, tensor<1xi64>,
+           tensor<1xi64>) -> tensor<?x?xi64>
+
+    // CHECK: %[[IDS:.*]] = tensor.dim %arg2, %{{.*}} : tensor<?x?xi64>
+    // CHECK: %[[D0:.*]] = tensor.dim %arg1, %{{.*}} : tensor<?x?xi64>
+    // CHECK: %[[D1:.*]] = tensor.dim %arg1, %{{.*}} : tensor<?x?xi64>
+    // CHECK: %[[NEG:.*]] = arith.subi %{{.*}}, %[[IDS]] : index
+    // CHECK: arith.addi %[[NEG]], %[[D1]] : index
+    // CHECK: %[[CAP:.*]] = arith.select %{{.*}}, %[[D1]], %{{.*}} : index
+    // CHECK: tensor.empty(%[[D0]], %[[CAP]]) : tensor<?x?xi64>
+    // CHECK: hip.slice
+    return %r : tensor<?x?xi64>
+  }
 }

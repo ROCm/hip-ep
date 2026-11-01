@@ -99,12 +99,12 @@ TopKToHip::matchAndRewrite(mlir::Operation *op,
     axis += xType.getRank();
 
   bool largest = true;
-  if (auto largestAttr = op->getAttrOfType<mlir::BoolAttr>("largest"))
-    largest = largestAttr.getValue();
+  if (auto largestAttr = op->getAttrOfType<mlir::IntegerAttr>("largest"))
+    largest = largestAttr.getSInt() != 0;
 
   bool sorted = true;
-  if (auto sortedAttr = op->getAttrOfType<mlir::BoolAttr>("sorted"))
-    sorted = sortedAttr.getValue();
+  if (auto sortedAttr = op->getAttrOfType<mlir::IntegerAttr>("sorted"))
+    sorted = sortedAttr.getSInt() != 0;
 
   // TopK's two results share an IDENTICAL shape; only the element type differs
   // (values inherit x's element type, indices are integer). Some exports drop
@@ -152,7 +152,8 @@ TopKToHip::matchAndRewrite(mlir::Operation *op,
   if (!indicesInit)
     return rewriter.notifyMatchFailure(op, "failed to build indices init");
 
-  // hip.top_k is multi-result (autoInfer=0): pass explicit result types.
+  // hip.top_k is multi-result and does not use the single-result inference
+  // family, so pass explicit result types.
   auto hipOp = mlir::hip::TopKOp::create(
       rewriter, loc, mlir::TypeRange{valuesType, indicesType}, context, x, k,
       valuesInit, indicesInit, rewriter.getI64IntegerAttr(axis),
@@ -162,146 +163,11 @@ TopKToHip::matchAndRewrite(mlir::Operation *op,
   return mlir::success();
 }
 
-// Drop the size-1 axis that top-k keeps. A leading unit axis merges into the
-// next dimension; any other unit axis merges into the previous one.
-// Before: tensor<1x1xi64>, axis 1, keepdims 0
-// After:  tensor.collapse_shape -> tensor<1xi64>
-static mlir::FailureOr<mlir::Value>
-squeezeUnitAxis(mlir::PatternRewriter &rewriter, mlir::Location loc,
-                mlir::Value indices, int64_t axis,
-                mlir::RankedTensorType resultType) {
-  auto sourceType = mlir::cast<mlir::RankedTensorType>(indices.getType());
-  int64_t rank = sourceType.getRank();
-  if (resultType.getRank() + 1 != rank || axis < 0 || axis >= rank)
-    return mlir::failure();
-  if (rank == 1) {
-    auto shapeType =
-        mlir::RankedTensorType::get({0}, rewriter.getI64Type());
-    mlir::Value shape = mlir::tensor::FromElementsOp::create(
-        rewriter, loc, shapeType, mlir::ValueRange{});
-    return mlir::Value(mlir::tensor::ReshapeOp::create(
-        rewriter, loc, resultType, indices, shape));
-  }
-  llvm::SmallVector<mlir::ReassociationIndices> groups;
-  for (int64_t index : llvm::seq<int64_t>(0, rank)) {
-    if (index == axis)
-      continue;
-    groups.push_back({index});
-  }
-  if (axis == 0)
-    groups.front().insert(groups.front().begin(), 0);
-  else
-    groups[axis - 1].push_back(axis);
-  return mlir::Value(mlir::tensor::CollapseShapeOp::create(
-      rewriter, loc, resultType, indices, groups));
-}
-
-/// onnx.ArgMax -> hip.top_k with K = 1. Ties keep the first index, matching
-/// select_last_index = 0. Integer data is cast to f32 first; that cast is
-/// exact for magnitudes up to 2^24, which covers token ids.
-struct ArgMaxToHip : public mlir::RewritePattern {
-  ArgMaxToHip(mlir::MLIRContext *ctx)
-      : RewritePattern("onnx.ArgMax", /*benefit=*/1, ctx) {}
-
-  mlir::LogicalResult
-  matchAndRewrite(mlir::Operation *op,
-                  mlir::PatternRewriter &rewriter) const override;
-};
-
-mlir::LogicalResult
-ArgMaxToHip::matchAndRewrite(mlir::Operation *op,
-                             mlir::PatternRewriter &rewriter) const {
-  auto ctxOrFailure = getContextArg(op, rewriter);
-  if (mlir::failed(ctxOrFailure))
-    return rewriter.notifyMatchFailure(op, "missing context argument");
-  mlir::Value context = *ctxOrFailure;
-
-  if (op->getNumOperands() != 1 || op->getNumResults() != 1)
-    return rewriter.notifyMatchFailure(op, "expected one input and one output");
-
-  mlir::Value input = op->getOperand(0);
-  auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
-  auto resultType =
-      mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  if (!inputType || !inputType.hasStaticShape() || !resultType ||
-      !resultType.getElementType().isInteger(64))
-    return rewriter.notifyMatchFailure(
-        op, "ArgMax requires a static input and an i64 result");
-
-  int64_t selectLast = 0;
-  if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("select_last_index"))
-    selectLast = attr.getValue().getSExtValue();
-  if (selectLast != 0)
-    return rewriter.notifyMatchFailure(
-        op, "ArgMax select_last_index must be 0");
-
-  int64_t keepdims = 1;
-  if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("keepdims"))
-    keepdims = attr.getValue().getSExtValue();
-  if (keepdims != 0 && keepdims != 1)
-    return rewriter.notifyMatchFailure(op, "ArgMax keepdims must be 0 or 1");
-
-  int64_t axis = 0;
-  if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("axis"))
-    axis = attr.getValue().getSExtValue();
-  if (axis < 0)
-    axis += inputType.getRank();
-  if (axis < 0 || axis >= inputType.getRank())
-    return rewriter.notifyMatchFailure(op, "ArgMax axis is out of range");
-
-  mlir::Location loc = op->getLoc();
-  mlir::Type element = inputType.getElementType();
-  mlir::Value data = input;
-  if (element.isIntOrIndex()) {
-    auto castType =
-        mlir::RankedTensorType::get(inputType.getShape(), rewriter.getF32Type());
-    mlir::Value castInit = createEmptyTensor(rewriter, loc, castType, input);
-    auto cast = mlir::hip::CastOp::create(rewriter, loc, context, input,
-                                          castInit,
-                                          rewriter.getI64IntegerAttr(1));
-    data = cast->getResult(0);
-    element = rewriter.getF32Type();
-  } else if (!mlir::isa<mlir::FloatType>(element)) {
-    return rewriter.notifyMatchFailure(op, "ArgMax element type is unsupported");
-  }
-
-  llvm::SmallVector<int64_t> keptShape(inputType.getShape());
-  keptShape[axis] = 1;
-  auto valuesType = mlir::RankedTensorType::get(keptShape, element);
-  auto indicesType =
-      mlir::RankedTensorType::get(keptShape, rewriter.getI64Type());
-  if (keepdims == 1 && indicesType != resultType)
-    return rewriter.notifyMatchFailure(op, "ArgMax result shape does not match");
-
-  mlir::Value one = mlir::arith::ConstantOp::create(
-      rewriter, loc, rewriter.getI64IntegerAttr(1));
-  auto kType = mlir::RankedTensorType::get({1}, rewriter.getI64Type());
-  mlir::Value k = mlir::tensor::FromElementsOp::create(rewriter, loc, kType,
-                                                       mlir::ValueRange{one});
-  mlir::Value valuesInit = createEmptyTensor(rewriter, loc, valuesType, data);
-  mlir::Value indicesInit =
-      createEmptyTensor(rewriter, loc, indicesType, data);
-  auto topk = mlir::hip::TopKOp::create(
-      rewriter, loc, mlir::TypeRange{valuesType, indicesType}, context, data, k,
-      valuesInit, indicesInit, rewriter.getI64IntegerAttr(axis),
-      rewriter.getBoolAttr(true), rewriter.getBoolAttr(true));
-  mlir::Value indices = topk->getResult(1);
-  if (keepdims == 0) {
-    mlir::FailureOr<mlir::Value> squeezed =
-        squeezeUnitAxis(rewriter, loc, indices, axis, resultType);
-    if (mlir::failed(squeezed))
-      return rewriter.notifyMatchFailure(op, "ArgMax result shape does not match");
-    indices = *squeezed;
-  }
-  rewriter.replaceOp(op, indices);
-  return mlir::success();
-}
-
 } // namespace
 
 void populateTopKConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx) {
-  patterns.add<TopKToHip, ArgMaxToHip>(ctx);
+  patterns.add<TopKToHip>(ctx);
 }
 
 } // namespace hip

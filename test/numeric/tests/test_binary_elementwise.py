@@ -13,7 +13,7 @@ op, so the kernels themselves see equal-sized inputs.
 Per the runtime dtype tables in lib/Runtime/real/<op>.cpp:
 
     Div   : f16, f32, i32, i64
-    Equal : f16, f32, i32, i64  (output: bool)
+    Equal : f16, f32, i8, ui8, i16, ui16, i32, i64  (output: bool)
     Less  : f16, f32, i32, i64  (output: bool)
     Mod   : f16/f32 require fmod=1; i32/i64 require fmod=0
     And   : bool only (output: bool); mirrors ORT v1.22.2
@@ -121,6 +121,10 @@ class TestEqual:
         [
             (np.float16, [4, 8]),
             (np.float32, [4, 8]),
+            (np.int8, [4, 8]),
+            (np.uint8, [4, 8]),
+            (np.int16, [4, 8]),
+            (np.uint16, [4, 8]),
             (np.int32, [4, 8]),
             (np.int64, [4, 8]),
         ],
@@ -135,6 +139,29 @@ class TestEqual:
             # Use a small discrete set so we actually exercise equality hits.
             a = rng.choice([-1.0, 0.0, 1.0, 2.0], size=shape).astype(dtype)
             b = rng.choice([-1.0, 0.0, 1.0, 2.0], size=shape).astype(dtype)
+        actual, expected = model_runner.run_sample(model, [a, b])
+        compare_outputs(actual, expected, atol=0)
+
+    @pytest.mark.parametrize(
+        "dtype",
+        [np.int8, np.uint8, np.int16, np.uint16],
+    )
+    def test_equal_partial_broadcast(self, model_runner, dtype):
+        """Partial broadcast ([4,1] vs [1,8]) materialises both sides via expand."""
+        lhs_shape = [4, 1]
+        rhs_shape = [1, 8]
+        out_shape = [4, 8]
+        in_tp = np_to_onnx_type(dtype)
+        out_tp = np_to_onnx_type(np.bool_)
+        A = helper.make_tensor_value_info("A", in_tp, lhs_shape)
+        B = helper.make_tensor_value_info("B", in_tp, rhs_shape)
+        Y = helper.make_tensor_value_info("Y", out_tp, out_shape)
+        node = helper.make_node("Equal", ["A", "B"], ["Y"])
+        model = make_model_from_nodes([node], [A, B], [Y])
+
+        rng = np.random.default_rng(206)
+        a = rng.integers(0, 5, lhs_shape, dtype=dtype)
+        b = rng.integers(0, 5, rhs_shape, dtype=dtype)
         actual, expected = model_runner.run_sample(model, [a, b])
         compare_outputs(actual, expected, atol=0)
 
@@ -241,6 +268,38 @@ class TestMod:
         actual, expected = model_runner.run_sample(model, [a, b])
         atol = 1e-3 if dtype == np.float16 else 1e-5
         compare_outputs(actual, expected, atol=atol, rtol=1e-3)
+
+    @pytest.mark.parametrize(
+        "dtype,lhs_shape,rhs_shape,fmod",
+        [
+            (np.int64, [748], [], 0),
+            (np.int32, [4, 8], [1, 8], 0),
+            (np.int64, [4, 1], [1, 8], 0),
+            (np.float32, [4, 8], [4, 1], 1),
+            (np.float16, [2, 3, 8], [8], 1),
+        ],
+    )
+    def test_mod_broadcast(self, model_runner, dtype, lhs_shape, rhs_shape, fmod):
+        out_shape = list(np.broadcast_shapes(tuple(lhs_shape), tuple(rhs_shape)))
+        tp = np_to_onnx_type(dtype)
+        A = helper.make_tensor_value_info("A", tp, lhs_shape)
+        B = helper.make_tensor_value_info("B", tp, rhs_shape)
+        Y = helper.make_tensor_value_info("Y", tp, out_shape)
+        node = helper.make_node("Mod", ["A", "B"], ["Y"], fmod=fmod)
+        model = make_model_from_nodes([node], [A, B], [Y])
+
+        rng = np.random.default_rng(208)
+        if np.issubdtype(dtype, np.integer):
+            a = rng.integers(-50, 50, lhs_shape, dtype=dtype)
+        else:
+            a = rng.uniform(-3.0, 3.0, lhs_shape).astype(dtype)
+        b = np.asarray(_safe_divisor(rng, dtype, rhs_shape), dtype=dtype)
+        actual, expected = model_runner.run_sample(model, [a, b])
+        if np.issubdtype(dtype, np.integer):
+            compare_outputs(actual, expected, atol=0)
+        else:
+            atol = 1e-3 if dtype == np.float16 else 1e-5
+            compare_outputs(actual, expected, atol=atol, rtol=1e-3)
 
 
 # ---------------------------------------------------------------------------

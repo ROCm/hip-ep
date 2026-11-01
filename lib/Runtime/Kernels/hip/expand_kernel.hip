@@ -172,7 +172,11 @@ extern "C" int hip_expand(void *stream, const void *input, void *output,
                        output_shape, aligned_in_strides, output_rank,
                        num_output_elements);
     break;
+  // 2-byte integer payloads. uint16 reuses the int16 instantiation: the
+  // kernel only copies elements and never does arithmetic. wrap_equal
+  // materialises a partial broadcast through this entry.
   case HIP_DTYPE_INT16:
+  case HIP_DTYPE_UINT16:
     hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_expand_kernel<int16_t>),
                        dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
                        static_cast<const int16_t *>(input),

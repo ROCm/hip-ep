@@ -11,6 +11,17 @@
 
 message(STATUS "Configuring E2E integration tests")
 
+# Native .dll/.so artifacts are opt-in (HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS,
+# default OFF). When that support is off, compile and execute the LLVM IR
+# bitcode path instead.
+if(HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS)
+  set(_e2e_mode NATIVE)
+  set(_e2e_ext ".dll")
+else()
+  set(_e2e_mode LLVM_IR)
+  set(_e2e_ext ".bc")
+endif()
+
 # Auto-discover all .mlir test files from test/lit/e2e/
 file(GLOB MLIR_E2E_TESTS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../lit/e2e/*.mlir")
 
@@ -24,29 +35,29 @@ foreach(test_file ${MLIR_E2E_TESTS})
     set(test_dir "${CMAKE_CURRENT_BINARY_DIR}/${test_name}")
     file(MAKE_DIRECTORY "${test_dir}")
 
-    # Output DLL path (inside per-test dir)
-    set(dll_output "${test_dir}/${test_name}.dll")
+    # Output artifact path (inside per-test dir). .dll when native artifacts
+    # are enabled, .bc otherwise.
+    set(artifact_output "${test_dir}/${test_name}${_e2e_ext}")
 
-    # Test 1: Compile .mlir → .dll
+    # Test 1: Compile .mlir → artifact.
     # WORKING_DIRECTORY is set to the per-test dir so constants.bin
     # (the default constants filename) is written there.
-    # --mode NATIVE: the default artifact format is now LLVM_IR (.bc), so
-    # request a native .dll explicitly to keep the ELF init/fini check below
-    # meaningful and exercise the native loader path.
+    # --mode NATIVE (when enabled) keeps the ELF init/fini check below
+    # meaningful and exercises the native loader path.
     add_test(NAME E2E_Compile_${test_name}
         COMMAND $<TARGET_FILE:hip-compiler>
             "${test_file}"
-            -o "${dll_output}"
-            --mode NATIVE
+            -o "${artifact_output}"
+            --mode ${_e2e_mode}
         WORKING_DIRECTORY "${test_dir}"
     )
 
-    # Test 2: Execute .dll
+    # Test 2: Execute the artifact.
     # WORKING_DIRECTORY matches the compile step so hip-test resolves
     # constants.bin from the same per-test dir via DiskFileSystem(".").
     add_test(NAME E2E_Execute_${test_name}
         COMMAND $<TARGET_FILE:hip-test>
-            "${dll_output}"
+            "${artifact_output}"
             --verbose
             --validate
         WORKING_DIRECTORY "${test_dir}"
@@ -75,7 +86,7 @@ foreach(test_name ${hipsr_e2e_models})
     set(test_file "${CMAKE_CURRENT_SOURCE_DIR}/../lit/e2e/${test_name}.mlir")
     set(test_dir "${CMAKE_CURRENT_BINARY_DIR}/hipsr_${test_name}")
     file(MAKE_DIRECTORY "${test_dir}")
-    set(dll_output "${test_dir}/${test_name}.dll")
+    set(artifact_output "${test_dir}/${test_name}${_e2e_ext}")
 
     add_test(NAME E2E_Compile_hipsr_${test_name}
         COMMAND ${CMAKE_COMMAND} -E env
@@ -83,14 +94,14 @@ foreach(test_name ${hipsr_e2e_models})
             HIPDNN_EP_STRICT=1
             $<TARGET_FILE:hip-compiler>
                 "${test_file}"
-                -o "${dll_output}"
-                --mode NATIVE
+                -o "${artifact_output}"
+                --mode ${_e2e_mode}
         WORKING_DIRECTORY "${test_dir}"
     )
 
     add_test(NAME E2E_Execute_hipsr_${test_name}
         COMMAND $<TARGET_FILE:hip-test>
-            "${dll_output}"
+            "${artifact_output}"
             --verbose
             --validate
         WORKING_DIRECTORY "${test_dir}"
@@ -109,7 +120,7 @@ endforeach()
 #      SIGSEGV at process exit walking stale dtor pointers.
 # Plus a no-`.ctors` check: a populated .ctors section means LLVM
 # regressed back to UseInitArray=false (bug 1 above).
-if(NOT WIN32)
+if(HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS AND NOT WIN32)
     set(_init_fini_check_dll
         "${CMAKE_CURRENT_BINARY_DIR}/test_add_model/test_add_model.dll")
     add_test(NAME E2E_DLL_HasInitFiniArrays

@@ -17,8 +17,10 @@
  * Shape list is CSV with a header, columns K,N,block_size,has_zp (extra columns
  * ignored) -- i.e. what extract_shapes.py emits.
  *
- * Build (from the repo root):
- *   clang++ -x hip --offload-arch=gfx1151 -O3 -std=c++17 -w \
+ * Build (from the repo root) for the release target at the release -O2, so the
+ * sweep times the code custom_kernels_<arch>.dll runs (gfx11-generic or gfx1170);
+ * the table is still per chip (update_lut.py --arch):
+ *   clang++ -x hip --offload-arch=gfx11-generic -O2 -std=c++17 -w \
  *       -I lib/Runtime/Kernels/include \
  *       lib/Runtime/Kernels/hip/autotune/matmul_nbits/tools/matmul_nbits_autotune_sweep.cpp \
  *       lib/Runtime/Kernels/hip/matmul_nbits_kernel.hip -o matmul_nbits_sweep.exe
@@ -54,7 +56,7 @@ extern "C" int hip_matmul_nbits_u4_wmma_stride(
 extern "C" int hip_matmul_nbits_dp4a(
     void* stream_v, const void* A, const void* B, const void* scales,
     const void* zp_u8, const void* bias, void* out,
-    int64_t N, int64_t K, int64_t block_size,
+    int64_t M, int64_t N, int64_t K, int64_t block_size,
     void* a_qb_scratch, void* a_scale_scratch);
 
 #define HIP_OK(c)                                                             \
@@ -304,7 +306,7 @@ int main(int argc, char** argv) {
           std::fprintf(stderr, "#SHAPE path=dp4a M=1 N=%d K=%d gs=%d zp=%d\n",
                        s.n, s.k, s.gs, int(s.zp));
           hip_matmul_nbits_dp4a(nullptr, buf.a, buf.b, buf.sc, zp_u, nullptr,
-                                buf.out, s.n, s.k, s.gs, buf.qb, buf.qs);
+                                buf.out, 1, s.n, s.k, s.gs, buf.qb, buf.qs);
           HIP_OK(hipDeviceSynchronize());
         }
         continue;

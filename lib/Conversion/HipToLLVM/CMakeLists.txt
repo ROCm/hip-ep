@@ -15,10 +15,13 @@ add_library(HipToLLVM STATIC
   ActivationLowering.cpp
   BiasGeluLowering.cpp
   FastGeluLowering.cpp
+  TriluLowering.cpp
   NormLowering.cpp
   GatherLowering.cpp
   GatherElementsLowering.cpp
   TopKLowering.cpp
+  RandomNormalLikeLowering.cpp
+  ArgMaxLowering.cpp
   ScatterElementsLowering.cpp
   CompressLowering.cpp
   OneHotLowering.cpp
@@ -30,12 +33,14 @@ add_library(HipToLLVM STATIC
   GqaLowering.cpp
   MultiHeadAttentionLowering.cpp
   MatMulNBitsLowering.cpp
+  DequantBnb4Lowering.cpp
   QMoELowering.cpp
   QMoEAmdLowering.cpp
   GatherBlockQuantizedLowering.cpp
   QdqLowering.cpp
   GraphLowering.cpp
   CausalConvWithStateLowering.cpp
+  NGramHashMappingLowering.cpp
   GemmLowering.cpp
   WhereLowering.cpp
   EqualLowering.cpp
@@ -43,6 +48,9 @@ add_library(HipToLLVM STATIC
   AndLowering.cpp
   DivLowering.cpp
   LinearAttentionLowering.cpp
+  GatedDeltaNetLowering.cpp
+  DynamicSparseAttentionLowering.cpp
+  SparseAttentionIndexerLowering.cpp
   UnaryElementwiseLowering.cpp
   CumSumLowering.cpp
   PadLowering.cpp
@@ -67,6 +75,8 @@ add_library(HipToLLVM STATIC
   QMatMulLowering.cpp
   QGemmLowering.cpp
   QConvLowering.cpp
+  QLinearConvLowering.cpp
+  QLinearMatMulLowering.cpp
   QLpNormalizationLowering.cpp
   QSigmoidLowering.cpp
 )
@@ -99,3 +109,8 @@ target_link_libraries(HipToLLVM PUBLIC
   # implement this interface. See the guarded walk in HipToLLVM.cpp.
   MLIRConvertToLLVMInterface
 )
+
+# Guard dtype before the unchanged runtime ABI reduces it to byte width.
+if(HIP_EP_RING_ENABLED)
+    target_compile_definitions(HipToLLVM PRIVATE HIP_EP_RING_ENABLED=${HIP_EP_RING_ENABLED})
+endif()

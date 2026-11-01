@@ -409,80 +409,6 @@
     });
   }
 
-  /* ------------------------------------------------------------ hero deck */
-
-  function initDeck() {
-    // The markup ships every slide visible and the controls hidden, so the
-    // no-JS rendering is a readable stack of features rather than a dead
-    // widget. Only once we are sure we can drive it do we collapse it to one
-    // slide and reveal the controls.
-    var deck = document.querySelector('[data-deck]');
-    if (!deck) return;
-
-    var slides = deck.querySelectorAll('[data-deck-slide]');
-    var controls = deck.querySelector('[data-deck-controls]');
-    var dotHost = deck.querySelector('[data-deck-dots]');
-    if (slides.length < 2 || !controls || !dotHost) return;
-
-    var index = 0;
-    var dots = [];
-    var timer = null;
-
-    function show(next) {
-      index = (next + slides.length) % slides.length;
-      Array.prototype.forEach.call(slides, function (slide, i) {
-        slide.hidden = i !== index;
-      });
-      dots.forEach(function (dot, i) {
-        dot.setAttribute('aria-current', i === index ? 'true' : 'false');
-      });
-    }
-
-    Array.prototype.forEach.call(slides, function (slide, i) {
-      var dot = document.createElement('button');
-      dot.type = 'button';
-      dot.className = 'deck__dot';
-      dot.setAttribute('aria-label', 'Feature ' + (i + 1) + ' of ' + slides.length);
-      dot.addEventListener('click', function () {
-        stop();
-        show(i);
-      });
-      dotHost.appendChild(dot);
-      dots.push(dot);
-    });
-
-    deck.querySelector('[data-deck-prev]').addEventListener('click', function () {
-      stop();
-      show(index - 1);
-    });
-    deck.querySelector('[data-deck-next]').addEventListener('click', function () {
-      stop();
-      show(index + 1);
-    });
-
-    function stop() {
-      if (timer === null) return;
-      window.clearInterval(timer);
-      timer = null;
-    }
-
-    // Auto-advance is a hint that there is more than one panel, so it stops for
-    // good the moment someone steers the deck themselves — and never starts if
-    // the reader has asked for reduced motion, or is reading a slide.
-    var still = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)');
-    if (!(still && still.matches)) {
-      timer = window.setInterval(function () {
-        show(index + 1);
-      }, 7000);
-      deck.addEventListener('mouseenter', stop);
-      deck.addEventListener('focusin', stop);
-    }
-
-    deck.classList.add('is-ready');
-    controls.hidden = false;
-    show(0);
-  }
-
   /* ------------------------------------------------- landing model tabs */
 
   function initModelTabs() {
@@ -580,8 +506,7 @@
     // The table is fully rendered and every row visible before this runs; the
     // controls are hidden in the markup and only revealed here. So the no-JS
     // page is the whole matrix in source order, which is readable, and sorting
-    // and filtering are the upgrade. Same contract as initDeck() and
-    // initModelTabs().
+    // and filtering are the upgrade. Same contract as initModelTabs().
     var host = document.querySelector('[data-matrix]');
     if (!host) return;
 
@@ -738,6 +663,64 @@
     host.classList.add('is-ready');
   }
 
+  /* -------------------------------------------------------- hero spec strip */
+
+  /* The four figures under the hero schematic, with the accent walking between
+     them on its own. This is the one piece of the stat carousel that was worth
+     keeping, separated from everything that made the carousel bad: all four
+     facts are on screen the whole time, nothing is behind a control, and there
+     is no state a reader can be in the middle of. Ignoring it costs nothing,
+     which is why it is allowed to move without being asked to.
+
+     THE DIM STATE IS OWNED BY THIS FUNCTION. `.specs` renders every figure at
+     full accent; `is-ready` is what dims the unlit three, and it is added here
+     and only here, after the guards. So every early return below leaves a
+     static, fully legible strip rather than three cells stuck grey waiting for
+     a timer that is never going to fire. */
+  function initSpecStrip() {
+    var strip = document.querySelector('[data-specs]');
+    if (!strip) return;
+
+    var items = strip.querySelectorAll('[data-spec]');
+    // Two is the minimum for "move somewhere else"; one would spin forever in
+    // the loop below looking for a different index.
+    if (items.length < 2) return;
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+
+    strip.classList.add('is-ready');
+
+    var current = -1;
+    var timer = null;
+
+    function step() {
+      var next = current;
+      // Never the same cell twice running: a repeat looks like the animation
+      // has stalled, which is worse than it being slow.
+      while (next === current) next = Math.floor(Math.random() * items.length);
+      if (current >= 0) items[current].classList.remove('is-lit');
+      items[next].classList.add('is-lit');
+      current = next;
+      // Uneven dwell, 1.5s to 2.9s. A fixed interval is the thing that makes
+      // an ambient animation read as a widget counting down; the jitter is the
+      // whole difference between "alive" and "on a timer".
+      timer = window.setTimeout(step, 1500 + Math.random() * 1400);
+    }
+
+    // A backgrounded tab should not hold a repeating timer open for an
+    // animation nobody can see. Whatever was lit stays lit while hidden, so
+    // the strip is never caught mid-transition on return.
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden) {
+        window.clearTimeout(timer);
+        timer = null;
+      } else if (!timer) {
+        step();
+      }
+    });
+
+    step();
+  }
+
   /* ----------------------------------------------------------------- boot */
 
   function boot() {
@@ -748,9 +731,9 @@
     initToc();
     initSearch();
     initTableScroll();
-    initDeck();
     initModelTabs();
     initModelMatrix();
+    initSpecStrip();
   }
 
   if (document.readyState === 'loading') {

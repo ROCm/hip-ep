@@ -47,6 +47,21 @@
 extern "C" {
 #endif
 
+/* Experimental attention-only Ring entries. Q/output: [1,Q,24,256];
+ * K/V: [1,4,capacity,256] FP16, already appended by the runtime. */
+// Validated attention-core bounds; full-model capacity depends on available memory.
+#define HIP_EP_RING_MAX_QUERY_LENGTH 262144
+#define HIP_EP_RING_MAX_KV_LENGTH 262272
+HIP_KERNEL_API int hip_gqa_ring_device_supported(void);
+HIP_KERNEL_API size_t hip_gqa_ring_workspace(int query_length,
+                                             int total_length);
+HIP_KERNEL_API int hip_gqa_ring_attention(void *stream, const void *query,
+                                          const void *key, const void *value,
+                                          void *output, int query_length,
+                                          int past_length, int capacity,
+                                          void *workspace,
+                                          size_t workspace_bytes);
+
 /* =========================================================================
  * Data Type Enum
  * =========================================================================
@@ -332,6 +347,84 @@ HIP_KERNEL_API int hip_qconv(
     float inv_output_scale, int64_t output_zp);
 
 /* =========================================================================
+ * QLinearConv (native ONNX, 8-bit grouped NCHW)
+ * =========================================================================
+ *
+ * y = saturate(round((conv(x - x_zp, w - w_zp) + B) * x_scale * w_scale
+ *                    / y_scale) + y_zp)
+ *
+ * Distinct from hip_qconv, which is the W4A16 1x1 fusion. Dtypes are
+ * HIP_DTYPE_INT8 or HIP_DTYPE_UINT8. weight_scale_count / weight_zp_count are
+ * 1 (per-tensor) or out_channels (per output channel). bias is nullable int32.
+ * Returns 0 on success.
+ */
+HIP_KERNEL_API int hip_qlinear_conv(
+    void* stream,
+    const void* input,
+    const void* input_scale,
+    const void* input_zero_point,
+    const void* weights,
+    const void* weight_scale,
+    const void* weight_zero_point,
+    const void* output_scale,
+    const void* output_zero_point,
+    const void* bias,
+    void* output,
+    int64_t batch,
+    int64_t in_channels,
+    int64_t out_channels,
+    int64_t height_in,
+    int64_t width_in,
+    int64_t height_out,
+    int64_t width_out,
+    int64_t kernel_h,
+    int64_t kernel_w,
+    int64_t stride_h,
+    int64_t stride_w,
+    int64_t pad_h,
+    int64_t pad_w,
+    int64_t dilation_h,
+    int64_t dilation_w,
+    int64_t group,
+    int input_dtype,
+    int weight_dtype,
+    int output_dtype,
+    int64_t weight_scale_count,
+    int64_t weight_zp_count);
+
+/* =========================================================================
+ * QLinearMatMul (native ONNX, rank-2 8-bit)
+ * =========================================================================
+ *
+ * y = saturate(round(matmul(a - a_zp, b - b_zp) * a_scale * b_scale
+ *                    / y_scale) + y_zp)
+ *
+ * a is [M, K], b is [K, N], y is [M, N]. Distinct from hip_qmatmul, which is
+ * the QDQ fusion. Dtypes are HIP_DTYPE_INT8 or HIP_DTYPE_UINT8. A's and Y's
+ * scales and zero points are per-tensor. b_scale_count and b_zp_count are 1,
+ * or N for one value per output column. Returns 0 on success.
+ */
+HIP_KERNEL_API int hip_qlinear_matmul(
+    void* stream,
+    const void* a,
+    const void* a_scale,
+    const void* a_zero_point,
+    const void* b,
+    const void* b_scale,
+    const void* b_zero_point,
+    const void* y_scale,
+    const void* y_zero_point,
+    void* y,
+    int64_t m,
+    int64_t k,
+    int64_t n,
+    int a_dtype,
+    int b_dtype,
+    int y_dtype,
+    int64_t b_scale_count,
+    int64_t b_zp_count);
+
+/* =========================================================================
  * Elementwise Unary (Neg / Sign / Cos / Sin / Not)
  * =========================================================================
  *
@@ -435,6 +528,16 @@ HIP_KERNEL_API int hip_elementwise_not(
     const void* input,
     void* output,
     int64_t num_elements);
+
+// Element-wise IsNaN. input is the floating-point buffer selected by
+// hip_dtype (f16/bf16/f32/f64). output is one byte per element, 1 where
+// the input is NaN and 0 otherwise.
+HIP_KERNEL_API int hip_isnan(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
 
 /* =========================================================================
  * Elementwise Binary (Mul / Add / Min / Max / Div / Mod / Equal / Less)
@@ -541,6 +644,10 @@ HIP_KERNEL_API int hip_elementwise_binary_bcast(
  * rejected by the host wrapper.
  *
  * Output type is always uint8 (1-byte bool).
+ *
+ * Supported hip_dtype: HIP_DTYPE_FLOAT16, HIP_DTYPE_FLOAT32, HIP_DTYPE_INT8,
+ * HIP_DTYPE_UINT8, HIP_DTYPE_INT16, HIP_DTYPE_UINT16, HIP_DTYPE_INT32,
+ * HIP_DTYPE_INT64.
  */
 HIP_KERNEL_API int hip_elementwise_equal(
     void* stream,
@@ -690,6 +797,44 @@ HIP_KERNEL_API int hip_leaky_relu(
     int hip_dtype,
     double alpha);
 
+/* PRelu: y = x >= 0 ? x : slope * x. slope broadcasts onto x. */
+HIP_KERNEL_API int hip_prelu(void *stream, const void *x, const void *slope,
+                             void *output, const int64_t *x_shape,
+                             int64_t x_rank, const int64_t *slope_shape,
+                             int64_t slope_rank, const int64_t *out_shape,
+                             int64_t out_rank, int hip_dtype);
+
+/* Keep the upper or lower triangle of each rows x cols matrix packed in a
+ * contiguous row-major buffer. upper != 0 keeps col - row >= diagonal.
+ * input_elements is num_elements, or 1 to broadcast input[0]. */
+HIP_KERNEL_API int hip_trilu(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t input_elements,
+    int64_t num_elements,
+    int64_t rows,
+    int64_t cols,
+    int64_t diagonal,
+    int64_t upper,
+    int hip_dtype);
+
+/* =========================================================================
+ * Local Response Normalization
+ * =========================================================================
+ *
+ * ONNX LRN across channels. n is the batch, channels is axis 1, and spatial
+ * is the product of the remaining dimensions. size is the channel window.
+ * Supports HIP_DTYPE_FLOAT16, HIP_DTYPE_FLOAT32, HIP_DTYPE_BFLOAT16, and
+ * HIP_DTYPE_FLOAT64.
+ *
+ * Returns: 0 on success, non-zero hipError_t on failure.
+ */
+HIP_KERNEL_API int hip_lrn(void *stream, const void *input, void *output,
+                           int64_t n, int64_t channels, int64_t spatial,
+                           int64_t size, double alpha, double beta, double bias,
+                           int hip_dtype);
+
 /* =========================================================================
  * Swish Activation
  * =========================================================================
@@ -702,6 +847,34 @@ HIP_KERNEL_API int hip_leaky_relu(
  */
 HIP_KERNEL_API int hip_swish(void *stream, const void *input, void *output,
                              int64_t num_elements, int hip_dtype, double alpha);
+
+/* =========================================================================
+ * Element-wise power
+ * =========================================================================
+ *
+ * y = pow(x, exponent), with exponent a host scalar. Supports
+ * HIP_DTYPE_FLOAT16, HIP_DTYPE_FLOAT32, HIP_DTYPE_BFLOAT16, and
+ * HIP_DTYPE_FLOAT64. A negative base with a non-integer exponent yields NaN.
+ *
+ * Returns: 0 on success (hipSuccess), non-zero hipError_t on failure.
+ */
+HIP_KERNEL_API int hip_pow(void *stream, const void *input, void *output,
+                           int64_t num_elements, int hip_dtype,
+                           double exponent);
+
+/* =========================================================================
+ * Fused SwiGLU Activation
+ * =========================================================================
+ *
+ * Applies output = (gate * sigmoid(gate)) * up element-wise.
+ * Supports HIP_DTYPE_FLOAT16, HIP_DTYPE_FLOAT32, HIP_DTYPE_BFLOAT16, and
+ * HIP_DTYPE_FLOAT64.
+ *
+ * Returns: 0 on success (hipSuccess), non-zero hipError_t on failure.
+ */
+HIP_KERNEL_API int hip_swiglu(void *stream, const void *gate, const void *up,
+                              void *output, int64_t num_elements,
+                              int hip_dtype);
 
 /* =========================================================================
  * Softplus activation
@@ -789,6 +962,28 @@ HIP_KERNEL_API int hip_rope_forward(
     int64_t interleaved,
     int64_t element_size_bytes,
     int64_t is_bnsh);
+
+// com.microsoft MRotaryEmbedding (hip.mrotary_embedding). A column whose
+// position is outside [0, max_position) is copied unrotated.
+HIP_KERNEL_API int hip_mrope_forward(
+    void* stream,
+    const void* input,
+    const void* position_ids,
+    const void* cos_cache,
+    const void* sin_cache,
+    void* output,
+    int64_t batch_size,
+    int64_t seq_len,
+    int64_t num_heads,
+    int64_t head_dim,
+    int64_t rotary_dim,
+    int64_t max_position,
+    int64_t section_t,
+    int64_t section_h,
+    int64_t section_w,
+    int64_t mrope_layout,
+    float scale,
+    int64_t element_size_bytes);
 
 /* =========================================================================
  * GQA Device Kernel Launchers
@@ -1052,29 +1247,18 @@ HIP_KERNEL_API int hip_gqa_fused_decode(
     void* O, int B, int H, int G, int d, int skv, int max_seq,
     float scale, const void* seqlens_k);
 
-/* Optimized fused GQA prefill (sq > 1, d in {64,128}, fp16, causal, GQA) --
- * Flash-Attention-2 with WMMA tile GEMMs and intra-wave online softmax. These
- * reproduce the gqa_compare TTFT-winning kernels (OPTIMIZATION.md ch.13):
- *   v5: warp-private / register-resident (best at d == 64).
- *   v7: M-register-blocked, global-streamed K (best at d == 128).
- * Each self-tunes its launch config on the first call per (d,sq,skv,Hq,G)
- * shape and caches the winner process-wide. Layout: Q [B,sq,Hq,d];
- * K/V cache [B,G,max_seq,d] (post-RoPE, post-append). Returns 0 on success,
- * -1 if d is unsupported. No seqlens_k / sliding-window / head-sink / smooth
- * softmax / softcap -- caller must gate those out (use the decomposed path). */
-HIP_KERNEL_API int hip_gqa_flash_prefill_v5_v2(
-    void* stream, const void* Q, const void* Kcache, const void* Vcache,
-    void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
-    int past_len, float scale);
-
-HIP_KERNEL_API int hip_gqa_flash_prefill_v7_v2(
-    void* stream, const void* Q, const void* Kcache, const void* Vcache,
-    void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
-    int past_len, float scale);
-
-/* Unified fused flash-prefill entry: picks v5 (d==64) or v7 (d==128) internally
- * so the runtime calls one symbol for any eligible prefill. Same layout /
- * constraints as v5/v7 above. Returns 0 on success, -1 if d is unsupported. */
+/* Optimized fused GQA prefill (sq > 1, d in {64,96,128,256}, fp16, causal, GQA) --
+ * Flash-Attention-2 with WMMA tile GEMMs and an in-register online softmax
+ * over transposed scores, each staged K/V tile shared by several query heads
+ * of one KV group:
+ *   v6x: d == 64, 96 and 128; a block is heads x Q subtiles (4 or 8 waves).
+ *   v8x: d == 256; a block is heads x waves that split the head dim.
+ * The unified entry picks the kernel by head dim, self-tunes the launch config
+ * on the first call per (d,sq,skv bucket,Hq,G) shape and caches the winner
+ * process-wide. Layout: Q [B,sq,Hq,d]; K/V cache [B,G,max_seq,d] (post-RoPE,
+ * post-append). Returns 0 on success, -1 if d is unsupported. No seqlens_k /
+ * sliding-window / head-sink / smooth softmax / softcap -- caller must gate
+ * those out (use hip_gqa_flash_prefill below or the decomposed path). */
 HIP_KERNEL_API int hip_gqa_flash_prefill_v2(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
     void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
@@ -1094,26 +1278,27 @@ HIP_KERNEL_API int hip_gqa_flash_prefill_v2(
  *                       decomposed path when head_sink is null. head_sink takes
  *                       precedence when both are supplied.
  *
- * Sinks and windows are implemented by the v5 kernel, i.e. at d == 64 only.
- * Returns 0 on success and -1 when the request cannot be served exactly (a sink
- * or a window with d != 64), so the caller falls back to the decomposed path
- * instead of silently dropping either. A request with neither is forwarded to
- * v2 and keeps v2's head-dim coverage. */
+ * Sinks are implemented at d == 64 and d == 96, and windows at d == 64, 96
+ * and 128 (all by v6x). Returns 0 on success and -1 when the request cannot
+ * be served exactly (a sink with d == 128 or 256, a window with d == 256), so
+ * the caller falls back to the decomposed path instead of silently dropping
+ * either. A request with neither keeps v2's head-dim coverage. */
 HIP_KERNEL_API int hip_gqa_flash_prefill(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
     void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
     int past_len, float scale, int local_window_size, const void* head_sink,
     int num_heads, int smooth_softmax);
 
-/* Lookup-only v3 variant. The final five fields are explicit launch
- * parameters for v5/v7/v8 respectively; unused fields are zero. This entry
- * validates the selected tuple and never invokes an online autotuner. */
+/* Lookup-only v3 variant. The final five fields are the explicit launch
+ * config (hipdnn_ep::GqaPrefillConfig): v6x uses hb / qw / mt / bkv, v8x uses
+ * nd / hb / bkv; unused fields are zero. This entry validates the tuple against
+ * the configs built for the shape and never invokes an online autotuner. */
 HIP_KERNEL_API int hip_gqa_flash_prefill_v3_configured(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
     void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
     int past_len, float scale, int local_window_size, const void* head_sink,
     int num_heads, int smooth_softmax,
-    int m_tiles, int bkv, int nw, int mt, int nd);
+    int hb, int qw, int mt, int bkv, int nd);
 
 /* NB: prefill is compute-bound, so there is deliberately NO separate int8
  * prefill kernel. The runtime (real/gqa.cpp) dequantizes the int8 KV cache to an
@@ -1135,10 +1320,12 @@ HIP_KERNEL_API int hip_mha_flash_prefill(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
     void* O, int B, int N, int sq, int skv, int d, int max_seq, float scale);
 
-/* FA-2 split-K GQA decode (sq == 1, d in {64, 128}, HPG=H/G==4):
+/* FA-2 split-K GQA decode (sq == 1, d in {64, 96, 128, 256},
+ * HPG=H/G in {1,2,3,4,5,6,8,16}):
  * GQA-aware kernel that loads K/V tiles into LDS once and reuses them
- * across the 4 query heads of each KV group, then a second kernel
- * merges K_SPLITS partial (m, l, O) per query head.
+ * across the query heads of each KV group, then a second kernel
+ * merges K_SPLITS partial (m, l, O) per query head. fp16 d == 96 runs a
+ * dedicated split kernel that streams K/V through registers instead.
  *
  * Depth-gated alternative to hip_gqa_fused_decode for skv >= ~256 where
  * Llama-3.x family shows large bandwidth headroom over the existing
@@ -1298,11 +1485,35 @@ HIP_KERNEL_API int hip_gather_elements(
     int element_size_bytes,
     int indices_element_size_bytes);
 
+/* Scratch hip_top_k wants for this shape, or 0 when it needs none (only the
+ * chunked two-pass path for long last-axis rows with 2 <= k <= 32 does). With
+ * a smaller or null workspace those rows take the one-pass kernel. */
+HIP_KERNEL_API size_t hip_top_k_workspace_bytes(int64_t axis, int64_t rank,
+                                                const int64_t* x_shape,
+                                                int64_t k);
+
 HIP_KERNEL_API int hip_top_k(void* stream, const void* data, void* values,
                              void* indices, int64_t axis, int64_t largest,
                              int64_t sorted, int64_t rank,
                              const int64_t* x_shape, int64_t k,
-                             int element_size_bytes);
+                             int element_size_bytes, void* workspace,
+                             size_t workspace_bytes);
+
+// Fill `output` with Normal(mean, scale) samples. `shape` has `rank` dims
+// (rank 0 is one element). `seed` selects the counter-hash generator.
+// `hip_dtype` is f16, bf16, f32, or f64.
+HIP_KERNEL_API int hip_random_normal_like(void* stream, void* output,
+                                          int64_t rank, const int64_t* shape,
+                                          float mean, float scale,
+                                          uint64_t seed, int hip_dtype);
+
+// Index of the maximum along `axis`. `data_shape` is the input shape (dynamic
+// dims included). Indices are i64. `hip_dtype` is hip_dtype_t so i32 is not
+// compared as float. Output is one index per slice, contiguous.
+HIP_KERNEL_API int hip_arg_max(void* stream, const void* data, void* indices,
+                               int64_t axis, int64_t select_last_index,
+                               int64_t rank, const int64_t* data_shape,
+                               int hip_dtype);
 
 HIP_KERNEL_API int hip_scatter_elements(
     void* stream,
@@ -1352,6 +1563,28 @@ HIP_KERNEL_API int hip_one_hot(
     int64_t depth_scalar,
     int element_size_bytes,
     int indices_element_size_bytes);
+
+/* com.microsoft NGramHashMapping. T = int32 / int64 (element_size_bytes 4 /
+ * 8) for every pointer except segment_ids. past_ids, head_offsets,
+ * eos_token_id, segment_ids and present_ids may be null. */
+HIP_KERNEL_API int hip_ngram_hash_mapping(
+    void* stream,
+    const void* input_ids,
+    const void* multipliers,
+    const void* vocab_sizes,
+    const void* past_ids,
+    const void* head_offsets,
+    const void* eos_token_id,
+    const int32_t* segment_ids,
+    void* hash_ids,
+    void* present_ids,
+    int64_t batch,
+    int64_t seq_len,
+    int64_t max_ngram_size,
+    int64_t n_head_per_ngram,
+    int64_t pad_id,
+    int64_t reset_on_eos,
+    int element_size_bytes);
 
 /* =========================================================================
  * ReduceSum (Parallel Sum Reduction)
@@ -1469,7 +1702,8 @@ HIP_KERNEL_API int hip_reduce_l2(
  * (the lowering does this).
  *
  * Supported hip_dtypes: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
- * HIP_DTYPE_BFLOAT16, HIP_DTYPE_FLOAT64.
+ * HIP_DTYPE_BFLOAT16, HIP_DTYPE_FLOAT64 for every mode. HIP_DTYPE_INT8 and
+ * HIP_DTYPE_UINT8 are MaxPool only (integer compare, no float cast).
  * Returns: 0 on success, non-zero on failure.
  */
 HIP_KERNEL_API int hip_pool(
@@ -1497,15 +1731,17 @@ HIP_KERNEL_API int hip_pool(
  *
  * Resamples the trailing spatial axes of an `(N, C, D_1, ..., D_k)` input
  * onto an `(N, C, O_1, ..., O_k)` output grid.  Per-axis scale is computed
- * inside the kernel as `scale = in_dim / out_dim`.  The (N, C) prefix is
- * pass-through.
+ * inside the kernel as `scale = in_dim / out_dim` (hip_resize_scaled below
+ * takes the ONNX scales instead).  The (N, C) prefix is pass-through.
  *
  *  mode:               0 = nearest, 1 = linear (N-linear)
- *  coord_transform:    0 = half_pixel, 1 = asymmetric, 2 = align_corners
+ *  coord_transform:    0 = half_pixel, 1 = asymmetric, 2 = align_corners,
+ *                      3 = pytorch_half_pixel
  *  nearest_mode:       0 = round_prefer_floor (only used when mode=nearest)
  *
  * Supported hip_dtypes: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
- * HIP_DTYPE_BFLOAT16, HIP_DTYPE_FLOAT64.
+ * HIP_DTYPE_BFLOAT16, HIP_DTYPE_FLOAT64 for every mode. HIP_DTYPE_INT8 and
+ * HIP_DTYPE_UINT8 are nearest only (index copy, no interpolation).
  * Returns: 0 on success, non-zero on failure.
  */
 HIP_KERNEL_API int hip_resize(
@@ -1520,6 +1756,25 @@ HIP_KERNEL_API int hip_resize(
     int mode,
     int coord_transform,
     int nearest_mode);
+
+/* hip_resize, but window axis i samples with ONNX scale `scale<i>`
+ * (output / input) when it is > 0.  ONNX uses the supplied scale, which
+ * differs from out_dim / in_dim when floor(in_dim * scale) rounds.
+ * align_corners ignores the scales.
+ */
+HIP_KERNEL_API int hip_resize_scaled(
+    void* stream,
+    const void* input,
+    void* output,
+    int hip_dtype,
+    int spatial_rank,
+    int64_t N, int64_t C,
+    int64_t in_d0, int64_t in_d1, int64_t in_d2,
+    int64_t out_d0, int64_t out_d1, int64_t out_d2,
+    int mode,
+    int coord_transform,
+    int nearest_mode,
+    float scale0, float scale1, float scale2);
 
 /* =========================================================================
  * GridSample (ONNX 4-D NCHW)
@@ -1600,8 +1855,8 @@ HIP_KERNEL_API int hip_global_pool(
  *                     on the FP path (matches ORT _Min<float>).
  * - hip_reduce_prod : Mul op, init = 1.
  *
- * Supported hip_dtypes: HIP_DTYPE_INT32, HIP_DTYPE_INT64, HIP_DTYPE_FLOAT16
- * (FP16 accumulates in float, narrows on write).
+ * Supported hip_dtypes: HIP_DTYPE_INT32, HIP_DTYPE_INT64, HIP_DTYPE_FLOAT32,
+ * HIP_DTYPE_FLOAT16 (FP16 accumulates in float, narrows on write).
  */
 /* `inner_size`: see hip_reduce_sum (strided non-trailing-axis support). */
 HIP_KERNEL_API int hip_reduce_max(
@@ -1914,6 +2169,57 @@ HIP_KERNEL_API int hip_instance_norm(
     int hip_dtype);
 
 /* =========================================================================
+ * BatchNormalization (inference)
+ * =========================================================================
+ *
+ *   y = scale[c] * (x - mean[c]) * rsqrt(var[c] + epsilon) + bias[c]
+ *
+ * Mean and variance are the supplied per-channel vectors. Input is
+ * (N, C, spatial) in row-major layout. Scale, bias, mean, and variance
+ * are length C.
+ *
+ * `hip_dtype`: FLOAT16, BFLOAT16, FLOAT32, or FLOAT64.
+ */
+HIP_KERNEL_API int hip_batch_norm(
+    void* stream,
+    const void* input,
+    const void* scale,
+    const void* bias,
+    const void* mean,
+    const void* variance,
+    void* output,
+    int64_t n,
+    int64_t c,
+    int64_t spatial,
+    float epsilon,
+    int hip_dtype);
+
+/* =========================================================================
+ * GroupNorm (com.microsoft)
+ * =========================================================================
+ *
+ *   y = scale[c] * (x - mean) * rsqrt(var + epsilon) + bias[c]
+ *
+ * Mean/var over each (N, group). channels_last 0 is NCHW, 1 is NHWC.
+ * activation 1 applies SiLU after the affine transform.
+ * `hip_dtype`: FLOAT16, BFLOAT16, FLOAT32, or FLOAT64.
+ */
+HIP_KERNEL_API int hip_group_norm(
+    void* stream,
+    const void* input,
+    const void* scale,
+    const void* bias,
+    void* output,
+    int64_t n,
+    int64_t c,
+    int64_t spatial,
+    int64_t groups,
+    int channels_last,
+    int activation,
+    float epsilon,
+    int hip_dtype);
+
+/* =========================================================================
  * RMS Normalization (ONNX RMSNormalization / SimplifiedLayerNormalization)
  * =========================================================================
  *
@@ -1947,6 +2253,107 @@ HIP_KERNEL_API int hip_rms_norm(
     int hip_dtype);
 
 /* =========================================================================
+ * Gated RMS Normalization (com.microsoft GatedRMSNorm)
+ * =========================================================================
+ *
+ *   y = x * rsqrt(mean(x^2) + epsilon) * scale * act(gate)
+ *
+ * input / gate / output are [outer, norm_size]; scale is [norm_size].
+ * `activation`: 0 = sigmoid(z), 1 = SiLU z * sigmoid(z). FP32 math, one
+ * rounding to the I/O type. `hip_dtype`: FLOAT16 or FLOAT32.
+ */
+HIP_KERNEL_API int hip_gated_rms_norm(
+    void* stream,
+    const void* input,
+    const void* scale,
+    const void* gate,
+    void* output,
+    int64_t outer,
+    int64_t norm_size,
+    int activation,
+    float epsilon,
+    int hip_dtype);
+
+/* =========================================================================
+ * Engram gate (com.microsoft EngramGate)
+ * =========================================================================
+ *
+ * key / query / output / normed: [rows, hidden] with rows = B * S * hc;
+ * value: [rows / hc, hidden]; scales: [hc, hidden]. Row r uses scale row
+ * r % hc and value row r / hc. conv_scale and normed may both be null.
+ * `hip_dtype`: FLOAT16 or FLOAT32.
+ */
+HIP_KERNEL_API int hip_engram_gate(
+    void* stream,
+    const void* key,
+    const void* query,
+    const void* value,
+    const void* key_scale,
+    const void* query_scale,
+    const void* conv_scale,
+    void* output,
+    void* normed,
+    int64_t rows,
+    int64_t hc,
+    int64_t hidden,
+    float epsilon,
+    int hip_dtype);
+
+/* =========================================================================
+ * Hyper-connection mix (com.microsoft HyperConnectionPreMix / PostMix)
+ * =========================================================================
+ *
+ * streams are [rows, branches, hidden]. feature_gate 0 indexes the gate as
+ * [rows, branches]; 1 indexes it as [rows, branches, hidden]. Pre-mix
+ * multiplies by reduction_scale. Post-mix adds post_mix * block_output;
+ * stream_mix null keeps the original stream. Pre-mix and post-mix use FP32
+ * math and one rounding. hip_dtype: FLOAT16 or FLOAT32.
+ */
+HIP_KERNEL_API int hip_hyper_connection_pre_mix(
+    void* stream,
+    const void* streams,
+    const void* pre_mix,
+    void* output,
+    int64_t rows,
+    int64_t branches,
+    int64_t hidden,
+    int feature_gate,
+    int gate_sigmoid,
+    float reduction_scale,
+    int hip_dtype);
+
+HIP_KERNEL_API int hip_hyper_connection_post_mix(
+    void* stream,
+    const void* streams,
+    const void* block_output,
+    const void* post_mix,
+    const void* stream_mix,
+    void* output,
+    int64_t rows,
+    int64_t branches,
+    int64_t hidden,
+    int feature_gate,
+    int hip_dtype);
+
+/* Gate chain and residual each round to the element type before the norm. */
+HIP_KERNEL_API int hip_hyper_connection_post_mix_norm(
+    void* stream,
+    const void* streams,
+    const void* block_output,
+    const void* gate,
+    const void* stream_mix,
+    const void* scale,
+    void* residual,
+    void* normed,
+    int64_t rows,
+    int64_t branches,
+    int64_t hidden,
+    int feature_gate,
+    int gate_activation,
+    float epsilon,
+    int hip_dtype);
+
+/* =========================================================================
  * Skip RMS Normalization (com.microsoft SkipSimplifiedLayerNormalization)
  * =========================================================================
  *
@@ -1975,6 +2382,29 @@ HIP_KERNEL_API int hip_skip_rms_norm(
     int64_t norm_size,
     float epsilon,
     int hip_dtype);
+
+/* hip_skip_rms_norm with a dtype per tensor (bias shares skip's). Besides the
+ * all-equal case, which forwards to hip_skip_rms_norm, the supported
+ * combination is input FLOAT32, skip FLOAT16, gamma FLOAT16, output FLOAT16,
+ * sum FLOAT32: an fp32 residual stream in an fp16 model, with the Casts on
+ * skip, gamma and output folded in. Pass sum_dtype = input_dtype when
+ * input_skip_bias_sum is null. Returns -1 for any other combination. */
+HIP_KERNEL_API int hip_skip_rms_norm_mixed(
+    void* stream,
+    const void* input,
+    const void* skip,
+    const void* gamma,
+    const void* bias,              // optional
+    void* output,
+    void* input_skip_bias_sum,     // optional
+    int64_t outer,
+    int64_t norm_size,
+    float epsilon,
+    int input_dtype,
+    int skip_dtype,
+    int gamma_dtype,
+    int output_dtype,
+    int sum_dtype);
 
 /* =========================================================================
  * Range (1-D sequence generation)
@@ -2144,6 +2574,18 @@ HIP_KERNEL_API int hip_matmul_nbits(
     const void* pre_unpacked_zp_u8,
     const void* pre_unpacked_zp_fp16);
 
+// Bitsandbytes FP4/NF4 dequant. Writes row-major [N, K] f32.
+// quant_type 0 is FP4 and 1 is NF4. Even indices read the high nibble.
+HIP_KERNEL_API int hip_dequant_bnb4(
+    void* stream,
+    const void* packed,
+    const void* absmax,
+    void* output,
+    int64_t n,
+    int64_t k,
+    int64_t block_size,
+    int64_t quant_type);
+
 /* Hands the session's matmul_autotune_mode option ("lookup" resolves the
  * offline LUT, "online" always sweeps; null when absent) to the autotune.
  * Precedence is HIPDNN_MATMUL_AUTOTUNE_MODE > provider_mode > lookup. The mode
@@ -2179,6 +2621,47 @@ HIP_KERNEL_API int hip_matmul_nbits_grouped_wmma(
     int64_t bits,
     int64_t block_size,
     int64_t element_size_bytes);
+
+/* int4 x fp16 GEMM over a ragged batch of expert row slices (MoE prefill),
+ * fp16 activations and fp32 accumulation. Streams each weight once straight
+ * into WMMA fragments instead of staging it through LDS, which is what bounds
+ * the general WMMA tile at small M. One launch covers every expert, driven by
+ * a device-side row-tile list so nothing is read back.
+ *   A / output         : fp16 rows packed back-to-back in expert order; expert
+ *                        e's rows start at expert_row_offsets[e] (int32,
+ *                        device). A is [rows, K], output [rows, N].
+ *   B, scales          : expert-major MatMulNBits layout
+ *                        ([E, N, ceil(K/2)] packed, fp16 [E, N, ceil(K/bs)])
+ *   zero_points        : nullptr for symmetric (zp = 8); with zp_packed_u4 != 0
+ *                        the packed uint8 tensor [E, N, ceil(ceil(K/bs)/2)],
+ *                        otherwise fp16 [E, N, ceil(K/bs)]. Both give
+ *                        bit-identical results.
+ *   bias               : fp16 [E, N] or nullptr
+ *   row_tiles          : int32 [max_row_tiles][3] = (expert, row0, rows) with
+ *                        rows <= tile_rows (hip_qmoe_build_row_tiles)
+ *   num_row_tiles      : int32 device scalar, valid entries of row_tiles
+ *   max_row_tiles      : host-side upper bound on *num_row_tiles (grid size)
+ *   tile_rows          : tile height the list was built with; cfg < 0 picks
+ *                        the default config for it, and a cfg whose row tile
+ *                        is shorter returns -1.
+ * Requires wave32 WMMA, bits == 4, fp16, K % 32 == 0, power-of-two
+ * block_size >= 32 and K small enough for one workgroup per column tile
+ * (default configs: K <= 9216 for tile_rows <= 32, K <= 5120 above); returns
+ * -1 otherwise. */
+HIP_KERNEL_API int hip_matmul_nbits_wmma_smallm_grouped(
+    void* stream, int cfg,
+    const void* A, const void* B, const void* scales, const void* zero_points,
+    int zp_packed_u4, const void* bias, const void* expert_row_offsets,
+    const void* row_tiles, const void* num_row_tiles, void* output,
+    int64_t max_row_tiles, int64_t tile_rows, int64_t N, int64_t K,
+    int64_t bits, int64_t block_size, int64_t element_size_bytes);
+
+/* 1 when hip_matmul_nbits_wmma_smallm_grouped accepts this shape and tile
+ * height (same cfg rule), else 0. Lets a caller commit to the device-side
+ * grouped flow before issuing any of it. */
+HIP_KERNEL_API int hip_matmul_nbits_wmma_smallm_grouped_supported(
+    int cfg, int64_t tile_rows, int64_t N, int64_t K, int64_t bits,
+    int64_t block_size, int64_t element_size_bytes);
 
 /* W4A8 integer-dot-product (dp4a) GEMV for a single decode row (M==1).
  * Dynamically quantizes the fp16 activation row to per-group int8 (into
@@ -2296,9 +2779,12 @@ HIP_KERNEL_API int hip_matmul_nbits_u4_wmma_padrow(
  *   bits == 4 + is_signed_data == 0  -> uint4  (raw nibble in [0,15])
  *   bits == 8 + is_signed_data == 0  -> uint8  (raw byte  in [0,255])
  *   bits == 8 + is_signed_data == 1  -> int8   (signed byte in [-128,127])
+ *   is_float8_data == 1              -> float8 e4m3fn, dequantized as
+ *                                       decode * scale (zp not applied)
  *
  * scales       - one per (data block) along quantize_axis: same shape as
  *                data except dim quantize_axis is data.shape[qa]/block_size.
+ *                A dim of 1 on any other axis broadcasts along that axis.
  *                Type: T2 in {fp32, fp16, bf16}, matches output.
  * zero_points  - same logical shape as scales; same packing as data
  *                (sub-byte for bits==4). May be null; default zp is then
@@ -2332,8 +2818,15 @@ HIP_KERNEL_API int hip_gather_block_quantized(
     int quantize_axis,           // normalized
     int default_zp,              // applied when zero_points == null
     int is_signed_data,          // 1 if int4 / int8, 0 if uint4 / uint8
+    int is_float8_data,          // 1 if float8 e4m3fn
     int indices_is_int64,        // 1 = i64, 0 = i32
+    int compact_rows,            // see below
     int out_dtype);              // hip_dtype_t (FLOAT16 / FLOAT32 / BFLOAT16)
+
+/* compact_rows == 1 (gather_axis must be 0): `data` holds only the gathered
+ * rows, row k being the row of the k-th index in row-major `indices` order.
+ * `data_shape[0]` stays the full table extent, against which indices are
+ * range-checked; scales / zero_points are still addressed by the index. */
 
 /* =========================================================================
  * QuantizeLinear / DequantizeLinear
@@ -2430,10 +2923,14 @@ HIP_KERNEL_API int hip_dequantize_linear(
     int in_dtype,                // hip_dtype_t
     int scale_dtype,
     int out_dtype,
-    // Value width of input and zero_point: 8 or 16 to agree with in_dtype, or
-    // 4 for ONNX INT4/UINT4. At 4 in_dtype supplies only the signedness and
-    // both buffers hold ceil(numel/2) bytes, two values per byte, low nibble
-    // first, over the flattened row-major sequence. input_shape stays logical.
+    // Value width of input and zero_point: 8, 16, or 32 to agree with
+    // in_dtype, or 4 for ONNX INT4/UINT4. 32 is signed only and has no
+    // quantize counterpart, matching ONNX giving DequantizeLinear an int32
+    // input but QuantizeLinear no int32 output; it carries a conv or gemm bias
+    // quantized at input_scale * weight_scale. At 4 in_dtype supplies only the
+    // signedness and both buffers hold ceil(numel/2) bytes, two values per
+    // byte, low nibble first, over the flattened row-major sequence.
+    // input_shape stays logical.
     int in_bits);
 
 /* =========================================================================
@@ -2449,6 +2946,9 @@ HIP_KERNEL_API int hip_dequantize_linear(
 
 /* Top-k routing: find top-k experts per token from router_probs.
  *   router_probs   - GPU [num_tokens, num_experts]
+ *   router_weights - GPU [num_tokens, num_experts] or NULL. When set, the
+ *                    selected experts' weights are gathered from it instead
+ *                    of the softmax of router_probs.
  *   expert_indices - GPU [num_tokens, k] int32 (output)
  *   expert_weights - GPU [num_tokens, k] (output, same type as probs)
  *   normalize      - 1 to normalize selected weights (sum-to-one)
@@ -2456,6 +2956,7 @@ HIP_KERNEL_API int hip_dequantize_linear(
 HIP_KERNEL_API int hip_qmoe_topk_routing(
     void* stream,
     const void* router_probs,
+    const void* router_weights,
     void* expert_indices,
     void* expert_weights,
     int64_t num_tokens,
@@ -2576,10 +3077,24 @@ HIP_KERNEL_API int hip_qmoe_bucket_tokens_ragged(
     int64_t row_group_size,
     int64_t element_size_bytes);
 
-/* One-launch ragged W4A16 MatMulNBits over every row group/expert.
+/* Row tiles for hip_matmul_nbits_wmma_smallm_grouped, built on the device from
+ * the bucketed expert counts. Experts with 0 < count <= split_rows are cut into
+ * tiles of rows_small rows (tiles_small), larger ones into tiles of rows_big
+ * (tiles_big). Each tile is int32 (expert, row0, rows), in ascending expert
+ * order; num_small / num_big are int32 device scalars receiving the counts.
+ * Capacity the caller must provide: tiles_small holds at most
+ * sum over small experts of ceil(count / rows_small), tiles_big
+ * total_rows / rows_big + (number of experts above split_rows). */
+HIP_KERNEL_API int hip_qmoe_build_row_tiles(
+    void* stream, const void* expert_counts, int64_t num_experts,
+    int64_t split_rows, int64_t rows_small, int64_t rows_big, void* tiles_small,
+    void* num_small, void* tiles_big, void* num_big);
+
+/* One-launch ragged quantized MatMulNBits over every row group/expert.
  * input_row_ids may be null for already-sorted input rows; otherwise it maps
  * each sorted output row to a source input row (FC1 fused gather).
  * zero_points_u8 is already unpacked [E,N,ceil(K/block_size)] or null.
+ * block_size must be a power of two and at least 32.
  */
 HIP_KERNEL_API int hip_qmoe_ragged_matmul_nbits(
     void* stream,
@@ -2597,6 +3112,7 @@ HIP_KERNEL_API int hip_qmoe_ragged_matmul_nbits(
     int64_t num_experts,
     int64_t N,
     int64_t K,
+    int64_t bits,
     int64_t block_size,
     int64_t element_size_bytes);
 
@@ -2655,20 +3171,21 @@ HIP_KERNEL_API int hip_qmoe_reduce_sorted_pairs(
  *   input            - GPU [hidden]              fp16
  *   expert_indices   - GPU [k]                   int32 (from topk_routing)
  *   expert_weights   - GPU [k]                   fp16  (from topk_routing)
- *   fc1_weights      - GPU [E, 2*inter, K_pack]  uint8 (per-expert nibbles)
+ *   fc1_weights      - GPU [E, 2*inter, K_pack]  uint8
  *   fc1_scales       - GPU [E, 2*inter, n_blk]   fp16
- *   fc1_zero_points  - GPU [E, 2*inter, ceil(n_blk/2)] uint8 (packed nibbles)
+ *   fc1_zero_points  - GPU [E, 2*inter, packed blocks] uint8
  *   fc1_bias         - GPU [E, 2*inter] or null  fp16
  *   fc2_weights      - GPU [E, hidden, K_pack]   uint8
  *   fc2_scales       - GPU [E, hidden, n_blk]    fp16
- *   fc2_zero_points  - GPU [E, hidden, ceil(n_blk/2)] uint8
+ *   fc2_zero_points  - GPU [E, hidden, packed blocks] uint8
  *   fc2_bias         - GPU [E, hidden] or null   fp16
  *   slot_buf         - GPU [k, hidden]           fp16  (transient scratch)
  *   act_out          - GPU [k, inter]            fp16  (transient scratch)
  *   output           - GPU [hidden]              fp16  (final, weighted sum)
  *
  * Constraints: fp16 only (element_size_bytes == 2); hidden_size and
- * inter_size both multiples of 32; block_size > 0 and even.
+ * inter_size both multiples of 32; block_size is a power of two and at
+ * least 32.
  */
 HIP_KERNEL_API int hip_qmoe_decode_fused(
     void* stream,
@@ -2683,7 +3200,7 @@ HIP_KERNEL_API int hip_qmoe_decode_fused(
     void* act_out,
     void* output,
     int64_t hidden_size, int64_t inter_size,
-    int64_t k, int64_t block_size,
+    int64_t k, int64_t expert_weight_bits, int64_t block_size,
     float swiglu_alpha, float swiglu_beta, float swiglu_limit,
     int64_t element_size_bytes);
 
@@ -2691,6 +3208,9 @@ HIP_KERNEL_API int hip_qmoe_decode_fused(
 // HIPDNN_EP_MATMUL_DP4A). Additionally takes 4 scratch buffers: quantized
 // int8 activations + per-group scales for the fc1 input ([hidden]) and the
 // fc2 slot activations ([k, inter]). fp16 only; block_size a multiple of 32.
+// num_tokens > 1 serves a short burst (speculative verify) in the same
+// launches: input/output are [num_tokens, hidden], expert_indices/weights
+// [num_tokens, k], and every scratch buffer is num_tokens times larger.
 HIP_KERNEL_API int hip_qmoe_decode_fused_dp4a(
     void* stream,
     const void* input,
@@ -2708,7 +3228,7 @@ HIP_KERNEL_API int hip_qmoe_decode_fused_dp4a(
     int64_t hidden_size, int64_t inter_size,
     int64_t k, int64_t block_size,
     float swiglu_alpha, float swiglu_beta, float swiglu_limit,
-    int64_t element_size_bytes);
+    int64_t element_size_bytes, int64_t num_tokens);
 
 /* =========================================================================
  * com.amd QMoE Sub-Kernels (LatentMoE)
@@ -3016,6 +3536,36 @@ HIP_KERNEL_API int hip_linear_attention_decode(
     int64_t beta_per_head,
     int64_t type);
 
+// Short-burst linear attention: runs all seq_len time steps of the packed
+// [B, T, H*D] inputs in one launch with the state held in registers (fp32
+// between steps). Same parameters as hip_linear_attention_decode, but the
+// pointers are at time step 0 and the initial state is read from past_state
+// (null = zeros, may alias state), so no past->present copy is needed.
+// Returns 0 on success, 1 when the shape is not supported or
+// HIPDNN_EP_LA_COLS=0 (caller falls back), <0 on launch error.
+HIP_KERNEL_API int hip_linear_attention_burst(
+    void* stream,
+    const void* query,
+    const void* key,
+    const void* value,
+    const void* decay,
+    const void* beta,
+    const void* past_state,
+    void* state,
+    void* output,
+    int64_t B,
+    int64_t seq_len,
+    int64_t Hq,
+    int64_t Hkv,
+    int64_t Nk,
+    int64_t dk,
+    int64_t dv,
+    float scale,
+    int64_t update_rule,
+    int64_t decay_per_key_dim,
+    int64_t beta_per_head,
+    int64_t type);
+
 // Chunked-parallel gated/gated-delta prefill kernel (windowed launches,
 // processes the whole sequence). Returns >0 (=1) when it declines (caller must
 // fall back to the per-token decode loop); 0 on success; <0 on launch error.
@@ -3185,6 +3735,160 @@ HIP_KERNEL_API int hip_causal_conv_prefill_nlc(
     int64_t activation,
     int64_t element_size_bytes);
 
+// Channels-last activations AND state, with dilated taps: input and output are
+// [B, L, C], past_state and present_state are [B, S, C] with
+// S = (K-1) * dilation. Any seq_len >= 1. Over the virtual sequence
+// x = [past_state | input], output t is act(bias + sum_j w[c,j] * x[t + j*dilation])
+// and present_state is the last S positions of x, oldest first. past_state may
+// be null (zeros) and may alias present_state.
+HIP_KERNEL_API int hip_causal_conv_nlc_state(
+    void* stream,
+    const void* input,
+    const void* weight,
+    const void* bias,
+    const void* past_state,
+    void* output,
+    void* present_state,
+    int64_t batch_size,
+    int64_t channels,
+    int64_t seq_len,
+    int64_t kernel_size,
+    int64_t dilation,
+    int64_t activation,
+    int64_t element_size_bytes);
+
+// com.microsoft GatedDeltaNet with packed QKV, gate_activation=qwen,
+// beta_activation=sigmoid, qk_l2_norm=1, update_rule=gated_delta.
+//   qkv           [B, L, 2*Hqk*dk + Hv*dv]   T = fp16 / fp32 (element_size_bytes)
+//   decay, beta   [B, L, Hv]                 fp32, raw projections
+//   initial_state [B, Hv, dv, dk]            fp32, may alias final_state
+//   a_log, dt_bias [Hv]                      fp32
+//   output        [B, L, Hv, dv]             T
+//   final_state   [B, Hv, dv, dk]            fp32
+// dk must be 32, 64, 128 or 256 and Hv a multiple of Hqk.
+HIP_KERNEL_API int hip_gated_delta_net(
+    void* stream,
+    const void* qkv,
+    const float* decay,
+    const float* beta,
+    const float* initial_state,
+    const float* a_log,
+    const float* dt_bias,
+    void* output,
+    float* final_state,
+    int64_t batch,
+    int64_t seq_len,
+    int64_t num_heads_qk,
+    int64_t num_heads_v,
+    int64_t head_size_qk,
+    int64_t head_size_v,
+    float scale,
+    int element_size_bytes);
+
+/* Exact int32 matmul. A is [batch, M, K]. b_batch_stride is 0 when every
+ * batch reuses one [K, N] matrix and K*N when B is batch-contiguous.
+ * Accumulates in int64 and stores a wrapping int32. transA/transB are not
+ * supported. Returns 0 on success. */
+HIP_KERNEL_API int hip_matmul_i32(
+    void* stream,
+    const void* a,
+    const void* b,
+    void* c,
+    int64_t m,
+    int64_t n,
+    int64_t k,
+    int64_t batch,
+    int64_t b_batch_stride);
+
+// com.microsoft DynamicSparseAttention, attention_mode=selected_only over the
+// main cache, fp16, no rotary / qk-norm / sink.
+//   query            [B, S, N*D]
+//   key, value       [B, S, kvN*D]
+//   past_*, present_* [B, kvN, capacity, D]; past may alias present, otherwise
+//                    present is first filled from past
+//   selected_indices [B*S, max_selected] int32
+//   selected_counts  [B*S] int32, seqlens_k [B] int32
+//   output           [B, S, N*D]
+// D must be 128 or 256, N/kvN at most 16, all tensors 16-byte aligned.
+// workspace must hold hip_dynamic_sparse_attention_workspace_size() bytes.
+HIP_KERNEL_API size_t hip_dynamic_sparse_attention_workspace_size(
+    int64_t batch,
+    int64_t seq_len,
+    int64_t num_heads,
+    int64_t kv_num_heads,
+    int64_t head_size,
+    int64_t max_selected);
+
+HIP_KERNEL_API int hip_dynamic_sparse_attention(
+    void* stream,
+    const void* query,
+    const void* key,
+    const void* value,
+    const void* past_key,
+    const void* past_value,
+    const int32_t* selected_indices,
+    const int32_t* selected_counts,
+    const int32_t* seqlens_k,
+    void* output,
+    void* present_key,
+    void* present_value,
+    void* workspace,
+    size_t workspace_bytes,
+    int64_t batch,
+    int64_t seq_len,
+    int64_t num_heads,
+    int64_t kv_num_heads,
+    int64_t head_size,
+    int64_t capacity,
+    int64_t max_selected,
+    float scale);
+
+// com.microsoft SparseAttentionIndexer, policy_mode=qsa, packed QK, no
+// past_sequence_length. T = fp16 (element_size_bytes 2) or fp32 (4).
+//   query            [B, S, (N+1)*D] T; the last D channels are the key
+//   query/key_norm_weight [D] T
+//   cos/sin_cache    [X, R] (rotary_batched 0) or [B, X, R] (1) T
+//   mask             [B, P+S] int64 or null (all visible)
+//   past_key         [B, P, D] T, may be null when P == 0
+//   selected_indices [B, S, token_budget + r - 1] int32
+//   present_key      [B, P+S, D] T
+// D must be 128, 1 <= N <= 8, R even in (0, D], token_budget / r <= 512.
+// workspace must hold hip_sparse_attention_indexer_workspace_size() bytes.
+HIP_KERNEL_API size_t hip_sparse_attention_indexer_workspace_size(
+    int64_t batch,
+    int64_t seq_len,
+    int64_t past_len,
+    int64_t num_heads,
+    int64_t head_size,
+    int64_t compress_ratio);
+
+HIP_KERNEL_API int hip_sparse_attention_indexer(
+    void* stream,
+    const void* query,
+    const void* query_norm_weight,
+    const void* key_norm_weight,
+    const void* cos_cache,
+    const void* sin_cache,
+    const int64_t* mask,
+    const void* past_key,
+    int32_t* selected_indices,
+    void* present_key,
+    void* workspace,
+    size_t workspace_bytes,
+    int64_t batch,
+    int64_t seq_len,
+    int64_t past_len,
+    int64_t num_heads,
+    int64_t head_size,
+    int64_t rotary_width,
+    int64_t rotary_rows,
+    int64_t rotary_batched,
+    int64_t compress_ratio,
+    int64_t token_budget,
+    int element_size_bytes,
+    float epsilon,
+    float scale);
+
 /* =========================================================================
  * Conv — general forward convolution (1D / 2D / 3D spatial)
  * =========================================================================
@@ -3205,11 +3909,15 @@ HIP_KERNEL_API int hip_causal_conv_prefill_nlc(
  * spatial_rank < 3 the trailing slots in `in_d`, `out_d`, `k`, `s` and `dil`
  * must be 1 and those in `p` must be 0 (the lowering does this).
  *
- * Accumulation is in float for every dtype, so a fp16 convolution with a
- * contraction extent in the thousands does not lose the reduction to rounding.
+ * Float dtypes accumulate in float, so a fp16 convolution with a contraction
+ * extent in the thousands does not lose the reduction to rounding.
+ * HIP_DTYPE_INT32 is a spatial-rank-2 convolution that accumulates in int64
+ * and stores a wrapping int32. Its trailing spatial slots must be the identity
+ * (extent / kernel / stride / dilation 1, pad 0).
  *
  * Supported hip_dtypes: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
- * HIP_DTYPE_BFLOAT16. All of input / weights / bias / output share the dtype.
+ * HIP_DTYPE_BFLOAT16, HIP_DTYPE_INT32. All of input / weights / bias / output
+ * share the dtype.
  * Returns: 0 on success, non-zero on failure.
  */
 HIP_KERNEL_API int hip_conv(
@@ -3272,6 +3980,12 @@ HIP_KERNEL_API int hip_conv_transpose(
     int64_t pad_top, int64_t pad_left,
     int64_t dil_h, int64_t dil_w,
     int64_t group);
+
+// fp16 GEMV out[N] = a[K] . B[K, N] with B row-major (N contiguous), fp32
+// accumulation. For narrow decode MatMuls such as an MoE router (N=128).
+// N must be a multiple of 8 and B 16-byte aligned; returns -1 otherwise.
+HIP_KERNEL_API int hip_gemv_f16_kn(void* stream, const void* a, const void* B,
+                                   void* out, int64_t K, int64_t N);
 
 /* =========================================================================
  * WMMA GEMM (Small-M Matrix Multiply via Wave Matrix Multiply-Accumulate)

@@ -19,6 +19,7 @@ NUMPY_TO_ONNX_TYPE = {
     np.int64: TensorProto.INT64,
     np.int32: TensorProto.INT32,
     np.int16: TensorProto.INT16,
+    np.uint16: TensorProto.UINT16,
     np.int8: TensorProto.INT8,
     np.uint8: TensorProto.UINT8,
     np.bool_: TensorProto.BOOL,
@@ -30,6 +31,9 @@ _ONNX_TO_NUMPY_TYPE = {v: k for k, v in NUMPY_TO_ONNX_TYPE.items()}
 def np_to_onnx_type(dtype) -> int:
     """Map numpy dtype to ONNX TensorProto element type."""
     dtype = np.dtype(dtype)
+    # ml_dtypes.bfloat16 has no numpy scalar type in the map above.
+    if dtype.name == "bfloat16":
+        return TensorProto.BFLOAT16
     return NUMPY_TO_ONNX_TYPE[dtype.type]
 
 

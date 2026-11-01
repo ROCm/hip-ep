@@ -82,6 +82,14 @@ operations introduced by strided-metadata expansion.
 
 `hip-resolve-memref-dims` folds post-bufferization `memref.dim` queries through view chains to root-buffer dimensions. These views may be created by bufferization or operand promotion, so this pass runs after both.
 
+For `memref.collapse_shape`, a constant-axis query becomes the product of the
+source dimensions in that axis's reassociation group. A singleton group uses
+its source dimension directly. Further dimension folds can recover explicit
+subview sizes or expand-shape operands. This removes false dependencies on
+late buffer views without changing their offsets or strides. Dynamic-axis
+queries remain unchanged. The rule uses descriptor sizes, not frontend names
+or tensor payload reads.
+
 The following CSE removes repeated size queries exposed by late allocation and
 view rewrites. Canonicalization then folds identities exposed by CSE, such as
 `select(c, d, d) -> d`. Folding must precede pool planning to recover reuse:
@@ -249,6 +257,63 @@ When a domain grows, the runtime synchronizes the session stream, frees that dom
 `hipdnn_ep_get_buffer_from_pool(state, index)` remains the legacy domain-zero accessor for compile-time offsets. Multi-domain dynamic paths use `hipdnn_ep_get_pool_base`.
 
 `hip.get_pool` carries an Allocate memory effect for the returned memref.
+
+## Session transient arena
+
+Pools, the workspace, and runtime op scratch (QMoE, convolution, GQA adapters,
+and similar) are sized lazily: most of them first reach their full size during
+the first inference. By then the host application has usually made its own
+long-lived device allocations, such as a KV cache. On devices where device
+memory has regions with different performance (for example a carve-out
+followed by slower overflow memory), the placement of these transients then
+depends on allocation order rather than on how hot they are.
+
+To make placement independent of that order, `hipdnn_ep_state_create` reserves
+one device allocation per `RuntimeState`, the transient arena, immediately
+after uploading the constants blob. The constants keep the first placement;
+the arena is next, ahead of anything the host allocates after session
+creation.
+
+Every session-owned device transient goes through
+`hipdnn_ep_state_device_alloc` / `hipdnn_ep_state_device_free`
+(`runtime_state_internal.h`):
+
+- Requests are served first-fit from the arena in 4 KiB-aligned blocks; freed
+  blocks coalesce with their neighbours (`lib/Runtime/transient_arena.h`).
+- A request that does not fit falls back to `hipMalloc`, so an undersized arena
+  only loses the placement guarantee for the overflow, never correctness.
+- Returning an arena block calls `hipDeviceSynchronize`, matching the implicit
+  synchronization of `hipFree`, because the block can be handed to new work
+  immediately.
+- If reserving the arena fails, the session runs without one.
+
+The arena is released in `hipdnn_ep_state_cleanup` after every transient and
+before the constants blob.
+
+Sizing, highest precedence first:
+
+| Source | Meaning |
+|---|---|
+| Provider option `transient_arena_mb` | Arena size in MiB; `0` disables it |
+| `HIPDNN_EP_TRANSIENT_ARENA_MB` | Same, process-wide |
+| Default | 128 MiB when the constants blob is at least 256 MiB, otherwise no arena |
+
+Explicit sizes are clamped to 4096 MiB; malformed values are reported and keep
+the default. Models with small constants get no arena by default, because
+their transients are small and the reservation would only cost memory.
+
+With `HIPDNN_EP_DEBUG=1`, each session logs its allocations and, at teardown,
+a summary line:
+
+```text
+[ARENA] state=... arena_mb=128.0 arena_hwm_mb=112.5 transient_hwm_mb=112.5 hits=... misses=0 miss_mb=0.0
+```
+
+`transient_hwm_mb` is the peak of all live session transients, arena and
+fallback combined; it is the size at which the arena would have served every
+request. Non-zero `misses` means the arena was too small for this workload.
+
+GPU-free coverage of the offset allocator: `test/runtime/test_transient_arena.cpp`.
 
 ## Host scalar scratch
 

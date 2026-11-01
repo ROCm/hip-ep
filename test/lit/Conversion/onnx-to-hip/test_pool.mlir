@@ -143,9 +143,7 @@ module {
   }
 
   // Test 7: non-overlapping 2D AveragePool (kernel == stride, no pad).
-  // Pre-lowering decomposes to expand_shape + transpose + reduce_mean
-  // instead of hip.pool — the fast path for projector-style patch pooling.
-  // The mean division happens in the reduce_mean kernel (no separate Mul).
+  // Lowers to hip.pool. The reshape + reduce_mean rewrite is not registered.
   func.func @test_averagepool_2d(%arg0: tensor<1x3x32x32xf32>)
       -> tensor<1x3x16x16xf32> {
     // CHECK-LABEL: func.func @test_averagepool_2d
@@ -155,13 +153,11 @@ module {
         : (tensor<1x3x32x32xf32>) -> tensor<1x3x16x16xf32>
 
     // CHECK-NOT: onnx.AveragePool
-    // CHECK-NOT: hip.pool
-    // CHECK: tensor.expand_shape
-    // CHECK-SAME: output_shape [1, 3, 16, 2, 16, 2]
-    // CHECK: hip.transpose
-    // CHECK-SAME: perm = [0, 1, 2, 4, 3, 5]
-    // CHECK: hip.reduce_mean
-    // CHECK-SAME: keepdims = 0
+    // CHECK-NOT: hip.reduce_mean
+    // CHECK: hip.pool
+    // CHECK-SAME: kernel_shape = [2, 2]
+    // CHECK-SAME: pool_mode = 0
+    // CHECK-SAME: strides = [2, 2]
 
     return %y : tensor<1x3x16x16xf32>
   }
@@ -229,5 +225,29 @@ module {
     // CHECK-SAME: pool_mode = 2
 
     return %y : tensor<1x3x16x16xf32>
+  }
+
+  // Test 9: uint8 MaxPool, the quantized-activation form (ceil_mode=1,
+  // kernel 3, stride 2). Output shape is the caller's; ceil_mode is passed
+  // through. i8/ui8 are rejected for AveragePool and LpPool.
+  func.func @test_maxpool_2d_ui8(%arg0: tensor<1x64x8x8xui8>)
+      -> tensor<1x64x4x4xui8> {
+    // CHECK-LABEL: func.func @test_maxpool_2d_ui8
+    %y = "onnx.MaxPool"(%arg0)
+        {ceil_mode = 1 : si64, kernel_shape = [3, 3], strides = [2, 2],
+         pads = [0, 0, 0, 0]}
+        : (tensor<1x64x8x8xui8>) -> tensor<1x64x4x4xui8>
+
+    // CHECK-NOT: onnx.MaxPool
+    // Input type is printed before the attributes; the result type is last.
+    // CHECK: hip.pool
+    // CHECK-SAME: tensor<1x64x8x8xui8>
+    // CHECK-SAME: ceil_mode = 1
+    // CHECK-SAME: kernel_shape = [3, 3]
+    // CHECK-SAME: pool_mode = 1
+    // CHECK-SAME: strides = [2, 2]
+    // CHECK-SAME: tensor<1x64x4x4xui8>
+
+    return %y : tensor<1x64x4x4xui8>
   }
 }

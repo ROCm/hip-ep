@@ -93,6 +93,11 @@ See [test/e2e/README.md](e2e/) for model generation and environment setup.
 
 See [test/numeric/README.md](numeric/) for backends, CLI options, and the "Bring your own ONNX" pattern.
 
+### Kernel compile-time guards (`test/kernel_guards/`)
+- **GPU-free checks on device-kernel source**: `LdsBarrierArchGate` compiles the `HIPDNN_LDS_BARRIER` gate in `lib/Runtime/Kernels/include/matmul_nbits_wmma_core.h` for gfx9 to gfx12 and checks the barrier each architecture emits.
+
+The per-op kernel unit tests, which need a GPU, live in [lib/Runtime/Kernels/unit_test/](../lib/Runtime/Kernels/unit_test/README.md).
+
 ## Common Issues
 
 ### LIT Tests

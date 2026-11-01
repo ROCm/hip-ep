@@ -1090,6 +1090,24 @@ std::vector<std::unique_ptr<ExecutionProvider>> compile_onnx_model_3_internal(
       set_ort_status(1, e.what());
     }
     return {};
+  } catch (const std::runtime_error &e) {
+    // hip-ep throws this when artifact_format=NATIVE is requested from a
+    // build configured without HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS. Fail the
+    // session instead of taking the skip-subgraph path below.
+    const std::string msg = e.what();
+    if (msg.find("HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS") != std::string::npos) {
+      LOG(ERROR) << msg;
+      if (set_ort_status) {
+        set_ort_status(1, e.what());
+      }
+      return {};
+    }
+    if (ENV_PARAM(XLNX_ENABLE_SKIP_FATAL)) {
+      LOG(INFO) << " catch other exception, skip this subgraph: " << e.what();
+    } else {
+      LOG(INFO) << " catch exception : " << e.what();
+      abort();
+    }
   } catch (const std::exception &e) {
     if (ENV_PARAM(XLNX_ENABLE_SKIP_FATAL)) {
       LOG(INFO) << " catch other exception, skip this subgraph: " << e.what();
@@ -1142,10 +1160,6 @@ compile_onnx_model_3(const std::string &model_path, const Graph &onnx_graph,
                                        set_ort_status);
 }
 
-thread_local const void *g_state = nullptr;
-thread_local morphizen::DllSafe<std::string> (*g_get_config_entry)(
-    const void *state, const char *entry_name) = nullptr;
-
 int morphizen_ep_on_run_start(
     const std::vector<std::unique_ptr<morphizen::ExecutionProvider>> &eps,
     const void *state,
@@ -1159,8 +1173,12 @@ int morphizen_ep_on_run_start(
   auto p_context =
       dynamic_cast<morphizen::PassContextImp *>(ep->get_context().get());
   CHECK(p_context != nullptr);
-  g_state = state;
-  g_get_config_entry = get_config_entry;
+  set_run_option_accessor(state, get_config_entry);
+  return 0;
+}
+
+int morphizen_ep_on_run_end() {
+  set_run_option_accessor(nullptr, nullptr);
   return 0;
 }
 
@@ -1192,6 +1210,10 @@ extern "C" MORPHIZEN_DLL_SPEC int morphizen_ep_on_run_start(
     morphizen::DllSafe<std::string> (*get_config_entry)(
         const void *state, const char *entry_name)) {
   return morphizen::morphizen_ep_on_run_start(eps, state, get_config_entry);
+}
+
+extern "C" MORPHIZEN_DLL_SPEC int morphizen_ep_on_run_end() {
+  return morphizen::morphizen_ep_on_run_end();
 }
 
 extern "C" MORPHIZEN_DLL_SPEC int morphizen_ep_set_ep_dynamic_options(

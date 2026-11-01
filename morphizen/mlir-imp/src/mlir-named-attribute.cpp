@@ -132,10 +132,10 @@ MLIRNamedAttribute::create_string(const std::string &name,
 // self-contained and survives any IR serialisation / round-trip.
 //
 // If `onnxElementTypeToMlirElementType` does not yet map this ONNX element type
-// (it silently defaults BFLOAT16/FP8/INT4/STRING to F32), the dense byte-size
-// guard below fails and we LOG(FATAL) with a fix hint, rather than silently
-// degrading to a pointer-encoded attribute that DenseElementsAttr consumers
-// cannot read.
+// (it silently defaults BFLOAT16/FP8 other than E4M3FN/INT4/STRING to F32), the
+// dense byte-size guard below fails and we LOG(FATAL) with a fix hint, rather
+// than silently degrading to a pointer-encoded attribute that DenseElementsAttr
+// consumers cannot read.
 //
 // The resulting `DenseElementsAttr` is the single source of truth: consumers
 // read the tensor value directly from it. The mlir-imp backend deliberately
@@ -174,7 +174,7 @@ MLIRNamedAttribute::create_tensor(const std::string &name,
   // `DenseElementsAttr::getFromRawBuffer` requires data_size to equal the
   // tensor's natural byte size (numElements * elemByteWidth). A mismatch means
   // `onnxElementTypeToMlirElementType` did not map this ONNX element type and
-  // defaulted it to F32 (BFLOAT16 / FP8 / INT4 / STRING).
+  // defaulted it to F32 (BFLOAT16 / FP8 other than E4M3FN / INT4 / STRING).
   const size_t elem_bytes = (elem_type.getIntOrFloatBitWidth() + 7) / 8;
   const size_t expected = tensor_type.getNumElements() * elem_bytes;
   if (expected != data_size) {

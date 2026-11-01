@@ -34,6 +34,14 @@ static int equal_hipdnn_to_hip_dtype(int64_t hipdnn_type) {
     return HIP_DTYPE_FLOAT16;
   case HIPDNN_EP_DATATYPE_FLOAT:
     return HIP_DTYPE_FLOAT32;
+  case HIPDNN_EP_DATATYPE_INT8:
+    return HIP_DTYPE_INT8;
+  case HIPDNN_EP_DATATYPE_UINT8:
+    return HIP_DTYPE_UINT8;
+  case HIPDNN_EP_DATATYPE_INT16:
+    return HIP_DTYPE_INT16;
+  case HIPDNN_EP_DATATYPE_UINT16:
+    return HIP_DTYPE_UINT16;
   case HIPDNN_EP_DATATYPE_INT32:
     return HIP_DTYPE_INT32;
   case HIPDNN_EP_DATATYPE_INT64:
@@ -71,7 +79,7 @@ int wrap_equal(RuntimeState *state, void *a, void *b, void *output, int64_t a_n,
   if (hip_dtype < 0) {
     fprintf(stderr,
             "[REAL] wrap_equal: unsupported input data_type=%s(%lld) "
-            "(supported: f16, f32, i32, i64)\n",
+            "(supported: f16, f32, i8, ui8, i16, ui16, i32, i64)\n",
             hipdnn_ep_datatype_name(data_type), (long long)data_type);
     return -1;
   }

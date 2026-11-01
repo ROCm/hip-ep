@@ -110,6 +110,8 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
       activationTypeEnum = 3;
     } else if (activationType == "identity") {
       activationTypeEnum = 4;
+    } else if (activationType == "relu2") {
+      activationTypeEnum = kQMoEActivationRelu2;
     }
 
     Value kVal = createI64Const(op.getK());

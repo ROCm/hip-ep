@@ -11,8 +11,8 @@
 //   * Identity CastLike (same input/result element type) is forwarded; both
 //     the op and the now-dead type-donor arg are dropped.
 //   * Function arguments that were ALREADY dead in the input IR are preserved
-//     -- so the "metadata captures the original signature" contract from
-//     convert-onnx-to-hip stays intact.
+//     by this pass. convert-onnx-to-hip later drops unread @main_graph
+//     arguments when it records the runtime input list.
 //   * No-CastLike functions are left fully unchanged.
 //
 // The pass is pure ONNX-dialect, so the RUN line invokes it standalone (no
@@ -55,8 +55,8 @@ module {
 
   // -------------------------------------------------------------------------
   // Case 3: a function argument that was ALREADY dead in the input IR is
-  // NOT dropped -- this preserves the "metadata captures the original
-  // signature" contract used by convert-onnx-to-hip.
+  // NOT dropped by simplify-onnx. convert-onnx-to-hip drops it later, when
+  // the runtime input list is recorded.
   // -------------------------------------------------------------------------
   func.func @preserve_already_dead_arg(%a: tensor<4xf32>, %unused: tensor<8xi32>) -> tensor<4xf32> {
     return %a : tensor<4xf32>

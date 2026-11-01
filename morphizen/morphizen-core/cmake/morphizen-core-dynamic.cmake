@@ -80,9 +80,18 @@ target_link_options(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PRIVATE "$<$<COMPILE_LAN
 # cannot bind its own @LLVM_22.0 llvm:: references to our ABI-incompatible
 # copy and segfault its in-process device-code compile. Windows uses the
 # matching .def instead.
+#
+# -z nodelete (DF_1_NODELETE) keeps this DSO mapped after dlclose. ORT probes
+# GetProvider, dlcloses on a miss, then dlopens again for CreateEpFactories.
+# local:* drops the STB_GNU_UNIQUE C++ exports that used to make glibc do this
+# itself. Without the flag the second map reloads libamd_comgr.so against the
+# ROCm libLLVM that stayed resident, and comgr's spirv-expand-step cl::opt
+# registers a second time. This does not make a real unload/reload safe; it
+# restores the pre-#1094 residency. Windows has no equivalent.
 if(NOT MSVC)
     target_link_options(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PRIVATE
-        "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/onnxruntime_morphizen_ep.exports")
+        "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/onnxruntime_morphizen_ep.exports"
+        "-Wl,-z,nodelete")
 endif()
 set_target_properties(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PROPERTIES
   VS_DEBUGGER_COMMAND "${CMAKE_INSTALL_PREFIX}\\bin\\test_onnx_runner.exe"

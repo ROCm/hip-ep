@@ -177,6 +177,8 @@ def OptimizeMemRefsPass : Pass<"hip-optimize-memrefs", "mlir::func::FuncOp"> {
 
 def FuseROCMlirPass : Pass<"hip-fuse-rocmlir", "mlir::func::FuncOp"> {
   let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::tensor::TensorDialect",
     "mlir::ub::UBDialect"
   ];
 }
@@ -203,6 +205,56 @@ def ConvertHipToTosaPass : Pass<"convert-hip-to-tosa", "mlir::func::FuncOp"> {
   let dependentDialects = [
     "mlir::tosa::TosaDialect"
   ];
+}
+
+def DecomposeConvTransposePass
+    : Pass<"hip-decompose-conv-transpose", "mlir::func::FuncOp"> {
+  let summary = "Rewrite hip.conv_transpose into stride-1 hip.conv residues";
+  let description = [{
+    Splits a transposed convolution into `stride` dense stride-1 forward
+    convolutions plus a strided reassembly, following MIOpen's implicit-gemm
+    backward-data v4r1 decomposition.
+
+    rocMLIR anchors kernel outlining on gemm / convolution / attention, so a
+    `hip.conv_transpose` reaching `convert-hip-to-tosa` leaves the outlined
+    region without an anchor and the backend rejects it. Emitting plain
+    `hip.conv` ops instead lets the existing `hip-fuse-rocmlir` and
+    `convert-hip-to-tosa` machinery claim the kernel unchanged, with no new
+    anchor op and no new TOSA op.
+
+    The per-residue tap selection, spatial flip, and channel swap apply only
+    to the filter, so they are constant-folded into fresh `hip.constant`s
+    rather than emitted as ops -- TOSA has no strided slice to lower a tap
+    stride to. Reassembly is one strided `tensor.insert_slice` per residue,
+    which bufferizes to a `memref.subview` plus a copy.
+
+    Restricted to the statically shaped, non-grouped, dilation-1 case with
+    `stride <= kernel` (so the residues tile the output with no holes) and a
+    compile-time filter. Anything else is left for the MIOpen path.
+  }];
+  let dependentDialects = [
+    "mlir::tensor::TensorDialect"
+  ];
+}
+
+def FoldBatchNormPass
+    : Pass<"hip-fold-batchnorm", "mlir::func::FuncOp"> {
+  let summary = "Fold constant-parameter hip.batch_norm into hip.conv weights";
+  let description = [{
+    Inference BatchNorm with constant parameters is the per-channel affine map
+    `y = s * x + t`, `s = scale / sqrt(var + eps)`, `t = B - mean * s`. When
+    its input is a `hip.conv`, or a `hip.add` of two `hip.conv`s, the scale is
+    multiplied into each filter per output channel and the shift is added to
+    one conv's bias (any existing biases are scaled by `s`). The batch norm
+    disappears, so a following pointwise op fuses straight into the conv.
+
+    Every intermediate result must have the batch norm as its only consumer,
+    and the filters, biases, and batch-norm parameters must be readable at
+    compile time. The rewritten filters are emitted as new inline
+    `hip.constant`s; the originals are left for their other users, if any.
+    Inline and file-backed carriers are read; memory-address carriers are
+    not, so a batch norm over memory-backed weights is left in place.
+  }];
 }
 
 def PromoteStridedHipOperandsPass
@@ -743,6 +795,13 @@ def ExternalizeConstantsPass
     `memref.global` +
     `bufferization.to_tensor` bridge consumed by
     `hip-resolve-extern-constants`.
+
+    With `skip-constant-data`, a file-backed carrier of at least 1.6e9
+    logical elements (4-bit `hip.gather_block_quantized` data counts two per
+    byte) whose every use is the `data` operand of an axis-0 `hip.gather` or
+    `hip.gather_block_quantized` gets a `disk_resident` unit entry in its
+    `hip.external_data`, takes no range in the GPU constants layout, and is
+    recorded with source kind `DiskFile`.
 
     This pass preserves full-sidecar, streaming, and hybrid skip-data behavior.
     It must run after all constant producers and shape inference, and before

@@ -15,6 +15,11 @@ message Metadata {
   //   "LLVM_IR" (default / empty) -> LlvmIrJit (in-process ORC JIT)
   //   "NATIVE"                    -> morphizen::Plugin (LoadLibrary/dlopen)
   string artifact_format = 4;
+  // GPU arch the embedded rocMLIR code objects were built for, or empty when
+  // the rocMLIR path was off (see hip::compiler::rocMlirArtifactTarget). The
+  // cache identity does not cover the arch or HIPDNN_EP_ROCMLIR, so the EP
+  // refuses to load an artifact whose value differs from the current one.
+  string rocmlir_arch = 5;
 }
 
 message Input {

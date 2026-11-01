@@ -37,6 +37,15 @@ add_test(NAME OutputAllocatorUnitTest COMMAND test-output-allocator)
 
 set_target_properties(test-output-allocator PROPERTIES FOLDER "runtime-tests")
 
+# Header-only offset allocator behind the session transient arena.
+add_executable(test-transient-arena test_transient_arena.cpp)
+target_compile_features(test-transient-arena PRIVATE cxx_std_17)
+target_include_directories(test-transient-arena PRIVATE
+    ${CMAKE_SOURCE_DIR}/lib/Runtime
+)
+add_test(NAME TransientArenaUnitTest COMMAND test-transient-arena)
+set_target_properties(test-transient-arena PROPERTIES FOLDER "runtime-tests")
+
 # GQA offline autotune tests are GPU-free: they link the real embedded table
 # (lut/gfx1151.fb) and drive the same resolver that ships in
 # custom_kernels_<arch>, through the exported extern "C" shims. The resolver's
@@ -79,3 +88,15 @@ add_test(NAME GqaAutotuneUnitTest COMMAND test-gqa-autotune)
 set_tests_properties(GqaAutotuneUnitTest PROPERTIES
     ENVIRONMENT "HIPDNN_EP_GQA_ARCH=gfx1151")
 set_target_properties(test-gqa-autotune PROPERTIES FOLDER "runtime-tests")
+
+# ELF-only. Require DF_1_NODELETE and the two plugin entry points.
+# See test_hipgpu_elf_contract.cpp.
+if(UNIX AND NOT APPLE AND TARGET ${morphizen_CORE_DYNAMIC_UNIQUE_ID})
+  add_executable(test-hipgpu-elf-contract test_hipgpu_elf_contract.cpp)
+  target_compile_features(test-hipgpu-elf-contract PRIVATE cxx_std_17)
+  target_link_libraries(test-hipgpu-elf-contract PRIVATE ${CMAKE_DL_LIBS})
+  add_test(NAME HipGpuElfContract
+    COMMAND test-hipgpu-elf-contract $<TARGET_FILE:${morphizen_CORE_DYNAMIC_UNIQUE_ID}>)
+  set_tests_properties(HipGpuElfContract PROPERTIES TIMEOUT 60)
+  set_target_properties(test-hipgpu-elf-contract PROPERTIES FOLDER "runtime-tests")
+endif()

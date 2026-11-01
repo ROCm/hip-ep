@@ -7,13 +7,14 @@
 // collapse/expand). Shorter operands are right-aligned with leading 1s via
 // tensor.expand_shape before collapse.
 //
-// Unranked tensors cannot become hip.add (verifier requires ranked operands),
-// so that case is a separate split-file that expects conversion to fail after
-// packing has already bailed.
+// Unranked tensors cannot become hip.add (the HIP contract requires ranked
+// operands), so that case is a separate split-file that verifies the ONNX op
+// remains available for fallback after packing and compute conversion decline
+// it without mutating the IR.
 
 // RUN: split-file %s %t
 // RUN: hip-mlir-opt %t/static.mlir --hip-add-context-arg --convert-onnx-to-hip | FileCheck %t/static.mlir
-// RUN: not hip-mlir-opt %t/unranked.mlir --hip-add-context-arg --convert-onnx-to-hip 2>&1 | FileCheck %t/unranked.mlir
+// RUN: hip-mlir-opt %t/unranked.mlir --hip-add-context-arg --convert-onnx-to-hip | FileCheck %t/unranked.mlir
 
 //--- static.mlir
 module {
@@ -113,14 +114,15 @@ module {
     return %arg0 : tensor<4xf32>
   }
 
-  // Packing requires a ranked static shape, so this is not collapsed. Compute
-  // conversion then emits hip.add, which rejects unranked operands.
+  // Packing and HIP compute conversion both require ranked operands. They
+  // leave this ONNX operation unchanged for a later fallback partition.
   func.func @keep_unranked_lhs_add(
       %lhs: tensor<*xf32>,
       %rhs: tensor<2x3x4x5x6xf32>)
       -> tensor<2x3x4x5x6xf32> {
     // CHECK-NOT: tensor.collapse_shape
-    // CHECK: 'hip.add' op operand #{{.*}} must be ranked tensor or memref
+    // CHECK: "onnx.Add"
+    // CHECK-NOT: hip.add
     %result = "onnx.Add"(%lhs, %rhs) :
         (tensor<*xf32>, tensor<2x3x4x5x6xf32>)
         -> tensor<2x3x4x5x6xf32>
