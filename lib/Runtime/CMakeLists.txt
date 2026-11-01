@@ -166,9 +166,9 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
     # Build include flags
     # NOTE: -I and path are separate list items to handle paths with spaces
     # (e.g., "C:/Program Files/..."). Clang supports "-I" "<path>" as two args.
-    set(COMPILE_FLAGS "")
-    if(HIP_EP_GQA_IMPL_ID)
-        list(APPEND COMPILE_FLAGS "-DHIP_EP_GQA_IMPL_ID=${HIP_EP_GQA_IMPL_ID}")
+    set(COMPILE_FLAGS "-DHIP_EP_TURBOQUANT_ENABLED=${HIP_EP_TURBOQUANT_ENABLED}")
+    if(HIP_EP_RING_ENABLED)
+        list(APPEND COMPILE_FLAGS "-DHIP_EP_RING_ENABLED=${HIP_EP_RING_ENABLED}")
     endif()
 
     # PIC is required when this bitcode is later linked into the per-model
@@ -271,6 +271,7 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
                 ${CMAKE_SOURCE_DIR}/include/hip/datatype_abi.h
                 ${CMAKE_SOURCE_DIR}/include/hip/init_config_abi.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/runtime_state_internal.h
+                ${CMAKE_CURRENT_SOURCE_DIR}/transient_arena.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/op_state.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/op_profile.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/chrome_trace.h
@@ -328,15 +329,18 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/gather_elements.cpp runtime_gather_elements.bc)
     compile_to_bitcode(real/top_k.cpp runtime_top_k.bc)
     compile_to_bitcode(real/random_normal_like.cpp runtime_random_normal_like.bc)
+    compile_to_bitcode(real/arg_max.cpp runtime_arg_max.bc)
     compile_to_bitcode(real/scatter_elements.cpp runtime_scatter_elements.bc)
     compile_to_bitcode(real/compress.cpp runtime_compress.bc)
     compile_to_bitcode(real/one_hot.cpp runtime_one_hot.bc)
+    compile_to_bitcode(real/ngram_hash_mapping.cpp runtime_ngram_hash_mapping.bc)
     compile_to_bitcode(real/reduce_sum.cpp runtime_reduce_sum.bc)
     compile_to_bitcode(real/reduce_mean.cpp runtime_reduce_mean.bc)
     compile_to_bitcode(real/reduce_l2.cpp runtime_reduce_l2.bc)
     compile_to_bitcode(real/reduce_max.cpp runtime_reduce_max.bc)
     compile_to_bitcode(real/reduce_min.cpp runtime_reduce_min.bc)
     compile_to_bitcode(real/matmul_nbits.cpp runtime_matmul_nbits.bc)
+    compile_to_bitcode(real/dequant_bnb4.cpp runtime_dequant_bnb4.bc)
     compile_to_bitcode(real/qmoe.cpp runtime_qmoe.bc)
     compile_to_bitcode(real/qmoe_amd.cpp runtime_qmoe_amd.bc)
     compile_to_bitcode(real/gather_block_quantized.cpp runtime_gather_block_quantized.bc)
@@ -350,6 +354,11 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/and.cpp runtime_and.bc)
     compile_to_bitcode(real/div.cpp runtime_div.bc)
     compile_to_bitcode(real/linear_attention.cpp runtime_linear_attention.bc)
+    compile_to_bitcode(real/gated_delta_net.cpp runtime_gated_delta_net.bc)
+    compile_to_bitcode(real/dynamic_sparse_attention.cpp
+                       runtime_dynamic_sparse_attention.bc)
+    compile_to_bitcode(real/sparse_attention_indexer.cpp
+                       runtime_sparse_attention_indexer.bc)
     compile_to_bitcode(real/transpose.cpp runtime_transpose.bc)
     compile_to_bitcode(real/abs.cpp runtime_abs.bc)
     compile_to_bitcode(real/neg.cpp runtime_neg.bc)
@@ -429,15 +438,18 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_gather_elements.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_top_k.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_random_normal_like.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_arg_max.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_scatter_elements.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_compress.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_one_hot.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_ngram_hash_mapping.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_reduce_sum.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_reduce_mean.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_reduce_l2.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_reduce_max.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_reduce_min.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_matmul_nbits.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_dequant_bnb4.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qmoe.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qmoe_amd.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_causal_conv_with_state.bc
@@ -449,6 +461,9 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_and.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_div.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_linear_attention.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_gated_delta_net.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_dynamic_sparse_attention.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_sparse_attention_indexer.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_transpose.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_abs.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_neg.bc

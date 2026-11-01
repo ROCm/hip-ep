@@ -21,7 +21,7 @@
 // Expected: wrap_causal_conv_with_state(state, input, weight, bias,
 //           past_state, output, present_state, batch_size, channels,
 //           seq_len, kernel_size, ndim, activation, element_size_bytes,
-//           channels_last)
+//           channels_last, dilation, state_channels_last)
 //
 // Test cases:
 // 1. causal_conv_full                  — all static, bias + past_state, silu
@@ -32,6 +32,7 @@
 //                                         (validates kernel_size extraction)
 // 6. causal_conv_channels_last         — (B, L, C) input, static
 // 7. causal_conv_channels_last_dynamic — (B, L, C) input, dynamic L
+// 8. causal_conv_state_channels_last   — (B, S, C) state, dilation=3
 // ============================================================================
 
 // RUN: hip-mlir-opt %s --assign-op-state-slots --convert-hip-to-llvm | FileCheck %s
@@ -62,7 +63,7 @@ module {
              memref<1x64x128xf16, 1>, memref<1x64x3xf16, 1>)
         {activation = "silu", ndim = 1 : i64}
 
-    // CHECK: llvm.call @wrap_causal_conv_with_state({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_causal_conv_with_state({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
 
     return
   }
@@ -83,7 +84,7 @@ module {
              memref<1x64x128xf16, 1>, memref<1x64x3xf16, 1>)
         {ndim = 1 : i64}
 
-    // CHECK: llvm.call @wrap_causal_conv_with_state({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_causal_conv_with_state({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
 
     return
   }
@@ -107,7 +108,7 @@ module {
              memref<2x128x64xf16, 1>, memref<2x128x2xf16, 1>)
         {activation = "none", ndim = 1 : i64}
 
-    // CHECK: llvm.call @wrap_causal_conv_with_state({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_causal_conv_with_state({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
 
     return
   }
@@ -145,7 +146,7 @@ module {
     // CHECK: llvm.extractvalue {{.*}}[3, 2]
     // kernel_size = 4 remains a compile-time constant from static weight.
     // CHECK: llvm.mlir.constant(4 : i64)
-    // CHECK: llvm.call @wrap_causal_conv_with_state({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_causal_conv_with_state({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
 
     return
   }
@@ -178,7 +179,7 @@ module {
     // CHECK: llvm.mlir.constant(1 : i64)
     // CHECK: llvm.extractvalue {{.*}}[3, 2]
     // CHECK: llvm.mul
-    // CHECK: llvm.call @wrap_causal_conv_with_state({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_causal_conv_with_state({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
 
     return
   }
@@ -214,7 +215,7 @@ module {
     // CHECK: llvm.mlir.constant(2 : i64)
     // CHECK: llvm.mlir.constant(64 : i64)
     // CHECK: llvm.mlir.constant(128 : i64)
-    // CHECK: llvm.call @wrap_causal_conv_with_state({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_causal_conv_with_state({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
 
     return
   }
@@ -243,7 +244,32 @@ module {
     // channels is static (dim 2); only seq_len (dim 1) is extracted.
     // CHECK: llvm.mlir.constant(64 : i64)
     // CHECK: llvm.extractvalue {{.*}}[3, 1]
-    // CHECK: llvm.call @wrap_causal_conv_with_state({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_causal_conv_with_state({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+
+    return
+  }
+
+  func.func @causal_conv_state_channels_last(
+      %ctx: !hip.context,
+      %input: memref<2x128x64xf16, 1>,
+      %weight: memref<64x1x4xf16, 1>,
+      %past_state: memref<2x9x64xf16, 1>,
+      %output: memref<2x128x64xf16, 1>,
+      %present_state: memref<2x9x64xf16, 1>) {
+    // CHECK-LABEL: llvm.func @causal_conv_state_channels_last
+
+    hip.causal_conv_with_state(%ctx)
+        ins(%input, %weight, %past_state :
+            memref<2x128x64xf16, 1>, memref<64x1x4xf16, 1>,
+            memref<2x9x64xf16, 1>)
+        outs(%output, %present_state :
+             memref<2x128x64xf16, 1>, memref<2x9x64xf16, 1>)
+        {activation = "silu", ndim = 1 : i64, channels_last = true,
+         dilation = 3 : i64, state_channels_last = true}
+
+    // CHECK: %[[DIL:.*]] = llvm.mlir.constant(3 : i64)
+    // CHECK: %[[NSC:.*]] = llvm.mlir.constant(1 : i64)
+    // CHECK: llvm.call @wrap_causal_conv_with_state({{.*}}, %[[DIL]], %[[NSC]]) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
 
     return
   }

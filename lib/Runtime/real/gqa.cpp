@@ -339,7 +339,17 @@ static int update_kv_cache(hipStream_t stream, const void *past_key,
 // Fused-only forward: fp16, causal, GQA. No hipBLASLt, no decomposed fallback.
 //===----------------------------------------------------------------------===//
 
-#if HIP_EP_GQA_IMPL_ID != 0
+#if HIP_EP_RING_ENABLED != 0
+// Set before starting inference. Only an explicit "1" opts into Ring;
+// compiling the implementation never changes the default GQA selection.
+static bool gqa_ring_requested() {
+  static const bool enabled = [] {
+    const char *value = std::getenv("HIPDNN_EP_USE_RING_ATTENTION");
+    return value && std::strcmp(value, "1") == 0;
+  }();
+  return enabled;
+}
+
 // Return 1 for a valid call outside Ring's context bound, 0 on success, and
 // -1 on failure. Validate every writable range before updating either cache.
 static int gqa_forward_ring(RuntimeState *state, hipStream_t stream,
@@ -365,7 +375,7 @@ static int gqa_forward_ring(RuntimeState *state, hipStream_t stream,
             "Ring GQA: invalid cache lengths or inconsistent cache aliases\n");
     return -1;
   }
-  if (total > 262144)
+  if (total > HIP_EP_RING_MAX_KV_LENGTH)
     return 1;
 
   struct Range {
@@ -418,9 +428,8 @@ static int gqa_forward_ring(RuntimeState *state, hipStream_t stream,
                       present_value, 1, int(past), int(sq), 4, 256,
                       int(past_capacity), int(capacity), nullptr, 2, 0) != 0)
     return -1;
-  RUNTIME_DEBUG_LOG("[REAL] Ring GQA impl=%d q=%lld past=%lld capacity=%lld\n",
-                    HIP_EP_GQA_IMPL_ID, (long long)sq, (long long)past,
-                    (long long)capacity);
+  RUNTIME_DEBUG_LOG("[REAL] Ring GQA q=%lld past=%lld capacity=%lld\n",
+                    (long long)sq, (long long)past, (long long)capacity);
   return hip_gqa_ring_attention(stream, query, present_key, present_value,
                                 output, int(sq), int(past), int(capacity),
                                 workspace, bytes) == 0
@@ -1152,13 +1161,14 @@ struct GqaGemmCache {
 // former shared RuntimeState::gqa_gemm_cache, so concurrent sessions (and
 // distinct GQA layers) no longer share one descriptor map.
 struct GqaState : OpStateT<GqaState> {
-  GqaGemmCache cache;
+  RuntimeState *tq4_owner = nullptr;
   float *tq4_constants = nullptr;
   int tq4_load_status = 0;
   ~GqaState() {
     if (tq4_constants)
-      (void)hipFree(tq4_constants);
+      (void)hipdnn_ep_state_device_free(tq4_owner, tq4_constants);
   }
+  GqaGemmCache cache;
 };
 
 // Resolve this GQA instance's descriptor cache from its op-state slot. Returns
@@ -2817,13 +2827,15 @@ static int ensure_gqa_fp32_adapter_scratch(RuntimeState *state, size_t needed) {
   if (state->gqa_fp32_adapter_scratch) {
     if (state->stream && hipStreamSynchronize(state->stream) != hipSuccess)
       return -1;
-    if (hipFree(state->gqa_fp32_adapter_scratch) != hipSuccess)
+    if (hipdnn_ep_state_device_free(state, state->gqa_fp32_adapter_scratch) !=
+        hipSuccess)
       return -1;
     state->gqa_fp32_adapter_scratch = nullptr;
     state->gqa_fp32_adapter_scratch_size = 0;
   }
 
-  if (hipMalloc(&state->gqa_fp32_adapter_scratch, alloc_size) != hipSuccess) {
+  if (hipdnn_ep_state_device_alloc(state, &state->gqa_fp32_adapter_scratch,
+                                   alloc_size) != hipSuccess) {
     fprintf(stderr,
             "wrap_group_query_attention: fp32 adapter scratch alloc failed "
             "(%zu bytes)\n",
@@ -3067,29 +3079,6 @@ int wrap_group_query_attention(
   // decomposed hipBLASLt fallback.
   //===------------------------------------------------------------------===//
 
-#if HIP_EP_GQA_IMPL_ID != 0
-  // No existing route implements softcap; do not silently drop it in a Ring
-  // build. Other unsupported Ring features retain their existing GQA route.
-  if (softcap != 0.0f) {
-    fprintf(stderr, "Ring GQA builds do not support softcap\n");
-    return -1;
-  }
-  if (element_size_bytes == 2 && batch_size == 1 && num_heads == 24 &&
-      kv_num_heads == 4 && head_dim == 256 && seq_len_q >= 1 &&
-      seq_len_q <= 131072 && seq_len_new_kv == seq_len_q && key && value &&
-      seqlens_k && !kv_bnsd && !reuse_past_kv && !kv_quantized && !do_rotary &&
-      no_causal == 0 && scale == 0.0625f && local_window_size <= 0 &&
-      !head_sink && smooth_softmax <= 0 && !attention_bias &&
-      hip_gqa_ring_device_supported()) {
-    int ring_rc =
-        gqa_forward_ring(state, stream, query, key, value, past_key, past_value,
-                         seqlens_k, output, present_key, present_value,
-                         seq_len_q, seq_len_kv, past_buf_seq);
-    if (ring_rc != 1)
-      return ring_rc;
-  }
-#endif
-
   const bool is_decode = (seq_len_q == 1);
   const bool decode_geometry_ok =
       !is_decode || flash_decode_geometry_ok(num_heads, kv_num_heads, head_dim);
@@ -3254,6 +3243,77 @@ int wrap_group_query_attention(
   return rc;
 }
 
+// The legacy ABI does not encode dtype: only compiler-proven FP16 operands
+// may enter this wrapper. All ineligible calls keep the original wrapper.
+int wrap_group_query_attention_ring_f16(
+    RuntimeState *state, int op_state_slot,
+    // Inputs 1-7 (core GQA)
+    void *query, void *key, void *value, void *past_key, void *past_value,
+    void *seqlens_k, void *total_seq_len,
+    // Inputs 8-10 (RoPE)
+    void *cos_cache, void *sin_cache, void *position_ids,
+    // Inputs 11-14 (advanced features)
+    void *attention_bias, void *head_sink, void *k_scale, void *v_scale,
+    // Outputs
+    void *output, void *present_key, void *present_value, void *output_qk,
+    // Attributes (13)
+    int64_t num_heads, int64_t kv_num_heads, float scale, int64_t do_rotary,
+    int64_t rotary_interleaved, float softcap, int64_t local_window_size,
+    int64_t smooth_softmax, int64_t qk_output, int64_t k_quant_type,
+    int64_t v_quant_type, int64_t kv_cache_bit_width, int32_t no_causal,
+    // Shape values (6)
+    int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
+    int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
+    int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
+    int64_t seq_len_new_kv) {
+  const char *cache_bits = state ? hipdnn_ep_runtime_get_provider_option(
+                                       state, "kvCacheQuantizationBits")
+                                 : nullptr;
+  const char *cache_codec =
+      state ? hipdnn_ep_runtime_get_provider_option(state, "kv_cache_codec")
+            : nullptr;
+  if ((cache_bits && strcmp(cache_bits, "0") != 0) ||
+      (cache_codec && *cache_codec))
+    return tq4_error(state, "quantized cache requires the physical-width ABI");
+#if HIP_EP_RING_ENABLED != 0
+  // Only the compiler's proven-FP16 calls use this entry. Recheck runtime
+  // geometry/features/device before reading lengths or modifying the cache.
+  // Any noncandidate retains the original entry point and its diagnostics.
+  if (gqa_ring_requested() && state && query && output && present_key &&
+      present_value && !position_ids && !output_qk && qk_output == 0 &&
+      softcap == 0.0f && element_size_bytes == 2 && batch_size == 1 &&
+      num_heads == 24 && kv_num_heads == 4 && head_dim == 256 &&
+      seq_len_q >= 1 && seq_len_q <= HIP_EP_RING_MAX_QUERY_LENGTH &&
+      seq_len_new_kv == seq_len_q && key && value && seqlens_k && !kv_bnsd &&
+      k_quant_type == 0 && v_quant_type == 0 && !do_rotary && no_causal == 0 &&
+      (scale == 0.0f || scale == 0.0625f) && local_window_size <= 0 &&
+      !head_sink && smooth_softmax <= 0 && !attention_bias &&
+      hip_gqa_ring_device_supported()) {
+    hipStream_t stream =
+        static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
+    if (stream) {
+      OP_PROFILE(
+          "gqa", [] { return std::string("ring_f16"); }, state);
+      int rc =
+          gqa_forward_ring(state, stream, query, key, value, past_key,
+                           past_value, seqlens_k, output, present_key,
+                           present_value, seq_len_q, seq_len_kv, past_buf_seq);
+      if (rc != 1)
+        return rc;
+    }
+  }
+#endif
+  return wrap_group_query_attention(
+      state, op_state_slot, query, key, value, past_key, past_value, seqlens_k,
+      total_seq_len, cos_cache, sin_cache, position_ids, attention_bias,
+      head_sink, k_scale, v_scale, output, present_key, present_value,
+      output_qk, num_heads, kv_num_heads, scale, do_rotary, rotary_interleaved,
+      softcap, local_window_size, smooth_softmax, qk_output, k_quant_type,
+      v_quant_type, kv_cache_bit_width, no_causal, batch_size, seq_len_q,
+      seq_len_kv, past_buf_seq, head_dim, element_size_bytes, attn_bias_batch,
+      attn_bias_num_heads, kv_bnsd, seq_len_new_kv);
+}
+
 // TurboQuant v1 uses a versioned cache-width ABI. Existing dense callers retain
 // wrap_group_query_attention; physical widths are never inferred from Q.
 static int tq4_error(RuntimeState *state, const char *message) {
@@ -3316,7 +3376,9 @@ static bool tq4_load_constants(RuntimeState *state, GqaState *gs) {
       if (fabs(dot - (i == j ? 1.0 : 0.0)) > 2e-5)
         return false;
     }
-  if (hipMalloc(reinterpret_cast<void **>(&gs->tq4_constants), header.bytes) !=
+  gs->tq4_owner = state;
+  if (hipdnn_ep_state_device_alloc(
+          state, reinterpret_cast<void **>(&gs->tq4_constants), header.bytes) !=
       hipSuccess)
     return false;
   // Initialization-only copy; no host transfer or allocation in steady decode.
@@ -3327,7 +3389,7 @@ static bool tq4_load_constants(RuntimeState *state, GqaState *gs) {
   return true;
 }
 
-extern "C" int wrap_group_query_attention_v2(
+extern "C" int wrap_group_query_attention_v3(
     RuntimeState *state, int op_state_slot,
     // Inputs 1-7 (core GQA)
     void *query, void *key, void *value, void *past_key, void *past_value,
@@ -3348,7 +3410,8 @@ extern "C" int wrap_group_query_attention_v2(
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
     int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
     int64_t seq_len_new_kv, int64_t past_key_width, int64_t past_value_width,
-    int64_t present_key_width, int64_t present_value_width) {
+    int64_t present_key_width, int64_t present_value_width,
+    int32_t fp16_tensors) {
   const char *bits = state ? hipdnn_ep_runtime_get_provider_option(
                                  state, "kvCacheQuantizationBits")
                            : nullptr;
@@ -3363,19 +3426,23 @@ extern "C" int wrap_group_query_attention_v2(
       if (width && width != head_dim)
         return tq4_error(
             state, "dense cache physical width differs from head dimension");
-    return wrap_group_query_attention(
-        state, op_state_slot, query, key, value, past_key, past_value,
-        seqlens_k, total_seq_len, cos_cache, sin_cache, position_ids,
-        attention_bias, head_sink, k_scale, v_scale, output, present_key,
-        present_value, output_qk, num_heads, kv_num_heads, scale, do_rotary,
-        rotary_interleaved, softcap, local_window_size, smooth_softmax,
-        qk_output, k_quant_type, v_quant_type, kv_cache_bit_width, no_causal,
-        batch_size, seq_len_q, seq_len_kv, past_buf_seq, head_dim,
-        element_size_bytes, attn_bias_batch, attn_bias_num_heads, kv_bnsd,
-        seq_len_new_kv);
+    auto dense = fp16_tensors ? wrap_group_query_attention_ring_f16
+                              : wrap_group_query_attention;
+    return dense(state, op_state_slot, query, key, value, past_key, past_value,
+                 seqlens_k, total_seq_len, cos_cache, sin_cache, position_ids,
+                 attention_bias, head_sink, k_scale, v_scale, output,
+                 present_key, present_value, output_qk, num_heads, kv_num_heads,
+                 scale, do_rotary, rotary_interleaved, softcap,
+                 local_window_size, smooth_softmax, qk_output, k_quant_type,
+                 v_quant_type, kv_cache_bit_width, no_causal, batch_size,
+                 seq_len_q, seq_len_kv, past_buf_seq, head_dim,
+                 element_size_bytes, attn_bias_batch, attn_bias_num_heads,
+                 kv_bnsd, seq_len_new_kv);
   }
-#if HIP_EP_GQA_IMPL_ID == 0
-  return tq4_error(state, "v1 requires a Ring-enabled build");
+#if !HIP_EP_TURBOQUANT_ENABLED || !HIP_EP_RING_ENABLED
+  return tq4_error(
+      state,
+      "v1 requires HIP_EP_ENABLE_TURBOQUANT and HIP_EP_ENABLE_RING_ATTENTION");
 #else
   if (strcmp(bits, "4") != 0 || !codec || strcmp(codec, "tq4_mse_qr_v1") != 0)
     return tq4_error(state, "unsupported bit width or missing codec identity");
@@ -3383,13 +3450,14 @@ extern "C" int wrap_group_query_attention_v2(
     return tq4_error(state, "missing runtime state");
   if (!hip_gqa_ring_device_supported())
     return tq4_error(state, "Ring requires an enabled gfx1151 device");
-  if (batch_size != 1 || num_heads != 24 || kv_num_heads != 4 ||
-      head_dim != 256 || element_size_bytes != 2 || seq_len_q < 1 ||
-      seq_len_q > 131072 || seq_len_new_kv != seq_len_q || kv_bnsd != 0 ||
-      no_causal || do_rotary || rotary_interleaved || position_ids ||
-      cos_cache || sin_cache || attention_bias || head_sink || k_scale ||
-      v_scale || k_quant_type || v_quant_type || softcap != 0 ||
-      local_window_size != -1 || smooth_softmax > 0 || qk_output || output_qk) {
+  if (!fp16_tensors || batch_size != 1 || num_heads != 24 ||
+      kv_num_heads != 4 || head_dim != 256 || element_size_bytes != 2 ||
+      seq_len_q < 1 || seq_len_q > HIP_EP_RING_MAX_QUERY_LENGTH ||
+      seq_len_new_kv != seq_len_q || kv_bnsd != 0 || no_causal || do_rotary ||
+      rotary_interleaved || position_ids || cos_cache || sin_cache ||
+      attention_bias || head_sink || k_scale || v_scale || k_quant_type ||
+      v_quant_type || softcap != 0 || local_window_size != -1 ||
+      smooth_softmax > 0 || qk_output || output_qk) {
     fprintf(
         stderr,
         "TurboQuant GQA contract: B=%lld H=%lld G=%lld D=%lld bytes=%lld "

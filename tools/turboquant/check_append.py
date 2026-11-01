@@ -76,10 +76,10 @@ def main():
         (262142, 2),
     ]
     assert lib.hip_tq4_prefill_workspace(0) == 0
-    assert lib.hip_tq4_prefill_workspace(131073) == 0
+    assert lib.hip_tq4_prefill_workspace(262145) == 0
     assert (
         lib.hip_tq4_prefill_workspace(128)
-        == lib.hip_tq4_prefill_workspace(131072)
+        == lib.hip_tq4_prefill_workspace(262144)
         == 7888896
     )
     for past, count in cases:

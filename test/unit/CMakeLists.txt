@@ -94,3 +94,24 @@ add_test(NAME QLpNormalizationRefUnit
 set_target_properties(test-qlpnormalization-ref PROPERTIES
   FOLDER "mlir/Test/Dialect/Hipsr"
 )
+
+# GPU-free tests for the rocMLIR autotune candidate selection. The selection
+# file has no HIP or MLIR dependency, so it compiles here directly.
+add_executable(test-adaptive-benchmark
+  test_adaptive_benchmark.cpp
+  ${CMAKE_SOURCE_DIR}/lib/Compiler/AdaptiveBenchmark.cpp
+)
+
+target_compile_features(test-adaptive-benchmark PRIVATE cxx_std_17)
+
+target_include_directories(test-adaptive-benchmark PRIVATE
+  ${CMAKE_SOURCE_DIR}/include
+)
+
+add_test(NAME AdaptiveBenchmarkUnit
+  COMMAND test-adaptive-benchmark
+)
+
+set_target_properties(test-adaptive-benchmark PROPERTIES
+  FOLDER "mlir/Test/Compiler"
+)

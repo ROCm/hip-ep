@@ -475,6 +475,262 @@ __global__ void linear_attention_decode_kernel_par(
 }
 
 //===----------------------------------------------------------------------===//
+// Column-split, register-resident variant (decode and short bursts).
+//
+// Every S column j evolves independently under all four rules (sk[j], v[j]
+// and the readout only touch column j), so a (batch, kv_head) state is split
+// across blockIdx.y into LA_COLS-wide column tiles: 4x the blocks of the
+// per-head kernels for dv=128, enough to cover every CU on gfx1151. Inside a
+// tile, G = dk/ISLICE threads share a column and each keeps its ISLICE rows of
+// S in registers, so S is read once and written once per launch instead of
+// read twice (sk pass + update pass) and written once.
+//
+// n_tok > 1 runs that many consecutive time steps in one launch with S held
+// in fp32 registers between them (rounded once at the end, like the CPU
+// kernel's fp32 recurrence). Pointers are at time step 0; per-token strides
+// are the packed [B, T, H*D] row sizes and seq_len is the batch stride.
+//===----------------------------------------------------------------------===//
+static constexpr int LA_COLS = 32;
+
+template <typename T, int ISLICE>
+__global__ void linear_attention_decode_kernel_cols(
+    const T* __restrict__ query,
+    const T* __restrict__ key,
+    const T* __restrict__ value,
+    const T* __restrict__ decay,
+    const T* __restrict__ beta_in,
+    const T* state_in,   // may alias state; null = zero initial state
+    T* state,
+    T* __restrict__ output,
+    int seq_len, int n_tok,
+    int Hq, int Hkv, int n_k, int dk, int dv,
+    float scale, int update_rule,
+    int decay_per_key_dim, int beta_per_head)
+{
+    constexpr int MAX_Q_HEADS = 16;
+    const int bg  = blockIdx.x;
+    const int b   = bg / Hkv;
+    const int g   = bg % Hkv;
+    const int tid = threadIdx.x;
+    const int nthreads = blockDim.x;
+    const int G   = nthreads / LA_COLS;
+    const int jl  = tid % LA_COLS;
+    const int p   = tid / LA_COLS;
+    const int j   = blockIdx.y * LA_COLS + jl;
+    const int i0  = p * ISLICE;
+
+    const int Hout = Hq >= Hkv ? Hq : Hkv;
+    const bool inverse_gqa = (Hq < Hkv);
+    const int num_q_heads  = inverse_gqa ? 1 : (Hq / Hkv);
+    const int h_q_load_base = inverse_gqa ? (g * Hq / Hkv) : (g * num_q_heads);
+    const int h_out_base    = inverse_gqa ? g : (g * num_q_heads);
+    const int h_k = g * n_k / Hkv;
+
+    const int64_t q_tok   = (int64_t)Hq * dk;
+    const int64_t k_tok   = (int64_t)n_k * dk;
+    const int64_t v_tok   = (int64_t)Hkv * dv;
+    const int64_t o_tok   = (int64_t)Hout * dv;
+    const int64_t d_tok   = decay_per_key_dim ? (int64_t)Hkv * dk : (int64_t)Hkv;
+    const int64_t b_tok   = beta_per_head ? (int64_t)Hkv : 1;
+    const int64_t T64     = seq_len;
+
+    const bool has_decay =
+        (update_rule == LA_RULE_GATED || update_rule == LA_RULE_GATED_DELTA) &&
+        decay != nullptr;
+    const bool needs_sk =
+        (update_rule == LA_RULE_DELTA || update_rule == LA_RULE_GATED_DELTA);
+
+    // Every token's operands are staged in LDS up front so the serial
+    // per-token loop below only touches LDS and registers.
+    extern __shared__ float smem[];
+    float* k_all    = smem;                                // [n_tok*dk]
+    float* aux_all  = k_all + n_tok * dk;                  // [n_tok*dk]
+    float* q_all    = aux_all + n_tok * dk;                // [n_tok*Nq*dk]
+    float* v_all    = q_all + n_tok * num_q_heads * dk;    // [n_tok*COLS]
+    float* beta_all = v_all + n_tok * LA_COLS;             // [n_tok]
+    float* sk_part  = beta_all + n_tok;                    // [G*COLS]
+    float* out_part = sk_part + G * LA_COLS;               // [G*COLS*Nq]
+
+    for (int x = tid; x < n_tok * dk; x += nthreads) {
+        const int t = x / dk, i = x % dk;
+        k_all[x] = to_float(key[b * T64 * k_tok + t * k_tok + (int64_t)h_k * dk + i]);
+        float a = 1.0f;
+        if (has_decay) {
+            const T* d_ptr = decay + b * T64 * d_tok + t * d_tok;
+            a = expf(to_float(decay_per_key_dim ? d_ptr[(int64_t)g * dk + i] : d_ptr[g]));
+        }
+        aux_all[x] = a;
+        for (int hl = 0; hl < num_q_heads; hl++) {
+            const int h_q = h_q_load_base + (inverse_gqa ? 0 : hl);
+            q_all[(t * num_q_heads + hl) * dk + i] =
+                to_float(query[b * T64 * q_tok + t * q_tok + (int64_t)h_q * dk + i]);
+        }
+    }
+    for (int x = tid; x < n_tok * LA_COLS; x += nthreads) {
+        const int t = x / LA_COLS, c = x % LA_COLS;
+        v_all[x] = to_float(value[b * T64 * v_tok + t * v_tok + (int64_t)g * dv +
+                                  blockIdx.y * LA_COLS + c]);
+    }
+    for (int t = tid; t < n_tok; t += nthreads)
+        beta_all[t] = (beta_in && needs_sk)
+            ? to_float(beta_in[b * T64 * b_tok + t * b_tok + (beta_per_head ? g : 0)])
+            : 0.0f;
+
+    const int64_t s_off = (int64_t)b * Hkv * dk * dv + (int64_t)g * dk * dv;
+    float s[ISLICE];
+#pragma unroll
+    for (int r = 0; r < ISLICE; r++)
+        s[r] = state_in ? to_float(state_in[s_off + (int64_t)(i0 + r) * dv + j]) : 0.0f;
+    __syncthreads();
+
+    // Two barriers per token: sk_part is re-written only after every thread
+    // has passed this token's second barrier, and out_part only after the
+    // p == 0 readers have reached the next token's first one.
+    for (int t = 0; t < n_tok; t++) {
+        const float* k_smem   = k_all + t * dk;
+        const float* aux_smem = aux_all + t * dk;
+        const float* q_smem   = q_all + t * num_q_heads * dk;
+        const float v_j       = v_all[t * LA_COLS + jl];
+        const float beta_val  = beta_all[t];
+
+        float sk_j = 0.0f;
+        if (needs_sk) {
+            float part = 0.0f;
+#pragma unroll
+            for (int r = 0; r < ISLICE; r++)
+                part += aux_smem[i0 + r] * s[r] * k_smem[i0 + r];
+            sk_part[p * LA_COLS + jl] = part;
+        }
+        __syncthreads();
+        if (needs_sk)
+            for (int q = 0; q < G; q++) sk_j += sk_part[q * LA_COLS + jl];
+
+        float sums[MAX_Q_HEADS];
+#pragma unroll
+        for (int hl = 0; hl < MAX_Q_HEADS; hl++) sums[hl] = 0.0f;
+#pragma unroll
+        for (int r = 0; r < ISLICE; r++) {
+            const int i = i0 + r;
+            const float k_i = k_smem[i];
+            const float decay_i = aux_smem[i];
+            float s_new;
+            switch (update_rule) {
+            case LA_RULE_LINEAR:      s_new = s[r] + k_i * v_j; break;
+            case LA_RULE_GATED:       s_new = decay_i * s[r] + k_i * v_j; break;
+            case LA_RULE_DELTA:       s_new = s[r] + beta_val * k_i * (v_j - sk_j); break;
+            case LA_RULE_GATED_DELTA: s_new = decay_i * s[r] + beta_val * k_i * (v_j - sk_j); break;
+            default:                  s_new = s[r];
+            }
+            s[r] = s_new;
+#pragma unroll
+            for (int hl = 0; hl < MAX_Q_HEADS; hl++)
+                if (hl < num_q_heads) sums[hl] += q_smem[hl * dk + i] * s_new;
+        }
+        for (int hl = 0; hl < num_q_heads; hl++)
+            out_part[(p * LA_COLS + jl) * num_q_heads + hl] = sums[hl];
+        __syncthreads();
+        if (p == 0) {
+            for (int hl = 0; hl < num_q_heads; hl++) {
+                float acc = 0.0f;
+                for (int q = 0; q < G; q++) acc += out_part[(q * LA_COLS + jl) * num_q_heads + hl];
+                const int h_out = h_out_base + (inverse_gqa ? 0 : hl);
+                output[b * T64 * o_tok + t * o_tok + (int64_t)h_out * dv + j] = from_float<T>(scale * acc);
+            }
+        }
+    }
+
+#pragma unroll
+    for (int r = 0; r < ISLICE; r++)
+        state[s_off + (int64_t)(i0 + r) * dv + j] = from_float<T>(s[r]);
+}
+
+// Launch the column-split kernel for n_tok steps starting at the pointers'
+// time step. Returns 1 when the shape does not fit (caller falls back).
+template <typename T>
+static int launch_la_cols(hipStream_t s, const void* q, const void* k, const void* v,
+                          const void* d, const void* be, const void* sin, void* st, void* o,
+                          int B, int seq_len, int n_tok, int Hq, int Hkv, int Nk,
+                          int dk, int dv, float scale, int rule, int dpk, int bph) {
+    static const int islice = [] {
+        const char* e = std::getenv("HIPDNN_EP_LA_COLS_ISLICE");
+        const int v = e ? atoi(e) : 16;
+        return (v == 8 || v == 16 || v == 32) ? v : 16;
+    }();
+    if (dv % LA_COLS != 0 || dk % islice != 0) return 1;
+    const int G = dk / islice;
+    if (G * LA_COLS > 1024) return 1;
+    const int nq = (Hq >= Hkv) ? Hq / Hkv : 1;
+    if (nq > 16) return 1;
+    const size_t smem = static_cast<size_t>(n_tok * (2 * dk + nq * dk + LA_COLS + 1) +
+                                            G * LA_COLS * (1 + nq)) * sizeof(float);
+    if (smem > 48 * 1024) return 1;
+    dim3 grid(static_cast<unsigned>(B * Hkv), static_cast<unsigned>(dv / LA_COLS));
+    dim3 block(static_cast<unsigned>(G * LA_COLS));
+#define LA_COLS_LAUNCH(IS)                                                                   \
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(linear_attention_decode_kernel_cols<T, IS>), grid,     \
+                       block, smem, s, static_cast<const T*>(q), static_cast<const T*>(k),    \
+                       static_cast<const T*>(v), static_cast<const T*>(d),                    \
+                       static_cast<const T*>(be), static_cast<const T*>(sin),                 \
+                       static_cast<T*>(st), static_cast<T*>(o),                               \
+                       seq_len, n_tok, Hq, Hkv, Nk, dk, dv, scale, rule, dpk, bph)
+    (void)hipGetLastError();
+    if (islice == 8) LA_COLS_LAUNCH(8);
+    else if (islice == 32) LA_COLS_LAUNCH(32);
+    else LA_COLS_LAUNCH(16);
+#undef LA_COLS_LAUNCH
+    const hipError_t err = hipGetLastError();
+    if (err != hipSuccess) {
+        fprintf(stderr,
+                "[custom_kernels] linear_attention_decode_kernel_cols launch failed: %s\n",
+                hipGetErrorString(err));
+        return -1;
+    }
+    return 0;
+}
+
+static int la_cols_dispatch(void* stream, const void* q, const void* k, const void* v,
+                            const void* d, const void* be, const void* sin, void* st,
+                            void* o, int64_t B, int64_t seq_len, int64_t n_tok, int64_t Hq,
+                            int64_t Hkv, int64_t Nk, int64_t dk, int64_t dv, float scale,
+                            int64_t rule, int64_t dpk, int64_t bph, int64_t type) {
+    hipStream_t s = static_cast<hipStream_t>(stream);
+    const int a[] = {static_cast<int>(B), static_cast<int>(seq_len), static_cast<int>(n_tok),
+                     static_cast<int>(Hq), static_cast<int>(Hkv), static_cast<int>(Nk),
+                     static_cast<int>(dk), static_cast<int>(dv)};
+    const int r = static_cast<int>(rule), dp = dpk ? 1 : 0, bp = bph ? 1 : 0;
+    if (type == 0)
+        return launch_la_cols<float>(s, q, k, v, d, be, sin, st, o, a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], scale, r, dp, bp);
+    if (type == 1)
+        return launch_la_cols<__half>(s, q, k, v, d, be, sin, st, o, a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], scale, r, dp, bp);
+    if (type == 2)
+        return launch_la_cols<__hip_bfloat16>(s, q, k, v, d, be, sin, st, o, a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], scale, r, dp, bp);
+    return 1;
+}
+
+static bool la_cols_enabled() {
+    static const bool on = [] {
+        const char* e = std::getenv("HIPDNN_EP_LA_COLS");
+        return !(e && e[0] == '0');
+    }();
+    return on;
+}
+
+extern "C" int hip_linear_attention_burst(
+    void* stream, const void* query, const void* key, const void* value,
+    const void* decay, const void* beta, const void* past_state, void* state,
+    void* output, int64_t B, int64_t seq_len, int64_t Hq, int64_t Hkv, int64_t Nk,
+    int64_t dk, int64_t dv, float scale, int64_t update_rule,
+    int64_t decay_per_key_dim, int64_t beta_per_head, int64_t type)
+{
+    if (!la_cols_enabled() || B <= 0 || seq_len <= 0 || Hq <= 0 || Hkv <= 0 || Nk <= 0 ||
+        Hkv % Nk != 0 || (Hq >= Hkv ? Hq % Hkv : Hkv % Hq) != 0)
+        return 1;
+    return la_cols_dispatch(stream, query, key, value, decay, beta, past_state, state,
+                            output, B, seq_len, seq_len, Hq, Hkv, Nk, dk, dv, scale,
+                            update_rule, decay_per_key_dim, beta_per_head, type);
+}
+
+//===----------------------------------------------------------------------===//
 // Host-side launcher
 //===----------------------------------------------------------------------===//
 
@@ -571,6 +827,15 @@ extern "C" int hip_linear_attention_decode(
                 "increase the kernel-side bound to support this GQA ratio\n",
                 num_q_heads, MAX_Q_HEADS);
         return -1;
+    }
+
+    if (la_cols_enabled()) {
+        const int rc = la_cols_dispatch(stream, query, key, value, decay, beta, state,
+                                        state, output, B, seq_len, /*n_tok=*/1, Hq, Hkv, Nk, dk,
+                                        dv, scale, update_rule, decay_per_key_dim,
+                                        beta_per_head, type);
+        if (rc <= 0)
+            return rc;
     }
 
     // smem layout: k_smem[dk] | v_smem[dv] | aux_smem[dk] | sk_smem[dv] |

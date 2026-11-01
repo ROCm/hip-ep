@@ -219,7 +219,9 @@ ReduceProdToHip::matchAndRewrite(mlir::Operation *op,
   auto keepdimsAttr = rewriter.getI64IntegerAttr(keepdims);
   auto noopAttr = rewriter.getI64IntegerAttr(noopWithEmptyAxes);
   auto hipOp = mlir::hip::ReduceProdOp::create(
-      rewriter, loc, context, data, axesOperand, init, keepdimsAttr, noopAttr);
+      rewriter, loc, context, data, axesOperand, init, keepdimsAttr, noopAttr,
+      getConstantReducedAxesAttr(rewriter, data, axesOperand,
+                                 noopWithEmptyAxes));
 
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();

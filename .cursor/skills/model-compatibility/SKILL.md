@@ -117,7 +117,39 @@ For an `unsupported` operator, also name the closest existing
 implementation in `lib/Runtime/real/`. There is no rule table for this.
 
 There is no verification pass to run: the verdicts come from the compiler,
-so there is nothing to second-guess.
+so there is nothing to second-guess. Do not put ORT session creation in the
+report. The dump uses an init-only config and `--allow-cpu-fallback`, so a
+CPU kernel error during that dump is not evidence about the HIP EP.
+
+### Kernel attribute support
+
+`partial` only means the converter never read an attribute. An attribute
+the probe calls `handled` can still be a value the kernel does not
+implement. The status stays `supported` or `partial`, and the report is
+wrong if that value is left out.
+
+Do this for every operator whose Backend names a `wrap_*` symbol, including
+ones marked `supported`. There is no list of operators or attribute names
+to check. A value is unsupported only when the code you open for this
+operator says so.
+
+1. Take every attribute on one EP-input instance (`ep_input_ops.json`, or
+   the details file when the operator is already on the worklist).
+2. Open the HipToLLVM lowering for the `hip.*` op this operator became
+   (`lib/Conversion/HipToLLVM/`). For each attribute, the accepted set is
+   the literals that attribute is compared with: a chain of equality tests,
+   or the arms of a switch. If this model's value is not in that set and
+   control falls through to a default without an error, add a row. Quote
+   the comparisons and the value the default becomes.
+3. Open the runtime file under `lib/Runtime/real/` that defines the
+   `wrap_*` symbol. For each attribute that arrives as a parameter, if an
+   early return's condition is true for this model's value, add a row and
+   quote that condition.
+
+Append the rows to `<OutputDir>/model_compatibility_report.md` under
+`## Kernel attribute support`, then quote that section in the reply, after
+the supported percentage and the worklist. If every value this model sets
+is implemented, the section is one line: `None.`
 
 ## Evidence levels
 
@@ -143,8 +175,9 @@ percentage would be the same failure in a different form.
 ## Reporting back
 
 Read the generated markdown; do not re-derive the numbers. Lead with the
-supported percentage and the worklist, in that order. Mention the evidence
-level only when it is not A.
+supported percentage and the worklist, then `## Kernel attribute support`.
+Do not report whether the ORT session loaded. Mention the evidence level
+only when it is not A.
 
 ## Batch
 
@@ -172,6 +205,8 @@ that only after the loop has proved itself more than a few times.
 - [ ] Read model_compatibility_report.md
 - [ ] Filled in converter source and root cause for every blocked,
       lowering-broken and partial entry
+- [ ] Appended `## Kernel attribute support` for every `wrap_*` operator
+      whose attribute value this model sets the kernel does not implement
 - [ ] Reported the evidence level if it was not A
 - [ ] At level D, led with the upper-bound caveat
 ```

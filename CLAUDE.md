@@ -16,7 +16,7 @@ This file gives coding agents the repository-wide rules and entry points needed 
 
 ## Project overview
 
-hip-ep is an ONNX Runtime Execution Provider for AMD GPUs. The compiler lowers ONNX operations through a custom MLIR HIP dialect to LLVM IR. Generated code dispatches to hipDNN, hipBLASLt, and custom HIP kernels.
+hip-ep is an ONNX Runtime Execution Provider for AMD GPUs. The compiler lowers ONNX operations through a custom MLIR HIP dialect to LLVM IR. Generated code dispatches to hipBLASLt and custom HIP kernels.
 
 The default per-model artifact is OS-portable LLVM bitcode. The Execution Provider JIT-loads it in-process together with embedded runtime bitcode. Native `.dll`/`.so` model artifacts are an opt-in mode.
 
@@ -140,9 +140,20 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for PR, formatting, AI-disclosure, and co
 - Keep tiny host-written shape buffers out of the GPU pool; `hip-materialize-host-scalars` redirects them to host-mapped scratch.
 - See [docs/design/hip-shape-inference.md](docs/design/hip-shape-inference.md).
 
+### Result-shape agreement
+
+- Converter destination construction and `reifyResultShapes` must validate
+  through the same `HipShapeUtils` shape rule. Validate dynamic destination
+  changes separately from static shape-rule refactoring.
+- Each category splits into a pure `infer*` function of static shapes and a `reify*` function that may emit index SSA. A `reify*` helper must validate through its `infer*` counterpart **before** touching the builder: a rewrite or reification that reports failure must leave the IR unchanged.
+- Keep shape machinery internal: only `infer*`/`reify*` rules belong in `HipShapeUtils.h`, while dimension maps and static folds stay file-static. Frontend-neutral conversion helper bodies belong in `HipConversionUtils.cpp`; `OnnxToHipUtils` retains ONNX import semantics and pattern-facing templates.
+- Express "not known at compile time" as `std::optional`, not a parallel `bool` flag, so a caller cannot pass a value that contradicts the flag.
+- See [docs/design/hip-shape-inference.md](docs/design/hip-shape-inference.md).
+
 ### Allocation and memory planning
 
 - Every transient allocation must be pooled or rewritten as an output allocation. Leftover `hip.alloc`/`memref.alloc` paths are not a supported per-inference allocator strategy.
+- Runtime-owned device transients (pools, workspace, op scratch) must be allocated and freed with `hipdnn_ep_state_device_alloc`/`hipdnn_ep_state_device_free`, never raw `hipMalloc`/`hipFree`, so they are served from the session transient arena.
 - Preserve the ordering and dominance requirements documented in [docs/design/pool-allocs-memory-planning.md](docs/design/pool-allocs-memory-planning.md).
 - `HIPDNN_EP_BUFFERIZE_COPY_BEFORE_WRITE=1` is an opt-in compile-time escape hatch for extremely large single-function graphs: it skips One-Shot Bufferize's expensive RaW analysis by copying before writes. Keep it off by default because the extra copies can reduce runtime performance.
 - HIP runtime calls consume contiguous bare pointers unless their ABI explicitly carries layout metadata. Materialize non-contiguous inputs before such calls.

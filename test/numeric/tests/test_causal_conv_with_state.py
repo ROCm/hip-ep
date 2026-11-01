@@ -170,6 +170,66 @@ def _make_channels_last_model(
     )
 
 
+def _make_nlc_state_model(
+    batch: int,
+    channels: int,
+    seq_len: int,
+    kernel_size: int,
+    dilation: int,
+    with_bias: bool,
+    dtype: np.dtype = np.float16,
+    with_past: bool = True,
+):
+    """ONNX `channels_last = 1`: input, output and state are all channels-last,
+    and the state holds (K - 1) * dilation positions."""
+    tp = _NP_TO_TP[dtype]
+    state_len = (kernel_size - 1) * dilation
+
+    X = helper.make_tensor_value_info("input", tp, [batch, seq_len, channels])
+    State = helper.make_tensor_value_info(
+        "past_state", tp, [batch, state_len, channels]
+    )
+    Y = helper.make_tensor_value_info("output", tp, [batch, seq_len, channels])
+    Present = helper.make_tensor_value_info(
+        "present_state", tp, [batch, state_len, channels]
+    )
+
+    rng = np.random.default_rng(0xD11A)
+    weight = (rng.standard_normal((channels, 1, kernel_size)) * 0.1).astype(dtype)
+    initializers = [numpy_helper.from_array(weight, name="weight")]
+    inputs_w = ["input", "weight"]
+    if with_bias:
+        bias = (rng.standard_normal((channels,)) * 0.05).astype(dtype)
+        initializers.append(numpy_helper.from_array(bias, name="bias"))
+        inputs_w.append("bias")
+    else:
+        inputs_w.append("")
+    if with_past:
+        inputs_w.append("past_state")
+
+    node = helper.make_node(
+        "CausalConvWithState",
+        inputs_w,
+        ["output", "present_state"],
+        domain="com.microsoft",
+        activation="silu",
+        ndim=1,
+        channels_last=1,
+        dilation=dilation,
+        state_window=0,
+    )
+
+    ms_opset = helper.make_opsetid("com.microsoft", 1)
+    return make_model_from_nodes(
+        [node],
+        [X, State] if with_past else [X],
+        [Y, Present],
+        initializers=initializers,
+        opset=17,
+        extra_opsets=[ms_opset],
+    )
+
+
 class TestCausalConvWithState:
     """SiLU is the only activation observed in chunk_opt; we additionally
     cover 'none' on a tiny shape so a regression in the activation branch
@@ -394,3 +454,44 @@ class TestCausalConvWideKernel:
 
         actual, expected = model_runner.run_sample(model, [x, state])
         compare_outputs(actual, expected, atol=5e-3, rtol=1e-2)
+
+    @pytest.mark.parametrize(
+        "seq_len,dilation,with_bias,dtype,channels,with_past",
+        [
+            # Qwen3.8 ple_conv: K=4, dilation=3, no bias, state (B, 9, C).
+            (1, 3, False, np.float16, 96, True),
+            (4, 3, False, np.float16, 96, True),  # seq_len < state_len
+            (128, 3, False, np.float16, 96, True),
+            (16, 1, True, np.float16, 96, True),
+            (37, 2, True, np.float32, 96, True),
+            (5, 3, False, np.float16, 300, True),
+            (6, 3, True, np.float32, 96, False),
+        ],
+    )
+    def test_ccws_channels_last_state_dilation(
+        self, model_runner, seq_len, dilation, with_bias, dtype, channels, with_past
+    ):
+        batch, kernel_size = 2, 4
+        model = _make_nlc_state_model(
+            batch,
+            channels,
+            seq_len,
+            kernel_size,
+            dilation,
+            with_bias,
+            dtype,
+            with_past,
+        )
+
+        rng = np.random.default_rng(0xA0 + seq_len + dilation)
+        x = (rng.standard_normal((batch, seq_len, channels)) * 0.5).astype(dtype)
+        state = (
+            rng.standard_normal((batch, (kernel_size - 1) * dilation, channels)) * 0.5
+        ).astype(dtype)
+
+        feeds = [x, state] if with_past else [x]
+        actual, expected = model_runner.run_sample(model, feeds)
+        if dtype == np.float32:
+            compare_outputs(actual, expected, atol=1e-4, rtol=1e-4)
+        else:
+            compare_outputs(actual, expected, atol=2e-3, rtol=1e-2)

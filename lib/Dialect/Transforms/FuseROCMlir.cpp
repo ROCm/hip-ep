@@ -68,6 +68,16 @@ public:
     SetVector<Value> operands;
     SetVector<Operation *> ops;
 
+    // An i32 matmul or convolution has an exact HIP kernel. Outlining it
+    // asks rocMLIR to compile a non-quantized integer tosa op, which this
+    // pipeline does not establish. Leave the op in main_graph.
+    for (Type type : anchorOp->getOperandTypes()) {
+      auto shaped = dyn_cast<ShapedType>(type);
+      if (shaped && shaped.getElementType().isInteger(32))
+        return rewriter.notifyMatchFailure(
+            anchorOp, "i32 anchor stays on the HIP kernel");
+    }
+
     // Fail on dynamic shapes
     for (Value operand : anchorOp->getOperands()) {
       if (auto tensorType = dyn_cast<TensorType>(operand.getType());
@@ -118,6 +128,25 @@ public:
       kernelOperands.insert(operand);
     }
     operands = std::move(kernelOperands);
+
+    // A bitsandbytes dequant that feeds only this anchor belongs in the same
+    // rock kernel. HipToTosa turns it into a nibble lookup and a multiply, and
+    // the matmul into tosa.matmul. A dynamic activation never reaches this
+    // pattern, so that case stays a HIP dequant plus hipBLASLt.
+    SmallVector<Value> dequantResults;
+    for (Value operand : operands) {
+      auto dequant = operand.getDefiningOp<DequantBnb4Op>();
+      if (!dequant || !dequant->hasOneUse())
+        continue;
+      dequantResults.push_back(operand);
+    }
+    for (Value value : dequantResults) {
+      auto dequant = value.getDefiningOp<DequantBnb4Op>();
+      ops.insert(dequant);
+      operands.remove(value);
+      operands.insert(dequant.getPacked());
+      operands.insert(dequant.getAbsmax());
+    }
 
     // `ops` is cloned into an IsolatedFromAbove func, so every value it reads
     // has to resolve inside that func. The DPS inputs above cover the data,

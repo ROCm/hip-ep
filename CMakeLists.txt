@@ -30,17 +30,22 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Experimental attention implementation; graph and runtime ABIs are unchanged.
-set(HIP_EP_GQA_IMPL "existing" CACHE STRING "GQA attention implementation")
-set_property(CACHE HIP_EP_GQA_IMPL PROPERTY STRINGS existing ring_q_resident ring_kv_outer)
-if(HIP_EP_GQA_IMPL STREQUAL "existing")
-  set(HIP_EP_GQA_IMPL_ID 0)
-elseif(HIP_EP_GQA_IMPL STREQUAL "ring_q_resident")
-  set(HIP_EP_GQA_IMPL_ID 1)
-elseif(HIP_EP_GQA_IMPL STREQUAL "ring_kv_outer")
-  set(HIP_EP_GQA_IMPL_ID 2)
+# Compile the experimental implementation; runtime dispatch remains opt-in.
+option(HIP_EP_ENABLE_TURBOQUANT "Build TurboQuant KV kernels (runtime opt-in)" ON)
+if(HIP_EP_ENABLE_TURBOQUANT)
+  set(HIP_EP_TURBOQUANT_ENABLED 1)
 else()
-  message(FATAL_ERROR "HIP_EP_GQA_IMPL must be existing, ring_q_resident, or ring_kv_outer")
+  set(HIP_EP_TURBOQUANT_ENABLED 0)
+endif()
+
+option(HIP_EP_ENABLE_RING_ATTENTION "Build Ring attention (runtime opt-in)" ON)
+if(DEFINED HIP_EP_GQA_IMPL)
+  message(FATAL_ERROR "HIP_EP_GQA_IMPL was replaced by HIP_EP_ENABLE_RING_ATTENTION=ON/OFF")
+endif()
+if(HIP_EP_ENABLE_RING_ATTENTION)
+  set(HIP_EP_RING_ENABLED 1)
+else()
+  set(HIP_EP_RING_ENABLED 0)
 endif()
 
 if(WIN32)
@@ -236,6 +241,12 @@ add_subdirectory(lib)
 # Must come AFTER lib/Runtime (RuntimeBitcode dep) and BEFORE tools/
 # (tools/hip-test links morphizen-custom-op-mlir).
 add_subdirectory(backend-mlir-compiler)
+
+# Test-only pass registrations used by hip-mlir-opt LIT coverage.
+# Define the library before configuring tools so the target is linked by name.
+if(BUILD_HIP_UNIT_TESTS)
+  add_subdirectory(test/lib/Dialect/Hip)
+endif()
 
 # Executable targets
 add_subdirectory(tools)

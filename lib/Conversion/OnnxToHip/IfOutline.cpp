@@ -10,8 +10,14 @@
 // `main_graph`.
 //
 // Transformations performed per onnx.If:
-//   1. Collect free variables (captures) used inside each branch.
-//   2. Unbox the ONNX-style 0-D-tensor `cond` operand to `i1`.
+//   1. Collect free variables (captures) from both branches. Each outlined
+//      function takes that union, in one order, so the hip.if trampoline
+//      can call either body with the same capture list.
+//   2. Unbox the single-element `cond` operand to `i1`. ONNX requires one
+//      element, not a rank-0 tensor: `Greater` of `tensor<1xf32>` and a
+//      scalar broadcasts to `tensor<1xui8>`. A unit-rank condition is
+//      collapsed to rank 0 and read back with `hip.readback_scalar`,
+//      because that value is GPU-computed.
 //   3. Materialize `tensor.empty` DPS inits for each If output.
 //   4. Outline each branch region into a private func.func and replace
 //      `onnx.Yield` with `func.return`.
@@ -26,6 +32,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "ReadbackScalar.h"
 #include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Dialect/IR/HipDialect.h"
 
@@ -48,39 +55,93 @@ namespace mlir {
 namespace hip {
 namespace {
 
-/// Materialize an `i1` scalar from a 0-D BOOL-like tensor operand.
-/// Same importer spellings as `onnx-loop-outline` (tensor<i1>, ui8, i8).
-static FailureOr<Value> unboxCond(OpBuilder &builder, Location loc,
+/// True when every dimension is static and the tensor holds one element.
+/// ONNX `If` requires a single element; rank may be greater than 0.
+static bool isSingleElement(RankedTensorType type) {
+  if (type.getNumDynamicDims() != 0)
+    return false;
+  int64_t count = 1;
+  for (int64_t dim : type.getShape()) {
+    if (dim <= 0)
+      return false;
+    count *= dim;
+  }
+  return count == 1;
+}
+
+/// Collapse a static unit tensor (`tensor<1xui8>`, `tensor<1x1xui8>`, ...)
+/// to a rank-0 tensor of the same element type.
+static FailureOr<Value> collapseUnitToRank0(OpBuilder &builder, Location loc,
+                                            Value cond, RankedTensorType type) {
+  if (type.getRank() == 0)
+    return cond;
+  Type elemType = type.getElementType();
+  Value current = cond;
+  if (type.getRank() > 1) {
+    SmallVector<ReassociationIndices, 1> reassoc(1);
+    for (int64_t axis : llvm::seq<int64_t>(0, type.getRank()))
+      reassoc.front().push_back(axis);
+    current = tensor::CollapseShapeOp::create(
+        builder, loc, RankedTensorType::get({1}, elemType), current, reassoc);
+  }
+  return tensor::CollapseShapeOp::create(
+             builder, loc, RankedTensorType::get({}, elemType), current,
+             ArrayRef<ReassociationIndices>{})
+      .getResult();
+}
+
+/// Materialize an `i1` scalar from a single-element BOOL-like tensor.
+/// Same importer spellings as `onnx-loop-outline` (i1, ui8, i8).
+///
+/// A rank-0 non-constant still uses `tensor.extract` (the historical path).
+/// A unit tensor of higher rank is collapsed and read back with
+/// `hip.readback_scalar`: the producer is a device kernel (`onnx.Greater`
+/// of a length-1 vector broadcasts to `tensor<1xui8>`), and a bare extract
+/// would load device memory without a stream sync.
+static FailureOr<Value> unboxCond(OpBuilder &builder, Location loc, Value ctx,
                                   Value condTensor) {
-  auto t = dyn_cast<RankedTensorType>(condTensor.getType());
-  if (!t || t.getRank() != 0)
+  auto type = dyn_cast<RankedTensorType>(condTensor.getType());
+  if (!type || !isSingleElement(type))
     return failure();
-  auto intTy = dyn_cast<IntegerType>(t.getElementType());
+  auto intTy = dyn_cast<IntegerType>(type.getElementType());
   if (!intTy)
     return failure();
   unsigned width = intTy.getWidth();
   if (width != 1 && width != 8)
     return failure();
 
-  if (Operation *defOp = condTensor.getDefiningOp()) {
-    if (defOp->getName().getStringRef() == "onnx.Constant") {
-      if (auto attr = defOp->getAttrOfType<DenseElementsAttr>("value")) {
-        auto at = dyn_cast<RankedTensorType>(attr.getType());
-        if (at && at.getRank() == 0 && at.getElementType() == intTy) {
-          bool truthy = (*attr.getValues<APInt>().begin()).getZExtValue() != 0;
-          return arith::ConstantIntOp::create(builder, loc, builder.getI1Type(),
-                                              truthy ? 1 : 0)
-              .getResult();
-        }
-      }
+  if (DenseElementsAttr dense = getConstantDense(condTensor)) {
+    if (dense.getNumElements() == 1) {
+      bool truthy = (*dense.getValues<APInt>().begin()).getZExtValue() != 0;
+      return arith::ConstantIntOp::create(builder, loc, builder.getI1Type(),
+                                          truthy ? 1 : 0)
+          .getResult();
     }
   }
 
-  Value extracted =
-      tensor::ExtractOp::create(builder, loc, condTensor, ValueRange{});
+  Value scalarTensor = condTensor;
+  if (type.getRank() != 0) {
+    FailureOr<Value> collapsed =
+        collapseUnitToRank0(builder, loc, condTensor, type);
+    if (failed(collapsed))
+      return failure();
+    scalarTensor = *collapsed;
+  }
+
+  // A rank-0 i1 is already the branch bit. Everything else is read back:
+  // the unit-tensor case is a device value, and ui8/i8 need a host byte.
+  Value extracted;
+  if (type.getRank() == 0 && width == 1) {
+    extracted =
+        tensor::ExtractOp::create(builder, loc, scalarTensor, ValueRange{});
+    return extracted;
+  }
+  extracted = readbackScalarToHost(builder, loc, ctx, scalarTensor);
   if (width == 1)
     return extracted;
 
+  // arith.cmpi takes a signless integer. ui8 and i8 lower to the same LLVM
+  // integer; HipToLLVM folds this cast once both types have been converted.
   Type signlessI8 = builder.getIntegerType(8);
   if (!intTy.isSignless()) {
     extracted = UnrealizedConversionCastOp::create(
@@ -111,10 +172,22 @@ createIfOutputInits(OpBuilder &b, Location loc, TypeRange resultTypes) {
   return inits;
 }
 
+/// Values defined outside `region` and used inside it, in first-use order.
+static LogicalResult collectBranchCaptures(Region &region,
+                                           llvm::SetVector<Value> &out) {
+  if (!region.hasOneBlock())
+    return failure();
+  llvm::SetVector<Value> captures;
+  getUsedValuesDefinedAbove(region, captures);
+  for (Value c : captures)
+    out.insert(c);
+  return success();
+}
+
 static LogicalResult outlineBranch(Region &region, Location loc,
                                    ModuleOp module, func::FuncOp parentFn,
                                    llvm::StringRef suffix, unsigned &counter,
-                                   llvm::SetVector<Value> &capturesUnion,
+                                   llvm::ArrayRef<Value> signatureCaptures,
                                    std::string &fnNameOut) {
   if (!region.hasOneBlock())
     return failure();
@@ -126,15 +199,14 @@ static LogicalResult outlineBranch(Region &region, Location loc,
   if (yieldOp->getName().getStringRef() != "onnx.Yield")
     return failure();
 
-  llvm::SetVector<Value> captures;
-  getUsedValuesDefinedAbove(region, captures);
-  for (Value c : captures)
-    capturesUnion.insert(c);
-
+  // Both branches take the union, in the same order hip.if passes it.
+  // A value used only on the other side is an unused argument here. The
+  // HipToLLVM trampoline calls both bodies with that one capture list plus
+  // the out-params, so a per-branch signature fails legalization.
   MLIRContext *ctx = region.getContext();
   Type ctxType = ContextType::get(ctx);
   SmallVector<Type> argTypes = {ctxType};
-  for (Value c : captures)
+  for (Value c : signatureCaptures)
     argTypes.push_back(c.getType());
 
   SmallVector<Type> resultTypes;
@@ -162,7 +234,7 @@ static LogicalResult outlineBranch(Region &region, Location loc,
   Block *entry = newFn.addEntryBlock();
   IRMapping mapping;
   unsigned argIdx = 1;
-  for (Value c : captures)
+  for (Value c : signatureCaptures)
     mapping.map(c, entry->getArgument(argIdx++));
 
   OpBuilder bodyBuilder(entry, entry->end());
@@ -227,15 +299,20 @@ LogicalResult OnnxIfOutlinePass::outlineIf(Operation *ifOp, unsigned &counter) {
     return ifOp->emitOpError("then/else yield operand count mismatch");
 
   llvm::SetVector<Value> capturesUnion;
+  if (failed(collectBranchCaptures(thenRegion, capturesUnion)) ||
+      failed(collectBranchCaptures(elseRegion, capturesUnion)))
+    return ifOp->emitOpError("failed to collect branch captures");
+
   std::string thenFnName;
   std::string elseFnName;
   auto parentFn = ifOp->getParentOfType<func::FuncOp>();
+  llvm::ArrayRef<Value> signatureCaptures = capturesUnion.getArrayRef();
 
   if (failed(outlineBranch(thenRegion, loc, module, parentFn, "_if_then_n",
-                           counter, capturesUnion, thenFnName)))
+                           counter, signatureCaptures, thenFnName)))
     return ifOp->emitOpError("failed to outline then_branch");
   if (failed(outlineBranch(elseRegion, loc, module, parentFn, "_if_else_n",
-                           counter, capturesUnion, elseFnName)))
+                           counter, signatureCaptures, elseFnName)))
     return ifOp->emitOpError("failed to outline else_branch");
 
   if (!parentFn || parentFn.getNumArguments() == 0 ||
@@ -246,10 +323,12 @@ LogicalResult OnnxIfOutlinePass::outlineIf(Operation *ifOp, unsigned &counter) {
   Value ctxVal = parentFn.getArgument(0);
 
   OpBuilder outerBuilder(ifOp);
-  FailureOr<Value> condI1 = unboxCond(outerBuilder, loc, ifOp->getOperand(0));
+  FailureOr<Value> condI1 =
+      unboxCond(outerBuilder, loc, ctxVal, ifOp->getOperand(0));
   if (failed(condI1))
-    return ifOp->emitOpError("could not unbox cond to i1 (expected 0-D "
-                             "tensor<i1>, tensor<i8>, or tensor<ui8>, got ")
+    return ifOp->emitOpError(
+               "could not unbox cond to i1 (expected a single-element "
+               "tensor<i1>, tensor<i8>, or tensor<ui8>, got ")
            << ifOp->getOperand(0).getType() << ")";
 
   FailureOr<SmallVector<Value>> oInits =

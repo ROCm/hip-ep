@@ -294,6 +294,7 @@ extern "C" HIP_KERNEL_API int hip_tq4_encode_append(
       past < 0 || capacity < 1 || capacity > 262144 ||
       int64_t(past) + count > capacity || pk == pv)
     return -1;
+  (void)hipGetLastError();
   hipLaunchKernelGGL(encode_append, dim3(G, count, 2), dim3(D), 0,
                     static_cast<hipStream_t>(stream), static_cast<const half *>(key),
                     static_cast<const half *>(value), static_cast<uint32_t *>(pk),
@@ -313,6 +314,7 @@ extern "C" HIP_KERNEL_API int hip_tq4_decode(
   hipStream_t s = static_cast<hipStream_t>(stream);
   float *qr = static_cast<float *>(workspace), *partial = qr + H * D;
   int parts = partitions(length);
+  (void)hipGetLastError();
   hipLaunchKernelGGL(rotate_query, dim3(H), dim3(D), 0, s,
                     static_cast<const half *>(query), qr, pi);
   if (hipGetLastError() != hipSuccess)
@@ -332,8 +334,8 @@ extern "C" HIP_KERNEL_API int hip_tq4_decode(
 }
 
 extern "C" HIP_KERNEL_API size_t hip_tq4_prefill_workspace(int count) {
-#if HIP_EP_GQA_IMPL_ID != 0 && HIP_EP_RING_DEVICE_ENABLED
-  if (count < 1 || count > 131072)
+#if HIP_EP_RING_ENABLED && HIP_EP_RING_DEVICE_ENABLED
+  if (count < 1 || count > HIP_EP_RING_MAX_QUERY_LENGTH)
     return 0;
   const size_t rows = size_t(count < APPEND_CHUNK ? count : APPEND_CHUNK) * H;
   return rows * (D * sizeof(half) + (2 * D + 2) * sizeof(float));
@@ -348,9 +350,9 @@ extern "C" HIP_KERNEL_API int hip_tq4_prefill(
     const void *pk, const void *pv, void *output, int count, int past,
     int capacity, const float *pi, const float *cbk, const float *cbv,
     void *workspace, size_t bytes) {
-  // The default GQA build omits ring_gqa.hip entirely. Do not reference Ring
-  // exports there, or in an architecture slice that cannot execute Ring.
-#if HIP_EP_GQA_IMPL_ID != 0 && HIP_EP_RING_DEVICE_ENABLED
+  // Ring can be excluded at build time. Keep this export linkable in that
+  // configuration and in architecture slices that cannot execute Ring.
+#if HIP_EP_RING_ENABLED && HIP_EP_RING_DEVICE_ENABLED
   const size_t required = hip_tq4_prefill_workspace(count);
   if (!required || !query || !key || !value || !pk || !pv || !output ||
       !pi || !cbk || !cbv || !workspace || bytes < required || past < 1 ||

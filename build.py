@@ -386,7 +386,7 @@ def run_tests(args, build_dir):
             "-C",
             args.config,
             "-R",
-            "StaticPlugins|OutputAllocator|LdsBarrierArchGate",
+            "StaticPlugins|OutputAllocator|LdsBarrierArchGate|AdaptiveBenchmark",
             "--output-on-failure",
         ]
     )

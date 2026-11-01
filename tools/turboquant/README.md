@@ -23,8 +23,8 @@ dependency setup. This walkthrough is not a new Linux qualification.
 
 ### 1. Select source, environment and paths
 
-Use this PR's branch, including its Ring PR #1252 dependency; a checkout of
-Ring alone is insufficient. Work in an isolated directory so existing benchmark
+Use the upstream `users/rajeevp/turboquant-kv4` branch. Ring PR #1366 is
+already merged into main; this branch adds the packed cache implementation. Work in an isolated directory so existing benchmark
 installations remain unchanged. The commands below are **PowerShell** commands
 run from an x64 MSVC developer environment with CMake and Ninja on `PATH`.
 Choose an already prepared Python environment with the matching ORT/GenAI and
@@ -60,7 +60,8 @@ the recorded model qualification.
 ```powershell
 & $Python build.py --hip_arch gfx1151 --config Release --cmake_generator Ninja `
   --build_dir $HipBuild --install_dir $HipInstall --therock_dist $RocmDevel `
-  --cmake_extra_defines HIP_EP_GQA_IMPL=ring_kv_outer `
+  --cmake_extra_defines HIP_EP_ENABLE_RING_ATTENTION=ON `
+  --cmake_extra_defines HIP_EP_ENABLE_TURBOQUANT=ON `
   --cmake_extra_defines "FETCHCONTENT_SOURCE_DIR_ONNXRUNTIME=$OrtSdk" `
   --cmake_extra_defines HIP_EP_GENERATE_TQ_CODEC=ON `
   --cmake_extra_defines "Python3_EXECUTABLE=$Python" `
@@ -72,12 +73,13 @@ local dependency prefixes as described in the Windows quick start. The codec
 target produces `reference/codec/{codec.bin,constants.npz,manifest.json}` and
 installs `codec.bin`/`manifest.json` under
 `$HipInstall/share/hip-ep/turboquant`. Generation does **not** enable quantization
-by itself; step 4 supplies the runtime options. `ring_q_resident` is an alternative
-prefill schedule, but the append GPU measurements use `ring_kv_outer`.
+by itself; step 4 supplies the runtime options. Both build options default to ON.
+Ordinary inference still uses upstream GQA. Set `HIPDNN_EP_USE_RING_ATTENTION=1`
+before process startup for dense Ring; packed-cache options explicitly select
+Ring prefill plus TurboQuant decode/append.
 
-The default `HIP_EP_GQA_IMPL=existing` build does not include Ring and cannot
-enable TurboQuant. In that build, and in architecture slices where Ring is
-disabled, `hip_tq4_prefill_workspace` returns zero and `hip_tq4_prefill` returns
+With `HIP_EP_ENABLE_RING_ATTENTION=OFF`, TurboQuant append is unavailable.
+In that build, and in architecture slices where Ring is disabled, `hip_tq4_prefill_workspace` returns zero and `hip_tq4_prefill` returns
 `hipErrorNotSupported` without accessing GPU memory. These exports must remain
 linkable even when `ring_gqa.hip` is omitted. To check such a library (with the
 ROCm runtime on the loader path), run:
@@ -360,8 +362,11 @@ for results and limitations.
 The `benchmark/` files are the development harness used for the tables. Copy
 them into `work/scripts/` (their parent directory defines the work root), and
 use `work/venv/Scripts/python.exe`. They expect ROCm SDK packages under that
-interpreter's base environment. Build three separate installs with the normal
-repository build procedure, changing `HIP_EP_GQA_IMPL`:
+interpreter's base environment. The tables below are historical measurements at the revisions recorded in the
+validation report. Their old build selector was removed upstream. To reproduce
+those historical builds, check out commit `2486d18` and select `HIP_EP_GQA_IMPL`.
+For current three-path measurements use the single-build
+[manual multi-turn test](../../test/long_context/README.md). Historical selections:
 
 | Selection | Install directory |
 | --- | --- |
@@ -421,3 +426,15 @@ are decomposed into weights, KV and residual other in the published table.
 Source formatting and replacing the private archived-reference path with an
 environment variable do not retroactively change recorded harness hashes.
 The metrics JSON retains the original measured binary and harness provenance.
+
+### Current upstream GenAI stack
+
+Current upstream CI applies GenAI PR #2691, which already adds AMDGPU continuous
+decoding. Do **not** apply the full stock-0.17 patch again on that stack. Apply
+only `tools/turboquant/patches/onnxruntime-genai-0.17-pending-append.patch` there
+(or use `git apply --include='src/decoding/*'` on the full patch). The current
+2685/2691/2705/2712/2792/2801 patch stack does not modify either standard-decoding
+file; the remaining patch is apply-checked against v0.17.0. It changes only
+pending-token flush before append, independent of KV precision. No rewind change
+is included. Local results identify the exact GenAI package used; applying a
+patch is not a claim that every CI dependency combination has been tested.

@@ -63,7 +63,7 @@ The codec file has a 40-byte header: eight little-endian uint32 values (magic `0
 
 ## Runtime and compiler integration
 
-The logical attention dimension and physical cache width are different. `GqaLowering` selects `wrap_group_query_attention_v2` for dynamic or packed widths and passes the actual four past/present K/V widths. Static dense shapes retain the existing ABI. The v2 dense path validates widths and delegates to existing GQA.
+The logical attention dimension and physical cache width are different. `GqaLowering` selects `wrap_group_query_attention_v3` for dynamic or packed widths and passes the actual four past/present K/V widths. Static dense shapes retain the existing ABI. The v3 ABI also carries compiler-proven FP16 tensor eligibility, preventing BF16 from entering packed kernels. The v3 dense path validates widths and delegates to existing GQA.
 
 The runtime checks geometry, feature flags, lengths, shared aliases, physical widths and overlapping ranges before encoding into the cache. It uses the EP stream and runtime-owned workspace. Codec errors and kernel failures propagate to an `OrtStatus`; the custom operator no longer reports successful output after a nonzero runtime return.
 
@@ -136,6 +136,17 @@ The patch includes a device-capability unit assertion; the exercised GPU
 integration checks cover repeated append, a pending token, cache bytes and
 resumed decode. See [append validation](turboquant-append-validation.md) for
 the measured scope and any remaining gates.
+
+
+Current upstream CI applies GenAI PR #2691, which already adds AMDGPU continuous
+decoding. Do **not** apply the full stock-0.17 patch again on that stack. Apply
+only `tools/turboquant/patches/onnxruntime-genai-0.17-pending-append.patch` there
+(or use `git apply --include='src/decoding/*'` on the full patch). The current
+2685/2691/2705/2712/2792/2801 patch stack does not modify either standard-decoding
+file; the remaining patch is apply-checked against v0.17.0. It changes only
+pending-token flush before append, independent of KV precision. No rewind change
+is included. Local results identify the exact GenAI package used; applying a
+patch is not a claim that every CI dependency combination has been tested.
 
 ## Validation and diagnostic memory accounting
 

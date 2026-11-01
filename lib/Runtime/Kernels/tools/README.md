@@ -3,11 +3,11 @@
 `check_kernel_resources.py` compiles every custom-kernel source (the
 `_kernel_sources` list in `../CMakeLists.txt`) with the product flags
 (`-O2`, `--offload-arch=gfx11-generic` and `gfx1170`, as in
-`../cmake/hip_utils.cmake`) and compares each kernel against the baselines next
-to it, `kernel_resources_<arch>.json`: VGPRs, scratch bytes per lane, spilled
-VGPRs and occupancy from the compiler's resource remarks, plus the instruction
-count and the number and total width of the LDS loads in its ISA. It needs only
-the HIP SDK; no CMake build and no GPU.
+`../cmake/hip_utils.cmake`, plus `gfx1151`) and compares each kernel against
+the baselines next to it, `kernel_resources_<arch>.json`: VGPRs, scratch bytes
+per lane, spilled VGPRs and occupancy from the compiler's resource remarks,
+plus the instruction count and the number and total width of the LDS loads in
+its ISA. It needs only the HIP SDK; no CMake build and no GPU.
 
 ## When to run it
 
@@ -32,7 +32,16 @@ python lib/Runtime/Kernels/tools/check_kernel_resources.py --rocm <HIP SDK root>
 ```
 
 `--rocm` defaults to `$HIP_PATH`. Takes a few minutes with the default job
-count (half the cores); `--sources gqa_kernel,matmul_nbits_kernel` limits it.
+count (half the cores); `--sources gqa_kernel,matmul_nbits_kernel` limits it,
+`--archs` picks the targets.
+
+Why gfx1151 next to the two product archs: register budgets follow the compile
+target (`HIPDNN_VGPRS_PER_SIMD` / `HIPDNN_WAVES_FOR_VGPRS` in
+`../include/hip_arch_compat.h`). gfx11-generic, the binary gfx1150 / 1151 /
+1152 run, and gfx1170 have 1024 VGPRs per SIMD; a gfx1151 build (the target the
+LUT sweeps used to be built for, and the usual developer build) has 1536. A
+change can fix the product binary and still spill or slow down in a gfx1151
+build, or the other way round, so both files are checked.
 
 ## Reading the report
 
@@ -43,7 +52,7 @@ count (half the cores); `--sources gqa_kernel,matmul_nbits_kernel` limits it.
 | `ERROR NARROWER LDS LOADS` | more than 10% more LDS load instructions moving no more bytes | usually a `__shared__` array read as vectors without a declared alignment: add `__align__(16)` |
 | `WARN OCCUPANCY DROP` | more VGPRs crossed an allocation step | usually harmless; matters for VGPR-limited kernels on 1024-VGPR parts |
 | `WARN MORE INSTRUCTIONS` | over 10% more instructions (`--insn-growth`) | compare the kernel's hot loop in `-S` output of both compilers; often index math the new compiler no longer simplifies |
-| `TIGHT` (with `--squeeze N`) | spill-free today with N to `--squeeze-max` VGPRs (default 128), spills when only N are available | less than (budget - N) registers of margin; the next compiler may tip it over. Use 112 / 128 for 1024-thread or `waves_per_eu(8)` kernels, 232 / 256 for the ones at the architectural limit |
+| `TIGHT` (with `--squeeze N`) | spill-free today with N to `--squeeze-max` VGPRs (default 128, 192 on gfx1151), spills when only N are available | less than (budget - N) registers of margin; the next compiler may tip it over. Use 112 / 128 for 1024-thread or `waves_per_eu(8)` kernels (176 / 192 with `--archs gfx1151`), 232 / 256 for the ones at the architectural limit |
 
 Exit status is 1 on any error. `--strict` turns the warnings into errors.
 
@@ -69,6 +78,33 @@ Kernels that use scratch in the new baseline are added to its `allow` map with
 a generated reason; replace it with the real one (pre-existing debt, a tuning
 candidate the tuner never picks, ...). Commit the JSON together with the
 compiler bump so the next bump compares against it.
+
+## What the current baselines accept
+
+The baselines are this tree built with the SDK pinned in `cmake/deps.txt`. The
+kernels below are worse there than with the previous SDK and are accepted as
+they are; their `allow` reasons mark them as known regressions.
+
+Kernels this change does not touch (their owners have the details and the
+prototyped fixes):
+
+- `conv_kernel`: `conv_tiled_kernel` 0 -> 260 B/lane of scratch with no spilled
+  VGPR (a data-dependent `break` keeps a register array in private memory), and
+  narrower LDS loads in 9 kernels.
+- `qgemm_kernel` / `qmatmul_kernel`: narrower LDS loads in 384 kernels each, and
+  the 1024-thread qgemm GEMV configs 104-116 -> 280-288 B (0 -> 96-108 B for
+  `<..., 32, 4, 16, 32, 64>`).
+- `qconv_kernel`, `qmoe_amd_kernel`, `nonzero_kernel`, `compress_kernel`:
+  narrower LDS loads (16 / 2 / 6 / 1 kernels).
+- `qmoe_kernel`: the TILE_N = 16 decode GEMV candidates 124 -> 140 B (fc2 dp4a
+  24 -> 80 B; 0 -> 68 B on gfx1151). `multi_head_attention_kernel`: one prefill
+  tile at the register limit (+4 B or more spilled values).
+
+In `matmul_nbits_kernel` and `gqa_kernel`:
+
+- GEMV candidates that already spilled with the previous SDK: i8 TILE_N = 16
+  256 -> 268 B, dp4a M-blocked `<*, 4, 8>` 80 -> 84 B and `<*, 8, 8>`
+  360 -> 364 B (48 -> 52 B on gfx1151). None is a LUT or heuristic pick.
 
 ## What usually fixes a regression
 

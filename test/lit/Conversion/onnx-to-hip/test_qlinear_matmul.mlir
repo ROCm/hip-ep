@@ -3,10 +3,11 @@
 
 // onnx.QLinearMatMul -> hip.qlinear_matmul
 //
-// Covers the MobileNetV3 int8 form: uint8 [1, K] times int8 [K, N], scalar
-// scales and zero points. Rank other than 2, per-column scales, and dynamic
-// scale shapes stay onnx.QLinearMatMul. A rank-1 tensor of one element is
-// still per-tensor.
+// uint8 [1, K] times int8 [K, N], with scalar scales and zero points, and the
+// same product when B's scale and zero point have one value per column. Rank
+// other than 2, a B scale whose length is neither 1 nor N, and dynamic scale
+// shapes stay onnx.QLinearMatMul. A rank-1 tensor of one element is still
+// per-tensor.
 //
 // RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
 
@@ -84,16 +85,31 @@ module {
     return %y : tensor<1x3xui8>
   }
 
-  // CHECK-LABEL: func.func @qlinear_matmul_per_column_rejected
-  // CHECK: onnx.QLinearMatMul
-  // CHECK-NOT: hip.qlinear_matmul
-  func.func @qlinear_matmul_per_column_rejected(
+  // CHECK-LABEL: func.func @qlinear_matmul_per_column
+  // CHECK: hip.qlinear_matmul
+  // CHECK-SAME: tensor<3xf32>
+  // CHECK-SAME: tensor<3xi8>
+  // CHECK-NOT: onnx.QLinearMatMul
+  func.func @qlinear_matmul_per_column(
       %a: tensor<1x4xui8>, %as: tensor<f32>, %az: tensor<ui8>,
       %b: tensor<4x3xi8>, %bs: tensor<3xf32>, %bz: tensor<3xi8>,
       %ys: tensor<f32>, %yz: tensor<ui8>) -> tensor<1x3xui8> {
     %y = "onnx.QLinearMatMul"(%a, %as, %az, %b, %bs, %bz, %ys, %yz)
         : (tensor<1x4xui8>, tensor<f32>, tensor<ui8>, tensor<4x3xi8>,
            tensor<3xf32>, tensor<3xi8>, tensor<f32>, tensor<ui8>) -> tensor<1x3xui8>
+    return %y : tensor<1x3xui8>
+  }
+
+  // CHECK-LABEL: func.func @qlinear_matmul_b_scale_length_rejected
+  // CHECK: onnx.QLinearMatMul
+  // CHECK-NOT: hip.qlinear_matmul
+  func.func @qlinear_matmul_b_scale_length_rejected(
+      %a: tensor<1x4xui8>, %as: tensor<f32>, %az: tensor<ui8>,
+      %b: tensor<4x3xi8>, %bs: tensor<2xf32>, %bz: tensor<i8>,
+      %ys: tensor<f32>, %yz: tensor<ui8>) -> tensor<1x3xui8> {
+    %y = "onnx.QLinearMatMul"(%a, %as, %az, %b, %bs, %bz, %ys, %yz)
+        : (tensor<1x4xui8>, tensor<f32>, tensor<ui8>, tensor<4x3xi8>,
+           tensor<2xf32>, tensor<i8>, tensor<f32>, tensor<ui8>) -> tensor<1x3xui8>
     return %y : tensor<1x3xui8>
   }
 }

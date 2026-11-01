@@ -23,6 +23,8 @@
 
 static int reduce_min_hipdnn_to_hip_dtype(int64_t hipdnn_type) {
   switch (hipdnn_type) {
+  case HIPDNN_EP_DATATYPE_FLOAT:
+    return HIP_DTYPE_FLOAT32;
   case HIPDNN_EP_DATATYPE_HALF:
     return HIP_DTYPE_FLOAT16;
   case HIPDNN_EP_DATATYPE_INT32:
@@ -87,7 +89,7 @@ int wrap_reduce_min(RuntimeState *state, void *data, void *axes, void *output,
   if (hip_dtype < 0) {
     fprintf(stderr,
             "[REAL] wrap_reduce_min: unsupported data_type=%s(%lld) "
-            "(supported: f16, i32, i64)\n",
+            "(supported: f32, f16, i32, i64)\n",
             hipdnn_ep_datatype_name(data_type), (long long)data_type);
     return -1;
   }

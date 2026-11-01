@@ -38,7 +38,6 @@ message(STATUS "[custom_kernels] Using HIP_ARCHITECTURES: ${HIP_ARCHITECTURES}")
 set(_kernel_sources
     hip/rope_kernel.hip
     hip/gqa_kernel.hip
-    hip/turboquant_kernel.hip
     hip/multi_head_attention_kernel.hip
     hip/gemm_wmma_kernel.hip
     hip/elementwise_sub_kernel.hip
@@ -75,6 +74,7 @@ set(_kernel_sources
     hip/batch_norm_kernel.hip
     hip/group_norm_kernel.hip
     hip/rms_norm_kernel.hip
+    hip/hyper_connection_kernel.hip
     hip/skip_rms_norm_kernel.hip
     hip/cast_kernel.hip
     hip/range_kernel.hip
@@ -82,21 +82,29 @@ set(_kernel_sources
     hip/gather_elements_kernel.hip
     hip/top_k_kernel.hip
     hip/random_normal_like_kernel.hip
+    hip/arg_max_kernel.hip
     hip/scatter_elements_kernel.hip
     hip/compress_kernel.hip
     hip/one_hot_kernel.hip
+    hip/ngram_hash_mapping_kernel.hip
     hip/reduce_sum_kernel.hip
     hip/pool_kernel.hip
     hip/conv_kernel.hip
+    hip/matmul_i32_kernel.hip
     hip/conv_transpose_kernel.hip
     hip/resize_kernel.hip
     hip/grid_sample_kernel.hip
     hip/global_pool_kernel.hip
     hip/matmul_nbits_kernel.hip
+    hip/gemv_f16_kernel.hip
+    hip/dequant_bnb4_kernel.hip
     hip/qmoe_kernel.hip
     hip/qmoe_ragged_mm_kernel.hip
     hip/qmoe_amd_kernel.hip
     hip/linear_attention_kernel.hip
+    hip/gated_delta_net_kernel.hip
+    hip/dynamic_sparse_attention_kernel.hip
+    hip/sparse_attention_indexer_kernel.hip
     hip/transpose_kernel.hip
     hip/causal_conv_step_kernel.hip
     hip/slice_kernel.hip
@@ -142,6 +150,8 @@ function(_lut_arch_members arch out_var)
         set(_m gfx1030 gfx1031 gfx1032 gfx1033 gfx1034 gfx1035 gfx1036)
     elseif(arch STREQUAL "gfx11-generic")
         set(_m gfx1100 gfx1101 gfx1102 gfx1103 gfx1150 gfx1151 gfx1152 gfx1153)
+    elseif(arch STREQUAL "gfx11-7-generic")
+        set(_m gfx1170 gfx1171 gfx1172)
     elseif(arch STREQUAL "gfx12-generic")
         set(_m gfx1200 gfx1201)
     else()
@@ -234,19 +244,25 @@ endfunction()
 # One SHARED target per arch. Each builds a fatbin with that single slice;
 # OFFLOAD_ARCHS narrows the global list to one element so the resulting
 # DLL/SO is not bloated with code for archs the consumer won't load.
-if(HIP_EP_GQA_IMPL_ID)
+if(HIP_EP_TURBOQUANT_ENABLED)
+    list(APPEND _kernel_sources hip/turboquant_kernel.hip)
+endif()
+
+if(HIP_EP_RING_ENABLED)
     list(APPEND _kernel_sources hip/ring/ring_gqa.hip)
 endif()
 
 foreach(_arch IN LISTS HIP_ARCHITECTURES)
     set(_ring_device_enabled 0)
-    if(_arch STREQUAL "gfx1151")
+    # gfx11-generic also runs on Strix Halo. Compile Ring into that release
+    # slice, but retain the gfx1151-only device guard in ring_gqa.hip.
+    if(_arch STREQUAL "gfx1151" OR _arch STREQUAL "gfx11-generic")
         set(_ring_device_enabled 1)
     endif()
-    set(_ring_compile_options "")
-    if(HIP_EP_GQA_IMPL_ID)
+    set(_ring_compile_options -DHIP_EP_TURBOQUANT_ENABLED=${HIP_EP_TURBOQUANT_ENABLED})
+    if(HIP_EP_RING_ENABLED)
         list(APPEND _ring_compile_options
-            -DHIP_EP_GQA_IMPL_ID=${HIP_EP_GQA_IMPL_ID}
+            -DHIP_EP_RING_ENABLED=${HIP_EP_RING_ENABLED}
             -DHIP_EP_RING_DEVICE_ENABLED=${_ring_device_enabled})
     endif()
     set(_target custom_kernels_${_arch})
@@ -269,7 +285,7 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
         DEPENDS
             HipSchemas
     )
-    if(HIP_EP_GQA_IMPL_ID AND NOT WIN32)
+    if(NOT WIN32)
         target_compile_options(${_target} PRIVATE ${_ring_compile_options})
     endif()
     set_target_properties(${_target} PROPERTIES

@@ -18,29 +18,30 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
   LogicalResult
   matchAndRewrite(GqaOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-#if HIP_EP_GQA_IMPL_ID != 0
-    // The runtime's element_size_bytes argument cannot distinguish BF16 from
-    // FP16. Ring builds reject ambiguous types before erasing that information.
-    Type queryElement =
-        cast<MemRefType>(op.getQuery().getType()).getElementType();
-    if (!queryElement.isF16() && !queryElement.isF32())
-      return op.emitOpError(
-          "Ring GQA builds require FP16 or FP32 query tensors");
-    for (Value operand : {op.getKey(), op.getValue(), op.getOutput()}) {
-      if (operand &&
-          cast<MemRefType>(operand.getType()).getElementType() != queryElement)
-        return op.emitOpError(
-            "Ring GQA builds require matching query/key/value/output types");
-    }
-    if (op.getKQuantType() == "NONE" && op.getVQuantType() == "NONE") {
-      for (Value operand : {op.getPastKey(), op.getPastValue(),
-                            op.getPresentKey(), op.getPresentValue()}) {
-        if (operand && cast<MemRefType>(operand.getType()).getElementType() !=
-                           queryElement)
-          return op.emitOpError(
-              "Ring GQA builds require matching unquantized cache types");
-      }
-    }
+    const char *callee = kWrapGQA;
+#if HIP_EP_RING_ENABLED != 0
+    // Prove the element types before lowering erases them. A two-byte element
+    // size alone cannot distinguish FP16 from BF16. Ineligible calls retain
+    // the original GQA entry point and its existing behavior.
+    auto isF16 = [](Value value) {
+      return value &&
+             cast<MemRefType>(value.getType()).getElementType().isF16();
+    };
+    bool ringTypes = true;
+    for (Value value :
+         {op.getQuery(), op.getKey(), op.getValue(), op.getOutput(),
+          op.getPresentKey(), op.getPresentValue()})
+      ringTypes &= isF16(value);
+    for (Value value : {op.getPastKey(), op.getPastValue()})
+      ringTypes &= !value || isF16(value);
+    if (ringTypes && op.getSoftcap().isZero() && op.getNumHeads() == 24 &&
+        op.getKvNumHeads() == 4 && op.getKQuantType() == "NONE" &&
+        op.getVQuantType() == "NONE" && !op.getDoRotary() &&
+        !op.getNoCausal() && op.getLocalWindowSizeAttr().getInt() <= 0 &&
+        op.getSmoothSoftmaxAttr().getInt() <= 0 && !op.getQkOutput() &&
+        !op.getHeadSink() && !op.getAttentionBias() && !op.getPositionIds() &&
+        !op.getOutputQk())
+      callee = kWrapGQARingF16;
 #endif
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
@@ -317,10 +318,18 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         i64Type  // seq_len_new_kv
     };
 
-    if (widthABI)
+    bool fp16Tensors = true;
+    for (Value value : {op.getQuery(), op.getKey(), op.getValue(),
+                        op.getOutput(), op.getPastKey(), op.getPastValue(),
+                        op.getPresentKey(), op.getPresentValue()})
+      fp16Tensors &=
+          !value || cast<MemRefType>(value.getType()).getElementType().isF16();
+    if (widthABI) {
       paramTypes.append(4, i64Type);
+      paramTypes.push_back(i32Type);
+    }
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, widthABI ? "wrap_group_query_attention_v2" : kWrapGQA,
+        rewriter, module, widthABI ? "wrap_group_query_attention_v3" : callee,
         paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
@@ -350,6 +359,9 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
       args.push_back(cacheWidth(op.getPresentKey(), adaptor.getPresentKey()));
       args.push_back(
           cacheWidth(op.getPresentValue(), adaptor.getPresentValue()));
+      args.push_back(LLVM::ConstantOp::create(
+          rewriter, loc, i32Type,
+          rewriter.getI32IntegerAttr(fp16Tensors ? 1 : 0)));
     }
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 
