@@ -46,6 +46,9 @@ def main():
         "mode": "pytorch-bf16",
         "track": args.track,
         "torch": torch.__version__,
+        "hip_runtime": torch.version.hip,
+        "numpy": np.__version__,
+        "numpy_module": np.__file__,
         "transformers": transformers.__version__,
         "model": str(args.model.resolve()),
         "turns": [],
@@ -107,7 +110,9 @@ def main():
             parameter_bytes=sum(
                 p.numel() * p.element_size() for p in model.parameters()
             ),
-            loading=loading,
+            loading={
+                k: sorted(v) if isinstance(v, set) else v for k, v in loading.items()
+            },
             gpu_only=True,
         )
         save(out / "receipt.json", report)

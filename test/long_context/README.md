@@ -115,7 +115,10 @@ patch is not a claim that every CI dependency combination has been tested.
 
 Omit both `--torch-model` and `--torch-python` for the three OGA paths alone.
 For four paths, use the matching original BF16 checkpoint and an isolated Python
-environment with GPU-enabled PyTorch and Transformers 5.22.1. Earlier versions
+environment with GPU-enabled PyTorch and Transformers 5.22.1. The validated
+Windows environment uses the PyPI NumPy 2.5.2 wheel inside that environment;
+inheriting Conda's OpenMP-enabled BLAS conflicted with PyTorch's OpenMP runtime
+during large logit-vector comparisons. No duplicate-OpenMP override is used. Earlier versions
 may reset Qwen3.5 recurrent state on a multi-token append; the reference checks
 the state-aware implementation and records its source hash. It validates exact
 vocabulary-to-ID equality, BF16 GPU parameter placement, cache length, finite
