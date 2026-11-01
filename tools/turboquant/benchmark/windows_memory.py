@@ -80,26 +80,34 @@ class Memory:
                 base = 2**exponent
                 classes.update(base + base * k // steps for k in range(steps))
         allocated = next((x for x in sorted(classes) if x >= size), size)
-        selected = [
-            a for a in self.allocations() if a["bytes"] == allocated and a["host"]
-        ]
+        selected = [a for a in self.allocations() if a["bytes"] == allocated]
+        # Qwen has 16 full-attention layers, hence 32 cache tensors. Other
+        # state tensors may share this class (48 recurrent buffers collide at
+        # a 768-token dense capacity). Budget only the known 32 KV tensors;
+        # all additional same-size allocations remain charged to Other.
+        assert len(selected) >= 32, (size, allocated, len(selected))
+        kinds = {a["host"] for a in selected}
+        assert len(kinds) == 1, "Mixed allocation kinds require pointer attribution"
+        host = next(iter(kinds))
         key = (capacity, quantized)
         if not hasattr(self, "cache_allocations"):
             self.cache_allocations = {}
         if key not in self.cache_allocations:
-            # Identify the 32 buffers before any prefill transient exists.
-            assert len(selected) == 32, (size, allocated, len(selected))
-            self.cache_allocations[key] = {a["address"] for a in selected}
-        else:
-            # Small transient buffers may share this size class after warmup.
-            # Preserve the verified cache budget; charge extra buffers to Other.
-            assert self.cache_allocations[key] <= {a["address"] for a in selected}
+            self.cache_allocations[key] = (
+                {a["address"] for a in selected} if len(selected) == 32 else None
+            )
+        addresses = self.cache_allocations[key]
+        if addresses is not None:
+            assert addresses <= {a["address"] for a in selected}
         return {
             "buffers": 32,
             "bytes_per_buffer": allocated,
             "total_bytes": 32 * allocated,
             "payload_bytes": 32 * size,
             "allocator_padding_bytes": 32 * (allocated - size),
-            "verification": "32 mapped-host allocations verified before first prefill and retained; additional same-size transient allocations excluded from KV",
+            "verification": "32 KV tensors from model geometry, allocator-rounded size checked against live HIP allocations; extra same-size state/transient buffers charged to Other",
             "same_size_live_buffers": len(selected),
+            "cache_host_buffers": 32 if host else 0,
+            "cache_device_buffers": 0 if host else 32,
+            "cache_address_identity_verified": addresses is not None,
         }

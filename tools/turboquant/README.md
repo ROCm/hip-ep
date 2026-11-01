@@ -18,6 +18,12 @@ This walkthrough covers Radeon 8060S (`gfx1151`), batch one, Qwen3.8-27B with
 and external RoPE. INT4 **weights** alone do not enable compressed KV. The
 current environment uses Python 3.13, ORT 1.31.0, NumPy 2.4.3, GenAI 0.17.0
 with the append companion, and TheRock 7.15.26333, aligned with Ring PR1366.
+For the current-branch, three-configuration timing and memory campaign, use the
+[performance report](../../docs/design/turboquant-current-performance.md) and
+[manual performance command](../../test/long_context/README.md#performance-only-campaign-windows).
+It includes kernels through 256K, single-turn model runs through 64K, and eight
+4K appends, without warm-up. Accuracy and judge findings are separate.
+
 Older performance tables used ORT 1.30 and are not current-main measurements.
 Other configurations need separate validation. See the
 [Windows build prerequisites](../../docs/quick_start.md) for MSVC, Ninja, SDK and

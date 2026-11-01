@@ -159,3 +159,67 @@ are not the debug-disabled performance campaign. Before a long run, record the
 Python executable, imported package paths/versions, build cache, loaded runtime
 DLL paths and thread settings. Fail early if the pinned environment drifts.
 The unrelated Windows RMT infrastructure failure is outside this feature's scope.
+
+## Performance-only campaign (Windows)
+
+`run_turboquant_performance.py` explicitly measures all three OGA configurations
+from the same installed build. It is absent from default CI/CTest/pytest. Use the
+PR1366 Python/ROCm environment and the append-capable GenAI companion described
+above. It forces debug/performance tracing off, two OpenMP/OpenBLAS threads and
+strict GPU offload. Run on AC power with no other GPU jobs or builds.
+
+```powershell
+# Build the small allocation counter once in an MSVC developer shell.
+cl /nologo /std:c++17 /O2 /EHsc /LD `
+  tools/turboquant/benchmark/windows_memory_counter.cpp `
+  /FoC:/work/build/windows_memory_counter.obj `
+  /link /OUT:C:/work/build/windows_memory_counter.dll
+
+python test/long_context/run_turboquant_performance.py all `
+  --install C:/work/install/turboquant `
+  --model C:/work/models/qwen-original `
+  --codec C:/work/reference/codec/codec.bin `
+  --constants C:/work/reference/codec/constants.npz `
+  --sdk-devel C:/path/to/_rocm_sdk_devel `
+  --sdk-core C:/path/to/_rocm_sdk_core `
+  --genai-pythonpath C:/work/install/genai-append `
+  --memory-counter C:/work/build/windows_memory_counter.dll `
+  --output C:/work/results/current-performance
+```
+
+Replace `all` with `kernel`, `model`, or `multiturn` for one table. The default
+grid is 128/256/512/1K/2K/4K/8K/16K/32K/64K/128K/256K for kernels, through 64K
+for the model, and eight 4K prompt appends with 128 generated tokens per turn.
+The output must be on the model's volume because weights are hard-linked.
+Only a completed `measured` receipt is reused; use a new output directory after
+changing source/install/protocol. A failed/partial case is not silently overwritten.
+
+There are **zero warm-up calls**. Kernel prefill has three measured single calls;
+decode has three measured batches of 30 calls. Mode order rotates. No-Ring uses
+the DLL's lookup-only GQA configuration. All calls, including first use, remain
+in the receipts; report three-round medians and disclose cold initialization.
+TurboQuant prefill includes Ring attention plus separately synchronized cache
+encoding; kernel decode excludes cache append for all three configurations.
+Synchronized host wall time is used, without graph replay or cache displacement.
+
+Model cases run two measured requests (or two eight-turn conversations), without
+an untimed probe. Model load/JIT is outside timing. Prefill times `append_tokens`
+plus synchronization. Decode times the 127 model steps after first-token selection;
+128 output tokens are always produced. Greedy histories may differ, but prompt
+tokens and sequence lengths match. Random token prompts intentionally measure
+compute/cache throughput and are not a semantic conversation quality test.
+Logits, answer scoring, cache hashing and LLM judging are absent from timing.
+Raw receipts preserve all samples, loaded DLLs, hashes and launch configurations.
+Memory uses the same process-local HIP allocation counter as PR1366: peak live
+device plus mapped-host requested bytes, including retained EP pools. Weights
+are verified model blobs; KV budgets the model's 32 cache tensors at the measured
+allocator size class, including padding; Other is peak total minus weights and KV.
+Recurrent-state allocations can share a KV size class: extras stay in Other,
+and the receipt marks when exact cache-address identity is ambiguous. Prefill and decode peaks
+are recorded separately. This is not WDDM physical residency or total system RAM;
+driver-internal allocations, interpreter memory and page rounding are excluded.
+Counter reads occur outside timed regions; allocation hooks remain active in all
+three configurations. No model/kernel warm-up is added by enabling the counter.
+
+Current measured tables: [performance report](../../docs/design/turboquant-current-performance.md).
+Accuracy/LLM-judge findings require separate review and are not part of that report.
