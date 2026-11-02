@@ -6,13 +6,13 @@ Licensed under the MIT License.
 # Guidelines for generic compiler passes
 
 Keep compiler passes generic wherever possible. Use explicit IR information
-and shared analyses. Keep target-specific decisions separate from generic
-pass logic.
+and shared analyses. Keep frontend-specific assumptions and backend-specific
+policy out of generic pass logic.
 
-## 1. Use IR semantics, not target assumptions
+## 1. Use IR semantics, not frontend or backend assumptions
 
-A generic pass bases its decisions on IR semantics and analyses, not on
-backend-specific policy.
+A generic pass bases its decisions on the semantics and analyses of the IR it
+operates on, not on frontend-specific assumptions or backend-specific policy.
 
 Use operation semantics, types, attributes, interfaces, and analysis results.
 
@@ -27,14 +27,18 @@ Do not assume that:
 
 Check the required facts through an explicit contract or analysis.
 
-## 2. Separate the algorithm from backend policy
+## 2. Separate generic algorithms from frontend and backend logic
 
 Keep each pass focused on one job. Reuse existing passes, analyses, and
 interfaces. Prefer standard MLIR support before adding project-specific logic.
 
 Generic passes should reason from IR semantics and contracts expressed through
-types, attributes, interfaces, and analyses. Do not introduce backend-specific
-decisions into generic passes merely by putting them behind an interface.
+types, attributes, interfaces, and analyses. Do not introduce frontend- or
+backend-specific decisions into generic passes merely by putting them behind
+an interface.
+
+Frontend conversion must express the required source semantics in the IR.
+Generic passes should not need to know which framework or exporter produced it.
 
 A backend pass makes decisions about target execution, memory placement, or
 runtime behavior and may use backend contracts. Any constraints needed by
@@ -93,9 +97,10 @@ that a transformation is correct in general.
 
 ## Questions for code review
 
-- Does the decision follow IR semantics, or depend on backend policy?
+- Does the decision follow IR semantics, or depend on frontend assumptions or
+  backend policy?
 - Can an existing IR interface or analysis provide the required facts?
-- Would another target require changes to the generic algorithm?
+- Would another frontend or target require changes to the generic algorithm?
 - Do later passes preserve the same guarantees?
 
 ## References
