@@ -19,6 +19,7 @@ Use operation semantics, types, attributes, interfaces, and analysis results.
 Do not assume that:
 
 - `memref.load` or `memref.store` always runs on the host.
+- A buffer is host-accessible.
 - A compute operation always runs on a GPU.
 - CPU execution is always synchronous or GPU execution is always asynchronous.
 - An earlier operation has finished using a buffer.
@@ -29,18 +30,21 @@ Check the required facts through an explicit contract or analysis.
 ## 2. Separate the algorithm from backend policy
 
 Keep each pass focused on one job. Reuse existing passes, analyses, and
-interfaces before adding new logic.
+interfaces. Prefer standard MLIR support before adding project-specific logic.
 
 Generic passes should reason from IR semantics and contracts expressed through
 types, attributes, interfaces, and analyses. Do not introduce backend-specific
 decisions into generic passes merely by putting them behind an interface.
 
+A backend pass makes decisions about target execution, memory placement, or
+runtime behavior and may use backend contracts. Any constraints needed by
+later generic passes must be represented in the IR. A pass's name or source
+directory does not determine whether it is generic.
+
 For example, a buffer-reuse pass should reason about aliasing, lifetimes, and
 execution dependencies represented in the IR. Backend passes must preserve
 those guarantees when choosing memory placement and implementing
 synchronization.
-
-Put target-specific transformations and runtime policy in backend passes.
 
 ## 3. Keep operation rules with the operation
 
@@ -59,9 +63,10 @@ consistent IR contracts across affected passes.
 Later passes must preserve correctness guarantees. For example, pooling must
 preserve a buffer-reuse restriction.
 
-Document required pass ordering and test it when correctness depends on it.
-Do not rely on accidental ordering or optional canonicalization for
-correctness.
+Document required pass ordering in the
+[pipeline pass menu](docs/pipeline_pass_menu.md) and test it when correctness
+depends on it. Do not rely on accidental ordering or optional canonicalization
+for correctness.
 
 Apply a rewrite only when operation semantics, interface contracts, or
 analysis results establish that it is safe. If the required facts are missing,
@@ -80,8 +85,11 @@ Include tests for:
 - Relevant aliases and views.
 - Interactions with later passes.
 
-Use small IR examples to test the rule. A successful run of one model does not
-prove that a transformation is correct in general.
+Use small IR examples to test the rule. For non-obvious rewrites, include a
+minimal Before/After IR example in the implementation and keep it updated.
+Keep examples and comments focused on IR patterns and invariants, not the
+model that exposed the issue. A successful run of one model does not prove
+that a transformation is correct in general.
 
 ## Questions for code review
 

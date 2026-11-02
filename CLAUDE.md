@@ -194,10 +194,8 @@ Check every affected layer:
 
 ### Change a compiler transformation
 
-- Document non-obvious rewrites with a minimal `Before:` / `After:` IR example in the implementation.
-- Update the example whenever the transformation changes.
-- Prefer standard MLIR interfaces, analyses, and passes before adding project-specific infrastructure.
-- Keep generic compiler comments focused on IR patterns and invariants rather than the model that exposed the issue.
+Follow the [compiler pass guidelines](COMPILER_PASS_GUIDELINES.md) for pass
+design, rewrite examples, and testing.
 
 ### Change runtime code or ABI
 
