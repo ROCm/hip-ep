@@ -191,9 +191,8 @@ static Value boxCondTensor(OpBuilder &builder, Location loc, Value condI1,
       scalar = arith::ExtUIOp::create(builder, loc, builder.getIntegerType(8),
                                       condI1);
       if (!intTy.isSignless()) {
-        scalar = UnrealizedConversionCastOp::create(builder, loc,
-                                                    TypeRange{elemTy},
-                                                    ValueRange{scalar})
+        scalar = UnrealizedConversionCastOp::create(
+                     builder, loc, TypeRange{elemTy}, ValueRange{scalar})
                      .getResult(0);
       }
     }
@@ -284,7 +283,8 @@ static LogicalResult lowerScanLoop(Operation *loopOp, Block &bodyBlock,
                                    unsigned numLoopCarried, unsigned numScan) {
   Location loc = loopOp->getLoc();
   if (loopOp->getNumResults() != numLoopCarried + numScan)
-    return loopOp->emitOpError("onnx.Loop scan result count mismatch: expected ")
+    return loopOp->emitOpError(
+               "onnx.Loop scan result count mismatch: expected ")
            << (numLoopCarried + numScan) << " results, got "
            << loopOp->getNumResults();
   if (bodyBlock.getNumArguments() != 2 + numLoopCarried)
@@ -338,8 +338,8 @@ static LogicalResult lowerScanLoop(Operation *loopOp, Block &bodyBlock,
     RankedTensorType accTy = scanAccType(resultTy, perIter);
     if (!accTy || accTy.getRank() < 1)
       return loopOp->emitOpError(
-          "onnx.Loop scan output must be a ranked tensor with a leading "
-          "iteration dimension, got ")
+                 "onnx.Loop scan output must be a ranked tensor with a leading "
+                 "iteration dimension, got ")
              << resultTy;
     auto perTy = dyn_cast<RankedTensorType>(perIter.getType());
     if (perTy && perTy.getRank() + 1 != accTy.getRank())
@@ -376,8 +376,8 @@ static LogicalResult lowerScanLoop(Operation *loopOp, Block &bodyBlock,
   auto whileOp = scf::WhileOp::create(
       builder, loc, resultTypes, inits,
       [&](OpBuilder &b, Location wl, ValueRange args) {
-        Value tripOk = arith::CmpIOp::create(
-            b, wl, arith::CmpIPredicate::slt, args[0], *mIdx);
+        Value tripOk = arith::CmpIOp::create(b, wl, arith::CmpIPredicate::slt,
+                                             args[0], *mIdx);
         Value keep =
             arith::AndIOp::create(b, wl, tripOk, args[condArg]).getResult();
         scf::ConditionOp::create(b, wl, keep, args);
@@ -387,8 +387,8 @@ static LogicalResult lowerScanLoop(Operation *loopOp, Block &bodyBlock,
             arith::IndexCastOp::create(b, wl, b.getI64Type(), args[0]);
         Value iterTensor =
             boxRank0(b, wl, iterI64, bodyBlock.getArgument(0).getType());
-        Value condTensor = boxCondTensor(
-            b, wl, args[condArg], bodyBlock.getArgument(1).getType());
+        Value condTensor = boxCondTensor(b, wl, args[condArg],
+                                         bodyBlock.getArgument(1).getType());
 
         IRMapping mapping;
         mapping.map(bodyBlock.getArgument(0), iterTensor);
@@ -402,8 +402,8 @@ static LogicalResult lowerScanLoop(Operation *loopOp, Block &bodyBlock,
           b.clone(op, mapping);
         }
 
-        FailureOr<Value> nextCond =
-            unboxCondInit(b, wl, mapping.lookupOrDefault(yieldOp->getOperand(0)));
+        FailureOr<Value> nextCond = unboxCondInit(
+            b, wl, mapping.lookupOrDefault(yieldOp->getOperand(0)));
         if (failed(nextCond)) {
           loopOp->emitOpError("could not unbox scan-loop cond_out to i1");
           nextCond = args[condArg];
@@ -414,8 +414,7 @@ static LogicalResult lowerScanLoop(Operation *loopOp, Block &bodyBlock,
         yielded.push_back(nextIter);
         yielded.push_back(*nextCond);
         for (unsigned i = 0; i < numLoopCarried; ++i) {
-          Value carried = mapping.lookupOrDefault(
-              yieldOp->getOperand(1 + i));
+          Value carried = mapping.lookupOrDefault(yieldOp->getOperand(1 + i));
           FailureOr<Value> casted =
               castTensor(b, wl, carried, args[carriedArg + i].getType());
           if (failed(casted)) {
@@ -426,7 +425,8 @@ static LogicalResult lowerScanLoop(Operation *loopOp, Block &bodyBlock,
           yielded.push_back(*casted);
         }
         for (auto [s, scan] : llvm::enumerate(scans)) {
-          Value perIter = mapping.lookupOrDefault(yieldOp->getOperand(scan.yieldIdx));
+          Value perIter =
+              mapping.lookupOrDefault(yieldOp->getOperand(scan.yieldIdx));
           Value chunk = unsqueezeLeading(b, wl, perIter, scan.accTy);
           FailureOr<Value> chunkAcc = castTensor(b, wl, chunk, scan.accTy);
           if (failed(chunkAcc)) {
@@ -437,21 +437,20 @@ static LogicalResult lowerScanLoop(Operation *loopOp, Block &bodyBlock,
           // First iteration replaces the zero-length seed. Later iterations
           // append. Concatenating onto the seed would require a 0-extent
           // inner dimension to match the chunk.
-          auto ifOp = scf::IfOp::create(b, wl, TypeRange{scan.accTy},
-                                        args[haveArg],
-                                        /*withElseRegion=*/true);
+          auto ifOp =
+              scf::IfOp::create(b, wl, TypeRange{scan.accTy}, args[haveArg],
+                                /*withElseRegion=*/true);
           OpBuilder thenB =
               OpBuilder::atBlockEnd(&ifOp.getThenRegion().front());
-          Value accumulated = concatScan(thenB, wl, args[scanArg + s],
-                                        *chunkAcc, scan.accTy);
+          Value accumulated =
+              concatScan(thenB, wl, args[scanArg + s], *chunkAcc, scan.accTy);
           scf::YieldOp::create(thenB, wl, accumulated);
           OpBuilder elseB =
               OpBuilder::atBlockEnd(&ifOp.getElseRegion().front());
           scf::YieldOp::create(elseB, wl, *chunkAcc);
           yielded.push_back(ifOp.getResult(0));
         }
-        Value trueI1 =
-            arith::ConstantIntOp::create(b, wl, b.getI1Type(), 1);
+        Value trueI1 = arith::ConstantIntOp::create(b, wl, b.getI1Type(), 1);
         yielded.push_back(trueI1);
         scf::YieldOp::create(b, wl, yielded);
       });
