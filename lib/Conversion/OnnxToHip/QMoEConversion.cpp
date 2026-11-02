@@ -121,6 +121,10 @@ QMoEToHip::matchAndRewrite(mlir::Operation *op,
         op, "QMoE: missing `block_size` attribute and cannot infer it from "
             "input/fc1_scales tensor shapes");
   }
+  if (blockSizeValue < 32 || (blockSizeValue & (blockSizeValue - 1)) != 0) {
+    return rewriter.notifyMatchFailure(
+        op, "QMoE: block_size must be a power of two and at least 32");
+  }
   auto blockSizeAttr = rewriter.getI64IntegerAttr(blockSizeValue);
 
   auto normIntAttr =
@@ -160,12 +164,13 @@ QMoEToHip::matchAndRewrite(mlir::Operation *op,
                                 ? activationTypeStrAttr
                                 : rewriter.getStringAttr("relu");
 
-  // Every wrap_qmoe path takes fp16 activations and 4-bit experts; the fused
-  // SwiGLU decode would misread wider weights instead of rejecting them.
+  // Runtime kernels support fp16 activations with 2-bit or 4-bit experts.
   if (!mlir::getElementTypeOrSelf(input.getType()).isF16() ||
-      expertWeightBitsAttr.getInt() != 4) {
+      (expertWeightBitsAttr.getInt() != 2 &&
+       expertWeightBitsAttr.getInt() != 4)) {
     return rewriter.notifyMatchFailure(
-        op, "QMoE: only fp16 input with expert_weight_bits=4 is supported");
+        op, "QMoE: only fp16 input with expert_weight_bits=2 or 4 is "
+            "supported");
   }
 
   // wrap_qmoe rejects every other combination at runtime.
@@ -187,6 +192,55 @@ QMoEToHip::matchAndRewrite(mlir::Operation *op,
     return rewriter.notifyMatchFailure(
         op, "QMoE: weights_prepacked must be -1 or 0 (schema [E, N, K/pack] "
             "weights); no alternate prepacked layout is implemented");
+  }
+
+  const int64_t bits = expertWeightBitsAttr.getInt();
+  auto validatePackedShape = [&](mlir::Value weight, mlir::Value zeroPoint,
+                                 int64_t logicalK) {
+    auto weightType = mlir::dyn_cast<mlir::RankedTensorType>(weight.getType());
+    if (!weightType || weightType.getRank() != 3 || logicalK < 0)
+      return true;
+    const int64_t packedK = (logicalK * bits + 7) / 8;
+    if (!weightType.isDynamicDim(2) && weightType.getDimSize(2) != packedK)
+      return false;
+    if (!zeroPoint)
+      return true;
+    auto zeroPointType =
+        mlir::dyn_cast<mlir::RankedTensorType>(zeroPoint.getType());
+    if (!zeroPointType || zeroPointType.getRank() != 3)
+      return true;
+    for (int64_t dim = 0; dim < 2; ++dim) {
+      if (!weightType.isDynamicDim(dim) && !zeroPointType.isDynamicDim(dim) &&
+          weightType.getDimSize(dim) != zeroPointType.getDimSize(dim))
+        return false;
+    }
+    const int64_t groups = (logicalK + blockSizeValue - 1) / blockSizeValue;
+    const int64_t packedGroups = (groups * bits + 7) / 8;
+    return zeroPointType.isDynamicDim(2) ||
+           zeroPointType.getDimSize(2) == packedGroups;
+  };
+
+  int64_t hidden = -1;
+  if (auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
+      inputType && inputType.getRank() > 0 &&
+      !inputType.isDynamicDim(inputType.getRank() - 1))
+    hidden = inputType.getDimSize(inputType.getRank() - 1);
+
+  int64_t intermediate = -1;
+  if (auto fc1Type =
+          mlir::dyn_cast<mlir::RankedTensorType>(fc1Weights.getType());
+      fc1Type && fc1Type.getRank() == 3 && !fc1Type.isDynamicDim(1)) {
+    const int64_t fusion = swigluFusion == 1 ? 2 : 1;
+    if (fc1Type.getDimSize(1) % fusion == 0)
+      intermediate = fc1Type.getDimSize(1) / fusion;
+  }
+
+  if (!validatePackedShape(fc1Weights, fc1ZeroPoints, hidden) ||
+      !validatePackedShape(fc2Weights, fc2ZeroPoints, intermediate) ||
+      (fc3Weights && !validatePackedShape(fc3Weights, fc3ZeroPoints, hidden))) {
+    return rewriter.notifyMatchFailure(
+        op, "QMoE: packed weight or zero-point shape does not match the "
+            "quantization attributes");
   }
 
   auto rt = mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());

@@ -5,7 +5,7 @@
 
 """Tests for the ONNX ReduceMin op.
 
-The runtime (lib/Runtime/real/reduce_min.cpp) supports f16/i32/i64 and assumes
+The runtime (lib/Runtime/real/reduce_min.cpp) supports f32/f16/i32/i64 and assumes
 the reduced axis occupies the trailing portion of the buffer (reduce_size =
 data_elems / output_elems), so these tests reduce the LAST axis -- the natural
 contiguous case. Integer dtypes (i32/i64, both supported by the EP kernel and
@@ -59,5 +59,13 @@ class TestReduceMin:
         model = _make_reduce_min_model(shape, axes, keepdims=0, dtype=dtype)
         rng = np.random.default_rng(1102)
         data = rng.integers(-100, 100, shape, dtype=dtype)
+        actual, expected = model_runner.run_sample(model, [data])
+        compare_outputs(actual, expected, atol=0)
+
+    def test_reduce_min_f32_last_axis(self, model_runner):
+        shape = [4, 8]
+        model = _make_reduce_min_model(shape, [1], keepdims=1, dtype=np.float32)
+        rng = np.random.default_rng(1103)
+        data = rng.integers(-100, 100, shape).astype(np.float32)
         actual, expected = model_runner.run_sample(model, [data])
         compare_outputs(actual, expected, atol=0)

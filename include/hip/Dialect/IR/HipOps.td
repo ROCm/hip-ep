@@ -931,7 +931,8 @@ def Hip_QMoEOp : Hip_DpsOp_WithInfer<"qmoe", "Output", [AttrSizedOperandSegments
     Mixture-of-Experts with top-k expert routing and optional SwiGLU activation.
 
     Routes each token to its top-k experts, performs quantized linear
-    projections (fc1 gate+up, fc2 down) per expert with int4 dequantization,
+    projections (fc1 gate+up, fc2 down) per expert with 2-bit or 4-bit
+    dequantization,
     applies activation (SwiGLU by default), and combines expert outputs.
 
     SwiGLU formula (when swiglu_fusion=1, interleaved in fc1 output):
@@ -944,8 +945,8 @@ def Hip_QMoEOp : Hip_DpsOp_WithInfer<"qmoe", "Output", [AttrSizedOperandSegments
     has no gate/linear split):
       result = relu(fc1_out)^2
 
-    Weight packing follows MatMulNBits convention: uint8 packed,
-    dequantized = (quantized - 8) * scale for 4-bit weights.
+    Weight packing follows MatMulNBits convention. The default zero point is
+    half of the unsigned quantized range.
 
     Optional inputs per spec:
       fc1_experts_bias, fc2_experts_bias: bias vectors (optional)

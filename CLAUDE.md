@@ -16,7 +16,7 @@ This file gives coding agents the repository-wide rules and entry points needed 
 
 ## Project overview
 
-hip-ep is an ONNX Runtime Execution Provider for AMD GPUs. The compiler lowers ONNX operations through a custom MLIR HIP dialect to LLVM IR. Generated code dispatches to hipDNN, hipBLASLt, and custom HIP kernels.
+hip-ep is an ONNX Runtime Execution Provider for AMD GPUs. The compiler lowers ONNX operations through a custom MLIR HIP dialect to LLVM IR. Generated code dispatches to hipBLASLt and custom HIP kernels.
 
 The default per-model artifact is OS-portable LLVM bitcode. The Execution Provider JIT-loads it in-process together with embedded runtime bitcode. Native `.dll`/`.so` model artifacts are an opt-in mode.
 
@@ -153,6 +153,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for PR, formatting, AI-disclosure, and co
 ### Allocation and memory planning
 
 - Every transient allocation must be pooled or rewritten as an output allocation. Leftover `hip.alloc`/`memref.alloc` paths are not a supported per-inference allocator strategy.
+- Runtime-owned device transients (pools, workspace, op scratch) must be allocated and freed with `hipdnn_ep_state_device_alloc`/`hipdnn_ep_state_device_free`, never raw `hipMalloc`/`hipFree`, so they are served from the session transient arena.
 - Preserve the ordering and dominance requirements documented in [docs/design/pool-allocs-memory-planning.md](docs/design/pool-allocs-memory-planning.md).
 - `HIPDNN_EP_BUFFERIZE_COPY_BEFORE_WRITE=1` is an opt-in compile-time escape hatch for extremely large single-function graphs: it skips One-Shot Bufferize's expensive RaW analysis by copying before writes. Keep it off by default because the extra copies can reduce runtime performance.
 - HIP runtime calls consume contiguous bare pointers unless their ABI explicitly carries layout metadata. Materialize non-contiguous inputs before such calls.

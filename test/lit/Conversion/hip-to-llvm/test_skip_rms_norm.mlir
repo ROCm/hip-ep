@@ -181,3 +181,26 @@ func.func @skip_rms_norm_output_only(%ctx: !hip.context) {
 
   return
 }
+
+// ===== Mixed element types (fp32 residual, fp16 skip/gamma/output) =====
+
+// CHECK-LABEL: @skip_rms_norm_mixed
+func.func @skip_rms_norm_mixed(%ctx: !hip.context) {
+  %input = memref.alloc() : memref<1x2880xf32, 1>
+  %skip = memref.alloc() : memref<1x2880xf16, 1>
+  %gamma = memref.alloc() : memref<2880xf16, 1>
+  %output = memref.alloc() : memref<1x2880xf16, 1>
+  %skip_output = memref.alloc() : memref<1x2880xf32, 1>
+
+  // Element sizes in/skip/gamma/out/sum = 4/2/2/2/4 go to the _mixed entry.
+  // CHECK-DAG: llvm.mlir.constant(4 : i64) : i64
+  // CHECK-DAG: llvm.mlir.constant(2 : i64) : i64
+  // CHECK: llvm.call @wrap_skip_simplified_layer_norm_mixed({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, f32) -> i32
+  // CHECK-NOT: llvm.call @wrap_skip_simplified_layer_norm(
+  hip.skip_rms_norm(%ctx)
+      ins(%input, %skip, %gamma : memref<1x2880xf32, 1>, memref<1x2880xf16, 1>, memref<2880xf16, 1>)
+      outs(%output, %skip_output : memref<1x2880xf16, 1>, memref<1x2880xf32, 1>)
+      {epsilon = 9.99999974e-06 : f32}
+
+  return
+}

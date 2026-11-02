@@ -60,13 +60,28 @@ bool parseAutotuneSpace(StringRef name, AutotuneSpace &out);
 
 const char *autotuneSpaceName(AutotuneSpace space);
 
+// How the candidates of one search are timed. `Adaptive` is MIGraphX's
+// two-pass selection (see AdaptiveBenchmark.h): a short coarse pass over
+// every candidate, then bundled launches for the few that can still win.
+// `Simple` times every candidate with `warmupRuns` and `measuredRuns`; it
+// costs time proportional to the slowest candidates and is kept for A/B
+// comparison.
+enum class AutotuneBenchmark { Adaptive, Simple };
+
+// Parses "adaptive" or "simple". Returns false and leaves \p out alone on
+// anything else.
+bool parseAutotuneBenchmark(StringRef name, AutotuneBenchmark &out);
+
+const char *autotuneBenchmarkName(AutotuneBenchmark benchmark);
+
 struct AutotuneOptions {
   AutotuneSpace space = AutotuneSpace::Quick;
-  // Untimed launches before the timed ones, discarding clock/cache warmup.
-  // The whole point of benchmarking is resolving differences of tens of
-  // percent, so these default high enough that run-to-run noise stays below
-  // the effect: at 5 and 20 the same kernel measured 4.2e-02 to 7.5e-02 ms,
-  // wider than most of the wins being searched for.
+  AutotuneBenchmark benchmark = AutotuneBenchmark::Adaptive;
+  // `Simple` only. Untimed launches before the timed ones, discarding
+  // clock/cache warmup. These default high enough that run-to-run noise stays
+  // below the effect: at 5 and 20 the same kernel measured 4.2e-02 to
+  // 7.5e-02 ms, wider than most of the wins being searched for. `Adaptive`
+  // gets the same stability from bundling launches instead.
   unsigned warmupRuns = 20;
   unsigned measuredRuns = 100;
   // Where the compile-pool progress lines go. Null keeps the search silent,
@@ -132,6 +147,10 @@ private:
 // one means touching the compilation schema. Worth doing when a caller needs
 // per-session control -- an env var is process-wide.
 bool rocMlirAutotuneFromEnv(AutotuneSpace &out);
+
+// Reads HIPDNN_EP_ROCMLIR_AUTOTUNE_BENCH ("adaptive" or "simple"). Leaves
+// \p out alone when unset or unparseable.
+void rocMlirAutotuneBenchmarkFromEnv(AutotuneBenchmark &out);
 
 } // namespace hip
 } // namespace mlir
