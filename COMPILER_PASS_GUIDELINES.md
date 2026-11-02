@@ -11,8 +11,8 @@ pass logic.
 
 ## 1. Use IR semantics, not target assumptions
 
-A generic pass uses IR contracts and analyses instead of embedding
-target-specific policy.
+A generic pass bases its decisions on IR semantics and analyses, not on
+backend-specific policy.
 
 Use operation semantics, types, attributes, interfaces, and analysis results.
 
@@ -31,14 +31,16 @@ Check the required facts through an explicit contract or analysis.
 Keep each pass focused on one job. Reuse existing passes, analyses, and
 interfaces before adding new logic.
 
-A generic pass may get target information through an interface. Keep the
-backend logic behind that interface.
+Generic passes should reason from IR semantics and contracts expressed through
+types, attributes, interfaces, and analyses. Do not introduce backend-specific
+decisions into generic passes merely by putting them behind an interface.
 
-For example, a buffer-reuse pass checks whether buffers can safely share
-storage. The backend supplies target-specific execution, memory, and runtime
-restrictions.
+For example, a buffer-reuse pass should reason about aliasing, lifetimes, and
+execution dependencies represented in the IR. Backend passes must preserve
+those guarantees when choosing memory placement and implementing
+synchronization.
 
-Put target-specific transformations in backend passes.
+Put target-specific transformations and runtime policy in backend passes.
 
 ## 3. Keep operation rules with the operation
 
@@ -52,7 +54,7 @@ rules should not be copied into generic passes.
 ## 4. Fix the issue at the layer that owns it
 
 Fix missing information or incorrect behavior in the layer that owns it. Use
-the same contract in all affected passes.
+consistent IR contracts across affected passes.
 
 Later passes must preserve correctness guarantees. For example, pooling must
 preserve a buffer-reuse restriction.
@@ -62,7 +64,9 @@ Do not rely on accidental ordering or optional canonicalization for
 correctness.
 
 Apply a rewrite only when operation semantics, interface contracts, or
-analysis results establish that it is safe.
+analysis results establish that it is safe. If the required facts are missing,
+skip an optional rewrite. Report a diagnostic if a required transformation
+cannot proceed safely.
 
 A rewrite pattern or reifier that reports failure must leave the input IR
 unchanged.
@@ -81,8 +85,8 @@ prove that a transformation is correct in general.
 
 ## Questions for code review
 
-- Does the decision use IR facts or an unstated target assumption?
-- Can an existing interface or analysis provide the information?
+- Does the decision follow IR semantics, or depend on backend policy?
+- Can an existing IR interface or analysis provide the required facts?
 - Would another target require changes to the generic algorithm?
 - Do later passes preserve the same guarantees?
 
