@@ -297,7 +297,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         ptrType, // present_key
         ptrType, // present_value
         ptrType, // output_qk
-        // Attributes (12 values)
+        // Attributes (13 values)
         i64Type, // num_heads
         i64Type, // kv_num_heads
         f32Type, // scale
@@ -324,6 +324,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         i64Type, // seq_len_new_kv
         i32Type, // has_host_length
         i32Type, // host_length_value
+        // Key bias (3 values)
         ptrType, // key_bias
         i64Type, // key_bias_batch
         i64Type  // key_bias_len
@@ -352,7 +353,8 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         batchSizeVal, seqLenQVal, seqLenKVVal, pastBufSeqVal, headDimVal,
         elemSizeVal, attnBiasBatchVal, attnBiasNumHeadsVal, kvBnsdVal,
         seqLenNewKVVal, hasHostLength, hostLength,
-        keyBiasPtr,     keyBiasBatchVal, keyBiasLenVal};
+        // Key bias (3 values)
+        keyBiasPtr, keyBiasBatchVal, keyBiasLenVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 

@@ -2091,7 +2091,9 @@ __device__ __forceinline__ float d96_swap_halves(float v) {
 #endif
 }
 
-template <int HPG>
+// HAS_KB is compile-time for the same reason as in gqa_flash_decode_kernel:
+// a runtime bias check in the key loop slows the no-bias decode.
+template <int HPG, bool HAS_KB = false>
 __global__ void __launch_bounds__(HPG * WAVE_SIZE)
 gqa_flash_decode_d96_kernel(
     const __half* __restrict__ Q_roped,  // [B, 1, H, 96]
@@ -2177,11 +2179,13 @@ gqa_flash_decode_d96_kernel(
 
   const float scale_log2e = scale * LOG2E;
   const __half* kb_row =
-      key_bias ? key_bias + (size_t)batch * key_bias_stride : nullptr;
+      HAS_KB ? key_bias + (size_t)batch * key_bias_stride : nullptr;
   // The bias rides the K/V ring so its load latency is hidden like theirs.
   auto load_kb = [&](int kv) -> float {
-    return kb_row ? __half2float(kb_row[kv < kv_end ? kv : kv_start]) * LOG2E
-                  : 0.0f;
+    if constexpr (HAS_KB)
+      return __half2float(kb_row[kv < kv_end ? kv : kv_start]) * LOG2E;
+    else
+      return 0.0f;
   };
   float m = -INFINITY;
   float l = 0.0f;
@@ -2228,7 +2232,7 @@ gqa_flash_decode_d96_kernel(
       float s = -INFINITY;
       if (kv < kv_end) {
         s = dot * scale_log2e;
-        if (kb_row) s += kbias[r];
+        if constexpr (HAS_KB) s += kbias[r];
       }
       const float s_o   = d96_swap_halves(s);
       const float m_new = fmaxf(m, fmaxf(s, s_o));
@@ -2849,14 +2853,17 @@ static inline void launchFlashDecodeConfig(
       } while (0)
     // fp16 D=96 has its own split kernel (gqa_flash_decode_d96_kernel); the
     // INT8 cache keeps the generic one.
+    #define LAUNCH_D96_KB(HPG_, KB_)                                           \
+      gqa_flash_decode_d96_kernel<HPG_, KB_>                                   \
+          <<<grid_main, (HPG_) * WAVE_SIZE, 0, stream>>>(                      \
+              hQ, hK, hV, hP, H, G, max_seq, scale, iSeq,                      \
+              local_window_size, splits, kb, kb_stride)
     #define LAUNCH_SCALAR_D96(HPG_)                                            \
       do {                                                                     \
-        if constexpr (FMT == KvDtype::kF16)                                    \
-          gqa_flash_decode_d96_kernel<HPG_>                                    \
-              <<<grid_main, (HPG_) * WAVE_SIZE, 0, stream>>>(                  \
-                  hQ, hK, hV, hP, H, G, max_seq, scale, iSeq,                  \
-                  local_window_size, splits, kb, kb_stride);                   \
-        else                                                                   \
+        if constexpr (FMT == KvDtype::kF16) {                                  \
+          if (kb) LAUNCH_D96_KB(HPG_, true);                                   \
+          else LAUNCH_D96_KB(HPG_, false);                                     \
+        } else                                                                 \
           LAUNCH_SCALAR_D(96, HPG_);                                           \
       } while (0)
     #define LAUNCH_SCALAR(HPG_)                                                \
@@ -2882,6 +2889,7 @@ static inline void launchFlashDecodeConfig(
     }
     #undef LAUNCH_SCALAR
     #undef LAUNCH_SCALAR_D96
+    #undef LAUNCH_D96_KB
     #undef LAUNCH_SCALAR_D
     #undef LAUNCH_SCALAR_D_KB
   }

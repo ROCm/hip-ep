@@ -814,7 +814,9 @@ __global__ void __launch_bounds__(kReduceBlock) qmoe_reduce_sorted_pairs_kernel(
     for (int j = 0; j < kVec; ++j) acc.h[j] = __float2half(0.0f);
 #pragma unroll
     for (int r = 0; r < kMaxTopK; ++r) {
-      if (r >= n) break;
+      // continue, not break: an early exit stops the full unroll and moves v
+      // to scratch memory.
+      if (r >= n) continue;
       const float weight = s_weight[r];
       const float s = s_scale[r];
       float value[kVec];

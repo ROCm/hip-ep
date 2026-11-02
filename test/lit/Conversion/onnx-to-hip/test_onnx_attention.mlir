@@ -29,8 +29,9 @@
 // stripped of their shared position source, and the window leg's indices drawn
 // from two DIFFERENT position sources; and the key-padding fold cases: an
 // is_causal=1 mask of padding AND causal (full layer) and padding AND causal
-// AND window (sliding layer) both reduced to a per-key key_bias row, and an
-// unrecognized OR leg that keeps the full attention_bias.
+// AND window (sliding layer) both reduced to a per-key key_bias row, and three
+// declines that keep the full attention_bias: an unrecognized OR leg,
+// is_causal=0, and a window bound with no causal compare.
 // ============================================================================
 
 // The pass runs `--convert-onnx-to-hip`, whose module-metadata step requires
@@ -1236,6 +1237,177 @@ module {
     // CHECK-SAME: tensor<?x1x?x?xf16>)
     // CHECK-NOT: key_bias
     // CHECK-SAME: outs(
+    // CHECK-NOT: onnx.Attention
+
+    return %out#0, %out#1, %out#2
+        : tensor<?x?x2048xf16>, tensor<?x8x?x128xf16>, tensor<?x8x?x128xf16>
+  }
+}
+
+// -----
+
+// ===== Key-padding fold declines without is_causal=1 =====
+//
+// The causal conjunct can only be dropped when the runtime applies causality
+// itself. Under is_causal=0 the same And(pad, causal) mask stays a full
+// attention_bias.
+module {
+  func.func @main_graph(
+      %query: tensor<?x?x2048xf16>,
+      %key: tensor<?x?x1024xf16>,
+      %value: tensor<?x?x1024xf16>,
+      %attnmask: tensor<?x?xi64>,
+      %past_key: tensor<?x8x?x128xf16>,
+      %past_value: tensor<?x8x?x128xf16>)
+      -> (tensor<?x?x2048xf16>, tensor<?x8x?x128xf16>,
+          tensor<?x8x?x128xf16>) {
+
+    // CHECK-LABEL: func.func @main_graph
+    // CHECK-SAME: (%[[CTXKC:.*]]: !hip.context,
+
+    %c1 = "onnx.Constant"() {value = dense<1> : tensor<1xi64>}
+        : () -> tensor<1xi64>
+    %c2 = "onnx.Constant"() {value = dense<2> : tensor<1xi64>}
+        : () -> tensor<1xi64>
+    %keepv = "onnx.Constant"() {value = dense<0.000000e+00> : tensor<f32>}
+        : () -> tensor<f32>
+    %dropv = "onnx.Constant"() {value = dense<-6.550400e+04> : tensor<f32>}
+        : () -> tensor<f32>
+
+    %ax1 = "onnx.Constant"() {value = dense<1> : tensor<i64>} : () -> tensor<i64>
+    %kidx = "onnx.CumSum"(%attnmask, %ax1)
+        : (tensor<?x?xi64>, tensor<i64>) -> tensor<?x?xi64>
+    %sbeg = "onnx.Constant"() {value = dense<-8> : tensor<1xi64>}
+        : () -> tensor<1xi64>
+    %send = "onnx.Constant"() {value = dense<9223372036854775807> : tensor<1xi64>}
+        : () -> tensor<1xi64>
+    %qidx = "onnx.Slice"(%kidx, %sbeg, %send, %c1)
+        : (tensor<?x?xi64>, tensor<1xi64>, tensor<1xi64>, tensor<1xi64>)
+        -> tensor<?x?xi64>
+    %qpos = "onnx.Unsqueeze"(%qidx, %c2)
+        : (tensor<?x?xi64>, tensor<1xi64>) -> tensor<?x?x1xi64>
+    %kpos = "onnx.Unsqueeze"(%kidx, %c1)
+        : (tensor<?x?xi64>, tensor<1xi64>) -> tensor<?x1x?xi64>
+    %causal = "onnx.GreaterOrEqual"(%qpos, %kpos)
+        : (tensor<?x?x1xi64>, tensor<?x1x?xi64>) -> tensor<?x?x?xi1>
+
+    %padu = "onnx.Unsqueeze"(%attnmask, %c1)
+        : (tensor<?x?xi64>, tensor<1xi64>) -> tensor<?x1x?xi64>
+    %padb = "onnx.Cast"(%padu) {to = 9 : si64}
+        : (tensor<?x1x?xi64>) -> tensor<?x1x?xi1>
+    %keep = "onnx.And"(%padb, %causal)
+        : (tensor<?x1x?xi1>, tensor<?x?x?xi1>) -> tensor<?x?x?xi1>
+    %bias32 = "onnx.Where"(%keep, %keepv, %dropv)
+        : (tensor<?x?x?xi1>, tensor<f32>, tensor<f32>) -> tensor<?x?x?xf32>
+    %bias16 = "onnx.Cast"(%bias32) {to = 10 : si64}
+        : (tensor<?x?x?xf32>) -> tensor<?x?x?xf16>
+    %bias = "onnx.Unsqueeze"(%bias16, %c1)
+        : (tensor<?x?x?xf16>, tensor<1xi64>) -> tensor<?x1x?x?xf16>
+
+    %out:3 = "onnx.Attention"(%query, %key, %value, %bias, %past_key,
+                              %past_value)
+        {q_num_heads = 16 : si64,
+         kv_num_heads = 8 : si64,
+         is_causal = 0 : si64,
+         scale = 8.838835e-02 : f32,
+         softcap = 0.000000e+00 : f32}
+        : (tensor<?x?x2048xf16>, tensor<?x?x1024xf16>, tensor<?x?x1024xf16>,
+           tensor<?x1x?x?xf16>, tensor<?x8x?x128xf16>, tensor<?x8x?x128xf16>)
+        -> (tensor<?x?x2048xf16>, tensor<?x8x?x128xf16>,
+            tensor<?x8x?x128xf16>)
+
+    // CHECK: hip.gqa(%[[CTXKC]])
+    // CHECK-SAME: tensor<?x1x?x?xf16>)
+    // CHECK-NOT: key_bias
+    // CHECK-SAME: outs(
+    // CHECK-NOT: onnx.Attention
+
+    return %out#0, %out#1, %out#2
+        : tensor<?x?x2048xf16>, tensor<?x8x?x128xf16>, tensor<?x8x?x128xf16>
+  }
+}
+
+// -----
+
+// ===== Key-padding fold declines a window bound with no causal compare =====
+//
+// `P - Q < W` alone also admits every future key, so without the causal
+// compare over the same (P, Q) it is not a sliding window and cannot become
+// local_window_size. The whole mask stays an attention_bias.
+module {
+  func.func @main_graph(
+      %query: tensor<?x?x2048xf16>,
+      %key: tensor<?x?x1024xf16>,
+      %value: tensor<?x?x1024xf16>,
+      %attnmask: tensor<?x?xi64>,
+      %past_key: tensor<?x8x?x128xf16>,
+      %past_value: tensor<?x8x?x128xf16>)
+      -> (tensor<?x?x2048xf16>, tensor<?x8x?x128xf16>,
+          tensor<?x8x?x128xf16>) {
+
+    // CHECK-LABEL: func.func @main_graph
+    // CHECK-SAME: (%[[CTXKN:.*]]: !hip.context,
+
+    %c1 = "onnx.Constant"() {value = dense<1> : tensor<1xi64>}
+        : () -> tensor<1xi64>
+    %c2 = "onnx.Constant"() {value = dense<2> : tensor<1xi64>}
+        : () -> tensor<1xi64>
+    %w = "onnx.Constant"() {value = dense<512> : tensor<i64>}
+        : () -> tensor<i64>
+    %keepv = "onnx.Constant"() {value = dense<0.000000e+00> : tensor<f32>}
+        : () -> tensor<f32>
+    %dropv = "onnx.Constant"() {value = dense<-6.550400e+04> : tensor<f32>}
+        : () -> tensor<f32>
+
+    %ax1 = "onnx.Constant"() {value = dense<1> : tensor<i64>} : () -> tensor<i64>
+    %kidx = "onnx.CumSum"(%attnmask, %ax1)
+        : (tensor<?x?xi64>, tensor<i64>) -> tensor<?x?xi64>
+    %sbeg = "onnx.Constant"() {value = dense<-8> : tensor<1xi64>}
+        : () -> tensor<1xi64>
+    %send = "onnx.Constant"() {value = dense<9223372036854775807> : tensor<1xi64>}
+        : () -> tensor<1xi64>
+    %qidx = "onnx.Slice"(%kidx, %sbeg, %send, %c1)
+        : (tensor<?x?xi64>, tensor<1xi64>, tensor<1xi64>, tensor<1xi64>)
+        -> tensor<?x?xi64>
+    %qpos = "onnx.Unsqueeze"(%qidx, %c2)
+        : (tensor<?x?xi64>, tensor<1xi64>) -> tensor<?x?x1xi64>
+    %kpos = "onnx.Unsqueeze"(%kidx, %c1)
+        : (tensor<?x?xi64>, tensor<1xi64>) -> tensor<?x1x?xi64>
+    %dist = "onnx.Sub"(%qpos, %kpos)
+        : (tensor<?x?x1xi64>, tensor<?x1x?xi64>) -> tensor<?x?x?xi64>
+    %inwin = "onnx.Less"(%dist, %w)
+        : (tensor<?x?x?xi64>, tensor<i64>) -> tensor<?x?x?xi1>
+
+    %padu = "onnx.Unsqueeze"(%attnmask, %c1)
+        : (tensor<?x?xi64>, tensor<1xi64>) -> tensor<?x1x?xi64>
+    %padb = "onnx.Cast"(%padu) {to = 9 : si64}
+        : (tensor<?x1x?xi64>) -> tensor<?x1x?xi1>
+    %keep = "onnx.And"(%padb, %inwin)
+        : (tensor<?x1x?xi1>, tensor<?x?x?xi1>) -> tensor<?x?x?xi1>
+    %bias32 = "onnx.Where"(%keep, %keepv, %dropv)
+        : (tensor<?x?x?xi1>, tensor<f32>, tensor<f32>) -> tensor<?x?x?xf32>
+    %bias16 = "onnx.Cast"(%bias32) {to = 10 : si64}
+        : (tensor<?x?x?xf32>) -> tensor<?x?x?xf16>
+    %bias = "onnx.Unsqueeze"(%bias16, %c1)
+        : (tensor<?x?x?xf16>, tensor<1xi64>) -> tensor<?x1x?x?xf16>
+
+    %out:3 = "onnx.Attention"(%query, %key, %value, %bias, %past_key,
+                              %past_value)
+        {q_num_heads = 16 : si64,
+         kv_num_heads = 8 : si64,
+         is_causal = 1 : si64,
+         scale = 8.838835e-02 : f32,
+         softcap = 0.000000e+00 : f32}
+        : (tensor<?x?x2048xf16>, tensor<?x?x1024xf16>, tensor<?x?x1024xf16>,
+           tensor<?x1x?x?xf16>, tensor<?x8x?x128xf16>, tensor<?x8x?x128xf16>)
+        -> (tensor<?x?x2048xf16>, tensor<?x8x?x128xf16>,
+            tensor<?x8x?x128xf16>)
+
+    // CHECK: hip.gqa(%[[CTXKN]])
+    // CHECK-SAME: tensor<?x1x?x?xf16>)
+    // CHECK-NOT: key_bias
+    // CHECK-SAME: outs(
+    // CHECK-NOT: local_window_size
     // CHECK-NOT: onnx.Attention
 
     return %out#0, %out#1, %out#2
