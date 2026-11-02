@@ -1675,7 +1675,9 @@ using KvElem = std::conditional_t<FMT == KvDtype::kI8, int8_t, __half>;
 // bandwidth-bound decode. All divergent code is a compile-time `if constexpr`
 // branch, so FMT==kF16 lowers to byte-identical SASS as the original fp16
 // kernel. Both paths emit the SAME [B, H, K_SPLITS, D+2] partials.
-template <int D, int HPG, KvDtype FMT = KvDtype::kF16>
+// HAS_KB is compile-time because a runtime bias check inside the per-key
+// softmax loop slows the no-bias decode.
+template <int D, int HPG, KvDtype FMT = KvDtype::kF16, bool HAS_KB = false>
 __global__ void __launch_bounds__(HPG * WAVE_SIZE)
 gqa_flash_decode_kernel(
     const __half* __restrict__ Q_roped,    // [B, 1, H, D] (BSHD with sq=1)
@@ -1846,7 +1848,7 @@ gqa_flash_decode_kernel(
   // and every key step takes its value with a readlane: a load per key would
   // put its latency on the serial softmax chain.
   const __half* kb_row =
-      key_bias ? key_bias + (size_t)batch * key_bias_stride : nullptr;
+      HAS_KB ? key_bias + (size_t)batch * key_bias_stride : nullptr;
   constexpr int KB_REGS = (BKV + WAVE_SIZE - 1) / WAVE_SIZE;
   float kb_reg[KB_REGS] = {};
 
@@ -1861,7 +1863,7 @@ gqa_flash_decode_kernel(
   for (int tile_start = kv_start; tile_start < kv_end; tile_start += BKV) {
     const int tile_n = (tile_start + BKV <= kv_end)
         ? BKV : (kv_end - tile_start);
-    if (kb_row) {
+    if constexpr (HAS_KB) {
       #pragma unroll
       for (int j = 0; j < KB_REGS; ++j) {
         const int k = j * WAVE_SIZE + lane_id;
@@ -1957,7 +1959,7 @@ gqa_flash_decode_kernel(
         dot_partial += __shfl_xor(dot_partial, offset);
 
       float score = dot_partial * scale_log2e;
-      if (kb_row) {
+      if constexpr (HAS_KB) {
         int b = __builtin_amdgcn_readlane(__builtin_bit_cast(int, kb_reg[0]),
                                           t % WAVE_SIZE);
         #pragma unroll
@@ -2835,11 +2837,16 @@ static inline void launchFlashDecodeConfig(
     // The kernel body is HpG-generic (each wave owns one query head and reads
     // the KV cache with the max_seq stride), so a single template covers GQA
     // and MHA (HpG==1) alike; we just instantiate every supported HpG.
-    #define LAUNCH_SCALAR_D(D_, HPG_)                                          \
-      gqa_flash_decode_kernel<D_, HPG_, FMT>                                   \
+    #define LAUNCH_SCALAR_D_KB(D_, HPG_, KB_)                                  \
+      gqa_flash_decode_kernel<D_, HPG_, FMT, KB_>                              \
           <<<grid_main, (HPG_) * WAVE_SIZE, 0, stream>>>(                      \
               hQ, hK, hV, kSc, vSc, hP, H, G, max_seq, scale, iSeq,            \
               local_window_size, splits, kb, kb_stride)
+    #define LAUNCH_SCALAR_D(D_, HPG_)                                          \
+      do {                                                                     \
+        if (kb) LAUNCH_SCALAR_D_KB(D_, HPG_, true);                            \
+        else LAUNCH_SCALAR_D_KB(D_, HPG_, false);                              \
+      } while (0)
     // fp16 D=96 has its own split kernel (gqa_flash_decode_d96_kernel); the
     // INT8 cache keeps the generic one.
     #define LAUNCH_SCALAR_D96(HPG_)                                            \
@@ -2876,6 +2883,7 @@ static inline void launchFlashDecodeConfig(
     #undef LAUNCH_SCALAR
     #undef LAUNCH_SCALAR_D96
     #undef LAUNCH_SCALAR_D
+    #undef LAUNCH_SCALAR_D_KB
   }
 
   // Reduce: one block per query head, block dim D. seqlens_k / sliding-window /
