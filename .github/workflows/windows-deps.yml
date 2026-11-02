@@ -27,10 +27,10 @@ permissions:
   contents: read
 
 env:
-  # LLVM/MLIR/LLD are sourced from the llvm-project subtree vendored inside
-  # rocmlirTriton (external/llvm-project). The repo + pinned commit are read
-  # from cmake/deps.txt (single source of truth with the from-source fallback
-  # in cmake/deps.cmake); the commit is the llvm-install cache key.
+  # LLVM/MLIR/LLD are cloned from deps.txt llvm_project. The hash column is a
+  # branch name, so the cache key is that branch's current tip. Same source as
+  # cmake/deps.cmake's from-source fallback. rocmlirTriton's vendored
+  # external/llvm-project is not built.
   ONNXRUNTIME_VERSION: "1.31.0"
   ONNXRUNTIME_PR_PATCHES: ""
   OGA_VERSION: "0.17.0"
@@ -70,12 +70,18 @@ jobs:
         working-directory: source-hip-ep
         run: |
           set -euo pipefail
-          LINE=$(grep -E '^rocmlirtriton;' cmake/deps.txt)
-          RT_URL=$(echo "$LINE" | cut -d';' -f2)
-          RT_COMMIT=$(echo "$LINE" | cut -d';' -f3)
-          echo "url=$RT_URL" >> "$GITHUB_OUTPUT"
-          echo "commit=$RT_COMMIT" >> "$GITHUB_OUTPUT"
-          echo "value=dep-llvm-rocmlirtriton-${RT_COMMIT}" >> "$GITHUB_OUTPUT"
+          LINE=$(grep -E '^llvm_project;' cmake/deps.txt)
+          LLVM_URL=$(echo "$LINE" | cut -d';' -f2)
+          LLVM_REF=$(echo "$LINE" | cut -d';' -f3)
+          LLVM_COMMIT=$(git ls-remote "$LLVM_URL" "refs/heads/$LLVM_REF" | awk '{print $1}')
+          if [ -z "$LLVM_COMMIT" ]; then
+            echo "ERROR: no tip for $LLVM_URL refs/heads/$LLVM_REF" >&2
+            exit 1
+          fi
+          echo "url=$LLVM_URL" >> "$GITHUB_OUTPUT"
+          echo "ref=$LLVM_REF" >> "$GITHUB_OUTPUT"
+          echo "commit=$LLVM_COMMIT" >> "$GITHUB_OUTPUT"
+          echo "value=dep-llvm-${LLVM_COMMIT}" >> "$GITHUB_OUTPUT"
 
       - name: Probe llvm-install
         id: cache-llvm
@@ -119,16 +125,15 @@ jobs:
         if: steps.cache-llvm.outputs.cache-hit != 'true'
         shell: bash
         run: |
-          # LLVM/MLIR/LLD come from the llvm-project subtree vendored inside
-          # rocmlirTriton (external/llvm-project); a shallow clone of the pinned
-          # commit already carries it (git subtree, not a submodule). Recipe
-          # matches cmake/deps.cmake's from-source fallback.
-          SRC="${{ runner.workspace }}/rocmlirTriton"
+          # Shallow clone of the deps.txt llvm_project branch tip. The cmake
+          # project lives at llvm/, not the repository root. Recipe matches
+          # cmake/deps.cmake's from-source fallback.
+          SRC="${{ runner.workspace }}/llvm-project"
           git init "$SRC"
           git -C "$SRC" remote add origin "${{ steps.key.outputs.url }}"
-          git -C "$SRC" fetch --depth 1 origin "${{ steps.key.outputs.commit }}"
+          git -C "$SRC" fetch --depth 1 origin "${{ steps.key.outputs.ref }}"
           git -C "$SRC" checkout FETCH_HEAD
-          cmake -G Ninja -S "$SRC/external/llvm-project/llvm" -B "${{ runner.workspace }}/build-llvm" \
+          cmake -G Ninja -S "$SRC/llvm" -B "${{ runner.workspace }}/build-llvm" \
             -DCMAKE_BUILD_TYPE=Release \
             -DLLVM_ENABLE_PROJECTS="clang;mlir;lld" \
             -DLLVM_TARGETS_TO_BUILD=X86 \

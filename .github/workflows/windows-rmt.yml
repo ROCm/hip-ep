@@ -55,13 +55,21 @@ jobs:
           EP_REF="${{ env.AMDGPU_EP_REF }}"
           AMDPR_KEY="${{ env.AMDGPU_PR_PATCHES }}"
           AMDPR_KEY="${AMDPR_KEY// /-}"
-          LINE=$(grep -E '^rocmlirtriton;' cmake/deps.txt)
-          echo "url=$(echo "$LINE" | cut -d';' -f2)" >> "$GITHUB_OUTPUT"
-          echo "commit=$(echo "$LINE" | cut -d';' -f3)" >> "$GITHUB_OUTPUT"
+          LINE=$(grep -E '^llvm_project;' cmake/deps.txt)
+          LLVM_URL=$(echo "$LINE" | cut -d';' -f2)
+          LLVM_REF=$(echo "$LINE" | cut -d';' -f3)
+          LLVM_COMMIT=$(git ls-remote "$LLVM_URL" "refs/heads/$LLVM_REF" | awk '{print $1}')
+          if [ -z "$LLVM_COMMIT" ]; then
+            echo "ERROR: no tip for $LLVM_URL refs/heads/$LLVM_REF" >&2
+            exit 1
+          fi
+          echo "url=$LLVM_URL" >> "$GITHUB_OUTPUT"
+          echo "ref=$LLVM_REF" >> "$GITHUB_OUTPUT"
+          echo "commit=$LLVM_COMMIT" >> "$GITHUB_OUTPUT"
           echo "ort=dep-ort-${{ env.ONNXRUNTIME_VERSION }}-ortpr-${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
           echo "amdgpu=windows-amdgpu-${EP_REF:0:7}-amdpr${AMDPR_KEY}-deps${DEPS_HASH}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
           echo "oga=windows-oga-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
-          echo "llvm=dep-llvm-rocmlirtriton-amdgpu-$(echo "$LINE" | cut -d';' -f3)" >> "$GITHUB_OUTPUT"
+          echo "llvm=dep-llvm-amdgpu-${LLVM_COMMIT}" >> "$GITHUB_OUTPUT"
 
       - name: Restore ort-install
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
@@ -99,12 +107,14 @@ jobs:
         if: steps.cache-llvm.outputs.cache-hit != 'true'
         shell: bash
         run: |
-          SRC="${{ runner.workspace }}/rocmlirTriton"
+          # Shallow clone of the deps.txt llvm_project branch tip. The cmake
+          # project lives at llvm/. AMDGPU stays enabled; only the source changed.
+          SRC="${{ runner.workspace }}/llvm-project"
           git init "$SRC"
           git -C "$SRC" remote add origin "${{ steps.deps.outputs.url }}"
-          git -C "$SRC" fetch --depth 1 origin "${{ steps.deps.outputs.commit }}"
+          git -C "$SRC" fetch --depth 1 origin "${{ steps.deps.outputs.ref }}"
           git -C "$SRC" checkout FETCH_HEAD
-          cmake -G Ninja -S "$SRC/external/llvm-project/llvm" -B "${{ runner.workspace }}/build-llvm" \
+          cmake -G Ninja -S "$SRC/llvm" -B "${{ runner.workspace }}/build-llvm" \
             -DCMAKE_BUILD_TYPE=Release \
             -DLLVM_ENABLE_PROJECTS="clang;mlir;lld" \
             -DLLVM_TARGETS_TO_BUILD="X86;AMDGPU" \
