@@ -4,17 +4,34 @@
 ##
 name: Windows RMT Build
 
-# Extra rocMLIR package. This workflow does not call Windows Build or
-# windows-deps, so it does not share their concurrency groups or replace
-# gpu-test-package. It restores the existing ORT, amdgpu, and OGA caches and
-# builds a separate LLVM prefix with the AMDGPU backend. continue-on-error
-# keeps a failure from blocking the pull request.
+# Extra rocMLIR package. Windows Build calls this after the deps prebuild, on
+# the same commit, so the ORT, amdgpu, and OGA caches exist before the
+# restores. amdgpu and OGA also fall back to the artifacts that prebuild
+# uploaded: a cache saved earlier in the same run is not always visible yet.
+# ORT is cache-only, which is safe once the prebuild job has finished. This
+# job keeps its own concurrency group, uploads gpu-test-package-rmt, and
+# builds a separate LLVM prefix with the AMDGPU backend. The caller sets
+# continue-on-error so a failure here does not fail Windows Build.
+# workflow_dispatch reruns against whatever is already cached.
 on:
   workflow_dispatch:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-  push:
-    branches: [main, "release/**", "gpuep/releases/**"]
+  workflow_call:
+    inputs:
+      ort_cache_key:
+        description: Cache key of the prebuilt ONNX Runtime install prefix.
+        required: false
+        type: string
+        default: ""
+      amdgpu_cache_key:
+        description: Cache key of the prebuilt amdgpu-ep build artifacts.
+        required: false
+        type: string
+        default: ""
+      oga_cache_key:
+        description: Cache key of the prebuilt OGA artifact set.
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -22,7 +39,6 @@ permissions:
 jobs:
   build:
     runs-on: windows-2022
-    continue-on-error: true
     concurrency:
       group: windows-rmt-${{ github.ref }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -58,9 +74,23 @@ jobs:
           LINE=$(grep -E '^rocmlirtriton;' cmake/deps.txt)
           echo "url=$(echo "$LINE" | cut -d';' -f2)" >> "$GITHUB_OUTPUT"
           echo "commit=$(echo "$LINE" | cut -d';' -f3)" >> "$GITHUB_OUTPUT"
-          echo "ort=dep-ort-${{ env.ONNXRUNTIME_VERSION }}-ortpr-${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
-          echo "amdgpu=windows-amdgpu-${EP_REF:0:7}-amdpr${AMDPR_KEY}-deps${DEPS_HASH}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
-          echo "oga=windows-oga-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
+          # Windows Build passes the keys the prebuild actually saved and
+          # uploaded. A manual dispatch recomputes them.
+          ORT_KEY="${{ inputs.ort_cache_key }}"
+          AMD_KEY="${{ inputs.amdgpu_cache_key }}"
+          OGA_KEY="${{ inputs.oga_cache_key }}"
+          if [ -z "$ORT_KEY" ]; then
+            ORT_KEY="dep-ort-${{ env.ONNXRUNTIME_VERSION }}-ortpr-${{ env.ONNXRUNTIME_PR_PATCHES }}"
+          fi
+          if [ -z "$AMD_KEY" ]; then
+            AMD_KEY="windows-amdgpu-${EP_REF:0:7}-amdpr${AMDPR_KEY}-deps${DEPS_HASH}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}"
+          fi
+          if [ -z "$OGA_KEY" ]; then
+            OGA_KEY="windows-oga-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}"
+          fi
+          echo "ort=$ORT_KEY" >> "$GITHUB_OUTPUT"
+          echo "amdgpu=$AMD_KEY" >> "$GITHUB_OUTPUT"
+          echo "oga=$OGA_KEY" >> "$GITHUB_OUTPUT"
           echo "llvm=dep-llvm-rocmlirtriton-amdgpu-$(echo "$LINE" | cut -d';' -f3)" >> "$GITHUB_OUTPUT"
 
       - name: Restore ort-install
@@ -70,19 +100,35 @@ jobs:
           key: ${{ steps.deps.outputs.ort }}
           fail-on-cache-miss: true
 
+      # Caches are the fast path. On a cold key the prebuild uploads the same
+      # tree, and that artifact is the reliable handoff inside this run.
       - name: Restore amdgpu-artifacts
+        id: restore-amdgpu
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/amdgpu-artifacts
           key: ${{ steps.deps.outputs.amdgpu }}
-          fail-on-cache-miss: true
+
+      - name: Download amdgpu-artifacts
+        if: steps.restore-amdgpu.outputs.cache-hit != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.deps.outputs.amdgpu }}
+          path: ${{ runner.workspace }}/amdgpu-artifacts
 
       - name: Restore oga-artifacts
+        id: restore-oga
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/oga-artifacts
           key: ${{ steps.deps.outputs.oga }}
-          fail-on-cache-miss: true
+
+      - name: Download oga-artifacts
+        if: steps.restore-oga.outputs.cache-hit != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.deps.outputs.oga }}
+          path: ${{ runner.workspace }}/oga-artifacts
 
       - name: Restore AMDGPU llvm-install
         id: cache-llvm
