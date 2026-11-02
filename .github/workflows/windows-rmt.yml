@@ -10,8 +10,9 @@ name: Windows RMT Build
 # uploaded: a cache saved earlier in the same run is not always visible yet.
 # ORT is cache-only, which is safe once the prebuild job has finished. This
 # job keeps its own concurrency group, uploads gpu-test-package-rmt, and
-# builds a separate LLVM prefix with the AMDGPU backend. The caller sets
-# continue-on-error so a failure here does not fail Windows Build.
+# builds a separate LLVM prefix with the AMDGPU backend. continue-on-error
+# is set here because a caller job that uses a reusable workflow cannot set
+# it, and a failure here must not fail Windows Build.
 # workflow_dispatch reruns against whatever is already cached.
 on:
   workflow_dispatch:
@@ -39,6 +40,7 @@ permissions:
 jobs:
   build:
     runs-on: windows-2022
+    continue-on-error: true
     concurrency:
       group: windows-rmt-${{ github.ref }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}

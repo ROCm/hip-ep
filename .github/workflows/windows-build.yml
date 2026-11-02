@@ -37,12 +37,12 @@ jobs:
 
   # Separate rocMLIR package. It must not start until prebuild has saved the
   # shared caches and uploaded the amdgpu and OGA artifacts. Not part of the
-  # merge queue. continue-on-error keeps a failure from failing this workflow.
+  # merge queue. A caller job cannot set continue-on-error; the called
+  # workflow does, so a failure there does not fail this workflow.
   build_rmt:
     name: Windows RMT Build
     needs: prebuild
     if: github.event_name != 'merge_group'
-    continue-on-error: true
     uses: ./.github/workflows/windows-rmt.yml
     with:
       ort_cache_key: ${{ needs.prebuild.outputs.ort_cache_key }}
