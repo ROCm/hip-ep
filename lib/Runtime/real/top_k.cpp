@@ -177,7 +177,12 @@ int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
     return -1;
   }
 
-  if (k_val > kTopKDeviceMax)
+  // Above 256 the device kernel only does full sorts of a contiguous last axis
+  // in f16/f32, and those need workspace; everything else is selected here.
+  const bool device_shape =
+      element_size_bytes != 8 &&
+      hip_top_k_device_supported(axis, rank, x_shape, k_val);
+  if (k_val > kTopKDeviceMax && !device_shape)
     return host_top_k(static_cast<hipStream_t>(stream), x, values, indices,
                       axis, largest, rank, x_shape, num_elements, k_val,
                       element_size_bytes);
@@ -189,6 +194,10 @@ int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
     workspace = hipdnn_ep_state_get_workspace(state);
     workspace_bytes = hipdnn_ep_state_get_workspace_size(state);
   }
+  if (k_val > kTopKDeviceMax && workspace_bytes < needed)
+    return host_top_k(static_cast<hipStream_t>(stream), x, values, indices,
+                      axis, largest, rank, x_shape, num_elements, k_val,
+                      element_size_bytes);
 
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_top_k: axis=%lld, k=%lld, rank=%lld, largest=%lld, "

@@ -8,8 +8,10 @@
 
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
+#include <climits>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
 
 namespace {
 
@@ -402,6 +404,176 @@ static bool topk_two_pass_ok(const TopKGeom &geom) {
          kTopKChunk <= per_thread && chunks * geom.k <= per_thread;
 }
 
+static bool topk_full_sort_ok(const TopKGeom &geom) {
+  return geom.k == geom.axis_size && geom.k > kTopKTwoPassMaxK &&
+         geom.axis == geom.rank - 1 && geom.axis_size < INT32_MAX;
+}
+
+static int64_t topk_full_sort_width(int64_t axis_size) {
+  int64_t width = 1;
+  while (width < axis_size) {
+    if (width > INT32_MAX / 2)
+      return 0;
+    width *= 2;
+  }
+  return width;
+}
+
+static bool topk_checked_product(int64_t lhs, int64_t rhs, int64_t &result) {
+  if (lhs < 0 || rhs < 0)
+    return false;
+  if (lhs != 0 && rhs > std::numeric_limits<int64_t>::max() / lhs)
+    return false;
+  result = lhs * rhs;
+  return true;
+}
+
+static size_t topk_full_sort_bytes(const TopKGeom &geom) {
+  const int64_t width = topk_full_sort_width(geom.axis_size);
+  if (width == 0 || geom.num_rows <= 0)
+    return 0;
+  int64_t elements = 0;
+  if (!topk_checked_product(geom.num_rows, width, elements))
+    return 0;
+  constexpr uint64_t bytes_per_element = sizeof(float) + sizeof(int32_t);
+  if (static_cast<uint64_t>(elements) >
+      std::numeric_limits<size_t>::max() / bytes_per_element)
+    return 0;
+  return static_cast<size_t>(elements) * bytes_per_element;
+}
+
+__device__ __forceinline__ bool topk_full_before(float a_key, int32_t a_index,
+                                                 float b_key, int32_t b_index,
+                                                 int largest) {
+  if (a_index == INT32_MAX)
+    return false;
+  if (b_index == INT32_MAX)
+    return true;
+  bool a_nan = isnan(a_key);
+  bool b_nan = isnan(b_key);
+  if (a_nan != b_nan)
+    return !a_nan;
+  if (a_nan)
+    return a_index < b_index;
+  if (a_key == b_key)
+    return a_index < b_index;
+  return largest ? a_key > b_key : a_key < b_key;
+}
+
+template <typename T>
+__global__ void topk_full_sort_init_kernel(const T *__restrict__ data,
+                                           float *__restrict__ keys,
+                                           int32_t *__restrict__ indices,
+                                           int64_t axis_size,
+                                           int64_t padded_width,
+                                           int64_t total) {
+  int64_t linear =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (linear >= total)
+    return;
+  int64_t column = linear % padded_width;
+  int64_t row = linear / padded_width;
+  if (column < axis_size) {
+    keys[linear] = topk_elem_to_float(data[row * axis_size + column]);
+    indices[linear] = static_cast<int32_t>(column);
+  } else {
+    keys[linear] = 0.0f;
+    indices[linear] = INT32_MAX;
+  }
+}
+
+__global__ void topk_full_sort_step_kernel(float *__restrict__ keys,
+                                           int32_t *__restrict__ indices,
+                                           int64_t padded_width,
+                                           int64_t total, int64_t stage,
+                                           int64_t stride, int largest) {
+  int64_t linear =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (linear >= total)
+    return;
+  int64_t column = linear % padded_width;
+  int64_t partner_column = column ^ stride;
+  if (partner_column <= column)
+    return;
+  int64_t partner = linear - column + partner_column;
+  float a_key = keys[linear];
+  float b_key = keys[partner];
+  int32_t a_index = indices[linear];
+  int32_t b_index = indices[partner];
+  bool ascending_half = (column & stage) == 0;
+  bool a_before_b =
+      topk_full_before(a_key, a_index, b_key, b_index, largest);
+  if ((ascending_half && !a_before_b) || (!ascending_half && a_before_b)) {
+    keys[linear] = b_key;
+    keys[partner] = a_key;
+    indices[linear] = b_index;
+    indices[partner] = a_index;
+  }
+}
+
+template <typename T>
+__global__ void topk_full_sort_output_kernel(
+    const T *__restrict__ data, T *__restrict__ values,
+    int64_t *__restrict__ output_indices,
+    const int32_t *__restrict__ indices,
+    int64_t axis_size, int64_t padded_width, int64_t total) {
+  int64_t linear =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (linear >= total)
+    return;
+  int64_t column = linear % axis_size;
+  int64_t row = linear / axis_size;
+  int32_t index = indices[row * padded_width + column];
+  values[linear] = data[row * axis_size + index];
+  output_indices[linear] = index;
+}
+
+template <typename T>
+static int launch_top_k_full_sort(hipStream_t stream, const T *data, T *values,
+                                  int64_t *indices, const TopKGeom &geom,
+                                  int largest, void *workspace) {
+  const int64_t width = topk_full_sort_width(geom.axis_size);
+  int64_t workspace_elements = 0;
+  int64_t output_elements = 0;
+  if (!topk_checked_product(geom.num_rows, width, workspace_elements) ||
+      !topk_checked_product(geom.num_rows, geom.axis_size, output_elements))
+    return -1;
+  float *keys = static_cast<float *>(workspace);
+  int32_t *workspace_indices =
+      reinterpret_cast<int32_t *>(keys + workspace_elements);
+  constexpr int block_size = 256;
+  const int64_t workspace_blocks =
+      (workspace_elements - 1) / block_size + 1;
+  const int64_t output_blocks = (output_elements - 1) / block_size + 1;
+  if (workspace_blocks > std::numeric_limits<unsigned>::max() ||
+      output_blocks > std::numeric_limits<unsigned>::max())
+    return -1;
+  const unsigned workspace_grid = static_cast<unsigned>(workspace_blocks);
+  const unsigned output_grid = static_cast<unsigned>(output_blocks);
+
+  (void)hipGetLastError();
+  hipLaunchKernelGGL(HIP_KERNEL_NAME(topk_full_sort_init_kernel<T>),
+                     dim3(workspace_grid), dim3(block_size), 0, stream, data,
+                     keys, workspace_indices, geom.axis_size, width,
+                     workspace_elements);
+  for (int64_t stage = 2; stage <= width; stage *= 2)
+    for (int64_t stride = stage / 2; stride > 0; stride /= 2)
+      hipLaunchKernelGGL(topk_full_sort_step_kernel, dim3(workspace_grid),
+                         dim3(block_size), 0, stream, keys, workspace_indices,
+                         width, workspace_elements, stage, stride, largest);
+  hipLaunchKernelGGL(HIP_KERNEL_NAME(topk_full_sort_output_kernel<T>),
+                     dim3(output_grid), dim3(block_size), 0, stream, data,
+                     values, indices, workspace_indices, geom.axis_size, width,
+                     output_elements);
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess) {
+    fprintf(stderr, "[custom_kernels] full-sort top_k launch failed: %s\n",
+            hipGetErrorString(err));
+    return static_cast<int>(err);
+  }
+  return 0;
+}
+
 // Per-chunk (key, index) lists of the two-pass path: float keys, then int
 // indices.
 static size_t topk_two_pass_bytes(const TopKGeom &geom) {
@@ -446,6 +618,19 @@ static int launch_top_k(void *stream, const void *data, void *values,
     return 0;
 
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
+  if (topk_full_sort_ok(geom)) {
+    const size_t needed = topk_full_sort_bytes(geom);
+    if (!workspace || needed == 0 || workspace_bytes < needed) {
+      fprintf(stderr,
+              "[custom_kernels] full-sort top_k needs %zu workspace bytes, "
+              "got %zu\n",
+              needed, workspace_bytes);
+      return -1;
+    }
+    return launch_top_k_full_sort(
+        hip_stream, static_cast<const T *>(data), static_cast<T *>(values),
+        static_cast<int64_t *>(indices), geom, largest, workspace);
+  }
   // Without enough workspace a long row still takes the one-pass kernel.
   if (topk_two_pass_ok(geom) && workspace &&
       workspace_bytes >= topk_two_pass_bytes(geom))
@@ -516,12 +701,17 @@ static bool make_topk_geom(int64_t axis, int64_t rank, const int64_t *x_shape,
     return false;
 
   geom.k = k;
-  for (int64_t i = 0; i < rank; ++i)
+  for (int64_t i = 0; i < rank; ++i) {
+    if (x_shape[i] < 0)
+      return false;
     geom.in_shape[i] = x_shape[i];
+  }
 
   geom.in_stride[rank - 1] = 1;
   for (int64_t i = rank - 2; i >= 0; --i)
-    geom.in_stride[i] = geom.in_stride[i + 1] * geom.in_shape[i + 1];
+    if (!topk_checked_product(geom.in_stride[i + 1],
+                              geom.in_shape[i + 1], geom.in_stride[i]))
+      return false;
 
   geom.axis_size = geom.in_shape[geom.axis];
   int64_t k_eff = geom.k;
@@ -535,12 +725,16 @@ static bool make_topk_geom(int64_t axis, int64_t rank, const int64_t *x_shape,
 
   geom.out_stride[rank - 1] = 1;
   for (int64_t i = rank - 2; i >= 0; --i)
-    geom.out_stride[i] = geom.out_stride[i + 1] * out_shape[i + 1];
+    if (!topk_checked_product(geom.out_stride[i + 1], out_shape[i + 1],
+                              geom.out_stride[i]))
+      return false;
   geom.num_rows = 1;
   for (int64_t i = 0; i < rank; ++i) {
     if (i == geom.axis)
       continue;
-    geom.num_rows *= geom.in_shape[i];
+    if (!topk_checked_product(geom.num_rows, geom.in_shape[i],
+                              geom.num_rows))
+      return false;
   }
   return true;
 }
@@ -553,9 +747,25 @@ extern "C" size_t hip_top_k_workspace_bytes(int64_t axis, int64_t rank,
   if (!x_shape || rank <= 0 || rank > kMaxRank || k <= 0)
     return 0;
   TopKGeom geom;
-  if (!make_topk_geom(axis, rank, x_shape, k, geom) || !topk_two_pass_ok(geom))
+  if (!make_topk_geom(axis, rank, x_shape, k, geom))
+    return 0;
+  if (topk_full_sort_ok(geom))
+    return topk_full_sort_bytes(geom);
+  if (!topk_two_pass_ok(geom))
     return 0;
   return topk_two_pass_bytes(geom);
+}
+
+extern "C" int hip_top_k_device_supported(int64_t axis, int64_t rank,
+                                          const int64_t *x_shape, int64_t k) {
+  if (!x_shape || rank <= 0 || rank > kMaxRank)
+    return 0;
+  if (k <= kTopKTwoPassMaxK)
+    return 1;
+  TopKGeom geom;
+  if (!make_topk_geom(axis, rank, x_shape, k, geom))
+    return 0;
+  return topk_full_sort_ok(geom) && topk_full_sort_bytes(geom) > 0;
 }
 
 extern "C" int hip_top_k(void *stream, const void *data, void *values,
@@ -570,15 +780,17 @@ extern "C" int hip_top_k(void *stream, const void *data, void *values,
     return -1;
   if (k <= 0)
     return 0;
-  if (k > 256) {
-    fprintf(stderr, "[custom_kernels] hip_top_k: K=%lld exceeds max 256\n",
-            (long long)k);
-    return -1;
-  }
 
   TopKGeom geom;
   if (!make_topk_geom(axis, rank, x_shape, k, geom))
     return -1;
+  if (k > kTopKTwoPassMaxK && !topk_full_sort_ok(geom)) {
+    fprintf(stderr,
+            "[custom_kernels] hip_top_k: K=%lld exceeds max 256 and is not a "
+            "contiguous full-axis sort\n",
+            (long long)k);
+    return -1;
+  }
 
   CUSTOM_KERNELS_DEBUG_LOG(
       "[custom_kernels] hip_top_k: axis=%lld, k=%lld, rank=%lld, "

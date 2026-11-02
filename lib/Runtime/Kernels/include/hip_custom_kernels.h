@@ -1500,12 +1500,19 @@ HIP_KERNEL_API int hip_gather_elements(
     int element_size_bytes,
     int indices_element_size_bytes);
 
-/* Scratch hip_top_k wants for this shape, or 0 when it needs none (only the
- * chunked two-pass path for long last-axis rows with 2 <= k <= 32 does). With
- * a smaller or null workspace those rows take the one-pass kernel. */
+/* Scratch hip_top_k wants for this shape, or 0 when it needs none. The chunked
+ * two-pass path for long last-axis rows with 2 <= k <= 32 uses it when given,
+ * and otherwise takes the one-pass kernel. The full-sort path for k > 256
+ * requires it. */
 HIP_KERNEL_API size_t hip_top_k_workspace_bytes(int64_t axis, int64_t rank,
                                                 const int64_t* x_shape,
                                                 int64_t k);
+
+/* Nonzero when hip_top_k handles this shape: any k <= 256, or a full sort of
+ * a contiguous last axis (k == axis size) above that. */
+HIP_KERNEL_API int hip_top_k_device_supported(int64_t axis, int64_t rank,
+                                              const int64_t* x_shape,
+                                              int64_t k);
 
 HIP_KERNEL_API int hip_top_k(void* stream, const void* data, void* values,
                              void* indices, int64_t axis, int64_t largest,
