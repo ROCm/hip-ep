@@ -3040,6 +3040,24 @@ int wrap_scatter_nd(RuntimeState *state, void *data, void *indices,
   return 0;
 }
 
+int wrap_tensor_scatter(RuntimeState *state, void *past, void *update,
+                        void *write_indices, void *output, int64_t elem_bytes,
+                        int64_t batch, int64_t outer, int64_t max_seq,
+                        int64_t seq, int64_t inner, int64_t circular) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_tensor_scatter\n");
+    return -1;
+  }
+  (void)update;
+  MOCK_PRINT("[MOCK] wrap_tensor_scatter(elem_bytes=%lld, batch=%lld, "
+             "outer=%lld, max_seq=%lld, seq=%lld, inner=%lld, circular=%lld, "
+             "in_place=%d, has_write_indices=%d)\n",
+             (long long)elem_bytes, (long long)batch, (long long)outer,
+             (long long)max_seq, (long long)seq, (long long)inner,
+             (long long)circular, past == output, write_indices != nullptr);
+  return 0;
+}
+
 int wrap_sign(RuntimeState *state, void *input, void *output,
               int64_t num_elements, int64_t data_type) {
   if (!state) {

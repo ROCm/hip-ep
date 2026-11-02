@@ -4136,6 +4136,50 @@ void ScatterNDOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// TensorScatterOp: ins(past, update, [write_indices]), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange TensorScatterOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void TensorScatterOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult TensorScatterOp::verify() {
+  auto past = cast<ShapedType>(getPast().getType());
+  auto update = cast<ShapedType>(getUpdate().getType());
+  auto out = cast<ShapedType>(getOutput().getType());
+  const int64_t rank = past.getRank();
+  const int64_t axis = getAxis();
+  if (axis < 1 || axis >= rank)
+    return emitOpError("axis must be in [1, rank)");
+  if (update.getRank() != rank || out.getRank() != rank)
+    return emitOpError("past, update and output must have the same rank");
+  if (past.getElementType() != update.getElementType() ||
+      past.getElementType() != out.getElementType())
+    return emitOpError("past, update and output must share an element type");
+  for (int64_t d = 0; d < rank; ++d) {
+    auto compatible = [&](ShapedType t) {
+      return t.isDynamicDim(d) || past.isDynamicDim(d) ||
+             t.getDimSize(d) == past.getDimSize(d);
+    };
+    if (!compatible(out) || (d != axis && !compatible(update)))
+      return emitOpError("update and output must match past outside axis, "
+                         "output everywhere");
+  }
+  if (Value wi = getWriteIndices()) {
+    auto t = cast<ShapedType>(wi.getType());
+    if (t.getRank() != 1 || !t.getElementType().isInteger(64))
+      return emitOpError("write_indices must be [B] int64");
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // NonZeroOp: ins(x), outs(y, count)
 //===----------------------------------------------------------------------===//
 

@@ -2323,6 +2323,16 @@ int wrap_scatter_nd(RuntimeState *state, void *data, void *indices,
                     const int64_t *output_shape, int64_t output_rank,
                     int64_t reduction_id, int64_t data_type);
 
+// ONNX TensorScatter over buffers viewed as [batch, outer, max_seq, inner]
+// (update: [batch, outer, seq, inner]): output := past unless they share a
+// buffer, then output[b, o, w, :] = update[b, o, t, :] with
+// w = write_indices[b] + t (device int64 [batch], null = 0), modulo max_seq
+// when `circular`.
+int wrap_tensor_scatter(RuntimeState *state, void *past, void *update,
+                        void *write_indices, void *output, int64_t elem_bytes,
+                        int64_t batch, int64_t outer, int64_t max_seq,
+                        int64_t seq, int64_t inner, int64_t circular);
+
 //===----------------------------------------------------------------------===//
 // ONNX Loop Drivers
 //===----------------------------------------------------------------------===//

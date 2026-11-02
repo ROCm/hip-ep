@@ -3765,6 +3765,18 @@ HIP_KERNEL_API int hip_strided_copy(void *stream, void *dst, const void *src,
                      const int64_t *dst_outer_strides, int64_t row_elems,
                      int64_t outer_total);
 
+// ONNX TensorScatter row writes into a [batch, outer, max_seq, row] buffer:
+// present[b, o, w, :] = update[b, o, t, :] for t < seq, where w is
+// write_indices[b] + t (device int64 [batch], null = 0), taken modulo max_seq
+// when `circular`; linear writes past max_seq are dropped. row_bytes is the
+// byte size of one row. Does not copy past into present.
+HIP_KERNEL_API int hip_tensor_scatter(void *stream, void *present,
+                                      const void *update,
+                                      const int64_t *write_indices,
+                                      int64_t batch, int64_t outer,
+                                      int64_t max_seq, int64_t seq,
+                                      int64_t row_bytes, int circular);
+
 /* =========================================================================
  * Causal Depthwise 1D Conv -- single-step "decode" path
  * =========================================================================

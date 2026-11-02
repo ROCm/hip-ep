@@ -559,6 +559,8 @@ void populateSliceConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
 void populateScatterNDConversionPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
+void populateTensorScatterConversionPatterns(RewritePatternSet &patterns,
+                                             MLIRContext *ctx);
 void populateIdentityConversionPatterns(RewritePatternSet &patterns,
                                         MLIRContext *ctx);
 void populateOrConversionPatterns(RewritePatternSet &patterns,

@@ -63,6 +63,7 @@ add_library(HipToLLVM STATIC
   ModLowering.cpp
   SliceLowering.cpp
   ScatterNDLowering.cpp
+  TensorScatterLowering.cpp
   NonZeroLowering.cpp
   NonMaxSuppressionLowering.cpp
   ReadbackDimLowering.cpp

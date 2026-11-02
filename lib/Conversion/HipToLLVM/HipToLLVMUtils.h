@@ -189,6 +189,7 @@ inline constexpr const char *kWrapSign = "wrap_sign";
 inline constexpr const char *kWrapMod = "wrap_mod";
 inline constexpr const char *kWrapSlice = "wrap_slice_typed";
 inline constexpr const char *kWrapScatterND = "wrap_scatter_nd";
+inline constexpr const char *kWrapTensorScatter = "wrap_tensor_scatter";
 inline constexpr const char *kWrapNonZero = "wrap_nonzero";
 inline constexpr const char *kWrapNonMaxSuppression =
     "wrap_non_max_suppression";
@@ -589,6 +590,8 @@ void populateSliceLoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);
 void populateScatterNDLoweringPatterns(const LLVMTypeConverter &converter,
                                        RewritePatternSet &patterns);
+void populateTensorScatterLoweringPatterns(const LLVMTypeConverter &converter,
+                                           RewritePatternSet &patterns);
 void populateNonZeroLoweringPatterns(const LLVMTypeConverter &converter,
                                      RewritePatternSet &patterns);
 void populateNonMaxSuppressionLoweringPatterns(

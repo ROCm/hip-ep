@@ -5406,6 +5406,56 @@ def Hip_ScatterNDOp : Hip_DpsOp_AutoReifyInfer<"scatter_nd"> {
   }];
 }
 
+def Hip_TensorScatterOp : Hip_DpsOp_AutoReifyInfer<"tensor_scatter"> {
+  let summary = "TensorScatter: write update rows into a copy of a buffer";
+  let description = [{
+    ONNX TensorScatter (opset 24). `output` is `past` with the `update` rows
+    written along `axis` (normalized, 1 <= axis < rank):
+
+      output[b, ..., w(b, t), ...] = update[b, ..., t, ...]
+
+    with w(b, t) = write_indices[b] + t for `linear` mode and that modulo
+    the axis size for `circular`. Without `write_indices` every batch writes
+    from row 0.
+
+    The op reads `past` and writes `output` as separate operands, and IR
+    passes may treat them as distinct buffers. The runtime additionally
+    accepts `past` and `output` bound to the same buffer by the caller (a
+    function argument and a function result sharing storage) and then
+    writes only the `update` rows. That aliasing is not visible in the IR:
+    it is only correct when no operation reads `past` after this op, which
+    the caller that binds the shared buffer must guarantee.
+
+    Example:
+    ```mlir
+    hip.tensor_scatter(%ctx) ins(%past, %update : tensor<2x4x16x8xf16>,
+                                 tensor<2x4x?x8xf16>)
+        write_indices(%wi : tensor<2xi64>)
+        outs(%out : tensor<2x4x16x8xf16>) {axis = 2 : i64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$past,
+    Hip_TensorOrMemRef:$update,
+    Optional<Hip_TensorOrMemRef>:$write_indices, // [B] i64
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$axis,
+    DefaultValuedAttr<BoolAttr, "false">:$circular
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $past `,` $update `:` type($past) `,`
+        type($update) `)`
+    (`write_indices` `(` $write_indices^ `:` type($write_indices) `)`)?
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  let hasVerifier = 1;
+}
+
 def Hip_SignOp : Hip_DpsOp_AutoReifyInfer<"sign", "Y"> {
   let summary = "Element-wise sign: y = sign(x)";
   let description = [{
