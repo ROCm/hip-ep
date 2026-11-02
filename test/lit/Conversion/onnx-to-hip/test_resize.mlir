@@ -424,4 +424,23 @@ module {
     // CHECK: return
     return %y : tensor<1x1x8xf32>
   }
+
+  // Test 21: a static identity Resize with unit scales is removed when its
+  // result is an intermediate value. Graph outputs retain their allocation.
+  func.func @test_resize_identity_intermediate(%arg0: tensor<1x3x16x16xf32>)
+      -> tensor<1x3x16x16xf32> {
+    // CHECK-LABEL: func.func @test_resize_identity_intermediate
+    // CHECK-SAME: (%{{.*}}: !hip.context, %[[X:.*]]: tensor<1x3x16x16xf32>)
+    %roi = "onnx.NoValue"() {value} : () -> none
+    %scales = "onnx.Constant"() {value = dense<[1.0, 1.0, 1.0, 1.0]> : tensor<4xf32>}
+        : () -> tensor<4xf32>
+    %resized = "onnx.Resize"(%arg0, %roi, %scales)
+        {mode = "nearest", coordinate_transformation_mode = "asymmetric",
+         nearest_mode = "floor"}
+        : (tensor<1x3x16x16xf32>, none, tensor<4xf32>) -> tensor<1x3x16x16xf32>
+    %y = "onnx.Neg"(%resized) : (tensor<1x3x16x16xf32>) -> tensor<1x3x16x16xf32>
+    // CHECK-NOT: hip.resize
+    // CHECK: hip.neg(%{{.*}}) ins(%[[X]] : tensor<1x3x16x16xf32>)
+    return %y : tensor<1x3x16x16xf32>
+  }
 }

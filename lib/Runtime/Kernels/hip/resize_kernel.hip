@@ -152,6 +152,31 @@ __global__ void resize_nearest_kernel(const T* __restrict__ input,
   output[tid] = input[base_in + in_off];
 }
 
+// Nearest Resize with asymmetric coordinates and floor rounding maps an
+// integer upsample directly to input[o / scale]. This avoids the floating
+// coordinate transform, rounding, and clamping needed by the generic kernel.
+template <typename T>
+__global__ void resize_nearest_integer_2d_kernel(
+    const T* __restrict__ input, T* __restrict__ output, int64_t N,
+    int64_t C, int64_t in0, int64_t in1, int64_t out0, int64_t out1,
+    int64_t scale0, int64_t scale1, int64_t total_outputs) {
+  int64_t tid = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (tid >= total_outputs) return;
+
+  int64_t plane = out0 * out1;
+  int64_t n = tid / (C * plane);
+  int64_t rem = tid - n * C * plane;
+  int64_t c = rem / plane;
+  rem -= c * plane;
+  int64_t o0 = rem / out1;
+  int64_t o1 = rem - o0 * out1;
+
+  int64_t i0 = o0 / scale0;
+  int64_t i1 = o1 / scale1;
+  int64_t in_off = ((n * C + c) * in0 + i0) * in1 + i1;
+  output[tid] = input[in_off];
+}
+
 template <typename T>
 __device__ inline float fetch(const T* base, int64_t i0, int64_t i1, int64_t i2,
                               int64_t in0, int64_t in1, int64_t in2) {
@@ -165,15 +190,121 @@ __device__ inline float fetch(const T* base, int64_t i0, int64_t i1, int64_t i2,
 }
 
 template <typename T>
-__global__ void resize_linear_kernel(const T* __restrict__ input,
-                                     T* __restrict__ output,
-                                     int spatial_rank,
-                                     int64_t N, int64_t C,
-                                     int64_t in0, int64_t in1, int64_t in2,
-                                     int64_t out0, int64_t out1, int64_t out2,
-                                     int coord_transform,
-                                     float s0, float s1, float s2,
-                                     int64_t total_outputs) {
+__device__ inline float fetch_2d(const T* base, int64_t i0, int64_t i1,
+                                 int64_t in0, int64_t in1) {
+  if (i0 < 0) i0 = 0;
+  if (i0 >= in0) i0 = in0 - 1;
+  if (i1 < 0) i1 = 0;
+  if (i1 >= in1) i1 = in1 - 1;
+  return to_float<T>(base[i0 * in1 + i1]);
+}
+
+// Bilinear Resize over two spatial axes. Keep this separate from the
+// trilinear implementation so rank-2 Resize does not calculate an unused
+// third coordinate or fetch duplicate corners along a unit axis.
+template <typename T>
+__global__ void resize_linear_2d_kernel(const T* __restrict__ input,
+                                        T* __restrict__ output,
+                                        int64_t N, int64_t C,
+                                        int64_t in0, int64_t in1,
+                                        int64_t out0, int64_t out1,
+                                        int coord_transform, float s0,
+                                        float s1, int64_t total_outputs) {
+  int64_t tid = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (tid >= total_outputs) return;
+
+  int64_t plane = out0 * out1;
+  int64_t n = tid / (C * plane);
+  int64_t rem = tid - n * C * plane;
+  int64_t c = rem / plane;
+  rem -= c * plane;
+  int64_t o0 = rem / out1;
+  int64_t o1 = rem - o0 * out1;
+
+  float x0 = coord_to_input(static_cast<int>(o0), static_cast<int>(out0),
+                            static_cast<int>(in0), coord_transform, s0);
+  float x1 = coord_to_input(static_cast<int>(o1), static_cast<int>(out1),
+                            static_cast<int>(in1), coord_transform, s1);
+  int64_t lo0 = static_cast<int64_t>(floorf(x0));
+  int64_t lo1 = static_cast<int64_t>(floorf(x1));
+  float t0 = x0 - static_cast<float>(lo0);
+  float t1 = x1 - static_cast<float>(lo1);
+
+  const T* base = input + (n * C + c) * (in0 * in1);
+  float c00 = fetch_2d(base, lo0, lo1, in0, in1);
+  float c01 = fetch_2d(base, lo0, lo1 + 1, in0, in1);
+  float c10 = fetch_2d(base, lo0 + 1, lo1, in0, in1);
+  float c11 = fetch_2d(base, lo0 + 1, lo1 + 1, in0, in1);
+  float c0 = c00 * (1.0f - t1) + c01 * t1;
+  float c1 = c10 * (1.0f - t1) + c11 * t1;
+  output[tid] = from_float<T>(c0 * (1.0f - t0) + c1 * t0);
+}
+
+// Common image upsampling case: half-pixel coordinates with a uniform 2x or
+// 4x scale. The output-to-input mapping uses 32-bit integer quotient/remainder
+// operations, which compile to shifts and masks for Scale. The interior path
+// skips the four bounds checks needed only on the image border.
+template <typename T, uint32_t Scale>
+__global__ void resize_linear_2d_pow2_kernel(
+    const T* __restrict__ input, T* __restrict__ output, uint32_t N,
+    uint32_t C, uint32_t in0, uint32_t in1, uint32_t out0, uint32_t out1,
+    uint32_t total_outputs) {
+  uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+  if (tid >= total_outputs) return;
+
+  uint32_t plane = out0 * out1;
+  uint32_t n = tid / (C * plane);
+  uint32_t rem = tid - n * C * plane;
+  uint32_t c = rem / plane;
+  rem -= c * plane;
+  uint32_t o0 = rem / out1;
+  uint32_t o1 = rem - o0 * out1;
+
+  uint32_t r0 = o0 % Scale;
+  uint32_t r1 = o1 % Scale;
+  int32_t lo0 = static_cast<int32_t>(o0 / Scale) +
+                ((2 * r0 + 1 < Scale) ? -1 : 0);
+  int32_t lo1 = static_cast<int32_t>(o1 / Scale) +
+                ((2 * r1 + 1 < Scale) ? -1 : 0);
+  float t0 = static_cast<float>((2 * r0 + 1 + Scale) % (2 * Scale)) /
+             static_cast<float>(2 * Scale);
+  float t1 = static_cast<float>((2 * r1 + 1 + Scale) % (2 * Scale)) /
+             static_cast<float>(2 * Scale);
+
+  const T* base = input + (n * C + c) * (in0 * in1);
+  float c00;
+  float c01;
+  float c10;
+  float c11;
+  if (lo0 >= 0 && lo0 + 1 < static_cast<int32_t>(in0) && lo1 >= 0 &&
+      lo1 + 1 < static_cast<int32_t>(in1)) {
+    const T* row0 = base + static_cast<uint32_t>(lo0) * in1;
+    const T* row1 = row0 + in1;
+    c00 = to_float<T>(row0[lo1]);
+    c01 = to_float<T>(row0[lo1 + 1]);
+    c10 = to_float<T>(row1[lo1]);
+    c11 = to_float<T>(row1[lo1 + 1]);
+  } else {
+    c00 = fetch_2d(base, lo0, lo1, in0, in1);
+    c01 = fetch_2d(base, lo0, lo1 + 1, in0, in1);
+    c10 = fetch_2d(base, lo0 + 1, lo1, in0, in1);
+    c11 = fetch_2d(base, lo0 + 1, lo1 + 1, in0, in1);
+  }
+  float c0 = c00 * (1.0f - t1) + c01 * t1;
+  float c1 = c10 * (1.0f - t1) + c11 * t1;
+  output[tid] = from_float<T>(c0 * (1.0f - t0) + c1 * t0);
+}
+
+template <typename T>
+__global__ void resize_linear_3d_kernel(const T* __restrict__ input,
+                                        T* __restrict__ output,
+                                        int spatial_rank,
+                                        int64_t N, int64_t C,
+                                        int64_t in0, int64_t in1, int64_t in2,
+                                        int64_t out0, int64_t out1,
+                                        int64_t out2, int coord_transform,
+                                        float s0, float s1, float s2,
+                                        int64_t total_outputs) {
   int64_t tid = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (tid >= total_outputs) return;
 
@@ -260,6 +391,45 @@ static int launch_nearest(hipStream_t stream, const void* input, void* output,
   return static_cast<int>(err);
 }
 
+static bool get_integer_upsample_scale(int64_t in_dim, int64_t out_dim,
+                                       float supplied_scale,
+                                       int64_t &integer_scale) {
+  if (in_dim <= 0 || out_dim <= 0)
+    return false;
+  if (supplied_scale > 0.0f) {
+    if (!std::isfinite(supplied_scale))
+      return false;
+    integer_scale = static_cast<int64_t>(supplied_scale);
+    return integer_scale > 0 &&
+           supplied_scale == static_cast<float>(integer_scale) &&
+           out_dim / in_dim == integer_scale && out_dim % in_dim == 0;
+  }
+  integer_scale = out_dim / in_dim;
+  return integer_scale > 0 && out_dim % in_dim == 0;
+}
+
+static bool can_launch_linear_pow2_2d(int64_t N, int64_t C, int64_t in0,
+                                      int64_t in1, int64_t out0, int64_t out1,
+                                      int coord_transform, float s0, float s1,
+                                      int64_t &scale) {
+  if ((coord_transform != 0 && coord_transform != 3) || out0 <= 1 ||
+      out1 <= 1 || N <= 0 || C <= 0 || in0 <= 0 || in1 <= 0 ||
+      out0 > UINT32_MAX || out1 > UINT32_MAX || in0 > UINT32_MAX ||
+      in1 > UINT32_MAX || N > UINT32_MAX || C > UINT32_MAX)
+    return false;
+  if (static_cast<uint64_t>(N) * static_cast<uint64_t>(C) *
+          static_cast<uint64_t>(out0) * static_cast<uint64_t>(out1) >
+      UINT32_MAX)
+    return false;
+  int64_t scale0 = 0;
+  int64_t scale1 = 0;
+  if (!get_integer_upsample_scale(in0, out0, s0, scale0) ||
+      !get_integer_upsample_scale(in1, out1, s1, scale1) || scale0 != scale1)
+    return false;
+  scale = scale0;
+  return scale == 2 || scale == 4;
+}
+
 template <typename T>
 static int launch(hipStream_t stream, const void* input, void* output,
                   int spatial_rank, int64_t N, int64_t C,
@@ -273,21 +443,71 @@ static int launch(hipStream_t stream, const void* input, void* output,
   int64_t grid = (total + block - 1) / block;
 
   if (mode == 0) {
-    hipLaunchKernelGGL(resize_nearest_kernel<T>,
-                       dim3(static_cast<unsigned>(grid)), dim3(block),
-                       0, stream,
-                       static_cast<const T*>(input), static_cast<T*>(output),
-                       spatial_rank, N, C, in0, in1, in2,
-                       out0, out1, out2,
-                       coord_transform, nearest_mode, s0, s1, s2, total);
+    int64_t scale0 = 0;
+    int64_t scale1 = 0;
+    bool integerNearest2d =
+        spatial_rank == 2 && coord_transform == 1 && nearest_mode == 2 &&
+        get_integer_upsample_scale(in0, out0, s0, scale0) &&
+        get_integer_upsample_scale(in1, out1, s1, scale1);
+    if (integerNearest2d) {
+      hipLaunchKernelGGL(resize_nearest_integer_2d_kernel<T>,
+                         dim3(static_cast<unsigned>(grid)), dim3(block),
+                         0, stream,
+                         static_cast<const T*>(input),
+                         static_cast<T*>(output), N, C, in0, in1, out0, out1,
+                         scale0, scale1, total);
+    } else {
+      hipLaunchKernelGGL(resize_nearest_kernel<T>,
+                         dim3(static_cast<unsigned>(grid)), dim3(block),
+                         0, stream,
+                         static_cast<const T*>(input),
+                         static_cast<T*>(output), spatial_rank, N, C, in0, in1,
+                         in2, out0, out1, out2, coord_transform, nearest_mode,
+                         s0, s1, s2, total);
+    }
   } else {
-    hipLaunchKernelGGL(resize_linear_kernel<T>,
-                       dim3(static_cast<unsigned>(grid)), dim3(block),
-                       0, stream,
-                       static_cast<const T*>(input), static_cast<T*>(output),
-                       spatial_rank, N, C, in0, in1, in2,
-                       out0, out1, out2,
-                       coord_transform, s0, s1, s2, total);
+    if (spatial_rank == 2) {
+      int64_t scale = 0;
+      if (can_launch_linear_pow2_2d(N, C, in0, in1, out0, out1,
+                                    coord_transform, s0, s1, scale)) {
+        constexpr int pow2Block = 256;
+        int64_t pow2Grid = (total + pow2Block - 1) / pow2Block;
+        if (scale == 2) {
+          hipLaunchKernelGGL(
+              (resize_linear_2d_pow2_kernel<T, 2>),
+              dim3(static_cast<unsigned>(pow2Grid)), dim3(pow2Block),
+              0, stream, static_cast<const T*>(input),
+              static_cast<T*>(output), static_cast<uint32_t>(N),
+              static_cast<uint32_t>(C), static_cast<uint32_t>(in0),
+              static_cast<uint32_t>(in1), static_cast<uint32_t>(out0),
+              static_cast<uint32_t>(out1), static_cast<uint32_t>(total));
+        } else {
+          hipLaunchKernelGGL(
+              (resize_linear_2d_pow2_kernel<T, 4>),
+              dim3(static_cast<unsigned>(pow2Grid)), dim3(pow2Block),
+              0, stream, static_cast<const T*>(input),
+              static_cast<T*>(output), static_cast<uint32_t>(N),
+              static_cast<uint32_t>(C), static_cast<uint32_t>(in0),
+              static_cast<uint32_t>(in1), static_cast<uint32_t>(out0),
+              static_cast<uint32_t>(out1), static_cast<uint32_t>(total));
+        }
+      } else {
+        hipLaunchKernelGGL(resize_linear_2d_kernel<T>,
+                           dim3(static_cast<unsigned>(grid)), dim3(block),
+                           0, stream,
+                           static_cast<const T*>(input),
+                           static_cast<T*>(output), N, C, in0, in1, out0, out1,
+                           coord_transform, s0, s1, total);
+      }
+    } else {
+      hipLaunchKernelGGL(resize_linear_3d_kernel<T>,
+                         dim3(static_cast<unsigned>(grid)), dim3(block),
+                         0, stream,
+                         static_cast<const T*>(input), static_cast<T*>(output),
+                         spatial_rank, N, C, in0, in1, in2,
+                         out0, out1, out2,
+                         coord_transform, s0, s1, s2, total);
+    }
   }
 
   hipError_t err = hipGetLastError();
