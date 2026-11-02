@@ -146,11 +146,8 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
   const int abDtype = (elem_size == 2) ? HIP_DTYPE_FLOAT16 : HIP_DTYPE_FLOAT32;
 
   // One row against a narrow row-major B (an MoE router: N=128, K=2880): one
-  // GEMV launch. A hipBLASLt call costs 5-12 us of host time on gfx1151,
-  // about as much as the whole GEMV here. Within these bounds the GEMV is also
-  // faster on the GPU; from N=1024 hipBLASLt's kernels match it, and K above
-  // 8192 is unmeasured. With M=1 the activation is K contiguous elements
-  // whatever transA says.
+  // GEMV launch. K above 8192 is unmeasured. With M=1 the activation is K
+  // contiguous elements whatever transA says.
   if (elem_size == 2 && M == 1 && batch_count == 1 && !transB && N > 0 &&
       N <= 512 && K > 0 && K <= 8192 && N % 8 == 0 &&
       reinterpret_cast<uintptr_t>(B) % 16 == 0) {
