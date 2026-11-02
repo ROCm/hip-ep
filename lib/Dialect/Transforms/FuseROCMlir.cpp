@@ -159,8 +159,8 @@ static LogicalResult outlineRocMlirChain(DestinationStyleOpInterface start,
   for (Type type : start->getOperandTypes()) {
     auto shaped = dyn_cast<ShapedType>(type);
     if (shaped && shaped.getElementType().isInteger(32))
-      return rewriter.notifyMatchFailure(
-          start, "i32 anchor stays on the HIP kernel");
+      return rewriter.notifyMatchFailure(start,
+                                         "i32 anchor stays on the HIP kernel");
   }
 
   // Fail on dynamic shapes
