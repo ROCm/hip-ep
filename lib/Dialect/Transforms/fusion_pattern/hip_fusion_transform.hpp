@@ -271,6 +271,26 @@ isHipQdqUnsignedQuantized(mlir::PatternRewriter &, mlir::PDLResultList &,
   return mlir::success(intType && intType.isUnsigned());
 }
 
+/// every op is a Q/DQ and all of them share one quantized element type
+inline mlir::LogicalResult
+hasSameHipQdqElementType(mlir::PatternRewriter &, mlir::PDLResultList &,
+                         llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.empty())
+    return mlir::failure();
+  mlir::IntegerType first;
+  for (const mlir::PDLValue &arg : args) {
+    auto intType =
+        getQdqQuantizedElementType(arg.dyn_cast<mlir::Operation *>());
+    if (!intType || (first && intType != first))
+      return mlir::failure();
+    first = intType;
+  }
+  // The quantized elementwise kernels take one data type for both operands
+  // and the output, so a mixed chain such as a uint16 activation plus an int8
+  // constant would read the narrower operand at the wider width.
+  return mlir::success();
+}
+
 /// rms computes an L2 normalization over the trailing axis
 ///
 /// `onnx.LpNormalization` never reaches this layer: LpNormalizationConversion
@@ -797,6 +817,8 @@ inline void registerNativeHelpers(mlir::PDLPatternModule &pdlPatterns) {
                                          isHipQdqQuantizedWidth);
   pdlPatterns.registerConstraintFunction("IsHipQdqUnsignedQuantized",
                                          isHipQdqUnsignedQuantized);
+  pdlPatterns.registerConstraintFunction("HasSameHipQdqElementType",
+                                         hasSameHipQdqElementType);
   pdlPatterns.registerConstraintFunction("IsHipFusableQConvGeometry",
                                          isHipFusableQConvGeometry);
   pdlPatterns.registerConstraintFunction("IsHipPerAxisQuantizedWeight",
