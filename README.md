@@ -4,16 +4,34 @@ Licensed under the MIT License.
 -->
 # ROCm hip-ep
 
-**hip-ep** is an ONNX Runtime Execution Provider for AMD GPUs. It compiles ONNX graphs through an MLIR pipeline—from ONNX dialect operations to a custom HIP dialect and LLVM IR—and executes them with hipDNN, hipBLASLt, and custom HIP kernels.
+**hip-ep** is an ONNX Runtime Execution Provider for AMD GPUs. It compiles ONNX graphs through an MLIR pipeline—from ONNX dialect operations to a custom HIP dialect and LLVM IR—and executes them with hipBLASLt and custom HIP kernels.
 
 The provider integrates with ONNX Runtime through the MorphiZen pass framework. By default, compiled models are emitted as OS-portable LLVM bitcode and JIT-loaded in-process when a session is created. Native per-model libraries remain available as an opt-in artifact format.
 
 See the [HIP EP website](https://rocm.github.io/hip-ep/) for documentation and benchmarks.
 
-## Highlights
+## What's new — October 2026
+- **Faster** — 1.85× prefill and 1.13× decode at 16K context vs v0.3, averaged across the 15 models we track.
+- **Speculative decoding** — EAGLE4, DFLASH2, and MTP, delivering up to 2.3× the decode TPS on Qwen3.8-27B.
+- **Broad model support**
+  - **New models:** Qwen3.8-Flash-Next, Qwen3.8-27B, Qwen3.5-122B-A10B, Nemotron-3-Super-120B, Mistral-Small-4-119B, Laguna-S-2.1, Gemma 4.
+  - Agile PyTorch-to-OGA flow brings up a new model in under a day.
+  - Released models are listed in [models.json](docs/models.json).
+
+| New model (Strix Halo) | Input (tokens) | TTFT (s) | Decode TPS |
+|---|---|--:|--:|
+| Qwen3.8-Flash-Next | 16K text + 1.8K image | 37.60 | 19.93 |
+| Qwen3.5-122B-A10B | 16K text + 1.8K image | 44.55 | 21.05 |
+| Nemotron-3-Super-120B-A12B | 16K text | 82.39 | 20.44 |
+| Mistral-Small-4-119B-2603 | 16K text + 2.4K image | 27.47 | 11.67 |
+| Laguna-S-2.1 (118B) | 16K text | 40.36 | 9.51 |
+| Gemma 4 26B-A4B | 16K text + 0.25K image | 16.76 | 35.85 |
+| Qwen3.8-27B | 16K text + 1.8K image | 42.24 | 13.17 |
+
+## Key features
 
 - **MLIR compiler pipeline** — lowers ONNX graphs to HIP and LLVM IR.
-- **ROCm execution backends** — dispatches to hipDNN, hipBLASLt, and custom HIP kernels.
+- **ROCm execution backends** — dispatches to hipBLASLt and custom HIP kernels.
 - **Dynamic shapes** — supports runtime batch/sequence dimensions, shape refinement, and runtime-sized outputs.
 - **GPU memory planning** — packs transient allocations into one or more grow-on-demand pool domains and keeps host-written shape scalars in separate host-mapped scratch.
 - **In-graph output allocation** — allocates graph outputs through the Execution Provider callback once their runtime shapes are known.
@@ -55,7 +73,7 @@ Per-model artifact + constants file
     └── native .dll/.so (opt-in) ─► OS dynamic loader
     │
     ▼
-hipDNN / hipBLASLt / custom HIP kernels
+hipBLASLt / custom HIP kernels
     │
     ▼
 AMD GPU

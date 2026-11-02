@@ -69,14 +69,13 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
                     (long long)expert_weight_bits, (long long)block_size,
                     (long long)elem_size);
 
-  // Guard against pathological metadata: block_size==0 would otherwise crash
-  // with STATUS_INTEGER_DIVIDE_BY_ZERO inside the k_blocks computations below
-  // (and produces invalid quant layouts even at >0 if not a multiple of 2).
-  if (block_size <= 0 || (block_size & 1) != 0) {
+  if (expert_weight_bits != 2 && expert_weight_bits != 4) {
+    fprintf(stderr, "wrap_qmoe: expert_weight_bits must be 2 or 4\n");
+    return -1;
+  }
+  if (block_size < 32 || (block_size & (block_size - 1)) != 0) {
     fprintf(stderr,
-            "wrap_qmoe: invalid block_size=%lld (must be a positive even "
-            "value matching the weights' quant block layout)\n",
-            (long long)block_size);
+            "wrap_qmoe: block_size must be a power of two and at least 32\n");
     return -1;
   }
   if (hidden_size <= 0 || inter_size <= 0 || num_experts <= 0 || k <= 0 ||
@@ -270,7 +269,8 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
     // 32, hidden/inter multiples of 32). Quantizes the shared input + the k
     // slot activations to int8 once, then runs the fc1/fc2 GEMVs via sudot4.
     // Falls through to the fp fused path otherwise.
-    const bool dp4a_ok = hipdnn_ep_matmul_dp4a_enabled() && elem_size == 2 &&
+    const bool dp4a_ok = expert_weight_bits == 4 &&
+                         hipdnn_ep_matmul_dp4a_enabled() && elem_size == 2 &&
                          block_size > 0 && (block_size % 32 == 0) &&
                          (hidden_size % 32 == 0) && (inter_size % 32 == 0);
     RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: fused decode%s path (tokens=%lld, "
@@ -312,8 +312,8 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
             stream, in_t, idx_t, wts_t, fc1_weights, fc1_scales,
             fc1_zero_points, fc1_bias, fc2_weights, fc2_scales, fc2_zero_points,
             fc2_bias, d_fc2_buf, d_act_buf, out_t, hidden_size, inter_size, k,
-            block_size, activation_alpha, activation_beta, swiglu_limit,
-            elem_size));
+            expert_weight_bits, block_size, activation_alpha, activation_beta,
+            swiglu_limit, elem_size));
       }
     }
     return 0;
@@ -340,14 +340,6 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   // source token rows through d_sorted_token_ids; FC2 consumes the contiguous
   // sorted activation rows. No expert metadata is copied to the host.
   {
-    if (expert_weight_bits != 4) {
-      fprintf(stderr,
-              "wrap_qmoe: ragged prefill supports expert_weight_bits=4, got "
-              "%lld\n",
-              (long long)expert_weight_bits);
-      return -1;
-    }
-
     auto activate = [&]() -> int {
       OP_ROCTX_MARK("hip_ep.op.qmoe.prefill.act");
       if (swiglu)
@@ -370,20 +362,30 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
         return -1;
       }
       if (fc1_zero_points) {
-        fc1_pre_zp_u8 = hipdnn_ep_real::lookup_or_unpack_zp_u8(
-            *zpc, stream, fc1_zero_points,
-            static_cast<int>(num_experts * fusion_inter),
-            static_cast<int>(k_blocks_fc1));
+        fc1_pre_zp_u8 = expert_weight_bits == 2
+                            ? hipdnn_ep_real::lookup_or_unpack_zp_u8_2bit(
+                                  *zpc, stream, fc1_zero_points,
+                                  static_cast<int>(num_experts * fusion_inter),
+                                  static_cast<int>(k_blocks_fc1))
+                            : hipdnn_ep_real::lookup_or_unpack_zp_u8(
+                                  *zpc, stream, fc1_zero_points,
+                                  static_cast<int>(num_experts * fusion_inter),
+                                  static_cast<int>(k_blocks_fc1));
         if (!fc1_pre_zp_u8) {
           result = -1;
           goto cleanup;
         }
       }
       if (fc2_zero_points) {
-        fc2_pre_zp_u8 = hipdnn_ep_real::lookup_or_unpack_zp_u8(
-            *zpc, stream, fc2_zero_points,
-            static_cast<int>(num_experts * hidden_size),
-            static_cast<int>(k_blocks_fc2));
+        fc2_pre_zp_u8 = expert_weight_bits == 2
+                            ? hipdnn_ep_real::lookup_or_unpack_zp_u8_2bit(
+                                  *zpc, stream, fc2_zero_points,
+                                  static_cast<int>(num_experts * hidden_size),
+                                  static_cast<int>(k_blocks_fc2))
+                            : hipdnn_ep_real::lookup_or_unpack_zp_u8(
+                                  *zpc, stream, fc2_zero_points,
+                                  static_cast<int>(num_experts * hidden_size),
+                                  static_cast<int>(k_blocks_fc2));
         if (!fc2_pre_zp_u8) {
           result = -1;
           goto cleanup;
@@ -461,7 +463,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
         stream, input, d_sorted_token_ids, d_row_groups, d_row_group_count,
         d_fc1_queue_head, fc1_weights, fc1_scales, fc1_pre_zp_u8, fc1_bias,
         d_fc1_buf, routed_rows, num_experts, fusion_inter, hidden_size,
-        block_size, elem_size));
+        expert_weight_bits, block_size, elem_size));
 
     HIP_CHECK(activate());
 
@@ -470,7 +472,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
         stream, d_act_buf, /*input_row_ids=*/nullptr, d_row_groups,
         d_row_group_count, d_fc2_queue_head, fc2_weights, fc2_scales,
         fc2_pre_zp_u8, fc2_bias, d_fc2_buf, routed_rows, num_experts,
-        hidden_size, inter_size, block_size, elem_size));
+        hidden_size, inter_size, expert_weight_bits, block_size, elem_size));
 
     OP_ROCTX_MARK("hip_ep.op.qmoe.prefill.reduce");
     HIP_CHECK(hip_qmoe_reduce_sorted_pairs(

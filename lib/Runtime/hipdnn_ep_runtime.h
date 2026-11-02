@@ -860,6 +860,14 @@ int wrap_hipblasLtMatmul(
     int64_t transA,         // 1 = swap A's last two dims before multiply
     int64_t transB);        // 1 = swap B's last two dims before multiply
 
+// Int32 matmul. hipBLASLt has no int32 GEMM, and feeding i32 bits to the f32
+// entry point reads them as floats. Neither operand is transposed. The kernel
+// accumulates in int64 and wraps to int32. b_batch_stride is 0 when B is one
+// matrix shared by every batch, and K*N when B holds one matrix per batch.
+int wrap_matmul_i32(RuntimeState *state, const void *A, const void *B,
+                    void *output, int64_t M, int64_t N, int64_t K,
+                    int64_t batch_count, int64_t b_batch_stride);
+
 // RocMLIR dispatch wrapper (hip.rocmlir). Launches a pre-compiled GPU kernel
 // embedded (as an ELF/HSACO blob) in `kernel_binary` at compile time. The
 // generated IR stages the operand data pointers (inputs first, then output)
@@ -918,6 +926,31 @@ int wrap_group_query_attention(
     // Sequence length of the key/value operands (seq_len_q for packed QKV).
     // 0 with a causal past cache means the call appends nothing and attends
     // over past_key/past_value only (a layer sharing another layer's cache).
+    int64_t seq_len_new_kv);
+
+// Compiler-selected entry for proven FP16 Ring candidates. Other shapes and
+// devices fall back to the original GQA implementation without changing its
+// ABI.
+int wrap_group_query_attention_ring_f16(
+    RuntimeState *state, int op_state_slot,
+    // Inputs 1-7 (core GQA)
+    void *query, void *key, void *value, void *past_key, void *past_value,
+    void *seqlens_k, void *total_seq_len,
+    // Inputs 8-10 (RoPE)
+    void *cos_cache, void *sin_cache, void *position_ids,
+    // Inputs 11-14 (advanced features)
+    void *attention_bias, void *head_sink, void *k_scale, void *v_scale,
+    // Outputs
+    void *output, void *present_key, void *present_value, void *output_qk,
+    // Attributes (13)
+    int64_t num_heads, int64_t kv_num_heads, float scale, int64_t do_rotary,
+    int64_t rotary_interleaved, float softcap, int64_t local_window_size,
+    int64_t smooth_softmax, int64_t qk_output, int64_t k_quant_type,
+    int64_t v_quant_type, int64_t kv_cache_bit_width, int32_t no_causal,
+    // Shape values (6)
+    int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
+    int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
+    int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
     int64_t seq_len_new_kv);
 
 // MultiHeadAttention operation wrapper (com.microsoft.MultiHeadAttention v1).
@@ -1605,6 +1638,16 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
                                     int64_t input_num_elements,
                                     int64_t gamma_num_elements,
                                     int64_t element_size_bytes, float epsilon);
+
+// Same op with an element size per tensor (bias shares skip's); emitted only
+// when they differ, e.g. an fp32 residual with fp16 skip/gamma/output. A
+// sum_element_size is ignored when input_skip_bias_sum is nullptr.
+int wrap_skip_simplified_layer_norm_mixed(
+    RuntimeState *state, void *input, void *skip, void *gamma, void *bias,
+    void *output, void *input_skip_bias_sum, int64_t input_num_elements,
+    int64_t gamma_num_elements, int64_t input_element_size,
+    int64_t skip_element_size, int64_t gamma_element_size,
+    int64_t output_element_size, int64_t sum_element_size, float epsilon);
 
 // MatMulNBits operation wrapper (quantized N-bit matrix multiplication)
 // Dequantizes packed int4 weights and computes Y = A @ dequant(B)^T + bias
