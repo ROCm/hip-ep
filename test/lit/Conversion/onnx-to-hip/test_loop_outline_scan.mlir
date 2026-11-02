@@ -26,7 +26,8 @@ module {
 // CHECK-DAG: %[[M:.*]] = arith.constant 2 : index
 // CHECK: %[[SEED:.*]] = tensor.empty(%{{.*}}) : tensor<?x4xf32>
 // CHECK: scf.while
+// The condition is in the before-region, ahead of the scan concat.
+// CHECK: scf.condition
 // CHECK: onnx.Unsqueeze
 // CHECK: onnx.Concat
-// CHECK: scf.condition
 // CHECK-NOT: hip.loop
