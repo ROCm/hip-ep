@@ -36,14 +36,17 @@
 #include "matmul_nbits_autotune.h"
 
 #ifndef HIPDNN_LUT_LINKED_EXTERNALLY
-// MODE=autotune (default): no real FlatBuffers LUT is linked. Empty resolve()
-// lets the kernel link and fall back to its runtime sweep. MODE=lut links the
-// real matmul_nbits_autotune.cpp resolver instead (see Makefile), which
-// defines these symbols, so this stub must not also define them.
+// MODE=autotune, and MODE=lookup on a chip with no table: no FlatBuffers LUT is
+// linked. Empty resolve() lets the kernel link and fall back to its runtime
+// sweep, and extendedConfigsMeasured() is false, as on a device whose table
+// names no extended entry, so that sweep times the original entries. MODE=lookup
+// links the real matmul_nbits_autotune.cpp resolver instead (see Makefile),
+// which defines these symbols, so this stub must not also define them.
 namespace hipdnn_ep {
 namespace matmul_nbits_autotune {
 Result resolve(const Request&, WmmaValidator, GemvValidator, void*) { return {}; }
 Stats stats() { return {}; }
+bool extendedConfigsMeasured() { return false; }
 }  // namespace matmul_nbits_autotune
 }  // namespace hipdnn_ep
 #else
