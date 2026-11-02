@@ -15,9 +15,11 @@
  *                     warp-shuffle reductions span the whole wave correctly.
  *   HIPDNN_HAS_WMMA   1 only in a device pass for an arch that has one of the
  *                     WMMA f16 16x16x16 builtins below (RDNA3/RDNA3.5/RDNA4).
- *                     0 on CDNA and in the host pass, so WMMA code paths
- *                     compile away (and are never launched -- the host
- *                     dispatch checks the device warpSize at runtime).
+ *                     0 on CDNA, on gfx10 and in the host pass, so WMMA code
+ *                     paths compile away. The host dispatch checks the
+ *                     device's wave size at runtime, which keeps WMMA
+ *                     launches off CDNA; hipdnn_device_has_wmma() below also
+ *                     tells gfx10 (wave32, no WMMA) apart.
  *   HIPDNN_WMMA_GFX12 1 when only the newer, gfx12-style WMMA encoding is
  *                     available (see below). Selects the fragment layout the
  *                     kernels must use.
@@ -228,6 +230,7 @@ __device__ static inline int hipdnn_dot4(int a, int b, int acc) {
  * default, so dispatch decisions stay as they were before CDNA support. */
 #ifdef __cplusplus
 #include <hip/hip_runtime.h>
+#include <cstring>
 static inline int hipdnn_device_wave_size() {
   constexpr int kMaxCachedDevices = 16;
   // Zero-initialized (0 == not probed yet), so no thread-safe-statics guard is
@@ -257,6 +260,43 @@ static inline int hipdnn_device_wave_size() {
 
 static inline bool hipdnn_device_is_wave64() {
   return hipdnn_device_wave_size() >= 64;
+}
+
+/* Host-side mirror of HIPDNN_HAS_WMMA for a device's gcnArchName, which may
+ * carry a feature suffix ("gfx1151:xnack-"). Every gfx11 and gfx12 part has
+ * one of the two WMMA encodings above (gfx1170 the gfx12-style one). CDNA
+ * (gfx9xx) has MFMA instead, and gfx10xx is wave32 with no matrix
+ * instructions, so the wave size does not tell whether a WMMA kernel's image
+ * is real or the trap matmul_nbits_wmma_core.h compiles in its place. */
+static inline bool hipdnn_arch_has_wmma(const char* gcn_arch_name) {
+  return gcn_arch_name != nullptr &&
+         (std::strncmp(gcn_arch_name, "gfx11", 5) == 0 ||
+          std::strncmp(gcn_arch_name, "gfx12", 5) == 0);
+}
+
+/* hipdnn_arch_has_wmma for the currently selected device, cached per device
+ * ordinal like hipdnn_device_wave_size(). A failed query yields false, so a
+ * launch gated on it launches nothing. */
+static inline bool hipdnn_device_has_wmma() {
+  constexpr int kMaxCachedDevices = 16;
+  // 0 == not probed yet, 1 == no WMMA, 2 == WMMA.
+  static int cached[kMaxCachedDevices] = {};
+
+  auto probe = [](int d) {
+    hipDeviceProp_t p;
+    return hipGetDeviceProperties(&p, d) == hipSuccess &&
+           hipdnn_arch_has_wmma(p.gcnArchName);
+  };
+
+  int dev = 0;
+  if (hipGetDevice(&dev) != hipSuccess || dev < 0)
+    return false;
+  if (dev >= kMaxCachedDevices)
+    return probe(dev);
+
+  if (cached[dev] == 0)
+    cached[dev] = probe(dev) ? 2 : 1;
+  return cached[dev] == 2;
 }
 #endif
 

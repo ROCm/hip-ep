@@ -298,7 +298,7 @@ What the measurements behind these options showed (gfx1151, int4 prefill shapes 
 - `sched_group_barrier` patterns constrain the compiler's schedule, so whether one helps depends on the compiler version. That is one reason LUT rows must be measured on the product kernel binary (see the autotune README).
 - The two-deep prefetch depends on how the compiler widens each tile's 16-bit scale for the packed dequant. Widened in place, on the register its load is still filling, the scale waits for every load in flight and drains the prefetch at every K-step. The Linux build therefore builds the scale pair as an fp16 vector, which the compiler folds into the packed multiplies; the Windows build keeps the integer form, because with its toolchain the fp16 pair slows the CU-mode tiles. The gfx1151 table was measured on the Windows build, and the Linux build runs the same rows.
 
-Every extended entry is forced by index in the `Xfp16_Wu4_Yfp16` kernel unit test through `hip_matmul_nbits_u4_wmma_run_config`, which runs exactly the requested config or fails. `update_lut.py` rejects a table naming an entry that `WMMA_EXT_CONFIGS` does not compile.
+Every extended entry is forced by index in the `Xfp16_Wu4_Yfp16` kernel unit test through `hip_matmul_nbits_u4_wmma_run_config`, which runs exactly the requested config or fails. On a device without WMMA (CDNA, gfx10), where the WMMA kernels compile to a trap, it launches nothing and the test skips that phase. `update_lut.py` rejects a table naming an entry that `WMMA_EXT_CONFIGS` does not compile.
 
 ## Key Design Decisions
 

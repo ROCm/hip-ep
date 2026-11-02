@@ -30,6 +30,7 @@
  */
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
+#include "hip_arch_compat.h"
 #include "hip_custom_kernels.h"
 
 #ifndef HIPDNN_KERNEL_UT_LINKS_SHARED_KERNELS
@@ -901,10 +902,10 @@ int main(int argc, char* argv[]) {
 
   const int tier = hipdnn_ep_test::resolveCoverageTier(argc, argv);
   const int sweep_rc = sweep::run(tier);
-  // The extended entries are WMMA kernels, which a wave64 (CDNA) device cannot
-  // run; there only the sweep above applies.
+  // The extended entries are WMMA kernels, which CDNA (wave64) and gfx10
+  // (wave32) devices cannot run; there only the sweep above applies.
   int forced_rc = 0;
-  if (prop.warpSize >= 64)
+  if (!hipdnn_arch_has_wmma(prop.gcnArchName))
     std::printf("SKIP: extended WMMA entries unsupported on %s\n", prop.gcnArchName);
   else
     forced_rc = forced::run();
