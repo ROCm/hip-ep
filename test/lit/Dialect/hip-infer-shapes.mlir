@@ -197,9 +197,10 @@ func.func @refine_rope_static_last_dim(%ctx: !hip.context,
     -> tensor<?x?x?xf16> {
   %e = tensor.empty(%d0, %d1, %d2) : tensor<?x?x?xf16>
   %y = hip.rope(%ctx)
-    ins(%x, %pos, %cos, %sin :
-        tensor<?x?x4096xf16>, tensor<?x?xi64>,
+    ins(%x, %cos, %sin :
+        tensor<?x?x4096xf16>,
         tensor<131072x64xf16>, tensor<131072x64xf16>)
+    position_ids(%pos : tensor<?x?xi64>)
     outs(%e : tensor<?x?x?xf16>)
     {interleaved = 0 : i64, num_heads = 32 : i64, rotary_embedding_dim = 128 : i64}
     : tensor<?x?x?xf16>
