@@ -101,13 +101,18 @@ def resolve_therock_bin(arg: str | None) -> Path:
     for d in filter(None, os.environ.get("PATH", "").split(os.pathsep)):
         if (Path(d) / "amdhip64_7.dll").is_file():
             return Path(d).resolve()
-    raise FileNotFoundError("TheRock bin not found; pass --therock-bin, set THEROCK_DIST "
-                            "or put the folder with amdhip64_7.dll on PATH")
+    raise FileNotFoundError(
+        "TheRock bin not found; pass --therock-bin, set THEROCK_DIST "
+        "or put the folder with amdhip64_7.dll on PATH"
+    )
 
 
 def harness_values(cfg: dict, a: argparse.Namespace) -> dict:
     used = json.dumps(cfg["harness"])
-    values = {"model": str(Path(a.model_dir).resolve()), "n_prompts": str(len(cfg["question_ids"]))}
+    values = {
+        "model": str(Path(a.model_dir).resolve()),
+        "n_prompts": str(len(cfg["question_ids"])),
+    }
     if "{ep_dir}" in used:
         values["ep_dir"] = str(resolve_ep_dir(a.ep_dir))
     if "{therock_bin}" in used:
@@ -115,7 +120,9 @@ def harness_values(cfg: dict, a: argparse.Namespace) -> dict:
     return values
 
 
-def run_harness(cfg: dict, a: argparse.Namespace, harness_json: Path, log: Path) -> tuple[int, float]:
+def run_harness(
+    cfg: dict, a: argparse.Namespace, harness_json: Path, log: Path
+) -> tuple[int, float]:
     h = cfg["harness"]
     values = harness_values(cfg, a)
     cmd = [
@@ -123,10 +130,14 @@ def run_harness(cfg: dict, a: argparse.Namespace, harness_json: Path, log: Path)
         "-u",
         str(Path(values["model"]) / h["script"]),
         *(arg.format(**values) for arg in h.get("args", [])),
-        "--arms", ",".join(cfg["arms"]),
-        "--questions", str(cfg["_prompts"]),
-        "-n", str(cfg["max_new"]),
-        "--json", str(harness_json),
+        "--arms",
+        ",".join(cfg["arms"]),
+        "--questions",
+        str(cfg["_prompts"]),
+        "-n",
+        str(cfg["max_new"]),
+        "--json",
+        str(harness_json),
     ]
     env = dict(os.environ)
     env.update(cfg.get("env", {}))
@@ -137,8 +148,15 @@ def run_harness(cfg: dict, a: argparse.Namespace, harness_json: Path, log: Path)
     print("$ " + " ".join(cmd), flush=True)
     t0 = time.perf_counter()
     with open(log, "w", encoding="utf-8") as lf:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                env=env, text=True, encoding="utf-8", errors="replace")
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=env,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
         for line in proc.stdout:
             sys.stdout.write(line)
             lf.write(line)
@@ -183,9 +201,15 @@ def prompts_qwen38_spec_bench(result: dict) -> list[dict]:
                 "tok_s": r["tps_decode"],
                 "identical_to_none": bool(base) and r["sha1"] == base["sha1"],
             }
-        out.append({"question_id": rec["question_id"], "task": rec["subtask"],
-                    "prompt_len": rec["prompt_tokens"], "arms": arms,
-                    **({"skipped": rec["skipped"]} if "skipped" in rec else {})})
+        out.append(
+            {
+                "question_id": rec["question_id"],
+                "task": rec["subtask"],
+                "prompt_len": rec["prompt_tokens"],
+                "arms": arms,
+                **({"skipped": rec["skipped"]} if "skipped" in rec else {}),
+            }
+        )
     return out
 
 
@@ -204,7 +228,9 @@ def pooled(prompts: list[dict], arm: str) -> dict:
         out["tokens_per_verify"] = n / iters if iters else 0.0
         out["accepted"] = sum(p["arms"][arm]["accepted"] for p in prompts)
         out["drafted"] = sum(p["arms"][arm]["drafted"] for p in prompts)
-        out["identical_to_none"] = sum(bool(p["arms"][arm]["identical_to_none"]) for p in prompts)
+        out["identical_to_none"] = sum(
+            bool(p["arms"][arm]["identical_to_none"]) for p in prompts
+        )
     return out
 
 
@@ -216,15 +242,23 @@ def evaluate(cfg: dict, result: dict) -> dict:
     checks: list[dict] = []
 
     def check(name, value, threshold, ok):
-        checks.append({"name": name, "value": value, "threshold": threshold, "pass": bool(ok)})
+        checks.append(
+            {"name": name, "value": value, "threshold": threshold, "pass": bool(ok)}
+        )
 
     got_ids = sorted(int(p["question_id"]) for p in prompts)
     want_ids = sorted(cfg["question_ids"])
     check("prompt set", got_ids, want_ids, got_ids == want_ids)
 
     arms = {}
-    missing = sorted({f"{arm}@q{p['question_id']}" for p in prompts for arm in cfg["arms"]
-                      if arm not in p["arms"]})
+    missing = sorted(
+        {
+            f"{arm}@q{p['question_id']}"
+            for p in prompts
+            for arm in cfg["arms"]
+            if arm not in p["arms"]
+        }
+    )
     check("all arms decoded", missing, [], not missing and bool(prompts))
     if missing or not prompts:
         return {"arms": arms, "checks": checks}
@@ -238,12 +272,21 @@ def evaluate(cfg: dict, result: dict) -> dict:
         for key in ("tok_s", "speedup", "tokens_per_verify"):
             if key in cur and key in r:
                 floor = r[key] * (1 - tol[key])
-                check(f"{arm} {key}", round(cur[key], 3), round(floor, 3), cur[key] >= floor)
+                check(
+                    f"{arm} {key}",
+                    round(cur[key], 3),
+                    round(floor, 3),
+                    cur[key] >= floor,
+                )
                 cur[f"{key}_vs_ref"] = cur[key] / r[key] - 1
 
     per_prompt = []
     for p in sorted(prompts, key=lambda p: p["question_id"]):
-        row = {"question_id": p["question_id"], "task": p["task"], "prompt_len": p["prompt_len"]}
+        row = {
+            "question_id": p["question_id"],
+            "task": p["task"],
+            "prompt_len": p["prompt_len"],
+        }
         for arm in cfg["arms"]:
             st = p["arms"][arm]
             row[arm] = {"tok_s": st["tok_s"], "new_tokens": st["new_tokens"]}
@@ -256,7 +299,11 @@ def evaluate(cfg: dict, result: dict) -> dict:
 def calibrated_reference(cfg: dict, arms: dict) -> dict:
     ref = {}
     for arm, cur in arms.items():
-        ref[arm] = {k: round(cur[k], 3) for k in ("tok_s", "speedup", "tokens_per_verify") if k in cur}
+        ref[arm] = {
+            k: round(cur[k], 3)
+            for k in ("tok_s", "speedup", "tokens_per_verify")
+            if k in cur
+        }
     return ref
 
 
@@ -265,15 +312,22 @@ def print_report(verdict: dict) -> None:
     for arm, cur in verdict.get("arms", {}).items():
         extra = ""
         if "speedup" in cur:
-            extra = (f"  speedup {cur['speedup']:.3f}x  tokens/verify {cur['tokens_per_verify']:.2f}"
-                     f"  accepted {cur['accepted']}/{cur['drafted']}"
-                     f"  identical {cur['identical_to_none']}")
+            extra = (
+                f"  speedup {cur['speedup']:.3f}x  tokens/verify {cur['tokens_per_verify']:.2f}"
+                f"  accepted {cur['accepted']}/{cur['drafted']}"
+                f"  identical {cur['identical_to_none']}"
+            )
         print(f"  {arm:18s} {cur['tok_s']:7.2f} tok/s{extra}")
     for c in verdict.get("checks", []):
         bound = "expected" if isinstance(c["threshold"], list) else "min"
-        print(f"  [{'PASS' if c['pass'] else 'FAIL'}] {c['name']}: {c['value']} ({bound} {c['threshold']})")
+        print(
+            f"  [{'PASS' if c['pass'] else 'FAIL'}] {c['name']}: {c['value']} ({bound} {c['threshold']})"
+        )
     if verdict.get("session_load_s"):
-        print("  load/compile s: " + ", ".join(f"{k} {v:.1f}" for k, v in verdict["session_load_s"].items()))
+        print(
+            "  load/compile s: "
+            + ", ".join(f"{k} {v:.1f}" for k, v in verdict["session_load_s"].items())
+        )
     if "wall_s" in verdict:
         print(f"  wall: {verdict['wall_s'] / 60:.1f} min")
     print(f"  status: {verdict['status']}", flush=True)
@@ -282,8 +336,11 @@ def print_report(verdict: dict) -> None:
 def speed_only_failure(part: dict) -> bool:
     """Timing can be off on a cold run; prompt-set, decode and acceptance failures cannot."""
     failed = [c["name"] for c in part.get("checks", []) if not c["pass"]]
-    return "error" not in part and bool(failed) and all(
-        name.endswith((" tok_s", " speedup")) for name in failed)
+    return (
+        "error" not in part
+        and bool(failed)
+        and all(name.endswith((" tok_s", " speedup")) for name in failed)
+    )
 
 
 def run_attempt(cfg: dict, a: argparse.Namespace, out: Path, attempt: int) -> dict:
@@ -299,7 +356,11 @@ def run_attempt(cfg: dict, a: argparse.Namespace, out: Path, attempt: int) -> di
         except FileNotFoundError as exc:
             return {"status": "FAIL", "error": str(exc)}
         text = log.read_text(encoding="utf-8", errors="replace")
-        part.update(harness_returncode=rc, wall_s=round(wall, 1), session_load_s=load_times(text))
+        part.update(
+            harness_returncode=rc,
+            wall_s=round(wall, 1),
+            session_load_s=load_times(text),
+        )
         if rc != 0:
             part.update(status="FAIL", error=f"harness exited with {rc} (log: {log})")
             return part
@@ -314,29 +375,55 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("-m", "--model-dir", help="speculator model repo checkout")
     ap.add_argument("-o", "--output", required=True, help="verdict JSON")
-    ap.add_argument("--baseline", default=str(DEFAULT_BASELINE),
-                    help="baseline JSON; a relative path resolves against this script's directory")
+    ap.add_argument(
+        "--baseline",
+        default=str(DEFAULT_BASELINE),
+        help="baseline JSON; a relative path resolves against this script's directory",
+    )
     ap.add_argument("--ep-dir", default=None, help="directory holding hipgpu.dll")
-    ap.add_argument("--therock-bin", default=None, help="TheRock bin (default $THEROCK_DIST/bin)")
-    ap.add_argument("--python", default=None, help="interpreter for the harness (default: this one)")
-    ap.add_argument("--timeout", type=int, default=1800, help="harness timeout in seconds")
-    ap.add_argument("--retries", type=int, default=1,
-                    help="re-runs when only tok/s or speedup checks fail (a cold first run "
-                         "after boot or download is up to ~13%% slower)")
-    ap.add_argument("--evaluate", default=None, help="gate an existing harness JSON instead of running")
-    ap.add_argument("--calibrate", default=None,
-                    help="write the measured numbers as the reference of this baseline file")
+    ap.add_argument(
+        "--therock-bin", default=None, help="TheRock bin (default $THEROCK_DIST/bin)"
+    )
+    ap.add_argument(
+        "--python", default=None, help="interpreter for the harness (default: this one)"
+    )
+    ap.add_argument(
+        "--timeout", type=int, default=1800, help="harness timeout in seconds"
+    )
+    ap.add_argument(
+        "--retries",
+        type=int,
+        default=1,
+        help="re-runs when only tok/s or speedup checks fail (a cold first run "
+        "after boot or download is up to ~13%% slower)",
+    )
+    ap.add_argument(
+        "--evaluate",
+        default=None,
+        help="gate an existing harness JSON instead of running",
+    )
+    ap.add_argument(
+        "--calibrate",
+        default=None,
+        help="write the measured numbers as the reference of this baseline file",
+    )
     a = ap.parse_args()
 
     cfg = load_baseline(Path(a.baseline))
     out = Path(a.output).resolve()
     out.parent.mkdir(parents=True, exist_ok=True)
-    verdict = {"baseline": str(cfg["_path"]), "calibrated": cfg["reference"].get("calibrated", False)}
+    verdict = {
+        "baseline": str(cfg["_path"]),
+        "calibrated": cfg["reference"].get("calibrated", False),
+    }
 
     prompt_sha = sha256(cfg["_prompts"])
     if prompt_sha != cfg["prompts_sha256"]:
-        verdict.update(status="FAIL", error=f"prompt file {cfg['_prompts']} sha256 {prompt_sha} "
-                                            f"!= {cfg['prompts_sha256']}")
+        verdict.update(
+            status="FAIL",
+            error=f"prompt file {cfg['_prompts']} sha256 {prompt_sha} "
+            f"!= {cfg['prompts_sha256']}",
+        )
         out.write_text(json.dumps(verdict, indent=1), encoding="utf-8")
         print(f"[ERROR] {verdict['error']}", flush=True)
         return 1
@@ -347,7 +434,10 @@ def main() -> int:
     attempts = []
     for attempt in range(retries + 1):
         if attempts:
-            print(f"[INFO] only speed checks failed; retrying ({attempt}/{retries})", flush=True)
+            print(
+                f"[INFO] only speed checks failed; retrying ({attempt}/{retries})",
+                flush=True,
+            )
         part = run_attempt(cfg, a, out, attempt)
         attempts.append(part)
         if part["status"] == "PASS" or not speed_only_failure(part):
@@ -355,8 +445,11 @@ def main() -> int:
     verdict.update(attempts[-1])
     if len(attempts) > 1:
         verdict["attempts"] = [
-            {"status": p["status"], "wall_s": p.get("wall_s"),
-             "failed": [c["name"] for c in p.get("checks", []) if not c["pass"]]}
+            {
+                "status": p["status"],
+                "wall_s": p.get("wall_s"),
+                "failed": [c["name"] for c in p.get("checks", []) if not c["pass"]],
+            }
             for p in attempts
         ]
         verdict["wall_s"] = round(sum(p.get("wall_s", 0) for p in attempts), 1)
@@ -367,14 +460,17 @@ def main() -> int:
 
     if a.calibrate:
         if not verdict.get("arms") or not all(
-                c["pass"] for c in verdict["checks"] if c["name"] in ("prompt set", "all arms decoded")):
+            c["pass"]
+            for c in verdict["checks"]
+            if c["name"] in ("prompt set", "all arms decoded")
+        ):
             verdict["status"] = "FAIL"
         else:
             target = Path(a.calibrate)
             new_cfg = json.loads(target.read_text(encoding="utf-8"))
             new_cfg["reference"] = {
                 "calibrated": True,
-                "source": f"calibration run {time.strftime('%Y-%m-%d')} ({harness_json.name})",
+                "source": f"calibration run {time.strftime('%Y-%m-%d')} ({Path(verdict['harness_json']).name})",
                 "arms": calibrated_reference(cfg, verdict["arms"]),
             }
             target.write_text(json.dumps(new_cfg, indent=2) + "\n", encoding="utf-8")
