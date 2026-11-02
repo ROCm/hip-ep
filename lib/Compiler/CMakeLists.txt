@@ -74,6 +74,11 @@ if(ENABLE_ROCMLIRTRITON)
   # build already does); only compile-time include propagation is dropped,
   # which hip-rocmlir-compiler restores by naming the closure itself.
   target_link_libraries(LibHipCompiler PRIVATE "${_rocmlir_link_closure}")
+  # TritonToHsaco dlopens this library by name at kernel-compile time. The
+  # link closure does not pull the custom target in, so depend on it directly.
+  if(TARGET triton_amd_codegen_lib)
+    add_dependencies(LibHipCompiler triton_amd_codegen_lib)
+  endif()
   # Same name as the CMake option deliberately: one flag for the whole
   # feature, rather than a separate macro that can drift out of sync with it.
   target_compile_definitions(LibHipCompiler PUBLIC ENABLE_ROCMLIRTRITON=1)

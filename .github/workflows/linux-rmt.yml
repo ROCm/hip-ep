@@ -176,7 +176,7 @@ jobs:
           SRC="${{ runner.workspace }}/llvm-project"
           git init "$SRC"
           git -C "$SRC" remote add origin "${{ steps.llvm.outputs.url }}"
-          git -C "$SRC" fetch --depth 1 origin "${{ steps.llvm.outputs.ref }}"
+          git -C "$SRC" fetch --depth 1 origin "${{ steps.llvm.outputs.commit }}"
           git -C "$SRC" checkout FETCH_HEAD
           cmake -G Ninja -S "$SRC/llvm" -B "${{ runner.workspace }}/build-llvm" \
             -DCMAKE_BUILD_TYPE=Release \

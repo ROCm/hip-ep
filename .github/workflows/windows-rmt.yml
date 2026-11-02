@@ -75,10 +75,6 @@ jobs:
           echo "commit=$LLVM_COMMIT" >> "$GITHUB_OUTPUT"
           echo "ort=dep-ort-${{ env.ONNXRUNTIME_VERSION }}-ortpr-${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
           echo "amdgpu=windows-amdgpu-${EP_REF:0:7}-amdpr${AMDPR_KEY}-deps${DEPS_HASH}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
-          # Prefix of every amdgpu key for this EP ref. Used only when the
-          # exact key is not saved yet; the hash sits before the ORT pin, so
-          # this cannot also pin the ORT version.
-          echo "amdgpu_prefix=windows-amdgpu-${EP_REF:0:7}-amdpr${AMDPR_KEY}-deps" >> "$GITHUB_OUTPUT"
           echo "oga=windows-oga-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
           echo "llvm=dep-llvm-amdgpu-${LLVM_COMMIT}" >> "$GITHUB_OUTPUT"
 
@@ -94,15 +90,7 @@ jobs:
         with:
           path: ${{ runner.workspace }}/amdgpu-artifacts
           key: ${{ steps.deps.outputs.amdgpu }}
-          restore-keys: |
-            ${{ steps.deps.outputs.amdgpu_prefix }}
-
-      - name: Require restored amdgpu-artifacts
-        shell: bash
-        run: |
-          set -euo pipefail
-          ART=$(cygpath -u "${{ runner.workspace }}/amdgpu-artifacts")
-          test -f "$ART/bin/amdgpu-ep.dll"
+          fail-on-cache-miss: true
 
       - name: Restore oga-artifacts
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
@@ -131,7 +119,7 @@ jobs:
           SRC="${{ runner.workspace }}/llvm-project"
           git init "$SRC"
           git -C "$SRC" remote add origin "${{ steps.deps.outputs.url }}"
-          git -C "$SRC" fetch --depth 1 origin "${{ steps.deps.outputs.ref }}"
+          git -C "$SRC" fetch --depth 1 origin "${{ steps.deps.outputs.commit }}"
           git -C "$SRC" checkout FETCH_HEAD
           cmake -G Ninja -S "$SRC/llvm" -B "${{ runner.workspace }}/build-llvm" \
             -DCMAKE_BUILD_TYPE=Release \

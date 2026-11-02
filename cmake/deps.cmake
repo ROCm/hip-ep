@@ -463,6 +463,29 @@ if(ENABLE_ROCMLIRTRITON)
   add_subdirectory("${rocmlirtriton_SOURCE_DIR}"
                    "${CMAKE_BINARY_DIR}/rocmlirTriton" EXCLUDE_FROM_ALL)
 
+  # TritonToHsaco dlopens triton_amd_codegen by bare name. rocmlirTriton copies
+  # it into the build lib dir and does not install it (that rule is on the
+  # disabled fat-library path). Windows resolves the name next to the exe;
+  # Linux resolves it through LD_LIBRARY_PATH, which the RMT package sets to
+  # the install lib dir.
+  if(WIN32)
+    set(_triton_amd_codegen_name "triton_amd_codegen.dll")
+    set(_triton_amd_codegen_dest "bin")
+  else()
+    set(_triton_amd_codegen_name "libtriton_amd_codegen.so")
+    set(_triton_amd_codegen_dest "lib")
+  endif()
+  set(_triton_amd_codegen_path
+      "${CMAKE_BINARY_DIR}/lib/${_triton_amd_codegen_name}")
+  install(CODE "
+    if(NOT EXISTS \"${_triton_amd_codegen_path}\")
+      message(FATAL_ERROR
+        \"triton_amd_codegen was not built: ${_triton_amd_codegen_path}\")
+    endif()
+    file(INSTALL \"${_triton_amd_codegen_path}\"
+      DESTINATION \"\${CMAKE_INSTALL_PREFIX}/${_triton_amd_codegen_dest}\")
+  ")
+
   set_directory_properties(PROPERTIES COMPILE_OPTIONS "${_hipep_copts_before}")
 
   # Curated rock/triton link closure. rocMLIR maintains this list for its fat
