@@ -607,9 +607,16 @@ static const bool kZeroArray[] = {true, false};
 // The leaf's activation and output dtype: X and Y in its name.
 static constexpr bool kFp32 = true;
 
+enum class Route { Nbits, Dp4a, Padrow };
+static const char* routeName(Route route) {
+  return route == Route::Dp4a ? "dp4a" : route == Route::Padrow ? "padrow" : "nbits";
+}
+
 struct Case {
   int M, K, N, gs;
   bool zero, fp32;
+  bool packed_zp = false;
+  Route route = Route::Nbits;
 };
 
 static std::vector<Case> buildCases(int tier) {
@@ -620,14 +627,68 @@ static std::vector<Case> buildCases(int tier) {
   std::vector<Case> out;
   for (int gs : kGsArray)
     for (bool zero : kZeroArray)
-      for (size_t si = 0; si < n_shapes; ++si)
+      for (size_t si = 0; si < n_shapes; ++si) {
         out.push_back({shapes[si].M, shapes[si].K, shapes[si].N, gs, zero, kFp32});
+        if (zero)
+          out.push_back({shapes[si].M, shapes[si].K, shapes[si].N, gs, true, kFp32, true});
+      }
+  // The EP's separate entries are categorical axes, not an online policy
+  // experiment. Small non-tile-aligned N/M keep this boundary coverage cheap.
+  if (!kFp32) {
+    for (int gs : kGsArray)
+      for (bool zero : kZeroArray) {
+        out.push_back({1, 4096, 65, gs, zero, false, true, Route::Dp4a});
+        out.push_back({17, 4096, 65, gs, zero, false, false, Route::Padrow});
+        if (zero)
+          out.push_back({17, 4096, 65, gs, true, false, true, Route::Padrow});
+      }
+    // Odd number of quantization groups: zp rows must round up independently.
+    out.push_back({1, 2976, 65, 32, true, false, true, Route::Dp4a});
+  }
   return out;
+}
+
+// The DP4A entry includes per-group activation quantization. Check that
+// operation against its scalar CPU equivalent, and separately report the
+// approximation error relative to the original full-float reference.
+static void dp4aReference(const Case& c, CaseData& d) {
+  const int groups = c.K / c.gs;
+  std::vector<int> aq(c.K);
+  std::vector<float> as(groups);
+  for (int g = 0; g < groups; ++g) {
+    float amax = 0.0f;
+    for (int k = g * c.gs; k < (g + 1) * c.gs; ++k)
+      amax = std::max(amax, std::fabs(half_to_float(d.A16[k])));
+    as[g] = amax > 0 ? amax * (1.0f / 127.0f) : 1.0f;
+    const float inv = amax > 0 ? 127.0f / amax : 0.0f;
+    for (int k = g * c.gs; k < (g + 1) * c.gs; ++k)
+      aq[k] = std::max(-127, std::min(127,
+          static_cast<int>(std::nearbyint(half_to_float(d.A16[k]) * inv))));
+  }
+  for (int n = 0; n < c.N; ++n) {
+    float sum = 0.0f;
+    for (int g = 0; g < groups; ++g) {
+      const int z = c.zero ? static_cast<int>(half_to_float(d.zeros[n * groups + g])) : 8;
+      int dot = 0;
+      for (int k = g * c.gs; k < (g + 1) * c.gs; ++k) {
+        const unsigned b = d.Bpacked[static_cast<size_t>(n) * (c.K / 2) + k / 2];
+        const int q = (b >> (4 * (k & 1))) & 15;
+        dot += aq[k] * (q - z);
+      }
+      sum += as[g] * half_to_float(d.scales[n * groups + g]) * dot;
+    }
+    d.Cref16[n] = float_to_half(sum);
+  }
 }
 
 static bool runOne(const Case& c, int idx) {
   CaseData d;
   genCase(c.M, c.K, c.N, c.gs, c.zero, c.fp32, /*seed=*/1000u + idx, d);
+  std::vector<__half> original_ref;
+  if (c.route == Route::Dp4a) {
+    original_ref = d.Cref16;
+    dp4aReference(c, d);
+  }
 
   const size_t countA = static_cast<size_t>(c.M) * c.K;
   const size_t countC = static_cast<size_t>(c.M) * c.N;
@@ -636,6 +697,8 @@ static bool runOne(const Case& c, int idx) {
   void *dA = nullptr, *dC = nullptr;
   __half* dS = nullptr;
   __half* dZ = nullptr;
+  uint8_t *dZpacked = nullptr, *dZu8 = nullptr;
+  void *dAq = nullptr, *dAs = nullptr;
   uint8_t* dB = nullptr;
   HIP_CHECK(hipMalloc(&dA, countA * elem));
   HIP_CHECK(hipMalloc(&dB, d.Bpacked.size()));
@@ -651,24 +714,70 @@ static bool runOne(const Case& c, int idx) {
 
   hipStream_t stream;
   HIP_CHECK(hipStreamCreate(&stream));
+  const int groups = (c.K + c.gs - 1) / c.gs;
+  if (c.zero && c.packed_zp) {
+    const int packed_cols = (groups + 1) / 2;
+    std::vector<uint8_t> packed(static_cast<size_t>(c.N) * packed_cols, 0);
+    for (int n = 0; n < c.N; ++n)
+      for (int g = 0; g < groups; ++g)
+        packed[static_cast<size_t>(n) * packed_cols + g / 2] |=
+            static_cast<uint8_t>(static_cast<int>(half_to_float(d.zeros[n * groups + g]))
+                                 << (4 * (g & 1)));
+    HIP_CHECK(hipMalloc(&dZpacked, packed.size()));
+    HIP_CHECK(hipMalloc(&dZu8, static_cast<size_t>(c.N) * groups));
+    HIP_CHECK(hipMemcpy(dZpacked, packed.data(), packed.size(), hipMemcpyHostToDevice));
+    // Like the EP's per-weight cache, expand once, outside per-call timing.
+    hip_matmul_nbits_unpack_zp_u8(stream, dZpacked, dZu8, c.N, groups);
+    HIP_CHECK(hipGetLastError());
+    hip_matmul_nbits_convert_zp_fp16(stream, dZpacked, dZ, c.N, groups);
+    HIP_CHECK(hipGetLastError());
+    HIP_CHECK(hipStreamSynchronize(stream));
+  }
+  if (c.route == Route::Dp4a) {
+    HIP_CHECK(hipMalloc(&dAq, static_cast<size_t>(c.M) * c.K));
+    HIP_CHECK(hipMalloc(&dAs, static_cast<size_t>(c.M) * groups * sizeof(float)));
+  }
+  const bool use_u8 = c.packed_zp &&
+      (c.route == Route::Dp4a || c.M == 1 || (c.M < 8 && c.K % 32));
+  void* consumed_zp = c.zero ? (use_u8 ? static_cast<void*>(dZu8) : dZ) : nullptr;
+  const size_t consumed_zp_bytes = c.zero ? d.zeros.size() * (use_u8 ? 1 : 2) : 0;
+  bool padrow_fallback = false;
+  auto launch_buffers = [&](const void* b, const void* s, const void* z) {
+    if (c.route == Route::Dp4a)
+      return hip_matmul_nbits_dp4a(stream, dA, b, s, z, nullptr, dC,
+                                   c.M, c.N, c.K, c.gs, dAq, dAs);
+    if (c.route == Route::Padrow) {
+      const int rc = hip_matmul_nbits_u4_wmma_padrow(
+          stream, -1, c.M, c.N, c.K, c.gs, dA, c.K, b, s, z, dC, c.N);
+      if (rc == 0) return rc;
+      padrow_fallback = true;  // Same per-call fallback as wrap_matmul_nbits.
+    }
+    return hip_matmul_nbits(stream, dA, b, s,
+        c.zero ? (c.packed_zp ? static_cast<const void*>(dZpacked) : z) : nullptr,
+        nullptr, dC, c.M, c.N, c.K, 1, 4, c.gs, static_cast<int>(elem),
+        c.packed_zp ? 1 : 2,
+        c.packed_zp ? (use_u8 ? z : dZu8) : nullptr,
+        c.packed_zp && c.M > 1 ? (use_u8 ? dZ : z) : nullptr);
+  };
   auto launch = [&]() {
-    return hip_matmul_nbits(stream, dA, dB, dS, c.zero ? dZ : nullptr,
-                            nullptr, dC, c.M, c.N, c.K, /*batch_count=*/1,
-                            /*bits=*/4, c.gs, static_cast<int>(elem),
-                            /*zp_elem_size=*/2, nullptr, nullptr);
+    return launch_buffers(dB, dS, consumed_zp);
   };
 
   // 3 calls: first triggers this shape's autotune search / LUT resolve
   // (cached after), the rest are correctness-check warmup.
   int status = 0;
-  char tune_key[64];
-  std::snprintf(tune_key, sizeof(tune_key), "%dx%dx%d_gs%d_%s", c.M, c.N, c.K,
-                c.gs, c.zero ? "z" : "noz");
+  char tune_key[96];
+  std::snprintf(tune_key, sizeof(tune_key), "%dx%dx%d_gs%d_%s_%s_%s", c.M, c.N, c.K,
+                c.gs, c.zero ? "z" : "noz", routeName(c.route),
+                c.packed_zp ? "u8" : "float");
   const std::string selected_config = capture_selected_config(tune_key, [&] {
     for (int w = 0; w < 3; ++w) status = launch();
     HIP_CHECK(hipStreamSynchronize(stream));
   });
 
+  // Selection diagnostics belong to the untimed warmup only.
+  _putenv_s("HIPDNN_MATMUL_AUTOTUNE_LOG", "0");
+  _putenv_s("HIPDNN_MATMUL_LUT_LOG", "0");
   double avg_ms = 0.0;
   if (status == 0) {
     constexpr int kIters = 20;
@@ -677,22 +786,21 @@ static bool runOne(const Case& c, int idx) {
     const hipdnn_ep_test::ColdCopies weights(
         {{dB, d.Bpacked.size()},
          {dS, d.scales.size() * sizeof(__half)},
-         {dZ, c.zero ? d.zeros.size() * sizeof(__half) : 0}});
+         {consumed_zp, consumed_zp_bytes}});
     avg_ms = hipdnn_ep_test::rotatedMeanMs(stream, kIters, weights, [&](int i) {
-      hip_matmul_nbits(stream, dA, weights.part(i, 0), weights.part(i, 1),
-                       c.zero ? weights.part(i, 2) : nullptr, nullptr, dC, c.M,
-                       c.N, c.K, /*batch_count=*/1, /*bits=*/4, c.gs,
-                       static_cast<int>(elem), /*zp_elem_size=*/2, nullptr,
-                       nullptr);
+      const int rc = launch_buffers(weights.part(i, 0), weights.part(i, 1),
+                                    c.zero ? weights.part(i, 2) : nullptr);
+      if (rc != 0) status = rc;
     });
   }
 
   bool pass = (status == 0);
   double rel_l2 = 0.0;
+  double approximation_l2 = 0.0;
   if (status == 0) {
     std::vector<uint8_t> raw(countC * elem);
     HIP_CHECK(hipMemcpy(raw.data(), dC, countC * elem, hipMemcpyDeviceToHost));
-    double ssd = 0.0, ssr = 0.0;
+    double ssd = 0.0, ssr = 0.0, approx_ssd = 0.0, approx_ssr = 0.0;
     int errors = 0;
     for (size_t i = 0; i < countC; ++i) {
       const float gpu_val = c.fp32 ? reinterpret_cast<float*>(raw.data())[i]
@@ -700,14 +808,28 @@ static bool runOne(const Case& c, int idx) {
       const float ref_val = c.fp32 ? d.Cref32[i] : half_to_float(d.Cref16[i]);
       const float diff = std::fabs(gpu_val - ref_val);
       const float tol = std::fabs(ref_val) * 0.05f + 0.1f;
-      if (diff > tol) ++errors;
+      if (!std::isfinite(gpu_val) || diff > tol) ++errors;
       ssd += (double)diff * diff;
       ssr += (double)ref_val * ref_val;
+      if (!original_ref.empty()) {
+        const double original = half_to_float(original_ref[i]);
+        const double delta = gpu_val - original;
+        approx_ssd += delta * delta;
+        approx_ssr += original * original;
+      }
     }
     rel_l2 = ssr > 0.0 ? std::sqrt(ssd / ssr) : std::sqrt(ssd);
     pass = (errors == 0);
+    if (!original_ref.empty()) {
+      approximation_l2 = approx_ssr > 0 ? std::sqrt(approx_ssd / approx_ssr)
+                                       : std::sqrt(approx_ssd);
+      pass = pass && approximation_l2 <= 0.01;
+    }
   }
 
+  std::printf("  route=%s zp_type=%s approximation_relL2=%.3e\n",
+              padrow_fallback ? "padrow->nbits" : routeName(c.route),
+              c.zero ? (c.packed_zp ? "u8" : "float") : "none", approximation_l2);
   std::printf("  M=%d N=%d K=%d gs=%d zero=%d dtype=%s  status=%d  %.4f ms  relL2=%.3e  %s\n",
               c.M, c.N, c.K, c.gs, c.zero, c.fp32 ? "fp32" : "fp16", status,
               avg_ms, rel_l2, pass ? "PASS" : "*** FAIL ***");
@@ -731,6 +853,10 @@ static bool runOne(const Case& c, int idx) {
   hipFree(dB);
   hipFree(dS);
   if (dZ) hipFree(dZ);
+  if (dZpacked) hipFree(dZpacked);
+  if (dZu8) hipFree(dZu8);
+  if (dAq) hipFree(dAq);
+  if (dAs) hipFree(dAs);
   hipFree(dC);
   hipStreamDestroy(stream);
   return pass;
@@ -755,13 +881,14 @@ static int run(int coverage_tier) {
 // Single-shape convenience path (make test_custom): in-process rng, no data
 // files. SIZE=MxKxN GS=<group_size> [NO_ZEROS=1].
 // ============================================================
-static int runCustom(int M, int N, int K, int gs, bool zero) {
-  return sweep::runOne({M, K, N, gs, zero, sweep::kFp32}, /*idx=*/0) ? 0 : 1;
+static int runCustom(int M, int N, int K, int gs, bool zero,
+                     bool packed_zp, sweep::Route route) {
+  return sweep::runOne({M, K, N, gs, zero, sweep::kFp32, packed_zp, route}, /*idx=*/0) ? 0 : 1;
 }
 
 int main(int argc, char* argv[]) {
   std::printf("custom_kernels MatMulNBits bits=4 (nibble-packed) Verification, fp32 activations\n");
-  std::printf("================================================================================\n");
+  std::printf("===============================================================\n");
 
   hipDeviceProp_t prop;
   HIP_CHECK(hipGetDeviceProperties(&prop, 0));
@@ -770,16 +897,61 @@ int main(int argc, char* argv[]) {
   int M = 0, N = 0, K = 0;
   int gs = 128;
   bool no_zeros = false;
+  bool packed_zp = false;
+  sweep::Route route = sweep::Route::Nbits;
   bool have_custom = false;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     if (a == "--no-zeros") no_zeros = true;
     else if (a == "--group-size" && i + 1 < argc) gs = std::atoi(argv[++i]);
+    else if ((a == "--coverage" || a == "--tier") && i + 1 < argc) ++i;
+    else if (a == "--zp-type" && i + 1 < argc) {
+      const std::string value = argv[++i];
+      if (value == "u8") packed_zp = true;
+      else if (value != "f16" && value != "f32") {
+        std::fprintf(stderr, "unsupported --zp-type: %s\n", value.c_str());
+        return 2;
+      }
+    } else if (a == "--route" && i + 1 < argc) {
+      const std::string value = argv[++i];
+      if (value == "dp4a") route = sweep::Route::Dp4a;
+      else if (value == "padrow") route = sweep::Route::Padrow;
+      else if (value != "nbits") {
+        std::fprintf(stderr, "unsupported --route: %s\n", value.c_str());
+        return 2;
+      }
+    }
     else if (sscanf(argv[i], "%dx%dx%d", &M, &K, &N) == 3) have_custom = true;
+    else {
+      std::fprintf(stderr, "unknown or incomplete argument: %s\n", argv[i]);
+      return 2;
+    }
   }
 
-  if (have_custom)
-    return runCustom(M, N, K, gs, !no_zeros);
+  if (have_custom) {
+    if (M <= 0 || N <= 0 || K <= 0 || gs < 32 || (gs & (gs - 1))) {
+      std::fprintf(stderr, "positive M/K/N and power-of-two group_size >=32 required\n");
+      return 2;
+    }
+    if (route != sweep::Route::Nbits && sweep::kFp32) {
+      std::fprintf(stderr, "the EP uses only nbits for fp32 activations\n");
+      return 2;
+    }
+    if (route == sweep::Route::Dp4a &&
+        (M != 1 || K % 32 || K % gs || (!no_zeros && !packed_zp))) {
+      std::fprintf(stderr, "dp4a requires M=1, 32|K, group_size|K and u8 or absent zp\n");
+      return 2;
+    }
+    if (route == sweep::Route::Padrow && (M < 16 || K % 32 || K % gs)) {
+      std::fprintf(stderr, "padrow requires M>=16, 32|K and group_size|K\n");
+      return 2;
+    }
+    return runCustom(M, N, K, gs, !no_zeros, packed_zp, route);
+  }
+  if (route != sweep::Route::Nbits || packed_zp) {
+    std::fprintf(stderr, "--route/--zp-type require an explicit MxKxN shape\n");
+    return 2;
+  }
 
   const int tier = hipdnn_ep_test::resolveCoverageTier(argc, argv);
   return sweep::run(tier);

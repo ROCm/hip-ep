@@ -62,3 +62,24 @@ via a one-line C23 `#embed` (see `unit_test/README.md` "`MODE=lookup`") -- no
 `embed_lut.py`, no generated `.cpp`. Both modes append to `out/results.csv`.
 
 CI passes `OFFLOAD`/`HIP_SDK` explicitly; there is no personal default.
+
+## EP entry and zero-point coverage
+
+Single shapes accept `--zp-type u8` for ONNX nibble-packed zero points, or
+`--no-zeros`. The packed rows use `ceil(groups_k/2)` bytes independently;
+zero points are expanded once like the EP's per-weight cache.
+
+The fp16 leaf additionally accepts `--route dp4a|padrow|nbits` (default
+`nbits`). DP4A is restricted to the EP's default single-row decode route,
+with `32 | K`, `group_size | K`, and u8 or absent zero points. Its time
+includes per-call activation quantization. Padrow time includes the
+per-call weight repack and follows the EP's generic fallback on a miss.
+The fp32 leaf rejects the separate fp16-only routes. Unknown arguments
+fail explicitly instead of silently selecting a different operation.
+
+The original 20-launch cold-weight rotation mean is unchanged. Coverage
+adds packed-zero-point cases and inexpensive separate-entry boundary
+cases. CPU checks retain the per-element absolute/relative tolerance;
+DP4A is checked against scalar per-group dynamic int8 quantization, with
+a separate approximation relL2 limit of 0.01 against the original full
+reference. Each result prints the actual entry and zero-point format.
