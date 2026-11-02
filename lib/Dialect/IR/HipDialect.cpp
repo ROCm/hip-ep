@@ -3179,6 +3179,9 @@ LogicalResult SparseAttentionIndexerOp::verify() {
   if (getMask()) {
     data.push_back(getMask());
   }
+  if (getPastSequenceLength()) {
+    data.push_back(getPastSequenceLength());
+  }
   data.push_back(getSelectedIndices());
   data.push_back(getPresentKey());
   if (failed(verifyDpsComputeOp(*this, data, 2))) {
@@ -3246,10 +3249,13 @@ LogicalResult SparseAttentionIndexerOp::verify() {
     return emitOpError("past_key, present_key and selected_indices must have "
                        "a static last dim");
   }
+  const bool shared = static_cast<bool>(getPastSequenceLength());
   const int64_t past = pastType.getDimSize(1);
   const int64_t total =
-      ShapedType::isDynamic(past) || ShapedType::isDynamic(seq) ? kAny
-                                                                : past + seq;
+      shared || ShapedType::isDynamic(past) || ShapedType::isDynamic(seq)
+          ? kAny
+          : past + seq;
+  const int64_t presentRows = shared ? past : total;
 
   Type i32 = IntegerType::get(getContext(), 32);
   Type i64 = IntegerType::get(getContext(), 64);
@@ -3285,10 +3291,12 @@ LogicalResult SparseAttentionIndexerOp::verify() {
       failed(check(getSinCache(), "sin_cache", elem, cacheShape)) ||
       failed(check(getPastKey(), "past_key", elem, {batch, kAny, kHeadSize})) ||
       (getMask() && failed(check(getMask(), "mask", i64, {batch, total}))) ||
+      (shared && failed(check(getPastSequenceLength(), "past_sequence_length",
+                              i32, {1}))) ||
       failed(check(getSelectedIndices(), "selected_indices", i32,
                    {batch, seq, budget + ratio - 1})) ||
       failed(check(getPresentKey(), "present_key", elem,
-                   {batch, total, kHeadSize}))) {
+                   {batch, presentRows, kHeadSize}))) {
     return failure();
   }
   auto sinType = cast<ShapedType>(getSinCache().getType());
