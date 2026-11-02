@@ -3335,8 +3335,8 @@ int wrap_group_query_attention_ring_f16(
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
     int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
-    int64_t seq_len_new_kv, int32_t has_host_length,
-    int32_t host_length_value) {
+    int64_t seq_len_new_kv, int32_t has_host_length, int32_t host_length_value,
+    void *key_bias, int64_t key_bias_batch, int64_t key_bias_len) {
 #if HIP_EP_RING_ENABLED != 0
   const std::optional<int32_t> host_length =
       has_host_length ? std::optional<int32_t>(host_length_value)
@@ -3352,7 +3352,7 @@ int wrap_group_query_attention_ring_f16(
       seq_len_new_kv == seq_len_q && key && value && seqlens_k && !kv_bnsd &&
       k_quant_type == 0 && v_quant_type == 0 && !do_rotary && no_causal == 0 &&
       (scale == 0.0f || scale == 0.0625f) && local_window_size <= 0 &&
-      !head_sink && smooth_softmax <= 0 && !attention_bias &&
+      !head_sink && smooth_softmax <= 0 && !attention_bias && !key_bias &&
       hip_gqa_ring_device_supported()) {
     hipStream_t stream =
         static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
@@ -3377,5 +3377,5 @@ int wrap_group_query_attention_ring_f16(
       v_quant_type, kv_cache_bit_width, no_causal, batch_size, seq_len_q,
       seq_len_kv, past_buf_seq, head_dim, element_size_bytes, attn_bias_batch,
       attn_bias_num_heads, kv_bnsd, seq_len_new_kv, has_host_length,
-      host_length_value);
+      host_length_value, key_bias, key_bias_batch, key_bias_len);
 }

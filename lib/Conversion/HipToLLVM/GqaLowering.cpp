@@ -43,8 +43,8 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         op.getVQuantType() == "NONE" && !op.getDoRotary() &&
         !op.getNoCausal() && op.getLocalWindowSizeAttr().getInt() <= 0 &&
         op.getSmoothSoftmaxAttr().getInt() <= 0 && !op.getQkOutput() &&
-        !op.getHeadSink() && !op.getAttentionBias() && !op.getPositionIds() &&
-        !op.getOutputQk())
+        !op.getHeadSink() && !op.getAttentionBias() && !op.getKeyBias() &&
+        !op.getPositionIds() && !op.getOutputQk())
       callee = kWrapGQARingF16;
 #endif
     Location loc = op.getLoc();
