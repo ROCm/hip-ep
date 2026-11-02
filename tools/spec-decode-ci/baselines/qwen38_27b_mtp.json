@@ -56,7 +56,20 @@
     "tokens_per_verify": 0.02
   },
   "reference": {
-    "calibrated": true,
+    "calibrated": false,
+    "source": "team reference numbers for Qwen3.8-27B on Strix Halo (plain 13.36 tok/s; MTP ~19.4 1.45x; DSpark ~23.1 1.73x; DFlash2 27.24 2.04x; EAGLE-4 33.19 2.31x); tokens per verify from the board measurement, which is hardware-independent",
+    "arms": {
+      "none": {
+        "tok_s": 13.36
+      },
+      "mtp:2:cap8": {
+        "tok_s": 19.4,
+        "speedup": 1.45,
+        "tokens_per_verify": 2.372
+      }
+    }
+  },
+  "board_measurement": {
     "source": "median of 6 runs on Strix Halo (Radeon 8060S, Windows power plan Balanced), hip-ep dfcca586, 2026-11-01; tokens per verify identical on every run",
     "arms": {
       "none": {
