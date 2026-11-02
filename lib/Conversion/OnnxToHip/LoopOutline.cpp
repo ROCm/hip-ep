@@ -31,8 +31,11 @@
 //     Per ONNX spec, missing cond means the loop runs M times with no
 //     conditional early exit -- the body's `cond_out` (if any) is
 //     ignored.
-//   - Scan outputs (results beyond the loop-carried slot count) are not
-//     yet supported; rejected with a clean diagnostic.
+//   - Scan outputs (yield values past the loop-carried slots) are lowered
+//     to `scf.while` in the parent function. Each executed iteration
+//     unsqueezes the per-iter tensor and concatenates it on axis 0, so
+//     the leading dimension equals the number of iterations that ran.
+//     `hip.loop` is unchanged for loops that have no scan outputs.
 //
 //===----------------------------------------------------------------------===//
 
@@ -43,6 +46,7 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -162,6 +166,319 @@ static FailureOr<Value> unboxCondInit(OpBuilder &builder, Location loc,
       .getResult();
 }
 
+/// Box a scalar into the 0-D tensor ONNX uses for iter / cond. `from_elements`
+/// is rank 1, which would disagree with the body's `tensor<i64>` / `tensor<i1>`
+/// block arguments.
+static Value boxRank0(OpBuilder &builder, Location loc, Value scalar,
+                      Type tensorTy) {
+  auto ranked = dyn_cast<RankedTensorType>(tensorTy);
+  Type elemTy = ranked ? ranked.getElementType() : scalar.getType();
+  if (!ranked || ranked.getRank() != 0)
+    ranked = RankedTensorType::get({}, elemTy);
+  Value dest = tensor::EmptyOp::create(builder, loc, ranked, ValueRange{});
+  return tensor::InsertOp::create(builder, loc, scalar, dest, ValueRange{});
+}
+
+/// Box an i1 into the 0-D tensor the ONNX body uses for `cond_in`.
+static Value boxCondTensor(OpBuilder &builder, Location loc, Value condI1,
+                           Type tensorTy) {
+  Type elemTy = builder.getI1Type();
+  if (auto ranked = dyn_cast<RankedTensorType>(tensorTy))
+    elemTy = ranked.getElementType();
+  Value scalar = condI1;
+  if (auto intTy = dyn_cast<IntegerType>(elemTy)) {
+    if (intTy.getWidth() == 8) {
+      scalar = arith::ExtUIOp::create(builder, loc, builder.getIntegerType(8),
+                                      condI1);
+      if (!intTy.isSignless()) {
+        scalar = UnrealizedConversionCastOp::create(builder, loc,
+                                                    TypeRange{elemTy},
+                                                    ValueRange{scalar})
+                     .getResult(0);
+      }
+    }
+  }
+  return boxRank0(builder, loc, scalar, tensorTy);
+}
+
+static FailureOr<Value> castTensor(OpBuilder &builder, Location loc, Value v,
+                                   Type dst) {
+  if (v.getType() == dst)
+    return v;
+  auto srcTy = dyn_cast<TensorType>(v.getType());
+  auto dstTy = dyn_cast<TensorType>(dst);
+  if (!srcTy || !dstTy || srcTy.getElementType() != dstTy.getElementType())
+    return failure();
+  return tensor::CastOp::create(builder, loc, dst, v).getResult();
+}
+
+static Value onnxNoValue(OpBuilder &builder, Location loc, Type ty) {
+  OperationState state(loc, "onnx.NoValue");
+  state.addTypes(ty);
+  state.addAttribute("value", builder.getUnitAttr());
+  return builder.create(state)->getResult(0);
+}
+
+/// Ranked scan-accumulator type. The loop result is already that tensor
+/// when the importer ranked it. Otherwise build `[?, per-iter shape]`.
+static RankedTensorType scanAccType(Type loopResultTy, Value perIter) {
+  if (auto ranked = dyn_cast<RankedTensorType>(loopResultTy))
+    return ranked;
+  auto perIterTy = dyn_cast<RankedTensorType>(perIter.getType());
+  if (!perIterTy)
+    return {};
+  SmallVector<int64_t> shape;
+  shape.push_back(ShapedType::kDynamic);
+  shape.append(perIterTy.getShape().begin(), perIterTy.getShape().end());
+  return RankedTensorType::get(shape, perIterTy.getElementType());
+}
+
+static Value emptyScanAcc(OpBuilder &builder, Location loc,
+                          RankedTensorType accTy) {
+  SmallVector<Value> dynamicSizes;
+  for (int64_t dim : accTy.getShape()) {
+    if (ShapedType::isDynamic(dim))
+      dynamicSizes.push_back(
+          arith::ConstantIndexOp::create(builder, loc, 0).getResult());
+  }
+  return tensor::EmptyOp::create(builder, loc, accTy, dynamicSizes);
+}
+
+/// Unsqueeze `perIter` on axis 0 so it can be concatenated onto `accTy`.
+static Value unsqueezeLeading(OpBuilder &builder, Location loc, Value perIter,
+                              RankedTensorType accTy) {
+  SmallVector<int64_t> shape;
+  shape.push_back(1);
+  if (auto perTy = dyn_cast<RankedTensorType>(perIter.getType()))
+    shape.append(perTy.getShape().begin(), perTy.getShape().end());
+  else if (accTy.getRank() > 0)
+    shape.append(accTy.getShape().begin() + 1, accTy.getShape().end());
+  auto unsqTy = RankedTensorType::get(shape, accTy.getElementType());
+  OperationState state(loc, "onnx.Unsqueeze");
+  state.addOperands(perIter);
+  state.addTypes(unsqTy);
+  state.addAttribute("axes", builder.getDenseI64ArrayAttr({0}));
+  return builder.create(state)->getResult(0);
+}
+
+static Value concatScan(OpBuilder &builder, Location loc, Value acc,
+                        Value chunk, RankedTensorType accTy) {
+  OperationState state(loc, "onnx.Concat");
+  state.addOperands({acc, chunk});
+  state.addTypes(accTy);
+  state.addAttribute("axis", builder.getI64IntegerAttr(0));
+  return builder.create(state)->getResult(0);
+}
+
+/// Lower an onnx.Loop that yields scan outputs to `scf.while`.
+///
+/// hip.loop's ABI aliases each carried buffer in place and has no slot for
+/// a value produced once per iteration. Scan outputs are the concatenation
+/// of those per-iteration tensors on a new leading axis, and the length of
+/// that axis is the number of iterations that actually ran. `scf.while`
+/// keeps that length exact, including early exit and a zero-trip result.
+static LogicalResult lowerScanLoop(Operation *loopOp, Block &bodyBlock,
+                                   Operation *yieldOp, Value mTensor,
+                                   Value condInitTensor, bool condInitIsNone,
+                                   ValueRange vInitTensors,
+                                   unsigned numLoopCarried, unsigned numScan) {
+  Location loc = loopOp->getLoc();
+  if (loopOp->getNumResults() != numLoopCarried + numScan)
+    return loopOp->emitOpError("onnx.Loop scan result count mismatch: expected ")
+           << (numLoopCarried + numScan) << " results, got "
+           << loopOp->getNumResults();
+  if (bodyBlock.getNumArguments() != 2 + numLoopCarried)
+    return loopOp->emitOpError("onnx.Loop body arg count mismatch: expected ")
+           << (2 + numLoopCarried) << ", got " << bodyBlock.getNumArguments();
+
+  auto parentFn = loopOp->getParentOfType<func::FuncOp>();
+  if (!parentFn || parentFn.getNumArguments() == 0 ||
+      !isa<ContextType>(parentFn.getArgument(0).getType()))
+    return loopOp->emitOpError(
+        "onnx.Loop is not inside a func.func with !hip.context as arg 0; "
+        "ensure --hip-add-context-arg ran first");
+  Value ctxVal = parentFn.getArgument(0);
+
+  OpBuilder builder(loopOp);
+  FailureOr<Value> mIdx = unboxTripCount(builder, loc, ctxVal, mTensor);
+  if (failed(mIdx))
+    return loopOp->emitOpError("could not unbox M to index (expected "
+                               "tensor<i64>, got ")
+           << mTensor.getType() << ")";
+
+  Value condI1;
+  if (condInitIsNone) {
+    condI1 = arith::ConstantIntOp::create(builder, loc, builder.getI1Type(), 1);
+  } else {
+    FailureOr<Value> unboxed = unboxCondInit(builder, loc, condInitTensor);
+    if (failed(unboxed))
+      return loopOp->emitOpError("could not unbox cond_init to i1 (expected "
+                                 "0-D tensor<i1>, tensor<i8>, or tensor<ui8>, "
+                                 "got ")
+             << condInitTensor.getType() << ")";
+    condI1 = *unboxed;
+  }
+
+  // One accumulator per scan yield whose loop result is a tensor. A `none`
+  // result is an unused ONNX output; the body still computes it, but nothing
+  // is concatenated.
+  struct ScanAcc {
+    unsigned yieldIdx;
+    unsigned resultIdx;
+    RankedTensorType accTy;
+    Value init;
+  };
+  SmallVector<ScanAcc> scans;
+  for (unsigned s = 0; s < numScan; ++s) {
+    unsigned resultIdx = numLoopCarried + s;
+    Type resultTy = loopOp->getResult(resultIdx).getType();
+    if (isa<NoneType>(resultTy))
+      continue;
+    Value perIter = yieldOp->getOperand(1 + numLoopCarried + s);
+    RankedTensorType accTy = scanAccType(resultTy, perIter);
+    if (!accTy || accTy.getRank() < 1)
+      return loopOp->emitOpError(
+          "onnx.Loop scan output must be a ranked tensor with a leading "
+          "iteration dimension, got ")
+             << resultTy;
+    auto perTy = dyn_cast<RankedTensorType>(perIter.getType());
+    if (perTy && perTy.getRank() + 1 != accTy.getRank())
+      return loopOp->emitOpError("onnx.Loop scan rank mismatch: per-iter rank ")
+             << perTy.getRank() << " vs accumulated rank " << accTy.getRank();
+    if (perTy && perTy.getElementType() != accTy.getElementType())
+      return loopOp->emitOpError(
+          "onnx.Loop scan element type does not match its result");
+    scans.push_back({1 + numLoopCarried + s, resultIdx, accTy,
+                     emptyScanAcc(builder, loc, accTy)});
+  }
+
+  Value falseI1 =
+      arith::ConstantIntOp::create(builder, loc, builder.getI1Type(), 0);
+  Value zeroIdx = arith::ConstantIndexOp::create(builder, loc, 0);
+  Value oneIdx = arith::ConstantIndexOp::create(builder, loc, 1);
+
+  SmallVector<Value> inits;
+  inits.push_back(zeroIdx);
+  inits.push_back(condI1);
+  inits.append(vInitTensors.begin(), vInitTensors.end());
+  for (ScanAcc &scan : scans)
+    inits.push_back(scan.init);
+  inits.push_back(falseI1);
+  SmallVector<Type> resultTypes;
+  for (Value v : inits)
+    resultTypes.push_back(v.getType());
+
+  unsigned condArg = 1;
+  unsigned carriedArg = 2;
+  unsigned scanArg = carriedArg + numLoopCarried;
+  unsigned haveArg = scanArg + scans.size();
+
+  auto whileOp = scf::WhileOp::create(
+      builder, loc, resultTypes, inits,
+      [&](OpBuilder &b, Location wl, ValueRange args) {
+        Value tripOk = arith::CmpIOp::create(
+            b, wl, arith::CmpIPredicate::slt, args[0], *mIdx);
+        Value keep =
+            arith::AndIOp::create(b, wl, tripOk, args[condArg]).getResult();
+        scf::ConditionOp::create(b, wl, keep, args);
+      },
+      [&](OpBuilder &b, Location wl, ValueRange args) {
+        Value iterI64 =
+            arith::IndexCastOp::create(b, wl, b.getI64Type(), args[0]);
+        Value iterTensor =
+            boxRank0(b, wl, iterI64, bodyBlock.getArgument(0).getType());
+        Value condTensor = boxCondTensor(
+            b, wl, args[condArg], bodyBlock.getArgument(1).getType());
+
+        IRMapping mapping;
+        mapping.map(bodyBlock.getArgument(0), iterTensor);
+        mapping.map(bodyBlock.getArgument(1), condTensor);
+        for (unsigned i = 0; i < numLoopCarried; ++i)
+          mapping.map(bodyBlock.getArgument(2 + i), args[carriedArg + i]);
+
+        for (Operation &op : bodyBlock) {
+          if (&op == yieldOp)
+            continue;
+          b.clone(op, mapping);
+        }
+
+        FailureOr<Value> nextCond =
+            unboxCondInit(b, wl, mapping.lookupOrDefault(yieldOp->getOperand(0)));
+        if (failed(nextCond)) {
+          loopOp->emitOpError("could not unbox scan-loop cond_out to i1");
+          nextCond = args[condArg];
+        }
+
+        SmallVector<Value> yielded;
+        Value nextIter = arith::AddIOp::create(b, wl, args[0], oneIdx);
+        yielded.push_back(nextIter);
+        yielded.push_back(*nextCond);
+        for (unsigned i = 0; i < numLoopCarried; ++i) {
+          Value carried = mapping.lookupOrDefault(
+              yieldOp->getOperand(1 + i));
+          FailureOr<Value> casted =
+              castTensor(b, wl, carried, args[carriedArg + i].getType());
+          if (failed(casted)) {
+            loopOp->emitOpError(
+                "loop-carried scan-loop value cannot be cast to its init type");
+            casted = args[carriedArg + i];
+          }
+          yielded.push_back(*casted);
+        }
+        for (auto [s, scan] : llvm::enumerate(scans)) {
+          Value perIter = mapping.lookupOrDefault(yieldOp->getOperand(scan.yieldIdx));
+          Value chunk = unsqueezeLeading(b, wl, perIter, scan.accTy);
+          FailureOr<Value> chunkAcc = castTensor(b, wl, chunk, scan.accTy);
+          if (failed(chunkAcc)) {
+            loopOp->emitOpError(
+                "scan chunk cannot be cast to the accumulated scan type");
+            chunkAcc = args[scanArg + s];
+          }
+          // First iteration replaces the zero-length seed. Later iterations
+          // append. Concatenating onto the seed would require a 0-extent
+          // inner dimension to match the chunk.
+          auto ifOp = scf::IfOp::create(b, wl, TypeRange{scan.accTy},
+                                        args[haveArg],
+                                        /*withElseRegion=*/true);
+          OpBuilder thenB =
+              OpBuilder::atBlockEnd(&ifOp.getThenRegion().front());
+          Value accumulated = concatScan(thenB, wl, args[scanArg + s],
+                                        *chunkAcc, scan.accTy);
+          scf::YieldOp::create(thenB, wl, accumulated);
+          OpBuilder elseB =
+              OpBuilder::atBlockEnd(&ifOp.getElseRegion().front());
+          scf::YieldOp::create(elseB, wl, *chunkAcc);
+          yielded.push_back(ifOp.getResult(0));
+        }
+        Value trueI1 =
+            arith::ConstantIntOp::create(b, wl, b.getI1Type(), 1);
+        yielded.push_back(trueI1);
+        scf::YieldOp::create(b, wl, yielded);
+      });
+
+  builder.setInsertionPointAfter(whileOp);
+  SmallVector<Value> replacements;
+  replacements.reserve(loopOp->getNumResults());
+  unsigned scanSlot = 0;
+  for (unsigned i = 0; i < loopOp->getNumResults(); ++i) {
+    Type resultTy = loopOp->getResult(i).getType();
+    if (isa<NoneType>(resultTy)) {
+      replacements.push_back(onnxNoValue(builder, loc, resultTy));
+      continue;
+    }
+    Value raw = i < numLoopCarried ? whileOp.getResult(carriedArg + i)
+                                   : whileOp.getResult(scanArg + scanSlot++);
+    FailureOr<Value> casted = castTensor(builder, loc, raw, resultTy);
+    if (failed(casted))
+      return loopOp->emitOpError("cannot cast loop result #")
+             << i << " from " << raw.getType() << " to " << resultTy;
+    replacements.push_back(*casted);
+  }
+  loopOp->replaceAllUsesWith(replacements);
+  loopOp->erase();
+  return success();
+}
+
 //===----------------------------------------------------------------------===//
 // OnnxLoopOutlinePass
 //===----------------------------------------------------------------------===//
@@ -181,6 +498,7 @@ struct OnnxLoopOutlinePass
     registry.insert<hip::HipDialect>();
     registry.insert<func::FuncDialect>();
     registry.insert<arith::ArithDialect>();
+    registry.insert<scf::SCFDialect>();
     registry.insert<tensor::TensorDialect>();
   }
 
@@ -198,7 +516,8 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
 
   // ONNX Loop has exactly one region with one block: the body.
   if (loopOp->getNumRegions() != 1)
-    return loopOp->emitOpError("onnx.Loop with != 1 regions not supported");
+    return loopOp->emitOpError("onnx.Loop with ")
+           << loopOp->getNumRegions() << " regions is not supported";
   Region &bodyRegion = loopOp->getRegion(0);
   if (!bodyRegion.hasOneBlock())
     return loopOp->emitOpError(
@@ -228,11 +547,15 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
   if (yieldOp->getName().getStringRef() != "onnx.Yield")
     return loopOp->emitOpError("onnx.Loop body must end with onnx.Yield, got ")
            << yieldOp->getName().getStringRef();
-  if (yieldOp->getNumOperands() != 1 + numLoopCarried)
-    return loopOp->emitOpError(
-               "onnx.Loop scan outputs not yet supported (expected ")
-           << (1 + numLoopCarried) << " yield operands for " << numLoopCarried
-           << " loop-carried, got " << yieldOp->getNumOperands() << ")";
+  if (yieldOp->getNumOperands() < 1 + numLoopCarried)
+    return loopOp->emitOpError("onnx.Loop yield has ")
+           << yieldOp->getNumOperands() << " operands, expected at least "
+           << (1 + numLoopCarried) << " for " << numLoopCarried
+           << " loop-carried values";
+  unsigned numScan = yieldOp->getNumOperands() - 1 - numLoopCarried;
+  if (numScan > 0)
+    return lowerScanLoop(loopOp, bodyBlock, yieldOp, mTensor, condInitTensor,
+                         condInitIsNone, vInitTensors, numLoopCarried, numScan);
 
   // Block-arg layout in the body: (iter_t, cond_in_t, v_in_1, ..., v_in_N).
   // Validate the arg count matches what the operands imply.

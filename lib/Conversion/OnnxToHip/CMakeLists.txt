@@ -147,6 +147,7 @@ target_link_libraries(OnnxToHip PUBLIC
   MLIRPass
   MLIRFuncDialect
   MLIRArithDialect
+  MLIRSCFDialect
   MLIRTensorDialect
   MLIRLinalgDialect
   MLIRMemRefDialect
