@@ -87,6 +87,14 @@ delete the cache and recompile after changing GPUs or toggling either
 if autotuning was requested but no HIP device could be reached, so the suffix
 never claims tuning that did not happen.
 
+`HIPDNN_EP_ROCMLIR_AUTOTUNE_BENCH` selects how candidates are timed and is not
+part of the suffix: both modes search the same space and record the same kind
+of artifact. `adaptive` (default) is MIGraphX's `adaptive_topk_benchmark`: a
+short coarse pass over every candidate, then bundled launches for the ten
+fastest within 4x of the best (see `include/hip/Compiler/AdaptiveBenchmark.h`).
+`simple` gives every candidate 20 warmup and 100 timed launches. Benchmark
+inputs hold generated data (floats in [-1, 1), small integers), not zeros.
+
 ---
 
 ## Schema: Single Source of Truth

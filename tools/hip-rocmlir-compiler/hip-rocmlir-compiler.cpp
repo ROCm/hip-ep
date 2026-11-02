@@ -165,6 +165,7 @@ int main(int argc, char **argv) {
   mlir::hip::AutotuneOptions autotune;
   autotune.log = &llvm::errs();
   autotune.logPrefix = "[hip-rocmlir-compiler]";
+  mlir::hip::rocMlirAutotuneBenchmarkFromEnv(autotune.benchmark);
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
     if (arg == "-o" && i + 1 < argc) {
@@ -188,6 +189,13 @@ int main(int argc, char **argv) {
       if (!mlir::hip::parseAutotuneSpace(kind, autotune.space)) {
         llvm::errs() << "error: unknown autotune space '" << kind
                      << "' (expected quick, full, or exhaustive)\n";
+        return 1;
+      }
+    } else if (llvm::StringRef(arg).starts_with("--autotune-bench=")) {
+      llvm::StringRef mode = llvm::StringRef(arg).drop_front(17);
+      if (!mlir::hip::parseAutotuneBenchmark(mode, autotune.benchmark)) {
+        llvm::errs() << "error: unknown autotune benchmark '" << mode
+                     << "' (expected adaptive or simple)\n";
         return 1;
       }
     } else if (arg == "--autotune-warmup" && i + 1 < argc) {
@@ -230,11 +238,22 @@ int main(int argc, char **argv) {
         << "                       Override the default quick autotune space "
            "and\n"
         << "                       embed the fastest GPU candidate.\n"
+        << "  --autotune-bench=adaptive|simple\n"
+        << "                       How candidates are timed (default: "
+           "adaptive, or\n"
+        << "                       HIPDNN_EP_ROCMLIR_AUTOTUNE_BENCH). adaptive "
+           "is\n"
+        << "                       MIGraphX's coarse pass plus bundled "
+           "precise pass\n"
+        << "                       over the fastest candidates; simple times "
+           "every\n"
+        << "                       candidate with the two options below.\n"
         << "  --autotune-warmup <n>\n"
-        << "                       Warmup launches per candidate (default: "
-           "20).\n"
-        << "  --autotune-runs <n> Timed launches per candidate (default: "
-           "100).\n"
+        << "                       simple only: warmup launches per "
+           "candidate\n"
+        << "                       (default: 20).\n"
+        << "  --autotune-runs <n> simple only: timed launches per candidate\n"
+        << "                       (default: 100).\n"
         << "                       Lower values get noisy: at 5/20 the same "
            "kernel\n"
         << "                       measured 4.2e-02 to 7.5e-02 ms, wider than "

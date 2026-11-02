@@ -51,6 +51,7 @@ add_library(OnnxToHip STATIC
   OneHotConversion.cpp
   GatherShapeFold.cpp
   TransposeMatMulFold.cpp
+  SkipNormCastFold.cpp
   ReshapeShapeFold.cpp
   PadShapeFold.cpp
   SliceShapeFold.cpp
@@ -121,6 +122,9 @@ add_library(OnnxToHip STATIC
   DepthToSpaceConversion.cpp
   SpaceToDepthConversion.cpp
   QdqConversion.cpp
+  DynamicQuantizeLinearConversion.cpp
+  ConvIntegerConversion.cpp
+  MatMulIntegerConversion.cpp
   LoopOutline.cpp
   IfOutline.cpp
   ReluConversion.cpp
