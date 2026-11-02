@@ -86,6 +86,8 @@ jobs:
 
       # ubuntu-latest ships ~14 GB usable SSD; the from-source LLVM build + ORT
       # need much more. Reclaim ~30 GB by pruning preinstalled toolchains.
+      # Keep swap. Deleting it makes the rmt-core LLVM link OOM the runner,
+      # which GitHub reports as "lost communication" and drops the log.
       - name: Free disk space
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
         with:
@@ -95,7 +97,7 @@ jobs:
           dotnet: true
           haskell: true
           large-packages: false
-          swap-storage: true
+          swap-storage: false
 
       # Pin the Python the whole job uses (ORT/OGA wheels are built against it).
       - name: Setup Python 3.14
@@ -178,6 +180,7 @@ jobs:
           git -C "$SRC" remote add origin "${{ steps.llvm.outputs.url }}"
           git -C "$SRC" fetch --depth 1 origin "${{ steps.llvm.outputs.commit }}"
           git -C "$SRC" checkout FETCH_HEAD
+          rm -rf "$SRC/.git"
           cmake -G Ninja -S "$SRC/llvm" -B "${{ runner.workspace }}/build-llvm" \
             -DCMAKE_BUILD_TYPE=Release \
             -DLLVM_ENABLE_PROJECTS="clang;mlir;lld" \
@@ -191,6 +194,7 @@ jobs:
             -DLLVM_INCLUDE_BENCHMARKS=OFF \
             -DLLVM_BUILD_TOOLS=ON \
             -DLLVM_INSTALL_UTILS=ON \
+            -DLLVM_PARALLEL_LINK_JOBS=1 \
             -DCMAKE_CXX_VISIBILITY_PRESET=hidden \
             -DCMAKE_C_VISIBILITY_PRESET=hidden \
             -DCMAKE_VISIBILITY_INLINES_HIDDEN=ON \
