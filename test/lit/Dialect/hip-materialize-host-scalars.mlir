@@ -300,3 +300,19 @@ func.func @external_global_left_alone(%ctx: !hip.context, %out: memref<i32>) {
   hip.cast(%ctx) ins(%g : memref<i64>) outs(%out : memref<i32>) {to = 6 : i64}
   return
 }
+
+// LLVM's i48 array stride is 8 bytes, not its 6-byte payload size.
+// CHECK-LABEL: func.func @padded_elements
+// CHECK: %[[SIZE:.*]] = arith.constant 192 : index
+// CHECK: %[[SCRATCH:.*]] = hip.get_host_scratch(%{{.*}}, %[[SIZE]])
+// CHECK: memref.view %[[SCRATCH]]{{.*}} to memref<10xi48>
+// CHECK: %[[OFFSET:.*]] = arith.constant 128 : index
+// CHECK: memref.view %[[SCRATCH]][%[[OFFSET]]][] {{.*}} to memref<i8>
+func.func @padded_elements(%ctx: !hip.context, %x: i48, %y: i8) {
+  %c0 = arith.constant 0 : index
+  %a = memref.alloc() : memref<10xi48>
+  memref.store %x, %a[%c0] : memref<10xi48>
+  %b = memref.alloc() : memref<i8>
+  memref.store %y, %b[] : memref<i8>
+  return
+}
