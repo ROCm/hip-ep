@@ -35,9 +35,8 @@ extern "C" int8_t hipdnn_ep_op_state_construct_matmul_nbits(RuntimeState *state,
   return 0;
 }
 
-// MatMul: real runtime holds a shared_ptr to a device-wide hipBLASLt algo
-// table (MatmulState in real/matmul.cpp); the mock owns no device/hipBLASLt
-// resources.
+// MatMul: real runtime holds a shared_ptr to a device-wide GEMM algo table
+// (MatmulState in real/matmul.cpp); the mock owns no device resources.
 extern "C" int8_t hipdnn_ep_op_state_construct_matmul(RuntimeState *state,
                                                       int32_t slot) {
   hipdnn_ep_op_state_set(state, slot, MockOpState::create().release());
@@ -61,17 +60,17 @@ hipdnn_ep_op_state_construct_causal_conv_with_state(RuntimeState *state,
   return 0;
 }
 
-// GQA: real runtime owns a per-GEMM-shape hipBLASLt descriptor/algo cache
-// (GqaState in real/gqa.cpp); the mock owns no device/hipBLASLt resources.
+// GQA: real runtime owns a per-GEMM-shape routing cache (GqaState in
+// real/gqa.cpp); the mock owns no device resources.
 extern "C" int8_t hipdnn_ep_op_state_construct_gqa(RuntimeState *state,
                                                    int32_t slot) {
   hipdnn_ep_op_state_set(state, slot, MockOpState::create().release());
   return 0;
 }
 
-// MultiHeadAttention: real runtime owns a per-GEMM-shape hipBLASLt
-// descriptor/algo cache (MhaState in real/multi_head_attention.cpp); the mock
-// owns no device/hipBLASLt resources.
+// MultiHeadAttention: real runtime owns a per-GEMM-shape routing cache
+// (MhaState in real/multi_head_attention.cpp); the mock owns no device
+// resources.
 extern "C" int8_t
 hipdnn_ep_op_state_construct_multi_head_attention(RuntimeState *state,
                                                   int32_t slot) {
@@ -88,8 +87,8 @@ extern "C" int8_t hipdnn_ep_op_state_construct_optensor(RuntimeState *state,
   return 0;
 }
 
-// Gemm: real runtime holds a shared_ptr to a device-wide hipBLASLt algo table
-// (GemmState in real/gemm.cpp); the mock owns no device/hipBLASLt resources.
+// Gemm: real runtime holds a shared_ptr to a device-wide GEMM algo table
+// (GemmState in real/gemm.cpp); the mock owns no device resources.
 extern "C" int8_t hipdnn_ep_op_state_construct_gemm(RuntimeState *state,
                                                     int32_t slot) {
   hipdnn_ep_op_state_set(state, slot, MockOpState::create().release());

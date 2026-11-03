@@ -69,6 +69,9 @@ prefix gets one `kernel-tests/<arch>/`, named exactly like that entry's
     hipdnn-kernel-ut-gather-block-quantized-xi64-wu4-yfp16.exe
     hipdnn-kernel-ut-gather-block-quantized-xi64-wu8-yfp16.exe
     hipdnn-kernel-ut-gather-block-quantized-xi64-wfp8-yfp16.exe
+    hipdnn-kernel-ut-gemm-xfp16-wfp16-yfp16.exe
+    hipdnn-kernel-ut-gemm-xfp16-wfp16-yfp32.exe
+    hipdnn-kernel-ut-gemm-xfp32-wfp32-yfp32.exe
 ```
 
 ### Run (on a machine with a supported AMD GPU)
@@ -90,7 +93,7 @@ controller from that `bin` directory:
 | `--mode` | `lookup`, `autotune` | `lookup` | `lookup` uses the tables embedded in `custom_kernels_<arch>.dll` and falls through to autotune on a miss, like production. `autotune` bypasses the tables (production's `online` mode). |
 | `--coverage` | `1`, `2`, `3` | `3` | Shape tier; see "Shape coverage". `1` suits a per-PR job, `3` a nightly one. |
 
-The controller runs the 16 leaves serially, with `bin` as the working
+The controller runs the 19 leaves serially, with `bin` as the working
 directory so every leaf finds `custom_kernels_<arch>.dll`. It prints one
 `[<op>/<leaf>] PASS|FAIL (<ms> ms)` line per leaf and finally
 `Combined report: <path>`.
@@ -193,7 +196,7 @@ Concretely:
   never drops a categorical situation.
 
 A tier3 (default) run of one leaf is on the order of tens to ~150 cases, and
-the whole 16-leaf suite at tier3 is budgeted at **up to ~30 min total**
+the whole 19-leaf suite at tier3 is budgeted at **up to ~30 min total**
 (measured ~20-25 min in practice) — this is intentionally wider than a
 "finishes in a minute" smoke test, because the shape axis (M=1 vs M>1,
 multiple K/N/seq scenarios) needs real coverage too, not just the categorical
@@ -258,6 +261,8 @@ unit_test/
   gqa/prefill/Xfp16_Wi8_Yfp16/
   qmoe_ragged_mm/Xfp16_Wu4_Yfp16/
   gather_block_quantized/Xi64_W{u4,u8,fp8}_Yfp16/
+  gemm/Xfp16_Wfp16_Y{fp16,fp32}/
+  gemm/Xfp32_Wfp32_Yfp32/
 ```
 
 `unit_test/` holds one directory per op and nothing else besides the four
@@ -378,6 +383,14 @@ COVERAGE=N` (any leaf, or the top-level aggregator) builds and runs it.
   `{16,32,64,128}`, `{1,16,2048}` indices). Every index list includes the first
   and last rows, negative and out-of-range indices. Outputs are compared
   bit-exactly with the CPU reference.
+- **gemm** (CK GEMM, one leaf per operand / output dtype pair): every combo
+  the pair supports (transA, bias) x 8 alignments of m / n / k x 4 batch
+  layouts (batch 1, packed batch strides, padded leading dimensions,
+  broadcast B) x alpha where the epilogue applies it, at every tier, plus 2 /
+  4 / 8 typical attention and linear-layer shapes by tier. Each case runs the
+  instance production would reach (table proposals, then every instance) and
+  the reference GEMM; the fp16 leaf adds `hip_gemv_fp16`'s paths. The CPU
+  reference is multithreaded over output columns.
 
 A new op's test cpp should follow whichever of the above shapes fit it best:
 if the kernel's dispatch paths are better covered by a small hand-picked
@@ -399,7 +412,9 @@ make clean ...
 The Makefiles use repo-relative paths only: `HIP_SDK`, `OFFLOAD` and
 `LUT_ARCH` come from the command line. `MODE=lookup` on a chip that has a table
 (every chip with a checked-in `lut/<chip>.fb`) also needs `FLATC` and
-`FLATBUFFERS_INC`; see "`MODE=lookup`" below.
+`FLATBUFFERS_INC`; see "`MODE=lookup`" below. The gemm leaves also need
+`CK_SRC` (the Composable Kernel checkout hip-ep pins) and `CK_GEN` (the
+`<build>/ck_generated` directory holding its `ck/config.h`).
 
 The build follows the release: compile for the CI target, pick the table by
 the real chip.

@@ -417,54 +417,14 @@ bool isSharedLibraryFile(llvm::StringRef path) {
 }
 
 // Install symbol search generators on the JIT's main JITDylib, in priority
-// order: per-OS ROCm libs, the per-arch kernel DLL/SO, plugin-contributed
-// libraries, then the process image.
+// order: the per-arch kernel DLL/SO, plugin-contributed libraries, then the
+// process image.
 // The kernel DLL is added before the process generator so its hip_* launchers
 // win over any look-alike symbol in another loaded module. Returns false only
 // when a mandatory load fails.
 bool installSearchGenerators(llvm::orc::LLJIT &jit) {
   auto &jd = jit.getMainJITDylib();
   const char global_prefix = jit.getDataLayout().getGlobalPrefix();
-
-  std::string last_load_error;
-  auto loadFirst = [&](llvm::ArrayRef<const char *> names) {
-    for (const char *lib : names) {
-      auto gen =
-          llvm::orc::DynamicLibrarySearchGenerator::Load(lib, global_prefix);
-      if (!gen) {
-        last_load_error = llvm::toString(gen.takeError());
-        continue;
-      }
-      jd.addGenerator(std::move(*gen));
-      return true;
-    }
-    return false;
-  };
-
-  // ROCm libs the runtime calls into (the EP only imports amdhip64 directly).
-  // A missing lib is tolerated: a model that never touches it still JITs.
-  const std::vector<std::vector<const char *>> rocm_libs = {
-#ifdef _WIN32
-      {"hipblaslt.dll", "libhipblaslt.dll"},
-#else
-      {"libhipblaslt.so"},
-#endif
-  };
-  for (const std::vector<const char *> &names : rocm_libs) {
-    if (loadFirst(names))
-      continue;
-    std::string tried;
-    for (const char *lib : names) {
-      if (!tried.empty())
-        tried += ", ";
-      tried += lib;
-    }
-    if (hipdnn_ep::env_enabled("HIPDNN_EP_DEBUG")) {
-      LOG(WARNING) << "LlvmIrJit: Load(" << tried
-                   << ") failed: " << last_load_error
-                   << "; models needing it will fail at lookup.";
-    }
-  }
 
 #ifdef HIPDNN_EP_LOAD_KERNEL_DLLS
   {

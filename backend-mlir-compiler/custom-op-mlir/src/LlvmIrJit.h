@@ -20,7 +20,7 @@ namespace mlir_compilation::customop {
 //   2. `bitcode`     -- per-model module supplied by the caller (emitted
 //                       with empty triple/datalayout for OS portability).
 //
-// External symbols (`hip_*` kernel launchers, libamdhip64, hipBLASLt, CRT)
+// External symbols (`hip_*` kernel launchers, libamdhip64, CRT)
 // resolve through search generators installed on the JITDylib (process image
 // + per-OS ROCm DLLs); MSVC-only emutls and allocation helpers are injected
 // as absolute symbols on Windows.

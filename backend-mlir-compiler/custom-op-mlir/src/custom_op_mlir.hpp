@@ -122,8 +122,8 @@ static_assert(offsetof(output_allocator_t, self) == 0,
 // arguments (see InferenceState.cpp).
 // ============================================================================
 
-// One-time initialisation: creates GPU stream, hipBLASLt handle, and
-// uploads compiled model weights to device memory through the supplied
+// One-time initialisation: creates the GPU stream and uploads compiled model
+// weights to device memory through the supplied
 // FileSystem (which resolves the constants.bin entry inside the EPContext tar).
 //
 // Parameters:
