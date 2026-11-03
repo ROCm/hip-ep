@@ -1793,7 +1793,20 @@ __global__ void la_pf_scan_f32(
     }
 }
 
-template <typename T>
+// Width-32 xor reduction. gfx11 is wave32; the explicit width keeps the
+// reduction inside one wave on a wave64 target as well.
+static __device__ __forceinline__ float la_warp_sum32(float v) {
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1)
+        v += __shfl_xor(v, off, 32);
+    return v;
+}
+
+// kStage copies this chunk's S0 [dv, dk] and U [C, dv] into LDS and reduces
+// each Q·S0 dot across a wave. The unstaged kernel re-reads all of S0 from
+// global memory once per query row, and a warp walking those rows issues a
+// dk-strided load. Staging is only selected when the extra LDS fits.
+template <typename T, bool kStage>
 __global__ void la_pf_pass3_f32(
     const T* __restrict__ query,
     const T* __restrict__ key,
@@ -1872,21 +1885,61 @@ __global__ void la_pf_pass3_f32(
         Pm[t * Ceff + s] = expf(clog[t] - clog[s]) * qk;
     }
     __syncthreads();
-    for (int idx = tid; idx < Ceff * dv; idx += nthreads) {
-        const int t = idx / dv, j = idx % dv;
-        const float* qr = Qsm + t * dk;
-        // la_pf_scan_f32 writes each chunk's S0 as [dv][dk], so row j is
-        // contiguous over i.
-        const float* sr = S0 + (int64_t)j * dk;
-        float qs = 0.f;
-        for (int i = 0; i < dk; i++)
-            qs += qr[i] * sr[i];
-        float intra = 0.f;
-        for (int s = 0; s <= t; s++)
-            intra += Pm[t * Ceff + s] * Ul[s * dv + j];
-        output[b * out_bs + (int64_t)(c0 + t) * Hout * dv +
-               (int64_t)h_out * dv + j] =
-            from_float<T>(scale * (Asm[t] * qs + intra));
+    if constexpr (kStage) {
+        // After the prefix the streaming kernel uses. The launch adds exactly
+        // these two tiles, and only when they fit in 64 KB.
+        float* Ssm = clog + LA_CHUNK;                 // [dv, dk]
+        float* Usm = Ssm + dv * dk;                   // [C, dv]
+        // One coalesced copy. Every query row used to reload this tile.
+        for (int idx = tid; idx < dv * dk; idx += nthreads)
+            Ssm[idx] = S0[idx];
+        for (int idx = tid; idx < Ceff * dv; idx += nthreads)
+            Usm[idx] = Ul[idx];
+        __syncthreads();
+        const int lane = tid & 31;
+        const int warp = tid >> 5;
+        const int nwarps = nthreads >> 5;
+        const int nout = Ceff * dv;
+        for (int out = warp; out < nout; out += nwarps) {
+            const int t = out / dv, j = out % dv;
+            const float* qr = Qsm + t * dk;
+            // Consecutive lanes read consecutive i from both qr and sr, so
+            // the LDS loads are bank-conflict free. The loop also supports a
+            // dk that is not a multiple of the wave width.
+            const float* sr = Ssm + (int64_t)j * dk;
+            float dot_partial = 0.f;
+            for (int i = lane; i < dk; i += 32)
+                dot_partial += qr[i] * sr[i];
+            // Do not leave the triangular intra-chunk sum on lane 0. It is
+            // independent across s, so fold each lane's terms into the same
+            // wave reduction as the Q·S0 partial.
+            float partial = Asm[t] * dot_partial;
+            for (int s = lane; s <= t; s += 32)
+                partial += Pm[t * Ceff + s] * Usm[s * dv + j];
+            const float value = la_warp_sum32(partial);
+            if (lane == 0) {
+                output[b * out_bs + (int64_t)(c0 + t) * Hout * dv +
+                       (int64_t)h_out * dv + j] =
+                    from_float<T>(scale * value);
+            }
+        }
+    } else {
+        for (int idx = tid; idx < Ceff * dv; idx += nthreads) {
+            const int t = idx / dv, j = idx % dv;
+            const float* qr = Qsm + t * dk;
+            // la_pf_scan_f32 writes each chunk's S0 as [dv][dk], so row j is
+            // contiguous over i.
+            const float* sr = S0 + (int64_t)j * dk;
+            float qs = 0.f;
+            for (int i = 0; i < dk; i++)
+                qs += qr[i] * sr[i];
+            float intra = 0.f;
+            for (int s = 0; s <= t; s++)
+                intra += Pm[t * Ceff + s] * Ul[s * dv + j];
+            output[b * out_bs + (int64_t)(c0 + t) * Hout * dv +
+                   (int64_t)h_out * dv + j] =
+                from_float<T>(scale * (Asm[t] * qs + intra));
+        }
     }
 }
 
@@ -2022,12 +2075,18 @@ static int la_launch_parallel(
                    (LA_CHUNK * dk > dk * (LA_CHUNK + LA_KT_PAD)
                         ? LA_CHUNK * dk : dk * (LA_CHUNK + LA_KT_PAD)) +
                    dvs * LA_CHUNK) * sizeof(__half);
-    const size_t s3 = gated_f32
+    const size_t s3_base = gated_f32
         ? (size_t)(2 * LA_CHUNK * dk + LA_CHUNK * LA_CHUNK + 2 * LA_CHUNK) *
               sizeof(float)
         : (size_t)(2 * LA_CHUNK * dv + LA_CHUNK * LA_CHUNK +
                    2 * LA_CHUNK) * sizeof(float) +
               (size_t)(2 * LA_CHUNK * dk + LA_CHUNK * dk) * sizeof(__half);
+    // S0 [dv, dk] plus one U tile. Declined back to the streaming kernel when
+    // the tile is too wide for the 64 KB LDS budget.
+    const size_t s3_stage = s3_base +
+        (size_t)(dk * dv + LA_CHUNK * dv) * sizeof(float);
+    const bool stage_pass3 = gated_f32 && s3_stage <= 64 * 1024;
+    const size_t s3 = stage_pass3 ? s3_stage : s3_base;
     if (s1 > 64 * 1024 || s2 > 64 * 1024 || s3 > 64 * 1024) return 1;
 
     // With the dv-split there are LA_SCAN_NSPLIT times as many scan blocks and
@@ -2057,9 +2116,14 @@ static int la_launch_parallel(
                 dim3((unsigned)(B * Hkv * LA_SCAN_NSPLIT)), dim3(scan_block),
                 s2, s, k, Uloc_g, rlast_g, alast_g, S0_f, carry_f, state,
                 seq_len, Hkv, Nk, dk, dv, win, cbeg, is_first, is_last);
-            hipLaunchKernelGGL(la_pf_pass3_f32<T>, dim3((unsigned)ncb),
-                dim3(256), s3, s, q, k, dec, Uloc_g, S0_f, out, seq_len, Hq,
-                Hkv, Nk, dk, dv, scale, win, cbeg);
+            if (stage_pass3)
+                hipLaunchKernelGGL((la_pf_pass3_f32<T, true>), dim3((unsigned)ncb),
+                    dim3(256), s3, s, q, k, dec, Uloc_g, S0_f, out, seq_len, Hq,
+                    Hkv, Nk, dk, dv, scale, win, cbeg);
+            else
+                hipLaunchKernelGGL((la_pf_pass3_f32<T, false>), dim3((unsigned)ncb),
+                    dim3(256), s3, s, q, k, dec, Uloc_g, S0_f, out, seq_len, Hq,
+                    Hkv, Nk, dk, dv, scale, win, cbeg);
         } else {
             hipLaunchKernelGGL(la_pf_scan<T>,
                 dim3((unsigned)(B * Hkv * LA_SCAN_NSPLIT)), dim3(scan_block),
