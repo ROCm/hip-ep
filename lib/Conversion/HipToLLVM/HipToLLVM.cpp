@@ -13,6 +13,7 @@
 #include "mlir/IR/Dialect.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 
 #include <iterator>
@@ -250,7 +251,10 @@ private:
       builder.setInsertionPointToStart(errorBlock);
       LLVM::ReturnOp::create(builder, loc, ValueRange{errorStatus});
 
-      for (LLVM::CallOp call : fallibleCalls) {
+      // Split from the last call back: a split moves every operation after
+      // the call into the new block, so going forward would move the rest of
+      // the graph once per call. Backward, each operation moves once.
+      for (LLVM::CallOp call : llvm::reverse(fallibleCalls)) {
         Block *callBlock = call->getBlock();
         Block *continueBlock =
             callBlock->splitBlock(std::next(call->getIterator()));
