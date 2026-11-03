@@ -920,6 +920,14 @@ extern "C" int hip_sparse_attention_indexer(
             element_size_bytes);
     return -1;
   }
+  if (past_key == present_key && past_rows != present_rows) {
+    fprintf(stderr,
+            "[custom_kernels] hip_sparse_attention_indexer: aliased past_key "
+            "(%lld rows) and present_key (%lld rows) must have the same "
+            "rows\n",
+            (long long)past_rows, (long long)present_rows);
+    return -1;
+  }
   const uintptr_t vec_align = 4u * static_cast<unsigned>(element_size_bytes);
   if (reinterpret_cast<uintptr_t>(query) % vec_align != 0 ||
       reinterpret_cast<uintptr_t>(present_key) % vec_align != 0 ||

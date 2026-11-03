@@ -3156,7 +3156,7 @@ LogicalResult DynamicSparseAttentionOp::verify() {
 //===----------------------------------------------------------------------===//
 // SparseAttentionIndexerOp:
 //   ins(query, query_norm_weight, key_norm_weight, cos_cache, sin_cache,
-//       past_key) [mask(mask)]
+//       past_key) [mask(mask)] [past_sequence_length(past_sequence_length)]
 //   outs(selected_indices, present_key)
 //===----------------------------------------------------------------------===//
 

@@ -3853,7 +3853,8 @@ HIP_KERNEL_API int hip_dynamic_sparse_attention(
 //                    P == 0
 //   selected_indices [B, S, token_budget + r - 1] int32
 //   present_key      [B, present_rows, D] T, P+S <= present_rows; may alias
-//                    past_key, in which case rows < P are not rewritten
+//                    past_key when present_rows == past_rows, in which case
+//                    rows < P are not rewritten
 // D must be 128, 1 <= N <= 8, R even in (0, D], token_budget / r <= 512.
 // workspace must hold hip_sparse_attention_indexer_workspace_size() bytes.
 HIP_KERNEL_API size_t hip_sparse_attention_indexer_workspace_size(

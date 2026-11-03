@@ -795,28 +795,31 @@ int wrap_sparse_attention_indexer(
     const void *key_norm_weight, const void *cos_cache, const void *sin_cache,
     const void *mask, const void *past_sequence_length, const void *past_key,
     void *selected_indices, void *present_key, int64_t batch, int64_t seq_len,
-    int64_t past_len, int64_t present_len, int64_t num_heads, int64_t head_size,
-    int64_t rotary_width, int64_t rotary_rows, int64_t rotary_batched,
-    int64_t compress_ratio, int64_t token_budget, int64_t element_size_bytes,
-    int64_t past_batch, int64_t mask_batch, int64_t mask_len, int64_t cos_batch,
-    int64_t sin_batch, int64_t sin_rows, float epsilon, float scale) {
+    int64_t past_rows, int64_t present_rows, int64_t num_heads,
+    int64_t head_size, int64_t rotary_width, int64_t rotary_rows,
+    int64_t rotary_batched, int64_t compress_ratio, int64_t token_budget,
+    int64_t element_size_bytes, int64_t past_batch, int64_t mask_batch,
+    int64_t mask_len, int64_t cos_batch, int64_t sin_batch, int64_t sin_rows,
+    float epsilon, float scale) {
   if (!state || !query || !query_norm_weight || !key_norm_weight ||
-      !cos_cache || !sin_cache || (past_len > 0 && !past_key) ||
+      !cos_cache || !sin_cache || (past_rows > 0 && !past_key) ||
       !selected_indices || !present_key) {
     fprintf(stderr,
             "Invalid required argument in wrap_sparse_attention_indexer\n");
     return -1;
   }
+  (void)past_sequence_length;
+  (void)present_rows;
   (void)past_batch;
   (void)mask_batch;
   (void)mask_len;
   (void)cos_batch;
   (void)sin_batch;
   (void)sin_rows;
-  MOCK_PRINT("[MOCK] wrap_sparse_attention_indexer(B=%lld, S=%lld, P=%lld, "
-             "N=%lld, D=%lld, R=%lld, X=%lld, batched=%lld, r=%lld, "
-             "budget=%lld, elem=%lld, eps=%g, scale=%f, mask=%d)\n",
-             (long long)batch, (long long)seq_len, (long long)past_len,
+  MOCK_PRINT("[MOCK] wrap_sparse_attention_indexer(B=%lld, S=%lld, "
+             "past_rows=%lld, N=%lld, D=%lld, R=%lld, X=%lld, batched=%lld, "
+             "r=%lld, budget=%lld, elem=%lld, eps=%g, scale=%f, mask=%d)\n",
+             (long long)batch, (long long)seq_len, (long long)past_rows,
              (long long)num_heads, (long long)head_size,
              (long long)rotary_width, (long long)rotary_rows,
              (long long)rotary_batched, (long long)compress_ratio,
