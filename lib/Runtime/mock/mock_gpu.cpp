@@ -614,15 +614,17 @@ int wrap_group_query_attention_ring_f16(
     void *attention_bias, void *head_sink, void *k_scale, void *v_scale,
     // Outputs
     void *output, void *present_key, void *present_value, void *output_qk,
-    // Attributes (13)
+    // Attributes (14)
     int64_t num_heads, int64_t kv_num_heads, float scale, int64_t do_rotary,
     int64_t rotary_interleaved, float softcap, int64_t local_window_size,
     int64_t smooth_softmax, int64_t qk_output, int64_t k_quant_type,
     int64_t v_quant_type, int64_t kv_cache_bit_width, int32_t no_causal,
-    // Shape values (6)
+    int32_t derive_seqlens_from_attention_bias,
+    // Shape values (12)
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
-    int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
+    int64_t attn_bias_batch, int64_t attn_bias_num_heads,
+    int64_t attn_bias_seq_q, int64_t attn_bias_seq_kv, int64_t kv_bnsd,
     int64_t seq_len_new_kv, int32_t has_host_length,
     int32_t host_length_value) {
   return wrap_group_query_attention_host_length(
@@ -631,10 +633,11 @@ int wrap_group_query_attention_ring_f16(
       head_sink, k_scale, v_scale, output, present_key, present_value,
       output_qk, num_heads, kv_num_heads, scale, do_rotary, rotary_interleaved,
       softcap, local_window_size, smooth_softmax, qk_output, k_quant_type,
-      v_quant_type, kv_cache_bit_width, no_causal, batch_size, seq_len_q,
-      seq_len_kv, past_buf_seq, head_dim, element_size_bytes, attn_bias_batch,
-      attn_bias_num_heads, kv_bnsd, seq_len_new_kv, has_host_length,
-      host_length_value);
+      v_quant_type, kv_cache_bit_width, no_causal,
+      derive_seqlens_from_attention_bias, batch_size, seq_len_q, seq_len_kv,
+      past_buf_seq, head_dim, element_size_bytes, attn_bias_batch,
+      attn_bias_num_heads, attn_bias_seq_q, attn_bias_seq_kv, kv_bnsd,
+      seq_len_new_kv, has_host_length, host_length_value);
 }
 
 int wrap_multi_head_attention(
