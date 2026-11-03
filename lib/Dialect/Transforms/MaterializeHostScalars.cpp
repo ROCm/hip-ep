@@ -6,7 +6,9 @@
 //
 // Place small static buffers in runtime-owned mapped scratch before buffer
 // reuse and device pooling. Each candidate gets a separate aligned region.
-// Keep all payload operations and their order.
+// Keep all payload operations and their order. The runtime backs every
+// function's scratch request with the same buffer, so regions are laid out
+// across the whole module and each function requests the module total.
 //
 // Run after linalg-to-loops so host stores are visible. Run before
 // OptimizeMemRefs: reuse can merge a candidate into a larger allocation that
@@ -221,7 +223,9 @@ static DenseElementsAttr getHostConstantCandidate(memref::GetGlobalOp op) {
     return {};
   auto global = SymbolTable::lookupNearestSymbolFrom<memref::GlobalOp>(
       op, op.getNameAttr());
-  if (!global || global->hasAttr("hip.external_data"))
+  // A mutable global may be written elsewhere, so its initial value is not
+  // what this read observes.
+  if (!global || !global.getConstant() || global->hasAttr("hip.external_data"))
     return {};
   auto init = dyn_cast_or_null<DenseElementsAttr>(global.getInitialValueAttr());
   if (!init)
@@ -246,54 +250,48 @@ static int64_t scratchBytes(MemRefType type) {
 }
 
 namespace {
-struct MaterializeHostScalarsPass
-    : public impl::MaterializeHostScalarsPassBase<MaterializeHostScalarsPass> {
-
-  void runOnOperation() override;
+/// The scratch slots one function needs, at offsets in the module-wide layout.
+struct FunctionScratch {
+  func::FuncOp funcOp;
+  SmallVector<memref::AllocOp> candidates;
+  SmallVector<int64_t> offsets;
+  SmallVector<std::pair<memref::GetGlobalOp, DenseElementsAttr>> constants;
+  SmallVector<int64_t> constantOffsets;
 };
 
-void MaterializeHostScalarsPass::runOnOperation() {
-  func::FuncOp funcOp = getOperation();
+/// Collect the candidates of \p funcOp, or return false if it has none or
+/// cannot reach the runtime scratch buffer.
+static bool collectCandidates(func::FuncOp funcOp, FunctionScratch &plan) {
   if (funcOp.empty())
-    return;
-
+    return false;
   if (funcOp.getNumArguments() == 0 ||
       !isa<ContextType>(funcOp.getArgument(0).getType()))
-    return;
-  Value ctx = funcOp.getArgument(0);
+    return false;
 
   // Collect candidates before rewriting. Keep their traversal order.
-  SmallVector<memref::AllocOp> candidates;
+  plan.funcOp = funcOp;
   funcOp.walk([&](memref::AllocOp op) {
     if (isHostScalarCandidate(op))
-      candidates.push_back(op);
+      plan.candidates.push_back(op);
   });
   // Constant globals go after the allocations, so alloc offsets do not
   // depend on them.
-  SmallVector<std::pair<memref::GetGlobalOp, DenseElementsAttr>> constants;
   funcOp.walk([&](memref::GetGlobalOp op) {
     if (DenseElementsAttr init = getHostConstantCandidate(op))
-      constants.emplace_back(op, init);
+      plan.constants.emplace_back(op, init);
   });
-  if (candidates.empty() && constants.empty())
-    return;
+  return !plan.candidates.empty() || !plan.constants.empty();
+}
 
-  constexpr int64_t kAlign = 64;
-  SmallVector<int64_t> offsets;
-  offsets.reserve(candidates.size());
-  SmallVector<int64_t> constantOffsets;
-  constantOffsets.reserve(constants.size());
-  int64_t total = 0;
-  auto place = [&](MemRefType ty) {
-    int64_t off = llvm::alignTo(total, kAlign);
-    total = off + scratchBytes(ty);
-    return off;
-  };
-  for (memref::AllocOp allocOp : candidates)
-    offsets.push_back(place(allocOp.getType()));
-  for (auto &entry : constants)
-    constantOffsets.push_back(place(entry.first.getType()));
-  total = llvm::alignTo(total, kAlign);
+/// Replace the candidates of one function with views of the session scratch
+/// buffer, requested at its module-wide size \p total.
+static void materialize(FunctionScratch &plan, int64_t total) {
+  func::FuncOp funcOp = plan.funcOp;
+  Value ctx = funcOp.getArgument(0);
+  auto &candidates = plan.candidates;
+  auto &offsets = plan.offsets;
+  auto &constants = plan.constants;
+  auto &constantOffsets = plan.constantOffsets;
 
   Block &entry = funcOp.getBody().front();
   OpBuilder builder(funcOp.getContext());
@@ -360,6 +358,46 @@ void MaterializeHostScalarsPass::runOnOperation() {
     LLVM_DEBUG(llvm::dbgs() << "  Materialized constant " << view
                             << " at offset " << offset << "\n");
   }
+}
+
+struct MaterializeHostScalarsPass
+    : public impl::MaterializeHostScalarsPassBase<MaterializeHostScalarsPass> {
+
+  void runOnOperation() override;
+};
+
+void MaterializeHostScalarsPass::runOnOperation() {
+  std::vector<FunctionScratch> functions;
+  for (func::FuncOp funcOp : getOperation().getOps<func::FuncOp>()) {
+    FunctionScratch plan;
+    if (collectCandidates(funcOp, plan))
+      functions.push_back(std::move(plan));
+  }
+  if (functions.empty())
+    return;
+
+  // Every function of the session shares one runtime scratch buffer, and a
+  // caller's views stay live across a call into an outlined `hip.if` branch.
+  // So functions get disjoint offsets and all request the same total: a
+  // callee then neither overwrites its caller's slots nor grows (and so
+  // reallocates) the buffer under them.
+  constexpr int64_t kAlign = 64;
+  int64_t total = 0;
+  auto place = [&](MemRefType ty) {
+    int64_t off = llvm::alignTo(total, kAlign);
+    total = off + scratchBytes(ty);
+    return off;
+  };
+  for (FunctionScratch &plan : functions) {
+    for (memref::AllocOp allocOp : plan.candidates)
+      plan.offsets.push_back(place(allocOp.getType()));
+    for (auto &entry : plan.constants)
+      plan.constantOffsets.push_back(place(entry.first.getType()));
+  }
+  total = llvm::alignTo(total, kAlign);
+
+  for (FunctionScratch &plan : functions)
+    materialize(plan, total);
 }
 
 } // namespace
