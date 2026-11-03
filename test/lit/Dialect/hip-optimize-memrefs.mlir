@@ -203,3 +203,40 @@ func.func @no_reuse_different_element_type(
   hip.miopen.softmax(%ctx) ins(%c : memref<64xf16>) outs(%alloc1 : memref<64xf16>)
   return %alloc1 : memref<64xf16>
 }
+
+// A host-written shape buffer (memref.store into a memref.reshape shape) does
+// not take over a dead buffer a hip kernel wrote. The merged slot would be
+// too big for hip-materialize-host-scalars and stay in the GPU pool, so the
+// host stores fault (SmolVLM vision encoder, pixel-shuffle reshape).
+// CHECK-LABEL: func.func @no_reuse_host_store_into_device_slot
+// CHECK:         %[[DEV:.*]] = memref.alloc(){{.*}}: memref<31x32xi64>
+// CHECK:         hip.reduce_sum{{.*}}outs(%[[DEV]] :
+// CHECK-NOT:     memref.reinterpret_cast
+// CHECK:         %[[SHAPE:.*]] = memref.alloc(){{.*}}: memref<4xi64>
+// CHECK:         memref.store %{{.*}}, %[[SHAPE]]
+// CHECK:         memref.reshape %{{.*}}(%[[SHAPE]])
+func.func @no_reuse_host_store_into_device_slot(
+    %ctx: !hip.context,
+    %x: memref<31x8x32xi64>,
+    %axes: memref<1xi64>,
+    %data: memref<1024x768xf32>,
+    %n: i64) -> memref<1x32x8x3072xf32> {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  %c3 = arith.constant 3 : index
+  %c8 = arith.constant 8 : i64
+  %c32 = arith.constant 32 : i64
+  %c3072 = arith.constant 3072 : i64
+  %dev = memref.alloc() : memref<31x32xi64>
+  hip.reduce_sum(%ctx) ins(%x, %axes : memref<31x8x32xi64>, memref<1xi64>) outs(%dev : memref<31x32xi64>) {keepdims = 0 : i64, reduced_axes = array<i64: 1>}
+  %shape = memref.alloc() : memref<4xi64>
+  memref.store %n, %shape[%c0] : memref<4xi64>
+  memref.store %c32, %shape[%c1] : memref<4xi64>
+  memref.store %c8, %shape[%c2] : memref<4xi64>
+  memref.store %c3072, %shape[%c3] : memref<4xi64>
+  %r = memref.reshape %data(%shape) : (memref<1024x768xf32>, memref<4xi64>) -> memref<1x32x8x3072xf32>
+  %out = memref.alloc() : memref<1x32x8x3072xf32>
+  hip.neg(%ctx) ins(%r : memref<1x32x8x3072xf32>) outs(%out : memref<1x32x8x3072xf32>)
+  return %out : memref<1x32x8x3072xf32>
+}

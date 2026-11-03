@@ -113,6 +113,12 @@ std::unique_ptr<Pass> createVerifyNoConstantCarriersPass() {
 void mlir::hip::buildOnnxToHipPipelineTail(
     OpPassManager &pm, const mlir::hip::OnnxToHipPipelineOptions &options,
     morphizen::FileSystem *fs) {
+  // hip.conv_transpose only has a rank-4 MIOpen lowering. Decompose supported
+  // rank-3 transposed convolutions while they are still tensor ops so the
+  // regular HIP-to-LLVM pipeline can lower their rank-4 hip.conv residues.
+  // The rocMLIR path runs the same pass in its separate pre-fusion head.
+  pm.addNestedPass<func::FuncOp>(mlir::hip::createDecomposeConvTransposePass());
+
   // 1b. Refine `?` (kDynamic) dims on HIP DPS op result types using each
   //     op's `ReifyRankedShapedTypeOpInterface` impl. Placed here so the
   //     refinements propagate through bufferize and into pool / alloc
@@ -127,6 +133,13 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   //     for the design and `test/lit/Dialect/hip-infer-shapes.mlir` for
   //     the reference cases.
   pm.addPass(mlir::hip::createInferShapesPass());
+
+  // 1b-if. Size each dynamic hip.if output. onnx-if-outline left a
+  //        `hip.if_result_dim` placeholder per `?` dim; the branch bodies are
+  //        now lowered, so each size is host arithmetic on the captures.
+  //        Runs before hip-externalize-constants, which moves the shape
+  //        constants that arithmetic reads out of the IR.
+  pm.addPass(mlir::hip::createResolveIfResultDimsPass());
 
   // 1b*. HIP-to-HIP pattern rewriting, Such as Q/DQ fusion
   pm.addPass(mlir::hip::createHipFusionTransformPass());
@@ -214,6 +227,14 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   bufferizeOpts.bufferizeFunctionBoundaries = true;
   bufferizeOpts.functionBoundaryTypeConversion =
       bufferization::LayoutMapOption::IdentityLayoutMap;
+  // onnx.Loop scan outputs lower to scf.while and yield a new tensor each
+  // iteration (concat along the iteration axis). One-Shot otherwise requires
+  // every scf.condition / scf.yield tensor to be the same buffer as the
+  // matching iter arg, and it pairs those operands by index with the *before*
+  // block. After canonicalization the before block still carries the i1 trip
+  // condition while the after block does not, so that pairing does not hold.
+  // No scf.for exists yet at this point (linalg-to-loops runs later).
+  bufferizeOpts.allowReturnAllocsFromLoops = true;
   // Opt-in: skip One-Shot's RaW-conflict analysis (super-linear in op count;
   // the sole hotspot on very large single-function graphs) by copying before
   // every write instead of proving in-place safety. Gated because those extra
@@ -284,7 +305,7 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   //     translation.
   //
   //     Placement is load-bearing: it MUST run BEFORE MaterializeHostScalars
-  //     (6b).  The rank-0 fill bufferizes to `memref.alloc + linalg.fill`;
+  //     (5b).  The rank-0 fill bufferizes to `memref.alloc + linalg.fill`;
   //     only AFTER this pass does it become `memref.alloc + memref.store`,
   //     which is the shape MaterializeHostScalars recognises as a tiny
   //     host-fed scalar and redirects to host-mapped scratch.  If this ran
@@ -295,12 +316,18 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   //     device memory.  No-op on graphs that emit no linalg ops.
   pm.addNestedPass<func::FuncOp>(createConvertLinalgToLoopsPass());
 
-  // 6. HIP-specific buffer optimizations
+  // 5b. Assign host-accessible storage before buffer reuse. Otherwise, reuse
+  // can merge a tiny host-written shape buffer into a larger allocation that
+  // exceeds the host-scalar pass's size limit. Pooling would then place the
+  // host store in device memory. Later layout promotion creates copy-only
+  // temporaries; it does not introduce host loads or stores.
+  pm.addNestedPass<func::FuncOp>(mlir::hip::createMaterializeHostScalarsPass());
+
+  // 6. Reuse compatible buffers after host-scalar placement.
   pm.addNestedPass<func::FuncOp>(mlir::hip::createOptimizeMemRefsPass());
 
   // The remaining pre-pooling passes have two distinct roles:
-  //   - Correctness/ABI passes that must introduce or redirect allocations
-  //     before pooling (6a and 6b).
+  //   - Correctness/ABI preparation before pooling (6a).
   //   - Shape preconditions used only to improve pool quality (grouped in 6c).
 
   // 6a. Correctness/ABI: materialize identity-layout temporaries for
@@ -311,15 +338,6 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   //     per-inference allocations.
   pm.addNestedPass<func::FuncOp>(
       mlir::hip::createPromoteStridedHipOperandsPass());
-
-  // 6b. Correctness/ABI: redirect tiny host-fed memref.alloc ops (bufferized
-  //     `tensor.from_elements` shape arithmetic) from the GPU pool to
-  //     runtime-owned host-mapped scratch. Must run after 6a so its candidate
-  //     analysis sees the final allocation set, and before pooling so
-  //     host-written buffers never become views into device memory. See
-  //     MaterializeHostScalars.cpp; pipeline-static-shape-lockdown.mlir locks
-  //     down this ordering.
-  pm.addNestedPass<func::FuncOp>(mlir::hip::createMaterializeHostScalarsPass());
 
   // 6c. Pool quality: normalize dynamic allocation sizes after all view and
   //     allocation rewrites, immediately before hip-pool-allocs.

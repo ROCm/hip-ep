@@ -31,6 +31,10 @@ static int gather_nd_hipdnn_to_hip_dtype(int64_t hipdnn_type) {
     return HIP_DTYPE_INT32;
   case HIPDNN_EP_DATATYPE_INT64:
     return HIP_DTYPE_INT64;
+  case HIPDNN_EP_DATATYPE_UINT8:
+    return HIP_DTYPE_UINT8;
+  case HIPDNN_EP_DATATYPE_INT8:
+    return HIP_DTYPE_INT8;
   default:
     return -1;
   }
@@ -71,7 +75,7 @@ int wrap_gather_nd(RuntimeState *state, void *data, void *indices, void *output,
   if (hip_dtype < 0) {
     fprintf(stderr,
             "[REAL] wrap_gather_nd: unsupported data_type=%s(%lld) "
-            "(supported: f16, f32, i32, i64)\n",
+            "(supported: f16, f32, i32, i64, i8, ui8)\n",
             hipdnn_ep_datatype_name(data_type), (long long)data_type);
     return -1;
   }

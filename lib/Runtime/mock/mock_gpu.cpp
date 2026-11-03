@@ -506,7 +506,7 @@ int wrap_rocmlir(RuntimeState *state, const char *kernel_binary,
   return 0;
 }
 
-int wrap_group_query_attention(
+int wrap_group_query_attention_host_length(
     RuntimeState *state, int op_state_slot,
     // Inputs 1-7 (core GQA)
     void *query, void *key, void *value, void *past_key, void *past_value,
@@ -532,7 +532,8 @@ int wrap_group_query_attention(
     // it).
     int64_t kv_bnsd,
     // key/value sequence length (mock stub ignores it).
-    int64_t seq_len_new_kv) {
+    int64_t seq_len_new_kv, int32_t has_host_length,
+    int32_t host_length_value) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_group_query_attention\n");
     return -1;
@@ -558,6 +559,8 @@ int wrap_group_query_attention(
   (void)attn_bias_num_heads;
   (void)kv_bnsd;
   (void)seq_len_new_kv;
+  (void)has_host_length;
+  (void)host_length_value;
 
   MOCK_PRINT("[MOCK] wrap_group_query_attention(\n");
   MOCK_PRINT("[MOCK]   num_heads=%lld, kv_num_heads=%lld,\n",
@@ -599,8 +602,9 @@ int wrap_group_query_attention_ring_f16(
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
     int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
-    int64_t seq_len_new_kv) {
-  return wrap_group_query_attention(
+    int64_t seq_len_new_kv, int32_t has_host_length,
+    int32_t host_length_value) {
+  return wrap_group_query_attention_host_length(
       state, op_state_slot, query, key, value, past_key, past_value, seqlens_k,
       total_seq_len, cos_cache, sin_cache, position_ids, attention_bias,
       head_sink, k_scale, v_scale, output, present_key, present_value,
@@ -608,7 +612,8 @@ int wrap_group_query_attention_ring_f16(
       softcap, local_window_size, smooth_softmax, qk_output, k_quant_type,
       v_quant_type, kv_cache_bit_width, no_causal, batch_size, seq_len_q,
       seq_len_kv, past_buf_seq, head_dim, element_size_bytes, attn_bias_batch,
-      attn_bias_num_heads, kv_bnsd, seq_len_new_kv);
+      attn_bias_num_heads, kv_bnsd, seq_len_new_kv, has_host_length,
+      host_length_value);
 }
 
 int wrap_multi_head_attention(
@@ -2595,6 +2600,34 @@ int wrap_nonzero(RuntimeState *state, void *input, void *output,
   return 0;
 }
 
+int wrap_non_max_suppression(
+    RuntimeState *state, const float *boxes, const float *scores,
+    const int64_t *max_output_boxes_per_class, const float *iou_threshold,
+    const float *score_threshold, int64_t *selected, int32_t *count_ptr,
+    int64_t num_batches, int64_t num_classes, int64_t num_boxes,
+    int64_t capacity, int64_t center_point_box, int64_t has_score_threshold) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_non_max_suppression\n");
+    return -1;
+  }
+  (void)boxes;
+  (void)scores;
+  (void)max_output_boxes_per_class;
+  (void)iou_threshold;
+  (void)score_threshold;
+  (void)selected;
+  // The mock selects nothing; downstream shapes see N = 0.
+  if (count_ptr)
+    *count_ptr = 0;
+  MOCK_PRINT("[MOCK] wrap_non_max_suppression(B=%lld, C=%lld, S=%lld, "
+             "capacity=%lld, center_point_box=%lld, "
+             "has_score_threshold=%lld)\n",
+             (long long)num_batches, (long long)num_classes,
+             (long long)num_boxes, (long long)capacity,
+             (long long)center_point_box, (long long)has_score_threshold);
+  return 0;
+}
+
 int32_t hipdnn_ep_readback_i32(RuntimeState *state, const void *device_scalar) {
   (void)state;
   // Mock "device" memory is host memory: read the scalar directly.
@@ -2889,7 +2922,8 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
                int64_t data_rank, const int64_t *output_shape,
                int64_t output_rank, int64_t starts_num_elements,
                int64_t axes_num_elements, int64_t steps_num_elements,
-               int64_t data_type) {
+               int64_t data_type, int64_t index_type) {
+  (void)index_type;
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_slice\n");
     return -1;

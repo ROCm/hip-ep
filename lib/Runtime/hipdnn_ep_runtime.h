@@ -877,7 +877,7 @@ int wrap_rocmlir(RuntimeState *state, const char *kernel_binary,
 // packed QKV paths, optional RoPE, KV cache management, local window
 // attention (local_window_size), and smooth softmax (head_sink /
 // smooth_softmax).
-int wrap_group_query_attention(
+int wrap_group_query_attention_host_length(
     RuntimeState *state,
     int op_state_slot, // per-instance op-state slot (GEMM descriptor cache)
     // Inputs 1-7 (core GQA)
@@ -912,11 +912,14 @@ int wrap_group_query_attention(
     // Sequence length of the key/value operands (seq_len_q for packed QKV).
     // 0 with a causal past cache means the call appends nothing and attends
     // over past_key/past_value only (a layer sharing another layer's cache).
-    int64_t seq_len_new_kv);
+    int64_t seq_len_new_kv,
+    // When has_host_length is 1, the compiler proves that host_length_value
+    // equals seqlens_k[0] for batch one, including the valid -1 sentinel.
+    // Otherwise the value is ignored and the runtime reads seqlens_k.
+    int32_t has_host_length, int32_t host_length_value);
 
 // Compiler-selected entry for proven FP16 Ring candidates. Other shapes and
-// devices fall back to the original GQA implementation without changing its
-// ABI.
+// devices fall back to GQA with the same optional host-length contract.
 int wrap_group_query_attention_ring_f16(
     RuntimeState *state, int op_state_slot,
     // Inputs 1-7 (core GQA)
@@ -937,7 +940,7 @@ int wrap_group_query_attention_ring_f16(
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
     int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
-    int64_t seq_len_new_kv);
+    int64_t seq_len_new_kv, int32_t has_host_length, int32_t host_length_value);
 
 // MultiHeadAttention operation wrapper (com.microsoft.MultiHeadAttention v1).
 // Called by generated IR for onnx.Custom(MultiHeadAttention) lowering.
@@ -2057,6 +2060,20 @@ int wrap_nonzero(RuntimeState *state, void *input, void *output,
                  int64_t input_rank, const int64_t *input_dims,
                  int64_t output_capacity, int64_t input_data_type);
 
+// ONNX NonMaxSuppression wrapper. `boxes` is [num_batches, num_boxes, 4] f32,
+// `scores` is [num_batches, num_classes, num_boxes] f32 and the three scalar
+// inputs are device-resident. Writes up to `capacity` (batch, class, box)
+// int64 triples to `selected` and the true triple count to the device i32
+// `count_ptr`. `score_threshold` is ignored when `has_score_threshold` is 0.
+// Runs on the host after a stream sync: selection is a short sequential scan
+// per (batch, class) over at most `num_boxes` candidates.
+int wrap_non_max_suppression(
+    RuntimeState *state, const float *boxes, const float *scores,
+    const int64_t *max_output_boxes_per_class, const float *iou_threshold,
+    const float *score_threshold, int64_t *selected, int32_t *count_ptr,
+    int64_t num_batches, int64_t num_classes, int64_t num_boxes,
+    int64_t capacity, int64_t center_point_box, int64_t has_score_threshold);
+
 // Synchronize the GPU stream (so the producing kernel has completed), then
 // copy a single device-resident i32 scalar back to the host and return it.
 // Used by hip.readback_dim to turn a kernel-computed runtime extent (e.g.
@@ -2205,12 +2222,14 @@ int wrap_mod(RuntimeState *state, void *lhs, void *rhs, void *output,
 // run end-to-end for IR-shape debugging.
 //
 // axes / steps may be nullptr when the corresponding optional input is absent.
+// `index_type` is the element type of starts, ends, axes and steps
+// (HIPDNN_EP_DATATYPE_INT32 or INT64). All four use the same type.
 int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
                void *axes, void *steps, void *output, const int64_t *data_shape,
                int64_t data_rank, const int64_t *output_shape,
                int64_t output_rank, int64_t starts_num_elements,
                int64_t axes_num_elements, int64_t steps_num_elements,
-               int64_t data_type);
+               int64_t data_type, int64_t index_type);
 
 // ScatterND: output = copy(data), then output[indices[i]] (reduction)
 // updates[i].

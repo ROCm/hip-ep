@@ -54,6 +54,50 @@ static Type promoteRankZero(Type type) {
                                tensorType.getEncoding());
 }
 
+/// rocMLIR's arithmetic uses signless integers. ONNX BOOL is ui8 in the
+/// importer, but a Where condition is a one-byte 0/1 mask, so the outlined
+/// kernel can safely view that argument as i8. The dispatch continues to pass
+/// the original ui8 buffer; only the private kernel signature is normalized.
+static Type getRocMlirKernelArgumentType(Value operand,
+                                         const SetVector<Operation *> &ops) {
+  Type type = promoteRankZero(operand.getType());
+  auto tensorType = dyn_cast<RankedTensorType>(type);
+  if (!tensorType || !tensorType.getElementType().isUnsignedInteger(8))
+    return type;
+
+  for (Operation *op : ops) {
+    auto where = dyn_cast<WhereOp>(op);
+    if (where && where.getCondition() == operand)
+      return tensorType.clone(IntegerType::get(type.getContext(), 8));
+  }
+  return type;
+}
+
+// rocMLIR regularizes pointwise fusion in the anchor's iteration space. A
+// pointwise result that grows that space needs inverse transforms for its
+// additional operands. A broadcast is not invertible, except for an inline
+// scalar constant that can be rebuilt in the anchor's shape.
+static bool canFuseGrowingPointwiseOp(Value source, Operation *candidate) {
+  auto sourceType = dyn_cast<RankedTensorType>(source.getType());
+  if (!sourceType || candidate->getNumResults() != 1)
+    return false;
+  auto resultType =
+      dyn_cast<RankedTensorType>(candidate->getResult(0).getType());
+  if (!resultType || resultType.getNumElements() <= sourceType.getNumElements())
+    return true;
+
+  auto candidateDps = dyn_cast<DestinationStyleOpInterface>(candidate);
+  if (!candidateDps)
+    return false;
+  for (Value operand : candidateDps.getDpsInputs()) {
+    if (operand == source || isa<ContextType>(operand.getType()))
+      continue;
+    if (!isInlineScalarConstant(operand))
+      return false;
+  }
+  return true;
+}
+
 template <typename AnchorOp>
 class FuseAnchorPointwise : public OpRewritePattern<AnchorOp> {
 public:
@@ -105,7 +149,9 @@ public:
       }
       ops.insert(endOp);
       prevOp = endOp;
-    } while (endOp->hasOneUse() && isaPointwiseOp(*endOp->user_begin()));
+    } while (
+        endOp->hasOneUse() && isaPointwiseOp(*endOp->user_begin()) &&
+        canFuseGrowingPointwiseOp(endOp->getResult(0), *endOp->user_begin()));
 
     // Remove the hip.context operand
     auto context = operands.front();
@@ -198,7 +244,8 @@ public:
       rewriter.setInsertionPointToStart(parentModule.getBody());
       auto funcType = rewriter.getFunctionType(
           llvm::map_to_vector(
-              operands, [](Value v) { return promoteRankZero(v.getType()); }),
+              operands,
+              [&ops](Value v) { return getRocMlirKernelArgumentType(v, ops); }),
           endOp->getResultTypes());
 
       newFunc = func::FuncOp::create(rewriter, rewriter.getUnknownLoc(),

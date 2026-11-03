@@ -70,6 +70,7 @@ add_library(OnnxToHip STATIC
   RangeConversion.cpp
   FastGeluFusion.cpp
   ErfGeluFusion.cpp
+  LayerNormFusion.cpp
   ProjectorOpsRewrites.cpp
   LpNormalizationConversion.cpp
   EqualConversion.cpp
@@ -110,6 +111,7 @@ add_library(OnnxToHip STATIC
   AbsConversion.cpp
   SizeConversion.cpp
   NonZeroConversion.cpp
+  NonMaxSuppressionConversion.cpp
   ConcatConversion.cpp
   PoolConversion.cpp
   ResizeConversion.cpp
@@ -127,6 +129,7 @@ add_library(OnnxToHip STATIC
   MatMulIntegerConversion.cpp
   LoopOutline.cpp
   IfOutline.cpp
+  IfResultDims.cpp
   ReluConversion.cpp
   ImageScalerConversion.cpp
   LeakyReluConversion.cpp
@@ -151,6 +154,7 @@ target_link_libraries(OnnxToHip PUBLIC
   MLIRPass
   MLIRFuncDialect
   MLIRArithDialect
+  MLIRSCFDialect
   MLIRTensorDialect
   MLIRLinalgDialect
   MLIRMemRefDialect

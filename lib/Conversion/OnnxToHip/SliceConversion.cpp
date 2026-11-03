@@ -5,6 +5,7 @@
 
 #include "OnnxToHipUtils.h"
 
+#include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 
@@ -210,6 +211,40 @@ static mlir::Value resolveHostIndex(mlir::OpBuilder &b, mlir::Location loc,
 
   llvm::StringRef opName = def->getName().getStringRef();
 
+  // Reshape-like ops keep row-major element order, so element idx of the
+  // result is element idx of the source. Exporters wrap scalar shape
+  // arithmetic in Unsqueeze to build 1-D Slice bounds -- Whisper's
+  // `Slice(embed_positions, Unsqueeze(past_len), Unsqueeze(past_len + len))`
+  // -- which converts to `tensor.expand_shape`.
+  if (mlir::isa<mlir::tensor::ExpandShapeOp, mlir::tensor::CollapseShapeOp,
+                mlir::tensor::ReshapeOp>(def) ||
+      opName == "onnx.Unsqueeze" || opName == "onnx.Squeeze" ||
+      opName == "onnx.Reshape" || opName == "onnx.Flatten")
+    return resolveHostIndex(b, loc, def->getOperand(0), idx, depth + 1);
+
+  // `Gather(Shape(x), k)` on the 1-D shape vector with compile-time indices:
+  // element idx is element indices[idx] of the data.
+  if (opName == "onnx.Gather") {
+    mlir::Value data = def->getOperand(0);
+    auto dataType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
+    if (!dataType || dataType.getRank() != 1 || !dataType.hasStaticShape())
+      return {};
+    if (auto axisAttr = def->getAttrOfType<mlir::IntegerAttr>("axis"))
+      if (axisAttr.getSInt() != 0 && axisAttr.getSInt() != -1)
+        return {};
+    mlir::DenseElementsAttr indices =
+        getCompileTimeConstantTensor(def->getOperand(1));
+    if (!indices || idx >= indices.getNumElements())
+      return {};
+    int64_t k =
+        (*(indices.getValues<mlir::APInt>().begin() + idx)).getSExtValue();
+    if (k < 0)
+      k += dataType.getDimSize(0);
+    if (k < 0 || k >= dataType.getDimSize(0))
+      return {};
+    return resolveHostIndex(b, loc, data, k, depth + 1);
+  }
+
   // Unconverted onnx.Shape: element idx is dim (start + idx) of the operand.
   // `start` is normalized as ShapeToTensorDims normalizes it; `end` only bounds
   // how many elements exist, which the caller-side extent check above covers.
@@ -248,11 +283,12 @@ static mlir::Value resolveHostIndex(mlir::OpBuilder &b, mlir::Location loc,
   // Binary shape arithmetic. hip elementwise ops are DPS, so their operands are
   // (ctx, lhs, rhs, out); the ONNX forms are plain (lhs, rhs).
   unsigned lhsPos = 0;
-  bool isHip =
-      mlir::isa<mlir::hip::SubOp, mlir::hip::AddOp, mlir::hip::MulOp>(def);
+  bool isHip = mlir::isa<mlir::hip::SubOp, mlir::hip::AddOp, mlir::hip::MulOp,
+                         mlir::hip::DivOp>(def);
   if (isHip)
     lhsPos = 1;
-  else if (opName != "onnx.Sub" && opName != "onnx.Add" && opName != "onnx.Mul")
+  else if (opName != "onnx.Sub" && opName != "onnx.Add" &&
+           opName != "onnx.Mul" && opName != "onnx.Div")
     return {};
 
   mlir::Value lhs = def->getOperand(lhsPos);
@@ -269,10 +305,20 @@ static mlir::Value resolveHostIndex(mlir::OpBuilder &b, mlir::Location loc,
 
   bool isSub = isHip ? mlir::isa<mlir::hip::SubOp>(def) : opName == "onnx.Sub";
   bool isAdd = isHip ? mlir::isa<mlir::hip::AddOp>(def) : opName == "onnx.Add";
+  bool isDiv = isHip ? mlir::isa<mlir::hip::DivOp>(def) : opName == "onnx.Div";
   if (isSub)
     return mlir::arith::SubIOp::create(b, loc, l, r);
   if (isAdd)
     return mlir::arith::AddIOp::create(b, loc, l, r);
+  if (isDiv) {
+    // ONNX integer Div truncates toward zero, matching arith.divsi. A divisor
+    // that is not a non-zero compile-time constant could fault on the host,
+    // so leave that bound unresolved.
+    std::optional<int64_t> divisor = mlir::getConstantIntValue(r);
+    if (!divisor || *divisor == 0)
+      return {};
+    return mlir::arith::DivSIOp::create(b, loc, l, r);
+  }
   return mlir::arith::MulIOp::create(b, loc, l, r);
 }
 

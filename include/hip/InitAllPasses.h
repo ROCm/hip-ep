@@ -8,6 +8,7 @@
 #include <mutex>
 
 #include "hip/Compiler/PluginRegistry.h"
+#include "hip/Conversion/HipToLLVM/Passes.h"
 #include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Conversion/Passes.h"
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
@@ -82,6 +83,7 @@ public:
 enum class OnnxDialectKind { Stub, Modeled };
 
 inline void registerConvertToLLVMInterfaces(mlir::DialectRegistry &registry) {
+  mlir::hip::registerRuntimeAccessOpInterfaceExternalModels(registry);
   mlir::hipsr::registerConvertHipsrToLLVMInterface(registry);
   mlir::registerConvertFuncToLLVMInterface(registry);
   mlir::registerConvertMemRefToLLVMInterface(registry);
@@ -214,6 +216,9 @@ inline void registerAllPasses() {
     });
     mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
       return mlir::hip::createOnnxIfOutlinePass();
+    });
+    mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
+      return mlir::hip::createResolveIfResultDimsPass();
     });
     // Standard MLIR passes used by the production flow or supported custom/test
     // pipelines, registered so an override can name them around the hip-*

@@ -38,6 +38,13 @@
 //     proving value-equivalence in general would require alias analysis;
 //     SSA identity is sound and cheap, and CSE should run first to
 //     maximize opportunities).
+//   - Host access: an alloc the host reads or writes (memref.load / store,
+//     directly or through a view) is never merged. Merged into a large device
+//     buffer (a reshape shape written into a dead kernel output) it is too big
+//     for hip-materialize-host-scalars, so the host store lands in the GPU
+//     pool and faults. Merged with another host buffer, "dead" is wrong: its
+//     last user may be a memref.copy (an async hipMemcpy) that has not run
+//     yet when the host stores the next value into the shared slot.
 //
 //===----------------------------------------------------------------------===//
 
@@ -48,6 +55,7 @@
 #include "mlir/Dialect/Arith/Transforms/BufferViewFlowOpInterfaceImpl.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Interfaces/ViewLikeInterface.h"
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Statistic.h"
@@ -71,6 +79,7 @@ struct AllocInterval {
   memref::AllocOp allocOp;
   unsigned defIndex;     ///< Block index where the alloc occurs.
   unsigned lastUseIndex; ///< Block index of the last (transitive) use.
+  bool hostAccess;       ///< The host loads from or stores into it.
 };
 
 /// A reusable memory slot: tracks the buffer, its type, when it becomes
@@ -80,6 +89,7 @@ struct Slot {
   MemRefType type;
   unsigned lastUseIndex; ///< Updated when the slot is reused.
   SmallVector<Value, 4> dynamicSizes;
+  bool hostAccess;
 };
 
 //===----------------------------------------------------------------------===//
@@ -98,10 +108,27 @@ static SmallVector<int64_t> getContiguousStrides(MemRefType type) {
   return strides;
 }
 
+/// True if the host reads or writes \p buffer, directly or through a view.
+/// For memref.reshape only the data operand is the viewed source; a buffer
+/// used as the shape operand is read when the descriptor is built, which is
+/// not a load from the data.
+static bool hasHostAccess(Value buffer) {
+  for (Operation *user : buffer.getUsers()) {
+    if (isa<memref::LoadOp, memref::StoreOp>(user))
+      return true;
+    if (auto view = dyn_cast<ViewLikeOpInterface>(user))
+      if (view.getViewSource() == buffer && hasHostAccess(view->getResult(0)))
+        return true;
+  }
+  return false;
+}
+
 /// Returns true if \p slot can serve an allocation of \p neededType with
 /// the given dynamic-size operands.
 static bool canReuse(const Slot &slot, MemRefType neededType,
-                     OperandRange neededDynSizes) {
+                     OperandRange neededDynSizes, bool hostAccess) {
+  if (slot.hostAccess || hostAccess)
+    return false;
   if (slot.type.getElementType() != neededType.getElementType())
     return false;
   if (slot.type.getMemorySpace() != neededType.getMemorySpace())
@@ -180,7 +207,8 @@ void OptimizeMemRefsPass::runOnOperation() {
 
     unsigned lastUse = findLastAliasedUseIndex(result, aliasAnalysis, block,
                                                opIndex, blockSize);
-    intervals.push_back({allocOp, opIndex[&op], lastUse});
+    intervals.push_back(
+        {allocOp, opIndex[&op], lastUse, hasHostAccess(result)});
     LLVM_DEBUG(llvm::dbgs() << "  interval " << allocOp << " [" << opIndex[&op]
                             << ", " << lastUse << "]\n");
   }
@@ -201,7 +229,7 @@ void OptimizeMemRefsPass::runOnOperation() {
     for (auto &slot : slots) {
       if (slot.lastUseIndex >= interval.defIndex)
         continue;
-      if (!canReuse(slot, neededType, neededDynSizes))
+      if (!canReuse(slot, neededType, neededDynSizes, interval.hostAccess))
         continue;
       int64_t waste =
           getStaticByteSize(slot.type) - getStaticByteSize(neededType);
@@ -231,10 +259,10 @@ void OptimizeMemRefsPass::runOnOperation() {
       ++NumAllocsReused;
     } else {
       LLVM_DEBUG(llvm::dbgs() << "  New slot for " << neededType << "\n");
-      slots.push_back({interval.allocOp.getResult(), neededType,
-                       interval.lastUseIndex,
-                       SmallVector<Value, 4>(neededDynSizes.begin(),
-                                             neededDynSizes.end())});
+      slots.push_back(
+          {interval.allocOp.getResult(), neededType, interval.lastUseIndex,
+           SmallVector<Value, 4>(neededDynSizes.begin(), neededDynSizes.end()),
+           interval.hostAccess});
       ++NumSlotsCreated;
     }
   }

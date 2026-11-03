@@ -68,6 +68,21 @@ module {
     return
   }
 
+  // Test 4b: dynamic input H/W resized to a static output (shape inference
+  // pinned the output from a constant sizes vector).
+  func.func @resize_dynamic_in_static_out_f32(
+      %ctx: !hip.context,
+      %x: memref<1x3x?x?xf32, 1>,
+      %y: memref<1x3x300x300xf32, 1>) {
+    // CHECK-LABEL: llvm.func @resize_dynamic_in_static_out_f32
+    hip.resize(%ctx) ins(%x : memref<1x3x?x?xf32, 1>)
+                     outs(%y : memref<1x3x300x300xf32, 1>)
+                     {mode = 1, coord_transform = 1, nearest_mode = 2}
+    // CHECK-NOT: hip.resize
+    // CHECK: llvm.call @wrap_resize
+    return
+  }
+
   // Test 5: channels-last. Lowered as N, C=1, spatial_rank=3, window (H, W, C).
   // The channel extent is unchanged, so that window axis is copied.
   func.func @resize_nhwc_static_f32(
@@ -100,7 +115,7 @@ module {
     return
   }
 
-  // Test 7: nearest uint8. The runtime copies samples; linear stays rejected.
+  // Test 7: nearest uint8. The runtime copies one sample.
   func.func @resize_nearest_ui8(
       %ctx: !hip.context,
       %x: memref<1x256x13x13xui8, 1>,
@@ -109,6 +124,20 @@ module {
     hip.resize(%ctx) ins(%x : memref<1x256x13x13xui8, 1>)
                      outs(%y : memref<1x256x26x26xui8, 1>)
                      {mode = 0, coord_transform = 0, nearest_mode = 1}
+    // CHECK: llvm.call @wrap_resize
+    // CHECK-NOT: hip.resize
+    return
+  }
+
+  // Test 7b: linear uint8 interpolates stored codes through the same wrapper.
+  func.func @resize_linear_ui8(
+      %ctx: !hip.context,
+      %x: memref<1x21x65x65xui8, 1>,
+      %y: memref<1x21x513x513xui8, 1>) {
+    // CHECK-LABEL: llvm.func @resize_linear_ui8
+    hip.resize(%ctx) ins(%x : memref<1x21x65x65xui8, 1>)
+                     outs(%y : memref<1x21x513x513xui8, 1>)
+                     {mode = 1, coord_transform = 2, nearest_mode = 2}
     // CHECK: llvm.call @wrap_resize
     // CHECK-NOT: hip.resize
     return

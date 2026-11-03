@@ -411,6 +411,48 @@ def Hip_IfOp : Hip_Op<"if",
   let hasVerifier = 1;
 }
 
+def Hip_IfResultDimOp : Hip_Op<"if_result_dim", [Pure]> {
+  let summary = "Run-time size of one dynamic dimension of a hip.if output";
+  let description = [{
+    Size of dimension `$dim` of output `$result_index` of the hip.if whose
+    branches are `$then_func` / `$else_func`, for the branch `$cond` selects.
+    `$captures` are that hip.if's captures, in the same order.
+
+    `onnx-if-outline` emits this op to size the `tensor.empty` o_init of an
+    output whose type has a `?` dimension. The branch bodies are still ONNX
+    there, so the size is not yet known. `hip-resolve-if-result-dims` replaces
+    the op after conversion: it rebuilds each branch's size from its captures
+    on the host and selects between them on `$cond`. The op must not survive
+    to bufferization.
+
+    Example:
+    ```mlir
+    %d1 = hip.if_result_dim(%cond) captures(%ids : tensor<?x?xi64>)
+              then @main_graph_if_then_n0 else @main_graph_if_else_n1
+              {result_index = 0 : i32, dim = 1 : i64}
+    %init = tensor.empty(%d1) : tensor<1x?xf32>
+    ```
+  }];
+
+  let arguments = (ins
+    I1:$cond,
+    Variadic<AnyType>:$captures,
+    FlatSymbolRefAttr:$then_func,
+    FlatSymbolRefAttr:$else_func,
+    I32Attr:$result_index,
+    I64Attr:$dim
+  );
+
+  let results = (outs Index:$size);
+
+  let assemblyFormat = [{
+    `(` $cond `)`
+    ( `captures` `(` $captures^ `:` type($captures) `)` )?
+    `then` $then_func `else` $else_func
+    attr-dict
+  }];
+}
+
 def Hip_FreeOp : Hip_Op<"free",
     [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let summary = "Free device memory";
@@ -5397,6 +5439,60 @@ def Hip_NonZeroOp : Hip_DpsOp_AutoReify<"nonzero"> {
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
     `outs` `(` $y `,` $count `:` type($y) `,` type($count) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_NonMaxSuppressionOp : Hip_DpsOp_AutoReify<"non_max_suppression"> {
+  let summary = "Greedy box selection (ONNX NonMaxSuppression)";
+  let description = [{
+    Implements ONNX NonMaxSuppression (opset 11+). `boxes` is `[B, S, 4]`
+    f32, `scores` is `[B, C, S]` f32. The three scalar operands are the
+    ONNX `max_output_boxes_per_class` (i64), `iou_threshold` (f32) and
+    `score_threshold` (f32); `has_score_threshold` is false when the ONNX
+    node omitted the last one, in which case its operand is ignored.
+
+    For every (batch, class) the op keeps boxes in descending score order
+    whose IoU with each already kept box is at most `iou_threshold`, up to
+    `max_output_boxes_per_class`. `selected` is `[N, 3]` i64 of
+    `(batch, class, box)` triples. N is data-dependent: the destination is
+    over-allocated to `B * C * S` rows and the true count is written to the
+    device i32 scalar `count`, which the converter reads back with
+    `hip.readback_dim` to slice `selected` to `[N, 3]`.
+
+    `center_point_box` is 0 for `[y1, x1, y2, x2]` corners and 1 for
+    `[x_center, y_center, width, height]`.
+
+    Example:
+    ```mlir
+    hip.non_max_suppression(%ctx)
+        ins(%boxes, %scores, %max, %iou, %score :
+            memref<1x?x4xf32, 1>, memref<1x1x?xf32, 1>, memref<i64, 1>,
+            memref<f32, 1>, memref<f32, 1>)
+        outs(%selected, %count : memref<?x3xi64, 1>, memref<i32, 1>)
+        {center_point_box = 0 : i64, has_score_threshold = true}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$boxes,
+    Hip_TensorOrMemRef:$scores,
+    Hip_TensorOrMemRef:$max_output_boxes_per_class,
+    Hip_TensorOrMemRef:$iou_threshold,
+    Hip_TensorOrMemRef:$score_threshold,
+    Hip_TensorOrMemRef:$selected,
+    Hip_TensorOrMemRef:$count,
+    I64Attr:$center_point_box,
+    BoolAttr:$has_score_threshold
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $boxes `,` $scores `,` $max_output_boxes_per_class
+    `,` $iou_threshold `,` $score_threshold `:` type($boxes) `,`
+    type($scores) `,` type($max_output_boxes_per_class) `,`
+    type($iou_threshold) `,` type($score_threshold) `)`
+    `outs` `(` $selected `,` $count `:` type($selected) `,` type($count) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
 }

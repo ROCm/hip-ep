@@ -286,18 +286,20 @@ module {
     return %y : tensor<1x128x52x52xi8>
   }
 
-  // Test 14: linear on uint8 would interpolate stored codes. Leave it.
-  func.func @test_resize_linear_ui8_rejected(%arg0: tensor<1x3x8x8xui8>)
+  // Test 14: linear on uint8 interpolates the stored codes.
+  func.func @test_resize_linear_ui8(%arg0: tensor<1x3x8x8xui8>)
       -> tensor<1x3x16x16xui8> {
-    // CHECK-LABEL: func.func @test_resize_linear_ui8_rejected
+    // CHECK-LABEL: func.func @test_resize_linear_ui8
     %roi = "onnx.NoValue"() {value} : () -> none
     %scales = "onnx.Constant"() {value = dense<[1.0, 1.0, 2.0, 2.0]> : tensor<4xf32>}
         : () -> tensor<4xf32>
     %y = "onnx.Resize"(%arg0, %roi, %scales)
         {mode = "linear", coordinate_transformation_mode = "half_pixel"}
         : (tensor<1x3x8x8xui8>, none, tensor<4xf32>) -> tensor<1x3x16x16xui8>
-    // CHECK: onnx.Resize
-    // CHECK-NOT: hip.resize
+    // CHECK-NOT: onnx.Resize
+    // CHECK: hip.resize
+    // CHECK-SAME: coord_transform = 0
+    // CHECK-SAME: mode = 1
     return %y : tensor<1x3x16x16xui8>
   }
 
@@ -423,5 +425,67 @@ module {
     // CHECK-NOT: scales
     // CHECK: return
     return %y : tensor<1x1x8xf32>
+  }
+
+  // Test 21: a static identity Resize with unit scales is removed when its
+  // result is an intermediate value. Graph outputs retain their allocation.
+  func.func @test_resize_identity_intermediate(%arg0: tensor<1x3x16x16xf32>)
+      -> tensor<1x3x16x16xf32> {
+    // CHECK-LABEL: func.func @test_resize_identity_intermediate
+    // CHECK-SAME: (%{{.*}}: !hip.context, %[[X:.*]]: tensor<1x3x16x16xf32>)
+    %roi = "onnx.NoValue"() {value} : () -> none
+    %scales = "onnx.Constant"() {value = dense<[1.0, 1.0, 1.0, 1.0]> : tensor<4xf32>}
+        : () -> tensor<4xf32>
+    %resized = "onnx.Resize"(%arg0, %roi, %scales)
+        {mode = "nearest", coordinate_transformation_mode = "asymmetric",
+         nearest_mode = "floor"}
+        : (tensor<1x3x16x16xf32>, none, tensor<4xf32>) -> tensor<1x3x16x16xf32>
+    %y = "onnx.Neg"(%resized) : (tensor<1x3x16x16xf32>) -> tensor<1x3x16x16xf32>
+    // CHECK-NOT: hip.resize
+    // CHECK: hip.neg(%{{.*}}) ins(%[[X]] : tensor<1x3x16x16xf32>)
+    return %y : tensor<1x3x16x16xf32>
+  }
+
+  // Test 22: sizes assembled from a constant-index gather of the input
+  // shape and a constant tail. Every entry is known without a readback.
+  func.func @test_resize_gathered_sizes(%x: tensor<1x?x?x3xf32>,
+                                        %t: tensor<1x3x?x?xf32>)
+      -> tensor<?x?x?x?xf32> {
+    // CHECK-LABEL: func.func @test_resize_gathered_sizes
+    %c1 = arith.constant 1 : index
+    %c2 = arith.constant 2 : index
+    %c1_i64 = arith.constant 1 : i64
+    %c3_i64 = arith.constant 3 : i64
+    %perm = "onnx.Constant"() {value = dense<[0, 3, 1, 2]> : tensor<4xi64>}
+        : () -> tensor<4xi64>
+    %hw = "onnx.Constant"() {value = dense<300> : tensor<2xi64>}
+        : () -> tensor<2xi64>
+    %roi = "onnx.Constant"() {value = dense<> : tensor<0xf32>} : () -> tensor<0xf32>
+    %scales = "onnx.Constant"() {value = dense<> : tensor<0xf32>} : () -> tensor<0xf32>
+    %d1 = tensor.dim %x, %c1 : tensor<1x?x?x3xf32>
+    %h = arith.index_cast %d1 : index to i64
+    %d2 = tensor.dim %x, %c2 : tensor<1x?x?x3xf32>
+    %w = arith.index_cast %d2 : index to i64
+    %shape = tensor.from_elements %c1_i64, %h, %w, %c3_i64 : tensor<4xi64>
+    %g = "onnx.Gather"(%shape, %perm) {axis = 0 : si64}
+        : (tensor<4xi64>, tensor<4xi64>) -> tensor<4xi64>
+    %nc = tensor.extract_slice %g[0] [2] [1] : tensor<4xi64> to tensor<2xi64>
+    %e = tensor.empty() : tensor<4xi64>
+    %s0 = tensor.insert_slice %nc into %e[0] [2] [1]
+        : tensor<2xi64> into tensor<4xi64>
+    %sizes = tensor.insert_slice %hw into %s0[2] [2] [1]
+        : tensor<2xi64> into tensor<4xi64>
+    %y = "onnx.Resize"(%t, %roi, %scales, %sizes)
+        {mode = "linear", coordinate_transformation_mode = "asymmetric",
+         nearest_mode = "floor"}
+        : (tensor<1x3x?x?xf32>, tensor<0xf32>, tensor<0xf32>, tensor<4xi64>)
+        -> tensor<?x?x?x?xf32>
+    // CHECK-NOT: onnx.Resize
+    // CHECK-NOT: hip.readback_scalar
+    // CHECK: %[[C300:.*]] = arith.constant 300 : index
+    // CHECK: tensor.empty(%[[C300]], %[[C300]]) : tensor<1x3x?x?xf32>
+    // CHECK: hip.resize
+    // CHECK: tensor.cast %{{.*}} : tensor<1x3x?x?xf32> to tensor<?x?x?x?xf32>
+    return %y : tensor<?x?x?x?xf32>
   }
 }
