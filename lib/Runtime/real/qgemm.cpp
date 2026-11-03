@@ -53,7 +53,7 @@ int wrap_qgemm(RuntimeState *state, const void *A, const void *B, const void *C,
                int64_t c_data_type, int64_t y_data_type, int64_t b_bits,
                int64_t c_dim0, int64_t c_dim1, float M_ab, float M_c,
                int64_t A_zero_point, int64_t B_zero_point, int64_t C_zero_point,
-               int64_t Y_zero_point) {
+               int64_t Y_zero_point, const void *live_seqlens) {
   OP_PROFILE(
       "qgemm",
       [&] {
@@ -157,11 +157,12 @@ int wrap_qgemm(RuntimeState *state, const void *A, const void *B, const void *C,
       (long long)Y_zero_point, C ? "yes" : "null", (long long)c_dim0,
       (long long)c_dim1);
 
-  int rc = hip_qgemm(stream, A, B, C, B_scales, B_zero_points, Y, M, N, K,
-                     trans_a != 0, trans_b != 0, a_dtype, b_dtype, c_dtype,
-                     y_dtype, static_cast<int>(b_bits), c_dim0, c_dim1, M_ab,
-                     M_c, A_zero_point, B_zero_point, C_zero_point,
-                     Y_zero_point, workspace, workspace_bytes);
+  int rc = hip_qgemm_live_rows(
+      stream, A, B, C, B_scales, B_zero_points, Y, M, N, K, trans_a != 0,
+      trans_b != 0, a_dtype, b_dtype, c_dtype, y_dtype,
+      static_cast<int>(b_bits), c_dim0, c_dim1, M_ab, M_c, A_zero_point,
+      B_zero_point, C_zero_point, Y_zero_point, workspace, workspace_bytes,
+      static_cast<const int32_t *>(live_seqlens));
   if (rc != 0) {
     fprintf(stderr, "[REAL] wrap_qgemm: kernel launch failed (%d)\n", rc);
     return -1;

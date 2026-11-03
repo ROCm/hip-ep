@@ -1043,9 +1043,21 @@ LogicalResult QGemmOp::verify() {
     dataOperands.push_back(bZeroPoints);
   if (Value c = getC())
     dataOperands.push_back(c);
+  if (Value live = getLiveSeqlens())
+    dataOperands.push_back(live);
   dataOperands.push_back(getY());
   if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/1)))
     return failure();
+
+  // The kernel reads exactly one int32 off the device; anything else would be
+  // read as something it is not.
+  if (Value live = getLiveSeqlens()) {
+    auto liveType = cast<ShapedType>(live.getType());
+    if (!liveType.getElementType().isInteger(32) ||
+        !liveType.hasStaticShape() || liveType.getNumElements() != 1)
+      return emitOpError("expected live_seqlens to be a single int32, got ")
+             << live.getType();
+  }
 
   ArrayRef<int64_t> aShape = detail::getShapeOf(getA());
   ArrayRef<int64_t> bShape = detail::getShapeOf(getB());

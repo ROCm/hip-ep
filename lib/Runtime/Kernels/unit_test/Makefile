@@ -43,7 +43,7 @@ LEAVES := gather_block_quantized/Xi64_Wfp8_Yfp16 \
 	matmul_nbits/Xfp16_Wu4_Yfp16 matmul_nbits/Xfp16_Wi8_Yfp16 \
 	matmul_nbits/Xfp32_Wu2_Yfp32 matmul_nbits/Xfp32_Wu3_Yfp32 \
 	matmul_nbits/Xfp32_Wu4_Yfp32 matmul_nbits/Xfp32_Wi8_Yfp32 \
-	qmoe_ragged_mm/Xfp16_Wu4_Yfp16
+	qgemm/Xint_Wint_Yint qmoe_ragged_mm/Xfp16_Wu4_Yfp16
 
 ARCH  := $(patsubst --offload-arch=%,%,$(OFFLOAD))
 HIPCC := $(HIP_SDK)/bin/hipcc.exe
