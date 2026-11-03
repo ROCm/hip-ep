@@ -285,7 +285,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
           fc2_zero_points, fc2_bias, d_fc2_buf, d_act_buf, output, d_a_qb_in,
           d_a_scale_in, d_a_qb_mid, d_a_scale_mid, hidden_size, inter_size, k,
           block_size, activation_alpha, activation_beta, swiglu_limit,
-          elem_size, num_tokens));
+          elem_size, num_tokens, num_experts));
       return 0;
     }
     for (int64_t t = 0; t < num_tokens; t++) {
@@ -302,14 +302,15 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
             fc1_zero_points, fc1_bias, fc2_weights, fc2_scales, fc2_zero_points,
             fc2_bias, d_fc2_buf, d_act_buf, out_t, d_a_qb_in, d_a_scale_in,
             d_a_qb_mid, d_a_scale_mid, hidden_size, inter_size, k, block_size,
-            activation_alpha, activation_beta, swiglu_limit, elem_size, 1));
+            activation_alpha, activation_beta, swiglu_limit, elem_size, 1,
+            num_experts));
       } else {
         HIP_CHECK(hip_qmoe_decode_fused(
             stream, in_t, idx_t, wts_t, fc1_weights, fc1_scales,
             fc1_zero_points, fc1_bias, fc2_weights, fc2_scales, fc2_zero_points,
             fc2_bias, d_fc2_buf, d_act_buf, out_t, hidden_size, inter_size, k,
             expert_weight_bits, block_size, activation_alpha, activation_beta,
-            swiglu_limit, elem_size));
+            swiglu_limit, elem_size, num_experts));
       }
     }
     return 0;
