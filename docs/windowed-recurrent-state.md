@@ -1,7 +1,3 @@
-<!--
-Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
-Licensed under the MIT License.
--->
 # Windowed recurrent state
 
 ## Purpose and supported operators
@@ -17,6 +13,14 @@ This feature is model- and export-dependent. A model must carry the
 without those attributes continues to use the normal rewind-and-replay path.
 KV-cache cropping and recurrent-state promotion are separate mechanisms.
 
+## Model export requirements
+
+hip-ep does not export or rewrite a model's state layout. The model exporter  
+must emit `state_window > 0` on the supported `CausalConvWithState` and  
+`LinearAttention` nodes, together with state tensors whose first dimension is  
+the window dimension. The exported graph must also preserve the normal  
+past/present state input and output names expected by the consumer.
+
 ## Compiler and lowering changes
 
 The ONNX-to-HIP conversions preserve the window dimension and operator
@@ -30,25 +34,33 @@ The compiler tests cover both conversion boundaries and windowed attributes:
 - `test/lit/Conversion/hip-to-llvm/`
 - `test/lit/Dialect/`
 
+
+
 ## Runtime and kernel/API design
 
-The runtime wrappers pass the state-window metadata to the HIP
-implementations. The per-architecture custom kernels update the selected
-state slot on the model's session stream.
+During a wide verification, each supported hybrid operator writes its recurrent/conv result into one slot of the state window. After partial acceptance, the decoder must promote the accepted slot to the committed slot. For example, in the Qwen3.6-27B export this means copying one slot in 96 state tensors (48 convolution states and 48 recurrent states).
 
-The provider exports a versioned C API from `include/hip/device_api.h`:
+The runtime wrappers pass the selected slot and state layout to the
+per-architecture custom HIP kernel. The kernel performs all of those copies
+on the model's active session stream.
+
+OGA calls the provider through the small versioned C API in
+`include/hip/device_api.h`:
 
 - `hipdnn_ep_device_api_version()`
 - `hipdnn_ep_copy_state_slots(...)`
 
-The copy entry point validates host descriptors, obtains the current provider
-stream, and launches one HIP kernel over all state descriptors. It does not
-synchronize the stream. If the API or matching kernel is unavailable,
-consumers should retain their compatibility fallback.
+The first function reports which API contract HIP EP supports. OGA checks that
+the result is version `1` before using the second function. The copy function
+receives the device descriptors plus matching host descriptors, validates the
+host descriptors, obtains the provider's active GPU stream, and launches one
+kernel for all state tensors. It returns without synchronizing, so the copy
+stays ordered with the model work on that stream.
 
-The API is deliberately versioned. Consumers must check version `1` before
-calling the copy entry point, and future incompatible changes should use a
-new API version rather than changing the existing signature.
+If the API or architecture-specific kernel is unavailable, OGA uses its
+compatibility path with individual tensor copies. The API is versioned so a
+future incompatible signature can be added as version `2` without breaking
+older OGA binaries.
 
 ## Consumer contract for OGA
 
@@ -58,7 +70,7 @@ OGA consumer must:
 1. Run the wide verification forward.
 2. Determine the accepted prefix.
 3. Crop the KV/position state and promote the corresponding recurrent-state
-   window slot.
+  window slot.
 4. Avoid the immediate replay append.
 
 The consumer must resolve the API from the already-loaded decoder provider,
@@ -71,12 +83,12 @@ does not belong in this HIP EP runtime contract.
 Coverage is provided at each compiler/runtime boundary:
 
 - GPU-free numeric checks:
-  `test/numeric/tests/test_causal_conv_with_state.py` and
-  `test/numeric/tests/test_linear_attention.py`
+`test/numeric/tests/test_causal_conv_with_state.py` and
+`test/numeric/tests/test_linear_attention.py`
 - GPU state-slot promotion:
-  `test/runtime/test_state_slot_copy.cpp`
+`test/runtime/test_state_slot_copy.cpp`
 - Provider export contract:
-  `test/runtime/test_hipgpu_elf_contract.cpp`
+`test/runtime/test_hipgpu_elf_contract.cpp`
 
 The state-slot test checks mixed descriptor sizes, alignment, stream ordering,
 guards, and repeated launches. The ELF test checks provider visibility,
@@ -148,8 +160,4 @@ tree. Without it, ELF loading tests can fail with an error such as
 
 ## Limitations
 
-Do not commit build directories, installed packages, generated model files,
-ONNX external-data files, caches, or profiling JSON. A reviewable change
-contains the source, tests, and this documentation only. The OGA/DFlash
-controller bridge is a separate consumer-side change and should be reviewed
-in the DFlash/OGA change rather than copied into the HIP EP PR.
+Do not commit build directories, installed packages, generated model files, ONNX external-data files, caches, or profiling JSON. A reviewable change contains the source, tests, and this documentation only. The OGA/DFlash controller bridge is a separate consumer-side change that will be referenced in the DFlash PR rather than copied into this HIP EP PR.
