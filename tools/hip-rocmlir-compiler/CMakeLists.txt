@@ -5,6 +5,12 @@
 
 add_executable(hip-rocmlir-compiler hip-rocmlir-compiler.cpp)
 
+# Same reason as LibHipCompiler: this target includes InitRocMLIRDialects.h,
+# whose Triton headers require C++20.
+set_target_properties(hip-rocmlir-compiler PROPERTIES
+  CXX_STANDARD 20
+  CXX_STANDARD_REQUIRED YES)
+
 add_dependencies(hip-rocmlir-compiler
   HipDialectIncGen
   HipsrDialectIncGen

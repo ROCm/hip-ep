@@ -83,6 +83,13 @@ if(ENABLE_ROCMLIRTRITON)
   # feature, rather than a separate macro that can drift out of sync with it.
   target_compile_definitions(LibHipCompiler PUBLIC ENABLE_ROCMLIRTRITON=1)
 
+  # InitRocMLIRDialects.h pulls in Triton headers, and Triton is C++20
+  # (std::set::contains in triton/Tools/Sys/GetEnv.h). The rest of hip-ep stays
+  # on C++17; this is the library that includes those headers.
+  set_target_properties(LibHipCompiler PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED YES)
+
   # resolveRocMlirArch asks the live GPU which chip to build for; a code object
   # for the wrong chip fails at module load. Headers only, no hip::host link:
   # hip-compiler links this library but only compiles, and a load-time HIP
