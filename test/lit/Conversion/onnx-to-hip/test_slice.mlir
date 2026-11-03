@@ -558,4 +558,35 @@ module {
     // CHECK: hip.slice
     return %r : tensor<?x?xf32>
   }
+
+  // Test 22: the first half of a GEGLU chunk, Slice(x, 0,
+  // (Shape(x)[2] + 1) / 2, axis 2). The extent is half the data dim, not
+  // the data dim.
+  func.func @test_slice_native_div_shape_end(%x: tensor<?x?x?xf32>)
+      -> tensor<?x?x?xf32> {
+    // CHECK-LABEL: func.func @test_slice_native_div_shape_end
+    %zero = arith.constant dense<0> : tensor<1xi64>
+    %one = arith.constant dense<1> : tensor<1xi64>
+    %two = arith.constant dense<2> : tensor<1xi64>
+    %axes = arith.constant dense<[2]> : tensor<1xi64>
+    %dim = "onnx.Shape"(%x) {start = 2 : si64, end = 3 : si64}
+        : (tensor<?x?x?xf32>) -> tensor<1xi64>
+    %sum = "onnx.Add"(%dim, %one)
+        : (tensor<1xi64>, tensor<1xi64>) -> tensor<1xi64>
+    %half = "onnx.Div"(%sum, %two)
+        : (tensor<1xi64>, tensor<1xi64>) -> tensor<1xi64>
+    %r = "onnx.Slice"(%x, %zero, %half, %axes)
+        : (tensor<?x?x?xf32>, tensor<1xi64>, tensor<1xi64>,
+           tensor<1xi64>) -> tensor<?x?x?xf32>
+
+    // CHECK: %[[SUM:.*]] = arith.addi %{{.*}}, %{{.*}} : index
+    // CHECK: %[[HALF:.*]] = arith.divsi %[[SUM]], %{{.*}} : index
+    // CHECK: arith.select %{{.*}}, %{{.*}}, %[[HALF]] : index
+    // CHECK: %[[SPAN:.*]] = arith.subi %{{.*}}, %{{.*}} : index
+    // CHECK: %[[EXT:.*]] = arith.maxsi %[[SPAN]], %{{.*}} : index
+    // CHECK: %[[CAP:.*]] = arith.select %{{.*}}, %{{.*}}, %[[EXT]] : index
+    // CHECK: tensor.empty(%{{.*}}, %{{.*}}, %[[CAP]]) : tensor<?x?x?xf32>
+    // CHECK: hip.slice
+    return %r : tensor<?x?x?xf32>
+  }
 }

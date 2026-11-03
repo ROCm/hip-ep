@@ -5,6 +5,7 @@
 
 #include "OnnxToHipUtils.h"
 
+#include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 
@@ -311,8 +312,15 @@ static mlir::Value resolveHostIndex(mlir::OpBuilder &b, mlir::Location loc,
     return mlir::arith::SubIOp::create(b, loc, l, r);
   if (isAdd)
     return mlir::arith::AddIOp::create(b, loc, l, r);
-  if (isDiv)
+  if (isDiv) {
+    // `Chunk` exports split an axis at `(dim + 1) / 2`. ONNX integer Div
+    // truncates, as divsi does; a divisor that is not a non-zero constant
+    // could fault on the host, so it does not resolve.
+    std::optional<int64_t> divisor = mlir::getConstantIntValue(r);
+    if (!divisor || *divisor == 0)
+      return {};
     return mlir::arith::DivSIOp::create(b, loc, l, r);
+  }
   return mlir::arith::MulIOp::create(b, loc, l, r);
 }
 
