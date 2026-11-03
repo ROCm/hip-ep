@@ -383,16 +383,6 @@ void GemmFp16U4ImplX(
         s_out = (uint32_t(s_bits) << 16) | s_bits;
         b_out = (uint32_t(b_bits) << 16) | b_bits;
     };
-#if !defined(_WIN32)
-    // The bias half of packConstants, for the depth-2 dequant. packConstants
-    // keeps its own copy: the depth-1 kernels' schedule depends on its order.
-    auto packBias = [&](_Float16 zp) __attribute__((always_inline)) -> uint32_t
-    {
-        const _Float16 bias = -((_Float16)1024 + zp);
-        const uint16_t b_bits = __builtin_bit_cast(uint16_t, bias);
-        return (uint32_t(b_bits) << 16) | b_bits;
-    };
-#endif
 
     auto loadGroupConstants = [&](int grp) __attribute__((always_inline))
     {
@@ -527,28 +517,7 @@ void GemmFp16U4ImplX(
                     sp = s_pk[c];
                     bp = bias_pk[c];
                 } else {
-#if defined(_WIN32)
                     packConstants(s_raw[S][c], zp_raw[S][c], sp, bp);
-#else
-                    /* The scale pair is an fp16 vector, which the compiler
-                     * folds into the packed multiplies' operand select. From
-                     * the scale's bits widened to 32 (packConstants), the
-                     * Linux toolchain makes the widening a write to the upper
-                     * half of the register the scale's load is still filling;
-                     * that write waits for every load in flight, so the K-step
-                     * opens with s_waitcnt vmcnt(0) and the second prefetch
-                     * stage drains.
-                     *   Before: s_waitcnt vmcnt(0); v_mov_b16 v1.h, 0; ...
-                     *           v_mul_u32_u24 v2, 0x10001, v1; v_pk_mul_f16 v3, v4, v2
-                     *   After:  v_pk_mul_f16 v3, v1, v4 op_sel_hi:[0,1]
-                     * The Windows toolchain widens into another register, and
-                     * there the fp16 pair slows the CU-mode tiles, whose loads
-                     * then sink to the end of the step; it keeps the integer
-                     * form its table was tuned with. */
-                    const half2v s2 = {s_raw[S][c], s_raw[S][c]};
-                    sp = __builtin_bit_cast(uint32_t, s2);
-                    bp = packBias(zp_raw[S][c]);
-#endif
                 }
                 const half2v bias2 = __builtin_bit_cast(half2v, bp);
                 const half2v scale2 = __builtin_bit_cast(half2v, sp);
