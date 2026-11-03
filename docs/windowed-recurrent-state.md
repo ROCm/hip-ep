@@ -2,6 +2,8 @@
 Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 Licensed under the MIT License.
 -->
+
+
 # Windowed recurrent state
 
 ## Purpose and supported operators
@@ -16,6 +18,39 @@ This feature is model- and export-dependent. A model must carry the
 `state_window` attributes and use the supported operator forms. A model
 without those attributes continues to use the normal rewind-and-replay path.
 KV-cache cropping and recurrent-state promotion are separate mechanisms.
+
+Models without `state_window` attributes continue to use the existing
+non-windowed execution path; this feature does not change their behavior.
+
+### Accepted-prefix example
+
+During wide verification, the model writes one recurrent state for each
+verified position:
+
+```text
+wide verification:
+  S0 -> S1 -> S2 -> S3 -> S4 -> S5 -> S6 -> S7
+```
+
+If the decoder accepts the prefix through `S3`, the later states are
+speculative and must not be used:
+
+```text
+accepted state:  S3
+rejected states: S4, S5, S6, S7
+```
+
+The decoder crops the KV/position state and copies `S3` into the committed
+destination slot `S7`:
+
+```text
+copy S3 -> S7
+```
+
+This is a device-to-device copy, not a slot rename. `S4` through `S6` remain
+physically present but are logically stale; they are ignored until a later
+verification overwrites them. The next decoding step uses the committed state
+now stored in `S7`.
 
 ## Model export requirements
 
@@ -43,6 +78,9 @@ The compiler tests cover both conversion boundaries and windowed attributes:
 ## Runtime and kernel/API design
 
 During a wide verification, each supported hybrid operator writes its recurrent/conv result into one slot of the state window. After partial acceptance, the decoder must promote the accepted slot to the committed slot. For example, in the Qwen3.6-27B export this means copying one slot in 96 state tensors (48 convolution states and 48 recurrent states).
+
+Promotion means copying the accepted slot into the committed destination slot;
+it does not rename or clear the other window slots.
 
 The runtime wrappers pass the selected slot and state layout to the
 per-architecture custom HIP kernel. The kernel performs all of those copies
@@ -162,6 +200,6 @@ The ROCm runtime path is required when running tests directly from the build
 tree. Without it, ELF loading tests can fail with an error such as
 `libamdhip64.so.7: cannot open shared object file`.
 
-## Limitations
+## How to utilize in practice
 
-Do not commit build directories, installed packages, generated model files, ONNX external-data files, caches, or profiling JSON. A reviewable change contains the source, tests, and this documentation only. The OGA/DFlash controller bridge is a separate consumer-side change that will be referenced in the DFlash PR rather than copied into this HIP EP PR.
+The OGA/DFlash controller bridge is a separate consumer-side change that will be referenced. It uses the windowed state functionality and crop optimization in hip-ep to accelerate speculative decoding algorithm DFlash.
