@@ -375,7 +375,7 @@ int wrap_causal_conv_with_state(
     void *present_state, int64_t batch_size, int64_t channels, int64_t seq_len,
     int64_t kernel_size, int64_t ndim, int64_t activation,
     int64_t element_size_bytes, int64_t channels_last, int64_t dilation,
-    int64_t state_channels_last) {
+    int64_t state_channels_last, int64_t state_window) {
   (void)op_state_slot;
   if (!state || !input || !weight || !output || !present_state) {
     fprintf(stderr,
@@ -393,9 +393,10 @@ int wrap_causal_conv_with_state(
   MOCK_PRINT("[MOCK]   ndim=%lld, activation=%s(%lld), elem_size=%lld,\n",
              (long long)ndim, act_name, (long long)activation,
              (long long)element_size_bytes);
-  MOCK_PRINT("[MOCK]   layout=%s, state=%s, dilation=%lld,\n",
+  MOCK_PRINT("[MOCK]   layout=%s, state=%s, dilation=%lld, state_window=%lld,\n",
              channels_last ? "channels_last(B,L,C)" : "channels_first(B,C,L)",
-             state_channels_last ? "(B,S,C)" : "(B,C,S)", (long long)dilation);
+             state_channels_last ? "(B,S,C)" : "(B,C,S)",
+             (long long)dilation, (long long)state_window);
   MOCK_PRINT("[MOCK]   bias=%s, past_state=%s)\n", bias ? "yes" : "null",
              past_state ? "yes" : "null");
 
@@ -671,7 +672,7 @@ int wrap_linear_attention(RuntimeState *state, const void *query,
                           int64_t decay_per_key_dim, int64_t beta_per_head,
                           float scale, int64_t chunk_size, int64_t update_rule,
                           int64_t B, int64_t seq_len, int64_t dk, int64_t dv,
-                          int64_t type) {
+                          int64_t type, int64_t state_window) {
   if (!state || !query || !key || !value || !output || !present_state) {
     fprintf(stderr, "Invalid required argument in wrap_linear_attention\n");
     return -1;
@@ -706,7 +707,8 @@ int wrap_linear_attention(RuntimeState *state, const void *query,
   MOCK_PRINT("[MOCK]   scale=%f, chunk_size=%lld, update_rule=%s(%lld),\n",
              (double)scale, (long long)chunk_size, rule_name,
              (long long)update_rule);
-  MOCK_PRINT("[MOCK]   type=%lld,\n", (long long)type);
+  MOCK_PRINT("[MOCK]   type=%lld, state_window=%lld,\n", (long long)type,
+             (long long)state_window);
   MOCK_PRINT("[MOCK]   past_state=%s, decay=%s, beta=%s)\n",
              past_state ? "yes" : "null", decay ? "yes" : "null",
              beta ? "yes" : "null");

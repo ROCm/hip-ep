@@ -1869,8 +1869,9 @@ int wrap_qmoe_amd(
 // makes input and output (batch, seq_len, channels). Weight layout: (channels,
 // 1, kernel_size) for 1D depthwise.
 //   bias:       nullable - per-channel bias (channels)
-//   past_state: nullable - carry state from previous step (batch, channels,
-//   k-1) activation: 0=none, 1=silu/swish
+//   past_state: nullable - carry state from previous step
+//     ([state_window,] batch, channels, k-1)
+//   activation: 0=none, 1=silu/swish
 int wrap_causal_conv_with_state(
     RuntimeState *state,
     int op_state_slot,  // per-instance op-state slot (descriptor cache home)
@@ -1880,7 +1881,7 @@ int wrap_causal_conv_with_state(
     const void *bias,   // nullable, (channels)
     const void *past_state, // nullable, (batch, channels, kernel_size - 1)
     void *output,           // same layout as input
-    void *present_state,    // (batch, channels, kernel_size - 1)
+    void *present_state,    // ([state_window,] batch, channels, kernel_size - 1)
     int64_t batch_size, int64_t channels, int64_t seq_len, int64_t kernel_size,
     int64_t ndim,
     int64_t activation, // 0=none, 1=silu/swish
@@ -1893,7 +1894,9 @@ int wrap_causal_conv_with_state(
     // positions. Values > 1 require state_channels_last.
     int64_t dilation,
     // 1 = carry state is (batch, state_len, channels). Requires channels_last.
-    int64_t state_channels_last);
+    int64_t state_channels_last,
+    // 0 = legacy state; W > 0 adds a leading W axis.
+    int64_t state_window);
 
 //==============================================================================
 // ONNX Gemm via hipBLASLt
@@ -1905,7 +1908,8 @@ int wrap_causal_conv_with_state(
 // and prefill. Supports update rules: linear(0), gated(1), delta(2),
 // gated_delta(3).
 // All tensor inputs use packed 3D format [B, T, H*D] except past/present
-// state which is 4D [B, H_kv, d_k, d_v].
+// state which is [B, H_kv, d_k, d_v], or [W, B, H_kv, d_k, d_v] when
+// state_window > 0.
 // Head counts are three-way:
 //   - Hq : query heads
 //   - Hkv: KV state heads
@@ -1932,15 +1936,16 @@ int wrap_linear_attention(
     const void *query,      // [B, T, Hq * dk]
     const void *key,        // [B, T, Nk * dk]
     const void *value,      // [B, T, H_kv * d_v]
-    const void *past_state, // [B, H_kv, d_k, d_v] (nullable)
+    const void *past_state, // [[W,] B, H_kv, d_k, d_v] (nullable)
     const void *decay,      // [B, T, H_kv * d_k] or [B, T, H_kv] (nullable)
     const void *beta,       // [B, T, H_kv] or [B, T, 1] (nullable)
     void *output,           // [B, T, max(H_q, H_kv) * d_v]
-    void *present_state,    // [B, H_kv, d_k, d_v]
+    void *present_state,    // [[W,] B, H_kv, d_k, d_v]
     int64_t Hq, int64_t Hkv, int64_t Nk, int64_t decay_per_key_dim,
     int64_t beta_per_head, float scale, int64_t chunk_size,
     int64_t update_rule, // 0=linear, 1=gated, 2=delta, 3=gated_delta
-    int64_t B, int64_t seq_len, int64_t dk, int64_t dv, int64_t type);
+    int64_t B, int64_t seq_len, int64_t dk, int64_t dv, int64_t type,
+    int64_t state_window);
 
 // scale == 0 means 1 / sqrt(head_size_qk).
 int wrap_gated_delta_net(RuntimeState *state, const void *qkv,

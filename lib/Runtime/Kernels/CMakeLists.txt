@@ -114,6 +114,7 @@ set(_kernel_sources
     hip/softmax_kernel.hip
     hip/nonzero_kernel.hip
     hip/strided_copy_kernel.hip
+    hip/state_slot_copy_kernel.hip
 )
 
 # MatMulNBits offline autotune table.

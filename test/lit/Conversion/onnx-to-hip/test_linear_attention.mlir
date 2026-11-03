@@ -271,4 +271,36 @@ module {
 
     return %out#0, %out#1 : tensor<?x?x4096xf16>, tensor<?x8x128x128xf16>
   }
+
+  // ===========================================================================
+  // Test 7: Windowed recurrent state gains a leading W axis and preserves the
+  // state_window attribute on the HIP op.
+  // ===========================================================================
+  func.func @test_linear_attention_state_window(
+      %query: tensor<1x3x16xf16>,
+      %key: tensor<1x3x8xf16>,
+      %value: tensor<1x3x8xf16>,
+      %past_state: tensor<4x1x2x4x4xf16>)
+      -> (tensor<1x3x8xf16>, tensor<4x1x2x4x4xf16>) {
+
+    // CHECK-LABEL: func.func @test_linear_attention_state_window
+
+    %out:2 = "onnx.Custom"(%query, %key, %value, %past_state)
+        <{function_name = "LinearAttention"}>
+        {domain_name = "com.microsoft",
+         q_num_heads = 4 : si64,
+         kv_num_heads = 2 : si64,
+         state_window = 4 : si64,
+         update_rule = "linear"}
+        : (tensor<1x3x16xf16>, tensor<1x3x8xf16>,
+           tensor<1x3x8xf16>, tensor<4x1x2x4x4xf16>)
+        -> (tensor<1x3x8xf16>, tensor<4x1x2x4x4xf16>)
+
+    // CHECK: tensor.empty() : tensor<4x1x2x4x4xf16>
+    // CHECK: hip.linear_attention({{.*}})
+    // CHECK-SAME: state_window = 4 : i64
+
+    return %out#0, %out#1 :
+        tensor<1x3x8xf16>, tensor<4x1x2x4x4xf16>
+  }
 }

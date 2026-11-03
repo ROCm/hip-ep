@@ -46,6 +46,7 @@ exactly rather than forcing a strictly self-consistent breakdown.
 """
 
 import numpy as np
+import onnx
 import pytest
 from onnx import TensorProto, helper
 
@@ -78,6 +79,7 @@ def _make_linear_attention_model(
     scale: float = 1.0,
     update_rule: str = "gated_delta",
     include_past_state: bool = True,
+    state_window: int = 0,
 ):
     """Build a LinearAttention ONNX model with up to six runtime inputs.
 
@@ -99,11 +101,10 @@ def _make_linear_attention_model(
     Q = helper.make_tensor_value_info("query", tp, [batch, seq_len, q_dim])
     K = helper.make_tensor_value_info("key", tp, [batch, seq_len, k_dim])
     V = helper.make_tensor_value_info("value", tp, [batch, seq_len, v_dim])
-    State = helper.make_tensor_value_info(
-        "past_state",
-        tp,
-        [batch, kv_num_heads, state_dk, state_dv],
-    )
+    state_shape = [batch, kv_num_heads, state_dk, state_dv]
+    if state_window > 0:
+        state_shape = [state_window, *state_shape]
+    State = helper.make_tensor_value_info("past_state", tp, state_shape)
     Decay = helper.make_tensor_value_info(
         "decay",
         tp,
@@ -120,11 +121,7 @@ def _make_linear_attention_model(
         tp,
         [batch, seq_len, out_dim],
     )
-    Present = helper.make_tensor_value_info(
-        "present_state",
-        tp,
-        [batch, kv_num_heads, state_dk, state_dv],
-    )
+    Present = helper.make_tensor_value_info("present_state", tp, state_shape)
 
     node_inputs = ["query", "key", "value", "past_state", "decay", "beta"]
     graph_inputs = [Q, K, V, State, Decay, Beta]
@@ -140,17 +137,29 @@ def _make_linear_attention_model(
         kv_num_heads=kv_num_heads,
         q_num_heads=q_num_heads,
         scale=scale,
+        state_window=state_window,
         update_rule=update_rule,
     )
 
     ms_opset = helper.make_opsetid("com.microsoft", 1)
-    return make_model_from_nodes(
+    model = make_model_from_nodes(
         [node],
         graph_inputs,
         [Y, Present],
         opset=17,
         extra_opsets=[ms_opset],
     )
+    # ORT 1.30 (used by the HIP EP test package) supports through IR 13.
+    model.ir_version = min(model.ir_version, 13)
+    return model
+
+
+def _run_backend(model_runner, model, feeds, name):
+    """Run only HIP EP for custom-op contracts unavailable on ORT CPU."""
+    subdir = model_runner._last_subdir or model_runner._next_subdir(name)
+    model_path = subdir / f"{name}.onnx"
+    onnx.save_model(model, model_path)
+    return model_runner.backend.run(str(model_path), feeds)
 
 
 def _make_inputs(
@@ -191,6 +200,89 @@ class TestLinearAttention:
     Q/K/V hidden derived from a single d_k/d_v) gives clean coverage of
     the gated_delta math; the chunk_opt cases then verify the asymmetric
     layout the actual model uses."""
+
+    @pytest.mark.parametrize("seq_len", [3, 5])
+    @pytest.mark.parametrize("update_rule", ["linear", "gated_delta"])
+    def test_la_state_window(self, model_runner, update_rule, seq_len):
+        """Window slots match independent legacy runs at every token boundary."""
+        batch, qh, kvh, d_k, d_v, state_window = 2, 1, 1, 8, 8, 4
+        q_dim, k_dim, v_dim = qh * d_k, kvh * d_k, kvh * d_v
+        window_model = _make_linear_attention_model(
+            batch,
+            seq_len,
+            qh,
+            kvh,
+            q_dim,
+            k_dim,
+            v_dim,
+            d_k,
+            d_v,
+            scale=1.0,
+            update_rule=update_rule,
+            state_window=state_window,
+        )
+
+        inputs = _make_inputs(
+            np.random.default_rng(0x51A7E),
+            batch,
+            seq_len,
+            kvh,
+            q_dim,
+            k_dim,
+            v_dim,
+            d_k,
+            d_v,
+        )
+        initial_state = inputs[3]
+        window_state = np.zeros((state_window, *initial_state.shape), dtype=np.float16)
+        window_state[-1] = initial_state
+        window_inputs = inputs[:3] + [window_state] + inputs[4:]
+        window_output, window_states = _run_backend(
+            model_runner,
+            window_model,
+            window_inputs,
+            f"la_state_window_{update_rule}",
+        )
+
+        expected_states = np.zeros_like(window_states)
+        legacy_output = None
+        first_retained_prefix = max(1, seq_len - state_window + 1)
+        for prefix in range(first_retained_prefix, seq_len + 1):
+            legacy_model = _make_linear_attention_model(
+                batch,
+                prefix,
+                qh,
+                kvh,
+                q_dim,
+                k_dim,
+                v_dim,
+                d_k,
+                d_v,
+                scale=1.0,
+                update_rule=update_rule,
+            )
+            prefix_inputs = [
+                inputs[0][:, :prefix],
+                inputs[1][:, :prefix],
+                inputs[2][:, :prefix],
+                initial_state,
+                inputs[4][:, :prefix],
+                inputs[5][:, :prefix],
+            ]
+            prefix_output, prefix_state = _run_backend(
+                model_runner,
+                legacy_model,
+                prefix_inputs,
+                f"la_state_window_{update_rule}_prefix_{prefix}",
+            )
+            expected_states[state_window - seq_len + prefix - 1] = prefix_state
+            if prefix == seq_len:
+                legacy_output = prefix_output
+
+        np.testing.assert_allclose(window_output, legacy_output, atol=1e-2, rtol=1e-2)
+        np.testing.assert_allclose(
+            window_states, expected_states, atol=1e-2, rtol=1e-2
+        )
 
     @pytest.mark.parametrize("seq_len", [1, 4])
     @pytest.mark.parametrize("update_rule", ["linear", "gated", "delta", "gated_delta"])

@@ -31,12 +31,13 @@ module {
       %x: tensor<1x128x64xf16>,
       %w: tensor<64x1x4xf16>,
       %b: tensor<64xf16>,
-      %past: tensor<1x64x3xf16>)
-      -> (tensor<1x128x64xf16>, tensor<1x64x3xf16>) {
+      %past: tensor<4x1x64x3xf16>)
+      -> (tensor<1x128x64xf16>, tensor<4x1x64x3xf16>) {
     // CHECK-LABEL: func.func @fold_transpose_pair
     // CHECK-NOT: hip.transpose
     // CHECK: hip.causal_conv_with_state
     // CHECK-SAME: channels_last = true
+    // CHECK-SAME: state_window = 4 : i64
     // CHECK-NOT: hip.transpose
 
     %e0 = tensor.empty() : tensor<1x64x128xf16>
@@ -45,21 +46,21 @@ module {
         : tensor<1x64x128xf16>
 
     %e1 = tensor.empty() : tensor<1x64x128xf16>
-    %e2 = tensor.empty() : tensor<1x64x3xf16>
+    %e2 = tensor.empty() : tensor<4x1x64x3xf16>
     %y, %s = hip.causal_conv_with_state(%ctx)
         ins(%t0, %w, %b, %past :
             tensor<1x64x128xf16>, tensor<64x1x4xf16>,
-            tensor<64xf16>, tensor<1x64x3xf16>)
-        outs(%e1, %e2 : tensor<1x64x128xf16>, tensor<1x64x3xf16>)
-        {activation = "silu", ndim = 1 : i64}
-        : tensor<1x64x128xf16>, tensor<1x64x3xf16>
+            tensor<64xf16>, tensor<4x1x64x3xf16>)
+        outs(%e1, %e2 : tensor<1x64x128xf16>, tensor<4x1x64x3xf16>)
+        {activation = "silu", ndim = 1 : i64, state_window = 4 : i64}
+        : tensor<1x64x128xf16>, tensor<4x1x64x3xf16>
 
     %e3 = tensor.empty() : tensor<1x128x64xf16>
     %z = hip.transpose(%ctx) ins(%y : tensor<1x64x128xf16>)
         outs(%e3 : tensor<1x128x64xf16>) {perm = [0, 2, 1]}
         : tensor<1x128x64xf16>
 
-    return %z, %s : tensor<1x128x64xf16>, tensor<1x64x3xf16>
+    return %z, %s : tensor<1x128x64xf16>, tensor<4x1x64x3xf16>
   }
 
   // --------------------------------------------------------------------------

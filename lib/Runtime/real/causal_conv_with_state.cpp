@@ -65,7 +65,7 @@ int wrap_causal_conv_with_state(
     void *present_state, int64_t batch_size, int64_t channels, int64_t seq_len,
     int64_t kernel_size, int64_t ndim, int64_t activation,
     int64_t element_size_bytes, int64_t channels_last, int64_t dilation,
-    int64_t state_channels_last) {
+    int64_t state_channels_last, int64_t state_window) {
   // Retained for ABI stability; this op holds no state (see above).
   (void)op_state_slot;
 
@@ -99,6 +99,13 @@ int wrap_causal_conv_with_state(
             (long long)seq_len);
     return -1;
   }
+  if (state_window < 0) {
+    fprintf(stderr,
+            "wrap_causal_conv_with_state: state_window=%lld must be "
+            "nonnegative\n",
+            (long long)state_window);
+    return -1;
+  }
 
   if ((state_channels_last && !channels_last) || dilation < 1 ||
       (dilation != 1 && !state_channels_last)) {
@@ -118,6 +125,58 @@ int wrap_causal_conv_with_state(
     return -1;
   }
 
+  const int64_t state_length = (kernel_size - 1) * dilation;
+  const int64_t state_slot_bytes =
+      batch_size * channels * state_length * element_size_bytes;
+  const void *kernel_past_state = past_state;
+  void *kernel_present_state = present_state;
+
+  // Windowed state reads only the final input slot. Preserve that slot because
+  // OGA may alias past_state and present_state, then materialize this call's
+  // per-token states right-aligned in the output window.
+  if (state_window > 0 && state_slot_bytes > 0) {
+    const auto *past_bytes = static_cast<const unsigned char *>(past_state);
+    auto *present_bytes = static_cast<unsigned char *>(present_state);
+    const int64_t last_slot_offset = (state_window - 1) * state_slot_bytes;
+
+    if (past_state) {
+      if (hipdnn_ep_state_ensure_conv_scratch(
+              state, static_cast<size_t>(state_slot_bytes)) != 0) {
+        fprintf(stderr,
+                "wrap_causal_conv_with_state: state-window scratch "
+                "allocation failed\n");
+        return -1;
+      }
+      void *saved_past = hipdnn_ep_state_get_conv_scratch(state);
+      hipError_t copy_status =
+          hipMemcpyAsync(saved_past, past_bytes + last_slot_offset,
+                         state_slot_bytes, hipMemcpyDeviceToDevice, stream);
+      if (copy_status != hipSuccess) {
+        fprintf(stderr,
+                "wrap_causal_conv_with_state: preserving final state-window "
+                "slot failed (%s)\n",
+                hipGetErrorString(copy_status));
+        return -1;
+      }
+      kernel_past_state = saved_past;
+    } else {
+      kernel_past_state = nullptr;
+    }
+    kernel_present_state = present_bytes + last_slot_offset;
+
+    int rc = hip_causal_conv_state_window(
+        stream, input, kernel_past_state, present_state, batch_size, channels,
+        seq_len, kernel_size, state_window, element_size_bytes, channels_last,
+        dilation, state_channels_last);
+    if (rc != 0) {
+      fprintf(stderr,
+              "wrap_causal_conv_with_state: state-window materialization "
+              "failed (%d)\n",
+              rc);
+      return -1;
+    }
+  }
+
   OP_PROFILE(
       "causal_conv",
       [&] {
@@ -133,17 +192,18 @@ int wrap_causal_conv_with_state(
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_causal_conv_with_state: batch=%lld, "
                     "channels=%lld, seq_len=%lld, kernel=%lld, ndim=%lld, "
-                    "activation=%lld, elem_size=%lld, channels_last=%lld\n",
+                    "activation=%lld, elem_size=%lld, channels_last=%lld, "
+                    "state_window=%lld\n",
                     (long long)batch_size, (long long)channels,
                     (long long)seq_len, (long long)kernel_size, (long long)ndim,
                     (long long)activation, (long long)element_size_bytes,
-                    (long long)channels_last);
+                    (long long)channels_last, (long long)state_window);
 
   if (state_channels_last) {
-    int rc = hip_causal_conv_nlc_state(stream, input, weight, bias, past_state,
-                                       output, present_state, batch_size,
-                                       channels, seq_len, kernel_size, dilation,
-                                       activation, element_size_bytes);
+    int rc = hip_causal_conv_nlc_state(
+        stream, input, weight, bias, kernel_past_state, output,
+        kernel_present_state, batch_size, channels, seq_len, kernel_size,
+        dilation, activation, element_size_bytes);
     if (rc != 0) {
       fprintf(stderr,
               "wrap_causal_conv_with_state: hip_causal_conv_nlc_state failed "
@@ -169,8 +229,9 @@ int wrap_causal_conv_with_state(
   // by construction rather than by accident.
   if (seq_len == 1) {
     int rc = hip_causal_conv_step_decode(
-        stream, input, weight, bias, past_state, output, present_state,
-        batch_size, channels, kernel_size, activation, element_size_bytes);
+        stream, input, weight, bias, kernel_past_state, output,
+        kernel_present_state, batch_size, channels, kernel_size, activation,
+        element_size_bytes);
     if (rc != 0) {
       fprintf(stderr,
               "wrap_causal_conv_with_state: hip_causal_conv_step_decode "
@@ -191,14 +252,14 @@ int wrap_causal_conv_with_state(
   // needs to be spliced into a channels-last graph.
   int rc =
       channels_last
-          ? hip_causal_conv_prefill_nlc(stream, input, weight, bias, past_state,
-                                        output, present_state, batch_size,
-                                        channels, seq_len, kernel_size,
-                                        activation, element_size_bytes)
-          : hip_causal_conv_prefill(stream, input, weight, bias, past_state,
-                                    output, present_state, batch_size, channels,
-                                    seq_len, kernel_size, activation,
-                                    element_size_bytes);
+          ? hip_causal_conv_prefill_nlc(
+                stream, input, weight, bias, kernel_past_state, output,
+                kernel_present_state, batch_size, channels, seq_len,
+                kernel_size, activation, element_size_bytes)
+          : hip_causal_conv_prefill(
+                stream, input, weight, bias, kernel_past_state, output,
+                kernel_present_state, batch_size, channels, seq_len,
+                kernel_size, activation, element_size_bytes);
   if (rc != 0) {
     fprintf(stderr,
             "wrap_causal_conv_with_state: hip_causal_conv_prefill%s failed "

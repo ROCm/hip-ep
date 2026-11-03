@@ -32,7 +32,7 @@ extern "C" int wrap_linear_attention(
     void *present_state, int64_t Hq, int64_t Hkv, int64_t Nk,
     int64_t decay_per_key_dim, int64_t beta_per_head, float scale,
     int64_t chunk_size, int64_t update_rule, int64_t B, int64_t seq_len,
-    int64_t dk, int64_t dv, int64_t type) {
+    int64_t dk, int64_t dv, int64_t type, int64_t state_window) {
   OP_PROFILE(
       "linear_attention",
       [&] {
@@ -47,12 +47,13 @@ extern "C" int wrap_linear_attention(
 
   RUNTIME_DEBUG_LOG("[linear_attention] enter: B=%lld seq_len=%lld "
                     "q_heads=%lld kv_heads=%lld n_k=%lld d_k=%lld d_v=%lld "
-                    "scale=%.6f chunk=%lld rule=%lld type=%s(%lld)\n",
+                    "scale=%.6f chunk=%lld rule=%lld type=%s(%lld) "
+                    "state_window=%lld\n",
                     (long long)B, (long long)seq_len, (long long)Hq,
                     (long long)Hkv, (long long)Nk, (long long)dk, (long long)dv,
                     (double)scale, (long long)chunk_size,
                     (long long)update_rule, hipdnn_ep_datatype_name(type),
-                    (long long)type);
+                    (long long)type, (long long)state_window);
 
   RUNTIME_DEBUG_LOG("[linear_attention] layout: decay_per_key_dim=%lld "
                     "beta_per_head=%lld\n",
@@ -70,6 +71,13 @@ extern "C" int wrap_linear_attention(
             "[linear_attention] ERROR: unsupported element type %lld "
             "(expect HIPDNN_EP_DATATYPE_FLOAT/HALF/BFLOAT16)\n",
             (long long)type);
+    return -1;
+  }
+  if (state_window < 0) {
+    fprintf(stderr,
+            "[linear_attention] ERROR: state_window=%lld must be "
+            "nonnegative\n",
+            (long long)state_window);
     return -1;
   }
 
@@ -141,6 +149,8 @@ extern "C" int wrap_linear_attention(
   // State size per batch per head: dk * dv elements
   const int64_t state_bytes = dk * dv * elem_size;
   int64_t total_state_bytes = B * Hkv * state_bytes;
+  const int64_t window_state_bytes =
+      (state_window > 0 ? state_window : 1) * total_state_bytes;
 
   // Per-token stride (in bytes) for each packed [B, T, H*D] tensor. The
   // kernel indexes into the packed layout directly using seq_len as the
@@ -166,6 +176,7 @@ extern "C" int wrap_linear_attention(
   const int64_t beta_token_bytes = (beta_per_head ? Hkv : 1) * elem_size;
 
   int result = 0;
+  void *working_state = present_state;
 
   // Decode and short bursts (speculative verify) run every step in one launch
   // that reads past_state and writes present_state directly, so they skip the
@@ -196,10 +207,44 @@ extern "C" int wrap_linear_attention(
   // this single launch covers the entire state for decode, per-token prefill,
   // chunked prefill, and the chunked-path fallback.
   //
-  // Skip initialization when the buffers alias. Under a shared-buffer binding
-  // the recurrent state is already in present_state and all paths update it in
-  // place, so copying it to itself would be a semantic no-op.
-  if (past_state) {
+  // Windowed execution needs an independent working state because OGA may bind
+  // past and present to the same window buffer. Save the final input slot
+  // before clearing the output window.
+  if (state_window > 0) {
+    if (hipdnn_ep_state_ensure_la_scratch(
+            state, static_cast<size_t>(total_state_bytes)) != 0) {
+      fprintf(stderr,
+              "[linear_attention] ERROR: state-window scratch allocation "
+              "failed\n");
+      result = -1;
+      goto cleanup;
+    }
+    working_state = hipdnn_ep_state_get_la_scratch(state);
+    if (past_state) {
+      const void *past_last =
+          static_cast<const char *>(past_state) +
+          (state_window - 1) * total_state_bytes;
+      const int copy_result = hip_strided_copy(
+          hip_stream, working_state, past_last, elem_size,
+          /*outer_rank=*/0, /*outer_sizes=*/nullptr,
+          /*src_outer_strides=*/nullptr, /*dst_outer_strides=*/nullptr,
+          /*row_elems=*/B * Hkv * dk * dv, /*outer_total=*/1);
+      if (copy_result != 0) {
+        fprintf(stderr,
+                "[linear_attention] ERROR: state-window input copy failed "
+                "(%d)\n",
+                copy_result);
+        result = -1;
+        goto cleanup;
+      }
+    } else {
+      HIP_CHECK(hipMemsetAsync(working_state, 0, total_state_bytes,
+                               (hipStream_t)hip_stream));
+    }
+    HIP_CHECK(hipMemsetAsync(present_state, 0, window_state_bytes,
+                             (hipStream_t)hip_stream));
+  } else if (past_state) {
+    // Skip initialization when legacy buffers alias.
     if (past_state != present_state) {
       const int copy_result = hip_strided_copy(
           hip_stream, present_state, past_state, elem_size,
@@ -225,7 +270,7 @@ extern "C" int wrap_linear_attention(
   // unsupported config; we then fall back to the per-token loop below.
   if ((update_rule == kUpdateRuleGated ||
        update_rule == kUpdateRuleGatedDelta) &&
-      seq_len > 1) {
+      seq_len > 1 && state_window == 0) {
     // The chunk-parallel path needs a device scratch arena sized to this shape
     // and rule; the two rules run different kernels and need different layouts.
     // It lives in the per-session RuntimeState::la_scratch pool
@@ -285,8 +330,31 @@ extern "C" int wrap_linear_attention(
              : nullptr;
     void *o_t = (char *)output + t * o_token_bytes;
 
+    // The retained token states occupy the right-aligned tail of the window.
+    // Copy the state before this token into its slot, then update that slot in
+    // place so it becomes the state after this token.
+    if (state_window > 0 && t >= seq_len - state_window) {
+      const int64_t slot = t + state_window - seq_len;
+      void *slot_state =
+          static_cast<char *>(present_state) + slot * total_state_bytes;
+      const int copy_result = hip_strided_copy(
+          hip_stream, slot_state, working_state, elem_size,
+          /*outer_rank=*/0, /*outer_sizes=*/nullptr,
+          /*src_outer_strides=*/nullptr, /*dst_outer_strides=*/nullptr,
+          /*row_elems=*/B * Hkv * dk * dv, /*outer_total=*/1);
+      if (copy_result != 0) {
+        fprintf(stderr,
+                "[linear_attention] ERROR: state-window slot copy failed at "
+                "t=%lld (%d)\n",
+                (long long)t, copy_result);
+        result = -1;
+        goto cleanup;
+      }
+      working_state = slot_state;
+    }
+
     int kern_result = hip_linear_attention_decode(
-        hip_stream, q_t, k_t, v_t, decay_t, beta_t, present_state, o_t, B,
+        hip_stream, q_t, k_t, v_t, decay_t, beta_t, working_state, o_t, B,
         seq_len, Hq, Hkv, Nk, dk, dv, scale, update_rule, decay_per_key_dim,
         beta_per_head, type);
     if (kern_result != 0) {

@@ -1,7 +1,8 @@
 # Linker version script for the EP shared library (libhipgpu.so / hipgpu.dll).
 #
-# ONNX Runtime's plugin EP loader looks up only CreateEpFactories and
-# ReleaseEpFactory (GetProcAddress / dlsym). Everything else in this DSO is
+# ONNX Runtime's plugin EP loader looks up CreateEpFactories and
+# ReleaseEpFactory. OGA additionally resolves the versioned HIP device API for
+# provider-stream state-slot promotion. Everything else in this DSO remains
 # internal: MorphiZen C++ APIs, generated protobuf classes, and the
 # statically-linked LLVM/MLIR copy. Exporting those would bloat the dynamic
 # symbol table and, on ELF, let ROCm's libamd_comgr.so bind its @LLVM_22.0
@@ -12,6 +13,8 @@
   global:
     CreateEpFactories;
     ReleaseEpFactory;
+    hipdnn_ep_device_api_version;
+    hipdnn_ep_copy_state_slots;
   local:
     *;
 };

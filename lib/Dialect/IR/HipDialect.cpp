@@ -2714,6 +2714,10 @@ void CausalConvWithStateOp::getEffects(
 
 LogicalResult CausalConvWithStateOp::verify() {
   auto dilation = static_cast<int64_t>(getDilation());
+  auto stateWindow = static_cast<int64_t>(getStateWindow());
+  if (stateWindow < 0) {
+    return emitOpError("state_window must be nonnegative, got ") << stateWindow;
+  }
   if (dilation < 1) {
     return emitOpError("dilation must be at least 1, got ") << dilation;
   }
@@ -2723,38 +2727,69 @@ LogicalResult CausalConvWithStateOp::verify() {
   if (dilation != 1 && !getStateChannelsLast()) {
     return emitOpError("dilation > 1 requires state_channels_last");
   }
-  if (!getStateChannelsLast()) {
+  if (!getStateChannelsLast() && stateWindow == 0) {
     return success();
   }
 
   auto inputType = cast<ShapedType>(getInput().getType());
   auto weightType = cast<ShapedType>(getWeight().getType());
   if (inputType.getRank() != 3 || weightType.getRank() != 3) {
-    return emitOpError("state_channels_last requires rank-3 input and weight");
+    return emitOpError(
+        "windowed/state-channels-last mode requires rank-3 input and weight");
   }
   if (weightType.isDynamicDim(2)) {
-    return emitOpError("state_channels_last requires a static kernel size");
+    return emitOpError(
+        "windowed/state-channels-last mode requires a static kernel size");
   }
   int64_t stateLen = (weightType.getDimSize(2) - 1) * dilation;
-  int64_t channels = inputType.getDimSize(2);
+  int64_t channels =
+      inputType.getDimSize(getChannelsLast() ? 2 : 1);
   SmallVector<Value, 2> states = {getPresentState()};
   if (getPastState()) {
     states.push_back(getPastState());
   }
   for (Value state : states) {
     auto stateType = cast<ShapedType>(state.getType());
-    if (stateType.getRank() != 3) {
-      return emitOpError("state must be rank 3, got rank ")
+    int64_t expectedRank = stateWindow > 0 ? 4 : 3;
+    if (stateType.getRank() != expectedRank) {
+      return emitOpError("state must be rank ")
+             << expectedRank << ", got rank "
              << stateType.getRank();
     }
-    if (!stateType.isDynamicDim(1) && stateType.getDimSize(1) != stateLen) {
-      return emitOpError("state dim 1 must be (kernel_size - 1) * dilation = ")
-             << stateLen << ", got " << stateType.getDimSize(1);
+    int64_t batchDim = stateWindow > 0 ? 1 : 0;
+    int64_t channelDim;
+    int64_t stateDim;
+    if (getStateChannelsLast()) {
+      stateDim = stateWindow > 0 ? 2 : 1;
+      channelDim = stateWindow > 0 ? 3 : 2;
+    } else {
+      channelDim = stateWindow > 0 ? 2 : 1;
+      stateDim = stateWindow > 0 ? 3 : 2;
     }
-    if (!ShapedType::isDynamic(channels) && !stateType.isDynamicDim(2) &&
-        stateType.getDimSize(2) != channels) {
-      return emitOpError("state dim 2 must match the input channels ")
-             << channels << ", got " << stateType.getDimSize(2);
+    if (stateWindow > 0 && !stateType.isDynamicDim(0) &&
+        stateType.getDimSize(0) != stateWindow) {
+      return emitOpError("state dim 0 must match state_window ")
+             << stateWindow << ", got " << stateType.getDimSize(0);
+    }
+    int64_t batch = inputType.getDimSize(0);
+    if (!ShapedType::isDynamic(batch) && !stateType.isDynamicDim(batchDim) &&
+        stateType.getDimSize(batchDim) != batch) {
+      return emitOpError("state batch dim must match the input batch ")
+             << batch << ", got " << stateType.getDimSize(batchDim);
+    }
+    if (!stateType.isDynamicDim(stateDim) &&
+        stateType.getDimSize(stateDim) != stateLen) {
+      return emitOpError("state dim ")
+             << stateDim
+             << " must be (kernel_size - 1) * dilation = "
+             << stateLen << ", got " << stateType.getDimSize(stateDim);
+    }
+    if (!ShapedType::isDynamic(channels) &&
+        !stateType.isDynamicDim(channelDim) &&
+        stateType.getDimSize(channelDim) != channels) {
+      return emitOpError("state dim ")
+             << channelDim << " must match the input channels " << channels
+             << ", got " << stateType.getDimSize(channelDim);
     }
   }
   return success();

@@ -89,11 +89,40 @@ set_tests_properties(GqaAutotuneUnitTest PROPERTIES
     ENVIRONMENT "HIPDNN_EP_GQA_ARCH=gfx1151")
 set_target_properties(test-gqa-autotune PROPERTIES FOLDER "runtime-tests")
 
+# Live-GPU test for the batched state-window slot promotion launcher. Unlike
+# the package kernel-unit-test harness (Windows-only today), this small test is
+# also built on Linux so the HIP EP package used by OGA can be validated in
+# place. One executable is linked to each configured per-arch kernel library.
+if(HIPDNN_EP_LINK_HIP_HOST AND TARGET hip::host)
+  foreach(_arch IN LISTS HIP_ARCHITECTURES)
+    if(TARGET custom_kernels_${_arch})
+      set(_state_slot_test test-state-slot-copy-${_arch})
+      add_executable(${_state_slot_test} test_state_slot_copy.cpp)
+      target_compile_features(${_state_slot_test} PRIVATE cxx_std_17)
+      target_include_directories(${_state_slot_test} PRIVATE
+        ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/include)
+      target_link_libraries(${_state_slot_test} PRIVATE
+        custom_kernels_${_arch}
+        hip::host)
+      add_test(NAME StateSlotCopy_${_arch}
+        COMMAND ${_state_slot_test})
+      set_tests_properties(StateSlotCopy_${_arch} PROPERTIES
+        LABELS "gpu;kernel-ut;${_arch}")
+      set_target_properties(${_state_slot_test} PROPERTIES
+        FOLDER "runtime-tests")
+    endif()
+  endforeach()
+endif()
+
 # ELF-only. Require DF_1_NODELETE and the two plugin entry points.
 # See test_hipgpu_elf_contract.cpp.
 if(UNIX AND NOT APPLE AND TARGET ${morphizen_CORE_DYNAMIC_UNIQUE_ID})
   add_executable(test-hipgpu-elf-contract test_hipgpu_elf_contract.cpp)
   target_compile_features(test-hipgpu-elf-contract PRIVATE cxx_std_17)
+  if(HIPDNN_EP_LINK_HIP_HOST)
+    target_compile_definitions(test-hipgpu-elf-contract PRIVATE
+      HIPDNN_EP_EXPECT_DEVICE_API=1)
+  endif()
   target_link_libraries(test-hipgpu-elf-contract PRIVATE ${CMAKE_DL_LIBS})
   add_test(NAME HipGpuElfContract
     COMMAND test-hipgpu-elf-contract $<TARGET_FILE:${morphizen_CORE_DYNAMIC_UNIQUE_ID}>)

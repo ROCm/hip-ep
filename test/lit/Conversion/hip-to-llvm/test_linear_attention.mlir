@@ -4,7 +4,7 @@
 // ============================================================================
 // TEST PURPOSE:
 // Verify hip.linear_attention lowers to a single call to
-// wrap_linear_attention with 22 parameters:
+// wrap_linear_attention with 23 parameters:
 // - 9 pointers: state, query, key, value, past_state, decay, beta,
 //               output, present_state (absent optionals become null)
 // - 6 attributes: q_num_heads, kv_num_heads, n_k_heads, scale, chunk_size,
@@ -15,8 +15,9 @@
 //                 derived from the operand's last dim at lowering time:
 //                 decay_per_key_dim = 1 if decay.dim[-1] != H_kv,
 //                 beta_per_head     = 1 if beta.dim[-1]  != 1)
-// - 5 shape params: batch_size, seq_len, head_dim_k, head_dim_v,
-//                   type / HIPDNN_EP_DATATYPE_* (static -> llvm.mlir.constant,
+// - 6 shape/runtime params: batch_size, seq_len, head_dim_k, head_dim_v,
+//                   type / HIPDNN_EP_DATATYPE_*, state_window
+//                   (static -> llvm.mlir.constant,
 //                   dynamic -> llvm.extractvalue %desc[3, N], with
 //                   head_dim_k = query.dim[2] / q_num_heads always via
 //                   llvm.udiv)
@@ -56,7 +57,7 @@ module {
         {q_num_heads = 32 : i64, kv_num_heads = 8 : i64,
          scale = 0.0883883461 : f32, update_rule = "gated"}
 
-    // Test 1 verifies 22 parameters:
+    // Test 1 verifies 23 parameters:
     // - 9 pointers: state, query, key, value, past_state, decay(ptr),
     //               beta(NULL), output, present_state
     // - 6 attributes: q_num_heads=32, kv_num_heads=8, n_k_heads=8 (=1024/128),
@@ -66,7 +67,7 @@ module {
     // - 5 shape params: batch_size=1, seq_len=1, head_dim_k=128,
     //                   head_dim_v=128, type=1 (HIPDNN_EP_DATATYPE_HALF for f16)
     // CHECK-LABEL: llvm.func @test_linear_attention_lowering
-    // CHECK: llvm.call @wrap_linear_attention({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, f32, i64, i64, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_linear_attention({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, f32, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
     return
   }
 
@@ -111,7 +112,7 @@ module {
     // CHECK: llvm.udiv
     // head_dim_v: present_state dim 3 is static.
     // CHECK: llvm.mlir.constant(128 : i64)
-    // CHECK: llvm.call @wrap_linear_attention({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, f32, i64, i64, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_linear_attention({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, f32, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
 
     return
   }
@@ -160,7 +161,37 @@ module {
     // CHECK: llvm.udiv
     // head_dim_v extracted from present_state descriptor (dim 3).
     // CHECK: llvm.extractvalue {{.*}}[3, 3]
-    // CHECK: llvm.call @wrap_linear_attention({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, f32, i64, i64, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_linear_attention({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, f32, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+
+    return
+  }
+
+  // Test 4: Windowed state is rank 5; d_v comes from dim 4 and W is passed
+  // as the final runtime argument.
+  func.func @test_linear_attention_state_window(
+      %ctx: !hip.context,
+      %query: memref<1x3x16xf16, 1>,
+      %key: memref<1x3x8xf16, 1>,
+      %value: memref<1x3x10xf16, 1>,
+      %past_state: memref<7x1x2x4x5xf16, 1>,
+      %output: memref<1x3x20xf16, 1>,
+      %present_state: memref<7x1x2x4x5xf16, 1>) {
+    // CHECK-LABEL: llvm.func @test_linear_attention_state_window
+
+    hip.linear_attention(%ctx)
+        ins(%query, %key, %value :
+            memref<1x3x16xf16, 1>, memref<1x3x8xf16, 1>,
+            memref<1x3x10xf16, 1>)
+        past_state(%past_state : memref<7x1x2x4x5xf16, 1>)
+        outs(%output, %present_state :
+             memref<1x3x20xf16, 1>, memref<7x1x2x4x5xf16, 1>)
+        {q_num_heads = 4 : i64, kv_num_heads = 2 : i64,
+         state_window = 7 : i64, update_rule = "linear"}
+
+    // CHECK: %[[WINDOW:.*]] = llvm.mlir.constant(7 : i64)
+    // d_v is read from present_state dim 4, not the leading window dimension.
+    // CHECK: llvm.mlir.constant(5 : i64)
+    // CHECK: llvm.call @wrap_linear_attention({{.*}}, %[[WINDOW]]) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, f32, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
 
     return
   }

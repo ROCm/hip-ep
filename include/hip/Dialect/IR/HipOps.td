@@ -3859,7 +3859,11 @@ def Hip_CausalConvWithStateOp : Hip_DpsOp_AutoReify<"causal_conv_with_state", [A
     convolution. The carry state stores the last (k-1) positions along the
     causal axis for incremental decode, and is (batch, channels, k-1) under
     either `channels_last` setting -- only input and output are permuted, so
-    that layout change never invalidates a carried state.
+    that layout change never invalidates a carried state. With
+    `state_window = W > 0`, past_state and present_state gain a leading W
+    axis. Only past_state[W-1] is read, and present_state stores this call's
+    trailing per-token carry states right-aligned, with the final state in
+    slot W-1.
 
     `channels_last` exists because the surrounding graph is channels-last: a
     channels-first convolution has to be bracketed by a Transpose pair, and at
@@ -3895,18 +3899,19 @@ def Hip_CausalConvWithStateOp : Hip_DpsOp_AutoReify<"causal_conv_with_state", [A
 
     // Optional inputs
     Optional<Hip_TensorOrMemRef>:$bias,        // (channels)
-    Optional<Hip_TensorOrMemRef>:$past_state,  // (batch, channels, k-1)
+    Optional<Hip_TensorOrMemRef>:$past_state,  // ([W,] batch, channels, k-1)
 
     // DPS output buffers
     Hip_TensorOrMemRef:$output,          // same shape as input
-    Hip_TensorOrMemRef:$present_state,   // (batch, channels, k-1)
+    Hip_TensorOrMemRef:$present_state,   // ([W,] batch, channels, k-1)
 
     // Attributes
     DefaultValuedAttr<StrAttr, "\"none\"">:$activation,  // "none", "silu", "swish"
     DefaultValuedAttr<I64Attr, "1">:$ndim,               // 1, 2, or 3
     DefaultValuedAttr<BoolAttr, "false">:$channels_last,  // input/output (B, L, C)
     DefaultValuedAttr<I64Attr, "1">:$dilation,
-    DefaultValuedAttr<BoolAttr, "false">:$state_channels_last  // state (B, S, C)
+    DefaultValuedAttr<BoolAttr, "false">:$state_channels_last, // state (B, S, C)
+    DefaultValuedAttr<I64Attr, "0">:$state_window
   );
 
   let assemblyFormat = [{
@@ -4483,13 +4488,17 @@ def Hip_LinearAttentionOp : Hip_DpsOp_AutoReify<"linear_attention", [AttrSizedOp
       1. query       (required, T) - [B, T, H_q * d_k]
       2. key         (required, T) - [B, T, n_k * d_k], n_k | H_kv
       3. value       (required, T) - [B, T, H_kv * d_v]
-      4. past_state  (optional, S) - [B, H_kv, d_k, d_v]
+      4. past_state  (optional, S) - [[W,] B, H_kv, d_k, d_v]
       5. decay       (optional, T) - [B, T, H_kv * d_k] or [B, T, H_kv]
       6. beta        (optional, T) - [B, T, H_kv] or [B, T, 1]
 
     DPS output buffers:
       output        (required, T) - [B, T, max(H_q, H_kv) * d_v]
-      present_state (required, S) - [B, H_kv, d_k, d_v]
+      present_state (required, S) - [[W,] B, H_kv, d_k, d_v]
+
+    With `state_window = W > 0`, only past_state[W-1] is read. The trailing
+    per-token recurrent states from this call are written right-aligned to
+    present_state, and slot W-1 is always the final recurrent state.
 
     Example:
     ```mlir
@@ -4531,7 +4540,8 @@ def Hip_LinearAttentionOp : Hip_DpsOp_AutoReify<"linear_attention", [AttrSizedOp
     // Optional attributes (with defaults)
     DefaultValuedAttr<F32Attr, "0.0">:$scale,
     DefaultValuedAttr<I64Attr, "0">:$chunk_size,
-    DefaultValuedAttr<StrAttr, "\"gated_delta\"">:$update_rule
+    DefaultValuedAttr<StrAttr, "\"gated_delta\"">:$update_rule,
+    DefaultValuedAttr<I64Attr, "0">:$state_window
   );
 
   let assemblyFormat = [{

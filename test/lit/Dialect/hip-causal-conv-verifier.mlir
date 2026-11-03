@@ -62,3 +62,33 @@ func.func @state_channels_mismatch(%ctx: !hip.context,
        state_channels_last = true}
   return
 }
+
+// -----
+
+func.func @state_window_extent_mismatch(%ctx: !hip.context,
+    %input: memref<1x64x8xf16, 1>, %weight: memref<64x1x4xf16, 1>,
+    %output: memref<1x64x8xf16, 1>, %present: memref<3x1x64x3xf16, 1>) {
+  // expected-error @+1 {{state dim 0 must match state_window 4, got 3}}
+  hip.causal_conv_with_state(%ctx)
+      ins(%input, %weight :
+          memref<1x64x8xf16, 1>, memref<64x1x4xf16, 1>)
+      outs(%output, %present :
+           memref<1x64x8xf16, 1>, memref<3x1x64x3xf16, 1>)
+      {activation = "silu", ndim = 1 : i64, state_window = 4 : i64}
+  return
+}
+
+// -----
+
+func.func @state_window_channels_first_mismatch(%ctx: !hip.context,
+    %input: memref<1x64x8xf16, 1>, %weight: memref<64x1x4xf16, 1>,
+    %output: memref<1x64x8xf16, 1>, %present: memref<4x1x32x3xf16, 1>) {
+  // expected-error @+1 {{state dim 2 must match the input channels 64, got 32}}
+  hip.causal_conv_with_state(%ctx)
+      ins(%input, %weight :
+          memref<1x64x8xf16, 1>, memref<64x1x4xf16, 1>)
+      outs(%output, %present :
+           memref<1x64x8xf16, 1>, memref<4x1x32x3xf16, 1>)
+      {activation = "silu", ndim = 1 : i64, state_window = 4 : i64}
+  return
+}

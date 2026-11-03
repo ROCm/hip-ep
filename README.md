@@ -127,6 +127,7 @@ Tool availability depends on the build configuration; see the platform quick-sta
 - [Plugin interface design](docs/design/plugin-interface.md)
 - [Custom kernel design](docs/design/custom_kernel_design.md)
 - [Per-operation profiling](docs/design/per-op-profiling.md)
+- [Windowed recurrent state](docs/windowed_state.md)
 - [Remote development workflow](docs/remote-dev-workflow.md)
 
 ## Developer entry points
