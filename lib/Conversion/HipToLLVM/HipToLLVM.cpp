@@ -292,6 +292,7 @@ void ConvertHipToLLVMPass::runOnOperation() {
   populateSliceLoweringPatterns(typeConverter, patterns);
   populateScatterNDLoweringPatterns(typeConverter, patterns);
   populateNonZeroLoweringPatterns(typeConverter, patterns);
+  populateNonMaxSuppressionLoweringPatterns(typeConverter, patterns);
   populateReadbackDimLoweringPatterns(typeConverter, patterns);
   populateReadbackScalarLoweringPatterns(typeConverter, patterns);
   populateSizeLoweringPatterns(typeConverter, patterns);

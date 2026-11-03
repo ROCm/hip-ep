@@ -5,6 +5,7 @@
 
 #include "hip/Conversion/HipsrToLLVM/HipsrToLLVM.h"
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
+#include "hip/datatype_abi.h"
 
 #include "hip/Dialect/Hipsr/IR/HipsrLLVMLoweringUtils.h"
 #include "hip/Dialect/Hipsr/IR/HipsrShapeRegionPopulationUtils.h"
@@ -307,6 +308,33 @@ struct SliceLowering : ConvertOpToLLVMPattern<SliceOp> {
       }
       return extractContiguousMemRefPtr(memref, rewriter, loc);
     };
+    // Attribute slots are stored as host i64. A memref slot keeps its own
+    // element type, and every slot the runtime reads must agree.
+    auto slotIndexType = [](DenseI64ArrayAttr attr,
+                            Value operand) -> std::optional<int64_t> {
+      if (attr)
+        return HIPDNN_EP_DATATYPE_INT64;
+      if (!operand)
+        return HIPDNN_EP_DATATYPE_INT64;
+      auto elem = cast<MemRefType>(operand.getType()).getElementType();
+      if (elem.isInteger(64))
+        return HIPDNN_EP_DATATYPE_INT64;
+      if (elem.isInteger(32))
+        return HIPDNN_EP_DATATYPE_INT32;
+      return std::nullopt;
+    };
+    std::optional<int64_t> indexType =
+        slotIndexType(op.getStartsAttrAttr(), op.getStarts());
+    for (auto [attr, operand] :
+         {std::pair{op.getEndsAttrAttr(), op.getEnds()},
+          std::pair{op.getAxesAttrAttr(), op.getAxes()},
+          std::pair{op.getStepsAttrAttr(), op.getSteps()}}) {
+      std::optional<int64_t> slot = slotIndexType(attr, operand);
+      if (!indexType || !slot || *slot != *indexType)
+        return rewriter.notifyMatchFailure(
+            op, "slice index slots must share one i32 or i64 element type");
+    }
+
     DenseI64ArrayAttr startsAttr = op.getStartsAttrAttr();
     Value startsPtr = windowPtr(startsAttr, adaptor.getStarts());
     Value endsPtr = windowPtr(op.getEndsAttrAttr(), adaptor.getEnds());
@@ -319,9 +347,9 @@ struct SliceLowering : ConvertOpToLLVMPattern<SliceOp> {
         startsAttr ? static_cast<int64_t>(startsAttr.size())
                    : cast<ShapedType>(op.getStarts().getType()).getDimSize(0));
 
-    using SliceCall =
-        RuntimeFunc<i32, hostPtr, devicePtr, hostPtr, hostPtr, hostPtr, hostPtr,
-                    devicePtr, hostPtr, i64, hostPtr, i64, i64, i64, i64, i64>;
+    using SliceCall = RuntimeFunc<i32, hostPtr, devicePtr, hostPtr, hostPtr,
+                                  hostPtr, hostPtr, devicePtr, hostPtr, i64,
+                                  hostPtr, i64, i64, i64, i64, i64, i64>;
     auto sliceFunc =
         SliceCall::lookupOrCreateFn(rewriter, loc, module, kWrapSlice);
     if (failed(sliceFunc)) {
@@ -331,7 +359,7 @@ struct SliceLowering : ConvertOpToLLVMPattern<SliceOp> {
                                endsPtr, axesPtr, stepsPtr, adaptor.getInit(),
                                dataShape, dataType.getRank(), outputShape,
                                outputType.getRank(), entries, entries, entries,
-                               elementType))) {
+                               elementType, *indexType))) {
       return failure();
     }
     rewriter.eraseOp(op);
