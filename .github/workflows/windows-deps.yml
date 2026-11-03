@@ -337,13 +337,16 @@ jobs:
           AMDPR_KEY="${AMDPR_KEY// /-}"
           echo "value=windows-amdgpu-${EP_REF:0:7}-amdpr${AMDPR_KEY}-deps${DEPS_HASH}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
 
+      # Restore rather than lookup-only. A hit has to leave the tree on disk
+      # so this job can upload it: the build job's later cache restore can miss
+      # after a large LLVM save evicts the entry, and a skipped upload then
+      # leaves that job with nothing to download.
       - name: Probe amdgpu-artifacts
         id: cache-amdgpu
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/amdgpu-artifacts
           key: ${{ steps.key.outputs.value }}
-          lookup-only: true
 
       - name: Restore ort-install
         if: steps.cache-amdgpu.outputs.cache-hit != 'true'
@@ -498,7 +501,6 @@ jobs:
           key: ${{ steps.key.outputs.value }}
 
       - name: Upload amdgpu-artifacts
-        if: steps.cache-amdgpu.outputs.cache-hit != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.key.outputs.value }}
@@ -530,13 +532,14 @@ jobs:
         shell: bash
         run: echo "value=windows-oga-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
 
+      # Same as amdgpu: materialize a cache hit so the upload below always
+      # publishes this run's copy. A later eviction must not strand the build.
       - name: Probe oga-artifacts
         id: cache-oga
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/oga-artifacts
           key: ${{ steps.key.outputs.value }}
-          lookup-only: true
 
       - name: Restore ort-install
         if: steps.cache-oga.outputs.cache-hit != 'true'
@@ -728,7 +731,6 @@ jobs:
           key: ${{ steps.key.outputs.value }}
 
       - name: Upload oga-artifacts
-        if: steps.cache-oga.outputs.cache-hit != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.key.outputs.value }}

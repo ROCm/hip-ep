@@ -98,8 +98,8 @@ jobs:
           key: ${{ needs.prebuild.outputs.ort_cache_key }}
           fail-on-cache-miss: true
 
-      # Caches are the fast path. On a cold key the prebuild uploads the same
-      # tree, and that artifact is the reliable handoff inside this run.
+      # Caches are the fast path. The prebuild always uploads this run's copy,
+      # so download-artifact still works after a later cache eviction.
       - name: Restore amdgpu-artifacts
         id: restore-amdgpu
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1

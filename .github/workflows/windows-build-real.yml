@@ -72,9 +72,8 @@ jobs:
           key: ${{ inputs.ort_cache_key }}
           fail-on-cache-miss: true
 
-      # Caches are the fast path, but prebuild may have produced a brand-new
-      # artifact set earlier in this workflow run. Upload/download-artifact is
-      # the reliable same-run handoff in that case.
+      # Caches are the fast path. The prebuild always uploads this run's copy,
+      # so download-artifact still works after a later cache eviction.
       - name: Restore amdgpu-artifacts cache
         id: restore-amdgpu
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
