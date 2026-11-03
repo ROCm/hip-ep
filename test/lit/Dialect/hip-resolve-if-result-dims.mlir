@@ -8,7 +8,7 @@
 // arithmetic on the captured dims, with no readback, and the division must be
 // guarded because the untaken branch's size is computed too.
 
-// RUN: hip-mlir-opt --hip-resolve-if-result-dims --cse %s | FileCheck %s
+// RUN: hip-mlir-opt --hip-resolve-if-result-dims --cse --split-input-file %s | FileCheck %s
 
 module {
   func.func @main_graph(%ctx: !hip.context, %c: i1, %x: tensor<?x?xf32>)
@@ -86,3 +86,157 @@ module {
 // CHECK: hip.if
 // CHECK-LABEL: func.func private @then_n0
 // CHECK: hip.readback_scalar
+
+// -----
+
+// A shape entry narrowed to i32 before it reaches the shape tensor keeps the
+// truncation: the caller re-extends the narrowed value instead of reusing the
+// index.
+module {
+  func.func @narrow_from_elements(%ctx: !hip.context, %c: i1,
+                                  %x: tensor<?x?xf32>) -> tensor<?x8x64xf32> {
+    %d0 = hip.if_result_dim(%c) captures(%x : tensor<?x?xf32>)
+        then @narrow_then else @narrow_else {result_index = 0 : i32, dim = 0 : i64}
+    %init = tensor.empty(%d0) : tensor<?x8x64xf32>
+    %r = hip.if(%ctx, %c) outs(%init : tensor<?x8x64xf32>)
+        captures(%x : tensor<?x?xf32>) -> (tensor<?x8x64xf32>)
+        then @narrow_then else @narrow_else {num_outputs = 1 : i32}
+    return %r : tensor<?x8x64xf32>
+  }
+
+  func.func private @narrow_then(%ctx: !hip.context, %x: tensor<?x?xf32>)
+      -> tensor<?x8x64xf32> {
+    %c0 = arith.constant 0 : index
+    %n = tensor.dim %x, %c0 : tensor<?x?xf32>
+    %n32 = arith.index_cast %n : index to i32
+    %c8 = arith.constant 8 : i32
+    %c64 = arith.constant 64 : i32
+    %shape = tensor.from_elements %n32, %c8, %c64 : tensor<3xi32>
+    %y = tensor.reshape %x(%shape)
+        : (tensor<?x?xf32>, tensor<3xi32>) -> tensor<?x8x64xf32>
+    return %y : tensor<?x8x64xf32>
+  }
+
+  func.func private @narrow_else(%ctx: !hip.context, %x: tensor<?x?xf32>)
+      -> tensor<?x8x64xf32> {
+    %shape = arith.constant dense<[4, 8, 64]> : tensor<3xi64>
+    %y = tensor.reshape %x(%shape)
+        : (tensor<?x?xf32>, tensor<3xi64>) -> tensor<?x8x64xf32>
+    return %y : tensor<?x8x64xf32>
+  }
+}
+
+// CHECK-LABEL: func.func @narrow_from_elements(
+// CHECK-SAME: %{{.*}}: !hip.context, %[[COND:.*]]: i1, %[[X:.*]]: tensor<?x?xf32>)
+// CHECK: %[[N:.*]] = tensor.dim %[[X]], %{{.*}} : tensor<?x?xf32>
+// CHECK: %[[N32:.*]] = arith.index_cast %[[N]] : index to i32
+// CHECK: %[[THEN:.*]] = arith.index_cast %[[N32]] : i32 to index
+// CHECK: %[[SIZE:.*]] = arith.select %[[COND]], %[[THEN]], %{{.*}} : index
+// CHECK: tensor.empty(%[[SIZE]]) : tensor<?x8x64xf32>
+
+// -----
+
+// hip.cast to i32 truncates and sign-extends, rather than passing the i64
+// value through.
+module {
+  func.func @narrow_hip_cast(%ctx: !hip.context, %c: i1,
+                             %x: tensor<?x?xf32>) -> tensor<?x8x64xf32> {
+    %d0 = hip.if_result_dim(%c) captures(%x : tensor<?x?xf32>)
+        then @cast_then else @cast_else {result_index = 0 : i32, dim = 0 : i64}
+    %init = tensor.empty(%d0) : tensor<?x8x64xf32>
+    %r = hip.if(%ctx, %c) outs(%init : tensor<?x8x64xf32>)
+        captures(%x : tensor<?x?xf32>) -> (tensor<?x8x64xf32>)
+        then @cast_then else @cast_else {num_outputs = 1 : i32}
+    return %r : tensor<?x8x64xf32>
+  }
+
+  func.func private @cast_then(%ctx: !hip.context, %x: tensor<?x?xf32>)
+      -> tensor<?x8x64xf32> {
+    %c0 = arith.constant 0 : index
+    %n = tensor.dim %x, %c0 : tensor<?x?xf32>
+    %n64 = arith.index_cast %n : index to i64
+    %c8 = arith.constant 8 : i64
+    %c64 = arith.constant 64 : i64
+    %shape = tensor.from_elements %n64, %c8, %c64 : tensor<3xi64>
+    %cast_init = tensor.empty() : tensor<3xi32>
+    %shape32 = hip.cast(%ctx) ins(%shape : tensor<3xi64>)
+        outs(%cast_init : tensor<3xi32>) {to = 6 : i64} : tensor<3xi32>
+    %y = tensor.reshape %x(%shape32)
+        : (tensor<?x?xf32>, tensor<3xi32>) -> tensor<?x8x64xf32>
+    return %y : tensor<?x8x64xf32>
+  }
+
+  func.func private @cast_else(%ctx: !hip.context, %x: tensor<?x?xf32>)
+      -> tensor<?x8x64xf32> {
+    %shape = arith.constant dense<[4, 8, 64]> : tensor<3xi64>
+    %y = tensor.reshape %x(%shape)
+        : (tensor<?x?xf32>, tensor<3xi64>) -> tensor<?x8x64xf32>
+    return %y : tensor<?x8x64xf32>
+  }
+}
+
+// CHECK-LABEL: func.func @narrow_hip_cast(
+// CHECK-SAME: %{{.*}}: !hip.context, %[[COND:.*]]: i1, %[[X:.*]]: tensor<?x?xf32>)
+// CHECK: %[[N:.*]] = tensor.dim %[[X]], %{{.*}} : tensor<?x?xf32>
+// CHECK: %[[N32:.*]] = arith.index_cast %[[N]] : index to i32
+// CHECK: %[[THEN:.*]] = arith.index_cast %[[N32]] : i32 to index
+// CHECK: %[[SIZE:.*]] = arith.select %[[COND]], %[[THEN]], %{{.*}} : index
+// CHECK: tensor.empty(%[[SIZE]]) : tensor<?x8x64xf32>
+// CHECK-NOT: hip.if_result_dim
+// CHECK: hip.if
+
+// -----
+
+// hip.div on a shape tensor: the untaken branch's divisor may be zero (an
+// empty input), and its size is computed anyway, so the divisor is guarded.
+module {
+  func.func @guarded_hip_div(%ctx: !hip.context, %c: i1,
+                             %x: tensor<?x?xf32>) -> tensor<?x8x64xf32> {
+    %d0 = hip.if_result_dim(%c) captures(%x : tensor<?x?xf32>)
+        then @div_then else @div_else {result_index = 0 : i32, dim = 0 : i64}
+    %init = tensor.empty(%d0) : tensor<?x8x64xf32>
+    %r = hip.if(%ctx, %c) outs(%init : tensor<?x8x64xf32>)
+        captures(%x : tensor<?x?xf32>) -> (tensor<?x8x64xf32>)
+        then @div_then else @div_else {num_outputs = 1 : i32}
+    return %r : tensor<?x8x64xf32>
+  }
+
+  func.func private @div_then(%ctx: !hip.context, %x: tensor<?x?xf32>)
+      -> tensor<?x8x64xf32> {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %n = tensor.dim %x, %c0 : tensor<?x?xf32>
+    %m = tensor.dim %x, %c1 : tensor<?x?xf32>
+    %n64 = arith.index_cast %n : index to i64
+    %m64 = arith.index_cast %m : index to i64
+    %one = arith.constant 1 : i64
+    %c8 = arith.constant 8 : i64
+    %c64 = arith.constant 64 : i64
+    %num = tensor.from_elements %n64, %c8, %c64 : tensor<3xi64>
+    %den = tensor.from_elements %m64, %one, %one : tensor<3xi64>
+    %q_init = tensor.empty() : tensor<3xi64>
+    %q = hip.div(%ctx) ins(%num, %den : tensor<3xi64>, tensor<3xi64>)
+        outs(%q_init : tensor<3xi64>) : tensor<3xi64>
+    %y = tensor.reshape %x(%q)
+        : (tensor<?x?xf32>, tensor<3xi64>) -> tensor<?x8x64xf32>
+    return %y : tensor<?x8x64xf32>
+  }
+
+  func.func private @div_else(%ctx: !hip.context, %x: tensor<?x?xf32>)
+      -> tensor<?x8x64xf32> {
+    %shape = arith.constant dense<[4, 8, 64]> : tensor<3xi64>
+    %y = tensor.reshape %x(%shape)
+        : (tensor<?x?xf32>, tensor<3xi64>) -> tensor<?x8x64xf32>
+    return %y : tensor<?x8x64xf32>
+  }
+}
+
+// CHECK-LABEL: func.func @guarded_hip_div(
+// CHECK-SAME: %{{.*}}: !hip.context, %[[COND:.*]]: i1, %[[X:.*]]: tensor<?x?xf32>)
+// CHECK-DAG: %[[N:.*]] = tensor.dim %[[X]], %c0
+// CHECK-DAG: %[[M:.*]] = tensor.dim %[[X]], %c1
+// CHECK: %[[IS_ZERO:.*]] = arith.cmpi eq, %[[M]], %{{.*}} : index
+// CHECK: %[[DIVISOR:.*]] = arith.select %[[IS_ZERO]], %{{.*}}, %[[M]] : index
+// CHECK: %[[THEN:.*]] = arith.divsi %[[N]], %[[DIVISOR]] : index
+// CHECK: %[[SIZE:.*]] = arith.select %[[COND]], %[[THEN]], %{{.*}} : index
+// CHECK: tensor.empty(%[[SIZE]]) : tensor<?x8x64xf32>
