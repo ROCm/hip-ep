@@ -228,11 +228,14 @@ def DecomposeConvTransposePass
     stride to. Reassembly is one strided `tensor.insert_slice` per residue,
     which bufferizes to a `memref.subview` plus a copy.
 
-    Restricted to the statically shaped, non-grouped, dilation-1 case with
-    `stride <= kernel` (so the residues tile the output with no holes) and a
-    compile-time filter. Anything else is left for the MIOpen path.
+    Rank-4 inputs must be statically shaped. A rank-3 input is expanded to
+    rank 4 with a unit height so dynamic batch and width stay legal; the
+    filter and residue geometry stay static. Grouped, dilated, and
+    `stride > kernel` cases, and filters that are not readable at compile
+    time, are left for the MIOpen path.
   }];
   let dependentDialects = [
+    "mlir::arith::ArithDialect",
     "mlir::tensor::TensorDialect"
   ];
 }
