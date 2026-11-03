@@ -111,6 +111,7 @@ add_library(OnnxToHip STATIC
   AbsConversion.cpp
   SizeConversion.cpp
   NonZeroConversion.cpp
+  NonMaxSuppressionConversion.cpp
   ConcatConversion.cpp
   PoolConversion.cpp
   ResizeConversion.cpp

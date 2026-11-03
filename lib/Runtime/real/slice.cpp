@@ -29,10 +29,8 @@
 //   2. Resolve to per-input-axis (start, step) per ONNX rules.
 //   3. Launch `hip_slice` -- one thread per output element.
 //
-// We assume the four index tensors are INT64 -- the standard ONNX form
-// and what every test in the LIT suite uses. If a model produces INT32
-// index tensors we will need to dispatch on stride (the ABI omits the
-// dtype for these operands today).
+// starts, ends, axes and steps share one element type, INT32 or INT64,
+// passed as `index_type`. INT32 values are sign-extended after the copy.
 
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
@@ -67,7 +65,7 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
                int64_t data_rank, const int64_t *output_shape,
                int64_t output_rank, int64_t starts_num_elements,
                int64_t axes_num_elements, int64_t steps_num_elements,
-               int64_t data_type) {
+               int64_t data_type, int64_t index_type) {
   // (Slice runtime entry trace removed; was used for the slice-empty-buffer
   // root-cause investigation. Re-add with a HIPDNN_EP_DEBUG gate if needed.)
   OP_PROFILE(
@@ -80,6 +78,17 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
         return std::string(b);
       },
       state);
+
+  // Empty tensors have no backing allocation in the pool (their data pointer
+  // is null). Slicing an empty result is a no-op, so handle it before
+  // validating data/index/output pointers.
+  if (output_shape && output_rank >= 0) {
+    int64_t out_num_elements = 1;
+    for (int64_t d = 0; d < output_rank; ++d)
+      out_num_elements *= output_shape[d];
+    if (out_num_elements == 0)
+      return 0;
+  }
 
   if (!state || !starts || !ends || !data_shape || !output_shape) {
     RUNTIME_DEBUG_LOG("[REAL] wrap_slice: null required argument\n");
@@ -171,34 +180,53 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
     return -1;
   }
 
+  if (index_type != HIPDNN_EP_DATATYPE_INT32 &&
+      index_type != HIPDNN_EP_DATATYPE_INT64) {
+    fprintf(stderr,
+            "[REAL] wrap_slice: index_type=%s(%lld) must be i32 or i64\n",
+            hipdnn_ep_datatype_name(index_type), (long long)index_type);
+    return -1;
+  }
+  const bool narrow = index_type == HIPDNN_EP_DATATYPE_INT32;
+  const size_t indexBytes = narrow ? sizeof(int32_t) : sizeof(int64_t);
+
   hipStream_t hip_stream =
       static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
 
-  // D2H the (typically tiny) index tensors. Treat them as INT64 -- the
-  // standard form for ONNX Slice indices and what every model in scope
-  // emits. If a future model uses INT32 we'd need a dtype param in the
-  // ABI; for now bail explicitly rather than silently mis-read.
+  // D2H the (typically tiny) index tensors. INT32 is copied into a side
+  // buffer and sign-extended once the stream has finished.
   const int64_t K = starts_num_elements;
   std::vector<int64_t> starts_host(K);
   std::vector<int64_t> ends_host(K);
   std::vector<int64_t> axes_host;
   std::vector<int64_t> steps_host;
+  std::vector<int32_t> starts32, ends32, axes32, steps32;
 
-  hipError_t err =
-      hipMemcpyAsync(starts_host.data(), starts, K * sizeof(int64_t),
-                     hipMemcpyDeviceToHost, hip_stream);
-  if (err != hipSuccess) {
-    fprintf(stderr, "[REAL] wrap_slice: starts D2H failed: %s\n",
-            hipGetErrorString(err));
-    return -1;
-  }
-  err = hipMemcpyAsync(ends_host.data(), ends, K * sizeof(int64_t),
+  auto copyIndices = [&](void *dst, const void *src, int64_t count,
+                         const char *what) -> bool {
+    hipError_t copyErr =
+        hipMemcpyAsync(dst, src, static_cast<size_t>(count) * indexBytes,
                        hipMemcpyDeviceToHost, hip_stream);
-  if (err != hipSuccess) {
-    fprintf(stderr, "[REAL] wrap_slice: ends D2H failed: %s\n",
-            hipGetErrorString(err));
+    if (copyErr != hipSuccess) {
+      fprintf(stderr, "[REAL] wrap_slice: %s D2H failed: %s\n", what,
+              hipGetErrorString(copyErr));
+      return false;
+    }
+    return true;
+  };
+  auto indexDest = [&](std::vector<int64_t> &wide, std::vector<int32_t> &raw,
+                       int64_t count) -> void * {
+    if (narrow) {
+      raw.resize(static_cast<size_t>(count));
+      return raw.data();
+    }
+    wide.resize(static_cast<size_t>(count));
+    return wide.data();
+  };
+
+  if (!copyIndices(indexDest(starts_host, starts32, K), starts, K, "starts") ||
+      !copyIndices(indexDest(ends_host, ends32, K), ends, K, "ends"))
     return -1;
-  }
 
   if (axes && axes_num_elements > 0) {
     if (axes_num_elements != K) {
@@ -208,14 +236,8 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
               (long long)axes_num_elements, (long long)K);
       return -1;
     }
-    axes_host.resize(K);
-    err = hipMemcpyAsync(axes_host.data(), axes, K * sizeof(int64_t),
-                         hipMemcpyDeviceToHost, hip_stream);
-    if (err != hipSuccess) {
-      fprintf(stderr, "[REAL] wrap_slice: axes D2H failed: %s\n",
-              hipGetErrorString(err));
+    if (!copyIndices(indexDest(axes_host, axes32, K), axes, K, "axes"))
       return -1;
-    }
   }
 
   if (steps && steps_num_elements > 0) {
@@ -226,21 +248,29 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
               (long long)steps_num_elements, (long long)K);
       return -1;
     }
-    steps_host.resize(K);
-    err = hipMemcpyAsync(steps_host.data(), steps, K * sizeof(int64_t),
-                         hipMemcpyDeviceToHost, hip_stream);
-    if (err != hipSuccess) {
-      fprintf(stderr, "[REAL] wrap_slice: steps D2H failed: %s\n",
-              hipGetErrorString(err));
+    if (!copyIndices(indexDest(steps_host, steps32, K), steps, K, "steps"))
       return -1;
-    }
   }
 
-  err = hipStreamSynchronize(hip_stream);
+  hipError_t err = hipStreamSynchronize(hip_stream);
   if (err != hipSuccess) {
     fprintf(stderr, "[REAL] wrap_slice: stream sync after D2H failed: %s\n",
             hipGetErrorString(err));
     return -1;
+  }
+  if (narrow) {
+    auto widen = [](std::vector<int64_t> &dst,
+                    const std::vector<int32_t> &src) {
+      dst.resize(src.size());
+      for (size_t i = 0; i < src.size(); ++i)
+        dst[i] = src[i];
+    };
+    widen(starts_host, starts32);
+    widen(ends_host, ends32);
+    if (!axes32.empty())
+      widen(axes_host, axes32);
+    if (!steps32.empty())
+      widen(steps_host, steps32);
   }
 
   // Build per-input-axis (start, step) arrays. Axes not listed in `axes`

@@ -838,6 +838,50 @@ static RankedTensorType inferShapeOpResult(Operation *op) {
   return rankedLike(op->getResult(0).getType(), {length});
 }
 
+/// `onnx.Squeeze` drops `axes` (attribute, or a constant operand). Output
+/// rank is input rank minus the number of axes. A missing axes list drops
+/// every static size-1 dim; a dynamic dim with no axes list does not fix
+/// the rank. A squeezed axis is omitted even when its extent is dynamic:
+/// ONNX still removes that axis, and the lowering slices it to 1.
+static RankedTensorType inferSqueezeResult(Operation *op) {
+  if (op->getNumOperands() < 1 || op->getNumResults() != 1)
+    return {};
+  auto inputType = dyn_cast<RankedTensorType>(op->getOperand(0).getType());
+  if (!inputType)
+    return {};
+  SmallVector<int64_t> axes;
+  if (!readIntArrayAttr(op, "axes", axes)) {
+    if (op->getNumOperands() < 2 || isOnnxNone(op->getOperand(1))) {
+      SmallVector<int64_t> shape;
+      for (int64_t dim : inputType.getShape()) {
+        if (ShapedType::isDynamic(dim))
+          return {};
+        if (dim != 1)
+          shape.push_back(dim);
+      }
+      return rankedLike(op->getResult(0).getType(), shape);
+    }
+    auto axisValues = readConstInt1D(op->getOperand(1));
+    if (!axisValues)
+      return {};
+    axes = std::move(*axisValues);
+  }
+  int64_t rank = inputType.getRank();
+  SmallVector<bool> drop(rank, false);
+  for (int64_t axis : axes) {
+    if (axis < 0)
+      axis += rank;
+    if (axis < 0 || axis >= rank || drop[axis])
+      return {};
+    drop[axis] = true;
+  }
+  SmallVector<int64_t> shape;
+  for (int64_t i = 0; i < rank; ++i)
+    if (!drop[i])
+      shape.push_back(inputType.getDimSize(i));
+  return rankedLike(op->getResult(0).getType(), shape);
+}
+
 /// `onnx.Unsqueeze` inserts unit dims at `axes` (attribute, or a constant
 /// operand). Output rank is input rank plus the number of axes.
 static RankedTensorType inferUnsqueezeResult(Operation *op) {
@@ -872,9 +916,53 @@ static RankedTensorType inferUnsqueezeResult(Operation *op) {
   return rankedLike(op->getResult(0).getType(), shape);
 }
 
+/// Rank is the input rank when starts and ends are not compile-time
+/// constants. A known sliced axis becomes dynamic. Unknown axes make
+/// every extent dynamic. A shape already stored on the result is kept by
+/// `mergeInferredType`.
+static RankedTensorType inferSliceUnknownBounds(Operation *op,
+                                                RankedTensorType inputType) {
+  int64_t rank = inputType.getRank();
+  std::optional<int64_t> count;
+  if (op->getNumOperands() >= 2) {
+    if (auto startsType =
+            dyn_cast<RankedTensorType>(op->getOperand(1).getType()))
+      if (startsType.getRank() == 1 && !startsType.isDynamicDim(0))
+        count = startsType.getDimSize(0);
+  }
+  SmallVector<int64_t> axes;
+  bool axesKnown = false;
+  if (readIntArrayAttr(op, "axes", axes)) {
+    axesKnown = true;
+  } else if (op->getNumOperands() >= 4 && !isOnnxNone(op->getOperand(3))) {
+    if (auto axisValues = readConstInt1D(op->getOperand(3))) {
+      axes = std::move(*axisValues);
+      axesKnown = true;
+    }
+  } else if (count && *count <= rank) {
+    axes.resize(*count);
+    for (int64_t i = 0; i < *count; ++i)
+      axes[i] = i;
+    axesKnown = true;
+  }
+  SmallVector<int64_t> shape(rank, ShapedType::kDynamic);
+  if (!axesKnown)
+    return rankedLike(op->getResult(0).getType(), shape);
+  shape.assign(inputType.getShape().begin(), inputType.getShape().end());
+  for (int64_t axis : axes) {
+    if (axis < 0)
+      axis += rank;
+    if (axis < 0 || axis >= rank)
+      return {};
+    shape[axis] = ShapedType::kDynamic;
+  }
+  return rankedLike(op->getResult(0).getType(), shape);
+}
+
 /// `onnx.Slice`. Rank is unchanged. A static axis extent becomes the number
 /// of elements from start to end. Bounds come from attributes, or from
-/// constant inputs. A runtime bound yields no type, so a stored shape stays.
+/// constant inputs. A runtime bound still establishes rank; a stored shape
+/// is kept.
 static RankedTensorType inferSliceResult(Operation *op) {
   if (op->getNumOperands() < 1 || op->getNumResults() != 1)
     return {};
@@ -889,7 +977,7 @@ static RankedTensorType inferSliceResult(Operation *op) {
     auto startValues = readConstInt1D(op->getOperand(1));
     auto endValues = readConstInt1D(op->getOperand(2));
     if (!startValues || !endValues)
-      return {};
+      return inferSliceUnknownBounds(op, inputType);
     starts = std::move(*startValues);
     ends = std::move(*endValues);
   }
@@ -897,7 +985,7 @@ static RankedTensorType inferSliceResult(Operation *op) {
       !isOnnxNone(op->getOperand(3))) {
     auto axisValues = readConstInt1D(op->getOperand(3));
     if (!axisValues)
-      return {};
+      return inferSliceUnknownBounds(op, inputType);
     axes = std::move(*axisValues);
   }
   if (axes.empty()) {
@@ -909,7 +997,7 @@ static RankedTensorType inferSliceResult(Operation *op) {
       !isOnnxNone(op->getOperand(4))) {
     auto stepValues = readConstInt1D(op->getOperand(4));
     if (!stepValues)
-      return {};
+      return inferSliceUnknownBounds(op, inputType);
     steps = std::move(*stepValues);
   }
   if (steps.empty())
@@ -1456,6 +1544,8 @@ static LogicalResult inferUnrankedOnnxResults(Operation *op,
   }
   if (name == "onnx.Shape")
     return pushSingle(inferShapeOpResult(op));
+  if (name == "onnx.Squeeze")
+    return pushSingle(inferSqueezeResult(op));
   if (name == "onnx.Unsqueeze")
     return pushSingle(inferUnsqueezeResult(op));
   if (name == "onnx.Slice")

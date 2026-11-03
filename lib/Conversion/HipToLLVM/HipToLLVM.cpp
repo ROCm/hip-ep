@@ -286,6 +286,7 @@ populateLoweringPatterns(LLVMTypeConverter &typeConverter,
   populateSliceLoweringPatterns(typeConverter, patterns);
   populateScatterNDLoweringPatterns(typeConverter, patterns);
   populateNonZeroLoweringPatterns(typeConverter, patterns);
+  populateNonMaxSuppressionLoweringPatterns(typeConverter, patterns);
   populateReadbackDimLoweringPatterns(typeConverter, patterns, hostScalars);
   populateReadbackScalarLoweringPatterns(typeConverter, patterns, hostScalars);
   populateSizeLoweringPatterns(typeConverter, patterns);
