@@ -376,35 +376,6 @@ __global__ void resize_linear_3d_kernel(const T* __restrict__ input,
   output[tid] = from_float<T>(v);
 }
 
-// Nearest is an index copy, so integer element types do not need to_float.
-// Kept separate from launch<> so integer dtypes do not instantiate the
-// linear kernel.
-template <typename T>
-static int launch_nearest(hipStream_t stream, const void* input, void* output,
-                          int spatial_rank, int64_t N, int64_t C,
-                          int64_t in0, int64_t in1, int64_t in2,
-                          int64_t out0, int64_t out1, int64_t out2,
-                          int coord_transform, int nearest_mode,
-                          float s0, float s1, float s2) {
-  int64_t total = N * C * out0 * out1 * out2;
-  if (total <= 0) return 0;
-  int block = 256;
-  int64_t grid = (total + block - 1) / block;
-  hipLaunchKernelGGL(resize_nearest_kernel<T>,
-                     dim3(static_cast<unsigned>(grid)), dim3(block),
-                     0, stream,
-                     static_cast<const T*>(input), static_cast<T*>(output),
-                     spatial_rank, N, C, in0, in1, in2,
-                     out0, out1, out2,
-                     coord_transform, nearest_mode, s0, s1, s2, total);
-  hipError_t err = hipGetLastError();
-  if (err != hipSuccess) {
-    fprintf(stderr, "[custom_kernels] hip_resize launch failed: %s\n",
-            hipGetErrorString(err));
-  }
-  return static_cast<int>(err);
-}
-
 static bool get_integer_upsample_scale(int64_t in_dim, int64_t out_dim,
                                        float supplied_scale,
                                        int64_t &integer_scale) {
