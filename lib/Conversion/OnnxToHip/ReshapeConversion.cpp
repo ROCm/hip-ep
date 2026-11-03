@@ -954,6 +954,42 @@ struct UnsqueezeToStdTensor : public mlir::RewritePattern {
 // Squeeze -> standard tensor ops (zero-cost metadata reinterpretation)
 //===----------------------------------------------------------------------===//
 
+/// Axes to drop, from the attribute or a constant operand. Negative axes are
+/// normalized against `rank`. An unknown or out-of-range list returns nullopt.
+static std::optional<llvm::SmallVector<int64_t>>
+readSqueezeAxes(mlir::Operation *op, mlir::Value axesValue, int64_t rank) {
+  llvm::SmallVector<int64_t> axes;
+  if (auto dense = op->getAttrOfType<mlir::DenseI64ArrayAttr>("axes")) {
+    axes.assign(dense.asArrayRef().begin(), dense.asArrayRef().end());
+  } else if (auto array = op->getAttrOfType<mlir::ArrayAttr>("axes")) {
+    for (mlir::Attribute attr : array) {
+      auto intAttr = mlir::dyn_cast<mlir::IntegerAttr>(attr);
+      if (!intAttr)
+        return std::nullopt;
+      axes.push_back(intAttr.getValue().getSExtValue());
+    }
+  } else if (axesValue) {
+    mlir::DenseElementsAttr dense = getConstantDense(axesValue);
+    if (!dense || !dense.getElementType().isIntOrIndex())
+      return std::nullopt;
+    for (llvm::APInt element : dense.getValues<llvm::APInt>())
+      axes.push_back(element.getSExtValue());
+  } else {
+    return std::nullopt;
+  }
+  if (axes.empty())
+    return std::nullopt;
+  llvm::SmallBitVector seen(rank);
+  for (int64_t &axis : axes) {
+    if (axis < 0)
+      axis += rank;
+    if (axis < 0 || axis >= rank || seen.test(axis))
+      return std::nullopt;
+    seen.set(axis);
+  }
+  return axes;
+}
+
 /// onnx.Squeeze -> tensor.collapse_shape (zero-cost metadata operation).
 struct SqueezeToStdTensor : public mlir::RewritePattern {
   SqueezeToStdTensor(mlir::MLIRContext *ctx)
@@ -1009,14 +1045,60 @@ struct SqueezeToStdTensor : public mlir::RewritePattern {
       return mlir::success();
     }
 
+    mlir::Value collapseInput = data;
+    mlir::RankedTensorType collapseType = inputType;
     auto reassocOpt =
         mlir::getReassociationIndicesForReshape(inputType, outputType);
-    if (!reassocOpt)
-      return rewriter.notifyMatchFailure(
-          op, "cannot compute squeeze reassociation");
+    // A dynamic squeezed axis is not a static 1, so collapse_shape cannot
+    // drop it directly. ONNX guarantees that axis is 1 at runtime. Slice it
+    // to a unit extent, then collapse.
+    if (!reassocOpt) {
+      auto axesToDrop = readSqueezeAxes(op, axes, inputType.getRank());
+      if (!axesToDrop || (int64_t)axesToDrop->size() !=
+                             inputType.getRank() - outputType.getRank())
+        return rewriter.notifyMatchFailure(
+            op, "cannot compute squeeze reassociation");
+      int64_t inputRank = inputType.getRank();
+      llvm::SmallBitVector drop(inputRank);
+      for (int64_t axis : *axesToDrop)
+        drop.set(axis);
+      llvm::SmallVector<int64_t> slicedShape;
+      llvm::SmallVector<mlir::OpFoldResult> offsets(inputRank,
+                                                    rewriter.getIndexAttr(0));
+      llvm::SmallVector<mlir::OpFoldResult> sizes;
+      llvm::SmallVector<mlir::OpFoldResult> strides(inputRank,
+                                                    rewriter.getIndexAttr(1));
+      slicedShape.reserve(inputRank);
+      sizes.reserve(inputRank);
+      for (int64_t i = 0; i < inputRank; ++i) {
+        int64_t dim = inputType.getDimSize(i);
+        if (drop.test(i)) {
+          if (!mlir::ShapedType::isDynamic(dim) && dim != 1)
+            return rewriter.notifyMatchFailure(op, "squeezed axis is not 1");
+          slicedShape.push_back(1);
+          sizes.push_back(rewriter.getIndexAttr(1));
+          continue;
+        }
+        slicedShape.push_back(dim);
+        if (mlir::ShapedType::isDynamic(dim))
+          sizes.push_back(
+              mlir::tensor::DimOp::create(rewriter, loc, data, i).getResult());
+        else
+          sizes.push_back(rewriter.getIndexAttr(dim));
+      }
+      collapseType =
+          mlir::RankedTensorType::get(slicedShape, inputType.getElementType());
+      collapseInput = mlir::tensor::ExtractSliceOp::create(
+          rewriter, loc, collapseType, data, offsets, sizes, strides);
+      reassocOpt =
+          mlir::getReassociationIndicesForReshape(collapseType, outputType);
+      if (!reassocOpt)
+        return rewriter.notifyMatchFailure(
+            op, "cannot compute squeeze reassociation");
+    }
 
     auto collapseOp = mlir::tensor::CollapseShapeOp::create(
-        rewriter, loc, outputType, data, *reassocOpt);
+        rewriter, loc, outputType, collapseInput, *reassocOpt);
     rewriter.replaceOp(op, collapseOp.getResult());
     return mlir::success();
   }
