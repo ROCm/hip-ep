@@ -4,9 +4,10 @@
 ##
 name: Windows Deps
 
-# Prebuilds the two heavy from-source dependencies into cached install prefixes
-# and returns their cache keys. Callers restore those prefixes with
-# fail-on-cache-miss, so a green run here is what guarantees the caches exist.
+# Prebuilds the heavy dependencies and returns their cache keys. Each job also
+# uploads that tree as a workflow artifact. Callers restore the cache and, on a
+# miss, download the artifact: a later save can evict an entry before the build
+# job runs, and a lookup-only hit does not leave a copy in this run.
 on:
   workflow_call:
     outputs:
@@ -83,13 +84,14 @@ jobs:
           echo "commit=$LLVM_COMMIT" >> "$GITHUB_OUTPUT"
           echo "value=dep-llvm-${LLVM_COMMIT}" >> "$GITHUB_OUTPUT"
 
+      # Restore rather than lookup-only so a hit leaves llvm-install on disk
+      # for the upload below.
       - name: Probe llvm-install
         id: cache-llvm
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/llvm-install
           key: ${{ steps.key.outputs.value }}
-          lookup-only: true
 
       - name: Setup Python 3.14
         if: steps.cache-llvm.outputs.cache-hit != 'true'
@@ -159,6 +161,14 @@ jobs:
           path: ${{ runner.workspace }}/llvm-install
           key: ${{ steps.key.outputs.value }}
 
+      - name: Upload llvm-install
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.key.outputs.value }}
+          path: ${{ runner.workspace }}/llvm-install
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Save sccache directory
         if: always() && steps.cache-llvm.outputs.cache-hit != 'true' && github.ref_name == 'main'
         continue-on-error: true
@@ -182,13 +192,14 @@ jobs:
         shell: bash
         run: echo "value=dep-ort-${{ env.ONNXRUNTIME_VERSION }}-ortpr-${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
 
+      # Restore rather than lookup-only so a hit leaves ort-install on disk
+      # for the upload below.
       - name: Probe ort-install
         id: cache-ort
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/ort-install
           key: ${{ steps.key.outputs.value }}
-          lookup-only: true
 
       - name: Setup Python 3.14
         if: steps.cache-ort.outputs.cache-hit != 'true'
@@ -298,6 +309,14 @@ jobs:
           path: ${{ runner.workspace }}/ort-install
           key: ${{ steps.key.outputs.value }}
 
+      - name: Upload ort-install
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.key.outputs.value }}
+          path: ${{ runner.workspace }}/ort-install
+          if-no-files-found: error
+          retention-days: 1
+
   amdgpu:
     needs: ort
     runs-on: windows-2022
@@ -349,12 +368,19 @@ jobs:
           key: ${{ steps.key.outputs.value }}
 
       - name: Restore ort-install
+        id: restore-ort
         if: steps.cache-amdgpu.outputs.cache-hit != 'true'
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/ort-install
           key: ${{ needs.ort.outputs.cache_key }}
-          fail-on-cache-miss: true
+
+      - name: Download ort-install
+        if: steps.cache-amdgpu.outputs.cache-hit != 'true' && steps.restore-ort.outputs.cache-hit != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.ort.outputs.cache_key }}
+          path: ${{ runner.workspace }}/ort-install
 
       - name: Setup Python 3.14
         if: steps.cache-amdgpu.outputs.cache-hit != 'true'
@@ -542,12 +568,19 @@ jobs:
           key: ${{ steps.key.outputs.value }}
 
       - name: Restore ort-install
+        id: restore-ort
         if: steps.cache-oga.outputs.cache-hit != 'true'
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/ort-install
           key: ${{ needs.ort.outputs.cache_key }}
-          fail-on-cache-miss: true
+
+      - name: Download ort-install
+        if: steps.cache-oga.outputs.cache-hit != 'true' && steps.restore-ort.outputs.cache-hit != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.ort.outputs.cache_key }}
+          path: ${{ runner.workspace }}/ort-install
 
       - name: Setup Python 3.14
         if: steps.cache-oga.outputs.cache-hit != 'true'
