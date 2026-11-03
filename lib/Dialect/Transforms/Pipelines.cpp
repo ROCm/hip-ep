@@ -128,6 +128,13 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   //     the reference cases.
   pm.addPass(mlir::hip::createInferShapesPass());
 
+  // 1b-if. Size each dynamic hip.if output. onnx-if-outline left a
+  //        `hip.if_result_dim` placeholder per `?` dim; the branch bodies are
+  //        now lowered, so each size is host arithmetic on the captures.
+  //        Runs before hip-externalize-constants, which moves the shape
+  //        constants that arithmetic reads out of the IR.
+  pm.addPass(mlir::hip::createResolveIfResultDimsPass());
+
   // 1b*. HIP-to-HIP pattern rewriting, Such as Q/DQ fusion
   pm.addPass(mlir::hip::createHipFusionTransformPass());
 

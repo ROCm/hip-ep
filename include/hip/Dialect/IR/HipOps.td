@@ -411,6 +411,48 @@ def Hip_IfOp : Hip_Op<"if",
   let hasVerifier = 1;
 }
 
+def Hip_IfResultDimOp : Hip_Op<"if_result_dim", [Pure]> {
+  let summary = "Run-time size of one dynamic dimension of a hip.if output";
+  let description = [{
+    Size of dimension `$dim` of output `$result_index` of the hip.if whose
+    branches are `$then_func` / `$else_func`, for the branch `$cond` selects.
+    `$captures` are that hip.if's captures, in the same order.
+
+    `onnx-if-outline` emits this op to size the `tensor.empty` o_init of an
+    output whose type has a `?` dimension. The branch bodies are still ONNX
+    there, so the size is not yet known. `hip-resolve-if-result-dims` replaces
+    the op after conversion: it rebuilds each branch's size from its captures
+    on the host and selects between them on `$cond`. The op must not survive
+    to bufferization.
+
+    Example:
+    ```mlir
+    %d1 = hip.if_result_dim(%cond) captures(%ids : tensor<?x?xi64>)
+              then @main_graph_if_then_n0 else @main_graph_if_else_n1
+              {result_index = 0 : i32, dim = 1 : i64}
+    %init = tensor.empty(%d1) : tensor<1x?xf32>
+    ```
+  }];
+
+  let arguments = (ins
+    I1:$cond,
+    Variadic<AnyType>:$captures,
+    FlatSymbolRefAttr:$then_func,
+    FlatSymbolRefAttr:$else_func,
+    I32Attr:$result_index,
+    I64Attr:$dim
+  );
+
+  let results = (outs Index:$size);
+
+  let assemblyFormat = [{
+    `(` $cond `)`
+    ( `captures` `(` $captures^ `:` type($captures) `)` )?
+    `then` $then_func `else` $else_func
+    attr-dict
+  }];
+}
+
 def Hip_FreeOp : Hip_Op<"free",
     [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let summary = "Free device memory";
