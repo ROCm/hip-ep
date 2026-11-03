@@ -111,10 +111,6 @@ docs/superpowers/
 node_modules/
 vendor/
 
-# Local OGA/DFlash build and cache trees used for integration experiments.
-tools/cache/
-tools/dflash-hipep/
-
 # Coverage reports
 coverage/
 *.gcov

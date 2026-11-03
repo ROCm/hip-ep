@@ -15,10 +15,10 @@ KV-cache cropping and recurrent-state promotion are separate mechanisms.
 
 ## Model export requirements
 
-hip-ep does not export or rewrite a model's state layout. The model exporter  
-must emit `state_window > 0` on the supported `CausalConvWithState` and  
-`LinearAttention` nodes, together with state tensors whose first dimension is  
-the window dimension. The exported graph must also preserve the normal  
+hip-ep does not export or rewrite a model's state layout. The model exporter
+must emit `state_window > 0` on the supported `CausalConvWithState` and
+`LinearAttention` nodes, together with state tensors whose first dimension is
+the window dimension. The exported graph must also preserve the normal
 past/present state input and output names expected by the consumer.
 
 ## Compiler and lowering changes
