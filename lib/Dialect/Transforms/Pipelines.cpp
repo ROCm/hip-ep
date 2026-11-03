@@ -113,6 +113,12 @@ std::unique_ptr<Pass> createVerifyNoConstantCarriersPass() {
 void mlir::hip::buildOnnxToHipPipelineTail(
     OpPassManager &pm, const mlir::hip::OnnxToHipPipelineOptions &options,
     morphizen::FileSystem *fs) {
+  // hip.conv_transpose only has a rank-4 MIOpen lowering. Decompose supported
+  // rank-3 transposed convolutions while they are still tensor ops so the
+  // regular HIP-to-LLVM pipeline can lower their rank-4 hip.conv residues.
+  // The rocMLIR path runs the same pass in its separate pre-fusion head.
+  pm.addNestedPass<func::FuncOp>(mlir::hip::createDecomposeConvTransposePass());
+
   // 1b. Refine `?` (kDynamic) dims on HIP DPS op result types using each
   //     op's `ReifyRankedShapedTypeOpInterface` impl. Placed here so the
   //     refinements propagate through bufferize and into pool / alloc
