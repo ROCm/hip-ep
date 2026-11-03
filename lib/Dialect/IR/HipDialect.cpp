@@ -2616,8 +2616,7 @@ LogicalResult UnpackInt4Op::verify() {
   if (packedType.getRank() < 1 || packedType.getRank() != outputType.getRank())
     return emitOpError("packed input and output ranks must match");
   if (packedType.getShape().drop_back() != outputType.getShape().drop_back())
-    return emitOpError(
-        "only the last dimension changes when unpacking int4");
+    return emitOpError("only the last dimension changes when unpacking int4");
   int64_t packedK = packedType.getShape().back();
   int64_t unpackedK = outputType.getShape().back();
   if (packedK <= 0 || unpackedK != packedK * 2)

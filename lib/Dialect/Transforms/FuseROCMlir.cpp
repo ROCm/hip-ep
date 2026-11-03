@@ -345,7 +345,8 @@ public:
     Type elemType = resultType.getElementType();
     if ((!elemType.isF16() && !elemType.isF32()) ||
         aType.getElementType() != elemType)
-      return rewriter.notifyMatchFailure(op, "activation and result must be f16 or f32");
+      return rewriter.notifyMatchFailure(
+          op, "activation and result must be f16 or f32");
     if (!scaleType.getElementType().isF16() &&
         !scaleType.getElementType().isF32())
       return rewriter.notifyMatchFailure(op, "scales must be f16 or f32");
@@ -398,7 +399,8 @@ public:
 
     Location loc = op.getLoc();
     Value ctx = op.getHandle();
-    auto ui8 = IntegerType::get(rewriter.getContext(), 8, IntegerType::Unsigned);
+    auto ui8 =
+        IntegerType::get(rewriter.getContext(), 8, IntegerType::Unsigned);
     auto packedType = RankedTensorType::get({n, kBlocks * blob}, ui8);
     SmallVector<ReassociationIndices, 2> reassoc(2);
     reassoc[0].push_back(0);
@@ -423,22 +425,23 @@ public:
     }
 
     auto weightType = RankedTensorType::get({n, k}, elemType);
-    Value weightInit = tensor::EmptyOp::create(rewriter, loc,
-                                               weightType.getShape(), elemType);
+    Value weightInit =
+        tensor::EmptyOp::create(rewriter, loc, weightType.getShape(), elemType);
     Value weight =
-        DequantizeLinearOp::create(
-            rewriter, loc, TypeRange{weightType}, ctx, unpacked, op.getScales(),
-            zp, weightInit, rewriter.getI64IntegerAttr(/*axis=*/1),
-            rewriter.getI64IntegerAttr(blockSize))
+        DequantizeLinearOp::create(rewriter, loc, TypeRange{weightType}, ctx,
+                                   unpacked, op.getScales(), zp, weightInit,
+                                   rewriter.getI64IntegerAttr(/*axis=*/1),
+                                   rewriter.getI64IntegerAttr(blockSize))
             .getResult(0);
 
-    Value matmulInit = tensor::EmptyOp::create(rewriter, loc,
-                                               resultType.getShape(), elemType);
+    Value matmulInit =
+        tensor::EmptyOp::create(rewriter, loc, resultType.getShape(), elemType);
     SmallVector<NamedAttribute> attrs = {
         rewriter.getNamedAttr("transA", rewriter.getI64IntegerAttr(0)),
         rewriter.getNamedAttr("transB", rewriter.getI64IntegerAttr(1))};
     SmallVector<Value> matmulOperands = {ctx, op.getA(), weight, matmulInit};
-    Value y = MatmulOp::create(rewriter, loc, matmulOperands, attrs).getResult(0);
+    Value y =
+        MatmulOp::create(rewriter, loc, matmulOperands, attrs).getResult(0);
 
     Value result = y;
     if (Value bias = op.getBias()) {

@@ -2538,7 +2538,7 @@ struct DequantizeLinearConverter final
                   ConversionPatternRewriter &rewriter) const override {
     if (op.getBlockSize() != 0)
       return lowerBlockedDequantize(op, adaptor.getInput(), adaptor.getScale(),
-                                   adaptor.getZeroPoint(), rewriter);
+                                    adaptor.getZeroPoint(), rewriter);
     RankedTensorType resultType;
     Value input, scale, zp;
     if (failed(matchQdqCommon(op, adaptor.getInput(), adaptor.getScale(),
@@ -5700,18 +5700,20 @@ LogicalResult lowerBlockedDequantize(DequantizeLinearOp op, Value input,
   auto scaleType = dyn_cast<RankedTensorType>(scale.getType());
   if (!resultType || !resultType.hasStaticShape() || !inputType ||
       !inputType.hasStaticShape() || !scaleType || !scaleType.hasStaticShape())
-    return rewriter.notifyMatchFailure(
-        op, "blocked dequant shapes must be static");
-  if (inputType.getShape() != resultType.getShape())
     return rewriter.notifyMatchFailure(op,
-                                       "blocked dequant cannot change the shape");
+                                       "blocked dequant shapes must be static");
+  if (inputType.getShape() != resultType.getShape())
+    return rewriter.notifyMatchFailure(
+        op, "blocked dequant cannot change the shape");
   if (!isa<FloatType>(resultType.getElementType()))
-    return rewriter.notifyMatchFailure(op, "blocked dequant result must be float");
+    return rewriter.notifyMatchFailure(op,
+                                       "blocked dequant result must be float");
   if (!isa<IntegerType>(inputType.getElementType()))
     return rewriter.notifyMatchFailure(op,
                                        "blocked dequant input must be integer");
   if (!isa<FloatType>(scaleType.getElementType()))
-    return rewriter.notifyMatchFailure(op, "blocked dequant scale must be float");
+    return rewriter.notifyMatchFailure(op,
+                                       "blocked dequant scale must be float");
   if (resultType.getRank() != 2)
     return rewriter.notifyMatchFailure(op, "blocked dequant is rank 2 [N, K]");
 
@@ -5737,7 +5739,8 @@ LogicalResult lowerBlockedDequantize(DequantizeLinearOp op, Value input,
   Type computeElem = resultType.getElementType();
   Value scales = reshapeTo(scale, {n, kBlocks}, rewriter);
   scales = emitTosaCast(rewriter, loc, scales, computeElem);
-  scales = broadcastBlocksAlongK(scales, n, k, kBlocks, blockSize, rewriter, loc);
+  scales =
+      broadcastBlocksAlongK(scales, n, k, kBlocks, blockSize, rewriter, loc);
 
   Value shifted = emitTosaCast(rewriter, loc, input, computeElem);
   if (zeroPoint) {
@@ -5923,7 +5926,8 @@ struct UnpackInt4Converter final : public OpConversionPattern<UnpackInt4Op> {
         !resultType.getElementType().isUnsignedInteger(8))
       return rewriter.notifyMatchFailure(op, "unpack_int4 is ui8");
     if (packedType.getRank() != resultType.getRank() ||
-        packedType.getShape().drop_back() != resultType.getShape().drop_back() ||
+        packedType.getShape().drop_back() !=
+            resultType.getShape().drop_back() ||
         resultType.getShape().back() != packedType.getShape().back() * 2)
       return rewriter.notifyMatchFailure(op, "last dimension must double");
 
@@ -8211,10 +8215,10 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         SoftplusOp, GeluOp, BiasGeluOp, FastGeluOp, SiluOp, SwishOp, WhereOp,
         LeakyReluOp, MiopenSoftmaxOp, ReduceSumOp, ReduceMeanOp, CastOp,
         QuantizeLinearOp, DequantizeLinearOp, MatMulNBitsOp, UnpackInt4Op,
-        DequantBnb4Op,
-        GatherOp, GatherElementsOp, GatherNDOp, GridSampleOp, SizeOp, OneHotOp,
-        RangeOp, RopeOp, GqaOp, MultiHeadAttentionOp, IfOp, LoopOp, RoundOp,
-        ModOp, AtanOp, RmsNormOp, LayerNormOp, InstanceNormOp, SkipRmsNormOp>();
+        DequantBnb4Op, GatherOp, GatherElementsOp, GatherNDOp, GridSampleOp,
+        SizeOp, OneHotOp, RangeOp, RopeOp, GqaOp, MultiHeadAttentionOp, IfOp,
+        LoopOp, RoundOp, ModOp, AtanOp, RmsNormOp, LayerNormOp, InstanceNormOp,
+        SkipRmsNormOp>();
     // tosa.matmul (and other tosa ops) are not destination-passing, so
     // MatMulConverter drops each hip op's DPS `outs` operand. The
     // `tensor.empty` that fed it is then dead, but a full conversion still
@@ -8370,10 +8374,10 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         ReduceMeanConverter, ReduceL2Converter, CastConverter,
         DequantizeLinearConverter, QuantizeLinearConverter,
         MatMulNBitsConverter, UnpackInt4Converter, DequantBnb4Converter,
-        GatherConverter,
-        GatherElementsConverter, GatherNDConverter, ScatterElementsConverter,
-        ScatterNDConverter, GatherBlockQuantizedConverter, TopKConverter,
-        QMoEConverter, GridSampleConverter, SizeConverter, TensorConstConverter,
+        GatherConverter, GatherElementsConverter, GatherNDConverter,
+        ScatterElementsConverter, ScatterNDConverter,
+        GatherBlockQuantizedConverter, TopKConverter, QMoEConverter,
+        GridSampleConverter, SizeConverter, TensorConstConverter,
         FromElementsConverter, SplatConverter, OneHotConverter, RangeConverter,
         RopeConverter, GqaConverter, MhaConverter, CumSumConverter, IfConverter,
         LoopConverter, RmsNormConverter, LayerNormConverter,
