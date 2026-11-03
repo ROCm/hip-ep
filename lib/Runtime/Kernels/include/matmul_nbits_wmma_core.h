@@ -16,6 +16,7 @@
 #include <hip/hip_runtime.h>
 
 #include <cstdint>
+#include <type_traits>
 
 // half16 holds one WMMA A/B fragment; its vector width matches
 // HIPDNN_WMMA_FRAG_ELEMS (16 on gfx11, 8 on the gfx12-style encoding
@@ -90,16 +91,17 @@ template <int BM_T, int BN_T, int WT_M, int WT_N, bool USE_ZEROS,
           bool BOUNDS_CHECK = false, bool FUSED_DQ = true,
           int BK_IN = BM_T / (WT_M * WT_N), bool ZEROS_U8 = false,
           bool ADD_BIAS = false, bool EXPLICIT_TILE = false,
-          bool CHECK_K_TAIL = false, bool RUNTIME_OPTIONAL = false>
+          bool CHECK_K_TAIL = false, bool RUNTIME_OPTIONAL = false,
+          typename AT = _Float16, typename CT = _Float16>
 __device__ __forceinline__
 void GemmFp16U4Impl(
     int M, int N, int K,
-    const _Float16* __restrict__ A, int lda,
+    const AT* __restrict__ A, int lda,
     const void* __restrict__ B_data,
     const _Float16* __restrict__ scales,
     const void* __restrict__ zeros,
     int group_size, int num_groups_k,
-    _Float16* __restrict__ C, int ldc,
+    CT* __restrict__ C, int ldc,
     int swizzle_n = 4,
     /* Bytes between B rows. 0 derives the arrival stride,
      * num_groups_k * (group_size/2); a larger value reads a buffer whose rows
@@ -281,7 +283,7 @@ void GemmFp16U4Impl(
     int              a_row[A_NCH];
     int              a_koff[A_NCH];
     bool             a_valid[A_NCH];
-    const _Float16*  a_src[A_NCH];
+    const AT*        a_src[A_NCH];
 #pragma unroll
     for (int c = 0; c < A_NCH; c++) {
         const int idx = tid + c * THR_L;
@@ -315,7 +317,14 @@ void GemmFp16U4Impl(
      * so that global loads overlap with Matrix Core WMMA execution.
      */
 
-    uint32_t pf_a[A_NCH][A_CH / 2];
+    /* An fp32 A chunk is held in registers as loaded and rounded to fp16 only
+     * when it is staged into shared memory, so the global load still overlaps
+     * the WMMA of the previous K-step. */
+    constexpr bool kAF32 = std::is_same<AT, float>::value;
+    static_assert(kAF32 || std::is_same<AT, _Float16>::value,
+                  "A must be fp16 or fp32");
+    constexpr int A_U32 = kAF32 ? A_CH : A_CH / 2;
+    uint32_t pf_a[A_NCH][A_U32];
     [[maybe_unused]] uint32_t pf_b4[B_U32] = {};
     [[maybe_unused]] u32x4    pf_bfp[B_U32] = {};
 
@@ -394,18 +403,21 @@ void GemmFp16U4Impl(
             const int a_k = tile_k + a_koff[c];
             const bool full_k = CHECK_K_TAIL ? (a_k + A_CH <= K) : true;
             if (ok && full_k) {
-                if constexpr (A_CH == 8)
-                    *reinterpret_cast<u32x4*>(pf_a[c]) =
-                        *reinterpret_cast<const u32x4*>(a_src[c]);
-                else
+                if constexpr (A_U32 >= 4) {
+#pragma unroll
+                    for (int v = 0; v < A_U32 / 4; v++)
+                        reinterpret_cast<u32x4*>(pf_a[c])[v] =
+                            reinterpret_cast<const u32x4*>(a_src[c])[v];
+                } else {
                     *reinterpret_cast<u32x2*>(pf_a[c]) =
                         *reinterpret_cast<const u32x2*>(a_src[c]);
+                }
             } else {
 #pragma unroll
-                for (int e = 0; e < A_CH / 2; e++) pf_a[c][e] = 0;
+                for (int e = 0; e < A_U32; e++) pf_a[c][e] = 0;
                 if constexpr (CHECK_K_TAIL) {
                     if (ok && a_k < K) {
-                        _Float16* tail = reinterpret_cast<_Float16*>(pf_a[c]);
+                        AT* tail = reinterpret_cast<AT*>(pf_a[c]);
 #pragma unroll
                         for (int e = 0; e < A_CH; e++)
                             if (a_k + e < K) tail[e] = a_src[c][e];
@@ -516,10 +528,23 @@ void GemmFp16U4Impl(
         for(int c = 0; c < A_NCH; c++)
         {
             _Float16* dst = &smA[buf][a_row[c]][a_koff[c]];
-            if constexpr (A_CH == 8)
+            if constexpr (kAF32) {
+                const float* src = reinterpret_cast<const float*>(pf_a[c]);
+                uint32_t h[A_CH / 2];
+#pragma unroll
+                for (int e = 0; e < A_CH / 2; e++)
+                    h[e] = __builtin_bit_cast(
+                        uint32_t, half2v{static_cast<_Float16>(src[2 * e]),
+                                         static_cast<_Float16>(src[2 * e + 1])});
+                if constexpr (A_CH == 8)
+                    *reinterpret_cast<u32x4*>(dst) = *reinterpret_cast<const u32x4*>(h);
+                else
+                    *reinterpret_cast<u32x2*>(dst) = *reinterpret_cast<const u32x2*>(h);
+            } else if constexpr (A_CH == 8) {
                 *reinterpret_cast<u32x4*>(dst) = *reinterpret_cast<const u32x4*>(pf_a[c]);
-            else
+            } else {
                 *reinterpret_cast<u32x2*>(dst) = *reinterpret_cast<const u32x2*>(pf_a[c]);
+            }
         }
     };
 
@@ -661,12 +686,12 @@ void GemmFp16U4Impl(
             // add for every stored element: +160 VALU per tile in the 256x128
             // WT4x2 epilogue, which 7.14 had folded into one pointer.
             const int r0 = hipdnn_wmma_acc_row(sub, 0);
-            _Float16* crow = C + static_cast<int64_t>(mbase + r0) * ldc + nbase + lane;
+            CT* crow = C + static_cast<int64_t>(mbase + r0) * ldc + nbase + lane;
 #pragma unroll
             for(int e = 0; e < 8; e++)
             {
                 int r = hipdnn_wmma_acc_row(sub, e);
-                _Float16* cp = crow + static_cast<int64_t>(r - r0) * ldc;
+                CT* cp = crow + static_cast<int64_t>(r - r0) * ldc;
                 const int tile_r =
                     (wrow * WT_M + wm) * WMMA_TILE + r;
                 if constexpr (BOUNDS_CHECK) {
@@ -681,7 +706,7 @@ void GemmFp16U4Impl(
                                 value += static_cast<float>(output_bias[nbase + lane]);
                             }
                         }
-                        *cp = (_Float16)value;
+                        *cp = static_cast<CT>(value);
                     }
                 } else {
                     float value = acc[wm][wn][e];
@@ -693,7 +718,7 @@ void GemmFp16U4Impl(
                             value += static_cast<float>(output_bias[nbase + lane]);
                         }
                     }
-                    *cp = (_Float16)value;
+                    *cp = static_cast<CT>(value);
                 }
             }
         }

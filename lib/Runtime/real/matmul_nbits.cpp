@@ -18,6 +18,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <limits>
 #include <mutex>
 #include <unordered_map>
 #include <utility>
@@ -234,6 +235,12 @@ struct MatmulNbitsState : OpStateT<MatmulNbitsState> {
   std::mutex scale_mu;
   std::unordered_map<const void *, std::pair<void *, size_t>> scale_fp16;
 
+  // fp16 zero-point tensor -> its single value when every group shares one,
+  // NaN otherwise, keyed by device pointer like the caches above. See
+  // lookup_uniform_zp_fp16.
+  std::mutex uniform_zp_mu;
+  std::unordered_map<const void *, float> uniform_zp;
+
   ~MatmulNbitsState() {
     for (auto &[k, v] : b_fp16)
       hipFree(v.first);
@@ -357,6 +364,27 @@ const void *lookup_or_convert_scale_fp16(MatmulNbitsState *mst, void *stream,
     mst->scale_fp16.emplace(scales_fp32, std::make_pair(dst, bytes));
   }
   return dst;
+}
+
+// Returns the common value of a constant fp16 zero-point tensor
+// ([N, num_groups_k], n_elems values) when all its groups share one, NaN
+// otherwise. Quantizers that emit one fixed zero point (e.g. 1.5 for a
+// symmetric 2-bit grid) still store it per group; passing it as a scalar
+// spares the bits=2 kernels a read as large as the scales. Checked once per
+// weight (the probe synchronizes the stream) and cached.
+float lookup_uniform_zp_fp16(MatmulNbitsState *mst, void *stream,
+                             const void *zero_points, int64_t n_elems) {
+  std::lock_guard<std::mutex> lock(mst->uniform_zp_mu);
+  auto it = mst->uniform_zp.find(zero_points);
+  if (it != mst->uniform_zp.end())
+    return it->second;
+  float value = std::numeric_limits<float>::quiet_NaN();
+  float v = 0.0f;
+  if (hip_matmul_nbits_fp16_uniform_value(stream, zero_points, n_elems, &v) ==
+      1)
+    value = v;
+  mst->uniform_zp.emplace(zero_points, value);
+  return value;
 }
 
 uint64_t prefill_shape_key(int64_t M, int64_t N, int64_t K) {
@@ -839,9 +867,20 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
     }
   }
 
-  HIP_CHECK(hip_matmul_nbits(stream, A, B, scales, zero_points, bias, output, M,
-                             N, K, batch_count, bits, block_size, elem_size,
-                             zp_elem_size, pre_zp_u8, pre_zp_fp16));
+  {
+    float uniform_zp = std::numeric_limits<float>::quiet_NaN();
+    if (bits == 2 && zero_points && zp_elem_size == 2 && block_size > 0) {
+      MatmulNbitsState *mst =
+          MatmulNbitsState::get_op_state(state, op_state_slot);
+      if (mst)
+        uniform_zp = lookup_uniform_zp_fp16(
+            mst, stream, zero_points, N * ((K + block_size - 1) / block_size));
+    }
+    HIP_CHECK(hip_matmul_nbits_ex(stream, A, B, scales, zero_points, bias,
+                                  output, M, N, K, batch_count, bits,
+                                  block_size, elem_size, zp_elem_size,
+                                  pre_zp_u8, pre_zp_fp16, uniform_zp));
+  }
 
 cleanup:
   return result;

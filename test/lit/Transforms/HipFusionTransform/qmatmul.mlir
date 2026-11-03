@@ -158,3 +158,53 @@ func.func @qmatmul_w8_per_column(%ctx: !hip.context,
 
   return %q : tensor<4x6xui16>
 }
+
+// -----
+
+// lm_head shape: a dynamic-sequence A16 activation against a per-tensor W8
+// weight. The quantize's init is sized from tensor.dim of the matmul result;
+// that shape-only read must not block the fusion.
+// CHECK-LABEL: func.func @qmatmul_dynamic_seq
+// CHECK-SAME:  (%[[CTX:.*]]: !hip.context, %[[A:.*]]: tensor<1x?x8xui16>) -> tensor<1x?x6xui16> {
+// CHECK-NOT:     hip.dequantize_linear
+// CHECK-NOT:     hip.matmul(
+// CHECK:         %[[QMM:.*]] = hip.qmatmul(%[[CTX]]) ins(%[[A]], %{{.*}} : tensor<1x?x8xui16>, tensor<8x6xui8>) outs(%{{.*}} : tensor<1x?x6xui16>) {A_scale = 2.500000e-01 : f32, A_zero_point = 32768 : i64, B_scale = 1.250000e-01 : f32, B_zero_point = 128 : i64, Y_scale = 5.000000e-01 : f32, Y_zero_point = 32768 : i64} : tensor<1x?x6xui16>
+// CHECK:         return %[[QMM]] : tensor<1x?x6xui16>
+func.func @qmatmul_dynamic_seq(%ctx: !hip.context,
+                               %a: tensor<1x?x8xui16>) -> tensor<1x?x6xui16> {
+  %c1 = arith.constant 1 : index
+  %a_scale = hip.constant {value = dense<0.25> : tensor<f32>} : tensor<f32>
+  %a_zp = hip.constant {value = dense<32768> : tensor<ui16>} : tensor<ui16>
+  %w = hip.constant {location = "w.bin", offset = 0 : i64, size = 48 : i64} : tensor<8x6xui8>
+  %b_scale = hip.constant {value = dense<0.125> : tensor<f32>} : tensor<f32>
+  %b_zp = hip.constant {value = dense<128> : tensor<ui8>} : tensor<ui8>
+  %y_scale = hip.constant {value = dense<0.5> : tensor<f32>} : tensor<f32>
+  %y_zp = hip.constant {value = dense<32768> : tensor<ui16>} : tensor<ui16>
+
+  %s = tensor.dim %a, %c1 : tensor<1x?x8xui16>
+  %e0 = tensor.empty(%s) : tensor<1x?x8xf32>
+  %dq_a = hip.dequantize_linear(%ctx)
+      ins(%a, %a_scale : tensor<1x?x8xui16>, tensor<f32>)
+      zero_point(%a_zp : tensor<ui16>)
+      outs(%e0 : tensor<1x?x8xf32>)
+      {axis = 1 : i64, block_size = 0 : i64} : tensor<1x?x8xf32>
+  %e1 = tensor.empty() : tensor<8x6xf32>
+  %dq_b = hip.dequantize_linear(%ctx)
+      ins(%w, %b_scale : tensor<8x6xui8>, tensor<f32>)
+      zero_point(%b_zp : tensor<ui8>)
+      outs(%e1 : tensor<8x6xf32>)
+      {axis = 1 : i64, block_size = 0 : i64} : tensor<8x6xf32>
+  %e2 = tensor.empty(%s) : tensor<1x?x6xf32>
+  %prod = hip.matmul(%ctx)
+    ins(%dq_a, %dq_b : tensor<1x?x8xf32>, tensor<8x6xf32>)
+    outs(%e2 : tensor<1x?x6xf32>) : tensor<1x?x6xf32>
+  %ps = tensor.dim %prod, %c1 : tensor<1x?x6xf32>
+  %e3 = tensor.empty(%ps) : tensor<1x?x6xui16>
+  %q = hip.quantize_linear(%ctx)
+      ins(%prod, %y_scale : tensor<1x?x6xf32>, tensor<f32>)
+      zero_point(%y_zp : tensor<ui16>)
+      outs(%e3 : tensor<1x?x6xui16>)
+      {axis = 1 : i64, block_size = 0 : i64, precision = 16 : i64,
+       saturate = 1 : i64} : tensor<1x?x6xui16>
+  return %q : tensor<1x?x6xui16>
+}

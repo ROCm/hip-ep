@@ -50,7 +50,6 @@
 
 namespace hip {
 namespace fusion_transform {
-namespace {
 
 // True when every use is either `consumer` or a tensor.dim. tensor.dim only
 // reads the type, which this pattern requires to match the gate.
@@ -72,6 +71,8 @@ void retargetShapeQueries(mlir::PatternRewriter &rewriter, mlir::Value from,
     return mlir::isa<mlir::tensor::DimOp>(operand.getOwner());
   });
 }
+
+namespace {
 
 // One dynamic axis after projection producers have been followed.
 struct Extent {
@@ -159,11 +160,12 @@ std::optional<Extent> stepProjection(mlir::Operation *op, int64_t outDim) {
   return std::nullopt;
 }
 
-// The walk follows tensor.cast and one projection. hip-infer-shapes inserts
-// a cast on the projection result and may leave one on its activation, which
-// is three steps; the fourth covers a second cast on either side. Anything
+// The walk follows tensor.cast, per-element Q/DQ and one projection.
+// hip-infer-shapes inserts a cast on the projection result and may leave one
+// on its activation, which is three steps; the fourth covers a second cast on
+// either side and two more cover a Q/DQ pair on the activation. Anything
 // longer is not this pattern, so the walk declines instead of scanning it.
-constexpr int kMaxExtentHops = 4;
+constexpr int kMaxExtentHops = 6;
 
 std::optional<Extent> traceExtent(mlir::Value value, int64_t dim) {
   mlir::Value current = value;
@@ -182,6 +184,24 @@ std::optional<Extent> traceExtent(mlir::Value value, int64_t dim) {
       current = castOp.getSource();
       continue;
     }
+    // Per-element Q/DQ keep their input's shape. A quantized export feeds
+    // gate and up through separate DQs of one code tensor.
+    // Packed int4 halves the stored trailing axis, so it is not
+    // shape-preserving.
+    auto dq = mlir::dyn_cast<mlir::hip::DequantizeLinearOp>(def);
+    if (dq && !dq.getPackedInt4()) {
+      current = dq.getInput();
+      continue;
+    }
+    auto q = mlir::dyn_cast<mlir::hip::QuantizeLinearOp>(def);
+    if (q && !q.getPackedInt4()) {
+      current = q.getInput();
+      continue;
+    }
+    if (auto fq = mlir::dyn_cast<mlir::hip::FakeQuantizeOp>(def)) {
+      current = fq.getInput();
+      continue;
+    }
     if (std::optional<Extent> stepped = stepProjection(def, axis)) {
       if (stepped->isStatic)
         return *stepped;
@@ -193,6 +213,8 @@ std::optional<Extent> traceExtent(mlir::Value value, int64_t dim) {
   }
   return std::nullopt;
 }
+
+} // namespace
 
 // True when every dynamic axis of both tensors is the same runtime extent.
 // Static axes are already settled by type equality.
@@ -211,6 +233,8 @@ bool sameRuntimeShape(mlir::Value lhs, mlir::Value rhs) {
   }
   return true;
 }
+
+namespace {
 
 struct SwigluFusion : public mlir::OpRewritePattern<mlir::hip::MulOp> {
   using OpRewritePattern::OpRewritePattern;

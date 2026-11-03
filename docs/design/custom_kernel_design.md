@@ -275,6 +275,12 @@ Four execution paths, auto-dispatched by shape:
 
 **bits=2 fractional FP16 zero-points**: AMD Quark 2-bit models encode the non-uniform levels `[-1, -1/3, 1/3, 1]` in the `(index - zero_point) * scale` form by using a *fractional* zero-point of `1.5` (the `2/3` factor is folded into the per-group scale). These arrive as an FP16 zero-point tensor (`zp_elem_size==2`, one value per group), which must be read as FP16 — rounding to an integer would corrupt the `1.5`. The u2 GEMV, WMMA (fused inline-decode and dequant+GEMM), and naive kernels are templated on the zero-point element type (`uint8_t` for the packed-integer path, `_Float16`/`__half` for this path); the dequant math is already float, so the FP16 path matches the uint8 path's performance and the integer path is unchanged. The FP16 buffer is one value per group already, so it is passed straight through with no unpack/convert step.
 
+**bits=2 uniform zero-point**: When every FP16 zero-point of a weight has the same value (the Quark `1.5` case), the runtime detects it once per zero-point buffer (`hip_matmul_nbits_fp16_uniform_value`, cached by pointer in `MatmulNbitsState`) and calls `hip_matmul_nbits_ex` with that value. The u2 kernels then take it as a scalar `default_zp` and never read the zero-point tensor, which removes as many bytes per decode step as the FP16 scales. A NaN `uniform_zp` means no such guarantee and behaves exactly like `hip_matmul_nbits`.
+
+**bits=2 fp32 activations**: The u2 GEMV reads fp32 A and writes fp32 C directly (templated on the A/C element types), so an fp32 graph skips the A cast, the C cast and their fp16 scratch round trip. The WMMA kernels re-read each A tile once per N block, so fp32 A would double that traffic once A outgrows the last-level cache; the u2 WMMA path instead casts A to fp16 once and writes fp32 C directly from its epilogue. A bias falls back to the cast path, whose epilogue is fp16-only.
+
+**bits=2 GEMV autotune**: Each candidate is timed against rotating copies of B/scales/zero-points (`GemvWeightRotation` + `timeConfigRotated`, median of bursts), so the ranking reflects DRAM-bound decode rather than cache-hot replays of a weight that fits in the last-level cache.
+
 **WMMA path** (prefill, M≥16): Transposes A/C to column-major internally, converts uint8 zero-points to FP16, then uses `__builtin_amdgcn_wmma_f16_16x16x16_f16` intrinsics with double-buffered shared memory for A tiles and grid swizzling (Morton-order blocks) for L2 cache locality.
 
 ## Key Design Decisions

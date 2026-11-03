@@ -10,7 +10,9 @@
 //
 // Sanity-checks that both ONNX markers are fully consumed (so nothing falls
 // through to ORT CPU silently) and that both runtime symbols make it to the
-// final LLVM module.
+// final LLVM module. The DQ scale differs from the Q scale so the pair is not
+// a round trip that hip-fusion-transform collapses into hip.fake_quantize
+// (covered by test_fake_quantize_model.mlir).
 
 // CHECK: module attributes {
 // CHECK-SAME: hipdnn.input_count = 1
@@ -30,6 +32,7 @@ module {
   func.func @main_graph(%x: tensor<1x64x32xf32> {onnx.name = "x"})
       -> (tensor<1x64x32xf32> {onnx.name = "output"}) {
     %scale = "onnx.Constant"() {value = dense<1.000000e-01> : tensor<f32>} : () -> tensor<f32>
+    %dq_scale = "onnx.Constant"() {value = dense<2.000000e-01> : tensor<f32>} : () -> tensor<f32>
     %zp = "onnx.Constant"() {value = dense<0> : tensor<i8>} : () -> tensor<i8>
     %q = "onnx.QuantizeLinear"(%x, %scale, %zp) {
       axis = 1 : si64,
@@ -37,7 +40,7 @@ module {
       saturate = 1 : si64,
       onnx_node_name = "QuantizeLinear_0"
     } : (tensor<1x64x32xf32>, tensor<f32>, tensor<i8>) -> tensor<1x64x32xi8>
-    %dq = "onnx.DequantizeLinear"(%q, %scale, %zp) {
+    %dq = "onnx.DequantizeLinear"(%q, %dq_scale, %zp) {
       axis = 1 : si64,
       block_size = 0 : si64,
       onnx_node_name = "DequantizeLinear_0"

@@ -26,6 +26,12 @@
 namespace hip {
 namespace fusion_transform {
 
+// Shape helpers shared with the quantized SwiGLU fusion.
+bool hasSingleValueUse(mlir::Value value, mlir::Operation *consumer);
+void retargetShapeQueries(mlir::PatternRewriter &rewriter, mlir::Value from,
+                          mlir::Value to);
+bool sameRuntimeShape(mlir::Value lhs, mlir::Value rhs);
+
 void populateSwigluFusionPattern(mlir::RewritePatternSet &patterns,
                                  mlir::PatternBenefit benefit);
 
