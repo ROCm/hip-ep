@@ -1,0 +1,303 @@
+{
+  "copyright": "Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.",
+  "license": "Licensed under the MIT License.",
+  "description": "Public AMD GPU EP exports on Hugging Face, with the files needed to run each one. Field reference: docs/models.md.",
+  "models": [
+    {
+      "id": "gpt-oss-120b",
+      "name": "GPT-OSS 120B",
+      "family": "gpt-oss",
+      "model_type": "llm",
+      "base_model": "openai/gpt-oss-120b",
+      "params": "117B total, 5.1B active",
+      "params_billions": {
+        "total": 117,
+        "active": 5.1
+      },
+      "architecture": "Sparse mixture of experts",
+      "task": "Text generation, reasoning",
+      "license": "apache-2.0",
+      "quant_scheme": "uint4 AWQ",
+      "precision": "uint4 AWQ, group 32, asymmetric, with QMoE experts",
+      "quantized_model": {
+        "path": "https://huggingface.co/amd/GPT-OSS-120B_gpuep_1.0_gpu_128/tree/main",
+        "hf_repo": "amd/GPT-OSS-120B_gpuep_1.0_gpu_128",
+        "subdir": "",
+        "onnx_files": {
+          "text": "model.onnx"
+        },
+        "access": "public"
+      }
+    },
+    {
+      "id": "qwen2.5-14b",
+      "name": "Qwen2.5 14B Instruct",
+      "family": "qwen",
+      "model_type": "llm",
+      "base_model": "Qwen/Qwen2.5-14B-Instruct",
+      "params": "14.7B",
+      "params_billions": {
+        "total": 14.7
+      },
+      "architecture": "Dense transformer",
+      "task": "Text generation",
+      "license": "apache-2.0",
+      "quant_scheme": "int4 RTN",
+      "precision": "int4 RTN, group 128, asymmetric",
+      "quantized_model": {
+        "path": "https://huggingface.co/amd/Qwen2.5-14B-Instruct_gpuep_1.0_gpu_128/tree/main",
+        "hf_repo": "amd/Qwen2.5-14B-Instruct_gpuep_1.0_gpu_128",
+        "subdir": "",
+        "onnx_files": {
+          "text": "text.onnx"
+        },
+        "access": "public"
+      }
+    },
+    {
+      "id": "qwen2.5-coder-14b",
+      "name": "Qwen2.5-Coder 14B Instruct",
+      "family": "qwen",
+      "model_type": "llm",
+      "base_model": "Qwen/Qwen2.5-Coder-14B-Instruct",
+      "params": "14.7B",
+      "params_billions": {
+        "total": 14.7
+      },
+      "architecture": "Dense transformer",
+      "task": "Code generation",
+      "license": "apache-2.0",
+      "quant_scheme": "int4 RTN",
+      "precision": "int4 RTN, group 128, asymmetric",
+      "quantized_model": {
+        "path": "https://huggingface.co/amd/Qwen2.5-Coder-14B-Instruct_gpuep_1.0_gpu_128/tree/main",
+        "hf_repo": "amd/Qwen2.5-Coder-14B-Instruct_gpuep_1.0_gpu_128",
+        "subdir": "",
+        "onnx_files": {
+          "text": "text.onnx"
+        },
+        "access": "public"
+      }
+    },
+    {
+      "id": "qwen3.5-9b",
+      "name": "Qwen3.5 9B",
+      "family": "qwen",
+      "model_type": "vlm",
+      "base_model": "Qwen/Qwen3.5-9B",
+      "params": "9B",
+      "params_billions": {
+        "total": 9
+      },
+      "architecture": "Gated DeltaNet + dense transformer + vision encoder",
+      "task": "Image understanding, text generation",
+      "license": "apache-2.0",
+      "quant_scheme": "int4 RTN",
+      "precision": "int4 RTN text decoder, group 32; fp16 vision encoder and embedding",
+      "quantized_model": {
+        "path": "https://huggingface.co/amd/Qwen3.5-9B_gpuep_1.0_gpu_128/tree/main",
+        "hf_repo": "amd/Qwen3.5-9B_gpuep_1.0_gpu_128",
+        "subdir": "",
+        "onnx_files": {
+          "text": "text.onnx",
+          "vision": "vision.onnx",
+          "embedding": "embedding.onnx"
+        },
+        "access": "public"
+      }
+    },
+    {
+      "id": "qwen3.5-35b-a3b",
+      "name": "Qwen3.5 35B-A3B",
+      "family": "qwen",
+      "model_type": "vlm",
+      "base_model": "Qwen/Qwen3.5-35B-A3B",
+      "params": "35B total, 3B active",
+      "params_billions": {
+        "total": 35,
+        "active": 3
+      },
+      "architecture": "Gated DeltaNet + sparse mixture of experts + vision encoder",
+      "task": "Image understanding, text generation",
+      "license": "apache-2.0",
+      "quant_scheme": "int4 RTN",
+      "precision": "int4 RTN text decoder, group 32, with QMoE experts; fp16 vision encoder and embedding",
+      "quantized_model": {
+        "path": "https://huggingface.co/amd/Qwen3.5-35B-A3B_gpuep_1.0_gpu_128/tree/main",
+        "hf_repo": "amd/Qwen3.5-35B-A3B_gpuep_1.0_gpu_128",
+        "subdir": "",
+        "onnx_files": {
+          "text": "text.onnx",
+          "vision": "vision.onnx",
+          "embedding": "embedding.onnx"
+        },
+        "access": "public"
+      }
+    },
+    {
+      "id": "qwen3.5-122b-a10b",
+      "name": "Qwen3.5 122B-A10B",
+      "family": "qwen",
+      "model_type": "vlm",
+      "base_model": "Qwen/Qwen3.5-122B-A10B",
+      "params": "122B total, 10B active",
+      "params_billions": {
+        "total": 122,
+        "active": 10
+      },
+      "architecture": "Gated DeltaNet + sparse mixture of experts + vision encoder",
+      "task": "Image understanding, text generation",
+      "license": "apache-2.0",
+      "quant_scheme": "int4 RTN",
+      "precision": "int4 RTN text decoder, group 32, with QMoE experts; fp16 vision encoder and embedding",
+      "quantized_model": {
+        "path": "https://huggingface.co/amd/Qwen3.5-122B-A10B_gpuep_1.0_gpu_128/tree/main",
+        "hf_repo": "amd/Qwen3.5-122B-A10B_gpuep_1.0_gpu_128",
+        "subdir": "",
+        "onnx_files": {
+          "text": "text.onnx",
+          "vision": "vision.onnx",
+          "embedding": "embedding.onnx"
+        },
+        "access": "public"
+      }
+    },
+    {
+      "id": "qwen3.6-27b",
+      "name": "Qwen3.6 27B",
+      "family": "qwen",
+      "model_type": "vlm",
+      "base_model": "Qwen/Qwen3.6-27B",
+      "params": "27B",
+      "params_billions": {
+        "total": 27
+      },
+      "architecture": "Gated DeltaNet + dense transformer + vision encoder",
+      "task": "Image understanding, text generation",
+      "license": "apache-2.0",
+      "quant_scheme": "int4 RTN",
+      "precision": "int4 RTN text decoder, group 32; fp16 vision encoder and embedding",
+      "quantized_model": {
+        "path": "https://huggingface.co/amd/Qwen3.6-27B_gpuep_1.0_gpu_128/tree/main",
+        "hf_repo": "amd/Qwen3.6-27B_gpuep_1.0_gpu_128",
+        "subdir": "",
+        "onnx_files": {
+          "text": "text.onnx",
+          "vision": "vision.onnx",
+          "embedding": "embedding.onnx"
+        },
+        "access": "public"
+      }
+    },
+    {
+      "id": "qwen3.6-35b-a3b",
+      "name": "Qwen3.6 35B-A3B",
+      "family": "qwen",
+      "model_type": "vlm",
+      "base_model": "Qwen/Qwen3.6-35B-A3B",
+      "params": "35B total, 3B active",
+      "params_billions": {
+        "total": 35,
+        "active": 3
+      },
+      "architecture": "Gated DeltaNet + sparse mixture of experts + vision encoder",
+      "task": "Image understanding, text generation",
+      "license": "apache-2.0",
+      "quant_scheme": "int4 RTN",
+      "precision": "int4 RTN text decoder, group 32, with QMoE experts; fp16 vision encoder and embedding",
+      "quantized_model": {
+        "path": "https://huggingface.co/amd/Qwen3.6-35B-A3B_gpuep_1.0_gpu_128/tree/main",
+        "hf_repo": "amd/Qwen3.6-35B-A3B_gpuep_1.0_gpu_128",
+        "subdir": "",
+        "onnx_files": {
+          "text": "text.onnx",
+          "vision": "vision.onnx",
+          "embedding": "embedding.onnx"
+        },
+        "access": "public"
+      }
+    },
+    {
+      "id": "qwen3.8-27b",
+      "name": "Qwen3.8 27B",
+      "family": "qwen",
+      "model_type": "vlm",
+      "base_model": "Qwen/Qwen3.8-27B",
+      "params": "27B",
+      "params_billions": {
+        "total": 27
+      },
+      "architecture": "Gated DeltaNet + dense transformer + vision encoder",
+      "task": "Image understanding, text generation",
+      "license": "apache-2.0",
+      "quant_scheme": "int4 k-quant",
+      "precision": "int4 k-quant text decoder, group 128, asymmetric; fp16 vision encoder and embedding",
+      "quantized_model": {
+        "path": "https://huggingface.co/amd/Qwen3.8-27B_gpuep_1.0_gpu_128/tree/main",
+        "hf_repo": "amd/Qwen3.8-27B_gpuep_1.0_gpu_128",
+        "subdir": "",
+        "onnx_files": {
+          "text": "text.onnx",
+          "vision": "vision.onnx",
+          "embedding": "embedding.onnx"
+        },
+        "access": "public"
+      }
+    },
+    {
+      "id": "gemma-3-4b-it",
+      "name": "Gemma 3 4B IT",
+      "family": "gemma",
+      "model_type": "vlm",
+      "base_model": "google/gemma-3-4b-it",
+      "params": "4B",
+      "params_billions": {
+        "total": 4
+      },
+      "architecture": "Dense transformer + vision encoder",
+      "task": "Image understanding, text generation",
+      "license": "gemma",
+      "quant_scheme": "int4 RTN",
+      "precision": "int4 RTN text decoder, group 128; fp16 vision encoder and embedding",
+      "quantized_model": {
+        "path": "https://huggingface.co/amd/Gemma3-4B-it_gpuep_1.0_gpu_128/tree/main",
+        "hf_repo": "amd/Gemma3-4B-it_gpuep_1.0_gpu_128",
+        "subdir": "",
+        "onnx_files": {
+          "text": "text.onnx",
+          "vision": "vision.onnx",
+          "embedding": "embedding.onnx"
+        },
+        "access": "public"
+      }
+    },
+    {
+      "id": "gemma-4-26b-a4b-it",
+      "name": "Gemma 4 26B-A4B IT",
+      "family": "gemma",
+      "model_type": "vlm",
+      "base_model": "google/gemma-4-26B-A4B-it",
+      "params": "25.2B total, 3.8B active",
+      "params_billions": {
+        "total": 25.2,
+        "active": 3.8
+      },
+      "architecture": "Sparse mixture of experts + vision encoder",
+      "task": "Image understanding, text generation",
+      "license": "apache-2.0",
+      "quant_scheme": "int4",
+      "precision": "int4 text decoder, group 32, asymmetric, with symmetric QMoE experts; int4 vision encoder, group 32, asymmetric; fp16 embedding",
+      "quantized_model": {
+        "path": "https://huggingface.co/amd/Gemma-4-26B-A4B-it_gpuep_1.0_gpu_128/tree/main",
+        "hf_repo": "amd/Gemma-4-26B-A4B-it_gpuep_1.0_gpu_128",
+        "subdir": "",
+        "onnx_files": {
+          "text": "decoder/model.onnx",
+          "vision": "vision_encoder/model.onnx",
+          "embedding": "embedding/model.onnx"
+        },
+        "access": "public"
+      }
+    }
+  ]
+}

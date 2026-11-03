@@ -373,6 +373,7 @@ std::string genericTargetFor(llvm::StringRef arch) {
       .Cases({"gfx1100", "gfx1101", "gfx1102", "gfx1103", "gfx1150", "gfx1151",
               "gfx1152", "gfx1153"},
              "gfx11-generic")
+      .Cases({"gfx1170", "gfx1171", "gfx1172"}, "gfx11-7-generic")
       .Cases({"gfx1200", "gfx1201"}, "gfx12-generic")
       .Default("");
 }
@@ -462,19 +463,6 @@ bool installSearchGenerators(llvm::orc::LLJIT &jit) {
       LOG(WARNING) << "LlvmIrJit: Load(" << tried
                    << ") failed: " << last_load_error
                    << "; models needing it will fail at lookup.";
-    }
-  }
-
-#ifdef _WIN32
-  const char *const kHipdnnBackend = "hipdnn_backend.dll";
-#else
-  const char *const kHipdnnBackend = "libhipdnn_backend.so";
-#endif
-  if (!loadFirst({kHipdnnBackend})) {
-    if (hipdnn_ep::env_enabled("HIPDNN_EP_DEBUG")) {
-      LOG(INFO) << "LlvmIrJit: Load(" << kHipdnnBackend
-                << ") failed: " << last_load_error
-                << "; hipDNN graph models will fail at lookup.";
     }
   }
 

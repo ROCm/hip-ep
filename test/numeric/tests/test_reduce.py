@@ -229,8 +229,8 @@ class TestReduceL2:
 
 
 # ---------------------------------------------------------------------------
-# ReduceMax (added by qwen-vision-kernels PR)
-# Runtime dtypes: f16, i32, i64  (NO f32 -- not in the dispatch table)
+# ReduceMax
+# Runtime dtypes: f32, f16, i32, i64
 # ---------------------------------------------------------------------------
 
 
@@ -238,6 +238,7 @@ class TestReduceMax:
     @pytest.mark.parametrize(
         "dtype,shape,axes,keepdims",
         [
+            (np.float32, [4, 8], [1], 1),
             (np.float16, [4, 8], [1], 1),
             (np.float16, [4, 8], [1], 0),
             (np.int32, [1, 64], [1], 1),
