@@ -10,6 +10,11 @@
 *.cc  text working-tree-encoding=UTF-8
 *.md  text working-tree-encoding=UTF-8
 
+# Upstream PR patches applied by CI: keep the bytes exact on Windows checkouts
+# (core.autocrlf), because a converted patch no longer applies and its hash is
+# part of the OGA cache key.
+.github/patches/**/*.patch -text
+
 # Cursor agent skills/scripts: LF in repo so Linux pre-commit (licenseheaders)
 # does not rewrite line endings on every CI run.
 .cursor/** text eol=lf working-tree-encoding=UTF-8

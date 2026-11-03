@@ -1,0 +1,33 @@
+diff --git a/src/generator/generators.cpp b/src/generator/generators.cpp
+index 2cd67565d2..97500cc9cf 100644
+--- a/src/generator/generators.cpp
++++ b/src/generator/generators.cpp
+@@ -67,13 +67,14 @@ static bool _ = (Ort::InitApi(), false);
+ bool SupportsContinuousDecoding(DeviceType device_type) noexcept {
+   // Some models fall back to CPU attention, where continuation is valid because their KV cache is
+   // also on CPU. Other listed providers preserve appendable KV state across generation turns.
+-  constexpr std::array<DeviceType, 6> supported_devices{
++  constexpr std::array<DeviceType, 7> supported_devices{
+       DeviceType::CPU,
+       DeviceType::CUDA,
+       DeviceType::WEBGPU,
+       DeviceType::OpenVINO,
+       DeviceType::NvTensorRtRtx,
+-      DeviceType::RyzenAI};
++      DeviceType::RyzenAI,
++      DeviceType::AMDGPU};
+   return std::find(supported_devices.begin(), supported_devices.end(), device_type) !=
+          supported_devices.end();
+ }
+diff --git a/test/cpp/engine/request_lifecycle_tests.cpp b/test/cpp/engine/request_lifecycle_tests.cpp
+index f7ea631c04..e76e87ac07 100644
+--- a/test/cpp/engine/request_lifecycle_tests.cpp
++++ b/test/cpp/engine/request_lifecycle_tests.cpp
+@@ -234,6 +234,7 @@ class RequestLifecycleTest : public ::testing::Test {
+ TEST(ContinuousDecodingDeviceSupportTest, MatchesKvCacheCapabilityContract) {
+   EXPECT_TRUE(SupportsContinuousDecoding(DeviceType::CPU));
+   EXPECT_TRUE(SupportsContinuousDecoding(DeviceType::CUDA));
++  EXPECT_TRUE(SupportsContinuousDecoding(DeviceType::AMDGPU));
+   EXPECT_FALSE(SupportsContinuousDecoding(DeviceType::DML));
+   EXPECT_FALSE(SupportsContinuousDecoding(DeviceType::QnnHtp));
+ }

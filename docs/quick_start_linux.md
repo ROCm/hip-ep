@@ -117,10 +117,10 @@ git clone --branch v0.17.0 https://github.com/microsoft/onnxruntime-genai.git
 cd onnxruntime-genai
 git submodule update --init --recursive
 
-for pr in 2685 2691; do
-  curl -fsSL "https://github.com/microsoft/onnxruntime-genai/pull/${pr}.diff" \
-    -o "/tmp/oga-${pr}.diff"
-  git apply --whitespace=nowarn --3way --exclude='test/*' "/tmp/oga-${pr}.diff"
+# Same patch list and flags as OGA_PR_PATCHES in .github/workflows/linux-build.yml.
+for pr in 2685 2691 2705 2712 2792 2801; do
+  git apply --whitespace=nowarn --3way --exclude='test/*' --exclude='.github/*' \
+    --exclude='*.md' "../hip-ep/.github/patches/oga/${pr}.patch"
 done
 ```
 

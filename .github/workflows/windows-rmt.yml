@@ -76,7 +76,8 @@ jobs:
             AMD_KEY="windows-amdgpu-${EP_REF:0:7}-amdpr${AMDPR_KEY}-deps${DEPS_HASH}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}"
           fi
           if [ -z "$OGA_KEY" ]; then
-            OGA_KEY="windows-oga-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}"
+            PATCH_HASH=$(for pr in ${{ env.OGA_PR_PATCHES }}; do cat ".github/patches/oga/$pr.patch" || exit 1; done | sha256sum | cut -c1-12)
+            OGA_KEY="windows-oga-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-p${PATCH_HASH}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}"
           fi
           echo "ort=$ORT_KEY" >> "$GITHUB_OUTPUT"
           echo "amdgpu=$AMD_KEY" >> "$GITHUB_OUTPUT"

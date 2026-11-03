@@ -1,0 +1,2020 @@
+diff --git a/cgmanifests/generated/cgmanifest.json b/cgmanifests/generated/cgmanifest.json
+index c5ab492bb1..4f7a5f7b38 100644
+--- a/cgmanifests/generated/cgmanifest.json
++++ b/cgmanifests/generated/cgmanifest.json
+@@ -46,7 +46,7 @@
+       "component": {
+         "type": "git",
+         "git": {
+-          "commitHash": "75129dc9da91f95c22d3f83087571a0759ed0d5c",
++          "commitHash": "99fec2db1c0a17de60eb0f1c2353c91f8d5e22ca",
+           "repositoryUrl": "https://github.com/microsoft/onnxruntime-extensions.git"
+         },
+         "comments": "onnxruntime_extensions"
+diff --git a/cmake/deps.txt b/cmake/deps.txt
+index 70c8617e15..8c29375245 100644
+--- a/cmake/deps.txt
++++ b/cmake/deps.txt
+@@ -14,7 +14,7 @@ pybind11;https://github.com/pybind/pybind11/archive/refs/tags/v2.13.6.zip;f78029
+ googletest;https://github.com/google/googletest/archive/530d5c8c84abd2a46f38583ee817743c9b3a42b4.zip;5e3a61db2aa975cfd0f97ba92c818744e7fa7034
+ microsoft_wil;https://github.com/microsoft/wil/archive/refs/tags/v1.0.230629.1.zip;e4a542a323c070376f7c2d1973d0f7ddbc1d2fa5
+ directx_headers;https://github.com/microsoft/DirectX-Headers/archive/refs/tags/v1.613.1.zip;47653509a3371eabb156360f42faf582f314bf2e
+-onnxruntime_extensions;https://github.com/microsoft/onnxruntime-extensions.git;0353c93d966d74706724e41ddab63f580eebbbf0
++onnxruntime_extensions;https://github.com/microsoft/onnxruntime-extensions.git;99fec2db1c0a17de60eb0f1c2353c91f8d5e22ca
+ 
+ # These two dependencies are for the optional constrained decoding feature (USE_GUIDANCE)
+ llguidance;https://github.com/microsoft/llguidance.git;94fa39128ef184ffeda33845f6d333f332a34b4d
+diff --git a/src/models/model_type.h b/src/models/model_type.h
+index 9e5cb33b69..9fe2990e73 100644
+--- a/src/models/model_type.h
++++ b/src/models/model_type.h
+@@ -36,7 +36,7 @@ struct ModelType {
+ 
+   inline static bool IsMMM(const std::string& model_type) {
+     // Multi-modal model (MMM)
+-    static constexpr std::array<std::string_view, 2> MMM = {"gemma4", "phi4mm"};
++    static constexpr std::array<std::string_view, 3> MMM = {"gemma4", "gemma4_unified", "phi4mm"};
+     return std::find(MMM.begin(), MMM.end(), model_type) != MMM.end();
+   }
+ 
+diff --git a/src/models/preprocessing/gemma4_multimodal_processor.cpp b/src/models/preprocessing/gemma4_multimodal_processor.cpp
+index 80171698d1..b2560b4808 100644
+--- a/src/models/preprocessing/gemma4_multimodal_processor.cpp
++++ b/src/models/preprocessing/gemma4_multimodal_processor.cpp
+@@ -188,9 +188,21 @@ ProcessGemma4Prompt(const Generators::Tokenizer& tokenizer, const std::string& p
+ 
+ Gemma4MultiModalProcessor::Gemma4MultiModalProcessor(Config& config, const SessionInfo& session_info)
+     : pixel_values_type_{session_info.GetInputDataType(config.model.vision.inputs.pixel_values)} {
++  // gemma-4-12B "unified" is encoder-free: it consumes raw 48px merged pixel
++  // patches (patch_dim 6912) and raw 640-sample waveform frames directly. The
++  // preprocessing ops (Gemma4ImageTransform at patch_size=48/pooling=1 and
++  // Gemma4UnifiedAudioFrames) already emit the final contract, so — unlike the
++  // SigLIP/log-mel "gemma4" path — no pixel trimming or conv-subsampling of the
++  // audio-token count is applied.
++  unified_ = config.model.type == "gemma4_unified";
++
+   // Query pixel_position_ids type (int32 or int64) if the vision model has this input
+   if (session_info.HasInput(config.model.vision.inputs.pixel_position_ids)) {
+     pixel_position_ids_type_ = session_info.GetInputDataType(config.model.vision.inputs.pixel_position_ids);
++    if (pixel_position_ids_type_ != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 &&
++        pixel_position_ids_type_ != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
++      throw std::runtime_error("Gemma4 pixel_position_ids input must have type INT32 or INT64");
++    }
+   }
+   const auto image_processor_config = (config.config_path / fs::path(config.model.vision.config_filename)).string();
+   CheckResult(OrtxCreateProcessor(image_processor_.ToBeAssigned(), image_processor_config.c_str()));
+@@ -298,14 +310,14 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
+     CheckResult(OrtxFeatureExtraction(audio_processor_.get(), payload.audios->audios_.get(), audio_result.ToBeAssigned()));
+ 
+     // OrtxTensorResultGetAt allocates a new TensorObject the caller owns; wrap in OrtxObjectPtr to dispose.
+-    ort_extensions::OrtxObjectPtr<OrtxTensor> audio_features_owner;
++    ort_extensions::OrtxObjectPtr<OrtxTensor> audio_features_owner, audio_attention_mask_owner;
+     CheckResult(OrtxTensorResultGetAt(audio_result.get(), 0, audio_features_owner.ToBeAssigned()));
++    CheckResult(OrtxTensorResultGetAt(audio_result.get(), 1, audio_attention_mask_owner.ToBeAssigned()));
+     OrtxTensor* audio_features = audio_features_owner.get();
++    OrtxTensor* audio_attention_mask = audio_attention_mask_owner.get();
+ 
+     EmplaceProcessedTensor(*named_tensors, Config::Defaults::AudioEmbedsName, audio_features, audio_features_type_, allocator);
+ 
+-    // Create input_features_mask: all-True for single-clip inference (no padding)
+-    // Shape matches audio features: [batch, time] bool
+     const float* audio_data{};
+     const int64_t* audio_shape{};
+     size_t audio_dims;
+@@ -319,17 +331,23 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
+           "but received " +
+           std::to_string(batch_dim) + " clips.");
+     }
+-    {
+-      auto mask = OrtValue::CreateTensor<bool>(allocator, std::vector<int64_t>{batch_dim, time_dim});
+-      std::fill_n(mask->GetTensorMutableData<bool>(), batch_dim * time_dim, true);
+-      named_tensors->emplace(std::string(Config::Defaults::AudioAttentionMaskName),
+-                             std::make_shared<Tensor>(std::move(mask)));
++    // Preserve the extractor's actual mask. Current single-clip frames are all
++    // valid; retaining the mask also respects padding bounds if batching evolves.
++    named_tensors->emplace(std::string(Config::Defaults::AudioAttentionMaskName),
++                           std::make_shared<Tensor>(ProcessTensor<bool>(audio_attention_mask, allocator)));
++
++    // Compute audio_sizes / audio-token count.
++    // Unified: each 640-sample frame is exactly one audio soft token, so the
++    // token count equals the number of frames (time_dim) — no subsampling.
++    // Standard gemma4: the Conformer speech encoder applies 2-stage Conv2d with
++    // stride=2 each, so the token count is reduced accordingly.
++    if (unified_) {
++      num_audio_tokens = time_dim;
++    } else {
++      int64_t t_after_1 = (time_dim - 1) / 2 + 1;
++      int64_t t_after_2 = (t_after_1 - 1) / 2 + 1;
++      num_audio_tokens = t_after_2;
+     }
+-
+-    // Compute audio_sizes: the speech encoder uses 2-stage Conv2d with stride=2 each
+-    int64_t t_after_1 = (time_dim - 1) / 2 + 1;
+-    int64_t t_after_2 = (t_after_1 - 1) / 2 + 1;
+-    num_audio_tokens = t_after_2;
+     std::array<int64_t, 1> audio_sizes_shape = {1};
+     auto audio_sizes = OrtValue::CreateTensor<int64_t>(allocator, audio_sizes_shape);
+     audio_sizes->GetTensorMutableData<int64_t>()[0] = num_audio_tokens;
+@@ -345,8 +363,15 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
+ 
+   if (payload.images) {
+     // The Gemma4ImageTransform pads pixel_values and position_ids to max_patches.
+-    // The vision ONNX model expects the actual (unpadded) number of patches.
+-    // Trim the tensors to actual_patches = actual_soft_tokens * pooling_kernel_size².
++    //
++    // Standard gemma4: the SigLIP vision ONNX expects the actual (unpadded)
++    // number of teacher patches, so the tensors are trimmed to
++    // actual_patches = actual_soft_tokens * pooling_kernel_size².
++    //
++    // Unified (gemma4_unified): the encoder-free vision graph consumes the full
++    // padded (max_soft_tokens, 6912) tensors and strips padding internally using
++    // position_ids (== -1 marks padding). No trimming is applied; actual_patches
++    // is computed but the trim branches below are gated on !unified_.
+     constexpr int64_t kPoolingKernelSize = 3;
+     const int64_t actual_patches = static_cast<int64_t>(max_soft_tokens) * kPoolingKernelSize * kPoolingKernelSize;
+ 
+@@ -361,7 +386,7 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
+     const int64_t num_padded_patches = (pv_dims == 3) ? pv_shape[1] : pv_shape[0];
+     const int64_t patch_dim = (pv_dims == 3) ? pv_shape[2] : pv_shape[1];
+ 
+-    if (actual_patches < num_padded_patches) {
++    if (!unified_ && actual_patches < num_padded_patches) {
+       // Trim: copy only the first actual_patches from the padded tensor.
+       // The preprocessor outputs float32 data, so we trim using float32 strides,
+       // then cast to the model's pixel_values type (float, fp16, or bf16).
+@@ -406,33 +431,34 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
+       const int64_t num_padded_pos = (pos_dims == 3) ? pos_shape[1] : pos_shape[0];
+       const int64_t pos_last_dim = (pos_dims == 3) ? pos_shape[2] : pos_shape[1];
+ 
+-      if (actual_patches < num_padded_pos) {
+-        // Trim position_ids: for 3D, copy per-batch with correct stride.
+-        // Detect the element type from the vision model's input to handle both int32 and int64.
+-        const int64_t pos_batch = (pos_dims == 3) ? pos_shape[0] : 1;
+-        auto trimmed_pos_shape = (pos_dims == 3) ? std::vector<int64_t>{pos_batch, actual_patches, pos_last_dim}
+-                                                 : std::vector<int64_t>{actual_patches, pos_last_dim};
+-
+-        auto trimmed_pos = OrtValue::CreateTensor(allocator, trimmed_pos_shape, pixel_position_ids_type_);
+-        const size_t pos_elem_size = (pixel_position_ids_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) ? 4 : 8;
+-        auto* dst = static_cast<uint8_t*>(trimmed_pos->GetTensorMutableRawData());
+-        const auto* src = static_cast<const uint8_t*>(pos_data_raw);
+-        const size_t src_stride = static_cast<size_t>(num_padded_pos * pos_last_dim) * pos_elem_size;
+-        const size_t dst_stride = static_cast<size_t>(actual_patches * pos_last_dim) * pos_elem_size;
++      // Gemma4ImageTransform always emits INT64 positions, regardless of the
++      // graph's requested type. Use source-element strides for both trimmed
++      // standard grids and full padded unified grids, converting values rather
++      // than reinterpreting the source bytes when the graph expects INT32.
++      const int64_t pos_batch = (pos_dims == 3) ? pos_shape[0] : 1;
++      const int64_t output_patches = (!unified_ && actual_patches < num_padded_pos)
++                                         ? actual_patches
++                                         : num_padded_pos;
++      auto output_pos_shape = (pos_dims == 3) ? std::vector<int64_t>{pos_batch, output_patches, pos_last_dim}
++                                              : std::vector<int64_t>{output_patches, pos_last_dim};
++      auto output_pos = OrtValue::CreateTensor(allocator, output_pos_shape, pixel_position_ids_type_);
++      const auto* src = static_cast<const int64_t*>(pos_data_raw);
++      const size_t src_stride = static_cast<size_t>(num_padded_pos * pos_last_dim);
++      const size_t dst_stride = static_cast<size_t>(output_patches * pos_last_dim);
++      if (pixel_position_ids_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
++        auto* dst = output_pos->GetTensorMutableData<int32_t>();
+         for (int64_t b = 0; b < pos_batch; ++b) {
+-          std::memcpy(dst + b * dst_stride, src + b * src_stride, dst_stride);
++          std::transform(src + b * src_stride, src + b * src_stride + dst_stride,
++                         dst + b * dst_stride, [](int64_t value) { return static_cast<int32_t>(value); });
+         }
+-        named_tensors->emplace(std::string(Config::Defaults::PixelPositionIdsName),
+-                               std::make_shared<Tensor>(std::move(trimmed_pos)));
+-      } else {
+-        if (pixel_position_ids_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
+-          named_tensors->emplace(std::string(Config::Defaults::PixelPositionIdsName),
+-                                 std::make_shared<Tensor>(ProcessTensor<int32_t>(pixel_position_ids, allocator)));
+-        } else {
+-          named_tensors->emplace(std::string(Config::Defaults::PixelPositionIdsName),
+-                                 std::make_shared<Tensor>(ProcessTensor<int64_t>(pixel_position_ids, allocator)));
++      } else if (pixel_position_ids_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
++        auto* dst = output_pos->GetTensorMutableData<int64_t>();
++        for (int64_t b = 0; b < pos_batch; ++b) {
++          std::copy_n(src + b * src_stride, dst_stride, dst + b * dst_stride);
+         }
+       }
++      named_tensors->emplace(std::string(Config::Defaults::PixelPositionIdsName),
++                             std::make_shared<Tensor>(std::move(output_pos)));
+     }
+   }
+ 
+diff --git a/src/models/preprocessing/gemma4_multimodal_processor.h b/src/models/preprocessing/gemma4_multimodal_processor.h
+index cb7d59796a..d6a2e9ab5f 100644
+--- a/src/models/preprocessing/gemma4_multimodal_processor.h
++++ b/src/models/preprocessing/gemma4_multimodal_processor.h
+@@ -20,6 +20,7 @@ struct Gemma4MultiModalProcessor : Processor {
+   ONNXTensorElementDataType audio_features_type_;
+ 
+   bool has_speech_{false};
++  bool unified_{false};  // gemma-4-12B encoder-free "unified" variant
+   size_t vision_soft_tokens_per_image_{260};
+ };
+ 
+diff --git a/src/models/preprocessing/multi_modal_processor.cpp b/src/models/preprocessing/multi_modal_processor.cpp
+index a0ae8443fd..65d68f373f 100644
+--- a/src/models/preprocessing/multi_modal_processor.cpp
++++ b/src/models/preprocessing/multi_modal_processor.cpp
+@@ -36,6 +36,7 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
+           {"lfm2_audio", Processor::Create<Lfm2AudioProcessor>},
+           {"lfm2_vl", Processor::Create<Lfm2VlImageProcessor>},
+           {"gemma4", Processor::Create<Gemma4MultiModalProcessor>},
++          {"gemma4_unified", Processor::Create<Gemma4MultiModalProcessor>},
+           {"mistral3", Processor::Create<Mistral3ImageProcessor>},
+           {"fara", Processor::Create<QwenImageProcessor>},
+           {"qwen2_5_vl", Processor::Create<QwenImageProcessor>},
+diff --git a/test/python/create/create_dummy_gemma4_unified_models.py b/test/python/create/create_dummy_gemma4_unified_models.py
+new file mode 100644
+index 0000000000..b3aeac476f
+--- /dev/null
++++ b/test/python/create/create_dummy_gemma4_unified_models.py
+@@ -0,0 +1,239 @@
++# Copyright (c) Microsoft Corporation. All rights reserved.
++# Licensed under the MIT License
++
++"""Generate the dummy ``gemma4_unified`` test model directory.
++
++The gemma-4-12B "unified" (encoder-free) model shares the gemma4 decoder /
++embedding contract but consumes raw 48px merged pixel patches
++(``pixel_values`` last dim = 48*48*3 = 6912) and raw 640-sample waveform frames
++(``audio_embeds`` last dim = 640) directly, instead of the SigLIP 16px /
++128-dim log-mel contract.
++
++This derives a temporary unified model from the existing
++``test/models/gemma4`` fixtures: the embedding / text decoders are copied
++verbatim, the vision / speech graphs consume the unified inputs, and the
++genai / processor configs are rewritten for the ``gemma4_unified`` type.
++
++Usage (from the repo root):
++    python test/python/create/create_dummy_gemma4_unified_models.py --output /tmp/gemma4-unified-validation
++"""
++
++from __future__ import annotations
++
++import argparse
++import json
++import shutil
++from pathlib import Path
++
++import numpy as np
++import onnx
++
++_UNIFIED_PIXEL_DIM = 48 * 48 * 3  # 6912
++_UNIFIED_AUDIO_DIM = 640
++
++_REPO_ROOT = Path(__file__).resolve().parents[3]
++_SRC_DIR = _REPO_ROOT / "test" / "models" / "gemma4"
++_DST_DIR = _REPO_ROOT / "test" / "models" / "gemma4_unified"
++
++_TOKENIZER_FILES = [
++    "special_tokens_map.json",
++    "tokenizer.json",
++    "tokenizer_config.json",
++]
++
++
++def _create_unified_vision_model(out_path: Path) -> None:
++    """Select real patches by XY positions and expose their pixel means."""
++    h, t = onnx.helper, onnx.TensorProto
++    inputs = [
++        h.make_tensor_value_info(
++            "pixel_values", t.FLOAT, ["batch_size", 280, _UNIFIED_PIXEL_DIM]
++        ),
++        h.make_tensor_value_info("pixel_position_ids", t.INT64, ["batch_size", 280, 2]),
++    ]
++    outputs = [h.make_tensor_value_info("image_features", t.FLOAT, ["tokens", 2048])]
++    nodes = [
++        h.make_node("Gather", ["pixel_position_ids", "x_axis"], ["x"], axis=2),
++        h.make_node("Greater", ["x", "negative_one"], ["valid"]),
++        h.make_node("NonZero", ["valid"], ["indices_t"]),
++        h.make_node("Transpose", ["indices_t"], ["indices"], perm=[1, 0]),
++        h.make_node("GatherND", ["pixel_values", "indices"], ["patches"]),
++        h.make_node("Cast", ["patches"], ["patches_double"], to=t.DOUBLE),
++        h.make_node(
++            "ReduceMean", ["patches_double"], ["means_double"], axes=[1], keepdims=1
++        ),
++        h.make_node("Cast", ["means_double"], ["means"], to=t.FLOAT),
++        h.make_node("Shape", ["means"], ["mean_shape"]),
++        h.make_node("Gather", ["mean_shape", "first_axis"], ["token_count"], axis=0),
++        h.make_node(
++            "Concat", ["token_count", "hidden_size"], ["feature_shape"], axis=0
++        ),
++        h.make_node("Expand", ["means", "feature_shape"], ["image_features"]),
++    ]
++    initializers = [
++        onnx.numpy_helper.from_array(np.array(0, np.int64), "x_axis"),
++        onnx.numpy_helper.from_array(np.array(-1, np.int64), "negative_one"),
++        onnx.numpy_helper.from_array(np.array([0], np.int64), "first_axis"),
++        onnx.numpy_helper.from_array(np.array([2048], np.int64), "hidden_size"),
++    ]
++    graph = h.make_graph(
++        nodes, "unified_input_sensitive_vision", inputs, outputs, initializers
++    )
++    model = h.make_model(graph, opset_imports=[h.make_opsetid("", 14)], ir_version=7)
++    onnx.checker.check_model(model)
++    onnx.save(model, out_path)
++
++
++def _create_unified_speech_model(out_path: Path) -> None:
++    """Consume PCM, the actual frame mask, and the requested audio token count."""
++    h, t = onnx.helper, onnx.TensorProto
++    inputs = [
++        h.make_tensor_value_info(
++            "input_features", t.FLOAT, ["batch_size", "num_frames", _UNIFIED_AUDIO_DIM]
++        ),
++        h.make_tensor_value_info(
++            "input_features_mask", t.BOOL, ["batch_size", "num_frames"]
++        ),
++        h.make_tensor_value_info("audio_sizes", t.INT64, ["batch_size"]),
++    ]
++    outputs = [h.make_tensor_value_info("audio_features", t.FLOAT, ["tokens", 2048])]
++    nodes = [
++        h.make_node(
++            "ReduceMean", ["input_features"], ["frame_means"], axes=[2], keepdims=0
++        ),
++        h.make_node("Cast", ["input_features_mask"], ["mask_float"], to=t.FLOAT),
++        h.make_node("Mul", ["frame_means", "mask_float"], ["masked_means"]),
++        h.make_node("ReduceSum", ["masked_means"], ["audio_sum"], keepdims=0),
++        h.make_node("Cast", ["audio_sizes"], ["sizes_float"], to=t.FLOAT),
++        h.make_node("ReduceSum", ["sizes_float"], ["size_sum"], keepdims=0),
++        h.make_node("Add", ["audio_sum", "size_sum"], ["signal"]),
++        h.make_node("ReduceSum", ["audio_sizes"], ["token_count"], keepdims=1),
++        h.make_node(
++            "Concat",
++            ["token_count", "hidden_size"],
++            ["feature_shape"],
++            axis=0,
++        ),
++        h.make_node("Expand", ["signal", "feature_shape"], ["audio_features"]),
++    ]
++    initializers = [
++        onnx.numpy_helper.from_array(np.array([2048], np.int64), "hidden_size"),
++    ]
++    graph = h.make_graph(
++        nodes, "unified_input_sensitive_speech", inputs, outputs, initializers
++    )
++    model = h.make_model(graph, opset_imports=[h.make_opsetid("", 14)], ir_version=7)
++    onnx.checker.check_model(model)
++    onnx.save(model, out_path)
++
++
++def create_model(source_dir: Path, output_dir: Path) -> None:
++    """Derive an isolated fixture; never rewrite the tracked model directory."""
++    if not source_dir.exists():
++        raise SystemExit(
++            f"Source gemma4 fixtures not found at {source_dir}. Generate/download the "
++            "gemma4 test model directory first; gemma4_unified is derived from it."
++        )
++    if output_dir.resolve() in {source_dir.resolve(), _DST_DIR.resolve()}:
++        raise ValueError(
++            "Use a temporary output directory, not a tracked fixture directory"
++        )
++    output_dir.mkdir(parents=True, exist_ok=False)
++
++    # Decoder + embedding are identical to gemma4.
++    for name in ("dummy_text.onnx", "dummy_embedding.onnx"):
++        shutil.copyfile(source_dir / name, output_dir / name)
++
++    _create_unified_vision_model(output_dir / "dummy_vision.onnx")
++    _create_unified_speech_model(output_dir / "dummy_speech.onnx")
++
++    for name in _TOKENIZER_FILES:
++        shutil.copyfile(source_dir / name, output_dir / name)
++
++    # genai_config.json: switch the model type and vision processor config file.
++    with open(source_dir / "genai_config.json") as f:
++        genai_config = json.load(f)
++    genai_config["model"]["type"] = "gemma4_unified"
++    genai_config["model"]["vision"]["config_filename"] = "image_processor.json"
++    genai_config["model"]["speech"]["inputs"] = {
++        "audio_embeds": "input_features",
++        "attention_mask": "input_features_mask",
++        "audio_sizes": "audio_sizes",
++    }
++    with open(output_dir / "genai_config.json", "w") as f:
++        json.dump(genai_config, f, indent=4)
++
++    # image_processor.json: reuse Gemma4ImageTransform with the merged geometry
++    # (patch_size=48, pooling_kernel_size=1) that yields 6912-dim patches.
++    image_processor = {
++        "processor": {
++            "name": "gemma_4_unified_image_processing",
++            "transforms": [
++                {
++                    "operation": {
++                        "name": "decode_image",
++                        "type": "DecodeImage",
++                        "attrs": {"color_space": "RGB"},
++                    }
++                },
++                {
++                    "operation": {
++                        "name": "gemma4_image_transform",
++                        "type": "Gemma4ImageTransform",
++                        "attrs": {
++                            "patch_size": 48,
++                            "max_soft_tokens": 280,
++                            "pooling_kernel_size": 1,
++                        },
++                    }
++                },
++            ],
++        }
++    }
++    with open(output_dir / "image_processor.json", "w") as f:
++        json.dump(image_processor, f, indent=4)
++
++    # audio_feature_extraction.json: raw 640-sample waveform framing.
++    audio_config = {
++        "feature_extraction": {
++            "sequence": [
++                {
++                    "operation": {
++                        "name": "audio_decoder",
++                        "type": "AudioDecoder",
++                        "attrs": {"max_samples": 0},
++                    }
++                },
++                {
++                    "operation": {
++                        "name": "gemma4_audio",
++                        "type": "Gemma4Audio",
++                        "attrs": {
++                            "type": "raw_frames",
++                            "audio_samples_per_token": 640,
++                            "sampling_rate": 16000,
++                            "padding_value": 0.0,
++                        },
++                    }
++                },
++            ]
++        }
++    }
++    with open(output_dir / "audio_feature_extraction.json", "w") as f:
++        json.dump(audio_config, f, indent=4)
++
++    print(f"Wrote gemma4_unified dummy model to {output_dir}")
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--source", type=Path, default=_SRC_DIR)
++    parser.add_argument(
++        "--output", type=Path, required=True, help="New temporary model directory"
++    )
++    args = parser.parse_args()
++    create_model(args.source, args.output)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/test/python/models/test_gemma4_models.py b/test/python/models/test_gemma4_models.py
+index 586c85cf47..61a67041cb 100644
+--- a/test/python/models/test_gemma4_models.py
++++ b/test/python/models/test_gemma4_models.py
+@@ -23,7 +23,9 @@
+ import pytest
+ from _test_utils import run_subprocess
+ 
+-logging.basicConfig(format="%(asctime)s %(name)s [%(levelname)s] - %(message)s", level=logging.DEBUG)
++logging.basicConfig(
++    format="%(asctime)s %(name)s [%(levelname)s] - %(message)s", level=logging.DEBUG
++)
+ log = logging.getLogger("gemma4-tests")
+ 
+ GEMMA4_MODEL_NAME = "gemma4"
+@@ -90,38 +92,83 @@ def _create_static_batch_vision_model(onnx, output_path):
+     """Create a static-B=1 vision model that removes padding and pools 3x3 patches."""
+     helper = onnx.helper
+     tensor_proto = onnx.TensorProto
+-    pixel_values = helper.make_tensor_value_info("pixel_values", tensor_proto.FLOAT, [1, "num_patches", 768])
+-    position_ids = helper.make_tensor_value_info("pixel_position_ids", tensor_proto.INT64, [1, "num_patches", 2])
+-    image_features = helper.make_tensor_value_info("image_features", tensor_proto.FLOAT, ["num_soft_tokens", 2048])
++    pixel_values = helper.make_tensor_value_info(
++        "pixel_values", tensor_proto.FLOAT, [1, "num_patches", 768]
++    )
++    position_ids = helper.make_tensor_value_info(
++        "pixel_position_ids", tensor_proto.INT64, [1, "num_patches", 2]
++    )
++    image_features = helper.make_tensor_value_info(
++        "image_features", tensor_proto.FLOAT, ["num_soft_tokens", 2048]
++    )
+ 
+     nodes = [
+-        helper.make_node("Gather", ["pixel_position_ids", "x_axis"], ["x_positions"], axis=2),
++        helper.make_node(
++            "Gather", ["pixel_position_ids", "x_axis"], ["x_positions"], axis=2
++        ),
+         helper.make_node("Greater", ["x_positions", "negative_one"], ["valid_mask"]),
+         helper.make_node("NonZero", ["valid_mask"], ["valid_indices_transposed"]),
+-        helper.make_node("Transpose", ["valid_indices_transposed"], ["valid_indices"], perm=[1, 0]),
+-        helper.make_node("GatherND", ["pixel_values", "valid_indices"], ["valid_patches"]),
+         helper.make_node(
+-            "Slice", ["valid_patches", "slice_start", "slice_end", "slice_axis", "slice_step"], ["pooled_patches"]
++            "Transpose", ["valid_indices_transposed"], ["valid_indices"], perm=[1, 0]
++        ),
++        helper.make_node(
++            "GatherND", ["pixel_values", "valid_indices"], ["valid_patches"]
++        ),
++        helper.make_node(
++            "Slice",
++            ["valid_patches", "slice_start", "slice_end", "slice_axis", "slice_step"],
++            ["pooled_patches"],
++        ),
++        helper.make_node(
++            "Pad", ["pooled_patches", "feature_padding", "zero"], ["image_features"]
+         ),
+-        helper.make_node("Pad", ["pooled_patches", "feature_padding", "zero"], ["image_features"]),
+     ]
+     initializers = [
+         onnx.numpy_helper.from_array(np.array(0, dtype=np.int64), "x_axis"),
+         onnx.numpy_helper.from_array(np.array(-1, dtype=np.int64), "negative_one"),
+         onnx.numpy_helper.from_array(np.array([0], dtype=np.int64), "slice_start"),
+-        onnx.numpy_helper.from_array(np.array([np.iinfo(np.int64).max], dtype=np.int64), "slice_end"),
++        onnx.numpy_helper.from_array(
++            np.array([np.iinfo(np.int64).max], dtype=np.int64), "slice_end"
++        ),
+         onnx.numpy_helper.from_array(np.array([0], dtype=np.int64), "slice_axis"),
+         onnx.numpy_helper.from_array(np.array([9], dtype=np.int64), "slice_step"),
+-        onnx.numpy_helper.from_array(np.array([0, 0, 0, 1280], dtype=np.int64), "feature_padding"),
++        onnx.numpy_helper.from_array(
++            np.array([0, 0, 0, 1280], dtype=np.int64), "feature_padding"
++        ),
+         onnx.numpy_helper.from_array(np.array(0, dtype=np.float32), "zero"),
+     ]
+     graph = helper.make_graph(
+-        nodes, "gemma4_static_batch_vision", [pixel_values, position_ids], [image_features], initializers
++        nodes,
++        "gemma4_static_batch_vision",
++        [pixel_values, position_ids],
++        [image_features],
++        initializers,
++    )
++    model = helper.make_model(
++        graph, opset_imports=[helper.make_opsetid("", 14)], ir_version=7
+     )
+-    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 14)], ir_version=7)
+     onnx.save(model, output_path)
+ 
+ 
++def _set_vision_position_dtype(onnx, model_path, dtype):
++    """Rewrite positions and their comparison constant together for valid ONNX."""
++    model = onnx.load(model_path)
++    position_input = next(
++        value for value in model.graph.input if value.name == "pixel_position_ids"
++    )
++    position_input.type.tensor_type.elem_type = dtype
++    for value in model.graph.initializer:
++        if value.name == "negative_one":
++            numpy_dtype = np.int32 if dtype == onnx.TensorProto.INT32 else np.int64
++            value.CopyFrom(
++                onnx.numpy_helper.from_array(
++                    np.array(-1, dtype=numpy_dtype), value.name
++                )
++            )
++    onnx.checker.check_model(model)
++    onnx.save(model, model_path)
++
++
+ def _create_dynamic_embedding_model(
+     onnx,
+     output_path,
+@@ -135,17 +182,23 @@ def _create_dynamic_embedding_model(
+     helper = onnx.helper
+     tensor_proto = onnx.TensorProto
+     feature_type = feature_type or tensor_proto.FLOAT
+-    input_ids = helper.make_tensor_value_info("input_ids", tensor_proto.INT32, ["batch_size", "sequence_length"])
++    input_ids = helper.make_tensor_value_info(
++        "input_ids", tensor_proto.INT32, ["batch_size", "sequence_length"]
++    )
+     feature_shape = ["num_image_tokens", "hidden_size"]
+     if feature_rank == 3:
+         feature_shape.insert(0, 1)
+-    image_features = helper.make_tensor_value_info("image_features", feature_type, feature_shape)
++    image_features = helper.make_tensor_value_info(
++        "image_features", feature_type, feature_shape
++    )
+     inputs_embeds = helper.make_tensor_value_info(
+         "inputs_embeds", tensor_proto.FLOAT, ["batch_size", "sequence_length", 2048]
+     )
+     nodes = [
+         helper.make_node("Shape", ["input_ids"], ["input_shape"]),
+-        helper.make_node("Concat", ["input_shape", "hidden_size"], ["output_shape"], axis=0),
++        helper.make_node(
++            "Concat", ["input_shape", "hidden_size"], ["output_shape"], axis=0
++        ),
+         helper.make_node(
+             "ConstantOfShape",
+             ["output_shape"],
+@@ -156,36 +209,64 @@ def _create_dynamic_embedding_model(
+     graph_inputs = [input_ids]
+     initializers = [
+         onnx.numpy_helper.from_array(np.array([2048], dtype=np.int64), "hidden_size"),
+-        onnx.numpy_helper.from_array(np.array(image_token_id, dtype=np.int32), "image_token_id"),
++        onnx.numpy_helper.from_array(
++            np.array(image_token_id, dtype=np.int32), "image_token_id"
++        ),
+         onnx.numpy_helper.from_array(np.array([0], dtype=np.int64), "squeeze_axis"),
+     ]
+     if consume_features:
+         graph_inputs.append(image_features)
+         nodes.extend(
+             [
+-                helper.make_node("Equal", ["input_ids", "image_token_id"], ["image_mask"]),
+-                helper.make_node("NonZero", ["image_mask"], ["image_indices_transposed"]),
+-                helper.make_node("Transpose", ["image_indices_transposed"], ["image_indices"], perm=[1, 0]),
++                helper.make_node(
++                    "Equal", ["input_ids", "image_token_id"], ["image_mask"]
++                ),
++                helper.make_node(
++                    "NonZero", ["image_mask"], ["image_indices_transposed"]
++                ),
++                helper.make_node(
++                    "Transpose",
++                    ["image_indices_transposed"],
++                    ["image_indices"],
++                    perm=[1, 0],
++                ),
+             ]
+         )
+         features_for_scatter = "image_features"
+         if feature_rank == 3:
+-            nodes.append(helper.make_node("Squeeze", [features_for_scatter, "squeeze_axis"], ["rank2_image_features"]))
++            nodes.append(
++                helper.make_node(
++                    "Squeeze",
++                    [features_for_scatter, "squeeze_axis"],
++                    ["rank2_image_features"],
++                )
++            )
+             features_for_scatter = "rank2_image_features"
+         if feature_type != tensor_proto.FLOAT:
+             nodes.append(
+-                helper.make_node("Cast", [features_for_scatter], ["float_image_features"], to=tensor_proto.FLOAT)
++                helper.make_node(
++                    "Cast",
++                    [features_for_scatter],
++                    ["float_image_features"],
++                    to=tensor_proto.FLOAT,
++                )
+             )
+             features_for_scatter = "float_image_features"
+         nodes.append(
+             helper.make_node(
+-                "ScatterND", ["inputs_embeds_empty", "image_indices", features_for_scatter], ["inputs_embeds"]
++                "ScatterND",
++                ["inputs_embeds_empty", "image_indices", features_for_scatter],
++                ["inputs_embeds"],
+             )
+         )
+         nodes[2].output[0] = "inputs_embeds_empty"
+ 
+-    graph = helper.make_graph(nodes, "gemma4_dynamic_embedding", graph_inputs, [inputs_embeds], initializers)
+-    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 14)], ir_version=7)
++    graph = helper.make_graph(
++        nodes, "gemma4_dynamic_embedding", graph_inputs, [inputs_embeds], initializers
++    )
++    model = helper.make_model(
++        graph, opset_imports=[helper.make_opsetid("", 14)], ir_version=7
++    )
+     onnx.save(model, output_path)
+ 
+ 
+@@ -194,52 +275,99 @@ def _create_dynamic_decoder_model(onnx, output_path, *, with_kv_cache=True):
+     helper = onnx.helper
+     tensor_proto = onnx.TensorProto
+     inputs = [
+-        helper.make_tensor_value_info("inputs_embeds", tensor_proto.FLOAT, ["batch_size", "sequence_length", 2048]),
+-        helper.make_tensor_value_info("attention_mask", tensor_proto.INT64, ["batch_size", "total_sequence_length"]),
+-        helper.make_tensor_value_info("position_ids", tensor_proto.INT64, ["batch_size", "sequence_length"]),
+         helper.make_tensor_value_info(
+-            "past_key_values.0.key", tensor_proto.FLOAT, ["batch_size", 4, "past_sequence_length", 256]
++            "inputs_embeds", tensor_proto.FLOAT, ["batch_size", "sequence_length", 2048]
+         ),
+         helper.make_tensor_value_info(
+-            "past_key_values.0.value", tensor_proto.FLOAT, ["batch_size", 4, "past_sequence_length", 256]
++            "attention_mask",
++            tensor_proto.INT64,
++            ["batch_size", "total_sequence_length"],
++        ),
++        helper.make_tensor_value_info(
++            "position_ids", tensor_proto.INT64, ["batch_size", "sequence_length"]
++        ),
++        helper.make_tensor_value_info(
++            "past_key_values.0.key",
++            tensor_proto.FLOAT,
++            ["batch_size", 4, "past_sequence_length", 256],
++        ),
++        helper.make_tensor_value_info(
++            "past_key_values.0.value",
++            tensor_proto.FLOAT,
++            ["batch_size", 4, "past_sequence_length", 256],
+         ),
+     ]
+     outputs = [
+-        helper.make_tensor_value_info("logits", tensor_proto.FLOAT, ["batch_size", "sequence_length", 8]),
+         helper.make_tensor_value_info(
+-            "present.0.key", tensor_proto.FLOAT, ["batch_size", 4, "total_sequence_length", 256]
++            "logits", tensor_proto.FLOAT, ["batch_size", "sequence_length", 8]
+         ),
+         helper.make_tensor_value_info(
+-            "present.0.value", tensor_proto.FLOAT, ["batch_size", 4, "total_sequence_length", 256]
++            "present.0.key",
++            tensor_proto.FLOAT,
++            ["batch_size", 4, "total_sequence_length", 256],
++        ),
++        helper.make_tensor_value_info(
++            "present.0.value",
++            tensor_proto.FLOAT,
++            ["batch_size", 4, "total_sequence_length", 256],
+         ),
+     ]
+     nodes = [
+         helper.make_node("Shape", ["inputs_embeds"], ["embeds_shape"]),
+-        helper.make_node("Slice", ["embeds_shape", "zero_index", "two_index"], ["batch_sequence_shape"]),
++        helper.make_node(
++            "Slice",
++            ["embeds_shape", "zero_index", "two_index"],
++            ["batch_sequence_shape"],
++        ),
+         helper.make_node("Mul", ["inputs_embeds", "inputs_embeds"], ["squared_embeds"]),
+-        helper.make_node("ReduceSum", ["squared_embeds", "reduce_axes"], ["feature_score"], keepdims=1),
+-        helper.make_node("Concat", ["batch_sequence_shape", "one_index"], ["score_shape"], axis=0),
+-        helper.make_node("Expand", ["feature_score", "score_shape"], ["expanded_feature_score"]),
+-        helper.make_node("Concat", ["batch_sequence_shape", "two_index"], ["prefix_shape"], axis=0),
++        helper.make_node(
++            "ReduceSum",
++            ["squared_embeds", "reduce_axes"],
++            ["feature_score"],
++            keepdims=1,
++        ),
++        helper.make_node(
++            "Concat", ["batch_sequence_shape", "one_index"], ["score_shape"], axis=0
++        ),
++        helper.make_node(
++            "Expand", ["feature_score", "score_shape"], ["expanded_feature_score"]
++        ),
++        helper.make_node(
++            "Concat", ["batch_sequence_shape", "two_index"], ["prefix_shape"], axis=0
++        ),
+         helper.make_node(
+             "ConstantOfShape",
+             ["prefix_shape"],
+             ["logits_prefix"],
+             value=onnx.numpy_helper.from_array(np.array([0], dtype=np.float32)),
+         ),
+-        helper.make_node("Concat", ["batch_sequence_shape", "five_index"], ["suffix_shape"], axis=0),
++        helper.make_node(
++            "Concat", ["batch_sequence_shape", "five_index"], ["suffix_shape"], axis=0
++        ),
+         helper.make_node(
+             "ConstantOfShape",
+             ["suffix_shape"],
+             ["logits_suffix"],
+             value=onnx.numpy_helper.from_array(np.array([0], dtype=np.float32)),
+         ),
+-        helper.make_node("Concat", ["logits_prefix", "expanded_feature_score", "logits_suffix"], ["logits"], axis=2),
++        helper.make_node(
++            "Concat",
++            ["logits_prefix", "expanded_feature_score", "logits_suffix"],
++            ["logits"],
++            axis=2,
++        ),
+         helper.make_node("Shape", ["attention_mask"], ["mask_shape"]),
+-        helper.make_node("Slice", ["mask_shape", "zero_index", "one_index"], ["batch_dim"]),
+-        helper.make_node("Slice", ["mask_shape", "one_index", "two_index"], ["total_sequence_dim"]),
+         helper.make_node(
+-            "Concat", ["batch_dim", "num_heads", "total_sequence_dim", "head_size"], ["present_shape"], axis=0
++            "Slice", ["mask_shape", "zero_index", "one_index"], ["batch_dim"]
++        ),
++        helper.make_node(
++            "Slice", ["mask_shape", "one_index", "two_index"], ["total_sequence_dim"]
++        ),
++        helper.make_node(
++            "Concat",
++            ["batch_dim", "num_heads", "total_sequence_dim", "head_size"],
++            ["present_shape"],
++            axis=0,
+         ),
+         helper.make_node(
+             "ConstantOfShape",
+@@ -263,8 +391,201 @@ def _create_dynamic_decoder_model(onnx, output_path, *, with_kv_cache=True):
+         outputs = outputs[:1]
+         nodes = nodes[:-6]
+         initializers = initializers[:-2]
+-    graph = helper.make_graph(nodes, "gemma4_dynamic_decoder", inputs, outputs, initializers)
+-    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 14)], ir_version=7)
++    graph = helper.make_graph(
++        nodes, "gemma4_dynamic_decoder", inputs, outputs, initializers
++    )
++    model = helper.make_model(
++        graph, opset_imports=[helper.make_opsetid("", 14)], ir_version=7
++    )
++    onnx.save(model, output_path)
++
++
++def _create_modality_signal_embedding_model(
++    onnx,
++    output_path,
++    feature_name="image_features",
++    consume_features=False,
++    extra_feature_names=(),
++):
++    """Create prompt-sized embeddings, optionally consuming a modality signal."""
++    helper = onnx.helper
++    tensor_proto = onnx.TensorProto
++    input_ids = helper.make_tensor_value_info(
++        "input_ids", tensor_proto.INT32, ["batch_size", "sequence_length"]
++    )
++    image_features = helper.make_tensor_value_info(
++        feature_name, tensor_proto.FLOAT, ["num_modality_tokens", 2048]
++    )
++    inputs = [input_ids, image_features]
++    inputs.extend(
++        helper.make_tensor_value_info(
++            name, tensor_proto.FLOAT, [f"{name}_tokens", 2048]
++        )
++        for name in extra_feature_names
++    )
++    inputs_embeds = helper.make_tensor_value_info(
++        "inputs_embeds", tensor_proto.FLOAT, ["batch_size", "sequence_length", 2048]
++    )
++    nodes = [
++        helper.make_node("Shape", ["input_ids"], ["input_shape"]),
++        helper.make_node(
++            "Concat", ["input_shape", "hidden_size"], ["output_shape"], axis=0
++        ),
++        helper.make_node(
++            "ConstantOfShape",
++            ["output_shape"],
++            ["base_embeds" if consume_features else "inputs_embeds"],
++            value=onnx.numpy_helper.from_array(np.array([0], dtype=np.float32)),
++        ),
++    ]
++    if consume_features:
++        nodes.extend(
++            [
++                # A double reduction preserves the semantic mean without the
++                # cumulative float32 error from thousands of repeated channels.
++                helper.make_node(
++                    "Cast", [feature_name], ["features_double"], to=tensor_proto.DOUBLE
++                ),
++                helper.make_node(
++                    "ReduceMean", ["features_double"], ["signal_double"], keepdims=0
++                ),
++                helper.make_node(
++                    "Cast",
++                    ["signal_double"],
++                    ["modality_signal"],
++                    to=tensor_proto.FLOAT,
++                ),
++                helper.make_node(
++                    "Add", ["base_embeds", "modality_signal"], ["inputs_embeds"]
++                ),
++            ]
++        )
++    initializers = [
++        onnx.numpy_helper.from_array(np.array([2048], dtype=np.int64), "hidden_size")
++    ]
++    graph = helper.make_graph(
++        nodes, "gemma4_dynamic_embedding", inputs, [inputs_embeds], initializers
++    )
++    model = helper.make_model(
++        graph, opset_imports=[helper.make_opsetid("", 14)], ir_version=7
++    )
++    onnx.checker.check_model(model)
++    onnx.save(model, output_path)
++
++
++def _create_modality_signal_decoder_model(onnx, output_path, consume_embeddings=False):
++    """Create prompt-sized outputs, optionally projecting embeddings into token 2."""
++    helper = onnx.helper
++    tensor_proto = onnx.TensorProto
++    inputs = [
++        helper.make_tensor_value_info(
++            "inputs_embeds", tensor_proto.FLOAT, ["batch_size", "sequence_length", 2048]
++        ),
++        helper.make_tensor_value_info(
++            "attention_mask",
++            tensor_proto.INT64,
++            ["batch_size", "total_sequence_length"],
++        ),
++        helper.make_tensor_value_info(
++            "position_ids", tensor_proto.INT64, ["batch_size", "sequence_length"]
++        ),
++        helper.make_tensor_value_info(
++            "past_key_values.0.key",
++            tensor_proto.FLOAT,
++            ["batch_size", 4, "past_sequence_length", 256],
++        ),
++        helper.make_tensor_value_info(
++            "past_key_values.0.value",
++            tensor_proto.FLOAT,
++            ["batch_size", 4, "past_sequence_length", 256],
++        ),
++    ]
++    outputs = [
++        helper.make_tensor_value_info(
++            "logits", tensor_proto.FLOAT, ["batch_size", "sequence_length", 8]
++        ),
++        helper.make_tensor_value_info(
++            "present.0.key",
++            tensor_proto.FLOAT,
++            ["batch_size", 4, "total_sequence_length", 256],
++        ),
++        helper.make_tensor_value_info(
++            "present.0.value",
++            tensor_proto.FLOAT,
++            ["batch_size", 4, "total_sequence_length", 256],
++        ),
++    ]
++    nodes = [
++        helper.make_node("Shape", ["inputs_embeds"], ["embeds_shape"]),
++        helper.make_node(
++            "Slice",
++            ["embeds_shape", "zero_index", "two_index"],
++            ["batch_sequence_shape"],
++        ),
++        helper.make_node(
++            "Concat", ["batch_sequence_shape", "vocab_size"], ["logits_shape"], axis=0
++        ),
++        helper.make_node(
++            "ConstantOfShape",
++            ["logits_shape"],
++            ["base_logits" if consume_embeddings else "logits"],
++            value=onnx.numpy_helper.from_array(np.array([0], dtype=np.float32)),
++        ),
++        helper.make_node("Shape", ["attention_mask"], ["mask_shape"]),
++        helper.make_node(
++            "Slice", ["mask_shape", "zero_index", "one_index"], ["batch_dim"]
++        ),
++        helper.make_node(
++            "Slice", ["mask_shape", "one_index", "two_index"], ["total_sequence_dim"]
++        ),
++        helper.make_node(
++            "Concat",
++            ["batch_dim", "num_heads", "total_sequence_dim", "head_size"],
++            ["present_shape"],
++            axis=0,
++        ),
++        helper.make_node(
++            "ConstantOfShape",
++            ["present_shape"],
++            ["present.0.key"],
++            value=onnx.numpy_helper.from_array(np.array([0], dtype=np.float32)),
++        ),
++        helper.make_node("Identity", ["present.0.key"], ["present.0.value"]),
++    ]
++    initializers = [
++        onnx.numpy_helper.from_array(np.array([0], dtype=np.int64), "zero_index"),
++        onnx.numpy_helper.from_array(np.array([1], dtype=np.int64), "one_index"),
++        onnx.numpy_helper.from_array(np.array([2], dtype=np.int64), "two_index"),
++        onnx.numpy_helper.from_array(np.array([8], dtype=np.int64), "vocab_size"),
++        onnx.numpy_helper.from_array(np.array([4], dtype=np.int64), "num_heads"),
++        onnx.numpy_helper.from_array(np.array([256], dtype=np.int64), "head_size"),
++    ]
++    if consume_embeddings:
++        # Input-sensitive embedding fixtures fill the entire tensor with one
++        # scalar. Max exposes that signal exactly, without another large sum.
++        nodes.extend(
++            [
++                helper.make_node(
++                    "ReduceMax", ["inputs_embeds"], ["embedding_signal"], keepdims=0
++                ),
++                helper.make_node(
++                    "Mul", ["embedding_signal", "token_selector"], ["token_signal"]
++                ),
++                helper.make_node("Add", ["base_logits", "token_signal"], ["logits"]),
++            ]
++        )
++        initializers.append(
++            onnx.numpy_helper.from_array(
++                np.array([0, 0, 1, 0, 0, 0, 0, 0], dtype=np.float32), "token_selector"
++            )
++        )
++    graph = helper.make_graph(
++        nodes, "gemma4_dynamic_decoder", inputs, outputs, initializers
++    )
++    model = helper.make_model(
++        graph, opset_imports=[helper.make_opsetid("", 14)], ir_version=7
++    )
++    onnx.checker.check_model(model)
+     onnx.save(model, output_path)
+ 
+ 
+@@ -287,7 +608,9 @@ def test_gemma4_text_only(test_data_path):
+     ids = _to_numpy(inputs["input_ids"])
+     assert len(ids.shape) == 2, f"input_ids should be 2D, got shape {ids.shape}"
+     assert ids.shape[0] == 1, f"input_ids batch dim should be 1, got {ids.shape[0]}"
+-    assert ids.shape[1] >= 5, f"input_ids too short for prompt, got length {ids.shape[1]}"
++    assert (
++        ids.shape[1] >= 5
++    ), f"input_ids too short for prompt, got length {ids.shape[1]}"
+ 
+ 
+ @pytest.mark.parametrize("relative_image_path", [Path("images") / "australia.jpg"])
+@@ -323,7 +646,9 @@ def test_gemma4_vision_load_from_bytes(test_data_path, relative_image_path):
+     with open(image_path, "rb") as f:
+         images = og.Images.open_bytes(f.read())
+ 
+-    inputs = processor(f"{GEMMA4_IMAGE_TOKEN}What is shown in this image?", images=images)
++    inputs = processor(
++        f"{GEMMA4_IMAGE_TOKEN}What is shown in this image?", images=images
++    )
+ 
+     assert inputs is not None
+     assert "pixel_values" in inputs
+@@ -337,13 +662,18 @@ def test_gemma4_vision_multiple_images(test_data_path, relative_image_paths):
+     """Test that Gemma4 preserves per-image metadata in input image order."""
+     _, processor = _load_model_and_processor(test_data_path)
+ 
+-    image_paths = [os.fspath(_get_test_media_path(test_data_path, path)) for path in relative_image_paths]
++    image_paths = [
++        os.fspath(_get_test_media_path(test_data_path, path))
++        for path in relative_image_paths
++    ]
+     for p in image_paths:
+         if not os.path.exists(p):
+             pytest.skip(f"Test image not found at {p}")
+     images = og.Images.open(*image_paths)
+ 
+-    inputs = processor(f"{GEMMA4_IMAGE_TOKEN}{GEMMA4_IMAGE_TOKEN}Compare these images", images=images)
++    inputs = processor(
++        f"{GEMMA4_IMAGE_TOKEN}{GEMMA4_IMAGE_TOKEN}Compare these images", images=images
++    )
+ 
+     assert inputs is not None
+     assert "pixel_values" in inputs
+@@ -362,7 +692,9 @@ def test_gemma4_vision_multiple_images(test_data_path, relative_image_paths):
+     assert np.all(image_token_counts > 0)
+     assert pixel_values.shape[1] == int(image_token_counts.max()) * 9
+ 
+-    valid_patch_counts = np.count_nonzero(np.any(pixel_position_ids != -1, axis=-1), axis=1)
++    valid_patch_counts = np.count_nonzero(
++        np.any(pixel_position_ids != -1, axis=-1), axis=1
++    )
+     assert np.all(valid_patch_counts % 9 == 0)
+     expected_token_counts = valid_patch_counts // 9
+     np.testing.assert_array_equal(image_token_counts, expected_token_counts)
+@@ -372,7 +704,10 @@ def test_gemma4_vision_multiple_images(test_data_path, relative_image_paths):
+     "relative_image_paths",
+     [[Path("images") / "australia.jpg", Path("images") / "sheet.png"]],
+ )
+-def test_gemma4_static_batch_vision_executes_multiple_images(test_data_path, tmp_path, relative_image_paths):
++@pytest.mark.parametrize("position_dtype", ["int64", "int32"])
++def test_gemma4_static_batch_vision_executes_multiple_images(
++    test_data_path, tmp_path, relative_image_paths, position_dtype
++):
+     """Test that the static-B=1 vision model runs once per differently sized image."""
+     onnx = pytest.importorskip("onnx")
+     source_model_path = Path(_get_gemma4_model_path(test_data_path))
+@@ -389,21 +724,67 @@ def test_gemma4_static_batch_vision_executes_multiple_images(test_data_path, tmp
+     config["search"]["past_present_share_buffer"] = False
+     config_path.write_text(json.dumps(config), encoding="utf-8")
+     _create_static_batch_vision_model(onnx, model_path / "dummy_vision.onnx")
+-    _create_dynamic_embedding_model(onnx, model_path / "dummy_embedding.onnx", config["model"]["image_token_id"])
++    _create_dynamic_embedding_model(
++        onnx, model_path / "dummy_embedding.onnx", config["model"]["image_token_id"]
++    )
+     _create_dynamic_decoder_model(onnx, model_path / "dummy_text.onnx")
+ 
+     model = og.Model(os.fspath(model_path))
+     processor = model.create_multimodal_processor()
+-    image_paths = [os.fspath(_get_test_media_path(test_data_path, path)) for path in relative_image_paths]
++    image_paths = [
++        os.fspath(_get_test_media_path(test_data_path, path))
++        for path in relative_image_paths
++    ]
+     images = og.Images.open(*image_paths)
+-    inputs = processor(f"{GEMMA4_IMAGE_TOKEN}{GEMMA4_IMAGE_TOKEN}Compare these images", images=images)
++    inputs = processor(
++        f"{GEMMA4_IMAGE_TOKEN}{GEMMA4_IMAGE_TOKEN}Compare these images", images=images
++    )
++    reference_positions = _to_numpy(inputs["pixel_position_ids"])
++    assert reference_positions.dtype == np.int64
++    assert np.any(reference_positions > 0), "Exercise nonzero XY coordinates"
++    # The tracked processor pads to 280 * 9 teacher patches. These assets must
++    # exercise trimming, including a second image read at the padded source stride.
++    assert reference_positions.shape[1] < 280 * 9
++    assert np.any(np.all(reference_positions == -1, axis=-1))
++    if position_dtype == "int32":
++        reference_pixels = _to_numpy(inputs["pixel_values"])
++        reference_counts = _to_numpy(inputs["num_image_tokens"])
++        # Keep the reference model's files untouched and avoid sharing a cached
++        # session path between different graph input types.
++        int32_model_path = tmp_path / "gemma4_int32"
++        shutil.copytree(model_path, int32_model_path)
++        _set_vision_position_dtype(
++            onnx, int32_model_path / "dummy_vision.onnx", onnx.TensorProto.INT32
++        )
++        model = og.Model(os.fspath(int32_model_path))
++        processor = model.create_multimodal_processor()
++        inputs = processor(
++            f"{GEMMA4_IMAGE_TOKEN}{GEMMA4_IMAGE_TOKEN}Compare these images",
++            images=images,
++        )
++        positions = _to_numpy(inputs["pixel_position_ids"])
++        assert positions.dtype == np.int32
++        np.testing.assert_array_equal(positions, reference_positions)
++        np.testing.assert_array_equal(
++            _to_numpy(inputs["pixel_values"]), reference_pixels
++        )
++        np.testing.assert_array_equal(
++            _to_numpy(inputs["num_image_tokens"]), reference_counts
++        )
+     image_token_counts = _to_numpy(inputs["num_image_tokens"])
+     assert image_token_counts[0] != image_token_counts[1]
++    assert reference_positions.shape[1] == int(image_token_counts.max()) * 9
+ 
+     params = og.GeneratorParams(model)
+     params.set_search_options(max_length=4096)
+     generator = og.Generator(model, params)
+     generator.set_inputs(inputs)
++    prompt_ids = _to_numpy(inputs["input_ids"])[0]
++    generator.generate_next_token()
++    sequence = np.asarray(generator.get_sequence(0))
++    assert sequence.size == prompt_ids.size + 1
++    np.testing.assert_array_equal(sequence[:-1], prompt_ids)
++    assert sequence[-1] == 2
+ 
+ 
+ @pytest.mark.parametrize("relative_image_path", [Path("images") / "australia.jpg"])
+@@ -435,10 +816,14 @@ def test_gemma4_vision_model_io(test_data_path):
+     assert "image_features" in output_names
+ 
+     pv_input = next(i for i in model.graph.input if i.name == "pixel_values")
+-    assert pv_input.type.tensor_type.elem_type == onnx.TensorProto.FLOAT, "pixel_values must be float32"
++    assert (
++        pv_input.type.tensor_type.elem_type == onnx.TensorProto.FLOAT
++    ), "pixel_values must be float32"
+ 
+     dim0 = pv_input.type.tensor_type.shape.dim[0]
+-    assert dim0.dim_param != "", f"pixel_values dim-0 should be dynamic, got static dim_value={dim0.dim_value}"
++    assert (
++        dim0.dim_param != ""
++    ), f"pixel_values dim-0 should be dynamic, got static dim_value={dim0.dim_value}"
+ 
+ 
+ def test_gemma4_embedding_model_io(test_data_path):
+@@ -483,16 +868,24 @@ def test_gemma4_speech_model_io(test_data_path):
+ 
+     assert "audio_embeds" in input_names, "Speech model must have audio_embeds input"
+     assert "audio_sizes" in input_names, "Speech model must have audio_sizes input"
+-    assert "audio_features" in output_names, "Speech model must have audio_features output"
++    assert (
++        "audio_features" in output_names
++    ), "Speech model must have audio_features output"
+ 
+     # audio_embeds should be float32 with shape (batch, num_frames, 128)
+     ae_input = next(i for i in model.graph.input if i.name == "audio_embeds")
+-    assert ae_input.type.tensor_type.elem_type == onnx.TensorProto.FLOAT, "audio_embeds must be float32"
+-    assert ae_input.type.tensor_type.shape.dim[2].dim_value == 128, "audio_embeds feature dim should be 128"
++    assert (
++        ae_input.type.tensor_type.elem_type == onnx.TensorProto.FLOAT
++    ), "audio_embeds must be float32"
++    assert (
++        ae_input.type.tensor_type.shape.dim[2].dim_value == 128
++    ), "audio_embeds feature dim should be 128"
+ 
+     # audio_sizes should be int64
+     as_input = next(i for i in model.graph.input if i.name == "audio_sizes")
+-    assert as_input.type.tensor_type.elem_type == onnx.TensorProto.INT64, "audio_sizes must be int64"
++    assert (
++        as_input.type.tensor_type.elem_type == onnx.TensorProto.INT64
++    ), "audio_sizes must be int64"
+ 
+ 
+ @pytest.mark.parametrize("relative_audio_path", [Path("audios") / "jfk.flac"])
+@@ -500,9 +893,8 @@ def test_gemma4_audio_preprocessing(test_data_path, relative_audio_path):
+     """Test audio preprocessing with Gemma4 (Gemma4LogMel feature extraction)."""
+     _, processor = _load_model_and_processor(test_data_path)
+ 
+-    audio_path = os.fspath(Path(test_data_path) / relative_audio_path)
+-    if not os.path.exists(audio_path):
+-        pytest.skip(f"Test audio file not found at {audio_path}")
++    audio_path = os.fspath(_get_test_media_path(test_data_path, relative_audio_path))
++    assert os.path.isfile(audio_path), f"Missing validation audio: {audio_path}"
+ 
+     audios = og.Audios.open(audio_path)
+     prompt = "<|audio|>Transcribe this audio"
+@@ -517,22 +909,42 @@ def test_gemma4_audio_preprocessing(test_data_path, relative_audio_path):
+     # Audio prompt expands <|audio|> tokens based on audio duration,
+     # so sequence length should be significantly longer than just the text tokens.
+     # "Transcribe this audio" = 4 text tokens + BOS + expanded audio tokens
+-    assert ids.shape[1] > 5, f"input_ids should contain expanded audio tokens, got length {ids.shape[1]}"
++    assert (
++        ids.shape[1] > 5
++    ), f"input_ids should contain expanded audio tokens, got length {ids.shape[1]}"
+ 
+     # Audio preprocessing should produce audio_embeds and attention mask
+     assert "audio_embeds" in inputs, "Processor should output audio_embeds"
+-    assert "audio_attention_mask" in inputs, "Processor should output audio attention mask"
++    assert (
++        "audio_attention_mask" in inputs
++    ), "Processor should output audio attention mask"
+ 
+     # Validate audio_embeds structure: should be float with 128-dim features
+     audio_embeds = _to_numpy(inputs["audio_embeds"])
+-    assert len(audio_embeds.shape) >= 2, f"audio_embeds should be at least 2D, got {audio_embeds.shape}"
+-    assert audio_embeds.shape[-1] == 128, f"audio_embeds feature dim should be 128, got {audio_embeds.shape[-1]}"
+-    assert audio_embeds.dtype == np.float32, f"audio_embeds should be float32, got {audio_embeds.dtype}"
++    assert (
++        len(audio_embeds.shape) >= 2
++    ), f"audio_embeds should be at least 2D, got {audio_embeds.shape}"
++    assert (
++        audio_embeds.shape[-1] == 128
++    ), f"audio_embeds feature dim should be 128, got {audio_embeds.shape[-1]}"
++    assert (
++        audio_embeds.dtype == np.float32
++    ), f"audio_embeds should be float32, got {audio_embeds.dtype}"
+ 
+     # Validate audio_sizes is present and positive
+     assert "audio_sizes" in inputs, "Processor should output audio_sizes"
+     audio_sizes = _to_numpy(inputs["audio_sizes"])
+     assert audio_sizes[0] > 0, f"audio_sizes should be positive, got {audio_sizes[0]}"
++    frames = audio_embeds.shape[-2]
++    assert audio_sizes.dtype == np.int64
++    assert audio_sizes.shape == (1,)
++    assert audio_sizes[0] == ((frames + 1) // 2 + 1) // 2
++    mask = _to_numpy(inputs["audio_attention_mask"])
++    assert mask.dtype == np.bool_
++    assert mask.shape == audio_embeds.shape[:2]
++    # With left-only semicausal padding, every emitted single-clip window ends
++    # in real PCM. Token counts still follow the two stride-2 convolutions.
++    np.testing.assert_array_equal(mask, np.ones_like(mask))
+ 
+ 
+ def _write_pipelined_gemma4(
+@@ -563,7 +975,10 @@ def _write_pipelined_gemma4(
+     vision = config["model"]["vision"]
+     vision["filename"] = "dummy_vision.onnx"
+     vision.pop("pipeline", None)
+-    vision["inputs"] = {"pixel_values": "pixel_values", "pixel_position_ids": "pixel_position_ids"}
++    vision["inputs"] = {
++        "pixel_values": "pixel_values",
++        "pixel_position_ids": "pixel_position_ids",
++    }
+     vision["outputs"] = {"image_features": "image_features"}
+     _create_static_batch_vision_model(onnx, model_path / "dummy_vision.onnx")
+     _create_dynamic_embedding_model(
+@@ -574,7 +989,9 @@ def _write_pipelined_gemma4(
+         feature_rank=feature_rank,
+         consume_features=consume_features,
+     )
+-    _create_dynamic_decoder_model(onnx, model_path / "dummy_text.onnx", with_kv_cache=with_kv_cache)
++    _create_dynamic_decoder_model(
++        onnx, model_path / "dummy_text.onnx", with_kv_cache=with_kv_cache
++    )
+ 
+     decoder = config["model"]["decoder"]
+     decoder.pop("filename", None)
+@@ -582,7 +999,10 @@ def _write_pipelined_gemma4(
+         {
+             "embedding": {
+                 "filename": "dummy_embedding.onnx",
+-                "inputs": ["input_ids", *(["image_features"] if consume_features else [])],
++                "inputs": [
++                    "input_ids",
++                    *(["image_features"] if consume_features else []),
++                ],
+                 "outputs": ["inputs_embeds"],
+             },
+             "text": {
+@@ -624,11 +1044,16 @@ def test_pipelined_gemma4_fixture_selects_dummy_vision_graph(test_data_path, tmp
+     )
+     source_config_path.write_text(json.dumps(source_config), encoding="utf-8")
+ 
+-    config_path = _write_pipelined_gemma4(onnx, source_model_path, tmp_path / "pipeline")
++    config_path = _write_pipelined_gemma4(
++        onnx, source_model_path, tmp_path / "pipeline"
++    )
+     vision = json.loads(config_path.read_text(encoding="utf-8"))["model"]["vision"]
+     assert vision["filename"] == "dummy_vision.onnx"
+     assert not vision.get("pipeline")
+-    assert vision["inputs"] == {"pixel_values": "pixel_values", "pixel_position_ids": "pixel_position_ids"}
++    assert vision["inputs"] == {
++        "pixel_values": "pixel_values",
++        "pixel_position_ids": "pixel_position_ids",
++    }
+     assert vision["outputs"] == {"image_features": "image_features"}
+ 
+ 
+@@ -639,7 +1064,12 @@ def test_pipelined_gemma4_fixture_selects_dummy_vision_graph(test_data_path, tmp
+ @pytest.mark.parametrize("feature_rank,feature_dtype", [(2, "float32"), (3, "float16")])
+ @pytest.mark.parametrize("window_size", [None, 64])
+ def test_gemma4_pipelined_decoder_runs_single_session_vision(
+-    test_data_path, tmp_path, relative_image_paths, feature_rank, feature_dtype, window_size
++    test_data_path,
++    tmp_path,
++    relative_image_paths,
++    feature_rank,
++    feature_dtype,
++    window_size,
+ ):
+     """A pipelined Gemma4 decoder must still encode every image and bind the features.
+ 
+@@ -654,7 +1084,11 @@ def test_gemma4_pipelined_decoder_runs_single_session_vision(
+         onnx,
+         source_model_path,
+         model_path,
+-        feature_type=onnx.TensorProto.FLOAT16 if feature_dtype == "float16" else onnx.TensorProto.FLOAT,
++        feature_type=(
++            onnx.TensorProto.FLOAT16
++            if feature_dtype == "float16"
++            else onnx.TensorProto.FLOAT
++        ),
+         feature_rank=feature_rank,
+         with_kv_cache=window_size is None,
+     )
+@@ -668,15 +1102,22 @@ def test_gemma4_pipelined_decoder_runs_single_session_vision(
+ 
+     model = og.Model(os.fspath(model_path))
+     processor = model.create_multimodal_processor()
+-    image_paths = [os.fspath(_get_test_media_path(test_data_path, path)) for path in relative_image_paths]
++    image_paths = [
++        os.fspath(_get_test_media_path(test_data_path, path))
++        for path in relative_image_paths
++    ]
+     for p in image_paths:
+         if not os.path.exists(p):
+             pytest.skip(f"Test image not found at {p}")
+     images = og.Images.open(*image_paths)
+-    inputs = processor(f"{GEMMA4_IMAGE_TOKEN}{GEMMA4_IMAGE_TOKEN}Compare these images", images=images)
++    inputs = processor(
++        f"{GEMMA4_IMAGE_TOKEN}{GEMMA4_IMAGE_TOKEN}Compare these images", images=images
++    )
+ 
+     image_token_counts = _to_numpy(inputs["num_image_tokens"])
+-    assert image_token_counts[0] != image_token_counts[1], "fixture images must differ in token count"
++    assert (
++        image_token_counts[0] != image_token_counts[1]
++    ), "fixture images must differ in token count"
+ 
+     params = og.GeneratorParams(model)
+     params.set_search_options(max_length=4096)
+@@ -688,7 +1129,9 @@ def test_gemma4_pipelined_decoder_runs_single_session_vision(
+     for pixels, image_positions in zip(pixel_values, positions, strict=True):
+         valid = image_positions[:, 0] > -1
+         expected_features.append(np.pad(pixels[valid][::9], ((0, 0), (0, 1280))))
+-    expected_features = np.concatenate(expected_features).astype(feature_dtype).astype(np.float32)
++    expected_features = (
++        np.concatenate(expected_features).astype(feature_dtype).astype(np.float32)
++    )
+     ids = _to_numpy(inputs["input_ids"])
+     image_mask = ids == GEMMA4_IMAGE_TOKEN_ID
+     assert np.count_nonzero(image_mask) == int(image_token_counts.sum())
+@@ -696,7 +1139,9 @@ def test_gemma4_pipelined_decoder_runs_single_session_vision(
+     expected_embeds[image_mask] = expected_features
+     if window_size is not None:
+         padding = (-ids.shape[1]) % window_size
+-        expected_embeds = np.pad(expected_embeds, ((0, 0), (padding, 0), (0, 0)))[:, -window_size:]
++        expected_embeds = np.pad(expected_embeds, ((0, 0), (padding, 0), (0, 0)))[
++            :, -window_size:
++        ]
+     np.testing.assert_allclose(
+         generator.get_output("inputs_embeds"),
+         expected_embeds,
+@@ -707,16 +1152,23 @@ def test_gemma4_pipelined_decoder_runs_single_session_vision(
+     assert generator.get_next_tokens() == [2]
+     generator.generate_next_token()
+     assert generator.get_next_tokens() == [0]
+-    np.testing.assert_array_equal(generator.get_output("inputs_embeds"), np.zeros((1, 1, 2048)))
++    np.testing.assert_array_equal(
++        generator.get_output("inputs_embeds"), np.zeros((1, 1, 2048))
++    )
+ 
+ 
+-def test_pipelined_mistral3_is_rejected_before_using_qwen_vision(test_data_path, tmp_path):
++def test_pipelined_mistral3_is_rejected_before_using_qwen_vision(
++    test_data_path, tmp_path
++):
+     """Pixtral's rank-four, per-image cropping contract must not enter the Qwen pipeline."""
+     onnx = pytest.importorskip("onnx")
+     source_model_path = Path(_get_gemma4_model_path(test_data_path))
+     model_path = tmp_path / "mistral3-pipeline"
+     _write_pipelined_gemma4(onnx, source_model_path, model_path, type="mistral3")
+-    with pytest.raises(RuntimeError, match="Pipelined decoder is not supported for model type 'mistral3'"):
++    with pytest.raises(
++        RuntimeError,
++        match="Pipelined decoder is not supported for model type 'mistral3'",
++    ):
+         og.Model(os.fspath(model_path))
+ 
+ 
+@@ -724,7 +1176,9 @@ def test_text_only_pipelined_decoder_requires_append_tokens(test_data_path, tmp_
+     """Text pipelines must not load a vision session or accept multimodal SetInputs."""
+     onnx = pytest.importorskip("onnx")
+     source_model_path = Path(_get_gemma4_model_path(test_data_path))
+-    inputs = og.Model(os.fspath(source_model_path)).create_multimodal_processor()("Hello")
++    inputs = og.Model(os.fspath(source_model_path)).create_multimodal_processor()(
++        "Hello"
++    )
+     model_path = tmp_path / "text-pipeline"
+     _write_pipelined_gemma4(
+         onnx,
+@@ -739,7 +1193,9 @@ def test_text_only_pipelined_decoder_requires_append_tokens(test_data_path, tmp_
+     params = og.GeneratorParams(model)
+     params.set_search_options(max_length=32)
+     generator = og.Generator(model, params)
+-    with pytest.raises(RuntimeError, match="Please use generator.AppendTokens for decoder-pipeline"):
++    with pytest.raises(
++        RuntimeError, match=r"Please use generator\.AppendTokens for decoder-pipeline"
++    ):
+         generator.set_inputs(inputs)
+     generator.append_tokens(np.array([0, 2], dtype=np.int32))
+     generator.generate_next_token()
+@@ -748,7 +1204,9 @@ def test_text_only_pipelined_decoder_requires_append_tokens(test_data_path, tmp_
+     assert generator.get_next_tokens() == [0]
+ 
+ 
+-def test_gemma4_pipelined_text_only_uses_rank3_float16_empty_features(test_data_path, tmp_path):
++def test_gemma4_pipelined_text_only_uses_rank3_float16_empty_features(
++    test_data_path, tmp_path
++):
+     """Text decode must receive a correctly ranked and typed empty feature tensor."""
+     onnx = pytest.importorskip("onnx")
+     source_model_path = Path(_get_gemma4_model_path(test_data_path))
+@@ -799,7 +1257,9 @@ def test_gemma4_pipelined_decoder_injects_features_when_embedding_has_no_feature
+     assert generator.get_next_tokens() == [0]
+ 
+ 
+-def test_gemma4_pipelined_decoder_rejects_missing_image_features_output(test_data_path, tmp_path):
++def test_gemma4_pipelined_decoder_rejects_missing_image_features_output(
++    test_data_path, tmp_path
++):
+     """A configured image_features output that the vision graph lacks must fail loudly.
+ 
+     Silently falling back to output 0 would feed whatever that output happens to be into the
+@@ -811,19 +1271,26 @@ def test_gemma4_pipelined_decoder_rejects_missing_image_features_output(test_dat
+     vision = {
+         "filename": "dummy_vision.onnx",
+         "config_filename": "processor_config.json",
+-        "inputs": {"pixel_values": "pixel_values", "pixel_position_ids": "pixel_position_ids"},
++        "inputs": {
++            "pixel_values": "pixel_values",
++            "pixel_position_ids": "pixel_position_ids",
++        },
+         "outputs": {"image_features": "not_an_output_of_this_graph"},
+         "session_options": {"log_id": "onnxruntime-genai", "provider_options": []},
+     }
+     _write_pipelined_gemma4(onnx, source_model_path, model_path, vision=vision)
+ 
+-    image_path = os.fspath(_get_test_media_path(test_data_path, Path("images") / "australia.jpg"))
++    image_path = os.fspath(
++        _get_test_media_path(test_data_path, Path("images") / "australia.jpg")
++    )
+     if not os.path.exists(image_path):
+         pytest.skip(f"Test image not found at {image_path}")
+ 
+     model = og.Model(os.fspath(model_path))
+     processor = model.create_multimodal_processor()
+-    inputs = processor(f"{GEMMA4_IMAGE_TOKEN}Describe this image", images=og.Images.open(image_path))
++    inputs = processor(
++        f"{GEMMA4_IMAGE_TOKEN}Describe this image", images=og.Images.open(image_path)
++    )
+ 
+     params = og.GeneratorParams(model)
+     params.set_search_options(max_length=4096)
+@@ -835,12 +1302,17 @@ def test_gemma4_pipelined_decoder_rejects_missing_image_features_output(test_dat
+ @pytest.mark.parametrize(
+     "speech",
+     [
+-        {"filename": "dummy_speech.onnx", "config_filename": "audio_feature_extraction.json"},
++        {
++            "filename": "dummy_speech.onnx",
++            "config_filename": "audio_feature_extraction.json",
++        },
+         {"filename": "dummy_speech.onnx", "config_filename": ""},
+         {"filename": "", "config_filename": "audio_feature_extraction.json"},
+     ],
+ )
+-def test_gemma4_pipelined_decoder_disables_declared_speech_encoder(test_data_path, tmp_path, speech):
++def test_gemma4_pipelined_decoder_disables_declared_speech_encoder(
++    test_data_path, tmp_path, speech
++):
+     """A pipelined decoder has no speech session, so a declared one is disabled, not rejected.
+ 
+     Gemma 4 exports ship an audio encoder beside the vision encoder, so this config shape is
+@@ -912,7 +1384,9 @@ def main():
+     log.info(f"Test models path: {args.test_models}")
+     log.info(f"Working directory: {args.cwd}")
+ 
+-    run_gemma4_vision_tests(os.path.abspath(args.cwd), log, os.path.abspath(args.test_models))
++    run_gemma4_vision_tests(
++        os.path.abspath(args.cwd), log, os.path.abspath(args.test_models)
++    )
+ 
+     log.info("All tests completed successfully!")
+     return 0
+diff --git a/test/python/models/test_gemma4_unified_models.py b/test/python/models/test_gemma4_unified_models.py
+new file mode 100644
+index 0000000000..2083fe9e20
+--- /dev/null
++++ b/test/python/models/test_gemma4_unified_models.py
+@@ -0,0 +1,505 @@
++# Copyright (c) Microsoft Corporation. All rights reserved.
++# Licensed under the MIT License
++
++"""
++Unit tests for the Gemma4 "unified" (encoder-free, gemma-4-12B) multimodal model.
++
++Unlike the standard gemma4 model, the unified variant consumes raw 48px merged
++pixel patches (``pixel_values`` last dim = 6912) and raw 640-sample waveform
++frames (``audio_embeds`` last dim = 640) directly, and its ``model.type`` is
++``gemma4_unified``. These tests exercise the ``unified_`` branch of
++``Gemma4MultiModalProcessor``: processor creation, and that the produced
++pixel_values / audio_embeds / audio_sizes follow the unified contract.
++Input-sensitive stand-in graphs also verify native modality-to-decoder handoff
++by observing logits before and after controlled processor-tensor mutations.
++
++The tests derive temporary unified fixtures from tracked ``test/models/gemma4``
++assets using ``test/python/create/create_dummy_gemma4_unified_models.py``.
++
++Usage:
++    pytest test_gemma4_unified_models.py --test_models=/path/to/models
++"""
++
++import json
++import logging
++import os
++import shutil
++from pathlib import Path
++
++import numpy as np
++import onnx
++import onnxruntime as ort
++import onnxruntime_genai as og
++import pytest
++from create.create_dummy_gemma4_unified_models import create_model
++from test_gemma4_models import (
++    _create_modality_signal_decoder_model,
++    _create_modality_signal_embedding_model,
++    _set_vision_position_dtype,
++)
++
++logging.basicConfig(
++    format="%(asctime)s %(name)s [%(levelname)s] - %(message)s", level=logging.DEBUG
++)
++log = logging.getLogger("gemma4-unified-tests")
++
++GEMMA4_UNIFIED_MODEL_NAME = "gemma4_unified"
++
++# Encoder-free unified contract.
++_UNIFIED_PIXEL_DIM = 48 * 48 * 3  # 6912
++_UNIFIED_AUDIO_DIM = 640
++
++
++@pytest.fixture(scope="module")
++def unified_model_path(request, tmp_path_factory):
++    """Reuse tracked Gemma4 assets, deriving all unified files in a temp dir."""
++    test_data_path = request.config.getoption("--test_models")
++    assert test_data_path, "--test_models is required for Gemma4 validation"
++    source = Path(test_data_path) / "gemma4"
++    assert source.is_dir(), f"Missing tracked Gemma4 fixture: {source}"
++    destination = tmp_path_factory.mktemp("unified") / GEMMA4_UNIFIED_MODEL_NAME
++    create_model(source, destination)
++    return destination
++
++
++def _load_model_and_processor(model_path):
++    model = og.Model(os.fspath(model_path))
++    return model, model.create_multimodal_processor()
++
++
++def _media_path(test_data_path, relative_path):
++    # Main's media layout is test/{images,audios}, not test/models/{images,audios}.
++    candidates = [
++        Path(test_data_path).parent / relative_path,
++        Path(__file__).resolve().parents[2] / relative_path,
++    ]
++    for path in candidates:
++        if path.is_file():
++            return os.fspath(path)
++    return pytest.fail(f"Missing validation media; checked {candidates}")
++
++
++def _to_numpy(tensor):
++    if hasattr(tensor, "as_numpy"):
++        return tensor.as_numpy()
++    if hasattr(tensor, "numpy"):
++        return tensor.numpy()
++    return np.array(tensor)
++
++
++def test_gemma4_unified_model_load(unified_model_path):
++    """The gemma4_unified model (model.type == 'gemma4_unified') loads."""
++    model = og.Model(os.fspath(unified_model_path))
++    assert model is not None
++
++
++def test_gemma4_unified_processor_creation(unified_model_path):
++    """create_multimodal_processor() succeeds for the gemma4_unified type.
++
++    This exercises the processor-factory registration and the unified image /
++    audio ort-extensions configs (Gemma4ImageTransform at patch_size=48 and
++    Gemma4UnifiedAudioFrames).
++    """
++    _, processor = _load_model_and_processor(unified_model_path)
++    assert processor is not None
++
++
++def test_gemma4_unified_model_io_contract(unified_model_path):
++    """The dummy graph inputs use the encoder-free unified names and shapes."""
++    model_path = Path(unified_model_path)
++    with open(model_path / "genai_config.json") as config_file:
++        config = json.load(config_file)
++    speech_config_inputs = config["model"]["speech"]["inputs"]
++    assert speech_config_inputs == {
++        "audio_embeds": "input_features",
++        "attention_mask": "input_features_mask",
++        "audio_sizes": "audio_sizes",
++    }
++
++    vision = onnx.load(model_path / "dummy_vision.onnx")
++    vision_inputs = {
++        value.name: (
++            value.type.tensor_type.elem_type,
++            [
++                dim.dim_value or dim.dim_param
++                for dim in value.type.tensor_type.shape.dim
++            ],
++        )
++        for value in vision.graph.input
++    }
++    assert vision_inputs == {
++        "pixel_values": (
++            onnx.TensorProto.FLOAT,
++            ["batch_size", 280, _UNIFIED_PIXEL_DIM],
++        ),
++        "pixel_position_ids": (onnx.TensorProto.INT64, ["batch_size", 280, 2]),
++    }
++
++    speech = onnx.load(model_path / "dummy_speech.onnx")
++    speech_graph_inputs = {
++        value.name: (
++            value.type.tensor_type.elem_type,
++            [
++                dim.dim_value or dim.dim_param
++                for dim in value.type.tensor_type.shape.dim
++            ],
++        )
++        for value in speech.graph.input
++    }
++    assert speech_graph_inputs == {
++        "input_features": (
++            onnx.TensorProto.FLOAT,
++            ["batch_size", "num_frames", _UNIFIED_AUDIO_DIM],
++        ),
++        "audio_sizes": (onnx.TensorProto.INT64, ["batch_size"]),
++        "input_features_mask": (onnx.TensorProto.BOOL, ["batch_size", "num_frames"]),
++    }
++    assert len(speech.graph.output) == 1
++    speech_output = speech.graph.output[0]
++    assert speech_output.name == "audio_features"
++    assert speech_output.type.tensor_type.elem_type == onnx.TensorProto.FLOAT
++    assert [
++        dim.dim_value or dim.dim_param
++        for dim in speech_output.type.tensor_type.shape.dim
++    ] == ["tokens", 2048]
++
++
++def test_gemma4_unified_text_only(unified_model_path):
++    """Text-only processing (no images/audio)."""
++    _, processor = _load_model_and_processor(unified_model_path)
++    inputs = processor("What is the capital of France?", images=None)
++    assert inputs is not None
++    assert "input_ids" in inputs
++    ids = _to_numpy(inputs["input_ids"])
++    assert len(ids.shape) == 2 and ids.shape[0] == 1
++
++
++@pytest.mark.parametrize("relative_image_path", [Path("images") / "australia.jpg"])
++def test_gemma4_unified_vision_contract(
++    test_data_path, unified_model_path, relative_image_path
++):
++    """Unified vision preprocessing produces 6912-dim merged patches (no trim)."""
++    _, processor = _load_model_and_processor(unified_model_path)
++
++    image_path = _media_path(test_data_path, relative_image_path)
++    images = og.Images.open(image_path)
++
++    inputs = processor("<|image|>Describe this image", images=images)
++    assert inputs is not None
++    assert "pixel_values" in inputs
++    assert "pixel_position_ids" in inputs
++
++    pixel_values = _to_numpy(inputs["pixel_values"])
++    assert (
++        pixel_values.shape[-1] == _UNIFIED_PIXEL_DIM
++    ), f"unified pixel_values feature dim should be {_UNIFIED_PIXEL_DIM}, got {pixel_values.shape[-1]}"
++    # Unified feeds the full padded patch grid (no trim); the graph strips
++    # padding via position_ids. pixel_position_ids rows must match pixel_values.
++    pos = _to_numpy(inputs["pixel_position_ids"])
++    assert (
++        pos.shape[-2] == pixel_values.shape[-2]
++    ), f"position_ids ({pos.shape}) and pixel_values ({pixel_values.shape}) patch counts must match"
++    assert pos.shape[-1] == 2
++    assert pixel_values.shape == (1, 280, _UNIFIED_PIXEL_DIM)
++    assert pixel_values.dtype == np.float32
++    assert pos.dtype == np.int64
++    valid = np.all(pos[0] >= 0, axis=-1)
++    counts = _to_numpy(inputs["num_image_tokens"])
++    np.testing.assert_array_equal(counts, [valid.sum()])
++    assert (
++        valid.any() and not valid.all()
++    ), "Asset must exercise real patches and padding"
++    np.testing.assert_array_equal(
++        pos[0, ~valid], -np.ones((np.count_nonzero(~valid), 2), dtype=np.int64)
++    )
++    np.testing.assert_array_equal(
++        pixel_values[0, ~valid], np.zeros_like(pixel_values[0, ~valid])
++    )
++
++
++def test_gemma4_unified_vision_int32_positions(
++    test_data_path, unified_model_path, tmp_path
++):
++    """INT32 positions match the INT64 source, including XY and padded -1 rows."""
++    images = og.Images.open(
++        _media_path(test_data_path, Path("images") / "australia.jpg")
++    )
++    _, reference_processor = _load_model_and_processor(unified_model_path)
++    reference = reference_processor("<|image|>Describe", images=images)
++    expected = _to_numpy(reference["pixel_position_ids"])
++    assert np.any(expected > 0), "Exercise nonzero XY coordinates"
++    assert np.any(np.all(expected == -1, axis=-1)), "Exercise retained unified padding"
++    model_path = tmp_path / "unified_int32"
++    shutil.copytree(unified_model_path, model_path)
++    _set_vision_position_dtype(
++        onnx, model_path / "dummy_vision.onnx", onnx.TensorProto.INT32
++    )
++    _, processor = _load_model_and_processor(model_path)
++    actual = processor("<|image|>Describe", images=images)
++    positions = _to_numpy(actual["pixel_position_ids"])
++    assert positions.dtype == np.int32
++    assert positions.shape == (1, 280, 2)
++    np.testing.assert_array_equal(positions, expected)
++    for name in ("pixel_values", "num_image_tokens", "input_ids"):
++        np.testing.assert_array_equal(
++            _to_numpy(actual[name]), _to_numpy(reference[name])
++        )
++
++
++@pytest.mark.parametrize("model_type", ["gemma4", "gemma4_unified"])
++@pytest.mark.parametrize(
++    "position_dtype", [onnx.TensorProto.FLOAT, onnx.TensorProto.FLOAT16]
++)
++def test_gemma4_vision_rejects_unsupported_position_dtype(
++    test_data_path, unified_model_path, tmp_path, model_type, position_dtype
++):
++    """Reject floating-point positions before any image output allocation."""
++    source = (
++        unified_model_path
++        if model_type == "gemma4_unified"
++        else Path(test_data_path) / "gemma4"
++    )
++    model_path = tmp_path / model_type
++    shutil.copytree(source, model_path)
++    vision_path = model_path / "dummy_vision.onnx"
++    vision = onnx.load(vision_path)
++    position_input = next(
++        value for value in vision.graph.input if value.name == "pixel_position_ids"
++    )
++    position_input.type.tensor_type.elem_type = position_dtype
++    # Keep the graph valid so rejection comes from the processor's dtype guard.
++    for node in vision.graph.node:
++        for index, name in enumerate(node.input):
++            if name == "pixel_position_ids":
++                node.input[index] = "integer_position_ids"
++    vision.graph.node.insert(
++        0,
++        onnx.helper.make_node(
++            "Cast",
++            ["pixel_position_ids"],
++            ["integer_position_ids"],
++            to=onnx.TensorProto.INT64,
++        ),
++    )
++    onnx.checker.check_model(vision)
++    onnx.save(vision, vision_path)
++    model = og.Model(os.fspath(model_path))
++    with pytest.raises(
++        RuntimeError, match="pixel_position_ids input must have type INT32 or INT64"
++    ):
++        model.create_multimodal_processor()
++
++
++@pytest.mark.parametrize("relative_audio_path", [Path("audios") / "jfk.flac"])
++def test_gemma4_unified_audio_contract(
++    test_data_path, unified_model_path, relative_audio_path
++):
++    """Unified audio preprocessing produces raw 640-sample frames; audio_sizes = frame count."""
++    _, processor = _load_model_and_processor(unified_model_path)
++
++    audio_path = _media_path(test_data_path, relative_audio_path)
++
++    audios = og.Audios.open(audio_path)
++    inputs = processor("<|audio|>Transcribe this audio", audios=audios)
++    assert inputs is not None
++    assert "audio_embeds" in inputs
++    assert "audio_sizes" in inputs
++
++    audio_embeds = _to_numpy(inputs["audio_embeds"])
++    assert (
++        audio_embeds.shape[-1] == _UNIFIED_AUDIO_DIM
++    ), f"unified audio_embeds feature dim should be {_UNIFIED_AUDIO_DIM}, got {audio_embeds.shape[-1]}"
++    assert audio_embeds.dtype == np.float32
++
++    # Unified: each 640-sample frame is exactly one audio token, so audio_sizes
++    # equals the number of frames (no stride-2 subsampling).
++    num_frames = audio_embeds.shape[-2]
++    audio_sizes = _to_numpy(inputs["audio_sizes"])
++    assert (
++        audio_sizes[0] == num_frames
++    ), f"unified audio_sizes should equal frame count {num_frames}, got {audio_sizes[0]}"
++    assert audio_sizes.dtype == np.int64
++    assert audio_sizes.shape == (1,)
++    mask = _to_numpy(inputs["audio_attention_mask"])
++    assert mask.dtype == np.bool_
++    np.testing.assert_array_equal(mask, np.ones((1, num_frames), dtype=np.bool_))
++
++
++def test_gemma4_unified_audio_multiple_clips_rejected(
++    test_data_path, unified_model_path
++):
++    _, processor = _load_model_and_processor(unified_model_path)
++    audio = _media_path(test_data_path, Path("audios") / "jfk.flac")
++    with pytest.raises(RuntimeError, match="only 1 audio clip per prompt"):
++        processor("<|audio|><|audio|>Transcribe", audios=og.Audios.open(audio, audio))
++
++
++@pytest.mark.parametrize("modality", ["image", "audio"])
++def test_gemma4_unified_modality_sessions_generate(
++    test_data_path, unified_model_path, tmp_path, modality
++):
++    """Execute the real modality -> embedding -> decoder path and advance search."""
++    model_path = tmp_path / "model"
++    shutil.copytree(unified_model_path, model_path)
++    config_path = model_path / "genai_config.json"
++    config = json.loads(config_path.read_text(encoding="utf-8"))
++    feature_name = "image_features" if modality == "image" else "audio_features"
++    config["model"]["embedding"]["inputs"] = {
++        "input_ids": "input_ids",
++        feature_name: feature_name,
++    }
++    extra_feature_names = ()
++    if modality == "audio":
++        # Gemma4 always has a vision session. Native embedding binding therefore
++        # supplies image_features even for audio-only prompts (empty [0, 2048]).
++        config["model"]["embedding"]["inputs"]["image_features"] = "image_features"
++        extra_feature_names = ("image_features",)
++    config["model"]["vocab_size"] = 8
++    config["model"]["eos_token_id"] = [1]
++    config["search"]["past_present_share_buffer"] = False
++    if modality == "image":
++        config["model"]["speech"] = {"filename": "", "config_filename": ""}
++    config_path.write_text(json.dumps(config), encoding="utf-8")
++    _create_modality_signal_embedding_model(
++        onnx,
++        model_path / "dummy_embedding.onnx",
++        feature_name=feature_name,
++        consume_features=True,
++        extra_feature_names=extra_feature_names,
++    )
++    _create_modality_signal_decoder_model(
++        onnx, model_path / "dummy_text.onnx", consume_embeddings=True
++    )
++
++    model, processor = _load_model_and_processor(model_path)
++    if modality == "image":
++        images = og.Images.open(
++            _media_path(test_data_path, Path("images") / "australia.jpg")
++        )
++        inputs = processor("<|image|>Describe", images=images)
++        feed = {
++            name: _to_numpy(inputs[name])
++            for name in ("pixel_values", "pixel_position_ids")
++        }
++        session = ort.InferenceSession(
++            os.fspath(model_path / "dummy_vision.onnx"),
++            providers=["CPUExecutionProvider"],
++        )
++        features = session.run(None, feed)[0]
++        valid = np.all(feed["pixel_position_ids"][0] >= 0, axis=-1)
++        expected = (
++            feed["pixel_values"][0, valid]
++            .mean(axis=1, keepdims=True, dtype=np.float64)
++            .astype(np.float32)
++        )
++        np.testing.assert_allclose(
++            features, np.broadcast_to(expected, features.shape), rtol=1e-5, atol=1e-6
++        )
++        changed_pixels = feed["pixel_values"].copy()
++        changed_pixels[0, np.flatnonzero(valid)[0]] += 0.25
++        changed = session.run(None, {**feed, "pixel_values": changed_pixels})[0]
++        np.testing.assert_allclose(changed[0] - features[0], 0.25, rtol=0, atol=1e-5)
++        changed_positions = feed["pixel_position_ids"].copy()
++        changed_positions[0, np.flatnonzero(valid)[0]] = -1
++        trimmed = session.run(None, {**feed, "pixel_position_ids": changed_positions})[
++            0
++        ]
++        np.testing.assert_allclose(trimmed, features[1:], rtol=0, atol=0)
++    else:
++        audios = og.Audios.open(
++            _media_path(test_data_path, Path("audios") / "jfk.flac")
++        )
++        inputs = processor("<|audio|>Transcribe", audios=audios)
++        feed = {
++            "input_features": _to_numpy(inputs["audio_embeds"]),
++            "input_features_mask": _to_numpy(inputs["audio_attention_mask"]),
++            "audio_sizes": _to_numpy(inputs["audio_sizes"]),
++        }
++        session = ort.InferenceSession(
++            os.fspath(model_path / "dummy_speech.onnx"),
++            providers=["CPUExecutionProvider"],
++        )
++        features = session.run(None, feed)[0]
++        assert features.shape == (int(feed["audio_sizes"].sum()), 2048)
++        expected = (
++            feed["input_features"].mean(axis=2) * feed["input_features_mask"]
++        ).sum()
++        expected += feed["audio_sizes"][0]
++        np.testing.assert_allclose(features, expected, rtol=1e-5, atol=1e-5)
++        # Controlled PCM makes mask consumption observable even if the asset's
++        # first frame happens to have zero mean.
++        controlled = {**feed, "input_features": np.ones_like(feed["input_features"])}
++        all_valid = session.run(None, controlled)[0]
++        changed_mask = feed["input_features_mask"].copy()
++        changed_mask[0, 0] = False
++        masked = session.run(None, {**controlled, "input_features_mask": changed_mask})[
++            0
++        ]
++        np.testing.assert_allclose(all_valid - masked, 1.0, rtol=0, atol=0)
++        changed_pcm = session.run(
++            None, {**controlled, "input_features": controlled["input_features"] * 2}
++        )[0]
++        np.testing.assert_allclose(
++            changed_pcm - all_valid, feed["input_features"].shape[1], rtol=0, atol=0
++        )
++        changed_sizes = feed["audio_sizes"] - 1
++        counted = session.run(None, {**controlled, "audio_sizes": changed_sizes})[0]
++        assert counted.shape == (int(changed_sizes.sum()), 2048)
++        np.testing.assert_allclose(all_valid[:-1] - counted, 1.0, rtol=0, atol=0)
++
++    # Verify that the modality output is consumed, not just declared, by embedding.
++    embedding = ort.InferenceSession(
++        os.fspath(model_path / "dummy_embedding.onnx"),
++        providers=["CPUExecutionProvider"],
++    )
++    ids = _to_numpy(inputs["input_ids"])
++    embedding_feed = {"input_ids": ids, feature_name: features}
++    if modality == "audio":
++        embedding_feed["image_features"] = np.empty((0, 2048), dtype=np.float32)
++    embeds = embedding.run(None, embedding_feed)[0]
++    np.testing.assert_allclose(
++        embeds, features.mean(dtype=np.float64), rtol=1e-5, atol=1e-5
++    )
++    changed_embeds = embedding.run(
++        None, {**embedding_feed, feature_name: features + 1}
++    )[0]
++    np.testing.assert_allclose(changed_embeds - embeds, 1.0, rtol=0, atol=1e-4)
++
++    native_signals = []
++    for mutate in (False, True):
++        if mutate:
++            # Change an actual processor tensor before the second native
++            # SetInputs, not merely the inputs to the direct ORT self-check.
++            if modality == "image":
++                changed_input = feed["pixel_values"] + np.float32(1)
++                inputs["pixel_values"] = changed_input
++                features = session.run(None, {**feed, "pixel_values": changed_input})[0]
++            else:
++                changed_input = np.ones_like(feed["input_features"])
++                inputs["audio_embeds"] = changed_input
++                features = session.run(None, {**feed, "input_features": changed_input})[
++                    0
++                ]
++        expected_signal = np.float32(features.mean(dtype=np.float64))
++        expected_logits = np.zeros(8, dtype=np.float32)
++        expected_logits[2] = expected_signal
++        params = og.GeneratorParams(model)
++        params.set_search_options(max_length=ids.shape[1] + 2, do_sample=False)
++        generator = og.Generator(model, params)
++        generator.set_inputs(inputs)
++        np.testing.assert_array_equal(generator.get_sequence(0), ids[0])
++        # SetInputs runs prefill. Observe its logits before search transforms
++        # them or a later decoder step consumes empty modality tensors.
++        logits = np.asarray(generator.get_logits()).reshape(-1, 8)
++        np.testing.assert_allclose(
++            logits, np.broadcast_to(expected_logits, logits.shape), rtol=1e-5, atol=1e-5
++        )
++        native_signals.append(float(logits[-1, 2]))
++        generator.generate_next_token()
++        sequence = np.asarray(generator.get_sequence(0))
++        assert sequence.size == ids.shape[1] + 1
++        np.testing.assert_array_equal(sequence[:-1], ids[0])
++        assert sequence[-1] == int(np.argmax(expected_logits))
++    assert not np.isclose(
++        native_signals[0], native_signals[1]
++    ), "Native logits must consume changed modality inputs"
