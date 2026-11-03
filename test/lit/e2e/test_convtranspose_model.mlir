@@ -11,14 +11,17 @@
 //
 // Verifies the complete hipdnn-pipeline:
 // 1. convert-onnx-to-hip: onnx.ConvTranspose -> hip.conv_transpose
-// 2. bufferize / canonicalize
-// 3. convert-hip-to-llvm: hip.conv_transpose -> wrap_conv_transpose
+// 2. hip-decompose-conv-transpose: this static f32 case becomes hip.conv
+// 3. bufferize / canonicalize / convert-hip-to-llvm: hip.conv -> wrap_conv
 // 4. generate-interface: Create inference_init/compute/cleanup/metadata
+//
+// The '(' keeps this from matching wrap_conv_transpose. The direct MIOpen
+// lowering is covered by Conversion/hip-to-llvm/test_convtranspose.mlir.
 
 // CHECK: module attributes {
 // CHECK-SAME: hipdnn.input_count = 1
 // CHECK-SAME: hipdnn.output_count = 1
-// CHECK: llvm.func @wrap_conv_transpose
+// CHECK: llvm.func @wrap_conv(
 // CHECK: llvm.func @inference_init
 // CHECK: llvm.func @inference_compute
 // CHECK: llvm.func @inference_cleanup
