@@ -382,7 +382,7 @@ time we get the call — the lowering has consumed it.
 The binary elementwise ops split into two groups by how broadcast is
 handled:
 
-- `wrap_div` / `wrap_equal` / `wrap_less` / `wrap_and` / `wrap_or` take
+- `wrap_div` / `wrap_equal` / `wrap_less` / `wrap_mod` / `wrap_and` / `wrap_or` take
   **full 4D operand shapes** (each operand's N,C,H,W, left-padded with 1
   by the lowering). When an operand does not already match the output
   shape, the runtime materialises the ONNX multidirectional broadcast via
@@ -394,8 +394,6 @@ handled:
   produce wrong results. `wrap_equal` additionally keeps the kernel's
   zero-stride fast path for a scalar operand (num==1), avoiding a
   needless expand.
-- `wrap_mod` still takes only a single `num_elements` and requires both
-  inputs already broadcast to that shape.
 
 When adding a new binary op, prefer the 4D-shape + `hip_expand` pattern
 (see `wrap_div`) so general broadcast is correct; only take the bare

@@ -67,8 +67,9 @@ def decode_tokens(blobs: list[bytes], *, wave_size: int = 32) -> DecodedRecords:
     occupancy) the rest of the pipeline consumes.
 
     One raw SQTT byte stream per shader engine is expected (see
-    :func:`extract_blobs`); dispatches / events / realtime are read from SE0
-    (they are broadcast), occupancy from every SE.
+    :func:`extract_blobs`). Dispatches / events are read from SE0 (they are
+    broadcast to every SE); occupancy and the realtime clock pairs come from
+    every SE, because each SE stamps its records with its own shader clock.
     """
     from . import sqtt_decode
 

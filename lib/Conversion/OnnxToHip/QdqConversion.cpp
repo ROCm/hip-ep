@@ -9,8 +9,9 @@
 // y = (x - zero_point) * scale
 //
 // com.microsoft QLinearAdd / QLinearMul / QLinearConcat /
-// QLinearGlobalAveragePool are decomposed here into native
-// DequantizeLinear + compute + QuantizeLinear, before PDLL fusion.
+// QLinearGlobalAveragePool / QLinearAveragePool / QLinearLeakyRelu are
+// decomposed here into
+// native DequantizeLinear + compute + QuantizeLinear, before PDLL fusion.
 // Per-tensor Add and Mul then fuse to hip.qadd / hip.qmul.
 
 #include "OnnxToHipUtils.h"
@@ -502,12 +503,261 @@ struct QLinearGlobalAveragePoolToQdq : public mlir::RewritePattern {
   }
 };
 
+static mlir::FailureOr<llvm::SmallVector<int64_t>>
+readI64List(mlir::Attribute attr) {
+  llvm::SmallVector<int64_t> values;
+  if (auto array = mlir::dyn_cast_or_null<mlir::ArrayAttr>(attr)) {
+    for (mlir::Attribute elem : array) {
+      auto integer = mlir::dyn_cast<mlir::IntegerAttr>(elem);
+      if (!integer)
+        return mlir::failure();
+      values.push_back(integer.getValue().getSExtValue());
+    }
+    return values;
+  }
+  if (auto dense = mlir::dyn_cast_or_null<mlir::DenseI64ArrayAttr>(attr)) {
+    values.append(dense.asArrayRef().begin(), dense.asArrayRef().end());
+    return values;
+  }
+  return mlir::failure();
+}
+
+// com.microsoft QLinearAveragePool: dequantize, optional NHWC transpose,
+// onnx.AveragePool, transpose back, quantize. AveragePool already lowers
+// to hip.pool (or the non-overlapping reshape/reduce fast path).
+struct QLinearAveragePoolToQdq : public mlir::RewritePattern {
+  QLinearAveragePoolToQdq(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Custom", /*benefit=*/2, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override {
+    auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
+    if (!funcNameAttr || funcNameAttr.getValue() != "QLinearAveragePool")
+      return rewriter.notifyMatchFailure(op, "not QLinearAveragePool");
+    auto domainAttr = op->getAttrOfType<mlir::StringAttr>("domain_name");
+    if (!domainAttr || domainAttr.getValue() != "com.microsoft")
+      return rewriter.notifyMatchFailure(op, "not com.microsoft");
+    // Schema min_input is 4: the trailing y_zero_point may be omitted.
+    if (op->getNumResults() != 1 || op->getNumOperands() < 4 ||
+        op->getNumOperands() > 5)
+      return rewriter.notifyMatchFailure(
+          op, "expected X, x_scale, x_zero_point, y_scale, optional "
+              "y_zero_point");
+
+    mlir::Value x = realOperand(op, 0);
+    mlir::Value xScale = realOperand(op, 1);
+    mlir::Value xZp = realOperand(op, 2);
+    mlir::Value yScale = realOperand(op, 3);
+    mlir::Value yZp = realOperand(op, 4);
+    if (!x || !xScale || !yScale)
+      return rewriter.notifyMatchFailure(op, "missing data or scale operand");
+
+    auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(x.getType());
+    auto resultType =
+        mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+    if (!inputType || !resultType)
+      return rewriter.notifyMatchFailure(op, "expected ranked tensors");
+    int64_t rank = inputType.getRank();
+    if (rank < 3 || rank > 5 || resultType.getRank() != rank)
+      return rewriter.notifyMatchFailure(
+          op, "QLinearAveragePool supports rank 3, 4, or 5");
+    if (!isInt8Element(inputType.getElementType()) ||
+        inputType.getElementType() != resultType.getElementType())
+      return rewriter.notifyMatchFailure(op, "pool is int8 or uint8");
+
+    int64_t channelsLast = getOnnxIntAttr(op, "channels_last", 0);
+    if (channelsLast != 0 && channelsLast != 1)
+      return rewriter.notifyMatchFailure(op, "channels_last must be 0 or 1");
+
+    auto kernelOr = readI64List(op->getAttr("kernel_shape"));
+    if (mlir::failed(kernelOr) ||
+        static_cast<int64_t>(kernelOr->size()) != rank - 2)
+      return rewriter.notifyMatchFailure(
+          op, "kernel_shape length must equal the spatial rank");
+
+    auto inputShape = inputType.getShape();
+    auto resultShape = resultType.getShape();
+    auto compatible = [](int64_t lhs, int64_t rhs) {
+      return lhs == mlir::ShapedType::kDynamic ||
+             rhs == mlir::ShapedType::kDynamic || lhs == rhs;
+    };
+    if (!compatible(inputShape[0], resultShape[0]))
+      return rewriter.notifyMatchFailure(op, "batch dim mismatch");
+    int64_t channelDim = channelsLast ? inputShape[rank - 1] : inputShape[1];
+    int64_t resultChannel =
+        channelsLast ? resultShape[rank - 1] : resultShape[1];
+    if (!compatible(channelDim, resultChannel))
+      return rewriter.notifyMatchFailure(op, "channel dim mismatch");
+
+    auto si64 = mlir::IntegerType::get(rewriter.getContext(), 64,
+                                       mlir::IntegerType::Signed);
+    llvm::SmallVector<mlir::NamedAttribute> poolAttrs;
+    poolAttrs.push_back(rewriter.getNamedAttr(
+        "kernel_shape", rewriter.getI64ArrayAttr(*kernelOr)));
+    // ONNX stride defaults to 1. A missing strides attribute must be written
+    // down: AveragePoolToReshapeMean treats absence as stride == kernel and
+    // would take the non-overlapping fast path.
+    llvm::SmallVector<int64_t> strides(rank - 2, 1);
+    if (op->hasAttr("strides")) {
+      auto stridesOr = readI64List(op->getAttr("strides"));
+      if (mlir::failed(stridesOr) ||
+          static_cast<int64_t>(stridesOr->size()) != rank - 2)
+        return rewriter.notifyMatchFailure(
+            op, "strides length must equal the spatial rank");
+      strides.assign(stridesOr->begin(), stridesOr->end());
+    }
+    poolAttrs.push_back(
+        rewriter.getNamedAttr("strides", rewriter.getI64ArrayAttr(strides)));
+    for (llvm::StringRef name : {"pads", "dilations"}) {
+      if (!op->hasAttr(name))
+        continue;
+      auto valuesOr = readI64List(op->getAttr(name));
+      if (mlir::failed(valuesOr))
+        return rewriter.notifyMatchFailure(op,
+                                           "pool attribute is not an i64 list");
+      poolAttrs.push_back(
+          rewriter.getNamedAttr(name, rewriter.getI64ArrayAttr(*valuesOr)));
+    }
+    if (auto autoPad = op->getAttrOfType<mlir::StringAttr>("auto_pad"))
+      poolAttrs.push_back(rewriter.getNamedAttr("auto_pad", autoPad));
+    for (llvm::StringRef name : {"ceil_mode", "count_include_pad"}) {
+      if (auto attr = op->getAttrOfType<mlir::IntegerAttr>(name))
+        poolAttrs.push_back(rewriter.getNamedAttr(
+            name,
+            mlir::IntegerAttr::get(si64, attr.getValue().getSExtValue())));
+    }
+
+    mlir::Location loc = op->getLoc();
+    mlir::Value dequantized =
+        emitDequantize(rewriter, loc, x, xScale, xZp, f32TypeOf(inputType));
+
+    // AveragePool is NCHW. channels_last moves C to the end and back.
+    llvm::SmallVector<int64_t> toChannelsFirst;
+    toChannelsFirst.push_back(0);
+    toChannelsFirst.push_back(rank - 1);
+    for (int64_t i = 1; i + 1 < rank; ++i)
+      toChannelsFirst.push_back(i);
+    auto permute = [](llvm::ArrayRef<int64_t> shape,
+                      llvm::ArrayRef<int64_t> perm) {
+      llvm::SmallVector<int64_t> out(perm.size());
+      for (auto [i, src] : llvm::enumerate(perm))
+        out[i] = shape[src];
+      return out;
+    };
+
+    mlir::Value poolInput = dequantized;
+    mlir::RankedTensorType poolType = f32TypeOf(resultType);
+    if (channelsLast) {
+      poolInput = emitOnnxOp(
+          rewriter, loc, "onnx.Transpose", dequantized,
+          mlir::RankedTensorType::get(permute(inputShape, toChannelsFirst),
+                                      rewriter.getF32Type()),
+          {rewriter.getNamedAttr("perm",
+                                 rewriter.getI64ArrayAttr(toChannelsFirst))});
+      poolType = mlir::RankedTensorType::get(
+          permute(resultShape, toChannelsFirst), rewriter.getF32Type());
+    }
+
+    mlir::Value pooled = emitOnnxOp(rewriter, loc, "onnx.AveragePool",
+                                    poolInput, poolType, poolAttrs);
+
+    mlir::Value toQuantize = pooled;
+    if (channelsLast) {
+      llvm::SmallVector<int64_t> toChannelsLast;
+      toChannelsLast.push_back(0);
+      for (int64_t i = 2; i < rank; ++i)
+        toChannelsLast.push_back(i);
+      toChannelsLast.push_back(1);
+      toQuantize = emitOnnxOp(
+          rewriter, loc, "onnx.Transpose", pooled,
+          mlir::RankedTensorType::get(resultShape, rewriter.getF32Type()),
+          {rewriter.getNamedAttr("perm",
+                                 rewriter.getI64ArrayAttr(toChannelsLast))});
+    }
+
+    mlir::Value quantized =
+        emitQuantize(rewriter, loc, toQuantize, yScale, yZp, resultType);
+    rewriter.replaceOp(op, quantized);
+    return mlir::success();
+  }
+};
+
+// com.microsoft QLinearLeakyRelu: dequantize, onnx.LeakyRelu, quantize.
+// The float LeakyRelu lowering already emits hip.leaky_relu.
+struct QLinearLeakyReluToQdq : public mlir::RewritePattern {
+  QLinearLeakyReluToQdq(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Custom", /*benefit=*/2, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override {
+    auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
+    if (!funcNameAttr || funcNameAttr.getValue() != "QLinearLeakyRelu")
+      return rewriter.notifyMatchFailure(op, "not QLinearLeakyRelu");
+    auto domainAttr = op->getAttrOfType<mlir::StringAttr>("domain_name");
+    if (!domainAttr || domainAttr.getValue() != "com.microsoft")
+      return rewriter.notifyMatchFailure(op, "not com.microsoft");
+    // Schema min_input is 4: the trailing Y_zero_point may be omitted.
+    // realOperand returns null for that missing operand, and emitQuantize
+    // leaves it off the QuantizeLinear.
+    if (op->getNumResults() != 1 || op->getNumOperands() < 4 ||
+        op->getNumOperands() > 5)
+      return rewriter.notifyMatchFailure(
+          op, "expected X, x_scale, x_zero_point, y_scale, optional "
+              "y_zero_point");
+
+    mlir::Value x = realOperand(op, 0);
+    mlir::Value xScale = realOperand(op, 1);
+    mlir::Value xZp = realOperand(op, 2);
+    mlir::Value yScale = realOperand(op, 3);
+    mlir::Value yZp = realOperand(op, 4);
+    if (!x || !xScale || !yScale)
+      return rewriter.notifyMatchFailure(op, "missing data or scale operand");
+
+    auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(x.getType());
+    auto resultType =
+        mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+    if (!inputType || !resultType)
+      return rewriter.notifyMatchFailure(op, "expected ranked tensors");
+    if (inputType.getRank() != resultType.getRank())
+      return rewriter.notifyMatchFailure(op, "input and result rank differ");
+    for (int64_t i = 0; i < inputType.getRank(); ++i) {
+      int64_t inDim = inputType.getDimSize(i);
+      int64_t outDim = resultType.getDimSize(i);
+      if (inDim != mlir::ShapedType::kDynamic &&
+          outDim != mlir::ShapedType::kDynamic && inDim != outDim)
+        return rewriter.notifyMatchFailure(op, "input and result shape differ");
+    }
+    if (!isInt8Element(inputType.getElementType()) ||
+        inputType.getElementType() != resultType.getElementType())
+      return rewriter.notifyMatchFailure(op, "LeakyRelu is int8 or uint8");
+
+    // Contrib default matches onnx.LeakyRelu.
+    double alpha = 0.01;
+    if (auto attr = op->getAttrOfType<mlir::FloatAttr>("alpha"))
+      alpha = attr.getValueAsDouble();
+
+    mlir::Location loc = op->getLoc();
+    mlir::Value dequantized =
+        emitDequantize(rewriter, loc, x, xScale, xZp, f32TypeOf(inputType));
+    mlir::Value activated = emitOnnxOp(
+        rewriter, loc, "onnx.LeakyRelu", dequantized, f32TypeOf(resultType),
+        {rewriter.getNamedAttr("alpha", rewriter.getF32FloatAttr(alpha))});
+    mlir::Value quantized =
+        emitQuantize(rewriter, loc, activated, yScale, yZp, resultType);
+    rewriter.replaceOp(op, quantized);
+    return mlir::success();
+  }
+};
+
 } // namespace
 
 void populateCustomQdqCanonicalizationPatterns(RewritePatternSet &patterns,
                                                MLIRContext *ctx) {
   patterns.add<CustomQdqToNativeOnnx, QLinearAddToQdq, QLinearMulToQdq,
-               QLinearConcatToQdq, QLinearGlobalAveragePoolToQdq>(ctx);
+               QLinearConcatToQdq, QLinearGlobalAveragePoolToQdq,
+               QLinearAveragePoolToQdq, QLinearLeakyReluToQdq>(ctx);
 }
 
 void populateQdqConversionPatterns(RewritePatternSet &patterns,

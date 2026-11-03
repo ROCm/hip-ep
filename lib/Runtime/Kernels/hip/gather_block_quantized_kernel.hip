@@ -137,7 +137,7 @@ __global__ void gather_block_quantized_kernel(
     int gather_axis, int quantize_axis,
     int bits, int block_size,
     int default_zp, int is_signed_data, int is_float8_data,
-    int indices_is_int64,
+    int indices_is_int64, int compact_rows,
     GbqDimsND data_shape, GbqDimsND indices_shape,
     GbqDimsND scales_shape, GbqDimsND output_shape) {
   int64_t tid = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -208,7 +208,8 @@ __global__ void gather_block_quantized_kernel(
       // expanded into indices_rank dims).
       coord = out_coord[d + indices_rank - 1];
     }
-    data_elem_lin = data_elem_lin * data_shape.v[d] + coord;
+    int64_t data_coord = (d == gather_axis && compact_rows) ? indices_lin : coord;
+    data_elem_lin = data_elem_lin * data_shape.v[d] + data_coord;
     int64_t sc_coord;
     if (d == quantize_axis) {
       sc_coord = coord / block_size;
@@ -254,7 +255,7 @@ static int launch_gbq(hipStream_t stream, const uint8_t *data,
                       int output_rank, int gather_axis, int quantize_axis,
                       int bits, int block_size, int default_zp,
                       int is_signed_data, int is_float8_data,
-                      int indices_is_int64,
+                      int indices_is_int64, int compact_rows,
                       const GbqDimsND &data_shape,
                       const GbqDimsND &indices_shape,
                       const GbqDimsND &scales_shape,
@@ -276,7 +277,7 @@ static int launch_gbq(hipStream_t stream, const uint8_t *data,
                      zero_points, output, total, data_rank, indices_rank,
                      output_rank, gather_axis, quantize_axis, bits, block_size,
                      default_zp, is_signed_data, is_float8_data,
-                     indices_is_int64, data_shape,
+                     indices_is_int64, compact_rows, data_shape,
                      indices_shape, scales_shape, output_shape);
   return 0;
 }
@@ -296,7 +297,7 @@ extern "C" int hip_gather_block_quantized(
     const int64_t *output_shape, int output_rank,
     int bits, int block_size, int gather_axis, int quantize_axis,
     int default_zp, int is_signed_data, int is_float8_data,
-    int indices_is_int64, int out_dtype) {
+    int indices_is_int64, int compact_rows, int out_dtype) {
   // ---- Validation. We reject ranks > MAX_RANK loudly rather than risk
   //      a silently truncated coord-decomposition loop.
   if (data_rank <= 0 || data_rank > HIP_GBQ_MAX_RANK ||
@@ -318,6 +319,13 @@ extern "C" int hip_gather_block_quantized(
             "(data_rank=%d gather_axis=%d quantize_axis=%d). The host wrapper "
             "is responsible for normalizing negatives.\n",
             data_rank, gather_axis, quantize_axis);
+    return -1;
+  }
+  if (compact_rows && gather_axis != 0) {
+    fprintf(stderr,
+            "[custom_kernels] hip_gather_block_quantized: compact_rows "
+            "requires gather_axis == 0, got %d\n",
+            gather_axis);
     return -1;
   }
   if (bits != 4 && bits != 8) {
@@ -389,7 +397,8 @@ extern "C" int hip_gather_block_quantized(
         static_cast<const uint8_t *>(zero_points),
         static_cast<float *>(output), total, data_rank, indices_rank,
         output_rank, gather_axis, quantize_axis, bits, block_size, default_zp,
-        is_signed_data, is_float8_data, indices_is_int64, data_nd, indices_nd,
+        is_signed_data, is_float8_data, indices_is_int64, compact_rows,
+        data_nd, indices_nd,
         scales_nd, output_nd);
     break;
   case HIP_DTYPE_FLOAT16:
@@ -399,7 +408,8 @@ extern "C" int hip_gather_block_quantized(
         static_cast<const uint8_t *>(zero_points),
         static_cast<__half *>(output), total, data_rank, indices_rank,
         output_rank, gather_axis, quantize_axis, bits, block_size, default_zp,
-        is_signed_data, is_float8_data, indices_is_int64, data_nd, indices_nd,
+        is_signed_data, is_float8_data, indices_is_int64, compact_rows,
+        data_nd, indices_nd,
         scales_nd, output_nd);
     break;
   case HIP_DTYPE_BFLOAT16:
@@ -409,7 +419,8 @@ extern "C" int hip_gather_block_quantized(
         static_cast<const uint8_t *>(zero_points),
         static_cast<__hip_bfloat16 *>(output), total, data_rank, indices_rank,
         output_rank, gather_axis, quantize_axis, bits, block_size, default_zp,
-        is_signed_data, is_float8_data, indices_is_int64, data_nd, indices_nd,
+        is_signed_data, is_float8_data, indices_is_int64, compact_rows,
+        data_nd, indices_nd,
         scales_nd, output_nd);
     break;
   default:

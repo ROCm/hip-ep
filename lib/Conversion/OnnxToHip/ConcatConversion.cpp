@@ -189,6 +189,14 @@ struct ConcatDecompose : public mlir::RewritePattern {
       mlir::Value input = op->getOperand(i);
       mlir::RankedTensorType inputType = inputTypes[i];
 
+      // A static zero extent contributes no elements. insert_slice requires
+      // offset < dest dim, so a trailing empty input — the shape-vector
+      // Slice(x, rank, INT64_MAX) used by attention reshape — lands at
+      // offset == result dim and fails verification (`<offset> >= <dim>`).
+      // Skip it. The running offset does not move.
+      if (!inputType.isDynamicDim(axis) && inputType.getDimSize(axis) == 0)
+        continue;
+
       // Per-axis (offset, size, stride) lists for tensor.insert_slice.
       llvm::SmallVector<mlir::OpFoldResult> offsets, sizes, strides;
       offsets.reserve(rank);

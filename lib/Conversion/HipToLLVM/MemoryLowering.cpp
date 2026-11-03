@@ -605,8 +605,12 @@ struct MemRefDeallocOpLowering
   }
 };
 
-/// Static strides in elements for identity or strided memref types (no dynamic
-/// dims/strides).
+/// Effective static strides in elements for identity or strided memref types.
+/// A dynamic stride on a statically-singleton dimension is immaterial to the
+/// addressed element set, so canonicalize it from the adjacent inner stride
+/// when the inner extents are static. This occurs in rank-expanding output
+/// subviews whose statically-singleton outer dimension retains a dynamic
+/// stride.
 static FailureOr<SmallVector<int64_t>> tryStaticStridesElems(MemRefType ty) {
   ArrayRef<int64_t> shape = ty.getShape();
   unsigned rank = ty.getRank();
@@ -628,27 +632,21 @@ static FailureOr<SmallVector<int64_t>> tryStaticStridesElems(MemRefType ty) {
     auto strides = llvm::to_vector(sl.getStrides());
     if (strides.size() != rank)
       return failure();
-    for (int64_t s : strides)
-      if (ShapedType::isDynamic(s))
+
+    for (int i = static_cast<int>(rank) - 1; i >= 0; --i) {
+      unsigned dim = static_cast<unsigned>(i);
+      if (ShapedType::isDynamic(strides[dim])) {
+        if (shape[dim] != 1)
+          return failure();
+        strides[dim] = dim + 1 < rank ? strides[dim + 1] * shape[dim + 1] : 1;
+      }
+      if (ShapedType::isDynamic(shape[dim]))
         return failure();
+    }
     return strides;
   }
 
   return failure();
-}
-
-static FailureOr<SmallVector<int64_t>>
-computeRowMajorStridesElems(ArrayRef<int64_t> shape) {
-  unsigned rank = shape.size();
-  SmallVector<int64_t> out(rank);
-  int64_t running = 1;
-  for (int i = static_cast<int>(rank) - 1; i >= 0; --i) {
-    out[static_cast<unsigned>(i)] = running;
-    if (ShapedType::isDynamic(shape[static_cast<unsigned>(i)]))
-      return failure();
-    running *= shape[static_cast<unsigned>(i)];
-  }
-  return out;
 }
 
 static FailureOr<int64_t> tryElemSizeBytes(Type elemTy) {
@@ -660,12 +658,28 @@ static FailureOr<int64_t> tryElemSizeBytes(Type elemTy) {
   return static_cast<int64_t>(bits / 8);
 }
 
-static bool strideVectorsEqual(ArrayRef<int64_t> a, ArrayRef<int64_t> b) {
-  if (a.size() != b.size())
+/// Whether `strides` store `shape` as one unbroken run of elements, so a copy
+/// of the whole memref is a single flat transfer.
+///
+/// A dimension of extent 1 is skipped rather than checked: it spans no
+/// distance, so whatever stride it carries cannot put a hole between elements.
+/// That is what makes a one-element window into a larger buffer
+/// (`memref<1xf32, strided<[8], offset: 4>>`, the shape a Split of a row
+/// bufferizes to) a flat copy even though its stride is not 1.
+static bool isCopyContiguousElems(ArrayRef<int64_t> shape,
+                                  ArrayRef<int64_t> strides) {
+  if (shape.size() != strides.size())
     return false;
-  for (size_t i = 0, e = a.size(); i != e; ++i) {
-    if (a[i] != b[i])
+  int64_t expected = 1;
+  for (int i = static_cast<int>(shape.size()) - 1; i >= 0; --i) {
+    int64_t extent = shape[static_cast<unsigned>(i)];
+    if (ShapedType::isDynamic(extent))
       return false;
+    if (extent == 1)
+      continue;
+    if (strides[static_cast<unsigned>(i)] != expected)
+      return false;
+    expected *= extent;
   }
   return true;
 }
@@ -762,14 +776,13 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
     ArrayRef<int64_t> srcStrides = *srcStridesOr;
     ArrayRef<int64_t> dstStrides = *dstStridesOr;
 
-    FailureOr<SmallVector<int64_t>> denseStridesOr =
-        computeRowMajorStridesElems(shape);
-    if (failed(denseStridesOr))
-      return rewriter.notifyMatchFailure(op, "need static shape");
-
-    // Single D2D memcpy only for dense row-major storage (no holes).
-    if (strideVectorsEqual(srcStrides, dstStrides) &&
-        strideVectorsEqual(srcStrides, ArrayRef<int64_t>(*denseStridesOr))) {
+    // Single D2D memcpy when each side stores its elements without holes. The
+    // two sides' strides need not match: both walk the same row-major order,
+    // and a differing stride on a dimension of extent 1 moves nothing.
+    // Leaving such a copy to the default MemRef->LLVM lowering would emit host
+    // loads and stores, which fault on these device pointers.
+    if (isCopyContiguousElems(shape, srcStrides) &&
+        isCopyContiguousElems(shape, dstStrides)) {
       int64_t numElems = 1;
       for (int64_t d : shape)
         numElems *= d;

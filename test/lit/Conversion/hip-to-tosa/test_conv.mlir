@@ -30,6 +30,33 @@ func.func @conv(%ctx: !hip.context, %input: tensor<1x4x7x9xf16>,
   return %result : tensor<1x6x7x6xf16>
 }
 
+// Rank-5 hip.conv uses NCDHW/OIDHW. TOSA and rocMLIR accept Conv3D in
+// NDHWC/ODHWI, so transpose the channel dimension around the convolution.
+// CHECK-LABEL: func.func @conv3d
+// CHECK: %[[INPUT3D:.*]] = tosa.transpose %arg1 {perms = array<i32: 0, 2, 3, 4, 1>} : (tensor<1x4x5x7x9xf16>) -> tensor<1x5x7x9x4xf16>
+// CHECK: %[[WEIGHT3D:.*]] = tosa.transpose %arg2 {perms = array<i32: 0, 2, 3, 4, 1>} : (tensor<6x4x3x1x1xf16>) -> tensor<6x3x1x1x4xf16>
+// CHECK: %[[CONV3D:.*]] = tosa.conv3d %[[INPUT3D]], %[[WEIGHT3D]], %arg3
+// CHECK-SAME: acc_type = f32
+// CHECK-SAME: dilation = array<i64: 1, 1, 1>
+// CHECK-SAME: pad = array<i64: 1, 1, 0, 0, 0, 0>
+// CHECK-SAME: stride = array<i64: 1, 1, 1>
+// CHECK: tosa.transpose %[[CONV3D]] {perms = array<i32: 0, 4, 1, 2, 3>} : (tensor<1x5x7x9x6xf16>) -> tensor<1x6x5x7x9xf16>
+// CHECK-NOT: hip.conv
+func.func @conv3d(
+    %ctx: !hip.context, %input: tensor<1x4x5x7x9xf16>,
+    %weight: tensor<6x4x3x1x1xf16>, %bias: tensor<6xf16>,
+    %init: tensor<1x6x5x7x9xf16>) -> tensor<1x6x5x7x9xf16>
+    attributes {rock.kernel} {
+  %result = hip.conv(%ctx) ins(
+      %input, %weight, %bias :
+      tensor<1x4x5x7x9xf16>, tensor<6x4x3x1x1xf16>, tensor<6xf16>)
+      outs(%init : tensor<1x6x5x7x9xf16>)
+      {dilations = [1, 1, 1], group = 1 : i64, kernel_shape = [3, 1, 1],
+       pads = [1, 0, 0, 1, 0, 0], strides = [1, 1, 1]} :
+      tensor<1x6x5x7x9xf16>
+  return %result : tensor<1x6x5x7x9xf16>
+}
+
 // An omitted HIP bias becomes a zero TOSA bias.
 // CHECK-LABEL: func.func @conv_without_bias
 // CHECK: %[[ZERO:.*]] = "tosa.const"() <{values = dense<0.000000e+00> : tensor<4xf32>}> : () -> tensor<4xf32>
@@ -207,4 +234,41 @@ func.func @kernel_shape_mismatch(
       {dilations = [1, 1], group = 1 : i64, kernel_shape = [1, 1],
        pads = [0, 0, 0, 0], strides = [1, 1]} : tensor<1x4x3x3xf32>
   return %result : tensor<1x4x3x3xf32>
+}
+
+// -----
+
+// An i32 convolution passes explicit zero points and an i32 accumulator.
+
+// CHECK-LABEL: func.func @conv_i32
+// CHECK: %[[ZP:.*]] = "tosa.const"() <{values = dense<0> : tensor<1xi32>}> : () -> tensor<1xi32>
+// CHECK: tosa.conv2d {{.*}}, %[[ZP]], %[[ZP]]
+// CHECK-SAME: acc_type = i32
+// CHECK-NOT: hip.conv
+func.func @conv_i32(%ctx: !hip.context, %input: tensor<1x4x3x3xi32>,
+                    %weight: tensor<2x4x1x1xi32>, %init: tensor<1x2x3x3xi32>)
+    -> tensor<1x2x3x3xi32> attributes {rock.kernel} {
+  %result = hip.conv(%ctx) ins(
+      %input, %weight : tensor<1x4x3x3xi32>, tensor<2x4x1x1xi32>)
+      outs(%init : tensor<1x2x3x3xi32>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [1, 1],
+       pads = [0, 0, 0, 0], strides = [1, 1]} : tensor<1x2x3x3xi32>
+  return %result : tensor<1x2x3x3xi32>
+}
+
+// i32 convolution lowering is supported only by the 2D runtime path.
+// -----
+func.func @conv3d_i32(
+    %ctx: !hip.context, %input: tensor<1x4x5x7x9xi32>,
+    %weight: tensor<6x4x3x1x1xi32>, %init: tensor<1x6x5x7x9xi32>)
+    -> tensor<1x6x5x7x9xi32> attributes {rock.kernel} {
+  // expected-error @+1 {{failed to legalize operation 'hip.conv'}}
+  %result = hip.conv(%ctx) ins(
+      %input, %weight :
+      tensor<1x4x5x7x9xi32>, tensor<6x4x3x1x1xi32>)
+      outs(%init : tensor<1x6x5x7x9xi32>)
+      {dilations = [1, 1, 1], group = 1 : i64, kernel_shape = [3, 1, 1],
+       pads = [1, 0, 0, 1, 0, 0], strides = [1, 1, 1]} :
+      tensor<1x6x5x7x9xi32>
+  return %result : tensor<1x6x5x7x9xi32>
 }

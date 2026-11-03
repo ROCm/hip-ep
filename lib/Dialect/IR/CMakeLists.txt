@@ -5,12 +5,17 @@
 
 add_library(HipDialectIR STATIC
   HipCausalConvCanonicalize.cpp
+  HipConstantData.cpp
   HipDialect.cpp
   HipDpsOpInterface.cpp
   HipOpStateInterface.cpp
   HipReadbackCanonicalize.cpp
   HipReifyResultShapesImpl.cpp
   HipShapeUtils.cpp
+  HipShapeUtilsGather.cpp
+  HipShapeUtilsMatmulGemm.cpp
+  HipShapeUtilsReduction.cpp
+  HipShapeUtilsShapeOps.cpp
 )
 
 add_dependencies(HipDialectIR
@@ -42,10 +47,3 @@ target_link_libraries(HipDialectIR PUBLIC
   # (the per-op state constructor calls woven into the op-state init function).
   MLIRLLVMDialect
 )
-
-# HipDialect.cpp aggregates every TableGen-generated op class (GET_OP_CLASSES).
-# As the dialect grows, this single translation unit exceeds the MSVC COFF
-# section limit (fatal error C1128); /bigobj raises it.
-if(MSVC)
-  target_compile_options(HipDialectIR PRIVATE /bigobj)
-endif()

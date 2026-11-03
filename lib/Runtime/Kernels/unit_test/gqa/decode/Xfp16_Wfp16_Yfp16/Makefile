@@ -1,12 +1,17 @@
 # ============================================================
 # custom_kernels GQA flash decode (TPS) Test -- fp16 KV cache
 #
-#   make test        OFFLOAD=--offload-arch=gfx1151 HIP_SDK=<sdk> [COVERAGE=1|2|3]
+#   make test        HIP_SDK=<sdk> [OFFLOAD=--offload-arch=<gfx>] [COVERAGE=1|2|3]
 #   make test_custom OFFLOAD=... HIP_SDK=... B=1 H=32 G=8 D=128 MAX_SEQ=4096 TOTAL=2048
 #   make clean
 #
-# MODE=lookup (default) -- resolves the config from AUTOTUNE_DIR/lut/<arch>.fb,
-# falling back to autotune when this arch has no table (warned, never a hard
+# OFFLOAD defaults to the release target, gfx11-generic, and the kernels
+# build at -O2 like custom_kernels_<arch>.dll, so the test runs the code
+# that ships. Pass OFFLOAD=--offload-arch=gfx1151 (etc.) for a chip build.
+#
+# MODE=lookup (default) -- resolves the config from
+# AUTOTUNE_DIR/lut/<LUT_ARCH>.fb (see LUT_ARCH below), falling back to
+# autotune when that chip has no table (warned, never a hard
 # failure). MODE=autotune always sweeps. lookup needs flatc + its include/ (a
 # build tool, not part
 # of this repo -- see README): FLATC=<path to flatc(.exe)>
@@ -29,7 +34,7 @@ endif
 
 # ---- Required from CI / CLI ----
 
-OFFLOAD  ?= --offload-arch=gfx1151
+OFFLOAD  ?= --offload-arch=gfx11-generic
 HIP_SDK  ?= $(HIP_PATH)
 MODE     ?= lookup
 COVERAGE ?= 3
@@ -50,7 +55,19 @@ TARGET    := $(BUILD_DIR)/test_gqa_decode.exe
 RESULTS_CSV := $(BUILD_DIR)/results.csv
 
 ARCH   := $(patsubst --offload-arch=%,%,$(OFFLOAD))
-LUT_FB := $(AUTOTUNE_DIR)/lut/$(ARCH).fb
+
+# The tables are per chip, the build is per target: a gfx*-generic ARCH runs on
+# every member chip, so it takes the table of the GPU the test runs on -- this
+# machine's (amdgpu-arch) unless LUT_ARCH=gfxNNNN names another, e.g. for an exe
+# that is copied to a different box. A concrete ARCH uses its own table.
+ifeq ($(origin LUT_ARCH),undefined)
+    ifneq ($(findstring generic,$(ARCH)),)
+        LUT_ARCH := $(firstword $(shell "$(HIP_SDK)/bin/amdgpu-arch.exe"))
+    else
+        LUT_ARCH := $(ARCH)
+    endif
+endif
+LUT_FB := $(AUTOTUNE_DIR)/lut/$(LUT_ARCH).fb
 
 ifeq ($(MODE),lookup)
     MODE_RESOLVED := $(if $(wildcard $(LUT_FB)),lookup,autotune)
@@ -66,7 +83,7 @@ KERNEL_MODE := $(if $(filter lookup,$(MODE_RESOLVED)),lookup,online)
 FLATC ?= flatc
 FLATBUFFERS_INC ?=
 
-KERNEL_FLAGS := -O3 -std=c++17 -x hip -ffp-contract=fast
+KERNEL_FLAGS := -O2 -std=c++17 -x hip -ffp-contract=fast
 CXXFLAGS     := -O3 -std=c++17 -Wno-c23-extensions
 INCLUDES     := -I$(INCLUDE_DIR)
 
@@ -164,7 +181,10 @@ mode_info:
 	@echo [MODE=$(MODE) -^> $(MODE_RESOLVED)] arch=$(ARCH) lut_fb=$(LUT_FB)
 ifeq ($(MODE),lookup)
 ifneq ($(MODE_RESOLVED),lookup)
-	@echo [MODE=lookup] no LUT for $(ARCH) at $(LUT_FB) -- falling back to MODE=autotune
+	@echo [MODE=lookup] no LUT for $(LUT_ARCH) at $(LUT_FB) -- falling back to MODE=autotune
+ifeq ($(LUT_ARCH),)
+	@echo [MODE=lookup] no GPU detected for the $(ARCH) table; pass LUT_ARCH=gfxNNNN
+endif
 endif
 endif
 ifeq ($(MODE_RESOLVED),lookup)

@@ -225,6 +225,9 @@ private:
   // (e.g. degenerate / fake OrtMemoryInfo); AllocImpl falls back to the
   // current HIP device in that case rather than failing the allocation.
   int device_id_;
+  // DEFAULT memory comes from hipMalloc (not host-dereferenceable) unless
+  // MORPHIZEN_DEFAULT_HIPMALLOC=0; HOST_ACCESSIBLE stays hipHostMalloc.
+  bool device_only_;
 };
 
 // hipMemcpy / hipMemcpyAsync based OrtDataTransferImpl. A single shared

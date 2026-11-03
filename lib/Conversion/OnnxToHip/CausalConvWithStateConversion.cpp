@@ -71,6 +71,36 @@ mlir::LogicalResult CausalConvWithStateToHip::matchAndRewrite(
           ? rewriter.getI64IntegerAttr(ndimAttrOnnx.getValue().getSExtValue())
           : rewriter.getI64IntegerAttr(1);
 
+  auto getIntAttr = [&](llvm::StringRef name, int64_t dflt) -> int64_t {
+    auto attr = op->getAttrOfType<mlir::IntegerAttr>(name);
+    return attr ? attr.getValue().getSExtValue() : dflt;
+  };
+  int64_t channelsLast = getIntAttr("channels_last", 0);
+  int64_t dilation = getIntAttr("dilation", 1);
+  if (getIntAttr("state_window", 0) != 0) {
+    return rewriter.notifyMatchFailure(op, "state_window > 0 is unsupported");
+  }
+  if (dilation < 1) {
+    return rewriter.notifyMatchFailure(op, "dilation must be at least 1");
+  }
+  if (!channelsLast && dilation != 1) {
+    return rewriter.notifyMatchFailure(
+        op, "dilation > 1 is only supported with channels_last = 1");
+  }
+
+  auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
+  if (!inputType) {
+    return rewriter.notifyMatchFailure(op, "input must be ranked");
+  }
+  mlir::Type elemType = inputType.getElementType();
+  if (!elemType.isF16() && !elemType.isF32()) {
+    return rewriter.notifyMatchFailure(op, "only f16 and f32 are supported");
+  }
+  if (channelsLast && (ndimAttr.getInt() != 1 || inputType.getRank() != 3)) {
+    return rewriter.notifyMatchFailure(
+        op, "channels_last = 1 is only supported for rank-3 (B, L, C) input");
+  }
+
   // Outputs: output (same shape as input), present_state
   size_t numResults = op->getNumResults();
   if (numResults != 2)
@@ -81,6 +111,30 @@ mlir::LogicalResult CausalConvWithStateToHip::matchAndRewrite(
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
   auto presentStateType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(1).getType());
+
+  if (channelsLast) {
+    auto weightType = mlir::dyn_cast<mlir::RankedTensorType>(weight.getType());
+    int64_t channels = inputType.getDimSize(2);
+    if (!weightType || weightType.getRank() != 3 ||
+        !weightType.hasStaticShape() || weightType.getDimSize(1) != 1 ||
+        mlir::ShapedType::isDynamic(channels) ||
+        weightType.getDimSize(0) != channels) {
+      return rewriter.notifyMatchFailure(
+          op, "channels_last = 1 needs a static (C, 1, K) weight matching the "
+              "input channels");
+    }
+    int64_t stateLen = (weightType.getDimSize(2) - 1) * dilation;
+    auto isStateType = [&](mlir::Type type) {
+      auto st = mlir::dyn_cast<mlir::RankedTensorType>(type);
+      return st && st.getRank() == 3 && st.getDimSize(1) == stateLen &&
+             st.getDimSize(2) == channels;
+    };
+    if (!isStateType(presentStateType) ||
+        (pastState && !isStateType(pastState.getType()))) {
+      return rewriter.notifyMatchFailure(
+          op, "channels_last = 1 state must be (B, (K - 1) * dilation, C)");
+    }
+  }
 
   // Create DPS init tensors
   mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, input);
@@ -103,6 +157,14 @@ mlir::LogicalResult CausalConvWithStateToHip::matchAndRewrite(
   mlir::SmallVector<mlir::NamedAttribute> attrs;
   attrs.push_back(rewriter.getNamedAttr("activation", activationAttr));
   attrs.push_back(rewriter.getNamedAttr("ndim", ndimAttr));
+  if (channelsLast) {
+    attrs.push_back(
+        rewriter.getNamedAttr("channels_last", rewriter.getBoolAttr(true)));
+    attrs.push_back(rewriter.getNamedAttr("state_channels_last",
+                                          rewriter.getBoolAttr(true)));
+    attrs.push_back(rewriter.getNamedAttr(
+        "dilation", rewriter.getI64IntegerAttr(dilation)));
+  }
 
   // Build result types
   mlir::SmallVector<mlir::Type> resultTypes;

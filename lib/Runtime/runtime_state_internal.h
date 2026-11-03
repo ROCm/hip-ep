@@ -27,6 +27,23 @@
 // is acyclic.
 #include "op_state.h"
 
+struct DiskConstant {
+  const uint8_t *data; // table start inside the read-only file `view`
+  void *view;
+  size_t view_size;
+  int64_t size;
+};
+
+// Copies the rows of disk-resident constant `constant_index` selected by device
+// `indices` into device `dst`, in index order, and synchronizes state->stream.
+// Negative indices wrap; an out-of-range index yields a zero row.
+int hipdnn_ep_disk_constant_gather_rows(RuntimeState *state,
+                                        int64_t constant_index,
+                                        const void *indices,
+                                        int64_t num_indices,
+                                        int64_t index_bytes, int64_t num_rows,
+                                        int64_t row_bytes, void *dst);
+
 // Internal runtime state structure
 // This struct is opaque to generated code (passed as void*)
 struct RuntimeState {
@@ -40,6 +57,13 @@ struct RuntimeState {
   void *gpu_constants_blob;
   void **gpu_constants;
   size_t num_constants;
+
+  // Indexed like gpu_constants; null when no constant is disk-resident.
+  // Entry i has a non-null data exactly when ConstantInfo[i].disk_resident,
+  // and then gpu_constants[i] is null.
+  DiskConstant *disk_constants;
+  void *disk_gather_staging; // hipHostMalloc'd, grown on demand
+  size_t disk_gather_staging_size;
 
   // Memory pooling support — multi-domain.
   //
@@ -331,6 +355,19 @@ struct RuntimeState {
   // their casts and fused kernels.
   void *gqa_fp32_adapter_scratch;
   size_t gqa_fp32_adapter_scratch_size;
+
+  // TransientArena (hipdnn_ep_runtime_state.cpp), reserved right after the
+  // constants blob so the weights keep placement priority over it; null when
+  // the session runs without an arena.
+  void *transient_arena;
 };
+
+// Every session-owned device transient (pools, workspace, op scratch) must be
+// allocated and freed through these, never with raw hipMalloc/hipFree, so it
+// is served from the transient arena when one exists and has room. Both keep
+// hipMalloc/hipFree semantics, including the device synchronization on free.
+hipError_t hipdnn_ep_state_device_alloc(RuntimeState *state, void **ptr,
+                                        size_t size);
+hipError_t hipdnn_ep_state_device_free(RuntimeState *state, void *ptr);
 
 #endif // HIPDNN_EP_RUNTIME_STATE_INTERNAL_H

@@ -10,8 +10,10 @@
 #include <cstdio>
 #include <string>
 
-// onnx.QLinearMatMul. Rank-2 8-bit matrix product, per-tensor scales and
-// zero points. Not wrap_qmatmul: that entry point is the QDQ fusion.
+// onnx.QLinearMatMul. Rank-2 8-bit matrix product. A's and Y's scales and
+// zero points are per-tensor. B's scale and zero point are per-tensor or one
+// value per output column. Not wrap_qmatmul: that entry point is the QDQ
+// fusion.
 
 static int hipdnn_to_hip_dtype_qlinear_mm(int64_t hipdnn_type) {
   switch (hipdnn_type) {
@@ -24,12 +26,13 @@ static int hipdnn_to_hip_dtype_qlinear_mm(int64_t hipdnn_type) {
   }
 }
 
-static int check_per_tensor(const char *name, int64_t count) {
-  if (count == 1)
+static int check_count(const char *name, int64_t count, int64_t per_tensor,
+                       int64_t per_column) {
+  if (count == per_tensor || count == per_column)
     return 0;
   fprintf(stderr,
-          "[REAL] wrap_qlinear_matmul: %s count %lld is not per-tensor\n", name,
-          (long long)count);
+          "[REAL] wrap_qlinear_matmul: %s count %lld is not 1 or %lld\n", name,
+          (long long)count, (long long)per_column);
   return -1;
 }
 
@@ -72,12 +75,12 @@ int wrap_qlinear_matmul(RuntimeState *state, const void *a, const void *a_scale,
             (long long)a_dtype, (long long)b_dtype, (long long)y_dtype);
     return -1;
   }
-  if (check_per_tensor("a scale", a_scale_count) ||
-      check_per_tensor("b scale", b_scale_count) ||
-      check_per_tensor("y scale", y_scale_count) ||
-      check_per_tensor("a zero point", a_zp_count) ||
-      check_per_tensor("b zero point", b_zp_count) ||
-      check_per_tensor("y zero point", y_zp_count))
+  if (check_count("a scale", a_scale_count, 1, 1) ||
+      check_count("b scale", b_scale_count, 1, n) ||
+      check_count("y scale", y_scale_count, 1, 1) ||
+      check_count("a zero point", a_zp_count, 1, 1) ||
+      check_count("b zero point", b_zp_count, 1, n) ||
+      check_count("y zero point", y_zp_count, 1, 1))
     return -1;
 
   void *stream = hipdnn_ep_state_get_stream(state);
@@ -86,7 +89,7 @@ int wrap_qlinear_matmul(RuntimeState *state, const void *a, const void *a_scale,
 
   int rc = hip_qlinear_matmul(stream, a, a_scale, a_zero_point, b, b_scale,
                               b_zero_point, y_scale, y_zero_point, y, m, k, n,
-                              hip_a, hip_b, hip_y);
+                              hip_a, hip_b, hip_y, b_scale_count, b_zp_count);
   if (rc != 0) {
     fprintf(stderr, "[REAL] wrap_qlinear_matmul: kernel launch failed (%d)\n",
             rc);

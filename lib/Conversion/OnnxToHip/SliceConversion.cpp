@@ -234,6 +234,17 @@ static mlir::Value resolveHostIndex(mlir::OpBuilder &b, mlir::Location loc,
     return mlir::tensor::DimOp::create(b, loc, input, dimIdx);
   }
 
+  bool isHipNeg = mlir::isa<mlir::hip::NegOp>(def);
+  if (isHipNeg || opName == "onnx.Neg") {
+    mlir::Value x = resolveHostIndex(b, loc, def->getOperand(isHipNeg ? 1 : 0),
+                                     idx, depth + 1);
+    if (!x) {
+      return {};
+    }
+    return mlir::arith::SubIOp::create(
+        b, loc, mlir::arith::ConstantIndexOp::create(b, loc, 0), x);
+  }
+
   // Binary shape arithmetic. hip elementwise ops are DPS, so their operands are
   // (ctx, lhs, rhs, out); the ONNX forms are plain (lhs, rhs).
   unsigned lhsPos = 0;
@@ -427,6 +438,18 @@ struct SliceDecompose : public mlir::RewritePattern {
 
     // Apply per-axis (start, end, step), implementing the ONNX spec's
     // negative-index and clamping rules.
+    //
+    // extract_slice rejects offset >= dim even when the slice size is 0
+    // (`offset 0 is out-of-bounds: <offset> >= <dim>` — the leading 0 is the
+    // dimension index). ONNX Slice(x, dim, dim) and Slice(x, dim, INT64_MAX)
+    // are empty and clamp start to dim, so a length-3 shape sliced from index
+    // 3 would be extract_slice [3][0] and fail verification. A size-0 view
+    // holds no elements, so any in-range offset is the same tensor; use 0
+    // when dim > 0. A source dim of 0 has no in-range offset, so that result
+    // is tensor.empty rather than extract_slice. This does not apply to the
+    // hip.slice path: a runtime-zero extent there stays full capacity so a
+    // loop accumulator can append into it.
+    bool noInBoundsView = false;
     for (size_t k = 0; k < axesVec.size(); ++k) {
       int64_t axis = axesVec[k];
       if (axis < 0)
@@ -450,6 +473,12 @@ struct SliceDecompose : public mlir::RewritePattern {
       int64_t size = (end - start + step - 1) / step;
       if (size < 0)
         size = 0;
+      if (size == 0) {
+        if (dim == 0)
+          noInBoundsView = true;
+        else
+          start = 0;
+      }
 
       offsets[axis] = rewriter.getIndexAttr(start);
       sizes[axis] = rewriter.getIndexAttr(size);
@@ -470,6 +499,24 @@ struct SliceDecompose : public mlir::RewritePattern {
       if (!intAttr || intAttr.getInt() != outType.getDimSize(i))
         return rewriter.notifyMatchFailure(
             op, "computed slice size does not match inferred output");
+    }
+
+    if (noInBoundsView) {
+      llvm::SmallVector<mlir::Value> dynSizes;
+      for (int64_t i : llvm::seq<int64_t>(rank)) {
+        if (!outType.isDynamicDim(i))
+          continue;
+        auto dimVal = llvm::dyn_cast_if_present<mlir::Value>(sizes[i]);
+        if (!dimVal)
+          return rewriter.notifyMatchFailure(op, "missing dynamic slice size");
+        dynSizes.push_back(dimVal);
+      }
+      mlir::Value empty =
+          mlir::tensor::EmptyOp::create(rewriter, loc, outType.getShape(),
+                                        outType.getElementType(), dynSizes)
+              .getResult();
+      rewriter.replaceOp(op, empty);
+      return mlir::success();
     }
 
     mlir::OperationState state(
