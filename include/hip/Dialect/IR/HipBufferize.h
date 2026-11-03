@@ -239,6 +239,8 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     MultiHeadAttentionOp::attachInterface<
         HipDstBufferizableModel<MultiHeadAttentionOp>>(*ctx);
     NonZeroOp::attachInterface<HipDstBufferizableModel<NonZeroOp>>(*ctx);
+    NonMaxSuppressionOp::attachInterface<
+        HipDstBufferizableModel<NonMaxSuppressionOp>>(*ctx);
     SizeOp::attachInterface<HipDstBufferizableModel<SizeOp>>(*ctx);
     LoopOp::attachInterface<HipDstBufferizableModel<LoopOp>>(*ctx);
     QAddOp::attachInterface<HipDstBufferizableModel<QAddOp>>(*ctx);

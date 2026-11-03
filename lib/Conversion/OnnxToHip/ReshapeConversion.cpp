@@ -11,15 +11,13 @@
 
 namespace mlir {
 namespace hip {
-namespace {
 
 /// Find an existing host scalar through a small shape tensor's construction.
 /// Do not read tensor payloads. Stop at unknown producers or dynamic slices.
 ///
 /// Before: readback(collapse(extract_slice(insert_slice(from_elements(x)))))
 /// After:  x
-static std::optional<OpFoldResult> findHostShapeEntry(Value shape,
-                                                      int64_t index) {
+std::optional<OpFoldResult> findHostShapeEntry(Value shape, int64_t index) {
   // Bound the walk independently of the model's graph size.
   for (unsigned depth = 0; depth < 64; ++depth) {
     auto type = dyn_cast<RankedTensorType>(shape.getType());
@@ -61,6 +59,23 @@ static std::optional<OpFoldResult> findHostShapeEntry(Value shape,
       shape = slice.getSource();
       continue;
     }
+    if (auto gather = shape.getDefiningOp<hip::GatherOp>()) {
+      auto dataType = dyn_cast<RankedTensorType>(gather.getData().getType());
+      DenseElementsAttr indices = getConstantDense(gather.getIndices());
+      if (auto constant = gather.getIndices().getDefiningOp<hip::ConstantOp>())
+        indices = dyn_cast_or_null<DenseElementsAttr>(constant.getValueAttr());
+      if (!dataType || dataType.getRank() != 1 || !dataType.hasStaticShape() ||
+          gather.getAxis() != 0 || !indices ||
+          !isa<IntegerType>(indices.getElementType()) ||
+          index >= indices.getNumElements())
+        return std::nullopt;
+      int64_t source = indices.getValues<APInt>()[index].getSExtValue();
+      if (source < 0)
+        source += dataType.getDimSize(0);
+      index = source;
+      shape = gather.getData();
+      continue;
+    }
     if (auto insert = shape.getDefiningOp<tensor::InsertSliceOp>()) {
       if (insert.getType().getRank() != 1)
         return std::nullopt;
@@ -84,6 +99,8 @@ static std::optional<OpFoldResult> findHostShapeEntry(Value shape,
   }
   return std::nullopt;
 }
+
+namespace {
 
 /// A tensor dimension cannot be the ONNX Reshape sentinel -1.
 /// Preserve this fact through non-narrowing index casts and selections only.
@@ -1051,7 +1068,8 @@ struct SqueezeToStdTensor : public mlir::RewritePattern {
         mlir::getReassociationIndicesForReshape(inputType, outputType);
     // A dynamic squeezed axis is not a static 1, so collapse_shape cannot
     // drop it directly. ONNX guarantees that axis is 1 at runtime. Slice it
-    // to a unit extent, then collapse.
+    // to a unit extent, then collapse. A kept axis that is dynamic in the
+    // input but static in the inferred result takes the result extent.
     if (!reassocOpt) {
       auto axesToDrop = readSqueezeAxes(op, axes, inputType.getRank());
       if (!axesToDrop || (int64_t)axesToDrop->size() !=
@@ -1070,6 +1088,7 @@ struct SqueezeToStdTensor : public mlir::RewritePattern {
                                                     rewriter.getIndexAttr(1));
       slicedShape.reserve(inputRank);
       sizes.reserve(inputRank);
+      int64_t outputAxis = 0;
       for (int64_t i = 0; i < inputRank; ++i) {
         int64_t dim = inputType.getDimSize(i);
         if (drop.test(i)) {
@@ -1079,6 +1098,11 @@ struct SqueezeToStdTensor : public mlir::RewritePattern {
           sizes.push_back(rewriter.getIndexAttr(1));
           continue;
         }
+        int64_t outputDim = outputType.getDimSize(outputAxis++);
+        if (mlir::ShapedType::isDynamic(dim))
+          dim = outputDim;
+        else if (!mlir::ShapedType::isDynamic(outputDim) && outputDim != dim)
+          return rewriter.notifyMatchFailure(op, "kept axis extent mismatch");
         slicedShape.push_back(dim);
         if (mlir::ShapedType::isDynamic(dim))
           sizes.push_back(
