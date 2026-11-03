@@ -1480,9 +1480,15 @@ void MLIRGraph::canonicalize_optional_outputs() {
     state.addOperands(op->getOperands());
     state.addTypes(newTypes);
     state.addAttributes(op->getAttrs());
-    // Copy inherent/discardable attributes and properties
+    // Copy inherent/discardable attributes and properties.
     if (op->getPropertiesStorageSize())
       state.propertiesAttr = op->getPropertiesAsAttribute();
+    // Loop / If / Scan carry their body in regions. Dropping them here
+    // leaves onnx.Loop with zero regions and onnx-loop-outline rejects it.
+    for (mlir::Region &region : op->getRegions()) {
+      mlir::Region *dest = state.addRegion();
+      dest->takeBody(region);
+    }
 
     auto *newOp = builder.create(state);
 
