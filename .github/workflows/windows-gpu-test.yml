@@ -1126,10 +1126,11 @@ jobs:
               $rows += "| $name | $thisMB | - | - |`n"
               continue
             }
-            $mainB = 0
-            if ($mainSizes.ContainsKey($name)) {
-              $mainB = [int64]$mainSizes[$name]
+            if (-not $mainSizes.ContainsKey($name)) {
+              $rows += "| $name | $thisMB | - | new |`n"
+              continue
             }
+            $mainB = [int64]$mainSizes[$name]
             $delta = $thisB - $mainB
             $mainMB = "{0:F2}" -f ($mainB / 1MB)
             $deltaMB = "{0:+0.00;-0.00;0.00}" -f ($delta / 1MB)
