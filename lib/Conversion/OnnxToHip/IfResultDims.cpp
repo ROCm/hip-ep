@@ -266,6 +266,33 @@ private:
     return dyn_cast_or_null<DenseElementsAttr>(global.getConstantInitValue());
   }
 
+  /// 1 if `index` value `v` is non-zero, else 0.
+  Value asBool(Value v) {
+    Location loc = branch.getLoc();
+    Value nonZero =
+        arith::CmpIOp::create(b, loc, arith::CmpIPredicate::ne, v, constant(0));
+    return arith::SelectOp::create(b, loc, nonZero, constant(1), constant(0))
+        .getResult();
+  }
+
+  /// `index` value `v` as a `hip.cast` to integer type `ty` leaves it:
+  /// truncated to the width of `ty`, then sign- or zero-extended back.
+  Value wrapToElement(Value v, IntegerType ty) {
+    unsigned width = ty.getWidth();
+    if (width == 1)
+      return asBool(v);
+    if (width >= 64)
+      return v;
+    Location loc = branch.getLoc();
+    Value narrow =
+        arith::IndexCastOp::create(b, loc, b.getIntegerType(width), v);
+    if (ty.isUnsigned())
+      return arith::IndexCastUIOp::create(b, loc, b.getIndexType(), narrow)
+          .getResult();
+    return arith::IndexCastOp::create(b, loc, b.getIndexType(), narrow)
+        .getResult();
+  }
+
   /// `index` value `v` as the integer or index type `ty`.
   FailureOr<Value> castIndex(Value v, Type ty) {
     if (v.getType() == ty)
@@ -325,8 +352,10 @@ private:
 
     if (auto from = dyn_cast<tensor::FromElementsOp>(def)) {
       Value elem = from.getElements()[idx];
+      // A narrower cast truncates; the clone below keeps that.
       if (auto cast = elem.getDefiningOp<arith::IndexCastOp>())
-        if (cast.getIn().getType().isIndex())
+        if (cast.getIn().getType().isIndex() &&
+            ty.getElementType().getIntOrFloatBitWidth() >= 64)
           return scalar(cast.getIn(), depth + 1);
       FailureOr<Value> v = scalar(elem, depth + 1);
       if (failed(v))
@@ -417,9 +446,16 @@ private:
 
     if (isa<CastOp, NegOp>(def) && ins.size() == 1) {
       FailureOr<Value> x = operandElement(ins[0]);
-      if (failed(x) || isa<CastOp>(def))
-        return x;
-      return arith::SubIOp::create(b, loc, constant(0), *x).getResult();
+      if (failed(x))
+        return failure();
+      if (isa<NegOp>(def))
+        return arith::SubIOp::create(b, loc, constant(0), *x).getResult();
+      // A bool source is carried as zero / non-zero; as an integer it is 0/1.
+      auto srcTy = cast<RankedTensorType>(ins[0].getType());
+      Value v = *x;
+      if (srcTy.getElementType().isInteger(1))
+        v = asBool(v);
+      return wrapToElement(v, cast<IntegerType>(ty.getElementType()));
     }
 
     if (isa<AddOp, SubOp, MulOp, DivOp, MaxOp, MinOp>(def) && ins.size() == 2) {
@@ -433,8 +469,19 @@ private:
         return arith::SubIOp::create(b, loc, *l, *r).getResult();
       if (isa<MulOp>(def))
         return arith::MulIOp::create(b, loc, *l, *r).getResult();
-      if (isa<DivOp>(def))
-        return arith::DivSIOp::create(b, loc, *l, *r).getResult();
+      if (isa<DivOp>(def)) {
+        // As in computeScalar: the untaken branch's divisor may be zero.
+        Value divisor = *r;
+        std::optional<int64_t> known = getConstantIntValue(divisor);
+        if (!known || *known == 0) {
+          Value isZero = arith::CmpIOp::create(b, loc, arith::CmpIPredicate::eq,
+                                               divisor, constant(0));
+          divisor =
+              arith::SelectOp::create(b, loc, isZero, constant(1), divisor)
+                  .getResult();
+        }
+        return arith::DivSIOp::create(b, loc, *l, divisor).getResult();
+      }
       if (isa<MaxOp>(def))
         return arith::MaxSIOp::create(b, loc, *l, *r).getResult();
       return arith::MinSIOp::create(b, loc, *l, *r).getResult();
