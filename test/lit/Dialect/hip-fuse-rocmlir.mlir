@@ -268,3 +268,37 @@ func.func @main_graph(%ctx: !hip.context, %a: tensor<1x2x4x3xf32>,
       outs(%whereInit : tensor<1x2x4x5xf32>) : tensor<1x2x4x5xf32>
   return %result : tensor<1x2x4x5xf32>
 }
+
+// -----
+
+// A pointwise consumer that broadcasts the anchor result into a larger tensor
+// cannot be regularized in the anchor's iteration space. Keep that consumer
+// outside the rocMLIR kernel, together with its full-size tensor operand.
+
+// CHECK-LABEL: func.func @rocMlir
+// CHECK: hip.conv
+// CHECK: hip.sigmoid
+// CHECK-NOT: hip.mul
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK: hip.rocmlir
+// CHECK-NOT: tensor<1x16x4x4xf16>)
+// CHECK: hip.mul
+func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x1x1xf16>,
+                      %w: tensor<16x8x1x1xf16>, %b: tensor<16xf16>,
+                      %full: tensor<1x16x4x4xf16>) -> tensor<1x16x4x4xf16> {
+  %convInit = tensor.empty() : tensor<1x16x1x1xf16>
+  %conv = hip.conv(%ctx) ins(%in, %w, %b : tensor<1x8x1x1xf16>,
+                                        tensor<16x8x1x1xf16>, tensor<16xf16>)
+      outs(%convInit : tensor<1x16x1x1xf16>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [1, 1],
+       pads = [0, 0, 0, 0], strides = [1, 1]} : tensor<1x16x1x1xf16>
+  %sigmoidInit = tensor.empty() : tensor<1x16x1x1xf16>
+  %sigmoid = hip.sigmoid(%ctx) ins(%conv : tensor<1x16x1x1xf16>)
+      outs(%sigmoidInit : tensor<1x16x1x1xf16>) : tensor<1x16x1x1xf16>
+  %mulInit = tensor.empty() : tensor<1x16x4x4xf16>
+  %mul = hip.mul(%ctx) ins(%full, %sigmoid : tensor<1x16x4x4xf16>,
+                                                tensor<1x16x1x1xf16>)
+      outs(%mulInit : tensor<1x16x4x4xf16>) -> tensor<1x16x4x4xf16>
+  return %mul : tensor<1x16x4x4xf16>
+}
