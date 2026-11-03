@@ -282,6 +282,15 @@ struct RuntimeState {
   int32_t seqlens_k_cached_val;
   const void *seqlens_k_cached_ptr;
 
+  // Host-side estimate of the B == 1 total sequence length, for performance
+  // choices only (split counts, tuning-table lookups); kernels that need the
+  // exact length read seqlens_k on the device. Set from every real seqlens_k
+  // read, advanced by sq once per forward pass otherwise (the
+  // seqlens_hint_advanced flag is cleared by hipdnn_ep_runtime_begin_compute).
+  // -1 = unknown.
+  int64_t seqlens_hint_total;
+  bool seqlens_hint_advanced;
+
   // ONNX Loop driver state. Lazily allocated by hipdnn_ep_run_counted_loop /
   // hipdnn_ep_run_loop on first call; freed in hipdnn_ep_state_cleanup.
   //
