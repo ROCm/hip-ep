@@ -6,18 +6,19 @@ Licensed under the MIT License.
 # RyzenAI CoreLib (NPU) Backend
 
 hip-ep can run selected operators on the AMD NPU through RyzenAI CoreLib
-(`ryzenai-corelib`, C API in `include/ryzenai/corelib.h`). Every other
+(`ryzenai-corelib`, C API under `include/ryzenai/corelib/`; hip-ep is built
+against CoreLib 0.66). Every other
 operator stays on the GPU, and each NPU-routed call falls back to the GPU at
 runtime when CoreLib cannot run it.
 
 ## Hardware
 
-CoreLib dispatches prebuilt AIE4 kernels and only opens a hardware context on
-an AIE4 part (XRT device name containing "Medusa"). On AIE2/AIE2P parts
-(Phoenix, Strix) it reports no device: hip-ep logs
-`[corelib] no NPU; corelib ops run on the GPU` once per session and every
-routed op runs on the GPU. DynamicDispatch's AIE2P kernel folders (for example
-`transaction/stx`) cannot be used as a CoreLib kernel store.
+CoreLib's operator API runs prebuilt kernels on an AIE4 (AIEM) NPU only.
+`ryzenai_corelib_npu_usable()` is false on AIE2/AIE2P parts (Phoenix, Strix,
+Krackan), where CoreLib runs only raw kernels through `stream_dispatch`, and on
+an AIE4 part whose XRT is older than 2.26.0. hip-ep then logs
+`[corelib] no NPU corelib's ops run on; ...` once per session and every routed
+op runs on the GPU.
 
 The backend runs inside the GPU execution provider, so the machine also needs
 a working HIP GPU: CoreLib staging uses the session's HIP stream, and every
@@ -29,11 +30,12 @@ unsupported op runs on the GPU.
 |---|---|---|
 | `use_ryzenai_corelib` = `1`/`true` | EP provider option | Compile with the CoreLib lowering |
 | `HIPEP_USE_RYZENAI_CORELIB` = `1`/`true` | Environment, read at compile time | Same, when the provider option is unset |
-| `RYZENAICORELIB_ROOT` | Environment, build and run time | CoreLib install tree (or repo root; `install/` is searched). Build: locates `include/ryzenai/corelib.h`. Run: loads `bin/ryzenai_corelib.dll` (`lib/libryzenai_corelib.so` on Linux), else the default library search path |
-| `RYZENAICORELIB_PDI` = `<prefill>,<token>` | Environment, run time | PDI pair of the CoreLib stream; must match the model's kernels (see below). Default `0,16` |
+| `RYZENAICORELIB_ROOT` | Environment, build and run time | CoreLib install tree (or repo root; `install/` is searched). Build: locates `include/ryzenai/corelib/base.h` (CoreLib 0.66 or later). Run: loads `bin/ryzenai_corelib.dll` (`lib/libryzenai_corelib.so` on Linux), else the default library search path |
+| `RYZENAICORELIB_PDI` = `<prefill PDIs>;<decode PDIs>` | Environment, run time | The stream's PDIs, each phase a comma-separated priority list (for example `9;19,35`); must match the kernels available (see below). Default `1;16` |
 | `RYZENAICORELIB_KERNEL_BUNDLE` = `<model>` | Environment, run time | Enables the kernel bundle linked into that CoreLib model library (e.g. `qwen3` from `ryzenai_corelib_model_qwen3.dll`) |
 | `RYZENAI_CORELIB_KERNELS_ROOT` | Environment, run time (read by CoreLib) | NPU kernel store. With neither a store nor a bundle every call goes to the GPU |
-| `HIPDNN_EP_STRICT` = `1` | Environment, run time | A call CoreLib ran on the host CPU fails inference with `HIPDNN_EP_ERR_CORELIB_CPU_FALLBACK` |
+| `RYZENAI_CORELIB_DISABLE_GPU` = `1` | Environment, run time (read by CoreLib) | Keeps CoreLib from loading HIP for its own GPU tier. hip-ep never lets CoreLib dispatch to its GPU or CPU paths; this also avoids the HIP load |
+| `HIPDNN_EP_STRICT` = `1` | Environment, run time | A routed call the NPU refuses at a shape a kernel was listed for fails inference with `HIPDNN_EP_ERR_CORELIB_OFF_NPU` instead of running on the GPU. Shapes with no listed kernel still run on the GPU |
 
 Both artifact formats are supported: `LLVM_IR` resolves the wrappers from the
 host process, and `NATIVE` model DLLs link `hipdnn-ep-corelib`. An EPContext
@@ -45,7 +47,10 @@ artifact keeps the setting it was compiled with.
 `<ryzenai-corelib>/install` with `include/`, `bin/` and `lib/`; the repository
 root also works. The build needs only the header. `ryzenai_corelib.lib` is
 not linked: the EP loads `ryzenai_corelib.dll` itself on the first CoreLib
-call, so it still loads on machines without CoreLib. XRT normally comes from
+call, so it still loads on machines without CoreLib. Build CoreLib for hip-ep
+with `python build.py --install-dir <prefix> --gpu-targets none`: without its
+GPU kernels CoreLib never loads HIP, so it cannot contend with the EP's own HIP
+runtime. XRT normally comes from
 the NPU driver; if CoreLib cannot find it, add
 `<install>/xrt_package/xrt` to `PATH`.
 
@@ -68,7 +73,7 @@ runs on the GPU. Rebuild hip-ep after updating CoreLib.
 
 The EP can be built on one machine and run on another (for example built on
 an AIE2 machine, run on an AIE4 machine). Nothing in the build is specific to
-the NPU: the PDI pair, kernels and CoreLib library are all chosen at run time.
+the NPU: the PDIs, kernels and CoreLib library are all chosen at run time.
 The target must match in:
 
 - GPU architecture: build with `--hip_arch` (or `HIP_ARCH`) set to the
@@ -89,27 +94,34 @@ whatever name an application registers the EP DLL.
 
 | HIP op | CoreLib call | Runs on CoreLib when |
 |---|---|---|
-| `hip.matmul_nbits` | `ryzenai_corelib_matmul_bf16` | `bits == 4`, no `g_idx`, `block_size` a multiple of 32 dividing K, zero points absent or packed uint8, and a kernel ships for (K, N, group, bias) |
+| `hip.matmul_nbits` | `ryzenai_corelib_matmul_bf16` (`mladf_v4` weights) | `bits == 4`, no `g_idx`, `block_size` a multiple of 32 dividing K, K a multiple of 128 (block size divisible by 64) or of 64 (otherwise), zero points absent or packed uint8, and a kernel ships for (K, N, group, bias) |
 | `hip.rms_norm` | `ryzenai_corelib_rmsnorm_bf16` | the scale spans exactly the normalized width, and a kernel ships for it |
-| `hip.skip_rms_norm` | `ryzenai_corelib_add_rmsnorm_bf16` | no bias input, and a kernel ships for the width |
+| `hip.skip_rms_norm` | `ryzenai_corelib_add_rmsnorm_bf16` | no bias input, and an `add_rmsnorm` kernel ships for the width |
 
 Activations may be f32, f16 or bf16; CoreLib computes in BF16. Weights are
 packed once per op instance from the model constants. Attention (`hip.gqa`)
 stays on the GPU: CoreLib's `flat_mha_bf16` owns its KV cache on the NPU,
 which does not match ONNX Runtime GenAI's past/present tensors.
 
-Each CoreLib model ships kernels for one PDI pair, and a stream on another pair
-silently runs those shapes on the host (which hip-ep then routes to the GPU).
-Set `RYZENAICORELIB_PDI` to the pair of the CoreLib model matching the ONNX
-model, as declared in that model's `models/<Model>.cpp` (`kPrefillPdi`/
-`kTokenPdi`, or `kPrefillPDI`/`kTokenPDI`). At CoreLib 0.29.5:
+Kernels are named by PDI, and the stream reaches only those on its PDIs: a
+shape no listed PDI ships runs on the GPU. A kernel bundle
+(`RYZENAICORELIB_KERNEL_BUNDLE`) holds exactly the shapes its CoreLib model
+dispatches, so it covers an ONNX export of that same model; a full kernel
+store (`RYZENAI_CORELIB_KERNELS_ROOT`) covers more shapes. Set
+`RYZENAICORELIB_PDI` to the PDIs of the CoreLib model matching the ONNX model,
+as declared in its `models/<Model>.cpp` (`kPrefillPdi`, `kTokenPdi` or
+`kTokenPdis`). At CoreLib 0.66:
 
 | CoreLib model | `RYZENAICORELIB_PDI` |
 |---|---|
-| Qwen2 / Qwen2.5 | `0,16` (default) |
-| Qwen3, Llama, Phi4Mini | `1,16` |
-| Gemma4 | `8,17` |
-| Qwen3.5, Qwen3.6, Qwen3.8 | `9,19` |
+| Qwen3, Llama, Phi4Mini | `1;16` (default) |
+| Gemma4 | `8;17,33` |
+| LFM2.5 | `4;18` |
+| Qwen3.5, Qwen3.6 | `9;19,35` |
+| Qwen3.8, Qwen4 | `9;37` |
+
+No shipped PDI carries a biased plain prefill matmul kernel, so a
+`MatMulNBits` with a bias runs its prefill on the GPU.
 
 Matmul group size and shipped row counts are read from CoreLib's kernel
 enumeration, so they need no configuration. An ONNX int4 export at block size
@@ -150,10 +162,12 @@ header's major (and, below 1.0, minor) version.
 Per session (`RuntimeState::corelib_ctx`, released through
 `corelib_ctx_destroy` in `hipdnn_ep_state_cleanup`):
 
-- One CoreLib stream on the configured PDI pair, with the configured kernel
-  bundle enabled. No NPU, no loadable library, a malformed setting, a bundle
-  that fails to enable, or neither a bundle nor a kernel store makes the
-  context unusable, and every call returns not-handled.
+- One CoreLib stream restricted to the NPU
+  (`stream_set_enabled_backends(npu)`), on the configured PDIs, with the
+  configured kernel bundle enabled. No usable NPU, no loadable library, a
+  malformed setting, a bundle that fails to enable, or neither a bundle nor a
+  kernel store makes the context unusable, and every call returns
+  not-handled.
 - Per op instance, keyed by its constant weight pointer (stable for the
   session), op kind and epsilon: the packed weights, the row counts that ship
   for the shape (from `*_enum_kernels`), and BF16 device tensors per padded
@@ -166,10 +180,16 @@ Per call:
 2. Inputs are copied GPU → host on the session stream, written into CoreLib
    tensors, run, synchronized, read back, and copied host → GPU. CoreLib
    exposes no device pointer, so this staging is unavoidable.
-3. CoreLib's `cpu_fallbacks` counter is compared before and after. A host run
-   produces a correct result; that padded row count is then routed to the GPU
-   for the rest of the session, or, under `HIPDNN_EP_STRICT=1`, the device
-   error flag is set so `inference_compute` fails.
+3. The stream may use only the NPU, so CoreLib never runs a call on its own
+   GPU or CPU paths. Where the NPU cannot run it (no kernel on the stream's
+   PDIs, reported as `unsupported` or `missing_kernel`, or a failed NPU run)
+   the call fails. hip-ep then runs it on the GPU wrapper and routes that
+   padded row count to the GPU for the rest of the session. Under
+   `HIPDNN_EP_STRICT=1` the device error flag is set instead, so
+   `inference_compute` fails.
+
+Pad rows are zeroed when a row count's tensors are created, since a CoreLib
+device tensor is undefined until written.
 
 The last session to close calls `ryzenai_corelib_cleanup`, which CoreLib
 requires before process exit.
@@ -181,14 +201,25 @@ requires before process exit.
 | LIT (`test/lit/Conversion/hip-to-llvm/test_ryzenai_corelib.mlir`) | Call-then-fallback IR with the option; GPU-only IR without it |
 | Any machine, option unset | No regression: generated code is unchanged and CoreLib is never loaded |
 | Any machine without an AIE4 NPU, option set | Compile option, fallback branch, library loading and version check; results match the GPU run |
-| AIE4 machine, option set | NPU execution: weight packing, row padding, BF16 accuracy, CPU-fallback detection |
+| AIE4 machine, option set | NPU execution: weight packing, row padding, BF16 accuracy, off-NPU detection |
 
 On an AIE4 machine, run an int4 MatMulNBits ONNX export of a model CoreLib
 supports with `HIPEP_USE_RYZENAI_CORELIB=1`, `RYZENAICORELIB_ROOT`, the
 model's `RYZENAICORELIB_PDI`, `RYZENAI_CORELIB_KERNELS_ROOT` (for example
 `<DynamicDispatch>/transaction/mds`) or `RYZENAICORELIB_KERNEL_BUNDLE`, and
-`HIPDNN_EP_STRICT=1`. Expect `[corelib] NPU stream: PDI (...)` on stderr. Only
-ONNX models are compiled; CoreLib's own GGUF model files are not used.
+`HIPDNN_EP_STRICT=1`. Expect `[corelib] NPU stream: prefill PDIs ...` on
+stderr. Only ONNX models are compiled; CoreLib's own GGUF model files are not
+used.
+
+The simplest demonstration is an int4 ONNX export of Qwen3 (block size 128)
+with `RYZENAICORELIB_KERNEL_BUNDLE=qwen3` and the default PDIs, `1;16`: the
+bundle holds the matmul and norm shapes CoreLib's Qwen3 driver dispatches.
+That driver runs the MLP as one fused `ssmlp` kernel, so the bundle has no
+plain matmul at the gate, up and down shapes, and an ONNX export that fuses
+Q, K and V into one projection has no match either. Each such op logs
+`no matmul kernel ...` once and runs on the GPU; the attention projections,
+`lm_head` and the norms run on the NPU. `HIPDNN_EP_STRICT=1` fails the run
+only when the NPU refuses a shape that a kernel was listed for.
 
 ## Limitations
 

@@ -189,8 +189,8 @@ python build.py --install_dir "$LOCAL_DIR" --cmake_prefix_path "$LOCAL_DIR"
 ```
 
 Optional: to build in the RyzenAI CoreLib (AIE4 NPU) backend, set
-`RYZENAICORELIB_ROOT` to a CoreLib install tree (the folder holding
-`include/ryzenai/corelib.h`) before building. Without it a stub is built and
+`RYZENAICORELIB_ROOT` to a CoreLib 0.66 or later install tree (the folder
+holding `include/ryzenai/corelib/base.h`) before building. Without it a stub is built and
 everything runs on the GPU. See
 [ryzenai-corelib-backend.md](design/ryzenai-corelib-backend.md).
 

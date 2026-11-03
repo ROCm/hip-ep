@@ -590,7 +590,7 @@ install(TARGETS hipdnn-ep-tls ARCHIVE DESTINATION lib)
 # See docs/design/ryzenai-corelib-backend.md.
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 if(NOT BUILD_MOCK_RUNTIME)
-    find_package(RyzenAICorelib QUIET)
+    find_package(RyzenAICorelib 0.66 QUIET)
 endif()
 if(RyzenAICorelib_FOUND)
     message(STATUS "RyzenAI CoreLib ${RyzenAICorelib_VERSION}: "
@@ -617,8 +617,6 @@ else()
         ${CMAKE_CURRENT_SOURCE_DIR}/mock)
 endif()
 set_target_properties(hipdnn-ep-corelib PROPERTIES POSITION_INDEPENDENT_CODE ON)
-# corelib.h's C++ section uses designated initializers.
-target_compile_features(hipdnn-ep-corelib PRIVATE cxx_std_20)
 install(TARGETS hipdnn-ep-corelib ARCHIVE DESTINATION lib)
 
 # ============================================================================

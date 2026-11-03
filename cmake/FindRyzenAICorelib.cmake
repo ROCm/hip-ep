@@ -11,14 +11,14 @@ endif()
 # use. RYZENAICORELIB_ROOT is a corelib install tree or repository root.
 # Sets RyzenAICorelib_FOUND, RyzenAICorelib_INCLUDE_DIR, RyzenAICorelib_VERSION.
 find_path(RyzenAICorelib_INCLUDE_DIR
-  NAMES ryzenai/corelib.h
+  NAMES ryzenai/corelib/base.h
   HINTS ${RYZENAICORELIB_ROOT}
   PATH_SUFFIXES include install/include
   DOC "RyzenAI CoreLib include directory"
 )
 
 if(RyzenAICorelib_INCLUDE_DIR)
-  file(STRINGS "${RyzenAICorelib_INCLUDE_DIR}/ryzenai/corelib.h" _corelib_ver
+  file(STRINGS "${RyzenAICorelib_INCLUDE_DIR}/ryzenai/corelib/base.h" _corelib_ver
        REGEX "^#define RYZENAI_CORELIB_VERSION_(MAJOR|MINOR|PATCH) [0-9]+")
   foreach(_part MAJOR MINOR PATCH)
     string(REGEX REPLACE ".*VERSION_${_part} ([0-9]+).*" "\\1" _v_${_part}

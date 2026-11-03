@@ -22,8 +22,13 @@
 #include "../hipdnn_ep_runtime.h"
 #include "../runtime_state_internal.h"
 
-#include <ryzenai/corelib.h>
-#include <ryzenai/corelib/testing.h>
+// The C headers only: <ryzenai/corelib.h> also pulls in the C++20 wrappers.
+#include <ryzenai/corelib/base.h>
+#include <ryzenai/corelib/ops/matmul_bf16.h>
+#include <ryzenai/corelib/ops/rmsnorm_bf16.h>
+#include <ryzenai/corelib/stream.h>
+#include <ryzenai/corelib/tensor.h>
+#include <ryzenai/corelib/weights.h>
 
 #include <cstdint>
 #include <cstdio>
@@ -47,12 +52,10 @@
 
 namespace {
 
-// Default PDI pair: the one corelib's Qwen2 model is built for
-// (models/Qwen2.cpp). Each corelib model ships kernels for its own pair, and a
-// stream on the wrong pair silently sends shapes to the host, so other models
-// set RYZENAICORELIB_PDI.
-constexpr int kDefaultPrefillPdi = 0;
-constexpr int kDefaultTokenPdi = 16;
+// Default PDIs: those of corelib's Qwen3, Llama and Phi-4-mini models. Each
+// corelib model ships kernels on its own PDIs, and a shape no listed PDI ships
+// runs on the GPU, so other models set RYZENAICORELIB_PDI.
+constexpr const char *kDefaultPdis = "1;16";
 
 // std::getenv cannot see the process environment from the static-CRT EP DLL.
 std::string read_env(const char *name) {
@@ -75,10 +78,13 @@ std::string read_env(const char *name) {
 #define HIPDNN_EP_CORELIB_FUNCTIONS(X)                                         \
   X(ryzenai_corelib_get_version)                                               \
   X(ryzenai_corelib_cleanup)                                                   \
-  X(ryzenai_corelib_get_hardware_context)                                      \
+  X(ryzenai_corelib_npu_usable)                                                \
   X(ryzenai_corelib_get_last_error_message)                                    \
   X(ryzenai_corelib_object_release)                                            \
   X(ryzenai_corelib_create_stream)                                             \
+  X(ryzenai_corelib_stream_use_pdis)                                           \
+  X(ryzenai_corelib_stream_set_enabled_backends)                               \
+  X(ryzenai_corelib_stream_npu_usable)                                         \
   X(ryzenai_corelib_stream_synchronize)                                        \
   X(ryzenai_corelib_stream_get_kernels_root)                                   \
   X(ryzenai_corelib_stream_enable_kernel_bundle)                               \
@@ -91,8 +97,8 @@ std::string read_env(const char *name) {
   X(ryzenai_corelib_rmsnorm_bf16_weights_create)                               \
   X(ryzenai_corelib_rmsnorm_bf16_enum_kernels)                                 \
   X(ryzenai_corelib_rmsnorm_bf16)                                              \
-  X(ryzenai_corelib_add_rmsnorm_bf16)                                          \
-  X(ryzenai_corelib_testing_stream_counters_get)
+  X(ryzenai_corelib_add_rmsnorm_bf16_enum_kernels)                             \
+  X(ryzenai_corelib_add_rmsnorm_bf16)
 
 struct CorelibApi {
 #define HIPDNN_EP_CORELIB_MEMBER(name) decltype(&::name) name = nullptr;
@@ -181,16 +187,39 @@ const CorelibApi *load_corelib() {
   return loaded;
 }
 
-// Parses RYZENAICORELIB_PDI ("<prefill>,<token>"); false when malformed.
-bool parse_pdi_pair(const std::string &value, int *prefill, int *token) {
-  int p = 0, t = 0;
-  char trailing = 0;
-  if (std::sscanf(value.c_str(), " %d , %d %c", &p, &t, &trailing) != 2 ||
-      p < 0 || t < 0)
-    return false;
-  *prefill = p;
-  *token = t;
-  return true;
+// Parses a comma-separated list of non-negative PDIs; false when malformed.
+bool parse_pdi_list(const std::string &value, std::vector<int32_t> *out) {
+  out->clear();
+  size_t pos = 0;
+  while (true) {
+    size_t end = value.find(',', pos);
+    std::string item = value.substr(pos, end - pos);
+    int v = -1;
+    char trailing = 0;
+    if (std::sscanf(item.c_str(), " %d %c", &v, &trailing) != 1 || v < 0)
+      return false;
+    out->push_back(v);
+    if (end == std::string::npos)
+      return true;
+    pos = end + 1;
+  }
+}
+
+// Parses RYZENAICORELIB_PDI, "<prefill PDIs>;<decode PDIs>", each a priority
+// list such as "9;19,35"; false when malformed.
+bool parse_pdis(const std::string &value, std::vector<int32_t> *prefill,
+                std::vector<int32_t> *decode) {
+  size_t semi = value.find(';');
+  return semi != std::string::npos &&
+         parse_pdi_list(value.substr(0, semi), prefill) &&
+         parse_pdi_list(value.substr(semi + 1), decode);
+}
+
+std::string pdi_list_string(const std::vector<int32_t> &pdis) {
+  std::string s;
+  for (int32_t p : pdis)
+    s += (s.empty() ? "" : ",") + std::to_string(p);
+  return s;
 }
 
 // ryzenai_corelib_cleanup must run before process exit rather than at DLL
@@ -226,35 +255,6 @@ float half_to_float(uint16_t h) {
   float f;
   std::memcpy(&f, &bits, sizeof(f));
   return f;
-}
-
-uint16_t float_to_half(float f) {
-  uint32_t x;
-  std::memcpy(&x, &f, sizeof(x));
-  uint32_t sign = (x >> 16) & 0x8000;
-  int32_t exp = int32_t((x >> 23) & 0xFF) - 127 + 15;
-  uint32_t mant = x & 0x7FFFFF;
-  if (((x >> 23) & 0xFF) == 0xFF)
-    return uint16_t(sign | 0x7C00 | (mant ? 0x200 : 0));
-  if (exp >= 0x1F)
-    return uint16_t(sign | 0x7C00);
-  if (exp <= 0) {
-    if (exp < -10)
-      return uint16_t(sign);
-    mant |= 0x800000;
-    uint32_t shift = uint32_t(14 - exp);
-    uint32_t half = mant >> shift;
-    uint32_t rem = mant & ((1u << shift) - 1);
-    uint32_t mid = 1u << (shift - 1);
-    if (rem > mid || (rem == mid && (half & 1)))
-      ++half;
-    return uint16_t(sign | half);
-  }
-  uint32_t half = sign | (uint32_t(exp) << 10) | (mant >> 13);
-  uint32_t rem = mant & 0x1FFF;
-  if (rem > 0x1000 || (rem == 0x1000 && (half & 1)))
-    ++half;
-  return uint16_t(half);
 }
 
 uint16_t float_to_bf16(float f) {
@@ -312,7 +312,7 @@ make_source(ryzenai_corelib_weights_role role, const void *data, uint64_t size,
   size_t i = 0;
   for (int64_t d : dims)
     s.dims[i++] = d;
-  s.memory = ryzenai_corelib_weights_memory_copy;
+  s.memory_mode = ryzenai_corelib_weights_memory_copy;
   return s;
 }
 
@@ -321,14 +321,13 @@ make_source(ryzenai_corelib_weights_role role, const void *data, uint64_t size,
 //===----------------------------------------------------------------------===//
 
 // One packed op instance, keyed by its constant weight pointer (stable for the
-// session), op kind and epsilon. `rows_on_cpu` records
-// padded row counts corelib ran on the host, which are routed to the GPU from
-// then on.
+// session), op kind and epsilon. `rows_off_npu` records padded row counts the
+// NPU refused, which are routed to the GPU from then on.
 struct OpEntry {
   ryzenai_corelib_weights_ptr weights = nullptr;
   bool unsupported = false;
   std::set<int64_t> shipped_rows;
-  std::set<int64_t> rows_on_cpu;
+  std::set<int64_t> rows_off_npu;
   // Padded rows -> BF16 device tensors, in argument order of the op.
   std::map<int64_t, std::vector<ryzenai_corelib_tensor_ptr>> tensors;
 };
@@ -375,30 +374,59 @@ CorelibContext *get_context(RuntimeState *state) {
   if (!ctx->api)
     return ctx;
   const CorelibApi &api = *ctx->api;
-  if (!api.ryzenai_corelib_get_hardware_context()) {
-    fprintf(stderr, "[corelib] no NPU; corelib ops run on the GPU\n");
+  // corelib's ops run only on an AIE4 (AIEM) NPU; AIE2P runs only raw kernels.
+  if (!api.ryzenai_corelib_npu_usable()) {
+    fprintf(stderr, "[corelib] no NPU corelib's ops run on; corelib ops run on "
+                    "the GPU\n");
     return ctx;
   }
-  int prefill_pdi = kDefaultPrefillPdi;
-  int token_pdi = kDefaultTokenPdi;
-  const std::string pdi = read_env("RYZENAICORELIB_PDI");
-  if (!pdi.empty() && !parse_pdi_pair(pdi, &prefill_pdi, &token_pdi)) {
+  std::vector<int32_t> prefill_pdis, decode_pdis;
+  std::string pdis = read_env("RYZENAICORELIB_PDI");
+  if (pdis.empty())
+    pdis = kDefaultPdis;
+  if (!parse_pdis(pdis, &prefill_pdis, &decode_pdis)) {
     fprintf(stderr,
-            "[corelib] RYZENAICORELIB_PDI='%s' is not '<prefill>,<token>'; "
-            "corelib ops run on the GPU\n",
-            pdi.c_str());
+            "[corelib] RYZENAICORELIB_PDI='%s' is not '<prefill PDIs>;<decode "
+            "PDIs>'; corelib ops run on the GPU\n",
+            pdis.c_str());
     return ctx;
   }
-  if (api.ryzenai_corelib_create_stream(prefill_pdi, token_pdi, &ctx->stream) !=
+  if (api.ryzenai_corelib_create_stream(&ctx->stream) !=
       ryzenai_corelib_status_success) {
-    fprintf(stderr, "[corelib] create_stream(%d, %d) failed: %s\n", prefill_pdi,
-            token_pdi, api.ryzenai_corelib_get_last_error_message());
+    fprintf(stderr, "[corelib] create_stream failed: %s\n",
+            api.ryzenai_corelib_get_last_error_message());
     return ctx;
   }
   auto drop_stream = [&] {
     api.ryzenai_corelib_object_release(ctx->stream);
     ctx->stream = nullptr;
   };
+
+  // NPU only: a call the NPU cannot run then fails (unsupported or
+  // missing_kernel) instead of running on corelib's own GPU or CPU paths, and
+  // hip-ep runs it on its GPU wrapper.
+  if (api.ryzenai_corelib_stream_set_enabled_backends(
+          ctx->stream, ryzenai_corelib_backend_npu) !=
+          ryzenai_corelib_status_success ||
+      api.ryzenai_corelib_stream_use_pdis(
+          ctx->stream, ryzenai_corelib_model_phase_prefill, prefill_pdis.data(),
+          prefill_pdis.size()) != ryzenai_corelib_status_success ||
+      api.ryzenai_corelib_stream_use_pdis(
+          ctx->stream, ryzenai_corelib_model_phase_decode, decode_pdis.data(),
+          decode_pdis.size()) != ryzenai_corelib_status_success) {
+    fprintf(stderr,
+            "[corelib] configuring the stream failed: %s; corelib ops run on "
+            "the GPU\n",
+            api.ryzenai_corelib_get_last_error_message());
+    drop_stream();
+    return ctx;
+  }
+  if (!api.ryzenai_corelib_stream_npu_usable(ctx->stream)) {
+    fprintf(stderr, "[corelib] the stream cannot use the NPU; corelib ops run "
+                    "on the GPU\n");
+    drop_stream();
+    return ctx;
+  }
 
   // A model's kernel bundle is linked into its corelib model library and
   // works with or without a kernel store.
@@ -414,8 +442,7 @@ CorelibContext *get_context(RuntimeState *state) {
     return ctx;
   }
 
-  // With neither a bundle nor a kernel store every op would run on corelib's
-  // host fallback, which is slower than the GPU path.
+  // With neither a bundle nor a kernel store no op could reach the NPU.
   const char *root = api.ryzenai_corelib_stream_get_kernels_root(ctx->stream);
   if (bundle.empty() && (!root || !*root)) {
     fprintf(stderr, "[corelib] no kernels (set RYZENAI_CORELIB_KERNELS_ROOT or "
@@ -425,9 +452,11 @@ CorelibContext *get_context(RuntimeState *state) {
     return ctx;
   }
   fprintf(stderr,
-          "[corelib] NPU stream: PDI (%d, %d), kernel bundle '%s', kernels "
-          "root '%s'\n",
-          prefill_pdi, token_pdi, bundle.c_str(), root ? root : "");
+          "[corelib] NPU stream: prefill PDIs %s, decode PDIs %s, kernel "
+          "bundle '%s', kernels root '%s'\n",
+          pdi_list_string(prefill_pdis).c_str(),
+          pdi_list_string(decode_pdis).c_str(), bundle.c_str(),
+          root ? root : "");
   ctx->usable = true;
   std::lock_guard<std::mutex> lock(g_sessions_mu);
   ++g_live_sessions;
@@ -437,7 +466,7 @@ CorelibContext *get_context(RuntimeState *state) {
 // Smallest shipped row count that holds `rows`, or 0 when none does.
 int64_t pick_rows(const OpEntry &entry, int64_t rows) {
   auto it = entry.shipped_rows.lower_bound(rows);
-  if (it == entry.shipped_rows.end() || entry.rows_on_cpu.count(*it))
+  if (it == entry.shipped_rows.end() || entry.rows_off_npu.count(*it))
     return 0;
   return *it;
 }
@@ -456,55 +485,59 @@ bool h2d(RuntimeState *state, void *dst, const void *src, size_t bytes) {
          hipStreamSynchronize(stream) == hipSuccess;
 }
 
-uint64_t cpu_fallbacks(const CorelibContext &ctx) {
-  ryzenai_corelib_testing_stream_counters c{};
-  ctx.api->ryzenai_corelib_testing_stream_counters_get(ctx.stream, &c);
-  return c.cpu_fallbacks;
-}
-
-// corelib ran the op on the host: the result is correct but slow. Under
-// HIPDNN_EP_STRICT=1 that is an error surfaced through the device error flag
-// (read by inference_compute); otherwise this shape moves to the GPU.
-int note_cpu_fallback(RuntimeState *state, CorelibContext &ctx, OpEntry &entry,
-                      const char *op, int64_t rows) {
-  entry.rows_on_cpu.insert(rows);
-  if (!ctx.strict) {
-    fprintf(stderr,
-            "[corelib] %s ran on the CPU at %lld rows; using the GPU for that "
-            "shape from now on\n",
-            op, (long long)rows);
-    return 0;
-  }
-  fprintf(stderr,
-          "[corelib] %s ran on the CPU at %lld rows (HIPDNN_EP_STRICT)\n", op,
-          (long long)rows);
-  int code = HIPDNN_EP_ERR_CORELIB_CPU_FALLBACK;
+// The NPU refused the op at these padded rows: no kernel ships there on the
+// stream's PDIs, or the NPU run failed. corelib ran nothing, so the GPU wrapper
+// runs this call and this shape from then on. Under HIPDNN_EP_STRICT=1 it is
+// instead an error surfaced through the device error flag (read by
+// inference_compute).
+int note_off_npu(RuntimeState *state, CorelibContext &ctx, OpEntry &entry,
+                 const char *op, int64_t rows, const char *what) {
+  entry.rows_off_npu.insert(rows);
+  fprintf(stderr, "[corelib] %s at %lld rows: %s failed: %s%s\n", op,
+          (long long)rows, what,
+          ctx.api->ryzenai_corelib_get_last_error_message(),
+          ctx.strict ? " (HIPDNN_EP_STRICT)"
+                     : "; using the GPU for that shape from now on");
+  if (!ctx.strict)
+    return HIPDNN_EP_CORELIB_NOT_HANDLED;
+  int code = HIPDNN_EP_ERR_CORELIB_OFF_NPU;
   if (state->device_error_flag)
     h2d(state, state->device_error_flag, &code, sizeof(code));
   return code;
 }
 
-// Creates (once) the BF16 device tensors for `rows` padded rows.
+// Creates (once) the BF16 device tensors for `rows` padded rows. A device
+// tensor is undefined until written, so the first `inputs` are zeroed: each
+// call writes only its live rows, and the pad rows then stay finite.
 const std::vector<ryzenai_corelib_tensor_ptr> *
 tensors_for(CorelibContext &ctx, OpEntry &entry, int64_t rows,
-            std::initializer_list<int64_t> widths) {
+            std::initializer_list<int64_t> widths, size_t inputs) {
   auto it = entry.tensors.find(rows);
   if (it != entry.tensors.end())
     return &it->second;
   std::vector<ryzenai_corelib_tensor_ptr> ts;
+  auto fail = [&](const char *what) {
+    fprintf(stderr, "[corelib] %s failed: %s\n", what,
+            ctx.api->ryzenai_corelib_get_last_error_message());
+    for (ryzenai_corelib_tensor_ptr p : ts)
+      ctx.api->ryzenai_corelib_object_release(p);
+    return nullptr;
+  };
   for (int64_t w : widths) {
     int64_t shape[2] = {rows, w};
     ryzenai_corelib_tensor_ptr t = nullptr;
     if (ctx.api->ryzenai_corelib_create_device_tensor(
             ryzenai_corelib_data_type_bf16, shape, 2, &t) !=
-        ryzenai_corelib_status_success) {
-      fprintf(stderr, "[corelib] create_device_tensor failed: %s\n",
-              ctx.api->ryzenai_corelib_get_last_error_message());
-      for (ryzenai_corelib_tensor_ptr p : ts)
-        ctx.api->ryzenai_corelib_object_release(p);
-      return nullptr;
-    }
+        ryzenai_corelib_status_success)
+      return fail("create_device_tensor");
     ts.push_back(t);
+    if (ts.size() <= inputs) {
+      std::vector<uint16_t> zeros(size_t(rows * w));
+      if (ctx.api->ryzenai_corelib_tensor_write(
+              t, ryzenai_corelib_data_type_bf16, zeros.data(), zeros.size(),
+              0) != ryzenai_corelib_status_success)
+        return fail("tensor_write");
+    }
   }
   return &entry.tensors.emplace(rows, std::move(ts)).first->second;
 }
@@ -528,16 +561,22 @@ struct MatMulKernelQuery {
   std::set<int64_t> *rows;
 };
 
-bool collect_matmul_rows(void *p, int /*pdi*/, int64_t m, int64_t k, int64_t n,
-                         int64_t group_size, bool has_bias, int64_t /*heads*/,
-                         int64_t /*max_seq*/) {
+// corelib derives the kernel group from the model's: divisible by 64 takes the
+// g64 layout, otherwise g32.
+int64_t kernel_group(int64_t block_size) {
+  return block_size % 64 == 0 ? 64 : 32;
+}
+
+// Lists only the stream's PDIs' kernels, so every row count found here is one
+// the stream can reach.
+bool collect_matmul_rows(void *p,
+                         const ryzenai_corelib_matmul_bf16_kernel_info *info) {
   auto *q = static_cast<MatMulKernelQuery *>(p);
-  // corelib derives the kernel group from the model's: divisible by 64 takes
-  // g64, otherwise g32. Accept either spelling of the group.
-  int64_t kernel_group = q->block_size % 64 == 0 ? 64 : 32;
-  if (k == q->k && n == q->n && has_bias == q->has_bias &&
-      (group_size == q->block_size || group_size == kernel_group))
-    q->rows->insert(m);
+  // Accept either spelling of the group.
+  if (info->k == q->k && info->n == q->n && info->has_bias == q->has_bias &&
+      (info->group_size == q->block_size ||
+       info->group_size == kernel_group(q->block_size)))
+    q->rows->insert(info->m);
   return true;
 }
 
@@ -571,15 +610,8 @@ bool pack_matmul(RuntimeState *state, CorelibContext &ctx, OpEntry &entry,
       return false;
   }
 
-  // corelib takes FP16 scales and an FP32 bias whatever the activation type.
-  // Scales are FP16 (2 bytes) or FP32 (4 bytes) independently of A.
-  std::vector<uint16_t> scales_fp16(size_t(N) * size_t(groups));
-  for (size_t i = 0; i < scales_fp16.size(); ++i)
-    scales_fp16[i] =
-        scale_elem_size == 2
-            ? reinterpret_cast<const uint16_t *>(scales_raw.data())[i]
-            : float_to_half(
-                  to_float(HIPDNN_EP_DATATYPE_FLOAT, scales_raw.data(), i));
+  // corelib takes FP16 or FP32 scales (independent of A's type) and narrows
+  // them to BF16 itself, and an FP32 bias whatever the activation type.
   std::vector<float> bias_fp32(bias ? size_t(N) : 0);
   for (size_t i = 0; i < bias_fp32.size(); ++i)
     bias_fp32[i] = to_float(data_type, bias_raw.data(), i);
@@ -588,9 +620,12 @@ bool pack_matmul(RuntimeState *state, CorelibContext &ctx, OpEntry &entry,
       make_source(ryzenai_corelib_weights_role_qweight, qweight.data(),
                   qweight.size(), ryzenai_corelib_weights_data_type_onnx_uint8,
                   {N, K / 2}),
-      make_source(ryzenai_corelib_weights_role_scales, scales_fp16.data(),
-                  scales_fp16.size() * sizeof(uint16_t),
-                  ryzenai_corelib_weights_data_type_onnx_float16, {N, groups}),
+      make_source(ryzenai_corelib_weights_role_scales, scales_raw.data(),
+                  scales_raw.size(),
+                  scale_elem_size == 2
+                      ? ryzenai_corelib_weights_data_type_onnx_float16
+                      : ryzenai_corelib_weights_data_type_onnx_float,
+                  {N, groups}),
   };
   if (zero_points)
     sources.push_back(make_source(
@@ -607,7 +642,7 @@ bool pack_matmul(RuntimeState *state, CorelibContext &ctx, OpEntry &entry,
   desc.n = N;
   desc.group_size = static_cast<uint32_t>(block_size);
   desc.has_bias = bias != nullptr;
-  desc.format = ryzenai_corelib_matmul_bf16_weights_format_mladf;
+  desc.format = ryzenai_corelib_matmul_bf16_weights_format_mladf_v4;
   if (!ok(ctx,
           ctx.api->ryzenai_corelib_matmul_bf16_weights_create(
               &desc, sources.data(), sources.size(), nullptr, &entry.weights),
@@ -616,8 +651,11 @@ bool pack_matmul(RuntimeState *state, CorelibContext &ctx, OpEntry &entry,
 
   MatMulKernelQuery query{K, N, block_size, bias != nullptr,
                           &entry.shipped_rows};
-  ctx.api->ryzenai_corelib_matmul_bf16_enum_kernels(
-      ctx.stream, collect_matmul_rows, &query);
+  if (!ok(ctx,
+          ctx.api->ryzenai_corelib_matmul_bf16_enum_kernels(
+              ctx.stream, collect_matmul_rows, &query),
+          "matmul_bf16_enum_kernels"))
+    return false;
   if (entry.shipped_rows.empty()) {
     fprintf(stderr,
             "[corelib] no matmul kernel for K=%lld N=%lld group=%lld bias=%d; "
@@ -632,15 +670,21 @@ bool pack_matmul(RuntimeState *state, CorelibContext &ctx, OpEntry &entry,
 // RmsNorm / SkipRmsNorm (shared weights: epsilon + BF16 scale)
 //===----------------------------------------------------------------------===//
 
-bool collect_norm_rows(void *p, int /*pdi*/, int64_t m, int64_t k) {
-  auto *q = static_cast<std::pair<int64_t, std::set<int64_t> *> *>(p);
-  if (k == q->first)
-    q->second->insert(m);
+using NormKernelQuery = std::pair<int64_t, std::set<int64_t> *>;
+
+template <class KernelInfo>
+bool collect_norm_rows(void *p, const KernelInfo *info) {
+  auto *q = static_cast<NormKernelQuery *>(p);
+  if (info->k == q->first)
+    q->second->insert(info->m);
   return true;
 }
 
+// `fused` selects add_rmsnorm's kernels, which ship at exact (M, k) pairs of
+// their own.
 bool pack_norm(RuntimeState *state, CorelibContext &ctx, OpEntry &entry,
-               const void *scale, int64_t k, float epsilon, int64_t data_type) {
+               const void *scale, int64_t k, float epsilon, int64_t data_type,
+               bool fused) {
   size_t elem = 0;
   ryzenai_corelib_data_type unused;
   activation_type(data_type, &unused, &elem);
@@ -666,14 +710,22 @@ bool pack_norm(RuntimeState *state, CorelibContext &ctx, OpEntry &entry,
           "rmsnorm_bf16_weights_create"))
     return false;
 
-  // add_rmsnorm has no enumeration of its own; its grid is narrower, which
-  // the CPU-fallback check catches per shape.
-  std::pair<int64_t, std::set<int64_t> *> query{k, &entry.shipped_rows};
-  ctx.api->ryzenai_corelib_rmsnorm_bf16_enum_kernels(ctx.stream,
-                                                     collect_norm_rows, &query);
+  NormKernelQuery query{k, &entry.shipped_rows};
+  ryzenai_corelib_status st =
+      fused
+          ? ctx.api->ryzenai_corelib_add_rmsnorm_bf16_enum_kernels(
+                ctx.stream,
+                collect_norm_rows<ryzenai_corelib_add_rmsnorm_bf16_kernel_info>,
+                &query)
+          : ctx.api->ryzenai_corelib_rmsnorm_bf16_enum_kernels(
+                ctx.stream,
+                collect_norm_rows<ryzenai_corelib_rmsnorm_bf16_kernel_info>,
+                &query);
+  if (!ok(ctx, st, "rmsnorm enum_kernels"))
+    return false;
   if (entry.shipped_rows.empty()) {
-    fprintf(stderr, "[corelib] no rmsnorm kernel for k=%lld; using the GPU\n",
-            (long long)k);
+    fprintf(stderr, "[corelib] no %s kernel for k=%lld; using the GPU\n",
+            fused ? "add_rmsnorm" : "rmsnorm", (long long)k);
     return false;
   }
   return true;
@@ -712,8 +764,10 @@ int wrap_corelib_matmul_nbits(RuntimeState *state, int /*op_state_slot*/,
                               int64_t scale_elem_size, int64_t data_type) {
   ryzenai_corelib_data_type act_type;
   size_t elem = 0;
+  // K must be whole tiles of the layout: 128 at g64, 64 at g32.
   if (!state || bits != 4 || g_idx || block_size % 32 != 0 ||
-      K % block_size != 0 || (zero_points && zp_elem_size != 1) ||
+      K % block_size != 0 || K % (2 * kernel_group(block_size)) != 0 ||
+      (zero_points && zp_elem_size != 1) ||
       (scale_elem_size != 2 && scale_elem_size != 4) ||
       !activation_type(data_type, &act_type, &elem))
     return HIPDNN_EP_CORELIB_NOT_HANDLED;
@@ -732,7 +786,7 @@ int wrap_corelib_matmul_nbits(RuntimeState *state, int /*op_state_slot*/,
   const int64_t padded = pick_rows(*entry, rows);
   if (padded == 0)
     return HIPDNN_EP_CORELIB_NOT_HANDLED;
-  const auto *ts = tensors_for(*ctx, *entry, padded, {K, N});
+  const auto *ts = tensors_for(*ctx, *entry, padded, {K, N}, 1);
   if (!ts)
     return HIPDNN_EP_CORELIB_NOT_HANDLED;
   const CorelibApi &api = *ctx->api;
@@ -742,18 +796,21 @@ int wrap_corelib_matmul_nbits(RuntimeState *state, int /*op_state_slot*/,
   if (!d2h(state, ctx->staging_in.data(), A, ctx->staging_in.size()))
     return HIPDNN_EP_ERR_D2H_TRANSFER_FAILED;
 
-  const uint64_t before = cpu_fallbacks(*ctx);
   if (!ok(*ctx,
           api.ryzenai_corelib_tensor_write(
               (*ts)[0], act_type, ctx->staging_in.data(), size_t(rows * K), 0),
-          "tensor_write") ||
-      !ok(*ctx,
-          api.ryzenai_corelib_matmul_bf16(ctx->stream, (*ts)[0], entry->weights,
-                                          (*ts)[1]),
-          "matmul_bf16") ||
-      !ok(*ctx, api.ryzenai_corelib_stream_synchronize(ctx->stream),
-          "stream_synchronize") ||
-      !ok(*ctx,
+          "tensor_write"))
+    return HIPDNN_EP_CORELIB_NOT_HANDLED;
+  if (api.ryzenai_corelib_matmul_bf16(ctx->stream, (*ts)[0], entry->weights,
+                                      nullptr, (*ts)[1]) !=
+      ryzenai_corelib_status_success)
+    return note_off_npu(state, *ctx, *entry, "matmul_nbits", padded,
+                        "matmul_bf16");
+  if (api.ryzenai_corelib_stream_synchronize(ctx->stream) !=
+      ryzenai_corelib_status_success)
+    return note_off_npu(state, *ctx, *entry, "matmul_nbits", padded,
+                        "stream_synchronize");
+  if (!ok(*ctx,
           api.ryzenai_corelib_tensor_read(
               (*ts)[1], act_type, ctx->staging_out.data(), size_t(rows * N), 0),
           "tensor_read"))
@@ -761,15 +818,12 @@ int wrap_corelib_matmul_nbits(RuntimeState *state, int /*op_state_slot*/,
 
   if (!h2d(state, output, ctx->staging_out.data(), ctx->staging_out.size()))
     return HIPDNN_EP_ERR_H2D_TRANSFER_FAILED;
-  if (cpu_fallbacks(*ctx) != before)
-    return note_cpu_fallback(state, *ctx, *entry, "matmul_nbits", padded);
   return HIPDNN_EP_SUCCESS;
 }
 
 int wrap_corelib_rms_norm(RuntimeState *state, void *input, void *scale,
                           void *output, int64_t input_num_elements,
-                          int64_t scale_num_elements,
-                          int64_t norm_num_elements,
+                          int64_t scale_num_elements, int64_t norm_num_elements,
                           int64_t /*element_size_bytes*/, int64_t /*axis*/,
                           float epsilon, int64_t /*stash_type*/,
                           int64_t data_type) {
@@ -786,7 +840,7 @@ int wrap_corelib_rms_norm(RuntimeState *state, void *input, void *scale,
   if (!ctx->usable)
     return HIPDNN_EP_CORELIB_NOT_HANDLED;
   OpEntry *entry = entry_for(*ctx, scale, kRmsNorm, epsilon, [&](OpEntry &e) {
-    return pack_norm(state, *ctx, e, scale, k, epsilon, data_type);
+    return pack_norm(state, *ctx, e, scale, k, epsilon, data_type, false);
   });
   if (!entry)
     return HIPDNN_EP_CORELIB_NOT_HANDLED;
@@ -796,40 +850,40 @@ int wrap_corelib_rms_norm(RuntimeState *state, void *input, void *scale,
   if (padded == 0)
     return HIPDNN_EP_CORELIB_NOT_HANDLED;
   // In-place is unsafe at large M, so input and output are separate tensors.
-  const auto *ts = tensors_for(*ctx, *entry, padded, {k, k});
+  const auto *ts = tensors_for(*ctx, *entry, padded, {k, k}, 1);
   if (!ts)
     return HIPDNN_EP_CORELIB_NOT_HANDLED;
   const CorelibApi &api = *ctx->api;
 
   const size_t bytes = size_t(input_num_elements) * elem;
+  const size_t count = size_t(input_num_elements);
   ctx->staging_in.resize(bytes);
   ctx->staging_out.resize(bytes);
   if (!d2h(state, ctx->staging_in.data(), input, bytes))
     return HIPDNN_EP_ERR_D2H_TRANSFER_FAILED;
 
-  const uint64_t before = cpu_fallbacks(*ctx);
   if (!ok(*ctx,
           api.ryzenai_corelib_tensor_write((*ts)[0], act_type,
-                                           ctx->staging_in.data(),
-                                           size_t(input_num_elements), 0),
-          "tensor_write") ||
-      !ok(*ctx,
-          api.ryzenai_corelib_rmsnorm_bf16(ctx->stream, (*ts)[0],
-                                           entry->weights, (*ts)[1]),
-          "rmsnorm_bf16") ||
-      !ok(*ctx, api.ryzenai_corelib_stream_synchronize(ctx->stream),
-          "stream_synchronize") ||
-      !ok(*ctx,
+                                           ctx->staging_in.data(), count, 0),
+          "tensor_write"))
+    return HIPDNN_EP_CORELIB_NOT_HANDLED;
+  if (api.ryzenai_corelib_rmsnorm_bf16(ctx->stream, (*ts)[0], entry->weights,
+                                       (*ts)[1]) !=
+      ryzenai_corelib_status_success)
+    return note_off_npu(state, *ctx, *entry, "rms_norm", padded,
+                        "rmsnorm_bf16");
+  if (api.ryzenai_corelib_stream_synchronize(ctx->stream) !=
+      ryzenai_corelib_status_success)
+    return note_off_npu(state, *ctx, *entry, "rms_norm", padded,
+                        "stream_synchronize");
+  if (!ok(*ctx,
           api.ryzenai_corelib_tensor_read((*ts)[1], act_type,
-                                          ctx->staging_out.data(),
-                                          size_t(input_num_elements), 0),
+                                          ctx->staging_out.data(), count, 0),
           "tensor_read"))
     return HIPDNN_EP_CORELIB_NOT_HANDLED;
 
   if (!h2d(state, output, ctx->staging_out.data(), bytes))
     return HIPDNN_EP_ERR_H2D_TRANSFER_FAILED;
-  if (cpu_fallbacks(*ctx) != before)
-    return note_cpu_fallback(state, *ctx, *entry, "rms_norm", padded);
   return HIPDNN_EP_SUCCESS;
 }
 
@@ -853,8 +907,8 @@ int wrap_corelib_skip_rms_norm(RuntimeState *state, void *input, void *skip,
     return HIPDNN_EP_CORELIB_NOT_HANDLED;
   OpEntry *entry =
       entry_for(*ctx, gamma, kSkipRmsNorm, epsilon, [&](OpEntry &e) {
-        return pack_norm(state, *ctx, e, gamma, k, epsilon, data_type);
-  });
+        return pack_norm(state, *ctx, e, gamma, k, epsilon, data_type, true);
+      });
   if (!entry)
     return HIPDNN_EP_CORELIB_NOT_HANDLED;
 
@@ -863,7 +917,7 @@ int wrap_corelib_skip_rms_norm(RuntimeState *state, void *input, void *skip,
   if (padded == 0)
     return HIPDNN_EP_CORELIB_NOT_HANDLED;
   // x, residual, total, normed.
-  const auto *ts = tensors_for(*ctx, *entry, padded, {k, k, k, k});
+  const auto *ts = tensors_for(*ctx, *entry, padded, {k, k, k, k}, 2);
   if (!ts)
     return HIPDNN_EP_CORELIB_NOT_HANDLED;
   const CorelibApi &api = *ctx->api;
@@ -877,7 +931,6 @@ int wrap_corelib_skip_rms_norm(RuntimeState *state, void *input, void *skip,
       !d2h(state, ctx->staging_aux.data(), skip, bytes))
     return HIPDNN_EP_ERR_D2H_TRANSFER_FAILED;
 
-  const uint64_t before = cpu_fallbacks(*ctx);
   if (!ok(*ctx,
           api.ryzenai_corelib_tensor_write((*ts)[0], act_type,
                                            ctx->staging_in.data(), count, 0),
@@ -885,15 +938,18 @@ int wrap_corelib_skip_rms_norm(RuntimeState *state, void *input, void *skip,
       !ok(*ctx,
           api.ryzenai_corelib_tensor_write((*ts)[1], act_type,
                                            ctx->staging_aux.data(), count, 0),
-          "tensor_write") ||
-      !ok(*ctx,
-          api.ryzenai_corelib_add_rmsnorm_bf16(ctx->stream, (*ts)[0], (*ts)[1],
-                                               entry->weights, (*ts)[2],
-                                               (*ts)[3]),
-          "add_rmsnorm_bf16") ||
-      !ok(*ctx, api.ryzenai_corelib_stream_synchronize(ctx->stream),
-          "stream_synchronize") ||
-      !ok(*ctx,
+          "tensor_write"))
+    return HIPDNN_EP_CORELIB_NOT_HANDLED;
+  if (api.ryzenai_corelib_add_rmsnorm_bf16(
+          ctx->stream, (*ts)[0], (*ts)[1], entry->weights, (*ts)[2],
+          (*ts)[3]) != ryzenai_corelib_status_success)
+    return note_off_npu(state, *ctx, *entry, "skip_rms_norm", padded,
+                        "add_rmsnorm_bf16");
+  if (api.ryzenai_corelib_stream_synchronize(ctx->stream) !=
+      ryzenai_corelib_status_success)
+    return note_off_npu(state, *ctx, *entry, "skip_rms_norm", padded,
+                        "stream_synchronize");
+  if (!ok(*ctx,
           api.ryzenai_corelib_tensor_read((*ts)[3], act_type,
                                           ctx->staging_out.data(), count, 0),
           "tensor_read"))
@@ -911,8 +967,6 @@ int wrap_corelib_skip_rms_norm(RuntimeState *state, void *input, void *skip,
     if (!h2d(state, input_skip_bias_sum, ctx->staging_out2.data(), bytes))
       return HIPDNN_EP_ERR_H2D_TRANSFER_FAILED;
   }
-  if (cpu_fallbacks(*ctx) != before)
-    return note_cpu_fallback(state, *ctx, *entry, "skip_rms_norm", padded);
   return HIPDNN_EP_SUCCESS;
 }
 
