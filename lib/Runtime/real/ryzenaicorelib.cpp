@@ -382,8 +382,9 @@ CorelibContext *get_context(RuntimeState *state) {
   const CorelibApi &api = *ctx->api;
   // corelib's ops run only on an AIE4 (AIEM) NPU; AIE2P runs only raw kernels.
   if (!api.ryzenai_corelib_npu_usable()) {
-    fprintf(stderr, "[corelib] no NPU corelib's ops run on; corelib ops run on "
-                    "the GPU\n");
+    fprintf(stderr, "[corelib] no usable AIE4 NPU (corelib's ops run only on "
+                    "AIE4, with XRT 2.26.0 or later); corelib ops run on the "
+                    "GPU\n");
     return ctx;
   }
   std::vector<int32_t> prefill_pdis, decode_pdis;

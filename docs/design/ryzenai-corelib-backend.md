@@ -17,8 +17,8 @@ CoreLib's operator API runs prebuilt kernels on an AIE4 (AIEM) NPU only.
 `ryzenai_corelib_npu_usable()` is false on AIE2/AIE2P parts (Phoenix, Strix,
 Krackan), where CoreLib runs only raw kernels through `stream_dispatch`, and on
 an AIE4 part whose XRT is older than 2.26.0. hip-ep then logs
-`[corelib] no NPU corelib's ops run on; ...` once per session and every routed
-op runs on the GPU.
+`[corelib] no usable AIE4 NPU (...); corelib ops run on the GPU` once per
+session and every routed op runs on the GPU.
 
 The backend runs inside the GPU execution provider, so the machine also needs
 a working HIP GPU: CoreLib staging uses the session's HIP stream, and every
