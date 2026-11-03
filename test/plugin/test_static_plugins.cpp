@@ -281,7 +281,7 @@ int main() {
         llvm::raw_string_ostream stream(text);
         diagnostic.print(stream);
         sawLateCarrierDiagnostic |= llvm::StringRef(text).contains(
-            "hip.constant survived past hip-externalize-constants");
+            "hip.constant was introduced after hip-externalize-constants");
         return mlir::success();
       });
   CapturingFileSystem lateFs;

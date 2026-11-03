@@ -42,13 +42,13 @@ namespace hip {
 /// scalar lives in device or host-accessible memory).
 constexpr int64_t kDefaultExternalizeMinNumElements = 1;
 
-/// Pipeline options forwarded to ExternalizeConstantsPass. ConvertOnnxToHipPass
-/// only emits hip.constant carriers. These mirror the externalizer options
-/// so the pipeline flag surface is:
-///   --onnx-to-hip-pipeline='externalize-min-num-elements=256
-///                                externalize-output-dir=/tmp'
-struct OnnxToHipPipelineOptions
-    : public PassPipelineOptions<OnnxToHipPipelineOptions> {
+/// Options for the source-neutral HIP tensor-to-bufferized pipeline.
+///
+/// Frontends call this pipeline after they have produced tensor-form HIP IR,
+/// including the `!hip.context` function argument, graph ABI metadata, and any
+/// `hip.constant` carriers. The options mirror ExternalizeConstantsPass.
+struct HipTensorToBufferizedPipelineOptions
+    : public PassPipelineOptions<HipTensorToBufferizedPipelineOptions> {
   Option<std::string> externalizeOutputDir{
       *this, "externalize-output-dir",
       llvm::cl::desc("Directory for constants-file .constants.bin/.json files "
@@ -66,6 +66,14 @@ struct OnnxToHipPipelineOptions
       llvm::cl::init(false)};
 };
 
+/// The ONNX-to-HIP pipeline's options are the tensor pipeline's: ONNX
+/// conversion has no options of its own, and ConvertOnnxToHipPass only emits
+/// hip.constant carriers for the tensor pipeline to externalize. The pipeline
+/// flag surface is therefore:
+///   --onnx-to-hip-pipeline='externalize-min-num-elements=256
+///                                externalize-output-dir=/tmp'
+using OnnxToHipPipelineOptions = HipTensorToBufferizedPipelineOptions;
+
 /// Pipeline options for the HIP-to-LLVM lowering pipeline.
 /// Controls the GenerateInterface pass at the end of the pipeline.
 struct HipToLLVMPipelineOptions
@@ -77,23 +85,29 @@ struct HipToLLVMPipelineOptions
       llvm::cl::init("constants.bin")};
 };
 
-/// Build the common tail of the ONNX-to-HIP pipeline: everything after the
-/// OnnxToHip conversion (shape inference, HIP-to-HIP pattern rewriting,
-/// constant externalization, bufferization, output-allocator rewrite, pooling,
-/// extern-constant resolution) up to -- but not including -- the HIP-to-LLVM
-/// lowering. Exposed
-/// so tools that build a custom head (e.g. hip-rocmlir-compiler, which inserts
-/// fuse-rocmlir + a rocMLIR compile/embed step) can run the standard tail
-/// without duplicating its load-bearing pass ordering.
-void buildOnnxToHipPipelineTail(OpPassManager &pm,
-                                const OnnxToHipPipelineOptions &options,
-                                morphizen::FileSystem *fs = nullptr);
+/// Build the source-neutral tensor-form HIP to bufferized HIP pipeline.
+///
+/// This begins at the stable frontend boundary, after source-specific lowering
+/// has produced tensor-form HIP IR. It performs HIP shape refinement, constant
+/// externalization, canonicalization, bufferization, output-allocation
+/// rewriting, memory planning, and final memref cleanup, up to -- but not
+/// including -- the HIP-to-LLVM lowering. It does not add a context argument or
+/// run any source-dialect conversion. Callers that build their own head (the
+/// ONNX pipeline, hip-rocmlir-compiler's fuse-rocmlir + rocMLIR compile/embed
+/// step) append it rather than duplicating its load-bearing pass ordering.
+///
+/// \p fs -- when non-null, externalized constants are written through this
+///   FileSystem. When null, a DiskFileSystem is used.
+void buildHipTensorToBufferizedPipeline(
+    OpPassManager &pm, const HipTensorToBufferizedPipelineOptions &options,
+    morphizen::FileSystem *fs = nullptr);
 
 /// Build the head of the ONNX-to-HIP pipeline: everything up to and including
-/// the OnnxToHip conversion. Split out from the tail so a caller can insert
-/// work between the two -- the rocMLIR path outlines kernels and compiles them
-/// there, which has to happen on tensor-level HIP IR before the tail
-/// bufferizes. \p handle, when non-null, inserts the hipDNN graph passes.
+/// the OnnxToHip conversion. Split out from the tensor-to-bufferized pipeline
+/// so a caller can insert work between the two -- the rocMLIR path outlines
+/// kernels and compiles them there, which has to happen on tensor-level HIP IR
+/// before that pipeline bufferizes. \p handle, when non-null, inserts the
+/// hipDNN graph passes.
 void buildOnnxToHipPipelineHead(OpPassManager &pm,
                                 hipdnnHandle_t handle = nullptr,
                                 CompiledGraphMap output_graphs = {});

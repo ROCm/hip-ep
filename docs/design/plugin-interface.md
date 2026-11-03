@@ -577,7 +577,8 @@ support this today; a fourth is planned.
   `include/hip/InitAllPasses.h::registerAllPasses()`, is called by both the EP
   / `hip-compiler` driver and the `hip-mlir-opt` tool, so the set of nameable
   passes can never drift between them. The composable pipeline names
-  (`onnx-to-hip-pipeline`, `hip-to-llvm-pipeline`, `hipdnn-pipeline`) are
+  (`hip-tensor-to-bufferized-pipeline`, `onnx-to-hip-pipeline`,
+  `hip-to-llvm-pipeline`, `hipdnn-pipeline`) are
   registered alongside. A published "pass menu" lists the names, anchor ops,
   and `PipelineSlot` anchors: [`docs/pipeline_pass_menu.md`](../pipeline_pass_menu.md).
   A few load-bearing passes are intentionally *not* individually nameable
