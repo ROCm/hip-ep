@@ -1881,7 +1881,7 @@ int wrap_causal_conv_with_state(
     const void *bias,   // nullable, (channels)
     const void *past_state, // nullable, (batch, channels, kernel_size - 1)
     void *output,           // same layout as input
-    void *present_state,    // ([state_window,] batch, channels, kernel_size - 1)
+    void *present_state, // ([state_window,] batch, channels, kernel_size - 1)
     int64_t batch_size, int64_t channels, int64_t seq_len, int64_t kernel_size,
     int64_t ndim,
     int64_t activation, // 0=none, 1=silu/swish

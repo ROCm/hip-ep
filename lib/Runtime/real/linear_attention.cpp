@@ -221,9 +221,8 @@ extern "C" int wrap_linear_attention(
     }
     working_state = hipdnn_ep_state_get_la_scratch(state);
     if (past_state) {
-      const void *past_last =
-          static_cast<const char *>(past_state) +
-          (state_window - 1) * total_state_bytes;
+      const void *past_last = static_cast<const char *>(past_state) +
+                              (state_window - 1) * total_state_bytes;
       const int copy_result = hip_strided_copy(
           hip_stream, working_state, past_last, elem_size,
           /*outer_rank=*/0, /*outer_sizes=*/nullptr,

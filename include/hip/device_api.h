@@ -46,10 +46,11 @@ HIPDNN_EP_DEVICE_API uint32_t hipdnn_ep_device_api_version(void);
 // memory; descriptors_host points to the identical host-side descriptors and
 // is used only for validation. Returns UNAVAILABLE when no session stream or
 // matching per-architecture custom-kernel library is available.
-HIPDNN_EP_DEVICE_API int hipdnn_ep_copy_state_slots(
-    const hipdnn_ep_state_slot_desc *descriptors_device,
-    const hipdnn_ep_state_slot_desc *descriptors_host, int32_t count,
-    int32_t source_slot, int32_t destination_slot);
+HIPDNN_EP_DEVICE_API int
+hipdnn_ep_copy_state_slots(const hipdnn_ep_state_slot_desc *descriptors_device,
+                           const hipdnn_ep_state_slot_desc *descriptors_host,
+                           int32_t count, int32_t source_slot,
+                           int32_t destination_slot);
 
 #ifdef __cplusplus
 }

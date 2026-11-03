@@ -120,9 +120,9 @@ struct LinearAttentionOpLowering
       return op.emitError("present_state rank must be ")
              << expectedStateRank << " for state_window=" << stateWindowValue;
     int64_t headDimVIndex = stateWindowValue > 0 ? 4 : 3;
-    Value headDimVVal = getMemRefDimSize(
-        presentStateType, headDimVIndex, adaptor.getPresentState(), rewriter,
-        loc);
+    Value headDimVVal =
+        getMemRefDimSize(presentStateType, headDimVIndex,
+                         adaptor.getPresentState(), rewriter, loc);
 
     // Derive layout flags for the optional decay / beta tensors so the
     // runtime can pick the correct per-token stride:

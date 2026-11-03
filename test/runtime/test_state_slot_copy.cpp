@@ -28,8 +28,7 @@ static_assert(sizeof(StateSlotDesc) == 16);
 bool hip_ok(hipError_t error, const char *operation) {
   if (error == hipSuccess)
     return true;
-  std::fprintf(stderr, "%s failed: %s\n", operation,
-               hipGetErrorString(error));
+  std::fprintf(stderr, "%s failed: %s\n", operation, hipGetErrorString(error));
   return false;
 }
 
@@ -62,8 +61,8 @@ bool run_promotion(hipStream_t stream,
   std::vector<std::vector<uint8_t>> after(kDescriptorCount);
   for (int i = 0; i < kDescriptorCount; ++i) {
     after[i].resize(before[i].size());
-    if (!hip_ok(hipMemcpyAsync(after[i].data(), allocations[i],
-                               after[i].size(), hipMemcpyDeviceToHost, stream),
+    if (!hip_ok(hipMemcpyAsync(after[i].data(), allocations[i], after[i].size(),
+                               hipMemcpyDeviceToHost, stream),
                 "state download"))
       return false;
   }
@@ -79,17 +78,15 @@ bool run_promotion(hipStream_t stream,
       uint8_t expected = before[descriptor][byte];
       const size_t destination_begin =
           kGuardBytes + static_cast<size_t>(destination_slot) * slot_bytes;
-      if (byte >= destination_begin &&
-          byte < destination_begin + slot_bytes) {
+      if (byte >= destination_begin && byte < destination_begin + slot_bytes) {
         const size_t within_slot = byte - destination_begin;
         expected =
-            before[descriptor][kGuardBytes +
-                               static_cast<size_t>(source_slot) * slot_bytes +
-                               within_slot];
+            before[descriptor]
+                  [kGuardBytes + static_cast<size_t>(source_slot) * slot_bytes +
+                   within_slot];
       }
       if (after[descriptor][byte] != expected) {
-        std::fprintf(stderr,
-                     "descriptor %d byte %zu: got %u, expected %u\n",
+        std::fprintf(stderr, "descriptor %d byte %zu: got %u, expected %u\n",
                      descriptor, byte,
                      static_cast<unsigned>(after[descriptor][byte]),
                      static_cast<unsigned>(expected));
@@ -118,17 +115,16 @@ int main() {
   bool success = true;
   for (int descriptor = 0; descriptor < kDescriptorCount; ++descriptor) {
     // Exercise both the vectorized and byte-copy paths.
-    const size_t slot_bytes =
-        descriptor % 2 == 0 ? static_cast<size_t>(64 + descriptor * 16)
-                            : static_cast<size_t>(65 + descriptor * 13);
-    const size_t allocation_bytes =
-        2 * kGuardBytes + kSlotCount * slot_bytes;
+    const size_t slot_bytes = descriptor % 2 == 0
+                                  ? static_cast<size_t>(64 + descriptor * 16)
+                                  : static_cast<size_t>(65 + descriptor * 13);
+    const size_t allocation_bytes = 2 * kGuardBytes + kSlotCount * slot_bytes;
     initial[descriptor].assign(allocation_bytes, 0xa5);
     for (int slot = 0; slot < kSlotCount; ++slot) {
       for (size_t byte = 0; byte < slot_bytes; ++byte)
-        initial[descriptor][kGuardBytes +
-                            static_cast<size_t>(slot) * slot_bytes + byte] =
-            state_value(descriptor, slot, byte);
+        initial[descriptor]
+               [kGuardBytes + static_cast<size_t>(slot) * slot_bytes + byte] =
+                   state_value(descriptor, slot, byte);
     }
 
     if (!hip_ok(hipMalloc(&allocations[descriptor], allocation_bytes),
@@ -140,9 +136,9 @@ int main() {
       success = false;
       break;
     }
-    descriptors[descriptor] = {
-        static_cast<uint8_t *>(allocations[descriptor]) + kGuardBytes,
-        static_cast<uint64_t>(slot_bytes)};
+    descriptors[descriptor] = {static_cast<uint8_t *>(allocations[descriptor]) +
+                                   kGuardBytes,
+                               static_cast<uint64_t>(slot_bytes)};
   }
 
   if (success)

@@ -280,9 +280,7 @@ class TestLinearAttention:
                 legacy_output = prefix_output
 
         np.testing.assert_allclose(window_output, legacy_output, atol=1e-2, rtol=1e-2)
-        np.testing.assert_allclose(
-            window_states, expected_states, atol=1e-2, rtol=1e-2
-        )
+        np.testing.assert_allclose(window_states, expected_states, atol=1e-2, rtol=1e-2)
 
     @pytest.mark.parametrize("seq_len", [1, 4])
     @pytest.mark.parametrize("update_rule", ["linear", "gated", "delta", "gated_delta"])

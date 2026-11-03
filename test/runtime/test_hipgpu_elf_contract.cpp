@@ -115,8 +115,7 @@ int main(int argc, char **argv) {
     return 1;
   }
 #ifdef HIPDNN_EP_EXPECT_DEVICE_API
-  if (!device_api_version ||
-      !dlsym(handle, "hipdnn_ep_copy_state_slots")) {
+  if (!device_api_version || !dlsym(handle, "hipdnn_ep_copy_state_slots")) {
     std::cerr << "device API entry points missing: " << dlerror() << "\n";
     return 1;
   }

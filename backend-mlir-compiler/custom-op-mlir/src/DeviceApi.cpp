@@ -74,8 +74,7 @@ std::string moduleDirectory() {
   std::string result(info.dli_fname);
   const size_t slash = result.find_last_of('/');
 #endif
-  return slash == std::string::npos ? std::string{}
-                                    : result.substr(0, slash);
+  return slash == std::string::npos ? std::string{} : result.substr(0, slash);
 }
 
 std::string activeArchitecture() {
@@ -97,21 +96,19 @@ std::string genericArchitecture(const std::string &architecture) {
           {{"gfx900", "gfx902", "gfx904", "gfx906", "gfx909", "gfx90c"},
            "gfx9-generic"},
           {{"gfx942", "gfx950"}, "gfx9-4-generic"},
-          {{"gfx1010", "gfx1011", "gfx1012", "gfx1013"},
-           "gfx10-1-generic"},
-          {{"gfx1030", "gfx1031", "gfx1032", "gfx1033", "gfx1034",
-            "gfx1035", "gfx1036"},
+          {{"gfx1010", "gfx1011", "gfx1012", "gfx1013"}, "gfx10-1-generic"},
+          {{"gfx1030", "gfx1031", "gfx1032", "gfx1033", "gfx1034", "gfx1035",
+            "gfx1036"},
            "gfx10-3-generic"},
-          {{"gfx1100", "gfx1101", "gfx1102", "gfx1103", "gfx1150",
-            "gfx1151", "gfx1152", "gfx1153"},
+          {{"gfx1100", "gfx1101", "gfx1102", "gfx1103", "gfx1150", "gfx1151",
+            "gfx1152", "gfx1153"},
            "gfx11-generic"},
           {{"gfx1200", "gfx1201"}, "gfx12-generic"},
       };
   for (const auto &[members, generic] : families) {
-    if (std::find_if(members.begin(), members.end(),
-                     [&](const char *member) {
-                       return architecture == member;
-                     }) != members.end())
+    if (std::find_if(members.begin(), members.end(), [&](const char *member) {
+          return architecture == member;
+        }) != members.end())
       return generic;
   }
   return {};
@@ -137,8 +134,7 @@ KernelLibrary loadKernelLibrary(const std::string &architecture) {
     FreeLibrary(handle);
   }
 #else
-  const std::string basename =
-      "libcustom_kernels_" + architecture + ".so";
+  const std::string basename = "libcustom_kernels_" + architecture + ".so";
   const std::vector<std::string> paths =
       directory.empty()
           ? std::vector<std::string>{basename}
@@ -189,8 +185,7 @@ bool validateDescriptors(const hipdnn_ep_state_slot_desc *descriptors,
   for (int32_t i = 0; i < count; ++i) {
     if (!descriptors[i].base || descriptors[i].slot_bytes == 0 ||
         maximum_slot + 1 >
-            std::numeric_limits<uint64_t>::max() /
-                descriptors[i].slot_bytes)
+            std::numeric_limits<uint64_t>::max() / descriptors[i].slot_bytes)
       return false;
   }
   return true;
@@ -199,15 +194,15 @@ bool validateDescriptors(const hipdnn_ep_state_slot_desc *descriptors,
 } // namespace
 #endif
 
-extern "C" HIPDNN_EP_DEVICE_API uint32_t
-hipdnn_ep_device_api_version(void) {
+extern "C" HIPDNN_EP_DEVICE_API uint32_t hipdnn_ep_device_api_version(void) {
   return HIPDNN_EP_DEVICE_API_VERSION;
 }
 
-extern "C" HIPDNN_EP_DEVICE_API int hipdnn_ep_copy_state_slots(
-    const hipdnn_ep_state_slot_desc *descriptors_device,
-    const hipdnn_ep_state_slot_desc *descriptors_host, int32_t count,
-    int32_t source_slot, int32_t destination_slot) {
+extern "C" HIPDNN_EP_DEVICE_API int
+hipdnn_ep_copy_state_slots(const hipdnn_ep_state_slot_desc *descriptors_device,
+                           const hipdnn_ep_state_slot_desc *descriptors_host,
+                           int32_t count, int32_t source_slot,
+                           int32_t destination_slot) {
 #ifdef HIPDNN_EP_LINK_HIP_HOST
   if (!descriptors_device ||
       !validateDescriptors(descriptors_host, count, source_slot,
@@ -218,20 +213,20 @@ extern "C" HIPDNN_EP_DEVICE_API int hipdnn_ep_copy_state_slots(
   StateSlotCopyKernel kernel = resolveKernel();
   if (!stream || !kernel) {
     if (std::getenv("ORTGENAI_AMDGPU_TRACE_STATE_SLOT_COPY"))
-      std::fprintf(stderr,
-                   "[HIP EP] batched state-slot copy unavailable: %s%s\n",
-                   stream ? "" : "no current provider stream",
-                   kernel ? "" : (stream ? "kernel unavailable"
-                                         : "; kernel unavailable"));
+      std::fprintf(
+          stderr, "[HIP EP] batched state-slot copy unavailable: %s%s\n",
+          stream ? "" : "no current provider stream",
+          kernel ? ""
+                 : (stream ? "kernel unavailable" : "; kernel unavailable"));
     return HIPDNN_EP_DEVICE_API_UNAVAILABLE;
   }
 
   const int launch_status =
       kernel(stream, descriptors_device, count, source_slot, destination_slot);
   if (std::getenv("ORTGENAI_AMDGPU_TRACE_STATE_SLOT_COPY"))
-    std::fprintf(stderr,
-                 "[HIP EP] batched state-slot copy launch status=%d stream=%p\n",
-                 launch_status, stream);
+    std::fprintf(
+        stderr, "[HIP EP] batched state-slot copy launch status=%d stream=%p\n",
+        launch_status, stream);
   return launch_status == static_cast<int>(hipSuccess)
              ? HIPDNN_EP_DEVICE_API_SUCCESS
              : HIPDNN_EP_DEVICE_API_LAUNCH_ERROR;

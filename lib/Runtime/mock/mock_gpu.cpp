@@ -393,10 +393,11 @@ int wrap_causal_conv_with_state(
   MOCK_PRINT("[MOCK]   ndim=%lld, activation=%s(%lld), elem_size=%lld,\n",
              (long long)ndim, act_name, (long long)activation,
              (long long)element_size_bytes);
-  MOCK_PRINT("[MOCK]   layout=%s, state=%s, dilation=%lld, state_window=%lld,\n",
-             channels_last ? "channels_last(B,L,C)" : "channels_first(B,C,L)",
-             state_channels_last ? "(B,S,C)" : "(B,C,S)",
-             (long long)dilation, (long long)state_window);
+  MOCK_PRINT(
+      "[MOCK]   layout=%s, state=%s, dilation=%lld, state_window=%lld,\n",
+      channels_last ? "channels_last(B,L,C)" : "channels_first(B,C,L)",
+      state_channels_last ? "(B,S,C)" : "(B,C,S)", (long long)dilation,
+      (long long)state_window);
   MOCK_PRINT("[MOCK]   bias=%s, past_state=%s)\n", bias ? "yes" : "null",
              past_state ? "yes" : "null");
 

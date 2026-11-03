@@ -111,8 +111,7 @@ LinearAttentionToHip::matchAndRewrite(mlir::Operation *op,
   auto updateRuleAttr = getStrAttr("update_rule", "gated_delta");
   auto stateWindowAttr = getI64Attr("state_window", 0);
   if (stateWindowAttr.getInt() < 0)
-    return rewriter.notifyMatchFailure(op,
-                                       "state_window must be nonnegative");
+    return rewriter.notifyMatchFailure(op, "state_window must be nonnegative");
 
   // === Check Outputs (always 2: output, present_state) ===
   size_t numResults = op->getNumResults();

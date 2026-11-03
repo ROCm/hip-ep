@@ -153,15 +153,15 @@ struct CausalConvWithStateOpLowering
       return failure();
 
     SmallVector<Value, 19> args = {
-        statePtr,    getOpStateSlotValue(op, rewriter, loc),
-        inputPtr,    weightPtr,
-        biasPtr,     pastStatePtr,
-        outputPtr,   presentStatePtr,
-        batchSize,   channels,
-        seqLen,      kernelSizeVal,
-        ndimVal,     activationVal,
-        elemSizeVal, channelsLastVal,
-        dilationVal, stateChannelsLastVal,
+        statePtr,      getOpStateSlotValue(op, rewriter, loc),
+        inputPtr,      weightPtr,
+        biasPtr,       pastStatePtr,
+        outputPtr,     presentStatePtr,
+        batchSize,     channels,
+        seqLen,        kernelSizeVal,
+        ndimVal,       activationVal,
+        elemSizeVal,   channelsLastVal,
+        dilationVal,   stateChannelsLastVal,
         stateWindowVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);

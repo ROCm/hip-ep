@@ -294,9 +294,7 @@ class TestCausalConvWithState:
                 legacy_output = prefix_output
 
         np.testing.assert_allclose(window_output, legacy_output, atol=1e-5, rtol=1e-5)
-        np.testing.assert_allclose(
-            window_states, expected_states, atol=1e-5, rtol=1e-5
-        )
+        np.testing.assert_allclose(window_states, expected_states, atol=1e-5, rtol=1e-5)
 
     @pytest.mark.parametrize(
         "batch,channels,seq_len,kernel_size,activation",

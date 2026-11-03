@@ -142,9 +142,8 @@ int wrap_causal_conv_with_state(
     if (past_state) {
       if (hipdnn_ep_state_ensure_conv_scratch(
               state, static_cast<size_t>(state_slot_bytes)) != 0) {
-        fprintf(stderr,
-                "wrap_causal_conv_with_state: state-window scratch "
-                "allocation failed\n");
+        fprintf(stderr, "wrap_causal_conv_with_state: state-window scratch "
+                        "allocation failed\n");
         return -1;
       }
       void *saved_past = hipdnn_ep_state_get_conv_scratch(state);
@@ -250,16 +249,15 @@ int wrap_causal_conv_with_state(
   // channels_last takes the _nlc kernel, which reads and writes (B, L, C)
   // directly instead of paying the Transpose pair the channels-first kernel
   // needs to be spliced into a channels-last graph.
-  int rc =
-      channels_last
-          ? hip_causal_conv_prefill_nlc(
-                stream, input, weight, bias, kernel_past_state, output,
-                kernel_present_state, batch_size, channels, seq_len,
-                kernel_size, activation, element_size_bytes)
-          : hip_causal_conv_prefill(
-                stream, input, weight, bias, kernel_past_state, output,
-                kernel_present_state, batch_size, channels, seq_len,
-                kernel_size, activation, element_size_bytes);
+  int rc = channels_last
+               ? hip_causal_conv_prefill_nlc(
+                     stream, input, weight, bias, kernel_past_state, output,
+                     kernel_present_state, batch_size, channels, seq_len,
+                     kernel_size, activation, element_size_bytes)
+               : hip_causal_conv_prefill(
+                     stream, input, weight, bias, kernel_past_state, output,
+                     kernel_present_state, batch_size, channels, seq_len,
+                     kernel_size, activation, element_size_bytes);
   if (rc != 0) {
     fprintf(stderr,
             "wrap_causal_conv_with_state: hip_causal_conv_prefill%s failed "

@@ -2742,8 +2742,7 @@ LogicalResult CausalConvWithStateOp::verify() {
         "windowed/state-channels-last mode requires a static kernel size");
   }
   int64_t stateLen = (weightType.getDimSize(2) - 1) * dilation;
-  int64_t channels =
-      inputType.getDimSize(getChannelsLast() ? 2 : 1);
+  int64_t channels = inputType.getDimSize(getChannelsLast() ? 2 : 1);
   SmallVector<Value, 2> states = {getPresentState()};
   if (getPastState()) {
     states.push_back(getPastState());
@@ -2753,8 +2752,7 @@ LogicalResult CausalConvWithStateOp::verify() {
     int64_t expectedRank = stateWindow > 0 ? 4 : 3;
     if (stateType.getRank() != expectedRank) {
       return emitOpError("state must be rank ")
-             << expectedRank << ", got rank "
-             << stateType.getRank();
+             << expectedRank << ", got rank " << stateType.getRank();
     }
     int64_t batchDim = stateWindow > 0 ? 1 : 0;
     int64_t channelDim;
@@ -2781,8 +2779,8 @@ LogicalResult CausalConvWithStateOp::verify() {
         stateType.getDimSize(stateDim) != stateLen) {
       return emitOpError("state dim ")
              << stateDim
-             << " must be (kernel_size - 1) * dilation = "
-             << stateLen << ", got " << stateType.getDimSize(stateDim);
+             << " must be (kernel_size - 1) * dilation = " << stateLen
+             << ", got " << stateType.getDimSize(stateDim);
     }
     if (!ShapedType::isDynamic(channels) &&
         !stateType.isDynamicDim(channelDim) &&
