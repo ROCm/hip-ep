@@ -2591,6 +2591,40 @@ void MatMulNBitsOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
+MutableOperandRange UnpackInt4Op::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void UnpackInt4Op::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult UnpackInt4Op::verify() {
+  if (failed(verifyDpsComputeOp(*this, {getPacked(), getOutput()},
+                                /*numInits=*/1)))
+    return failure();
+
+  auto packedType = cast<ShapedType>(getPacked().getType());
+  auto outputType = cast<ShapedType>(getOutput().getType());
+  if (!packedType.getElementType().isUnsignedInteger(8) ||
+      !outputType.getElementType().isUnsignedInteger(8))
+    return emitOpError("packed input and output must be ui8");
+  if (!packedType.hasStaticShape() || !outputType.hasStaticShape())
+    return emitOpError("packed input and output must have static shapes");
+  if (packedType.getRank() < 1 || packedType.getRank() != outputType.getRank())
+    return emitOpError("packed input and output ranks must match");
+  if (packedType.getShape().drop_back() != outputType.getShape().drop_back())
+    return emitOpError(
+        "only the last dimension changes when unpacking int4");
+  int64_t packedK = packedType.getShape().back();
+  int64_t unpackedK = outputType.getShape().back();
+  if (packedK <= 0 || unpackedK != packedK * 2)
+    return emitOpError("last dimension must double");
+  return success();
+}
+
 MutableOperandRange DequantBnb4Op::getDpsInitsMutable() {
   return getOutputMutable();
 }
