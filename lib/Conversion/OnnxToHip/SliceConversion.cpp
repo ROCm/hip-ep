@@ -281,9 +281,7 @@ static mlir::Value resolveHostIndex(mlir::OpBuilder &b, mlir::Location loc,
   }
 
   // Binary shape arithmetic. hip elementwise ops are DPS, so their operands are
-  // (ctx, lhs, rhs, out); the ONNX forms are plain (lhs, rhs). Integer ONNX
-  // Div truncates toward zero; shape extents are non-negative, so arith.divsi
-  // preserves the bound calculation used by Slice.
+  // (ctx, lhs, rhs, out); the ONNX forms are plain (lhs, rhs).
   unsigned lhsPos = 0;
   bool isHip = mlir::isa<mlir::hip::SubOp, mlir::hip::AddOp, mlir::hip::MulOp,
                          mlir::hip::DivOp>(def);
@@ -313,9 +311,9 @@ static mlir::Value resolveHostIndex(mlir::OpBuilder &b, mlir::Location loc,
   if (isAdd)
     return mlir::arith::AddIOp::create(b, loc, l, r);
   if (isDiv) {
-    // `Chunk` exports split an axis at `(dim + 1) / 2`. ONNX integer Div
-    // truncates, as divsi does; a divisor that is not a non-zero constant
-    // could fault on the host, so it does not resolve.
+    // ONNX integer Div truncates toward zero, matching arith.divsi. A divisor
+    // that is not a non-zero compile-time constant could fault on the host,
+    // so leave that bound unresolved.
     std::optional<int64_t> divisor = mlir::getConstantIntValue(r);
     if (!divisor || *divisor == 0)
       return {};
