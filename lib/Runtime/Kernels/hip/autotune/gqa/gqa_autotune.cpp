@@ -555,13 +555,13 @@ namespace hipdnn_ep {
 namespace {
 
 Table &table() {
-  static Table *t = [] {
-    auto *fresh = new Table();
-    for (size_t i = 0; i < kGqaLutBlobCount && !fresh->loaded; ++i)
-      loadBuffer(*fresh, kGqaLutBlobs[i], kGqaLutBlobSizes[i]);
-    return fresh;
-  }();
-  return *t;
+  static Table t;
+  static std::once_flag once;
+  std::call_once(once, [] {
+    for (size_t i = 0; i < kGqaLutBlobCount && !t.loaded; ++i)
+      loadBuffer(t, kGqaLutBlobs[i], kGqaLutBlobSizes[i]);
+  });
+  return t;
 }
 
 struct Policy {

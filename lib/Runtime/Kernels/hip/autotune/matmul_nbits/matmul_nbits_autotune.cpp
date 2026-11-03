@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -302,13 +303,13 @@ namespace matmul_nbits_autotune {
 namespace {
 
 Table& table() {
-  static Table* t = [] {
-    auto* fresh = new Table();
-    for (size_t i = 0; i < kMatmulNbitsLutBlobCount && !fresh->loaded; ++i)
-      loadBuffer(*fresh, kMatmulNbitsLutBlobs[i], kMatmulNbitsLutBlobSizes[i]);
-    return fresh;
-  }();
-  return *t;
+  static Table t;
+  static std::once_flag once;
+  std::call_once(once, [] {
+    for (size_t i = 0; i < kMatmulNbitsLutBlobCount && !t.loaded; ++i)
+      loadBuffer(t, kMatmulNbitsLutBlobs[i], kMatmulNbitsLutBlobSizes[i]);
+  });
+  return t;
 }
 
 /* Hands `answer` to whichever validator matches its kind. A geometry the live
