@@ -280,13 +280,16 @@ static mlir::Value resolveHostIndex(mlir::OpBuilder &b, mlir::Location loc,
   }
 
   // Binary shape arithmetic. hip elementwise ops are DPS, so their operands are
-  // (ctx, lhs, rhs, out); the ONNX forms are plain (lhs, rhs).
+  // (ctx, lhs, rhs, out); the ONNX forms are plain (lhs, rhs). Integer ONNX
+  // Div truncates toward zero; shape extents are non-negative, so arith.divsi
+  // preserves the bound calculation used by Slice.
   unsigned lhsPos = 0;
-  bool isHip =
-      mlir::isa<mlir::hip::SubOp, mlir::hip::AddOp, mlir::hip::MulOp>(def);
+  bool isHip = mlir::isa<mlir::hip::SubOp, mlir::hip::AddOp, mlir::hip::MulOp,
+                         mlir::hip::DivOp>(def);
   if (isHip)
     lhsPos = 1;
-  else if (opName != "onnx.Sub" && opName != "onnx.Add" && opName != "onnx.Mul")
+  else if (opName != "onnx.Sub" && opName != "onnx.Add" &&
+           opName != "onnx.Mul" && opName != "onnx.Div")
     return {};
 
   mlir::Value lhs = def->getOperand(lhsPos);
@@ -303,10 +306,13 @@ static mlir::Value resolveHostIndex(mlir::OpBuilder &b, mlir::Location loc,
 
   bool isSub = isHip ? mlir::isa<mlir::hip::SubOp>(def) : opName == "onnx.Sub";
   bool isAdd = isHip ? mlir::isa<mlir::hip::AddOp>(def) : opName == "onnx.Add";
+  bool isDiv = isHip ? mlir::isa<mlir::hip::DivOp>(def) : opName == "onnx.Div";
   if (isSub)
     return mlir::arith::SubIOp::create(b, loc, l, r);
   if (isAdd)
     return mlir::arith::AddIOp::create(b, loc, l, r);
+  if (isDiv)
+    return mlir::arith::DivSIOp::create(b, loc, l, r);
   return mlir::arith::MulIOp::create(b, loc, l, r);
 }
 
