@@ -300,4 +300,128 @@ module {
     // CHECK-NOT: hip.resize
     return %y : tensor<1x3x16x16xui8>
   }
+
+  // Test 15: empty roi and scales passed as arguments, not folded constants.
+  // sizes supplies the output shape; the converter reads it from the result type.
+  func.func @test_resize_empty_roi(%arg0: tensor<1x512x6x6xf16>,
+                                    %roi: tensor<0xf32>,
+                                    %scales: tensor<0xf32>,
+                                    %sizes: tensor<4xi64>)
+      -> tensor<1x512x12x12xf16> {
+    // CHECK-LABEL: func.func @test_resize_empty_roi
+    %y = "onnx.Resize"(%arg0, %roi, %scales, %sizes)
+        {mode = "linear", coordinate_transformation_mode = "asymmetric",
+         nearest_mode = "floor"}
+        : (tensor<1x512x6x6xf16>, tensor<0xf32>, tensor<0xf32>, tensor<4xi64>)
+        -> tensor<1x512x12x12xf16>
+
+    // CHECK-NOT: onnx.Resize
+    // CHECK: hip.resize
+    // CHECK-SAME: coord_transform = 1
+    // CHECK-SAME: mode = 1
+    return %y : tensor<1x512x12x12xf16>
+  }
+
+  // Test 16: pytorch_half_pixel is its own coord id (3), not an alias of
+  // half_pixel. An output axis of length 1 samples input coordinate 0.
+  func.func @test_resize_pytorch_half_pixel(%arg0: tensor<1x3x16x16xf16>,
+                                             %scales: tensor<4xf32>)
+      -> tensor<1x3x32x32xf16> {
+    // CHECK-LABEL: func.func @test_resize_pytorch_half_pixel
+    %roi = "onnx.NoValue"() {value} : () -> none
+    %y = "onnx.Resize"(%arg0, %roi, %scales)
+        {mode = "linear",
+         coordinate_transformation_mode = "pytorch_half_pixel"}
+        : (tensor<1x3x16x16xf16>, none, tensor<4xf32>)
+        -> tensor<1x3x32x32xf16>
+
+    // CHECK-NOT: onnx.Resize
+    // CHECK: hip.resize
+    // CHECK-SAME: coord_transform = 3
+    // CHECK-SAME: mode = 1
+    return %y : tensor<1x3x32x32xf16>
+  }
+
+  // Test 17: floor(3 * 1.5) = 4, so out/in is 4/3, not 1.5. The ONNX
+  // scales are kept on the op for the coordinate transform.
+  func.func @test_resize_scales_kept(%arg0: tensor<1x1x3xf32>)
+      -> tensor<1x1x4xf32> {
+    // CHECK-LABEL: func.func @test_resize_scales_kept
+    %roi = "onnx.NoValue"() {value} : () -> none
+    %scales = "onnx.Constant"() {value = dense<[1.0, 1.0, 1.5]> : tensor<3xf32>}
+        : () -> tensor<3xf32>
+    %y = "onnx.Resize"(%arg0, %roi, %scales)
+        {mode = "linear", coordinate_transformation_mode = "half_pixel"}
+        : (tensor<1x1x3xf32>, none, tensor<3xf32>) -> tensor<1x1x4xf32>
+    // CHECK-NOT: onnx.Resize
+    // CHECK: hip.resize
+    // CHECK-SAME: scales = [1.000000e+00, 1.000000e+00, 1.500000e+00]
+    return %y : tensor<1x1x4xf32>
+  }
+
+  // Test 18: scales that match out/in, and align_corners, need no scales.
+  func.func @test_resize_scales_dropped(%arg0: tensor<1x1x3xf32>,
+                                        %arg1: tensor<1x1x3xf32>)
+      -> (tensor<1x1x6xf32>, tensor<1x1x4xf32>) {
+    // CHECK-LABEL: func.func @test_resize_scales_dropped
+    %roi = "onnx.NoValue"() {value} : () -> none
+    %s2 = "onnx.Constant"() {value = dense<[1.0, 1.0, 2.0]> : tensor<3xf32>}
+        : () -> tensor<3xf32>
+    %s15 = "onnx.Constant"() {value = dense<[1.0, 1.0, 1.5]> : tensor<3xf32>}
+        : () -> tensor<3xf32>
+    %y0 = "onnx.Resize"(%arg0, %roi, %s2)
+        {mode = "linear", coordinate_transformation_mode = "half_pixel"}
+        : (tensor<1x1x3xf32>, none, tensor<3xf32>) -> tensor<1x1x6xf32>
+    %y1 = "onnx.Resize"(%arg1, %roi, %s15)
+        {mode = "linear", coordinate_transformation_mode = "align_corners"}
+        : (tensor<1x1x3xf32>, none, tensor<3xf32>) -> tensor<1x1x4xf32>
+    // CHECK: hip.resize
+    // CHECK-NOT: scales
+    // CHECK: hip.resize
+    // CHECK-SAME: coord_transform = 2
+    // CHECK-NOT: scales
+    // CHECK: return
+    return %y0, %y1 : tensor<1x1x6xf32>, tensor<1x1x4xf32>
+  }
+
+  // Test 19: floor(3 * 1.1) = 3 leaves axis 1's extent unchanged, but it is
+  // still resampled, so the kept scales include it.
+  func.func @test_resize_scales_unchanged_extent(%arg0: tensor<1x3x3x1xf32>)
+      -> tensor<1x3x4x1xf32> {
+    // CHECK-LABEL: func.func @test_resize_scales_unchanged_extent
+    %roi = "onnx.NoValue"() {value} : () -> none
+    %scales = "onnx.Constant"() {value = dense<[1.0, 1.1, 1.5, 1.0]> : tensor<4xf32>}
+        : () -> tensor<4xf32>
+    %y = "onnx.Resize"(%arg0, %roi, %scales)
+        {mode = "nearest", coordinate_transformation_mode = "pytorch_half_pixel",
+         nearest_mode = "floor"}
+        : (tensor<1x3x3x1xf32>, none, tensor<4xf32>) -> tensor<1x3x4x1xf32>
+    // CHECK-NOT: onnx.Resize
+    // CHECK: hip.resize
+    // CHECK-SAME: scales = [1.000000e+00, 1.100{{[0-9]*}}, 1.500000e+00, 1.000000e+00]
+    return %y : tensor<1x3x4x1xf32>
+  }
+
+  // Test 20: casts round the folded scales. 2.0001 through f16 is 2, which
+  // matches out / in, so no scales are kept.
+  func.func @test_resize_scales_through_cast(%arg0: tensor<1x1x4xf32>)
+      -> tensor<1x1x8xf32> {
+    // CHECK-LABEL: func.func @test_resize_scales_through_cast
+    %roi = "onnx.NoValue"() {value} : () -> none
+    %s = "onnx.Constant"() {value = dense<[1.0, 1.0, 2.0001]> : tensor<3xf32>}
+        : () -> tensor<3xf32>
+    %h = "onnx.Cast"(%s) {saturate = 1 : si64, to = f16}
+        : (tensor<3xf32>) -> tensor<3xf16>
+    %f = "onnx.Cast"(%h) {saturate = 1 : si64, to = f32}
+        : (tensor<3xf16>) -> tensor<3xf32>
+    %y = "onnx.Resize"(%arg0, %roi, %f)
+        {mode = "nearest", coordinate_transformation_mode = "asymmetric",
+         nearest_mode = "floor"}
+        : (tensor<1x1x4xf32>, none, tensor<3xf32>) -> tensor<1x1x8xf32>
+    // CHECK-NOT: onnx.Resize
+    // CHECK: hip.resize
+    // CHECK-NOT: scales
+    // CHECK: return
+    return %y : tensor<1x1x8xf32>
+  }
 }

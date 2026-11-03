@@ -234,6 +234,17 @@ static mlir::Value resolveHostIndex(mlir::OpBuilder &b, mlir::Location loc,
     return mlir::tensor::DimOp::create(b, loc, input, dimIdx);
   }
 
+  bool isHipNeg = mlir::isa<mlir::hip::NegOp>(def);
+  if (isHipNeg || opName == "onnx.Neg") {
+    mlir::Value x = resolveHostIndex(b, loc, def->getOperand(isHipNeg ? 1 : 0),
+                                     idx, depth + 1);
+    if (!x) {
+      return {};
+    }
+    return mlir::arith::SubIOp::create(
+        b, loc, mlir::arith::ConstantIndexOp::create(b, loc, 0), x);
+  }
+
   // Binary shape arithmetic. hip elementwise ops are DPS, so their operands are
   // (ctx, lhs, rhs, out); the ONNX forms are plain (lhs, rhs).
   unsigned lhsPos = 0;

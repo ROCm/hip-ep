@@ -28,6 +28,7 @@ TestQMoERelu2 covers swiglu_fusion=0 with activation_type="relu2". ORT CPU
 has no relu2 MoE kernel, so it compares against an equivalent graph.
 """
 
+import os
 from dataclasses import dataclass
 
 import numpy as np
@@ -37,13 +38,34 @@ from onnx import TensorProto, helper, numpy_helper
 from framework.comparator import compare_outputs
 from framework.onnx_utils import make_model_from_nodes
 
-SEQ_LENS = [1, 128]
+# 1 is decode and 128 is prefill; the runtime picks its MoE strategy on token count
+# (hipdnn_ep_qmoe_fused_max_tokens): 2..8 run the fused decode kernels as one burst
+# over all token*k slots, 9 and up take the grouped path. Speculative verify widths
+# live in the first band.
+SEQ_LENS = [1, 2, 5, 8, 9, 128]
+FUSED_MAX_TOKENS = int(os.environ.get("HIPDNN_EP_QMOE_FUSED_MAX_TOKENS", "8"))
 HIDDEN = 2880
 INTERMEDIATE = 5760
 NUM_EXPERTS = 32
 TOP_K = 4
 BLOCK_SIZE = 32
 EXPERT_WEIGHT_BITS = 4
+
+
+def _compare_gpt_oss_shape(actual, expected, seq_len):
+    """The fused decode kernels quantize activations to int8 per 32-element
+    group by default (W4A8, HIPDNN_EP_MATMUL_DP4A), an error that scales with
+    the output (|output| reaches ~100 at these shapes). Fused token counts are
+    bounded at 2% of the largest |output| with a tighter cosine instead of the
+    grouped path's fixed atol.
+    """
+    if seq_len <= FUSED_MAX_TOKENS:
+        scale = float(np.abs(expected[0].astype(np.float32)).max())
+        compare_outputs(
+            actual, expected, atol=2e-2 * scale, rtol=1e-2, cos_threshold=0.9999
+        )
+    else:
+        compare_outputs(actual, expected, atol=1e-1, rtol=1e-2, cos_threshold=0.99)
 
 
 def _make_qmoe_model(
@@ -54,19 +76,22 @@ def _make_qmoe_model(
     num_experts: int,
     top_k: int,
     block_size: int = 32,
+    expert_weight_bits: int = EXPERT_WEIGHT_BITS,
     gate_up_scale_range: tuple[float, float] = (0.001, 0.05),
     gate_up_bias_range: tuple[float, float] = (-1.0, 0.5),
     down_scale_range: tuple[float, float] = (0.001, 0.02),
     down_bias_range: tuple[float, float] = (-0.5, 0.5),
     seed: int = 42,
     with_mix_weights: bool = False,
+    with_zero_points: bool = False,
     normalize_routing_weights: int = 1,
+    swiglu_limit: float | None = 7.0,
 ):
     """Build a QMoE ONNX model with random quantized expert weights.
 
     Gate/up projection: hidden -> intermediate (per expert, fused).
     Down projection:    intermediate // 2 -> hidden (per expert).
-    Weights are 4-bit quantized (packed into uint8).
+    Weights are packed into uint8.
 
     Scale and bias ranges are tuneable to match real model distributions.
     Scales are always positive (matching the real GPT-OSS-20B pattern).
@@ -76,10 +101,11 @@ def _make_qmoe_model(
     experts and the mixing weights are gathered from it.
     """
     down_in = intermediate // 2
-    packed_gate_up = hidden // 2
-    packed_down = down_in // 2
-    gate_up_num_blocks = hidden // block_size
-    down_num_blocks = down_in // block_size
+    values_per_byte = 8 // expert_weight_bits
+    packed_gate_up = (hidden + values_per_byte - 1) // values_per_byte
+    packed_down = (down_in + values_per_byte - 1) // values_per_byte
+    gate_up_num_blocks = (hidden + block_size - 1) // block_size
+    down_num_blocks = (down_in + block_size - 1) // block_size
 
     x = helper.make_tensor_value_info(
         "input",
@@ -133,6 +159,20 @@ def _make_qmoe_model(
         [num_experts, hidden],
     ).astype(np.float16)
 
+    def make_zero_points(shape: tuple[int, int, int]) -> np.ndarray:
+        values_per_byte = 8 // expert_weight_bits
+        values = rng.integers(0, 1 << expert_weight_bits, shape, dtype=np.uint8)
+        packed_shape = (
+            *shape[:-1],
+            (shape[-1] + values_per_byte - 1) // values_per_byte,
+        )
+        packed = np.zeros(packed_shape, dtype=np.uint8)
+        for i in range(shape[-1]):
+            packed[..., i // values_per_byte] |= values[..., i] << (
+                (i % values_per_byte) * expert_weight_bits
+            )
+        return packed
+
     initializers = [
         numpy_helper.from_array(gate_up_qw, name="gate_up_qweight"),
         numpy_helper.from_array(gate_up_scales, name="gate_up_scales"),
@@ -141,6 +181,17 @@ def _make_qmoe_model(
         numpy_helper.from_array(down_scales, name="down_scales"),
         numpy_helper.from_array(down_bias, name="down_bias"),
     ]
+    if with_zero_points:
+        initializers += [
+            numpy_helper.from_array(
+                make_zero_points((num_experts, intermediate, gate_up_num_blocks)),
+                name="gate_up_zero_points",
+            ),
+            numpy_helper.from_array(
+                make_zero_points((num_experts, hidden, down_num_blocks)),
+                name="down_zero_points",
+            ),
+        ]
 
     node_inputs = [
         "input",
@@ -155,10 +206,14 @@ def _make_qmoe_model(
         "",
         "",
     ]
+    node_inputs += [
+        "gate_up_zero_points" if with_zero_points else "",
+        "down_zero_points" if with_zero_points else "",
+        "",
+    ]
     graph_inputs = [x, router]
     if with_mix_weights:
-        # fc1/fc2/fc3 zero points (inputs 11-13) stay absent.
-        node_inputs += ["", "", "", "mix_weights"]
+        node_inputs.append("mix_weights")
         graph_inputs.append(
             helper.make_tensor_value_info(
                 "mix_weights",
@@ -167,21 +222,25 @@ def _make_qmoe_model(
             )
         )
 
+    attributes = {
+        "activation_type": "swiglu",
+        "activation_alpha": 1.702,
+        "activation_beta": 1.0,
+        "expert_weight_bits": expert_weight_bits,
+        "k": top_k,
+        "normalize_routing_weights": normalize_routing_weights,
+        "swiglu_fusion": 1,
+        "use_sparse_mixer": 0,
+        "block_size": block_size,
+    }
+    if swiglu_limit is not None:
+        attributes["swiglu_limit"] = swiglu_limit
     node = helper.make_node(
         "QMoE",
         node_inputs,
         ["output"],
         domain="com.microsoft",
-        activation_type="swiglu",
-        activation_alpha=1.702,
-        activation_beta=1.0,
-        expert_weight_bits=4,
-        k=top_k,
-        normalize_routing_weights=normalize_routing_weights,
-        swiglu_fusion=1,
-        use_sparse_mixer=0,
-        block_size=block_size,
-        swiglu_limit=7.0,
+        **attributes,
     )
 
     ms_opset = helper.make_opsetid("com.microsoft", 1)
@@ -196,6 +255,60 @@ def _make_qmoe_model(
 
 
 class TestQMoE:
+    @pytest.mark.parametrize("seq_len", [1, 8])
+    @pytest.mark.parametrize("with_zero_points", [False, True])
+    @pytest.mark.parametrize("swiglu_limit", [7.0, None])
+    def test_two_bit(self, model_runner, seq_len, with_zero_points, swiglu_limit):
+        hidden = 64
+        intermediate = 128
+        num_experts = 4
+        top_k = 2
+        model = _make_qmoe_model(
+            1,
+            seq_len,
+            hidden,
+            intermediate,
+            num_experts,
+            top_k,
+            block_size=32,
+            expert_weight_bits=2,
+            with_zero_points=with_zero_points,
+            swiglu_limit=swiglu_limit,
+        )
+
+        rng = np.random.default_rng(17)
+        x = rng.uniform(-1, 1, [1, seq_len, hidden]).astype(np.float16)
+        router = rng.standard_normal([seq_len, num_experts]).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x, router])
+        compare_outputs(actual, expected, atol=1e-1, rtol=2e-2, cos_threshold=0.99)
+
+    @pytest.mark.parametrize("seq_len", [1, 8])
+    @pytest.mark.parametrize("expert_weight_bits", [2, 4])
+    def test_partial_quantization_block(
+        self, model_runner, seq_len, expert_weight_bits
+    ):
+        hidden = 96
+        intermediate = 192
+        num_experts = 4
+        model = _make_qmoe_model(
+            1,
+            seq_len,
+            hidden,
+            intermediate,
+            num_experts,
+            top_k=2,
+            block_size=64,
+            expert_weight_bits=expert_weight_bits,
+        )
+
+        rng = np.random.default_rng(23)
+        x = rng.uniform(-1, 1, [1, seq_len, hidden]).astype(np.float16)
+        router = rng.standard_normal([seq_len, num_experts]).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x, router])
+        compare_outputs(actual, expected, atol=1e-1, rtol=2e-2, cos_threshold=0.99)
+
     @pytest.mark.parametrize(
         "seq_len,hidden,intermediate,num_experts,top_k",
         [
@@ -225,6 +338,28 @@ class TestQMoE:
         rng = np.random.default_rng(99)
         x = rng.uniform(-1, 1, [1, seq_len, hidden]).astype(np.float16)
         router = rng.standard_normal([seq_len, num_experts]).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x, router])
+        compare_outputs(actual, expected, atol=5e-2, rtol=1e-2, cos_threshold=0.999)
+
+    @pytest.mark.parametrize("seq_len", [1, 37])
+    @pytest.mark.parametrize("top_k", [4, 8])
+    @pytest.mark.parametrize("num_experts", [64, 128, 256])
+    def test_qmoe_many_experts(self, model_runner, num_experts, top_k, seq_len):
+        """Expert counts of gpt-oss-120b (128) and Qwen3.5-35B-A3B (256) and
+        between, at small hidden/intermediate sizes. Routing holds 2, 4 or 8
+        experts per wave lane for these counts; seq_len=1 is the fused decode
+        path, 37 the prefill path.
+        """
+        model = _make_qmoe_model(1, seq_len, 64, 128, num_experts, top_k)
+
+        rng = np.random.default_rng(7)
+        x = rng.uniform(-1, 1, [1, seq_len, 64]).astype(np.float16)
+        # Each token's logits are a shuffle of distinct fp16 values: a tie at
+        # the k-th logit would make the expert choice backend-defined.
+        levels = np.linspace(-4.0, 4.0, num_experts).astype(np.float16)
+        assert len(np.unique(levels)) == num_experts
+        router = rng.permuted(np.tile(levels, (seq_len, 1)), axis=1)
 
         actual, expected = model_runner.run_sample(model, [x, router])
         compare_outputs(actual, expected, atol=5e-2, rtol=1e-2, cos_threshold=0.999)
@@ -259,7 +394,7 @@ class TestQMoE:
         )
 
         actual, expected = model_runner.run_sample(model, [x, router])
-        compare_outputs(actual, expected, atol=1e-1, rtol=1e-2, cos_threshold=0.99)
+        _compare_gpt_oss_shape(actual, expected, seq_len)
 
     @pytest.mark.parametrize("seq_len", [2, 37, 512])
     def test_qmoe_gpt_oss_shape_skewed_routing(self, model_runner, seq_len):
@@ -290,7 +425,7 @@ class TestQMoE:
         assert not (ranked[:, TOP_K - 1] == ranked[:, TOP_K]).any()
 
         actual, expected = model_runner.run_sample(model, [x, router])
-        compare_outputs(actual, expected, atol=1e-1, rtol=1e-2, cos_threshold=0.99)
+        _compare_gpt_oss_shape(actual, expected, seq_len)
 
     @pytest.mark.parametrize("normalize", [0, 1])
     @pytest.mark.parametrize(

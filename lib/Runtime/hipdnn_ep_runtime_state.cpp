@@ -9,6 +9,7 @@
 #include "hipdnn_ep_runtime.h"
 #include "op_profile.h"
 #include "runtime_state_internal.h"
+#include "transient_arena.h"
 
 #if defined(HIPDNN_EP_REAL_RUNTIME)
 #include "gqa_autotune.h"
@@ -22,6 +23,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -86,6 +88,147 @@ void *map_file_readonly(const char *path, size_t *out_size) {
 #endif
 }
 
+// Session transient arena: one device allocation made right after the
+// constants blob, before the host application allocates its own long-lived
+// buffers (e.g. a KV cache). Pools, workspace and op scratch first grow on the
+// first inference; serving them from the arena keeps their placement
+// independent of what was allocated in between. Requests that do not fit fall
+// back to hipMalloc. See docs/design/pool-allocs-memory-planning.md.
+//
+// Sizing: provider option transient_arena_mb, else
+// HIPDNN_EP_TRANSIENT_ARENA_MB, else kDefaultArenaMiB for sessions with at
+// least kArenaMinConstantsMiB of constants (small models reserve nothing). The
+// default covers the first-inference transients of a chunked-prefill MoE
+// decoder session; larger demands spill to hipMalloc.
+constexpr size_t kDefaultArenaMiB = 128;
+constexpr size_t kArenaMinConstantsMiB = 256;
+constexpr size_t kMaxArenaMiB = 4096;
+constexpr double kMiB = 1024.0 * 1024.0;
+
+struct TransientArena {
+  char *base = nullptr;
+  hipdnn_ep::TransientArenaAllocator blocks;
+  std::unordered_map<void *, size_t> direct_live; // fallback ptr -> bytes
+  size_t live = 0, live_hwm = 0;                  // arena + fallback
+
+  void track(const RuntimeState *state, size_t bytes, bool in_arena) {
+    live += bytes;
+    live_hwm = std::max(live_hwm, live);
+    RUNTIME_DEBUG_LOG("[ARENA] alloc state=%p bytes=%zu %s arena_used_mb=%.1f "
+                      "live_mb=%.1f hwm_mb=%.1f\n",
+                      static_cast<const void *>(state), bytes,
+                      in_arena ? "arena" : "fallback", blocks.used() / kMiB,
+                      live / kMiB, live_hwm / kMiB);
+  }
+};
+
+// Returns the arena size in MiB; malformed values keep the default.
+size_t transient_arena_mib(RuntimeState *state, size_t constants_bytes) {
+  const char *v =
+      hipdnn_ep_runtime_get_provider_option(state, "transient_arena_mb");
+  const char *source = "provider option transient_arena_mb";
+  if (!v || !v[0]) {
+    v = getenv("HIPDNN_EP_TRANSIENT_ARENA_MB");
+    source = "HIPDNN_EP_TRANSIENT_ARENA_MB";
+  }
+  const size_t fallback =
+      constants_bytes >= (kArenaMinConstantsMiB << 20) ? kDefaultArenaMiB : 0;
+  if (!v || !v[0])
+    return fallback;
+  char *end = nullptr;
+  const unsigned long long mib = strtoull(v, &end, 10);
+  if (end == v || *end != '\0') {
+    fprintf(stderr, "[ARENA] ignoring malformed %s='%s'\n", source, v);
+    return fallback;
+  }
+  return std::min<size_t>(static_cast<size_t>(mib), kMaxArenaMiB);
+}
+
+void create_transient_arena(RuntimeState *state, size_t constants_bytes) {
+  if (state->transient_arena)
+    return;
+  const size_t bytes = transient_arena_mib(state, constants_bytes) << 20;
+  if (bytes == 0)
+    return;
+  void *p = nullptr;
+  if (hipMalloc(&p, bytes) != hipSuccess) {
+    (void)hipGetLastError();
+    fprintf(stderr,
+            "[ARENA] hipMalloc(%zu) for the transient arena failed; "
+            "transient buffers use hipMalloc\n",
+            bytes);
+    return;
+  }
+  auto *a = new TransientArena();
+  a->base = static_cast<char *>(p);
+  a->blocks.init(bytes);
+  state->transient_arena = a;
+  RUNTIME_DEBUG_LOG("[ARENA] create state=%p base=%p bytes=%zu\n",
+                    static_cast<void *>(state), p, bytes);
+}
+
+void destroy_transient_arena(RuntimeState *state) {
+  auto *a = static_cast<TransientArena *>(state->transient_arena);
+  if (!a)
+    return;
+  RUNTIME_DEBUG_LOG("[ARENA] state=%p arena_mb=%.1f arena_hwm_mb=%.1f "
+                    "transient_hwm_mb=%.1f hits=%zu misses=%zu miss_mb=%.1f\n",
+                    static_cast<void *>(state), a->blocks.size() / kMiB,
+                    a->blocks.highWaterMark() / kMiB, a->live_hwm / kMiB,
+                    a->blocks.hits(), a->blocks.misses(),
+                    a->blocks.missBytes() / kMiB);
+  HIP_CLEANUP(hipFree(a->base));
+  delete a;
+  state->transient_arena = nullptr;
+}
+} // namespace
+
+hipError_t hipdnn_ep_state_device_alloc(RuntimeState *state, void **ptr,
+                                        size_t size) {
+  auto *a =
+      state ? static_cast<TransientArena *>(state->transient_arena) : nullptr;
+  if (!a)
+    return hipMalloc(ptr, size);
+  if (std::optional<size_t> offset = a->blocks.allocate(size)) {
+    *ptr = a->base + *offset;
+    a->track(state, a->blocks.blockBytes(*offset), true);
+    return hipSuccess;
+  }
+  const hipError_t err = hipMalloc(ptr, size);
+  if (err == hipSuccess) {
+    a->direct_live[*ptr] = size;
+    a->track(state, size, false);
+  }
+  return err;
+}
+
+hipError_t hipdnn_ep_state_device_free(RuntimeState *state, void *ptr) {
+  if (!ptr)
+    return hipSuccess;
+  auto *a =
+      state ? static_cast<TransientArena *>(state->transient_arena) : nullptr;
+  if (!a)
+    return hipFree(ptr);
+  char *p = static_cast<char *>(ptr);
+  if (p < a->base || p >= a->base + a->blocks.size()) {
+    auto d = a->direct_live.find(ptr);
+    if (d != a->direct_live.end()) {
+      a->live -= d->second;
+      a->direct_live.erase(d);
+    }
+    return hipFree(ptr);
+  }
+  // hipFree synchronizes the device; returning a block must too, or the next
+  // allocation could hand the region to new work while kernels still use it.
+  const hipError_t err = hipDeviceSynchronize();
+  const size_t offset = static_cast<size_t>(p - a->base);
+  a->live -= a->blocks.blockBytes(offset);
+  if (!a->blocks.release(offset))
+    fprintf(stderr, "[ARENA] free of %p: not a live arena block\n", ptr);
+  return err;
+}
+
+namespace {
 void unmap_file(void *view, size_t size) {
 #ifdef _WIN32
   (void)size;
@@ -264,6 +407,7 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
 #endif
 
   if (!metadata_blob || blob_size == 0) {
+    create_transient_arena(*out_state, 0);
     TIMING_LOG("[Session] hipdnn_ep_state_init_with_fs total: %.3fs (no "
                "constants)\n",
                elapsed_since(t0));
@@ -274,6 +418,7 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   auto *constants = meta->constants();
   int64_t count = constants ? (int64_t)constants->size() : 0;
   if (count <= 0) {
+    create_transient_arena(*out_state, 0);
     TIMING_LOG("[Session] hipdnn_ep_state_init_with_fs total: %.3fs (no "
                "constants)\n",
                elapsed_since(t0));
@@ -332,6 +477,9 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   RUNTIME_DEBUG_LOG("[CONSTANTS] Loaded constants blob: %zu bytes\n",
                     total_size);
 
+  // After the constants blob, so the weights keep their placement priority.
+  create_transient_arena(*out_state, total_size);
+
   TIMING_LOG("[Session] hipdnn_ep_state_init_with_fs total: %.3fs\n",
              elapsed_since(t0));
   return 0;
@@ -375,6 +523,7 @@ static int initialize_state_handles(RuntimeState **out_state) {
   // and hipdnn_ep_alloc_output then forwards each graph-output request to it.
   state->output_allocator.self = nullptr;
   state->output_allocator.allocate = nullptr;
+  state->transient_arena = nullptr;
   state->qmoe_scratch = nullptr;
   state->qmoe_scratch_size = 0;
   state->qmoe_host_scratch = nullptr;
@@ -964,12 +1113,12 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
 
   // Free shared workspace (if allocated)
   if (state->workspace) {
-    HIP_CLEANUP(hipFree(state->workspace));
+    HIP_CLEANUP(hipdnn_ep_state_device_free(state, state->workspace));
   }
 
   // Free qmoe device scratch + pinned host mirror (if allocated)
   if (state->qmoe_scratch) {
-    HIP_CLEANUP(hipFree(state->qmoe_scratch));
+    HIP_CLEANUP(hipdnn_ep_state_device_free(state, state->qmoe_scratch));
   }
   if (state->qmoe_host_scratch) {
     HIP_CLEANUP(hipHostFree(state->qmoe_host_scratch));
@@ -977,7 +1126,7 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
 
   // Free com.amd qmoe device scratch + pinned host mirror (if allocated)
   if (state->qmoe_amd_scratch) {
-    HIP_CLEANUP(hipFree(state->qmoe_amd_scratch));
+    HIP_CLEANUP(hipdnn_ep_state_device_free(state, state->qmoe_amd_scratch));
   }
   if (state->qmoe_amd_host_scratch) {
     HIP_CLEANUP(hipHostFree(state->qmoe_amd_host_scratch));
@@ -986,31 +1135,33 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   // Free the convolution workspace pool (if allocated). The stream
   // sync above has drained any in-flight conv that may still be reading it.
   if (state->conv_scratch) {
-    HIP_CLEANUP(hipFree(state->conv_scratch));
+    HIP_CLEANUP(hipdnn_ep_state_device_free(state, state->conv_scratch));
   }
 
   // Free the QDQ LpNormalization intermediates and scalar parameters.
   if (state->qlpnormalization_scratch) {
-    HIP_CLEANUP(hipFree(state->qlpnormalization_scratch));
+    HIP_CLEANUP(
+        hipdnn_ep_state_device_free(state, state->qlpnormalization_scratch));
   }
 
   if (state->qsigmoid_scratch) {
-    HIP_CLEANUP(hipFree(state->qsigmoid_scratch));
+    HIP_CLEANUP(hipdnn_ep_state_device_free(state, state->qsigmoid_scratch));
   }
 
   // Free the W4A8 dp4a matmul_nbits scratch (if allocated).
   if (state->matmul_dp4a_scratch) {
-    HIP_CLEANUP(hipFree(state->matmul_dp4a_scratch));
+    HIP_CLEANUP(hipdnn_ep_state_device_free(state, state->matmul_dp4a_scratch));
   }
 
   // Free the linear-attention chunk-parallel prefill scratch (if allocated).
   // The stream sync above has drained any in-flight prefill still reading it.
   if (state->la_scratch) {
-    HIP_CLEANUP(hipFree(state->la_scratch));
+    HIP_CLEANUP(hipdnn_ep_state_device_free(state, state->la_scratch));
   }
 
   if (state->gqa_fp32_adapter_scratch) {
-    HIP_CLEANUP(hipFree(state->gqa_fp32_adapter_scratch));
+    HIP_CLEANUP(
+        hipdnn_ep_state_device_free(state, state->gqa_fp32_adapter_scratch));
   }
 
   // Tear down per-op state slots. Each entry's deletor destroys its concrete
@@ -1058,7 +1209,7 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   if (state->pool_base) {
     for (int i = 0; i < state->num_pool_domains; ++i) {
       if (state->pool_base[i]) {
-        HIP_CLEANUP(hipFree(state->pool_base[i]));
+        HIP_CLEANUP(hipdnn_ep_state_device_free(state, state->pool_base[i]));
       }
     }
     free(state->pool_base);
@@ -1072,6 +1223,8 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   if (state->buffer_offsets) {
     free(state->buffer_offsets);
   }
+
+  destroy_transient_arena(state);
 
   // Free the single constants blob and the pointer array.
   if (state->gpu_constants_blob) {
@@ -1381,7 +1534,8 @@ int hipdnn_ep_pool_init(RuntimeState *state, size_t pool_size,
   // time. Multi-domain functions leave domains 1..N empty here; those are grown
   // on first hip.get_pool call (lazy init).
   if (pool_size > 0) {
-    if (hipMalloc(&state->pool_base[0], pool_size) != hipSuccess) {
+    if (hipdnn_ep_state_device_alloc(state, &state->pool_base[0], pool_size) !=
+        hipSuccess) {
       fprintf(stderr, "Failed to allocate memory pool of size %zu bytes\n",
               pool_size);
       return 2; // Pool allocation failed
@@ -1400,7 +1554,7 @@ int hipdnn_ep_pool_init(RuntimeState *state, size_t pool_size,
     if (!state->buffer_offsets) {
       fprintf(stderr, "Failed to allocate buffer offsets array\n");
       if (state->pool_base[0]) {
-        HIP_CLEANUP(hipFree(state->pool_base[0]));
+        HIP_CLEANUP(hipdnn_ep_state_device_free(state, state->pool_base[0]));
         state->pool_base[0] = nullptr;
       }
       return 1; // Allocation failed
@@ -1484,10 +1638,12 @@ void *hipdnn_ep_get_pool_base(RuntimeState *state, int domain_id,
           "hipdnn_ep_get_pool_base: growing pool[%d] %zu -> %zu bytes "
           "(rare; first time this large input shape was seen)\n",
           domain_id, state->pool_size[domain_id], needed_size);
-      HIP_CLEANUP(hipFree(state->pool_base[domain_id]));
+      HIP_CLEANUP(
+          hipdnn_ep_state_device_free(state, state->pool_base[domain_id]));
     }
     void *new_base = nullptr;
-    if (hipMalloc(&new_base, needed_size) != hipSuccess) {
+    if (hipdnn_ep_state_device_alloc(state, &new_base, needed_size) !=
+        hipSuccess) {
       fprintf(stderr,
               "hipdnn_ep_get_pool_base: hipMalloc failed for pool[%d] grow "
               "(%zu -> %zu bytes)\n",
@@ -1587,12 +1743,13 @@ int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size) {
     if (state->stream) {
       HIP_CLEANUP(hipStreamSynchronize(state->stream));
     }
-    HIP_CLEANUP(hipFree(state->workspace));
+    HIP_CLEANUP(hipdnn_ep_state_device_free(state, state->workspace));
     state->workspace = nullptr;
     state->workspace_size = 0;
   }
 
-  if (hipMalloc(&state->workspace, alloc_size) != hipSuccess) {
+  if (hipdnn_ep_state_device_alloc(state, &state->workspace, alloc_size) !=
+      hipSuccess) {
     fprintf(
         stderr,
         "hipdnn_ep_state_ensure_workspace: hipMalloc failed for %zu bytes\n",
@@ -1648,12 +1805,13 @@ int hipdnn_ep_state_ensure_qmoe_scratch(RuntimeState *state,
     if (state->stream) {
       HIP_CLEANUP(hipStreamSynchronize(state->stream));
     }
-    HIP_CLEANUP(hipFree(state->qmoe_scratch));
+    HIP_CLEANUP(hipdnn_ep_state_device_free(state, state->qmoe_scratch));
     state->qmoe_scratch = nullptr;
     state->qmoe_scratch_size = 0;
   }
 
-  if (hipMalloc(&state->qmoe_scratch, alloc_size) != hipSuccess) {
+  if (hipdnn_ep_state_device_alloc(state, &state->qmoe_scratch, alloc_size) !=
+      hipSuccess) {
     fprintf(stderr,
             "hipdnn_ep_state_ensure_qmoe_scratch: hipMalloc failed for %zu "
             "bytes\n",
@@ -1743,12 +1901,13 @@ int hipdnn_ep_state_ensure_qmoe_amd_scratch(RuntimeState *state,
     if (state->stream) {
       HIP_CLEANUP(hipStreamSynchronize(state->stream));
     }
-    HIP_CLEANUP(hipFree(state->qmoe_amd_scratch));
+    HIP_CLEANUP(hipdnn_ep_state_device_free(state, state->qmoe_amd_scratch));
     state->qmoe_amd_scratch = nullptr;
     state->qmoe_amd_scratch_size = 0;
   }
 
-  if (hipMalloc(&state->qmoe_amd_scratch, alloc_size) != hipSuccess) {
+  if (hipdnn_ep_state_device_alloc(state, &state->qmoe_amd_scratch,
+                                   alloc_size) != hipSuccess) {
     fprintf(stderr,
             "hipdnn_ep_state_ensure_qmoe_amd_scratch: hipMalloc failed for "
             "%zu bytes\n",
@@ -1833,12 +1992,13 @@ int hipdnn_ep_state_ensure_conv_scratch(RuntimeState *state,
     if (state->stream) {
       hipStreamSynchronize(state->stream);
     }
-    HIP_CLEANUP(hipFree(state->conv_scratch));
+    HIP_CLEANUP(hipdnn_ep_state_device_free(state, state->conv_scratch));
     state->conv_scratch = nullptr;
     state->conv_scratch_size = 0;
   }
 
-  if (hipMalloc(&state->conv_scratch, alloc_size) != hipSuccess) {
+  if (hipdnn_ep_state_device_alloc(state, &state->conv_scratch, alloc_size) !=
+      hipSuccess) {
     fprintf(stderr,
             "hipdnn_ep_state_ensure_conv_scratch: hipMalloc failed for %zu "
             "bytes\n",
@@ -1874,12 +2034,14 @@ int hipdnn_ep_state_ensure_qlpnormalization_scratch(RuntimeState *state,
     if (state->stream) {
       HIP_CLEANUP(hipStreamSynchronize(state->stream));
     }
-    HIP_CLEANUP(hipFree(state->qlpnormalization_scratch));
+    HIP_CLEANUP(
+        hipdnn_ep_state_device_free(state, state->qlpnormalization_scratch));
     state->qlpnormalization_scratch = nullptr;
     state->qlpnormalization_scratch_size = 0;
   }
 
-  if (hipMalloc(&state->qlpnormalization_scratch, alloc_size) != hipSuccess) {
+  if (hipdnn_ep_state_device_alloc(state, &state->qlpnormalization_scratch,
+                                   alloc_size) != hipSuccess) {
     fprintf(stderr,
             "hipdnn_ep_state_ensure_qlpnormalization_scratch: hipMalloc "
             "failed for %zu bytes\n",
@@ -1915,12 +2077,13 @@ int hipdnn_ep_state_ensure_qsigmoid_scratch(RuntimeState *state,
     if (state->stream) {
       hipStreamSynchronize(state->stream);
     }
-    HIP_CLEANUP(hipFree(state->qsigmoid_scratch));
+    HIP_CLEANUP(hipdnn_ep_state_device_free(state, state->qsigmoid_scratch));
     state->qsigmoid_scratch = nullptr;
     state->qsigmoid_scratch_size = 0;
   }
 
-  if (hipMalloc(&state->qsigmoid_scratch, alloc_size) != hipSuccess) {
+  if (hipdnn_ep_state_device_alloc(state, &state->qsigmoid_scratch,
+                                   alloc_size) != hipSuccess) {
     fprintf(stderr,
             "hipdnn_ep_state_ensure_qsigmoid_scratch: hipMalloc failed for "
             "%zu bytes\n",
@@ -1959,12 +2122,13 @@ int hipdnn_ep_state_ensure_matmul_dp4a_scratch(RuntimeState *state,
     if (state->stream) {
       hipStreamSynchronize(state->stream);
     }
-    HIP_CLEANUP(hipFree(state->matmul_dp4a_scratch));
+    HIP_CLEANUP(hipdnn_ep_state_device_free(state, state->matmul_dp4a_scratch));
     state->matmul_dp4a_scratch = nullptr;
     state->matmul_dp4a_scratch_size = 0;
   }
 
-  if (hipMalloc(&state->matmul_dp4a_scratch, alloc_size) != hipSuccess) {
+  if (hipdnn_ep_state_device_alloc(state, &state->matmul_dp4a_scratch,
+                                   alloc_size) != hipSuccess) {
     fprintf(stderr,
             "hipdnn_ep_state_ensure_matmul_dp4a_scratch: hipMalloc failed for "
             "%zu bytes\n",
@@ -2008,12 +2172,13 @@ int hipdnn_ep_state_ensure_la_scratch(RuntimeState *state, size_t needed_size) {
     if (state->stream) {
       hipStreamSynchronize(state->stream);
     }
-    HIP_CLEANUP(hipFree(state->la_scratch));
+    HIP_CLEANUP(hipdnn_ep_state_device_free(state, state->la_scratch));
     state->la_scratch = nullptr;
     state->la_scratch_size = 0;
   }
 
-  if (hipMalloc(&state->la_scratch, alloc_size) != hipSuccess) {
+  if (hipdnn_ep_state_device_alloc(state, &state->la_scratch, alloc_size) !=
+      hipSuccess) {
     fprintf(stderr,
             "hipdnn_ep_state_ensure_la_scratch: hipMalloc failed for %zu "
             "bytes\n",

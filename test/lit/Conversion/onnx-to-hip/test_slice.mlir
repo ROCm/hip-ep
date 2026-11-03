@@ -392,4 +392,60 @@ module {
 
     return %r : tensor<0xi64>
   }
+
+  // Test 17: keep the last Shape(ids)[1] positions of the mask,
+  // Slice(attn, -Shape(ids)[1], INT64_MAX). At decode that is 1 of
+  // Shape(attn)[1] columns.
+  func.func @test_slice_native_neg_shape_start(
+      %attn: tensor<?x?xi64>, %ids: tensor<?x?xi64>) -> tensor<?x?xi64> {
+    // CHECK-LABEL: func.func @test_slice_native_neg_shape_start
+    %axes = arith.constant dense<[1]> : tensor<1xi64>
+    %ends = arith.constant dense<9223372036854775807> : tensor<1xi64>
+    %ids_len = "onnx.Shape"(%ids) {start = 1 : si64, end = 2 : si64}
+        : (tensor<?x?xi64>) -> tensor<1xi64>
+    %starts = "onnx.Neg"(%ids_len) : (tensor<1xi64>) -> tensor<1xi64>
+    %r = "onnx.Slice"(%attn, %starts, %ends, %axes)
+        : (tensor<?x?xi64>, tensor<1xi64>, tensor<1xi64>,
+           tensor<1xi64>) -> tensor<?x?xi64>
+
+    // CHECK: %[[D0:.*]] = tensor.dim %arg1, %{{.*}} : tensor<?x?xi64>
+    // CHECK: %[[D1:.*]] = tensor.dim %arg1, %{{.*}} : tensor<?x?xi64>
+    // CHECK: %[[IDS:.*]] = tensor.dim %arg2, %{{.*}} : tensor<?x?xi64>
+    // CHECK: %[[NEG:.*]] = arith.subi %{{.*}}, %[[IDS]] : index
+    // CHECK: arith.addi %[[NEG]], %[[D1]] : index
+    // CHECK: %[[CAP:.*]] = arith.select %{{.*}}, %[[D1]], %{{.*}} : index
+    // CHECK: tensor.empty(%[[D0]], %[[CAP]]) : tensor<?x?xi64>
+    // CHECK: hip.slice
+    return %r : tensor<?x?xi64>
+  }
+
+  // Test 18: test 17 in the post-conversion spelling (hip.neg over a
+  // from_elements of the packed dim).
+  func.func @test_slice_native_lowered_neg_shape_start(
+      %ctx: !hip.context, %attn: tensor<?x?xi64>, %ids: tensor<?x?xi64>)
+      -> tensor<?x?xi64> {
+    // CHECK-LABEL: func.func @test_slice_native_lowered_neg_shape_start
+    %c1 = arith.constant 1 : index
+    %axes = arith.constant dense<[1]> : tensor<1xi64>
+    %ends = arith.constant dense<9223372036854775807> : tensor<1xi64>
+    %ids_dim = tensor.dim %ids, %c1 : tensor<?x?xi64>
+    %ids_i64 = arith.index_cast %ids_dim : index to i64
+    %ids_len = tensor.from_elements %ids_i64 : tensor<1xi64>
+    %neg_init = tensor.empty() : tensor<1xi64>
+    %starts = hip.neg(%ctx) ins(%ids_len : tensor<1xi64>)
+        outs(%neg_init : tensor<1xi64>) : tensor<1xi64>
+    %r = "onnx.Slice"(%attn, %starts, %ends, %axes)
+        : (tensor<?x?xi64>, tensor<1xi64>, tensor<1xi64>,
+           tensor<1xi64>) -> tensor<?x?xi64>
+
+    // CHECK: %[[IDS:.*]] = tensor.dim %arg2, %{{.*}} : tensor<?x?xi64>
+    // CHECK: %[[D0:.*]] = tensor.dim %arg1, %{{.*}} : tensor<?x?xi64>
+    // CHECK: %[[D1:.*]] = tensor.dim %arg1, %{{.*}} : tensor<?x?xi64>
+    // CHECK: %[[NEG:.*]] = arith.subi %{{.*}}, %[[IDS]] : index
+    // CHECK: arith.addi %[[NEG]], %[[D1]] : index
+    // CHECK: %[[CAP:.*]] = arith.select %{{.*}}, %[[D1]], %{{.*}} : index
+    // CHECK: tensor.empty(%[[D0]], %[[CAP]]) : tensor<?x?xi64>
+    // CHECK: hip.slice
+    return %r : tensor<?x?xi64>
+  }
 }

@@ -25,11 +25,11 @@ namespace {
 //
 //   * mode in {"nearest", "linear"}                                  (no cubic)
 //   * coordinate_transformation_mode in
-//       {"half_pixel", "asymmetric", "align_corners"}
+//       {"half_pixel", "pytorch_half_pixel", "asymmetric", "align_corners"}
 //   * nearest_mode in {round_prefer_floor, round_prefer_ceil, floor, ceil}
 //   * antialias = 0, exclude_outside = 0             (defaults)
 //   * keep_aspect_ratio_policy = "stretch"           (default)
-//   * roi must be absent / NoValue                   (no tf_crop_and_resize)
+//   * roi must be absent: none, or a 0-element tensor (no tf_crop_and_resize)
 //   * rank in [3, 5], input and output ranks equal
 //   * matching float types, or matching int8/uint8 when mode is nearest.
 //     Nearest copies samples. Linear on integer codes is rejected.
@@ -45,6 +45,11 @@ namespace {
 // arith.constant, possibly behind a cast).  A copied prefix axis must have
 // scale 1 and copies `tensor.dim` when that dim is dynamic.  Any other
 // positive scale is floor(input_dim * scale) in f64, then index.
+//
+// The kernel samples with out_dim / in_dim. ONNX samples with the supplied
+// scale, which differs when floor rounds: [1,1,3] at scale 1.5 is length 4,
+// and 4/3 would map output 1 to 0.625 instead of 0.5. A constant `scales`
+// vector with any such axis is kept on hip.resize as `scales`.
 //
 // When `scales` is absent, operand `sizes` supplies the output extents.  A
 // compile-time constant vector is written into the result type.  A runtime
@@ -113,12 +118,35 @@ static mlir::Value unwrapCast(mlir::Value v) {
   return v;
 }
 
+/// Constant scales, read through float-to-float casts. Each cast rounds the
+/// values to its element type: [1, 1, 2.0001] cast through f16 is 2.
 static bool foldScales(mlir::Value scales, int64_t rank,
                        llvm::SmallVectorImpl<double> &out) {
   if (!scales || isAbsent(scales))
     return false;
-  mlir::DenseElementsAttr dense =
-      getCompileTimeConstantTensor(unwrapCast(scales));
+  llvm::SmallVector<mlir::FloatType, 4> castTypes;
+  mlir::Value source = scales;
+  for (int i = 0; i < 4; ++i) {
+    mlir::Operation *def = source.getDefiningOp();
+    if (!def)
+      break;
+    mlir::Value castInput;
+    if (def->getName().getStringRef() == "onnx.Cast")
+      castInput = def->getOperand(0);
+    else if (mlir::isa<mlir::hip::CastOp>(def))
+      castInput = def->getOperand(1);
+    else
+      break;
+    auto castType = mlir::dyn_cast<mlir::ShapedType>(source.getType());
+    auto castElem =
+        castType ? mlir::dyn_cast<mlir::FloatType>(castType.getElementType())
+                 : mlir::FloatType();
+    if (!castElem)
+      return false;
+    castTypes.push_back(castElem);
+    source = castInput;
+  }
+  mlir::DenseElementsAttr dense = getCompileTimeConstantTensor(source);
   if (!dense)
     return false;
   auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(dense.getType());
@@ -127,8 +155,14 @@ static bool foldScales(mlir::Value scales, int64_t rank,
       !mlir::isa<mlir::FloatType>(tensorType.getElementType()))
     return false;
   out.clear();
-  for (mlir::APFloat entry : dense.getValues<mlir::APFloat>())
+  for (mlir::APFloat entry : dense.getValues<mlir::APFloat>()) {
+    for (mlir::FloatType castElem : llvm::reverse(castTypes)) {
+      bool losesInfo = false;
+      entry.convert(castElem.getFloatSemantics(),
+                    llvm::APFloat::rmNearestTiesToEven, &losesInfo);
+    }
     out.push_back(entry.convertToDouble());
+  }
   return out.size() == static_cast<size_t>(rank);
 }
 
@@ -256,7 +290,7 @@ struct ResizeToHip : public mlir::RewritePattern {
 
     // ONNX Resize accepts (X, roi?, scales?, sizes?) — between 1 and 4
     // operands depending on what the exporter supplied.  We accept any
-    // count but require `roi` (operand 1) to be NoValue.
+    // count but require `roi` (operand 1) to be absent.
     auto operands = op->getOperands();
     if (operands.empty())
       return rewriter.notifyMatchFailure(op, "no input");
@@ -327,10 +361,15 @@ struct ResizeToHip : public mlir::RewritePattern {
       coordId = 1;
     else if (ct == "align_corners")
       coordId = 2;
+    else if (ct == "pytorch_half_pixel")
+      // Same map as half_pixel, except an output axis of length 1 samples
+      // input coordinate 0. The kernel applies that guard; the id stays
+      // distinct so a length-1 axis is not treated as half_pixel.
+      coordId = 3;
     else
       return rewriter.notifyMatchFailure(
           op, "Resize coordinate_transformation_mode must be one of "
-              "{half_pixel, asymmetric, align_corners}");
+              "{half_pixel, pytorch_half_pixel, asymmetric, align_corners}");
 
     std::string nm = getStrAttr("nearest_mode", "round_prefer_floor");
     int64_t nearestId;
@@ -369,6 +408,7 @@ struct ResizeToHip : public mlir::RewritePattern {
     auto modeAttr = rewriter.getI64IntegerAttr(modeId);
     auto coordAttr = rewriter.getI64IntegerAttr(coordId);
     auto nearestAttr = rewriter.getI64IntegerAttr(nearestId);
+    mlir::ArrayAttr scalesAttr;
 
     auto emitResize = [&](mlir::RankedTensorType resultType,
                           mlir::ValueRange dynSizes,
@@ -377,9 +417,9 @@ struct ResizeToHip : public mlir::RewritePattern {
       mlir::Value init =
           mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
                                         resultType.getElementType(), dynSizes);
-      auto hipOp =
-          mlir::hip::ResizeOp::create(rewriter, loc, resultType, context, input,
-                                      init, modeAttr, coordAttr, nearestAttr);
+      auto hipOp = mlir::hip::ResizeOp::create(
+          rewriter, loc, resultType, context, input, init, modeAttr, coordAttr,
+          nearestAttr, scalesAttr);
       if (stamped) {
         hipOp->setAttr("prefix_count",
                        rewriter.getI64IntegerAttr(stamped->prefixCount));
@@ -395,11 +435,33 @@ struct ResizeToHip : public mlir::RewritePattern {
     };
 
     // A static window already has its extents in the result type, so scales
-    // may be a runtime value.  The kernel recovers scale = in_dim / out_dim.
+    // may be a runtime value.  The kernel recovers scale = in_dim / out_dim,
+    // or uses the compile-time constant scales recorded below. A runtime
+    // scale is not readable here; static extents only come out of shape
+    // inference when the scales were constant.
     // A dynamic window extent is filled from a compile-time constant scale.
-    // This path is unchanged for every resize the type-only plan accepts.
     bool scalesPath = false;
     llvm::SmallVector<mlir::Value> dynSizes;
+    mlir::Value scales = operands.size() > 2 ? operands[2] : mlir::Value();
+    llvm::SmallVector<double> scaleVec;
+    bool scalesFolded = foldScales(scales, rank, scaleVec);
+
+    // ONNX samples with the supplied scale. Record it when the extent ratio
+    // the kernel would use differs; align_corners does not read the scale.
+    // Lowering plans the launch from the same scales.
+    if (launch && scalesFolded && coordId != 2 &&
+        llvm::all_of(scaleVec,
+                     [](double s) { return s > 0.0 && std::isfinite(s); }) &&
+        resizeScalesDifferFromExtents(inputType, outputType, scaleVec)) {
+      launch = planHipResizeLaunch(inputType, outputType,
+                                   /*hostExtents=*/false, scaleVec);
+      if (!launch)
+        return rewriter.notifyMatchFailure(
+            op, "Resize: a non-unit scale falls outside a trailing window of "
+                "at most 3 axes");
+      scalesAttr = rewriter.getF64ArrayAttr(scaleVec);
+    }
+
     if (launch) {
       bool windowDynamic = false;
       for (int64_t i : llvm::seq<int64_t>(launch->spatialRank))
@@ -413,9 +475,7 @@ struct ResizeToHip : public mlir::RewritePattern {
         }
         scalesPath = true;
       } else {
-        mlir::Value scales = operands.size() > 2 ? operands[2] : mlir::Value();
-        llvm::SmallVector<double> scaleVec;
-        if (foldScales(scales, rank, scaleVec)) {
+        if (scalesFolded) {
           for (int64_t axis : llvm::seq<int64_t>(launch->prefixCount)) {
             if (scaleVec[axis] != 1.0)
               return rewriter.notifyMatchFailure(

@@ -1308,15 +1308,32 @@ struct SplitToStdTensor : public mlir::RewritePattern {
         strides.push_back(rewriter.getIndexAttr(1));
       }
 
+      // An equal split of a static axis has a constant chunk size. Write
+      // that size into the extract_slice result when the declared axis is
+      // still dynamic, then cast back so users keep the original type.
+      mlir::RankedTensorType sliceType = outputType;
+      if (auto chunk = mlir::getConstantIntValue(actualSliceSize)) {
+        if (outputType.isDynamicDim(axis)) {
+          llvm::SmallVector<int64_t> refined(outputType.getShape());
+          refined[axis] = *chunk;
+          sliceType =
+              mlir::RankedTensorType::get(refined, outputType.getElementType());
+        }
+      }
+
       // Create extract_slice operation using OpBuilder
       // This will properly decompose OpFoldResults into static attrs and
       // dynamic operands
       mlir::OperationState state(
           loc, mlir::tensor::ExtractSliceOp::getOperationName());
-      mlir::tensor::ExtractSliceOp::build(rewriter, state, outputType, input,
+      mlir::tensor::ExtractSliceOp::build(rewriter, state, sliceType, input,
                                           offsets, sizes, strides);
       auto sliceOp = rewriter.create(state);
-      replacements.push_back(sliceOp->getResult(0));
+      mlir::Value result = sliceOp->getResult(0);
+      if (sliceType != outputType)
+        result =
+            mlir::tensor::CastOp::create(rewriter, loc, outputType, result);
+      replacements.push_back(result);
 
       // Update offset for next slice
       if (i < numOutputs - 1)

@@ -3,12 +3,16 @@
 # Licensed under the MIT License.
 #
 
-"""Tests for ONNX Upsample, lowered through hip.resize.
+"""Tests for ONNX Upsample and Resize, lowered through hip.resize.
 
 Upsample is Resize with asymmetric coordinates. Nearest sampling uses floor.
 output_dim = floor(input_dim * scale). Schema 9 passes scales as an input.
 Opset 7 and 8 store the same list as an attribute. The two Deeplab shapes
 are the linear nodes in ul_deeplabv3_fp16.
+
+Resize pytorch_half_pixel maps every output of a length-1 axis to input 0.
+Other lengths use half_pixel. When floor(input * scale) rounds, the
+coordinate transform must use the supplied scale, not output / input.
 """
 
 from __future__ import annotations
@@ -48,6 +52,63 @@ def _make_upsample_model(
     )
 
 
+def _make_resize_sizes_model(
+    shape: list[int], sizes: list[int], dtype: np.dtype, mode: str, coord: str
+):
+    x_info = helper.make_tensor_value_info("X", np_to_onnx_type(dtype), list(shape))
+    y_info = helper.make_tensor_value_info("Y", np_to_onnx_type(dtype), list(sizes))
+    sizes_init = helper.make_tensor("sizes", TensorProto.INT64, [len(sizes)], sizes)
+    node = helper.make_node(
+        "Resize",
+        ["X", "", "", "sizes"],
+        ["Y"],
+        mode=mode,
+        coordinate_transformation_mode=coord,
+    )
+    return make_model_from_nodes(
+        [node], [x_info], [y_info], initializers=[sizes_init], opset=13
+    )
+
+
+def _make_resize_scales_model(
+    shape: list[int],
+    scales: list[float],
+    dtype: np.dtype,
+    mode: str,
+    coord: str,
+    nearest_mode: str = "round_prefer_floor",
+    out_shape: list[int] | None = None,
+    cast_through: list[int] = (),
+):
+    if out_shape is None:
+        out_shape = [int(math.floor(dim * s)) for dim, s in zip(shape, scales)]
+    x_info = helper.make_tensor_value_info("X", np_to_onnx_type(dtype), list(shape))
+    y_info = helper.make_tensor_value_info("Y", np_to_onnx_type(dtype), out_shape)
+    scales_init = helper.make_tensor("scales", TensorProto.FLOAT, [len(scales)], scales)
+    # Each Cast rounds the scales to its element type before Resize reads them.
+    cast_types = list(cast_through)
+    if cast_types:
+        cast_types.append(TensorProto.FLOAT)
+    nodes = []
+    scales_name = "scales"
+    for i, to in enumerate(cast_types):
+        nodes.append(helper.make_node("Cast", [scales_name], [f"scales_{i}"], to=to))
+        scales_name = f"scales_{i}"
+    nodes.append(
+        helper.make_node(
+            "Resize",
+            ["X", "", scales_name],
+            ["Y"],
+            mode=mode,
+            coordinate_transformation_mode=coord,
+            nearest_mode=nearest_mode,
+        )
+    )
+    return make_model_from_nodes(
+        nodes, [x_info], [y_info], initializers=[scales_init], opset=13
+    )
+
+
 class TestUpsample:
     @pytest.mark.parametrize(
         "shape,scales,dtype",
@@ -82,3 +143,84 @@ class TestUpsample:
         x = rng.uniform(-2.0, 2.0, shape).astype(np.float32)
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=0)
+
+
+class TestResize:
+    @pytest.mark.parametrize(
+        "out_len,expected",
+        [
+            (1, [0.0]),
+            (2, [0.5, 2.5]),
+        ],
+    )
+    def test_pytorch_half_pixel_linear(self, model_runner, out_len, expected):
+        model = _make_resize_sizes_model(
+            [1, 1, 4], [1, 1, out_len], np.float32, "linear", "pytorch_half_pixel"
+        )
+        x = np.arange(4, dtype=np.float32).reshape(1, 1, 4)
+        actual, reference = model_runner.run_sample(model, [x])
+        compare_outputs(actual, reference, atol=1e-6)
+        np.testing.assert_allclose(
+            actual[0].reshape(-1), np.array(expected, np.float32), atol=1e-6
+        )
+
+    def test_scales_kept_when_floor_rounds(self, model_runner):
+        model = _make_resize_scales_model(
+            [1, 1, 3], [1.0, 1.0, 1.5], np.float32, "linear", "half_pixel"
+        )
+        x = np.arange(3, dtype=np.float32).reshape(1, 1, 3)
+        actual, reference = model_runner.run_sample(model, [x])
+        compare_outputs(actual, reference, atol=1e-5)
+        np.testing.assert_allclose(
+            actual[0].reshape(-1),
+            np.array([0.0, 0.5, 1.1666667, 1.8333334], np.float32),
+            atol=1e-5,
+        )
+
+    @pytest.mark.parametrize(
+        "shape,scales,mode,coord",
+        [
+            ([1, 3, 7, 9], [1.0, 1.0, 1.5, 2.3], "linear", "asymmetric"),
+            ([1, 3, 7, 9], [1.0, 1.0, 1.5, 2.3], "linear", "pytorch_half_pixel"),
+            ([1, 3, 7, 9], [1.0, 1.0, 1.5, 2.3], "nearest", "half_pixel"),
+            ([1, 3, 8, 8], [1.0, 1.0, 2.0, 2.0], "linear", "half_pixel"),
+        ],
+    )
+    def test_scales(self, model_runner, shape, scales, mode, coord):
+        model = _make_resize_scales_model(shape, scales, np.float32, mode, coord)
+        rng = np.random.default_rng(301)
+        x = rng.uniform(-1.0, 1.0, shape).astype(np.float32)
+        actual, reference = model_runner.run_sample(model, [x])
+        compare_outputs(actual, reference, atol=1e-4, rtol=1e-4)
+
+    def test_scales_unchanged_extent_is_resampled(self, model_runner):
+        # floor(3 * 1.1) = 3 keeps the H extent, but H is still resampled.
+        model = _make_resize_scales_model(
+            [1, 3, 3, 1],
+            [1.0, 1.1, 1.5, 1.0],
+            np.float32,
+            "nearest",
+            "pytorch_half_pixel",
+            nearest_mode="floor",
+        )
+        x = np.repeat(np.array([0.0, 10.0, 20.0], np.float32), 3).reshape(1, 3, 3, 1)
+        actual, reference = model_runner.run_sample(model, [x])
+        compare_outputs(actual, reference, atol=0)
+        np.testing.assert_array_equal(actual[0][0, :, 0, 0], [0.0, 0.0, 10.0])
+
+    def test_scales_rounded_by_cast(self, model_runner):
+        # 2.0001 through f16 is 2, so [0, 1, 2, 3] doubles exactly.
+        model = _make_resize_scales_model(
+            [1, 1, 4],
+            [1.0, 1.0, 2.0001],
+            np.float32,
+            "nearest",
+            "asymmetric",
+            nearest_mode="floor",
+            out_shape=[1, 1, 8],
+            cast_through=[TensorProto.FLOAT16],
+        )
+        x = np.arange(4, dtype=np.float32).reshape(1, 1, 4)
+        actual, reference = model_runner.run_sample(model, [x])
+        compare_outputs(actual, reference, atol=0)
+        np.testing.assert_array_equal(actual[0].reshape(-1), [0, 0, 1, 1, 2, 2, 3, 3])

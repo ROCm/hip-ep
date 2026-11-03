@@ -48,3 +48,53 @@ func.func @qadd(%ctx: !hip.context,
 
   return %q : tensor<1x128x32xi8>
 }
+
+// -----
+
+// The qadd kernel reads both operands at the result's element type, so a
+// uint16 activation plus an int8 constant stays an unfused dequantize, add,
+// quantize chain.
+
+// CHECK-LABEL: func.func @qadd_mixed_types
+// CHECK-NOT:     hip.qadd
+// CHECK:         hip.add
+// CHECK:         hip.quantize_linear
+func.func @qadd_mixed_types(%ctx: !hip.context,
+                            %lhs: tensor<1x128x32xui16>,
+                            %rhs: tensor<1x128x32xi8>) -> tensor<1x128x32xui16> {
+  %lhs_scale = hip.constant {value = dense<0.25> : tensor<f32>} : tensor<f32>
+  %lhs_zp = hip.constant {value = dense<32768> : tensor<ui16>} : tensor<ui16>
+  %rhs_scale = hip.constant {value = dense<0.5> : tensor<f32>} : tensor<f32>
+  %rhs_zp = hip.constant {value = dense<0> : tensor<i8>} : tensor<i8>
+  %out_scale = hip.constant {value = dense<0.125> : tensor<f32>} : tensor<f32>
+  %out_zp = hip.constant {value = dense<32768> : tensor<ui16>} : tensor<ui16>
+
+  %e0 = tensor.empty() : tensor<1x128x32xf32>
+  %dq_lhs = hip.dequantize_linear(%ctx)
+      ins(%lhs, %lhs_scale : tensor<1x128x32xui16>, tensor<f32>)
+      zero_point(%lhs_zp : tensor<ui16>)
+      outs(%e0 : tensor<1x128x32xf32>)
+      {axis = 1 : i64, block_size = 0 : i64} : tensor<1x128x32xf32>
+
+  %e1 = tensor.empty() : tensor<1x128x32xf32>
+  %dq_rhs = hip.dequantize_linear(%ctx)
+      ins(%rhs, %rhs_scale : tensor<1x128x32xi8>, tensor<f32>)
+      zero_point(%rhs_zp : tensor<i8>)
+      outs(%e1 : tensor<1x128x32xf32>)
+      {axis = 1 : i64, block_size = 0 : i64} : tensor<1x128x32xf32>
+
+  %e2 = tensor.empty() : tensor<1x128x32xf32>
+  %sum = hip.add(%ctx)
+      ins(%dq_lhs, %dq_rhs : tensor<1x128x32xf32>, tensor<1x128x32xf32>)
+      outs(%e2 : tensor<1x128x32xf32>) -> tensor<1x128x32xf32>
+
+  %e3 = tensor.empty() : tensor<1x128x32xui16>
+  %q = hip.quantize_linear(%ctx)
+      ins(%sum, %out_scale : tensor<1x128x32xf32>, tensor<f32>)
+      zero_point(%out_zp : tensor<ui16>)
+      outs(%e3 : tensor<1x128x32xui16>)
+      {axis = 1 : i64, block_size = 0 : i64, precision = 16 : i64,
+       saturate = 1 : i64} : tensor<1x128x32xui16>
+
+  return %q : tensor<1x128x32xui16>
+}

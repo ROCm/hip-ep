@@ -846,6 +846,14 @@ int wrap_hipblasLtMatmul(
     int64_t transA,         // 1 = swap A's last two dims before multiply
     int64_t transB);        // 1 = swap B's last two dims before multiply
 
+// Int32 matmul. hipBLASLt has no int32 GEMM, and feeding i32 bits to the f32
+// entry point reads them as floats. Neither operand is transposed. The kernel
+// accumulates in int64 and wraps to int32. b_batch_stride is 0 when B is one
+// matrix shared by every batch, and K*N when B holds one matrix per batch.
+int wrap_matmul_i32(RuntimeState *state, const void *A, const void *B,
+                    void *output, int64_t M, int64_t N, int64_t K,
+                    int64_t batch_count, int64_t b_batch_stride);
+
 // RocMLIR dispatch wrapper (hip.rocmlir). Launches a pre-compiled GPU kernel
 // embedded (as an ELF/HSACO blob) in `kernel_binary` at compile time. The
 // generated IR stages the operand data pointers (inputs first, then output)
@@ -904,6 +912,31 @@ int wrap_group_query_attention(
     // Sequence length of the key/value operands (seq_len_q for packed QKV).
     // 0 with a causal past cache means the call appends nothing and attends
     // over past_key/past_value only (a layer sharing another layer's cache).
+    int64_t seq_len_new_kv);
+
+// Compiler-selected entry for proven FP16 Ring candidates. Other shapes and
+// devices fall back to the original GQA implementation without changing its
+// ABI.
+int wrap_group_query_attention_ring_f16(
+    RuntimeState *state, int op_state_slot,
+    // Inputs 1-7 (core GQA)
+    void *query, void *key, void *value, void *past_key, void *past_value,
+    void *seqlens_k, void *total_seq_len,
+    // Inputs 8-10 (RoPE)
+    void *cos_cache, void *sin_cache, void *position_ids,
+    // Inputs 11-14 (advanced features)
+    void *attention_bias, void *head_sink, void *k_scale, void *v_scale,
+    // Outputs
+    void *output, void *present_key, void *present_value, void *output_qk,
+    // Attributes (13)
+    int64_t num_heads, int64_t kv_num_heads, float scale, int64_t do_rotary,
+    int64_t rotary_interleaved, float softcap, int64_t local_window_size,
+    int64_t smooth_softmax, int64_t qk_output, int64_t k_quant_type,
+    int64_t v_quant_type, int64_t kv_cache_bit_width, int32_t no_causal,
+    // Shape values (6)
+    int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
+    int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
+    int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
     int64_t seq_len_new_kv);
 
 // MultiHeadAttention operation wrapper (com.microsoft.MultiHeadAttention v1).
@@ -1418,9 +1451,10 @@ int wrap_pool(RuntimeState *state, void *input, void *output, void *indices,
 // Resize wrapper (uses custom HIP kernel).
 // Spatial-axis-only resize over (N, C, D_1[, D_2[, D_3]]) input; (N, C)
 // pass-through.  `mode` (0=nearest, 1=linear), `coord_transform`
-// (0=half_pixel, 1=asymmetric, 2=align_corners) and `nearest_mode`
-// (0=round_prefer_floor) are pre-resolved at compile time from the ONNX
-// string attributes.  data_type: HIPDNN_EP_DATATYPE_* (FLOAT, HALF,
+// (0=half_pixel, 1=asymmetric, 2=align_corners, 3=pytorch_half_pixel) and
+// `nearest_mode` (0=round_prefer_floor) are pre-resolved at compile time
+// from the ONNX string attributes.  data_type: HIPDNN_EP_DATATYPE_* (FLOAT,
+// HALF,
 // BFLOAT16, DOUBLE).
 
 int wrap_resize(RuntimeState *state, void *input, void *output,
@@ -1428,6 +1462,15 @@ int wrap_resize(RuntimeState *state, void *input, void *output,
                 int64_t in0, int64_t in1, int64_t in2, int64_t out0,
                 int64_t out1, int64_t out2, int64_t mode,
                 int64_t coord_transform, int64_t nearest_mode);
+// wrap_resize, but window axis i samples with ONNX scale `scale<i>` (output /
+// input) when it is > 0 instead of out<i> / in<i>. Emitted when hip.resize
+// carries `scales`.
+int wrap_resize_scaled(RuntimeState *state, void *input, void *output,
+                       int64_t data_type, int64_t spatial_rank, int64_t N,
+                       int64_t C, int64_t in0, int64_t in1, int64_t in2,
+                       int64_t out0, int64_t out1, int64_t out2, int64_t mode,
+                       int64_t coord_transform, int64_t nearest_mode,
+                       double scale0, double scale1, double scale2);
 
 // GridSample (4-D NCHW). grid is (N, H_out, W_out, 2) with last dim (x, y).
 // mode: 0=nearest, 1=bilinear; padding_mode: 0=zeros, 1=border, 2=reflection;
@@ -1581,6 +1624,16 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
                                     int64_t input_num_elements,
                                     int64_t gamma_num_elements,
                                     int64_t element_size_bytes, float epsilon);
+
+// Same op with an element size per tensor (bias shares skip's); emitted only
+// when they differ, e.g. an fp32 residual with fp16 skip/gamma/output. A
+// sum_element_size is ignored when input_skip_bias_sum is nullptr.
+int wrap_skip_simplified_layer_norm_mixed(
+    RuntimeState *state, void *input, void *skip, void *gamma, void *bias,
+    void *output, void *input_skip_bias_sum, int64_t input_num_elements,
+    int64_t gamma_num_elements, int64_t input_element_size,
+    int64_t skip_element_size, int64_t gamma_element_size,
+    int64_t output_element_size, int64_t sum_element_size, float epsilon);
 
 // MatMulNBits operation wrapper (quantized N-bit matrix multiplication)
 // Dequantizes packed int4 weights and computes Y = A @ dequant(B)^T + bias
@@ -2132,8 +2185,14 @@ int wrap_sign(RuntimeState *state, void *input, void *output,
 // Mod operation wrapper (element-wise modulo / fmod).
 //   fmod = 0  -> integer modulo (Python %); requires integer data_type
 //   fmod = 1  -> C fmod         ; requires float data_type
+// Operand shapes are passed as 4D (N, C, H, W), left-padded with 1 by the
+// compiler; ONNX multidirectional broadcast is materialised via hip_expand
+// when an operand does not already match the output shape.
 int wrap_mod(RuntimeState *state, void *lhs, void *rhs, void *output,
-             int64_t num_elements, int64_t data_type, int64_t fmod);
+             int64_t a_n, int64_t a_c, int64_t a_h, int64_t a_w, int64_t b_n,
+             int64_t b_c, int64_t b_h, int64_t b_w, int64_t out_n,
+             int64_t out_c, int64_t out_h, int64_t out_w, int64_t data_type,
+             int64_t fmod);
 
 // Slice operation wrapper (ONNX Slice native fallback).
 //
