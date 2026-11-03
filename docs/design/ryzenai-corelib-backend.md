@@ -68,8 +68,9 @@ CoreLib moves.
 
 CoreLib is below 1.0, so the EP refuses a library whose major or minor
 version differs from the header it was built against, and logs
-`[corelib] runtime version ... does not match headers ...`; everything then
-runs on the GPU. Rebuild hip-ep after updating CoreLib.
+`[corelib] <dll> is version ..., but hip-ep was built against ...`; everything
+then runs on the GPU. Rebuild hip-ep after updating CoreLib, and point
+`RYZENAICORELIB_ROOT` at the install it was built against.
 
 The EP can be built on one machine and run on another (for example built on
 an AIE2 machine, run on an AIE4 machine). Nothing in the build is specific to

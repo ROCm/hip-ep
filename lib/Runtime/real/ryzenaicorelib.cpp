@@ -148,9 +148,12 @@ const CorelibApi *load_corelib() {
     candidates.push_back(kName);
 
     void *lib = nullptr;
+    std::string loaded_path;
     for (const std::string &c : candidates)
-      if ((lib = open_library(c)))
+      if ((lib = open_library(c))) {
+        loaded_path = c;
         break;
+      }
     if (!lib) {
       fprintf(stderr,
               "[corelib] %s not found (RYZENAICORELIB_ROOT='%s'); "
@@ -163,25 +166,28 @@ const CorelibApi *load_corelib() {
   api.name = reinterpret_cast<decltype(api.name)>(find_symbol(lib, #name));    \
   if (!api.name) {                                                             \
     fprintf(stderr,                                                            \
-            "[corelib] missing symbol %s; corelib ops run on the GPU\n",       \
-            #name);                                                            \
+            "[corelib] %s has no symbol %s; corelib ops run on the GPU\n",     \
+            loaded_path.c_str(), #name);                                       \
     return nullptr;                                                            \
   }
-    HIPDNN_EP_CORELIB_FUNCTIONS(HIPDNN_EP_CORELIB_RESOLVE)
-#undef HIPDNN_EP_CORELIB_RESOLVE
-
+    // The version comes first: another version's library may lack symbols,
+    // and a mismatch names the real problem better than a missing symbol.
     // Below 1.0 any minor release may break the ABI.
+    HIPDNN_EP_CORELIB_RESOLVE(ryzenai_corelib_get_version)
     uint32_t major = 0, minor = 0, patch = 0;
     api.ryzenai_corelib_get_version(&major, &minor, &patch);
     if (major != RYZENAI_CORELIB_VERSION_MAJOR ||
         (major == 0 && minor != RYZENAI_CORELIB_VERSION_MINOR)) {
       fprintf(stderr,
-              "[corelib] runtime version %u.%u.%u does not match headers "
+              "[corelib] %s is version %u.%u.%u, but hip-ep was built against "
               "%d.%d.%d; corelib ops run on the GPU\n",
-              major, minor, patch, RYZENAI_CORELIB_VERSION_MAJOR,
-              RYZENAI_CORELIB_VERSION_MINOR, RYZENAI_CORELIB_VERSION_PATCH);
+              loaded_path.c_str(), major, minor, patch,
+              RYZENAI_CORELIB_VERSION_MAJOR, RYZENAI_CORELIB_VERSION_MINOR,
+              RYZENAI_CORELIB_VERSION_PATCH);
       return nullptr;
     }
+    HIPDNN_EP_CORELIB_FUNCTIONS(HIPDNN_EP_CORELIB_RESOLVE)
+#undef HIPDNN_EP_CORELIB_RESOLVE
     return &api;
   }();
   return loaded;
