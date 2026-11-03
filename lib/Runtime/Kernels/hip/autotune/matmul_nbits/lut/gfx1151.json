@@ -2778,7 +2778,7 @@
   {"bits": "B4", "config": 120, "group_size": "G32", "k": 4096, "m": 512, "n": 8192, "phase": "Prefill", "row_stride": "Padded", "zero_point": "Symmetric"},
   {"bits": "B4", "config": 115, "group_size": "G32", "k": 4096, "m": 1000, "n": 8192, "phase": "Prefill", "row_stride": "Padded", "zero_point": "Symmetric"},
   {"bits": "B4", "config": 109, "group_size": "G32", "k": 4096, "m": 1024, "n": 8192, "phase": "Prefill", "row_stride": "Padded", "zero_point": "Symmetric"},
-  {"bits": "B4", "config": 90, "group_size": "G32", "k": 4096, "m": 2048, "n": 8192, "phase": "Prefill", "row_stride": "Padded", "zero_point": "Symmetric"},
+  {"bits": "B4", "config": 109, "group_size": "G32", "k": 4096, "m": 2048, "n": 8192, "phase": "Prefill", "row_stride": "Padded", "zero_point": "Symmetric"},
   {"bits": "B4", "config": 122, "group_size": "G32", "k": 4096, "m": 3000, "n": 8192, "phase": "Prefill", "row_stride": "Padded", "zero_point": "Symmetric"},
   {"bits": "B4", "config": 56, "group_size": "G32", "k": 4096, "m": 4096, "n": 8192, "phase": "Prefill", "row_stride": "Padded", "zero_point": "Symmetric"},
   {"bits": "B4", "config": 50, "group_size": "G32", "k": 4096, "m": 8192, "n": 8192, "phase": "Prefill", "row_stride": "Padded", "zero_point": "Symmetric"},
