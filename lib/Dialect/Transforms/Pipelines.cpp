@@ -327,8 +327,10 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   // can merge a tiny host-written shape buffer into a larger allocation that
   // exceeds the host-scalar pass's size limit. Pooling would then place the
   // host store in device memory. Later layout promotion creates copy-only
-  // temporaries; it does not introduce host loads or stores.
-  pm.addNestedPass<func::FuncOp>(mlir::hip::createMaterializeHostScalarsPass());
+  // temporaries; it does not introduce host loads or stores. Module-level:
+  // every function shares the one scratch buffer, so slots are laid out
+  // across the module.
+  pm.addPass(mlir::hip::createMaterializeHostScalarsPass());
 
   // 6. Reuse compatible buffers after host-scalar placement.
   pm.addNestedPass<func::FuncOp>(mlir::hip::createOptimizeMemRefsPass());
