@@ -258,6 +258,17 @@ __device__ __forceinline__ float gqa_from_float<float>(float v) {
   return v;
 }
 
+// The past a call extends, from seqlens_k (the total length less one) on the
+// device. A padded first prompt holds its tokens in rows 0..seqlens_k with
+// padding after them and no past, so the difference clamps at 0 -- the reading
+// ORT gives a padded first prompt. The host (gqa_forward_fused) only launches
+// a padded window once total_sequence_length has marked it as a first prompt.
+__device__ __forceinline__ int gqa_past_len_from_seqlens(int seqlens_k,
+                                                         int sq) {
+  const int past_len = seqlens_k + 1 - sq;
+  return past_len < 0 ? 0 : past_len;
+}
+
 template <typename T>
 __global__ void rope_kernel(
     const T* __restrict__ input,
@@ -269,10 +280,11 @@ __global__ void rope_kernel(
     const int* __restrict__ seqlens_k) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   const int batch_idx = __builtin_amdgcn_readfirstlane(blockIdx.y);
-  // When seqlens_k is provided, read past_len from device memory
-  // (ORT convention: seqlens_k[b] = total_tokens - 1, so past_len = total - sq).
+  // When seqlens_k is provided, read past_len from device memory.
   // All threads read the same address; hardware coalesces into a broadcast.
-  int eff_past_len = seqlens_k ? (seqlens_k[batch_idx] + 1 - seq_len) : past_len;
+  int eff_past_len =
+      seqlens_k ? gqa_past_len_from_seqlens(seqlens_k[batch_idx], seq_len)
+                : past_len;
   int elems = seq_len * num_heads * half_rot;
   if (idx >= elems) return;
 
@@ -366,7 +378,9 @@ __global__ void kv_cache_append_kernel(
     int sq, int G, int d, int present_seq, int past_len,
     const int* __restrict__ seqlens_k) {
   const int batch_idx = __builtin_amdgcn_readfirstlane(blockIdx.y);
-  int eff_past_len = seqlens_k ? (seqlens_k[batch_idx] + 1 - sq) : past_len;
+  int eff_past_len = seqlens_k
+                         ? gqa_past_len_from_seqlens(seqlens_k[batch_idx], sq)
+                         : past_len;
   // Skip malformed batches rather than write past this slice.
   if (eff_past_len < 0 || eff_past_len + sq > present_seq) return;
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -393,7 +407,9 @@ __global__ void kv_cache_append_vec_kernel(
     int sq, int G, int d, int present_seq, int past_len,
     const int* __restrict__ seqlens_k) {
   const int batch_idx = __builtin_amdgcn_readfirstlane(blockIdx.y);
-  int eff_past_len = seqlens_k ? (seqlens_k[batch_idx] + 1 - sq) : past_len;
+  int eff_past_len = seqlens_k
+                         ? gqa_past_len_from_seqlens(seqlens_k[batch_idx], sq)
+                         : past_len;
   if (eff_past_len < 0 || eff_past_len + sq > present_seq) return;
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   const int dv = d / VEC;
@@ -520,7 +536,9 @@ __global__ void kv_cache_append_quant_i8_kernel(
     int sq, int G, int d, int present_seq, int past_len,
     const int* __restrict__ seqlens_k) {
   const int batch_idx = __builtin_amdgcn_readfirstlane(blockIdx.y);
-  int eff_past_len = seqlens_k ? (seqlens_k[batch_idx] + 1 - sq) : past_len;
+  int eff_past_len = seqlens_k
+                         ? gqa_past_len_from_seqlens(seqlens_k[batch_idx], sq)
+                         : past_len;
   if (eff_past_len < 0 || eff_past_len + sq > present_seq) return;
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   int total_per_batch = sq * G * d;
