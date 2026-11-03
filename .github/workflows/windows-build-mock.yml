@@ -41,19 +41,44 @@ jobs:
           fetch-depth: 0
           show-progress: false
 
-      - name: Restore llvm-install
+      # LLVM and ORT are prebuilt by the deps workflow, never rebuilt here.
+      # The cache is the fast path; when the deps job built a prefix in this
+      # run it also uploaded it as an artifact named after the cache key.
+      - name: Restore llvm-install cache
+        id: restore-llvm
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/llvm-install
           key: ${{ inputs.llvm_cache_key }}
-          fail-on-cache-miss: true
 
-      - name: Restore ort-install
+      - name: Download llvm-install
+        id: download-llvm
+        if: steps.restore-llvm.outputs.cache-hit != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.llvm_cache_key }}
+          path: ${{ runner.workspace }}/llvm-install
+
+      - name: Restore ort-install cache
+        id: restore-ort
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/ort-install
           key: ${{ inputs.ort_cache_key }}
-          fail-on-cache-miss: true
+
+      - name: Download ort-install
+        id: download-ort
+        if: steps.restore-ort.outputs.cache-hit != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.ort_cache_key }}
+          path: ${{ runner.workspace }}/ort-install
+
+      - name: Explain missing prebuilt dependency
+        if: failure() && (steps.download-llvm.outcome == 'failure' || steps.download-ort.outcome == 'failure')
+        shell: bash
+        run: |
+          echo "::error title=Prebuilt dependency evicted::The deps workflow found this entry in the cache in an earlier attempt, and it has been evicted since. Use 'Re-run all jobs', not 'Re-run failed jobs', so the deps jobs rebuild it."
 
       # -----------------------------------------------------------------------
       # llvm-lit.py requires the lit pip package at runtime. Pin Python to

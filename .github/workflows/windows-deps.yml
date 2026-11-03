@@ -4,9 +4,9 @@
 ##
 name: Windows Deps
 
-# Prebuilds the two heavy from-source dependencies into cached install prefixes
-# and returns their cache keys. Callers restore those prefixes with
-# fail-on-cache-miss, so a green run here is what guarantees the caches exist.
+# Prebuilds the heavy from-source dependencies into cached install prefixes and
+# returns their cache keys. Callers restore from the cache and fall back to the
+# same-named artifact, which each job uploads whenever it builds.
 on:
   workflow_call:
     outputs:
@@ -68,6 +68,8 @@ jobs:
         id: key
         shell: bash
         working-directory: source-hip-ep
+        env:
+          BASE_REF: ${{ github.base_ref || github.event.merge_group.base_ref }}
         run: |
           set -euo pipefail
           LINE=$(grep -E '^rocmlirtriton;' cmake/deps.txt)
@@ -76,6 +78,18 @@ jobs:
           echo "url=$RT_URL" >> "$GITHUB_OUTPUT"
           echo "commit=$RT_COMMIT" >> "$GITHUB_OUTPUT"
           echo "value=dep-llvm-rocmlirtriton-${RT_COMMIT}" >> "$GITHUB_OUTPUT"
+          # PR and merge-queue caches are scoped to their own ref, so each one
+          # stores a private >1 GB copy. Only store one when the pin differs
+          # from the base branch; otherwise the base branch's push run owns it.
+          SAVE=true
+          if [ -n "$BASE_REF" ]; then
+            if git fetch -q --depth 1 origin "$BASE_REF"; then
+              BASE_COMMIT=$(git show FETCH_HEAD:cmake/deps.txt | grep -E '^rocmlirtriton;' | cut -d';' -f3 || true)
+              if [ "$BASE_COMMIT" = "$RT_COMMIT" ]; then SAVE=false; fi
+            fi
+          fi
+          echo "save=$SAVE" >> "$GITHUB_OUTPUT"
+          echo "Store llvm-install on a miss: $SAVE"
 
       - name: Probe llvm-install
         id: cache-llvm
@@ -147,12 +161,24 @@ jobs:
           cmake --build "${{ runner.workspace }}/build-llvm" --target install
 
       - name: Save llvm-install
-        if: steps.cache-llvm.outputs.cache-hit != 'true'
+        if: steps.cache-llvm.outputs.cache-hit != 'true' && steps.key.outputs.save == 'true'
         continue-on-error: true
         uses: actions/cache/save@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/llvm-install
           key: ${{ steps.key.outputs.value }}
+
+      # Same-run handoff: the cache entry may be unsaved (see the save policy
+      # above) or evicted before the consumers restore it.
+      - name: Upload llvm-install
+        if: steps.cache-llvm.outputs.cache-hit != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.key.outputs.value }}
+          path: ${{ runner.workspace }}/llvm-install
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: true
 
       - name: Save sccache directory
         if: always() && steps.cache-llvm.outputs.cache-hit != 'true' && github.ref_name == 'main'
@@ -293,6 +319,16 @@ jobs:
           path: ${{ runner.workspace }}/ort-install
           key: ${{ steps.key.outputs.value }}
 
+      - name: Upload ort-install
+        if: steps.cache-ort.outputs.cache-hit != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.key.outputs.value }}
+          path: ${{ runner.workspace }}/ort-install
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: true
+
   amdgpu:
     needs: ort
     runs-on: windows-2022
@@ -332,12 +368,26 @@ jobs:
           lookup-only: true
 
       - name: Restore ort-install
+        id: restore-ort
         if: steps.cache-amdgpu.outputs.cache-hit != 'true'
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/ort-install
           key: ${{ needs.ort.outputs.cache_key }}
-          fail-on-cache-miss: true
+
+      - name: Download ort-install
+        id: download-ort
+        if: steps.cache-amdgpu.outputs.cache-hit != 'true' && steps.restore-ort.outputs.cache-hit != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.ort.outputs.cache_key }}
+          path: ${{ runner.workspace }}/ort-install
+
+      - name: Explain missing ort-install
+        if: failure() && steps.download-ort.outcome == 'failure'
+        shell: bash
+        run: |
+          echo "::error title=ort-install evicted::The ort job found '${{ needs.ort.outputs.cache_key }}' in the cache in an earlier attempt, and the entry has been evicted since. Use 'Re-run all jobs', not 'Re-run failed jobs', so the ort job rebuilds it."
 
       - name: Setup Python 3.14
         if: steps.cache-amdgpu.outputs.cache-hit != 'true'
@@ -491,6 +541,7 @@ jobs:
           path: ${{ runner.workspace }}/amdgpu-artifacts
           if-no-files-found: error
           retention-days: 1
+          overwrite: true
 
       - name: Save sccache directory
         if: always() && steps.cache-amdgpu.outputs.cache-hit != 'true' && github.ref_name == 'main'
@@ -525,12 +576,26 @@ jobs:
           lookup-only: true
 
       - name: Restore ort-install
+        id: restore-ort
         if: steps.cache-oga.outputs.cache-hit != 'true'
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/ort-install
           key: ${{ needs.ort.outputs.cache_key }}
-          fail-on-cache-miss: true
+
+      - name: Download ort-install
+        id: download-ort
+        if: steps.cache-oga.outputs.cache-hit != 'true' && steps.restore-ort.outputs.cache-hit != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.ort.outputs.cache_key }}
+          path: ${{ runner.workspace }}/ort-install
+
+      - name: Explain missing ort-install
+        if: failure() && steps.download-ort.outcome == 'failure'
+        shell: bash
+        run: |
+          echo "::error title=ort-install evicted::The ort job found '${{ needs.ort.outputs.cache_key }}' in the cache in an earlier attempt, and the entry has been evicted since. Use 'Re-run all jobs', not 'Re-run failed jobs', so the ort job rebuilds it."
 
       - name: Setup Python 3.14
         if: steps.cache-oga.outputs.cache-hit != 'true'
@@ -721,6 +786,7 @@ jobs:
           path: ${{ runner.workspace }}/oga-artifacts
           if-no-files-found: error
           retention-days: 1
+          overwrite: true
 
       - name: Save sccache directory
         if: always() && steps.cache-oga.outputs.cache-hit != 'true' && github.ref_name == 'main'

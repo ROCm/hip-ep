@@ -146,15 +146,30 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Resolve rocmlirTriton pin
         id: rocmlir
+        env:
+          BASE_REF: ${{ github.base_ref || github.event.merge_group.base_ref }}
         run: |
           set -euo pipefail
           LINE=$(grep -E '^rocmlirtriton;' cmake/deps.txt)
+          RT_COMMIT=$(echo "$LINE" | cut -d';' -f3)
           echo "url=$(echo "$LINE" | cut -d';' -f2)" >> "$GITHUB_OUTPUT"
-          echo "commit=$(echo "$LINE" | cut -d';' -f3)" >> "$GITHUB_OUTPUT"
+          echo "commit=$RT_COMMIT" >> "$GITHUB_OUTPUT"
+          # PR and merge-queue caches are scoped to their own ref, so each one
+          # stores a private >1 GB copy. Only store one when the pin differs
+          # from the base branch; otherwise the base branch's push run owns it.
+          SAVE=true
+          if [ -n "$BASE_REF" ]; then
+            if git fetch -q --depth 1 origin "$BASE_REF"; then
+              BASE_COMMIT=$(git show FETCH_HEAD:cmake/deps.txt | grep -E '^rocmlirtriton;' | cut -d';' -f3 || true)
+              if [ "$BASE_COMMIT" = "$RT_COMMIT" ]; then SAVE=false; fi
+            fi
+          fi
+          echo "save=$SAVE" >> "$GITHUB_OUTPUT"
+          echo "Store llvm-install on a miss: $SAVE"
 
-      - name: Cache LLVM install prefix
+      - name: Restore LLVM install prefix
         id: cache-llvm
-        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/llvm-install
           # Keyed only on the rocmlirTriton commit: a protobuf/ORT bump must not
@@ -192,6 +207,14 @@ jobs:
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
           cmake --build "${{ runner.workspace }}/build-llvm" --target install
           rm -rf "$SRC" "${{ runner.workspace }}/build-llvm"
+
+      - name: Save LLVM install prefix
+        if: steps.cache-llvm.outputs.cache-hit != 'true' && steps.rocmlir.outputs.save == 'true'
+        continue-on-error: true
+        uses: actions/cache/save@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/llvm-install
+          key: linux-llvm-rocmlirtriton-amdgpu-${{ steps.rocmlir.outputs.commit }}
 
       # -----------------------------------------------------------------------
       # ONNX Runtime built from source into ort-install (cached): checkout ->

@@ -56,6 +56,8 @@ jobs:
       - name: Compute dependency cache keys
         id: deps
         shell: bash
+        env:
+          BASE_REF: ${{ github.base_ref || github.event.merge_group.base_ref }}
         run: |
           set -euo pipefail
           DEPS_HASH=$(git rev-parse --short=12 HEAD:cmake/deps.txt)
@@ -82,13 +84,40 @@ jobs:
           echo "amdgpu=$AMD_KEY" >> "$GITHUB_OUTPUT"
           echo "oga=$OGA_KEY" >> "$GITHUB_OUTPUT"
           echo "llvm=dep-llvm-rocmlirtriton-amdgpu-$(echo "$LINE" | cut -d';' -f3)" >> "$GITHUB_OUTPUT"
+          # PR and merge-queue caches are scoped to their own ref, so each one
+          # stores a private >1 GB copy. Only store one when the pin differs
+          # from the base branch; otherwise the base branch's push run owns it.
+          RT_COMMIT=$(echo "$LINE" | cut -d';' -f3)
+          SAVE_LLVM=true
+          if [ -n "$BASE_REF" ]; then
+            if git fetch -q --depth 1 origin "$BASE_REF"; then
+              BASE_COMMIT=$(git show FETCH_HEAD:cmake/deps.txt | grep -E '^rocmlirtriton;' | cut -d';' -f3 || true)
+              if [ "$BASE_COMMIT" = "$RT_COMMIT" ]; then SAVE_LLVM=false; fi
+            fi
+          fi
+          echo "save_llvm=$SAVE_LLVM" >> "$GITHUB_OUTPUT"
+          echo "Store llvm-install on a miss: $SAVE_LLVM"
 
-      - name: Restore ort-install
+      - name: Restore ort-install cache
+        id: restore-ort
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/ort-install
           key: ${{ steps.deps.outputs.ort }}
-          fail-on-cache-miss: true
+
+      - name: Download ort-install
+        id: download-ort
+        if: steps.restore-ort.outputs.cache-hit != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.deps.outputs.ort }}
+          path: ${{ runner.workspace }}/ort-install
+
+      - name: Explain missing ort-install
+        if: failure() && steps.download-ort.outcome == 'failure'
+        shell: bash
+        run: |
+          echo "::error title=ort-install evicted::The prebuild found '${{ steps.deps.outputs.ort }}' in the cache in an earlier attempt, and the entry has been evicted since. Use 'Re-run all jobs', not 'Re-run failed jobs', so prebuild rebuilds it."
 
       # Caches are the fast path. On a cold key the prebuild uploads the same
       # tree, and that artifact is the reliable handoff inside this run.
@@ -157,7 +186,7 @@ jobs:
           cmake --build "${{ runner.workspace }}/build-llvm" --target install
 
       - name: Save AMDGPU llvm-install
-        if: steps.cache-llvm.outputs.cache-hit != 'true'
+        if: steps.cache-llvm.outputs.cache-hit != 'true' && steps.deps.outputs.save_llvm == 'true'
         continue-on-error: true
         uses: actions/cache/save@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
