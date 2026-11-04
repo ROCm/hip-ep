@@ -58,11 +58,12 @@ namespace {
 /// silently miscompiled (see the guards below).
 ///
 /// Not yet supported (rejected with a clear message): the 4th qk_matmul_output
-/// result, the opset-24 nonpad_kv_seqlen external-cache input, and non-rank-4
+/// result, the opset-24 nonpad_kv_seqlen external-cache input, rank-0/rank-1
 /// or boolean attn_mask (the runtime's attention_bias is additive-float only).
 ///
-/// Mask-extent contract: the rank-4 additive mask is passed to the runtime
-/// verbatim. Batch/head dims may broadcast from extent 1, while the q/kv
+/// Mask-extent contract: rank-2 [S,T] and rank-3 [H,S,T] additive masks are
+/// normalized to rank-4 [1,1,S,T] and [1,H,S,T] views before being passed to
+/// the runtime. Batch/head dims may broadcast from extent 1, while the q/kv
 /// extents must equal the score extents. Runtime checks cover dynamic shapes;
 /// cached attention does not accept a key-broadcast mask.
 ///
@@ -213,9 +214,11 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
     if (!maskType)
       return rewriter.notifyMatchFailure(op, "attn_mask must be a ranked "
                                              "tensor");
-    if (maskType.getRank() != 4)
+    const int64_t maskRank = maskType.getRank();
+    if (maskRank < 2 || maskRank > 4)
       return rewriter.notifyMatchFailure(
-          op, "attn_mask must be rank 4 [B, H, S, T]");
+          op, "attn_mask must be rank 2 [S,T], rank 3 [H,S,T], or rank 4 "
+              "[B,H,S,T]");
     // The runtime's attention_bias is additive float; a boolean keep/drop mask
     // would need conversion to additive 0/-inf, which is not modelled here.
     if (maskType.getElementType().isInteger(1))
@@ -223,22 +226,59 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
           op, "boolean attn_mask not supported (runtime attention_bias is "
               "additive-float only)");
 
+    // ONNX broadcasting right-aligns lower-rank masks against [B,H,S,T].
+    // Insert unit leading dimensions as a view so the shared hip.gqa runtime
+    // can keep its rank-4 attention_bias ABI without copying mask data.
+    if (maskRank < 4) {
+      const int64_t leadingUnits = 4 - maskRank;
+      llvm::SmallVector<int64_t> normalizedShape(
+          static_cast<size_t>(leadingUnits), 1);
+      normalizedShape.append(maskType.getShape().begin(),
+                             maskType.getShape().end());
+      auto normalizedType = mlir::RankedTensorType::get(
+          normalizedShape, maskType.getElementType());
+
+      llvm::SmallVector<mlir::OpFoldResult> outputShape;
+      for (int64_t i = 0; i < leadingUnits; ++i)
+        outputShape.push_back(rewriter.getIndexAttr(1));
+      for (int64_t i = 0; i < maskRank; ++i) {
+        if (maskType.isDynamicDim(i))
+          outputShape.push_back(
+              mlir::tensor::DimOp::create(rewriter, loc, attnMask, i)
+                  .getResult());
+        else
+          outputShape.push_back(rewriter.getIndexAttr(maskType.getDimSize(i)));
+      }
+
+      llvm::SmallVector<mlir::ReassociationIndices> reassociation;
+      mlir::ReassociationIndices firstGroup;
+      for (int64_t i = 0; i <= leadingUnits; ++i)
+        firstGroup.push_back(i);
+      reassociation.push_back(std::move(firstGroup));
+      for (int64_t i = 1; i < maskRank; ++i)
+        reassociation.push_back({leadingUnits + i});
+
+      attnMask = mlir::tensor::ExpandShapeOp::create(rewriter, loc,
+                                                     normalizedType, attnMask,
+                                                     reassociation, outputShape)
+                     .getResult();
+      maskType = normalizedType;
+    }
+
     const int64_t querySeqDim = rank4 ? 2 : 1;
     const int64_t querySeq = queryType.getDimSize(querySeqDim);
     const int64_t maskQuerySeq = maskType.getDimSize(2);
-    if ((querySeq == mlir::ShapedType::kDynamic) !=
-            (maskQuerySeq == mlir::ShapedType::kDynamic) ||
-        (querySeq != mlir::ShapedType::kDynamic && querySeq != maskQuerySeq)) {
+    if (querySeq != mlir::ShapedType::kDynamic &&
+        maskQuerySeq != mlir::ShapedType::kDynamic &&
+        querySeq != maskQuerySeq) {
       return rewriter.notifyMatchFailure(
           op, "attn_mask query extent must equal the query sequence length");
     }
 
     const int64_t keySeq = keyType.getDimSize(querySeqDim);
     const int64_t maskKvSeq = maskType.getDimSize(3);
-    if (!pastKey &&
-        ((keySeq == mlir::ShapedType::kDynamic) !=
-             (maskKvSeq == mlir::ShapedType::kDynamic) ||
-         (keySeq != mlir::ShapedType::kDynamic && keySeq != maskKvSeq))) {
+    if (!pastKey && keySeq != mlir::ShapedType::kDynamic &&
+        maskKvSeq != mlir::ShapedType::kDynamic && keySeq != maskKvSeq) {
       return rewriter.notifyMatchFailure(
           op, "attn_mask key extent must equal the KV sequence length");
     }
@@ -246,6 +286,23 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
       return rewriter.notifyMatchFailure(
           op, "broadcast attn_mask key extent cannot provide the logical KV "
               "length for a cached attention");
+
+    // The runtime's mask-derived live-length path currently supports only one
+    // batch. Reject a statically known multi-batch masked Attention here;
+    // dynamic batch is checked from its concrete value in the runtime.
+    const int64_t batch = queryType.getDimSize(0);
+    if (batch != mlir::ShapedType::kDynamic && batch > 1)
+      return rewriter.notifyMatchFailure(
+          op, "attention with an attn_mask currently supports only batch "
+              "size 1");
+
+    if (pastKey) {
+      auto pastKeyType =
+          mlir::dyn_cast<mlir::RankedTensorType>(pastKey.getType());
+      if (!pastKeyType || pastKeyType.getRank() != 4)
+        return rewriter.notifyMatchFailure(
+            op, "past_key must be a rank-4 [B,N,S,head] tensor");
+    }
   }
   // is_causal=0 with no mask is bidirectional attention, which the runtime
   // services only as a no-past path (bidirectional_no_past ignores past KV).
@@ -401,9 +458,26 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
           .getResult();
   mlir::Value seqlensKI32 =
       mlir::arith::IndexCastOp::create(rewriter, loc, i32Ty, totalKvM1Idx);
-  auto seqlensKType = mlir::RankedTensorType::get({1}, i32Ty);
-  mlir::Value seqlensK = mlir::tensor::FromElementsOp::create(
-      rewriter, loc, seqlensKType, mlir::ValueRange{seqlensKI32});
+  const int64_t batchDim = queryType.getDimSize(0);
+  auto seqlensKType = mlir::RankedTensorType::get({batchDim}, i32Ty);
+  mlir::Value seqlensK;
+  if (batchDim == mlir::ShapedType::kDynamic) {
+    mlir::Value batchSize =
+        mlir::tensor::DimOp::create(rewriter, loc, query, 0).getResult();
+    seqlensK =
+        mlir::tensor::GenerateOp::create(
+            rewriter, loc, seqlensKType, mlir::ValueRange{batchSize},
+            [&](mlir::OpBuilder &builder, mlir::Location bodyLoc,
+                mlir::ValueRange) {
+              mlir::tensor::YieldOp::create(builder, bodyLoc, seqlensKI32);
+            })
+            .getResult();
+  } else {
+    llvm::SmallVector<mlir::Value> values(static_cast<size_t>(batchDim),
+                                          seqlensKI32);
+    seqlensK = mlir::tensor::FromElementsOp::create(rewriter, loc, seqlensKType,
+                                                    values);
+  }
 
   // === hip.gqa output type + init =====================================
   //
@@ -448,7 +522,6 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
   };
   int64_t kHeadDim = perHeadDim(keyType);
   int64_t vHeadDim = perHeadDim(valueType);
-  int64_t batchDim = queryType.getDimSize(0);
 
   auto synthPresent = [&](int64_t headDim,
                           mlir::Type elem) -> mlir::RankedTensorType {

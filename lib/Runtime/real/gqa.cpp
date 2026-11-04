@@ -114,13 +114,14 @@ static bool gqa_cache_seqlens_enabled() {
   return enabled;
 }
 
-// Sentinel returned by read_seqlens_k_for_dispatch when the pre-dispatch read
-// is not applicable (multi-batch or missing seqlens_k_ptr) or failed (D2H copy
-// / stream sync error). Outside the valid range of real seqlens_k values (-1 is
-// ORT's prefill sentinel; 0..max_seq are real). Callers must treat this as "no
-// pre-read available" and fall back to the legacy per-call D2H readback site
-// they already implement.
-static constexpr int32_t kSeqlensKNotRead = -2;
+enum SeqlensKReadStatus : int32_t {
+  // The pre-dispatch read is not applicable or failed. Callers may fall back
+  // to the legacy per-call D2H readback.
+  kSeqlensKNotRead = -2,
+  // Mask-derived live-length recovery failed or is unsupported. Callers must
+  // not fall back to seqlens_k because it carries the physical capacity.
+  kSeqlensKReadError = -3,
+};
 
 // Read seqlens_k_val from device (or the per-Compute() cache when
 // HIPDNN_EP_GQA_CACHE_SEQLENS=1) once per call before the fused/decomposed
@@ -179,10 +180,28 @@ static int32_t read_shared_mask_seqlens(
     hipStream_t stream, const void *attentionBias, int64_t biasBatch,
     int64_t biasHeads, int64_t batch, int64_t querySeq, int64_t keyCapacity,
     int64_t pastCapacity, int64_t elementSize, RuntimeState *state) {
-  if (!attentionBias || !state || batch != 1 || biasBatch < 1 ||
-      biasHeads < 1 || querySeq <= 0 || keyCapacity <= 0 ||
-      pastCapacity != keyCapacity || (elementSize != 2 && elementSize != 4))
+  // A different past/mask extent is the ordinary growing-cache case, where
+  // the converter-provided seqlens_k is authoritative and no scan is needed.
+  if (pastCapacity != keyCapacity)
     return kSeqlensKNotRead;
+
+  // Equal extents identify the preallocated-cache case: the mask width is the
+  // physical capacity, so scanning the mask is required to recover live length.
+  if (batch != 1) {
+    fprintf(stderr,
+            "GQA attention-mask live-length derivation does not support "
+            "preallocated caches with batch=%lld (only batch=1 is supported)\n",
+            (long long)batch);
+    return kSeqlensKReadError;
+  }
+  if (!attentionBias || !state || biasBatch < 1 || biasHeads < 1 ||
+      querySeq <= 0 || keyCapacity <= 0 ||
+      (elementSize != 2 && elementSize != 4)) {
+    fprintf(stderr,
+            "GQA attention-mask live-length derivation received invalid "
+            "arguments\n");
+    return kSeqlensKReadError;
+  }
 
   const bool cacheEnabled = gqa_cache_seqlens_enabled();
   if (cacheEnabled && state->attention_mask_seqlens_cached_valid &&
@@ -194,8 +213,11 @@ static int32_t read_shared_mask_seqlens(
       state->attention_mask_seqlens_cached_element_size == elementSize)
     return state->attention_mask_seqlens_cached_val;
 
-  if (hipdnn_ep_state_ensure_workspace(state, sizeof(int32_t)) != 0)
-    return kSeqlensKNotRead;
+  if (hipdnn_ep_state_ensure_workspace(state, sizeof(int32_t)) != 0) {
+    fprintf(stderr,
+            "GQA attention-mask live-length workspace allocation failed\n");
+    return kSeqlensKReadError;
+  }
   void *deviceLastValid = hipdnn_ep_state_get_workspace(state);
   if (!deviceLastValid ||
       hip_gqa_bias_key_extent(
@@ -203,16 +225,31 @@ static int32_t read_shared_mask_seqlens(
           static_cast<int>(biasHeads), static_cast<int>(querySeq),
           static_cast<int>(keyCapacity), static_cast<int>(querySeq),
           static_cast<int>(querySeq), /*past_len=*/0, /*num_chunks=*/1,
-          static_cast<int>(elementSize)) != 0)
-    return kSeqlensKNotRead;
+          static_cast<int>(elementSize)) != 0) {
+    fprintf(stderr, "GQA attention-mask live-length kernel launch failed\n");
+    return kSeqlensKReadError;
+  }
 
   int32_t lastValid = -1;
-  if (hipMemcpyAsync(&lastValid, deviceLastValid, sizeof(lastValid),
-                     hipMemcpyDeviceToHost, stream) != hipSuccess ||
-      hipStreamSynchronize(stream) != hipSuccess)
-    return kSeqlensKNotRead;
-  if (lastValid < 0)
-    return kSeqlensKNotRead;
+  hipError_t copyStatus =
+      hipMemcpyAsync(&lastValid, deviceLastValid, sizeof(lastValid),
+                     hipMemcpyDeviceToHost, stream);
+  if (copyStatus != hipSuccess) {
+    fprintf(stderr, "GQA attention-mask live-length D2H read failed: %s\n",
+            hipGetErrorString(copyStatus));
+    return kSeqlensKReadError;
+  }
+  hipError_t syncStatus = hipStreamSynchronize(stream);
+  if (syncStatus != hipSuccess) {
+    fprintf(stderr,
+            "GQA attention-mask live-length synchronization failed: %s\n",
+            hipGetErrorString(syncStatus));
+    return kSeqlensKReadError;
+  }
+  if (lastValid < 0) {
+    fprintf(stderr, "GQA attention mask contains no valid key position\n");
+    return kSeqlensKReadError;
+  }
 
   if (cacheEnabled) {
     state->attention_mask_seqlens_cached_valid = true;
@@ -1408,6 +1445,13 @@ static int gqa_forward_hipblaslt(
   // its own D2H). On B>1 this returns kSeqlensKNotRead and both downstream
   // paths fall back to their legacy per-call reads. Stored in seqlens_k_pre;
   // total_seq_pre is the derived total_seq (-1 means unknown / not applicable).
+  if (derive_seqlens_from_attention_bias && B != 1) {
+    fprintf(stderr,
+            "GQA attention-mask length handling supports only batch=1 "
+            "(got batch=%lld)\n",
+            (long long)B);
+    return -1;
+  }
   const int32_t sharedMaskSeqlens =
       derive_seqlens_from_attention_bias
           ? read_shared_mask_seqlens(stream, attention_bias, attn_bias_batch,
@@ -1415,6 +1459,8 @@ static int gqa_forward_hipblaslt(
                                      attn_bias_seq_kv, past_buf_seq,
                                      element_size_bytes, state)
           : kSeqlensKNotRead;
+  if (sharedMaskSeqlens == kSeqlensKReadError)
+    return -1;
   int32_t seqlens_k_pre =
       sharedMaskSeqlens != kSeqlensKNotRead
           ? sharedMaskSeqlens

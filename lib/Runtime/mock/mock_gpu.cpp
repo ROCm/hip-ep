@@ -524,7 +524,7 @@ int wrap_group_query_attention_host_length(
     int64_t v_quant_type, int64_t kv_cache_bit_width,
     // Whisper bidirectional-attention flag (mock stub ignores it).
     int32_t no_causal,
-    // Mask-derived live-length flag (mock stub ignores it).
+    // Mask-derived live-length flag.
     int32_t derive_seqlens_from_attention_bias,
     // Shape values (12)
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
@@ -559,6 +559,13 @@ int wrap_group_query_attention_host_length(
       return -1;
     }
   }
+  if (derive_seqlens_from_attention_bias && batch_size != 1) {
+    fprintf(stderr,
+            "Attention-mask length handling supports only batch=1 "
+            "(got batch=%lld)\n",
+            (long long)batch_size);
+    return -1;
+  }
   (void)op_state_slot;
 
   (void)position_ids;
@@ -573,7 +580,6 @@ int wrap_group_query_attention_host_length(
   (void)v_quant_type;
   (void)kv_cache_bit_width;
   (void)no_causal;
-  (void)derive_seqlens_from_attention_bias;
   (void)present_key;
   (void)present_value;
   (void)kv_bnsd;

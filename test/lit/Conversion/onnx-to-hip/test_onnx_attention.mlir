@@ -122,7 +122,8 @@ module {
     // CHECK: %[[LOGICAL:.*]] = tensor.dim %{{.*}}, %c3
     // CHECK: %[[CAPACITY:.*]] = arith.maxsi %[[PAST]], %[[LOGICAL]]
     // CHECK: arith.subi %[[LOGICAL]], %{{.*}}
-    // CHECK: tensor.from_elements %{{.*}} : tensor<1xi32>
+    // CHECK: tensor.generate
+    // CHECK-SAME: tensor<?xi32>
     // CHECK: tensor.empty(%{{.*}}, %[[CAPACITY]]) : tensor<?x8x?x256xf16>
     // CHECK: hip.gqa(%[[CTX2]])
     // CHECK-SAME: derive_seqlens_from_attention_bias = true
@@ -175,7 +176,8 @@ module {
     // CHECK: %[[PASTG:.*]] = tensor.dim %{{.*}}, %c2
     // CHECK: %[[LOGICALG:.*]] = tensor.dim %{{.*}}, %c3
     // CHECK: %[[CAPACITYG:.*]] = arith.maxsi %[[PASTG]], %[[LOGICALG]]
-    // CHECK: tensor.from_elements %{{.*}} : tensor<1xi32>
+    // CHECK: tensor.generate
+    // CHECK-SAME: tensor<?xi32>
     // CHECK: tensor.empty(%{{.*}}, %[[CAPACITYG]]) : tensor<?x1x?x256xf16>
     // CHECK: hip.gqa(%[[CTXG]])
     // Mask is threaded as the final hip.gqa input (attention_bias).
@@ -199,10 +201,10 @@ module {
 // causal mask applies (no_causal = false).
 module {
   func.func @main_graph(
-      %query: tensor<1x8x2048xf16>,
-      %key: tensor<1x8x1024xf16>,
-      %value: tensor<1x8x1024xf16>)
-      -> tensor<1x8x2048xf16> {
+      %query: tensor<2x8x2048xf16>,
+      %key: tensor<2x8x1024xf16>,
+      %value: tensor<2x8x1024xf16>)
+      -> tensor<2x8x2048xf16> {
 
     // CHECK-LABEL: func.func @main_graph
     // CHECK-SAME: (%[[CTX3:.*]]: !hip.context,
@@ -213,11 +215,13 @@ module {
          is_causal = 1 : si64,
          scale = 0.0883883461 : f32,
          softcap = 0.000000e+00 : f32}
-        : (tensor<1x8x2048xf16>, tensor<1x8x1024xf16>, tensor<1x8x1024xf16>)
-        -> tensor<1x8x2048xf16>
+        : (tensor<2x8x2048xf16>, tensor<2x8x1024xf16>, tensor<2x8x1024xf16>)
+        -> tensor<2x8x2048xf16>
 
+    // The shape-derived length is replicated once per batch.
+    // CHECK: tensor.from_elements %[[LEN:.*]], %[[LEN]] : tensor<2xi32>
     // Synthesized present buffers (seq dynamic = current tokens), head_dim = 128.
-    // CHECK: tensor.empty(%{{.*}}) : tensor<1x8x?x128xf16>
+    // CHECK: tensor.empty(%{{.*}}) : tensor<2x8x?x128xf16>
     // CHECK: hip.gqa(%[[CTX3]])
     // Attributes print alphabetically; no_causal defaults to false and is
     // omitted (is_causal=1), so the dict goes straight from kv_num_heads to
@@ -225,7 +229,7 @@ module {
     // CHECK-SAME: {kv_num_heads = 8 : i64, num_heads = 16 : i64
     // CHECK-NOT: onnx.Attention
 
-    return %y : tensor<1x8x2048xf16>
+    return %y : tensor<2x8x2048xf16>
   }
 }
 
@@ -389,35 +393,136 @@ module {
 
 // -----
 
-// Only rank-4 additive masks have an unambiguous batch/head layout in the
-// runtime contract.
+// The runtime's mask-derived live-length path currently supports only one
+// batch. Reject a statically known multi-batch growing cache during lowering.
 module {
   func.func @main_graph(
-      %query: tensor<1x1x2048xf16>,
-      %key: tensor<1x1x1024xf16>,
-      %value: tensor<1x1x1024xf16>,
-      %attn_mask: tensor<1x1x128xf16>,
-      %past_key: tensor<1x8x127x128xf16>,
-      %past_value: tensor<1x8x127x128xf16>)
-      -> (tensor<1x1x2048xf16>, tensor<1x8x128x128xf16>,
-          tensor<1x8x128x128xf16>) {
+      %query: tensor<2x1x2048xf16>,
+      %key: tensor<2x1x1024xf16>,
+      %value: tensor<2x1x1024xf16>,
+      %attn_mask: tensor<2x1x1x128xf16>,
+      %past_key: tensor<2x8x127x128xf16>,
+      %past_value: tensor<2x8x127x128xf16>)
+      -> (tensor<2x1x2048xf16>, tensor<2x8x128x128xf16>,
+          tensor<2x8x128x128xf16>) {
     %out:3 = "onnx.Attention"(%query, %key, %value, %attn_mask, %past_key,
                               %past_value)
         {q_num_heads = 16 : si64,
          kv_num_heads = 8 : si64,
          is_causal = 1 : si64}
-        : (tensor<1x1x2048xf16>, tensor<1x1x1024xf16>,
-           tensor<1x1x1024xf16>, tensor<1x1x128xf16>,
-           tensor<1x8x127x128xf16>, tensor<1x8x127x128xf16>)
-        -> (tensor<1x1x2048xf16>, tensor<1x8x128x128xf16>,
-            tensor<1x8x128x128xf16>)
+        : (tensor<2x1x2048xf16>, tensor<2x1x1024xf16>,
+           tensor<2x1x1024xf16>, tensor<2x1x1x128xf16>,
+           tensor<2x8x127x128xf16>, tensor<2x8x127x128xf16>)
+        -> (tensor<2x1x2048xf16>, tensor<2x8x128x128xf16>,
+            tensor<2x8x128x128xf16>)
 
     // CHECK-LABEL: func.func @main_graph
     // CHECK-NOT: hip.gqa
     // CHECK: onnx.Attention
 
     return %out#0, %out#1, %out#2
-        : tensor<1x1x2048xf16>, tensor<1x8x128x128xf16>,
+        : tensor<2x1x2048xf16>, tensor<2x8x128x128xf16>,
+          tensor<2x8x128x128xf16>
+  }
+}
+
+// -----
+
+// The same conservative batch restriction applies when there is no past cache:
+// causal masked Attention still consumes the synthesized seqlens_k.
+module {
+  func.func @main_graph(
+      %query: tensor<2x8x1024xf16>,
+      %key: tensor<2x8x1024xf16>,
+      %value: tensor<2x8x1024xf16>,
+      %attn_mask: tensor<2x1x8x8xf16>) -> tensor<2x8x1024xf16> {
+    %out = "onnx.Attention"(%query, %key, %value, %attn_mask)
+        {q_num_heads = 8 : si64,
+         kv_num_heads = 8 : si64,
+         is_causal = 1 : si64}
+        : (tensor<2x8x1024xf16>, tensor<2x8x1024xf16>,
+           tensor<2x8x1024xf16>, tensor<2x1x8x8xf16>)
+        -> tensor<2x8x1024xf16>
+
+    // CHECK-LABEL: func.func @main_graph
+    // CHECK-NOT: hip.gqa
+    // CHECK: onnx.Attention
+
+    return %out : tensor<2x8x1024xf16>
+  }
+}
+
+// -----
+
+// A rank-3 [H,S,T] mask follows ONNX right-aligned broadcasting and is viewed
+// as [1,H,S,T] before being passed to hip.gqa. A dynamic mask S is accepted
+// with a static query S; the runtime validates their concrete extents.
+module {
+  func.func @main_graph(
+      %query: tensor<1x2x2048xf16>,
+      %key: tensor<1x2x1024xf16>,
+      %value: tensor<1x2x1024xf16>,
+      %attn_mask: tensor<16x?x128xf16>,
+      %past_key: tensor<1x8x126x128xf16>,
+      %past_value: tensor<1x8x126x128xf16>)
+      -> (tensor<1x2x2048xf16>, tensor<1x8x128x128xf16>,
+          tensor<1x8x128x128xf16>) {
+    %out:3 = "onnx.Attention"(%query, %key, %value, %attn_mask, %past_key,
+                              %past_value)
+        {q_num_heads = 16 : si64,
+         kv_num_heads = 8 : si64,
+         is_causal = 1 : si64}
+        : (tensor<1x2x2048xf16>, tensor<1x2x1024xf16>,
+           tensor<1x2x1024xf16>, tensor<16x?x128xf16>,
+           tensor<1x8x126x128xf16>, tensor<1x8x126x128xf16>)
+        -> (tensor<1x2x2048xf16>, tensor<1x8x128x128xf16>,
+            tensor<1x8x128x128xf16>)
+
+    // CHECK-LABEL: func.func @main_graph
+    // CHECK: tensor.expand_shape %{{.*}} {{\[\[}}0, 1], [2], [3]] output_shape {{.*}} : tensor<16x?x128xf16> into tensor<1x16x?x128xf16>
+    // CHECK: hip.gqa
+    // CHECK-SAME: ins({{.*}}tensor<1x16x?x128xf16>) outs
+    // CHECK-NOT: onnx.Attention
+
+    return %out#0, %out#1, %out#2
+        : tensor<1x2x2048xf16>, tensor<1x8x128x128xf16>,
+          tensor<1x8x128x128xf16>
+  }
+}
+
+// -----
+
+// A rank-2 [S,T] mask is viewed as [1,1,S,T]. Both batch and head dimensions
+// then use the runtime's existing broadcast support.
+module {
+  func.func @main_graph(
+      %query: tensor<1x2x2048xf16>,
+      %key: tensor<1x2x1024xf16>,
+      %value: tensor<1x2x1024xf16>,
+      %attn_mask: tensor<2x128xf16>,
+      %past_key: tensor<1x8x126x128xf16>,
+      %past_value: tensor<1x8x126x128xf16>)
+      -> (tensor<1x2x2048xf16>, tensor<1x8x128x128xf16>,
+          tensor<1x8x128x128xf16>) {
+    %out:3 = "onnx.Attention"(%query, %key, %value, %attn_mask, %past_key,
+                              %past_value)
+        {q_num_heads = 16 : si64,
+         kv_num_heads = 8 : si64,
+         is_causal = 1 : si64}
+        : (tensor<1x2x2048xf16>, tensor<1x2x1024xf16>,
+           tensor<1x2x1024xf16>, tensor<2x128xf16>,
+           tensor<1x8x126x128xf16>, tensor<1x8x126x128xf16>)
+        -> (tensor<1x2x2048xf16>, tensor<1x8x128x128xf16>,
+            tensor<1x8x128x128xf16>)
+
+    // CHECK-LABEL: func.func @main_graph
+    // CHECK: tensor.expand_shape %{{.*}} {{\[\[}}0, 1, 2], [3]] output_shape [1, 1, 2, 128] : tensor<2x128xf16> into tensor<1x1x2x128xf16>
+    // CHECK: hip.gqa
+    // CHECK-SAME: ins({{.*}}tensor<1x1x2x128xf16>) outs
+    // CHECK-NOT: onnx.Attention
+
+    return %out#0, %out#1, %out#2
+        : tensor<1x2x2048xf16>, tensor<1x8x128x128xf16>,
           tensor<1x8x128x128xf16>
   }
 }
