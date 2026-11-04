@@ -46,10 +46,16 @@ env:
   SCCACHE_CACHE_SIZE: "200M"
 
 jobs:
-  build-linux-rmt:
+  # LLVM and ONNX Runtime finish in this job so their caches are saved before
+  # the six-hour runner limit. The hip-ep link is the next job and gets its
+  # own budget. A single job built both, then died while linking and never
+  # stored the LLVM prefix.
+  deps-linux-rmt:
     # No draft-PR gate: the cache-priming strategy needs every PR push.
     runs-on: ubuntu-latest
     continue-on-error: true
+    outputs:
+      llvm_commit: ${{ steps.llvm.outputs.commit }}
     steps:
       # MorphiZen is vendored in-tree as a git subtree under morphizen,
       # so no deploy key or submodule initialization is needed.
@@ -300,6 +306,75 @@ jobs:
           mkdir -p "${{ runner.workspace }}/ort-install/wheels"
           cp "$ORT_WHEEL" "${{ runner.workspace }}/ort-install/wheels/"
           echo "Cached ORT wheel: $(basename "$ORT_WHEEL")"
+
+  build-linux-rmt:
+    needs: deps-linux-rmt
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: false
+          fetch-depth: 1
+          show-progress: false
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+        with:
+          tool-cache: false
+          docker-images: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          swap-storage: false
+
+      - name: Setup Python 3.14
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.14"
+
+      - name: Install build toolchain
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ninja-build git ca-certificates curl
+          python3 -m pip install --upgrade pip
+          python3 -m pip install cmake ninja lit numpy wheel setuptools packaging requests
+          cmake --version
+          ninja --version
+
+      - name: Prepare sccache local cache
+        run: |
+          echo "SCCACHE_DIR=${{ runner.workspace }}/sccache-dir" >> $GITHUB_ENV
+          echo "SCCACHE_KEY_DATE=$(date -u +'%Y%m%d')" >> $GITHUB_ENV
+
+      - name: Restore sccache directory
+        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/sccache-dir
+          key: sccache-linux-rmt-${{ env.SCCACHE_KEY_DATE }}
+          restore-keys: |
+            sccache-linux-rmt-
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Restore LLVM install prefix
+        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/llvm-install
+          key: linux-llvm-amdgpu-${{ needs.deps-linux-rmt.outputs.llvm_commit }}
+          fail-on-cache-miss: true
+
+      - name: Restore ONNX Runtime install prefix
+        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/ort-install
+          key: linux-ort-${{ env.ONNXRUNTIME_VERSION }}-ortpr-${{ env.ONNXRUNTIME_PR_PATCHES }}-whl
+          fail-on-cache-miss: true
 
       # TheRock is auto-downloaded fresh by cmake/deps.cmake during the configure
       # (not cached).

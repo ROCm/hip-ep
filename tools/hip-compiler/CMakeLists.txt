@@ -13,6 +13,7 @@ add_dependencies(hip-compiler
   HipPassesIncGen
 )
 
+hip_link_rocmlir_closure(hip-compiler)
 target_link_libraries(hip-compiler PRIVATE
   LibHipCompiler
   LLVMSupport

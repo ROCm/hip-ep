@@ -40,15 +40,6 @@ if(ENABLE_ROCMLIRTRITON)
   # out, then fail as though the machine had no GPU.
   set(HIPDNN_EP_ROCMLIR_AUTOTUNE_AVAILABLE OFF CACHE INTERNAL
       "RocMlirAutotune.cpp compiled its real implementation, not its stub")
-  # rocMLIR/Triton's per-library static archives have circular dependencies,
-  # so a single-pass link leaves undefined symbols. GNU/BSD-style linkers need
-  # an explicit RESCAN group; MSVC-style linkers (link.exe / lld-link) rescan
-  # automatically and do not support the feature.
-  if(CMAKE_LINK_GROUP_USING_RESCAN_SUPPORTED)
-    set(_rocmlir_link_closure "$<LINK_GROUP:RESCAN,${HIPDNN_ROCMLIR_LINK_LIBS}>")
-  else()
-    set(_rocmlir_link_closure "${HIPDNN_ROCMLIR_LINK_LIBS}")
-  endif()
   target_link_libraries(LibHipCompiler PUBLIC
     HipToTosa
     # rocMLIR/Triton reference this MLIR extension (registerInlinerExtension)
@@ -60,20 +51,35 @@ if(ENABLE_ROCMLIRTRITON)
     # it so a standard MLIR dependency does not hinge on that.
     MLIRFuncTransforms
   )
-  # The rocMLIR/Triton closure is linked PRIVATE, not PUBLIC, on purpose. Many
-  # of its Triton members are CMake OBJECT libraries (add_triton_object), whose
-  # INTERFACE $<TARGET_OBJECTS> are absorbed into any STATIC library that links
-  # them. Linked PRIVATE, the objects are bundled into libLibHipCompiler.a once
-  # and exposed to consumers only as $<LINK_ONLY> link dependencies, so the
-  # several WHOLE_ARCHIVE'd plugin archives that link LibHipCompiler
-  # (HipCInterface, custom-op-mlir, level-1-pass) no longer each bundle their
-  # own copy of the Triton objects. Linked PUBLIC, those copies collide at the
-  # final EP link with the object libraries' direct expansion and with each
-  # other, producing duplicate-symbol errors. Consumers still resolve the
-  # symbols on demand from libLibHipCompiler.a (as the Windows STATIC-library
-  # build already does); only compile-time include propagation is dropped,
-  # which hip-rocmlir-compiler restores by naming the closure itself.
-  target_link_libraries(LibHipCompiler PRIVATE "${_rocmlir_link_closure}")
+  # Triton libraries are OBJECT libraries (add_triton_object) whose interface
+  # publishes $<TARGET_OBJECTS>. Linking that interface into this STATIC
+  # library re-exports the objects, so every WHOLE_ARCHIVE'd plugin that links
+  # LibHipCompiler (HipCInterface, custom-op-mlir, level-1-pass) archives its
+  # own copy, and the EP link also receives the objects directly. MSVC then
+  # reports LNK2005. Archive the objects into this library only, and leave the
+  # non-object closure for final binaries (see hip_link_rocmlir_closure).
+  set(_rocmlir_objects "")
+  set(_rocmlir_static "")
+  foreach(_lib IN LISTS HIPDNN_ROCMLIR_LINK_LIBS)
+    if(NOT TARGET "${_lib}")
+      continue()
+    endif()
+    get_target_property(_rocmlir_type "${_lib}" TYPE)
+    if(_rocmlir_type STREQUAL "OBJECT_LIBRARY")
+      list(APPEND _rocmlir_objects "$<TARGET_OBJECTS:${_lib}>")
+    else()
+      list(APPEND _rocmlir_static "${_lib}")
+    endif()
+    target_include_directories(LibHipCompiler SYSTEM PRIVATE
+      $<TARGET_PROPERTY:${_lib},INTERFACE_INCLUDE_DIRECTORIES>)
+    target_compile_definitions(LibHipCompiler PRIVATE
+      $<TARGET_PROPERTY:${_lib},INTERFACE_COMPILE_DEFINITIONS>)
+  endforeach()
+  if(_rocmlir_objects)
+    target_sources(LibHipCompiler PRIVATE ${_rocmlir_objects})
+  endif()
+  set(HIPDNN_ROCMLIR_STATIC_LINK_LIBS "${_rocmlir_static}" CACHE INTERNAL
+      "Non-object rocMLIR/Triton libraries linked by final binaries" FORCE)
   # TritonToHsaco dlopens this library by name at kernel-compile time. The
   # link closure does not pull the custom target in, so depend on it directly.
   if(TARGET triton_amd_codegen_lib)
@@ -250,6 +256,55 @@ if(TARGET hipdnn_graph_runtime)
         "HIPDNN_GRAPH_RUNTIME_LIB_PATH=\"$<TARGET_LINKER_FILE:hipdnn_graph_runtime>\""
     )
     target_link_libraries(LibHipCompiler PUBLIC OnnxToHipDNN)
+endif()
+
+# Final binaries link the non-object rocMLIR/Triton libraries once. Static
+# plugins must not: archiving those objects into more than one WHOLE_ARCHIVE
+# input duplicates them in hipgpu.dll (LNK2005 / multiple definition).
+function(hip_link_rocmlir_closure target)
+  if(NOT ENABLE_ROCMLIRTRITON)
+    return()
+  endif()
+  if("${HIPDNN_ROCMLIR_STATIC_LINK_LIBS}" STREQUAL "")
+    return()
+  endif()
+  # rocMLIR/Triton's static archives have circular dependencies, so a
+  # single-pass link leaves undefined symbols. GNU/BSD-style linkers need an
+  # explicit RESCAN group; MSVC-style linkers rescan automatically and do not
+  # support the feature.
+  if(CMAKE_LINK_GROUP_USING_RESCAN_SUPPORTED)
+    target_link_libraries("${target}" PRIVATE
+      "$<LINK_GROUP:RESCAN,${HIPDNN_ROCMLIR_STATIC_LINK_LIBS}>")
+  else()
+    target_link_libraries("${target}" PRIVATE ${HIPDNN_ROCMLIR_STATIC_LINK_LIBS})
+  endif()
+endfunction()
+
+function(hip_rocmlir_apply_includes target)
+  if(NOT ENABLE_ROCMLIRTRITON)
+    return()
+  endif()
+  foreach(_lib IN LISTS HIPDNN_ROCMLIR_LINK_LIBS)
+    if(NOT TARGET "${_lib}")
+      continue()
+    endif()
+    target_include_directories("${target}" SYSTEM PRIVATE
+      $<TARGET_PROPERTY:${_lib},INTERFACE_INCLUDE_DIRECTORIES>)
+    target_compile_definitions("${target}" PRIVATE
+      $<TARGET_PROPERTY:${_lib},INTERFACE_COMPILE_DEFINITIONS>)
+  endforeach()
+endfunction()
+
+# The EP target is created later, under morphizen. Attach the closure once the
+# top-level directory has finished configuring.
+function(hip_link_rocmlir_into_ep)
+  if(TARGET "${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET}")
+    hip_link_rocmlir_closure("${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET}")
+  endif()
+endfunction()
+if(ENABLE_ROCMLIRTRITON)
+  cmake_language(DEFER DIRECTORY "${CMAKE_SOURCE_DIR}"
+    CALL hip_link_rocmlir_into_ep)
 endif()
 
 # Set folder for IDE organization

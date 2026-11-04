@@ -15,6 +15,7 @@ add_dependencies(hip-mlir-opt
   HipOpsIncGen
   HipPassesIncGen
 )
+hip_link_rocmlir_closure(hip-mlir-opt)
 target_link_libraries(hip-mlir-opt PRIVATE
   HipSupport
   LibHipCompiler

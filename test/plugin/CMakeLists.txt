@@ -30,6 +30,7 @@ target_include_directories(test_static_plugins PRIVATE
   ${CMAKE_SOURCE_DIR}/morphizen/morphizen-foundation/include
 )
 
+hip_link_rocmlir_closure(test_static_plugins)
 target_link_libraries(test_static_plugins PRIVATE
   LibHipCompiler
   hip_ep_sample_plugin
