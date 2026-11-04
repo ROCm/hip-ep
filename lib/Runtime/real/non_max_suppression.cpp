@@ -60,8 +60,10 @@ bool copyToHost(void *dst, const void *src, size_t bytes, hipStream_t stream,
                 const char *what) {
   if (bytes == 0)
     return true;
-  hipError_t err =
-      hipMemcpyAsync(dst, src, bytes, hipMemcpyDeviceToHost, stream);
+  // hipMemcpyDefault, not DeviceToHost: a host-scalar input lives in mapped
+  // host scratch, and an explicit device-to-host copy of that pointer fails
+  // with `invalid argument`.
+  hipError_t err = hipMemcpyAsync(dst, src, bytes, hipMemcpyDefault, stream);
   if (err != hipSuccess) {
     fprintf(stderr, "[REAL] wrap_non_max_suppression: %s D2H failed: %s\n",
             what, hipGetErrorString(err));
@@ -134,7 +136,9 @@ int wrap_non_max_suppression(
   std::vector<int64_t> triples;
   std::vector<int64_t> order;
   std::vector<Corners> kept;
-  if (maxOutput > 0) {
+  // num_boxes == 0 leaves hostScores empty. Indexing it for a class pointer
+  // is out of bounds; the count written below is already zero.
+  if (maxOutput > 0 && num_boxes > 0) {
     for (int64_t batch = 0; batch < num_batches; ++batch) {
       std::vector<Corners> corners(static_cast<size_t>(num_boxes));
       for (int64_t box = 0; box < num_boxes; ++box)

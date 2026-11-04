@@ -9,7 +9,9 @@ module {
   }
 
   // All five inputs present, dynamic box count (SSD postprocessor shape).
-  // The capacity is B * C * S rows; the readback count slices it.
+  // The capacity is B * C * S rows. The returned tensor is a fresh buffer
+  // sized by the readback count, so a graph output is [N, 3] and not the
+  // capacity.
   func.func @nms_all_inputs(%boxes: tensor<1x?x4xf32>, %scores: tensor<1x1x?xf32>,
                             %max: tensor<i64>, %iou: tensor<f32>,
                             %score: tensor<f32>) -> tensor<?x3xi64> {
@@ -26,7 +28,9 @@ module {
   // CHECK: %[[CNT:.*]] = tensor.empty() : tensor<i32>
   // CHECK: %[[NMS:.*]]:2 = hip.non_max_suppression(%[[CTX]]) ins(%[[B]], %[[S]], %[[M]], %[[I]], %[[T]] : tensor<1x?x4xf32>, tensor<1x1x?xf32>, tensor<i64>, tensor<f32>, tensor<f32>) outs(%[[SEL]], %[[CNT]] : tensor<?x3xi64>, tensor<i32>) {center_point_box = 0 : i64, has_score_threshold = true}
   // CHECK: %[[N:.*]] = hip.readback_dim(%[[CTX]], %[[NMS]]#1 : tensor<i32>) -> index
-  // CHECK: tensor.extract_slice %[[NMS]]#0[0, 0] [%[[N]], 3] [1, 1] : tensor<?x3xi64> to tensor<?x3xi64>
+  // CHECK: %[[ROWS:.*]] = tensor.empty(%[[N]]) : tensor<?x3xi64>
+  // CHECK: %[[SLICE:.*]] = tensor.extract_slice %[[NMS]]#0[0, 0] [%[[N]], 3] [1, 1] : tensor<?x3xi64> to tensor<?x3xi64>
+  // CHECK: tensor.insert_slice %[[SLICE]] into %[[ROWS]][0, 0] [%[[N]], 3] [1, 1] : tensor<?x3xi64> into tensor<?x3xi64>
 
   // Only boxes and scores: absent inputs become constants, and score
   // filtering is disabled by attribute.
@@ -42,4 +46,21 @@ module {
   // CHECK: tensor.empty(%{{.*}}) : tensor<?x3xi64>
   // CHECK: hip.non_max_suppression(%{{.*}}) ins(%{{.*}}, %{{.*}}, %[[MAX]], %{{.*}}, %{{.*}} : tensor<2x6x4xf32>, tensor<2x3x6xf32>, tensor<i64>, tensor<f32>, tensor<f32>)
   // CHECK-SAME: {center_point_box = 1 : i64, has_score_threshold = false}
+  // CHECK: %[[N:.*]] = hip.readback_dim
+  // CHECK: tensor.empty(%[[N]]) : tensor<?x3xi64>
+  // CHECK: tensor.insert_slice
+
+  // A non-scalar max_output_boxes_per_class does not match. Defaults must
+  // not be created before that check, so the op is left unchanged.
+  func.func @nms_bad_max(%boxes: tensor<1x1x4xf32>, %scores: tensor<1x1x1xf32>,
+                         %max: tensor<2xi64>) -> tensor<?x3xi64> {
+    %y = "onnx.NonMaxSuppression"(%boxes, %scores, %max)
+        : (tensor<1x1x4xf32>, tensor<1x1x1xf32>, tensor<2xi64>) -> tensor<?x3xi64>
+    return %y : tensor<?x3xi64>
+  }
+
+  // CHECK-LABEL: func.func @nms_bad_max
+  // CHECK: onnx.NonMaxSuppression
+  // CHECK-NOT: hip.constant
+  // CHECK-NOT: hip.non_max_suppression
 }

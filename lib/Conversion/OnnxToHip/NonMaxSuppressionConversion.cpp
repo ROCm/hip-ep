@@ -48,7 +48,9 @@ static Value dimOrConstant(PatternRewriter &rewriter, Location loc, Value value,
 // After:  %r:2 = hip.non_max_suppression(%ctx) ins(...)
 //                    outs(%empty_BxCxS_by_3, %count)
 //         %n = hip.readback_dim(%ctx) %r#1
-//         %y = tensor.extract_slice %r#0[0, 0] [%n, 3] [1, 1]
+//         %rows = tensor.empty(%n) : tensor<?x3xi64>
+//         %y = tensor.insert_slice
+//                (tensor.extract_slice %r#0[0, 0] [%n, 3]) into %rows
 struct NonMaxSuppressionToHip : public RewritePattern {
   NonMaxSuppressionToHip(MLIRContext *ctx)
       : RewritePattern("onnx.NonMaxSuppression", /*benefit=*/1, ctx) {}
@@ -85,29 +87,14 @@ struct NonMaxSuppressionToHip : public RewritePattern {
     if (centerPointBox != 0 && centerPointBox != 1)
       return rewriter.notifyMatchFailure(op, "center_point_box must be 0 or 1");
 
-    Location loc = op->getLoc();
-    auto i64Scalar = RankedTensorType::get({}, i64);
-    auto f32Scalar = RankedTensorType::get({}, f32);
-
-    // Absent max_output_boxes_per_class selects nothing; absent iou_threshold
-    // is 0. An absent score_threshold disables score filtering entirely, which
-    // no threshold value reproduces, so it is carried as an attribute.
-    Value maxOutput = isAbsent(op, 2)
-                          ? createScalarConstant(rewriter, loc, i64Scalar,
-                                                 rewriter.getI64IntegerAttr(0))
-                          : op->getOperand(2);
-    Value iouThreshold =
-        isAbsent(op, 3) ? createScalarConstant(rewriter, loc, f32Scalar,
-                                               rewriter.getF32FloatAttr(0.0f))
-                        : op->getOperand(3);
-    bool hasScoreThreshold = !isAbsent(op, 4);
-    Value scoreThreshold =
-        hasScoreThreshold
-            ? op->getOperand(4)
-            : createScalarConstant(rewriter, loc, f32Scalar,
-                                   rewriter.getF32FloatAttr(0.0f));
-    if (!isScalarOf(maxOutput, i64) || !isScalarOf(iouThreshold, f32) ||
-        !isScalarOf(scoreThreshold, f32))
+    // Reject a supplied optional input before building defaults. A failure
+    // after rewriter.create would leave those constants in the graph.
+    Value maxOutput = isAbsent(op, 2) ? Value() : op->getOperand(2);
+    Value iouThreshold = isAbsent(op, 3) ? Value() : op->getOperand(3);
+    Value scoreThreshold = isAbsent(op, 4) ? Value() : op->getOperand(4);
+    if ((maxOutput && !isScalarOf(maxOutput, i64)) ||
+        (iouThreshold && !isScalarOf(iouThreshold, f32)) ||
+        (scoreThreshold && !isScalarOf(scoreThreshold, f32)))
       return rewriter.notifyMatchFailure(
           op, "max_output_boxes_per_class must be i64 and the thresholds f32 "
               "one-element tensors");
@@ -116,6 +103,24 @@ struct NonMaxSuppressionToHip : public RewritePattern {
     if (failed(ctxOrFailure))
       return failure();
     Value context = *ctxOrFailure;
+
+    Location loc = op->getLoc();
+    auto i64Scalar = RankedTensorType::get({}, i64);
+    auto f32Scalar = RankedTensorType::get({}, f32);
+
+    // Absent max_output_boxes_per_class selects nothing; absent iou_threshold
+    // is 0. An absent score_threshold disables score filtering entirely, which
+    // no threshold value reproduces, so it is carried as an attribute.
+    bool hasScoreThreshold = static_cast<bool>(scoreThreshold);
+    if (!maxOutput)
+      maxOutput = createScalarConstant(rewriter, loc, i64Scalar,
+                                       rewriter.getI64IntegerAttr(0));
+    if (!iouThreshold)
+      iouThreshold = createScalarConstant(rewriter, loc, f32Scalar,
+                                          rewriter.getF32FloatAttr(0.0f));
+    if (!scoreThreshold)
+      scoreThreshold = createScalarConstant(rewriter, loc, f32Scalar,
+                                            rewriter.getF32FloatAttr(0.0f));
 
     // Every (batch, class, box) triple selected is the worst case.
     Value capacity = arith::MulIOp::create(
@@ -146,9 +151,18 @@ struct NonMaxSuppressionToHip : public RewritePattern {
                                           rewriter.getIndexAttr(3)};
     SmallVector<OpFoldResult, 2> strides = {rewriter.getIndexAttr(1),
                                             rewriter.getIndexAttr(1)};
-    Value trimmed = tensor::ExtractSliceOp::create(rewriter, loc, capacityType,
-                                                   hipOp.getResult(0), offsets,
-                                                   sizes, strides);
+    // The capacity buffer stays internal. The returned tensor is a fresh
+    // [N, 3] allocation, so a graph output is sized from the selected-row
+    // count rather than from B * C * S.
+    Value selectedRows = tensor::EmptyOp::create(
+        rewriter, loc, capacityType.getShape(), i64, ValueRange{count});
+    Value slice = tensor::ExtractSliceOp::create(rewriter, loc, capacityType,
+                                                 hipOp.getResult(0), offsets,
+                                                 sizes, strides);
+    Value trimmed =
+        tensor::InsertSliceOp::create(rewriter, loc, slice, selectedRows,
+                                      offsets, sizes, strides)
+            .getResult();
     if (trimmed.getType() != resultType)
       trimmed = tensor::CastOp::create(rewriter, loc, resultType, trimmed);
     rewriter.replaceOp(op, trimmed);
