@@ -63,4 +63,14 @@ module {
                      outs(%output : memref<8xf64, 1>)
     return
   }
+  func.func @swiglu_promoted_f16(%ctx: !hip.context,
+      %gate: memref<8x128xf16, 1>, %up: memref<8x128xf16, 1>,
+      %output: memref<8x128xf16, 1>) {
+    // CHECK-LABEL: llvm.func @swiglu_promoted_f16
+    // CHECK: llvm.call @wrap_swiglu_promoted
+    hip.swiglu(%ctx)
+        ins(%gate, %up : memref<8x128xf16, 1>, memref<8x128xf16, 1>)
+        outs(%output : memref<8x128xf16, 1>) {promote_activation = true}
+    return
+  }
 }
