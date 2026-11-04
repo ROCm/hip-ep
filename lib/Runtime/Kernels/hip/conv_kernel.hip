@@ -199,6 +199,12 @@ struct ConvParams {
   // has to split back into a row and a column of that 2-D grid.
   int32_t nBlkW;
   FastDiv rBlkW;
+
+  // Split-K WMMA only: the contraction is cut into kSplits chunks of kChunk
+  // (a multiple of the 16-wide WMMA step, so no step straddles two chunks),
+  // one per grid-z slice.
+  int32_t kSplits;
+  int64_t kChunk;
 };
 
 // The input coordinate that kernel tap (0,0,0) of an output position reads.
@@ -691,12 +697,19 @@ __device__ __forceinline__ half16 loadWmmaFrag(const _Float16 *row, int pair) {
 // VEC selects the vectorised im2col stage. It is a template parameter rather
 // than a branch so that only one of the two sets of hoisted per-thread origins
 // is materialised into registers.
-template <int BM, int BN, int WM, int WN, bool VEC>
+//
+// SPLITK makes each grid-z slice contract one kChunk of K and store its fp32
+// partial sums, without bias, to `part` as [kSplits][N][Cout][Nout];
+// conv_splitk_reduce_kernel adds the chunks and the bias. That is for shapes
+// whose output is too small to cover the device -- few channels times a small
+// feature map -- but whose contraction is long, where the unsplit grid leaves
+// most CUs idle for the whole of a long K loop.
+template <int BM, int BN, int WM, int WN, bool VEC, bool SPLITK = false>
 __global__ __launch_bounds__((BM / (WM * kWmma)) * (BN / (WN * kWmma)) * 32)
 void conv_wmma_kernel(const __half *__restrict__ x,
                       const __half *__restrict__ w,
                       const __half *__restrict__ bias, __half *__restrict__ y,
-                      ConvParams pr) {
+                      ConvParams pr, float *__restrict__ part) {
   constexpr int kWavesM = BM / (WM * kWmma);
   constexpr int kWavesN = BN / (WN * kWmma);
   constexpr int kThreads = kWavesM * kWavesN * 32;
@@ -750,7 +763,15 @@ void conv_wmma_kernel(const __half *__restrict__ x,
   const int64_t n0 = static_cast<int64_t>(blkN) * BN;
   const int64_t m0 = static_cast<int64_t>(blkM) * BM;
   int64_t nbatch, g;
-  blockBases(pr, blockIdx.z, nbatch, g);
+  int64_t split = 0, kLo = 0, kHi = pr.K;
+  if constexpr (SPLITK) {
+    split = blockIdx.z % pr.kSplits;
+    kLo = split * pr.kChunk;
+    kHi = kLo + pr.kChunk < pr.K ? kLo + pr.kChunk : pr.K;
+    blockBases(pr, blockIdx.z / pr.kSplits, nbatch, g);
+  } else {
+    blockBases(pr, blockIdx.z, nbatch, g);
+  }
 
   // Filter staging: contiguous run of K per row, as in the scalar kernel.
   constexpr int kVecA = (BM * kWmma) / kThreads;
@@ -808,10 +829,10 @@ void conv_wmma_kernel(const __half *__restrict__ x,
     for (int j = 0; j < WN; ++j) acc[i][j] = (float8)0.0f;
 
   int cur = 0;
-  if (tid < kWmma) ks[0][tid] = makeKSlice(pr, tid);
+  if (tid < kWmma) ks[0][tid] = makeKSlice(pr, kLo + tid);
   __syncthreads();
 
-  for (int64_t kBase = 0; kBase < pr.K; kBase += kWmma) {
+  for (int64_t kBase = kLo; kBase < kHi; kBase += kWmma) {
     const int64_t wBase = wRowBase + kBase + kOffA;
     const int64_t kRem = pr.K - kBase - kOffA;
 #pragma unroll
@@ -899,10 +920,34 @@ void conv_wmma_kernel(const __half *__restrict__ x,
                           hipdnn_wmma_acc_row(pair, e);
         if (m >= pr.MPerGroup) continue;
         const int64_t oc = g * pr.MPerGroup + m;
-        const float bv = bias ? to_float<__half>(bias[oc]) : 0.0f;
-        y[yBatchBase + oc * pr.Nout + o] = from_float<__half>(acc[i][j][e] + bv);
+        if constexpr (SPLITK) {
+          part[(split * pr.N * pr.Cout + nbatch * pr.Cout + oc) * pr.Nout + o] =
+              acc[i][j][e];
+        } else {
+          const float bv = bias ? to_float<__half>(bias[oc]) : 0.0f;
+          y[yBatchBase + oc * pr.Nout + o] =
+              from_float<__half>(acc[i][j][e] + bv);
+        }
       }
     }
+  }
+}
+
+// Sums the kSplits fp32 partials of a split-K conv_wmma_kernel launch, adds
+// the bias and stores fp16. `count` is N * Cout * Nout, the size of one chunk.
+__global__ void conv_splitk_reduce_kernel(const float *__restrict__ part,
+                                          const __half *__restrict__ bias,
+                                          __half *__restrict__ y,
+                                          int64_t count, int32_t splits,
+                                          int64_t cout, int64_t nout) {
+  for (int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+       i < count; i += static_cast<int64_t>(gridDim.x) * blockDim.x) {
+    float sum = 0.0f;
+    for (int32_t s = 0; s < splits; ++s)
+      sum += part[s * count + i];
+    if (bias)
+      sum += to_float<__half>(bias[(i / nout) % cout]);
+    y[i] = from_float<__half>(sum);
   }
 }
 
@@ -1333,7 +1378,7 @@ static void launchWmma(hipStream_t stream, const void *x, const void *w,
                          static_cast<const __half *>(x),
                          static_cast<const __half *>(w),
                          static_cast<const __half *>(bias),
-                         static_cast<__half *>(y), pr);
+                         static_cast<__half *>(y), pr, nullptr);
       return;
     }
   }
@@ -1341,7 +1386,77 @@ static void launchWmma(hipStream_t stream, const void *x, const void *w,
                      dim3(threads), 0, stream, static_cast<const __half *>(x),
                      static_cast<const __half *>(w),
                      static_cast<const __half *>(bias),
-                     static_cast<__half *>(y), pr);
+                     static_cast<__half *>(y), pr, nullptr);
+}
+
+// Split-K tile: 64 output channels by 64 positions, which an 8x8 feature map
+// fills exactly where every wider column tile above leaves most lanes idle.
+constexpr int kSplitBM = 64;
+constexpr int kSplitBN = 64;
+// A chunk shorter than this spends more on the extra partial-sum traffic than
+// the extra blocks recover.
+constexpr int64_t kSplitMinChunk = 512;
+constexpr int kSplitMax = 16;
+
+// How many K chunks a fp16 convolution should be cut into, or 0 to leave it to
+// the ladder. Splitting is for grids that cannot fill the device on their own:
+// below two blocks per CU the unsplit kernels run a long contraction on a
+// fraction of the device, so the grid is grown to about four per CU.
+static int chooseSplitK(const ConvParams &pr, int64_t cus) {
+  if (pr.group != 1 || pr.MPerGroup < kSplitBM || pr.N * pr.Nout <= 0 ||
+      pr.K <= 0)
+    return 0;
+  const int64_t blocks = ((pr.MPerGroup + kSplitBM - 1) / kSplitBM) *
+                         ((pr.Nout + kSplitBN - 1) / kSplitBN) * pr.N;
+  if (blocks >= 2 * cus)
+    return 0;
+  int64_t splits = (4 * cus + blocks - 1) / blocks;
+  splits = splits < kSplitMax ? splits : kSplitMax;
+  while (splits > 1 && pr.K / splits < kSplitMinChunk)
+    --splits;
+  return splits > 1 ? static_cast<int>(splits) : 0;
+}
+
+static size_t splitKWorkspaceBytes(const ConvParams &pr, int splits) {
+  return static_cast<size_t>(splits) * pr.N * pr.Cout * pr.Nout * sizeof(float);
+}
+
+static int launchWmmaSplitK(hipStream_t stream, const void *x, const void *w,
+                            const void *bias, void *y, const ConvParams &base,
+                            int splits, float *part) {
+  constexpr int threads =
+      (kSplitBM / (2 * kWmma)) * (kSplitBN / (2 * kWmma)) * 32;
+  ConvParams pr = withTileGrid(base, kSplitBM, kSplitBN);
+  pr.kSplits = splits;
+  pr.kChunk = ((pr.K + splits - 1) / splits + kWmma - 1) / kWmma * kWmma;
+  logPick("wmma-splitk", pr);
+  (void)hipGetLastError();
+  dim3 grid(swizzledGridX(pr), 1u,
+            static_cast<unsigned>(pr.N * pr.group * splits));
+  if (pr.innerVec)
+    hipLaunchKernelGGL((conv_wmma_kernel<kSplitBM, kSplitBN, 2, 2, true, true>),
+                       grid, dim3(threads), 0, stream,
+                       static_cast<const __half *>(x),
+                       static_cast<const __half *>(w), nullptr, nullptr, pr,
+                       part);
+  else
+    hipLaunchKernelGGL((conv_wmma_kernel<kSplitBM, kSplitBN, 2, 2, false, true>),
+                       grid, dim3(threads), 0, stream,
+                       static_cast<const __half *>(x),
+                       static_cast<const __half *>(w), nullptr, nullptr, pr,
+                       part);
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess)
+    return static_cast<int>(err);
+  const int64_t count = pr.N * pr.Cout * pr.Nout;
+  constexpr int kReduceThreads = 256;
+  const int64_t blocks = (count + kReduceThreads - 1) / kReduceThreads;
+  hipLaunchKernelGGL(conv_splitk_reduce_kernel,
+                     dim3(static_cast<unsigned>(blocks < 65535 ? blocks : 65535)),
+                     dim3(kReduceThreads), 0, stream, part,
+                     static_cast<const __half *>(bias), static_cast<__half *>(y),
+                     count, splits, pr.Cout, pr.Nout);
+  return static_cast<int>(hipGetLastError());
 }
 
 constexpr int kWinKMax = 3; // largest kernel extent the window kernel stages
@@ -1745,37 +1860,17 @@ static int launch_conv_i32(void *stream, const void *input, const void *weights,
   return static_cast<int>(err);
 }
 
-extern "C" int hip_conv(void *stream, const void *input, const void *weights,
-                        const void *bias, void *output, int hip_dtype,
-                        int spatial_rank, int64_t N, int64_t Cin, int64_t Cout,
-                        int64_t in_d0, int64_t in_d1, int64_t in_d2,
-                        int64_t out_d0, int64_t out_d1, int64_t out_d2,
-                        int64_t k0, int64_t k1, int64_t k2, int64_t s0,
-                        int64_t s1, int64_t s2, int64_t p0, int64_t p1,
-                        int64_t p2, int64_t dil0, int64_t dil1, int64_t dil2,
-                        int64_t group) {
-  if (spatial_rank < 1 || spatial_rank > 3) {
-    fprintf(stderr, "[custom_kernels] hip_conv: unsupported spatial_rank=%d\n",
-            spatial_rank);
-    return -1;
-  }
-  if (!input || !weights || !output) {
-    fprintf(stderr, "[custom_kernels] hip_conv: null input/weights/output\n");
-    return -1;
-  }
-  if (group < 1 || Cin % group != 0 || Cout % group != 0) {
-    fprintf(stderr,
-            "[custom_kernels] hip_conv: group=%lld does not divide Cin=%lld / "
-            "Cout=%lld\n",
-            (long long)group, (long long)Cin, (long long)Cout);
-    return -1;
-  }
-  if (hip_dtype == HIP_DTYPE_INT32)
-    return launch_conv_i32(stream, input, weights, bias, output, spatial_rank,
-                           N, Cin, Cout, in_d0, in_d1, in_d2, out_d0, out_d1,
-                           out_d2, k0, k1, k2, s0, s1, s2, p0, p1, p2, dil0,
-                           dil1, dil2, group);
-
+// The kernel descriptor for one convolution. hip_conv and
+// hip_conv_workspace_bytes both build it here, so they reach the same split-K
+// decision.
+static ConvParams makeConvParams(int spatial_rank, int64_t N, int64_t Cin,
+                                 int64_t Cout, int64_t in_d0, int64_t in_d1,
+                                 int64_t in_d2, int64_t out_d0, int64_t out_d1,
+                                 int64_t out_d2, int64_t k0, int64_t k1,
+                                 int64_t k2, int64_t s0, int64_t s1, int64_t s2,
+                                 int64_t p0, int64_t p1, int64_t p2,
+                                 int64_t dil0, int64_t dil1, int64_t dil2,
+                                 int64_t group) {
   ConvParams pr{};
   pr.N = N;
   pr.Cin = Cin;
@@ -1820,6 +1915,73 @@ extern "C" int hip_conv(void *stream, const void *input, const void *weights,
   // Runs are only contiguous at unit stride, and only worth forming when a row
   // is at least one run long. Everything else keeps the scalar stage.
   pr.innerVec = (innerS == 1 && innerOut >= 8 && pr.Nout > 0) ? 1 : 0;
+  return pr;
+}
+
+// K chunks for a fp16 convolution, or 0 when it runs unsplit. Depthwise shapes
+// keep their own kernel: their contraction is a single channel.
+static int splitKFor(const ConvParams &pr) {
+  if (isDepthwise(pr))
+    return 0;
+  return chooseSplitK(pr, deviceUnitCount() * kUnitsPerWgp);
+}
+
+extern "C" size_t hip_conv_workspace_bytes(
+    int hip_dtype, int spatial_rank, int64_t N, int64_t Cin,
+    int64_t Cout, int64_t in_d0, int64_t in_d1,
+    int64_t in_d2, int64_t out_d0, int64_t out_d1,
+    int64_t out_d2, int64_t k0, int64_t k1,
+    int64_t k2, int64_t s0, int64_t s1, int64_t s2,
+    int64_t p0, int64_t p1, int64_t p2,
+    int64_t dil0, int64_t dil1, int64_t dil2,
+    int64_t group) {
+  if (hip_dtype != HIP_DTYPE_FLOAT16 || spatial_rank < 1 || spatial_rank > 3 ||
+      group < 1 || Cin % group != 0 || Cout % group != 0)
+    return 0;
+  const ConvParams pr =
+      makeConvParams(spatial_rank, N, Cin, Cout, in_d0, in_d1, in_d2, out_d0,
+                     out_d1, out_d2, k0, k1, k2, s0, s1, s2, p0, p1, p2, dil0,
+                     dil1, dil2, group);
+  const int splits = splitKFor(pr);
+  return splits > 0 ? splitKWorkspaceBytes(pr, splits) : 0;
+}
+
+extern "C" int hip_conv(void *stream, const void *input, const void *weights,
+                        const void *bias, void *output, int hip_dtype,
+                        int spatial_rank, int64_t N, int64_t Cin, int64_t Cout,
+                        int64_t in_d0, int64_t in_d1, int64_t in_d2,
+                        int64_t out_d0, int64_t out_d1, int64_t out_d2,
+                        int64_t k0, int64_t k1, int64_t k2, int64_t s0,
+                        int64_t s1, int64_t s2, int64_t p0, int64_t p1,
+                        int64_t p2, int64_t dil0, int64_t dil1, int64_t dil2,
+                        int64_t group, void *workspace,
+                        size_t workspace_bytes) {
+  if (spatial_rank < 1 || spatial_rank > 3) {
+    fprintf(stderr, "[custom_kernels] hip_conv: unsupported spatial_rank=%d\n",
+            spatial_rank);
+    return -1;
+  }
+  if (!input || !weights || !output) {
+    fprintf(stderr, "[custom_kernels] hip_conv: null input/weights/output\n");
+    return -1;
+  }
+  if (group < 1 || Cin % group != 0 || Cout % group != 0) {
+    fprintf(stderr,
+            "[custom_kernels] hip_conv: group=%lld does not divide Cin=%lld / "
+            "Cout=%lld\n",
+            (long long)group, (long long)Cin, (long long)Cout);
+    return -1;
+  }
+  if (hip_dtype == HIP_DTYPE_INT32)
+    return launch_conv_i32(stream, input, weights, bias, output, spatial_rank,
+                           N, Cin, Cout, in_d0, in_d1, in_d2, out_d0, out_d1,
+                           out_d2, k0, k1, k2, s0, s1, s2, p0, p1, p2, dil0,
+                           dil1, dil2, group);
+
+  const ConvParams pr =
+      makeConvParams(spatial_rank, N, Cin, Cout, in_d0, in_d1, in_d2, out_d0,
+                     out_d1, out_d2, k0, k1, k2, s0, s1, s2, p0, p1, p2, dil0,
+                     dil1, dil2, group);
 
   CUSTOM_KERNELS_DEBUG_LOG(
       "[custom_kernels] hip_conv: dtype=%d spatial_rank=%d N=%lld Cin=%lld "
@@ -1838,8 +2000,21 @@ extern "C" int hip_conv(void *stream, const void *input, const void *weights,
   switch (hip_dtype) {
     case HIP_DTYPE_FLOAT32:
       return launch<float>(hip_stream, input, weights, bias, output, pr);
-    case HIP_DTYPE_FLOAT16:
+    case HIP_DTYPE_FLOAT16: {
+      const int splits = splitKFor(pr);
+      if (splits > 0 && workspace &&
+          workspace_bytes >= splitKWorkspaceBytes(pr, splits)) {
+        const int rc = launchWmmaSplitK(hip_stream, input, weights, bias,
+                                        output, pr, splits,
+                                        static_cast<float *>(workspace));
+        if (rc != 0)
+          fprintf(stderr,
+                  "[custom_kernels] hip_conv split-K launch failed: %s\n",
+                  hipGetErrorString(static_cast<hipError_t>(rc)));
+        return rc;
+      }
       return launch<__half>(hip_stream, input, weights, bias, output, pr);
+    }
     case HIP_DTYPE_BFLOAT16:
       return launch<hip_bfloat16>(hip_stream, input, weights, bias, output, pr);
     default:
