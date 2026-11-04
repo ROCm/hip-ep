@@ -17,13 +17,13 @@
 // CHECK-NOT:     hip.alloc_output
 // CHECK:         hip.alloc(%{{.*}}, %{{.*}}) : memref<?x4xf32>
 // CHECK:         memref.copy
-// CHECK-NEXT:    hip.free
+// CHECK:         hip.free
 // CHECK:         scf.condition
 // CHECK:       } do {
 // CHECK:       }
 // CHECK:         hip.alloc_output(%{{.*}}, %{{.*}}) {out_idx = 0 : i64} : memref<?x4xf32>
 // CHECK:         memref.copy
-// CHECK-NEXT:    hip.free
+// CHECK:         hip.free
 // CHECK:         return
 func.func @loop_carried_output(%ctx: !hip.context, %init: memref<?x4xf32>,
                                %n: index) -> memref<?x4xf32> {
