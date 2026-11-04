@@ -81,6 +81,13 @@ if(ENABLE_ROCMLIRTRITON)
       "Triton OBJECT libraries added once, on final binaries only" FORCE)
   set(HIPDNN_ROCMLIR_STATIC_LINK_LIBS "${_rocmlir_static}" CACHE INTERNAL
       "Non-object rocMLIR/Triton libraries linked by final binaries" FORCE)
+  # RocMlirKernelCompiler.cpp includes InitRocMLIRDialects.h, which includes
+  # generated Triton/Proton Passes.h.inc headers. Those files are produced by
+  # the object libraries' tablegen targets. Without this edge ninja compiles
+  # this library before the .inc exists.
+  if(_rocmlir_object_targets)
+    add_dependencies(LibHipCompiler ${_rocmlir_object_targets})
+  endif()
   # TritonToHsaco dlopens this library by name at kernel-compile time. The
   # link closure does not pull the custom target in, so depend on it directly.
   if(TARGET triton_amd_codegen_lib)
