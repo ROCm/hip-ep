@@ -3130,7 +3130,7 @@ int wrap_group_query_attention_host_length(
               (long long)seq_len_q);
       return -1;
     }
-    if (past_key != nullptr && attn_bias_seq_kv == 1) {
+    if (past_key != nullptr && past_buf_seq > 0 && attn_bias_seq_kv == 1) {
       fprintf(stderr,
               "wrap_group_query_attention: a key-broadcast attention bias "
               "cannot provide the logical KV length for cached attention\n");

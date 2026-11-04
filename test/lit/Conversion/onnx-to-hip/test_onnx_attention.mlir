@@ -416,6 +416,42 @@ module {
 
 // -----
 
+// A unit key extent over an empty past is the full logical length of a
+// single-token prefill, not a broadcast.
+module {
+  func.func @main_graph(
+      %query: tensor<1x1x2048xf16>,
+      %key: tensor<1x1x1024xf16>,
+      %value: tensor<1x1x1024xf16>,
+      %attn_mask: tensor<1x1x1x1xf16>,
+      %past_key: tensor<1x8x0x128xf16>,
+      %past_value: tensor<1x8x0x128xf16>)
+      -> (tensor<1x1x2048xf16>, tensor<1x8x1x128xf16>,
+          tensor<1x8x1x128xf16>) {
+    %out:3 = "onnx.Attention"(%query, %key, %value, %attn_mask, %past_key,
+                              %past_value)
+        {q_num_heads = 16 : si64,
+         kv_num_heads = 8 : si64,
+         is_causal = 1 : si64}
+        : (tensor<1x1x2048xf16>, tensor<1x1x1024xf16>,
+           tensor<1x1x1024xf16>, tensor<1x1x1x1xf16>,
+           tensor<1x8x0x128xf16>, tensor<1x8x0x128xf16>)
+        -> (tensor<1x1x2048xf16>, tensor<1x8x1x128xf16>,
+            tensor<1x8x1x128xf16>)
+
+    // CHECK-LABEL: func.func @main_graph
+    // CHECK: hip.gqa
+    // CHECK-SAME: derive_seqlens_from_attention_bias = true
+    // CHECK-NOT: onnx.Attention
+
+    return %out#0, %out#1, %out#2
+        : tensor<1x1x2048xf16>, tensor<1x8x1x128xf16>,
+          tensor<1x8x1x128xf16>
+  }
+}
+
+// -----
+
 // A statically known multi-batch growing cache is rejected during lowering.
 module {
   func.func @main_graph(

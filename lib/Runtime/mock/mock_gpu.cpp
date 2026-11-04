@@ -548,11 +548,11 @@ int wrap_group_query_attention_host_length(
     const bool query_extent_ok = attn_bias_seq_q == seq_len_q;
     const int64_t cache_extent =
         past_buf_seq > seq_len_kv ? past_buf_seq : seq_len_kv;
-    const bool kv_extent_ok = past_key != nullptr
-                                  ? attn_bias_seq_kv != 1 &&
-                                        attn_bias_seq_kv >= seq_len_new_kv &&
-                                        attn_bias_seq_kv <= cache_extent
-                                  : attn_bias_seq_kv == seq_len_new_kv;
+    const bool kv_extent_ok =
+        past_key != nullptr ? (past_buf_seq == 0 || attn_bias_seq_kv != 1) &&
+                                  attn_bias_seq_kv >= seq_len_new_kv &&
+                                  attn_bias_seq_kv <= cache_extent
+                            : attn_bias_seq_kv == seq_len_new_kv;
     if (!leading_extents_ok || !query_extent_ok || !kv_extent_ok) {
       fprintf(stderr,
               "Invalid attention bias shape in wrap_group_query_attention\n");

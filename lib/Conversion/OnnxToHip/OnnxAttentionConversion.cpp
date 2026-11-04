@@ -282,17 +282,20 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
       return rewriter.notifyMatchFailure(
           op, "attn_mask key extent must equal the KV sequence length");
     }
-    if (pastKey && maskKvSeq == 1)
-      return rewriter.notifyMatchFailure(
-          op, "broadcast attn_mask key extent cannot provide the logical KV "
-              "length for a cached attention");
-
     if (pastKey) {
       auto pastKeyType =
           mlir::dyn_cast<mlir::RankedTensorType>(pastKey.getType());
       if (!pastKeyType || pastKeyType.getRank() != 4)
         return rewriter.notifyMatchFailure(
             op, "past_key must be a rank-4 [B,N,S,head] tensor");
+      // A unit key extent is valid only over an empty past; a dynamic past
+      // extent is checked by the runtime.
+      const int64_t pastSeq = pastKeyType.getDimSize(2);
+      if (maskKvSeq == 1 && pastSeq != mlir::ShapedType::kDynamic &&
+          pastSeq > 0)
+        return rewriter.notifyMatchFailure(
+            op, "broadcast attn_mask key extent cannot provide the logical KV "
+                "length for a cached attention");
     }
   }
   // is_causal=0 with no mask is bidirectional attention, which the runtime
@@ -513,8 +516,8 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
 
   auto synthPresent = [&](int64_t headDim,
                           mlir::Type elem) -> mlir::RankedTensorType {
-    return mlir::RankedTensorType::get(
-        {queryType.getDimSize(0), kvNumHeads, kDyn, headDim}, elem);
+    return mlir::RankedTensorType::get({batch, kvNumHeads, kDyn, headDim},
+                                       elem);
   };
 
   mlir::RankedTensorType presentKeyType =
