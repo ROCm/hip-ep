@@ -32,8 +32,8 @@
 //     still expand that shape (`min_variadic_broadcast`).
 //   - Squeeze of a ranked input ranks an unranked result, including when
 //     the dropped axis is dynamic (`squeeze_unit_axis`,
-//     `squeeze_dynamic_axis_feeds_reshape`). A Slice with runtime bounds
-//     keeps the input rank (`slice_runtime_bounds_keeps_rank`).
+//     `squeeze_dynamic_axis_feeds_reshape`). A Slice whose bounds are not
+//     constants stays unranked (`slice_runtime_bounds_stays_unranked`).
 
 // -----------------------------------------------------------------------
 // Forward Concat rule: Concat((1x?x1152, ?x?x?), axis=1) -> 1x?x1152.
@@ -431,14 +431,15 @@ func.func @squeeze_dynamic_axis_feeds_reshape(%x: tensor<?x?x?x?xf32>,
   return %reshaped : tensor<*xf32>
 }
 
-// Runtime starts and ends do not change rank. Default axes are 0, 1, 2, so
-// those extents become dynamic and the unsliced trailing 4 stays.
-// CHECK-LABEL: func.func @slice_runtime_bounds_keeps_rank
-// CHECK:         "onnx.Slice"{{.*}} -> tensor<?x?x?x4xf32>
-func.func @slice_runtime_bounds_keeps_rank(%x: tensor<?x?x?x4xf32>,
-                                           %starts: tensor<3xi32>,
-                                           %ends: tensor<3xi32>) -> tensor<*xf32> {
+// Runtime starts and ends do not establish a rank. Ranking the result would
+// let slice lowering allocate the input extent: tensor<10xf32> sliced from
+// 2 to 5 would become a length-10 tensor.
+// CHECK-LABEL: func.func @slice_runtime_bounds_stays_unranked
+// CHECK:         "onnx.Slice"{{.*}} -> tensor<*xf32>
+func.func @slice_runtime_bounds_stays_unranked(%x: tensor<10xf32>,
+                                              %starts: tensor<1xi64>,
+                                              %ends: tensor<1xi64>) -> tensor<*xf32> {
   %y = "onnx.Slice"(%x, %starts, %ends)
-      : (tensor<?x?x?x4xf32>, tensor<3xi32>, tensor<3xi32>) -> tensor<*xf32>
+      : (tensor<10xf32>, tensor<1xi64>, tensor<1xi64>) -> tensor<*xf32>
   return %y : tensor<*xf32>
 }
