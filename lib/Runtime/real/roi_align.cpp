@@ -76,11 +76,10 @@ wrap_roi_align(RuntimeState *state, void *input, void *rois,
       (long long)sampling_ratio, (double)spatial_scale, (long long)half_pixel,
       (long long)mode);
 
-  int rc = hip_roi_align(stream, input, rois, batch_indices, output, n, c, in_h,
-                         in_w, num_rois, out_h, out_w,
-                         static_cast<int>(sampling_ratio), spatial_scale,
-                         static_cast<int>(half_pixel), static_cast<int>(mode),
-                         hip_dtype);
+  int rc = hip_roi_align(
+      stream, input, rois, batch_indices, output, n, c, in_h, in_w, num_rois,
+      out_h, out_w, static_cast<int>(sampling_ratio), spatial_scale,
+      static_cast<int>(half_pixel), static_cast<int>(mode), hip_dtype);
   if (rc != 0) {
     fprintf(stderr, "[REAL] wrap_roi_align: kernel launch failed (%d)\n", rc);
     return -1;

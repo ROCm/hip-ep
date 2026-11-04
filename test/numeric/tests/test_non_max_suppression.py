@@ -92,9 +92,7 @@ class TestNonMaxSuppression:
         model = _make_nms_model(batch, num_classes, max_out, iou)
         rng = np.random.default_rng(31)
         boxes = _random_corner_boxes(rng, batch, num_boxes)
-        scores = rng.uniform(0, 1, (batch, num_classes, num_boxes)).astype(
-            np.float32
-        )
+        scores = rng.uniform(0, 1, (batch, num_classes, num_boxes)).astype(np.float32)
         actual, expected = model_runner.run_sample(model, [boxes, scores])
         compare_outputs(actual, expected, atol=0, rtol=0)
 

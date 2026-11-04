@@ -101,10 +101,10 @@ mlir::FailureOr<mlir::Value> castToRank3(mlir::PatternRewriter &rewriter,
   auto unranked = mlir::dyn_cast<mlir::UnrankedTensorType>(type);
   if (!unranked)
     return mlir::failure();
-  auto rankedType = mlir::RankedTensorType::get(
-      {mlir::ShapedType::kDynamic, mlir::ShapedType::kDynamic,
-       mlir::ShapedType::kDynamic},
-      unranked.getElementType());
+  auto rankedType = mlir::RankedTensorType::get({mlir::ShapedType::kDynamic,
+                                                 mlir::ShapedType::kDynamic,
+                                                 mlir::ShapedType::kDynamic},
+                                                unranked.getElementType());
   return mlir::tensor::CastOp::create(rewriter, loc, rankedType, value)
       .getResult();
 }
@@ -227,9 +227,9 @@ struct NonMaxSuppressionToHip : public mlir::RewritePattern {
     auto i64Ty = rewriter.getI64Type();
     auto selectedType =
         mlir::RankedTensorType::get({mlir::ShapedType::kDynamic, 3}, i64Ty);
-    mlir::Value selectedInit = mlir::tensor::EmptyOp::create(
-        rewriter, loc, selectedType.getShape(), i64Ty,
-        mlir::ValueRange{capacity});
+    mlir::Value selectedInit =
+        mlir::tensor::EmptyOp::create(rewriter, loc, selectedType.getShape(),
+                                      i64Ty, mlir::ValueRange{capacity});
     auto countType = mlir::RankedTensorType::get({}, rewriter.getI32Type());
     mlir::Value countInit = mlir::tensor::EmptyOp::create(
         rewriter, loc, countType.getShape(), countType.getElementType());
@@ -249,8 +249,8 @@ struct NonMaxSuppressionToHip : public mlir::RewritePattern {
             .getResult();
     mlir::SmallVector<mlir::OpFoldResult, 2> offsets = {
         rewriter.getIndexAttr(0), rewriter.getIndexAttr(0)};
-    mlir::SmallVector<mlir::OpFoldResult, 2> sizes = {
-        mlir::OpFoldResult(count), rewriter.getIndexAttr(3)};
+    mlir::SmallVector<mlir::OpFoldResult, 2> sizes = {mlir::OpFoldResult(count),
+                                                      rewriter.getIndexAttr(3)};
     mlir::SmallVector<mlir::OpFoldResult, 2> strides = {
         rewriter.getIndexAttr(1), rewriter.getIndexAttr(1)};
     mlir::Value trimmed = mlir::tensor::ExtractSliceOp::create(

@@ -65,8 +65,8 @@ HIPDNN_EP_RT_EXPORT int wrap_non_max_suppression(
   int rc = hip_non_max_suppression(
       stream, boxes, scores, selected, count_ptr, b, c, n, capacity,
       max_output_boxes_per_class, iou_threshold, score_threshold,
-      static_cast<int>(has_score_threshold),
-      static_cast<int>(center_point_box), workspace, ws_bytes);
+      static_cast<int>(has_score_threshold), static_cast<int>(center_point_box),
+      workspace, ws_bytes);
   if (rc != 0) {
     fprintf(stderr,
             "[REAL] wrap_non_max_suppression: kernel launch failed (%d)\n", rc);

@@ -173,8 +173,7 @@ struct RoiAlignToHip : public mlir::RewritePattern {
     if (mlir::ShapedType::isDynamic(numRois))
       dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc, *rois, 0));
     if (mlir::ShapedType::isDynamic(channels))
-      dynSizes.push_back(
-          mlir::tensor::DimOp::create(rewriter, loc, *input, 1));
+      dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc, *input, 1));
 
     auto outputType =
         mlir::RankedTensorType::get({numRois, channels, outH, outW}, elemTy);
