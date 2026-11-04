@@ -1,9 +1,3 @@
-<!--
-Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
-Licensed under the MIT License.
--->
-
-
 # Windowed recurrent state
 
 ## Purpose and supported operators
@@ -19,38 +13,80 @@ This feature is model- and export-dependent. A model must carry the
 without those attributes continues to use the normal rewind-and-replay path.
 KV-cache cropping and recurrent-state promotion are separate mechanisms.
 
-Models without `state_window` attributes continue to use the existing
-non-windowed execution path; this feature does not change their behavior.
+**Models without** `state_window` **attributes continue to use the existing non-windowed execution path; this feature does not change their behavior.**
 
-### Accepted-prefix example
+## Implementation summary
 
-During wide verification, the model writes one recurrent state for each
-verified position:
+This feature combines additions with targeted changes to existing execution
+paths:
+
+- **New compiler and lowering support:** preserve the `state_window` dimension
+and attributes through ONNX-to-HIP conversion, HIP dialect processing,
+bufferization, and HIP-to-LLVM lowering.
+- **New batched state-slot promotion kernel:** add the per-architecture `hip_state_slot_copy` GPU kernel to copy the selected slot across all
+recurrent and convolution state tensors in one asynchronous launch.
+- **New provider contract:** add the versioned
+`hipdnn_ep_copy_state_slots(...)` API and export it from the provider,
+with a compatibility path for consumers that cannot use the API.
+- **Existing runtime changes:** pass window dimensions and selected slots
+through the recurrent/conv wrappers and publish the active model stream to
+the promotion launcher.
+- **Existing** `LinearAttention` **path change:** retain the burst optimization
+when `state_window == 0`, while routing `state_window > 0` through per-token materialization so every retained source slot is valid before promotion. This is needed for accuracy purposes.
+- **Unchanged consumer behavior:** crop/promotion integration belongs to the decoder consumer; this HIP EP feature does not modify the inference controller.
+
+The sections below explain the state semantics and each contract in detail.
+
+### Accepted-prefix example in wide speculative verification
+
+For a windowed recurrent model, the per-token path used during wide
+verification materializes one recurrent state for each verified position:
 
 ```text
 wide verification:
   S0 -> S1 -> S2 -> S3 -> S4 -> S5 -> S6 -> S7
 ```
 
-If the decoder accepts the prefix through `S3`, the later states are
-speculative and must not be used:
+If the decoder accepts the prefix through `S3`, the later states belong to
+rejected speculative positions and must not become the committed state:
 
 ```text
 accepted state:  S3
 rejected states: S4, S5, S6, S7
 ```
 
-The decoder crops the KV/position state and copies `S3` into the committed
+The decoder performs two related operations. It crops the KV/position state to
+the accepted length, then asks the provider to copy `S3` into the committed
 destination slot `S7`:
 
 ```text
 copy S3 -> S7
 ```
 
-This is a device-to-device copy, not a slot rename. `S4` through `S6` remain
-physically present but are logically stale; they are ignored until a later
-verification overwrites them. The next decoding step uses the committed state
-now stored in `S7`.
+The `S3 -> S7` operation is a device-to-device copy across the recurrent and convolution state tensors, not a slot rename. The added batched HIP EP slot-copy kernel performs these copies; the decoder chooses the source and destination slots based on the accepted prefix.
+
+`S4` through `S6` remain physically present and correctly materialized, but
+they are logically stale because they represent rejected speculative
+positions. They are ignored until a later verification overwrites them. The
+next decoding step uses the committed state now stored in `S7`.
+
+Without windowed recurrent-state support, the decoder could not recover `S3`
+from the wide verification. It would have to snapshot the state before
+verification, run the wide verification, determine that `S1` through `S3`
+were accepted, restore the snapshot, and replay those accepted positions
+sequentially:
+
+```text
+Process without windowed support:
+snapshot S0
+→ wide verification
+→ accept S1, S2, S3
+→ restore S0
+→ replay S1 → S2 → S3
+→ continue from the replayed state
+```
+
+Windowed state avoids that additional target-model replay. It retains the accepted recurrent state during the wide pass, promotes it with one batched device-to-device operation, and continues directly from the accepted prefix. This reduces replay overhead and can improve throughput.
 
 ## Model export requirements
 
@@ -81,6 +117,27 @@ During a wide verification, each supported hybrid operator writes its recurrent/
 
 Promotion means copying the accepted slot into the committed destination slot;
 it does not rename or clear the other window slots.
+
+### Windowed materialization versus the burst path
+
+The recurrent state must be produced correctly before promotion can be
+correct. The short-burst `LinearAttention` kernel is optimized for
+unwindowed execution: it reads the prior state and writes the final recurrent
+state for the whole sequence. That is sufficient when `state_window == 0`,
+because no intermediate state slot is retained.
+
+For `state_window > 0`, the runtime uses the per-token path instead. Each token's recurrent update is materialized into its corresponding retained window slot before crop selects an accepted prefix. Using the burst path for a windowed sequence would produce the final state but could leave intermediate slots semantically incomplete, so promoting one of those slots could resume from the wrong recurrent state.
+
+The selection is intentionally scoped in `lib/Runtime/real/linear_attention.cpp`:
+
+```cpp
+if (state_window == 0 && seq_len <= hipdnn_ep_la_burst_max_tokens())
+```
+
+This preserves the existing burst optimization for non-windowed recurrent
+models. Dense models do not use this recurrent `LinearAttention` path and are
+unaffected. Batched state-slot promotion remains unchanged; this guard fixes
+how the source slots are materialized before that promotion runs.
 
 The runtime wrappers pass the selected slot and state layout to the
 per-architecture custom HIP kernel. The kernel performs all of those copies
@@ -135,6 +192,20 @@ Coverage is provided at each compiler/runtime boundary:
 The state-slot test checks mixed descriptor sizes, alignment, stream ordering,
 guards, and repeated launches. The ELF test checks provider visibility,
 `DF_1_NODELETE`, plugin exports, and the versioned state-slot API exports.
+
+The kernel-branch validation for the windowed materialization change also
+includes:
+
+- `StateSlotCopy_gfx1151` and `HipGpuElfContract`: 2/2 passed.
+- The numeric `CausalConvWithState` and `LinearAttention` suite: 67 passed.
+The generated test models cap their ONNX IR version at 13 to match the
+packaged ONNX Runtime used for validation; this affects only temporary test
+models.
+- The compiler LIT suite covering the modified lowering and dialect paths.
+
+These are native HIP EP regression checks. OGA/DFlash integration, crop
+behavior, wide-versus-sequential diagnostics, and end-to-end performance
+belong to the downstream consumer integration validation.
 
 From the build tree, run the focused runtime tests:
 

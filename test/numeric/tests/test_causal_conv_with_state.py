@@ -170,7 +170,7 @@ def _make_channels_last_model(
     ]
 
     ms_opset = helper.make_opsetid("com.microsoft", 1)
-    return make_model_from_nodes(
+    model = make_model_from_nodes(
         nodes,
         [X, State],
         [Y, Present],
@@ -181,6 +181,9 @@ def _make_channels_last_model(
         opset=17,
         extra_opsets=[ms_opset],
     )
+    # ORT 1.30 (used by the HIP EP test package) supports through IR 13.
+    model.ir_version = min(model.ir_version, 13)
+    return model
 
 
 def _make_nlc_state_model(
@@ -233,7 +236,7 @@ def _make_nlc_state_model(
     )
 
     ms_opset = helper.make_opsetid("com.microsoft", 1)
-    return make_model_from_nodes(
+    model = make_model_from_nodes(
         [node],
         [X, State] if with_past else [X],
         [Y, Present],
@@ -241,6 +244,9 @@ def _make_nlc_state_model(
         opset=17,
         extra_opsets=[ms_opset],
     )
+    # ORT 1.30 (used by the HIP EP test package) supports through IR 13.
+    model.ir_version = min(model.ir_version, 13)
+    return model
 
 
 class TestCausalConvWithState:

@@ -181,7 +181,10 @@ extern "C" int wrap_linear_attention(
   // Decode and short bursts (speculative verify) run every step in one launch
   // that reads past_state and writes present_state directly, so they skip the
   // state copy below as well as the chunked scan's extra launches.
-  if (seq_len <= hipdnn_ep_la_burst_max_tokens()) {
+  // The burst kernel writes a single unwindowed recurrent state. Windowed
+  // execution must use the per-token path below so every retained slot is
+  // materialized before crop_to_accepted() promotes one.
+  if (state_window == 0 && seq_len <= hipdnn_ep_la_burst_max_tokens()) {
     const int rc = hip_linear_attention_burst(
         hip_stream, query, key, value, decay, beta, past_state, present_state,
         output, B, seq_len, Hq, Hkv, Nk, dk, dv, scale, update_rule,
