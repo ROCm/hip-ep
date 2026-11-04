@@ -298,6 +298,8 @@ void ConvertHipToLLVMPass::runOnOperation() {
   populatePoolLoweringPatterns(typeConverter, patterns);
   populateResizeLoweringPatterns(typeConverter, patterns);
   populateGridSampleLoweringPatterns(typeConverter, patterns);
+  populateRoiAlignLoweringPatterns(typeConverter, patterns);
+  populateNonMaxSuppressionLoweringPatterns(typeConverter, patterns);
   populateGlobalPoolLoweringPatterns(typeConverter, patterns);
   populateQElementwiseLoweringPatterns(typeConverter, patterns);
   populateQMatMulLoweringPatterns(typeConverter, patterns);

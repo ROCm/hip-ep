@@ -1456,6 +1456,31 @@ int wrap_grid_sample(RuntimeState *state, void *input, void *grid, void *output,
                      int64_t in_w, int64_t out_h, int64_t out_w, int64_t mode,
                      int64_t padding_mode, int64_t align_corners);
 
+// RoiAlign (4-D NCHW). rois is (num_rois, 4) as (x1, y1, x2, y2) in the same
+// element type as input; batch_indices is (num_rois) int64. Output is
+// (num_rois, C, out_h, out_w). sampling_ratio: 0 = adaptive. half_pixel: 1 =
+// "half_pixel", 0 = "output_half_pixel". mode: 0=avg, 1=max. data_type:
+// HIPDNN_EP_DATATYPE_* (FLOAT/HALF/BFLOAT16/DOUBLE).
+int wrap_roi_align(RuntimeState *state, void *input, void *rois,
+                   void *batch_indices, void *output, int64_t data_type,
+                   int64_t n, int64_t c, int64_t in_h, int64_t in_w,
+                   int64_t num_rois, int64_t out_h, int64_t out_w,
+                   int64_t sampling_ratio, float spatial_scale,
+                   int64_t half_pixel, int64_t mode);
+
+// NonMaxSuppression. boxes is (B, N, 4) f32, scores is (B, C, N) f32.
+// Writes (batch, class, box) int64 triples to `selected` (capacity rows,
+// ordered by batch, class, then selection) and the number written to the
+// device int32 `count_ptr`. center_point_box: 0 = (y1, x1, y2, x2),
+// 1 = (xc, yc, w, h). Scratch comes from the shared session workspace.
+int wrap_non_max_suppression(RuntimeState *state, void *boxes, void *scores,
+                             void *selected, int32_t *count_ptr, int64_t b,
+                             int64_t c, int64_t n, int64_t capacity,
+                             int64_t max_output_boxes_per_class,
+                             float iou_threshold, float score_threshold,
+                             int64_t has_score_threshold,
+                             int64_t center_point_box);
+
 // Global pool wrapper (uses custom HIP kernel).
 // Treats the data as a flat [outer, reduce_size] matrix and writes one
 // reduced value per row into output. Covers ONNX GlobalAveragePool /

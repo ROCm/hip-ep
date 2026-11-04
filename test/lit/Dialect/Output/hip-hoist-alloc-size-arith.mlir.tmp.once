@@ -1,0 +1,208 @@
+module {
+  func.func @hoist_simple_chain(%arg0: memref<?x?xi64>) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c4096 = arith.constant 4096 : index
+    %dim = memref.dim %arg0, %c0 : memref<?x?xi64>
+    %dim_0 = memref.dim %arg0, %c1 : memref<?x?xi64>
+    %0 = arith.muli %dim, %dim_0 : index
+    %1 = arith.muli %0, %c4096 : index
+    %alloc = memref.alloc(%dim, %dim_0) : memref<?x?xui8>
+    %alloc_1 = memref.alloc(%1) : memref<3x?xi64>
+    memref.dealloc %alloc : memref<?x?xui8>
+    memref.dealloc %alloc_1 : memref<3x?xi64>
+    return
+  }
+  func.func @hoist_mixed_arith_chain(%arg0: memref<?xi64>) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c2 = arith.constant 2 : index
+    %c8 = arith.constant 8 : index
+    %dim = memref.dim %arg0, %c0 : memref<?xi64>
+    %0 = arith.addi %dim, %c8 : index
+    %1 = arith.subi %0, %c1 : index
+    %2 = arith.divui %1, %c2 : index
+    %3 = arith.cmpi sgt, %2, %c1 : index
+    %4 = arith.select %3, %2, %c1 : index
+    %alloc = memref.alloc(%dim) : memref<?xf16>
+    %alloc_0 = memref.alloc(%4) : memref<?xf16>
+    memref.dealloc %alloc : memref<?xf16>
+    memref.dealloc %alloc_0 : memref<?xf16>
+    return
+  }
+  func.func @do_not_hoist_load(%arg0: memref<?xi64>, %arg1: memref<1xi64>) {
+    %c0 = arith.constant 0 : index
+    %dim = memref.dim %arg0, %c0 : memref<?xi64>
+    %alloc = memref.alloc(%dim) : memref<?xf16>
+    %0 = memref.load %arg1[%c0] : memref<1xi64>
+    %1 = arith.index_cast %0 : i64 to index
+    %alloc_0 = memref.alloc(%1) : memref<?xf16>
+    memref.dealloc %alloc : memref<?xf16>
+    memref.dealloc %alloc_0 : memref<?xf16>
+    return
+  }
+  func.func private @opaque_helper(index) -> index
+  func.func @do_not_hoist_unmarked_call(%arg0: memref<?xi64>) {
+    %c0 = arith.constant 0 : index
+    %dim = memref.dim %arg0, %c0 : memref<?xi64>
+    %alloc = memref.alloc(%dim) : memref<?xf16>
+    %0 = call @opaque_helper(%dim) : (index) -> index
+    %alloc_0 = memref.alloc(%0) : memref<?xf16>
+    memref.dealloc %alloc : memref<?xf16>
+    memref.dealloc %alloc_0 : memref<?xf16>
+    return
+  }
+  func.func @already_hoisted(%arg0: memref<?xi64>) {
+    %c0 = arith.constant 0 : index
+    %c2 = arith.constant 2 : index
+    %dim = memref.dim %arg0, %c0 : memref<?xi64>
+    %0 = arith.muli %dim, %c2 : index
+    %alloc = memref.alloc(%dim) : memref<?xf16>
+    %alloc_0 = memref.alloc(%0) : memref<?xf16>
+    memref.dealloc %alloc : memref<?xf16>
+    memref.dealloc %alloc_0 : memref<?xf16>
+    return
+  }
+  func.func @do_not_hoist_through_load(%arg0: memref<?xi64>, %arg1: memref<1xi64>) {
+    %c0 = arith.constant 0 : index
+    %c2 = arith.constant 2 : index
+    %dim = memref.dim %arg0, %c0 : memref<?xi64>
+    %alloc = memref.alloc(%dim) : memref<?xf16>
+    %0 = memref.load %arg1[%c0] : memref<1xi64>
+    %1 = arith.index_cast %0 : i64 to index
+    %2 = arith.muli %1, %c2 : index
+    %alloc_0 = memref.alloc(%2) : memref<?xf16>
+    memref.dealloc %alloc : memref<?xf16>
+    memref.dealloc %alloc_0 : memref<?xf16>
+    return
+  }
+  func.func @do_not_hoist_runtime_divisor_divsi(%arg0: memref<?xi64>, %arg1: memref<?xi64>) {
+    %c0 = arith.constant 0 : index
+    %dim = memref.dim %arg0, %c0 : memref<?xi64>
+    %dim_0 = memref.dim %arg1, %c0 : memref<?xi64>
+    %alloc = memref.alloc(%dim) : memref<?xf16>
+    %0 = arith.divsi %dim, %dim_0 : index
+    %alloc_1 = memref.alloc(%0) : memref<?xf16>
+    memref.dealloc %alloc : memref<?xf16>
+    memref.dealloc %alloc_1 : memref<?xf16>
+    return
+  }
+  func.func @do_not_hoist_runtime_divisor_divui(%arg0: memref<?xi64>, %arg1: memref<?xi64>) {
+    %c0 = arith.constant 0 : index
+    %dim = memref.dim %arg0, %c0 : memref<?xi64>
+    %dim_0 = memref.dim %arg1, %c0 : memref<?xi64>
+    %alloc = memref.alloc(%dim) : memref<?xf16>
+    %0 = arith.divui %dim, %dim_0 : index
+    %alloc_1 = memref.alloc(%0) : memref<?xf16>
+    memref.dealloc %alloc : memref<?xf16>
+    memref.dealloc %alloc_1 : memref<?xf16>
+    return
+  }
+  func.func @hoist_above_earliest_static_alloc(%arg0: memref<?xf32>) {
+    %c0 = arith.constant 0 : index
+    %dim = memref.dim %arg0, %c0 : memref<?xf32>
+    %alloc = memref.alloc() : memref<1xi32>
+    %alloc_0 = memref.alloc(%dim) : memref<?xf32>
+    memref.dealloc %alloc : memref<1xi32>
+    memref.dealloc %alloc_0 : memref<?xf32>
+    return
+  }
+  func.func @do_not_hoist_region_capture(%arg0: memref<?xf32>, %arg1: i1) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %alloc = memref.alloc() : memref<1xi32>
+    %dim = memref.dim %arg0, %c0 : memref<?xf32>
+    %0 = arith.addi %dim, %c1 : index
+    %1 = scf.if %arg1 -> (index) {
+      scf.yield %0 : index
+    } else {
+      scf.yield %dim : index
+    }
+    %alloc_0 = memref.alloc(%1) : memref<?xf32>
+    memref.dealloc %alloc : memref<1xi32>
+    memref.dealloc %alloc_0 : memref<?xf32>
+    return
+  }
+  func.func @hoist_independent_size_branch(%arg0: memref<?xf32>, %arg1: memref<1xi64>) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %dim = memref.dim %arg0, %c0 : memref<?xf32>
+    %0 = arith.addi %dim, %c1 : index
+    %alloc = memref.alloc() : memref<1xi32>
+    %1 = memref.load %arg1[%c0] : memref<1xi64>
+    %2 = arith.index_cast %1 : i64 to index
+    %3 = arith.addi %0, %2 : index
+    %alloc_0 = memref.alloc(%3) : memref<?xf32>
+    memref.dealloc %alloc : memref<1xi32>
+    memref.dealloc %alloc_0 : memref<?xf32>
+    return
+  }
+  func.func @hoist_after_late_load(%arg0: memref<1xindex>) {
+    %c0 = arith.constant 0 : index
+    %c4 = arith.constant 4 : index
+    %alloc = memref.alloc() : memref<1xf32>
+    %0 = memref.load %arg0[%c0] : memref<1xindex>
+    %1 = arith.divsi %0, %c4 : index
+    %2 = arith.addi %1, %c4 : index
+    %alloc_0 = memref.alloc(%0) : memref<?xf32>
+    %alloc_1 = memref.alloc(%2) : memref<?xf32>
+    %alloc_2 = memref.alloc(%2) : memref<?xf32>
+    memref.dealloc %alloc : memref<1xf32>
+    memref.dealloc %alloc_0 : memref<?xf32>
+    memref.dealloc %alloc_1 : memref<?xf32>
+    memref.dealloc %alloc_2 : memref<?xf32>
+    return
+  }
+  func.func @current_operand_order(%arg0: index) {
+    %c2 = arith.constant 2 : index
+    %0 = arith.muli %arg0, %c2 : index
+    %alloc = memref.alloc() : memref<1xf32>
+    %1 = call @opaque_helper(%arg0) : (index) -> index
+    %2 = arith.addi %1, %0 : index
+    %alloc_0 = memref.alloc(%1) : memref<?xf32>
+    %alloc_1 = memref.alloc(%2) : memref<?xf32>
+    memref.dealloc %alloc : memref<1xf32>
+    memref.dealloc %alloc_0 : memref<?xf32>
+    memref.dealloc %alloc_1 : memref<?xf32>
+    return
+  }
+  func.func @shared_size_dag(%arg0: index) {
+    %c2 = arith.constant 2 : index
+    %alloc = memref.alloc() : memref<1xf32>
+    %0 = call @opaque_helper(%arg0) : (index) -> index
+    %1 = arith.muli %0, %c2 : index
+    %2 = arith.addi %1, %c2 : index
+    %3 = arith.subi %1, %c2 : index
+    %4 = arith.addi %2, %3 : index
+    %alloc_0 = memref.alloc(%0) : memref<?xf32>
+    %alloc_1 = memref.alloc(%4) : memref<?xf32>
+    memref.dealloc %alloc : memref<1xf32>
+    memref.dealloc %alloc_0 : memref<?xf32>
+    memref.dealloc %alloc_1 : memref<?xf32>
+    return
+  }
+  func.func @consumer_of_runtime_division(%arg0: index, %arg1: index) {
+    %c2 = arith.constant 2 : index
+    %alloc = memref.alloc() : memref<1xf32>
+    %0 = arith.divsi %arg0, %arg1 : index
+    %1 = arith.addi %0, %c2 : index
+    %alloc_0 = memref.alloc(%0) : memref<?xf32>
+    %alloc_1 = memref.alloc(%1) : memref<?xf32>
+    memref.dealloc %alloc : memref<1xf32>
+    memref.dealloc %alloc_0 : memref<?xf32>
+    memref.dealloc %alloc_1 : memref<?xf32>
+    return
+  }
+  func.func @allocation_dependency(%arg0: index) {
+    %c0 = arith.constant 0 : index
+    %alloc = memref.alloc(%arg0) : memref<?xf32>
+    %dim = memref.dim %alloc, %c0 : memref<?xf32>
+    %alloc_0 = memref.alloc() : memref<1xf32>
+    %alloc_1 = memref.alloc(%dim) : memref<?xf32>
+    memref.dealloc %alloc : memref<?xf32>
+    memref.dealloc %alloc_0 : memref<1xf32>
+    memref.dealloc %alloc_1 : memref<?xf32>
+    return
+  }
+}
+

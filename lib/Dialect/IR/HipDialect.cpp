@@ -2410,6 +2410,140 @@ LogicalResult GridSampleOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// RoiAlignOp: ins(input, rois, batch_indices), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange RoiAlignOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void RoiAlignOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult RoiAlignOp::verify() {
+  SmallVector<Value> dataOperands{getInput(), getRois(), getBatchIndices(),
+                                  getOutput()};
+  if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/1)))
+    return failure();
+
+  auto inputShape = detail::getShapeOf(getInput());
+  auto roisShape = detail::getShapeOf(getRois());
+  auto indicesShape = detail::getShapeOf(getBatchIndices());
+  auto outputShape = detail::getShapeOf(getOutput());
+  if (inputShape.size() != 4)
+    return emitOpError("expected 4-D input (N, C, H, W)");
+  if (roisShape.size() != 2 ||
+      (!ShapedType::isDynamic(roisShape[1]) && roisShape[1] != 4))
+    return emitOpError("expected rois of shape (num_rois, 4)");
+  if (indicesShape.size() != 1)
+    return emitOpError("expected 1-D batch_indices (num_rois)");
+  if (outputShape.size() != 4)
+    return emitOpError(
+        "expected 4-D output (num_rois, C, output_height, output_width)");
+
+  Type elemTy = getElementTypeOrSelf(getInput().getType());
+  if (getElementTypeOrSelf(getRois().getType()) != elemTy ||
+      getElementTypeOrSelf(getOutput().getType()) != elemTy)
+    return emitOpError("input, rois and output must share an element type");
+  if (!getElementTypeOrSelf(getBatchIndices().getType()).isInteger(64))
+    return emitOpError("batch_indices must be i64");
+
+  int64_t mode = getMode();
+  if (mode != 0 && mode != 1)
+    return emitOpError("mode must be 0 (avg) or 1 (max), got ") << mode;
+  if (getOutputHeight() < 1 || getOutputWidth() < 1)
+    return emitOpError("output_height and output_width must be >= 1");
+  if (getSamplingRatio() < 0)
+    return emitOpError("sampling_ratio must be >= 0");
+  int64_t halfPixel = getHalfPixel();
+  if (halfPixel != 0 && halfPixel != 1)
+    return emitOpError("half_pixel must be 0 or 1, got ") << halfPixel;
+
+  auto checkDim = [&](int64_t outDim, int64_t expected,
+                      StringRef what) -> LogicalResult {
+    if (ShapedType::isDynamic(outDim) || ShapedType::isDynamic(expected) ||
+        outDim == expected)
+      return success();
+    return emitOpError("output ")
+           << what << " " << outDim << " does not match expected " << expected;
+  };
+  if (failed(checkDim(outputShape[0], roisShape[0], "num_rois")) ||
+      failed(checkDim(outputShape[0], indicesShape[0], "num_rois")) ||
+      failed(checkDim(outputShape[1], inputShape[1], "channels")) ||
+      failed(checkDim(outputShape[2], getOutputHeight(), "height")) ||
+      failed(checkDim(outputShape[3], getOutputWidth(), "width")))
+    return failure();
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// NonMaxSuppressionOp: ins(boxes, scores), outs(selected, count)
+//===----------------------------------------------------------------------===//
+
+// Operand order is (ctx, boxes, scores, selected, count); the two DPS inits
+// are the trailing contiguous range, as required by
+// DestinationStyleOpInterface.
+MutableOperandRange NonMaxSuppressionOp::getDpsInitsMutable() {
+  return MutableOperandRange(*this, /*start=*/3, /*length=*/2);
+}
+
+void NonMaxSuppressionOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult NonMaxSuppressionOp::verify() {
+  SmallVector<Value> dataOperands{getBoxes(), getScores(), getSelected(),
+                                  getCount()};
+  if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/2)))
+    return failure();
+
+  auto boxesShape = detail::getShapeOf(getBoxes());
+  auto scoresShape = detail::getShapeOf(getScores());
+  auto selectedShape = detail::getShapeOf(getSelected());
+  auto countShape = detail::getShapeOf(getCount());
+  if (boxesShape.size() != 3 ||
+      (!ShapedType::isDynamic(boxesShape[2]) && boxesShape[2] != 4))
+    return emitOpError("expected boxes of shape (B, N, 4)");
+  if (scoresShape.size() != 3)
+    return emitOpError("expected scores of shape (B, C, N)");
+  if (selectedShape.size() != 2 ||
+      (!ShapedType::isDynamic(selectedShape[1]) && selectedShape[1] != 3))
+    return emitOpError("expected selected of shape (capacity, 3)");
+  if (!countShape.empty())
+    return emitOpError("expected a rank-0 count");
+
+  auto sameOrDynamic = [](int64_t a, int64_t b) {
+    return ShapedType::isDynamic(a) || ShapedType::isDynamic(b) || a == b;
+  };
+  if (!sameOrDynamic(boxesShape[0], scoresShape[0]) ||
+      !sameOrDynamic(boxesShape[1], scoresShape[2]))
+    return emitOpError("boxes (B, N, 4) and scores (B, C, N) disagree");
+
+  if (!getElementTypeOrSelf(getBoxes().getType()).isF32() ||
+      !getElementTypeOrSelf(getScores().getType()).isF32())
+    return emitOpError("boxes and scores must be f32");
+  if (!getElementTypeOrSelf(getSelected().getType()).isInteger(64))
+    return emitOpError("selected must be i64");
+  if (!getElementTypeOrSelf(getCount().getType()).isInteger(32))
+    return emitOpError("count must be i32");
+
+  int64_t center = getCenterPointBox();
+  if (center != 0 && center != 1)
+    return emitOpError("center_point_box must be 0 or 1, got ") << center;
+  int64_t hasScore = getHasScoreThreshold();
+  if (hasScore != 0 && hasScore != 1)
+    return emitOpError("has_score_threshold must be 0 or 1, got ") << hasScore;
+  if (getMaxOutputBoxesPerClass() < 0)
+    return emitOpError("max_output_boxes_per_class must be >= 0");
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // GlobalPoolOp: ins(input), outs(output)
 //===----------------------------------------------------------------------===//
 

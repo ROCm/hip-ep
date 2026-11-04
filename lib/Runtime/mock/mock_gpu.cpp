@@ -1333,6 +1333,56 @@ int wrap_grid_sample(RuntimeState *state, void *input, void *grid, void *output,
   return 0;
 }
 
+int wrap_roi_align(RuntimeState *state, void *input, void *rois,
+                   void *batch_indices, void *output, int64_t data_type,
+                   int64_t n, int64_t c, int64_t in_h, int64_t in_w,
+                   int64_t num_rois, int64_t out_h, int64_t out_w,
+                   int64_t sampling_ratio, float spatial_scale,
+                   int64_t half_pixel, int64_t mode) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_roi_align\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_roi_align(dtype=%s(%lld), N=%lld, C=%lld, "
+             "in=%lldx%lld, rois=%lld, out=%lldx%lld, sampling_ratio=%lld, "
+             "spatial_scale=%f, half_pixel=%lld, mode=%lld)\n",
+             hipdnn_ep_datatype_name(data_type), (long long)data_type,
+             (long long)n, (long long)c, (long long)in_h, (long long)in_w,
+             (long long)num_rois, (long long)out_h, (long long)out_w,
+             (long long)sampling_ratio, (double)spatial_scale,
+             (long long)half_pixel, (long long)mode);
+  (void)input;
+  (void)rois;
+  (void)batch_indices;
+  (void)output;
+  return 0;
+}
+
+int wrap_non_max_suppression(RuntimeState *state, void *boxes, void *scores,
+                             void *selected, int32_t *count_ptr, int64_t b,
+                             int64_t c, int64_t n, int64_t capacity,
+                             int64_t max_output_boxes_per_class,
+                             float iou_threshold, float score_threshold,
+                             int64_t has_score_threshold,
+                             int64_t center_point_box) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_non_max_suppression\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_non_max_suppression(B=%lld, C=%lld, N=%lld, "
+             "capacity=%lld, max=%lld, iou=%f, score=%f, has_score=%lld, "
+             "center=%lld)\n",
+             (long long)b, (long long)c, (long long)n, (long long)capacity,
+             (long long)max_output_boxes_per_class, (double)iou_threshold,
+             (double)score_threshold, (long long)has_score_threshold,
+             (long long)center_point_box);
+  (void)boxes;
+  (void)scores;
+  (void)selected;
+  (void)count_ptr;
+  return 0;
+}
+
 int wrap_global_pool(RuntimeState *state, void *input, void *output,
                      int64_t outer, int64_t reduce_size, int64_t data_type,
                      int64_t mode, int64_t p) {

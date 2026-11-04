@@ -23,16 +23,18 @@ set(_MSVC_HIP_CMATH_WORKAROUND_HEADER
 # Configuration
 #------------------------------------------------------------------------------
 
-# Find HIP_PATH from environment or CMake variable
-if(NOT DEFINED HIP_PATH)
-    if(DEFINED ENV{HIP_PATH})
-        set(HIP_PATH $ENV{HIP_PATH})
-    elseif(DEFINED ENV{ROCM_PATH})
-        set(HIP_PATH $ENV{ROCM_PATH})
-    elseif(DEFINED ENV{THEROCK_DIST})
-        set(HIP_PATH $ENV{THEROCK_DIST})
-    elseif(DEFINED THEROCK_DIST)
-        set(HIP_PATH ${THEROCK_DIST})
+# Find HIP_PATH from environment or CMake variable.
+# A defined-but-empty HIP_PATH (hip-config-amd copies a blank HIP_PATH env var
+# into the cmake variable) must not hide THEROCK_DIST.
+if(NOT HIP_PATH)
+    if(NOT "$ENV{HIP_PATH}" STREQUAL "")
+        set(HIP_PATH "$ENV{HIP_PATH}")
+    elseif(NOT "$ENV{ROCM_PATH}" STREQUAL "")
+        set(HIP_PATH "$ENV{ROCM_PATH}")
+    elseif(NOT "$ENV{THEROCK_DIST}" STREQUAL "")
+        set(HIP_PATH "$ENV{THEROCK_DIST}")
+    elseif(THEROCK_DIST)
+        set(HIP_PATH "${THEROCK_DIST}")
     elseif(EXISTS "/opt/rocm")
         set(HIP_PATH "/opt/rocm")
     endif()
@@ -65,6 +67,10 @@ endif()
 
 # Try to find HIP package (provides hip::host target for host-side code)
 find_package(hip QUIET)
+# hip-config-amd overwrites HIP_PATH from ENV{HIP_PATH} even when that is blank.
+if(NOT HIP_PATH AND THEROCK_DIST)
+    set(HIP_PATH "${THEROCK_DIST}")
+endif()
 
 if(WIN32)
     # Find hipcc compiler (needed for .hip device code compilation)

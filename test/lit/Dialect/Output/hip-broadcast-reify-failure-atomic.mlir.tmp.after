@@ -1,0 +1,19 @@
+module {
+  func.func @late_axis_conflict(%arg0: !hip.context, %arg1: index, %arg2: index, %arg3: tensor<?x?xf32>, %arg4: tensor<?x?xf32>, %arg5: tensor<?x?xf32>) -> tensor<?x?xf32> {
+    %c2 = arith.constant 2 : index
+    %c3 = arith.constant 3 : index
+    %extracted_slice = tensor.extract_slice %arg3[0, 0] [%arg1, %c2] [1, 1] : tensor<?x?xf32> to tensor<?x?xf32>
+    %extracted_slice_0 = tensor.extract_slice %arg4[0, 0] [%arg2, %c3] [1, 1] : tensor<?x?xf32> to tensor<?x?xf32>
+    %0 = hip.add(%arg0) ins(%extracted_slice, %extracted_slice_0 : tensor<?x?xf32>, tensor<?x?xf32>) outs(%arg5 : tensor<?x?xf32>) -> tensor<?x?xf32>
+    return %0 : tensor<?x?xf32>
+  }
+  func.func @late_operand_conflict(%arg0: !hip.context, %arg1: index, %arg2: index, %arg3: tensor<?x?xi1>, %arg4: tensor<?x?xf32>, %arg5: tensor<?x?xf32>, %arg6: tensor<?x?xf32>) -> tensor<?x?xf32> {
+    %c2 = arith.constant 2 : index
+    %c3 = arith.constant 3 : index
+    %extracted_slice = tensor.extract_slice %arg4[0, 0] [%arg1, %c2] [1, 1] : tensor<?x?xf32> to tensor<?x?xf32>
+    %extracted_slice_0 = tensor.extract_slice %arg5[0, 0] [%arg2, %c3] [1, 1] : tensor<?x?xf32> to tensor<?x?xf32>
+    %0 = hip.where(%arg0) ins(%arg3, %extracted_slice, %extracted_slice_0 : tensor<?x?xi1>, tensor<?x?xf32>, tensor<?x?xf32>) outs(%arg6 : tensor<?x?xf32>) : tensor<?x?xf32>
+    return %0 : tensor<?x?xf32>
+  }
+}
+

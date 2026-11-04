@@ -33,11 +33,15 @@ struct GatherToHip : public mlir::RewritePattern {
     int64_t axis = op->getAttrOfType<mlir::IntegerAttr>("axis").getSInt();
     auto axisAttr = rewriter.getI64IntegerAttr(axis);
 
-    // Get result type
+    // UnrankedOpGuard lets through a ranked result over unranked operands
+    // (e.g. `tensor<*xi64>` indices from NonZero/TopK), whose rank the dim
+    // loops below would read as garbage.
     auto resultType =
-        mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-    auto dataType = mlir::cast<mlir::RankedTensorType>(data.getType());
-    auto indicesType = mlir::cast<mlir::RankedTensorType>(indices.getType());
+        mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+    auto dataType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
+    auto indicesType = mlir::dyn_cast<mlir::RankedTensorType>(indices.getType());
+    if (!resultType || !dataType || !indicesType)
+      return rewriter.notifyMatchFailure(op, "gather.unranked");
 
     // Normalize negative axis for dimension calculations only
     int64_t normalizedAxis = axis < 0 ? axis + dataType.getRank() : axis;

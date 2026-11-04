@@ -1790,6 +1790,83 @@ HIP_KERNEL_API int hip_grid_sample(
     int hip_dtype);
 
 /* =========================================================================
+ * RoiAlign (ONNX 4-D NCHW)
+ * =========================================================================
+ *
+ * Pools each region of input (N, C, H, W) into (out_h, out_w) bins by
+ * bilinear sampling. rois is (num_rois, 4) as (x1, y1, x2, y2) in the input
+ * element type; batch_indices is (num_rois) int64. Output is
+ * (num_rois, C, out_h, out_w). Regions whose batch index is out of range
+ * produce zeros.
+ *
+ *  sampling_ratio: samples per bin per axis; 0 = ceil(roi_extent / out)
+ *  half_pixel:     1 = shift corners by -0.5 ("half_pixel"),
+ *                  0 = no shift, extents clamped to >= 1
+ *                      ("output_half_pixel")
+ *  mode:           0 = avg, 1 = max (ONNX Runtime semantics: max over
+ *                  samples of the largest weighted bilinear tap)
+ *
+ * Supported hip_dtypes: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
+ * HIP_DTYPE_BFLOAT16, HIP_DTYPE_FLOAT64.
+ * Returns: 0 on success, non-zero on failure.
+ */
+HIP_KERNEL_API int hip_roi_align(
+    void* stream,
+    const void* input,
+    const void* rois,
+    const void* batch_indices,
+    void* output,
+    int64_t n, int64_t c,
+    int64_t in_h, int64_t in_w,
+    int64_t num_rois,
+    int64_t out_h, int64_t out_w,
+    int sampling_ratio,
+    float spatial_scale,
+    int half_pixel,
+    int mode,
+    int hip_dtype);
+
+/* =========================================================================
+ * NonMaxSuppression (ONNX)
+ * =========================================================================
+ *
+ * boxes (B, N, 4) f32, scores (B, C, N) f32. For each (batch, class) the
+ * boxes are visited in descending score order (ties: lower index first) and
+ * a box is kept unless its IoU with an already kept box is greater than
+ * iou_threshold; at most max_output_boxes_per_class are kept. With
+ * has_score_threshold, only boxes scoring above score_threshold compete.
+ *
+ * selected receives (batch, class, box) int64 triples, ordered by batch,
+ * class, then selection order; rows past *count are zero. count is a device
+ * int32 the kernels write with the number of triples.
+ *
+ *  center_point_box: 0 = (y1, x1, y2, x2), 1 = (xc, yc, w, h)
+ *
+ * hip_non_max_suppression_workspace_bytes returns the device scratch the
+ * launch needs; workspace must be at least that many bytes.
+ * Returns: 0 on success, non-zero on failure.
+ */
+HIP_KERNEL_API size_t hip_non_max_suppression_workspace_bytes(
+    int64_t b, int64_t c, int64_t n,
+    int64_t max_output_boxes_per_class);
+
+HIP_KERNEL_API int hip_non_max_suppression(
+    void* stream,
+    const void* boxes,
+    const void* scores,
+    void* selected,
+    int32_t* count,
+    int64_t b, int64_t c, int64_t n,
+    int64_t capacity,
+    int64_t max_output_boxes_per_class,
+    float iou_threshold,
+    float score_threshold,
+    int has_score_threshold,
+    int center_point_box,
+    void* workspace,
+    size_t workspace_bytes);
+
+/* =========================================================================
  * Global pool (avg / max / lp)
  * =========================================================================
  *

@@ -46,11 +46,11 @@ namespace {
 //      input OR a result type with at least one dynamic dim. Each dynamic
 //      dim is materialised from the shape input via `tensor.extract` +
 //      `arith.index_cast`, the fill value is built as a scalar
-//      `arith.constant`, and the output tensor is produced via
-//      `tensor.splat` (which broadcasts a scalar to a ranked tensor with
-//      arbitrary static + dynamic dims). No HIP dialect op or runtime
-//      function is needed -- `tensor.splat` bufferizes naturally and lowers
-//      through the standard MLIR pipeline.
+//      `arith.constant`. A dynamic result is produced by `hip.expand` of a
+//      rank-0 `linalg.fill` (a GPU broadcast); a dynamic `tensor.splat`
+//      would bufferize to host loops storing into the GPU result buffer.
+//      Static results, and element types hip.expand does not handle, use
+//      `tensor.splat`.
 
 /// Return the dense-elements attribute backing \p value if it can be
 /// determined at compile time (the same forms recognised by ReshapeConversion
@@ -357,7 +357,17 @@ struct ConstantOfShapeFold : public mlir::RewritePattern {
   }
 };
 
-/// Dynamic-shape fallback: produce a `tensor.splat` whose dynamic dim sizes
+/// Element types wrap_expand broadcasts.
+static bool isExpandElementType(mlir::Type type) {
+  if (type.isF16() || type.isF32())
+    return true;
+  auto intTy = mlir::dyn_cast<mlir::IntegerType>(type);
+  return intTy && !intTy.isUnsigned() &&
+         (intTy.getWidth() == 32 || intTy.getWidth() == 64);
+}
+
+/// Dynamic-shape fallback: broadcast the fill value with `hip.expand` (or,
+/// for element types hip.expand lacks, a `tensor.splat`) whose dynamic sizes
 /// are read out of the shape input at runtime via `tensor.extract`.
 /// Handles either (a) a non-constant shape input or (b) a result type with
 /// at least one dynamic dim.
@@ -410,6 +420,35 @@ struct ConstantOfShapeDynamic : public mlir::RewritePattern {
     mlir::Value scalar;
     if (mlir::failed(buildScalarFillValue(op, rewriter, loc, elemType, scalar)))
       return mlir::failure();
+
+    // A dynamic tensor.splat bufferizes to host loops that store straight
+    // into the (GPU pool) result buffer. Broadcast a rank-0 fill on the GPU
+    // instead; the rank-0 fill is a single host store that
+    // hip-materialize-host-scalars moves to host-mapped scratch. Trilu
+    // consumers keep the splat: they read its scalar and the splat dies.
+    bool onlyTriluUsers = llvm::all_of(op->getUsers(), [](mlir::Operation *u) {
+      return u->getName().getStringRef() == "onnx.Trilu";
+    });
+    if (!resultType.hasStaticShape() && isExpandElementType(elemType) &&
+        !(onlyTriluUsers && !op->use_empty())) {
+      auto ctxOrFailure = getContextArg(op, rewriter);
+      if (mlir::succeeded(ctxOrFailure)) {
+        auto scalarTensorTy = mlir::RankedTensorType::get({}, elemType);
+        mlir::Value empty = mlir::tensor::EmptyOp::create(
+            rewriter, loc, scalarTensorTy, mlir::ValueRange{});
+        mlir::Value fill =
+            mlir::linalg::FillOp::create(rewriter, loc,
+                                         mlir::ValueRange{scalar},
+                                         mlir::ValueRange{empty})
+                .getResult(0);
+        mlir::Value init = mlir::tensor::EmptyOp::create(
+            rewriter, loc, resultType.getShape(), elemType, dynSizes);
+        auto expand = mlir::hip::ExpandOp::create(rewriter, loc, *ctxOrFailure,
+                                                  fill, shapeInput, init);
+        rewriter.replaceOp(op, expand->getResult(0));
+        return mlir::success();
+      }
+    }
 
     // tensor.splat broadcasts a scalar to a ranked (possibly dynamic) shape;
     // dynamic dims must be supplied positionally in the same order they

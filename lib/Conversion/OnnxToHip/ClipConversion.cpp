@@ -68,8 +68,20 @@ struct ClipToHipMinMax : public mlir::RewritePattern {
     mlir::Value hiV =
         (n >= 3 && !isNoValue(op->getOperand(2))) ? op->getOperand(2) : nullptr;
 
+    // Clip preserves the input shape, so a result the importer left unranked
+    // (`tensor<*xT>`) takes its rank from a ranked input. UnrankedOpGuard only
+    // declines ops unranked on both sides, so this cast must be checked.
     auto resultType =
-        mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+        mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+    if (!resultType) {
+      auto xType = mlir::dyn_cast<mlir::RankedTensorType>(x.getType());
+      auto unrankedResult =
+          mlir::dyn_cast<mlir::UnrankedTensorType>(op->getResult(0).getType());
+      if (!xType || !unrankedResult)
+        return rewriter.notifyMatchFailure(op, "clip.unranked_result");
+      resultType = mlir::RankedTensorType::get(
+          xType.getShape(), unrankedResult.getElementType());
+    }
 
     // Both bounds missing: pure identity.
     if (!loV && !hiV) {
