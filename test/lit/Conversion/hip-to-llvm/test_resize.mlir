@@ -68,6 +68,21 @@ module {
     return
   }
 
+  // Test 4b: dynamic input H/W resized to a static output (shape inference
+  // pinned the output from a constant sizes vector).
+  func.func @resize_dynamic_in_static_out_f32(
+      %ctx: !hip.context,
+      %x: memref<1x3x?x?xf32, 1>,
+      %y: memref<1x3x300x300xf32, 1>) {
+    // CHECK-LABEL: llvm.func @resize_dynamic_in_static_out_f32
+    hip.resize(%ctx) ins(%x : memref<1x3x?x?xf32, 1>)
+                     outs(%y : memref<1x3x300x300xf32, 1>)
+                     {mode = 1, coord_transform = 1, nearest_mode = 2}
+    // CHECK-NOT: hip.resize
+    // CHECK: llvm.call @wrap_resize
+    return
+  }
+
   // Test 5: channels-last. Lowered as N, C=1, spatial_rank=3, window (H, W, C).
   // The channel extent is unchanged, so that window axis is copied.
   func.func @resize_nhwc_static_f32(
