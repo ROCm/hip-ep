@@ -2897,7 +2897,8 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
                int64_t data_rank, const int64_t *output_shape,
                int64_t output_rank, int64_t starts_num_elements,
                int64_t axes_num_elements, int64_t steps_num_elements,
-               int64_t data_type) {
+               int64_t data_type, int64_t index_type) {
+  (void)index_type;
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_slice\n");
     return -1;

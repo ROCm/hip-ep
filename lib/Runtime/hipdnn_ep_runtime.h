@@ -2209,12 +2209,14 @@ int wrap_mod(RuntimeState *state, void *lhs, void *rhs, void *output,
 // run end-to-end for IR-shape debugging.
 //
 // axes / steps may be nullptr when the corresponding optional input is absent.
+// `index_type` is the element type of starts, ends, axes and steps
+// (HIPDNN_EP_DATATYPE_INT32 or INT64). All four use the same type.
 int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
                void *axes, void *steps, void *output, const int64_t *data_shape,
                int64_t data_rank, const int64_t *output_shape,
                int64_t output_rank, int64_t starts_num_elements,
                int64_t axes_num_elements, int64_t steps_num_elements,
-               int64_t data_type);
+               int64_t data_type, int64_t index_type);
 
 // ScatterND: output = copy(data), then output[indices[i]] (reduction)
 // updates[i].

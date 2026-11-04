@@ -15,7 +15,7 @@ namespace {
 //                 data_shape_ptr, data_rank,
 //                 output_shape_ptr, output_rank,
 //                 starts_num_elements, axes_num_elements,
-//                 steps_num_elements, data_type)
+//                 steps_num_elements, data_type, index_type)
 //
 // Today the runtime function is a no-op stub that only logs its parameters
 // (see lib/Runtime/real/slice.cpp). This lowering exists to keep the IR
@@ -41,6 +41,27 @@ struct SliceOpLowering : public ConvertOpToLLVMPattern<SliceOp> {
     int64_t hipDtype = getHipdnnDataType(dataType.getElementType());
     if (hipDtype < 0)
       return rewriter.notifyMatchFailure(op, "unsupported data element type");
+
+    // starts, ends and the optional axes and steps share one element type.
+    auto indexTypeOf = [](MemRefType type) -> int64_t {
+      if (type.getElementType().isInteger(32))
+        return HIPDNN_EP_DATATYPE_INT32;
+      if (type.getElementType().isInteger(64))
+        return HIPDNN_EP_DATATYPE_INT64;
+      return HIPDNN_EP_DATATYPE_UNSUPPORTED;
+    };
+    int64_t indexType = indexTypeOf(startsType);
+    auto sameIndexType = [&](MemRefType type) {
+      return indexTypeOf(type) == indexType;
+    };
+    if (indexType < 0 ||
+        !sameIndexType(cast<MemRefType>(op.getEnds().getType())) ||
+        (op.getAxes() &&
+         !sameIndexType(cast<MemRefType>(op.getAxes().getType()))) ||
+        (op.getSteps() &&
+         !sameIndexType(cast<MemRefType>(op.getSteps().getType()))))
+      return rewriter.notifyMatchFailure(
+          op, "slice index tensors must share one i32 or i64 element type");
 
     Value statePtr = adaptor.getCtx();
     Value dataPtr =
@@ -100,25 +121,26 @@ struct SliceOpLowering : public ConvertOpToLLVMPattern<SliceOp> {
     Value dataRank = createI64Const(dataType.getRank());
     Value outRank = createI64Const(outputType.getRank());
     Value dataTypeVal = createI64Const(hipDtype);
+    Value indexTypeVal = createI64Const(indexType);
 
-    SmallVector<Type, 16> paramTypes = {
+    SmallVector<Type, 17> paramTypes = {
         ptrType, ptrType, ptrType, ptrType, // state, data, starts, ends
         ptrType, ptrType, ptrType,          // axes, steps, output
         ptrType, i64Type,                   // data_shape, data_rank
         ptrType, i64Type,                   // out_shape,  out_rank
         i64Type, i64Type, i64Type,          // starts_num, axes_num,
                                             // steps_num
-        i64Type};                           // data_type
+        i64Type, i64Type};                  // data_type, index_type
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapSlice, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 16> args = {statePtr, dataPtr,  startsPtr,  endsPtr,
-                                   axesPtr,  stepsPtr, outPtr,     dataShape,
-                                   dataRank, outShape, outRank,    startsNum,
-                                   axesNum,  stepsNum, dataTypeVal};
+    SmallVector<Value, 16> args = {
+        statePtr, dataPtr,   startsPtr,   endsPtr,     axesPtr, stepsPtr,
+        outPtr,   dataShape, dataRank,    outShape,    outRank, startsNum,
+        axesNum,  stepsNum,  dataTypeVal, indexTypeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
