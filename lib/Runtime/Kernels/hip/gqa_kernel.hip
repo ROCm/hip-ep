@@ -3039,8 +3039,10 @@ static std::mutex g_flash_decode_mutex;
 // the per-call CPU cost overlaps GPU execution. It matters in *host-bound* real
 // decode (per-token host sync / sampling between steps drains the queue, so the
 // CPU cost is on the critical path). skv is bucketed to its next-power-of-two
-// exponent. Layout: B[40..51] H[28..39] G[16..27] d[6..15] log2bucket[0..5].
-// d gets a full 10 bits so d=256 (Qwen3 16:4) does not spill into G.
+// exponent. Layout: has_key_bias[52] B[40..51] H[28..39] G[16..27] d[6..15]
+// log2bucket[0..5]. d gets a full 10 bits so d=256 (Qwen3 16:4) does not spill
+// into G. A key bias selects different kernel instantiations, so a config tuned
+// without one does not carry over.
 //
 // Bucketing skv is what keeps an autotune cache usable in a decode loop at all:
 // the KV length grows by one every token, so a key holding the exact length
@@ -3053,9 +3055,11 @@ static inline int skvLog2Bucket(int skv) {
   return blog;
 }
 
-static uint64_t flashDecodeKey(int B, int H, int G, int d, int skv) {
+static uint64_t flashDecodeKey(int B, int H, int G, int d, int skv,
+                               bool has_key_bias) {
   const int blog = skvLog2Bucket(skv);
-  return ((uint64_t)(uint32_t)B << 40) | ((uint64_t)(uint32_t)H << 28) |
+  return ((uint64_t)has_key_bias << 52) |
+         ((uint64_t)(uint32_t)B << 40) | ((uint64_t)(uint32_t)H << 28) |
          ((uint64_t)(uint32_t)G << 16) | ((uint64_t)(uint32_t)d << 6) |
          (uint64_t)(uint32_t)blog;
 }
@@ -3351,7 +3355,7 @@ static int runGqaFlashDecode(
     const float*  kSc = static_cast<const float*>(k_scale);
     const float*  vSc = static_cast<const float*>(v_scale);
     if (!forced && !no_autotune) {
-      const uint64_t key = flashDecodeKey(B, H, G, d, tune_len);
+      const uint64_t key = flashDecodeKey(B, H, G, d, tune_len, hKb != nullptr);
       std::lock_guard<std::mutex> lock(g_flash_decode_i8_mutex);
       auto it = g_flash_decode_i8_cache.find(key);
       if (it != g_flash_decode_i8_cache.end()) {
@@ -3379,7 +3383,7 @@ static int runGqaFlashDecode(
   const __half* hK = static_cast<const __half*>(Kcache);
   const __half* hV = static_cast<const __half*>(Vcache);
   if (!forced && !no_autotune) {
-    const uint64_t key = flashDecodeKey(B, H, G, d, tune_len);
+    const uint64_t key = flashDecodeKey(B, H, G, d, tune_len, hKb != nullptr);
     std::lock_guard<std::mutex> lock(g_flash_decode_mutex);
     auto it = g_flash_decode_cache.find(key);
     if (it != g_flash_decode_cache.end()) {
@@ -4881,19 +4885,22 @@ static std::string prefillV8xName(const PrefillV8xCfg& c) {
     return buf;
 }
 
-// Tuned configs, keyed per (d, sq, skv bucket, Hq, G, window). skv is bucketed
-// by power of two, not exact: keying on the exact length re-tunes on every
-// call of a loop that grows its context (a speculative verify pass at sq=k+1
-// re-tuned once per generated token). The window belongs in the key: it caps
-// how many KV tiles a block walks, a different work profile.
+// Tuned configs, keyed per (d, sq, skv bucket, Hq, G, window, key bias). skv
+// is bucketed by power of two, not exact: keying on the exact length re-tunes
+// on every call of a loop that grows its context (a speculative verify pass at
+// sq=k+1 re-tuned once per generated token). The window belongs in the key: it
+// caps how many KV tiles a block walks, a different work profile. A key bias
+// selects the HAS_KB instantiation, which times differently.
 static std::mutex g_prefill_cfg_mutex;
 static std::unordered_map<std::string, PrefillV6xCfg> g_v6x_cfg_cache;
 static std::unordered_map<std::string, PrefillV8xCfg> g_v8x_cfg_cache;
 
-static std::string prefillTuneKey(int d, int sq, int skv, int Hq, int G, int window) {
+static std::string prefillTuneKey(int d, int sq, int skv, int Hq, int G, int window,
+                                  bool has_key_bias) {
     return std::to_string(d) + "_" + std::to_string(sq) + "_b" +
            std::to_string(skvLog2Bucket(skv)) + "_" + std::to_string(Hq) + "_" +
-           std::to_string(G) + "_w" + std::to_string(window > 0 ? window : 0);
+           std::to_string(G) + "_w" + std::to_string(window > 0 ? window : 0) +
+           (has_key_bias ? "_kb" : "");
 }
 
 // Self-tuning launch: v6x at d64 / d96 / d128, v8x at d256 (no window).
@@ -4908,7 +4915,8 @@ static int prefillTunedRun(
     int local_window_size, const _Float16* key_bias, int key_bias_stride)
 {
     if (key_bias != nullptr && d != 128) return -1;
-    const std::string key = prefillTuneKey(d, sq, skv, Hq, G, local_window_size);
+    const std::string key =
+        prefillTuneKey(d, sq, skv, Hq, G, local_window_size, key_bias != nullptr);
     if (d == 256) {
         if (local_window_size > 0 || key_bias != nullptr) return -1;
         PrefillV8xCfg cands[kPrefillV8xMaxCandidates];
