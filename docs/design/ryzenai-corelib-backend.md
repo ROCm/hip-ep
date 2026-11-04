@@ -128,6 +128,37 @@ Matmul group size and shipped row counts are read from CoreLib's kernel
 enumeration, so they need no configuration. An ONNX int4 export at block size
 64 or 128 reaches g64 kernels; block size 32 selects g32 kernels.
 
+## Model coverage
+
+What each model in `test/python` can run on the NPU, with
+`RYZENAI_CORELIB_KERNELS_ROOT` set to DynamicDispatch's kernel store
+(`transaction/mds`) and no kernel bundle. Found by matching each model's
+`MatMulNBits` (K, N, block size) and RMS norm widths against the store's
+`mladfmatmulbias`, `rmsnorm` and `addrmsnorm` kernel names at DynamicDispatch
+tag `corelib/kernels/20261029.0`; a store at another revision can differ.
+Prefill PDIs ship row counts 1 to 4096, decode PDIs one row. Everything not
+listed runs on the GPU, as do attention, RoPE and every other op.
+
+| Model (`test/python`) | Matmuls on the NPU | Norms on the NPU | `RYZENAICORELIB_PDI` | Run on AIE4 |
+|---|---|---|---|---|
+| Llama 3.1 8B AWQ (`test_llama8b.py`, block 128) | All 225: Q/K/V/O, MLP, `lm_head` (decode) | Final norm; the 64 skip-norms only on PDIs 9/19 | `1;16` | Yes: all 225 matmuls on the NPU, logits match the GPU-only run (cosine 0.99996) |
+| Llama 3.2 1B (`test_llama1b.py`, block 32) | All 112 | Final norm; the 32 skip-norms only on PDIs 9/19 | `1;16` | No |
+| Gemma 3 4B (`test_gemma3_4b.py`, block 128) | All 239 | QK norms (k=256) and layer norms (k=2560); skip-norms on decode (PDI 33) | `2;17,33` | No |
+| Mistral 7B v0.3 (`test_mistral7b_v3.py`, block 32) | 128 of 225: Q/K/V/O; MLP and `lm_head` stay on the GPU | Final norm; skip-norms only on PDIs 9/19 | `1;16` | No |
+| Qwen2.5 14B, Qwen2.5-Coder 14B (`test_qwen2_5*_14b.py`, block 128, zero points) | 192 of 337: Q/O on PDIs 1/16, K/V on PDIs 9/37; MLP and `lm_head` stay on the GPU | All, on PDIs 9/37 | `1,9;16,37` | No |
+| gpt-oss 20B (`test_gptoss20b.py`, block 32) | `lm_head` only, on decode | Final norm | `1;16` | No |
+| Phi-4 14B (`test_phi4_14b.py`, block 32) | None: the store has Phi-4's shapes at g64 only | All, on PDIs 9/37 only | — | No |
+| DeepSeek-R1 70B (`test_deepseek_r1_70b.py`) | None: no K=8192 kernels | None | — | No |
+| Llama 3.1 8B asym, gpt-oss 120B | Not checked: their Hugging Face repos were not accessible | | | No |
+
+A model bundle covers fewer shapes than the store: with
+`RYZENAICORELIB_KERNEL_BUNDLE=llama`, Llama 3.1 8B runs Q/K/V/O, `lm_head` and
+the final norm on the NPU but its MLP on the GPU, since the bundle carries only
+CoreLib's fused MLP kernel. Phi-4 would reach the NPU for every matmul from an
+export at block size 64 or 128. A PDI list naming more than one PDI per phase
+(such as `1,9;16,19` to reach the Llama skip-norms) makes the NPU switch PDIs
+between ops; whether that pays off is not measured.
+
 ## Generated code
 
 With `use-ryzenai-corelib`, `convert-hip-to-llvm` emits the CoreLib wrapper
@@ -230,4 +261,4 @@ only when the NPU refuses a shape that a kernel was listed for.
 - CoreLib kernels ship only at specific shapes; anything else falls back.
 - Attention, the fused MLP (`ssmlp_bf16`) and RoPE are not routed.
 - AIE4 only; AIE2/AIE2P machines always use the GPU.
-- Not yet validated on AIE4 hardware.
+- Validated on AIE4 hardware with one model so far (see Model coverage).
