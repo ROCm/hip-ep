@@ -22,7 +22,7 @@ namespace {
 constexpr int kTopKDeviceMax = 256;
 constexpr int kTopKMaxRank = 8;
 
-float topk_key(const char *element, int64_t element_size) {
+double topk_key(const char *element, int64_t element_size) {
   if (element_size == 2) {
     __half value;
     memcpy(&value, element, sizeof(value));
@@ -31,7 +31,7 @@ float topk_key(const char *element, int64_t element_size) {
   if (element_size == 8) {
     double value;
     memcpy(&value, element, sizeof(value));
-    return static_cast<float>(value);
+    return value;
   }
   float value;
   memcpy(&value, element, sizeof(value));
@@ -103,10 +103,10 @@ int host_top_k(hipStream_t stream, const void *x, void *values, void *indices,
     std::partial_sort(
         order.begin(), order.begin() + k, order.end(),
         [&](int64_t lhs, int64_t rhs) {
-          float left =
+          double left =
               topk_key(input + (base + lhs * in_stride[axis]) * element_size,
                        element_size);
-          float right =
+          double right =
               topk_key(input + (base + rhs * in_stride[axis]) * element_size,
                        element_size);
           if (left != right)
