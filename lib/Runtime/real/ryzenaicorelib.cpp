@@ -18,6 +18,18 @@
 //
 //===----------------------------------------------------------------------===//
 
+// Compiled by MSVC, unlike the runtime bitcode, but RuntimeState pulls in
+// hipBLASLt's headers, whose host code calls the clang/GCC builtin
+// __builtin_clz (hipblaslt_e5m3.h).
+#if defined(_MSC_VER) && !defined(__clang__)
+#include <intrin.h>
+static inline int __builtin_clz(unsigned int x) {
+  unsigned long index;
+  _BitScanReverse(&index, x);
+  return 31 - static_cast<int>(index);
+}
+#endif
+
 #include "../hipdnn_ep_errors.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../runtime_state_internal.h"
