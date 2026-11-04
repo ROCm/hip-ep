@@ -203,3 +203,33 @@ func.func @no_reuse_different_element_type(
   hip.miopen.softmax(%ctx) ins(%c : memref<64xf16>) outs(%alloc1 : memref<64xf16>)
   return %alloc1 : memref<64xf16>
 }
+
+// A host-written shape buffer must not be folded into a dead device buffer.
+// %shape (memref<2xi64>, 16 bytes) would fit in the dead NonZero output
+// (memref<1x512xi64>), but it is written by host memref.store ops; merged into
+// that slot it would land in the GPU pool and the stores would fault. It stays
+// a separate alloc so hip-materialize-host-scalars can move it to host scratch.
+// CHECK-LABEL: func.func @no_reuse_host_written
+// CHECK:         %[[NZ:.*]] = memref.alloc() : memref<1x512xi64>
+// CHECK:         hip.nonzero
+// CHECK-NOT:     memref.reinterpret_cast %[[NZ]]
+// CHECK:         %[[SHAPE:.*]] = memref.alloc() : memref<2xi64>
+// CHECK:         memref.store %{{.*}}, %[[SHAPE]]
+// CHECK:         memref.reshape %{{.*}}(%[[SHAPE]])
+func.func @no_reuse_host_written(
+    %ctx: !hip.context,
+    %x: memref<512xf32>,
+    %data: memref<64xf32>,
+    %n: i64) -> memref<1x64xf32> {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c1_i64 = arith.constant 1 : i64
+  %nz = memref.alloc() : memref<1x512xi64>
+  %count = memref.alloc() : memref<i32>
+  hip.nonzero(%ctx) ins(%x : memref<512xf32>) outs(%nz, %count : memref<1x512xi64>, memref<i32>) {input_data_type = 0 : i64}
+  %shape = memref.alloc() : memref<2xi64>
+  memref.store %c1_i64, %shape[%c0] : memref<2xi64>
+  memref.store %n, %shape[%c1] : memref<2xi64>
+  %r = memref.reshape %data(%shape) : (memref<64xf32>, memref<2xi64>) -> memref<1x64xf32>
+  return %r : memref<1x64xf32>
+}
