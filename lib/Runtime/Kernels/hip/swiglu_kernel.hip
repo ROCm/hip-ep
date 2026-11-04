@@ -202,3 +202,67 @@ extern "C" int hip_swiglu_promoted(void *stream, const void *gate,
                                output, numElements);
   return static_cast<int>(hipGetLastError());
 }
+
+// Clamped SwiGLU, in FP32 with one rounding at the store: the form hip.qmoe
+// applies between its projections (GPT-OSS), written as GGML and llama.cpp
+// write it, g / (1 + exp(-alpha * g)) rather than g * sigmoid(alpha * g).
+template <typename T>
+__global__ void swigluClampedKernel(const T *__restrict__ gate,
+                                    const T *__restrict__ up,
+                                    T *__restrict__ output, int64_t numElements,
+                                    float alpha, float beta, float limit) {
+  using Traits = SwigluTraits<T>;
+  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx >= numElements)
+    return;
+  const float g = fminf(static_cast<float>(Traits::load(gate[idx])), limit);
+  const float u =
+      fminf(fmaxf(static_cast<float>(Traits::load(up[idx])), -limit), limit);
+  output[idx] = Traits::store(g / (1.0f + expf(alpha * -g)) * (u + beta));
+}
+
+extern "C" int hip_swiglu_clamped(void *stream, const void *gate,
+                                  const void *up, void *output,
+                                  int64_t numElements, int hipDtype,
+                                  float alpha, float beta, float limit) {
+  if (numElements <= 0)
+    return 0;
+  hipStream_t hipStream = static_cast<hipStream_t>(stream);
+  constexpr int kBlockSize = 256;
+  const int gridSize =
+      static_cast<int>((numElements + kBlockSize - 1) / kBlockSize);
+  (void)hipGetLastError();
+  switch (hipDtype) {
+  case HIP_DTYPE_FLOAT32:
+    hipLaunchKernelGGL(
+        swigluClampedKernel<float>, dim3(gridSize), dim3(kBlockSize), 0,
+        hipStream, static_cast<const float *>(gate),
+        static_cast<const float *>(up), static_cast<float *>(output),
+        numElements, alpha, beta, limit);
+    break;
+  case HIP_DTYPE_FLOAT16:
+    hipLaunchKernelGGL(
+        swigluClampedKernel<__half>, dim3(gridSize), dim3(kBlockSize), 0,
+        hipStream, static_cast<const __half *>(gate),
+        static_cast<const __half *>(up), static_cast<__half *>(output),
+        numElements, alpha, beta, limit);
+    break;
+  case HIP_DTYPE_BFLOAT16:
+    hipLaunchKernelGGL(
+        swigluClampedKernel<__hip_bfloat16>, dim3(gridSize), dim3(kBlockSize),
+        0, hipStream, static_cast<const __hip_bfloat16 *>(gate),
+        static_cast<const __hip_bfloat16 *>(up),
+        static_cast<__hip_bfloat16 *>(output), numElements, alpha, beta, limit);
+    break;
+  default:
+    fprintf(stderr,
+            "[custom_kernels] hip_swiglu_clamped: unsupported dtype=%d\n",
+            hipDtype);
+    return -1;
+  }
+  hipError_t error = hipGetLastError();
+  if (error != hipSuccess)
+    fprintf(stderr, "[custom_kernels] hip_swiglu_clamped launch failed: %s\n",
+            hipGetErrorString(error));
+  return static_cast<int>(error);
+}

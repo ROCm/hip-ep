@@ -402,7 +402,8 @@ struct PromotedSwigluFusion : public mlir::OpRewritePattern<mlir::hip::CastOp> {
   matchAndRewrite(mlir::hip::CastOp outputCast,
                   mlir::PatternRewriter &rewriter) const override {
     auto swiglu = outputCast.getInput().getDefiningOp<mlir::hip::SwigluOp>();
-    if (!swiglu || swiglu.getPromoteActivation())
+    // The promoted kernel computes plain SwiGLU only.
+    if (!swiglu || swiglu.getPromoteActivation() || swiglu.isClamped())
       return mlir::failure();
     auto gateCast = swiglu.getGate().getDefiningOp<mlir::hip::CastOp>();
     auto upCast = swiglu.getUp().getDefiningOp<mlir::hip::CastOp>();

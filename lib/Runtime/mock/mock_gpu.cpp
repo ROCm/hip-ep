@@ -3088,3 +3088,14 @@ int wrap_swiglu_promoted(RuntimeState *state, void *gate, void *up,
              (long long)num_elements);
   return 0;
 }
+
+int wrap_swiglu_clamped(RuntimeState *state, void *gate, void *up, void *output,
+                        int64_t num_elements, int64_t data_type, float alpha,
+                        float beta, float limit) {
+  if (!state || !gate || !up || !output)
+    return -1;
+  MOCK_PRINT("[MOCK] wrap_swiglu_clamped(num_elements=%lld, data_type=%lld, "
+             "alpha=%g, beta=%g, limit=%g)\n",
+             (long long)num_elements, (long long)data_type, alpha, beta, limit);
+  return 0;
+}
