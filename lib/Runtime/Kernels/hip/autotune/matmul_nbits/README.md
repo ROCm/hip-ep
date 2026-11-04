@@ -54,10 +54,13 @@ config table still accepts wins.
 | **Fallback** | phase + bits only | guarantees a hit; the config that won most often for that phase |
 
 `phase` is not just prefill/decode. It is one of `Prefill` (WMMA tiles),
-`Decode` (fp16 GEMV) and `DecodeDp4a` (W4A8 integer-dot GEMV). The two decode
-kernels read the same `kGemvConfigs` table but rank it differently, which is why
-they already keep separate tune caches at runtime — they need separate rows for
-the same reason.
+`Decode` (fp16 GEMV), `DecodeDp4a` (W4A8 integer-dot GEMV) and
+`DecodeDp4aBlocks` (the W4A8 GEMV that reads a weight stored in 16-row blocks).
+The first two decode kernels read the same `kGemvConfigs` table but rank it
+differently, which is why they already keep separate tune caches at runtime —
+they need separate rows for the same reason. `DecodeDp4aBlocks` rows name a
+`kDp4aBlocksConfigs` entry as a Gemv config whose `tile_n` packs the 16-row
+groups per workgroup (bits 0-3) and the K blocks per step (bits 4-7).
 
 Row stride is part of the prefill key because a padded buffer has a different
 winner (measured: cfg11 -> cfg3 at N=5120 K=4096), so layouts must not share a
@@ -69,6 +72,15 @@ category skips the point groups and goes to the phase's fallback, so a
 lookup never uses a point measured at another pitch. The sweep driver logs the
 pad of each `prefill_padrow` measurement (`pad=`), and `update_lut.py` maps it
 to the category.
+
+A weight stored in another byte order (`XorLines`, `Blocks`; see Row pads) is a
+category of its own, taken from the request's `layout`. A group size and zero
+point with no points there is answered from its `Arrival` points, through the
+caller's validator, which keeps only the extended configs that read the byte
+order. The sweep
+driver measures them with `--layouts xor,blocks` (it needs `--extended`): the
+markers `prefill_xor` and `prefill_blocks` for prefill, and `dp4a_blocks` for
+the block-reading decode GEMV at M = 1.
 
 `--out` names the JSON that `update_lut.py build` and `merge` write and
 `compile` reads; `--fb-out` names the binary, which defaults to `lut/<arch>.fb`
@@ -99,7 +111,9 @@ lowest prefill (prompt 1024) plus 128-token decode time, in the pad sweep and
 two re-measurements, taking the smaller pad when it is within noise of the
 fastest. A listed weight needs prefill rows measured at its stored pad
 (`Padded256`, or `Padded` for a 128-byte entry), so layout and rows come from
-the same data; without them its prefill LUT lookup misses. The compiler reads
+the same data; without them its prefill LUT lookup misses. A byte-order entry
+falls back to the arrival rows instead, so its rows (and, for `Blocks`, the
+`DecodeDp4aBlocks` rows) refine it rather than enable it. The compiler reads
 the entries through `hip_matmul_nbits_u4_row_pads(arch, ...)`
 (`matmul_nbits_row_pad_abi.h`). `update_lut.py build` and `merge` carry them
 over unchanged from `lut/<arch>.json` (`--carry-from` names another table). No
@@ -154,6 +168,13 @@ clang++ -x hip --offload-arch=gfx11-generic -O2 -std=c++17 -w `
 # 3. measure -> build -> compile. --arch is the chip the sweep runs on (the
 #    table is per chip even though the binary is generic).
 python scripts/update_lut.py all --arch gfx1151 --sweep mn_sweep.exe --flatc <flatc>
+
+# Byte-order rows (prefill_xor, prefill_blocks, dp4a_blocks) as a supplementary
+# sweep next to the main log, then merged phase by phase.
+python scripts/update_lut.py measure --arch gfx1151 --tag layouts --sweep mn_sweep.exe `
+    --sweep-args --extended --layouts xor,blocks --layouts-only
+python scripts/update_lut.py build --merge-existing --arch gfx1151 --phase Prefill
+python scripts/update_lut.py build --merge-existing --arch gfx1151 --phase DecodeDp4aBlocks
 ```
 
 Each sweep process starts with an empty in-process tune map (the tuners no

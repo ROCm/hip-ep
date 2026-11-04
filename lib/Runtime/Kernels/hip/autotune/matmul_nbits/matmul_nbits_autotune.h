@@ -48,7 +48,7 @@ enum class Source : uint8_t {
 /* Which kernel is being configured. Decode and DecodeDp4a both index
  * kGemvConfigs but rank it differently, so they are separate keys -- mirroring
  * the separate tune caches the two already keep at runtime. */
-enum class Phase : uint8_t { Prefill = 1, Decode = 2, DecodeDp4a = 3 };
+enum class Phase : uint8_t { Prefill = 1, Decode = 2, DecodeDp4a = 3, DecodeDp4aBlocks = 4 };
 
 /* One MatMulNBits invocation, in the terms the kernel dispatch already has. */
 struct Request {
@@ -62,6 +62,11 @@ struct Request {
   /* Bytes between B rows, 0 for the arrival layout. Prefill only: the padded
    * layout has a different winner, so it must not share a row. */
   int b_row_bytes = 0;
+  /* B's byte order (hip::MatmulNBitsWeightLayout): 1 XOR lines, 2 16-row
+   * blocks. Prefill only, a row category of its own; a group size and zero
+   * point with no rows there is answered from the arrival rows, through the
+   * caller's validator. */
+  int layout = 0;
 };
 
 /* Tile geometry for the WMMA prefill path, as stored in the row. The caller

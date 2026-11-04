@@ -14,6 +14,12 @@
  * pitch, and then returns that point's config: a lookup never answers with a
  * point measured at another pitch. A pad with no row-stride category goes to
  * the phase's fallback.
+ *
+ * A weight byte order (Request::layout) is its own category: a query hits its
+ * own point when the table has one, is answered from another point of that
+ * category when the category has any for its group size and zero points, and
+ * otherwise from the arrival points, never a padded one. An unknown layout
+ * goes to the fallback.
  */
 #include "matmul_nbits_autotune.h"
 #include "matmul_nbits_autotune_generated.h"
@@ -44,6 +50,12 @@ static int failures = 0;
 
 static bool acceptAll(void *, const mna::WmmaAnswer &) { return true; }
 
+static bool sameAnswer(const mna::WmmaAnswer &a, const mna::WmmaAnswer &b) {
+  return a.bm == b.bm && a.bn == b.bn && a.swizzle_n == b.swizzle_n &&
+         a.wt_m == b.wt_m && a.wt_n == b.wt_n && a.bk == b.bk &&
+         a.fused == b.fused && a.ext == b.ext && a.variant == b.variant;
+}
+
 static int groupSize(fbs::MatmulNbitsGroupSize g) {
   return 8 << static_cast<int>(g); // G16 = 1 ... G512 = 6
 }
@@ -60,6 +72,7 @@ int main() {
   // Prefill points by stride, with the geometry each one names.
   std::map<std::pair<Key, fbs::MatmulNbitsRowStride>, mna::WmmaAnswer> rows;
   std::set<Key> keys;
+  std::set<std::tuple<int, bool, fbs::MatmulNbitsRowStride>> groups;
   for (const auto *p : *lut->points()) {
     if (p->phase() != fbs::MatmulNbitsPhase::Prefill ||
         p->bits() != fbs::MatmulNbitsBits::B4)
@@ -81,6 +94,7 @@ int main() {
                   p->m(), static_cast<int>(p->n()), p->k()};
     rows[{key, p->row_stride()}] = a;
     keys.insert(key);
+    groups.insert({std::get<0>(key), std::get<1>(key), p->row_stride()});
   }
   CHECK(!keys.empty(), "no prefill points in the embedded table");
 
@@ -111,17 +125,41 @@ int main() {
             m, n, k, gs, zp, pad, static_cast<int>(r.source),
             want_exact ? "has" : "has no");
       if (want_exact && r.source == mna::Source::Exact) {
-        const mna::WmmaAnswer &w = row->second;
-        CHECK(r.wmma.bm == w.bm && r.wmma.bn == w.bn &&
-                  r.wmma.swizzle_n == w.swizzle_n && r.wmma.wt_m == w.wt_m &&
-                  r.wmma.wt_n == w.wt_n && r.wmma.bk == w.bk &&
-                  r.wmma.fused == w.fused && r.wmma.ext == w.ext &&
-                  r.wmma.variant == w.variant,
+        CHECK(sameAnswer(r.wmma, row->second),
               "M=%d N=%d K=%d gs=%d pad=%d: answer differs from the point", m,
               n, k, gs, pad);
         ++exact;
       }
     }
+    const std::pair<int, fbs::MatmulNbitsRowStride> layouts[] = {
+        {1, fbs::MatmulNbitsRowStride::XorLines},
+        {2, fbs::MatmulNbitsRowStride::Blocks}};
+    req.b_row_bytes = 0;
+    for (const auto &[layout, stride] : layouts) {
+      req.layout = layout;
+      const mna::Result r = mna::resolve(req, acceptAll, nullptr, nullptr);
+      auto row = rows.find({key, stride});
+      if (row == rows.end() && !groups.count({gs, zp, stride}))
+        row = rows.find({key, fbs::MatmulNbitsRowStride::Arrival});
+      const bool want_exact = row != rows.end();
+      CHECK((r.source == mna::Source::Exact) == want_exact,
+            "M=%d N=%d K=%d gs=%d zp=%d layout=%d: source %d, table %s a "
+            "point for it",
+            m, n, k, gs, zp, layout, static_cast<int>(r.source),
+            want_exact ? "has" : "has no");
+      if (want_exact && r.source == mna::Source::Exact)
+        CHECK(sameAnswer(r.wmma, row->second),
+              "M=%d N=%d K=%d gs=%d layout=%d: answer differs from the point",
+              m, n, k, gs, layout);
+    }
+    req.layout = 3;
+    {
+      const mna::Result r = mna::resolve(req, acceptAll, nullptr, nullptr);
+      CHECK(r.source == mna::Source::Fallback,
+            "M=%d N=%d K=%d gs=%d layout=3: source %d, expected Fallback", m, n,
+            k, gs, static_cast<int>(r.source));
+    }
+    req.layout = 0;
     // A pad with no row-stride category may only reach the fallback.
     req.b_row_bytes = arrival + 192;
     const mna::Result r = mna::resolve(req, acceptAll, nullptr, nullptr);
@@ -155,7 +193,8 @@ int main() {
   const mna::Stats s = mna::stats();
   CHECK(s.table_loaded, "table not loaded");
   CHECK(s.invalid_points == 0, "%u invalid points", s.invalid_points);
-  std::printf("%zu prefill shapes x 3 pitches, %d exact hits, %d failure(s)\n",
+  std::printf("%zu prefill shapes x 3 pitches + 3 layouts, %d exact pitch "
+              "hits, %d failure(s)\n",
               keys.size(), exact, failures);
   return failures ? 1 : 0;
 }

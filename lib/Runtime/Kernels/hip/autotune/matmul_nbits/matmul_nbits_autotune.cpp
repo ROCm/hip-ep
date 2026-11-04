@@ -94,18 +94,25 @@ int groupSizeValue(fbs::MatmulNbitsGroupSize gs) {
 
 /* The exact-match part of the key. Points sharing one of these are mutually
  * comparable by distance; points across two of them are not. */
+// Every enum value must fit its field below, or two groups share a key.
+static_assert(static_cast<uint32_t>(fbs::MatmulNbitsPhase::MAX) <= 0x7u, "phase field");
+static_assert(static_cast<uint32_t>(fbs::MatmulNbitsBits::MAX) <= 0x7u, "bits field");
+static_assert(static_cast<uint32_t>(fbs::MatmulNbitsGroupSize::MAX) <= 0x7u, "group size field");
+static_assert(static_cast<uint32_t>(fbs::MatmulNbitsZeroPoint::MAX) <= 0x3u, "zero point field");
+static_assert(static_cast<uint32_t>(fbs::MatmulNbitsRowStride::MAX) <= 0x7u, "row stride field");
+
 uint32_t groupKey(fbs::MatmulNbitsPhase phase, fbs::MatmulNbitsBits bits, fbs::MatmulNbitsGroupSize gs,
                   fbs::MatmulNbitsZeroPoint zp, fbs::MatmulNbitsRowStride stride) {
-  return (static_cast<uint32_t>(phase) & 0x3u) |
-         ((static_cast<uint32_t>(bits) & 0x7u) << 2) |
-         ((static_cast<uint32_t>(gs) & 0x7u) << 5) |
-         ((static_cast<uint32_t>(zp) & 0x3u) << 8) |
-         ((static_cast<uint32_t>(stride) & 0x3u) << 10);
+  return (static_cast<uint32_t>(phase) & 0x7u) |
+         ((static_cast<uint32_t>(bits) & 0x7u) << 3) |
+         ((static_cast<uint32_t>(gs) & 0x7u) << 6) |
+         ((static_cast<uint32_t>(zp) & 0x3u) << 9) |
+         ((static_cast<uint32_t>(stride) & 0x7u) << 11);
 }
 
 uint32_t fallbackKey(fbs::MatmulNbitsPhase phase, fbs::MatmulNbitsBits bits) {
-  return (static_cast<uint32_t>(phase) & 0x3u) |
-         ((static_cast<uint32_t>(bits) & 0x7u) << 2);
+  return (static_cast<uint32_t>(phase) & 0x7u) |
+         ((static_cast<uint32_t>(bits) & 0x7u) << 3);
 }
 
 // ---------------------------------------------------------------------------
@@ -183,6 +190,7 @@ bool pointConsistent(const fbs::MatmulNbitsTunePoint& p, fbs::MatmulNbitsConfigK
   const bool prefill = p.phase() == fbs::MatmulNbitsPhase::Prefill;
   if (prefill != (p.row_stride() != fbs::MatmulNbitsRowStride::Any)) return false;
   if (p.row_stride() > fbs::MatmulNbitsRowStride::MAX) return false;
+  if (p.phase() > fbs::MatmulNbitsPhase::MAX) return false;
 
   // The referenced config has to match the path it will be handed to.
   return kind == (prefill ? fbs::MatmulNbitsConfigKind::Wmma : fbs::MatmulNbitsConfigKind::Gemv);
@@ -438,6 +446,7 @@ Result resolve(const Request& request, WmmaValidator wmma_valid,
   case Phase::Prefill:    phase = fbs::MatmulNbitsPhase::Prefill; break;
   case Phase::Decode:     phase = fbs::MatmulNbitsPhase::Decode; break;
   case Phase::DecodeDp4a: phase = fbs::MatmulNbitsPhase::DecodeDp4a; break;
+  case Phase::DecodeDp4aBlocks: phase = fbs::MatmulNbitsPhase::DecodeDp4aBlocks; break;
   }
   const fbs::MatmulNbitsBits bits = bitsClass(request.bits);
   if (bits == fbs::MatmulNbitsBits::Any) return result;
@@ -449,7 +458,13 @@ Result resolve(const Request& request, WmmaValidator wmma_valid,
       request.has_zp ? fbs::MatmulNbitsZeroPoint::Asymmetric : fbs::MatmulNbitsZeroPoint::Symmetric;
   fbs::MatmulNbitsRowStride stride = fbs::MatmulNbitsRowStride::Any;
   bool classified = true;
-  if (prefill && request.b_row_bytes == 0) {
+  if (prefill && request.layout == 1) {
+    stride = fbs::MatmulNbitsRowStride::XorLines;
+  } else if (prefill && request.layout == 2) {
+    stride = fbs::MatmulNbitsRowStride::Blocks;
+  } else if (prefill && request.layout != 0) {
+    classified = false;
+  } else if (prefill && request.b_row_bytes == 0) {
     stride = fbs::MatmulNbitsRowStride::Arrival;
   } else if (prefill) {
     const int arrival = request.group_size > 0
@@ -468,8 +483,12 @@ Result resolve(const Request& request, WmmaValidator wmma_valid,
   const float qn = std::log2(static_cast<float>(request.n));
   const float qk = std::log2(static_cast<float>(request.k));
 
-  const auto git = classified ? t.groups.find(groupKey(phase, bits, gs, zp, stride))
-                              : t.groups.end();
+  auto git = classified ? t.groups.find(groupKey(phase, bits, gs, zp, stride))
+                        : t.groups.end();
+  // A byte order with no rows for this group size and zero point is answered
+  // from the arrival rows; the validator keeps only configs that read it.
+  if (git == t.groups.end() && prefill && classified && request.layout != 0)
+    git = t.groups.find(groupKey(phase, bits, gs, zp, fbs::MatmulNbitsRowStride::Arrival));
   if (git != t.groups.end()) {
     const std::vector<Point>& pts = git->second;
 

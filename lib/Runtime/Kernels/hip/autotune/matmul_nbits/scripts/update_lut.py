@@ -50,15 +50,23 @@ GROUP_SIZES = {16: "G16", 32: "G32", 64: "G64", 128: "G128", 256: "G256",
                512: "G512"}
 # prefill_padrow is measured at arrival + `pad=` bytes (128 when the sweep log
 # predates the field); each pad is its own row-stride category.
+# prefill_xor / prefill_blocks are measured with the weight stored in that byte
+# order (hip::MatmulNBitsWeightLayout), each its own row-stride category;
+# dp4a_blocks is the block-reading decode GEMV, whose Gemv answer packs the row
+# groups and K blocks per step into tile_n (rg + 16 * ku).
 PATH_TO_PHASE = {"prefill": "Prefill", "prefill_padrow": "Prefill",
                  "prefill_padrow256": "Prefill",
-                 "decode": "Decode", "dp4a": "DecodeDp4a"}
+                 "prefill_xor": "Prefill", "prefill_blocks": "Prefill",
+                 "decode": "Decode", "dp4a": "DecodeDp4a",
+                 "dp4a_blocks": "DecodeDp4aBlocks"}
 PATH_TO_STRIDE = {"prefill": "Arrival", "prefill_padrow": "Padded",
                   "prefill_padrow256": "Padded256",
-                  "decode": "Any", "dp4a": "Any"}
+                  "prefill_xor": "XorLines", "prefill_blocks": "Blocks",
+                  "decode": "Any", "dp4a": "Any", "dp4a_blocks": "Any"}
 PATH_TO_KIND = {"prefill": "Wmma", "prefill_padrow": "Wmma",
                 "prefill_padrow256": "Wmma",
-                "decode": "Gemv", "dp4a": "Gemv"}
+                "prefill_xor": "Wmma", "prefill_blocks": "Wmma",
+                "decode": "Gemv", "dp4a": "Gemv", "dp4a_blocks": "Gemv"}
 PADROW_PATH = {128: "prefill_padrow", 256: "prefill_padrow256"}
 
 
@@ -123,6 +131,12 @@ WMMA_TIME_RE = re.compile(
 GEMV_TIME_RE = re.compile(
     r"^\[custom_kernels\]\s+(?:dp4a )?config\[\s*\d+\] "
     r"threads=\s*(\d+) tile_n=(\d+) : ([\d.]+) ms")
+BLOCKS_WIN_RE = re.compile(
+    r"GEMV-dp4a-blocks autotune:.*-> config\[(\d+)\] "
+    r"threads=(\d+) rg=(\d+) ku=(\d+)")
+BLOCKS_TIME_RE = re.compile(
+    r"^\[custom_kernels\]\s+dp4a-blocks config\[\s*\d+\] "
+    r"threads=\s*(\d+) rg=(\d+) ku=(\d+) : ([\d.]+) ms")
 
 
 def answer_key(ans: dict):
@@ -202,6 +216,20 @@ def parse_log(path: Path):
                            int(w.group(8)), 1 if w.group(2) == "fused" else 0,
                            int(w.group(9) or 0), int(w.group(10) or 0))
                     yield cur, key, times
+                    cur, times = None, {}
+                continue
+
+            if cur[0] == "dp4a_blocks":
+                t = BLOCKS_TIME_RE.match(line)
+                if t:
+                    times[("Gemv", int(t.group(1)),
+                           int(t.group(2)) + 16 * int(t.group(3)))] = \
+                        float(t.group(4))
+                    continue
+                g = BLOCKS_WIN_RE.search(line)
+                if g:
+                    yield cur, ("Gemv", int(g.group(2)),
+                                int(g.group(3)) + 16 * int(g.group(4))), times
                     cur, times = None, {}
                 continue
 
@@ -574,8 +602,8 @@ class LutError(ValueError):
 
 
 KERNEL_SRC = ROOT.parent.parent / "matmul_nbits_kernel.hip"
-PHASES = ("Prefill", "Decode", "DecodeDp4a")
-STRIDES = ("Arrival", "Padded", "Padded256")
+PHASES = ("Prefill", "Decode", "DecodeDp4a", "DecodeDp4aBlocks")
+STRIDES = ("Arrival", "Padded", "Padded256", "XorLines", "Blocks")
 WEIGHT_LAYOUTS = ("Rows", "XorLines", "Blocks")
 ZERO_POINTS = ("Symmetric", "Asymmetric")
 
@@ -791,6 +819,11 @@ def cmd_merge(args) -> int:
                     fb_rows.append((r, new_fb))
                     continue
         fb_rows.append((r, None))
+    if new_fb is not None and not any(r["phase"] == phase
+                                      for r in old["fallbacks"]):
+        # A phase the table had no rows for: without a fallback its unmeasured
+        # keys would tune online in-model.
+        fb_rows.append(({"phase": phase, "bits": "B4", "config": -1}, new_fb))
 
     # Existing pool indices and row order are kept and new configs appended, so
     # the json diff is just the changed rows. A config no row uses any more
@@ -1005,7 +1038,7 @@ def main() -> int:
                     help="build: keep the current table and replace only the "
                          "--phase rows the readings beat by --min-gain")
     ap.add_argument("--phase", default="DecodeDp4a",
-                    choices=["Prefill", "Decode", "DecodeDp4a"],
+                    choices=list(PHASES),
                     help="build --merge-existing: the phase to update")
     ap.add_argument("--min-gain", type=float, default=0.03,
                     help="build --merge-existing: required speedup of the new "

@@ -3196,6 +3196,17 @@ static int tuneDp4aBlocksConfig(
 
 static std::unordered_map<std::string, int> dp4a_blocks_cache;
 
+// A DecodeDp4aBlocks table answer: threads, and tile_n packing the 16-row groups
+// per workgroup (bits 0-3) and the K blocks per step (bits 4-7).
+static int dp4aBlocksConfigFromGeometry(const matmul_lut::GemvAnswer& g) {
+    for (int cid = 0; cid < kNumDp4aBlocksConfigs; cid++)
+        if (kDp4aBlocksConfigs[cid].threads == g.threads &&
+            kDp4aBlocksConfigs[cid].rg == (g.tile_n & 15) &&
+            kDp4aBlocksConfigs[cid].ku == (g.tile_n >> 4))
+            return cid;
+    return -1;
+}
+
 static int getOrTuneDp4aBlocksConfig(
     hipStream_t stream,
     const int8_t* a_qb, const float* a_scale,
@@ -3208,6 +3219,33 @@ static int getOrTuneDp4aBlocksConfig(
     std::lock_guard<std::mutex> lock(dp4a_tune_mutex);
     auto it = dp4a_blocks_cache.find(key);
     if (it != dp4a_blocks_cache.end()) return it->second;
+    if (matmulNbitsLutLookupEnabled()) {
+        matmul_lut::Request req;
+        req.phase = matmul_lut::Phase::DecodeDp4aBlocks;
+        req.bits = 4;
+        req.m = 1;
+        req.n = static_cast<int>(N);
+        req.k = static_cast<int>(K);
+        req.group_size = static_cast<int>(bs);
+        req.has_zp = zp != nullptr;
+        const matmul_lut::Result r = matmul_lut::resolve(
+            req, nullptr,
+            [](void*, const matmul_lut::GemvAnswer& g) {
+                return dp4aBlocksConfigFromGeometry(g) >= 0;
+            },
+            nullptr);
+        const int cid = r.source == matmul_lut::Source::None
+                            ? -1 : dp4aBlocksConfigFromGeometry(r.gemv);
+        if (cid >= 0) {
+            MATMUL_NBITS_AUTOTUNE_LOG(
+                "[custom_kernels] LUT hit (src=%d d=%.3f) dp4a-blocks N=%lld K=%lld "
+                "gs=%lld -> config[%d]\n",
+                static_cast<int>(r.source), r.distance, (long long)N, (long long)K,
+                (long long)bs, cid);
+            dp4a_blocks_cache[key] = cid;
+            return cid;
+        }
+    }
     const int best = tuneDp4aBlocksConfig(stream, a_qb, a_scale, B, sc, zp, bi,
                                        out, N, K, bs);
     dp4a_blocks_cache[key] = best;
@@ -5732,6 +5770,7 @@ static int matmulNbitsLutWmmaConfig(int M, int N, int K, int gs, bool has_zp,
     req.group_size = gs;
     req.has_zp = has_zp;
     req.b_row_bytes = b_row_bytes;
+    req.layout = layout;
     MatmulNbitsWmmaLutCtx ctx{M, N, K, gs, b_row_bytes, layout};
     const matmul_lut::Result r =
         matmul_lut::resolve(req, matmulNbitsWmmaValidator, nullptr, &ctx);

@@ -46,7 +46,11 @@ enum MatmulNbitsPhase : ubyte {
   Any = 0,
   Prefill = 1,      // WMMA tiles, kWmmaConfigs
   Decode = 2,       // fp16 GEMV reduction, kGemvConfigs
-  DecodeDp4a = 3    // W4A8 integer-dot GEMV, kGemvConfigs
+  DecodeDp4a = 3,   // W4A8 integer-dot GEMV, kGemvConfigs
+  // The block-reading dp4a GEMV for a weight stored in 16-row blocks,
+  // kDp4aBlocksConfigs: a Gemv config whose tile_n packs the 16-row groups per
+  // workgroup (bits 0-3) and the K blocks per step (bits 4-7).
+  DecodeDp4aBlocks = 4
 }
 
 // Reserved beyond B4: the i8/u3/u2 GEMV kernels already share kGemvConfigs and
@@ -85,7 +89,9 @@ enum MatmulNbitsRowStride : ubyte {
   Any = 0,
   Arrival = 1,     // num_groups_k * (block_size/2) bytes per row
   Padded = 2,      // arrival + 128 B (the per-call repack, a 128 B row pad)
-  Padded256 = 3    // arrival + 256 B (a weight padded at load by 256 B)
+  Padded256 = 3,   // arrival + 256 B (a weight padded at load by 256 B)
+  XorLines = 4,    // dense rows whose 128-byte lines are XOR-swizzled per row
+  Blocks = 5       // 512-byte blocks of 16 rows x 32 bytes
 }
 
 // ---------------------------------------------------------------------------
