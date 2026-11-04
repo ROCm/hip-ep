@@ -442,22 +442,28 @@ struct Case {
   // Sliding window; <= 0 is full attention. Convention matches
   // causal_mask_kernel_impl: key k is masked when k < past_len + q - window + 1.
   int window;
-  // > 0: a key_bias row per batch masks batch b's last b*pad keys (right
-  // padding, so every query row keeps a real key).
+  // > 0: a key_bias row per batch masks b*pad keys of batch b: the last ones
+  // (right padding, so every query row keeps a real key) or, with left_pad,
+  // the first ones.
   int pad;
+  // Bias of a padded key. The fp16 lower bound is what the ONNX mask uses.
+  float pad_value = -65504.0f;
+  // Left padding leaves the first query rows of a padded batch with no real
+  // key. Their output is unspecified (ONNX gives NaN), so only rows with a
+  // real key are compared, and every output must be finite.
+  bool left_pad = false;
 };
 
-// The ONNX mask value for a padded key: the fp16 lower bound.
-static constexpr float kPadBias = -65504.0f;
-
-// key_bias rows [B, skv]: 0 for a real key, kPadBias for padding. Empty when
+// key_bias rows [B, skv]: 0 for a real key, pad_value for padding. Empty when
 // the case has no padding.
 static std::vector<float> make_key_bias(const Case& c, int skv) {
   if (c.pad <= 0) return {};
   std::vector<float> kb((size_t)c.B * skv, 0.0f);
-  for (int b = 0; b < c.B; ++b)
-    for (int k = std::max(0, skv - b * c.pad); k < skv; ++k)
-      kb[(size_t)b * skv + k] = kPadBias;
+  for (int b = 0; b < c.B; ++b) {
+    const int n = std::min(skv, b * c.pad);
+    const int k0 = c.left_pad ? 0 : skv - n;
+    for (int k = k0; k < k0 + n; ++k) kb[(size_t)b * skv + k] = c.pad_value;
+  }
   return kb;
 }
 
@@ -553,7 +559,9 @@ static std::string case_shape(const Case& c) {
   if (c.window > 0) s += "_win" + std::to_string(c.window);
   if (c.sink_mode == kSinkPerHead || c.sink_mode == kSinkBoth) s += "_sink";
   if (c.sink_mode == kSinkSmooth || c.sink_mode == kSinkBoth) s += "_smooth";
-  if (c.pad > 0) s += "_pad" + std::to_string(c.pad);
+  if (c.pad > 0) s += (c.left_pad ? "_lpad" : "_pad") + std::to_string(c.pad);
+  if (c.pad > 0 && std::isinf(c.pad_value)) s += "_ninf";
+  else if (c.pad > 0 && c.pad_value < -65504.0f) s += "_m3e38";
   return s;
 }
 
@@ -720,7 +728,26 @@ static bool run_case(const Case& c, int iters) {
   HIP_CHECK(hipMemcpy(Oh.data(), dO, qn * sizeof(__half), hipMemcpyDeviceToHost));
   std::vector<float> Oout(qn);
   for (size_t i = 0; i < qn; ++i) Oout[i] = __half2float(Oh[i]);
-  const double err = rel_l2(Oout, Oref);
+  bool finite = true;
+  for (float x : Oout) finite = finite && std::isfinite(x);
+  std::vector<float> cmp_out, cmp_ref;
+  for (int b = 0; b < B; ++b)
+    for (int s = 0; s < sq; ++s) {
+      const int kmax = past_len + s;
+      const int kmin = (c.window > 0 && kmax - c.window + 1 > 0)
+                           ? kmax - c.window + 1
+                           : 0;
+      bool has_key = Kb.empty();
+      for (int k = kmin; k <= kmax && !has_key; ++k)
+        has_key = Kb[(size_t)b * skv + k] == 0.0f;
+      if (!has_key) continue;
+      const size_t row = (size_t)(b * sq + s) * H * D;
+      cmp_out.insert(cmp_out.end(), Oout.begin() + row,
+                     Oout.begin() + row + (size_t)H * D);
+      cmp_ref.insert(cmp_ref.end(), Oref.begin() + row,
+                     Oref.begin() + row + (size_t)H * D);
+    }
+  const double err = finite ? rel_l2(cmp_out, cmp_ref) : INFINITY;
 
   // The rows a launch reads: from the window's start below the first query
   // when there is a window, else every key.
@@ -956,10 +983,15 @@ int main(int argc, char** argv) {
       {"pad-d64-win",    2, 64,  8,  64, 777,  0,    kSinkNone,   true,  128, 200},
       {"pad-d96",        2, 32, 32,  96, 512,  0,    kSinkNone,   true,  0,   100},
       {"pad-d256",       2, 16,  2, 256, 512,  0,    kSinkNone,   true,  0,   100},
+      // Left padding with -inf: batch 1's first KV tiles are fully masked,
+      // with and without a window, and from a past chunk.
+      {"lpad-inf",       2, 48,  8, 128, 1000, 0,    kSinkNone,   false, 0,   250, -INFINITY, true},
+      {"lpad-inf-win",   2, 72,  8, 128, 1000, 0,    kSinkNone,   false, 128, 250, -INFINITY, true},
+      {"lpad-3e38-past", 2, 48,  8, 128, 777,  200,  kSinkNone,   false, 0,   300, -3.4e38f,  true},
   };
   const size_t kNumCases = sizeof(cases) / sizeof(cases[0]);
 
-  // tier1 (28 rows) still touches D{64,96,128,256}, every sink_mode, window
+  // tier1 (30 rows) still touches D{64,96,128,256}, every sink_mode, window
   // on/off, window 1, a window wider than the sequence, chunked-prefill
   // (past>0), batch 2, the d128-must-decline case and 2 of the sq=128 rows
   // (the cheapest shape), plus one row per prefill route the first rows
@@ -967,15 +999,15 @@ int main(int argc, char** argv) {
   // group not divisible by 4 with and without a window, d128 MHA, d96
   // plain / windowed / with a sink, a d256 group of 5, a d64 group of 3,
   // d64 MHA with the sink, smooth and a window together, and the key bias
-  // with and without a window.
+  // with and without a window, right- and -inf left-padded.
   static const size_t kTier1[] = {0,  3,  7,  9,  11, 13, 15, 17, 18, 23,
                                   24, 25, 29, 30, 40, 43, 44, 47, 50, 55,
-                                  56, 64, 66, 69, 73, 74, 76, 78};
+                                  56, 64, 66, 69, 73, 74, 76, 78, 82, 83};
   // tier2 (~65% by case count, but includes ALL the cheap sq=128 additions
   // since they cost almost nothing -- see kTier2 vs tier3 wall time in
   // RESULT.md) still excludes the 2 new expensive sq=8192 rows (kept
   // tier3-only, a deliberate budget trade-off documented in RESULT.md).
-  // The prefill routing, head_dim 96 and key bias rows (39-81) are all in
+  // The prefill routing, head_dim 96 and key bias rows (39-84) are all in
   // tier2, and so is every tier1 row.
   static const size_t kTier2[] = {0,  1,  3,  4,  6,  7,  9,  10, 11, 12,
                                   13, 14, 15, 16, 17, 18, 19, 20, 21, 23,
@@ -984,7 +1016,7 @@ int main(int argc, char** argv) {
                                   47, 48, 49, 50, 51, 52, 53, 54, 55, 56,
                                   57, 58, 59, 60, 61, 62, 63, 64, 65, 66,
                                   67, 68, 69, 70, 71, 72, 73, 74, 75, 76,
-                                  77, 78, 79, 80, 81};
+                                  77, 78, 79, 80, 81, 82, 83, 84};
   const size_t* idxs = coverage_tier == 1 ? kTier1
                      : coverage_tier == 2 ? kTier2
                                           : nullptr;

@@ -18,6 +18,9 @@ the past below it into present, since no later step reads it.
 
 Head geometry follows the targets of the fused key-bias kernels: head_dim
 128, 6 query heads per KV head on full-attention layers and 9 on sliding ones.
+A -inf drop value checks that a fully masked KV tile does not turn into NaN,
+and head_dim 64 prefill takes the decomposed key-bias path, since the fused
+prefill applies the bias at head_dim 128 only.
 """
 
 import numpy as np
@@ -32,18 +35,17 @@ KV_HEADS = 2
 DROP = -65504.0
 
 
-def _make_model(q_heads, window):
-    """Attention whose mask is Unsqueeze(Cast_f16(Where(keep, 0, -65504))) with
+def _make_model(q_heads, window, drop, hd):
+    """Attention whose mask is Unsqueeze(Cast_f16(Where(keep, 0, drop))) with
     keep = And(pad, causal[, window]) over CumSum positions of the mask; the
     query positions are the last S of them."""
-    hd = HEAD_DIM
     inits = [
         numpy_helper.from_array(np.array(1, np.int64), "ax1"),
         numpy_helper.from_array(np.array([1], np.int64), "c1"),
         numpy_helper.from_array(np.array([2], np.int64), "c2"),
         numpy_helper.from_array(np.array([np.iinfo(np.int64).max], np.int64), "q_end"),
         numpy_helper.from_array(np.array(0.0, np.float32), "keep_v"),
-        numpy_helper.from_array(np.array(DROP, np.float32), "drop_v"),
+        numpy_helper.from_array(np.array(drop, np.float32), "drop_v"),
     ]
     nodes = [
         helper.make_node("Shape", ["q"], ["q_len"], start=1, end=2),
@@ -97,11 +99,12 @@ def _make_model(q_heads, window):
     return make_model_from_nodes(nodes, inputs, outputs, initializers=inits, opset=23)
 
 
-def _run(model_runner, batch, seq, past, q_heads, window, pad, left):
+def _run(
+    model_runner, batch, seq, past, q_heads, window, pad, left, drop=DROP, hd=HEAD_DIM
+):
     """Batch b > 0 pads b * pad keys, on the left (generation) or the right."""
     total = seq + past
     rng = np.random.default_rng(seq * 131 + past * 7 + q_heads)
-    hd = HEAD_DIM
     q = rng.standard_normal([batch, seq, q_heads * hd]).astype(np.float16)
     k = rng.standard_normal([batch, seq, KV_HEADS * hd]).astype(np.float16)
     v = rng.standard_normal([batch, seq, KV_HEADS * hd]).astype(np.float16)
@@ -115,7 +118,7 @@ def _run(model_runner, batch, seq, past, q_heads, window, pad, left):
         else:
             mask[b, total - n :] = 0
 
-    model = _make_model(q_heads, window)
+    model = _make_model(q_heads, window, drop, hd)
     actual, expected = model_runner.run_sample(model, [q, k, v, pk, pv, mask])
     real = mask[:, past:].astype(bool)
     kept = max(0, past - window + 1) if window else 0
@@ -180,4 +183,44 @@ class TestOnnxAttentionKeyPadding:
             window=window,
             pad=70,
             left=True,
+        )
+
+    @pytest.mark.parametrize(
+        "q_heads,window",
+        [pytest.param(12, 0, id="full_hpg6"), pytest.param(18, 64, id="sliding_hpg9")],
+    )
+    @pytest.mark.parametrize(
+        "seq,past",
+        [pytest.param(256, 0, id="prefill"), pytest.param(1, 255, id="decode")],
+    )
+    def test_neg_inf(self, model_runner, q_heads, window, seq, past):
+        """A -inf drop value over a left padding longer than a KV tile."""
+        _run(
+            model_runner,
+            batch=2,
+            seq=seq,
+            past=past,
+            q_heads=q_heads,
+            window=window,
+            pad=96,
+            left=True,
+            drop=-np.inf,
+        )
+
+    @pytest.mark.parametrize("drop", [DROP, -np.inf], ids=["fp16_min", "neg_inf"])
+    @pytest.mark.parametrize("left", [False, True], ids=["right_pad", "left_pad"])
+    def test_decomposed_head_dim64(self, model_runner, drop, left):
+        """Prefill at head_dim 64: the fused prefill declines a key bias there,
+        so the decomposed path applies it."""
+        _run(
+            model_runner,
+            batch=2,
+            seq=256,
+            past=0,
+            q_heads=12,
+            window=0,
+            pad=96,
+            left=left,
+            drop=drop,
+            hd=64,
         )

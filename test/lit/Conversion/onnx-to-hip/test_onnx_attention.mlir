@@ -1416,3 +1416,86 @@ module {
         : tensor<?x?x2048xf16>, tensor<?x8x?x128xf16>, tensor<?x8x?x128xf16>
   }
 }
+
+// -----
+
+// ===== Key-padding fold on the numeric test's graph =====
+//
+// test_onnx_attention_key_padding.py: the query positions are the last S
+// entries of the CumSum, sliced from -Shape(q)[1:2], and the drop value is
+// -inf. The fold must still fire, so that test exercises the fused kernels.
+module {
+  func.func @main_graph(
+      %query: tensor<?x?x1536xf16>,
+      %key: tensor<?x?x256xf16>,
+      %value: tensor<?x?x256xf16>,
+      %attnmask: tensor<?x?xi64>,
+      %past_key: tensor<?x2x?x128xf16>,
+      %past_value: tensor<?x2x?x128xf16>)
+      -> (tensor<?x?x1536xf16>, tensor<?x2x?x128xf16>,
+          tensor<?x2x?x128xf16>) {
+
+    // CHECK-LABEL: func.func @main_graph
+    // CHECK-SAME: (%[[CTXKP:.*]]: !hip.context,
+
+    %c1 = "onnx.Constant"() {value = dense<1> : tensor<1xi64>}
+        : () -> tensor<1xi64>
+    %c2 = "onnx.Constant"() {value = dense<2> : tensor<1xi64>}
+        : () -> tensor<1xi64>
+    %keepv = "onnx.Constant"() {value = dense<0.000000e+00> : tensor<f32>}
+        : () -> tensor<f32>
+    %dropv = "onnx.Constant"() {value = dense<0xFF800000> : tensor<f32>}
+        : () -> tensor<f32>
+
+    %qlen = "onnx.Shape"(%query) {start = 1 : si64, end = 2 : si64}
+        : (tensor<?x?x1536xf16>) -> tensor<1xi64>
+    %sbeg = "onnx.Neg"(%qlen) : (tensor<1xi64>) -> tensor<1xi64>
+    %send = "onnx.Constant"() {value = dense<9223372036854775807> : tensor<1xi64>}
+        : () -> tensor<1xi64>
+    %ax1 = "onnx.Constant"() {value = dense<1> : tensor<i64>} : () -> tensor<i64>
+    %kidx = "onnx.CumSum"(%attnmask, %ax1)
+        : (tensor<?x?xi64>, tensor<i64>) -> tensor<?x?xi64>
+    %qidx = "onnx.Slice"(%kidx, %sbeg, %send, %c1)
+        : (tensor<?x?xi64>, tensor<1xi64>, tensor<1xi64>, tensor<1xi64>)
+        -> tensor<?x?xi64>
+    %qpos = "onnx.Unsqueeze"(%qidx, %c2)
+        : (tensor<?x?xi64>, tensor<1xi64>) -> tensor<?x?x1xi64>
+    %kpos = "onnx.Unsqueeze"(%kidx, %c1)
+        : (tensor<?x?xi64>, tensor<1xi64>) -> tensor<?x1x?xi64>
+    %causal = "onnx.GreaterOrEqual"(%qpos, %kpos)
+        : (tensor<?x?x1xi64>, tensor<?x1x?xi64>) -> tensor<?x?x?xi1>
+
+    %padu = "onnx.Unsqueeze"(%attnmask, %c1)
+        : (tensor<?x?xi64>, tensor<1xi64>) -> tensor<?x1x?xi64>
+    %padb = "onnx.Cast"(%padu) {to = 9 : si64}
+        : (tensor<?x1x?xi64>) -> tensor<?x1x?xi1>
+    %keep = "onnx.And"(%padb, %causal)
+        : (tensor<?x1x?xi1>, tensor<?x?x?xi1>) -> tensor<?x?x?xi1>
+    %bias32 = "onnx.Where"(%keep, %keepv, %dropv)
+        : (tensor<?x?x?xi1>, tensor<f32>, tensor<f32>) -> tensor<?x?x?xf32>
+    %bias16 = "onnx.Cast"(%bias32) {to = 10 : si64}
+        : (tensor<?x?x?xf32>) -> tensor<?x?x?xf16>
+    %bias = "onnx.Unsqueeze"(%bias16, %c1)
+        : (tensor<?x?x?xf16>, tensor<1xi64>) -> tensor<?x1x?x?xf16>
+
+    %out:3 = "onnx.Attention"(%query, %key, %value, %bias, %past_key,
+                              %past_value)
+        {q_num_heads = 12 : si64,
+         kv_num_heads = 2 : si64,
+         is_causal = 1 : si64}
+        : (tensor<?x?x1536xf16>, tensor<?x?x256xf16>, tensor<?x?x256xf16>,
+           tensor<?x1x?x?xf16>, tensor<?x2x?x128xf16>, tensor<?x2x?x128xf16>)
+        -> (tensor<?x?x1536xf16>, tensor<?x2x?x128xf16>,
+            tensor<?x2x?x128xf16>)
+
+    // CHECK: hip.gqa(%[[CTXKP]])
+    // CHECK-NOT: tensor<?x1x?x?xf16>) key_bias
+    // CHECK-SAME: key_bias(%{{.*}} : tensor<?x?xf16>)
+    // CHECK-SAME: {kv_num_heads = 2 : i64, num_heads = 12 : i64
+    // CHECK-NOT: local_window_size
+    // CHECK-NOT: onnx.Attention
+
+    return %out#0, %out#1, %out#2
+        : tensor<?x?x1536xf16>, tensor<?x2x?x128xf16>, tensor<?x2x?x128xf16>
+  }
+}

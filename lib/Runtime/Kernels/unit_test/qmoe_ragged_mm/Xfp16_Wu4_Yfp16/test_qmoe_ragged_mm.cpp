@@ -1206,6 +1206,98 @@ bool run_grouped_partial_block_case(hipStream_t stream) {
   return pass;
 }
 
+// The grouped GEMM with an explicit config at a K that takes several waves of
+// K chunks: cfg 0/1 run 18 chunks per wave (a guarded last wave here), cfg 6/7
+// run 16 (even waves). cfg 0/6 take 16-row tiles, cfg 1/7 32-row tiles.
+bool run_grouped_cpw_case(hipStream_t stream, int cfg, int k) {
+  constexpr int experts = 3;
+  constexpr int n = 64;
+  constexpr int block_size = 128;
+  const int tile_rows = (cfg == 0 || cfg == 6) ? 16 : 32;
+  const std::vector<int32_t> expert_rows =
+      tile_rows == 16 ? std::vector<int32_t>{5, 16, 11}
+                      : std::vector<int32_t>{20, 32, 7};
+  std::vector<int32_t> expert_offsets = {0};
+  std::vector<int32_t> row_tiles;
+  for (int expert = 0; expert < experts; ++expert) {
+    expert_offsets.push_back(expert_offsets.back() + expert_rows[expert]);
+    row_tiles.insert(row_tiles.end(), {expert, 0, expert_rows[expert]});
+  }
+  const int rows = expert_offsets.back();
+  const std::vector<int32_t> num_row_tiles = {experts};
+  const PackedMatrix matrix = make_matrix(experts, n, k, block_size, 21);
+
+  std::vector<__half> input(static_cast<size_t>(rows) * k);
+  for (int row = 0; row < rows; ++row)
+    for (int col = 0; col < k; ++col)
+      input[static_cast<size_t>(row) * k + col] =
+          float_to_half(input_value(row + 3, col));
+
+  std::vector<__half> expected(static_cast<size_t>(rows) * n);
+  for (int expert = 0; expert < experts; ++expert) {
+    for (int row = expert_offsets[expert]; row < expert_offsets[expert + 1];
+         ++row) {
+      for (int col = 0; col < n; ++col) {
+        const size_t expert_col = static_cast<size_t>(expert) * n + col;
+        float accumulator = 0.0f;
+        for (int col_k = 0; col_k < k; ++col_k) {
+          const uint8_t packed =
+              matrix.weights[expert_col * matrix.row_bytes + col_k / 2];
+          const float q = (col_k & 1) ? static_cast<float>(packed >> 4)
+                                      : static_cast<float>(packed & 0x0f);
+          const float scale = half_to_float(
+              matrix.scales[expert_col * matrix.k_blocks + col_k / block_size]);
+          accumulator +=
+              half_to_float(input[static_cast<size_t>(row) * k + col_k]) *
+              (q - 8.0f) * scale;
+        }
+        expected[static_cast<size_t>(row) * n + col] = float_to_half(
+            accumulator + half_to_float(matrix.bias[expert_col]));
+      }
+    }
+  }
+
+  DeviceBuffer<__half> d_input(input.size());
+  DeviceBuffer<uint8_t> d_weights(matrix.weights.size());
+  DeviceBuffer<__half> d_scales(matrix.scales.size());
+  DeviceBuffer<__half> d_bias(matrix.bias.size());
+  DeviceBuffer<int32_t> d_expert_offsets(expert_offsets.size());
+  DeviceBuffer<int32_t> d_row_tiles(row_tiles.size());
+  DeviceBuffer<int32_t> d_num_row_tiles(num_row_tiles.size());
+  DeviceBuffer<__half> d_output(expected.size());
+  upload(d_input, input);
+  upload(d_weights, matrix.weights);
+  upload(d_scales, matrix.scales);
+  upload(d_bias, matrix.bias);
+  upload(d_expert_offsets, expert_offsets);
+  upload(d_row_tiles, row_tiles);
+  upload(d_num_row_tiles, num_row_tiles);
+
+  const std::string shape = "grouped_cfg" + std::to_string(cfg) + "_K" +
+                            std::to_string(k) + "_tile" +
+                            std::to_string(tile_rows);
+  const int status = hip_matmul_nbits_wmma_smallm_grouped(
+      reinterpret_cast<void*>(stream), cfg, d_input.get(), d_weights.get(),
+      d_scales.get(), nullptr, /*zp_packed_u4=*/1, d_bias.get(),
+      d_expert_offsets.get(), d_row_tiles.get(), d_num_row_tiles.get(),
+      d_output.get(), experts, tile_rows, n, k, 4, block_size, sizeof(__half));
+  Metrics metrics;
+  if (status == static_cast<int>(hipSuccess)) {
+    HIP_CHECK(hipStreamSynchronize(stream));
+    std::vector<__half> actual(expected.size());
+    HIP_CHECK(hipMemcpy(actual.data(), d_output.get(),
+                        actual.size() * sizeof(__half), hipMemcpyDeviceToHost));
+    metrics = compare(actual, expected);
+  }
+  const bool pass = metrics.finite && metrics.rel_l2 <= 5e-3;
+  std::cout << (pass ? "PASS" : "FAIL") << " relL2=" << metrics.rel_l2
+            << " status=" << status << " shape=" << shape << '\n';
+  ResultRow result(shape, "fixed:cfg=" + std::to_string(cfg) +
+                              " block_size=128");
+  result.finish(metrics.rel_l2, pass);
+  return pass;
+}
+
 // Rows with a SwiGLU row scale s > 1 hold v = fc2(act / s) without bias, so
 // each contribution is s * v + b. b is large next to v so that applying it
 // before the rescale, or scaling it with the row, is visible.
@@ -1643,12 +1735,13 @@ int main(int argc, char** argv) {
   constexpr int pipeline_cases = 1;
   constexpr int reduce_scaled_cases = 2;
   constexpr int grouped_partial_block_cases = 1;
+  constexpr int grouped_cpw_cases = 8;
   std::cout << "qmoe_ragged_mm coverage=" << coverage
             << " cases=" << shape_count * category_count + model_shape_cases +
                                adaptive_shape_cases + descriptor_cases +
                                task_policy_cases + launcher_cases +
                                pipeline_cases + reduce_scaled_cases +
-                               grouped_partial_block_cases
+                               grouped_partial_block_cases + grouped_cpw_cases
             << '\n';
 
   hipStream_t stream = nullptr;
@@ -1700,6 +1793,10 @@ int main(int argc, char** argv) {
   all_pass = run_reduce_scaled_case(stream, 64) && all_pass;
   all_pass = run_reduce_scaled_case(stream, 36) && all_pass;
   all_pass = run_grouped_partial_block_case(stream) && all_pass;
+  // K=1024 is 2 waves of 16 chunks, K=3072 is 6.
+  for (int cfg : {0, 6, 1, 7})
+    for (int k : {1024, 3072})
+      all_pass = run_grouped_cpw_case(stream, cfg, k) && all_pass;
   HIP_CHECK(hipStreamDestroy(stream));
 
   std::cout << (all_pass ? "ALL PASS" : "SOME FAIL") << '\n';

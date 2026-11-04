@@ -394,6 +394,12 @@ extern "C" int hip_gqa_flash_prefill_v2(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
     void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
     int past_len, float scale);
+extern "C" int hip_gqa_flash_prefill(
+    void* stream, const void* Q, const void* Kcache, const void* Vcache,
+    void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
+    int past_len, float scale, int local_window_size, const void* head_sink,
+    int num_heads, int smooth_softmax, const void* key_bias,
+    int key_bias_stride);
 
 #define HIP_CHECK(expr)                                                        \
   do {                                                                         \
@@ -405,13 +411,36 @@ extern "C" int hip_gqa_flash_prefill_v2(
     }                                                                          \
   } while (0)
 
-struct Case { const char* name; int B, H, G, D, sq; };
+struct Case {
+  const char* name;
+  int B, H, G, D, sq;
+  // > 0: a key_bias row per batch marks batch b's first b*pad keys as left
+  // padding. The first query rows of a padded batch then have no real key;
+  // their output is unspecified, so only rows with a real key are compared,
+  // and every output must be finite.
+  int pad = 0;
+  float pad_value = -INFINITY;
+};
 
 // results.csv shape: the parameters that tell any two cases apart.
 static std::string case_shape(const Case& c) {
-  return "B" + std::to_string(c.B) + "_H" + std::to_string(c.H) + "_G" +
-         std::to_string(c.G) + "_D" + std::to_string(c.D) + "_sq" +
-         std::to_string(c.sq);
+  std::string s = "B" + std::to_string(c.B) + "_H" + std::to_string(c.H) +
+                  "_G" + std::to_string(c.G) + "_D" + std::to_string(c.D) +
+                  "_sq" + std::to_string(c.sq);
+  if (c.pad > 0) s += "_lpad" + std::to_string(c.pad);
+  if (c.pad > 0 && std::isinf(c.pad_value)) s += "_ninf";
+  return s;
+}
+
+// key_bias rows [B, sq]: 0 for a real key, pad_value for padding. Empty when
+// the case has no padding.
+static std::vector<float> make_key_bias(const Case& c) {
+  if (c.pad <= 0) return {};
+  std::vector<float> kb((size_t)c.B * c.sq, 0.0f);
+  for (int b = 0; b < c.B; ++b)
+    for (int k = 0; k < std::min(c.sq, b * c.pad); ++k)
+      kb[(size_t)b * c.sq + k] = c.pad_value;
+  return kb;
 }
 
 // Runs `body(b, hq)` for every (batch, query-head) pair, threaded across
@@ -448,6 +477,7 @@ static void cpu_reference_i8(const std::vector<float>& Q,
                              const std::vector<int8_t>& V_i8,
                              const std::vector<float>& kscale,
                              const std::vector<float>& vscale,
+                             const std::vector<float>& kb,  // [B,sq] or empty
                              std::vector<float>& O, int B, int H, int G, int D,
                              int sq, int max_seq, float scale) {
   const int HPG = H / G;
@@ -463,7 +493,7 @@ static void cpu_reference_i8(const std::vector<float>& Q,
           const int8_t* kp = &K_i8[((size_t)(b * G + hkv) * max_seq + k) * D];
           float dot = 0.0f;
           for (int e = 0; e < D; ++e) dot += q[e] * ((float)kp[e] * ks[e]);
-          s[k] = dot * scale;
+          s[k] = dot * scale + (kb.empty() ? 0.0f : kb[(size_t)b * sq + k]);
           if (s[k] > m) m = s[k];
         }
         float l = 0.0f;
@@ -483,7 +513,9 @@ static void cpu_reference_i8(const std::vector<float>& Q,
 // CPU fp32 causal GQA over the original fp16 (as fp32) BNSD K/V (quant-error ref).
 static void cpu_reference_fp16(const std::vector<float>& Q,
                                const std::vector<float>& K,
-                               const std::vector<float>& V, std::vector<float>& O,
+                               const std::vector<float>& V,
+                               const std::vector<float>& kb,
+                               std::vector<float>& O,
                                int B, int H, int G, int D, int sq, int max_seq,
                                float scale) {
   const int HPG = H / G;
@@ -497,7 +529,7 @@ static void cpu_reference_fp16(const std::vector<float>& Q,
           const float* kp = &K[((size_t)(b * G + hkv) * max_seq + k) * D];
           float dot = 0.0f;
           for (int e = 0; e < D; ++e) dot += q[e] * kp[e];
-          s[k] = dot * scale;
+          s[k] = dot * scale + (kb.empty() ? 0.0f : kb[(size_t)b * sq + k]);
           if (s[k] > m) m = s[k];
         }
         float l = 0.0f;
@@ -617,9 +649,28 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
   std::vector<int8_t> K_i8(kn), V_i8(kn);
   HIP_CHECK(hipMemcpy(K_i8.data(), dK8, kn, hipMemcpyDeviceToHost));
   HIP_CHECK(hipMemcpy(V_i8.data(), dV8, kn, hipMemcpyDeviceToHost));
+  const std::vector<float> Kb = make_key_bias(c);
   std::vector<float> ref_i8(qn), ref_fp16(qn);
-  cpu_reference_i8(Qf, K_i8, V_i8, kscale, vscale, ref_i8, B, H, G, D, sq, max_seq, scale);
-  cpu_reference_fp16(Qf, Kf_bnsd, Vf_bnsd, ref_fp16, B, H, G, D, sq, max_seq, scale);
+  cpu_reference_i8(Qf, K_i8, V_i8, kscale, vscale, Kb, ref_i8, B, H, G, D, sq, max_seq, scale);
+  cpu_reference_fp16(Qf, Kf_bnsd, Vf_bnsd, Kb, ref_fp16, B, H, G, D, sq, max_seq, scale);
+  __half* dKb = nullptr;
+  if (!Kb.empty()) {
+    std::vector<__half> Kbh(Kb.size());
+    for (size_t i = 0; i < Kb.size(); ++i) Kbh[i] = __float2half(Kb[i]);
+    HIP_CHECK(hipMalloc(&dKb, Kbh.size() * sizeof(__half)));
+    HIP_CHECK(hipMemcpy(dKb, Kbh.data(), Kbh.size() * sizeof(__half),
+                        hipMemcpyHostToDevice));
+  }
+  const int kb_stride = B > 1 ? skv : 0;
+  // Only the unified entry takes a key bias.
+  auto prefill = [&](const void* k, const void* v, void* o, int kv_rows) {
+    if (dKb)
+      return hip_gqa_flash_prefill(nullptr, dQ, k, v, o, B, H, G, sq, skv, D,
+                                   kv_rows, past_len, scale, -1, nullptr, H, 0,
+                                   dKb, kb_stride);
+    return hip_gqa_flash_prefill_v2(nullptr, dQ, k, v, o, B, H, G, sq, skv, D,
+                                    kv_rows, past_len, scale);
+  };
 
   // Step 2+3: dequant once -> fp16 prefill (the runtime int8 prefill path).
   // The prefill is dispatched the way real/gqa.cpp does: in lookup mode resolve
@@ -658,11 +709,11 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
           past_len, scale, /*local_window_size=*/-1, /*head_sink=*/nullptr, H,
           /*smooth_softmax=*/0, selected_config.hb, selected_config.qw,
           selected_config.mt, selected_config.bkv, selected_config.nd,
-          /*key_bias=*/nullptr, /*key_bias_stride=*/0);
+          dKb, kb_stride);
       return;
     }
 #endif
-    hip_gqa_flash_prefill_v2(nullptr, dQ, dKf16, dVf16, dO8, B, H, G, sq, skv, D, max_seq, past_len, scale);
+    prefill(dKf16, dVf16, dO8, max_seq);
   };
   // Every launch in this function runs inside a capture window: the op's
   // [gqa-cfg] diagnostic latches its enable flag on the first read, so it has
@@ -680,7 +731,7 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
 
   // fp16 baseline prefill.
   auto run_fp16 = [&](const void* k, const void* v, int kv_rows) {
-    hip_gqa_flash_prefill_v2(nullptr, dQ, k, v, dO16, B, H, G, sq, skv, D, kv_rows, past_len, scale);
+    prefill(k, v, dO16, kv_rows);
   };
   hipdnn_ep_test::captureLogLines(
       "HIPDNN_GQA_AUTOTUNE_LOG", "_cfg_capture.tmp", [&]() {
@@ -737,10 +788,23 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
     hip_gqa_dequant_kv_i8_to_fp16(nullptr, kv8.v(i), dVf16, dVsc, B, sq, G, D, kv8.rows(), max_seq);
   });
 
+  // Compare the query rows that have a real key: row i of batch b sees keys
+  // 0..i, of which the first b*pad are padding.
+  bool finite = true;
+  for (float x : O_path) finite = finite && std::isfinite(x);
+  std::vector<float> cmp_path, cmp_i8, cmp_fp16;
+  for (int b = 0; b < B; ++b)
+    for (int i = std::min(sq, b * c.pad); i < sq; ++i) {
+      const size_t row = (size_t)(b * sq + i) * H * D, n = (size_t)H * D;
+      cmp_path.insert(cmp_path.end(), O_path.begin() + row, O_path.begin() + row + n);
+      cmp_i8.insert(cmp_i8.end(), ref_i8.begin() + row, ref_i8.begin() + row + n);
+      cmp_fp16.insert(cmp_fp16.end(), ref_fp16.begin() + row, ref_fp16.begin() + row + n);
+    }
+
   Result r;
   r.c = c;
-  r.relL2_path_vs_i8ref = rel_l2(O_path, ref_i8);
-  r.relL2_i8_vs_fp16 = rel_l2(ref_i8, ref_fp16);
+  r.relL2_path_vs_i8ref = finite ? rel_l2(cmp_path, cmp_i8) : INFINITY;
+  r.relL2_i8_vs_fp16 = rel_l2(cmp_i8, cmp_fp16);
   r.ms_fp16 = ms_fp16; r.ms_int8 = ms_int8; r.ms_dequant = ms_deq;
   r.pass = r.relL2_path_vs_i8ref < 2e-2;
 
@@ -767,6 +831,7 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
   hipFree(dQ); hipFree(dKbshd); hipFree(dVbshd); hipFree(dK8); hipFree(dV8);
   hipFree(dKf16); hipFree(dVf16); hipFree(dKbnsd); hipFree(dVbnsd);
   hipFree(dKsc); hipFree(dVsc); hipFree(dO8); hipFree(dO16);
+  if (dKb) hipFree(dKb);
   return r;
 }
 
@@ -880,9 +945,15 @@ int main(int argc, char** argv) {
     for (const auto& s : shapes)
       for (size_t li = 0; li < n_sqs; ++li)
         full_cases.push_back({s.name, 1, s.H, s.G, s.D, sqs[li]});
-    printf("coverage=%d -> running %zu typical length(s) x 9 categorical "
+    // -inf left padding (key bias runs at d128 only): batch 1's first KV
+    // tiles are fully masked.
+    for (size_t li = 0; li < n_sqs; ++li)
+      full_cases.push_back({"lpad-llama-3.1-8b", 2, 32, 8, 128, sqs[li],
+                            sqs[li] / 4 + 1});
+    printf("coverage=%d -> running %zu typical length(s) x %zu categorical "
            "case(s) = %zu gqa_prefill_i8 cases\n",
-           coverage_tier, n_sqs, full_cases.size());
+           coverage_tier, n_sqs, full_cases.size() / n_sqs,
+           full_cases.size());
 
     for (const Case& fc : full_cases)
       results.push_back(run_case(fc, iters, seed));
