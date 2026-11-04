@@ -189,8 +189,14 @@ func.func @pool_view_returned_no_free(
 // CHECK-SAME:    (%[[CTX8:[^:]*]]: !hip.context, %[[INIT:[^:]*]]: memref<?xf32>, %[[SRC:[^:]*]]: memref<4xf32>
 // CHECK:         %[[LOOP:.*]] = scf.while (%[[A:.*]] = %[[INIT]])
 // CHECK:           %[[COPY:.*]] = hip.alloc(%[[CTX8]], %{{.*}}) : memref<?xf32>
+// The before argument may still be the loop initializer (a caller buffer).
+// Free it only when the carried allocation is a replacement buffer.
 // CHECK:           memref.copy %[[A]], %[[COPY]]
-// CHECK-NEXT:      hip.free(%[[CTX8]], %[[A]]) : memref<?xf32>
+// CHECK:           memref.extract_strided_metadata %[[A]]
+// CHECK:           memref.extract_strided_metadata %[[INIT]]
+// CHECK:           arith.cmpi eq
+// CHECK:           scf.if
+// CHECK-NEXT:        hip.free(%[[CTX8]], %[[A]]) : memref<?xf32>
 // CHECK:           scf.condition(%{{.*}}) %[[COPY]] : memref<?xf32>
 // CHECK:         ^bb0(%[[B:.*]]: memref<?xf32>):
 // CHECK:           %[[TMP:.*]] = hip.alloc(%[[CTX8]]) : memref<4xf32>
@@ -202,9 +208,10 @@ func.func @pool_view_returned_no_free(
 // CHECK-NOT:         hip.free
 // CHECK:             scf.yield %[[GROW]]
 // CHECK:           hip.free(%[[CTX8]], %[[B]]) : memref<?xf32>
-// CHECK:           %[[P0:.*]] = memref.extract_aligned_pointer_as_index %[[FRESH]]
-// CHECK:           %[[P1:.*]] = memref.extract_aligned_pointer_as_index %[[NEXT]]
-// CHECK:           arith.cmpi eq, %[[P0]], %[[P1]]
+// A shifted view shares its source's allocated pointer, not the aligned one.
+// CHECK:           memref.extract_strided_metadata %[[FRESH]]
+// CHECK:           memref.extract_strided_metadata %[[NEXT]]
+// CHECK:           arith.cmpi eq
 // CHECK:           scf.if
 // CHECK-NEXT:        hip.free(%[[CTX8]], %[[FRESH]]) : memref<4xf32>
 // CHECK:           scf.yield %[[NEXT]]
@@ -242,5 +249,139 @@ func.func @while_carried(%ctx: !hip.context, %init: memref<?xf32>,
   }
   %head = memref.subview %r[0] [4] [1] : memref<?xf32> to memref<4xf32, strided<[1]>>
   memref.copy %head, %src : memref<4xf32, strided<[1]>> to memref<4xf32>
+  return
+}
+
+// arith.select forwards a nested allocation. The free follows the select's
+// users, so the selected memref is not released before the copy.
+// CHECK-LABEL: func.func @select_nested
+// CHECK:         scf.if
+// CHECK:           %[[ALLOC:.*]] = hip.alloc(%{{.*}}) : memref<4xf32>
+// CHECK:           %[[PICKED:.*]] = arith.select
+// CHECK:           memref.copy %[[PICKED]], %{{.*}}
+// CHECK:           hip.free(%{{.*}}, %[[ALLOC]]) : memref<4xf32>
+func.func @select_nested(%ctx: !hip.context, %flag: i1, %go: i1,
+                         %ext: memref<4xf32>) {
+  scf.if %go {
+    %alloc = memref.alloc() : memref<4xf32>
+    %picked = arith.select %flag, %alloc, %ext : memref<4xf32>
+    memref.copy %picked, %ext : memref<4xf32> to memref<4xf32>
+    scf.yield
+  }
+  return
+}
+
+// A memref.view byte shift keeps the source allocation. The branch free must
+// compare allocated pointers, so yielding the view does not free its storage
+// before the merged result is read.
+// CHECK-LABEL: func.func @shifted_view_branch
+// CHECK:         %[[BUF:.*]] = hip.alloc(%{{.*}}) : memref<32xi8>
+// CHECK:         memref.view
+// CHECK:         %[[MERGED:.*]] = scf.if
+// CHECK:         memref.extract_strided_metadata %[[BUF]]
+// CHECK:         memref.extract_strided_metadata %[[MERGED]]
+// CHECK:         scf.if
+// CHECK-NEXT:      hip.free(%{{.*}}, %[[BUF]])
+// CHECK:         memref.dim %[[MERGED]]
+// CHECK:         hip.free(%{{.*}}, %[[MERGED]])
+func.func @shifted_view_branch(%ctx: !hip.context, %flag: i1, %go: i1) {
+  %c0 = arith.constant 0 : index
+  %c16 = arith.constant 16 : index
+  scf.if %go {
+    %buf = memref.alloc() : memref<32xi8>
+    %view = memref.view %buf[%c16][] : memref<32xi8> to memref<4xf32>
+    %other = memref.alloc() : memref<4xf32>
+    %merged = scf.if %flag -> (memref<4xf32>) {
+      scf.yield %view : memref<4xf32>
+    } else {
+      scf.yield %other : memref<4xf32>
+    }
+    %d = memref.dim %merged, %c0 : memref<4xf32>
+    scf.yield
+  }
+  return
+}
+
+// Both scf.if results can be the same new allocation. Neither free runs
+// before the later consumer.
+// CHECK-LABEL: func.func @aliased_if_results
+// CHECK:         scf.if {{.*}} -> (memref<4xf32>, memref<4xf32>)
+// CHECK:         memref.copy
+// CHECK-NOT:     hip.free
+// CHECK:         memref.copy
+// CHECK:         scf.if
+// CHECK:           hip.free
+// CHECK:         scf.if
+// CHECK:           hip.free
+func.func @aliased_if_results(%ctx: !hip.context, %flag: i1,
+                              %ext: memref<4xf32>) {
+  %a, %b = scf.if %flag -> (memref<4xf32>, memref<4xf32>) {
+    %m = memref.alloc() : memref<4xf32>
+    scf.yield %m, %m : memref<4xf32>, memref<4xf32>
+  } else {
+    scf.yield %ext, %ext : memref<4xf32>, memref<4xf32>
+  }
+  memref.copy %a, %ext : memref<4xf32> to memref<4xf32>
+  memref.copy %b, %ext : memref<4xf32> to memref<4xf32>
+  return
+}
+
+// The while initializer is an entry-block alloc. Replacements carried on the
+// backedge are freed in the before block; the entry alloc is freed once, on
+// the path that owns it.
+// CHECK-LABEL: func.func @while_entry_initializer
+// CHECK:         %[[INIT:.*]] = hip.alloc(%{{.*}}) : memref<4xf32>
+// CHECK:         scf.while (%[[A:.*]] = %[[INIT]])
+// CHECK:           memref.copy %[[A]], %{{.*}}
+// CHECK:           memref.extract_strided_metadata %[[A]]
+// CHECK:           memref.extract_strided_metadata %[[INIT]]
+// CHECK:           scf.if
+// CHECK-NEXT:        hip.free(%{{.*}}, %[[A]])
+// CHECK:         hip.free(%{{.*}}, %[[INIT]])
+func.func @while_entry_initializer(%ctx: !hip.context, %n: index) {
+  %c0 = arith.constant 0 : index
+  %init = memref.alloc() : memref<4xf32>
+  %r = scf.while (%a = %init) : (memref<4xf32>) -> memref<4xf32> {
+    %copy = memref.alloc() : memref<4xf32>
+    memref.copy %a, %copy : memref<4xf32> to memref<4xf32>
+    %go = arith.cmpi slt, %c0, %n : index
+    scf.condition(%go) %copy : memref<4xf32>
+  } do {
+  ^bb0(%b: memref<4xf32>):
+    scf.yield %b : memref<4xf32>
+  }
+  return
+}
+
+// An scf.if result initializes the loop and is read again after it. The
+// before-argument free must not release that buffer on the first iteration.
+// CHECK-LABEL: func.func @while_live_initializer
+// CHECK:         %[[INIT:.*]] = scf.if
+// CHECK:         scf.while (%[[A:.*]] = %[[INIT]])
+// CHECK:           memref.copy %[[A]], %{{.*}}
+// CHECK:           memref.extract_strided_metadata %[[INIT]]
+// CHECK:           scf.if
+// CHECK-NEXT:        hip.free(%{{.*}}, %[[A]])
+// CHECK:         memref.copy %[[INIT]], %{{.*}}
+// CHECK:         hip.free(%{{.*}}, %[[INIT]])
+func.func @while_live_initializer(%ctx: !hip.context, %flag: i1, %n: index,
+                                  %ext: memref<4xf32>) {
+  %c0 = arith.constant 0 : index
+  %init = scf.if %flag -> (memref<4xf32>) {
+    %alloc = memref.alloc() : memref<4xf32>
+    scf.yield %alloc : memref<4xf32>
+  } else {
+    scf.yield %ext : memref<4xf32>
+  }
+  %r = scf.while (%a = %init) : (memref<4xf32>) -> memref<4xf32> {
+    %copy = memref.alloc() : memref<4xf32>
+    memref.copy %a, %copy : memref<4xf32> to memref<4xf32>
+    %go = arith.cmpi slt, %c0, %n : index
+    scf.condition(%go) %copy : memref<4xf32>
+  } do {
+  ^bb0(%b: memref<4xf32>):
+    scf.yield %b : memref<4xf32>
+  }
+  memref.copy %init, %ext : memref<4xf32> to memref<4xf32>
   return
 }

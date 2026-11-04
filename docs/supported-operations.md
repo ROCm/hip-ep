@@ -93,6 +93,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | BatchNormalization | Custom HIP kernel; inference only (`training_mode` stays on ONNX) |
 | GroupNorm (`com.microsoft`) | Custom HIP kernel; optional SiLU, NCHW or NHWC |
 | SkipLayerNormalization (`com.microsoft`) | Decomposed to Add + LayerNormalization, including the optional input bias |
+| EmbedLayerNormalization (`com.microsoft`) | Decomposed to Gather + Add + LayerNormalization. f16/f32 tables, i32 indices. A missing position-id input uses `0 .. sequence-1` when the sequence length is static. `mask_index` is the count of ones along the sequence; with no mask it is zeros |
 | RMSNormalization | Custom HIP kernel |
 | SimplifiedLayerNormalization | Custom HIP kernel |
 | SkipSimplifiedLayerNormalization (`com.microsoft`) | Custom HIP kernel, add and norm fused |
@@ -142,7 +143,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | MaxPool | Custom HIP kernel (f16/bf16/f32/f64, and i8/ui8) |
 | AveragePool | Custom HIP kernel |
 | LpPool | Custom HIP kernel |
-| Resize | Custom HIP kernel. nearest and linear on f16/bf16/f32/f64; nearest also on int8/uint8. A dynamic extent comes from a constant `scales` vector, or from a `sizes` vector read back to a host index when `scales` is absent |
+| Resize | Custom HIP kernel. nearest and linear on f16/bf16/f32/f64 and on int8/uint8. Integer linear interpolates the stored codes and truncates toward zero. A dynamic extent comes from a constant `scales` vector, or from a `sizes` vector read back to a host index when `scales` is absent |
 | Upsample | Lowered through Resize (`asymmetric`, nearest `floor`). Schema 9 passes `scales` as an input; opset 7–8 stores them as an f32 attribute |
 | GridSample | Custom HIP kernel |
 | GlobalAveragePool | Custom HIP kernel |

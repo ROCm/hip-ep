@@ -4,8 +4,8 @@
 //===----------------------------------------------------------------------===//
 // A scan result used after the loop. The concatenation buffer is allocated
 // inside scf.while, so pooling does not take it. Allocation lowering frees
-// that buffer in the loop. The value returned to the caller is one output
-// allocation after the loop.
+// iteration allocations in the loop. The runtime-owned hip.alloc_output that
+// exits the loop is copied into the caller's output and is not hip.free'd.
 //===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt --onnx-to-hip-pipeline %s | FileCheck %s
@@ -35,5 +35,5 @@ module {
 // CHECK:         scf.yield
 // CHECK:         hip.alloc_output
 // CHECK:         memref.copy
-// CHECK:         hip.free
+// CHECK-NOT:     hip.free
 // CHECK:         return
