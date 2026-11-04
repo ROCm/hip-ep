@@ -154,6 +154,9 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     SwigluOp::attachInterface<HipDstBufferizableModel<SwigluOp>>(*ctx);
     ResizeOp::attachInterface<HipDstBufferizableModel<ResizeOp>>(*ctx);
     GridSampleOp::attachInterface<HipDstBufferizableModel<GridSampleOp>>(*ctx);
+    RoiAlignOp::attachInterface<HipDstBufferizableModel<RoiAlignOp>>(*ctx);
+    NonMaxSuppressionOp::attachInterface<
+        HipDstBufferizableModel<NonMaxSuppressionOp>>(*ctx);
     GlobalPoolOp::attachInterface<HipDstBufferizableModel<GlobalPoolOp>>(*ctx);
     ReciprocalOp::attachInterface<HipDstBufferizableModel<ReciprocalOp>>(*ctx);
     SqrtOp::attachInterface<HipDstBufferizableModel<SqrtOp>>(*ctx);

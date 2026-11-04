@@ -901,12 +901,79 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
 // Unsqueeze -> standard tensor ops (zero-cost metadata reinterpretation)
 //===----------------------------------------------------------------------===//
 
+/// Unsqueeze axes from the opset < 13 attribute or a constant operand.
+static std::optional<llvm::SmallVector<int64_t>>
+readUnsqueezeAxes(mlir::Operation *op, mlir::Value axes) {
+  llvm::SmallVector<int64_t> values;
+  if (auto attr = op->getAttrOfType<mlir::ArrayAttr>("axes")) {
+    for (mlir::Attribute element : attr) {
+      auto intAttr = mlir::dyn_cast<mlir::IntegerAttr>(element);
+      if (!intAttr)
+        return std::nullopt;
+      values.push_back(intAttr.getValue().getSExtValue());
+    }
+    return values;
+  }
+  if (!axes || !axes.getDefiningOp())
+    return std::nullopt;
+  auto dense = mlir::dyn_cast_or_null<mlir::DenseIntElementsAttr>(
+      axes.getDefiningOp()->getAttr("value"));
+  if (!dense)
+    return std::nullopt;
+  for (const mlir::APInt &entry : dense.getValues<mlir::APInt>())
+    values.push_back(entry.getSExtValue());
+  return values;
+}
+
+/// Unsqueeze copies every non-inserted dim, so a static output extent is also
+/// the input extent. Returns the input type with those extents filled in, or
+/// null when nothing refines.
+static mlir::RankedTensorType
+refineUnsqueezeInput(mlir::RankedTensorType inputType,
+                     mlir::RankedTensorType outputType,
+                     llvm::ArrayRef<int64_t> axes) {
+  int64_t outRank = outputType.getRank();
+  if (static_cast<int64_t>(axes.size()) != outRank - inputType.getRank())
+    return {};
+  llvm::SmallVector<bool> inserted(outRank, false);
+  for (int64_t axis : axes) {
+    if (axis < 0)
+      axis += outRank;
+    if (axis < 0 || axis >= outRank || inserted[axis])
+      return {};
+    inserted[axis] = true;
+  }
+  llvm::SmallVector<int64_t> shape(inputType.getShape());
+  bool changed = false;
+  int64_t src = 0;
+  for (int64_t i = 0; i < outRank; ++i) {
+    if (inserted[i])
+      continue;
+    int64_t in = shape[src];
+    int64_t out = outputType.getDimSize(i);
+    if (mlir::ShapedType::isDynamic(in) && !mlir::ShapedType::isDynamic(out)) {
+      shape[src] = out;
+      changed = true;
+    } else if (!mlir::ShapedType::isDynamic(in) &&
+               !mlir::ShapedType::isDynamic(out) && in != out) {
+      return {};
+    }
+    ++src;
+  }
+  if (!changed)
+    return {};
+  return mlir::RankedTensorType::get(shape, inputType.getElementType());
+}
+
 /// onnx.Unsqueeze -> tensor.expand_shape (zero-cost metadata operation).
 ///
 /// The reassociation is computed from the input/output SHAPES, so the `axes`
-/// operand is not read (it may even be a block-argument graph input after a
-/// graph slice routes a folded `const_1d_*` axes tensor across a part
-/// boundary).
+/// operand is not required (it may even be a block-argument graph input after
+/// a graph slice routes a folded `const_1d_*` axes tensor across a part
+/// boundary). When the axes are known, static output extents over dynamic
+/// input dims are first applied to the input with a `tensor.cast`:
+/// `tensor<?x?x?xf32> -> tensor<?x1x28x28xf32>` has no expand_shape
+/// reassociation until the input is `tensor<?x28x28xf32>`.
 ///
 /// Before:
 ///   %r = onnx.Unsqueeze %x, %axes
@@ -929,13 +996,19 @@ struct UnsqueezeToStdTensor : public mlir::RewritePattern {
         failed(result))
       return result;
 
-    auto reassocOpt =
-        mlir::getReassociationIndicesForReshape(inputType, outputType);
+    mlir::RankedTensorType refinedType;
+    if (auto axisValues = readUnsqueezeAxes(op, axes))
+      refinedType = refineUnsqueezeInput(inputType, outputType, *axisValues);
+
+    auto reassocOpt = mlir::getReassociationIndicesForReshape(
+        refinedType ? refinedType : inputType, outputType);
     if (!reassocOpt)
       return rewriter.notifyMatchFailure(
           op, "cannot compute unsqueeze reassociation");
 
     mlir::Location loc = op->getLoc();
+    if (refinedType)
+      data = mlir::tensor::CastOp::create(rewriter, loc, refinedType, data);
     // Unsqueeze only inserts unit dims, so every group keeps at most one
     // dynamic dim and no shape operand is needed.
     auto outputShape = buildExpandShapeOutputShape(rewriter, loc, data,
