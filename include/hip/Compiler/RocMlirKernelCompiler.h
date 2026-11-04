@@ -111,10 +111,11 @@ bool runRocMlirHighLevelPipeline(ModuleOp kernelModule);
 // instead of buildKernelPipeline, and it has no tuning space or perf_config.
 bool isRocMlirElementwiseKernelModule(ModuleOp kernelModule);
 
-// Whether `kernelModule` (in rock form) has anything for rocMLIR to compile:
-// a gemm-like op, or an elementwise kernel with an arith/math op left in it.
-// Lowering can fold all of a kernel's computation away -- an identity cast,
-// or hip.max(%x, %x) -- and createTunableParamSpace aborts on what is left.
+// Whether an elementwise `kernelModule` (in rock form) still has an arith or
+// math op. Lowering can fold the whole kernel away -- an identity cast, or
+// hip.max(%x, %x) -- and the elementwise pipeline then has nothing to compile.
+// A gemm-like op counts as well, so a conv or gemm module is left to the
+// tuning-space path.
 bool hasRocMlirComputation(ModuleOp kernelModule);
 
 // Pick the first perfConfig out of the tuning search space and compile with

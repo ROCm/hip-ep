@@ -17,7 +17,6 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
-#include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/Dominance.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Pass/PassManager.h"
@@ -394,40 +393,6 @@ OwningOpRef<ModuleOp> takeRocMlirKernelsAsTosaModule(ModuleOp module,
   return kernels;
 }
 
-// Batch conversion failed and discarded the moved funcs. Rebuild from the
-// pristine HIP clones, one kernel per pass-manager run, and keep only the
-// ones that convert. A failed run is thrown away so a partly rewritten body
-// never reaches rock. The caller inlines `failedNames` through the HIP path.
-// Diagnostics here are the same legalization errors the batch already
-// reported; swallow them so a recovered kernel is not a fatal subgraph error.
-static OwningOpRef<ModuleOp>
-convertRocMlirKernelsToTosaEach(ModuleOp hipKernels, StringRef arch,
-                                SmallVectorImpl<std::string> &failedNames) {
-  MLIRContext *ctx = hipKernels.getContext();
-  OpBuilder builder(ctx);
-  OwningOpRef<ModuleOp> kernels = ModuleOp::create(builder.getUnknownLoc());
-  PassManager pm(ctx);
-  pm.addNestedPass<func::FuncOp>(createConvertHipToTosaPass());
-  pm.addPass(createCanonicalizerPass());
-  ScopedDiagnosticHandler quiet(ctx, [](Diagnostic &) { return success(); });
-  for (auto func : hipKernels.getOps<func::FuncOp>()) {
-    if (!func->hasAttr("rock.kernel"))
-      continue;
-    OwningOpRef<ModuleOp> one = ModuleOp::create(builder.getUnknownLoc());
-    auto copy = cast<func::FuncOp>(func.clone());
-    if (!arch.empty())
-      copy->setAttr("rock.arch", builder.getStringAttr(arch));
-    one->push_back(copy);
-    if (failed(pm.run(*one))) {
-      failedNames.push_back(func.getSymName().str());
-      continue;
-    }
-    copy->remove();
-    kernels->getBody()->push_back(copy);
-  }
-  return kernels;
-}
-
 OwningOpRef<ModuleOp> takeRocMlirKernelModule(ModuleOp kernelsModule,
                                               StringRef kernelName) {
   func::FuncOp kernel;
@@ -467,10 +432,13 @@ bool runRocMlirHighLevelPipeline(ModuleOp kernelModule) {
 
 bool compileRocMlirDefaultPerfConfig(ModuleOp kernelModule, StringRef arch,
                                      CompiledKernel &out) {
-  if (!hasRocMlirComputation(kernelModule))
-    return false;
-  if (isRocMlirElementwiseKernelModule(kernelModule))
+  // Only an elementwise kernel can fold away to nothing rocMLIR can compile.
+  // A conv or gemm keeps the tuning-space path below.
+  if (isRocMlirElementwiseKernelModule(kernelModule)) {
+    if (!hasRocMlirComputation(kernelModule))
+      return false;
     return compileRocMlirBackend(kernelModule, arch, /*perfConfig=*/"", out);
+  }
 
   // Affix a perfConfig to the gemm op (the `perf_config` string attr). Take
   // the first entry enumerated from the tuning search space; autotuning
@@ -520,16 +488,19 @@ compileAndEmbedRocMlirKernels(ModuleOp module,
   if (kernelNames.empty())
     return success();
 
-  // Pristine HIP bodies, kept for a kernel rocMLIR cannot take: one HIP-to-TOSA
-  // rejects, one whose computation folds away in lowering, or one it fails to
-  // compile (an i64 elementwise kernel, say: rock.blockwise_load/store stop at
-  // 32-bit integers). The fallback is the whole outlined function, so a conv
-  // fused with a sub TOSA refuses is inlined as hip.conv and hip.sub together,
-  // and one such kernel does not fail the whole subgraph.
+  // Pristine HIP bodies of elementwise kernels. A conv or gemm that rocMLIR
+  // cannot compile still fails the module. An elementwise kernel can fold
+  // away (hip.max(%x, %x)) or fail in the backend (an i64 chain:
+  // rock.blockwise_load/store stop at 32-bit integers); that kernel runs as
+  // its hip ops.
   OwningOpRef<ModuleOp> hipKernels = ModuleOp::create(module.getLoc());
   for (auto func : module.getOps<func::FuncOp>())
     if (func->hasAttr("rock.kernel"))
       hipKernels->push_back(func.clone());
+  auto elementwiseKernel = [&](StringRef name) {
+    auto func = hipKernels->lookupSymbol<func::FuncOp>(name);
+    return func && func->hasAttr("rock.elementwise");
+  };
   llvm::StringSet<> onHipPath;
   auto runOnHipPath = [&](StringRef name) {
     inlineRocMlirKernel(module, hipKernels->lookupSymbol<func::FuncOp>(name));
@@ -550,16 +521,8 @@ compileAndEmbedRocMlirKernels(ModuleOp module,
   // re-parented.
   OwningOpRef<ModuleOp> kernels =
       takeRocMlirKernelsAsTosaModule(module, options.arch);
-  if (!kernels) {
-    // The batch moved every kernel and then failed, so those funcs are gone.
-    // Retry each pristine clone on its own and inline only the ones that
-    // still cannot convert.
-    SmallVector<std::string> tosaFailed;
-    kernels =
-        convertRocMlirKernelsToTosaEach(*hipKernels, options.arch, tosaFailed);
-    for (const std::string &name : tosaFailed)
-      fallBack(name, "hip->tosa conversion");
-  }
+  if (!kernels)
+    return module.emitError() << "hip->tosa conversion failed";
 
   // The tuning and backend entry points are module-scoped and assume a single
   // anchor op per module, so the kernels still have to be compiled one at a
@@ -583,11 +546,15 @@ compileAndEmbedRocMlirKernels(ModuleOp module,
     // only see anything once the kernel is in rock form. Handing the callback
     // raw tosa instead gave --autotune an empty search space.
     if (!runRocMlirHighLevelPipeline(*single)) {
+      if (!elementwiseKernel(name))
+        return module.emitError()
+               << "rocMLIR high-level pipeline failed for kernel '" << name
+               << "'";
       fallBack(name, "high-level pipeline");
       continue;
     }
 
-    if (!hasRocMlirComputation(*single)) {
+    if (elementwiseKernel(name) && !hasRocMlirComputation(*single)) {
       if (options.log)
         *options.log << options.logPrefix << " kernel '" << name
                      << "' has no computation left after lowering; running "
@@ -601,6 +568,9 @@ compileAndEmbedRocMlirKernels(ModuleOp module,
                   ? options.compileOne(*single, name, out)
                   : compileRocMlirDefaultPerfConfig(*single, options.arch, out);
     if (!ok) {
+      if (!elementwiseKernel(name))
+        return module.emitError()
+               << "rocMLIR failed to compile kernel '" << name << "'";
       fallBack(name, "compile");
       continue;
     }
@@ -615,6 +585,9 @@ compileAndEmbedRocMlirKernels(ModuleOp module,
       continue;
     auto it = compiledByKernel.find(name);
     if (it == compiledByKernel.end() || it->second.binary.empty()) {
+      if (!elementwiseKernel(name))
+        return module.emitError()
+               << "rocMLIR deferred kernel compiles failed";
       compiledByKernel.erase(name);
       fallBack(name, "deferred compile");
     }

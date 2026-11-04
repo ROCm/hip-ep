@@ -143,24 +143,29 @@ static Operation *chainPredecessor(Operation *op, Value input) {
   return def;
 }
 
-// Outline `start` and the single-use pointwise chain that consumes it into one
-// rocMlir function. `start` is a conv/matmul/gemm or the head of a pointwise
-// chain; rocMLIR compiles the latter with no FusionRoot (PR 122 elementwise).
+// Outline `start` and the chain that consumes it into one rocMlir function.
+// `pointwiseChain` is the head of a standalone pointwise chain: growth steps
+// through layout ops and hip.transpose, and stops before an op hip-to-tosa
+// cannot convert. An anchor keeps the direct pointwise-successor walk, so a
+// transpose or an expand_shape between a conv and its epilogue stays on HIP.
 static LogicalResult outlineRocMlirChain(DestinationStyleOpInterface start,
                                          PatternRewriter &rewriter,
-                                         int *counter) {
+                                         int *counter, bool pointwiseChain) {
   DestinationStyleOpInterface endOp = start;
   SetVector<Value> operands;
   SetVector<Operation *> ops;
 
   // An i32 matmul or convolution has an exact HIP kernel. Outlining it
   // asks rocMLIR to compile a non-quantized integer tosa op, which this
-  // pipeline does not establish. Leave the op in main_graph.
-  for (Type type : start->getOperandTypes()) {
-    auto shaped = dyn_cast<ShapedType>(type);
-    if (shaped && shaped.getElementType().isInteger(32))
-      return rewriter.notifyMatchFailure(start,
-                                         "i32 anchor stays on the HIP kernel");
+  // pipeline does not establish. Leave the op in main_graph. A pointwise
+  // i32 chain is not that kernel, so it still outlines.
+  if (!pointwiseChain) {
+    for (Type type : start->getOperandTypes()) {
+      auto shaped = dyn_cast<ShapedType>(type);
+      if (shaped && shaped.getElementType().isInteger(32))
+        return rewriter.notifyMatchFailure(
+            start, "i32 anchor stays on the HIP kernel");
+    }
   }
 
   // Fail on dynamic shapes
@@ -168,18 +173,15 @@ static LogicalResult outlineRocMlirChain(DestinationStyleOpInterface start,
     return rewriter.notifyMatchFailure(start,
                                        "only static shapes are supported");
 
-  // Match the pointwise chain, stepping through reshapers the way MIGraphX
+  // Pointwise chains step through reshapers the way MIGraphX
   // `match::skip(conv_dot_reshaper_names)` does. hip.transpose itself may end
   // the chain. The chain stops before any op hip-to-tosa cannot convert, so
-  // the prefix still compiles and the rest stays on the HIP path.
-  auto advance = [&](Operation *from) -> bool {
-    SmallVector<Operation *> layout;
-    DestinationStyleOpInterface next = nextChainOp(from, &layout);
-    if (!next)
-      return false;
+  // the prefix still compiles and the rest stays on the HIP path. An anchor
+  // only follows a direct pointwise successor, which is the walk conv, matmul,
+  // and gemm epilogues had before standalone pointwise fusion.
+  auto takeNext = [&](DestinationStyleOpInterface next, Value carried,
+                      ArrayRef<Operation *> layout) {
     ops.insert_range(layout);
-    Value carried =
-        layout.empty() ? from->getResult(0) : layout.back()->getResult(0);
     endOp = next;
     auto newOperands = endOp.getDpsInputs();
     if (auto it = llvm::find(newOperands, carried); it != newOperands.end())
@@ -190,6 +192,24 @@ static LogicalResult outlineRocMlirChain(DestinationStyleOpInterface start,
         ops.insert(initOp);
     }
     ops.insert(endOp);
+  };
+  auto advance = [&](Operation *from) -> bool {
+    if (pointwiseChain) {
+      SmallVector<Operation *> layout;
+      DestinationStyleOpInterface next = nextChainOp(from, &layout);
+      if (!next)
+        return false;
+      Value carried =
+          layout.empty() ? from->getResult(0) : layout.back()->getResult(0);
+      takeNext(next, carried, layout);
+      return true;
+    }
+    if (!from->hasOneUse() || !isaPointwiseOp(*from->user_begin()))
+      return false;
+    auto next = dyn_cast<DestinationStyleOpInterface>(*from->user_begin());
+    if (!next)
+      return false;
+    takeNext(next, from->getResult(0), {});
     return true;
   };
 
@@ -381,7 +401,8 @@ public:
 
   LogicalResult matchAndRewrite(AnchorOp anchorOp,
                                 PatternRewriter &rewriter) const override {
-    return outlineRocMlirChain(anchorOp, rewriter, counter);
+    return outlineRocMlirChain(anchorOp, rewriter, counter,
+                               /*pointwiseChain=*/false);
   }
 
 private:
@@ -421,7 +442,9 @@ static bool isReachedByAnchorChain(Operation *op) {
       Operation *pred = chainPredecessor(current, input);
       if (!pred)
         continue;
-      if (isOutlinedAnchor(pred))
+      // A rocmlir op is an anchor already rewritten. The epilogue it did not
+      // take (a transpose, then an add) stays on the HIP path.
+      if (isOutlinedAnchor(pred) || isa<RocMlirOp>(pred))
         return true;
       if (isa<TransposeOp>(pred) ||
           (isaPointwiseOp(pred) && isFusibleChainOp(pred)))
@@ -484,7 +507,7 @@ public:
       return rewriter.notifyMatchFailure(
           op, "chain has no arith or math op to form an elementwise kernel");
     return outlineRocMlirChain(cast<DestinationStyleOpInterface>(op), rewriter,
-                               counter);
+                               counter, /*pointwiseChain=*/true);
   }
 
 private:

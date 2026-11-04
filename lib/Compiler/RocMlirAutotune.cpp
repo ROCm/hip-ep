@@ -1005,8 +1005,6 @@ bool RocMlirAutotuner::Impl::compileAndBenchmarkSearches(
       times.perfConfigCompileMs += millisecondsSince(compileStart);
     }
 
-    // A kernel with no winner is left out of `byKernel`, and the caller runs
-    // its hip ops instead.
     for (DeferredSearch &search : queued) {
       MLIRContext context(autotuneRegistry(), MLIRContext::Threading::DISABLED);
       context.loadAllAvailableDialects();
@@ -1016,13 +1014,13 @@ bool RocMlirAutotuner::Impl::compileAndBenchmarkSearches(
       if (!parsed) {
         llvm::errs() << "error: failed to reparse rock module for '"
                      << search.kernelName << "'\n";
-        continue;
+        return false;
       }
       CompiledKernel winner;
       std::string bestConfig;
       if (!pickWinner(search.candidates, search.kernelName, *parsed, bestConfig,
                       winner))
-        continue;
+        return false;
       if (!search.cacheKey.empty())
         winnerCache[search.cacheKey] = bestConfig;
       byKernel[search.kernelName] = std::move(winner);
@@ -1037,7 +1035,7 @@ bool RocMlirAutotuner::Impl::compileAndBenchmarkSearches(
     if (cached == winnerCache.end()) {
       llvm::errs() << "error: no autotune winner for repeated problem on '"
                    << item.kernelName << "'\n";
-      continue;
+      return false;
     }
     DeferredCacheHit hit;
     hit.kernelName = std::move(item.kernelName);
@@ -1099,7 +1097,7 @@ bool RocMlirAutotuner::Impl::compileDeferredCacheHits(
     CompiledKernel winner;
     if (!parsed || !autotuneKernel(*parsed, hit.kernelName, winner,
                                    /*deferCacheHits=*/false))
-      continue;
+      return false;
     byKernel[hit.kernelName] = std::move(winner);
   }
   return true;

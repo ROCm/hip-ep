@@ -132,9 +132,7 @@ set_target_properties(test-adaptive-benchmark PROPERTIES
   FOLDER "mlir/Test/Compiler"
 )
 
-# GPU-free check that a HIP-to-TOSA failure falls back per kernel: a static
-# conv+leaky_relu stays a rocMLIR dispatch, and a fused kernel whose sub TOSA
-# refuses is inlined as hip.conv, hip.sub, and hip.mul.
+# GPU-free check that rock.elementwise selects the elementwise pipeline.
 if(ENABLE_ROCMLIRTRITON)
   if(CMAKE_LINK_GROUP_USING_RESCAN_SUPPORTED)
     set(_rocmlir_link_closure "$<LINK_GROUP:RESCAN,${HIPDNN_ROCMLIR_LINK_LIBS}>")
@@ -143,7 +141,6 @@ if(ENABLE_ROCMLIRTRITON)
   endif()
 
   foreach(_rocmlir_test IN ITEMS
-      "test-rocmlir-tosa-fallback;test_rocmlir_tosa_fallback.cpp;RocMlirTosaFallbackUnit"
       "test-rocmlir-elementwise-pipeline;test_rocmlir_elementwise_pipeline.cpp;RocMlirElementwisePipelineUnit")
     list(GET _rocmlir_test 0 _target)
     list(GET _rocmlir_test 1 _source)

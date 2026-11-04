@@ -314,13 +314,15 @@ func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf16>,
 
 // -----
 
-// MIGraphX reshaper_names: a transpose between a conv and a pointwise op is
-// part of the same rocMLIR kernel, not a separate HIP kernel.
+// An anchor epilogue does not step through hip.transpose. The conv is its own
+// kernel; the transpose and the add stay on the HIP path, and the pointwise
+// pattern does not claim the add.
 
 // CHECK-LABEL: func.func @rocMlir
+// CHECK-NOT: rock.elementwise
 // CHECK: hip.conv
-// CHECK: hip.transpose
-// CHECK: hip.add
+// CHECK-NOT: hip.transpose
+// CHECK-NOT: hip.add
 // CHECK: return
 
 // CHECK-LABEL: func.func @main_graph
@@ -340,8 +342,8 @@ func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf16>,
   %addEmpty = tensor.empty() : tensor<1x4x4x16xf16>
   // CHECK: hip.rocmlir
   // CHECK-NOT: hip.rocmlir
-  // CHECK-NOT: hip.transpose
-  // CHECK-NOT: hip.add
+  // CHECK: hip.transpose
+  // CHECK: hip.add
   // CHECK: return
   %r = hip.add(%ctx) ins(%t, %other : tensor<1x4x4x16xf16>, tensor<1x4x4x16xf16>)
       outs(%addEmpty : tensor<1x4x4x16xf16>) -> tensor<1x4x4x16xf16>
@@ -743,19 +745,15 @@ func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf16>,
 
 // -----
 
-// The same through a hip.transpose: the conv's chain takes the transpose and
-// the add, and the cast is a kernel of its own.
+// The same through a hip.transpose stays on the HIP path with the add. The
+// anchor kernel is the conv alone, and the cast is not folded into it.
 
 // CHECK-LABEL: func.func @rocMlir
-// CHECK: hip.cast
-// CHECK-NOT: hip.conv
-// CHECK-NOT: hip.add
-// CHECK: return
-// CHECK-LABEL: func.func @rocMlir
-// CHECK-NOT: hip.cast
+// CHECK-NOT: rock.elementwise
 // CHECK: hip.conv
-// CHECK: hip.transpose
-// CHECK: hip.add
+// CHECK-NOT: hip.transpose
+// CHECK-NOT: hip.cast
+// CHECK-NOT: hip.add
 // CHECK: return
 
 // CHECK-LABEL: func.func @main_graph
@@ -777,11 +775,12 @@ func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf16>,
       outs(%transEmpty : tensor<1x4x4x16xf16>) {perm = [0, 2, 3, 1]}
       : tensor<1x4x4x16xf16>
   %addEmpty = tensor.empty() : tensor<1x4x4x16xf16>
-  // CHECK: hip.rocmlir
+  // The cast is defined before the conv, so it stays in front of the dispatch.
+  // CHECK: hip.cast
   // CHECK: hip.rocmlir
   // CHECK-NOT: hip.rocmlir
-  // CHECK-NOT: hip.transpose
-  // CHECK-NOT: hip.add
+  // CHECK: hip.transpose
+  // CHECK: hip.add
   // CHECK: return
   %r = hip.add(%ctx) ins(%t, %cast : tensor<1x4x4x16xf16>, tensor<1x4x4x16xf16>)
       outs(%addEmpty : tensor<1x4x4x16xf16>) -> tensor<1x4x4x16xf16>
