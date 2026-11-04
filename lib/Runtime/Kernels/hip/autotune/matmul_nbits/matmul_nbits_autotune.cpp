@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -337,8 +338,8 @@ namespace matmul_nbits_autotune {
 namespace {
 
 Table& table() {
-  static Table* t = [] {
-    auto* fresh = new Table();
+  static const std::unique_ptr<Table> t = [] {
+    auto fresh = std::make_unique<Table>();
     for (size_t i = 0; i < kMatmulNbitsLutBlobCount && !fresh->loaded; ++i)
       loadBuffer(*fresh, kMatmulNbitsLutBlobs[i], kMatmulNbitsLutBlobSizes[i]);
     return fresh;

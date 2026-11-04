@@ -876,6 +876,11 @@ HIP_KERNEL_API int hip_swiglu(void *stream, const void *gate, const void *up,
                               void *output, int64_t num_elements,
                               int hip_dtype);
 
+// Half input/output, with FP32 activation intermediates.
+HIP_KERNEL_API int hip_swiglu_promoted(void *stream, const void *gate,
+                                      const void *up, void *output,
+                                      int64_t num_elements, int hip_dtype);
+
 /* =========================================================================
  * Softplus activation
  * =========================================================================
@@ -1740,8 +1745,10 @@ HIP_KERNEL_API int hip_pool(
  *  nearest_mode:       0 = round_prefer_floor (only used when mode=nearest)
  *
  * Supported hip_dtypes: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
- * HIP_DTYPE_BFLOAT16, HIP_DTYPE_FLOAT64 for every mode. HIP_DTYPE_INT8 and
- * HIP_DTYPE_UINT8 are nearest only (index copy, no interpolation).
+ * HIP_DTYPE_BFLOAT16, HIP_DTYPE_FLOAT64, HIP_DTYPE_INT8, and
+ * HIP_DTYPE_UINT8 for every mode. Integer linear interpolates the stored
+ * codes in float and truncates toward zero on the store. Nearest copies
+ * one sample.
  * Returns: 0 on success, non-zero on failure.
  */
 HIP_KERNEL_API int hip_resize(
@@ -3870,15 +3877,18 @@ HIP_KERNEL_API int hip_dynamic_sparse_attention(
     int64_t max_selected,
     float scale);
 
-// com.microsoft SparseAttentionIndexer, policy_mode=qsa, packed QK, no
-// past_sequence_length. T = fp16 (element_size_bytes 2) or fp32 (4).
+// com.microsoft SparseAttentionIndexer, policy_mode=qsa, packed QK.
+// T = fp16 (element_size_bytes 2) or fp32 (4).
 //   query            [B, S, (N+1)*D] T; the last D channels are the key
 //   query/key_norm_weight [D] T
 //   cos/sin_cache    [X, R] (rotary_batched 0) or [B, X, R] (1) T
 //   mask             [B, P+S] int64 or null (all visible)
-//   past_key         [B, P, D] T, may be null when P == 0
+//   past_key         [B, past_rows, D] T, P <= past_rows; may be null when
+//                    P == 0
 //   selected_indices [B, S, token_budget + r - 1] int32
-//   present_key      [B, P+S, D] T
+//   present_key      [B, present_rows, D] T, P+S <= present_rows; may alias
+//                    past_key when present_rows == past_rows, in which case
+//                    rows < P are not rewritten
 // D must be 128, 1 <= N <= 8, R even in (0, D], token_budget / r <= 512.
 // workspace must hold hip_sparse_attention_indexer_workspace_size() bytes.
 HIP_KERNEL_API size_t hip_sparse_attention_indexer_workspace_size(
@@ -3905,6 +3915,8 @@ HIP_KERNEL_API int hip_sparse_attention_indexer(
     int64_t batch,
     int64_t seq_len,
     int64_t past_len,
+    int64_t past_rows,
+    int64_t present_rows,
     int64_t num_heads,
     int64_t head_size,
     int64_t rotary_width,

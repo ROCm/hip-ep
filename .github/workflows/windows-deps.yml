@@ -7,6 +7,13 @@ name: Windows Deps
 # Prebuilds the two heavy from-source dependencies into cached install prefixes
 # and returns their cache keys. Callers restore those prefixes with
 # fail-on-cache-miss, so a green run here is what guarantees the caches exist.
+#
+# Windows Build and Windows RMT Build both call this workflow. Each job's
+# concurrency group is per ref and commit, so the two callers of one event
+# queue on the same group and a cold key is built once. A group holds only one
+# pending job and cancels the older one; per commit, a newer push cannot cancel
+# a queued deps job of an earlier commit. Both callers of one event see the
+# same github.sha, which on a pull request is the test merge commit.
 on:
   workflow_call:
     outputs:
@@ -49,7 +56,7 @@ jobs:
   llvm:
     runs-on: windows-2022
     concurrency:
-      group: deps-llvm-${{ github.ref }}
+      group: deps-llvm-${{ github.ref }}-${{ github.sha }}
       cancel-in-progress: false
 
     outputs:
@@ -165,7 +172,7 @@ jobs:
   ort:
     runs-on: windows-2022
     concurrency:
-      group: deps-ort-${{ github.ref }}
+      group: deps-ort-${{ github.ref }}-${{ github.sha }}
       cancel-in-progress: false
 
     outputs:
@@ -297,7 +304,7 @@ jobs:
     needs: ort
     runs-on: windows-2022
     concurrency:
-      group: deps-amdgpu-${{ github.ref }}
+      group: deps-amdgpu-${{ github.ref }}-${{ github.sha }}
       cancel-in-progress: false
 
     outputs:
@@ -504,7 +511,7 @@ jobs:
     needs: ort
     runs-on: windows-2022
     concurrency:
-      group: deps-oga-${{ github.ref }}
+      group: deps-oga-${{ github.ref }}-${{ github.sha }}
       cancel-in-progress: false
 
     outputs:
