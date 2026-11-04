@@ -129,6 +129,7 @@ inline constexpr const char *kWrapGQAHostLength =
     "wrap_group_query_attention_host_length";
 inline constexpr const char *kWrapGQARingF16 =
     "wrap_group_query_attention_ring_f16";
+inline constexpr const char *kWrapKvAttention = "wrap_kv_attention";
 inline constexpr const char *kWrapMultiHeadAttention =
     "wrap_multi_head_attention";
 inline constexpr const char *kWrapMatMulNBits = "wrap_matmul_nbits";
@@ -530,6 +531,8 @@ void populateRopeLoweringPatterns(const LLVMTypeConverter &converter,
 void populateGqaLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns,
     const DenseMap<Operation *, Value> &hostScalars);
+void populateKvAttentionLoweringPatterns(const LLVMTypeConverter &converter,
+                                         RewritePatternSet &patterns);
 void populateMultiHeadAttentionLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns);
 void populateMatMulNBitsLoweringPatterns(const LLVMTypeConverter &converter,

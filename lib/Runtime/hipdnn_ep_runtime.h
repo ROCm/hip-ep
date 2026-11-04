@@ -936,6 +936,17 @@ int wrap_group_query_attention_host_length(
     // window masks; null when absent. key_bias_len must cover seq_len_kv.
     void *key_bias, int64_t key_bias_batch, int64_t key_bias_len);
 
+// hip.kv_attention: causal fp16 attention of query [B, seq_len_q,
+// num_heads * key_dim] over BNSH key [B, kv_num_heads, kv_rows, key_dim] and
+// value [B, kv_num_heads, kv_rows, value_dim] into output [B, seq_len_q,
+// num_heads * value_dim]. kv_seqlen (nullable, int64 [B]) is the number of
+// valid rows; without it all kv_rows rows are valid.
+int wrap_kv_attention(RuntimeState *state, void *query, void *key, void *value,
+                      void *kv_seqlen, void *output, int64_t num_heads,
+                      int64_t kv_num_heads, float scale, int64_t batch,
+                      int64_t seq_len_q, int64_t kv_rows, int64_t key_dim,
+                      int64_t value_dim);
+
 // Compiler-selected entry for proven FP16 Ring candidates. Other shapes and
 // devices fall back to GQA with the same optional host-length contract.
 int wrap_group_query_attention_ring_f16(

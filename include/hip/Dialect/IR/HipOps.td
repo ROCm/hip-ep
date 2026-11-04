@@ -4263,6 +4263,57 @@ def Hip_GqaOp : Hip_DpsOp_AutoReify<"gqa", [AttrSizedOperandSegments, OpStateOpI
   let hasVerifier = 1;
 }
 
+// ===== Attention over a key/value buffer =====================================
+
+def Hip_KvAttentionOp : Hip_DpsOp_AutoReifyInfer<"kv_attention", "Output"> {
+  let summary = "Causal attention over a key/value buffer";
+  let description = [{
+    Causal scaled dot-product attention of `query` [B, S, num_heads * dk]
+    over `key` [B, kv_num_heads, T, dk] and `value` [B, kv_num_heads, T, dv]
+    (BNSH). Query head h reads key/value head h / (num_heads / kv_num_heads).
+    The op only reads key and value.
+
+    Without `kv_seqlen` all T rows are valid. With `kv_seqlen` ([B] int64)
+    the first Tv = kv_seqlen[b] rows of batch b are valid and the remaining
+    rows are not read; S <= Tv <= T. Query row i attends to rows
+    0 .. Tv - S + i, so the queries are the last S of the Tv valid positions.
+    This is ONNX Attention with is_causal = 1 and nonpad_kv_seqlen.
+
+    Result per head: softmax(scale * Q_h K_h^T + causal mask) V_h.
+
+    Example:
+    ```mlir
+    hip.kv_attention(%ctx) ins(%q, %k, %v : tensor<1x?x4096xf16>,
+        tensor<1x8x?x128xf16>, tensor<1x8x?x128xf16>)
+        kv_seqlen(%len : tensor<1xi64>)
+        outs(%out : tensor<1x?x4096xf16>)
+        {num_heads = 32 : i64, kv_num_heads = 8 : i64, scale = 0.088 : f32}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$query,              // [B, S, num_heads * dk]
+    Hip_TensorOrMemRef:$key,                // [B, kv_num_heads, T, dk]
+    Hip_TensorOrMemRef:$value,              // [B, kv_num_heads, T, dv]
+    Optional<Hip_TensorOrMemRef>:$kv_seqlen, // [B] i64
+    Hip_TensorOrMemRef:$output,             // [B, S, num_heads * dv]
+    I64Attr:$num_heads,
+    I64Attr:$kv_num_heads,
+    F32Attr:$scale
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $query `,` $key `,` $value `:`
+        type($query) `,` type($key) `,` type($value) `)`
+    (`kv_seqlen` `(` $kv_seqlen^ `:` type($kv_seqlen) `)`)?
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  let hasVerifier = 1;
+}
+
 // ===== hipDNN Graph Outlining + Execution ====================================
 
 def Hip_YieldOp : Hip_Op<"yield", [Pure, Terminator,

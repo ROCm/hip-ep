@@ -3777,6 +3777,12 @@ HIP_KERNEL_API int hip_tensor_scatter(void *stream, void *present,
                                       int64_t max_seq, int64_t seq,
                                       int64_t row_bytes, int circular);
 
+// seqlens_k[i] = lengths[i] - 1 on the device: int64 valid-row counts to the
+// int32 "total length - 1" form the GQA decode kernels read.
+HIP_KERNEL_API int hip_lengths_to_seqlens_k(void *stream,
+                                            const int64_t *lengths,
+                                            int32_t *seqlens_k, int64_t n);
+
 /* =========================================================================
  * Causal Depthwise 1D Conv -- single-step "decode" path
  * =========================================================================

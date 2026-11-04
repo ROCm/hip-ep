@@ -3748,6 +3748,60 @@ LogicalResult GqaOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// KvAttentionOp: ins(query, key, value, [kv_seqlen]) outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange KvAttentionOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void KvAttentionOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult KvAttentionOp::verify() {
+  const int64_t heads = getNumHeads();
+  const int64_t kvHeads = getKvNumHeads();
+  if (heads <= 0 || kvHeads <= 0 || heads % kvHeads != 0)
+    return emitOpError("num_heads must be a positive multiple of "
+                       "kv_num_heads");
+
+  auto q = cast<ShapedType>(getQuery().getType());
+  auto k = cast<ShapedType>(getKey().getType());
+  auto v = cast<ShapedType>(getValue().getType());
+  auto out = cast<ShapedType>(getOutput().getType());
+  if (q.getRank() != 3 || out.getRank() != 3)
+    return emitOpError("query and output must be rank 3 [B, S, heads * dim]");
+  if (k.getRank() != 4 || v.getRank() != 4)
+    return emitOpError("key and value must be rank 4 [B, kv_num_heads, T, "
+                       "dim]");
+  if (k.isDynamicDim(3) || v.isDynamicDim(3))
+    return emitOpError("key and value head dims must be static");
+  const int64_t dk = k.getDimSize(3);
+  const int64_t dv = v.getDimSize(3);
+  auto dimIs = [](ShapedType t, int64_t dim, int64_t want) {
+    return t.isDynamicDim(dim) || t.getDimSize(dim) == want;
+  };
+  if (!dimIs(k, 1, kvHeads) || !dimIs(v, 1, kvHeads))
+    return emitOpError("key and value must have kv_num_heads heads");
+  if (!dimIs(q, 2, heads * dk))
+    return emitOpError("query must be [B, S, num_heads * dk]");
+  if (!dimIs(out, 2, heads * dv))
+    return emitOpError("output must be [B, S, num_heads * dv]");
+  if (!k.isDynamicDim(2) && !v.isDynamicDim(2) &&
+      k.getDimSize(2) != v.getDimSize(2))
+    return emitOpError("key and value must have the same number of rows");
+  if (Value lengths = getKvSeqlen()) {
+    auto t = cast<ShapedType>(lengths.getType());
+    if (t.getRank() != 1 || !t.getElementType().isInteger(64))
+      return emitOpError("kv_seqlen must be [B] int64");
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // HipDNNGraphOp: ins(variadic), outs(variadic)
 //===----------------------------------------------------------------------===//
 

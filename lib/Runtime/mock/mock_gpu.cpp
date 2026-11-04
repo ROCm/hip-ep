@@ -585,6 +585,24 @@ int wrap_group_query_attention_host_length(
   return 0;
 }
 
+int wrap_kv_attention(RuntimeState *state, void *query, void *key, void *value,
+                      void *kv_seqlen, void *output, int64_t num_heads,
+                      int64_t kv_num_heads, float scale, int64_t batch,
+                      int64_t seq_len_q, int64_t kv_rows, int64_t key_dim,
+                      int64_t value_dim) {
+  if (!state || !query || !key || !value || !output) {
+    fprintf(stderr, "Invalid argument in wrap_kv_attention\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_kv_attention(num_heads=%lld, kv_num_heads=%lld, "
+             "scale=%f, batch=%lld, seq_q=%lld, kv_rows=%lld, key_dim=%lld, "
+             "value_dim=%lld, kv_seqlen=%p)\n",
+             (long long)num_heads, (long long)kv_num_heads, (double)scale,
+             (long long)batch, (long long)seq_len_q, (long long)kv_rows,
+             (long long)key_dim, (long long)value_dim, kv_seqlen);
+  return 0;
+}
+
 int wrap_group_query_attention_ring_f16(
     RuntimeState *state, int op_state_slot,
     // Inputs 1-7 (core GQA)

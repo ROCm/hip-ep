@@ -379,6 +379,12 @@ struct RuntimeState {
   // constants blob so the weights keep placement priority over it; null when
   // the session runs without an arena.
   void *transient_arena;
+
+  // int32 seqlens_k [kv_seqlens_cap] derived from the kv_seqlen operand of
+  // hip.kv_attention. Its own buffer so its address is stable across layers:
+  // the per-Compute seqlens_k cache is keyed on it.
+  void *kv_seqlens;
+  int64_t kv_seqlens_cap;
 };
 
 // Every session-owned device transient (pools, workspace, op scratch) must be
