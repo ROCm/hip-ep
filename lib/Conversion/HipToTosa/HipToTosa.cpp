@@ -5737,12 +5737,28 @@ LogicalResult lowerBlockedDequantize(DequantizeLinearOp op, Value input,
 
   Location loc = op.getLoc();
   Type computeElem = resultType.getElementType();
-  Value scales = reshapeTo(scale, {n, kBlocks}, rewriter);
+  // Keep the K-block dimension explicit through dequantization so TOSA
+  // broadcasts the trailing extent-1 scale and zero point. Expanding those
+  // operands with tosa.tile leaves an op rocMLIR cannot legalize.
+  auto blockResultType =
+      RankedTensorType::get({n, kBlocks, blockSize}, computeElem);
+  Value blocks = reshapeTo(input, blockResultType.getShape(), rewriter);
+  Value scales = reshapeTo(scale, {n, kBlocks, 1}, rewriter);
   scales = emitTosaCast(rewriter, loc, scales, computeElem);
-  scales =
-      broadcastBlocksAlongK(scales, n, k, kBlocks, blockSize, rewriter, loc);
 
-  Value shifted = emitTosaCast(rewriter, loc, input, computeElem);
+  // Signless i4 is what arith.uitofp accepts. A plain tosa.cast of that type
+  // lowers to a signed conversion, which turns nibbles 8..15 negative.
+  // unsigned_cast lowers to uitofp and keeps the MatMulNBits values unsigned.
+  Value shifted;
+  if (cast<RankedTensorType>(blocks.getType()).getElementType().isInteger(4)) {
+    auto castType = RankedTensorType::get(
+        cast<RankedTensorType>(blocks.getType()).getShape(), computeElem);
+    shifted = tosa::CustomOp::create(rewriter, loc, castType, kRockUnsignedCast,
+                                     kRockCustomOpDomain, "", blocks)
+                  .getResult(0);
+  } else {
+    shifted = emitTosaCast(rewriter, loc, blocks, computeElem);
+  }
   if (zeroPoint) {
     auto zpType = dyn_cast<RankedTensorType>(zeroPoint.getType());
     if (!zpType || !zpType.hasStaticShape())
@@ -5753,13 +5769,14 @@ LogicalResult lowerBlockedDequantize(DequantizeLinearOp op, Value input,
     if (zpType.getNumElements() != n * kBlocks)
       return rewriter.notifyMatchFailure(op,
                                          "zero point must have N * k_blocks");
-    Value zp = reshapeTo(zeroPoint, {n, kBlocks}, rewriter);
-    zp = broadcastBlocksAlongK(zp, n, k, kBlocks, blockSize, rewriter, loc);
+    Value zp = reshapeTo(zeroPoint, {n, kBlocks, 1}, rewriter);
     zp = emitTosaCast(rewriter, loc, zp, computeElem);
-    shifted = tosa::SubOp::create(rewriter, loc, resultType, shifted, zp);
+    shifted = tosa::SubOp::create(rewriter, loc, blockResultType, shifted, zp);
   }
+  Value dequantized =
+      emitTosaMul(rewriter, loc, shifted, scales, blockResultType);
   rewriter.replaceOp(op,
-                     emitTosaMul(rewriter, loc, shifted, scales, resultType));
+                     reshapeTo(dequantized, resultType.getShape(), rewriter));
   return success();
 }
 
@@ -8183,11 +8200,74 @@ struct QMoEConverter final : public OpConversionPattern<hip::QMoEOp> {
   }
 };
 
+// True when `logical` is the low-nibble-first expansion of `packed`.
+static bool isLowNibblePackedUi8(RankedTensorType packed,
+                                 RankedTensorType logical) {
+  if (!packed || !logical || !packed.hasStaticShape() ||
+      !logical.hasStaticShape())
+    return false;
+  if (!packed.getElementType().isUnsignedInteger(8) ||
+      !logical.getElementType().isUnsignedInteger(8))
+    return false;
+  if (packed.getRank() == 0 || packed.getRank() != logical.getRank())
+    return false;
+  if (packed.getShape().drop_back() != logical.getShape().drop_back())
+    return false;
+  return logical.getShape().back() == packed.getShape().back() * 2;
+}
+
+// A blocked MatMulNBits unpack materializes ui8 before the GEMM. rocMLIR then
+// cannot tell that B is int4 and rejects the kernel. When the packed bytes
+// are the kernel argument and the only consumer is a blocked dequant, retarget
+// that argument to logical signless i4 at the unpacked shape. The byte buffer
+// is unchanged; rocMLIR's 4-bit legalization extracts the nibbles, matching
+// migraphx-realize-int4. The element type is signless because arith.uitofp,
+// which the unsigned cast lowers to, rejects an unsigned integer operand.
+// uitofp still reads the nibbles as unsigned values.
+static void realizeBlockedInt4Arguments(func::FuncOp func) {
+  SmallVector<UnpackInt4Op> unpacks;
+  func.walk([&](UnpackInt4Op op) { unpacks.push_back(op); });
+  for (UnpackInt4Op unpack : unpacks) {
+    if (unpack.getNumResults() != 1 || !unpack.getResult(0).hasOneUse())
+      continue;
+    Value packed = unpack.getPacked();
+    if (!packed.hasOneUse())
+      continue;
+    auto logicalUi8 = dyn_cast<RankedTensorType>(unpack.getResult(0).getType());
+    auto packedType = dyn_cast<RankedTensorType>(packed.getType());
+    auto arg = dyn_cast<BlockArgument>(packed);
+    if (!arg || arg.getOwner() != &func.front())
+      continue;
+    if (!isLowNibblePackedUi8(packedType, logicalUi8))
+      continue;
+    auto dequant =
+        dyn_cast<DequantizeLinearOp>(*unpack.getResult(0).getUsers().begin());
+    if (!dequant || dequant.getBlockSize() == 0 || dequant.getPackedInt4())
+      continue;
+    if (dequant.getInput() != unpack.getResult(0))
+      continue;
+
+    auto i4 = IntegerType::get(func.getContext(), 4,
+                               IntegerType::SignednessSemantics::Signless);
+    auto logicalI4 = RankedTensorType::get(logicalUi8.getShape(), i4);
+    arg.setType(logicalI4);
+    FunctionType fnType = func.getFunctionType();
+    SmallVector<Type> inputs(fnType.getInputs());
+    inputs[arg.getArgNumber()] = logicalI4;
+    func.setFunctionType(
+        FunctionType::get(func.getContext(), inputs, fnType.getResults()));
+    dequant.getInputMutable().set(arg);
+    unpack.erase();
+  }
+}
+
 class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
   void runOnOperation() override {
     auto funcOp = getOperation();
     if (!funcOp->hasAttr("rock.kernel"))
       return;
+
+    realizeBlockedInt4Arguments(funcOp);
 
     MLIRContext *ctx = &getContext();
 
