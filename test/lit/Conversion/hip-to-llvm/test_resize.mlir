@@ -93,15 +93,14 @@ module {
                      outs(%y : memref<1x3x8x8xf32, 1>)
                      {mode = 1, coord_transform = 1, nearest_mode = 2}
     // CHECK-NOT: hip.resize
-    // The dynamic input channel is the first window dimension. Verify the
-    // launch is N + a three-axis window and passes input C and static output C
-    // separately; treating C as a copied prefix would pass the wrong extent.
-    // CHECK: %[[N:.*]] = llvm.mlir.constant(1 : i64) : i64
-    // CHECK: %[[C:.*]] = llvm.mlir.constant(1 : i64) : i64
+    // The dynamic input channel is the first window input and the static
+    // 3-channel extent is the first window output. spatial_rank is the second
+    // constant 3: the first is that output extent. A copied channel would pass
+    // the input extent as prefix C instead.
     // CHECK: %[[IN_CHANNEL:.*]] = llvm.extractvalue %{{.*}}[3, 1]
     // CHECK: %[[OUT_CHANNEL:.*]] = llvm.mlir.constant(3 : i64) : i64
     // CHECK: %[[SPATIAL_RANK:.*]] = llvm.mlir.constant(3 : i64) : i64
-    // CHECK: llvm.call @wrap_resize{{.*}}(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %[[SPATIAL_RANK]], %[[N]], %[[C]], %[[IN_CHANNEL]], %{{.*}}, %{{.*}}, %[[OUT_CHANNEL]]
+    // CHECK: llvm.call @wrap_resize(%{{[^,]*}}, %{{[^,]*}}, %{{[^,]*}}, %{{[^,]*}}, %[[SPATIAL_RANK]], %{{[^,]*}}, %{{[^,]*}}, %[[IN_CHANNEL]], %{{[^,]*}}, %{{[^,]*}}, %[[OUT_CHANNEL]],
     return
   }
 

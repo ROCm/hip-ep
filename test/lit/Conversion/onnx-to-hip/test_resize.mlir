@@ -514,8 +514,11 @@ module {
         : (tensor<1x?x?x?xf32>, tensor<0xf32>, tensor<0xf32>, tensor<4xi64>)
         -> tensor<?x?x?x?xf32>
     // CHECK-NOT: hip.readback_scalar
-    // CHECK: %[[H:.*]] = arith.index_cast %{{.*}} : i64 to index
-    // CHECK: tensor.empty(%[[H]], %[[H]]) : tensor<1x3x?x?xf32>
+    // Both dynamic extents are casts of the same gathered host scalar.
+    // CHECK: %[[SRC:.*]] = arith.index_cast %{{.*}} : index to i64
+    // CHECK: %[[H:.*]] = arith.index_cast %[[SRC]] : i64 to index
+    // CHECK: %[[W:.*]] = arith.index_cast %[[SRC]] : i64 to index
+    // CHECK: tensor.empty(%[[H]], %[[W]]) : tensor<1x3x?x?xf32>
     return %y : tensor<?x?x?x?xf32>
   }
 
