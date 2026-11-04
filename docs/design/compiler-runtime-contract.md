@@ -87,6 +87,14 @@ delete the cache and recompile after changing GPUs or toggling either
 if autotuning was requested but no HIP device could be reached, so the suffix
 never claims tuning that did not happen.
 
+`HIPDNN_EP_ROCMLIR_AUTOTUNE_BENCH` selects how candidates are timed and is not
+part of the suffix: both modes search the same space and record the same kind
+of artifact. `adaptive` (default) is MIGraphX's `adaptive_topk_benchmark`: a
+short coarse pass over every candidate, then bundled launches for the ten
+fastest within 4x of the best (see `include/hip/Compiler/AdaptiveBenchmark.h`).
+`simple` gives every candidate 20 warmup and 100 timed launches. Benchmark
+inputs hold generated data (floats in [-1, 1), small integers), not zeros.
+
 ---
 
 ## Schema: Single Source of Truth
@@ -168,6 +176,7 @@ Dynamic dimensions are encoded as `-1`.
 | `constants_filename` | `string` | Name of the constants file to open via `fs` |
 | `constants[i].size` | `int64` | Byte size of constant `i` |
 | `constants[i].offset` | `int64` | Byte offset of constant `i` in the constants file |
+| `constants[i].disk_resident` | `bool` | Constant `i` is read on demand from its `FileRefSource`; it has no GPU copy |
 | `input_count` | `int64` | Number of model inputs the graph reads. An unread function argument is omitted |
 | `output_count` | `int64` | Number of model outputs |
 | `inputs[i].shape` | `[int64]` | Tensor dimensions of input `i`; `-1` = dynamic |
@@ -200,13 +209,32 @@ The generated LLVM IR plus `RuntimeState` therefore carry pool behavior. See
 [pool-allocs-memory-planning.md](pool-allocs-memory-planning.md) for the
 attribute, lowering, and grow-on-demand runtime contract.
 
+### Disk-resident constants
+
+A constant with `disk_resident` set is consumed only by gathers along axis 0,
+which lower to wrappers that take the constant index instead of a data
+pointer:
+
+- `wrap_gather_from_file(state, constant_index, indices, output, axis, ...)` —
+  same trailing arguments as `wrap_gather`; `axis` is normalized and must be
+  `0`.
+- `wrap_gather_block_quantized_from_file(state, constant_index, indices,
+  scales, zero_points, output, ...)` — same trailing arguments as
+  `wrap_gather_block_quantized`.
+
+`constant_index` is the constant's `globalIndex` and is a compile-time
+constant. For these entries `inference_init` maps the source file instead of
+uploading it, and `hipdnn_ep_constant_get` returns null. See
+[constant-handling-design.md](constant-handling-design.md#disk-resident-gather-tables)
+for selection and the runtime read path.
+
 ---
 
 ## Consumers
 
 | Consumer | Fields used | How |
 |----------|-------------|-----|
-| Runtime (`inference_init`) | `constants_filename`, `constants[i].offset` | Reads `__metadata_blob`; opens constants file via `fs`; indexes into blob by offset |
+| Runtime (`inference_init`) | `constants_filename`, `constants[i].offset`, `constants[i].disk_resident` | Reads `__metadata_blob`; opens constants file via `fs`; indexes into blob by offset; maps disk-resident sources |
 | Any caller | all | Reads `__metadata_json` via `inference_get_metadata_json()` |
 
 ---

@@ -100,6 +100,19 @@ static Request decode(Phase p, int n, int k, int gs, bool zp) {
   return r;
 }
 
+// Mirrors wmmaConfigLaunchable's !fused ⇒ N <= maxGridY gate (HIP maxGridSize[1]
+// is 65536 on current devices). Kept here so the LUT resolve path can be tested
+// without linking the HIP kernel.
+struct WideNCtx {
+  int n;
+};
+static constexpr int kDequantMaxGridY = 65536;
+static bool rejectUnfusedWideN(void* ctx, const WmmaAnswer& g) {
+  const int n = static_cast<const WideNCtx*>(ctx)->n;
+  if (!g.fused && n > kDequantMaxGridY) return false;
+  return true;
+}
+
 int main() {
   const Stats s = stats();
   std::printf("table_loaded=%d points=%u invalid_points=%u\n\n",
@@ -200,6 +213,38 @@ int main() {
   expectExactly("all geometries rejected",
                 prefill(128, 14336, 4096, 128, true), Source::None,
                 /*accept=*/false);
+
+  std::printf("\n-- query-shape launchability (!fused vs maxGridY) --\n");
+  // launchDequant uses grid.y = N; HIP caps maxGridSize[1] at 65536 on current
+  // GPUs. A nearest donor at N=32768 can name a !fused config that is illegal
+  // at lm_head N=128256. The runtime validator must reject those so resolve
+  // walks to a fused neighbour (or None) rather than hand production a bad
+  // launch. This test mirrors that predicate without linking the HIP kernel.
+  {
+    // Narrow N: !fused answers remain acceptable (donor shape for the LUT).
+    WideNCtx ctx{32768};
+    const Request r = prefill(16384, 32768, 4096, 128, false);
+    const Result got = resolve(r, rejectUnfusedWideN, acceptGemv, &ctx);
+    const bool ok = got.source != Source::None;
+    if (!ok) ++failures;
+    std::printf("  %-52s src=%-8s fused=%d %s\n",
+                "N=32768 still resolves with launchability filter",
+                name(got.source), int(got.wmma.fused), ok ? "OK" : "FAIL");
+  }
+  {
+    // Wide N: never accept a !fused Exact/Nearest (the production failure mode).
+    WideNCtx ctx{128256};
+    const Request r = prefill(16384, 128256, 4096, 128, false);
+    const Result got = resolve(r, rejectUnfusedWideN, acceptGemv, &ctx);
+    const bool bad_unfused =
+        (got.source == Source::Exact || got.source == Source::Nearest) &&
+        !got.wmma.fused;
+    const bool ok = !bad_unfused;
+    if (!ok) ++failures;
+    std::printf("  %-52s src=%-8s fused=%d %s\n",
+                "N=128256 never returns !fused Exact/Nearest",
+                name(got.source), int(got.wmma.fused), ok ? "OK" : "FAIL");
+  }
 
   const Stats after = stats();
   std::printf("\nrejected_answers=%u\n", after.rejected_answers);

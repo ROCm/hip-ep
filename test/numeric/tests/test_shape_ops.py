@@ -579,6 +579,41 @@ class TestSlice:
         actual, expected = model_runner.run_sample(model, feeds)
         compare_outputs(actual, expected, atol=0)
 
+    @pytest.mark.parametrize("seq_len,total_len", [(1, 20), (3, 12), (7, 7)])
+    def test_slice_mask_tail_by_sequence_length(self, model_runner, seq_len, total_len):
+        """Slice(mask, -Shape(ids)[1], INT64_MAX) gating a [B, S, ...] tensor."""
+        nodes = [
+            helper.make_node("Shape", ["ids"], ["ids_shape"]),
+            helper.make_node("Gather", ["ids_shape", "one"], ["seq"], axis=0),
+            helper.make_node("Neg", ["seq"], ["start"]),
+            helper.make_node("Slice", ["mask", "start", "end", "one"], ["tail"]),
+            helper.make_node("Cast", ["tail"], ["keep"], to=TensorProto.BOOL),
+            helper.make_node("Unsqueeze", ["keep", "axes"], ["keep4"]),
+            helper.make_node("Where", ["keep4", "X", "zero"], ["Y"]),
+        ]
+        initializers = [
+            helper.make_tensor("one", TensorProto.INT64, [1], [1]),
+            helper.make_tensor("end", TensorProto.INT64, [1], [np.iinfo(np.int64).max]),
+            helper.make_tensor("axes", TensorProto.INT64, [2], [2, 3]),
+            helper.make_tensor("zero", TensorProto.FLOAT16, [], [0.0]),
+        ]
+        inputs = [
+            helper.make_tensor_value_info("ids", TensorProto.INT64, ["B", "S"]),
+            helper.make_tensor_value_info("mask", TensorProto.INT64, ["B", "T"]),
+            helper.make_tensor_value_info("X", TensorProto.FLOAT16, ["B", "S", 4, 8]),
+        ]
+        outputs = [
+            helper.make_tensor_value_info("Y", TensorProto.FLOAT16, ["B", "S", 4, 8])
+        ]
+        model = make_model_from_nodes(nodes, inputs, outputs, initializers)
+
+        rng = np.random.default_rng(504)
+        ids = rng.integers(0, 1000, [1, seq_len], dtype=np.int64)
+        mask = rng.integers(0, 2, [1, total_len], dtype=np.int64)
+        x = rng.uniform(-2.0, 2.0, [1, seq_len, 4, 8]).astype(np.float16)
+        actual, expected = model_runner.run_sample(model, [ids, mask, x])
+        compare_outputs(actual, expected, atol=0)
+
 
 # ---------------------------------------------------------------------------
 # ScatterND

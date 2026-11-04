@@ -5,9 +5,11 @@
 
 add_library(HipDialectIR STATIC
   HipCausalConvCanonicalize.cpp
+  HipConstantData.cpp
   HipDialect.cpp
   HipDpsOpInterface.cpp
   HipOpStateInterface.cpp
+  RuntimeAccessOpInterface.cpp
   HipReadbackCanonicalize.cpp
   HipReifyResultShapesImpl.cpp
   HipShapeUtils.cpp
@@ -23,6 +25,7 @@ add_dependencies(HipDialectIR
   HipTypesIncGen
   HipDpsOpInterfaceIncGen
   HipOpStateInterfaceIncGen
+  RuntimeAccessOpInterfaceIncGen
   HipOpsIncGen
 )
 

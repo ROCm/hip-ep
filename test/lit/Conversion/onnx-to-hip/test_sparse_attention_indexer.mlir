@@ -71,6 +71,37 @@ module {
   // CHECK-SAME: tensor<64x32xf32>, tensor<64x32xf32>, tensor<2x5x128xf32>) outs(
   // CHECK-SAME: {compress_ratio = 4 : i64, epsilon = 9.99999997E-7 : f32, scale = 0.0883883461 : f32, token_budget = 64 : i64}
 
+  func.func @sai_past_sequence_length(
+      %qk: tensor<?x?x640xf16>,
+      %qw: tensor<128xf16>,
+      %kw: tensor<128xf16>,
+      %cos: tensor<?x?x64xf16>,
+      %sin: tensor<?x?x64xf16>,
+      %past: tensor<?x?x128xf16>,
+      %psl: tensor<1xi32>
+  ) -> (tensor<?x?x2051xi32>, tensor<?x?x128xf16>) {
+    %none = "onnx.NoValue"() {value} : () -> none
+    %sel, %present = "onnx.Custom"(%qk, %none, %qw, %kw, %cos, %sin, %none, %past, %none, %none, %none, %none, %psl) {
+      function_name = "SparseAttentionIndexer",
+      domain_name = "com.microsoft",
+      policy_mode = "qsa",
+      compress_ratio = 4 : si64,
+      token_budget = 2048 : si64
+    } : (tensor<?x?x640xf16>, none, tensor<128xf16>, tensor<128xf16>, tensor<?x?x64xf16>, tensor<?x?x64xf16>, none, tensor<?x?x128xf16>, none, none, none, none, tensor<1xi32>)
+      -> (tensor<?x?x2051xi32>, tensor<?x?x128xf16>)
+    return %sel, %present : tensor<?x?x2051xi32>, tensor<?x?x128xf16>
+  }
+
+  // CHECK-LABEL: func.func @sai_past_sequence_length
+  // CHECK-SAME: %[[PAST:[^:]*]]: tensor<?x?x128xf16>, %[[PSL:.*]]: tensor<1xi32>)
+  // CHECK: %[[SEL:.*]] = tensor.empty
+  // CHECK: %[[PB:.*]] = tensor.dim
+  // CHECK: %[[P:.*]] = tensor.dim %[[PAST]]
+  // CHECK-NOT: arith.addi
+  // CHECK: %[[PRESENT:.*]] = tensor.empty(%[[PB]], %[[P]]) : tensor<?x?x128xf16>
+  // CHECK: hip.sparse_attention_indexer
+  // CHECK-SAME: past_sequence_length(%[[PSL]] : tensor<1xi32>) outs(%[[SEL]], %[[PRESENT]] :
+
   func.func @sai_csa_policy(
       %qk: tensor<1x1x640xf16>,
       %qw: tensor<128xf16>,

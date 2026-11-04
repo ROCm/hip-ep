@@ -84,4 +84,25 @@ module {
   // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[IDS:.*]]: tensor<1x4xi64>, %[[MULT:.*]]: tensor<2xi64>, %[[VOCAB:.*]]: tensor<2xi64>, %[[SEG:.*]]: tensor<1x4xi32>)
   // CHECK: %[[HASH:.*]] = tensor.empty() : tensor<1x4x2xi64>
   // CHECK: hip.ngram_hash_mapping(%[[CTX]]) ins(%[[IDS]], %[[MULT]], %[[VOCAB]] : tensor<1x4xi64>, tensor<2xi64>, tensor<2xi64>) segment_ids(%[[SEG]] : tensor<1x4xi32>) outs(%[[HASH]] : tensor<1x4x2xi64>) {max_ngram_size = 2 : i64, n_head_per_ngram = 2 : i64, pad_id = 0 : i64} : tensor<1x4x2xi64>
+
+  func.func @ngram_i32_pad_out_of_range(
+      %ids: tensor<2x4xi32>,
+      %mult: tensor<3xi32>,
+      %vocab: tensor<4xi32>
+  ) -> tensor<2x4x4xi32> {
+    %none = "onnx.NoValue"() {value} : () -> none
+    %hash = "onnx.Custom"(%ids, %mult, %vocab, %none, %none, %none, %none) {
+      function_name = "NGramHashMapping",
+      domain_name = "com.microsoft",
+      max_ngram_size = 3 : si64,
+      n_head_per_ngram = 2 : si64,
+      pad_id = 4294967296 : si64
+    } : (tensor<2x4xi32>, tensor<3xi32>, tensor<4xi32>, none, none, none, none)
+      -> tensor<2x4x4xi32>
+    return %hash : tensor<2x4x4xi32>
+  }
+
+  // CHECK-LABEL: func.func @ngram_i32_pad_out_of_range
+  // CHECK: "onnx.Custom"
+  // CHECK-NOT: hip.ngram_hash_mapping
 }

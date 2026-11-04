@@ -94,6 +94,17 @@ gpt-oss-20b-webgpu-int4-rtn-block-32-pruned_lm_head,2880,32,4,32,0,24
 gpt-oss-20b-webgpu-int4-rtn-block-32-pruned_lm_head,2880,5120,4,32,0,24
 gpt-oss-20b-webgpu-int4-rtn-block-32-pruned_lm_head,2880,201088,4,32,0,1
 gpt-oss-20b-webgpu-int4-rtn-block-32-pruned_lm_head,4096,2880,4,32,0,24
+Internal,640,20480,4,32,0,1
+Internal,5120,96,4,32,0,1
+Internal,5120,1024,4,32,0,1
+Internal,5120,12288,4,32,0,1
+Internal,5120,14336,4,32,0,1
+Internal,5120,16384,4,32,0,1
+Internal,5120,248320,4,32,0,1
+Internal,6144,5120,4,32,0,1
+Internal,14336,5120,4,32,0,1
+Internal,20480,640,4,32,0,1
+Internal,20480,644,4,32,0,1
 Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml-pruned_lm_head,4096,1024,4,128,1,64
 Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml-pruned_lm_head,4096,4096,4,128,1,64
 Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml-pruned_lm_head,4096,14336,4,128,1,64

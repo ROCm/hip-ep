@@ -35,7 +35,7 @@ env:
   # Space-separated microsoft/onnxruntime-genai PR numbers fetched from
   # pull/<n>.diff and applied on top of v<OGA_VERSION>. Part of the OGA cache
   # key. Remove a PR once it lands in the pinned OGA release.
-  OGA_PR_PATCHES: "2685 2691 2705 2712"
+  OGA_PR_PATCHES: "2685 2691 2705 2712 2792 2801"
   # The GPU arch the artifact targets. CI runners have no GPU, so it is passed
   # explicitly (build.py auto-detects from /sys on a real GPU host).
   HIP_ARCHITECTURES: gfx11-generic
@@ -365,7 +365,8 @@ jobs:
           # and fails the step. Tests are excluded because OGA does not build
           # them and their fixtures do conflict; OGA's own CI workflows are
           # excluded because the build does not use them and some no longer
-          # exist at the pinned tag.
+          # exist at the pinned tag. Markdown is excluded because the build
+          # does not read it and doc edits across the listed PRs conflict.
           for pr in $prs; do
             url="https://github.com/microsoft/onnxruntime-genai/pull/${pr}.diff"
             echo "Fetching $url"
@@ -375,7 +376,7 @@ jobs:
               "$url" -o "/tmp/oga-pr-${pr}.diff"
             echo "Applying PR #${pr}"
             git apply --whitespace=nowarn --3way --exclude='test/*' \
-              --exclude='.github/*' "/tmp/oga-pr-${pr}.diff" \
+              --exclude='.github/*' --exclude='*.md' "/tmp/oga-pr-${pr}.diff" \
               || { echo "PR #${pr} failed to apply"; exit 1; }
           done
 
