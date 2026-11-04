@@ -143,14 +143,37 @@ static Operation *chainPredecessor(Operation *op, Value input) {
   return def;
 }
 
-// Outline `start` and the chain that consumes it into one rocMlir function.
+// Bookkeeping cloned so the kernel is IsolatedFromAbove. The symbol names the
+// computation, the way MIGraphX names a rocMLIR function from its ops.
+static bool isRocMlirKernelNameOp(Operation *op) {
+  return !isa<tensor::EmptyOp, tensor::ExpandShapeOp, tensor::CollapseShapeOp,
+              arith::ConstantOp, ub::PoisonOp, ConstantOp>(op);
+}
+
+// `_n` keeps the symbol unique inside one HIP module. Two chains with the
+// same ops, such as repeated conv+leaky_relu, would otherwise both be named
+// mlir_conv_leaky_relu and the module verifier rejects the second.
+static std::string rocMlirKernelName(ArrayRef<Operation *> ops, int index) {
+  std::string name = "mlir";
+  for (Operation *op : ops) {
+    if (!isRocMlirKernelNameOp(op))
+      continue;
+    name.push_back('_');
+    name += op->getName().stripDialect().str();
+  }
+  name.push_back('_');
+  name += std::to_string(index);
+  return name;
+}
+
+// Outline `start` and the chain that consumes it into one rocMLIR function.
 // `pointwiseChain` is the head of a standalone pointwise chain: growth steps
 // through layout ops and hip.transpose, and stops before an op hip-to-tosa
 // cannot convert. An anchor keeps the direct pointwise-successor walk, so a
 // transpose or an expand_shape between a conv and its epilogue stays on HIP.
 static LogicalResult outlineRocMlirChain(DestinationStyleOpInterface start,
                                          PatternRewriter &rewriter,
-                                         int *counter, bool pointwiseChain) {
+                                         bool pointwiseChain, int *counter) {
   DestinationStyleOpInterface endOp = start;
   SetVector<Value> operands;
   SetVector<Operation *> ops;
@@ -320,9 +343,9 @@ static LogicalResult outlineRocMlirChain(DestinationStyleOpInterface start,
             operands, [](Value v) { return promoteRankZero(v.getType()); }),
         endOp->getResultTypes());
 
-    newFunc = func::FuncOp::create(rewriter, rewriter.getUnknownLoc(),
-                                   "rocMlir" + std::to_string((*counter)++),
-                                   funcType);
+    newFunc = func::FuncOp::create(
+        rewriter, rewriter.getUnknownLoc(),
+        rocMlirKernelName(ops.getArrayRef(), (*counter)++), funcType);
     newFunc->setAttr("rock.kernel", rewriter.getUnitAttr());
     newFunc->setAttr("rock.arch", rewriter.getStringAttr("gfx1151"));
     // rocMLIR compiles a kernel with no conv/gemm root through its standalone
@@ -401,12 +424,12 @@ public:
 
   LogicalResult matchAndRewrite(AnchorOp anchorOp,
                                 PatternRewriter &rewriter) const override {
-    return outlineRocMlirChain(anchorOp, rewriter, counter,
-                               /*pointwiseChain=*/false);
+    return outlineRocMlirChain(anchorOp, rewriter, /*pointwiseChain=*/false,
+                               counter);
   }
 
 private:
-  int *counter = nullptr;
+  int *counter;
 };
 
 // A conv, matmul, or gemm the anchor patterns outline, chain included.
@@ -507,11 +530,11 @@ public:
       return rewriter.notifyMatchFailure(
           op, "chain has no arith or math op to form an elementwise kernel");
     return outlineRocMlirChain(cast<DestinationStyleOpInterface>(op), rewriter,
-                               counter, /*pointwiseChain=*/true);
+                               /*pointwiseChain=*/true, counter);
   }
 
 private:
-  int *counter = nullptr;
+  int *counter;
 };
 
 class FuseROCMlirPass : public impl::FuseROCMlirPassBase<FuseROCMlirPass> {
@@ -521,19 +544,18 @@ public:
     if (funcOp.getSymName() != "main_graph")
       return;
 
+    // Outlined funcs share this module's symbol table, so the suffix is one
+    // sequence for every kernel taken from this main_graph.
+    int kernelCounter = 0;
     MLIRContext *ctx = &getContext();
     RewritePatternSet patterns(ctx);
-    int counter = 0;
     patterns.add<FuseAnchorPointwise<MatmulOp>, FuseAnchorPointwise<ConvOp>,
-                 FuseAnchorPointwise<GemmOp>>(ctx, &counter);
-    patterns.add<FusePointwiseChain>(ctx, &counter);
+                 FuseAnchorPointwise<GemmOp>>(ctx, &kernelCounter);
+    patterns.add<FusePointwiseChain>(ctx, &kernelCounter);
 
     if (failed(applyPatternsGreedily(funcOp, std::move(patterns))))
       signalPassFailure();
   }
-
-private:
-  int counter = 0;
 };
 
 } // namespace
