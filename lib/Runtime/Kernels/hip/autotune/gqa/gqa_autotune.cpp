@@ -45,6 +45,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -555,8 +556,8 @@ namespace hipdnn_ep {
 namespace {
 
 Table &table() {
-  static Table *t = [] {
-    auto *fresh = new Table();
+  static const std::unique_ptr<Table> t = [] {
+    auto fresh = std::make_unique<Table>();
     for (size_t i = 0; i < kGqaLutBlobCount && !fresh->loaded; ++i)
       loadBuffer(*fresh, kGqaLutBlobs[i], kGqaLutBlobSizes[i]);
     return fresh;

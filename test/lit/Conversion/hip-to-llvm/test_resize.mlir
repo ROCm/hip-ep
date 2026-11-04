@@ -100,7 +100,7 @@ module {
     return
   }
 
-  // Test 7: nearest uint8. The runtime copies samples; linear stays rejected.
+  // Test 7: nearest uint8. The runtime copies one sample.
   func.func @resize_nearest_ui8(
       %ctx: !hip.context,
       %x: memref<1x256x13x13xui8, 1>,
@@ -109,6 +109,20 @@ module {
     hip.resize(%ctx) ins(%x : memref<1x256x13x13xui8, 1>)
                      outs(%y : memref<1x256x26x26xui8, 1>)
                      {mode = 0, coord_transform = 0, nearest_mode = 1}
+    // CHECK: llvm.call @wrap_resize
+    // CHECK-NOT: hip.resize
+    return
+  }
+
+  // Test 7b: linear uint8 interpolates stored codes through the same wrapper.
+  func.func @resize_linear_ui8(
+      %ctx: !hip.context,
+      %x: memref<1x21x65x65xui8, 1>,
+      %y: memref<1x21x513x513xui8, 1>) {
+    // CHECK-LABEL: llvm.func @resize_linear_ui8
+    hip.resize(%ctx) ins(%x : memref<1x21x65x65xui8, 1>)
+                     outs(%y : memref<1x21x513x513xui8, 1>)
+                     {mode = 1, coord_transform = 2, nearest_mode = 2}
     // CHECK: llvm.call @wrap_resize
     // CHECK-NOT: hip.resize
     return
