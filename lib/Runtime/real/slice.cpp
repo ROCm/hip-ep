@@ -248,7 +248,8 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
     return -1;
   }
   if (narrow) {
-    auto widen = [](std::vector<int64_t> &dst, const std::vector<int32_t> &src) {
+    auto widen = [](std::vector<int64_t> &dst,
+                    const std::vector<int32_t> &src) {
       dst.resize(src.size());
       for (size_t i = 0; i < src.size(); ++i)
         dst[i] = src[i];
