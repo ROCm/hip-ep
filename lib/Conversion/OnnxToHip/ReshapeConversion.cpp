@@ -987,6 +987,12 @@ readSqueezeAxes(mlir::Operation *op, mlir::Value axesValue, int64_t rank) {
     }
   } else if (axesValue) {
     mlir::DenseElementsAttr dense = getConstantDense(axesValue);
+    // `lowerOnnxConstants` rewrites `onnx.Constant` to `hip.constant` before
+    // this pattern runs. `getConstantDense` does not look at that carrier.
+    if (!dense)
+      if (auto constant = axesValue.getDefiningOp<ConstantOp>())
+        dense = mlir::dyn_cast_or_null<mlir::DenseElementsAttr>(
+            constant.getValueAttr());
     if (!dense || !dense.getElementType().isIntOrIndex())
       return std::nullopt;
     for (llvm::APInt element : dense.getValues<llvm::APInt>())
