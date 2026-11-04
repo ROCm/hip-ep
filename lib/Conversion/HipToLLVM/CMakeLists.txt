@@ -33,6 +33,7 @@ add_library(HipToLLVM STATIC
   TransposeLowering.cpp
   RopeLowering.cpp
   GqaLowering.cpp
+  MlaAttentionLowering.cpp
   KvAttentionLowering.cpp
   MultiHeadAttentionLowering.cpp
   MatMulNBitsLowering.cpp

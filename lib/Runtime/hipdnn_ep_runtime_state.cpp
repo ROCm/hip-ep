@@ -548,6 +548,8 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->la_scratch_size = 0;
   state->gqa_fp32_adapter_scratch = nullptr;
   state->gqa_fp32_adapter_scratch_size = 0;
+  state->mla_scratch = nullptr;
+  state->mla_scratch_size = 0;
   state->kv_seqlens = nullptr;
   state->kv_seqlens_cap = 0;
   state->zp_unpack_cache = nullptr;
@@ -1173,6 +1175,9 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
         hipdnn_ep_state_device_free(state, state->gqa_fp32_adapter_scratch));
   }
 
+  if (state->mla_scratch) {
+    HIP_CLEANUP(hipdnn_ep_state_device_free(state, state->mla_scratch));
+  }
   if (state->kv_seqlens) {
     HIP_CLEANUP(hipdnn_ep_state_device_free(state, state->kv_seqlens));
   }

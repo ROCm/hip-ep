@@ -380,9 +380,15 @@ struct RuntimeState {
   // the session runs without an arena.
   void *transient_arena;
 
+  // Per-session scratch for hip.mla_attention (expanded K/V for prefill, the
+  // latent-space query and output for decode). Grow-on-demand, freed in
+  // cleanup; shared by every layer because one stream serialises them.
+  void *mla_scratch;
+  size_t mla_scratch_size;
   // int32 seqlens_k [kv_seqlens_cap] derived from the kv_seqlen operand of
-  // hip.kv_attention. Its own buffer so its address is stable across layers:
-  // the per-Compute seqlens_k cache is keyed on it.
+  // hip.kv_attention / hip.mla_attention. Kept apart from mla_scratch so its
+  // address is stable across layers: the per-Compute seqlens_k cache is keyed
+  // on it.
   void *kv_seqlens;
   int64_t kv_seqlens_cap;
 };

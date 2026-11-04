@@ -138,6 +138,8 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     RangeOp::attachInterface<HipDstBufferizableModel<RangeOp>>(*ctx);
     SiluOp::attachInterface<HipDstBufferizableModel<SiluOp>>(*ctx);
     GqaOp::attachInterface<HipDstBufferizableModel<GqaOp>>(*ctx);
+    MlaAttentionOp::attachInterface<HipDstBufferizableModel<MlaAttentionOp>>(
+        *ctx);
     KvAttentionOp::attachInterface<HipDstBufferizableModel<KvAttentionOp>>(
         *ctx);
     CastOp::attachInterface<HipDstBufferizableModel<CastOp>>(*ctx);

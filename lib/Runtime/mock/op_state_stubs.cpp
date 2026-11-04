@@ -69,6 +69,14 @@ extern "C" int8_t hipdnn_ep_op_state_construct_gqa(RuntimeState *state,
   return 0;
 }
 
+// MlaAttention: real runtime owns the rearranged weights and GEMM descriptors
+// (MlaState in real/mla.cpp); the mock owns no device resources.
+extern "C" int8_t
+hipdnn_ep_op_state_construct_mla_attention(RuntimeState *state, int32_t slot) {
+  hipdnn_ep_op_state_set(state, slot, MockOpState::create().release());
+  return 0;
+}
+
 // MultiHeadAttention: real runtime owns a per-GEMM-shape hipBLASLt
 // descriptor/algo cache (MhaState in real/multi_head_attention.cpp); the mock
 // owns no device/hipBLASLt resources.

@@ -829,7 +829,6 @@ void populatePowDecompositionPatterns(RewritePatternSet &patterns,
 /// See ErfGeluFusion.cpp.
 void populateErfGeluFusionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
-
 /// Pre-lowering pattern set: decompose vision/projector ops that have no
 /// direct MorphiZen converter into supported primitives —
 /// AveragePool(kernel==stride) → Reshape/Transpose/ReduceMean, Pow(x, c) →

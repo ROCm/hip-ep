@@ -4263,6 +4263,104 @@ def Hip_GqaOp : Hip_DpsOp_AutoReify<"gqa", [AttrSizedOperandSegments, OpStateOpI
   let hasVerifier = 1;
 }
 
+// ===== Multi-head Latent Attention ===========================================
+
+def Hip_MlaAttentionOp : Hip_DpsOp_AutoReifyInfer<"mla_attention", "Output",
+    [AttrSizedOperandSegments, OpStateOpInterface]> {
+  let summary = "Causal attention over a latent (MLA) KV cache";
+  let description = [{
+    Multi-head latent attention reading a compressed cache. Each cache row is
+    [c (kv_lora_rank), k_r (qk_rope_dim)]: c is a latent vector and k_r a
+    key part shared by all heads. Per head h the keys and values the row
+    stands for are
+
+      K_h = [c @ k_b_h, k_r]    (qk_nope_dim + qk_rope_dim)
+      V_h = c @ v_b_h           (v_dim)
+
+    and the result is causal softmax(scale * Q_h K_h^T) V_h with the queries
+    at the last S positions of the T cached rows.
+
+    `k_b` and `v_b` are the up-projections in one of two forms, selected by
+    `block_size`:
+      * 0: fp16 [kv_lora_rank, num_heads * dim] (a MatMul weight).
+      * > 0: int4 MatMulNBits [num_heads * dim, kv_lora_rank / block_size,
+        block_size / 2] with fp16 scales [num_heads * dim * blocks] and the
+        implicit zero point 8.
+
+    The runtime picks the evaluation order per call from S: S > 1 expands
+    K/V once and runs head_dim (qk_nope_dim + qk_rope_dim) attention, S == 1
+    multiplies the queries into the latent space, attends over the cache
+    directly (one KV head, head_dim kv_lora_rank + qk_rope_dim) and applies
+    v_b afterwards. Both orders compute the same function.
+
+    `cache` is [B, 1, T, kv_lora_rank + qk_rope_dim] and holds exactly T
+    valid rows unless `kv_seqlen` ([B] int64) is given: then the cache is a
+    buffer whose first Tv = kv_seqlen[b] rows are valid (ONNX Attention's
+    nonpad_kv_seqlen) and T below means Tv. Prefill needs the same Tv for
+    every batch.
+
+    Query row i attends to cache rows 0 .. T - S + i.
+
+    Example:
+    ```mlir
+    hip.mla_attention(%ctx)
+        ins(%q, %cache, %k_b, %v_b : tensor<1x?x4096xf16>,
+            tensor<1x1x?x320xf16>, tensor<2048x2x64xui8>,
+            tensor<4096x2x64xui8>)
+        k_b_scales(%k_s : tensor<4096xf16>)
+        v_b_scales(%v_s : tensor<8192xf16>)
+        outs(%out : tensor<1x?x4096xf16>)
+        {num_heads = 32 : i64, kv_lora_rank = 256 : i64,
+         qk_nope_dim = 64 : i64, qk_rope_dim = 64 : i64, v_dim = 128 : i64,
+         scale = 0.195 : f32, block_size = 128 : i64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$query,      // [B, S, num_heads * (nope + rope)]
+    Hip_TensorOrMemRef:$cache,      // [B, 1, T, kv_lora_rank + rope]
+    Hip_TensorOrMemRef:$k_b,
+    Hip_TensorOrMemRef:$v_b,
+    Optional<Hip_TensorOrMemRef>:$k_b_scales,
+    Optional<Hip_TensorOrMemRef>:$v_b_scales,
+    Optional<Hip_TensorOrMemRef>:$kv_seqlen,  // [B] i64
+    Hip_TensorOrMemRef:$output,     // [B, S, num_heads * v_dim]
+    I64Attr:$num_heads,
+    I64Attr:$kv_lora_rank,
+    I64Attr:$qk_nope_dim,
+    I64Attr:$qk_rope_dim,
+    I64Attr:$v_dim,
+    F32Attr:$scale,
+    DefaultValuedAttr<I64Attr, "0">:$block_size
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $query `,` $cache `,` $k_b `,` $v_b `:`
+        type($query) `,` type($cache) `,` type($k_b) `,` type($v_b) `)`
+    (`k_b_scales` `(` $k_b_scales^ `:` type($k_b_scales) `)`)?
+    (`v_b_scales` `(` $v_b_scales^ `:` type($v_b_scales) `)`)?
+    (`kv_seqlen` `(` $kv_seqlen^ `:` type($kv_seqlen) `)`)?
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  // OpStateOpInterface: the per-instance state holds the weights rearranged
+  // for both evaluation orders, built from k_b/v_b on the first call (their
+  // device buffers are only known then), and its GEMM descriptors.
+  let extraClassDeclaration = [{
+    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
+                                      ::mlir::Location loc,
+                                      ::mlir::Value statePtr, int32_t slot) {
+      return ::mlir::hip::emitOpStateConstruct(
+          builder, loc, statePtr, slot,
+          "hipdnn_ep_op_state_construct_mla_attention", {});
+    }
+  }];
+
+  let hasVerifier = 1;
+}
+
 // ===== Attention over a key/value buffer =====================================
 
 def Hip_KvAttentionOp : Hip_DpsOp_AutoReifyInfer<"kv_attention", "Output"> {

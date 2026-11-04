@@ -3748,6 +3748,76 @@ LogicalResult GqaOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// MlaAttentionOp: ins(query, cache, k_b, v_b, [k_b_scales, v_b_scales,
+//                     kv_seqlen])
+//                 outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange MlaAttentionOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void MlaAttentionOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult MlaAttentionOp::verify() {
+  const int64_t heads = getNumHeads();
+  const int64_t lat = getKvLoraRank();
+  const int64_t nope = getQkNopeDim();
+  const int64_t rope = getQkRopeDim();
+  const int64_t dv = getVDim();
+  const int64_t block = getBlockSize();
+  if (heads <= 0 || lat <= 0 || nope <= 0 || rope <= 0 || dv <= 0)
+    return emitOpError("num_heads and every head dim must be positive");
+  if (block < 0 || (block > 0 && lat % block != 0))
+    return emitOpError("block_size must be 0 or divide kv_lora_rank");
+
+  auto lastDimIs = [](Value v, int64_t rank, int64_t want) {
+    auto t = cast<ShapedType>(v.getType());
+    return t.getRank() == rank &&
+           (t.isDynamicDim(rank - 1) || t.getDimSize(rank - 1) == want);
+  };
+  if (!lastDimIs(getQuery(), 3, heads * (nope + rope)))
+    return emitOpError("query must be [B, S, num_heads * (qk_nope_dim + "
+                       "qk_rope_dim)]");
+  if (!lastDimIs(getCache(), 4, lat + rope))
+    return emitOpError("cache must be [B, 1, T, kv_lora_rank + qk_rope_dim]");
+  if (!lastDimIs(getOutput(), 3, heads * dv))
+    return emitOpError("output must be [B, S, num_heads * v_dim]");
+  if (Value lengths = getKvSeqlen()) {
+    auto t = cast<ShapedType>(lengths.getType());
+    if (t.getRank() != 1 || !t.getElementType().isInteger(64))
+      return emitOpError("kv_seqlen must be [B] int64");
+  }
+
+  const bool quantized = block > 0;
+  if (quantized != (getKBScales() != nullptr) ||
+      quantized != (getVBScales() != nullptr))
+    return emitOpError("k_b_scales and v_b_scales are required exactly when "
+                       "block_size > 0");
+  auto weightOk = [&](Value w, int64_t n) {
+    auto t = cast<ShapedType>(w.getType());
+    if (!t.hasStaticShape())
+      return false;
+    if (!quantized)
+      return t.getRank() == 2 && t.getDimSize(0) == lat &&
+             t.getDimSize(1) == heads * n &&
+             t.getElementType().isF16();
+    return t.getRank() == 3 && t.getDimSize(0) == heads * n &&
+           t.getDimSize(1) == lat / block && t.getDimSize(2) == block / 2 &&
+           t.getElementType().isInteger(8);
+  };
+  if (!weightOk(getKB(), nope) || !weightOk(getVB(), dv))
+    return emitOpError("k_b/v_b must be fp16 [kv_lora_rank, num_heads * dim] "
+                       "or int4-packed [num_heads * dim, kv_lora_rank / "
+                       "block_size, block_size / 2]");
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // KvAttentionOp: ins(query, key, value, [kv_seqlen]) outs(output)
 //===----------------------------------------------------------------------===//
 

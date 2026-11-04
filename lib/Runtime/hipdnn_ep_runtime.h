@@ -936,6 +936,20 @@ int wrap_group_query_attention_host_length(
     // window masks; null when absent. key_bias_len must cover seq_len_kv.
     void *key_bias, int64_t key_bias_batch, int64_t key_bias_len);
 
+// hip.mla_attention: causal attention over a latent (MLA) cache
+// [B, 1, cache_seq, kv_lora_rank + qk_rope_dim]. k_b/v_b are fp16
+// [kv_lora_rank, num_heads * dim] when block_size == 0, else int4 MatMulNBits
+// [num_heads * dim, kv_lora_rank / block_size, block_size / 2] with fp16
+// scales. kv_seqlen (nullable, int64 [B]) is the number of valid rows of a
+// cache buffer; without it all cache_seq rows are valid.
+int wrap_mla_attention(RuntimeState *state, int op_state_slot, void *query,
+                       void *cache, void *k_b, void *v_b, void *k_b_scales,
+                       void *v_b_scales, void *kv_seqlen, void *output,
+                       int64_t num_heads, int64_t kv_lora_rank,
+                       int64_t qk_nope_dim, int64_t qk_rope_dim, int64_t v_dim,
+                       float scale, int64_t block_size, int64_t batch,
+                       int64_t seq_len_q, int64_t cache_seq);
+
 // hip.kv_attention: causal fp16 attention of query [B, seq_len_q,
 // num_heads * key_dim] over BNSH key [B, kv_num_heads, kv_rows, key_dim] and
 // value [B, kv_num_heads, kv_rows, value_dim] into output [B, seq_len_q,

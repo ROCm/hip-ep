@@ -161,6 +161,17 @@ the selected perfConfig string are printed only with `--verbose`.
 | `generate-op-state-init` | module | Emit `@hipdnn_ep_op_states_init_fn` from each stateful op's `generateOpStateInit`. No-op without stateful ops. |
 | `convert-hip-to-llvm` | module | Lower HIP ops to runtime C-API calls / LLVM dialect. |
 
+Latent (MLA) attention is two steps. `convert-onnx-to-hip` lowers a causal
+`onnx.Attention` bounded by `nonpad_kv_seqlen` to `hip.kv_attention`, which
+reads K/V in place. `hip-fusion-transform` then rewrites a `hip.kv_attention`
+whose K/V are expanded from a latent cache (`collapse_shape` → column slices →
+up-projections, rope key broadcast over heads) into `hip.mla_attention` on the
+cache. The fusion reads the up-projection weights as `hip.constant` payloads,
+so it must run before `hip-externalize-constants`; it proves dynamic row
+counts equal by tracing `tensor.dim` extents, so it runs after
+`hip-infer-shapes` but also matches the un-refined form. A `hip.kv_attention`
+it leaves alone runs as fused GQA attention over the expanded K/V.
+
 ### rocMLIR offload passes
 
 Anchored on `func.func`, so the textual form needs `func.func(...)`. These run
@@ -250,7 +261,8 @@ ONNX → HIP  (buildOnnxToHipPipeline)
                                            runs the same pass in its own head)
   func.func(hip-fold-constant-extracts)
   hip-infer-shapes
-  hip-fusion-transform               (must precede externalization: its patterns
+  hip-fusion-transform               (must precede externalization: its patterns,
+                                      e.g. kv_attention -> mla_attention,
                                       read hip.constant payloads)
   hip-externalize-constants
   canonicalize ; cse

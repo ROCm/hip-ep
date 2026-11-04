@@ -585,6 +585,31 @@ int wrap_group_query_attention_host_length(
   return 0;
 }
 
+int wrap_mla_attention(RuntimeState *state, int op_state_slot, void *query,
+                       void *cache, void *k_b, void *v_b, void *k_b_scales,
+                       void *v_b_scales, void *kv_seqlen, void *output,
+                       int64_t num_heads, int64_t kv_lora_rank,
+                       int64_t qk_nope_dim, int64_t qk_rope_dim, int64_t v_dim,
+                       float scale, int64_t block_size, int64_t batch,
+                       int64_t seq_len_q, int64_t cache_seq) {
+  if (!state || !query || !cache || !k_b || !v_b || !output) {
+    fprintf(stderr, "Invalid argument in wrap_mla_attention\n");
+    return -1;
+  }
+  (void)op_state_slot;
+  (void)k_b_scales;
+  (void)v_b_scales;
+  MOCK_PRINT("[MOCK] wrap_mla_attention(num_heads=%lld, kv_lora_rank=%lld, "
+             "qk_nope_dim=%lld, qk_rope_dim=%lld, v_dim=%lld, scale=%f, "
+             "block_size=%lld, batch=%lld, seq_q=%lld, cache_seq=%lld, "
+             "kv_seqlen=%p)\n",
+             (long long)num_heads, (long long)kv_lora_rank,
+             (long long)qk_nope_dim, (long long)qk_rope_dim, (long long)v_dim,
+             (double)scale, (long long)block_size, (long long)batch,
+             (long long)seq_len_q, (long long)cache_seq, kv_seqlen);
+  return 0;
+}
+
 int wrap_kv_attention(RuntimeState *state, void *query, void *key, void *value,
                       void *kv_seqlen, void *output, int64_t num_heads,
                       int64_t kv_num_heads, float scale, int64_t batch,

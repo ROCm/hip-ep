@@ -31,6 +31,7 @@
 #include "hip/Dialect/IR/HipDialect.h"
 
 #include "linear_attention_group_fold.hpp"
+#include "mla_attention_fusion.hpp"
 #include "patch_embed_conv_to_gemm.hpp"
 #include "swiglu_fusion.hpp"
 
@@ -864,6 +865,9 @@ constexpr unsigned kSwigluFusionBenefit = 2;
 /// The only pattern rooted at `hip.linear_attention`.
 constexpr unsigned kLinearAttentionGroupFoldBenefit = 1;
 
+/// The MLA attention fusion is the only pattern rooted at `hip.kv_attention`.
+constexpr unsigned kMlaAttentionFusionBenefit = 1;
+
 /// apply this directory's patterns to every function body in module, failure
 /// means the embedded PDLL patterns will not parse or the driver failed
 ///
@@ -881,6 +885,8 @@ inline mlir::LogicalResult run(mlir::ModuleOp module,
                               mlir::PatternBenefit(kSwigluFusionBenefit));
   populateLinearAttentionGroupFoldPattern(
       patterns, mlir::PatternBenefit(kLinearAttentionGroupFoldBenefit));
+  populateMlaAttentionFusionPattern(
+      patterns, mlir::PatternBenefit(kMlaAttentionFusionBenefit));
 
   // pdl patterns here
   if (pdlBuffer.getBufferSize() != 0) {
