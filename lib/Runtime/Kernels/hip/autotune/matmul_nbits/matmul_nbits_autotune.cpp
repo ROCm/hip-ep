@@ -329,10 +329,17 @@ void loadBuffer(Table& t, const unsigned char* data, size_t size,
       const int gs = groupSizeValue(r->group_size());
       const bool known_zp = r->zero_point() == fbs::MatmulNbitsZeroPoint::Symmetric ||
                             r->zero_point() == fbs::MatmulNbitsZeroPoint::Asymmetric;
+      const auto layout = static_cast<int32_t>(r->layout());
       // A padded row must stay a multiple of the 16-byte B loads.
       if (gs == 0 || !known_zp || r->n() == 0 || r->k() == 0 ||
           r->n() > INT32_MAX || r->k() > INT32_MAX || r->pad_bytes() % 16 != 0 ||
-          (r->pad_bytes() != 0 && (r->k() / 2 + r->pad_bytes()) % 16 != 0)) {
+          (r->pad_bytes() != 0 && (r->k() / 2 + r->pad_bytes()) % 16 != 0) ||
+          layout < 0 || layout > 2 ||
+          // XorLines (1) and Blocks (2): dense rows, no pad; Blocks needs whole
+          // 16-row groups and 64-value pieces
+          // (include/hip/matmul_nbits_weight_layout.h).
+          (layout != 0 && (r->pad_bytes() != 0 || r->k() % 64 != 0)) ||
+          (layout == 2 && r->n() % 16 != 0)) {
         ++t.invalid_row_pads;
         continue;
       }
@@ -342,6 +349,7 @@ void loadBuffer(Table& t, const unsigned char* data, size_t size,
       e.block_size = gs;
       e.zero_points = r->zero_point() == fbs::MatmulNbitsZeroPoint::Asymmetric ? 1 : 0;
       e.pad_bytes = r->pad_bytes();
+      e.layout = layout;
       // One pad per weight shape: a repeated key keeps the first entry, the
       // same one update_lut.py would have refused to write.
       const bool dup = std::any_of(t.row_pads.begin(), t.row_pads.end(), [&](const auto& o) {

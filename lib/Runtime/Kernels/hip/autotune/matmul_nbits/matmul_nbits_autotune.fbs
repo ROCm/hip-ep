@@ -172,14 +172,24 @@ struct MatmulNbitsExtendedConfig {
   variant: ubyte;
 }
 
-// Row pad of one int4 weight shape, which hip-pad-matmul-nbits-weights stores
-// once at load with a K/2 + pad_bytes row pitch. Measured per shape: the pad
-// with the lowest prefill plus decode time, the smaller one when they tie.
-// 0 keeps the arrival stride. A shape without an entry is not padded at load;
-// where its stride aliases, the runtime repacks it per call.
+// Byte order an int4 weight is stored in at load: hip::MatmulNBitsWeightLayout
+// (include/hip/matmul_nbits_weight_layout.h).
+enum MatmulNbitsWeightLayout : ubyte {
+  Rows = 0,      // rows K/2 + pad_bytes apart
+  XorLines = 1,  // dense rows, 128-byte lines XOR-swizzled per row
+  Blocks = 2     // 512-byte blocks of 16 rows x 32 bytes
+}
+
+// How hip-pad-matmul-nbits-weights stores one int4 weight shape at load: rows
+// with a K/2 + pad_bytes pitch (Rows), or the dense rows in another byte order
+// (pad_bytes 0). Measured per shape: the layout with the lowest prefill plus
+// decode time, the one with less memory when they tie. Rows with pad 0 keeps
+// the arrival stride. A shape without an entry is not changed at load; where
+// its stride aliases, the runtime repacks it per call.
 struct MatmulNbitsRowPad {
   group_size: MatmulNbitsGroupSize;
   zero_point: MatmulNbitsZeroPoint;
+  layout: MatmulNbitsWeightLayout;
   pad_bytes: uint16;       // multiple of 16: B is loaded in 16-byte vectors
   n: uint32;
   k: uint32;

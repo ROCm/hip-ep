@@ -21,7 +21,7 @@ namespace hip::compiler {
 /// tree.
 struct MatmulNBitsRowPads {
   /// The table's per-weight pads (hip_matmul_nbits_u4_row_pads) in the pass's
-  /// `row-pads` format, `N:K:block_size:zero_points=pad_bytes`.
+  /// `row-pads` format, `N:K:block_size:zero_points=<pad_bytes|xor|blocks>`.
   std::vector<std::string> entries;
 };
 

@@ -460,6 +460,12 @@ def Hip_ConstantOp : Hip_Op<"constant", [Pure]> {
     constant places each at the pitch of the rank-2 8-bit result's inner
     dimension, zero-filling the rest. Set by `hip-pad-matmul-nbits-weights`.
 
+    `weight_layout` (with `row_bytes` equal to the result's inner dimension, no
+    pad) stores the dense rows in another byte order, a
+    `hip::MatmulNBitsWeightLayout` other than Rows
+    (`include/hip/matmul_nbits_weight_layout.h`): 1 = XOR-swizzled 128-byte
+    lines, 2 = 512-byte blocks of 16 rows. Set by `hip-pad-matmul-nbits-weights`.
+
     This op deliberately has no fold method. Generic canonicalization may
     reason about its purity, but only `hip-externalize-constants` may choose
     between inline and external storage.
@@ -474,7 +480,8 @@ def Hip_ConstantOp : Hip_Op<"constant", [Pure]> {
     OptionalAttr<StrAttr>:$symbol_name_hint,
     OptionalAttr<StrAttr>:$source_name,
     OptionalAttr<I64Attr>:$serialization_order,
-    OptionalAttr<I64Attr>:$row_bytes
+    OptionalAttr<I64Attr>:$row_bytes,
+    OptionalAttr<I64Attr>:$weight_layout
   );
   let results = (outs AnyRankedTensor:$result);
 
@@ -496,7 +503,7 @@ def Hip_ConstantOp : Hip_Op<"constant", [Pure]> {
             /*offset=*/nullptr, /*memory_address=*/nullptr, /*size=*/nullptr,
             /*symbol_name_hint=*/nullptr, /*source_name=*/nullptr,
             /*serialization_order=*/nullptr,
-            /*row_bytes=*/nullptr);
+            /*row_bytes=*/nullptr, /*weight_layout=*/nullptr);
     }]>,
     OpBuilder<(ins "::mlir::RankedTensorType":$result,
                    "::mlir::StringAttr":$location,
@@ -505,7 +512,7 @@ def Hip_ConstantOp : Hip_Op<"constant", [Pure]> {
       build($_builder, $_state, result, /*value=*/nullptr, location, offset,
             /*memory_address=*/nullptr, size, /*symbol_name_hint=*/nullptr,
             /*source_name=*/nullptr, /*serialization_order=*/nullptr,
-            /*row_bytes=*/nullptr);
+            /*row_bytes=*/nullptr, /*weight_layout=*/nullptr);
     }]>,
     OpBuilder<(ins "::mlir::RankedTensorType":$result,
                    "::mlir::IntegerAttr":$memory_address,
@@ -514,7 +521,7 @@ def Hip_ConstantOp : Hip_Op<"constant", [Pure]> {
             /*location=*/nullptr, /*offset=*/nullptr, memory_address, size,
             /*symbol_name_hint=*/nullptr, /*source_name=*/nullptr,
             /*serialization_order=*/nullptr,
-            /*row_bytes=*/nullptr);
+            /*row_bytes=*/nullptr, /*weight_layout=*/nullptr);
     }]>
   ];
 
@@ -868,7 +875,11 @@ def Hip_MatMulNBitsOp : Hip_DpsOp_WithInfer<"matmul_nbits", "Output", [AttrSized
     // above K/2 the weight is stored row-padded; K/2 keeps it dense on purpose
     // (the runtime does not repack it). 0: dense, not laid out by the
     // compiler; the runtime may repack an aliasing weight per call.
-    DefaultValuedAttr<I64Attr, "0">:$b_row_bytes
+    DefaultValuedAttr<I64Attr, "0">:$b_row_bytes,
+    // Byte order of B as laid out by hip-pad-matmul-nbits-weights, a
+    // hip::MatmulNBitsWeightLayout: 0 = rows at b_row_bytes; 1 = XOR-swizzled
+    // lines and 2 = 16-row blocks, both with b_row_bytes = K/2.
+    DefaultValuedAttr<I64Attr, "0">:$b_layout
   );
 
   let assemblyFormat = [{

@@ -7,10 +7,12 @@
 // (from memory or from a file) is written followed by its zero pad, so the
 // full constants file holds the padded layout while only one bounded buffer
 // is ever held. Compares the written file byte for byte with the expected
-// layout, including a file source larger than the 1 MB read buffer.
+// layout, including a file source larger than the 1 MB read buffer. Entries
+// with a weight layout are written rearranged, also across read chunks.
 
 #include "hip/Support/ConstantsIO.h"
 #include "hip/Support/DiskFileSystem.h"
+#include "hip/matmul_nbits_weight_layout.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -46,6 +48,19 @@ std::vector<char> padded(const std::vector<char> &dense, int64_t rowBytes,
   for (int64_t r = 0; r < rows; ++r)
     std::copy_n(dense.data() + r * rowBytes, rowBytes, v.data() + r * rowPitch);
   return v;
+}
+
+// `dense` rearranged into `layout` in one step, the image the chunked writer
+// must reproduce.
+std::vector<char> laidOut(std::vector<char> dense, int64_t rowBytes,
+                          hip::MatmulNBitsWeightLayout layout) {
+  std::vector<uint8_t> scratch(static_cast<size_t>(
+      hip::matmulNBitsWeightLayoutRowStep(layout) * rowBytes));
+  hip::applyMatmulNBitsWeightLayout(
+      reinterpret_cast<uint8_t *>(dense.data()), 0,
+      dense.size() / static_cast<size_t>(rowBytes),
+      static_cast<uint64_t>(rowBytes), layout, scratch.data());
+  return dense;
 }
 
 std::vector<char> readFile(const std::filesystem::path &p) {
@@ -122,6 +137,52 @@ int main() {
   check(!mlir::hip::writeConstantsBinToFileSystem(&diskFs, "bad3.bin", bad,
                                                   total),
         "short file source is rejected");
+
+  // Weight layouts: blocks from memory (48 rows), and from a file of 800 rows
+  // (1.6 MB, read in chunks of whole 16-row groups); XOR lines from memory.
+  const auto denseD = rowsOf(48, 2048, 4);
+  const auto denseE = rowsOf(800, 2048, 5);
+  const auto denseF = rowsOf(40, 6144, 6);
+  const fs::path srcE = dir / "weights_e.data";
+  {
+    std::ofstream ofs(srcE, std::ios::binary);
+    ofs.write(denseE.data(), denseE.size());
+  }
+  std::vector<mlir::hip::ConstantEntry> lay(3);
+  lay[0].size = 48 * 2048;
+  lay[0].data = denseD.data();
+  lay[1].offset = lay[0].size;
+  lay[1].size = 800 * 2048;
+  lay[1].file_path = srcE.string();
+  lay[2].offset = lay[1].offset + lay[1].size;
+  lay[2].size = 40 * 6144;
+  lay[2].data = denseF.data();
+  for (auto &e : lay)
+    e.row_bytes = e.row_pitch = e.size == 40 * 6144 ? 6144 : 2048;
+  lay[0].weight_layout = lay[1].weight_layout = 2;
+  lay[2].weight_layout = 1;
+  const int64_t layTotal = lay[2].offset + lay[2].size;
+  check(mlir::hip::writeConstantsBinToFileSystem(&diskFs, "lay.bin", lay,
+                                                 layTotal),
+        "entries with weight layouts are written");
+  std::vector<char> layExpected;
+  for (const auto &v :
+       {laidOut(denseD, 2048, hip::MatmulNBitsWeightLayout::Blocks),
+        laidOut(denseE, 2048, hip::MatmulNBitsWeightLayout::Blocks),
+        laidOut(denseF, 6144, hip::MatmulNBitsWeightLayout::XorLines)})
+    layExpected.insert(layExpected.end(), v.begin(), v.end());
+  check(readFile(dir / "lay.bin") == layExpected,
+        "file holds every weight in its layout byte for byte");
+  auto badLay = lay;
+  badLay[0].row_pitch = 2304; // a layout takes no row pad
+  check(!mlir::hip::writeConstantsBinToFileSystem(&diskFs, "bad4.bin", badLay,
+                                                  layTotal),
+        "a weight layout with a row pad is rejected");
+  badLay = lay;
+  badLay[0].weight_layout = 7;
+  check(!mlir::hip::writeConstantsBinToFileSystem(&diskFs, "bad5.bin", badLay,
+                                                  layTotal),
+        "an unknown weight layout is rejected");
 
   fs::remove_all(dir);
   if (g_failures) {

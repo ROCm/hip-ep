@@ -781,21 +781,23 @@ def ResolveExternConstantsPass
 
 def PadMatMulNBitsWeightsPass
     : Pass<"hip-pad-matmul-nbits-weights", "mlir::ModuleOp"> {
-  let summary = "Store int4 MatMulNBits weights row-padded";
+  let summary = "Store int4 MatMulNBits weights row-padded or reordered";
   let description = [{
     For each `hip.constant` whose only users are tensor-mode bits=4
     `hip.matmul_nbits` ops reading it as B, with block_size dividing K,
     retypes the carrier to `[N, K/2 + pad]` and sets each user's `b_row_bytes`
-    to that pitch. Only weights listed in `row-pads` are changed: the pad is
-    their entry. An unlisted weight is left as it is, so the runtime keeps
-    repacking it per call when its row stride K/2 aliases into a few cache
-    sets. A listed pad of 0 keeps the dense layout and sets
+    to that pitch, or keeps `[N, K/2]` and stores the rows in the byte order
+    the entry names (`xor`: XOR-swizzled 128-byte lines; `blocks`: 512-byte
+    blocks of 16 rows), setting the users' `b_layout`. Only weights listed in
+    `row-pads` are changed. An unlisted weight is left as it is, so the
+    runtime keeps repacking it per call when its row stride K/2 aliases into a
+    few cache sets. A listed pad of 0 keeps the dense layout and sets
     `b_row_bytes = K/2`, which tells the runtime not to repack it. The
     compiler driver fills `row-pads` from the device's autotune table; a
-    device without one pads nothing. External carriers
-    keep their dense source and gain `row_bytes = K/2`, which
-    `hip-externalize-constants` and the runtime loader expand at storage time;
-    inline carriers are rewritten to padded bytes.
+    device without one changes nothing. External carriers keep their dense
+    source and gain `row_bytes = K/2` (and `weight_layout`), which
+    `hip-externalize-constants` and the runtime loader expand and rearrange at
+    storage time; inline carriers are rewritten to the stored bytes.
 
     The runtime used to repack such a weight into a padded scratch on every
     prefill call. Storing it padded removes the repack without a second copy.
@@ -804,7 +806,8 @@ def PadMatMulNBitsWeightsPass
   }];
   let options = [
     ListOption<"rowPads", "row-pads", "std::string",
-               "Per-weight row pads, `N:K:block_size:zero_points=pad_bytes` "
+               "Per-weight placements, "
+               "`N:K:block_size:zero_points=<pad_bytes|xor|blocks>` "
                "(zero_points 0 or 1, pad a multiple of 16)">,
   ];
   let dependentDialects = ["mlir::hip::HipDialect"];

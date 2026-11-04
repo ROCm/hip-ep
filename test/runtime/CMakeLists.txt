@@ -62,15 +62,19 @@ target_include_directories(test-matmul-nbits-abi PRIVATE
 target_compile_definitions(test-matmul-nbits-abi PRIVATE HIPDNN_EP_RT_NO_EXPORT)
 add_test(NAME MatMulNBitsAbiUnitTest COMMAND test-matmul-nbits-abi)
 set_tests_properties(MatMulNBitsAbiUnitTest PROPERTIES
-    PASS_REGULAR_EXPRESSION "wrap_matmul_nbits_ex\\(M=1, N=64, K=64, [^\n]*b_row_bytes=0\\)"
+    PASS_REGULAR_EXPRESSION "wrap_matmul_nbits_ex\\(M=1, N=64, K=64, [^\n]*b_row_bytes=0, b_layout=0\\)"
     FAIL_REGULAR_EXPRESSION "rc=[^0]")
 set_target_properties(test-matmul-nbits-abi PROPERTIES FOLDER "runtime-tests")
 
-# Checks applied to every ConstantInfo before upload, and the row expansion of
-# row-padded constants (lib/Runtime/constant_layout.h, header-only).
+# Checks applied to every ConstantInfo before upload, the row expansion of
+# row-padded constants and the weight-layout rearrangement
+# (lib/Runtime/constant_layout.h, header-only).
 add_executable(test-constant-layout test_constant_layout.cpp)
 target_compile_features(test-constant-layout PRIVATE cxx_std_17)
-target_include_directories(test-constant-layout PRIVATE ${CMAKE_SOURCE_DIR}/lib/Runtime)
+target_include_directories(test-constant-layout PRIVATE
+    ${CMAKE_SOURCE_DIR}/lib/Runtime
+    ${CMAKE_SOURCE_DIR}/include
+)
 add_test(NAME ConstantLayoutUnitTest COMMAND test-constant-layout)
 set_target_properties(test-constant-layout PROPERTIES FOLDER "runtime-tests")
 

@@ -265,6 +265,14 @@ runs just before the externalizer. An int4 MatMulNBits weight is retyped to
 `[N, K/2 + pad]` and marked `row_bytes = K/2`; its users get
 `b_row_bytes = K/2 + pad`. The carrier's `size` stays the dense source size.
 
+A weight can instead keep its dense size and be stored in another byte order
+(`hip::MatmulNBitsWeightLayout`, `include/hip/matmul_nbits_weight_layout.h`):
+XOR-swizzled 128-byte lines (`xor`) or 512-byte blocks of 16 rows (`blocks`).
+It is retyped to `[N, K/2]` and marked `row_bytes = K/2` and `weight_layout`;
+its users get `b_row_bytes = K/2` and `b_layout`. Every order moves bytes only
+within a row or a 16-row group, so the writer and the loader rearrange a
+weight one row group at a time, in place.
+
 The pad comes from the compile target's MatMulNBits autotune table
 (`lib/Runtime/Kernels/hip/autotune/matmul_nbits/lut/<arch>.json`). The compiler
 driver reads it through `hip_matmul_nbits_u4_row_pads` (structured entries,
@@ -275,9 +283,10 @@ target is `ROCK_ARCH` when set, else the running device. It passes them as the
 pass's options:
 
 - `row_pads` (`row-pads`): per measured (N, K, block size, zero points), the
-  pad with the lowest prefill plus decode time. A listed pad of 0 keeps the
-  weight dense and sets its users' `b_row_bytes` to K/2, which tells the
-  runtime not to repack it.
+  placement with the lowest prefill plus decode time: a pad
+  (`N:K:bs:zp=<bytes>`) or a byte order (`=xor`, `=blocks`). A listed pad of 0
+  keeps the weight dense and sets its users' `b_row_bytes` to K/2, which tells
+  the runtime not to repack it.
 
 Only listed weights are padded. An unlisted weight stays dense, and where its
 stride K/2 aliases into a few cache sets (K = 4096, 8192, 12288, 14336, ...)
@@ -291,15 +300,18 @@ The externalizer plans the padded footprint (`N * (K/2 + pad)`), so offsets and
   them as-is. Planning stays metadata-only: the writer
   (`writeConstantsBinToFileSystem`, `ConstantEntry.row_bytes` / `.row_pitch`)
   reads the dense rows from the file reference or producer memory and writes
-  each followed by its zero pad, through one buffer of at most 1 MB, so no
-  padded copy of a weight is held on the host;
+  each followed by its zero pad, or rearranged into its byte order
+  (`ConstantEntry.weight_layout`), through one buffer of at most 1 MB of whole
+  rows or row groups, so no padded or rearranged copy of a weight is held on
+  the host;
 - streaming: the source stays dense (file reference, or the hybrid partial
-  file), and `hipdnn.constant_row_bytes` / `hipdnn.constant_row_pitches` reach
-  `ConstantInfo.row_bytes` / `.row_pitch`; the per-entry upload expands the rows
-  in its host staging buffer before the copy.
+  file), and `hipdnn.constant_row_bytes` / `hipdnn.constant_row_pitches` /
+  `hipdnn.constant_weight_layouts` reach `ConstantInfo.row_bytes` /
+  `.row_pitch` / `.weight_layout`; the per-entry upload expands the rows and
+  rearranges them in its host staging buffer before the copy.
 
 Either way one copy of the weight exists on the GPU. Inline carriers are padded
-in place by the pass.
+or rearranged in place by the pass.
 
 ### Step 2 — Code generation: `GenerateInterface` pass
 

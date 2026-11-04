@@ -524,21 +524,32 @@ verify_model_metadata(const void *metadata_blob, size_t blob_size) {
     auto *c = constants->Get(i);
     hipdnn_ep::ConstantLayout layout;
     if (const char *err = hipdnn_ep::planConstantLayout(
-            c->offset(), c->size(), c->row_bytes(), c->row_pitch(), &layout)) {
+            c->offset(), c->size(), c->row_bytes(), c->row_pitch(),
+            c->weight_layout(), &layout)) {
       fprintf(stderr,
               "__metadata_blob constant %lld: %s (offset=%lld size=%lld "
-              "row_bytes=%lld row_pitch=%lld)\n",
+              "row_bytes=%lld row_pitch=%lld weight_layout=%d)\n",
               (long long)i, err, (long long)c->offset(), (long long)c->size(),
-              (long long)c->row_bytes(), (long long)c->row_pitch());
+              (long long)c->row_bytes(), (long long)c->row_pitch(),
+              c->weight_layout());
       return nullptr;
     }
     // Disk-resident constants are mapped, not uploaded, so they have no
-    // padded layout to expand.
+    // padded layout to expand and no byte order to rearrange.
     if (layout.row_pitch != 0 && c->disk_resident()) {
       fprintf(stderr,
               "__metadata_blob constant %lld is both disk-resident and "
               "row-padded\n",
               (long long)i);
+      return nullptr;
+    }
+    if (layout.weight_layout != hip::MatmulNBitsWeightLayout::Rows &&
+        meta->version() <
+            static_cast<int32_t>(ModelMetaVersion::WeightLayout)) {
+      fprintf(stderr,
+              "__metadata_blob constant %lld has weight_layout %d but the "
+              "metadata version is %d\n",
+              (long long)i, c->weight_layout(), meta->version());
       return nullptr;
     }
     if (layout.row_pitch != 0 &&
@@ -1067,10 +1078,11 @@ static int per_entry_load_constants(RuntimeState *state,
 
     // Valid by verify_model_metadata. A row-padded constant fetches its dense
     // source rows (src_sz) and places each at row_pitch in the blob (size is
-    // the padded footprint).
+    // the padded footprint); a constant with a weight layout then has its
+    // rows rearranged into that byte order.
     hipdnn_ep::ConstantLayout layout;
     hipdnn_ep::planConstantLayout(c->offset(), c->size(), c->row_bytes(),
-                                  c->row_pitch(), &layout);
+                                  c->row_pitch(), c->weight_layout(), &layout);
     const size_t sz = (size_t)layout.size;
     const size_t src_sz = (size_t)layout.src_size;
     void *dst = static_cast<char *>(state->gpu_constants_blob) + layout.offset;
@@ -1078,6 +1090,11 @@ static int per_entry_load_constants(RuntimeState *state,
     // sized it by footprint).
     auto upload = [&]() -> bool {
       hipdnn_ep::expandRowsInPlace(staging, layout);
+      if (const uint64_t scratch_bytes =
+              hipdnn_ep::weightLayoutScratchBytes(layout)) {
+        std::vector<uint8_t> scratch(scratch_bytes);
+        hipdnn_ep::rearrangeInPlace(staging, layout, scratch.data());
+      }
       return hipMemcpy(dst, staging, sz, hipMemcpyHostToDevice) == hipSuccess;
     };
 

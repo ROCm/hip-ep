@@ -8,7 +8,8 @@
 // runtime ABI, so such an artifact can meet a newer runtime. This calls the
 // old 18-argument entry point on the mock runtime; CTest checks the output
 // (PASS_REGULAR_EXPRESSION) for the forwarded wrap_matmul_nbits_ex call with
-// b_row_bytes = 0, the arrival layout those artifacts were compiled for.
+// b_row_bytes = 0 and b_layout = 0, the arrival layout those artifacts were
+// compiled for.
 
 #include "hipdnn_ep_runtime.h"
 

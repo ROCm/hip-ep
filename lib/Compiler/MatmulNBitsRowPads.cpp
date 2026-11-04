@@ -121,7 +121,13 @@ std::optional<MatmulNBitsRowPads> readLibrary(const std::string &path,
         std::string entry;
         llvm::raw_string_ostream os(entry);
         os << r.n << ':' << r.k << ':' << r.block_size << ':' << r.zero_points
-           << '=' << r.pad_bytes;
+           << '=';
+        if (r.layout == 1)
+          os << "xor";
+        else if (r.layout == 2)
+          os << "blocks";
+        else
+          os << r.pad_bytes;
         pads.entries.push_back(std::move(entry));
       }
       result = std::move(pads);

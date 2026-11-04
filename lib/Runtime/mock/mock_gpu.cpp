@@ -1810,7 +1810,8 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
   return wrap_matmul_nbits_ex(state, op_state_slot, A, B, scales, zero_points,
                               g_idx, bias, output, M, N, K, batch_count, bits,
                               block_size, elem_size, zp_elem_size,
-                              scale_elem_size, /*b_row_bytes=*/0);
+                              scale_elem_size, /*b_row_bytes=*/0,
+                              /*b_layout=*/0);
 }
 
 int wrap_matmul_nbits_ex(RuntimeState *state, int op_state_slot, const void *A,
@@ -1820,7 +1821,7 @@ int wrap_matmul_nbits_ex(RuntimeState *state, int op_state_slot, const void *A,
                          int64_t K, int64_t batch_count, int64_t bits,
                          int64_t block_size, int64_t elem_size,
                          int64_t zp_elem_size, int64_t scale_elem_size,
-                         int64_t b_row_bytes) {
+                         int64_t b_row_bytes, int64_t b_layout) {
   (void)op_state_slot;
   (void)scale_elem_size;
   if (!state) {
@@ -1830,11 +1831,13 @@ int wrap_matmul_nbits_ex(RuntimeState *state, int op_state_slot, const void *A,
 
   MOCK_PRINT("[MOCK] wrap_matmul_nbits_ex(M=%lld, N=%lld, K=%lld, "
              "batch=%lld, bits=%lld, block_size=%lld, elem_size=%lld, "
-             "zero_points=%s, g_idx=%s, bias=%s, b_row_bytes=%lld)\n",
+             "zero_points=%s, g_idx=%s, bias=%s, b_row_bytes=%lld, "
+             "b_layout=%lld)\n",
              (long long)M, (long long)N, (long long)K, (long long)batch_count,
              (long long)bits, (long long)block_size, (long long)elem_size,
              zero_points ? "yes" : "null", g_idx ? "yes" : "null",
-             bias ? "yes" : "null", (long long)b_row_bytes);
+             bias ? "yes" : "null", (long long)b_row_bytes,
+             (long long)b_layout);
 
   return 0;
 }

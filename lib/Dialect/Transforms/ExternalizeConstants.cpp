@@ -91,6 +91,9 @@ struct ConstantPlan {
   /// equals `size` for every other carrier.
   int64_t rowBytes = 0;
   int64_t rowPitch = 0;
+  /// A hip::MatmulNBitsWeightLayout (`weight_layout`): the dense rows are
+  /// stored in that byte order (rowPitch == rowBytes).
+  int32_t weightLayout = 0;
   int64_t sourceSize = 0;
   /// Dense index in the generated constant metadata arrays.
   int64_t index = -1;
@@ -372,6 +375,8 @@ private:
       plan.rowBytes = rowBytes.getInt();
       plan.rowPitch = plan.type.getDimSize(1);
       plan.sourceSize = op.getSizeAttr().getInt();
+      if (IntegerAttr layout = op.getWeightLayoutAttr())
+        plan.weightLayout = static_cast<int32_t>(layout.getInt());
     } else if (plan.source != SourceKind::Inline)
       if (auto sizeAttr = op.getSizeAttr()) {
         int64_t declared = sizeAttr.getInt();
@@ -589,7 +594,9 @@ private:
     SmallVector<int64_t> memOffsets;
     SmallVector<int64_t> rowBytes;
     SmallVector<int64_t> rowPitches;
+    SmallVector<int32_t> weightLayouts;
     bool anyRowPadded = false;
+    bool anyWeightLayout = false;
     sizes.reserve(externalizedCount);
     offsets.reserve(externalizedCount);
 
@@ -626,7 +633,9 @@ private:
       memOffsets.push_back(plan.partialBlobOffset);
       rowBytes.push_back(plan.rowBytes);
       rowPitches.push_back(plan.rowPitch);
+      weightLayouts.push_back(plan.weightLayout);
       anyRowPadded |= plan.rowBytes != 0;
+      anyWeightLayout |= plan.weightLayout != 0;
     }
 
     module->setAttr("hip.constants_file", StringAttr::get(ctx, binFileName));
@@ -649,13 +658,17 @@ private:
     module->setAttr("hipdnn.constant_mem_offsets",
                     DenseI64ArrayAttr::get(ctx, memOffsets));
     // Only streaming metadata needs these: a full constants file already
-    // holds the padded bytes, and the bulk upload copies it verbatim.
+    // holds the padded and rearranged bytes, and the bulk upload copies it
+    // verbatim.
     if (anyRowPadded) {
       module->setAttr("hipdnn.constant_row_bytes",
                       DenseI64ArrayAttr::get(ctx, rowBytes));
       module->setAttr("hipdnn.constant_row_pitches",
                       DenseI64ArrayAttr::get(ctx, rowPitches));
     }
+    if (anyWeightLayout)
+      module->setAttr("hipdnn.constant_weight_layouts",
+                      DenseI32ArrayAttr::get(ctx, weightLayouts));
   }
 
   LogicalResult rejectStaleState() {
@@ -671,6 +684,7 @@ private:
         "hipdnn.constant_mem_offsets",
         "hipdnn.constant_row_bytes",
         "hipdnn.constant_row_pitches",
+        "hipdnn.constant_weight_layouts",
     };
     for (const char *attr : attrs)
       if (module->hasAttr(attr))
@@ -712,6 +726,7 @@ private:
     entry.file_offset = plan.sourceFileOffset;
     entry.row_bytes = plan.rowBytes;
     entry.row_pitch = plan.rowPitch;
+    entry.weight_layout = plan.weightLayout;
     return entry;
   }
 
@@ -771,10 +786,12 @@ private:
       partialEntries.push_back(makeEntry(plan, plan.partialBlobOffset));
       partialEntries.back().file_path.clear();
       partialEntries.back().splat_elem_size = 0;
-      // The partial file holds the dense source; the loader pads at upload.
+      // The partial file holds the dense source; the loader pads and
+      // rearranges at upload.
       partialEntries.back().size = plan.sourceSize;
       partialEntries.back().row_bytes = 0;
       partialEntries.back().row_pitch = 0;
+      partialEntries.back().weight_layout = 0;
     }
 
     if (!partialEntries.empty() &&

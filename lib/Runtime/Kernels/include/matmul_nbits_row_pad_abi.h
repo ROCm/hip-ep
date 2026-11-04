@@ -15,13 +15,15 @@
 extern "C" {
 #endif
 
-/* One int4 weight shape the table lays out with its own row pad. */
+/* One int4 weight shape the table lays out at load: rows with its own row
+ * pad, or the dense rows in another byte order. */
 typedef struct HipMatmulNBitsRowPad {
   int32_t n;
   int32_t k;
   int32_t block_size;
   int32_t zero_points; /* 1: a zero_points tensor (asymmetric), 0: symmetric */
-  int32_t pad_bytes;   /* multiple of 16; 0 keeps the weight dense */
+  int32_t pad_bytes;   /* multiple of 16; 0 keeps the rows dense */
+  int32_t layout;      /* a hip::MatmulNBitsWeightLayout; pad_bytes 0 unless 0 */
 } HipMatmulNBitsRowPad;
 
 /* The row pads of the embedded table for `arch` ("gfx1151"; NULL or "": the

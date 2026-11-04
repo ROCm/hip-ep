@@ -576,6 +576,7 @@ class LutError(ValueError):
 KERNEL_SRC = ROOT.parent.parent / "matmul_nbits_kernel.hip"
 PHASES = ("Prefill", "Decode", "DecodeDp4a")
 STRIDES = ("Arrival", "Padded", "Padded256")
+WEIGHT_LAYOUTS = ("Rows", "XorLines", "Blocks")
 ZERO_POINTS = ("Symmetric", "Asymmetric")
 
 
@@ -644,6 +645,13 @@ def check_table(t: dict) -> None:
                 (r["pad_bytes"] and (r["k"] // 2 + r["pad_bytes"]) % 16):
             errors.append(f"row_pads: invalid entry {r} (pad and K/2 + pad must "
                           f"be multiples of 16)")
+        layout = r.get("layout")
+        if layout not in WEIGHT_LAYOUTS:
+            errors.append(f"row_pads: entry {r} needs a layout in {WEIGHT_LAYOUTS}")
+        elif layout != "Rows" and (r.get("pad_bytes") or (r.get("k") or 1) % 64 or
+                                   (layout == "Blocks" and (r.get("n") or 1) % 16)):
+            errors.append(f"row_pads: entry {r}: a {layout} weight takes no pad "
+                          f"(and Blocks needs N % 16 == 0 and K % 64 == 0)")
         if key in keys:
             errors.append(f"row_pads: weight {key} listed twice")
         keys.add(key)

@@ -25,6 +25,20 @@
 // RUN: cd %t && hip-mlir-opt --hip-pad-matmul-nbits-weights='row-pads=2:4096:128:0=256' --hip-externalize-constants='externalize-min-num-elements=1 externalize-output-dir=%t/stream skip-constant-data=true' pad.mlir | FileCheck %s --check-prefix=STREAM
 // RUN: cd %t && hip-mlir-opt --hip-pad-matmul-nbits-weights='row-pads=2:4096:128:0=256' --hip-externalize-constants='externalize-min-num-elements=1 externalize-output-dir=%t/full' pad.mlir | FileCheck %s --check-prefix=FULL
 // RUN: %python -c "import sys; s = open(sys.argv[1], 'rb').read(); d = open(sys.argv[2], 'rb').read(); assert len(d) == 2 * 2304, len(d); assert d[0:2048] == s[0:2048] and d[2304:4352] == s[2048:4096]; assert d[2048:2304] == bytes(256) and d[4352:4608] == bytes(256)" %t/w.bin %t/full/model.constants.bin
+// Byte orders (16 rows of K = 4096): XOR-swizzled lines and 16-row blocks.
+// RUN: mkdir -p %t/blkfull %t/blkstream %t/xorfull
+// RUN: %python -c "import sys; open(sys.argv[1], 'wb').write(bytes((i * 7 + 1) % 251 for i in range(32768)))" %t/w16.bin
+// RUN: hip-mlir-opt --hip-pad-matmul-nbits-weights='row-pads=16:4096:128:0=blocks' %t/layout.mlir | FileCheck %s --check-prefix=BLOCKS
+// RUN: hip-mlir-opt --hip-pad-matmul-nbits-weights='row-pads=16:4096:128:0=xor' %t/layout.mlir | FileCheck %s --check-prefix=XOR
+// RUN: hip-mlir-opt --hip-pad-matmul-nbits-weights='row-pads=2:4096:128:0=blocks' %t/pad.mlir | FileCheck %s --check-prefix=NOTABLE
+// RUN: not hip-mlir-opt --hip-pad-matmul-nbits-weights='row-pads=16:4096:128:0=tiles' %t/layout.mlir 2>&1 | FileCheck %s --check-prefix=BADLAYOUT
+// RUN: cd %t && hip-mlir-opt --hip-pad-matmul-nbits-weights='row-pads=16:4096:128:0=blocks' --hip-externalize-constants='externalize-min-num-elements=1 externalize-output-dir=%t/blkstream skip-constant-data=true' layout.mlir | FileCheck %s --check-prefix=BLKSTREAM
+// RUN: cd %t && hip-mlir-opt --hip-pad-matmul-nbits-weights='row-pads=16:4096:128:0=blocks' --hip-externalize-constants='externalize-min-num-elements=1 externalize-output-dir=%t/blkfull' layout.mlir
+// RUN: cd %t && hip-mlir-opt --hip-pad-matmul-nbits-weights='row-pads=16:4096:128:0=xor' --hip-externalize-constants='externalize-min-num-elements=1 externalize-output-dir=%t/xorfull' layout.mlir
+// Every byte where the layout puts it: block (n / 16, j) at j * 512, row n % 16
+// at 32 * (n % 16); with XOR lines, line l of row n at l ^ ((n / 4) % 16).
+// RUN: %python -c "import sys; s = open(sys.argv[1], 'rb').read(); d = open(sys.argv[2], 'rb').read(); assert len(d) == 32768, len(d); assert all(d[(b // 32) * 512 + n * 32 + b % 32] == s[n * 2048 + b] for n in range(16) for b in range(2048))" %t/w16.bin %t/blkfull/model.constants.bin
+// RUN: %python -c "import sys; s = open(sys.argv[1], 'rb').read(); d = open(sys.argv[2], 'rb').read(); assert len(d) == 32768, len(d); assert all(d[n * 2048 + (((b // 128) ^ ((n // 4) % 16)) * 128) + b % 128] == s[n * 2048 + b] for n in range(16) for b in range(2048))" %t/w16.bin %t/xorfull/model.constants.bin
 
 //--- pad.mlir
 // K = 4096: K/2 = 2048 bytes is 16 cache lines, gcd(16, 64) = 16 >= 8.
@@ -128,4 +142,31 @@ func.func @misaligned_pitch(%ctx: !hip.context, %a: tensor<4x48xf16>,
       {K = 48 : i64, N = 2 : i64, bits = 4 : i64, block_size = 16 : i64,
        accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<4x2xf16>
   return %y : tensor<4x2xf16>
+}
+
+//--- layout.mlir
+// BLOCKS-LABEL: func.func @layout
+// BLOCKS:         %[[W:.*]] = hip.constant {location = "w16.bin", offset = 0 : i64, row_bytes = 2048 : i64, size = 32768 : i64, weight_layout = 2 : i64} : tensor<16x2048xui8>
+// BLOCKS:         hip.matmul_nbits(%{{.*}}) ins(%{{.*}}, %[[W]], %{{.*}} : tensor<1x4096xf16>, tensor<16x2048xui8>, tensor<16x32xf16>)
+// BLOCKS-SAME:      b_layout = 2 : i64, b_row_bytes = 2048 : i64
+// XOR-LABEL:    func.func @layout
+// XOR:            hip.constant {{.*}}weight_layout = 1 : i64} : tensor<16x2048xui8>
+// XOR:            b_layout = 1 : i64, b_row_bytes = 2048 : i64
+// BADLAYOUT: malformed row-pads entry '16:4096:128:0=tiles'
+// BLKSTREAM:      module attributes
+// BLKSTREAM-SAME: hipdnn.constant_row_bytes = array<i64: 2048>
+// BLKSTREAM-SAME: hipdnn.constant_row_pitches = array<i64: 2048>
+// BLKSTREAM-SAME: hipdnn.constant_sizes = array<i64: 32768>
+// BLKSTREAM-SAME: hipdnn.constant_weight_layouts = array<i32: 2>
+func.func @layout(%ctx: !hip.context, %a: tensor<1x4096xf16>,
+                  %s: tensor<16x32xf16>) -> tensor<1x16xf16> {
+  %w = hip.constant {location = "w16.bin", offset = 0 : i64, size = 32768 : i64}
+      : tensor<16x32x64xui8>
+  %e = tensor.empty() : tensor<1x16xf16>
+  %y = hip.matmul_nbits(%ctx) ins(%a, %w, %s :
+      tensor<1x4096xf16>, tensor<16x32x64xui8>, tensor<16x32xf16>)
+      outs(%e : tensor<1x16xf16>)
+      {K = 4096 : i64, N = 16 : i64, bits = 4 : i64, block_size = 128 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x16xf16>
+  return %y : tensor<1x16xf16>
 }

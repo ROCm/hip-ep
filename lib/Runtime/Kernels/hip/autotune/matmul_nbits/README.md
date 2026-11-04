@@ -83,8 +83,11 @@ A table may opt its device into storing int4 weights row-padded at load
 (`hip-pad-matmul-nbits-weights`), which removes the per-call repack:
 
 - `row_pads` lists int4 weight shapes (N, K, group size, zero points) with
-  the pad, in bytes, each is stored with. A listed pad of 0 keeps that weight
-  dense with no repack.
+  how each is stored: `layout` `Rows` and the pad, in bytes (a listed pad of 0
+  keeps that weight dense with no repack), or `layout` `XorLines` / `Blocks`
+  with pad 0, the dense rows in that byte order
+  (`include/hip/matmul_nbits_weight_layout.h`; K % 64 == 0, and N % 16 == 0
+  for `Blocks`).
 - Only listed weights are padded. An unlisted weight stays dense; where its
   stride aliases (`hip::matmulNBitsRowStrideAliases` in
   `include/hip/matmul_nbits_row_alias.h`, shared by the compiler, the runtime

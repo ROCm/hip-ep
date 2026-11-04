@@ -549,7 +549,8 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
   return wrap_matmul_nbits_ex(state, op_state_slot, A, B, scales, zero_points,
                               g_idx, bias, output, M, N, K, batch_count, bits,
                               block_size, elem_size, zp_elem_size,
-                              scale_elem_size, /*b_row_bytes=*/0);
+                              scale_elem_size, /*b_row_bytes=*/0,
+                              /*b_layout=*/0);
 }
 
 int wrap_matmul_nbits_ex(RuntimeState *state, int op_state_slot, const void *A,
@@ -559,7 +560,7 @@ int wrap_matmul_nbits_ex(RuntimeState *state, int op_state_slot, const void *A,
                          int64_t K, int64_t batch_count, int64_t bits,
                          int64_t block_size, int64_t elem_size,
                          int64_t zp_elem_size, int64_t scale_elem_size,
-                         int64_t b_row_bytes) {
+                         int64_t b_row_bytes, int64_t b_layout) {
   OP_PROFILE(
       "matmul_nbits",
       [&] {
@@ -605,6 +606,15 @@ int wrap_matmul_nbits_ex(RuntimeState *state, int op_state_slot, const void *A,
             "K=%lld block_size=%lld)\n",
             (long long)b_row_bytes, (long long)bits, (long long)K,
             (long long)block_size);
+    return -1;
+  }
+  // No kernel reads a weight in another byte order yet, and no row-pad table
+  // lists one; a module that has one was compiled for a newer runtime.
+  if (b_layout != 0) {
+    fprintf(stderr,
+            "wrap_matmul_nbits: weight layout %lld is not supported by this "
+            "runtime\n",
+            (long long)b_layout);
     return -1;
   }
   // b_row_bytes == K/2 is a weight the compiler kept dense on purpose (its

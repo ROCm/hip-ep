@@ -43,7 +43,9 @@ namespace hip {
 ///
 /// A mem-addr or file-ref entry with `row_pitch != 0` is row-padded: `size`
 /// is its footprint in constants.bin, and the source holds only the
-/// size / row_pitch dense rows of `row_bytes`.
+/// size / row_pitch dense rows of `row_bytes`. With a `weight_layout` other
+/// than Rows (row_pitch == row_bytes) the rows are written in that byte order
+/// (include/hip/matmul_nbits_weight_layout.h).
 ///
 /// `data` lifetime (when used) is the caller's responsibility and must
 /// cover the call to `writeConstantsBinToFileSystem`.
@@ -60,6 +62,7 @@ struct ConstantEntry {
   // a row-padded constant is expanded one row at a time while it is written.
   int64_t row_bytes = 0;
   int64_t row_pitch = 0;
+  int32_t weight_layout = 0; // a hip::MatmulNBitsWeightLayout
 };
 
 /// Write a constants.bin with alignment padding and tiled splat expansion
