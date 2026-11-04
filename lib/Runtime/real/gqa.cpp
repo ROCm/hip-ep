@@ -494,7 +494,7 @@ static int gqa_forward_fused(
     // [key_bias_batch, key_bias_len] fp16 per-key additive bias, or null.
     const void *key_bias = nullptr, int64_t key_bias_batch = 0,
     int64_t key_bias_len = 0, const void *position_ids = nullptr,
-    int rotary_max_position = 0) {
+    int rotary_max_position = 0, int *decode_tickets = nullptr) {
   // One row per batch entry, or one row shared by all of them.
   const int key_bias_stride =
       key_bias && key_bias_batch > 1 ? static_cast<int>(key_bias_len) : 0;
@@ -506,6 +506,38 @@ static int gqa_forward_fused(
   const size_t elem_sz = 2;        // fp16 only on the fused path
   const bool need_rope = do_rotary && cos_cache && sin_cache;
   const bool packed_qkv = (!key && !value);
+
+  // Decode over an in-place cache: one kernel does RoPE, the append, split-K
+  // attention and the reduce. It reads seqlens_k on the device, so this path
+  // never synchronizes with the host. It takes no key bias.
+  if (sq == 1 && decode_tickets && !packed_qkv && !kv_quantized && !key_bias &&
+      seqlens_k_ptr && past_key && past_key == present_key &&
+      past_value == present_value &&
+      hip_gqa_flash_decode_fused_supported(
+          static_cast<int>(H), static_cast<int>(G), static_cast<int>(d))) {
+    const size_t partials_bytes = static_cast<size_t>(B) * H *
+                                  kFlashDecodeMaxSplits * (d + 2) *
+                                  sizeof(float);
+    if (hipdnn_ep_state_ensure_workspace(state, partials_bytes) != 0)
+      return -1;
+    // The live length stays on the device, so the kernel sizes the split
+    // count from the geometry and trims it to the live range itself.
+    if (hip_gqa_flash_decode_fused(
+            stream, query, key, value, present_key, present_value, output,
+            hipdnn_ep_state_get_workspace(state), decode_tickets,
+            need_rope ? cos_cache : nullptr, need_rope ? sin_cache : nullptr,
+            need_rope ? position_ids : nullptr, rotary_max_position,
+            static_cast<int>(B), static_cast<int>(H), static_cast<int>(G),
+            static_cast<int>(d), static_cast<int>(present_seq),
+            /*splits=*/0, scale, seqlens_k_ptr, local_window_size, head_sink,
+            use_smooth_softmax ? 1 : 0) != 0)
+      return -1;
+    RUNTIME_DEBUG_LOG("[REAL] fused GQA decode: B=%lld H=%lld G=%lld d=%lld "
+                      "rope=%d window=%d\n",
+                      (long long)B, (long long)H, (long long)G, (long long)d,
+                      static_cast<int>(need_rope), local_window_size);
+    return 0;
+  }
 
   // B==1 pre-read (cached per Compute) feeds host past_len where needed.
   const int32_t seqlens_k_pre =
@@ -1251,7 +1283,45 @@ struct GqaGemmCache {
 // distinct GQA layers) no longer share one descriptor map.
 struct GqaState : OpStateT<GqaState> {
   GqaGemmCache cache;
+  // Split-arrival counters of the single-dispatch decode kernel, one per
+  // (batch, KV head). The kernel leaves them zero, so they are cleared only
+  // when allocated. Per op instance because layers run back to back on one
+  // stream and each layer's launch must find its own counters at zero.
+  int *decode_tickets = nullptr;
+  int64_t decode_ticket_count = 0;
+  ~GqaState() {
+    if (decode_tickets)
+      (void)hipFree(decode_tickets);
+  }
 };
+
+// Zeroed counters for `n` (batch, KV head) pairs, or nullptr when the slot is
+// missing or the allocation fails (the caller then takes the unfused path).
+static int *gqa_decode_tickets(RuntimeState *state, hipStream_t stream,
+                               int op_state_slot, int64_t n) {
+  GqaState *gs = GqaState::get_op_state(state, op_state_slot);
+  if (!gs || n <= 0)
+    return nullptr;
+  if (gs->decode_ticket_count >= n)
+    return gs->decode_tickets;
+  if (gs->decode_tickets) {
+    (void)hipFree(gs->decode_tickets);
+    gs->decode_tickets = nullptr;
+    gs->decode_ticket_count = 0;
+  }
+  void *p = nullptr;
+  if (hipMalloc(&p, static_cast<size_t>(n) * sizeof(int)) != hipSuccess)
+    return nullptr;
+  // Ordered before the first decode launch on the same stream.
+  if (hipMemsetAsync(p, 0, static_cast<size_t>(n) * sizeof(int), stream) !=
+      hipSuccess) {
+    (void)hipFree(p);
+    return nullptr;
+  }
+  gs->decode_tickets = static_cast<int *>(p);
+  gs->decode_ticket_count = n;
+  return gs->decode_tickets;
+}
 
 // Resolve this GQA instance's descriptor cache from its op-state slot. Returns
 // nullptr when the slot is unconstructed (init failure) -- callers propagate
@@ -3388,13 +3458,23 @@ int wrap_group_query_attention_host_length(
       (long long)do_rotary,
       static_cast<int>(key == nullptr && value == nullptr));
 
+  int *decode_tickets = nullptr;
+  if (is_decode && key && value && past_key && past_key == present_key &&
+      !kv_quantized && !key_bias &&
+      hip_gqa_flash_decode_fused_supported(static_cast<int>(num_heads),
+                                           static_cast<int>(kv_num_heads),
+                                           static_cast<int>(head_dim)))
+    decode_tickets = gqa_decode_tickets(state, stream, op_state_slot,
+                                        batch_size * kv_num_heads);
+
   int rc = gqa_forward_fused(
       state, stream, query, key, value, past_key, past_value, seqlens_k,
       cos_cache, sin_cache, output, present_key, present_value, batch_size,
       seq_len_q, seq_len_kv, past_buf_seq, num_heads, kv_num_heads, head_dim,
       scale, do_rotary, k_scale, v_scale, kv_format, head_sink,
       has_smooth_softmax, static_cast<int>(local_window_size), host_length,
-      key_bias, key_bias_batch, key_bias_len, position_ids, rope_rows);
+      key_bias, key_bias_batch, key_bias_len, position_ids, rope_rows,
+      decode_tickets);
   if (rc != 0)
     fprintf(stderr,
             "wrap_group_query_attention: gqa_forward_fused failed "

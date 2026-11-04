@@ -1457,6 +1457,31 @@ HIP_KERNEL_API int hip_gqa_flash_decode_fused_copy(
     float scale, const void* head_sink, int use_smooth_softmax,
     const void* key_bias, int key_bias_stride);
 
+/* 1 when hip_gqa_flash_decode_fused implements this fp16 geometry. */
+HIP_KERNEL_API int hip_gqa_flash_decode_fused_supported(int H, int G, int d);
+
+/* Single-dispatch fp16 decode (sq == 1) over an in-place BNSD cache
+ * [B, G, max_seq, d]: optional RoPE of Q / K_new (cos_cache, sin_cache at
+ * position_ids[b], or at seqlens_k[b] when position_ids is null, clamped into
+ * the max_position cache rows as hip_gqa_rope does), append of
+ * K_new / V_new at row seqlens_k[b] (skipped when K_new is null, i.e. the
+ * cache already holds the token), split-K attention and the FA-2 reduce, all
+ * in one kernel. Q and O are [B, 1, H, d]; K_new / V_new are [B, 1, G, d].
+ * tickets: device int[B * G], zero-initialized once and left zero by every
+ * call. splits: the launch split count (at most 64), or 0 to derive one from
+ * the geometry; a short live range uses fewer. partials_workspace:
+ * B * H * 64 * (d + 2) floats. seqlens_k is required; the host never reads
+ * it. max_position: cos/sin rows, positive when cos_cache is given. There is
+ * no key bias; a decode with one goes through hip_gqa_flash_decode.
+ * Returns 0 on success. */
+HIP_KERNEL_API int hip_gqa_flash_decode_fused(
+    void* stream, const void* Q, const void* K_new, const void* V_new,
+    void* Kcache, void* Vcache, void* O, void* partials_workspace,
+    int* tickets, const void* cos_cache, const void* sin_cache,
+    const void* position_ids, int max_position, int B, int H, int G, int d,
+    int max_seq, int splits, float scale, const void* seqlens_k,
+    int local_window_size, const void* head_sink, int use_smooth_softmax);
+
 /* =========================================================================
  * Cast (Element Type Conversion)
  * =========================================================================
