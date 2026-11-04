@@ -4165,6 +4165,10 @@ extern "C" int hip_gqa_flash_decode_fused(
   a.seqlens_k = static_cast<const int*>(seqlens_k);
   a.scale = scale;
   a.H = H; a.G = G; a.max_seq = max_seq;
+  // HIPDNN_GQA_DECODE_SPLITS forces the launch count here as it does for the
+  // multi-dispatch decode; the kernel still trims it to the live range.
+  if (splits <= 0)
+    if (const char* e = getenv("HIPDNN_GQA_DECODE_SPLITS")) splits = atoi(e);
   a.splits = fusedDecodeLaunchSplits(B, G, hpg, max_seq, splits);
   a.min_chunk = kFusedDecodeMinChunk;
   a.local_window_size = local_window_size;
