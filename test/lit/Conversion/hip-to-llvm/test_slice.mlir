@@ -68,5 +68,9 @@ module {
 // CHECK: llvm.call @wrap_slice({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64, i64, i64, i64) -> i32
 
 // CHECK-LABEL: llvm.func @test_slice_i32
-// CHECK: llvm.mlir.constant(3 : i64) : i64
-// CHECK: llvm.call @wrap_slice({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64, i64, i64, i64) -> i32
+// FLOAT is 0. The constant created immediately after it is the index dtype.
+// INT32 is 3, which is also the output extent, so a bare constant(3) would
+// still match if the call passed INT64 (4).
+// CHECK: %[[DATA_TYPE:.*]] = llvm.mlir.constant(0 : i64) : i64
+// CHECK-NEXT: %[[INDEX_TYPE:.*]] = llvm.mlir.constant(3 : i64) : i64
+// CHECK: llvm.call @wrap_slice({{.*}}, %[[DATA_TYPE]], %[[INDEX_TYPE]]) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64, i64, i64, i64) -> i32

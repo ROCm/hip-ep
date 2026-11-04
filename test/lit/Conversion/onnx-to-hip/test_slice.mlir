@@ -448,4 +448,22 @@ module {
     // CHECK: hip.slice
     return %r : tensor<?x?xi64>
   }
+
+  // Test 19: graph-input INT32 indices stay INT32 on hip.slice. A cast to
+  // i64 would skip the sign-extending runtime copy. Negative steps keep
+  // this off the extract_slice fold.
+  func.func @test_slice_i32_indices(%input: tensor<4x6xf32>,
+                                    %starts: tensor<2xi32>,
+                                    %ends: tensor<2xi32>,
+                                    %axes: tensor<2xi32>,
+                                    %steps: tensor<2xi32>) -> tensor<4x6xf32> {
+    // CHECK-LABEL: func.func @test_slice_i32_indices
+    %r = "onnx.Slice"(%input, %starts, %ends, %axes, %steps)
+        : (tensor<4x6xf32>, tensor<2xi32>, tensor<2xi32>,
+           tensor<2xi32>, tensor<2xi32>) -> tensor<4x6xf32>
+
+    // CHECK-NOT: tensor.extract_slice
+    // CHECK: hip.slice({{.*}}) ins({{.*}} : tensor<4x6xf32>, tensor<2xi32>, tensor<2xi32>) axes({{[^:]*}} : tensor<2xi32>) steps({{[^:]*}} : tensor<2xi32>)
+    return %r : tensor<4x6xf32>
+  }
 }
