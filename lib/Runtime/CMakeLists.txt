@@ -609,8 +609,30 @@ if(RyzenAICorelib_FOUND)
         target_link_libraries(hipdnn-ep-corelib PRIVATE ${CMAKE_DL_LIBS})
     endif()
 else()
-    message(STATUS "RyzenAI CoreLib not found (set RYZENAICORELIB_ROOT); "
-                   "wrap_corelib_* always defer to the GPU")
+    # A root that is set but unusable (typically an older CoreLib) would
+    # otherwise build the stub silently.
+    if(NOT BUILD_MOCK_RUNTIME AND (RYZENAICORELIB_ROOT OR
+                                   DEFINED ENV{RYZENAICORELIB_ROOT}))
+        if(RYZENAICORELIB_ROOT)
+            set(_corelib_root "${RYZENAICORELIB_ROOT}")
+        else()
+            set(_corelib_root "$ENV{RYZENAICORELIB_ROOT}")
+        endif()
+        set(_corelib_found_version "")
+        if(RyzenAICorelib_VERSION)
+            set(_corelib_found_version " (found ${RyzenAICorelib_VERSION})")
+        endif()
+        message(WARNING
+            "RYZENAICORELIB_ROOT is '${_corelib_root}', but no RyzenAI CoreLib "
+            "0.66 or later is there${_corelib_found_version}: "
+            "include/ryzenai/corelib/base.h is missing or too old. Building the "
+            "stub, so wrap_corelib_* always defer to the GPU. Point "
+            "RYZENAICORELIB_ROOT at a CoreLib 0.66+ install, or clear the stale "
+            "RyzenAICorelib_INCLUDE_DIR cache entry.")
+    else()
+        message(STATUS "RyzenAI CoreLib not found (set RYZENAICORELIB_ROOT); "
+                       "wrap_corelib_* always defer to the GPU")
+    endif()
     add_library(hipdnn-ep-corelib STATIC mock/ryzenaicorelib_stub.cpp)
     target_include_directories(hipdnn-ep-corelib PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
