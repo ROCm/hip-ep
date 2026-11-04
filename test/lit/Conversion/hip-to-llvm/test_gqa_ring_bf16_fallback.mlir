@@ -2,11 +2,6 @@
 // Licensed under the MIT License.
 
 // RUN: hip-mlir-opt --assign-op-state-slots --convert-hip-to-llvm %s | FileCheck %s
-//
-// The trailing i32 on the wrap_group_query_attention call is op_state_slot,
-// threaded by --assign-op-state-slots. It selects this GQA instance's
-// per-instance GqaState (hipBLASLt GEMM descriptor cache), replacing the
-// former shared RuntimeState::gqa_gemm_cache.
 
 module {
   func.func @test_gqa_lowering(%ctx: !hip.context,
@@ -34,5 +29,5 @@ module {
   }
 }
 
-// CHECK: llvm.call @wrap_group_query_attention(
+// CHECK: llvm.call @wrap_group_query_attention_host_length(
 // CHECK-NOT: @wrap_group_query_attention_ring_f16

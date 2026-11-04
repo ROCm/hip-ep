@@ -13,6 +13,22 @@
 
 message(STATUS "Configuring MLIR dialect/pass unit tests")
 
+add_executable(test-runtime-lowering-contracts
+  test_runtime_lowering_contracts.cpp
+)
+target_include_directories(test-runtime-lowering-contracts PRIVATE
+  ${CMAKE_SOURCE_DIR}/lib/Conversion/HipToLLVM
+  ${MLIR_INCLUDE_DIRS}
+  ${LLVM_INCLUDE_DIRS}
+)
+target_link_libraries(test-runtime-lowering-contracts PRIVATE
+  HipToLLVM
+  MLIRParser
+)
+add_test(NAME RuntimeLoweringContractsUnit
+  COMMAND test-runtime-lowering-contracts
+)
+
 add_executable(test-hipsr-externalize-constants test_externalize_constants.cpp)
 
 target_compile_features(test-hipsr-externalize-constants PRIVATE cxx_std_17)

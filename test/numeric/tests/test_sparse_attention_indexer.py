@@ -3,8 +3,7 @@
 # Licensed under the MIT License.
 #
 
-"""Tests for com.microsoft SparseAttentionIndexer (policy_mode=qsa, packed QK,
-no past_sequence_length).
+"""Tests for com.microsoft SparseAttentionIndexer (policy_mode=qsa, packed QK).
 
 ORT CPU has no SparseAttentionIndexer kernel, so the reference is a NumPy port
 of the ORT CUDA semantics. Scores are fp32 sums whose order differs between
@@ -27,25 +26,30 @@ _D = 128
 _TIE_RTOL = 1e-5
 
 
-def _make_model(N, R, rank3, has_mask, dtype, ratio, budget, epsilon, scale):
+def _make_model(
+    N, R, rank3, has_mask, dtype, ratio, budget, epsilon, scale, shared=False
+):
     elem = TP.FLOAT16 if dtype == np.float16 else TP.FLOAT
     attrs = dict(policy_mode="qsa", compress_ratio=ratio, token_budget=budget)
     if epsilon is not None:
         attrs["epsilon"] = epsilon
     if scale is not None:
         attrs["scale"] = scale
+    node_inputs = [
+        "query",
+        "",
+        "query_norm_weight",
+        "key_norm_weight",
+        "cos_cache",
+        "sin_cache",
+        "mask" if has_mask else "",
+        "past_key",
+    ]
+    if shared:
+        node_inputs += ["", "", "", "", "past_sequence_length"]
     node = helper.make_node(
         "SparseAttentionIndexer",
-        [
-            "query",
-            "",
-            "query_norm_weight",
-            "key_norm_weight",
-            "cos_cache",
-            "sin_cache",
-            "mask" if has_mask else "",
-            "past_key",
-        ],
+        node_inputs,
         ["selected_indices", "present_key"],
         domain="com.microsoft",
         **attrs,
@@ -61,11 +65,17 @@ def _make_model(N, R, rank3, has_mask, dtype, ratio, budget, epsilon, scale):
     if has_mask:
         inputs.append(helper.make_tensor_value_info("mask", TP.INT64, ["B", "T"]))
     inputs.append(helper.make_tensor_value_info("past_key", elem, ["B", "P", _D]))
+    if shared:
+        inputs.append(
+            helper.make_tensor_value_info("past_sequence_length", TP.INT32, [1])
+        )
     outputs = [
         helper.make_tensor_value_info(
             "selected_indices", TP.INT32, ["B", "S", budget + ratio - 1]
         ),
-        helper.make_tensor_value_info("present_key", elem, ["B", "T", _D]),
+        helper.make_tensor_value_info(
+            "present_key", elem, ["B", "P" if shared else "T", _D]
+        ),
     ]
     model = make_model_from_nodes([node], inputs, outputs, **_OPSETS)
     model.ir_version = 10
@@ -406,6 +416,68 @@ def test_exact_ties_keep_block_order(model_runner, S):
     query[:, :, N * _D :] = -rng.uniform(0.1, 1, (B, S, _D)).astype(dt)
     past = -rng.uniform(0.1, 1, (B, P, _D)).astype(dt)
     _run_feeds(model_runner, query, qw, kw, cos, sin, None, past, budget=64, exact=True)
+
+
+@pytest.mark.parametrize("bind_shared", [True, False])
+@pytest.mark.parametrize("has_mask", [False, True])
+def test_past_sequence_length(model_runner, bind_shared, has_mask):
+    """past_key / present_key are [B, C, D] caches holding past_sequence_length
+    valid rows. With bind_shared both are bound to one device buffer and the
+    rows past the valid ones must stay untouched."""
+    import onnxruntime as ort
+
+    backend = model_runner.backend
+    if not hasattr(backend, "create_session"):
+        pytest.skip("backend does not expose an ORT session for IO binding")
+    B, N, R, C, L = 2, 4, 64, 640, 300
+    dt = np.float16
+    rng = np.random.default_rng(40 + 2 * bind_shared + has_mask)
+    model = _make_model(N, R, True, has_mask, dt, 4, 64, 1e-6, None, shared=True)
+    sess = backend.create_session(_persist(model_runner, model))
+    qw = rng.uniform(0.5, 1.5, _D).astype(dt)
+    kw = rng.uniform(0.5, 1.5, _D).astype(dt)
+    cos, sin = _rope_tables(rng, C, R, dt, B)
+    cache = np.full((B, C, _D), np.nan, dt)
+    cache[:, :L] = rng.uniform(-1, 1, (B, L, _D)).astype(dt)
+    cache_dev = ort.OrtValue.ortvalue_from_numpy(
+        cache, device_type="gpu", vendor_id=0x1002
+    )
+
+    for S in [1, 5, 1]:
+        query = rng.uniform(-1, 1, (B, S, (N + 1) * _D)).astype(dt)
+        mask = None
+        if has_mask:
+            mask = np.ones((B, L + S), np.int64)
+            mask[1, :23] = 0
+        io = sess.io_binding()
+        names = ["query", "query_norm_weight", "key_norm_weight", "cos_cache"]
+        names += ["sin_cache", "past_sequence_length"]
+        feeds = [query, qw, kw, cos, sin, np.array([L], np.int32)]
+        if has_mask:
+            names.append("mask")
+            feeds.append(mask)
+        for name, arr in zip(names, feeds):
+            io.bind_cpu_input(name, arr)
+        io.bind_output("selected_indices")
+        if bind_shared:
+            io.bind_ortvalue_input("past_key", cache_dev)
+            io.bind_ortvalue_output("present_key", cache_dev)
+        else:
+            io.bind_cpu_input("past_key", cache)
+            io.bind_output("present_key")
+        sess.run_with_iobinding(io)
+        outputs = io.copy_outputs_to_cpu()
+
+        expected, present, row_info = _sai_reference(
+            query, qw, kw, cos, sin, mask, cache[:, :L], 4, 64, 1e-6, 1 / np.sqrt(_D)
+        )
+        _check_selected(outputs[0], expected, row_info, 4, 64)
+        cache[:, : L + S] = present
+        actual = cache_dev.numpy() if bind_shared else outputs[1]
+        np.testing.assert_array_equal(actual[:, : L + S], present)
+        if bind_shared:
+            np.testing.assert_array_equal(actual, cache)
+        L += S
 
 
 def _persist(model_runner, model):

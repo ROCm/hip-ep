@@ -5,6 +5,8 @@
 
 add_library(HipToLLVM STATIC
   HipToLLVM.cpp
+  HostScalarAnalysis.cpp
+  RuntimeAccessInterface.cpp
   MemoryLowering.cpp
   ConvLowering.cpp
   ConvTransposeLowering.cpp
@@ -94,6 +96,7 @@ target_link_libraries(HipToLLVM PUBLIC
   MLIRLLVMDialect
   MLIRLLVMCommonConversion
   MLIRMemRefDialect
+  MLIRBufferizationTransforms
   MLIRTransforms
   MLIRArithTransforms
   # convert-hip-to-llvm populates the standard dialect->LLVM lowering patterns

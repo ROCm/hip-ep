@@ -129,7 +129,9 @@ def print_output_summary(
     """Print a per-output summary comparing *actual* and *expected* tensors."""
     print(f"{tag} Outputs:")
     for i, (act, exp) in enumerate(zip(actual, expected)):
-        diff = float(np.abs(act.astype(np.float64) - exp.astype(np.float64)).max())
+        diff = float(
+            np.abs(act.astype(np.float64) - exp.astype(np.float64)).max(initial=0.0)
+        )
         print(
             f"{tag}   [{i}] actual  {tensor_desc(act)}"
             f"  |  expect  {tensor_desc(exp)}"
