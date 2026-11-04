@@ -586,8 +586,7 @@ compileAndEmbedRocMlirKernels(ModuleOp module,
     auto it = compiledByKernel.find(name);
     if (it == compiledByKernel.end() || it->second.binary.empty()) {
       if (!elementwiseKernel(name))
-        return module.emitError()
-               << "rocMLIR deferred kernel compiles failed";
+        return module.emitError() << "rocMLIR deferred kernel compiles failed";
       compiledByKernel.erase(name);
       fallBack(name, "deferred compile");
     }
