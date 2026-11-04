@@ -608,19 +608,22 @@ int wrap_matmul_nbits_ex(RuntimeState *state, int op_state_slot, const void *A,
             (long long)block_size);
     return -1;
   }
-  // No kernel reads a weight in another byte order yet, and no row-pad table
-  // lists one; a module that has one was compiled for a newer runtime.
-  if (b_layout != 0) {
+  // A weight in a byte order other than rows (hip::MatmulNBitsWeightLayout)
+  // is laid out by the compiler for bits=4, dense rows, K % 64 == 0.
+  if (b_layout != 0 && (b_layout < 0 || b_layout > 2 || bits != 4 ||
+                        K % 64 != 0 || (b_layout == 2 && N % 16 != 0) ||
+                        (b_row_bytes != 0 && b_row_bytes != K / 2))) {
     fprintf(stderr,
-            "wrap_matmul_nbits: weight layout %lld is not supported by this "
-            "runtime\n",
-            (long long)b_layout);
+            "wrap_matmul_nbits: unsupported b_layout=%lld (bits=%lld N=%lld "
+            "K=%lld b_row_bytes=%lld)\n",
+            (long long)b_layout, (long long)bits, (long long)N, (long long)K,
+            (long long)b_row_bytes);
     return -1;
   }
   // b_row_bytes == K/2 is a weight the compiler kept dense on purpose (its
   // table measured it no slower dense): no per-call repack below, and the
   // kernels get the dense layout (0).
-  const bool laid_out_by_compiler = b_row_bytes != 0;
+  bool laid_out_by_compiler = b_row_bytes != 0;
   if (b_row_bytes == K / 2)
     b_row_bytes = 0;
 
@@ -756,9 +759,9 @@ int wrap_matmul_nbits_ex(RuntimeState *state, int op_state_slot, const void *A,
       if (base) {
         void *a_qb = base;
         void *a_scale = base + scale_off;
-        int rc = hip_matmul_nbits_dp4a_ex(stream, A, B, scales, pre_zp_u8, bias,
-                                          output, M, N, K, block_size, a_qb,
-                                          a_scale, b_row_bytes);
+        int rc = hip_matmul_nbits_dp4a_layout(
+            stream, A, B, scales, pre_zp_u8, bias, output, M, N, K, block_size,
+            a_qb, a_scale, b_row_bytes, b_layout);
         if (rc == 0) {
           result = 0;
           goto cleanup;
@@ -768,6 +771,22 @@ int wrap_matmul_nbits_ex(RuntimeState *state, int op_state_slot, const void *A,
             "[REAL] matmul_nbits dp4a rc=%d, falling back to fp GEMV\n", rc);
       }
     }
+  }
+
+  // Every path below reads rows. A weight in another byte order runs on a
+  // dense copy in a shared scratch, and from there takes the paths a dense
+  // weight takes, including the per-call repack of an aliasing stride.
+  if (b_layout != 0) {
+    B = hip_matmul_nbits_u4_unlayout_scratch(stream, B, static_cast<int>(N),
+                                             static_cast<int>(K),
+                                             static_cast<int>(b_layout));
+    if (!B) {
+      fprintf(stderr, "wrap_matmul_nbits: no dense copy of the B layout\n");
+      return -1;
+    }
+    b_layout = 0;
+    b_row_bytes = 0;
+    laid_out_by_compiler = false;
   }
 
   // CDNA/wave64 prefill fast path: dequantize B -> fp16 once and run a

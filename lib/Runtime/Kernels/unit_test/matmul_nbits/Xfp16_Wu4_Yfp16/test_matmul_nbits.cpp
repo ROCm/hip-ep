@@ -871,6 +871,151 @@ static int run() {
 }  // namespace forced
 
 // ============================================================
+// Weight byte orders. hip_matmul_nbits_dp4a_layout at M = 1, 2, 4 and 7 on the
+// rows, XOR-swizzled lines and 16-row blocks of the same weight, against a CPU
+// reference of the dp4a arithmetic (activations quantized per group to int8 as
+// the kernel does, integer dot, per-group scales, bias), and
+// hip_matmul_nbits_u4_unlayout back to the dense rows byte for byte. The byte
+// orders are written out here from their definition
+// (include/hip/matmul_nbits_weight_layout.h), not taken from the library.
+// ============================================================
+namespace layouts {
+
+// Where byte b of dense row n is stored in `layout` (1 XOR lines, 2 blocks).
+static size_t storedAt(int layout, int n, int b, int rb) {
+  if (layout == 2)
+    return static_cast<size_t>(n / 16) * 16 * rb + static_cast<size_t>(b / 32) * 512 +
+           static_cast<size_t>(n % 16) * 32 + b % 32;
+  if (layout == 1 && rb % 128 == 0) {
+    const int lines = rb / 128;
+    int p = 1;
+    while (lines % (p * 2) == 0) p *= 2;
+    const int r = 64 / std::min(p, 64);  // 64 / gcd(lines, 64)
+    const int f = (n / r) % p;
+    return static_cast<size_t>(n) * rb + static_cast<size_t>(((b / 128) ^ f) * 128 + b % 128);
+  }
+  return static_cast<size_t>(n) * rb + b;
+}
+
+static float dp4aRef(const CaseData& d, const std::vector<uint8_t>& zp, int m, int n,
+                     int K, int gs, float bias) {
+  const int ngk = K / gs;
+  const uint8_t* row = &d.Bpacked[static_cast<size_t>(n) * (K / 2)];
+  float acc = 0.0f;
+  for (int g = 0; g < ngk; ++g) {
+    float amax = 0.0f;
+    for (int k = g * gs; k < (g + 1) * gs; ++k)
+      amax = std::max(amax, std::fabs(half_to_float(d.A16[static_cast<size_t>(m) * K + k])));
+    const float inv = amax > 0.0f ? 127.0f / amax : 0.0f;
+    const float a_scale = amax > 0.0f ? amax * (1.0f / 127.0f) : 1.0f;
+    int dot = 0, sum = 0;
+    for (int k = g * gs; k < (g + 1) * gs; ++k) {
+      int q = static_cast<int>(std::nearbyint(half_to_float(d.A16[static_cast<size_t>(m) * K + k]) * inv));
+      q = std::max(-127, std::min(127, q));
+      const int w = (k & 1) ? (row[k / 2] >> 4) : (row[k / 2] & 15);
+      dot += q * w;
+      sum += q;
+    }
+    const int z = zp.empty() ? 8 : zp[static_cast<size_t>(n) * ngk + g];
+    acc += a_scale * half_to_float(d.scales[static_cast<size_t>(n) * ngk + g]) *
+           static_cast<float>(dot - sum * z);
+  }
+  return acc + bias;
+}
+
+static int run() {
+  hipStream_t stream;
+  HIP_CHECK(hipStreamCreate(&stream));
+  struct KN { int K, N; };
+  const KN shapes[] = {{4096, 1024}, {4096, 4096}, {2048, 256}, {12288, 512}};
+  int fail = 0, ran = 0;
+  for (const KN& s : shapes) {
+    for (int gs : {32, 128}) {
+      for (bool zero : {true, false}) {
+        const int K = s.K, N = s.N, rb = K / 2, ngk = K / gs, maxM = 7;
+        CaseData d;
+        genCase(maxM, K, N, gs, zero, /*fp32=*/false, 9000u + static_cast<unsigned>(ran), d);
+        std::vector<uint8_t> zp;
+        if (zero) {
+          zp.resize(d.zeros.size());
+          for (size_t i = 0; i < zp.size(); ++i)
+            zp[i] = static_cast<uint8_t>(std::lround(half_to_float(d.zeros[i])));
+        }
+        std::vector<__half> bias(N);
+        for (int n = 0; n < N; ++n) bias[n] = float_to_half(0.25f * static_cast<float>(n % 7) - 0.75f);
+        void *dA, *dB, *dDense, *dS, *dZ = nullptr, *dBias, *dC, *dQ, *dQs;
+        HIP_CHECK(hipMalloc(&dA, d.A16.size() * sizeof(__half)));
+        HIP_CHECK(hipMalloc(&dB, d.Bpacked.size()));
+        HIP_CHECK(hipMalloc(&dDense, d.Bpacked.size()));
+        HIP_CHECK(hipMalloc(&dS, d.scales.size() * sizeof(__half)));
+        HIP_CHECK(hipMalloc(&dBias, bias.size() * sizeof(__half)));
+        HIP_CHECK(hipMalloc(&dC, static_cast<size_t>(maxM) * N * sizeof(__half)));
+        HIP_CHECK(hipMalloc(&dQ, static_cast<size_t>(maxM) * K));
+        HIP_CHECK(hipMalloc(&dQs, static_cast<size_t>(maxM) * ngk * sizeof(float)));
+        if (zero) {
+          HIP_CHECK(hipMalloc(&dZ, zp.size()));
+          HIP_CHECK(hipMemcpy(dZ, zp.data(), zp.size(), hipMemcpyHostToDevice));
+        }
+        HIP_CHECK(hipMemcpy(dA, d.A16.data(), d.A16.size() * sizeof(__half), hipMemcpyHostToDevice));
+        HIP_CHECK(hipMemcpy(dS, d.scales.data(), d.scales.size() * sizeof(__half), hipMemcpyHostToDevice));
+        HIP_CHECK(hipMemcpy(dBias, bias.data(), bias.size() * sizeof(__half), hipMemcpyHostToDevice));
+        for (int layout : {0, 1, 2}) {
+          if (layout == 2 && hipdnn_device_is_wave64()) continue;
+          std::vector<uint8_t> stored(d.Bpacked.size());
+          for (int n = 0; n < N; ++n)
+            for (int b = 0; b < rb; ++b)
+              stored[storedAt(layout, n, b, rb)] = d.Bpacked[static_cast<size_t>(n) * rb + b];
+          HIP_CHECK(hipMemcpy(dB, stored.data(), stored.size(), hipMemcpyHostToDevice));
+          if (layout != 0) {
+            HIP_CHECK(hipMemset(dDense, 0, d.Bpacked.size()));
+            const int rc = hip_matmul_nbits_u4_unlayout(stream, dB, dDense, N, K, layout);
+            HIP_CHECK(hipStreamSynchronize(stream));
+            std::vector<uint8_t> back(d.Bpacked.size());
+            HIP_CHECK(hipMemcpy(back.data(), dDense, back.size(), hipMemcpyDeviceToHost));
+            const bool ok = rc == 0 && back == d.Bpacked;
+            ++ran;
+            if (!ok) ++fail;
+            std::printf("  unlayout layout=%d N=%d K=%d  rc=%d  %s\n", layout, N, K, rc,
+                        ok ? "PASS" : "*** FAIL ***");
+          }
+          for (int M : {1, 2, 4, 7}) {
+            HIP_CHECK(hipMemset(dC, 0xFF, static_cast<size_t>(M) * N * sizeof(__half)));
+            const int rc = hip_matmul_nbits_dp4a_layout(
+                stream, dA, dB, dS, dZ, dBias, dC, M, N, K, gs, dQ, dQs, 0, layout);
+            HIP_CHECK(hipStreamSynchronize(stream));
+            std::vector<__half> out(static_cast<size_t>(M) * N);
+            HIP_CHECK(hipMemcpy(out.data(), dC, out.size() * sizeof(__half), hipMemcpyDeviceToHost));
+            int errors = 0;
+            float worst = 0.0f;
+            for (int m = 0; m < M && rc == 0; ++m)
+              for (int n = 0; n < N; ++n) {
+                const float r = dp4aRef(d, zp, m, n, K, gs, half_to_float(bias[n]));
+                const float g = half_to_float(out[static_cast<size_t>(m) * N + n]);
+                const float diff = std::fabs(g - r);
+                worst = std::max(worst, diff);
+                if (!(diff <= std::fabs(r) * 4e-3f + 2e-2f)) ++errors;
+              }
+            const bool ok = rc == 0 && errors == 0;
+            ++ran;
+            if (!ok) ++fail;
+            std::printf("  dp4a layout=%d M=%d N=%d K=%d gs=%d zero=%d  rc=%d  max|diff|=%.3e  %s\n",
+                        layout, M, N, K, gs, zero, rc, worst, ok ? "PASS" : "*** FAIL ***");
+          }
+        }
+        hipFree(dA); hipFree(dB); hipFree(dDense); hipFree(dS); hipFree(dBias);
+        hipFree(dC); hipFree(dQ); hipFree(dQs);
+        if (dZ) hipFree(dZ);
+      }
+    }
+  }
+  HIP_CHECK(hipStreamDestroy(stream));
+  std::printf("\nWeight byte orders: %d checks, %d failed\n", ran, fail);
+  return fail == 0 ? 0 : 1;
+}
+
+}  // namespace layouts
+
+// ============================================================
 // Single-shape convenience path (make test_custom): in-process rng, no data
 // files. SIZE=MxKxN GS=<group_size> [NO_ZEROS=1].
 // ============================================================
@@ -890,15 +1035,19 @@ int main(int argc, char* argv[]) {
   int gs = 128;
   bool no_zeros = false;
   bool have_custom = false;
+  bool layouts_only = false;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     if (a == "--no-zeros") no_zeros = true;
+    else if (a == "--layouts-only") layouts_only = true;
     else if (a == "--group-size" && i + 1 < argc) gs = std::atoi(argv[++i]);
     else if (sscanf(argv[i], "%dx%dx%d", &M, &K, &N) == 3) have_custom = true;
   }
 
   if (have_custom)
     return runCustom(M, N, K, gs, !no_zeros);
+  if (layouts_only)
+    return layouts::run();
 
   const int tier = hipdnn_ep_test::resolveCoverageTier(argc, argv);
   const int sweep_rc = sweep::run(tier);
@@ -909,5 +1058,6 @@ int main(int argc, char* argv[]) {
     std::printf("SKIP: extended WMMA entries unsupported on %s\n", prop.gcnArchName);
   else
     forced_rc = forced::run();
-  return sweep_rc != 0 || forced_rc != 0 ? 1 : 0;
+  const int layouts_rc = layouts::run();
+  return sweep_rc != 0 || forced_rc != 0 || layouts_rc != 0 ? 1 : 0;
 }

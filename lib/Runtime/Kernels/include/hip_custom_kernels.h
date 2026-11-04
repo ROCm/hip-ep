@@ -2720,6 +2720,19 @@ HIP_KERNEL_API int hip_matmul_nbits_dp4a_ex(
     int64_t M, int64_t N, int64_t K, int64_t block_size,
     void* a_qb_scratch, void* a_scale_scratch, int64_t b_row_bytes);
 
+/* hip_matmul_nbits_dp4a_ex against a B stored in the byte order b_layout (a
+ * hip::MatmulNBitsWeightLayout, include/hip/matmul_nbits_weight_layout.h):
+ * 0 = rows b_row_bytes apart; 1 = XOR-swizzled 128-byte lines and 2 = 512-byte
+ * blocks of 16 rows, both dense (b_row_bytes 0 or K/2) and K % 64 == 0; blocks
+ * also need N % 16 == 0 and a wave32 device. */
+HIP_KERNEL_API int hip_matmul_nbits_dp4a_layout(
+    void* stream,
+    const void* A, const void* B, const void* scales, const void* zp_u8,
+    const void* bias, void* out,
+    int64_t M, int64_t N, int64_t K, int64_t block_size,
+    void* a_qb_scratch, void* a_scale_scratch, int64_t b_row_bytes,
+    int64_t b_layout);
+
 /* Stand-alone launchers for the zero_points unpack/convert kernels, used by
  * the asym matmul_nbits cache in lib/Runtime/real/matmul_nbits.cpp.
  *
@@ -2795,6 +2808,17 @@ HIP_KERNEL_API size_t hip_matmul_nbits_u4_padrow_bytes(int N, int K);
 HIP_KERNEL_API int hip_matmul_nbits_u4_row_pads(const char* arch,
                                                 HipMatmulNBitsRowPad* entries,
                                                 int32_t capacity);
+
+/* hip_matmul_nbits_u4_unlayout: copy a B stored in byte order `layout` (1 XOR
+ *   lines, 2 16-row blocks; K % 64 == 0, N % 16 == 0 for blocks) into dst as
+ *   dense rows of K/2 bytes. hip_matmul_nbits_u4_unlayout_scratch does it into a
+ *   shared scratch (grown to the largest weight, reused by the next call) and
+ *   returns it, or nullptr on failure. For the int4 paths that do not read the
+ *   layout directly. */
+HIP_KERNEL_API int hip_matmul_nbits_u4_unlayout(
+    void* stream, const void* B, void* dst, int N, int K, int layout);
+HIP_KERNEL_API const void* hip_matmul_nbits_u4_unlayout_scratch(
+    void* stream, const void* B, int N, int K, int layout);
 
 HIP_KERNEL_API int hip_matmul_nbits_u4_prepack_padrow(
     void* stream, const void* B, void* dst, int N, int K);

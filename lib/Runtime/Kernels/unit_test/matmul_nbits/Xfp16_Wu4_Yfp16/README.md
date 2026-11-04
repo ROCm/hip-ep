@@ -20,6 +20,15 @@ make clean
 | `test_custom` | One shape from `SIZE=MxKxN`, `GS=`, `NO_ZEROS=1` (in-process rng). |
 | `clean` | Removes `out/`. |
 
+After the sweep, the exe forces every extended WMMA entry (on WMMA devices),
+then checks the weight byte orders: `hip_matmul_nbits_dp4a_layout` at M = 1,
+2, 4 and 7 on the rows, XOR-swizzled lines and 16-row blocks of each weight
+against a CPU reference of the dp4a arithmetic, and
+`hip_matmul_nbits_u4_unlayout` back to the dense rows byte for byte. The
+byte orders are written out in the test from their definition
+(`include/hip/matmul_nbits_weight_layout.h`). `--layouts-only` runs just that
+phase.
+
 ## Shape coverage (3 tiers)
 
 `test_matmul_nbits.cpp`'s `sweep` namespace crosses two axis groups:
