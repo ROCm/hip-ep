@@ -279,7 +279,7 @@ Four execution paths, auto-dispatched by shape:
 
 **Row-padded int4 weights.** A K-step reads B rows K/2 bytes apart. When K/2 is a whole number of 128-byte lines whose count shares a factor of at least 8 with the 64 cache sets (K = 4096, 8192, ...), those rows map to at most 8 sets and evict each other although the working set fits in cache. `hip::matmulNBitsRowStrideAliases` (`include/hip/matmul_nbits_row_alias.h`) is the one definition of that test, used by the compiler, the runtime and the autotune sweep driver. Such weights are read with a padded row pitch, set up in one of two ways:
 
-- At load, by `hip-pad-matmul-nbits-weights`: the pad comes from the device LUT (`row_pads` per weight shape, else `default_row_pad` for an aliasing weight). The constant is stored with `row_bytes`/`row_pitch` (see [constant-handling-design.md](constant-handling-design.md)), and the op passes the pitch to `wrap_matmul_nbits_ex` as `b_row_bytes`.
+- At load, by `hip-pad-matmul-nbits-weights`: only weights whose shape the device LUT lists in `row_pads` are padded, each to its listed pad. The constant is stored with `row_bytes`/`row_pitch` (see [constant-handling-design.md](constant-handling-design.md)), and the op passes the pitch to `wrap_matmul_nbits_ex` as `b_row_bytes`.
 - Per call, by the runtime, when the compiler did not lay the weight out: the weight is repacked at arrival + 128 B into one shared scratch, then multiplied.
 
 The LUT keys prefill rows by stride category (`Arrival`, `Padded` = +128 B, `Padded256` = +256 B) because the best tile differs between layouts. See `lib/Runtime/Kernels/hip/autotune/matmul_nbits/README.md` for the table workflow.

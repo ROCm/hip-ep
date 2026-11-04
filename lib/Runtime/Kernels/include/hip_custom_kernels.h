@@ -2786,14 +2786,13 @@ HIP_KERNEL_API void hip_matmul_nbits_dequant_b_fp16_ex(
  * hip_matmul_nbits_u4_row_pads: the autotune table's row-pad policy for an
  *   arch (NULL: the running device), read by the compiler for
  *   hip-pad-matmul-nbits-weights; see HipMatmulNBitsRowPadsFn in
- *   matmul_nbits_row_pad_abi.h. A default pad of 0 (the arch has no table, or
- *   its table was not measured with weights padded at load) keeps aliasing
- *   weights dense, and the runtime repacks them per call as before.
+ *   matmul_nbits_row_pad_abi.h. A weight the table does not list (every
+ *   weight, when the arch has no table) stays dense, and the runtime repacks
+ *   it per call as before when its stride aliases.
  * ------------------------------------------------------------------------- */
 HIP_KERNEL_API size_t hip_matmul_nbits_u4_padrow_bytes(int N, int K);
 
 HIP_KERNEL_API int hip_matmul_nbits_u4_row_pads(const char* arch,
-                                                int32_t* default_pad,
                                                 HipMatmulNBitsRowPad* entries,
                                                 int32_t capacity);
 

@@ -487,7 +487,6 @@ bool CompilerDriver::runMLIRPasses(
     const ::hip::compiler::MatmulNBitsRowPads rowPads =
         ::hip::compiler::queryMatmulNBitsRowPads();
     tailOpts.matmulNBitsRowPads = rowPads.entries;
-    tailOpts.matmulNBitsDefaultRowPad = rowPads.defaultPad;
     mlir::hip::buildOnnxToHipPipelineTail(pm, tailOpts, fileSystem_);
 
     mlir::hip::HipToLLVMPipelineOptions rocMlirLlvmOpts;
@@ -504,7 +503,6 @@ bool CompilerDriver::runMLIRPasses(
     const ::hip::compiler::MatmulNBitsRowPads rowPads =
         ::hip::compiler::queryMatmulNBitsRowPads();
     onnxToHipOpts.matmulNBitsRowPads = rowPads.entries;
-    onnxToHipOpts.matmulNBitsDefaultRowPad = rowPads.defaultPad;
 
     if (hipdnnHandle_) {
       compiledGraphs_ =

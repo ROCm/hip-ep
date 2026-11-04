@@ -566,7 +566,7 @@ def _geomean_slowdown(ans, pts):
 
 # Table fields that are not part of a build or merge result but carried over
 # from the existing table: measured separately from the tile winners.
-CARRIED = ("row_pads", "default_row_pad")
+CARRIED = ("row_pads",)
 
 
 class LutError(ValueError):
@@ -647,8 +647,9 @@ def check_table(t: dict) -> None:
         if key in keys:
             errors.append(f"row_pads: weight {key} listed twice")
         keys.add(key)
-    if t.get("default_row_pad", 0) % 16:
-        errors.append(f"default_row_pad {t['default_row_pad']} is not a multiple of 16")
+    if "default_row_pad" in t:
+        errors.append("default_row_pad is not supported: list every weight padded "
+                      "at load in row_pads")
     if errors:
         raise LutError("\n".join(errors))
 
@@ -680,8 +681,6 @@ def write_lut_json(out: Path, doc: dict, configs, fallbacks, points,
         f.write("{\n")
         for k in doc:
             f.write(f' "{k}": {json.dumps(doc[k])},\n')
-        if carried.get("default_row_pad"):
-            f.write(f' "default_row_pad": {carried["default_row_pad"]},\n')
         f.write(' "configs": [\n')
         f.write(",\n".join("  " + json.dumps(c, sort_keys=True) for c in plain))
         f.write("\n ],\n \"fallbacks\": [\n")

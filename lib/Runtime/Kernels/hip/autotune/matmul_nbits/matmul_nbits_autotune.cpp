@@ -131,7 +131,6 @@ struct Table {
   std::unordered_map<uint32_t, uint16_t> fallbacks;
   float wm = 1.0f, wn = 1.0f, wk = 1.0f;
   std::vector<HipMatmulNBitsRowPad> row_pads;
-  int default_row_pad = 0;
   bool extended_configs = false;   // some config names an extended entry
   bool loaded = false;
   uint32_t points = 0;
@@ -358,21 +357,15 @@ void loadBuffer(Table& t, const unsigned char* data, size_t size,
     }
   }
 
-  // Same 16-byte rule as a listed pad.
-  if (lut->default_row_pad() % 16 == 0)
-    t.default_row_pad = lut->default_row_pad();
-  else
-    ++t.invalid_row_pads;
-
   t.loaded = true;
   if (logOn())
     fprintf(stderr,
             "[matmul-lut] loaded %u points in %zu groups (%u rejected), "
             "extended configs %s (%u rejected), %u row pads (%u rejected), "
-            "default row pad %d, weights m=%.2f n=%.2f k=%.2f, for %s\n",
+            "weights m=%.2f n=%.2f k=%.2f, for %s\n",
             t.points, t.groups.size(), t.invalid_points,
             t.extended_configs ? "yes" : "no", t.invalid_extended_configs,
-            row_pads, t.invalid_row_pads, t.default_row_pad, t.wm, t.wn, t.wk,
+            row_pads, t.invalid_row_pads, t.wm, t.wn, t.wk,
             lut->gpu_arch() ? lut->gpu_arch()->c_str() : "?");
 }
 
@@ -552,8 +545,7 @@ Result resolve(const Request& request, WmmaValidator wmma_valid,
   return result;
 }
 
-int rowPads(const char* arch, int32_t* default_pad, HipMatmulNBitsRowPad* entries,
-            int32_t capacity) {
+int rowPads(const char* arch, HipMatmulNBitsRowPad* entries, int32_t capacity) {
   // An explicit arch is a compile target, which need not be this device; its
   // table is loaded on the side, once per arch, and kept for the process.
   static std::mutex mu;
@@ -571,7 +563,6 @@ int rowPads(const char* arch, int32_t* default_pad, HipMatmulNBitsRowPad* entrie
     t = slot.get();
   }
   if (!t->loaded) return -1;
-  if (default_pad) *default_pad = t->default_row_pad;
   const int32_t count = static_cast<int32_t>(t->row_pads.size());
   for (int32_t i = 0; i < count && i < capacity && entries; ++i)
     entries[i] = t->row_pads[i];

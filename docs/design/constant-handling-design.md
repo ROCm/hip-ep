@@ -274,16 +274,15 @@ module or in the build tree (`HIP_CUSTOM_KERNELS_DIR` / `_ARCH` override). The
 target is `ROCK_ARCH` when set, else the running device. It passes them as the
 pass's options:
 
-- `row_pads` (`row-pads`): per (N, K, block size, zero points), the pad with the
-  lowest prefill plus decode time. A listed pad of 0 keeps the weight dense and
-  sets its users' `b_row_bytes` to K/2, which tells the runtime not to repack
-  it.
-- `default_row_pad` (`default-row-pad`): the pad for an unlisted weight whose
-  stride K/2 aliases into a few cache sets (K = 4096, 8192, 12288, 14336, ...).
+- `row_pads` (`row-pads`): per measured (N, K, block size, zero points), the
+  pad with the lowest prefill plus decode time. A listed pad of 0 keeps the
+  weight dense and sets its users' `b_row_bytes` to K/2, which tells the
+  runtime not to repack it.
 
-A device whose table sets neither (every arch but gfx1151 today) pads nothing:
-its weights stay dense and the runtime repacks aliasing ones per prefill call,
-as before.
+Only listed weights are padded. An unlisted weight stays dense, and where its
+stride K/2 aliases into a few cache sets (K = 4096, 8192, 12288, 14336, ...)
+the runtime repacks it per prefill call, as before. A device whose table lists
+no row pads pads nothing.
 
 The externalizer plans the padded footprint (`N * (K/2 + pad)`), so offsets and
 `hipdnn.constant_sizes` describe the stored layout:

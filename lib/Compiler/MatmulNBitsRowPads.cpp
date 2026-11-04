@@ -111,13 +111,11 @@ std::optional<MatmulNBitsRowPads> readLibrary(const std::string &path,
   std::optional<MatmulNBitsRowPads> result;
   if (HipMatmulNBitsRowPadsFn query = rowPadsExport(path)) {
     const char *arch = targetArch.empty() ? nullptr : targetArch.c_str();
-    int32_t defaultPad = 0;
-    const int count = query(arch, &defaultPad, nullptr, 0);
+    const int count = query(arch, nullptr, 0);
     if (count >= 0) {
       std::vector<HipMatmulNBitsRowPad> rows(static_cast<size_t>(count));
-      query(arch, &defaultPad, rows.data(), count);
+      query(arch, rows.data(), count);
       MatmulNBitsRowPads pads;
-      pads.defaultPad = defaultPad;
       // The pass's `row-pads` option format.
       for (const HipMatmulNBitsRowPad &r : rows) {
         std::string entry;
@@ -184,8 +182,7 @@ MatmulNBitsRowPads queryMatmulNBitsRowPads() {
         it = cache.emplace(key, readLibrary(path, targetArch)).first;
       if (!it->second)
         continue;
-      COMPILER_DEBUG_LOG("[CompilerDriver] MatMulNBits row pads: default "
-                         << it->second->defaultPad << ", "
+      COMPILER_DEBUG_LOG("[CompilerDriver] MatMulNBits row pads: "
                          << it->second->entries.size() << " entries from "
                          << path << "\n");
       return *it->second;

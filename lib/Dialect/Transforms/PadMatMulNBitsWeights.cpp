@@ -13,13 +13,13 @@
 // scratch buffer; doing it once in the stored constant removes the repack and
 // leaves a single copy of the weight.
 //
-// The pad of a weight comes from the device's autotune table, which the
-// compiler driver reads from the custom kernels library: the weight's
-// `row-pads` entry when listed, else `default-row-pad` when its stride
-// aliases. A device whose table sets neither (default 0) pads nothing, and the
-// runtime keeps repacking per call. A listed pad of 0 keeps the weight dense
-// and marks its users with b_row_bytes = K/2, so the runtime does not repack
-// a weight that was measured faster (or as fast, in less memory) dense.
+// The pad of a weight is its `row-pads` entry in the device's autotune table,
+// which the compiler driver reads from the custom kernels library. Only
+// measured weights are listed; an unlisted weight keeps the dense layout and
+// the runtime keeps repacking it per call when its stride aliases. A listed
+// pad of 0 keeps the weight dense and marks its users with b_row_bytes = K/2,
+// so the runtime does not repack a weight that was measured faster (or as
+// fast, in less memory) dense.
 //
 // Before:
 //   %w = hip.constant {memory_address = A, size = 8388608}
@@ -27,7 +27,7 @@
 //   hip.matmul_nbits(%ctx) ins(%a, %w, %s : ...)
 //            ... {K = 4096, N = 4096, ...}
 //
-// After (default-row-pad=256):
+// After (row-pads=4096:4096:128:0=256, the weight's geometry and pad):
 //   %w = hip.constant {memory_address = A, size = 8388608, row_bytes = 2048}
 //            : tensor<4096x2304xui8>
 //   hip.matmul_nbits(%ctx) ins(%a, %w, %s : ...)
@@ -39,7 +39,6 @@
 
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
-#include "hip/matmul_nbits_row_alias.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -99,11 +98,6 @@ struct PadMatMulNBitsWeightsPass
                << "hip-pad-matmul-nbits-weights: duplicate row-pads entry '"
                << entry << "'";
     }
-    const int64_t defaultPad = defaultRowPad;
-    if (defaultPad < 0 || defaultPad % 16 != 0)
-      return emitError(UnknownLoc::get(context))
-             << "hip-pad-matmul-nbits-weights: default-row-pad " << defaultPad
-             << " is not a non-negative multiple of 16";
     return success();
   }
 
@@ -114,18 +108,12 @@ struct PadMatMulNBitsWeightsPass
       padCarrier(c);
   }
 
-  // The pad for this use of the weight: its table entry, else the default
-  // when the stride aliases, else none (-1, leave the weight to the runtime).
-  // 0 is a listed decision to keep the weight dense.
+  // The pad for this use of the weight: its table entry, else none (-1, leave
+  // the weight to the runtime). 0 is a listed decision to keep it dense.
   int64_t padFor(MatMulNBitsOp mm) const {
     auto it = table.find(RowPadKey{mm.getN(), mm.getK(), mm.getBlockSize(),
                                    static_cast<bool>(mm.getZeroPoints())});
-    if (it != table.end())
-      return it->second;
-    const int64_t pad = defaultRowPad;
-    return ::hip::matmulNBitsRowStrideAliases(mm.getK()) && pad > 0
-               ? pad
-               : int64_t{-1};
+    return it != table.end() ? it->second : int64_t{-1};
   }
 
   void padCarrier(ConstantOp c) {

@@ -25,11 +25,10 @@ typedef struct HipMatmulNBitsRowPad {
 } HipMatmulNBitsRowPad;
 
 /* The row pads of the embedded table for `arch` ("gfx1151"; NULL or "": the
- * running device). Writes *default_pad (the pad for an aliasing weight no
- * entry lists; 0 pads none at load) and the first min(count, capacity)
- * entries, and returns count; -1 when the library has no compatible table for
- * `arch`. */
-typedef int (*HipMatmulNBitsRowPadsFn)(const char *arch, int32_t *default_pad,
+ * running device). Writes the first min(count, capacity) entries and returns
+ * count; -1 when the library has no compatible table for `arch`. A weight no
+ * entry lists keeps the dense layout. */
+typedef int (*HipMatmulNBitsRowPadsFn)(const char *arch,
                                        HipMatmulNBitsRowPad *entries,
                                        int32_t capacity);
 

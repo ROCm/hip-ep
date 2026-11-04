@@ -82,25 +82,25 @@ of range or an extended entry the kernel library does not compile.
 A table may opt its device into storing int4 weights row-padded at load
 (`hip-pad-matmul-nbits-weights`), which removes the per-call repack:
 
-- `default_row_pad` is the pad, in bytes, for a weight whose stride aliases
-  (`hip::matmulNBitsRowStrideAliases` in `include/hip/matmul_nbits_row_alias.h`,
-  shared by the compiler, the runtime and the sweep driver). 0, or a table
-  without the field, pads nothing at load, and the runtime keeps repacking such
-  weights per call.
-- `row_pads` overrides it per int4 weight shape (N, K, group size, zero
-  points). A listed pad of 0 keeps that weight dense with no repack.
+- `row_pads` lists int4 weight shapes (N, K, group size, zero points) with
+  the pad, in bytes, each is stored with. A listed pad of 0 keeps that weight
+  dense with no repack.
+- Only listed weights are padded. An unlisted weight stays dense; where its
+  stride aliases (`hip::matmulNBitsRowStrideAliases` in
+  `include/hip/matmul_nbits_row_alias.h`, shared by the compiler, the runtime
+  and the sweep driver), the runtime keeps repacking it per call. A table
+  without `row_pads` pads nothing at load.
 
-Both come from measurement: the pad from {0, 16, 128, 256} bytes with the
+Each entry comes from measurement: the pad from {0, 16, 128, 256} bytes with the
 lowest prefill (prompt 1024) plus 128-token decode time, in the pad sweep and
 two re-measurements, taking the smaller pad when it is within noise of the
-fastest. For the shapes of the measured models, gfx1151's padded rows are
-measured at each weight's stored pad (`Padded256`, or `Padded` for a 128-byte
-entry), so layout and rows come from the same data; its other `Padded` rows are
-the per-call repack sweep's (arrival + 128 B). The compiler reads both through
-`hip_matmul_nbits_u4_row_pads(arch, ...)` (`matmul_nbits_row_pad_abi.h`).
-`update_lut.py build` and `merge` carry them over unchanged from
-`lut/<arch>.json` (`--carry-from` names another table). Only gfx1151 sets them
-today.
+fastest. A listed weight needs prefill rows measured at its stored pad
+(`Padded256`, or `Padded` for a 128-byte entry), so layout and rows come from
+the same data; without them its prefill LUT lookup misses. The compiler reads
+the entries through `hip_matmul_nbits_u4_row_pads(arch, ...)`
+(`matmul_nbits_row_pad_abi.h`). `update_lut.py build` and `merge` carry them
+over unchanged from `lut/<arch>.json` (`--carry-from` names another table). No
+shipped table lists row pads yet.
 
 ## Why the row stores geometry, not a config index
 
