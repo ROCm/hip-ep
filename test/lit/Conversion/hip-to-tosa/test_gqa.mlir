@@ -4,10 +4,11 @@
 // ============================================================================
 // TEST PURPOSE:
 // hip.gqa lowers to TOSA SDPA inside a rock.kernel function. Cover prefill
-// MHA/GQA, decode+past concat, no_causal, bias, window, packed QKV, scale=0,
-// RoPE, head_sink, INT8 KV, output_qk, the ub.poison context form, and a
-// no-op without rock.kernel. Rejections (share-buffer, INT4, decode RoPE
-// without position_ids) each get their own --split-input-file chunk.
+// MHA/GQA, decode+past concat, no_causal, bias, key_bias, window, packed QKV,
+// scale=0, RoPE, head_sink, INT8 KV, output_qk, the ub.poison context form,
+// and a no-op without rock.kernel. Rejections (share-buffer, INT4, decode
+// RoPE without position_ids, dynamic key_bias) each get their own
+// --split-input-file chunk.
 // ============================================================================
 
 // RUN: hip-mlir-opt --convert-hip-to-tosa --split-input-file \
@@ -134,6 +135,28 @@ func.func @bias(%ctx: !hip.context, %q: tensor<1x4x16xf16>,
       operandSegmentSizes = array<i32: 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 0>,
       num_heads = 2 : i64, kv_num_heads = 2 : i64, no_causal = true
     } : (!hip.context, tensor<1x4x16xf16>, tensor<1x4x16xf16>, tensor<1x4x16xf16>, tensor<1xi32>, tensor<i32>, tensor<1x1x4x4xf16>, tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>) -> (tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>)
+  return %r#0, %r#1, %r#2 : tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>
+}
+
+// A [batch, total] key bias is added to every query row's scores.
+// CHECK-LABEL: func.func @key_bias
+// CHECK: tosa.matmul
+// CHECK: tosa.reshape {{.*}} -> tensor<1x1x1x4xf16>
+// CHECK: tosa.add
+// CHECK: tosa.matmul
+// CHECK-NOT: hip.gqa
+func.func @key_bias(%ctx: !hip.context, %q: tensor<1x4x16xf16>,
+                    %k: tensor<1x4x16xf16>, %v: tensor<1x4x16xf16>,
+                    %seqlens: tensor<1xi32>, %total: tensor<i32>,
+                    %kb: tensor<1x4xf16>,
+                    %o: tensor<1x4x16xf16>, %pk: tensor<1x2x4x8xf16>,
+                    %pv: tensor<1x2x4x8xf16>)
+    -> (tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>)
+    attributes {rock.kernel} {
+  %r:3 = "hip.gqa"(%ctx, %q, %k, %v, %seqlens, %total, %kb, %o, %pk, %pv) {
+      operandSegmentSizes = array<i32: 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0>,
+      num_heads = 2 : i64, kv_num_heads = 2 : i64
+    } : (!hip.context, tensor<1x4x16xf16>, tensor<1x4x16xf16>, tensor<1x4x16xf16>, tensor<1xi32>, tensor<i32>, tensor<1x4xf16>, tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>) -> (tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>)
   return %r#0, %r#1, %r#2 : tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>
 }
 
@@ -388,4 +411,23 @@ func.func @decode_rope_rejected(%ctx: !hip.context, %q: tensor<1x1x16xf16>,
       {num_heads = 2 : i64, kv_num_heads = 2 : i64, do_rotary = 1 : i64}
       : tensor<1x1x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>
   return %r#0, %r#1, %r#2 : tensor<1x1x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>
+}
+
+// -----
+
+// A dynamic key bias has no static reshape; reject before emitting scores.
+func.func @dynamic_key_bias_rejected(%ctx: !hip.context, %q: tensor<1x4x16xf16>,
+                                     %k: tensor<1x4x16xf16>, %v: tensor<1x4x16xf16>,
+                                     %seqlens: tensor<1xi32>, %total: tensor<i32>,
+                                     %kb: tensor<?x?xf16>,
+                                     %o: tensor<1x4x16xf16>, %pk: tensor<1x2x4x8xf16>,
+                                     %pv: tensor<1x2x4x8xf16>)
+    -> (tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>)
+    attributes {rock.kernel} {
+  // expected-error@+1 {{failed to legalize operation 'hip.gqa'}}
+  %r:3 = "hip.gqa"(%ctx, %q, %k, %v, %seqlens, %total, %kb, %o, %pk, %pv) {
+      operandSegmentSizes = array<i32: 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0>,
+      num_heads = 2 : i64, kv_num_heads = 2 : i64
+    } : (!hip.context, tensor<1x4x16xf16>, tensor<1x4x16xf16>, tensor<1x4x16xf16>, tensor<1xi32>, tensor<i32>, tensor<?x?xf16>, tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>) -> (tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>)
+  return %r#0, %r#1, %r#2 : tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>
 }
