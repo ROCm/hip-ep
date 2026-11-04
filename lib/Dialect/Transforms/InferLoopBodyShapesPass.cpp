@@ -916,53 +916,13 @@ static RankedTensorType inferUnsqueezeResult(Operation *op) {
   return rankedLike(op->getResult(0).getType(), shape);
 }
 
-/// Rank is the input rank when starts and ends are not compile-time
-/// constants. A known sliced axis becomes dynamic. Unknown axes make
-/// every extent dynamic. A shape already stored on the result is kept by
-/// `mergeInferredType`.
-static RankedTensorType inferSliceUnknownBounds(Operation *op,
-                                                RankedTensorType inputType) {
-  int64_t rank = inputType.getRank();
-  std::optional<int64_t> count;
-  if (op->getNumOperands() >= 2) {
-    if (auto startsType =
-            dyn_cast<RankedTensorType>(op->getOperand(1).getType()))
-      if (startsType.getRank() == 1 && !startsType.isDynamicDim(0))
-        count = startsType.getDimSize(0);
-  }
-  SmallVector<int64_t> axes;
-  bool axesKnown = false;
-  if (readIntArrayAttr(op, "axes", axes)) {
-    axesKnown = true;
-  } else if (op->getNumOperands() >= 4 && !isOnnxNone(op->getOperand(3))) {
-    if (auto axisValues = readConstInt1D(op->getOperand(3))) {
-      axes = std::move(*axisValues);
-      axesKnown = true;
-    }
-  } else if (count && *count <= rank) {
-    axes.resize(*count);
-    for (int64_t i = 0; i < *count; ++i)
-      axes[i] = i;
-    axesKnown = true;
-  }
-  SmallVector<int64_t> shape(rank, ShapedType::kDynamic);
-  if (!axesKnown)
-    return rankedLike(op->getResult(0).getType(), shape);
-  shape.assign(inputType.getShape().begin(), inputType.getShape().end());
-  for (int64_t axis : axes) {
-    if (axis < 0)
-      axis += rank;
-    if (axis < 0 || axis >= rank)
-      return {};
-    shape[axis] = ShapedType::kDynamic;
-  }
-  return rankedLike(op->getResult(0).getType(), shape);
-}
-
 /// `onnx.Slice`. Rank is unchanged. A static axis extent becomes the number
 /// of elements from start to end. Bounds come from attributes, or from
-/// constant inputs. A runtime bound still establishes rank; a stored shape
-/// is kept.
+/// constant inputs. A bound that is not a constant does not establish a
+/// rank. The slice lowering uses the input extent when it cannot compute
+/// the length, so a runtime bound would publish that extent as the result
+/// shape. A shape already stored on the result is kept by
+/// `mergeInferredType`.
 static RankedTensorType inferSliceResult(Operation *op) {
   if (op->getNumOperands() < 1 || op->getNumResults() != 1)
     return {};
@@ -977,7 +937,7 @@ static RankedTensorType inferSliceResult(Operation *op) {
     auto startValues = readConstInt1D(op->getOperand(1));
     auto endValues = readConstInt1D(op->getOperand(2));
     if (!startValues || !endValues)
-      return inferSliceUnknownBounds(op, inputType);
+      return {};
     starts = std::move(*startValues);
     ends = std::move(*endValues);
   }
@@ -985,7 +945,7 @@ static RankedTensorType inferSliceResult(Operation *op) {
       !isOnnxNone(op->getOperand(3))) {
     auto axisValues = readConstInt1D(op->getOperand(3));
     if (!axisValues)
-      return inferSliceUnknownBounds(op, inputType);
+      return {};
     axes = std::move(*axisValues);
   }
   if (axes.empty()) {
@@ -997,7 +957,7 @@ static RankedTensorType inferSliceResult(Operation *op) {
       !isOnnxNone(op->getOperand(4))) {
     auto stepValues = readConstInt1D(op->getOperand(4));
     if (!stepValues)
-      return inferSliceUnknownBounds(op, inputType);
+      return {};
     steps = std::move(*stepValues);
   }
   if (steps.empty())

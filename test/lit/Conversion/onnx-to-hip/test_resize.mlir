@@ -286,18 +286,20 @@ module {
     return %y : tensor<1x128x52x52xi8>
   }
 
-  // Test 14: linear on uint8 would interpolate stored codes. Leave it.
-  func.func @test_resize_linear_ui8_rejected(%arg0: tensor<1x3x8x8xui8>)
+  // Test 14: linear on uint8 interpolates the stored codes.
+  func.func @test_resize_linear_ui8(%arg0: tensor<1x3x8x8xui8>)
       -> tensor<1x3x16x16xui8> {
-    // CHECK-LABEL: func.func @test_resize_linear_ui8_rejected
+    // CHECK-LABEL: func.func @test_resize_linear_ui8
     %roi = "onnx.NoValue"() {value} : () -> none
     %scales = "onnx.Constant"() {value = dense<[1.0, 1.0, 2.0, 2.0]> : tensor<4xf32>}
         : () -> tensor<4xf32>
     %y = "onnx.Resize"(%arg0, %roi, %scales)
         {mode = "linear", coordinate_transformation_mode = "half_pixel"}
         : (tensor<1x3x8x8xui8>, none, tensor<4xf32>) -> tensor<1x3x16x16xui8>
-    // CHECK: onnx.Resize
-    // CHECK-NOT: hip.resize
+    // CHECK-NOT: onnx.Resize
+    // CHECK: hip.resize
+    // CHECK-SAME: coord_transform = 0
+    // CHECK-SAME: mode = 1
     return %y : tensor<1x3x16x16xui8>
   }
 
