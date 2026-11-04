@@ -1981,13 +1981,14 @@ int wrap_dynamic_sparse_attention(
 int wrap_sparse_attention_indexer(
     RuntimeState *state, const void *query, const void *query_norm_weight,
     const void *key_norm_weight, const void *cos_cache, const void *sin_cache,
-    const void *mask, const void *past_key, void *selected_indices,
-    void *present_key, int64_t batch, int64_t seq_len, int64_t past_len,
-    int64_t num_heads, int64_t head_size, int64_t rotary_width,
-    int64_t rotary_rows, int64_t rotary_batched, int64_t compress_ratio,
-    int64_t token_budget, int64_t element_size_bytes, int64_t past_batch,
-    int64_t mask_batch, int64_t mask_len, int64_t cos_batch, int64_t sin_batch,
-    int64_t sin_rows, float epsilon, float scale);
+    const void *mask, const void *past_sequence_length, const void *past_key,
+    void *selected_indices, void *present_key, int64_t batch, int64_t seq_len,
+    int64_t past_rows, int64_t present_rows, int64_t num_heads,
+    int64_t head_size, int64_t rotary_width, int64_t rotary_rows,
+    int64_t rotary_batched, int64_t compress_ratio, int64_t token_budget,
+    int64_t element_size_bytes, int64_t past_batch, int64_t mask_batch,
+    int64_t mask_len, int64_t cos_batch, int64_t sin_batch, int64_t sin_rows,
+    float epsilon, float scale);
 
 //==============================================================================
 // ONNX Gemm via hipBLASLt
