@@ -61,16 +61,18 @@ std::optional<OpFoldResult> findHostShapeEntry(Value shape, int64_t index) {
     }
     if (auto gather = shape.getDefiningOp<hip::GatherOp>()) {
       auto dataType = dyn_cast<RankedTensorType>(gather.getData().getType());
-      int64_t axis = gather.getAxis();
-      if (dataType && axis < 0)
-        axis += dataType.getRank();
       DenseElementsAttr indices = getConstantDense(gather.getIndices());
       if (auto constant = gather.getIndices().getDefiningOp<hip::ConstantOp>())
         indices = dyn_cast_or_null<DenseElementsAttr>(constant.getValueAttr());
       if (!dataType || dataType.getRank() != 1 || !dataType.hasStaticShape() ||
-          axis != 0 || !indices ||
-          !isa<IntegerType>(indices.getElementType()) ||
+          !indices || !isa<IntegerType>(indices.getElementType()) ||
           index >= indices.getNumElements())
+        return std::nullopt;
+      // A rank-1 shape vector has one axis. ONNX axis -1 names that axis.
+      int64_t axis = gather.getAxis();
+      if (axis < 0)
+        axis += dataType.getRank();
+      if (axis != 0)
         return std::nullopt;
       int64_t source = indices.getValues<APInt>()[index].getSExtValue();
       if (source < 0)
@@ -977,7 +979,8 @@ struct UnsqueezeToStdTensor : public mlir::RewritePattern {
 //===----------------------------------------------------------------------===//
 
 /// Axes to drop, from the attribute or a constant operand. Negative axes are
-/// normalized against `rank`. An unknown or out-of-range list returns nullopt.
+/// normalized against `rank`. An unknown, out-of-range, or repeated axis
+/// returns nullopt. A repeated axis is rejected, not merged.
 static std::optional<llvm::SmallVector<int64_t>>
 readSqueezeAxes(mlir::Operation *op, mlir::Value axesValue, int64_t rank) {
   llvm::SmallVector<int64_t> axes;

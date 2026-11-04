@@ -32,7 +32,9 @@
 //     still expand that shape (`min_variadic_broadcast`).
 //   - Squeeze of a ranked input ranks an unranked result, including when
 //     the dropped axis is dynamic (`squeeze_unit_axis`,
-//     `squeeze_dynamic_axis_feeds_reshape`). A Slice whose bounds are not
+//     `squeeze_dynamic_axis_feeds_reshape`). Negative and repeated axes are
+//     normalized first (`squeeze_negative_and_multiple`,
+//     `squeeze_duplicate_axes`). A Slice whose bounds are not
 //     constants stays unranked (`slice_runtime_bounds_stays_unranked`).
 
 // -----------------------------------------------------------------------
@@ -441,5 +443,21 @@ func.func @slice_runtime_bounds_stays_unranked(%x: tensor<10xf32>,
                                               %ends: tensor<1xi64>) -> tensor<*xf32> {
   %y = "onnx.Slice"(%x, %starts, %ends)
       : (tensor<10xf32>, tensor<1xi64>, tensor<1xi64>) -> tensor<*xf32>
+  return %y : tensor<*xf32>
+}
+
+// Negative axes are normalized, then both are dropped. A repeated axis is
+// not merged: the result stays unranked.
+// CHECK-LABEL: func.func @squeeze_negative_and_multiple
+// CHECK:         "onnx.Squeeze"{{.*}} -> tensor<?x4xf32>
+func.func @squeeze_negative_and_multiple(%x: tensor<1x?x1x4xf32>) -> tensor<*xf32> {
+  %y = "onnx.Squeeze"(%x) {axes = [-4, -2]} : (tensor<1x?x1x4xf32>) -> tensor<*xf32>
+  return %y : tensor<*xf32>
+}
+
+// CHECK-LABEL: func.func @squeeze_duplicate_axes
+// CHECK:         "onnx.Squeeze"{{.*}} -> tensor<*xf32>
+func.func @squeeze_duplicate_axes(%x: tensor<?x?x1x4xf32>) -> tensor<*xf32> {
+  %y = "onnx.Squeeze"(%x) {axes = [2, -2]} : (tensor<?x?x1x4xf32>) -> tensor<*xf32>
   return %y : tensor<*xf32>
 }

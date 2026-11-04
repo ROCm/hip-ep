@@ -89,6 +89,26 @@ module {
     return %result : tensor<?x?x?xf32>
   }
 
+  // Negative axes are normalized before the dynamic slice. Axis -1 is the
+  // last dimension.
+  func.func @test_squeeze_dynamic_negative(%data: tensor<?x?x?x?xf32>) -> tensor<?x?x?xf32> {
+    %result = "onnx.Squeeze"(%data) {axes = [-1]} : (tensor<?x?x?x?xf32>) -> tensor<?x?x?xf32>
+    return %result : tensor<?x?x?xf32>
+  }
+
+  // Two axes, one written negative. Both are sliced to 1, then collapsed.
+  func.func @test_squeeze_dynamic_multiple(%data: tensor<?x?x?x?xf32>) -> tensor<?x?xf32> {
+    %result = "onnx.Squeeze"(%data) {axes = [-4, 2]} : (tensor<?x?x?x?xf32>) -> tensor<?x?xf32>
+    return %result : tensor<?x?xf32>
+  }
+
+  // A repeated axis is rejected. The op stays, and the dynamic dims are
+  // not sliced.
+  func.func @test_squeeze_duplicate_axis(%data: tensor<?x?x?x?xf32>) -> tensor<?x?x?xf32> {
+    %result = "onnx.Squeeze"(%data) {axes = [0, 0]} : (tensor<?x?x?x?xf32>) -> tensor<?x?x?xf32>
+    return %result : tensor<?x?x?xf32>
+  }
+
   // The same drop, with the axes list as an operand. The pipeline rewrites
   // that constant to hip.constant before Squeeze is converted.
   func.func @test_squeeze_dynamic_axis_operand(%data: tensor<?x?x?x?xf32>) -> tensor<?x?x?xf32> {
@@ -154,6 +174,24 @@ module {
 // CHECK: %[[SLICE:.*]] = tensor.extract_slice %[[DATA]][0, 0, 0, 0] [1, %{{[^]]*}}, %{{[^]]*}}, %{{[^]]*}}] [1, 1, 1, 1] : tensor<?x?x?x?xf32> to tensor<1x?x?x?xf32>
 // CHECK: %[[RESULT:.*]] = tensor.collapse_shape %[[SLICE]] {{\[\[}}0, 1], [2], [3]] : tensor<1x?x?x?xf32> into tensor<?x?x?xf32>
 // CHECK: return %[[RESULT]] : tensor<?x?x?xf32>
+
+// CHECK-LABEL: func.func @test_squeeze_dynamic_negative
+// CHECK-SAME: %[[CTX:.*]]: !hip.context, %[[DATA:.*]]: tensor<?x?x?x?xf32>)
+// CHECK-NOT: onnx.Squeeze
+// CHECK: %[[SLICE:.*]] = tensor.extract_slice %[[DATA]][0, 0, 0, 0] [%{{[^]]*}}, %{{[^]]*}}, %{{[^]]*}}, 1] [1, 1, 1, 1] : tensor<?x?x?x?xf32> to tensor<?x?x?x1xf32>
+// CHECK: %[[RESULT:.*]] = tensor.collapse_shape %[[SLICE]] {{\[\[}}0], [1], [2, 3]] : tensor<?x?x?x1xf32> into tensor<?x?x?xf32>
+// CHECK: return %[[RESULT]] : tensor<?x?x?xf32>
+
+// CHECK-LABEL: func.func @test_squeeze_dynamic_multiple
+// CHECK-SAME: %[[CTX:.*]]: !hip.context, %[[DATA:.*]]: tensor<?x?x?x?xf32>)
+// CHECK-NOT: onnx.Squeeze
+// CHECK: %[[SLICE:.*]] = tensor.extract_slice %[[DATA]][0, 0, 0, 0] [1, %{{[^]]*}}, 1, %{{[^]]*}}] [1, 1, 1, 1] : tensor<?x?x?x?xf32> to tensor<1x?x1x?xf32>
+// CHECK: %[[RESULT:.*]] = tensor.collapse_shape %[[SLICE]] {{\[\[}}0, 1], [2, 3]] : tensor<1x?x1x?xf32> into tensor<?x?xf32>
+// CHECK: return %[[RESULT]] : tensor<?x?xf32>
+
+// CHECK-LABEL: func.func @test_squeeze_duplicate_axis
+// CHECK: onnx.Squeeze
+// CHECK-NOT: tensor.collapse_shape
 
 // CHECK-LABEL: func.func @test_squeeze_dynamic_axis_operand
 // CHECK-SAME: %[[CTX:.*]]: !hip.context, %[[DATA:.*]]: tensor<?x?x?x?xf32>)
