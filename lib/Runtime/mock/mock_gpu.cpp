@@ -506,7 +506,7 @@ int wrap_rocmlir(RuntimeState *state, const char *kernel_binary,
   return 0;
 }
 
-int wrap_group_query_attention(
+int wrap_group_query_attention_host_length(
     RuntimeState *state, int op_state_slot,
     // Inputs 1-7 (core GQA)
     void *query, void *key, void *value, void *past_key, void *past_value,
@@ -532,7 +532,8 @@ int wrap_group_query_attention(
     // it).
     int64_t kv_bnsd,
     // key/value sequence length (mock stub ignores it).
-    int64_t seq_len_new_kv) {
+    int64_t seq_len_new_kv, int32_t has_host_length,
+    int32_t host_length_value) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_group_query_attention\n");
     return -1;
@@ -558,6 +559,8 @@ int wrap_group_query_attention(
   (void)attn_bias_num_heads;
   (void)kv_bnsd;
   (void)seq_len_new_kv;
+  (void)has_host_length;
+  (void)host_length_value;
 
   MOCK_PRINT("[MOCK] wrap_group_query_attention(\n");
   MOCK_PRINT("[MOCK]   num_heads=%lld, kv_num_heads=%lld,\n",
@@ -599,8 +602,9 @@ int wrap_group_query_attention_ring_f16(
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
     int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
-    int64_t seq_len_new_kv) {
-  return wrap_group_query_attention(
+    int64_t seq_len_new_kv, int32_t has_host_length,
+    int32_t host_length_value) {
+  return wrap_group_query_attention_host_length(
       state, op_state_slot, query, key, value, past_key, past_value, seqlens_k,
       total_seq_len, cos_cache, sin_cache, position_ids, attention_bias,
       head_sink, k_scale, v_scale, output, present_key, present_value,
@@ -608,7 +612,8 @@ int wrap_group_query_attention_ring_f16(
       softcap, local_window_size, smooth_softmax, qk_output, k_quant_type,
       v_quant_type, kv_cache_bit_width, no_causal, batch_size, seq_len_q,
       seq_len_kv, past_buf_seq, head_dim, element_size_bytes, attn_bias_batch,
-      attn_bias_num_heads, kv_bnsd, seq_len_new_kv);
+      attn_bias_num_heads, kv_bnsd, seq_len_new_kv, has_host_length,
+      host_length_value);
 }
 
 int wrap_multi_head_attention(
@@ -793,30 +798,33 @@ int wrap_dynamic_sparse_attention(
 int wrap_sparse_attention_indexer(
     RuntimeState *state, const void *query, const void *query_norm_weight,
     const void *key_norm_weight, const void *cos_cache, const void *sin_cache,
-    const void *mask, const void *past_key, void *selected_indices,
-    void *present_key, int64_t batch, int64_t seq_len, int64_t past_len,
-    int64_t num_heads, int64_t head_size, int64_t rotary_width,
-    int64_t rotary_rows, int64_t rotary_batched, int64_t compress_ratio,
-    int64_t token_budget, int64_t element_size_bytes, int64_t past_batch,
-    int64_t mask_batch, int64_t mask_len, int64_t cos_batch, int64_t sin_batch,
-    int64_t sin_rows, float epsilon, float scale) {
+    const void *mask, const void *past_sequence_length, const void *past_key,
+    void *selected_indices, void *present_key, int64_t batch, int64_t seq_len,
+    int64_t past_rows, int64_t present_rows, int64_t num_heads,
+    int64_t head_size, int64_t rotary_width, int64_t rotary_rows,
+    int64_t rotary_batched, int64_t compress_ratio, int64_t token_budget,
+    int64_t element_size_bytes, int64_t past_batch, int64_t mask_batch,
+    int64_t mask_len, int64_t cos_batch, int64_t sin_batch, int64_t sin_rows,
+    float epsilon, float scale) {
   if (!state || !query || !query_norm_weight || !key_norm_weight ||
-      !cos_cache || !sin_cache || (past_len > 0 && !past_key) ||
+      !cos_cache || !sin_cache || (past_rows > 0 && !past_key) ||
       !selected_indices || !present_key) {
     fprintf(stderr,
             "Invalid required argument in wrap_sparse_attention_indexer\n");
     return -1;
   }
+  (void)past_sequence_length;
+  (void)present_rows;
   (void)past_batch;
   (void)mask_batch;
   (void)mask_len;
   (void)cos_batch;
   (void)sin_batch;
   (void)sin_rows;
-  MOCK_PRINT("[MOCK] wrap_sparse_attention_indexer(B=%lld, S=%lld, P=%lld, "
-             "N=%lld, D=%lld, R=%lld, X=%lld, batched=%lld, r=%lld, "
-             "budget=%lld, elem=%lld, eps=%g, scale=%f, mask=%d)\n",
-             (long long)batch, (long long)seq_len, (long long)past_len,
+  MOCK_PRINT("[MOCK] wrap_sparse_attention_indexer(B=%lld, S=%lld, "
+             "past_rows=%lld, N=%lld, D=%lld, R=%lld, X=%lld, batched=%lld, "
+             "r=%lld, budget=%lld, elem=%lld, eps=%g, scale=%f, mask=%d)\n",
+             (long long)batch, (long long)seq_len, (long long)past_rows,
              (long long)num_heads, (long long)head_size,
              (long long)rotary_width, (long long)rotary_rows,
              (long long)rotary_batched, (long long)compress_ratio,

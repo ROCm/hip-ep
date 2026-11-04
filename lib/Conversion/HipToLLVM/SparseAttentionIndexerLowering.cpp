@@ -39,12 +39,15 @@ struct SparseAttentionIndexerOpLowering
     const int64_t headSize = pastType.getDimSize(2);
     const int64_t numHeads = queryType.getDimSize(2) / headSize - 1;
 
-    Value maskPtr =
-        adaptor.getMask()
-            ? extractContiguousMemRefPtr(adaptor.getMask(), rewriter, loc)
-            : LLVM::ZeroOp::create(rewriter, loc, ptrType).getResult();
+    auto presentType = cast<MemRefType>(op.getPresentKey().getType());
+    auto optionalPtr = [&](Value v) -> Value {
+      return v ? extractContiguousMemRefPtr(v, rewriter, loc)
+               : LLVM::ZeroOp::create(rewriter, loc, ptrType).getResult();
+    };
+    Value maskPtr = optionalPtr(adaptor.getMask());
+    Value pastSeqLenPtr = optionalPtr(adaptor.getPastSequenceLength());
 
-    SmallVector<Value, 29> args = {
+    SmallVector<Value, 31> args = {
         adaptor.getCtx(),
         extractContiguousMemRefPtr(adaptor.getQuery(), rewriter, loc),
         extractContiguousMemRefPtr(adaptor.getQueryNormWeight(), rewriter, loc),
@@ -52,12 +55,15 @@ struct SparseAttentionIndexerOpLowering
         extractContiguousMemRefPtr(adaptor.getCosCache(), rewriter, loc),
         extractContiguousMemRefPtr(adaptor.getSinCache(), rewriter, loc),
         maskPtr,
+        pastSeqLenPtr,
         extractContiguousMemRefPtr(adaptor.getPastKey(), rewriter, loc),
         extractContiguousMemRefPtr(adaptor.getSelectedIndices(), rewriter, loc),
         extractContiguousMemRefPtr(adaptor.getPresentKey(), rewriter, loc),
         getMemRefDimSize(queryType, 0, adaptor.getQuery(), rewriter, loc),
         getMemRefDimSize(queryType, 1, adaptor.getQuery(), rewriter, loc),
         getMemRefDimSize(pastType, 1, adaptor.getPastKey(), rewriter, loc),
+        getMemRefDimSize(presentType, 1, adaptor.getPresentKey(), rewriter,
+                         loc),
         createI64Const(numHeads),
         createI64Const(headSize),
         createI64Const(cosType.getDimSize(cosRank - 1)),
@@ -93,8 +99,8 @@ struct SparseAttentionIndexerOpLowering
     args.push_back(createF32Const(op.getEpsilon().convertToFloat()));
     args.push_back(createF32Const(op.getScale().convertToFloat()));
 
-    SmallVector<Type, 29> paramTypes(10, ptrType);
-    paramTypes.append(17, i64Type);
+    SmallVector<Type, 31> paramTypes(11, ptrType);
+    paramTypes.append(18, i64Type);
     paramTypes.append(2, f32Type);
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(

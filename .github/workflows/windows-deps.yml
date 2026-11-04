@@ -8,6 +8,13 @@ name: Windows Deps
 # uploads that tree as a workflow artifact. Callers restore the cache and, on a
 # miss, download the artifact: a later save can evict an entry before the build
 # job runs, and a lookup-only hit does not leave a copy in this run.
+#
+# Windows Build and Windows RMT Build both call this workflow. Each job's
+# concurrency group is per ref and commit, so the two callers of one event
+# queue on the same group and a cold key is built once. A group holds only one
+# pending job and cancels the older one; per commit, a newer push cannot cancel
+# a queued deps job of an earlier commit. Both callers of one event see the
+# same github.sha, which on a pull request is the test merge commit.
 on:
   workflow_call:
     outputs:
@@ -50,7 +57,7 @@ jobs:
   llvm:
     runs-on: windows-2022
     concurrency:
-      group: deps-llvm-${{ github.ref }}
+      group: deps-llvm-${{ github.ref }}-${{ github.sha }}
       cancel-in-progress: false
 
     outputs:
@@ -180,7 +187,7 @@ jobs:
   ort:
     runs-on: windows-2022
     concurrency:
-      group: deps-ort-${{ github.ref }}
+      group: deps-ort-${{ github.ref }}-${{ github.sha }}
       cancel-in-progress: false
 
     outputs:
@@ -321,7 +328,7 @@ jobs:
     needs: ort
     runs-on: windows-2022
     concurrency:
-      group: deps-amdgpu-${{ github.ref }}
+      group: deps-amdgpu-${{ github.ref }}-${{ github.sha }}
       cancel-in-progress: false
 
     outputs:
@@ -546,7 +553,7 @@ jobs:
     needs: ort
     runs-on: windows-2022
     concurrency:
-      group: deps-oga-${{ github.ref }}
+      group: deps-oga-${{ github.ref }}-${{ github.sha }}
       cancel-in-progress: false
 
     outputs:
