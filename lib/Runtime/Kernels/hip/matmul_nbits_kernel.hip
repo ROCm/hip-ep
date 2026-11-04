@@ -4637,10 +4637,13 @@ struct SmallMWmmaConfig {
 
 // tm x 16 rows and tn x 16 columns per workgroup, CPW chunks of 32 k per wave,
 // DB / DA chunks of B / A in flight per wave. The first three are the defaults
-// for M <= 16, M <= 32 and larger; the rest are alternatives for sweeps.
+// for M <= 16, M <= 32 and larger; the last two replace the first two when
+// only CPW 16 divides K / 32 (see smallMWmmaDefaultConfig); the rest are
+// alternatives for sweeps.
 static constexpr SmallMWmmaConfig kSmallMWmmaConfigs[] = {
     {1, 1, 18, 18, 2}, {2, 1, 18, 18, 1}, {4, 1, 10, 10, 1},
     {1, 1, 10, 10, 2}, {2, 1, 10, 10, 1}, {4, 1, 6, 6, 1},
+    {1, 1, 16, 16, 2}, {2, 1, 16, 16, 1},
 };
 static constexpr int kNumSmallMWmmaConfigs =
     static_cast<int>(sizeof(kSmallMWmmaConfigs) / sizeof(kSmallMWmmaConfigs[0]));
@@ -4895,10 +4898,15 @@ void MatMulNBitsWMMA_SmallM_Grouped(
 
 // Config chosen by tile height when the caller passes cfg < 0. Picked from a
 // sweep on gfx1151 with the gpt-oss expert shapes (fc1 N=5760 / fc2 N=2880,
-// K=2880, block 32).
-static int smallMWmmaDefaultConfig(int64_t M) {
-    if (M <= 16) return 0;
-    if (M <= 32) return 1;
+// K=2880, block 32). When CPW 18 leaves a short, guarded last wave but CPW 16
+// splits K / 32 evenly, the CPW 16 variant runs 9-12% faster (gfx1151, expert
+// shapes K=3072 and K=1024, block 128).
+static int smallMWmmaDefaultConfig(int64_t M, int64_t K) {
+    const int64_t nchunk = K / 32;
+    const bool cpw16 =
+        nchunk % 18 != 0 && nchunk % 16 == 0 && nchunk / 16 <= 16;
+    if (M <= 16) return cpw16 ? 6 : 0;
+    if (M <= 32) return cpw16 ? 7 : 1;
     return 2;
 }
 
@@ -4938,7 +4946,7 @@ extern "C" int hip_matmul_nbits_wmma_smallm_grouped_supported(
     int cfg, int64_t tile_rows, int64_t N, int64_t K, int64_t bits,
     int64_t block_size, int64_t element_size_bytes) {
   if (tile_rows <= 0) return 0;
-  if (cfg < 0) cfg = smallMWmmaDefaultConfig(tile_rows);
+  if (cfg < 0) cfg = smallMWmmaDefaultConfig(tile_rows, K);
   SmallMWmmaLaunch p;
   if (!smallMWmmaPlan(cfg, N, K, bits, block_size, element_size_bytes,
                       nullptr, 0, &p))
@@ -4948,7 +4956,8 @@ extern "C" int hip_matmul_nbits_wmma_smallm_grouped_supported(
 
 #define SMALLM_WMMA_CASES(X)                                                  \
     X(0, 1, 1, 18, 18, 2) X(1, 2, 1, 18, 18, 1) X(2, 4, 1, 10, 10, 1)         \
-    X(3, 1, 1, 10, 10, 2) X(4, 2, 1, 10, 10, 1) X(5, 4, 1, 6, 6, 1)
+    X(3, 1, 1, 10, 10, 2) X(4, 2, 1, 10, 10, 1) X(5, 4, 1, 6, 6, 1)          \
+    X(6, 1, 1, 16, 16, 2) X(7, 2, 1, 16, 16, 1)
 
 extern "C" int hip_matmul_nbits_wmma_smallm_grouped(
     void* stream, int cfg,
@@ -4959,7 +4968,7 @@ extern "C" int hip_matmul_nbits_wmma_smallm_grouped(
     int64_t bits, int64_t block_size, int64_t element_size_bytes) {
   if (max_row_tiles <= 0 || N <= 0 || K <= 0) return 0;
   if (tile_rows <= 0) return -1;
-  if (cfg < 0) cfg = smallMWmmaDefaultConfig(tile_rows);
+  if (cfg < 0) cfg = smallMWmmaDefaultConfig(tile_rows, K);
   SmallMWmmaLaunch p;
   if (!smallMWmmaPlan(cfg, N, K, bits, block_size, element_size_bytes,
                       zero_points, zp_packed_u4, &p))
@@ -4989,6 +4998,7 @@ extern "C" int hip_matmul_nbits_wmma_smallm_grouped(
     if (p.full) SMALLM_GROUPED_LAUNCH_ONE(TM, TN, CPW, DB, DA, true);         \
     else SMALLM_GROUPED_LAUNCH_ONE(TM, TN, CPW, DB, DA, false);               \
     break;
+  (void)hipGetLastError();
   switch (cfg) { SMALLM_WMMA_CASES(SMALLM_GROUPED_LAUNCH) }
 #undef SMALLM_GROUPED_LAUNCH
 #undef SMALLM_GROUPED_LAUNCH_ONE

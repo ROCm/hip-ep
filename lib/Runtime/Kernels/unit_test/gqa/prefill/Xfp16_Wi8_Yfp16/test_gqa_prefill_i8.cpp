@@ -368,7 +368,8 @@ extern "C" int hip_gqa_flash_prefill_v3_configured(
     void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
     int past_len, float scale, int local_window_size, const void* head_sink,
     int num_heads, int smooth_softmax,
-    int hb, int qw, int mt, int bkv, int nd);
+    int hb, int qw, int mt, int bkv, int nd,
+    const void* key_bias, int key_bias_stride);
 
 // Mirrors real/gqa.cpp: v8x at d256, v6x otherwise.
 static hipdnn_ep::GqaPrefillVariant prefill_variant(int d) {
@@ -656,7 +657,8 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
           nullptr, dQ, dKf16, dVf16, dO8, B, H, G, sq, skv, D, max_seq,
           past_len, scale, /*local_window_size=*/-1, /*head_sink=*/nullptr, H,
           /*smooth_softmax=*/0, selected_config.hb, selected_config.qw,
-          selected_config.mt, selected_config.bkv, selected_config.nd);
+          selected_config.mt, selected_config.bkv, selected_config.nd,
+          /*key_bias=*/nullptr, /*key_bias_stride=*/0);
       return;
     }
 #endif

@@ -258,8 +258,23 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
       }
     }
 
-    // Both runtime entry points accept the optional host length.
-    SmallVector<Type, 45> paramTypes = {
+    // key_bias [B or 1, T]: one fp16 row per batch entry, applied by the fused
+    // kernels per key. The runtime checks T against the KV length it scores.
+    Value keyBiasPtr = nullPtr;
+    Value keyBiasBatchVal = createI64Const(0);
+    Value keyBiasLenVal = createI64Const(0);
+    if (op.getKeyBias()) {
+      auto kbType = cast<MemRefType>(op.getKeyBias().getType());
+      keyBiasPtr =
+          extractContiguousMemRefPtr(adaptor.getKeyBias(), rewriter, loc);
+      keyBiasBatchVal =
+          getMemRefDimSize(kbType, 0, adaptor.getKeyBias(), rewriter, loc);
+      keyBiasLenVal =
+          getMemRefDimSize(kbType, 1, adaptor.getKeyBias(), rewriter, loc);
+    }
+
+    // Both runtime entry points accept the optional host length and key_bias.
+    SmallVector<Type, 48> paramTypes = {
         ptrType, // state
         i32Type, // op_state_slot
         // Inputs (14 pointers - some may be nullptr)
@@ -308,7 +323,10 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         i64Type, // kv_bnsd
         i64Type, // seq_len_new_kv
         i32Type, // has_host_length
-        i32Type  // host_length_value
+        i32Type, // host_length_value
+        ptrType, // key_bias
+        i64Type, // key_bias_batch
+        i64Type  // key_bias_len
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp =
@@ -333,7 +351,8 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         // Shape info (10 values)
         batchSizeVal, seqLenQVal, seqLenKVVal, pastBufSeqVal, headDimVal,
         elemSizeVal, attnBiasBatchVal, attnBiasNumHeadsVal, kvBnsdVal,
-        seqLenNewKVVal, hasHostLength, hostLength};
+        seqLenNewKVVal, hasHostLength, hostLength,
+        keyBiasPtr,     keyBiasBatchVal, keyBiasLenVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 

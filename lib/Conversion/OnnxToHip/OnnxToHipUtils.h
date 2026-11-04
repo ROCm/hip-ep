@@ -689,6 +689,14 @@ void populatePackBroadcastTo4DPatterns(RewritePatternSet &patterns,
 void populateAttentionWindowFoldPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
 
+/// Pre-lowering pattern set: fold a sigmoid + correction-bias router built
+/// outside a com.microsoft QMoE (TopK, GatherElements, ReduceSum and two
+/// ScatterElements feeding router_probs / router_weights) into
+/// `hip.qmoe {routing_type = "sigmoid_bias"}` over the fp32 logits. Must run
+/// before `convertComputeOps` rewrites the chain. See QMoEConversion.cpp.
+void populateQMoESigmoidRoutingFoldPatterns(RewritePatternSet &patterns,
+                                            MLIRContext *ctx);
+
 /// Pre-lowering pattern set: collapse ORT's inlined `FastGelu` primitive
 /// chain (Pow / Mul / Sum / Tanh) back into a single
 /// `onnx.Gelu(approximate="tanh")`. ORT inlines the Gelu function body

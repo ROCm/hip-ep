@@ -33,8 +33,8 @@ module {
 
 // CHECK-LABEL: llvm.func @ring_f16(
 // CHECK: %[[ABSENT:.*]] = llvm.mlir.constant(0 : i32) : i32
-// RING: llvm.call @wrap_group_query_attention_ring_f16({{.*}}, %[[ABSENT]], %[[ABSENT]])
-// DEFAULT: llvm.call @wrap_group_query_attention_host_length({{.*}}, %[[ABSENT]], %[[ABSENT]])
+// RING: llvm.call @wrap_group_query_attention_ring_f16({{.*}}, %[[ABSENT]], %[[ABSENT]], {{.*}})
+// DEFAULT: llvm.call @wrap_group_query_attention_host_length({{.*}}, %[[ABSENT]], %[[ABSENT]], {{.*}})
 
 // -----
 
@@ -42,8 +42,8 @@ module {
 // CHECK-LABEL: llvm.func @ring_host_length(
 // CHECK: llvm.store %[[LENGTH:arg[0-9]+]],
 // CHECK: %[[PRESENT:.*]] = llvm.mlir.constant(1 : i32) : i32
-// RING: llvm.call @wrap_group_query_attention_ring_f16({{.*}}, %[[PRESENT]], %[[LENGTH]])
-// DEFAULT: llvm.call @wrap_group_query_attention_host_length({{.*}}, %[[PRESENT]], %[[LENGTH]])
+// RING: llvm.call @wrap_group_query_attention_ring_f16({{.*}}, %[[PRESENT]], %[[LENGTH]], {{.*}})
+// DEFAULT: llvm.call @wrap_group_query_attention_host_length({{.*}}, %[[PRESENT]], %[[LENGTH]], {{.*}})
 func.func @ring_host_length(%ctx: !hip.context, %length: i32,
     %q: memref<1x1x6144xf16>, %k: memref<1x1x1024xf16>, %v: memref<1x1x1024xf16>,
     %total: memref<i32>, %out: memref<1x1x6144xf16>,

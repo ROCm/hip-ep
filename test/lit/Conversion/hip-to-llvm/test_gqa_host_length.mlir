@@ -8,10 +8,10 @@
 // CHECK: %[[A:.*]] = llvm.trunc {{.*}} : i64 to i32
 // CHECK: llvm.store %[[A]],
 // CHECK: %[[PRESENT_A:.*]] = llvm.mlir.constant(1 : i32) : i32
-// CHECK: llvm.call @wrap_group_query_attention_host_length({{.*}}, %[[PRESENT_A]], %[[A]])
+// CHECK: llvm.call @wrap_group_query_attention_host_length({{.*}}, %[[PRESENT_A]], %[[A]], {{.*}})
 // CHECK: llvm.store %[[B:arg[0-9]+]],
 // CHECK: %[[PRESENT_B:.*]] = llvm.mlir.constant(1 : i32) : i32
-// CHECK: llvm.call @wrap_group_query_attention_host_length({{.*}}, %[[PRESENT_B]], %[[B]])
+// CHECK: llvm.call @wrap_group_query_attention_host_length({{.*}}, %[[PRESENT_B]], %[[B]], {{.*}})
 func.func @distinct_lengths(%ctx: !hip.context, %a: i64, %b: i32,
     %q: memref<1x1x64xf16>, %total: memref<i32>, %out: memref<1x1x64xf16>,
     %pk: memref<1x1x128x64xf16>, %pv: memref<1x1x128x64xf16>) {
@@ -44,7 +44,7 @@ func.func @distinct_lengths(%ctx: !hip.context, %a: i64, %b: i32,
 // A later store can race with an earlier GPU reader.
 // CHECK-LABEL: llvm.func @rewritten_slot(
 // CHECK: %[[ABSENT:.*]] = llvm.mlir.constant(0 : i32) : i32
-// CHECK: llvm.call @wrap_group_query_attention_host_length({{.*}}, %[[ABSENT]], %[[ABSENT]])
+// CHECK: llvm.call @wrap_group_query_attention_host_length({{.*}}, %[[ABSENT]], %[[ABSENT]], {{.*}})
 func.func @rewritten_slot(%ctx: !hip.context, %a: i32, %b: i32, %q: memref<1x1x64xf16>,
     %total: memref<i32>, %out: memref<1x1x64xf16>, %pk: memref<1x1x128x64xf16>,
     %pv: memref<1x1x128x64xf16>) {
@@ -69,7 +69,7 @@ func.func @rewritten_slot(%ctx: !hip.context, %a: i32, %b: i32, %q: memref<1x1x6
 // CHECK-LABEL: llvm.func @device_writer(
 // CHECK: llvm.call @wrap_cast
 // CHECK: %[[ABSENT:.*]] = llvm.mlir.constant(0 : i32) : i32
-// CHECK: llvm.call @wrap_group_query_attention_host_length({{.*}}, %[[ABSENT]], %[[ABSENT]])
+// CHECK: llvm.call @wrap_group_query_attention_host_length({{.*}}, %[[ABSENT]], %[[ABSENT]], {{.*}})
 func.func @device_writer(%ctx: !hip.context, %a: i32, %source: memref<1xi64>,
     %q: memref<1x1x64xf16>, %total: memref<i32>, %out: memref<1x1x64xf16>,
     %pk: memref<1x1x128x64xf16>, %pv: memref<1x1x128x64xf16>) {
@@ -94,7 +94,7 @@ func.func @device_writer(%ctx: !hip.context, %a: i32, %source: memref<1xi64>,
 // Keep multi-element length inputs on the existing path.
 // CHECK-LABEL: llvm.func @multi_element(
 // CHECK: %[[ABSENT:.*]] = llvm.mlir.constant(0 : i32) : i32
-// CHECK: llvm.call @wrap_group_query_attention_host_length({{.*}}, %[[ABSENT]], %[[ABSENT]])
+// CHECK: llvm.call @wrap_group_query_attention_host_length({{.*}}, %[[ABSENT]], %[[ABSENT]], {{.*}})
 func.func @multi_element(%ctx: !hip.context, %a: i32, %b: i32, %q: memref<1x1x64xf16>,
     %total: memref<i32>, %out: memref<1x1x64xf16>, %pk: memref<1x1x128x64xf16>,
     %pv: memref<1x1x128x64xf16>) {

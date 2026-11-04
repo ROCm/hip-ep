@@ -117,6 +117,7 @@ buildHipGqaCall(mlir::Operation *op, mlir::PatternRewriter &rewriter,
   segmentSizes.push_back(0);                     // head_sink
   segmentSizes.push_back(0);                     // k_scale
   segmentSizes.push_back(0);                     // v_scale
+  segmentSizes.push_back(0);                     // key_bias
   segmentSizes.push_back(1);                     // output
   segmentSizes.push_back(1);                     // present_key
   segmentSizes.push_back(1);                     // present_value

@@ -132,6 +132,8 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/Sequence.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
@@ -147,6 +149,8 @@
 STATISTIC(NumAttentionWindowStamps,
           "Number of onnx.Attention ops stamped with a sliding window "
           "recovered from the additive mask subgraph");
+STATISTIC(NumAttentionKeyBiasFolds,
+          "Number of onnx.Attention masks reduced to a per-key bias row");
 
 namespace mlir {
 namespace hip {
@@ -621,11 +625,349 @@ struct AttentionStampMaskWindow : public mlir::RewritePattern {
   }
 };
 
+//===----------------------------------------------------------------------===//
+// Key-padding fold
+//===----------------------------------------------------------------------===//
+//
+// A causal decoder export with `is_causal = 1` very often still ships the
+// whole keep-condition in its additive mask:
+//
+//   keep = And(pad, causal [, window])
+//   mask = Unsqueeze(Cast_f16(Where(keep, 0.0, -65504.0)), [1])
+//
+//   with  pad    = Cast_bool(Unsqueeze(attention_mask, [1]))    [B, 1, T]
+//         causal = GreaterOrEqual(P, Q)                         [B, S, T]
+//         window = Less(Sub(P, Q), W)
+//
+// The causal conjunct repeats what `is_causal = 1` already applies, and the
+// window conjunct what `hipdnn.local_window_size` carries. Only `pad` adds
+// information, and it varies along the key axis alone. Rebuilding the mask
+// from that conjunct gives the same scores with a [B, 1, 1, T] mask instead
+// of [B, 1, S, T]:
+//
+//   mask' = Unsqueeze(Cast_f16(Where(pad, 0.0, -65504.0)), [1])  [B, 1, 1, T]
+//
+// and the op is stamped `hipdnn.key_bias_mask`, which tells
+// OnnxAttentionConversion to pass the row as hip.gqa's per-key `key_bias`
+// instead of a full `attention_bias`. That is what lets the fused flash
+// kernels serve the op: they add one bias value per key and keep their own
+// causal and window masking, where a full [S, T] bias would have to be
+// streamed per query row.
+//
+// Why dropping the causal and window conjuncts is exact. Both compare P and Q
+// drawn from one position sequence (the same provenance test the window fold
+// uses), while the runtime masks by absolute index. The two agree for every
+// query that is itself a real token and every key `pad` keeps, as long as the
+// attention mask's zeros are contiguous at one end -- left or right padding,
+// which is what generators emit: such a key at absolute index j and query at
+// absolute index i have positions j - L and i - L for the same pad count L,
+// so P >= Q is i >= j and P - Q < W is i - j < W. A key `pad` drops is
+// dropped by mask' too, whatever its position. The rows of padded queries may
+// change (a right-padded query's position is clamped, a left-padded one's row
+// is fully masked either way), but `pad` drops those positions as keys from
+// every row, so no real token's output depends on them. This is the same
+// assumption the window stamp already makes when it narrows the KV range by
+// absolute position.
+//
+// Recognition is all-or-nothing, unlike the window fold: every conjunct must
+// be understood, because every conjunct but `pad` is dropped. An Or anywhere,
+// a second per-key leg, or a leg that varies along the query axis without
+// being a recognized causal or window compare declines and leaves the mask
+// exactly as it was.
+
+/// Is `v` a boolean conjunct that varies only along the batch and key axes of
+/// a rank-`rank` keep-condition? Every axis between the first and the last
+/// must be a static 1. That is a statement about the value's type, which is
+/// what makes it safe: whatever produced it, broadcasting it into [B, .., T]
+/// cannot depend on the query.
+/// The ORT importer spells ONNX BOOL as ui8, so an And operand of either type
+/// is a boolean.
+static bool isPerKeyLeg(mlir::Value v, int64_t rank) {
+  auto t = mlir::dyn_cast<mlir::RankedTensorType>(v.getType());
+  if (!t || t.getRank() != rank || rank < 2)
+    return false;
+  mlir::Type elem = t.getElementType();
+  if (!elem.isInteger(1) && !elem.isUnsignedInteger(8))
+    return false;
+  for (int64_t i : llvm::seq<int64_t>(1, rank - 1))
+    if (t.getDimSize(i) != 1)
+      return false;
+  return true;
+}
+
+/// Split an And-tree into its conjuncts. Casts from i1 are looked through; a
+/// cast from any other type, ui8 included since it may be real uint8 data, is
+/// a nonzero test and stays a leaf.
+static bool collectConjuncts(mlir::Value v, int depth,
+                             llvm::SmallVectorImpl<mlir::Value> &out) {
+  if (depth > kMaxDepth || out.size() > 8)
+    return false;
+  mlir::Operation *def = v ? v.getDefiningOp() : nullptr;
+  llvm::StringRef name = def ? def->getName().getStringRef() : "";
+  if (name == "onnx.And" && def->getNumOperands() == 2)
+    return collectConjuncts(def->getOperand(0), depth + 1, out) &&
+           collectConjuncts(def->getOperand(1), depth + 1, out);
+  if ((name == "onnx.Cast" || name == "onnx.Identity") &&
+      def->getNumOperands() == 1) {
+    auto in = mlir::dyn_cast<mlir::ShapedType>(def->getOperand(0).getType());
+    if (in && in.getElementType().isInteger(1))
+      return collectConjuncts(def->getOperand(0), depth + 1, out);
+  }
+  if (!llvm::is_contained(out, v))
+    out.push_back(v);
+  return true;
+}
+
+/// Inline axes of an `onnx.Unsqueeze`, from the operand or the attribute.
+static std::optional<llvm::SmallVector<int64_t>>
+getUnsqueezeAxes(mlir::Operation *def) {
+  llvm::SmallVector<int64_t> axes;
+  if (def->getNumOperands() > 1) {
+    mlir::Operation *c = def->getOperand(1).getDefiningOp();
+    mlir::DenseElementsAttr dense;
+    if (auto cst = mlir::dyn_cast_or_null<mlir::arith::ConstantOp>(c))
+      dense = mlir::dyn_cast<mlir::DenseElementsAttr>(cst.getValue());
+    else if (c && c->getName().getStringRef() == "onnx.Constant")
+      dense = c->getAttrOfType<mlir::DenseElementsAttr>("value");
+    if (!dense || !dense.getElementType().isInteger())
+      return std::nullopt;
+    for (const llvm::APInt &a : dense.getValues<llvm::APInt>())
+      axes.push_back(a.getSExtValue());
+    return axes;
+  }
+  auto arr = def->getAttrOfType<mlir::ArrayAttr>("axes");
+  if (!arr)
+    return std::nullopt;
+  for (mlir::Attribute a : arr) {
+    auto i = mlir::dyn_cast<mlir::IntegerAttr>(a);
+    if (!i)
+      return std::nullopt;
+    axes.push_back(i.getValue().getSExtValue());
+  }
+  return axes;
+}
+
+/// The result type of `def` (a value-preserving op on the mask's path) when
+/// its data operand is narrowed to `in`. Only the ops whose result shape
+/// follows from the operand's are handled; anything else declines.
+static mlir::RankedTensorType retypeOnPath(mlir::Operation *def,
+                                           mlir::RankedTensorType in) {
+  auto out =
+      mlir::dyn_cast<mlir::RankedTensorType>(def->getResult(0).getType());
+  if (!out)
+    return {};
+  llvm::StringRef name = def->getName().getStringRef();
+  if (name == "onnx.Cast" || name == "onnx.Identity")
+    return mlir::RankedTensorType::get(in.getShape(), out.getElementType());
+  if (name != "onnx.Unsqueeze")
+    return {};
+  auto axes = getUnsqueezeAxes(def);
+  if (!axes)
+    return {};
+  const int64_t rank = in.getRank() + static_cast<int64_t>(axes->size());
+  if (out.getRank() != rank)
+    return {};
+  llvm::SmallVector<bool> inserted(rank, false);
+  for (int64_t a : *axes) {
+    if (a < 0)
+      a += rank;
+    // A trailing axis would move the key extent off the last dimension.
+    if (a < 0 || a >= rank - 1 || inserted[a])
+      return {};
+    inserted[a] = true;
+  }
+  llvm::SmallVector<int64_t> shape;
+  int64_t src = 0;
+  for (int64_t i : llvm::seq<int64_t>(rank))
+    shape.push_back(inserted[i] ? 1 : in.getDimSize(src++));
+  return mlir::RankedTensorType::get(shape, out.getElementType());
+}
+
+/// Clone `def` with its data operand replaced by `in` and its result retyped
+/// to `ty`, reusing an identical clone another Attention already made: the
+/// layers of a model share one mask, and each would otherwise rebuild it.
+/// The clone goes right before `def`, which every operand already dominates
+/// (`in` is an ancestor of `def`'s data operand or was placed before it). A
+/// reused op must precede `def` for the same reason.
+static mlir::Value cloneOnto(mlir::PatternRewriter &rewriter,
+                             mlir::Operation *def, mlir::Value in,
+                             mlir::RankedTensorType ty) {
+  for (mlir::Operation *user : in.getUsers()) {
+    if (user == def || user->getName() != def->getName() ||
+        user->getNumOperands() != def->getNumOperands() ||
+        user->getOperand(0) != in || user->getResult(0).getType() != ty ||
+        user->getAttrDictionary() != def->getAttrDictionary() ||
+        user->getBlock() != def->getBlock() || !user->isBeforeInBlock(def))
+      continue;
+    bool same = true;
+    for (unsigned i : llvm::seq<unsigned>(1, def->getNumOperands()))
+      same = same && user->getOperand(i) == def->getOperand(i);
+    if (same)
+      return user->getResult(0);
+  }
+  mlir::OpBuilder::InsertionGuard guard(rewriter);
+  rewriter.setInsertionPoint(def);
+  mlir::Operation *clone = rewriter.clone(*def);
+  clone->setOperand(0, in);
+  clone->getResult(0).setType(ty);
+  return clone->getResult(0);
+}
+
+struct AttentionFoldKeyPaddingMask : public mlir::RewritePattern {
+  AttentionFoldKeyPaddingMask(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Attention", /*benefit=*/2, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override {
+    if (op->hasAttr("hipdnn.key_bias_mask"))
+      return rewriter.notifyMatchFailure(op, "keybias.already_folded");
+    auto causalAttr = op->getAttrOfType<mlir::IntegerAttr>("is_causal");
+    if (!causalAttr || causalAttr.getValue().getSExtValue() != 1)
+      return rewriter.notifyMatchFailure(op, "keybias.not_is_causal");
+    if (op->getNumOperands() < 4)
+      return rewriter.notifyMatchFailure(op, "keybias.no_mask_operand");
+    mlir::Value mask = op->getOperand(3);
+    if (!mask || mlir::isa<mlir::NoneType>(mask.getType()))
+      return rewriter.notifyMatchFailure(op, "keybias.mask_is_none");
+
+    // The path from the mask down to its Where, outermost first. Only ops
+    // whose result shape follows from their operand's can be replayed onto
+    // the narrowed keep-condition.
+    llvm::SmallVector<mlir::Operation *> path;
+    mlir::Operation *select = nullptr;
+    for (mlir::Value cur = mask; !select && path.size() < 4;) {
+      mlir::Operation *def = cur.getDefiningOp();
+      if (!def)
+        break;
+      llvm::StringRef name = def->getName().getStringRef();
+      if (name == "onnx.Where") {
+        select = def;
+      } else if (name == "onnx.Cast" || name == "onnx.Identity" ||
+                 name == "onnx.Unsqueeze") {
+        path.push_back(def);
+        cur = def->getOperand(0);
+      } else {
+        break;
+      }
+    }
+    if (!select || select->getNumOperands() != 3)
+      return rewriter.notifyMatchFailure(op, "keybias.no_select_producer");
+    auto keepVal = getInlineScalarFloat(select->getOperand(1));
+    auto dropVal = getInlineScalarFloat(select->getOperand(2));
+    if (!keepVal || !dropVal || *keepVal != 0.0 || *dropVal > kDropThreshold)
+      return rewriter.notifyMatchFailure(op, "keybias.select_arms_not_0_neg");
+    for (int i : {1, 2}) {
+      auto arm = mlir::dyn_cast<mlir::RankedTensorType>(
+          select->getOperand(i).getType());
+      if (!arm || arm.getNumElements() != 1)
+        return rewriter.notifyMatchFailure(op, "keybias.select_arm_not_scalar");
+    }
+
+    mlir::Value keep = select->getOperand(0);
+    auto keepTy = mlir::dyn_cast<mlir::RankedTensorType>(keep.getType());
+    if (!keepTy || keepTy.getRank() < 2)
+      return rewriter.notifyMatchFailure(op, "keybias.keep_unranked");
+    llvm::SmallVector<mlir::Value> conjuncts;
+    if (!collectConjuncts(keep, /*depth=*/0, conjuncts))
+      return rewriter.notifyMatchFailure(op, "keybias.keep_too_deep");
+
+    // Classify every conjunct. Causal compares are kept by (P, Q) so a window
+    // bound can be checked against one of them.
+    mlir::Value keyLeg;
+    llvm::SmallVector<std::pair<mlir::Value, mlir::Value>> causal;
+    llvm::SmallVector<std::tuple<mlir::Value, mlir::Value, int64_t>> bounds;
+    for (mlir::Value c : conjuncts) {
+      mlir::Value p, q;
+      int64_t w = 0;
+      int visited = 0;
+      // The bound first: `W >= Sub(P, Q)` is also a GreaterOrEqual.
+      if (matchDistanceBound(c, p, q, w)) {
+        bounds.emplace_back(p, q, w);
+      } else if (matchCausalCompare(c, p, q)) {
+        auto pAxis = getUnsqueezeAxis(p);
+        auto qAxis = getUnsqueezeAxis(q);
+        if (!hasSharedPositionSource(p, q, visited) ||
+            (pAxis && qAxis && *pAxis < *qAxis))
+          return rewriter.notifyMatchFailure(op, "keybias.causal_unproven");
+        causal.emplace_back(p, q);
+      } else if (isPerKeyLeg(c, keepTy.getRank()) && !keyLeg) {
+        keyLeg = c;
+      } else {
+        return rewriter.notifyMatchFailure(op, "keybias.unrecognized_conjunct");
+      }
+    }
+    if (!keyLeg)
+      return rewriter.notifyMatchFailure(op, "keybias.no_key_leg");
+    std::optional<int64_t> window;
+    for (auto [p, q, w] : bounds) {
+      // The causal compare over the same (P, Q) is what orients the bound;
+      // without one, `P - Q < W` could equally bound the future.
+      if (w <= 0 || !llvm::is_contained(causal, std::make_pair(p, q)))
+        return rewriter.notifyMatchFailure(op, "keybias.window_unproven");
+      window = window ? std::min(*window, w) : w;
+    }
+    if (auto stamped =
+            op->getAttrOfType<mlir::IntegerAttr>("hipdnn.local_window_size")) {
+      if (stamped.getValue().getSExtValue() != window.value_or(-1))
+        return rewriter.notifyMatchFailure(op, "keybias.window_disagrees");
+    }
+
+    // Replay the Where and the layout path onto the key leg, innermost first.
+    auto keyTy = mlir::cast<mlir::RankedTensorType>(keyLeg.getType());
+    const int64_t last = keyTy.getRank() - 1;
+    if (keyTy.getDimSize(last) == 1 && keepTy.getDimSize(last) != 1)
+      return rewriter.notifyMatchFailure(op, "keybias.key_leg_broadcast");
+    auto selTy =
+        mlir::dyn_cast<mlir::RankedTensorType>(select->getResult(0).getType());
+    if (!selTy || selTy.getRank() != keyTy.getRank())
+      return rewriter.notifyMatchFailure(op, "keybias.select_rank");
+    llvm::SmallVector<mlir::RankedTensorType> types;
+    mlir::RankedTensorType curTy =
+        mlir::RankedTensorType::get(keyTy.getShape(), selTy.getElementType());
+    types.push_back(curTy);
+    for (mlir::Operation *def : llvm::reverse(path)) {
+      curTy = retypeOnPath(def, curTy);
+      if (!curTy)
+        return rewriter.notifyMatchFailure(op, "keybias.path_not_replayable");
+      types.push_back(curTy);
+    }
+    auto maskTy = mlir::dyn_cast<mlir::RankedTensorType>(mask.getType());
+    if (!maskTy || curTy.getRank() != 4 || maskTy.getRank() != 4 ||
+        curTy.getDimSize(1) != 1 || curTy.getDimSize(2) != 1 ||
+        curTy.getElementType() != maskTy.getElementType())
+      return rewriter.notifyMatchFailure(op, "keybias.result_not_b11t");
+    // hip.gqa's key_bias is an fp16 row.
+    if (!maskTy.getElementType().isF16())
+      return rewriter.notifyMatchFailure(op, "keybias.mask_not_f16");
+
+    mlir::Value v = cloneOnto(rewriter, select, keyLeg, types.front());
+    for (auto [def, ty] :
+         llvm::zip(llvm::reverse(path), llvm::drop_begin(types)))
+      v = cloneOnto(rewriter, def, v, ty);
+
+    rewriter.modifyOpInPlace(op, [&] {
+      op->setOperand(3, v);
+      op->setAttr("hipdnn.key_bias_mask", rewriter.getUnitAttr());
+      if (window)
+        op->setAttr("hipdnn.local_window_size",
+                    rewriter.getI64IntegerAttr(*window));
+    });
+    LLVM_DEBUG(llvm::dbgs()
+               << "[" DEBUG_TYPE "] folded the attention mask to a "
+               << "per-key bias row (" << conjuncts.size()
+               << " conjuncts, window " << window.value_or(-1) << ")\n");
+    ++NumAttentionKeyBiasFolds;
+    return mlir::success();
+  }
+};
+
 } // namespace
 
 void populateAttentionWindowFoldPatterns(mlir::RewritePatternSet &patterns,
                                          mlir::MLIRContext *ctx) {
   patterns.add<AttentionStampMaskWindow>(ctx);
+  patterns.add<AttentionFoldKeyPaddingMask>(ctx);
 }
 
 } // namespace hip
