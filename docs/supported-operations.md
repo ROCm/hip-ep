@@ -106,17 +106,20 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | RotaryEmbedding (`ai.onnx`) | Custom HIP kernel |
 | MRotaryEmbedding (`com.microsoft`) | Custom HIP kernel. Rank-3 input, `interleaved=0`, `is_packed_batching=0`, f16/f32 |
 | GroupQueryAttention (`com.microsoft`) | Custom HIP kernels and hipBLASLt |
-| SparseAttentionIndexer (`com.microsoft`) | Custom HIP kernels, wave32 (RDNA) only. `qsa` policy with packed QK, head size 128, up to 8 heads, `token_budget / compress_ratio` ≤ 512, f16/f32; no `past_sequence_length` |
+| SparseAttentionIndexer (`com.microsoft`) | Custom HIP kernels, wave32 (RDNA) only. `qsa` policy with packed QK, head size 128, up to 8 heads, `token_budget / compress_ratio` ≤ 512, f16/f32. With `past_sequence_length`, `past_key` / `present_key` are max-capacity caches that may share one buffer |
 | DynamicSparseAttention (`com.microsoft`) | Custom HIP kernel (WMMA), wave32 (RDNA) only. `selected_only` over the main KV cache, head size 128 or 256, up to 16 query heads per KV head, f16; no rotary, q/k norm or `head_sink` |
 | MultiHeadAttention (`com.microsoft`) | Lowered to GroupQueryAttention or decomposed hipBLASLt/custom-kernel paths |
 | Attention (`com.microsoft`) | Fused QKV split into GroupQueryAttention. Equal Q/K/V sizes may be inferred from a `[H, 3H]` weight. Bidirectional and causal, with static or dynamic batch and sequence. A rank-1 length or rank-2 padding mask becomes an additive attention bias. |
 | Attention (`ai.onnx`, opset 23/24) | Lowered to GroupQueryAttention for supported rank-3/rank-4, causal/masked, output, and KV-cache forms |
 | MatMulNBits (`com.microsoft`) | Custom HIP kernel |
 | MatMulBnb4 (`com.microsoft`) | HIP dequant of FP4 (`quant_type` 0) or NF4 (`quant_type` 1) into `[N, K]`, then `hip.matmul` with `transB = 1`. The first packed value is the high nibble. Static shapes pull that dequant into the rocMLIR matmul kernel. A dynamic activation leaves the dequant on HIP and the GEMM on hipBLASLt. Block size 16, 32, 64, 128, or 256. `transB` must be 1 and `training_mode` must be 0 |
-| QMoE (`com.microsoft`) | Custom HIP kernel |
+| QMoE (`com.microsoft`) | Custom HIP kernel. FP16 activations with 2-bit or 4-bit expert weights in the schema `[E, N, K/pack]` layout. Block size must be a power of two and at least 32 |
 | GatherBlockQuantized (`com.microsoft`) | Custom HIP kernel |
 | QuantizeLinear | Custom HIP kernel |
+| DynamicQuantizeLinear | Decomposed to single-axis ReduceMin/ReduceMax, scale and zero-point math, and `hip.quantize_linear` with axis 0. A zero input range selects scale 1 |
 | DequantizeLinear | Custom HIP kernel |
+| ConvInteger | Decomposed to Cast, Sub, and `hip.conv`, then Cast back to i32 when `65025 * (C/group) * product(kernel_shape)` fits in the f32 mantissa. A longer reduction accumulates in i32 and is not rewritten to `hip.gemm`. Rank-3 NCL and rank-4 NCHW with a static or dynamic batch; channels, spatial dimensions, and weights must be static. Rank-3 is expanded to the shared 2D path. Scalar or per-output-channel weight zero point |
+| MatMulInteger | Decomposed to Cast, Sub, and `hip.matmul`, then Cast back to i32 when `65025 * K` fits in the f32 mantissa. A longer K accumulates in i32. Rank 2–4. A static rank-2 B may be shared across dynamic batch and sequence dimensions, including a dynamic M. B's K and N stay static. An uninferred K on A still lowers and accumulates in i32. A per-row zero point requires a static M. A size-1 batch on A is expanded to the result batch. A rank-2 B stays one shared matrix, and an i32 `hip.matmul` passes batch stride 0 for it. Scalar or per-row / per-column zero point |
 | QLinearConv | Custom HIP kernel. 8-bit grouped NCHW, optional int32 bias. `NOTSET` uses the pads attribute. `VALID`, `SAME_UPPER`, and `SAME_LOWER` are resolved to explicit pads. Separate from the W4A16 `hip.qconv` fusion |
 | QLinearAdd (`com.microsoft`) | Decomposed to DequantizeLinear + Add + QuantizeLinear; per-tensor scales fuse to `hip.qadd` |
 | QLinearMul (`com.microsoft`) | Decomposed to DequantizeLinear + Mul + QuantizeLinear; per-tensor scales fuse to `hip.qmul` |
@@ -139,7 +142,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | MaxPool | Custom HIP kernel (f16/bf16/f32/f64, and i8/ui8) |
 | AveragePool | Custom HIP kernel |
 | LpPool | Custom HIP kernel |
-| Resize | Custom HIP kernel. nearest and linear on f16/bf16/f32/f64; nearest also on int8/uint8. A dynamic extent comes from a constant `scales` vector, or from a `sizes` vector read back to a host index when `scales` is absent |
+| Resize | Custom HIP kernel. nearest and linear on f16/bf16/f32/f64 and on int8/uint8. Integer linear interpolates the stored codes and truncates toward zero. A dynamic extent comes from a constant `scales` vector, or from a `sizes` vector read back to a host index when `scales` is absent |
 | Upsample | Lowered through Resize (`asymmetric`, nearest `floor`). Schema 9 passes `scales` as an input; opset 7–8 stores them as an f32 attribute |
 | GridSample | Custom HIP kernel |
 | GlobalAveragePool | Custom HIP kernel |

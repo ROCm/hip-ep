@@ -13,6 +13,22 @@
 
 message(STATUS "Configuring MLIR dialect/pass unit tests")
 
+add_executable(test-runtime-lowering-contracts
+  test_runtime_lowering_contracts.cpp
+)
+target_include_directories(test-runtime-lowering-contracts PRIVATE
+  ${CMAKE_SOURCE_DIR}/lib/Conversion/HipToLLVM
+  ${MLIR_INCLUDE_DIRS}
+  ${LLVM_INCLUDE_DIRS}
+)
+target_link_libraries(test-runtime-lowering-contracts PRIVATE
+  HipToLLVM
+  MLIRParser
+)
+add_test(NAME RuntimeLoweringContractsUnit
+  COMMAND test-runtime-lowering-contracts
+)
+
 add_executable(test-hipsr-externalize-constants test_externalize_constants.cpp)
 
 target_compile_features(test-hipsr-externalize-constants PRIVATE cxx_std_17)
@@ -93,4 +109,25 @@ add_test(NAME QLpNormalizationRefUnit
 
 set_target_properties(test-qlpnormalization-ref PROPERTIES
   FOLDER "mlir/Test/Dialect/Hipsr"
+)
+
+# GPU-free tests for the rocMLIR autotune candidate selection. The selection
+# file has no HIP or MLIR dependency, so it compiles here directly.
+add_executable(test-adaptive-benchmark
+  test_adaptive_benchmark.cpp
+  ${CMAKE_SOURCE_DIR}/lib/Compiler/AdaptiveBenchmark.cpp
+)
+
+target_compile_features(test-adaptive-benchmark PRIVATE cxx_std_17)
+
+target_include_directories(test-adaptive-benchmark PRIVATE
+  ${CMAKE_SOURCE_DIR}/include
+)
+
+add_test(NAME AdaptiveBenchmarkUnit
+  COMMAND test-adaptive-benchmark
+)
+
+set_target_properties(test-adaptive-benchmark PROPERTIES
+  FOLDER "mlir/Test/Compiler"
 )

@@ -931,7 +931,8 @@ def Hip_QMoEOp : Hip_DpsOp_WithInfer<"qmoe", "Output", [AttrSizedOperandSegments
     Mixture-of-Experts with top-k expert routing and optional SwiGLU activation.
 
     Routes each token to its top-k experts, performs quantized linear
-    projections (fc1 gate+up, fc2 down) per expert with int4 dequantization,
+    projections (fc1 gate+up, fc2 down) per expert with 2-bit or 4-bit
+    dequantization,
     applies activation (SwiGLU by default), and combines expert outputs.
 
     SwiGLU formula (when swiglu_fusion=1, interleaved in fc1 output):
@@ -944,8 +945,8 @@ def Hip_QMoEOp : Hip_DpsOp_WithInfer<"qmoe", "Output", [AttrSizedOperandSegments
     has no gate/linear split):
       result = relu(fc1_out)^2
 
-    Weight packing follows MatMulNBits convention: uint8 packed,
-    dequantized = (quantized - 8) * scale for 4-bit weights.
+    Weight packing follows MatMulNBits convention. The default zero point is
+    half of the unsigned quantized range.
 
     Optional inputs per spec:
       fc1_experts_bias, fc2_experts_bias: bias vectors (optional)
@@ -2865,7 +2866,8 @@ def Hip_SwigluOp : Hip_DpsOp_AutoReify<"swiglu"> {
 
     The operands and output must have identical shapes; this operation does
     not perform broadcasting. The fused runtime kernel supports f16, f32,
-    bf16, and f64.
+    bf16, and f64. With promote_activation, f16 inputs and output use f32
+    sigmoid and multiply intermediates; only the final result rounds to f16.
 
     Example:
     ```mlir
@@ -2879,7 +2881,8 @@ def Hip_SwigluOp : Hip_DpsOp_AutoReify<"swiglu"> {
     Hip_ContextType:$ctx,
     Hip_TensorOrMemRef:$gate,
     Hip_TensorOrMemRef:$up,
-    Hip_TensorOrMemRef:$output
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<BoolAttr, "false">:$promote_activation
   );
 
   let assemblyFormat = [{
@@ -3637,6 +3640,10 @@ def Hip_ReduceSumOp : Hip_DpsOp_Reduction<"reduce_sum"> {
     Combined with noop_with_empty_axes attribute, this enables ONNX-compliant
     optional axes semantics while keeping all operands required.
 
+    `reduced_axes` is set when `axes` is a compile-time constant: the
+    normalized, sorted reduced axes. The LLVM lowering derives the inner
+    stride from it; without it the stride is inferred from the shapes.
+
     Example:
     ```mlir
     hip.reduce_sum(%ctx) ins(%data, %axes : memref<1x128xi64, 1>, memref<i64, 1>)
@@ -3650,7 +3657,8 @@ def Hip_ReduceSumOp : Hip_DpsOp_Reduction<"reduce_sum"> {
     Hip_TensorOrMemRef:$axes,
     Hip_TensorOrMemRef:$output,
     DefaultValuedAttr<I64Attr, "1">:$keepdims,
-    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes
+    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes,
+    OptionalAttr<DenseI64ArrayAttr>:$reduced_axes
   );
 
   let assemblyFormat = [{
@@ -3680,6 +3688,10 @@ def Hip_ReduceMeanOp : Hip_DpsOp_Reduction<"reduce_mean"> {
     Combined with noop_with_empty_axes attribute, this enables ONNX-compliant
     optional axes semantics while keeping all operands required.
 
+    `reduced_axes` is set when `axes` is a compile-time constant: the
+    normalized, sorted reduced axes. The LLVM lowering derives the inner
+    stride from it; without it the stride is inferred from the shapes.
+
     Example:
     ```mlir
     hip.reduce_mean(%ctx) ins(%data, %axes : memref<1x128xf16, 1>, memref<i64, 1>)
@@ -3693,7 +3705,8 @@ def Hip_ReduceMeanOp : Hip_DpsOp_Reduction<"reduce_mean"> {
     Hip_TensorOrMemRef:$axes,
     Hip_TensorOrMemRef:$output,
     DefaultValuedAttr<I64Attr, "1">:$keepdims,
-    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes
+    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes,
+    OptionalAttr<DenseI64ArrayAttr>:$reduced_axes
   );
 
   let assemblyFormat = [{
@@ -3719,6 +3732,10 @@ def Hip_ReduceL2Op : Hip_DpsOp_Reduction<"reduce_l2"> {
     Combined with noop_with_empty_axes attribute, this enables ONNX-compliant
     optional axes semantics while keeping all operands required.
 
+    `reduced_axes` is set when `axes` is a compile-time constant: the
+    normalized, sorted reduced axes. The LLVM lowering derives the inner
+    stride from it; without it the stride is inferred from the shapes.
+
     Example:
     ```mlir
     hip.reduce_l2(%ctx) ins(%data, %axes : memref<128x3x256x32xf16, 1>, memref<1xi64, 1>)
@@ -3732,7 +3749,8 @@ def Hip_ReduceL2Op : Hip_DpsOp_Reduction<"reduce_l2"> {
     Hip_TensorOrMemRef:$axes,
     Hip_TensorOrMemRef:$output,
     DefaultValuedAttr<I64Attr, "1">:$keepdims,
-    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes
+    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes,
+    OptionalAttr<DenseI64ArrayAttr>:$reduced_axes
   );
 
   let assemblyFormat = [{
@@ -3754,6 +3772,10 @@ def Hip_ReduceMaxOp : Hip_DpsOp_Reduction<"reduce_max"> {
     Combined with noop_with_empty_axes attribute, this enables ONNX-compliant
     optional axes semantics while keeping all operands required.
 
+    `reduced_axes` is set when `axes` is a compile-time constant: the
+    normalized, sorted reduced axes. The LLVM lowering derives the inner
+    stride from it; without it the stride is inferred from the shapes.
+
     Example:
     ```mlir
     hip.reduce_max(%ctx) ins(%data, %axes : memref<1x128xi64, 1>, memref<i64, 1>)
@@ -3767,7 +3789,8 @@ def Hip_ReduceMaxOp : Hip_DpsOp_Reduction<"reduce_max"> {
     Hip_TensorOrMemRef:$axes,
     Hip_TensorOrMemRef:$output,
     DefaultValuedAttr<I64Attr, "1">:$keepdims,
-    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes
+    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes,
+    OptionalAttr<DenseI64ArrayAttr>:$reduced_axes
   );
 
   let assemblyFormat = [{
@@ -3789,6 +3812,10 @@ def Hip_ReduceMinOp : Hip_DpsOp_Reduction<"reduce_min"> {
     Combined with noop_with_empty_axes attribute, this enables ONNX-compliant
     optional axes semantics while keeping all operands required.
 
+    `reduced_axes` is set when `axes` is a compile-time constant: the
+    normalized, sorted reduced axes. The LLVM lowering derives the inner
+    stride from it; without it the stride is inferred from the shapes.
+
     Example:
     ```mlir
     hip.reduce_min(%ctx) ins(%data, %axes : memref<1x128xi64, 1>, memref<i64, 1>)
@@ -3802,7 +3829,8 @@ def Hip_ReduceMinOp : Hip_DpsOp_Reduction<"reduce_min"> {
     Hip_TensorOrMemRef:$axes,
     Hip_TensorOrMemRef:$output,
     DefaultValuedAttr<I64Attr, "1">:$keepdims,
-    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes
+    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes,
+    OptionalAttr<DenseI64ArrayAttr>:$reduced_axes
   );
 
   let assemblyFormat = [{
@@ -4670,13 +4698,14 @@ def Hip_DynamicSparseAttentionOp : Hip_DpsOp_AutoReify<"dynamic_sparse_attention
   let hasVerifier = 1;
 }
 
-def Hip_SparseAttentionIndexerOp : Hip_DpsOp_AutoReify<"sparse_attention_indexer"> {
+def Hip_SparseAttentionIndexerOp : Hip_DpsOp_AutoReify<"sparse_attention_indexer",
+    [AttrSizedOperandSegments]> {
   let summary = "Query-aware selection of KV token blocks "
                 "(com.microsoft SparseAttentionIndexer, policy_mode = qsa)";
   let description = [{
     com.microsoft SparseAttentionIndexer restricted to policy_mode = qsa with
-    packed QK (no separate key) and no past_sequence_length, so present_key
-    is past_key with the new keys appended.
+    packed QK (no separate key). present_key holds the P valid past_key rows
+    with the new keys appended.
 
     Shapes, with N query heads (at most 8), D = 128, R the rotary width
     (even, <= D),
@@ -4687,8 +4716,12 @@ def Hip_SparseAttentionIndexerOp : Hip_DpsOp_AutoReify<"sparse_attention_indexer
       cos/sin_cache       [X, R] or [B, X, R]
       mask (optional)     [B, T]                i64, nonzero = visible
       past_key            [B, P, D]
+      past_sequence_length (optional) [1]       i32
       selected_indices    [B, S, K * r + r - 1] i32
       present_key         [B, T, D]
+    With past_sequence_length, P is its value and past_key / present_key
+    are both [B, C, D] with T <= C. They may alias, in which case only rows
+    P .. T - 1 of present_key are written.
     The last dims of past_key, present_key and selected_indices must be
     static, epsilon finite and non-negative. Dynamic dims are checked against
     these shapes at run time.
@@ -4727,6 +4760,7 @@ def Hip_SparseAttentionIndexerOp : Hip_DpsOp_AutoReify<"sparse_attention_indexer
     Hip_TensorOrMemRef:$sin_cache,
     Hip_TensorOrMemRef:$past_key,
     Optional<Hip_TensorOrMemRef>:$mask,
+    Optional<Hip_TensorOrMemRef>:$past_sequence_length,
     Hip_TensorOrMemRef:$selected_indices,
     Hip_TensorOrMemRef:$present_key,
     I64Attr:$compress_ratio,
@@ -4744,6 +4778,8 @@ def Hip_SparseAttentionIndexerOp : Hip_DpsOp_AutoReify<"sparse_attention_indexer
         type($past_key)
     `)`
     (`mask` `(` $mask^ `:` type($mask) `)`)?
+    (`past_sequence_length` `(` $past_sequence_length^ `:`
+        type($past_sequence_length) `)`)?
     `outs` `(` $selected_indices `,` $present_key `:`
               type($selected_indices) `,` type($present_key) `)`
     attr-dict (`:` type($result_tensors)^)?
@@ -5014,6 +5050,10 @@ def Hip_ReduceProdOp : Hip_DpsOp_Reduction<"reduce_prod"> {
     Combined with noop_with_empty_axes attribute, this enables ONNX-compliant
     optional axes semantics while keeping all operands required.
 
+    `reduced_axes` is set when `axes` is a compile-time constant: the
+    normalized, sorted reduced axes. The LLVM lowering derives the inner
+    stride from it; without it the stride is inferred from the shapes.
+
     Example:
     ```mlir
     hip.reduce_prod(%ctx) ins(%data, %axes : memref<3x2x2xf32, 1>, memref<0xi64, 1>)
@@ -5027,7 +5067,8 @@ def Hip_ReduceProdOp : Hip_DpsOp_Reduction<"reduce_prod"> {
     Hip_TensorOrMemRef:$axes,
     Hip_TensorOrMemRef:$output,
     DefaultValuedAttr<I64Attr, "1">:$keepdims,
-    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes
+    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes,
+    OptionalAttr<DenseI64ArrayAttr>:$reduced_axes
   );
 
   let assemblyFormat = [{

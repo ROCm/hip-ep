@@ -167,6 +167,27 @@ extern "C" int wrap_linear_attention(
 
   int result = 0;
 
+  // Decode and short bursts (speculative verify) run every step in one launch
+  // that reads past_state and writes present_state directly, so they skip the
+  // state copy below as well as the chunked scan's extra launches.
+  if (seq_len <= hipdnn_ep_la_burst_max_tokens()) {
+    const int rc = hip_linear_attention_burst(
+        hip_stream, query, key, value, decay, beta, past_state, present_state,
+        output, B, seq_len, Hq, Hkv, Nk, dk, dv, scale, update_rule,
+        decay_per_key_dim, beta_per_head, type);
+    if (rc == 0) {
+      RUNTIME_DEBUG_LOG("[linear_attention] burst kernel (%lld token(s))\n",
+                        (long long)seq_len);
+      goto cleanup;
+    }
+    if (rc < 0) {
+      fprintf(stderr, "[linear_attention] ERROR: burst kernel failed (%d)\n",
+              rc);
+      result = -1;
+      goto cleanup;
+    }
+  }
+
   // Initialize present_state from past_state (or zeros) before dispatching any
   // update rule or execution path. Use a compute-stream kernel rather than
   // hipMemcpyAsync(D2D): LA state may live in host-mapped memory, where the

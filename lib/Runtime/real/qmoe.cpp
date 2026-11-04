@@ -69,14 +69,13 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
                     (long long)expert_weight_bits, (long long)block_size,
                     (long long)elem_size);
 
-  // Guard against pathological metadata: block_size==0 would otherwise crash
-  // with STATUS_INTEGER_DIVIDE_BY_ZERO inside the k_blocks computations below
-  // (and produces invalid quant layouts even at >0 if not a multiple of 2).
-  if (block_size <= 0 || (block_size & 1) != 0) {
+  if (expert_weight_bits != 2 && expert_weight_bits != 4) {
+    fprintf(stderr, "wrap_qmoe: expert_weight_bits must be 2 or 4\n");
+    return -1;
+  }
+  if (block_size < 32 || (block_size & (block_size - 1)) != 0) {
     fprintf(stderr,
-            "wrap_qmoe: invalid block_size=%lld (must be a positive even "
-            "value matching the weights' quant block layout)\n",
-            (long long)block_size);
+            "wrap_qmoe: block_size must be a power of two and at least 32\n");
     return -1;
   }
   if (hidden_size <= 0 || inter_size <= 0 || num_experts <= 0 || k <= 0 ||
@@ -162,10 +161,14 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   // fc2 slot activations ([k, inter]). Sized unconditionally (a few KB) so the
   // offset layout is identical whether or not dp4a runs; the fp path ignores
   // them. k_blocks_fc1 == n_blk_in, k_blocks_fc2 == n_blk_mid.
-  size_t sz_a_qb_in = align_up_64(hidden_size * sizeof(int8_t));
-  size_t sz_a_scale_in = align_up_64(k_blocks_fc1 * sizeof(float));
-  size_t sz_a_qb_mid = align_up_64(k * inter_size * sizeof(int8_t));
-  size_t sz_a_scale_mid = align_up_64(k * k_blocks_fc2 * sizeof(float));
+  // A fused burst quantizes all of its tokens at once, so these scale with
+  // num_tokens.
+  size_t sz_a_qb_in = align_up_64(num_tokens * hidden_size * sizeof(int8_t));
+  size_t sz_a_scale_in = align_up_64(num_tokens * k_blocks_fc1 * sizeof(float));
+  size_t sz_a_qb_mid =
+      align_up_64(num_tokens * k * inter_size * sizeof(int8_t));
+  size_t sz_a_scale_mid =
+      align_up_64(num_tokens * k * k_blocks_fc2 * sizeof(float));
   // Grouped prefill only: the gathered fc1 input rows, the two row-tile lists
   // (3 int32 per tile) and their device-side lengths.
   size_t sz_gather_buf =
@@ -248,42 +251,67 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
       stream, router_probs, router_weights, d_expert_indices, d_expert_weights,
       num_tokens, num_experts, k, normalize_routing_weights, elem_size));
 
-  // Fused decode fast path: single-token MoE collapses to three back-to-back
-  // kernel launches (FC1+SwiGLU, FC2, weighted reduce) with zero D2H,
-  // hipStreamSynchronize, or host-side bucketing. Replaces the multi-pass
-  // bucket -> sync -> per-active-expert (gather, fc1, swiglu, fc2,
-  // scatter_add) sequence below. d_act_buf is reused as the [k, inter]
-  // activation slots, d_fc2_buf as the [k, hidden] per-expert output slots
-  // (gather/scatter happen inline via expert_indices).
-  if (num_tokens == 1 && swiglu) {
+  // Fused path: one token's MoE collapses to three back-to-back kernel
+  // launches (FC1+SwiGLU, FC2, weighted reduce) with zero D2H,
+  // hipStreamSynchronize, or host-side bucketing. d_act_buf is reused as the
+  // [k, inter] activation slots, d_fc2_buf as the [k, hidden] per-expert
+  // output slots (gather/scatter happen inline via expert_indices).
+  //
+  // A burst up to hipdnn_ep_qmoe_fused_max_tokens() is served a token at a
+  // time (speculative verify widths); wider bursts take the grouped path
+  // below. Each iteration is independent -- one token's k experts reduced
+  // into that token's output row -- and iterations are serialized on the
+  // stream, so the k-slot buffers are reused across iterations.
+  if (num_tokens <= hipdnn_ep_qmoe_fused_max_tokens() && swiglu) {
     // W4A8 dp4a decode variant (env-gated). Requires fp16 and 32-aligned
     // block_size / hidden / inter (all true for the MoE targets: block_size
     // 32, hidden/inter multiples of 32). Quantizes the shared input + the k
     // slot activations to int8 once, then runs the fc1/fc2 GEMVs via sudot4.
     // Falls through to the fp fused path otherwise.
-    const bool dp4a_ok = hipdnn_ep_matmul_dp4a_enabled() && elem_size == 2 &&
+    const bool dp4a_ok = expert_weight_bits == 4 &&
+                         hipdnn_ep_matmul_dp4a_enabled() && elem_size == 2 &&
                          block_size > 0 && (block_size % 32 == 0) &&
                          (hidden_size % 32 == 0) && (inter_size % 32 == 0);
-    if (dp4a_ok) {
-      RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: fused decode dp4a path (k=%lld)\n",
-                        (long long)k);
+    RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: fused decode%s path (tokens=%lld, "
+                      "k=%lld)\n",
+                      dp4a_ok ? " dp4a" : "", (long long)num_tokens,
+                      (long long)k);
+    // dp4a serves the whole burst in one set of launches (T*k slots in
+    // flight instead of k), which keeps more of the GPU busy per launch.
+    if (dp4a_ok && hipdnn_ep_qmoe_burst_enabled()) {
       HIP_CHECK(hip_qmoe_decode_fused_dp4a(
           stream, input, d_expert_indices, d_expert_weights, fc1_weights,
           fc1_scales, fc1_zero_points, fc1_bias, fc2_weights, fc2_scales,
           fc2_zero_points, fc2_bias, d_fc2_buf, d_act_buf, output, d_a_qb_in,
           d_a_scale_in, d_a_qb_mid, d_a_scale_mid, hidden_size, inter_size, k,
           block_size, activation_alpha, activation_beta, swiglu_limit,
-          elem_size));
+          elem_size, num_tokens));
       return 0;
     }
-    RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: fused decode path (k=%lld)\n",
-                      (long long)k);
-    HIP_CHECK(hip_qmoe_decode_fused(
-        stream, input, d_expert_indices, d_expert_weights, fc1_weights,
-        fc1_scales, fc1_zero_points, fc1_bias, fc2_weights, fc2_scales,
-        fc2_zero_points, fc2_bias, d_fc2_buf, d_act_buf, output, hidden_size,
-        inter_size, k, block_size, activation_alpha, activation_beta,
-        swiglu_limit, elem_size));
+    for (int64_t t = 0; t < num_tokens; t++) {
+      const void *in_t =
+          static_cast<const char *>(input) + t * hidden_size * elem_size;
+      void *out_t = static_cast<char *>(output) + t * hidden_size * elem_size;
+      const void *idx_t =
+          static_cast<const char *>(d_expert_indices) + t * k * sizeof(int32_t);
+      const void *wts_t =
+          static_cast<const char *>(d_expert_weights) + t * k * elem_size;
+      if (dp4a_ok) {
+        HIP_CHECK(hip_qmoe_decode_fused_dp4a(
+            stream, in_t, idx_t, wts_t, fc1_weights, fc1_scales,
+            fc1_zero_points, fc1_bias, fc2_weights, fc2_scales, fc2_zero_points,
+            fc2_bias, d_fc2_buf, d_act_buf, out_t, d_a_qb_in, d_a_scale_in,
+            d_a_qb_mid, d_a_scale_mid, hidden_size, inter_size, k, block_size,
+            activation_alpha, activation_beta, swiglu_limit, elem_size, 1));
+      } else {
+        HIP_CHECK(hip_qmoe_decode_fused(
+            stream, in_t, idx_t, wts_t, fc1_weights, fc1_scales,
+            fc1_zero_points, fc1_bias, fc2_weights, fc2_scales, fc2_zero_points,
+            fc2_bias, d_fc2_buf, d_act_buf, out_t, hidden_size, inter_size, k,
+            expert_weight_bits, block_size, activation_alpha, activation_beta,
+            swiglu_limit, elem_size));
+      }
+    }
     return 0;
   }
 
@@ -307,14 +335,6 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   // source token rows through d_sorted_token_ids; FC2 consumes the contiguous
   // sorted activation rows. No expert metadata is copied to the host.
   {
-    if (expert_weight_bits != 4) {
-      fprintf(stderr,
-              "wrap_qmoe: ragged prefill supports expert_weight_bits=4, got "
-              "%lld\n",
-              (long long)expert_weight_bits);
-      return -1;
-    }
-
     auto activate = [&]() -> int {
       if (swiglu)
         return hip_qmoe_swiglu(stream, d_fc1_buf, d_act_buf, routed_rows,
@@ -336,20 +356,30 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
         return -1;
       }
       if (fc1_zero_points) {
-        fc1_pre_zp_u8 = hipdnn_ep_real::lookup_or_unpack_zp_u8(
-            *zpc, stream, fc1_zero_points,
-            static_cast<int>(num_experts * fusion_inter),
-            static_cast<int>(k_blocks_fc1));
+        fc1_pre_zp_u8 = expert_weight_bits == 2
+                            ? hipdnn_ep_real::lookup_or_unpack_zp_u8_2bit(
+                                  *zpc, stream, fc1_zero_points,
+                                  static_cast<int>(num_experts * fusion_inter),
+                                  static_cast<int>(k_blocks_fc1))
+                            : hipdnn_ep_real::lookup_or_unpack_zp_u8(
+                                  *zpc, stream, fc1_zero_points,
+                                  static_cast<int>(num_experts * fusion_inter),
+                                  static_cast<int>(k_blocks_fc1));
         if (!fc1_pre_zp_u8) {
           result = -1;
           goto cleanup;
         }
       }
       if (fc2_zero_points) {
-        fc2_pre_zp_u8 = hipdnn_ep_real::lookup_or_unpack_zp_u8(
-            *zpc, stream, fc2_zero_points,
-            static_cast<int>(num_experts * hidden_size),
-            static_cast<int>(k_blocks_fc2));
+        fc2_pre_zp_u8 = expert_weight_bits == 2
+                            ? hipdnn_ep_real::lookup_or_unpack_zp_u8_2bit(
+                                  *zpc, stream, fc2_zero_points,
+                                  static_cast<int>(num_experts * hidden_size),
+                                  static_cast<int>(k_blocks_fc2))
+                            : hipdnn_ep_real::lookup_or_unpack_zp_u8(
+                                  *zpc, stream, fc2_zero_points,
+                                  static_cast<int>(num_experts * hidden_size),
+                                  static_cast<int>(k_blocks_fc2));
         if (!fc2_pre_zp_u8) {
           result = -1;
           goto cleanup;
@@ -415,7 +445,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
         stream, input, d_sorted_token_ids, d_row_groups, d_row_group_count,
         d_fc1_queue_head, fc1_weights, fc1_scales, fc1_pre_zp_u8, fc1_bias,
         d_fc1_buf, routed_rows, num_experts, fusion_inter, hidden_size,
-        block_size, elem_size));
+        expert_weight_bits, block_size, elem_size));
 
     HIP_CHECK(activate());
 
@@ -423,7 +453,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
         stream, d_act_buf, /*input_row_ids=*/nullptr, d_row_groups,
         d_row_group_count, d_fc2_queue_head, fc2_weights, fc2_scales,
         fc2_pre_zp_u8, fc2_bias, d_fc2_buf, routed_rows, num_experts,
-        hidden_size, inter_size, block_size, elem_size));
+        hidden_size, inter_size, expert_weight_bits, block_size, elem_size));
 
     HIP_CHECK(hip_qmoe_reduce_sorted_pairs(
         stream, d_fc2_buf, d_pair_to_sorted, d_expert_indices, d_expert_weights,
