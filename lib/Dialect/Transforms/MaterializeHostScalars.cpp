@@ -208,8 +208,10 @@ static void stageHipReadConstantGlobals(func::FuncOp funcOp) {
     if (!type.hasStaticShape() || type.getNumElements() > 16 ||
         !type.getLayout().isIdentity())
       continue;
+    // arith.constant only takes signless integers, so signed/unsigned
+    // constants (e.g. QLinear ui8 zero points) stay globals.
     Type elem = type.getElementType();
-    if (!elem.isIntOrIndex() && !isa<FloatType>(elem))
+    if (!elem.isSignlessIntOrIndex() && !isa<FloatType>(elem))
       continue;
     auto global =
         module.lookupSymbol<memref::GlobalOp>(getGlobal.getNameAttr());
