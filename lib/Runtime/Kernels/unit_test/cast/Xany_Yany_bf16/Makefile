@@ -8,10 +8,10 @@
 # The op has no autotune table and no tuner, so MODE is accepted for the
 # uniform API but only labels out/results.csv.
 #
-# `test` runs every bf16 cast pair (plus a few pre-existing pairs and the
-# unsupported/empty edge cases) on the sizes COVERAGE selects (default 3; see
-# unit_test/README.md "Shape coverage"). Inputs and the CPU reference are
-# generated in-process -- no python, no data files.
+# `test` runs every bf16 cast pair (plus the unsupported-pair cases) on the
+# sizes COVERAGE selects (default 3; see unit_test/README.md "Shape
+# coverage"). Inputs and the CPU reference are generated in-process -- no
+# python, no data files.
 # ============================================================
 
 ifeq ($(OS),Windows_NT)

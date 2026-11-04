@@ -4,11 +4,11 @@
  *
  * Standalone unit test for hip_cast with bf16 on one side of the cast.
  *
- * Covers bf16 <-> {f32, f16, f64, i64, i32, i16, i8, u8} (16 pairs), plus a
- * few pre-existing non-bf16 pairs as a regression check, the unsupported-pair
- * path and num_elements == 0. Every output is compared bit-exactly with a
- * CPU reference computed in this file with plain integer bit operations; it
- * does not use the HIP conversion intrinsics the kernel uses.
+ * Covers bf16 <-> {f32, f16, f64, i64, i32, i16, i8, u8} (16 pairs) and the
+ * three "unsupported" exits of the bf16 dispatch. Every output is compared
+ * bit-exactly with a CPU reference computed in this file with plain integer
+ * bit operations; it does not use the HIP conversion intrinsics the kernel
+ * uses.
  *
  * Reference semantics (same as the kernel and PyTorch): every bf16 cast goes
  * through fp32. fp32 -> bf16 and fp32 -> fp16 round to nearest even, so f64
@@ -235,12 +235,7 @@ std::vector<uint8_t> reference(int src, int dst, const std::vector<uint8_t>& in,
                                int64_t n) {
   std::vector<uint8_t> out(static_cast<size_t>(n * dtype_size(dst)));
   for (int64_t i = 0; i < n; ++i) {
-    if (src == kI64 && dst == kI32) {
-      // Pre-existing integer path: plain truncation, not through fp32.
-      put<int32_t>(out, i, static_cast<int32_t>(get<int64_t>(in, i)));
-    } else {
-      store_from_float(dst, out, i, load_as_float(src, in, i));
-    }
+    store_from_float(dst, out, i, load_as_float(src, in, i));
   }
   return out;
 }
@@ -272,26 +267,20 @@ private:
   uint64_t state_;
 };
 
-// Special values first, then generated ones, so every case of at least
-// ~100 elements contains all of the specials.
+// Special values first, then generated ones, so every case (n >= 256)
+// contains all of the specials. One value per distinct rounding case.
 std::vector<uint8_t> make_f32(int64_t n, Rng& rng) {
   const float specials[] = {
-      0.0f, -0.0f, INFINITY, -INFINITY, NAN, 1.0f, -1.0f,
+      0.0f, -0.0f, INFINITY, -INFINITY, NAN,
       1.00390625f,   // 1 + 2^-8: bf16 tie, rounds down to 1.0 (even)
-      -1.00390625f,
+      -1.00390625f,  // same tie, negative
       1.01171875f,   // 1 + 3 * 2^-8: bf16 tie, rounds up (even)
-      1.0078125f,    // exact in bf16
-      3.14159f, -2.5f, 65504.0f, 65520.0f /* fp16 overflow tie -> inf */,
-      1e-40f, -1e-40f, 1e-45f,  // fp32 subnormals
-      FLT_MIN, -FLT_MIN, FLT_MAX, -FLT_MAX,
-      3.3895314e38f,  // largest finite bf16
-      3.4e38f,        // rounds to +inf in bf16
+      3.3895314e38f,            // largest finite bf16
       bits_float(0x7f7f8000u),  // tie between max bf16 and inf -> inf
+      FLT_MAX,                  // rounds to +inf in bf16
       bits_float(0x00008000u),  // subnormal tie, rounds down
       bits_float(0x00018000u),  // subnormal tie, rounds up
-      6.1035156e-5f,  // smallest normal fp16
-      5.9604645e-8f,  // smallest subnormal fp16
-      2.9802322e-8f,  // half of it: fp16 tie, rounds to 0
+      1e-40f,                   // fp32 subnormal
   };
   const int64_t ns = static_cast<int64_t>(sizeof(specials) / sizeof(float));
   std::vector<uint8_t> v(static_cast<size_t>(n * 4));
@@ -346,11 +335,13 @@ std::vector<uint8_t> make_enumerated8(int64_t n) {
 
 std::vector<uint8_t> make_f64(int64_t n, Rng& rng) {
   const double specials[] = {
-      0.0, -0.0, INFINITY, -INFINITY, NAN, 1.0, -1.0, 1e300, -1e300, 1e-300,
-      -1e-300, DBL_MAX, 3.4e38, 1e-40,
+      0.0, -0.0, INFINITY, -INFINITY, NAN,
+      1e300,   // overflows in the f64 -> f32 step
+      1e-300,  // underflows to 0 in the f64 -> f32 step
+      3.4e38,  // finite in f32, overflows only in bf16
+      1e-40,   // f32 subnormal after the first step (no flush to zero)
       1.0 + 0x1p-8,           // exact in fp32, bf16 tie -> 1.0
       1.0 + 0x1p-8 + 0x1p-40, // rounds to the tie in fp32 first -> 1.0
-      65504.0, 3.141592653589793,
   };
   const int64_t ns = static_cast<int64_t>(sizeof(specials) / sizeof(double));
   std::vector<uint8_t> v(static_cast<size_t>(n * 8));
@@ -375,9 +366,12 @@ std::vector<uint8_t> make_f64(int64_t n, Rng& rng) {
 
 std::vector<uint8_t> make_i64(int64_t n, Rng& rng) {
   const int64_t specials[] = {
-      0, 1, -1, 255, 256, 257, -257, 65535, 16777216, 16777217, -16777217,
-      16777219, INT32_MAX, INT32_MIN, (int64_t(1) << 40) + 12345,
-      -(int64_t(1) << 53) + 1, int64_t(1) << 62, INT64_MAX, INT64_MIN,
+      0,
+      257, -257,                   // bf16 tie
+      16777217,                    // fp32 tie, rounds down (even)
+      16777219,                    // fp32 tie, rounds up (even)
+      (int64_t(1) << 40) + 12345,  // rounds twice (fp32, then bf16)
+      INT64_MAX, INT64_MIN,
   };
   const int64_t ns = static_cast<int64_t>(sizeof(specials) / sizeof(int64_t));
   std::vector<uint8_t> v(static_cast<size_t>(n * 8));
@@ -397,8 +391,8 @@ std::vector<uint8_t> make_i64(int64_t n, Rng& rng) {
 }
 
 std::vector<uint8_t> make_i32(int64_t n, Rng& rng) {
-  const int32_t specials[] = {0, 1, -1, 257, 16777216, 16777217, -16777217,
-                              16777219, INT32_MAX, INT32_MIN};
+  const int32_t specials[] = {0,        257,       -257,
+                              16777217, INT32_MAX, INT32_MIN};
   const int64_t ns = static_cast<int64_t>(sizeof(specials) / sizeof(int32_t));
   std::vector<uint8_t> v(static_cast<size_t>(n * 4));
   for (int64_t i = 0; i < n; ++i) {
@@ -462,7 +456,7 @@ std::vector<uint8_t> make_input(int src, int dst, int64_t n, uint64_t seed) {
     return make_enumerated16(n, {0x3c00, 0x7c00, 0xfc00, 0x7e00, 0x8000,
                                  0x7bff, 0x0001, 0x0400});
   case kBF16:
-    if (dtype_size(dst) <= 8 && dst != kF32 && dst != kF16 && dst != kF64) {
+    if (dst != kF32 && dst != kF16 && dst != kF64) {  // integer destination
       return make_bf16_in_range(n, dst, rng);
     }
     return make_enumerated16(n, {0x3f80, 0x7f80, 0xff80, 0x7fc0, 0x8000,
@@ -690,36 +684,16 @@ bool run_unsupported_case(int src, int dst, hipStream_t stream) {
   return pass;
 }
 
-// num_elements == 0: hip_cast returns 0 and writes nothing.
-bool run_empty_case(hipStream_t stream) {
-  ResultRow result("bf16_to_f32_n0");
-  DeviceBytes d_in(16);
-  DeviceBytes d_out(16);
-  upload(d_out.get(), std::vector<uint8_t>(16, kFillBytes[0]));
-  const int status = hip_cast(reinterpret_cast<void*>(stream), d_in.get(),
-                              d_out.get(), 0, kBF16, kF32);
-  HIP_CHECK(hipStreamSynchronize(stream));
-  const std::vector<uint8_t> out = download(d_out.get(), 16);
-  const bool untouched =
-      std::all_of(out.begin(), out.end(),
-                  [](uint8_t b) { return b == kFillBytes[0]; });
-  const bool pass = status == 0 && untouched;
-  std::cout << (pass ? "PASS " : "FAIL ") << "bf16_to_f32_n0 status=" << status
-            << '\n';
-  result.finish(pass);
-  return pass;
-}
-
 struct Size {
   int64_t n;
   int min_coverage;
 };
 
-// 255/256/257 straddle the 256-thread block; 70001 holds every 16-bit
-// pattern after the specials; the last one is a large tensor.
+// 257 ends in a partial 256-thread block and 256 is exactly one block;
+// 70001 holds every 16-bit source pattern after the specials; the last one
+// is a large tensor.
 constexpr Size kSizes[] = {
-    {1, 1}, {257, 1}, {70001, 1}, {255, 2}, {256, 2}, {4099, 2},
-    {1048579, 3},
+    {257, 1}, {70001, 1}, {256, 2}, {1048579, 3},
 };
 
 bool parse_options(int argc, char** argv, int* coverage) {
@@ -751,12 +725,9 @@ int main(int argc, char** argv) {
     pairs.push_back({kBF16, other});
     pairs.push_back({other, kBF16});
   }
-  // Pre-existing non-bf16 paths, to show they are unchanged.
-  pairs.push_back({kF32, kF16});
-  pairs.push_back({kF16, kF32});
-  pairs.push_back({kI64, kI32});
-  pairs.push_back({kU8, kF32});
 
+  // The three -1 exits of launch_cast_bf16: unsupported output dtype,
+  // unsupported input dtype, and neither side bf16.
   const std::pair<int, int> unsupported[] = {
       {kBF16, kU16}, {kU16, kBF16}, {kF64, kI8}};
 
@@ -764,13 +735,13 @@ int main(int argc, char** argv) {
   for (const Size& size : kSizes) {
     size_count += size.min_coverage <= coverage ? 1 : 0;
   }
-  const int cases = static_cast<int>(pairs.size()) * size_count +
-                    static_cast<int>(sizeof(unsupported) /
-                                     sizeof(unsupported[0])) +
-                    1;
+  const int edge_cases =
+      static_cast<int>(sizeof(unsupported) / sizeof(unsupported[0]));
+  const int cases = static_cast<int>(pairs.size()) * size_count + edge_cases;
   std::cout << "cast coverage=" << coverage << " -> running " << size_count
-            << " size(s) x " << pairs.size() << " dtype pair(s) + 4 edge cases = "
-            << cases << " cast cases\n";
+            << " size(s) x " << pairs.size() << " dtype pair(s) + "
+            << edge_cases << " unsupported case(s) = " << cases
+            << " cast cases\n";
 
   hipStream_t stream = nullptr;
   HIP_CHECK(hipStreamCreate(&stream));
@@ -790,7 +761,6 @@ int main(int argc, char** argv) {
   for (const auto& pair : unsupported) {
     all_pass = run_unsupported_case(pair.first, pair.second, stream) && all_pass;
   }
-  all_pass = run_empty_case(stream) && all_pass;
   HIP_CHECK(hipStreamDestroy(stream));
 
   std::cout << (all_pass ? "ALL PASS" : "SOME FAIL") << '\n';

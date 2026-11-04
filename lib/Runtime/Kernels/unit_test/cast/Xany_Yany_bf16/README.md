@@ -25,11 +25,10 @@ test with plain integer bit operations (it does not use the HIP intrinsics):
   16-bit sources enumerate every bit pattern at the 70001-element size.
 - Every element is written and nothing outside the output: each case runs
   twice with two different fill bytes and 64 guard elements on each side.
-- Regression: the pre-existing f32 -> f16, f16 -> f32, i64 -> i32 and
-  u8 -> f32 paths give the same results.
-- Unsupported pairs (bf16 <-> u16, f64 -> i8) return -1 and leave the output
-  untouched (the kernel prints an "unsupported conversion" line, expected).
-- `num_elements == 0` returns 0 and writes nothing.
+- Unsupported pairs return -1 and leave the output untouched, one per exit of
+  the bf16 dispatch: bf16 -> u16 (output dtype), u16 -> bf16 (input dtype)
+  and f64 -> i8 (neither side bf16). The kernel prints an "unsupported
+  conversion" line for each; that is expected.
 
 bf16 -> i8 / u8 / i16 / i32 / i64 is only checked with values that fit the
 destination: a float -> integer cast of an out-of-range value or NaN is
@@ -37,13 +36,15 @@ undefined in C++, as it is for the pre-existing fp32/fp16 -> integer kernels.
 
 ## Coverage
 
-Sizes straddle the 256-thread block. `--coverage N` (or `HIPDNN_UT_COVERAGE`,
-default 3) picks the sizes; every dtype pair and edge case runs at every tier.
+257 ends in a partial 256-thread block, 256 is exactly one block, 70001 holds
+every 16-bit source pattern. `--coverage N` (or `HIPDNN_UT_COVERAGE`,
+default 3) picks the sizes; every dtype pair and unsupported case runs at
+every tier.
 
 | Tier | Sizes |
 |---|---|
-| 1 | 1, 257, 70001 |
-| 2 | + 255, 256, 4099 |
+| 1 | 257, 70001 |
+| 2 | + 256 |
 | 3 | + 1048579 |
 
 ## Targets

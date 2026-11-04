@@ -382,10 +382,9 @@ COVERAGE=N` (any leaf, or the top-level aggregator) builds and runs it.
   bit-exactly with the CPU reference.
 - **cast** (one leaf, `Xany_Yany_bf16`, for every cast with bf16 on one side;
   see its README for why it is not one leaf per pair): bf16 <-> {f32, f16,
-  f64, i64, i32, i16, i8, u8}, four pre-existing non-bf16 pairs, unsupported
-  pairs and `num_elements == 0`, on sizes COVERAGE thins (tier1 = 3 sizes,
-  tier2 = 6, tier3 = 7, up to ~1M elements). Outputs are compared bit-exactly
-  with a CPU reference.
+  f64, i64, i32, i16, i8, u8} and three unsupported pairs, on sizes COVERAGE
+  thins (tier1 = 2 sizes, tier2 = 3, tier3 = 4, up to ~1M elements). Outputs
+  are compared bit-exactly with a CPU reference.
 
 A new op's test cpp should follow whichever of the above shapes fit it best:
 if the kernel's dispatch paths are better covered by a small hand-picked
