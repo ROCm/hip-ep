@@ -534,6 +534,10 @@ struct QMoESigmoidRoutingFold : public mlir::RewritePattern {
     if (mlir::ShapedType::isDynamic(experts) ||
         biasTy.getDimSize(0) != experts || k > experts)
       return rewriter.notifyMatchFailure(op, "bias does not span the experts");
+    // The routing kernel and the sorted-pair reduce hold at most 16 selections
+    // per token; the unfused routing chain has no such limit.
+    if (k > 16)
+      return rewriter.notifyMatchFailure(op, "k exceeds the routing kernel");
     if (logitsTy.hasStaticShape() && inputTy.hasStaticShape() &&
         logitsTy.getNumElements() / experts !=
             inputTy.getNumElements() /

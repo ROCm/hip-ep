@@ -256,4 +256,61 @@ module {
   // CHECK-SAME: router_weights(%{{.*}} : tensor<8x16xf16>)
   // CHECK-NOT: sigmoid_bias
   // CHECK: return
+
+  // ===== Test 5: k = 17 exceeds the routing kernel: no fold =====
+  func.func @k_too_large(%x: tensor<1x8x128xf16>, %logits: tensor<1x8x32xf32>) -> tensor<1x8x128xf16> {
+    %s = "onnx.Sigmoid"(%logits) : (tensor<1x8x32xf32>) -> tensor<1x8x32xf32>
+    %bias = "onnx.Constant"() {value = dense<5.000000e-01> : tensor<32xf32>} : () -> tensor<32xf32>
+    %sel = "onnx.Add"(%s, %bias) : (tensor<1x8x32xf32>, tensor<32xf32>) -> tensor<1x8x32xf32>
+    %k = "onnx.Constant"() {value = dense<17> : tensor<1xi64>} : () -> tensor<1xi64>
+    %v, %idx = "onnx.TopK"(%sel, %k) {axis = -1 : si64, largest = 1 : si64, sorted = 1 : si64}
+        : (tensor<1x8x32xf32>, tensor<1xi64>) -> (tensor<1x8x17xf32>, tensor<1x8x17xi64>)
+    %g = "onnx.GatherElements"(%s, %idx) {axis = -1 : si64}
+        : (tensor<1x8x32xf32>, tensor<1x8x17xi64>) -> tensor<1x8x17xf32>
+    %axes = "onnx.Constant"() {value = dense<-1> : tensor<1xi64>} : () -> tensor<1xi64>
+    %sum = "onnx.ReduceSum"(%g, %axes) {keepdims = 1 : si64, noop_with_empty_axes = 0 : si64}
+        : (tensor<1x8x17xf32>, tensor<1xi64>) -> tensor<1x8x1xf32>
+    %d = "onnx.Div"(%g, %sum) : (tensor<1x8x17xf32>, tensor<1x8x1xf32>) -> tensor<1x8x17xf32>
+    %c = "onnx.Constant"() {value = dense<3.125000e-01> : tensor<f32>} : () -> tensor<f32>
+    %m = "onnx.Mul"(%d, %c) : (tensor<1x8x17xf32>, tensor<f32>) -> tensor<1x8x17xf32>
+    %w = "onnx.Cast"(%m) {saturate = 1 : si64, to = f16} : (tensor<1x8x17xf32>) -> tensor<1x8x17xf16>
+    %ninf = "onnx.Constant"() {value = dense<0xFC00> : tensor<f16>} : () -> tensor<f16>
+    %one = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<f16>} : () -> tensor<f16>
+    %zero = "onnx.Constant"() {value = dense<0.000000e+00> : tensor<f16>} : () -> tensor<f16>
+    %shp = "onnx.Constant"() {value = dense<[1, 8, 32]> : tensor<3xi64>} : () -> tensor<3xi64>
+    %ishp = "onnx.Shape"(%idx) : (tensor<1x8x17xi64>) -> tensor<3xi64>
+    %pfill = "onnx.Expand"(%ninf, %shp) : (tensor<f16>, tensor<3xi64>) -> tensor<1x8x32xf16>
+    %pupd = "onnx.Expand"(%one, %ishp) : (tensor<f16>, tensor<3xi64>) -> tensor<1x8x17xf16>
+    %rp = "onnx.ScatterElements"(%pfill, %idx, %pupd) {axis = -1 : si64}
+        : (tensor<1x8x32xf16>, tensor<1x8x17xi64>, tensor<1x8x17xf16>) -> tensor<1x8x32xf16>
+    %wfill = "onnx.Expand"(%zero, %shp) : (tensor<f16>, tensor<3xi64>) -> tensor<1x8x32xf16>
+    %rw = "onnx.ScatterElements"(%wfill, %idx, %w) {axis = -1 : si64}
+        : (tensor<1x8x32xf16>, tensor<1x8x17xi64>, tensor<1x8x17xf16>) -> tensor<1x8x32xf16>
+    %rs = "onnx.Constant"() {value = dense<[-1, 32]> : tensor<2xi64>} : () -> tensor<2xi64>
+    %rp2 = "onnx.Reshape"(%rp, %rs) {allowzero = 0 : si64} : (tensor<1x8x32xf16>, tensor<2xi64>) -> tensor<8x32xf16>
+    %rw2 = "onnx.Reshape"(%rw, %rs) {allowzero = 0 : si64} : (tensor<1x8x32xf16>, tensor<2xi64>) -> tensor<8x32xf16>
+    %fc1_w = "onnx.Constant"() {value = dense<1> : tensor<32x128x64xui8>} : () -> tensor<32x128x64xui8>
+    %fc1_s = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<32x128x1xf16>} : () -> tensor<32x128x1xf16>
+    %fc2_w = "onnx.Constant"() {value = dense<1> : tensor<32x128x32xui8>} : () -> tensor<32x128x32xui8>
+    %fc2_s = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<32x128x1xf16>} : () -> tensor<32x128x1xf16>
+    %none = "onnx.NoValue"() {value} : () -> none
+    %y = "onnx.Custom"(%x, %rp2, %fc1_w, %fc1_s, %none, %fc2_w, %fc2_s,
+                       %none, %none, %none, %none, %none, %none, %none, %rw2) {
+      function_name = "QMoE", domain_name = "com.microsoft",
+      activation_type = "swiglu", block_size = 128 : si64,
+      expert_weight_bits = 4 : si64, k = 17 : si64,
+      normalize_routing_weights = 0 : si64, swiglu_fusion = 1 : si64,
+      weights_prepacked = 0 : si64, onnx_node_name = "QMoE_k_too_large"
+    } : (tensor<1x8x128xf16>, tensor<8x32xf16>,
+         tensor<32x128x64xui8>, tensor<32x128x1xf16>, none,
+         tensor<32x128x32xui8>, tensor<32x128x1xf16>,
+         none, none, none, none, none, none, none, tensor<8x32xf16>) -> tensor<1x8x128xf16>
+    return %y : tensor<1x8x128xf16>
+  }
+
+  // CHECK-LABEL: func.func @k_too_large
+  // CHECK: hip.qmoe
+  // CHECK-SAME: router_weights(%{{.*}} : tensor<8x32xf16>)
+  // CHECK-NOT: sigmoid_bias
+  // CHECK: return
 }
