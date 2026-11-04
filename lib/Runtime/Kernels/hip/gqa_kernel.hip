@@ -676,6 +676,14 @@ __device__ __forceinline__ float causal_mask_fill_value<float>() {
   return -INFINITY;
 }
 
+// A key bias read by a fused online-softmax kernel. Exports also drop keys
+// with -inf (or fp32 -3.4e38, which is -inf in fp16); every running max starts
+// at -inf, so a first scanned key at -inf would give exp2(-inf - -inf) = NaN.
+// fp16's most negative finite value keeps such a key at weight zero.
+__device__ __forceinline__ float key_bias_value(float b) {
+  return fmaxf(b, -65504.0f);
+}
+
 template <typename T>
 __global__ void causal_mask_kernel_impl(
     T* __restrict__ S,
@@ -1868,7 +1876,8 @@ gqa_flash_decode_kernel(
       for (int j = 0; j < KB_REGS; ++j) {
         const int k = j * WAVE_SIZE + lane_id;
         kb_reg[j] = k < tile_n
-            ? __half2float(kb_row[tile_start + k]) * LOG2E : 0.0f;
+            ? key_bias_value(__half2float(kb_row[tile_start + k])) * LOG2E
+            : 0.0f;
       }
     }
 
@@ -2183,7 +2192,8 @@ gqa_flash_decode_d96_kernel(
   // The bias rides the K/V ring so its load latency is hidden like theirs.
   auto load_kb = [&](int kv) -> float {
     if constexpr (HAS_KB)
-      return __half2float(kb_row[kv < kv_end ? kv : kv_start]) * LOG2E;
+      return key_bias_value(__half2float(kb_row[kv < kv_end ? kv : kv_start])) *
+             LOG2E;
     else
       return 0.0f;
   };
@@ -2538,7 +2548,9 @@ gqa_flash_decode_wmma_kernel(
       const int c = sj * 16 + wmma_lane;
       float kb = 0.0f;
       if constexpr (HAS_KB)
-        kb = kv0 + c < kv_end ? __half2float(kb_row[kv0 + c]) * LOG2E : 0.0f;
+        kb = kv0 + c < kv_end
+                 ? key_bias_value(__half2float(kb_row[kv0 + c])) * LOG2E
+                 : 0.0f;
       #pragma unroll
       for (int ele = 0; ele < 8; ++ele) {
         const int r = hipdnn_wmma_acc_row(pair, ele);
@@ -3891,7 +3903,8 @@ __device__ __forceinline__ void gqa_flash_prefill_v6x_body(
     // suffices.
     auto kb_load = [&](int kv0) -> float {
         const int kv = kv0 + tid;
-        return (tid < BKV && kv < skv) ? static_cast<float>(kb_row[kv]) * inv_scale : 0.0f;
+        return (tid < BKV && kv < skv)
+            ? key_bias_value(static_cast<float>(kb_row[kv])) * inv_scale : 0.0f;
     };
     auto kb_commit = [&](float v) {
         if (tid >= BKV) return;
@@ -3981,7 +3994,8 @@ __device__ __forceinline__ void gqa_flash_prefill_v6x_body(
                     for (int e = 0; e < kAcc; ++e) {
                         const int kv_pos = kv0 + sj * 16 + hipdnn_wmma_acc_row(pair, e);
                         s0[e] = kv_pos < skv
-                            ? static_cast<float>(kb_row[kv_pos]) * inv_scale : 0.0f;
+                            ? key_bias_value(static_cast<float>(kb_row[kv_pos])) * inv_scale
+                            : 0.0f;
                     }
                 }
             }

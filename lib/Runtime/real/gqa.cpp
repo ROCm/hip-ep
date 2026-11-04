@@ -122,9 +122,9 @@ static bool gqa_cache_seqlens_enabled() {
 // they already implement.
 static constexpr int32_t kSeqlensKNotRead = -2;
 
-// Read seqlens_k_val from device (or the per-Compute() cache when
-// HIPDNN_EP_GQA_CACHE_SEQLENS=1) once per call before the fused/decomposed
-// dispatch decision. Two purposes:
+// Read seqlens_k_val from device (or the per-Compute() cache, which is on
+// unless HIPDNN_EP_GQA_CACHE_SEQLENS=0) once per call before the
+// fused/decomposed dispatch decision. Two purposes:
 //   1. Give the smart-dispatch heuristic access to total_seq for the decode
 //      case (sq == 1) so it can compare against gqa_fused_decode_max_t().
 //   2. Populate the per-Compute() cache for B == 1 so subsequent GQA layers
@@ -1385,7 +1385,7 @@ static int gqa_forward_hipblaslt(
   bool need_rope = do_rotary && cos_cache && sin_cache;
 
   // Pre-dispatch read of seqlens_k (or per-Compute() cache lookup for B==1
-  // when HIPDNN_EP_GQA_CACHE_SEQLENS=1). Applies to both prefill (sq>1) and
+  // unless HIPDNN_EP_GQA_CACHE_SEQLENS=0). Applies to both prefill (sq>1) and
   // decode (sq==1) for B==1 -- both share the same seqlens_k pointer and
   // benefit from caching. The result is reused by the fused-path
   // need_host_past_len block (eliminating its inline D2H) and the
@@ -1648,8 +1648,8 @@ static int gqa_forward_hipblaslt(
 
   // D2H readback of seqlens_k is required here because hipBLASLt descriptor
   // creation and workspace sizing are host-side APIs that need total_seq. For
-  // B == 1 the value was already read (and cached when
-  // HIPDNN_EP_GQA_CACHE_SEQLENS=1) by the pre-dispatch helper above; we just
+  // B == 1 the value was already read (and cached unless
+  // HIPDNN_EP_GQA_CACHE_SEQLENS=0) by the pre-dispatch helper above; we just
   // consume seqlens_k_pre. The B > 1 branch keeps the legacy per-call read
   // because per-batch validation requires reading every entry and we have no
   // validated multi-batch decode workload yet.
