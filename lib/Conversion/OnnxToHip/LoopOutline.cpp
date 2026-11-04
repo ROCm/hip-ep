@@ -343,9 +343,9 @@ static Value concatScan(OpBuilder &builder, Location loc, Value acc,
   // asserts the attribute type is signed. A signless i64 passes a Release
   // build and crashes a debug hip-mlir-opt.
   state.addAttribute(
-      "axis", IntegerAttr::get(IntegerType::get(builder.getContext(), 64,
-                                                IntegerType::Signed),
-                               0));
+      "axis",
+      IntegerAttr::get(
+          IntegerType::get(builder.getContext(), 64, IntegerType::Signed), 0));
   return builder.create(state)->getResult(0);
 }
 
