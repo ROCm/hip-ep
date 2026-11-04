@@ -96,18 +96,29 @@ bool parseAutotuneSpace(StringRef name, AutotuneSpace &out) {
   return true;
 }
 
+bool rocMlirSkipBenchmarking() {
+  // hip_get_env, not std::getenv: the provider reads this from inside the
+  // static-CRT EP DLL. Unset or "0" benchmarks. Any other value skips, the
+  // same rule hip-rocmlir-compiler already used.
+  std::string value = hip_get_env("HIP_ROCMLIR_SKIP_BENCHMARKING");
+  return !value.empty() && value != "0";
+}
+
 bool rocMlirAutotuneFromEnv(AutotuneSpace &out) {
-  // hip_get_env, not std::getenv: this runs inside the static-CRT EP DLL, and
-  // std::getenv there cannot see env vars set by the host process -- the
-  // override would be silently dropped. Same reasoning as resolveRocMlirArch.
-  std::string mode = hip_get_env("HIPDNN_EP_ROCMLIR_AUTOTUNE");
-  if (mode.empty() || mode == "0" || mode == "off")
+  if (rocMlirSkipBenchmarking())
     return false;
+  std::string mode = hip_get_env("HIPDNN_EP_ROCMLIR_AUTOTUNE");
+  if (mode.empty()) {
+    out = AutotuneSpace::Quick;
+    return true;
+  }
   if (parseAutotuneSpace(mode, out))
     return true;
-  llvm::errs() << "warning: ignoring unknown HIPDNN_EP_ROCMLIR_AUTOTUNE='"
-               << mode << "' (expected quick, full, exhaustive, or off)\n";
-  return false;
+  llvm::errs() << "warning: unknown HIPDNN_EP_ROCMLIR_AUTOTUNE='" << mode
+               << "'; using quick. Set HIP_ROCMLIR_SKIP_BENCHMARKING=1 to "
+                  "skip benchmarking (expected quick, full, or exhaustive).\n";
+  out = AutotuneSpace::Quick;
+  return true;
 }
 
 const char *autotuneBenchmarkName(AutotuneBenchmark benchmark) {

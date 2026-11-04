@@ -151,9 +151,15 @@ private:
   std::unique_ptr<Impl> impl;
 };
 
-// Reads HIPDNN_EP_ROCMLIR_AUTOTUNE. Recognizes "quick", "full", "exhaustive",
-// and "off"/"0"/"" for disabled; returns false when disabled or unparseable,
-// leaving \p out alone.
+// HIP_ROCMLIR_SKIP_BENCHMARKING, shared by hip-rocmlir-compiler and the ONNX
+// Runtime provider. Unset or "0" means benchmark. Any other value skips the
+// search and keeps rocMLIR's default perfConfig.
+bool rocMlirSkipBenchmarking();
+
+// Reads HIPDNN_EP_ROCMLIR_AUTOTUNE for the search space only. Unset or empty
+// selects quick. "quick", "full", and "exhaustive" select that space. Returns
+// false, leaving \p out alone, when rocMlirSkipBenchmarking() is true. An
+// unrecognized value warns and selects quick.
 //
 // Env-only on purpose for now. The custom-kernel autotuners also accept a
 // provider option, but those are read in the Runtime, which already has the

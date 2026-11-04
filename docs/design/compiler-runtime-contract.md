@@ -73,19 +73,24 @@ setup throws `std::runtime_error`. See [native-vs-ir-comparison.md](../native-vs
 
 `Metadata.rocmlir_arch` records what the embedded rocMLIR code objects were
 built for, not only the GPU arch: it is `hip::compiler::rocMlirArtifactTarget()`,
-which is empty when `HIPDNN_EP_ROCMLIR` was off, the arch alone when rocMLIR
-compiled with default perfConfigs (`gfx1151`), and the arch with an
-`+autotune=<space>` suffix when `HIPDNN_EP_ROCMLIR_AUTOTUNE` selected
-benchmarked ones (`gfx1151+autotune=quick`). The perfConfig a kernel was tuned
-to is baked into its code object, so a tuned and an untuned artifact are not
-interchangeable even on the same GPU.
+which is empty when `HIPDNN_EP_ROCMLIR` was off, the arch with an
+`+autotune=<space>` suffix when rocMLIR benchmarked perfConfigs
+(`gfx1151+autotune=quick`), and the arch alone when
+`HIP_ROCMLIR_SKIP_BENCHMARKING` compiled the default perfConfig (`gfx1151`).
+`hip-rocmlir-compiler` and the ONNX Runtime provider both read that variable:
+unset or `0` benchmarks, and any other value skips the search. Autotune
+otherwise runs for a rocMLIR session. Unset `HIPDNN_EP_ROCMLIR_AUTOTUNE`
+selects `quick`; `full` and `exhaustive` select those spaces. The
+perfConfig a kernel was tuned to is baked into its code object, so a tuned
+and an untuned artifact are not interchangeable even on the same GPU.
 
 The model cache / EPContext identity is derived from the graph alone, so the EP
 refuses to load an artifact whose recorded value differs from the current one;
 delete the cache and recompile after changing GPUs or toggling either
-`HIPDNN_EP_ROCMLIR` or `HIPDNN_EP_ROCMLIR_AUTOTUNE`. Compilation fails outright
-if autotuning was requested but no HIP device could be reached, so the suffix
-never claims tuning that did not happen.
+`HIPDNN_EP_ROCMLIR`, `HIP_ROCMLIR_SKIP_BENCHMARKING`, or
+`HIPDNN_EP_ROCMLIR_AUTOTUNE`. Compilation fails outright
+if autotune is on but no HIP device could be reached, so the suffix never
+claims tuning that did not happen.
 
 `HIPDNN_EP_ROCMLIR_AUTOTUNE_BENCH` selects how candidates are timed and is not
 part of the suffix: both modes search the same space and record the same kind
