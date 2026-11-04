@@ -27,7 +27,11 @@ namespace {
 //   * coordinate_transformation_mode in
 //       {"half_pixel", "pytorch_half_pixel", "asymmetric", "align_corners"}
 //   * nearest_mode in {round_prefer_floor, round_prefer_ceil, floor, ceil}
-//   * antialias = 0, exclude_outside = 0             (defaults)
+//   * antialias = 0, exclude_outside = 0             (defaults), or
+//     antialias = 1 with exclude_outside = 1 for linear on float types with
+//     half_pixel / pytorch_half_pixel: hip.resize mode 2. That is PyTorch's
+//     antialias=True; exclude_outside = 0 would also weigh the edge pixels
+//     repeated outside the input.
 //   * keep_aspect_ratio_policy = "stretch"           (default)
 //   * roi must be absent: none, or a 0-element tensor (no tf_crop_and_resize)
 //   * rank in [3, 5], input and output ranks equal
@@ -389,10 +393,20 @@ struct ResizeToHip : public mlir::RewritePattern {
         return attr.getValue().getSExtValue();
       return defaultVal;
     };
-    if (getI64("antialias", 0) != 0)
-      return rewriter.notifyMatchFailure(op, "antialias not supported");
-    if (getI64("exclude_outside", 0) != 0)
+    if (getI64("antialias", 0) != 0) {
+      if (modeId != 1 || getI64("exclude_outside", 0) != 1)
+        return rewriter.notifyMatchFailure(
+            op, "antialias is supported for linear with exclude_outside = 1");
+      if (coordId != 0 && coordId != 3)
+        return rewriter.notifyMatchFailure(
+            op, "antialias is supported with half_pixel or pytorch_half_pixel");
+      if (!mlir::isa<mlir::FloatType>(inputType.getElementType()))
+        return rewriter.notifyMatchFailure(op,
+                                           "antialias is supported on floats");
+      modeId = 2;
+    } else if (getI64("exclude_outside", 0) != 0) {
       return rewriter.notifyMatchFailure(op, "exclude_outside not supported");
+    }
     if (auto a = op->getAttrOfType<mlir::ArrayAttr>("axes"))
       if (!a.empty())
         return rewriter.notifyMatchFailure(

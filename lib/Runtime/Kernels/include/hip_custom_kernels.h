@@ -1729,8 +1729,7 @@ HIP_KERNEL_API int hip_pool(
     int count_include_pad,
     int p);
 
-
- /* =========================================================================
+/* =========================================================================
  * Resize (1D / 2D / 3D spatial)
  * =========================================================================
  *
@@ -1739,7 +1738,10 @@ HIP_KERNEL_API int hip_pool(
  * inside the kernel as `scale = in_dim / out_dim` (hip_resize_scaled below
  * takes the ONNX scales instead).  The (N, C) prefix is pass-through.
  *
- *  mode:               0 = nearest, 1 = linear (N-linear)
+ *  mode:               0 = nearest, 1 = linear (N-linear),
+ *                      2 = antialiased linear (ONNX antialias = 1 with
+ *                      exclude_outside = 1; half_pixel or
+ *                      pytorch_half_pixel only)
  *  coord_transform:    0 = half_pixel, 1 = asymmetric, 2 = align_corners,
  *                      3 = pytorch_half_pixel
  *  nearest_mode:       0 = round_prefer_floor (only used when mode=nearest)

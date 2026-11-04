@@ -23,7 +23,7 @@
 //   wrap_resize_scaled(<same>, scale0..2): window axis i samples with ONNX
 //               scale<i> when > 0 instead of out<i> / in<i>
 //
-// `mode`:           0 = nearest, 1 = linear (N-linear)
+// `mode`:           0 = nearest, 1 = linear (N-linear), 2 = antialiased linear
 // `coord_transform`: 0 = half_pixel, 1 = asymmetric, 2 = align_corners,
 //                    3 = pytorch_half_pixel
 // `nearest_mode`:    0 = round_prefer_floor (only used when mode=nearest)

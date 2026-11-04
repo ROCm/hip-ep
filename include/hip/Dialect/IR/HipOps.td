@@ -5505,7 +5505,12 @@ def Hip_ResizeOp : Hip_DpsOp_AutoReify<"resize"> {
 
     Supported attribute set (anything outside is rejected at conversion):
       * mode in {"nearest", "linear"}              — encoded as i64
-        - 0 = nearest, 1 = linear (N-linear: bilinear / trilinear)
+        - 0 = nearest, 1 = linear (N-linear: bilinear / trilinear),
+          2 = antialiased linear: ONNX antialias = 1 with exclude_outside = 1
+          (PyTorch's antialias=True). Along an axis that shrinks, the
+          triangle filter widens to 1 / scale input pixels and each output
+          is the weighted mean of the input pixels under it. Float types,
+          half_pixel or pytorch_half_pixel only.
       * coordinate_transformation_mode in
           {"half_pixel", "pytorch_half_pixel", "asymmetric",
            "align_corners"}  — encoded as i64

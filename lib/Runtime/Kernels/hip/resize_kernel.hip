@@ -20,9 +20,10 @@
 // One thread per output element.  Output is laid out row-major over
 // (N, C, O_1, O_2, O_3) where unused trailing axes are size 1.  Each
 // thread maps its (o_i) coords back to the input domain via the configured
-// coordinate_transformation_mode, then either picks the nearest input
-// sample (mode=0) or N-linearly interpolates over the surrounding 2^k
-// samples (mode=1).  (N, C) prefix is pass-through.  An axis samples with
+// coordinate_transformation_mode, then picks the nearest input sample
+// (mode=0), N-linearly interpolates over the surrounding 2^k samples
+// (mode=1), or averages the samples under a widened triangle filter (mode=2,
+// antialiased linear).  (N, C) prefix is pass-through.  An axis samples with
 // its ONNX scale when hip_resize_scaled supplies one (> 0), else with
 // `out_dim / in_dim`.
 
@@ -245,6 +246,92 @@ __global__ void resize_linear_kernel(const T* __restrict__ input,
   output[tid] = from_float<T>(v);
 }
 
+// Antialiased linear (mode 2): ONNX Resize with antialias = 1 and
+// exclude_outside = 1, which is PyTorch's interpolate(..., antialias=True).
+// Along an axis that shrinks, the triangle filter widens to 1 / scale input
+// pixels; each output is the weighted sum of the input pixels inside the
+// filter's support, over the sum of their weights (pixels outside the input
+// do not count). An axis that does not shrink is plain linear. Only the
+// half_pixel and pytorch_half_pixel transforms (coord_transform 0 and 3).
+struct AntialiasAxis {
+  float center;     // sample position, in input pixels, plus 0.5
+  float support;    // half-width of the filter, in input pixels
+  float invSupport; // 1 / support
+  int64_t lo, hi;   // input pixels inside the support, [lo, hi)
+};
+
+__device__ inline AntialiasAxis antialias_axis(int64_t o, int64_t out_dim,
+                                               int64_t in_dim,
+                                               int coord_transform,
+                                               float onnx_scale) {
+  const float scale =
+      onnx_scale > 0.0f
+          ? onnx_scale
+          : static_cast<float>(out_dim) / static_cast<float>(in_dim);
+  AntialiasAxis a;
+  // pytorch_half_pixel samples input coordinate 0 on an output axis of 1.
+  a.center = coord_transform == 3 && out_dim == 1
+                 ? 0.5f
+                 : (static_cast<float>(o) + 0.5f) / scale;
+  a.support = fmaxf(1.0f / scale, 1.0f);
+  a.invSupport = 1.0f / a.support;
+  a.lo = max(int64_t(0), int64_t(a.center - a.support + 0.5f));
+  a.hi = min(in_dim, int64_t(a.center + a.support + 0.5f));
+  return a;
+}
+
+__device__ inline float antialias_weight(const AntialiasAxis& a, int64_t i) {
+  return fmaxf(
+      1.0f - fabsf((static_cast<float>(i) - a.center + 0.5f) * a.invSupport),
+      0.0f);
+}
+
+template <typename T>
+__global__ void resize_antialias_kernel(const T* __restrict__ input,
+                                        T* __restrict__ output,
+                                        int64_t N, int64_t C,
+                                        int64_t in0, int64_t in1, int64_t in2,
+                                        int64_t out0, int64_t out1, int64_t out2,
+                                        int coord_transform,
+                                        float s0, float s1, float s2,
+                                        int64_t total_outputs) {
+  int64_t tid = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (tid >= total_outputs) return;
+
+  int64_t plane = out0 * out1 * out2;
+  int64_t n = tid / (C * plane);
+  int64_t rem = tid - n * C * plane;
+  int64_t c = rem / plane;
+  rem -= c * plane;
+  int64_t o0 = rem / (out1 * out2);
+  int64_t r1 = rem - o0 * (out1 * out2);
+  int64_t o1 = r1 / out2;
+  int64_t o2 = r1 - o1 * out2;
+
+  // An unused axis (in = out = 1) has the one pixel 0 at weight exactly 1.
+  const AntialiasAxis a0 = antialias_axis(o0, out0, in0, coord_transform, s0);
+  const AntialiasAxis a1 = antialias_axis(o1, out1, in1, coord_transform, s1);
+  const AntialiasAxis a2 = antialias_axis(o2, out2, in2, coord_transform, s2);
+
+  const T* base = input + (n * C + c) * (in0 * in1 * in2);
+  float value = 0.0f;
+  float total = 0.0f;
+  for (int64_t i0 = a0.lo; i0 < a0.hi; ++i0) {
+    const float w0 = antialias_weight(a0, i0);
+    for (int64_t i1 = a1.lo; i1 < a1.hi; ++i1) {
+      const float w1 = antialias_weight(a1, i1);
+      for (int64_t i2 = a2.lo; i2 < a2.hi; ++i2) {
+        const float weight = antialias_weight(a2, i2) * w1 * w0;
+        if (weight <= 0.0f) continue;
+        value += to_float<T>(base[(i0 * in1 + i1) * in2 + i2]) * weight;
+        total += weight;
+      }
+    }
+  }
+  if (total > 0.0f) value /= total;
+  output[tid] = from_float<T>(value);
+}
+
 template <typename T>
 static int launch(hipStream_t stream, const void* input, void* output,
                   int spatial_rank, int64_t N, int64_t C,
@@ -257,7 +344,15 @@ static int launch(hipStream_t stream, const void* input, void* output,
   int block = 256;
   int64_t grid = (total + block - 1) / block;
 
-  if (mode == 0) {
+  (void)hipGetLastError();
+  if (mode == 2) {
+    hipLaunchKernelGGL(resize_antialias_kernel<T>,
+                       dim3(static_cast<unsigned>(grid)), dim3(block),
+                       0, stream,
+                       static_cast<const T*>(input), static_cast<T*>(output),
+                       N, C, in0, in1, in2, out0, out1, out2,
+                       coord_transform, s0, s1, s2, total);
+  } else if (mode == 0) {
     hipLaunchKernelGGL(resize_nearest_kernel<T>,
                        dim3(static_cast<unsigned>(grid)), dim3(block),
                        0, stream,
@@ -295,8 +390,15 @@ static int resize_dispatch(void* stream, const void* input, void* output,
             spatial_rank);
     return -1;
   }
-  if (mode != 0 && mode != 1) {
+  if (mode != 0 && mode != 1 && mode != 2) {
     fprintf(stderr, "[custom_kernels] hip_resize: bad mode=%d\n", mode);
+    return -1;
+  }
+  if (mode == 2 && coord_transform != 0 && coord_transform != 3) {
+    fprintf(stderr,
+            "[custom_kernels] hip_resize: antialiased linear takes half_pixel "
+            "or pytorch_half_pixel, not coord_transform=%d\n",
+            coord_transform);
     return -1;
   }
 

@@ -13,6 +13,7 @@ are the linear nodes in ul_deeplabv3_fp16.
 Resize pytorch_half_pixel maps every output of a length-1 axis to input 0.
 Other lengths use half_pixel. When floor(input * scale) rounds, the
 coordinate transform must use the supplied scale, not output / input.
+Resize with antialias = 1 and exclude_outside = 1 is antialiased linear.
 """
 
 from __future__ import annotations
@@ -53,7 +54,12 @@ def _make_upsample_model(
 
 
 def _make_resize_sizes_model(
-    shape: list[int], sizes: list[int], dtype: np.dtype, mode: str, coord: str
+    shape: list[int],
+    sizes: list[int],
+    dtype: np.dtype,
+    mode: str,
+    coord: str,
+    **attrs,
 ):
     x_info = helper.make_tensor_value_info("X", np_to_onnx_type(dtype), list(shape))
     y_info = helper.make_tensor_value_info("Y", np_to_onnx_type(dtype), list(sizes))
@@ -64,9 +70,15 @@ def _make_resize_sizes_model(
         ["Y"],
         mode=mode,
         coordinate_transformation_mode=coord,
+        **attrs,
     )
+    # antialias is an opset-18 attribute.
     return make_model_from_nodes(
-        [node], [x_info], [y_info], initializers=[sizes_init], opset=13
+        [node],
+        [x_info],
+        [y_info],
+        initializers=[sizes_init],
+        opset=18 if "antialias" in attrs else 13,
     )
 
 
@@ -163,6 +175,35 @@ class TestResize:
         np.testing.assert_allclose(
             actual[0].reshape(-1), np.array(expected, np.float32), atol=1e-6
         )
+
+    # antialias = 1 with exclude_outside = 1 (PyTorch's antialias=True):
+    # shrinking widens the filter, growing is plain linear, and an output
+    # axis of 1 averages the whole input axis.
+    @pytest.mark.parametrize(
+        "shape,sizes,coord",
+        [
+            ([1, 3, 37, 53], [1, 3, 16, 20], "half_pixel"),
+            ([1, 3, 37, 53], [1, 3, 50, 20], "half_pixel"),
+            ([2, 4, 24, 24], [2, 4, 48, 40], "half_pixel"),
+            ([1, 2, 37, 53], [1, 2, 1, 20], "pytorch_half_pixel"),
+            ([1, 2, 37, 53], [1, 2, 16, 1], "half_pixel"),
+            ([1, 2, 9, 37, 53], [1, 2, 4, 16, 20], "half_pixel"),
+        ],
+    )
+    def test_antialias_linear(self, model_runner, shape, sizes, coord):
+        model = _make_resize_sizes_model(
+            shape,
+            sizes,
+            np.float32,
+            "linear",
+            coord,
+            antialias=1,
+            exclude_outside=1,
+        )
+        rng = np.random.default_rng(302)
+        x = rng.standard_normal(shape).astype(np.float32)
+        actual, reference = model_runner.run_sample(model, [x])
+        compare_outputs(actual, reference, atol=1e-5, rtol=1e-5)
 
     def test_scales_kept_when_floor_rounds(self, model_runner):
         model = _make_resize_scales_model(
