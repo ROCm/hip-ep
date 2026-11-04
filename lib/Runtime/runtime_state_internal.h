@@ -282,6 +282,11 @@ struct RuntimeState {
   int32_t seqlens_k_cached_val;
   const void *seqlens_k_cached_ptr;
 
+  // SparseAttentionIndexer past_sequence_length, same lifetime as above.
+  bool sai_past_len_cached_valid;
+  int32_t sai_past_len_cached_val;
+  const void *sai_past_len_cached_ptr;
+
   // ONNX Loop driver state. Lazily allocated by hipdnn_ep_run_counted_loop /
   // hipdnn_ep_run_loop on first call; freed in hipdnn_ep_state_cleanup.
   //

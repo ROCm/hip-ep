@@ -7,9 +7,9 @@
 // GQA runtime wrapper (self-contained: optimized fused fast path + legacy
 // decomposed hipBLASLt fallback).
 //
-// The generated IR calls `wrap_group_query_attention` (43-arg ABI, kept in
-// lockstep with the HipToLLVM lowering so the symbol keeps resolving). Path
-// selection:
+// The generated IR calls `wrap_group_query_attention_host_length`, or
+// `wrap_group_query_attention_ring_f16` for proven FP16 Ring candidates.
+// Path selection:
 //
 //   * Common fp16 causal GQA (head_dim in {64,96,128,256}, templated decode
 //     geometry) -> optimized fused custom kernels:
@@ -71,6 +71,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -145,9 +146,15 @@ static constexpr int32_t kSeqlensKNotRead = -2;
 // (total_seq - 1).
 static int32_t read_seqlens_k_for_dispatch(hipStream_t stream,
                                            const void *seqlens_k_ptr, int64_t B,
-                                           RuntimeState *state) {
+                                           RuntimeState *state,
+                                           std::optional<int32_t> host_length) {
   if (!seqlens_k_ptr || B != 1)
     return kSeqlensKNotRead;
+
+  // This value is local to the call. Do not read or update the pointer cache.
+  // The compiler proves that the buffer contains the same value.
+  if (host_length)
+    return *host_length;
 
   if (gqa_cache_seqlens_enabled() && state && state->seqlens_k_cached_valid &&
       state->seqlens_k_cached_ptr == seqlens_k_ptr)
@@ -361,8 +368,10 @@ static int gqa_forward_ring(RuntimeState *state, hipStream_t stream,
                             const void *past_value, const void *seqlens_k,
                             void *output, void *present_key,
                             void *present_value, int64_t sq, int64_t capacity,
-                            int64_t past_capacity) {
-  int32_t last = read_seqlens_k_for_dispatch(stream, seqlens_k, 1, state);
+                            int64_t past_capacity,
+                            std::optional<int32_t> host_length) {
+  int32_t last =
+      read_seqlens_k_for_dispatch(stream, seqlens_k, 1, state, host_length);
   if (last < -1) {
     fprintf(stderr, "Ring GQA: failed or invalid sequence-length read\n");
     return -1;
@@ -454,7 +463,8 @@ static int gqa_forward_fused(
     const void *k_scale = nullptr, const void *v_scale = nullptr,
     KvCacheFormat kv_format = KvCacheFormat::Fp16,
     const void *head_sink = nullptr, bool use_smooth_softmax = false,
-    int local_window_size = -1) {
+    int local_window_size = -1,
+    std::optional<int32_t> host_length = std::nullopt) {
 
   // Any non-fp16 cache reads/writes quantized bytes on the concat/append/decode
   // path; the specific scheme is carried by kv_format (extensible to INT4/FP8).
@@ -466,7 +476,7 @@ static int gqa_forward_fused(
 
   // B==1 pre-read (cached per Compute) feeds host past_len where needed.
   const int32_t seqlens_k_pre =
-      read_seqlens_k_for_dispatch(stream, seqlens_k_ptr, B, state);
+      read_seqlens_k_for_dispatch(stream, seqlens_k_ptr, B, state, host_length);
 
   const size_t Q_full_bytes = static_cast<size_t>(B) * sq * H * d * elem_sz;
   const size_t K_full_bytes = static_cast<size_t>(B) * sq * G * d * elem_sz;
@@ -1316,7 +1326,8 @@ static int gqa_forward_hipblaslt(
     int64_t past_buf_seq, int64_t H, int64_t G, int64_t d, float scale,
     int64_t do_rotary, int64_t local_window_size, bool no_causal,
     int64_t element_size_bytes, int op_state_slot, bool kv_bnsd,
-    bool reuse_past_kv = false) {
+    bool reuse_past_kv = false,
+    std::optional<int32_t> host_length = std::nullopt) {
 
   void *const out_present_key = present_key;
   void *const out_present_value = present_value;
@@ -1355,7 +1366,7 @@ static int gqa_forward_hipblaslt(
   // paths fall back to their legacy per-call reads. Stored in seqlens_k_pre;
   // total_seq_pre is the derived total_seq (-1 means unknown / not applicable).
   int32_t seqlens_k_pre =
-      read_seqlens_k_for_dispatch(stream, seqlens_k_ptr, B, state);
+      read_seqlens_k_for_dispatch(stream, seqlens_k_ptr, B, state, host_length);
   int64_t total_seq_pre = -1;
   if (bidirectional_no_past) {
     // bidirectional_no_past (Whisper encoder / cross-attn): seqlens_k = skv
@@ -2882,13 +2893,13 @@ static int gqa_forward_fused_from_fp32(
     int64_t past_buf_seq, int64_t H, int64_t G, int64_t d, float scale,
     int64_t do_rotary, const void *k_scale, const void *v_scale,
     KvCacheFormat kv_format, const void *head_sink, bool use_smooth_softmax,
-    int local_window_size) {
+    int local_window_size, std::optional<int32_t> host_length) {
   const bool packed_qkv = (!key && !value);
   const bool need_rope = do_rotary && cos_cache && sin_cache;
 
   int64_t past_len = 0;
   const int32_t seqlens_k_pre =
-      read_seqlens_k_for_dispatch(stream, seqlens_k, B, state);
+      read_seqlens_k_for_dispatch(stream, seqlens_k, B, state, host_length);
   if (seqlens_k_pre == -1) {
     past_len = 0;
   } else if (seqlens_k_pre >= 0) {
@@ -2943,22 +2954,22 @@ static int gqa_forward_fused_from_fp32(
   if (sin16 && gqa_cast_f32_to_f16(stream, sin_cache, sin16, rope_elems) != 0)
     return -1;
 
-  int rc = gqa_forward_fused(state, stream, q16, k16, v16, past_key, past_value,
-                             seqlens_k, cos16 ? cos16 : cos_cache,
-                             sin16 ? sin16 : sin_cache, out16, present_key,
-                             present_value, B, sq, skv, past_buf_seq, H, G, d,
-                             scale, do_rotary, k_scale, v_scale, kv_format,
-                             head_sink, use_smooth_softmax, local_window_size);
+  int rc = gqa_forward_fused(
+      state, stream, q16, k16, v16, past_key, past_value, seqlens_k,
+      cos16 ? cos16 : cos_cache, sin16 ? sin16 : sin_cache, out16, present_key,
+      present_value, B, sq, skv, past_buf_seq, H, G, d, scale, do_rotary,
+      k_scale, v_scale, kv_format, head_sink, use_smooth_softmax,
+      local_window_size, host_length);
   if (rc != 0)
     return rc;
   return gqa_cast_f16_to_f32(stream, out16, output, out_elems);
 }
 
 //===----------------------------------------------------------------------===//
-// Public wrapper called by generated IR. ABI MUST stay identical to the
-// HipToLLVM lowering (kWrapGQA = "wrap_group_query_attention", 43 params).
+// A proven host length avoids the readback only for batch one. Otherwise,
+// retain the existing readback and per-element validation.
 //===----------------------------------------------------------------------===//
-int wrap_group_query_attention(
+int wrap_group_query_attention_host_length(
     RuntimeState *state, int op_state_slot,
     // Inputs 1-7 (core GQA)
     void *query, void *key, void *value, void *past_key, void *past_value,
@@ -2978,7 +2989,11 @@ int wrap_group_query_attention(
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
     int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
-    int64_t seq_len_new_kv) {
+    int64_t seq_len_new_kv, int32_t has_host_length,
+    int32_t host_length_value) {
+  const std::optional<int32_t> host_length =
+      has_host_length ? std::optional<int32_t>(host_length_value)
+                      : std::nullopt;
   OP_PROFILE(
       "gqa",
       [&] {
@@ -3183,7 +3198,7 @@ int wrap_group_query_attention(
         cos_cache, sin_cache, output, present_key, present_value, batch_size,
         seq_len_q, seq_len_kv, past_buf_seq, num_heads, kv_num_heads, head_dim,
         scale, do_rotary, k_scale, v_scale, kv_format, head_sink,
-        has_smooth_softmax, static_cast<int>(local_window_size));
+        has_smooth_softmax, static_cast<int>(local_window_size), host_length);
     if (arc != 0)
       fprintf(stderr,
               "wrap_group_query_attention: fp32 adapter / gqa_forward_fused "
@@ -3215,7 +3230,7 @@ int wrap_group_query_attention(
         present_key, present_value, batch_size, seq_len_q, seq_len_kv,
         past_buf_seq, num_heads, kv_num_heads, head_dim, scale, do_rotary,
         local_window_size, no_causal != 0, element_size_bytes, op_state_slot,
-        kv_bnsd != 0, reuse_past_kv);
+        kv_bnsd != 0, reuse_past_kv, host_length);
     if (lrc != 0)
       fprintf(stderr,
               "wrap_group_query_attention: legacy decomposed pipeline failed "
@@ -3237,7 +3252,7 @@ int wrap_group_query_attention(
       cos_cache, sin_cache, output, present_key, present_value, batch_size,
       seq_len_q, seq_len_kv, past_buf_seq, num_heads, kv_num_heads, head_dim,
       scale, do_rotary, k_scale, v_scale, kv_format, head_sink,
-      has_smooth_softmax, static_cast<int>(local_window_size));
+      has_smooth_softmax, static_cast<int>(local_window_size), host_length);
   if (rc != 0)
     fprintf(stderr,
             "wrap_group_query_attention: gqa_forward_fused failed "
@@ -3246,7 +3261,7 @@ int wrap_group_query_attention(
   return rc;
 }
 
-// The legacy ABI does not encode dtype: only compiler-proven FP16 operands
+// The pointer ABI does not encode dtype: only compiler-proven FP16 operands
 // may enter this wrapper. All ineligible calls keep the original wrapper.
 int wrap_group_query_attention_ring_f16(
     RuntimeState *state, int op_state_slot,
@@ -3268,8 +3283,12 @@ int wrap_group_query_attention_ring_f16(
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
     int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
-    int64_t seq_len_new_kv) {
+    int64_t seq_len_new_kv, int32_t has_host_length,
+    int32_t host_length_value) {
 #if HIP_EP_RING_ENABLED != 0
+  const std::optional<int32_t> host_length =
+      has_host_length ? std::optional<int32_t>(host_length_value)
+                      : std::nullopt;
   // Only the compiler's proven-FP16 calls use this entry. Recheck runtime
   // geometry/features/device before reading lengths or modifying the cache.
   // Any noncandidate retains the original entry point and its diagnostics.
@@ -3288,16 +3307,16 @@ int wrap_group_query_attention_ring_f16(
     if (stream) {
       OP_PROFILE(
           "gqa", [] { return std::string("ring_f16"); }, state);
-      int rc =
-          gqa_forward_ring(state, stream, query, key, value, past_key,
-                           past_value, seqlens_k, output, present_key,
-                           present_value, seq_len_q, seq_len_kv, past_buf_seq);
+      int rc = gqa_forward_ring(state, stream, query, key, value, past_key,
+                                past_value, seqlens_k, output, present_key,
+                                present_value, seq_len_q, seq_len_kv,
+                                past_buf_seq, host_length);
       if (rc != 1)
         return rc;
     }
   }
 #endif
-  return wrap_group_query_attention(
+  return wrap_group_query_attention_host_length(
       state, op_state_slot, query, key, value, past_key, past_value, seqlens_k,
       total_seq_len, cos_cache, sin_cache, position_ids, attention_bias,
       head_sink, k_scale, v_scale, output, present_key, present_value,
@@ -3305,5 +3324,6 @@ int wrap_group_query_attention_ring_f16(
       softcap, local_window_size, smooth_softmax, qk_output, k_quant_type,
       v_quant_type, kv_cache_bit_width, no_causal, batch_size, seq_len_q,
       seq_len_kv, past_buf_seq, head_dim, element_size_bytes, attn_bias_batch,
-      attn_bias_num_heads, kv_bnsd, seq_len_new_kv);
+      attn_bias_num_heads, kv_bnsd, seq_len_new_kv, has_host_length,
+      host_length_value);
 }
