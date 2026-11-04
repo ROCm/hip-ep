@@ -423,6 +423,10 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
     }
 
     constexpr int64_t row_group_size = 64;
+    // Scaled SwiGLU rows need the bias after the rescale, so the reduce adds
+    // it instead of the fc2 GEMM.
+    const void *fc2_gemm_bias = d_row_scale ? nullptr : fc2_bias;
+    const void *fc2_reduce_bias = d_row_scale ? fc2_bias : nullptr;
     RUNTIME_DEBUG_LOG(
         "[REAL] wrap_qmoe: device %s prefill rows=%lld experts=%lld\n",
         grouped ? "grouped" : "ragged", (long long)routed_rows,
@@ -464,10 +468,10 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
                            hidden_size));
       HIP_CHECK(activate());
       HIP_CHECK(grouped_fc(d_act_buf, fc2_weights, fc2_scales, fc2_zero_points,
-                           fc2_bias, d_fc2_buf, hidden_size, inter_size));
+                           fc2_gemm_bias, d_fc2_buf, hidden_size, inter_size));
       HIP_CHECK(hip_qmoe_reduce_sorted_pairs(
           stream, d_fc2_buf, d_pair_to_sorted, d_expert_indices,
-          d_expert_weights, d_row_scale, fc2_bias, output, num_tokens,
+          d_expert_weights, d_row_scale, fc2_reduce_bias, output, num_tokens,
           hidden_size, k, elem_size));
       return 0;
     }
@@ -483,12 +487,13 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
     HIP_CHECK(hip_qmoe_ragged_matmul_nbits(
         stream, d_act_buf, /*input_row_ids=*/nullptr, d_row_groups,
         d_row_group_count, d_fc2_queue_head, fc2_weights, fc2_scales,
-        fc2_pre_zp_u8, fc2_bias, d_fc2_buf, routed_rows, num_experts,
+        fc2_pre_zp_u8, fc2_gemm_bias, d_fc2_buf, routed_rows, num_experts,
         hidden_size, inter_size, expert_weight_bits, block_size, elem_size));
 
     HIP_CHECK(hip_qmoe_reduce_sorted_pairs(
         stream, d_fc2_buf, d_pair_to_sorted, d_expert_indices, d_expert_weights,
-        d_row_scale, fc2_bias, output, num_tokens, hidden_size, k, elem_size));
+        d_row_scale, fc2_reduce_bias, output, num_tokens, hidden_size, k,
+        elem_size));
     return 0;
   }
 

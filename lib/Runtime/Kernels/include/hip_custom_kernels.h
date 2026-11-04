@@ -3197,8 +3197,8 @@ HIP_KERNEL_API int hip_qmoe_ragged_matmul_nbits_get_task_kind(
  * old serial per-expert scatter-add path without atomics. row_scale (fp32
  * [sorted rows], may be null) multiplies each sorted row's contribution; it is
  * the buffer hip_qmoe_swiglu filled for that row's fc2 input. fc2_bias (fp16
- * [num_experts, width], may be null) must be the bias the fc2 GEMM added, so
- * it is not scaled along with the row.
+ * [num_experts, width], may be null) is added to each contribution after the
+ * row scale, so the fc2 GEMM must not also add it.
  */
 HIP_KERNEL_API int hip_qmoe_reduce_sorted_pairs(
     void* stream,

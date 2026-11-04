@@ -1206,6 +1206,106 @@ bool run_grouped_partial_block_case(hipStream_t stream) {
   return pass;
 }
 
+// Rows with a SwiGLU row scale s > 1 hold v = fc2(act / s) without bias, so
+// each contribution is s * v + b. b is large next to v so that applying it
+// before the rescale, or scaling it with the row, is visible.
+bool run_reduce_scaled_case(hipStream_t stream, int width) {
+  constexpr int tokens = 6;
+  constexpr int experts = 4;
+  constexpr int top_k = 3;
+  constexpr int pairs = tokens * top_k;
+  ResultRow result("reduce_scaled_T" + std::to_string(tokens) + "_k" +
+                       std::to_string(top_k) + "_W" + std::to_string(width),
+                   "fixed");
+
+  std::vector<int32_t> expert_indices(pairs);
+  std::vector<__half> expert_weights(pairs);
+  std::vector<int32_t> pair_to_sorted(pairs);
+  std::vector<float> row_scale(pairs);
+  for (int pair = 0; pair < pairs; ++pair) {
+    const int token = pair / top_k;
+    const int slot = pair % top_k;
+    // Slot 2 of every third token names no expert.
+    expert_indices[pair] = slot == 2 && token % 3 == 0
+                               ? std::numeric_limits<int32_t>::max()
+                               : (token + 2 * slot) % experts;
+    expert_weights[pair] = float_to_half(0.25f + 0.125f * slot);
+    pair_to_sorted[pair] = (pair * 7) % pairs;
+    row_scale[pair] = static_cast<float>(1 << ((pair % 4) * 4));
+  }
+  std::vector<__half> sorted(static_cast<size_t>(pairs) * width);
+  for (size_t i = 0; i < sorted.size(); ++i)
+    sorted[i] = float_to_half(static_cast<float>(static_cast<int>(i % 29) - 14) /
+                              32.0f);
+  std::vector<__half> bias(static_cast<size_t>(experts) * width);
+  for (size_t i = 0; i < bias.size(); ++i)
+    bias[i] = float_to_half(static_cast<float>(static_cast<int>(i % 11) - 5) *
+                            8.0f);
+
+  std::vector<__half> expected(static_cast<size_t>(tokens) * width);
+  for (int token = 0; token < tokens; ++token) {
+    for (int col = 0; col < width; ++col) {
+      uint32_t used = 0;
+      __half acc = float_to_half(0.0f);
+      for (int rank = 0; rank < top_k; ++rank) {
+        int best_slot = -1;
+        int32_t best = std::numeric_limits<int32_t>::max();
+        for (int slot = 0; slot < top_k; ++slot) {
+          const int32_t expert = expert_indices[token * top_k + slot];
+          if ((used & (1u << slot)) == 0 && expert < best) {
+            best = expert;
+            best_slot = slot;
+          }
+        }
+        if (best_slot < 0) break;
+        used |= 1u << best_slot;
+        const int pair = token * top_k + best_slot;
+        const int row = pair_to_sorted[pair];
+        const float value =
+            row_scale[row] *
+                half_to_float(sorted[static_cast<size_t>(row) * width + col]) +
+            half_to_float(bias[static_cast<size_t>(best) * width + col]);
+        acc = float_to_half(half_to_float(acc) +
+                            half_to_float(expert_weights[pair]) * value);
+      }
+      expected[static_cast<size_t>(token) * width + col] = acc;
+    }
+  }
+
+  DeviceBuffer<__half> d_sorted(sorted.size());
+  DeviceBuffer<int32_t> d_pair_to_sorted(pairs);
+  DeviceBuffer<int32_t> d_indices(pairs);
+  DeviceBuffer<__half> d_weights(pairs);
+  DeviceBuffer<float> d_scale(pairs);
+  DeviceBuffer<__half> d_bias(bias.size());
+  DeviceBuffer<__half> d_output(expected.size());
+  upload(d_sorted, sorted);
+  upload(d_pair_to_sorted, pair_to_sorted);
+  upload(d_indices, expert_indices);
+  upload(d_weights, expert_weights);
+  upload(d_scale, row_scale);
+  upload(d_bias, bias);
+  const int status = hip_qmoe_reduce_sorted_pairs(
+      reinterpret_cast<void*>(stream), d_sorted.get(), d_pair_to_sorted.get(),
+      d_indices.get(), d_weights.get(), d_scale.get(), d_bias.get(),
+      d_output.get(), tokens, width, top_k, sizeof(__half));
+  if (status != static_cast<int>(hipSuccess)) return false;
+  HIP_CHECK(hipStreamSynchronize(stream));
+  std::vector<__half> got(expected.size());
+  HIP_CHECK(hipMemcpy(got.data(), d_output.get(), got.size() * sizeof(__half),
+                      hipMemcpyDeviceToHost));
+
+  // The device may fuse the weighted add, so allow fp16 rounding ties. A bias
+  // applied before the rescale is off by about s * b, far above this.
+  const Metrics metrics = compare(got, expected);
+  const bool pass = metrics.finite && metrics.rel_l2 <= 1e-3;
+  std::cout << (pass ? "PASS" : "FAIL") << " relL2=" << metrics.rel_l2
+            << " n=" << got.size() << " shape=reduce_scaled_W" << width
+            << " maxAbs=" << metrics.max_abs << '\n';
+  result.finish(metrics.rel_l2, pass);
+  return pass;
+}
+
 bool run_pipeline_case(hipStream_t stream) {
   constexpr int tokens = 20;
   constexpr int experts = 5;
@@ -1406,7 +1506,7 @@ bool run_pipeline_case(hipStream_t stream) {
     status = hip_qmoe_ragged_matmul_nbits(
         reinterpret_cast<void*>(stream), d_act.get(), nullptr, d_groups.get(),
         d_group_count.get(), d_fc2_queue.get(), d_fc2_weights.get(),
-        d_fc2_scales.get(), d_fc2_zero_points.get(), d_fc2_bias.get(),
+        d_fc2_scales.get(), d_fc2_zero_points.get(), /*bias=*/nullptr,
         d_fc2_output.get(), pairs, experts, hidden, inter, 4, block_size,
         sizeof(__half));
     if (status != static_cast<int>(hipSuccess)) return false;
@@ -1541,12 +1641,14 @@ int main(int argc, char** argv) {
   constexpr int task_policy_cases = 2;
   constexpr int launcher_cases = 1;
   constexpr int pipeline_cases = 1;
+  constexpr int reduce_scaled_cases = 2;
   constexpr int grouped_partial_block_cases = 1;
   std::cout << "qmoe_ragged_mm coverage=" << coverage
             << " cases=" << shape_count * category_count + model_shape_cases +
                                adaptive_shape_cases + descriptor_cases +
                                task_policy_cases + launcher_cases +
-                               pipeline_cases + grouped_partial_block_cases
+                               pipeline_cases + reduce_scaled_cases +
+                               grouped_partial_block_cases
             << '\n';
 
   hipStream_t stream = nullptr;
@@ -1594,6 +1696,9 @@ int main(int argc, char** argv) {
                all_pass;
   }
   all_pass = run_pipeline_case(stream) && all_pass;
+  // 64 takes the 8-wide loads; 36 the scalar fallback.
+  all_pass = run_reduce_scaled_case(stream, 64) && all_pass;
+  all_pass = run_reduce_scaled_case(stream, 36) && all_pass;
   all_pass = run_grouped_partial_block_case(stream) && all_pass;
   HIP_CHECK(hipStreamDestroy(stream));
 

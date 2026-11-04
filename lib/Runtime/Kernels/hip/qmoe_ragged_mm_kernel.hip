@@ -822,19 +822,18 @@ __global__ void __launch_bounds__(kReduceBlock) qmoe_reduce_sorted_pairs_kernel(
       float value[kVec];
 #pragma unroll
       for (int j = 0; j < kVec; ++j) value[j] = static_cast<float>(v[r].h[j]);
-      // The fc2 GEMM saw act / s but added the unscaled bias b, so the true
-      // value is s * v - (s - 1) * b. s is a power of two, so s == 1 rows are
-      // bit-identical to the unscaled path. s is uniform across the block.
+      // The fc2 GEMM saw act / s and no bias, so the true value is s * v + b.
+      // Adding b after the rescale keeps a large bias from swamping v's fp16
+      // mantissa. s is a power of two and uniform across the block.
       if (s != 1.0f) {
-        Vec b;
-        if (fc2_bias)
-          b = *reinterpret_cast<const Vec *>(fc2_bias + s_bias_base[r] +
-                                             c * kVec);
 #pragma unroll
-        for (int j = 0; j < kVec; ++j) {
-          value[j] *= s;
-          if (fc2_bias) value[j] -= (s - 1.0f) * static_cast<float>(b.h[j]);
-        }
+        for (int j = 0; j < kVec; ++j) value[j] *= s;
+      }
+      if (fc2_bias) {
+        const Vec b = *reinterpret_cast<const Vec *>(fc2_bias +
+                                                     s_bias_base[r] + c * kVec);
+#pragma unroll
+        for (int j = 0; j < kVec; ++j) value[j] += static_cast<float>(b.h[j]);
       }
 #pragma unroll
       for (int j = 0; j < kVec; ++j)
