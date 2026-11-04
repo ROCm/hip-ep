@@ -96,20 +96,9 @@ supplement numerical/kernel checks. Inspect outputs before treating them as evid
 
 `manifest.json` records source diff, libraries, model/tokenizer, codec and fixture
 hashes. `comparisons.json` has per-position metrics; `summary.md` has the per-turn
-table. Preserve raw artifacts outside Git and add measured findings, limitations
-and reproduction commands to the PR document. Do not report an unrun judge as passed.
-
-### Current upstream GenAI stack
-
-Current upstream CI applies GenAI PR #2691, which already adds AMDGPU continuous
-decoding. Do **not** apply the full stock-0.17 patch again on that stack. Apply
-only `tools/turboquant/patches/onnxruntime-genai-0.17-pending-append.patch` there
-(or use `git apply --include='src/decoding/*'` on the full patch). The current
-2685/2691/2705/2712/2792/2801 patch stack does not modify either standard-decoding
-file; the remaining patch is apply-checked against v0.17.0. It changes only
-pending-token flush before append, independent of KV precision. No rewind change
-is included. Local results identify the exact GenAI package used; applying a
-patch is not a claim that every CI dependency combination has been tested.
+table. Keep generated artifacts outside Git. Multi-turn accuracy reports, answer text
+and judge findings remain local pending author review; do not add them to the
+branch or PR description. Do not report an unrun judge as passed.
 
 ### Optional BF16 reference
 
@@ -143,22 +132,12 @@ includes weight quantization and framework/kernel arithmetic differences. Report
 these comparisons separately. This eight-question ledger fixture cannot establish
 general long-context answer quality, even when the judge assigns perfect scores.
 
-### Environment consistency
+### Environment
 
-Use the same Release/MSVC/gfx1151 build settings, ROCm toolchain, ORT 1.31 SDK,
-Python dependency environment and model revision as the PR1366 Ring campaign.
-Keep `ENABLE_ROCMLIRTRITON=OFF` for that comparison. The feature-specific GenAI
-append companion is applied to all OGA arms and loaded with the same ORT 1.31
-runtime. The retained v0.17 companion binary was built with the 1.30 SDK; its
-release C API is validated against the 1.31 runtime by the integration test.
-This feature-specific binary difference is recorded explicitly. The original Ring installation remains unchanged.
-
-Strict mode and two-thread OpenMP/OpenBLAS settings follow that campaign's
-numeric checks. Dispatch diagnostics intentionally enable debug logging; they
-are not the debug-disabled performance campaign. Before a long run, record the
-Python executable, imported package paths/versions, build cache, loaded runtime
-DLL paths and thread settings. Fail early if the pinned environment drifts.
-The unrelated Windows RMT infrastructure failure is outside this feature's scope.
+Use the [tested setup](../../tools/turboquant/README.md#enable-turboquant-on-the-tested-windows-setup)
+for all OGA arms, including the GenAI append companion. Record interpreter and
+package paths, toolchain, DLL hashes and thread settings. Enable debug tracing
+for dispatch checks; disable it for the separate performance campaign.
 
 ## Performance-only campaign (Windows)
 
@@ -223,3 +202,25 @@ three configurations. No model/kernel warm-up is added by enabling the counter.
 
 Current measured tables: [performance report](../../docs/design/turboquant-current-performance.md).
 Accuracy/LLM-judge findings require separate review and are not part of that report.
+
+## Support files
+
+There is one generated conversation fixture, not a checked-in fixture dataset.
+The runner writes `fixture.json` to the result directory at execution time.
+`fixture.py` is its small, versioned source; changing it changes the recorded
+fixture hash. No model weights, token arrays or answer results belong here.
+
+| File | Responsibility |
+| --- | --- |
+| `run_turboquant_multiturn.py` | Persistent generators, dispatch/cache/history checks and matched/free-running tracks. |
+| `fixture.py` | Eight-turn fictional ledger, exact prompt token budgets and expected-content checks. |
+| `metrics.py` | Per-position distribution comparisons; shared with the BF16 reference. |
+| `test_metrics.py` | Fast CPU tests for fixture integrity and metric behavior. |
+| `pytorch_reference.py` | Optional original-BF16 model control, isolated from OGA's package/DLL environment. |
+| `judge_multiturn.py` | Optional blinded packet export and external judge adapter. |
+| `run_turboquant_performance.py` | Kernel, single-turn and append performance without accuracy tracing. |
+
+The BF16 and judge tools implement optional paths promised by the evaluation
+protocol. They are independent processes so importing the OGA test does not
+load their framework or invoke a judge. All are useful; the old dedicated
+`check_multiturn_windows.py` launcher has been superseded by the shared runner.

@@ -4,9 +4,15 @@ Licensed under the MIT License.
 -->
 # Experimental 4-bit TurboQuant KV cache
 
-This opt-in implementation incorporates main at `9900502325dcfaab713831d05d93c2df6859849b`, including merged [Ring attention PR #1366](https://github.com/ROCm/hip-ep/pull/1366). Ring and TurboQuant compile by default. Existing GQA remains the default runtime path; dense Ring requires its runtime opt-in, and TurboQuant requires explicit codec provider options. Enabling Ring alone does not enable KV compression.
+TurboQuant stores full-attention KV as four-bit centroid indices plus FP32 norms.
+Fresh prefill uses FP16 Ring attention; decode scans packed KV directly; append
+prefill combines packed history with the new prompt. Ring and TurboQuant compile
+by default, and runtime selection is explicit. See the [setup guide](../../tools/turboquant/README.md)
+for enablement and the [manual test guide](../../test/long_context/README.md) for reproduction.
 
-The feature is **not ready for release**. Full-model generated sequences diverge at some tested prompt lengths even when first-step logits pass the numerical screen. The synthetic 256K comparison fails its numerical gate. Strict encoder parity has two centroid-boundary code-byte differences at 4K on Windows. The Windows codec export also differs from the frozen Linux artifact. See [measured validation](turboquant-validation.md) for results and limitations.
+This implementation is experimental. Kernel correctness over stored quantized
+values and broad model answer quality are separate gates; the unresolved
+[validation limits](#validation-and-known-limitations) remain in scope for review.
 
 ## Data flow
 
@@ -118,44 +124,90 @@ the existing model-quality limitations or constitute a general FP16 extreme-
 range qualification. New measurements must be recorded separately from the
 historical single-turn tables.
 
-### GenAI continuation dependency
+### Why the Ring source changes
 
-Stock GenAI 0.17 rejects repeated `Generator.append_tokens()` calls for the
-AMDGPU cache device before invoking HIP-EP. The companion
-[`onnxruntime-genai-0.17-amdgpu-append.patch`](../../tools/turboquant/patches/onnxruntime-genai-0.17-amdgpu-append.patch)
-adds AMDGPU to the continuation capability list. It also makes standard
-decoding evaluate a pending selected token before appending a new prompt;
-otherwise the sequence length can advance ahead of the KV/recurrent state.
-This is a GenAI source dependency, not a change to the packed cache format.
-Rewind behavior is unchanged.
+`ring_gqa.hip` supplies the tiled prefill computation for both parts of append:
 
-Build the patch against the GenAI `v0.17.0` release and use that package for
-multi-turn tests. The local validation uses a separate package directory;
-the installed stock package and original benchmark environments remain intact.
-The patch includes a device-capability unit assertion; the exercised GPU
-integration checks cover repeated append, a pending token, cache bytes and
-resumed decode. See [append validation](turboquant-append-validation.md) for
-the measured scope and any remaining gates.
+```mermaid
+flowchart LR
+    Q["New FP16 queries"] --> R["Rotate queries"]
+    H["Packed history: indices + norms"] --> P["Ring prefix attention: unpack LDS tiles"]
+    R --> P
+    Q --> T["Ring causal attention over new FP16 K/V"]
+    N["New FP16 K/V"] --> T
+    P --> J["Inverse-rotate prefix output; merge FP32 outputs and log-normalizers"]
+    T --> J
+    J --> O["Attention output"]
+    J --> E["Encode and append only new K/V"]
+    E --> H
+```
 
+`RingStatsCall<true>` reconstructs prefix tiles and returns FP32 output and
+natural-log softmax statistics. `RingStatsCall<false>` returns the same statistics
+for the causal dense tail. The join needs both to reproduce one softmax over the
+combined prefix and tail. Reusing the existing Ring tile schedule avoids a second
+copy of its WMMA, masking and LDS implementation.
 
-Current upstream CI applies GenAI PR #2691, which already adds AMDGPU continuous
-decoding. Do **not** apply the full stock-0.17 patch again on that stack. Apply
-only `tools/turboquant/patches/onnxruntime-genai-0.17-pending-append.patch` there
-(or use `git apply --include='src/decoding/*'` on the full patch). The current
-2685/2691/2705/2712/2792/2801 patch stack does not modify either standard-decoding
-file; the remaining patch is apply-checked against v0.17.0. It changes only
-pending-token flush before append, independent of KV precision. No rewind change
-is included. Local results identify the exact GenAI package used; applying a
-patch is not a claim that every CI dependency combination has been tested.
+The ordinary dense launch still instantiates `RingCall`: compile-time `stats` and
+`packed` are false. Its K/V shape remains `past + query`, so the generalized scan
+bound is the original dense bound. The extra packed load and statistics branches
+are specialized away. Ring decode is unchanged by this extension. The 54-case
+Ring numeric sanity suite passed on merge `6e39e12`; this documentation cleanup
+makes no further kernel changes.
 
-## Validation and diagnostic memory accounting
+### Compiler and mock runtime
 
-The reference tests cover packing, reconstruction, rotation and partitioned attention. Direct HIP tests use guarded allocations, poisoned unused capacity and FP64 attention over the actual reconstructed packed data. The strict encoder byte gate is intentionally unchanged despite the documented boundary differences. The Windows GenAI test exercises shared-cache allocation, dense prefill, repeated append/decode transitions, preservation of old packed rows and invalid-codec rejection. `check_append.py` checks the mixed FP16/packed attention oracle, partial tiles, query-chunk boundaries, workspace admission and the 256K capacity boundary.
+`GqaLowering.cpp` selects the versioned packed-width entry for packed or dynamic
+cache shapes. The declaration, real runtime and mock runtime must expose the
+same signature. `lib/Runtime/mock/mock_gpu.cpp` therefore supplies
+`wrap_group_query_attention_v4` for GPU-free compiler/mock builds. It records
+ordinary mock dispatch; it does not emulate compression or prove GPU accuracy.
+There is no `mock_gpu.hip` in this PR.
 
-The optional Windows `HIP_EP_PROFILE_ALLOCATOR_DLL` hook loads a diagnostic allocation shim into ORC symbol lookup. The benchmark shim intercepts four HIP allocation/free APIs and records live EP device/mapped-host allocation sizes and event peaks. Leave the variable unset outside profiling. The independent Windows WDDM sampler measures process GPU commitment and includes mapped-host KV once; it is not physical residency. A controlled allocation/free/reuse check distinguishes retained HIP memory from live-user allocation totals.
+### GenAI continuation
 
-The complete compiler/runtime/kernel integration is submitted together because the packed width, allocator contract, codec identity and decoder must agree. The feature remains explicit opt-in and draft while correctness gates are unresolved. No claim is made for other models, architectures, broad task accuracy or production readiness.
+Repeated prompt append requires AMDGPU continuous decoding and flushing any
+selected token whose KV has not been computed yet. This lifecycle requirement
+applies to all three OGA modes. The [setup guide](../../tools/turboquant/README.md#external-dependencies)
+owns the two companion patch choices, affected external files and exact SDK
+provenance. HIP-EP does not require an ONNX schema or cache-allocation patch.
 
-## Codec generation
+## Validation and known limitations
 
-Codec BIN/NPZ files are generated build/test assets, not source-controlled fixtures. Enable `HIP_EP_GENERATE_TQ_CODEC` or run `tools/turboquant/generate_codec.py` during setup; see the [generation instructions](../../tools/turboquant/README.md#generate-codec-assets-during-build-or-test-setup). Preserve the generated manifest and codec hash with cached data and measurements.
+| Evidence | What it establishes | Remaining limit |
+| --- | --- | --- |
+| CPU codec and guarded HIP oracles | Packing, reconstruction, rotation, partition merge and arithmetic over stored indices/norms. | Strict CPU/GPU encoder parity historically fails at centroid boundaries: two code-byte differences in the 4K-vector gate. That assertion remains unchanged. |
+| Mixed-cache append oracle | FP64 comparison, chunk/tile boundaries, bounded scratch, unchanged old rows and capacity admission. | FP16 staging adds rounding; this is not broad model-quality qualification. |
+| Historical first-step/full-model checks | Some matching-prefix logits meet the numerical screen. | Greedy sequences diverge at several lengths; passing one-step logits does not guarantee answer agreement. |
+| Historical synthetic 256K check | Kernel execution and decode timing at the cache boundary. | The first-decode screen failed: TurboQuant cosine 0.902733, relative L2 0.440642 versus baseline. Ring also failed that historical screen. No semantic 256K or full-model 256K prefill claim is made. |
+| Codec provenance | Generated constants have a manifest and checksum. | Windows and historical Linux exports differ; codec identity must remain fixed for a cache. |
+
+The historical evidence and original harnesses are preserved in
+[the pre-cleanup revision](https://github.com/ROCm/hip-ep/tree/6e39e12cf2dec225adb72a593fab9493e25576f9/tools/turboquant)
+and its [validation report](https://github.com/ROCm/hip-ep/blob/6e39e12cf2dec225adb72a593fab9493e25576f9/docs/design/turboquant-validation.md).
+Those older binaries and measurements do not qualify current main. The
+[recorded three-path performance report](turboquant-current-performance.md)
+retains its exact source revision and machine-readable samples. Multi-turn
+accuracy analysis and judge findings remain local pending author review.
+
+The latest merge sanity passed 692 compiler tests (nine unsupported), seven
+selected runtime tests, 29 CPU tests, 54 Ring numeric cases and two host-length
+numeric tests. These are scoped sanity checks, not a release-quality claim.
+
+## Support files and measurement scope
+
+| Area | Retained purpose |
+| --- | --- |
+| `tools/turboquant/` | Codec generation/reference and focused GPU/integration gates. |
+| `tools/turboquant/benchmark/windows_memory_counter.cpp` | Optional process-local HIP allocation counter for timing campaigns. |
+| `tools/turboquant/benchmark/windows_memory.py` | Reader used by `run_turboquant_performance.py`; the only remaining benchmark Python helper. |
+| `test/long_context/` | Manual three-path model performance and multi-turn characterization; [file roles](../../test/long_context/README.md#support-files). |
+
+The allocation sidecar records live EP device and mapped-host requested bytes,
+including retained pools. It excludes driver allocations, CPU interpreter RAM
+and physical residency. Weights, reserved KV and residual Other use this one
+scope in the current performance report. Older WDDM commitment samplers and
+four-way launchers are retired; their results are retained only as historical
+evidence at the revision above. Keep `HIP_EP_PROFILE_ALLOCATOR_DLL` unset outside
+profiling. Setup and [codec generation](../../tools/turboquant/README.md#generate-codec-assets-during-build-or-test-setup)
+remain in the setup guide; no BIN/NPZ assets are committed.

@@ -7,7 +7,7 @@ Licensed under the MIT License.
 This is an experimental, explicit-opt-in MSE-only QR codec for the Qwen
 24-query-head / 4-KV-head / dimension-256 geometry. Read
 [`turboquant-kv-cache.md`](../../docs/design/turboquant-kv-cache.md) and the
-[historical validation](../../docs/design/turboquant-validation.md) before use.
+[known limitations](../../docs/design/turboquant-kv-cache.md#validation-and-known-limitations) before use.
 The strict encoder gate and some full-model comparisons currently fail; this
 is not a production-quality accuracy claim.
 
@@ -18,7 +18,7 @@ This walkthrough covers Radeon 8060S (`gfx1151`), batch one, Qwen3.8-27B with
 and external RoPE. INT4 **weights** alone do not enable compressed KV. The
 current environment uses Python 3.13, ORT 1.31.0, NumPy 2.4.3, GenAI 0.17.0
 with the append companion, and TheRock 7.15.26333, aligned with Ring PR1366.
-For the current-branch, three-configuration timing and memory campaign, use the
+For the recorded three-configuration timing and memory campaign, use the
 [performance report](../../docs/design/turboquant-current-performance.md) and
 [manual performance command](../../test/long_context/README.md#performance-only-campaign-windows).
 It includes kernels through 256K, single-turn model runs through 64K, and eight
@@ -235,37 +235,7 @@ and checks packed cache allocation, repeated append/decode, unchanged old rows,
 and invalid-codec rejection. Inspect `results/integration/receipt.json` and
 `run.log`; the receipt must report `status: passed`.
 
-For the full Qwen test, first prepare the pinned model and verified download
-receipt described in [Reproduce Windows full-model measurements](#reproduce-windows-full-model-measurements).
-Then run:
-
-```powershell
-& $Python tools/turboquant/check_multiturn_windows.py
-```
-
-It creates per-run model links/configuration and checks 4K prefill, eight decode
-tokens, 33-token append, eight decode tokens, 129-token append and eight decode
-tokens. Inspect `results/append/qwen/receipt.json`: status, loaded library paths
-and hashes, finite logits and preserved old packed rows. This verifies execution;
-the matching-prefix dense control and existing accuracy blockers are described
-below. The command is not an accuracy qualification for arbitrary prompts.
-
-| Symptom | Check |
-| --- | --- |
-| AMDGPU continuous decoding rejected | The process imported stock GenAI; check `og.__file__` and the rebuilt DLL. |
-| Missing/invalid codec | All three provider options, absolute path, generated manifest/hash and runtime header/checksum validation. |
-| Unsupported TurboQuant geometry/device | `gfx1151`, Ring-enabled build, batch one, H24/G4/D256, FP16 and shared buffers. |
-| Wrong DLL or missing dependency | `AMDGPU_EP_PATH`, DLL search paths and the install selected in the receipt. |
-| Strict encoder test fails at 4K | This is a recorded centroid-boundary discrepancy; retain the failure rather than weakening the assertion. |
-
-
-## CPU reference
-
-Install NumPy, SciPy and pytest, then run from the repository root:
-
-```console
-python -m pytest tools/turboquant/test_reference.py -q
-```
+For full-model checks, continue with the [manual test guide](../../test/long_context/README.md).
 
 ## Generate codec assets during build or test setup
 
@@ -314,149 +284,72 @@ already-exported constants without regenerating them. The older standalone
 `fixtures.npz` is a local diagnostic artifact; the current tests generate their
 input tensors and do not need it.
 
-## GPU checks
+## Tests and measurements
 
-The scripts use an external work directory with this layout:
+Use the same installed build for all three paths. The commands below serve
+separate purposes; the long model campaign runs only when explicitly invoked.
 
-```text
-work/
-  hip-ep/                       this repository
-  reference/codec/constants.npz generated reference arrays
-  reference/codec/codec.bin     serialized codec
-  build/                       profiling DLL and build outputs
-  results/                     test receipts
-  install/turboquant/           Ring-KV build including TurboQuant
-```
-
-Set `TQ_WORK_ROOT` to the absolute work directory, `TQ_HIP_RUNTIME` to the HIP
-runtime library, and `TQ_TEST_LIBRARY` to the installed gfx1151 custom-kernel
-library. On Windows, initialize the ROCm SDK DLL search paths first (the local
-validation environment imports its ROCm PyTorch package before the direct
-ctypes checks). Run `check_hip.py` for strict code bytes, guarded allocations,
-decoder oracle and negative workspace/bounds checks. Its 4096-vector case is
-expected to expose the documented two-byte encoder discrepancy; do not weaken
-the assertion. Run `check_hip_extended.py` with `TQ_RING_LIBRARY` set to a
-Ring-enabled custom-kernel library for append/long-history checks and direct
-kernel timing. These timings are not full-model token throughput.
-
-`check_append.py` checks multi-token append prefill against an FP64 mixed-cache
-oracle, including 128-query chunk boundaries, bounded scratch, unchanged old
-cache bytes and long histories through the 256K capacity boundary. Set
-`TQ_APPEND_RESULTS` to isolate its receipts from prior measurements. The test
-compares appended rows byte for byte with the frozen PR encoder selected by
-`TQ_ENCODER_BASELINE_LIBRARY` (default: `install/turboquant`). CPU encoder
-code-byte differences remain visible in the receipt; `check_hip.py` retains
-the separate strict CPU encoder assertion unchanged.
-
-`check_genai_windows.py` checks repeated append/decode turns, shared-cache
-allocation, old-row preservation and invalid-codec
-error propagation with a small generated ONNX graph. It expects the Windows
-SDK and work layout described above. `TQ_INTEGRATION_INSTALL` and
-`TQ_INTEGRATION_RESULTS` select an isolated installation and result directory. `benchmark/check_long_windows.py` checks
-the decoder against an FP64 oracle at 128K, 128K+128 and 256K, including guards.
-
-## Multi-turn GenAI checks
-
-Stock GenAI 0.17 rejects continuous decoding on AMDGPU. Apply
-[`patches/onnxruntime-genai-0.17-amdgpu-append.patch`](patches/onnxruntime-genai-0.17-amdgpu-append.patch)
-to the matching GenAI release, build it against the matching ORT SDK, and use
-the resulting Python package (an isolated `PYTHONPATH` works). The patch
-enables AMDGPU append and flushes a pending selected token before the next
-prompt; it does not change rewind handling.
-
-Run `check_genai_windows.py` first. Then run `check_multiturn_windows.py` with
-`TQ_WORK_ROOT`, `TQ_INTEGRATION_INSTALL`, and `TQ_APPEND_RESULTS` set, using the
-verified model files and download receipt described below. It runs 4K prefill,
-eight decode tokens, a 33-token append, eight decode tokens, a 129-token append,
-and eight decode tokens in one generator. It checks old cache bytes in all
-16 full-attention layers and finite logits. Run it again with
-`TQ_MULTITURN_DENSE_CONTROL=1` for a dense Ring comparison on exactly the same
-token history, including a dense append versus fresh full-history check.
-For the production baseline, also set `TQ_MULTITURN_DENSE_VARIANT=baseline`
-and point `TQ_INTEGRATION_INSTALL` to the frozen `install/existing` build.
-It writes `qwen-baseline/` results separately and reuses the same TQ token history.
-The single-run latencies are diagnostic, not replacements for the historical
-benchmark table. Read [append validation](../../docs/design/turboquant-append-validation.md)
-for results and limitations.
-
-## Reproduce Windows full-model measurements
-
-The `benchmark/` files are the development harness used for the tables. Copy
-them into `work/scripts/` (their parent directory defines the work root), and
-use `work/venv/Scripts/python.exe`. They expect ROCm SDK packages under that
-interpreter's base environment. The tables below are historical measurements at the revisions recorded in the
-validation report. Their old build selector was removed upstream. To reproduce
-those historical builds, check out commit `2486d18` and select `HIP_EP_GQA_IMPL`.
-For current three-path measurements use the single-build
-[manual multi-turn test](../../test/long_context/README.md). Historical selections:
-
-| Selection | Install directory |
+| Command / file | Purpose |
 | --- | --- |
-| `existing` | `install/existing` |
-| `ring_q_resident` | `install/ring_q_resident` |
-| `ring_kv_outer` | `install/turboquant` |
+| `python -m pytest tools/turboquant/test_reference.py tools/turboquant/test_generate_codec.py -q` | CPU codec mathematics, packing and generated-asset provenance. |
+| `check_hip.py` | Strict GPU encoder bytes, decode oracle, bounds and allocation guards. The known centroid-boundary failure remains a failure. |
+| `check_hip_extended.py` | Guarded decode checks through 64K and paired Ring comparisons. Add `--long` for 128K, 128K+128 and 256K. |
+| `check_append.py` | Mixed packed-history/FP16-tail attention against FP64, chunk boundaries and unchanged old cache rows. |
+| `check_genai_windows.py` | Small generated-model integration, repeated append/decode and invalid-codec rejection. |
+| `check_unavailable_append.py` | Export/admission checks for a build without the Ring append implementation; see step 2. |
+| [Manual model tests](../../test/long_context/README.md) | One runner for matched-history and free-running conversations, optional BF16 reference and blinded judge packets. |
+| [Performance campaign](../../test/long_context/README.md#performance-only-campaign-windows) | One runner for kernel, single-turn model and eight-turn timing/memory tables. |
 
-The last install supplies both dense Ring-KV and TurboQuant; provider options
-select the packed cache. Record the source revision, dirty diff and library
-hashes for every build. The reported baseline selects production GQA in the
-same integration source tree, rather than claiming a pristine upstream binary.
+For direct HIP checks set `TQ_WORK_ROOT` to the work directory,
+`TQ_TEST_LIBRARY` and `TQ_RING_LIBRARY` to the installed custom-kernel library,
+and `TQ_HIP_RUNTIME` to the HIP runtime. Initialize the SDK DLL search directories
+on Windows. `hip_test_utils.py` supplies shared ctypes bindings and guarded
+allocations; `reference.py` supplies the independent CPU oracle.
 
-Use the model `amd/Qwen3.8-27B_gpuep_1.0_gpu_128`, revision
-`9b37cf56a001720ba7ce98ff80ea651b02e5931b`, in `work/models/qwen-original`.
-Verify downloaded files before creating `results/windows-qwen-download.json`
-with `{"status":"passed","verified":[{"file":"relative-file-name"}, ...]}`.
-The profiler hard-links these verified model files into per-case directories.
-Do not include model files or credentials in a source commit.
+`check_append.py` compares new packed bytes with the frozen encoder selected by
+`TQ_ENCODER_BASELINE_LIBRARY`. Its default is `<work>/install/turboquant`.
+Select an independently preserved library explicitly when validating a new
+encoder. `TQ_APPEND_RESULTS` selects the result directory. Passing that regression
+does not imply strict CPU/GPU encoder byte parity.
 
-Create the `build/` and `results/` directories, then build the allocation sidecar from an MSVC x64 developer console:
+For the full model use `amd/Qwen3.8-27B_gpuep_1.0_gpu_128`, revision
+`9b37cf56a001720ba7ce98ff80ea651b02e5931b`, in `<work>/models/qwen-original`.
+Verify the downloaded model files and retain their hashes; runners hard-link
+weights into fresh case directories on the same volume. Keep generated models,
+codec files, logits, answers and receipts outside Git.
 
-```console
-cl /LD /EHsc /std:c++17 /O2 scripts/windows_memory_counter.cpp /Fe:build/windows_memory_counter.dll
-```
+### Troubleshooting
 
-Run the observer in a separate terminal before each case, then the case itself:
+| Symptom | Check |
+| --- | --- |
+| AMDGPU continuous decoding rejected | Imported GenAI package/DLL and the companion patch in step 3. |
+| Missing/invalid codec | All three decoder options, absolute codec path and manifest/hash. |
+| Unsupported geometry/device | gfx1151, Ring build, batch one, H24/G4/D256, FP16 and shared buffers. |
+| Wrong DLL or missing dependency | `AMDGPU_EP_PATH`, SDK DLL search directories and receipt library hashes. |
+| Strict encoder failure at 4K | Preserve the recorded discrepancy; do not weaken the assertion. |
 
-```console
-venv\Scripts\python scripts\windows_memory_observer.py --variant existing --length 4096
-venv\Scripts\python scripts\windows_profile_run.py existing 4096 --repetitions 3
-```
+## External dependencies
 
-Repeat serially for `existing`, `ring_q`, `ring`, `tq4`, at 128, 256, 512, 1024,
-2048, 4096, 8192, 16384, 32768, 65536 and 131072. Use one measured request at
-131072. Generate each dense Ring reference before its corresponding `tq4`
-case. For 256K use `synthetic-existing`, `synthetic-ring_q`, `synthetic-ring`
-and `synthetic-tq4` with length 262144; the observer variant omits `synthetic-`.
-Run `consolidate_comparison.py` after all receipts exist. Do not overlap GPU
-tests or compiler builds with timing runs.
+HIP-EP needs no ONNX Runtime core patch, ONNX schema change, cache allocator
+patch, weight conversion or production graph rewrite for this feature.
+The GenAI append companion is the only external source change:
 
-If dense 128K cannot complete, the historical TQ profiler requires
-`TQ_ARCHIVED_RING_128K` pointing to an explicitly labeled archived reference
-directory containing `probe.json` and logits arrays. This reference is for
-numerical diagnostics only; the consolidator never substitutes its Linux
-performance or memory data into Windows rows. No archived reference is bundled.
+| GenAI source | Purpose |
+| --- | --- |
+| `src/generator/generators.cpp` | Admit AMDGPU continuous decoding on stock v0.17.0. |
+| `src/decoding/standard_decoding_strategy.h` and `.cpp` | Flush a selected token whose KV has not yet been computed before appending a prompt. |
+| `test/cpp/engine/request_lifecycle_tests.cpp` | Assert AMDGPU continuation capability. |
 
-For the three long direct-kernel checks, use `python scripts/windows_profile_run.py kernel-long` after installing the kernels and preparing the frozen constants.
+For a GenAI source tree that already includes AMDGPU continuous decoding (such
+as the CI stack using #2691), apply only
+[`onnxruntime-genai-0.17-pending-append.patch`](patches/onnxruntime-genai-0.17-pending-append.patch).
+Use `git apply --check` against the actual dependency revision. Do not apply
+both patches. The shared decoding-strategy change needs broader backend review;
+local integration checks do not replace GenAI's upstream C++ suite.
 
-The launcher bounds each case to one hour and stops its own child process tree
-if available system memory remains below 1 GiB for 20 seconds. Retain failed
-receipts rather than converting partial timings into completed results.
-WDDM totals are process GPU commitments sampled approximately every 20 ms,
-not physical residency. The sidecar's separate event peaks measure live EP
-allocation requests. The two counters have different scopes; only WDDM totals
-are decomposed into weights, KV and residual other in the published table.
-
-Source formatting and replacing the private archived-reference path with an
-environment variable do not retroactively change recorded harness hashes.
-The metrics JSON retains the original measured binary and harness provenance.
-
-### Current upstream GenAI stack
-
-Current upstream CI applies GenAI PR #2691, which already adds AMDGPU continuous
-decoding. Do **not** apply the full stock-0.17 patch again on that stack. Apply
-only `tools/turboquant/patches/onnxruntime-genai-0.17-pending-append.patch` there
-(or use `git apply --include='src/decoding/*'` on the full patch). The current
-2685/2691/2705/2712/2792/2801 patch stack does not modify either standard-decoding
-file; the remaining patch is apply-checked against v0.17.0. It changes only
-pending-token flush before append, independent of KV precision. No rewind change
-is included. Local results identify the exact GenAI package used; applying a
-patch is not a claim that every CI dependency combination has been tested.
+The retained Windows companion reuses matching cp313 GenAI 0.17 bindings and
+replaces only its core DLL. That companion was built with the ORT 1.30 SDK and
+validated with the Ring ORT 1.31 runtime. HIP-EP itself uses the 1.31 SDK.
+Record these separately rather than implying SDK equivalence. Per-application
+`genai_config.json`, DLL search paths, downloaded SDKs, environments and generated
+codec/model artifacts are setup inputs, not additional source patches.

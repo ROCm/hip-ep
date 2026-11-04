@@ -12,6 +12,11 @@ import numpy as np
 import os
 from reference import pack_indices
 import time
+import argparse
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--long", action="store_true", help="Check 128K, 128K+128 and 256K")
+args = parser.parse_args()
 
 const = np.load(ROOT / "reference/codec/constants.npz")
 pi, ck, cv = (const[k] for k in ("rotation", "cb_k", "cb_v"))
@@ -34,7 +39,9 @@ hip.hipEventElapsedTime.argtypes = [c.POINTER(c.c_float), ptr, ptr]
 hip.hipEventDestroy.argtypes = [ptr]
 
 
-def timed(fn, reps=30):
+def timed(fn, reps=None):
+    if reps is None:
+        reps = 5 if args.long else 30
     for _ in range(3):
         check(fn())
     check(hip.hipStreamSynchronize(stream))
@@ -60,7 +67,12 @@ def timed(fn, reps=30):
 
 records = []
 rng = np.random.default_rng(77823)
-for length in (33, 129, 4096, 8192, 16384, 32768, 65536, 65664):
+lengths = (
+    (131072, 131200, 262144)
+    if args.long
+    else (33, 129, 4096, 8192, 16384, 32768, 65536, 65664)
+)
+for length in lengths:
     # Arbitrary indices cover all codes and are independent of the GPU encoder.
     capacity = length
     kr = pack_indices(
@@ -202,7 +214,7 @@ for length in (33, 129, 4096, 8192, 16384, 32768, 65536, 65664):
             np.linalg.norm(actual - expected) / np.linalg.norm(expected)
         ),
         "pairs": pairs,
-        "timing_scope": "attention including rotations, excludes append; concurrent CPU build, diagnostic only",
+        "timing_scope": "attention including rotations, excludes append; diagnostic only",
     }
     records.append(record)
     print(json.dumps(record), flush=True)
@@ -211,6 +223,6 @@ for length in (33, 129, 4096, 8192, 16384, 32768, 65536, 65664):
 for b in (dp, dk, dv):
     b.close()
 check(hip.hipStreamDestroy(stream))
-(ROOT / "results/kernel-extended.json").write_text(
-    json.dumps({"status": "passed", "cases": records}, indent=2) + "\n"
-)
+(
+    ROOT / ("results/kernel-long.json" if args.long else "results/kernel-extended.json")
+).write_text(json.dumps({"status": "passed", "cases": records}, indent=2) + "\n")
