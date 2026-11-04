@@ -287,15 +287,6 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
           op, "broadcast attn_mask key extent cannot provide the logical KV "
               "length for a cached attention");
 
-    // The runtime's mask-derived live-length path currently supports only one
-    // batch. Reject a statically known multi-batch masked Attention here;
-    // dynamic batch is checked from its concrete value in the runtime.
-    const int64_t batch = queryType.getDimSize(0);
-    if (batch != mlir::ShapedType::kDynamic && batch > 1)
-      return rewriter.notifyMatchFailure(
-          op, "attention with an attn_mask currently supports only batch "
-              "size 1");
-
     if (pastKey) {
       auto pastKeyType =
           mlir::dyn_cast<mlir::RankedTensorType>(pastKey.getType());
@@ -315,6 +306,17 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
   // the runtime IN ADDITION to any additive mask; is_causal=0 => causal is
   // skipped and the mask (if any) carries all masking.
   bool noCausal = (isCausal == 0);
+
+  // The synthesized seqlens_k carries a single length, so only batch 1 is
+  // supported wherever the runtime consumes it. The bidirectional no-past path
+  // ignores seqlens_k. A dynamic batch cannot be rejected here; the runtime
+  // rejects batch > 1 on the masked path.
+  const bool bidirectionalNoPast = noCausal && !attnMask;
+  const int64_t batch = queryType.getDimSize(0);
+  if (!bidirectionalNoPast && batch != mlir::ShapedType::kDynamic && batch > 1)
+    return rewriter.notifyMatchFailure(
+        op, "attention currently supports only batch size 1 (except "
+            "bidirectional attention without a mask or past cache)");
 
   auto ctxOrFailure = getContextArg(op, rewriter);
   if (mlir::failed(ctxOrFailure))
@@ -458,26 +460,12 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
           .getResult();
   mlir::Value seqlensKI32 =
       mlir::arith::IndexCastOp::create(rewriter, loc, i32Ty, totalKvM1Idx);
-  const int64_t batchDim = queryType.getDimSize(0);
-  auto seqlensKType = mlir::RankedTensorType::get({batchDim}, i32Ty);
-  mlir::Value seqlensK;
-  if (batchDim == mlir::ShapedType::kDynamic) {
-    mlir::Value batchSize =
-        mlir::tensor::DimOp::create(rewriter, loc, query, 0).getResult();
-    seqlensK =
-        mlir::tensor::GenerateOp::create(
-            rewriter, loc, seqlensKType, mlir::ValueRange{batchSize},
-            [&](mlir::OpBuilder &builder, mlir::Location bodyLoc,
-                mlir::ValueRange) {
-              mlir::tensor::YieldOp::create(builder, bodyLoc, seqlensKI32);
-            })
-            .getResult();
-  } else {
-    llvm::SmallVector<mlir::Value> values(static_cast<size_t>(batchDim),
-                                          seqlensKI32);
-    seqlensK = mlir::tensor::FromElementsOp::create(rewriter, loc, seqlensKType,
-                                                    values);
-  }
+  // Keep this a static single-element tensor. A dynamically shaped buffer is
+  // not eligible for host-scratch materialisation, so it would be placed in
+  // the device pool while the host-side fill loop still runs on the CPU.
+  auto seqlensKType = mlir::RankedTensorType::get({1}, i32Ty);
+  mlir::Value seqlensK = mlir::tensor::FromElementsOp::create(
+      rewriter, loc, seqlensKType, mlir::ValueRange{seqlensKI32});
 
   // === hip.gqa output type + init =====================================
   //
@@ -525,8 +513,8 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
 
   auto synthPresent = [&](int64_t headDim,
                           mlir::Type elem) -> mlir::RankedTensorType {
-    return mlir::RankedTensorType::get({batchDim, kvNumHeads, kDyn, headDim},
-                                       elem);
+    return mlir::RankedTensorType::get(
+        {queryType.getDimSize(0), kvNumHeads, kDyn, headDim}, elem);
   };
 
   mlir::RankedTensorType presentKeyType =
