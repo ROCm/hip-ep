@@ -79,12 +79,25 @@ class TestTopK:
             (2, 20000, 32),  # rows past 8192 take the chunked two-pass path
             (2, 248320, 128),  # 32 < k <= 256 stays on the two-pass path
             (1, 100000, 256),
+            (1, 768, 768),  # k > 256 takes the bitonic sort path (one tile)
+            (1, 3072, 1000),
+            (1, 49152, 1000),  # rows past one tile sort in the workspace
+            (2, 12288, 2000),
         ],
     )
     def test_topk_last_axis_vocab(self, model_runner, rows, cols, k, largest):
         model = _make_topk_model([rows, cols], k, axis=1, largest=largest, sorted_=1)
         rng = np.random.default_rng(603)
         x = _distinct_rows(rng, rows, cols)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0)
+
+    @pytest.mark.parametrize("largest", [1, 0])
+    def test_topk_large_k_axis0(self, model_runner, largest):
+        """k > 256 along a non-last axis (strided rows)."""
+        model = _make_topk_model([5000, 3], 941, axis=0, largest=largest, sorted_=1)
+        rng = np.random.default_rng(604)
+        x = np.ascontiguousarray(_distinct_rows(rng, 3, 5000).T)
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=0)
 
