@@ -530,13 +530,24 @@ static int gqa_forward_fused(
             static_cast<int>(B), static_cast<int>(H), static_cast<int>(G),
             static_cast<int>(d), static_cast<int>(present_seq),
             /*splits=*/0, scale, seqlens_k_ptr, local_window_size, head_sink,
-            use_smooth_softmax ? 1 : 0) != 0)
-      return -1;
-    RUNTIME_DEBUG_LOG("[REAL] fused GQA decode: B=%lld H=%lld G=%lld d=%lld "
-                      "rope=%d window=%d\n",
-                      (long long)B, (long long)H, (long long)G, (long long)d,
-                      static_cast<int>(need_rope), local_window_size);
-    return 0;
+            use_smooth_softmax ? 1 : 0) == 0) {
+      RUNTIME_DEBUG_LOG("[REAL] fused GQA decode: B=%lld H=%lld G=%lld "
+                        "d=%lld rope=%d window=%d\n",
+                        (long long)B, (long long)H, (long long)G, (long long)d,
+                        static_cast<int>(need_rope), local_window_size);
+      return 0;
+    }
+    // A failed launch never ran, so the cache is untouched and the
+    // multi-dispatch sequence below can still produce this step.
+    static bool warned = false;
+    if (!warned) {
+      warned = true;
+      fprintf(stderr,
+              "gqa_forward_fused: single-dispatch decode failed "
+              "(H=%lld G=%lld d=%lld); using the multi-dispatch "
+              "decode\n",
+              (long long)H, (long long)G, (long long)d);
+    }
   }
 
   // B==1 pre-read (cached per Compute) feeds host past_len where needed.
@@ -1166,6 +1177,18 @@ static bool gqa_fused_decode_disabled() {
   return disabled;
 }
 
+// Set HIPDNN_EP_GQA_DISABLE_SINGLE_DISPATCH_DECODE=1 to run an in-place fp16
+// decode as the multi-dispatch sequence (rope, append, split-K decode, reduce)
+// instead of hip_gqa_flash_decode_fused, e.g. to A/B the two or to rule the
+// fused kernel out when debugging decode output.
+static bool gqa_single_dispatch_decode_disabled() {
+  static const bool disabled = [] {
+    const char *v = std::getenv("HIPDNN_EP_GQA_DISABLE_SINGLE_DISPATCH_DECODE");
+    return v && std::strcmp(v, "0") != 0;
+  }();
+  return disabled;
+}
+
 // Smart-dispatch threshold for the legacy GQA decode (sq == 1). When total_seq
 // exceeds this value, dispatch routes through the decomposed hipBLASLt pipeline
 // instead of the fused custom kernel hip_gqa_fused_decode. The fused kernel
@@ -1289,9 +1312,12 @@ struct GqaState : OpStateT<GqaState> {
   // stream and each layer's launch must find its own counters at zero.
   int *decode_tickets = nullptr;
   int64_t decode_ticket_count = 0;
+  // Session that allocated decode_tickets; the slot is torn down before the
+  // session's transient arena, so the buffer can still be returned to it.
+  RuntimeState *ticket_owner = nullptr;
   ~GqaState() {
     if (decode_tickets)
-      (void)hipFree(decode_tickets);
+      (void)hipdnn_ep_state_device_free(ticket_owner, decode_tickets);
   }
 };
 
@@ -1305,21 +1331,23 @@ static int *gqa_decode_tickets(RuntimeState *state, hipStream_t stream,
   if (gs->decode_ticket_count >= n)
     return gs->decode_tickets;
   if (gs->decode_tickets) {
-    (void)hipFree(gs->decode_tickets);
+    (void)hipdnn_ep_state_device_free(gs->ticket_owner, gs->decode_tickets);
     gs->decode_tickets = nullptr;
     gs->decode_ticket_count = 0;
   }
   void *p = nullptr;
-  if (hipMalloc(&p, static_cast<size_t>(n) * sizeof(int)) != hipSuccess)
+  if (hipdnn_ep_state_device_alloc(
+          state, &p, static_cast<size_t>(n) * sizeof(int)) != hipSuccess)
     return nullptr;
   // Ordered before the first decode launch on the same stream.
   if (hipMemsetAsync(p, 0, static_cast<size_t>(n) * sizeof(int), stream) !=
       hipSuccess) {
-    (void)hipFree(p);
+    (void)hipdnn_ep_state_device_free(state, p);
     return nullptr;
   }
   gs->decode_tickets = static_cast<int *>(p);
   gs->decode_ticket_count = n;
+  gs->ticket_owner = state;
   return gs->decode_tickets;
 }
 
@@ -3460,7 +3488,7 @@ int wrap_group_query_attention_host_length(
 
   int *decode_tickets = nullptr;
   if (is_decode && key && value && past_key && past_key == present_key &&
-      !kv_quantized && !key_bias &&
+      !kv_quantized && !key_bias && !gqa_single_dispatch_decode_disabled() &&
       hip_gqa_flash_decode_fused_supported(static_cast<int>(num_heads),
                                            static_cast<int>(kv_num_heads),
                                            static_cast<int>(head_dim)))
