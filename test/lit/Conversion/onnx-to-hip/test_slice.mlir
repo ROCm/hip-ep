@@ -466,4 +466,67 @@ module {
     // CHECK: hip.slice({{.*}}) ins({{.*}} : tensor<4x6xf32>, tensor<2xi32>, tensor<2xi32>) axes({{[^:]*}} : tensor<2xi32>) steps({{[^:]*}} : tensor<2xi32>)
     return %r : tensor<4x6xf32>
   }
+
+  // Test 20: a dynamic Slice end of Shape(data)[last] / 2. The divisor is
+  // the non-zero constant 2, so integer Div resolves and the native Slice
+  // is allocated at half the source width. A zero or non-constant divisor
+  // stays unresolved and the Slice keeps the source extent.
+  func.func @test_slice_native_shape_div_extent(%input: tensor<?x2560xf32>)
+      -> tensor<?x?xf32> {
+    // CHECK-LABEL: func.func @test_slice_native_shape_div_extent
+    %zero = arith.constant dense<[0]> : tensor<1xi64>
+    %axis = arith.constant dense<[1]> : tensor<1xi64>
+    %two = arith.constant dense<[2]> : tensor<1xi64>
+    %shape = "onnx.Shape"(%input) {start = 1 : si64, end = 2 : si64}
+        : (tensor<?x2560xf32>) -> tensor<1xi64>
+    %half = "onnx.Div"(%shape, %two) : (tensor<1xi64>, tensor<1xi64>)
+        -> tensor<1xi64>
+    %r = "onnx.Slice"(%input, %zero, %half, %axis)
+        : (tensor<?x2560xf32>, tensor<1xi64>, tensor<1xi64>,
+           tensor<1xi64>) -> tensor<?x?xf32>
+
+    // CHECK: arith.divsi %{{.*}}, %{{.*}} : index
+    // CHECK: tensor.empty(%{{.*}}, %{{.*}}) : tensor<?x?xf32>
+    // CHECK: hip.slice
+    return %r : tensor<?x?xf32>
+  }
+
+  // Test 21: the same bound divided by a runtime value. The divisor is not a
+  // compile-time constant, so the division does not resolve.
+  func.func @test_slice_div_nonconstant_extent(%input: tensor<?x2560xf32>,
+                                               %divisor: tensor<1xi64>)
+      -> tensor<?x?xf32> {
+    // CHECK-LABEL: func.func @test_slice_div_nonconstant_extent
+    // CHECK-NOT: arith.divsi
+    // CHECK: hip.slice
+    %zero = arith.constant dense<[0]> : tensor<1xi64>
+    %axis = arith.constant dense<[1]> : tensor<1xi64>
+    %shape = "onnx.Shape"(%input) {start = 1 : si64, end = 2 : si64}
+        : (tensor<?x2560xf32>) -> tensor<1xi64>
+    %half = "onnx.Div"(%shape, %divisor) : (tensor<1xi64>, tensor<1xi64>)
+        -> tensor<1xi64>
+    %r = "onnx.Slice"(%input, %zero, %half, %axis)
+        : (tensor<?x2560xf32>, tensor<1xi64>, tensor<1xi64>,
+           tensor<1xi64>) -> tensor<?x?xf32>
+    return %r : tensor<?x?xf32>
+  }
+
+  // Test 22: division by the constant 0 does not resolve. A host divsi would
+  // fault, so the Slice keeps the source extent.
+  func.func @test_slice_div_zero_extent(%input: tensor<?x2560xf32>)
+      -> tensor<?x?xf32> {
+    // CHECK-LABEL: func.func @test_slice_div_zero_extent
+    // CHECK-NOT: arith.divsi
+    // CHECK: hip.slice
+    %zero = arith.constant dense<[0]> : tensor<1xi64>
+    %axis = arith.constant dense<[1]> : tensor<1xi64>
+    %shape = "onnx.Shape"(%input) {start = 1 : si64, end = 2 : si64}
+        : (tensor<?x2560xf32>) -> tensor<1xi64>
+    %half = "onnx.Div"(%shape, %zero) : (tensor<1xi64>, tensor<1xi64>)
+        -> tensor<1xi64>
+    %r = "onnx.Slice"(%input, %zero, %half, %axis)
+        : (tensor<?x2560xf32>, tensor<1xi64>, tensor<1xi64>,
+           tensor<1xi64>) -> tensor<?x?xf32>
+    return %r : tensor<?x?xf32>
+  }
 }
