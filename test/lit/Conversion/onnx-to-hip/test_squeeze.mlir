@@ -88,6 +88,12 @@ module {
     %result = "onnx.Squeeze"(%data) {axes = [0]} : (tensor<?x?x?x?xf32>) -> tensor<?x?x?xf32>
     return %result : tensor<?x?x?xf32>
   }
+
+  // Kept axes are dynamic in the input but static in the inferred result.
+  func.func @test_squeeze_static_result(%data: tensor<?x1x?x?xf32>) -> tensor<3x300x300xf32> {
+    %result = "onnx.Squeeze"(%data) {axes = [1]} : (tensor<?x1x?x?xf32>) -> tensor<3x300x300xf32>
+    return %result : tensor<3x300x300xf32>
+  }
 }
 
 // CHECK-LABEL: func.func @test_squeeze_front
@@ -140,3 +146,9 @@ module {
 // CHECK: %[[SLICE:.*]] = tensor.extract_slice %[[DATA]][0, 0, 0, 0] [1, %{{[^]]*}}, %{{[^]]*}}, %{{[^]]*}}] [1, 1, 1, 1] : tensor<?x?x?x?xf32> to tensor<1x?x?x?xf32>
 // CHECK: %[[RESULT:.*]] = tensor.collapse_shape %[[SLICE]] {{\[\[}}0, 1], [2], [3]] : tensor<1x?x?x?xf32> into tensor<?x?x?xf32>
 // CHECK: return %[[RESULT]] : tensor<?x?x?xf32>
+
+// CHECK-LABEL: func.func @test_squeeze_static_result
+// CHECK-SAME: %[[CTX:.*]]: !hip.context, %[[DATA:.*]]: tensor<?x1x?x?xf32>)
+// CHECK: %[[SLICE:.*]] = tensor.extract_slice %[[DATA]][0, 0, 0, 0] [3, 1, 300, 300] [1, 1, 1, 1] : tensor<?x1x?x?xf32> to tensor<3x1x300x300xf32>
+// CHECK: %[[RESULT:.*]] = tensor.collapse_shape %[[SLICE]] {{\[\[}}0], [1, 2], [3]] : tensor<3x1x300x300xf32> into tensor<3x300x300xf32>
+// CHECK: return %[[RESULT]] : tensor<3x300x300xf32>
