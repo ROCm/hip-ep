@@ -53,7 +53,8 @@ struct RoiAlignOpLowering : public ConvertOpToLLVMPattern<RoiAlignOp> {
     Value statePtr = adaptor.getCtx();
     Value inputPtr =
         extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc);
-    Value roisPtr = extractContiguousMemRefPtr(adaptor.getRois(), rewriter, loc);
+    Value roisPtr =
+        extractContiguousMemRefPtr(adaptor.getRois(), rewriter, loc);
     Value indicesPtr =
         extractContiguousMemRefPtr(adaptor.getBatchIndices(), rewriter, loc);
     Value outputPtr =

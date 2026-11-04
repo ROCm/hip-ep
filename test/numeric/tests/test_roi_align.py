@@ -28,9 +28,7 @@ def _make_roi_align_model(
     c = input_shape[1]
     X = helper.make_tensor_value_info("X", tp, input_shape)
     rois = helper.make_tensor_value_info("rois", tp, [num_rois, 4])
-    idx = helper.make_tensor_value_info(
-        "batch_indices", TensorProto.INT64, [num_rois]
-    )
+    idx = helper.make_tensor_value_info("batch_indices", TensorProto.INT64, [num_rois])
     Y = helper.make_tensor_value_info("Y", tp, [num_rois, c, out_h, out_w])
     node = helper.make_node(
         "RoiAlign",
@@ -109,9 +107,7 @@ def _make_f16_reference_model(input_shape, num_rois, out_h, out_w):
     f16 = TensorProto.FLOAT16
     X = helper.make_tensor_value_info("X", f16, input_shape)
     rois = helper.make_tensor_value_info("rois", f16, [num_rois, 4])
-    idx = helper.make_tensor_value_info(
-        "batch_indices", TensorProto.INT64, [num_rois]
-    )
+    idx = helper.make_tensor_value_info("batch_indices", TensorProto.INT64, [num_rois])
     Y = helper.make_tensor_value_info("Y", f16, [num_rois, c, out_h, out_w])
     nodes = [
         helper.make_node("Cast", ["X"], ["X32"], to=TensorProto.FLOAT),
