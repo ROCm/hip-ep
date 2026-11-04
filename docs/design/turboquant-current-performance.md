@@ -4,6 +4,11 @@ Licensed under the MIT License.
 -->
 # Current-branch TurboQuant performance
 
+Revision scope: these tables retain the measured source revision below. The
+subsequent merge of main `6a52f055ee0cdf3ffb376163104c371cadba68eb` changes
+GQA host-length handling. Its sanity validation is separate; these timings have
+not been remeasured on that merge.
+
 All three configurations use source `112c3c5b98d82666a9d75205ed149b1d5e8f53d8`, merged main/Ring PR1366, and the same installed HIP-EP/kernel DLLs. No historical kernel measurements or accuracy-diagnostic timings are mixed into these tables. No warm-up calls; every measured request from the final protocol is retained. First-use costs remain in raw samples. Kernel tables use three-round medians; model tables use the arithmetic mean of two measured requests/conversations.
 
 Windows Radeon 8060S (`gfx1151`), AC power, serial GPU jobs; HIP 7.15.26333, ORT 1.31.0, GenAI 0.17.0 plus the documented append companion, NumPy 2.4.3, `OMP_NUM_THREADS=2`, `OPENBLAS_NUM_THREADS=2`. The companion was built against ORT 1.30 SDK and runs with ORT 1.31; HIP-EP was built against 1.31. Debug/performance tracing is disabled. Model construction and explicit harness buffer/generator setup are outside timing. Runtime allocations and deferred initialization performed inside inference remain included. No online GQA tuning: no-Ring uses the current DLL's normal lookup policy/configured entry points.

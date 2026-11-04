@@ -4,8 +4,11 @@
  */
 
 #include "HipToLLVMUtils.h"
+#include "hip/Conversion/HipToLLVM/Passes.h"
+#include "hip/Dialect/IR/RuntimeAccessOpInterface.h"
 
 #include "mlir/Conversion/ConvertToLLVM/ToLLVMInterface.h"
+#include "mlir/Dialect/Bufferization/Transforms/BufferViewFlowAnalysis.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Dialect.h"
 #include "mlir/Transforms/DialectConversion.h"
@@ -25,6 +28,7 @@ namespace {
 
 struct ConvertHipToLLVMPass
     : public impl::ConvertHipToLLVMPassBase<ConvertHipToLLVMPass> {
+  using Base::Base;
   void runOnOperation() override;
 
 private:
@@ -218,20 +222,10 @@ private:
   }
 };
 
-void ConvertHipToLLVMPass::runOnOperation() {
-  ModuleOp module = getOperation();
-  MLIRContext *ctx = module.getContext();
-
-  LowerToLLVMOptions options(ctx);
-  LLVMTypeConverter typeConverter(ctx, options);
-
-  // !hip.context -> !llvm.ptr (opaque pointer to runtime context)
-  typeConverter.addConversion([ctx](ContextType type) -> Type {
-    return LLVM::LLVMPointerType::get(ctx, 0);
-  });
-
-  RewritePatternSet patterns(ctx);
-
+static void
+populateLoweringPatterns(LLVMTypeConverter &typeConverter,
+                         RewritePatternSet &patterns,
+                         const DenseMap<Operation *, Value> &hostScalars) {
   // HIP dialect-specific lowerings
   populateMemoryLoweringPatterns(typeConverter, patterns);
   populateConvLoweringPatterns(typeConverter, patterns);
@@ -258,7 +252,7 @@ void ConvertHipToLLVMPass::runOnOperation() {
   populateReduceLoweringPatterns(typeConverter, patterns);
   populateTransposeLoweringPatterns(typeConverter, patterns);
   populateRopeLoweringPatterns(typeConverter, patterns);
-  populateGqaLoweringPatterns(typeConverter, patterns);
+  populateGqaLoweringPatterns(typeConverter, patterns, hostScalars);
   populateMultiHeadAttentionLoweringPatterns(typeConverter, patterns);
   populateMatMulNBitsLoweringPatterns(typeConverter, patterns);
   populateDequantBnb4LoweringPatterns(typeConverter, patterns);
@@ -292,8 +286,8 @@ void ConvertHipToLLVMPass::runOnOperation() {
   populateSliceLoweringPatterns(typeConverter, patterns);
   populateScatterNDLoweringPatterns(typeConverter, patterns);
   populateNonZeroLoweringPatterns(typeConverter, patterns);
-  populateReadbackDimLoweringPatterns(typeConverter, patterns);
-  populateReadbackScalarLoweringPatterns(typeConverter, patterns);
+  populateReadbackDimLoweringPatterns(typeConverter, patterns, hostScalars);
+  populateReadbackScalarLoweringPatterns(typeConverter, patterns, hostScalars);
   populateSizeLoweringPatterns(typeConverter, patterns);
   populatePoolLoweringPatterns(typeConverter, patterns);
   populateResizeLoweringPatterns(typeConverter, patterns);
@@ -325,62 +319,87 @@ void ConvertHipToLLVMPass::runOnOperation() {
   arith::populateCeilFloorDivExpandOpsPatterns(patterns);
   arith::populateArithToLLVMConversionPatterns(typeConverter, patterns);
   cf::populateControlFlowToLLVMConversionPatterns(typeConverter, patterns);
+}
 
+// A promised interface is not necessarily registered. The standard dialect
+// patterns above handle those cases without querying an unresolved promise.
+static void populateDialectLowerings(Dialect *dialect,
+                                     LLVMTypeConverter &typeConverter,
+                                     RewritePatternSet &patterns,
+                                     LLVMConversionTarget &target) {
+  if (!dialect || dialect->hasPromisedInterface(
+                      dialect->getTypeID(),
+                      ConvertToLLVMPatternInterface::getInterfaceID()))
+    return;
+  if (auto *iface = dyn_cast<ConvertToLLVMPatternInterface>(dialect))
+    iface->populateConvertToLLVMConversionPatterns(target, typeConverter,
+                                                   patterns);
+}
+
+void ConvertHipToLLVMPass::runOnOperation() {
+  ModuleOp module = getOperation();
+  MLIRContext *ctx = module.getContext();
+  LLVMTypeConverter typeConverter(ctx);
+  // Scratch placement and the runtime memref ABI both use 64-bit indices.
+  if (typeConverter.getIndexTypeBitwidth() != 64) {
+    module.emitError("HIP runtime requires 64-bit indices");
+    return signalPassFailure();
+  }
+  // Establish native type/legality rules before plugins extend them.
+  typeConverter.addConversion([ctx](ContextType) -> Type {
+    return LLVM::LLVMPointerType::get(ctx, 0);
+  });
+  RewritePatternSet patterns(ctx), alternatives(ctx);
   LLVMConversionTarget target(*ctx);
   target.addLegalDialect<LLVM::LLVMDialect>();
   target.addIllegalDialect<HipDialect>();
   target.addIllegalOp<memref::AllocOp, memref::DeallocOp>();
   target.addLegalOp<ModuleOp>();
+  DenseSet<Dialect *> seenDialects;
+  SmallVector<Operation *> mappedInputOps;
+  SmallVector<Value> scratches;
+  module.walk([&](Operation *op) {
+    Dialect *dialect = op->getDialect();
+    if (seenDialects.insert(dialect).second)
+      populateDialectLowerings(dialect, typeConverter, alternatives, target);
+    if (auto scratch = dyn_cast<GetHostScratchOp>(op))
+      scratches.push_back(scratch.getResult());
+    if (auto access = dyn_cast<RuntimeAccessOpInterface>(op))
+      if (access.supportsHostMappedInputs())
+        mappedInputOps.push_back(op);
+  });
 
-  // Out-of-tree dialects (e.g. a plugin vendor dialect) inject their HIP->LLVM
-  // lowering the standard upstream way: every dialect in use that implements
-  // ConvertToLLVMPatternInterface adds its conversion patterns AND marks its
-  // own ops illegal on `target`.
-  //
-  // This inlines upstream's populateConversionTargetFromOperation but
-  // guards the interface lookup with hasPromisedInterface(). Upstream
-  // dyn_casts every walked dialect unconditionally, which report_fatal_errors
-  // (assertions build) for a dialect that only *promised* the interface but
-  // never registered it. After bufferization the module is full of such
-  // dialects (memref, func, arith, cf), so the blanket walk would abort
-  // essentially every compile. We can't fulfill those promises instead:
-  // this pass hand-rolls standard-dialect lowering via the explicit
-  // populate*ToLLVM calls above, so routing it through the interface too
-  // would populate them twice. So skip any dialect that only promised the
-  // interface -- hasPromisedInterface() is a cheap set check on every build.
-  // A plugin dialect that genuinely implements it has its promise resolved
-  // when its extension is added (hasPromisedInterface() == false), so it
-  // still passes the guard and contributes its patterns. See
-  // docs/design/plugin-interface.md "Custom-op lowering".
-  //
-  // Before (upstream blanket walk -- aborts on memref's unfulfilled promise):
-  //   populateConversionTargetFromOperation(module, target, tc, patterns);
-  // After (skip promised-but-unregistered, keep genuine implementors):
-  //   for each unique dialect D reached from the module:
-  //     if D promised the interface but did not register it -> skip
-  //     else if D implements it -> add D's ConvertToLLVM patterns
-  {
-    llvm::DenseSet<Dialect *> seenDialects;
-    module.walk([&](Operation *op) {
-      Dialect *dialect = op->getDialect();
-      if (!dialect || !seenDialects.insert(dialect).second)
-        return;
-      // Promised-but-unregistered dialects would fatal under dyn_cast in an
-      // assertions build; skip them (their lowering is the populate* above).
-      if (dialect->hasPromisedInterface(
-              dialect->getTypeID(),
-              ConvertToLLVMPatternInterface::getInterfaceID()))
-        return;
-      auto *iface = dyn_cast<ConvertToLLVMPatternInterface>(dialect);
-      if (!iface)
-        return;
-      iface->populateConvertToLLVMConversionPatterns(target, typeConverter,
-                                                     patterns);
-    });
+  RuntimeAccessOverrides overrides(alternatives);
+  llvm::erase_if(mappedInputOps, [&](Operation *op) {
+    return !overrides.contains(op->getName());
+  });
+  // Placement may have relied on mapped-input support before a plugin was
+  // loaded. Check consumers of scratch-derived views, not unrelated ops.
+  if (!scratches.empty() && !mappedInputOps.empty()) {
+    BufferViewFlowAnalysis aliases(module);
+    DenseSet<Value> scratchAliases;
+    for (Value scratch : scratches)
+      for (Value alias : aliases.resolve(scratch))
+        scratchAliases.insert(alias);
+    for (Operation *op : mappedInputOps)
+      if (llvm::any_of(op->getOperands(), [&](Value operand) {
+            return scratchAliases.contains(operand);
+          })) {
+        op->emitError("alternative lowering has no host-mapped input contract");
+        return signalPassFailure();
+      }
   }
 
+  const auto hostScalars = collectHostScalarValues(
+      module, overrides, typeConverter.getIndexTypeBitwidth(),
+      reportHostScalars);
+  populateLoweringPatterns(typeConverter, patterns, hostScalars);
+  // Preserve native-before-plugin order for equal-benefit patterns.
+  for (auto &pattern : alternatives.getNativePatterns())
+    patterns.add(std::move(pattern));
+  patterns.add(std::move(alternatives.getPDLPatterns()));
   if (failed(applyPartialConversion(module, target, std::move(patterns))))
-    signalPassFailure();
+    return signalPassFailure();
 
   // A ui8 If condition is compared as signless i8. Lowering the readback
   // inserts the reverse cast, and that round trip is not executable LLVM.

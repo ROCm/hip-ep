@@ -877,7 +877,7 @@ int wrap_rocmlir(RuntimeState *state, const char *kernel_binary,
 // packed QKV paths, optional RoPE, KV cache management, local window
 // attention (local_window_size), and smooth softmax (head_sink /
 // smooth_softmax).
-int wrap_group_query_attention(
+int wrap_group_query_attention_host_length(
     RuntimeState *state,
     int op_state_slot, // per-instance op-state slot (GEMM descriptor cache)
     // Inputs 1-7 (core GQA)
@@ -912,13 +912,15 @@ int wrap_group_query_attention(
     // Sequence length of the key/value operands (seq_len_q for packed QKV).
     // 0 with a causal past cache means the call appends nothing and attends
     // over past_key/past_value only (a layer sharing another layer's cache).
-    int64_t seq_len_new_kv);
+    int64_t seq_len_new_kv,
+    // When has_host_length is 1, the compiler proves that host_length_value
+    // equals seqlens_k[0] for batch one, including the valid -1 sentinel.
+    // Otherwise the value is ignored and the runtime reads seqlens_k.
+    int32_t has_host_length, int32_t host_length_value);
 
-// Compiler-selected entry for proven FP16 Ring candidates. Other shapes and
-// devices fall back to the original GQA implementation without changing its
-// ABI.
-// Physical-width ABI with compiler-proven FP16 tensor types.
-int wrap_group_query_attention_v3(
+// Physical-width ABI with compiler-proven FP16 tensor types and the same
+// optional host-length contract as dense GQA.
+int wrap_group_query_attention_v4(
     RuntimeState *state, int op_state_slot,
     // Inputs 1-7 (core GQA)
     void *query, void *key, void *value, void *past_key, void *past_value,
@@ -938,9 +940,9 @@ int wrap_group_query_attention_v3(
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
     int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
-    int64_t seq_len_new_kv, int64_t past_key_width, int64_t past_value_width,
-    int64_t present_key_width, int64_t present_value_width,
-    int32_t fp16_tensors);
+    int64_t seq_len_new_kv, int32_t has_host_length, int32_t host_length_value,
+    int64_t past_key_width, int64_t past_value_width, int64_t present_key_width,
+    int64_t present_value_width, int32_t fp16_tensors);
 
 int wrap_group_query_attention_ring_f16(
     RuntimeState *state, int op_state_slot,
@@ -962,7 +964,7 @@ int wrap_group_query_attention_ring_f16(
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
     int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
-    int64_t seq_len_new_kv);
+    int64_t seq_len_new_kv, int32_t has_host_length, int32_t host_length_value);
 
 // MultiHeadAttention operation wrapper (com.microsoft.MultiHeadAttention v1).
 // Called by generated IR for onnx.Custom(MultiHeadAttention) lowering.
@@ -2003,13 +2005,14 @@ int wrap_dynamic_sparse_attention(
 int wrap_sparse_attention_indexer(
     RuntimeState *state, const void *query, const void *query_norm_weight,
     const void *key_norm_weight, const void *cos_cache, const void *sin_cache,
-    const void *mask, const void *past_key, void *selected_indices,
-    void *present_key, int64_t batch, int64_t seq_len, int64_t past_len,
-    int64_t num_heads, int64_t head_size, int64_t rotary_width,
-    int64_t rotary_rows, int64_t rotary_batched, int64_t compress_ratio,
-    int64_t token_budget, int64_t element_size_bytes, int64_t past_batch,
-    int64_t mask_batch, int64_t mask_len, int64_t cos_batch, int64_t sin_batch,
-    int64_t sin_rows, float epsilon, float scale);
+    const void *mask, const void *past_sequence_length, const void *past_key,
+    void *selected_indices, void *present_key, int64_t batch, int64_t seq_len,
+    int64_t past_rows, int64_t present_rows, int64_t num_heads,
+    int64_t head_size, int64_t rotary_width, int64_t rotary_rows,
+    int64_t rotary_batched, int64_t compress_ratio, int64_t token_budget,
+    int64_t element_size_bytes, int64_t past_batch, int64_t mask_batch,
+    int64_t mask_len, int64_t cos_batch, int64_t sin_batch, int64_t sin_rows,
+    float epsilon, float scale);
 
 //==============================================================================
 // ONNX Gemm via hipBLASLt

@@ -90,6 +90,11 @@ Ordinary inference still uses upstream GQA. Set `HIPDNN_EP_USE_RING_ATTENTION=1`
 before process startup for dense Ring; packed-cache options explicitly select
 Ring prefill plus TurboQuant decode/append.
 
+After updating from the earlier `wrap_group_query_attention_v3` build, regenerate
+compiled model/session artifacts with this build. The v4 packed-cache ABI now
+includes main's optional host sequence length; old compiled artifacts are not
+binary compatible. Codec files and the packed row format are unchanged.
+
 With `HIP_EP_ENABLE_RING_ATTENTION=OFF`, TurboQuant append is unavailable.
 In that build, and in architecture slices where Ring is disabled, `hip_tq4_prefill_workspace` returns zero and `hip_tq4_prefill` returns
 `hipErrorNotSupported` without accessing GPU memory. These exports must remain

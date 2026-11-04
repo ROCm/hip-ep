@@ -63,7 +63,7 @@ The codec file has a 40-byte header: eight little-endian uint32 values (magic `0
 
 ## Runtime and compiler integration
 
-The logical attention dimension and physical cache width are different. `GqaLowering` selects `wrap_group_query_attention_v3` for dynamic or packed widths and passes the actual four past/present K/V widths. Static dense shapes retain the existing ABI. The v3 ABI also carries compiler-proven FP16 tensor eligibility, preventing BF16 from entering packed kernels. The v3 dense path validates widths and delegates to existing GQA.
+The logical attention dimension and physical cache width are different. `GqaLowering` selects `wrap_group_query_attention_v4` for dynamic or packed widths and passes the actual four past/present K/V widths. Static dense shapes use main's optional-host-length ABI. The v4 packed-width entry also carries `has_host_length` and `host_length_value` before the four widths, so compiler-proven lengths avoid device readback on both dense and packed paths. Unproven lengths retain the runtime readback. Regenerate model artifacts produced against the earlier v3 entry. The v4 ABI also carries compiler-proven FP16 tensor eligibility, preventing BF16 from entering packed kernels. The v4 dense path validates widths and delegates to existing GQA.
 
 The runtime checks geometry, feature flags, lengths, shared aliases, physical widths and overlapping ranges before encoding into the cache. It uses the EP stream and runtime-owned workspace. Codec errors and kernel failures propagate to an `OrtStatus`; the custom operator no longer reports successful output after a nonzero runtime return.
 

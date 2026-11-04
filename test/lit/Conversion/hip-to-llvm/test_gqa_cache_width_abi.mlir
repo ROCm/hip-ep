@@ -34,7 +34,7 @@ module {
 // CHECK-LABEL: llvm.func @packed_f16(
 // CHECK: %[[WIDTH:.*]] = llvm.mlir.constant(66 : i64) : i64
 // CHECK: %[[FP16:.*]] = llvm.mlir.constant(1 : i32) : i32
-// CHECK: llvm.call @wrap_group_query_attention_v3({{.*}}, %[[FP16]])
+// CHECK: llvm.call @wrap_group_query_attention_v4({{.*}}, %[[FP16]])
 
 // -----
 module {
@@ -65,7 +65,7 @@ module {
 
 // CHECK-LABEL: llvm.func @dynamic_f16(
 // CHECK: %[[FP16:.*]] = llvm.mlir.constant(1 : i32) : i32
-// CHECK: llvm.call @wrap_group_query_attention_v3({{.*}}, %[[FP16]])
+// CHECK: llvm.call @wrap_group_query_attention_v4({{.*}}, %[[FP16]])
 
 // -----
 module {
@@ -97,7 +97,7 @@ module {
 // CHECK-LABEL: llvm.func @packed_bf16(
 // CHECK: %[[WIDTH:.*]] = llvm.mlir.constant(66 : i64) : i64
 // CHECK: %[[FP16:.*]] = llvm.mlir.constant(0 : i32) : i32
-// CHECK: llvm.call @wrap_group_query_attention_v3({{.*}}, %[[FP16]])
+// CHECK: llvm.call @wrap_group_query_attention_v4({{.*}}, %[[FP16]])
 
 // -----
 module {
@@ -129,4 +129,4 @@ module {
 // CHECK-LABEL: llvm.func @packed_mixed(
 // CHECK: %[[WIDTH:.*]] = llvm.mlir.constant(66 : i64) : i64
 // CHECK: %[[FP16:.*]] = llvm.mlir.constant(0 : i32) : i32
-// CHECK: llvm.call @wrap_group_query_attention_v3({{.*}}, %[[FP16]])
+// CHECK: llvm.call @wrap_group_query_attention_v4({{.*}}, %[[FP16]])

@@ -51,7 +51,7 @@ import onnx  # noqa: E402 - initialize Windows DLL search paths first
 from onnx import helper as h, TensorProto as T, numpy_helper as nh  # noqa: E402 - initialize Windows DLL search paths first
 import onnxruntime_genai as og  # noqa: E402 - initialize Windows DLL search paths first
 
-sys.path.insert(0, str(ROOT / "hip-ep/tools/turboquant"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from reference import attention, encode, unpack_rows  # noqa: E402 - initialize Windows DLL search paths first
 
 rng = np.random.default_rng(227)
