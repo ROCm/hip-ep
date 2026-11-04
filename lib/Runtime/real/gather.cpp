@@ -5,6 +5,7 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
+#include "../runtime_state_internal.h"
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
 
@@ -44,4 +45,34 @@ int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
                     indices_num_elements, output_num_elements, axis_size,
                     inner_size, static_cast<int>(element_size_bytes),
                     static_cast<int>(indices_element_size_bytes));
+}
+
+int wrap_gather_from_file(RuntimeState *state, int64_t constant_index,
+                          void *indices, void *output, int64_t axis,
+                          int64_t data_num_elements,
+                          int64_t indices_num_elements,
+                          int64_t output_num_elements, int64_t axis_size,
+                          int64_t inner_size, int64_t element_size_bytes,
+                          int64_t indices_element_size_bytes) {
+  OP_PROFILE(
+      "gather_from_file",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "n=%lld", (long long)indices_num_elements);
+        return std::string(b);
+      },
+      state);
+  if (!state || !output || axis != 0 ||
+      data_num_elements != axis_size * inner_size ||
+      output_num_elements != indices_num_elements * inner_size) {
+    fprintf(stderr,
+            "[REAL] wrap_gather_from_file: constant %lld does not match an "
+            "axis-0 gather of a disk-resident table\n",
+            (long long)constant_index);
+    return -1;
+  }
+  return hipdnn_ep_disk_constant_gather_rows(
+      state, constant_index, indices, indices_num_elements,
+      indices_element_size_bytes, axis_size, inner_size * element_size_bytes,
+      output);
 }

@@ -4,9 +4,9 @@
 ##
 
 # Posts a single reminder comment on PR open with links to the
-# incremental-development and AI-tool-use policies. Also auto-labels
-# PRs that exceed the soft size threshold as `large-pr`. The bot does
-# not generate review content; it only posts static guidance and a label.
+# incremental-development, AI-tool-use, and compiler pass guidelines.
+# Also labels PRs above the soft size threshold as `large-pr`. The bot
+# does not generate review content; it only posts static guidance and a label.
 
 name: PR policy reminder
 
@@ -33,6 +33,9 @@ jobs:
               "This project follows LLVM's incremental-development and AI-tool-use",
               "guidance. See [`CONTRIBUTING.md`](../blob/main/CONTRIBUTING.md)",
               "for the project workflow.",
+              "",
+              "For compiler changes, also read",
+              "[`COMPILER_PASS_GUIDELINES.md`](https://github.com/ROCm/hip-ep/blob/main/COMPILER_PASS_GUIDELINES.md).",
               "",
               "Before requesting review, please check that:",
               "",

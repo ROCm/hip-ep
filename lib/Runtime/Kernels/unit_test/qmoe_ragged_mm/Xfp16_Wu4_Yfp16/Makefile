@@ -1,9 +1,13 @@
 # ============================================================
 # custom_kernels qmoe_ragged_mm (fp16 activations, uint4 weights) Test
 #
-#   make test        OFFLOAD=--offload-arch=gfx1151 HIP_SDK=<sdk> [COVERAGE=1|2|3]
+#   make test        HIP_SDK=<sdk> [OFFLOAD=--offload-arch=<gfx>] [COVERAGE=1|2|3]
 #   make test_custom OFFLOAD=... HIP_SDK=... ARGS="--launcher-grid-only"
 #   make clean
+#
+# OFFLOAD defaults to the release target, gfx11-generic, and the kernels
+# build at -O2 like custom_kernels_<arch>.dll, so the test runs the code
+# that ships. Pass OFFLOAD=--offload-arch=gfx1151 (etc.) for a chip build.
 #
 # The op has no autotune table and no tuner, so MODE is accepted for the
 # uniform API but only labels out/results.csv.
@@ -25,7 +29,7 @@ endif
 
 # ---- Required from CI / CLI ----
 
-OFFLOAD  ?= --offload-arch=gfx1151
+OFFLOAD  ?= --offload-arch=gfx11-generic
 HIP_SDK  ?= $(HIP_PATH)
 MODE     ?= lookup
 COVERAGE ?= 3
@@ -51,7 +55,7 @@ ARCH := $(patsubst --offload-arch=%,%,$(OFFLOAD))
 
 # ---- Build settings ----
 
-KERNEL_FLAGS := -O3 -std=c++17 -x hip -ffp-contract=fast
+KERNEL_FLAGS := -O2 -std=c++17 -x hip -ffp-contract=fast
 CXXFLAGS     := -O3 -std=c++17
 INCLUDES     := -I$(INCLUDE_DIR)
 

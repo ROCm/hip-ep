@@ -66,6 +66,9 @@ prefix gets one `kernel-tests/<arch>/`, named exactly like that entry's
     hipdnn-kernel-ut-gqa-decode-xfp16-wi8-yfp16.exe
     hipdnn-kernel-ut-gqa-prefill-xfp16-wfp16-yfp16.exe
     hipdnn-kernel-ut-gqa-prefill-xfp16-wi8-yfp16.exe
+    hipdnn-kernel-ut-gather-block-quantized-xi64-wu4-yfp16.exe
+    hipdnn-kernel-ut-gather-block-quantized-xi64-wu8-yfp16.exe
+    hipdnn-kernel-ut-gather-block-quantized-xi64-wfp8-yfp16.exe
 ```
 
 ### Run (on a machine with a supported AMD GPU)
@@ -87,7 +90,7 @@ controller from that `bin` directory:
 | `--mode` | `lookup`, `autotune` | `lookup` | `lookup` uses the tables embedded in `custom_kernels_<arch>.dll` and falls through to autotune on a miss, like production. `autotune` bypasses the tables (production's `online` mode). |
 | `--coverage` | `1`, `2`, `3` | `3` | Shape tier; see "Shape coverage". `1` suits a per-PR job, `3` a nightly one. |
 
-The controller runs the 13 leaves serially, with `bin` as the working
+The controller runs the 16 leaves serially, with `bin` as the working
 directory so every leaf finds `custom_kernels_<arch>.dll`. It prints one
 `[<op>/<leaf>] PASS|FAIL (<ms> ms)` line per leaf and finally
 `Combined report: <path>`.
@@ -190,7 +193,7 @@ Concretely:
   never drops a categorical situation.
 
 A tier3 (default) run of one leaf is on the order of tens to ~150 cases, and
-the whole 12-leaf suite at tier3 is budgeted at **up to ~30 min total**
+the whole 16-leaf suite at tier3 is budgeted at **up to ~30 min total**
 (measured ~20-25 min in practice) — this is intentionally wider than a
 "finishes in a minute" smoke test, because the shape axis (M=1 vs M>1,
 multiple K/N/seq scenarios) needs real coverage too, not just the categorical
@@ -212,9 +215,9 @@ X<xdtype>_W<wdtype>_Y<ydtype>[_ZP<zpdtype>][_other]
 
 | Token | Meaning |
 |---|---|
-| `X` | activation / input (MatMulNBits A, GQA Q) |
-| `W` | weight / KV (MatMulNBits packed B, GQA K/V cache) |
-| `Y` | output (MatMulNBits C, GQA O) |
+| `X` | activation / input (MatMulNBits A, GQA Q, GatherBlockQuantized indices) |
+| `W` | weight / KV (MatMulNBits packed B, GQA K/V cache, GatherBlockQuantized data) |
+| `Y` | output (MatMulNBits C, GQA O, GatherBlockQuantized output) |
 | `_ZP…` | only if zero-point storage is a distinguishing feature of this leaf (`_ZPu8`, `_ZPfp16`, …) |
 
 Examples:
@@ -254,6 +257,7 @@ unit_test/
   gqa/prefill/Xfp16_Wfp16_Yfp16/
   gqa/prefill/Xfp16_Wi8_Yfp16/
   qmoe_ragged_mm/Xfp16_Wu4_Yfp16/
+  gather_block_quantized/Xi64_W{u4,u8,fp8}_Yfp16/
 ```
 
 `unit_test/` holds one directory per op and nothing else besides the four
@@ -365,6 +369,15 @@ COVERAGE=N` (any leaf, or the top-level aggregator) builds and runs it.
   counts on both sides of each GEMV / WMMA16 / WMMA64 boundary, the bucket
   descriptors, the task-policy and launch-grid selectors, and one
   FC1 -> SwiGLU -> FC2 pipeline.
+- **gather_block_quantized** (u4, u8 and fp8 weights as separate leaves):
+  compact rows `{off,on}` x indices rank `{1,2}`, crossed for u4 / u8 with
+  zero points `{off,on}` x signedness `{unsigned,signed}` (16 combos) and for
+  fp8 with scale granularity `{per-tensor [1,1], per-row, blockwise}` (12
+  combos), on a shape list COVERAGE thins (tier1 = 2 shapes, tier2 = 4,
+  tier3 = 6; rows `1024..8192`, row length `64..3840`, block size
+  `{16,32,64,128}`, `{1,16,2048}` indices). Every index list includes the first
+  and last rows, negative and out-of-range indices. Outputs are compared
+  bit-exactly with the CPU reference.
 
 A new op's test cpp should follow whichever of the above shapes fit it best:
 if the kernel's dispatch paths are better covered by a small hand-picked
@@ -378,15 +391,33 @@ is the single source of truth for what "typical" means for that op.
 From `unit_test/`, the whole suite, run the way the CI runs it:
 
 ```
-make test  OFFLOAD=--offload-arch=gfx1151 HIP_SDK=<sdk> [MODE=lookup|autotune] [COVERAGE=1|2|3]
+make test  HIP_SDK=<sdk> [OFFLOAD=--offload-arch=<gfx>] [LUT_ARCH=<gfx>] [MODE=lookup|autotune] [COVERAGE=1|2|3]
 make build ...   # build only
 make clean ...
 ```
 
-The Makefiles use repo-relative paths only: `HIP_SDK` and `OFFLOAD` come from
-the command line. `MODE=lookup` on an arch that has a table (every arch with a
-checked-in `lut/<arch>.fb`) also needs `FLATC` and `FLATBUFFERS_INC`; see
-"`MODE=lookup`" below.
+The Makefiles use repo-relative paths only: `HIP_SDK`, `OFFLOAD` and
+`LUT_ARCH` come from the command line. `MODE=lookup` on a chip that has a table
+(every chip with a checked-in `lut/<chip>.fb`) also needs `FLATC` and
+`FLATBUFFERS_INC`; see "`MODE=lookup`" below.
+
+The build follows the release: compile for the CI target, pick the table by
+the real chip.
+
+- `OFFLOAD` defaults to `--offload-arch=gfx11-generic`, the target of the
+  `custom_kernels_gfx11-generic.dll` every gfx115x part runs, and the kernels
+  build at `-O2` like that DLL, so a test measures the code that ships.
+  For gfx1170 pass `OFFLOAD=--offload-arch=gfx1170` (the release target
+  for it). A chip target such as
+  `OFFLOAD=--offload-arch=gfx1151` still works and uses that chip's table.
+- The LUTs are per chip (`lut/gfx1151.fb`, ...), so for a `gfx*-generic`
+  target `LUT_ARCH` defaults to the GPU of the machine that builds, read with
+  `$(HIP_SDK)/bin/amdgpu-arch.exe`. Pass `LUT_ARCH=gfxNNNN` when the exe will
+  run on another box (e.g. `LUT_ARCH=gfx1150` for a gfx11-generic exe built
+  on a gfx1151 and run on a gfx1150). The resolver still
+  checks the table's `gpu_arch` against the device at run time and ignores a
+  table for another chip, so a wrong `LUT_ARCH` costs the lookup, never
+  correctness. `mode_info` prints the table it picked.
 
 `make test` runs every leaf's `make build` (add `-j` to build them in
 parallel), which compiles the kernel sources into the leaf, and collects the
@@ -410,8 +441,8 @@ leaf alone; `make test` there runs the leaf directly and writes the leaf's own
 after what the kernel itself calls them:
 
 - **`lookup`** (default): resolve the config from
-  `hip/autotune/<op>/lut/<arch>.fb`. If this arch has no table, it warns and
-  falls back to `autotune` — a missing table is never a hard failure.
+  `hip/autotune/<op>/lut/<LUT_ARCH>.fb`. If that chip has no table, it warns
+  and falls back to `autotune` — a missing table is never a hard failure.
 - **`autotune`**: always the runtime sweep, never touches a table.
 
 `MODE` also selects the kernel's own source, via
@@ -424,7 +455,7 @@ the real resolver and table are *linked*, so without that wiring a run labelled
 `knowledge/hosts.md`) plus its `include/`, passed on the command line:
 
 ```
-make test MODE=lookup OFFLOAD=--offload-arch=gfx1151 HIP_SDK=<sdk> \
+make test MODE=lookup HIP_SDK=<sdk> \
     FLATC=<path to flatc(.exe)> FLATBUFFERS_INC=<flatbuffers include dir>
 ```
 
@@ -518,6 +549,10 @@ decode `B1_H64_G8_D64_len2048` and prefill `B1_H64_G8_D64_sq512_past0`, with
 input layout) with `_bias` and `_zp` when set, and names its selector,
 descriptor and pipeline cases (`task_policy_fc1`, `launcher_grid`,
 `descriptors_E11_P304_k1`, `pipeline_T20_E5_k2_H32_I16_bs32`).
+gather_block_quantized writes `R1024_C160_bs16_I2x8` (table rows, row length,
+block size, indices shape) with `_compact`, `_zp` and `_signed` when set, or
+the fp8 scale granularity `_tensor` / `_row` / `_block`; its `config` is always
+`fixed:elementwise` and its `time_ms` 0.
 
 `time_ms` is the **mean per-launch** time of that case's timed launches (the
 leaf's fixed count of launches between two HIP events), not a total, and it is
@@ -566,8 +601,9 @@ A run is either `lookup` or `autotune`, never both, so a leaf has exactly one
 
 Under `hipdnn-kernel-ut.exe` each leaf reads that output back from its stderr
 log (see "Run" above); a leaf started any other way redirects its own stderr
-to a scratch file under `out/` instead, which captures the kernels only when
-they are linked into the leaf (the local make build). Either way a passing run
+to a scratch file beside its executable instead (so it works from any working
+directory), which captures the kernels only when they are linked into the leaf
+(the local make build). Either way a passing run
 leaves only `out/results.csv`. Because an op logs a selection only on the
 first encounter with a tune key, a later case sharing that key reuses the
 earlier selection silently; the leaf remembers it per key so every row still

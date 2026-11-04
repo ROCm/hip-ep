@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 
+#include "../ResizeLayout.h"
 #include "OnnxToHipUtils.h"
 
 #include "mlir/IR/BuiltinAttributes.h"
@@ -18,9 +19,10 @@ namespace {
 // with coordinate_transformation_mode="asymmetric" and, for nearest,
 // nearest_mode="floor". Those are hip.resize enum ids 1 and 2.
 //
-// Scales are not passed to the kernel. hip.resize recovers each axis as
-// out_dim / in_dim from the result type the importer already computed
-// (output_dim = floor(input_dim * scale)).
+// hip.resize recovers each axis as out_dim / in_dim from the result type the
+// importer already computed (output_dim = floor(input_dim * scale)). When
+// floor rounds (65 * 7.890625 -> 512), that ratio is not the supplied scale,
+// so a constant scales list is kept on hip.resize as `scales`.
 //
 // Schema 9 passes scales as a second input. Opset 7 and 8 store that same
 // list as an f32 attribute and have only the X input. The importer prints
@@ -199,6 +201,18 @@ struct UpsampleToResize : public mlir::RewritePattern {
       return rewriter.notifyMatchFailure(
           op, "Upsample mode must be 'nearest' or 'linear'");
 
+    // Lowering plans the launch from the kept scales, so it must exist.
+    mlir::ArrayAttr scalesAttr;
+    if (scaleValues &&
+        resizeScalesDifferFromExtents(inputType, outputType, *scaleValues)) {
+      if (!planHipResizeLaunch(inputType, outputType, /*hostExtents=*/false,
+                               *scaleValues))
+        return rewriter.notifyMatchFailure(
+            op, "Upsample: a non-unit scale falls outside a trailing window "
+                "of at most 3 axes");
+      scalesAttr = rewriter.getF64ArrayAttr(*scaleValues);
+    }
+
     mlir::Location loc = op->getLoc();
     llvm::SmallVector<mlir::Value> dynSizes;
     for (int64_t i : llvm::seq<int64_t>(2)) {
@@ -213,7 +227,7 @@ struct UpsampleToResize : public mlir::RewritePattern {
         rewriter, loc, outputType, *ctxOrFailure, input, init,
         rewriter.getI64IntegerAttr(modeId),
         rewriter.getI64IntegerAttr(kResizeCoordAsymmetric),
-        rewriter.getI64IntegerAttr(kResizeNearestFloor));
+        rewriter.getI64IntegerAttr(kResizeNearestFloor), scalesAttr);
     rewriter.replaceOp(op, hipOp.getResult(0));
     return mlir::success();
   }

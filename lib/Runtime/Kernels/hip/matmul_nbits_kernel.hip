@@ -684,6 +684,32 @@ void matmul_nbits_gemv_kernel_i8(
 #define GEMV4_WAVES_MAX(TN, TM)                                                \
   ((TM) == 1 && (TN) > 8 ? HIPDNN_WAVES_FOR_VGPRS(168) : GEMV_WAVES_MAX(TM))
 
+// On a 1536-VGPR target (a gfx1151 build) TILE_N = 16 at TILE_M = 1 keeps the
+// col-major code it had before #1240: the single A index in read_a below,
+// and M == 1 without zero points stays on the col-major kernel (see
+// launchGemvConfig). The tile uses 168 of the 170 registers its 9 waves leave
+// there. The per-group A row pointer adds two spilled registers, and storing
+// a just-loaded register to scratch puts an s_waitcnt vmcnt(0) into the K loop,
+// so the 16 B columns are no longer consumed as they arrive; the row-major
+// kernel waits for all its loads at once as well. On gfx1151 both were 8-13%
+// slower than the old code at the LUT's 64-thread TILE_N = 16 decode points
+// (K 5120 x N 17408 / 17920 and the transposed shapes, DRAM-bound). On the
+// 1024-VGPR file of the product binary the row-major kernel is the faster one
+// at TILE_N = 16 (col-major 4-62% slower) and the new A index is what removed
+// the per-element 64-bit multiplies, so nothing changes there.
+#define GEMV4_KEEP_COL_TN16(TN, TM)                                            \
+  ((TM) == 1 && (TN) > 8 && HIPDNN_VGPRS_PER_SIMD >= 1536)
+
+// The M-blocked TILE_M = 8, TILE_N = 2 tile, the lookup-mode pick for
+// M = 5..7, keeps the single A index on a 1536-VGPR target as well. There the
+// per-group row pointer lets the compiler take it from 167 VGPRs (9 waves) to
+// 107 (12 waves), and at M = 6 it ran 0.78-1.31x the original's time on
+// gfx1151 depending on the shape (1.24x and 1.31x on the Llama-3.1 FFN with
+// zero points). On the 1024-VGPR file the old index spilled the tile (584
+// B/lane with the current SDK), so the product binary keeps the new one.
+#define GEMV4_KEEP_OLD_A_TM8(TN, TM)                                           \
+  ((TM) == 8 && (TN) == 2 && HIPDNN_VGPRS_PER_SIMD >= 1536)
+
 template <int BLOCK_SIZE, int TILE_N, bool COL_MAJOR = false, int TILE_M = 1>
 __global__ __launch_bounds__(BLOCK_SIZE)
 __attribute__((amdgpu_waves_per_eu(GEMV4_WAVES_MIN(TILE_N, TILE_M),
@@ -812,9 +838,15 @@ void matmul_nbits_gemv_kernel(
     // TILE_M > 1 the extra live values also pushed the tile into scratch
     // (100-584 bytes per lane, 2-4x slower).
     auto read_a = [&](int tm, int k_lane, int k_const) __attribute__((always_inline)) -> float {
-        const __half* row = a_base + tm * a_mstep +
-                            static_cast<int64_t>(k_lane) * a_stride;
-        return static_cast<float>(row[static_cast<int64_t>(k_const) * a_stride]);
+        if constexpr (COL_MAJOR && (GEMV4_KEEP_COL_TN16(TILE_N, TILE_M) ||
+                                    GEMV4_KEEP_OLD_A_TM8(TILE_N, TILE_M))) {
+            return static_cast<float>(
+                a_base[tm * a_mstep + static_cast<int64_t>(k_lane + k_const) * a_stride]);
+        } else {
+            const __half* row = a_base + tm * a_mstep +
+                                static_cast<int64_t>(k_lane) * a_stride;
+            return static_cast<float>(row[static_cast<int64_t>(k_const) * a_stride]);
+        }
     };
 
     // ---- Phase 1: 32-nibble (128-bit) vectorized main loop ----
@@ -1586,6 +1618,24 @@ static constexpr GemvConfig kGemvConfigs[] = {
 static constexpr int kNumGemvConfigs =
     static_cast<int>(sizeof(kGemvConfigs) / sizeof(kGemvConfigs[0]));
 
+// VGPRs per SIMD of the code object this process runs, which is not always the
+// device's: a gfx1151 runs the gfx11-generic code object (1024) unless the
+// build has a gfx1151 one (1536). Read once from the device.
+__device__ int g_gemv_vgprs_per_simd = HIPDNN_VGPRS_PER_SIMD;
+
+static int gemvCodeObjectVgprsPerSimd()
+{
+    static const int v = [] {
+        int x = 1024;
+        if (hipMemcpyFromSymbol(&x, HIP_SYMBOL(g_gemv_vgprs_per_simd), sizeof(x)) != hipSuccess) {
+            (void)hipGetLastError();
+            x = 1024;
+        }
+        return x;
+    }();
+    return v;
+}
+
 static void launchGemvConfig(
     int config_id, hipStream_t stream,
     const __half* A, const uint8_t* B,
@@ -1601,7 +1651,11 @@ static void launchGemvConfig(
     // compile-time A stride. The col-major one indexes A with the runtime stride
     // M (see read_a), which ROCm 7.16 compiles to a 64-bit multiply per element:
     // +30% instructions in the decode loop, 1.2x slower on average, up to 1.9x.
-    if (col_major && M == 1 && zp == nullptr && batch == 1) col_major = false;
+    // A gfx1151 build keeps the col-major kernel at TILE_N = 16 (see
+    // GEMV4_KEEP_COL_TN16).
+    if (col_major && M == 1 && zp == nullptr && batch == 1 &&
+        !(c.tile_n > 8 && gemvCodeObjectVgprsPerSimd() >= 1536))
+        col_major = false;
     dim3 grid(static_cast<unsigned>((N + c.tile_n - 1) / c.tile_n),
               static_cast<unsigned>(M),
               static_cast<unsigned>(col_major ? 1 : batch));
@@ -1721,6 +1775,11 @@ static void settleClock(hipEvent_t ev0, hipEvent_t ev1, hipStream_t stream,
 // comparable to the signal at that scale, so a small-iters min alone is not
 // trustworthy there. A reading <= 0 is not a real duration (Windows HIP event
 // timer noise at sub-0.1ms scale can yield this); it must never win the min.
+// Nor can a positive reading far below the config's own median: the same timer
+// now and then reports an 80 us GEMM as 10 us (beyond any chip's peak), and the
+// min would give that config the point every time. A sample under half the
+// median of the config's samples is such a glitch and is left out; a real peak
+// (boost clock, warm cache) stays within 2x of the median.
 // `evict`, when not null, streams the eviction buffer before each timed
 // launch; that is recorded ahead of ev0, so it stays out of the reading.
 template <typename LaunchFn>
@@ -1729,10 +1788,32 @@ static float timeConfigPeak(hipEvent_t ev0, hipEvent_t ev1, hipStream_t stream,
                             void* evict, LaunchFn&& launch) {
     for (int w = 0; w < warmup; w++) launch();
 
+    constexpr int kMaxSamples = 32;
+    float samples[kMaxSamples];
+    int kept = 0;
+    const int cap = floor_iters < kMaxSamples ? floor_iters : kMaxSamples;
+
+    // Smallest sample that is not implausibly far below the median of the
+    // samples taken so far (1e30 while there is none).
+    auto robustPeak = [&]() {
+        if (kept == 0) return 1e30f;
+        float lo = 1e30f;
+        for (int i = 0; i < kept; i++) lo = samples[i] < lo ? samples[i] : lo;
+        if (kept < 3) return lo;
+        float sorted[kMaxSamples];
+        for (int i = 0; i < kept; i++) sorted[i] = samples[i];
+        std::sort(sorted, sorted + kept);
+        const float median = sorted[kept / 2];
+        float best = 1e30f;
+        for (int i = 0; i < kept; i++)
+            if (samples[i] >= 0.5f * median && samples[i] < best) best = samples[i];
+        return best;
+    };
+
     float best = 1e30f;
     int iter_count = 0;
     while (iter_count < iters ||
-           (best < floor_ms && iter_count < floor_iters)) {
+           (best < floor_ms && iter_count < cap)) {
         gemvEvict(evict, stream);
         hipEventRecord(ev0, stream);
         launch();
@@ -1740,7 +1821,10 @@ static float timeConfigPeak(hipEvent_t ev0, hipEvent_t ev1, hipStream_t stream,
         hipEventSynchronize(ev1);
         float ms = 0.0f;
         hipEventElapsedTime(&ms, ev0, ev1);
-        if (ms > 0.0f && ms < best) best = ms;
+        if (ms > 0.0f && kept < kMaxSamples) {
+            samples[kept++] = ms;
+            best = robustPeak();
+        }
         iter_count++;
     }
     return best;
@@ -4617,30 +4701,48 @@ __device__ __forceinline__ void SmallMWmmaImpl(
     const int c0 = wid * CPW;
     const int cnt = FULL ? CPW : min(CPW, (K >> 5) - c0);
 
+    // Scales and zero points for this wave's CPW chunks, loaded up front. The
+    // zero-point mode is tested once around all of its loads: tested per chunk
+    // (if (ok && zp_mode == ...) inside the j loop), the current compiler kept a uniform
+    // branch per chunk and waited for each chunk's scale load inside it (one
+    // s_waitcnt vmcnt(0) per chunk, 55 -> 79 waits at CPW=18), so the
+    // prologue's loads ran one at a time: 3-8% on the gpt-oss expert layers.
     const unsigned char* b_col[TN];
+    size_t ns[TN];
+    int grp[CPW];
+#pragma unroll
+    for (int j = 0; j < CPW; j++)
+        grp[j] = (FULL || j < cnt) ? (c0 + j) >> group_shift : 0;
     _Float16 rs[CPW][TN], rz[CPW][TN];
 #pragma unroll
     for (int tn = 0; tn < TN; tn++) {
         const int n = col0 + tn * 16 + lane;
-        const size_t ns = static_cast<size_t>(n < N ? n : 0);
-        b_col[tn] = B + ns * b_row_bytes + c0 * 16;
-        const _Float16* s_col = scales + ns * num_groups_k;
-        const _Float16* z16 =
-            static_cast<const _Float16*>(zeros) + ns * zp_stride;
-        const uint8_t* z4 = static_cast<const uint8_t*>(zeros) + ns * zp_stride;
+        ns[tn] = static_cast<size_t>(n < N ? n : 0);
+        b_col[tn] = B + ns[tn] * b_row_bytes + c0 * 16;
+        const _Float16* s_col = scales + ns[tn] * num_groups_k;
 #pragma unroll
         for (int j = 0; j < CPW; j++) {
-            const bool ok = FULL || j < cnt;
-            const int g = ok ? (c0 + j) >> group_shift : 0;
-            rs[j][tn] = ok ? s_col[g] : (_Float16)0;
-            _Float16 z = 8;
-            if (ok && zp_mode == kSmallMZpFp16) {
-                z = z16[g];
-            } else if (ok && zp_mode == kSmallMZpU4) {
-                const uint8_t b = z4[g >> 1];
-                z = static_cast<_Float16>((g & 1) ? (b >> 4) : (b & 0xF));
+            const _Float16 s = s_col[grp[j]];
+            rs[j][tn] = (FULL || j < cnt) ? s : (_Float16)0;
+            rz[j][tn] = 8;
+        }
+    }
+    if (zp_mode == kSmallMZpU4) {
+#pragma unroll
+        for (int tn = 0; tn < TN; tn++) {
+            const uint8_t* z4 = static_cast<const uint8_t*>(zeros) + ns[tn] * zp_stride;
+#pragma unroll
+            for (int j = 0; j < CPW; j++) {
+                const uint8_t b = z4[grp[j] >> 1];
+                rz[j][tn] = static_cast<_Float16>((grp[j] & 1) ? (b >> 4) : (b & 0xF));
             }
-            rz[j][tn] = z;
+        }
+    } else if (zp_mode == kSmallMZpFp16) {
+#pragma unroll
+        for (int tn = 0; tn < TN; tn++) {
+            const _Float16* z16 = static_cast<const _Float16*>(zeros) + ns[tn] * zp_stride;
+#pragma unroll
+            for (int j = 0; j < CPW; j++) rz[j][tn] = z16[grp[j]];
         }
     }
     const _Float16* a_row[TM];
@@ -4826,7 +4928,7 @@ static bool smallMWmmaPlan(int cfg, int64_t N, int64_t K, int64_t bits,
     p->group_shift = 0;
     while ((32LL << p->group_shift) < block_size) p->group_shift++;
     p->ngk = static_cast<int>((K + block_size - 1) / block_size);
-    p->b_row_bytes = p->ngk * static_cast<int>(block_size / 2);
+    p->b_row_bytes = static_cast<int>((K + 1) / 2);
     p->zp_mode = !zero_points ? 0 : zp_packed_u4 ? kSmallMZpU4 : kSmallMZpFp16;
     p->zp_stride = zp_packed_u4 ? (p->ngk + 1) / 2 : p->ngk;
     return true;
@@ -5026,6 +5128,32 @@ static bool wmmaConfigSupported(const WmmaConfig& c, int N, int K, int gs) {
     return K % wmmaBk(c) == 0;
 }
 
+// launchDequant uses grid.y = N. HIP caps maxGridSize[1] (65536 on gfx1201);
+// a !fused config that won at a smaller donor N is unlaunchable for lm_head
+// (N=128256). Cached once so LUT validation and the online tuner share it.
+static int dequantMaxGridY() {
+    static const int y = [] {
+        hipDeviceProp_t p{};
+        if (hipGetDeviceProperties(&p, 0) != hipSuccess || p.maxGridSize[1] <= 0)
+            return 65536;
+        return p.maxGridSize[1];
+    }();
+    return y;
+}
+
+// Query-shape launchability for LUT nearest and the online sweep. A config that
+// is legal at a nearby measured point can still be illegal here (padded stride,
+// BK vs K, dequant grid.y). Validators must use this so resolve walks outwards
+// instead of handing production an unlaunchable winner.
+static bool wmmaConfigLaunchable(const WmmaConfig& c, int /*M*/, int N, int K,
+                                 int gs, int b_row_bytes) {
+    if (!wmmaConfigSupported(c, N, K, gs)) return false;
+    // Separate dequant has no stride argument; padded B must stay fused.
+    if (b_row_bytes != 0 && !c.fused) return false;
+    if (!c.fused && N > dequantMaxGridY()) return false;
+    return true;
+}
+
 // Config to fall back on when the requested one cannot serve the shape.
 // Config 9 ({128, 64, sw=4, fused}, BK = 32) is the historical default and is
 // supported for every K the dispatcher lets through; the scan is there so this
@@ -5040,20 +5168,27 @@ static int wmmaFallbackConfig(int N, int K, int gs) {
 /* WMMA half of the LUT bridge; see the GEMV half above kGemvConfigs for the
  * cache-then-LUT-then-sweep ordering this serves. */
 
-// wmmaConfigApplies needs the shape, so the validator carries it through ctx.
+// Full query shape so the validator can reject configs that only work at a
+// nearby donor point (see wmmaConfigLaunchable).
 struct MatmulNbitsWmmaLutCtx {
+    int m;
     int n;
+    int k;
     int gs;
+    int b_row_bytes;
 };
 
-static int wmmaConfigFromGeometry(const matmul_lut::WmmaAnswer& g, int N, int gs) {
+static int wmmaConfigFromGeometry(const matmul_lut::WmmaAnswer& g,
+                                  const MatmulNbitsWmmaLutCtx& ctx) {
     for (int cid = 0; cid < kNumWmmaConfigs; cid++) {
         const WmmaConfig& c = kWmmaConfigs[cid];
         if (c.bm != g.bm || c.bn != g.bn || c.swizzle_n != g.swizzle_n ||
             c.wt_m != g.wt_m || c.wt_n != g.wt_n || c.fused != g.fused)
             continue;
         if (wmmaBk(c) != g.bk) continue;
-        if (!wmmaConfigApplies(c, N, gs)) continue;
+        if (!wmmaConfigLaunchable(c, ctx.m, ctx.n, ctx.k, ctx.gs,
+                                  ctx.b_row_bytes))
+            return -1;
         return cid;
     }
     return -1;
@@ -5061,7 +5196,7 @@ static int wmmaConfigFromGeometry(const matmul_lut::WmmaAnswer& g, int N, int gs
 
 static bool matmulNbitsWmmaValidator(void* ctx, const matmul_lut::WmmaAnswer& g) {
     const auto* c = static_cast<const MatmulNbitsWmmaLutCtx*>(ctx);
-    return wmmaConfigFromGeometry(g, c->n, c->gs) >= 0;
+    return wmmaConfigFromGeometry(g, *c) >= 0;
 }
 
 // Returns a kWmmaConfigs index from the LUT, or -1 on a miss.
@@ -5077,18 +5212,11 @@ static int matmulNbitsLutWmmaConfig(int M, int N, int K, int gs, bool has_zp,
     req.group_size = gs;
     req.has_zp = has_zp;
     req.b_row_bytes = b_row_bytes;
-    MatmulNbitsWmmaLutCtx ctx{N, gs};
+    MatmulNbitsWmmaLutCtx ctx{M, N, K, gs, b_row_bytes};
     const matmul_lut::Result r =
         matmul_lut::resolve(req, matmulNbitsWmmaValidator, nullptr, &ctx);
     if (r.source == matmul_lut::Source::None) return -1;
-    const int cid = wmmaConfigFromGeometry(r.wmma, N, gs);
-    // A padded stride can only be served by a fused config; the dequant pass
-    // behind a !fused one has no stride argument.
-    if (cid >= 0 && b_row_bytes != 0 && !kWmmaConfigs[cid].fused) return -1;
-    // The geometry match above does not see K, so a table row can name a config
-    // whose BK does not divide it. Reject here rather than let the launch fall
-    // back, which would cache a config that is replaced on every call.
-    if (cid >= 0 && K % wmmaBk(kWmmaConfigs[cid]) != 0) return -1;
+    const int cid = wmmaConfigFromGeometry(r.wmma, ctx);
     if (cid >= 0)
         MATMUL_NBITS_AUTOTUNE_LOG(
             "[custom_kernels] LUT hit (src=%d d=%.3f) M=%d N=%d K=%d gs=%d "
@@ -5529,42 +5657,58 @@ static int tuneWmmaConfig(
 
     _Float16* dq_buf = ensureDqBuffer(N, K);
 
-    // Separate-dequant configs read B only through launchDequant, which has no
-    // stride argument, so at a padded stride they would decode the padding as
-    // weights. Measuring them here would let the tuner crown a config the
-    // padded path cannot serve.
-    const bool fused_only = (b_row_bytes != 0);
-
     float best_ms = 1e30f;
     int   best_id = wmmaFallbackConfig(N, K, gs);
-    constexpr int WARMUP = 1;
+    constexpr int WARMUP = 2;
     constexpr int ITERS  = 5;
+    constexpr int kFloorIters = 15;  // extra iters for sub-0.1ms configs
 
-    /* Single in-order pass, keeping each config's batch time. Deliberately the
-     * original, minimal measurement: the kernel tuner is on the runtime dispatch
-     * path, so it stays simple and fast. Any more careful measurement (clock
-     * settling, multi-pass, structural tie-breaks) belongs in the offline LUT
-     * sweep, not here -- see autotune/matmul_nbits. */
+    // Same predicate as the LUT validator: skip a tile that cannot launch at
+    // this query (BK vs K, padded stride, dequant grid.y). Measuring it would
+    // crown a winner the production path cannot serve.
+    auto candidate = [&](int cid) {
+        return wmmaConfigLaunchable(kWmmaConfigs[cid], M, N, K, gs,
+                                    b_row_bytes);
+    };
+
+    /* The offline LUT sweep ranks configs by the timings logged here, so this
+     * is the measurement the tables are only as good as. Same standard as the
+     * GEMV and u3 / u2 WMMA tuners: settle the clock once, then give every
+     * config the peak (min) of ITERS isolated launches at that clock. A
+     * back-to-back average with one warmup launch timed the early configs
+     * boosted and the late ones throttled. */
+    int settle_id = -1;
+    for (int cid = 0; cid < kNumWmmaConfigs && settle_id < 0; cid++)
+        if (candidate(cid)) settle_id = cid;
+    if (settle_id >= 0)
+        settleClock(ev0, ev1, stream, [&]{
+            launchWmmaConfig(settle_id, stream, M, N, K, A, lda, B,
+                             scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf,
+                             b_row_bytes);
+        });
+
     for (int cid = 0; cid < kNumWmmaConfigs; cid++) {
-        auto& cfg = kWmmaConfigs[cid];
-        if (!wmmaConfigSupported(cfg, N, K, gs)) continue;
-        if (fused_only && !cfg.fused) continue;
+        if (!candidate(cid)) continue;
 
-        for (int w = 0; w < WARMUP; w++)
+        const float cfg_ms = timeConfigPeak(ev0, ev1, stream, WARMUP, ITERS,
+                                            kFloorIters, 0.1f, nullptr, [&]{
             launchWmmaConfig(cid, stream, M, N, K, A, lda, B,
                              scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf,
                              b_row_bytes);
+        });
 
-        hipEventRecord(ev0, stream);
-        for (int i = 0; i < ITERS; i++)
-            launchWmmaConfig(cid, stream, M, N, K, A, lda, B,
-                             scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf,
-                             b_row_bytes);
-        hipEventRecord(ev1, stream);
-        hipEventSynchronize(ev1);
-
-        float ms = 0.0f;
-        hipEventElapsedTime(&ms, ev0, ev1);
+        // Drain sticky launch errors per candidate. A losing config that fails
+        // to launch (e.g. invalid block/shared-mem on this shape) would
+        // otherwise leave hipGetLastError set; the production launch of the
+        // winner then looks like it failed even when it succeeded (lm_head
+        // N=128256 on gfx1201). Skip the failed candidate so it cannot win.
+        hipError_t launch_err = hipGetLastError();
+        if (launch_err != hipSuccess) {
+            MATMUL_NBITS_AUTOTUNE_LOG(
+                "[custom_kernels]   wmma config[%2d] SKIP launch failed: %s\n",
+                cid, hipGetErrorString(launch_err));
+            continue;
+        }
 
         MATMUL_NBITS_AUTOTUNE_LOG(
             "[custom_kernels]   wmma config[%2d] %s bm=%3d bn=%3d sw=%d "
@@ -5573,10 +5717,10 @@ static int tuneWmmaConfig(
             kWmmaConfigs[cid].bm, kWmmaConfigs[cid].bn,
             kWmmaConfigs[cid].swizzle_n, kWmmaConfigs[cid].wt_m,
             kWmmaConfigs[cid].wt_n, wmmaBk(kWmmaConfigs[cid]),
-            ms / ITERS);
+            cfg_ms);
 
-        if (ms < best_ms) {
-            best_ms = ms;
+        if (cfg_ms < best_ms) {
+            best_ms = cfg_ms;
             best_id = cid;
         }
     }
@@ -5595,7 +5739,7 @@ static int tuneWmmaConfig(
         kWmmaConfigs[best_id].bm, kWmmaConfigs[best_id].bn,
         kWmmaConfigs[best_id].swizzle_n, kWmmaConfigs[best_id].wt_m,
         kWmmaConfigs[best_id].wt_n, wmmaBk(kWmmaConfigs[best_id]),
-        best_ms / ITERS);
+        best_ms);
 
     return best_id;
 }
@@ -6490,34 +6634,49 @@ static int tuneWmmaConfigI8(
 
     float best_ms = 1e30f;
     int   best_id = 12; // 128x128 sw=2: a safe default for typical N>=64
-    constexpr int WARMUP = 1;
+    constexpr int WARMUP = 2;
     constexpr int ITERS  = 5;
+    constexpr int kFloorIters = 15;  // extra iters for sub-0.1ms configs
+
+    // Skip large BN tiles when N is too small to benefit.
+    auto candidate = [&](int cid) { return kWmmaI8Configs[cid].bn <= N * 2; };
+
+    // Settle the clock once, then peak-of-ITERS per config at that clock; see
+    // tuneWmmaConfig for why the offline sweep needs this.
+    int settle_id = -1;
+    for (int cid = 0; cid < kNumWmmaI8Configs && settle_id < 0; cid++)
+        if (candidate(cid)) settle_id = cid;
+    if (settle_id >= 0)
+        settleClock(ev0, ev1, stream, [&]{
+            launchWmmaConfigI8(settle_id, stream, M, N, K, A, lda, B,
+                               scales, zeros, gs, ngk, C, ldc, has_zp);
+        });
 
     for (int cid = 0; cid < kNumWmmaI8Configs; cid++) {
         auto& cfg = kWmmaI8Configs[cid];
-        // Skip large BN tiles when N is too small to benefit.
-        if (cfg.bn > N * 2) continue;
+        if (!candidate(cid)) continue;
 
-        for (int w = 0; w < WARMUP; w++)
+        const float cfg_ms = timeConfigPeak(ev0, ev1, stream, WARMUP, ITERS,
+                                            kFloorIters, 0.1f, nullptr, [&]{
             launchWmmaConfigI8(cid, stream, M, N, K, A, lda, B,
                                scales, zeros, gs, ngk, C, ldc, has_zp);
+        });
 
-        hipEventRecord(ev0, stream);
-        for (int i = 0; i < ITERS; i++)
-            launchWmmaConfigI8(cid, stream, M, N, K, A, lda, B,
-                               scales, zeros, gs, ngk, C, ldc, has_zp);
-        hipEventRecord(ev1, stream);
-        hipEventSynchronize(ev1);
-
-        float ms = 0.0f;
-        hipEventElapsedTime(&ms, ev0, ev1);
+        // See tuneWmmaConfig: drain sticky launch errors per candidate.
+        hipError_t launch_err = hipGetLastError();
+        if (launch_err != hipSuccess) {
+            MATMUL_NBITS_AUTOTUNE_LOG(
+                "[custom_kernels]   wmma-i8 config[%2d] SKIP launch failed: %s\n",
+                cid, hipGetErrorString(launch_err));
+            continue;
+        }
 
         MATMUL_NBITS_AUTOTUNE_LOG(
             "[custom_kernels]   wmma-i8 config[%2d] bm=%3d bn=%3d sw=%d : %.4f ms\n",
-            cid, cfg.bm, cfg.bn, cfg.swizzle_n, ms / ITERS);
+            cid, cfg.bm, cfg.bn, cfg.swizzle_n, cfg_ms);
 
-        if (ms < best_ms) {
-            best_ms = ms;
+        if (cfg_ms < best_ms) {
+            best_ms = cfg_ms;
             best_id = cid;
         }
     }
@@ -6530,7 +6689,7 @@ static int tuneWmmaConfigI8(
         "best config[%d] bm=%d bn=%d sw=%d (%.4f ms/iter)\n",
         M, N, K, gs, has_zp ? "yes" : "no",
         best_id, kWmmaI8Configs[best_id].bm, kWmmaI8Configs[best_id].bn,
-        kWmmaI8Configs[best_id].swizzle_n, best_ms / ITERS);
+        kWmmaI8Configs[best_id].swizzle_n, best_ms);
 
     return best_id;
 }
@@ -7228,6 +7387,15 @@ static int tuneWmmaConfigU3(
         hipEventRecord(ev1, stream);
         hipEventSynchronize(ev1);
 
+        // See tuneWmmaConfig: drain sticky launch errors per candidate.
+        hipError_t launch_err = hipGetLastError();
+        if (launch_err != hipSuccess) {
+            MATMUL_NBITS_AUTOTUNE_LOG(
+                "[custom_kernels]   wmma-u3 config[%2d] SKIP launch failed: %s\n",
+                cid, hipGetErrorString(launch_err));
+            continue;
+        }
+
         float ms = 0.0f;
         hipEventElapsedTime(&ms, ev0, ev1);
 
@@ -7879,6 +8047,15 @@ static int tuneWmmaConfigU2(
                                scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf);
         hipEventRecord(ev1, stream);
         hipEventSynchronize(ev1);
+
+        // See tuneWmmaConfig: drain sticky launch errors per candidate.
+        hipError_t launch_err = hipGetLastError();
+        if (launch_err != hipSuccess) {
+            MATMUL_NBITS_AUTOTUNE_LOG(
+                "[custom_kernels]   wmma-u2 config[%2d] SKIP launch failed: %s\n",
+                cid, hipGetErrorString(launch_err));
+            continue;
+        }
 
         float ms = 0.0f;
         hipEventElapsedTime(&ms, ev0, ev1);

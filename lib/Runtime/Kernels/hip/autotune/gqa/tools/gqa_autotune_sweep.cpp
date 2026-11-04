@@ -55,6 +55,36 @@
 
 namespace {
 
+// Seconds of back-to-back launches before a shape's first timed candidate
+// (--resettle-s); see resettle().
+double g_resettle_s = 1.0;
+
+// Every shape builds and uploads its Q/K/V on the host -- seconds for the long
+// ones -- and the GPU idles meanwhile and re-boosts. Without this the first
+// candidates of a shape were timed at a different clock than the rest, which is
+// the "settle once and hold" rule of hip-kernel-perf-measurement broken at every
+// shape boundary. Launch the shape's own kernel until the clock is back at its
+// sustained plateau. Batches grow until one spans 5 ms so a 10 us decode kernel
+// keeps the GPU busy instead of idling on a sync after every launch, while a
+// 500 ms prefill kernel is still one launch per sync.
+template <typename F> void resettle(F &&launch) {
+  using Clock = std::chrono::steady_clock;
+  const auto t0 = Clock::now();
+  int batch = 1;
+  while (std::chrono::duration<double>(Clock::now() - t0).count() <
+         g_resettle_s) {
+    const auto tb = Clock::now();
+    for (int i = 0; i < batch; ++i)
+      launch();
+    (void)hipDeviceSynchronize();
+    const double ms =
+        std::chrono::duration<double, std::milli>(Clock::now() - tb).count();
+    if (ms < 5.0 && batch < 512)
+      batch *= 2;
+  }
+  (void)hipGetLastError();
+}
+
 struct Shape {
   std::string id;
   std::string group;
@@ -369,6 +399,8 @@ std::vector<Result> sweepPrefill(const Shape &s, bool verify, double target_ms,
 
   std::vector<Result> out;
   auto measure = [&](Result r, auto &&launch) {
+    if (out.empty() && print_realtime)
+      resettle(launch);
     r.ms = timeConfig(launch, target_ms, 3, 2000, rounds);
     r.prod_candidate = true;
     r.rel_l2 = -1.0;
@@ -509,8 +541,8 @@ struct KernelVersion {
 };
 constexpr KernelVersion kKernelVersions[] = {
     {"flash_decode", "decode-2"},
-    {"prefill_v6x", "v6x-2"},
-    {"prefill_v8x", "v8x-1"},
+    {"prefill_v6x", "v6x-3"},
+    {"prefill_v8x", "v8x-2"},
 };
 
 static const char *kernelVersion(const char *kernel) {
@@ -672,6 +704,8 @@ std::vector<Result> sweepDecode(const Shape &s, bool verify, double target_ms,
         // Each dispatch on its own, and each one reading the next cache in the
         // rotation. `rounds` is spent on samples instead: the median of 40-800
         // isolated dispatches rather than the median of a handful of averages.
+        if (out.empty() && print_realtime)
+          resettle(launch);
         const double ms = timeIsolated(launch, target_ms * rounds, 40, 800);
         double err = -1.0;
         if (verify) {
@@ -895,6 +929,8 @@ int main(int argc, char **argv) {
       decode_split_cap = atoi(next());
     else if (a == "--warmup-s")
       warmup_s = atof(next());
+    else if (a == "--resettle-s")
+      g_resettle_s = atof(next());
     else if (a == "--tune-compare")
       tune_compare = true;
     else {
@@ -903,6 +939,7 @@ int main(int argc, char **argv) {
           "usage: %s --shapes <csv> [--only <id-prefix>] [--csv <all>]\n"
           "          [--best-csv <winners>] [--no-verify] [--target-ms N]\n"
           "          [--rounds N] [--decode-split-cap N] [--warmup-s N]\n"
+          "          [--resettle-s N]\n"
           "\n"
           "  --tune-compare        also call the production online tuner per\n"
           "                        shape and record what it chose and how "
@@ -915,6 +952,11 @@ int main(int argc, char **argv) {
           "on\n"
           "                        whichever shapes the file happens to list\n"
           "                        first. Default 4; 0 disables.\n"
+          "  --resettle-s N        seconds of the shape's own kernel run back\n"
+          "                        to back before its first candidate is\n"
+          "                        timed, so the clock the host-side setup let\n"
+          "                        drop is back at its plateau. Default 1; 0\n"
+          "                        disables.\n"
           "  --decode-split-cap N  explore decode split counts above the\n"
           "     production ceiling (%d). Rows above it are written with\n"
           "     prod_candidate=0 and never win.\n",

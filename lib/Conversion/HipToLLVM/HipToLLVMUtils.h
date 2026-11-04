@@ -6,6 +6,7 @@
 #ifndef HIP_CONVERSION_HIPTOLLVM_UTILS_H
 #define HIP_CONVERSION_HIPTOLLVM_UTILS_H
 
+#include "RuntimeAccess.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 #include "hip/datatype_abi.h"
@@ -37,6 +38,17 @@
 namespace mlir {
 namespace hip {
 
+// True only for the flat stream-ordered copy path in MemoryLowering.cpp.
+// Other layouts can use host copies and require a separate ordering proof.
+bool hasFlatRuntimeCopyLowering(MemRefType source, MemRefType target);
+
+// Prove scalar values and joint wait removal before conversion erases stores.
+// Empty results keep all existing readbacks. This analysis does not change IR.
+DenseMap<Operation *, Value>
+collectHostScalarValues(ModuleOp module,
+                        const RuntimeAccessOverrides &overrides,
+                        unsigned indexBitwidth, bool report);
+
 inline constexpr const char *kHipMalloc = "hip_device_malloc";
 inline constexpr const char *kHipFree = "hip_device_free";
 inline constexpr const char *kHipGetPoolBase = "hipdnn_ep_get_pool_base";
@@ -51,10 +63,13 @@ inline constexpr const char *kWrapStridedCopy = "wrap_strided_copy";
 inline constexpr const char *kWrapConv = "wrap_conv";
 inline constexpr const char *kWrapConvTranspose = "wrap_conv_transpose";
 inline constexpr const char *kWrapHipblasltMatmul = "wrap_hipblasLtMatmul";
+inline constexpr const char *kWrapMatmulI32 = "wrap_matmul_i32";
 inline constexpr const char *kWrapRocMlir = "wrap_rocmlir";
 inline constexpr const char *kWrapRmsNorm = "wrap_rms_norm";
 inline constexpr const char *kWrapSkipSimplifiedLayerNorm =
     "wrap_skip_simplified_layer_norm";
+inline constexpr const char *kWrapSkipSimplifiedLayerNormMixed =
+    "wrap_skip_simplified_layer_norm_mixed";
 inline constexpr const char *kWrapLayerNormalization =
     "wrap_layer_normalization";
 inline constexpr const char *kWrapInstanceNormalization =
@@ -75,6 +90,7 @@ inline constexpr const char *kMiopenMul = "hip_miopen_mul";
 inline constexpr const char *kMiopenSoftmax = "hip_miopen_softmax";
 inline constexpr const char *kWrapTranspose = "wrap_transpose";
 inline constexpr const char *kWrapGather = "wrap_gather";
+inline constexpr const char *kWrapGatherFromFile = "wrap_gather_from_file";
 inline constexpr const char *kWrapGatherElements = "wrap_gather_elements";
 inline constexpr const char *kWrapTopK = "wrap_top_k";
 inline constexpr const char *kWrapRandomNormalLike = "wrap_random_normal_like";
@@ -87,13 +103,14 @@ inline constexpr const char *kWrapGelu = "wrap_gelu";          // hip.gelu
 inline constexpr const char *kWrapBiasGelu = "wrap_bias_gelu"; // hip.bias_gelu
 inline constexpr const char *kWrapFastGelu = "wrap_fast_gelu"; // hip.fast_gelu
 inline constexpr const char *kWrapLeakyRelu =
-    "wrap_leaky_relu";                                        // hip.leaky_relu
-inline constexpr const char *kWrapPRelu = "wrap_prelu";       // hip.prelu
-inline constexpr const char *kWrapLRN = "wrap_lrn";           // hip.lrn
-inline constexpr const char *kWrapTrilu = "wrap_trilu";       // hip.trilu
-inline constexpr const char *kWrapSwish = "wrap_swish";       // hip.swish
-inline constexpr const char *kWrapPow = "wrap_pow";           // hip.pow
-inline constexpr const char *kWrapSwiglu = "wrap_swiglu";     // hip.swiglu
+    "wrap_leaky_relu";                                    // hip.leaky_relu
+inline constexpr const char *kWrapPRelu = "wrap_prelu";   // hip.prelu
+inline constexpr const char *kWrapLRN = "wrap_lrn";       // hip.lrn
+inline constexpr const char *kWrapTrilu = "wrap_trilu";   // hip.trilu
+inline constexpr const char *kWrapSwish = "wrap_swish";   // hip.swish
+inline constexpr const char *kWrapPow = "wrap_pow";       // hip.pow
+inline constexpr const char *kWrapSwiglu = "wrap_swiglu"; // hip.swiglu
+inline constexpr const char *kWrapSwigluPromoted = "wrap_swiglu_promoted";
 inline constexpr const char *kWrapSoftplus = "wrap_softplus"; // hip.softplus
 inline constexpr const char *kWrapElementwiseSub = "wrap_elementwise_sub";
 inline constexpr const char *kWrapRotaryEmbedding = "wrap_rotary_embedding";
@@ -108,7 +125,10 @@ inline constexpr const char *kWrapReduceMean = "wrap_reduce_mean";
 inline constexpr const char *kWrapReduceL2 = "wrap_reduce_l2";
 inline constexpr const char *kWrapReduceMax = "wrap_reduce_max";
 inline constexpr const char *kWrapReduceMin = "wrap_reduce_min";
-inline constexpr const char *kWrapGQA = "wrap_group_query_attention";
+inline constexpr const char *kWrapGQAHostLength =
+    "wrap_group_query_attention_host_length";
+inline constexpr const char *kWrapGQARingF16 =
+    "wrap_group_query_attention_ring_f16";
 inline constexpr const char *kWrapMultiHeadAttention =
     "wrap_multi_head_attention";
 inline constexpr const char *kWrapMatMulNBits = "wrap_matmul_nbits";
@@ -117,6 +137,8 @@ inline constexpr const char *kWrapQMoE = "wrap_qmoe";
 inline constexpr const char *kWrapQMoEAmd = "wrap_qmoe_amd";
 inline constexpr const char *kWrapGatherBlockQuantized =
     "wrap_gather_block_quantized";
+inline constexpr const char *kWrapGatherBlockQuantizedFromFile =
+    "wrap_gather_block_quantized_from_file";
 inline constexpr const char *kWrapQuantizeLinear = "wrap_quantize_linear";
 inline constexpr const char *kWrapDequantizeLinear = "wrap_dequantize_linear";
 inline constexpr const char *kWrapGemm = "wrap_gemm";
@@ -158,6 +180,7 @@ inline constexpr const char *kWrapExpand = "wrap_expand";
 inline constexpr const char *kWrapReduceProd = "wrap_reduce_prod";
 inline constexpr const char *kWrapPool = "wrap_pool";
 inline constexpr const char *kWrapResize = "wrap_resize";
+inline constexpr const char *kWrapResizeScaled = "wrap_resize_scaled";
 inline constexpr const char *kWrapGridSample = "wrap_grid_sample";
 inline constexpr const char *kWrapGlobalPool = "wrap_global_pool";
 inline constexpr const char *kWrapLess = "wrap_less";
@@ -197,6 +220,10 @@ inline constexpr int64_t kStridesIdx = 4;
 // Values must match HIPDNN_EP_QMOE_AMD_* in lib/Runtime/hipdnn_ep_runtime.h.
 inline constexpr int64_t kQMoEAmdActivationRelu2 = 0;
 inline constexpr int64_t kQMoEAmdRoutingSigmoid = 0;
+
+// hip.qmoe / wrap_qmoe relu2 activation. Must match
+// HIPDNN_EP_QMOE_ACTIVATION_RELU2 in lib/Runtime/hipdnn_ep_runtime.h.
+inline constexpr int64_t kQMoEActivationRelu2 = 5;
 
 // Window-pool reduction mode constants (hip.pool / wrap_pool).
 // Values must match HIPDNN_EP_POOL_* in lib/Runtime/hipdnn_ep_runtime.h
@@ -492,8 +519,9 @@ void populateTransposeLoweringPatterns(const LLVMTypeConverter &converter,
                                        RewritePatternSet &patterns);
 void populateRopeLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
-void populateGqaLoweringPatterns(const LLVMTypeConverter &converter,
-                                 RewritePatternSet &patterns);
+void populateGqaLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns,
+    const DenseMap<Operation *, Value> &hostScalars);
 void populateMultiHeadAttentionLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns);
 void populateMatMulNBitsLoweringPatterns(const LLVMTypeConverter &converter,
@@ -559,12 +587,14 @@ void populateNonZeroLoweringPatterns(const LLVMTypeConverter &converter,
 // Generic data-dependent-shape readback primitive (hip.readback_dim). Not tied
 // to any single operator; any op that computes a runtime extent into a device
 // i32 scalar can be sliced/sized via this.
-void populateReadbackDimLoweringPatterns(const LLVMTypeConverter &converter,
-                                         RewritePatternSet &patterns);
+void populateReadbackDimLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns,
+    const DenseMap<Operation *, Value> &hostScalars);
 // hip.readback_scalar: generic synchronized host-readback of a single device
 // scalar of arbitrary element type (the i64/f32/f16 sibling of readback_dim).
-void populateReadbackScalarLoweringPatterns(const LLVMTypeConverter &converter,
-                                            RewritePatternSet &patterns);
+void populateReadbackScalarLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns,
+    const DenseMap<Operation *, Value> &hostScalars);
 void populateSizeLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateLoopLoweringPatterns(const LLVMTypeConverter &converter,

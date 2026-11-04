@@ -20,9 +20,12 @@
 //               data_type, spatial_rank,
 //               N, C, in0..2, out0..2,
 //               mode, coord_transform, nearest_mode)
+//   wrap_resize_scaled(<same>, scale0..2): window axis i samples with ONNX
+//               scale<i> when > 0 instead of out<i> / in<i>
 //
 // `mode`:           0 = nearest, 1 = linear (N-linear)
-// `coord_transform`: 0 = half_pixel, 1 = asymmetric, 2 = align_corners
+// `coord_transform`: 0 = half_pixel, 1 = asymmetric, 2 = align_corners,
+//                    3 = pytorch_half_pixel
 // `nearest_mode`:    0 = round_prefer_floor (only used when mode=nearest)
 
 static int hipdnn_ep_to_hip_dtype(int64_t data_type) {
@@ -44,11 +47,13 @@ static int hipdnn_ep_to_hip_dtype(int64_t data_type) {
   }
 }
 
-int wrap_resize(RuntimeState *state, void *input, void *output,
-                int64_t data_type, int64_t spatial_rank, int64_t N, int64_t C,
-                int64_t in0, int64_t in1, int64_t in2, int64_t out0,
-                int64_t out1, int64_t out2, int64_t mode,
-                int64_t coord_transform, int64_t nearest_mode) {
+// `scales` is null for wrap_resize: the kernel samples with out / in.
+static int resize_impl(RuntimeState *state, void *input, void *output,
+                       int64_t data_type, int64_t spatial_rank, int64_t N,
+                       int64_t C, int64_t in0, int64_t in1, int64_t in2,
+                       int64_t out0, int64_t out1, int64_t out2, int64_t mode,
+                       int64_t coord_transform, int64_t nearest_mode,
+                       const double *scales) {
   OP_PROFILE(
       "resize",
       [&] {
@@ -84,14 +89,45 @@ int wrap_resize(RuntimeState *state, void *input, void *output,
       (long long)out2, (long long)mode, (long long)coord_transform,
       (long long)nearest_mode);
 
-  int rc = hip_resize(
-      stream, input, output, hip_dtype, static_cast<int>(spatial_rank), N, C,
-      in0, in1, in2, out0, out1, out2, static_cast<int>(mode),
-      static_cast<int>(coord_transform), static_cast<int>(nearest_mode));
+  int rc =
+      scales
+          ? hip_resize_scaled(
+                stream, input, output, hip_dtype,
+                static_cast<int>(spatial_rank), N, C, in0, in1, in2, out0, out1,
+                out2, static_cast<int>(mode), static_cast<int>(coord_transform),
+                static_cast<int>(nearest_mode), static_cast<float>(scales[0]),
+                static_cast<float>(scales[1]), static_cast<float>(scales[2]))
+          : hip_resize(stream, input, output, hip_dtype,
+                       static_cast<int>(spatial_rank), N, C, in0, in1, in2,
+                       out0, out1, out2, static_cast<int>(mode),
+                       static_cast<int>(coord_transform),
+                       static_cast<int>(nearest_mode));
   if (rc != 0) {
     fprintf(stderr, "[REAL] wrap_resize: kernel launch failed (%d)\n", rc);
     return -1;
   }
   RUNTIME_DEBUG_LOG("[REAL] wrap_resize: completed successfully\n");
   return 0;
+}
+
+int wrap_resize(RuntimeState *state, void *input, void *output,
+                int64_t data_type, int64_t spatial_rank, int64_t N, int64_t C,
+                int64_t in0, int64_t in1, int64_t in2, int64_t out0,
+                int64_t out1, int64_t out2, int64_t mode,
+                int64_t coord_transform, int64_t nearest_mode) {
+  return resize_impl(state, input, output, data_type, spatial_rank, N, C, in0,
+                     in1, in2, out0, out1, out2, mode, coord_transform,
+                     nearest_mode, nullptr);
+}
+
+int wrap_resize_scaled(RuntimeState *state, void *input, void *output,
+                       int64_t data_type, int64_t spatial_rank, int64_t N,
+                       int64_t C, int64_t in0, int64_t in1, int64_t in2,
+                       int64_t out0, int64_t out1, int64_t out2, int64_t mode,
+                       int64_t coord_transform, int64_t nearest_mode,
+                       double scale0, double scale1, double scale2) {
+  const double scales[3] = {scale0, scale1, scale2};
+  return resize_impl(state, input, output, data_type, spatial_rank, N, C, in0,
+                     in1, in2, out0, out1, out2, mode, coord_transform,
+                     nearest_mode, scales);
 }

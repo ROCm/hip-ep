@@ -47,6 +47,35 @@ __global__ void gather_kernel(
   output[tid] = data[data_off];
 }
 
+// Rows of 16-byte multiples: one thread per 16-byte vector, 32-bit offsets.
+template <typename IdxT>
+__global__ void gather_rows_vec_kernel(const uint4* __restrict__ data,
+                                       const IdxT* __restrict__ indices,
+                                       uint4* __restrict__ output,
+                                       uint32_t axis_size,
+                                       uint32_t vecs_per_row,
+                                       uint32_t indices_num,
+                                       uint32_t total_vecs) {
+  uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+  if (tid >= total_vecs) {
+    return;
+  }
+  uint32_t v = tid % vecs_per_row;
+  uint32_t row = tid / vecs_per_row;
+  uint32_t idx_off = row % indices_num;
+  uint32_t outer_off = row / indices_num;
+  int64_t index_val = static_cast<int64_t>(indices[idx_off]);
+  if (index_val < 0) {
+    index_val += axis_size;
+  }
+  if (index_val < 0 || index_val >= axis_size) {
+    output[tid] = make_uint4(0, 0, 0, 0);
+    return;
+  }
+  output[tid] = data[(outer_off * axis_size +
+                      static_cast<uint32_t>(index_val)) * vecs_per_row + v];
+}
+
 // Dispatch on the index element type (4 = int32, 8 = int64). The data element
 // type is fixed by the caller's `T`.
 template <typename T>
@@ -128,6 +157,46 @@ extern "C" int hip_gather(
   // without this the check below can report an error left behind by an
   // unrelated earlier API call as this kernel's launch failure.
   (void)hipGetLastError();
+
+  const int64_t row_bytes = inner_size * element_size_bytes;
+  const int64_t data_vecs = data_num_elements * element_size_bytes / 16;
+  const int64_t out_vecs = output_num_elements * element_size_bytes / 16;
+  if ((element_size_bytes == 2 || element_size_bytes == 4 ||
+       element_size_bytes == 8) &&
+      row_bytes % 16 == 0 &&
+      reinterpret_cast<uintptr_t>(data) % 16 == 0 &&
+      reinterpret_cast<uintptr_t>(output) % 16 == 0 &&
+      data_vecs <= static_cast<int64_t>(UINT32_MAX) &&
+      out_vecs <= static_cast<int64_t>(UINT32_MAX)) {
+    const uint32_t vecs_per_row = static_cast<uint32_t>(row_bytes / 16);
+    const uint32_t total_vecs = static_cast<uint32_t>(out_vecs);
+    const dim3 grid((total_vecs + kBlockSize - 1) / kBlockSize);
+    if (indices_element_size_bytes == 4) {
+      hipLaunchKernelGGL(HIP_KERNEL_NAME(gather_rows_vec_kernel<int32_t>),
+                         grid, dim3(kBlockSize), 0, hip_stream,
+                         static_cast<const uint4*>(data),
+                         static_cast<const int32_t*>(indices),
+                         static_cast<uint4*>(output),
+                         static_cast<uint32_t>(axis_size), vecs_per_row,
+                         static_cast<uint32_t>(indices_num_elements),
+                         total_vecs);
+    } else {
+      hipLaunchKernelGGL(HIP_KERNEL_NAME(gather_rows_vec_kernel<int64_t>),
+                         grid, dim3(kBlockSize), 0, hip_stream,
+                         static_cast<const uint4*>(data),
+                         static_cast<const int64_t*>(indices),
+                         static_cast<uint4*>(output),
+                         static_cast<uint32_t>(axis_size), vecs_per_row,
+                         static_cast<uint32_t>(indices_num_elements),
+                         total_vecs);
+    }
+    hipError_t err = hipGetLastError();
+    if (err != hipSuccess) {
+      fprintf(stderr, "[custom_kernels] hip_gather launch failed: %s\n",
+              hipGetErrorString(err));
+    }
+    return static_cast<int>(err);
+  }
 
   switch (element_size_bytes) {
     case 2:
