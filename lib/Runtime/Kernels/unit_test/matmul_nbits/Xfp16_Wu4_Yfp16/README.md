@@ -26,8 +26,9 @@ then checks the weight byte orders: `hip_matmul_nbits_dp4a_layout` at M = 1,
 against a CPU reference of the dp4a arithmetic, and
 `hip_matmul_nbits_u4_unlayout` back to the dense rows byte for byte. The
 byte orders are written out in the test from their definition
-(`include/hip/matmul_nbits_weight_layout.h`). `--layouts-only` runs just that
-phase.
+(`include/hip/matmul_nbits_weight_layout.h`). The forced phase also runs
+every extended entry with a nonzero variant on both byte orders.
+`--layouts-only` and `--forced-only` run just one phase.
 
 ## Shape coverage (3 tiers)
 

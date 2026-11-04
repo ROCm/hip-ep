@@ -2581,7 +2581,11 @@ HIP_KERNEL_API int hip_matmul_nbits(
  * bits=4 B whose rows were padded to b_row_bytes (>= K/2) at load, so the
  * aliasing-prone strides need no per-call repack; it requires bits == 4 and
  * block_size | K, and every int4 path (WMMA, GEMV, M-blocked GEMV, naive)
- * honours it. Returns -1 for an unsupported combination. */
+ * honours it. b_layout is B's byte order (hip::MatmulNBitsWeightLayout,
+ * include/hip/matmul_nbits_weight_layout.h): 0 rows; 1 XOR-swizzled lines and
+ * 2 16-row blocks (dense, K % 64 == 0, N % 16 == 0 for blocks), read directly
+ * by the int4 WMMA prefill through the extended entries and through a dense
+ * copy on every other path. Returns -1 for an unsupported combination. */
 HIP_KERNEL_API int hip_matmul_nbits_ex(
     void* stream,
     const void* A,
@@ -2598,7 +2602,8 @@ HIP_KERNEL_API int hip_matmul_nbits_ex(
     int64_t zp_elem_size,
     const void* pre_unpacked_zp_u8,
     const void* pre_unpacked_zp_fp16,
-    int64_t b_row_bytes);
+    int64_t b_row_bytes,
+    int64_t b_layout);
 
 // Bitsandbytes FP4/NF4 dequant. Writes row-major [N, K] f32.
 // quant_type 0 is FP4 and 1 is NF4. Even indices read the high nibble.
@@ -2828,6 +2833,15 @@ HIP_KERNEL_API int hip_matmul_nbits_u4_wmma_stride(
     const void* A, int lda, const void* B, const void* scales,
     const void* zeros, void* C, int ldc, int b_row_bytes);
 
+/* hip_matmul_nbits_u4_wmma_stride for a B stored in byte order `layout`
+ * (0 rows; 1 XOR lines; 2 16-row blocks). Only the extended entries with a
+ * nonzero variant read layouts 1 and 2; returns -1 when no config serves the
+ * shape in that layout. */
+HIP_KERNEL_API int hip_matmul_nbits_u4_wmma_layout(
+    void* stream, int cfg, int M, int N, int K, int group_size,
+    const void* A, int lda, const void* B, const void* scales,
+    const void* zeros, void* C, int ldc, int b_row_bytes, int layout);
+
 /* The WMMA config table (kWmmaConfigs) as forced-config tests and offline
  * measurements see it. hip_matmul_nbits_u4_wmma_config_desc fills `out` for
  * config `cfg` (0 <= cfg < hip_matmul_nbits_u4_wmma_config_count()) and
@@ -2854,6 +2868,13 @@ HIP_KERNEL_API int hip_matmul_nbits_u4_wmma_run_config(
     void* stream, int cfg, int M, int N, int K, int group_size,
     const void* A, int lda, const void* B, const void* scales,
     const void* zeros, void* C, int ldc, int b_row_bytes);
+
+/* hip_matmul_nbits_u4_wmma_run_config with B in byte order `layout`; -2 also
+ * when the config does not read that layout. */
+HIP_KERNEL_API int hip_matmul_nbits_u4_wmma_run_config_layout(
+    void* stream, int cfg, int M, int N, int K, int group_size,
+    const void* A, int lda, const void* B, const void* scales,
+    const void* zeros, void* C, int ldc, int b_row_bytes, int layout);
 
 /* hip_matmul_nbits_u4_wmma_padrow: fused int4 WMMA prefill against a row-padded
  *   B, repacking B into a single shared scratch on each call. Bounds padded-B

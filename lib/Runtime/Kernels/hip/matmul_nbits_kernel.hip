@@ -4850,11 +4850,14 @@ void MatMulNBitsWMMA_ZP(
 
 // GemmFp16U4ImplX entries. VARIANT packs the pipeline options of
 // matmul_nbits_wmma_core_x.h in bits 0-6 (see WmmaConfig::variant); bit 7
-// selects the CU-mode build of the same kernel.
+// selects the CU-mode build of the same kernel; bits 8-9 are B's byte order
+// (hip::MatmulNBitsWeightLayout), set by launchWmmaExt from the call, not by
+// the config table.
 #define WMMAX_VARIANT_ARGS(V) \
     ((V) & 1) ? 2 : 1, ((V) >> 1) & 1, ((V) >> 2) & 1, ((V) >> 3) & 3, \
     ((V) >> 5) & 1, ((V) >> 6) & 1
 constexpr int kWmmaVariantCuMode = 128;
+constexpr int kWmmaVariantLayoutShift = 8;
 
 // CU mode is a per-kernel property (the descriptor's workgroup_processor_mode):
 // the workgroup's waves share one CU and its half of the LDS instead of
@@ -4874,7 +4877,7 @@ constexpr int kWmmaVariantCuMode = 128;
         int swizzle_n, int b_row_bytes)                                         \
     {                                                                           \
         GemmFp16U4ImplX<BM_T, BN_T, WT_M, WT_N, USE_ZEROS, BC, BK_T,            \
-                        WMMAX_VARIANT_ARGS(VARIANT)>(                           \
+                        WMMAX_VARIANT_ARGS(VARIANT), ((VARIANT) >> 8) & 3>(     \
             M, N, K, A, lda, B_packed, scales, zeros, group_size, num_groups_k, \
             C, ldc, swizzle_n, b_row_bytes);                                    \
     }
@@ -5656,10 +5659,15 @@ static int dequantMaxGridY() {
 // BK vs K, dequant grid.y). Validators must use this so resolve walks outwards
 // instead of handing production an unlaunchable winner.
 static bool wmmaConfigLaunchable(const WmmaConfig& c, int /*M*/, int N, int K,
-                                 int gs, int b_row_bytes) {
+                                 int gs, int b_row_bytes, int layout = 0) {
     if (!wmmaConfigSupported(c, N, K, gs)) return false;
     // Separate dequant has no stride argument; padded B must stay fused.
     if (b_row_bytes != 0 && !c.fused) return false;
+    // Only GemmFp16U4ImplX reads a byte order other than rows: the extended
+    // entries with a nonzero variant (variant 0 runs the shipped core).
+    if (layout != 0 && (!c.ext || c.variant == 0 || K % 64 != 0 ||
+                        (layout == 2 && N % 16 != 0)))
+        return false;
     if (!c.fused && N > dequantMaxGridY()) return false;
     return true;
 }
@@ -5686,6 +5694,7 @@ struct MatmulNbitsWmmaLutCtx {
     int k;
     int gs;
     int b_row_bytes;
+    int layout;
 };
 
 static int wmmaConfigFromGeometry(const matmul_lut::WmmaAnswer& g,
@@ -5698,7 +5707,7 @@ static int wmmaConfigFromGeometry(const matmul_lut::WmmaAnswer& g,
         if (wmmaBk(c) != g.bk) continue;
         if (c.ext != g.ext || c.variant != g.variant) continue;
         if (!wmmaConfigLaunchable(c, ctx.m, ctx.n, ctx.k, ctx.gs,
-                                  ctx.b_row_bytes))
+                                  ctx.b_row_bytes, ctx.layout))
             return -1;
         return cid;
     }
@@ -5712,7 +5721,7 @@ static bool matmulNbitsWmmaValidator(void* ctx, const matmul_lut::WmmaAnswer& g)
 
 // Returns a kWmmaConfigs index from the LUT, or -1 on a miss.
 static int matmulNbitsLutWmmaConfig(int M, int N, int K, int gs, bool has_zp,
-                           int b_row_bytes) {
+                           int b_row_bytes, int layout = 0) {
     if (!matmulNbitsLutLookupEnabled()) return -1;   // online mode: sweep, skip the LUT
     matmul_lut::Request req;
     req.phase = matmul_lut::Phase::Prefill;
@@ -5723,7 +5732,7 @@ static int matmulNbitsLutWmmaConfig(int M, int N, int K, int gs, bool has_zp,
     req.group_size = gs;
     req.has_zp = has_zp;
     req.b_row_bytes = b_row_bytes;
-    MatmulNbitsWmmaLutCtx ctx{M, N, K, gs, b_row_bytes};
+    MatmulNbitsWmmaLutCtx ctx{M, N, K, gs, b_row_bytes, layout};
     const matmul_lut::Result r =
         matmul_lut::resolve(req, matmulNbitsWmmaValidator, nullptr, &ctx);
     if (r.source == matmul_lut::Source::None) return -1;
@@ -5731,9 +5740,9 @@ static int matmulNbitsLutWmmaConfig(int M, int N, int K, int gs, bool has_zp,
     if (cid >= 0)
         MATMUL_NBITS_AUTOTUNE_LOG(
             "[custom_kernels] LUT hit (src=%d d=%.3f) M=%d N=%d K=%d gs=%d "
-            "stride=%d -> config[%d]\n",
+            "stride=%d layout=%d -> config[%d]\n",
             static_cast<int>(r.source), r.distance, M, N, K, gs, b_row_bytes,
-            cid);
+            layout, cid);
     return cid;
 }
 
@@ -5756,7 +5765,8 @@ static void launchWmmaExt(
     hipStream_t stream, int M, int N, int K,
     const _Float16* A, int lda, const unsigned char* B,
     const _Float16* scales, const _Float16* zeros, int gs, int ngk,
-    _Float16* C, int ldc, bool has_zp, int swizzle_n, int b_row_bytes)
+    _Float16* C, int ldc, bool has_zp, int swizzle_n, int b_row_bytes,
+    int layout = 0)
 {
     const bool bc = (M % BM != 0) || (N % BN != 0);
     dim3 grid(static_cast<unsigned>((N + BN - 1) / BN),
@@ -5771,16 +5781,26 @@ static void launchWmmaExt(
         else if (has_zp)   WMMA_EXT_LAUNCH((MatMulNBitsWMMA_ZP<BM, BN, WM, WN, 1, false, BK>));
         else if (bc)       WMMA_EXT_LAUNCH((MatMulNBitsWMMA_NoZP<BM, BN, WM, WN, 1, true, BK>));
         else               WMMA_EXT_LAUNCH((MatMulNBitsWMMA_NoZP<BM, BN, WM, WN, 1, false, BK>));
-    } else if constexpr ((VAR & kWmmaVariantCuMode) != 0) {
-        if (has_zp && bc)  WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_ZP_CU<BM, BN, WM, WN, true, BK, VAR>));
-        else if (has_zp)   WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_ZP_CU<BM, BN, WM, WN, false, BK, VAR>));
-        else if (bc)       WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_NoZP_CU<BM, BN, WM, WN, true, BK, VAR>));
-        else               WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_NoZP_CU<BM, BN, WM, WN, false, BK, VAR>));
     } else {
-        if (has_zp && bc)  WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_ZP<BM, BN, WM, WN, true, BK, VAR>));
-        else if (has_zp)   WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_ZP<BM, BN, WM, WN, false, BK, VAR>));
-        else if (bc)       WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_NoZP<BM, BN, WM, WN, true, BK, VAR>));
-        else               WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_NoZP<BM, BN, WM, WN, false, BK, VAR>));
+        // B's byte order is bits 8-9 of the instantiated variant.
+#define WMMA_EXT_X(ZPK, NZK, V)                                                \
+        {                                                                      \
+            if (has_zp && bc)  WMMA_EXT_LAUNCH((ZPK<BM, BN, WM, WN, true, BK, V>));  \
+            else if (has_zp)   WMMA_EXT_LAUNCH((ZPK<BM, BN, WM, WN, false, BK, V>)); \
+            else if (bc)       WMMA_EXT_LAUNCH((NZK<BM, BN, WM, WN, true, BK, V>));  \
+            else               WMMA_EXT_LAUNCH((NZK<BM, BN, WM, WN, false, BK, V>)); \
+        }
+#define WMMA_EXT_X_LAYOUTS(ZPK, NZK)                                           \
+        if (layout == 1)      WMMA_EXT_X(ZPK, NZK, VAR | (1 << kWmmaVariantLayoutShift)) \
+        else if (layout == 2) WMMA_EXT_X(ZPK, NZK, VAR | (2 << kWmmaVariantLayoutShift)) \
+        else                  WMMA_EXT_X(ZPK, NZK, VAR)
+        if constexpr ((VAR & kWmmaVariantCuMode) != 0) {
+            WMMA_EXT_X_LAYOUTS(MatMulNBitsWMMAX_ZP_CU, MatMulNBitsWMMAX_NoZP_CU)
+        } else {
+            WMMA_EXT_X_LAYOUTS(MatMulNBitsWMMAX_ZP, MatMulNBitsWMMAX_NoZP)
+        }
+#undef WMMA_EXT_X_LAYOUTS
+#undef WMMA_EXT_X
     }
 #undef WMMA_EXT_LAUNCH
 }
@@ -5793,13 +5813,16 @@ static void launchWmmaConfig(
     const _Float16* scales, const _Float16* zeros,
     int gs, int ngk,
     _Float16* C, int ldc, bool has_zp,
-    _Float16* B_fp16_buf = nullptr, int b_row_bytes = 0)
+    _Float16* B_fp16_buf = nullptr, int b_row_bytes = 0, int layout = 0)
 {
     if (!wmmaConfigSupported(kWmmaConfigs[config_id], N, K, gs))
         config_id = wmmaFallbackConfig(N, K, gs);
 
     auto& c = kWmmaConfigs[config_id];
     bool need_bc = (M % c.bm != 0) || (N % c.bn != 0);
+    // A byte order other than rows is read only by the extended core; callers
+    // pick a config through wmmaConfigLaunchable, so this never launches.
+    if (layout != 0 && (!wmmaConfigIsExt(c) || c.variant == 0)) return;
 
     if (wmmaConfigIsExt(c)) {
 #define WMMA_EXT_CASE(BM, BN, WM, WN, BK, VAR, SW)                             \
@@ -5807,7 +5830,7 @@ static void launchWmmaConfig(
             wmmaBk(c) == BK && c.variant == VAR) {                           \
             launchWmmaExt<BM, BN, WM, WN, BK, VAR>(                          \
                 stream, M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc,  \
-                has_zp, c.swizzle_n, b_row_bytes);                           \
+                has_zp, c.swizzle_n, b_row_bytes, layout);                   \
             return;                                                          \
         }
         WMMA_EXT_CONFIGS(WMMA_EXT_CASE)
@@ -6212,7 +6235,7 @@ static int tuneWmmaConfig(
     const unsigned char* B,
     const _Float16* scales, const _Float16* zeros,
     int gs, int ngk,
-    _Float16* C, int ldc, bool has_zp, int b_row_bytes = 0)
+    _Float16* C, int ldc, bool has_zp, int b_row_bytes = 0, int layout = 0)
 {
     hipEvent_t ev0, ev1;
     hipEventCreate(&ev0);
@@ -6236,7 +6259,7 @@ static int tuneWmmaConfig(
                         g_wmma_sweep_extended.load(std::memory_order_relaxed);
     auto candidate = [&](int cid) {
         const WmmaConfig& cfg = kWmmaConfigs[cid];
-        return wmmaConfigLaunchable(cfg, M, N, K, gs, b_row_bytes) &&
+        return wmmaConfigLaunchable(cfg, M, N, K, gs, b_row_bytes, layout) &&
                !(cfg.ext && !ext_ok);
     };
 
@@ -6253,7 +6276,7 @@ static int tuneWmmaConfig(
         settleClock(ev0, ev1, stream, [&]{
             launchWmmaConfig(settle_id, stream, M, N, K, A, lda, B,
                              scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf,
-                             b_row_bytes);
+                             b_row_bytes, layout);
         });
 
     for (int cid = 0; cid < kNumWmmaConfigs; cid++) {
@@ -6263,7 +6286,7 @@ static int tuneWmmaConfig(
                                             kFloorIters, 0.1f, nullptr, [&]{
             launchWmmaConfig(cid, stream, M, N, K, A, lda, B,
                              scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf,
-                             b_row_bytes);
+                             b_row_bytes, layout);
         });
 
         // Drain sticky launch errors per candidate. A losing config that fails
@@ -6296,6 +6319,8 @@ static int tuneWmmaConfig(
 
     hipEventDestroy(ev0);
     hipEventDestroy(ev1);
+    // No config can read this byte order at this shape.
+    if (layout != 0 && settle_id < 0) return -1;
 
     // The full tile geometry is logged, not just the config index, so an
     // offline consumer can record what won without depending on this table's
@@ -6324,11 +6349,12 @@ static std::mutex wmma_tune_mutex;
  * N=5120 K=4096, cfg11 -> cfg3). Appended only when padding is in use, so
  * entries written by earlier builds for the arrival stride still hit. */
 static std::string wmmaCacheKey(int M, int N, int K, int gs, bool has_zp,
-                                int b_row_bytes = 0) {
+                                int b_row_bytes = 0, int layout = 0) {
     std::string key = std::to_string(M) + "_" + std::to_string(N) + "_" +
                       std::to_string(K) + "_" + std::to_string(gs) + "_" +
                       (has_zp ? "1" : "0");
     if (b_row_bytes != 0) key += "_p" + std::to_string(b_row_bytes);
+    if (layout != 0) key += "_l" + std::to_string(layout);
     return key;
 }
 
@@ -6367,16 +6393,18 @@ static int getOrTuneWmmaConfig(
     const unsigned char* B,
     const _Float16* scales, const _Float16* zeros,
     int gs, int ngk,
-    _Float16* C, int ldc, bool has_zp, int b_row_bytes = 0)
+    _Float16* C, int ldc, bool has_zp, int b_row_bytes = 0, int layout = 0)
 {
     const int forced = forcedWmmaConfig();
     // A forced config at a padded stride must still read B directly; the
     // dequant pass behind a !fused config has no stride argument.
     if (forced >= 0 && wmmaConfigApplies(kWmmaConfigs[forced], N, gs) &&
-        (b_row_bytes == 0 || kWmmaConfigs[forced].fused))
+        (b_row_bytes == 0 || kWmmaConfigs[forced].fused) &&
+        (layout == 0 ||
+         wmmaConfigLaunchable(kWmmaConfigs[forced], M, N, K, gs, b_row_bytes, layout)))
         return forced;
 
-    std::string key = wmmaCacheKey(M, N, K, gs, has_zp, b_row_bytes);
+    std::string key = wmmaCacheKey(M, N, K, gs, has_zp, b_row_bytes, layout);
 
     std::lock_guard<std::mutex> lock(wmma_tune_mutex);
 
@@ -6387,15 +6415,17 @@ static int getOrTuneWmmaConfig(
     // Map miss: the offline table before the sweep. The stride is part of the
     // LUT key for the same reason it is part of the cache key -- a padded
     // buffer has a different winner.
-    const int lut = matmulNbitsLutWmmaConfig(M, N, K, gs, has_zp, b_row_bytes);
+    const int lut =
+        matmulNbitsLutWmmaConfig(M, N, K, gs, has_zp, b_row_bytes, layout);
     if (lut >= 0) {
         wmma_cache[key] = lut;
         return lut;
     }
 
+    // -1 with a byte order no config reads at this shape.
     int best = tuneWmmaConfig(stream, M, N, K, A, lda, B,
                                scales, zeros, gs, ngk, C, ldc, has_zp,
-                               b_row_bytes);
+                               b_row_bytes, layout);
     wmma_cache[key] = best;
 
     MATMUL_NBITS_AUTOTUNE_LOG(
@@ -6723,6 +6753,39 @@ extern "C" int hip_matmul_nbits_u4_prepack_padrow(
  * launches and into the cache key, the winner is chosen for the layout that
  * will actually be used. Returns -1 when no fused config can serve the shape,
  * which lets the caller fall back to the arrival-layout path. */
+extern "C" int hip_matmul_nbits_u4_wmma_layout(
+    void* stream, int cfg, int M, int N, int K, int group_size,
+    const void* A, int lda, const void* B, const void* scales,
+    const void* zeros, void* C, int ldc, int b_row_bytes, int layout)
+{
+    const int ngk = (K + group_size - 1) / group_size;
+    const bool has_zp = (zeros != nullptr);
+    auto s  = static_cast<hipStream_t>(stream);
+    auto ap = static_cast<const _Float16*>(A);
+    auto bp = static_cast<const unsigned char*>(B);
+    auto sp = static_cast<const _Float16*>(scales);
+    auto zp = static_cast<const _Float16*>(zeros);
+    auto cp = static_cast<_Float16*>(C);
+
+    int id = cfg;
+    if (id < 0 || id >= kNumWmmaConfigs ||
+        !wmmaConfigLaunchable(kWmmaConfigs[id], M, N, K, group_size,
+                              b_row_bytes, layout))
+        id = getOrTuneWmmaConfig(s, M, N, K, ap, lda, bp, sp, zp, group_size,
+                                 ngk, cp, ldc, has_zp, b_row_bytes, layout);
+    // Only fused configs read B directly, and only the extended core reads a
+    // byte order other than rows; -1 asks the caller for another path.
+    if (id < 0 || !kWmmaConfigs[id].fused ||
+        !wmmaConfigLaunchable(kWmmaConfigs[id], M, N, K, group_size,
+                              b_row_bytes, layout))
+        return -1;
+
+    (void)hipGetLastError();
+    launchWmmaConfig(id, s, M, N, K, ap, lda, bp, sp, zp, group_size, ngk, cp,
+                     ldc, has_zp, nullptr, b_row_bytes, layout);
+    return static_cast<int>(hipGetLastError());
+}
+
 extern "C" int hip_matmul_nbits_u4_wmma_stride(
     void* stream, int cfg, int M, int N, int K, int group_size,
     const void* A, int lda, const void* B, const void* scales,
@@ -6782,12 +6845,24 @@ extern "C" int hip_matmul_nbits_u4_wmma_run_config(
     const void* A, int lda, const void* B, const void* scales,
     const void* zeros, void* C, int ldc, int b_row_bytes)
 {
+    return hip_matmul_nbits_u4_wmma_run_config_layout(
+        stream, cfg, M, N, K, group_size, A, lda, B, scales, zeros, C, ldc,
+        b_row_bytes, /*layout=*/0);
+}
+
+extern "C" int hip_matmul_nbits_u4_wmma_run_config_layout(
+    void* stream, int cfg, int M, int N, int K, int group_size,
+    const void* A, int lda, const void* B, const void* scales,
+    const void* zeros, void* C, int ldc, int b_row_bytes, int layout)
+{
     if (cfg < 0 || cfg >= kNumWmmaConfigs || group_size <= 0) return -2;
     // WMMA kernels compile to a trap on an arch without WMMA: CDNA (wave64)
     // and gfx10 (wave32), so the wave size is not the test.
     if (!hipdnn_device_has_wmma()) return -2;
     const WmmaConfig& c = kWmmaConfigs[cfg];
     if (!c.fused || !wmmaConfigSupported(c, N, K, group_size)) return -2;
+    if (!wmmaConfigLaunchable(c, M, N, K, group_size, b_row_bytes, layout))
+        return -2;
     (void)hipGetLastError();
     launchWmmaConfig(cfg, static_cast<hipStream_t>(stream), M, N, K,
                      static_cast<const _Float16*>(A), lda,
@@ -6795,7 +6870,7 @@ extern "C" int hip_matmul_nbits_u4_wmma_run_config(
                      static_cast<const _Float16*>(scales),
                      static_cast<const _Float16*>(zeros), group_size,
                      (K + group_size - 1) / group_size, static_cast<_Float16*>(C),
-                     ldc, zeros != nullptr, nullptr, b_row_bytes);
+                     ldc, zeros != nullptr, nullptr, b_row_bytes, layout);
     return static_cast<int>(hipGetLastError());
 }
 
@@ -9175,7 +9250,8 @@ extern "C" int hip_matmul_nbits_ex(
     int64_t zp_elem_size,
     const void* pre_unpacked_zp_u8,
     const void* pre_unpacked_zp_fp16,
-    int64_t b_row_bytes) {
+    int64_t b_row_bytes,
+    int64_t b_layout) {
   // A row-padded weight is only produced for bits=4 with whole quant groups,
   // so every int4 path below can take the pitch as-is.
   if (b_row_bytes != 0 &&
@@ -9197,6 +9273,33 @@ extern "C" int hip_matmul_nbits_ex(
   }
 
   if (M <= 0 || N <= 0 || K <= 0 || batch_count <= 0) return 0;
+
+  // A byte order other than rows (hip::MatmulNBitsWeightLayout) is read
+  // directly only by the int4 WMMA prefill path (GemmFp16U4ImplX); every other
+  // case runs on a dense copy of B in a shared scratch.
+  if (b_layout != 0) {
+    if (b_layout < 0 || b_layout > 2 || bits != 4 || K % 64 != 0 ||
+        (b_layout == 2 && N % 16 != 0) ||
+        (b_row_bytes != 0 && b_row_bytes != K / 2)) {
+      fprintf(stderr,
+              "[custom_kernels] hip_matmul_nbits: unsupported b_layout=%lld "
+              "(bits=%lld N=%lld K=%lld b_row_bytes=%lld)\n",
+              (long long)b_layout, (long long)bits, (long long)N, (long long)K,
+              (long long)b_row_bytes);
+      return -1;
+    }
+    b_row_bytes = 0;
+    const bool wmma_reads = batch_count == 1 && M >= wmmaMinM() &&
+                            (element_size_bytes == 2 || element_size_bytes == 4) &&
+                            hipdnn_device_has_wmma() && !hipdnn_device_is_wave64();
+    if (!wmma_reads) {
+      B = hip_matmul_nbits_u4_unlayout_scratch(stream, B, static_cast<int>(N),
+                                               static_cast<int>(K),
+                                               static_cast<int>(b_layout));
+      if (!B) return -1;
+      b_layout = 0;
+    }
+  }
 
   // All bits widths (2/3/4/8) route fp32 A/C through the shared fp16 cast
   // scratch: cast A to fp16, run the unchanged fp16 compute path, cast the
@@ -9221,7 +9324,7 @@ extern "C" int hip_matmul_nbits_ex(
         stream, a_fp16, B, scales, zero_points, bias, c_fp16,
         M, N, K, batch_count, bits, block_size,
         /*element_size_bytes=*/2, zp_elem_size,
-        pre_unpacked_zp_u8, pre_unpacked_zp_fp16, b_row_bytes);
+        pre_unpacked_zp_u8, pre_unpacked_zp_fp16, b_row_bytes, b_layout);
     if (rc != 0) return rc;
 
     launchCastFp16ToFp32(cast_stream, c_fp16, static_cast<float*>(output), c_elems);
@@ -9921,9 +10024,20 @@ extern "C" int hip_matmul_nbits_ex(
 
     bool has_zp = (z_ptr != nullptr);
     const int b_pitch = static_cast<int>(b_row_bytes);
+    int layout = static_cast<int>(b_layout);
     int wmma_cfg = getOrTuneWmmaConfig(
         hip_stream, iM, iN, iK, a_ptr, lda, b_ptr,
-        s_ptr, z_ptr, gs, ngk, out_ptr, ldc, has_zp, b_pitch);
+        s_ptr, z_ptr, gs, ngk, out_ptr, ldc, has_zp, b_pitch, layout);
+    if (wmma_cfg < 0) {
+      // No config reads this byte order at this shape: the dense copy.
+      b_ptr = static_cast<const unsigned char*>(hip_matmul_nbits_u4_unlayout_scratch(
+          hip_stream, b_ptr, iN, iK, layout));
+      if (!b_ptr) return -1;
+      layout = 0;
+      wmma_cfg = getOrTuneWmmaConfig(hip_stream, iM, iN, iK, a_ptr, lda, b_ptr,
+                                     s_ptr, z_ptr, gs, ngk, out_ptr, ldc,
+                                     has_zp, b_pitch);
+    }
 
     // A padded B is only readable by the fused configs, which is all the
     // tuner and the LUT offer at a nonzero pitch.
@@ -9933,7 +10047,7 @@ extern "C" int hip_matmul_nbits_ex(
     launchWmmaConfig(wmma_cfg, hip_stream,
                      iM, iN, iK, a_ptr, lda, b_ptr,
                      s_ptr, z_ptr, gs, ngk, out_ptr, ldc, has_zp, dq_buf,
-                     b_pitch);
+                     b_pitch, layout);
 
     hipError_t err = hipGetLastError();
     if (err != hipSuccess) {
@@ -10119,7 +10233,10 @@ extern "C" int hip_matmul_nbits_ex(
     };
 
     bool use_wmma;
-    if (tier_is_tuned) {
+    // Only WMMA reads a byte order other than rows (the GEMV tier cannot).
+    if (b_layout != 0) {
+      use_wmma = true;
+    } else if (tier_is_tuned) {
       use_wmma = preferWmmaTier(
           hip_stream, static_cast<int>(M), static_cast<int>(N),
           static_cast<int>(K), static_cast<int>(block_size),
@@ -10226,5 +10343,5 @@ extern "C" int hip_matmul_nbits(
                              M, N, K, batch_count, bits, block_size,
                              element_size_bytes, zp_elem_size,
                              pre_unpacked_zp_u8, pre_unpacked_zp_fp16,
-                             /*b_row_bytes=*/0);
+                             /*b_row_bytes=*/0, /*b_layout=*/0);
 }

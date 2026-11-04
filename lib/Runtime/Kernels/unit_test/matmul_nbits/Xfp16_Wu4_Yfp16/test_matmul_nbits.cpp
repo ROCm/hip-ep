@@ -755,15 +755,36 @@ static int run(int coverage_tier) {
 
 }  // namespace sweep
 
+// Where byte b of dense row n of a weight with rb-byte rows is stored in byte
+// order `layout` (1 XOR lines, 2 16-row blocks), written out from the
+// definition in include/hip/matmul_nbits_weight_layout.h, not taken from the
+// library.
+static size_t storedAtLayout(int layout, int n, int b, int rb) {
+  if (layout == 2)
+    return static_cast<size_t>(n / 16) * 16 * rb + static_cast<size_t>(b / 32) * 512 +
+           static_cast<size_t>(n % 16) * 32 + b % 32;
+  if (layout == 1 && rb % 128 == 0) {
+    const int lines = rb / 128;
+    int p = 1;
+    while (lines % (p * 2) == 0) p *= 2;
+    const int r = 64 / std::min(p, 64);  // 64 / gcd(lines, 64)
+    const int f = (n / r) % p;
+    return static_cast<size_t>(n) * rb + static_cast<size_t>(((b / 128) ^ f) * 128 + b % 128);
+  }
+  return static_cast<size_t>(n) * rb + b;
+}
+
+
 // ============================================================
 // Forced extended entries. Every WMMA_EXT_CONFIGS entry is run by index
 // through hip_matmul_nbits_u4_wmma_run_config, which refuses a config that
 // does not serve the shape instead of substituting another, so a pass here
 // means that entry's kernel produced the result. Each runs on a tile-exact and
 // a ragged M x N, group sizes 32 and 128, with and without zero points, at the
-// arrival pitch and with 128- and 256-byte row pads, against the CPU
-// reference. The LUT may stop selecting an entry; this keeps all of them
-// checked. An entry that serves none of the cases fails.
+// arrival pitch and with 128- and 256-byte row pads, and (entries with a
+// nonzero variant, the extended core) on the XOR-line and 16-row-block byte
+// orders, against the CPU reference. The LUT may stop selecting an entry; this
+// keeps all of them checked. An entry that serves none of the cases fails.
 // ============================================================
 namespace forced {
 
@@ -848,6 +869,44 @@ static int run() {
                         zero, pad, rc, ssr > 0.0 ? std::sqrt(ssd / ssr) : std::sqrt(ssd),
                         pass ? "PASS" : "*** FAIL ***");
           }
+          for (int layout : {1, 2}) {
+            if (t.variant == 0 || (layout == 2 && N % 16 != 0)) continue;
+            std::vector<uint8_t> stored(d.Bpacked.size());
+            for (int n = 0; n < N; ++n)
+              for (int b = 0; b < row_bytes; ++b)
+                stored[storedAtLayout(layout, n, b, row_bytes)] =
+                    d.Bpacked[static_cast<size_t>(n) * row_bytes + b];
+            HIP_CHECK(hipMemcpy(dB, stored.data(), stored.size(), hipMemcpyHostToDevice));
+            HIP_CHECK(hipMemset(dC, 0xFF, static_cast<size_t>(M) * N * sizeof(__half)));
+            const int rc = hip_matmul_nbits_u4_wmma_run_config_layout(
+                stream, cfg, M, N, K, gs, dA, K, dB, dS, zero ? dZ : nullptr, dC, N,
+                0, layout);
+            if (rc == -2) continue;
+            HIP_CHECK(hipStreamSynchronize(stream));
+            int errors = 0;
+            double ssd = 0.0, ssr = 0.0;
+            std::vector<__half> out(static_cast<size_t>(M) * N);
+            if (rc == 0) {
+              HIP_CHECK(hipMemcpy(out.data(), dC, out.size() * sizeof(__half),
+                                  hipMemcpyDeviceToHost));
+              for (size_t i = 0; i < out.size(); ++i) {
+                const float g = half_to_float(out[i]);
+                const float r = half_to_float(d.Cref16[i]);
+                const float diff = std::fabs(g - r);
+                if (!(diff <= std::fabs(r) * 0.05f + 0.1f)) ++errors;
+                ssd += static_cast<double>(diff) * diff;
+                ssr += static_cast<double>(r) * r;
+              }
+            }
+            const bool pass = rc == 0 && errors == 0;
+            ++ran;
+            if (!pass) ++fail;
+            std::printf("  forced cfg[%d] %dx%d WT%dx%d BK%d var=%d  M=%d N=%d K=%d gs=%d "
+                        "zero=%d layout=%d  rc=%d  relL2=%.3e  %s\n",
+                        cfg, t.bm, t.bn, t.wt_m, t.wt_n, t.bk, t.variant, M, N, K, gs,
+                        zero, layout, rc, ssr > 0.0 ? std::sqrt(ssd / ssr) : std::sqrt(ssd),
+                        pass ? "PASS" : "*** FAIL ***");
+          }
           hipFree(dA);
           hipFree(dB);
           hipFree(dS);
@@ -880,22 +939,6 @@ static int run() {
 // (include/hip/matmul_nbits_weight_layout.h), not taken from the library.
 // ============================================================
 namespace layouts {
-
-// Where byte b of dense row n is stored in `layout` (1 XOR lines, 2 blocks).
-static size_t storedAt(int layout, int n, int b, int rb) {
-  if (layout == 2)
-    return static_cast<size_t>(n / 16) * 16 * rb + static_cast<size_t>(b / 32) * 512 +
-           static_cast<size_t>(n % 16) * 32 + b % 32;
-  if (layout == 1 && rb % 128 == 0) {
-    const int lines = rb / 128;
-    int p = 1;
-    while (lines % (p * 2) == 0) p *= 2;
-    const int r = 64 / std::min(p, 64);  // 64 / gcd(lines, 64)
-    const int f = (n / r) % p;
-    return static_cast<size_t>(n) * rb + static_cast<size_t>(((b / 128) ^ f) * 128 + b % 128);
-  }
-  return static_cast<size_t>(n) * rb + b;
-}
 
 static float dp4aRef(const CaseData& d, const std::vector<uint8_t>& zp, int m, int n,
                      int K, int gs, float bias) {
@@ -964,7 +1007,7 @@ static int run() {
           std::vector<uint8_t> stored(d.Bpacked.size());
           for (int n = 0; n < N; ++n)
             for (int b = 0; b < rb; ++b)
-              stored[storedAt(layout, n, b, rb)] = d.Bpacked[static_cast<size_t>(n) * rb + b];
+              stored[storedAtLayout(layout, n, b, rb)] = d.Bpacked[static_cast<size_t>(n) * rb + b];
           HIP_CHECK(hipMemcpy(dB, stored.data(), stored.size(), hipMemcpyHostToDevice));
           if (layout != 0) {
             HIP_CHECK(hipMemset(dDense, 0, d.Bpacked.size()));
@@ -1008,6 +1051,62 @@ static int run() {
       }
     }
   }
+  // Prefill through hip_matmul_nbits_ex: the WMMA path reads the byte order
+  // through an extended entry, or the dense copy when none serves the shape.
+  struct MKN { int M, K, N; };
+  const MKN prefill[] = {{16, 4096, 1024}, {64, 4096, 1024}, {64, 2048, 256}};
+  for (const MKN& s : prefill) {
+    for (int gs : {32, 128}) {
+      for (bool zero : {true, false}) {
+        const int M = s.M, K = s.K, N = s.N, rb = K / 2;
+        CaseData d;
+        genCase(M, K, N, gs, zero, /*fp32=*/false, 9500u + static_cast<unsigned>(ran), d);
+        void *dA, *dB, *dS, *dZ = nullptr, *dC;
+        HIP_CHECK(hipMalloc(&dA, d.A16.size() * sizeof(__half)));
+        HIP_CHECK(hipMalloc(&dB, d.Bpacked.size()));
+        HIP_CHECK(hipMalloc(&dS, d.scales.size() * sizeof(__half)));
+        HIP_CHECK(hipMalloc(&dC, static_cast<size_t>(M) * N * sizeof(__half)));
+        HIP_CHECK(hipMemcpy(dA, d.A16.data(), d.A16.size() * sizeof(__half), hipMemcpyHostToDevice));
+        HIP_CHECK(hipMemcpy(dS, d.scales.data(), d.scales.size() * sizeof(__half), hipMemcpyHostToDevice));
+        if (zero) {
+          HIP_CHECK(hipMalloc(&dZ, d.zeros.size() * sizeof(__half)));
+          HIP_CHECK(hipMemcpy(dZ, d.zeros.data(), d.zeros.size() * sizeof(__half), hipMemcpyHostToDevice));
+        }
+        for (int layout : {0, 1, 2}) {
+          std::vector<uint8_t> stored(d.Bpacked.size());
+          for (int n = 0; n < N; ++n)
+            for (int b = 0; b < rb; ++b)
+              stored[storedAtLayout(layout, n, b, rb)] = d.Bpacked[static_cast<size_t>(n) * rb + b];
+          HIP_CHECK(hipMemcpy(dB, stored.data(), stored.size(), hipMemcpyHostToDevice));
+          HIP_CHECK(hipMemset(dC, 0xFF, static_cast<size_t>(M) * N * sizeof(__half)));
+          const int rc = hip_matmul_nbits_ex(
+              stream, dA, dB, dS, dZ, nullptr, dC, M, N, K, 1, 4, gs, 2,
+              zero ? 2 : 0, nullptr, dZ, 0, layout);
+          HIP_CHECK(hipStreamSynchronize(stream));
+          std::vector<__half> out(static_cast<size_t>(M) * N);
+          HIP_CHECK(hipMemcpy(out.data(), dC, out.size() * sizeof(__half), hipMemcpyDeviceToHost));
+          int errors = 0;
+          double ssd = 0.0, ssr = 0.0;
+          for (size_t i = 0; i < out.size() && rc == 0; ++i) {
+            const float g = half_to_float(out[i]);
+            const float r = half_to_float(d.Cref16[i]);
+            const float diff = std::fabs(g - r);
+            if (!(diff <= std::fabs(r) * 0.05f + 0.1f)) ++errors;
+            ssd += static_cast<double>(diff) * diff;
+            ssr += static_cast<double>(r) * r;
+          }
+          const bool ok = rc == 0 && errors == 0;
+          ++ran;
+          if (!ok) ++fail;
+          std::printf("  prefill layout=%d M=%d N=%d K=%d gs=%d zero=%d  rc=%d  relL2=%.3e  %s\n",
+                      layout, M, N, K, gs, zero, rc,
+                      ssr > 0.0 ? std::sqrt(ssd / ssr) : std::sqrt(ssd), ok ? "PASS" : "*** FAIL ***");
+        }
+        hipFree(dA); hipFree(dB); hipFree(dS); hipFree(dC);
+        if (dZ) hipFree(dZ);
+      }
+    }
+  }
   HIP_CHECK(hipStreamDestroy(stream));
   std::printf("\nWeight byte orders: %d checks, %d failed\n", ran, fail);
   return fail == 0 ? 0 : 1;
@@ -1036,10 +1135,12 @@ int main(int argc, char* argv[]) {
   bool no_zeros = false;
   bool have_custom = false;
   bool layouts_only = false;
+  bool forced_only = false;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     if (a == "--no-zeros") no_zeros = true;
     else if (a == "--layouts-only") layouts_only = true;
+    else if (a == "--forced-only") forced_only = true;
     else if (a == "--group-size" && i + 1 < argc) gs = std::atoi(argv[++i]);
     else if (sscanf(argv[i], "%dx%dx%d", &M, &K, &N) == 3) have_custom = true;
   }
@@ -1048,6 +1149,8 @@ int main(int argc, char* argv[]) {
     return runCustom(M, N, K, gs, !no_zeros);
   if (layouts_only)
     return layouts::run();
+  if (forced_only)
+    return hipdnn_arch_has_wmma(prop.gcnArchName) ? forced::run() : 0;
 
   const int tier = hipdnn_ep_test::resolveCoverageTier(argc, argv);
   const int sweep_rc = sweep::run(tier);

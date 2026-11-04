@@ -623,7 +623,7 @@ int wrap_matmul_nbits_ex(RuntimeState *state, int op_state_slot, const void *A,
   // b_row_bytes == K/2 is a weight the compiler kept dense on purpose (its
   // table measured it no slower dense): no per-call repack below, and the
   // kernels get the dense layout (0).
-  bool laid_out_by_compiler = b_row_bytes != 0;
+  const bool laid_out_by_compiler = b_row_bytes != 0;
   if (b_row_bytes == K / 2)
     b_row_bytes = 0;
 
@@ -773,10 +773,11 @@ int wrap_matmul_nbits_ex(RuntimeState *state, int op_state_slot, const void *A,
     }
   }
 
-  // Every path below reads rows. A weight in another byte order runs on a
-  // dense copy in a shared scratch, and from there takes the paths a dense
-  // weight takes, including the per-call repack of an aliasing stride.
-  if (b_layout != 0) {
+  // The wave64 path below dequantizes rows. A weight in another byte order
+  // runs it on a dense copy in a shared scratch; on every other device
+  // hip_matmul_nbits_ex takes the byte order (its WMMA prefill reads it, its
+  // other paths make the same dense copy).
+  if (b_layout != 0 && hipdnn_device_is_wave64()) {
     B = hip_matmul_nbits_u4_unlayout_scratch(stream, B, static_cast<int>(N),
                                              static_cast<int>(K),
                                              static_cast<int>(b_layout));
@@ -786,7 +787,6 @@ int wrap_matmul_nbits_ex(RuntimeState *state, int op_state_slot, const void *A,
     }
     b_layout = 0;
     b_row_bytes = 0;
-    laid_out_by_compiler = false;
   }
 
   // CDNA/wave64 prefill fast path: dequantize B -> fp16 once and run a
@@ -879,7 +879,7 @@ int wrap_matmul_nbits_ex(RuntimeState *state, int op_state_slot, const void *A,
   HIP_CHECK(hip_matmul_nbits_ex(stream, A, B, scales, zero_points, bias, output,
                                 M, N, K, batch_count, bits, block_size,
                                 elem_size, zp_elem_size, pre_zp_u8, pre_zp_fp16,
-                                b_row_bytes));
+                                b_row_bytes, b_layout));
 
 cleanup:
   return result;
