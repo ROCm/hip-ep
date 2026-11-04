@@ -31,8 +31,8 @@ namespace {
 //   * keep_aspect_ratio_policy = "stretch"           (default)
 //   * roi must be absent: none, or a 0-element tensor (no tf_crop_and_resize)
 //   * rank in [3, 5], input and output ranks equal
-//   * matching float types, or matching int8/uint8 when mode is nearest.
-//     Nearest copies samples. Linear on integer codes is rejected.
+//   * matching float types, or matching int8/uint8. Nearest copies samples.
+//     Linear interpolates the stored integer codes and truncates toward zero.
 //
 // The runtime kernel is unchanged: a copied prefix of at most two axes and a
 // trailing window of at most three.  Channels-first `1x3x16x16 -> 1x3x32x32`
@@ -349,9 +349,6 @@ struct ResizeToHip : public mlir::RewritePattern {
     else
       return rewriter.notifyMatchFailure(op, "Resize mode must be "
                                              "'nearest' or 'linear'");
-    if (int8Elem && modeId != 0)
-      return rewriter.notifyMatchFailure(
-          op, "Resize int8/uint8 supports nearest only");
 
     std::string ct = getStrAttr("coordinate_transformation_mode", "half_pixel");
     int64_t coordId;
