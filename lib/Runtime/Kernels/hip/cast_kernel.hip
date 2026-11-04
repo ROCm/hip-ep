@@ -4,13 +4,64 @@
  */
 
 #include "hip_custom_kernels.h"
-#include "hip_dtype_utils.h"
 #include "debug_log.h"
 
 #include <hip/hip_runtime.h>
+#include <hip/hip_bf16.h>
 #include <hip/hip_fp16.h>
 #include <cstdint>
 #include <cstdio>
+
+namespace {
+
+// Element <-> float for the bf16 cast paths. Integers and f64 use
+// static_cast; f16/bf16 use the HIP intrinsics, which round to nearest even
+// (same as PyTorch and ONNX).
+template <typename T>
+struct CastIO {
+  __device__ static inline float load(T x) { return static_cast<float>(x); }
+  __device__ static inline T store(float x) { return static_cast<T>(x); }
+};
+
+template <>
+struct CastIO<__half> {
+  __device__ static inline float load(__half x) { return __half2float(x); }
+  __device__ static inline __half store(float x) { return __float2half(x); }
+};
+
+template <>
+struct CastIO<__hip_bfloat16> {
+  __device__ static inline float load(__hip_bfloat16 x) {
+    return __bfloat162float(x);
+  }
+  __device__ static inline __hip_bfloat16 store(float x) {
+    return __float2bfloat16(x);
+  }
+};
+
+template <typename T>
+struct TypeTag {
+  using type = T;
+};
+
+// Runtime dtype -> f(TypeTag<T>{}). Returns -1 for an unsupported dtype.
+template <typename F>
+int dispatch_dtype(int dtype, F&& f) {
+  switch (dtype) {
+  case HIP_DTYPE_FLOAT32:  return f(TypeTag<float>{});
+  case HIP_DTYPE_FLOAT16:  return f(TypeTag<__half>{});
+  case HIP_DTYPE_BFLOAT16: return f(TypeTag<__hip_bfloat16>{});
+  case HIP_DTYPE_FLOAT64:  return f(TypeTag<double>{});
+  case HIP_DTYPE_INT64:    return f(TypeTag<int64_t>{});
+  case HIP_DTYPE_INT32:    return f(TypeTag<int32_t>{});
+  case HIP_DTYPE_INT16:    return f(TypeTag<int16_t>{});
+  case HIP_DTYPE_INT8:     return f(TypeTag<int8_t>{});
+  case HIP_DTYPE_UINT8:    return f(TypeTag<uint8_t>{});
+  default:                 return -1;
+  }
+}
+
+} // namespace
 
 __global__ void cast_i64_to_i32_kernel(
     const int64_t* __restrict__ input,
@@ -157,8 +208,7 @@ __global__ void cast_via_float_kernel(
     int64_t num_elements) {
   int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (idx < num_elements) {
-    output[idx] = hip_dtype::CastIO<Dst>::store(
-        hip_dtype::CastIO<Src>::load(input[idx]));
+    output[idx] = CastIO<Dst>::store(CastIO<Src>::load(input[idx]));
   }
 }
 
@@ -228,14 +278,14 @@ static int launch_cast_bf16(hipStream_t stream, const void* input,
                             int input_dtype, int output_dtype,
                             int grid_size, int block_size) {
   if (input_dtype == HIP_DTYPE_BFLOAT16) {
-    return hip_dtype::dispatch_dtype(output_dtype, [&](auto dst) {
+    return dispatch_dtype(output_dtype, [&](auto dst) {
       using Dst = typename decltype(dst)::type;
       return launch_cast_via_float<__hip_bfloat16, Dst>(
           stream, input, output, num_elements, grid_size, block_size);
     });
   }
   if (output_dtype == HIP_DTYPE_BFLOAT16) {
-    return hip_dtype::dispatch_dtype(input_dtype, [&](auto src) {
+    return dispatch_dtype(input_dtype, [&](auto src) {
       using Src = typename decltype(src)::type;
       return launch_cast_via_float<Src, __hip_bfloat16>(
           stream, input, output, num_elements, grid_size, block_size);
