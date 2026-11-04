@@ -277,7 +277,7 @@ Four execution paths, auto-dispatched by shape:
 
 **WMMA path** (prefill, M≥16): Transposes A/C to column-major internally, converts uint8 zero-points to FP16, then uses `__builtin_amdgcn_wmma_f16_16x16x16_f16` intrinsics with double-buffered shared memory for A tiles and grid swizzling (Morton-order blocks) for L2 cache locality.
 
-**Extended WMMA entries.** `WMMA_EXT_CONFIGS` lists fused int4 entries that run `GemmFp16U4ImplX` (`matmul_nbits_wmma_core_x.h`) instead of the shipped `GemmFp16U4Impl`. The extended core is a separate copy so that no existing `kWmmaConfigs` entry changes. It is specialized to the fused-dequant, FP16-zero-point, no-bias contract its kernels use. Extended entries are chosen only through a LUT that names them (or by the sweep on such a device), never by the online autotuner. `WmmaConfig::variant` selects pipeline options per entry:
+**Extended WMMA entries.** `WMMA_EXT_CONFIGS` lists fused int4 entries that run `GemmFp16U4ImplX` (`matmul_nbits_wmma_core_x.h`) instead of the shipped `GemmFp16U4Impl`. The extended core is a separate copy so that no existing `kWmmaConfigs` entry changes. It is specialized to the fused-dequant, FP16-zero-point, no-bias contract its kernels use. Extended entries are chosen only through a LUT that names them (or by the sweep on such a device), never by the online autotuner. They were measured and verified on gfx1151 only, so they run only on a gfx1151 device: `wmmaConfigApplies` refuses them on any other device, which covers LUT answers, sweep candidates, `HIPDNN_MATMUL_NBITS_WMMA_CFG` and an explicit config index. The kernels are still compiled into every WMMA code object (`gfx11-generic` serves gfx1151 too), but nothing launches them elsewhere. `WmmaConfig::variant` selects pipeline options per entry:
 
 | Bit | Option |
 |---|---|
@@ -298,7 +298,7 @@ What the measurements behind these options showed (gfx1151, int4 prefill shapes 
 - `sched_group_barrier` patterns constrain the compiler's schedule, so whether one helps depends on the compiler version. That is one reason LUT rows must be measured on the product kernel binary (see the autotune README).
 - The two-deep prefetch also depends on how the compiler widens each tile's 16-bit scale for the packed dequant. Widened in place, in the register its load is still filling, the scale waits for every load in flight and the prefetch drains at every K-step; TheRock 7.13 did that on Linux. HIP 7.16, the SDK of both platforms, widens into another register. After a compiler bump, check the PGR 2 K-loops for `s_waitcnt vmcnt(0)` before the step's WMMAs.
 
-Every extended entry is forced by index in the `Xfp16_Wu4_Yfp16` kernel unit test through `hip_matmul_nbits_u4_wmma_run_config`, which runs exactly the requested config or fails. On a device without WMMA (CDNA, gfx10), where the WMMA kernels compile to a trap, it launches nothing and the test skips that phase. `update_lut.py` rejects a table naming an entry that `WMMA_EXT_CONFIGS` does not compile.
+Every extended entry is forced by index in the `Xfp16_Wu4_Yfp16` kernel unit test through `hip_matmul_nbits_u4_wmma_run_config`, which runs exactly the requested config or fails. On any device other than gfx1151 (`hip_matmul_nbits_u4_wmma_ext_device` returns 0), it launches nothing and the test skips that phase. `update_lut.py` rejects a table naming an entry that `WMMA_EXT_CONFIGS` does not compile.
 
 ## Key Design Decisions
 

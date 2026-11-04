@@ -2765,8 +2765,10 @@ HIP_KERNEL_API int hip_matmul_nbits_u4_wmma_stride(
  * returns 0, else -1. hip_matmul_nbits_u4_wmma_run_config is
  * hip_matmul_nbits_u4_wmma_stride with config `cfg` and no other: it returns
  * -2 and launches nothing when `cfg` is not a fused config that serves this
- * N, K and group_size, or the device has no WMMA (CDNA, gfx10), instead of
- * substituting the tuned one. */
+ * N, K and group_size, or the device is not gfx1151, instead of substituting
+ * the tuned one. hip_matmul_nbits_u4_wmma_ext_device returns 1 when the
+ * current device runs the extended entries (gfx1151 only, where they were
+ * measured), else 0; elsewhere no path selects or launches one. */
 typedef struct HipMatmulNBitsWmmaConfigDesc {
     int bm, bn, wt_m, wt_n, bk, swizzle_n;
     int fused;   /* 1: dequant fused into the WMMA kernel */
@@ -2777,9 +2779,11 @@ typedef struct HipMatmulNBitsWmmaConfigDesc {
 HIP_KERNEL_API int hip_matmul_nbits_u4_wmma_config_count(void);
 HIP_KERNEL_API int hip_matmul_nbits_u4_wmma_config_desc(
     int cfg, HipMatmulNBitsWmmaConfigDesc* out);
+HIP_KERNEL_API int hip_matmul_nbits_u4_wmma_ext_device(void);
 /* Offline LUT sweeps only: a nonzero `enable` makes the WMMA tuner time the
  * extended entries even though the linked table names none, which is how their
- * rows are measured. Production dispatch never calls it. */
+ * rows are measured. It has no effect on a device other than gfx1151.
+ * Production dispatch never calls it. */
 HIP_KERNEL_API void hip_matmul_nbits_u4_wmma_sweep_extended(int enable);
 HIP_KERNEL_API int hip_matmul_nbits_u4_wmma_run_config(
     void* stream, int cfg, int M, int N, int K, int group_size,

@@ -5103,6 +5103,29 @@ struct WmmaConfig {
 
 static constexpr bool wmmaConfigIsExt(const WmmaConfig& c) { return c.ext; }
 
+// The extended entries were measured and verified on gfx1151 only, so only a
+// gfx1151 device runs them; every other device keeps the original entries.
+// gcnArchName may carry feature suffixes ("gfx1151:xnack-"). Cached per device
+// ordinal like hipdnn_device_wave_size().
+static bool wmmaExtDevice() {
+    constexpr int kMaxCachedDevices = 16;
+    // 0 == not probed yet, 1 == no, 2 == yes.
+    static int cached[kMaxCachedDevices] = {};
+
+    auto probe = [](int d) {
+        hipDeviceProp_t p;
+        if (hipGetDeviceProperties(&p, d) != hipSuccess) return false;
+        return std::strncmp(p.gcnArchName, "gfx1151", 7) == 0 &&
+               (p.gcnArchName[7] == '\0' || p.gcnArchName[7] == ':');
+    };
+
+    int dev = 0;
+    if (hipGetDevice(&dev) != hipSuccess || dev < 0) return false;
+    if (dev >= kMaxCachedDevices) return probe(dev);
+    if (cached[dev] == 0) cached[dev] = probe(dev) ? 2 : 1;
+    return cached[dev] == 2;
+}
+
 // Extended fused int4 entries: (bm, bn, wt_m, wt_n, bk, variant, swizzle).
 // Measured prefill winners, reachable only through a LUT that names them; see
 // "Extended WMMA entries" in docs/design/custom_kernel_design.md. (geometry,
@@ -5227,6 +5250,9 @@ static constexpr int wmmaBNibblesPerThread(const WmmaConfig& c) {
     return c.bn * wmmaBk(c) / wmmaThreads(c);
 }
 static bool wmmaConfigApplies(const WmmaConfig& c, int N, int gs) {
+    // Every path to a launch passes here: LUT answers, sweep candidates,
+    // HIPDNN_MATMUL_NBITS_WMMA_CFG and an explicit config index.
+    if (wmmaConfigIsExt(c) && !wmmaExtDevice()) return false;
     // The narrow-tile policy predates the extended entries; those were measured
     // at wide N and only reach a shape through the LUT or the sweep timing.
     if (!wmmaConfigIsExt(c) && c.bn < 64 && N > 2 * c.bn) return false;
@@ -6302,6 +6328,10 @@ extern "C" int hip_matmul_nbits_u4_wmma_config_desc(
     return 0;
 }
 
+extern "C" int hip_matmul_nbits_u4_wmma_ext_device() {
+    return wmmaExtDevice() ? 1 : 0;
+}
+
 extern "C" void hip_matmul_nbits_u4_wmma_sweep_extended(int enable) {
     g_wmma_sweep_extended.store(enable != 0, std::memory_order_relaxed);
 }
@@ -6312,9 +6342,10 @@ extern "C" int hip_matmul_nbits_u4_wmma_run_config(
     const void* zeros, void* C, int ldc, int b_row_bytes)
 {
     if (cfg < 0 || cfg >= kNumWmmaConfigs || group_size <= 0) return -2;
-    // WMMA kernels compile to a trap on an arch without WMMA: CDNA (wave64)
-    // and gfx10 (wave32), so the wave size is not the test.
-    if (!hipdnn_device_has_wmma()) return -2;
+    // Forced launches serve the extended-entry test and offline measurement,
+    // both gfx1151 only. Elsewhere, including devices whose WMMA kernels
+    // compile to a trap (CDNA, gfx10), it launches nothing.
+    if (!wmmaExtDevice()) return -2;
     const WmmaConfig& c = kWmmaConfigs[cfg];
     if (!c.fused || !wmmaConfigSupported(c, N, K, group_size)) return -2;
     (void)hipGetLastError();
