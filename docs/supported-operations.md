@@ -109,7 +109,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | GroupQueryAttention (`com.microsoft`) | Custom HIP kernels and hipBLASLt |
 | SparseAttentionIndexer (`com.microsoft`) | Custom HIP kernels, wave32 (RDNA) only. `qsa` policy with packed QK, head size 128, up to 8 heads, `token_budget / compress_ratio` ≤ 512, f16/f32. With `past_sequence_length`, `past_key` / `present_key` are max-capacity caches that may share one buffer |
 | DynamicSparseAttention (`com.microsoft`) | Custom HIP kernel (WMMA), wave32 (RDNA) only. `selected_only` over the main KV cache, head size 128 or 256, up to 16 query heads per KV head, f16; no rotary, q/k norm or `head_sink` |
-| MultiHeadAttention (`com.microsoft`) | Lowered to GroupQueryAttention or decomposed hipBLASLt/custom-kernel paths |
+| MultiHeadAttention (`com.microsoft`) | Lowered to GroupQueryAttention or decomposed hipBLASLt/custom-kernel paths. Non-causal fp16 prefill with head size up to 256 runs as one flash-attention kernel (WMMA, wave32). Unmasked fp16 attention exported as primitives (head-split Reshape/Transpose, MatMul, scalar scale, Softmax, MatMul, head merge) is fused into this op |
 | Attention (`com.microsoft`) | Fused QKV split into GroupQueryAttention. Equal Q/K/V sizes may be inferred from a `[H, 3H]` weight. Bidirectional and causal, with static or dynamic batch and sequence. A rank-1 length or rank-2 padding mask becomes an additive attention bias. |
 | Attention (`ai.onnx`, opset 23/24) | Lowered to GroupQueryAttention for supported rank-3/rank-4, causal/masked, output, and KV-cache forms |
 | MatMulNBits (`com.microsoft`) | Custom HIP kernel |
