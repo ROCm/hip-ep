@@ -138,8 +138,10 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/MathExtras.h"
 
 #include <algorithm>
+#include <limits>
 #include <optional>
 
 // DEBUG_TYPE comes from OnnxToHipUtils.h ("convert-onnx-to-hip"), shared with
@@ -382,6 +384,52 @@ static bool hasSharedPositionSource(mlir::Value p, mlir::Value q,
     if (qSources.contains(src))
       return true;
   return false;
+}
+
+namespace {
+struct PositionOrigin {
+  mlir::Operation *source;
+  int64_t offset;
+};
+} // namespace
+
+/// The position source an index tensor reads and the constant it adds to
+/// every entry. Only ops that keep each selected entry's value (layout ops,
+/// Cast, Slice) and Add/Sub of an inline integer are walked; anything else has
+/// no known offset.
+///
+/// A shared source alone lets `P >= Q + 1` (strictly causal) or `P + 3 >= Q`
+/// pass as the plain causal compare the runtime applies, so dropping such a
+/// conjunct would change which keys a query sees.
+static std::optional<PositionOrigin> positionOrigin(mlir::Value v, int depth) {
+  mlir::Operation *def = v ? v.getDefiningOp() : nullptr;
+  if (!def || depth > kPositionProvenanceDepth)
+    return std::nullopt;
+  llvm::StringRef name = def->getName().getStringRef();
+  if (name == "onnx.CumSum" || name == "onnx.Range")
+    return PositionOrigin{def, 0};
+  if (name == "onnx.Unsqueeze" || name == "onnx.Squeeze" ||
+      name == "onnx.Reshape" || name == "onnx.Cast" ||
+      name == "onnx.Identity" || name == "onnx.Slice" || name == "onnx.Expand")
+    return positionOrigin(def->getOperand(0), depth + 1);
+  if ((name != "onnx.Add" && name != "onnx.Sub") || def->getNumOperands() != 2)
+    return std::nullopt;
+  // Sub only with the constant on the right; `c - x` reverses the order.
+  for (unsigned i : {1u, 0u}) {
+    if (name == "onnx.Sub" && i == 0)
+      break;
+    std::optional<int64_t> c = getInlineScalarInt(def->getOperand(i));
+    if (!c)
+      continue;
+    std::optional<PositionOrigin> origin =
+        positionOrigin(def->getOperand(1 - i), depth + 1);
+    if (!origin || *c == std::numeric_limits<int64_t>::min() ||
+        llvm::AddOverflow(origin->offset, name == "onnx.Sub" ? -*c : *c,
+                          origin->offset))
+      return std::nullopt;
+    return origin;
+  }
+  return std::nullopt;
 }
 
 /// Is an `onnx.CumSum` an ancestor of `v` within `kSegmentProvenanceDepth`?
@@ -890,6 +938,12 @@ struct AttentionFoldKeyPaddingMask : public mlir::RewritePattern {
         if (!hasSharedPositionSource(p, q, visited) ||
             (pAxis && qAxis && *pAxis < *qAxis))
           return rewriter.notifyMatchFailure(op, "keybias.causal_unproven");
+        // The runtime's causal mask compares the positions themselves.
+        auto pOrigin = positionOrigin(p, /*depth=*/0);
+        auto qOrigin = positionOrigin(q, /*depth=*/0);
+        if (!pOrigin || !qOrigin || pOrigin->source != qOrigin->source ||
+            pOrigin->offset != qOrigin->offset)
+          return rewriter.notifyMatchFailure(op, "keybias.causal_offset");
         causal.emplace_back(p, q);
       } else if (isPerKeyLeg(c, keepTy.getRank()) && !keyLeg) {
         keyLeg = c;
