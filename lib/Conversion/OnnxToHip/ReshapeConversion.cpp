@@ -61,17 +61,22 @@ std::optional<OpFoldResult> findHostShapeEntry(Value shape, int64_t index) {
     }
     if (auto gather = shape.getDefiningOp<hip::GatherOp>()) {
       auto dataType = dyn_cast<RankedTensorType>(gather.getData().getType());
+      int64_t axis = gather.getAxis();
+      if (dataType && axis < 0)
+        axis += dataType.getRank();
       DenseElementsAttr indices = getConstantDense(gather.getIndices());
       if (auto constant = gather.getIndices().getDefiningOp<hip::ConstantOp>())
         indices = dyn_cast_or_null<DenseElementsAttr>(constant.getValueAttr());
       if (!dataType || dataType.getRank() != 1 || !dataType.hasStaticShape() ||
-          gather.getAxis() != 0 || !indices ||
+          axis != 0 || !indices ||
           !isa<IntegerType>(indices.getElementType()) ||
           index >= indices.getNumElements())
         return std::nullopt;
       int64_t source = indices.getValues<APInt>()[index].getSExtValue();
       if (source < 0)
         source += dataType.getDimSize(0);
+      if (source < 0 || source >= dataType.getDimSize(0))
+        return std::nullopt;
       index = source;
       shape = gather.getData();
       continue;

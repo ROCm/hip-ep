@@ -427,45 +427,41 @@ module {
     return %y : tensor<1x1x8xf32>
   }
 
-  // Test 21: sizes assembled from a constant-index gather of the input
-  // shape and a constant tail. Every entry is known without a readback.
-  func.func @test_resize_gathered_sizes(%x: tensor<1x?x?x3xf32>,
-                                        %t: tensor<1x3x?x?xf32>)
+  // Test 21: sizes [1, 3, H, W] assembled from a reordered gather of the
+  // input shape. A negative gather axis and index are valid for this
+  // rank-1 shape vector. The gathered dynamic H/W scalars stay on the host.
+  func.func @test_resize_gathered_sizes(%x: tensor<1x?x?x?xf32>)
       -> tensor<?x?x?x?xf32> {
     // CHECK-LABEL: func.func @test_resize_gathered_sizes
     %c1 = arith.constant 1 : index
     %c2 = arith.constant 2 : index
     %c1_i64 = arith.constant 1 : i64
     %c3_i64 = arith.constant 3 : i64
-    %perm = "onnx.Constant"() {value = dense<[0, 3, 1, 2]> : tensor<4xi64>}
+    %perm = "onnx.Constant"() {value = dense<[0, -1, 1, 2]> : tensor<4xi64>}
         : () -> tensor<4xi64>
-    %hw = "onnx.Constant"() {value = dense<300> : tensor<2xi64>}
-        : () -> tensor<2xi64>
     %roi = "onnx.Constant"() {value = dense<> : tensor<0xf32>} : () -> tensor<0xf32>
     %scales = "onnx.Constant"() {value = dense<> : tensor<0xf32>} : () -> tensor<0xf32>
-    %d1 = tensor.dim %x, %c1 : tensor<1x?x?x3xf32>
+    %d1 = tensor.dim %x, %c1 : tensor<1x?x?x?xf32>
     %h = arith.index_cast %d1 : index to i64
-    %d2 = tensor.dim %x, %c2 : tensor<1x?x?x3xf32>
+    %d2 = tensor.dim %x, %c2 : tensor<1x?x?x?xf32>
     %w = arith.index_cast %d2 : index to i64
     %shape = tensor.from_elements %c1_i64, %h, %w, %c3_i64 : tensor<4xi64>
-    %g = "onnx.Gather"(%shape, %perm) {axis = 0 : si64}
+    %sizes = "onnx.Gather"(%shape, %perm) {axis = -1 : si64}
         : (tensor<4xi64>, tensor<4xi64>) -> tensor<4xi64>
-    %nc = tensor.extract_slice %g[0] [2] [1] : tensor<4xi64> to tensor<2xi64>
-    %e = tensor.empty() : tensor<4xi64>
-    %s0 = tensor.insert_slice %nc into %e[0] [2] [1]
-        : tensor<2xi64> into tensor<4xi64>
-    %sizes = tensor.insert_slice %hw into %s0[2] [2] [1]
-        : tensor<2xi64> into tensor<4xi64>
-    %y = "onnx.Resize"(%t, %roi, %scales, %sizes)
+    %y = "onnx.Resize"(%x, %roi, %scales, %sizes)
         {mode = "linear", coordinate_transformation_mode = "asymmetric",
          nearest_mode = "floor"}
-        : (tensor<1x3x?x?xf32>, tensor<0xf32>, tensor<0xf32>, tensor<4xi64>)
+        : (tensor<1x?x?x?xf32>, tensor<0xf32>, tensor<0xf32>, tensor<4xi64>)
         -> tensor<?x?x?x?xf32>
     // CHECK-NOT: onnx.Resize
     // CHECK-NOT: hip.readback_scalar
-    // CHECK: tensor.empty() : tensor<1x3x300x300xf32>
+    // CHECK: %[[H64:.*]] = arith.index_cast %{{.*}} : index to i64
+    // CHECK: %[[W64:.*]] = arith.index_cast %{{.*}} : index to i64
+    // CHECK: %[[H:.*]] = arith.index_cast %[[H64]] : i64 to index
+    // CHECK: %[[W:.*]] = arith.index_cast %[[W64]] : i64 to index
+    // CHECK: tensor.empty(%[[H]], %[[W]]) : tensor<1x3x?x?xf32>
     // CHECK: hip.resize
-    // CHECK: tensor.cast %{{.*}} : tensor<1x3x300x300xf32> to tensor<?x?x?x?xf32>
+    // CHECK: tensor.cast %{{.*}} : tensor<1x3x?x?xf32> to tensor<?x?x?x?xf32>
     return %y : tensor<?x?x?x?xf32>
   }
 
@@ -493,6 +489,62 @@ module {
     // CHECK: tensor.empty() : tensor<1x3x300x300xf32>
     // CHECK: hip.resize
     // CHECK: tensor.cast %{{.*}} : tensor<1x3x300x300xf32> to tensor<?x?x?x?xf32>
+    return %y : tensor<?x?x?x?xf32>
+  }
+
+  // Test 23: repeated Gather indices reuse the same host dimension.
+  func.func @test_resize_gathered_repeated_index(%x: tensor<1x?x?x?xf32>)
+      -> tensor<?x?x?x?xf32> {
+    // CHECK-LABEL: func.func @test_resize_gathered_repeated_index
+    %c1 = arith.constant 1 : index
+    %c1_i64 = arith.constant 1 : i64
+    %c3_i64 = arith.constant 3 : i64
+    %perm = "onnx.Constant"() {value = dense<[0, -1, 1, 1]> : tensor<4xi64>}
+        : () -> tensor<4xi64>
+    %roi = "onnx.Constant"() {value = dense<> : tensor<0xf32>} : () -> tensor<0xf32>
+    %scales = "onnx.Constant"() {value = dense<> : tensor<0xf32>} : () -> tensor<0xf32>
+    %d1 = tensor.dim %x, %c1 : tensor<1x?x?x?xf32>
+    %h = arith.index_cast %d1 : index to i64
+    %shape = tensor.from_elements %c1_i64, %h, %h, %c3_i64 : tensor<4xi64>
+    %sizes = "onnx.Gather"(%shape, %perm) {axis = 0 : si64}
+        : (tensor<4xi64>, tensor<4xi64>) -> tensor<4xi64>
+    %y = "onnx.Resize"(%x, %roi, %scales, %sizes)
+        {mode = "linear", coordinate_transformation_mode = "asymmetric",
+         nearest_mode = "floor"}
+        : (tensor<1x?x?x?xf32>, tensor<0xf32>, tensor<0xf32>, tensor<4xi64>)
+        -> tensor<?x?x?x?xf32>
+    // CHECK-NOT: hip.readback_scalar
+    // CHECK: %[[H:.*]] = arith.index_cast %{{.*}} : i64 to index
+    // CHECK: tensor.empty(%[[H]], %[[H]]) : tensor<1x3x?x?xf32>
+    return %y : tensor<?x?x?x?xf32>
+  }
+
+  // Test 24: an out-of-range Gather index is not followed through the host
+  // shape walk. Resize falls back to a scalar readback for that entry.
+  func.func @test_resize_gathered_out_of_range_index(%x: tensor<1x?x?x?xf32>)
+      -> tensor<?x?x?x?xf32> {
+    // CHECK-LABEL: func.func @test_resize_gathered_out_of_range_index
+    %c1 = arith.constant 1 : index
+    %c2 = arith.constant 2 : index
+    %c1_i64 = arith.constant 1 : i64
+    %c3_i64 = arith.constant 3 : i64
+    %perm = "onnx.Constant"() {value = dense<[0, -1, 1, 4]> : tensor<4xi64>}
+        : () -> tensor<4xi64>
+    %roi = "onnx.Constant"() {value = dense<> : tensor<0xf32>} : () -> tensor<0xf32>
+    %scales = "onnx.Constant"() {value = dense<> : tensor<0xf32>} : () -> tensor<0xf32>
+    %d1 = tensor.dim %x, %c1 : tensor<1x?x?x?xf32>
+    %h = arith.index_cast %d1 : index to i64
+    %d2 = tensor.dim %x, %c2 : tensor<1x?x?x?xf32>
+    %w = arith.index_cast %d2 : index to i64
+    %shape = tensor.from_elements %c1_i64, %h, %w, %c3_i64 : tensor<4xi64>
+    %sizes = "onnx.Gather"(%shape, %perm) {axis = 0 : si64}
+        : (tensor<4xi64>, tensor<4xi64>) -> tensor<4xi64>
+    %y = "onnx.Resize"(%x, %roi, %scales, %sizes)
+        {mode = "linear", coordinate_transformation_mode = "asymmetric",
+         nearest_mode = "floor"}
+        : (tensor<1x?x?x?xf32>, tensor<0xf32>, tensor<0xf32>, tensor<4xi64>)
+        -> tensor<?x?x?x?xf32>
+    // CHECK: hip.readback_scalar
     return %y : tensor<?x?x?x?xf32>
   }
 }
