@@ -179,3 +179,68 @@ func.func @pool_view_returned_no_free(
   hip.miopen.softmax(%ctx) ins(%view0 : memref<8x8xf32>) outs(%view1 : memref<8x8xf32>)
   return %view1 : memref<8x8xf32>
 }
+
+// Allocs inside an scf.while (onnx.Loop scan lowering). Each is freed in its
+// own block: an iteration-local buffer after its last use, a carried value
+// after its last use in the block that receives it, and a buffer only one
+// scf.if branch yields when the scf.if did not return it. Buffers passed on
+// by scf.condition / scf.yield are freed by the next holder.
+// CHECK-LABEL: func.func @while_carried
+// CHECK-SAME:    (%[[CTX8:[^:]*]]: !hip.context, %[[INIT:[^:]*]]: memref<?xf32>, %[[SRC:[^:]*]]: memref<4xf32>
+// CHECK:         %[[LOOP:.*]] = scf.while (%[[A:.*]] = %[[INIT]])
+// CHECK:           %[[COPY:.*]] = hip.alloc(%[[CTX8]], %{{.*}}) : memref<?xf32>
+// CHECK:           memref.copy %[[A]], %[[COPY]]
+// CHECK-NEXT:      hip.free(%[[CTX8]], %[[A]]) : memref<?xf32>
+// CHECK:           scf.condition(%{{.*}}) %[[COPY]] : memref<?xf32>
+// CHECK:         ^bb0(%[[B:.*]]: memref<?xf32>):
+// CHECK:           %[[TMP:.*]] = hip.alloc(%[[CTX8]]) : memref<4xf32>
+// CHECK:           %[[FRESH:.*]] = hip.alloc(%[[CTX8]]) : memref<4xf32>
+// CHECK:           memref.copy %[[TMP]], %[[FRESH]]
+// CHECK-NEXT:      hip.free(%[[CTX8]], %[[TMP]]) : memref<4xf32>
+// CHECK:           %[[NEXT:.*]] = scf.if
+// CHECK:             %[[GROW:.*]] = hip.alloc
+// CHECK-NOT:         hip.free
+// CHECK:             scf.yield %[[GROW]]
+// CHECK:           hip.free(%[[CTX8]], %[[B]]) : memref<?xf32>
+// CHECK:           %[[P0:.*]] = memref.extract_aligned_pointer_as_index %[[FRESH]]
+// CHECK:           %[[P1:.*]] = memref.extract_aligned_pointer_as_index %[[NEXT]]
+// CHECK:           arith.cmpi eq, %[[P0]], %[[P1]]
+// CHECK:           scf.if
+// CHECK-NEXT:        hip.free(%[[CTX8]], %[[FRESH]]) : memref<4xf32>
+// CHECK:           scf.yield %[[NEXT]]
+// CHECK:         memref.copy
+// CHECK-NEXT:    hip.free(%[[CTX8]], %[[LOOP]]) : memref<?xf32>
+// CHECK-NEXT:    return
+func.func @while_carried(%ctx: !hip.context, %init: memref<?xf32>,
+                         %src: memref<4xf32>, %n: index, %flag: i1) {
+  %c0 = arith.constant 0 : index
+  %c4 = arith.constant 4 : index
+  %r = scf.while (%a = %init) : (memref<?xf32>) -> memref<?xf32> {
+    %d = memref.dim %a, %c0 : memref<?xf32>
+    %copy = memref.alloc(%d) : memref<?xf32>
+    memref.copy %a, %copy : memref<?xf32> to memref<?xf32>
+    %go = arith.cmpi slt, %d, %n : index
+    scf.condition(%go) %copy : memref<?xf32>
+  } do {
+  ^bb0(%b: memref<?xf32>):
+    %tmp = memref.alloc() : memref<4xf32>
+    memref.copy %src, %tmp : memref<4xf32> to memref<4xf32>
+    %fresh = memref.alloc() : memref<4xf32>
+    %cast = memref.cast %fresh : memref<4xf32> to memref<?xf32>
+    memref.copy %tmp, %fresh : memref<4xf32> to memref<4xf32>
+    %next = scf.if %flag -> (memref<?xf32>) {
+      %d2 = memref.dim %b, %c0 : memref<?xf32>
+      %size = arith.addi %d2, %c4 : index
+      %grow = memref.alloc(%size) : memref<?xf32>
+      %head = memref.subview %grow[0] [%d2] [1] : memref<?xf32> to memref<?xf32, strided<[1]>>
+      memref.copy %b, %head : memref<?xf32> to memref<?xf32, strided<[1]>>
+      scf.yield %grow : memref<?xf32>
+    } else {
+      scf.yield %cast : memref<?xf32>
+    }
+    scf.yield %next : memref<?xf32>
+  }
+  %head = memref.subview %r[0] [4] [1] : memref<?xf32> to memref<4xf32, strided<[1]>>
+  memref.copy %head, %src : memref<4xf32, strided<[1]>> to memref<4xf32>
+  return
+}
