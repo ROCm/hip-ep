@@ -329,6 +329,21 @@ func.func @slice_constant_bounds(%x: tensor<1x?x12x64xf16>) -> tensor<1x?x12x?xf
   return %y : tensor<1x?x12x?xf16>
 }
 
+// MaskRCNN box decode: ends = INT64_MAX ("to the end") with step 2 keeps
+// columns 1 and 3 of a ?x4 box tensor, not zero columns.
+// CHECK-LABEL: func.func @slice_int64_max_end
+// CHECK:         "onnx.Slice"{{.*}} -> tensor<?x2xf32>
+func.func @slice_int64_max_end(%x: tensor<?x4xf32>) -> tensor<*xf32> {
+  %starts = "onnx.Constant"() {value = dense<1> : tensor<1xi64>} : () -> tensor<1xi64>
+  %ends = "onnx.Constant"() {value = dense<9223372036854775807> : tensor<1xi64>} : () -> tensor<1xi64>
+  %axes = "onnx.Constant"() {value = dense<1> : tensor<1xi64>} : () -> tensor<1xi64>
+  %steps = "onnx.Constant"() {value = dense<2> : tensor<1xi64>} : () -> tensor<1xi64>
+  %y = "onnx.Slice"(%x, %starts, %ends, %axes, %steps)
+      : (tensor<?x4xf32>, tensor<1xi64>, tensor<1xi64>, tensor<1xi64>, tensor<1xi64>)
+        -> tensor<*xf32>
+  return %y : tensor<*xf32>
+}
+
 // Qwen attn_output. The Slice axis is dynamic, so constant starts = ends = 0
 // keep that axis as `?` and copy the static dims. hip.loop was outlined while
 // v_init was still tensor<?x?x?xf16>; its result and the body must follow.

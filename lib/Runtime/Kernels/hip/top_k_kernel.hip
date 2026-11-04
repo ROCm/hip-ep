@@ -438,6 +438,255 @@ static int launch_top_k_two_pass(hipStream_t stream, const T *data, T *values,
   return 0;
 }
 
+// K past the register-list kernels (the per-level pre-NMS top-1000 of Mask
+// R-CNN's RPN, over up to ~10^5 anchors) sorts each whole row instead:
+// (key, index) pairs padded to a power of two are bitonic-sorted best-first
+// under topk_better, and the first K are written out. A row of at most
+// kTopKSortTile pairs is sorted in shared memory in one launch. Longer rows
+// sort in the workspace: tiles are sorted in shared memory, each later stage
+// runs its strides >= kTopKSortTile as global compare-exchange passes and the
+// rest in shared memory.
+constexpr int kTopKSortBlock = 1024;
+constexpr int64_t kTopKSortTile = 4096;
+
+static int64_t topk_sort_padded(int64_t n) {
+  int64_t p = 1;
+  while (p < n)
+    p <<= 1;
+  return p;
+}
+
+static int64_t topk_k_eff(const TopKGeom &geom) {
+  return geom.k < geom.axis_size ? geom.k : geom.axis_size;
+}
+
+static bool topk_sort_ok(const TopKGeom &geom) {
+  return topk_k_eff(geom) > kTopKSmallMax && geom.axis_size < INT32_MAX &&
+         geom.num_rows <= 65535;
+}
+
+static size_t topk_sort_bytes(const TopKGeom &geom) {
+  const int64_t padded = topk_sort_padded(geom.axis_size);
+  if (padded <= kTopKSortTile)
+    return 0;
+  return static_cast<size_t>(geom.num_rows * padded) *
+         (sizeof(float) + sizeof(int));
+}
+
+__device__ void topk_row_bases(const TopKGeom &geom, int64_t row,
+                               int64_t &in_base, int64_t &out_base) {
+  in_base = 0;
+  out_base = 0;
+  int64_t rem = row;
+  for (int64_t d = geom.rank - 1; d >= 0; --d) {
+    if (d == geom.axis)
+      continue;
+    const int64_t dim = geom.in_shape[d];
+    const int64_t c = dim > 0 ? rem % dim : 0;
+    if (dim > 0)
+      rem /= dim;
+    in_base += c * geom.in_stride[d];
+    out_base += c * geom.out_stride[d];
+  }
+}
+
+// Pair (t, t ^ j) of a bitonic stage `size`; positions are row-global so
+// that tiles of one row alternate direction as the network requires.
+__device__ __forceinline__ void topk_cmp_swap(float *key, int *idx, int64_t t,
+                                              int64_t l, int64_t gpos,
+                                              int64_t size) {
+  const bool first = (gpos & size) == 0;
+  const bool swap = first ? topk_better(key[l], idx[l], key[t], idx[t])
+                          : topk_better(key[t], idx[t], key[l], idx[l]);
+  if (swap) {
+    const float k = key[t];
+    key[t] = key[l];
+    key[l] = k;
+    const int i = idx[t];
+    idx[t] = idx[l];
+    idx[l] = i;
+  }
+}
+
+__device__ void topk_tile_steps(float *key, int *idx, int64_t n,
+                                int64_t tile_off, int64_t size, int64_t j) {
+  for (; j > 0; j >>= 1) {
+    for (int64_t t = threadIdx.x; t < n; t += blockDim.x) {
+      const int64_t l = t ^ j;
+      if (l > t)
+        topk_cmp_swap(key, idx, t, l, tile_off + t, size);
+    }
+    __syncthreads();
+  }
+}
+
+template <typename T>
+__device__ void topk_store_out(T *values, int64_t *indices,
+                               const TopKGeom &geom, int64_t out_base,
+                               int64_t j, float key, int idx, bool lg) {
+  const int64_t o = out_base + j * geom.out_stride[geom.axis];
+  topk_store_value(values, o, lg ? key : -key);
+  indices[o] = idx;
+}
+
+// Grid (tiles, rows). Loads one tile from \p data and runs every stage that
+// fits in it. With a single tile the row is fully sorted and the top K go
+// straight to the outputs; otherwise the tile goes to the workspace.
+template <typename T>
+__global__ void __launch_bounds__(kTopKSortBlock)
+    topk_sort_tile_kernel(const T *__restrict__ data, T *__restrict__ values,
+                          int64_t *__restrict__ indices, float *wkey,
+                          int *widx, TopKGeom geom, int64_t padded,
+                          int largest) {
+  __shared__ float s_key[kTopKSortTile];
+  __shared__ int s_idx[kTopKSortTile];
+  const int64_t row = blockIdx.y;
+  const int64_t n = padded < kTopKSortTile ? padded : kTopKSortTile;
+  const int64_t tile_off = static_cast<int64_t>(blockIdx.x) * n;
+  const bool lg = largest != 0;
+  int64_t in_base, out_base;
+  topk_row_bases(geom, row, in_base, out_base);
+
+  for (int64_t t = threadIdx.x; t < n; t += blockDim.x) {
+    const int64_t i = tile_off + t;
+    if (i < geom.axis_size) {
+      const float v = topk_elem_to_float(
+          data[in_base + i * geom.in_stride[geom.axis]]);
+      s_key[t] = lg ? v : -v;
+      s_idx[t] = static_cast<int>(i);
+    } else {
+      s_key[t] = -INFINITY;
+      s_idx[t] = INT32_MAX;
+    }
+  }
+  __syncthreads();
+  for (int64_t size = 2; size <= n; size <<= 1)
+    topk_tile_steps(s_key, s_idx, n, tile_off, size, size >> 1);
+
+  if (!wkey) {
+    const int64_t k_eff = geom.k < geom.axis_size ? geom.k : geom.axis_size;
+    for (int64_t t = threadIdx.x; t < k_eff; t += blockDim.x)
+      topk_store_out(values, indices, geom, out_base, t, s_key[t], s_idx[t],
+                     lg);
+    return;
+  }
+  const int64_t w = row * padded + tile_off;
+  for (int64_t t = threadIdx.x; t < n; t += blockDim.x) {
+    wkey[w + t] = s_key[t];
+    widx[w + t] = s_idx[t];
+  }
+}
+
+// Grid (padded / kTopKSortBlock, rows): one global step (size, j).
+__global__ void __launch_bounds__(kTopKSortBlock)
+    topk_sort_global_step_kernel(float *wkey, int *widx, int64_t padded,
+                                 int64_t size, int64_t j) {
+  const int64_t t =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const int64_t l = t ^ j;
+  if (t >= padded || l <= t)
+    return;
+  const int64_t base = static_cast<int64_t>(blockIdx.y) * padded;
+  topk_cmp_swap(wkey + base, widx + base, t, l, t, size);
+}
+
+// Grid (padded / kTopKSortTile, rows): strides < kTopKSortTile of stage size.
+__global__ void __launch_bounds__(kTopKSortBlock)
+    topk_sort_merge_tile_kernel(float *wkey, int *widx, int64_t padded,
+                                int64_t size) {
+  __shared__ float s_key[kTopKSortTile];
+  __shared__ int s_idx[kTopKSortTile];
+  const int64_t tile_off = static_cast<int64_t>(blockIdx.x) * kTopKSortTile;
+  const int64_t w = static_cast<int64_t>(blockIdx.y) * padded + tile_off;
+  for (int64_t t = threadIdx.x; t < kTopKSortTile; t += blockDim.x) {
+    s_key[t] = wkey[w + t];
+    s_idx[t] = widx[w + t];
+  }
+  __syncthreads();
+  topk_tile_steps(s_key, s_idx, kTopKSortTile, tile_off, size,
+                  kTopKSortTile >> 1);
+  for (int64_t t = threadIdx.x; t < kTopKSortTile; t += blockDim.x) {
+    wkey[w + t] = s_key[t];
+    widx[w + t] = s_idx[t];
+  }
+}
+
+// Grid (ceil(K / kTopKSortBlock), rows): first K sorted pairs to the outputs.
+template <typename T>
+__global__ void __launch_bounds__(kTopKSortBlock)
+    topk_sort_store_kernel(const float *__restrict__ wkey,
+                           const int *__restrict__ widx, T *__restrict__ values,
+                           int64_t *__restrict__ indices, TopKGeom geom,
+                           int64_t padded, int64_t k_eff, int largest) {
+  const int64_t j =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (j >= k_eff)
+    return;
+  const int64_t row = blockIdx.y;
+  int64_t in_base, out_base;
+  topk_row_bases(geom, row, in_base, out_base);
+  const int64_t w = row * padded + j;
+  topk_store_out(values, indices, geom, out_base, j, wkey[w], widx[w],
+                 largest != 0);
+}
+
+template <typename T>
+static int launch_top_k_sort(hipStream_t stream, const T *data, T *values,
+                             int64_t *indices, const TopKGeom &geom,
+                             int largest, void *workspace,
+                             size_t workspace_bytes) {
+  const int64_t padded = topk_sort_padded(geom.axis_size);
+  const unsigned rows = static_cast<unsigned>(geom.num_rows);
+  (void)hipGetLastError();
+  if (padded <= kTopKSortTile) {
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(topk_sort_tile_kernel<T>), dim3(1, rows),
+                       dim3(kTopKSortBlock), 0, stream, data, values, indices,
+                       nullptr, nullptr, geom, padded, largest);
+  } else {
+    if (!workspace || workspace_bytes < topk_sort_bytes(geom)) {
+      fprintf(stderr,
+              "[custom_kernels] hip_top_k: K=%lld over axis %lld needs "
+              "%zu workspace bytes, have %zu\n",
+              (long long)geom.k, (long long)geom.axis_size,
+              topk_sort_bytes(geom), workspace_bytes);
+      return -1;
+    }
+    float *wkey = static_cast<float *>(workspace);
+    int *widx = reinterpret_cast<int *>(wkey + geom.num_rows * padded);
+    const unsigned tiles = static_cast<unsigned>(padded / kTopKSortTile);
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(topk_sort_tile_kernel<T>),
+                       dim3(tiles, rows), dim3(kTopKSortBlock), 0, stream,
+                       data, values, indices, wkey, widx, geom, padded,
+                       largest);
+    const unsigned step_blocks =
+        static_cast<unsigned>(padded / kTopKSortBlock);
+    for (int64_t size = 2 * kTopKSortTile; size <= padded; size <<= 1) {
+      for (int64_t j = size >> 1; j >= kTopKSortTile; j >>= 1)
+        hipLaunchKernelGGL(topk_sort_global_step_kernel,
+                           dim3(step_blocks, rows), dim3(kTopKSortBlock), 0,
+                           stream, wkey, widx, padded, size, j);
+      hipLaunchKernelGGL(topk_sort_merge_tile_kernel, dim3(tiles, rows),
+                         dim3(kTopKSortBlock), 0, stream, wkey, widx, padded,
+                         size);
+    }
+    const int64_t k_eff = topk_k_eff(geom);
+    hipLaunchKernelGGL(
+        HIP_KERNEL_NAME(topk_sort_store_kernel<T>),
+        dim3(static_cast<unsigned>((k_eff + kTopKSortBlock - 1) /
+                                   kTopKSortBlock),
+             rows),
+        dim3(kTopKSortBlock), 0, stream, wkey, widx, values, indices, geom,
+        padded, k_eff, largest);
+  }
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess) {
+    fprintf(stderr, "[custom_kernels] sort top_k launch failed: %s\n",
+            hipGetErrorString(err));
+    return static_cast<int>(err);
+  }
+  return 0;
+}
+
 template <typename T>
 static int launch_top_k(void *stream, const void *data, void *values,
                         void *indices, const TopKGeom &geom, int largest,
@@ -486,6 +735,13 @@ static int launch_top_k(void *stream, const void *data, void *values,
     }
     return 0;
   }
+  if (topk_sort_ok(geom) &&
+      (topk_k_eff(geom) > kTopKTwoPassMaxK || topk_sort_bytes(geom) == 0 ||
+       (workspace && workspace_bytes >= topk_sort_bytes(geom))))
+    return launch_top_k_sort(hip_stream, static_cast<const T *>(data),
+                             static_cast<T *>(values),
+                             static_cast<int64_t *>(indices), geom, largest,
+                             workspace, workspace_bytes);
   constexpr int kBlockSize = 256;
   int grid_size = static_cast<int>(
       (geom.num_rows + kBlockSize - 1) / kBlockSize);
@@ -553,9 +809,13 @@ extern "C" size_t hip_top_k_workspace_bytes(int64_t axis, int64_t rank,
   if (!x_shape || rank <= 0 || rank > kMaxRank || k <= 0)
     return 0;
   TopKGeom geom;
-  if (!make_topk_geom(axis, rank, x_shape, k, geom) || !topk_two_pass_ok(geom))
+  if (!make_topk_geom(axis, rank, x_shape, k, geom))
     return 0;
-  return topk_two_pass_bytes(geom);
+  if (topk_two_pass_ok(geom))
+    return topk_two_pass_bytes(geom);
+  if (topk_sort_ok(geom))
+    return topk_sort_bytes(geom);
+  return 0;
 }
 
 extern "C" int hip_top_k(void *stream, const void *data, void *values,
@@ -570,15 +830,17 @@ extern "C" int hip_top_k(void *stream, const void *data, void *values,
     return -1;
   if (k <= 0)
     return 0;
-  if (k > 256) {
-    fprintf(stderr, "[custom_kernels] hip_top_k: K=%lld exceeds max 256\n",
-            (long long)k);
-    return -1;
-  }
-
   TopKGeom geom;
   if (!make_topk_geom(axis, rank, x_shape, k, geom))
     return -1;
+  if (topk_k_eff(geom) > kTopKTwoPassMaxK && !topk_sort_ok(geom)) {
+    fprintf(stderr,
+            "[custom_kernels] hip_top_k: K=%lld unsupported (axis=%lld, "
+            "rows=%lld)\n",
+            (long long)k, (long long)geom.axis_size,
+            (long long)geom.num_rows);
+    return -1;
+  }
 
   CUSTOM_KERNELS_DEBUG_LOG(
       "[custom_kernels] hip_top_k: axis=%lld, k=%lld, rank=%lld, "

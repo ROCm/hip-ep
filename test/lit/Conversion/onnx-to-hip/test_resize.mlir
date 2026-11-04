@@ -426,4 +426,51 @@ module {
     // CHECK: return
     return %y : tensor<1x1x8xf32>
   }
+
+  // Test 21: MaskRCNN FPN upsample. A non-empty roi is ignored outside
+  // tf_crop_and_resize. Scales are Concat([1, 1], runtime): the prefix folds,
+  // and each window scale is read back to size the dynamic H and W.
+  func.func @test_resize_runtime_window_scales(%arg0: tensor<1x256x?x?xf32>,
+                                               %window: tensor<2xf32>)
+      -> tensor<?x?x?x?xf32> {
+    // CHECK-LABEL: func.func @test_resize_runtime_window_scales
+    %roi = "onnx.Constant"() {value = dense<[0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]> : tensor<8xf32>}
+        : () -> tensor<8xf32>
+    %prefix = "onnx.Constant"() {value = dense<1.0> : tensor<2xf32>}
+        : () -> tensor<2xf32>
+    %scales = "onnx.Concat"(%prefix, %window) {axis = 0 : si64}
+        : (tensor<2xf32>, tensor<2xf32>) -> tensor<4xf32>
+    %y = "onnx.Resize"(%arg0, %roi, %scales)
+        {mode = "nearest", coordinate_transformation_mode = "half_pixel",
+         nearest_mode = "round_prefer_floor"}
+        : (tensor<1x256x?x?xf32>, tensor<8xf32>, tensor<4xf32>)
+        -> tensor<?x?x?x?xf32>
+    // CHECK-NOT: onnx.Resize
+    // CHECK-COUNT-2: hip.readback_scalar
+    // CHECK: tensor.empty(%{{.*}}, %{{.*}}) : tensor<1x256x?x?xf32>
+    // CHECK: hip.resize
+    // CHECK-NOT: prefix_count
+    // CHECK: tensor.cast %{{.*}} : tensor<1x256x?x?xf32> to tensor<?x?x?x?xf32>
+    // CHECK: return
+    return %y : tensor<?x?x?x?xf32>
+  }
+
+  // Test 22: a runtime scale on a copied prefix axis cannot be proven to be 1.
+  func.func @test_resize_runtime_prefix_scale_rejected(
+      %arg0: tensor<?x256x?x?xf32>, %lead: tensor<2xf32>)
+      -> tensor<?x?x?x?xf32> {
+    // CHECK-LABEL: func.func @test_resize_runtime_prefix_scale_rejected
+    %roi = "onnx.NoValue"() {value} : () -> none
+    %window = "onnx.Constant"() {value = dense<2.0> : tensor<2xf32>}
+        : () -> tensor<2xf32>
+    %scales = "onnx.Concat"(%lead, %window) {axis = 0 : si64}
+        : (tensor<2xf32>, tensor<2xf32>) -> tensor<4xf32>
+    %y = "onnx.Resize"(%arg0, %roi, %scales)
+        {mode = "nearest", coordinate_transformation_mode = "half_pixel"}
+        : (tensor<?x256x?x?xf32>, none, tensor<4xf32>) -> tensor<?x?x?x?xf32>
+    // CHECK: onnx.Resize
+    // CHECK-NOT: hip.resize
+    // CHECK: return
+    return %y : tensor<?x?x?x?xf32>
+  }
 }

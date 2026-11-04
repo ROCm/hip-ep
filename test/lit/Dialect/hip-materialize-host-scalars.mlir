@@ -256,3 +256,31 @@ func.func @padded_elements(%ctx: !hip.context, %x: i48, %y: i8) {
   memref.store %y, %b[] : memref<i8>
   return
 }
+
+// --- Small constant global read by a hip op: a converter-emitted tensor
+//     constant (MaskRCNN's class count, multiplied by hip.mul) bufferizes to
+//     a host .data global the GPU kernel cannot read. It MUST be staged into
+//     host scratch with host stores of its value. A constant global only
+//     copied on the host is left as is. ---
+memref.global "private" constant @__constant_xi64 : memref<i64> = dense<81>
+memref.global "private" constant @__constant_2xi32 : memref<2xi32> = dense<[3, 5]>
+// CHECK-LABEL: func.func @constant_global_hip_consumer
+// CHECK-SAME:    (%[[CTX:.*]]: !hip.context
+// CHECK:         %[[SCRATCH:.*]] = hip.get_host_scratch(%[[CTX]],
+// CHECK-NOT:     memref.get_global @__constant_xi64
+// CHECK:         %[[V:.*]] = memref.view %[[SCRATCH]]{{.*}} : memref<?xi8> to memref<i64>
+// CHECK:         %[[C81:.*]] = arith.constant 81 : i64
+// CHECK:         memref.store %[[C81]], %[[V]][] : memref<i64>
+// CHECK:         hip.mul(%[[CTX]]) ins(%[[V]], %{{.*}} : memref<i64>, memref<i64>)
+// CHECK:         %[[G:.*]] = memref.get_global @__constant_2xi32 : memref<2xi32>
+// CHECK:         memref.copy %[[G]], %{{.*}}
+func.func @constant_global_hip_consumer(%ctx: !hip.context,
+                                        %x: memref<i64>,
+                                        %out: memref<i64>,
+                                        %dst: memref<2xi32>) {
+  %c = memref.get_global @__constant_xi64 : memref<i64>
+  hip.mul(%ctx) ins(%c, %x : memref<i64>, memref<i64>) outs(%out : memref<i64>)
+  %g = memref.get_global @__constant_2xi32 : memref<2xi32>
+  memref.copy %g, %dst : memref<2xi32> to memref<2xi32>
+  return
+}
