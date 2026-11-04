@@ -474,6 +474,171 @@ __global__ void linear_attention_decode_kernel_par(
     }
 }
 
+// Fixed decode geometry; the original parallel kernel remains available.
+template <typename T>
+__global__ void linear_attention_decode_state_cache_kernel(
+    const T* __restrict__ query,
+    const T* __restrict__ key,
+    const T* __restrict__ value,
+    const T* __restrict__ decay,
+    const T* __restrict__ beta_in,
+    T* __restrict__ state,
+    T* __restrict__ output,
+    int seq_len,
+    int Hq_arg, int Hkv_arg, int n_k_arg, int dk_arg, int dv_arg,
+    float scale, int update_rule_arg,
+    int decay_per_key_dim_arg, int beta_per_head_arg)
+{
+    constexpr int MAX_Q_HEADS = 1;
+    constexpr int Hq = 16, Hkv = 48, n_k = 16, dk = 128, dv = 128;
+    constexpr int update_rule = LA_RULE_GATED_DELTA;
+    constexpr int decay_per_key_dim = 0, beta_per_head = 1;
+
+    const int bg = blockIdx.x;
+    const int b  = bg / Hkv;
+    const int g  = bg % Hkv;
+    const int tid = threadIdx.x;
+    const int nthreads = blockDim.x;
+
+    constexpr int G = 4; // dk-split factor (block == G*dv)
+    const int j  = tid % dv;               // output column owned by this thread
+    const int p  = tid / dv;               // dk-partition index in [0, G)
+    const int islice = dk / G;
+    const int i0 = p * islice;
+    const int i1 = i0 + islice;
+
+    const int Hout = Hq >= Hkv ? Hq : Hkv;
+    const bool inverse_gqa = (Hq < Hkv);
+    const int num_q_heads  = inverse_gqa ? 1 : (Hq / Hkv);
+    const int h_q_load_base = inverse_gqa ? (g * Hq / Hkv) : (g * num_q_heads);
+    const int h_out_base    = inverse_gqa ? g : (g * num_q_heads);
+    const int h_k = g * n_k / Hkv;
+
+    const int64_t q_batch_stride   = (int64_t)seq_len * Hq   * dk;
+    const int64_t k_batch_stride   = (int64_t)seq_len * n_k  * dk;
+    const int64_t v_batch_stride   = (int64_t)seq_len * Hkv  * dv;
+    const int64_t out_batch_stride = (int64_t)seq_len * Hout * dv;
+    const int64_t decay_batch_stride = decay_per_key_dim
+        ? (int64_t)seq_len * Hkv * dk : (int64_t)seq_len * Hkv;
+    const int64_t beta_batch_stride = beta_per_head
+        ? (int64_t)seq_len * Hkv : (int64_t)seq_len;
+    const int64_t state_batch_stride = (int64_t)Hkv * dk * dv;
+
+    extern __shared__ float smem[];
+    float* k_smem   = smem;
+    float* v_smem   = smem + dk;
+    float* aux_smem = smem + dk + dv;
+    float* sk_smem  = smem + 2 * dk + dv;
+    float* q_smem   = smem + 2 * dk + 2 * dv;
+    float* sk_part  = q_smem + num_q_heads * dk;   // [G*dv] partial sk
+    float* out_part = sk_part + G * dv;            // [G*dv*num_q_heads] partial out
+
+    const T* k_ptr = key   + b * k_batch_stride + (int64_t)h_k * dk;
+    const T* v_ptr = value + b * v_batch_stride + (int64_t)g   * dv;
+    T* S = state + b * state_batch_stride + (int64_t)g * dk * dv;
+
+    for (int t = tid; t < dk; t += nthreads) k_smem[t] = to_float(k_ptr[t]);
+    for (int t = tid; t < dv; t += nthreads) v_smem[t] = to_float(v_ptr[t]);
+
+    const bool has_decay =
+        (update_rule == LA_RULE_GATED || update_rule == LA_RULE_GATED_DELTA) &&
+        decay != nullptr;
+    if (has_decay) {
+        if (decay_per_key_dim) {
+            const T* d_ptr = decay + b * decay_batch_stride + (int64_t)g * dk;
+            for (int t = tid; t < dk; t += nthreads)
+                aux_smem[t] = expf(to_float(d_ptr[t]));
+        } else {
+            const float gv = expf(to_float(decay[b * decay_batch_stride + g]));
+            for (int t = tid; t < dk; t += nthreads) aux_smem[t] = gv;
+        }
+    }
+
+    float beta_val = 0.0f;
+    if (beta_in &&
+        (update_rule == LA_RULE_DELTA || update_rule == LA_RULE_GATED_DELTA)) {
+        const int64_t beta_idx = beta_per_head
+            ? b * beta_batch_stride + g : b * beta_batch_stride;
+        beta_val = to_float(beta_in[beta_idx]);
+    }
+
+    for (int hl = 0; hl < num_q_heads; hl++) {
+        const int h_q = h_q_load_base + (inverse_gqa ? 0 : hl);
+        const T* q_ptr_h = query + b * q_batch_stride + (int64_t)h_q * dk;
+        for (int t = tid; t < dk; t += nthreads)
+            q_smem[hl * dk + t] = to_float(q_ptr_h[t]);
+    }
+    __syncthreads();
+
+    // The recurrent-state shard is consumed twice; retain it across the
+    // projection reduction so the update/readout does not reload global state.
+    float old_state[dk / G];
+#pragma unroll
+    for (int offset = 0; offset < dk / G; offset++)
+        old_state[offset] = to_float(S[(i0 + offset) * dv + j]);
+
+    const bool needs_sk =
+        (update_rule == LA_RULE_DELTA || update_rule == LA_RULE_GATED_DELTA);
+    if (needs_sk) {
+        float part = 0.0f;
+#pragma unroll
+        for (int i = i0; i < i1; i++)
+            part += (has_decay ? aux_smem[i] : 1.0f) *
+                    old_state[i - i0] * k_smem[i];
+        sk_part[p * dv + j] = part;
+        __syncthreads();
+        if (p == 0) {
+            float s = 0.0f;
+            for (int q = 0; q < G; q++) s += sk_part[q * dv + j];
+            sk_smem[j] = s;
+        }
+        __syncthreads();
+    }
+
+    const float v_j  = v_smem[j];
+    const float sk_j = needs_sk ? sk_smem[j] : 0.0f;
+
+    float sums[MAX_Q_HEADS];
+#pragma unroll
+    for (int hl = 0; hl < MAX_Q_HEADS; hl++) sums[hl] = 0.0f;
+
+#pragma unroll
+    for (int i = i0; i < i1; i++) {
+        const float s_old   = old_state[i - i0];
+        const float k_i     = k_smem[i];
+        const float decay_i = has_decay ? aux_smem[i] : 1.0f;
+        float s_new;
+        switch (update_rule) {
+        case LA_RULE_LINEAR:      s_new = s_old + k_i * v_j; break;
+        case LA_RULE_GATED:       s_new = decay_i * s_old + k_i * v_j; break;
+        case LA_RULE_DELTA:       s_new = s_old + beta_val * k_i * (v_j - sk_j); break;
+        case LA_RULE_GATED_DELTA: s_new = decay_i * s_old + beta_val * k_i * (v_j - sk_j); break;
+        default:                  s_new = s_old;
+        }
+        // Preserve fp32 rounding before the fp16 state conversion. Without
+        // this register barrier the backend contracts FMA+cast to fp16 FMA.
+        asm volatile("" : "+v"(s_new));
+        S[i * dv + j] = from_float<T>(s_new);
+#pragma unroll
+        for (int hl = 0; hl < MAX_Q_HEADS; hl++)
+            if (hl < num_q_heads) sums[hl] += q_smem[hl * dk + i] * s_new;
+    }
+
+    for (int hl = 0; hl < num_q_heads; hl++)
+        out_part[(p * dv + j) * num_q_heads + hl] = sums[hl];
+    __syncthreads();
+    if (p == 0) {
+        for (int hl = 0; hl < num_q_heads; hl++) {
+            float s = 0.0f;
+            for (int q = 0; q < G; q++)
+                s += out_part[(q * dv + j) * num_q_heads + hl];
+            const int h_out = h_out_base + (inverse_gqa ? 0 : hl);
+            T* out_ptr = output + b * out_batch_stride + (int64_t)h_out * dv + j;
+            *out_ptr = from_float<T>(scale * s);
+        }
+    }
+}
+
 //===----------------------------------------------------------------------===//
 // Column-split, register-resident variant (decode and short bursts).
 //
@@ -867,6 +1032,18 @@ extern "C" int hip_linear_attention_decode(
                           la_par_G * dv_i * num_q_heads) * sizeof(float);
     }
 
+    static const bool keep_state = [] {
+        const char* value = std::getenv("HIPDNN_EP_LA_KEEP_STATE");
+        return !value || atoi(value) != 0;
+    }();
+    const bool use_state_cache = keep_state && use_par && la_par_G == 4 &&
+        B == 1 && seq_len == 1 && Hq == 16 && Hkv == 48 && Nk == 16 &&
+        dk == 128 && dv == 128 && type == 1 && update_rule == LA_RULE_GATED_DELTA &&
+        !decay_per_key_dim && beta_per_head && decay && beta;
+    if (use_state_cache)
+        CUSTOM_KERNELS_DEBUG_LOG(
+            "[custom_kernels] linear_attention_state_cache: G=4 dk=dv=128\n");
+
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] hip_linear_attention_decode: B=%lld seq_len=%lld "
         "Hq=%lld Hkv=%lld Nk=%lld dk=%d dv=%d scale=%.6f rule=%lld "
@@ -898,8 +1075,9 @@ extern "C" int hip_linear_attention_decode(
             decay_per_key_dim_i, beta_per_head_i);
     } else if (type == 1) {
         hipLaunchKernelGGL(
-            use_par ? linear_attention_decode_kernel_par<__half>
-                    : linear_attention_decode_kernel<__half>,
+            use_state_cache ? linear_attention_decode_state_cache_kernel<__half>
+                : (use_par ? linear_attention_decode_kernel_par<__half>
+                           : linear_attention_decode_kernel<__half>),
             dim3(grid), dim3(block), smem_bytes, hip_stream,
             static_cast<const __half*>(query),
             static_cast<const __half*>(key),
