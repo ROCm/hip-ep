@@ -74,7 +74,6 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
-#include <cstring>
 #include <limits>
 #include <memory>
 #include <numeric>
@@ -82,14 +81,6 @@
 #include <string>
 #include <thread>
 #include <vector>
-
-// Same convention as MIGraphX `enabled(MIGRAPHX_SKIP_BENCHMARKING)`: unset or
-// "0" is off; any other value skips GPU benchmarking and affixes the first
-// enumerated perfConfig.
-static bool skipBenchmarking() {
-  const char *env = std::getenv("HIP_ROCMLIR_SKIP_BENCHMARKING");
-  return env && std::strcmp(env, "0") != 0;
-}
 
 using mlir::hip::CompiledKernel;
 
@@ -221,7 +212,7 @@ int main(int argc, char **argv) {
     if (const char *env = std::getenv("HIP_ROCMLIR_PROBLEM_CACHE"))
       autotune.problemCachePath = env;
   }
-  if (skipBenchmarking())
+  if (mlir::hip::rocMlirSkipBenchmarking())
     autotuneEnabled = false;
   if (!autotune.problemCachePath.empty() && !autotuneEnabled)
     llvm::errs() << "warning: problem cache ignored because autotune is off\n";
