@@ -4898,13 +4898,12 @@ void MatMulNBitsWMMA_SmallM_Grouped(
 
 // Config chosen by tile height when the caller passes cfg < 0. Picked from a
 // sweep on gfx1151 with the gpt-oss expert shapes (fc1 N=5760 / fc2 N=2880,
-// K=2880, block 32). When CPW 18 leaves a short, guarded last wave but CPW 16
-// splits K / 32 evenly, the CPW 16 variant runs 9-12% faster (gfx1151, expert
-// shapes K=3072 and K=1024, block 128).
+// K=2880, block 32). The CPW 16 variants are used only at the K values where
+// they were measured faster than CPW 18 (gfx1151, grouped expert GEMMs at
+// block 128, 16- and 32-row tiles: 9-14% at K=512, 1024, 2048 and 3072); every
+// other K keeps the CPW 18 default.
 static int smallMWmmaDefaultConfig(int64_t M, int64_t K) {
-    const int64_t nchunk = K / 32;
-    const bool cpw16 =
-        nchunk % 18 != 0 && nchunk % 16 == 0 && nchunk / 16 <= 16;
+    const bool cpw16 = K == 512 || K == 1024 || K == 2048 || K == 3072;
     if (M <= 16) return cpw16 ? 6 : 0;
     if (M <= 32) return cpw16 ? 7 : 1;
     return 2;
