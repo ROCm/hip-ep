@@ -97,10 +97,9 @@ std::string rocMlirArtifactTarget() {
       rocMlirPipelineRequested()) {
     std::string target = mlir::hip::resolveRocMlirArch();
     // Which perfConfig each kernel was tuned to is baked into the embedded
-    // HSACO, so an artifact built with the default configs must not be reused
-    // once tuning is requested -- the cache is keyed on the graph alone, and
-    // the knob would silently appear to do nothing. Folding the mode into the
-    // target string puts it under the recorded-vs-current check below.
+    // HSACO. Autotune runs unless HIP_ROCMLIR_SKIP_BENCHMARKING is set, so
+    // the target string records the space. An artifact built with the other
+    // setting must not be reused: the cache is keyed on the graph alone.
     mlir::hip::AutotuneSpace space;
     if (!target.empty() && mlir::hip::rocMlirAutotuneFromEnv(space))
       target += std::string("+autotune=") + mlir::hip::autotuneSpaceName(space);
@@ -443,11 +442,11 @@ bool CompilerDriver::runMLIRPasses(
       embedOpts.logPrefix = "[CompilerDriver/rocmlir]";
     }
 
-    // Opt-in: without this the embed falls back to position 0 of the tuning
-    // space, which rocMLIR picks for applicability rather than speed. Tuning
-    // compiles and times every candidate, so it costs far more than a session
-    // creation normally should -- hence off unless asked for. Declared in this
-    // scope because embedOpts only holds function_refs into it.
+    // On unless HIP_ROCMLIR_SKIP_BENCHMARKING is set. Without a usable
+    // device the embed would fall back to position 0 of the tuning space,
+    // which rocMLIR picks for applicability rather than speed, so that case
+    // fails the compile. Declared in this scope because embedOpts only holds
+    // function_refs into it.
     std::optional<mlir::hip::RocMlirAutotuner> autotuner;
     mlir::hip::AutotuneSpace autotuneSpace;
     if (mlir::hip::rocMlirAutotuneFromEnv(autotuneSpace)) {
@@ -465,9 +464,9 @@ bool CompilerDriver::runMLIRPasses(
       // runtime or no visible device, which the autotuner has already
       // described on the log.
       if (!autotuner->isUsable()) {
-        error_message = "HIPDNN_EP_ROCMLIR_AUTOTUNE was set, but autotuning "
-                        "could not reach a HIP device; unset it to compile "
-                        "with the default perfConfig";
+        error_message = "rocMLIR autotune could not reach a HIP device; set "
+                        "HIP_ROCMLIR_SKIP_BENCHMARKING=1 to compile with the "
+                        "default perfConfig";
         return false;
       }
       autotuner->installInto(embedOpts);

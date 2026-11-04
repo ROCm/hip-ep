@@ -99,7 +99,11 @@ Options use MLIR's pipeline-option syntax:
 
 `hip-rocmlir-compiler` defaults to quick autotune: it enumerates the rocMLIR
 quick space, compiles every applicable candidate, benchmarks them on the
-current HIP device, and embeds the fastest binary. Every search config in the
+current HIP device, and embeds the fastest binary. The ONNX Runtime provider
+does the same whenever `HIPDNN_EP_ROCMLIR` is on. Both honor
+`HIP_ROCMLIR_SKIP_BENCHMARKING`: unset or `0` benchmarks, and any other value
+keeps rocMLIR's default perfConfig. `HIPDNN_EP_ROCMLIR_AUTOTUNE=full` or
+`exhaustive` selects that space. Every search config in the
 model is compiled in one pool (default: one job per hardware thread;
 `HIP_ROCMLIR_COMPILE_JOBS` overrides the width). GPU benchmarking stays serial,
 and it starts only after that pool finishes, so candidate timings do not
