@@ -80,7 +80,10 @@ which is empty when `HIPDNN_EP_ROCMLIR` was off, the arch with an
 `hip-rocmlir-compiler` and the ONNX Runtime provider both read that variable:
 unset or `0` benchmarks, and any other value skips the search. Autotune
 otherwise runs for a rocMLIR session. Unset `HIPDNN_EP_ROCMLIR_AUTOTUNE`
-selects `quick`; `full` and `exhaustive` select those spaces. The
+selects `quick`; `full` and `exhaustive` select those spaces. Before
+benchmarking, the autotuner applies the shipped
+`tools/problem-cache/lut/<gpu_arch>.fb` whose `gpu_arch` matches the device,
+then an optional `HIP_ROCMLIR_PROBLEM_CACHE` file. The
 perfConfig a kernel was tuned to is baked into its code object, so a tuned
 and an untuned artifact are not interchangeable even on the same GPU.
 

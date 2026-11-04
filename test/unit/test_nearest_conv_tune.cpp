@@ -3,8 +3,8 @@
  * Licensed under the MIT License.
  */
 
-// GPU-free checks for the grouped log2 nearest conv lookup: exact GEMM,
-// closer spatial neighbor, hard mismatches, and a tile that does not fit.
+// GPU-free checks for the grouped log2 nearest lookup: conv, gemm,
+// attention, and gemm-elementwise-gemm.
 
 #include "nearest_conv_tune.h"
 #include "problem_cache_generated.h"
@@ -35,6 +35,37 @@ const char *kBase =
     "-y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1";
 
 using mlir::hip::ProblemCacheConvEntry;
+
+std::string gemmProblem(const char *dtype, int m, int n, int k,
+                        const char *transB = "false") {
+  return "gfx1151\t20\t1\t-t " + std::string(dtype) +
+         " -out_datatype " + dtype + " -transA false -transB " + transB +
+         " -transO false -g 1 -m " + std::to_string(m) + " -n " +
+         std::to_string(n) + " -k " + std::to_string(k) +
+         " -supportsSplitK true";
+}
+
+std::string attnProblem(int seqQ, int seqK, const char *causal = "false",
+                        int head = 64) {
+  return "gfx1151\t20\t1\t-t f16 -transQ false -transK false -transV false "
+         "-transO false -causal " +
+         std::string(causal) +
+         " -return_lse false -split_kv 1 -num_heads_q 8 -num_heads_kv 8 "
+         "-g 1 -seq_len_q " +
+         std::to_string(seqQ) + " -seq_len_k " + std::to_string(seqK) +
+         " -head_dim_qk " + std::to_string(head) + " -head_dim_v " +
+         std::to_string(head) +
+         " -with-attn-scale false -with-attn-bias false -transBias false "
+         "-supportsSplitK true";
+}
+
+std::string gegProblem(int m, int n, int k, int gemmO,
+                       const char *transC = "false") {
+  return "gfx1151\t20\t1\t-t f16 -transA false -transB false -transC " +
+         std::string(transC) + " -transO false -g 1 -m " + std::to_string(m) +
+         " -n " + std::to_string(n) + " -k " + std::to_string(k) + " -gemmO " +
+         std::to_string(gemmO) + " -supportsSplitK true";
+}
 
 } // namespace
 
@@ -135,6 +166,69 @@ int main() {
   expect(hit.has_value() && hit->solution == tile128,
          "a rejected solution yields the next nearest row");
 
+  const std::string gemmNear = "gemm:v4:32,64,16,1,1,4,16,1,2,0,0";
+  const std::string gemmFar = "gemm:mPerBlock=32,nPerBlock=64,kPerBlock=16";
+  const std::string gemmIllegal = "gemm:v4:128,64,16,1,1,4,16,1,2,0,0";
+  const std::string gemmQuery = gemmProblem("f16", 96, 128, 256);
+  std::vector<ProblemCacheConvEntry> gemms = {
+      {gemmProblem("f16", 80, 128, 256), gemmIllegal},
+      {gemmProblem("f16", 64, 128, 256), gemmNear},
+      {gemmProblem("f16", 256, 128, 256), gemmFar},
+  };
+  hit = mlir::hip::findNearestConvTune(gemmQuery, gemms);
+  expect(hit.has_value() && !hit->exact && hit->solution == gemmNear,
+         "gemm M=96 skips an oversized closer tile for M=64");
+
+  hit = mlir::hip::findNearestConvTune(gemmProblem("f32", 96, 128, 256), gemms);
+  expect(!hit.has_value(), "gemm f32 does not borrow an f16 row");
+
+  hit = mlir::hip::findNearestConvTune(gemmProblem("f16", 96, 128, 256, "true"),
+                                      gemms);
+  expect(!hit.has_value(), "gemm transB is a different group");
+
+  int64_t dimM = 0, dimN = 0, dimK = 0;
+  expect(mlir::hip::implicitGemmDims(gemmQuery, dimM, dimN, dimK) &&
+             dimM == 96 && dimN == 128 && dimK == 256,
+         "gemm problem string reports M, N, and K");
+
+  const std::string attnNear = "attn:v1:64,32,32,1,1,4,16,1,1,0,0";
+  const std::string attnIllegal = "attn:v1:256,32,32,1,1,4,16,1,1,0,0";
+  const std::string attnQuery = attnProblem(200, 128);
+  std::vector<ProblemCacheConvEntry> attns = {
+      {attnProblem(180, 128), attnIllegal},
+      {attnProblem(128, 128), attnNear},
+      {attnProblem(512, 128), "attn:v1:32,32,32,1,1,4,16,1,1,0,0"},
+  };
+  hit = mlir::hip::findNearestConvTune(attnQuery, attns);
+  expect(hit.has_value() && !hit->exact && hit->solution == attnNear,
+         "attention seq 200 skips an oversized closer tile for seq 128");
+
+  hit = mlir::hip::findNearestConvTune(attnProblem(200, 128, "true"), attns);
+  expect(!hit.has_value(), "attention causal is a different group");
+
+  hit = mlir::hip::findNearestConvTune(attnProblem(200, 128, "false", 128),
+                                      attns);
+  expect(!hit.has_value(), "attention head dim is a different group");
+
+  hit = mlir::hip::findNearestConvTune(attnQuery, gemms);
+  expect(!hit.has_value(), "attention does not borrow a gemm row");
+
+  const std::string gegNear = "attn:v1:32,64,16,1,1,4,16,1,1,0,0";
+  const std::string gegIllegal = "attn:v6:32,64,128,16,1,1,4,16,1,1,0,0";
+  const std::string gegQuery = gegProblem(96, 128, 64, 64);
+  std::vector<ProblemCacheConvEntry> gegs = {
+      {gegProblem(80, 128, 64, 64), gegIllegal},
+      {gegProblem(64, 128, 64, 64), gegNear},
+      {gegProblem(256, 128, 64, 32), "attn:v1:16,64,16,1,1,4,16,1,1,0,0"},
+  };
+  hit = mlir::hip::findNearestConvTune(gegQuery, gegs);
+  expect(hit.has_value() && !hit->exact && hit->solution == gegNear,
+         "gemm-elementwise-gemm skips a second-GEMM tile that does not fit");
+
+  hit = mlir::hip::findNearestConvTune(gegProblem(96, 128, 64, 64, "true"),
+                                      gegs);
+  expect(!hit.has_value(), "gemm-elementwise-gemm transC is a different group");
+
   namespace fbs = hipdnn_ep::rocmlir_autotune::fbs;
   flatbuffers::FlatBufferBuilder builder;
   auto tileOff = builder.CreateString(tile32);
@@ -157,11 +251,11 @@ int main() {
   auto kernelAbi = builder.CreateString("rocmlir-conv-v1");
   auto modelKey = builder.CreateString("");
   std::vector<flatbuffers::Offset<fbs::RocmlirTuneFallback>> fallbacks;
-  auto table = fbs::CreateRocmlirAutotuneLut(
+  auto lutOff = fbs::CreateRocmlirAutotuneLut(
       builder, 1, gpuArch, 0, kernelAbi, modelKey, 1.0f, 1.0f, 1.0f,
       builder.CreateVector(configs), builder.CreateVector(points),
       builder.CreateVector(fallbacks));
-  fbs::FinishRocmlirAutotuneLutBuffer(builder, table);
+  fbs::FinishRocmlirAutotuneLutBuffer(builder, lutOff);
 
   mlir::hip::ProblemCacheLut loaded;
   std::string error;
@@ -169,7 +263,8 @@ int main() {
                                         builder.GetSize(), loaded, error),
          "RCAL buffer loads");
   expect(loaded.entries.size() == 2 && loaded.entries[0].solution == tile32 &&
-             loaded.entries[1].solution == gemmTile && loaded.weightM == 1.0f,
+             loaded.entries[1].solution == gemmTile && loaded.weightM == 1.0f &&
+             loaded.gpuArch == "gfx1151",
          "loader keeps conv and gemm rows and drops a non-gemm config");
 
   const uint8_t garbage[] = {1, 2, 3, 4};

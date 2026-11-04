@@ -482,6 +482,10 @@ struct RocMlirAutotuner::Impl {
   rock::TuningParamSetKind kind;
   AutotunePhaseTimes times;
   bool usable = false;
+  // Chip the benchmarks run on, without the target triple suffix. Shipped
+  // tables whose gpu_arch is a different device are skipped.
+  std::string deviceGfx;
+  bool fileCacheArchWarned = false;
 
   // Winners for this compile, same role as MIGraphX's problem cache. The first
   // kernel with a given problem key is searched; every other kernel with that
@@ -573,6 +577,10 @@ struct RocMlirAutotuner::Impl {
   bool compileAndBenchmarkSearches(llvm::StringMap<CompiledKernel> &byKernel);
   bool compileDeferredCacheHits(llvm::StringMap<CompiledKernel> &byKernel);
   const ProblemCacheLut &loadedProblemCache();
+  bool problemCacheActive() const;
+  std::optional<std::string>
+  lookupProblemCache(StringRef problem,
+                     const std::vector<std::string> &rejected);
   bool dumpProblemCache(StringRef path) const;
   bool finish(llvm::StringMap<CompiledKernel> &byKernel) {
     return compileAndBenchmarkSearches(byKernel) &&
@@ -672,6 +680,7 @@ bool RocMlirAutotuner::Impl::checkDevice() {
     return false;
   StringRef requestedArch = StringRef(arch).split(':').first;
   StringRef deviceArch = StringRef(properties.gcnArchName).split(':').first;
+  deviceGfx = deviceArch.str();
   if (requestedArch != deviceArch)
     llvm::errs() << "warning: autotuning for " << requestedArch << " on device "
                  << deviceArch << "; compiled candidates may not load\n";
@@ -864,6 +873,74 @@ bool RocMlirAutotuner::Impl::pickWinner(
   return true;
 }
 
+// Generated from tools/problem-cache/lut/*.fb. One blob per checked-in arch.
+// Present only in the real autotune build; the stub does not reference them.
+extern "C" const unsigned char *const kRocmlirProblemCacheBlobs[];
+extern "C" const size_t kRocmlirProblemCacheBlobSizes[];
+extern "C" const size_t kRocmlirProblemCacheBlobCount;
+
+static const std::vector<ProblemCacheLut> &shippedProblemCaches() {
+  static const std::vector<ProblemCacheLut> luts = [] {
+    std::vector<ProblemCacheLut> loaded;
+    loaded.reserve(kRocmlirProblemCacheBlobCount);
+    for (size_t i = 0; i < kRocmlirProblemCacheBlobCount; ++i) {
+      ProblemCacheLut lut;
+      std::string error;
+      if (!loadProblemCacheLut(kRocmlirProblemCacheBlobs[i],
+                               kRocmlirProblemCacheBlobSizes[i], lut, error)) {
+        llvm::errs() << "warning: shipped problem cache: " << error << "\n";
+        continue;
+      }
+      loaded.push_back(std::move(lut));
+    }
+    return loaded;
+  }();
+  return luts;
+}
+
+bool RocMlirAutotuner::Impl::problemCacheActive() const {
+  return kRocmlirProblemCacheBlobCount != 0 ||
+         !options.problemCachePath.empty();
+}
+
+std::optional<std::string> RocMlirAutotuner::Impl::lookupProblemCache(
+    StringRef problem, const std::vector<std::string> &rejected) {
+  const auto search = [&](const ProblemCacheLut &lut)
+      -> std::optional<std::string> {
+    if ((!lut.gpuArch.empty() && lut.gpuArch != deviceGfx) ||
+        lut.entries.empty())
+      return std::nullopt;
+    std::optional<NearestConvTuneHit> hit = findNearestConvTune(
+        std::string_view(problem.data(), problem.size()), lut.entries,
+        rejected, lut.weightM, lut.weightN, lut.weightK);
+    if (!hit)
+      return std::nullopt;
+    if (log())
+      *log() << options.logPrefix << " nearest-tune "
+             << (hit->exact ? "exact" : "nearest") << " d="
+             << llvm::format("%.3f", hit->distance) << " matched "
+             << hit->matchedProblem << " -> " << hit->solution << "\n";
+    return std::move(hit->solution);
+  };
+  for (const ProblemCacheLut &lut : shippedProblemCaches()) {
+    if (std::optional<std::string> solution = search(lut))
+      return solution;
+  }
+  if (!options.problemCachePath.empty()) {
+    const ProblemCacheLut &lut = loadedProblemCache();
+    if (!lut.gpuArch.empty() && lut.gpuArch != deviceGfx) {
+      if (!fileCacheArchWarned) {
+        llvm::errs() << "warning: problem cache is for " << lut.gpuArch
+                     << ", device is " << deviceGfx << "; ignoring it\n";
+        fileCacheArchWarned = true;
+      }
+    } else if (std::optional<std::string> solution = search(lut)) {
+      return solution;
+    }
+  }
+  return std::nullopt;
+}
+
 bool RocMlirAutotuner::Impl::autotuneKernel(ModuleOp module,
                                             StringRef kernelName,
                                             CompiledKernel &out,
@@ -875,63 +952,55 @@ bool RocMlirAutotuner::Impl::autotuneKernel(ModuleOp module,
   }
   ensureDialectsLoaded();
 
-  // Look up before building the search space. A known winner is compiled in
-  // the second pool. A problem already queued in this compile waits for that
-  // same pool once the search has been benchmarked. A later compile failure
-  // drops the entry and searches, so a config that won for a different
-  // epilogue cannot fail this kernel. A local problem cache fills a miss
-  // with the nearest legal conv tile. A tile that fails to compile is skipped
-  // and the next nearest is tried. When none remain, the search runs.
+  // Look up before building the search space. Order is the shipped
+  // lut/<arch>.fb, then --problem-cache, then this compile's winner cache,
+  // then the selected tuning space. A known winner is compiled in the second
+  // pool. A problem already queued in this compile waits for that pool once
+  // the search has been benchmarked. A tile that fails to compile is skipped
+  // and the next nearest row is tried. When none remain, the search runs.
   llvm::SmallString<2048> problem;
   std::string cacheKey;
   if (succeeded(rock::getTuningProblemStr(module, problem))) {
     cacheKey = cacheKeyFor(problem);
+    const bool cacheActive = problemCacheActive();
     bool retryNearest = true;
     while (retryNearest) {
       retryNearest = false;
-      auto cached = winnerCache.find(cacheKey);
-      if (cached == winnerCache.end() && !options.problemCachePath.empty()) {
-        const ProblemCacheLut &lut = loadedProblemCache();
-        if (auto hit = findNearestConvTune(
-                std::string_view(problem.data(), problem.size()), lut.entries,
-                rejectedSolutions[cacheKey], lut.weightM, lut.weightN,
-                lut.weightK)) {
-          if (log())
-            *log() << options.logPrefix << " nearest-tune "
-                   << (hit->exact ? "exact" : "nearest") << " d="
-                   << llvm::format("%.3f", hit->distance) << " matched "
-                   << hit->matchedProblem << " -> " << hit->solution << "\n";
-          winnerCache[cacheKey] = std::move(hit->solution);
-        }
-        cached = winnerCache.find(cacheKey);
+      std::string chosen;
+      if (std::optional<std::string> fromLut = lookupProblemCache(
+              problem, rejectedSolutions[cacheKey])) {
+        chosen = std::move(*fromLut);
+        winnerCache[cacheKey] = chosen;
+      } else if (auto cached = winnerCache.find(cacheKey);
+                 cached != winnerCache.end()) {
+        chosen = cached->getValue();
       }
-      if (cached == winnerCache.end())
+      if (chosen.empty())
         break;
       if (deferCacheHits) {
         DeferredCacheHit hit;
         hit.kernelName = kernelName.str();
         hit.rockModule = std::move(rockModule);
-        hit.perfConfig = cached->getValue();
+        hit.perfConfig = std::move(chosen);
         hit.cacheKey = std::move(cacheKey);
         cacheHits.push_back(std::move(hit));
         return true;
       }
       const auto compileStart = std::chrono::steady_clock::now();
-      bool ok = compilePerfConfig(rockModule, arch, cached->getValue(), out);
+      bool ok = compilePerfConfig(rockModule, arch, chosen, out);
       times.perfConfigCompileMs += millisecondsSince(compileStart);
       if (ok)
         return true;
-      std::string failed = cached->getValue();
       llvm::errs() << "warning: cached perfConfig failed to compile for '"
                    << kernelName << "'";
-      if (!options.problemCachePath.empty())
+      if (cacheActive)
         llvm::errs() << "; trying the next problem-cache tile\n";
       else
         llvm::errs() << "; searching the " << autotuneSpaceName(options.space)
                      << " space\n";
-      rejectedSolutions[cacheKey].push_back(std::move(failed));
+      rejectedSolutions[cacheKey].push_back(std::move(chosen));
       winnerCache.erase(cacheKey);
-      if (!options.problemCachePath.empty())
+      if (cacheActive)
         retryNearest = true;
     }
     if (deferCacheHits && searchesInFlight.count(cacheKey)) {
@@ -1119,7 +1188,7 @@ bool RocMlirAutotuner::Impl::compileDeferredCacheHits(
     }
     llvm::errs() << "warning: cached perfConfig failed to compile for '"
                  << hit.kernelName << "'";
-    if (!options.problemCachePath.empty())
+    if (problemCacheActive())
       llvm::errs() << "; trying the next problem-cache tile\n";
     else
       llvm::errs() << "; searching the " << autotuneSpaceName(options.space)

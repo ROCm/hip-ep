@@ -132,8 +132,8 @@ set_target_properties(test-adaptive-benchmark PROPERTIES
   FOLDER "mlir/Test/Compiler"
 )
 
-# Problem-cache lookup. GPU-free: the test builds an MXPC buffer in memory
-# and checks exact string hits, nearest conv tiles, and dtype mismatches.
+# Problem-cache lookup. GPU-free: the test builds an RCAL buffer in memory
+# and checks exact string hits, nearest tiles, and group mismatches.
 add_executable(test-nearest-conv-tune
   test_nearest_conv_tune.cpp
   ${CMAKE_SOURCE_DIR}/tools/problem-cache/nearest_conv_tune.cpp

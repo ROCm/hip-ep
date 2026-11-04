@@ -3,24 +3,32 @@
  * Licensed under the MIT License.
  */
 
-// Nearest rocMLIR conv tile from a problem-cache table.
+// Nearest rocMLIR tile from a problem-cache table.
 //
 // Same shape as the MatMulNBits LUT: a hard group, then one weighted log2
-// distance. Arch, conv kind, -F, layouts, stride, dilation, and the fusion
-// suffix (-inputFusions, -outputFusions, -supportsSplitK) must match. Inside
-// that group the distance is over the implicit GEMM:
+// distance. The weights live in the .fb (`weight_m/n/k`), defaulting to 1.
+// A miss only searches rows of the same kernel kind.
 //
-//   M = K_out
-//   N = batch * out_h * out_w
-//   K = (C / groups) * filter_h * filter_w
-//   d = sqrt(wM*log2(M)^2 + wN*log2(N)^2 + wK*log2(K)^2)
+// Conv. Arch, conv kind, -F, layouts, stride, dilation, and the fusion
+// suffix must match. The distance is the implicit GEMM:
+//   M = K_out, N = batch * out_h * out_w,
+//   K = (C / groups) * filter_h * filter_w.
 //
-// The distance weights live in the .fb (`weight_m/n/k`), defaulting to 1.
-// The neighbor supplies only its gemm:/attn: perfConfig. An identical problem
-// string is returned as stored, including a gemm key: that tile already
-// compiled for this kernel. tileLegal applies only when borrowing a neighbor.
-// `rejectedSolutions` are tiles that already failed to compile; the next
-// nearest legal row is returned.
+// Gemm. Arch, datatype, output datatype, transposes, scaled-gemm flags,
+// -g, and the fusion suffix must match. The distance is -m, -n, -k.
+//
+// Attention. Arch, datatype, transposes, causal, LSE, split-KV, sliding
+// window, head counts, head dims, scale/bias, and the fusion suffix must
+// match. The distance is -seq_len_q and -seq_len_k.
+//
+// GemmElementwiseGemm. Arch, datatype, the four transposes, -g, and the
+// fusion suffix must match. The distance is -m, -n, -k, and -gemmO. The
+// fourth axis uses weight_n.
+//
+// The neighbor supplies only its gemm:/attn: perfConfig. An identical
+// problem string is returned as stored. The block-size check applies only
+// when borrowing a neighbor. `rejectedSolutions` are tiles that already
+// failed to compile; the next nearest legal row is returned.
 
 #ifndef HIP_PROBLEM_CACHE_NEAREST_CONV_TUNE_H
 #define HIP_PROBLEM_CACHE_NEAREST_CONV_TUNE_H
@@ -41,8 +49,10 @@ struct ProblemCacheConvEntry {
 };
 
 // One loaded .fb. `entries` are the gemm:/attn: points; other perfConfigs are
-// dropped. Weights are the table's log-space metric.
+// dropped. Weights are the table's log-space metric. `gpuArch` is the table's
+// gpu_arch; empty means the table is not restricted to one device.
 struct ProblemCacheLut {
+  std::string gpuArch;
   float weightM = 1.0f;
   float weightN = 1.0f;
   float weightK = 1.0f;
@@ -52,18 +62,19 @@ struct ProblemCacheLut {
 struct NearestConvTuneHit {
   std::string solution;
   std::string matchedProblem;
-  // Weighted log2 distance. Zero when M, N, and K all match.
+  // Weighted log2 distance. Zero when every distance axis matches.
   float distance = 0;
   bool exact = false;
 };
 
-// Implicit GEMM of a conv problem string. False, and m/n/k left at 0, when
-// `problem` is not a conv. The dump writes these into each LUT point.
+// Primary M, N, and K of a conv, gemm, attention, or gemm-elementwise-gemm
+// problem string. False, and m/n/k left at 0, for any other string. The dump
+// writes these into each LUT point. The lookup re-parses the problem string
+// and does not read the stored values.
 bool implicitGemmDims(std::string_view problem, int64_t &m, int64_t &n,
                       int64_t &k);
 
-// Rows whose perfConfig is gemm:/attn:. Anything else is skipped. Gemm
-// problem keys are kept so an exact string match can hit them.
+// Rows whose perfConfig is gemm:/attn:. Anything else is skipped.
 bool loadProblemCacheLut(const uint8_t *data, size_t size, ProblemCacheLut &lut,
                          std::string &error);
 
