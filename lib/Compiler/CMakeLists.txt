@@ -51,14 +51,16 @@ if(ENABLE_ROCMLIRTRITON)
     # it so a standard MLIR dependency does not hinge on that.
     MLIRFuncTransforms
   )
-  # Triton libraries are OBJECT libraries (add_triton_object) whose interface
-  # publishes $<TARGET_OBJECTS>. Linking that interface into this STATIC
-  # library re-exports the objects, so every WHOLE_ARCHIVE'd plugin that links
-  # LibHipCompiler (HipCInterface, custom-op-mlir, level-1-pass) archives its
-  # own copy, and the EP link also receives the objects directly. MSVC then
-  # reports LNK2005. Archive the objects into this library only, and leave the
-  # non-object closure for final binaries (see hip_link_rocmlir_closure).
-  set(_rocmlir_objects "")
+  # Triton libraries are OBJECT libraries whose interface publishes
+  # $<TARGET_OBJECTS>. Putting those objects into this STATIC library makes
+  # CMake re-export them, so every WHOLE_ARCHIVE'd plugin that links
+  # LibHipCompiler archives its own copy and the final link also gets the
+  # loose objects (LNK2005 / multiple definition). Keep the objects off this
+  # archive. Final binaries add them once (see hip_link_rocmlir_closure).
+  # The non-object closure is also linked only from those binaries, and on
+  # GNU ld it has to come after this archive: a RESCAN group placed earlier
+  # is not searched again for symbols this archive introduces.
+  set(_rocmlir_object_targets "")
   set(_rocmlir_static "")
   foreach(_lib IN LISTS HIPDNN_ROCMLIR_LINK_LIBS)
     if(NOT TARGET "${_lib}")
@@ -66,7 +68,7 @@ if(ENABLE_ROCMLIRTRITON)
     endif()
     get_target_property(_rocmlir_type "${_lib}" TYPE)
     if(_rocmlir_type STREQUAL "OBJECT_LIBRARY")
-      list(APPEND _rocmlir_objects "$<TARGET_OBJECTS:${_lib}>")
+      list(APPEND _rocmlir_object_targets "${_lib}")
     else()
       list(APPEND _rocmlir_static "${_lib}")
     endif()
@@ -75,9 +77,8 @@ if(ENABLE_ROCMLIRTRITON)
     target_compile_definitions(LibHipCompiler PRIVATE
       $<TARGET_PROPERTY:${_lib},INTERFACE_COMPILE_DEFINITIONS>)
   endforeach()
-  if(_rocmlir_objects)
-    target_sources(LibHipCompiler PRIVATE ${_rocmlir_objects})
-  endif()
+  set(HIPDNN_ROCMLIR_OBJECT_LINK_LIBS "${_rocmlir_object_targets}" CACHE INTERNAL
+      "Triton OBJECT libraries added once, on final binaries only" FORCE)
   set(HIPDNN_ROCMLIR_STATIC_LINK_LIBS "${_rocmlir_static}" CACHE INTERNAL
       "Non-object rocMLIR/Triton libraries linked by final binaries" FORCE)
   # TritonToHsaco dlopens this library by name at kernel-compile time. The
@@ -258,23 +259,45 @@ if(TARGET hipdnn_graph_runtime)
     target_link_libraries(LibHipCompiler PUBLIC OnnxToHipDNN)
 endif()
 
-# Final binaries link the non-object rocMLIR/Triton libraries once. Static
-# plugins must not: archiving those objects into more than one WHOLE_ARCHIVE
-# input duplicates them in hipgpu.dll (LNK2005 / multiple definition).
+# Final binaries take the Triton objects and the non-object closure. Static
+# plugins must not: a second copy in a WHOLE_ARCHIVE input duplicates the
+# objects in hipgpu.dll (LNK2005 / multiple definition).
 function(hip_link_rocmlir_closure target)
   if(NOT ENABLE_ROCMLIRTRITON)
     return()
   endif()
+  # One copy of each Triton object, on this binary only. Not archived into
+  # LibHipCompiler, so plugins that link that library do not absorb them.
+  foreach(_lib IN LISTS HIPDNN_ROCMLIR_OBJECT_LINK_LIBS)
+    if(NOT TARGET "${_lib}")
+      continue()
+    endif()
+    target_sources("${target}" PRIVATE "$<TARGET_OBJECTS:${_lib}>")
+  endforeach()
   if("${HIPDNN_ROCMLIR_STATIC_LINK_LIBS}" STREQUAL "")
     return()
   endif()
-  # rocMLIR/Triton's static archives have circular dependencies, so a
-  # single-pass link leaves undefined symbols. GNU/BSD-style linkers need an
-  # explicit RESCAN group; MSVC-style linkers rescan automatically and do not
-  # support the feature.
+  # rocMLIR's static archives have circular dependencies, and LibHipCompiler
+  # (already on the link line) is what references them. CMake's LINK_GROUP is
+  # ordered with the rest of the link interface, which on GNU ld is before
+  # that archive, so the group is never searched for the new undefined
+  # symbols. LINK_OPTIONS are emitted after the libraries. MSVC rescans on
+  # its own and has no --start-group.
   if(CMAKE_LINK_GROUP_USING_RESCAN_SUPPORTED)
-    target_link_libraries("${target}" PRIVATE
-      "$<LINK_GROUP:RESCAN,${HIPDNN_ROCMLIR_STATIC_LINK_LIBS}>")
+    set(_rocmlir_group_files "")
+    set(_rocmlir_group_deps "")
+    foreach(_lib IN LISTS HIPDNN_ROCMLIR_STATIC_LINK_LIBS)
+      if(NOT TARGET "${_lib}")
+        continue()
+      endif()
+      list(APPEND _rocmlir_group_deps "${_lib}")
+      list(APPEND _rocmlir_group_files "$<TARGET_FILE:${_lib}>")
+    endforeach()
+    if(_rocmlir_group_deps)
+      add_dependencies("${target}" ${_rocmlir_group_deps})
+      target_link_options("${target}" PRIVATE
+        "LINKER:--start-group" ${_rocmlir_group_files} "LINKER:--end-group")
+    endif()
   else()
     target_link_libraries("${target}" PRIVATE ${HIPDNN_ROCMLIR_STATIC_LINK_LIBS})
   endif()

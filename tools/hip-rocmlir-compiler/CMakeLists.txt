@@ -24,10 +24,9 @@ add_dependencies(hip-rocmlir-compiler
 # executable (ENABLE_ROCMLIRTRITON), so its pipeline/tuning libraries are
 # called in-process -- no dlopen, no serialized-IR hand-off.
 #
-# LibHipCompiler archives the Triton OBJECT libraries. Linking them again here
-# would duplicate those symbols. The non-object closure is linked once, and
-# the includes are applied directly because this executable includes rocMLIR
-# headers (mlir/Dialect/Rock/*).
+# hip_link_rocmlir_closure adds the Triton objects once and appends the
+# non-object archives after LibHipCompiler. The includes are applied directly
+# because this executable includes rocMLIR headers (mlir/Dialect/Rock/*).
 hip_rocmlir_apply_includes(hip-rocmlir-compiler)
 hip_link_rocmlir_closure(hip-rocmlir-compiler)
 target_link_libraries(hip-rocmlir-compiler PRIVATE
