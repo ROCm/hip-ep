@@ -961,8 +961,8 @@ int wrap_group_query_attention_v2(
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
     int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
     int64_t seq_len_new_kv, int32_t has_host_length, int32_t host_length_value,
-    int64_t past_key_width, int64_t past_value_width,
-    int64_t present_key_width, int64_t present_value_width);
+    int64_t past_key_width, int64_t past_value_width, int64_t present_key_width,
+    int64_t present_value_width);
 
 // MultiHeadAttention operation wrapper (com.microsoft.MultiHeadAttention v1).
 // Called by generated IR for onnx.Custom(MultiHeadAttention) lowering.
