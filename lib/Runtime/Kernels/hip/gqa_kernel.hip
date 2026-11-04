@@ -266,13 +266,10 @@ __global__ void rope_kernel(
     const T* __restrict__ sin_cache,
     int seq_len, int num_heads, int head_dim,
     int half_rot, int past_len,
-    const int* __restrict__ seqlens_k) {
+    const int* __restrict__ seqlens_k,
+    const int64_t* __restrict__ position_ids, int max_position) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   const int batch_idx = __builtin_amdgcn_readfirstlane(blockIdx.y);
-  // When seqlens_k is provided, read past_len from device memory
-  // (ORT convention: seqlens_k[b] = total_tokens - 1, so past_len = total - sq).
-  // All threads read the same address; hardware coalesces into a broadcast.
-  int eff_past_len = seqlens_k ? (seqlens_k[batch_idx] + 1 - seq_len) : past_len;
   int elems = seq_len * num_heads * half_rot;
   if (idx >= elems) return;
 
@@ -282,7 +279,21 @@ __global__ void rope_kernel(
   int s = remaining / num_heads;
   if (s >= seq_len) return;
 
-  int pos = eff_past_len + s;
+  // position_ids wins when given. Otherwise read past_len from device memory
+  // (ORT convention: seqlens_k[b] = total_tokens - 1, so past_len = total - sq).
+  // All threads read the same address; hardware coalesces into a broadcast.
+  // Like RotaryEmbedding, clamp into the cache rows [0, max_position); clamp
+  // before narrowing so a large int64 position cannot wrap into range.
+  int64_t raw_pos;
+  if (position_ids) {
+    raw_pos = position_ids[batch_idx * seq_len + s];
+  } else {
+    int eff_past_len =
+        seqlens_k ? (seqlens_k[batch_idx] + 1 - seq_len) : past_len;
+    raw_pos = static_cast<int64_t>(eff_past_len) + s;
+  }
+  const int pos = static_cast<int>(
+      raw_pos < 0 ? 0 : (raw_pos >= max_position ? max_position - 1 : raw_pos));
   int base = ((batch_idx * seq_len + s) * num_heads + h) * head_dim;
 
   float x1 = gqa_to_float<T>(input[base + d]);
@@ -819,14 +830,16 @@ static void launch_rope(
     hipStream_t stream, const void* input, void* output,
     const void* cos_cache, const void* sin_cache,
     int batch_size, int seq_len, int num_heads,
-    int head_dim, int half_rot, int past_len, const void* seqlens_k) {
+    int head_dim, int half_rot, int past_len, const void* seqlens_k,
+    const void* position_ids, int max_position) {
   int elems = seq_len * num_heads * half_rot;
   int blocks = (elems + GQA_THREADS - 1) / GQA_THREADS;
   rope_kernel<T><<<dim3(blocks, batch_size), GQA_THREADS, 0, stream>>>(
       static_cast<const T*>(input), static_cast<T*>(output),
       static_cast<const T*>(cos_cache), static_cast<const T*>(sin_cache),
       seq_len, num_heads, head_dim, half_rot, past_len,
-      static_cast<const int*>(seqlens_k));
+      static_cast<const int*>(seqlens_k),
+      static_cast<const int64_t*>(position_ids), max_position);
 }
 
 template <typename T>
@@ -918,11 +931,18 @@ extern "C" int hip_gqa_rope(
     const void* cos_cache, const void* sin_cache,
     int batch_size, int seq_len, int num_heads,
     int head_dim, int half_rot, int past_len,
-    const void* seqlens_k, int element_size_bytes) {
+    const void* seqlens_k, const void* position_ids, int max_position,
+    int element_size_bytes) {
+  if (max_position <= 0) {
+    fprintf(stderr, "hip_gqa_rope: max_position=%d must be positive\n",
+            max_position);
+    return -1;
+  }
   hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
   GQA_DISPATCH_BY_ELEM_SIZE(element_size_bytes, launch_rope, stream, input,
                             output, cos_cache, sin_cache, batch_size, seq_len,
-                            num_heads, head_dim, half_rot, past_len, seqlens_k);
+                            num_heads, head_dim, half_rot, past_len, seqlens_k,
+                            position_ids, max_position);
   GQA_RETURN_LAUNCH_STATUS();
 }
 

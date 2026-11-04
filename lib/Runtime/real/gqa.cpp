@@ -490,7 +490,8 @@ static int gqa_forward_fused(
     std::optional<int32_t> host_length = std::nullopt,
     // [key_bias_batch, key_bias_len] fp16 per-key additive bias, or null.
     const void *key_bias = nullptr, int64_t key_bias_batch = 0,
-    int64_t key_bias_len = 0) {
+    int64_t key_bias_len = 0, const void *position_ids = nullptr,
+    int rotary_max_position = 0) {
   // One row per batch entry, or one row shared by all of them.
   const int key_bias_stride =
       key_bias && key_bias_batch > 1 ? static_cast<int>(key_bias_len) : 0;
@@ -612,14 +613,14 @@ static int gqa_forward_fused(
       if (hip_gqa_rope(stream, qSrc, d_Qroped, cos_cache, sin_cache,
                        static_cast<int>(B), static_cast<int>(sq),
                        static_cast<int>(H), static_cast<int>(d), half_rot,
-                       static_cast<int>(past_len), seqlens_k_ptr,
-                       static_cast<int>(elem_sz)) != 0)
+                       static_cast<int>(past_len), seqlens_k_ptr, position_ids,
+                       rotary_max_position, static_cast<int>(elem_sz)) != 0)
         return -1;
       if (hip_gqa_rope(stream, kSrc, d_Kroped, cos_cache, sin_cache,
                        static_cast<int>(B), static_cast<int>(sq),
                        static_cast<int>(G), static_cast<int>(d), half_rot,
-                       static_cast<int>(past_len), seqlens_k_ptr,
-                       static_cast<int>(elem_sz)) != 0)
+                       static_cast<int>(past_len), seqlens_k_ptr, position_ids,
+                       rotary_max_position, static_cast<int>(elem_sz)) != 0)
         return -1;
       qSrc = d_Qroped;
       kSrc = d_Kroped; // V is never RoPE'd.
@@ -819,14 +820,14 @@ static int gqa_forward_fused(
     if (hip_gqa_rope(stream, qSrc, d_Qroped, cos_cache, sin_cache,
                      static_cast<int>(B), static_cast<int>(sq),
                      static_cast<int>(H), static_cast<int>(d), half_rot,
-                     static_cast<int>(past_len), nullptr,
-                     static_cast<int>(elem_sz)) != 0)
+                     static_cast<int>(past_len), nullptr, position_ids,
+                     rotary_max_position, static_cast<int>(elem_sz)) != 0)
       return -1;
     if (hip_gqa_rope(stream, kSrc, d_Kroped, cos_cache, sin_cache,
                      static_cast<int>(B), static_cast<int>(sq),
                      static_cast<int>(G), static_cast<int>(d), half_rot,
-                     static_cast<int>(past_len), nullptr,
-                     static_cast<int>(elem_sz)) != 0)
+                     static_cast<int>(past_len), nullptr, position_ids,
+                     rotary_max_position, static_cast<int>(elem_sz)) != 0)
       return -1;
     qSrc = d_Qroped;
     kSrc = d_Kroped; // V is never RoPE'd.
@@ -1355,7 +1356,8 @@ static int gqa_forward_hipblaslt(
     // total_seq and element_size_bytes. A query extent of 1 is a per-key row
     // that every query row shares (hip.gqa's key_bias).
     int64_t attn_bias_sq = 0, int64_t attn_bias_total = 0,
-    int64_t attn_bias_elem = 0) {
+    int64_t attn_bias_elem = 0, const void *position_ids = nullptr,
+    int rotary_max_position = 0) {
 
   void *const out_present_key = present_key;
   void *const out_present_value = present_value;
@@ -1584,14 +1586,14 @@ static int gqa_forward_hipblaslt(
       if (hip_gqa_rope(stream, qSrc, d_Qroped, cos_cache, sin_cache,
                        static_cast<int>(B), static_cast<int>(sq),
                        static_cast<int>(H), static_cast<int>(d), half_rot,
-                       static_cast<int>(past_len), seqlens_k_ptr,
-                       static_cast<int>(elem_sz)) != 0)
+                       static_cast<int>(past_len), seqlens_k_ptr, position_ids,
+                       rotary_max_position, static_cast<int>(elem_sz)) != 0)
         return -1;
       if (hip_gqa_rope(stream, kSrc, d_Kroped, cos_cache, sin_cache,
                        static_cast<int>(B), static_cast<int>(sq),
                        static_cast<int>(G), static_cast<int>(d), half_rot,
-                       static_cast<int>(past_len), seqlens_k_ptr,
-                       static_cast<int>(elem_sz)) != 0)
+                       static_cast<int>(past_len), seqlens_k_ptr, position_ids,
+                       rotary_max_position, static_cast<int>(elem_sz)) != 0)
         return -1;
 
       qSrc = d_Qroped;
@@ -2441,15 +2443,15 @@ static int gqa_forward_hipblaslt(
       HIP_CHECK(hip_gqa_rope(stream, qSrc, d_Qroped, cos_cache, sin_cache,
                              static_cast<int>(B), static_cast<int>(sq),
                              static_cast<int>(H), static_cast<int>(d), half_rot,
-                             static_cast<int>(past_len), nullptr,
-                             static_cast<int>(elem_sz)));
+                             static_cast<int>(past_len), nullptr, position_ids,
+                             rotary_max_position, static_cast<int>(elem_sz)));
       qSrc = d_Qroped;
       if (!reuse_past_kv) {
-        HIP_CHECK(hip_gqa_rope(stream, kSrc, d_Kroped, cos_cache, sin_cache,
-                               static_cast<int>(B), static_cast<int>(sq),
-                               static_cast<int>(G), static_cast<int>(d),
-                               half_rot, static_cast<int>(past_len), nullptr,
-                               static_cast<int>(elem_sz)));
+        HIP_CHECK(hip_gqa_rope(
+            stream, kSrc, d_Kroped, cos_cache, sin_cache, static_cast<int>(B),
+            static_cast<int>(sq), static_cast<int>(G), static_cast<int>(d),
+            half_rot, static_cast<int>(past_len), nullptr, position_ids,
+            rotary_max_position, static_cast<int>(elem_sz)));
         kSrc = d_Kroped;
       }
     }
@@ -2918,7 +2920,8 @@ static int gqa_forward_fused_from_fp32(
     int64_t past_buf_seq, int64_t H, int64_t G, int64_t d, float scale,
     int64_t do_rotary, const void *k_scale, const void *v_scale,
     KvCacheFormat kv_format, const void *head_sink, bool use_smooth_softmax,
-    int local_window_size, std::optional<int32_t> host_length) {
+    int local_window_size, std::optional<int32_t> host_length,
+    int rotary_max_position) {
   const bool packed_qkv = (!key && !value);
   const bool need_rope = do_rotary && cos_cache && sin_cache;
 
@@ -2940,7 +2943,11 @@ static int gqa_forward_fused_from_fp32(
   const int64_t kv_elems = packed_qkv ? 0 : (B * sq * G * d);
   const int64_t out_elems = B * sq * H * d;
   const int64_t half_rot = d / 2;
-  const int64_t rope_elems = need_rope ? ((past_len + sq) * half_rot) : 0;
+  // Without position_ids, RoPE reads rows [past_len, past_len + sq), clamped
+  // to the cache rows; only those rows are converted.
+  const int64_t rope_rows =
+      std::min<int64_t>(past_len + sq, rotary_max_position);
+  const int64_t rope_elems = need_rope ? (rope_rows * half_rot) : 0;
 
   const size_t q_bytes = static_cast<size_t>(q_elems) * 2;
   const size_t k_bytes =
@@ -2984,7 +2991,9 @@ static int gqa_forward_fused_from_fp32(
       cos16 ? cos16 : cos_cache, sin16 ? sin16 : sin_cache, out16, present_key,
       present_value, B, sq, skv, past_buf_seq, H, G, d, scale, do_rotary,
       k_scale, v_scale, kv_format, head_sink, use_smooth_softmax,
-      local_window_size, host_length);
+      local_window_size, host_length, /*key_bias=*/nullptr,
+      /*key_bias_batch=*/0, /*key_bias_len=*/0, /*position_ids=*/nullptr,
+      static_cast<int>(rope_rows));
   if (rc != 0)
     return rc;
   return gqa_cast_f16_to_f32(stream, out16, output, out_elems);
@@ -3014,8 +3023,9 @@ int wrap_group_query_attention_host_length(
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
     int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
-    int64_t seq_len_new_kv, int32_t has_host_length, int32_t host_length_value,
-    void *key_bias, int64_t key_bias_batch, int64_t key_bias_len) {
+    int64_t seq_len_new_kv, int64_t rotary_max_position,
+    int32_t has_host_length, int32_t host_length_value, void *key_bias,
+    int64_t key_bias_batch, int64_t key_bias_len) {
   const std::optional<int32_t> host_length =
       has_host_length ? std::optional<int32_t>(host_length_value)
                       : std::nullopt;
@@ -3054,10 +3064,27 @@ int wrap_group_query_attention_host_length(
   // wrong results. present_key/present_value are required by both paths (the
   // legacy decomposed pipeline reads/writes them as the BNSD KV cache).
   //===------------------------------------------------------------------===//
-  if (position_ids != nullptr) {
-    fprintf(stderr, "wrap_group_query_attention: position_ids not supported\n");
+  // position_ids only selects the RoPE rows. Without do_rotary it has nothing
+  // to index, and every RoPE kernel here is half-rotated.
+  if (position_ids != nullptr && (!do_rotary || !cos_cache || !sin_cache)) {
+    fprintf(stderr, "wrap_group_query_attention: position_ids requires "
+                    "do_rotary with cos_cache/sin_cache\n");
     return -1;
   }
+  if (do_rotary && rotary_interleaved != 0) {
+    fprintf(stderr,
+            "wrap_group_query_attention: rotary_interleaved=1 not supported\n");
+    return -1;
+  }
+  // RoPE clamps every position into the cos/sin rows, so it needs at least
+  // one row.
+  if (do_rotary && cos_cache && sin_cache && rotary_max_position <= 0) {
+    fprintf(stderr,
+            "wrap_group_query_attention: cos_cache/sin_cache have no rows\n");
+    return -1;
+  }
+  const int rope_rows =
+      static_cast<int>(std::min<int64_t>(rotary_max_position, INT32_MAX));
   // attention_bias (onnx.Attention external mask) is intentionally NOT rejected
   // here: the legacy decomposed pipeline applies it (Step 8b in
   // gqa_forward_hipblaslt), and fused_supported below excludes it so masked
@@ -3124,7 +3151,6 @@ int wrap_group_query_attention_host_length(
     scale = 1.0f / sqrtf(static_cast<float>(head_dim));
 
   (void)total_seq_len;      // runtime derives total_seq from seqlens_k
-  (void)rotary_interleaved; // interleaved layout handled inside hip_gqa_rope
   (void)softcap;            // softcap not applied on either path
   (void)kv_cache_bit_width; // validated above for the int8 KV path
 
@@ -3230,6 +3256,13 @@ int wrap_group_query_attention_host_length(
   }
 
   if (fp32_int8_fused) {
+    // The adapter casts only the cos/sin rows [0, total_seq); position_ids may
+    // index any row.
+    if (position_ids != nullptr) {
+      fprintf(stderr, "wrap_group_query_attention: position_ids with an fp32 "
+                      "query over a quantized KV cache is not supported\n");
+      return -1;
+    }
     RUNTIME_DEBUG_LOG(
         "[REAL] wrap_group_query_attention: fp32->fp16 adapter onto fused "
         "(elem=%lld d=%lld sq=%lld packed=%d)\n",
@@ -3241,7 +3274,8 @@ int wrap_group_query_attention_host_length(
         cos_cache, sin_cache, output, present_key, present_value, batch_size,
         seq_len_q, seq_len_kv, past_buf_seq, num_heads, kv_num_heads, head_dim,
         scale, do_rotary, k_scale, v_scale, kv_format, head_sink,
-        has_smooth_softmax, static_cast<int>(local_window_size), host_length);
+        has_smooth_softmax, static_cast<int>(local_window_size), host_length,
+        rope_rows);
     if (arc != 0)
       fprintf(stderr,
               "wrap_group_query_attention: fp32 adapter / gqa_forward_fused "
@@ -3281,7 +3315,7 @@ int wrap_group_query_attention_host_length(
         no_causal != 0, element_size_bytes, op_state_slot, kv_bnsd != 0,
         reuse_past_kv, host_length,
         /*attn_bias_sq=*/kb ? 1 : 0, /*attn_bias_total=*/kb ? key_bias_len : 0,
-        /*attn_bias_elem=*/kb ? 2 : 0);
+        /*attn_bias_elem=*/kb ? 2 : 0, position_ids, rope_rows);
     if (lrc != 0)
       fprintf(stderr,
               "wrap_group_query_attention: legacy decomposed pipeline failed "
@@ -3304,7 +3338,7 @@ int wrap_group_query_attention_host_length(
       seq_len_q, seq_len_kv, past_buf_seq, num_heads, kv_num_heads, head_dim,
       scale, do_rotary, k_scale, v_scale, kv_format, head_sink,
       has_smooth_softmax, static_cast<int>(local_window_size), host_length,
-      key_bias, key_bias_batch, key_bias_len);
+      key_bias, key_bias_batch, key_bias_len, position_ids, rope_rows);
   if (rc != 0)
     fprintf(stderr,
             "wrap_group_query_attention: gqa_forward_fused failed "
@@ -3335,8 +3369,9 @@ int wrap_group_query_attention_ring_f16(
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
     int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
-    int64_t seq_len_new_kv, int32_t has_host_length, int32_t host_length_value,
-    void *key_bias, int64_t key_bias_batch, int64_t key_bias_len) {
+    int64_t seq_len_new_kv, int64_t rotary_max_position,
+    int32_t has_host_length, int32_t host_length_value, void *key_bias,
+    int64_t key_bias_batch, int64_t key_bias_len) {
 #if HIP_EP_RING_ENABLED != 0
   const std::optional<int32_t> host_length =
       has_host_length ? std::optional<int32_t>(host_length_value)
@@ -3376,6 +3411,7 @@ int wrap_group_query_attention_ring_f16(
       softcap, local_window_size, smooth_softmax, qk_output, k_quant_type,
       v_quant_type, kv_cache_bit_width, no_causal, batch_size, seq_len_q,
       seq_len_kv, past_buf_seq, head_dim, element_size_bytes, attn_bias_batch,
-      attn_bias_num_heads, kv_bnsd, seq_len_new_kv, has_host_length,
-      host_length_value, key_bias, key_bias_batch, key_bias_len);
+      attn_bias_num_heads, kv_bnsd, seq_len_new_kv, rotary_max_position,
+      has_host_length, host_length_value, key_bias, key_bias_batch,
+      key_bias_len);
 }

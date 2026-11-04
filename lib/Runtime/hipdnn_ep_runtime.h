@@ -913,6 +913,9 @@ int wrap_group_query_attention_host_length(
     // 0 with a causal past cache means the call appends nothing and attends
     // over past_key/past_value only (a layer sharing another layer's cache).
     int64_t seq_len_new_kv,
+    // Rows of cos_cache/sin_cache (0 without them). RoPE positions, from
+    // position_ids or seqlens_k, are clamped into [0, rotary_max_position).
+    int64_t rotary_max_position,
     // When has_host_length is 1, the compiler proves that host_length_value
     // equals seqlens_k[0] for batch one, including the valid -1 sentinel.
     // Otherwise the value is ignored and the runtime reads seqlens_k.
@@ -944,8 +947,9 @@ int wrap_group_query_attention_ring_f16(
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
     int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
-    int64_t seq_len_new_kv, int32_t has_host_length, int32_t host_length_value,
-    void *key_bias, int64_t key_bias_batch, int64_t key_bias_len);
+    int64_t seq_len_new_kv, int64_t rotary_max_position,
+    int32_t has_host_length, int32_t host_length_value, void *key_bias,
+    int64_t key_bias_batch, int64_t key_bias_len);
 
 // MultiHeadAttention operation wrapper (com.microsoft.MultiHeadAttention v1).
 // Called by generated IR for onnx.Custom(MultiHeadAttention) lowering.
