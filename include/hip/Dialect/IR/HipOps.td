@@ -4097,6 +4097,12 @@ def Hip_GqaOp : Hip_DpsOp_AutoReify<"gqa", [AttrSizedOperandSegments, OpStateOpI
     Optional<Hip_TensorOrMemRef>:$k_scale,        // Broadcastable to present_key shape
     Optional<Hip_TensorOrMemRef>:$v_scale,        // Broadcastable to present_value shape
 
+    // HIP extension (not in the MS spec): an additive fp16 bias per key,
+    // [batch, total_seq_len], added to every query row's scores on top of the
+    // causal and window masks. It carries a key-padding mask in a form the
+    // fused flash kernels apply directly, which a full attention_bias is not.
+    Optional<Hip_TensorOrMemRef>:$key_bias,
+
     // === DPS-style output buffers ===
     Hip_TensorOrMemRef:$output,        // 3D (batch, seq_len, hidden_size)
     Hip_TensorOrMemRef:$present_key,   // 4D BNSH format
@@ -4126,7 +4132,13 @@ def Hip_GqaOp : Hip_DpsOp_AutoReify<"gqa", [AttrSizedOperandSegments, OpStateOpI
     // Whisper / bidirectional-attention enabler: when true, the causal mask
     // step in the runtime is skipped. Default false preserves all existing
     // Llama / gpt-oss callers' behaviour.
-    DefaultValuedAttr<BoolAttr, "false">:$no_causal
+    DefaultValuedAttr<BoolAttr, "false">:$no_causal,
+
+    // HIP extension: every seqlens_k entry is total_seq_len - 1. A converter
+    // that broadcasts one host-computed length to [batch] on the device sets
+    // it, so HIP-to-LLVM can still forward the host-written total_seq_len and
+    // the runtime skips its seqlens_k readback.
+    UnitAttr:$uniform_seqlens_k
   );
 
   let assemblyFormat = [{
@@ -4159,6 +4171,7 @@ def Hip_GqaOp : Hip_DpsOp_AutoReify<"gqa", [AttrSizedOperandSegments, OpStateOpI
         ( `,` type($k_scale)^ )?
         ( `,` type($v_scale)^ )?
     `)`
+    ( `key_bias` `(` $key_bias^ `:` type($key_bias) `)` )?
     `outs` `(`
         $output `,` $present_key `,` $present_value
         ( `,` $output_qk^ )?
