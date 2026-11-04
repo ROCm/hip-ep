@@ -190,7 +190,7 @@ Those older binaries and measurements do not qualify current main. The
 retains its exact source revision and machine-readable samples. Multi-turn
 accuracy analysis and judge findings remain local pending author review.
 
-The latest merge sanity passed 692 compiler tests (nine unsupported), seven
+Merge `6e39e12` sanity passed 692 compiler tests (nine unsupported), seven
 selected runtime tests, 29 CPU tests, 54 Ring numeric cases and two host-length
 numeric tests. These are scoped sanity checks, not a release-quality claim.
 

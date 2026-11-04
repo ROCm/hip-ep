@@ -4,10 +4,11 @@ Licensed under the MIT License.
 -->
 # Current-branch TurboQuant performance
 
-Revision scope: these tables retain the measured source revision below. The
-subsequent merge of main `6a52f055ee0cdf3ffb376163104c371cadba68eb` changes
-GQA host-length handling. Its sanity validation is separate; these timings have
-not been remeasured on that merge.
+Revision scope: these tables retain the measured source revision below. Later
+main merges, most recently `f6e2e59ef0597e9dd8243964531f59ef863000cb`, change
+GQA host-length handling and Qwen LinearAttention/SwiGLU/RMSNorm execution.
+Their sanity validation is separate; these timings have not been remeasured
+on those merges.
 
 All three configurations use source `112c3c5b98d82666a9d75205ed149b1d5e8f53d8`, merged main/Ring PR1366, and the same installed HIP-EP/kernel DLLs. No historical kernel measurements or accuracy-diagnostic timings are mixed into these tables. No warm-up calls; every measured request from the final protocol is retained. First-use costs remain in raw samples. Kernel tables use three-round medians; model tables use the arithmetic mean of two measured requests/conversations.
 
