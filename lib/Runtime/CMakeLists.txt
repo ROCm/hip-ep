@@ -167,6 +167,9 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
     # NOTE: -I and path are separate list items to handle paths with spaces
     # (e.g., "C:/Program Files/..."). Clang supports "-I" "<path>" as two args.
     set(COMPILE_FLAGS "")
+    if(HIP_EP_RING_ENABLED)
+        list(APPEND COMPILE_FLAGS "-DHIP_EP_RING_ENABLED=${HIP_EP_RING_ENABLED}")
+    endif()
 
     # PIC is required when this bitcode is later linked into the per-model
     # shared library on Linux (ELF .so). Without -fPIC the IR omits dso_local
@@ -268,6 +271,7 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
                 ${CMAKE_SOURCE_DIR}/include/hip/datatype_abi.h
                 ${CMAKE_SOURCE_DIR}/include/hip/init_config_abi.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/runtime_state_internal.h
+                ${CMAKE_CURRENT_SOURCE_DIR}/transient_arena.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/op_state.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/op_profile.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/chrome_trace.h

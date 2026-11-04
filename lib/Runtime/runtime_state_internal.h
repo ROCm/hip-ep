@@ -282,6 +282,11 @@ struct RuntimeState {
   int32_t seqlens_k_cached_val;
   const void *seqlens_k_cached_ptr;
 
+  // SparseAttentionIndexer past_sequence_length, same lifetime as above.
+  bool sai_past_len_cached_valid;
+  int32_t sai_past_len_cached_val;
+  const void *sai_past_len_cached_ptr;
+
   // ONNX Loop driver state. Lazily allocated by hipdnn_ep_run_counted_loop /
   // hipdnn_ep_run_loop on first call; freed in hipdnn_ep_state_cleanup.
   //
@@ -355,6 +360,19 @@ struct RuntimeState {
   // their casts and fused kernels.
   void *gqa_fp32_adapter_scratch;
   size_t gqa_fp32_adapter_scratch_size;
+
+  // TransientArena (hipdnn_ep_runtime_state.cpp), reserved right after the
+  // constants blob so the weights keep placement priority over it; null when
+  // the session runs without an arena.
+  void *transient_arena;
 };
+
+// Every session-owned device transient (pools, workspace, op scratch) must be
+// allocated and freed through these, never with raw hipMalloc/hipFree, so it
+// is served from the transient arena when one exists and has room. Both keep
+// hipMalloc/hipFree semantics, including the device synchronization on free.
+hipError_t hipdnn_ep_state_device_alloc(RuntimeState *state, void **ptr,
+                                        size_t size);
+hipError_t hipdnn_ep_state_device_free(RuntimeState *state, void *ptr);
 
 #endif // HIPDNN_EP_RUNTIME_STATE_INTERNAL_H

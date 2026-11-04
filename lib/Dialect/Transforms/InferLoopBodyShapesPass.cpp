@@ -281,7 +281,8 @@ static bool preservesShape(StringRef name) {
 
 static bool broadcastsShape(StringRef name) {
   static constexpr StringRef kOps[] = {"onnx.Add", "onnx.Mul", "onnx.Sub",
-                                       "onnx.Pow", "onnx.Div"};
+                                       "onnx.Pow", "onnx.Div", "onnx.Max",
+                                       "onnx.Min"};
   return named(name, kOps);
 }
 
@@ -398,16 +399,26 @@ static RankedTensorType inferTransposeResult(Operation *op) {
   return rankedLike(op->getResult(0).getType(), shape);
 }
 
+/// Multidirectional broadcast of every operand. Min and Max are variadic, so
+/// a later input can raise the rank or a size. An unranked operand can do
+/// the same, and then the result is left alone.
 static RankedTensorType inferBroadcastResult(Operation *op) {
   if (op->getNumOperands() < 2 || op->getNumResults() != 1)
     return {};
-  auto lhs = dyn_cast<RankedTensorType>(op->getOperand(0).getType());
-  auto rhs = dyn_cast<RankedTensorType>(op->getOperand(1).getType());
-  if (!lhs || !rhs)
-    return {};
-  auto shape = broadcastDims(lhs.getShape(), rhs.getShape());
-  if (failed(shape))
-    return {};
+  std::optional<SmallVector<int64_t>> shape;
+  for (Value operand : op->getOperands()) {
+    auto ranked = dyn_cast<RankedTensorType>(operand.getType());
+    if (!ranked)
+      return {};
+    if (!shape) {
+      shape = SmallVector<int64_t>(ranked.getShape());
+      continue;
+    }
+    auto next = broadcastDims(*shape, ranked.getShape());
+    if (failed(next))
+      return {};
+    shape = std::move(*next);
+  }
   return rankedLike(op->getResult(0).getType(), *shape);
 }
 

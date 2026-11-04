@@ -89,12 +89,11 @@ struct ResizeOpLowering : public ConvertOpToLLVMPattern<ResizeOp> {
                      dataType == HIPDNN_EP_DATATYPE_HALF ||
                      dataType == HIPDNN_EP_DATATYPE_BFLOAT16 ||
                      dataType == HIPDNN_EP_DATATYPE_DOUBLE;
-    bool nearestInt8 =
-        op.getMode() == 0 && (dataType == HIPDNN_EP_DATATYPE_INT8 ||
-                              dataType == HIPDNN_EP_DATATYPE_UINT8);
-    if (!floatType && !nearestInt8)
+    bool int8Type = dataType == HIPDNN_EP_DATATYPE_INT8 ||
+                    dataType == HIPDNN_EP_DATATYPE_UINT8;
+    if (!floatType && !int8Type)
       return rewriter.notifyMatchFailure(
-          op, "Resize: float types, or int8/uint8 nearest");
+          op, "Resize: float, int8, or uint8 element type");
 
     Value statePtr = adaptor.getCtx();
     Value inputPtr =

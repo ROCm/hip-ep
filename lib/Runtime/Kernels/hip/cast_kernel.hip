@@ -171,6 +171,18 @@ __global__ void cast_ui8_to_f32_kernel(
   }
 }
 
+// ConvInteger casts int8 activations and weights to f32 before hip.conv.
+// Sign is preserved: static_cast<float> of int8_t sign-extends.
+__global__ void cast_i8_to_f32_kernel(
+    const int8_t* __restrict__ input,
+    float* __restrict__ output,
+    int64_t num_elements) {
+  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    output[idx] = static_cast<float>(input[idx]);
+  }
+}
+
 __global__ void cast_f16_to_ui8_kernel(
     const __half* __restrict__ input,
     uint8_t* __restrict__ output,
@@ -189,6 +201,9 @@ extern "C" int hip_cast(
     int input_dtype,
     int output_dtype) {
   if (num_elements <= 0) return 0;
+
+  // Drop a stale error so the status returned below belongs to this launch.
+  (void)hipGetLastError();
 
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
   constexpr int kBlockSize = 256;
@@ -300,6 +315,22 @@ extern "C" int hip_cast(
                        dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
                        static_cast<const uint8_t*>(input),
                        static_cast<float*>(output), num_elements);
+  } else if (input_dtype == HIP_DTYPE_INT8 && output_dtype == HIP_DTYPE_FLOAT32) {
+    CUSTOM_KERNELS_DEBUG_LOG("[custom_kernels] hip_cast: INT8->FLOAT32, "
+            "num_elements=%lld, grid=%d, block=%d\n",
+            (long long)num_elements, grid_size, kBlockSize);
+    hipLaunchKernelGGL(cast_i8_to_f32_kernel,
+                       dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const int8_t*>(input),
+                       static_cast<float*>(output), num_elements);
+  } else if (input_dtype == HIP_DTYPE_INT8 && output_dtype == HIP_DTYPE_INT32) {
+    CUSTOM_KERNELS_DEBUG_LOG("[custom_kernels] hip_cast: INT8->INT32, "
+            "num_elements=%lld, grid=%d, block=%d\n",
+            (long long)num_elements, grid_size, kBlockSize);
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(cast_int_to_int_kernel<int8_t, int32_t>),
+                       dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const int8_t*>(input),
+                       static_cast<int32_t*>(output), num_elements);
   } else if (input_dtype == HIP_DTYPE_FLOAT16 && output_dtype == HIP_DTYPE_UINT8) {
     hipLaunchKernelGGL(cast_f16_to_ui8_kernel,
                        dim3(grid_size), dim3(kBlockSize), 0, hip_stream,

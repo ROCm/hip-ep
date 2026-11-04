@@ -39,6 +39,8 @@ Pattern HipQAdd with benefit(10) {
   HasExtractableQdqZeropoint(dq_lhs);
   HasExtractableQdqZeropoint(dq_rhs);
   HasExtractableQdqZeropoint(q);
+  // hip.qadd has one element type for both operands and the result.
+  HasSameHipQdqElementType(dq_lhs, dq_rhs, q);
   // hip.add's init already carries the fused result's shape, so it is the
   // shape source for hip.qadd's own init.
   CanBuildInit(output_type, add_init);
