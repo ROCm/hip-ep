@@ -110,14 +110,13 @@ static FailureOr<Value> unboxTripCount(OpBuilder &builder, Location loc,
 ///
 /// Same constant-folding rationale as `unboxTripCount`: when the cond is
 /// produced by an `onnx.Constant` we fold the byte directly into an
-/// `arith.constant i1` so the hip.loop op's `cond_init` operand doesn't
-/// sit on a `tensor.extract` that would later bufferize to a host load
-/// from device-resident memory. For non-constant cond (rare; future
-/// extension), we extract and reduce to i1 via `cmpi ne 0`, bridging
-/// `ui8`/`si8` -> signless `i8` with an `unrealized_conversion_cast`
-/// since `arith.cmpi` requires signless operands.
+/// `arith.constant i1`. A runtime condition may have been computed on the
+/// GPU, so it is read back with `hip.readback_scalar` (D2H plus a stream
+/// sync) and then reduced to i1. A bare `tensor.extract` would race the
+/// kernel that produced it. `ui8`/`si8` are bridged to signless `i8`
+/// because `arith.cmpi` requires signless operands.
 static FailureOr<Value> unboxCondInit(OpBuilder &builder, Location loc,
-                                      Value condTensor) {
+                                      Value ctx, Value condTensor) {
   auto t = dyn_cast<RankedTensorType>(condTensor.getType());
   if (!t || t.getRank() != 0)
     return failure();
@@ -144,9 +143,8 @@ static FailureOr<Value> unboxCondInit(OpBuilder &builder, Location loc,
     }
   }
 
-  // Non-constant fallback.
-  Value extracted =
-      tensor::ExtractOp::create(builder, loc, condTensor, ValueRange{});
+  // Non-constant: synchronize, then read the scalar on the host.
+  Value extracted = readbackScalarToHost(builder, loc, ctx, condTensor);
   if (width == 1)
     return extracted; // already an i1 scalar
 
@@ -218,29 +216,105 @@ static Value onnxNoValue(OpBuilder &builder, Location loc, Type ty) {
   return builder.create(state)->getResult(0);
 }
 
-/// Ranked scan-accumulator type. The loop result is already that tensor
-/// when the importer ranked it. Otherwise build `[?, per-iter shape]`.
+/// Ranked scan-accumulator type. The leading dimension is always dynamic:
+/// it counts the iterations that actually ran, so a declared `tensor<2x4xf32>`
+/// result is accumulated as `tensor<?x4xf32>` and cast back only after the
+/// loop. A static `tensor<1x4xf32>` chunk cannot be cast to `tensor<2x4xf32>`.
+/// Inner dimensions keep a static extent from the per-iteration tensor when
+/// the loop result left that extent dynamic.
 static RankedTensorType scanAccType(Type loopResultTy, Value perIter) {
-  if (auto ranked = dyn_cast<RankedTensorType>(loopResultTy))
-    return ranked;
   auto perIterTy = dyn_cast<RankedTensorType>(perIter.getType());
-  if (!perIterTy)
-    return {};
   SmallVector<int64_t> shape;
-  shape.push_back(ShapedType::kDynamic);
-  shape.append(perIterTy.getShape().begin(), perIterTy.getShape().end());
-  return RankedTensorType::get(shape, perIterTy.getElementType());
+  Type elemTy;
+  if (auto ranked = dyn_cast<RankedTensorType>(loopResultTy)) {
+    if (ranked.getRank() < 1)
+      return {};
+    shape.assign(ranked.getShape().begin(), ranked.getShape().end());
+    elemTy = ranked.getElementType();
+  } else if (perIterTy) {
+    shape.push_back(ShapedType::kDynamic);
+    shape.append(perIterTy.getShape().begin(), perIterTy.getShape().end());
+    elemTy = perIterTy.getElementType();
+  } else {
+    return {};
+  }
+  shape[0] = ShapedType::kDynamic;
+  if (perIterTy &&
+      perIterTy.getRank() + 1 == static_cast<int64_t>(shape.size())) {
+    for (int64_t i = 0; i < perIterTy.getRank(); ++i)
+      if (ShapedType::isDynamic(shape[i + 1]) && !perIterTy.isDynamicDim(i))
+        shape[i + 1] = perIterTy.getDimSize(i);
+  }
+  return RankedTensorType::get(shape, elemTy);
 }
 
-static Value emptyScanAcc(OpBuilder &builder, Location loc,
-                          RankedTensorType accTy) {
+/// Value whose shape is known outside the loop body, looking through
+/// identity and casts. A loop-body block argument is returned as itself so
+/// the caller can substitute the corresponding init.
+static Value scanShapeSource(Value v, Block &body) {
+  while (Operation *def = v.getDefiningOp()) {
+    if (def->getBlock() != &body)
+      return v;
+    bool transparent = isa<tensor::CastOp>(def) ||
+                       def->getName().getStringRef() == "onnx.Identity";
+    if (!transparent || def->getNumOperands() != 1)
+      return {};
+    v = def->getOperand(0);
+  }
+  return v;
+}
+
+/// Extent of inner scan dimension `innerDim` (0 is the first dim of the
+/// per-iteration tensor). The leading scan dimension is not handled here.
+static FailureOr<Value> outerScanExtent(OpBuilder &builder, Location loc,
+                                        Value perIter, int64_t innerDim,
+                                        Block &body, ValueRange carriedInits) {
+  Value src = scanShapeSource(perIter, body);
+  if (!src)
+    return failure();
+  if (auto barg = dyn_cast<BlockArgument>(src)) {
+    if (barg.getOwner() == &body) {
+      if (barg.getArgNumber() < 2)
+        return failure();
+      unsigned carried = barg.getArgNumber() - 2;
+      if (carried >= carriedInits.size())
+        return failure();
+      src = carriedInits[carried];
+    }
+  }
+  auto srcTy = dyn_cast<RankedTensorType>(src.getType());
+  if (!srcTy || innerDim < 0 || innerDim >= srcTy.getRank())
+    return failure();
+  if (!srcTy.isDynamicDim(innerDim))
+    return arith::ConstantIndexOp::create(builder, loc,
+                                          srcTy.getDimSize(innerDim))
+        .getResult();
+  return tensor::DimOp::create(builder, loc, src, innerDim).getResult();
+}
+
+/// Zero-trip seed. Only the leading dimension is 0. Any other dynamic
+/// dimension takes the per-iteration extent, so a body that yields
+/// `tensor<4xf32>` seeds `[0, 4]` rather than `[0, 0]`.
+static FailureOr<Value> emptyScanAcc(OpBuilder &builder, Location loc,
+                                     RankedTensorType accTy, Value perIter,
+                                     Block &body, ValueRange carriedInits) {
   SmallVector<Value> dynamicSizes;
-  for (int64_t dim : accTy.getShape()) {
-    if (ShapedType::isDynamic(dim))
+  for (auto [dimIdx, dim] : llvm::enumerate(accTy.getShape())) {
+    if (!ShapedType::isDynamic(dim))
+      continue;
+    if (dimIdx == 0) {
       dynamicSizes.push_back(
           arith::ConstantIndexOp::create(builder, loc, 0).getResult());
+      continue;
+    }
+    FailureOr<Value> extent =
+        outerScanExtent(builder, loc, perIter, static_cast<int64_t>(dimIdx) - 1,
+                        body, carriedInits);
+    if (failed(extent))
+      return failure();
+    dynamicSizes.push_back(*extent);
   }
-  return tensor::EmptyOp::create(builder, loc, accTy, dynamicSizes);
+  return tensor::EmptyOp::create(builder, loc, accTy, dynamicSizes).getResult();
 }
 
 /// Unsqueeze `perIter` on axis 0 so it can be concatenated onto `accTy`.
@@ -310,7 +384,8 @@ static LogicalResult lowerScanLoop(Operation *loopOp, Block &bodyBlock,
   if (condInitIsNone) {
     condI1 = arith::ConstantIntOp::create(builder, loc, builder.getI1Type(), 1);
   } else {
-    FailureOr<Value> unboxed = unboxCondInit(builder, loc, condInitTensor);
+    FailureOr<Value> unboxed =
+        unboxCondInit(builder, loc, ctxVal, condInitTensor);
     if (failed(unboxed))
       return loopOp->emitOpError("could not unbox cond_init to i1 (expected "
                                  "0-D tensor<i1>, tensor<i8>, or tensor<ui8>, "
@@ -348,8 +423,12 @@ static LogicalResult lowerScanLoop(Operation *loopOp, Block &bodyBlock,
     if (perTy && perTy.getElementType() != accTy.getElementType())
       return loopOp->emitOpError(
           "onnx.Loop scan element type does not match its result");
-    scans.push_back({1 + numLoopCarried + s, resultIdx, accTy,
-                     emptyScanAcc(builder, loc, accTy)});
+    FailureOr<Value> seed =
+        emptyScanAcc(builder, loc, accTy, perIter, bodyBlock, vInitTensors);
+    if (failed(seed))
+      return loopOp->emitOpError(
+          "scan seed inner extent is not known before the loop");
+    scans.push_back({1 + numLoopCarried + s, resultIdx, accTy, *seed});
   }
 
   Value falseI1 =
@@ -402,17 +481,26 @@ static LogicalResult lowerScanLoop(Operation *loopOp, Block &bodyBlock,
           b.clone(op, mapping);
         }
 
-        FailureOr<Value> nextCond = unboxCondInit(
-            b, wl, mapping.lookupOrDefault(yieldOp->getOperand(0)));
-        if (failed(nextCond)) {
-          loopOp->emitOpError("could not unbox scan-loop cond_out to i1");
-          nextCond = args[condArg];
+        // An omitted cond_init means the loop runs M times. The body's
+        // cond_out is ignored, matching the counted hip.loop path.
+        Value nextCondI1;
+        if (condInitIsNone) {
+          nextCondI1 = arith::ConstantIntOp::create(b, wl, b.getI1Type(), 1);
+        } else {
+          FailureOr<Value> nextCond = unboxCondInit(
+              b, wl, ctxVal, mapping.lookupOrDefault(yieldOp->getOperand(0)));
+          if (failed(nextCond)) {
+            loopOp->emitOpError("could not unbox scan-loop cond_out to i1");
+            nextCondI1 = args[condArg];
+          } else {
+            nextCondI1 = *nextCond;
+          }
         }
 
         SmallVector<Value> yielded;
         Value nextIter = arith::AddIOp::create(b, wl, args[0], oneIdx);
         yielded.push_back(nextIter);
-        yielded.push_back(*nextCond);
+        yielded.push_back(nextCondI1);
         for (unsigned i = 0; i < numLoopCarried; ++i) {
           Value carried = mapping.lookupOrDefault(yieldOp->getOperand(1 + i));
           FailureOr<Value> casted =
@@ -782,7 +870,8 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
     condI1Val = arith::ConstantIntOp::create(outerBuilder, loc,
                                              outerBuilder.getI1Type(), 1);
   } else {
-    FailureOr<Value> condI1 = unboxCondInit(outerBuilder, loc, condInitTensor);
+    FailureOr<Value> condI1 =
+        unboxCondInit(outerBuilder, loc, ctxVal, condInitTensor);
     if (failed(condI1))
       return loopOp->emitOpError("could not unbox cond_init to i1 (expected "
                                  "0-D tensor<i1>, tensor<i8>, or tensor<ui8>, "
