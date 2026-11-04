@@ -339,7 +339,13 @@ static Value concatScan(OpBuilder &builder, Location loc, Value acc,
   OperationState state(loc, "onnx.Concat");
   state.addOperands({acc, chunk});
   state.addTypes(accTy);
-  state.addAttribute("axis", builder.getI64IntegerAttr(0));
+  // ONNX Concat.axis is si64. ConcatDecompose reads it with getSInt(), which
+  // asserts the attribute type is signed. A signless i64 passes a Release
+  // build and crashes a debug hip-mlir-opt.
+  state.addAttribute(
+      "axis", IntegerAttr::get(IntegerType::get(builder.getContext(), 64,
+                                                IntegerType::Signed),
+                               0));
   return builder.create(state)->getResult(0);
 }
 

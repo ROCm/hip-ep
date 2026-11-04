@@ -97,7 +97,9 @@ module {
 // The condition is in the before-region, ahead of the scan concat.
 // CHECK: scf.condition
 // CHECK: onnx.Unsqueeze
-// CHECK: onnx.Concat
+// ConcatDecompose reads axis with getSInt(), so the attribute must be si64.
+// A signless `axis = 0 : i64` crashes a debug hip-mlir-opt.
+// CHECK: onnx.Concat{{.*}}axis = 0 : si64
 // CHECK-NOT: hip.loop
 
 // CHECK-LABEL: func.func @static_leading
