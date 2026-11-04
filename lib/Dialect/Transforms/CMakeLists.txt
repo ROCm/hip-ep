@@ -83,6 +83,7 @@ target_link_libraries(HipDialectTransforms PUBLIC
   MLIRFuncDialect
   MLIRMemRefDialect
   MLIRArithDialect
+  MLIRSCFDialect
   MLIRAffineDialect
   MLIRLLVMDialect
   MLIRBufferizationDialect
