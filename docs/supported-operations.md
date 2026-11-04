@@ -145,6 +145,8 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Resize | Custom HIP kernel. nearest and linear on f16/bf16/f32/f64 and on int8/uint8. Integer linear interpolates the stored codes and truncates toward zero. A dynamic extent comes from a constant `scales` vector, or from a `sizes` vector read back to a host index when `scales` is absent |
 | Upsample | Lowered through Resize (`asymmetric`, nearest `floor`). Schema 9 passes `scales` as an input; opset 7–8 stores them as an f32 attribute |
 | GridSample | Custom HIP kernel |
+| RoiAlign | Custom HIP kernel. avg and max modes, `half_pixel` and `output_half_pixel`, f16/bf16/f32/f64. The number of regions and every input extent may be dynamic |
+| NonMaxSuppression | Custom HIP kernel, f32. `max_output_boxes_per_class`, `iou_threshold` and `score_threshold` must be compile-time constants. Batch, class and box counts may be dynamic. The output is allocated at `B * C * min(N, max_output_boxes_per_class)` rows and trimmed to the kernel-written count, as for NonZero |
 | GlobalAveragePool | Custom HIP kernel |
 | GlobalMaxPool | Custom HIP kernel |
 | GlobalLpPool | Custom HIP kernel |
