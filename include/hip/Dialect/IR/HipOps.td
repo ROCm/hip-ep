@@ -4145,7 +4145,13 @@ def Hip_GqaOp : Hip_DpsOp_AutoReify<"gqa", [AttrSizedOperandSegments, OpStateOpI
     // Whisper / bidirectional-attention enabler: when true, the causal mask
     // step in the runtime is skipped. Default false preserves all existing
     // Llama / gpt-oss callers' behaviour.
-    DefaultValuedAttr<BoolAttr, "false">:$no_causal
+    DefaultValuedAttr<BoolAttr, "false">:$no_causal,
+
+    // HIP extension: every seqlens_k entry is total_seq_len - 1. A converter
+    // that broadcasts one host-computed length to [batch] on the device sets
+    // it, so HIP-to-LLVM can still forward the host-written total_seq_len and
+    // the runtime skips its seqlens_k readback.
+    UnitAttr:$uniform_seqlens_k
   );
 
   let assemblyFormat = [{

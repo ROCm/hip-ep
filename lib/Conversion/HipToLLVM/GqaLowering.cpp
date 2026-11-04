@@ -59,6 +59,12 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
       hostLength = rewriter.getRemappedValue(original);
       if (!hostLength)
         return rewriter.notifyMatchFailure(op, "cannot convert host length");
+      // HostScalarAnalysis forwards total_seq_len for a uniform seqlens_k.
+      if (op.getUniformSeqlensK())
+        hostLength = LLVM::SubOp::create(
+            rewriter, loc, hostLength,
+            LLVM::ConstantOp::create(rewriter, loc, i32Type,
+                                     rewriter.getI32IntegerAttr(1)));
     }
     Value hasHostLength = LLVM::ConstantOp::create(
         rewriter, loc, i32Type, rewriter.getI32IntegerAttr(hostLength ? 1 : 0));

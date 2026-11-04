@@ -1059,7 +1059,9 @@ module {
     // CHECK: hip.gqa(%[[CTXKB]]) ins(%{{[^,]+}}, %{{[^,]+}}, %{{[^,]+}}, %{{[^,]+}}, %{{[^,]+}}, %[[SEQ]],
     // CHECK-NOT: tensor<?x1x?x?xf16>) key_bias
     // CHECK-SAME: key_bias(%{{.*}} : tensor<?x?xf16>)
+    // Every entry is total_seq - 1, so HIP-to-LLVM can forward the host total.
     // CHECK-SAME: {kv_num_heads = 8 : i64, num_heads = 16 : i64
+    // CHECK-SAME: uniform_seqlens_k
     // CHECK-NOT: onnx.Attention
 
     return %out#0, %out#1, %out#2
