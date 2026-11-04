@@ -463,10 +463,36 @@ module {
         -> tensor<?x?x?x?xf32>
     // CHECK-NOT: onnx.Resize
     // CHECK-NOT: hip.readback_scalar
-    // CHECK: %[[C300:.*]] = arith.constant 300 : index
-    // CHECK: tensor.empty(%[[C300]], %[[C300]]) : tensor<1x3x?x?xf32>
+    // CHECK: tensor.empty() : tensor<1x3x300x300xf32>
     // CHECK: hip.resize
-    // CHECK: tensor.cast %{{.*}} : tensor<1x3x?x?xf32> to tensor<?x?x?x?xf32>
+    // CHECK: tensor.cast %{{.*}} : tensor<1x3x300x300xf32> to tensor<?x?x?x?xf32>
+    return %y : tensor<?x?x?x?xf32>
+  }
+
+  // Test 22: gathered sizes [1, 3, 300, 300] on an input whose channel is
+  // dynamic. The channel must become the static output extent 3. Leaving it
+  // dynamic would copy a runtime channel count into a 3-channel buffer.
+  func.func @test_resize_dynamic_channel(%x: tensor<1x?x?x?xf32>) -> tensor<?x?x?x?xf32> {
+    // CHECK-LABEL: func.func @test_resize_dynamic_channel
+    %nc = "onnx.Constant"() {value = dense<[1, 3]> : tensor<2xi64>} : () -> tensor<2xi64>
+    %hw = "onnx.Constant"() {value = dense<300> : tensor<2xi64>} : () -> tensor<2xi64>
+    %roi = "onnx.Constant"() {value = dense<> : tensor<0xf32>} : () -> tensor<0xf32>
+    %scales = "onnx.Constant"() {value = dense<> : tensor<0xf32>} : () -> tensor<0xf32>
+    %e = tensor.empty() : tensor<4xi64>
+    %s0 = tensor.insert_slice %nc into %e[0] [2] [1]
+        : tensor<2xi64> into tensor<4xi64>
+    %sizes = tensor.insert_slice %hw into %s0[2] [2] [1]
+        : tensor<2xi64> into tensor<4xi64>
+    %y = "onnx.Resize"(%x, %roi, %scales, %sizes)
+        {mode = "linear", coordinate_transformation_mode = "asymmetric",
+         nearest_mode = "floor"}
+        : (tensor<1x?x?x?xf32>, tensor<0xf32>, tensor<0xf32>, tensor<4xi64>)
+        -> tensor<?x?x?x?xf32>
+    // CHECK-NOT: onnx.Resize
+    // CHECK-NOT: hip.readback_scalar
+    // CHECK: tensor.empty() : tensor<1x3x300x300xf32>
+    // CHECK: hip.resize
+    // CHECK: tensor.cast %{{.*}} : tensor<1x3x300x300xf32> to tensor<?x?x?x?xf32>
     return %y : tensor<?x?x?x?xf32>
   }
 }

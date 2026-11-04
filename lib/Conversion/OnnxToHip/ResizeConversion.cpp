@@ -572,10 +572,11 @@ struct ResizeToHip : public mlir::RewritePattern {
           outputType.getDimSize(axis) != extent)
         return rewriter.notifyMatchFailure(
             op, "Resize: sizes disagrees with static output extent");
-      // A constant extent of a static input axis is written into the type, so
-      // the type-only plan still applies and no readback is required. A
-      // runtime extent stays dynamic; its host index is the readback.
-      if (known && !inputType.isDynamicDim(axis)) {
+      // A known extent is part of the result type even when the input axis
+      // is dynamic. Leaving it dynamic makes the planner copy the input
+      // extent into an output buffer of the known size. A runtime extent
+      // stays dynamic; its host index is the readback.
+      if (known) {
         refinedShape.push_back(extent);
         continue;
       }
