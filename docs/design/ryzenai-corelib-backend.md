@@ -134,10 +134,18 @@ What each model in `test/python` can run on the NPU, with
 `RYZENAI_CORELIB_KERNELS_ROOT` set to DynamicDispatch's kernel store
 (`transaction/mds`) and no kernel bundle. Found by matching each model's
 `MatMulNBits` (K, N, block size) and RMS norm widths against the store's
-`mladfmatmulbias`, `rmsnorm` and `addrmsnorm` kernel names at DynamicDispatch
-tag `corelib/kernels/20261029.0`; a store at another revision can differ.
-Prefill PDIs ship row counts 1 to 4096, decode PDIs one row. Everything not
-listed runs on the GPU, as do attention, RoPE and every other op.
+`mladfmatmulbias`, `mladfrmsnorm` and `addrmsnorm` kernel names at
+DynamicDispatch tag `corelib/kernels/20261029.0`; a store at another revision
+can differ. Prefill PDIs ship row counts 1 to 4096, decode PDIs one row.
+Everything not listed runs on the GPU, as do attention, RoPE and every other
+op.
+
+The tests download each model into `models/<name>/` (git-ignored) and write
+fixed-shape variants of it (`model_fixed_kv<N>_sq<M>.onnx`) into
+`models/<name>-fixed/`, beside the same weights file. A fixed variant has the
+model's `MatMulNBits` and norms unchanged, so its row in the table applies to
+both folders; for Phi-4 both `models/phi-4-onnx-gpu-int4-rtn-block-32/` and
+`models/phi-4-onnx-gpu-int4-rtn-block-32-fixed/` were checked.
 
 | Model (`test/python`) | Matmuls on the NPU | Norms on the NPU | `RYZENAICORELIB_PDI` | Run on AIE4 |
 |---|---|---|---|---|
@@ -147,7 +155,7 @@ listed runs on the GPU, as do attention, RoPE and every other op.
 | Mistral 7B v0.3 (`test_mistral7b_v3.py`, block 32) | 128 of 225: Q/K/V/O; MLP and `lm_head` stay on the GPU | Final norm; skip-norms only on PDIs 9/19 | `1;16` | No |
 | Qwen2.5 14B, Qwen2.5-Coder 14B (`test_qwen2_5*_14b.py`, block 128, zero points) | 192 of 337: Q/O on PDIs 1/16, K/V on PDIs 9/37; MLP and `lm_head` stay on the GPU | All, on PDIs 9/37 | `1,9;16,37` | No |
 | gpt-oss 20B (`test_gptoss20b.py`, block 32) | `lm_head` only, on decode | Final norm | `1;16` | No |
-| Phi-4 14B (`test_phi4_14b.py`, block 32) | None: the store has Phi-4's shapes at g64 only | All, on PDIs 9/37 only | — | No |
+| Phi-4 14B (`test_phi4_14b.py`, block 32; `microsoft/phi-4-onnx` `gpu/gpu-int4-rtn-block-32`) | None of 281: the store has Phi-4's shapes (K/N 5120, 1280, 17920, 100352) at g64 only | The 81 norms (k=5120), on PDIs 9/37 only | — (no matmul offload; norms alone are not worth the per-call staging) | No |
 | DeepSeek-R1 70B (`test_deepseek_r1_70b.py`) | None: no K=8192 kernels | None | — | No |
 | Llama 3.1 8B asym, gpt-oss 120B | Not checked: their Hugging Face repos were not accessible | | | No |
 
