@@ -141,7 +141,7 @@ listed runs on the GPU, as do attention, RoPE and every other op.
 
 | Model (`test/python`) | Matmuls on the NPU | Norms on the NPU | `RYZENAICORELIB_PDI` | Run on AIE4 |
 |---|---|---|---|---|
-| Llama 3.1 8B AWQ (`test_llama8b.py`, block 128) | All 225: Q/K/V/O, MLP, `lm_head` (decode) | Final norm; the 64 skip-norms only on PDIs 9/19 | `1;16` | Yes: all 225 matmuls on the NPU, logits match the GPU-only run (cosine 0.99996) |
+| Llama 3.1 8B AWQ (`test_llama8b.py`, block 128) | All 225: Q/K/V/O, MLP, `lm_head` (decode) | All 65: final norm (PDIs 1/16), the 64 skip-norms (PDIs 9/19) | `1,9;16,19` (`1;16` leaves the skip-norms on the GPU) | Yes: every matmul and norm on the NPU, no fallback; logits match the GPU-only run (cosine 0.99995, top-1 49 of 51, the rest near-ties) |
 | Llama 3.2 1B (`test_llama1b.py`, block 32) | All 112 | Final norm; the 32 skip-norms only on PDIs 9/19 | `1;16` | No |
 | Gemma 3 4B (`test_gemma3_4b.py`, block 128) | All 239 | QK norms (k=256) and layer norms (k=2560); skip-norms on decode (PDI 33) | `2;17,33` | No |
 | Mistral 7B v0.3 (`test_mistral7b_v3.py`, block 32) | 128 of 225: Q/K/V/O; MLP and `lm_head` stay on the GPU | Final norm; skip-norms only on PDIs 9/19 | `1;16` | No |
@@ -157,7 +157,15 @@ the final norm on the NPU but its MLP on the GPU, since the bundle carries only
 CoreLib's fused MLP kernel. Phi-4 would reach the NPU for every matmul from an
 export at block size 64 or 128. A PDI list naming more than one PDI per phase
 (such as `1,9;16,19` to reach the Llama skip-norms) makes the NPU switch PDIs
-between ops; whether that pays off is not measured.
+between ops; for Llama 3.1 8B its throughput was within the run-to-run spread
+of `1;16`.
+
+The kernel store must be at the revision the table was found at or later: an
+older DynamicDispatch checkout lacked the width-4096 `addrmsnorm` kernels, and
+CoreLib reads the plain norms from `mladfrmsnorm/` and the fused ones from
+`addrmsnorm/`. A sparse checkout for these three ops needs
+`transaction/mds/mladfmatmulbias`, `transaction/mds/mladfrmsnorm` and
+`transaction/mds/addrmsnorm`.
 
 ## Generated code
 
