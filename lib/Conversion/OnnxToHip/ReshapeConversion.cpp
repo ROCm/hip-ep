@@ -1092,14 +1092,15 @@ struct SqueezeToStdTensor : public mlir::RewritePattern {
       llvm::SmallBitVector drop(inputRank);
       for (int64_t axis : *axesToDrop)
         drop.set(axis);
+      // Decide the sliced shape before creating any op. A mismatch must
+      // return failure with the IR unchanged: a tensor.dim created on the
+      // way to that failure would survive the rejected match.
       llvm::SmallVector<int64_t> slicedShape;
-      llvm::SmallVector<mlir::OpFoldResult> offsets(inputRank,
-                                                    rewriter.getIndexAttr(0));
-      llvm::SmallVector<mlir::OpFoldResult> sizes;
-      llvm::SmallVector<mlir::OpFoldResult> strides(inputRank,
-                                                    rewriter.getIndexAttr(1));
+      // Extent of each slice dimension. kDynamic is replaced by tensor.dim
+      // only after the shape and its reassociation are both accepted.
+      llvm::SmallVector<int64_t> sliceExtents;
       slicedShape.reserve(inputRank);
-      sizes.reserve(inputRank);
+      sliceExtents.reserve(inputRank);
       int64_t outputAxis = 0;
       for (int64_t i = 0; i < inputRank; ++i) {
         int64_t dim = inputType.getDimSize(i);
@@ -1107,7 +1108,7 @@ struct SqueezeToStdTensor : public mlir::RewritePattern {
           if (!mlir::ShapedType::isDynamic(dim) && dim != 1)
             return rewriter.notifyMatchFailure(op, "squeezed axis is not 1");
           slicedShape.push_back(1);
-          sizes.push_back(rewriter.getIndexAttr(1));
+          sliceExtents.push_back(1);
           continue;
         }
         int64_t outputDim = outputType.getDimSize(outputAxis++);
@@ -1116,21 +1117,31 @@ struct SqueezeToStdTensor : public mlir::RewritePattern {
         else if (!mlir::ShapedType::isDynamic(outputDim) && outputDim != dim)
           return rewriter.notifyMatchFailure(op, "kept axis extent mismatch");
         slicedShape.push_back(dim);
-        if (mlir::ShapedType::isDynamic(dim))
-          sizes.push_back(
-              mlir::tensor::DimOp::create(rewriter, loc, data, i).getResult());
-        else
-          sizes.push_back(rewriter.getIndexAttr(dim));
+        sliceExtents.push_back(dim);
       }
       collapseType =
           mlir::RankedTensorType::get(slicedShape, inputType.getElementType());
-      collapseInput = mlir::tensor::ExtractSliceOp::create(
-          rewriter, loc, collapseType, data, offsets, sizes, strides);
       reassocOpt =
           mlir::getReassociationIndicesForReshape(collapseType, outputType);
       if (!reassocOpt)
         return rewriter.notifyMatchFailure(
             op, "cannot compute squeeze reassociation");
+
+      llvm::SmallVector<mlir::OpFoldResult> offsets(inputRank,
+                                                    rewriter.getIndexAttr(0));
+      llvm::SmallVector<mlir::OpFoldResult> sizes;
+      llvm::SmallVector<mlir::OpFoldResult> strides(inputRank,
+                                                    rewriter.getIndexAttr(1));
+      sizes.reserve(inputRank);
+      for (int64_t i = 0; i < inputRank; ++i) {
+        if (mlir::ShapedType::isDynamic(sliceExtents[i]))
+          sizes.push_back(
+              mlir::tensor::DimOp::create(rewriter, loc, data, i).getResult());
+        else
+          sizes.push_back(rewriter.getIndexAttr(sliceExtents[i]));
+      }
+      collapseInput = mlir::tensor::ExtractSliceOp::create(
+          rewriter, loc, collapseType, data, offsets, sizes, strides);
     }
 
     auto collapseOp = mlir::tensor::CollapseShapeOp::create(

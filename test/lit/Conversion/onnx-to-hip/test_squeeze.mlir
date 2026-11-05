@@ -117,6 +117,14 @@ module {
     return %result : tensor<?x?x?xf32>
   }
 
+  // A kept axis whose static extent disagrees with the result is rejected
+  // before any tensor.dim or extract_slice is created. Axis 0 is dynamic, so
+  // a check that creates the dim query for axis 1 first would leak that op.
+  func.func @test_squeeze_kept_extent_mismatch(%data: tensor<?x?x2xf32>) -> tensor<?x3xf32> {
+    %result = "onnx.Squeeze"(%data) {axes = [0]} : (tensor<?x?x2xf32>) -> tensor<?x3xf32>
+    return %result : tensor<?x3xf32>
+  }
+
   // Kept axes are dynamic in the input but static in the inferred result.
   func.func @test_squeeze_static_result(%data: tensor<?x1x?x?xf32>) -> tensor<3x300x300xf32> {
     %result = "onnx.Squeeze"(%data) {axes = [1]} : (tensor<?x1x?x?xf32>) -> tensor<3x300x300xf32>
@@ -199,6 +207,12 @@ module {
 // CHECK: %[[SLICE:.*]] = tensor.extract_slice %[[DATA]][0, 0, 0, 0] [1, %{{[^]]*}}, %{{[^]]*}}, %{{[^]]*}}] [1, 1, 1, 1] : tensor<?x?x?x?xf32> to tensor<1x?x?x?xf32>
 // CHECK: %[[RESULT:.*]] = tensor.collapse_shape %[[SLICE]] {{\[\[}}0, 1], [2], [3]] : tensor<1x?x?x?xf32> into tensor<?x?x?xf32>
 // CHECK: return %[[RESULT]] : tensor<?x?x?xf32>
+
+// CHECK-LABEL: func.func @test_squeeze_kept_extent_mismatch
+// CHECK-NOT: tensor.dim
+// CHECK-NOT: tensor.extract_slice
+// CHECK-NOT: tensor.collapse_shape
+// CHECK: onnx.Squeeze
 
 // CHECK-LABEL: func.func @test_squeeze_static_result
 // CHECK-SAME: %[[CTX:.*]]: !hip.context, %[[DATA:.*]]: tensor<?x1x?x?xf32>)
