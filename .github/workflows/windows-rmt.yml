@@ -433,7 +433,7 @@ jobs:
         with:
           name: gpu-test-package-rmt
           path: staging/
-          retention-days: ${{ (github.ref == 'refs/heads/main' || contains(github.ref, 'release')) && 14 || 3 }}
+          retention-days: ${{ (github.ref == 'refs/heads/main' || contains(github.ref, 'release')) && 90 || 3 }}
 
       # Saved from main only; pull requests restore the main entry. A failed
       # build still leaves useful objects, but a skipped one has no directory.
