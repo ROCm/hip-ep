@@ -434,8 +434,8 @@
 "dynamic_sparse_attention_kernel":{
 "_ZN12_GLOBAL__N_118dsa_combine_kernelILi128EEEvPKfPDF16_i":[19,0,0,16,358,15,100],
 "_ZN12_GLOBAL__N_118dsa_combine_kernelILi256EEEvPKfPDF16_i":[19,0,0,16,358,15,100],
-"_ZN12_GLOBAL__N_120dsa_attention_kernelILi128ELi2EEEvPKDF16_S2_S2_PKiS4_S4_PDF16_Pfiiiiiif":[179,0,0,4,1625,48,500],
-"_ZN12_GLOBAL__N_120dsa_attention_kernelILi256ELi4EEEvPKDF16_S2_S2_PKiS4_S4_PDF16_Pfiiiiiif":[180,0,0,4,1601,46,484],
+"_ZN12_GLOBAL__N_120dsa_attention_kernelILi128ELi2EEEvPKDF16_S2_S2_PKiS4_S4_PDF16_Pfiiiiiif":[230,0,0,5,1079,24,384],
+"_ZN12_GLOBAL__N_120dsa_attention_kernelILi256ELi4EEEvPKDF16_S2_S2_PKiS4_S4_PDF16_Pfiiiiiif":[256,0,0,4,1105,32,512],
 "_ZN12_GLOBAL__N_120dsa_kv_append_kernelEPKDv4_jS2_PS0_S3_PKiiiii":[15,0,0,16,178,0,0]
 },
 "elementwise_binary_kernel":{

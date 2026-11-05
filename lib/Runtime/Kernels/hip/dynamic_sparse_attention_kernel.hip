@@ -30,7 +30,6 @@ typedef _Float16 frag_t
     __attribute__((ext_vector_type(HIPDNN_WMMA_FRAG_ELEMS)));
 typedef float acc_t __attribute__((ext_vector_type(8)));
 typedef unsigned int vec16_t __attribute__((ext_vector_type(4)));
-typedef _Float16 half8_t __attribute__((ext_vector_type(8)));
 
 #if HIPDNN_HAS_WMMA
 #define DSA_WMMA(a, b, c) HIPDNN_WMMA_F32_16X16X16_F16(a, b, c)
@@ -78,11 +77,72 @@ dsa_kv_append_kernel(const vec16_t *__restrict__ key,
   present_value[dst] = value[src];
 }
 
-// One block per (query row, KV head, split). The heads of the KV group are the
-// 16 WMMA rows (rows >= hpg stay zero and are never written); the ND waves each
-// own D/ND of the head dim. Per tile of kBkv candidates: S = Q K^T with K
-// fragments read straight from the cache, the ND partial scores summed in LDS,
-// online softmax by 2*ND threads per row, O += P V with V staged transposed.
+// Exchanges a value with lane ^ 16 on the VALU. The inline-asm copy keeps the
+// compiler from dual-issuing the copy of x into the tied "old" operand, which
+// can lose its interlock on gfx11 (see v6_swap_halves in gqa_kernel.hip).
+__device__ __forceinline__ int swap_halves(int x) {
+#if HIPDNN_HAS_WMMA && HIPDNN_WMMA_FRAG_ELEMS != 8
+  int old;
+  asm("v_mov_b32 %0, %1" : "=v"(old) : "v"(x));
+  return __builtin_amdgcn_permlanex16(old, x, 0x76543210u, 0xfedcba98u, false,
+                                      false);
+#elif HIPDNN_HAS_WMMA
+  return __builtin_amdgcn_permlanex16(x, x, 0x76543210u, 0xfedcba98u, false,
+                                      false);
+#else
+  return __shfl_xor(x, 16);
+#endif
+}
+__device__ __forceinline__ float swap_halves(float x) {
+  return __builtin_bit_cast(float, swap_halves(__builtin_bit_cast(int, x)));
+}
+
+// Orders one wave's LDS accesses across its lanes without a block barrier.
+__device__ __forceinline__ void wave_lds_sync() {
+  __builtin_amdgcn_fence(__ATOMIC_RELEASE, "wavefront");
+  __builtin_amdgcn_wave_barrier();
+  __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "wavefront");
+}
+
+typedef int dw8_t __attribute__((ext_vector_type(8)));
+typedef _Float16 half2v_t __attribute__((ext_vector_type(2)));
+
+// Feeds NF operand fragments to use(f, frag) with at most RING reads issued
+// ahead of their WMMA. Left alone, the scheduler issues every LDS read of a
+// GEMM step up front and the tile spills (see v6_frag_stream in
+// gqa_kernel.hip).
+template <int NF, int RING, typename Load, typename Use>
+__device__ __forceinline__ void frag_stream(Load &&load, Use &&use) {
+  constexpr int R = RING < NF ? RING : NF;
+  typedef int dw_t __attribute__((ext_vector_type(sizeof(frag_t) / 4)));
+  dw_t ring[R];
+#pragma unroll
+  for (int f = 0; f < R; ++f) {
+    ring[f] = __builtin_bit_cast(dw_t, load(f));
+  }
+#pragma unroll
+  for (int f = 0; f < NF; ++f) {
+    dw_t x = ring[f % R];
+    if (f + R < NF) {
+      ring[f % R] = __builtin_bit_cast(dw_t, load(f + R));
+    }
+    asm("" : "+v"(x));
+    use(f, __builtin_bit_cast(frag_t, x));
+#if HIPDNN_HAS_WMMA
+    __builtin_amdgcn_sched_barrier(0);
+#endif
+  }
+}
+
+// One block per (query row, KV head, split), transposed-score core: S^T =
+// K Q^T with the candidates as WMMA rows and the KV group's heads as columns
+// (heads >= hpg are zero columns and are never written), so a lane owns one
+// head. The row max and sum reduce in registers plus one half-wave exchange,
+// and P^T is the B operand of O^T = V^T P^T straight from registers. The ND
+// waves each own D/ND of the head dim: K fragments come straight from the
+// cache (prefetched one tile ahead) and each wave stages its own V^T slice,
+// so the only block barriers per tile publish the partial scores, summed in
+// the same order by every wave. Lane i of a tile holds candidate i's index.
 // splits == 1 writes the normalized output, otherwise (m, l, O) partials in
 // log2 units for dsa_combine_kernel.
 template <int D, int ND>
@@ -98,26 +158,19 @@ dsa_attention_kernel(const _Float16 *__restrict__ query,
                      float *__restrict__ partials, int seq_len, int num_heads,
                      int kv_heads, int cap, int max_sel, int splits,
                      float scale_log2) {
-  constexpr int NT = 32 * ND;
   constexpr int DT = D / kTile / ND;
   constexpr int DS = DT * kTile;
   constexpr int N_TILES = kBkv / kTile;
-  constexpr int S_STR = kBkv + 1;
-  constexpr int P_STR = kBkv + 8;
   constexpr int VT_STR = kBkv + 8;
-  constexpr int TPR = NT / kTile;
-  constexpr int CPT = kBkv / TPR;
-  constexpr int V_PER_LANE = kBkv * (DS / 8) / 32;
+  constexpr int V_CHUNKS = DS / kTile;
+  // The running max only moves once a tile's max exceeds it by this much
+  // (log2 units), so P stays <= 2^8 and most tiles skip the O rescale.
+  constexpr float kRescaleSlack = 8.0f;
   static_assert(DT * kTile * ND == D, "ND must divide the 16-wide d tiles");
-  static_assert(CPT * TPR == kBkv, "softmax threads must tile kBkv");
-  static_assert(V_PER_LANE * 32 == kBkv * (DS / 8), "V staging must tile");
+  static_assert(kBkv == 32, "one candidate per lane");
 
   __shared__ __align__(16) _Float16 vt_lds[ND][DS * VT_STR];
-  __shared__ __align__(16) _Float16 p_lds[kTile * P_STR];
-  __shared__ float s_lds[ND][kTile * S_STR];
-  __shared__ int idx_lds[kBkv];
-  __shared__ float m_lds[kTile];
-  __shared__ float l_lds[kTile];
+  __shared__ __align__(16) float sp_lds[ND][N_TILES][32 * 8];
 
   const int row = blockIdx.x;
   const int g = blockIdx.y;
@@ -145,9 +198,13 @@ dsa_attention_kernel(const _Float16 *__restrict__ query,
   const int c_hi = c_lo + chunk < count ? c_lo + chunk : count;
   const int num_tiles = c_hi > c_lo ? (c_hi - c_lo + kBkv - 1) / kBkv : 0;
 
+  // The tile max is taken on the raw scores and scaled afterwards, which
+  // needs sc > 0 (the converter rejects a negative scale); a zero scale is a
+  // zero Q (all logits 0) with sc = 1.
+  const float sc = scale_log2 > 0.0f ? scale_log2 : 1.0f;
   frag_t q_reg[DT];
   {
-    const bool ok = wl < hpg;
+    const bool ok = wl < hpg && scale_log2 > 0.0f;
     const _Float16 *q_row =
         query +
         (static_cast<size_t>(row) * num_heads + g * hpg + (ok ? wl : 0)) * D +
@@ -164,20 +221,10 @@ dsa_attention_kernel(const _Float16 *__restrict__ query,
   const int *sel_row = selected_indices + static_cast<size_t>(row) * max_sel;
   _Float16 *vt = vt_lds[wave];
 
-  const int sm_row = tid / TPR;
-  const int sm_sub = tid % TPR;
-  float m_run = -FLT_MAX;
-  float l_run = 0.0f;
-  acc_t o_acc[DT];
-#pragma unroll
-  for (int tj = 0; tj < DT; ++tj) {
-    o_acc[tj] = acc_t{};
-  }
-
   auto load_idx = [&](int t) {
-    const int c = c_lo + t * kBkv + tid;
+    const int c = c_lo + t * kBkv + lane;
     int idx = -1;
-    if (tid < kBkv && t < num_tiles && c < c_hi) {
+    if (t < num_tiles && c < c_hi) {
       idx = sel_row[c];
       // valid_len implies qpos < total <= cap, so this is the whole ORT
       // filter 0 <= idx < total, idx <= qpos, idx < cap.
@@ -187,170 +234,275 @@ dsa_attention_kernel(const _Float16 *__restrict__ query,
     }
     return idx;
   };
-  int idx_next = load_idx(0);
+  // Skipped candidates read cache row 0, which is in bounds whenever a tile
+  // exists (count > 0 needs valid_len, so total >= 1): their scores are
+  // masked to -inf and their V rows zeroed before staging. Row offsets are
+  // 32-bit byte offsets (a [cap, D] head is far below 4 GiB) on the
+  // wave-uniform head base, so each address is one VGPR.
+  auto row_at = [&](const _Float16 *base, int idx) {
+    return reinterpret_cast<const _Float16 *>(
+        reinterpret_cast<const char *>(base) +
+        static_cast<unsigned>(idx < 0 ? 0 : idx) *
+            static_cast<unsigned>(D * sizeof(_Float16)));
+  };
+  // Row wl of A-operand tile sj is candidate sj * 16 + wl.
+  auto load_k = [&](frag_t(&kf)[N_TILES][DT], int idx) {
+    const int other = swap_halves(idx);
+#pragma unroll
+    for (int sj = 0; sj < N_TILES; ++sj) {
+      const _Float16 *k_row = row_at(k_base, sj == pair ? idx : other);
+#pragma unroll
+      for (int tk = 0; tk < DT; ++tk) {
+        kf[sj][tk] = load_frag(k_row + tk * kTile, pair);
+      }
+    }
+  };
+  // Lane i loads candidate i's slice of V.
+  auto load_v = [&](dw8_t(&vc)[V_CHUNKS], int idx) {
+    const _Float16 *v_row = row_at(v_base, idx);
+#pragma unroll
+    for (int j = 0; j < V_CHUNKS; ++j) {
+      vc[j] = *reinterpret_cast<const dw8_t *>(v_row + j * kTile);
+    }
+  };
+  // Candidate (lane) position in a V^T row: the K order of the P^T operand.
+  // On gfx11 each 16-candidate block of a row holds the 8 candidates of the
+  // row's parity first (see KvStage in gqa_kernel.hip).
+#if HIPDNN_WMMA_FRAG_ELEMS != 8
+  const int kk = lane & 15;
+  const int pos_even = (lane & 16) | ((kk & 1) << 3) | (kk >> 1);
+  const int pos_odd = (lane & 16) | (((kk & 1) ^ 1) << 3) | (kk >> 1);
+#else
+  const int pos_even = lane;
+  const int pos_odd = lane;
+#endif
+
+  float m_run = -FLT_MAX;
+  float l_run = 0.0f;
+  acc_t o_acc[DT];
+#pragma unroll
+  for (int tj = 0; tj < DT; ++tj) {
+    o_acc[tj] = acc_t{};
+  }
+
+  frag_t kf[N_TILES][DT];
+  // Dwords rather than half16, like pb below.
+  dw8_t vc[V_CHUNKS];
+  int idx_cur = load_idx(0);
+  int idx_nxt = load_idx(1);
+  load_k(kf, idx_cur);
+  load_v(vc, idx_cur);
 
   for (int t = 0; t < num_tiles; ++t) {
-    if (tid < kBkv) {
-      idx_lds[tid] = idx_next;
-    }
-    __syncthreads();
-    idx_next = load_idx(t + 1);
-
     acc_t s_acc[N_TILES];
 #pragma unroll
     for (int sj = 0; sj < N_TILES; ++sj) {
-      const int idx = idx_lds[sj * kTile + wl];
-      const _Float16 *k_row =
-          k_base + static_cast<size_t>(idx < 0 ? 0 : idx) * D;
       s_acc[sj] = acc_t{};
+    }
 #pragma unroll
-      for (int tk = 0; tk < DT; ++tk) {
-        const frag_t kf =
-            idx >= 0 ? load_frag(k_row + tk * kTile, pair) : frag_t{};
-        s_acc[sj] = DSA_WMMA(q_reg[tk], kf, s_acc[sj]);
-      }
+    for (int f = 0; f < N_TILES * DT; ++f) {
+      const int sj = f % N_TILES;
+      const int tk = f / N_TILES;
+      s_acc[sj] = DSA_WMMA(kf[sj][tk], q_reg[tk], s_acc[sj]);
+#if HIPDNN_HAS_WMMA
+      __builtin_amdgcn_sched_barrier(0);
+#endif
     }
 
-    // Skipped candidates stage zero V rows: a masked p of 0 must not meet an
-    // uninitialized cache row (0 * NaN).
+    if (ND > 1) {
 #pragma unroll
-    for (int i = 0; i < V_PER_LANE; ++i) {
-      const int q = lane + i * 32;
-      const int r = q % kBkv;
-      const int ch = q / kBkv;
-      const int idx = idx_lds[r];
-      vec16_t v = vec16_t{};
-      if (idx >= 0) {
-        v = *reinterpret_cast<const vec16_t *>(
-            v_base + static_cast<size_t>(idx) * D + ch * 8);
+      for (int sj = 0; sj < N_TILES; ++sj) {
+        *reinterpret_cast<acc_t *>(&sp_lds[wave][sj][lane * 8]) = s_acc[sj];
       }
-      const half8_t ve = __builtin_bit_cast(half8_t, v);
+      __syncthreads();
+    }
+    if (t + 1 < num_tiles) {
+      load_k(kf, idx_nxt);
+    }
+    const int idx_after = load_idx(t + 2);
+    if (ND > 1) {
+      // Every wave adds the partials in wave order, so all of them see the
+      // same scores. Streamed two at a time: hoisted, the ND * N_TILES reads
+      // would hold 8 * ND * N_TILES registers.
+      acc_t sum[N_TILES];
+      constexpr int R = 2;
+      acc_t ring[R];
+      auto read = [&](int f) {
+        return *reinterpret_cast<const acc_t *>(
+            &sp_lds[f / N_TILES][f % N_TILES][lane * 8]);
+      };
 #pragma unroll
-      for (int j = 0; j < 8; ++j) {
-        vt[(ch * 8 + j) * VT_STR + r] = ve[j];
+      for (int f = 0; f < R; ++f) {
+        ring[f] = read(f);
       }
+#pragma unroll
+      for (int f = 0; f < ND * N_TILES; ++f) {
+        const acc_t x = ring[f % R];
+        if (f + R < ND * N_TILES) {
+          ring[f % R] = read(f + R);
+        }
+        const int sj = f % N_TILES;
+        sum[sj] = f < N_TILES ? x : sum[sj] + x;
+#if HIPDNN_HAS_WMMA
+        __builtin_amdgcn_sched_barrier(0);
+#endif
+      }
+#pragma unroll
+      for (int sj = 0; sj < N_TILES; ++sj) {
+        s_acc[sj] = sum[sj];
+      }
+      __syncthreads();
     }
 
+    const unsigned vmask = __builtin_amdgcn_ballot_w32(idx_cur >= 0);
+    float tmax = -INFINITY;
 #pragma unroll
     for (int sj = 0; sj < N_TILES; ++sj) {
 #pragma unroll
       for (int e = 0; e < 8; ++e) {
-        s_lds[wave][hipdnn_wmma_acc_row(pair, e) * S_STR + sj * kTile + wl] =
-            s_acc[sj][e];
-      }
-    }
-    __syncthreads();
-
-    {
-      float sv[CPT];
-      float tmax = -INFINITY;
-#pragma unroll
-      for (int j = 0; j < CPT; ++j) {
-        const int col = sm_sub + j * TPR;
-        float x = 0.0f;
-#pragma unroll
-        for (int w = 0; w < ND; ++w) {
-          x += s_lds[w][sm_row * S_STR + col];
-        }
-        x = idx_lds[col] >= 0 ? x * scale_log2 : -INFINITY;
-        sv[j] = x;
+        const int key = sj * kTile + hipdnn_wmma_acc_row(pair, e);
+        const float x = (vmask >> key) & 1u ? s_acc[sj][e] : -INFINITY;
+        s_acc[sj][e] = x;
         tmax = fmaxf(tmax, x);
       }
-#pragma unroll
-      for (int off = 1; off < TPR; off <<= 1) {
-        tmax = fmaxf(tmax, __shfl_xor(tmax, off));
-      }
+    }
+    tmax = fmaxf(tmax, swap_halves(tmax)) * sc;
+    // Every lane of all ND waves sees the same scores, so the decision is
+    // uniform across the block.
+    if (__builtin_amdgcn_ballot_w32(tmax > m_run + kRescaleSlack) != 0) {
       const float m_new = fmaxf(m_run, tmax);
-      const float corr = exp2f(m_run - m_new);
-      float tsum = 0.0f;
-#pragma unroll
-      for (int j = 0; j < CPT; ++j) {
-        const float p = exp2f(sv[j] - m_new);
-        tsum += p;
-        p_lds[sm_row * P_STR + sm_sub + j * TPR] = static_cast<_Float16>(p);
-      }
-#pragma unroll
-      for (int off = 1; off < TPR; off <<= 1) {
-        tsum += __shfl_xor(tsum, off);
-      }
-      l_run = l_run * corr + tsum;
+      // Exponent <= 0: the raw v_exp_f32 needs none of exp2f's denormal
+      // fixup (see the GQA core).
+      const float corr = __builtin_amdgcn_exp2f(m_run - m_new);
       m_run = m_new;
-      if (sm_sub == 0) {
-        m_lds[sm_row] = corr;
+      l_run *= corr;
+#pragma unroll
+      for (int tj = 0; tj < DT; ++tj) {
+#pragma unroll
+        for (int e = 0; e < 8; ++e) {
+          o_acc[tj][e] *= corr;
+        }
       }
     }
-    __syncthreads();
+    float tsum = 0.0f;
+#if HIPDNN_WMMA_FRAG_ELEMS == 8
+    frag_t pb[N_TILES];
+#else
+    // Kept as dwords up to the WMMA: a half16 P^T carried across the V
+    // masking branch below gets every odd element rebuilt at the join (see
+    // Pb in the GQA core).
+    dw8_t pb[N_TILES];
+#endif
+#pragma unroll
+    for (int sj = 0; sj < N_TILES; ++sj) {
+      _Float16 own[8];
+#pragma unroll
+      for (int e = 0; e < 8; ++e) {
+        // Exponent <= kRescaleSlack.
+        const float p = __builtin_amdgcn_exp2f(fmaf(s_acc[sj][e], sc, -m_run));
+        tsum += p;
+        own[e] = static_cast<_Float16>(p);
+      }
+#if HIPDNN_WMMA_FRAG_ELEMS == 8
+#pragma unroll
+      for (int e = 0; e < 8; ++e) {
+        pb[sj][e] = own[e];
+      }
+#else
+#pragma unroll
+      for (int j = 0; j < 4; ++j) {
+        pb[sj][j] =
+            __builtin_bit_cast(int, half2v_t{own[2 * j], own[2 * j + 1]});
+      }
+#pragma unroll
+      for (int j = 0; j < 4; ++j) {
+        pb[sj][4 + j] = swap_halves(pb[sj][j]);
+      }
+#endif
+    }
+    tsum += swap_halves(tsum);
+    l_run += tsum;
 
+    // A masked p of 0 must not meet a non-finite V value of the row-0
+    // stand-in (0 * Inf).
+    if (vmask != 0xffffffffu) {
+#pragma unroll
+      for (int j = 0; j < V_CHUNKS; ++j) {
+        vc[j] = idx_cur >= 0 ? vc[j] : dw8_t{};
+      }
+    }
+#pragma unroll
+    for (int j = 0; j < V_CHUNKS; ++j) {
+#pragma unroll
+      for (int e = 0; e < kTile; ++e) {
+        // Shift and mask: ROCm 7.16 compiles a __builtin_bit_cast of the
+        // vector element vc[j][e / 2] as a read of vc[0][0].
+        const unsigned w = static_cast<unsigned>(vc[j][e / 2]);
+        vt[(j * kTile + e) * VT_STR + ((e & 1) ? pos_odd : pos_even)] =
+            __builtin_bit_cast(_Float16, static_cast<unsigned short>(
+                                             (e & 1) ? w >> 16 : w & 0xffffu));
+      }
+    }
+    wave_lds_sync();
+
+    const _Float16 *vf_base = vt + wl * VT_STR;
+    frag_stream<N_TILES * DT, 2>(
+        [&](int f) {
+          return load_frag(
+              vf_base + (f % DT) * kTile * VT_STR + (f / DT) * kTile, pair);
+        },
+        [&](int f, const frag_t &vf) {
+          o_acc[f % DT] = DSA_WMMA(vf, __builtin_bit_cast(frag_t, pb[f / DT]),
+                                   o_acc[f % DT]);
+        });
+    wave_lds_sync();
+#if HIPDNN_HAS_WMMA
+    // Keeps the next tile's V loads out of the value GEMM, where their
+    // registers would overlap the P^T and V^T fragments and spill.
+    __builtin_amdgcn_sched_barrier(0);
+#endif
+    if (t + 1 < num_tiles) {
+      load_v(vc, idx_nxt);
+    }
+    idx_cur = idx_nxt;
+    idx_nxt = idx_after;
+  }
+
+  if (wl >= hpg) {
+    return;
+  }
+  const int d0 = wave * DS;
+  if (splits == 1) {
+    const float inv = l_run > 0.0f ? 1.0f / l_run : 0.0f;
+    _Float16 *o_row =
+        output + (static_cast<size_t>(row) * num_heads + g * hpg + wl) * D + d0;
 #pragma unroll
     for (int tj = 0; tj < DT; ++tj) {
 #pragma unroll
       for (int e = 0; e < 8; ++e) {
-        o_acc[tj][e] *= m_lds[hipdnn_wmma_acc_row(pair, e)];
-      }
-    }
-#pragma unroll
-    for (int tk = 0; tk < N_TILES; ++tk) {
-      const frag_t pf = load_frag(p_lds + wl * P_STR + tk * kTile, pair);
-#pragma unroll
-      for (int tj = 0; tj < DT; ++tj) {
-        const frag_t vf =
-            load_frag(vt + (tj * kTile + wl) * VT_STR + tk * kTile, pair);
-        o_acc[tj] = DSA_WMMA(pf, vf, o_acc[tj]);
-      }
-    }
-    __syncthreads();
-  }
-
-  if (sm_sub == 0) {
-    m_lds[sm_row] = m_run;
-    l_lds[sm_row] = l_run;
-  }
-  __syncthreads();
-
-  const int d0 = wave * DS + wl;
-  if (splits == 1) {
-#pragma unroll
-    for (int e = 0; e < 8; ++e) {
-      const int r = hipdnn_wmma_acc_row(pair, e);
-      if (r < hpg) {
-        const float l = l_lds[r];
-        const float inv = l > 0.0f ? 1.0f / l : 0.0f;
-        _Float16 *o_row =
-            output + (static_cast<size_t>(row) * num_heads + g * hpg + r) * D;
-#pragma unroll
-        for (int tj = 0; tj < DT; ++tj) {
-          o_row[d0 + tj * kTile] = static_cast<_Float16>(o_acc[tj][e] * inv);
-        }
+        o_row[tj * kTile + hipdnn_wmma_acc_row(pair, e)] =
+            static_cast<_Float16>(o_acc[tj][e] * inv);
       }
     }
     return;
   }
-
+  float *pd =
+      partials +
+      ((static_cast<size_t>(row) * num_heads + g * hpg + wl) * splits + split) *
+          (D + 2);
 #pragma unroll
-  for (int e = 0; e < 8; ++e) {
-    const int r = hipdnn_wmma_acc_row(pair, e);
-    if (r < hpg) {
-      float *pd = partials +
-                  ((static_cast<size_t>(row) * num_heads + g * hpg + r) *
-                       splits +
-                   split) *
-                      (D + 2);
+  for (int tj = 0; tj < DT; ++tj) {
 #pragma unroll
-      for (int tj = 0; tj < DT; ++tj) {
-        pd[2 + d0 + tj * kTile] = o_acc[tj][e];
-      }
+    for (int e = 0; e < 8; ++e) {
+      pd[2 + d0 + tj * kTile + hipdnn_wmma_acc_row(pair, e)] = o_acc[tj][e];
     }
   }
-  if (tid < hpg) {
-    float *pd = partials +
-                ((static_cast<size_t>(row) * num_heads + g * hpg + tid) *
-                     splits +
-                 split) *
-                    (D + 2);
-    pd[0] = m_lds[tid];
-    pd[1] = l_lds[tid];
+  if (wave == 0 && pair == 0) {
+    pd[0] = m_run;
+    pd[1] = l_run;
   }
 }
+
 
 template <bool IS_MAX>
 __device__ __forceinline__ float blockReduce(float x, float *red) {
@@ -432,14 +584,13 @@ hipError_t launchAttention(hipStream_t stream, const void *query,
                            float *partials, int rows, int seq_len,
                            int num_heads, int kv_heads, int cap, int max_sel,
                            int splits, float scale) {
-  dsa_attention_kernel<D, ND>
-      <<<dim3(rows, kv_heads, splits), 32 * ND, 0, stream>>>(
-          static_cast<const _Float16 *>(query),
-          static_cast<const _Float16 *>(present_key),
-          static_cast<const _Float16 *>(present_value), selected_indices,
-          selected_counts, seqlens_k, static_cast<_Float16 *>(output),
-          partials, seq_len, num_heads, kv_heads, cap, max_sel, splits,
-          scale * kLog2e);
+  const dim3 grid(rows, kv_heads, splits);
+  dsa_attention_kernel<D, ND><<<grid, 32 * ND, 0, stream>>>(
+      static_cast<const _Float16 *>(query),
+      static_cast<const _Float16 *>(present_key),
+      static_cast<const _Float16 *>(present_value), selected_indices,
+      selected_counts, seqlens_k, static_cast<_Float16 *>(output), partials,
+      seq_len, num_heads, kv_heads, cap, max_sel, splits, scale * kLog2e);
   hipError_t err = hipGetLastError();
   if (err != hipSuccess || splits == 1) {
     return err;
