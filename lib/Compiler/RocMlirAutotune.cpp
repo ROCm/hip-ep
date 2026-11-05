@@ -1160,7 +1160,10 @@ bool RocMlirAutotuner::Impl::compileAndBenchmarkSearches(
 
 // One pool for every kernel that reused a winner. Each task compiles that
 // kernel's own symbol; benchmarking already happened on the first kernel with
-// the key. A compile failure erases the winner and searches that kernel.
+// the key. A compile failure drops the cached tile only when it is still the
+// one that failed. Several kernels can share one bad LUT tile; the first
+// failure searches and stores a replacement, and a later failure must keep
+// that replacement instead of searching again.
 bool RocMlirAutotuner::Impl::compileDeferredCacheHits(
     llvm::StringMap<CompiledKernel> &byKernel) {
   std::vector<DeferredCacheHit> hits = std::move(cacheHits);
@@ -1200,7 +1203,11 @@ bool RocMlirAutotuner::Impl::compileDeferredCacheHits(
       llvm::errs() << "; searching the " << autotuneSpaceName(options.space)
                    << " space\n";
     rejectedSolutions[hit.cacheKey].push_back(hit.perfConfig);
-    winnerCache.erase(hit.cacheKey);
+    // The entry may already be a replacement recorded by an earlier duplicate
+    // of this problem. Erase only the tile that just failed.
+    if (auto cached = winnerCache.find(hit.cacheKey);
+        cached != winnerCache.end() && cached->getValue() == hit.perfConfig)
+      winnerCache.erase(cached);
     MLIRContext context(autotuneRegistry(), MLIRContext::Threading::DISABLED);
     context.loadAllAvailableDialects();
     ParserConfig parserConfig(&context);
