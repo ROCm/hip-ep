@@ -77,6 +77,8 @@ std::optional<OpFoldResult> findHostShapeEntry(Value shape, int64_t index) {
       int64_t source = indices.getValues<APInt>()[index].getSExtValue();
       if (source < 0)
         source += dataType.getDimSize(0);
+      if (source < 0 || source >= dataType.getDimSize(0))
+        return std::nullopt;
       index = source;
       shape = gather.getData();
       continue;
