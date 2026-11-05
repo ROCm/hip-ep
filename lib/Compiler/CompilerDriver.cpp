@@ -455,6 +455,8 @@ bool CompilerDriver::runMLIRPasses(
       mlir::hip::rocMlirAutotuneBenchmarkFromEnv(autotuneOpts.benchmark);
       autotuneOpts.log = embedOpts.log;
       autotuneOpts.logPrefix = "[CompilerDriver/rocmlir-autotune]";
+      // Replaces the shipped LUT. Empty keeps that table.
+      autotuneOpts.problemCachePath = hip_get_env("HIP_ROCMLIR_PROBLEM_CACHE");
       autotuner.emplace(embedOpts.arch, autotuneOpts);
       // Refuse rather than fall back to the default perfConfig. By this point
       // rocMlirArtifactTarget() has already stamped +autotune=<space> into the
