@@ -1140,15 +1140,20 @@ HIP_KERNEL_API int hip_gqa_add_attention_bias_f32(
     int sq, int score_cols, int score_batch_stride, int bias_element_size_bytes,
     int bias_sq, int bias_row_offset, int bias_total_seq, int bias_col_offset);
 
+/* Additive bias at or below this cannot survive the softmax. Not a tolerance:
+ * it is the fp16 lower bound, the "not attended" sentinel itself. */
+#define HIP_GQA_BIAS_MASKED_MAX (-65504.0f)
+
 /* Highest key position each query chunk can attend, recovered from the additive
  * mask. Writes one int per chunk to out_chunk_hi (device), as an ABSOLUTE key
  * position, so the caller's per-chunk key range is [lo, out_chunk_hi[j] + 1).
  *
  * For a bidirectional op (onnx.Attention is_causal=0) the attributes carry no
  * upper bound and every chunk otherwise scores every key. An entry whose bias
- * is at or below -65504 -- the fp16 lower bound, the "not attended" sentinel --
- * contributes exactly zero to the softmax, so excluding it is bit-exact.
- * Anything less negative counts as attended, which only narrows less.
+ * is at or below masked_max counts as not attended; anything less negative
+ * counts as attended. With HIP_GQA_BIAS_MASKED_MAX an excluded entry
+ * contributes exactly zero to the softmax, so narrowing a chunk's key range
+ * is bit-exact and a less negative mask value only narrows less.
  *
  * Chunks are the caller's uniform tiling: chunk j covers query rows
  * [j*sq_chunk, min((j+1)*sq_chunk, sq)). bias layout and the bias_batch /
@@ -1159,7 +1164,7 @@ HIP_KERNEL_API int hip_gqa_bias_key_extent(
     void* stream, const void* bias, void* out_chunk_hi,
     int bias_batch, int bias_heads, int bias_sq, int bias_total_seq,
     int sq, int sq_chunk, int past_len, int num_chunks,
-    int bias_element_size_bytes);
+    int bias_element_size_bytes, float masked_max);
 
 /* Column-wise softmax in-place. One threadblock per (head, query).
  * Smooth softmax is activated when head_sink is non-null OR use_smooth_softmax

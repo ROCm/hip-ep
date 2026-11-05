@@ -666,7 +666,13 @@ class TestGroupQueryAttention:
             model,
             [q, k, v, pk, pv, seqlens, total, bias],
         )
-        compare_outputs(actual, expected, atol=1e-3)
+        # Present slots past the live length are not defined by the EP.
+        live = past_valid + seq_len
+        compare_outputs(
+            [actual[0], actual[1][:, :, :live], actual[2][:, :, :live]],
+            [expected[0], expected[1][:, :, :live], expected[2][:, :, :live]],
+            atol=1e-3,
+        )
 
     def test_gqa_decode_deep_cache_llama_shape(self, model_runner):
         """GQA single-token decode with a large KV cache (Llama-3.1-8B pattern).

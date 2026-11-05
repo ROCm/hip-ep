@@ -176,6 +176,11 @@ static int32_t read_seqlens_k_for_dispatch(hipStream_t stream,
   return seqlens_k_val;
 }
 
+// Live-length recovery needs the mask's attended extent rather than a safe
+// narrowing bound, so finite fill values down to -10000 also count as masked.
+// The current token's own column carries a bias near zero.
+static constexpr float kSharedMaskMaskedMax = -10000.0f;
+
 static int32_t read_shared_mask_seqlens(
     hipStream_t stream, const void *attentionBias, int64_t biasBatch,
     int64_t biasHeads, int64_t batch, int64_t querySeq, int64_t keyCapacity,
@@ -225,7 +230,7 @@ static int32_t read_shared_mask_seqlens(
           static_cast<int>(biasHeads), static_cast<int>(querySeq),
           static_cast<int>(keyCapacity), static_cast<int>(querySeq),
           static_cast<int>(querySeq), /*past_len=*/0, /*num_chunks=*/1,
-          static_cast<int>(elementSize)) != 0) {
+          static_cast<int>(elementSize), kSharedMaskMaskedMax) != 0) {
     fprintf(stderr, "GQA attention-mask live-length kernel launch failed\n");
     return kSeqlensKReadError;
   }
@@ -2167,7 +2172,8 @@ static int gqa_forward_hipblaslt(
             static_cast<int>(attn_bias_seq_q),
             static_cast<int>(attn_bias_seq_kv), static_cast<int>(sq),
             static_cast<int>(sq_chunk), static_cast<int>(past_len),
-            static_cast<int>(nchunks), static_cast<int>(elem_sz)) == 0) {
+            static_cast<int>(nchunks), static_cast<int>(elem_sz),
+            HIP_GQA_BIAS_MASKED_MAX) == 0) {
       std::vector<int32_t> hi(static_cast<size_t>(nchunks), 0);
       if (hipMemcpyAsync(hi.data(), d_hi, hi_bytes, hipMemcpyDeviceToHost,
                          stream) == hipSuccess &&
