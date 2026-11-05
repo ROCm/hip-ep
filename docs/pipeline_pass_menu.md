@@ -119,8 +119,11 @@ shipped rocMLIR LUT embedded from `tools/problem-cache/lut/<gpu_arch>.fb`
 (the JSON beside it is the reviewable source;
 `tools/problem-cache/problem_cache_to_fb.py` compiles it with
 `flatc --binary --strict-json`). Only a table whose `gpu_arch` matches the
-device is used. `--problem-cache <file.fb>` (or `HIP_ROCMLIR_PROBLEM_CACHE`)
-replaces that table: the shipped LUT is not consulted, and a miss in the
+device is used. The ONNX Runtime provider leaves the external path empty, so
+it consults that shipped table and, on a miss, benchmarks with the quick space
+unless `HIP_ROCMLIR_SKIP_BENCHMARKING` is set. `hip-rocmlir-compiler
+--problem-cache <file.fb>` (or `HIP_ROCMLIR_PROBLEM_CACHE`, read only by that
+tool) replaces the shipped table: it is not consulted, and a miss in the
 external file falls through to the in-process winner cache. That cache is
 checked before the quick, full, or exhaustive tuning space. The file is the same kind of artifact as the
 MatMulNBits and GQA LUTs: a JSON document (`schema_version`, `gpu_arch`,
