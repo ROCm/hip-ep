@@ -1062,7 +1062,12 @@ conv_window_kernel(const __half *__restrict__ x, const __half *__restrict__ w,
   const int rowA = tid / kRowThreadsA;
   const int kOffA = (tid % kRowThreadsA) * kVecA;
   const bool rowValidA = m0 + rowA < pr.MPerGroup;
-  const int64_t wRowBase = (g * pr.MPerGroup + m0 + rowA) * pr.K;
+  // This thread's filter row. Offsets inside it fit in 32 bits (a row is K
+  // elements); only the row base needs 64.
+  const _Float16 *wRow = reinterpret_cast<const _Float16 *>(w) +
+                         (g * pr.MPerGroup + m0 + rowA) * pr.K;
+  const int32_t kvol = static_cast<int32_t>(pr.kvol);
+  const int32_t cinG = static_cast<int32_t>(pr.CinPerGroup);
 
   float8 acc[WM][WN];
 #pragma unroll
@@ -1074,40 +1079,86 @@ conv_window_kernel(const __half *__restrict__ x, const __half *__restrict__ w,
   const int32_t k1 = static_cast<int32_t>(pr.k1);
   const int32_t wh = TH + k0 - 1;
   const int32_t ww = TW + k1 - 1;
+  const int32_t in1 = static_cast<int32_t>(pr.in1);
+  const int32_t inPlane = static_cast<int32_t>(pr.inPlane);
+  const int32_t wr0i = static_cast<int32_t>(wr0);
+  const int32_t wc0i = static_cast<int32_t>(wc0);
 
-  int buf = 0;
-  for (int64_t c0 = 0; c0 < pr.CinPerGroup; c0 += kWmma) {
-    // Stage the window for this channel slice. Out-of-input elements are
-    // written as zero, which is what padding means and what removes the bounds
-    // test from every tap below.
-    __syncthreads(); // every tap of the previous slice has finished with win
-    for (int idx = tid; idx < kWinElems; idx += kThreads) {
+  // The filter slice of one (channel slice, tap), read into registers a tap
+  // ahead of the LDS store that consumes it, so its global latency overlaps
+  // the previous tap's WMMAs instead of stalling the store.
+  _Float16 aNext[kVecA];
+  const auto loadA = [&](int32_t c0, int32_t t) {
+#pragma unroll
+    for (int i = 0; i < kVecA; ++i) {
+      const int32_t ic = c0 + kOffA + i;
+      aNext[i] = (rowValidA && ic < cinG) ? wRow[ic * kvol + t]
+                                          : static_cast<_Float16>(0.0f);
+    }
+  };
+  loadA(0, 0);
+
+  // The window of one channel slice, staged through registers into LDS: all of
+  // a thread's loads are issued before the barrier and waited on together,
+  // rather than one load-wait-store at a time. Out-of-input elements are zero,
+  // which is what padding means and what removes the bounds test from every
+  // tap. The slice base is the only 64-bit step; the window inside it is
+  // addressed in 32 bits (windowEligible guarantees the 16-channel span fits).
+  //
+  // Loading the next slice's window during this slice's taps instead hides the
+  // loads entirely but holds a window of registers through the taps, and the
+  // occupancy that costs loses more than it hides on all but the longest
+  // contractions.
+  constexpr int kWinPer = (kWinElems + kThreads - 1) / kThreads;
+  _Float16 winNext[kWinPer];
+  const auto loadWin = [&](int32_t c0) {
+    const _Float16 *xs = xg + static_cast<int64_t>(c0) * pr.inPlane;
+#pragma unroll
+    for (int l = 0; l < kWinPer; ++l) {
+      const int idx = tid + l * kThreads;
       const int e = idx / (WH * WW);
       const int rem = idx - e * (WH * WW);
       const int wr = rem / WW;
       const int wc = rem - wr * WW;
       _Float16 v = static_cast<_Float16>(0.0f);
-      if (wr < wh && wc < ww && c0 + e < pr.CinPerGroup) {
-        const int64_t r = wr0 + wr, c = wc0 + wc;
+      if (idx < kWinElems && wr < wh && wc < ww && c0 + e < cinG) {
+        const int32_t r = wr0i + wr, c = wc0i + wc;
         if (r >= 0 && r < pr.in0i && c >= 0 && c < pr.in1i)
-          v = xg[(c0 + e) * pr.inPlane + r * pr.in1 + c];
+          v = xs[e * inPlane + r * in1 + c];
       }
-      win[(wr * WW + wc) * kLdsK + e] = v;
+      winNext[l] = v;
     }
+  };
+  const auto storeWin = [&]() {
+#pragma unroll
+    for (int l = 0; l < kWinPer; ++l) {
+      const int idx = tid + l * kThreads;
+      if (idx >= kWinElems)
+        break;
+      const int e = idx / (WH * WW);
+      const int rem = idx - e * (WH * WW);
+      const int wr = rem / WW;
+      const int wc = rem - wr * WW;
+      win[(wr * WW + wc) * kLdsK + e] = winNext[l];
+    }
+  };
+  int buf = 0;
+  for (int32_t c0 = 0; c0 < cinG; c0 += kWmma) {
+    loadWin(c0);
+    __syncthreads(); // every tap of the previous slice has finished with win
+    storeWin();
 
     for (int32_t t = 0; t < k0 * k1; ++t) {
       const int32_t tr = t / k1, tc = t - tr * k1;
-      // Filter slice for this (tap, channel-slice), staged k-contiguous.
-      const int64_t wBase = wRowBase + (c0 + kOffA) * pr.kvol + t;
+      // Filter slice for this (tap, channel-slice), staged k-contiguous from
+      // the registers loaded during the previous tap.
 #pragma unroll
-      for (int i = 0; i < kVecA; ++i) {
-        const int64_t ic = c0 + kOffA + i;
-        As[buf][rowA][kOffA + i] =
-            (rowValidA && ic < pr.CinPerGroup)
-                ? static_cast<_Float16>(w[wBase + i * pr.kvol])
-                : static_cast<_Float16>(0.0f);
-      }
+      for (int i = 0; i < kVecA; ++i) As[buf][rowA][kOffA + i] = aNext[i];
       __syncthreads();
+      if (t + 1 < k0 * k1)
+        loadA(c0, t + 1);
+      else if (c0 + kWmma < cinG)
+        loadA(c0 + kWmma, 0);
 
       half16 aFrag[WM], bFrag[WN];
 #pragma unroll
@@ -1491,7 +1542,10 @@ static bool windowEligible(const ConvParams &pr) {
   return pr.k2 == 1 && pr.in2 == 1 && pr.out2 == 1 && // rank 2
          pr.s0 == 1 && pr.s1 == 1 && pr.d0 == 1 && pr.d1 == 1 &&
          pr.k0 >= 1 && pr.k0 <= kWinKMax && pr.k1 >= 1 && pr.k1 <= kWinKMax &&
-         pr.kvol > 1; // a 1x1 has nothing to amortise and no halo to pay for
+         pr.kvol > 1 && // a 1x1 has nothing to amortise and no halo to pay for
+         // The kernel addresses a 16-channel span of the input and a filter
+         // row in 32 bits.
+         pr.inPlane * kWmma <= INT32_MAX && pr.K <= INT32_MAX;
 }
 
 // How many blocks a window tile makes. Its column blocks tile the plane in two
