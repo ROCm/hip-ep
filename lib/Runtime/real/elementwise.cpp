@@ -63,15 +63,16 @@ extern "C" int8_t hipdnn_ep_op_state_construct_optensor(RuntimeState *state,
 //
 // Dispatches to custom HIP kernels: hip_elementwise_{mul,add,min,max} for
 // int16/int32/int64, and the native broadcasting kernel
-// hip_elementwise_binary_bcast for float16/float32.  Any other data_type /
-// tensor_op combination is unsupported and returns an error.
+// hip_elementwise_binary_bcast for float16/bfloat16/float32.  Any other
+// data_type / tensor_op combination is unsupported and returns an error.
 //
 // Each operand's shape is passed as 4D (N, C, H, W). For the integer path,
 // non-matching operands are materialised to the output shape via hip_expand
 // before the flat kernel runs; the float path broadcasts natively (dimension
 // 1 in one operand vs >1 in the other) without materialisation.
 // The compiler (HipToLLVM) left-pads shapes with 1 for rank < 4.
-// Currently supported data_types: float16, float32, int32, int64, int16
+// Currently supported data_types: float16, bfloat16, float32, int32, int64,
+// int16
 // Currently supported tensor_ops: MUL, ADD, MIN, MAX
 //===----------------------------------------------------------------------===//
 
@@ -146,6 +147,9 @@ int wrap_elementwise(RuntimeState *state, int op_state_slot, void *lhs,
       size_t elem_size = 0;
       switch (data_type) {
       case HIPDNN_EP_DATATYPE_HALF:
+        elem_size = 2;
+        break;
+      case HIPDNN_EP_DATATYPE_BFLOAT16:
         elem_size = 2;
         break;
       case HIPDNN_EP_DATATYPE_FLOAT:
@@ -309,13 +313,14 @@ int wrap_elementwise(RuntimeState *state, int op_state_slot, void *lhs,
     return rc;
   }
 
-  // Float/half Add/Mul/Min/Max fast path: a single broadcasting HIP kernel.
-  // The custom kernel does this work in well under a millisecond with fully
-  // coalesced output writes and native per-axis broadcasting (no Expand
-  // materialisation). bf16, any op not in {ADD,MUL,MIN,MAX}, or an output
-  // volume exceeding the kernel's 32-bit index range fall through to the
+  // Float/half/bf16 Add/Mul/Min/Max fast path: a single broadcasting HIP
+  // kernel. The custom kernel does this work in well under a millisecond with
+  // fully coalesced output writes and native per-axis broadcasting (no Expand
+  // materialisation). Any op not in {ADD,MUL,MIN,MAX}, or an output volume
+  // exceeding the kernel's 32-bit index range fall through to the
   // unsupported-combination error below -- there is no fallback.
   if ((data_type == HIPDNN_EP_DATATYPE_HALF ||
+       data_type == HIPDNN_EP_DATATYPE_BFLOAT16 ||
        data_type == HIPDNN_EP_DATATYPE_FLOAT) &&
       (tensor_op == HIPDNN_EP_TENSOR_OP_ADD ||
        tensor_op == HIPDNN_EP_TENSOR_OP_MUL ||
