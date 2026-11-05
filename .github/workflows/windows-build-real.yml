@@ -150,6 +150,8 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Stage GPU test package
         shell: bash
+        env:
+          VLM_BENCHMARK_REF: f02a82c8312224ef3e2f673c4c6569d487d47e64
         run: |
           mkdir -p staging/bin staging/lib
 
@@ -278,6 +280,8 @@ jobs:
           fi
           cp "$ORT_WHEEL" staging/wheels/
           cp "$OGA_WHEEL" staging/wheels/
+          curl -fsSL --retry 3 -o staging/vlm_benchmark.py \
+            "https://raw.githubusercontent.com/amd/RyzenAI-SW/$VLM_BENCHMARK_REF/LLM-examples/VLM/vlm_benchmark.py"
 
           echo "=== Binary sizes ==="
           ls -lh staging/bin/hipgpu.dll staging/bin/custom_kernels*.dll 2>/dev/null || true
@@ -314,8 +318,6 @@ jobs:
 
       - name: Stage Python wheel package
         shell: bash
-        env:
-          VLM_BENCHMARK_REF: f02a82c8312224ef3e2f673c4c6569d487d47e64
         run: |
           mkdir -p wheelpkg/wheels
           ORT_WHEEL=$(find "${{ runner.workspace }}/ort-install/wheels" \
@@ -334,8 +336,7 @@ jobs:
           cp "$ORT_WHEEL" "$OGA_WHEEL" "$EP_WHEEL" "$AMDGPU_WHEEL" wheelpkg/wheels/
           cp python/examples/run_onnx.py wheelpkg/
           cp "${{ runner.workspace }}/oga-artifacts/benchmark-python/"*.py wheelpkg/
-          curl -fsSL --retry 3 -o wheelpkg/vlm_benchmark.py \
-            "https://raw.githubusercontent.com/amd/RyzenAI-SW/$VLM_BENCHMARK_REF/LLM-examples/VLM/vlm_benchmark.py"
+          cp staging/vlm_benchmark.py wheelpkg/
           echo "=== Python wheel package layout ==="
           find wheelpkg/ -maxdepth 2 -mindepth 1 | sort
 
