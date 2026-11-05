@@ -82,10 +82,11 @@ unset or `0` benchmarks, and any other value skips the search. Autotune
 otherwise runs for a rocMLIR session. Unset `HIPDNN_EP_ROCMLIR_AUTOTUNE`
 selects `quick`. `quick`, `full`, and `exhaustive` are the only accepted
 values; anything else warns and stays on quick. Before
-benchmarking, the autotuner applies the shipped
+benchmarking, the provider applies the shipped
 `tools/problem-cache/lut/<gpu_arch>.fb` whose `gpu_arch` matches the device.
-`HIP_ROCMLIR_PROBLEM_CACHE` or `--problem-cache` replaces that table; the
-shipped LUT is not consulted. The
+It does not read `HIP_ROCMLIR_PROBLEM_CACHE`. `hip-rocmlir-compiler` does, via
+that variable or `--problem-cache`, and that file replaces the shipped table.
+The
 perfConfig a kernel was tuned to is baked into its code object, so a tuned
 and an untuned artifact are not interchangeable even on the same GPU.
 

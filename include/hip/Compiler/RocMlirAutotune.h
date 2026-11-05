@@ -96,12 +96,14 @@ struct AutotuneOptions {
   // `log` because the per-candidate lines are one per config per kernel --
   // useful when tuning by hand, far too much for a normal compile.
   bool verbose = false;
-  // External rocMLIR LUT FlatBuffer (.fb). When set, the shipped
-  // tools/problem-cache/lut/<gpu_arch>.fb is not consulted. Empty uses the
-  // shipped table. An identical problem string is compiled as stored. A miss
-  // takes the nearest legal tile of the same kernel kind (conv, gemm,
-  // attention, or gemm-elementwise-gemm). A tile that fails to compile is
-  // skipped for the next nearest row.
+  // External rocMLIR LUT FlatBuffer (.fb). hip-rocmlir-compiler sets this
+  // from --problem-cache or HIP_ROCMLIR_PROBLEM_CACHE. When set, the shipped
+  // tools/problem-cache/lut/<gpu_arch>.fb is not consulted. The in-process
+  // Execution Provider leaves this empty and uses the shipped table. An
+  // identical problem string is compiled as stored. A miss takes the nearest
+  // legal tile of the same kernel kind (conv, gemm, attention, or
+  // gemm-elementwise-gemm). A tile that fails to compile is skipped for the
+  // next nearest row.
   std::string problemCachePath;
   // Where to write this compile's winners. Empty skips the dump. The autotuner
   // does not write the file itself; hip-rocmlir-compiler calls

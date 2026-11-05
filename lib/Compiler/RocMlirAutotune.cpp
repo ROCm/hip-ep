@@ -956,11 +956,12 @@ bool RocMlirAutotuner::Impl::autotuneKernel(ModuleOp module,
   }
   ensureDialectsLoaded();
 
-  // Look up before building the search space. With --problem-cache or
-  // HIP_ROCMLIR_PROBLEM_CACHE set, that file is the only table. Otherwise the
-  // shipped lut/<arch>.fb is used. Either way a miss then checks this
-  // compile's winner cache, then the selected tuning space. A known winner is
-  // compiled in the second pool. A problem already queued waits for that pool
+  // Look up before building the search space. problemCachePath is set only by
+  // hip-rocmlir-compiler; when it is set, that file is the only table. The
+  // in-process EP leaves it empty and uses the shipped lut/<arch>.fb. A miss
+  // then checks this compile's winner cache, then the selected tuning space.
+  // A known winner is compiled in the second pool. A problem already queued
+  // waits for that pool
   // once the search has been benchmarked. A tile that fails to compile is skipped
   // and the next nearest row is tried. When none remain, the search runs.
   llvm::SmallString<2048> problem;
