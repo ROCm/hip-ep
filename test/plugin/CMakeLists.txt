@@ -48,6 +48,12 @@ if("sample" IN_LIST HIPDNN_EP_COMPILER_PLUGINS)
 else()
   target_compile_definitions(test_static_plugins PRIVATE HIP_EP_EXPECT_SAMPLE=0)
 endif()
+# Production plugins (e.g. hip_ep_gguf) register libraries and dialects of their
+# own; the no-plugin checks then cannot hold.
+if(HIPDNN_EP_COMPILER_PLUGINS AND NOT "sample" IN_LIST HIPDNN_EP_COMPILER_PLUGINS)
+  target_compile_definitions(test_static_plugins PRIVATE
+    HIP_EP_EXPECT_OTHER_PLUGINS=1)
+endif()
 
 set_target_properties(test_static_plugins PROPERTIES FOLDER "mlir/Test/Plugin")
 
