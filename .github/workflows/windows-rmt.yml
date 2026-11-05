@@ -4,14 +4,13 @@
 ##
 name: Windows RMT Build
 
-# Extra rocMLIR package. Kept as its own workflow so the LLVM build does not
-# hold Windows Build open: that run posts the perf and L2 PR comments, and it
-# stays in progress until every job in it has finished. This workflow runs
-# the same deps prebuild first. Those jobs share concurrency groups with
-# Windows Build and do not cancel an in-progress deps job, so a cold cache is
-# built once and this build restores it afterwards. amdgpu and OGA fall back
-# to the artifacts this run's prebuild uploaded. continue-on-error keeps a
-# build failure from failing the check. Not part of the merge queue.
+# Optional rocMLIR package. Kept as its own workflow so its long LLVM and
+# hip-ep build does not keep the Windows Build run in progress. This workflow
+# runs the same deps prebuild first. Those jobs share per-commit concurrency
+# groups with Windows Build and do not cancel an in-progress deps job, so a
+# cold cache is built once per commit and this build restores it afterwards.
+# amdgpu and OGA fall back to the artifacts this run's prebuild uploaded.
+# Not part of the merge queue.
 on:
   workflow_dispatch:
   pull_request:
@@ -26,6 +25,10 @@ jobs:
   prebuild:
     uses: ./.github/workflows/windows-deps.yml
 
+  # Job-level continue-on-error keeps the run green but still marks this
+  # check failed on the PR. Each step therefore continues on error and is
+  # skipped once an earlier step with an id has failed; the final step turns
+  # a failure into a warning. Steps whose failure is harmless have no id.
   build:
     needs: prebuild
     runs-on: windows-2022
@@ -47,6 +50,8 @@ jobs:
 
     steps:
       - name: Checkout
+        id: checkout
+        continue-on-error: true
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           submodules: false
@@ -55,6 +60,8 @@ jobs:
 
       - name: Compute dependency cache keys
         id: deps
+        if: ${{ !contains(steps.*.outcome, 'failure') }}
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
@@ -84,6 +91,9 @@ jobs:
           echo "llvm=dep-llvm-rocmlirtriton-amdgpu-$(echo "$LINE" | cut -d';' -f3)" >> "$GITHUB_OUTPUT"
 
       - name: Restore ort-install
+        id: restore-ort
+        if: ${{ !contains(steps.*.outcome, 'failure') }}
+        continue-on-error: true
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/ort-install
@@ -94,13 +104,17 @@ jobs:
       # tree, and that artifact is the reliable handoff inside this run.
       - name: Restore amdgpu-artifacts
         id: restore-amdgpu
+        if: ${{ !contains(steps.*.outcome, 'failure') }}
+        continue-on-error: true
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/amdgpu-artifacts
           key: ${{ steps.deps.outputs.amdgpu }}
 
       - name: Download amdgpu-artifacts
-        if: steps.restore-amdgpu.outputs.cache-hit != 'true'
+        id: download-amdgpu
+        if: ${{ !contains(steps.*.outcome, 'failure') && steps.restore-amdgpu.outputs.cache-hit != 'true' }}
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           name: ${{ steps.deps.outputs.amdgpu }}
@@ -108,13 +122,17 @@ jobs:
 
       - name: Restore oga-artifacts
         id: restore-oga
+        if: ${{ !contains(steps.*.outcome, 'failure') }}
+        continue-on-error: true
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/oga-artifacts
           key: ${{ steps.deps.outputs.oga }}
 
       - name: Download oga-artifacts
-        if: steps.restore-oga.outputs.cache-hit != 'true'
+        id: download-oga
+        if: ${{ !contains(steps.*.outcome, 'failure') && steps.restore-oga.outputs.cache-hit != 'true' }}
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           name: ${{ steps.deps.outputs.oga }}
@@ -122,17 +140,23 @@ jobs:
 
       - name: Restore AMDGPU llvm-install
         id: cache-llvm
+        if: ${{ !contains(steps.*.outcome, 'failure') }}
+        continue-on-error: true
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/llvm-install
           key: ${{ steps.deps.outputs.llvm }}
 
       - name: Setup MSVC environment
-        if: steps.cache-llvm.outputs.cache-hit != 'true'
+        id: msvc-llvm
+        if: ${{ !contains(steps.*.outcome, 'failure') && steps.cache-llvm.outputs.cache-hit != 'true' }}
+        continue-on-error: true
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
 
       - name: Build LLVM/MLIR/LLD with AMDGPU
-        if: steps.cache-llvm.outputs.cache-hit != 'true'
+        id: build-llvm
+        if: ${{ !contains(steps.*.outcome, 'failure') && steps.cache-llvm.outputs.cache-hit != 'true' }}
+        continue-on-error: true
         shell: bash
         run: |
           SRC="${{ runner.workspace }}/rocmlirTriton"
@@ -157,7 +181,7 @@ jobs:
           cmake --build "${{ runner.workspace }}/build-llvm" --target install
 
       - name: Save AMDGPU llvm-install
-        if: steps.cache-llvm.outputs.cache-hit != 'true'
+        if: ${{ !contains(steps.*.outcome, 'failure') && steps.cache-llvm.outputs.cache-hit != 'true' }}
         continue-on-error: true
         uses: actions/cache/save@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
@@ -165,24 +189,38 @@ jobs:
           key: ${{ steps.deps.outputs.llvm }}
 
       - name: Setup Python 3.14
+        id: setup-python
+        if: ${{ !contains(steps.*.outcome, 'failure') }}
+        continue-on-error: true
         uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
         with:
           python-version: "3.14"
 
       - name: Install pip dependencies
+        id: pip
+        if: ${{ !contains(steps.*.outcome, 'failure') }}
+        continue-on-error: true
         run: pip install lit requests
 
       # Put cl.exe and ninja.exe (bundled with VS) into PATH
       - name: Setup MSVC environment
+        id: msvc
+        if: ${{ !contains(steps.*.outcome, 'failure') }}
+        continue-on-error: true
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
 
       - name: Prepare sccache local cache
+        id: sccache-env
+        if: ${{ !contains(steps.*.outcome, 'failure') }}
+        continue-on-error: true
         shell: bash
         run: |
           echo "SCCACHE_DIR=${{ runner.workspace }}/sccache-dir" >> $GITHUB_ENV
           echo "SCCACHE_KEY_DATE=$(date -u +'%Y%m%d')" >> $GITHUB_ENV
 
       - name: Restore sccache directory
+        if: ${{ !contains(steps.*.outcome, 'failure') }}
+        continue-on-error: true
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/sccache-dir
@@ -191,9 +229,15 @@ jobs:
             sccache-windows-rmt-
 
       - name: Setup sccache
+        id: sccache
+        if: ${{ !contains(steps.*.outcome, 'failure') }}
+        continue-on-error: true
         uses: mozilla-actions/sccache-action@v0.0.9
 
       - name: Build hip-ep
+        id: build
+        if: ${{ !contains(steps.*.outcome, 'failure') }}
+        continue-on-error: true
         shell: bash
         run: |
           python build.py \
@@ -211,6 +255,9 @@ jobs:
       #   staging/morphizen_config.json
       # -----------------------------------------------------------------------
       - name: Stage GPU test package
+        id: stage
+        if: ${{ !contains(steps.*.outcome, 'failure') }}
+        continue-on-error: true
         shell: bash
         run: |
           mkdir -p staging/bin staging/lib
@@ -361,8 +408,26 @@ jobs:
           find staging/ -type f | sort
 
       - name: Upload GPU test package
+        id: upload
+        if: ${{ !contains(steps.*.outcome, 'failure') }}
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: gpu-test-package-rmt
           path: staging/
-          retention-days: ${{ (github.ref == 'refs/heads/main' || contains(github.ref, 'release')) && 14 || 3 }}
+          retention-days: ${{ (github.ref == 'refs/heads/main' || contains(github.ref, 'release')) && 90 || 3 }}
+
+      # Saved from main only; pull requests restore the main entry. A failed
+      # build still leaves useful objects, but a skipped one has no directory.
+      - name: Save sccache directory
+        if: ${{ always() && github.ref_name == 'main' && (steps.build.outcome == 'success' || steps.build.outcome == 'failure') }}
+        continue-on-error: true
+        uses: actions/cache/save@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/sccache-dir
+          key: sccache-windows-rmt-${{ env.SCCACHE_KEY_DATE }}
+
+      - name: Report optional build failure
+        if: ${{ contains(steps.*.outcome, 'failure') }}
+        shell: bash
+        run: echo "::warning title=Windows RMT Build::The optional RMT build failed; see the first failed step above."

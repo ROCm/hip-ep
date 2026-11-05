@@ -88,12 +88,13 @@ mlir::LogicalResult SparseAttentionIndexerToHip::matchAndRewrite(
   if (getOptionalOperand(1)) {
     return rewriter.notifyMatchFailure(op, "only packed QK is supported");
   }
+  constexpr size_t kPastSequenceLengthIdx = 12;
   for (size_t idx = 8; idx < numOps; ++idx) {
-    if (getOptionalOperand(idx)) {
-      return rewriter.notifyMatchFailure(
-          op, "csa inputs and past_sequence_length are not supported");
+    if (idx != kPastSequenceLengthIdx && getOptionalOperand(idx)) {
+      return rewriter.notifyMatchFailure(op, "csa inputs are not supported");
     }
   }
+  mlir::Value pastSeqLen = getOptionalOperand(kPastSequenceLengthIdx);
   mlir::Value query = op->getOperand(0);
   mlir::Value queryNormWeight = getOptionalOperand(2);
   mlir::Value keyNormWeight = getOptionalOperand(3);
@@ -185,11 +186,15 @@ mlir::LogicalResult SparseAttentionIndexerToHip::matchAndRewrite(
                                        "past_key must be [B, P, 128] of the "
                                        "query type");
   }
+  if (pastSeqLen && !matches(pastSeqLen, rewriter.getI32Type(), {1})) {
+    return rewriter.notifyMatchFailure(op,
+                                       "past_sequence_length must be i32 [1]");
+  }
   const int64_t past = pastType.getDimSize(1);
-  const int64_t total =
-      mlir::ShapedType::isDynamic(past) || mlir::ShapedType::isDynamic(seq)
-          ? kAny
-          : past + seq;
+  const int64_t total = pastSeqLen || mlir::ShapedType::isDynamic(past) ||
+                                mlir::ShapedType::isDynamic(seq)
+                            ? kAny
+                            : past + seq;
   if (mask && !matches(mask, rewriter.getI64Type(), {batch, total})) {
     return rewriter.notifyMatchFailure(op, "mask must be i64 [B, P + S]");
   }
@@ -213,9 +218,12 @@ mlir::LogicalResult SparseAttentionIndexerToHip::matchAndRewrite(
       mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(1).getType());
   if (!presentType || presentType.getRank() != 3 ||
       presentType.isDynamicDim(2) ||
-      !matches(op->getResult(1), elem, {batch, total, kHeadSize})) {
+      !matches(op->getResult(1), elem,
+               {batch, pastSeqLen ? past : total, kHeadSize})) {
     return rewriter.notifyMatchFailure(
-        op, "present_key must be [B, P + S, 128] of the query type");
+        op, pastSeqLen ? "present_key must have the shape of past_key"
+                       : "present_key must be [B, P + S, 128] of the query "
+                         "type");
   }
 
   float scale = 1.0f / std::sqrt(static_cast<float>(kHeadSize));
@@ -248,10 +256,14 @@ mlir::LogicalResult SparseAttentionIndexerToHip::matchAndRewrite(
   if (presentType.isDynamicDim(1)) {
     mlir::Value pastLen =
         mlir::tensor::DimOp::create(rewriter, loc, pastKey, int64_t{1});
-    mlir::Value seqLen =
-        mlir::tensor::DimOp::create(rewriter, loc, query, int64_t{1});
-    presentDims.push_back(
-        mlir::arith::AddIOp::create(rewriter, loc, pastLen, seqLen));
+    if (pastSeqLen) {
+      presentDims.push_back(pastLen);
+    } else {
+      mlir::Value seqLen =
+          mlir::tensor::DimOp::create(rewriter, loc, query, int64_t{1});
+      presentDims.push_back(
+          mlir::arith::AddIOp::create(rewriter, loc, pastLen, seqLen));
+    }
   }
   mlir::Value presentInit =
       mlir::tensor::EmptyOp::create(rewriter, loc, presentType.getShape(),
@@ -263,12 +275,19 @@ mlir::LogicalResult SparseAttentionIndexerToHip::matchAndRewrite(
   if (mask) {
     operands.push_back(mask);
   }
+  if (pastSeqLen) {
+    operands.push_back(pastSeqLen);
+  }
   operands.push_back(selectedInit);
   operands.push_back(presentInit);
 
   auto state = mlir::OperationState(loc, "hip.sparse_attention_indexer");
   state.addOperands(operands);
   state.addTypes({selectedType, presentType});
+  state.addAttribute(
+      "operand_segment_sizes",
+      rewriter.getDenseI32ArrayAttr(
+          {1, 1, 1, 1, 1, 1, 1, mask ? 1 : 0, pastSeqLen ? 1 : 0, 1, 1}));
   state.addAttribute("compress_ratio", rewriter.getI64IntegerAttr(ratio));
   state.addAttribute("token_budget", rewriter.getI64IntegerAttr(budget));
   state.addAttribute("epsilon", rewriter.getF32FloatAttr(epsilon));
