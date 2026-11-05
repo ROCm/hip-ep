@@ -69,6 +69,7 @@ prefix gets one `kernel-tests/<arch>/`, named exactly like that entry's
     hipdnn-kernel-ut-gather-block-quantized-xi64-wu4-yfp16.exe
     hipdnn-kernel-ut-gather-block-quantized-xi64-wu8-yfp16.exe
     hipdnn-kernel-ut-gather-block-quantized-xi64-wfp8-yfp16.exe
+    hipdnn-kernel-ut-cast-xany-yany-bf16.exe
 ```
 
 ### Run (on a machine with a supported AMD GPU)
@@ -258,6 +259,7 @@ unit_test/
   gqa/prefill/Xfp16_Wi8_Yfp16/
   qmoe_ragged_mm/Xfp16_Wu4_Yfp16/
   gather_block_quantized/Xi64_W{u4,u8,fp8}_Yfp16/
+  cast/Xany_Yany_bf16/
   gemv_transposed_b/Xfp32_Wfp32_Yfp32/
 ```
 
@@ -379,6 +381,11 @@ COVERAGE=N` (any leaf, or the top-level aggregator) builds and runs it.
   `{16,32,64,128}`, `{1,16,2048}` indices). Every index list includes the first
   and last rows, negative and out-of-range indices. Outputs are compared
   bit-exactly with the CPU reference.
+- **cast** (one leaf, `Xany_Yany_bf16`, for every cast with bf16 on one side;
+  see its README for why it is not one leaf per pair): bf16 <-> {f32, f16,
+  f64, i64, i32, i16, i8, u8} and three unsupported pairs, on sizes COVERAGE
+  thins (tier1 = 2 sizes, tier2 = 3, tier3 = 4, up to ~1M elements). Outputs
+  are compared bit-exactly with a CPU reference.
 - **gemv_transposed_b** (fp32): both launchers (one wave per output, and the
   multi-wave one the runtime uses for `N <= 256`) on the `N x K` shapes the
   runtime dispatches to a GEMV (`1 <= N <= 256`, `K >= 256`, `K` a multiple of
