@@ -185,25 +185,13 @@ GemmShape gemmShape(const ConvFields &problem) {
       outDim(problem.h, problem.p, problem.y, problem.u, problem.l), 1);
   const int64_t wo = std::max<int64_t>(
       outDim(problem.w, problem.q, problem.x, problem.v, problem.j), 1);
+  const int64_t groups = std::max<int64_t>(problem.g, 1);
   GemmShape shape;
-  shape.m = std::max<int64_t>(problem.k, 1);
+  // One group is one implicit GEMM: M is the output channels of that group.
+  shape.m = std::max<int64_t>(problem.k / groups, 1);
   shape.n = std::max<int64_t>(problem.n * ho * wo, 1);
-  shape.k = std::max<int64_t>(
-      (problem.c / std::max<int64_t>(problem.g, 1)) * problem.y * problem.x, 1);
+  shape.k = std::max<int64_t>((problem.c / groups) * problem.y * problem.x, 1);
   return shape;
-}
-
-// Nearest-neighbor guard only. An exact problem string skips this: rocMLIR
-// compiles a covering tile larger than the dimension (the next power of two
-// on K, a padded M or N block). Missing block sizes are left to rocMLIR.
-bool tileLegal(const ConvFields &problem, std::string_view solution) {
-  auto m = parseFlag(solution, "mPerBlock=");
-  auto n = parseFlag(solution, "nPerBlock=");
-  auto k = parseFlag(solution, "kPerBlock=");
-  if (!m || !n || !k)
-    return true;
-  const GemmShape shape = gemmShape(problem);
-  return *m <= shape.m && *n <= shape.n && *k <= shape.k;
 }
 
 bool sameGroup(const ConvFields &query, const ConvFields &row) {
@@ -441,6 +429,21 @@ bool tileFits(const BlockTile &tile, int64_t m, int64_t n, int64_t k,
   if (tile.m > m || tile.n > n || tile.k > k)
     return false;
   return !checkN1 || !tile.hasN1 || tile.n1 <= 0 || tile.n1 <= n1Limit;
+}
+
+// Nearest-neighbor guard only. An exact problem string skips this: rocMLIR
+// compiles a covering tile larger than the dimension (the next power of two
+// on K, a padded M or N block). A spelling with no block sizes is left to
+// rocMLIR. Named and positional gemm: tiles are both checked, and a
+// non-positive block does not fit.
+bool tileLegal(const ConvFields &problem, std::string_view solution) {
+  const BlockTile tile = parseBlockTile(solution, /*gemmGemm=*/false);
+  if (!tile.known)
+    return true;
+  if (tile.m <= 0 || tile.n <= 0 || tile.k <= 0)
+    return false;
+  const GemmShape shape = gemmShape(problem);
+  return tileFits(tile, shape.m, shape.n, shape.k, 0, false);
 }
 
 float axesDistance(const Axes &query, const Axes &row, float weightM,

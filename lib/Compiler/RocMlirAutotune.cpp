@@ -104,6 +104,11 @@ bool rocMlirSkipBenchmarking() {
   return !value.empty() && value != "0";
 }
 
+bool isAutotuneOptOut(StringRef mode) {
+  std::string value = mode.lower();
+  return value == "0" || value == "off" || value == "false" || value == "no";
+}
+
 bool rocMlirAutotuneFromEnv(AutotuneSpace &out) {
   if (rocMlirSkipBenchmarking())
     return false;
@@ -112,11 +117,17 @@ bool rocMlirAutotuneFromEnv(AutotuneSpace &out) {
     out = AutotuneSpace::Quick;
     return true;
   }
+  // An explicit opt-out must not fall through to quick. That would benchmark
+  // a session that asked not to, and fail the compile when no HIP device is
+  // visible.
+  if (isAutotuneOptOut(mode))
+    return false;
   if (parseAutotuneSpace(mode, out))
     return true;
   llvm::errs() << "warning: unknown HIPDNN_EP_ROCMLIR_AUTOTUNE='" << mode
-               << "'; using quick. Set HIP_ROCMLIR_SKIP_BENCHMARKING=1 to "
-                  "skip benchmarking (expected quick, full, or exhaustive).\n";
+               << "'; using quick. Set HIP_ROCMLIR_SKIP_BENCHMARKING=1 or "
+                  "HIPDNN_EP_ROCMLIR_AUTOTUNE=0 to skip benchmarking "
+                  "(expected quick, full, exhaustive, 0, off, false, or no).\n";
   out = AutotuneSpace::Quick;
   return true;
 }

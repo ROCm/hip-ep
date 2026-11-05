@@ -123,6 +123,23 @@ int main() {
   hit = mlir::hip::findNearestConvTune(tiny, table);
   expect(!hit.has_value(), "k=2 rejects mPerBlock=32");
 
+  const std::string grouped =
+      key("conv -F 1 -f NGC01 -I N01GC -O N01GC -n 1 -c 16 -H 64 -W 64 -k 32 "
+          "-y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 4");
+  int64_t groupedM = 0, groupedN = 0, groupedK = 0;
+  expect(mlir::hip::implicitGemmDims(grouped, groupedM, groupedN, groupedK) &&
+             groupedM == 8,
+         "grouped conv M is K divided by the group count");
+  hit = mlir::hip::findNearestConvTune(grouped, table);
+  expect(!hit.has_value(), "grouped conv M=8 rejects mPerBlock=32");
+
+  const std::string positionalOversized = "gemm:v4:32,32,4,1,1,4,16,1,2,0,0";
+  std::vector<ProblemCacheConvEntry> positional = {
+      {spatial96, positionalOversized},
+  };
+  hit = mlir::hip::findNearestConvTune(tiny, positional);
+  expect(!hit.has_value(), "a positional conv tile larger than M is rejected");
+
   hit = mlir::hip::findNearestConvTune("gfx1151\t20\t1\tgemm -t i8", table);
   expect(!hit.has_value(), "a gemm problem with no exact row misses");
 
