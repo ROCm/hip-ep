@@ -57,7 +57,9 @@ def require_lut(doc: dict) -> dict:
     if not isinstance(fallbacks, list):
         raise ValueError("fallbacks must be an array")
     for config in configs:
-        if not isinstance(config, dict) or not isinstance(config.get("perf_config"), str):
+        if not isinstance(config, dict) or not isinstance(
+            config.get("perf_config"), str
+        ):
             raise ValueError("each config must be {perf_config: string}")
     for point in points:
         if not isinstance(point, dict):
@@ -130,7 +132,9 @@ def build_document(header: dict, rows: list[dict]) -> dict:
     }
 
 
-def merge_rows(existing: list[dict], incoming: list[dict]) -> tuple[list[dict], int, int]:
+def merge_rows(
+    existing: list[dict], incoming: list[dict]
+) -> tuple[list[dict], int, int]:
     """Keep existing order. Incoming replaces a matching problem; new rows append."""
     index = {row["problem"]: i for i, row in enumerate(existing)}
     merged = list(existing)

@@ -38,8 +38,8 @@ using mlir::hip::ProblemCacheConvEntry;
 
 std::string gemmProblem(const char *dtype, int m, int n, int k,
                         const char *transB = "false") {
-  return "gfx1151\t20\t1\t-t " + std::string(dtype) +
-         " -out_datatype " + dtype + " -transA false -transB " + transB +
+  return "gfx1151\t20\t1\t-t " + std::string(dtype) + " -out_datatype " +
+         dtype + " -transA false -transB " + transB +
          " -transO false -g 1 -m " + std::to_string(m) + " -n " +
          std::to_string(n) + " -k " + std::to_string(k) +
          " -supportsSplitK true";
@@ -71,21 +71,21 @@ std::string gegProblem(int m, int n, int k, int gemmO,
 
 int main() {
   const std::string exact = key(kBase);
-  const std::string spatial96 = key(
-      "conv -F 1 -f NGC01 -I N01GC -O N01GC -n 1 -c 16 -H 96 -W 96 -k 32 "
-      "-y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1");
-  const std::string spatial128 = key(
-      "conv -F 1 -f NGC01 -I N01GC -O N01GC -n 1 -c 16 -H 128 -W 128 -k 32 "
-      "-y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1");
-  const std::string padded = key(
-      "conv -F 1 -f NGC01 -I N01GC -O N01GC -n 1 -c 16 -H 64 -W 64 -k 32 "
-      "-y 3 -x 3 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1");
+  const std::string spatial96 =
+      key("conv -F 1 -f NGC01 -I N01GC -O N01GC -n 1 -c 16 -H 96 -W 96 -k 32 "
+          "-y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1");
+  const std::string spatial128 =
+      key("conv -F 1 -f NGC01 -I N01GC -O N01GC -n 1 -c 16 -H 128 -W 128 -k 32 "
+          "-y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1");
+  const std::string padded =
+      key("conv -F 1 -f NGC01 -I N01GC -O N01GC -n 1 -c 16 -H 64 -W 64 -k 32 "
+          "-y 3 -x 3 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1");
   const std::string fp16 = key(
       "convfp16 -F 1 -f NGC01 -I N01GC -O N01GC -n 1 -c 16 -H 64 -W 64 -k 32 "
       "-y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1");
-  const std::string tiny = key(
-      "conv -F 1 -f NGC01 -I N01GC -O N01GC -n 1 -c 16 -H 4 -W 2 -k 2 "
-      "-y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1");
+  const std::string tiny =
+      key("conv -F 1 -f NGC01 -I N01GC -O N01GC -n 1 -c 16 -H 4 -W 2 -k 2 "
+          "-y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1");
 
   const std::string tile32 = "gemm:mPerBlock=32,nPerBlock=32,kPerBlock=4";
   const std::string tile96 = "gemm:mPerBlock=32,nPerBlock=64,kPerBlock=4";
@@ -101,9 +101,9 @@ int main() {
   expect(hit.has_value() && hit->exact && hit->solution == tile32,
          "exact GEMM returns that row");
 
-  const std::string query64 = key(
-      "conv -F 1 -f NGC01 -I N01GC -O N01GC -n 1 -c 16 -H 64 -W 64 -k 32 "
-      "-y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1");
+  const std::string query64 =
+      key("conv -F 1 -f NGC01 -I N01GC -O N01GC -n 1 -c 16 -H 64 -W 64 -k 32 "
+          "-y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1");
   std::vector<ProblemCacheConvEntry> spatial = {
       {spatial96, tile96},
       {spatial128, tile128},
@@ -138,9 +138,9 @@ int main() {
   hit = mlir::hip::findNearestConvTune(otherArch, table);
   expect(!hit.has_value(), "a different arch is a different group");
 
-  const std::string stride2 = key(
-      "conv -F 1 -f NGC01 -I N01GC -O N01GC -n 1 -c 16 -H 64 -W 64 -k 32 "
-      "-y 3 -x 3 -p 1 -q 1 -u 2 -v 2 -l 1 -j 1 -g 1");
+  const std::string stride2 =
+      key("conv -F 1 -f NGC01 -I N01GC -O N01GC -n 1 -c 16 -H 64 -W 64 -k 32 "
+          "-y 3 -x 3 -p 1 -q 1 -u 2 -v 2 -l 1 -j 1 -g 1");
   hit = mlir::hip::findNearestConvTune(stride2, table);
   expect(!hit.has_value(), "a different stride is a different group");
 
@@ -183,7 +183,7 @@ int main() {
   expect(!hit.has_value(), "gemm f32 does not borrow an f16 row");
 
   hit = mlir::hip::findNearestConvTune(gemmProblem("f16", 96, 128, 256, "true"),
-                                      gemms);
+                                       gemms);
   expect(!hit.has_value(), "gemm transB is a different group");
 
   int64_t dimM = 0, dimN = 0, dimK = 0;
@@ -207,7 +207,7 @@ int main() {
   expect(!hit.has_value(), "attention causal is a different group");
 
   hit = mlir::hip::findNearestConvTune(attnProblem(200, 128, "false", 128),
-                                      attns);
+                                       attns);
   expect(!hit.has_value(), "attention head dim is a different group");
 
   hit = mlir::hip::findNearestConvTune(attnQuery, gemms);
@@ -225,8 +225,8 @@ int main() {
   expect(hit.has_value() && !hit->exact && hit->solution == gegNear,
          "gemm-elementwise-gemm skips a second-GEMM tile that does not fit");
 
-  hit = mlir::hip::findNearestConvTune(gegProblem(96, 128, 64, 64, "true"),
-                                      gegs);
+  hit =
+      mlir::hip::findNearestConvTune(gegProblem(96, 128, 64, 64, "true"), gegs);
   expect(!hit.has_value(), "gemm-elementwise-gemm transC is a different group");
 
   namespace fbs = hipdnn_ep::rocmlir_autotune::fbs;
@@ -268,9 +268,9 @@ int main() {
          "loader keeps conv and gemm rows and drops a non-gemm config");
 
   const uint8_t garbage[] = {1, 2, 3, 4};
-  expect(!mlir::hip::loadProblemCacheLut(garbage, sizeof(garbage), loaded,
-                                         error),
-         "a non-RCAL buffer is rejected");
+  expect(
+      !mlir::hip::loadProblemCacheLut(garbage, sizeof(garbage), loaded, error),
+      "a non-RCAL buffer is rejected");
 
   if (gFailures != 0) {
     std::fprintf(stderr, "%d nearest-conv-tune checks failed\n", gFailures);

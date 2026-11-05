@@ -181,20 +181,15 @@ int64_t outDim(int64_t in, int64_t pad, int64_t ksz, int64_t stride,
 }
 
 GemmShape gemmShape(const ConvFields &problem) {
-  const int64_t ho =
-      std::max<int64_t>(outDim(problem.h, problem.p, problem.y, problem.u,
-                               problem.l),
-                        1);
-  const int64_t wo =
-      std::max<int64_t>(outDim(problem.w, problem.q, problem.x, problem.v,
-                               problem.j),
-                        1);
+  const int64_t ho = std::max<int64_t>(
+      outDim(problem.h, problem.p, problem.y, problem.u, problem.l), 1);
+  const int64_t wo = std::max<int64_t>(
+      outDim(problem.w, problem.q, problem.x, problem.v, problem.j), 1);
   GemmShape shape;
   shape.m = std::max<int64_t>(problem.k, 1);
   shape.n = std::max<int64_t>(problem.n * ho * wo, 1);
   shape.k = std::max<int64_t>(
-      (problem.c / std::max<int64_t>(problem.g, 1)) * problem.y * problem.x,
-      1);
+      (problem.c / std::max<int64_t>(problem.g, 1)) * problem.y * problem.x, 1);
   return shape;
 }
 
@@ -229,14 +224,15 @@ bool sameGroup(const ConvFields &query, const ConvFields &row) {
 }
 
 float gemmDistance(const GemmShape &query, const GemmShape &row, float weightM,
-                  float weightN, float weightK) {
+                   float weightN, float weightK) {
   auto term = [](float weight, int64_t a, int64_t b) {
     const float delta = weight * (std::log2(static_cast<float>(a)) -
                                   std::log2(static_cast<float>(b)));
     return delta * delta;
   };
   return std::sqrt(term(weightM, query.m, row.m) +
-                   term(weightN, query.n, row.n) + term(weightK, query.k, row.k));
+                   term(weightN, query.n, row.n) +
+                   term(weightK, query.k, row.k));
 }
 
 bool isConvSolution(std::string_view solution) {
@@ -297,10 +293,8 @@ ProblemPrefix splitPrefix(std::string key) {
 FusionFields parseFusions(std::string_view body) {
   FusionFields fusions;
   fusions.inputFusions = parseEqualsFlag(body, "-inputFusions=").value_or("");
-  fusions.outputFusions =
-      parseEqualsFlag(body, "-outputFusions=").value_or("");
-  fusions.supportsSplitK =
-      parseWordFlag(body, "-supportsSplitK ").value_or("");
+  fusions.outputFusions = parseEqualsFlag(body, "-outputFusions=").value_or("");
+  fusions.supportsSplitK = parseWordFlag(body, "-supportsSplitK ").value_or("");
   return fusions;
 }
 
@@ -454,8 +448,9 @@ float axesDistance(const Axes &query, const Axes &row, float weightM,
   const float weights[4] = {weightM, weightN, weightK, weightN};
   float sum = 0;
   for (int i = 0; i < query.n; ++i) {
-    const float delta = weights[i] * (std::log2(static_cast<float>(query.v[i])) -
-                                      std::log2(static_cast<float>(row.v[i])));
+    const float delta =
+        weights[i] * (std::log2(static_cast<float>(query.v[i])) -
+                      std::log2(static_cast<float>(row.v[i])));
     sum += delta * delta;
   }
   return std::sqrt(sum);
@@ -585,8 +580,8 @@ Axes gemmAxes(const GemmFields &fields) {
 }
 
 bool gemmTileLegal(const GemmFields &query, std::string_view solution) {
-  return tileFits(parseBlockTile(solution, false), query.m, query.n, query.k,
-                  0, false);
+  return tileFits(parseBlockTile(solution, false), query.m, query.n, query.k, 0,
+                  false);
 }
 
 std::optional<AttnFields> parseAttentionProblem(std::string key) {
@@ -640,8 +635,7 @@ bool sameAttentionGroup(const AttnFields &query, const AttnFields &row) {
          sameOptionalInt(query.numHeadsQ, row.numHeadsQ) &&
          sameOptionalInt(query.numHeadsKv, row.numHeadsKv) &&
          sameOptionalInt(query.g, row.g) && query.headQk == row.headQk &&
-         query.headV == row.headV &&
-         sameWord(query.withScale, row.withScale) &&
+         query.headV == row.headV && sameWord(query.withScale, row.withScale) &&
          sameWord(query.withBias, row.withBias) &&
          sameWord(query.transBias, row.transBias) &&
          sameFusions(query.fusions, row.fusions);
@@ -715,15 +709,15 @@ bool gegTileLegal(const GegFields &query, std::string_view solution) {
 }
 
 template <typename Fields>
-std::optional<NearestConvTuneHit> searchNearest(
-    std::string_view problemKey, const Fields &query,
-    const std::vector<ProblemCacheConvEntry> &entries,
-    const std::vector<std::string> &rejectedSolutions, float weightM,
-    float weightN, float weightK,
-    std::optional<Fields> (*parse)(std::string),
-    bool (*sameGroupOf)(const Fields &, const Fields &),
-    Axes (*axesOf)(const Fields &),
-    bool (*legal)(const Fields &, std::string_view)) {
+std::optional<NearestConvTuneHit>
+searchNearest(std::string_view problemKey, const Fields &query,
+              const std::vector<ProblemCacheConvEntry> &entries,
+              const std::vector<std::string> &rejectedSolutions, float weightM,
+              float weightN, float weightK,
+              std::optional<Fields> (*parse)(std::string),
+              bool (*sameGroupOf)(const Fields &, const Fields &),
+              Axes (*axesOf)(const Fields &),
+              bool (*legal)(const Fields &, std::string_view)) {
   const Axes queryAxes = axesOf(query);
   const ProblemCacheConvEntry *best = nullptr;
   Fields bestFields{};
@@ -885,41 +879,41 @@ findNearestConvTune(std::string_view problemKey,
     return std::nullopt;
   const std::string key(problemKey);
   if (auto query = parseConvProblem(key)) {
-  const GemmShape queryGemm = gemmShape(*query);
+    const GemmShape queryGemm = gemmShape(*query);
 
-  const ProblemCacheConvEntry *best = nullptr;
-  ConvFields bestFields;
-  float bestDistance = 0;
-  for (const auto &entry : entries) {
-    if (!isConvSolution(entry.solution) || entry.problem == problemKey)
-      continue;
-    if (std::find(rejectedSolutions.begin(), rejectedSolutions.end(),
-                  entry.solution) != rejectedSolutions.end())
-      continue;
-    auto fields = parseConvProblem(entry.problem);
-    if (!fields || !sameGroup(*query, *fields) ||
-        !tileLegal(*query, entry.solution))
-      continue;
-    const float distance =
-        gemmDistance(queryGemm, gemmShape(*fields), weightM, weightN, weightK);
-    // Ties keep the earlier row, matching the MatMulNBits probe.
-    if (best != nullptr && distance >= bestDistance)
-      continue;
-    best = &entry;
-    bestFields = *fields;
-    bestDistance = distance;
-  }
-  if (best == nullptr)
-    return std::nullopt;
+    const ProblemCacheConvEntry *best = nullptr;
+    ConvFields bestFields;
+    float bestDistance = 0;
+    for (const auto &entry : entries) {
+      if (!isConvSolution(entry.solution) || entry.problem == problemKey)
+        continue;
+      if (std::find(rejectedSolutions.begin(), rejectedSolutions.end(),
+                    entry.solution) != rejectedSolutions.end())
+        continue;
+      auto fields = parseConvProblem(entry.problem);
+      if (!fields || !sameGroup(*query, *fields) ||
+          !tileLegal(*query, entry.solution))
+        continue;
+      const float distance = gemmDistance(queryGemm, gemmShape(*fields),
+                                          weightM, weightN, weightK);
+      // Ties keep the earlier row, matching the MatMulNBits probe.
+      if (best != nullptr && distance >= bestDistance)
+        continue;
+      best = &entry;
+      bestFields = *fields;
+      bestDistance = distance;
+    }
+    if (best == nullptr)
+      return std::nullopt;
 
-  const GemmShape rowGemm = gemmShape(bestFields);
-  NearestConvTuneHit hit;
-  hit.solution = best->solution;
-  hit.matchedProblem = best->problem;
-  hit.distance = bestDistance;
-  hit.exact = queryGemm.m == rowGemm.m && queryGemm.n == rowGemm.n &&
-              queryGemm.k == rowGemm.k;
-  return hit;
+    const GemmShape rowGemm = gemmShape(bestFields);
+    NearestConvTuneHit hit;
+    hit.solution = best->solution;
+    hit.matchedProblem = best->problem;
+    hit.distance = bestDistance;
+    hit.exact = queryGemm.m == rowGemm.m && queryGemm.n == rowGemm.n &&
+                queryGemm.k == rowGemm.k;
+    return hit;
   }
 
   if (auto query = parseAttentionProblem(key))
