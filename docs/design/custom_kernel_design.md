@@ -301,6 +301,9 @@ What the measurements behind these options showed (gfx1151, int4 prefill shapes 
 
 Every extended entry is forced by index in the `Xfp16_Wu4_Yfp16` kernel unit test through `hip_matmul_nbits_u4_wmma_run_config`, which runs exactly the requested config or fails. On any device other than gfx1151 (`hip_matmul_nbits_u4_wmma_ext_device` returns 0), it launches nothing and the test skips that phase. `update_lut.py` rejects a table naming an entry that `WMMA_EXT_CONFIGS` does not compile.
 
+### 11. `lib/Runtime/Kernels/hip/gemv_f16_kernel.hip`
+
+Dense M=1 GEMVs that `wrap_hipblasLtMatmul` takes ahead of hipBLASLt, whose fixed per-call cost dominates single-row products. `hip_gemv_f16_kn` serves fp16 `[1, K] x [K, N]`; `hip_gemv_f32_kn` serves fp32 with N ≤ 512, N % 4 == 0 and a 16-byte-aligned B, the shape of an fp32 MoE router (Laguna: K=2048/3072, N=256), where hipBLASLt takes 32-57 us a call against an 8-12 us read floor and the GEMV reaches 82-91% of it. One float4 of columns per lane, a full-K reduction per row group in LDS.
 ## Key Design Decisions
 
 - **Per-arch SHARED library, not static lib**: One `custom_kernels_<arch>.{dll,so}` per arch in `HIP_ARCHITECTURES`, each with a single fatbin slice. Co-located with the EP binary; `LlvmIrJit::create` `dlopen`s the matching variant at JIT init based on `gcnArchName`. Per-model bitcode stays free of GPU code, which is what keeps it OS-portable and bytewise-stable across model recompiles when only the host CRT changes.
