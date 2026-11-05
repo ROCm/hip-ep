@@ -90,13 +90,50 @@ __device__ __forceinline__ void store4(float *p, const float (&x)[4]) {
   *reinterpret_cast<float4_t *>(p) = float4_t{x[0], x[1], x[2], x[3]};
 }
 
-// RMSNorm then split-half RoPE on the first R channels of one 128-wide
-// vector held by a wave, lane l owning channels 4l .. 4l + 3. Every thread of
-// the block must call it (block barriers).
+// Split-half RoPE angles. Without ids, cos / sin are [rows, width] tables,
+// batch_stride apart per batch (0 when shared). With ids, they are
+// [table_rows, width / 2] base tables and frequency f of row t in batch b
+// reads base row ids[section[f] * section_stride + b * batch_stride + t].
+template <typename T> struct Rope {
+  const T *cos;
+  const T *sin;
+  const int64_t *ids;
+  int64_t batch_stride;
+  int64_t section_stride;
+  int rows;
+  int width;
+  int table_rows;
+  uint8_t section[kD / 2];
+};
+
+// Angle of channel d < width at row t (already clamped to rows) of batch b.
+// A negative gathered position wraps once, as ONNX Gather indices do.
+template <typename T>
+__device__ __forceinline__ void ropeAngle(const Rope<T> &rope, int b, int t,
+                                          int d, float &c, float &s) {
+  size_t at;
+  if (rope.ids == nullptr) {
+    at = b * rope.batch_stride + static_cast<size_t>(t) * rope.width + d;
+  } else {
+    const int half = rope.width / 2;
+    const int f = d < half ? d : d - half;
+    int64_t p = rope.ids[rope.section[f] * rope.section_stride +
+                         b * rope.batch_stride + t];
+    p = p < 0 ? p + rope.table_rows : p;
+    p = p < 0 ? 0 : (p < rope.table_rows ? p : rope.table_rows - 1);
+    at = static_cast<size_t>(p) * half + f;
+  }
+  c = static_cast<float>(rope.cos[at]);
+  s = static_cast<float>(rope.sin[at]);
+}
+
+// RMSNorm then split-half RoPE at row clamp(pos, 0, rows - 1) on the first
+// width channels of one 128-wide vector held by a wave, lane l owning channels
+// 4l .. 4l + 3. Every thread of the block must call it (block barriers).
 template <typename T>
 __device__ __forceinline__ void normRope(float (&x)[4], const T *weight,
-                                         const T *cos_row, const T *sin_row,
-                                         int rotary, float eps, float *lds) {
+                                         const Rope<T> &rope, int b, int pos,
+                                         float eps, float *lds) {
   const int lane = threadIdx.x % 32;
   float ss = 0.0f;
 #pragma unroll
@@ -111,14 +148,16 @@ __device__ __forceinline__ void normRope(float (&x)[4], const T *weight,
   }
   store4(lds + 4 * lane, x);
   __syncthreads();
-  const int half = rotary / 2;
+  const int t = clampPos(pos, rope.rows);
+  const int half = rope.width / 2;
 #pragma unroll
   for (int i = 0; i < 4; ++i) {
     const int d = 4 * lane + i;
-    if (d < rotary) {
+    if (d < rope.width) {
       const float paired = d < half ? -lds[d + half] : lds[d - half];
-      x[i] = x[i] * static_cast<float>(cos_row[d]) +
-             paired * static_cast<float>(sin_row[d]);
+      float c, s;
+      ropeAngle(rope, b, t, d, c, s);
+      x[i] = x[i] * c + paired * s;
     }
   }
   __syncthreads();
@@ -127,10 +166,11 @@ __device__ __forceinline__ void normRope(float (&x)[4], const T *weight,
 // Pooled, normalized and rotated key of block j (one wave). Every thread of
 // the block must call it.
 template <typename T>
-__device__ __forceinline__ void pooledKey(
-    const T *keys, const int *group, int ratio, const T *key_norm_weight,
-    const T *cos_cache, const T *sin_cache, int rotary, int rotary_rows,
-    size_t cos_batch_offset, float eps, float *lds, float (&x)[4]) {
+__device__ __forceinline__ void pooledKey(const T *keys, const int *group,
+                                          int ratio, const T *key_norm_weight,
+                                          const Rope<T> &rope, int b,
+                                          float eps, float *lds,
+                                          float (&x)[4]) {
   const int lane = threadIdx.x % 32;
 #pragma unroll
   for (int i = 0; i < 4; ++i) {
@@ -148,11 +188,7 @@ __device__ __forceinline__ void pooledKey(
   for (int i = 0; i < 4; ++i) {
     x[i] /= static_cast<float>(ratio);
   }
-  const size_t rope_row =
-      cos_batch_offset +
-      static_cast<size_t>(clampPos(group[0], rotary_rows)) * rotary;
-  normRope<T>(x, key_norm_weight, cos_cache + rope_row, sin_cache + rope_row,
-              rotary, eps, lds);
+  normRope<T>(x, key_norm_weight, rope, b, group[0], eps, lds);
 }
 
 __device__ __forceinline__ int visibleFlags(const int64_t *mask, int b,
@@ -227,12 +263,9 @@ template <typename T>
 __global__ void __launch_bounds__(kThreads)
 sai_pooled_kernel(const T *__restrict__ present, const int *__restrict__ visible,
                   const int *__restrict__ row_count,
-                  const T *__restrict__ key_norm_weight,
-                  const T *__restrict__ cos_cache,
-                  const T *__restrict__ sin_cache, float *__restrict__ pooled,
-                  int seq_len, int total, int present_stride, int max_blocks,
-                  int ratio, int rotary, int rotary_rows,
-                  int64_t cos_batch_stride, float eps) {
+                  const T *__restrict__ key_norm_weight, const Rope<T> rope,
+                  float *__restrict__ pooled, int seq_len, int total,
+                  int present_stride, int max_blocks, int ratio, float eps) {
   __shared__ __align__(16) float lds[kWaves][kD];
   const int b = blockIdx.y;
   const int wave = threadIdx.x / 32;
@@ -248,8 +281,7 @@ sai_pooled_kernel(const T *__restrict__ present, const int *__restrict__ visible
   pooledKey<T>(present + static_cast<size_t>(b) * present_stride * kD,
                visible + static_cast<size_t>(b) * total +
                    (valid ? j : j0) * ratio,
-               ratio, key_norm_weight, cos_cache, sin_cache, rotary,
-               rotary_rows, b * cos_batch_stride, eps, lds[wave], x);
+               ratio, key_norm_weight, rope, b, eps, lds[wave], x);
   if (valid) {
     store4(pooled + (static_cast<size_t>(b) * max_blocks + j) * kD + 4 * lane,
            x);
@@ -259,10 +291,9 @@ sai_pooled_kernel(const T *__restrict__ present, const int *__restrict__ visible
 // One wave per (row, head) of the chunk rows [s0, s0 + rows).
 template <typename T>
 __device__ __forceinline__ void
-queryItems(const T *query, const T *query_norm_weight, const T *cos_cache,
-           const T *sin_cache, float *qrot, int b, int item_block, int seq_len,
-           int s0, int rows, int chunk_stride, int num_heads, int past_len,
-           int rotary, int rotary_rows, int64_t cos_batch_stride, float eps) {
+queryItems(const T *query, const T *query_norm_weight, const Rope<T> &rope,
+           float *qrot, int b, int item_block, int seq_len, int s0, int rows,
+           int chunk_stride, int num_heads, int past_len, float eps) {
   __shared__ __align__(16) float lds[kWaves][kD];
   const int wave = threadIdx.x / 32;
   const int lane = threadIdx.x % 32;
@@ -278,11 +309,7 @@ queryItems(const T *query, const T *query_norm_weight, const T *cos_cache,
             (static_cast<size_t>(b) * seq_len + s) * (num_heads + 1) * kD +
             h * kD + 4 * lane,
         x);
-  const size_t rope_row =
-      b * cos_batch_stride +
-      static_cast<size_t>(clampPos(past_len + s, rotary_rows)) * rotary;
-  normRope<T>(x, query_norm_weight, cos_cache + rope_row, sin_cache + rope_row,
-              rotary, eps, lds[wave]);
+  normRope<T>(x, query_norm_weight, rope, b, past_len + s, eps, lds[wave]);
   if (valid) {
     store4(qrot +
                ((static_cast<size_t>(b) * chunk_stride + sl) * num_heads + h) *
@@ -295,16 +322,11 @@ queryItems(const T *query, const T *query_norm_weight, const T *cos_cache,
 template <typename T>
 __global__ void __launch_bounds__(kThreads)
 sai_query_kernel(const T *__restrict__ query,
-                 const T *__restrict__ query_norm_weight,
-                 const T *__restrict__ cos_cache,
-                 const T *__restrict__ sin_cache, float *__restrict__ qrot,
-                 int seq_len, int s0, int rows, int chunk_stride,
-                 int num_heads, int past_len, int rotary, int rotary_rows,
-                 int64_t cos_batch_stride, float eps) {
-  queryItems<T>(query, query_norm_weight, cos_cache, sin_cache, qrot,
-                blockIdx.y, blockIdx.x, seq_len, s0, rows, chunk_stride,
-                num_heads, past_len, rotary, rotary_rows, cos_batch_stride,
-                eps);
+                 const T *__restrict__ query_norm_weight, const Rope<T> rope,
+                 float *__restrict__ qrot, int seq_len, int s0, int rows,
+                 int chunk_stride, int num_heads, int past_len, float eps) {
+  queryItems<T>(query, query_norm_weight, rope, qrot, blockIdx.y, blockIdx.x,
+                seq_len, s0, rows, chunk_stride, num_heads, past_len, eps);
 }
 
 template <int Bytes> struct RawVec;
@@ -319,15 +341,13 @@ template <typename T, int kCopy>
 __global__ void __launch_bounds__(kThreads)
 sai_prologue_kernel(const T *__restrict__ query,
                     const T *__restrict__ query_norm_weight,
-                    const T *__restrict__ cos_cache,
-                    const T *__restrict__ sin_cache,
-                    const int64_t *__restrict__ mask, const T *past_key,
-                    T *present, int *__restrict__ chunk_count,
-                    float *__restrict__ qrot, int count_blocks,
-                    int query_blocks, int seq_len, int past_len, int total,
-                    int copy_start, int past_stride, int present_stride,
-                    int chunk_stride, int num_heads, int rotary,
-                    int rotary_rows, int64_t cos_batch_stride, float eps) {
+                    const Rope<T> rope, const int64_t *__restrict__ mask,
+                    const T *past_key, T *present,
+                    int *__restrict__ chunk_count, float *__restrict__ qrot,
+                    int count_blocks, int query_blocks, int seq_len,
+                    int past_len, int total, int copy_start, int past_stride,
+                    int present_stride, int chunk_stride, int num_heads,
+                    float eps) {
   const int b = blockIdx.y;
   const int x = blockIdx.x;
   if (x < count_blocks) {
@@ -335,10 +355,8 @@ sai_prologue_kernel(const T *__restrict__ query,
     return;
   }
   if (x < count_blocks + query_blocks) {
-    queryItems<T>(query, query_norm_weight, cos_cache, sin_cache, qrot, b,
-                  x - count_blocks, seq_len, 0, seq_len, chunk_stride,
-                  num_heads, past_len, rotary, rotary_rows, cos_batch_stride,
-                  eps);
+    queryItems<T>(query, query_norm_weight, rope, qrot, b, x - count_blocks,
+                  seq_len, 0, seq_len, chunk_stride, num_heads, past_len, eps);
     return;
   }
   typedef typename RawVec<kCopy * sizeof(T)>::type V;
@@ -376,13 +394,10 @@ sai_pooled_score_kernel(const T *__restrict__ present,
                         const int *__restrict__ visible,
                         const int *__restrict__ row_count,
                         const T *__restrict__ key_norm_weight,
-                        const T *__restrict__ cos_cache,
-                        const T *__restrict__ sin_cache,
-                        const float *__restrict__ qrot,
+                        const Rope<T> rope, const float *__restrict__ qrot,
                         float *__restrict__ scores, int seq_len, int s0,
                         int rows, int chunk_stride, int num_heads, int total,
                         int present_stride, int max_blocks, int ratio,
-                        int rotary, int rotary_rows, int64_t cos_batch_stride,
                         float eps, float scale) {
   __shared__ __align__(16) float q_lds[kFusedRows * kMaxHeads * kD];
   __shared__ __align__(16) float lds[kWaves][kD];
@@ -406,8 +421,7 @@ sai_pooled_score_kernel(const T *__restrict__ present,
   pooledKey<T>(present + static_cast<size_t>(b) * present_stride * kD,
                visible + static_cast<size_t>(b) * total +
                    (valid ? j : j0) * ratio,
-               ratio, key_norm_weight, cos_cache, sin_cache, rotary,
-               rotary_rows, b * cos_batch_stride, eps, lds[wave], x);
+               ratio, key_norm_weight, rope, b, eps, lds[wave], x);
   if (!valid) {
     return;
   }
@@ -767,13 +781,12 @@ unsigned gridFor(int64_t n, int64_t per) {
 template <typename T>
 hipError_t launchAll(hipStream_t stream, const Layout &l, const T *query,
                      const T *query_norm_weight, const T *key_norm_weight,
-                     const T *cos_cache, const T *sin_cache,
-                     const int64_t *mask, const T *past_key,
-                     int32_t *selected, T *present, char *ws, int batch,
-                     int seq_len, int past_len, int past_stride,
-                     int present_stride, int num_heads, int rotary,
-                     int rotary_rows, int64_t cos_batch_stride, int ratio,
-                     int block_topk, int capacity, float eps, float scale) {
+                     const Rope<T> &rope, const int64_t *mask,
+                     const T *past_key, int32_t *selected, T *present,
+                     char *ws, int batch, int seq_len, int past_len,
+                     int past_stride, int present_stride, int num_heads,
+                     int ratio, int block_topk, int capacity, float eps,
+                     float scale) {
   const int total = static_cast<int>(l.total);
   if (total == 0) {
     return hipSuccess;
@@ -810,16 +823,14 @@ hipError_t launchAll(hipStream_t stream, const Layout &l, const T *query,
   const dim3 grid(count_blocks + query_blocks + present_blocks, batch);
   if (wide) {
     sai_prologue_kernel<T, kWide><<<grid, kThreads, 0, stream>>>(
-        query, query_norm_weight, cos_cache, sin_cache, mask, past_key,
-        present, chunk_count, qrot, count_blocks, query_blocks, seq_len,
-        past_len, total, copy_start, past_stride, present_stride,
-        chunk_stride, num_heads, rotary, rotary_rows, cos_batch_stride, eps);
+        query, query_norm_weight, rope, mask, past_key, present, chunk_count,
+        qrot, count_blocks, query_blocks, seq_len, past_len, total,
+        copy_start, past_stride, present_stride, chunk_stride, num_heads, eps);
   } else {
     sai_prologue_kernel<T, 4><<<grid, kThreads, 0, stream>>>(
-        query, query_norm_weight, cos_cache, sin_cache, mask, past_key,
-        present, chunk_count, qrot, count_blocks, query_blocks, seq_len,
-        past_len, total, copy_start, past_stride, present_stride,
-        chunk_stride, num_heads, rotary, rotary_rows, cos_batch_stride, eps);
+        query, query_norm_weight, rope, mask, past_key, present, chunk_count,
+        qrot, count_blocks, query_blocks, seq_len, past_len, total,
+        copy_start, past_stride, present_stride, chunk_stride, num_heads, eps);
   }
   if (seq_len == 0) {
     return hipGetLastError();
@@ -832,9 +843,8 @@ hipError_t launchAll(hipStream_t stream, const Layout &l, const T *query,
   if (max_blocks > 0 && !fused) {
     sai_pooled_kernel<T>
         <<<dim3(gridFor(max_blocks, kWaves), batch), kThreads, 0, stream>>>(
-            present, visible, row_count, key_norm_weight, cos_cache,
-            sin_cache, pooled, seq_len, total, present_stride, max_blocks,
-            ratio, rotary, rotary_rows, cos_batch_stride, eps);
+            present, visible, row_count, key_norm_weight, rope, pooled,
+            seq_len, total, present_stride, max_blocks, ratio, eps);
   }
   for (int s0 = 0; s0 < seq_len; s0 += chunk_stride) {
     const int rows =
@@ -844,20 +854,17 @@ hipError_t launchAll(hipStream_t stream, const Layout &l, const T *query,
         sai_query_kernel<T>
             <<<dim3(gridFor(static_cast<int64_t>(rows) * num_heads, kWaves),
                     batch),
-               kThreads, 0, stream>>>(query, query_norm_weight, cos_cache,
-                                      sin_cache, qrot, seq_len, s0, rows,
-                                      chunk_stride, num_heads, past_len,
-                                      rotary, rotary_rows, cos_batch_stride,
-                                      eps);
+               kThreads, 0, stream>>>(query, query_norm_weight, rope, qrot,
+                                      seq_len, s0, rows, chunk_stride,
+                                      num_heads, past_len, eps);
       }
       if (fused) {
         sai_pooled_score_kernel<T>
             <<<dim3(gridFor(max_blocks, kWaves), batch), kThreads, 0,
-               stream>>>(present, visible, row_count, key_norm_weight,
-                         cos_cache, sin_cache, qrot, scores, seq_len, s0,
-                         rows, chunk_stride, num_heads, total, present_stride,
-                         max_blocks, ratio, rotary, rotary_rows,
-                         cos_batch_stride, eps, scale);
+               stream>>>(present, visible, row_count, key_norm_weight, rope,
+                         qrot, scores, seq_len, s0, rows, chunk_stride,
+                         num_heads, total, present_stride, max_blocks, ratio,
+                         eps, scale);
       } else {
         sai_score_kernel<<<dim3(gridFor(max_blocks, kTileBlocks),
                                 gridFor(rows, kTileRows), batch),
@@ -871,6 +878,30 @@ hipError_t launchAll(hipStream_t stream, const Layout &l, const T *query,
         max_blocks, ratio, block_topk, capacity);
   }
   return hipGetLastError();
+}
+
+template <typename T>
+Rope<T> makeRope(const void *cos, const void *sin, const int64_t *ids,
+                 const uint8_t *sections, int64_t batch, int64_t width,
+                 int64_t rows, int64_t batched, int64_t id_rows) {
+  Rope<T> rope{};
+  rope.cos = static_cast<const T *>(cos);
+  rope.sin = static_cast<const T *>(sin);
+  rope.ids = ids;
+  rope.width = static_cast<int>(width);
+  if (ids == nullptr) {
+    rope.rows = static_cast<int>(rows);
+    rope.batch_stride = batched ? rows * width : 0;
+    return rope;
+  }
+  rope.rows = static_cast<int>(id_rows);
+  rope.table_rows = static_cast<int>(rows);
+  rope.batch_stride = id_rows;
+  rope.section_stride = batch * id_rows;
+  for (int64_t f = 0; f < width / 2; ++f) {
+    rope.section[f] = sections[f];
+  }
+  return rope;
 }
 
 } // namespace
@@ -891,10 +922,11 @@ extern "C" int hip_sparse_attention_indexer(
     int64_t num_heads, int64_t head_size,
     int64_t rotary_width, int64_t rotary_rows, int64_t rotary_batched,
     int64_t compress_ratio, int64_t token_budget, int element_size_bytes,
-    float epsilon, float scale) {
+    float epsilon, float scale, const int64_t *rotary_position_ids,
+    const uint8_t *rotary_sections, int64_t id_sections, int64_t id_rows) {
   if (!query || !query_norm_weight || !key_norm_weight || !cos_cache ||
       !sin_cache || (past_len > 0 && !past_key) || !selected_indices ||
-      !present_key) {
+      !present_key || (rotary_position_ids && !rotary_sections)) {
     fprintf(stderr,
             "[custom_kernels] hip_sparse_attention_indexer: null pointer\n");
     return -1;
@@ -919,6 +951,21 @@ extern "C" int hip_sparse_attention_indexer(
             (long long)compress_ratio, (long long)token_budget,
             element_size_bytes);
     return -1;
+  }
+  if (rotary_position_ids) {
+    bool sections_ok = !rotary_batched && id_sections >= 1 && id_rows >= 1 &&
+                       id_rows <= INT32_MAX && rotary_rows <= INT32_MAX;
+    for (int64_t f = 0; sections_ok && f < rotary_width / 2; ++f) {
+      sections_ok = rotary_sections[f] < id_sections;
+    }
+    if (!sections_ok) {
+      fprintf(stderr,
+              "[custom_kernels] hip_sparse_attention_indexer: gathered rotary "
+              "needs rank 2 base tables, [M >= 1, B, X >= 1] ids "
+              "(M=%lld X=%lld) and every section below M\n",
+              (long long)id_sections, (long long)id_rows);
+      return -1;
+    }
   }
   if (past_key == present_key && past_rows != present_rows) {
     fprintf(stderr,
@@ -958,7 +1005,6 @@ extern "C" int hip_sparse_attention_indexer(
 
   hipStream_t s = static_cast<hipStream_t>(stream);
   (void)hipGetLastError();
-  const int64_t cos_batch_stride = rotary_batched ? rotary_rows * rotary_width : 0;
   const int capacity = static_cast<int>(token_budget + compress_ratio - 1);
   const int block_topk = static_cast<int>(token_budget / compress_ratio);
   hipError_t err;
@@ -967,31 +1013,31 @@ extern "C" int hip_sparse_attention_indexer(
         s, l, static_cast<const _Float16 *>(query),
         static_cast<const _Float16 *>(query_norm_weight),
         static_cast<const _Float16 *>(key_norm_weight),
-        static_cast<const _Float16 *>(cos_cache),
-        static_cast<const _Float16 *>(sin_cache), mask,
-        static_cast<const _Float16 *>(past_key), selected_indices,
+        makeRope<_Float16>(cos_cache, sin_cache, rotary_position_ids,
+                           rotary_sections, batch, rotary_width, rotary_rows,
+                           rotary_batched, id_rows),
+        mask, static_cast<const _Float16 *>(past_key), selected_indices,
         static_cast<_Float16 *>(present_key), static_cast<char *>(workspace),
         static_cast<int>(batch), static_cast<int>(seq_len),
         static_cast<int>(past_len), static_cast<int>(past_rows),
         static_cast<int>(present_rows), static_cast<int>(num_heads),
-        static_cast<int>(rotary_width), static_cast<int>(rotary_rows),
-        cos_batch_stride, static_cast<int>(compress_ratio), block_topk,
-        capacity, epsilon, scale);
+        static_cast<int>(compress_ratio), block_topk, capacity, epsilon,
+        scale);
   } else {
     err = launchAll<float>(
         s, l, static_cast<const float *>(query),
         static_cast<const float *>(query_norm_weight),
         static_cast<const float *>(key_norm_weight),
-        static_cast<const float *>(cos_cache),
-        static_cast<const float *>(sin_cache), mask,
-        static_cast<const float *>(past_key), selected_indices,
+        makeRope<float>(cos_cache, sin_cache, rotary_position_ids,
+                        rotary_sections, batch, rotary_width, rotary_rows,
+                        rotary_batched, id_rows),
+        mask, static_cast<const float *>(past_key), selected_indices,
         static_cast<float *>(present_key), static_cast<char *>(workspace),
         static_cast<int>(batch), static_cast<int>(seq_len),
         static_cast<int>(past_len), static_cast<int>(past_rows),
         static_cast<int>(present_rows), static_cast<int>(num_heads),
-        static_cast<int>(rotary_width), static_cast<int>(rotary_rows),
-        cos_batch_stride, static_cast<int>(compress_ratio), block_topk,
-        capacity, epsilon, scale);
+        static_cast<int>(compress_ratio), block_topk, capacity, epsilon,
+        scale);
   }
   if (err != hipSuccess) {
     fprintf(stderr,

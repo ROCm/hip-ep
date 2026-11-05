@@ -3933,7 +3933,8 @@ HIP_KERNEL_API int hip_dynamic_sparse_attention(
 // T = fp16 (element_size_bytes 2) or fp32 (4).
 //   query            [B, S, (N+1)*D] T; the last D channels are the key
 //   query/key_norm_weight [D] T
-//   cos/sin_cache    [X, R] (rotary_batched 0) or [B, X, R] (1) T
+//   cos/sin_cache    [X, R] (rotary_batched 0) or [B, X, R] (1) T, or with
+//                    rotary_position_ids [rotary_rows, R/2] T base tables
 //   mask             [B, P+S] int64 or null (all visible)
 //   past_key         [B, past_rows, D] T, P <= past_rows; may be null when
 //                    P == 0
@@ -3941,6 +3942,11 @@ HIP_KERNEL_API int hip_dynamic_sparse_attention(
 //   present_key      [B, present_rows, D] T, P+S <= present_rows; may alias
 //                    past_key when present_rows == past_rows, in which case
 //                    rows < P are not rewritten
+//   rotary_position_ids [id_sections, B, id_rows] int64 or null; frequency f
+//                    of row t reads base row
+//                    rotary_position_ids[rotary_sections[f], b, t]
+//   rotary_sections  host [R/2] bytes, each frequency's MRoPE section,
+//                    < id_sections (with ids only)
 // D must be 128, 1 <= N <= 8, R even in (0, D], token_budget / r <= 512.
 // workspace must hold hip_sparse_attention_indexer_workspace_size() bytes.
 HIP_KERNEL_API size_t hip_sparse_attention_indexer_workspace_size(
@@ -3978,7 +3984,11 @@ HIP_KERNEL_API int hip_sparse_attention_indexer(
     int64_t token_budget,
     int element_size_bytes,
     float epsilon,
-    float scale);
+    float scale,
+    const int64_t* rotary_position_ids,
+    const uint8_t* rotary_sections,
+    int64_t id_sections,
+    int64_t id_rows);
 
 /* =========================================================================
  * Conv — general forward convolution (1D / 2D / 3D spatial)

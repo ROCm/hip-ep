@@ -17,7 +17,7 @@ must match exactly.
 import numpy as np
 import pytest
 from onnx import TensorProto as TP
-from onnx import helper
+from onnx import helper, numpy_helper
 
 from framework.onnx_utils import make_model_from_nodes
 
@@ -416,6 +416,120 @@ def test_exact_ties_keep_block_order(model_runner, S):
     query[:, :, N * _D :] = -rng.uniform(0.1, 1, (B, S, _D)).astype(dt)
     past = -rng.uniform(0.1, 1, (B, P, _D)).astype(dt)
     _run_feeds(model_runner, query, qw, kw, cos, sin, None, past, budget=64, exact=True)
+
+
+def _make_gathered_rotary_model(N, R, rows, budget, masks):
+    """Returns an indexer model that builds its MRoPE rotary tables:
+
+    cache = Concat(w, w)
+    w     = Where(m2, g2, Where(m1, g1, g0))
+    g_k   = Gather(base, Gather(rotary_position_ids, k))
+    """
+    elem = TP.FLOAT16
+    nodes = [
+        helper.make_node(
+            "Constant", [], [f"k{k}"], value=numpy_helper.from_array(np.int64(k))
+        )
+        for k in range(3)
+    ]
+    nodes += [
+        helper.make_node("Gather", ["rotary_position_ids", f"k{k}"], [f"pos{k}"])
+        for k in range(3)
+    ]
+    for kind in ("cos", "sin"):
+        nodes += [
+            helper.make_node("Gather", [f"{kind}_base", f"pos{k}"], [f"{kind}{k}"])
+            for k in range(3)
+        ]
+        nodes.append(
+            helper.make_node("Where", ["m1", f"{kind}1", f"{kind}0"], [f"{kind}_w1"])
+        )
+        nodes.append(
+            helper.make_node("Where", ["m2", f"{kind}2", f"{kind}_w1"], [f"{kind}_w"])
+        )
+        nodes.append(
+            helper.make_node(
+                "Concat", [f"{kind}_w", f"{kind}_w"], [f"{kind}_cache"], axis=-1
+            )
+        )
+    nodes.append(
+        helper.make_node(
+            "SparseAttentionIndexer",
+            ["query", "", "query_norm_weight", "key_norm_weight"]
+            + ["cos_cache", "sin_cache", "", "past_key"],
+            ["selected_indices", "present_key"],
+            domain="com.microsoft",
+            policy_mode="qsa",
+            compress_ratio=4,
+            token_budget=budget,
+        )
+    )
+    inputs = [
+        helper.make_tensor_value_info("query", elem, ["B", "S", (N + 1) * _D]),
+        helper.make_tensor_value_info("query_norm_weight", elem, [_D]),
+        helper.make_tensor_value_info("key_norm_weight", elem, [_D]),
+        helper.make_tensor_value_info("cos_base", elem, [rows, R // 2]),
+        helper.make_tensor_value_info("sin_base", elem, [rows, R // 2]),
+        helper.make_tensor_value_info("rotary_position_ids", TP.INT64, [3, "B", "X"]),
+        helper.make_tensor_value_info("past_key", elem, ["B", "P", _D]),
+    ]
+    outputs = [
+        helper.make_tensor_value_info(
+            "selected_indices", TP.INT32, ["B", "S", budget + 3]
+        ),
+        helper.make_tensor_value_info("present_key", elem, ["B", "T", _D]),
+    ]
+    inits = [numpy_helper.from_array(m, f"m{i}") for i, m in enumerate(masks, 1)]
+    model = make_model_from_nodes(nodes, inputs, outputs, inits, **_OPSETS)
+    model.ir_version = 10
+    return model
+
+
+@pytest.mark.parametrize("S", [1, 64])
+def test_rotary_fold_matches_tables(model_runner, S):
+    """The folded graph must match the indexer fed materialized tables bit for bit.
+
+    The ids cover three distinct sections, per-batch offsets, negative positions
+    and a history X longer than the context.
+    """
+    B, P, N, R, rows, budget = 2, 1000, 4, 64, 2048, 2048
+    X = P + S + 100
+    dt = np.float16
+    rng = np.random.default_rng(50 + S)
+    freq = np.arange(R // 2)
+    masks = (freq % 3 == 1, freq % 3 == 2)
+    ids = rng.integers(-rows, rows, (3, B, X))
+    ids[0] = np.arange(X) + rng.integers(0, 64, (B, 1))
+    ang = np.arange(rows)[:, None] / (10000.0 ** (freq / (R // 2)))
+    cos_base, sin_base = np.cos(ang).astype(dt), np.sin(ang).astype(dt)
+
+    def table(base):
+        g0, g1, g2 = (base[ids[k]] for k in range(3))
+        w = np.where(masks[1], g2, np.where(masks[0], g1, g0))
+        return np.concatenate([w, w], axis=-1)
+
+    cos, sin = table(cos_base), table(sin_base)
+    query = rng.uniform(-1, 1, (B, S, (N + 1) * _D)).astype(dt)
+    qw = rng.uniform(0.5, 1.5, _D).astype(dt)
+    kw = rng.uniform(0.5, 1.5, _D).astype(dt)
+    past = rng.uniform(-1, 1, (B, P, _D)).astype(dt)
+
+    folded = model_runner.backend.run(
+        _persist(model_runner, _make_gathered_rotary_model(N, R, rows, budget, masks)),
+        [query, qw, kw, cos_base, sin_base, ids, past],
+    )
+    tabled = _make_model(N, R, True, False, dt, 4, budget, None, None)
+    tabled = model_runner.backend.run(
+        _persist(model_runner, tabled), [query, qw, kw, cos, sin, past]
+    )
+    for got, want in zip(folded, tabled):
+        np.testing.assert_array_equal(got, want)
+
+    expected, present, row_info = _sai_reference(
+        query, qw, kw, cos, sin, None, past, 4, budget, 1e-6, 1 / np.sqrt(_D)
+    )
+    np.testing.assert_array_equal(folded[1], present)
+    _check_selected(folded[0], expected, row_info, 4, budget)
 
 
 @pytest.mark.parametrize("bind_shared", [True, False])
