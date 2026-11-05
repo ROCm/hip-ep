@@ -565,6 +565,8 @@ void populateSizeConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateNonZeroConversionPatterns(RewritePatternSet &patterns,
                                        MLIRContext *ctx);
+void populateNonMaxSuppressionConversionPatterns(RewritePatternSet &patterns,
+                                                 MLIRContext *ctx);
 void populateConcatConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
 void populateReluConversionPatterns(RewritePatternSet &patterns,

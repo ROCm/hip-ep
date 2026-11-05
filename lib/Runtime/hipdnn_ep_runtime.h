@@ -2065,6 +2065,20 @@ int wrap_nonzero(RuntimeState *state, void *input, void *output,
                  int64_t input_rank, const int64_t *input_dims,
                  int64_t output_capacity, int64_t input_data_type);
 
+// ONNX NonMaxSuppression wrapper. `boxes` is [num_batches, num_boxes, 4] f32,
+// `scores` is [num_batches, num_classes, num_boxes] f32 and the three scalar
+// inputs are device-resident. Writes up to `capacity` (batch, class, box)
+// int64 triples to `selected` and the true triple count to the device i32
+// `count_ptr`. `score_threshold` is ignored when `has_score_threshold` is 0.
+// Runs on the host after a stream sync: selection is a short sequential scan
+// per (batch, class) over at most `num_boxes` candidates.
+int wrap_non_max_suppression(
+    RuntimeState *state, const float *boxes, const float *scores,
+    const int64_t *max_output_boxes_per_class, const float *iou_threshold,
+    const float *score_threshold, int64_t *selected, int32_t *count_ptr,
+    int64_t num_batches, int64_t num_classes, int64_t num_boxes,
+    int64_t capacity, int64_t center_point_box, int64_t has_score_threshold);
+
 // Synchronize the GPU stream (so the producing kernel has completed), then
 // copy a single device-resident i32 scalar back to the host and return it.
 // Used by hip.readback_dim to turn a kernel-computed runtime extent (e.g.
