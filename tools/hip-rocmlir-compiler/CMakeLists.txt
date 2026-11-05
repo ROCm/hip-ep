@@ -28,7 +28,6 @@ add_dependencies(hip-rocmlir-compiler
 # non-object archives after LibHipCompiler. The includes are applied directly
 # because this executable includes rocMLIR headers (mlir/Dialect/Rock/*).
 hip_rocmlir_apply_includes(hip-rocmlir-compiler)
-hip_link_rocmlir_closure(hip-rocmlir-compiler)
 target_link_libraries(hip-rocmlir-compiler PRIVATE
   HipSupport
   LibHipCompiler
@@ -46,6 +45,8 @@ target_link_libraries(hip-rocmlir-compiler PRIVATE
   # LLVM/MLIR come from ${llvm_libs} -- no bundled second copy.
   ${llvm_libs}
 )
+# After LibHipCompiler so the GNU ld rescan group is the last link item.
+hip_link_rocmlir_closure(hip-rocmlir-compiler)
 
 # Follows what LibHipCompiler actually built, not BUILD_MOCK_RUNTIME: the
 # benchmarking code lives there now and stubs itself out when the build does not

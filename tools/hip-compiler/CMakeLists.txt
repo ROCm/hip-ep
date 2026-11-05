@@ -13,12 +13,13 @@ add_dependencies(hip-compiler
   HipPassesIncGen
 )
 
-hip_link_rocmlir_closure(hip-compiler)
 target_link_libraries(hip-compiler PRIVATE
   LibHipCompiler
   LLVMSupport
   HipSupport
 )
+# After LibHipCompiler so the GNU ld rescan group is the last link item.
+hip_link_rocmlir_closure(hip-compiler)
 
 target_include_directories(hip-compiler PRIVATE
   ${CMAKE_SOURCE_DIR}/include
