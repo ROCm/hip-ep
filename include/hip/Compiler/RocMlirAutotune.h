@@ -156,8 +156,9 @@ private:
 };
 
 // HIP_ROCMLIR_SKIP_BENCHMARKING, shared by hip-rocmlir-compiler and the ONNX
-// Runtime provider. Unset or "0" means benchmark. Any other value skips the
-// search and keeps rocMLIR's default perfConfig.
+// Runtime provider. Unset or "0" means benchmark. A present empty string
+// skips, and so does any other value. The search then keeps rocMLIR's
+// default perfConfig.
 bool rocMlirSkipBenchmarking();
 
 // Reads HIPDNN_EP_ROCMLIR_AUTOTUNE for the search space only. Unset or empty
