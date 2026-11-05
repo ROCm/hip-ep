@@ -344,7 +344,7 @@ class TestLinearAttention:
     @pytest.mark.parametrize(
         "d_k,d_v",
         [
-            (128, 64),   # pass3 S0/U staging fits within the 64 KB LDS budget
+            (128, 64),  # pass3 S0/U staging fits within the 64 KB LDS budget
             (128, 128),  # same path must fall back to global S0/U streaming
         ],
     )
