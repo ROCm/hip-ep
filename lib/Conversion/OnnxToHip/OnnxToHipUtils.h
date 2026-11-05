@@ -385,6 +385,12 @@ readbackShapeEntryToHostOrExtract(mlir::PatternRewriter &rewriter,
   return readbackShapeEntryToHost(rewriter, loc, *ctx, shape, idx);
 }
 
+/// Element `index` of a small 1-D shape tensor, traced through its
+/// construction (constants, from_elements, slices, constant-index gathers)
+/// without reading device data. Returns an attribute for a compile-time
+/// entry, the host scalar it was built from, or nullopt.
+std::optional<OpFoldResult> findHostShapeEntry(Value shape, int64_t index);
+
 // Pattern population functions (one per operator file)
 void populateMatMulConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
@@ -565,12 +571,6 @@ void populateSizeConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateNonZeroConversionPatterns(RewritePatternSet &patterns,
                                        MLIRContext *ctx);
-
-/// Element `index` of a small 1-D shape tensor, traced through its
-/// construction (constants, from_elements, slices, constant-index gathers)
-/// without reading device data. Returns an attribute for a compile-time
-/// entry, the host scalar it was built from, or nullopt.
-std::optional<OpFoldResult> findHostShapeEntry(Value shape, int64_t index);
 void populateConcatConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
 void populateReluConversionPatterns(RewritePatternSet &patterns,
