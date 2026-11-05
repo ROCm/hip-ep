@@ -5,7 +5,6 @@
 
 #include "../ResizeLayout.h"
 #include "HipToLLVMUtils.h"
-#include "hip/resize_abi.h"
 
 namespace mlir {
 namespace hip {
@@ -37,9 +36,13 @@ namespace {
 //               in0..2, out0..2,
 //               mode, coord_transform, nearest_mode)
 //   -> i32
-// `mode` is hip.resize's mode with its antialias and exclude_outside flags
-// (hip/resize_abi.h).
+// `mode` is hip.resize's mode | antialias << 9 | exclude_outside << 10.
 //   wrap_resize_scaled(<same arguments>, scale0..2 : f64) -> i32
+
+// The filter flags ORed into the kernel's mode, HIP_RESIZE_FLAG_* in
+// hip_custom_kernels.h.
+constexpr int64_t kResizeFlagAntialias = 1 << 9;
+constexpr int64_t kResizeFlagExcludeOutside = 1 << 10;
 
 struct ResizeOpLowering : public ConvertOpToLLVMPattern<ResizeOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
@@ -125,11 +128,11 @@ struct ResizeOpLowering : public ConvertOpToLLVMPattern<ResizeOp> {
           getMemRefDimSize(outputType, axis, outputDesc, rewriter, loc);
     }
 
-    // The mode and the filter flags are one argument (hip/resize_abi.h).
+    // The kernel's mode packs the filter flags above the interpolation mode,
+    // where GGML keeps its scale flags (HIP_RESIZE_* in hip_custom_kernels.h).
     Value mode = createI64(
-        op.getMode() |
-        (op.getAntialias() ? HIPDNN_EP_RESIZE_FLAG_ANTIALIAS : 0) |
-        (op.getExcludeOutside() ? HIPDNN_EP_RESIZE_FLAG_EXCLUDE_OUTSIDE : 0));
+        op.getMode() | (op.getAntialias() ? kResizeFlagAntialias : 0) |
+        (op.getExcludeOutside() ? kResizeFlagExcludeOutside : 0));
     Value coord = createI64(op.getCoordTransform());
     Value nearest = createI64(op.getNearestMode());
     Value spatialRankV = createI64(launch->spatialRank);
