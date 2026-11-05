@@ -91,7 +91,7 @@ controller from that `bin` directory:
 | `--mode` | `lookup`, `autotune` | `lookup` | `lookup` uses the tables embedded in `custom_kernels_<arch>.dll` and falls through to autotune on a miss, like production. `autotune` bypasses the tables (production's `online` mode). |
 | `--coverage` | `1`, `2`, `3` | `3` | Shape tier; see "Shape coverage". `1` suits a per-PR job, `3` a nightly one. |
 
-The controller runs the 17 leaves serially, with `bin` as the working
+The controller runs the 27 leaves serially, with `bin` as the working
 directory so every leaf finds `custom_kernels_<arch>.dll`. It prints one
 `[<op>/<leaf>] PASS|FAIL (<ms> ms)` line per leaf and finally
 `Combined report: <path>`.
