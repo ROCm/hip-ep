@@ -103,8 +103,8 @@ current HIP device, and embeds the fastest binary. The ONNX Runtime provider
 does the same whenever `HIPDNN_EP_ROCMLIR` is on. Both honor
 `HIP_ROCMLIR_SKIP_BENCHMARKING`: unset or `0` benchmarks, and any other value
 keeps rocMLIR's default perfConfig. Unset `HIPDNN_EP_ROCMLIR_AUTOTUNE`
-selects quick. `0`, `off`, `false`, and `no` keep the default perfConfig.
-`full` and `exhaustive` select those spaces. Every search config in the
+selects quick. `quick`, `full`, and `exhaustive` are the only accepted
+values; anything else warns and stays on quick. Every search config in the
 model is compiled in one pool (default: one job per hardware thread;
 `HIP_ROCMLIR_COMPILE_JOBS` overrides the width). GPU benchmarking stays serial,
 and it starts only after that pool finishes, so candidate timings do not
