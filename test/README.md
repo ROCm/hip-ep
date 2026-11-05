@@ -23,25 +23,25 @@ ctest --test-dir ../build/$(basename $PWD) --verbose
 # Via CTest
 ctest --test-dir ../build/$(basename $PWD) --verbose
 
-# Via CMake target
-cmake --build ../build/$(basename $PWD) --target check-onnx-hip-lit
+# LIT tests via CMake target
+cmake --build ../build/$(basename $PWD) --target check-hip-mlir-lit
 ```
 
 ### By Category
 
 ```bash
 # LIT tests only (MLIR pass validation)
-ctest --test-dir ../build/$(basename $PWD) -R LitTests --verbose
+ctest --test-dir ../build/$(basename $PWD) -R MorphizenMLIRLitTests --verbose
 
-# E2E tests only (ORT integration)
-ctest --test-dir ../build/$(basename $PWD) -R OrtIntegration --verbose
+# E2E tests only (hip-compiler + hip-test on test/lit/e2e/*.mlir)
+ctest --test-dir ../build/$(basename $PWD) -R "^E2E_" --verbose
 ```
 
 ### Specific Tests
 
 ```bash
-# Single LIT test via llvm-lit
-llvm-lit -v hip-ep/test/lit/Conversion/onnx-to-hip/test_gemm_basic.mlir
+# Single LIT test via llvm-lit (point at the build tree, filter by path)
+llvm-lit -v ../build/$(basename $PWD)/test/lit/ --filter onnx-to-hip/test_gemm
 ```
 
 ## Prerequisites
@@ -50,7 +50,6 @@ See [docs/quick_start.md](../docs/quick_start.md) for build prerequisites.
 
 Additional test-specific dependencies:
 - **Python + lit**: `pip install lit` (for LIT tests)
-- **Test Models**: Generated via Python scripts (see [test/e2e/README.md](e2e/))
 
 ## Build Configuration
 
@@ -62,8 +61,7 @@ Test-specific CMake flags:
 | Flag | Default | Purpose |
 |------|---------|---------|
 | `BUILD_HIP_UNIT_TESTS` | ON | Register LIT and E2E tests with CTest |
-| `ONNX_HIP_INCLUDE_LIT_TESTS` | ON | Enable LIT tests |
-| `BUILD_MOCK_RUNTIME` | ON | Enable E2E tests with mock runtime |
+| `BUILD_MOCK_RUNTIME` | ON in CMake; `build.py` passes OFF unless `--mock` | Build the mock runtime (no GPU required) instead of the real one |
 
 To disable HIP unit tests (LIT + E2E) during the build:
 
@@ -74,17 +72,16 @@ cmake -DBUILD_HIP_UNIT_TESTS=OFF ...
 ## Test Coverage
 
 ### LIT Tests (`test/lit/`)
-- **Conversion passes**: ONNX→HIP, HIP→LLVM dialect lowering
-- **Transform passes**: Buffer deallocation, C-ABI wrapper generation
-- **Integration**: Multi-pass compilation pipelines
+- **Conversion passes**: ONNX → HIP, HIP → LLVM / TOSA lowering (default path), plus the opt-in hipDNN (when a hipDNN handle is available) and HIPSR (`HIPDNN_EP_HIPSR=1`) paths
+- **Transform passes**: C-ABI wrapper generation, op-state slots, HIP fusion
+- **Pipelines and plugins**: Multi-pass pipelines and compiler plugin hooks
 
 See [test/lit/README.md](lit/) for detailed test writing guide and debugging tips.
 
 ### E2E Tests (`test/e2e/`)
-- **ORT Integration**: EP registration, session creation
-- **Model Execution**: Conv and Conv+Gemm models with CPU device
+- **Compile + execute**: Each `test/lit/e2e/*.mlir` is compiled with `hip-compiler` and run with `hip-test --validate`
 
-See [test/e2e/README.md](e2e/) for model generation and environment setup.
+See [test/e2e/README.md](e2e/) for running the suite and GPU setup.
 
 ### Numeric Tests (`test/numeric/`)
 - **Per-operator correctness**: Single-op ONNX models (Sigmoid, MatMul, ...) run on the MorphiZen EP and compared against an ORT CPU reference.
@@ -113,25 +110,9 @@ pip install lit
 cmake --build ../build/$(basename $PWD) --target hip-mlir-opt --config Debug
 ```
 
-### E2E Tests
-
-**Test skips with "V2 API not implemented"**:
-```bash
-# Set environment variable
-export MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1  # Linux/Mac
-set MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1     # Windows CMD
-```
-
-**Missing test models**:
-```bash
-# Generate models (see test/e2e/README.md)
-cd test/e2e
-python gen_conv_model.py --two-layer --output /path/to/build/Debug/bin/conv_model.onnx
-```
-
 ## References
 
 - [LIT Tests Detailed Guide](lit/README.md) - Test writing, FileCheck patterns, debugging
-- [E2E Tests Quick Guide](e2e/README.md) - Model generation, environment setup, troubleshooting
+- [E2E Tests Quick Guide](e2e/README.md) - Running the suite, GPU setup, troubleshooting
 - [LLVM Testing Infrastructure](https://llvm.org/docs/TestingGuide.html)
 - [FileCheck Documentation](https://llvm.org/docs/CommandGuide/FileCheck.html)
