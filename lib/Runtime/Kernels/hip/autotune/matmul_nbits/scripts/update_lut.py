@@ -981,9 +981,16 @@ def validate_fast_winner_confirmation(row, source_manifest):
     if values['candidate'] / values['baseline'] > 1.02:
         raise ValueError('checked winner has a confirmed regression')
     rejected_id = confirmation.get('rejected_fast_config_id')
+    reason = confirmation.get('selection_reason', 'confirmed_regression')
+    justified = values['rejected_fast_candidate'] / values['baseline'] > 1.02
+    if reason == 'priority_checked_best':
+        justified = (row.get('priority') is True
+                     and values['rejected_fast_candidate'] / values['candidate'] > 1.02)
+    elif reason != 'confirmed_regression':
+        justified = False
     if (rejected_id == row['winner'] or rejected_id not in row['legal_config_ids']
-            or values['rejected_fast_candidate'] / values['baseline'] <= 1.02):
-        raise ValueError('checked correction requires a formally failing fast choice')
+            or not justified):
+        raise ValueError('checked correction requires a confirmed regression or priority improvement')
     return True
 
 

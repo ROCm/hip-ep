@@ -187,6 +187,11 @@ sides' five-process/five-block arrays, shape/config/source identity and raw
 audit digests; the importer recomputes the 2% acceptance check. It never replaces
 prepared-kernel fast samples with padded-wrapper timings. Record both values
 and verify the corrected winner in the final production regression screen.
+For priority model exact points, `selection_reason=priority_checked_best` also
+permits an already checked config when it is more than 2% faster than the
+displaced fast choice and still passes baseline acceptance. This requires
+`priority=true` and the same bound five-process/block arrays; an unchecked gain
+or a tie cannot override fast ranking. Prefer the existing fast tie band first.
 It preserves existing pool indices, unrelated points, fallbacks and fitted
 weights, and adds priority exact points that were explicitly reviewed. The
 atomic import performs no GPU work and refuses a second import against the
