@@ -80,7 +80,9 @@ namespace {
 ///   %total_seq = tensor.from_elements %tot        : tensor<i32>
 ///   %pk_init   = tensor.empty(%B, %tot)    // present sized to %tot, NOT %past
 ///   %y, %pk, %pv = hip.gqa(%ctx)
-///       ins(%q, %k, %v, %past_k, %past_v, %seqlens_k, %total_seq, %mask)
+///       ins(%q, %seqlens_k, %total_seq)
+///       key(%k) value(%v) past_key(%past_k) past_value(%past_v)
+///       attention_bias(%mask)
 ///       outs(%y_init, %pk_init, %pv_init)
 ///       {num_heads = 16, kv_num_heads = 8, scale = 1.0, no_causal = true}
 ///

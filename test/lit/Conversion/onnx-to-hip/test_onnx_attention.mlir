@@ -72,8 +72,8 @@ module {
     // CHECK: tensor.empty() : tensor<1x1x2048xf16>
     // CHECK: tensor.empty() : tensor<1x8x128x128xf16>
     // CHECK: hip.gqa(%[[CTX]])
-    // Mask is threaded as the final hip.gqa input (attention_bias).
-    // CHECK-SAME: ins({{.*}}tensor<1x1x1x128xf16>) outs
+    // The mask is threaded as hip.gqa's attention_bias operand.
+    // CHECK-SAME: attention_bias({{[^)]*}}tensor<1x1x1x128xf16>) outs(
     // Attributes print alphabetically; no_causal = true is present (is_causal=0).
     // CHECK-SAME: {kv_num_heads = 8 : i64, no_causal = true, num_heads = 16 : i64
     // CHECK-NOT: onnx.Attention
@@ -178,8 +178,8 @@ module {
     // CHECK: tensor.from_elements %{{.*}} : tensor<1xi32>
     // CHECK: tensor.empty(%{{.*}}, %[[TOTG]]) : tensor<?x1x?x256xf16>
     // CHECK: hip.gqa(%[[CTXG]])
-    // Mask is threaded as the final hip.gqa input (attention_bias).
-    // CHECK-SAME: ins({{.*}}tensor<?x1x?x?xf16>) outs
+    // The mask is threaded as hip.gqa's attention_bias operand.
+    // CHECK-SAME: attention_bias({{[^)]*}}tensor<?x1x?x?xf16>) outs(
     // Attributes print alphabetically; no_causal defaults to false and is
     // omitted, so the dict goes straight from kv_num_heads to num_heads.
     // CHECK-SAME: {kv_num_heads = 1 : i64, num_heads = 8 : i64
@@ -345,8 +345,9 @@ module {
     // CHECK: tensor.from_elements %{{.*}} : tensor<1xi32>
     // CHECK: tensor.empty(%[[TOT]]) : tensor<1x1x?x256xf16>
     // CHECK: hip.gqa(%[[CTX6]])
-    // Mask is threaded as attention_bias; no past_key/past_value operands.
-    // CHECK-SAME: ins({{.*}}tensor<1x1x1x?xf16>) outs
+    // The mask is threaded as attention_bias, with no past_key/past_value
+    // clauses between value(...) and attention_bias(...).
+    // CHECK-SAME: ins({{[^)]*}}) key({{[^)]*}}) value({{[^)]*}}) attention_bias({{[^)]*}}tensor<1x1x1x?xf16>) outs(
     // CHECK-SAME: {kv_num_heads = 1 : i64, no_causal = true, num_heads = 8 : i64
     // CHECK-NOT: onnx.Attention
 

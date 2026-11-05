@@ -111,7 +111,7 @@ Ops with no hipBLASLt equivalent. Implemented as pure C++ kernels.
 | `hip.transpose` | `(%ctx) ins(%input : ...) outs(%output : ...) {perm = [...]}` | N-D transpose with arbitrary permutation | Full impl |
 | `hip.gather` | `(%ctx) ins(%indices, %table : ...) outs(%output : ...)` | Embedding table lookup | Stub |
 | `hip.silu` | `(%ctx) ins(%input : ...) outs(%output : ...)` | SiLU activation: `x * sigmoid(x)` | Stub |
-| `hip.gqa` | `(%ctx, %layer, %start_pos, %seq_len) ins(%q, %k, %v : ...) outs(%kv_cache, %output : ...)` | Grouped query attention with KV cache | Stub |
+| `hip.gqa` | `(%ctx) ins(%query, %seqlens_k, %total_seq_len : ...) key(%k : ...) value(%v : ...) past_key(%pk : ...) past_value(%pv : ...) outs(%output, %present_key, %present_value : ...)`; every optional operand is a named clause (`cos_cache(...)`, `k_scale(...)`, `output_qk(...)`, ...) | Grouped query attention (`com.microsoft.GroupQueryAttention`) with KV cache | Full impl |
 
 ---
 

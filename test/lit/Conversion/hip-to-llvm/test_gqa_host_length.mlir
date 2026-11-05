@@ -22,17 +22,21 @@ func.func @distinct_lengths(%ctx: !hip.context, %a: i64, %b: i32,
   %len = memref.view %scratch[%c0][] : memref<?xi8> to memref<1xi32>
   %n = arith.trunci %a : i64 to i32
   memref.store %n, %len[%c0] : memref<1xi32>
-  hip.gqa(%ctx) ins(%q, %q, %q, %pk, %pv, %len, %total :
-      memref<1x1x64xf16>, memref<1x1x64xf16>, memref<1x1x64xf16>,
-      memref<1x1x128x64xf16>, memref<1x1x128x64xf16>, memref<1xi32>, memref<i32>)
+  hip.gqa(%ctx) ins(%q, %len, %total :
+          memref<1x1x64xf16>, memref<1xi32>, memref<i32>)
+      key(%q : memref<1x1x64xf16>) value(%q : memref<1x1x64xf16>)
+      past_key(%pk : memref<1x1x128x64xf16>)
+      past_value(%pv : memref<1x1x128x64xf16>)
     outs(%out, %pk, %pv :
       memref<1x1x64xf16>, memref<1x1x128x64xf16>, memref<1x1x128x64xf16>)
     {num_heads = 1 : i64, kv_num_heads = 1 : i64}
   %len2 = memref.view %scratch[%c64][] : memref<?xi8> to memref<1xi32>
   memref.store %b, %len2[%c0] : memref<1xi32>
-  hip.gqa(%ctx) ins(%q, %q, %q, %pk, %pv, %len2, %total :
-      memref<1x1x64xf16>, memref<1x1x64xf16>, memref<1x1x64xf16>,
-      memref<1x1x128x64xf16>, memref<1x1x128x64xf16>, memref<1xi32>, memref<i32>)
+  hip.gqa(%ctx) ins(%q, %len2, %total :
+          memref<1x1x64xf16>, memref<1xi32>, memref<i32>)
+      key(%q : memref<1x1x64xf16>) value(%q : memref<1x1x64xf16>)
+      past_key(%pk : memref<1x1x128x64xf16>)
+      past_value(%pv : memref<1x1x128x64xf16>)
     outs(%out, %pk, %pv :
       memref<1x1x64xf16>, memref<1x1x128x64xf16>, memref<1x1x128x64xf16>)
     {num_heads = 1 : i64, kv_num_heads = 1 : i64}
@@ -53,9 +57,11 @@ func.func @rewritten_slot(%ctx: !hip.context, %a: i32, %b: i32, %q: memref<1x1x6
   %scratch = hip.get_host_scratch(%ctx, %size) : memref<?xi8>
   %len = memref.view %scratch[%c0][] : memref<?xi8> to memref<1xi32>
   memref.store %a, %len[%c0] : memref<1xi32>
-  hip.gqa(%ctx) ins(%q, %q, %q, %pk, %pv, %len, %total :
-      memref<1x1x64xf16>, memref<1x1x64xf16>, memref<1x1x64xf16>,
-      memref<1x1x128x64xf16>, memref<1x1x128x64xf16>, memref<1xi32>, memref<i32>)
+  hip.gqa(%ctx) ins(%q, %len, %total :
+          memref<1x1x64xf16>, memref<1xi32>, memref<i32>)
+      key(%q : memref<1x1x64xf16>) value(%q : memref<1x1x64xf16>)
+      past_key(%pk : memref<1x1x128x64xf16>)
+      past_value(%pv : memref<1x1x128x64xf16>)
     outs(%out, %pk, %pv :
       memref<1x1x64xf16>, memref<1x1x128x64xf16>, memref<1x1x128x64xf16>)
     {num_heads = 1 : i64, kv_num_heads = 1 : i64}
@@ -80,9 +86,11 @@ func.func @device_writer(%ctx: !hip.context, %a: i32, %source: memref<1xi64>,
   memref.store %a, %len[%c0] : memref<1xi32>
   hip.cast(%ctx) ins(%source : memref<1xi64>)
     outs(%len : memref<1xi32>) {to = 6 : i64}
-  hip.gqa(%ctx) ins(%q, %q, %q, %pk, %pv, %len, %total :
-      memref<1x1x64xf16>, memref<1x1x64xf16>, memref<1x1x64xf16>,
-      memref<1x1x128x64xf16>, memref<1x1x128x64xf16>, memref<1xi32>, memref<i32>)
+  hip.gqa(%ctx) ins(%q, %len, %total :
+          memref<1x1x64xf16>, memref<1xi32>, memref<i32>)
+      key(%q : memref<1x1x64xf16>) value(%q : memref<1x1x64xf16>)
+      past_key(%pk : memref<1x1x128x64xf16>)
+      past_value(%pv : memref<1x1x128x64xf16>)
     outs(%out, %pk, %pv :
       memref<1x1x64xf16>, memref<1x1x128x64xf16>, memref<1x1x128x64xf16>)
     {num_heads = 1 : i64, kv_num_heads = 1 : i64}
@@ -105,9 +113,11 @@ func.func @multi_element(%ctx: !hip.context, %a: i32, %b: i32, %q: memref<1x1x64
   memref.store %a, %len[%c0] : memref<2xi32>
   %c1 = arith.constant 1 : index
   memref.store %b, %len[%c1] : memref<2xi32>
-  hip.gqa(%ctx) ins(%q, %q, %q, %pk, %pv, %len, %total :
-      memref<1x1x64xf16>, memref<1x1x64xf16>, memref<1x1x64xf16>,
-      memref<1x1x128x64xf16>, memref<1x1x128x64xf16>, memref<2xi32>, memref<i32>)
+  hip.gqa(%ctx) ins(%q, %len, %total :
+          memref<1x1x64xf16>, memref<2xi32>, memref<i32>)
+      key(%q : memref<1x1x64xf16>) value(%q : memref<1x1x64xf16>)
+      past_key(%pk : memref<1x1x128x64xf16>)
+      past_value(%pv : memref<1x1x128x64xf16>)
     outs(%out, %pk, %pv :
       memref<1x1x64xf16>, memref<1x1x128x64xf16>, memref<1x1x128x64xf16>)
     {num_heads = 1 : i64, kv_num_heads = 1 : i64}

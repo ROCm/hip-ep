@@ -819,11 +819,9 @@ func.func @refine_gqa_multi_result_dps_out_fallback(
   %e1 = tensor.empty(%d0, %d1, %d2, %d3) : tensor<?x?x?x?xf16>
   %e2 = tensor.empty(%d0, %d1, %d2, %d3) : tensor<?x?x?x?xf16>
   %r:3 = hip.gqa(%ctx)
-    ins(%query, %key, %value, %past_key, %past_value,
-        %seqlens_k, %total_seq_len :
-        tensor<1x?x4096xf16>, tensor<1x?x1024xf16>, tensor<1x?x1024xf16>,
-        tensor<1x8x?x128xf16>, tensor<1x8x?x128xf16>,
-        tensor<1xi32>, tensor<i32>)
+    ins(%query, %seqlens_k, %total_seq_len : tensor<1x?x4096xf16>, tensor<1xi32>, tensor<i32>)
+      key(%key : tensor<1x?x1024xf16>) value(%value : tensor<1x?x1024xf16>)
+      past_key(%past_key : tensor<1x8x?x128xf16>) past_value(%past_value : tensor<1x8x?x128xf16>)
     outs(%e0, %e1, %e2 :
          tensor<?x?x?xf16>, tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>)
     {num_heads = 32 : i64, kv_num_heads = 8 : i64,
