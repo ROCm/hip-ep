@@ -5534,8 +5534,8 @@ def Hip_ResizeOp : Hip_DpsOp_AutoReify<"resize"> {
       * cubic_coeff_a (default -0.75): -0.75 only, the value ONNX, PyTorch
         and GGML use.
 
-    The lowering passes mode, antialias and exclude_outside to the kernel as
-    one integer: mode | antialias << 9 | exclude_outside << 10.
+    The lowering passes mode, antialias and exclude_outside to the runtime as
+    one integer (hip/resize_abi.h).
 
     Per-axis scale is recovered at runtime from the window's input and output
     extents (`scale = in_dim / out_dim`).  `scales` and `sizes` do not appear

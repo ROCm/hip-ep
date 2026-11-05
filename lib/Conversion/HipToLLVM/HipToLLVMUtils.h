@@ -181,9 +181,6 @@ inline constexpr const char *kWrapReduceProd = "wrap_reduce_prod";
 inline constexpr const char *kWrapPool = "wrap_pool";
 inline constexpr const char *kWrapResize = "wrap_resize";
 inline constexpr const char *kWrapResizeScaled = "wrap_resize_scaled";
-// Flags hip.resize's lowering ORs into the kernel's mode (HIP_RESIZE_FLAG_*).
-inline constexpr int64_t kResizeFlagAntialias = 1 << 9;
-inline constexpr int64_t kResizeFlagExcludeOutside = 1 << 10;
 inline constexpr const char *kWrapGridSample = "wrap_grid_sample";
 inline constexpr const char *kWrapGlobalPool = "wrap_global_pool";
 inline constexpr const char *kWrapLess = "wrap_less";

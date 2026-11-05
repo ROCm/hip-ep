@@ -1729,10 +1729,6 @@ HIP_KERNEL_API int hip_pool(
     int count_include_pad,
     int p);
 
-#define HIP_RESIZE_MODE_MASK 0xFF
-#define HIP_RESIZE_FLAG_ANTIALIAS (1 << 9)
-#define HIP_RESIZE_FLAG_EXCLUDE_OUTSIDE (1 << 10)
-
 /* =========================================================================
  * Resize (1D / 2D / 3D spatial)
  * =========================================================================
@@ -1762,6 +1758,10 @@ HIP_KERNEL_API int hip_pool(
  * store. Nearest copies one sample.
  * Returns: 0 on success, non-zero on failure.
  */
+#define HIP_RESIZE_MODE_MASK 0xFF
+#define HIP_RESIZE_FLAG_ANTIALIAS (1 << 9)
+#define HIP_RESIZE_FLAG_EXCLUDE_OUTSIDE (1 << 10)
+
 HIP_KERNEL_API int hip_resize(
     void* stream,
     const void* input,

@@ -6,6 +6,7 @@
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
 #include "error_check_macros.h"
+#include "hip/resize_abi.h"
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
 
@@ -23,13 +24,21 @@
 //   wrap_resize_scaled(<same>, scale0..2): window axis i samples with ONNX
 //               scale<i> when > 0 instead of out<i> / in<i>
 //
-// `mode`:           0 = nearest, 1 = linear (N-linear), 2 = cubic, ORed with
-//                    HIP_RESIZE_FLAG_ANTIALIAS / _EXCLUDE_OUTSIDE
-//                    (hip_custom_kernels.h)
+// `mode`:           0 = nearest, 1 = linear (N-linear), 2 = cubic, with the
+//                    antialias and exclude_outside flags (hip/resize_abi.h);
+//                    hip_resize takes the same integer
 // `coord_transform`: 0 = half_pixel, 1 = asymmetric, 2 = align_corners,
 //                    3 = pytorch_half_pixel
 // `nearest_mode`:    0 = round_prefer_floor, 1 = round_prefer_ceil, 2 = floor,
 //                    3 = ceil (only used when mode=nearest)
+
+// The compiler's encoding of `mode` is the kernel's, so it passes through.
+static_assert(HIPDNN_EP_RESIZE_MODE_MASK == HIP_RESIZE_MODE_MASK &&
+                  HIPDNN_EP_RESIZE_FLAG_ANTIALIAS ==
+                      HIP_RESIZE_FLAG_ANTIALIAS &&
+                  HIPDNN_EP_RESIZE_FLAG_EXCLUDE_OUTSIDE ==
+                      HIP_RESIZE_FLAG_EXCLUDE_OUTSIDE,
+              "hip/resize_abi.h and hip_custom_kernels.h disagree");
 
 static int hipdnn_ep_to_hip_dtype(int64_t data_type) {
   switch (data_type) {
