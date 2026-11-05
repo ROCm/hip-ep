@@ -40,6 +40,16 @@ inline bool hipdnn_ep_gemv_f32_enabled() {
   return enabled;
 }
 
+// Decode with separate past/present KV buffers (past_present_share_buffer
+// off) folds the concat into the flash-decode split kernel, which then reads
+// past once instead of twice. Default on; HIPDNN_EP_GQA_FUSED_KV_COPY=0
+// restores concat + decode for A/B isolation.
+inline bool hipdnn_ep_gqa_fused_kv_copy_enabled() {
+  static const bool enabled =
+      hipdnn_ep::env_enabled_default_on("HIPDNN_EP_GQA_FUSED_KV_COPY");
+  return enabled;
+}
+
 // Widest token burst wrap_qmoe serves by iterating the one-token fused kernel
 // (three launches per token, no host sync, one expert set read per token)
 // instead of the grouped path (one pass over the union of experts in padded
