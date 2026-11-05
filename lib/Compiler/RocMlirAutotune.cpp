@@ -922,10 +922,8 @@ std::optional<std::string> RocMlirAutotuner::Impl::lookupProblemCache(
              << hit->matchedProblem << " -> " << hit->solution << "\n";
     return std::move(hit->solution);
   };
-  for (const ProblemCacheLut &lut : shippedProblemCaches()) {
-    if (std::optional<std::string> solution = search(lut))
-      return solution;
-  }
+  // An external table replaces the shipped one. A miss there goes to the
+  // in-process winner cache and then the tuning space, not back to the embed.
   if (!options.problemCachePath.empty()) {
     const ProblemCacheLut &lut = loadedProblemCache();
     if (!lut.gpuArch.empty() && lut.gpuArch != deviceGfx) {
@@ -937,6 +935,11 @@ std::optional<std::string> RocMlirAutotuner::Impl::lookupProblemCache(
     } else if (std::optional<std::string> solution = search(lut)) {
       return solution;
     }
+    return std::nullopt;
+  }
+  for (const ProblemCacheLut &lut : shippedProblemCaches()) {
+    if (std::optional<std::string> solution = search(lut))
+      return solution;
   }
   return std::nullopt;
 }
@@ -952,11 +955,12 @@ bool RocMlirAutotuner::Impl::autotuneKernel(ModuleOp module,
   }
   ensureDialectsLoaded();
 
-  // Look up before building the search space. Order is the shipped
-  // lut/<arch>.fb, then --problem-cache, then this compile's winner cache,
-  // then the selected tuning space. A known winner is compiled in the second
-  // pool. A problem already queued in this compile waits for that pool once
-  // the search has been benchmarked. A tile that fails to compile is skipped
+  // Look up before building the search space. With --problem-cache or
+  // HIP_ROCMLIR_PROBLEM_CACHE set, that file is the only table. Otherwise the
+  // shipped lut/<arch>.fb is used. Either way a miss then checks this
+  // compile's winner cache, then the selected tuning space. A known winner is
+  // compiled in the second pool. A problem already queued waits for that pool
+  // once the search has been benchmarked. A tile that fails to compile is skipped
   // and the next nearest row is tried. When none remain, the search runs.
   llvm::SmallString<2048> problem;
   std::string cacheKey;
