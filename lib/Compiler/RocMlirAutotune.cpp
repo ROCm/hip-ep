@@ -10,8 +10,8 @@
 
 #include "hip/Compiler/AdaptiveBenchmark.h"
 #include "hip/Compiler/RocMlirKernelCompiler.h"
-#include "nearest_conv_tune.h"
 #include "hip/InitAllPasses.h"
+#include "nearest_conv_tune.h"
 // hip_get_env, not std::getenv: this runs inside the static-CRT EP DLL, whose
 // CRT cannot see env vars the host process sets afterwards.
 #include "hip/debug_log.h"
@@ -906,20 +906,20 @@ bool RocMlirAutotuner::Impl::problemCacheActive() const {
 
 std::optional<std::string> RocMlirAutotuner::Impl::lookupProblemCache(
     StringRef problem, const std::vector<std::string> &rejected) {
-  const auto search = [&](const ProblemCacheLut &lut)
-      -> std::optional<std::string> {
+  const auto search =
+      [&](const ProblemCacheLut &lut) -> std::optional<std::string> {
     if ((!lut.gpuArch.empty() && lut.gpuArch != deviceGfx) ||
         lut.entries.empty())
       return std::nullopt;
     std::optional<NearestConvTuneHit> hit = findNearestConvTune(
-        std::string_view(problem.data(), problem.size()), lut.entries,
-        rejected, lut.weightM, lut.weightN, lut.weightK);
+        std::string_view(problem.data(), problem.size()), lut.entries, rejected,
+        lut.weightM, lut.weightN, lut.weightK);
     if (!hit)
       return std::nullopt;
     if (log())
       *log() << options.logPrefix << " nearest-tune "
-             << (hit->exact ? "exact" : "nearest") << " d="
-             << llvm::format("%.3f", hit->distance) << " matched "
+             << (hit->exact ? "exact" : "nearest")
+             << " d=" << llvm::format("%.3f", hit->distance) << " matched "
              << hit->matchedProblem << " -> " << hit->solution << "\n";
     return std::move(hit->solution);
   };
@@ -968,8 +968,8 @@ bool RocMlirAutotuner::Impl::autotuneKernel(ModuleOp module,
     while (retryNearest) {
       retryNearest = false;
       std::string chosen;
-      if (std::optional<std::string> fromLut = lookupProblemCache(
-              problem, rejectedSolutions[cacheKey])) {
+      if (std::optional<std::string> fromLut =
+              lookupProblemCache(problem, rejectedSolutions[cacheKey])) {
         chosen = std::move(*fromLut);
         winnerCache[cacheKey] = chosen;
       } else if (auto cached = winnerCache.find(cacheKey);
