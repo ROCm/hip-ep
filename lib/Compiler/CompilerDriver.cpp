@@ -50,6 +50,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <memory>
 #include <sstream>
@@ -88,6 +89,44 @@ OnnxDialectKind onnxDialectKind() {
 }
 } // namespace
 
+namespace {
+// FNV-1a over the shipped LUT bytes. The model cache key is the graph, so two
+// compiles that pick different perfConfigs must not share an artifact. The
+// provider consults only the embedded tools/problem-cache/lut/*.fb; hashing
+// those bytes makes a changed table fail the recorded/current check the same
+// way a changed autotune space does. hip-rocmlir-compiler's --problem-cache
+// is not part of this string: the provider never reads it.
+#if defined(ENABLE_ROCMLIRTRITON) && defined(HIPDNN_EP_LINK_HIP_HOST) &&       \
+    defined(HIPDNN_HIP_RUNTIME_LIB)
+extern "C" const unsigned char *const kRocmlirProblemCacheBlobs[];
+extern "C" const size_t kRocmlirProblemCacheBlobSizes[];
+extern "C" const size_t kRocmlirProblemCacheBlobCount;
+
+std::string shippedProblemCacheFingerprint() {
+  uint64_t hash = 14695981039346656037ull;
+  for (size_t blob = 0; blob < kRocmlirProblemCacheBlobCount; ++blob) {
+    const unsigned char *bytes = kRocmlirProblemCacheBlobs[blob];
+    const size_t size = kRocmlirProblemCacheBlobSizes[blob];
+    if (!bytes || size == 0)
+      continue;
+    for (size_t i = 0; i < size; ++i) {
+      hash ^= bytes[i];
+      hash *= 1099511628211ull;
+    }
+  }
+  static constexpr char kHex[] = "0123456789abcdef";
+  std::string hex(16, '0');
+  for (int nibble = 15; nibble >= 0; --nibble) {
+    hex[static_cast<size_t>(nibble)] = kHex[hash & 0xfu];
+    hash >>= 4;
+  }
+  return hex;
+}
+#else
+std::string shippedProblemCacheFingerprint() { return {}; }
+#endif
+} // namespace
+
 std::string rocMlirArtifactTarget() {
 #ifdef ENABLE_ROCMLIRTRITON
   // Mirror the dispatch order in compileImpl: HIPDNN_EP_PIPELINE and
@@ -97,13 +136,19 @@ std::string rocMlirArtifactTarget() {
       rocMlirPipelineRequested()) {
     std::string target = mlir::hip::resolveRocMlirArch();
     // Which perfConfig each kernel was tuned to is baked into the embedded
-    // HSACO, so an artifact built with the default configs must not be reused
-    // once tuning is requested -- the cache is keyed on the graph alone, and
-    // the knob would silently appear to do nothing. Folding the mode into the
-    // target string puts it under the recorded-vs-current check below.
+    // HSACO. Autotune runs unless HIP_ROCMLIR_SKIP_BENCHMARKING is set, so
+    // the target string records the space and the shipped LUT that supplied
+    // tiles before the search. An artifact built with the other setting, or
+    // against other LUT bytes, must not be reused: the cache is keyed on the
+    // graph alone. Skip-benchmarking does not consult the LUT, so it has no
+    // +lut= suffix.
     mlir::hip::AutotuneSpace space;
-    if (!target.empty() && mlir::hip::rocMlirAutotuneFromEnv(space))
+    if (!target.empty() && mlir::hip::rocMlirAutotuneFromEnv(space)) {
       target += std::string("+autotune=") + mlir::hip::autotuneSpaceName(space);
+      const std::string lut = shippedProblemCacheFingerprint();
+      if (!lut.empty())
+        target += "+lut=" + lut;
+    }
     return target;
   }
 #endif
@@ -443,11 +488,11 @@ bool CompilerDriver::runMLIRPasses(
       embedOpts.logPrefix = "[CompilerDriver/rocmlir]";
     }
 
-    // Opt-in: without this the embed falls back to position 0 of the tuning
-    // space, which rocMLIR picks for applicability rather than speed. Tuning
-    // compiles and times every candidate, so it costs far more than a session
-    // creation normally should -- hence off unless asked for. Declared in this
-    // scope because embedOpts only holds function_refs into it.
+    // On unless HIP_ROCMLIR_SKIP_BENCHMARKING is set. Without a usable
+    // device the embed would fall back to position 0 of the tuning space,
+    // which rocMLIR picks for applicability rather than speed, so that case
+    // fails the compile. Declared in this scope because embedOpts only holds
+    // function_refs into it.
     std::optional<mlir::hip::RocMlirAutotuner> autotuner;
     mlir::hip::AutotuneSpace autotuneSpace;
     if (mlir::hip::rocMlirAutotuneFromEnv(autotuneSpace)) {
@@ -456,6 +501,9 @@ bool CompilerDriver::runMLIRPasses(
       mlir::hip::rocMlirAutotuneBenchmarkFromEnv(autotuneOpts.benchmark);
       autotuneOpts.log = embedOpts.log;
       autotuneOpts.logPrefix = "[CompilerDriver/rocmlir-autotune]";
+      // problemCachePath stays empty. The provider uses the shipped LUT only.
+      // --problem-cache and HIP_ROCMLIR_PROBLEM_CACHE are read by
+      // hip-rocmlir-compiler, which is what replaces that table.
       autotuner.emplace(embedOpts.arch, autotuneOpts);
       // Refuse rather than fall back to the default perfConfig. By this point
       // rocMlirArtifactTarget() has already stamped +autotune=<space> into the
@@ -465,9 +513,9 @@ bool CompilerDriver::runMLIRPasses(
       // runtime or no visible device, which the autotuner has already
       // described on the log.
       if (!autotuner->isUsable()) {
-        error_message = "HIPDNN_EP_ROCMLIR_AUTOTUNE was set, but autotuning "
-                        "could not reach a HIP device; unset it to compile "
-                        "with the default perfConfig";
+        error_message = "rocMLIR autotune could not reach a HIP device; set "
+                        "HIP_ROCMLIR_SKIP_BENCHMARKING=1 to compile with the "
+                        "default perfConfig";
         return false;
       }
       autotuner->installInto(embedOpts);

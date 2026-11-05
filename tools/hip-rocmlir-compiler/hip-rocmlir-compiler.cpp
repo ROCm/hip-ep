@@ -74,7 +74,6 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
-#include <cstring>
 #include <limits>
 #include <memory>
 #include <numeric>
@@ -82,14 +81,6 @@
 #include <string>
 #include <thread>
 #include <vector>
-
-// Same convention as MIGraphX `enabled(MIGRAPHX_SKIP_BENCHMARKING)`: unset or
-// "0" is off; any other value skips GPU benchmarking and affixes the first
-// enumerated perfConfig.
-static bool skipBenchmarking() {
-  const char *env = std::getenv("HIP_ROCMLIR_SKIP_BENCHMARKING");
-  return env && std::strcmp(env, "0") != 0;
-}
 
 using mlir::hip::CompiledKernel;
 
@@ -203,6 +194,10 @@ int main(int argc, char **argv) {
         llvm::errs() << "error: invalid --autotune-warmup value\n";
         return 1;
       }
+    } else if (arg == "--problem-cache" && i + 1 < argc) {
+      autotune.problemCachePath = argv[++i];
+    } else if (arg == "--dump-problem-cache" && i + 1 < argc) {
+      autotune.problemCacheDumpPath = argv[++i];
     } else if (arg == "--autotune-runs" && i + 1 < argc) {
       if (llvm::StringRef(argv[++i]).getAsInteger(10, autotune.measuredRuns) ||
           autotune.measuredRuns == 0) {
@@ -213,15 +208,29 @@ int main(int argc, char **argv) {
       inputFilename = argv[i];
     }
   }
-  if (skipBenchmarking())
+  if (autotune.problemCachePath.empty()) {
+    if (const char *env = std::getenv("HIP_ROCMLIR_PROBLEM_CACHE"))
+      autotune.problemCachePath = env;
+  }
+  if (mlir::hip::rocMlirSkipBenchmarking())
     autotuneEnabled = false;
 #if !HIP_ROCMLIR_AUTOTUNE
-  if (autotuneFlagSeen && autotuneEnabled) {
+  if ((autotuneFlagSeen && autotuneEnabled) ||
+      !autotune.problemCacheDumpPath.empty()) {
     llvm::errs() << "error: autotune requires a real HIP build\n";
     return 1;
   }
   autotuneEnabled = false;
 #endif
+  // After the stub override. A HIP_ROCMLIR_AUTOTUNE=0 build leaves
+  // autotuneEnabled true until that block, and --problem-cache without
+  // --autotune would otherwise be ignored with no warning.
+  if (!autotune.problemCachePath.empty() && !autotuneEnabled)
+    llvm::errs() << "warning: problem cache ignored because autotune is off\n";
+  if (!autotune.problemCacheDumpPath.empty() && !autotuneEnabled) {
+    llvm::errs() << "error: --dump-problem-cache requires autotune\n";
+    return 1;
+  }
   if (inputFilename.empty() || outputPath.empty()) {
     llvm::errs()
         << "Usage: " << argv[0]
@@ -259,6 +268,22 @@ int main(int argc, char **argv) {
         << "                       measured 4.2e-02 to 7.5e-02 ms, wider than "
            "the\n"
         << "                       differences being searched for.\n"
+        << "  --problem-cache <file.fb>\n"
+        << "                       Before searching, use this LUT FlatBuffer\n"
+        << "                       instead of the shipped table.\n"
+        << "                       An identical problem string is\n"
+        << "                       compiled as stored. HIP_ROCMLIR_PROBLEM_"
+           "CACHE\n"
+        << "                       sets the same path. A conv miss requires\n"
+        << "                       matching arch, dtype, -F, layouts, stride,\n"
+        << "                       dilation, and fusions, then the nearest\n"
+        << "                       M/N/K tile (weights 1) that fits. A tile\n"
+        << "                       that fails to compile is skipped for the\n"
+        << "                       next nearest; otherwise the search runs.\n"
+        << "  --dump-problem-cache <file.json>\n"
+        << "                       After autotune, write the LUT JSON\n"
+        << "                       (configs, points, fallbacks). Compile it\n"
+        << "                       to a .fb with problem_cache_to_fb.py.\n"
         << "  --verbose            Print per-config compile/benchmark lines "
            "and the\n"
         << "                       selected perfConfig.\n"
@@ -470,13 +495,18 @@ int main(int argc, char **argv) {
   bool embedOk =
       mlir::hip::compileAndEmbedRocMlirKernels(*module, embedOpts).succeeded();
   // Whether or not the embed succeeded: the pool and benchmark figures explain
-  // where a slow or failed compile spent its time.
+  // where a slow or failed compile spent its time. The LUT is written only
+  // after a successful embed, so a failed compile does not replace a good table
+  // with a partial one.
   if (autotuner) {
     compilePhaseTimes.perfConfigCompileMs +=
         autotuner->phaseTimes().perfConfigCompileMs;
     compilePhaseTimes.benchmarkMs += autotuner->phaseTimes().benchmarkMs;
   }
   if (!embedOk)
+    return 1;
+  if (autotuner && !autotune.problemCacheDumpPath.empty() &&
+      !autotuner->dumpProblemCache(autotune.problemCacheDumpPath))
     return 1;
 
   // Stage 4: run the standard ONNX-to-HIP tail (shape inference, constant
