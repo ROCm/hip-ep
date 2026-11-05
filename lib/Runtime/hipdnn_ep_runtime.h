@@ -2011,6 +2011,11 @@ int wrap_dynamic_sparse_attention(
 // past_key may be null when past_len == 0; mask may be null (all visible).
 // mask_* are ignored without a mask and cos_batch / sin_batch unless
 // rotary_batched; shape disagreement returns -1 before any launch.
+// With rotary_position_ids ([id_sections, id_batch, id_rows] int64),
+// cos/sin_cache are [rotary_rows, rotary_width / 2] base tables and
+// rotary_sections (host, rotary_width / 2 bytes) gives each frequency's MRoPE
+// section, the ids row of its positions; without the ids, rotary_sections and
+// id_* are ignored.
 int wrap_sparse_attention_indexer(
     RuntimeState *state, const void *query, const void *query_norm_weight,
     const void *key_norm_weight, const void *cos_cache, const void *sin_cache,
@@ -2021,7 +2026,9 @@ int wrap_sparse_attention_indexer(
     int64_t rotary_batched, int64_t compress_ratio, int64_t token_budget,
     int64_t element_size_bytes, int64_t past_batch, int64_t mask_batch,
     int64_t mask_len, int64_t cos_batch, int64_t sin_batch, int64_t sin_rows,
-    float epsilon, float scale);
+    float epsilon, float scale, const void *rotary_position_ids,
+    const void *rotary_sections, int64_t id_sections, int64_t id_batch,
+    int64_t id_rows);
 
 //==============================================================================
 // ONNX Gemm via hipBLASLt
