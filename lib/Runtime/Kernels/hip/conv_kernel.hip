@@ -1084,11 +1084,15 @@ conv_window_kernel(const __half *__restrict__ x, const __half *__restrict__ w,
   const _Float16 *xg = reinterpret_cast<const _Float16 *>(x) +
                        (nbatch * pr.Cin + g * pr.CinPerGroup) * pr.inPlane;
 
-  // Window staging assignment: consecutive threads take consecutive window
-  // columns, so the global read is a contiguous run of WW elements per row.
-  // The LDS write is the strided side of the transpose, which is the right way
-  // round -- the window is written once per channel slice and read kvol times.
-  constexpr int kWinElems = kWmma * WH * WW;
+  // Window staging assignment: a thread owns whole window positions and stages
+  // all 16 channels of each, so consecutive threads read consecutive window
+  // columns of one channel at a time and the LDS write of a position is one
+  // contiguous 16-channel run. A position's input offset and padding test do
+  // not change between channel slices, so they are computed once here; owning
+  // flattened (channel, row, col) elements instead put a different position
+  // under every element and kept all of those offsets live in registers.
+  constexpr int kWinPos = WH * WW;
+  constexpr int kPosPer = (kWinPos + kThreads - 1) / kThreads;
 
   // Filter staging, as in conv_wmma_kernel but at a stride: for one tap the 16
   // contraction entries are 16 channels, which sit kvol apart in the filter.
@@ -1144,44 +1148,67 @@ conv_window_kernel(const __half *__restrict__ x, const __half *__restrict__ w,
   // loads entirely but holds a window of registers through the taps, and the
   // occupancy that costs loses more than it hides on all but the longest
   // contractions.
-  constexpr int kWinPer = (kWinElems + kThreads - 1) / kThreads;
-  _Float16 winNext[kWinPer];
-  const auto loadWin = [&](int32_t c0) {
-    const _Float16 *xs = xg + static_cast<int64_t>(c0) * pr.inPlane;
+  //
+  // The loads are unconditional and the zeroes are selected in at the LDS
+  // store. A masked load into a zeroed register makes the zeroing a write the
+  // load has to wait behind, and the compiler then drains the load queue every
+  // couple of channels. So an out-of-input position reads the slice's first
+  // element instead, and a ragged last slice re-reads its last channel. The
+  // channel step is uniform and goes in the scalar base; each position keeps
+  // one unsigned 32-bit byte offset, which is what lets the load take the
+  // scalar-base form rather than carry a 64-bit address per load.
+  uint32_t posOffB[kPosPer];
+  bool posIn[kPosPer];
 #pragma unroll
-    for (int l = 0; l < kWinPer; ++l) {
-      const int idx = tid + l * kThreads;
-      const int e = idx / (WH * WW);
-      const int rem = idx - e * (WH * WW);
-      const int wr = rem / WW;
-      const int wc = rem - wr * WW;
-      _Float16 v = static_cast<_Float16>(0.0f);
-      if (idx < kWinElems && wr < wh && wc < ww && c0 + e < cinG) {
-        const int32_t r = wr0i + wr, c = wc0i + wc;
-        if (r >= 0 && r < pr.in0i && c >= 0 && c < pr.in1i)
-          v = xs[e * inPlane + r * in1 + c];
-      }
-      winNext[l] = v;
+  for (int p = 0; p < kPosPer; ++p) {
+    const int pos = tid + p * kThreads;
+    const int wr = pos / WW;
+    const int wc = pos - wr * WW;
+    const int32_t r = wr0i + wr, c = wc0i + wc;
+    posIn[p] = pos < kWinPos && wr < wh && wc < ww && r >= 0 && r < pr.in0i &&
+               c >= 0 && c < pr.in1i;
+    posOffB[p] = posIn[p] ? static_cast<uint32_t>(r * in1 + c) * 2u : 0u;
+  }
+  half8 winNext[kPosPer][2];
+  const auto loadWin = [&](int32_t c0) {
+    const char *xs = reinterpret_cast<const char *>(
+        xg + static_cast<int64_t>(c0) * pr.inPlane);
+    const int32_t last = min(cinG - c0, kWmma) - 1;
+#pragma unroll
+    for (int e = 0; e < kWmma; ++e) {
+      const char *xe = xs + static_cast<int64_t>(min(e, last)) * pr.inPlane * 2;
+#pragma unroll
+      for (int p = 0; p < kPosPer; ++p)
+        winNext[p][e / 8][e % 8] =
+            *reinterpret_cast<const _Float16 *>(xe + posOffB[p]);
     }
   };
-  const auto storeWin = [&]() {
+  const auto storeWin = [&](int32_t c0) {
+    const int32_t chans = cinG - c0;
 #pragma unroll
-    for (int l = 0; l < kWinPer; ++l) {
-      const int idx = tid + l * kThreads;
-      if (idx >= kWinElems)
+    for (int p = 0; p < kPosPer; ++p) {
+      const int pos = tid + p * kThreads;
+      if (pos >= kWinPos)
         break;
-      const int e = idx / (WH * WW);
-      const int rem = idx - e * (WH * WW);
-      const int wr = rem / WW;
-      const int wc = rem - wr * WW;
-      win[(wr * WW + wc) * kLdsK + e] = winNext[l];
+      half8 lo = winNext[p][0], hi = winNext[p][1];
+      if (chans < kWmma) {
+#pragma unroll
+        for (int e = 0; e < 8; ++e) {
+          if (e >= chans) lo[e] = static_cast<_Float16>(0.0f);
+          if (e + 8 >= chans) hi[e] = static_cast<_Float16>(0.0f);
+        }
+      }
+      if (!posIn[p]) lo = hi = (half8)static_cast<_Float16>(0.0f);
+      half8 *dst = reinterpret_cast<half8 *>(&win[pos * kLdsK]);
+      dst[0] = lo;
+      dst[1] = hi;
     }
   };
   int buf = 0;
   for (int32_t c0 = 0; c0 < cinG; c0 += kWmma) {
     loadWin(c0);
     __syncthreads(); // every tap of the previous slice has finished with win
-    storeWin();
+    storeWin(c0);
 
     for (int32_t t = 0; t < k0 * k1; ++t) {
       const int32_t tr = t / k1, tc = t - tr * k1;

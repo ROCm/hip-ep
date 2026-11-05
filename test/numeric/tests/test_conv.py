@@ -114,6 +114,30 @@ class TestConv:
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=2e-2, rtol=1e-2, cos_threshold=0.999)
 
+    @pytest.mark.parametrize(
+        "in_c,out_c,spatial",
+        [
+            (40, 64, 37),  # 32-row tile; last channel slice half full
+            (72, 128, 100),  # 64-row tile; last channel slice half full
+            (64, 64, 20),  # whole channel slices
+        ],
+    )
+    def test_conv_window(self, model_runner, in_c, out_c, spatial):
+        """fp16 3x3 convolutions the window-staging kernel takes.
+
+        The input window is staged 16 channels at a time with its padding
+        resolved at staging, so a channel count that is not a multiple of 16
+        and an output plane that does not divide into the tile both leave
+        staged elements that have to come out as zero.
+        """
+        model = _make_conv_model(in_c, out_c, 1, k=3, spatial=spatial)
+
+        rng = np.random.default_rng(99)
+        x = rng.uniform(-1.0, 1.0, [1, in_c, spatial, spatial]).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=1e-2, rtol=1e-2, cos_threshold=0.999)
+
     def test_conv3d_temporal(self, model_runner):
         """Rank-5 NCDHW conv: depth kernel 3, spatial kernel 1x1, pad 1 on D.
 
