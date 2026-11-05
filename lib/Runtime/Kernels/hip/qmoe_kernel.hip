@@ -19,7 +19,7 @@
 #include <unordered_map>
 
 static constexpr int kBlock = 256;
-static constexpr int kMaxK = 16;
+static constexpr int kMaxK = 32;
 // topk_routing runs one block per token with this many threads; per-expert exp
 // values are staged in dynamic shared memory sized num_experts at launch, so
 // there is no compile-time cap on the expert count.
@@ -474,8 +474,15 @@ extern "C" int hip_qmoe_topk_routing(
             (long long)element_size_bytes);
     return -1;
   }
+  if (k > kMaxK) {
+    fprintf(stderr,
+            "[custom_kernels] hip_qmoe_topk_routing: k=%lld > %d not "
+            "supported\n",
+            (long long)k, kMaxK);
+    return -1;
+  }
   (void)hipGetLastError();
-  if (num_experts <= 256 && k <= kMaxK && k <= num_experts) {
+  if (num_experts <= 256 && k <= num_experts) {
     // One 32-lane group per token, up to 8 experts per lane. With
     // k > num_experts the argmax would pick padding lanes, whose indices lie
     // past num_experts; the block kernel keeps every index in range.
