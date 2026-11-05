@@ -11,7 +11,7 @@
 //
 // Conv. Arch, conv kind, -F, layouts, stride, dilation, and the fusion
 // suffix must match. The distance is the implicit GEMM:
-//   M = K_out, N = batch * out_h * out_w,
+//   M = K_out / groups, N = batch * out_h * out_w,
 //   K = (C / groups) * filter_h * filter_w.
 //
 // Gemm. Arch, datatype, output datatype, transposes, scaled-gemm flags,

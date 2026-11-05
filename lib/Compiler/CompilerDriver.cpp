@@ -465,7 +465,8 @@ bool CompilerDriver::runMLIRPasses(
       // described on the log.
       if (!autotuner->isUsable()) {
         error_message = "rocMLIR autotune could not reach a HIP device; set "
-                        "HIP_ROCMLIR_SKIP_BENCHMARKING=1 to compile with the "
+                        "HIP_ROCMLIR_SKIP_BENCHMARKING=1 or "
+                        "HIPDNN_EP_ROCMLIR_AUTOTUNE=0 to compile with the "
                         "default perfConfig";
         return false;
       }

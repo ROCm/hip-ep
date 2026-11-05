@@ -491,16 +491,18 @@ int main(int argc, char **argv) {
   bool embedOk =
       mlir::hip::compileAndEmbedRocMlirKernels(*module, embedOpts).succeeded();
   // Whether or not the embed succeeded: the pool and benchmark figures explain
-  // where a slow or failed compile spent its time.
+  // where a slow or failed compile spent its time. The LUT is written only
+  // after a successful embed, so a failed compile does not replace a good table
+  // with a partial one.
   if (autotuner) {
     compilePhaseTimes.perfConfigCompileMs +=
         autotuner->phaseTimes().perfConfigCompileMs;
     compilePhaseTimes.benchmarkMs += autotuner->phaseTimes().benchmarkMs;
-    if (!autotune.problemCacheDumpPath.empty() &&
-        !autotuner->dumpProblemCache(autotune.problemCacheDumpPath))
-      return 1;
   }
   if (!embedOk)
+    return 1;
+  if (autotuner && !autotune.problemCacheDumpPath.empty() &&
+      !autotuner->dumpProblemCache(autotune.problemCacheDumpPath))
     return 1;
 
   // Stage 4: run the standard ONNX-to-HIP tail (shape inference, constant

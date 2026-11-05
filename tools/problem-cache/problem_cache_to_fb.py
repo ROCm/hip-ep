@@ -17,7 +17,8 @@ and ``fallbacks``. ``flatc --binary --strict-json`` turns it into a ``.fb``.
 
 ``--flatbuffer`` merges by problem string. A problem already in the table keeps
 its place and takes the incoming perfConfig. New problems are appended. Configs
-are de-duplicated again after the merge.
+are de-duplicated again after the merge. The two tables must name the same
+``gpu_arch``; a different architecture is refused.
 """
 
 from __future__ import annotations
@@ -177,10 +178,14 @@ def run_flatc(flatc: str, args: list[str]) -> None:
 def decode_flatbuffer(flatc: str, path: Path) -> dict:
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
+        # --defaults-json keeps schema_version and the distance weights. flatc
+        # otherwise omits fields that equal their schema default, and the
+        # loader then treats a version-1 table as unsupported.
         run_flatc(
             flatc,
             [
                 "--json",
+                "--defaults-json",
                 "--raw-binary",
                 "--strict-json",
                 "-o",
@@ -252,6 +257,13 @@ def main(argv: list[str] | None = None) -> int:
         if not args.flatbuffer.is_file():
             raise SystemExit(f"flatbuffer not found: {args.flatbuffer}")
         existing = decode_flatbuffer(flatc, args.flatbuffer)
+        existing_arch = str(existing.get("gpu_arch") or "")
+        incoming_arch = str(incoming.get("gpu_arch") or "")
+        if existing_arch != incoming_arch:
+            raise SystemExit(
+                f"refusing to merge gpu_arch {incoming_arch!r} into "
+                f"{existing_arch!r}"
+            )
         header = existing
         rows, added, replaced = merge_rows(points_of(existing), rows)
     else:
