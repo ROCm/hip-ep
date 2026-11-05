@@ -4,6 +4,7 @@
  */
 
 #include "HipToLLVMUtils.h"
+#include "hip/Dialect/Transforms/BufferUtils.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -658,32 +659,6 @@ static FailureOr<int64_t> tryElemSizeBytes(Type elemTy) {
   return static_cast<int64_t>(bits / 8);
 }
 
-/// Whether `strides` store `shape` as one unbroken run of elements, so a copy
-/// of the whole memref is a single flat transfer.
-///
-/// A dimension of extent 1 is skipped rather than checked: it spans no
-/// distance, so whatever stride it carries cannot put a hole between elements.
-/// That is what makes a one-element window into a larger buffer
-/// (`memref<1xf32, strided<[8], offset: 4>>`, the shape a Split of a row
-/// bufferizes to) a flat copy even though its stride is not 1.
-static bool isCopyContiguousElems(ArrayRef<int64_t> shape,
-                                  ArrayRef<int64_t> strides) {
-  if (shape.size() != strides.size())
-    return false;
-  int64_t expected = 1;
-  for (int i = static_cast<int>(shape.size()) - 1; i >= 0; --i) {
-    int64_t extent = shape[static_cast<unsigned>(i)];
-    if (ShapedType::isDynamic(extent))
-      return false;
-    if (extent == 1)
-      continue;
-    if (strides[static_cast<unsigned>(i)] != expected)
-      return false;
-    expected *= extent;
-  }
-  return true;
-}
-
 /// Lowers memref.copy on GPU memrefs to wrap_hipMemcpyAsync /
 /// wrap_hipMemcpy2DAsync when strides are statically known, plus the flat case
 /// where both sides are identity-layout but their extents are dynamic.
@@ -781,8 +756,7 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
     // and a differing stride on a dimension of extent 1 moves nothing.
     // Leaving such a copy to the default MemRef->LLVM lowering would emit host
     // loads and stores, which fault on these device pointers.
-    if (isCopyContiguousElems(shape, srcStrides) &&
-        isCopyContiguousElems(shape, dstStrides)) {
+    if (hasFlatRuntimeCopyLowering(srcTy, dstTy)) {
       int64_t numElems = 1;
       for (int64_t d : shape)
         numElems *= d;
@@ -942,6 +916,18 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
 };
 
 } // namespace
+
+bool hasFlatRuntimeCopyLowering(MemRefType source, MemRefType target) {
+  if (!source || !target || source.getShape() != target.getShape() ||
+      failed(tryElemSizeBytes(source.getElementType())))
+    return false;
+  auto sourceStrides = tryStaticStridesElems(source);
+  auto targetStrides = tryStaticStridesElems(target);
+  if (failed(sourceStrides) || failed(targetStrides))
+    return source.getLayout().isIdentity() && target.getLayout().isIdentity();
+  return isContiguousRowMajor(source.getShape(), *sourceStrides) &&
+         isContiguousRowMajor(target.getShape(), *targetStrides);
+}
 
 void populateMemoryLoweringPatterns(const LLVMTypeConverter &converter,
                                     RewritePatternSet &patterns) {
