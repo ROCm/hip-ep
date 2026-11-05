@@ -105,7 +105,7 @@ ctest --test-dir ../build/hip-ep -R "^E2E_" --verbose
 ## Performance Testing
 
 Use `onnxruntime_perf_test` to benchmark inference latency. The examples below
-compare MorphiZen EP (AMD GPU via HIP) against DML EP.
+compare the hipgpu EP (AMD GPU via HIP) against DML EP.
 
 ### Setup
 
@@ -121,12 +121,12 @@ export PATH="$THEROCK_DIST/bin:$PATH"
 cd $PREBUILT_DIR/bin
 ```
 
-### MorphiZen EP
+### hipgpu EP
 
 ```bash
 ./onnxruntime_perf_test.exe \
-  --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" \
-  --plugin_eps "MorphiZenExecutionProvider" \
+  --plugin_ep_libs "hipgpu|hipgpu.dll" \
+  --plugin_eps "hipgpu" \
   --plugin_ep_options "config_file|morphizen_config.json" \
   -t 60 -c 1 -s -I \
   /path/to/models/full_model_seq1.onnx
