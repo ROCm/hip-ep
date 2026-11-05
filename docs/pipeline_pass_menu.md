@@ -120,9 +120,9 @@ shipped rocMLIR LUT embedded from `tools/problem-cache/lut/<gpu_arch>.fb`
 `tools/problem-cache/problem_cache_to_fb.py` compiles it with
 `flatc --binary --strict-json`). Only a table whose `gpu_arch` matches the
 device is used. `--problem-cache <file.fb>` (or `HIP_ROCMLIR_PROBLEM_CACHE`)
-is a second table, checked after the shipped one. Both are checked before the
-in-process winner cache, and that cache is checked before the quick, full, or
-exhaustive tuning space. The file is the same kind of artifact as the
+replaces that table: the shipped LUT is not consulted, and a miss in the
+external file falls through to the in-process winner cache. That cache is
+checked before the quick, full, or exhaustive tuning space. The file is the same kind of artifact as the
 MatMulNBits and GQA LUTs: a JSON document (`schema_version`, `gpu_arch`,
 `kernel_abi`, `weight_m/n/k`, `configs`, `points`, `fallbacks`).
 An identical problem string is compiled as stored. A miss takes the nearest

@@ -7,7 +7,8 @@
 // review, compiled with `flatc --binary --strict-json` to a `.fb`.
 // `tools/problem-cache/lut/<gpu_arch>.fb` is embedded in LibHipCompiler, so
 // hip-rocmlir-compiler and the ONNX Runtime provider both check it before the
-// in-process winner cache and the tuning space. A lookup
+// in-process winner cache and the tuning space. An external problem cache
+// replaces this table. A lookup
 // matches the categorical fields of the rocMLIR problem string exactly, then
 // takes the nearest measured point of the same kernel kind. Distance 0 is an
 // exact hit, not a separate tier.
