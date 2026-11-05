@@ -35,6 +35,7 @@ unsupported op runs on the GPU.
 | `RYZENAICORELIB_KERNEL_BUNDLE` = `<model>` | Environment, run time | Enables the kernel bundle linked into that CoreLib model library (e.g. `qwen3` from `ryzenai_corelib_model_qwen3.dll`) |
 | `RYZENAI_CORELIB_KERNELS_ROOT` | Environment, run time (read by CoreLib) | NPU kernel store. With neither a store nor a bundle every call goes to the GPU |
 | `RYZENAI_CORELIB_DISABLE_GPU` = `1` | Environment, run time (read by CoreLib) | Keeps CoreLib from loading HIP for its own GPU tier. hip-ep never lets CoreLib dispatch to its GPU or CPU paths; this also avoids the HIP load |
+| `RYZENAICORELIB_REPORT` = `1` | Environment, run time | At session end, prints per op and shape the instances and the calls that ran on the NPU or the GPU, with why the GPU ones did (see "Report" below) |
 | `HIPDNN_EP_STRICT` = `1` | Environment, run time | A routed call the NPU refuses at a shape a kernel was listed for fails inference with `HIPDNN_EP_ERR_CORELIB_OFF_NPU` instead of running on the GPU. Shapes with no listed kernel still run on the GPU |
 
 Both artifact formats are supported: `LLVM_IR` resolves the wrappers from the
@@ -241,6 +242,28 @@ device tensor is undefined until written.
 
 The last session to close calls `ryzenai_corelib_cleanup`, which CoreLib
 requires before process exit.
+
+### Report
+
+A shape with no kernel logs `[corelib] no ... kernel for ...` once. With
+`RYZENAICORELIB_REPORT=1`, the session's end also prints a table showing, for
+any model, what ran where:
+
+```text
+[corelib] report: NPU stream: prefill PDIs 1,9, decode PDIs 16,19, ...
+[corelib]   op            shape                                   inst NPU calls GPU calls  GPU because
+[corelib]   MatMulNBits   K=4096 N=1024 block=128                   64     12800         0
+[corelib]   MatMulNBits   K=4096 N=14336 block=128                  64         0     12800  no kernel at this shape on the stream's PDIs (12800)
+[corelib]   SkipRmsNorm   k=4096                                    64     12800         0
+[corelib]   total: 450 op instances, 386 of them ran on the NPU at least once; ...
+```
+
+`inst` counts distinct weights (op instances) of that shape. A reason names
+what kept a call off the NPU: the weights' format (bits, `g_idx`, block size or
+K, zero point or scale type), no kernel at the shape or width, no kernel at the
+call's row count (with the largest shipped), the NPU refusing a row count, or
+no NPU stream at all. Ops hip-ep does not route to CoreLib (attention, RoPE,
+elementwise) are not listed: they always run on the GPU.
 
 ## Testing
 
