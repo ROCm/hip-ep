@@ -185,9 +185,11 @@ int wrap_elementwise(RuntimeState *state, int op_state_slot, void *lhs,
                     "zero-filling output as a safe default\n");
     hipStream_t stream =
         static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
-    size_t elem_size = (data_type == HIPDNN_EP_DATATYPE_HALF) ? 2 : 4;
-    size_t bytes =
-        static_cast<size_t>(out_n) * out_c * out_h * out_w * elem_size;
+    int64_t elem_size = hipdnn_ep_datatype_size(data_type);
+    if (elem_size <= 0)
+      return -1;
+    size_t bytes = static_cast<size_t>(out_n) * out_c * out_h * out_w *
+                   static_cast<size_t>(elem_size);
     hipError_t err = hipMemsetAsync(output, 0, bytes, stream);
     if (err != hipSuccess)
       return -1;
