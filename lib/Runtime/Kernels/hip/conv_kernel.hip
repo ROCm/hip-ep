@@ -704,7 +704,8 @@ __device__ __forceinline__ half16 loadWmmaFrag(const _Float16 *row, int pair) {
 // whose output is too small to cover the device -- few channels times a small
 // feature map -- but whose contraction is long, where the unsplit grid leaves
 // most CUs idle for the whole of a long K loop.
-template <int BM, int BN, int WM, int WN, bool VEC, bool SPLITK = false>
+template <int BM, int BN, int WM, int WN, bool VEC, bool SPLITK = false,
+          bool PREFETCH = true>
 __global__ __launch_bounds__((BM / (WM * kWmma)) * (BN / (WN * kWmma)) * 32)
 void conv_wmma_kernel(const __half *__restrict__ x,
                       const __half *__restrict__ w,
@@ -828,24 +829,25 @@ void conv_wmma_kernel(const __half *__restrict__ x,
 #pragma unroll
     for (int j = 0; j < WN; ++j) acc[i][j] = (float8)0.0f;
 
-  int cur = 0;
-  if (tid < kWmma) ks[0][tid] = makeKSlice(pr, kLo + tid);
-  __syncthreads();
-
-  for (int64_t kBase = kLo; kBase < kHi; kBase += kWmma) {
+  // One K step's filter and im2col slices, read into registers -- bounds and
+  // padding already applied -- a step ahead of the LDS store that consumes
+  // them, so their global latency overlaps the previous step's WMMAs rather
+  // than stalling the store right before the barrier.
+  constexpr int kRegsB = VEC ? kItemsB * kVecB : kLoadsB;
+  _Float16 aNext[kVecA];
+  _Float16 bNext[kRegsB];
+  const auto loadStep = [&](int64_t kBase, int c) {
     const int64_t wBase = wRowBase + kBase + kOffA;
     const int64_t kRem = pr.K - kBase - kOffA;
 #pragma unroll
     for (int i = 0; i < kVecA; ++i)
-      As[rowA][kOffA + i] =
-          (rowValidA && i < kRem) ? static_cast<_Float16>(w[wBase + i])
-                                  : static_cast<_Float16>(0.0f);
-
+      aNext[i] = (rowValidA && i < kRem) ? static_cast<_Float16>(w[wBase + i])
+                                         : static_cast<_Float16>(0.0f);
     if (VEC) {
 #pragma unroll
       for (int l = 0; l < kItemsB; ++l) {
         const int kk = kkVec + l * kStepKK;
-        const KSlice s = ks[cur][kk];
+        const KSlice s = ks[c][kk];
         // The two runs share the slice, so both bounds tests reduce to an outer
         // predicate plus the innermost coordinate of the run's first column.
         bool outerA, outerB;
@@ -872,7 +874,7 @@ void conv_wmma_kernel(const __half *__restrict__ x,
           const int32_t xi = useA ? xiA + i : xiB + (i - splitB);
           const bool ok = i < nValid && (useA ? outerA : outerB) && xi >= 0 &&
                           xi < pr.innerIni;
-          Bs[bsRow(cgB * kVecB + i) + kk] =
+          bNext[l * kVecB + i] =
               ok ? (useA ? v1[i] : v2[i]) : static_cast<_Float16>(0.0f);
         }
       }
@@ -880,13 +882,47 @@ void conv_wmma_kernel(const __half *__restrict__ x,
 #pragma unroll
       for (int l = 0; l < kLoadsB; ++l) {
         const int kk = kkB + l * kStepB;
-        Bs[bsRow(colB) + kk] =
-            colValid ? static_cast<_Float16>(
-                           gatherSplit<__half>(xChan, pr, org, ks[cur][kk]))
-                     : static_cast<_Float16>(0.0f);
+        bNext[l] = colValid ? static_cast<_Float16>(gatherSplit<__half>(
+                                  xChan, pr, org, ks[c][kk]))
+                            : static_cast<_Float16>(0.0f);
       }
     }
+  };
+  const auto storeStep = [&]() {
+#pragma unroll
+    for (int i = 0; i < kVecA; ++i) As[rowA][kOffA + i] = aNext[i];
+    if (VEC) {
+#pragma unroll
+      for (int l = 0; l < kItemsB; ++l)
+#pragma unroll
+        for (int i = 0; i < kVecB; ++i)
+          Bs[bsRow(cgB * kVecB + i) + kkVec + l * kStepKK] =
+              bNext[l * kVecB + i];
+    } else {
+#pragma unroll
+      for (int l = 0; l < kLoadsB; ++l)
+        Bs[bsRow(colB) + kkB + l * kStepB] = bNext[l];
+    }
+  };
+
+  int cur = 0;
+  if (tid < kWmma) ks[0][tid] = makeKSlice(pr, kLo + tid);
+  __syncthreads();
+  if constexpr (PREFETCH)
+    loadStep(kLo, 0);
+
+  for (int64_t kBase = kLo; kBase < kHi; kBase += kWmma) {
+    if constexpr (!PREFETCH)
+      loadStep(kBase, cur);
+    // The previous step's fragment reads finished at its closing barrier.
+    storeStep();
+    // The next step's slice offsets, needed by its loads below. Their last
+    // readers were the loads two steps back, a barrier ago.
+    if (tid < kWmma) ks[cur ^ 1][tid] = makeKSlice(pr, kBase + kWmma + tid);
     __syncthreads();
+    if constexpr (PREFETCH)
+      if (kBase + kWmma < kHi)
+        loadStep(kBase + kWmma, cur ^ 1);
 
     half16 aFrag[WM], bFrag[WN];
 #pragma unroll
@@ -902,7 +938,6 @@ void conv_wmma_kernel(const __half *__restrict__ x,
 #pragma unroll
       for (int j = 0; j < WN; ++j)
         acc[i][j] = HIPDNN_WMMA_F32_16X16X16_F16(aFrag[i], bFrag[j], acc[i][j]);
-    if (tid < kWmma) ks[cur ^ 1][tid] = makeKSlice(pr, kBase + kWmma + tid);
     __syncthreads();
     cur ^= 1;
   }
@@ -1410,7 +1445,7 @@ static void launchTile(hipStream_t stream, const void *x, const void *w,
                      static_cast<const T *>(bias), static_cast<T *>(y), pr);
 }
 
-template <int BM, int BN, int WM, int WN>
+template <int BM, int BN, int WM, int WN, bool PREFETCH = true>
 static void launchWmma(hipStream_t stream, const void *x, const void *w,
                        const void *bias, void *y, const ConvParams &base) {
   constexpr int threads = (BM / (WM * kWmma)) * (BN / (WN * kWmma)) * 32;
@@ -1424,7 +1459,7 @@ static void launchWmma(hipStream_t stream, const void *x, const void *w,
       (BN % 8 == 0) && (((BN / 8) * kWmma) % threads == 0);
   if constexpr (kVecEligible) {
     if (pr.innerVec) {
-      hipLaunchKernelGGL((conv_wmma_kernel<BM, BN, WM, WN, true>), grid,
+      hipLaunchKernelGGL((conv_wmma_kernel<BM, BN, WM, WN, true, false, PREFETCH>), grid,
                          dim3(threads), 0, stream,
                          static_cast<const __half *>(x),
                          static_cast<const __half *>(w),
@@ -1433,7 +1468,7 @@ static void launchWmma(hipStream_t stream, const void *x, const void *w,
       return;
     }
   }
-  hipLaunchKernelGGL((conv_wmma_kernel<BM, BN, WM, WN, false>), grid,
+  hipLaunchKernelGGL((conv_wmma_kernel<BM, BN, WM, WN, false, false, PREFETCH>), grid,
                      dim3(threads), 0, stream, static_cast<const __half *>(x),
                      static_cast<const __half *>(w),
                      static_cast<const __half *>(bias),
@@ -1657,7 +1692,11 @@ bool launchWmmaIfProfitable<__half>(hipStream_t stream, const void *x,
   // reduction is long enough that hiding the filter loads is what matters, and
   // the lost occupancy dominates (whisper_l1 loses 33%).
   if (pr.MPerGroup <= 512 && tileFits(pr, 128, 256, cus)) {
-    launchWmma<128, 256, 4, 4>(stream, x, w, bias, y, pr);
+    // Without the register prefetch: this tile already holds the most
+    // registers of any, the shapes it takes have short contractions, and the
+    // prefetched im2col slice measured slower here (0.85x on a 320-channel
+    // 64x64 1x1) where every other tile gained.
+    launchWmma<128, 256, 4, 4, false>(stream, x, w, bias, y, pr);
     return true;
   }
   // A taller row tile, for the shapes with many output channels. What this buys
