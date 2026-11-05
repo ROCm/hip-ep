@@ -44,7 +44,7 @@ func.func @qconv_wins_on_benefit(%ctx: !hip.context,
       ins(%w, %w_scale : tensor<4x8x1x1xi8>, tensor<4xf32>)
       zero_point(%w_zp : tensor<4xi8>)
       outs(%e1 : tensor<4x8x1x1xf32>)
-      {axis = 0 : i64, block_size = 0 : i64, packed_int4} : tensor<4x8x1x1xf32>
+      {axis = 0 : i64, block_size = 0 : i64, packed_bits = 4 : i64} : tensor<4x8x1x1xf32>
 
   %e2 = tensor.empty() : tensor<1x4x1x1xf32>
   %conv = hip.conv(%ctx)

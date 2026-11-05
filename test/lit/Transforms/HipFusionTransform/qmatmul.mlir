@@ -86,7 +86,7 @@ func.func @qmatmul_w4_per_column(%ctx: !hip.context,
       ins(%w, %w_scale : tensor<8x6xi8>, tensor<6xf32>)
       zero_point(%w_zp : tensor<6xi8>)
       outs(%e1 : tensor<8x6xf32>)
-      {axis = 1 : i64, block_size = 0 : i64, packed_int4} : tensor<8x6xf32>
+      {axis = 1 : i64, block_size = 0 : i64, packed_bits = 4 : i64} : tensor<8x6xf32>
 
   %e2 = tensor.empty() : tensor<4x6xf32>
   %prod = hip.matmul(%ctx)

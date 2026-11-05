@@ -57,7 +57,7 @@ enum class PackedInt4Result {
 /// ONNX INT4/UINT4 is imported as i8/ui8 at the logical element count, but its
 /// buffer holds only ceil(numel/2) packed bytes; a consumer trusting the i8
 /// element type over-reads. The halved byte size is the only surviving signal,
-/// so stamp `packed_int4` here (where the backing size is known) to make the
+/// so stamp `packed_bits` here (where the backing size is known) to make the
 /// lowering nibble-unpack. `packedBytes` is that true backing byte count.
 ///
 /// The marker is scoped to DequantizeLinear rather than every user because the
@@ -99,7 +99,9 @@ markPackedInt4Consumers(mlir::Operation *constOp,
       if (auto fn = user->getAttrOfType<mlir::StringAttr>("function_name"))
         isDq = fn.getValue() == "DequantizeLinear";
     if (isDq)
-      user->setAttr("packed_int4", builder.getUnitAttr());
+      // ONNX has no sub-byte type narrower than INT4/UINT4, so 4 is the only
+      // width this path can observe; hip.dequantize_linear admits others.
+      user->setAttr(kPackedBitsAttr, builder.getI64IntegerAttr(4));
   }
   return PackedInt4Result::Packed;
 }

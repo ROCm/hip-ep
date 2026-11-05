@@ -11,7 +11,7 @@
 //      (size == ceil(numel/2)) for an 8-bit result -- the verifier otherwise
 //      rejects "size does not match result byte size" and int4 models never
 //      compile.
-//   2. lowerOnnxConstants stamps `packed_int4` on the consuming DequantizeLinear
+//   2. lowerOnnxConstants stamps `packed_bits` on the consuming DequantizeLinear
 //      so downstream lowering nibble-unpacks instead of over-reading the packed
 //      buffer as full-width i8.
 //
@@ -67,15 +67,16 @@ module {
 // CHECK: hip.constant
 // CHECK-SAME: size = 4 : i64
 
-// Its DequantizeLinear carries packed_int4; the real int8 one does not. Custom
-// Microsoft QDQ is canonicalized before ordinary ONNX-to-HIP lowering.
+// Its DequantizeLinear carries packed_bits = 4; the real int8 one does not.
+// Custom Microsoft QDQ is canonicalized before ordinary ONNX-to-HIP lowering,
+// so the marker lands on the hip op rather than on a surviving onnx.Custom.
 // CHECK: hip.dequantize_linear
-// CHECK-SAME: packed_int4
+// CHECK-SAME: packed_bits = 4
 
 // CHECK: hip.dequantize_linear
-// CHECK-NOT: packed_int4
+// CHECK-NOT: packed_bits = 4
 
 // The odd-count (7-element, size 4 = ceil(7/2)) packed weight is also accepted
 // and marked -- odd logical counts pack their last nibble into a padded byte.
 // CHECK: hip.dequantize_linear
-// CHECK-SAME: packed_int4
+// CHECK-SAME: packed_bits = 4
