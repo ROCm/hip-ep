@@ -10,9 +10,7 @@ the output extent (k) statically -- the runtime still reads k from the K
 buffer at run time (real/top_k.cpp does a D2H copy of k), so the GPU kernel is
 exercised. `largest` and `sorted` are both covered.
 
-Inputs use DISTINCT per-row values (no ties), so the selected set and its
-sorted order -- and therefore the returned indices -- are unambiguous and can
-be compared bit-exact against the ORT CPU reference (atol=0).
+Outputs are compared bit-exact against the ORT CPU reference (atol=0).
 """
 
 from __future__ import annotations
@@ -25,13 +23,18 @@ from framework.comparator import compare_outputs
 from framework.onnx_utils import make_model_from_nodes, np_to_onnx_type
 
 
-def _make_topk_model(x_shape: list[int], k: int, axis: int, largest: int, sorted_: int):
+def _make_topk_model(
+    x_shape: list[int],
+    k: int,
+    axis: int,
+    largest: int,
+    sorted_: int,
+    dtype=np.float32,
+):
     out_shape = list(x_shape)
     out_shape[axis] = k
-    X = helper.make_tensor_value_info("x", np_to_onnx_type(np.float32), list(x_shape))
-    values = helper.make_tensor_value_info(
-        "values", np_to_onnx_type(np.float32), out_shape
-    )
+    X = helper.make_tensor_value_info("x", np_to_onnx_type(dtype), list(x_shape))
+    values = helper.make_tensor_value_info("values", np_to_onnx_type(dtype), out_shape)
     indices = helper.make_tensor_value_info(
         "indices", np_to_onnx_type(np.int64), out_shape
     )
@@ -95,5 +98,37 @@ class TestTopK:
         model = _make_topk_model(x_shape, k, axis=1, largest=1, sorted_=1)
         rng = np.random.default_rng(602)
         x = _distinct_rows(rng, x_shape[0], x_shape[1])
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0)
+
+    @pytest.mark.parametrize("largest", [1, 0])
+    @pytest.mark.parametrize(
+        "axis_size,k",
+        [
+            pytest.param(300, 257, id="partial-k257"),
+            pytest.param(257, 257, id="full-axis"),
+        ],
+    )
+    def test_topk_host_non_last_axis_with_ties(
+        self, model_runner, axis_size, k, largest
+    ):
+        model = _make_topk_model([axis_size, 3], k, axis=0, largest=largest, sorted_=1)
+        tied = (np.arange(axis_size, dtype=np.float32) // 2).astype(np.float32)
+        x = np.stack((tied, np.roll(tied, 7), -tied), axis=1)
+
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0)
+
+    def test_topk_host_f64_preserves_comparison_precision(self, model_runner):
+        x = np.concatenate(
+            (
+                np.array([1.0, 1.0 + 2.0**-30], dtype=np.float64),
+                np.full(256, 2.0, dtype=np.float64),
+            )
+        )
+        model = _make_topk_model(
+            [x.size], 257, axis=0, largest=1, sorted_=1, dtype=np.float64
+        )
+
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=0)
