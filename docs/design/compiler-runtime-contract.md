@@ -81,8 +81,8 @@ alone when `HIP_ROCMLIR_SKIP_BENCHMARKING` compiled the default perfConfig
 `tools/problem-cache/lut/*.fb` bytes embedded in that build. It is omitted
 when benchmarking is skipped, because that path does not consult the table.
 `hip-rocmlir-compiler` and the ONNX Runtime provider both read that variable:
-unset or `0` benchmarks, and any other value skips the search. Autotune
-otherwise runs for a rocMLIR session. Unset `HIPDNN_EP_ROCMLIR_AUTOTUNE`
+unset or `0` benchmarks. A present empty value skips, and so does any other
+value. Autotune otherwise runs for a rocMLIR session. Unset `HIPDNN_EP_ROCMLIR_AUTOTUNE`
 selects `quick`. `quick`, `full`, and `exhaustive` are the only accepted
 values; anything else warns and stays on quick. Before
 benchmarking, the provider applies the shipped

@@ -97,11 +97,16 @@ bool parseAutotuneSpace(StringRef name, AutotuneSpace &out) {
 }
 
 bool rocMlirSkipBenchmarking() {
-  // hip_get_env, not std::getenv: the provider reads this from inside the
-  // static-CRT EP DLL. Unset or "0" benchmarks. Any other value skips, the
-  // same rule hip-rocmlir-compiler already used.
-  std::string value = hip_get_env("HIP_ROCMLIR_SKIP_BENCHMARKING");
-  return !value.empty() && value != "0";
+  // Unset benchmarks. "0" benchmarks. A present empty string skips, and so
+  // does any other value: that is what `env && strcmp(env, "0") != 0` did in
+  // the tool. hip_get_env returns "" for both unset and empty, so it would
+  // turn an explicit empty value back into benchmarking. hip_env_lookup keeps
+  // presence, via GetEnvironmentVariableA on Windows, where the static-CRT EP
+  // DLL cannot see the host CRT environment.
+  std::string value;
+  if (!hip_env_lookup("HIP_ROCMLIR_SKIP_BENCHMARKING", value))
+    return false;
+  return value != "0";
 }
 
 bool rocMlirAutotuneFromEnv(AutotuneSpace &out) {
