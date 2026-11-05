@@ -214,12 +214,6 @@ int main(int argc, char **argv) {
   }
   if (mlir::hip::rocMlirSkipBenchmarking())
     autotuneEnabled = false;
-  if (!autotune.problemCachePath.empty() && !autotuneEnabled)
-    llvm::errs() << "warning: problem cache ignored because autotune is off\n";
-  if (!autotune.problemCacheDumpPath.empty() && !autotuneEnabled) {
-    llvm::errs() << "error: --dump-problem-cache requires autotune\n";
-    return 1;
-  }
 #if !HIP_ROCMLIR_AUTOTUNE
   if ((autotuneFlagSeen && autotuneEnabled) ||
       !autotune.problemCacheDumpPath.empty()) {
@@ -228,6 +222,15 @@ int main(int argc, char **argv) {
   }
   autotuneEnabled = false;
 #endif
+  // After the stub override. A HIP_ROCMLIR_AUTOTUNE=0 build leaves
+  // autotuneEnabled true until that block, and --problem-cache without
+  // --autotune would otherwise be ignored with no warning.
+  if (!autotune.problemCachePath.empty() && !autotuneEnabled)
+    llvm::errs() << "warning: problem cache ignored because autotune is off\n";
+  if (!autotune.problemCacheDumpPath.empty() && !autotuneEnabled) {
+    llvm::errs() << "error: --dump-problem-cache requires autotune\n";
+    return 1;
+  }
   if (inputFilename.empty() || outputPath.empty()) {
     llvm::errs()
         << "Usage: " << argv[0]
