@@ -644,6 +644,9 @@ OrtStatus *IRConverterImp::convert_graph_nodes(morphizen::Graph &graph) const {
     }
 
     morphizen::NodeAttributesBuilder attrs_builder;
+    // GRAPH attributes are also exposed by Node_GetSubgraphs. Track names
+    // already imported so a body is attached once.
+    std::unordered_set<std::string> graph_attr_names;
 
     std::vector<const OrtOpAttr *> api_node_attributes;
     size_t num_of_attributes = 0;
@@ -694,6 +697,7 @@ OrtStatus *IRConverterImp::convert_graph_nodes(morphizen::Graph &graph) const {
         break;
       }
       case OrtOpAttrType::ORT_OP_ATTR_GRAPH: {
+        graph_attr_names.insert(attr_name);
         attrs_builder.add(attr_name,
                           make_subgraph_attribute(graph, *node, attr_name));
         break;
@@ -735,6 +739,20 @@ OrtStatus *IRConverterImp::convert_graph_nodes(morphizen::Graph &graph) const {
             "Unsupported attribute type encountered during conversion");
       }
       }
+    }
+
+    // Node_GetAttributes does not always surface subgraph attributes.
+    // Loop / If / Scan bodies are available from Node_GetSubgraphs, which
+    // is the API ORT documents for reading them. Without this, onnx.Loop
+    // is emitted with zero regions and onnx-loop-outline rejects it.
+    auto subgraphs = Ort::ConstNode(node).GetSubgraphs();
+    for (const auto &sub : subgraphs) {
+      if (!graph_attr_names.insert(sub.attr_name).second)
+        continue;
+      MY_LOG(3) << "Importing subgraph attribute " << sub.attr_name
+                << " from Node_GetSubgraphs";
+      attrs_builder.add(sub.attr_name,
+                        make_subgraph_attribute(graph, *node, sub.attr_name));
     }
 
     auto node_attributes = attrs_builder.build();
