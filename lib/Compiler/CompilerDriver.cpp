@@ -50,6 +50,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <memory>
 #include <sstream>
@@ -88,6 +89,44 @@ OnnxDialectKind onnxDialectKind() {
 }
 } // namespace
 
+namespace {
+// FNV-1a over the shipped LUT bytes. The model cache key is the graph, so two
+// compiles that pick different perfConfigs must not share an artifact. The
+// provider consults only the embedded tools/problem-cache/lut/*.fb; hashing
+// those bytes makes a changed table fail the recorded/current check the same
+// way a changed autotune space does. hip-rocmlir-compiler's --problem-cache
+// is not part of this string: the provider never reads it.
+#if defined(ENABLE_ROCMLIRTRITON) && defined(HIPDNN_EP_LINK_HIP_HOST) &&       \
+    defined(HIPDNN_HIP_RUNTIME_LIB)
+extern "C" const unsigned char *const kRocmlirProblemCacheBlobs[];
+extern "C" const size_t kRocmlirProblemCacheBlobSizes[];
+extern "C" const size_t kRocmlirProblemCacheBlobCount;
+
+std::string shippedProblemCacheFingerprint() {
+  uint64_t hash = 14695981039346656037ull;
+  for (size_t blob = 0; blob < kRocmlirProblemCacheBlobCount; ++blob) {
+    const unsigned char *bytes = kRocmlirProblemCacheBlobs[blob];
+    const size_t size = kRocmlirProblemCacheBlobSizes[blob];
+    if (!bytes || size == 0)
+      continue;
+    for (size_t i = 0; i < size; ++i) {
+      hash ^= bytes[i];
+      hash *= 1099511628211ull;
+    }
+  }
+  static constexpr char kHex[] = "0123456789abcdef";
+  std::string hex(16, '0');
+  for (int nibble = 15; nibble >= 0; --nibble) {
+    hex[static_cast<size_t>(nibble)] = kHex[hash & 0xfu];
+    hash >>= 4;
+  }
+  return hex;
+}
+#else
+std::string shippedProblemCacheFingerprint() { return {}; }
+#endif
+} // namespace
+
 std::string rocMlirArtifactTarget() {
 #ifdef ENABLE_ROCMLIRTRITON
   // Mirror the dispatch order in compileImpl: HIPDNN_EP_PIPELINE and
@@ -98,11 +137,18 @@ std::string rocMlirArtifactTarget() {
     std::string target = mlir::hip::resolveRocMlirArch();
     // Which perfConfig each kernel was tuned to is baked into the embedded
     // HSACO. Autotune runs unless HIP_ROCMLIR_SKIP_BENCHMARKING is set, so
-    // the target string records the space. An artifact built with the other
-    // setting must not be reused: the cache is keyed on the graph alone.
+    // the target string records the space and the shipped LUT that supplied
+    // tiles before the search. An artifact built with the other setting, or
+    // against other LUT bytes, must not be reused: the cache is keyed on the
+    // graph alone. Skip-benchmarking does not consult the LUT, so it has no
+    // +lut= suffix.
     mlir::hip::AutotuneSpace space;
-    if (!target.empty() && mlir::hip::rocMlirAutotuneFromEnv(space))
+    if (!target.empty() && mlir::hip::rocMlirAutotuneFromEnv(space)) {
       target += std::string("+autotune=") + mlir::hip::autotuneSpaceName(space);
+      const std::string lut = shippedProblemCacheFingerprint();
+      if (!lut.empty())
+        target += "+lut=" + lut;
+    }
     return target;
   }
 #endif
