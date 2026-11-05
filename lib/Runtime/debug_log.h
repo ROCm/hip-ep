@@ -31,6 +31,15 @@ inline bool hipdnn_ep_matmul_dp4a_enabled() {
   return enabled;
 }
 
+// One-row fp32 MatMul against a narrow B (an fp32 MoE router: N=256,
+// K=2048/3072) as one GEMV launch instead of hipBLASLt. Default on;
+// HIPDNN_EP_GEMV_F32=0 restores hipBLASLt for A/B isolation.
+inline bool hipdnn_ep_gemv_f32_enabled() {
+  static const bool enabled =
+      hipdnn_ep::env_enabled_default_on("HIPDNN_EP_GEMV_F32");
+  return enabled;
+}
+
 // Widest token burst wrap_qmoe serves by iterating the one-token fused kernel
 // (three launches per token, no host sync, one expert set read per token)
 // instead of the grouped path (one pass over the union of experts in padded

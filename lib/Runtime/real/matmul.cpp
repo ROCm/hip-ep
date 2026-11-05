@@ -498,6 +498,16 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
     OP_ROCTX_MARK("hip_ep.op.matmul.run.gemv");
     return hip_gemv_f16_kn(stream, A, B, output, K, N) == 0 ? 0 : -1;
   }
+  // The fp32 router (Laguna: N=256, K=2048/3072) on hipBLASLt takes 32-57 us
+  // a call against a 8-12 us read floor; the GEMV runs at 82-91% of it.
+  if (elem_size == 4 && M == 1 && batch_count == 1 && !transB && N > 0 &&
+      N <= 512 && K > 0 && K <= 8192 && N % 4 == 0 &&
+      reinterpret_cast<uintptr_t>(B) % 16 == 0 &&
+      hipdnn_ep_gemv_f32_enabled()) {
+    RUNTIME_DEBUG_LOG("[REAL] wrap_hipblasLtMatmul: GEMV f32 N=%lld K=%lld\n",
+                      (long long)N, (long long)K);
+    return hip_gemv_f32_kn(stream, A, B, output, K, N) == 0 ? 0 : -1;
+  }
 
   const char *type_name = (elem_size == 2) ? "f16" : "f32";
   RUNTIME_DEBUG_LOG("[REAL] wrap_hipblasLtMatmul: M=%lld, N=%lld, K=%lld, "
