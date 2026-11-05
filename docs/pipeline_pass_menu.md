@@ -101,8 +101,9 @@ Options use MLIR's pipeline-option syntax:
 quick space, compiles every applicable candidate, benchmarks them on the
 current HIP device, and embeds the fastest binary. The ONNX Runtime provider
 does the same whenever `HIPDNN_EP_ROCMLIR` is on. Both honor
-`HIP_ROCMLIR_SKIP_BENCHMARKING`: unset or `0` benchmarks, and any other value
-keeps rocMLIR's default perfConfig. Unset `HIPDNN_EP_ROCMLIR_AUTOTUNE`
+`HIP_ROCMLIR_SKIP_BENCHMARKING`: unset or `0` benchmarks. A present empty
+value skips, and so does any other value, keeping rocMLIR's default perfConfig.
+Unset `HIPDNN_EP_ROCMLIR_AUTOTUNE`
 selects quick. `quick`, `full`, and `exhaustive` are the only accepted
 values; anything else warns and stays on quick. Every search config in the
 model is compiled in one pool (default: one job per hardware thread;
@@ -149,8 +150,8 @@ in-process cache. A miss there runs the selected tuning space.
 `--dump-problem-cache <file.json>` writes that JSON after autotune, one
 point per unique problem and one config per distinct perfConfig. The flag
 requires autotune; `HIP_ROCMLIR_SKIP_BENCHMARKING` does not produce a dump.
-Set `HIP_ROCMLIR_SKIP_BENCHMARKING=1` (any value
-other than `0`) to skip the GPU search and affix the first enumerated
+Set `HIP_ROCMLIR_SKIP_BENCHMARKING=1` (any present value other than `0`,
+including empty) to skip the GPU search and affix the first enumerated
 perfConfig. The problem cache is not consulted in that mode. The log names the space (`quick`, `full`, or `exhaustive`) and the
 number of configs in each pool. At the end it prints three wall times:
 perfConfig compile (pool wait, summed across the two pools), serial GPU
