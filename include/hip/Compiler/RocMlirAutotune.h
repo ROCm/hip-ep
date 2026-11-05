@@ -158,10 +158,10 @@ private:
 bool rocMlirSkipBenchmarking();
 
 // Reads HIPDNN_EP_ROCMLIR_AUTOTUNE for the search space only. Unset or empty
-// selects quick. "quick", "full", and "exhaustive" select that space. "0",
-// "off", "false", and "no" opt out, as does rocMlirSkipBenchmarking(). Either
-// opt-out returns false and leaves \p out alone. An unrecognized value warns
-// and selects quick.
+// selects quick. "quick", "full", and "exhaustive" are the only accepted
+// values. Anything else warns and selects quick. Skipping the search is
+// rocMlirSkipBenchmarking(), not a value of this variable. Returns false,
+// leaving \p out alone, only when that skip flag is set.
 //
 // Env-only on purpose for now. The custom-kernel autotuners also accept a
 // provider option, but those are read in the Runtime, which already has the
