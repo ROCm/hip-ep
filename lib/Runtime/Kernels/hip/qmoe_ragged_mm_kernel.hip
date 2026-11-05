@@ -36,7 +36,7 @@ constexpr int kKTile = 32;
 constexpr int kThreadsPerBlock = 128;
 // HIP reports WGPs in multiProcessorCount on RDNA; each WGP contains two CUs.
 constexpr int kComputeUnitsPerWgp = 2;
-constexpr int kMaxTopK = 16;
+constexpr int kMaxTopK = 32;
 constexpr int kGemvTileN = 16;
 constexpr int64_t kTwoWindowMinRows = 512;
 
