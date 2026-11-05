@@ -756,15 +756,18 @@ inline constexpr llvm::StringLiteral kSelectedCountsAttr =
 void populateIndexerCountsFoldPatterns(RewritePatternSet &patterns,
                                        MLIRContext *ctx);
 
-/// Input slots DsaPrologueFold appends to a com.microsoft
+/// Input slots the pre-lowering folds append to a com.microsoft
 /// `DynamicSparseAttention` after its 17 ORT inputs (absent ones are None):
 /// the gate, then q_norm_weight, k_norm_weight, position_ids, cos_cache and
-/// sin_cache of a folded q/k norm + MRoPE prologue. The prologue also stamps
-/// the epsilon, section and layout attributes below.
+/// sin_cache of a folded q/k norm + MRoPE prologue (DsaPrologueFold, which
+/// also stamps the epsilon, section and layout attributes below), then the
+/// past_sequence_length of the indexer QsaPairFold paired it with.
 inline constexpr size_t kDsaGateIdx = 17;
 inline constexpr size_t kDsaPrologueIdx = 18;
 inline constexpr size_t kDsaPrologueInputs = 5;
-inline constexpr size_t kDsaMaxInputs = kDsaPrologueIdx + kDsaPrologueInputs;
+inline constexpr size_t kDsaPastSequenceLengthIdx =
+    kDsaPrologueIdx + kDsaPrologueInputs;
+inline constexpr size_t kDsaMaxInputs = kDsaPastSequenceLengthIdx + 1;
 inline constexpr llvm::StringLiteral kDsaNormEpsilonAttr =
     "hipdnn.dsa_norm_epsilon";
 inline constexpr llvm::StringLiteral kDsaMropeSectionAttr =
@@ -780,6 +783,18 @@ inline constexpr llvm::StringLiteral kDsaMropeLayoutAttr =
 /// See DsaPrologueFold.cpp.
 void populateDsaPrologueFoldPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
+
+/// Marker QsaPairFold stamps on a qsa `SparseAttentionIndexer` whose
+/// selection only paired `DynamicSparseAttention` ops read.
+inline constexpr llvm::StringLiteral kQsaPairAttr = "hipdnn.qsa_pair";
+
+/// Pre-lowering pattern set: pair a qsa `SparseAttentionIndexer` with the
+/// `DynamicSparseAttention` ops that consume its selection and counts, so the
+/// indexer skips the rows that select every position and the attention takes
+/// those rows' positions in order. Must run after IndexerCountsFold has given
+/// the indexer its counts result and BEFORE `convertComputeOps`. See
+/// QsaPairFold.cpp.
+void populateQsaPairFoldPatterns(RewritePatternSet &patterns, MLIRContext *ctx);
 
 /// Pre-lowering pattern set: collapse ORT's inlined `FastGelu` primitive
 /// chain (Pow / Mul / Sum / Tanh) back into a single

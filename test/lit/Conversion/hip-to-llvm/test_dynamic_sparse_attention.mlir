@@ -65,7 +65,8 @@ module {
     // CHECK: %[[ZERO:.*]] = llvm.mlir.constant(0 : i64) : i64
     // CHECK: %[[SCALE:.*]] = llvm.mlir.constant(6.250000e-02 : f32) : f32
     // CHECK: %[[EPS:.*]] = llvm.mlir.constant(0.000000e+00 : f32) : f32
-    // CHECK: llvm.call @wrap_dynamic_sparse_attention(%{{.*}}, %[[Q]], %[[KP]], %[[VP]], %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %[[GATE]], %[[QNW]], %[[KNW]], %[[POS]], %[[COS]], %[[SIN]], %{{.*}}, %{{.*}}, %{{.*}}, %[[B]], %[[S]], %[[N]], %[[KVN]], %[[D]], %[[CAP]], %[[K]], %[[PKB]], %[[PKH]], %[[PKD]], %[[PVB]], %[[PVH]], %[[PVC]], %[[PVD]], %[[OKC]], %[[OKD]], %[[OVC]], %[[OVD]], %[[IDXR]], %[[CNTR]], %[[SEQR]], %[[KB]], %[[KS]], %[[KW]], %[[VB]], %[[VS]], %[[VW]], %[[ZERO]], {{(%[0-9]+, ){15}%}}[[SCALE]], %[[EPS]]) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32) -> i32
+    // CHECK-NEXT: %[[NOPAIR:.*]] = llvm.mlir.zero : !llvm.ptr
+    // CHECK: llvm.call @wrap_dynamic_sparse_attention(%{{.*}}, %[[Q]], %[[KP]], %[[VP]], %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %[[GATE]], %[[QNW]], %[[KNW]], %[[POS]], %[[COS]], %[[SIN]], %{{.*}}, %{{.*}}, %{{.*}}, %[[B]], %[[S]], %[[N]], %[[KVN]], %[[D]], %[[CAP]], %[[K]], %[[PKB]], %[[PKH]], %[[PKD]], %[[PVB]], %[[PVH]], %[[PVC]], %[[PVD]], %[[OKC]], %[[OKD]], %[[OVC]], %[[OVD]], %[[IDXR]], %[[CNTR]], %[[SEQR]], %[[KB]], %[[KS]], %[[KW]], %[[VB]], %[[VS]], %[[VW]], %[[ZERO]], {{(%[0-9]+, ){15}%}}[[SCALE]], %[[EPS]], %[[NOPAIR]]) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32, !llvm.ptr) -> i32
     return
   }
 
@@ -116,7 +117,40 @@ module {
     // CHECK-NEXT: %[[LAYOUT:.*]] = llvm.mlir.constant(1 : i64) : i64
     // CHECK-NEXT: %[[SCALE:.*]] = llvm.mlir.constant(6.250000e-02 : f32) : f32
     // CHECK-NEXT: %[[EPS:.*]] = llvm.mlir.constant(9.99999997E-7 : f32) : f32
-    // CHECK-NEXT: llvm.call @wrap_dynamic_sparse_attention(%{{.*}}, %[[QKV]], %[[NOKEY]], %[[NOVALUE]], {{(%[0-9]+, ){18}%}}[[D]], {{(%[0-9]+, ){24}%}}[[GW]], %[[QNL]], %[[KNL]], %[[SECTIONS]], {{(%[0-9]+, ){6}%}}[[SECT]], %[[SECH]], %[[SECW]], %[[LAYOUT]], %[[SCALE]], %[[EPS]])
+    // CHECK-NEXT: %[[NOPAIR:.*]] = llvm.mlir.zero : !llvm.ptr
+    // CHECK-NEXT: llvm.call @wrap_dynamic_sparse_attention(%{{.*}}, %[[QKV]], %[[NOKEY]], %[[NOVALUE]], {{(%[0-9]+, ){18}%}}[[D]], {{(%[0-9]+, ){24}%}}[[GW]], %[[QNL]], %[[KNL]], %[[SECTIONS]], {{(%[0-9]+, ){6}%}}[[SECT]], %[[SECH]], %[[SECW]], %[[LAYOUT]], %[[SCALE]], %[[EPS]], %[[NOPAIR]])
+    return
+  }
+
+  // A paired op passes its indexer's past_sequence_length last.
+  func.func @dsa_paired(
+      %ctx: !hip.context,
+      %q: memref<?x?x6144xf16, 1>,
+      %k: memref<?x?x512xf16, 1>,
+      %v: memref<?x?x512xf16, 1>,
+      %past_k: memref<?x2x?x?xf16, 1>,
+      %past_v: memref<?x2x?x?xf16, 1>,
+      %idx: memref<?x2051xi32, 1>,
+      %cnt: memref<?xi32, 1>,
+      %seqlens: memref<?xi32, 1>,
+      %psl: memref<1xi32, 1>,
+      %out: memref<?x?x6144xf16, 1>,
+      %present_k: memref<?x2x?x?xf16, 1>,
+      %present_v: memref<?x2x?x?xf16, 1>) {
+    hip.dynamic_sparse_attention(%ctx) ins(%q : memref<?x?x6144xf16, 1>)
+        kv(%k, %v : memref<?x?x512xf16, 1>, memref<?x?x512xf16, 1>)
+        cache(%past_k, %past_v : memref<?x2x?x?xf16, 1>, memref<?x2x?x?xf16, 1>)
+        select(%idx, %cnt, %seqlens : memref<?x2051xi32, 1>, memref<?xi32, 1>,
+               memref<?xi32, 1>)
+        pair(%psl : memref<1xi32, 1>)
+        outs(%out, %present_k, %present_v : memref<?x?x6144xf16, 1>,
+             memref<?x2x?x?xf16, 1>, memref<?x2x?x?xf16, 1>)
+        {num_heads = 24 : i64, kv_num_heads = 2 : i64, scale = 6.250000e-02 : f32}
+    // CHECK-LABEL: llvm.func @dsa_paired
+    // CHECK: %[[EPS:.*]] = llvm.mlir.constant(0.000000e+00 : f32) : f32
+    // CHECK-NEXT: %[[PSL:.*]] = llvm.extractvalue %{{.*}}[1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
+    // CHECK-NEXT: %[[PAIR:.*]] = llvm.addrspacecast %[[PSL]] : !llvm.ptr<1> to !llvm.ptr
+    // CHECK-NEXT: llvm.call @wrap_dynamic_sparse_attention({{.*}}, %[[EPS]], %[[PAIR]]) : ({{.*}}, f32, f32, !llvm.ptr) -> i32
     return
   }
 }

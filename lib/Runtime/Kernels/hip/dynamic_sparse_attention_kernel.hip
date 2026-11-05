@@ -8,9 +8,11 @@
  * softmax, invalid candidates skipped, empty candidate set -> zero output.
  */
 
+#include "autotune/gqa/gqa_autotune.h"
 #include "hip_arch_compat.h"
 #include "hip_custom_kernels.h"
 
+#include <algorithm>
 #include <cfloat>
 #include <cstdint>
 #include <cstdio>
@@ -258,6 +260,38 @@ __device__ __forceinline__ _Float16 dsa_apply_gate(_Float16 o, _Float16 g) {
                                static_cast<float>(sig));
 }
 
+// dsa_apply_gate on the eight halves of a 16-byte run.
+__device__ __forceinline__ vec16_t dsa_gate_run(vec16_t o, vec16_t g) {
+  auto gated = [](unsigned int x, unsigned int y, int shift) {
+    const auto h = [](unsigned int w, int s) {
+      return __builtin_bit_cast(_Float16, static_cast<unsigned short>(w >> s));
+    };
+    return static_cast<unsigned int>(__builtin_bit_cast(
+               unsigned short, dsa_apply_gate(h(x, shift), h(y, shift))))
+           << shift;
+  };
+#pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    o[i] = gated(o[i], g[i], 0) | gated(o[i], g[i], 16);
+  }
+  return o;
+}
+
+// Gates rows s < rows of every batch in place: the rows a routed GQA prefill
+// wrote ungated. One thread per 16-byte run of a row.
+__global__ void __launch_bounds__(kAppendThreads)
+dsa_gate_rows_kernel(const vec16_t *__restrict__ gate,
+                     vec16_t *__restrict__ output, int seq_len, int rows,
+                     int row_runs) {
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= rows * row_runs) {
+    return;
+  }
+  const size_t at =
+      static_cast<size_t>(blockIdx.y) * seq_len * row_runs + i;
+  output[at] = dsa_gate_run(output[at], gate[at]);
+}
+
 // Exchanges a value with lane ^ 16 on the VALU. The inline-asm copy keeps the
 // compiler from dual-issuing the copy of x into the tied "old" operand, which
 // can lose its interlock on gfx11 (see v6_swap_halves in gqa_kernel.hip).
@@ -319,7 +353,9 @@ __device__ __forceinline__ void frag_stream(Load &&load, Use &&use) {
 // the same order by every wave. Lane i of a tile holds candidate i's index.
 // splits == 1 writes the normalized (and gated) output, otherwise (m, l, O)
 // partials in log2 units for dsa_combine_kernel. Query rows are q_stride
-// elements apart.
+// elements apart. Rows s < dense_rows take candidate c = position c instead
+// of reading selected_indices; rows s < routed_rows of a batch whose total
+// length is routed_total were already written by a routed prefill.
 template <int D, int ND>
 __global__ void __launch_bounds__(32 * ND)
 __attribute__((amdgpu_waves_per_eu(HIPDNN_WAVES_FOR_VGPRS(256))))
@@ -333,7 +369,8 @@ dsa_attention_kernel(const _Float16 *__restrict__ query,
                      _Float16 *__restrict__ output,
                      float *__restrict__ partials, int q_stride, int seq_len,
                      int num_heads, int kv_heads, int cap, int max_sel,
-                     int splits, float scale_log2) {
+                     int splits, float scale_log2, int dense_rows,
+                     int routed_rows, int routed_total) {
   constexpr int DT = D / kTile / ND;
   constexpr int DS = DT * kTile;
   constexpr int N_TILES = kBkv / kTile;
@@ -361,6 +398,10 @@ dsa_attention_kernel(const _Float16 *__restrict__ query,
   const int s = row % seq_len;
 
   const int total = __builtin_amdgcn_readfirstlane(seqlens_k[b] + 1);
+  if (s < routed_rows && total == routed_total) {
+    return;
+  }
+  const bool dense = s < dense_rows;
   const bool valid_len = seq_len <= total && total <= cap;
   const int qpos = total - seq_len + s;
   int count = 0;
@@ -399,7 +440,7 @@ dsa_attention_kernel(const _Float16 *__restrict__ query,
     const int c = c_lo + t * kBkv + lane;
     int idx = -1;
     if (t < num_tiles && c < c_hi) {
-      idx = sel_row[c];
+      idx = dense ? c : sel_row[c];
       // valid_len implies qpos < total <= cap, so this is the whole ORT
       // filter 0 <= idx < total, idx <= qpos, idx < cap.
       if (idx < 0 || idx > qpos) {
@@ -670,20 +711,7 @@ dsa_attention_kernel(const _Float16 *__restrict__ query,
       vec16_t o = *reinterpret_cast<const vec16_t *>(vt + h * O_STR + c);
       const size_t at = o_base + static_cast<size_t>(h) * D + c;
       if (gate) {
-        const vec16_t gv = *reinterpret_cast<const vec16_t *>(gate + at);
-        auto gated = [](unsigned int x, unsigned int y, int shift) {
-          const auto h = [](unsigned int w, int s) {
-            return __builtin_bit_cast(_Float16,
-                                      static_cast<unsigned short>(w >> s));
-          };
-          return static_cast<unsigned int>(__builtin_bit_cast(
-                     unsigned short, dsa_apply_gate(h(x, shift), h(y, shift))))
-                 << shift;
-        };
-#pragma unroll
-        for (int i = 0; i < 4; ++i) {
-          o[i] = gated(o[i], gv[i], 0) | gated(o[i], gv[i], 16);
-        }
+        o = dsa_gate_run(o, *reinterpret_cast<const vec16_t *>(gate + at));
       }
       *reinterpret_cast<vec16_t *>(output + at) = o;
     }
@@ -794,7 +822,8 @@ hipError_t launchAttention(hipStream_t stream, const void *query,
                            const int32_t *seqlens_k, const void *gate,
                            void *output, float *partials, int q_stride,
                            int rows, int seq_len, int num_heads, int kv_heads,
-                           int cap, int max_sel, int splits, float scale) {
+                           int cap, int max_sel, int splits, float scale,
+                           int dense_rows, int routed_rows, int routed_total) {
   const dim3 grid(rows, kv_heads, splits);
   const auto *g = static_cast<const _Float16 *>(gate);
   dsa_attention_kernel<D, ND><<<grid, 32 * ND, 0, stream>>>(
@@ -803,7 +832,7 @@ hipError_t launchAttention(hipStream_t stream, const void *query,
       static_cast<const _Float16 *>(present_value), selected_indices,
       selected_counts, seqlens_k, g, static_cast<_Float16 *>(output), partials,
       q_stride, seq_len, num_heads, kv_heads, cap, max_sel, splits,
-      scale * kLog2e);
+      scale * kLog2e, dense_rows, routed_rows, routed_total);
   hipError_t err = hipGetLastError();
   if (err != hipSuccess || splits == 1) {
     return err;
@@ -843,6 +872,88 @@ size_t prologueBytes(int64_t batch, int64_t seq_len, int64_t num_heads,
   return (bytes + kWorkspaceAlign - 1) / kWorkspaceAlign * kWorkspaceAlign;
 }
 
+// Fewest dense rows worth routing to the GQA prefill: fewer query rows leave
+// the prefill too few workgroups to beat the attention kernel, which then
+// still runs after it for the other rows.
+constexpr int64_t kRouteMinRows = 192;
+
+// Causal GQA flash prefill (Q [B, sq, Hq, d], K/V cache [B, G, max_seq, d]
+// holding past_len + sq rows), configured by the session's autotune policy the
+// way the GQA op configures it.
+int gqaPrefill(void *policy, hipStream_t s, const void *q, const void *k,
+               const void *v, void *o, int batch, int hq, int g, int sq,
+               int d, int max_seq, int past_len, float scale) {
+  const int skv = past_len + sq;
+  if (hip_gqa_autotune_mode(policy) ==
+      static_cast<int>(hipdnn_ep::GqaAutotuneMode::Online)) {
+    return hip_gqa_flash_prefill_v2(s, q, k, v, o, batch, hq, g, sq, skv, d,
+                                    max_seq, past_len, scale);
+  }
+  const hipdnn_ep::GqaPrefillRequest request{
+      d == 256 ? hipdnn_ep::GqaPrefillVariant::V8x
+               : hipdnn_ep::GqaPrefillVariant::V6x,
+      batch, hq, g, d, sq, skv, /*local_window=*/0};
+  hipdnn_ep::GqaPrefillResult selected;
+  hip_gqa_autotune_resolve_prefill(policy, &request, &selected);
+  auto launch = [&](const hipdnn_ep::GqaPrefillConfig &c) {
+    return hip_gqa_flash_prefill_v3_configured(
+        s, q, k, v, o, batch, hq, g, sq, skv, d, max_seq, past_len, scale,
+        /*local_window_size=*/0, /*head_sink=*/nullptr, hq,
+        /*smooth_softmax=*/0, c.hb, c.qw, c.mt, c.bkv, c.nd,
+        /*key_bias=*/nullptr, /*key_bias_stride=*/0);
+  };
+  int rc = launch(selected.config);
+  if (rc != 0 && selected.source != hipdnn_ep::GqaTuneSource::Heuristic) {
+    hipdnn_ep::GqaPrefillConfig heuristic;
+    hip_gqa_autotune_fallback_prefill(&request, &heuristic);
+    rc = launch(heuristic);
+  }
+  return rc;
+}
+
+// Runs the dense rows [0, rows) of every batch as a causal GQA prefill over
+// past_len cached positions, then gates them. q rows are num_heads * D wide.
+// Returns false, having launched nothing that matters, when the prefill
+// rejects the shape; the attention kernel then computes those rows itself.
+bool routeDenseRows(void *policy, hipStream_t s, const void *q,
+                    const void *present_key, const void *present_value,
+                    const void *gate, void *output, int64_t batch,
+                    int64_t seq_len, int64_t rows, int64_t num_heads,
+                    int64_t kv_heads, int64_t head_size, int64_t cap,
+                    int64_t past_len, float scale) {
+  const size_t row_elems = static_cast<size_t>(num_heads * head_size);
+  const size_t cache_elems = static_cast<size_t>(kv_heads * cap * head_size);
+  // The prefill takes Q and O as [B, sq, Hq, d], so a prefix shorter than S
+  // runs once per batch.
+  const int64_t launches = rows == seq_len ? 1 : batch;
+  for (int64_t b = 0; b < launches; ++b) {
+    const size_t q_off = b * seq_len * row_elems;
+    if (gqaPrefill(policy, s, static_cast<const _Float16 *>(q) + q_off,
+                   static_cast<const _Float16 *>(present_key) + b * cache_elems,
+                   static_cast<const _Float16 *>(present_value) +
+                       b * cache_elems,
+                   static_cast<_Float16 *>(output) + q_off,
+                   static_cast<int>(rows == seq_len ? batch : 1),
+                   static_cast<int>(num_heads), static_cast<int>(kv_heads),
+                   static_cast<int>(rows), static_cast<int>(head_size),
+                   static_cast<int>(cap), static_cast<int>(past_len),
+                   scale) != 0) {
+      return false;
+    }
+  }
+  if (gate) {
+    const int row_runs = static_cast<int>(row_elems / 8);
+    dsa_gate_rows_kernel<<<dim3(static_cast<unsigned>(
+                                    (rows * row_runs + kAppendThreads - 1) /
+                                    kAppendThreads),
+                                static_cast<unsigned>(batch)),
+                           kAppendThreads, 0, s>>>(
+        static_cast<const vec16_t *>(gate), static_cast<vec16_t *>(output),
+        static_cast<int>(seq_len), static_cast<int>(rows), row_runs);
+  }
+  return true;
+}
+
 } // namespace
 
 extern "C" size_t hip_dynamic_sparse_attention_workspace_size(
@@ -866,7 +977,8 @@ extern "C" int hip_dynamic_sparse_attention(
     const HipDsaPrologue *prologue, void *output, void *present_key,
     void *present_value, void *workspace, size_t workspace_bytes,
     int64_t batch, int64_t seq_len, int64_t num_heads, int64_t kv_num_heads,
-    int64_t head_size, int64_t capacity, int64_t max_selected, float scale) {
+    int64_t head_size, int64_t capacity, int64_t max_selected, float scale,
+    const HipDsaPair *pair) {
   const bool packed = !key && !value;
   if (!query || (!packed && (!key || !value)) || !past_key || !past_value ||
       !selected_counts || !seqlens_k || !output || !present_key ||
@@ -888,6 +1000,11 @@ extern "C" int hip_dynamic_sparse_attention(
        (prologue->layout != 0 && prologue->layout != 1))) {
     fprintf(stderr, "[custom_kernels] hip_dynamic_sparse_attention: invalid "
                     "q/k norm and MRoPE prologue\n");
+    return -1;
+  }
+  if (pair && pair->past_len < 0) {
+    fprintf(stderr, "[custom_kernels] hip_dynamic_sparse_attention: negative "
+                    "paired past length\n");
     return -1;
   }
   if (packed) {
@@ -1012,6 +1129,24 @@ extern "C" int hip_dynamic_sparse_attention(
   }
   err = hipGetLastError();
 
+  // A paired row s < dense_rows sees positions 0 .. past_len + s, all of
+  // which its indexer selected.
+  const int64_t dense_rows =
+      pair ? std::min(std::max<int64_t>(max_selected - pair->past_len, 0),
+                      seq_len)
+           : 0;
+  int64_t routed_rows = 0;
+  if (err == hipSuccess && dense_rows >= kRouteMinRows && splits == 1 &&
+      attn_q_stride == num_heads * head_size &&
+      pair->past_len + dense_rows <= capacity &&
+      routeDenseRows(pair->gqa_policy, s, attn_query, present_key,
+                     present_value, gate, output, batch, seq_len, dense_rows,
+                     num_heads, kv_num_heads, head_size, capacity,
+                     pair->past_len, scale)) {
+    routed_rows = dense_rows;
+    err = hipGetLastError();
+  }
+
   if (err == hipSuccess) {
     float *partials = reinterpret_cast<float *>(ws);
     auto attend = [&](auto launcher) {
@@ -1022,7 +1157,10 @@ extern "C" int hip_dynamic_sparse_attention(
                       static_cast<int>(num_heads),
                       static_cast<int>(kv_num_heads),
                       static_cast<int>(capacity),
-                      static_cast<int>(max_selected), splits, scale);
+                      static_cast<int>(max_selected), splits, scale,
+                      static_cast<int>(dense_rows),
+                      static_cast<int>(routed_rows),
+                      static_cast<int>(pair ? pair->past_len + seq_len : 0));
     };
     err = head_size == 256 ? attend(launchAttention<256, 4>)
                            : attend(launchAttention<128, 2>);

@@ -334,3 +334,51 @@ func.func @sai_counts_shape(%ctx: !hip.context,
   return %r#0, %r#1, %r#2
       : tensor<1x3x2051xi32>, tensor<1x8x128xf16>, tensor<1x2xi32>
 }
+
+// -----
+
+func.func @sai_pair_format_mask(%ctx: !hip.context,
+    %qk: tensor<1x1x640xf16>, %qw: tensor<128xf16>, %kw: tensor<128xf16>,
+    %cos: tensor<8x64xf16>, %sin: tensor<8x64xf16>, %past: tensor<1x7x128xf16>,
+    %mask: tensor<1x8xi64>, %psl: tensor<1xi32>,
+    %sel: tensor<1x1x2051xi32>, %present: tensor<1x8x128xf16>,
+    %counts: tensor<1x1xi32>)
+    -> (tensor<1x1x2051xi32>, tensor<1x8x128xf16>, tensor<1x1xi32>) {
+  // expected-error @+1 {{pair_format needs past_sequence_length and selected_counts and no mask}}
+  %r:3 = hip.sparse_attention_indexer(%ctx)
+      ins(%qk, %qw, %kw, %cos, %sin, %past :
+          tensor<1x1x640xf16>, tensor<128xf16>, tensor<128xf16>,
+          tensor<8x64xf16>, tensor<8x64xf16>, tensor<1x7x128xf16>)
+      mask(%mask : tensor<1x8xi64>)
+      past_sequence_length(%psl : tensor<1xi32>)
+      outs(%sel, %present : tensor<1x1x2051xi32>, tensor<1x8x128xf16>)
+      counts(%counts : tensor<1x1xi32>)
+      {compress_ratio = 4 : i64, token_budget = 2048 : i64,
+       epsilon = 9.99999997E-7 : f32, scale = 0.0883883461 : f32,
+       pair_format}
+      : tensor<1x1x2051xi32>, tensor<1x8x128xf16>, tensor<1x1xi32>
+  return %r#0, %r#1, %r#2
+      : tensor<1x1x2051xi32>, tensor<1x8x128xf16>, tensor<1x1xi32>
+}
+
+// -----
+
+func.func @sai_pair_format_without_counts(%ctx: !hip.context,
+    %qk: tensor<1x1x640xf16>, %qw: tensor<128xf16>, %kw: tensor<128xf16>,
+    %cos: tensor<8x64xf16>, %sin: tensor<8x64xf16>, %past: tensor<1x7x128xf16>,
+    %psl: tensor<1xi32>,
+    %sel: tensor<1x1x2051xi32>, %present: tensor<1x8x128xf16>)
+    -> (tensor<1x1x2051xi32>, tensor<1x8x128xf16>) {
+  // expected-error @+1 {{pair_format needs past_sequence_length and selected_counts and no mask}}
+  %r:2 = hip.sparse_attention_indexer(%ctx)
+      ins(%qk, %qw, %kw, %cos, %sin, %past :
+          tensor<1x1x640xf16>, tensor<128xf16>, tensor<128xf16>,
+          tensor<8x64xf16>, tensor<8x64xf16>, tensor<1x7x128xf16>)
+      past_sequence_length(%psl : tensor<1xi32>)
+      outs(%sel, %present : tensor<1x1x2051xi32>, tensor<1x8x128xf16>)
+      {compress_ratio = 4 : i64, token_budget = 2048 : i64,
+       epsilon = 9.99999997E-7 : f32, scale = 0.0883883461 : f32,
+       pair_format}
+      : tensor<1x1x2051xi32>, tensor<1x8x128xf16>
+  return %r#0, %r#1 : tensor<1x1x2051xi32>, tensor<1x8x128xf16>
+}

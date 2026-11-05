@@ -24,6 +24,7 @@ constexpr int64_t kMaxBlockTopK = 512;
 ///   rotary_position_ids and rotary_sections.
 /// - IndexerCountsFold: a third result marked kSelectedCountsAttr. It becomes
 ///   selected_counts.
+/// - QsaPairFold: kQsaPairAttr. It becomes pair_format.
 struct SparseAttentionIndexerToHip : public mlir::RewritePattern {
   SparseAttentionIndexerToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
@@ -242,6 +243,11 @@ mlir::LogicalResult SparseAttentionIndexerToHip::matchAndRewrite(
     return rewriter.notifyMatchFailure(
         op, "SparseAttentionIndexer qsa expects 2 results (3 with counts)");
   }
+  const bool paired = op->hasAttr(kQsaPairAttr);
+  if (paired && (!withCounts || mask || !pastSeqLen)) {
+    return rewriter.notifyMatchFailure(
+        op, "a paired indexer needs counts, past_sequence_length and no mask");
+  }
   if (withCounts &&
       !matches(op->getResult(2), rewriter.getI32Type(), {batch, seq})) {
     return rewriter.notifyMatchFailure(op, "selected_counts must be i32 "
@@ -358,6 +364,9 @@ mlir::LogicalResult SparseAttentionIndexerToHip::matchAndRewrite(
   state.addAttribute("scale", rewriter.getF32FloatAttr(scale));
   if (rotaryIds) {
     state.addAttribute("rotary_sections", sectionsAttr);
+  }
+  if (paired) {
+    state.addAttribute("pair_format", rewriter.getUnitAttr());
   }
   mlir::Operation *hipOp = rewriter.create(state);
   rewriter.replaceOp(op, hipOp->getResults());

@@ -3,9 +3,9 @@
 
 // RUN: hip-mlir-opt --convert-hip-to-llvm %s | FileCheck %s
 
-// The counts init is passed as the last runtime argument.
+// The counts init is passed just before the pair_format flag, which stays 0.
 // CHECK-LABEL: llvm.func @wrap_sparse_attention_indexer(
-// CHECK-SAME:      !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32, !llvm.ptr, !llvm.ptr, i64, i64, i64, !llvm.ptr) -> i32
+// CHECK-SAME:      !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32, !llvm.ptr, !llvm.ptr, i64, i64, i64, !llvm.ptr, i64) -> i32
 // CHECK-LABEL: llvm.func @sai_counts(
 // CHECK-SAME:      %[[CTX:[^:]*]]: !llvm.ptr,
 // CHECK:           %[[NOMASK:.*]] = llvm.mlir.zero : !llvm.ptr
@@ -52,7 +52,8 @@
 // CHECK-NEXT:      %[[ZERO:.*]] = llvm.mlir.constant(0 : i64) : i64
 // CHECK-NEXT:      %[[COUNTS_PTR:.*]] = llvm.extractvalue %{{.*}}[1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
 // CHECK-NEXT:      %[[COUNTS:.*]] = llvm.addrspacecast %[[COUNTS_PTR]] : !llvm.ptr<1> to !llvm.ptr
-// CHECK-NEXT:      %{{.*}} = llvm.call @wrap_sparse_attention_indexer(%[[CTX]], %[[QK]], %[[QW]], %[[KW]], %[[COS]], %[[SIN]], %[[NOMASK]], %[[PSL]], %[[PAST]], %[[SEL]], %[[PRESENT]], %[[B]], %[[S]], %[[P]], %[[PR]], %[[N]], %[[D]], %[[R]], %[[X]], %[[BATCHED]], %[[RATIO]], %[[BUDGET]], %[[ELEM]], %[[PB]], %[[MB]], %[[ML]], %[[CB]], %[[SB]], %[[SR]], %[[EPS]], %[[SCALE]], %[[NOIDS]], %[[NOMAP]], %[[ZERO]], %[[ZERO]], %[[ZERO]], %[[COUNTS]])
+// CHECK-NEXT:      %[[NOPAIR:.*]] = llvm.mlir.constant(0 : i64) : i64
+// CHECK-NEXT:      %{{.*}} = llvm.call @wrap_sparse_attention_indexer(%[[CTX]], %[[QK]], %[[QW]], %[[KW]], %[[COS]], %[[SIN]], %[[NOMASK]], %[[PSL]], %[[PAST]], %[[SEL]], %[[PRESENT]], %[[B]], %[[S]], %[[P]], %[[PR]], %[[N]], %[[D]], %[[R]], %[[X]], %[[BATCHED]], %[[RATIO]], %[[BUDGET]], %[[ELEM]], %[[PB]], %[[MB]], %[[ML]], %[[CB]], %[[SB]], %[[SR]], %[[EPS]], %[[SCALE]], %[[NOIDS]], %[[NOMAP]], %[[ZERO]], %[[ZERO]], %[[ZERO]], %[[COUNTS]], %[[NOPAIR]])
 // CHECK-NEXT:      llvm.return
 // CHECK-NEXT:    }
 func.func @sai_counts(
@@ -77,5 +78,40 @@ func.func @sai_counts(
       counts(%counts : memref<1x1xi32, 1>)
       {compress_ratio = 4 : i64, token_budget = 2048 : i64,
        epsilon = 9.99999997E-7 : f32, scale = 0.0883883461 : f32}
+  return
+}
+
+// pair_format, which needs counts, sets the trailing flag to 1.
+// CHECK-LABEL: llvm.func @sai_pair_format(
+// CHECK-SAME:      %[[CTX:[^:]*]]: !llvm.ptr,
+// CHECK:           %[[COUNTS_PTR:.*]] = llvm.extractvalue %{{.*}}[1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT:      %[[COUNTS:.*]] = llvm.addrspacecast %[[COUNTS_PTR]] : !llvm.ptr<1> to !llvm.ptr
+// CHECK-NEXT:      %[[PAIR:.*]] = llvm.mlir.constant(1 : i64) : i64
+// CHECK-NEXT:      %{{.*}} = llvm.call @wrap_sparse_attention_indexer(%[[CTX]], {{.*}}, %[[COUNTS]], %[[PAIR]])
+// CHECK-NEXT:      llvm.return
+// CHECK-NEXT:    }
+func.func @sai_pair_format(
+    %ctx: !hip.context,
+    %qk: memref<1x4x640xf16, 1>,
+    %qw: memref<128xf16, 1>,
+    %kw: memref<128xf16, 1>,
+    %cos: memref<1x4096x64xf16, 1>,
+    %sin: memref<1x4096x64xf16, 1>,
+    %past: memref<1x?x128xf16, 1>,
+    %psl: memref<1xi32, 1>,
+    %sel: memref<1x4x2051xi32, 1>,
+    %present: memref<1x?x128xf16, 1>,
+    %counts: memref<1x4xi32, 1>) {
+  hip.sparse_attention_indexer(%ctx)
+      ins(%qk, %qw, %kw, %cos, %sin, %past :
+          memref<1x4x640xf16, 1>, memref<128xf16, 1>, memref<128xf16, 1>,
+          memref<1x4096x64xf16, 1>, memref<1x4096x64xf16, 1>,
+          memref<1x?x128xf16, 1>)
+      past_sequence_length(%psl : memref<1xi32, 1>)
+      outs(%sel, %present : memref<1x4x2051xi32, 1>, memref<1x?x128xf16, 1>)
+      counts(%counts : memref<1x4xi32, 1>)
+      {compress_ratio = 4 : i64, token_budget = 2048 : i64,
+       epsilon = 9.99999997E-7 : f32, scale = 0.0883883461 : f32,
+       pair_format}
   return
 }

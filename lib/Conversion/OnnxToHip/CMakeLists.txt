@@ -70,6 +70,7 @@ add_library(OnnxToHip STATIC
   IndexerRotaryFold.cpp
   IndexerCountsFold.cpp
   DsaPrologueFold.cpp
+  QsaPairFold.cpp
   RangeConversion.cpp
   FastGeluFusion.cpp
   ErfGeluFusion.cpp

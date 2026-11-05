@@ -40,7 +40,7 @@ struct DynamicSparseAttentionOpLowering
       return v ? extractContiguousMemRefPtr(v, rewriter, loc)
                : LLVM::ZeroOp::create(rewriter, loc, ptrType).getResult();
     };
-    SmallVector<Value, 63> args = {adaptor.getCtx()};
+    SmallVector<Value, 64> args = {adaptor.getCtx()};
     for (Value v :
          {adaptor.getQuery(), adaptor.getKey(), adaptor.getValue(),
           adaptor.getPastKey(), adaptor.getPastValue(),
@@ -96,10 +96,12 @@ struct DynamicSparseAttentionOpLowering
     args.push_back(createF32Const(op.getScale().convertToFloat()));
     args.push_back(createF32Const(
         op.getNormEpsilon() ? op.getNormEpsilon()->convertToFloat() : 0.0f));
+    args.push_back(optionalPtr(adaptor.getPastSequenceLength()));
 
-    SmallVector<Type, 63> paramTypes(18, ptrType);
+    SmallVector<Type, 64> paramTypes(18, ptrType);
     paramTypes.append(43, i64Type);
     paramTypes.append(2, f32Type);
+    paramTypes.push_back(ptrType);
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapDynamicSparseAttention, paramTypes, i32Type);

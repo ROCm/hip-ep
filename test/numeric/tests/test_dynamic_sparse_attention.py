@@ -14,6 +14,10 @@ cache).
 The fused cases surround the op with the graph the compiler folds into it: a
 Split of one packed qkv input, per-head SimplifiedLayerNormalization and
 MRotaryEmbedding of q and k, and Mul(output, Sigmoid(gate)).
+
+The paired cases feed the op from a qsa SparseAttentionIndexer, which the
+compiler pairs with it; they must match the same graph with the selection
+also returned, which stays unpaired.
 """
 
 import numpy as np
@@ -717,6 +721,153 @@ def test_fused_prologue_and_gate(model_runner, case):
     else:
         np.testing.assert_array_equal(actual[1], pk)
     np.testing.assert_array_equal(actual[2], pv)
+
+
+def _make_paired_model(N, KV, D, budget, expose_selection):
+    """A qsa SparseAttentionIndexer with past_sequence_length and the exported
+    counts subgraph feeds the op through Reshapes to [B * S, W] and [B * S].
+    ``expose_selection`` also returns the selection, which keeps the two ops
+    unpaired."""
+    width = budget + 3
+    f16 = TP.FLOAT16
+    nodes = [
+        helper.make_node(
+            "Constant", [], [name], value=numpy_helper.from_array(np.array(*value))
+        )
+        for name, value in (
+            ("zero", (0, np.int32)),
+            ("one", (1, np.int32)),
+            ("last", ([-1], np.int64)),
+            ("rows", ([-1, width], np.int64)),
+        )
+    ]
+    nodes += [
+        helper.make_node(
+            "SparseAttentionIndexer",
+            ["index_query", "", "index_q_weight", "index_k_weight", "index_cos"]
+            + ["index_sin", "", "index_past", "", "", "", ""]
+            + ["past_sequence_length"],
+            ["selected", "index_present"],
+            domain="com.microsoft",
+            policy_mode="qsa",
+            compress_ratio=4,
+            token_budget=budget,
+        ),
+        helper.make_node("GreaterOrEqual", ["selected", "zero"], ["valid"]),
+        helper.make_node("Where", ["valid", "one", "zero"], ["valid_i32"]),
+        helper.make_node("ReduceSum", ["valid_i32", "last"], ["counts"], keepdims=0),
+        helper.make_node("Reshape", ["selected", "rows"], ["selected_indices"]),
+        helper.make_node("Reshape", ["counts", "last"], ["selected_counts"]),
+        helper.make_node(
+            "DynamicSparseAttention",
+            ["query", "key", "value", "past_key", "past_value", "", ""]
+            + ["selected_indices", "selected_counts", "seqlens_k"]
+            + ["total_sequence_length"]
+            + [""] * 6,
+            ["output", "present_key", "present_value"],
+            domain="com.microsoft",
+            num_heads=N,
+            kv_num_heads=KV,
+            scale=0.0625,
+            is_causal=1,
+            attention_mode="selected_only",
+            selected_kv_source="main",
+            do_rotary=0,
+            rotary_interleaved=0,
+            qk_norm_epsilon=1e-6,
+        ),
+    ]
+    cache = ["B", KV, "cap", D]
+    index_cache = ["B", "cap", 128]
+    inputs = [
+        helper.make_tensor_value_info("index_query", f16, ["B", "S", 5 * 128]),
+        helper.make_tensor_value_info("index_q_weight", f16, [128]),
+        helper.make_tensor_value_info("index_k_weight", f16, [128]),
+        helper.make_tensor_value_info("index_cos", f16, ["X", 64]),
+        helper.make_tensor_value_info("index_sin", f16, ["X", 64]),
+        helper.make_tensor_value_info("index_past", f16, index_cache),
+        helper.make_tensor_value_info("past_sequence_length", TP.INT32, [1]),
+        helper.make_tensor_value_info("query", f16, ["B", "S", N * D]),
+        helper.make_tensor_value_info("key", f16, ["B", "S", KV * D]),
+        helper.make_tensor_value_info("value", f16, ["B", "S", KV * D]),
+        helper.make_tensor_value_info("past_key", f16, cache),
+        helper.make_tensor_value_info("past_value", f16, cache),
+        helper.make_tensor_value_info("seqlens_k", TP.INT32, ["B"]),
+        helper.make_tensor_value_info("total_sequence_length", TP.INT32, []),
+    ]
+    outputs = [
+        helper.make_tensor_value_info("output", f16, ["B", "S", N * D]),
+        helper.make_tensor_value_info("present_key", f16, cache),
+        helper.make_tensor_value_info("present_value", f16, cache),
+        helper.make_tensor_value_info("index_present", f16, index_cache),
+    ]
+    if expose_selection:
+        outputs.append(
+            helper.make_tensor_value_info("selected", TP.INT32, ["B", "S", width])
+        )
+    model = make_model_from_nodes(nodes, inputs, outputs, **_OPSETS)
+    model.ir_version = 10
+    return model
+
+
+@pytest.mark.parametrize(
+    "B,P,S,budget,padding",
+    [
+        (1, 0, 600, 256, 0),
+        (2, 40, 96, 128, 0),
+        (1, 66, 1, 64, 0),
+        (1, 67, 1, 64, 0),
+        (2, 0, 300, 256, 5),
+    ],
+    ids=["prefill", "mixed_rows", "decode_dense", "decode_routed", "padded_batch"],
+)
+def test_paired_indexer(model_runner, B, P, S, budget, padding):
+    """Row s selects every position while P + s + 1 <= budget + 3. Paired, the
+    indexer skips scoring those rows, and the attention runs them as a causal
+    prefill when there are at least 192. The other rows get their blocks in
+    ascending order. ``padding`` shortens the last batch's seqlens_k, so its
+    dense rows stay on the attention kernel."""
+    N, KV, D = 8, 2, 256
+    rng = np.random.default_rng(1000 + P + S + padding)
+    cap = P + S + 8
+    q, k, v, past_k, past_v = _inputs(rng, B, S, N, KV, D, cap)
+    cos, sin = (np.tile(t, 2) for t in _rope_base_tables(cap, 32))
+    seqlens = np.full(B, P + S - 1, np.int32)
+    seqlens[-1] -= padding
+    feeds = dict(
+        index_query=rng.uniform(-1, 1, (B, S, 5 * 128)).astype(np.float16),
+        index_q_weight=rng.uniform(0.5, 1.5, 128).astype(np.float16),
+        index_k_weight=rng.uniform(0.5, 1.5, 128).astype(np.float16),
+        index_cos=cos,
+        index_sin=sin,
+        index_past=rng.uniform(-1, 1, (B, cap, 128)).astype(np.float16),
+        past_sequence_length=np.array([P], np.int32),
+        query=q,
+        key=k,
+        value=v,
+        past_key=past_k,
+        past_value=past_v,
+        seqlens_k=seqlens,
+        total_sequence_length=np.array(P + S, np.int32),
+    )
+    results = {}
+    for expose in (True, False):
+        model = _make_paired_model(N, KV, D, budget, expose)
+        names = [i.name for i in model.graph.input]
+        results[expose] = model_runner.backend.run(
+            _persist(model_runner, model), [feeds[x] for x in names]
+        )
+    unpaired, paired = results[True], results[False]
+    sel = unpaired[4].reshape(B * S, -1)
+    counts = (sel >= 0).sum(-1, dtype=np.int32)
+    expected = _dsa_reference(
+        q, k, v, past_k, past_v, sel, counts, seqlens, N, KV, 0.0625
+    )
+    for actual in (unpaired, paired):
+        compare_outputs(actual[:1], expected[:1], atol=5e-3, rtol=0.0)
+        np.testing.assert_array_equal(actual[1], expected[1])
+        np.testing.assert_array_equal(actual[2], expected[2])
+    np.testing.assert_array_equal(paired[3], unpaired[3])
 
 
 def _persist(model_runner, model):

@@ -10,6 +10,7 @@
 #include "hip_arch_compat.h"
 #include "hip_custom_kernels.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <hip/hip_runtime.h>
@@ -556,9 +557,12 @@ template <> struct RawVec<8> { typedef uint2 type; };
 template <> struct RawVec<16> { typedef uint4 type; };
 
 // Grid x holds count_blocks mask-count blocks, then query_blocks blocks for
-// the chunk at s0 = 0, then the blocks writing present_key rows
+// the chunk of rows [s0, seq_len), then the blocks writing present_key rows
 // [copy_start, total) (past_key rows followed by the new key rows, kCopy
-// elements per thread). past_key and present may alias.
+// elements per thread). past_key and present may alias. The first
+// dense_rows threads of those blocks also write the counts of the rows
+// s < dense_rows, which select every one of their past_len + s + 1
+// positions.
 template <typename T, int kCopy>
 __global__ void __launch_bounds__(kThreads)
 sai_prologue_kernel(const T *__restrict__ query,
@@ -566,7 +570,8 @@ sai_prologue_kernel(const T *__restrict__ query,
                     const Rope<T> rope, const int64_t *__restrict__ mask,
                     const T *past_key, T *present,
                     int *__restrict__ chunk_count, float *__restrict__ qrot,
-                    int count_blocks, int query_blocks, int seq_len,
+                    int *__restrict__ counts, int count_blocks,
+                    int query_blocks, int seq_len, int s0, int dense_rows,
                     int past_len, int total, int copy_start, int past_stride,
                     int present_stride, int chunk_stride, int num_heads,
                     float eps) {
@@ -578,7 +583,8 @@ sai_prologue_kernel(const T *__restrict__ query,
   }
   if (x < count_blocks + query_blocks) {
     queryItems<T>(query, query_norm_weight, rope, qrot, b, x - count_blocks,
-                  seq_len, 0, seq_len, chunk_stride, num_heads, past_len, eps);
+                  seq_len, s0, seq_len - s0, chunk_stride, num_heads,
+                  past_len, eps);
     return;
   }
   typedef typename RawVec<kCopy * sizeof(T)>::type V;
@@ -586,6 +592,10 @@ sai_prologue_kernel(const T *__restrict__ query,
   const int64_t v =
       static_cast<int64_t>(x - count_blocks - query_blocks) * kThreads +
       threadIdx.x;
+  if (v < dense_rows) {
+    counts[static_cast<size_t>(b) * seq_len + v] =
+        past_len + static_cast<int>(v) + 1;
+  }
   if (v >= static_cast<int64_t>(total - copy_start) * kVecPerRow) {
     return;
   }
@@ -884,12 +894,14 @@ __device__ __forceinline__ void bitonicWave(unsigned long long &a,
 
 // One block of kT threads per row.
 // - An MSB-first 8-bit radix select finds the key of the topk-th best block.
-//   The winners are gathered and bitonic-sorted.
+//   The winners are gathered and bitonic-sorted; with kAscending they are
+//   emitted in block order without a sort.
 // - With kItems > 0, the row's scores (at most kT * kItems) are read once into
 //   registers, item u of thread t holding block u * kT + t. The radix passes
 //   then read no memory, so a few long rows (decode) run on one wide block.
 // - counts, when given, receives the row's number of valid entries.
-template <int kT, int kItems>
+template <int kT, int kItems, bool kAscending>
+
 __global__ void __launch_bounds__(kT)
 sai_select_kernel(const float *__restrict__ scores,
                   const int *__restrict__ visible,
@@ -1003,80 +1015,102 @@ sai_select_kernel(const float *__restrict__ scores,
     threshold = prefix;
   }
 
-  if (tid == 0) {
-    count_lds = 0;
-  }
-  __syncthreads();
-  forEach([&](int j, float score) {
-    const unsigned long long key = blockKey(score, j);
-    if (key >= threshold) {
-      const int pos = atomicAdd(&count_lds, 1);
-      if (pos < kMaxTopK) {
-        keys[pos] = key;
+  if constexpr (kAscending) {
+    // Thread t owns blocks [t * per, t * per + per), so one scan of the
+    // per-thread winner counts ranks every winner in block order.
+    const int per = (blocks + kT - 1) / kT;
+    const int j0 = tid * per;
+    const int j1 = j0 + per < blocks ? j0 + per : blocks;
+    int mine = 0;
+    for (int j = j0; j < j1; ++j) {
+      mine += blockKey(row_scores[j], j) >= threshold ? 1 : 0;
+    }
+    int rank = blockInclusiveScan(mine, wave_sums) - mine;
+    for (int j = j0; j < j1 && mine > 0; ++j) {
+      if (blockKey(row_scores[j], j) >= threshold) {
+        for (int k = 0; k < ratio; ++k) {
+          out[rank * ratio + k] = visibleAt(vis, j * ratio + k);
+        }
+        ++rank;
+        --mine;
       }
     }
-  });
-  __syncthreads();
-  for (int i = tid; i < kMaxTopK; i += kT) {
-    if (i >= topk) {
-      keys[i] = 0;
+  } else {
+    if (tid == 0) {
+      count_lds = 0;
     }
-  }
-  __syncthreads();
-  // Bitonic sort, descending. The first kPairs threads' waves each hold 64
-  // keys in registers and run the stages of stride <= 32 there; only the
-  // strides reaching across waves go through LDS.
-  if (topk > 1) {
-    const bool sorter = tid < kPairs;
-    const int i = 64 * (tid / 32) + lane;
-    unsigned long long a = 0;
-    unsigned long long c = 0;
-    if (sorter) {
-      a = keys[i];
-      c = keys[i + 32];
-    }
-    for (int size = 2; size <= kMaxTopK; size <<= 1) {
-      if (size > 64) {
-        if (sorter) {
-          keys[i] = a;
-          keys[i + 32] = c;
+    __syncthreads();
+    forEach([&](int j, float score) {
+      const unsigned long long key = blockKey(score, j);
+      if (key >= threshold) {
+        const int pos = atomicAdd(&count_lds, 1);
+        if (pos < kMaxTopK) {
+          keys[pos] = key;
         }
-        __syncthreads();
-        for (int stride = size / 2; stride >= 64; stride >>= 1) {
+      }
+    });
+    __syncthreads();
+    for (int i = tid; i < kMaxTopK; i += kT) {
+      if (i >= topk) {
+        keys[i] = 0;
+      }
+    }
+    __syncthreads();
+    // Bitonic sort, descending. The first kPairs threads' waves each hold 64
+    // keys in registers and run the stages of stride <= 32 there; only the
+    // strides reaching across waves go through LDS.
+    if (topk > 1) {
+      const bool sorter = tid < kPairs;
+      const int i = 64 * (tid / 32) + lane;
+      unsigned long long a = 0;
+      unsigned long long c = 0;
+      if (sorter) {
+        a = keys[i];
+        c = keys[i + 32];
+      }
+      for (int size = 2; size <= kMaxTopK; size <<= 1) {
+        if (size > 64) {
           if (sorter) {
-            const int lo = 2 * tid - (tid & (stride - 1));
-            const int hi = lo + stride;
-            const bool desc = (lo & size) == 0;
-            const unsigned long long x = keys[lo];
-            const unsigned long long y = keys[hi];
-            if ((x < y) == desc) {
-              keys[lo] = y;
-              keys[hi] = x;
-            }
+            keys[i] = a;
+            keys[i + 32] = c;
           }
           __syncthreads();
+          for (int stride = size / 2; stride >= 64; stride >>= 1) {
+            if (sorter) {
+              const int lo = 2 * tid - (tid & (stride - 1));
+              const int hi = lo + stride;
+              const bool desc = (lo & size) == 0;
+              const unsigned long long x = keys[lo];
+              const unsigned long long y = keys[hi];
+              if ((x < y) == desc) {
+                keys[lo] = y;
+                keys[hi] = x;
+              }
+            }
+            __syncthreads();
+          }
+          if (sorter) {
+            a = keys[i];
+            c = keys[i + 32];
+          }
         }
         if (sorter) {
-          a = keys[i];
-          c = keys[i + 32];
+          bitonicWave(a, c, i, size);
         }
       }
       if (sorter) {
-        bitonicWave(a, c, i, size);
+        keys[i] = a;
+        keys[i + 32] = c;
       }
+      __syncthreads();
     }
-    if (sorter) {
-      keys[i] = a;
-      keys[i + 32] = c;
-    }
-    __syncthreads();
-  }
 
-  for (int idx = tid; idx < topk * ratio; idx += kT) {
-    const int rank = idx / ratio;
-    const int j = static_cast<int>(0xFFFFFFFFu -
-                                   static_cast<unsigned>(keys[rank]));
-    out[idx] = visibleAt(vis, j * ratio + idx % ratio);
+    for (int idx = tid; idx < topk * ratio; idx += kT) {
+      const int rank = idx / ratio;
+      const int j = static_cast<int>(0xFFFFFFFFu -
+                                     static_cast<unsigned>(keys[rank]));
+      out[idx] = visibleAt(vis, j * ratio + idx % ratio);
+    }
   }
   const int tail = count - blocks * ratio;
   for (int idx = tid; idx < tail; idx += kT) {
@@ -1145,6 +1179,31 @@ unsigned gridFor(int64_t n, int64_t per) {
   return static_cast<unsigned>((n + per - 1) / per);
 }
 
+template <bool kAscending>
+void launchSelect(hipStream_t stream, const float *scores, const int *visible,
+                  const int *row_count, int32_t *selected, int32_t *counts,
+                  int batch, int rows, int seq_len, int s0, int chunk_stride,
+                  int total, int max_blocks, int ratio, int block_topk,
+                  int capacity) {
+  // The wide block's fixed cost only pays off on long rows.
+  if (static_cast<int64_t>(rows) * batch <= kWideSelectRows &&
+      max_blocks >= kWideSelectMinBlocks &&
+      max_blocks <= kWideSelectThreads * kWideSelectItems) {
+    sai_select_kernel<kWideSelectThreads, kWideSelectItems, kAscending>
+        <<<dim3(rows, batch), kWideSelectThreads, 0, stream>>>(
+            scores, visible, row_count, selected, counts, seq_len, s0,
+            chunk_stride, total, max_blocks, ratio, block_topk, capacity);
+  } else {
+    sai_select_kernel<kThreads, 0, kAscending>
+        <<<dim3(rows, batch), kThreads, 0, stream>>>(
+            scores, visible, row_count, selected, counts, seq_len, s0,
+            chunk_stride, total, max_blocks, ratio, block_topk, capacity);
+  }
+}
+
+// pair: no mask, and the rows s < clamp(capacity - past_len, 0, seq_len),
+// which select every position, only get their counts; the other rows list
+// their blocks in ascending order.
 template <typename T>
 hipError_t launchAll(hipStream_t stream, const Layout &l, const T *query,
                      const T *query_norm_weight, const T *key_norm_weight,
@@ -1153,11 +1212,14 @@ hipError_t launchAll(hipStream_t stream, const Layout &l, const T *query,
                      T *present, char *ws, int batch, int seq_len, int past_len,
                      int past_stride, int present_stride, int num_heads,
                      int ratio, int block_topk, int capacity, float eps,
-                     float scale) {
+                     float scale, bool pair) {
   const int total = static_cast<int>(l.total);
   if (total == 0) {
     return hipSuccess;
   }
+  const int dense_rows =
+      pair ? std::min(std::max(capacity - past_len, 0), seq_len) : 0;
+  const int sparse_rows = seq_len - dense_rows;
   // Without a mask the positions are the identity and no scatter runs.
   const bool masked = mask != nullptr;
   int *visible = masked ? reinterpret_cast<int *>(ws + l.visible) : nullptr;
@@ -1172,12 +1234,12 @@ hipError_t launchAll(hipStream_t stream, const Layout &l, const T *query,
   const int chunk_stride = static_cast<int>(l.chunk_rows);
 
   const bool prologue_query =
-      seq_len > 0 && max_blocks > 0 && chunk_stride >= seq_len;
+      sparse_rows > 0 && max_blocks > 0 && chunk_stride >= sparse_rows;
   const int count_blocks = seq_len > 0 && masked ? num_chunks : 0;
   const int query_blocks =
       prologue_query
           ? static_cast<int>(
-                gridFor(static_cast<int64_t>(seq_len) * num_heads, kWaves))
+                gridFor(static_cast<int64_t>(sparse_rows) * num_heads, kWaves))
           : 0;
   constexpr int kWide = 16 / sizeof(T);
   const bool wide = ((reinterpret_cast<uintptr_t>(query) |
@@ -1194,15 +1256,17 @@ hipError_t launchAll(hipStream_t stream, const Layout &l, const T *query,
   if (wide) {
     sai_prologue_kernel<T, kWide><<<grid, kThreads, 0, stream>>>(
         query, query_norm_weight, rope, mask, past_key, present, chunk_count,
-        qrot, count_blocks, query_blocks, seq_len, past_len, total,
-        copy_start, past_stride, present_stride, chunk_stride, num_heads, eps);
+        qrot, counts, count_blocks, query_blocks, seq_len, dense_rows,
+        dense_rows, past_len, total, copy_start, past_stride, present_stride,
+        chunk_stride, num_heads, eps);
   } else {
     sai_prologue_kernel<T, 4><<<grid, kThreads, 0, stream>>>(
         query, query_norm_weight, rope, mask, past_key, present, chunk_count,
-        qrot, count_blocks, query_blocks, seq_len, past_len, total,
-        copy_start, past_stride, present_stride, chunk_stride, num_heads, eps);
+        qrot, counts, count_blocks, query_blocks, seq_len, dense_rows,
+        dense_rows, past_len, total, copy_start, past_stride, present_stride,
+        chunk_stride, num_heads, eps);
   }
-  if (seq_len == 0) {
+  if (sparse_rows == 0) {
     return hipGetLastError();
   }
 
@@ -1211,14 +1275,14 @@ hipError_t launchAll(hipStream_t stream, const Layout &l, const T *query,
         mask, chunk_count, visible, row_count, total, past_len, seq_len,
         num_chunks);
   }
-  const bool fused = seq_len <= kFusedRows;
+  const bool fused = sparse_rows <= kFusedRows;
   if (max_blocks > 0 && !fused) {
     sai_pooled_kernel<T>
         <<<dim3(gridFor(max_blocks, kWaves), batch), kThreads, 0, stream>>>(
             present, visible, row_count, key_norm_weight, rope, pooled,
             seq_len, total, present_stride, max_blocks, ratio, eps);
   }
-  for (int s0 = 0; s0 < seq_len; s0 += chunk_stride) {
+  for (int s0 = dense_rows; s0 < seq_len; s0 += chunk_stride) {
     const int rows =
         seq_len - s0 < chunk_stride ? seq_len - s0 : chunk_stride;
     if (max_blocks > 0) {
@@ -1251,20 +1315,10 @@ hipError_t launchAll(hipStream_t stream, const Layout &l, const T *query,
         }
       }
     }
-    // The wide block's fixed cost only pays off on long rows.
-    if (static_cast<int64_t>(rows) * batch <= kWideSelectRows &&
-        max_blocks >= kWideSelectMinBlocks &&
-        max_blocks <= kWideSelectThreads * kWideSelectItems) {
-      sai_select_kernel<kWideSelectThreads, kWideSelectItems>
-          <<<dim3(rows, batch), kWideSelectThreads, 0, stream>>>(
-              scores, visible, row_count, selected, counts, seq_len, s0,
-              chunk_stride, total, max_blocks, ratio, block_topk, capacity);
-    } else {
-      sai_select_kernel<kThreads, 0>
-          <<<dim3(rows, batch), kThreads, 0, stream>>>(
-              scores, visible, row_count, selected, counts, seq_len, s0,
-              chunk_stride, total, max_blocks, ratio, block_topk, capacity);
-    }
+    (pair ? launchSelect<true> : launchSelect<false>)(
+        stream, scores, visible, row_count, selected, counts, batch, rows,
+        seq_len, s0, chunk_stride, total, max_blocks, ratio, block_topk,
+        capacity);
   }
   return hipGetLastError();
 }
@@ -1320,12 +1374,17 @@ extern "C" int hip_sparse_attention_indexer(
     int64_t compress_ratio, int64_t token_budget, int element_size_bytes,
     float epsilon, float scale, const int64_t *rotary_position_ids,
     const uint8_t *rotary_sections, int64_t id_sections, int64_t id_rows,
-    int32_t *selected_counts) {
+    int32_t *selected_counts, int pair_format) {
   if (!query || !query_norm_weight || !key_norm_weight || !cos_cache ||
       !sin_cache || (past_len > 0 && !past_key) || !selected_indices ||
       !present_key || (rotary_position_ids && !rotary_sections)) {
     fprintf(stderr,
             "[custom_kernels] hip_sparse_attention_indexer: null pointer\n");
+    return -1;
+  }
+  if (pair_format && (mask || !selected_counts)) {
+    fprintf(stderr, "[custom_kernels] hip_sparse_attention_indexer: "
+                    "pair_format needs selected_counts and no mask\n");
     return -1;
   }
   if (batch < 0 || seq_len < 0 || past_len < 0 || head_size != kD ||
@@ -1420,7 +1479,7 @@ extern "C" int hip_sparse_attention_indexer(
         static_cast<int>(past_len), static_cast<int>(past_rows),
         static_cast<int>(present_rows), static_cast<int>(num_heads),
         static_cast<int>(compress_ratio), block_topk, capacity, epsilon,
-        scale);
+        scale, pair_format != 0);
   } else {
     err = launchAll<float>(
         s, l, static_cast<const float *>(query),
@@ -1436,7 +1495,7 @@ extern "C" int hip_sparse_attention_indexer(
         static_cast<int>(past_len), static_cast<int>(past_rows),
         static_cast<int>(present_rows), static_cast<int>(num_heads),
         static_cast<int>(compress_ratio), block_topk, capacity, epsilon,
-        scale);
+        scale, pair_format != 0);
   }
   if (err != hipSuccess) {
     fprintf(stderr,

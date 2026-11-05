@@ -3938,6 +3938,19 @@ typedef struct HipDsaPrologue {
   float epsilon;
 } HipDsaPrologue;
 
+// Pairing of hip_dynamic_sparse_attention with a pair_format
+// hip_sparse_attention_indexer of past length past_len that wrote
+// selected_indices. Rows s < clamp(max_selected - past_len, 0, S) of every
+// batch are dense: they take positions 0, 1, ... (their count of them) and
+// their selected_indices rows are never read. When enough rows are dense, the
+// attention runs them as one causal GQA prefill under gqa_policy (the
+// session's autotune policy, may be null) and only redoes a batch whose
+// seqlens_k disagrees with past_len.
+typedef struct HipDsaPair {
+  int64_t past_len;
+  void* gqa_policy;
+} HipDsaPair;
+
 // com.microsoft DynamicSparseAttention, attention_mode=selected_only over the
 // main cache, fp16, no sink.
 //   query            [B, S, N*D], or packed [B, S, (N + 2*kvN)*D] (q, k, v
@@ -3950,6 +3963,7 @@ typedef struct HipDsaPrologue {
 //   gate             [B, S, N*D] or null: output = attention * Sigmoid(gate)
 //                    with the rounding of an unfused Sigmoid then Mul
 //   prologue         null, or the q/k norm and MRoPE above
+//   pair             null, or the pairing above
 //   output           [B, S, N*D]
 // D must be 128 or 256, N/kvN at most 16, all tensors 16-byte aligned.
 // workspace must hold hip_dynamic_sparse_attention_workspace_size() bytes.
@@ -3986,7 +4000,8 @@ HIP_KERNEL_API int hip_dynamic_sparse_attention(
     int64_t head_size,
     int64_t capacity,
     int64_t max_selected,
-    float scale);
+    float scale,
+    const HipDsaPair* pair);
 
 // com.microsoft SparseAttentionIndexer, policy_mode=qsa, packed QK.
 // T = fp16 (element_size_bytes 2) or fp32 (4).
@@ -4008,6 +4023,10 @@ HIP_KERNEL_API int hip_dynamic_sparse_attention(
 //                    < id_sections (with ids only)
 //   selected_counts  [B, S] int32 or null; receives the number of valid
 //                    (non-negative) entries of each selected_indices row
+//   pair_format      0, or 1 (needs selected_counts and no mask): rows with
+//                    P + s + 1 <= token_budget + r - 1 select every position
+//                    and only get their count; the other rows list their
+//                    blocks by ascending index instead of by score
 // D must be 128, 1 <= N <= 8, R even in (0, D], token_budget / r <= 512.
 // workspace must hold hip_sparse_attention_indexer_workspace_size() bytes.
 HIP_KERNEL_API size_t hip_sparse_attention_indexer_workspace_size(
@@ -4050,7 +4069,8 @@ HIP_KERNEL_API int hip_sparse_attention_indexer(
     const uint8_t* rotary_sections,
     int64_t id_sections,
     int64_t id_rows,
-    int32_t* selected_counts);
+    int32_t* selected_counts,
+    int pair_format);
 
 /* =========================================================================
  * Conv — general forward convolution (1D / 2D / 3D spatial)

@@ -6,6 +6,7 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
+#include "../runtime_state_internal.h"
 #include "hip_custom_kernels.h"
 
 #include <cstdio>
@@ -33,7 +34,7 @@ int wrap_dynamic_sparse_attention(
     int64_t position_batch, int64_t position_seq_len, int64_t cos_rows,
     int64_t cos_width, int64_t sin_rows, int64_t sin_width, int64_t section_t,
     int64_t section_h, int64_t section_w, int64_t mrope_layout, float scale,
-    float norm_epsilon) {
+    float norm_epsilon, const void *past_sequence_length) {
   const bool packed = !key && !value;
   if (!state || !query || (!packed && (!key || !value)) || !past_key ||
       !past_value || !selected_counts || !seqlens_k || !output ||
@@ -153,17 +154,30 @@ int wrap_dynamic_sparse_attention(
     return -1;
   }
 
+  HipDsaPair pair{};
+  if (past_sequence_length) {
+    if (!hipdnn_ep_read_past_sequence_length(
+            state, stream, past_sequence_length, &pair.past_len) ||
+        pair.past_len < 0) {
+      fprintf(stderr, "wrap_dynamic_sparse_attention: failed to read the "
+                      "paired past_sequence_length\n");
+      return -1;
+    }
+    pair.gqa_policy = state->gqa_autotune_policy;
+  }
+  const HipDsaPair *pair_ptr = past_sequence_length ? &pair : nullptr;
+
   OP_PROFILE(
       "dynamic_sparse_attention",
       [&] {
         char b[128];
         snprintf(b, sizeof(b),
-                 "b=%lld,sq=%lld,h=%lld,g=%lld,d=%lld,cap=%lld,k=%lld%s%s%s",
+                 "b=%lld,sq=%lld,h=%lld,g=%lld,d=%lld,cap=%lld,k=%lld%s%s%s%s",
                  (long long)batch, (long long)seq_len, (long long)num_heads,
                  (long long)kv_num_heads, (long long)head_size,
                  (long long)capacity, (long long)max_selected,
                  packed ? ",packed" : "", prologue_ptr ? ",prologue" : "",
-                 gate ? ",gate" : "");
+                 gate ? ",gate" : "", pair_ptr ? ",pair" : "");
         return std::string(b);
       },
       state);
@@ -171,11 +185,12 @@ int wrap_dynamic_sparse_attention(
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_dynamic_sparse_attention: B=%lld S=%lld N=%lld "
       "kvN=%lld D=%lld cap=%lld max_selected=%lld scale=%f "
-      "shared_cache=%d packed=%d prologue=%d gate=%d\n",
+      "shared_cache=%d packed=%d prologue=%d gate=%d pair_past=%lld\n",
       (long long)batch, (long long)seq_len, (long long)num_heads,
       (long long)kv_num_heads, (long long)head_size, (long long)capacity,
       (long long)max_selected, (double)scale, past_key == present_key ? 1 : 0,
-      packed ? 1 : 0, prologue_ptr ? 1 : 0, gate ? 1 : 0);
+      packed ? 1 : 0, prologue_ptr ? 1 : 0, gate ? 1 : 0,
+      (long long)(pair_ptr ? pair.past_len : -1));
 
   const size_t ws_bytes = hip_dynamic_sparse_attention_workspace_size(
       batch, seq_len, num_heads, kv_num_heads, head_size, max_selected,
@@ -198,7 +213,8 @@ int wrap_dynamic_sparse_attention(
       static_cast<const int32_t *>(selected_counts),
       static_cast<const int32_t *>(seqlens_k), gate, prologue_ptr, output,
       present_key, present_value, workspace, ws_bytes, batch, seq_len,
-      num_heads, kv_num_heads, head_size, capacity, max_selected, scale);
+      num_heads, kv_num_heads, head_size, capacity, max_selected, scale,
+      pair_ptr);
   if (rc != 0) {
     fprintf(stderr,
             "wrap_dynamic_sparse_attention: hip_dynamic_sparse_attention "

@@ -766,7 +766,7 @@ int wrap_dynamic_sparse_attention(
     int64_t position_batch, int64_t position_seq_len, int64_t cos_rows,
     int64_t cos_width, int64_t sin_rows, int64_t sin_width, int64_t section_t,
     int64_t section_h, int64_t section_w, int64_t mrope_layout, float scale,
-    float norm_epsilon) {
+    float norm_epsilon, const void *past_sequence_length) {
   const bool packed = !key && !value;
   const int prologue_parts = (q_norm_weight != nullptr) +
                              (k_norm_weight != nullptr) +
@@ -820,12 +820,13 @@ int wrap_dynamic_sparse_attention(
   (void)seqlens_len;
   MOCK_PRINT("[MOCK] wrap_dynamic_sparse_attention(B=%lld, S=%lld, N=%lld, "
              "kvN=%lld, D=%lld, cap=%lld, max_selected=%lld, scale=%f, "
-             "shared_cache=%d, packed=%d, prologue=%d, gate=%d)\n",
+             "shared_cache=%d, packed=%d, prologue=%d, gate=%d, paired=%d)\n",
              (long long)batch, (long long)seq_len, (long long)num_heads,
              (long long)kv_num_heads, (long long)head_size, (long long)capacity,
              (long long)max_selected, (double)scale,
              past_key == present_key ? 1 : 0, packed ? 1 : 0,
-             prologue_parts != 0 ? 1 : 0, gate ? 1 : 0);
+             prologue_parts != 0 ? 1 : 0, gate ? 1 : 0,
+             past_sequence_length ? 1 : 0);
   return 0;
 }
 
@@ -841,11 +842,12 @@ int wrap_sparse_attention_indexer(
     int64_t mask_len, int64_t cos_batch, int64_t sin_batch, int64_t sin_rows,
     float epsilon, float scale, const void *rotary_position_ids,
     const void *rotary_sections, int64_t id_sections, int64_t id_batch,
-    int64_t id_rows, void *selected_counts) {
+    int64_t id_rows, void *selected_counts, int64_t pair_format) {
   if (!state || !query || !query_norm_weight || !key_norm_weight ||
       !cos_cache || !sin_cache || (past_rows > 0 && !past_key) ||
       !selected_indices || !present_key ||
-      (rotary_position_ids && !rotary_sections)) {
+      (rotary_position_ids && !rotary_sections) ||
+      (pair_format && (mask || !past_sequence_length || !selected_counts))) {
     fprintf(stderr,
             "Invalid required argument in wrap_sparse_attention_indexer\n");
     return -1;
@@ -863,7 +865,7 @@ int wrap_sparse_attention_indexer(
   MOCK_PRINT("[MOCK] wrap_sparse_attention_indexer(B=%lld, S=%lld, "
              "past_rows=%lld, N=%lld, D=%lld, R=%lld, X=%lld, batched=%lld, "
              "r=%lld, budget=%lld, elem=%lld, eps=%g, scale=%f, mask=%d, "
-             "id_rows=%lld, counts=%d)\n",
+             "id_rows=%lld, counts=%d, pair=%d)\n",
              (long long)batch, (long long)seq_len, (long long)past_rows,
              (long long)num_heads, (long long)head_size,
              (long long)rotary_width, (long long)rotary_rows,
@@ -871,7 +873,7 @@ int wrap_sparse_attention_indexer(
              (long long)token_budget, (long long)element_size_bytes,
              (double)epsilon, (double)scale, mask ? 1 : 0,
              (long long)(rotary_position_ids ? id_rows : 0),
-             selected_counts ? 1 : 0);
+             selected_counts ? 1 : 0, pair_format ? 1 : 0);
   return 0;
 }
 

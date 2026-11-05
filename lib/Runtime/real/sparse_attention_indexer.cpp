@@ -14,8 +14,8 @@
 #include <cstdio>
 #include <string>
 
-static bool read_past_sequence_length(RuntimeState *state, void *stream,
-                                      const void *ptr, int64_t *out) {
+bool hipdnn_ep_read_past_sequence_length(RuntimeState *state, void *stream,
+                                         const void *ptr, int64_t *out) {
   if (state->sai_past_len_cached_valid &&
       state->sai_past_len_cached_ptr == ptr) {
     *out = state->sai_past_len_cached_val;
@@ -47,12 +47,17 @@ int wrap_sparse_attention_indexer(
     int64_t mask_len, int64_t cos_batch, int64_t sin_batch, int64_t sin_rows,
     float epsilon, float scale, const void *rotary_position_ids,
     const void *rotary_sections, int64_t id_sections, int64_t id_batch,
-    int64_t id_rows, void *selected_counts) {
+    int64_t id_rows, void *selected_counts, int64_t pair_format) {
   if (!state || !query || !query_norm_weight || !key_norm_weight ||
       !cos_cache || !sin_cache || (past_rows > 0 && !past_key) ||
       !selected_indices || !present_key ||
       (rotary_position_ids && !rotary_sections)) {
     fprintf(stderr, "wrap_sparse_attention_indexer: null required argument\n");
+    return -1;
+  }
+  if (pair_format && (mask || !past_sequence_length || !selected_counts)) {
+    fprintf(stderr, "wrap_sparse_attention_indexer: pair_format needs "
+                    "past_sequence_length and selected_counts and no mask\n");
     return -1;
   }
   if (past_batch != batch) {
@@ -70,8 +75,8 @@ int wrap_sparse_attention_indexer(
 
   int64_t past_len = past_rows;
   if (past_sequence_length) {
-    if (!read_past_sequence_length(state, stream, past_sequence_length,
-                                   &past_len)) {
+    if (!hipdnn_ep_read_past_sequence_length(state, stream,
+                                             past_sequence_length, &past_len)) {
       fprintf(stderr, "wrap_sparse_attention_indexer: failed to read "
                       "past_sequence_length\n");
       return -1;
@@ -126,9 +131,10 @@ int wrap_sparse_attention_indexer(
       "sparse_attention_indexer",
       [&] {
         char b[96];
-        snprintf(b, sizeof(b), "b=%lld,sq=%lld,past=%lld,h=%lld,mask=%d",
+        snprintf(b, sizeof(b), "b=%lld,sq=%lld,past=%lld,h=%lld,mask=%d%s",
                  (long long)batch, (long long)seq_len, (long long)past_len,
-                 (long long)num_heads, mask ? 1 : 0);
+                 (long long)num_heads, mask ? 1 : 0,
+                 pair_format ? ",pair" : "");
         return std::string(b);
       },
       state);
@@ -137,14 +143,14 @@ int wrap_sparse_attention_indexer(
       "[REAL] wrap_sparse_attention_indexer: B=%lld S=%lld P=%lld "
       "past_rows=%lld present_rows=%lld N=%lld D=%lld R=%lld X=%lld "
       "batched=%lld r=%lld budget=%lld elem=%lld eps=%g scale=%f mask=%d "
-      "id_rows=%lld\n",
+      "id_rows=%lld pair=%d\n",
       (long long)batch, (long long)seq_len, (long long)past_len,
       (long long)past_rows, (long long)present_rows, (long long)num_heads,
       (long long)head_size, (long long)rotary_width, (long long)rotary_rows,
       (long long)rotary_batched, (long long)compress_ratio,
       (long long)token_budget, (long long)element_size_bytes, (double)epsilon,
       (double)scale, mask ? 1 : 0,
-      (long long)(rotary_position_ids ? id_rows : 0));
+      (long long)(rotary_position_ids ? id_rows : 0), pair_format ? 1 : 0);
 
   const size_t ws_bytes = hip_sparse_attention_indexer_workspace_size(
       batch, seq_len, past_len, num_heads, head_size, compress_ratio);
@@ -169,7 +175,7 @@ int wrap_sparse_attention_indexer(
       token_budget, static_cast<int>(element_size_bytes), epsilon, scale,
       static_cast<const int64_t *>(rotary_position_ids),
       static_cast<const uint8_t *>(rotary_sections), id_sections, id_rows,
-      static_cast<int32_t *>(selected_counts));
+      static_cast<int32_t *>(selected_counts), pair_format ? 1 : 0);
   if (rc != 0) {
     fprintf(stderr,
             "wrap_sparse_attention_indexer: hip_sparse_attention_indexer "

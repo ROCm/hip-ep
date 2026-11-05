@@ -3169,7 +3169,7 @@ LogicalResult GatedDeltaNetOp::verify() {
 //   ins(query) [kv(key, value)] cache(past_key, past_value)
 //   select(selected_indices, selected_counts, seqlens_k) [gate(gate)]
 //   [prologue(q_norm_weight, k_norm_weight, position_ids, cos_cache,
-//             sin_cache)]
+//             sin_cache)] [pair(past_sequence_length)]
 //   outs(output, present_key, present_value)
 //===----------------------------------------------------------------------===//
 
@@ -3213,6 +3213,9 @@ LogicalResult DynamicSparseAttentionOp::verify() {
   }
   if (hasPrologue) {
     data.append(prologue.begin(), prologue.end());
+  }
+  if (getPastSequenceLength()) {
+    data.push_back(getPastSequenceLength());
   }
   data.append({getOutput(), getPresentKey(), getPresentValue()});
   if (failed(verifyDpsComputeOp(*this, data, 3))) {
@@ -3329,6 +3332,9 @@ LogicalResult DynamicSparseAttentionOp::verify() {
           check(getSelectedIndices(), "selected_indices", i32, {rows, kAny})) ||
       failed(check(getSelectedCounts(), "selected_counts", i32, {rows})) ||
       failed(check(getSeqlensK(), "seqlens_k", i32, {batch})) ||
+      (getPastSequenceLength() &&
+       failed(
+           check(getPastSequenceLength(), "past_sequence_length", i32, {1}))) ||
       failed(check(getOutput(), "output", f16, {batch, seq, qWidth})) ||
       failed(check(getPresentKey(), "present_key", f16, cacheShape)) ||
       failed(check(getPresentValue(), "present_value", f16, cacheShape))) {
@@ -3382,6 +3388,11 @@ LogicalResult SparseAttentionIndexerOp::verify() {
   if (gathered != getRotarySections().has_value()) {
     return emitOpError(
         "rotary_position_ids and rotary_sections must be given together");
+  }
+  if (getPairFormat() &&
+      (getMask() || !getPastSequenceLength() || !getSelectedCounts())) {
+    return emitOpError("pair_format needs past_sequence_length and "
+                       "selected_counts and no mask");
   }
 
   const int64_t ratio = getCompressRatio();

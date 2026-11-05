@@ -4750,6 +4750,13 @@ def Hip_DynamicSparseAttentionOp : Hip_DpsOp_AutoReify<"dynamic_sparse_attention
     With gate, output = attention * Sigmoid(gate), rounded to f16 after the
     attention, after the sigmoid and after the product.
 
+    past_sequence_length (optional, i32 [1]) pairs the op with a pair_format
+    hip.sparse_attention_indexer of that past length P, whose selection it
+    reads: row (b, s) with P + s + 1 <= K is dense, and its c-th candidate
+    is position c (for c below its count) instead of a selected_indices
+    entry, which the indexer left unwritten there. The other filters are
+    unchanged.
+
     Example:
     ```mlir
     hip.dynamic_sparse_attention(%ctx) ins(%q : memref<1x1x6144xf16, 1>)
@@ -4781,6 +4788,7 @@ def Hip_DynamicSparseAttentionOp : Hip_DpsOp_AutoReify<"dynamic_sparse_attention
     Optional<Hip_TensorOrMemRef>:$position_ids,
     Optional<Hip_TensorOrMemRef>:$cos_cache,
     Optional<Hip_TensorOrMemRef>:$sin_cache,
+    Optional<Hip_TensorOrMemRef>:$past_sequence_length,
     Hip_TensorOrMemRef:$output,
     Hip_TensorOrMemRef:$present_key,
     Hip_TensorOrMemRef:$present_value,
@@ -4805,6 +4813,7 @@ def Hip_DynamicSparseAttentionOp : Hip_DpsOp_AutoReify<"dynamic_sparse_attention
         $cos_cache `,` $sin_cache `:` type($q_norm_weight) `,`
         type($k_norm_weight) `,` type($position_ids) `,` type($cos_cache) `,`
         type($sin_cache) `)`)?
+    (`pair` `(` $past_sequence_length^ `:` type($past_sequence_length) `)`)?
     `outs` `(` $output `,` $present_key `,` $present_value `:`
               type($output) `,` type($present_key) `,` type($present_value) `)`
     attr-dict (`:` type($result_tensors)^)?
@@ -4866,6 +4875,13 @@ def Hip_SparseAttentionIndexerOp : Hip_DpsOp_AutoReify<"sparse_attention_indexer
     Gather/Where/Concat subgraph would otherwise materialize, read only at the
     rows the indexer rotates.
 
+    pair_format, which needs past_sequence_length and selected_counts and no
+    mask, marks a selection read only by hip.dynamic_sparse_attention ops
+    paired through the same past_sequence_length. Row (b, s) with
+    P + s + 1 <= K * r + r - 1 selects every position; its selected_indices
+    row is left unwritten (its count is still written). The other rows list
+    their top blocks by ascending block index rather than by score.
+
     Example:
     ```mlir
     hip.sparse_attention_indexer(%ctx)
@@ -4898,7 +4914,8 @@ def Hip_SparseAttentionIndexerOp : Hip_DpsOp_AutoReify<"sparse_attention_indexer
     I64Attr:$token_budget,
     F32Attr:$epsilon,
     F32Attr:$scale,
-    OptionalAttr<DenseI32ArrayAttr>:$rotary_sections
+    OptionalAttr<DenseI32ArrayAttr>:$rotary_sections,
+    UnitAttr:$pair_format
   );
 
   let assemblyFormat = [{

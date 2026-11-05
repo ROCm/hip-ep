@@ -298,7 +298,9 @@ struct DsaPrologueFold : public RewritePattern {
     }
 
     SmallVector<Value> operands = llvm::to_vector(op->getOperands());
-    operands.resize(kDsaMaxInputs, op->getOperand(kAuxKeyIdx));
+    operands.resize(
+        std::max<size_t>(operands.size(), kDsaPrologueIdx + kDsaPrologueInputs),
+        op->getOperand(kAuxKeyIdx));
     operands[0] = q->input;
     operands[kKeyIdx] = k->input;
     llvm::copy(

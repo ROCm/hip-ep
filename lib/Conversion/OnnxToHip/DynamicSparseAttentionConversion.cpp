@@ -91,8 +91,8 @@ mlir::LogicalResult DynamicSparseAttentionToHip::matchAndRewrite(
 
   if (numOps < 11 || numOps > kDsaMaxInputs) {
     return rewriter.notifyMatchFailure(
-        op, "DynamicSparseAttention expects 11-17 operands, or up to 23 with "
-            "folded gate and prologue inputs");
+        op, "DynamicSparseAttention expects 11-17 operands, or up to 24 with "
+            "folded gate, prologue and pairing inputs");
   }
   mlir::Value query = op->getOperand(0);
   mlir::Value key = getOptionalOperand(1);
@@ -104,11 +104,13 @@ mlir::LogicalResult DynamicSparseAttentionToHip::matchAndRewrite(
   mlir::Value seqlensK = getOptionalOperand(9);
   mlir::Value gate = getOptionalOperand(kDsaGateIdx);
   llvm::SmallVector<mlir::Value> prologue;
-  for (size_t idx = kDsaPrologueIdx; idx < kDsaMaxInputs; ++idx) {
+  for (size_t idx = kDsaPrologueIdx; idx < kDsaPrologueIdx + kDsaPrologueInputs;
+       ++idx) {
     if (mlir::Value v = getOptionalOperand(idx)) {
       prologue.push_back(v);
     }
   }
+  mlir::Value pastSeqLen = getOptionalOperand(kDsaPastSequenceLengthIdx);
   if (static_cast<bool>(key) != static_cast<bool>(value)) {
     return rewriter.notifyMatchFailure(
         op, "key and value must be both given or both absent");
@@ -243,6 +245,10 @@ mlir::LogicalResult DynamicSparseAttentionToHip::matchAndRewrite(
   if (!matches(seqlensK, i32, {batch})) {
     return rewriter.notifyMatchFailure(op, "seqlens_k must be i32 [B]");
   }
+  if (pastSeqLen && !matches(pastSeqLen, i32, {1})) {
+    return rewriter.notifyMatchFailure(
+        op, "paired past_sequence_length must be i32 [1]");
+  }
 
   if (op->getNumResults() != 3) {
     return rewriter.notifyMatchFailure(
@@ -304,16 +310,19 @@ mlir::LogicalResult DynamicSparseAttentionToHip::matchAndRewrite(
     operands.push_back(gate);
   }
   operands.append(prologue.begin(), prologue.end());
+  if (pastSeqLen) {
+    operands.push_back(pastSeqLen);
+  }
   operands.append({outputInit, presentKeyInit, presentValueInit});
   const int32_t kv = packed ? 0 : 1;
   const int32_t pro = hasPrologue ? 1 : 0;
   auto state = mlir::OperationState(loc, "hip.dynamic_sparse_attention");
   state.addOperands(operands);
   state.addTypes({outputType, presentKeyType, presentValueType});
-  state.addAttribute(
-      "operand_segment_sizes",
-      rewriter.getDenseI32ArrayAttr({1, 1, kv, kv, 1, 1, 1, 1, 1, gate ? 1 : 0,
-                                     pro, pro, pro, pro, pro, 1, 1, 1}));
+  state.addAttribute("operand_segment_sizes",
+                     rewriter.getDenseI32ArrayAttr(
+                         {1, 1, kv, kv, 1, 1, 1, 1, 1, gate ? 1 : 0, pro, pro,
+                          pro, pro, pro, pastSeqLen ? 1 : 0, 1, 1, 1}));
   state.addAttribute("num_heads", rewriter.getI64IntegerAttr(numHeads));
   state.addAttribute("kv_num_heads", rewriter.getI64IntegerAttr(kvNumHeads));
   state.addAttribute("scale", rewriter.getF32FloatAttr(scale));

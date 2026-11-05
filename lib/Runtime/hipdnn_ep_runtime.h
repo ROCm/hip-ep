@@ -1996,6 +1996,9 @@ int wrap_gated_delta_net(RuntimeState *state, const void *qkv,
 // position_ids, cos_cache and sin_cache are all null (their dims, section_*,
 // mrope_layout and norm_epsilon ignored) or all set: the q/k norm and MRoPE
 // prologue of hip_dynamic_sparse_attention, rotary width 2 * sum(section).
+// past_sequence_length (device int32 [1]) may be null; when given it is the
+// past length of the pair_format indexer that wrote selected_indices, whose
+// dense rows (past + s + 1 <= max_selected) take positions 0, 1, ... in order.
 int wrap_dynamic_sparse_attention(
     RuntimeState *state, const void *query, const void *key, const void *value,
     const void *past_key, const void *past_value, const void *selected_indices,
@@ -2018,7 +2021,7 @@ int wrap_dynamic_sparse_attention(
     int64_t position_batch, int64_t position_seq_len, int64_t cos_rows,
     int64_t cos_width, int64_t sin_rows, int64_t sin_width, int64_t section_t,
     int64_t section_h, int64_t section_w, int64_t mrope_layout, float scale,
-    float norm_epsilon);
+    float norm_epsilon, const void *past_sequence_length);
 
 // past_key may be null when past_len == 0; mask may be null (all visible).
 // mask_* are ignored without a mask and cos_batch / sin_batch unless
@@ -2029,7 +2032,10 @@ int wrap_dynamic_sparse_attention(
 // section, the ids row of its positions; without the ids, rotary_sections and
 // id_* are ignored.
 // selected_counts ([batch, seq_len] int32) may be null; when given it receives
-// the number of valid entries of each selected_indices row.
+// the number of valid entries of each selected_indices row. pair_format != 0
+// (needs past_sequence_length and selected_counts, no mask) leaves the rows
+// that select every position unwritten and lists the others' blocks in
+// ascending order, for a paired wrap_dynamic_sparse_attention.
 int wrap_sparse_attention_indexer(
     RuntimeState *state, const void *query, const void *query_norm_weight,
     const void *key_norm_weight, const void *cos_cache, const void *sin_cache,
@@ -2042,7 +2048,7 @@ int wrap_sparse_attention_indexer(
     int64_t mask_len, int64_t cos_batch, int64_t sin_batch, int64_t sin_rows,
     float epsilon, float scale, const void *rotary_position_ids,
     const void *rotary_sections, int64_t id_sections, int64_t id_batch,
-    int64_t id_rows, void *selected_counts);
+    int64_t id_rows, void *selected_counts, int64_t pair_format);
 
 //==============================================================================
 // ONNX Gemm via hipBLASLt
