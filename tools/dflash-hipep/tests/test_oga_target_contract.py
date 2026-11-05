@@ -1,3 +1,7 @@
+#
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the MIT License.
+#
 """Unit tests for the OGA adapter operations that replace PyTorch target calls.
 
 These tests use scripted OGA generators and ORT sessions. They verify the
@@ -18,7 +22,7 @@ import numpy as np
 HIPEP_STUDY_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(HIPEP_STUDY_ROOT))
 
-from oga_target_native import (
+from oga_target_native import (  # noqa: E402
     DFLASH_LOGITS,
     OgaDFlashTarget,
 )
@@ -36,10 +40,15 @@ def _adapter() -> OgaDFlashTarget:
     target.vocab_size = 248320
     target.hidden_output_names = TEST_HIDDEN_OUTPUT_NAMES
     target.final_hidden_output = "/model/layers.40/final_norm_layernorm/output_0"
+    target.state_window = 0
+    target.force_replay = False
+    target.window_crop_available = False
     target.generator = None
     target.max_length = 0
     target.processed_length = 0
     target.partial_rollback_count = 0
+    target.window_crop_count = 0
+    target.replay_append_count = 0
     target._expected_next_token = None
     target.rollback_correction_mismatch_count = 0
     return target
@@ -102,6 +111,10 @@ class _SnapshotRewindGenerator:
     def rewind_to(self, length: int) -> None:
         self.calls.append(("rewind_to", length))
         self.phase = "rewound"
+
+    def crop_to_accepted(self, length: int, recurrent_position: int) -> None:
+        self.calls.append(("crop_to_accepted", (length, recurrent_position)))
+        self.phase = "cropped"
 
     def append_tokens(self, tokens: np.ndarray) -> None:
         self.calls.append(("append_tokens", tokens.copy()))
@@ -190,7 +203,7 @@ class OgaTargetContractTests(unittest.TestCase):
         self.assertEqual(feeds["hidden_states"].shape, hidden.shape)
 
     def test_snapshot_rewind_restores_and_appends_only_accepted_rows(self) -> None:
-        """Patched OGA snapshots before verify and rewinds a partial rejection."""
+        """A non-windowed target rewinds and replays a partial rejection."""
         target = _adapter()
         generator = _SnapshotRewindGenerator()
         target.generator = generator
@@ -222,6 +235,8 @@ class OgaTargetContractTests(unittest.TestCase):
         self.assertEqual(committed, 12)
         self.assertEqual(target.processed_length, 22)
         self.assertEqual(target.partial_rollback_count, 1)
+        self.assertEqual(target.window_crop_count, 0)
+        self.assertEqual(target.replay_append_count, 1)
         self.assertIn(("rewind_to", 20), generator.calls)
         restored_append = [
             call for call in generator.calls if call[0] == "append_tokens"
@@ -233,6 +248,40 @@ class OgaTargetContractTests(unittest.TestCase):
         np.testing.assert_array_equal(
             output.target_hidden[:, :2, :2048],
             np.full((1, 2, 2048), 30, dtype=np.float16),
+        )
+
+    def test_windowed_partial_accept_crops_without_replay(self) -> None:
+        target = _adapter()
+        target.state_window = 8
+        target.window_crop_available = True
+        generator = _SnapshotRewindGenerator()
+        target.generator = generator
+        target.processed_length = 20
+        target._expected_next_token = 10
+
+        output = target.verify(np.asarray([[10, 21, 22]], dtype=np.int64))
+        committed = target.commit_verified_prefix(
+            output,
+            committed_count=2,
+            expected_bonus=12,
+            committed_prefix_ids=np.asarray(
+                [[*range(20), 10, 21]],
+                dtype=np.int64,
+            ),
+        )
+
+        self.assertEqual(committed, 12)
+        self.assertEqual(target.processed_length, 22)
+        self.assertEqual(target.partial_rollback_count, 1)
+        self.assertEqual(target.window_crop_count, 1)
+        self.assertEqual(target.replay_append_count, 0)
+        self.assertIn(("crop_to_accepted", (22, 1)), generator.calls)
+        self.assertNotIn(("rewind_to", 20), generator.calls)
+        appends = [call for call in generator.calls if call[0] == "append_tokens"]
+        self.assertEqual(len(appends), 1)
+        np.testing.assert_array_equal(
+            appends[0][1],
+            np.asarray([10, 21, 22], dtype=np.int32),
         )
 
 

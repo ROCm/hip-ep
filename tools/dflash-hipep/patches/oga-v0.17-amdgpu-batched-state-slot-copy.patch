@@ -1,0 +1,205 @@
+diff --git a/src/ep/amdgpu/interface.cpp b/src/ep/amdgpu/interface.cpp
+index 5fb77be0..ea8c1b87 100644
+--- a/src/ep/amdgpu/interface.cpp
++++ b/src/ep/amdgpu/interface.cpp
+@@ -16,14 +16,100 @@
+ #include "models/io/kv_cache.h"
+ #include "interface.h"
+
++#include <atomic>
++#include <cstddef>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <mutex>
+ #include <stdexcept>
+
++#if defined(_WIN32)
++#define WIN32_LEAN_AND_MEAN
++#include <windows.h>
++#elif defined(__linux__) && !defined(__ANDROID__)
++#include <dlfcn.h>
++#endif
++
+ namespace Generators {
+ namespace AMDGPU {
+
+ const char* device_label = "amdgpu";
+ const char* label_cpu = "cpu";
+
++namespace {
++
++constexpr uint32_t kHipEpDeviceApiVersion = 1;
++constexpr int kHipEpDeviceApiSuccess = 0;
++constexpr int kHipEpDeviceApiUnavailable = 2;
++
++struct HipEpStateSlotDesc {
++  void* base;
++  uint64_t slot_bytes;
++};
++
++static_assert(sizeof(HipEpStateSlotDesc) == sizeof(StateSlotDesc));
++static_assert(alignof(HipEpStateSlotDesc) == alignof(StateSlotDesc));
++static_assert(offsetof(HipEpStateSlotDesc, base) == offsetof(StateSlotDesc, base));
++static_assert(offsetof(HipEpStateSlotDesc, slot_bytes) == offsetof(StateSlotDesc, slot_bytes));
++
++using HipEpDeviceApiVersionFn = uint32_t (*)();
++using HipEpCopyStateSlotsFn = int (*)(const HipEpStateSlotDesc*, const HipEpStateSlotDesc*,
++                                      int32_t, int32_t, int32_t);
++
++struct HipEpDeviceApi {
++  HipEpCopyStateSlotsFn copy_state_slots{};
++};
++
++HipEpDeviceApi ResolveHipEpDeviceApi() {
++#if defined(_WIN32)
++  HMODULE provider = GetModuleHandleA("hipgpu.dll");
++  if (!provider)
++    return {};
++  auto get_symbol = [&](const char* name) {
++    return reinterpret_cast<void*>(GetProcAddress(provider, name));
++  };
++#elif defined(__linux__) && !defined(__ANDROID__)
++  void* provider = nullptr;
++  // Resolve against the provider instance ORT already loaded for the decoder.
++  // Opening MORPHIZEN_EP_LIB normally can create a second libhipgpu instance
++  // with a different thread-local current-stream slot.
++  if (const char* provider_path = std::getenv("AMDGPU_EP_PATH"))
++    provider = dlopen(provider_path, RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
++  if (!provider)
++    provider = dlopen("libhipgpu.so", RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
++  if (!provider)
++    return {};
++  auto get_symbol = [&](const char* name) { return dlsym(provider, name); };
++#else
++  return {};
++#endif
++
++  auto version = reinterpret_cast<HipEpDeviceApiVersionFn>(
++      get_symbol("hipdnn_ep_device_api_version"));
++  auto copy = reinterpret_cast<HipEpCopyStateSlotsFn>(
++      get_symbol("hipdnn_ep_copy_state_slots"));
++  if (!version || version() != kHipEpDeviceApiVersion || !copy)
++    return {};
++  return {copy};
++}
++
++HipEpCopyStateSlotsFn GetHipEpCopyStateSlots() {
++  static std::mutex mutex;
++  static std::atomic<HipEpCopyStateSlotsFn> copy_state_slots{};
++  if (auto copy = copy_state_slots.load(std::memory_order_acquire))
++    return copy;
++  std::lock_guard<std::mutex> lock(mutex);
++  if (auto copy = copy_state_slots.load(std::memory_order_relaxed))
++    return copy;
++  const auto api = ResolveHipEpDeviceApi();
++  if (api.copy_state_slots)
++    copy_state_slots.store(api.copy_state_slots, std::memory_order_release);
++  return api.copy_state_slots;
++}
++
++}  // namespace
++
+ struct GpuMemory final : DeviceBuffer {
+   GpuMemory(size_t size, Ort::Allocator* allocator, const OrtMemoryInfo* memory_info)
+       : owned_{true}, ort_allocator_{allocator}, ort_memory_info_{memory_info} {
+@@ -275,6 +361,35 @@ struct InterfaceImpl : DeviceInterface {
+     return GetKvCacheQuantizationBits(session_options, to_string(GetType()));
+   }
+
++  bool CopyStateSlots(const void* descs_device, const void* descs_host, int count,
++                      int src_slot, int dst_slot) override {
++    auto copy = GetHipEpCopyStateSlots();
++    if (!copy) {
++      if (std::getenv("ORTGENAI_AMDGPU_TRACE_STATE_SLOT_COPY"))
++        std::fprintf(stderr, "[AMDGPU] HIP EP state-slot API unresolved\n");
++      return false;
++    }
++    const int status = copy(
++        static_cast<const HipEpStateSlotDesc*>(descs_device),
++        static_cast<const HipEpStateSlotDesc*>(descs_host), count, src_slot, dst_slot);
++    if (status == kHipEpDeviceApiSuccess) {
++      static std::atomic<bool> traced{};
++      if (std::getenv("ORTGENAI_AMDGPU_TRACE_STATE_SLOT_COPY") &&
++          !traced.exchange(true))
++        std::fprintf(stderr,
++                     "[AMDGPU] HIP EP batched state-slot copy active (%d tensors)\n",
++                     count);
++      return true;
++    }
++    if (status == kHipEpDeviceApiUnavailable) {
++      if (std::getenv("ORTGENAI_AMDGPU_TRACE_STATE_SLOT_COPY"))
++        std::fprintf(stderr, "[AMDGPU] HIP EP state-slot API unavailable\n");
++      return false;
++    }
++    throw std::runtime_error("HIP EP batched state-slot copy failed with status " +
++                             std::to_string(status));
++  }
++
+   void Synchronize() override {}
+
+  private:
+diff --git a/src/ep/cuda/interface.cpp b/src/ep/cuda/interface.cpp
+index 8b2292a3..6158e226 100644
+--- a/src/ep/cuda/interface.cpp
++++ b/src/ep/cuda/interface.cpp
+@@ -580,7 +580,8 @@ struct CudaInterfaceImplBase : DeviceInterface {
+     return true;
+   }
+
+-  bool CopyStateSlots(const void* descs_device, int count, int src_slot, int dst_slot) override {
++  bool CopyStateSlots(const void* descs_device, const void* /*descs_host*/, int count,
++                      int src_slot, int dst_slot) override {
+     cuda::LaunchCopyStateSlots(descs_device, count, src_slot, dst_slot, GetStream());
+     return true;
+   }
+diff --git a/src/models/io/recurrent_state.cpp b/src/models/io/recurrent_state.cpp
+index 486ca998..1facf738 100644
+--- a/src/models/io/recurrent_state.cpp
++++ b/src/models/io/recurrent_state.cpp
+@@ -232,8 +232,9 @@ bool RecurrentState::TryBatchedSlotPromote(size_t slot) {
+     slot_descs_.CopyCpuToDevice();
+   }
+
+-  return device.CopyStateSlots(slot_descs_.Span().data(), static_cast<int>(slot_descs_.size()),
+-                               static_cast<int>(slot), static_cast<int>(state_window_) - 1);
++  return device.CopyStateSlots(slot_descs_.Span().data(), slot_descs_cpu_.data(),
++                               static_cast<int>(slot_descs_.size()), static_cast<int>(slot),
++                               static_cast<int>(state_window_) - 1);
+ }
+
+ void RecurrentState::Update() {
+diff --git a/src/smartptrs.h b/src/smartptrs.h
+index b9982739..56f44078 100644
+--- a/src/smartptrs.h
++++ b/src/smartptrs.h
+@@ -217,7 +217,7 @@ static_assert(std::is_trivially_copyable_v<StateUpdateReplayDesc>);
+ // that boundary (Search, BatchedSampler, BatchedSamplerState, GeneratorParams, or Config).
+ // Dynamically loaded add-ons must report this exact version before the host can safely call through
+ // the C++ interface.
+-inline constexpr uint32_t kDeviceInterfaceVersion = 6;
++inline constexpr uint32_t kDeviceInterfaceVersion = 7;
+
+ struct DeviceInterface {
+   virtual ~DeviceInterface() {}
+@@ -311,13 +311,14 @@ struct DeviceInterface {
+   virtual bool ArgMaxDevice(const void* /*logits*/, ONNXTensorElementDataType /*logits_type*/, int /*num_rows*/,
+                             int /*vocab_size*/, DeviceSpan<int32_t> /*out_tokens*/) { return false; }
+   // Promote one window slot to another for every descriptor in `descs_device` (device memory,
+-  // `count` entries). A hybrid model has 2 state tensors per layer, so the per-tensor memcpy loop
+-  // this replaces issues 60+ cudaMemcpyAsync calls on every partial-accept MTP step; each costs a
+-  // few microseconds of *host* time, which shows up directly as GPU idle. One kernel launch does
+-  // the same work. Returns false on devices without an implementation.
++  // `count` entries). `descs_host` contains the identical host-side descriptors for providers
++  // that validate an external C ABI before launching. A hybrid model has 2 state tensors per
++  // layer, so the per-tensor memcpy loop this replaces issues 60+ device copies on every
++  // partial-accept MTP step. One kernel launch does the same work. Returns false on devices
++  // without an implementation.
+   // Keep last for vtable/ABI stability.
+-  virtual bool CopyStateSlots(const void* /*descs_device*/, int /*count*/, int /*src_slot*/,
+-                              int /*dst_slot*/) { return false; }
++  virtual bool CopyStateSlots(const void* /*descs_device*/, const void* /*descs_host*/,
++                              int /*count*/, int /*src_slot*/, int /*dst_slot*/) { return false; }
+   // Creates the conventional (non-paged) model state cache. The selected EP owns cache policy so
+   // providers can replace the standard exposed past/present tensor implementation. Keep last for
+   // vtable/ABI stability.

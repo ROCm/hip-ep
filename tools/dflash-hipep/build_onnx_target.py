@@ -1,8 +1,12 @@
+#
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the MIT License.
+#
 """Build a read-only-derived ONNX target for DFlash.
 
 The source OGA model is never written.  This script creates a replacement
 ``text.onnx`` graph that exposes the DFlash residual streams and final normalized
-hidden state, plus a standalone ``lm_head.onnx`` graph. 
+hidden state, plus a standalone ``lm_head.onnx`` graph.
 """
 
 from __future__ import annotations
@@ -10,7 +14,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,11 +22,6 @@ from pathlib import Path
 import onnx
 from onnx import TensorProto, helper
 
-
-DEFAULT_SOURCE = Path(
-    "/proj/xcohdstaff7/devledas/nobkup/models/"
-    "Qwen3.6-35B-A3B_gpuep_1.0_gpu_128"
-)
 DEFAULT_OUTPUT = Path(__file__).parent / "models/Qwen3.6-35B-A3B-hidden"
 TARGET_LAYER_IDS_BY_DRAFT = {
     "z-lab/Qwen3.6-35B-A3B-DFlash": (1, 6, 11, 16, 22, 27, 32, 37),
@@ -42,7 +41,6 @@ COPIED_ASSETS = (
     "vision.onnx.data",
 )
 LINKED_ASSETS = (
-    "genai_config.json",
     "tokenizer.json",
     "tokenizer_config.json",
     "processor_config.json",
@@ -127,7 +125,9 @@ def _assert_safe_paths(source: Path, output: Path) -> tuple[Path, Path]:
     source = source.resolve(strict=True)
     output = output.resolve(strict=False)
     if output == source or output.is_relative_to(source):
-        raise ValueError(f"Output must not be inside the source model directory: {output}")
+        raise ValueError(
+            f"Output must not be inside the source model directory: {output}"
+        )
     for name in (
         "text.onnx",
         "text.onnx.data",
@@ -144,7 +144,9 @@ def _assert_safe_paths(source: Path, output: Path) -> tuple[Path, Path]:
 def _replace_output_dir(output: Path, force: bool) -> None:
     if output.exists() or output.is_symlink():
         if not force:
-            raise FileExistsError(f"{output} already exists; pass --force to rebuild it")
+            raise FileExistsError(
+                f"{output} already exists; pass --force to rebuild it"
+            )
         if output.is_symlink() or output.is_file():
             output.unlink()
         else:
@@ -169,15 +171,20 @@ def _build_text_graph(source: Path, output: Path, spec: TargetModelSpec) -> list
 
     # expose the eight target hidden-state taps required by the DFlash draft:
     tap_names = spec.hidden_output_names
-    required = [*tap_names, spec.final_hidden_output] #also add the final hidden state output 
+    required = [
+        *tap_names,
+        spec.final_hidden_output,
+    ]  # also add the final hidden state output
     missing = [name for name in required if name not in produced]
     if missing:
-        raise RuntimeError("Required tensors are absent from source graph:\n  " + "\n  ".join(missing))
+        raise RuntimeError(
+            "Required tensors are absent from source graph:\n  " + "\n  ".join(missing)
+        )
 
     existing = {value.name for value in graph.output}
     for name in required:
         if name not in existing:
-            graph.output.append(_copy_value_info(graph, name)) 
+            graph.output.append(_copy_value_info(graph, name))
 
     head_node = next((node for node in graph.node if node.name == HEAD_NODE_NAME), None)
     if head_node is None:
@@ -185,8 +192,12 @@ def _build_text_graph(source: Path, output: Path, spec: TargetModelSpec) -> list
     dflash_head = onnx.NodeProto()
     dflash_head.CopyFrom(head_node)
     dflash_head.name = "/lm_head/DFlashMatMul_Q4"
-    dflash_head.input[0] = spec.final_hidden_output #graph surgery to add the final hidden state output to the lm_head input
-    dflash_head.output[0] = DFLASH_LOGITS #graph surgery to add the full block size logits output to the lm_head output
+    dflash_head.input[0] = (
+        spec.final_hidden_output
+    )  # graph surgery to add the final hidden state output to the lm_head input
+    dflash_head.output[0] = (
+        DFLASH_LOGITS  # graph surgery to add the full block size logits output to the lm_head output
+    )
     graph.node.append(dflash_head)
     graph.output.append(
         helper.make_tensor_value_info(
@@ -209,7 +220,9 @@ def _build_text_graph(source: Path, output: Path, spec: TargetModelSpec) -> list
 
 def _build_lm_head(source: Path, output: Path, spec: TargetModelSpec) -> None:
     model = onnx.load(str(source / "text.onnx"), load_external_data=False)
-    head_node = next((node for node in model.graph.node if node.name == HEAD_NODE_NAME), None)
+    head_node = next(
+        (node for node in model.graph.node if node.name == HEAD_NODE_NAME), None
+    )
     if head_node is None:
         raise RuntimeError(f"Could not find {HEAD_NODE_NAME}")
 
@@ -234,12 +247,20 @@ def _build_lm_head(source: Path, output: Path, spec: TargetModelSpec) -> None:
     graph = helper.make_graph(
         [node],
         "qwen36_quantized_lm_head",
-        [helper.make_tensor_value_info(
-            "hidden_states", TensorProto.FLOAT16, ["batch_size", "sequence_length", spec.hidden_size]
-        )],
-        [helper.make_tensor_value_info(
-            "logits", TensorProto.FLOAT16, ["batch_size", "sequence_length", spec.vocab_size]
-        )],
+        [
+            helper.make_tensor_value_info(
+                "hidden_states",
+                TensorProto.FLOAT16,
+                ["batch_size", "sequence_length", spec.hidden_size],
+            )
+        ],
+        [
+            helper.make_tensor_value_info(
+                "logits",
+                TensorProto.FLOAT16,
+                ["batch_size", "sequence_length", spec.vocab_size],
+            )
+        ],
         initializer=initializers,
     )
     head_model = helper.make_model(
@@ -258,11 +279,72 @@ def _build_lm_head(source: Path, output: Path, spec: TargetModelSpec) -> None:
     if [item.name for item in check.graph.initializer] != list(HEAD_INITIALIZERS):
         raise RuntimeError("Saved LM-head graph has unexpected initializers")
     for tensor in check.graph.initializer:
-        location = {item.key: item.value for item in tensor.external_data}.get("location")
+        location = {item.key: item.value for item in tensor.external_data}.get(
+            "location"
+        )
         if location != "text.onnx.data":
             raise RuntimeError(
                 f"{tensor.name} should reference text.onnx.data, but references {location!r}"
             )
+
+
+def _state_name_pattern(
+    graph: onnx.GraphProto,
+    *,
+    is_input: bool,
+    suffix: str,
+) -> str | None:
+    values = graph.input if is_input else graph.output
+    names = [value.name for value in values if value.name.endswith(suffix)]
+    if not names:
+        return None
+    patterns = {re.sub(r"\.\d+\.", ".%d.", name, count=1) for name in names}
+    if len(patterns) != 1:
+        direction = "input" if is_input else "output"
+        raise RuntimeError(
+            f"Could not derive one {direction} state-name pattern for {suffix}: "
+            f"{sorted(patterns)}"
+        )
+    return patterns.pop()
+
+
+def _write_derived_config(source: Path, output: Path) -> None:
+    """Copy the OGA config and align recurrent-state names with the graph.
+
+    Some older model packages carry stale state-name aliases even though the
+    ONNX graph uses the newer ``past_key_values.*``/``*.conv_state`` names.
+    OGA binds state tensors from this config, so preserve the source config
+    while correcting only aliases that can be derived from the graph itself.
+    """
+    with (source / "genai_config.json").open(encoding="utf-8") as stream:
+        config = json.load(stream)
+    graph = onnx.load(str(source / "text.onnx"), load_external_data=False).graph
+    decoder = config["model"]["decoder"]
+    inputs = decoder["inputs"]
+    outputs = decoder["outputs"]
+    updates = {
+        "past_conv_names": _state_name_pattern(
+            graph, is_input=True, suffix=".conv_state"
+        ),
+        "past_recurrent_names": _state_name_pattern(
+            graph, is_input=True, suffix=".recurrent_state"
+        ),
+        "present_conv_names": _state_name_pattern(
+            graph, is_input=False, suffix=".conv_state"
+        ),
+        "present_recurrent_names": _state_name_pattern(
+            graph, is_input=False, suffix=".recurrent_state"
+        ),
+    }
+    for key, value in updates.items():
+        if value is None:
+            continue
+        target = inputs if key.startswith("past_") else outputs
+        if target.get(key) != value:
+            target[key] = value
+    (output / "genai_config.json").write_text(
+        json.dumps(config, indent=2) + "\n", encoding="utf-8"
+    )
 
 
 def _materialize_assets(source: Path, output: Path) -> tuple[list[str], list[str]]:
@@ -271,6 +353,8 @@ def _materialize_assets(source: Path, output: Path) -> tuple[list[str], list[str
         source_path = source / name
         shutil.copy2(source_path, output / name)
         copied.append(name)
+    _write_derived_config(source, output)
+    copied.append("genai_config.json")
 
     linked = []
     for name in LINKED_ASSETS:
@@ -322,7 +406,6 @@ def build(
         # in text.onnx. The production DFlash loop does not consume this output.
         tap_names = _build_text_graph(source, output, spec)
 
-
         # Create the separate lm_head.onnx used to project draft hidden states
         # with the target model's original quantized LM-head weights.
         _build_lm_head(source, output, spec)
@@ -333,7 +416,9 @@ def build(
         # not modify the original model.
         after = _source_snapshot(source)
         if before != after:
-            raise RuntimeError("Source model changed while derived graphs were being built")
+            raise RuntimeError(
+                "Source model changed while derived graphs were being built"
+            )
 
         manifest = {
             "source": str(source),
@@ -368,7 +453,7 @@ def build(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source", type=Path, default=DEFAULT_SOURCE)
+    parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument(
         "--target-layer-ids",
@@ -383,9 +468,7 @@ def main() -> None:
         "--target-layer-spec",
         choices=tuple(TARGET_LAYER_IDS_BY_DRAFT),
         default=next(iter(TARGET_LAYER_IDS_BY_DRAFT)),
-        help=(
-            "Known DFlash draft config whose target_layer_ids should be used."
-        ),
+        help=("Known DFlash draft config whose target_layer_ids should be used."),
     )
     parser.add_argument(
         "--final-hidden-output",
@@ -398,8 +481,7 @@ def main() -> None:
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
     target_layer_ids = (
-        args.target_layer_ids
-        or TARGET_LAYER_IDS_BY_DRAFT[args.target_layer_spec]
+        args.target_layer_ids or TARGET_LAYER_IDS_BY_DRAFT[args.target_layer_spec]
     )
     build(
         args.source,

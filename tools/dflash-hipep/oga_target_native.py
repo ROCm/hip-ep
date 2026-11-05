@@ -1,3 +1,7 @@
+#
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the MIT License.
+#
 """DFlash target adapter for the patched upstream OGA runtime.
 
 This standalone module requires an OGA build with:
@@ -20,14 +24,23 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Iterator, Optional
+from typing import TYPE_CHECKING, Any, Iterator, Optional
 
 import numpy as np
+import onnx
+
+if TYPE_CHECKING:
+    import torch
+    from dflash.model import DFlashDraftModel
 
 
 DEFAULT_MODEL_DIR = Path(__file__).parent / "models/Qwen3.6-35B-A3B-hidden"
-DEFAULT_HIPEP_ROOT = Path("/proj/xcohdstaff7/devledas/hipep_0.5.1_linux")
-DEFAULT_ROCM_ROOT = Path("/opt/rocm/core-7.11")
+DEFAULT_HIPEP_ROOT = (
+    Path(os.environ["HIPEP_ROOT"]) if os.environ.get("HIPEP_ROOT") else None
+)
+DEFAULT_ROCM_ROOT = Path(
+    os.environ.get("ROCM_ROOT") or os.environ.get("THEROCK_DIST") or "/opt/rocm"
+)
 DFLASH_LOGITS = "dflash_logits"
 EP_NAME = "MorphiZenEP"
 
@@ -47,9 +60,7 @@ def _profile_stage(
     start_ns = time.perf_counter_ns()
     trace_factory = getattr(sink, "trace_context", None)
     trace_context = (
-        trace_factory(name, metadata)
-        if trace_factory is not None
-        else nullcontext()
+        trace_factory(name, metadata) if trace_factory is not None else nullcontext()
     )
     try:
         with trace_context:
@@ -76,11 +87,32 @@ def _prepend(env: dict[str, str], name: str, *paths: Path) -> None:
     env[name] = os.pathsep.join(values)
 
 
+def _state_window(model_dir: Path) -> int:
+    model = onnx.load(model_dir / "text.onnx", load_external_data=False)
+    windows = {
+        int(onnx.helper.get_attribute_value(attribute))
+        for node in model.graph.node
+        if node.domain == "com.microsoft"
+        and node.op_type in {"CausalConvWithState", "LinearAttention"}
+        for attribute in node.attribute
+        if attribute.name == "state_window"
+    }
+    if not windows:
+        return 0
+    if len(windows) != 1:
+        raise RuntimeError(f"Target uses inconsistent state windows: {windows}")
+    return windows.pop()
+
+
 def ensure_runtime_environment(
-    hipep_root: Path = DEFAULT_HIPEP_ROOT,
+    hipep_root: Path | None = DEFAULT_HIPEP_ROOT,
     rocm_root: Path = DEFAULT_ROCM_ROOT,
 ) -> None:
     """Re-exec once so OGA, HIP EP, and ROCm resolve from one process."""
+    if hipep_root is None:
+        raise ValueError(
+            "HIP EP package path is required; pass --hipep-root or set HIPEP_ROOT"
+        )
     if os.environ.get("_DFLASH_OGA_HIPEP_BOOTSTRAPPED") == "1":
         return
 
@@ -92,11 +124,7 @@ def ensure_runtime_environment(
     env["MORPHIZEN_EP_LIB"] = str(hipep_root / "lib/libhipgpu.so")
     python_tag = f"python{sys.version_info.major}.{sys.version_info.minor}"
     oga_package_lib = (
-        Path(sys.prefix)
-        / "lib"
-        / python_tag
-        / "site-packages"
-        / "onnxruntime_genai"
+        Path(sys.prefix) / "lib" / python_tag / "site-packages" / "onnxruntime_genai"
     )
     _prepend(env, "PATH", hipep_root / "bin")
     _prepend(
@@ -166,18 +194,25 @@ class OgaDFlashTarget:
     def __init__(
         self,
         model_dir: Path,
-        hipep_root: Path = DEFAULT_HIPEP_ROOT,
+        hipep_root: Path | None = DEFAULT_HIPEP_ROOT,
         profile_sink: Any | None = None,
+        force_replay: bool = False,
     ) -> None:
+        if hipep_root is None:
+            raise ValueError(
+                "HIP EP package path is required; pass hipep_root or set HIPEP_ROOT"
+            )
         self.model_dir = Path(model_dir).resolve()
         self.hipep_root = Path(hipep_root).resolve()
         self.profile_sink = profile_sink
+        self.force_replay = force_replay
         self._validate_files()
         self.spec = TargetModelSpec.from_model_dir(self.model_dir)
         self.hidden_size = self.spec.hidden_size
         self.vocab_size = self.spec.vocab_size
         self.hidden_output_names = self.spec.hidden_output_names
         self.final_hidden_output = self.spec.final_hidden_output
+        self.state_window = _state_window(self.model_dir)
 
         import onnxruntime as ort
         import onnxruntime_genai as og
@@ -216,18 +251,28 @@ class OgaDFlashTarget:
         if not devices:
             raise RuntimeError(f"No {EP_NAME} device was registered from {ep_library}")
 
-        self.embedding_session = self._create_session(
-            ort, devices, "embedding.onnx"
-        )
+        self.embedding_session = self._create_session(ort, devices, "embedding.onnx")
         self.head_session = self._create_session(ort, devices, "lm_head.onnx")
         self.generator: Any | None = None
         self.max_length = 0
         self.processed_length = 0
         self.partial_rollback_count = 0
+        self.window_crop_count = 0
+        self.replay_append_count = 0
+        self.window_crop_available = hasattr(self._og.Generator, "crop_to_accepted")
         if not hasattr(self._og.Generator, "snapshot_state"):
             raise RuntimeError(
                 "The installed OGA runtime has no Generator.snapshot_state(); "
                 "install the patched upstream OGA runtime"
+            )
+        if self.state_window > 1 and not self.window_crop_available:
+            print(
+                "WARNING: state_window detected, but "
+                "Generator.crop_to_accepted() is unavailable. "
+                "Using legacy rewind/replay; windowed no-replay "
+                "optimization is disabled.",
+                file=sys.stderr,
+                flush=True,
             )
         self._expected_next_token: int | None = None
         self.rollback_correction_mismatch_count = 0
@@ -434,6 +479,8 @@ class OgaDFlashTarget:
 
             self.processed_length = int(tokens.size)
             self.partial_rollback_count = 0
+            self.window_crop_count = 0
+            self.replay_append_count = 0
             self._expected_next_token = int(logits[0, 0].argmax())
             hidden = self._hidden_outputs("target.prefill")
             return OgaPrefillOutput(
@@ -461,14 +508,20 @@ class OgaDFlashTarget:
                 )
 
             processed_before = self.processed_length
-            # The snapshot position equals the number of tokens already processed:
-            # no OGA-sampled token is kept pending in this implementation.
-            with _profile_stage(
-                sink,
-                "target.verify.snapshot",
-                position=processed_before,
+            # A windowed verification can crop directly to an accepted position
+            # inside this forward. Taking a legacy snapshot would force
+            # rewind_to() back to that snapshot boundary instead.
+            if (
+                self.force_replay
+                or not self.window_crop_available
+                or self.state_window <= int(tokens.size)
             ):
-                self.generator.snapshot_state()
+                with _profile_stage(
+                    sink,
+                    "target.verify.snapshot",
+                    position=processed_before,
+                ):
+                    self.generator.snapshot_state()
             with _profile_stage(
                 sink,
                 "target.verify.append",
@@ -513,10 +566,10 @@ class OgaDFlashTarget:
             raise ValueError(
                 f"committed_count must be in [1, {block_size}], got {committed_count}"
             )
-        if expected_bonus != int(
-            verification.logits[0, committed_count - 1].argmax()
-        ):
-            raise RuntimeError("Expected bonus is inconsistent with verification logits")
+        if expected_bonus != int(verification.logits[0, committed_count - 1].argmax()):
+            raise RuntimeError(
+                "Expected bonus is inconsistent with verification logits"
+            )
 
         committed_prefix = self._as_token_array(committed_prefix_ids)
         accepted_length = verification.processed_length_before + committed_count
@@ -538,7 +591,27 @@ class OgaDFlashTarget:
                 "Committed prefix does not end with the accepted verification rows"
             )
 
-        if committed_count < block_size:
+        used_window_crop = False
+        if (
+            committed_count < block_size
+            and not self.force_replay
+            and self.window_crop_available
+            and self.state_window > block_size
+        ):
+            with _profile_stage(
+                sink,
+                "target.commit.window_crop",
+                position=accepted_length,
+                state_window=self.state_window,
+            ):
+                self.generator.crop_to_accepted(
+                    accepted_length,
+                    committed_count - 1,
+                )
+            self.partial_rollback_count += 1
+            self.window_crop_count += 1
+            used_window_crop = True
+        elif committed_count < block_size:
             # Restore the exact pre-verification target state, then process only
             # the anchor and draft rows that Python actually accepted.
             with _profile_stage(
@@ -554,6 +627,7 @@ class OgaDFlashTarget:
                 input_bytes=int(accepted_block.nbytes),
             ):
                 self.generator.append_tokens(accepted_block)
+            self.replay_append_count += 1
             restored_logits = self._full_logits("target.commit.replay")
             restored_hidden = self._hidden_outputs("target.commit.replay")
             if (
@@ -592,8 +666,11 @@ class OgaDFlashTarget:
                     "committed_count": committed_count,
                     "partial": committed_count < block_size,
                     "replay_rows": (
-                        committed_count if committed_count < block_size else 0
+                        committed_count
+                        if committed_count < block_size and not used_window_crop
+                        else 0
                     ),
+                    "window_crop": used_window_crop,
                 },
             )
         return expected_bonus
@@ -623,9 +700,7 @@ def dflash_generate_oga(
     num_input_tokens = input_ids.shape[1]
     max_length = num_input_tokens + max_new_tokens
     block_size = model.block_size if block_size is None else block_size
-    mask_token_id = (
-        model.mask_token_id if mask_token_id is None else mask_token_id
-    )
+    mask_token_id = model.mask_token_id if mask_token_id is None else mask_token_id
     if input_ids.ndim != 2 or input_ids.shape[0] != 1:
         raise ValueError("The OGA DFlash integration supports batch size 1")
 
@@ -662,12 +737,17 @@ def dflash_generate_oga(
         profile_sink,
         "controller.prefill.input_to_numpy",
     ) as profile:
-        prefill_ids = input_ids.detach().cpu().numpy().astype(
-            np.int64,
-            copy=False,
+        prefill_ids = (
+            input_ids.detach()
+            .cpu()
+            .numpy()
+            .astype(
+                np.int64,
+                copy=False,
+            )
         )
         profile["output_bytes"] = int(prefill_ids.nbytes)
-    output = target.prefill( #target prefill call
+    output = target.prefill(  # target prefill call
         prefill_ids,
         max_new_tokens=max_new_tokens,
         block_size=block_size,
@@ -687,9 +767,7 @@ def dflash_generate_oga(
             device=draft_device,
             dtype=draft_dtype,
         )
-    time_to_first_token = (
-        time.perf_counter() - prefill_start if return_stats else None
-    )
+    time_to_first_token = time.perf_counter() - prefill_start if return_stats else None
 
     decode_start = time.perf_counter() if return_stats else None
     _profile_call(profile_sink, "mark_decode_start")
@@ -717,7 +795,7 @@ def dflash_generate_oga(
             ) as profile:
                 embedding_ids = block_output_ids.detach().cpu().numpy()
                 profile["output_bytes"] = int(embedding_ids.nbytes)
-            embedding_output = target.embed(embedding_ids) #target embed call
+            embedding_output = target.embed(embedding_ids)  # target embed call
             with _profile_stage(
                 profile_sink,
                 "controller.embedding_to_torch",
@@ -727,7 +805,9 @@ def dflash_generate_oga(
                     device=draft_device,
                     dtype=draft_dtype,
                 )
-            with _profile_stage(profile_sink, "controller.draft_forward"): #draft forward call
+            with _profile_stage(
+                profile_sink, "controller.draft_forward"
+            ):  # draft forward call
                 draft_hidden = model(
                     target_hidden=target_hidden,
                     noise_embedding=noise_embedding,
@@ -748,7 +828,9 @@ def dflash_generate_oga(
                     draft_hidden.detach().to(torch.float16).cpu().numpy()
                 )
                 profile["output_bytes"] = int(draft_hidden_numpy.nbytes)
-            draft_logits_numpy = target.lm_head(draft_hidden_numpy) #target lm head call
+            draft_logits_numpy = target.lm_head(
+                draft_hidden_numpy
+            )  # target lm head call
             with _profile_stage(
                 profile_sink,
                 "controller.draft_logits_to_torch",
@@ -770,7 +852,9 @@ def dflash_generate_oga(
         ) as profile:
             verification_ids = block_output_ids.detach().cpu().numpy()
             profile["output_bytes"] = int(verification_ids.nbytes)
-        output = target.verify(verification_ids) #target verify call - temporarily advance through entire candidate and get logits and hidden states
+        output = target.verify(
+            verification_ids
+        )  # target verify call - temporarily advance through entire candidate and get logits and hidden states
         with _profile_stage(
             profile_sink,
             "controller.posterior_argmax",
@@ -793,9 +877,7 @@ def dflash_generate_oga(
             output_ids[:, start : start + committed_count] = block_output_ids[
                 :, :committed_count
             ]
-            output_ids[:, start + committed_count] = posterior[
-                :, acceptance_length
-            ]
+            output_ids[:, start + committed_count] = posterior[:, acceptance_length]
             start += committed_count
 
         with _profile_stage(
@@ -804,7 +886,8 @@ def dflash_generate_oga(
         ) as profile:
             committed_prefix = output_ids[:, :start].detach().cpu().numpy()
             profile["output_bytes"] = int(committed_prefix.nbytes)
-        target.commit_verified_prefix( #target commit verified prefix call (partial acceptance logic/ rewind and replay)
+        replay_count_before = target.replay_append_count
+        target.commit_verified_prefix(  # target commit verified prefix call (partial acceptance logic/ rewind and replay)
             output,
             committed_count=committed_count,
             expected_bonus=int(posterior[0, acceptance_length]),
@@ -831,7 +914,9 @@ def dflash_generate_oga(
             committed_count=int(committed_count),
             partial=bool(committed_count < block_size),
             replay_rows=(
-                int(committed_count) if committed_count < block_size else 0
+                int(committed_count)
+                if target.replay_append_count > replay_count_before
+                else 0
             ),
             correction_mismatch=bool(
                 target.rollback_correction_mismatch_count > mismatch_before

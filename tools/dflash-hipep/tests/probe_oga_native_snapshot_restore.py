@@ -1,3 +1,7 @@
+#
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the MIT License.
+#
 """Probe upstream OGA's native Qwen3.6 recurrent-state snapshot and restore.
 
 This test does not try to replace graph inputs from Python. It exercises only
@@ -111,10 +115,7 @@ def _generator_at_snapshot_boundary(
 
 def _states(generator, state_names: list[str]) -> dict[str, np.ndarray]:
     """Copy managed recurrent state before another execution overwrites it."""
-    return {
-        name: np.asarray(generator.get_output(name)).copy()
-        for name in state_names
-    }
+    return {name: np.asarray(generator.get_output(name)).copy() for name in state_names}
 
 
 def _outputs(generator, state_names: list[str]):
@@ -130,9 +131,7 @@ def _compare(
     reference_states: dict[str, np.ndarray],
 ) -> tuple[float, bool, list[str]]:
     """Return exact parity diagnostics against an uncontaminated execution."""
-    logit_error = float(
-        np.max(np.abs(logits.astype(np.float32) - reference_logits))
-    )
+    logit_error = float(np.max(np.abs(logits.astype(np.float32) - reference_logits)))
     predictions_match = np.array_equal(
         np.argmax(logits, axis=-1),
         np.argmax(reference_logits, axis=-1),
@@ -164,18 +163,14 @@ def _run_repeated_cycles(
             f"trace provides only {available.size}"
         )
 
-    reference, _ = _generator_at_snapshot_boundary(
-        og, model, max_length, expected_ids
-    )
+    reference, _ = _generator_at_snapshot_boundary(og, model, max_length, expected_ids)
     restored, boundary = _generator_at_snapshot_boundary(
         og, model, max_length, expected_ids
     )
 
     for cycle in range(cycles):
         start = cycle * tokens_per_cycle
-        committed = np.ascontiguousarray(
-            available[start : start + tokens_per_cycle]
-        )
+        committed = np.ascontiguousarray(available[start : start + tokens_per_cycle])
         rejected = np.full(committed.shape, 248049, dtype=np.int32)
 
         reference.append_tokens(committed)
@@ -258,15 +253,15 @@ def main() -> None:
         count=max(4, 1 + args.cycles * args.tokens_per_cycle),
     )
     state_names = _recurrent_output_names(args.model / "text.onnx")
-    print(f"Found {len(state_names) // 2} recurrent layers ({len(state_names)} tensors).")
+    print(
+        f"Found {len(state_names) // 2} recurrent layers ({len(state_names)} tensors)."
+    )
 
     correct_suffix = np.asarray(expected_ids[1:4], dtype=np.int32)
     rejected_suffix = np.full(correct_suffix.shape, 248049, dtype=np.int32)
 
     # Authoritative execution with no rejected-token contamination.
-    reference, _ = _generator_at_snapshot_boundary(
-        og, model, max_length, expected_ids
-    )
+    reference, _ = _generator_at_snapshot_boundary(og, model, max_length, expected_ids)
     reference.append_tokens(correct_suffix)
     reference_logits, reference_states = _outputs(reference, state_names)
     del reference
@@ -310,7 +305,9 @@ def main() -> None:
         for name in state_names
         if not np.array_equal(rewound_states[name], boundary_states[name])
     ]
-    print(f"States changed by rejected block:       {contaminated_count}/{len(state_names)}")
+    print(
+        f"States changed by rejected block:       {contaminated_count}/{len(state_names)}"
+    )
     print(
         "States restored at rewind boundary:    "
         f"{len(state_names) - len(boundary_restore_mismatches)}/{len(state_names)}"

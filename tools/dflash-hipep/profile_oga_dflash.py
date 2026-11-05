@@ -1,8 +1,13 @@
+#
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the MIT License.
+#
 """Profile the mixed PyTorch + OGA/HIP EP DFlash pipeline.
 
-The default run measures the same ten GSM8K prompts at block sizes 2, 4, 8,
-and 16, alongside a clean OGA baseline and the adapter's block-size-1
-baseline. Use one block size and one sample when collecting native traces.
+The default run measures ten GSM8K prompts at block sizes 2, 4, 8, and 16,
+alongside a clean OGA baseline and the adapter's block-size-1 baseline. Other
+datasets can be selected with --dataset. Use one block size and one sample when
+collecting native traces.
 """
 
 from __future__ import annotations
@@ -24,11 +29,11 @@ from typing import Any, Iterator
 
 import numpy as np
 
-from benchmark_oga import (
+from dataset_utils import (
+    DATASETS,
     DEFAULT_DRAFT,
     DEFAULT_HF_HOME,
-    DEFAULT_TOKENIZER,
-    _apply_chat_template,
+    apply_chat_template,
     load_and_process_dataset,
 )
 from oga_target_native import (
@@ -92,9 +97,7 @@ class GenerationRecord:
 
 class _Roctx:
     def __init__(self, rocm_root: Path) -> None:
-        candidates = sorted(
-            (rocm_root / "lib").glob("librocprofiler-sdk-roctx.so*")
-        )
+        candidates = sorted((rocm_root / "lib").glob("librocprofiler-sdk-roctx.so*"))
         if not candidates:
             candidates = sorted((rocm_root / "lib").glob("libroctx64.so*"))
         if not candidates:
@@ -401,11 +404,7 @@ def _generation_key(record: GenerationRecord) -> tuple[str, int]:
 def _aggregate_group(records: list[GenerationRecord]) -> dict[str, Any]:
     output_tokens = sum(record.output_tokens for record in records)
     decode_ns = sum(record.decode_elapsed_ns for record in records)
-    iterations = [
-        iteration
-        for record in records
-        for iteration in record.iterations
-    ]
+    iterations = [iteration for record in records for iteration in record.iterations]
     iteration_ms = [iteration.elapsed_ns / 1e6 for iteration in iterations]
     committed = [iteration.committed_count for iteration in iterations]
     partial = [iteration for iteration in iterations if iteration.partial]
@@ -421,9 +420,7 @@ def _aggregate_group(records: list[GenerationRecord]) -> dict[str, Any]:
         output_bytes = sum(
             int(event.metadata.get("output_bytes", 0)) for event in events
         )
-        input_bytes = sum(
-            int(event.metadata.get("input_bytes", 0)) for event in events
-        )
+        input_bytes = sum(int(event.metadata.get("input_bytes", 0)) for event in events)
         stages[name] = {
             "calls": len(events),
             "total_ms": sum(durations_ms),
@@ -440,14 +437,10 @@ def _aggregate_group(records: list[GenerationRecord]) -> dict[str, Any]:
         "decode_seconds": decode_ns / 1e9,
         "throughput_tps": output_tokens / (decode_ns / 1e9) if decode_ns else 0.0,
         "iterations": len(iterations),
-        "mean_iteration_ms": (
-            statistics.fmean(iteration_ms) if iteration_ms else 0.0
-        ),
+        "mean_iteration_ms": (statistics.fmean(iteration_ms) if iteration_ms else 0.0),
         "p50_iteration_ms": statistics.median(iteration_ms) if iteration_ms else 0.0,
         "p95_iteration_ms": _percentile(iteration_ms, 0.95),
-        "mean_committed_count": (
-            statistics.fmean(committed) if committed else 0.0
-        ),
+        "mean_committed_count": (statistics.fmean(committed) if committed else 0.0),
         "mean_progress": output_tokens / len(iterations) if iterations else 0.0,
         "full_accept_rate": (
             sum(not iteration.partial for iteration in iterations) / len(iterations)
@@ -477,26 +470,25 @@ def _add_parity(
         if record.mode == "adapter_baseline"
     }
     clean = {
-        record.dataset_index: record
-        for record in records
-        if record.mode == "clean_oga"
+        record.dataset_index: record for record in records if record.mode == "clean_oga"
     }
     for (mode, block_size), group in summary["groups"].items():
         if mode == "clean_oga":
             continue
         reference = clean if mode == "adapter_baseline" else adapter
         comparable = [
-            record for record in records
+            record
+            for record in records
             if _generation_key(record) == (mode, block_size)
             and record.dataset_index in reference
         ]
         token_exact = sum(
-            record.output_token_ids
-            == reference[record.dataset_index].output_token_ids
+            record.output_token_ids == reference[record.dataset_index].output_token_ids
             for record in comparable
         )
         boxed_comparable = [
-            record for record in comparable
+            record
+            for record in comparable
             if reference[record.dataset_index].boxed_answer is not None
             and record.boxed_answer is not None
         ]
@@ -505,7 +497,9 @@ def _add_parity(
             for record in boxed_comparable
         )
         group["parity"] = {
-            "reference": "clean_oga" if mode == "adapter_baseline" else "adapter_baseline",
+            "reference": "clean_oga"
+            if mode == "adapter_baseline"
+            else "adapter_baseline",
             "token_exact": token_exact,
             "token_comparable": len(comparable),
             "boxed_equal": boxed_equal,
@@ -519,8 +513,7 @@ def _summarize(records: list[GenerationRecord]) -> dict[str, Any]:
         grouped[_generation_key(record)].append(record)
     summary: dict[str, Any] = {
         "groups": {
-            key: _aggregate_group(group)
-            for key, group in sorted(grouped.items())
+            key: _aggregate_group(group) for key, group in sorted(grouped.items())
         }
     }
     _add_parity(summary, records)
@@ -593,9 +586,7 @@ def _json_ready(value: Any) -> Any:
     if isinstance(value, dict):
         return {
             (
-                f"{key[0]}:block={key[1]}"
-                if isinstance(key, tuple)
-                else str(key)
+                f"{key[0]}:block={key[1]}" if isinstance(key, tuple) else str(key)
             ): _json_ready(item)
             for key, item in value.items()
         }
@@ -662,11 +653,12 @@ def _compact_generation(record: GenerationRecord) -> dict[str, Any]:
 def _prepare_samples(
     tokenizer: Any,
     *,
+    dataset_name: str,
     max_samples: int,
     sample_indices: list[int] | None,
     enable_thinking: bool,
 ) -> list[dict[str, Any]]:
-    dataset = load_and_process_dataset("gsm8k")
+    dataset = load_and_process_dataset(dataset_name)
     random.seed(0)
     random.shuffle(dataset)
     selected_indices = (
@@ -678,7 +670,7 @@ def _prepare_samples(
     for sample_index, dataset_index in enumerate(selected_indices):
         instance = dataset[dataset_index]
         messages = [{"role": "user", "content": instance["turns"][0]}]
-        input_text = _apply_chat_template(
+        input_text = apply_chat_template(
             tokenizer,
             messages,
             enable_thinking,
@@ -688,6 +680,9 @@ def _prepare_samples(
                 "sample_index": sample_index,
                 "dataset_index": dataset_index,
                 "input_text": input_text,
+                "metadata": {
+                    key: value for key, value in instance.items() if key != "turns"
+                },
             }
         )
     return samples
@@ -710,12 +705,16 @@ def _load_draft_and_tokenizer(args: argparse.Namespace) -> tuple[Any, Any, Any]:
     )
     if not hasattr(draft_config, "block_size"):
         draft_config.block_size = draft_config.dflash_config["block_size"]
-    draft = DFlashDraftModel.from_pretrained(
-        args.draft_model,
-        config=draft_config,
-        dtype=torch.bfloat16,
-        trust_remote_code=True,
-    ).to(args.draft_device).eval()
+    draft = (
+        DFlashDraftModel.from_pretrained(
+            args.draft_model,
+            config=draft_config,
+            dtype=torch.bfloat16,
+            trust_remote_code=True,
+        )
+        .to(args.draft_device)
+        .eval()
+    )
     return torch, tokenizer, draft
 
 
@@ -732,9 +731,7 @@ def _run_mode(
     draft_device: str,
 ) -> None:
     stop_ids = (
-        [int(tokenizer.eos_token_id)]
-        if tokenizer.eos_token_id is not None
-        else []
+        [int(tokenizer.eos_token_id)] if tokenizer.eos_token_id is not None else []
     )
     for sample in samples:
         input_ids = tokenizer.encode(
@@ -769,7 +766,7 @@ def _run_mode(
                 return_stats=True,
             )
             generated_ids = (
-                response.output_ids[0, response.num_input_tokens:]
+                response.output_ids[0, response.num_input_tokens :]
                 .detach()
                 .cpu()
                 .tolist()
@@ -825,7 +822,12 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", type=Path, default=DEFAULT_MODEL_DIR)
     parser.add_argument("--draft-model", "--draft", default=DEFAULT_DRAFT)
-    parser.add_argument("--tokenizer", default=str(DEFAULT_TOKENIZER))
+    parser.add_argument("--tokenizer", required=True)
+    parser.add_argument(
+        "--dataset",
+        choices=sorted(DATASETS),
+        default="gsm8k",
+    )
     parser.add_argument("--max-samples", type=int, default=10)
     parser.add_argument("--sample-indices", type=int, nargs="+", default=None)
     parser.add_argument("--max-new-tokens", type=int, default=512)
@@ -838,6 +840,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--warmup-new-tokens", type=int, default=32)
     parser.add_argument("--skip-clean-baseline", action="store_true")
     parser.add_argument("--skip-adapter-baseline", action="store_true")
+    parser.add_argument(
+        "--force-replay",
+        action="store_true",
+        help="Use legacy rewind plus accepted-prefix replay for a windowed target.",
+    )
     parser.add_argument("--enable-thinking", action="store_true")
     parser.add_argument("--draft-device", default="cpu")
     parser.add_argument("--hipep-root", type=Path, default=DEFAULT_HIPEP_ROOT)
@@ -888,7 +895,11 @@ def main() -> None:
     args.hf_home.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("HF_HOME", str(args.hf_home))
 
-    target = OgaDFlashTarget(args.target, args.hipep_root)
+    target = OgaDFlashTarget(
+        args.target,
+        args.hipep_root,
+        force_replay=args.force_replay,
+    )
     torch, tokenizer, draft = _load_draft_and_tokenizer(args)
     random.seed(0)
     np.random.seed(0)
@@ -896,17 +907,31 @@ def main() -> None:
 
     samples = _prepare_samples(
         tokenizer,
+        dataset_name=args.dataset,
         max_samples=args.max_samples,
         sample_indices=args.sample_indices,
         enable_thinking=args.enable_thinking,
     )
     modes = _mode_specs(args)
     print(
-        f"[profile] samples={len(samples)} max_new_tokens={args.max_new_tokens} "
-        f"modes={modes}",
+        f"[profile] dataset={args.dataset} samples={len(samples)} "
+        f"max_new_tokens={args.max_new_tokens} modes={modes}",
         flush=True,
     )
     print(f"[profile] providers={target.providers}", flush=True)
+    rollback_mode = (
+        "forced-replay"
+        if args.force_replay
+        else "window-crop"
+        if target.state_window > 1 and target.window_crop_available
+        else "rewind-replay"
+    )
+    print(
+        f"[profile] state_window={target.state_window} "
+        f"crop_api={target.window_crop_available} "
+        f"rollback_mode={rollback_mode}",
+        flush=True,
+    )
 
     _warmup(
         modes=modes,
@@ -955,10 +980,12 @@ def main() -> None:
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     report = {
+        "dataset": args.dataset,
         "config": {
             "target": str(Path(args.target).resolve()),
             "draft_model": args.draft_model,
             "tokenizer": args.tokenizer,
+            "dataset": args.dataset,
             "max_samples": len(samples),
             "dataset_indices": [sample["dataset_index"] for sample in samples],
             "max_new_tokens": args.max_new_tokens,
@@ -967,12 +994,18 @@ def main() -> None:
             "draft_device": args.draft_device,
             "providers": target.providers,
             "roctx_ranges": args.roctx_ranges,
+            "force_replay": args.force_replay,
         },
-        "summary": _json_ready(summary),
-        "generations": [
-            _compact_generation(record)
-            for record in recorder.generations
+        "dataset_samples": [
+            {
+                "sample_index": sample["sample_index"],
+                "dataset_index": sample["dataset_index"],
+                **sample["metadata"],
+            }
+            for sample in samples
         ],
+        "summary": _json_ready(summary),
+        "generations": [_compact_generation(record) for record in recorder.generations],
     }
     args.output.write_text(
         json.dumps(report, indent=2) + "\n",

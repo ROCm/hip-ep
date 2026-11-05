@@ -1,3 +1,7 @@
+#
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the MIT License.
+#
 """Validate an OGA DFlash rollback strategy against a fixed target trace.
 
 OGA prefill produces the expected target token.
@@ -19,7 +23,7 @@ import numpy as np
 HIPEP_STUDY_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(HIPEP_STUDY_ROOT))
 
-from oga_target_native import (
+from oga_target_native import (  # noqa: E402
     DEFAULT_HIPEP_ROOT,
     DEFAULT_MODEL_DIR,
     DEFAULT_ROCM_ROOT,
@@ -56,6 +60,7 @@ INPUT_IDS = np.asarray(
     dtype=np.int32,
 )
 
+
 def _clean_greedy_ids(
     target: OgaDFlashTarget,
     input_ids: np.ndarray,
@@ -83,6 +88,12 @@ def main() -> None:
     parser.add_argument("--model", type=Path, default=DEFAULT_MODEL_DIR)
     parser.add_argument("--hipep-root", type=Path, default=DEFAULT_HIPEP_ROOT)
     parser.add_argument("--rocm-root", type=Path, default=DEFAULT_ROCM_ROOT)
+    parser.add_argument(
+        "--expect-mode",
+        choices=("auto", "window-crop", "rewind-replay"),
+        default="auto",
+        help="Expected partial-acceptance path; auto detects it from the model.",
+    )
     args = parser.parse_args()
 
     ensure_runtime_environment(args.hipep_root, args.rocm_root)
@@ -100,7 +111,9 @@ def main() -> None:
         )
     # Validate the hidden state shape.
     if prefill.target_hidden.shape != (1, INPUT_IDS.size, hidden_width):
-        raise RuntimeError(f"Unexpected prefill hidden shape: {prefill.target_hidden.shape}")
+        raise RuntimeError(
+            f"Unexpected prefill hidden shape: {prefill.target_hidden.shape}"
+        )
 
     # The adapter's target_hidden must be exactly the eight exposed residual
     # taps concatenated in DFlash target_layer_ids order.
@@ -188,6 +201,26 @@ def main() -> None:
         raise RuntimeError(
             f"Expected one partial rollback, got {target.partial_rollback_count}"
         )
+    expected_mode = args.expect_mode
+    if expected_mode == "auto":
+        expected_mode = (
+            "window-crop"
+            if target.state_window > 1 and target.window_crop_available
+            else "rewind-replay"
+        )
+    if expected_mode == "window-crop":
+        if target.window_crop_count != 1 or target.replay_append_count != 0:
+            raise RuntimeError(
+                "Expected one window crop and no replay append, got "
+                f"window_crop={target.window_crop_count}, "
+                f"replay_append={target.replay_append_count}"
+            )
+    elif target.window_crop_count != 0 or target.replay_append_count != 1:
+        raise RuntimeError(
+            "Expected one rewind/replay and no window crop, got "
+            f"window_crop={target.window_crop_count}, "
+            f"replay_append={target.replay_append_count}"
+        )
 
     after_rollback = target.verify(np.asarray([expected_ids[5]], dtype=np.int32))
     if after_rollback.logits.shape != (1, 1, target.vocab_size):
@@ -195,7 +228,9 @@ def main() -> None:
             f"Unexpected post-rollback logits shape: {after_rollback.logits.shape}"
         )
 
-    embeddings = target.embed(np.asarray([[expected_ids[0], bad_token]], dtype=np.int64))
+    embeddings = target.embed(
+        np.asarray([[expected_ids[0], bad_token]], dtype=np.int64)
+    )
     if embeddings.shape != (1, 2, target.hidden_size):
         raise RuntimeError(f"Unexpected embedding shape: {embeddings.shape}")
     draft_logits = target.lm_head(
@@ -206,7 +241,7 @@ def main() -> None:
 
     print(
         "PASS: OGA token parity, hidden taps, four-token verification, "
-        "stateless helpers, and snapshot/rewind rollback are correct."
+        f"stateless helpers, and {expected_mode} partial commit are correct."
     )
 
 
