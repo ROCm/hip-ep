@@ -89,9 +89,10 @@ mlir::LogicalResult DynamicSparseAttentionToHip::matchAndRewrite(
     return val;
   };
 
-  if (numOps < 11 || numOps > 17) {
+  if (numOps < 11 || numOps > kDsaMaxInputs) {
     return rewriter.notifyMatchFailure(
-        op, "DynamicSparseAttention expects 11-17 operands");
+        op, "DynamicSparseAttention expects 11-17 operands, or up to 23 with "
+            "folded gate and prologue inputs");
   }
   mlir::Value query = op->getOperand(0);
   mlir::Value key = getOptionalOperand(1);
@@ -101,9 +102,18 @@ mlir::LogicalResult DynamicSparseAttentionToHip::matchAndRewrite(
   mlir::Value selectedIndices = getOptionalOperand(7);
   mlir::Value selectedCounts = getOptionalOperand(8);
   mlir::Value seqlensK = getOptionalOperand(9);
-  if (!key || !value) {
-    return rewriter.notifyMatchFailure(op, "packed QKV is not supported");
+  mlir::Value gate = getOptionalOperand(kDsaGateIdx);
+  llvm::SmallVector<mlir::Value> prologue;
+  for (size_t idx = kDsaPrologueIdx; idx < kDsaMaxInputs; ++idx) {
+    if (mlir::Value v = getOptionalOperand(idx)) {
+      prologue.push_back(v);
+    }
   }
+  if (static_cast<bool>(key) != static_cast<bool>(value)) {
+    return rewriter.notifyMatchFailure(
+        op, "key and value must be both given or both absent");
+  }
+  const bool packed = !key;
   if (!pastKey || !pastValue) {
     return rewriter.notifyMatchFailure(op, "past_key/past_value are required");
   }
@@ -122,15 +132,45 @@ mlir::LogicalResult DynamicSparseAttentionToHip::matchAndRewrite(
     }
   }
 
+  const int64_t queryHeads = packed ? numHeads + 2 * kvNumHeads : numHeads;
   auto queryType = mlir::dyn_cast<mlir::RankedTensorType>(query.getType());
   if (!queryType || queryType.getRank() != 3 || queryType.isDynamicDim(2) ||
-      queryType.getDimSize(2) % numHeads != 0) {
+      queryType.getDimSize(2) % queryHeads != 0) {
     return rewriter.notifyMatchFailure(
-        op, "query must be [B, S, num_heads * D] with a static last dim");
+        op, "query must be [B, S, num_heads * D], or [B, S, (num_heads + 2 * "
+            "kv_num_heads) * D] when packed, with a static last dim");
   }
-  const int64_t headSize = queryType.getDimSize(2) / numHeads;
+  const int64_t headSize = queryType.getDimSize(2) / queryHeads;
   if (headSize != 128 && headSize != 256) {
     return rewriter.notifyMatchFailure(op, "head size must be 128 or 256");
+  }
+
+  auto epsilonAttr = op->getAttrOfType<mlir::FloatAttr>(kDsaNormEpsilonAttr);
+  auto sectionAttr =
+      op->getAttrOfType<mlir::DenseI64ArrayAttr>(kDsaMropeSectionAttr);
+  auto layoutAttr = op->getAttrOfType<mlir::IntegerAttr>(kDsaMropeLayoutAttr);
+  const bool hasPrologue = prologue.size() == kDsaPrologueInputs &&
+                           epsilonAttr && sectionAttr && layoutAttr;
+  if (!hasPrologue &&
+      (!prologue.empty() || epsilonAttr || sectionAttr || layoutAttr)) {
+    return rewriter.notifyMatchFailure(
+        op, "folded prologue inputs and attributes must be given together");
+  }
+  int64_t halfRotary = 0;
+  if (hasPrologue) {
+    llvm::ArrayRef<int64_t> section = sectionAttr.asArrayRef();
+    if (section.size() != 3 ||
+        llvm::any_of(section, [](int64_t s) { return s < 0; })) {
+      return rewriter.notifyMatchFailure(
+          op, "mrope section must be three non-negative entries");
+    }
+    halfRotary = section[0] + section[1] + section[2];
+    const float eps = static_cast<float>(epsilonAttr.getValueAsDouble());
+    const int64_t layout = layoutAttr.getValue().getSExtValue();
+    if (halfRotary <= 0 || 2 * halfRotary > headSize ||
+        (layout != 0 && layout != 1) || !std::isfinite(eps) || eps < 0.0f) {
+      return rewriter.notifyMatchFailure(op, "unsupported folded prologue");
+    }
   }
   auto pastType = mlir::dyn_cast<mlir::RankedTensorType>(pastKey.getType());
   if (!pastType || pastType.getRank() != 4 ||
@@ -165,13 +205,27 @@ mlir::LogicalResult DynamicSparseAttentionToHip::matchAndRewrite(
           : batch * seq;
   const llvm::SmallVector<int64_t> cacheShape = {
       batch, kvNumHeads, pastType.getDimSize(2), headSize};
-  if (!matches(query, f16, {batch, seq, numHeads * headSize})) {
+  if (!matches(query, f16, {batch, seq, queryHeads * headSize})) {
     return rewriter.notifyMatchFailure(op, "query must be f16");
   }
-  if (!matches(key, f16, {batch, seq, kvNumHeads * headSize}) ||
-      !matches(value, f16, {batch, seq, kvNumHeads * headSize})) {
+  if (!packed && (!matches(key, f16, {batch, seq, kvNumHeads * headSize}) ||
+                  !matches(value, f16, {batch, seq, kvNumHeads * headSize}))) {
     return rewriter.notifyMatchFailure(
         op, "key and value must be f16 [B, S, kv_num_heads * D]");
+  }
+  if (gate && !matches(gate, f16, {batch, seq, numHeads * headSize})) {
+    return rewriter.notifyMatchFailure(
+        op, "gate must be f16 [B, S, num_heads * D]");
+  }
+  if (hasPrologue &&
+      (!matches(prologue[0], f16, {headSize}) ||
+       !matches(prologue[1], f16, {headSize}) ||
+       !matches(prologue[2], rewriter.getI64Type(), {3, batch, seq}) ||
+       !matches(prologue[3], f16, {kAny, halfRotary}) ||
+       !matches(prologue[4], f16, {kAny, halfRotary}))) {
+    return rewriter.notifyMatchFailure(
+        op, "prologue inputs must be f16 [D] norm weights, i64 [3, B, S] "
+            "position ids and f16 [Y, R/2] cos/sin caches");
   }
   if (!matches(pastKey, f16, cacheShape) ||
       !matches(pastValue, f16, cacheShape)) {
@@ -240,14 +294,38 @@ mlir::LogicalResult DynamicSparseAttentionToHip::matchAndRewrite(
   mlir::Value presentValueInit =
       createEmptyTensor(rewriter, loc, presentValueType, pastValue);
 
+  llvm::SmallVector<mlir::Value> operands = {*ctxOrFailure, query};
+  if (!packed) {
+    operands.append({key, value});
+  }
+  operands.append(
+      {pastKey, pastValue, selectedIndices, selectedCounts, seqlensK});
+  if (gate) {
+    operands.push_back(gate);
+  }
+  operands.append(prologue.begin(), prologue.end());
+  operands.append({outputInit, presentKeyInit, presentValueInit});
+  const int32_t kv = packed ? 0 : 1;
+  const int32_t pro = hasPrologue ? 1 : 0;
   auto state = mlir::OperationState(loc, "hip.dynamic_sparse_attention");
-  state.addOperands({*ctxOrFailure, query, key, value, pastKey, pastValue,
-                     selectedIndices, selectedCounts, seqlensK, outputInit,
-                     presentKeyInit, presentValueInit});
+  state.addOperands(operands);
   state.addTypes({outputType, presentKeyType, presentValueType});
+  state.addAttribute(
+      "operand_segment_sizes",
+      rewriter.getDenseI32ArrayAttr({1, 1, kv, kv, 1, 1, 1, 1, 1, gate ? 1 : 0,
+                                     pro, pro, pro, pro, pro, 1, 1, 1}));
   state.addAttribute("num_heads", rewriter.getI64IntegerAttr(numHeads));
   state.addAttribute("kv_num_heads", rewriter.getI64IntegerAttr(kvNumHeads));
   state.addAttribute("scale", rewriter.getF32FloatAttr(scale));
+  if (hasPrologue) {
+    state.addAttribute("norm_epsilon",
+                       rewriter.getF32FloatAttr(
+                           static_cast<float>(epsilonAttr.getValueAsDouble())));
+    state.addAttribute("mrope_section", sectionAttr);
+    state.addAttribute(
+        "mrope_layout",
+        rewriter.getI64IntegerAttr(layoutAttr.getValue().getSExtValue()));
+  }
   mlir::Operation *hipOp = rewriter.create(state);
   rewriter.replaceOp(op, hipOp->getResults());
   return mlir::success();

@@ -756,6 +756,31 @@ inline constexpr llvm::StringLiteral kSelectedCountsAttr =
 void populateIndexerCountsFoldPatterns(RewritePatternSet &patterns,
                                        MLIRContext *ctx);
 
+/// Input slots DsaPrologueFold appends to a com.microsoft
+/// `DynamicSparseAttention` after its 17 ORT inputs (absent ones are None):
+/// the gate, then q_norm_weight, k_norm_weight, position_ids, cos_cache and
+/// sin_cache of a folded q/k norm + MRoPE prologue. The prologue also stamps
+/// the epsilon, section and layout attributes below.
+inline constexpr size_t kDsaGateIdx = 17;
+inline constexpr size_t kDsaPrologueIdx = 18;
+inline constexpr size_t kDsaPrologueInputs = 5;
+inline constexpr size_t kDsaMaxInputs = kDsaPrologueIdx + kDsaPrologueInputs;
+inline constexpr llvm::StringLiteral kDsaNormEpsilonAttr =
+    "hipdnn.dsa_norm_epsilon";
+inline constexpr llvm::StringLiteral kDsaMropeSectionAttr =
+    "hipdnn.dsa_mrope_section";
+inline constexpr llvm::StringLiteral kDsaMropeLayoutAttr =
+    "hipdnn.dsa_mrope_layout";
+
+/// Pre-lowering pattern set: fold the work around a com.microsoft
+/// `DynamicSparseAttention` into it: a `Mul(output, Sigmoid(g))` gate, the
+/// per-head SimplifiedLayerNormalization + MRotaryEmbedding of query and key,
+/// and the `Split` of a packed QKV projection. Must run BEFORE
+/// `lowerOnnxConstants` (it reads Reshape shapes) and `convertComputeOps`.
+/// See DsaPrologueFold.cpp.
+void populateDsaPrologueFoldPatterns(RewritePatternSet &patterns,
+                                     MLIRContext *ctx);
+
 /// Pre-lowering pattern set: collapse ORT's inlined `FastGelu` primitive
 /// chain (Pow / Mul / Sum / Tanh) back into a single
 /// `onnx.Gelu(approximate="tanh")`. ORT inlines the Gelu function body

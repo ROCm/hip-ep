@@ -1989,14 +1989,21 @@ int wrap_gated_delta_net(RuntimeState *state, const void *qkv,
                          int64_t element_size_bytes);
 
 // fp16 only. past_* may alias present_*. head_size is query width / num_heads
-// and capacity is past_key dim 2; the remaining dims are runtime shapes that
-// must agree with them, else -1 before any launch.
+// (/ (num_heads + 2 * kv_num_heads) for a packed query, when key and value
+// are null and their dims ignored) and capacity is past_key dim 2; the
+// remaining dims are runtime shapes that must agree with them, else -1 before
+// any launch. gate may be null (gate_* ignored). q_norm_weight, k_norm_weight,
+// position_ids, cos_cache and sin_cache are all null (their dims, section_*,
+// mrope_layout and norm_epsilon ignored) or all set: the q/k norm and MRoPE
+// prologue of hip_dynamic_sparse_attention, rotary width 2 * sum(section).
 int wrap_dynamic_sparse_attention(
     RuntimeState *state, const void *query, const void *key, const void *value,
     const void *past_key, const void *past_value, const void *selected_indices,
-    const void *selected_counts, const void *seqlens_k, void *output,
-    void *present_key, void *present_value, int64_t batch, int64_t seq_len,
-    int64_t num_heads, int64_t kv_num_heads, int64_t head_size,
+    const void *selected_counts, const void *seqlens_k, const void *gate,
+    const void *q_norm_weight, const void *k_norm_weight,
+    const void *position_ids, const void *cos_cache, const void *sin_cache,
+    void *output, void *present_key, void *present_value, int64_t batch,
+    int64_t seq_len, int64_t num_heads, int64_t kv_num_heads, int64_t head_size,
     int64_t capacity, int64_t max_selected, int64_t past_key_batch,
     int64_t past_key_heads, int64_t past_key_head_size,
     int64_t past_value_batch, int64_t past_value_heads,
@@ -2006,7 +2013,12 @@ int wrap_dynamic_sparse_attention(
     int64_t indices_rows, int64_t counts_rows, int64_t seqlens_len,
     int64_t key_batch, int64_t key_seq_len, int64_t key_width,
     int64_t value_batch, int64_t value_seq_len, int64_t value_width,
-    float scale);
+    int64_t gate_batch, int64_t gate_seq_len, int64_t gate_width,
+    int64_t q_norm_len, int64_t k_norm_len, int64_t position_sections,
+    int64_t position_batch, int64_t position_seq_len, int64_t cos_rows,
+    int64_t cos_width, int64_t sin_rows, int64_t sin_width, int64_t section_t,
+    int64_t section_h, int64_t section_w, int64_t mrope_layout, float scale,
+    float norm_epsilon);
 
 // past_key may be null when past_len == 0; mask may be null (all visible).
 // mask_* are ignored without a mask and cos_batch / sin_batch unless

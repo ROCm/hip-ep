@@ -10,12 +10,16 @@ ORT CPU has no DynamicSparseAttention kernel, so the reference is a NumPy port
 of the ORT CUDA semantics (fp32 logits and softmax, invalid candidates skipped,
 empty candidate set -> 0, K/V written at seqlens_k + 1 - S + s when inside the
 cache).
+
+The fused cases surround the op with the graph the compiler folds into it: a
+Split of one packed qkv input, per-head SimplifiedLayerNormalization and
+MRotaryEmbedding of q and k, and Mul(output, Sigmoid(gate)).
 """
 
 import numpy as np
 import pytest
 from onnx import TensorProto as TP
-from onnx import helper
+from onnx import helper, numpy_helper
 
 from framework.comparator import compare_outputs
 from framework.onnx_utils import make_model_from_nodes
@@ -432,6 +436,287 @@ def test_shared_past_present_decode(model_runner):
         compare_outputs([io.copy_outputs_to_cpu()[0]], [out], atol=5e-3, rtol=0.0)
         np.testing.assert_array_equal(cache_k.numpy(), past_k)
         np.testing.assert_array_equal(cache_v.numpy(), past_v)
+
+
+def _selection(rng, B, S, P, width):
+    """Flattened [B * S, width] candidate lists, -1 padded, and their counts."""
+    flat = np.full((B * S, width), -1, np.int32)
+    counts = np.zeros(B * S, np.int32)
+    for row in range(B * S):
+        qpos = P + row % S
+        n = min(qpos + 1, width)
+        flat[row, :n] = _block_indices(rng, qpos, n)
+        counts[row] = n
+    return flat, counts
+
+
+def _rope_base_tables(rows, half, theta=1e7):
+    """Standard RoPE base tables [rows, half]: cos/sin of pos * theta^(-f/half),
+    the layout of the exported cos_cache/sin_cache initializers."""
+    inv_freq = theta ** (-np.arange(half, dtype=np.float64) / half)
+    ang = np.arange(rows, dtype=np.float64)[:, None] * inv_freq[None, :]
+    return np.cos(ang).astype(np.float16), np.sin(ang).astype(np.float16)
+
+
+def _step_positions(B, P, S):
+    """[3, B, S] T/H/W positions of the S tokens after P cached ones. The rows
+    differ, so a frequency that reads the wrong section shows in the output."""
+    pos = np.arange(P, P + S)
+    pos = np.stack([pos, pos // 2, (3 * pos) // 4])
+    return np.broadcast_to(pos[:, None, :], (3, B, S)).copy()
+
+
+def _mrope_sections(half, section, layout):
+    """MRoPE section (0=T, 1=H, 2=W) of each rotary frequency, as mrope_stream
+    in rope_kernel.hip. Layout 0 uses contiguous sections; layout 1 puts H and
+    W on every third frequency."""
+    sec_t, sec_h, sec_w = section
+    f = np.arange(half)
+    if layout == 0:
+        return np.where(f < sec_t, 0, np.where(f < sec_t + sec_h, 1, 2))
+    h = (f % 3 == 1) & (f < 3 * sec_h)
+    w = (f % 3 == 2) & (f < 3 * sec_w)
+    return np.where(h, 1, np.where(w, 2, 0))
+
+
+def _norm_rope(x, heads, weight, position_ids, cos_base, sin_base, c):
+    """The exported per-head SimplifiedLayerNormalization (fp32 stash), then
+    MRotaryEmbedding (interleaved=0, fp32 rotation rounded once)."""
+    B, S, W = x.shape
+    x32 = x.reshape(B, S, heads, -1).astype(np.float32)
+    ms = np.mean(x32 * x32, axis=-1, keepdims=True, dtype=np.float32)
+    inv = np.float32(1.0) / np.sqrt(ms + np.float32(c["eps"]), dtype=np.float32)
+    normed = (x32 * inv * weight.astype(np.float32)).astype(np.float16)
+    half = c["rotary_dim"] // 2
+    sections = _mrope_sections(half, c["section"], c["layout"])
+    rows = np.moveaxis(position_ids[sections], 0, -1)
+    cs = cos_base[rows, np.arange(half)].astype(np.float32)[:, :, None, :]
+    sn = sin_base[rows, np.arange(half)].astype(np.float32)[:, :, None, :]
+    x0 = normed[..., :half].astype(np.float32)
+    x1 = normed[..., half : 2 * half].astype(np.float32)
+    out = normed.copy()
+    out[..., :half] = (x0 * cs - x1 * sn).astype(np.float16)
+    out[..., half : 2 * half] = (x1 * cs + x0 * sn).astype(np.float16)
+    return out.reshape(B, S, W)
+
+
+def _output_gate(attn, gate):
+    """Mul(attn, Sigmoid(gate)) in fp16: the sigmoid rounds to fp16 before the
+    product, which rounds again."""
+    sig = (1.0 / (1.0 + np.exp(-gate.astype(np.float32)))).astype(np.float16)
+    return (attn.astype(np.float32) * sig.astype(np.float32)).astype(np.float16)
+
+
+def _constant(nodes, name, values):
+    nodes.append(
+        helper.make_node(
+            "Constant",
+            [],
+            [name],
+            value=numpy_helper.from_array(np.array(values, np.int64)),
+        )
+    )
+    return name
+
+
+def _make_fused_model(c, gate_width):
+    """DSA with the optional packed-qkv Split, q/k norm + MRoPE prologue and
+    output gate of case ``c``; ``gate_width`` 0 means no gate."""
+    N, KV, D = c["N"], c["KV"], c["D"]
+    nodes, inits = [], []
+    f16 = TP.FLOAT16
+    inputs = []
+    if c["packed"]:
+        src = dict(q="q0", k="k0", v="v0")
+        widths = _constant(nodes, "widths", [N * D, KV * D, KV * D])
+        nodes.append(
+            helper.make_node("Split", ["qkv", widths], list(src.values()), axis=-1)
+        )
+        inputs.append(
+            helper.make_tensor_value_info("qkv", f16, ["B", "S", (N + 2 * KV) * D])
+        )
+    else:
+        src = dict(q="query", k="key", v="value")
+        inputs += [
+            helper.make_tensor_value_info(src[x], f16, ["B", "S", h * D])
+            for x, h in (("q", N), ("k", KV), ("v", KV))
+        ]
+    q, k = src["q"], src["k"]
+    if c["prologue"]:
+        per_head = _constant(nodes, "per_head", [0, -1, D])
+        rd = c["rotary_dim"]
+        cos, sin = _rope_base_tables(c["table_rows"], rd // 2)
+        inits += [
+            numpy_helper.from_array(cos, "cos_cache"),
+            numpy_helper.from_array(sin, "sin_cache"),
+        ]
+        rotated = []
+        for x, heads in (("q", N), ("k", KV)):
+            inits.append(numpy_helper.from_array(c[f"{x}_weight"], f"{x}_weight"))
+            merged = _constant(nodes, f"{x}_merged", [0, -1, heads * D])
+            nodes += [
+                helper.make_node("Reshape", [src[x], per_head], [f"{x}_heads"]),
+                helper.make_node(
+                    "SimplifiedLayerNormalization",
+                    [f"{x}_heads", f"{x}_weight"],
+                    [f"{x}_normed"],
+                    epsilon=c["eps"],
+                    axis=-1,
+                    stash_type=1,
+                ),
+                helper.make_node("Reshape", [f"{x}_normed", merged], [f"{x}_flat"]),
+                helper.make_node(
+                    "MRotaryEmbedding",
+                    [f"{x}_flat", "position_ids", "cos_cache", "sin_cache"],
+                    [f"{x}_rot"],
+                    domain="com.microsoft",
+                    interleaved=0,
+                    rotary_embedding_dim=rd,
+                    num_heads=heads,
+                    mrope_section=c["section"],
+                    mrope_layout=c["layout"],
+                    is_packed_batching=0,
+                ),
+            ]
+            rotated.append(f"{x}_rot")
+        q, k = rotated
+        inputs.append(
+            helper.make_tensor_value_info("position_ids", TP.INT64, [3, "B", "S"])
+        )
+    attn = "attn" if gate_width else "output"
+    nodes.append(
+        helper.make_node(
+            "DynamicSparseAttention",
+            [q, k, src["v"], "past_key", "past_value", "", ""]
+            + ["selected_indices", "selected_counts", "seqlens_k"]
+            + ["total_sequence_length"]
+            + [""] * 6,
+            [attn, "present_key", "present_value"],
+            domain="com.microsoft",
+            num_heads=N,
+            kv_num_heads=KV,
+            scale=c["scale"],
+            is_causal=1,
+            attention_mode="selected_only",
+            selected_kv_source="main",
+            do_rotary=0,
+            rotary_interleaved=0,
+            qk_norm_epsilon=1e-6,
+        )
+    )
+    if gate_width:
+        nodes += [
+            helper.make_node("Sigmoid", ["gate"], ["gate_sig"]),
+            helper.make_node("Mul", [attn, "gate_sig"], ["output"]),
+        ]
+        inputs.append(
+            helper.make_tensor_value_info("gate", f16, ["B", "S", gate_width])
+        )
+    cache = ["B", KV, "cap", D]
+    inputs += [
+        helper.make_tensor_value_info("past_key", f16, cache),
+        helper.make_tensor_value_info("past_value", f16, cache),
+        helper.make_tensor_value_info("selected_indices", TP.INT32, ["R", c["K"]]),
+        helper.make_tensor_value_info("selected_counts", TP.INT32, ["R"]),
+        helper.make_tensor_value_info("seqlens_k", TP.INT32, ["B"]),
+        helper.make_tensor_value_info("total_sequence_length", TP.INT32, []),
+    ]
+    outputs = [
+        helper.make_tensor_value_info("output", f16, ["B", "S", N * D]),
+        helper.make_tensor_value_info("present_key", f16, cache),
+        helper.make_tensor_value_info("present_value", f16, cache),
+    ]
+    model = make_model_from_nodes(nodes, inputs, outputs, inits, **_OPSETS)
+    model.ir_version = 10
+    return model
+
+
+_FUSED_CASES = {
+    # Folded pieces, geometry (heads, KV heads, head size), batch, new and
+    # cached tokens, candidate width.
+    "packed": dict(packed=True, prologue=False, gate=False, B=1, S=3, P=70),
+    "gate": dict(packed=False, prologue=False, gate=True, B=2, S=4, P=90),
+    "broadcast_gate": dict(packed=True, prologue=False, gate="broadcast", B=1, S=3),
+    "prologue": dict(packed=False, prologue=True, gate=False, B=2, S=5, P=90),
+    "packed_prologue": dict(packed=True, prologue=True, gate=False, B=1, S=64, P=0),
+    "all_d128_layout0": dict(
+        packed=True, prologue=True, gate=True, B=1, S=7, P=60, N=4, KV=1, D=128
+    ),
+    "all_decode_split": dict(
+        packed=True, prologue=True, gate=True, B=2, S=1, P=3000, K=2051
+    ),
+}
+for _c in _FUSED_CASES.values():
+    _c.setdefault("P", 50)
+    _c.setdefault("N", 24)
+    _c.setdefault("KV", 2)
+    _c.setdefault("D", 256)
+    _c.setdefault("K", 48)
+
+
+@pytest.mark.parametrize("case", list(_FUSED_CASES), ids=list(_FUSED_CASES))
+def test_fused_prologue_and_gate(model_runner, case):
+    c = dict(_FUSED_CASES[case])
+    N, KV, D, B, S, P, K = (c[x] for x in ("N", "KV", "D", "B", "S", "P", "K"))
+    rng = np.random.default_rng(sum(map(ord, case)))
+    half = 16 if D == 128 else 32
+    c.update(
+        scale=0.0625,
+        eps=1e-6,
+        rotary_dim=2 * half,
+        section=[6, 5, 5] if D == 128 else [11, 11, 10],
+        layout=0 if "layout0" in case else 1,
+        table_rows=P + S + 16,
+        q_weight=(1 + 0.1 * rng.standard_normal(D)).astype(np.float16),
+        k_weight=(1 + 0.1 * rng.standard_normal(D)).astype(np.float16),
+    )
+    gate_width = {True: N * D, "broadcast": 1, False: 0}[c["gate"]]
+    cap = P + S + 8
+    q, k, v, past_k, past_v = _inputs(rng, B, S, N, KV, D, cap)
+    past_k[:, :, P:] = np.nan
+    past_v[:, :, P:] = np.nan
+    sel, counts = _selection(rng, B, S, P, K)
+    seqlens = np.full(B, P + S - 1, np.int32)
+    total = np.array(P + S, np.int32)
+    feeds = {}
+    if c["packed"]:
+        feeds["qkv"] = np.concatenate([q, k, v], axis=-1)
+    else:
+        feeds.update(query=q, key=k, value=v)
+    if c["prologue"]:
+        pos = _step_positions(B, P, S)
+        feeds["position_ids"] = pos
+        cos, sin = _rope_base_tables(c["table_rows"], half)
+        q = _norm_rope(q, N, c["q_weight"], pos, cos, sin, c)
+        k = _norm_rope(k, KV, c["k_weight"], pos, cos, sin, c)
+    gate = None
+    if gate_width:
+        gate = rng.uniform(-4, 4, (B, S, gate_width)).astype(np.float16)
+        feeds["gate"] = gate
+    feeds.update(
+        past_key=past_k,
+        past_value=past_v,
+        selected_indices=sel,
+        selected_counts=counts,
+        seqlens_k=seqlens,
+        total_sequence_length=total,
+    )
+    model = _make_fused_model(c, gate_width)
+    names = [i.name for i in model.graph.input]
+    actual = model_runner.backend.run(
+        _persist(model_runner, model), [feeds[x] for x in names]
+    )
+    expected, pk, pv = _dsa_reference(
+        q, k, v, past_k, past_v, sel, counts, seqlens, N, KV, c["scale"]
+    )
+    if gate is not None:
+        expected = _output_gate(expected, gate)
+    compare_outputs(actual[:1], [expected], atol=5e-3, rtol=0.0)
+    if c["prologue"]:
+        np.testing.assert_allclose(actual[1], pk, rtol=4e-3, atol=4e-3)
+    else:
+        np.testing.assert_array_equal(actual[1], pk)
+    np.testing.assert_array_equal(actual[2], pv)
 
 
 def _persist(model_runner, model):

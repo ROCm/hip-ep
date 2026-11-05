@@ -4697,45 +4697,68 @@ def Hip_GatedDeltaNetOp : Hip_DpsOp_AutoReify<"gated_delta_net"> {
   let hasVerifier = 1;
 }
 
-def Hip_DynamicSparseAttentionOp : Hip_DpsOp_AutoReify<"dynamic_sparse_attention"> {
+def Hip_DynamicSparseAttentionOp : Hip_DpsOp_AutoReify<"dynamic_sparse_attention",
+    [AttrSizedOperandSegments]> {
   let summary = "Attention over per-row selected KV positions "
                 "(com.microsoft DynamicSparseAttention)";
   let description = [{
     com.microsoft DynamicSparseAttention restricted to
     attention_mode = selected_only, selected_kv_source = main, is_causal = 1,
-    separate Q/K/V, a past cache, and no rotary, q/k norm, local window or
-    head sink.
+    a past cache, and no ORT rotary or q/k norm inputs, local window or head
+    sink.
 
     Shapes, with N = num_heads, kvN = kv_num_heads, D = head size:
       query                   [B, S, N*D]          f16
-      key, value              [B, S, kvN*D]        f16
+                              [B, S, (N+2*kvN)*D]  packed, without key/value
+      key, value (optional)   [B, S, kvN*D]        f16
       past_key, past_value    [B, kvN, Cap, D]     f16
       selected_indices        [B*S, K]             i32
       selected_counts         [B*S]                i32
       seqlens_k               [B]                  i32
+      gate (optional)         [B, S, N*D]          f16
+      q/k_norm_weight (opt.)  [D]                  f16
+      position_ids (opt.)     [3, B, S]            i64
+      cos/sin_cache (opt.)    [Y, R/2]             f16
       output                  [B, S, N*D]          f16
       present_key/value       [B, kvN, Cap, D]     f16
 
-    D = query width / N must be 128 or 256 and N / kvN at most 16; scale must
-    be finite and non-negative. Dynamic dims, including the cache head dim,
-    are checked against these shapes at run time. present starts as past (they
-    may share a buffer). With T = seqlens_k[b] + 1, token s of batch b is
-    written to cache position T - S + s when that lies in [0, Cap). Row
-    (b, s) attends from position T - S + s if S <= T <= Cap and has no
-    candidates otherwise. Its candidates are the first
+    key and value are both given, or both absent with query holding each
+    token's q, k and v heads in that order. D must be 128 or 256 and N / kvN
+    at most 16; scale must be finite and non-negative. Dynamic dims, including
+    the cache head dim, are checked against these shapes at run time. present
+    starts as past (they may share a buffer). With T = seqlens_k[b] + 1, token
+    s of batch b is written to cache position T - S + s when that lies in
+    [0, Cap). Row (b, s) attends from position T - S + s if S <= T <= Cap and
+    has no candidates otherwise. Its candidates are the first
     clamp(selected_counts, 0, K) entries of selected_indices, keeping only
     0 <= idx <= T - S + s; duplicates count each time. Head h uses KV head
     h / (N / kvN). Logits are scale * q.k in fp32 and an empty candidate set
     gives a zero output.
 
+    The prologue operands q_norm_weight, k_norm_weight, position_ids,
+    cos_cache and sin_cache come together with norm_epsilon, mrope_section
+    (three entries, R = 2 * their sum <= D) and mrope_layout (0 or 1). Each
+    query and key head (including the keys written to present_key) is then
+    first RMS-normalized, x * rsqrt(mean(x^2) + norm_epsilon) * weight in fp32
+    rounded to f16, and its first R channels rotated by split-half MRoPE,
+    rounded to f16: the result of a SimplifiedLayerNormalization over each
+    head followed by MRotaryEmbedding (interleaved = 0). Frequency j < R / 2
+    reads its position from row 0, 1 or 2 of position_ids, the MRoPE section
+    that mrope_section and mrope_layout give it; a position outside [0, Y)
+    leaves the pair unrotated.
+
+    With gate, output = attention * Sigmoid(gate), rounded to f16 after the
+    attention, after the sigmoid and after the product.
+
     Example:
     ```mlir
-    hip.dynamic_sparse_attention(%ctx)
-        ins(%q, %k, %v, %past_k, %past_v, %idx, %cnt, %seqlens :
-            memref<1x1x6144xf16, 1>, memref<1x1x512xf16, 1>,
-            memref<1x1x512xf16, 1>, memref<1x2x4096x256xf16, 1>,
-            memref<1x2x4096x256xf16, 1>, memref<1x2051xi32, 1>,
-            memref<1xi32, 1>, memref<1xi32, 1>)
+    hip.dynamic_sparse_attention(%ctx) ins(%q : memref<1x1x6144xf16, 1>)
+        kv(%k, %v : memref<1x1x512xf16, 1>, memref<1x1x512xf16, 1>)
+        cache(%past_k, %past_v : memref<1x2x4096x256xf16, 1>,
+              memref<1x2x4096x256xf16, 1>)
+        select(%idx, %cnt, %seqlens : memref<1x2051xi32, 1>,
+               memref<1xi32, 1>, memref<1xi32, 1>)
+        gate(%g : memref<1x1x6144xf16, 1>)
         outs(%out, %present_k, %present_v : memref<1x1x6144xf16, 1>,
              memref<1x2x4096x256xf16, 1>, memref<1x2x4096x256xf16, 1>)
         {num_heads = 24 : i64, kv_num_heads = 2 : i64, scale = 6.250000e-02 : f32}
@@ -4745,29 +4768,43 @@ def Hip_DynamicSparseAttentionOp : Hip_DpsOp_AutoReify<"dynamic_sparse_attention
   let arguments = (ins
     Hip_ContextType:$ctx,
     Hip_TensorOrMemRef:$query,
-    Hip_TensorOrMemRef:$key,
-    Hip_TensorOrMemRef:$value,
+    Optional<Hip_TensorOrMemRef>:$key,
+    Optional<Hip_TensorOrMemRef>:$value,
     Hip_TensorOrMemRef:$past_key,
     Hip_TensorOrMemRef:$past_value,
     Hip_TensorOrMemRef:$selected_indices,
     Hip_TensorOrMemRef:$selected_counts,
     Hip_TensorOrMemRef:$seqlens_k,
+    Optional<Hip_TensorOrMemRef>:$gate,
+    Optional<Hip_TensorOrMemRef>:$q_norm_weight,
+    Optional<Hip_TensorOrMemRef>:$k_norm_weight,
+    Optional<Hip_TensorOrMemRef>:$position_ids,
+    Optional<Hip_TensorOrMemRef>:$cos_cache,
+    Optional<Hip_TensorOrMemRef>:$sin_cache,
     Hip_TensorOrMemRef:$output,
     Hip_TensorOrMemRef:$present_key,
     Hip_TensorOrMemRef:$present_value,
     I64Attr:$num_heads,
     I64Attr:$kv_num_heads,
-    F32Attr:$scale
+    F32Attr:$scale,
+    OptionalAttr<F32Attr>:$norm_epsilon,
+    OptionalAttr<DenseI64ArrayAttr>:$mrope_section,
+    OptionalAttr<I64Attr>:$mrope_layout
   );
 
   let assemblyFormat = [{
-    `(` $ctx `)` `ins` `(`
-        $query `,` $key `,` $value `,` $past_key `,` $past_value `,`
-        $selected_indices `,` $selected_counts `,` $seqlens_k
-        `:` type($query) `,` type($key) `,` type($value) `,`
-        type($past_key) `,` type($past_value) `,` type($selected_indices) `,`
-        type($selected_counts) `,` type($seqlens_k)
-    `)`
+    `(` $ctx `)` `ins` `(` $query `:` type($query) `)`
+    (`kv` `(` $key^ `,` $value `:` type($key) `,` type($value) `)`)?
+    `cache` `(` $past_key `,` $past_value `:` type($past_key) `,`
+        type($past_value) `)`
+    `select` `(` $selected_indices `,` $selected_counts `,` $seqlens_k `:`
+        type($selected_indices) `,` type($selected_counts) `,`
+        type($seqlens_k) `)`
+    (`gate` `(` $gate^ `:` type($gate) `)`)?
+    (`prologue` `(` $q_norm_weight^ `,` $k_norm_weight `,` $position_ids `,`
+        $cos_cache `,` $sin_cache `:` type($q_norm_weight) `,`
+        type($k_norm_weight) `,` type($position_ids) `,` type($cos_cache) `,`
+        type($sin_cache) `)`)?
     `outs` `(` $output `,` $present_key `,` $present_value `:`
               type($output) `,` type($present_key) `,` type($present_value) `)`
     attr-dict (`:` type($result_tensors)^)?
