@@ -177,12 +177,13 @@ to match OGA's auto-discovery convention. This happens only in Linux CI
 packaging, not in a local build. Do it manually if building locally:
 
 ($WORKSPACE is the workspace you used to natively build hip-ep itself
-(see "Native" above). It is the dir containing install/ and therock-dist/.)
+(see "Native" above). It is the dir containing install/ and build/. Use your
+own path for THEROCK_DIST if you passed `--therock_dist`.)
 
 ```bash
 export WORKSPACE=/path/to/your/hip-ep/workspace
 export ROOT="$WORKSPACE/install"
-export THEROCK_DIST="$WORKSPACE/therock-dist"
+export THEROCK_DIST="$WORKSPACE/build/hip-ep/_therock"
 export LD_LIBRARY_PATH="$ROOT/lib:$THEROCK_DIST/lib"
 export LIBRARY_PATH="$ROOT/lib:$THEROCK_DIST/lib"
 export PATH="$ROOT/bin:$PATH"
@@ -305,7 +306,7 @@ export ROOT="$WORKSPACE/install"            # built from source
 # the EP `.so` under `$ROOT/lib`. The EP `.so` is built with
 # `RPATH=$ORIGIN`, so LlvmIrJit's `dlopen` of the matching variant
 # resolves through the loader without needing it on `LD_LIBRARY_PATH`.
-export THEROCK_DIST="$WORKSPACE/therock-dist"
+export THEROCK_DIST="$WORKSPACE/build/hip-ep/_therock"
 export LD_LIBRARY_PATH="$ROOT/lib:$THEROCK_DIST/lib"
 export LIBRARY_PATH="$ROOT/lib:$THEROCK_DIST/lib"
 # clang/lld for the per-model DLL link (the prebuilt package ships it in

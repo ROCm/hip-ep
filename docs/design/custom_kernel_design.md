@@ -196,7 +196,7 @@ endif()
 These are compiled to bitcode (via `clang -emit-llvm`) and merged into `runtime.bc`. They:
 
 - Include `hip_custom_kernels.h` (pure C, Clang-compatible)
-- Implement `wrap_rotary_embedding(...)` and `wrap_group_query_attention(...)` (declared in [hipdnn_ep_runtime.h](lib/Runtime/hipdnn_ep_runtime.h))
+- Implement `wrap_rotary_embedding(...)` and `wrap_group_query_attention(...)` (declared in [hipdnn_ep_runtime.h](../../lib/Runtime/hipdnn_ep_runtime.h))
 - Extract the HIP stream from `RuntimeState*` via `hipdnn_ep_state_get_stream()`
 - Compute shape info from the parameters passed by the compiler lowering
 - Call the `hip_rope_forward()` / `hip_gqa_forward()` C functions
