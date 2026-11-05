@@ -129,6 +129,8 @@ inline constexpr const char *kWrapGQAHostLength =
     "wrap_group_query_attention_host_length";
 inline constexpr const char *kWrapGQARingF16 =
     "wrap_group_query_attention_ring_f16";
+// Width GQA ABI: host-length arguments plus four physical BNSD cache widths.
+inline constexpr const char *kWrapGQAV2 = "wrap_group_query_attention_v2";
 inline constexpr const char *kWrapMultiHeadAttention =
     "wrap_multi_head_attention";
 inline constexpr const char *kWrapMatMulNBits = "wrap_matmul_nbits";

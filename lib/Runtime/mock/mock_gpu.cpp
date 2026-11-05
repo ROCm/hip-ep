@@ -3116,3 +3116,16 @@ int wrap_swiglu_promoted(RuntimeState *state, void *gate, void *up,
              (long long)num_elements);
   return 0;
 }
+
+// Packed-cache GQA ABI (physical cache widths). Codecs need the real runtime.
+int wrap_group_query_attention_v2(
+    RuntimeState *, int, void *, void *, void *, void *, void *, void *, void *,
+    void *, void *, void *, void *, void *, void *, void *, void *, void *,
+    void *, void *, int64_t, int64_t, float, int64_t, int64_t, float, int64_t,
+    int64_t, int64_t, int64_t, int64_t, int64_t, int32_t, int64_t, int64_t,
+    int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t,
+    int32_t, int32_t, int64_t, int64_t, int64_t, int64_t) {
+  fprintf(stderr, "[MOCK] wrap_group_query_attention_v2: packed KV cache "
+                  "codecs require the real runtime\n");
+  return -1;
+}

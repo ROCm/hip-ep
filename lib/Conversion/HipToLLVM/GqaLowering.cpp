@@ -258,8 +258,37 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
       }
     }
 
-    // Both runtime entry points accept the optional host length.
-    SmallVector<Type, 45> paramTypes = {
+    // Physical cache width can differ from the logical head dimension when the
+    // cache holds a packed codec (KV-Pareto k8v8_g32_planar_v1: 140 FP16
+    // carriers = 280 bytes per token and KV head). The dense ABI cannot
+    // describe that, so such caches use wrap_group_query_attention_v2, which
+    // also receives the four physical BNSD widths; the runtime rejects packed
+    // widths unless a supported codec is enabled. Static dense shapes use the
+    // upstream host-length ABI.
+    bool widthABI = queryType.isDynamicDim(2);
+    int64_t logicalWidth =
+        widthABI ? -1 : queryType.getDimSize(2) / headDimDivisor;
+    for (Value cache : {op.getPastKey(), op.getPastValue(), op.getPresentKey(),
+                        op.getPresentValue()}) {
+      if (!cache)
+        continue;
+      auto type = cast<MemRefType>(cache.getType());
+      if (type.getRank() == 4 &&
+          (type.isDynamicDim(3) || type.getDimSize(3) != logicalWidth))
+        widthABI = true;
+    }
+    auto cacheWidth = [&](Value original, Value converted) -> Value {
+      if (!original)
+        return createI64Const(0);
+      auto type = cast<MemRefType>(original.getType());
+      // Only rank-4 BNSD caches carry a width; others report 0.
+      return type.getRank() == 4
+                 ? getMemRefDimSize(type, 3, converted, rewriter, loc)
+                 : createI64Const(0);
+    };
+
+    // All GQA entries accept the optional compiler-proven host length.
+    SmallVector<Type, 49> paramTypes = {
         ptrType, // state
         i32Type, // op_state_slot
         // Inputs (14 pointers - some may be nullptr)
@@ -311,12 +340,17 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         i32Type  // host_length_value
     };
 
-    FailureOr<LLVM::LLVMFuncOp> funcOp =
-        LLVM::lookupOrCreateFn(rewriter, module, callee, paramTypes, i32Type);
+    if (widthABI)
+      paramTypes.append(4, i64Type); // past/present key/value widths
+    // A packed or dynamic cache width needs the width ABI (the Ring and dense
+    // entries assume head_dim-wide FP16 rows); otherwise keep the callee
+    // selected above.
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, widthABI ? kWrapGQAV2 : callee, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 45> args = {
+    SmallVector<Value, 49> args = {
         statePtr,
         // Per-instance op-state slot (threaded by --assign-op-state-slots)
         getOpStateSlotValue(op, rewriter, loc),
@@ -335,6 +369,13 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         elemSizeVal, attnBiasBatchVal, attnBiasNumHeadsVal, kvBnsdVal,
         seqLenNewKVVal, hasHostLength, hostLength};
 
+    if (widthABI) {
+      args.push_back(cacheWidth(op.getPastKey(), adaptor.getPastKey()));
+      args.push_back(cacheWidth(op.getPastValue(), adaptor.getPastValue()));
+      args.push_back(cacheWidth(op.getPresentKey(), adaptor.getPresentKey()));
+      args.push_back(
+          cacheWidth(op.getPresentValue(), adaptor.getPresentValue()));
+    }
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 
     rewriter.eraseOp(op);

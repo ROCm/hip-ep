@@ -32,6 +32,7 @@
 #include <mutex>
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 // Environment parameters (global scope, before namespace)
@@ -803,7 +804,12 @@ void MlirCustomOp::compute_with_output_allocator(
   inference_state_->set_output_allocator(nullptr);
 
   if (ret != 0) {
-    LOG(ERROR) << "inference_compute (allocator) failed with code: " << ret;
+    // Do not copy or publish outputs after a runtime admission/kernel failure.
+    // The EP Compute callback converts this exception to an OrtStatus.
+    // (Same change as hip-ep PR #1254.)
+    throw std::runtime_error(
+        "inference_compute (allocator) failed with code: " +
+        std::to_string(ret));
   }
 
   // Output-completeness guard. Every declared output must be produced in-graph
