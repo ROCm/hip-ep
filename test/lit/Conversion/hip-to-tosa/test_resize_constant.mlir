@@ -384,3 +384,22 @@ func.func @not_a_kernel(%ctx: !hip.context, %x: tensor<1x3x16x16xf32>,
        : tensor<1x3x32x32xf32>
   return %r : tensor<1x3x32x32xf32>
 }
+
+// -----
+
+// An antialiased linear resize stays hip.resize: TOSA's BILINEAR has no
+// antialiasing filter.
+// CHECK-LABEL: func.func @resize_antialias_not_tosa
+// CHECK: hip.resize
+// CHECK-NOT: tosa.resize
+func.func @resize_antialias_not_tosa(%ctx: !hip.context,
+                                     %x: tensor<1x3x32x32xf32>,
+                                     %init: tensor<1x3x16x16xf32>)
+    -> tensor<1x3x16x16xf32> attributes {rock.kernel} {
+  %r = hip.resize(%ctx) ins(%x : tensor<1x3x32x32xf32>)
+                        outs(%init : tensor<1x3x16x16xf32>)
+       {mode = 1 : i64, coord_transform = 0 : i64, nearest_mode = 0 : i64,
+        antialias = true, exclude_outside = true}
+       : tensor<1x3x16x16xf32>
+  return %r : tensor<1x3x16x16xf32>
+}

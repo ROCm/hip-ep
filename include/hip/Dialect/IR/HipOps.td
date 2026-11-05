@@ -5548,26 +5548,48 @@ def Hip_ResizeOp : Hip_DpsOp_AutoReify<"resize"> {
   let summary = "Spatial resize / interpolation (ONNX Resize)";
   let description = [{
     Implements a subset of ONNX Resize that covers the common image / volume
-    upsample-and-downsample patterns.  The runtime kernel takes a copied prefix
+    upsample-and-downsample patterns. Its attributes are ONNX Resize's, so
+    other resamplers map onto the same ones: GGML's interpolate (llama.cpp)
+    is nearest with asymmetric coordinates and floor, linear or cubic
+    (a = -0.75) with half_pixel or align_corners, and linear with antialias
+    and exclude_outside.  The runtime kernel takes a copied prefix
     of at most two axes and a trailing window of at most three.  Channels-first
     `(N, C, H, W)` uses that prefix and window `(H, W)`.  Channels-last
     `(N, H, W, C)` uses prefix `(N)`, an empty channel slot, and window
     `(H, W, C)`; the channel extent is unchanged, so that axis is copied.
-    Rank is 3, 4, or 5. Element type is f16, bf16, f32, or f64. Nearest also
-    accepts matching i8 or ui8; linear does not, because interpolating integer
-    codes is not a dequantized resize.
+    Rank is 3, 4, or 5. Element type is f16, bf16, f32, or f64. Nearest and
+    plain linear also accept matching i8 or ui8 (linear interpolates the
+    stored codes and truncates toward zero); cubic and antialias are float
+    only.
 
-    Supported attribute set (anything outside is rejected at conversion):
-      * mode in {"nearest", "linear"}              — encoded as i64
-        - 0 = nearest, 1 = linear (N-linear: bilinear / trilinear)
+    Supported attribute set (the verifier rejects anything outside it):
+      * mode in {"nearest", "linear", "cubic"}     — encoded as i64
+        - 0 = nearest, 1 = linear (N-linear: bilinear / trilinear),
+          2 = cubic (N-cubic, Keys' kernel with cubic_coeff_a; out-of-range
+          taps take the edge sample)
       * coordinate_transformation_mode in
           {"half_pixel", "pytorch_half_pixel", "asymmetric",
            "align_corners"}  — encoded as i64
         - 0 = half_pixel, 1 = asymmetric, 2 = align_corners,
           3 = pytorch_half_pixel (half_pixel, but an output axis of length 1
           samples input coordinate 0)
-      * nearest_mode in {"round_prefer_floor"}      — encoded as i64
-        - 0 = round_prefer_floor (only used when mode=nearest)
+      * nearest_mode — encoded as i64, used when mode = nearest
+        - 0 = round_prefer_floor, 1 = round_prefer_ceil, 2 = floor, 3 = ceil
+      * antialias (default false): linear only, with exclude_outside and
+        half_pixel or pytorch_half_pixel. Along an axis that shrinks, the
+        triangle filter widens to 1 / scale input pixels and each output is
+        the weighted mean of the input pixels under it (PyTorch's
+        antialias=True, GGML's GGML_SCALE_FLAG_ANTIALIAS). An axis that does
+        not shrink is plain linear.
+      * exclude_outside (default false): taps outside the input get weight 0
+        and the rest are renormalized. Required with antialias; not
+        supported with cubic yet; no effect on nearest and plain linear,
+        which never sample outside the input.
+      * cubic_coeff_a (default -0.75): -0.75 only, the value ONNX, PyTorch
+        and GGML use.
+
+    The lowering passes mode, antialias and exclude_outside to the kernel as
+    one integer: mode | antialias << 9 | exclude_outside << 10.
 
     Per-axis scale is recovered at runtime from the window's input and output
     extents (`scale = in_dim / out_dim`).  `scales` and `sizes` do not appear
@@ -5601,7 +5623,10 @@ def Hip_ResizeOp : Hip_DpsOp_AutoReify<"resize"> {
     I64Attr:$mode,
     I64Attr:$coord_transform,
     I64Attr:$nearest_mode,
-    OptionalAttr<F64ArrayAttr>:$scales
+    OptionalAttr<F64ArrayAttr>:$scales,
+    DefaultValuedAttr<BoolAttr, "false">:$antialias,
+    DefaultValuedAttr<BoolAttr, "false">:$exclude_outside,
+    DefaultValuedAttr<F32Attr, "-0.75f">:$cubic_coeff_a
   );
 
   let assemblyFormat = [{
@@ -5609,6 +5634,21 @@ def Hip_ResizeOp : Hip_DpsOp_AutoReify<"resize"> {
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+  // The attributes before antialias; antialias, exclude_outside and
+  // cubic_coeff_a take their defaults.
+  let builders = [
+    OpBuilder<(ins "::mlir::TypeRange":$result_tensors, "::mlir::Value":$ctx,
+                   "::mlir::Value":$input, "::mlir::Value":$output,
+                   "::mlir::IntegerAttr":$mode,
+                   "::mlir::IntegerAttr":$coord_transform,
+                   "::mlir::IntegerAttr":$nearest_mode,
+                   "::mlir::ArrayAttr":$scales), [{
+      build($_builder, $_state, result_tensors, ctx, input, output, mode,
+            coord_transform, nearest_mode, scales, ::mlir::BoolAttr(),
+            ::mlir::BoolAttr(), ::mlir::FloatAttr());
+    }]>
+  ];
+  let hasVerifier = 1;
 }
 
 def Hip_GridSampleOp : Hip_DpsOp_AutoReifyInfer<"grid_sample"> {

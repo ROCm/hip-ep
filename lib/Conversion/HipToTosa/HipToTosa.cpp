@@ -4406,7 +4406,8 @@ static bool isTosaExpressibleResize(hip::ResizeOp op) {
       inputType.getDimSize(1) != resultType.getDimSize(1))
     return false;
 
-  if (op.getMode() != 1)
+  // TOSA's BILINEAR has no antialiasing filter.
+  if (op.getMode() != 1 || op.getAntialias())
     return false;
   // planResizeAxis derives the scale from the extents.
   if (op.getScales())
