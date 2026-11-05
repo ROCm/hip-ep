@@ -281,6 +281,8 @@ class TestLinearAttention:
             (1, 8, 4, 4, 16, 16),
             (1, 1, 4, 4, 16, 16),
             (1, 48, 4, 4, 16, 16),
+            (1, 48, 2, 2, 32, 48),
+            (1, 600, 2, 2, 32, 16),
         ],
     )
     @pytest.mark.parametrize("update_rule", ["gated", "gated_delta"])
