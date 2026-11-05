@@ -2357,6 +2357,39 @@ void ResizeOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
+LogicalResult ResizeOp::verify() {
+  const int64_t mode = getMode();
+  if (mode < 0 || mode > 2)
+    return emitOpError("mode must be 0 (nearest), 1 (linear) or 2 (cubic)");
+  if (getCoordTransform() < 0 || getCoordTransform() > 3)
+    return emitOpError("coord_transform must be in [0, 3]");
+  // nearest_mode is read only by nearest.
+  if (mode == 0 && (getNearestMode() < 0 || getNearestMode() > 3))
+    return emitOpError("nearest_mode must be in [0, 3]");
+  const bool isFloat =
+      isa<FloatType>(getElementTypeOrSelf(getInput().getType()));
+  if (getAntialias()) {
+    if (mode != 1)
+      return emitOpError("antialias is supported for linear only");
+    if (!getExcludeOutside())
+      return emitOpError("antialias requires exclude_outside");
+    if (getCoordTransform() != 0 && getCoordTransform() != 3)
+      return emitOpError(
+          "antialias requires half_pixel or pytorch_half_pixel coordinates");
+    if (!isFloat)
+      return emitOpError("antialias requires a float element type");
+  }
+  if (mode == 2) {
+    if (!isFloat)
+      return emitOpError("cubic requires a float element type");
+    if (getExcludeOutside())
+      return emitOpError("cubic with exclude_outside is not supported");
+    if (getCubicCoeffA().convertToFloat() != -0.75f)
+      return emitOpError("cubic supports cubic_coeff_a = -0.75 only");
+  }
+  return success();
+}
+
 //===----------------------------------------------------------------------===//
 // GridSampleOp: ins(input, grid), outs(output)
 //===----------------------------------------------------------------------===//

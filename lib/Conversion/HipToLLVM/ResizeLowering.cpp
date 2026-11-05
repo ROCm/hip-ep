@@ -36,6 +36,7 @@ namespace {
 //               in0..2, out0..2,
 //               mode, coord_transform, nearest_mode)
 //   -> i32
+// `mode` is hip.resize's mode | antialias << 9 | exclude_outside << 10.
 //   wrap_resize_scaled(<same arguments>, scale0..2 : f64) -> i32
 
 struct ResizeOpLowering : public ConvertOpToLLVMPattern<ResizeOp> {
@@ -122,7 +123,11 @@ struct ResizeOpLowering : public ConvertOpToLLVMPattern<ResizeOp> {
           getMemRefDimSize(outputType, axis, outputDesc, rewriter, loc);
     }
 
-    Value mode = createI64(op.getMode());
+    // The kernel's mode packs the filter flags above the interpolation mode,
+    // where GGML keeps its scale flags (HIP_RESIZE_* in hip_custom_kernels.h).
+    Value mode = createI64(
+        op.getMode() | (op.getAntialias() ? kResizeFlagAntialias : 0) |
+        (op.getExcludeOutside() ? kResizeFlagExcludeOutside : 0));
     Value coord = createI64(op.getCoordTransform());
     Value nearest = createI64(op.getNearestMode());
     Value spatialRankV = createI64(launch->spatialRank);

@@ -164,17 +164,32 @@ module {
     return
   }
 
-  // Antialiased linear (mode 2) goes through the same wrap_resize call; the
-  // kernel picks the filter from the mode.
+  // Antialiased linear: the lowering ORs antialias (1 << 9) and
+  // exclude_outside (1 << 10) into the kernel's mode, 1 | 512 | 1024.
   func.func @resize_antialias_f32(
       %ctx: !hip.context,
       %x: memref<1x3x37x53xf32, 1>,
       %y: memref<1x3x16x20xf32, 1>) {
     // CHECK-LABEL: llvm.func @resize_antialias_f32
-    // CHECK-DAG: %[[MODE:.*]] = llvm.mlir.constant(2 : i64) : i64
+    // CHECK-DAG: %[[MODE:.*]] = llvm.mlir.constant(1537 : i64) : i64
     // CHECK: llvm.call @wrap_resize({{.*}}, %[[MODE]], %{{.*}}, %{{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
     hip.resize(%ctx) ins(%x : memref<1x3x37x53xf32, 1>)
                      outs(%y : memref<1x3x16x20xf32, 1>)
+                     {mode = 1, coord_transform = 0, nearest_mode = 0,
+                      antialias = true, exclude_outside = true}
+    return
+  }
+
+  // Cubic is mode 2 with no flags.
+  func.func @resize_cubic_f16(
+      %ctx: !hip.context,
+      %x: memref<1x3x17x23xf16, 1>,
+      %y: memref<1x3x40x50xf16, 1>) {
+    // CHECK-LABEL: llvm.func @resize_cubic_f16
+    // CHECK-DAG: %[[MODE:.*]] = llvm.mlir.constant(2 : i64) : i64
+    // CHECK: llvm.call @wrap_resize({{.*}}, %[[MODE]], %{{.*}}, %{{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+    hip.resize(%ctx) ins(%x : memref<1x3x17x23xf16, 1>)
+                     outs(%y : memref<1x3x40x50xf16, 1>)
                      {mode = 2, coord_transform = 0, nearest_mode = 0}
     return
   }

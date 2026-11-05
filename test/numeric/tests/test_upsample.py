@@ -13,7 +13,8 @@ are the linear nodes in ul_deeplabv3_fp16.
 Resize pytorch_half_pixel maps every output of a length-1 axis to input 0.
 Other lengths use half_pixel. When floor(input * scale) rounds, the
 coordinate transform must use the supplied scale, not output / input.
-Resize with antialias = 1 and exclude_outside = 1 is antialiased linear.
+Resize with antialias = 1 and exclude_outside = 1 is antialiased linear;
+cubic uses cubic_coeff_a = -0.75 and exclude_outside = 0.
 """
 
 from __future__ import annotations
@@ -204,6 +205,28 @@ class TestResize:
         x = rng.standard_normal(shape).astype(np.float32)
         actual, reference = model_runner.run_sample(model, [x])
         compare_outputs(actual, reference, atol=1e-5, rtol=1e-5)
+
+    # Cubic (cubic_coeff_a = -0.75, exclude_outside = 0): edge samples stand
+    # in for taps past the border. ONNX Runtime's CPU reference takes 4-D
+    # cubic only.
+    @pytest.mark.parametrize(
+        "shape,sizes,coord,dtype",
+        [
+            ([1, 3, 17, 23], [1, 3, 40, 50], "half_pixel", np.float32),
+            ([1, 3, 37, 53], [1, 3, 20, 16], "pytorch_half_pixel", np.float32),
+            ([1, 3, 17, 23], [1, 3, 40, 50], "align_corners", np.float32),
+            ([1, 3, 17, 23], [1, 3, 40, 50], "asymmetric", np.float32),
+            ([1, 2, 16, 16], [1, 2, 1, 11], "pytorch_half_pixel", np.float32),
+            ([1, 3, 17, 23], [1, 3, 40, 50], "half_pixel", np.float16),
+        ],
+    )
+    def test_cubic(self, model_runner, shape, sizes, coord, dtype):
+        model = _make_resize_sizes_model(shape, sizes, dtype, "cubic", coord)
+        rng = np.random.default_rng(303)
+        x = rng.standard_normal(shape).astype(dtype)
+        actual, reference = model_runner.run_sample(model, [x])
+        tolerance = 1e-5 if dtype == np.float32 else 4e-3
+        compare_outputs(actual, reference, atol=tolerance, rtol=tolerance)
 
     def test_scales_kept_when_floor_rounds(self, model_runner):
         model = _make_resize_scales_model(

@@ -427,8 +427,8 @@ module {
     return %y : tensor<1x1x8xf32>
   }
 
-  // Test 21: antialias = 1 with exclude_outside = 1 on linear is mode 2
-  // (antialiased linear), with either half-pixel transform.
+  // Test 21: antialias = 1 with exclude_outside = 1 on linear keeps both as
+  // hip.resize attributes, with either half-pixel transform.
   func.func @test_resize_antialias(%arg0: tensor<1x3x37x53xf32>)
       -> tensor<1x3x16x20xf32> {
     // CHECK-LABEL: func.func @test_resize_antialias
@@ -443,8 +443,10 @@ module {
         -> tensor<1x3x16x20xf32>
     // CHECK-NOT: onnx.Resize
     // CHECK: hip.resize
+    // CHECK-SAME: antialias = true
     // CHECK-SAME: coord_transform = 3
-    // CHECK-SAME: mode = 2
+    // CHECK-SAME: exclude_outside = true
+    // CHECK-SAME: mode = 1
     return %y : tensor<1x3x16x20xf32>
   }
 
@@ -475,5 +477,55 @@ module {
         -> tensor<1x3x16x20xf32>
     return %a, %b, %c : tensor<1x3x16x20xf32>, tensor<1x3x16x20xf32>,
         tensor<1x3x16x20xf32>
+  }
+
+  // Test 23: cubic (a = -0.75, the default) is mode 2; antialias and
+  // exclude_outside keep their (unprinted) false defaults.
+  func.func @test_resize_cubic(%arg0: tensor<1x3x17x23xf16>)
+      -> tensor<1x3x40x50xf16> {
+    // CHECK-LABEL: func.func @test_resize_cubic
+    %roi = "onnx.NoValue"() {value} : () -> none
+    %scales = "onnx.NoValue"() {value} : () -> none
+    %sizes = "onnx.Constant"() {value = dense<[1, 3, 40, 50]> : tensor<4xi64>}
+        : () -> tensor<4xi64>
+    %y = "onnx.Resize"(%arg0, %roi, %scales, %sizes)
+        {mode = "cubic", coordinate_transformation_mode = "align_corners"}
+        : (tensor<1x3x17x23xf16>, none, none, tensor<4xi64>)
+        -> tensor<1x3x40x50xf16>
+    // CHECK-NOT: onnx.Resize
+    // CHECK: hip.resize
+    // CHECK-NOT: antialias
+    // CHECK-SAME: coord_transform = 2
+    // CHECK-NOT: exclude_outside
+    // CHECK-SAME: mode = 2
+    return %y : tensor<1x3x40x50xf16>
+  }
+
+  // Test 24: cubic stays ONNX with another cubic_coeff_a, with
+  // exclude_outside, or on integer codes.
+  func.func @test_resize_cubic_unsupported(%arg0: tensor<1x3x17x23xf32>,
+                                           %arg1: tensor<1x3x17x23xui8>)
+      -> (tensor<1x3x40x50xf32>, tensor<1x3x40x50xf32>, tensor<1x3x40x50xui8>) {
+    // CHECK-LABEL: func.func @test_resize_cubic_unsupported
+    %roi = "onnx.NoValue"() {value} : () -> none
+    %scales = "onnx.NoValue"() {value} : () -> none
+    %sizes = "onnx.Constant"() {value = dense<[1, 3, 40, 50]> : tensor<4xi64>}
+        : () -> tensor<4xi64>
+    // CHECK-COUNT-3: onnx.Resize
+    // CHECK-NOT: hip.resize
+    %a = "onnx.Resize"(%arg0, %roi, %scales, %sizes)
+        {mode = "cubic", cubic_coeff_a = -5.000000e-01 : f32}
+        : (tensor<1x3x17x23xf32>, none, none, tensor<4xi64>)
+        -> tensor<1x3x40x50xf32>
+    %b = "onnx.Resize"(%arg0, %roi, %scales, %sizes)
+        {mode = "cubic", exclude_outside = 1 : si64}
+        : (tensor<1x3x17x23xf32>, none, none, tensor<4xi64>)
+        -> tensor<1x3x40x50xf32>
+    %c = "onnx.Resize"(%arg1, %roi, %scales, %sizes)
+        {mode = "cubic"}
+        : (tensor<1x3x17x23xui8>, none, none, tensor<4xi64>)
+        -> tensor<1x3x40x50xui8>
+    return %a, %b, %c : tensor<1x3x40x50xf32>, tensor<1x3x40x50xf32>,
+        tensor<1x3x40x50xui8>
   }
 }

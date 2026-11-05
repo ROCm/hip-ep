@@ -1729,6 +1729,10 @@ HIP_KERNEL_API int hip_pool(
     int count_include_pad,
     int p);
 
+#define HIP_RESIZE_MODE_MASK 0xFF
+#define HIP_RESIZE_FLAG_ANTIALIAS (1 << 9)
+#define HIP_RESIZE_FLAG_EXCLUDE_OUTSIDE (1 << 10)
+
 /* =========================================================================
  * Resize (1D / 2D / 3D spatial)
  * =========================================================================
@@ -1738,19 +1742,24 @@ HIP_KERNEL_API int hip_pool(
  * inside the kernel as `scale = in_dim / out_dim` (hip_resize_scaled below
  * takes the ONNX scales instead).  The (N, C) prefix is pass-through.
  *
- *  mode:               0 = nearest, 1 = linear (N-linear),
- *                      2 = antialiased linear (ONNX antialias = 1 with
- *                      exclude_outside = 1; half_pixel or
- *                      pytorch_half_pixel only)
+ *  mode:               low byte (HIP_RESIZE_MODE_MASK): 0 = nearest,
+ *                      1 = linear (N-linear), 2 = cubic (N-cubic, a = -0.75,
+ *                      edge samples past the border), ORed with
+ *                      HIP_RESIZE_FLAG_ANTIALIAS (linear only, with
+ *                      HIP_RESIZE_FLAG_EXCLUDE_OUTSIDE and half_pixel or
+ *                      pytorch_half_pixel: ONNX antialias = 1 with
+ *                      exclude_outside = 1) - the bits GGML's scale flags
+ *                      use
  *  coord_transform:    0 = half_pixel, 1 = asymmetric, 2 = align_corners,
  *                      3 = pytorch_half_pixel
- *  nearest_mode:       0 = round_prefer_floor (only used when mode=nearest)
+ *  nearest_mode:       0 = round_prefer_floor, 1 = round_prefer_ceil,
+ *                      2 = floor, 3 = ceil (only used when mode=nearest)
  *
  * Supported hip_dtypes: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
- * HIP_DTYPE_BFLOAT16, HIP_DTYPE_FLOAT64, HIP_DTYPE_INT8, and
- * HIP_DTYPE_UINT8 for every mode. Integer linear interpolates the stored
- * codes in float and truncates toward zero on the store. Nearest copies
- * one sample.
+ * HIP_DTYPE_BFLOAT16 and HIP_DTYPE_FLOAT64 for every mode, HIP_DTYPE_INT8
+ * and HIP_DTYPE_UINT8 for nearest and plain linear. Integer linear
+ * interpolates the stored codes in float and truncates toward zero on the
+ * store. Nearest copies one sample.
  * Returns: 0 on success, non-zero on failure.
  */
 HIP_KERNEL_API int hip_resize(

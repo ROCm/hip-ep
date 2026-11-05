@@ -23,15 +23,16 @@ namespace {
 // is huge.  This pass implements the slice that covers ONNX exporters'
 // common image / volume use-case:
 //
-//   * mode in {"nearest", "linear"}                                  (no cubic)
+//   * mode in {"nearest", "linear", "cubic"}; cubic on float types with
+//     cubic_coeff_a = -0.75 (the default) and exclude_outside = 0
 //   * coordinate_transformation_mode in
 //       {"half_pixel", "pytorch_half_pixel", "asymmetric", "align_corners"}
 //   * nearest_mode in {round_prefer_floor, round_prefer_ceil, floor, ceil}
 //   * antialias = 0, exclude_outside = 0             (defaults), or
 //     antialias = 1 with exclude_outside = 1 for linear on float types with
-//     half_pixel / pytorch_half_pixel: hip.resize mode 2. That is PyTorch's
-//     antialias=True; exclude_outside = 0 would also weigh the edge pixels
-//     repeated outside the input.
+//     half_pixel / pytorch_half_pixel (PyTorch's antialias=True);
+//     exclude_outside = 0 would also weigh the edge pixels repeated outside
+//     the input.
 //   * keep_aspect_ratio_policy = "stretch"           (default)
 //   * roi must be absent: none, or a 0-element tensor (no tf_crop_and_resize)
 //   * rank in [3, 5], input and output ranks equal
@@ -350,9 +351,11 @@ struct ResizeToHip : public mlir::RewritePattern {
       modeId = 0;
     else if (mode == "linear")
       modeId = 1;
+    else if (mode == "cubic")
+      modeId = 2;
     else
       return rewriter.notifyMatchFailure(op, "Resize mode must be "
-                                             "'nearest' or 'linear'");
+                                             "'nearest', 'linear' or 'cubic'");
 
     std::string ct = getStrAttr("coordinate_transformation_mode", "half_pixel");
     int64_t coordId;
@@ -393,20 +396,28 @@ struct ResizeToHip : public mlir::RewritePattern {
         return attr.getValue().getSExtValue();
       return defaultVal;
     };
-    if (getI64("antialias", 0) != 0) {
-      if (modeId != 1 || getI64("exclude_outside", 0) != 1)
+    const bool antialias = getI64("antialias", 0) != 0;
+    const bool excludeOutside = getI64("exclude_outside", 0) != 0;
+    float cubicCoeffA = -0.75f;
+    if (auto attr = op->getAttrOfType<mlir::FloatAttr>("cubic_coeff_a"))
+      cubicCoeffA = static_cast<float>(attr.getValueAsDouble());
+    if (antialias) {
+      if (modeId != 1 || !excludeOutside)
         return rewriter.notifyMatchFailure(
             op, "antialias is supported for linear with exclude_outside = 1");
       if (coordId != 0 && coordId != 3)
         return rewriter.notifyMatchFailure(
             op, "antialias is supported with half_pixel or pytorch_half_pixel");
-      if (!mlir::isa<mlir::FloatType>(inputType.getElementType()))
-        return rewriter.notifyMatchFailure(op,
-                                           "antialias is supported on floats");
-      modeId = 2;
-    } else if (getI64("exclude_outside", 0) != 0) {
-      return rewriter.notifyMatchFailure(op, "exclude_outside not supported");
+    } else if (excludeOutside) {
+      return rewriter.notifyMatchFailure(
+          op, "exclude_outside is supported with antialias only");
     }
+    if (modeId == 2 && cubicCoeffA != -0.75f)
+      return rewriter.notifyMatchFailure(
+          op, "cubic is supported with cubic_coeff_a = -0.75 only");
+    if ((antialias || modeId == 2) && !floatElem)
+      return rewriter.notifyMatchFailure(
+          op, "antialias and cubic are supported on floats");
     if (auto a = op->getAttrOfType<mlir::ArrayAttr>("axes"))
       if (!a.empty())
         return rewriter.notifyMatchFailure(
@@ -430,7 +441,8 @@ struct ResizeToHip : public mlir::RewritePattern {
                                         resultType.getElementType(), dynSizes);
       auto hipOp = mlir::hip::ResizeOp::create(
           rewriter, loc, resultType, context, input, init, modeAttr, coordAttr,
-          nearestAttr, scalesAttr);
+          nearestAttr, scalesAttr, rewriter.getBoolAttr(antialias),
+          rewriter.getBoolAttr(excludeOutside), mlir::FloatAttr());
       if (stamped) {
         hipOp->setAttr("prefix_count",
                        rewriter.getI64IntegerAttr(stamped->prefixCount));
