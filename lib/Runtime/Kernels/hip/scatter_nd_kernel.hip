@@ -14,7 +14,8 @@
  *   updates.shape = indices.shape[:-1] + data.shape[K:]
  *
  * Per ONNX spec the host wrapper first does an `output := data` D2D
- * copy, then this kernel applies the updates. Threads cover the
+ * copy, then this kernel applies the updates. An output that is `data`
+ * itself (an updated state written in place) is not copied. Threads cover the
  * "flat updates" space:
  *
  *   total_threads = num_slices * slice_size
@@ -437,8 +438,8 @@ extern "C" int hip_scatter_nd(void *stream, const void *data,
 
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
 
-  // Step 1: copy data -> output. DPS guarantees these are distinct buffers,
-  // so a plain D2D async copy is safe.
+  // Step 1: copy data -> output - unless they are one buffer (a state
+  // updated in place), which holds data already.
   int elem_bytes = 0;
   switch (hip_dtype) {
   case HIP_DTYPE_FLOAT16:
@@ -459,9 +460,12 @@ extern "C" int hip_scatter_nd(void *stream, const void *data,
     return -1;
   }
 
-  hipError_t err = hipMemcpyAsync(
-      output, data, static_cast<size_t>(total_data_elements * elem_bytes),
-      hipMemcpyDeviceToDevice, hip_stream);
+  hipError_t err =
+      output == data
+          ? hipSuccess
+          : hipMemcpyAsync(output, data,
+                           static_cast<size_t>(total_data_elements * elem_bytes),
+                           hipMemcpyDeviceToDevice, hip_stream);
   if (err != hipSuccess) {
     fprintf(stderr, "[custom_kernels] hip_scatter_nd: data->output D2D failed: %s\n",
             hipGetErrorString(err));
