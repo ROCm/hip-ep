@@ -121,8 +121,11 @@ shipped rocMLIR LUT embedded from `tools/problem-cache/lut/<gpu_arch>.fb`
 `flatc --binary --strict-json`). Only a table whose `gpu_arch` matches the
 device is used. The ONNX Runtime provider leaves the external path empty, so
 it consults that shipped table and, on a miss, benchmarks with the quick space
-unless `HIP_ROCMLIR_SKIP_BENCHMARKING` is set. `hip-rocmlir-compiler
---problem-cache <file.fb>` (or `HIP_ROCMLIR_PROBLEM_CACHE`, read only by that
+unless `HIP_ROCMLIR_SKIP_BENCHMARKING` is set. A provider artifact records
+FNV-1a of those shipped bytes as `+lut=<fingerprint>` on
+`Metadata.rocmlir_arch` whenever autotune is on, so replacing a shipped LUT
+rejects the cached binary. The external file is not part of that string.
+`hip-rocmlir-compiler --problem-cache <file.fb>` (or `HIP_ROCMLIR_PROBLEM_CACHE`, read only by that
 tool) replaces the shipped table: it is not consulted, and a miss in the
 external file falls through to the in-process winner cache. That cache is
 checked before the quick, full, or exhaustive tuning space. The file is the same kind of artifact as the

@@ -74,9 +74,12 @@ setup throws `std::runtime_error`. See [native-vs-ir-comparison.md](../native-vs
 `Metadata.rocmlir_arch` records what the embedded rocMLIR code objects were
 built for, not only the GPU arch: it is `hip::compiler::rocMlirArtifactTarget()`,
 which is empty when `HIPDNN_EP_ROCMLIR` was off, the arch with an
-`+autotune=<space>` suffix when rocMLIR benchmarked perfConfigs
-(`gfx1151+autotune=quick`), and the arch alone when
-`HIP_ROCMLIR_SKIP_BENCHMARKING` compiled the default perfConfig (`gfx1151`).
+`+autotune=<space>+lut=<fingerprint>` suffix when rocMLIR benchmarked
+perfConfigs (`gfx1151+autotune=quick+lut=0123456789abcdef`), and the arch
+alone when `HIP_ROCMLIR_SKIP_BENCHMARKING` compiled the default perfConfig
+(`gfx1151`). The fingerprint is FNV-1a of the shipped
+`tools/problem-cache/lut/*.fb` bytes embedded in that build. It is omitted
+when benchmarking is skipped, because that path does not consult the table.
 `hip-rocmlir-compiler` and the ONNX Runtime provider both read that variable:
 unset or `0` benchmarks, and any other value skips the search. Autotune
 otherwise runs for a rocMLIR session. Unset `HIPDNN_EP_ROCMLIR_AUTOTUNE`
@@ -86,14 +89,16 @@ benchmarking, the provider applies the shipped
 `tools/problem-cache/lut/<gpu_arch>.fb` whose `gpu_arch` matches the device.
 It does not read `HIP_ROCMLIR_PROBLEM_CACHE`. `hip-rocmlir-compiler` does, via
 that variable or `--problem-cache`, and that file replaces the shipped table.
-The
-perfConfig a kernel was tuned to is baked into its code object, so a tuned
-and an untuned artifact are not interchangeable even on the same GPU.
+That tool writes LLVM bitcode; it does not stamp `Metadata.rocmlir_arch`.
+The perfConfig a kernel was tuned to is baked into its code object, so a tuned
+and an untuned artifact are not interchangeable even on the same GPU. Two
+provider artifacts whose shipped LUT bytes differ are not interchangeable
+either: the `+lut=` fingerprint makes the load check fail.
 
 The model cache / EPContext identity is derived from the graph alone, so the EP
 refuses to load an artifact whose recorded value differs from the current one;
-delete the cache and recompile after changing GPUs or toggling either
-`HIPDNN_EP_ROCMLIR`, `HIP_ROCMLIR_SKIP_BENCHMARKING`, or
+delete the cache and recompile after changing GPUs, replacing a shipped LUT,
+or toggling either `HIPDNN_EP_ROCMLIR`, `HIP_ROCMLIR_SKIP_BENCHMARKING`, or
 `HIPDNN_EP_ROCMLIR_AUTOTUNE`. Compilation fails outright
 if autotune is on but no HIP device could be reached, so the suffix never
 claims tuning that did not happen.
