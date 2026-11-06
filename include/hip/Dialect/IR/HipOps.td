@@ -353,6 +353,56 @@ def Hip_LoopOp : Hip_Op<"loop",
   let hasVerifier = 1;
 }
 
+def Hip_ScanOp : Hip_Op<"scan",
+    [AttrSizedOperandSegments,
+     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+     DeclareOpInterfaceMethods<DestinationStyleOpInterface,
+                               ["getDpsInitsMutable"]>,
+     DeclareOpInterfaceMethods<InferTypeOpInterface,
+                               ["inferReturnTypes"]>,
+     DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "Outlined-body ONNX Scan";
+  let description = [{
+    Executes an outlined Scan body once for every slice of the scan inputs.
+    The first `$num_state_variables` init operands are loop-carried state
+    buffers; the remaining inits are the stacked scan-output buffers.
+    After bufferization, `$state_scratch` contains one caller-owned temporary
+    per state variable. These temporaries keep delayed state writeback from
+    aliasing either the state inputs or the caller's other pooled buffers.
+
+    This initial implementation accepts forward scans on axis zero. The
+    outlining pass validates the ONNX axis/direction attributes before
+    creating this op.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Variadic<Hip_TensorOrMemRef>:$scan_inputs,
+    Variadic<AnyType>:$captures,
+    Variadic<Hip_TensorOrMemRef>:$state_scratch,
+    Variadic<Hip_TensorOrMemRef>:$inits,
+    FlatSymbolRefAttr:$body_func,
+    I32Attr:$num_state_variables,
+    I32Attr:$num_scan_inputs,
+    I32Attr:$num_scan_outputs
+  );
+
+  let results = (outs Variadic<AnyRankedTensor>:$outputs);
+
+  let assemblyFormat = [{
+    `(` $ctx `)`
+    `scan_inputs` `(` $scan_inputs `:` type($scan_inputs) `)`
+    ( `captures` `(` $captures^ `:` type($captures) `)` )?
+    ( `state_scratch` `(` $state_scratch^ `:` type($state_scratch) `)` )?
+    `outs` `(` $inits `:` type($inits) `)`
+    ( `->` `(` type($outputs)^ `)` )?
+    `body` $body_func
+    attr-dict
+  }];
+
+  let hasVerifier = 1;
+}
+
 def Hip_IfOp : Hip_Op<"if",
     [AttrSizedOperandSegments,
      DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
