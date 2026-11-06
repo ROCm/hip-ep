@@ -200,7 +200,7 @@ jobs:
             -DLLVM_INCLUDE_BENCHMARKS=OFF \
             -DLLVM_BUILD_TOOLS=ON \
             -DLLVM_INSTALL_UTILS=ON \
-            -DLLVM_PARALLEL_LINK_JOBS=1 \
+            -DLLVM_PARALLEL_LINK_JOBS=4 \
             -DCMAKE_CXX_VISIBILITY_PRESET=hidden \
             -DCMAKE_C_VISIBILITY_PRESET=hidden \
             -DCMAKE_VISIBILITY_INLINES_HIDDEN=ON \
