@@ -55,8 +55,25 @@ static std::optional<double> getScalarFloatConstant(mlir::Value v) {
     return std::nullopt;
   llvm::StringRef opName = def->getName().getStringRef();
   if ((opName == "onnx.Cast" || opName == "onnx.CastLike") &&
-      def->getNumOperands() >= 1)
-    return getScalarFloatConstant(def->getOperand(0));
+      def->getNumOperands() >= 1 && def->getNumResults() == 1) {
+    // Only a cast to a float type keeps the value meaningful; round it to that
+    // type as the cast would (e.g. an f32 epsilon of 1e-8 is 0 in f16).
+    auto resultType =
+        mlir::dyn_cast<mlir::ShapedType>(def->getResult(0).getType());
+    auto floatType =
+        resultType ? mlir::dyn_cast<mlir::FloatType>(resultType.getElementType())
+                   : nullptr;
+    if (!floatType)
+      return std::nullopt;
+    std::optional<double> source = getScalarFloatConstant(def->getOperand(0));
+    if (!source)
+      return std::nullopt;
+    llvm::APFloat rounded(*source);
+    bool losesInfo = false;
+    rounded.convert(floatType.getFloatSemantics(),
+                    llvm::APFloat::rmNearestTiesToEven, &losesInfo);
+    return rounded.convertToDouble();
+  }
   if (opName != "onnx.Constant")
     return std::nullopt;
   auto dense =
