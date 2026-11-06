@@ -122,8 +122,8 @@ QMatMulOp::reifyResultShapes(OpBuilder &b,
 // values within each head; output rank/extents match `$input` exactly).
 //
 // Before:
-//   %y = hip.rope(%ctx) ins(%x, %pos, %cos, %sin :
-//                            tensor<?x?x4096xf16>, ...)
+//   %y = hip.rope(%ctx) ins(%x, %cos, %sin : tensor<?x?x4096xf16>, ...)
+//                       position_ids(%pos : tensor<?x?xi64>)
 //                       outs(%out : tensor<?x?x?xf16>) -> tensor<?x?x?xf16>
 // After (reified result shape):
 //   dim 0 (dynamic) -> %d0 = tensor.dim %x, %c0

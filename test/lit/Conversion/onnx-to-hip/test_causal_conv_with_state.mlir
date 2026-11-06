@@ -59,7 +59,7 @@ module {
   // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[IN:.*]]: tensor<1x64x128xf16>, %[[W:.*]]: tensor<64x1x4xf16>, %[[B:.*]]: tensor<64xf16>, %[[PS:.*]]: tensor<1x64x3xf16>)
   // CHECK: tensor.empty() : tensor<1x64x128xf16>
   // CHECK: tensor.empty() : tensor<1x64x3xf16>
-  // CHECK: hip.causal_conv_with_state(%[[CTX]]) ins(%[[IN]], %[[W]], %[[B]], %[[PS]] : tensor<1x64x128xf16>, tensor<64x1x4xf16>, tensor<64xf16>, tensor<1x64x3xf16>) outs({{.*}}, {{.*}} : tensor<1x64x128xf16>, tensor<1x64x3xf16>) {activation = "silu"}
+  // CHECK: hip.causal_conv_with_state(%[[CTX]]) ins(%[[IN]], %[[W]] : tensor<1x64x128xf16>, tensor<64x1x4xf16>) bias(%[[B]] : tensor<64xf16>) past_state(%[[PS]] : tensor<1x64x3xf16>) outs({{.*}}, {{.*}} : tensor<1x64x128xf16>, tensor<1x64x3xf16>) {activation = "silu"}
   // CHECK-NOT: hip.alloc
 
   // --------------------------------------------------------------------------
@@ -104,7 +104,7 @@ module {
 
   // CHECK-LABEL: func.func @causal_conv_bias_only
   // CHECK-SAME: (%[[CTX3:.*]]: !hip.context, %[[IN3:.*]]: tensor<1x64x128xf16>, %[[W3:.*]]: tensor<64x1x4xf16>, %[[B3:.*]]: tensor<64xf16>)
-  // CHECK: hip.causal_conv_with_state(%[[CTX3]]) ins(%[[IN3]], %[[W3]], %[[B3]] : tensor<1x64x128xf16>, tensor<64x1x4xf16>, tensor<64xf16>) outs({{.*}}, {{.*}} : tensor<1x64x128xf16>, tensor<1x64x3xf16>)
+  // CHECK: hip.causal_conv_with_state(%[[CTX3]]) ins(%[[IN3]], %[[W3]] : tensor<1x64x128xf16>, tensor<64x1x4xf16>) bias(%[[B3]] : tensor<64xf16>) outs({{.*}}, {{.*}} : tensor<1x64x128xf16>, tensor<1x64x3xf16>)
   // CHECK-NOT: hip.alloc
 
   // --------------------------------------------------------------------------
@@ -167,7 +167,7 @@ module {
   // present_state init: dim 0 of past_state extracted at runtime.
   // CHECK: tensor.dim %[[PS5]]
   // CHECK: tensor.empty({{.*}}) : tensor<?x64x3xf16>
-  // CHECK: hip.causal_conv_with_state(%[[CTX5]]) ins(%[[IN5]], %[[W5]], %[[B5]], %[[PS5]] : tensor<?x64x?xf16>, tensor<64x1x4xf16>, tensor<64xf16>, tensor<?x64x3xf16>) outs({{.*}}, {{.*}} : tensor<?x64x?xf16>, tensor<?x64x3xf16>) {activation = "silu"
+  // CHECK: hip.causal_conv_with_state(%[[CTX5]]) ins(%[[IN5]], %[[W5]] : tensor<?x64x?xf16>, tensor<64x1x4xf16>) bias(%[[B5]] : tensor<64xf16>) past_state(%[[PS5]] : tensor<?x64x3xf16>) outs({{.*}}, {{.*}} : tensor<?x64x?xf16>, tensor<?x64x3xf16>) {activation = "silu"
   // CHECK-NOT: hip.alloc
 
   // --------------------------------------------------------------------------
@@ -219,7 +219,7 @@ module {
   }
 
   // CHECK-LABEL: func.func @causal_conv_channels_last_dilated
-  // CHECK: hip.causal_conv_with_state({{.*}}) ins({{.*}} : tensor<?x?x64xf16>, tensor<64x1x4xf16>, tensor<?x9x64xf16>) outs({{.*}} : tensor<?x?x64xf16>, tensor<?x9x64xf16>) {activation = "silu", channels_last = true, dilation = 3 : i64, state_channels_last = true}
+  // CHECK: hip.causal_conv_with_state({{.*}}) ins({{.*}} : tensor<?x?x64xf16>, tensor<64x1x4xf16>) past_state({{.*}} : tensor<?x9x64xf16>) outs({{.*}} : tensor<?x?x64xf16>, tensor<?x9x64xf16>) {activation = "silu", channels_last = true, dilation = 3 : i64, state_channels_last = true}
 
   func.func @causal_conv_state_window(
       %input: tensor<1x64x8xf16>,

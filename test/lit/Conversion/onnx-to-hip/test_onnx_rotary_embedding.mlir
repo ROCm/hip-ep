@@ -72,7 +72,7 @@ module {
   // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[X:.*]]: tensor<1x128x4096xf16>, %[[COS:.*]]: tensor<131072x64xf16>, %[[SIN:.*]]: tensor<131072x64xf16>, %[[POS:.*]]: tensor<1x128xi64>) -> tensor<1x128x4096xf16>
   // CHECK: %[[INIT:.*]] = tensor.empty() : tensor<1x128x4096xf16>
   // Operand remap: (X, cos, sin, pos) -> (input, pos, cos, sin).
-  // CHECK: hip.rope(%[[CTX]]) ins(%[[X]], %[[POS]], %[[COS]], %[[SIN]] : tensor<1x128x4096xf16>, tensor<1x128xi64>, tensor<131072x64xf16>, tensor<131072x64xf16>) outs(%[[INIT]] : tensor<1x128x4096xf16>) {interleaved = 0 : i64, num_heads = 32 : i64, rotary_embedding_dim = 128 : i64} : tensor<1x128x4096xf16>
+  // CHECK: hip.rope(%[[CTX]]) ins(%[[X]], %[[COS]], %[[SIN]] : tensor<1x128x4096xf16>, tensor<131072x64xf16>, tensor<131072x64xf16>) position_ids(%[[POS]] : tensor<1x128xi64>) outs(%[[INIT]] : tensor<1x128x4096xf16>) {interleaved = 0 : i64, num_heads = 32 : i64, rotary_embedding_dim = 128 : i64} : tensor<1x128x4096xf16>
   // CHECK-NOT: onnx.RotaryEmbedding
 }
 
