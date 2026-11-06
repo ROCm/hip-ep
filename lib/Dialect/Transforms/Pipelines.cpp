@@ -134,6 +134,13 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   //     the reference cases.
   pm.addPass(mlir::hip::createInferShapesPass());
 
+  // 1b-if. Size each dynamic hip.if output. onnx-if-outline left a
+  //        `hip.if_result_dim` placeholder per `?` dim; the branch bodies are
+  //        now lowered, so each size is host arithmetic on the captures.
+  //        Runs before hip-externalize-constants, which moves the shape
+  //        constants that arithmetic reads out of the IR.
+  pm.addPass(mlir::hip::createResolveIfResultDimsPass());
+
   // 1b*. HIP-to-HIP pattern rewriting, Such as Q/DQ fusion
   pm.addPass(mlir::hip::createHipFusionTransformPass());
 
@@ -313,8 +320,10 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   // can merge a tiny host-written shape buffer into a larger allocation that
   // exceeds the host-scalar pass's size limit. Pooling would then place the
   // host store in device memory. Later layout promotion creates copy-only
-  // temporaries; it does not introduce host loads or stores.
-  pm.addNestedPass<func::FuncOp>(mlir::hip::createMaterializeHostScalarsPass());
+  // temporaries; it does not introduce host loads or stores. Module-level:
+  // every function shares the one scratch buffer, so slots are laid out
+  // across the module.
+  pm.addPass(mlir::hip::createMaterializeHostScalarsPass());
 
   // 6. Reuse compatible buffers after host-scalar placement.
   pm.addNestedPass<func::FuncOp>(mlir::hip::createOptimizeMemRefsPass());
