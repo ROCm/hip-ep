@@ -38,6 +38,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <sstream>
 #include <string>
@@ -463,6 +464,25 @@ static bool parseMetadata(const char *json_str, std::vector<TensorMeta> &inputs,
   return parseTensors("inputs", inputs) && parseTensors("outputs", outputs);
 }
 
+/// Index of the largest logit. `elemSize` is 4 (fp32) or 2 (fp16).
+static int64_t argmaxLogits(const void *data, size_t vocab, size_t elemSize) {
+  auto at = [&](size_t index) -> float {
+    if (elemSize == sizeof(float))
+      return static_cast<const float *>(data)[index];
+    return halfToFloat(static_cast<const uint16_t *>(data)[index]);
+  };
+  size_t best = 0;
+  float bestValue = vocab ? at(0) : -std::numeric_limits<float>::infinity();
+  for (size_t i = 1; i < vocab; i++) {
+    const float value = at(i);
+    if (value > bestValue) {
+      bestValue = value;
+      best = i;
+    }
+  }
+  return static_cast<int64_t>(best);
+}
+
 /// Parse one stdin record of comma-separated int64 token ids.
 static bool parseTokenIds(const std::string &line, size_t expected,
                           std::vector<int64_t> &ids, std::string &error) {
@@ -757,32 +777,31 @@ int main(int argc, char **argv) {
                   << "\n";
         break;
       }
-      if (octx.outs.empty() || octx.outs[0].elem_size != sizeof(float) ||
+      const bool logitsPresent = !octx.outs.empty();
+      const size_t elem = logitsPresent ? octx.outs[0].elem_size : 0;
+      if (!logitsPresent || (elem != sizeof(float) && elem != sizeof(uint16_t)) ||
           octx.outs[0].shape.size() != 3 || octx.outs[0].shape[0] != 1 ||
           position < 0 || position >= octx.outs[0].shape[1]) {
-        std::cerr << "ERROR: expected f32 logits with shape [1,N,V]\n";
+        std::cerr << "ERROR: expected f32 or f16 logits with shape [1,N,V]\n";
         break;
       }
       const OutputSlot &slot = octx.outs[0];
       const size_t vocab = static_cast<size_t>(slot.shape[2]);
-      const size_t offset = static_cast<size_t>(position) * vocab;
-      std::vector<float> logits(vocab);
+      const size_t offset = static_cast<size_t>(position) * vocab * elem;
+      std::vector<uint8_t> logits(vocab * elem);
 #ifdef HIPDNN_EP_LINK_HIP_HOST
       hipError_t e = hipMemcpy(logits.data(),
-                               static_cast<const uint8_t *>(slot.gpu) +
-                                   offset * sizeof(float),
-                               vocab * sizeof(float), hipMemcpyDeviceToHost);
+                               static_cast<const uint8_t *>(slot.gpu) + offset,
+                               logits.size(), hipMemcpyDeviceToHost);
       if (e != hipSuccess) {
         std::cerr << "ERROR: D2H logits copy failed: " << hipGetErrorString(e)
                   << "\n";
         break;
       }
 #else
-      std::memcpy(logits.data(), slot.host.data() + offset * sizeof(float),
-                  vocab * sizeof(float));
+      std::memcpy(logits.data(), slot.host.data() + offset, logits.size());
 #endif
-      const auto it = std::max_element(logits.begin(), logits.end());
-      std::cout << std::distance(logits.begin(), it) << "\n" << std::flush;
+      std::cout << argmaxLogits(logits.data(), vocab, elem) << "\n" << std::flush;
     }
     set_alloc_func(state, nullptr);
     (void)cleanup_func(state);
