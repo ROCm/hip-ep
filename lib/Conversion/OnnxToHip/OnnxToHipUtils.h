@@ -641,6 +641,11 @@ void populateTransposeMatMulFoldPatterns(RewritePatternSet &patterns,
 void populateSkipNormCastFoldPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
 
+/// Pre-lowering pattern set: collapse Cast(f16->f32) -> Softplus ->
+/// Cast(f32->f16) into an f16 Softplus. See SoftplusCastFold.cpp.
+void populateSoftplusCastFoldPatterns(RewritePatternSet &patterns,
+                                      MLIRContext *ctx);
+
 /// Pre-lowering pattern set: collapse the Gather(Shape(x), const_idx)
 /// idiom into tensor.from_elements over a tensor.dim of x. Must run
 /// BEFORE lowerOnnxConstants so this ONNX-rooted matcher still sees the

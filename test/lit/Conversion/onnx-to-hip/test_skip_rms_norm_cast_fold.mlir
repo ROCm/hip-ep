@@ -7,7 +7,8 @@
 // Cast(f32->f16) on the output into an fp32 SkipSimplifiedLayerNormalization
 // (the gpt-oss residual layout): hip.skip_rms_norm reads the f16 skip and
 // gamma, writes the f16 output and keeps the residual sum in f32, with no
-// hip.cast left. Any partial match stays unfused.
+// hip.cast left. The output Cast is required; skip/gamma that are already f32
+// are read as f32.
 // ============================================================================
 
 // RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
@@ -62,7 +63,8 @@ module {
   // CHECK: hip.cast
   // CHECK: return
 
-  // Gamma is already f32: nothing to peel, so the fold does not fire.
+  // Gamma is already f32 (ORT folded its Cast into the initializer): the skip
+  // and output Casts are still absorbed and gamma is read as f32.
   func.func @gamma_f32(%res: tensor<1x1x2880xf32>, %skip: tensor<1x1x2880xf16>)
       -> tensor<1x1x2880xf16> {
     %g32 = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<2880xf32>} : () -> tensor<2880xf32>
@@ -78,8 +80,51 @@ module {
   }
 
   // CHECK-LABEL: func.func @gamma_f32
+  // CHECK-NOT: hip.cast
+  // CHECK: hip.skip_rms_norm(%{{.*}}) ins(%{{.*}}, %{{.*}}, %{{.*}} : tensor<1x1x2880xf32>, tensor<1x1x2880xf16>, tensor<2880xf32>)
+  // CHECK-SAME: outs(%{{.*}}, %{{.*}} : tensor<1x1x2880xf16>, tensor<1x1x2880xf32>)
+  // CHECK-NOT: hip.cast
+  // CHECK: return
+
+  // The skip is an f32 value with no Cast behind it: only the output Cast is
+  // absorbed.
+  func.func @skip_f32(%res: tensor<1x1x2880xf32>, %skip: tensor<1x1x2880xf32>)
+      -> (tensor<1x1x2880xf16>, tensor<1x1x2880xf32>) {
+    %g32 = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<2880xf32>} : () -> tensor<2880xf32>
+    %0:4 = "onnx.Custom"(%res, %skip, %g32) {
+      function_name = "SkipSimplifiedLayerNormalization",
+      domain_name = "com.microsoft",
+      epsilon = 9.99999974E-6 : f32
+    } : (tensor<1x1x2880xf32>, tensor<1x1x2880xf32>, tensor<2880xf32>)
+        -> (tensor<1x1x2880xf32>, none, none, tensor<1x1x2880xf32>)
+    %y16 = "onnx.Cast"(%0#0) {to = 10 : si64} : (tensor<1x1x2880xf32>) -> tensor<1x1x2880xf16>
+    return %y16, %0#3 : tensor<1x1x2880xf16>, tensor<1x1x2880xf32>
+  }
+
+  // CHECK-LABEL: func.func @skip_f32
+  // CHECK-NOT: hip.cast
   // CHECK: hip.skip_rms_norm(%{{.*}}) ins(%{{.*}}, %{{.*}}, %{{.*}} : tensor<1x1x2880xf32>, tensor<1x1x2880xf32>, tensor<2880xf32>)
+  // CHECK-SAME: outs(%{{.*}}, %{{.*}} : tensor<1x1x2880xf16>, tensor<1x1x2880xf32>)
+  // CHECK-NOT: hip.cast
+  // CHECK: return
+
+  // No output Cast: nothing is folded, the skip Cast stays.
+  func.func @no_output_cast(%res: tensor<1x1x2880xf32>, %skip: tensor<1x1x2880xf16>)
+      -> tensor<1x1x2880xf32> {
+    %g32 = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<2880xf32>} : () -> tensor<2880xf32>
+    %s32 = "onnx.Cast"(%skip) {to = 1 : si64} : (tensor<1x1x2880xf16>) -> tensor<1x1x2880xf32>
+    %0:4 = "onnx.Custom"(%res, %s32, %g32) {
+      function_name = "SkipSimplifiedLayerNormalization",
+      domain_name = "com.microsoft",
+      epsilon = 9.99999974E-6 : f32
+    } : (tensor<1x1x2880xf32>, tensor<1x1x2880xf32>, tensor<2880xf32>)
+        -> (tensor<1x1x2880xf32>, none, none, tensor<1x1x2880xf32>)
+    return %0#0 : tensor<1x1x2880xf32>
+  }
+
+  // CHECK-LABEL: func.func @no_output_cast
   // CHECK: hip.cast
+  // CHECK: hip.skip_rms_norm(%{{.*}}) ins(%{{.*}}, %{{.*}}, %{{.*}} : tensor<1x1x2880xf32>, tensor<1x1x2880xf32>, tensor<2880xf32>)
   // CHECK: return
 
   // A bias input keeps the all-f32 form.
