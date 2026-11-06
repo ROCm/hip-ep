@@ -8,6 +8,8 @@
 #include "runtime_types.h"
 
 #include <cstdio>
+#include <mutex>
+#include <unordered_set>
 
 // Note: These simple wrapper functions don't need cleanup, so we use a local
 // HIP_CHECK that returns directly instead of the goto-based HIP_CHECK_GOTO
@@ -42,6 +44,21 @@ int wrap_hipFree(void *ptr) {
 //
 // Signature: (i64) -> ptr.  Returns nullptr on failure (callers check), no
 // HIP_CHECK that would terminate the host process from inside the model DLL.
+//
+// hip-lower-allocs frees a loop-carried memref after its last use in each
+// iteration without knowing whether that value came from hip.alloc or from a
+// pool view / output buffer passed in as the loop init. Only pointers handed
+// out here are released; anything else is ignored.
+static std::mutex &deviceAllocMutex() {
+  static std::mutex mutex;
+  return mutex;
+}
+
+static std::unordered_set<void *> &deviceAllocs() {
+  static std::unordered_set<void *> allocs;
+  return allocs;
+}
+
 extern "C" void *hip_device_malloc(int64_t size) {
   void *ptr = nullptr;
   hipError_t err = hipMalloc(&ptr, size);
@@ -50,12 +67,21 @@ extern "C" void *hip_device_malloc(int64_t size) {
             hipGetErrorString(err));
     return nullptr;
   }
+  if (ptr) {
+    std::lock_guard<std::mutex> lock(deviceAllocMutex());
+    deviceAllocs().insert(ptr);
+  }
   return ptr;
 }
 
 extern "C" void hip_device_free(void *ptr) {
   if (!ptr)
     return;
+  {
+    std::lock_guard<std::mutex> lock(deviceAllocMutex());
+    if (deviceAllocs().erase(ptr) == 0)
+      return;
+  }
   hipError_t err = hipFree(ptr);
   if (err != hipSuccess) {
     fprintf(stderr, "hip_device_free(%p) failed: %s\n", ptr,

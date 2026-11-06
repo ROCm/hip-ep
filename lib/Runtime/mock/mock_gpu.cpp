@@ -532,8 +532,9 @@ int wrap_group_query_attention_host_length(
     // it).
     int64_t kv_bnsd,
     // key/value sequence length (mock stub ignores it).
-    int64_t seq_len_new_kv, int32_t has_host_length,
-    int32_t host_length_value) {
+    int64_t seq_len_new_kv, int32_t has_host_length, int32_t host_length_value,
+    // Per-key bias row [key_bias_batch, key_bias_len] (mock stub logs it).
+    void *key_bias, int64_t key_bias_batch, int64_t key_bias_len) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_group_query_attention\n");
     return -1;
@@ -573,6 +574,8 @@ int wrap_group_query_attention_host_length(
              "attn_bias_num_heads=%lld,\n",
              attention_bias, (long long)attn_bias_batch,
              (long long)attn_bias_num_heads);
+  MOCK_PRINT("[MOCK]   key_bias=%p, key_bias_batch=%lld, key_bias_len=%lld,\n",
+             key_bias, (long long)key_bias_batch, (long long)key_bias_len);
   MOCK_PRINT("[MOCK]   batch=%lld, seq_q=%lld, seq_kv=%lld, "
              "past_buf_seq=%lld, head_dim=%lld, elem_size=%lld)\n",
              (long long)batch_size, (long long)seq_len_q, (long long)seq_len_kv,
@@ -602,8 +605,8 @@ int wrap_group_query_attention_ring_f16(
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
     int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
-    int64_t seq_len_new_kv, int32_t has_host_length,
-    int32_t host_length_value) {
+    int64_t seq_len_new_kv, int32_t has_host_length, int32_t host_length_value,
+    void *key_bias, int64_t key_bias_batch, int64_t key_bias_len) {
   return wrap_group_query_attention_host_length(
       state, op_state_slot, query, key, value, past_key, past_value, seqlens_k,
       total_seq_len, cos_cache, sin_cache, position_ids, attention_bias,
@@ -613,7 +616,7 @@ int wrap_group_query_attention_ring_f16(
       v_quant_type, kv_cache_bit_width, no_causal, batch_size, seq_len_q,
       seq_len_kv, past_buf_seq, head_dim, element_size_bytes, attn_bias_batch,
       attn_bias_num_heads, kv_bnsd, seq_len_new_kv, has_host_length,
-      host_length_value);
+      host_length_value, key_bias, key_bias_batch, key_bias_len);
 }
 
 int wrap_multi_head_attention(
@@ -1996,7 +1999,9 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
               int64_t k, int64_t expert_weight_bits, int64_t block_size,
               int64_t swiglu_fusion, int64_t activation_type,
               float activation_alpha, float activation_beta, float swiglu_limit,
-              int64_t normalize_routing_weights, int64_t elem_size) {
+              int64_t normalize_routing_weights, int64_t elem_size,
+              const void *correction_bias, int64_t routing_type,
+              float routed_scaling_factor) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_qmoe\n");
     return -1;
@@ -2023,6 +2028,10 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
              fc1_bias ? "yes" : "null", fc2_bias ? "yes" : "null",
              fc3_weights ? "yes" : "null", fc1_zero_points ? "yes" : "null",
              fc2_zero_points ? "yes" : "null", router_weights ? "yes" : "null");
+  MOCK_PRINT("[MOCK]   routing_type=%lld, correction_bias=%s, "
+             "routed_scaling_factor=%f\n",
+             (long long)routing_type, correction_bias ? "yes" : "null",
+             (double)routed_scaling_factor);
 
   return 0;
 }
@@ -2603,6 +2612,34 @@ int wrap_nonzero(RuntimeState *state, void *input, void *output,
   return 0;
 }
 
+int wrap_non_max_suppression(
+    RuntimeState *state, const float *boxes, const float *scores,
+    const int64_t *max_output_boxes_per_class, const float *iou_threshold,
+    const float *score_threshold, int64_t *selected, int32_t *count_ptr,
+    int64_t num_batches, int64_t num_classes, int64_t num_boxes,
+    int64_t capacity, int64_t center_point_box, int64_t has_score_threshold) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_non_max_suppression\n");
+    return -1;
+  }
+  (void)boxes;
+  (void)scores;
+  (void)max_output_boxes_per_class;
+  (void)iou_threshold;
+  (void)score_threshold;
+  (void)selected;
+  // The mock selects nothing; downstream shapes see N = 0.
+  if (count_ptr)
+    *count_ptr = 0;
+  MOCK_PRINT("[MOCK] wrap_non_max_suppression(B=%lld, C=%lld, S=%lld, "
+             "capacity=%lld, center_point_box=%lld, "
+             "has_score_threshold=%lld)\n",
+             (long long)num_batches, (long long)num_classes,
+             (long long)num_boxes, (long long)capacity,
+             (long long)center_point_box, (long long)has_score_threshold);
+  return 0;
+}
+
 int32_t hipdnn_ep_readback_i32(RuntimeState *state, const void *device_scalar) {
   (void)state;
   // Mock "device" memory is host memory: read the scalar directly.
@@ -2892,12 +2929,14 @@ int wrap_gather_nd(RuntimeState *state, void *data, void *indices, void *output,
   return 0;
 }
 
-int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
-               void *axes, void *steps, void *output, const int64_t *data_shape,
-               int64_t data_rank, const int64_t *output_shape,
-               int64_t output_rank, int64_t starts_num_elements,
-               int64_t axes_num_elements, int64_t steps_num_elements,
-               int64_t data_type) {
+int wrap_slice_typed(RuntimeState *state, void *data, void *starts, void *ends,
+                     void *axes, void *steps, void *output,
+                     const int64_t *data_shape, int64_t data_rank,
+                     const int64_t *output_shape, int64_t output_rank,
+                     int64_t starts_num_elements, int64_t axes_num_elements,
+                     int64_t steps_num_elements, int64_t data_type,
+                     int64_t index_type) {
+  (void)index_type;
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_slice\n");
     return -1;
@@ -2917,6 +2956,18 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
              steps ? "yes" : "null", hipdnn_ep_datatype_name(data_type),
              (long long)data_type);
   return 0;
+}
+
+int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
+               void *axes, void *steps, void *output, const int64_t *data_shape,
+               int64_t data_rank, const int64_t *output_shape,
+               int64_t output_rank, int64_t starts_num_elements,
+               int64_t axes_num_elements, int64_t steps_num_elements,
+               int64_t data_type) {
+  return wrap_slice_typed(
+      state, data, starts, ends, axes, steps, output, data_shape, data_rank,
+      output_shape, output_rank, starts_num_elements, axes_num_elements,
+      steps_num_elements, data_type, HIPDNN_EP_DATATYPE_INT64);
 }
 
 int wrap_scatter_nd(RuntimeState *state, void *data, void *indices,

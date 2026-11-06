@@ -321,11 +321,16 @@ static LogicalResult summarize(Operation *op, Value ctx, ScratchRanges &ranges,
       return failure();
   }
   if (auto gqa = dyn_cast<GqaOp>(op)) {
-    auto type = dyn_cast<MemRefType>(gqa.getSeqlensK().getType());
-    if (type && type.getLayout().isIdentity() &&
-        type.getShape() == ArrayRef<int64_t>{1} &&
+    // A uniform seqlens_k is total_seq_len - 1 in every entry; GqaLowering
+    // subtracts the one. Its [batch] buffer is device-written, so forward the
+    // host-written total instead.
+    Value source =
+        gqa.getUniformSeqlensK() ? gqa.getTotalSeqLen() : gqa.getSeqlensK();
+    auto type = dyn_cast<MemRefType>(source.getType());
+    if (type && type.getLayout().isIdentity() && type.getRank() <= 1 &&
+        type.hasStaticShape() && type.getNumElements() == 1 &&
         type.getElementType().isInteger(32)) {
-      accesses.source = gqa.getSeqlensK();
+      accesses.source = source;
       accesses.requestedType = type.getElementType();
     }
   }

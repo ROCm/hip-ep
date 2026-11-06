@@ -303,14 +303,14 @@ jobs:
         with:
           name: gpu-test-package
           path: staging/
-          retention-days: ${{ (github.ref == 'refs/heads/main' || contains(github.ref, 'release')) && 14 || 3 }}
+          retention-days: ${{ (github.ref == 'refs/heads/main' || contains(github.ref, 'release')) && 90 || 3 }}
 
       - name: Upload DLL sizes
         uses: actions/upload-artifact@v4
         with:
           name: dll-sizes
           path: dll-sizes/dll-sizes.json
-          retention-days: ${{ (github.ref == 'refs/heads/main' || contains(github.ref, 'release')) && 14 || 3 }}
+          retention-days: ${{ (github.ref == 'refs/heads/main' || contains(github.ref, 'release')) && 90 || 3 }}
 
       - name: Stage Python wheel package
         shell: bash
@@ -344,7 +344,7 @@ jobs:
         with:
           name: hip-python-package
           path: wheelpkg/
-          retention-days: ${{ (github.ref == 'refs/heads/main' || contains(github.ref, 'release')) && 14 || 3 }}
+          retention-days: ${{ (github.ref == 'refs/heads/main' || contains(github.ref, 'release')) && 90 || 3 }}
 
       - name: Save sccache directory
         if: always() && github.ref_name == 'main'

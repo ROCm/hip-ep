@@ -113,6 +113,12 @@ std::unique_ptr<Pass> createVerifyNoConstantCarriersPass() {
 void mlir::hip::buildOnnxToHipPipelineTail(
     OpPassManager &pm, const mlir::hip::OnnxToHipPipelineOptions &options,
     morphizen::FileSystem *fs) {
+  // hip.conv_transpose only has a rank-4 MIOpen lowering. Decompose supported
+  // rank-3 transposed convolutions while they are still tensor ops so the
+  // regular HIP-to-LLVM pipeline can lower their rank-4 hip.conv residues.
+  // The rocMLIR path runs the same pass in its separate pre-fusion head.
+  pm.addNestedPass<func::FuncOp>(mlir::hip::createDecomposeConvTransposePass());
+
   // 1b. Refine `?` (kDynamic) dims on HIP DPS op result types using each
   //     op's `ReifyRankedShapedTypeOpInterface` impl. Placed here so the
   //     refinements propagate through bufferize and into pool / alloc
@@ -214,6 +220,14 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   bufferizeOpts.bufferizeFunctionBoundaries = true;
   bufferizeOpts.functionBoundaryTypeConversion =
       bufferization::LayoutMapOption::IdentityLayoutMap;
+  // onnx.Loop scan outputs lower to scf.while and yield a new tensor each
+  // iteration (concat along the iteration axis). One-Shot otherwise requires
+  // every scf.condition / scf.yield tensor to be the same buffer as the
+  // matching iter arg, and it pairs those operands by index with the *before*
+  // block. After canonicalization the before block still carries the i1 trip
+  // condition while the after block does not, so that pairing does not hold.
+  // No scf.for exists yet at this point (linalg-to-loops runs later).
+  bufferizeOpts.allowReturnAllocsFromLoops = true;
   // Opt-in: skip One-Shot's RaW-conflict analysis (super-linear in op count;
   // the sole hotspot on very large single-function graphs) by copying before
   // every write instead of proving in-place safety. Gated because those extra
