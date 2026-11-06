@@ -37,6 +37,7 @@ add_library(HipDialectTransforms STATIC
   FoldBatchNorm.cpp
   FoldConstantExtracts.cpp
   FuseROCMlir.cpp
+  FuseROCMlirReport.cpp
   GenerateInterface.cpp
   GenerateOpStateInit.cpp
   HipFusionTransform.cpp
