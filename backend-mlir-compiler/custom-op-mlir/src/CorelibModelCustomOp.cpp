@@ -29,7 +29,11 @@ int find(const google::protobuf::RepeatedPtrField<std::string> &names,
   return -1;
 }
 
+// The message is printed first: an exception unwinding through ONNX Runtime's
+// C API can end the process before anyone reads it.
 [[noreturn]] void fail(const std::string &msg) {
+  fprintf(stderr, "[corelib] model: %s\n", msg.c_str());
+  fflush(stderr);
   throw std::runtime_error("[corelib] model: " + msg);
 }
 
