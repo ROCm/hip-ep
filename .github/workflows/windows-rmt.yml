@@ -6,7 +6,8 @@ name: Windows RMT Build
 
 # Optional rocMLIR package. Kept as its own workflow so its long LLVM and
 # hip-ep build does not keep the Windows Build run in progress. This workflow
-# runs the same deps prebuild first. Those jobs share per-commit concurrency
+# runs the same deps prebuild first, without its X86-only LLVM: the build job
+# below uses its own AMDGPU LLVM. Those jobs share per-commit concurrency
 # groups with Windows Build and do not cancel an in-progress deps job, so a
 # cold cache is built once per commit and this build restores it afterwards.
 # amdgpu and OGA fall back to the artifacts this run's prebuild uploaded.
@@ -24,6 +25,8 @@ permissions:
 jobs:
   prebuild:
     uses: ./.github/workflows/windows-deps.yml
+    with:
+      build_llvm: false
 
   # Job-level continue-on-error keeps the run green but still marks this
   # check failed on the PR. Each step therefore continues on error and is
@@ -180,8 +183,10 @@ jobs:
             -DLLVM_INSTALL_UTILS=ON
           cmake --build "${{ runner.workspace }}/build-llvm" --target install
 
+      # Only push runs write this cache: a pull request's copy would count
+      # against the shared cache quota and evict main's entries.
       - name: Save AMDGPU llvm-install
-        if: ${{ !contains(steps.*.outcome, 'failure') && steps.cache-llvm.outputs.cache-hit != 'true' }}
+        if: ${{ !contains(steps.*.outcome, 'failure') && steps.cache-llvm.outputs.cache-hit != 'true' && github.event_name == 'push' }}
         continue-on-error: true
         uses: actions/cache/save@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:

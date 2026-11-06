@@ -147,9 +147,9 @@ jobs:
           echo "url=$(echo "$LINE" | cut -d';' -f2)" >> "$GITHUB_OUTPUT"
           echo "commit=$(echo "$LINE" | cut -d';' -f3)" >> "$GITHUB_OUTPUT"
 
-      - name: Cache LLVM install prefix
+      - name: Restore LLVM install prefix
         id: cache-llvm
-        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/llvm-install
           # Keyed only on the rocmlirTriton commit: a protobuf/ORT bump must not
@@ -187,6 +187,17 @@ jobs:
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
           cmake --build "${{ runner.workspace }}/build-llvm" --target install
           rm -rf "$SRC" "${{ runner.workspace }}/build-llvm"
+
+      # Only push runs write the cache. A cache saved by a pull request is
+      # visible to that pull request alone but counts against the repository's
+      # shared cache quota, so per-PR copies of this prefix evict main's entries.
+      - name: Save LLVM install prefix
+        if: steps.cache-llvm.outputs.cache-hit != 'true' && github.event_name == 'push'
+        continue-on-error: true
+        uses: actions/cache/save@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/llvm-install
+          key: linux-llvm-rocmlirtriton-${{ steps.rocmlir.outputs.commit }}
 
       # -----------------------------------------------------------------------
       # ONNX Runtime built from source into ort-install (cached): checkout ->

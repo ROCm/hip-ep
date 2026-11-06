@@ -5,8 +5,10 @@
 name: Windows Deps
 
 # Prebuilds the two heavy from-source dependencies into cached install prefixes
-# and returns their cache keys. Callers restore those prefixes with
-# fail-on-cache-miss, so a green run here is what guarantees the caches exist.
+# and returns their cache keys. Callers restore ort-install with
+# fail-on-cache-miss, so a green run here is what guarantees that cache exists.
+# llvm-install is cached only by push runs; a pull request that misses it
+# builds it and hands it to its callers as an artifact of this run instead.
 #
 # Windows Build and Windows RMT Build both call this workflow. Each job's
 # concurrency group is per ref and commit, so the two callers of one event
@@ -16,6 +18,11 @@ name: Windows Deps
 # same github.sha, which on a pull request is the test merge commit.
 on:
   workflow_call:
+    inputs:
+      build_llvm:
+        description: Provide the X86-only llvm-install. Windows RMT Build builds its own AMDGPU LLVM and passes false.
+        type: boolean
+        default: true
     outputs:
       llvm_cache_key:
         description: Cache key holding the LLVM/MLIR/LLD install prefix.
@@ -54,6 +61,7 @@ env:
 
 jobs:
   llvm:
+    if: inputs.build_llvm
     runs-on: windows-2022
     concurrency:
       group: deps-llvm-${{ github.ref }}-${{ github.sha }}
@@ -153,13 +161,28 @@ jobs:
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
           cmake --build "${{ runner.workspace }}/build-llvm" --target install
 
+      # Only push runs write this cache. A cache saved by a pull request is
+      # visible to that pull request alone but counts against the repository's
+      # shared cache quota, so per-PR copies of this prefix evict main's
+      # entries. The artifact is the handoff to this run's build jobs.
       - name: Save llvm-install
-        if: steps.cache-llvm.outputs.cache-hit != 'true'
+        if: steps.cache-llvm.outputs.cache-hit != 'true' && github.event_name == 'push'
         continue-on-error: true
         uses: actions/cache/save@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/llvm-install
           key: ${{ steps.key.outputs.value }}
+
+      - name: Upload llvm-install
+        if: steps.cache-llvm.outputs.cache-hit != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.key.outputs.value }}
+          path: ${{ runner.workspace }}/llvm-install
+          if-no-files-found: error
+          retention-days: 1
+          # A re-run of this job replaces the artifact of the earlier attempt.
+          overwrite: true
 
       - name: Save sccache directory
         if: always() && steps.cache-llvm.outputs.cache-hit != 'true' && github.ref_name == 'main'
