@@ -78,8 +78,12 @@ module {
 // CHECK: %[[M:.*]] = tensor.dim %[[X]], %{{.*}} : tensor<?x?xf32>
 // CHECK: %[[TOTAL:.*]] = arith.muli %[[N]], %[[M]] : index
 // CHECK: %[[IS_ZERO:.*]] = arith.cmpi eq, %[[M]], %{{.*}} : index
-// CHECK: %[[DIVISOR:.*]] = arith.select %[[IS_ZERO]], %{{.*}}, %[[M]] : index
-// CHECK: %[[ELSE:.*]] = arith.divsi %[[TOTAL]], %[[DIVISOR]] : index
+// CHECK: %[[IS_NEG1:.*]] = arith.cmpi eq, %[[M]], %{{.*}} : index
+// CHECK: %[[UNSAFE:.*]] = arith.ori %[[IS_ZERO]], %[[IS_NEG1]] : i1
+// CHECK: %[[NEG:.*]] = arith.subi %{{.*}}, %[[TOTAL]] : index
+// CHECK: %[[DIVISOR:.*]] = arith.select %[[UNSAFE]], %{{.*}}, %[[M]] : index
+// CHECK: %[[QUOT:.*]] = arith.divsi %[[TOTAL]], %[[DIVISOR]] : index
+// CHECK: %[[ELSE:.*]] = arith.select %[[IS_NEG1]], %[[NEG]], %[[QUOT]] : index
 // CHECK: %[[SIZE:.*]] = arith.select %[[COND]], %{{.*}}, %[[ELSE]] : index
 // CHECK: tensor.empty(%[[SIZE]]) : tensor<?x8x64xf32>
 // CHECK-NOT: hip.if_result_dim
@@ -236,8 +240,12 @@ module {
 // CHECK-DAG: %[[N:.*]] = tensor.dim %[[X]], %c0
 // CHECK-DAG: %[[M:.*]] = tensor.dim %[[X]], %c1
 // CHECK: %[[IS_ZERO:.*]] = arith.cmpi eq, %[[M]], %{{.*}} : index
-// CHECK: %[[DIVISOR:.*]] = arith.select %[[IS_ZERO]], %{{.*}}, %[[M]] : index
-// CHECK: %[[THEN:.*]] = arith.divsi %[[N]], %[[DIVISOR]] : index
+// CHECK: %[[IS_NEG1:.*]] = arith.cmpi eq, %[[M]], %{{.*}} : index
+// CHECK: %[[UNSAFE:.*]] = arith.ori %[[IS_ZERO]], %[[IS_NEG1]] : i1
+// CHECK: %[[DIVISOR:.*]] = arith.select %[[UNSAFE]], %{{.*}}, %[[M]] : index
+// CHECK: %[[QUOT:.*]] = arith.divsi %[[N]], %[[DIVISOR]] : index
+// CHECK: %[[NEG:.*]] = arith.subi %{{.*}}, %[[N]] : index
+// CHECK: %[[THEN:.*]] = arith.select %[[IS_NEG1]], %[[NEG]], %[[QUOT]] : index
 // CHECK: %[[SIZE:.*]] = arith.select %[[COND]], %[[THEN]], %{{.*}} : index
 // CHECK: tensor.empty(%[[SIZE]]) : tensor<?x8x64xf32>
 
@@ -349,3 +357,59 @@ module {
 // CHECK-NOT: arith.constant -1 : index
 // CHECK: %[[SIZE:.*]] = arith.select %[[COND]], %[[C255]], %[[C4]] : index
 // CHECK: tensor.empty(%[[SIZE]]) : tensor<?x8x64xf32>
+
+// -----
+
+// Gather(Shape(x), Cast(0)): the constant index reaches the Gather through a
+// hip.cast to i32. The rebuilt cast folds, so the index is still a constant
+// and the size resolves to dim 0 of x.
+module {
+  func.func @casted_gather_index(%ctx: !hip.context, %c: i1,
+                                 %x: tensor<?x?xf32>) -> tensor<?x8x64xf32> {
+    %d0 = hip.if_result_dim(%c) captures(%x : tensor<?x?xf32>)
+        then @gather_then else @gather_else {result_index = 0 : i32, dim = 0 : i64}
+    %init = tensor.empty(%d0) : tensor<?x8x64xf32>
+    %r = hip.if(%ctx, %c) outs(%init : tensor<?x8x64xf32>)
+        captures(%x : tensor<?x?xf32>) -> (tensor<?x8x64xf32>)
+        then @gather_then else @gather_else {num_outputs = 1 : i32}
+    return %r : tensor<?x8x64xf32>
+  }
+
+  func.func private @gather_then(%ctx: !hip.context, %x: tensor<?x?xf32>)
+      -> tensor<?x8x64xf32> {
+    %c0 = arith.constant 0 : index
+    %n = tensor.dim %x, %c0 : tensor<?x?xf32>
+    %n64 = arith.index_cast %n : index to i64
+    %c8 = arith.constant 8 : i64
+    %c64 = arith.constant 64 : i64
+    %shape = tensor.from_elements %n64, %c8, %c64 : tensor<3xi64>
+    %idx64 = arith.constant dense<0> : tensor<1xi64>
+    %idx_init = tensor.empty() : tensor<1xi32>
+    %idx = hip.cast(%ctx) ins(%idx64 : tensor<1xi64>)
+        outs(%idx_init : tensor<1xi32>) {to = 6 : i64} : tensor<1xi32>
+    %rows_init = tensor.empty() : tensor<1xi64>
+    %rows = hip.gather(%ctx) ins(%shape, %idx : tensor<3xi64>, tensor<1xi32>)
+        outs(%rows_init : tensor<1xi64>) {axis = 0 : i64} : tensor<1xi64>
+    %base = arith.constant dense<[1, 8, 64]> : tensor<3xi64>
+    %target = tensor.insert_slice %rows into %base[0] [1] [1]
+        : tensor<1xi64> into tensor<3xi64>
+    %y = tensor.reshape %x(%target)
+        : (tensor<?x?xf32>, tensor<3xi64>) -> tensor<?x8x64xf32>
+    return %y : tensor<?x8x64xf32>
+  }
+
+  func.func private @gather_else(%ctx: !hip.context, %x: tensor<?x?xf32>)
+      -> tensor<?x8x64xf32> {
+    %shape = arith.constant dense<[4, 8, 64]> : tensor<3xi64>
+    %y = tensor.reshape %x(%shape)
+        : (tensor<?x?xf32>, tensor<3xi64>) -> tensor<?x8x64xf32>
+    return %y : tensor<?x8x64xf32>
+  }
+}
+
+// CHECK-LABEL: func.func @casted_gather_index(
+// CHECK-SAME: %{{.*}}: !hip.context, %[[COND:.*]]: i1, %[[X:.*]]: tensor<?x?xf32>)
+// CHECK: %[[N:.*]] = tensor.dim %[[X]], %{{.*}} : tensor<?x?xf32>
+// CHECK: %[[SIZE:.*]] = arith.select %[[COND]], %[[N]], %{{.*}} : index
+// CHECK: tensor.empty(%[[SIZE]]) : tensor<?x8x64xf32>
+// CHECK-NOT: hip.if_result_dim
