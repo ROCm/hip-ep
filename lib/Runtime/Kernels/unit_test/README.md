@@ -2,6 +2,12 @@
 
 This folder contains the source for standalone HIP kernel unit tests.
 
+MatMulNBits, GQA decode/prefill and ragged W4 MatMul use the shared
+[adaptive timing policy](common/README.md). `--timing confirm` (default) adapts
+launch counts to at least ten seconds of GPU time and ten complete calls;
+`--timing screen` is the short LUT-ranking mode. Policy, actual iterations,
+runtime identity and dispersion are emitted as `UT_TIMING` JSON records.
+
 There are two ways to build and run them:
 
 - **Standalone development**: `make test` in this directory (see "Uniform make

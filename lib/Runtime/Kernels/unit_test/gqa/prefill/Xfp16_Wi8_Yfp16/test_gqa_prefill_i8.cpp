@@ -30,6 +30,7 @@
 // ============================================================
 
 #include <hip/hip_runtime.h>
+#include "../../../common/hip_adaptive_timing.h"
 #include <hip/hip_fp16.h>
 
 #include <algorithm>
@@ -88,6 +89,7 @@ class CsvWriter {
   }
   ~CsvWriter() { if (f_) std::fclose(f_); }
   void write(const CsvRow& r) {
+    timing::emitCsvBinding(r.shape, r.config, r.verdict, r.rel_l2, r.time_ms);
     if (!f_) return;
     std::fprintf(f_, "%s,%s,%s,%s,%s,%s,%.6f,%.6e,%s\n",
                  env_or("HIPDNN_RESULTS_OP", "gqa"),
@@ -305,43 +307,15 @@ inline int* holdReleaseFlag() {
   return flag;
 }
 
-// Mean milliseconds per launch over `iters` back-to-back launches on `stream`,
-// launch(c) reading copy c. Untimed launches over the rotation go first, until
-// kColdSettleBytes have been read.
+// The shared UT policy selects the actual call count from a device pilot.
+// launch(c) invokes the complete op with operand copy c.
 template <class Launch>
-double rotatedMeanMs(hipStream_t stream, int iters, const ColdKvCopies& copies,
-                     Launch&& launch) {
-  const int n = copies.count();
-  int turn = 0;
-  if (n > 1) {
-    const size_t settle = std::min<size_t>(
-        n, (kColdSettleBytes + copies.bytes() - 1) / copies.bytes());
-    for (size_t i = 0; i < settle; ++i) launch(turn++ % n);
-  }
-  // Drained, so the hold below holds the timed launches rather than being
-  // released while earlier launches are still queued ahead of it.
-  (void)hipStreamSynchronize(stream);
-  volatile int* release = holdReleaseFlag();
-  void* release_dev = nullptr;
-  if (release &&
-      hipHostGetDevicePointer(&release_dev, const_cast<int*>(release), 0) ==
-          hipSuccess) {
-    *release = 0;
-    holdStreamKernel<<<1, 1, 0, stream>>>(static_cast<const int*>(release_dev));
-  }
-  hipEvent_t start, stop;
-  (void)hipEventCreate(&start);
-  (void)hipEventCreate(&stop);
-  (void)hipEventRecord(start, stream);
-  for (int i = 0; i < iters; ++i) launch(turn++ % n);
-  (void)hipEventRecord(stop, stream);
-  if (release) *release = 1;
-  (void)hipEventSynchronize(stop);
-  float ms = 0.0f;
-  (void)hipEventElapsedTime(&ms, start, stop);
-  (void)hipEventDestroy(start);
-  (void)hipEventDestroy(stop);
-  return iters > 0 ? ms / iters : 0.0;
+double rotatedMeanMs(hipStream_t stream, int /*legacy_iters*/, const ColdKvCopies& copies,
+                     Launch&& launch, const char* complete_entry = nullptr) {
+  return timing::adaptiveRotatedMeanMs(
+      stream, copies, launch, holdReleaseFlag(),
+      [&](const int* flag) { holdStreamKernel<<<1, 1, 0, stream>>>(flag); },
+      warmTiming(), kColdSettleBytes, "gqa_prefill_xfp16_wi8_yfp16", complete_entry);
 }
 }  // namespace hipdnn_ep_test
 
@@ -563,6 +537,7 @@ struct Result {
 };
 
 static Result run_case(const Case& c, int iters, unsigned seed) {
+  hipdnn_ep_test::timing::CaseScope timing_case("gqa/prefill/Xfp16_Wi8_Yfp16", case_shape(c), "hip_gqa_flash_prefill");
   const int B = c.B, H = c.H, G = c.G, D = c.D, sq = c.sq;
   const int max_seq = sq, past_len = 0, skv = sq;
   const float scale = 1.0f / std::sqrt((float)D);
@@ -699,21 +674,22 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
     hip_gqa_autotune_destroy(policy);
   }
 #endif
-  auto run_int8_path = [&](const void* k8, const void* v8, int kv_rows) {
-    hip_gqa_dequant_kv_i8_to_fp16(nullptr, k8, dKf16, dKsc, B, sq, G, D, kv_rows, max_seq);
-    hip_gqa_dequant_kv_i8_to_fp16(nullptr, v8, dVf16, dVsc, B, sq, G, D, kv_rows, max_seq);
+  auto run_int8_path = [&](const void* k8, const void* v8, int kv_rows) -> int {
+    int status = hip_gqa_dequant_kv_i8_to_fp16(nullptr, k8, dKf16, dKsc, B, sq, G, D, kv_rows, max_seq);
+    if (status) return status;
+    status = hip_gqa_dequant_kv_i8_to_fp16(nullptr, v8, dVf16, dVsc, B, sq, G, D, kv_rows, max_seq);
+    if (status) return status;
 #ifdef HIPDNN_LUT_LINKED_EXTERNALLY
     if (!lookup_config.empty()) {
-      hip_gqa_flash_prefill_v3_configured(
+      return hip_gqa_flash_prefill_v3_configured(
           nullptr, dQ, dKf16, dVf16, dO8, B, H, G, sq, skv, D, max_seq,
           past_len, scale, /*local_window_size=*/-1, /*head_sink=*/nullptr, H,
           /*smooth_softmax=*/0, selected_config.hb, selected_config.qw,
           selected_config.mt, selected_config.bkv, selected_config.nd,
           dKb, kb_stride);
-      return;
     }
 #endif
-    prefill(dKf16, dVf16, dO8, max_seq);
+    return prefill(dKf16, dVf16, dO8, max_seq);
   };
   // Every launch in this function runs inside a capture window: the op's
   // [gqa-cfg] diagnostic latches its enable flag on the first read, so it has
@@ -731,7 +707,7 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
 
   // fp16 baseline prefill.
   auto run_fp16 = [&](const void* k, const void* v, int kv_rows) {
-    prefill(k, v, dO16, kv_rows);
+    return prefill(k, v, dO16, kv_rows);
   };
   hipdnn_ep_test::captureLogLines(
       "HIPDNN_GQA_AUTOTUNE_LOG", "_cfg_capture.tmp", [&]() {
@@ -748,10 +724,10 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
       dKbnsd, dVbnsd, B * G, max_seq, static_cast<size_t>(D) * sizeof(__half),
       0, skv);
   auto bench = [&](const hipdnn_ep_test::ColdKvCopies& kv,
-                   auto&& fn) -> double {
+                   auto&& fn, const char* complete_entry) -> double {
     for (int w = 0; w < 5; ++w) fn(0);
     HIP_CHECK(hipDeviceSynchronize());
-    return hipdnn_ep_test::rotatedMeanMs(nullptr, iters, kv, fn);
+    return hipdnn_ep_test::rotatedMeanMs(nullptr, iters, kv, fn, complete_entry);
   };
   // The op names the config it dispatched in its own [gqa-cfg] diagnostic;
   // capture it so results.csv records what ran instead of a placeholder. The
@@ -764,8 +740,11 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
         "HIPDNN_GQA_AUTOTUNE_LOG", "_cfg_capture.tmp",
         [&]() {
           ms_int8 = bench(kv8, [&](int i) {
-            run_int8_path(kv8.k(i), kv8.v(i), kv8.rows());
-          });
+            return run_int8_path(kv8.k(i), kv8.v(i), kv8.rows());
+          }, lookup_config.empty()
+                 ? (dKb ? "dequant_KV+hip_gqa_flash_prefill"
+                        : "dequant_KV+hip_gqa_flash_prefill_v2")
+                 : "dequant_KV+hip_gqa_flash_prefill_v3_configured");
         });
     for (const std::string& line : lines) {
       const size_t knobs = line.find("-> ");
@@ -779,14 +758,15 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
                                   "_cfg_capture.tmp",
                                   [&]() {
                                     ms_fp16 = bench(kv16, [&](int i) {
-                                      run_fp16(kv16.k(i), kv16.v(i),
-                                               kv16.rows());
-                                    });
+                                      return run_fp16(kv16.k(i), kv16.v(i),
+                                                      kv16.rows());
+                                    }, dKb ? "hip_gqa_flash_prefill" : "hip_gqa_flash_prefill_v2");
                                   });
   double ms_deq = bench(kv8, [&](int i) {
-    hip_gqa_dequant_kv_i8_to_fp16(nullptr, kv8.k(i), dKf16, dKsc, B, sq, G, D, kv8.rows(), max_seq);
-    hip_gqa_dequant_kv_i8_to_fp16(nullptr, kv8.v(i), dVf16, dVsc, B, sq, G, D, kv8.rows(), max_seq);
-  });
+    const int status = hip_gqa_dequant_kv_i8_to_fp16(nullptr, kv8.k(i), dKf16, dKsc, B, sq, G, D, kv8.rows(), max_seq);
+    if (status) return status;
+    return hip_gqa_dequant_kv_i8_to_fp16(nullptr, kv8.v(i), dVf16, dVsc, B, sq, G, D, kv8.rows(), max_seq);
+  }, "hip_gqa_dequant_kv_i8_to_fp16(K,V)");
 
   // Compare the query rows that have a real key: row i of batch b sees keys
   // 0..i, of which the first b*pad are padding.
@@ -887,12 +867,13 @@ static void write_markdown(const char* path, const char* dev, int cus,
   fprintf(f, "- Contrast the earlier per-fragment int8 prefill kernel (~0.6x, i.e. "
              "~1.6x slower): dequantizing once instead of per fragment recovers the "
              "full fp16 throughput.\n");
-  fprintf(f, "\n_Reproduce:_ `test_gqa_prefill_i8.exe --all --iters 200 --md <this file>`\n");
+  fprintf(f, "\n_Reproduce:_ `test_gqa_prefill_i8.exe --all --md <this file>`\n");
   fclose(f);
   printf("\n[markdown] wrote %s\n", path);
 }
 
 int main(int argc, char** argv) {
+  hipdnn_ep_test::timing::printTimingMode();
   setvbuf(stdout, nullptr, _IONBF, 0);
   int iters = 200; unsigned seed = 1234; bool all = false; const char* md = nullptr;
   Case single = {"custom", 1, 40, 10, 128, 2048}; bool have_single = false;
@@ -911,7 +892,7 @@ int main(int argc, char** argv) {
 
   int dev = 0; HIP_CHECK(hipGetDevice(&dev));
   hipDeviceProp_t prop; HIP_CHECK(hipGetDeviceProperties(&prop, dev));
-  printf("Device: %s (%d CUs)  iters=%d\n\n", prop.name, prop.multiProcessorCount, iters);
+  printf("Device: %s (%d CUs)  legacy_iters=%d (ignored; adaptive UT_TIMING counts)\n\n", prop.name, prop.multiProcessorCount, iters);
 
   std::vector<Result> results; int fails = 0;
   if (all || !have_single) {

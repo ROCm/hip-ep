@@ -36,6 +36,7 @@
 // ============================================================
 
 #include <hip/hip_runtime.h>
+#include "../../../common/hip_adaptive_timing.h"
 #include <hip/hip_fp16.h>
 
 #include <algorithm>
@@ -93,6 +94,7 @@ class CsvWriter {
   }
   ~CsvWriter() { if (f_) std::fclose(f_); }
   void write(const CsvRow& r) {
+    timing::emitCsvBinding(r.shape, r.config, r.verdict, r.rel_l2, r.time_ms);
     if (!f_) return;
     std::fprintf(f_, "%s,%s,%s,%s,%s,%s,%.6f,%.6e,%s\n",
                  env_or("HIPDNN_RESULTS_OP", "unknown"),
@@ -310,43 +312,15 @@ inline int* holdReleaseFlag() {
   return flag;
 }
 
-// Mean milliseconds per launch over `iters` back-to-back launches on `stream`,
-// launch(c) reading copy c. Untimed launches over the rotation go first, until
-// kColdSettleBytes have been read.
+// The shared UT policy selects the actual call count from a device pilot.
+// launch(c) invokes the complete op with operand copy c.
 template <class Launch>
-double rotatedMeanMs(hipStream_t stream, int iters, const ColdKvCopies& copies,
-                     Launch&& launch) {
-  const int n = copies.count();
-  int turn = 0;
-  if (n > 1) {
-    const size_t settle = std::min<size_t>(
-        n, (kColdSettleBytes + copies.bytes() - 1) / copies.bytes());
-    for (size_t i = 0; i < settle; ++i) launch(turn++ % n);
-  }
-  // Drained, so the hold below holds the timed launches rather than being
-  // released while earlier launches are still queued ahead of it.
-  (void)hipStreamSynchronize(stream);
-  volatile int* release = holdReleaseFlag();
-  void* release_dev = nullptr;
-  if (release &&
-      hipHostGetDevicePointer(&release_dev, const_cast<int*>(release), 0) ==
-          hipSuccess) {
-    *release = 0;
-    holdStreamKernel<<<1, 1, 0, stream>>>(static_cast<const int*>(release_dev));
-  }
-  hipEvent_t start, stop;
-  (void)hipEventCreate(&start);
-  (void)hipEventCreate(&stop);
-  (void)hipEventRecord(start, stream);
-  for (int i = 0; i < iters; ++i) launch(turn++ % n);
-  (void)hipEventRecord(stop, stream);
-  if (release) *release = 1;
-  (void)hipEventSynchronize(stop);
-  float ms = 0.0f;
-  (void)hipEventElapsedTime(&ms, start, stop);
-  (void)hipEventDestroy(start);
-  (void)hipEventDestroy(stop);
-  return iters > 0 ? ms / iters : 0.0;
+double rotatedMeanMs(hipStream_t stream, int /*legacy_iters*/, const ColdKvCopies& copies,
+                     Launch&& launch, const char* complete_entry = nullptr) {
+  return timing::adaptiveRotatedMeanMs(
+      stream, copies, launch, holdReleaseFlag(),
+      [&](const int* flag) { holdStreamKernel<<<1, 1, 0, stream>>>(flag); },
+      warmTiming(), kColdSettleBytes, "gqa_decode_xfp16_wfp16_yfp16", complete_entry);
 }
 }  // namespace hipdnn_ep_test
 
@@ -590,7 +564,7 @@ static bool decode_wmma_supported(const Case& c) {
   return (hpg == 4 && (c.D == 64 || c.D == 128)) || (hpg == 8 && c.D == 64);
 }
 
-// ---- run one launcher config; returns avg ms over iters --------------------
+// ---- run one launcher config; returns the adaptive UT median --------------------
 static double run_kernel(DecodeMode mode, const Case& c, float scale,
                          const __half* dQ, const __half* dK, const __half* dV,
                          __half* dO, float* dPart, const int* dSeq,
@@ -633,8 +607,8 @@ static double run_kernel(DecodeMode mode, const Case& c, float scale,
   }
 
   return hipdnn_ep_test::rotatedMeanMs(nullptr, iters, kv, [&](int i) {
-    launch(kv.k(i), kv.v(i), kv.rows());
-  });
+    return launch(kv.k(i), kv.v(i), kv.rows());
+  }, use_wmma < 0 ? "hip_gqa_flash_decode" : "hip_gqa_flash_decode_configured");
 }
 
 #ifdef HIPDNN_LUT_LINKED_EXTERNALLY
@@ -688,12 +662,12 @@ static double run_kernel_lut(const Case& c, float scale,
   }
 
   return hipdnn_ep_test::rotatedMeanMs(nullptr, iters, kv, [&](int i) {
-    hip_gqa_flash_decode_configured(nullptr, dQ, kv.k(i), kv.v(i), dO, dPart,
+    return hip_gqa_flash_decode_configured(nullptr, dQ, kv.k(i), kv.v(i), dO, dPart,
                                     B, H, G, D, c.total, kv.rows(), MAX_SPLITS,
                                     scale, dSeq, c.window, sinkp, c.smooth,
                                     HIP_KV_DTYPE_FP16, nullptr, nullptr,
                                     use_wmma, splits, bkv, dKb, max_seq);
-  });
+  }, "hip_gqa_flash_decode_configured");
 }
 #endif  // HIPDNN_LUT_LINKED_EXTERNALLY
 
@@ -715,12 +689,13 @@ static double run_fused(const Case& c, float scale,
     for (size_t i = 0; i < tmp.size(); ++i) host_O[i] = __half2float(tmp[i]);
   }
   return hipdnn_ep_test::rotatedMeanMs(nullptr, iters, kv, [&](int i) {
-    hip_gqa_fused_decode(nullptr, dQ, kv.k(i), kv.v(i), dO, B, H, G, D,
+    return hip_gqa_fused_decode(nullptr, dQ, kv.k(i), kv.v(i), dO, B, H, G, D,
                          c.total, kv.rows(), scale, dSeq);
-  });
+  }, "hip_gqa_fused_decode");
 }
 
 static int run_case(const Case& c, int iters, unsigned seed, bool verbose) {
+  hipdnn_ep_test::timing::CaseScope timing_case("gqa/decode/Xfp16_Wfp16_Yfp16", case_shape(c), "hip_gqa_flash_decode");
   const int B = c.B, H = c.H, G = c.G, D = c.D, max_seq = c.max_seq;
   if (H % G != 0) { printf("[skip] %s: H%%G!=0\n", c.name); return 0; }
   const float scale = 1.0f / std::sqrt((float)D);
@@ -823,7 +798,7 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose) {
 
   // One-block-per-head fused decode = the OLDEST baseline (pre-split-K); only
   // valid without window/sink, and very slow at long context, so it is opt-in
-  // (--fused) and timed with fewer iters.
+  // (--fused); its calls follow the same adaptive UT policy.
   const bool fused_ok_shape =
       g_do_fused && (c.window <= 0 && !c.sink && !c.smooth && c.pad <= 0);
   double ms_fused = 0.0; double l2_fused = 0.0; bool fused_ran = false;
@@ -946,7 +921,7 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose) {
 // splits; fix-def8 = force default impl @ 8 splits; v2 = autotune. This
 // isolates the value of per-shape autotune over a fixed 8-split policy.
 static void emit_markdown(int iters, const char* dev, int cus) {
-  printf("<!-- device: %s | %d CUs | iters=%d | per-decode-step latency (ms) | B=1 | fixed-config vs autotune on the v2 kernel (NOT historical code) -->\n\n",
+  printf("<!-- device: %s | %d CUs | legacy_iters=%d (ignored; adaptive UT_TIMING counts) | per-decode-step latency (ms) | B=1 | fixed-config vs autotune on the v2 kernel (NOT historical code) -->\n\n",
          dev, cus, iters);
   // Speedup columns "v2 vs xxx" = fixed_ms / v2_ms (unified so >1 always = v2 faster).
   printf("| # | model / geometry | HpG | D | len | win | feat | fix-scalar8 (ms) | fix-def8 (ms) | v2 (ms) | v2 vs scalar8 | v2 vs def8 | result |\n");
@@ -962,6 +937,7 @@ static void emit_markdown(int iters, const char* dev, int cus) {
 }
 
 int main(int argc, char** argv) {
+  hipdnn_ep_test::timing::printTimingMode();
   int iters = 200;
   unsigned seed = 1234;
   bool all = false, verbose = false;
@@ -996,7 +972,7 @@ int main(int argc, char** argv) {
   hipDeviceProp_t prop;
   HIP_CHECK(hipGetDeviceProperties(&prop, dev));
   if (!g_md)
-    printf("Device: %s (%d CUs)  iters=%d  max_splits=%d (PR438 baseline=%d)\n\n",
+    printf("Device: %s (%d CUs)  legacy_iters=%d (ignored; adaptive UT_TIMING counts)  max_splits=%d (PR438 baseline=%d)\n\n",
            prop.name, prop.multiProcessorCount, iters, MAX_SPLITS, BASELINE_SPLITS);
 
   int fails = 0;
