@@ -42,7 +42,7 @@ CastToHip::matchAndRewrite(mlir::Operation *op,
   // or hand-authored test IR) that never had an original ONNX enum to carry
   // forward.
   int64_t onnxDataType = 0;
-  if (auto preserved = op->getAttrOfType<mlir::IntegerAttr>("onnx_to_enum")) {
+  if (auto preserved = op->getAttrOfType<mlir::IntegerAttr>(kOnnxToEnumAttr)) {
     onnxDataType = preserved.getInt();
   } else {
     // Map MLIR element type to ONNX DataType enum
