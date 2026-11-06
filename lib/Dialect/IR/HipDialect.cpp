@@ -583,11 +583,29 @@ static void printSingleInitDpsOp(OpAsmPrinter &p, Operation *op, Value ctx,
 }
 
 //===------------
-// RocMlirOp: ins(variadic) outs(output)
+// RocMlirOp: ins(variadic) outs(variadic)
 //===------------
 
 MutableOperandRange RocMlirOp::getDpsInitsMutable() {
-  return getOutputMutable();
+  return getOutputsMutable();
+}
+
+LogicalResult RocMlirOp::verify() {
+  if (getOutputs().empty())
+    return emitOpError("requires at least one outs operand");
+  if (!isa<RankedTensorType>(getOutputs().front().getType())) {
+    if (getNumResults() != 0)
+      return emitOpError("on memrefs has no results");
+    return success();
+  }
+  if (getNumResults() != getOutputs().size())
+    return emitOpError("requires one result per outs operand");
+  for (auto [result, init] : llvm::zip(getResults(), getOutputs()))
+    if (result.getType() != init.getType())
+      return emitOpError("result type ")
+             << result.getType() << " differs from its outs type "
+             << init.getType();
+  return success();
 }
 
 void RocMlirOp::getEffects(
