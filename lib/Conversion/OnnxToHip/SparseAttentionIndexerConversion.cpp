@@ -18,10 +18,12 @@ constexpr int64_t kMaxBlockTopK = 512;
 /// com.microsoft.SparseAttentionIndexer (policy_mode = qsa)
 ///   -> hip.sparse_attention_indexer
 ///
-/// IndexerRotaryFold may have replaced cos_cache / sin_cache by the base
-/// tables, appended rotary_position_ids at kRotaryPositionIdsIdx and stamped
-/// kRotarySectionsAttr; those become the op's rotary_position_ids operand and
-/// rotary_sections attribute.
+/// It also reads what the pre-lowering folds left on the op:
+/// - IndexerRotaryFold: base tables as cos_cache / sin_cache, ids at
+///   kRotaryPositionIdsIdx and kRotarySectionsAttr. They become
+///   rotary_position_ids and rotary_sections.
+/// - IndexerCountsFold: a third result marked kSelectedCountsAttr. It becomes
+///   selected_counts.
 struct SparseAttentionIndexerToHip : public mlir::RewritePattern {
   SparseAttentionIndexerToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
@@ -235,9 +237,15 @@ mlir::LogicalResult SparseAttentionIndexerToHip::matchAndRewrite(
     return rewriter.notifyMatchFailure(op, "mask must be i64 [B, P + S]");
   }
 
-  if (op->getNumResults() != 2) {
+  const bool withCounts = op->hasAttr(kSelectedCountsAttr);
+  if (op->getNumResults() != (withCounts ? 3u : 2u)) {
     return rewriter.notifyMatchFailure(
-        op, "SparseAttentionIndexer qsa expects 2 results");
+        op, "SparseAttentionIndexer qsa expects 2 results (3 with counts)");
+  }
+  if (withCounts &&
+      !matches(op->getResult(2), rewriter.getI32Type(), {batch, seq})) {
+    return rewriter.notifyMatchFailure(op, "selected_counts must be i32 "
+                                           "[B, S]");
   }
   const int64_t capacity = budget + ratio - 1;
   auto selectedType =
@@ -273,16 +281,19 @@ mlir::LogicalResult SparseAttentionIndexerToHip::matchAndRewrite(
   }
 
   mlir::Location loc = op->getLoc();
-  llvm::SmallVector<mlir::Value> selectedDims;
-  for (int64_t i = 0; i < 2; ++i) {
-    if (selectedType.isDynamicDim(i)) {
-      selectedDims.push_back(
-          mlir::tensor::DimOp::create(rewriter, loc, query, i));
+  // The dynamic B and S of a [B, S, ...] result, read from the query.
+  auto batchSeqDims = [&](mlir::RankedTensorType type) {
+    llvm::SmallVector<mlir::Value> dims;
+    for (int64_t i : llvm::seq<int64_t>(0, 2)) {
+      if (type.isDynamicDim(i)) {
+        dims.push_back(mlir::tensor::DimOp::create(rewriter, loc, query, i));
+      }
     }
-  }
+    return dims;
+  };
   mlir::Value selectedInit = mlir::tensor::EmptyOp::create(
       rewriter, loc, selectedType.getShape(), selectedType.getElementType(),
-      selectedDims);
+      batchSeqDims(selectedType));
 
   llvm::SmallVector<mlir::Value> presentDims;
   if (presentType.isDynamicDim(0)) {
@@ -304,6 +315,14 @@ mlir::LogicalResult SparseAttentionIndexerToHip::matchAndRewrite(
   mlir::Value presentInit =
       mlir::tensor::EmptyOp::create(rewriter, loc, presentType.getShape(),
                                     presentType.getElementType(), presentDims);
+  mlir::Value countsInit;
+  mlir::RankedTensorType countsType;
+  if (withCounts) {
+    countsType = mlir::cast<mlir::RankedTensorType>(op->getResult(2).getType());
+    countsInit = mlir::tensor::EmptyOp::create(
+        rewriter, loc, countsType.getShape(), countsType.getElementType(),
+        batchSeqDims(countsType));
+  }
 
   llvm::SmallVector<mlir::Value> operands = {
       *ctxOrFailure, query,    queryNormWeight, keyNormWeight,
@@ -319,14 +338,20 @@ mlir::LogicalResult SparseAttentionIndexerToHip::matchAndRewrite(
   }
   operands.push_back(selectedInit);
   operands.push_back(presentInit);
+  if (withCounts) {
+    operands.push_back(countsInit);
+  }
 
   auto state = mlir::OperationState(loc, "hip.sparse_attention_indexer");
   state.addOperands(operands);
   state.addTypes({selectedType, presentType});
+  if (withCounts) {
+    state.addTypes(countsType);
+  }
   state.addAttribute("operand_segment_sizes",
                      rewriter.getDenseI32ArrayAttr(
                          {1, 1, 1, 1, 1, 1, 1, mask ? 1 : 0, pastSeqLen ? 1 : 0,
-                          rotaryIds ? 1 : 0, 1, 1}));
+                          rotaryIds ? 1 : 0, 1, 1, withCounts ? 1 : 0}));
   state.addAttribute("compress_ratio", rewriter.getI64IntegerAttr(ratio));
   state.addAttribute("token_budget", rewriter.getI64IntegerAttr(budget));
   state.addAttribute("epsilon", rewriter.getF32FloatAttr(epsilon));

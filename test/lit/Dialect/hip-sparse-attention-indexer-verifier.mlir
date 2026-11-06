@@ -290,3 +290,47 @@ func.func @sai_ids_sin_width(%ctx: !hip.context,
       : tensor<1x1x2051xi32>, tensor<1x8x128xf16>
   return %r#0, %r#1 : tensor<1x1x2051xi32>, tensor<1x8x128xf16>
 }
+
+// -----
+
+func.func @sai_counts_type(%ctx: !hip.context,
+    %qk: tensor<1x1x640xf16>, %qw: tensor<128xf16>, %kw: tensor<128xf16>,
+    %cos: tensor<8x64xf16>, %sin: tensor<8x64xf16>, %past: tensor<1x7x128xf16>,
+    %sel: tensor<1x1x2051xi32>, %present: tensor<1x8x128xf16>,
+    %counts: tensor<1x1xi64>)
+    -> (tensor<1x1x2051xi32>, tensor<1x8x128xf16>, tensor<1x1xi64>) {
+  // expected-error @+1 {{selected_counts must have element type 'i32', got 'i64'}}
+  %r:3 = hip.sparse_attention_indexer(%ctx)
+      ins(%qk, %qw, %kw, %cos, %sin, %past :
+          tensor<1x1x640xf16>, tensor<128xf16>, tensor<128xf16>,
+          tensor<8x64xf16>, tensor<8x64xf16>, tensor<1x7x128xf16>)
+      outs(%sel, %present : tensor<1x1x2051xi32>, tensor<1x8x128xf16>)
+      counts(%counts : tensor<1x1xi64>)
+      {compress_ratio = 4 : i64, token_budget = 2048 : i64,
+       epsilon = 9.99999997E-7 : f32, scale = 0.0883883461 : f32}
+      : tensor<1x1x2051xi32>, tensor<1x8x128xf16>, tensor<1x1xi64>
+  return %r#0, %r#1, %r#2
+      : tensor<1x1x2051xi32>, tensor<1x8x128xf16>, tensor<1x1xi64>
+}
+
+// -----
+
+func.func @sai_counts_shape(%ctx: !hip.context,
+    %qk: tensor<1x3x640xf16>, %qw: tensor<128xf16>, %kw: tensor<128xf16>,
+    %cos: tensor<8x64xf16>, %sin: tensor<8x64xf16>, %past: tensor<1x5x128xf16>,
+    %sel: tensor<1x3x2051xi32>, %present: tensor<1x8x128xf16>,
+    %counts: tensor<1x2xi32>)
+    -> (tensor<1x3x2051xi32>, tensor<1x8x128xf16>, tensor<1x2xi32>) {
+  // expected-error @+1 {{selected_counts dim 1 must be 3, got 2}}
+  %r:3 = hip.sparse_attention_indexer(%ctx)
+      ins(%qk, %qw, %kw, %cos, %sin, %past :
+          tensor<1x3x640xf16>, tensor<128xf16>, tensor<128xf16>,
+          tensor<8x64xf16>, tensor<8x64xf16>, tensor<1x5x128xf16>)
+      outs(%sel, %present : tensor<1x3x2051xi32>, tensor<1x8x128xf16>)
+      counts(%counts : tensor<1x2xi32>)
+      {compress_ratio = 4 : i64, token_budget = 2048 : i64,
+       epsilon = 9.99999997E-7 : f32, scale = 0.0883883461 : f32}
+      : tensor<1x3x2051xi32>, tensor<1x8x128xf16>, tensor<1x2xi32>
+  return %r#0, %r#1, %r#2
+      : tensor<1x3x2051xi32>, tensor<1x8x128xf16>, tensor<1x2xi32>
+}

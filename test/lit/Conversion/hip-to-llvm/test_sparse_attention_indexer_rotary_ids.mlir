@@ -6,7 +6,7 @@
 // Base tables [16, 4] gathered through [3, 1, X] position ids. The rotary
 // width is 8, X comes from the ids, and both indexers share one section map.
 // CHECK-LABEL: llvm.func @wrap_sparse_attention_indexer(
-// CHECK-SAME:      !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
+// CHECK-SAME:      !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32, !llvm.ptr, !llvm.ptr, i64, i64, i64, !llvm.ptr) -> i32
 // CHECK-NEXT:    llvm.mlir.global internal constant @__hip_sai_rotary_sections_00010200("\00\01\02\00") {addr_space = 0 : i32}
 // CHECK-NOT:     llvm.mlir.global
 // CHECK-LABEL: llvm.func @sai_rotary_ids(
@@ -57,12 +57,14 @@
 // CHECK-NEXT:      %[[M:.*]] = llvm.mlir.constant(3 : i64) : i64
 // CHECK-NEXT:      %[[IDS_B:.*]] = llvm.mlir.constant(1 : i64) : i64
 // CHECK-NEXT:      %[[IDS_X:.*]] = llvm.extractvalue %[[IDS_DESC]][3, 2] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<3 x i64>, array<3 x i64>)>
-// CHECK-NEXT:      %{{.*}} = llvm.call @wrap_sparse_attention_indexer(%[[CTX]], %[[QK]], %[[QW]], %[[KW]], %[[COS]], %[[SIN]], %[[NOMASK]], %[[PSL]], %[[PAST]], %[[SEL]], %[[PRESENT]], %[[B]], %[[S]], %[[P]], %[[PR]], %[[N]], %[[D]], %[[R]], %[[Y]], %[[BATCHED]], %[[RATIO]], %[[BUDGET]], %[[ELEM]], %[[PB]], %[[MB]], %[[ML]], %[[CB]], %[[SB]], %[[SR]], %[[EPS]], %[[SCALE]], %[[IDS]], %[[MAP]], %[[M]], %[[IDS_B]], %[[IDS_X]])
+// CHECK-NEXT:      %[[NOCOUNTS:.*]] = llvm.mlir.zero : !llvm.ptr
+// CHECK-NEXT:      %{{.*}} = llvm.call @wrap_sparse_attention_indexer(%[[CTX]], %[[QK]], %[[QW]], %[[KW]], %[[COS]], %[[SIN]], %[[NOMASK]], %[[PSL]], %[[PAST]], %[[SEL]], %[[PRESENT]], %[[B]], %[[S]], %[[P]], %[[PR]], %[[N]], %[[D]], %[[R]], %[[Y]], %[[BATCHED]], %[[RATIO]], %[[BUDGET]], %[[ELEM]], %[[PB]], %[[MB]], %[[ML]], %[[CB]], %[[SB]], %[[SR]], %[[EPS]], %[[SCALE]], %[[IDS]], %[[MAP]], %[[M]], %[[IDS_B]], %[[IDS_X]], %[[NOCOUNTS]])
 // CHECK:           %[[MAP2:.*]] = llvm.mlir.addressof @__hip_sai_rotary_sections_00010200 : !llvm.ptr
 // CHECK-NEXT:      %[[M2:.*]] = llvm.mlir.constant(3 : i64) : i64
 // CHECK-NEXT:      %[[IDS_B2:.*]] = llvm.mlir.constant(1 : i64) : i64
 // CHECK-NEXT:      %[[IDS_X2:.*]] = llvm.extractvalue %[[IDS_DESC]][3, 2] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<3 x i64>, array<3 x i64>)>
-// CHECK-NEXT:      %{{.*}} = llvm.call @wrap_sparse_attention_indexer(%[[CTX]], {{.*}}, %[[MAP2]], %[[M2]], %[[IDS_B2]], %[[IDS_X2]])
+// CHECK-NEXT:      %[[NOCOUNTS2:.*]] = llvm.mlir.zero : !llvm.ptr
+// CHECK-NEXT:      %{{.*}} = llvm.call @wrap_sparse_attention_indexer(%[[CTX]], {{.*}}, %[[MAP2]], %[[M2]], %[[IDS_B2]], %[[IDS_X2]], %[[NOCOUNTS2]])
 // CHECK-NEXT:      llvm.return
 // CHECK-NEXT:    }
 func.func @sai_rotary_ids(

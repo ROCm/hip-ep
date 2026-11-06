@@ -587,13 +587,14 @@ __device__ __forceinline__ unsigned long long blockKey(float score, int j) {
 
 // One block per row: an MSB-first 8-bit radix select finds the key of the
 // topk-th best block, the winners are gathered and bitonic-sorted in LDS.
+// counts, when given, receives the row's number of valid entries.
 __global__ void __launch_bounds__(kThreads)
 sai_select_kernel(const float *__restrict__ scores,
                   const int *__restrict__ visible,
                   const int *__restrict__ row_count,
-                  int *__restrict__ selected, int seq_len, int s0,
-                  int chunk_stride, int total, int max_blocks, int ratio,
-                  int block_topk, int capacity) {
+                  int *__restrict__ selected, int *__restrict__ counts,
+                  int seq_len, int s0, int chunk_stride, int total,
+                  int max_blocks, int ratio, int block_topk, int capacity) {
   __shared__ unsigned hist[256];
   __shared__ unsigned long long keys[kMaxTopK];
   __shared__ int wave_sums[kWaves];
@@ -721,6 +722,9 @@ sai_select_kernel(const float *__restrict__ scores,
   for (int idx = topk * ratio + tail + tid; idx < capacity; idx += kThreads) {
     out[idx] = -1;
   }
+  if (counts != nullptr && tid == 0) {
+    counts[static_cast<size_t>(b) * seq_len + s] = topk * ratio + tail;
+  }
 }
 
 struct Layout {
@@ -782,8 +786,8 @@ template <typename T>
 hipError_t launchAll(hipStream_t stream, const Layout &l, const T *query,
                      const T *query_norm_weight, const T *key_norm_weight,
                      const Rope<T> &rope, const int64_t *mask,
-                     const T *past_key, int32_t *selected, T *present,
-                     char *ws, int batch, int seq_len, int past_len,
+                     const T *past_key, int32_t *selected, int32_t *counts,
+                     T *present, char *ws, int batch, int seq_len, int past_len,
                      int past_stride, int present_stride, int num_heads,
                      int ratio, int block_topk, int capacity, float eps,
                      float scale) {
@@ -874,8 +878,8 @@ hipError_t launchAll(hipStream_t stream, const Layout &l, const T *query,
       }
     }
     sai_select_kernel<<<dim3(rows, batch), kThreads, 0, stream>>>(
-        scores, visible, row_count, selected, seq_len, s0, chunk_stride, total,
-        max_blocks, ratio, block_topk, capacity);
+        scores, visible, row_count, selected, counts, seq_len, s0,
+        chunk_stride, total, max_blocks, ratio, block_topk, capacity);
   }
   return hipGetLastError();
 }
@@ -923,7 +927,8 @@ extern "C" int hip_sparse_attention_indexer(
     int64_t rotary_width, int64_t rotary_rows, int64_t rotary_batched,
     int64_t compress_ratio, int64_t token_budget, int element_size_bytes,
     float epsilon, float scale, const int64_t *rotary_position_ids,
-    const uint8_t *rotary_sections, int64_t id_sections, int64_t id_rows) {
+    const uint8_t *rotary_sections, int64_t id_sections, int64_t id_rows,
+    int32_t *selected_counts) {
   if (!query || !query_norm_weight || !key_norm_weight || !cos_cache ||
       !sin_cache || (past_len > 0 && !past_key) || !selected_indices ||
       !present_key || (rotary_position_ids && !rotary_sections)) {
@@ -1017,7 +1022,8 @@ extern "C" int hip_sparse_attention_indexer(
                            rotary_sections, batch, rotary_width, rotary_rows,
                            rotary_batched, id_rows),
         mask, static_cast<const _Float16 *>(past_key), selected_indices,
-        static_cast<_Float16 *>(present_key), static_cast<char *>(workspace),
+        selected_counts, static_cast<_Float16 *>(present_key),
+        static_cast<char *>(workspace),
         static_cast<int>(batch), static_cast<int>(seq_len),
         static_cast<int>(past_len), static_cast<int>(past_rows),
         static_cast<int>(present_rows), static_cast<int>(num_heads),
@@ -1032,7 +1038,8 @@ extern "C" int hip_sparse_attention_indexer(
                         rotary_sections, batch, rotary_width, rotary_rows,
                         rotary_batched, id_rows),
         mask, static_cast<const float *>(past_key), selected_indices,
-        static_cast<float *>(present_key), static_cast<char *>(workspace),
+        selected_counts, static_cast<float *>(present_key),
+        static_cast<char *>(workspace),
         static_cast<int>(batch), static_cast<int>(seq_len),
         static_cast<int>(past_len), static_cast<int>(past_rows),
         static_cast<int>(present_rows), static_cast<int>(num_heads),

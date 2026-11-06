@@ -2016,6 +2016,8 @@ int wrap_dynamic_sparse_attention(
 // rotary_sections (host, rotary_width / 2 bytes) gives each frequency's MRoPE
 // section, the ids row of its positions; without the ids, rotary_sections and
 // id_* are ignored.
+// selected_counts ([batch, seq_len] int32) may be null; when given it receives
+// the number of valid entries of each selected_indices row.
 int wrap_sparse_attention_indexer(
     RuntimeState *state, const void *query, const void *query_norm_weight,
     const void *key_norm_weight, const void *cos_cache, const void *sin_cache,
@@ -2028,7 +2030,7 @@ int wrap_sparse_attention_indexer(
     int64_t mask_len, int64_t cos_batch, int64_t sin_batch, int64_t sin_rows,
     float epsilon, float scale, const void *rotary_position_ids,
     const void *rotary_sections, int64_t id_sections, int64_t id_batch,
-    int64_t id_rows);
+    int64_t id_rows, void *selected_counts);
 
 //==============================================================================
 // ONNX Gemm via hipBLASLt

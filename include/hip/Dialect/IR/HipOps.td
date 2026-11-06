@@ -4799,6 +4799,7 @@ def Hip_SparseAttentionIndexerOp : Hip_DpsOp_AutoReify<"sparse_attention_indexer
       rotary_position_ids (optional) [M, B, X]  i64
       selected_indices    [B, S, K * r + r - 1] i32
       present_key         [B, T, D]
+      selected_counts (optional) [B, S]         i32
     With past_sequence_length, P is its value and past_key / present_key
     are both [B, C, D] with T <= C. They may alias, in which case only rows
     P .. T - 1 of present_key are written.
@@ -4816,6 +4817,8 @@ def Hip_SparseAttentionIndexerOp : Hip_DpsOp_AutoReify<"sparse_attention_indexer
     scale * sum_h max(0, q_h . k_j) in fp32. The top min(K, blocks) blocks,
     ordered by score descending then block index ascending, emit their r
     token indices; the remaining visible tail follows and -1 fills the rest.
+    selected_counts, when given, receives the number of non-negative entries
+    of each selected_indices row.
 
     With rotary_position_ids [M, B, X] (i64), cos/sin_cache are base tables
     [Y, R / 2] and rotary_sections (R / 2 entries in [0, M)) gives the MRoPE
@@ -4853,6 +4856,7 @@ def Hip_SparseAttentionIndexerOp : Hip_DpsOp_AutoReify<"sparse_attention_indexer
     Optional<Hip_TensorOrMemRef>:$rotary_position_ids,
     Hip_TensorOrMemRef:$selected_indices,
     Hip_TensorOrMemRef:$present_key,
+    Optional<Hip_TensorOrMemRef>:$selected_counts,
     I64Attr:$compress_ratio,
     I64Attr:$token_budget,
     F32Attr:$epsilon,
@@ -4875,6 +4879,7 @@ def Hip_SparseAttentionIndexerOp : Hip_DpsOp_AutoReify<"sparse_attention_indexer
         type($rotary_position_ids) `)`)?
     `outs` `(` $selected_indices `,` $present_key `:`
               type($selected_indices) `,` type($present_key) `)`
+    (`counts` `(` $selected_counts^ `:` type($selected_counts) `)`)?
     attr-dict (`:` type($result_tensors)^)?
   }];
 

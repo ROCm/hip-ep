@@ -3978,6 +3978,8 @@ HIP_KERNEL_API int hip_dynamic_sparse_attention(
 //                    rotary_position_ids[rotary_sections[f], b, t]
 //   rotary_sections  host [R/2] bytes, each frequency's MRoPE section,
 //                    < id_sections (with ids only)
+//   selected_counts  [B, S] int32 or null; receives the number of valid
+//                    (non-negative) entries of each selected_indices row
 // D must be 128, 1 <= N <= 8, R even in (0, D], token_budget / r <= 512.
 // workspace must hold hip_sparse_attention_indexer_workspace_size() bytes.
 HIP_KERNEL_API size_t hip_sparse_attention_indexer_workspace_size(
@@ -4019,7 +4021,8 @@ HIP_KERNEL_API int hip_sparse_attention_indexer(
     const int64_t* rotary_position_ids,
     const uint8_t* rotary_sections,
     int64_t id_sections,
-    int64_t id_rows);
+    int64_t id_rows,
+    int32_t* selected_counts);
 
 /* =========================================================================
  * Conv — general forward convolution (1D / 2D / 3D spatial)

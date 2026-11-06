@@ -138,12 +138,14 @@ struct SparseAttentionIndexerOpLowering
       args.push_back(LLVM::ZeroOp::create(rewriter, loc, ptrType).getResult());
       args.append(3, createI64Const(0));
     }
+    args.push_back(optionalPtr(adaptor.getSelectedCounts()));
 
-    SmallVector<Type, 36> paramTypes(11, ptrType);
+    SmallVector<Type, 37> paramTypes(11, ptrType);
     paramTypes.append(18, i64Type);
     paramTypes.append(2, f32Type);
     paramTypes.append(2, ptrType);
     paramTypes.append(3, i64Type);
+    paramTypes.push_back(ptrType);
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapSparseAttentionIndexer, paramTypes, i32Type);

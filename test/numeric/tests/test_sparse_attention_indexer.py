@@ -532,6 +532,53 @@ def test_rotary_fold_matches_tables(model_runner, S):
     _check_selected(folded[0], expected, row_info, 4, budget)
 
 
+@pytest.mark.parametrize("S", [1, 64])
+def test_counts_fold(model_runner, S):
+    """The folded counts equal the number of valid entries in each selected row.
+
+    The history is shorter than the budget, so each row has its own count.
+    """
+    B, P, N, R, budget = 2, 100, 4, 64, 2048
+    dt = np.float16
+    rng = np.random.default_rng(70 + S)
+    query = rng.uniform(-1, 1, (B, S, (N + 1) * _D)).astype(dt)
+    qw = rng.uniform(0.5, 1.5, _D).astype(dt)
+    kw = rng.uniform(0.5, 1.5, _D).astype(dt)
+    cos, sin = _rope_tables(rng, P + S, R, dt, B)
+    past = rng.uniform(-1, 1, (B, P, _D)).astype(dt)
+
+    model = _make_model(N, R, True, False, dt, 4, budget, None, None)
+    constants = {"zero": np.int32(0), "one": np.int32(1), "axes": np.array([-1])}
+    model.graph.node.extend(
+        [
+            helper.make_node(
+                "Constant", [], [name], value=numpy_helper.from_array(value)
+            )
+            for name, value in constants.items()
+        ]
+        + [
+            helper.make_node("GreaterOrEqual", ["selected_indices", "zero"], ["ge"]),
+            helper.make_node("Where", ["ge", "one", "zero"], ["valid"]),
+            helper.make_node(
+                "ReduceSum", ["valid", "axes"], ["selected_counts"], keepdims=0
+            ),
+        ]
+    )
+    model.graph.output.append(
+        helper.make_tensor_value_info("selected_counts", TP.INT32, ["B", "S"])
+    )
+    sel, present, counts = model_runner.backend.run(
+        _persist(model_runner, model), [query, qw, kw, cos, sin, past]
+    )
+
+    expected, want_present, row_info = _sai_reference(
+        query, qw, kw, cos, sin, None, past, 4, budget, 1e-6, 1 / np.sqrt(_D)
+    )
+    np.testing.assert_array_equal(present, want_present)
+    _check_selected(sel, expected, row_info, 4, budget)
+    np.testing.assert_array_equal(counts, (expected >= 0).sum(-1, dtype=np.int32))
+
+
 @pytest.mark.parametrize("bind_shared", [True, False])
 @pytest.mark.parametrize("has_mask", [False, True])
 def test_past_sequence_length(model_runner, bind_shared, has_mask):
