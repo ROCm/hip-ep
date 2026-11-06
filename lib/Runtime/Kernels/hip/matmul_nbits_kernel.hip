@@ -4683,13 +4683,14 @@ struct SmallMWmmaConfig {
 
 // tm x 16 rows and tn x 16 columns per workgroup, CPW chunks of 32 k per wave,
 // DB / DA chunks of B / A in flight per wave. The first three are the defaults
-// for M <= 16, M <= 32 and larger; the last two replace the first two when
-// only CPW 16 divides K / 32 (see smallMWmmaDefaultConfig); the rest are
-// alternatives for sweeps.
+// for M <= 16, M <= 32 and larger. At the K values in smallMWmmaDefaultConfig
+// 6 replaces 0 and 8-10 (two column tiles) replace 1; 3-5 and 7 (the one
+// column CPW 16 tile) are alternatives for sweeps.
 static constexpr SmallMWmmaConfig kSmallMWmmaConfigs[] = {
     {1, 1, 18, 18, 2}, {2, 1, 18, 18, 1}, {4, 1, 10, 10, 1},
     {1, 1, 10, 10, 2}, {2, 1, 10, 10, 1}, {4, 1, 6, 6, 1},
     {1, 1, 16, 16, 2}, {2, 1, 16, 16, 1},
+    {2, 2, 16, 8, 1},  {2, 2, 8, 8, 1},   {2, 2, 16, 16, 1},
 };
 static constexpr int kNumSmallMWmmaConfigs =
     static_cast<int>(sizeof(kSmallMWmmaConfigs) / sizeof(kSmallMWmmaConfigs[0]));
@@ -4947,11 +4948,19 @@ void MatMulNBitsWMMA_SmallM_Grouped(
 // K=2880, block 32). The CPW 16 variants are used only at the K values where
 // they were measured faster than CPW 18 (gfx1151, grouped expert GEMMs at
 // block 128, 16- and 32-row tiles: 9-14% at K=512, 1024, 2048 and 3072); every
-// other K keeps the CPW 18 default.
+// other K keeps the CPW 18 default. At those K the 32-row tile takes two
+// column tiles per workgroup, which halves the activation re-reads (Laguna
+// expert shapes, block 128: 3-4% at K=512 and 2048 with CPW 8, 3% at 1024 and
+// 2% at 3072 with CPW 16).
 static int smallMWmmaDefaultConfig(int64_t M, int64_t K) {
     const bool cpw16 = K == 512 || K == 1024 || K == 2048 || K == 3072;
     if (M <= 16) return cpw16 ? 6 : 0;
-    if (M <= 32) return cpw16 ? 7 : 1;
+    if (M <= 32) {
+        if (K == 512 || K == 2048) return 9;
+        if (K == 1024) return 10;
+        if (K == 3072) return 8;
+        return 1;
+    }
     return 2;
 }
 
@@ -5002,7 +5011,8 @@ extern "C" int hip_matmul_nbits_wmma_smallm_grouped_supported(
 #define SMALLM_WMMA_CASES(X)                                                  \
     X(0, 1, 1, 18, 18, 2) X(1, 2, 1, 18, 18, 1) X(2, 4, 1, 10, 10, 1)         \
     X(3, 1, 1, 10, 10, 2) X(4, 2, 1, 10, 10, 1) X(5, 4, 1, 6, 6, 1)          \
-    X(6, 1, 1, 16, 16, 2) X(7, 2, 1, 16, 16, 1)
+    X(6, 1, 1, 16, 16, 2) X(7, 2, 1, 16, 16, 1)                            \
+    X(8, 2, 2, 16, 8, 1) X(9, 2, 2, 8, 8, 1) X(10, 2, 2, 16, 16, 1)
 
 extern "C" int hip_matmul_nbits_wmma_smallm_grouped(
     void* stream, int cfg,
