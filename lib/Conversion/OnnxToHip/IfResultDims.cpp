@@ -252,13 +252,14 @@ private:
         if (isSignedDivision) {
           Value minusOne =
               arith::ConstantOp::create(b, loc, b.getIntegerAttr(ty, -1));
-          isMinusOne = arith::CmpIOp::create(
-              b, loc, arith::CmpIPredicate::eq, divisor, minusOne);
+          isMinusOne = arith::CmpIOp::create(b, loc, arith::CmpIPredicate::eq,
+                                             divisor, minusOne);
           unsafe = arith::OrIOp::create(b, loc, unsafe, isMinusOne);
           // x / -1 is -x (wrapping at INT_MIN), and x % -1 is 0.
-          byMinusOne = isa<arith::RemSIOp>(def)
-                           ? zero
-                           : arith::SubIOp::create(b, loc, zero, lhs).getResult();
+          byMinusOne =
+              isa<arith::RemSIOp>(def)
+                  ? zero
+                  : arith::SubIOp::create(b, loc, zero, lhs).getResult();
         }
         mapping.map(
             def->getOperand(1),
