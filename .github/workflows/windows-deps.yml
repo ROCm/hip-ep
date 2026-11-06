@@ -4,9 +4,10 @@
 ##
 name: Windows Deps
 
-# Prebuilds the two heavy from-source dependencies into cached install prefixes
-# and returns their cache keys. Callers restore those prefixes with
-# fail-on-cache-miss, so a green run here is what guarantees the caches exist.
+# Prebuilds the heavy dependencies and returns their cache keys. Each job also
+# uploads that tree as a workflow artifact. Callers restore the cache and, on a
+# miss, download the artifact: a later save can evict an entry before the build
+# job runs, and a lookup-only hit does not leave a copy in this run.
 #
 # Windows Build and Windows RMT Build both call this workflow. Each job's
 # concurrency group is per ref and commit, so the two callers of one event
@@ -34,10 +35,10 @@ permissions:
   contents: read
 
 env:
-  # LLVM/MLIR/LLD are sourced from the llvm-project subtree vendored inside
-  # rocmlirTriton (external/llvm-project). The repo + pinned commit are read
-  # from cmake/deps.txt (single source of truth with the from-source fallback
-  # in cmake/deps.cmake); the commit is the llvm-install cache key.
+  # LLVM/MLIR/LLD are cloned from deps.txt llvm_project. The hash column is a
+  # branch name, so the cache key is that branch's current tip. Same source as
+  # cmake/deps.cmake's from-source fallback. rocmlirTriton's vendored
+  # external/llvm-project is not built.
   ONNXRUNTIME_VERSION: "1.31.0"
   ONNXRUNTIME_PR_PATCHES: ""
   OGA_VERSION: "0.19.0"
@@ -77,20 +78,27 @@ jobs:
         working-directory: source-hip-ep
         run: |
           set -euo pipefail
-          LINE=$(grep -E '^rocmlirtriton;' cmake/deps.txt)
-          RT_URL=$(echo "$LINE" | cut -d';' -f2)
-          RT_COMMIT=$(echo "$LINE" | cut -d';' -f3)
-          echo "url=$RT_URL" >> "$GITHUB_OUTPUT"
-          echo "commit=$RT_COMMIT" >> "$GITHUB_OUTPUT"
-          echo "value=windows-llvm-rocmlirtriton-${RT_COMMIT}" >> "$GITHUB_OUTPUT"
+          LINE=$(grep -E '^llvm_project;' cmake/deps.txt)
+          LLVM_URL=$(echo "$LINE" | cut -d';' -f2)
+          LLVM_REF=$(echo "$LINE" | cut -d';' -f3)
+          LLVM_COMMIT=$(git ls-remote "$LLVM_URL" "refs/heads/$LLVM_REF" | awk '{print $1}')
+          if [ -z "$LLVM_COMMIT" ]; then
+            echo "ERROR: no tip for $LLVM_URL refs/heads/$LLVM_REF" >&2
+            exit 1
+          fi
+          echo "url=$LLVM_URL" >> "$GITHUB_OUTPUT"
+          echo "ref=$LLVM_REF" >> "$GITHUB_OUTPUT"
+          echo "commit=$LLVM_COMMIT" >> "$GITHUB_OUTPUT"
+          echo "value=dep-llvm-${LLVM_COMMIT}" >> "$GITHUB_OUTPUT"
 
+      # Restore rather than lookup-only so a hit leaves llvm-install on disk
+      # for the upload below.
       - name: Probe llvm-install
         id: cache-llvm
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/llvm-install
           key: ${{ steps.key.outputs.value }}
-          lookup-only: true
 
       - name: Setup Python 3.14
         if: steps.cache-llvm.outputs.cache-hit != 'true'
@@ -126,18 +134,17 @@ jobs:
         if: steps.cache-llvm.outputs.cache-hit != 'true'
         shell: bash
         run: |
-          # LLVM/MLIR/LLD come from the llvm-project subtree vendored inside
-          # rocmlirTriton (external/llvm-project); a shallow clone of the pinned
-          # commit already carries it (git subtree, not a submodule). Recipe
-          # matches cmake/deps.cmake's from-source fallback; the install holds
-          # only LLVM_DISTRIBUTION_COMPONENTS, which also scopes the exported
+          # Shallow clone of the deps.txt llvm_project branch tip. The cmake
+          # project lives at llvm/, not the repository root. Recipe matches
+          # cmake/deps.cmake's from-source fallback; the install holds only
+          # LLVM_DISTRIBUTION_COMPONENTS, which also scopes the exported
           # CMake targets so find_package does not expect the omitted tools.
-          SRC="${{ runner.workspace }}/rocmlirTriton"
+          SRC="${{ runner.workspace }}/llvm-project"
           git init "$SRC"
           git -C "$SRC" remote add origin "${{ steps.key.outputs.url }}"
           git -C "$SRC" fetch --depth 1 origin "${{ steps.key.outputs.commit }}"
           git -C "$SRC" checkout FETCH_HEAD
-          cmake -G Ninja -S "$SRC/external/llvm-project/llvm" -B "${{ runner.workspace }}/build-llvm" \
+          cmake -G Ninja -S "$SRC/llvm" -B "${{ runner.workspace }}/build-llvm" \
             -DCMAKE_BUILD_TYPE=Release \
             -DLLVM_ENABLE_PROJECTS="clang;mlir;lld" \
             -DLLVM_TARGETS_TO_BUILD=X86 \
@@ -171,6 +178,14 @@ jobs:
           path: ${{ runner.workspace }}/llvm-install
           key: ${{ steps.key.outputs.value }}
 
+      - name: Upload llvm-install
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.key.outputs.value }}
+          path: ${{ runner.workspace }}/llvm-install
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Save sccache directory
         if: always() && steps.cache-llvm.outputs.cache-hit != 'true' && github.ref_name == 'main'
         continue-on-error: true
@@ -194,13 +209,14 @@ jobs:
         shell: bash
         run: echo "value=dep-ort-${{ env.ONNXRUNTIME_VERSION }}-ortpr-${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
 
+      # Restore rather than lookup-only so a hit leaves ort-install on disk
+      # for the upload below.
       - name: Probe ort-install
         id: cache-ort
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/ort-install
           key: ${{ steps.key.outputs.value }}
-          lookup-only: true
 
       - name: Setup Python 3.14
         if: steps.cache-ort.outputs.cache-hit != 'true'
@@ -310,6 +326,14 @@ jobs:
           path: ${{ runner.workspace }}/ort-install
           key: ${{ steps.key.outputs.value }}
 
+      - name: Upload ort-install
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.key.outputs.value }}
+          path: ${{ runner.workspace }}/ort-install
+          if-no-files-found: error
+          retention-days: 1
+
   amdgpu:
     needs: ort
     runs-on: windows-2022
@@ -334,27 +358,46 @@ jobs:
         shell: bash
         working-directory: source-hip-ep
         run: |
-          DEPS_HASH=$(git rev-parse --short=12 HEAD:cmake/deps.txt)
+          # amdgpu-ep only fetches migraphx_windows and therock_windows from
+          # deps.txt. Hash those rows, not the whole file, so a rocmlirTriton
+          # pin bump does not invalidate this cache.
+          set -euo pipefail
+          DEPS_LINES=$(grep -E '^(migraphx_windows|therock_windows);' cmake/deps.txt)
+          if [ -z "$DEPS_LINES" ]; then
+            echo "ERROR: migraphx_windows/therock_windows missing from cmake/deps.txt" >&2
+            exit 1
+          fi
+          DEPS_HASH=$(printf '%s\n' "$DEPS_LINES" | git hash-object --stdin | cut -c1-12)
           EP_REF="${{ env.AMDGPU_EP_REF }}"
           AMDPR_KEY="${{ env.AMDGPU_PR_PATCHES }}"
           AMDPR_KEY="${AMDPR_KEY// /-}"
           echo "value=windows-amdgpu-${EP_REF:0:7}-amdpr${AMDPR_KEY}-deps${DEPS_HASH}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
 
+      # Restore rather than lookup-only. A hit has to leave the tree on disk
+      # so this job can upload it: the build job's later cache restore can miss
+      # after a large LLVM save evicts the entry, and a skipped upload then
+      # leaves that job with nothing to download.
       - name: Probe amdgpu-artifacts
         id: cache-amdgpu
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/amdgpu-artifacts
           key: ${{ steps.key.outputs.value }}
-          lookup-only: true
 
       - name: Restore ort-install
+        id: restore-ort
         if: steps.cache-amdgpu.outputs.cache-hit != 'true'
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/ort-install
           key: ${{ needs.ort.outputs.cache_key }}
-          fail-on-cache-miss: true
+
+      - name: Download ort-install
+        if: steps.cache-amdgpu.outputs.cache-hit != 'true' && steps.restore-ort.outputs.cache-hit != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.ort.outputs.cache_key }}
+          path: ${{ runner.workspace }}/ort-install
 
       - name: Setup Python 3.14
         if: steps.cache-amdgpu.outputs.cache-hit != 'true'
@@ -501,7 +544,6 @@ jobs:
           key: ${{ steps.key.outputs.value }}
 
       - name: Upload amdgpu-artifacts
-        if: steps.cache-amdgpu.outputs.cache-hit != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.key.outputs.value }}
@@ -533,21 +575,29 @@ jobs:
         shell: bash
         run: echo "value=windows-oga-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
 
+      # Same as amdgpu: materialize a cache hit so the upload below always
+      # publishes this run's copy. A later eviction must not strand the build.
       - name: Probe oga-artifacts
         id: cache-oga
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/oga-artifacts
           key: ${{ steps.key.outputs.value }}
-          lookup-only: true
 
       - name: Restore ort-install
+        id: restore-ort
         if: steps.cache-oga.outputs.cache-hit != 'true'
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/ort-install
           key: ${{ needs.ort.outputs.cache_key }}
-          fail-on-cache-miss: true
+
+      - name: Download ort-install
+        if: steps.cache-oga.outputs.cache-hit != 'true' && steps.restore-ort.outputs.cache-hit != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.ort.outputs.cache_key }}
+          path: ${{ runner.workspace }}/ort-install
 
       - name: Setup Python 3.14
         if: steps.cache-oga.outputs.cache-hit != 'true'
@@ -731,7 +781,6 @@ jobs:
           key: ${{ steps.key.outputs.value }}
 
       - name: Upload oga-artifacts
-        if: steps.cache-oga.outputs.cache-hit != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.key.outputs.value }}
