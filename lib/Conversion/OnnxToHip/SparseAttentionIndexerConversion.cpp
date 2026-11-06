@@ -17,6 +17,13 @@ constexpr int64_t kMaxBlockTopK = 512;
 
 /// com.microsoft.SparseAttentionIndexer (policy_mode = qsa)
 ///   -> hip.sparse_attention_indexer
+///
+/// It also reads what the pre-lowering folds left on the op:
+/// - IndexerRotaryFold: base tables as cos_cache / sin_cache, ids at
+///   kRotaryPositionIdsIdx and kRotarySectionsAttr. They become
+///   rotary_position_ids and rotary_sections.
+/// - IndexerCountsFold: a third result marked kSelectedCountsAttr. It becomes
+///   selected_counts.
 struct SparseAttentionIndexerToHip : public mlir::RewritePattern {
   SparseAttentionIndexerToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
@@ -81,20 +88,30 @@ mlir::LogicalResult SparseAttentionIndexerToHip::matchAndRewrite(
     }
     return val;
   };
-  if (numOps < 8 || numOps > 14) {
+  auto sectionsAttr =
+      op->getAttrOfType<mlir::DenseI32ArrayAttr>(kRotarySectionsAttr);
+  if (sectionsAttr ? numOps != kRotaryPositionIdsIdx + 1
+                   : numOps < 8 || numOps > 14) {
     return rewriter.notifyMatchFailure(
-        op, "SparseAttentionIndexer expects 8-14 operands");
+        op, sectionsAttr ? "folded rotary expects rotary_position_ids last"
+                         : "SparseAttentionIndexer expects 8-14 operands");
   }
   if (getOptionalOperand(1)) {
     return rewriter.notifyMatchFailure(op, "only packed QK is supported");
   }
   constexpr size_t kPastSequenceLengthIdx = 12;
   for (size_t idx = 8; idx < numOps; ++idx) {
-    if (idx != kPastSequenceLengthIdx && getOptionalOperand(idx)) {
+    if (idx != kPastSequenceLengthIdx && idx != kRotaryPositionIdsIdx &&
+        getOptionalOperand(idx)) {
       return rewriter.notifyMatchFailure(op, "csa inputs are not supported");
     }
   }
   mlir::Value pastSeqLen = getOptionalOperand(kPastSequenceLengthIdx);
+  mlir::Value rotaryIds =
+      sectionsAttr ? getOptionalOperand(kRotaryPositionIdsIdx) : nullptr;
+  if (sectionsAttr && !rotaryIds) {
+    return rewriter.notifyMatchFailure(op, "rotary_position_ids is missing");
+  }
   mlir::Value query = op->getOperand(0);
   mlir::Value queryNormWeight = getOptionalOperand(2);
   mlir::Value keyNormWeight = getOptionalOperand(3);
@@ -151,17 +168,38 @@ mlir::LogicalResult SparseAttentionIndexerToHip::matchAndRewrite(
   }
   auto cosType = mlir::dyn_cast<mlir::RankedTensorType>(cosCache.getType());
   if (!cosType || (cosType.getRank() != 2 && cosType.getRank() != 3) ||
+      (rotaryIds && cosType.getRank() != 2) ||
       cosType.isDynamicDim(cosType.getRank() - 1)) {
     return rewriter.notifyMatchFailure(
-        op, "cos_cache must be rank 2 or 3 with a static rotary width");
+        op, "cos_cache must be rank 2 or 3 (a rank 2 base table with "
+            "rotary_position_ids) with a static rotary width");
   }
   const int64_t cosRank = cosType.getRank();
-  const int64_t rotary = cosType.getDimSize(cosRank - 1);
+  const int64_t cacheWidth = cosType.getDimSize(cosRank - 1);
+  const int64_t rotary = rotaryIds ? 2 * cacheWidth : cacheWidth;
   if (rotary <= 0 || rotary % 2 != 0 || rotary > kHeadSize) {
     return rewriter.notifyMatchFailure(
         op, "rotary width must be even and in (0, 128]");
   }
-  llvm::SmallVector<int64_t> cacheShape = {kAny, rotary};
+  if (rotaryIds) {
+    auto idsType = mlir::dyn_cast<mlir::RankedTensorType>(rotaryIds.getType());
+    if (!idsType ||
+        !matches(rotaryIds, rewriter.getI64Type(), {kAny, batch, kAny})) {
+      return rewriter.notifyMatchFailure(
+          op, "rotary_position_ids must be i64 [M, B, X]");
+    }
+    const int64_t numSections = idsType.getDimSize(0);
+    if (static_cast<int64_t>(sectionsAttr.size()) != cacheWidth ||
+        llvm::any_of(sectionsAttr.asArrayRef(), [&](int32_t s) {
+          return s < 0 || s >= kMaxRotarySections ||
+                 (!mlir::ShapedType::isDynamic(numSections) &&
+                  s >= numSections);
+        })) {
+      return rewriter.notifyMatchFailure(
+          op, "rotary_sections must name an MRoPE section per frequency");
+    }
+  }
+  llvm::SmallVector<int64_t> cacheShape = {kAny, cacheWidth};
   if (cosRank == 3) {
     cacheShape.insert(cacheShape.begin(), batch);
   }
@@ -199,9 +237,15 @@ mlir::LogicalResult SparseAttentionIndexerToHip::matchAndRewrite(
     return rewriter.notifyMatchFailure(op, "mask must be i64 [B, P + S]");
   }
 
-  if (op->getNumResults() != 2) {
+  const bool withCounts = op->hasAttr(kSelectedCountsAttr);
+  if (op->getNumResults() != (withCounts ? 3u : 2u)) {
     return rewriter.notifyMatchFailure(
-        op, "SparseAttentionIndexer qsa expects 2 results");
+        op, "SparseAttentionIndexer qsa expects 2 results (3 with counts)");
+  }
+  if (withCounts &&
+      !matches(op->getResult(2), rewriter.getI32Type(), {batch, seq})) {
+    return rewriter.notifyMatchFailure(op, "selected_counts must be i32 "
+                                           "[B, S]");
   }
   const int64_t capacity = budget + ratio - 1;
   auto selectedType =
@@ -237,16 +281,19 @@ mlir::LogicalResult SparseAttentionIndexerToHip::matchAndRewrite(
   }
 
   mlir::Location loc = op->getLoc();
-  llvm::SmallVector<mlir::Value> selectedDims;
-  for (int64_t i = 0; i < 2; ++i) {
-    if (selectedType.isDynamicDim(i)) {
-      selectedDims.push_back(
-          mlir::tensor::DimOp::create(rewriter, loc, query, i));
+  // The dynamic B and S of a [B, S, ...] result, read from the query.
+  auto batchSeqDims = [&](mlir::RankedTensorType type) {
+    llvm::SmallVector<mlir::Value> dims;
+    for (int64_t i : llvm::seq<int64_t>(0, 2)) {
+      if (type.isDynamicDim(i)) {
+        dims.push_back(mlir::tensor::DimOp::create(rewriter, loc, query, i));
+      }
     }
-  }
+    return dims;
+  };
   mlir::Value selectedInit = mlir::tensor::EmptyOp::create(
       rewriter, loc, selectedType.getShape(), selectedType.getElementType(),
-      selectedDims);
+      batchSeqDims(selectedType));
 
   llvm::SmallVector<mlir::Value> presentDims;
   if (presentType.isDynamicDim(0)) {
@@ -268,6 +315,14 @@ mlir::LogicalResult SparseAttentionIndexerToHip::matchAndRewrite(
   mlir::Value presentInit =
       mlir::tensor::EmptyOp::create(rewriter, loc, presentType.getShape(),
                                     presentType.getElementType(), presentDims);
+  mlir::Value countsInit;
+  mlir::RankedTensorType countsType;
+  if (withCounts) {
+    countsType = mlir::cast<mlir::RankedTensorType>(op->getResult(2).getType());
+    countsInit = mlir::tensor::EmptyOp::create(
+        rewriter, loc, countsType.getShape(), countsType.getElementType(),
+        batchSeqDims(countsType));
+  }
 
   llvm::SmallVector<mlir::Value> operands = {
       *ctxOrFailure, query,    queryNormWeight, keyNormWeight,
@@ -278,20 +333,32 @@ mlir::LogicalResult SparseAttentionIndexerToHip::matchAndRewrite(
   if (pastSeqLen) {
     operands.push_back(pastSeqLen);
   }
+  if (rotaryIds) {
+    operands.push_back(rotaryIds);
+  }
   operands.push_back(selectedInit);
   operands.push_back(presentInit);
+  if (withCounts) {
+    operands.push_back(countsInit);
+  }
 
   auto state = mlir::OperationState(loc, "hip.sparse_attention_indexer");
   state.addOperands(operands);
   state.addTypes({selectedType, presentType});
-  state.addAttribute(
-      "operand_segment_sizes",
-      rewriter.getDenseI32ArrayAttr(
-          {1, 1, 1, 1, 1, 1, 1, mask ? 1 : 0, pastSeqLen ? 1 : 0, 1, 1}));
+  if (withCounts) {
+    state.addTypes(countsType);
+  }
+  state.addAttribute("operand_segment_sizes",
+                     rewriter.getDenseI32ArrayAttr(
+                         {1, 1, 1, 1, 1, 1, 1, mask ? 1 : 0, pastSeqLen ? 1 : 0,
+                          rotaryIds ? 1 : 0, 1, 1, withCounts ? 1 : 0}));
   state.addAttribute("compress_ratio", rewriter.getI64IntegerAttr(ratio));
   state.addAttribute("token_budget", rewriter.getI64IntegerAttr(budget));
   state.addAttribute("epsilon", rewriter.getF32FloatAttr(epsilon));
   state.addAttribute("scale", rewriter.getF32FloatAttr(scale));
+  if (rotaryIds) {
+    state.addAttribute("rotary_sections", sectionsAttr);
+  }
   mlir::Operation *hipOp = rewriter.create(state);
   rewriter.replaceOp(op, hipOp->getResults());
   return mlir::success();

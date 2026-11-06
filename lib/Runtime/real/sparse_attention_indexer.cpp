@@ -45,10 +45,13 @@ int wrap_sparse_attention_indexer(
     int64_t rotary_batched, int64_t compress_ratio, int64_t token_budget,
     int64_t element_size_bytes, int64_t past_batch, int64_t mask_batch,
     int64_t mask_len, int64_t cos_batch, int64_t sin_batch, int64_t sin_rows,
-    float epsilon, float scale) {
+    float epsilon, float scale, const void *rotary_position_ids,
+    const void *rotary_sections, int64_t id_sections, int64_t id_batch,
+    int64_t id_rows, void *selected_counts) {
   if (!state || !query || !query_norm_weight || !key_norm_weight ||
       !cos_cache || !sin_cache || (past_rows > 0 && !past_key) ||
-      !selected_indices || !present_key) {
+      !selected_indices || !present_key ||
+      (rotary_position_ids && !rotary_sections)) {
     fprintf(stderr, "wrap_sparse_attention_indexer: null required argument\n");
     return -1;
   }
@@ -108,6 +111,16 @@ int wrap_sparse_attention_indexer(
             (long long)sin_rows, (long long)batch);
     return -1;
   }
+  if (rotary_position_ids &&
+      (rotary_batched || id_batch != batch || id_sections < 1 || id_rows < 1)) {
+    fprintf(stderr,
+            "wrap_sparse_attention_indexer: rotary_position_ids "
+            "[%lld, %lld, %lld] must be [M >= 1, B=%lld, X >= 1] over rank 2 "
+            "base tables\n",
+            (long long)id_sections, (long long)id_batch, (long long)id_rows,
+            (long long)batch);
+    return -1;
+  }
 
   OP_PROFILE(
       "sparse_attention_indexer",
@@ -123,13 +136,15 @@ int wrap_sparse_attention_indexer(
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_sparse_attention_indexer: B=%lld S=%lld P=%lld "
       "past_rows=%lld present_rows=%lld N=%lld D=%lld R=%lld X=%lld "
-      "batched=%lld r=%lld budget=%lld elem=%lld eps=%g scale=%f mask=%d\n",
+      "batched=%lld r=%lld budget=%lld elem=%lld eps=%g scale=%f mask=%d "
+      "id_rows=%lld\n",
       (long long)batch, (long long)seq_len, (long long)past_len,
       (long long)past_rows, (long long)present_rows, (long long)num_heads,
       (long long)head_size, (long long)rotary_width, (long long)rotary_rows,
       (long long)rotary_batched, (long long)compress_ratio,
       (long long)token_budget, (long long)element_size_bytes, (double)epsilon,
-      (double)scale, mask ? 1 : 0);
+      (double)scale, mask ? 1 : 0,
+      (long long)(rotary_position_ids ? id_rows : 0));
 
   const size_t ws_bytes = hip_sparse_attention_indexer_workspace_size(
       batch, seq_len, past_len, num_heads, head_size, compress_ratio);
@@ -151,7 +166,10 @@ int wrap_sparse_attention_indexer(
       static_cast<int32_t *>(selected_indices), present_key, workspace,
       ws_bytes, batch, seq_len, past_len, past_rows, present_rows, num_heads,
       head_size, rotary_width, rotary_rows, rotary_batched, compress_ratio,
-      token_budget, static_cast<int>(element_size_bytes), epsilon, scale);
+      token_budget, static_cast<int>(element_size_bytes), epsilon, scale,
+      static_cast<const int64_t *>(rotary_position_ids),
+      static_cast<const uint8_t *>(rotary_sections), id_sections, id_rows,
+      static_cast<int32_t *>(selected_counts));
   if (rc != 0) {
     fprintf(stderr,
             "wrap_sparse_attention_indexer: hip_sparse_attention_indexer "

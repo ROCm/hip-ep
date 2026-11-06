@@ -3281,13 +3281,14 @@ LogicalResult DynamicSparseAttentionOp::verify() {
 // SparseAttentionIndexerOp:
 //   ins(query, query_norm_weight, key_norm_weight, cos_cache, sin_cache,
 //       past_key) [mask(mask)] [past_sequence_length(past_sequence_length)]
-//   outs(selected_indices, present_key)
+//       [rotary_position_ids(rotary_position_ids)]
+//   outs(selected_indices, present_key) [counts(selected_counts)]
 //===----------------------------------------------------------------------===//
 
 MutableOperandRange SparseAttentionIndexerOp::getDpsInitsMutable() {
   return MutableOperandRange(
       *this, /*start=*/getSelectedIndicesMutable().getOperandNumber(),
-      /*length=*/2);
+      /*length=*/getSelectedCounts() ? 3 : 2);
 }
 
 void SparseAttentionIndexerOp::getEffects(
@@ -3306,10 +3307,21 @@ LogicalResult SparseAttentionIndexerOp::verify() {
   if (getPastSequenceLength()) {
     data.push_back(getPastSequenceLength());
   }
+  if (getRotaryPositionIds()) {
+    data.push_back(getRotaryPositionIds());
+  }
   data.push_back(getSelectedIndices());
   data.push_back(getPresentKey());
-  if (failed(verifyDpsComputeOp(*this, data, 2))) {
+  if (getSelectedCounts()) {
+    data.push_back(getSelectedCounts());
+  }
+  if (failed(verifyDpsComputeOp(*this, data, getSelectedCounts() ? 3 : 2))) {
     return failure();
+  }
+  const bool gathered = static_cast<bool>(getRotaryPositionIds());
+  if (gathered != getRotarySections().has_value()) {
+    return emitOpError(
+        "rotary_position_ids and rotary_sections must be given together");
   }
 
   const int64_t ratio = getCompressRatio();
@@ -3354,7 +3366,11 @@ LogicalResult SparseAttentionIndexerOp::verify() {
   if ((cosRank != 2 && cosRank != 3) || cosType.isDynamicDim(cosRank - 1)) {
     return emitOpError("cos_cache must be rank 2 or 3 with a static width");
   }
-  const int64_t rotary = cosType.getDimSize(cosRank - 1);
+  if (gathered && cosRank != 2) {
+    return emitOpError("cos_cache must be a rank 2 base table with "
+                       "rotary_position_ids");
+  }
+  const int64_t rotary = cosType.getDimSize(cosRank - 1) * (gathered ? 2 : 1);
   if (rotary <= 0 || rotary % 2 != 0 || rotary > kHeadSize) {
     return emitOpError("rotary width must be even and in (0, 128], got ")
            << rotary;
@@ -3404,9 +3420,33 @@ LogicalResult SparseAttentionIndexerOp::verify() {
     return success();
   };
 
-  SmallVector<int64_t> cacheShape = {kAny, rotary};
+  SmallVector<int64_t> cacheShape = {kAny, gathered ? rotary / 2 : rotary};
   if (cosRank == 3) {
     cacheShape.insert(cacheShape.begin(), batch);
+  }
+  if (gathered) {
+    Value ids = getRotaryPositionIds();
+    if (failed(check(ids, "rotary_position_ids", i64, {kAny, batch, kAny}))) {
+      return failure();
+    }
+    ArrayRef<int32_t> sections = *getRotarySections();
+    if (static_cast<int64_t>(sections.size()) != rotary / 2) {
+      return emitOpError("rotary_sections must have ")
+             << rotary / 2 << " entries, got " << sections.size();
+    }
+    // The kernels store the section map as bytes.
+    constexpr int64_t kMaxRotarySections = 256;
+    const int64_t numSections = cast<ShapedType>(ids.getType()).getDimSize(0);
+    const int64_t limit =
+        ShapedType::isDynamic(numSections)
+            ? kMaxRotarySections
+            : std::min<int64_t>(numSections, kMaxRotarySections);
+    for (int32_t s : sections) {
+      if (s < 0 || s >= limit) {
+        return emitOpError("rotary_sections entries must be in [0, ")
+               << limit << "), got " << s;
+      }
+    }
   }
   if (failed(check(getQueryNormWeight(), "query_norm_weight", elem,
                    {kHeadSize})) ||
@@ -3420,7 +3460,10 @@ LogicalResult SparseAttentionIndexerOp::verify() {
       failed(check(getSelectedIndices(), "selected_indices", i32,
                    {batch, seq, budget + ratio - 1})) ||
       failed(check(getPresentKey(), "present_key", elem,
-                   {batch, presentRows, kHeadSize}))) {
+                   {batch, presentRows, kHeadSize})) ||
+      (getSelectedCounts() &&
+       failed(
+           check(getSelectedCounts(), "selected_counts", i32, {batch, seq})))) {
     return failure();
   }
   auto sinType = cast<ShapedType>(getSinCache().getType());

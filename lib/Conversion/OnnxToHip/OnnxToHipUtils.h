@@ -705,6 +705,57 @@ void populateAttentionWindowFoldPatterns(RewritePatternSet &patterns,
 void populateQMoESigmoidRoutingFoldPatterns(RewritePatternSet &patterns,
                                             MLIRContext *ctx);
 
+/// Returns the defining op of `v` when it is named `name`, or `nullptr`.
+///   onnxProducer(%w, "onnx.Where") -> the onnx.Where that defines %w
+inline Operation *onnxProducer(Value v, StringRef name) {
+  Operation *op = v.getDefiningOp();
+  return op && op->getName().getStringRef() == name ? op : nullptr;
+}
+
+/// Returns true when `op` is a com.microsoft `SparseAttentionIndexer`
+/// onnx.Custom with policy_mode = "qsa", the op IndexerRotaryFold and
+/// IndexerCountsFold rewrite.
+inline bool isQsaSparseAttentionIndexer(Operation *op) {
+  auto fn = op->getAttrOfType<StringAttr>("function_name");
+  auto domain = op->getAttrOfType<StringAttr>("domain_name");
+  auto policy = op->getAttrOfType<StringAttr>("policy_mode");
+  return op->getName().getStringRef() == "onnx.Custom" && fn &&
+         fn.getValue() == "SparseAttentionIndexer" && domain &&
+         domain.getValue() == "com.microsoft" && policy &&
+         policy.getValue() == "qsa";
+}
+
+/// Per-frequency MRoPE section that IndexerRotaryFold stamps on a qsa
+/// `SparseAttentionIndexer` after replacing cos_cache / sin_cache with the
+/// base tables and appending rotary_position_ids at kRotaryPositionIdsIdx.
+inline constexpr llvm::StringLiteral kRotarySectionsAttr =
+    "hipdnn.rotary_sections";
+inline constexpr size_t kRotaryPositionIdsIdx = 14;
+/// The kernels store the rotary section map as bytes.
+inline constexpr int64_t kMaxRotarySections = 256;
+
+/// Pre-lowering pattern set: fold the Gather/Where/Concat subgraph that builds
+/// a qsa `SparseAttentionIndexer`'s MRoPE cos/sin tables into
+/// the indexer, which then gathers only the rows it rotates instead of reading
+/// tables sized by the bound rotary history. Must run BEFORE
+/// `lowerOnnxConstants` (it reads the section masks and section indices) and
+/// `convertComputeOps`. See IndexerRotaryFold.cpp.
+void populateIndexerRotaryFoldPatterns(RewritePatternSet &patterns,
+                                       MLIRContext *ctx);
+
+/// Marker IndexerCountsFold stamps on a qsa `SparseAttentionIndexer` it gave
+/// a third result: the i32 [B, S] count of valid selected_indices per row.
+inline constexpr llvm::StringLiteral kSelectedCountsAttr =
+    "hipdnn.selected_counts";
+
+/// Pre-lowering pattern set: replace the
+/// `ReduceSum(Where(GreaterOrEqual(selected_indices, 0), 1, 0))` glue that
+/// counts a qsa `SparseAttentionIndexer`'s valid entries per row with a counts
+/// result of the indexer. Must run BEFORE `lowerOnnxConstants` (it reads the
+/// glue's constants) and `convertComputeOps`. See IndexerCountsFold.cpp.
+void populateIndexerCountsFoldPatterns(RewritePatternSet &patterns,
+                                       MLIRContext *ctx);
+
 /// Pre-lowering pattern set: collapse ORT's inlined `FastGelu` primitive
 /// chain (Pow / Mul / Sum / Tanh) back into a single
 /// `onnx.Gelu(approximate="tanh")`. ORT inlines the Gelu function body

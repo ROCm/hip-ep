@@ -622,6 +622,8 @@ void ConvertOnnxToHipPass::runOnOperation() {
         populatePackBroadcastTo4DPatterns(preLoweringPatterns, ctx);
         populateAttentionWindowFoldPatterns(preLoweringPatterns, ctx);
         populateQMoESigmoidRoutingFoldPatterns(preLoweringPatterns, ctx);
+        populateIndexerRotaryFoldPatterns(preLoweringPatterns, ctx);
+        populateIndexerCountsFoldPatterns(preLoweringPatterns, ctx);
         populateFastGeluFusionPatterns(preLoweringPatterns, ctx);
         populateErfGeluFusionPatterns(preLoweringPatterns, ctx);
         populateProjectorOpsRewritePatterns(preLoweringPatterns, ctx);

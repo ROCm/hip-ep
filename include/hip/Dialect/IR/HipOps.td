@@ -4791,12 +4791,15 @@ def Hip_SparseAttentionIndexerOp : Hip_DpsOp_AutoReify<"sparse_attention_indexer
     K = token_budget / r (at most 512):
       query               [B, S, (N + 1) * D]   f16 or f32; key = last D
       query/key_norm_weight [D]
-      cos/sin_cache       [X, R] or [B, X, R]
+      cos/sin_cache       [X, R] or [B, X, R]; [Y, R / 2] with
+                          rotary_position_ids
       mask (optional)     [B, T]                i64, nonzero = visible
       past_key            [B, P, D]
       past_sequence_length (optional) [1]       i32
+      rotary_position_ids (optional) [M, B, X]  i64
       selected_indices    [B, S, K * r + r - 1] i32
       present_key         [B, T, D]
+      selected_counts (optional) [B, S]         i32
     With past_sequence_length, P is its value and past_key / present_key
     are both [B, C, D] with T <= C. They may alias, in which case only rows
     P .. T - 1 of present_key are written.
@@ -4814,6 +4817,17 @@ def Hip_SparseAttentionIndexerOp : Hip_DpsOp_AutoReify<"sparse_attention_indexer
     scale * sum_h max(0, q_h . k_j) in fp32. The top min(K, blocks) blocks,
     ordered by score descending then block index ascending, emit their r
     token indices; the remaining visible tail follows and -1 fills the rest.
+    selected_counts, when given, receives the number of non-negative entries
+    of each selected_indices row.
+
+    With rotary_position_ids [M, B, X] (i64), cos/sin_cache are base tables
+    [Y, R / 2] and rotary_sections (R / 2 entries in [0, M)) gives the MRoPE
+    section of each frequency, the row of the ids that holds its positions:
+    channel d of row t in batch b uses base row
+    ids[rotary_sections[d mod R / 2], b, t], wrapped once if negative and
+    clamped to [0, Y - 1]. This is the [B, X, R] MRoPE table a
+    Gather/Where/Concat subgraph would otherwise materialize, read only at the
+    rows the indexer rotates.
 
     Example:
     ```mlir
@@ -4839,12 +4853,15 @@ def Hip_SparseAttentionIndexerOp : Hip_DpsOp_AutoReify<"sparse_attention_indexer
     Hip_TensorOrMemRef:$past_key,
     Optional<Hip_TensorOrMemRef>:$mask,
     Optional<Hip_TensorOrMemRef>:$past_sequence_length,
+    Optional<Hip_TensorOrMemRef>:$rotary_position_ids,
     Hip_TensorOrMemRef:$selected_indices,
     Hip_TensorOrMemRef:$present_key,
+    Optional<Hip_TensorOrMemRef>:$selected_counts,
     I64Attr:$compress_ratio,
     I64Attr:$token_budget,
     F32Attr:$epsilon,
-    F32Attr:$scale
+    F32Attr:$scale,
+    OptionalAttr<DenseI32ArrayAttr>:$rotary_sections
   );
 
   let assemblyFormat = [{
@@ -4858,8 +4875,11 @@ def Hip_SparseAttentionIndexerOp : Hip_DpsOp_AutoReify<"sparse_attention_indexer
     (`mask` `(` $mask^ `:` type($mask) `)`)?
     (`past_sequence_length` `(` $past_sequence_length^ `:`
         type($past_sequence_length) `)`)?
+    (`rotary_position_ids` `(` $rotary_position_ids^ `:`
+        type($rotary_position_ids) `)`)?
     `outs` `(` $selected_indices `,` $present_key `:`
               type($selected_indices) `,` type($present_key) `)`
+    (`counts` `(` $selected_counts^ `:` type($selected_counts) `)`)?
     attr-dict (`:` type($result_tensors)^)?
   }];
 
