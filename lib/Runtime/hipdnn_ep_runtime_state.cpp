@@ -353,9 +353,18 @@ static int hipmalloc_and_fixup(RuntimeState *state,
                                size_t total_size) {
   auto t_prev = timing_now();
   if (hipMalloc(&state->gpu_constants_blob, total_size) != hipSuccess) {
-    fprintf(stderr, "hipMalloc failed for constants blob (%zu bytes)\n",
+    (void)hipGetLastError();
+    // A constants blob larger than physical RAM can still live in the page
+    // file. Managed memory is paged; a plain device alloc is not.
+    if (hipMallocManaged(&state->gpu_constants_blob, total_size,
+                         hipMemAttachGlobal) != hipSuccess) {
+      fprintf(stderr, "hipMalloc failed for constants blob (%zu bytes)\n",
+              total_size);
+      return 1;
+    }
+    fprintf(stderr,
+            "hipMalloc failed; constants blob uses managed memory (%zu bytes)\n",
             total_size);
-    return 1;
   }
   TIMING_LOG("[Session] hipMalloc VRAM: %.3fs (%zu bytes)\n",
              record_elapsed(t_prev), total_size);
