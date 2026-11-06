@@ -225,6 +225,11 @@ std::shared_ptr<ModelSession> create_model_session(const std::string &arch,
   ryzenai_corelib_model_session_options options{};
   options.size = sizeof(options);
   options.max_sequence_length = max_sequence_length;
+  // hip-ep owns the GPU: CoreLib's GPU tier would load its own HIP and
+  // register its buffers alongside the EP's. The CPU stays, for the token
+  // pick and gathers CoreLib runs there.
+  options.enabled_backends =
+      ryzenai_corelib_backend_npu | ryzenai_corelib_backend_cpu;
   if (api->ryzenai_corelib_model_create_session(
           model, &options, &s->session_) != ryzenai_corelib_status_success) {
     *why = "creating a " + arch +
