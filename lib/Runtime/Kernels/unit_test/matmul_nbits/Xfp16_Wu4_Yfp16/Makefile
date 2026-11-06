@@ -235,3 +235,18 @@ endif
 FORCE:
 
 .PHONY: test test_custom clean build direct asm mode_info FORCE
+
+# One-kernel libraries let the existing LUT driver pair both production sources
+# within one process. The original UT object provides the existing LUT embed.
+lut_measure_library lut_measure_driver: CXXFLAGS += -DHIPDNN_KERNEL_UT_LAUNCH_AUDIT=1
+lut_measure_library lut_measure_driver: KERNEL_FLAGS += -DHIPDNN_KERNEL_UT_LAUNCH_AUDIT=1
+
+lut_measure_library: direct
+	$(HIPCC) $(OFFLOAD) -shared $(DIRECT_TEST_OBJ) $(DIRECT_KERNEL_OBJ) $(LUT_OBJS) -Wl,/EXPORT:hip_matmul_nbits -Wl,/EXPORT:hip_matmul_nbits_u4_wmma_stride -Wl,/EXPORT:hip_matmul_nbits_u4_wmma_padrow -Wl,/EXPORT:hipdnnKernelUtLaunchAudit -Wl,/EXPORT:fflush -o $(BUILD_DIR)/matmul_nbits_measure.dll
+
+lut_measure_driver: direct $(AUTOTUNE_OBJ) | $(BUILD_DIR)
+	$(HIPCC) -c $(CXXFLAGS) $(OFFLOAD) -x hip $(INCLUDES) $(AUTOTUNE_DIR)/tools/matmul_nbits_autotune_sweep.cpp -o $(BUILD_DIR)/lut_measure_driver.obj
+	$(HIPCC) -c $(CXXFLAGS) $(OFFLOAD) -x hip $(AUTOTUNE_DIR)/tools/empty_lut_data.cpp -o $(BUILD_DIR)/lut_measure_empty.obj
+	$(HIPCC) $(OFFLOAD) $(BUILD_DIR)/lut_measure_driver.obj $(DIRECT_KERNEL_OBJ) $(AUTOTUNE_OBJ) $(BUILD_DIR)/lut_measure_empty.obj -o $(BUILD_DIR)/matmul_nbits_lut_measure.exe
+
+.PHONY: lut_measure_library lut_measure_driver

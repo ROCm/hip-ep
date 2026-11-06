@@ -7,10 +7,10 @@
     python update_lut.py compile   # json -> lut/<arch>.fb (needs flatc)
     python update_lut.py all
 
-The winners come from the in-kernel autotuner, read off its debug log. Nothing
-here re-implements "which config is fastest": there is one implementation of
-that and it is the one that ships, so the table cannot drift from the runtime's
-own judgement.
+Legacy sweep winners come from in-kernel autotuner logs. Kernel-change refreshes
+use import-fast to consume one accepted fast ranking dataset directly. import-ut
+also supports previously completed checked pinned-config data. Neither import
+runs another GPU measurement pass.
 
 The table is a set of measured points plus a per-phase fallback; a lookup takes
 the nearest point in log space over (M, N, K) within an exactly-matched
@@ -26,6 +26,8 @@ from __future__ import annotations
 import argparse
 import collections
 import itertools
+import hashlib
+import statistics
 import json
 import math
 import os
@@ -768,6 +770,460 @@ def cmd_build(args) -> int:
 # compile
 # ---------------------------------------------------------------------------
 
+def cmd_import_ut(args) -> int:
+    """Incremental refresh from the accepted pinned standard-UT dataset.
+
+    No GPU command is executed. The input binds the complete affected scope,
+    all per-config process/block readings, the code decision, and original LUT.
+    Existing pool indices, unrelated points, fallbacks and fitted weights stay
+    unchanged; priority model points are added from the same measurements.
+    """
+    if not args.accepted_ut:
+        raise ValueError('import-ut requires --accepted-ut')
+    input_bytes = Path(args.accepted_ut).read_bytes()
+    packet = json.loads(input_bytes)
+    data = packet['dataset']
+    digest = 'sha256:' + hashlib.sha256(json.dumps(data, sort_keys=True,
+        separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
+    if (packet.get('status') != 'CANDIDATE_ACCEPTED' or packet.get('dataset_digest') != digest
+            or data.get('source') != 'standard_pinned_ut' or data.get('pinned') is not True
+            or data.get('symmetric') is not True or data.get('architecture') != args.arch
+            or data.get('aggregation') != 'median_blocks_then_processes'
+            or not data.get('noise_label') or not data.get('clock_policy')
+            or not data.get('source_manifests') or not data.get('measurement_epoch')):
+        raise ValueError('accepted architecture-specific checked pinned-UT evidence is required')
+    source = LUT_DIR / f'{args.arch}.json'
+    if packet.get('original_lut_sha256') != hashlib.sha256(source.read_bytes()).hexdigest():
+        raise ValueError('accepted dataset does not match the original LUT')
+    old = json.loads(source.read_text(encoding='utf-8'))
+    if old.get('gpu_arch') != args.arch:
+        raise ValueError('LUT architecture mismatch')
+    scope = packet['scope']
+    if scope.get('actual_launch_mapping_complete') is not True or not scope.get('family_mapping_digest'):
+        raise ValueError('actual launch-family mapping is required')
+    indices = scope['affected_point_indices']
+    affected = set(indices)
+    if len(indices) != len(affected) or any(type(i) is not int or i < 0 or i >= len(old['points']) for i in affected):
+        raise ValueError('invalid affected LUT point index')
+    required_ids = scope['required_ids']
+    if (not isinstance(required_ids, list) or not required_ids
+            or any(not isinstance(i, str) or not i for i in required_ids)
+            or len(required_ids) != len(set(required_ids))):
+        raise ValueError('required scope ids must be unique nonempty strings')
+    rows = data['rows']
+    if len(rows) != len({row['id'] for row in rows}) or {row['id'] for row in rows} != set(scope['required_ids']):
+        raise ValueError('incomplete or duplicate affected/model/sentinel rows')
+    winners = {}
+    replacements = {}
+    additions = []
+    known_configs = {}
+    known_keys = set()
+    for row in rows:
+        key = row['key']
+        if (set(key) != {'phase', 'bits', 'group_size', 'zero_point', 'row_stride', 'm', 'n', 'k'}
+                or key['phase'] != 'Prefill' or key['bits'] != 'B4'
+                or key['group_size'] not in GROUP_SIZES.values()
+                or key['zero_point'] not in {'Symmetric', 'Asymmetric'}
+                or key['row_stride'] not in {'Arrival', 'Padded'}
+                or any(type(key[d]) is not int or not 0 < key[d] <= limit
+                       for d, limit in (('m', 65535), ('n', 4294967295), ('k', 65535)))):
+            raise ValueError('invalid measured WMMA-prefill key')
+        encoded_key = json.dumps(key, sort_keys=True)
+        if encoded_key in known_keys:
+            raise ValueError('duplicate measured key')
+        known_keys.add(encoded_key)
+        legal = row['legal_config_ids']
+        configs = row['configs']
+        if (not isinstance(legal, list) or not legal or len(legal) != len(set(legal))
+                or any(type(i) is not int or i < 0 for i in legal)
+                or len(configs) != len(legal) or {c['id'] for c in configs} != set(legal)):
+            raise ValueError('every legal config must be measured')
+        times = {'baseline': {}, 'candidate': {}}
+        for config in configs:
+            cfg = config['lut_config']
+            fields = {'kind', 'bm16', 'bn16', 'swizzle', 'wt_m', 'wt_n', 'bk', 'fused', 'threads', 'tile_n'}
+            if (set(cfg) != fields or cfg['kind'] != 'Wmma'
+                    or any(type(cfg[f]) is not int for f in fields - {'kind'})
+                    or any(not 0 < cfg[f] < 256 for f in ('bm16', 'bn16', 'swizzle', 'wt_m', 'wt_n'))
+                    or cfg['bk'] not in {16, 32, 64} or cfg['fused'] not in {0, 1}
+                    or cfg['threads'] != 0 or cfg['tile_n'] != 0
+                    or (key['row_stride'] == 'Padded' and cfg['fused'] != 1)):
+                raise ValueError('invalid pinned WMMA config geometry')
+            if config['id'] in known_configs and known_configs[config['id']] != cfg:
+                raise ValueError('pinned config identity changes between rows')
+            known_configs[config['id']] = cfg
+            if config.get('cpu_correct') is not True:
+                raise ValueError('CPU correctness failed')
+            for side in times:
+                processes = config[side]
+                if len(processes) < 5 or len(processes) % 2 != 1:
+                    raise ValueError('an odd count of at least five processes per side is required')
+                for blocks in processes:
+                    if len(blocks) < 5 or any(isinstance(v, bool) or not isinstance(v, (int, float))
+                            or not math.isfinite(v) or v <= 0 for v in blocks):
+                        raise ValueError('five finite positive accepted blocks per process are required')
+                times[side][config['id']] = statistics.median(statistics.median(b) for b in processes)
+        resolution = row['resolution_fraction']
+        if not isinstance(resolution, (int, float)) or isinstance(resolution, bool) or not math.isfinite(resolution) or not 0 <= resolution < 1:
+            raise ValueError('invalid measured resolution')
+        winner = min(times['candidate'], key=times['candidate'].get)
+        if min(times['candidate'].values()) > min(times['baseline'].values()) * (1 + resolution):
+            raise ValueError('candidate regression exceeds the accepted resolution')
+        winners[row['id']] = winner
+        config = next(c['lut_config'] for c in configs if c['id'] == winner)
+        if config.get('kind') != 'Wmma':
+            raise ValueError('this import path requires WMMA-prefill config evidence')
+        if row.get('lut_point_index') is not None:
+            index = row['lut_point_index']
+            if index not in affected or index in replacements:
+                raise ValueError('unexpected or duplicate affected LUT point')
+            key = {k: v for k, v in old['points'][index].items() if k != 'config'}
+            if row['key'] != key:
+                raise ValueError('measured key differs from the affected LUT point')
+            replacements[index] = config
+        if row.get('priority') is True and row.get('add_exact_point') is True:
+            additions.append((row['key'], config))
+    if set(replacements) != affected or packet.get('accepted_winners') != winners:
+        raise ValueError('scope/winners differ from the accepted dataset')
+    pool = list(old['configs'])
+    def index_of(config):
+        answer = _answer_of(config)
+        for index, existing in enumerate(pool):
+            if _answer_of(existing) == answer:
+                return index
+        if len(pool) >= 256:
+            raise ValueError('config pool exceeds the schema index capacity')
+        pool.append(config)
+        return len(pool) - 1
+    points = [dict(row) for row in old['points']]
+    for index, config in replacements.items():
+        points[index]['config'] = index_of(config)
+    key_to_index = {json.dumps({k: v for k, v in row.items() if k != 'config'}, sort_keys=True): i
+                    for i, row in enumerate(points)}
+    for key, config in additions:
+        encoded = json.dumps(key, sort_keys=True)
+        if encoded not in key_to_index:
+            key_to_index[encoded] = len(points)
+            points.append(dict(key, config=index_of(config)))
+    doc = {k: v for k, v in old.items() if k not in ('configs', 'fallbacks', 'points')}
+    out = Path(args.out) if args.out else source
+    unchanged = all(points[i] == row for i, row in enumerate(old['points']) if i not in affected)
+    if not unchanged or pool[:len(old['configs'])] != old['configs']:
+        raise ValueError('incremental import changed unrelated points/configs')
+    # Validate preservation before touching the destination. A failed write or
+    # validation leaves the previous table intact.
+    descriptor, name = tempfile.mkstemp(prefix=out.name + '.', suffix='.tmp', dir=out.parent)
+    os.close(descriptor)
+    temporary = Path(name)
+    try:
+        write_lut_json(temporary, doc, pool, old['fallbacks'], points)
+        expected = dict(doc, configs=pool, fallbacks=old['fallbacks'], points=points)
+        if json.loads(temporary.read_text(encoding='utf-8')) != expected:
+            raise ValueError('serialized LUT differs from the validated update')
+        temporary.replace(out)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    receipt = dict(status='PASS', dataset_digest=digest, architecture=args.arch,
+                   input_sha256=hashlib.sha256(input_bytes).hexdigest(),
+                   output_sha256=hashlib.sha256(out.read_bytes()).hexdigest(),
+                   old_point_count=len(old['points']), new_point_count=len(points),
+                   affected_point_count=len(affected), added_points=len(points)-len(old['points']),
+                   winner_measurement_passes=1, unrelated_points_unchanged=unchanged,
+                   unrelated_configs_unchanged=True, weights_unchanged=True,
+                   abi_schema_decision='unchanged serialized configs and kernel semantics')
+    if args.report:
+        Path(args.report).write_text(json.dumps(receipt, indent=2) + '\n', encoding='utf-8')
+    print('[import-ut] ' + json.dumps(receipt, sort_keys=True))
+    return 0
+
+
+def validate_fast_winner_confirmation(row, source_manifest):
+    """Validate a checked winner correction without replacing fast samples.
+
+    The raw auditor establishes clocks, launch identity and source compatibility.
+    This importer checks its bound attestation and recomputes acceptance from
+    retained blocks. Prepared ranking and padded UT wrapper timings stay separate.
+    """
+    confirmation = row.get('formal_confirmation')
+    if confirmation is None:
+        return False
+    if not isinstance(confirmation, dict):
+        raise ValueError('checked winner confirmation must be an object')
+    source_digest = hashlib.sha256(json.dumps(source_manifest, sort_keys=True,
+                                              separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
+    selected = next((c for c in row['configs'] if c['id'] == row['winner']), None)
+    operation = 'padded_wrapper' if row['key']['row_stride'] == 'Padded' else 'arrival_configured'
+    if (selected is None or confirmation.get('source') != 'standard_pinned_ut'
+            or confirmation.get('operation') != operation
+            or confirmation.get('key') != row['key']
+            or confirmation.get('config_id') != row['winner']
+            or confirmation.get('lut_config') != selected['lut_config']
+            or confirmation.get('final_source_manifest_digest') != source_digest
+            or confirmation.get('cpu_correct') is not True
+            or confirmation.get('clock_policy') != 'REALTIME_CPU_2pct'
+            or confirmation.get('resolution_fraction') != .02
+            or not re.fullmatch(r'[0-9a-f]{64}', str(confirmation.get('audited_row_digest', '')))
+            or not re.fullmatch(r'[0-9a-f]{64}', str(confirmation.get('raw_audit_digest', '')))):
+        raise ValueError('checked winner confirmation identity/acceptance binding is incomplete')
+    values = {}
+    sides = ['baseline', 'candidate', 'rejected_fast_candidate']
+    if 'rejected_fast_baseline' in confirmation:
+        if (confirmation.get('baseline_config_id') != row.get('baseline_source_config_id')
+                or confirmation.get('rejected_fast_baseline_config_id') != row.get('baseline_source_config_id')):
+            raise ValueError('displaced and corrected checks require the same original baseline config')
+        sides.append('rejected_fast_baseline')
+    for side in sides:
+        processes = confirmation.get(side)
+        if (not isinstance(processes, list) or len(processes) < 5 or len(processes) % 2 == 0
+                or any(not isinstance(blocks, list) or len(blocks) < 5 for blocks in processes)
+                or any(not isinstance(v, (int, float)) or isinstance(v, bool)
+                       or not math.isfinite(v) or v <= 0 for blocks in processes for v in blocks)):
+            raise ValueError('checked winner requires odd five-process, five-block evidence on each side')
+        values[side] = statistics.median(statistics.median(blocks) for blocks in processes)
+    if any(len(confirmation[side]) != len(confirmation['baseline']) for side in sides):
+        raise ValueError('checked winner process counts must match')
+    if values['candidate'] / values['baseline'] > 1.02:
+        raise ValueError('checked winner has a confirmed regression')
+    rejected_id = confirmation.get('rejected_fast_config_id')
+    reason = confirmation.get('selection_reason', 'confirmed_regression')
+    displaced_baseline = values.get('rejected_fast_baseline', values['baseline'])
+    justified = values['rejected_fast_candidate'] / displaced_baseline > 1.02
+    if reason == 'priority_checked_best':
+        justified = (row.get('priority') is True
+                     and values['rejected_fast_candidate'] / values['candidate'] > 1.02)
+    elif reason != 'confirmed_regression':
+        justified = False
+    if (rejected_id == row['winner'] or rejected_id not in row['legal_config_ids']
+            or not justified):
+        raise ValueError('checked correction requires a confirmed regression or priority improvement')
+    return True
+
+
+def validate_fast_regression_selection(row, source_manifest, original_config,
+                                      allow_pending=False):
+    """Bind a bounded regression decision without altering ranking samples.
+
+    Pending alternatives are staging tables only. Final checked alternatives use
+    formal_confirmation; an incomplete bounded check may retain the original
+    production config, as may a byte-identical original kernel.
+    """
+    selection = row.get('regression_selection')
+    if selection is None:
+        return False, False
+    selected = next((c for c in row['configs'] if c['id'] == row['winner']), None)
+    source_digest = hashlib.sha256(json.dumps(source_manifest, sort_keys=True,
+                                              separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
+    if (not isinstance(selection, dict) or selected is None
+            or selection.get('key') != row['key']
+            or selection.get('config_id') != row['winner']
+            or selection.get('lut_config') != selected['lut_config']
+            or selection.get('final_source_manifest_digest') != source_digest
+            or not re.fullmatch(r'[0-9a-f]{64}', str(selection.get('raw_audit_digest', '')))):
+        raise ValueError('regression selection source/key/config binding is incomplete')
+    if selection.get('kind') == 'pending_regression_fix':
+        displaced = selection.get('displaced_config_id')
+        if (not allow_pending or displaced == row['winner']
+                or displaced not in row['legal_config_ids']
+                or selection.get('baseline_config_id') != row.get('baseline_source_config_id')
+                or selection.get('cpu_correct') is not True
+                or selection.get('clock_policy') != 'REALTIME_CPU_2pct'):
+            raise ValueError('pending regression alternative requires explicit staging mode')
+        values = {}
+        for side in ('baseline', 'candidate'):
+            processes = selection.get(side)
+            if (not isinstance(processes, list) or len(processes) < 5 or len(processes) % 2 == 0
+                    or any(not isinstance(b, list) or len(b) < 5 for b in processes)
+                    or any(type(v) not in (int, float) or not math.isfinite(v) or v <= 0
+                           for b in processes for v in b)):
+                raise ValueError('pending fix requires a complete checked displaced-config loss')
+            values[side] = statistics.median(statistics.median(b) for b in processes)
+        if len(selection['baseline']) != len(selection['candidate']):
+            raise ValueError('pending fix requires matched checked process counts')
+        if values['candidate'] / values['baseline'] <= 1.02:
+            raise ValueError('pending fix has no confirmed displaced-config regression')
+        return True, True
+    if (selection.get('kind') != 'retain_original_config'
+            or row['winner'] != row.get('baseline_source_config_id')
+            or (original_config is not None and _answer_of(selected['lut_config']) != _answer_of(original_config))):
+        raise ValueError('bounded fallback must retain the original production config')
+    reason = selection.get('reason')
+    if reason == 'bounded_confirmation_incomplete':
+        if (selection.get('requested_processes') != 5
+                or type(selection.get('accepted_processes')) is not int
+                or not 0 <= selection['accepted_processes'] < 5
+                or selection.get('max_attempts_per_process') != 3):
+            raise ValueError('incomplete fallback requires the bounded confirmation receipt')
+    elif reason == 'unchanged_kernel_isa':
+        payload = selection.get('baseline_payload_sha256')
+        if (not re.fullmatch(r'[0-9a-f]{64}', str(payload))
+                or payload != selection.get('candidate_payload_sha256')
+                or selection.get('metadata_equal') is not True
+                or selection.get('launch_geometry_equal') is not True):
+            raise ValueError('unchanged-code fallback requires identical ISA and launch geometry')
+    else:
+        raise ValueError('unsupported bounded regression fallback')
+    return True, False
+
+
+def cmd_import_fast(args) -> int:
+    """Build the incremental LUT directly from one accepted fast ranking file.
+
+    This validates config ranking/provenance, not headline performance. The
+    final production screen and formal suspect confirmations remain separate.
+    """
+    if not args.winner_data:
+        raise ValueError('import-fast requires --winner-data')
+    input_bytes = Path(args.winner_data).read_bytes()
+    packet = json.loads(input_bytes)
+    data = packet['dataset']
+    digest = hashlib.sha256(json.dumps(data, sort_keys=True, separators=(',', ':'),
+                                      ensure_ascii=False).encode()).hexdigest()
+    if (packet.get('status') != 'FAST_RANKING_ACCEPTED' or packet.get('dataset_digest') != digest
+            or data.get('purpose') != 'lut_ranking' or data.get('architecture') != args.arch
+            or data.get('measurement_passes') != 1 or data.get('statistic') != 'median'
+            or data.get('strategy') != 'settle_once_hold' or not data.get('source_manifest')
+            or not data.get('build_identity') or not data.get('device_identity')):
+        raise ValueError('single canonical architecture/source/build-bound ranking data required')
+    source_manifest = data['source_manifest']
+    required_sources = {'lib/Runtime/Kernels/hip/matmul_nbits_kernel.hip',
+                        'lib/Runtime/Kernels/include/matmul_nbits_wmma_core.h'}
+    if (not required_sources <= set(source_manifest)
+            or packet.get('actual_launch_mapping_complete') is not True
+            or not re.fullmatch(r'[0-9a-f]{64}', str(packet.get('family_mapping_digest', '')))
+            or not isinstance(source_manifest, dict) or any(
+            not re.fullmatch(r'[0-9a-f]{64}', str(value)) for value in source_manifest.values())
+            or not re.fullmatch(r'[0-9a-f]{64}', str(data['build_identity'].get('candidate_library_sha256', '')))
+            or data['device_identity'].get('gcn_arch') != args.arch):
+        raise ValueError('verified source/build/device identities are required')
+    repo = ROOT.parents[5]
+    for name, expected in source_manifest.items():
+        relative = Path(name)
+        if (relative.is_absolute() or '..' in relative.parts
+                or not str(relative).replace('\\', '/').startswith('lib/Runtime/Kernels/')
+                or not (repo / relative).is_file()
+                or hashlib.sha256((repo / relative).read_bytes()).hexdigest() != expected):
+            raise ValueError('canonical dataset source differs from the current kernel tree')
+    source = LUT_DIR / f'{args.arch}.json'
+    if packet.get('original_lut_sha256') != hashlib.sha256(source.read_bytes()).hexdigest():
+        raise ValueError('canonical dataset is already imported or does not match the original LUT')
+    old = json.loads(source.read_text(encoding='utf-8'))
+    if old.get('gpu_arch') != args.arch:
+        raise ValueError('original LUT architecture mismatch')
+    required = data['required_ids']
+    rows = data['rows']
+    if (not required or len(required) != len(set(required)) or len(rows) != len(required)
+            or {r['id'] for r in rows} != set(required)):
+        raise ValueError('incomplete/duplicate canonical shape coverage')
+    affected = set(packet['affected_point_indices'])
+    if len(affected) != len(packet['affected_point_indices']):
+        raise ValueError('duplicate affected point indices')
+    pool = list(old['configs'])
+    points = [dict(point) for point in old['points']]
+    replacements = set()
+    winners = {}
+    geometry = {}
+    changed = 0
+    pending_selections = 0
+    def index_of(config):
+        ans = _answer_of(config)
+        for i, existing in enumerate(pool):
+            if _answer_of(existing) == ans:
+                return i
+        if len(pool) >= 256:
+            raise ValueError('config pool exceeds schema capacity')
+        pool.append(config)
+        return len(pool) - 1
+    for row in rows:
+        key = row['key']
+        if (set(key) != {'phase', 'bits', 'group_size', 'zero_point', 'row_stride', 'm', 'n', 'k'}
+                or key['phase'] != 'Prefill' or key['bits'] != 'B4'
+                or key['group_size'] not in GROUP_SIZES.values()
+                or key['zero_point'] not in {'Symmetric', 'Asymmetric'}
+                or key['row_stride'] not in {'Arrival', 'Padded'}
+                or any(type(key[d]) is not int or not 0 < key[d] <= limit
+                       for d, limit in (('m', 65535), ('n', 4294967295), ('k', 65535)))):
+            raise ValueError('invalid measured WMMA-prefill key')
+        legal, configs = row['legal_config_ids'], row['configs']
+        if not legal or len(legal) != len(set(legal)) or len(configs) != len(legal) or {c['id'] for c in configs} != set(legal):
+            raise ValueError('every considered config must appear once')
+        medians = {}
+        for config in configs:
+            cfg = config['lut_config']
+            _answer_of(cfg)
+            if (cfg['kind'] != 'Wmma' or cfg['bk'] not in {16, 32, 64}
+                    or cfg['fused'] not in {0, 1} or cfg['threads'] or cfg['tile_n']
+                    or any(type(cfg[f]) is not int or not 0 < cfg[f] < 256
+                           for f in ('bm16', 'bn16', 'swizzle', 'wt_m', 'wt_n'))
+                    or (key['row_stride'] == 'Padded' and cfg['fused'] != 1)):
+                raise ValueError('invalid pinned WMMA geometry')
+            if config['id'] in geometry and geometry[config['id']] != cfg:
+                raise ValueError('config identity changed between measured rows')
+            geometry[config['id']] = cfg
+            samples = config['samples']
+            if (config.get('cpu_correct') is not True or not isinstance(samples, list) or len(samples) < 3
+                    or any(not isinstance(v, (int, float)) or isinstance(v, bool)
+                           or not math.isfinite(v) or v <= 0 for v in samples)):
+                raise ValueError('valid retained median samples and CPU correctness are required')
+            medians[config['id']] = statistics.median(samples)
+        winner = row['winner']
+        checked = validate_fast_winner_confirmation(row, source_manifest)
+        point_index = row.get('lut_point_index')
+        original_config = (old['configs'][old['points'][point_index]['config']]
+                           if type(point_index) is int and 0 <= point_index < len(old['points']) else None)
+        regression_selected, pending = validate_fast_regression_selection(
+            row, source_manifest, original_config, getattr(args, 'allow_pending_regression', False))
+        pending_selections += int(pending)
+        if winner not in medians or (medians[winner] > min(medians.values()) * 1.02 and not checked and not regression_selected):
+            raise ValueError('winner differs from canonical median ranking/tie policy')
+        winners[row['id']] = winner
+        cfg = geometry[winner]
+        index = row.get('lut_point_index')
+        if index is not None:
+            if index not in affected or index in replacements or not 0 <= index < len(points):
+                raise ValueError('unexpected/duplicate affected LUT index')
+            if key != {k: v for k, v in points[index].items() if k != 'config'}:
+                raise ValueError('measured key differs from original LUT point')
+            replacements.add(index)
+            selected = index_of(cfg)
+            changed += points[index]['config'] != selected
+            points[index]['config'] = selected
+        elif row.get('priority') is True and row.get('add_exact_point') is True:
+            if any({k: v for k, v in p.items() if k != 'config'} == key for p in points):
+                raise ValueError('priority exact point already exists')
+            points.append(dict(key, config=index_of(cfg)))
+    if replacements != affected or packet['accepted_winners'] != winners:
+        raise ValueError('affected scope/winners differ from canonical dataset')
+    if (any(points[i] != p for i, p in enumerate(old['points']) if i not in affected)
+            or pool[:len(old['configs'])] != old['configs']):
+        raise ValueError('unrelated points/configs changed')
+    doc = {k: v for k, v in old.items() if k not in ('configs', 'fallbacks', 'points')}
+    out = Path(args.out) if args.out else source
+    descriptor, temporary_name = tempfile.mkstemp(prefix=out.name + '.', suffix='.tmp', dir=out.parent)
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    try:
+        write_lut_json(temporary, doc, pool, old['fallbacks'], points)
+        assert json.loads(temporary.read_text()) == dict(doc, configs=pool, fallbacks=old['fallbacks'], points=points)
+        temporary.replace(out)
+    finally:
+        if temporary.exists(): temporary.unlink()
+    receipt = dict(status='PENDING_PRODUCTION_CONFIRMATION' if pending_selections else 'PASS',
+                   pending_regression_selections=pending_selections,
+                   dataset_digest=digest, architecture=args.arch,
+                   input_sha256=hashlib.sha256(input_bytes).hexdigest(),
+                   output_sha256=hashlib.sha256(out.read_bytes()).hexdigest(),
+                   old_point_count=len(old['points']), new_point_count=len(points),
+                   affected_point_count=len(affected), changed_winners=changed,
+                   added_points=len(points)-len(old['points']), winner_measurement_passes=1,
+                   import_gpu_measurement_passes=0, unrelated_points_unchanged=True,
+                   unrelated_configs_unchanged=True, weights_unchanged=True,
+                   abi_schema_decision='unchanged serialized configs and numerical semantics')
+    if args.report: Path(args.report).write_text(json.dumps(receipt, indent=2)+'\n')
+    print('[import-fast] '+json.dumps(receipt, sort_keys=True))
+    return 0
+
+
 def cmd_compile(args) -> int:
     lut_json = LUT_DIR / f"{args.arch}.json"
     if not lut_json.exists():
@@ -796,7 +1252,11 @@ def cmd_compile(args) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("command",
-                    choices=["measure", "fit", "build", "compile", "all"])
+                    choices=["measure", "fit", "build", "compile", "all", "import-ut", "import-fast"])
+    ap.add_argument("--winner-data", help="canonical fast winner dataset JSON; import-fast only")
+    ap.add_argument("--allow-pending-regression", action="store_true",
+                    help="build a staging LUT for already-confirmed loss alternatives; final checks still required")
+    ap.add_argument("--accepted-ut", help="accepted pinned standard-UT dataset JSON; import-ut only")
     ap.add_argument("--arch", default="gfx1151")
     ap.add_argument("--sweep", default="matmul_nbits_sweep.exe",
                     help="path to the built matmul_nbits_autotune_sweep binary")
@@ -843,6 +1303,10 @@ def main() -> int:
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
+    if args.command == "import-fast":
+        return cmd_import_fast(args)
+    if args.command == "import-ut":
+        return cmd_import_ut(args)
     if args.command in ("measure", "all"):
         rc = cmd_measure(args)
         if rc:
