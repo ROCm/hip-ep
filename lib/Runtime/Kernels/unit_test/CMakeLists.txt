@@ -159,6 +159,9 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
     hipdnn-kernel-ut-gather-block-quantized-xi64-wfp8-yfp16
     gather_block_quantized/Xi64_Wfp8_Yfp16/test_gather_block_quantized_fp8.cpp)
   add_kernel_package_ut(${_arch}
+    hipdnn-kernel-ut-cast-xany-yany-bf16
+    cast/Xany_Yany_bf16/test_cast.cpp)
+  add_kernel_package_ut(${_arch}
     hipdnn-kernel-ut-slice-xu8-yu8
     slice/Xu8_Yu8/test_slice_u8.cpp)
   add_kernel_package_ut(${_arch}

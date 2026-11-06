@@ -69,6 +69,7 @@ prefix gets one `kernel-tests/<arch>/`, named exactly like that entry's
     hipdnn-kernel-ut-gather-block-quantized-xi64-wu4-yfp16.exe
     hipdnn-kernel-ut-gather-block-quantized-xi64-wu8-yfp16.exe
     hipdnn-kernel-ut-gather-block-quantized-xi64-wfp8-yfp16.exe
+    hipdnn-kernel-ut-cast-xany-yany-bf16.exe
 ```
 
 ### Run (on a machine with a supported AMD GPU)
@@ -90,7 +91,7 @@ controller from that `bin` directory:
 | `--mode` | `lookup`, `autotune` | `lookup` | `lookup` uses the tables embedded in `custom_kernels_<arch>.dll` and falls through to autotune on a miss, like production. `autotune` bypasses the tables (production's `online` mode). |
 | `--coverage` | `1`, `2`, `3` | `3` | Shape tier; see "Shape coverage". `1` suits a per-PR job, `3` a nightly one. |
 
-The controller runs the 20 leaves serially, with `bin` as the working
+The controller runs the 30 leaves serially, with `bin` as the working
 directory so every leaf finds `custom_kernels_<arch>.dll`. It prints one
 `[<op>/<leaf>] PASS|FAIL (<ms> ms)` line per leaf and finally
 `Combined report: <path>`.
@@ -193,7 +194,7 @@ Concretely:
   never drops a categorical situation.
 
 A tier3 (default) run of one leaf is on the order of tens to ~150 cases, and
-the whole 20-leaf suite at tier3 is budgeted at **up to ~30 min total**
+the whole 30-leaf suite at tier3 is budgeted at **up to ~30 min total**
 (measured ~20-25 min in practice) — this is intentionally wider than a
 "finishes in a minute" smoke test, because the shape axis (M=1 vs M>1,
 multiple K/N/seq scenarios) needs real coverage too, not just the categorical
@@ -258,6 +259,7 @@ unit_test/
   gqa/prefill/Xfp16_Wi8_Yfp16/
   qmoe_ragged_mm/Xfp16_Wu4_Yfp16/
   gather_block_quantized/Xi64_W{u4,u8,fp8}_Yfp16/
+  cast/Xany_Yany_bf16/
   slice/X{u8,u16,u32,u64}_Y{u8,u16,u32,u64}/
 ```
 
@@ -379,6 +381,11 @@ COVERAGE=N` (any leaf, or the top-level aggregator) builds and runs it.
   `{16,32,64,128}`, `{1,16,2048}` indices). Every index list includes the first
   and last rows, negative and out-of-range indices. Outputs are compared
   bit-exactly with the CPU reference.
+- **cast** (one leaf, `Xany_Yany_bf16`, for every cast with bf16 on one side;
+  see its README for why it is not one leaf per pair): bf16 <-> {f32, f16,
+  f64, i64, i32, i16, i8, u8} and three unsupported pairs, on sizes COVERAGE
+  thins (tier1 = 2 sizes, tier2 = 3, tier3 = 4, up to ~1M elements). Outputs
+  are compared bit-exactly with a CPU reference.
 - **slice** (one leaf per element size, u8 / u16 / u32 / u64, each launching
   every dtype of that size): contiguous, strided, reversed, mixed
   starts/steps, rank 8, empty and over-allocated outputs, rank 0 / rank 9 /

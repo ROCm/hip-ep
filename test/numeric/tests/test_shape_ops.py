@@ -282,6 +282,38 @@ class TestPad:
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=0)
 
+    def test_pad_empty_output(self, model_runner):
+        """An empty input with no padding returns the same shaped empty."""
+        shape = [0, 3]
+        model = _make_pad_model(
+            np.float32, shape, [0, 0, 0, 0], mode="constant", constant_value=2.5
+        )
+        x = np.empty(shape, dtype=np.float32)
+
+        actual, expected = model_runner.run_sample(model, [x])
+
+        assert actual[0].shape == (0, 3)
+        compare_outputs(actual, expected, atol=0)
+
+    def test_pad_empty_input_fills_output(self, model_runner):
+        """Padding [0, 3] to [2, 3] fills every element with the constant."""
+        shape = [0, 3]
+        constant = np.float32(2.5)
+        model = _make_pad_model(
+            np.float32,
+            shape,
+            [1, 0, 1, 0],
+            mode="constant",
+            constant_value=constant,
+        )
+        x = np.empty(shape, dtype=np.float32)
+
+        actual, expected = model_runner.run_sample(model, [x])
+
+        assert actual[0].shape == (2, 3)
+        np.testing.assert_array_equal(actual[0], np.full((2, 3), constant))
+        compare_outputs(actual, expected, atol=0)
+
     @pytest.mark.parametrize("mode", ["reflect", "edge", "wrap"])
     def test_pad_modes(self, model_runner, mode):
         """Cover the three non-constant Pad modes on fp16 input."""
