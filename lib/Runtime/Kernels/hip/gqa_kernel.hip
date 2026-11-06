@@ -1177,14 +1177,16 @@ extern "C" int hip_gqa_add_attention_bias_f32(
 // property of the input, not of the mask's structure.
 //
 // The mask itself already carries it, exactly, for one streaming read. An entry
-// whose additive bias is at or below -65504 -- the fp16 lower bound, and the
-// sentinel HF exports write for "not attended" -- cannot survive the softmax:
-// relative to any score the GEMM ahead of it can produce, exp() of it
-// underflows to exactly zero. That is the same property the mask relies on to
-// mask at all, and softmax_f32_to_out_kernel above already documents this
-// value for the same reason. So dropping those key positions from a chunk's
-// range is bit-exact rather than an approximation, and anything less negative
-// than the sentinel is treated as attended, which only narrows less.
+// whose additive bias is at or below HIP_GQA_BIAS_MASKED_MAX (-65504) -- the
+// fp16 lower bound, and the sentinel HF exports write for "not attended" --
+// cannot survive the softmax: relative to any score the GEMM ahead of it can
+// produce, exp() of it underflows to exactly zero. That is the same property
+// the mask relies on to mask at all, and softmax_f32_to_out_kernel above
+// already documents this value for the same reason. So dropping those key
+// positions from a chunk's range is bit-exact rather than an approximation,
+// and anything less negative than the sentinel is treated as attended, which
+// only narrows less. Callers that need the mask's attended extent rather than
+// a safe narrowing bound pass a less negative masked_max.
 //
 // Only the region ABOVE the chunk's last row is scanned. Keys at or below it
 // are kept whatever the mask says, so the answer is max(diagonal, highest
@@ -1194,15 +1196,11 @@ extern "C" int hip_gqa_add_attention_bias_f32(
 // for all of them.
 #define GQA_BIAS_EXTENT_THREADS 256
 
-// Additive bias at or below this cannot survive the softmax. Not a tolerance:
-// it is the fp16 lower bound, which is the sentinel itself.
-#define GQA_BIAS_MASKED_MAX (-65504.0f)
-
 template <typename TBias>
 __global__ void bias_key_extent_kernel(
     const TBias* __restrict__ bias, int* __restrict__ out,
     int bias_batch, int bias_heads, int bias_sq, int bias_total_seq,
-    int sq, int sq_chunk, int past_len) {
+    int sq, int sq_chunk, int past_len, float masked_max) {
   const int chunk = blockIdx.x;
   const int q0 = chunk * sq_chunk;
   if (q0 >= sq)
@@ -1227,7 +1225,7 @@ __global__ void bias_key_extent_kernel(
         for (int k = scan_lo + threadIdx.x; k < bias_total_seq;
              k += blockDim.x) {
           if (k > best &&
-              static_cast<float>(bias[row_base + k]) > GQA_BIAS_MASKED_MAX)
+              static_cast<float>(bias[row_base + k]) > masked_max)
             best = k;
         }
       }
@@ -1250,7 +1248,7 @@ extern "C" int hip_gqa_bias_key_extent(
     void* stream_ptr, const void* bias, void* out_chunk_hi,
     int bias_batch, int bias_heads, int bias_sq, int bias_total_seq,
     int sq, int sq_chunk, int past_len, int num_chunks,
-    int bias_element_size_bytes) {
+    int bias_element_size_bytes, float masked_max) {
   if (!bias || !out_chunk_hi || num_chunks <= 0 || sq_chunk <= 0 ||
       bias_total_seq <= 0 || bias_sq <= 0)
     return -1;
@@ -1265,13 +1263,13 @@ extern "C" int hip_gqa_bias_key_extent(
         <<<dim3(num_chunks), GQA_BIAS_EXTENT_THREADS, 0, stream>>>(
             static_cast<const __half*>(bias), static_cast<int*>(out_chunk_hi),
             bias_batch, bias_heads, bias_sq, bias_total_seq, sq, sq_chunk,
-            past_len);
+            past_len, masked_max);
   } else if (bias_element_size_bytes == 4) {
     bias_key_extent_kernel<float>
         <<<dim3(num_chunks), GQA_BIAS_EXTENT_THREADS, 0, stream>>>(
             static_cast<const float*>(bias), static_cast<int*>(out_chunk_hi),
             bias_batch, bias_heads, bias_sq, bias_total_seq, sq, sq_chunk,
-            past_len);
+            past_len, masked_max);
   } else {
     fprintf(stderr, "hip_gqa_bias_key_extent: unsupported bias elem size %d\n",
             bias_element_size_bytes);

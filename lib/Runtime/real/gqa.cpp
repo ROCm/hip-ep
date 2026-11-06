@@ -114,13 +114,14 @@ static bool gqa_cache_seqlens_enabled() {
   return enabled;
 }
 
-// Sentinel returned by read_seqlens_k_for_dispatch when the pre-dispatch read
-// is not applicable (multi-batch or missing seqlens_k_ptr) or failed (D2H copy
-// / stream sync error). Outside the valid range of real seqlens_k values (-1 is
-// ORT's prefill sentinel; 0..max_seq are real). Callers must treat this as "no
-// pre-read available" and fall back to the legacy per-call D2H readback site
-// they already implement.
-static constexpr int32_t kSeqlensKNotRead = -2;
+enum SeqlensKReadStatus : int32_t {
+  // The pre-dispatch read is not applicable or failed. Callers may fall back
+  // to the legacy per-call D2H readback.
+  kSeqlensKNotRead = -2,
+  // Mask-derived live-length recovery failed or is unsupported. Callers must
+  // not fall back to seqlens_k because it carries the physical capacity.
+  kSeqlensKReadError = -3,
+};
 
 // Read seqlens_k_val from device (or the per-Compute() cache when
 // HIPDNN_EP_GQA_CACHE_SEQLENS=1) once per call before the fused/decomposed
@@ -173,6 +174,99 @@ static int32_t read_seqlens_k_for_dispatch(hipStream_t stream,
     state->seqlens_k_cached_valid = true;
   }
   return seqlens_k_val;
+}
+
+// Live-length recovery needs the mask's attended extent rather than a safe
+// narrowing bound, so finite fill values down to -10000 also count as masked.
+// The current token's own column carries a bias near zero.
+static constexpr float kSharedMaskMaskedMax = -10000.0f;
+
+static int32_t read_shared_mask_seqlens(
+    hipStream_t stream, const void *attentionBias, int64_t biasBatch,
+    int64_t biasHeads, int64_t batch, int64_t querySeq, int64_t keyCapacity,
+    int64_t pastCapacity, int64_t elementSize, RuntimeState *state) {
+  // A different past/mask extent is the ordinary growing-cache case, where
+  // the converter-provided seqlens_k is authoritative and no scan is needed.
+  if (pastCapacity != keyCapacity)
+    return kSeqlensKNotRead;
+
+  // Equal extents identify the preallocated-cache case: the mask width is the
+  // physical capacity, so scanning the mask is required to recover live length.
+  if (batch != 1) {
+    fprintf(stderr,
+            "GQA attention-mask live-length derivation does not support "
+            "preallocated caches with batch=%lld (only batch=1 is supported)\n",
+            (long long)batch);
+    return kSeqlensKReadError;
+  }
+  if (!attentionBias || !state || biasBatch < 1 || biasHeads < 1 ||
+      querySeq <= 0 || keyCapacity <= 0 ||
+      (elementSize != 2 && elementSize != 4)) {
+    fprintf(stderr,
+            "GQA attention-mask live-length derivation received invalid "
+            "arguments\n");
+    return kSeqlensKReadError;
+  }
+
+  const bool cacheEnabled = gqa_cache_seqlens_enabled();
+  if (cacheEnabled && state->attention_mask_seqlens_cached_valid &&
+      state->attention_mask_seqlens_cached_ptr == attentionBias &&
+      state->attention_mask_seqlens_cached_bias_batch == biasBatch &&
+      state->attention_mask_seqlens_cached_bias_heads == biasHeads &&
+      state->attention_mask_seqlens_cached_query_seq == querySeq &&
+      state->attention_mask_seqlens_cached_key_capacity == keyCapacity &&
+      state->attention_mask_seqlens_cached_element_size == elementSize)
+    return state->attention_mask_seqlens_cached_val;
+
+  if (hipdnn_ep_state_ensure_workspace(state, sizeof(int32_t)) != 0) {
+    fprintf(stderr,
+            "GQA attention-mask live-length workspace allocation failed\n");
+    return kSeqlensKReadError;
+  }
+  void *deviceLastValid = hipdnn_ep_state_get_workspace(state);
+  if (!deviceLastValid ||
+      hip_gqa_bias_key_extent(
+          stream, attentionBias, deviceLastValid, static_cast<int>(biasBatch),
+          static_cast<int>(biasHeads), static_cast<int>(querySeq),
+          static_cast<int>(keyCapacity), static_cast<int>(querySeq),
+          static_cast<int>(querySeq), /*past_len=*/0, /*num_chunks=*/1,
+          static_cast<int>(elementSize), kSharedMaskMaskedMax) != 0) {
+    fprintf(stderr, "GQA attention-mask live-length kernel launch failed\n");
+    return kSeqlensKReadError;
+  }
+
+  int32_t lastValid = -1;
+  hipError_t copyStatus =
+      hipMemcpyAsync(&lastValid, deviceLastValid, sizeof(lastValid),
+                     hipMemcpyDeviceToHost, stream);
+  if (copyStatus != hipSuccess) {
+    fprintf(stderr, "GQA attention-mask live-length D2H read failed: %s\n",
+            hipGetErrorString(copyStatus));
+    return kSeqlensKReadError;
+  }
+  hipError_t syncStatus = hipStreamSynchronize(stream);
+  if (syncStatus != hipSuccess) {
+    fprintf(stderr,
+            "GQA attention-mask live-length synchronization failed: %s\n",
+            hipGetErrorString(syncStatus));
+    return kSeqlensKReadError;
+  }
+  if (lastValid < 0) {
+    fprintf(stderr, "GQA attention mask contains no valid key position\n");
+    return kSeqlensKReadError;
+  }
+
+  if (cacheEnabled) {
+    state->attention_mask_seqlens_cached_valid = true;
+    state->attention_mask_seqlens_cached_val = lastValid;
+    state->attention_mask_seqlens_cached_ptr = attentionBias;
+    state->attention_mask_seqlens_cached_bias_batch = biasBatch;
+    state->attention_mask_seqlens_cached_bias_heads = biasHeads;
+    state->attention_mask_seqlens_cached_query_seq = querySeq;
+    state->attention_mask_seqlens_cached_key_capacity = keyCapacity;
+    state->attention_mask_seqlens_cached_element_size = elementSize;
+  }
+  return lastValid;
 }
 
 // FA-2 split-K decode workspace capacity, in splits (matches gqa_kernel.hip).
@@ -1311,12 +1405,13 @@ static int gqa_forward_hipblaslt(
     // onnx.Attention external additive mask [B,H,S,T] (broadcastable on the
     // batch / head dims); null for plain GQA.
     const void *attention_bias, int64_t attn_bias_batch,
-    int64_t attn_bias_num_heads, void *output, void *present_key,
+    int64_t attn_bias_num_heads, int64_t attn_bias_seq_q,
+    int64_t attn_bias_seq_kv, void *output, void *present_key,
     void *present_value, int64_t B, int64_t sq, int64_t skv,
     int64_t past_buf_seq, int64_t H, int64_t G, int64_t d, float scale,
     int64_t do_rotary, int64_t local_window_size, bool no_causal,
-    int64_t element_size_bytes, int op_state_slot, bool kv_bnsd,
-    bool reuse_past_kv = false,
+    bool derive_seqlens_from_attention_bias, int64_t element_size_bytes,
+    int op_state_slot, bool kv_bnsd, bool reuse_past_kv = false,
     std::optional<int32_t> host_length = std::nullopt) {
 
   void *const out_present_key = present_key;
@@ -1355,8 +1450,29 @@ static int gqa_forward_hipblaslt(
   // its own D2H). On B>1 this returns kSeqlensKNotRead and both downstream
   // paths fall back to their legacy per-call reads. Stored in seqlens_k_pre;
   // total_seq_pre is the derived total_seq (-1 means unknown / not applicable).
+  if (derive_seqlens_from_attention_bias && B != 1) {
+    fprintf(stderr,
+            "GQA attention-mask length handling supports only batch=1 "
+            "(got batch=%lld)\n",
+            (long long)B);
+    return -1;
+  }
+  const int32_t sharedMaskSeqlens =
+      derive_seqlens_from_attention_bias
+          ? read_shared_mask_seqlens(stream, attention_bias, attn_bias_batch,
+                                     attn_bias_num_heads, B, attn_bias_seq_q,
+                                     attn_bias_seq_kv, past_buf_seq,
+                                     element_size_bytes, state)
+          : kSeqlensKNotRead;
+  if (sharedMaskSeqlens == kSeqlensKReadError)
+    return -1;
   int32_t seqlens_k_pre =
-      read_seqlens_k_for_dispatch(stream, seqlens_k_ptr, B, state, host_length);
+      sharedMaskSeqlens != kSeqlensKNotRead
+          ? sharedMaskSeqlens
+          : read_seqlens_k_for_dispatch(stream, seqlens_k_ptr, B, state,
+                                        host_length);
+  const void *deviceSeqlensK =
+      sharedMaskSeqlens != kSeqlensKNotRead ? nullptr : seqlens_k_ptr;
   int64_t total_seq_pre = -1;
   if (bidirectional_no_past) {
     // bidirectional_no_past (Whisper encoder / cross-attn): seqlens_k = skv
@@ -1630,7 +1746,7 @@ static int gqa_forward_hipblaslt(
   if (bidirectional_no_past) {
     total_seq = skv;
     past_len = 0;
-  } else if (seqlens_k_ptr) {
+  } else if (seqlens_k_ptr || sharedMaskSeqlens != kSeqlensKNotRead) {
     int32_t seqlens_k_val = 0;
 
     if (seqlens_k_pre != kSeqlensKNotRead) {
@@ -2052,10 +2168,12 @@ static int gqa_forward_hipblaslt(
     if (d_hi &&
         hip_gqa_bias_key_extent(
             stream, attention_bias, d_hi, static_cast<int>(attn_bias_batch),
-            static_cast<int>(attn_bias_num_heads), static_cast<int>(sq),
-            static_cast<int>(total_seq), static_cast<int>(sq),
+            static_cast<int>(attn_bias_num_heads),
+            static_cast<int>(attn_bias_seq_q),
+            static_cast<int>(attn_bias_seq_kv), static_cast<int>(sq),
             static_cast<int>(sq_chunk), static_cast<int>(past_len),
-            static_cast<int>(nchunks), static_cast<int>(elem_sz)) == 0) {
+            static_cast<int>(nchunks), static_cast<int>(elem_sz),
+            HIP_GQA_BIAS_MASKED_MAX) == 0) {
       std::vector<int32_t> hi(static_cast<size_t>(nchunks), 0);
       if (hipMemcpyAsync(hi.data(), d_hi, hi_bytes, hipMemcpyDeviceToHost,
                          stream) == hipSuccess &&
@@ -2472,7 +2590,7 @@ static int gqa_forward_hipblaslt(
           static_cast<int>(B), static_cast<int>(past_len), static_cast<int>(sq),
           static_cast<int>(G), static_cast<int>(d),
           static_cast<int>(past_buf_seq), static_cast<int>(present_seq),
-          (use_no_expand && !bidirectional_no_past) ? seqlens_k_ptr : nullptr,
+          (use_no_expand && !bidirectional_no_past) ? deviceSeqlensK : nullptr,
           static_cast<int>(elem_sz), static_cast<int>(kv_lo),
           bidirectional_no_past, static_cast<int>(skv), KvCacheFormat::Fp16,
           /*k_scale=*/nullptr, /*v_scale=*/nullptr, kv_bnsd));
@@ -2645,8 +2763,8 @@ static int gqa_forward_hipblaslt(
             static_cast<int>(use_smooth_softmax), attention_bias,
             static_cast<int>(attn_bias_batch),
             static_cast<int>(attn_bias_num_heads), static_cast<int>(elem_sz),
-            static_cast<int>(gemm_fp32), static_cast<int>(sq),
-            static_cast<int>(q0), static_cast<int>(total_seq),
+            static_cast<int>(gemm_fp32), static_cast<int>(attn_bias_seq_q),
+            static_cast<int>(q0), static_cast<int>(attn_bias_seq_kv),
             static_cast<int>(chunk_kv_lo)));
       } else if (gemm_fp32) {
         HIP_CHECK(hip_gqa_softmax_f32_to_f32(
@@ -2959,15 +3077,17 @@ int wrap_group_query_attention_host_length(
     void *attention_bias, void *head_sink, void *k_scale, void *v_scale,
     // Outputs
     void *output, void *present_key, void *present_value, void *output_qk,
-    // Attributes (13)
+    // Attributes (14)
     int64_t num_heads, int64_t kv_num_heads, float scale, int64_t do_rotary,
     int64_t rotary_interleaved, float softcap, int64_t local_window_size,
     int64_t smooth_softmax, int64_t qk_output, int64_t k_quant_type,
     int64_t v_quant_type, int64_t kv_cache_bit_width, int32_t no_causal,
-    // Shape values (6)
+    int32_t derive_seqlens_from_attention_bias,
+    // Shape values (12)
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
-    int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
+    int64_t attn_bias_batch, int64_t attn_bias_num_heads,
+    int64_t attn_bias_seq_q, int64_t attn_bias_seq_kv, int64_t kv_bnsd,
     int64_t seq_len_new_kv, int32_t has_host_length,
     int32_t host_length_value) {
   const std::optional<int32_t> host_length =
@@ -2999,6 +3119,43 @@ int wrap_group_query_attention_host_length(
             "by kv_num_heads (%lld)\n",
             (long long)num_heads, (long long)kv_num_heads);
     return -1;
+  }
+  if (attention_bias != nullptr) {
+    const bool batch_extent_ok =
+        attn_bias_batch == 1 || attn_bias_batch == batch_size;
+    const bool head_extent_ok =
+        attn_bias_num_heads == 1 || attn_bias_num_heads == num_heads;
+    if (!batch_extent_ok || !head_extent_ok || attn_bias_seq_q != seq_len_q) {
+      fprintf(stderr,
+              "wrap_group_query_attention: attention bias shape "
+              "[%lld,%lld,%lld,%lld] is incompatible with "
+              "batch=%lld, heads=%lld, query=%lld\n",
+              (long long)attn_bias_batch, (long long)attn_bias_num_heads,
+              (long long)attn_bias_seq_q, (long long)attn_bias_seq_kv,
+              (long long)batch_size, (long long)num_heads,
+              (long long)seq_len_q);
+      return -1;
+    }
+    if (past_key != nullptr && past_buf_seq > 0 && attn_bias_seq_kv == 1) {
+      fprintf(stderr,
+              "wrap_group_query_attention: a key-broadcast attention bias "
+              "cannot provide the logical KV length for cached attention\n");
+      return -1;
+    }
+    const int64_t cache_extent =
+        past_buf_seq > seq_len_kv ? past_buf_seq : seq_len_kv;
+    const bool kv_extent_ok = past_key != nullptr
+                                  ? attn_bias_seq_kv >= seq_len_new_kv &&
+                                        attn_bias_seq_kv <= cache_extent
+                                  : attn_bias_seq_kv == seq_len_new_kv;
+    if (!kv_extent_ok) {
+      fprintf(stderr,
+              "wrap_group_query_attention: attention bias KV extent %lld is "
+              "incompatible with key length %lld and cache extent %lld\n",
+              (long long)attn_bias_seq_kv, (long long)seq_len_new_kv,
+              (long long)cache_extent);
+      return -1;
+    }
   }
 
   //===------------------------------------------------------------------===//
@@ -3205,11 +3362,12 @@ int wrap_group_query_attention_host_length(
     int lrc = gqa_forward_hipblaslt(
         state, stream, ltHandle, query, key, value, past_key, past_value,
         seqlens_k, cos_cache, sin_cache, head_sink, has_smooth_softmax,
-        attention_bias, attn_bias_batch, attn_bias_num_heads, output,
-        present_key, present_value, batch_size, seq_len_q, seq_len_kv,
-        past_buf_seq, num_heads, kv_num_heads, head_dim, scale, do_rotary,
-        local_window_size, no_causal != 0, element_size_bytes, op_state_slot,
-        kv_bnsd != 0, reuse_past_kv, host_length);
+        attention_bias, attn_bias_batch, attn_bias_num_heads, attn_bias_seq_q,
+        attn_bias_seq_kv, output, present_key, present_value, batch_size,
+        seq_len_q, seq_len_kv, past_buf_seq, num_heads, kv_num_heads, head_dim,
+        scale, do_rotary, local_window_size, no_causal != 0,
+        derive_seqlens_from_attention_bias != 0, element_size_bytes,
+        op_state_slot, kv_bnsd != 0, reuse_past_kv, host_length);
     if (lrc != 0)
       fprintf(stderr,
               "wrap_group_query_attention: legacy decomposed pipeline failed "
@@ -3253,15 +3411,17 @@ int wrap_group_query_attention_ring_f16(
     void *attention_bias, void *head_sink, void *k_scale, void *v_scale,
     // Outputs
     void *output, void *present_key, void *present_value, void *output_qk,
-    // Attributes (13)
+    // Attributes (14)
     int64_t num_heads, int64_t kv_num_heads, float scale, int64_t do_rotary,
     int64_t rotary_interleaved, float softcap, int64_t local_window_size,
     int64_t smooth_softmax, int64_t qk_output, int64_t k_quant_type,
     int64_t v_quant_type, int64_t kv_cache_bit_width, int32_t no_causal,
-    // Shape values (6)
+    int32_t derive_seqlens_from_attention_bias,
+    // Shape values (12)
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
-    int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
+    int64_t attn_bias_batch, int64_t attn_bias_num_heads,
+    int64_t attn_bias_seq_q, int64_t attn_bias_seq_kv, int64_t kv_bnsd,
     int64_t seq_len_new_kv, int32_t has_host_length,
     int32_t host_length_value) {
 #if HIP_EP_RING_ENABLED != 0
@@ -3301,8 +3461,9 @@ int wrap_group_query_attention_ring_f16(
       head_sink, k_scale, v_scale, output, present_key, present_value,
       output_qk, num_heads, kv_num_heads, scale, do_rotary, rotary_interleaved,
       softcap, local_window_size, smooth_softmax, qk_output, k_quant_type,
-      v_quant_type, kv_cache_bit_width, no_causal, batch_size, seq_len_q,
-      seq_len_kv, past_buf_seq, head_dim, element_size_bytes, attn_bias_batch,
-      attn_bias_num_heads, kv_bnsd, seq_len_new_kv, has_host_length,
-      host_length_value);
+      v_quant_type, kv_cache_bit_width, no_causal,
+      derive_seqlens_from_attention_bias, batch_size, seq_len_q, seq_len_kv,
+      past_buf_seq, head_dim, element_size_bytes, attn_bias_batch,
+      attn_bias_num_heads, attn_bias_seq_q, attn_bias_seq_kv, kv_bnsd,
+      seq_len_new_kv, has_host_length, host_length_value);
 }

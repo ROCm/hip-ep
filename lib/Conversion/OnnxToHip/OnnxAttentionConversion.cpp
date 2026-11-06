@@ -58,15 +58,14 @@ namespace {
 /// silently miscompiled (see the guards below).
 ///
 /// Not yet supported (rejected with a clear message): the 4th qk_matmul_output
-/// result, the opset-24 nonpad_kv_seqlen external-cache input, and boolean
-/// attn_mask (the runtime's attention_bias is additive-float only).
+/// result, the opset-24 nonpad_kv_seqlen external-cache input, rank-0/rank-1
+/// or boolean attn_mask (the runtime's attention_bias is additive-float only).
 ///
-/// Mask-extent assumption: the additive mask is passed to the runtime verbatim;
-/// its batch/head dims broadcast (extent 1 -> all), but its q/kv extents must
-/// equal the query seq length and total (past+current) KV length respectively.
-/// The runtime bias kernel does NOT broadcast the q dim (a mask with q==1 while
-/// sq>1 would be read out of range), so exports that emit a full mask (q==S,
-/// the common case) are correct; a q-broadcast mask is not modelled.
+/// Mask-extent contract: rank-2 [S,T] and rank-3 [H,S,T] additive masks are
+/// normalized to rank-4 [1,1,S,T] and [1,H,S,T] views before being passed to
+/// the runtime. Batch/head dims may broadcast from extent 1, while the q/kv
+/// extents must equal the score extents. Runtime checks cover dynamic shapes;
+/// cached attention does not accept a key-broadcast mask.
 ///
 /// Before (Gemma-style decoder layer, is_causal=0, external fp16 mask, 3 out):
 ///   %y, %pk, %pv = onnx.Attention(%q, %k, %v, %mask, %past_k, %past_v)
@@ -74,22 +73,22 @@ namespace {
 ///
 /// After:
 ///   %cur       = tensor.dim %k, %c1        // incoming KV tokens
-///   %past      = tensor.dim %past_k, %c2   // valid past KV length (0 prefill)
-///   %tot       = arith.addi %past, %cur    // present seq = past + current
+///   %past      = tensor.dim %past_k, %c2   // cache extent
+///   %tot       = tensor.dim %mask, %c3     // logical KV length
+///   %capacity  = arith.maxsi %past, %tot   // shared or growing cache
 ///   %seqlens_k = tensor.from_elements (%tot - 1)  : tensor<1xi32>
-///   %total_seq = tensor.from_elements %tot        : tensor<i32>
-///   %pk_init   = tensor.empty(%B, %tot)    // present sized to %tot, NOT %past
+///   %total_seq = tensor.from_elements %capacity   : tensor<i32>
+///   %pk_init   = tensor.empty(%B, %capacity)
 ///   %y, %pk, %pv = hip.gqa(%ctx)
 ///       ins(%q, %k, %v, %past_k, %past_v, %seqlens_k, %total_seq, %mask)
 ///       outs(%y_init, %pk_init, %pv_init)
 ///       {num_heads = 16, kv_num_heads = 8, scale = 1.0, no_causal = true}
 ///
-/// present KV is concat(past, current) along the seq axis, so its seq extent is
-/// past_seq + current_seq.  A fresh prefill arrives with an EMPTY past
-/// (past_seq == 0): sizing present from dim(past_key, 2) alone would collapse
-/// it to a zero-length buffer, the output allocator would then hand the runtime
-/// a null present_key/present_value, and wrap_group_query_attention would
-/// reject the call and leave the attention output zero-filled.
+/// For cached attention, the full mask key extent carries the logical KV
+/// length. The present extent is the larger of that length and the past buffer
+/// extent, preserving both growing and preallocated shared caches. Without a
+/// past cache, K supplies the logical length. Without a mask, concat semantics
+/// apply.
 struct OnnxAttentionToHip : public mlir::RewritePattern {
   OnnxAttentionToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Attention", /*benefit=*/1, ctx) {}
@@ -209,17 +208,95 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
   // whether a mask is present. So is_causal=1 + mask applies BOTH; is_causal=0
   // + mask applies only the mask; no_causal && no mask selects the
   // bidirectional no-past path.
+  mlir::RankedTensorType maskType;
   if (attnMask) {
-    auto maskType = mlir::dyn_cast<mlir::RankedTensorType>(attnMask.getType());
+    maskType = mlir::dyn_cast<mlir::RankedTensorType>(attnMask.getType());
     if (!maskType)
       return rewriter.notifyMatchFailure(op, "attn_mask must be a ranked "
                                              "tensor");
+    const int64_t maskRank = maskType.getRank();
+    if (maskRank < 2 || maskRank > 4)
+      return rewriter.notifyMatchFailure(
+          op, "attn_mask must be rank 2 [S,T], rank 3 [H,S,T], or rank 4 "
+              "[B,H,S,T]");
     // The runtime's attention_bias is additive float; a boolean keep/drop mask
     // would need conversion to additive 0/-inf, which is not modelled here.
     if (maskType.getElementType().isInteger(1))
       return rewriter.notifyMatchFailure(
           op, "boolean attn_mask not supported (runtime attention_bias is "
               "additive-float only)");
+
+    // ONNX broadcasting right-aligns lower-rank masks against [B,H,S,T].
+    // Insert unit leading dimensions as a view so the shared hip.gqa runtime
+    // can keep its rank-4 attention_bias ABI without copying mask data.
+    if (maskRank < 4) {
+      const int64_t leadingUnits = 4 - maskRank;
+      llvm::SmallVector<int64_t> normalizedShape(
+          static_cast<size_t>(leadingUnits), 1);
+      normalizedShape.append(maskType.getShape().begin(),
+                             maskType.getShape().end());
+      auto normalizedType = mlir::RankedTensorType::get(
+          normalizedShape, maskType.getElementType());
+
+      llvm::SmallVector<mlir::OpFoldResult> outputShape;
+      for (int64_t i = 0; i < leadingUnits; ++i)
+        outputShape.push_back(rewriter.getIndexAttr(1));
+      for (int64_t i = 0; i < maskRank; ++i) {
+        if (maskType.isDynamicDim(i))
+          outputShape.push_back(
+              mlir::tensor::DimOp::create(rewriter, loc, attnMask, i)
+                  .getResult());
+        else
+          outputShape.push_back(rewriter.getIndexAttr(maskType.getDimSize(i)));
+      }
+
+      llvm::SmallVector<mlir::ReassociationIndices> reassociation;
+      mlir::ReassociationIndices firstGroup;
+      for (int64_t i = 0; i <= leadingUnits; ++i)
+        firstGroup.push_back(i);
+      reassociation.push_back(std::move(firstGroup));
+      for (int64_t i = 1; i < maskRank; ++i)
+        reassociation.push_back({leadingUnits + i});
+
+      attnMask = mlir::tensor::ExpandShapeOp::create(rewriter, loc,
+                                                     normalizedType, attnMask,
+                                                     reassociation, outputShape)
+                     .getResult();
+      maskType = normalizedType;
+    }
+
+    const int64_t querySeqDim = rank4 ? 2 : 1;
+    const int64_t querySeq = queryType.getDimSize(querySeqDim);
+    const int64_t maskQuerySeq = maskType.getDimSize(2);
+    if (querySeq != mlir::ShapedType::kDynamic &&
+        maskQuerySeq != mlir::ShapedType::kDynamic &&
+        querySeq != maskQuerySeq) {
+      return rewriter.notifyMatchFailure(
+          op, "attn_mask query extent must equal the query sequence length");
+    }
+
+    const int64_t keySeq = keyType.getDimSize(querySeqDim);
+    const int64_t maskKvSeq = maskType.getDimSize(3);
+    if (!pastKey && keySeq != mlir::ShapedType::kDynamic &&
+        maskKvSeq != mlir::ShapedType::kDynamic && keySeq != maskKvSeq) {
+      return rewriter.notifyMatchFailure(
+          op, "attn_mask key extent must equal the KV sequence length");
+    }
+    if (pastKey) {
+      auto pastKeyType =
+          mlir::dyn_cast<mlir::RankedTensorType>(pastKey.getType());
+      if (!pastKeyType || pastKeyType.getRank() != 4)
+        return rewriter.notifyMatchFailure(
+            op, "past_key must be a rank-4 [B,N,S,head] tensor");
+      // A unit key extent is valid only over an empty past; a dynamic past
+      // extent is checked by the runtime.
+      const int64_t pastSeq = pastKeyType.getDimSize(2);
+      if (maskKvSeq == 1 && pastSeq != mlir::ShapedType::kDynamic &&
+          pastSeq > 0)
+        return rewriter.notifyMatchFailure(
+            op, "broadcast attn_mask key extent cannot provide the logical KV "
+                "length for a cached attention");
+    }
   }
   // is_causal=0 with no mask is bidirectional attention, which the runtime
   // services only as a no-past path (bidirectional_no_past ignores past KV).
@@ -232,6 +309,17 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
   // the runtime IN ADDITION to any additive mask; is_causal=0 => causal is
   // skipped and the mask (if any) carries all masking.
   bool noCausal = (isCausal == 0);
+
+  // The synthesized seqlens_k carries a single length, so only batch 1 is
+  // supported wherever the runtime consumes it. The bidirectional no-past path
+  // ignores seqlens_k. A dynamic batch cannot be rejected here; the runtime
+  // rejects batch > 1 on the masked path.
+  const bool bidirectionalNoPast = noCausal && !attnMask;
+  const int64_t batch = queryType.getDimSize(0);
+  if (!bidirectionalNoPast && batch != mlir::ShapedType::kDynamic && batch > 1)
+    return rewriter.notifyMatchFailure(
+        op, "attention currently supports only batch size 1 (except "
+            "bidirectional attention without a mask or past cache)");
 
   auto ctxOrFailure = getContextArg(op, rewriter);
   if (mlir::failed(ctxOrFailure))
@@ -331,25 +419,38 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
 
   // === seqlens_k / total_seq_len ======================================
   //
-  // present KV = concat(past, current) along the seq axis, so the present seq
-  // extent is past_seq + current_seq. The incoming KV token count is K's seq
-  // extent -- dim(k3, 1), k3 being rank-3 [B, S_kv, hidden] -- NOT the query's.
+  // The incoming KV token count is K's seq extent -- dim(k3, 1), k3 being
+  // rank-3 [B, S_kv, hidden] -- NOT the query's.
   // With a past cache the two coincide (K/V carry only the new tokens), but two
   // shapes hand us the ENTIRE KV history with no past operand and S_kv > S_q:
   // cross-attention, and a KV-cache-sharing decoder layer (Gemma-3n style,
   // where the layers past the sharing point re-read an earlier layer's full
   // present.* cache). Sizing present from the query there collapses the KV
-  // buffer to the current token and silently drops the history. The valid past
-  // length is dim(past_key, 2) (rank-4 BNSH), or 0 with no past operand.
+  // buffer to the current token and silently drops the history.
   mlir::Value curSeqIdx =
       mlir::tensor::DimOp::create(rewriter, loc, k3, 1).getResult();
   mlir::Value pastSeqIdx =
       pastKey
           ? mlir::tensor::DimOp::create(rewriter, loc, pastKey, 2).getResult()
           : mlir::arith::ConstantIndexOp::create(rewriter, loc, 0).getResult();
-  mlir::Value totalKvIdx =
+  mlir::Value concatenatedKvIdx =
       mlir::arith::AddIOp::create(rewriter, loc, pastSeqIdx, curSeqIdx)
           .getResult();
+
+  // With a past cache, the additive mask's full key extent is the logical KV
+  // length. Without a past cache, K already carries the complete sequence.
+  mlir::Value logicalTotalKvIdx = concatenatedKvIdx;
+  mlir::Value presentSeqIdx = concatenatedKvIdx;
+  if (attnMask && pastKey) {
+    logicalTotalKvIdx =
+        mlir::tensor::DimOp::create(rewriter, loc, attnMask, 3).getResult();
+    presentSeqIdx = mlir::arith::MaxSIOp::create(rewriter, loc, pastSeqIdx,
+                                                 logicalTotalKvIdx)
+                        .getResult();
+  } else if (attnMask) {
+    logicalTotalKvIdx = curSeqIdx;
+    presentSeqIdx = curSeqIdx;
+  }
 
   // seqlens_k[b] = total_seq - 1 (ORT GQA convention total_seq = seqlens_k + 1;
   // the runtime derives past_len = total_seq - sq). Ignored by the runtime on
@@ -358,10 +459,13 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value oneIdx =
       mlir::arith::ConstantIndexOp::create(rewriter, loc, 1).getResult();
   mlir::Value totalKvM1Idx =
-      mlir::arith::SubIOp::create(rewriter, loc, totalKvIdx, oneIdx)
+      mlir::arith::SubIOp::create(rewriter, loc, logicalTotalKvIdx, oneIdx)
           .getResult();
   mlir::Value seqlensKI32 =
       mlir::arith::IndexCastOp::create(rewriter, loc, i32Ty, totalKvM1Idx);
+  // Keep this a static single-element tensor. A dynamically shaped buffer is
+  // not eligible for host-scratch materialisation, so it would be placed in
+  // the device pool while the host-side fill loop still runs on the CPU.
   auto seqlensKType = mlir::RankedTensorType::get({1}, i32Ty);
   mlir::Value seqlensK = mlir::tensor::FromElementsOp::create(
       rewriter, loc, seqlensKType, mlir::ValueRange{seqlensKI32});
@@ -409,11 +513,10 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
   };
   int64_t kHeadDim = perHeadDim(keyType);
   int64_t vHeadDim = perHeadDim(valueType);
-  int64_t batchDim = queryType.getDimSize(0);
 
   auto synthPresent = [&](int64_t headDim,
                           mlir::Type elem) -> mlir::RankedTensorType {
-    return mlir::RankedTensorType::get({batchDim, kvNumHeads, kDyn, headDim},
+    return mlir::RankedTensorType::get({batch, kvNumHeads, kDyn, headDim},
                                        elem);
   };
 
@@ -438,7 +541,7 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
 
   // total_seq_len scalar = present KV buffer capacity. When the present seq dim
   // is static (provided result type), emit a constant; otherwise emit the
-  // runtime past+current total.
+  // runtime capacity.
   mlir::Value totalSeqLen;
   auto totalSeqLenType = mlir::RankedTensorType::get({}, i32Ty);
   if (!presentKeyType.isDynamicDim(2)) {
@@ -448,14 +551,14 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
     totalSeqLen = mlir::arith::ConstantOp::create(rewriter, loc, attr);
   } else {
     mlir::Value totalKvI32 =
-        mlir::arith::IndexCastOp::create(rewriter, loc, i32Ty, totalKvIdx);
+        mlir::arith::IndexCastOp::create(rewriter, loc, i32Ty, presentSeqIdx);
     totalSeqLen = mlir::tensor::FromElementsOp::create(
         rewriter, loc, totalSeqLenType, mlir::ValueRange{totalKvI32});
   }
 
-  // Build the present_key/present_value DPS init buffers with seq dim = total
-  // (past + current). present is rank-4 BNSH [batch, kv_heads, seq, head_dim];
-  // batch (dim 0) and seq (dim 2) are the only dynamic dims in practice.
+  // Build the present_key/present_value DPS init buffers with the selected
+  // capacity. Present is rank-4 BNSH [batch, kv_heads, seq, head_dim]; batch
+  // (dim 0) and seq (dim 2) are the only dynamic dims in practice.
   auto buildPresentInit =
       [&](mlir::RankedTensorType t) -> mlir::FailureOr<mlir::Value> {
     llvm::SmallVector<mlir::Value> dynSizes;
@@ -463,7 +566,7 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
       if (!t.isDynamicDim(dimIdx))
         continue;
       if (dimIdx == 2)
-        dynSizes.push_back(totalKvIdx);
+        dynSizes.push_back(presentSeqIdx);
       else if (dimIdx == 0)
         dynSizes.push_back(
             mlir::tensor::DimOp::create(rewriter, loc, query, 0).getResult());
@@ -543,6 +646,8 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
       rewriter.getNamedAttr("softcap", rewriter.getF32FloatAttr(softcap)));
   attrs.push_back(
       rewriter.getNamedAttr("no_causal", rewriter.getBoolAttr(noCausal)));
+  attrs.push_back(rewriter.getNamedAttr("derive_seqlens_from_attention_bias",
+                                        rewriter.getBoolAttr(bool(attnMask))));
   // AttentionWindowFold recovers the window during pre-lowering from the
   // additive mask, which is the only place a pre-opset-25 export can put it,
   // and stamps the result here. Absent the stamp the op keeps hip.gqa's -1
