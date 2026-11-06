@@ -35,7 +35,8 @@ ifeq ($(HIP_SDK),)
 endif
 
 # Keep in sync with unit_test/CMakeLists.txt and kernel_ut_main.cpp.
-LEAVES := gather_block_quantized/Xi64_Wfp8_Yfp16 \
+LEAVES := cast/Xany_Yany_bf16 \
+	gather_block_quantized/Xi64_Wfp8_Yfp16 \
 	gather_block_quantized/Xi64_Wu4_Yfp16 gather_block_quantized/Xi64_Wu8_Yfp16 \
 	gqa/decode/Xfp16_Wfp16_Yfp16 gqa/decode/Xfp16_Wi8_Yfp16 \
 	gqa/prefill/Xfp16_Wfp16_Yfp16 gqa/prefill/Xfp16_Wi8_Yfp16 \

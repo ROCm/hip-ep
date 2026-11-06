@@ -37,6 +37,15 @@ add_test(NAME OutputAllocatorUnitTest COMMAND test-output-allocator)
 
 set_target_properties(test-output-allocator PROPERTIES FOLDER "runtime-tests")
 
+# Header-only offset allocator behind the session transient arena.
+add_executable(test-transient-arena test_transient_arena.cpp)
+target_compile_features(test-transient-arena PRIVATE cxx_std_17)
+target_include_directories(test-transient-arena PRIVATE
+    ${CMAKE_SOURCE_DIR}/lib/Runtime
+)
+add_test(NAME TransientArenaUnitTest COMMAND test-transient-arena)
+set_target_properties(test-transient-arena PROPERTIES FOLDER "runtime-tests")
+
 # GQA offline autotune tests are GPU-free: they link the real embedded table
 # (lut/gfx1151.fb) and drive the same resolver that ships in
 # custom_kernels_<arch>, through the exported extern "C" shims. The resolver's

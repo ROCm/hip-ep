@@ -33,6 +33,7 @@ add_library(HipDialectTransforms STATIC
   DecomposeConvTranspose.cpp
   ExternalizeConstants.cpp
   FixLoopAccumulatorOffset.cpp
+  FoldBatchNorm.cpp
   FuseROCMlir.cpp
   GenerateInterface.cpp
   GenerateOpStateInit.cpp
@@ -82,6 +83,7 @@ target_link_libraries(HipDialectTransforms PUBLIC
   MLIRFuncDialect
   MLIRMemRefDialect
   MLIRArithDialect
+  MLIRSCFDialect
   MLIRAffineDialect
   MLIRLLVMDialect
   MLIRBufferizationDialect

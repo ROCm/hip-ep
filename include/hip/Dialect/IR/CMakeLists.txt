@@ -33,6 +33,11 @@ mlir_tablegen(HipOpStateInterface.h.inc -gen-op-interface-decls)
 mlir_tablegen(HipOpStateInterface.cpp.inc -gen-op-interface-defs)
 add_public_tablegen_target(HipOpStateInterfaceIncGen)
 
+set(LLVM_TARGET_DEFINITIONS RuntimeAccessOpInterface.td)
+mlir_tablegen(RuntimeAccessOpInterface.h.inc -gen-op-interface-decls)
+mlir_tablegen(RuntimeAccessOpInterface.cpp.inc -gen-op-interface-defs)
+add_public_tablegen_target(RuntimeAccessOpInterfaceIncGen)
+
 set(LLVM_TARGET_DEFINITIONS HipOps.td)
 mlir_tablegen(HipOps.h.inc -gen-op-decls)
 mlir_tablegen(HipOps.cpp.inc -gen-op-defs)

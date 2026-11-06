@@ -102,6 +102,11 @@ function(add_kernel_package_ut arch executable_name source_file)
 endfunction()
 
 foreach(_arch IN LISTS HIP_ARCHITECTURES)
+  if(HIP_EP_RING_ENABLED AND (_arch STREQUAL "gfx1151" OR _arch STREQUAL "gfx11-generic"))
+    add_kernel_package_ut(${_arch}
+      hipdnn-kernel-ut-gqa-ring-xfp16-wfp16-yfp16
+      gqa/ring/Xfp16_Wfp16_Yfp16/test_gqa_ring.cpp)
+  endif()
   add_kernel_package_ut(${_arch}
     hipdnn-kernel-ut-matmul-nbits-xfp16-wu2-yfp16
     matmul_nbits/Xfp16_Wu2_Yfp16/test_matmul_nbits_u2.cpp)
@@ -142,6 +147,9 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
     hipdnn-kernel-ut-qmoe-ragged-mm-xfp16-wu4-yfp16
     qmoe_ragged_mm/Xfp16_Wu4_Yfp16/test_qmoe_ragged_mm.cpp)
   add_kernel_package_ut(${_arch}
+    hipdnn-kernel-ut-qmoe-ragged-mm-xfp16-wu2-yfp16
+    qmoe_ragged_mm/Xfp16_Wu2_Yfp16/test_qmoe_ragged_mm_u2.cpp)
+  add_kernel_package_ut(${_arch}
     hipdnn-kernel-ut-gather-block-quantized-xi64-wu4-yfp16
     gather_block_quantized/Xi64_Wu4_Yfp16/test_gather_block_quantized_u4.cpp)
   add_kernel_package_ut(${_arch}
@@ -150,6 +158,9 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
   add_kernel_package_ut(${_arch}
     hipdnn-kernel-ut-gather-block-quantized-xi64-wfp8-yfp16
     gather_block_quantized/Xi64_Wfp8_Yfp16/test_gather_block_quantized_fp8.cpp)
+  add_kernel_package_ut(${_arch}
+    hipdnn-kernel-ut-cast-xany-yany-bf16
+    cast/Xany_Yany_bf16/test_cast.cpp)
   add_kernel_package_ut(${_arch}
     hipdnn-kernel-ut-rms-norm-xfp32-wfp32-yfp32
     rms_norm/Xfp32_Wfp32_Yfp32/test_rms_norm.cpp)
@@ -163,6 +174,7 @@ hip_add_executable(hipdnn-kernel-ut
   COMPILE_OPTIONS
     -O3
     -std=c++17
+    -DHIP_EP_RING_ENABLED=${HIP_EP_RING_ENABLED}
   OFFLOAD_ARCHS
     ${_kernel_ut_primary_arch}
 )

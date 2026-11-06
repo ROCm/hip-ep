@@ -340,6 +340,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateAbsConversionPatterns(patterns, ctx);
   populateSizeConversionPatterns(patterns, ctx);
   populateNonZeroConversionPatterns(patterns, ctx);
+  populateNonMaxSuppressionConversionPatterns(patterns, ctx);
   populateConcatConversionPatterns(patterns, ctx);
   populateReluConversionPatterns(patterns, ctx);
   populateImageScalerConversionPatterns(patterns, ctx);
@@ -360,6 +361,9 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateDepthToSpaceConversionPatterns(patterns, ctx);
   populateSpaceToDepthConversionPatterns(patterns, ctx);
   populateQdqConversionPatterns(patterns, ctx);
+  populateDynamicQuantizeLinearConversionPatterns(patterns, ctx);
+  populateConvIntegerConversionPatterns(patterns, ctx);
+  populateMatMulIntegerConversionPatterns(patterns, ctx);
 
   for (std::unique_ptr<mlir::RewritePattern> &pattern :
        patterns.getNativePatterns())
@@ -610,6 +614,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
         mlir::RewritePatternSet preLoweringPatterns(ctx);
         populateGatherShapeFoldPatterns(preLoweringPatterns, ctx);
         populateTransposeMatMulFoldPatterns(preLoweringPatterns, ctx);
+        populateSkipNormCastFoldPatterns(preLoweringPatterns, ctx);
         populateGatherBlockQuantizedPreparePatterns(preLoweringPatterns, ctx);
         populateReshapeShapeFoldPatterns(preLoweringPatterns, ctx);
         populatePadShapeFoldPatterns(preLoweringPatterns, ctx);

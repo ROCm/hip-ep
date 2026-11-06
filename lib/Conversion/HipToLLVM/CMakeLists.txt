@@ -5,6 +5,8 @@
 
 add_library(HipToLLVM STATIC
   HipToLLVM.cpp
+  HostScalarAnalysis.cpp
+  RuntimeAccessInterface.cpp
   MemoryLowering.cpp
   ConvLowering.cpp
   ConvTransposeLowering.cpp
@@ -62,6 +64,7 @@ add_library(HipToLLVM STATIC
   SliceLowering.cpp
   ScatterNDLowering.cpp
   NonZeroLowering.cpp
+  NonMaxSuppressionLowering.cpp
   ReadbackDimLowering.cpp
   ReadbackScalarLowering.cpp
   SizeLowering.cpp
@@ -94,6 +97,7 @@ target_link_libraries(HipToLLVM PUBLIC
   MLIRLLVMDialect
   MLIRLLVMCommonConversion
   MLIRMemRefDialect
+  MLIRBufferizationTransforms
   MLIRTransforms
   MLIRArithTransforms
   # convert-hip-to-llvm populates the standard dialect->LLVM lowering patterns
@@ -109,3 +113,8 @@ target_link_libraries(HipToLLVM PUBLIC
   # implement this interface. See the guarded walk in HipToLLVM.cpp.
   MLIRConvertToLLVMInterface
 )
+
+# Guard dtype before the unchanged runtime ABI reduces it to byte width.
+if(HIP_EP_RING_ENABLED)
+    target_compile_definitions(HipToLLVM PRIVATE HIP_EP_RING_ENABLED=${HIP_EP_RING_ENABLED})
+endif()

@@ -7,6 +7,13 @@ name: Windows Deps
 # Prebuilds the two heavy from-source dependencies into cached install prefixes
 # and returns their cache keys. Callers restore those prefixes with
 # fail-on-cache-miss, so a green run here is what guarantees the caches exist.
+#
+# Windows Build and Windows RMT Build both call this workflow. Each job's
+# concurrency group is per ref and commit, so the two callers of one event
+# queue on the same group and a cold key is built once. A group holds only one
+# pending job and cancels the older one; per commit, a newer push cannot cancel
+# a queued deps job of an earlier commit. Both callers of one event see the
+# same github.sha, which on a pull request is the test merge commit.
 on:
   workflow_call:
     outputs:
@@ -37,7 +44,7 @@ env:
   # Space-separated microsoft/onnxruntime-genai PR numbers fetched from
   # pull/<n>.diff and applied on top of v<OGA_VERSION>. Part of the OGA cache
   # key. Remove a PR once it lands in the pinned OGA release.
-  OGA_PR_PATCHES: "2685 2691 2705 2712 2763"
+  OGA_PR_PATCHES: "2685 2691 2705 2712 2792 2801"
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
   AMDGPU_EP_REF: "f3dccce2a142567da050da1032617fb39db4086a"
   # Space-separated onnxruntime/onnxruntime-ep-amdgpu PR numbers applied on top
@@ -49,7 +56,7 @@ jobs:
   llvm:
     runs-on: windows-2022
     concurrency:
-      group: deps-llvm-${{ github.ref }}
+      group: deps-llvm-${{ github.ref }}-${{ github.sha }}
       cancel-in-progress: false
 
     outputs:
@@ -165,7 +172,7 @@ jobs:
   ort:
     runs-on: windows-2022
     concurrency:
-      group: deps-ort-${{ github.ref }}
+      group: deps-ort-${{ github.ref }}-${{ github.sha }}
       cancel-in-progress: false
 
     outputs:
@@ -297,7 +304,7 @@ jobs:
     needs: ort
     runs-on: windows-2022
     concurrency:
-      group: deps-amdgpu-${{ github.ref }}
+      group: deps-amdgpu-${{ github.ref }}-${{ github.sha }}
       cancel-in-progress: false
 
     outputs:
@@ -504,7 +511,7 @@ jobs:
     needs: ort
     runs-on: windows-2022
     concurrency:
-      group: deps-oga-${{ github.ref }}
+      group: deps-oga-${{ github.ref }}-${{ github.sha }}
       cancel-in-progress: false
 
     outputs:
@@ -605,15 +612,17 @@ jobs:
           # and fails the step. Tests are excluded because OGA does not build
           # them and their fixtures do conflict; OGA's own CI workflows are
           # excluded because the build does not use them and some no longer
-          # exist at the pinned tag.
+          # exist at the pinned tag. Markdown is excluded because the build
+          # does not read it and doc edits across the listed PRs conflict.
           foreach ($pr in $prs -split '\s+') {
             if (-not $pr) { continue }
             $url = "https://github.com/microsoft/onnxruntime-genai/pull/$pr.diff"
             $tmp = Join-Path $env:RUNNER_TEMP "oga-pr-$pr.diff"
             Write-Host "Fetching $url"
-            Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
+            # github.com throttles raw .diff fetches with HTTP 429.
+            Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing -MaximumRetryCount 6 -RetryIntervalSec 10
             Write-Host "Applying PR #$pr"
-            git apply --whitespace=nowarn --3way --exclude='test/*' --exclude='.github/*' $tmp
+            git apply --whitespace=nowarn --3way --exclude='test/*' --exclude='.github/*' --exclude='*.md' $tmp
             if ($LASTEXITCODE -ne 0) {
               throw "PR #$pr failed to apply (exit $LASTEXITCODE)"
             }

@@ -49,7 +49,7 @@ config table still accepts wins.
 
 | Tier | Key | Answers |
 |---|---|---|
-| **Exact** | phase, bits, `N`, `K`, group_size, zero-point, row-stride, M-bucket | the shapes in `shapes/` — every MatMulNBits node in 20 shipped models, plus the hand-added `Internal` rows |
+| **Exact** | phase, bits, `N`, `K`, group_size, zero-point, row-stride, M-bucket | measured MatMulNBits nodes in 20 shipped models, plus selected decode cells and full prefill ladders from the hand-added `Internal` inventory |
 | **Fuzzy** | same, but `N` and `K` collapsed to octave buckets | a model nobody measured whose layer dims land near a measured one |
 | **Fallback** | phase + bits only | guarantees a hit; the config that won most often for that phase |
 
@@ -85,6 +85,7 @@ changes rather than its existence, and the whole table is rejected.
 ```powershell
 # 1. shape inventory (only when the model set changes). extract_shapes.py does
 #    not emit the hand-added `Internal` rows; keep them in the new csv.
+#    The inventory can be wider than the decode Exact coverage.
 python scripts/extract_shapes.py `
     --models ../../../../../../ModelFiles/oga_models `
     --out shapes/oga_models_bits4.csv --bits 4
@@ -134,6 +135,12 @@ code changed).
 600 MB and a WMMA sweep is ~680 dispatches over it — tens of minutes per point —
 for an M that inference never issues, since logits are computed for the last
 token. Fuzzy and Fallback still answer if some caller does hand one a wide M.
+
+For the hand-added `Internal` inventory, the gfx1151 table covers 11 poorly
+matched DecodeDp4a shapes at M=1 and every listed prefill shape at all 12 M
+buckets from 8 through 16384. The 14 prefill shapes have Arrival rows; the
+three padded-K shapes also have Padded rows for the same M ladder. The vocab
+projection has decode coverage only. fp16 GEMV rows are unchanged.
 
 ## Embedding
 

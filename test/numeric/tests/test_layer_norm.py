@@ -72,7 +72,7 @@ def _make_simplified_layer_norm_model(
 
 
 def _make_skip_simplified_layer_norm_model(
-    input_shape: list[int], dtype: np.dtype = np.float16
+    input_shape: list[int], dtype: np.dtype = np.float16, with_bias: bool = False
 ):
     """Build a SkipSimplifiedLayerNormalization ONNX model.
 
@@ -87,11 +87,16 @@ def _make_skip_simplified_layer_norm_model(
 
     rng = np.random.default_rng(88)
     scale_data = rng.uniform(0.5, 1.5, [hidden]).astype(dtype)
-    scale_init = numpy_helper.from_array(scale_data, name="scale")
+    initializers = [numpy_helper.from_array(scale_data, name="scale")]
+    inputs = ["X", "skip", "scale"]
+    if with_bias:
+        bias_data = rng.uniform(-0.5, 0.5, [hidden]).astype(dtype)
+        initializers.append(numpy_helper.from_array(bias_data, name="bias"))
+        inputs.append("bias")
 
     node = helper.make_node(
         "SkipSimplifiedLayerNormalization",
-        ["X", "skip", "scale"],
+        inputs,
         ["Y", "", "", "Y3"],
         domain="com.microsoft",
         epsilon=1e-5,
@@ -101,10 +106,45 @@ def _make_skip_simplified_layer_norm_model(
         [node],
         [X, skip],
         [Y, Y3],
-        initializers=[scale_init],
+        initializers=initializers,
         extra_opsets=[ms_opset],
     )
     return model
+
+
+def _make_fp32_residual_skip_norm_model(input_shape: list[int]):
+    """gpt-oss residual layout: fp32 residual, everything else fp16 with Casts.
+
+    Y = Cast_f16(SSLN(res32, Cast_f32(skip16), Cast_f32(gamma16)).output)
+    Y3 = the fp32 residual sum, which feeds the next layer's norm.
+    """
+    hidden = input_shape[-1]
+    R = helper.make_tensor_value_info("R", TensorProto.FLOAT, input_shape)
+    S = helper.make_tensor_value_info("S", TensorProto.FLOAT16, input_shape)
+    Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT16, input_shape)
+    Y3 = helper.make_tensor_value_info("Y3", TensorProto.FLOAT, input_shape)
+
+    rng = np.random.default_rng(89)
+    gamma = rng.uniform(0.5, 1.5, [hidden]).astype(np.float16)
+    nodes = [
+        helper.make_node("Cast", ["S"], ["S32"], to=TensorProto.FLOAT),
+        helper.make_node("Cast", ["gamma"], ["G32"], to=TensorProto.FLOAT),
+        helper.make_node(
+            "SkipSimplifiedLayerNormalization",
+            ["R", "S32", "G32"],
+            ["Y32", "", "", "Y3"],
+            domain="com.microsoft",
+            epsilon=1e-5,
+        ),
+        helper.make_node("Cast", ["Y32"], ["Y"], to=TensorProto.FLOAT16),
+    ]
+    return make_model_from_nodes(
+        nodes,
+        [R, S],
+        [Y, Y3],
+        initializers=[numpy_helper.from_array(gamma, name="gamma")],
+        extra_opsets=[helper.make_opsetid("com.microsoft", 1)],
+    )
 
 
 def _make_skip_layer_norm_model(input_shape: list[int]):
@@ -376,6 +416,70 @@ class TestSkipSimplifiedLayerNorm:
 
         actual, expected = model_runner.run_sample(model, [x, skip_input])
         compare_outputs(actual, expected, atol=1e-5)
+
+    @pytest.mark.parametrize("dtype", [np.float32, np.float16])
+    @pytest.mark.parametrize("seq_len", SEQ_LENS)
+    def test_skip_simplified_layer_norm_gpt_oss_shape(
+        self, model_runner, seq_len, dtype
+    ):
+        """gpt-oss residual norm: hidden 2880, run in fp32 by the export."""
+        input_shape = [1, seq_len, 2880]
+        model = _make_skip_simplified_layer_norm_model(input_shape, dtype)
+
+        rng = np.random.default_rng(58)
+        x = rng.uniform(-2, 2, input_shape).astype(dtype)
+        skip_input = rng.uniform(-2, 2, input_shape).astype(dtype)
+
+        actual, expected = model_runner.run_sample(model, [x, skip_input])
+        compare_outputs(actual, expected, atol=1e-5 if dtype == np.float32 else 2e-3)
+
+    @pytest.mark.parametrize(
+        "dtype,hidden",
+        [(np.float16, 2880), (np.float32, 2880), (np.float16, 8200), (np.float16, 33)],
+    )
+    def test_skip_simplified_layer_norm_bias(self, model_runner, dtype, hidden):
+        """4-input form, through the row kernel (2880) and both fallbacks."""
+        input_shape = [1, 3, hidden]
+        model = _make_skip_simplified_layer_norm_model(
+            input_shape, dtype, with_bias=True
+        )
+
+        rng = np.random.default_rng(60)
+        x = rng.uniform(-2, 2, input_shape).astype(dtype)
+        skip_input = rng.uniform(-2, 2, input_shape).astype(dtype)
+
+        actual, expected = model_runner.run_sample(model, [x, skip_input])
+        compare_outputs(actual, expected, atol=1e-5 if dtype == np.float32 else 2e-3)
+
+    @pytest.mark.parametrize(
+        "seq_len,hidden", [(1, 2880), (128, 2880), (3, 8200), (2, 33)]
+    )
+    def test_skip_simplified_layer_norm_fp32_residual(
+        self, model_runner, seq_len, hidden
+    ):
+        """Cast -> fp32 SSLN -> Cast as gpt-oss exports it (Casts folded in)."""
+        input_shape = [1, seq_len, hidden]
+        model = _make_fp32_residual_skip_norm_model(input_shape)
+
+        rng = np.random.default_rng(61)
+        res = rng.uniform(-2, 2, input_shape).astype(np.float32)
+        skip_input = rng.uniform(-2, 2, input_shape).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [res, skip_input])
+        compare_outputs(actual, expected, atol=2e-3)
+
+    @pytest.mark.parametrize("hidden", [8192, 8200])
+    def test_skip_simplified_layer_norm_wide_row(self, model_runner, hidden):
+        """Either side of the register-resident row kernel's width limit."""
+        input_shape = [1, 2, hidden]
+        model = _make_skip_simplified_layer_norm_model(input_shape)
+
+        rng = np.random.default_rng(59)
+        x = rng.uniform(-2, 2, input_shape).astype(np.float16)
+        skip_input = rng.uniform(-2, 2, input_shape).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x, skip_input])
+        compare_outputs(actual, expected, atol=2e-3)
 
 
 # ---------------------------------------------------------------------------
@@ -719,3 +823,99 @@ class TestGroupNorm:
         x = rng.uniform(-2, 2, shape).astype(np.float16)
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=2e-3, rtol=1e-3)
+
+
+def _make_embed_layer_norm_model(
+    batch: int,
+    seq: int,
+    hidden: int,
+    *,
+    with_position_ids: bool,
+):
+    """com.microsoft.EmbedLayerNormalization over a small f32 table.
+
+    The CPU reference counts ones in the mask. Position ids are either an
+    explicit input or omitted, in which case positions are 0 .. seq-1.
+    """
+    vocab = 32
+    max_pos = seq + 2
+    ids = helper.make_tensor_value_info("ids", TensorProto.INT32, [batch, seq])
+    segments = helper.make_tensor_value_info(
+        "segments", TensorProto.INT32, [batch, seq]
+    )
+    mask = helper.make_tensor_value_info("mask", TensorProto.INT32, [batch, seq])
+    output = helper.make_tensor_value_info(
+        "output", TensorProto.FLOAT, [batch, seq, hidden]
+    )
+    mask_index = helper.make_tensor_value_info("mask_index", TensorProto.INT32, [batch])
+    rng = np.random.default_rng(21)
+    initializers = [
+        numpy_helper.from_array(
+            rng.uniform(-1, 1, [vocab, hidden]).astype(np.float32), name="word"
+        ),
+        numpy_helper.from_array(
+            rng.uniform(-1, 1, [max_pos, hidden]).astype(np.float32),
+            name="position",
+        ),
+        numpy_helper.from_array(
+            rng.uniform(-1, 1, [2, hidden]).astype(np.float32), name="segment"
+        ),
+        numpy_helper.from_array(
+            rng.uniform(0.5, 1.5, [hidden]).astype(np.float32), name="gamma"
+        ),
+        numpy_helper.from_array(
+            rng.uniform(-0.5, 0.5, [hidden]).astype(np.float32), name="beta"
+        ),
+    ]
+    inputs = ["ids", "segments", "word", "position", "segment", "gamma", "beta", "mask"]
+    graph_inputs = [ids, segments, mask]
+    if with_position_ids:
+        position_ids = helper.make_tensor_value_info(
+            "position_ids", TensorProto.INT32, [1, seq]
+        )
+        inputs.append("position_ids")
+        graph_inputs.append(position_ids)
+    node = helper.make_node(
+        "EmbedLayerNormalization",
+        inputs,
+        ["output", "mask_index"],
+        domain="com.microsoft",
+        epsilon=1e-12,
+    )
+    return make_model_from_nodes(
+        [node],
+        graph_inputs,
+        [output, mask_index],
+        initializers=initializers,
+        extra_opsets=[helper.make_opsetid("com.microsoft", 1)],
+    )
+
+
+class TestEmbedLayerNorm:
+    """Gather + add + LayerNormalization decomposition of the embedding fusion."""
+
+    def test_embed_layer_norm_with_position_ids(self, model_runner):
+        batch, seq, hidden = 2, 6, 8
+        model = _make_embed_layer_norm_model(batch, seq, hidden, with_position_ids=True)
+        rng = np.random.default_rng(22)
+        ids = rng.integers(0, 32, size=[batch, seq], dtype=np.int32)
+        segments = rng.integers(0, 2, size=[batch, seq], dtype=np.int32)
+        mask = np.ones([batch, seq], dtype=np.int32)
+        mask[:, 4:] = 0
+        position_ids = np.array([[0, 2, 1, 3, 0, 0]], dtype=np.int32)
+        actual, expected = model_runner.run_sample(
+            model, [ids, segments, mask, position_ids]
+        )
+        compare_outputs(actual, expected, atol=1e-4, rtol=1e-4)
+
+    def test_embed_layer_norm_default_positions(self, model_runner):
+        batch, seq, hidden = 1, 5, 8
+        model = _make_embed_layer_norm_model(
+            batch, seq, hidden, with_position_ids=False
+        )
+        rng = np.random.default_rng(23)
+        ids = rng.integers(0, 32, size=[batch, seq], dtype=np.int32)
+        segments = rng.integers(0, 2, size=[batch, seq], dtype=np.int32)
+        mask = np.array([[1, 1, 1, 0, 0]], dtype=np.int32)
+        actual, expected = model_runner.run_sample(model, [ids, segments, mask])
+        compare_outputs(actual, expected, atol=1e-4, rtol=1e-4)

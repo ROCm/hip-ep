@@ -26,11 +26,14 @@ GPT_OSS_VOCAB = 201088
 GPT_OSS_HIDDEN = 2880
 
 
-def _make_gather_model(data_shape: list[int], axis: int = 0):
-    """Build a Gather ONNX model with i64 data and scalar i64 index."""
+def _make_gather_model(
+    data_shape: list[int], axis: int = 0, indices_shape: list[int] | None = None
+):
+    """Build a Gather ONNX model with i64 data and indices."""
+    indices_shape = [] if indices_shape is None else indices_shape
     data = helper.make_tensor_value_info("data", TensorProto.INT64, data_shape)
-    indices = helper.make_tensor_value_info("indices", TensorProto.INT64, [])
-    output_shape = data_shape[:axis] + data_shape[axis + 1 :]
+    indices = helper.make_tensor_value_info("indices", TensorProto.INT64, indices_shape)
+    output_shape = data_shape[:axis] + indices_shape + data_shape[axis + 1 :]
     output = helper.make_tensor_value_info(
         "output", TensorProto.INT64, output_shape if output_shape else []
     )
@@ -107,6 +110,25 @@ class TestGather:
         actual, expected = model_runner.run_sample(model, [data, index])
         compare_outputs(actual, expected, atol=0)
 
+    @pytest.mark.parametrize(
+        "data_shape,axis,indices,output_shape",
+        [
+            ([3, 4], 0, np.empty([0], dtype=np.int64), (0, 4)),
+            ([2, 0, 3], 2, np.array([0, 2], dtype=np.int64), (2, 0, 2)),
+        ],
+    )
+    def test_gather_empty_output(
+        self, model_runner, data_shape, axis, indices, output_shape
+    ):
+        """Empty indices and a zero non-gather extent return shaped empties."""
+        model = _make_gather_model(data_shape, axis, list(indices.shape))
+        data = np.arange(np.prod(data_shape), dtype=np.int64).reshape(data_shape)
+
+        actual, expected = model_runner.run_sample(model, [data, indices])
+
+        assert actual[0].shape == output_shape
+        compare_outputs(actual, expected, atol=0)
+
     @pytest.mark.parametrize("seq_len", SEQ_LENS)
     def test_gather_embedding_llama_shape(self, model_runner, seq_len):
         """Embedding lookup: [128256, 4096] f16 gather by [1, S] i64."""
@@ -138,6 +160,24 @@ class TestGather:
         ids = rng.integers(0, LLAMA_VOCAB, [1, seq_len], dtype=np.int32)
 
         actual, expected = model_runner.run_sample(model, [ids])
+        compare_outputs(actual, expected, atol=0)
+
+    @pytest.mark.parametrize(
+        "dtype,inner", [(np.float16, 32), (np.float32, 4), (np.float16, 12)]
+    )
+    def test_gather_middle_axis_negative_indices(self, model_runner, dtype, inner):
+        data_shape = [3, 50, inner]
+        tp = helper.np_dtype_to_tensor_dtype(np.dtype(dtype))
+        data = helper.make_tensor_value_info("data", tp, data_shape)
+        indices = helper.make_tensor_value_info("indices", TensorProto.INT64, [2, 5])
+        output = helper.make_tensor_value_info("output", tp, [3, 2, 5, inner])
+        node = helper.make_node("Gather", ["data", "indices"], ["output"], axis=1)
+        model = make_model_from_nodes([node], [data, indices], [output])
+
+        rng = np.random.default_rng(7)
+        x = rng.uniform(-1, 1, data_shape).astype(dtype)
+        ids = rng.integers(-50, 50, [2, 5], dtype=np.int64)
+        actual, expected = model_runner.run_sample(model, [x, ids])
         compare_outputs(actual, expected, atol=0)
 
     @pytest.mark.parametrize("seq_len", SEQ_LENS)

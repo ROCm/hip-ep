@@ -190,6 +190,11 @@ do not depend on the EP table remaining live. `config` may be null, which is
 how callers without an ORT session (for example the `hip-test` tool) invoke the
 artifact.
 
+Runtime-read provider options include `gqa_autotune_mode`,
+`matmul_autotune_mode`, and `transient_arena_mb` (session transient arena size
+in MiB, `0` disables it; overrides `HIPDNN_EP_TRANSIENT_ARENA_MB`; see
+[pool-allocs-memory-planning.md](pool-allocs-memory-planning.md#session-transient-arena)).
+
 `hipdnn_ep_runtime_begin_compute` is called by the EP at the top of every
 `Compute()` (before input marshaling) to invalidate per-`Compute()` runtime
 caches — currently only the GQA `seqlens_k` D2H cache, which amortizes one
