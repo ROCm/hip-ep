@@ -83,6 +83,10 @@ call:
   past/present buffer it takes the past's shape, else it spans the positions
   so far.
 
+The EP's default device memory is device-only VRAM, so `input_ids` and
+`attention_mask` are read back, and the logits written, with `hipMemcpy` when
+they are in GPU memory; CoreLib itself takes host buffers.
+
 So the contract is onnxruntime-genai generation, not full ONNX semantics: a
 caller reading every row's logits or the KV tensors gets zeros. The session's
 capacity is `search.max_length` from the `genai_config.json` beside the model,
