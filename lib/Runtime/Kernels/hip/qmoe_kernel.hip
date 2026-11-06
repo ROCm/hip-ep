@@ -20,6 +20,8 @@
 
 static constexpr int kBlock = 256;
 static constexpr int kMaxK = 32;
+static_assert(kMaxK <= 32, "topk_routing_wave_kernel keeps selected expert i "
+                           "in lane i of a 32-lane group");
 // topk_routing runs one block per token with this many threads; per-expert exp
 // values are staged in dynamic shared memory sized num_experts at launch, so
 // there is no compile-time cap on the expert count.
