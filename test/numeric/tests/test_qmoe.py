@@ -730,14 +730,15 @@ class TestQMoERelu2:
         actual, expected = _run_relu2(model_runner, cfg)
         compare_outputs(actual, expected, atol=5e-2, rtol=1e-2, cos_threshold=0.999)
 
+    @pytest.mark.parametrize("num_experts,top_k", [(512, 22), (64, 32)])
     @pytest.mark.parametrize("seq_len", [1, 37])
-    def test_qmoe_relu2_top_k_above_16(self, model_runner, seq_len):
+    def test_qmoe_relu2_top_k_above_16(self, model_runner, seq_len, num_experts, top_k):
         cfg = Relu2Config(
             seq_len=seq_len,
             hidden=64,
             inter=64,
-            num_experts=512,
-            top_k=22,
+            num_experts=num_experts,
+            top_k=top_k,
             with_mix_weights=True,
         )
         actual, expected = _run_relu2(model_runner, cfg)
