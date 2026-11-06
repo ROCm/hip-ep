@@ -1,0 +1,168 @@
+diff --git a/src/models/multi_modal.cpp b/src/models/multi_modal.cpp
+index c1982fb2..dc86c9c4 100644
+--- a/src/models/multi_modal.cpp
++++ b/src/models/multi_modal.cpp
+@@ -978,6 +978,8 @@ DeviceSpan<float> DecoderState::RunPrefillWithChunking(int current_length, Devic
+     kv_cache_->Update(next_indices, length);
+     if (recurrent_state_)
+       recurrent_state_->Update();
++    if (recurrent_state_)
++      recurrent_state_->SetForwardLength(static_cast<int>(current_chunk_size));
+     logits_.Update(chunk_tokens, current_chunk_size);
+
+     // Feed only this chunk's slice of the pre-computed embeddings to the decoder.
+@@ -1006,6 +1008,8 @@ void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int tot
+     kv_cache_->Update(beam_indices, total_length);
+   if (recurrent_state_)
+     recurrent_state_->Update();
++  if (recurrent_state_)
++    recurrent_state_->SetForwardLength(static_cast<int>(new_length));
+   logits_.Update(next_tokens, new_length);
+   inputs_embeds_.UpdateSequenceLength(new_length);
+   if (per_layer_inputs_) per_layer_inputs_->UpdateSequenceLength(new_length);
+@@ -1018,11 +1022,29 @@ void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int tot
+     kv_cache_->Update(beam_indices, total_length);
+   if (recurrent_state_)
+     recurrent_state_->Update();
++  if (recurrent_state_)
++    recurrent_state_->SetForwardLength(static_cast<int>(new_length));
+   logits_.Update(next_tokens, new_length);
+   inputs_embeds_.UpdateSequenceLength(new_length);
+   if (per_layer_inputs_) per_layer_inputs_->UpdateSequenceLength(new_length);
+ }
+
++bool DecoderState::HasCroppableRecurrentState() const {
++  return recurrent_state_ && recurrent_state_->IsWindowed();
++}
++
++int64_t DecoderState::RecurrentStateWindow() const {
++  return recurrent_state_ ? recurrent_state_->StateWindow() : 1;
++}
++
++void DecoderState::CropToAccepted(size_t new_length, size_t recurrent_position) {
++  position_inputs_->RewindTo(new_length);
++  if (kv_cache_)
++    kv_cache_->RewindTo(new_length);
++  if (recurrent_state_)
++    recurrent_state_->CropToPosition(recurrent_position);
++}
++
+ MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& model, DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params)
+     : State{params, model},
+       model_{model},
+@@ -1167,6 +1189,19 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
+   return audio_output_ ? SampleAudioOrText(logits) : logits;
+ }
+
++bool MultiModalPipelineState::HasCroppableRecurrentState() const {
++  return decoder_state_->HasCroppableRecurrentState();
++}
++
++int64_t MultiModalPipelineState::RecurrentStateWindow() const {
++  return decoder_state_->RecurrentStateWindow();
++}
++
++void MultiModalPipelineState::CropToAccepted(
++    size_t new_length, size_t recurrent_position) {
++  decoder_state_->CropToAccepted(new_length, recurrent_position);
++}
++
+ DeviceSpan<float> MultiModalPipelineState::SampleAudioOrText(DeviceSpan<float> logits) {
+   if (!audio_output_->InAudio()) {
+     return logits;
+diff --git a/src/models/multi_modal.h b/src/models/multi_modal.h
+index 35d0554b..d8e05ba8 100644
+--- a/src/models/multi_modal.h
++++ b/src/models/multi_modal.h
+@@ -234,6 +234,9 @@ struct DecoderState : State {
+   DecoderState& operator=(const DecoderState&) = delete;
+
+   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
++  bool HasCroppableRecurrentState() const override;
++  int64_t RecurrentStateWindow() const override;
++  void CropToAccepted(size_t new_length, size_t recurrent_position) override;
+   void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int current_length, DeviceSpan<int32_t> beam_indices);
+
+   // Prefill chunking (see search.chunk_size). The embedding model still runs once over the whole
+@@ -274,6 +277,9 @@ struct MultiModalPipelineState : State {
+   OrtValue* GetInput(const char* name) override;
+
+   OrtValue* GetOutput(const char* name) override;
++  bool HasCroppableRecurrentState() const override;
++  int64_t RecurrentStateWindow() const override;
++  void CropToAccepted(size_t new_length, size_t recurrent_position) override;
+
+  private:
+   void UpdateInputsOutputs(const DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices,
+diff --git a/src/ort_genai.h b/src/ort_genai.h
+index da154ad6..252eabae 100644
+--- a/src/ort_genai.h
++++ b/src/ort_genai.h
+@@ -612,6 +612,11 @@ struct OgaGenerator : OgaAbstract {
+     OgaCheckResult(OgaGenerator_RewindTo(this, new_length));
+   }
+
++  void CropToAccepted(size_t new_length, size_t recurrent_position) {
++    OgaCheckResult(
++        OgaGenerator_CropToAccepted(this, new_length, recurrent_position));
++  }
++
+   void SnapshotState() {
+     OgaCheckResult(OgaGenerator_SnapshotState(this));
+   }
+diff --git a/src/ort_genai_c.cpp b/src/ort_genai_c.cpp
+index 5b444af9..a735c3a3 100644
+--- a/src/ort_genai_c.cpp
++++ b/src/ort_genai_c.cpp
+@@ -715,6 +715,14 @@ OgaResult* OGA_API_CALL OgaGenerator_RewindTo(OgaGenerator* generator, size_t ne
+   OGA_CATCH
+ }
+
++OgaResult* OGA_API_CALL OgaGenerator_CropToAccepted(
++    OgaGenerator* generator, size_t new_length, size_t recurrent_position) {
++  OGA_TRY
++  generator->CropToAccepted(new_length, recurrent_position);
++  return nullptr;
++  OGA_CATCH
++}
++
+ OgaResult* OGA_API_CALL OgaGenerator_SnapshotState(OgaGenerator* generator) {
+   OGA_TRY
+   generator->SnapshotState();
+diff --git a/src/ort_genai_c.h b/src/ort_genai_c.h
+index 307e9ad6..96e9ef9a 100644
+--- a/src/ort_genai_c.h
++++ b/src/ort_genai_c.h
+@@ -731,6 +731,9 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SetRuntimeOption(OgaGenerator* g
+  */
+ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_RewindTo(OgaGenerator* generator, size_t new_length);
+
++OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_CropToAccepted(
++    OgaGenerator* generator, size_t new_length, size_t recurrent_position);
++
+ /**
+  * \brief Snapshots the generator's recurrent state (conv/linear-attention state) so a later
+  *        OgaGenerator_RewindTo can roll it back. Used for speculative decoding (e.g. MTP) on
+diff --git a/src/python/python.cpp b/src/python/python.cpp
+index 8dc4ca29..f8cfb0dd 100644
+--- a/src/python/python.cpp
++++ b/src/python/python.cpp
+@@ -375,6 +375,10 @@ struct PyGenerator {
+     generator_->RewindTo(new_length);
+   }
+
++  void CropToAccepted(size_t new_length, size_t recurrent_position) {
++    generator_->CropToAccepted(new_length, recurrent_position);
++  }
++
+   void SnapshotState() {
+     generator_->SnapshotState();
+   }
+@@ -655,6 +659,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
+       .def("set_logits", &PyGenerator::SetLogits)
+       .def("generate_next_token", &PyGenerator::GenerateNextToken)
+       .def("rewind_to", &PyGenerator::RewindTo)
++      .def("crop_to_accepted", &PyGenerator::CropToAccepted)
+       .def("snapshot_state", &PyGenerator::SnapshotState)
+       .def("set_hidden_states", &PyGenerator::SetHiddenStates)
+       .def("get_next_tokens", &PyGenerator::GetNextTokens)

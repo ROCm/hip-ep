@@ -1,0 +1,58 @@
+diff --git a/src/models/multi_modal.cpp b/src/models/multi_modal.cpp
+index dc86c9c4..ede1bc6a 100644
+--- a/src/models/multi_modal.cpp
++++ b/src/models/multi_modal.cpp
+@@ -1045,6 +1045,19 @@ void DecoderState::CropToAccepted(size_t new_length, size_t recurrent_position)
+     recurrent_state_->CropToPosition(recurrent_position);
+ }
+ 
++void DecoderState::RewindTo(size_t index) {
++  position_inputs_->RewindTo(index);
++  if (kv_cache_)
++    kv_cache_->RewindTo(index);
++  if (recurrent_state_)
++    recurrent_state_->RewindTo(index);
++}
++
++void DecoderState::SnapshotState(size_t position) {
++  if (recurrent_state_)
++    recurrent_state_->Snapshot(position);
++}
++
+ MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& model, DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params)
+     : State{params, model},
+       model_{model},
+@@ -1202,6 +1215,14 @@ void MultiModalPipelineState::CropToAccepted(
+   decoder_state_->CropToAccepted(new_length, recurrent_position);
+ }
+ 
++void MultiModalPipelineState::RewindTo(size_t index) {
++  decoder_state_->RewindTo(index);
++}
++
++void MultiModalPipelineState::SnapshotState(size_t position) {
++  decoder_state_->SnapshotState(position);
++}
++
+ DeviceSpan<float> MultiModalPipelineState::SampleAudioOrText(DeviceSpan<float> logits) {
+   if (!audio_output_->InAudio()) {
+     return logits;
+diff --git a/src/models/multi_modal.h b/src/models/multi_modal.h
+index d8e05ba8..05b7407d 100644
+--- a/src/models/multi_modal.h
++++ b/src/models/multi_modal.h
+@@ -238,3 +238,5 @@ struct DecoderState : State {
+   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
++  void RewindTo(size_t index) override;
++  void SnapshotState(size_t position) override;
+   bool HasCroppableRecurrentState() const override;
+   int64_t RecurrentStateWindow() const override;
+@@ -277,6 +279,8 @@ struct MultiModalPipelineState : State {
+   OrtValue* GetInput(const char* name) override;
+ 
+   OrtValue* GetOutput(const char* name) override;
++  void RewindTo(size_t index) override;
++  void SnapshotState(size_t position) override;
+   bool HasCroppableRecurrentState() const override;
+   int64_t RecurrentStateWindow() const override;
+   void CropToAccepted(size_t new_length, size_t recurrent_position) override;
