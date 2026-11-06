@@ -136,9 +136,7 @@ def print_output_summary(
             diff = float("nan")
         else:
             diff = float(
-                np.abs(act.astype(np.float64) - exp.astype(np.float64)).max(
-                    initial=0.0
-                )
+                np.abs(act.astype(np.float64) - exp.astype(np.float64)).max(initial=0.0)
             )
         print(
             f"{tag}   [{i}] actual  {tensor_desc(act)}"
