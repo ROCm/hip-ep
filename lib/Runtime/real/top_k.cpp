@@ -15,6 +15,7 @@
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 #include <numeric>
+#include <string>
 #include <vector>
 
 namespace {
@@ -22,13 +23,53 @@ namespace {
 constexpr int kTopKDeviceMax = 256;
 constexpr int kTopKMaxRank = 8;
 
-double topk_key(const char *element, int64_t element_size) {
-  if (element_size == 2) {
+int top_k_hipdnn_to_hip_dtype(int64_t hipdnn_type) {
+  switch (hipdnn_type) {
+  case HIPDNN_EP_DATATYPE_FLOAT:
+    return HIP_DTYPE_FLOAT32;
+  case HIPDNN_EP_DATATYPE_HALF:
+    return HIP_DTYPE_FLOAT16;
+  case HIPDNN_EP_DATATYPE_BFLOAT16:
+    return HIP_DTYPE_BFLOAT16;
+  case HIPDNN_EP_DATATYPE_DOUBLE:
+    return HIP_DTYPE_FLOAT64;
+  case HIPDNN_EP_DATATYPE_INT8:
+    return HIP_DTYPE_INT8;
+  case HIPDNN_EP_DATATYPE_UINT8:
+    return HIP_DTYPE_UINT8;
+  case HIPDNN_EP_DATATYPE_INT16:
+    return HIP_DTYPE_INT16;
+  case HIPDNN_EP_DATATYPE_UINT16:
+    return HIP_DTYPE_UINT16;
+  case HIPDNN_EP_DATATYPE_INT32:
+    return HIP_DTYPE_INT32;
+  case HIPDNN_EP_DATATYPE_INT64:
+    return HIP_DTYPE_INT64;
+  default:
+    return -1;
+  }
+}
+
+int64_t topk_host_element_size(int hip_dtype) {
+  switch (hip_dtype) {
+  case HIP_DTYPE_FLOAT16:
+    return 2;
+  case HIP_DTYPE_FLOAT32:
+    return 4;
+  case HIP_DTYPE_FLOAT64:
+    return 8;
+  default:
+    return 0;
+  }
+}
+
+double topk_key(const char *element, int hip_dtype) {
+  if (hip_dtype == HIP_DTYPE_FLOAT16) {
     __half value;
     memcpy(&value, element, sizeof(value));
     return __half2float(value);
   }
-  if (element_size == 8) {
+  if (hip_dtype == HIP_DTYPE_FLOAT64) {
     double value;
     memcpy(&value, element, sizeof(value));
     return value;
@@ -38,14 +79,19 @@ double topk_key(const char *element, int64_t element_size) {
   return value;
 }
 
-// The device kernel keeps K winners in a fixed 256-slot list. A larger K,
-// which the SSD postprocessor uses to sort a whole class, is selected here.
+// The device kernel covers K up to 256 and, above that, full sorts of a
+// contiguous last axis. Other large K (partial TopK, a non-last axis) and f64,
+// which the device kernel would compare in f32, are selected here.
 int host_top_k(hipStream_t stream, const void *x, void *values, void *indices,
                int64_t axis, int64_t largest, int64_t rank,
                const int64_t *x_shape, int64_t num_elements, int64_t k,
-               int64_t element_size) {
-  if (element_size != 2 && element_size != 4 && element_size != 8)
+               int hip_dtype) {
+  const int64_t element_size = topk_host_element_size(hip_dtype);
+  if (element_size == 0) {
+    fprintf(stderr, "[REAL] wrap_top_k: unsupported host hip_dtype=%d\n",
+            hip_dtype);
     return -1;
+  }
   if (axis < 0)
     axis += rank;
   if (rank <= 0 || rank > kTopKMaxRank || axis < 0 || axis >= rank || k < 0)
@@ -103,12 +149,10 @@ int host_top_k(hipStream_t stream, const void *x, void *values, void *indices,
     std::partial_sort(
         order.begin(), order.begin() + k, order.end(),
         [&](int64_t lhs, int64_t rhs) {
-          double left =
-              topk_key(input + (base + lhs * in_stride[axis]) * element_size,
-                       element_size);
-          double right =
-              topk_key(input + (base + rhs * in_stride[axis]) * element_size,
-                       element_size);
+          double left = topk_key(
+              input + (base + lhs * in_stride[axis]) * element_size, hip_dtype);
+          double right = topk_key(
+              input + (base + rhs * in_stride[axis]) * element_size, hip_dtype);
           if (left != right)
             return largest ? left > right : left < right;
           return lhs < rhs;
@@ -145,21 +189,35 @@ int host_top_k(hipStream_t stream, const void *x, void *values, void *indices,
 int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
                void *indices, int64_t axis, int64_t largest, int64_t sorted,
                int64_t rank, const int64_t *x_shape, int64_t num_elements,
-               int64_t element_size_bytes) {
+               int64_t data_type) {
   OP_PROFILE(
       "top_k",
       [&] {
         char b[64];
-        snprintf(b, sizeof(b), "r%lld:axis=%lld", (long long)rank,
-                 (long long)axis);
+        snprintf(b, sizeof(b), "r%lld:axis=%lld:%s", (long long)rank,
+                 (long long)axis, hipdnn_ep_datatype_name(data_type));
         return std::string(b);
       },
       state);
 
-  (void)num_elements;
+  // main_graph drops this return value, so a nonzero status must also land in
+  // the device error flag that inference_compute reads after the stream sync.
+  auto finish = [&](int status) {
+    if (status != 0)
+      hipdnn_ep_state_set_error_flag(state, status);
+    return status;
+  };
+
   if (!state || !x || !k || !values || !indices || !x_shape) {
     RUNTIME_DEBUG_LOG("[REAL] wrap_top_k: null argument\n");
-    return -1;
+    return finish(-1);
+  }
+
+  int hip_dtype = top_k_hipdnn_to_hip_dtype(data_type);
+  if (hip_dtype < 0) {
+    fprintf(stderr, "[REAL] wrap_top_k: unsupported data_type=%lld\n",
+            (long long)data_type);
+    return finish(-1);
   }
 
   int64_t k_val = 0;
@@ -168,24 +226,28 @@ int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
   if (err != hipSuccess) {
     fprintf(stderr, "[REAL] wrap_top_k: failed to read K: %s\n",
             hipGetErrorString(err));
-    return -1;
+    return finish(-1);
   }
   err = hipStreamSynchronize(static_cast<hipStream_t>(stream));
   if (err != hipSuccess) {
     fprintf(stderr, "[REAL] wrap_top_k: stream sync failed: %s\n",
             hipGetErrorString(err));
-    return -1;
+    return finish(-1);
   }
 
-  // Above 256 the device kernel only does full sorts of a contiguous last axis
-  // in f16/f32, and those need workspace; everything else is selected here.
-  const bool device_shape =
-      element_size_bytes != 8 &&
-      hip_top_k_device_supported(axis, rank, x_shape, k_val);
-  if (k_val > kTopKDeviceMax && !device_shape)
-    return host_top_k(static_cast<hipStream_t>(stream), x, values, indices,
-                      axis, largest, rank, x_shape, num_elements, k_val,
-                      element_size_bytes);
+  auto run_on_host = [&] {
+    RUNTIME_DEBUG_LOG(
+        "[REAL] wrap_top_k: axis=%lld, k=%lld, dtype=%s -> host\n",
+        (long long)axis, (long long)k_val, hipdnn_ep_datatype_name(data_type));
+    return finish(host_top_k(static_cast<hipStream_t>(stream), x, values,
+                             indices, axis, largest, rank, x_shape,
+                             num_elements, k_val, hip_dtype));
+  };
+
+  const bool device_dtype =
+      hip_dtype == HIP_DTYPE_FLOAT16 || hip_dtype == HIP_DTYPE_FLOAT32;
+  if (!device_dtype || !hip_top_k_device_supported(axis, rank, x_shape, k_val))
+    return run_on_host();
 
   void *workspace = nullptr;
   size_t workspace_bytes = 0;
@@ -194,18 +256,18 @@ int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
     workspace = hipdnn_ep_state_get_workspace(state);
     workspace_bytes = hipdnn_ep_state_get_workspace_size(state);
   }
+  // The device full sort needs its key workspace; the K <= 256 paths do not.
   if (k_val > kTopKDeviceMax && workspace_bytes < needed)
-    return host_top_k(static_cast<hipStream_t>(stream), x, values, indices,
-                      axis, largest, rank, x_shape, num_elements, k_val,
-                      element_size_bytes);
+    return run_on_host();
 
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_top_k: axis=%lld, k=%lld, rank=%lld, largest=%lld, "
-      "sorted=%lld, workspace=%zu/%zu -> hip_top_k\n",
+      "sorted=%lld, dtype=%s, workspace=%zu/%zu -> hip_top_k\n",
       (long long)axis, (long long)k_val, (long long)rank, (long long)largest,
-      (long long)sorted, workspace_bytes, needed);
+      (long long)sorted, hipdnn_ep_datatype_name(data_type), workspace_bytes,
+      needed);
 
-  return hip_top_k(stream, x, values, indices, axis, largest, sorted, rank,
-                   x_shape, k_val, static_cast<int>(element_size_bytes),
-                   workspace, workspace_bytes);
+  return finish(hip_top_k(stream, x, values, indices, axis, largest, sorted,
+                          rank, x_shape, k_val, hip_dtype, workspace,
+                          workspace_bytes));
 }

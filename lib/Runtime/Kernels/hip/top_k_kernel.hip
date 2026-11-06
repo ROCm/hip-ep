@@ -30,18 +30,10 @@ struct TopKGeom {
 
 __device__ float topk_elem_to_float(float v) { return v; }
 
-__device__ float topk_elem_to_float(double v) {
-  return static_cast<float>(v);
-}
-
 __device__ float topk_elem_to_float(__half v) { return __half2float(v); }
 
 __device__ void topk_store_value(float *values, int64_t offset, float v) {
   values[offset] = v;
-}
-
-__device__ void topk_store_value(double *values, int64_t offset, float v) {
-  values[offset] = static_cast<double>(v);
 }
 
 __device__ void topk_store_value(__half *values, int64_t offset, float v) {
@@ -772,7 +764,7 @@ extern "C" int hip_top_k(void *stream, const void *data, void *values,
                          void *indices, int64_t axis, int64_t largest,
                          int64_t sorted, int64_t rank,
                          const int64_t *x_shape, int64_t k,
-                         int element_size_bytes, void *workspace,
+                         int hip_dtype, void *workspace,
                          size_t workspace_bytes) {
   if (!data || !values || !indices || !x_shape)
     return -1;
@@ -794,31 +786,24 @@ extern "C" int hip_top_k(void *stream, const void *data, void *values,
 
   CUSTOM_KERNELS_DEBUG_LOG(
       "[custom_kernels] hip_top_k: axis=%lld, k=%lld, rank=%lld, "
-      "rows=%lld, axis_size=%lld, elem=%d\n",
+      "rows=%lld, axis_size=%lld, dtype=%d\n",
       (long long)geom.axis, (long long)geom.k, (long long)rank,
-      (long long)geom.num_rows, (long long)geom.axis_size,
-      element_size_bytes);
+      (long long)geom.num_rows, (long long)geom.axis_size, hip_dtype);
 
-  switch (element_size_bytes) {
-  case 2:
+  switch (hip_dtype) {
+  case HIP_DTYPE_FLOAT16:
     return launch_top_k<__half>(stream, data, values, indices, geom,
                                 static_cast<int>(largest),
                                 static_cast<int>(sorted), workspace,
                                 workspace_bytes);
-  case 4:
+  case HIP_DTYPE_FLOAT32:
     return launch_top_k<float>(stream, data, values, indices, geom,
                                static_cast<int>(largest),
                                static_cast<int>(sorted), workspace,
                                workspace_bytes);
-  case 8:
-    return launch_top_k<double>(stream, data, values, indices, geom,
-                              static_cast<int>(largest),
-                              static_cast<int>(sorted), workspace,
-                              workspace_bytes);
   default:
-    fprintf(stderr,
-            "[custom_kernels] hip_top_k: unsupported element_size=%d\n",
-            element_size_bytes);
+    fprintf(stderr, "[custom_kernels] hip_top_k: unsupported hip_dtype=%d\n",
+            hip_dtype);
     return -1;
   }
 }

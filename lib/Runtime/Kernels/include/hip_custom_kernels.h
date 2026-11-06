@@ -1514,11 +1514,13 @@ HIP_KERNEL_API int hip_top_k_device_supported(int64_t axis, int64_t rank,
                                               const int64_t* x_shape,
                                               int64_t k);
 
+/* Supported hip_dtype: HIP_DTYPE_FLOAT16, HIP_DTYPE_FLOAT32. Other dtypes
+ * return -1. */
 HIP_KERNEL_API int hip_top_k(void* stream, const void* data, void* values,
                              void* indices, int64_t axis, int64_t largest,
                              int64_t sorted, int64_t rank,
                              const int64_t* x_shape, int64_t k,
-                             int element_size_bytes, void* workspace,
+                             int hip_dtype, void* workspace,
                              size_t workspace_bytes);
 
 // Fill `output` with Normal(mean, scale) samples. `shape` has `rank` dims
