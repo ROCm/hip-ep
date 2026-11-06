@@ -82,11 +82,14 @@ __global__ void hip_layer_norm_kernel(const T_IN *__restrict__ input,
   __shared__ float s_inv_std;
   __shared__ float s_reduce[kLayerNormBlockSize];
 
-  // Pass A: per-thread partial sums.
+  // Pass A: per-thread partial sums of x - shift. Shifting by a sample of the
+  // row keeps E[x^2] - E[x]^2 from cancelling when |mean| >> stddev (e.g.
+  // x = [8192, 8193] in fp32 would otherwise give a variance of 0).
+  const float shift = load_as_float<T_IN, T_SCALE>(x_row);
   float local_sum = 0.0f;
   float local_sumsq = 0.0f;
   for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
-    float v = load_as_float<T_IN, T_SCALE>(x_row + i);
+    float v = load_as_float<T_IN, T_SCALE>(x_row + i) - shift;
     local_sum += v;
     local_sumsq += v * v;
   }
@@ -114,28 +117,30 @@ __global__ void hip_layer_norm_kernel(const T_IN *__restrict__ input,
   }
   if (threadIdx.x == 0) {
     s_sumsq = s_reduce[0];
-    float mean = s_sum / static_cast<float>(norm_size);
-    float var = s_sumsq / static_cast<float>(norm_size) - mean * mean;
+    float shifted_mean = s_sum / static_cast<float>(norm_size);
+    float var = s_sumsq / static_cast<float>(norm_size) -
+                shifted_mean * shifted_mean;
     if (var < 0.0f)
       var = 0.0f; // Cancellation-induced negative -> clamp.
     float inv_std = rsqrtf(var + epsilon);
-    s_mean = mean;
+    s_mean = shifted_mean;
     s_inv_std = inv_std;
     if (mean_out)
-      mean_out[row] = store_from_float<MEAN_OUT_T>(mean);
+      mean_out[row] = store_from_float<MEAN_OUT_T>(shift + shifted_mean);
     if (inv_std_out)
       inv_std_out[row] = store_from_float<MEAN_OUT_T>(inv_std);
   }
   __syncthreads();
 
-  // Pass B: per-element normalize + affine.
-  float mean = s_mean;
+  // Pass B: per-element normalize + affine. (x - shift) - shifted_mean keeps
+  // the precision that x - (shift + shifted_mean) loses when |mean| is large.
+  float shifted_mean = s_mean;
   float inv_std = s_inv_std;
   for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
-    float v = load_as_float<T_IN, T_SCALE>(x_row + i);
+    float v = load_as_float<T_IN, T_SCALE>(x_row + i) - shift;
     float s = load_as_float<T_SCALE, T_SCALE>(scale + i);
     float b = bias ? load_as_float<T_SCALE, T_SCALE>(bias + i) : 0.0f;
-    float n = (v - mean) * inv_std * s + b;
+    float n = (v - shifted_mean) * inv_std * s + b;
     y_row[i] = store_from_float<T_IN>(n);
   }
 }
