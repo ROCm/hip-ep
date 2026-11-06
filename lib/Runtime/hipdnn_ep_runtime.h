@@ -2227,12 +2227,22 @@ int wrap_mod(RuntimeState *state, void *lhs, void *rhs, void *output,
 // run end-to-end for IR-shape debugging.
 //
 // axes / steps may be nullptr when the corresponding optional input is absent.
+// The original entry point is retained for cached bitcode and reads INT64
+// indices. New code calls wrap_slice_typed, whose `index_type` is the shared
+// element type of starts, ends, axes and steps (INT32 or INT64).
 int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
                void *axes, void *steps, void *output, const int64_t *data_shape,
                int64_t data_rank, const int64_t *output_shape,
                int64_t output_rank, int64_t starts_num_elements,
                int64_t axes_num_elements, int64_t steps_num_elements,
                int64_t data_type);
+int wrap_slice_typed(RuntimeState *state, void *data, void *starts, void *ends,
+                     void *axes, void *steps, void *output,
+                     const int64_t *data_shape, int64_t data_rank,
+                     const int64_t *output_shape, int64_t output_rank,
+                     int64_t starts_num_elements, int64_t axes_num_elements,
+                     int64_t steps_num_elements, int64_t data_type,
+                     int64_t index_type);
 
 // ScatterND: output = copy(data), then output[indices[i]] (reduction)
 // updates[i].
