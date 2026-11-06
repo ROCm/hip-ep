@@ -203,6 +203,25 @@ def FuseROCMlirPass : Pass<"hip-fuse-rocmlir", "mlir::func::FuncOp"> {
   ];
 }
 
+def FuseROCMlirReportPass
+    : Pass<"hip-rocmlir-fusion-report", "mlir::ModuleOp"> {
+  let summary = "Write one JSON line per rocMLIR kernel dispatch";
+  let description = [{
+    Appends a JSON-lines record for every hip.rocmlir dispatch and one record
+    per host function to the output file. A kernel record holds the first
+    anchor op, the multiset of op names in the kernel, the kernel signature
+    and a hash of the kernel body with its symbol name removed. A host record
+    holds the multiset of op names left in that function. Two fusion
+    pipelines make the same kernels when their records are equal as
+    multisets, independent of kernel names and kernel order. The IR is not
+    changed.
+  }];
+  let options = [
+    Option<"output", "output", "std::string", /*default=*/"\"-\"",
+           "File the records are appended to; '-' writes to stderr.">
+  ];
+}
+
 def HipFusionTransformPass
     : Pass<"hip-fusion-transform", "mlir::ModuleOp"> {
   let summary = "Rewrite HIP operations into other HIP operations via PDLL "

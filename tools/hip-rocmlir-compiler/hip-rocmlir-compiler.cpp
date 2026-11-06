@@ -358,8 +358,7 @@ int main(int argc, char **argv) {
   pm.addNestedPass<mlir::func::FuncOp>(
       mlir::hip::createDecomposeConvTransposePass());
   pm.addPass(mlir::createCanonicalizerPass());
-  pm.addNestedPass<mlir::func::FuncOp>(mlir::hip::createFuseROCMlirPass());
-  pm.addPass(mlir::func::createDuplicateFunctionEliminationPass());
+  mlir::hip::addRocMlirFusionPasses(pm, mlir::hip::FuseROCMlirPassOptions());
 
   if (mlir::failed(pm.run(*module))) {
     llvm::errs() << "error: "

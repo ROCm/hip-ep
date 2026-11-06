@@ -6,6 +6,7 @@
 #define HIP_DIALECT_TRANSFORMS_PIPELINES_H
 
 #include "hip/Conversion/OnnxToHipDNN/Passes.h"
+#include "hip/Dialect/Transforms/Passes.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Pass/PassOptions.h"
 
@@ -156,6 +157,43 @@ struct HipdnnPipelineOptions
 /// Chains buildOnnxToHipPipeline and buildHipToLLVMPipeline.
 void buildHipdnnPipeline(OpPassManager &pm,
                          const HipdnnPipelineOptions &options);
+
+/// Add the rocMLIR kernel fusion to a module pass manager: the fusion of
+/// main_graph into rock.kernel functions, then the merge of duplicate
+/// kernels. A non-empty reportPath appends the --hip-rocmlir-fusion-report
+/// records to that file. Every caller builds the fusion through this function
+/// so that the pass order and the options stay the same across tools.
+void addRocMlirFusionPasses(OpPassManager &pm,
+                            const FuseROCMlirPassOptions &fuseOptions,
+                            llvm::StringRef reportPath = "");
+
+struct RocMlirFusionPipelineOptions
+    : PassPipelineOptions<RocMlirFusionPipelineOptions> {
+  Option<bool> fuseViews{
+      *this, "fuse-views",
+      llvm::cl::desc("Absorb views, prologues, quantize epilogues and extra "
+                     "outputs around an anchor"),
+      llvm::cl::init(true)};
+  Option<bool> fuseGemmGemm{
+      *this, "fuse-geg",
+      llvm::cl::desc("Merge gemm-elementwise-gemm kernel pairs"),
+      llvm::cl::init(true)};
+  Option<std::string> arch{
+      *this, "arch",
+      llvm::cl::desc("Target GPU architecture stamped as rock.arch"),
+      llvm::cl::init("")};
+  ListOption<std::string> gemmGemmAccelTypes{
+      *this, "gemm-gemm-accel-types",
+      llvm::cl::desc("Gemm element types with matrix acceleration")};
+  Option<std::string> report{
+      *this, "report",
+      llvm::cl::desc("Append the fusion report records to this file"),
+      llvm::cl::init("")};
+};
+
+/// The rocMLIR fusion as one pipeline, for LIT and hip-mlir-opt.
+void buildRocMlirFusionPipeline(OpPassManager &pm,
+                                const RocMlirFusionPipelineOptions &options);
 
 struct RocMlirPipelineOptions : PassPipelineOptions<RocMlirPipelineOptions> {};
 
