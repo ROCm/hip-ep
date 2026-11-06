@@ -37,6 +37,8 @@ constexpr int kThreadsPerBlock = 128;
 // HIP reports WGPs in multiProcessorCount on RDNA; each WGP contains two CUs.
 constexpr int kComputeUnitsPerWgp = 2;
 constexpr int kMaxTopK = 32;
+static_assert(kMaxTopK <= 32, "qmoe_reduce_sorted_pairs_kernel tracks used "
+                              "slots in a uint32_t mask");
 constexpr int kGemvTileN = 16;
 constexpr int64_t kTwoWindowMinRows = 512;
 
