@@ -1241,7 +1241,7 @@ int wrap_gather_elements(RuntimeState *state, void *data, void *indices,
 int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
                void *indices, int64_t axis, int64_t largest, int64_t sorted,
                int64_t rank, const int64_t *x_shape, int64_t num_elements,
-               int64_t element_size_bytes);
+               int64_t data_type);
 
 // RandomNormalLike. `shape` is the output rank's sizes, including dynamic
 // dims filled in by the HIP-to-LLVM lowering. The input tensor is not

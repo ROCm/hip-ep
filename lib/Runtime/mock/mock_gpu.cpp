@@ -1119,7 +1119,7 @@ int wrap_arg_max(RuntimeState *state, void *data, void *indices, int64_t axis,
 int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
                void *indices, int64_t axis, int64_t largest, int64_t sorted,
                int64_t rank, const int64_t *x_shape, int64_t num_elements,
-               int64_t element_size_bytes) {
+               int64_t data_type) {
   (void)x;
   (void)k;
   (void)values;
@@ -1130,10 +1130,9 @@ int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
     return -1;
   }
   MOCK_PRINT("[MOCK] wrap_top_k(axis=%lld, largest=%lld, sorted=%lld, "
-             "rank=%lld, num_elements=%lld, element_size=%lld)\n",
+             "rank=%lld, num_elements=%lld, data_type=%lld)\n",
              (long long)axis, (long long)largest, (long long)sorted,
-             (long long)rank, (long long)num_elements,
-             (long long)element_size_bytes);
+             (long long)rank, (long long)num_elements, (long long)data_type);
   return 0;
 }
 

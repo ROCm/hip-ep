@@ -34,7 +34,7 @@ static Value buildShapeArray(MemRefType type, Value memref, Location loc,
 
 // hip.top_k(ctx, x, k, values, indices, axis, largest, sorted)
 //   -> wrap_top_k(state, x, k, values, indices, axis, largest, sorted, rank,
-//                 x_shape_ptr, num_elements, element_size_bytes)
+//                 x_shape_ptr, num_elements, data_type)
 struct TopKOpLowering : public ConvertOpToLLVMPattern<TopKOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -78,14 +78,13 @@ struct TopKOpLowering : public ConvertOpToLLVMPattern<TopKOp> {
     Value largestVal = createI64Const(op.getLargest() ? 1 : 0);
     Value sortedVal = createI64Const(op.getSorted() ? 1 : 0);
 
-    unsigned elementSizeBytes =
-        xType.getElementType().getIntOrFloatBitWidth() / 8;
-    Value elemSizeVal = createI64Const(elementSizeBytes);
+    Value dataTypeVal =
+        createI64Const(getHipdnnDataType(xType.getElementType()));
 
     SmallVector<Type, 12> paramTypes = {
         ptrType, ptrType, ptrType, ptrType, ptrType, // state, x, k, values, idx
         i64Type, i64Type, i64Type,                   // axis, largest, sorted
-        i64Type, ptrType, i64Type, i64Type};         // rank, shape, num, elem
+        i64Type, ptrType, i64Type, i64Type};         // rank, shape, num, dtype
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapTopK, paramTypes, i32Type);
@@ -94,7 +93,7 @@ struct TopKOpLowering : public ConvertOpToLLVMPattern<TopKOp> {
 
     SmallVector<Value> args = {statePtr,   xPtr,      kPtr,        valuesPtr,
                                indicesPtr, axisVal,   largestVal,  sortedVal,
-                               rankVal,    xShapeArr, numElements, elemSizeVal};
+                               rankVal,    xShapeArr, numElements, dataTypeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
