@@ -24,7 +24,7 @@ jobs:
 
     env:
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
-      STRIX_HF_MODELS: "amd/Gemma3-4B-it_gpuep_1.0_gpu_128 amd/Qwen3.5-9B_gpuep_1.0_gpu_128"
+      STRIX_HF_MODELS: "amd/Qwen3.5-9B_gpuep_1.0_gpu_128"
 
     steps:
       - name: Clean workspace
@@ -185,8 +185,9 @@ jobs:
             $model = $repo.Split('/')[1]
             $file = "strix-oga-results/$model.txt"
             $content = if (Test-Path -LiteralPath $file) { Get-Content -LiteralPath $file -Raw } else { "" }
-            $ttftMatch = [regex]::Match($content, 'Prompt processing \(time to first token\):\s*\n\s*avg \(us\):\s+([\d.]+)')
-            $tpsMatch = [regex]::Match($content, 'Token generation:\s*\n\s*avg \(us\):\s+([\d.]+)\s*\n\s*avg \(tokens/s\):\s+([\d.]+)')
+            $num = '([\d.]+(?:[eE][+-]?\d+)?)'
+            $ttftMatch = [regex]::Match($content, "Prompt processing \(time to first token\):\s*\n\s*avg \(us\):\s+$num")
+            $tpsMatch = [regex]::Match($content, "Token generation:\s*\n\s*avg \(us\):\s+$num\s*\n\s*avg \(tokens/s\):\s+$num")
             $memMatch = [regex]::Match($content, 'Peak working set size:\s+(\d+)\s+bytes')
             $ttft = if ($ttftMatch.Success) { [double]$ttftMatch.Groups[1].Value / 1000 } else { $null }
             $tps = if ($tpsMatch.Success) { [double]$tpsMatch.Groups[2].Value } else { $null }
