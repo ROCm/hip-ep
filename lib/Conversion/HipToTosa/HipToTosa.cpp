@@ -6726,6 +6726,12 @@ struct GqaConverter final : public OpConversionPattern<GqaOp> {
     if (!yType || !yType.hasStaticShape() || !pkType ||
         !pkType.hasStaticShape() || !pvType || !pvType.hasStaticShape())
       return rewriter.notifyMatchFailure(op, "expected static ranked tensors");
+    auto kbTy = adaptor.getKeyBias()
+                    ? dyn_cast<RankedTensorType>(adaptor.getKeyBias().getType())
+                    : RankedTensorType();
+    if (adaptor.getKeyBias() &&
+        (!kbTy || !kbTy.hasStaticShape() || kbTy.getRank() != 2))
+      return rewriter.notifyMatchFailure(op, "key_bias must be static");
 
     // Dialect verify already restricts bit width to 4 or 8. INT4 is legal on
     // hip.gqa; this expansion only implements the INT8 / float cache path.
@@ -6890,6 +6896,15 @@ struct GqaConverter final : public OpConversionPattern<GqaOp> {
         failed(addAttentionBias(scores, adaptor.getAttentionBias(), qkTy, batch,
                                 numHeads, rewriter, loc, op)))
       return failure();
+    if (Value keyBias = adaptor.getKeyBias()) {
+      if (kbTy.getElementType() != attnElem)
+        keyBias = emitTosaCast(rewriter, loc, keyBias, attnElem);
+      keyBias = reshapeTo(
+          keyBias, {kbTy.getDimSize(0), 1, 1, kbTy.getDimSize(1)}, rewriter);
+      if (failed(addAttentionBias(scores, keyBias, qkTy, batch, numHeads,
+                                  rewriter, loc, op)))
+        return failure();
+    }
 
     Value kIdx = createArangeI32(rewriter, loc, seqKv);
     kIdx = reshapeTo(kIdx, {1, 1, seqKv}, rewriter);
@@ -7750,6 +7765,8 @@ std::optional<QMoEPlan> planQMoE(hip::QMoEOp op) {
     return std::nullopt;
   // router_weights overrides router_probs and skips the softmax; not modelled.
   if (op.getRouterWeights())
+    return std::nullopt;
+  if (op.getRoutingType() != "softmax")
     return std::nullopt;
   if (op.getExpertWeightBits() != 4)
     return std::nullopt;
