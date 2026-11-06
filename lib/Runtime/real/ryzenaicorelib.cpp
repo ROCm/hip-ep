@@ -655,8 +655,10 @@ int64_t kernel_group(int64_t block_size) {
 bool collect_matmul_rows(void *p,
                          const ryzenai_corelib_matmul_bf16_kernel_info *info) {
   auto *q = static_cast<MatMulKernelQuery *>(p);
-  // Accept either spelling of the group.
-  if (info->k == q->k && info->n == q->n && info->has_bias == q->has_bias &&
+  // Accept either spelling of the group. The KV-cache writing (`_gm`) kernels
+  // are listed too, with gm_heads set; a plain matmul cannot run them.
+  if (info->gm_heads == 0 && info->k == q->k && info->n == q->n &&
+      info->has_bias == q->has_bias &&
       (info->group_size == q->block_size ||
        info->group_size == kernel_group(q->block_size)))
     q->rows->insert(info->m);
