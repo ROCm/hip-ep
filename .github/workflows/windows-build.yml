@@ -45,6 +45,13 @@ jobs:
       pull-requests: write
       actions: read
 
+  gpu_test_strix:
+    needs: build_real
+    uses: ./.github/workflows/windows-gpu-test-strix.yml
+    permissions:
+      contents: read
+      actions: read
+
   kernel_ut:
     needs: build_real
     uses: ./.github/workflows/windows-kernel-ut.yml
