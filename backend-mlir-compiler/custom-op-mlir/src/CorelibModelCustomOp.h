@@ -42,6 +42,7 @@ private:
   std::vector<std::pair<int, int>> presents_;
   mutable std::vector<int32_t> tokens_;
   mutable std::vector<float> logits_buf_;
+  mutable std::vector<Ort::Float16_t> logits_fp16_;
   mutable bool warned_mask_ = false;
 };
 

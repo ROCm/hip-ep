@@ -9,6 +9,10 @@
 #include "google/protobuf/util/json_util.h"
 #include <glog/logging.h>
 
+#ifdef HIPDNN_EP_LINK_HIP_HOST
+#include <hip/hip_runtime_api.h>
+#endif
+
 #include <cstdio>
 #include <cstring>
 #include <stdexcept>
@@ -29,12 +33,42 @@ int find(const google::protobuf::RepeatedPtrField<std::string> &names,
   throw std::runtime_error("[corelib] model: " + msg);
 }
 
-// Reads an int32 or int64 tensor's i-th element.
-int64_t int_at(const Ort::ConstValue &v, size_t i) {
-  if (v.GetTensorTypeAndShapeInfo().GetElementType() ==
-      ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32)
-    return v.GetTensorData<int32_t>()[i];
-  return v.GetTensorData<int64_t>()[i];
+// The EP's default device memory is device-only VRAM (hipMalloc), which the
+// host cannot read: such tensors move through hipMemcpy.
+bool on_gpu(const Ort::ConstMemoryInfo &info) {
+  return info.GetDeviceType() == OrtMemoryInfoDeviceType_GPU;
+}
+
+void copy(void *dst, const void *src, size_t bytes, bool gpu_src,
+          bool gpu_dst) {
+  if (!gpu_src && !gpu_dst) {
+    std::memcpy(dst, src, bytes);
+    return;
+  }
+#ifdef HIPDNN_EP_LINK_HIP_HOST
+  // ORT may still be filling an input on a stream of its own.
+  if (gpu_src && hipDeviceSynchronize() != hipSuccess)
+    fail("hipDeviceSynchronize failed");
+  if (hipMemcpy(dst, src, bytes, hipMemcpyDefault) != hipSuccess)
+    fail("hipMemcpy of " + std::to_string(bytes) + " bytes failed");
+#else
+  fail("a tensor in GPU memory, in a build without HIP");
+#endif
+}
+
+// An int32 or int64 tensor's elements, as int64, wherever it lives.
+std::vector<int64_t> read_ints(const Ort::ConstValue &v, size_t n) {
+  const bool i32 = v.GetTensorTypeAndShapeInfo().GetElementType() ==
+                   ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32;
+  const size_t elem = i32 ? sizeof(int32_t) : sizeof(int64_t);
+  std::vector<uint8_t> raw(n * elem);
+  copy(raw.data(), v.GetTensorRawData(), raw.size(),
+       on_gpu(v.GetTensorMemoryInfo()), false);
+  std::vector<int64_t> out(n);
+  for (size_t i = 0; i < n; ++i)
+    out[i] = i32 ? reinterpret_cast<const int32_t *>(raw.data())[i]
+                 : reinterpret_cast<const int64_t *>(raw.data())[i];
+  return out;
 }
 
 } // namespace
@@ -104,8 +138,8 @@ void CorelibModelCustomOp::Compute(const OrtApi * /*api*/,
   if (rows <= 0)
     fail("input_ids is empty");
   int64_t total = 0;
-  for (int64_t i = 0; i < mask_shape[1]; ++i)
-    total += int_at(mask, size_t(i));
+  for (int64_t m : read_ints(mask, size_t(mask_shape[1])))
+    total += m;
   if (total < rows) {
     if (!warned_mask_) {
       warned_mask_ = true;
@@ -118,9 +152,10 @@ void CorelibModelCustomOp::Compute(const OrtApi * /*api*/,
   }
   const int64_t position = total - rows;
 
+  const std::vector<int64_t> ids_host = read_ints(ids, size_t(rows));
   tokens_.resize(size_t(rows));
   for (int64_t i = 0; i < rows; ++i)
-    tokens_[size_t(i)] = static_cast<int32_t>(int_at(ids, size_t(i)));
+    tokens_[size_t(i)] = static_cast<int32_t>(ids_host[size_t(i)]);
   std::string why;
   if (!hipdnn_ep::corelib::forward(*session_, tokens_.data(), size_t(rows),
                                    position, logits_buf_.data(), &why))
@@ -131,18 +166,31 @@ void CorelibModelCustomOp::Compute(const OrtApi * /*api*/,
   const int64_t vocab = int64_t(logits_buf_.size());
   const int64_t shape[3] = {1, rows, vocab};
   Ort::UnownedValue out = ctxGetOutput(ctx, logits_, shape, 3);
-  const size_t last = size_t((rows - 1) * vocab);
-  if (out.GetTensorTypeAndShapeInfo().GetElementType() ==
-      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
-    auto *dst = out.GetTensorMutableData<Ort::Float16_t>();
-    std::memset(dst, 0, last * sizeof(Ort::Float16_t));
+  const bool fp16 = out.GetTensorTypeAndShapeInfo().GetElementType() ==
+                    ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16;
+  const size_t elem = fp16 ? sizeof(Ort::Float16_t) : sizeof(float);
+  const size_t row_bytes = size_t(vocab) * elem;
+  const size_t lead_bytes = size_t(rows - 1) * row_bytes;
+  const void *last_row = logits_buf_.data();
+  if (fp16) {
+    logits_fp16_.resize(size_t(vocab));
     for (int64_t v = 0; v < vocab; ++v)
-      dst[last + size_t(v)] = Ort::Float16_t(logits_buf_[size_t(v)]);
-  } else {
-    auto *dst = out.GetTensorMutableData<float>();
-    std::memset(dst, 0, last * sizeof(float));
-    std::memcpy(dst + last, logits_buf_.data(), size_t(vocab) * sizeof(float));
+      logits_fp16_[size_t(v)] = Ort::Float16_t(logits_buf_[size_t(v)]);
+    last_row = logits_fp16_.data();
   }
+  auto *dst = static_cast<uint8_t *>(out.GetTensorMutableRawData());
+  const bool gpu_out = on_gpu(out.GetTensorMemoryInfo());
+  if (lead_bytes != 0) {
+    if (gpu_out) {
+#ifdef HIPDNN_EP_LINK_HIP_HOST
+      if (hipMemset(dst, 0, lead_bytes) != hipSuccess)
+        fail("hipMemset of the logits failed");
+#endif
+    } else {
+      std::memset(dst, 0, lead_bytes);
+    }
+  }
+  copy(dst + lead_bytes, last_row, row_bytes, false, gpu_out);
 
   // CoreLib keeps the KV cache, so present.* is left unwritten. With a shared
   // past/present buffer it is that buffer and takes its shape; otherwise it
