@@ -38,6 +38,7 @@ from .step1_qdq_fp16 import (
 )
 from .step2_fp16_cleanup import patch_model_file
 from .step4_unfix_seq_len import unfix_seq_len
+from .step5_merge import normalize_gqa_kv_cache_shapes_file
 
 DEFAULT_MAX_SEQ_LEN = 16384
 INTERMEDIATES_DIR_NAME = "work"
@@ -362,6 +363,12 @@ def convert_bundle(
         raise RuntimeError(
             f"Conversion finished but external weights missing: {merged_data}"
         )
+
+    normalized_dims = normalize_gqa_kv_cache_shapes_file(merged_path)
+    print(
+        "  Normalized GQA KV sequence dimensions "
+        f"({normalized_dims} tensor shape(s) changed)"
+    )
 
     source_cfg = _find_genai_config_source(bundle.input_dir)
     cfg = build_genai_config(
