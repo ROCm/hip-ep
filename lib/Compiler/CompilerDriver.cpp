@@ -40,6 +40,8 @@
 #include "mlir/Transforms/Passes.h"
 
 #include "llvm/ADT/Sequence.h"
+#include "llvm/ADT/SmallString.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
@@ -81,6 +83,41 @@ bool rocMlirPipelineRequested() {
   return false;
 #endif
 }
+
+#ifdef ENABLE_ROCMLIRTRITON
+// HIPDNN_EP_ROCMLIR_PRE_FUSION_DUMP=<dir> writes the IR that the rocMLIR
+// fusion reads, one file per compiled graph. The first line records the
+// fusion options in --hip-rocmlir-fusion syntax, so that hip-mlir-opt can
+// replay the same fusion without a GPU.
+void dumpPreFusionIR(mlir::ModuleOp module,
+                     const mlir::hip::FuseROCMlirPassOptions &fuseOpts) {
+  std::string dir = hip_get_env("HIPDNN_EP_ROCMLIR_PRE_FUSION_DUMP");
+  if (dir.empty())
+    return;
+  static std::atomic<unsigned> sDumpSeq{0};
+  if (std::error_code ec = llvm::sys::fs::create_directories(dir)) {
+    llvm::errs() << "[CompilerDriver] cannot create " << dir << ": "
+                 << ec.message() << "\n";
+    return;
+  }
+  llvm::SmallString<256> path(dir);
+  llvm::sys::path::append(
+      path, "pre-fusion." + std::to_string(sDumpSeq.fetch_add(1)) + ".mlir");
+  std::error_code ec;
+  llvm::raw_fd_ostream os(path, ec);
+  if (ec) {
+    llvm::errs() << "[CompilerDriver] cannot open " << path << ": "
+                 << ec.message() << "\n";
+    return;
+  }
+  os << "// hip-rocmlir-fusion: fuse-views="
+     << (fuseOpts.fuseViews ? "true" : "false")
+     << " fuse-geg=" << (fuseOpts.fuseGemmGemm ? "true" : "false")
+     << " arch=" << fuseOpts.arch << " gemm-gemm-accel-types="
+     << llvm::join(fuseOpts.gemmGemmAccelTypes, ",") << "\n";
+  module->print(os);
+}
+#endif
 
 OnnxDialectKind onnxDialectKind() {
   return hipsrPipelineRequested() ? OnnxDialectKind::Modeled
@@ -439,11 +476,18 @@ bool CompilerDriver::runMLIRPasses(
       std::vector<std::string> accelTypes = mlir::hip::getRocMlirGemmAccelTypes(
           *module.getContext(), fuseOpts.arch);
       fuseOpts.gemmGemmAccelTypes.assign(accelTypes.begin(), accelTypes.end());
-      headPm.addNestedPass<mlir::func::FuncOp>(
-          mlir::hip::createFuseROCMlirPass(fuseOpts));
-      headPm.addPass(mlir::func::createDuplicateFunctionEliminationPass());
       if (mlir::failed(headPm.run(module))) {
-        error_message = "ONNX->HIP + fuse-rocmlir passes failed";
+        error_message = "ONNX->HIP passes before fuse-rocmlir failed";
+        return false;
+      }
+      dumpPreFusionIR(module, fuseOpts);
+      mlir::PassManager fusePm(module.getContext());
+      // HIPDNN_EP_ROCMLIR_FUSION_REPORT=<file> appends one JSON line per
+      // kernel, to compare the kernels of two fusion pipelines.
+      mlir::hip::addRocMlirFusionPasses(
+          fusePm, fuseOpts, hip_get_env("HIPDNN_EP_ROCMLIR_FUSION_REPORT"));
+      if (mlir::failed(fusePm.run(module))) {
+        error_message = "fuse-rocmlir passes failed";
         return false;
       }
     }

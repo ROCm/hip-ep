@@ -35,6 +35,7 @@ add_library(HipDialectTransforms STATIC
   FixLoopAccumulatorOffset.cpp
   FoldBatchNorm.cpp
   FuseROCMlir.cpp
+  FuseROCMlirReport.cpp
   GenerateInterface.cpp
   GenerateOpStateInit.cpp
   HipFusionTransform.cpp
