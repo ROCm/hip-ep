@@ -29,7 +29,7 @@ The generated model ABI uses `inference_compute(state, inputs)`. Graph outputs a
 | ONNX-to-HIP conversion | `lib/Conversion/OnnxToHip/` |
 | HIP dialect | `include/hip/Dialect/`, `lib/Dialect/` |
 | HIP-to-LLVM lowering | `lib/Conversion/HipToLLVM/` |
-| Compiler pipeline and driver | `lib/Dialect/Transforms/Pipelines.cpp`, `lib/Compiler/` |
+| Compiler pipeline and driver | `lib/Dialect/Hip/Transforms/Pipelines.cpp`, `lib/Compiler/` |
 | Runtime | `lib/Runtime/` |
 | Custom HIP kernels | `lib/Runtime/Kernels/` |
 | ONNX Runtime / MorphiZen integration | `backend-mlir-compiler/`, `morphizen/` |

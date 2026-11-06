@@ -7,8 +7,8 @@
 #define HIP_CONVERSION_HIPTOLLVM_UTILS_H
 
 #include "RuntimeAccess.h"
-#include "hip/Dialect/IR/HipDialect.h"
-#include "hip/Dialect/Transforms/Passes.h"
+#include "hip/Dialect/Hip/IR/HipDialect.h"
+#include "hip/Dialect/Hip/Transforms/Passes.h"
 #include "hip/datatype_abi.h"
 #include "hip/debug_log.h"
 #include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"

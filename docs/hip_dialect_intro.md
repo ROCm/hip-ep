@@ -205,20 +205,20 @@ For manual debugging, `hip-mlir-opt` can run the pass pipeline in isolation:
 ## File Structure
 
 ```
-include/hip/Dialect/IR/
+include/hip/Dialect/Hip/IR/
   HipDialect.td            Dialect definition (namespace "hip")
   HipTypes.td              Type definitions (!hip.context)
   HipOps.td                All op definitions (DPS ins/outs format)
   HipDialect.h             Dialect C++ header
   HipBufferize.h           Bufferization interface models
 
-include/hip/Dialect/Transforms/
+include/hip/Dialect/Hip/Transforms/
   Passes.td                Pass definitions via TableGen
   Passes.h                 Pass declarations (auto-generated)
 
-lib/Dialect/IR/
+lib/Dialect/Hip/IR/
   HipDialect.cpp           Dialect registration + DPS interface implementations
-lib/Dialect/Transforms/
+lib/Dialect/Hip/Transforms/
   OptimizeMemRefs.cpp      Buffer reuse pass (--hip-optimize-memrefs)
   PoolAllocs.cpp           Memory pooling pass (--hip-pool-allocs)
   LowerAllocs.cpp          memref.alloc -> hip.alloc pass (--hip-lower-allocs)

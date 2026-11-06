@@ -5,7 +5,7 @@
 
 #include "Dialect/Hip/TestHipPasses.h"
 
-#include "hip/Dialect/IR/HipDialect.h"
+#include "hip/Dialect/Hip/IR/HipDialect.h"
 
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/DialectRegistry.h"

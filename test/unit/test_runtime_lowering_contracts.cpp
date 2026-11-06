@@ -5,8 +5,8 @@
 
 #include "RuntimeAccess.h"
 #include "hip/Conversion/HipToLLVM/Passes.h"
-#include "hip/Dialect/IR/HipDialect.h"
-#include "hip/Dialect/IR/RuntimeAccessOpInterface.h"
+#include "hip/Dialect/Hip/IR/HipDialect.h"
+#include "hip/Dialect/Hip/IR/RuntimeAccessOpInterface.h"
 #include "mlir/Conversion/ConvertToLLVM/ToLLVMInterface.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"

@@ -12,7 +12,7 @@
 
 #include "hip/Compiler/PluginAPI.h"
 #include "hip/Compiler/PluginRegistry.h"
-#include "hip/Dialect/IR/HipDialect.h"
+#include "hip/Dialect/Hip/IR/HipDialect.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"

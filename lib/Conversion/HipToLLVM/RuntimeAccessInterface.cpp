@@ -4,8 +4,8 @@
  */
 
 #include "hip/Conversion/HipToLLVM/Passes.h"
-#include "hip/Dialect/IR/HipDialect.h"
-#include "hip/Dialect/IR/RuntimeAccessOpInterface.h"
+#include "hip/Dialect/Hip/IR/HipDialect.h"
+#include "hip/Dialect/Hip/IR/RuntimeAccessOpInterface.h"
 #include "mlir/IR/DialectRegistry.h"
 
 using namespace mlir;

@@ -3,8 +3,8 @@
  * Licensed under the MIT License.
  */
 
-#include "hip/Dialect/IR/HipDialect.h"
-#include "hip/Dialect/Transforms/Passes.h"
+#include "hip/Dialect/Hip/IR/HipDialect.h"
+#include "hip/Dialect/Hip/Transforms/Passes.h"
 
 #include <llvm/ADT/STLFunctionalExtras.h>
 #include <llvm/ADT/Sequence.h>
@@ -41,7 +41,7 @@
 namespace mlir::hip {
 
 #define GEN_PASS_DEF_CONVERTHIPTOTOSAPASS
-#include "hip/Dialect/Transforms/Passes.h.inc"
+#include "hip/Dialect/Hip/Transforms/Passes.h.inc"
 
 namespace {
 

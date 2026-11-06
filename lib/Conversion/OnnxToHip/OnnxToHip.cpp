@@ -32,7 +32,7 @@ namespace mlir {
 namespace hip {
 
 #define GEN_PASS_DEF_CONVERTONNXTOHIPPASS
-#include "hip/Dialect/Transforms/Passes.h.inc"
+#include "hip/Dialect/Hip/Transforms/Passes.h.inc"
 
 namespace {
 
@@ -524,7 +524,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
 
   // NOTE: onnx.CastLike -> onnx.Cast + dead-type-donor function-argument
   // drop is handled by the standalone simplify-onnx pass, which must run
-  // upstream of this one (see lib/Dialect/Transforms/Pipelines.cpp). We
+  // upstream of this one (see lib/Dialect/Hip/Transforms/Pipelines.cpp). We
   // capture metadata directly from the (already-simplified) signatures.
   if (mlir::failed(generateModuleMetadata(module)))
     return signalPassFailure();

@@ -33,7 +33,7 @@ class DialectRegistry;
 //                                 is built from. Same shared-MLIR requirement
 //                                 as registerPass.
 //   * requestPipelineSlot(...) -- run a registered pass at a named slot; read
-//                                 by lib/Dialect/Transforms/Pipelines.cpp.
+//                                 by lib/Dialect/Hip/Transforms/Pipelines.cpp.
 //   * addRuntimeBitcode(...)   -- contribute LLVM bitcode linked into the
 //                                 model module by
 //                                 lib/Target/LLVM/LLVMBackend.cpp (see the
@@ -73,7 +73,7 @@ namespace hip::compiler {
 /// simply do not reference the new slot.
 ///
 /// The current slots match the public seams in
-/// `lib/Dialect/Transforms/Pipelines.cpp`.
+/// `lib/Dialect/Hip/Transforms/Pipelines.cpp`.
 enum class PipelineSlot {
   /// After `SimplifyOnnxPass` in `buildOnnxToHipPipeline`.
   AfterSimplifyOnnx,
@@ -191,7 +191,7 @@ public:
   /// used for `--hip-mlir-opt --pass=...`).
   ///
   /// Records the (slot, passName) pair into the per-process registry
-  /// consulted by `lib/Dialect/Transforms/Pipelines.cpp`.
+  /// consulted by `lib/Dialect/Hip/Transforms/Pipelines.cpp`.
   void requestPipelineSlot(PipelineSlot slot, llvm::StringRef passName) {
     vtable_->requestPipelineSlot(self_, static_cast<int>(slot), passName.data(),
                                  passName.size());
@@ -258,7 +258,7 @@ void dispatchPluginRegistrationsOnce();
 /// references storage owned by the per-process plugin registry; each
 /// `StringRef` is stable for the lifetime of the process.
 ///
-/// Used by `lib/Dialect/Transforms/Pipelines.cpp` at each pipeline
+/// Used by `lib/Dialect/Hip/Transforms/Pipelines.cpp` at each pipeline
 /// slot to look up the requested plugin passes by name in MLIR's
 /// global pass registry and add them to the active `PassManager`.
 llvm::SmallVector<llvm::StringRef> pluginPassesForSlot(PipelineSlot slot);

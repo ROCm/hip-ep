@@ -256,7 +256,7 @@ The changes run within `convert-onnx-to-hip`; they do not add a pass.
 
 ### Pass order
 
-[pipeline_pass_menu.md](../pipeline_pass_menu.md) documents pass names and extension anchors. The order source of truth is `lib/Dialect/Transforms/Pipelines.cpp`; the relevant segment is:
+[pipeline_pass_menu.md](../pipeline_pass_menu.md) documents pass names and extension anchors. The order source of truth is `lib/Dialect/Hip/Transforms/Pipelines.cpp`; the relevant segment is:
 
 ```text
 simplify-onnx

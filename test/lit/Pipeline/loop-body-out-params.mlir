@@ -6,7 +6,7 @@
 
 // What this file tests
 // --------------------
-// The `--hip-loop-body-to-out-params` pass (lib/Dialect/Transforms/
+// The `--hip-loop-body-to-out-params` pass (lib/Dialect/Hip/Transforms/
 // LoopBodyToOutParams.cpp), which promotes private `*_loop_body_*`
 // functions from a return-based memref ABI to the out-param ABI that
 // `convert-hip-to-llvm` LoopLowering implements:

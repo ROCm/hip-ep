@@ -11,15 +11,15 @@
 #include "hip/Conversion/HipToLLVM/Passes.h"
 #include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Conversion/Passes.h"
+#include "hip/Dialect/Hip/IR/HipBufferize.h"
+#include "hip/Dialect/Hip/IR/HipDialect.h"
+#include "hip/Dialect/Hip/Transforms/Passes.h"
+#include "hip/Dialect/Hip/Transforms/Pipelines.h"
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
 #include "hip/Dialect/Hipsr/Pipelines/Pipelines.h"
 #include "hip/Dialect/Hipsr/Transforms/BufferizableOpInterfaceImpl.h"
 #include "hip/Dialect/Hipsr/Transforms/Passes.h"
-#include "hip/Dialect/IR/HipBufferize.h"
-#include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Onnx/IR/OnnxDialect.h"
-#include "hip/Dialect/Transforms/Passes.h"
-#include "hip/Dialect/Transforms/Pipelines.h"
 
 #include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
 #include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
@@ -172,7 +172,7 @@ loadAllDialects(mlir::MLIRContext &context,
 /// nameable passes can never drift between the EP and the tool.
 ///
 /// The authoritative name lists live with the passes themselves
-/// (`Dialect/Transforms/Passes.td`, each conversion pass's `getArgument()`)
+/// (`Dialect/Hip/Transforms/Passes.td`, each conversion pass's `getArgument()`)
 /// and are catalogued in `docs/pipeline_pass_menu.md`; this function only
 /// triggers their registration, so it deliberately does not re-enumerate them.
 ///

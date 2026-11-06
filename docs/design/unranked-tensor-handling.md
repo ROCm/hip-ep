@@ -12,7 +12,7 @@ This is the cross-repo contract referenced from PR
 [ROCm/MorphiZen #228](https://github.com/ROCm/MorphiZen/pull/228) and
 from comments in `lib/Conversion/OnnxToHip/LoopOutline.cpp`,
 `include/hip/InitAllPasses.h`, and
-`lib/Dialect/Transforms/Pipelines.cpp`.
+`lib/Dialect/Hip/Transforms/Pipelines.cpp`.
 
 > **TODO (in-flight)**: the importer-side half of this contract ships
 > in [MorphiZen PR #228](https://github.com/ROCm/MorphiZen/pull/228).
@@ -97,12 +97,12 @@ ort-bridge): preserve unranked tensors at the ORT boundary`).
   (e.g. those that index into a specific dim to size a `tensor.empty`)
   bail on unranked input.
 - **`--hip-infer-loop-body-shapes`**
-  (`lib/Dialect/Transforms/InferLoopBodyShapesPass.cpp`) runs before
+  (`lib/Dialect/Hip/Transforms/InferLoopBodyShapesPass.cpp`) runs before
   ONNX-to-HIP conversion. It seeds outlined-loop carried arguments from
   `v_init`, forward-infers supported unranked ONNX results (currently
   `onnx.Concat`), and applies the ONNX loop-carried type contract as a
   backstop. This is the EP's narrow rank-establishment stage.
-- **`--hip-infer-shapes`** (lib/Dialect/Transforms/InferShapesPass.cpp)
+- **`--hip-infer-shapes`** (lib/Dialect/Hip/Transforms/InferShapesPass.cpp)
   narrows dynamic dimensions (`?`) on already-ranked HIP DPS result
   types from shapes reified by `ReifyRankedShapedTypeOpInterface`.
   It does not convert `UnrankedTensorType` into a ranked type. Phase 2

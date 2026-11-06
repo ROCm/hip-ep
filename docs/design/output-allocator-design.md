@@ -68,7 +68,7 @@ generate-interface               ← 2-arg inference_compute ABI
 - `main_graph(state, inputs_array) -> i32`
 - Outputs allocated in-graph via `hip.alloc_output`, no `outputs_array`
 
-**Pipeline ordering is load-bearing.** `hip-use-output-allocator` runs *before* `hip-pool-allocs` (the "slot 4.5" placement) so the EP-owned output stays out of the GPU pool. Note this pipeline does **not** run ownership-based buffer deallocation at all — every transient is packed into session-owned pool(s) by `hip-pool-allocs` (as `memref.view` over `hip.get_pool`) rather than freed per-`memref.alloc`, so there is nothing to deallocate (see the pipeline-tail comment in `lib/Dialect/Transforms/Pipelines.cpp`). The historical constraint of running the output-allocator *after* deallocation (to stop the deallocator cloning the unowned `hip.alloc_output` at the `return`) is therefore moot.
+**Pipeline ordering is load-bearing.** `hip-use-output-allocator` runs *before* `hip-pool-allocs` (the "slot 4.5" placement) so the EP-owned output stays out of the GPU pool. Note this pipeline does **not** run ownership-based buffer deallocation at all — every transient is packed into session-owned pool(s) by `hip-pool-allocs` (as `memref.view` over `hip.get_pool`) rather than freed per-`memref.alloc`, so there is nothing to deallocate (see the pipeline-tail comment in `lib/Dialect/Hip/Transforms/Pipelines.cpp`). The historical constraint of running the output-allocator *after* deallocation (to stop the deallocator cloning the unowned `hip.alloc_output` at the `return`) is therefore moot.
 
 ---
 
@@ -95,7 +95,7 @@ Introduce `hip.alloc_output` — an operation that allocates output buffers via 
 
 The `hip-use-output-allocator` pass replaces the returned `memref.alloc` for each graph output with `hip.alloc_output`, reusing the alloc's dynamic-size operands. An alloc counts as a graph output when `func.return` hands it back — either directly, or after it passes through view ops (`memref.cast`, `memref.collapse_shape`, `memref.expand_shape`, `memref.subview`, any number of them). The pass uses `BufferViewFlowAnalysis` to check this: an alloc is an output if any value made from it via those view ops is returned. This handles reshaped / cast / subview'd outputs without special-casing each op, and the view ops between the alloc and the return are left in place.
 
-**Rank-reducing return (`collapse_shape`) — the ABI-shape attrs.** The internal compute buffer's rank can be *higher* than the ONNX / `func.return` output rank when the output is returned through `memref.collapse_shape` (e.g. a vision encoder produces `memref<?x?x2560xf16>` internally but the `image_features` graph output is rank-2 `memref<?x2560xf16>`). The EP output-allocator callback (`hipdnn_ep_alloc_output`) must receive the *returned* (ONNX) shape — ORT pre-binds the output `OrtValue` at the ONNX rank and rejects a mismatched request (`has shape {252,2560} but the computed output shape … is {1,252,2560}`). To carry that, `hip-use-output-allocator` stamps two discardable attrs on `hip.alloc_output` (names in `include/hip/Dialect/IR/HipDialect.h`):
+**Rank-reducing return (`collapse_shape`) — the ABI-shape attrs.** The internal compute buffer's rank can be *higher* than the ONNX / `func.return` output rank when the output is returned through `memref.collapse_shape` (e.g. a vision encoder produces `memref<?x?x2560xf16>` internally but the `image_features` graph output is rank-2 `memref<?x2560xf16>`). The EP output-allocator callback (`hipdnn_ep_alloc_output`) must receive the *returned* (ONNX) shape — ORT pre-binds the output `OrtValue` at the ONNX rank and rejects a mismatched request (`has shape {252,2560} but the computed output shape … is {1,252,2560}`). To carry that, `hip-use-output-allocator` stamps two discardable attrs on `hip.alloc_output` (names in `include/hip/Dialect/Hip/IR/HipDialect.h`):
 
 - `hipdnn.abi_shape` — the external shape, one entry per external dim (`ShapedType::kDynamic` marks dynamic).
 - `hipdnn.abi_groups` — the number of consecutive internal dims folded into each external dim (the contiguous collapse reassociation; entries sum to the internal rank).
@@ -289,7 +289,7 @@ Note the `main_graph` / `main_graph_internal` split (from `convert-hip-to-llvm`)
 
 | Concern | Where |
 |---|---|
-| Pipeline | [lib/Dialect/Transforms/Pipelines.cpp](../../lib/Dialect/Transforms/Pipelines.cpp): the slot-4.5 `hip-use-output-allocator` pass rewrites the returned allocs; `generate-interface` emits the 2-arg ABI |
+| Pipeline | [lib/Dialect/Hip/Transforms/Pipelines.cpp](../../lib/Dialect/Hip/Transforms/Pipelines.cpp): the slot-4.5 `hip-use-output-allocator` pass rewrites the returned allocs; `generate-interface` emits the 2-arg ABI |
 | EP front-end | [backend-mlir-compiler/level-1-pass/src/pass_main.cpp](../../backend-mlir-compiler/level-1-pass/src/pass_main.cpp), [MlirCompiler.cpp](../../backend-mlir-compiler/level-1-pass/src/MlirCompiler.cpp) |
 | EP-local ABI mirror | `output_allocator_t` in [custom_op_mlir.hpp](../../backend-mlir-compiler/custom-op-mlir/src/custom_op_mlir.hpp) (same `static_assert`s as the runtime struct) |
 | 2-arg dispatch + setter | [InferenceState.cpp](../../backend-mlir-compiler/custom-op-mlir/src/InferenceState.cpp) (`compute`, `set_output_allocator`) |

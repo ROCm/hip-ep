@@ -6,11 +6,11 @@
 #include "hip/Compiler/CompilerDriver.h"
 #include "hip/Compiler/PluginRegistry.h"
 #include "hip/Compiler/RocMlirArtifactTarget.h"
+#include "hip/Dialect/Hip/IR/HipDialect.h"
+#include "hip/Dialect/Hip/Transforms/Passes.h"
+#include "hip/Dialect/Hip/Transforms/Pipelines.h"
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
 #include "hip/Dialect/Hipsr/Pipelines/Pipelines.h"
-#include "hip/Dialect/IR/HipDialect.h"
-#include "hip/Dialect/Transforms/Passes.h"
-#include "hip/Dialect/Transforms/Pipelines.h"
 #include "hip/InitAllPasses.h"
 #include "hip/Support/DiskFileSystem.h"
 
@@ -349,7 +349,7 @@ bool CompilerDriver::runMLIRPasses(
                        "pipeline overridden by a custom pipeline\n");
     // A custom pipeline replaces the built-in builders wholesale, and
     // requestPipelineSlot() injections only run inside those builders
-    // (lib/Dialect/Transforms/Pipelines.cpp::addPluginPassesForSlot). So a
+    // (lib/Dialect/Hip/Transforms/Pipelines.cpp::addPluginPassesForSlot). So a
     // plugin's slot requests are NOT applied under an override. Warn once if
     // any are pending, so the interaction is not silent -- a custom pipeline
     // that wants a plugin pass must name it directly in HIPDNN_EP_PIPELINE.

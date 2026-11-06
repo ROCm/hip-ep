@@ -8,7 +8,7 @@
 
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
 
-#include "hip/Dialect/IR/HipDialect.h"
+#include "hip/Dialect/Hip/IR/HipDialect.h"
 
 #include "mlir/Bytecode/BytecodeOpInterface.h"
 #include "mlir/Dialect/Shape/IR/Shape.h"

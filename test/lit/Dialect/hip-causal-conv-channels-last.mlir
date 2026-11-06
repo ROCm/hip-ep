@@ -7,7 +7,7 @@
 // --------------------
 // `CausalConvWithStateOp::getCanonicalizationPatterns` -- the fold that absorbs
 // a [0,2,1] Transpose pair around a causal convolution into its `channels_last`
-// attribute. See lib/Dialect/IR/HipCausalConvCanonicalize.cpp.
+// attribute. See lib/Dialect/Hip/IR/HipCausalConvCanonicalize.cpp.
 //
 // The exporter emits Transpose/Conv/Transpose because ONNX Conv is
 // channels-first, not because the kernel needs that layout. Both transposes are

@@ -1827,7 +1827,7 @@ int wrap_qmoe(
 // correction-bias routing (vs softmax), relu2 activation (vs SwiGLU), and a
 // mandatory latent projection + shared-expert branch. Shares only sub-kernels
 // with lib/Runtime/real/qmoe.cpp, not any code path. Hip_QMoEAmdOp in
-// include/hip/Dialect/IR/HipOps.td carries the full op semantics.
+// include/hip/Dialect/Hip/IR/HipOps.td carries the full op semantics.
 //
 // activation_type / routing_type use the HIPDNN_EP_QMOE_AMD_* identifiers
 // below. Only relu2 and sigmoid are implemented; any other value is rejected

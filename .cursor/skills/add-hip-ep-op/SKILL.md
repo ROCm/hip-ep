@@ -25,10 +25,10 @@ registration specifically produces `error: op was not bufferized`.
 Implement every layer below, then stop for the user to build.
 
 ## 1. HIP Dialect
-- `hip-ep/include/hip/Dialect/IR/HipOps.td`: `def Hip_<Name>Op : Hip_DpsOp<"snake_name">`
+- `hip-ep/include/hip/Dialect/Hip/IR/HipOps.td`: `def Hip_<Name>Op : Hip_DpsOp<"snake_name">`
   with `Hip_ContextType:$ctx`, `Hip_TensorOrMemRef:$input/$output`, plus any attrs
   (e.g. `DefaultValuedAttr<F64Attr, "1.702">:$alpha`).
-- `hip-ep/lib/Dialect/IR/HipDialect.cpp`: define `getDpsInitsMutable` + `getEffects`.
+- `hip-ep/lib/Dialect/Hip/IR/HipDialect.cpp`: define `getDpsInitsMutable` + `getEffects`.
 
 ## 2. ONNX -> HIP conversion
 - New `hip-ep/lib/Conversion/OnnxToHip/<Name>Conversion.cpp` with
@@ -39,7 +39,7 @@ Implement every layer below, then stop for the user to build.
   `convertComputeOps`, add the source to `OnnxToHip/CMakeLists.txt`.
 
 ## 3. HIP -> memref (bufferization)
-- `hip-ep/include/hip/Dialect/IR/HipBufferize.h`: add
+- `hip-ep/include/hip/Dialect/Hip/IR/HipBufferize.h`: add
   `<Name>Op::attachInterface<HipDstBufferizableModel<<Name>Op>>(*ctx);` in
   `registerHipBufferizableOpInterfaceModels`.
 

@@ -5,9 +5,9 @@
 #ifndef HIP_COMPILER_COMPILER_PASSES_PASSES_H
 #define HIP_COMPILER_COMPILER_PASSES_PASSES_H
 
-#include "hip/Dialect/Transforms/Passes.h"
+#include "hip/Dialect/Hip/Transforms/Passes.h"
 
-// Re-export the GenerateInterface pass from the Dialect/Transforms layer.
+// Re-export the GenerateInterface pass from the Dialect/Hip/Transforms layer.
 // The Compiler pipeline uses the same pass — this header keeps the include
 // path consistent with the Compiler directory layout.
 

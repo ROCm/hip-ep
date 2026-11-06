@@ -17,7 +17,7 @@ through the `HIPDNN_EP_PIPELINE` override or when deciding which
 > release and re-check this table when you upgrade. The single source of truth
 > for *which* names are registered is
 > `include/hip/InitAllPasses.h::registerAllPasses()`; the order is
-> `lib/Dialect/Transforms/Pipelines.cpp`.
+> `lib/Dialect/Hip/Transforms/Pipelines.cpp`.
 
 ---
 
@@ -140,7 +140,7 @@ the selected perfConfig string are printed only with `--verbose`.
 | `hip-fold-batchnorm` | func.func | Fold an inference `hip.batch_norm` with constant parameters into the filter and bias of the `hip.conv` producing it, directly or through a `hip.add` of two convs (the shift goes into one bias). Every intermediate result must have the batch norm as its only consumer. Reads inline and file-backed constants only; a batch norm over memory-address-backed weights is left in place. |
 | `hip-externalize-constants` | module | Validate explicit serialization order, append unordered carriers deterministically, plan/serialize, then replace `hip.constant` using the existing inline/full/streaming/hybrid metadata contract. Direct threshold default: 0. |
 | `hip-infer-shapes` | module | Refine `?` dims on HIP DPS result types via `ReifyRankedShapedTypeOpInterface`. |
-| `hip-fusion-transform` | module | HIP-to-HIP rewriting at unrestricted arity (one op → many, many → one, or subgraph → subgraph). The patterns live in `lib/Dialect/Transforms/fusion_pattern/` — PDLL files compiled into the library, plus native C++ for rewrites whose shape depends on the matched op's rank — and share one `RewritePatternSet`. |
+| `hip-fusion-transform` | module | HIP-to-HIP rewriting at unrestricted arity (one op → many, many → one, or subgraph → subgraph). The patterns live in `lib/Dialect/Hip/Transforms/fusion_pattern/` — PDLL files compiled into the library, plus native C++ for rewrites whose shape depends on the matched op's rank — and share one `RewritePatternSet`. |
 | `hip-split-duplicate-dps-inits` | func.func | De-alias DPS init operands that CSE merged onto one `tensor.empty`, so an op that reads back its own outputs (e.g. `hip.gqa` present K/V) does not share a buffer (pre-bufferize). |
 | `hip-resolve-tensor-dims` | func.func | Fold `tensor.dim` of reshape chains into root-dim arithmetic (pre-bufferize). |
 | `hip-loop-body-to-out-params` | module | Promote outlined loop bodies to the out-param ABI. |
@@ -226,7 +226,7 @@ override (so a hand-listed pipeline omitting them will trip the
 ## Canonical built-in order (reference)
 
 What the default pipeline runs, with the plugin slots interleaved. Source of
-truth: `lib/Dialect/Transforms/Pipelines.cpp`.
+truth: `lib/Dialect/Hip/Transforms/Pipelines.cpp`.
 
 ```
 ONNX → HIP  (buildOnnxToHipPipeline)

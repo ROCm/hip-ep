@@ -3,11 +3,6 @@
  * Licensed under the MIT License.
  */
 
-#ifndef HIP_DIALECT_IR_RUNTIMEACCESSOPINTERFACE_H
-#define HIP_DIALECT_IR_RUNTIMEACCESSOPINTERFACE_H
-
-#include "mlir/IR/OpDefinition.h"
-
-#include "hip/Dialect/IR/RuntimeAccessOpInterface.h.inc"
-
-#endif
+// Compatibility include; declarations are owned by
+// hip/Dialect/Hip/IR/RuntimeAccessOpInterface.h.
+#include "hip/Dialect/Hip/IR/RuntimeAccessOpInterface.h"

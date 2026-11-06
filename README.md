@@ -112,6 +112,7 @@ Tool availability depends on the build configuration; see the platform quick-sta
 
 ### Architecture and compiler
 
+- [Source tree and ownership](docs/source-tree.md)
 - [Pipeline pass menu](docs/pipeline_pass_menu.md)
 - [Compiler-runtime contract](docs/design/compiler-runtime-contract.md)
 - [Shape inference design](docs/design/hip-shape-inference.md)
@@ -132,7 +133,8 @@ Tool availability depends on the build configuration; see the platform quick-sta
 ## Developer entry points
 
 - ONNX frontend: `lib/Conversion/OnnxToHip/`
-- HIP dialect: `include/hip/Dialect/` and `lib/Dialect/`
+- HIP dialect: `include/hip/Dialect/Hip/` and `lib/Dialect/Hip/`
+- Compiler C API: `include/hip-c/` and `lib/CAPI/`
 - HIP-to-LLVM lowering: `lib/Conversion/HipToLLVM/`
 - Compiler driver: `lib/Compiler/`
 - Runtime and custom kernels: `lib/Runtime/`
