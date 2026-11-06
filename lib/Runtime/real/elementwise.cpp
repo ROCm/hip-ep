@@ -85,7 +85,8 @@ int wrap_elementwise(RuntimeState *state, int op_state_slot, void *lhs,
       "elementwise",
       [&] {
         char b[64];
-        snprintf(b, sizeof(b), "%lldx%lldx%lldx%lld", (long long)out_n,
+        snprintf(b, sizeof(b), "op=%s %lldx%lldx%lldx%lld",
+                 hipdnn_ep_tensor_op_name(tensor_op), (long long)out_n,
                  (long long)out_c, (long long)out_h, (long long)out_w);
         return std::string(b);
       },
