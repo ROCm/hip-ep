@@ -2331,6 +2331,27 @@ void SwigluOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
+LogicalResult SwigluOp::verify() {
+  if (!isClamped())
+    return success();
+  if (getPromoteActivation())
+    return emitOpError("promote_activation does not combine with the clamped "
+                       "form (activation_alpha, activation_beta, "
+                       "swiglu_limit)");
+  if (!std::isfinite(getActivationAlpha().convertToFloat()) ||
+      !std::isfinite(getActivationBeta().convertToFloat()))
+    return emitOpError("activation_alpha and activation_beta must be finite");
+  float limit = getSwigluLimit().convertToFloat();
+  if (!std::isfinite(limit) || limit < 0.0f)
+    return emitOpError("swiglu_limit must be finite and not negative (0 "
+                       "clamps nothing)");
+  Type element = getElementTypeOrSelf(getOutput().getType());
+  if (!element.isF32() && !element.isF16() && !element.isBF16())
+    return emitOpError("the clamped form takes f32, f16 or bf16, not ")
+           << element;
+  return success();
+}
+
 //===----------------------------------------------------------------------===//
 // PoolOp: ins(input), outs([output] or [output, indices])
 //===----------------------------------------------------------------------===//
