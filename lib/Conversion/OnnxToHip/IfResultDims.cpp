@@ -229,28 +229,49 @@ private:
       mapping.map(operand, *mapped);
     }
     // Both branches' sizes are computed whichever branch runs, so a divisor
-    // that is zero only on the untaken branch must not trap on the host.
-    bool isDivision = isa<arith::DivSIOp, arith::DivUIOp, arith::CeilDivSIOp,
-                          arith::CeilDivUIOp, arith::FloorDivSIOp,
-                          arith::RemSIOp, arith::RemUIOp>(def);
-    std::optional<int64_t> knownDivisor =
-        isDivision ? getConstantIntValue(mapping.lookup(def->getOperand(1)))
-                   : std::nullopt;
-    if (isDivision && (!knownDivisor || *knownDivisor == 0)) {
+    // that is zero only on the untaken branch must not trap on the host, and
+    // neither may a signed INT_MIN / -1.
+    bool isSignedDivision = isa<arith::DivSIOp, arith::CeilDivSIOp,
+                                arith::FloorDivSIOp, arith::RemSIOp>(def);
+    bool isDivision =
+        isSignedDivision ||
+        isa<arith::DivUIOp, arith::CeilDivUIOp, arith::RemUIOp>(def);
+    Value byMinusOne;
+    Value isMinusOne;
+    if (isDivision) {
+      Value lhs = mapping.lookup(def->getOperand(0));
       Value divisor = mapping.lookup(def->getOperand(1));
-      Location loc = def->getLoc();
-      Value zero =
-          arith::ConstantOp::create(b, loc, b.getZeroAttr(divisor.getType()));
-      Value one = arith::ConstantOp::create(
-          b, loc, b.getIntegerAttr(divisor.getType(), 1));
-      Value isZero = arith::CmpIOp::create(b, loc, arith::CmpIPredicate::eq,
-                                           divisor, zero);
-      mapping.map(
-          def->getOperand(1),
-          arith::SelectOp::create(b, loc, isZero, one, divisor).getResult());
+      std::optional<int64_t> known = getConstantIntValue(divisor);
+      if (!known || *known == 0 || (isSignedDivision && *known == -1)) {
+        Location loc = def->getLoc();
+        Type ty = divisor.getType();
+        Value zero = arith::ConstantOp::create(b, loc, b.getZeroAttr(ty));
+        Value one = arith::ConstantOp::create(b, loc, b.getIntegerAttr(ty, 1));
+        Value unsafe = arith::CmpIOp::create(b, loc, arith::CmpIPredicate::eq,
+                                             divisor, zero);
+        if (isSignedDivision) {
+          Value minusOne =
+              arith::ConstantOp::create(b, loc, b.getIntegerAttr(ty, -1));
+          isMinusOne = arith::CmpIOp::create(
+              b, loc, arith::CmpIPredicate::eq, divisor, minusOne);
+          unsafe = arith::OrIOp::create(b, loc, unsafe, isMinusOne);
+          // x / -1 is -x (wrapping at INT_MIN), and x % -1 is 0.
+          byMinusOne = isa<arith::RemSIOp>(def)
+                           ? zero
+                           : arith::SubIOp::create(b, loc, zero, lhs).getResult();
+        }
+        mapping.map(
+            def->getOperand(1),
+            arith::SelectOp::create(b, loc, unsafe, one, divisor).getResult());
+      }
     }
     Operation *clone = b.clone(*def, mapping);
-    return clone->getResult(cast<OpResult>(s).getResultNumber());
+    Value result = clone->getResult(cast<OpResult>(s).getResultNumber());
+    if (isMinusOne)
+      result = arith::SelectOp::create(b, def->getLoc(), isMinusOne, byMinusOne,
+                                       result)
+                   .getResult();
+    return result;
   }
 
   /// Initial value of a small constant hip-externalize-constants left inline
@@ -285,12 +306,11 @@ private:
       return v;
     Location loc = branch.getLoc();
     Value narrow =
-        arith::IndexCastOp::create(b, loc, b.getIntegerType(width), v);
+        b.createOrFold<arith::IndexCastOp>(loc, b.getIntegerType(width), v);
     if (ty.isUnsigned())
-      return arith::IndexCastUIOp::create(b, loc, b.getIndexType(), narrow)
-          .getResult();
-    return arith::IndexCastOp::create(b, loc, b.getIndexType(), narrow)
-        .getResult();
+      return b.createOrFold<arith::IndexCastUIOp>(loc, b.getIndexType(),
+                                                  narrow);
+    return b.createOrFold<arith::IndexCastOp>(loc, b.getIndexType(), narrow);
   }
 
   /// `index` value `v` as the integer or index type `ty`.
@@ -299,7 +319,7 @@ private:
       return v;
     if (!ty.isIndex() && !ty.isSignlessInteger())
       return failure();
-    return arith::IndexCastOp::create(b, branch.getLoc(), ty, v).getResult();
+    return b.createOrFold<arith::IndexCastOp>(branch.getLoc(), ty, v);
   }
 
   /// Element `idx` (row-major) of a small static integer shape tensor, as a
@@ -461,8 +481,7 @@ private:
         return failure();
       if (isa<NegOp>(def))
         return wrapToElement(
-            arith::SubIOp::create(b, loc, constant(0), *x).getResult(),
-            elemTy);
+            b.createOrFold<arith::SubIOp>(loc, constant(0), *x), elemTy);
       // A bool source is carried as zero / non-zero; as an integer it is 0/1.
       auto srcTy = cast<RankedTensorType>(ins[0].getType());
       Value v = *x;
@@ -477,33 +496,42 @@ private:
       if (failed(l) || failed(r))
         return failure();
       if (isa<AddOp>(def))
-        return wrapToElement(arith::AddIOp::create(b, loc, *l, *r).getResult(),
+        return wrapToElement(b.createOrFold<arith::AddIOp>(loc, *l, *r),
                              elemTy);
       if (isa<SubOp>(def))
-        return wrapToElement(arith::SubIOp::create(b, loc, *l, *r).getResult(),
+        return wrapToElement(b.createOrFold<arith::SubIOp>(loc, *l, *r),
                              elemTy);
       if (isa<MulOp>(def))
-        return wrapToElement(arith::MulIOp::create(b, loc, *l, *r).getResult(),
+        return wrapToElement(b.createOrFold<arith::MulIOp>(loc, *l, *r),
                              elemTy);
       if (isa<DivOp>(def)) {
-        // As in computeScalar: the untaken branch's divisor may be zero.
+        // As in computeScalar: the untaken branch's divisor may be zero, and
+        // an i64 INT_MIN / -1 must not trap on the host.
         Value divisor = *r;
         std::optional<int64_t> known = getConstantIntValue(divisor);
-        if (!known || *known == 0) {
-          Value isZero = arith::CmpIOp::create(b, loc, arith::CmpIPredicate::eq,
-                                               divisor, constant(0));
-          divisor =
-              arith::SelectOp::create(b, loc, isZero, constant(1), divisor)
-                  .getResult();
-        }
+        if (known && *known != 0 && *known != -1)
+          return wrapToElement(b.createOrFold<arith::DivSIOp>(loc, *l, divisor),
+                               elemTy);
+        Value isZero = arith::CmpIOp::create(b, loc, arith::CmpIPredicate::eq,
+                                             divisor, constant(0));
+        Value isMinusOne = arith::CmpIOp::create(
+            b, loc, arith::CmpIPredicate::eq, divisor, constant(-1));
+        Value unsafe = arith::OrIOp::create(b, loc, isZero, isMinusOne);
+        divisor = arith::SelectOp::create(b, loc, unsafe, constant(1), divisor)
+                      .getResult();
         // Unsigned operands are already non-negative here, so a signed
-        // divide matches; INT_MIN / -1 wraps like the branch's divide.
+        // divide matches; x / -1 is -x, which wraps at INT_MIN as the
+        // branch's divide does.
+        Value quotient = arith::DivSIOp::create(b, loc, *l, divisor);
+        Value negated = arith::SubIOp::create(b, loc, constant(0), *l);
         return wrapToElement(
-            arith::DivSIOp::create(b, loc, *l, divisor).getResult(), elemTy);
+            arith::SelectOp::create(b, loc, isMinusOne, negated, quotient)
+                .getResult(),
+            elemTy);
       }
       if (isa<MaxOp>(def))
-        return arith::MaxSIOp::create(b, loc, *l, *r).getResult();
-      return arith::MinSIOp::create(b, loc, *l, *r).getResult();
+        return b.createOrFold<arith::MaxSIOp>(loc, *l, *r);
+      return b.createOrFold<arith::MinSIOp>(loc, *l, *r);
     }
 
     // Reshape's "0 copies the input dim": Where(Equal(shape, 0), dims, shape).
