@@ -326,8 +326,12 @@ foreach(_hip_target hip::host hip::device)
     PROPERTY INTERFACE_LINK_LIBRARIES "${_hip_kept_libs}")
 endforeach()
 
-# Public C API headers (compiler_api.h, compiler_types.h, ...).
+# Public C++ and compatibility headers, followed by the canonical C API.
 install(DIRECTORY ${CMAKE_SOURCE_DIR}/include/hip
+  DESTINATION include
+  FILES_MATCHING PATTERN "*.h"
+)
+install(DIRECTORY ${CMAKE_SOURCE_DIR}/include/hip-c
   DESTINATION include
   FILES_MATCHING PATTERN "*.h"
 )

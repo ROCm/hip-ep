@@ -5,13 +5,13 @@
 
 #include "CrashHandler.h"
 #include "hip/Compiler/PluginRegistry.h"
+#include "hip/Dialect/Hip/IR/HipBufferize.h"
+#include "hip/Dialect/Hip/IR/HipDialect.h"
+#include "hip/Dialect/Hip/Transforms/Passes.h"
+#include "hip/Dialect/Hip/Transforms/Pipelines.h"
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
 #include "hip/Dialect/Hipsr/Transforms/BufferizableOpInterfaceImpl.h"
-#include "hip/Dialect/IR/HipBufferize.h"
-#include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Onnx/IR/OnnxDialect.h"
-#include "hip/Dialect/Transforms/Passes.h"
-#include "hip/Dialect/Transforms/Pipelines.h"
 
 #include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
 #include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"

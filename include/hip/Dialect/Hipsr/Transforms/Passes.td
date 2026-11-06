@@ -3,7 +3,7 @@
 // Licensed under the MIT License.
 //
 // TableGen definitions for hipsr dialect transform passes, mirroring the hip
-// dialect's Dialect/Transforms/Passes.td. New hipsr transforms add their `def`
+// dialect's Dialect/Hip/Transforms/Passes.td. New hipsr transforms add their `def`
 // here; the aggregate header Dialect/Hipsr/Transforms/Passes.h pulls the
 // declarations and registration via GEN_PASS_DECL / GEN_PASS_REGISTRATION.
 //

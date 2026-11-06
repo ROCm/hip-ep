@@ -145,7 +145,7 @@ OrtGraph* → IRConverter::to_onnx_model()  →  MLIR bytes (input_mlir)
 It then calls into the compiler via a single C function:
 
 ```c
-// include/hip/compiler_api.h
+// include/hip-c/compiler_api.h
 CompilerErrorCode hip_compile_with_fs(
     const void*    input_mlir,   // MLIR IR bytes (from IRConverter)
     size_t         input_size,

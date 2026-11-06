@@ -21,7 +21,8 @@
 /lib/Conversion/                @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd @amd-bqiao @asparkhi @sambanerxilinxamd @CaymanYang @pschlan-amd
 /lib/Dialect/                   @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd @amd-bqiao @asparkhi @sambanerxilinxamd @CaymanYang @pschlan-amd
 /lib/Target/                    @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd @amd-bqiao @asparkhi @sambanerxilinxamd @CaymanYang @pschlan-amd
-/lib/CInterface/                @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd @amd-bqiao @asparkhi @sambanerxilinxamd @CaymanYang @pschlan-amd
+/lib/CAPI/                      @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd @amd-bqiao @asparkhi @sambanerxilinxamd @CaymanYang @pschlan-amd
+/include/hip-c/                 @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd @amd-bqiao @asparkhi @sambanerxilinxamd @CaymanYang @pschlan-amd
 /include/hip/Compiler/          @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd @amd-bqiao @asparkhi @sambanerxilinxamd @CaymanYang @pschlan-amd
 /include/hip/Conversion/        @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd @amd-bqiao @asparkhi @sambanerxilinxamd @CaymanYang @pschlan-amd
 /include/hip/Dialect/           @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd @amd-bqiao @asparkhi @sambanerxilinxamd @CaymanYang @pschlan-amd

@@ -1,0 +1,3979 @@
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
+
+#include "hip/Dialect/Hip/IR/HipDialect.h"
+
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/TypeSwitch.h"
+#include "llvm/Support/MathExtras.h"
+
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/IR/Builders.h"
+#include "mlir/IR/DialectImplementation.h"
+#include "mlir/IR/OpDefinition.h"
+#include "mlir/IR/SymbolTable.h"
+
+#include "HipShapeUtilsInternal.h"
+#include "hip/Dialect/Hip/IR/HipShapeUtils.h"
+
+#include <cmath>
+#include <limits>
+
+using namespace mlir;
+using namespace mlir::hip;
+
+#include "hip/Dialect/Hip/IR/HipDialect.cpp.inc"
+
+void HipDialect::initialize() {
+  addTypes<
+#define GET_TYPEDEF_LIST
+#include "hip/Dialect/Hip/IR/HipTypes.cpp.inc"
+      >();
+  addOperations<
+#define GET_OP_LIST
+#include "hip/Dialect/Hip/IR/HipOps.cpp.inc"
+      >();
+}
+
+#define GET_TYPEDEF_CLASSES
+#include "hip/Dialect/Hip/IR/HipTypes.cpp.inc"
+
+//===----------------------------------------------------------------------===//
+// Non-DPS ops: memory effect declarations
+//===----------------------------------------------------------------------===//
+
+void AllocOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  effects.emplace_back(MemoryEffects::Allocate::get(),
+                       getOperation()->getResult(0),
+                       SideEffects::DefaultResource::get());
+}
+
+void GetPoolOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  effects.emplace_back(MemoryEffects::Allocate::get(),
+                       getOperation()->getResult(0),
+                       SideEffects::DefaultResource::get());
+}
+
+void GetHostScratchOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  effects.emplace_back(MemoryEffects::Allocate::get(),
+                       getOperation()->getResult(0),
+                       SideEffects::DefaultResource::get());
+}
+
+void FreeOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  // memref is operand #1 (operand #0 is ctx)
+  effects.emplace_back(MemoryEffects::Free::get(),
+                       &getOperation()->getOpOperand(1),
+                       SideEffects::DefaultResource::get());
+}
+
+void GetConstantOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  effects.emplace_back(MemoryEffects::Read::get(), getOperation()->getResult(0),
+                       SideEffects::DefaultResource::get());
+}
+
+void AllocOutputOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  // Two requirements, both load-bearing:
+  //   (1) NOT MemoryEffects::Allocate. The returned buffer is EP/runtime-owned
+  //       (a graph output): hip-pool-allocs must never pool it, and a custom
+  //       pipeline that enables ownership-based buffer deallocation must never
+  //       free it. Ownership is keyed on the Allocate effect, so we
+  //       deliberately omit it (unlike AllocOp/GetPoolOp above).
+  //   (2) A generic Write effect (no associated value) marks the side effect of
+  //       calling into the EP output allocator, which mutates external runtime
+  //       state. This is what keeps the op alive: an op carrying a Write is
+  //       never trivially dead (DCE / canonicalize) even when its result is
+  //       unused, and CSE never merges side-effecting ops. (Contrast: an
+  //       Allocate-on-result op IS removed when its result is unused -- a
+  //       second reason to avoid Allocate here.)
+  effects.emplace_back(MemoryEffects::Write::get(),
+                       SideEffects::DefaultResource::get());
+}
+
+LogicalResult AllocOutputOp::verify() {
+  // Operand convention matches hip.alloc: exactly one Index per dynamic dim of
+  // the result memref (static dims come from the type, dynamic dims from
+  // operands). Guards against malformed alloc_output before lowering.
+  auto memrefTy = cast<MemRefType>(getMemref().getType());
+  if (static_cast<int64_t>(getDynamicSizes().size()) !=
+      memrefTy.getNumDynamicDims())
+    return emitOpError("expected ")
+           << memrefTy.getNumDynamicDims() << " dynamic size operand(s), got "
+           << getDynamicSizes().size();
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// ConstantOp: policy-neutral externalizable constant carrier
+//===----------------------------------------------------------------------===//
+
+ConstantOp::SourceKind ConstantOp::getSourceKind() {
+  if (getValueAttr())
+    return SourceKind::Inline;
+  return getMemoryAddressAttr() ? SourceKind::Memory : SourceKind::File;
+}
+
+LogicalResult ConstantOp::verify() {
+  RankedTensorType resultType = getResult().getType();
+  if (!resultType.hasStaticShape())
+    return emitOpError("requires a statically shaped ranked tensor result");
+
+  Type elementType = resultType.getElementType();
+  unsigned elementBits = 0;
+  if (auto floatType = dyn_cast<FloatType>(elementType)) {
+    if (!elementType.isF16() && !elementType.isBF16() && !elementType.isF32() &&
+        !elementType.isF64() && !isa<Float8E4M3FNType>(elementType))
+      return emitOpError("has unsupported floating-point element type ")
+             << elementType;
+    elementBits = floatType.getWidth();
+  } else if (auto integerType = dyn_cast<IntegerType>(elementType)) {
+    elementBits = integerType.getWidth();
+    if (elementBits != 1 && elementBits != 8 && elementBits != 16 &&
+        elementBits != 32 && elementBits != 64)
+      return emitOpError("has unsupported integer element type ")
+             << elementType;
+  } else {
+    return emitOpError("has unsupported element type ") << elementType;
+  }
+
+  int64_t numElements = 1;
+  for (int64_t dim : resultType.getShape()) {
+    if (llvm::MulOverflow(numElements, dim, numElements))
+      return emitOpError("result element count overflows int64");
+  }
+  int64_t elementBytes = static_cast<int64_t>((elementBits + 7) / 8);
+  int64_t expectedBytes = 0;
+  if (llvm::MulOverflow(numElements, elementBytes, expectedBytes))
+    return emitOpError("result byte size overflows int64");
+
+  if (IntegerAttr order = getSerializationOrderAttr())
+    if (order.getInt() < 0)
+      return emitOpError("serialization order must be non-negative");
+
+  bool hasValue = getValueAttr() != nullptr;
+  bool hasLocation = getLocationAttr() != nullptr;
+  bool hasOffset = getOffsetAttr() != nullptr;
+  bool hasMemoryAddress = getMemoryAddressAttr() != nullptr;
+  bool hasSize = getSizeAttr() != nullptr;
+  if (hasValue) {
+    if (hasLocation || hasOffset || hasMemoryAddress || hasSize)
+      return emitOpError("inline source must contain only `value`");
+    auto denseValue = dyn_cast<DenseElementsAttr>(getValueAttr());
+    if (!denseValue)
+      return emitOpError("inline `value` must be a DenseElementsAttr");
+    if (denseValue.getType() != resultType)
+      return emitOpError("inline `value` type ")
+             << denseValue.getType() << " does not match result type "
+             << resultType;
+    return success();
+  }
+
+  bool hasAnyFileField = hasLocation || hasOffset;
+  if (hasAnyFileField && hasMemoryAddress)
+    return emitOpError("file and memory sources are mutually exclusive");
+  if (!hasAnyFileField && !hasMemoryAddress && !hasSize)
+    return emitOpError(
+        "requires exactly one source: `value`, complete file source, or "
+        "complete memory source");
+  if (hasAnyFileField && (!hasLocation || !hasOffset || !hasSize))
+    return emitOpError(
+        "external source requires `location`, `offset`, and `size` together");
+  if (hasMemoryAddress && !hasSize)
+    return emitOpError(
+        "memory source requires `memory_address` and `size` together");
+  if (!hasAnyFileField && !hasMemoryAddress)
+    return emitOpError(
+        "external source requires a file location or memory address");
+
+  int64_t size = getSizeAttr().getInt();
+  if (size <= 0)
+    return emitOpError("external source `size` must be positive");
+  // A 4-bit initializer with no MLIR element type is carried as an 8-bit result
+  // of the logical element count while its buffer holds only ceil(n/2) packed
+  // bytes (two values per byte); accept that half-size external source.
+  int64_t packedBytes = (numElements + 1) / 2;
+  bool isPacked4Bit = elementBits == 8 && size == packedBytes;
+  if (size != expectedBytes && !isPacked4Bit)
+    return emitOpError("external source byte size ")
+           << size << " does not match result byte size " << expectedBytes;
+
+  if (hasMemoryAddress) {
+    if (getMemoryAddressAttr().getInt() == 0)
+      return emitOpError("memory-address source has null address");
+  } else {
+    StringRef location = getLocationAttr().getValue();
+    int64_t offset = getOffsetAttr().getInt();
+    if (location.empty())
+      return emitOpError("external source `location` must not be empty");
+    if (offset < 0)
+      return emitOpError("file source `offset` must be non-negative");
+    if (offset > std::numeric_limits<int64_t>::max() - size)
+      return emitOpError("file source range overflows int64");
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// LoopOp: outlined-body counted/conditional loop (DPS)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange LoopOp::getDpsInitsMutable() { return getVInitMutable(); }
+
+void LoopOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  // Match the DPS convention used by other Hip ops (see emitDpsMemoryEffects):
+  //   - v_init are DPS inits  -> Write (the body accumulates into them across
+  //     iterations; without Write, post-bufferization DCE drops the entire
+  //     loop because it appears side-effect-free with no live results).
+  //   - captures are data inputs -> Read.
+  //   - ctx / index / i1 operands are skipped (not memref).
+  // Pre-bufferization v_init are tensors (not memref) -- the isa<MemRefType>
+  // filter naturally suppresses effects then, which is correct: the op's
+  // tensor result use prevents DCE in tensor mode.
+  for (OpOperand &operand : getVInitMutable())
+    if (isa<MemRefType>(operand.get().getType()))
+      effects.emplace_back(MemoryEffects::Write::get(), &operand,
+                           SideEffects::DefaultResource::get());
+  for (OpOperand &operand : getCapturesMutable())
+    if (isa<MemRefType>(operand.get().getType()))
+      effects.emplace_back(MemoryEffects::Read::get(), &operand,
+                           SideEffects::DefaultResource::get());
+}
+
+LogicalResult LoopOp::verify() {
+  uint32_t numLoopCarried = getNumLoopCarried();
+
+  // num_loop_carried must equal the v_init count (both modes).
+  if (numLoopCarried != getVInit().size())
+    return emitOpError("num_loop_carried (")
+           << numLoopCarried << ") must equal the v_init operand count ("
+           << getVInit().size() << ")";
+
+  // Determine mode from v_init type when present; otherwise default to
+  // tensor mode (a num_loop_carried=0 op makes no sense, but allow it).
+  bool tensorMode = true;
+  if (!getVInit().empty())
+    tensorMode = isa<RankedTensorType>(getVInit()[0].getType());
+
+  if (tensorMode) {
+    // Tensor mode: results count == num_loop_carried, types match v_init.
+    if (numLoopCarried != getNumResults())
+      return emitOpError("tensor mode: num_loop_carried (")
+             << numLoopCarried << ") must equal the result count ("
+             << getNumResults() << ")";
+    for (uint32_t i = 0; i < numLoopCarried; ++i)
+      if (getVInit()[i].getType() != getResult(i).getType())
+        return emitOpError("result type #")
+               << i << " (" << getResult(i).getType()
+               << ") must match v_init type #" << i << " ("
+               << getVInit()[i].getType() << ")";
+  } else {
+    // Memref mode (post-bufferization): no results, v_init carries writes.
+    if (getNumResults() != 0)
+      return emitOpError("memref mode must have zero results, got ")
+             << getNumResults();
+  }
+
+  // body_func symbol resolution is checked in verifySymbolUses() so the
+  // verifier driver can share a SymbolTableCollection across all
+  // symbol-user ops in the module.
+  return success();
+}
+
+LogicalResult LoopOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  auto bodyFunc = symbolTable.lookupNearestSymbolFrom<func::FuncOp>(
+      *this, getBodyFuncAttr());
+  if (!bodyFunc)
+    return emitOpError("body_func '")
+           << getBodyFunc() << "' does not reference a func.func";
+  return success();
+}
+
+// Result types are mechanically the `v_init` operand types — matches the
+// `LoopOp::verify` contract, so any caller that uses an InferType-aware
+// builder (operand types only, no explicit result types) is verifier-clean
+// by construction.
+//
+// Memref-mode v_init produces 0 result types (DPS post-bufferization
+// convention; the verifier rejects mixed mode anyway).
+LogicalResult
+LoopOp::inferReturnTypes(MLIRContext *context, std::optional<Location> location,
+                         ValueRange operands, DictionaryAttr attributes,
+                         PropertyRef properties, RegionRange regions,
+                         SmallVectorImpl<Type> &inferredReturnTypes) {
+  LoopOpAdaptor adaptor(operands, attributes, properties, regions);
+  auto vInit = adaptor.getVInit();
+  inferredReturnTypes.reserve(vInit.size());
+  for (Value v : vInit) {
+    if (isa<RankedTensorType>(v.getType()))
+      inferredReturnTypes.push_back(v.getType());
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// IfOp: outlined then/else conditional (DPS)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange IfOp::getDpsInitsMutable() { return getOInitMutable(); }
+
+void IfOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  for (OpOperand &operand : getOInitMutable())
+    if (isa<MemRefType>(operand.get().getType()))
+      effects.emplace_back(MemoryEffects::Write::get(), &operand,
+                           SideEffects::DefaultResource::get());
+  for (OpOperand &operand : getCapturesMutable())
+    if (isa<MemRefType>(operand.get().getType()))
+      effects.emplace_back(MemoryEffects::Read::get(), &operand,
+                           SideEffects::DefaultResource::get());
+}
+
+LogicalResult IfOp::verify() {
+  uint32_t numOutputs = getNumOutputs();
+
+  if (numOutputs != getOInit().size())
+    return emitOpError("num_outputs (")
+           << numOutputs << ") must equal the o_init operand count ("
+           << getOInit().size() << ")";
+
+  bool tensorMode = true;
+  if (!getOInit().empty())
+    tensorMode = isa<RankedTensorType>(getOInit()[0].getType());
+
+  if (tensorMode) {
+    if (numOutputs != getNumResults())
+      return emitOpError("tensor mode: num_outputs (")
+             << numOutputs << ") must equal the result count ("
+             << getNumResults() << ")";
+    for (uint32_t i = 0; i < numOutputs; ++i)
+      if (getOInit()[i].getType() != getResult(i).getType())
+        return emitOpError("result type #")
+               << i << " (" << getResult(i).getType()
+               << ") must match o_init type #" << i << " ("
+               << getOInit()[i].getType() << ")";
+  } else {
+    if (getNumResults() != 0)
+      return emitOpError("memref mode must have zero results, got ")
+             << getNumResults();
+  }
+  return success();
+}
+
+LogicalResult IfOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  auto thenFn = symbolTable.lookupNearestSymbolFrom<func::FuncOp>(
+      *this, getThenFuncAttr());
+  if (!thenFn)
+    return emitOpError("then_func '")
+           << getThenFunc() << "' does not reference a func.func";
+  auto elseFn = symbolTable.lookupNearestSymbolFrom<func::FuncOp>(
+      *this, getElseFuncAttr());
+  if (!elseFn)
+    return emitOpError("else_func '")
+           << getElseFunc() << "' does not reference a func.func";
+  return success();
+}
+
+LogicalResult
+IfOp::inferReturnTypes(MLIRContext *context, std::optional<Location> location,
+                       ValueRange operands, DictionaryAttr attributes,
+                       PropertyRef properties, RegionRange regions,
+                       SmallVectorImpl<Type> &inferredReturnTypes) {
+  IfOpAdaptor adaptor(operands, attributes, properties, regions);
+  auto oInit = adaptor.getOInit();
+  inferredReturnTypes.reserve(oInit.size());
+  for (Value v : oInit) {
+    if (isa<RankedTensorType>(v.getType()))
+      inferredReturnTypes.push_back(v.getType());
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// Helpers for DPS compute ops (custom parse/print, verify, interfaces)
+//===----------------------------------------------------------------------===//
+
+/// Emit memory effects for a DPS compute op: memref inputs read, memref inits
+/// write. Non-memref operands (e.g. !hip.context, index scalars) are skipped.
+static void emitDpsMemoryEffects(
+    ArrayRef<OpOperand *> inputOperands, MutableOperandRange initOperands,
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  for (OpOperand *operand : inputOperands) {
+    if (!isa<MemRefType>(operand->get().getType()))
+      continue;
+    effects.emplace_back(MemoryEffects::Read::get(), operand,
+                         SideEffects::DefaultResource::get());
+  }
+  for (OpOperand &operand : initOperands) {
+    if (!isa<MemRefType>(operand.get().getType()))
+      continue;
+    effects.emplace_back(MemoryEffects::Write::get(), &operand,
+                         SideEffects::DefaultResource::get());
+  }
+}
+
+//===----------------------------------------------------------------------===//
+// Generic DPS assembly format: parse / print
+//
+// Single-output ops:
+//   Tensor:  %r = hip.op(%ctx) ins(%a, %b : T1, T2)
+//                               outs(%c : T3) -> T3
+//   Memref:  hip.op(%ctx) ins(%a, %b : M1, M2) outs(%c : M3)
+//
+// Multi-output ops use Variadic results:
+//   Tensor:  %r:2 = hip.op(%ctx) ins(...) outs(%c, %d : T1, T2) -> T1, T2
+//   Memref:  hip.op(%ctx) ins(...) outs(%c, %d : M1, M2)
+//===----------------------------------------------------------------------===//
+
+/// Parse a parenthesized comma-separated list of operands with types:
+///   `(` ssa-use `,` ... `:` type `,` ... `)`
+static ParseResult
+parseOperandListWithTypes(OpAsmParser &parser,
+                          SmallVectorImpl<OpAsmParser::UnresolvedOperand> &ops,
+                          SmallVectorImpl<Type> &types) {
+  if (parser.parseLParen())
+    return failure();
+  if (succeeded(parser.parseOptionalRParen()))
+    return success();
+  do {
+    ops.emplace_back();
+    if (parser.parseOperand(ops.back()))
+      return failure();
+  } while (succeeded(parser.parseOptionalComma()));
+  if (parser.parseColon())
+    return failure();
+  do {
+    types.emplace_back();
+    if (parser.parseType(types.back()))
+      return failure();
+  } while (succeeded(parser.parseOptionalComma()));
+  if (parser.parseRParen())
+    return failure();
+  if (ops.size() != types.size())
+    return parser.emitError(parser.getCurrentLocation(),
+                            "operand/type count mismatch");
+  return success();
+}
+
+/// Print a parenthesized comma-separated list of operands with types.
+static void printOperandListWithTypes(OpAsmPrinter &p, ValueRange operands) {
+  p << "(";
+  llvm::interleaveComma(operands, p, [&](Value v) { p.printOperand(v); });
+  p << " : ";
+  llvm::interleaveComma(operands.getTypes(), p);
+  p << ")";
+}
+
+//===----------------------------------------------------------------------===//
+// Parse/print for single-init ops (ctx + ins + outs(1) [-> result])
+//
+// Format:  `(` ctx `)` `ins` `(` ... `)` `outs` `(` ... `)` [attr-dict]
+//          [`->` type]
+//===----------------------------------------------------------------------===//
+
+/// Parse a single-init DPS compute op.
+/// \p numIns       number of data operands in the ins(...) clause.
+/// \p extraScalars operands between ctx and ins (e.g. dim0, dim1 for
+///                 transpose). They are parsed as `(` ctx `,` scalar... `)`.
+static ParseResult parseSingleInitDpsOp(OpAsmParser &parser,
+                                        OperationState &result, unsigned numIns,
+                                        unsigned extraScalars = 0) {
+  OpAsmParser::UnresolvedOperand ctxOperand;
+  Type ctxType;
+  SmallVector<OpAsmParser::UnresolvedOperand> scalarOps;
+  SmallVector<Type> scalarTypes;
+
+  // `(` ctx [`,` scalar `,` scalar ...] `)`
+  if (parser.parseLParen() || parser.parseOperand(ctxOperand))
+    return failure();
+  for (unsigned i = 0; i < extraScalars; ++i) {
+    scalarOps.emplace_back();
+    if (parser.parseComma() || parser.parseOperand(scalarOps.back()))
+      return failure();
+  }
+  if (parser.parseRParen())
+    return failure();
+
+  // Resolve ctx as !hip.context
+  ctxType = ContextType::get(parser.getContext());
+  if (parser.resolveOperand(ctxOperand, ctxType, result.operands))
+    return failure();
+  // Resolve scalars as index
+  for (auto &s : scalarOps)
+    if (parser.resolveOperand(s, IndexType::get(parser.getContext()),
+                              result.operands))
+      return failure();
+
+  // `ins` `(` operands `:` types `)`
+  SmallVector<OpAsmParser::UnresolvedOperand> insOps;
+  SmallVector<Type> insTypes;
+  if (parser.parseKeyword("ins") ||
+      parseOperandListWithTypes(parser, insOps, insTypes))
+    return failure();
+  if (insOps.size() != numIns)
+    return parser.emitError(parser.getCurrentLocation(), "expected ")
+           << numIns << " ins operand(s)";
+  for (unsigned i = 0; i < insOps.size(); ++i)
+    if (parser.resolveOperand(insOps[i], insTypes[i], result.operands))
+      return failure();
+
+  // `outs` `(` operand `:` type `)`
+  SmallVector<OpAsmParser::UnresolvedOperand> outsOps;
+  SmallVector<Type> outsTypes;
+  if (parser.parseKeyword("outs") ||
+      parseOperandListWithTypes(parser, outsOps, outsTypes))
+    return failure();
+  for (unsigned i = 0; i < outsOps.size(); ++i)
+    if (parser.resolveOperand(outsOps[i], outsTypes[i], result.operands))
+      return failure();
+
+  // attr-dict
+  if (parser.parseOptionalAttrDict(result.attributes))
+    return failure();
+
+  // Optional `->` result type(s) for tensor mode
+  if (succeeded(parser.parseOptionalArrow())) {
+    SmallVector<Type> resultTypes;
+    do {
+      resultTypes.emplace_back();
+      if (parser.parseType(resultTypes.back()))
+        return failure();
+    } while (succeeded(parser.parseOptionalComma()));
+    result.addTypes(resultTypes);
+  }
+  return success();
+}
+
+/// Print a single-init DPS compute op.
+static void printSingleInitDpsOp(OpAsmPrinter &p, Operation *op, Value ctx,
+                                 ValueRange scalarArgs, ValueRange ins,
+                                 ValueRange outs) {
+  p << "(";
+  p.printOperand(ctx);
+  for (Value s : scalarArgs) {
+    p << ", ";
+    p.printOperand(s);
+  }
+  p << ") ins";
+  printOperandListWithTypes(p, ins);
+  p << " outs";
+  printOperandListWithTypes(p, outs);
+  p.printOptionalAttrDict(op->getAttrs());
+  if (op->getNumResults() > 0) {
+    p << " -> ";
+    llvm::interleaveComma(op->getResultTypes(), p);
+  }
+}
+
+//===------------
+// RocMlirOp: ins(variadic) outs(output)
+//===------------
+
+MutableOperandRange RocMlirOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void RocMlirOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// ConvOp: ins(input, weights, bias), outs(output)
+// Uses declarative assemblyFormat - parse/print auto-generated by TableGen
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ConvOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void ConvOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// ConvTransposeOp: ins(input, weights, bias), outs(output)
+// Uses declarative assemblyFormat - parse/print auto-generated by TableGen
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ConvTransposeOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void ConvTransposeOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// QAddOp: ins(lhs, rhs), outs(output)
+// Quantized elementwise add with integrated QDQ scales and zero points
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange QAddOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void QAddOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// QMulOp: ins(lhs, rhs), outs(output)
+// Quantized elementwise mul with integrated QDQ scales and zero points
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange QMulOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void QMulOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// QConvOp: quantized ins(input, weights, scales, zero-points, [bias]),
+// outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange QConvOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void QConvOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// QLinearConvOp: onnx.QLinearConv, 8-bit grouped 2D
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange QLinearConvOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void QLinearConvOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+static bool isEightBitInt(Type type) {
+  auto integer = dyn_cast<IntegerType>(type);
+  return integer && integer.getWidth() == 8;
+}
+
+static LogicalResult verifyPositivePair(QLinearConvOp op, ArrayAttr attr,
+                                        StringRef name) {
+  if (attr.size() != 2)
+    return op.emitOpError() << name << " must have 2 entries";
+  for (Attribute entry : attr) {
+    auto intAttr = dyn_cast<IntegerAttr>(entry);
+    if (!intAttr || intAttr.getInt() <= 0)
+      return op.emitOpError() << name << " entries must be positive";
+  }
+  return success();
+}
+
+static LogicalResult verifyQuantParam(QLinearConvOp op, Value scale, Value zp,
+                                      Type storage, StringRef name) {
+  auto scaleType = dyn_cast<ShapedType>(scale.getType());
+  auto zpType = dyn_cast<ShapedType>(zp.getType());
+  if (!scaleType || !zpType || !scaleType.hasRank() || !zpType.hasRank() ||
+      scaleType.getRank() > 1 || zpType.getRank() > 1)
+    return op.emitOpError()
+           << name << " scale and zero point must be rank 0 or 1";
+  if (!scaleType.getElementType().isF32())
+    return op.emitOpError() << name << " scale must be f32";
+  if (zpType.getElementType() != storage)
+    return op.emitOpError()
+           << name
+           << " zero point element type must match the quantized tensor";
+  return success();
+}
+
+LogicalResult QLinearConvOp::verify() {
+  auto inputType = dyn_cast<ShapedType>(getInput().getType());
+  auto weightsType = dyn_cast<ShapedType>(getWeights().getType());
+  auto outputType = dyn_cast<ShapedType>(getOutput().getType());
+  if (!inputType || !weightsType || !outputType || !inputType.hasRank() ||
+      !weightsType.hasRank() || !outputType.hasRank() ||
+      inputType.getRank() != 4 || weightsType.getRank() != 4 ||
+      outputType.getRank() != 4)
+    return emitOpError("input, weights, and output must be rank 4");
+
+  if (!isEightBitInt(inputType.getElementType()) ||
+      !isEightBitInt(weightsType.getElementType()) ||
+      !isEightBitInt(outputType.getElementType()))
+    return emitOpError("input, weights, and output must be 8-bit integers");
+
+  if (failed(verifyQuantParam(*this, getInputScale(), getInputZeroPoint(),
+                              inputType.getElementType(), "input")))
+    return failure();
+  if (failed(verifyQuantParam(*this, getWeightScale(), getWeightZeroPoint(),
+                              weightsType.getElementType(), "weight")))
+    return failure();
+  if (failed(verifyQuantParam(*this, getOutputScale(), getOutputZeroPoint(),
+                              outputType.getElementType(), "output")))
+    return failure();
+
+  if (Value bias = getBias()) {
+    auto biasType = dyn_cast<ShapedType>(bias.getType());
+    if (!biasType || !biasType.hasRank() || biasType.getRank() != 1 ||
+        !biasType.getElementType().isInteger(32))
+      return emitOpError("bias must be rank-1 i32");
+  }
+
+  if (failed(verifyPositivePair(*this, getKernelShape(), "kernel_shape")) ||
+      failed(verifyPositivePair(*this, getStrides(), "strides")) ||
+      failed(verifyPositivePair(*this, getDilations(), "dilations")))
+    return failure();
+  if (getPads().size() != 4)
+    return emitOpError("pads must have 4 entries");
+  for (Attribute entry : getPads()) {
+    if (!isa<IntegerAttr>(entry))
+      return emitOpError("pads entries must be integers");
+  }
+  if (getGroup() < 1)
+    return emitOpError("group must be positive");
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// QLinearMatMulOp: onnx.QLinearMatMul, rank-2 8-bit
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange QLinearMatMulOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void QLinearMatMulOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+// `axisExtent` is 1 for a per-tensor parameter. For B it is N, so the scale
+// and zero point may each be one element or one value per output column.
+static LogicalResult verifyQuantParam(QLinearMatMulOp op, Value scale, Value zp,
+                                      Type storage, StringRef name,
+                                      int64_t axisExtent) {
+  auto scaleType = dyn_cast<ShapedType>(scale.getType());
+  auto zpType = dyn_cast<ShapedType>(zp.getType());
+  if (!scaleType || !zpType || !scaleType.hasRank() || !zpType.hasRank() ||
+      scaleType.getRank() > 1 || zpType.getRank() > 1)
+    return op.emitOpError()
+           << name << " scale and zero point must be rank 0 or 1";
+  if (!scaleType.getElementType().isF32())
+    return op.emitOpError() << name << " scale must be f32";
+  if (zpType.getElementType() != storage)
+    return op.emitOpError()
+           << name
+           << " zero point element type must match the quantized tensor";
+  auto fits = [&](int64_t count) { return count == 1 || count == axisExtent; };
+  if (axisExtent == 1) {
+    if (!scaleType.hasStaticShape() || !zpType.hasStaticShape() ||
+        scaleType.getNumElements() != 1 || zpType.getNumElements() != 1)
+      return op.emitOpError()
+             << name << " scale and zero point must be a single element";
+    return success();
+  }
+  if (!scaleType.hasStaticShape() || !zpType.hasStaticShape() ||
+      !fits(scaleType.getNumElements()) || !fits(zpType.getNumElements()))
+    return op.emitOpError()
+           << name
+           << " scale and zero point must be one element or one value per "
+              "column";
+  return success();
+}
+
+LogicalResult QLinearMatMulOp::verify() {
+  auto aType = dyn_cast<ShapedType>(getA().getType());
+  auto bType = dyn_cast<ShapedType>(getB().getType());
+  auto yType = dyn_cast<ShapedType>(getOutput().getType());
+  if (!aType || !bType || !yType || !aType.hasRank() || !bType.hasRank() ||
+      !yType.hasRank() || aType.getRank() != 2 || bType.getRank() != 2 ||
+      yType.getRank() != 2)
+    return emitOpError("a, b, and output must be rank 2");
+  if (!aType.hasStaticShape() || !bType.hasStaticShape() ||
+      !yType.hasStaticShape())
+    return emitOpError("a, b, and output must have static shapes");
+
+  int64_t m = aType.getDimSize(0);
+  int64_t k = aType.getDimSize(1);
+  int64_t n = bType.getDimSize(1);
+  if (m < 1 || k < 1 || n < 1)
+    return emitOpError("M, K, and N must be positive");
+  if (bType.getDimSize(0) != k)
+    return emitOpError("b rows must equal a columns");
+  if (yType.getDimSize(0) != m || yType.getDimSize(1) != n)
+    return emitOpError("output shape must be [M, N]");
+
+  if (!isEightBitInt(aType.getElementType()) ||
+      !isEightBitInt(bType.getElementType()) ||
+      !isEightBitInt(yType.getElementType()))
+    return emitOpError("a, b, and output must be 8-bit integers");
+
+  if (failed(verifyQuantParam(*this, getAScale(), getAZeroPoint(),
+                              aType.getElementType(), "a", /*axisExtent=*/1)) ||
+      failed(verifyQuantParam(*this, getBScale(), getBZeroPoint(),
+                              bType.getElementType(), "b", n)) ||
+      failed(verifyQuantParam(*this, getYScale(), getYZeroPoint(),
+                              yType.getElementType(), "y", /*axisExtent=*/1)))
+    return failure();
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// QLpNormalizationOp: quantized ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange QLpNormalizationOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void QLpNormalizationOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// QSigmoidOp: quantized ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange QSigmoidOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void QSigmoidOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// HipblasltMatmulOp: ins(A, B), outs(C)
+//===----------------------------------------------------------------------===//
+
+//===----------------------------------------------------------------------===//
+// MatmulOp: ins(A, B), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange MatmulOp::getDpsInitsMutable() {
+  // 0=ctx, 1=A, 2=B, 3=output
+  return getOutputMutable();
+}
+
+void MatmulOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult MatmulOp::verify() {
+  // First the cross-cutting DPS contract (all-tensor-or-all-memref +
+  // result-count parity); failures here also rule out bogus operand types,
+  // so the matmul shape check below can rely on detail::getShapeOf().
+  if (failed(verifyDpsComputeOp(*this, {getA(), getB(), getOutput()},
+                                /*numInits=*/1)))
+    return failure();
+
+  return mlir::hip::verifyHipOpShape(*this, [&] {
+    return mlir::hip::inferMatmulShape(
+        detail::getShapeOf(getA()), detail::getShapeOf(getB()),
+        [&]() { return this->emitOpError(); }, getTransA(), getTransB());
+  });
+}
+
+// `MatmulOp::reifyResultShapes` lives in
+// `lib/Dialect/Hip/IR/HipReifyResultShapesImpl.cpp`. See the header banner in
+// that file and `docs/design/hip-shape-inference.md` for the rationale.
+
+//===----------------------------------------------------------------------===//
+// QMatMulOp: ins(A, B, [B_scales, B_zero_points]), outs(Y)
+// Quantized matrix multiplication with integrated QDQ scales and zero points
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange QMatMulOp::getDpsInitsMutable() { return getYMutable(); }
+
+void QMatMulOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult QMatMulOp::verify() {
+  // SameVariadicOperandSize splits the two optional operands by operand count
+  // alone and ODS emits no check for it, so an odd count would silently make
+  // getY() read B_scales. 4 operands is the per-tensor form, 6 the per-column
+  // one; nothing in between is meaningful.
+  unsigned numOperands = getNumOperands();
+  if (numOperands != 4 && numOperands != 6)
+    return emitOpError("expected 4 operands for per-tensor B or 6 for "
+                       "per-column B, got ")
+           << numOperands;
+
+  // The optional B_scales / B_zero_points join the tensor-vs-memref mode check
+  // (that is all `dataOperands` drives); they are not DPS inits.
+  SmallVector<Value, 5> dataOperands{getA(), getB()};
+  if (getBScales())
+    dataOperands.push_back(getBScales());
+  if (getBZeroPoints())
+    dataOperands.push_back(getBZeroPoints());
+  dataOperands.push_back(getY());
+  if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/1)))
+    return failure();
+
+  // Per-tensor and per-column B are alternatives, not layers: the lowering
+  // folds one coefficient in the first case and passes a device array in the
+  // second, so a mixture has no meaning.
+  if (getBScales()) {
+    if (getBScaleAttr() || getBZeroPointAttr())
+      return emitOpError("per-column B quantization must not also carry the "
+                         "B_scale / B_zero_point attributes");
+    if (!getBQuantAxis())
+      return emitOpError("per-column B quantization requires B_quant_axis");
+  } else {
+    if (!getBScaleAttr() || !getBZeroPointAttr())
+      return emitOpError("per-tensor B quantization requires both the B_scale "
+                         "and B_zero_point attributes");
+    if (getBQuantAxis())
+      return emitOpError("B_quant_axis only describes the B_scales / "
+                         "B_zero_points operands");
+  }
+
+  auto bType = dyn_cast<ShapedType>(getB().getType());
+  if (!bType || !bType.hasRank())
+    return emitOpError("B must be ranked");
+  Type bElemType = bType.getElementType();
+
+  // A packed operand keeps its logical element count and an 8-bit element
+  // type, so the packing is only expressible as this flag over 8-bit storage.
+  if (getPackedInt4() && !bElemType.isInteger(8))
+    return emitOpError("packed_int4 requires 8-bit B storage, got ")
+           << bElemType;
+
+  if (getBScales()) {
+    // transB swaps B's trailing two extents, so the column axis moves with it.
+    int64_t rank = bType.getRank();
+    if (rank < 2)
+      return emitOpError("per-column B quantization requires a rank-2 or "
+                         "higher B");
+    int64_t columnAxis = getTransB() ? rank - 2 : rank - 1;
+    if (*getBQuantAxis() != columnAxis)
+      return emitOpError("B_quant_axis must name B's column axis ")
+             << columnAxis << ", got " << *getBQuantAxis();
+
+    auto scalesType = cast<ShapedType>(getBScales().getType());
+    auto zeroPointsType = cast<ShapedType>(getBZeroPoints().getType());
+    if (!scalesType.hasRank() || scalesType.getRank() != 1 ||
+        !zeroPointsType.hasRank() || zeroPointsType.getRank() != 1)
+      return emitOpError("B_scales and B_zero_points must be rank 1");
+    if (!scalesType.getElementType().isF32())
+      return emitOpError("B_scales must be f32, got ")
+             << scalesType.getElementType();
+    // ONNX guarantees zero_point.dtype == x.dtype, so one storage type
+    // describes both weight buffers and one packed_int4 flag covers both.
+    if (zeroPointsType.getElementType() != bElemType)
+      return emitOpError("B_zero_points element type must match B's, got ")
+             << zeroPointsType.getElementType() << " and " << bElemType;
+
+    int64_t columns = bType.getDimSize(columnAxis);
+    auto verifyLength = [&](StringRef name, ShapedType type) -> LogicalResult {
+      int64_t length = type.getDimSize(0);
+      if (ShapedType::isDynamic(columns) || ShapedType::isDynamic(length) ||
+          length == columns)
+        return success();
+      return emitOpError(name) << " must hold one value per B column ("
+                               << columns << "), got " << length;
+    };
+    if (failed(verifyLength("B_scales", scalesType)) ||
+        failed(verifyLength("B_zero_points", zeroPointsType)))
+      return failure();
+  }
+
+  return mlir::hip::verifyHipOpShape(*this, [&] {
+    return mlir::hip::inferMatmulShape(
+        detail::getShapeOf(getA()), detail::getShapeOf(getB()),
+        [&]() { return this->emitOpError(); }, getTransA(), getTransB());
+  });
+}
+
+// `QMatMulOp::reifyResultShapes` lives in
+// `lib/Dialect/Hip/IR/HipReifyResultShapesImpl.cpp`.
+
+//===----------------------------------------------------------------------===//
+// QGemmOp: ins(A, B, [B_scales, B_zero_points], [C]), outs(Y)
+// Quantized ONNX Gemm with integrated QDQ scales, zero points and bias
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange QGemmOp::getDpsInitsMutable() { return getYMutable(); }
+
+void QGemmOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult QGemmOp::verify() {
+  SmallVector<Value> dataOperands{getA(), getB()};
+  if (Value bScales = getBScales())
+    dataOperands.push_back(bScales);
+  if (Value bZeroPoints = getBZeroPoints())
+    dataOperands.push_back(bZeroPoints);
+  if (Value c = getC())
+    dataOperands.push_back(c);
+  dataOperands.push_back(getY());
+  if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/1)))
+    return failure();
+
+  ArrayRef<int64_t> aShape = detail::getShapeOf(getA());
+  ArrayRef<int64_t> bShape = detail::getShapeOf(getB());
+  if (aShape.size() != 2 || bShape.size() != 2)
+    return emitOpError("expected rank-2 A and B operands");
+  if (Value c = getC()) {
+    if (detail::getShapeOf(c).size() > 2)
+      return emitOpError("expected C to be broadcastable to [M, N]");
+  }
+
+  // A 4-bit B keeps an 8-bit element type and its logical shape; the packing is
+  // defined against the storage width, so that width is what gets checked.
+  Type bElemType = cast<ShapedType>(getB().getType()).getElementType();
+  if (!bElemType.isInteger(8))
+    return emitOpError("expected 8-bit integer storage for B, got ")
+           << bElemType;
+  if (getBBits() != 4 && getBBits() != 8)
+    return emitOpError("B_bits must be 4 or 8, got ") << getBBits();
+
+  // Per-channel quantization needs both halves: the kernel indexes a scale and
+  // a zero point by the same N, and neither has a meaningful stand-in.
+  if (static_cast<bool>(getBScales()) != static_cast<bool>(getBZeroPoints()))
+    return emitOpError(
+        "B_scales and B_zero_points must be given together or not at all");
+
+  if (Value bScales = getBScales()) {
+    Value bZeroPoints = getBZeroPoints();
+    ArrayRef<int64_t> scaleShape = detail::getShapeOf(bScales);
+    ArrayRef<int64_t> zpShape = detail::getShapeOf(bZeroPoints);
+    if (scaleShape.size() != 1 || zpShape.size() != 1)
+      return emitOpError("expected rank-1 B_scales and B_zero_points");
+    if (!cast<ShapedType>(bScales.getType()).getElementType().isF32())
+      return emitOpError("expected f32 B_scales");
+    // ONNX guarantees zero_point.dtype == x.dtype, which is also what lets one
+    // B_bits describe both buffers.
+    if (cast<ShapedType>(bZeroPoints.getType()).getElementType() != bElemType)
+      return emitOpError("B_zero_points element type must match B's");
+
+    int64_t n = bShape[getTransB() ? 0 : 1];
+    if (!ShapedType::isDynamic(n)) {
+      if (!ShapedType::isDynamic(scaleShape[0]) && scaleShape[0] != n)
+        return emitOpError("B_scales must hold one value per N (")
+               << n << "), got " << scaleShape[0];
+      if (!ShapedType::isDynamic(zpShape[0]) && zpShape[0] != n)
+        return emitOpError("B_zero_points must hold one value per N (")
+               << n << "), got " << zpShape[0];
+    }
+  }
+
+  return mlir::hip::verifyHipOpShape(
+      *this, [&]() -> FailureOr<SmallVector<int64_t>> {
+        return SmallVector<int64_t>{aShape[getTransA() ? 1 : 0],
+                                    bShape[getTransB() ? 0 : 1]};
+      });
+}
+
+// `QGemmOp::reifyResultShapes` lives in
+// `lib/Dialect/Hip/IR/HipReifyResultShapesImpl.cpp`.
+
+//===----------------------------------------------------------------------===//
+// RmsNormOp: ins(input, scale), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange RmsNormOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void RmsNormOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult RmsNormOp::verify() {
+  return verifyDpsComputeOp(*this, {getInput(), getScale(), getOutput()},
+                            /*numInits=*/1);
+}
+
+//===----------------------------------------------------------------------===//
+// SkipRmsNormOp: ins(input, skip, gamma, [bias])  outs(...variadic...)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange SkipRmsNormOp::getDpsInitsMutable() {
+  return getOutputsMutable();
+}
+
+void SkipRmsNormOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult SkipRmsNormOp::verify() { return success(); }
+
+//===----------------------------------------------------------------------===//
+// LayerNormOp: ins(input, scale, [bias]) outs(output, [mean, [inv_std]])
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange LayerNormOp::getDpsInitsMutable() {
+  return getOutputsMutable();
+}
+
+void LayerNormOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult LayerNormOp::verify() {
+  // Outputs cardinality must be 1, 2, or 3 (output, [mean], [inv_std]).
+  unsigned numOutputs = getOutputs().size();
+  if (numOutputs < 1 || numOutputs > 3)
+    return emitOpError("expected 1 to 3 output buffers (output, [mean, "
+                       "[inv_std]]), got ")
+           << numOutputs;
+
+  // Defer the all-tensor-or-all-memref consistency check to the shared helper
+  // so this op behaves like the rest of the DPS family.
+  SmallVector<Value> dataOperands;
+  dataOperands.push_back(getInput());
+  dataOperands.push_back(getScale());
+  if (Value b = getBias())
+    dataOperands.push_back(b);
+  for (Value out : getOutputs())
+    dataOperands.push_back(out);
+  return verifyDpsComputeOp(*this, dataOperands, /*numInits=*/numOutputs);
+}
+
+//===----------------------------------------------------------------------===//
+// InstanceNormOp: ins(input, scale, bias), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange InstanceNormOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void InstanceNormOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult InstanceNormOp::verify() {
+  SmallVector<Value> dataOperands{getInput(), getScale(), getBias(),
+                                  getOutput()};
+  if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/1)))
+    return failure();
+
+  auto rankedShape = [](Type t) -> std::optional<int64_t> {
+    if (auto tensor = dyn_cast<RankedTensorType>(t))
+      return tensor.getRank();
+    if (auto memref = dyn_cast<MemRefType>(t))
+      return memref.getRank();
+    return std::nullopt;
+  };
+
+  auto inputRank = rankedShape(getInput().getType());
+  if (!inputRank)
+    return emitOpError("expected ranked input of rank >= 3 (N, C, D1, ...)");
+  if (*inputRank < 3)
+    return emitOpError("expected input rank >= 3 (N, C, D1, ...), got ")
+           << *inputRank;
+
+  auto scaleRank = rankedShape(getScale().getType());
+  auto biasRank = rankedShape(getBias().getType());
+  if (scaleRank && *scaleRank != 1)
+    return emitOpError("expected 1-D scale of length C, got rank ")
+           << *scaleRank;
+  if (biasRank && *biasRank != 1)
+    return emitOpError("expected 1-D bias of length C, got rank ") << *biasRank;
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// BatchNormOp: ins(input, scale, bias, mean, variance), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange BatchNormOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void BatchNormOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult BatchNormOp::verify() {
+  SmallVector<Value> dataOperands{getInput(), getScale(),    getBias(),
+                                  getMean(),  getVariance(), getOutput()};
+  if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/1)))
+    return failure();
+
+  auto rankedShape = [](Type t) -> std::optional<int64_t> {
+    if (auto tensor = dyn_cast<RankedTensorType>(t))
+      return tensor.getRank();
+    if (auto memref = dyn_cast<MemRefType>(t))
+      return memref.getRank();
+    return std::nullopt;
+  };
+
+  auto inputRank = rankedShape(getInput().getType());
+  if (!inputRank)
+    return emitOpError("expected ranked input of rank >= 2 (N, C, ...)");
+  if (*inputRank < 2)
+    return emitOpError("expected input rank >= 2 (N, C, ...), got ")
+           << *inputRank;
+
+  auto expectRank1 = [&](Type type, StringRef name) -> LogicalResult {
+    auto rank = rankedShape(type);
+    if (rank && *rank != 1)
+      return emitOpError("expected 1-D ")
+             << name << " of length C, got rank " << *rank;
+    return success();
+  };
+  if (failed(expectRank1(getScale().getType(), "scale")) ||
+      failed(expectRank1(getBias().getType(), "bias")) ||
+      failed(expectRank1(getMean().getType(), "mean")) ||
+      failed(expectRank1(getVariance().getType(), "variance")))
+    return failure();
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// GroupNormOp: ins(input, scale, bias), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange GroupNormOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void GroupNormOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult GroupNormOp::verify() {
+  SmallVector<Value> dataOperands{getInput(), getScale(), getBias(),
+                                  getOutput()};
+  if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/1)))
+    return failure();
+
+  auto rankedShape = [](Type t) -> std::optional<int64_t> {
+    if (auto tensor = dyn_cast<RankedTensorType>(t))
+      return tensor.getRank();
+    if (auto memref = dyn_cast<MemRefType>(t))
+      return memref.getRank();
+    return std::nullopt;
+  };
+  auto shapedType = [](Type t) -> ShapedType {
+    if (auto tensor = dyn_cast<RankedTensorType>(t))
+      return tensor;
+    if (auto memref = dyn_cast<MemRefType>(t))
+      return memref;
+    return ShapedType();
+  };
+
+  auto inputRank = rankedShape(getInput().getType());
+  if (!inputRank || *inputRank < 3)
+    return emitOpError("expected input rank >= 3, got ")
+           << (inputRank ? *inputRank : -1);
+  if (getGroups() <= 0)
+    return emitOpError("groups must be positive");
+  if (getActivation() != 0 && getActivation() != 1)
+    return emitOpError("activation must be 0 (none) or 1 (SiLU)");
+  if (getChannelsLast() != 0 && getChannelsLast() != 1)
+    return emitOpError("channels_last must be 0 (NCHW) or 1 (NHWC)");
+
+  int64_t channelAxis = getChannelsLast() ? *inputRank - 1 : 1;
+  ShapedType inputShaped = shapedType(getInput().getType());
+  if (inputShaped && !inputShaped.isDynamicDim(channelAxis)) {
+    int64_t channels = inputShaped.getDimSize(channelAxis);
+    if (channels % getGroups() != 0)
+      return emitOpError("channel extent ")
+             << channels << " is not divisible by groups " << getGroups();
+  }
+
+  auto scaleRank = rankedShape(getScale().getType());
+  auto biasRank = rankedShape(getBias().getType());
+  if (scaleRank && *scaleRank != 1)
+    return emitOpError("expected 1-D scale of length C, got rank ")
+           << *scaleRank;
+  if (biasRank && *biasRank != 1)
+    return emitOpError("expected 1-D bias of length C, got rank ") << *biasRank;
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// GatedRmsNormOp: ins(input, scale, gate), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange GatedRmsNormOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void GatedRmsNormOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult GatedRmsNormOp::verify() {
+  if (failed(verifyDpsComputeOp(
+          *this, {getInput(), getScale(), getGate(), getOutput()},
+          /*numInits=*/1))) {
+    return failure();
+  }
+  if (getActivation() != "silu" && getActivation() != "sigmoid") {
+    return emitOpError("activation must be \"silu\" or \"sigmoid\", got \"")
+           << getActivation() << "\"";
+  }
+
+  auto inputType = dyn_cast<ShapedType>(getInput().getType());
+  auto scaleType = dyn_cast<ShapedType>(getScale().getType());
+  if (!inputType || !inputType.hasRank() || inputType.getRank() < 1) {
+    return emitOpError("expected a ranked input of rank >= 1");
+  }
+  if (!scaleType || !scaleType.hasRank() || scaleType.getRank() != 1) {
+    return emitOpError("expected 1-D scale");
+  }
+  auto gateType = dyn_cast<ShapedType>(getGate().getType());
+  if (!gateType || !gateType.hasRank() ||
+      gateType.getShape() != inputType.getShape() ||
+      gateType.getElementType() != inputType.getElementType()) {
+    return emitOpError("gate shape and element type must match the input");
+  }
+  int64_t last = inputType.getDimSize(inputType.getRank() - 1);
+  int64_t groupWidth = scaleType.getDimSize(0);
+  if (!ShapedType::isDynamic(last) && !ShapedType::isDynamic(groupWidth) &&
+      (groupWidth <= 0 || last % groupWidth != 0)) {
+    return emitOpError("input last dimension ")
+           << last << " is not a multiple of the scale length " << groupWidth;
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// EngramGateOp: ins(key, query, value, kscale, qscale, [cscale])
+//               outs(output, [normed])
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange EngramGateOp::getDpsInitsMutable() {
+  return getOutputsMutable();
+}
+
+void EngramGateOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult EngramGateOp::verify() {
+  size_t numOutputs = getOutputs().size();
+  if (numOutputs != 1 && numOutputs != 2) {
+    return emitOpError("expected 1 or 2 outputs, got ") << numOutputs;
+  }
+  if (numOutputs == 2 && !getConvNormScale()) {
+    return emitOpError("the second output requires conv_norm_scale");
+  }
+  auto keyType = dyn_cast<ShapedType>(getKey().getType());
+  auto queryType = dyn_cast<ShapedType>(getQuery().getType());
+  auto valueType = dyn_cast<ShapedType>(getValue().getType());
+  if (!keyType || !keyType.hasRank() || keyType.getRank() != 4) {
+    return emitOpError("expected key of rank 4 (B, S, hc, H)");
+  }
+  if (!queryType || !queryType.hasRank() ||
+      queryType.getShape() != keyType.getShape()) {
+    return emitOpError("query shape must match key");
+  }
+  if (!valueType || !valueType.hasRank() || valueType.getRank() != 3) {
+    return emitOpError("expected value of rank 3 (B, S, H)");
+  }
+
+  auto compatible = [](int64_t a, int64_t b) {
+    return ShapedType::isDynamic(a) || ShapedType::isDynamic(b) || a == b;
+  };
+  ArrayRef<int64_t> key = keyType.getShape();
+  ArrayRef<int64_t> value = valueType.getShape();
+  if (!compatible(value[0], key[0]) || !compatible(value[1], key[1]) ||
+      !compatible(value[2], key[3])) {
+    return emitOpError("value shape must be (B, S, H) of key (B, S, hc, H)");
+  }
+  SmallVector<Value> scales = {getKeyNormScale(), getQueryNormScale()};
+  if (getConvNormScale()) {
+    scales.push_back(getConvNormScale());
+  }
+  for (Value scale : scales) {
+    auto scaleType = dyn_cast<ShapedType>(scale.getType());
+    if (!scaleType || !scaleType.hasRank() || scaleType.getRank() != 2 ||
+        !compatible(scaleType.getDimSize(0), key[2]) ||
+        !compatible(scaleType.getDimSize(1), key[3])) {
+      return emitOpError("norm scales must have shape (hc, H)");
+    }
+  }
+  for (Value output : getOutputs()) {
+    auto outputType = dyn_cast<ShapedType>(output.getType());
+    if (!outputType || !outputType.hasRank() || outputType.getRank() != 4 ||
+        !llvm::all_of(llvm::seq<int64_t>(0, 4), [&](int64_t i) {
+          return compatible(outputType.getDimSize(i), key[i]);
+        })) {
+      return emitOpError("outputs must have the key shape");
+    }
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// HyperConnectionPreMixOp: ins(streams, pre_mix) outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange HyperConnectionPreMixOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void HyperConnectionPreMixOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult HyperConnectionPreMixOp::verify() {
+  if (failed(verifyDpsComputeOp(*this, {getStreams(), getPreMix(), getOutput()},
+                                /*numInits=*/1)))
+    return failure();
+
+  int64_t branches = getBranches();
+  int64_t hidden = getHidden();
+  int64_t flattened = getFlattened();
+  if (branches <= 0 || hidden <= 0)
+    return emitOpError("branches and hidden must be positive");
+  if (flattened != 0 && flattened != 1)
+    return emitOpError("flattened must be 0 or 1");
+  if (getGateSigmoid() != 0 && getGateSigmoid() != 1)
+    return emitOpError("gate_sigmoid must be 0 or 1");
+  auto streams = dyn_cast<ShapedType>(getStreams().getType());
+  if (!streams || !streams.hasRank())
+    return emitOpError("expected ranked streams");
+  if (!streams.getElementType().isF16() && !streams.getElementType().isF32())
+    return emitOpError("streams must be f16 or f32");
+  if (flattened) {
+    if (streams.getRank() < 1)
+      return emitOpError("flattened streams need rank >= 1");
+    int64_t width = streams.getDimSize(streams.getRank() - 1);
+    if (!ShapedType::isDynamic(width) && width != branches * hidden)
+      return emitOpError("flattened stream width must be branches * hidden");
+  } else {
+    if (streams.getRank() < 2)
+      return emitOpError("grouped streams need rank >= 2");
+    int64_t rank = streams.getRank();
+    int64_t branchDim = streams.getDimSize(rank - 2);
+    int64_t hiddenDim = streams.getDimSize(rank - 1);
+    if (!ShapedType::isDynamic(branchDim) && branchDim != branches ||
+        !ShapedType::isDynamic(hiddenDim) && hiddenDim != hidden)
+      return emitOpError("grouped streams must end in (branches, hidden)");
+  }
+
+  if (getGateLayout() != "branch" && getGateLayout() != "feature")
+    return emitOpError("gate_layout must be \"branch\" or \"feature\"");
+  auto gate = dyn_cast<ShapedType>(getPreMix().getType());
+  if (!gate || !gate.hasRank())
+    return emitOpError("expected a ranked gate");
+  if (gate.getElementType() != streams.getElementType())
+    return emitOpError("gate element type must match streams");
+  size_t prefix = flattened ? streams.getRank() - 1 : streams.getRank() - 2;
+  if (gate.getRank() < static_cast<int64_t>(prefix))
+    return emitOpError("gate rank is shorter than the stream prefix");
+  for (size_t i = 0; i < prefix; ++i) {
+    if (!ShapedType::isDynamic(gate.getDimSize(i)) &&
+        !ShapedType::isDynamic(streams.getDimSize(i)) &&
+        gate.getDimSize(i) != streams.getDimSize(i))
+      return emitOpError("gate leading dimensions must match streams");
+  }
+
+  auto output = dyn_cast<ShapedType>(getOutput().getType());
+  if (!output || !output.hasRank() || output.getRank() < 1)
+    return emitOpError("expected a ranked output");
+  if (output.getElementType() != streams.getElementType())
+    return emitOpError("output element type must match streams");
+  int64_t outputHidden = output.getDimSize(output.getRank() - 1);
+  if (!ShapedType::isDynamic(outputHidden) && outputHidden != hidden)
+    return emitOpError("output must end in hidden");
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// HyperConnectionPostMixOp: ins(streams, block_output, post_mix, [stream_mix])
+//                           outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange HyperConnectionPostMixOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void HyperConnectionPostMixOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult HyperConnectionPostMixOp::verify() {
+  SmallVector<Value> dataOperands{getStreams(), getBlockOutput(), getPostMix()};
+  if (getStreamMix())
+    dataOperands.push_back(getStreamMix());
+  dataOperands.push_back(getOutput());
+  if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/1)))
+    return failure();
+
+  int64_t branches = getBranches();
+  int64_t hidden = getHidden();
+  int64_t flattened = getFlattened();
+  if (branches <= 0 || hidden <= 0)
+    return emitOpError("branches and hidden must be positive");
+  if (flattened != 0 && flattened != 1)
+    return emitOpError("flattened must be 0 or 1");
+  auto streams = dyn_cast<ShapedType>(getStreams().getType());
+  if (!streams || !streams.hasRank())
+    return emitOpError("expected ranked streams");
+  if (!streams.getElementType().isF16() && !streams.getElementType().isF32())
+    return emitOpError("streams must be f16 or f32");
+  if (flattened) {
+    if (streams.getRank() < 1)
+      return emitOpError("flattened streams need rank >= 1");
+    int64_t width = streams.getDimSize(streams.getRank() - 1);
+    if (!ShapedType::isDynamic(width) && width != branches * hidden)
+      return emitOpError("flattened stream width must be branches * hidden");
+  } else {
+    if (streams.getRank() < 2)
+      return emitOpError("grouped streams need rank >= 2");
+    int64_t rank = streams.getRank();
+    int64_t branchDim = streams.getDimSize(rank - 2);
+    int64_t hiddenDim = streams.getDimSize(rank - 1);
+    if (!ShapedType::isDynamic(branchDim) && branchDim != branches ||
+        !ShapedType::isDynamic(hiddenDim) && hiddenDim != hidden)
+      return emitOpError("grouped streams must end in (branches, hidden)");
+  }
+
+  auto block = dyn_cast<ShapedType>(getBlockOutput().getType());
+  if (!block || !block.hasRank() || block.getRank() < 1)
+    return emitOpError("expected a ranked block_output");
+  if (block.getElementType() != streams.getElementType())
+    return emitOpError("block_output element type must match streams");
+  int64_t blockHidden = block.getDimSize(block.getRank() - 1);
+  if (!ShapedType::isDynamic(blockHidden) && blockHidden != hidden)
+    return emitOpError("block_output must end in hidden");
+
+  if (getGateLayout() != "branch" && getGateLayout() != "feature")
+    return emitOpError("gate_layout must be \"branch\" or \"feature\"");
+  auto gate = dyn_cast<ShapedType>(getPostMix().getType());
+  if (!gate || !gate.hasRank())
+    return emitOpError("expected a ranked gate");
+  if (gate.getElementType() != streams.getElementType())
+    return emitOpError("gate element type must match streams");
+  size_t prefix = flattened ? streams.getRank() - 1 : streams.getRank() - 2;
+  if (gate.getRank() < static_cast<int64_t>(prefix))
+    return emitOpError("gate rank is shorter than the stream prefix");
+  for (size_t i = 0; i < prefix; ++i) {
+    if (!ShapedType::isDynamic(gate.getDimSize(i)) &&
+        !ShapedType::isDynamic(streams.getDimSize(i)) &&
+        gate.getDimSize(i) != streams.getDimSize(i))
+      return emitOpError("gate leading dimensions must match streams");
+  }
+
+  auto output = dyn_cast<ShapedType>(getOutput().getType());
+  if (!output || !output.hasRank() || output.getShape() != streams.getShape() ||
+      output.getElementType() != streams.getElementType())
+    return emitOpError("output shape and element type must match streams");
+  if (Value mix = getStreamMix()) {
+    auto mixType = dyn_cast<ShapedType>(mix.getType());
+    if (!mixType || !mixType.hasRank() ||
+        mixType.getElementType() != streams.getElementType())
+      return emitOpError("stream_mix element type must match streams");
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// HyperConnectionPostMixNormOp:
+//   ins(streams, block_output, gate, norm_scale, [stream_mix])
+//   outs(residual, normed)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange HyperConnectionPostMixNormOp::getDpsInitsMutable() {
+  return getOutputsMutable();
+}
+
+void HyperConnectionPostMixNormOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult HyperConnectionPostMixNormOp::verify() {
+  if (getOutputs().size() != 2)
+    return emitOpError("expected residual and normed outputs");
+  SmallVector<Value> dataOperands{getStreams(), getBlockOutput(), getGate(),
+                                  getNormScale()};
+  if (getStreamMix())
+    dataOperands.push_back(getStreamMix());
+  dataOperands.push_back(getOutputs()[0]);
+  dataOperands.push_back(getOutputs()[1]);
+  if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/2)))
+    return failure();
+  if (getBranches() <= 0 || getHidden() <= 0)
+    return emitOpError("branches and hidden must be positive");
+  if (getFlattened() != 0 && getFlattened() != 1)
+    return emitOpError("flattened must be 0 or 1");
+  if (getGateActivation() != 0 && getGateActivation() != 1)
+    return emitOpError("gate_activation must be 0 or 1");
+  if (getGateLayout() != "branch" && getGateLayout() != "feature")
+    return emitOpError("gate_layout must be \"branch\" or \"feature\"");
+  auto streams = dyn_cast<ShapedType>(getStreams().getType());
+  auto scale = dyn_cast<ShapedType>(getNormScale().getType());
+  if (!streams || !streams.hasRank() || !scale || !scale.hasRank() ||
+      scale.getRank() != 1)
+    return emitOpError("expected ranked streams and a 1-D norm scale");
+  if (!streams.getElementType().isF16() && !streams.getElementType().isF32())
+    return emitOpError("streams must be f16 or f32");
+  int64_t branches = getBranches();
+  int64_t hidden = getHidden();
+  if (getFlattened()) {
+    if (streams.getRank() < 1)
+      return emitOpError("flattened streams need rank >= 1");
+    int64_t width = streams.getDimSize(streams.getRank() - 1);
+    if (!ShapedType::isDynamic(width) && width != branches * hidden)
+      return emitOpError("flattened stream width must be branches * hidden");
+  } else {
+    if (streams.getRank() < 2)
+      return emitOpError("grouped streams need rank >= 2");
+    int64_t rank = streams.getRank();
+    int64_t branchDim = streams.getDimSize(rank - 2);
+    int64_t hiddenDim = streams.getDimSize(rank - 1);
+    if (!ShapedType::isDynamic(branchDim) && branchDim != branches ||
+        !ShapedType::isDynamic(hiddenDim) && hiddenDim != hidden)
+      return emitOpError("grouped streams must end in (branches, hidden)");
+  }
+  auto gateType = dyn_cast<ShapedType>(getGate().getType());
+  if (!gateType || gateType.getElementType() != streams.getElementType())
+    return emitOpError("gate must match the streams element type");
+  if (Value mix = getStreamMix()) {
+    auto mixType = dyn_cast<ShapedType>(mix.getType());
+    if (!mixType || mixType.getElementType() != streams.getElementType())
+      return emitOpError("stream_mix must match the streams element type");
+  }
+  int64_t scaleLen = scale.getDimSize(0);
+  if (!ShapedType::isDynamic(scaleLen) &&
+      scaleLen != getBranches() * getHidden())
+    return emitOpError("norm scale length must be branches * hidden");
+  for (Value out : getOutputs()) {
+    auto outType = dyn_cast<ShapedType>(out.getType());
+    if (!outType || outType.getShape() != streams.getShape() ||
+        outType.getElementType() != streams.getElementType())
+      return emitOpError("outputs must match the streams shape and type");
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// RopeOp: ins(input, [position_ids], cos_cache, sin_cache), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange RopeOp::getDpsInitsMutable() {
+  // position_ids is Optional, so the raw operand index of `output` shifts when
+  // it is absent. Use the generated accessor instead of a hardcoded index.
+  return getOutputMutable();
+}
+
+void RopeOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// MRotaryEmbeddingOp: ins(input, position_ids, cos_cache, sin_cache),
+//                     outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange MRotaryEmbeddingOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void MRotaryEmbeddingOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult MRotaryEmbeddingOp::verify() {
+  if (failed(verifyDpsComputeOp(*this,
+                                {getInput(), getPositionIds(), getCosCache(),
+                                 getSinCache(), getOutput()},
+                                1))) {
+    return failure();
+  }
+
+  auto inputType = cast<ShapedType>(getInput().getType());
+  Type elem = inputType.getElementType();
+  if (!elem.isF16() && !elem.isF32()) {
+    return emitOpError("input must be f16 or f32, got ") << elem;
+  }
+  if (inputType.getRank() != 3) {
+    return emitOpError("input must be rank 3, got rank ")
+           << inputType.getRank();
+  }
+  if (inputType.isDynamicDim(2)) {
+    return emitOpError("input dim 2 must be static");
+  }
+  const int64_t hidden = inputType.getDimSize(2);
+  const int64_t numHeads = getNumHeads();
+  if (numHeads <= 0 || hidden % numHeads != 0) {
+    return emitOpError("input dim 2 (")
+           << hidden << ") must be a positive multiple of num_heads ("
+           << numHeads << ")";
+  }
+  const int64_t headSize = hidden / numHeads;
+  const int64_t rotaryDim = getRotaryEmbeddingDim();
+  if (rotaryDim <= 0 || rotaryDim % 2 != 0 || rotaryDim > headSize) {
+    return emitOpError("rotary_embedding_dim must be positive, even and at "
+                       "most the head size ")
+           << headSize << ", got " << rotaryDim;
+  }
+  const int64_t half = rotaryDim / 2;
+
+  ArrayAttr section = getMropeSection();
+  if (section.size() != 3) {
+    return emitOpError("mrope_section must have 3 elements, got ")
+           << section.size();
+  }
+  int64_t sectionSum = 0;
+  for (Attribute a : section) {
+    int64_t v = cast<IntegerAttr>(a).getInt();
+    if (v < 0) {
+      return emitOpError("mrope_section values must be non-negative");
+    }
+    sectionSum += v;
+  }
+  if (sectionSum != half) {
+    return emitOpError("mrope_section must sum to rotary_embedding_dim / 2 = ")
+           << half << ", got " << sectionSum;
+  }
+  if (getMropeLayout() != 0 && getMropeLayout() != 1) {
+    return emitOpError("mrope_layout must be 0 or 1, got ") << getMropeLayout();
+  }
+
+  auto dimMismatch = [](int64_t got, int64_t want) {
+    return !ShapedType::isDynamic(got) && !ShapedType::isDynamic(want) &&
+           got != want;
+  };
+
+  auto posType = cast<ShapedType>(getPositionIds().getType());
+  if (!posType.getElementType().isInteger(64) || posType.getRank() != 3 ||
+      posType.getDimSize(0) != 3 ||
+      dimMismatch(posType.getDimSize(1), inputType.getDimSize(0)) ||
+      dimMismatch(posType.getDimSize(2), inputType.getDimSize(1))) {
+    return emitOpError("position_ids must be i64 [3, B, S], got ") << posType;
+  }
+
+  for (Value cache : {getCosCache(), getSinCache()}) {
+    auto cacheType = cast<ShapedType>(cache.getType());
+    if (cacheType.getElementType() != elem || cacheType.getRank() != 2 ||
+        cacheType.getDimSize(1) != half) {
+      return emitOpError("cos_cache and sin_cache must be ")
+             << elem << " [max_position, " << half << "], got " << cacheType;
+    }
+  }
+  if (dimMismatch(cast<ShapedType>(getCosCache().getType()).getDimSize(0),
+                  cast<ShapedType>(getSinCache().getType()).getDimSize(0))) {
+    return emitOpError("cos_cache and sin_cache must have the same shape");
+  }
+
+  auto outputType = cast<ShapedType>(getOutput().getType());
+  if (outputType.getElementType() != elem || outputType.getRank() != 3 ||
+      dimMismatch(outputType.getDimSize(0), inputType.getDimSize(0)) ||
+      dimMismatch(outputType.getDimSize(1), inputType.getDimSize(1)) ||
+      dimMismatch(outputType.getDimSize(2), hidden)) {
+    return emitOpError("output must match the input shape and type, got ")
+           << outputType;
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// MiopenAddOp: ins(A, B), outs(C)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange MiopenAddOp::getDpsInitsMutable() { return getCMutable(); }
+
+void MiopenAddOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult MiopenAddOp::verify() {
+  return verifyDpsComputeOp(*this, {getA(), getB(), getC()}, /*numInits=*/1);
+}
+
+ParseResult MiopenAddOp::parse(OpAsmParser &parser, OperationState &result) {
+  return parseSingleInitDpsOp(parser, result, /*numIns=*/2);
+}
+
+void MiopenAddOp::print(OpAsmPrinter &p) {
+  printSingleInitDpsOp(p, *this, getCtx(), /*scalarArgs=*/{}, {getA(), getB()},
+                       {getC()});
+}
+
+//===----------------------------------------------------------------------===//
+// MulOp: ins(lhs, rhs), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange MulOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void MulOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult MulOp::verify() {
+  return verifyDpsComputeOp(*this, {getLhs(), getRhs(), getOutput()},
+                            /*numInits=*/1);
+}
+
+ParseResult MulOp::parse(OpAsmParser &parser, OperationState &result) {
+  return parseSingleInitDpsOp(parser, result, /*numIns=*/2);
+}
+
+void MulOp::print(OpAsmPrinter &p) {
+  printSingleInitDpsOp(p, *this, getCtx(), /*scalarArgs=*/{},
+                       {getLhs(), getRhs()}, {getOutput()});
+}
+
+//===----------------------------------------------------------------------===//
+// AddOp: ins(lhs, rhs), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange AddOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void AddOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult AddOp::verify() {
+  return verifyDpsComputeOp(*this, {getLhs(), getRhs(), getOutput()},
+                            /*numInits=*/1);
+}
+
+ParseResult AddOp::parse(OpAsmParser &parser, OperationState &result) {
+  return parseSingleInitDpsOp(parser, result, /*numIns=*/2);
+}
+
+void AddOp::print(OpAsmPrinter &p) {
+  printSingleInitDpsOp(p, *this, getCtx(), /*scalarArgs=*/{},
+                       {getLhs(), getRhs()}, {getOutput()});
+}
+
+//===----------------------------------------------------------------------===//
+// MiopenSoftmaxOp: ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange MiopenSoftmaxOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void MiopenSoftmaxOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult MiopenSoftmaxOp::verify() {
+  return verifyDpsComputeOp(*this, {getInput(), getOutput()}, /*numInits=*/1);
+}
+
+ParseResult MiopenSoftmaxOp::parse(OpAsmParser &parser,
+                                   OperationState &result) {
+  return parseSingleInitDpsOp(parser, result, /*numIns=*/1);
+}
+
+void MiopenSoftmaxOp::print(OpAsmPrinter &p) {
+  printSingleInitDpsOp(p, *this, getCtx(), /*scalarArgs=*/{}, {getInput()},
+                       {getOutput()});
+}
+
+//===----------------------------------------------------------------------===//
+// TransposeOp: ins(input), outs(output), attrs: perm
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange TransposeOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void TransposeOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult TransposeOp::verify() {
+  if (failed(
+          verifyDpsComputeOp(*this, {getInput(), getOutput()}, /*numInits=*/1)))
+    return failure();
+
+  // Determine input rank when available (ranked tensor or memref).
+  int64_t rank = -1;
+  if (auto t = dyn_cast<RankedTensorType>(getInput().getType()))
+    rank = t.getRank();
+  else if (auto m = dyn_cast<MemRefType>(getInput().getType()))
+    rank = m.getRank();
+
+  ArrayAttr permAttr = getPerm();
+  if (rank >= 0 && static_cast<int64_t>(permAttr.size()) != rank)
+    return emitOpError("perm length (")
+           << permAttr.size() << ") must match input rank (" << rank << ")";
+
+  // perm must be a permutation of [0, rank).
+  llvm::SmallVector<bool> seen(permAttr.size(), false);
+  for (Attribute a : permAttr) {
+    auto intAttr = dyn_cast<IntegerAttr>(a);
+    if (!intAttr)
+      return emitOpError("perm must be a list of integers");
+    int64_t v = intAttr.getValue().getSExtValue();
+    if (v < 0 || v >= static_cast<int64_t>(permAttr.size()))
+      return emitOpError("perm value ") << v << " is out of range";
+    if (seen[v])
+      return emitOpError("perm must be a permutation (duplicate value ")
+             << v << ")";
+    seen[v] = true;
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// GatherOp: ins(indices, table), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange GatherOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void GatherOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// OneHotOp: ins(indices, depth, values), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange OneHotOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void OneHotOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// CompressOp: ins(input, condition), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange CompressOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void CompressOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// ScatterElementsOp: ins(data, indices, updates), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ScatterElementsOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void ScatterElementsOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// GatherElementsOp: ins(data, indices), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange GatherElementsOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void GatherElementsOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// TopKOp: ins(x, k), outs(values, indices)
+//===----------------------------------------------------------------------===//
+
+// Operand order is (ctx, x, k, values, indices); the two DPS inits are the
+// trailing contiguous range.
+MutableOperandRange TopKOp::getDpsInitsMutable() {
+  return MutableOperandRange(*this, /*start=*/3, /*length=*/2);
+}
+
+void TopKOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// RandomNormalLikeOp: ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+// Operand order is (ctx, input, output). The input is a shape donor; the
+// kernel fills `output` and does not load input elements.
+MutableOperandRange RandomNormalLikeOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void RandomNormalLikeOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+  // Tensor-mode DPS effects are empty, so an unseeded fill looks pure and
+  // CSE can merge two calls that must each take a new clock seed. A Write
+  // on the default resource keeps only the seeded (deterministic) form
+  // eligible for CSE.
+  if (!getSeedAttr())
+    effects.emplace_back(MemoryEffects::Write::get(),
+                         SideEffects::DefaultResource::get());
+}
+
+//===----------------------------------------------------------------------===//
+// ArgMaxOp: ins(data), outs(output)
+//===----------------------------------------------------------------------===//
+
+// Operand order is (ctx, data, output); the DPS init is the trailing output.
+MutableOperandRange ArgMaxOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void ArgMaxOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// RangeOp: ins(start, limit, delta), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange RangeOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void RangeOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// SiluOp: ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange SiluOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void SiluOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult SiluOp::verify() {
+  return verifyDpsComputeOp(*this, {getInput(), getOutput()}, /*numInits=*/1);
+}
+
+ParseResult SiluOp::parse(OpAsmParser &parser, OperationState &result) {
+  return parseSingleInitDpsOp(parser, result, /*numIns=*/1);
+}
+
+void SiluOp::print(OpAsmPrinter &p) {
+  printSingleInitDpsOp(p, *this, getCtx(), /*scalarArgs=*/{}, {getInput()},
+                       {getOutput()});
+}
+
+//===----------------------------------------------------------------------===//
+// SigmoidOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange SigmoidOp::getDpsInitsMutable() { return getYMutable(); }
+
+void SigmoidOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// TanhOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange TanhOp::getDpsInitsMutable() { return getYMutable(); }
+
+void TanhOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// SoftplusOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange SoftplusOp::getDpsInitsMutable() { return getYMutable(); }
+
+void SoftplusOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// GeluOp: ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange GeluOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void GeluOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// BiasGeluOp: ins(data, bias), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange BiasGeluOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void BiasGeluOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// FastGeluOp: ins(input, [bias]), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange FastGeluOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void FastGeluOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// PReluOp: ins(x, slope), outs(output). slope broadcasts onto x.
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange PReluOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void PReluOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// LeakyReluOp: ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange LeakyReluOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void LeakyReluOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// LRNOp: channel-window normalization, ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange LRNOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void LRNOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult LRNOp::verify() {
+  auto inType = dyn_cast<ShapedType>(getInput().getType());
+  auto outType = dyn_cast<ShapedType>(getOutput().getType());
+  if (!inType || !outType || !inType.hasRank() || !outType.hasRank() ||
+      inType.getRank() < 2 || inType.getRank() != outType.getRank())
+    return emitOpError(
+        "input and output must have the same rank of at least 2");
+
+  for (int64_t dim : llvm::seq<int64_t>(inType.getRank())) {
+    if (inType.isDynamicDim(dim) || outType.isDynamicDim(dim))
+      continue;
+    if (inType.getDimSize(dim) != outType.getDimSize(dim))
+      return emitOpError("input and output shapes must match");
+  }
+
+  Type elemType = inType.getElementType();
+  if (elemType != outType.getElementType() ||
+      (!elemType.isF16() && !elemType.isBF16() && !elemType.isF32() &&
+       !elemType.isF64()))
+    return emitOpError("input and output must be f16, bf16, f32, or f64");
+  if (getSize() < 1)
+    return emitOpError("size must be positive");
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// TriluOp: ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange TriluOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void TriluOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// SwishOp: ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange SwishOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void SwishOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// PowOp: ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange PowOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void PowOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// SwigluOp: ins(gate, up), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange SwigluOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void SwigluOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// PoolOp: ins(input), outs([output] or [output, indices])
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange PoolOp::getDpsInitsMutable() { return getOutputsMutable(); }
+
+void PoolOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// ResizeOp: ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ResizeOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void ResizeOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// GridSampleOp: ins(input, grid), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange GridSampleOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void GridSampleOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult GridSampleOp::verify() {
+  SmallVector<Value> dataOperands{getInput(), getGrid(), getOutput()};
+  if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/1)))
+    return failure();
+
+  auto rankedShape = [](Type t) -> std::optional<int64_t> {
+    if (auto tensor = dyn_cast<RankedTensorType>(t))
+      return tensor.getRank();
+    if (auto memref = dyn_cast<MemRefType>(t))
+      return memref.getRank();
+    return std::nullopt;
+  };
+
+  auto inputRank = rankedShape(getInput().getType());
+  auto gridRank = rankedShape(getGrid().getType());
+  auto outputRank = rankedShape(getOutput().getType());
+  if (!inputRank || *inputRank != 4)
+    return emitOpError("expected 4-D input (N, C, H, W)");
+  if (!gridRank || *gridRank != 4)
+    return emitOpError("expected 4-D grid (N, H_out, W_out, 2)");
+  if (!outputRank || *outputRank != 4)
+    return emitOpError("expected 4-D output (N, C, H_out, W_out)");
+
+  int64_t mode = getMode();
+  if (mode != 0 && mode != 1)
+    return emitOpError("mode must be 0 (nearest) or 1 (bilinear), got ")
+           << mode;
+  int64_t padding = getPaddingMode();
+  if (padding < 0 || padding > 2)
+    return emitOpError("padding_mode must be 0 (zeros), 1 (border), or 2 "
+                       "(reflection), got ")
+           << padding;
+  int64_t align = getAlignCorners();
+  if (align != 0 && align != 1)
+    return emitOpError("align_corners must be 0 or 1, got ") << align;
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// GlobalPoolOp: ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange GlobalPoolOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void GlobalPoolOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// ReciprocalOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ReciprocalOp::getDpsInitsMutable() { return getYMutable(); }
+
+void ReciprocalOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// SqrtOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange SqrtOp::getDpsInitsMutable() { return getYMutable(); }
+
+void SqrtOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// SubOp: ins(lhs, rhs), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange SubOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void SubOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// MinOp: ins(lhs, rhs), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange MinOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void MinOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// MaxOp: ins(lhs, rhs), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange MaxOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void MaxOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// WhereOp: ins(condition, x, y), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange WhereOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void WhereOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// CastOp: ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange CastOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void CastOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// ReduceSumOp: ins(data, axes), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ReduceSumOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void ReduceSumOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// ReduceMeanOp: ins(data, axes), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ReduceMeanOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void ReduceMeanOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// ReduceL2Op: ins(data, axes), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ReduceL2Op::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void ReduceL2Op::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// ReduceMaxOp: ins(data, axes), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ReduceMaxOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void ReduceMaxOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// ReduceMinOp: ins(data, axes), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ReduceMinOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void ReduceMinOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// MatMulNBitsOp
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange MatMulNBitsOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void MatMulNBitsOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+MutableOperandRange DequantBnb4Op::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void DequantBnb4Op::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult DequantBnb4Op::verify() {
+  if (failed(verifyDpsComputeOp(*this, {getPacked(), getAbsmax(), getOutput()},
+                                /*numInits=*/1)))
+    return failure();
+
+  auto shaped = [](Value value) { return cast<ShapedType>(value.getType()); };
+  ShapedType packedType = shaped(getPacked());
+  ShapedType absmaxType = shaped(getAbsmax());
+  ShapedType outputType = shaped(getOutput());
+  if (!packedType.getElementType().isUnsignedInteger(8))
+    return emitOpError("packed weights must be ui8");
+  if (!absmaxType.getElementType().isF32() ||
+      !outputType.getElementType().isF32())
+    return emitOpError("absmax and output must be f32");
+  if (!packedType.hasStaticShape() || !absmaxType.hasStaticShape() ||
+      !outputType.hasStaticShape())
+    return emitOpError("packed, absmax, and output must have static shapes");
+  if (outputType.getRank() != 2)
+    return emitOpError("output must be rank 2 [N, K]");
+
+  int64_t n = getN();
+  int64_t k = getK();
+  int64_t blockSize = getBlockSize();
+  int64_t quantType = getQuantType();
+  if (quantType != 0 && quantType != 1)
+    return emitOpError("quant_type must be 0 (FP4) or 1 (NF4)");
+  if (blockSize != 16 && blockSize != 32 && blockSize != 64 &&
+      blockSize != 128 && blockSize != 256)
+    return emitOpError("block_size must be 16, 32, 64, 128, or 256");
+  if (n <= 0 || k <= 0)
+    return emitOpError("N and K must be positive");
+  if (n > std::numeric_limits<int64_t>::max() / k)
+    return emitOpError("N * K overflows");
+  int64_t numel = n * k;
+  if (numel % 2 != 0 || numel % blockSize != 0)
+    return emitOpError("N * K must fill nibble pairs and whole blocks");
+  if (outputType.getDimSize(0) != n || outputType.getDimSize(1) != k)
+    return emitOpError("output shape must be [N, K]");
+  if (packedType.getNumElements() != numel / 2)
+    return emitOpError("packed length must be N * K / 2");
+  if (absmaxType.getNumElements() != numel / blockSize)
+    return emitOpError("absmax length must be N * K / block_size");
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// QMoEOp
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange QMoEOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void QMoEOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// QMoEAmdOp
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange QMoEAmdOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void QMoEAmdOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// GatherBlockQuantizedOp: ins(data, indices, scales, [zero_points])
+//                          outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange GatherBlockQuantizedOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void GatherBlockQuantizedOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// CausalConvWithStateOp: ins(input, weight, [bias], [past_state])
+//                        outs(output, present_state)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange CausalConvWithStateOp::getDpsInitsMutable() {
+  // DPS inits: output, present_state (always 2)
+  // Count actual inputs before the inits
+  unsigned numInputs = 1; // ctx
+  numInputs++;            // input
+  numInputs++;            // weight
+  if (getBias())
+    ++numInputs;
+  if (getPastState())
+    ++numInputs;
+
+  return MutableOperandRange(*this, /*start=*/numInputs, /*length=*/2);
+}
+
+void CausalConvWithStateOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult CausalConvWithStateOp::verify() {
+  auto dilation = static_cast<int64_t>(getDilation());
+  if (dilation < 1) {
+    return emitOpError("dilation must be at least 1, got ") << dilation;
+  }
+  if (getStateChannelsLast() && !getChannelsLast()) {
+    return emitOpError("state_channels_last requires channels_last");
+  }
+  if (dilation != 1 && !getStateChannelsLast()) {
+    return emitOpError("dilation > 1 requires state_channels_last");
+  }
+  if (!getStateChannelsLast()) {
+    return success();
+  }
+
+  auto inputType = cast<ShapedType>(getInput().getType());
+  auto weightType = cast<ShapedType>(getWeight().getType());
+  if (inputType.getRank() != 3 || weightType.getRank() != 3) {
+    return emitOpError("state_channels_last requires rank-3 input and weight");
+  }
+  if (weightType.isDynamicDim(2)) {
+    return emitOpError("state_channels_last requires a static kernel size");
+  }
+  int64_t stateLen = (weightType.getDimSize(2) - 1) * dilation;
+  int64_t channels = inputType.getDimSize(2);
+  SmallVector<Value, 2> states = {getPresentState()};
+  if (getPastState()) {
+    states.push_back(getPastState());
+  }
+  for (Value state : states) {
+    auto stateType = cast<ShapedType>(state.getType());
+    if (stateType.getRank() != 3) {
+      return emitOpError("state must be rank 3, got rank ")
+             << stateType.getRank();
+    }
+    if (!stateType.isDynamicDim(1) && stateType.getDimSize(1) != stateLen) {
+      return emitOpError("state dim 1 must be (kernel_size - 1) * dilation = ")
+             << stateLen << ", got " << stateType.getDimSize(1);
+    }
+    if (!ShapedType::isDynamic(channels) && !stateType.isDynamicDim(2) &&
+        stateType.getDimSize(2) != channels) {
+      return emitOpError("state dim 2 must match the input channels ")
+             << channels << ", got " << stateType.getDimSize(2);
+    }
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// NGramHashMappingOp: ins(input_ids, multipliers, vocab_sizes, [past_ids],
+//                         [head_offsets], [eos_token_id], [segment_ids])
+//                     outs(hash_ids, [present_ids])
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange NGramHashMappingOp::getDpsInitsMutable() {
+  return getOutputsMutable();
+}
+
+void NGramHashMappingOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult NGramHashMappingOp::verify() {
+  SmallVector<Value> data = {getInputIds(), getMultipliers(), getVocabSizes()};
+  for (Value v :
+       {getPastIds(), getHeadOffsets(), getEosTokenId(), getSegmentIds()}) {
+    if (v) {
+      data.push_back(v);
+    }
+  }
+  llvm::append_range(data, getOutputs());
+  if (getOutputs().empty() || getOutputs().size() > 2) {
+    return emitOpError("expects 1 or 2 outputs, got ") << getOutputs().size();
+  }
+  if (failed(verifyDpsComputeOp(*this, data, getOutputs().size()))) {
+    return failure();
+  }
+
+  const int64_t ngram = getMaxNgramSize();
+  const int64_t headsPerNgram = getNHeadPerNgram();
+  if (ngram < 2) {
+    return emitOpError("max_ngram_size must be >= 2, got ") << ngram;
+  }
+  if (headsPerNgram < 1) {
+    return emitOpError("n_head_per_ngram must be >= 1, got ") << headsPerNgram;
+  }
+  const int64_t history = ngram - 1;
+  const int64_t numHeads = history * headsPerNgram;
+  constexpr int64_t kAny = ShapedType::kDynamic;
+
+  auto ids = cast<ShapedType>(getInputIds().getType());
+  Type elem = ids.getElementType();
+  if (!elem.isSignlessInteger(32) && !elem.isSignlessInteger(64)) {
+    return emitOpError("input_ids must be i32 or i64, got ") << elem;
+  }
+  const auto padId = static_cast<int64_t>(getPadId());
+  if (elem.isSignlessInteger(32) &&
+      (padId < std::numeric_limits<int32_t>::min() ||
+       padId > std::numeric_limits<int32_t>::max())) {
+    return emitOpError("pad_id ") << padId << " does not fit in i32";
+  }
+  if (ids.getRank() != 2) {
+    return emitOpError("input_ids must be rank 2, got rank ") << ids.getRank();
+  }
+  const int64_t batch = ids.getDimSize(0);
+  const int64_t seq = ids.getDimSize(1);
+
+  auto check = [&](Value v, StringRef name, Type expectedElem,
+                   ArrayRef<int64_t> expected) -> LogicalResult {
+    auto type = cast<ShapedType>(v.getType());
+    if (type.getElementType() != expectedElem) {
+      return emitOpError() << name << " must have element type " << expectedElem
+                           << ", got " << type.getElementType();
+    }
+    if (type.getRank() != static_cast<int64_t>(expected.size())) {
+      return emitOpError() << name << " must be rank " << expected.size()
+                           << ", got rank " << type.getRank();
+    }
+    for (auto [i, want] : llvm::enumerate(expected)) {
+      int64_t got = type.getDimSize(i);
+      if (want != kAny && got != ShapedType::kDynamic && got != want) {
+        return emitOpError() << name << " dim " << i << " must be " << want
+                             << ", got " << got;
+      }
+    }
+    return success();
+  };
+
+  auto mult = cast<ShapedType>(getMultipliers().getType());
+  if (failed(check(getMultipliers(), "multipliers", elem, {kAny}))) {
+    return failure();
+  }
+  if (!mult.isDynamicDim(0) && mult.getDimSize(0) < ngram) {
+    return emitOpError("multipliers must have at least ")
+           << ngram << " elements, got " << mult.getDimSize(0);
+  }
+  if (failed(check(getVocabSizes(), "vocab_sizes", elem, {numHeads}))) {
+    return failure();
+  }
+  if (getPastIds() &&
+      failed(check(getPastIds(), "past_ids", elem, {batch, history}))) {
+    return failure();
+  }
+  if (getHeadOffsets() &&
+      failed(check(getHeadOffsets(), "head_offsets", elem, {numHeads}))) {
+    return failure();
+  }
+  if (getEosTokenId() &&
+      failed(check(getEosTokenId(), "eos_token_id", elem, {}))) {
+    return failure();
+  }
+  if (getSegmentIds() &&
+      failed(check(getSegmentIds(), "segment_ids",
+                   IntegerType::get(getContext(), 32), {batch, seq}))) {
+    return failure();
+  }
+  if (failed(
+          check(getOutputs()[0], "hash_ids", elem, {batch, seq, numHeads}))) {
+    return failure();
+  }
+  if (getOutputs().size() == 2 &&
+      failed(check(getOutputs()[1], "present_ids", elem, {batch, history}))) {
+    return failure();
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// GemmOp
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange GemmOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void GemmOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// GqaOp: Full MS spec implementation
+//        ins(query, [key, value, past_key, past_value], seqlens_k,
+//        total_seq_len,
+//            [cos_cache, sin_cache, position_ids, attention_bias, head_sink,
+//             k_scale, v_scale])
+//        outs(output, present_state)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange LinearAttentionOp::getDpsInitsMutable() {
+  // Operand segments:
+  //   ctx(1), query(1), key(1), value(1),
+  //   past_state(0|1), decay(0|1), beta(0|1),
+  //   output(1), present_state(1)
+  unsigned numInputs = 4; // ctx, query, key, value
+  if (getPastState())
+    ++numInputs;
+  if (getDecay())
+    ++numInputs;
+  if (getBeta())
+    ++numInputs;
+
+  // DPS inits: output, present_state (always 2)
+  return MutableOperandRange(*this, /*start=*/numInputs, /*length=*/2);
+}
+
+void LinearAttentionOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// GatedDeltaNetOp: ins(qkv, decay, beta, initial_state, a_log, dt_bias)
+//                  outs(output, final_state)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange GatedDeltaNetOp::getDpsInitsMutable() {
+  return MutableOperandRange(
+      *this, /*start=*/getOutputMutable().getOperandNumber(), /*length=*/2);
+}
+
+void GatedDeltaNetOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult GatedDeltaNetOp::verify() {
+  SmallVector<Value> data = {getQkv(),          getDecay(),     getBeta(),
+                             getInitialState(), getALog(),      getDtBias(),
+                             getOutput(),       getFinalState()};
+  if (failed(verifyDpsComputeOp(*this, data, 2))) {
+    return failure();
+  }
+
+  constexpr int64_t kAny = ShapedType::kDynamic;
+  Type f32 = Float32Type::get(getContext());
+
+  auto qkvType = cast<ShapedType>(getQkv().getType());
+  Type elem = qkvType.getElementType();
+  if (!elem.isF16() && !elem.isF32()) {
+    return emitOpError("qkv must be f16 or f32, got ") << elem;
+  }
+  if (qkvType.getRank() != 3) {
+    return emitOpError("qkv must be rank 3, got rank ") << qkvType.getRank();
+  }
+  if (qkvType.isDynamicDim(2)) {
+    return emitOpError("qkv dim 2 must be static");
+  }
+
+  auto stateType = cast<ShapedType>(getInitialState().getType());
+  if (stateType.getElementType() != f32) {
+    return emitOpError("initial_state must be f32, got ")
+           << stateType.getElementType();
+  }
+  if (stateType.getRank() != 4) {
+    return emitOpError("initial_state must be rank 4, got rank ")
+           << stateType.getRank();
+  }
+  for (int64_t i = 1; i < 4; ++i) {
+    if (stateType.isDynamicDim(i)) {
+      return emitOpError("initial_state dim ") << i << " must be static";
+    }
+  }
+
+  const int64_t batch = qkvType.getDimSize(0);
+  const int64_t seq = qkvType.getDimSize(1);
+  const int64_t packed = qkvType.getDimSize(2);
+  const int64_t numHeadsV = stateType.getDimSize(1);
+  const int64_t headSizeV = stateType.getDimSize(2);
+  const int64_t headSizeQk = stateType.getDimSize(3);
+  if (headSizeQk != 32 && headSizeQk != 64 && headSizeQk != 128 &&
+      headSizeQk != 256) {
+    return emitOpError("head size dk must be 32, 64, 128 or 256, got ")
+           << headSizeQk;
+  }
+  const int64_t qkWidth = packed - numHeadsV * headSizeV;
+  if (qkWidth <= 0 || qkWidth % (2 * headSizeQk) != 0) {
+    return emitOpError("qkv dim 2 (")
+           << packed << ") minus Hv*dv (" << numHeadsV * headSizeV
+           << ") must be a positive multiple of 2*dk (" << 2 * headSizeQk
+           << ")";
+  }
+  const int64_t numHeadsQk = qkWidth / (2 * headSizeQk);
+  if (numHeadsV % numHeadsQk != 0) {
+    return emitOpError("Hv (")
+           << numHeadsV << ") must be a multiple of Hqk (" << numHeadsQk << ")";
+  }
+
+  auto check = [&](Value v, StringRef name, Type expectedElem,
+                   ArrayRef<int64_t> expected) -> LogicalResult {
+    auto type = cast<ShapedType>(v.getType());
+    if (type.getElementType() != expectedElem) {
+      return emitOpError() << name << " must have element type " << expectedElem
+                           << ", got " << type.getElementType();
+    }
+    if (type.getRank() != static_cast<int64_t>(expected.size())) {
+      return emitOpError() << name << " must be rank " << expected.size()
+                           << ", got rank " << type.getRank();
+    }
+    for (auto [i, want] : llvm::enumerate(expected)) {
+      int64_t got = type.getDimSize(i);
+      if (want != kAny && got != ShapedType::kDynamic && got != want) {
+        return emitOpError() << name << " dim " << i << " must be " << want
+                             << ", got " << got;
+      }
+    }
+    return success();
+  };
+
+  if (failed(check(getInitialState(), "initial_state", f32,
+                   {batch, numHeadsV, headSizeV, headSizeQk})) ||
+      failed(check(getDecay(), "decay", f32, {batch, seq, numHeadsV})) ||
+      failed(check(getBeta(), "beta", f32, {batch, seq, numHeadsV})) ||
+      failed(check(getALog(), "a_log", f32, {numHeadsV})) ||
+      failed(check(getDtBias(), "dt_bias", f32, {numHeadsV})) ||
+      failed(check(getOutput(), "output", elem,
+                   {batch, seq, numHeadsV, headSizeV})) ||
+      failed(
+          check(getFinalState(), "final_state", f32,
+                {stateType.getDimSize(0), numHeadsV, headSizeV, headSizeQk}))) {
+    return failure();
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// DynamicSparseAttentionOp:
+//   ins(query, key, value, past_key, past_value, selected_indices,
+//       selected_counts, seqlens_k)
+//   outs(output, present_key, present_value)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange DynamicSparseAttentionOp::getDpsInitsMutable() {
+  return MutableOperandRange(
+      *this, /*start=*/getOutputMutable().getOperandNumber(), /*length=*/3);
+}
+
+void DynamicSparseAttentionOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult DynamicSparseAttentionOp::verify() {
+  SmallVector<Value> data = {
+      getQuery(),          getKey(),         getValue(),
+      getPastKey(),        getPastValue(),   getSelectedIndices(),
+      getSelectedCounts(), getSeqlensK(),    getOutput(),
+      getPresentKey(),     getPresentValue()};
+  if (failed(verifyDpsComputeOp(*this, data, 3))) {
+    return failure();
+  }
+
+  const int64_t numHeads = getNumHeads();
+  const int64_t kvNumHeads = getKvNumHeads();
+  if (numHeads <= 0 || kvNumHeads <= 0 || numHeads % kvNumHeads != 0) {
+    return emitOpError("num_heads (")
+           << numHeads << ") must be a positive multiple of kv_num_heads ("
+           << kvNumHeads << ")";
+  }
+  if (numHeads / kvNumHeads > 16) {
+    return emitOpError("num_heads / kv_num_heads must be at most 16, got ")
+           << numHeads / kvNumHeads;
+  }
+
+  const float scale = getScale().convertToFloat();
+  if (!std::isfinite(scale) || scale < 0.0f) {
+    return emitOpError("scale must be finite and non-negative");
+  }
+
+  constexpr int64_t kAny = ShapedType::kDynamic;
+  auto queryType = cast<ShapedType>(getQuery().getType());
+  if (queryType.getRank() != 3 || queryType.isDynamicDim(2) ||
+      queryType.getDimSize(2) % numHeads != 0) {
+    return emitOpError("query must be rank 3 with a static last dim that is a "
+                       "multiple of num_heads");
+  }
+  const int64_t headSize = queryType.getDimSize(2) / numHeads;
+  if (headSize != 128 && headSize != 256) {
+    return emitOpError("head size must be 128 or 256, got ") << headSize;
+  }
+  auto pastType = cast<ShapedType>(getPastKey().getType());
+  if (pastType.getRank() != 4) {
+    return emitOpError("past_key must be rank 4, got rank ")
+           << pastType.getRank();
+  }
+  const int64_t batch = queryType.getDimSize(0);
+  const int64_t seq = queryType.getDimSize(1);
+  const int64_t rows =
+      ShapedType::isDynamic(batch) || ShapedType::isDynamic(seq) ? kAny
+                                                                 : batch * seq;
+  const int64_t cap = pastType.getDimSize(2);
+
+  Type f16 = Float16Type::get(getContext());
+  Type i32 = IntegerType::get(getContext(), 32);
+  auto check = [&](Value v, StringRef name, Type expectedElem,
+                   ArrayRef<int64_t> expected) -> LogicalResult {
+    auto type = cast<ShapedType>(v.getType());
+    if (type.getElementType() != expectedElem) {
+      return emitOpError() << name << " must have element type " << expectedElem
+                           << ", got " << type.getElementType();
+    }
+    if (type.getRank() != static_cast<int64_t>(expected.size())) {
+      return emitOpError() << name << " must be rank " << expected.size()
+                           << ", got rank " << type.getRank();
+    }
+    for (auto [i, want] : llvm::enumerate(expected)) {
+      int64_t got = type.getDimSize(i);
+      if (want != kAny && got != ShapedType::kDynamic && got != want) {
+        return emitOpError() << name << " dim " << i << " must be " << want
+                             << ", got " << got;
+      }
+    }
+    return success();
+  };
+
+  const SmallVector<int64_t> cacheShape = {batch, kvNumHeads, cap, headSize};
+  if (failed(
+          check(getQuery(), "query", f16, {batch, seq, numHeads * headSize})) ||
+      failed(
+          check(getKey(), "key", f16, {batch, seq, kvNumHeads * headSize})) ||
+      failed(check(getValue(), "value", f16,
+                   {batch, seq, kvNumHeads * headSize})) ||
+      failed(check(getPastKey(), "past_key", f16, cacheShape)) ||
+      failed(check(getPastValue(), "past_value", f16, cacheShape)) ||
+      failed(
+          check(getSelectedIndices(), "selected_indices", i32, {rows, kAny})) ||
+      failed(check(getSelectedCounts(), "selected_counts", i32, {rows})) ||
+      failed(check(getSeqlensK(), "seqlens_k", i32, {batch})) ||
+      failed(check(getOutput(), "output", f16,
+                   {batch, seq, numHeads * headSize})) ||
+      failed(check(getPresentKey(), "present_key", f16, cacheShape)) ||
+      failed(check(getPresentValue(), "present_value", f16, cacheShape))) {
+    return failure();
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// SparseAttentionIndexerOp:
+//   ins(query, query_norm_weight, key_norm_weight, cos_cache, sin_cache,
+//       past_key) [mask(mask)] [past_sequence_length(past_sequence_length)]
+//   outs(selected_indices, present_key)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange SparseAttentionIndexerOp::getDpsInitsMutable() {
+  return MutableOperandRange(
+      *this, /*start=*/getSelectedIndicesMutable().getOperandNumber(),
+      /*length=*/2);
+}
+
+void SparseAttentionIndexerOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult SparseAttentionIndexerOp::verify() {
+  SmallVector<Value> data = {getQuery(),         getQueryNormWeight(),
+                             getKeyNormWeight(), getCosCache(),
+                             getSinCache(),      getPastKey()};
+  if (getMask()) {
+    data.push_back(getMask());
+  }
+  if (getPastSequenceLength()) {
+    data.push_back(getPastSequenceLength());
+  }
+  data.push_back(getSelectedIndices());
+  data.push_back(getPresentKey());
+  if (failed(verifyDpsComputeOp(*this, data, 2))) {
+    return failure();
+  }
+
+  const int64_t ratio = getCompressRatio();
+  const int64_t budget = getTokenBudget();
+  if (ratio <= 0 || budget <= 0 || budget % ratio != 0) {
+    return emitOpError("token_budget (")
+           << budget << ") must be a positive multiple of compress_ratio ("
+           << ratio << ")";
+  }
+  if (budget / ratio > 512) {
+    return emitOpError("token_budget / compress_ratio must be at most 512, "
+                       "got ")
+           << budget / ratio;
+  }
+  const float epsilon = getEpsilon().convertToFloat();
+  if (!std::isfinite(epsilon) || epsilon < 0.0f) {
+    return emitOpError("epsilon must be finite and non-negative");
+  }
+
+  constexpr int64_t kAny = ShapedType::kDynamic;
+  constexpr int64_t kHeadSize = 128;
+  auto queryType = cast<ShapedType>(getQuery().getType());
+  Type elem = queryType.getElementType();
+  if (!elem.isF16() && !elem.isF32()) {
+    return emitOpError("query element type must be f16 or f32, got ") << elem;
+  }
+  if (queryType.getRank() != 3 || queryType.isDynamicDim(2)) {
+    return emitOpError("query must be rank 3 with a static width");
+  }
+  const int64_t width = queryType.getDimSize(2);
+  const int64_t numHeads = width / kHeadSize - 1;
+  if (width % kHeadSize != 0 || numHeads < 1 || numHeads > 8) {
+    return emitOpError("query width must be (N + 1) * 128 with 1 <= N <= 8, "
+                       "got ")
+           << width;
+  }
+  const int64_t batch = queryType.getDimSize(0);
+  const int64_t seq = queryType.getDimSize(1);
+
+  auto cosType = cast<ShapedType>(getCosCache().getType());
+  const int64_t cosRank = cosType.getRank();
+  if ((cosRank != 2 && cosRank != 3) || cosType.isDynamicDim(cosRank - 1)) {
+    return emitOpError("cos_cache must be rank 2 or 3 with a static width");
+  }
+  const int64_t rotary = cosType.getDimSize(cosRank - 1);
+  if (rotary <= 0 || rotary % 2 != 0 || rotary > kHeadSize) {
+    return emitOpError("rotary width must be even and in (0, 128], got ")
+           << rotary;
+  }
+
+  auto pastType = cast<ShapedType>(getPastKey().getType());
+  if (pastType.getRank() != 3) {
+    return emitOpError("past_key must be rank 3, got rank ")
+           << pastType.getRank();
+  }
+  auto selectedType = cast<ShapedType>(getSelectedIndices().getType());
+  auto presentType = cast<ShapedType>(getPresentKey().getType());
+  if (pastType.isDynamicDim(2) ||
+      (presentType.getRank() == 3 && presentType.isDynamicDim(2)) ||
+      (selectedType.getRank() == 3 && selectedType.isDynamicDim(2))) {
+    return emitOpError("past_key, present_key and selected_indices must have "
+                       "a static last dim");
+  }
+  const bool shared = static_cast<bool>(getPastSequenceLength());
+  const int64_t past = pastType.getDimSize(1);
+  const int64_t total =
+      shared || ShapedType::isDynamic(past) || ShapedType::isDynamic(seq)
+          ? kAny
+          : past + seq;
+  const int64_t presentRows = shared ? past : total;
+
+  Type i32 = IntegerType::get(getContext(), 32);
+  Type i64 = IntegerType::get(getContext(), 64);
+  auto check = [&](Value v, StringRef name, Type expectedElem,
+                   ArrayRef<int64_t> expected) -> LogicalResult {
+    auto type = cast<ShapedType>(v.getType());
+    if (type.getElementType() != expectedElem) {
+      return emitOpError() << name << " must have element type " << expectedElem
+                           << ", got " << type.getElementType();
+    }
+    if (type.getRank() != static_cast<int64_t>(expected.size())) {
+      return emitOpError() << name << " must be rank " << expected.size()
+                           << ", got rank " << type.getRank();
+    }
+    for (auto [i, want] : llvm::enumerate(expected)) {
+      int64_t got = type.getDimSize(i);
+      if (want != kAny && got != ShapedType::kDynamic && got != want) {
+        return emitOpError() << name << " dim " << i << " must be " << want
+                             << ", got " << got;
+      }
+    }
+    return success();
+  };
+
+  SmallVector<int64_t> cacheShape = {kAny, rotary};
+  if (cosRank == 3) {
+    cacheShape.insert(cacheShape.begin(), batch);
+  }
+  if (failed(check(getQueryNormWeight(), "query_norm_weight", elem,
+                   {kHeadSize})) ||
+      failed(check(getKeyNormWeight(), "key_norm_weight", elem, {kHeadSize})) ||
+      failed(check(getCosCache(), "cos_cache", elem, cacheShape)) ||
+      failed(check(getSinCache(), "sin_cache", elem, cacheShape)) ||
+      failed(check(getPastKey(), "past_key", elem, {batch, kAny, kHeadSize})) ||
+      (getMask() && failed(check(getMask(), "mask", i64, {batch, total}))) ||
+      (shared && failed(check(getPastSequenceLength(), "past_sequence_length",
+                              i32, {1}))) ||
+      failed(check(getSelectedIndices(), "selected_indices", i32,
+                   {batch, seq, budget + ratio - 1})) ||
+      failed(check(getPresentKey(), "present_key", elem,
+                   {batch, presentRows, kHeadSize}))) {
+    return failure();
+  }
+  auto sinType = cast<ShapedType>(getSinCache().getType());
+  for (int64_t i = 0; i < cosRank; ++i) {
+    if (!cosType.isDynamicDim(i) && !sinType.isDynamicDim(i) &&
+        cosType.getDimSize(i) != sinType.getDimSize(i)) {
+      return emitOpError("sin_cache must have the shape of cos_cache");
+    }
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// MultiHeadAttentionOp:
+//   ins(query, [key, value, bias, key_padding_mask, attention_bias,
+//                past_key, past_value, past_sequence_length,
+//                cache_indirection])
+//   outs(output, [present_key, present_value, qk])
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange MultiHeadAttentionOp::getDpsInitsMutable() {
+  // Count actual inputs (skip ctx which is always first)
+  unsigned numInputs = 1; // ctx
+  if (getQuery())
+    ++numInputs;
+  if (getKey())
+    ++numInputs;
+  if (getValue())
+    ++numInputs;
+  if (getBias())
+    ++numInputs;
+  if (getKeyPaddingMask())
+    ++numInputs;
+  if (getAttentionBias())
+    ++numInputs;
+  if (getPastKey())
+    ++numInputs;
+  if (getPastValue())
+    ++numInputs;
+  if (getPastSequenceLength())
+    ++numInputs;
+  if (getCacheIndirection())
+    ++numInputs;
+
+  // DPS inits: output (always), [present_key, present_value, qk] (optional)
+  unsigned numInits = 1;
+  if (getPresentKey())
+    ++numInits;
+  if (getPresentValue())
+    ++numInits;
+  if (getQk())
+    ++numInits;
+
+  return MutableOperandRange(*this, /*start=*/numInputs, /*length=*/numInits);
+}
+
+void MultiHeadAttentionOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// GqaOp: ins(query, [key, value, past_key, past_value,]
+//             seqlens_k, total_seq_len, [cos_cache, ...])
+//        outs(output, present_key, present_value, [output_qk])
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange GqaOp::getDpsInitsMutable() {
+  // DPS inits start after all inputs
+  // Required inputs: ctx(0), query(1), seqlens_k(6), total_seq_len(7)
+  // Optional inputs: key(2), value(3), past_key(4), past_value(5),
+  //                  cos_cache(8-14: 7 optional inputs)
+  // Then DPS outputs: output, present_key, present_value, [output_qk]
+
+  // Count actual inputs (skip ctx which is always first)
+  unsigned numInputs = 1; // ctx
+  if (getQuery())
+    ++numInputs;
+  if (getKey())
+    ++numInputs;
+  if (getValue())
+    ++numInputs;
+  if (getPastKey())
+    ++numInputs;
+  if (getPastValue())
+    ++numInputs;
+  if (getSeqlensK())
+    ++numInputs;
+  if (getTotalSeqLen())
+    ++numInputs;
+  if (getCosCache())
+    ++numInputs;
+  if (getSinCache())
+    ++numInputs;
+  if (getPositionIds())
+    ++numInputs;
+  if (getAttentionBias())
+    ++numInputs;
+  if (getHeadSink())
+    ++numInputs;
+  if (getKScale())
+    ++numInputs;
+  if (getVScale())
+    ++numInputs;
+
+  // DPS inits: output, present_key, present_value, [output_qk]
+  unsigned numInits = 3;
+  if (getOutputQk())
+    numInits = 4;
+
+  return MutableOperandRange(*this, /*start=*/numInputs, /*length=*/numInits);
+}
+
+void GqaOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult GqaOp::verify() {
+  // Verify quantization parameter consistency
+  auto kQuantType = getKQuantType().str();
+  auto vQuantType = getVQuantType().str();
+
+  // If k_quant_type != "NONE", k_scale must be provided
+  if (kQuantType != "NONE" && !getKScale()) {
+    return emitOpError("k_quant_type is '")
+           << kQuantType << "' but k_scale is not provided";
+  }
+
+  // If v_quant_type != "NONE", v_scale must be provided
+  if (vQuantType != "NONE" && !getVScale()) {
+    return emitOpError("v_quant_type is '")
+           << vQuantType << "' but v_scale is not provided";
+  }
+
+  // Verify quant_type values
+  if (kQuantType != "NONE" && kQuantType != "PER_TENSOR" &&
+      kQuantType != "PER_CHANNEL") {
+    return emitOpError("k_quant_type must be 'NONE', 'PER_TENSOR', or "
+                       "'PER_CHANNEL', got '")
+           << kQuantType << "'";
+  }
+
+  if (vQuantType != "NONE" && vQuantType != "PER_TENSOR" &&
+      vQuantType != "PER_CHANNEL") {
+    return emitOpError("v_quant_type must be 'NONE', 'PER_TENSOR', or "
+                       "'PER_CHANNEL', got '")
+           << vQuantType << "'";
+  }
+
+  // Verify bit width
+  int64_t bitWidth = getKvCacheBitWidth();
+  if (bitWidth != 4 && bitWidth != 8) {
+    return emitOpError("kv_cache_bit_width must be 4 or 8, got ") << bitWidth;
+  }
+
+  // Verify qk_output mode
+  int64_t qkOutput = getQkOutput();
+  if (qkOutput < 0 || qkOutput > 2) {
+    return emitOpError("qk_output must be 0, 1, or 2, got ") << qkOutput;
+  }
+
+  // If qk_output != 0, output_qk must be provided
+  if (qkOutput != 0 && !getOutputQk()) {
+    return emitOpError("qk_output is ")
+           << qkOutput << " but output_qk buffer is not provided";
+  }
+
+  // Verify paired optional inputs: cos_cache/sin_cache must both be present or
+  // both absent
+  bool hasCosCache = getCosCache() != nullptr;
+  bool hasSinCache = getSinCache() != nullptr;
+  if (hasCosCache != hasSinCache) {
+    return emitOpError("cos_cache and sin_cache must both be provided or both "
+                       "be omitted (found cos_cache=")
+           << (hasCosCache ? "present" : "absent")
+           << ", sin_cache=" << (hasSinCache ? "present" : "absent") << ")";
+  }
+
+  // Verify paired optional inputs: key/value must both be present or both
+  // absent
+  bool hasKey = getKey() != nullptr;
+  bool hasValue = getValue() != nullptr;
+  if (hasKey != hasValue) {
+    return emitOpError("key and value must both be provided or both be omitted "
+                       "(found key=")
+           << (hasKey ? "present" : "absent")
+           << ", value=" << (hasValue ? "present" : "absent") << ")";
+  }
+
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// HipDNNGraphOp: ins(variadic), outs(variadic)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange HipDNNGraphOp::getDpsInitsMutable() {
+  return getOutputsMutable();
+}
+
+void HipDNNGraphOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// EqualOp: ins(lhs, rhs), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange EqualOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void EqualOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// DivOp: ins(lhs, rhs), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange DivOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void DivOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// AbsOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange AbsOp::getDpsInitsMutable() { return getYMutable(); }
+
+void AbsOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// NegOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange NegOp::getDpsInitsMutable() { return getYMutable(); }
+
+void NegOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// IsNaNOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange IsNaNOp::getDpsInitsMutable() { return getYMutable(); }
+
+void IsNaNOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult IsNaNOp::verify() {
+  auto inputType = dyn_cast<ShapedType>(getX().getType());
+  auto outputType = dyn_cast<ShapedType>(getY().getType());
+  if (!inputType || !outputType || !inputType.hasRank() ||
+      !outputType.hasRank())
+    return emitOpError("expects ranked input and output");
+
+  Type inputElem = inputType.getElementType();
+  if (!inputElem.isF16() && !inputElem.isBF16() && !inputElem.isF32() &&
+      !inputElem.isF64())
+    return emitOpError("input element type must be f16, bf16, f32, or f64");
+
+  // ONNX bool is i1 in hand-written IR and an 8-bit integer in the
+  // ORT/morphizen frontend. Both are one byte per element at runtime.
+  Type outputElem = outputType.getElementType();
+  if (!outputElem.isInteger(1) && !outputElem.isInteger(8))
+    return emitOpError(
+        "output element type must be a 1-byte boolean (i1 or i8/ui8)");
+
+  if (inputType.getRank() != outputType.getRank())
+    return emitOpError("input and output ranks must match");
+  for (int64_t dim : llvm::seq<int64_t>(inputType.getRank())) {
+    if (inputType.isDynamicDim(dim) || outputType.isDynamicDim(dim))
+      continue;
+    if (inputType.getDimSize(dim) != outputType.getDimSize(dim))
+      return emitOpError("input and output shapes must match");
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// NotOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange NotOp::getDpsInitsMutable() { return getYMutable(); }
+
+void NotOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// OrOp: ins(lhs, rhs), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange OrOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void OrOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// AndOp: ins(lhs, rhs), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange AndOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void AndOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// CosOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange CosOp::getDpsInitsMutable() { return getYMutable(); }
+
+void CosOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// ErfOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ErfOp::getDpsInitsMutable() { return getYMutable(); }
+
+void ErfOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// SinOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange SinOp::getDpsInitsMutable() { return getYMutable(); }
+
+void SinOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// CeilOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange CeilOp::getDpsInitsMutable() { return getYMutable(); }
+
+void CeilOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// RoundOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange RoundOp::getDpsInitsMutable() { return getYMutable(); }
+
+void RoundOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// AtanOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange AtanOp::getDpsInitsMutable() { return getYMutable(); }
+
+void AtanOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// FloorOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange FloorOp::getDpsInitsMutable() { return getYMutable(); }
+
+void FloorOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// ExpOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ExpOp::getDpsInitsMutable() { return getYMutable(); }
+
+void ExpOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// LogOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange LogOp::getDpsInitsMutable() { return getYMutable(); }
+
+void LogOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// CumSumOp: ins(x, axis), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange CumSumOp::getDpsInitsMutable() { return getYMutable(); }
+
+void CumSumOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// PadOp: ins(data, pads, [constant_value], [axes]), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange PadOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void PadOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// TileOp: ins(input, repeats), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange TileOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void TileOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// ExpandOp: ins(input, shape), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ExpandOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void ExpandOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// ReduceProdOp: ins(data, axes), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ReduceProdOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void ReduceProdOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// LessOp: ins(lhs, rhs), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange LessOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void LessOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// GatherNDOp: ins(data, indices), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange GatherNDOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void GatherNDOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// SliceOp: ins(data, starts, ends, [axes], [steps]), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange SliceOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void SliceOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// SignOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange SignOp::getDpsInitsMutable() { return getYMutable(); }
+
+void SignOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// ModOp: ins(lhs, rhs), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ModOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void ModOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// ScatterNDOp: ins(data, indices, updates), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ScatterNDOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void ScatterNDOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// NonZeroOp: ins(x), outs(y, count)
+//===----------------------------------------------------------------------===//
+
+// Operand order is (ctx, x, y, count); the two DPS inits (y, count) are the
+// trailing contiguous range, as required by DestinationStyleOpInterface.
+MutableOperandRange NonZeroOp::getDpsInitsMutable() {
+  return MutableOperandRange(*this, /*start=*/2, /*length=*/2);
+}
+
+void NonZeroOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+MutableOperandRange NonMaxSuppressionOp::getDpsInitsMutable() {
+  return MutableOperandRange(*this, /*start=*/6, /*length=*/2);
+}
+
+void NonMaxSuppressionOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// ReadbackDimOp: ins(scalar) -> index
+//===----------------------------------------------------------------------===//
+
+// Reads the device `scalar` buffer (a Read effect on the operand) plus a stream
+// synchronization. The Read-after-Write against the producing kernel's write
+// keeps it correctly ordered (and, with no speculatable trait, un-hoistable).
+// The known non-allocating effect also keeps this op valid if a custom pipeline
+// enables ownership-based buffer deallocation.
+void ReadbackDimOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  // Operand order is (ctx, scalar); attach the Read to the scalar operand.
+  if (isa<MemRefType>(getScalar().getType()))
+    effects.emplace_back(MemoryEffects::Read::get(),
+                         &getOperation()->getOpOperand(1),
+                         SideEffects::DefaultResource::get());
+}
+
+void ReadbackScalarOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  // Operand order is (ctx, scalar); attach the Read to the scalar operand.
+  if (isa<MemRefType>(getScalar().getType()))
+    effects.emplace_back(MemoryEffects::Read::get(),
+                         &getOperation()->getOpOperand(1),
+                         SideEffects::DefaultResource::get());
+}
+
+//===----------------------------------------------------------------------===//
+// SizeOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange SizeOp::getDpsInitsMutable() { return getYMutable(); }
+
+void SizeOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// QuantizeLinearOp: ins(x, scale, zero_point), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange QuantizeLinearOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void QuantizeLinearOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// DequantizeLinearOp: ins(x, scale, zero_point), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange DequantizeLinearOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void DequantizeLinearOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+#define GET_OP_CLASSES
+#include "hip/Dialect/Hip/IR/HipOps.cpp.inc"

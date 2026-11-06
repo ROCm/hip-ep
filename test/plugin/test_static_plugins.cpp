@@ -15,9 +15,9 @@
 // Either way dispatch must be safe + idempotent. Plain main() (no GTest).
 
 #include "hip/Compiler/PluginRegistry.h"
-#include "hip/Dialect/IR/HipDialect.h"
-#include "hip/Dialect/Transforms/Passes.h"
-#include "hip/Dialect/Transforms/Pipelines.h"
+#include "hip/Dialect/Hip/IR/HipDialect.h"
+#include "hip/Dialect/Hip/Transforms/Passes.h"
+#include "hip/Dialect/Hip/Transforms/Pipelines.h"
 #include "hip/InitAllPasses.h"
 
 #include "morphizen-foundation/file_io.hpp"

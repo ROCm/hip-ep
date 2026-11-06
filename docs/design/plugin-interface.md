@@ -30,7 +30,7 @@ for a downstream team that needs to:
 1. Ship **architecture-specific or out-of-tree kernels** and the lowerings
    that target them, without adding them to the public repo.
 2. Add or reorder **compiler passes** for a specific target without forking
-   `lib/Dialect/Transforms/Pipelines.cpp`.
+   `lib/Dialect/Hip/Transforms/Pipelines.cpp`.
 3. Track the public repo as a **clean upstream dependency** -- linking
    against a released build -- instead of carrying a long-lived fork and
    re-merging on every change to `main`.
@@ -80,7 +80,7 @@ Static registrar  -->  HipEpPluginRegistry
 
 | Contribution | Registry call | Consumed by |
 |---|---|---|
-| MLIR pass | `registerPass<T>()` | `lib/Dialect/Transforms/Pipelines.cpp` |
+| MLIR pass | `registerPass<T>()` | `lib/Dialect/Hip/Transforms/Pipelines.cpp` |
 | Pass placement | `requestPipelineSlot(slot, name)` | same |
 | Dialect + op + interface models | `addDialectRegistration(fn)` | `hip::compiler::loadAllDialects` (`include/hip/InitAllPasses.h`) |
 | Runtime bitcode | `addRuntimeBitcode(data, size)` | `lib/Target/LLVM/LLVMBackend.cpp` |
@@ -182,7 +182,7 @@ enum class PipelineSlot {
 The enum is append-only: new anchors are added at the end, and removing or
 renaming one is an ABI break that bumps `HIP_EP_PLUGIN_API_VERSION`. Each
 anchor corresponds to a single point in
-[lib/Dialect/Transforms/Pipelines.cpp](../../lib/Dialect/Transforms/Pipelines.cpp),
+[lib/Dialect/Hip/Transforms/Pipelines.cpp](../../lib/Dialect/Hip/Transforms/Pipelines.cpp),
 where the pipeline builder consults the registry and adds any
 plugin-requested passes:
 
@@ -497,7 +497,7 @@ In-tree, the mechanism is:
 | [cmake/HipEpPlugins.cmake](../../cmake/HipEpPlugins.cmake) | `HIPDNN_EP_COMPILER_PLUGINS`, `hipdnn_ep_compiler_plugin_register`, generated registrar |
 | [lib/Compiler/StaticPlugins.cpp](../../lib/Compiler/StaticPlugins.cpp) | Static registrar: calls each selected plugin's entry once |
 | [lib/Compiler/PluginRegistry.cpp](../../lib/Compiler/PluginRegistry.cpp) | Host-side function-pointer table + contribution storage |
-| [lib/Dialect/Transforms/Pipelines.cpp](../../lib/Dialect/Transforms/Pipelines.cpp) | Slot hook (`addPluginPassesForSlot`) |
+| [lib/Dialect/Hip/Transforms/Pipelines.cpp](../../lib/Dialect/Hip/Transforms/Pipelines.cpp) | Slot hook (`addPluginPassesForSlot`) |
 | [include/hip/InitAllPasses.h](../../include/hip/InitAllPasses.h) | Dialect hook (`loadAllDialects` applies plugin dialect registrations) |
 | [lib/Target/LLVM/LLVMBackend.cpp](../../lib/Target/LLVM/LLVMBackend.cpp) | Links plugin bitcode into the model module |
 | [lib/Compiler/CompilerDriver.cpp](../../lib/Compiler/CompilerDriver.cpp) | Appends plugin link paths / libraries |

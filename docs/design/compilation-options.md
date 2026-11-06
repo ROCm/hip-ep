@@ -19,7 +19,7 @@ Compilation options are defined as a [FlatBuffers](https://flatbuffers.dev/) sch
 `schemas/compilation_options.fbs` and generated into `compilation_options_generated.h`
 as the `CompilationOptionsT` native struct. They are passed directly to the compiler
 via `CompilerDriver::compile()` and through the C API via `hip_compile_with_fs()`
-(see `lib/CInterface/CompilerAPI.cpp`).
+(see `lib/CAPI/CompilerAPI.cpp`).
 
 Callers may pass `NULL` for `options_json` to accept all defaults when using the C API.
 
@@ -77,7 +77,7 @@ hip-mlir-opt --onnx-to-hip-pipeline --hip-to-llvm-pipeline='constants-file=weigh
 ### From C API
 
 ```c
-// include/hip/compiler_api.h
+// include/hip-c/compiler_api.h
 CompilerErrorCode hip_compile_with_fs(
     const void*    input_mlir,
     size_t         input_size,

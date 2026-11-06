@@ -122,7 +122,7 @@ See [Current Fields](#current-fields) for the purpose of each field.
 
 ## Embedding Mechanism
 
-The `GenerateInterface` pass (`lib/Dialect/Transforms/GenerateInterface.cpp`)
+The `GenerateInterface` pass (`lib/Dialect/Hip/Transforms/GenerateInterface.cpp`)
 builds the FlatBuffers blob from MLIR module attributes and emits two globals
 into the LLVM module with **internal linkage** (not visible to JITted callers
 outside `model.bc`):

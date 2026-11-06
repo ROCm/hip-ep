@@ -5,7 +5,7 @@
 
 // What this file tests
 // --------------------
-// The `--hip-infer-loop-body-shapes` pass (lib/Dialect/Transforms/
+// The `--hip-infer-loop-body-shapes` pass (lib/Dialect/Hip/Transforms/
 // InferLoopBodyShapesPass.cpp), which rank-establishes `tensor<*xT>`
 // values inside outlined `hip.loop` body functions BEFORE
 // `convert-onnx-to-hip`:

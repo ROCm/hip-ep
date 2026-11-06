@@ -193,7 +193,7 @@ literal. It does no filesystem access, layout, index assignment, global
 creation, or constant metadata stamping.
 
 `hip-externalize-constants`
-(`lib/Dialect/Transforms/ExternalizeConstants.cpp`) validates each explicit
+(`lib/Dialect/Hip/Transforms/ExternalizeConstants.cpp`) validates each explicit
 `serialization_order`, then assigns every externalized carrier a sequential
 `globalIndex` (0, 1, 2, …). The ONNX converter's absolute counter preserves its
 original visitation across functions: function 0 imported sweep, function 0
@@ -215,7 +215,7 @@ dereferencing them. Keeping the handoff zero-copy avoids duplicating
 potentially multi-gigabyte weights throughout shape inference.
 
 Passes that fold weight values at compile time read a carrier's payload through
-`readConstantData` (`include/hip/Dialect/IR/HipConstantData.h`), which handles
+`readConstantData` (`include/hip/Dialect/Hip/IR/HipConstantData.h`), which handles
 inline values and file-backed ranges and declines memory-address carriers.
 `hip-fold-batchnorm`, `hip-decompose-conv-transpose`, and the NhwcConv
 conversion all use it, so they fold only weights at or below the importer's
@@ -260,7 +260,7 @@ artifact even though the IR remains unchanged.
 
 ### Step 2 — Code generation: `GenerateInterface` pass
 
-The `GenerateInterface` pass (`lib/Dialect/Transforms/GenerateInterface.cpp`) packs
+The `GenerateInterface` pass (`lib/Dialect/Hip/Transforms/GenerateInterface.cpp`) packs
 `hipdnn.constant_sizes`, `hipdnn.constant_offsets`, and
 `hipdnn.constants_filename` into `model_metadata`
 (see [compiler-runtime-contract.md](compiler-runtime-contract.md)). The
@@ -300,7 +300,7 @@ source files are memory-mapped instead (see
 
 Note: This constants buffer is separate from the working memory pool managed
 by `PoolAllocsPass`, which dynamically packs intermediate tensor allocations
-during inference (see `lib/Dialect/Transforms/PoolAllocs.cpp`).
+during inference (see `lib/Dialect/Hip/Transforms/PoolAllocs.cpp`).
 
 ### Step 4 — Inference
 

@@ -28,7 +28,7 @@
 //
 // Folding here shrinks `memref<Nxi64>` to `memref<i64>` (one host store)
 // AND localizes the boundary, so the late `--hip-materialize-host-scalars`
-// pass (lib/Dialect/Transforms/MaterializeHostScalars.cpp) can match the
+// pass (lib/Dialect/Hip/Transforms/MaterializeHostScalars.cpp) can match the
 // residual `memref.alloc + host store + GPU consumer` pattern and divert
 // the alloc out of the GPU pool into a `hipHostMalloc(hipHostMallocMapped)`
 // scratch buffer (`hip.get_host_scratch` view) that is host-writable AND

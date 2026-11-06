@@ -3,47 +3,11 @@
  * Licensed under the MIT License.
  */
 
-#ifndef HIP_COMPILER_API_H
-#define HIP_COMPILER_API_H
+// Compatibility include; declarations are owned by hip-c/compiler_api.h.
 
-#include "compiler_types.h"
+#ifndef HIP_LEGACY_COMPILER_API_H
+#define HIP_LEGACY_COMPILER_API_H
 
-/* C API linked into the EP; leave symbols unexported so they do not widen the
- * EP's dynamic export surface. */
-#define COMPILER_API
+#include "../hip-c/compiler_api.h"
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-/**
- * Compile MLIR input to DLL/object/IR file.
- *
- * onnx.Constant data is written to "constants.bin" via the provided
- * FileSystem. External constants are identified by the `location`
- * attribute on onnx.Constant ops in the MLIR bytecode.
- *
- * @param input_mlir      Input MLIR data (text or bytecode)
- * @param input_size      Size of input data in bytes
- * @param output_path     Output DLL/object/IR file path
- * @param options_json    Compilation options as JSON string (can be NULL)
- * @param error           Error information output (can be NULL)
- * @param fs              morphizen::FileSystem* (cast to void* for C ABI)
- * @return                COMPILER_SUCCESS or error code
- */
-COMPILER_API CompilerErrorCode hip_compile_with_fs(
-    const void *input_mlir, size_t input_size, const char *output_path,
-    const char *options_json, CompilerError *error, void *fs);
-
-/**
- * Get compiler version string.
- *
- * @return Static version string (e.g., "1.0.0")
- */
-COMPILER_API const char *hip_get_version(void);
-
-#ifdef __cplusplus
-}
-#endif
-
-#endif /* HIP_COMPILER_API_H */
+#endif // HIP_LEGACY_COMPILER_API_H

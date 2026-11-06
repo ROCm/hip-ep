@@ -1,0 +1,79 @@
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
+//===- HipDpsOpInterface.cpp - HipDpsOp default reify body ----------------===//
+//
+// The shared reifier queries DPS destination shapes with tensor::getMixedSizes.
+// It returns one vector per tensor result and an empty list for memref
+// operations. Operations with other shape rules override this body in
+// HipReifyResultShapesImpl.cpp.
+//
+// See `docs/design/hip-shape-inference.md` for the design rationale and
+// the recipe for wiring a new op (or a new shape category) into the
+// pipeline.
+//
+//===----------------------------------------------------------------------===//
+
+#include "hip/Dialect/Hip/IR/HipDialect.h"
+
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/IR/Builders.h"
+#include "mlir/IR/BuiltinTypes.h"
+#include "mlir/Interfaces/DestinationStyleOpInterface.h"
+#include "llvm/ADT/STLExtras.h"
+
+using namespace mlir;
+using namespace mlir::hip;
+
+namespace mlir::hip {
+#include "hip/Dialect/Hip/IR/HipDpsOpInterface.cpp.inc"
+} // namespace mlir::hip
+
+LogicalResult
+HipDpsOp::reifyResultShapes(OpBuilder &b,
+                            ReifiedRankedShapedTypeDims &reified) {
+  Operation *op = getOperation();
+  auto dpsOp = cast<DestinationStyleOpInterface>(op);
+  Operation::operand_range inits = dpsOp.getDpsInits();
+
+  // Return one shape vector per SSA result, as the upstream interface requires.
+  // Memref operations write to destinations and have no SSA results.
+  reified.clear();
+  if (op->getNumResults() == 0)
+    return success();
+
+  if (inits.size() != op->getNumResults())
+    return op->emitOpError()
+           << "cannot reify tensor result shapes: expected one DPS init per "
+              "result, but got "
+           << inits.size() << " init(s) for " << op->getNumResults()
+           << " result(s)";
+
+  // Validate every result/init pair before getMixedSizes emits tensor.dim.
+  // Failure must leave the IR unchanged and the reified output list empty.
+  for (auto [idx, result, out] : llvm::enumerate(op->getResults(), inits)) {
+    Type resultType = result.getType();
+    Type outType = out.getType();
+    if (!isa<RankedTensorType>(resultType))
+      return op->emitOpError("invalid tensor-mode result #")
+             << idx << ": expected ranked tensor, got " << resultType;
+    if (!isa<RankedTensorType>(outType))
+      return op->emitOpError("invalid tensor-mode DPS init #")
+             << idx << ": expected ranked tensor, got " << outType;
+    auto resultTensor = cast<RankedTensorType>(resultType);
+    auto outTensor = cast<RankedTensorType>(outType);
+    if (resultTensor.getRank() != outTensor.getRank())
+      return op->emitOpError("invalid tensor-mode result/init pair #")
+             << idx << ": result rank " << resultTensor.getRank()
+             << " does not match DPS init rank " << outTensor.getRank();
+  }
+
+  reified.reserve(op->getNumResults());
+  for (Value out : inits) {
+    SmallVector<OpFoldResult> dims =
+        tensor::getMixedSizes(b, op->getLoc(), out);
+    reified.emplace_back(std::move(dims));
+  }
+  return success();
+}
