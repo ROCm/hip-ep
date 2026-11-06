@@ -48,6 +48,9 @@ dist/
 !examples/*.onnx
 *.dat
 test_output/
+# lit sets test_exec_root = test_source_root (test/lit/lit.cfg.py), so each
+# test's scratch output lands in an Output/ directory inside the source tree
+test/lit/**/Output/
 
 # Numeric test suite (test/numeric/)
 #   python_test_output/    -- single root for all runtime output:
