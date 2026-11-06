@@ -6440,6 +6440,10 @@ static size_t matmulNbitsPadRowMaxBytes() {
     return cap;
 }
 
+extern "C" size_t hip_matmul_nbits_u4_padrow_max_bytes() {
+    return matmulNbitsPadRowMaxBytes();
+}
+
 static unsigned char* g_bpad_buf   = nullptr;
 static size_t         g_bpad_bytes = 0;
 

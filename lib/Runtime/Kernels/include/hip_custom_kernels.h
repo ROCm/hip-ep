@@ -2803,6 +2803,10 @@ HIP_KERNEL_API void hip_matmul_nbits_dequant_b_fp16(
  * ------------------------------------------------------------------------- */
 HIP_KERNEL_API size_t hip_matmul_nbits_u4_padrow_bytes(int N, int K);
 
+/* Largest padrow_bytes worth padding (HIPDNN_MATMUL_PADROW_MAX_MB, default
+ * 256 MB; 0 disables padrow). Larger layers keep the arrival layout. */
+HIP_KERNEL_API size_t hip_matmul_nbits_u4_padrow_max_bytes(void);
+
 HIP_KERNEL_API int hip_matmul_nbits_u4_prepack_padrow(
     void* stream, const void* B, void* dst, int N, int K);
 

@@ -803,9 +803,9 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
   // nothing in practice, but it keeps the assumption checked rather than
   // inferred.
   //
-  // The repack goes into a single shared scratch inside the kernel (see
-  // hip_matmul_nbits_u4_wmma_padrow), so padded-B memory is bounded to the
-  // largest layer instead of a persistent per-weight copy of every matrix.
+  // The repack goes into one per-session scratch from the session allocator,
+  // so padded-B memory is bounded to the largest layer instead of a persistent
+  // per-weight copy of every matrix, and concurrent sessions do not share it.
   // The stride-aware WMMA runs its own autotune keyed with the padded stride
   // and returns -1 if no fused config is eligible, in which case we fall
   // through unpadded.
@@ -826,12 +826,22 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
         zeros_ok = false;
     }
 
-    if (zeros_ok) {
-      int rc = hip_matmul_nbits_u4_wmma_padrow(
-          stream, /*cfg=*/-1, static_cast<int>(M), static_cast<int>(N),
-          static_cast<int>(K), static_cast<int>(block_size), A,
-          /*lda=*/static_cast<int>(K), B, scales, zeros_fp16, output,
-          /*ldc=*/static_cast<int>(N));
+    // The padded copy lives in the session scratch, sized to the largest
+    // padrow layer; layers over the cap keep the arrival layout.
+    const size_t pad_bytes = hip_matmul_nbits_u4_padrow_bytes(
+        static_cast<int>(N), static_cast<int>(K));
+    if (zeros_ok && pad_bytes <= hip_matmul_nbits_u4_padrow_max_bytes() &&
+        hipdnn_ep_state_ensure_matmul_padrow_scratch(state, pad_bytes) == 0) {
+      void *b_pad = hipdnn_ep_state_get_matmul_padrow_scratch(state);
+      int rc = hip_matmul_nbits_u4_prepack_padrow(
+          stream, B, b_pad, static_cast<int>(N), static_cast<int>(K));
+      if (rc == 0)
+        rc = hip_matmul_nbits_u4_wmma_stride(
+            stream, /*cfg=*/-1, static_cast<int>(M), static_cast<int>(N),
+            static_cast<int>(K), static_cast<int>(block_size), A,
+            /*lda=*/static_cast<int>(K), b_pad, scales, zeros_fp16, output,
+            /*ldc=*/static_cast<int>(N),
+            /*b_row_bytes=*/static_cast<int>(pad_bytes / N));
       if (rc == 0)
         goto cleanup;
       RUNTIME_DEBUG_LOG("[REAL] matmul_nbits padrow wmma rc=%d, falling back\n",
