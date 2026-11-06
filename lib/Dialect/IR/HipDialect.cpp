@@ -2652,6 +2652,39 @@ LogicalResult DequantBnb4Op::verify() {
 
 MutableOperandRange QMoEOp::getDpsInitsMutable() { return getOutputMutable(); }
 
+LogicalResult QMoEOp::verify() {
+  StringRef routing = getRoutingType();
+  if (routing == "softmax") {
+    if (getCorrectionBias())
+      return emitOpError("correction_bias requires routing_type sigmoid_bias");
+    return success();
+  }
+  if (routing != "sigmoid_bias")
+    return emitOpError("routing_type must be softmax or sigmoid_bias, got ")
+           << routing;
+  if (getRouterWeights())
+    return emitOpError("sigmoid_bias routing computes its own weights; "
+                       "router_weights must be absent");
+  auto logitsTy = dyn_cast<ShapedType>(getRouterProbs().getType());
+  auto biasTy = getCorrectionBias()
+                    ? dyn_cast<ShapedType>(getCorrectionBias().getType())
+                    : ShapedType();
+  if (!logitsTy || !logitsTy.getElementType().isF32())
+    return emitOpError("sigmoid_bias routing needs fp32 router logits");
+  if (!biasTy || biasTy.getRank() != 1 || !biasTy.getElementType().isF32())
+    return emitOpError("sigmoid_bias routing needs a rank-1 fp32 "
+                       "correction_bias");
+  if (logitsTy.hasRank() && logitsTy.getRank() > 0) {
+    int64_t experts = logitsTy.getDimSize(logitsTy.getRank() - 1);
+    int64_t biasLen = biasTy.getDimSize(0);
+    if (!ShapedType::isDynamic(experts) && !ShapedType::isDynamic(biasLen) &&
+        experts != biasLen)
+      return emitOpError("correction_bias length ")
+             << biasLen << " does not match " << experts << " experts";
+  }
+  return success();
+}
+
 void QMoEOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {

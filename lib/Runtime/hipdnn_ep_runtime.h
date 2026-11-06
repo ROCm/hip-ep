@@ -1799,6 +1799,13 @@ int wrap_dequantize_linear(
 // results.
 // Optional pointer args: pass nullptr if the corresponding input is absent.
 #define HIPDNN_EP_QMOE_ACTIVATION_RELU2 5
+// routing_type: SOFTMAX routes by softmax(router_probs) (or router_weights);
+// SIGMOID_BIAS reads fp32 logits in router_probs, selects the top-k of
+// sigmoid + correction_bias, and weights by the selected sigmoid scores,
+// normalized over k when normalize_routing_weights, times
+// routed_scaling_factor.
+#define HIPDNN_EP_QMOE_ROUTING_SOFTMAX 0
+#define HIPDNN_EP_QMOE_ROUTING_SIGMOID_BIAS 1
 
 int wrap_qmoe(
     RuntimeState *state,
@@ -1824,7 +1831,10 @@ int wrap_qmoe(
     int64_t activation_type, // 0=relu,1=gelu,2=silu,3=swiglu,4=identity,
                              // 5=relu2
     float activation_alpha, float activation_beta, float swiglu_limit,
-    int64_t normalize_routing_weights, int64_t elem_size);
+    int64_t normalize_routing_weights, int64_t elem_size,
+    const void *correction_bias, // (nullable) [num_experts] fp32
+    int64_t routing_type,        // HIPDNN_EP_QMOE_ROUTING_*
+    float routed_scaling_factor);
 
 // com.amd QMoE operation wrapper (LatentMoE).
 //

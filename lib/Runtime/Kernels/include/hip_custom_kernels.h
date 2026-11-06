@@ -3000,6 +3000,30 @@ HIP_KERNEL_API int hip_qmoe_topk_routing(
     int64_t normalize,
     int64_t element_size_bytes);
 
+/* Sigmoid + correction-bias top-k routing.
+ *   logits          - GPU [num_tokens, num_experts] fp32 router logits
+ *   correction_bias - GPU [num_experts] fp32; selection only
+ *   expert_indices  - GPU [num_tokens, k] int32 (output), in descending
+ *                     sigmoid + bias order, ties to the lower expert index
+ *   expert_weights  - GPU [num_tokens, k] fp16 (output):
+ *                     s / sum_k(s) * scale (no sum when normalize == 0),
+ *                     s = sigmoid(logit) of the selected expert
+ * Same output layout as hip_qmoe_topk_routing. element_size_bytes is that
+ * of expert_weights; only fp16 is supported.
+ */
+HIP_KERNEL_API int hip_qmoe_sigmoid_bias_routing(
+    void* stream,
+    const void* logits,
+    const void* correction_bias,
+    void* expert_indices,
+    void* expert_weights,
+    int64_t num_tokens,
+    int64_t num_experts,
+    int64_t k,
+    int64_t normalize,
+    float scale,
+    int64_t element_size_bytes);
+
 /* Gather rows: gathered[i,:] = input[token_ids[i],:]
  *   token_ids - GPU [count] int32
  */
@@ -3028,11 +3052,17 @@ HIP_KERNEL_API int hip_qmoe_add_bias(
  *   G = min(gate, limit)
  *   L = clamp(linear, -limit, limit)
  *   out = G * sigmoid(alpha*G) * (L + beta)
+ *
+ * row_scale (fp32 [n], may be null): row r is stored as out / row_scale[r],
+ * a power of two that keeps the row within fp16 range (1 for ordinary rows).
+ * Pass the same buffer to hip_qmoe_reduce_sorted_pairs. With null, rows are
+ * stored unscaled.
  */
 HIP_KERNEL_API int hip_qmoe_swiglu(
     void* stream,
     const void* input,
     void* output,
+    void* row_scale,
     int64_t n,
     int64_t inter_size,
     float alpha,
@@ -3066,9 +3096,11 @@ HIP_KERNEL_API int hip_qmoe_scatter_add(
  *   expert_weights   - GPU [num_tokens * k] fp16  (input from topk_routing)
  *   expert_counts    - GPU [num_experts]      int32 (output)
  *   expert_offsets   - GPU [num_experts + 1]  int32 (output, exclusive scan)
- *   sorted_token_ids - GPU [num_tokens * k]   int32 (output, grouped by eid)
+ *   sorted_token_ids - GPU [num_tokens * k]   int32 (output, grouped by eid;
+ *                      entries past the last routed pair are zeroed)
  *   sorted_weights   - GPU [num_tokens * k]   fp16  (output, aligned w/ ids)
  *
+ * Pairs whose expert id is outside [0, num_experts) are dropped.
  * Constraints: fp16 only; num_experts <= 1024.
  */
 HIP_KERNEL_API int hip_qmoe_bucket_tokens(
@@ -3179,7 +3211,11 @@ HIP_KERNEL_API int hip_qmoe_ragged_matmul_nbits_get_task_kind(
 
 /* Deterministic routed-pair reduction. Reorders each token's k contributions
  * by ascending expert id and rounds to fp16 after every addition, matching the
- * old serial per-expert scatter-add path without atomics.
+ * old serial per-expert scatter-add path without atomics. row_scale (fp32
+ * [sorted rows], may be null) multiplies each sorted row's contribution; it is
+ * the buffer hip_qmoe_swiglu filled for that row's fc2 input. fc2_bias (fp16
+ * [num_experts, width], may be null) is added to each contribution after the
+ * row scale, so the fc2 GEMM must not also add it.
  */
 HIP_KERNEL_API int hip_qmoe_reduce_sorted_pairs(
     void* stream,
@@ -3187,6 +3223,8 @@ HIP_KERNEL_API int hip_qmoe_reduce_sorted_pairs(
     const void* pair_to_sorted,
     const void* expert_indices,
     const void* expert_weights,
+    const void* row_scale,
+    const void* fc2_bias,
     void* output,
     int64_t num_tokens,
     int64_t width,
@@ -3214,9 +3252,12 @@ HIP_KERNEL_API int hip_qmoe_reduce_sorted_pairs(
  *   fc2_scales       - GPU [E, hidden, n_blk]    fp16
  *   fc2_zero_points  - GPU [E, hidden, packed blocks] uint8
  *   fc2_bias         - GPU [E, hidden] or null   fp16
- *   slot_buf         - GPU [k, hidden]           fp16  (transient scratch)
- *   act_out          - GPU [k, inter]            fp16  (transient scratch)
+ *   slot_buf         - GPU [k, hidden]           fp32  (transient scratch)
+ *   act_out          - GPU [k, inter]            fp32  (transient scratch)
  *   output           - GPU [hidden]              fp16  (final, weighted sum)
+ *
+ * The scratch is fp32 because an expert's SwiGLU activation and weighted
+ * output can exceed the fp16 range while the reduced output still fits.
  *
  * Constraints: fp16 only (element_size_bytes == 2); hidden_size and
  * inter_size both multiples of 32; block_size is a power of two and at
@@ -3243,6 +3284,7 @@ HIP_KERNEL_API int hip_qmoe_decode_fused(
 // HIPDNN_EP_MATMUL_DP4A). Additionally takes 4 scratch buffers: quantized
 // int8 activations + per-group scales for the fc1 input ([hidden]) and the
 // fc2 slot activations ([k, inter]). fp16 only; block_size a multiple of 32.
+// slot_buf and act_out are fp32, as for hip_qmoe_decode_fused.
 // num_tokens > 1 serves a short burst (speculative verify) in the same
 // launches: input/output are [num_tokens, hidden], expert_indices/weights
 // [num_tokens, k], and every scratch buffer is num_tokens times larger.

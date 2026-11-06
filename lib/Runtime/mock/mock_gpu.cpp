@@ -1999,7 +1999,9 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
               int64_t k, int64_t expert_weight_bits, int64_t block_size,
               int64_t swiglu_fusion, int64_t activation_type,
               float activation_alpha, float activation_beta, float swiglu_limit,
-              int64_t normalize_routing_weights, int64_t elem_size) {
+              int64_t normalize_routing_weights, int64_t elem_size,
+              const void *correction_bias, int64_t routing_type,
+              float routed_scaling_factor) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_qmoe\n");
     return -1;
@@ -2026,6 +2028,10 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
              fc1_bias ? "yes" : "null", fc2_bias ? "yes" : "null",
              fc3_weights ? "yes" : "null", fc1_zero_points ? "yes" : "null",
              fc2_zero_points ? "yes" : "null", router_weights ? "yes" : "null");
+  MOCK_PRINT("[MOCK]   routing_type=%lld, correction_bias=%s, "
+             "routed_scaling_factor=%f\n",
+             (long long)routing_type, correction_bias ? "yes" : "null",
+             (double)routed_scaling_factor);
 
   return 0;
 }

@@ -7766,6 +7766,8 @@ std::optional<QMoEPlan> planQMoE(hip::QMoEOp op) {
   // router_weights overrides router_probs and skips the softmax; not modelled.
   if (op.getRouterWeights())
     return std::nullopt;
+  if (op.getRoutingType() != "softmax")
+    return std::nullopt;
   if (op.getExpertWeightBits() != 4)
     return std::nullopt;
 
