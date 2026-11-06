@@ -213,6 +213,14 @@ class TestExpand:
             (np.int64, [1, 1, 1], [2, 3, 4]),
             # Llama-style attention-mask expand: [1, 1, S] -> [1, H, S]
             (np.int32, [1, 1, 16], [1, 8, 16]),
+            # Narrow inner (span kernel): one axis, inner = 4.
+            (np.float32, [2, 8, 1, 4], [2, 8, 8, 4]),
+            # Leading axis, inner wide enough for the load-once kernel.
+            (np.float16, [1, 128], [8, 128]),
+            # Inner larger than the block, so the load-once kernel tiles.
+            (np.float16, [2, 1, 512], [2, 8, 512]),
+            # int64 on the load-once path (inner >= 16).
+            (np.int64, [4, 1, 64], [4, 3, 64]),
         ],
     )
     def test_expand(self, model_runner, dtype, in_shape, out_shape):

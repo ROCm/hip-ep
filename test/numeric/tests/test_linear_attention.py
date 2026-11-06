@@ -341,6 +341,43 @@ class TestLinearAttention:
         # internally; fp16 round-trip on the I/O still leaves a tight tolerance.
         compare_outputs(actual, expected, atol=5e-3, rtol=1e-2)
 
+    @pytest.mark.parametrize(
+        "d_k,d_v",
+        [
+            (128, 64),  # pass3 S0/U staging fits within the 64 KB LDS budget
+            (128, 128),  # same path must fall back to global S0/U streaming
+        ],
+    )
+    def test_la_gated_pass3_lds_boundary(self, model_runner, d_k, d_v):
+        """Gated prefill agrees with CPU on both pass3 LDS-size branches."""
+        batch, seq_len, heads = 1, 48, 4
+        model = _make_linear_attention_model(
+            batch,
+            seq_len,
+            heads,
+            heads,
+            heads * d_k,
+            heads * d_k,
+            heads * d_v,
+            d_k,
+            d_v,
+            scale=1.0,
+            update_rule="gated",
+        )
+        inputs = _make_inputs(
+            np.random.default_rng(41 + d_v),
+            batch,
+            seq_len,
+            heads,
+            heads * d_k,
+            heads * d_k,
+            heads * d_v,
+            d_k,
+            d_v,
+        )
+        actual, expected = model_runner.run_sample(model, inputs)
+        compare_outputs(actual, expected, atol=5e-3, rtol=1e-2)
+
     @pytest.mark.parametrize("seq_len", SEQ_LENS)
     def test_la_chunk_opt_shape(self, model_runner, seq_len):
         """LinearAttention with the chunk_opt prefill/decode footprint:
