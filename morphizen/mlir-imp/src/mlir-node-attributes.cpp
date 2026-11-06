@@ -43,14 +43,15 @@ std::vector<std::string> MLIRNodeAttributes::get_attribute_names() const {
     // Skip internal morphizen / onnx-mlir attributes that are not user-
     // visible. Everything under the `morphizen.` namespace is internal;
     // the remaining named entries are ONNX bookkeeping plus onnx.Custom's
-    // function_name / domain_name stash.
+    // function_name / domain_name stash and Cast's onnx_to_enum stash.
     if (attr_name.starts_with("morphizen.") ||
         attr_name == attr_names::NODE_OUTPUTS ||
         attr_name == attr_names::ONNX_NAME ||
         attr_name == attr_names::ONNX_NODE_NAME ||
         attr_name == attr_names::ONNX_GRAPH_NAME ||
         attr_name == attr_names::CUSTOM_OP_FUNCTION_NAME ||
-        attr_name == attr_names::CUSTOM_OP_DOMAIN_NAME) {
+        attr_name == attr_names::CUSTOM_OP_DOMAIN_NAME ||
+        attr_name == attr_names::ONNX_TO_ENUM) {
       continue;
     }
 

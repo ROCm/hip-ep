@@ -900,6 +900,13 @@ MLIRGraph::add_node(const std::string &name, const std::string &op_type,
       // onnx.Cast requires 'to' as a TypeAttr property, not an IntegerAttr.
       // The EP receives 'to' as an ONNX TensorProto_DataType enum (integer),
       // but the registered ONNX dialect in the compiler expects TypeAttr.
+      //
+      // Several distinct ONNX enums collapse onto the same MLIR element type
+      // (e.g. UINT8=2 and BOOL=9 both become `ui8`), so once we convert to
+      // TypeAttr the original enum is unrecoverable from the type alone.
+      // Preserve it verbatim in a side attribute (attr_names::ONNX_TO_ENUM)
+      // so later passes (e.g. CastToHip) can recover the real target dtype
+      // instead of re-guessing it from the (already ambiguous) result type.
       llvm::SmallVector<mlir::NamedAttribute> new_attrs;
       for (auto &attr : mlir_attrs) {
         if (attr.getName() == "to") {
@@ -910,6 +917,9 @@ MLIRGraph::add_node(const std::string &name, const std::string &op_type,
                 onnxElementTypeToMlirElementType(onnx_type, builder);
             new_attrs.push_back(
                 builder.getNamedAttr("to", mlir::TypeAttr::get(mlir_type)));
+            new_attrs.push_back(
+                builder.getNamedAttr(attr_names::ONNX_TO_ENUM,
+                                     builder.getI64IntegerAttr(onnx_type)));
             continue;
           }
         }
