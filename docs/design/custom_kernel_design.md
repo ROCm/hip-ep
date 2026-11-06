@@ -301,6 +301,8 @@ What the measurements behind these options showed (gfx1151, int4 prefill shapes 
 
 Every extended entry is forced by index in the `Xfp16_Wu4_Yfp16` kernel unit test through `hip_matmul_nbits_u4_wmma_run_config`, which runs exactly the requested config or fails. On any device other than gfx1151 (`hip_matmul_nbits_u4_wmma_ext_device` returns 0), it launches nothing and the test skips that phase. `update_lut.py` rejects a table naming an entry that `WMMA_EXT_CONFIGS` does not compile.
 
+**Row-padded int4 B (`padrow`)**: when the packed row stride K/2 is a whole number of 128-byte lines sharing a factor of at least 8 with the 64 L1 sets (`shouldPadRow`: K=2048, 4096, 6144, 8192; not 2880 or 3072), the rows of a WMMA tile land in a few sets and evict each other. `hip_matmul_nbits_u4_prepack_padrow` copies B into a stride one line longer before the strided WMMA kernel. The EP passes a session-owned scratch (`hipdnn_ep_state_ensure_matmul_padrow_scratch`, capped at `hip_matmul_nbits_u4_padrow_max_bytes()`), so concurrent sessions never share the padded copy.
+
 ### 11. `lib/Runtime/Kernels/hip/gemv_f16_kernel.hip`
 
 Dense M=1 GEMVs that `wrap_hipblasLtMatmul` takes ahead of hipBLASLt, whose fixed per-call cost dominates single-row products. `hip_gemv_f16_kn` serves fp16 `[1, K] x [K, N]`; `hip_gemv_f32_kn` serves fp32 with N ≤ 512, N % 4 == 0 and a 16-byte-aligned B, the shape of an fp32 MoE router (Laguna: K=2048/3072, N=256), where hipBLASLt takes 32-57 us a call against an 8-12 us read floor and the GEMV reaches 82-91% of it. One float4 of columns per lane, a full-K reduction per row group in LDS.

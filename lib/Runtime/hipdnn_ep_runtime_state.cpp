@@ -544,6 +544,8 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->qsigmoid_scratch_size = 0;
   state->matmul_dp4a_scratch = nullptr;
   state->matmul_dp4a_scratch_size = 0;
+  state->matmul_padrow_scratch = nullptr;
+  state->matmul_padrow_scratch_size = 0;
   state->la_scratch = nullptr;
   state->la_scratch_size = 0;
   state->gqa_fp32_adapter_scratch = nullptr;
@@ -1158,6 +1160,10 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   // Free the W4A8 dp4a matmul_nbits scratch (if allocated).
   if (state->matmul_dp4a_scratch) {
     HIP_CLEANUP(hipdnn_ep_state_device_free(state, state->matmul_dp4a_scratch));
+  }
+  if (state->matmul_padrow_scratch) {
+    HIP_CLEANUP(
+        hipdnn_ep_state_device_free(state, state->matmul_padrow_scratch));
   }
 
   // Free the linear-attention chunk-parallel prefill scratch (if allocated).
@@ -2161,6 +2167,37 @@ int hipdnn_ep_state_ensure_matmul_dp4a_scratch(RuntimeState *state,
     return -1;
   }
   state->matmul_dp4a_scratch_size = alloc_size;
+  return 0;
+}
+
+void *hipdnn_ep_state_get_matmul_padrow_scratch(RuntimeState *state) {
+  return state ? state->matmul_padrow_scratch : nullptr;
+}
+
+int hipdnn_ep_state_ensure_matmul_padrow_scratch(RuntimeState *state,
+                                                 size_t needed_size) {
+  if (!state)
+    return -1;
+  if (needed_size == 0 || state->matmul_padrow_scratch_size >= needed_size)
+    return 0;
+  if (state->matmul_padrow_scratch) {
+    // The previous layer's prefill may still be reading the old buffer.
+    if (state->stream)
+      hipStreamSynchronize(state->stream);
+    HIP_CLEANUP(
+        hipdnn_ep_state_device_free(state, state->matmul_padrow_scratch));
+    state->matmul_padrow_scratch = nullptr;
+    state->matmul_padrow_scratch_size = 0;
+  }
+  if (hipdnn_ep_state_device_alloc(state, &state->matmul_padrow_scratch,
+                                   needed_size) != hipSuccess) {
+    fprintf(stderr,
+            "hipdnn_ep_state_ensure_matmul_padrow_scratch: alloc failed for "
+            "%zu bytes\n",
+            needed_size);
+    return -1;
+  }
+  state->matmul_padrow_scratch_size = needed_size;
   return 0;
 }
 

@@ -2805,6 +2805,10 @@ HIP_KERNEL_API void hip_matmul_nbits_dequant_b_fp16(
  * ------------------------------------------------------------------------- */
 HIP_KERNEL_API size_t hip_matmul_nbits_u4_padrow_bytes(int N, int K);
 
+/* Largest padrow_bytes worth padding (HIPDNN_MATMUL_PADROW_MAX_MB, default
+ * 256 MB; 0 disables padrow). Larger layers keep the arrival layout. */
+HIP_KERNEL_API size_t hip_matmul_nbits_u4_padrow_max_bytes(void);
+
 HIP_KERNEL_API int hip_matmul_nbits_u4_prepack_padrow(
     void* stream, const void* B, void* dst, int N, int K);
 
@@ -2843,16 +2847,6 @@ HIP_KERNEL_API int hip_matmul_nbits_u4_wmma_run_config(
     void* stream, int cfg, int M, int N, int K, int group_size,
     const void* A, int lda, const void* B, const void* scales,
     const void* zeros, void* C, int ldc, int b_row_bytes);
-
-/* hip_matmul_nbits_u4_wmma_padrow: fused int4 WMMA prefill against a row-padded
- *   B, repacking B into a single shared scratch on each call. Bounds padded-B
- *   memory to the largest single layer instead of a persistent per-weight copy.
- *   Takes the packed arrival-layout B directly; no caller-side buffer needed.
- *   Returns -1 (use the arrival-layout path) on failure or no fused config. */
-HIP_KERNEL_API int hip_matmul_nbits_u4_wmma_padrow(
-    void* stream, int cfg, int M, int N, int K, int group_size,
-    const void* A, int lda, const void* B, const void* scales,
-    const void* zeros, void* C, int ldc);
 
 /* =========================================================================
  * GatherBlockQuantized (com.microsoft)

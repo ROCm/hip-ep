@@ -6372,12 +6372,13 @@ extern "C" int hip_matmul_nbits_u4_wmma_run_config(
     return static_cast<int>(hipGetLastError());
 }
 
-// One reusable scratch for the padded-row-stride B copy, shared across every
+// The EP keeps one reusable scratch per session for the padded-row-stride B
+// copy (hipdnn_ep_state_ensure_matmul_padrow_scratch), shared across every
 // MatMulNBits layer. The padded buffer is only live for the duration of one
 // layer's prefill -- it is a WMMA input, not persistent state -- and layers run
-// in order on the stream, so a single grow-to-max buffer (like g_dq_buf above)
-// replaces the former per-weight persistent cache that kept a full padded copy
-// of every weight matrix alive for the whole session.
+// in order on the stream, so a single grow-to-max buffer replaces the former
+// per-weight persistent cache that kept a full padded copy of every weight
+// matrix alive for the whole session.
 //
 // EXTRA GPU MEMORY (the only allocation this feature adds):
 //   bytes = max over padrow-eligible layers of  N * (K/2 + kU4PadRowBytes)
@@ -6434,43 +6435,8 @@ static size_t matmulNbitsPadRowMaxBytes() {
     return cap;
 }
 
-static unsigned char* g_bpad_buf   = nullptr;
-static size_t         g_bpad_bytes = 0;
-
-static unsigned char* ensureBPadBuffer(size_t bytes) {
-    if (g_bpad_buf && g_bpad_bytes >= bytes) return g_bpad_buf;
-    if (g_bpad_buf) hipFree(g_bpad_buf);
-    if (hipMalloc(&g_bpad_buf, bytes) != hipSuccess) {
-        g_bpad_buf = nullptr;
-        g_bpad_bytes = 0;
-        return nullptr;
-    }
-    g_bpad_bytes = bytes;
-    return g_bpad_buf;
-}
-
-/* Fused int4 WMMA prefill against a row-padded B, repacking into the shared
- * scratch on each call. This bounds padded-B memory to one layer rather than a
- * persistent per-weight copy: the repack is a single strided copy (cheap next
- * to the prefill GEMM), and the config autotune/cache still keys on the padded
- * stride via hip_matmul_nbits_u4_wmma_stride. Returns -1 (caller falls back to
- * the arrival layout) on scratch/repack failure or when no fused config fits. */
-extern "C" int hip_matmul_nbits_u4_wmma_padrow(
-    void* stream, int cfg, int M, int N, int K, int group_size,
-    const void* A, int lda, const void* B, const void* scales,
-    const void* zeros, void* C, int ldc)
-{
-    const size_t need = hip_matmul_nbits_u4_padrow_bytes(N, K);
-    // Too big to pad (vocab/lm_head or other extreme shape): fall back to the
-    // arrival layout so the shared scratch never balloons past the cap.
-    if (need > matmulNbitsPadRowMaxBytes()) return -1;
-    unsigned char* dst = ensureBPadBuffer(need);
-    if (!dst) return -1;
-    if (hip_matmul_nbits_u4_prepack_padrow(stream, B, dst, N, K) != 0) return -1;
-    const int b_row_bytes = (K / 2) + kU4PadRowBytes;
-    return hip_matmul_nbits_u4_wmma_stride(stream, cfg, M, N, K, group_size, A,
-                                           lda, dst, scales, zeros, C, ldc,
-                                           b_row_bytes);
+extern "C" size_t hip_matmul_nbits_u4_padrow_max_bytes() {
+    return matmulNbitsPadRowMaxBytes();
 }
 
 /* =======================================================================
