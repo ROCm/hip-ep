@@ -4,9 +4,10 @@
 ##
 name: Windows GPU Test (Strix)
 
-# Runs OGA model_benchmark on the self-hosted Strix box against the
+# Runs vlm_benchmark.py on the self-hosted Strix box against the
 # gpu-test-package artifact of the same run, using public Hugging Face exports
-# from docs/models.json, and gates TTFT / TPS against the latest main baseline.
+# from docs/models.json and the image / 2k prompt pre-staged on the runner, and
+# gates TTFT / TPS against the latest main baseline.
 
 on:
   workflow_call:
@@ -30,9 +31,8 @@ jobs:
       - name: Clean workspace
         shell: cmd
         run: |
-          taskkill /f /im model_benchmark.exe >nul 2>&1 || ver >nul
           if exist gpu-test-package rd /s /q gpu-test-package
-          if exist hf-venv rd /s /q hf-venv
+          if exist strix-venv rd /s /q strix-venv
           if exist strix-oga-results rd /s /q strix-oga-results
           if exist main-strix-baseline rd /s /q main-strix-baseline
           if exist strix-perf-results rd /s /q strix-perf-results
@@ -48,6 +48,22 @@ jobs:
         with:
           python-version: "3.14"
 
+      - name: Create Python venv
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $py = "$PWD\strix-venv\Scripts\python.exe"
+          python -m venv strix-venv
+          Push-Location gpu-test-package\wheels
+          & $py -m pip install --quiet `
+            (Get-Item onnxruntime_directml-*.whl).Name `
+            (Get-Item onnxruntime_genai_directml-*.whl).Name `
+            Pillow numpy psutil "huggingface_hub>=0.34"
+          $rc = $LASTEXITCODE
+          Pop-Location
+          if ($rc -ne 0) { Write-Host "[ERROR] venv package install failed"; exit 1 }
+
       - name: Download models from Hugging Face
         shell: pwsh
         env:
@@ -57,39 +73,54 @@ jobs:
         run: |
           $ErrorActionPreference = 'Continue'
           $PSNativeCommandUseErrorActionPreference = $false
-          $venv = "$PWD\hf-venv"
-          python -m venv $venv
-          & "$venv\Scripts\python.exe" -m pip install --quiet "huggingface_hub>=0.34"
-          if ($LASTEXITCODE -ne 0) { Write-Host "[ERROR] huggingface_hub install failed"; exit 1 }
           $modelRoot = "${{ runner.workspace }}\hf-models"
           foreach ($repo in ($env:STRIX_HF_MODELS -split '\s+' | Where-Object { $_ })) {
             $dir = Join-Path $modelRoot $repo.Split('/')[1]
             Write-Host "=== hf download $repo -> $dir ==="
-            & "$venv\Scripts\hf.exe" download $repo --local-dir $dir
+            & "$PWD\strix-venv\Scripts\hf.exe" download $repo --local-dir $dir
             if ($LASTEXITCODE -ne 0) { Write-Host "[ERROR] download failed: $repo"; exit 1 }
           }
 
-      - name: Run OGA benchmark
-        timeout-minutes: 30
+      - name: Run VLM benchmark
+        timeout-minutes: 40
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
           $PSNativeCommandUseErrorActionPreference = $false
-          $pkgBin = Join-Path $PWD "gpu-test-package\bin"
-          $env:PATH = "$pkgBin;$env:PATH"
-          $benchmark = Join-Path $pkgBin "model_benchmark.exe"
-          if (-not (Test-Path $benchmark)) { Write-Host "[ERROR] model_benchmark.exe not found"; exit 1 }
+          $image = "${{ runner.workspace }}\amdgpu-vlm-images\dog.jpg"
+          $promptFile = "${{ runner.workspace }}\llm-prompts\prompt_2k.txt"
+          foreach ($f in @($image, $promptFile)) {
+            if (-not (Test-Path -LiteralPath $f)) { Write-Host "[ERROR] not found: $f"; exit 1 }
+          }
+          $bin = "$PWD\gpu-test-package\bin"
+          $script = "$bin\vlm_benchmark.py"
+          if (-not (Test-Path $script)) { Write-Host "[ERROR] vlm_benchmark.py not found: $script"; exit 1 }
+
+          $launcher = "$PWD\run_vlm.py"
+          @'
+          import ctypes, os, pathlib, runpy, sys
+          BIN, script, prompt_file = sys.argv[1:4]
+          os.add_dll_directory(BIN)
+          os.environ["PATH"] = BIN + os.pathsep + os.environ.get("PATH", "")
+          ctypes.CDLL(os.path.join(BIN, "onnxruntime.dll"))
+          prompt = pathlib.Path(prompt_file).read_text(encoding="utf-8").strip()
+          sys.argv = [script, "--prompt", prompt] + sys.argv[4:]
+          runpy.run_path(script, run_name="__main__")
+          '@ | Set-Content -Path $launcher -Encoding UTF8
 
           New-Item -ItemType Directory -Force -Path "strix-oga-results" | Out-Null
+          $py = "$PWD\strix-venv\Scripts\python.exe"
           $modelRoot = "${{ runner.workspace }}\hf-models"
           $failed = 0
           foreach ($repo in ($env:STRIX_HF_MODELS -split '\s+' | Where-Object { $_ })) {
             $name = $repo.Split('/')[1]
-            $outFile = "strix-oga-results\$name.txt"
-            Write-Host "=== OGA Benchmark: $name ==="
-            & $benchmark -i (Join-Path $modelRoot $name) -l 2048 -g 128 -r 5 -w 1 -b 1 -v 2>&1 |
-              Tee-Object -FilePath $outFile
-            if ($LASTEXITCODE -ne 0) { Write-Host "[ERROR] model_benchmark failed: $name"; $failed = 1 }
+            Write-Host "=== VLM Benchmark: $name ==="
+            & $py $launcher $bin $script $promptFile `
+              -m (Join-Path $modelRoot $name) -i $image `
+              --max_tokens 128 --max_length 8192 -n 3 -w 1 -v `
+              -o "strix-oga-results\$name.json" 2>&1 |
+              Tee-Object -FilePath "strix-oga-results\$name.txt"
+            if ($LASTEXITCODE -ne 0) { Write-Host "[ERROR] vlm_benchmark failed: $name"; $failed = 1 }
           }
           exit $failed
 
@@ -183,15 +214,11 @@ jobs:
           $regressions = @()
           foreach ($repo in ($env:STRIX_HF_MODELS -split '\s+' | Where-Object { $_ })) {
             $model = $repo.Split('/')[1]
-            $file = "strix-oga-results/$model.txt"
-            $content = if (Test-Path -LiteralPath $file) { Get-Content -LiteralPath $file -Raw } else { "" }
-            $num = '([\d.]+(?:[eE][+-]?\d+)?)'
-            $ttftMatch = [regex]::Match($content, "Prompt processing \(time to first token\):\s*\n\s*avg \(us\):\s+$num")
-            $tpsMatch = [regex]::Match($content, "Token generation:\s*\n\s*avg \(us\):\s+$num\s*\n\s*avg \(tokens/s\):\s+$num")
-            $memMatch = [regex]::Match($content, 'Peak working set size:\s+(\d+)\s+bytes')
-            $ttft = if ($ttftMatch.Success) { [double]$ttftMatch.Groups[1].Value / 1000 } else { $null }
-            $tps = if ($tpsMatch.Success) { [double]$tpsMatch.Groups[2].Value } else { $null }
-            $mem = if ($memMatch.Success) { "{0:F2}" -f ([double]$memMatch.Groups[1].Value / 1GB) } else { "-" }
+            $file = "strix-oga-results/$model.json"
+            $s = if (Test-Path -LiteralPath $file) { (Get-Content -LiteralPath $file -Raw | ConvertFrom-Json).summary } else { $null }
+            $ttft = if ($s -and $s.ttft_ms.avg -gt 0) { [double]$s.ttft_ms.avg } else { $null }
+            $tps = if ($s -and $s.token_generation_ms.tps_avg -gt 0) { [double]$s.token_generation_ms.tps_avg } else { $null }
+            $mem = if ($s) { "{0:F2}" -f ([double]$s.peak_memory_bytes / 1GB) } else { "-" }
             if ($null -eq $ttft -or $null -eq $tps) {
               $missing += $model
             }
@@ -220,7 +247,7 @@ jobs:
           $thisPerf | ConvertTo-Json -Depth 3 | Set-Content -Path "strix-perf-results/perf-results.json" -Encoding utf8
 
           $pct = "{0:F0}" -f ($threshold * 100)
-          $summary = "## Strix OGA Benchmark (prompt 2048, gen 128)`n`n" +
+          $summary = "## Strix VLM Benchmark (dog.jpg + prompt_2k, gen 128)`n`n" +
                      "Baseline: $mainNote | Gate: TTFT +$pct% / TPS -$pct%`n`n" +
                      "| Model | TTFT (ms) | Main | Delta | TPS | Main | Delta | Peak Mem (GB) |`n" +
                      "|-------|----:|----:|----:|----:|----:|----:|----:|`n" +
