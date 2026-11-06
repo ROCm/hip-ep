@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <hip/hip_runtime.h>
+#include <type_traits>
 
 namespace {
 
@@ -25,17 +26,79 @@ constexpr int kScanItems = 4;
 constexpr int kScanChunk = kThreads * kScanItems;
 constexpr int kKChunk = 16;
 constexpr int kSelectUnroll = 8;
+constexpr int kPoolGroup = 4;
+constexpr int kUniformSections = 4;
+constexpr int kWideSelectThreads = 1024;
+constexpr int kWideSelectItems = 32;
+constexpr int kWideSelectRows = 16;
+constexpr int kWideSelectMinBlocks = 8192;
+static_assert(kWideSelectMinBlocks > kMaxTopK, "wide rows run the radix passes");
 constexpr int kFusedRows = 3;
 constexpr int kTileRows = 16;
 constexpr int kTileBlocks = 128;
 constexpr size_t kChunkBudgetBytes = size_t{128} << 20;
 
+// Lane exchanges on the VALU: rowXor<M> reads lane ^ M within a 16-lane row
+// (DPP row_xmask) and swapHalves reads lane ^ 16 (v_permlanex16). __shfl_xor
+// lowers to ds_bpermute, an LDS round trip. Archs without these (the kernels
+// only run on wave32 but must compile everywhere) keep __shfl_xor.
+template <int M> __device__ __forceinline__ float rowXor(float v) {
+#if defined(__HIP_DEVICE_COMPILE__) && (defined(__GFX11__) || defined(__GFX12__))
+  static_assert(M > 0 && M < 16, "row_xmask stays within a 16-lane row");
+  return __builtin_bit_cast(
+      float, __builtin_amdgcn_update_dpp(0, __builtin_bit_cast(int, v),
+                                         0x160 | M, 0xF, 0xF, false));
+#else
+  return __shfl_xor(v, M);
+#endif
+}
+
+__device__ __forceinline__ float swapHalves(float v) {
+#if defined(__HIP_DEVICE_COMPILE__) && (defined(__GFX11__) || defined(__GFX12__))
+  // The inline-asm copy into the tied "old" operand keeps it out of a VOPD
+  // pair (see v6_swap_halves in gqa_kernel.hip).
+  const int x = __builtin_bit_cast(int, v);
+  int old;
+  asm("v_mov_b32 %0, %1" : "=v"(old) : "v"(x));
+  return __builtin_bit_cast(
+      float, __builtin_amdgcn_permlanex16(old, x, 0x76543210u, 0xfedcba98u,
+                                          false, false));
+#else
+  return __shfl_xor(v, 16);
+#endif
+}
+
 __device__ __forceinline__ float waveSum(float x) {
-#pragma unroll
-  for (int off = 16; off > 0; off >>= 1) {
-    x += __shfl_xor(x, off);
-  }
+  x += swapHalves(x);
+  x += rowXor<8>(x);
+  x += rowXor<4>(x);
+  x += rowXor<2>(x);
+  x += rowXor<1>(x);
   return x;
+}
+
+// Orders one wave's LDS accesses across its lanes without a block barrier.
+__device__ __forceinline__ void waveLdsSync() {
+  __builtin_amdgcn_fence(__ATOMIC_RELEASE, "wavefront");
+  __builtin_amdgcn_wave_barrier();
+  __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "wavefront");
+}
+
+// Without a mask every position is visible: visible[k] = k and a row at
+// past_len + s sees past_len + s + 1 positions. The kernels then get null
+// visible / row_count arrays.
+__device__ __forceinline__ int rowCount(const int *row_count, int b,
+                                        int seq_len, int total, int s) {
+  return row_count ? row_count[b * seq_len + s] : total - seq_len + s + 1;
+}
+
+__device__ __forceinline__ int visibleAt(const int *vis, int k) {
+  return vis ? vis[k] : k;
+}
+
+__device__ __forceinline__ const int *visibleRow(const int *visible, int b,
+                                                 int total) {
+  return visible ? visible + static_cast<size_t>(b) * total : nullptr;
 }
 
 // Inclusive scan over the block; every thread must call it.
@@ -90,10 +153,15 @@ __device__ __forceinline__ void store4(float *p, const float (&x)[4]) {
   *reinterpret_cast<float4_t *>(p) = float4_t{x[0], x[1], x[2], x[3]};
 }
 
-// Split-half RoPE angles. Without ids, cos / sin are [rows, width] tables,
-// batch_stride apart per batch (0 when shared). With ids, they are
-// [table_rows, width / 2] base tables and frequency f of row t in batch b
-// reads base row ids[section[f] * section_stride + b * batch_stride + t].
+// Split-half RoPE angles.
+// - Without ids, cos / sin are [rows, width] tables, batch_stride apart per
+//   batch (0 when shared).
+// - With ids, they are [table_rows, width / 2] base tables. Frequency f of row
+//   t in batch b is in MRoPE section section[f] and reads base row
+//   ids[section[f] * section_stride + b * batch_stride + t].
+// - With at most kUniformSections sections, section_bits also holds
+//   section[f], in bits 2 * (f % 16) and 2 * (f % 16) + 1 of word f / 16. The
+//   kernels read it from scalar registers.
 template <typename T> struct Rope {
   const T *cos;
   const T *sin;
@@ -103,36 +171,136 @@ template <typename T> struct Rope {
   int rows;
   int width;
   int table_rows;
+  int sections;
+  uint32_t section_bits[kD / 32];
   uint8_t section[kD / 2];
 };
 
-// Angle of channel d < width at row t (already clamped to rows) of batch b.
-// A negative gathered position wraps once, as ONNX Gather indices do.
-template <typename T>
-__device__ __forceinline__ void ropeAngle(const Rope<T> &rope, int b, int t,
-                                          int d, float &c, float &s) {
-  size_t at;
-  if (rope.ids == nullptr) {
-    at = b * rope.batch_stride + static_cast<size_t>(t) * rope.width + d;
-  } else {
-    const int half = rope.width / 2;
-    const int f = d < half ? d : d - half;
-    int64_t p = rope.ids[rope.section[f] * rope.section_stride +
-                         b * rope.batch_stride + t];
-    p = p < 0 ? p + rope.table_rows : p;
-    p = p < 0 ? 0 : (p < rope.table_rows ? p : rope.table_rows - 1);
-    at = static_cast<size_t>(p) * half + f;
+template <int M>
+__device__ __forceinline__ void rowXor4(const float (&x)[4], float (&y)[4]) {
+#pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    y[i] = rowXor<M>(x[i]);
   }
-  c = static_cast<float>(rope.cos[at]);
-  s = static_cast<float>(rope.sin[at]);
 }
 
-// RMSNorm then split-half RoPE at row clamp(pos, 0, rows - 1) on the first
-// width channels of one 128-wide vector held by a wave, lane l owning channels
-// 4l .. 4l + 3. Every thread of the block must call it (block barriers).
+// Sets y[i] to the RoPE partner d ^ half of channel d = 4l + i < 2 * half that
+// lane l holds. half is a power of two from 4 to 64, so the partner sits in
+// lane l ^ (half / 4).
+__device__ __forceinline__ void ropePartners(const float (&x)[4], int half,
+                                             float (&y)[4]) {
+  switch (half) {
+  case 4:
+    rowXor4<1>(x, y);
+    break;
+  case 8:
+    rowXor4<2>(x, y);
+    break;
+  case 16:
+    rowXor4<4>(x, y);
+    break;
+  case 32:
+    rowXor4<8>(x, y);
+    break;
+  default:
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      y[i] = swapHalves(x[i]);
+    }
+  }
+}
+
+// Base-table row of gathered position p: a negative position wraps once, as
+// ONNX Gather indices do.
+__device__ __forceinline__ size_t ropeRow(int64_t p, int table_rows) {
+  p = p < 0 ? p + table_rows : p;
+  return static_cast<size_t>(p < 0 ? 0
+                                   : (p < table_rows ? p : table_rows - 1));
+}
+
+// Angles of the channels 4l .. 4l + 3 that lane l holds, at row
+// clamp(pos, 0, rows - 1); every lane of the wave passes the same pos.
+// Channels past width read channel 0's angle and are left unrotated. With up
+// to kUniformSections sections, the row's position in each section is a
+// scalar load and lanes pick theirs, so the table loads wait on one round
+// trip instead of a section-map / id / table chain per channel.
 template <typename T>
-__device__ __forceinline__ void normRope(float (&x)[4], const T *weight,
-                                         const Rope<T> &rope, int b, int pos,
+__device__ __forceinline__ void ropeFetch(const Rope<T> &rope, int b, int pos,
+                                          float (&c)[4], float (&s)[4]) {
+  const int lane = threadIdx.x % 32;
+  const int t = __builtin_amdgcn_readfirstlane(clampPos(pos, rope.rows));
+  const int half = rope.width / 2;
+  int d[4], f[4];
+#pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    d[i] = 4 * lane + i < rope.width ? 4 * lane + i : 0;
+    f[i] = d[i] < half ? d[i] : d[i] - half;
+  }
+  size_t at[4];
+  if (rope.ids == nullptr) {
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      at[i] = b * rope.batch_stride + static_cast<size_t>(t) * rope.width + d[i];
+    }
+  } else {
+    const int64_t *ids = rope.ids + b * rope.batch_stride + t;
+    if (rope.sections <= kUniformSections) {
+      int64_t p[kUniformSections];
+#pragma unroll
+      for (int m = 0; m < kUniformSections; ++m) {
+        p[m] = ids[(m < rope.sections ? m : 0) * rope.section_stride];
+      }
+#pragma unroll
+      for (int i = 0; i < 4; ++i) {
+        const int w = f[i] / 16;
+        uint32_t bits = rope.section_bits[0];
+#pragma unroll
+        for (int k = 1; k < kD / 32; ++k) {
+          bits = w == k ? rope.section_bits[k] : bits;
+        }
+        const int m = (bits >> (2 * (f[i] % 16))) & 3;
+        int64_t q = p[0];
+#pragma unroll
+        for (int k = 1; k < kUniformSections; ++k) {
+          q = m == k ? p[k] : q;
+        }
+        at[i] = ropeRow(q, rope.table_rows) * half + f[i];
+      }
+    } else {
+#pragma unroll
+      for (int i = 0; i < 4; ++i) {
+        at[i] = ropeRow(ids[rope.section[f[i]] * rope.section_stride],
+                        rope.table_rows) *
+                    half +
+                f[i];
+      }
+    }
+  }
+#pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    c[i] = static_cast<float>(rope.cos[at[i]]);
+    s[i] = static_cast<float>(rope.sin[at[i]]);
+  }
+}
+
+// The norm weights of the channels lane l holds. Loaded ahead of the vector
+// they scale, since loads complete in order.
+template <typename T>
+__device__ __forceinline__ void normWeight(const T *weight, float (&w)[4]) {
+  const int lane = threadIdx.x % 32;
+#pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    w[i] = static_cast<float>(weight[4 * lane + i]);
+  }
+}
+
+// RMSNorm with weights w, then split-half RoPE with ropeFetch's angles on the
+// first width channels of one 128-wide vector held by a wave, lane l owning
+// channels 4l .. 4l + 3. Every lane of the wave must call it; lds is the
+// wave's own kD floats.
+__device__ __forceinline__ void normRope(float (&x)[4], const float (&w)[4],
+                                         const float (&c)[4],
+                                         const float (&s)[4], int width,
                                          float eps, float *lds) {
   const int lane = threadIdx.x % 32;
   float ss = 0.0f;
@@ -144,51 +312,108 @@ __device__ __forceinline__ void normRope(float (&x)[4], const T *weight,
   const float inv = rsqrtf(ss / static_cast<float>(kD) + eps);
 #pragma unroll
   for (int i = 0; i < 4; ++i) {
-    x[i] = x[i] * inv * static_cast<float>(weight[4 * lane + i]);
+    x[i] = x[i] * inv * w[i];
   }
-  store4(lds + 4 * lane, x);
-  __syncthreads();
-  const int t = clampPos(pos, rope.rows);
-  const int half = rope.width / 2;
+  const int half = width / 2;
+  float paired[4];
+  if (half >= 4 && (half & (half - 1)) == 0) {
+    ropePartners(x, half, paired);
+  } else {
+    store4(lds + 4 * lane, x);
+    waveLdsSync();
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      const int d = 4 * lane + i;
+      paired[i] = d < half ? lds[d + half] : lds[d - half];
+    }
+    waveLdsSync();
+  }
 #pragma unroll
   for (int i = 0; i < 4; ++i) {
     const int d = 4 * lane + i;
-    if (d < rope.width) {
-      const float paired = d < half ? -lds[d + half] : lds[d - half];
-      float c, s;
-      ropeAngle(rope, b, t, d, c, s);
-      x[i] = x[i] * c + paired * s;
-    }
+    const float r = x[i] * c[i] + (d < half ? -paired[i] : paired[i]) * s[i];
+    x[i] = d < width ? r : x[i];
   }
-  __syncthreads();
 }
 
-// Pooled, normalized and rotated key of block j (one wave). Every thread of
-// the block must call it.
-template <typename T>
-__device__ __forceinline__ void pooledKey(const T *keys, const int *group,
-                                          int ratio, const T *key_norm_weight,
-                                          const Rope<T> &rope, int b,
-                                          float eps, float *lds,
-                                          float (&x)[4]) {
+// Pooled, normalized and rotated key of the block whose positions are
+// vis[first .. first + ratio - 1], or first .. first + ratio - 1 without vis
+// (one wave). Every lane of the wave must call it.
+template <bool kVis, typename T>
+__device__ __forceinline__ void
+pooledKeyOf(const T *keys, const int *vis, int first, int ratio,
+            const T *key_norm_weight, const Rope<T> &rope, int b, float eps,
+            float *lds, float (&x)[4]) {
   const int lane = threadIdx.x % 32;
 #pragma unroll
   for (int i = 0; i < 4; ++i) {
     x[i] = 0.0f;
   }
-  for (int k = 0; k < ratio; ++k) {
-    float v[4];
-    load4(keys + static_cast<size_t>(group[k]) * kD + 4 * lane, v);
+  // kPoolGroup independent row loads at a time (a runtime-bounded loop waits
+  // for each row before issuing the next). Adding +0 for the clamped rows
+  // past ratio leaves the sum unchanged, since it starts at +0.
+  float v[kPoolGroup][4];
+  auto load = [&](int k0) {
+#pragma unroll
+    for (int u = 0; u < kPoolGroup; ++u) {
+      int row = first + (k0 + u < ratio ? k0 + u : ratio - 1);
+      if (kVis) {
+        row = vis[row];
+      }
+      load4(keys + static_cast<size_t>(row) * kD + 4 * lane, v[u]);
+    }
+  };
+  auto add = [&](int k0) {
+#pragma unroll
+    for (int u = 0; u < kPoolGroup; ++u) {
+#pragma unroll
+      for (int i = 0; i < 4; ++i) {
+        x[i] += k0 + u < ratio ? v[u][i] : 0.0f;
+      }
+    }
+  };
+  // The angles are loaded after the first rows, which the norm needs first
+  // (loads complete in order).
+  float w[4];
+  normWeight(key_norm_weight, w);
+  load(0);
+  float c[4], s[4];
+  ropeFetch(rope, b, kVis ? vis[first] : first, c, s);
+  add(0);
+  for (int k0 = kPoolGroup; k0 < ratio; k0 += kPoolGroup) {
+    load(k0);
+    add(k0);
+  }
+  // Scaling by an exact power-of-two reciprocal rounds like the division.
+  if ((ratio & (ratio - 1)) == 0) {
+    const float inv = 1.0f / static_cast<float>(ratio);
 #pragma unroll
     for (int i = 0; i < 4; ++i) {
-      x[i] += v[i];
+      x[i] *= inv;
+    }
+  } else {
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      x[i] /= static_cast<float>(ratio);
     }
   }
-#pragma unroll
-  for (int i = 0; i < 4; ++i) {
-    x[i] /= static_cast<float>(ratio);
+  normRope(x, w, c, s, rope.width, eps, lds);
+}
+
+template <typename T>
+__device__ __forceinline__ void pooledKey(const T *keys, const int *vis,
+                                          int first, int ratio,
+                                          const T *key_norm_weight,
+                                          const Rope<T> &rope, int b,
+                                          float eps, float *lds,
+                                          float (&x)[4]) {
+  if (vis) {
+    pooledKeyOf<true>(keys, vis, first, ratio, key_norm_weight, rope, b, eps,
+                      lds, x);
+  } else {
+    pooledKeyOf<false>(keys, vis, first, ratio, key_norm_weight, rope, b,
+                       eps, lds, x);
   }
-  normRope<T>(x, key_norm_weight, rope, b, group[0], eps, lds);
 }
 
 __device__ __forceinline__ int visibleFlags(const int64_t *mask, int b,
@@ -270,22 +495,18 @@ sai_pooled_kernel(const T *__restrict__ present, const int *__restrict__ visible
   const int b = blockIdx.y;
   const int wave = threadIdx.x / 32;
   const int lane = threadIdx.x % 32;
-  const int blocks = row_count[b * seq_len + seq_len - 1] / ratio;
-  const int j0 = blockIdx.x * kWaves;
-  if (j0 >= blocks) {
+  const int blocks =
+      rowCount(row_count, b, seq_len, total, seq_len - 1) / ratio;
+  const int j = blockIdx.x * kWaves + wave;
+  if (j >= blocks) {
     return;
   }
-  const int j = j0 + wave;
-  const bool valid = j < blocks;
   float x[4];
   pooledKey<T>(present + static_cast<size_t>(b) * present_stride * kD,
-               visible + static_cast<size_t>(b) * total +
-                   (valid ? j : j0) * ratio,
-               ratio, key_norm_weight, rope, b, eps, lds[wave], x);
-  if (valid) {
-    store4(pooled + (static_cast<size_t>(b) * max_blocks + j) * kD + 4 * lane,
-           x);
-  }
+               visibleRow(visible, b, total), j * ratio, ratio,
+               key_norm_weight, rope, b, eps, lds[wave], x);
+  store4(pooled + (static_cast<size_t>(b) * max_blocks + j) * kD + 4 * lane,
+         x);
 }
 
 // One wave per (row, head) of the chunk rows [s0, s0 + rows).
@@ -298,25 +519,26 @@ queryItems(const T *query, const T *query_norm_weight, const Rope<T> &rope,
   const int wave = threadIdx.x / 32;
   const int lane = threadIdx.x % 32;
   const int item = item_block * kWaves + wave;
-  const bool valid = item < rows * num_heads;
-  const int it = valid ? item : 0;
-  const int sl = it / num_heads;
-  const int h = it % num_heads;
+  if (item >= rows * num_heads) {
+    return;
+  }
+  const int sl = item / num_heads;
+  const int h = item % num_heads;
   const int s = s0 + sl;
 
-  float x[4];
+  float x[4], w[4], c[4], sn[4];
+  normWeight(query_norm_weight, w);
   load4(query +
             (static_cast<size_t>(b) * seq_len + s) * (num_heads + 1) * kD +
             h * kD + 4 * lane,
         x);
-  normRope<T>(x, query_norm_weight, rope, b, past_len + s, eps, lds[wave]);
-  if (valid) {
-    store4(qrot +
-               ((static_cast<size_t>(b) * chunk_stride + sl) * num_heads + h) *
-                   kD +
-               4 * lane,
-           x);
-  }
+  ropeFetch(rope, b, past_len + s, c, sn);
+  normRope(x, w, c, sn, rope.width, eps, lds[wave]);
+  store4(qrot +
+             ((static_cast<size_t>(b) * chunk_stride + sl) * num_heads + h) *
+                 kD +
+             4 * lane,
+         x);
 }
 
 template <typename T>
@@ -404,29 +626,48 @@ sai_pooled_score_kernel(const T *__restrict__ present,
   const int b = blockIdx.y;
   const int wave = threadIdx.x / 32;
   const int lane = threadIdx.x % 32;
-  const int blocks = row_count[b * seq_len + s0 + rows - 1] / ratio;
+  const int blocks =
+      rowCount(row_count, b, seq_len, total, s0 + rows - 1) / ratio;
   const int j0 = blockIdx.x * kWaves;
   if (j0 >= blocks) {
     return;
   }
+  // The query rows are loaded first and stored to LDS once the key is built,
+  // so their loads overlap the key's.
+  constexpr int kQVecs = kFusedRows * kMaxHeads * kD / 4 / kThreads;
+  static_assert(kQVecs * kThreads * 4 == kFusedRows * kMaxHeads * kD,
+                "query rows must tile the block");
   const float *q_src =
       qrot + static_cast<size_t>(b) * chunk_stride * num_heads * kD;
-  for (int idx = threadIdx.x; idx < rows * num_heads * kD; idx += kThreads) {
-    q_lds[idx] = q_src[idx];
+  const int q_vecs = rows * num_heads * kD / 4;
+  float4_t qv[kQVecs];
+#pragma unroll
+  for (int u = 0; u < kQVecs; ++u) {
+    const int idx = threadIdx.x + u * kThreads;
+    qv[u] = *reinterpret_cast<const float4_t *>(q_src +
+                                                4 * (idx < q_vecs ? idx : 0));
   }
-  __syncthreads();
   const int j = j0 + wave;
   const bool valid = j < blocks;
   float x[4];
-  pooledKey<T>(present + static_cast<size_t>(b) * present_stride * kD,
-               visible + static_cast<size_t>(b) * total +
-                   (valid ? j : j0) * ratio,
-               ratio, key_norm_weight, rope, b, eps, lds[wave], x);
+  if (valid) {
+    pooledKey<T>(present + static_cast<size_t>(b) * present_stride * kD,
+                 visibleRow(visible, b, total), j * ratio, ratio,
+                 key_norm_weight, rope, b, eps, lds[wave], x);
+  }
+#pragma unroll
+  for (int u = 0; u < kQVecs; ++u) {
+    const int idx = threadIdx.x + u * kThreads;
+    if (idx < q_vecs) {
+      *reinterpret_cast<float4_t *>(q_lds + 4 * idx) = qv[u];
+    }
+  }
+  __syncthreads();
   if (!valid) {
     return;
   }
   for (int r = 0; r < rows; ++r) {
-    if (j >= row_count[b * seq_len + s0 + r] / ratio) {
+    if (j >= rowCount(row_count, b, seq_len, total, s0 + r) / ratio) {
       continue;
     }
     float score = 0.0f;
@@ -447,41 +688,46 @@ sai_pooled_score_kernel(const T *__restrict__ present,
   }
 }
 
-// Tile of kTileRows rows x kTileBlocks blocks. Wave w owns rows 2w, 2w + 1
-// and lane l blocks l + 32 * jj; q and the pooled keys are staged through LDS
-// kKChunk channels at a time.
+// Tile of kTileRows rows x kTileBlocks blocks.
+// - Wave w owns rows 2w and 2w + 1; lane l owns blocks l + 32 * jj.
+// - The pooled keys go through LDS kKChunk channels at a time. q is
+//   wave-uniform and read with scalar loads, which keeps the inner loop off
+//   the LDS bandwidth limit.
+// - It computes kH >= num_heads heads, so the head loops carry no branches.
+//   Heads past num_heads repeat the last one and are dropped.
+template <int kH>
 __global__ void __launch_bounds__(kThreads)
 sai_score_kernel(const float *__restrict__ qrot,
                  const float *__restrict__ pooled,
                  const int *__restrict__ row_count, float *__restrict__ scores,
                  int seq_len, int s0, int rows, int chunk_stride, int num_heads,
-                 int max_blocks, int ratio, float scale) {
+                 int total, int max_blocks, int ratio, float scale) {
   constexpr int RPT = kTileRows / kWaves;
   constexpr int JPT = kTileBlocks / 32;
   constexpr int KS = kKChunk + 4;
   static_assert(RPT * kWaves == kTileRows, "rows must tile the waves");
-  __shared__ __align__(16) float q_lds[kTileRows * kMaxHeads * kKChunk];
   __shared__ __align__(16) float k_lds[kTileBlocks * KS];
 
   const int b = blockIdx.z;
   const int sl0 = blockIdx.y * kTileRows;
   const int tile_rows = rows - sl0 < kTileRows ? rows - sl0 : kTileRows;
   const int blocks =
-      row_count[b * seq_len + s0 + sl0 + tile_rows - 1] / ratio;
+      rowCount(row_count, b, seq_len, total, s0 + sl0 + tile_rows - 1) /
+      ratio;
   const int j0 = blockIdx.x * kTileBlocks;
   if (j0 >= blocks) {
     return;
   }
 
   const int tid = threadIdx.x;
-  const int wave = tid / 32;
+  const int wave = __builtin_amdgcn_readfirstlane(tid / 32);
   const int lane = tid % 32;
 
-  float acc[RPT][kMaxHeads][JPT];
+  float acc[RPT][kH][JPT];
 #pragma unroll
   for (int rr = 0; rr < RPT; ++rr) {
 #pragma unroll
-    for (int h = 0; h < kMaxHeads; ++h) {
+    for (int h = 0; h < kH; ++h) {
 #pragma unroll
       for (int jj = 0; jj < JPT; ++jj) {
         acc[rr][h][jj] = 0.0f;
@@ -491,24 +737,21 @@ sai_score_kernel(const float *__restrict__ qrot,
 
   const float *q_src =
       qrot + (static_cast<size_t>(b) * chunk_stride + sl0) * num_heads * kD;
+  const float *q_at[RPT][kH];
+#pragma unroll
+  for (int rr = 0; rr < RPT; ++rr) {
+    const int r = wave * RPT + rr < tile_rows ? wave * RPT + rr : tile_rows - 1;
+#pragma unroll
+    for (int h = 0; h < kH; ++h) {
+      q_at[rr][h] = q_src + (static_cast<size_t>(r) * num_heads +
+                             (h < num_heads ? h : num_heads - 1)) *
+                                kD;
+    }
+  }
   const float *k_src = pooled + static_cast<size_t>(b) * max_blocks * kD;
   constexpr int kVecPerRow = kKChunk / 4;
   for (int dc = 0; dc < kD; dc += kKChunk) {
     __syncthreads();
-    for (int idx = tid; idx < kTileRows * num_heads * kVecPerRow;
-         idx += kThreads) {
-      const int c = idx % kVecPerRow;
-      const int rh = idx / kVecPerRow;
-      const int r = rh / num_heads;
-      const int h = rh % num_heads;
-      float4_t v = float4_t{0.0f, 0.0f, 0.0f, 0.0f};
-      if (r < tile_rows) {
-        v = *reinterpret_cast<const float4_t *>(
-            q_src + static_cast<size_t>(rh) * kD + dc + 4 * c);
-      }
-      *reinterpret_cast<float4_t *>(
-          q_lds + (r * kMaxHeads + h) * kKChunk + 4 * c) = v;
-    }
     for (int idx = tid; idx < kTileBlocks * kVecPerRow; idx += kThreads) {
       const int c = idx % kVecPerRow;
       const int r = idx / kVecPerRow;
@@ -532,16 +775,14 @@ sai_score_kernel(const float *__restrict__ qrot,
 #pragma unroll
       for (int rr = 0; rr < RPT; ++rr) {
 #pragma unroll
-        for (int h = 0; h < kMaxHeads; ++h) {
-          if (h < num_heads) {
-            const float4_t qv = *reinterpret_cast<const float4_t *>(
-                q_lds + ((wave * RPT + rr) * kMaxHeads + h) * kKChunk + dd);
+        for (int h = 0; h < kH; ++h) {
+          const float4_t qv =
+              *reinterpret_cast<const float4_t *>(q_at[rr][h] + dc + dd);
 #pragma unroll
-            for (int jj = 0; jj < JPT; ++jj) {
+          for (int jj = 0; jj < JPT; ++jj) {
 #pragma unroll
-              for (int e = 0; e < 4; ++e) {
-                acc[rr][h][jj] = fmaf(qv[e], kv[jj][e], acc[rr][h][jj]);
-              }
+            for (int e = 0; e < 4; ++e) {
+              acc[rr][h][jj] = fmaf(qv[e], kv[jj][e], acc[rr][h][jj]);
             }
           }
         }
@@ -564,7 +805,7 @@ sai_score_kernel(const float *__restrict__ qrot,
       if (j < blocks) {
         float score = 0.0f;
 #pragma unroll
-        for (int h = 0; h < kMaxHeads; ++h) {
+        for (int h = 0; h < kH; ++h) {
           if (h < num_heads) {
             score += fmaxf(acc[rr][h][jj], 0.0f);
           }
@@ -585,19 +826,82 @@ __device__ __forceinline__ unsigned long long blockKey(float score, int j) {
          (0xFFFFFFFFu - static_cast<unsigned>(j));
 }
 
-// One block per row: an MSB-first 8-bit radix select finds the key of the
-// topk-th best block, the winners are gathered and bitonic-sorted in LDS.
-// counts, when given, receives the row's number of valid entries.
-__global__ void __launch_bounds__(kThreads)
+template <int M> __device__ __forceinline__ float laneXor(float v) {
+  return rowXor<M>(v);
+}
+
+template <> __device__ __forceinline__ float laneXor<16>(float v) {
+  return swapHalves(v);
+}
+
+template <int M>
+__device__ __forceinline__ unsigned long long laneXorKey(unsigned long long v) {
+  auto half = [](unsigned w) {
+    return __builtin_bit_cast(unsigned,
+                              laneXor<M>(__builtin_bit_cast(float, w)));
+  };
+  return static_cast<unsigned long long>(half(static_cast<unsigned>(v >> 32)))
+             << 32 |
+         half(static_cast<unsigned>(v));
+}
+
+// Bitonic stage of stride M <= 16 for key index i held by lane i % 32: the
+// lower index of a pair keeps the larger key in a descending size block.
+template <int M>
+__device__ __forceinline__ unsigned long long
+bitonicLane(unsigned long long v, int i, int size) {
+  const unsigned long long o = laneXorKey<M>(v);
+  const bool keep_max = ((i & M) == 0) == ((i & size) == 0);
+  return (v < o) == keep_max ? o : v;
+}
+
+// The stages of stride <= min(size / 2, 32) on one wave's 64 keys, lane l
+// holding keys i and i + 32 (i = 64 * wave + l) in a and c.
+__device__ __forceinline__ void bitonicWave(unsigned long long &a,
+                                            unsigned long long &c, int i,
+                                            int size) {
+  if (size >= 64) {
+    const bool desc = (i & size) == 0;
+    if ((a < c) == desc) {
+      const unsigned long long t = a;
+      a = c;
+      c = t;
+    }
+  }
+  auto stage = [&](auto m) {
+    constexpr int M = decltype(m)::value;
+    if (size > M) {
+      a = bitonicLane<M>(a, i, size);
+      c = bitonicLane<M>(c, i + 32, size);
+    }
+  };
+  stage(std::integral_constant<int, 16>{});
+  stage(std::integral_constant<int, 8>{});
+  stage(std::integral_constant<int, 4>{});
+  stage(std::integral_constant<int, 2>{});
+  stage(std::integral_constant<int, 1>{});
+}
+
+// One block of kT threads per row.
+// - An MSB-first 8-bit radix select finds the key of the topk-th best block.
+//   The winners are gathered and bitonic-sorted.
+// - With kItems > 0, the row's scores (at most kT * kItems) are read once into
+//   registers, item u of thread t holding block u * kT + t. The radix passes
+//   then read no memory, so a few long rows (decode) run on one wide block.
+// - counts, when given, receives the row's number of valid entries.
+template <int kT, int kItems>
+__global__ void __launch_bounds__(kT)
 sai_select_kernel(const float *__restrict__ scores,
                   const int *__restrict__ visible,
                   const int *__restrict__ row_count,
                   int *__restrict__ selected, int *__restrict__ counts,
                   int seq_len, int s0, int chunk_stride, int total,
                   int max_blocks, int ratio, int block_topk, int capacity) {
+  static_assert(kT >= 256 && kT % 32 == 0, "one thread per histogram bin");
+  constexpr int kPairs = kMaxTopK / 2;
   __shared__ unsigned hist[256];
   __shared__ unsigned long long keys[kMaxTopK];
-  __shared__ int wave_sums[kWaves];
+  __shared__ int wave_sums[kT / 32];
   __shared__ int bucket_lds;
   __shared__ int above_lds;
   __shared__ int in_bucket_lds;
@@ -608,13 +912,51 @@ sai_select_kernel(const float *__restrict__ scores,
   const int b = blockIdx.y;
   const int sl = blockIdx.x;
   const int s = s0 + sl;
-  const int count = row_count[b * seq_len + s];
+  const int count = rowCount(row_count, b, seq_len, total, s);
   const int blocks = count / ratio;
   const int topk = blocks < block_topk ? blocks : block_topk;
   const float *row_scores =
       scores + (static_cast<size_t>(b) * chunk_stride + sl) * max_blocks;
-  const int *vis = visible + static_cast<size_t>(b) * total;
+  const int *vis = visibleRow(visible, b, total);
   int *out = selected + (static_cast<size_t>(b) * seq_len + s) * capacity;
+
+  constexpr int kCache = kItems > 0 ? kItems : 1;
+  float cache[kCache];
+  if (kItems > 0) {
+#pragma unroll
+    for (int u = 0; u < kCache; ++u) {
+      const int j = u * kT + tid;
+      cache[u] = j < blocks ? row_scores[j] : 0.0f;
+    }
+  }
+  // fn(j, score) for every block j < blocks this thread owns.
+  auto forEach = [&](auto &&fn) {
+    if (kItems > 0) {
+#pragma unroll
+      for (int u = 0; u < kCache; ++u) {
+        const int j = u * kT + tid;
+        if (j < blocks) {
+          fn(j, cache[u]);
+        }
+      }
+      return;
+    }
+    for (int base = 0; base < blocks; base += kT * kSelectUnroll) {
+      float v[kSelectUnroll];
+#pragma unroll
+      for (int u = 0; u < kSelectUnroll; ++u) {
+        const int j = base + u * kT + tid;
+        v[u] = j < blocks ? row_scores[j] : 0.0f;
+      }
+#pragma unroll
+      for (int u = 0; u < kSelectUnroll; ++u) {
+        const int j = base + u * kT + tid;
+        if (j < blocks) {
+          fn(j, v[u]);
+        }
+      }
+    }
+  };
 
   unsigned long long threshold = 0;
   if (blocks > topk) {
@@ -622,37 +964,26 @@ sai_select_kernel(const float *__restrict__ scores,
     unsigned long long prefix_mask = 0;
     int need = topk;
     for (int shift = 56; shift >= 0; shift -= 8) {
-      hist[tid] = 0;
-      __syncthreads();
-      for (int base = 0; base < blocks; base += kThreads * kSelectUnroll) {
-        float v[kSelectUnroll];
-#pragma unroll
-        for (int u = 0; u < kSelectUnroll; ++u) {
-          const int j = base + u * kThreads + tid;
-          v[u] = j < blocks ? row_scores[j] : 0.0f;
-        }
-#pragma unroll
-        for (int u = 0; u < kSelectUnroll; ++u) {
-          const int j = base + u * kThreads + tid;
-          if (j >= blocks) {
-            continue;
-          }
-          const unsigned long long key = blockKey(v[u], j);
-          if ((key & prefix_mask) != prefix) {
-            continue;
-          }
-          const unsigned bucket = static_cast<unsigned>(key >> shift) & 255u;
-          const unsigned first = __builtin_amdgcn_readfirstlane(bucket);
-          const unsigned long long same = __ballot(bucket == first);
-          if (bucket != first) {
-            atomicAdd(&hist[bucket], 1u);
-          } else if (lane == __ffsll(static_cast<long long>(same)) - 1) {
-            atomicAdd(&hist[bucket], static_cast<unsigned>(__popcll(same)));
-          }
-        }
+      if (tid < 256) {
+        hist[tid] = 0;
       }
       __syncthreads();
-      const int c = static_cast<int>(hist[255 - tid]);
+      forEach([&](int j, float score) {
+        const unsigned long long key = blockKey(score, j);
+        if ((key & prefix_mask) != prefix) {
+          return;
+        }
+        const unsigned bucket = static_cast<unsigned>(key >> shift) & 255u;
+        const unsigned first = __builtin_amdgcn_readfirstlane(bucket);
+        const unsigned long long same = __ballot(bucket == first);
+        if (bucket != first) {
+          atomicAdd(&hist[bucket], 1u);
+        } else if (lane == __ffsll(static_cast<long long>(same)) - 1) {
+          atomicAdd(&hist[bucket], static_cast<unsigned>(__popcll(same)));
+        }
+      });
+      __syncthreads();
+      const int c = tid < 256 ? static_cast<int>(hist[255 - tid]) : 0;
       const int at_least = blockInclusiveScan(c, wave_sums);
       if (at_least - c < need && at_least >= need) {
         bucket_lds = 255 - tid;
@@ -676,50 +1007,82 @@ sai_select_kernel(const float *__restrict__ scores,
     count_lds = 0;
   }
   __syncthreads();
-  for (int j = tid; j < blocks; j += kThreads) {
-    const unsigned long long key = blockKey(row_scores[j], j);
+  forEach([&](int j, float score) {
+    const unsigned long long key = blockKey(score, j);
     if (key >= threshold) {
       const int pos = atomicAdd(&count_lds, 1);
       if (pos < kMaxTopK) {
         keys[pos] = key;
       }
     }
-  }
+  });
   __syncthreads();
-  for (int i = tid; i < kMaxTopK; i += kThreads) {
+  for (int i = tid; i < kMaxTopK; i += kT) {
     if (i >= topk) {
       keys[i] = 0;
     }
   }
   __syncthreads();
+  // Bitonic sort, descending. The first kPairs threads' waves each hold 64
+  // keys in registers and run the stages of stride <= 32 there; only the
+  // strides reaching across waves go through LDS.
   if (topk > 1) {
+    const bool sorter = tid < kPairs;
+    const int i = 64 * (tid / 32) + lane;
+    unsigned long long a = 0;
+    unsigned long long c = 0;
+    if (sorter) {
+      a = keys[i];
+      c = keys[i + 32];
+    }
     for (int size = 2; size <= kMaxTopK; size <<= 1) {
-      for (int stride = size / 2; stride > 0; stride >>= 1) {
-        const int lo = 2 * tid - (tid & (stride - 1));
-        const int hi = lo + stride;
-        const bool desc = (lo & size) == 0;
-        const unsigned long long a = keys[lo];
-        const unsigned long long c = keys[hi];
-        if ((a < c) == desc) {
-          keys[lo] = c;
-          keys[hi] = a;
+      if (size > 64) {
+        if (sorter) {
+          keys[i] = a;
+          keys[i + 32] = c;
         }
         __syncthreads();
+        for (int stride = size / 2; stride >= 64; stride >>= 1) {
+          if (sorter) {
+            const int lo = 2 * tid - (tid & (stride - 1));
+            const int hi = lo + stride;
+            const bool desc = (lo & size) == 0;
+            const unsigned long long x = keys[lo];
+            const unsigned long long y = keys[hi];
+            if ((x < y) == desc) {
+              keys[lo] = y;
+              keys[hi] = x;
+            }
+          }
+          __syncthreads();
+        }
+        if (sorter) {
+          a = keys[i];
+          c = keys[i + 32];
+        }
+      }
+      if (sorter) {
+        bitonicWave(a, c, i, size);
       }
     }
+    if (sorter) {
+      keys[i] = a;
+      keys[i + 32] = c;
+    }
+    __syncthreads();
   }
 
-  for (int idx = tid; idx < topk * ratio; idx += kThreads) {
+  for (int idx = tid; idx < topk * ratio; idx += kT) {
     const int rank = idx / ratio;
     const int j = static_cast<int>(0xFFFFFFFFu -
                                    static_cast<unsigned>(keys[rank]));
-    out[idx] = vis[j * ratio + idx % ratio];
+    out[idx] = visibleAt(vis, j * ratio + idx % ratio);
   }
   const int tail = count - blocks * ratio;
-  for (int idx = tid; idx < tail; idx += kThreads) {
-    out[topk * ratio + idx] = vis[blocks * ratio + idx];
+  for (int idx = tid; idx < tail; idx += kT) {
+    out[topk * ratio + idx] = visibleAt(vis, blocks * ratio + idx);
   }
-  for (int idx = topk * ratio + tail + tid; idx < capacity; idx += kThreads) {
+  for (int idx = topk * ratio + tail + tid; idx < capacity; idx += kT) {
     out[idx] = -1;
   }
   if (counts != nullptr && tid == 0) {
@@ -795,8 +1158,11 @@ hipError_t launchAll(hipStream_t stream, const Layout &l, const T *query,
   if (total == 0) {
     return hipSuccess;
   }
-  int *visible = reinterpret_cast<int *>(ws + l.visible);
-  int *row_count = reinterpret_cast<int *>(ws + l.row_count);
+  // Without a mask the positions are the identity and no scatter runs.
+  const bool masked = mask != nullptr;
+  int *visible = masked ? reinterpret_cast<int *>(ws + l.visible) : nullptr;
+  int *row_count =
+      masked ? reinterpret_cast<int *>(ws + l.row_count) : nullptr;
   int *chunk_count = reinterpret_cast<int *>(ws + l.chunk_count);
   float *pooled = reinterpret_cast<float *>(ws + l.pooled);
   float *qrot = reinterpret_cast<float *>(ws + l.qrot);
@@ -807,7 +1173,7 @@ hipError_t launchAll(hipStream_t stream, const Layout &l, const T *query,
 
   const bool prologue_query =
       seq_len > 0 && max_blocks > 0 && chunk_stride >= seq_len;
-  const int count_blocks = seq_len > 0 ? num_chunks : 0;
+  const int count_blocks = seq_len > 0 && masked ? num_chunks : 0;
   const int query_blocks =
       prologue_query
           ? static_cast<int>(
@@ -840,9 +1206,11 @@ hipError_t launchAll(hipStream_t stream, const Layout &l, const T *query,
     return hipGetLastError();
   }
 
-  sai_scatter_kernel<<<dim3(num_chunks, batch), kThreads, 0, stream>>>(
-      mask, chunk_count, visible, row_count, total, past_len, seq_len,
-      num_chunks);
+  if (masked) {
+    sai_scatter_kernel<<<dim3(num_chunks, batch), kThreads, 0, stream>>>(
+        mask, chunk_count, visible, row_count, total, past_len, seq_len,
+        num_chunks);
+  }
   const bool fused = seq_len <= kFusedRows;
   if (max_blocks > 0 && !fused) {
     sai_pooled_kernel<T>
@@ -870,16 +1238,33 @@ hipError_t launchAll(hipStream_t stream, const Layout &l, const T *query,
                          num_heads, total, present_stride, max_blocks, ratio,
                          eps, scale);
       } else {
-        sai_score_kernel<<<dim3(gridFor(max_blocks, kTileBlocks),
-                                gridFor(rows, kTileRows), batch),
-                           kThreads, 0, stream>>>(
-            qrot, pooled, row_count, scores, seq_len, s0, rows, chunk_stride,
-            num_heads, max_blocks, ratio, scale);
+        const dim3 score_grid(gridFor(max_blocks, kTileBlocks),
+                              gridFor(rows, kTileRows), batch);
+        if (num_heads <= 4) {
+          sai_score_kernel<4><<<score_grid, kThreads, 0, stream>>>(
+              qrot, pooled, row_count, scores, seq_len, s0, rows,
+              chunk_stride, num_heads, total, max_blocks, ratio, scale);
+        } else {
+          sai_score_kernel<kMaxHeads><<<score_grid, kThreads, 0, stream>>>(
+              qrot, pooled, row_count, scores, seq_len, s0, rows,
+              chunk_stride, num_heads, total, max_blocks, ratio, scale);
+        }
       }
     }
-    sai_select_kernel<<<dim3(rows, batch), kThreads, 0, stream>>>(
-        scores, visible, row_count, selected, counts, seq_len, s0,
-        chunk_stride, total, max_blocks, ratio, block_topk, capacity);
+    // The wide block's fixed cost only pays off on long rows.
+    if (static_cast<int64_t>(rows) * batch <= kWideSelectRows &&
+        max_blocks >= kWideSelectMinBlocks &&
+        max_blocks <= kWideSelectThreads * kWideSelectItems) {
+      sai_select_kernel<kWideSelectThreads, kWideSelectItems>
+          <<<dim3(rows, batch), kWideSelectThreads, 0, stream>>>(
+              scores, visible, row_count, selected, counts, seq_len, s0,
+              chunk_stride, total, max_blocks, ratio, block_topk, capacity);
+    } else {
+      sai_select_kernel<kThreads, 0>
+          <<<dim3(rows, batch), kThreads, 0, stream>>>(
+              scores, visible, row_count, selected, counts, seq_len, s0,
+              chunk_stride, total, max_blocks, ratio, block_topk, capacity);
+    }
   }
   return hipGetLastError();
 }
@@ -887,7 +1272,8 @@ hipError_t launchAll(hipStream_t stream, const Layout &l, const T *query,
 template <typename T>
 Rope<T> makeRope(const void *cos, const void *sin, const int64_t *ids,
                  const uint8_t *sections, int64_t batch, int64_t width,
-                 int64_t rows, int64_t batched, int64_t id_rows) {
+                 int64_t rows, int64_t batched, int64_t id_sections,
+                 int64_t id_rows) {
   Rope<T> rope{};
   rope.cos = static_cast<const T *>(cos);
   rope.sin = static_cast<const T *>(sin);
@@ -900,10 +1286,16 @@ Rope<T> makeRope(const void *cos, const void *sin, const int64_t *ids,
   }
   rope.rows = static_cast<int>(id_rows);
   rope.table_rows = static_cast<int>(rows);
+  rope.sections = static_cast<int>(id_sections < INT32_MAX ? id_sections
+                                                           : INT32_MAX);
   rope.batch_stride = id_rows;
   rope.section_stride = batch * id_rows;
   for (int64_t f = 0; f < width / 2; ++f) {
     rope.section[f] = sections[f];
+    if (id_sections <= kUniformSections) {
+      rope.section_bits[f / 16] |= static_cast<uint32_t>(sections[f])
+                                   << (2 * (f % 16));
+    }
   }
   return rope;
 }
@@ -1020,7 +1412,7 @@ extern "C" int hip_sparse_attention_indexer(
         static_cast<const _Float16 *>(key_norm_weight),
         makeRope<_Float16>(cos_cache, sin_cache, rotary_position_ids,
                            rotary_sections, batch, rotary_width, rotary_rows,
-                           rotary_batched, id_rows),
+                           rotary_batched, id_sections, id_rows),
         mask, static_cast<const _Float16 *>(past_key), selected_indices,
         selected_counts, static_cast<_Float16 *>(present_key),
         static_cast<char *>(workspace),
@@ -1036,7 +1428,7 @@ extern "C" int hip_sparse_attention_indexer(
         static_cast<const float *>(key_norm_weight),
         makeRope<float>(cos_cache, sin_cache, rotary_position_ids,
                         rotary_sections, batch, rotary_width, rotary_rows,
-                        rotary_batched, id_rows),
+                        rotary_batched, id_sections, id_rows),
         mask, static_cast<const float *>(past_key), selected_indices,
         selected_counts, static_cast<float *>(present_key),
         static_cast<char *>(workspace),

@@ -332,6 +332,11 @@ def test_decode(model_runner, P):
     _run_case(model_runner, B=1, S=1, P=P, seed=P)
 
 
+def test_decode_long_context(model_runner):
+    """Few rows of at least 8192 blocks select on one 1024-thread block."""
+    _run_case(model_runner, B=2, S=3, P=33000, seed=12)
+
+
 def test_prefill_multi_chunk(model_runner):
     """Scores past a 128 MiB budget split the query rows into chunks of
     budget / (B * ((P + S) / ratio + N * D) * 4 bytes) rows."""
@@ -377,6 +382,18 @@ def test_rank3_cache_clamped_rows(model_runner):
     _run_case(model_runner, B=1, S=1, P=3000, seed=8, X=1024)
 
 
+@pytest.mark.parametrize("R", [8, 48, 128])
+def test_rotary_widths(model_runner, R):
+    """Covers each RoPE partner path in both kernel layouts.
+
+    - Halves 4 and 64 swap partners between lanes; half 24 goes through LDS.
+    - S = 5 runs the separate pooled and score kernels; S = 1 runs the fused
+      pooled-score kernel.
+    """
+    _run_case(model_runner, B=1, S=5, P=900, seed=30 + R, R=R)
+    _run_case(model_runner, B=1, S=1, P=2100, seed=31 + R, R=R)
+
+
 def test_f32_small_config(model_runner):
     _run_case(
         model_runner,
@@ -418,19 +435,21 @@ def test_exact_ties_keep_block_order(model_runner, S):
     _run_feeds(model_runner, query, qw, kw, cos, sin, None, past, budget=64, exact=True)
 
 
-def _make_gathered_rotary_model(N, R, rows, budget, masks):
+def _make_gathered_rotary_model(N, R, rows, budget, masks, M, picks):
     """Returns an indexer model that builds its MRoPE rotary tables:
 
     cache = Concat(w, w)
     w     = Where(m2, g2, Where(m1, g1, g0))
-    g_k   = Gather(base, Gather(rotary_position_ids, k))
+    g_k   = Gather(base, Gather(rotary_position_ids, picks[k]))
+
+    rotary_position_ids is [M, B, X].
     """
     elem = TP.FLOAT16
     nodes = [
         helper.make_node(
-            "Constant", [], [f"k{k}"], value=numpy_helper.from_array(np.int64(k))
+            "Constant", [], [f"k{k}"], value=numpy_helper.from_array(np.int64(pick))
         )
-        for k in range(3)
+        for k, pick in enumerate(picks)
     ]
     nodes += [
         helper.make_node("Gather", ["rotary_position_ids", f"k{k}"], [f"pos{k}"])
@@ -470,7 +489,7 @@ def _make_gathered_rotary_model(N, R, rows, budget, masks):
         helper.make_tensor_value_info("key_norm_weight", elem, [_D]),
         helper.make_tensor_value_info("cos_base", elem, [rows, R // 2]),
         helper.make_tensor_value_info("sin_base", elem, [rows, R // 2]),
-        helper.make_tensor_value_info("rotary_position_ids", TP.INT64, [3, "B", "X"]),
+        helper.make_tensor_value_info("rotary_position_ids", TP.INT64, [M, "B", "X"]),
         helper.make_tensor_value_info("past_key", elem, ["B", "P", _D]),
     ]
     outputs = [
@@ -485,26 +504,28 @@ def _make_gathered_rotary_model(N, R, rows, budget, masks):
     return model
 
 
+@pytest.mark.parametrize("M, picks", [(3, (0, 1, 2)), (6, (0, 4, 5))])
 @pytest.mark.parametrize("S", [1, 64])
-def test_rotary_fold_matches_tables(model_runner, S):
+def test_rotary_fold_matches_tables(model_runner, S, M, picks):
     """The folded graph must match the indexer fed materialized tables bit for bit.
 
-    The ids cover three distinct sections, per-batch offsets, negative positions
-    and a history X longer than the context.
+    - The ids cover three distinct sections, per-batch offsets, negative
+      positions and a history X longer than the context.
+    - M = 3 reads the packed section map; M = 6 reads the per-channel one.
     """
     B, P, N, R, rows, budget = 2, 1000, 4, 64, 2048, 2048
     X = P + S + 100
     dt = np.float16
-    rng = np.random.default_rng(50 + S)
+    rng = np.random.default_rng(50 + S + M)
     freq = np.arange(R // 2)
     masks = (freq % 3 == 1, freq % 3 == 2)
-    ids = rng.integers(-rows, rows, (3, B, X))
-    ids[0] = np.arange(X) + rng.integers(0, 64, (B, 1))
+    ids = rng.integers(-rows, rows, (M, B, X))
+    ids[picks[0]] = np.arange(X) + rng.integers(0, 64, (B, 1))
     ang = np.arange(rows)[:, None] / (10000.0 ** (freq / (R // 2)))
     cos_base, sin_base = np.cos(ang).astype(dt), np.sin(ang).astype(dt)
 
     def table(base):
-        g0, g1, g2 = (base[ids[k]] for k in range(3))
+        g0, g1, g2 = (base[ids[pick]] for pick in picks)
         w = np.where(masks[1], g2, np.where(masks[0], g1, g0))
         return np.concatenate([w, w], axis=-1)
 
@@ -515,7 +536,10 @@ def test_rotary_fold_matches_tables(model_runner, S):
     past = rng.uniform(-1, 1, (B, P, _D)).astype(dt)
 
     folded = model_runner.backend.run(
-        _persist(model_runner, _make_gathered_rotary_model(N, R, rows, budget, masks)),
+        _persist(
+            model_runner,
+            _make_gathered_rotary_model(N, R, rows, budget, masks, M, picks),
+        ),
         [query, qw, kw, cos_base, sin_base, ids, past],
     )
     tabled = _make_model(N, R, True, False, dt, 4, budget, None, None)

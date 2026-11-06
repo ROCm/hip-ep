@@ -98,8 +98,11 @@ bit-identical with and without the fold.
   `rotary_position_ids`, `rotary_sections` and the id sizes after `scale`. Null
   ids select the table path.
 - The kernels take a `Rope<T>` argument holding either the table strides or
-  the ids, the strides and the section map. `ropeAngle` reads one base entry per
-  channel instead of a materialized table row.
+  the ids, the strides and the section map. `ropeFetch` reads one base entry per
+  channel instead of a materialized table row. With at most four sections the
+  map is also packed 2 bits per frequency (`section_bits`), so the row's
+  position in each section is one scalar load and each lane picks its own from
+  registers. More sections read the byte map per channel.
 
 ## Indexer counts fold
 
@@ -139,6 +142,47 @@ writes each row's valid entries, all non-negative token positions, ahead of
 the `-1` fill, so it writes their number from one thread. The count is exact.
 Other uses of `selected_indices` keep reading the indices unchanged.
 
+## Indexer kernels
+
+`launchAll` in the kernel source runs, per call:
+
+1. `sai_prologue_kernel`: the present-key copy, the per-chunk visible counts
+   (with a mask) and, when all query rows fit one chunk, the rotated queries.
+2. `sai_scatter_kernel`, only with a mask: the visible positions and each
+   row's visible count. Without a mask the positions are the identity, so the
+   later kernels get null `visible` / `row_count` and compute both.
+3. Up to `kFusedRows` query rows (decode): `sai_pooled_score_kernel` builds
+   each pooled key and scores it against every row in one pass. Otherwise
+   `sai_pooled_kernel` writes the pooled keys and, per chunk of rows,
+   `sai_query_kernel` (if not done in the prologue) and `sai_score_kernel`
+   write the score matrix.
+4. `sai_select_kernel` per row.
+
+A wave holds one 128-wide vector, 4 channels per lane. Its RMSNorm sum and the
+RoPE partner exchange use DPP `row_xmask` and `v_permlanex16` on gfx11/12
+(`__shfl_xor` lowers to an LDS round trip). A non-power-of-two rotary half
+goes through the wave's own LDS slice with a wave-level fence, so no block
+barrier is needed. Pooling issues `kPoolGroup` row loads at a time with the
+rows past `ratio` clamped and added as `+0`, and issues the rotary loads after
+the first rows. Loads complete in order, so a late-issued load never delays
+the data the norm needs first.
+
+`sai_score_kernel<kH>` tiles 16 rows by 128 blocks. The pooled keys go through
+LDS, but q is the same for a whole wave, so it is read with scalar loads. The
+LDS bandwidth then only carries the keys. `kH` is 4 or 8; heads past
+`num_heads` repeat the last head and are not summed, so the head loops have no
+branches.
+
+`sai_select_kernel<kT, kItems>` finds the `topk`-th best block key with an
+MSB-first 8-bit radix select, gathers the winners and sorts them descending
+with a bitonic network. Each of the first 8 waves holds 64 keys in registers
+and runs the stages of stride 32 and below with lane exchanges. Only the
+strides that cross waves go through LDS. Up to `kWideSelectRows` rows of at
+least `kWideSelectMinBlocks` blocks run on one 1024-thread block per row that
+reads its scores into registers once (`kItems = 32`), instead of streaming
+them on every radix pass. Shorter rows keep the 256-thread streaming variant,
+whose fixed cost is lower.
+
 ## Remaining graph glue
 
 The q/k `SimplifiedLayerNormalization` and `MRotaryEmbedding` before DSA, and
@@ -162,6 +206,8 @@ the sigmoid gate after it, still lower op by op.
     materialized tables to agree bit for bit.
   - `test_counts_fold` requires the folded counts to equal the number of
     non-negative entries in each selected row.
+  - `test_rotary_widths` covers the lane-exchange and LDS RoPE partners, and
+    `test_decode_long_context` covers the 1024-thread select.
 - Kernel resources: run
   [check_kernel_resources.py](../../lib/Runtime/Kernels/tools/check_kernel_resources.py)
   after changing either kernel.
