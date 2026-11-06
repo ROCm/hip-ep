@@ -4,9 +4,10 @@
 #
 
 """Tests for data-rearrangement / shape ops: Tile, Expand, Pad, GatherND,
-Slice, ScatterND.
+Slice, ScatterND, DepthToSpace, and SpaceToDepth.
 
-All six ops are added by the qwen-vision-kernels PR. They share a common
+Tile, Expand, Pad, GatherND, Slice, and ScatterND are added by the
+qwen-vision-kernels PR. They share a common
 property: the **shape** of an output depends on a graph-time tensor (repeats
 for Tile, shape for Expand, pads for Pad, indices for GatherND, starts/ends
 for Slice, indices for ScatterND). The runtime D2H-reads these small tensors
@@ -20,7 +21,7 @@ data dtype set is:
     Expand    : f16, f32, i32, i64
     Pad       : f16, f32, i32, i64       (modes: constant, reflect, edge, wrap)
     GatherND  : f16, f32, i32, i64       (indices: int64 only)
-    Slice     : f16, f32, i32, i64       (starts/ends/axes/steps: int64 only)
+    Slice     : f16, f32, i32, i64       (starts/ends/axes/steps: int32 or int64)
     ScatterND : f16, f32, i32, i64       (indices: int64 only;
                                           reductions: none, add, mul, min, max)
 """
@@ -279,6 +280,38 @@ class TestPad:
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=0)
 
+    def test_pad_empty_output(self, model_runner):
+        """An empty input with no padding returns the same shaped empty."""
+        shape = [0, 3]
+        model = _make_pad_model(
+            np.float32, shape, [0, 0, 0, 0], mode="constant", constant_value=2.5
+        )
+        x = np.empty(shape, dtype=np.float32)
+
+        actual, expected = model_runner.run_sample(model, [x])
+
+        assert actual[0].shape == (0, 3)
+        compare_outputs(actual, expected, atol=0)
+
+    def test_pad_empty_input_fills_output(self, model_runner):
+        """Padding [0, 3] to [2, 3] fills every element with the constant."""
+        shape = [0, 3]
+        constant = np.float32(2.5)
+        model = _make_pad_model(
+            np.float32,
+            shape,
+            [1, 0, 1, 0],
+            mode="constant",
+            constant_value=constant,
+        )
+        x = np.empty(shape, dtype=np.float32)
+
+        actual, expected = model_runner.run_sample(model, [x])
+
+        assert actual[0].shape == (2, 3)
+        np.testing.assert_array_equal(actual[0], np.full((2, 3), constant))
+        compare_outputs(actual, expected, atol=0)
+
     @pytest.mark.parametrize("mode", ["reflect", "edge", "wrap"])
     def test_pad_modes(self, model_runner, mode):
         """Cover the three non-constant Pad modes on fp16 input."""
@@ -398,6 +431,7 @@ def _make_slice_model(
     steps: list[int] | None,
     output_shape: list[int],
     constant_indices: bool,
+    index_dtype=np.int64,
 ):
     """Build a Slice model.
 
@@ -408,6 +442,7 @@ def _make_slice_model(
     runtime kernel path.
     """
     tp = np_to_onnx_type(dtype)
+    index_tp = np_to_onnx_type(index_dtype)
     X = helper.make_tensor_value_info("X", tp, list(input_shape))
 
     input_names = ["X", "starts", "ends"]
@@ -416,39 +451,35 @@ def _make_slice_model(
 
     if constant_indices:
         initializers.append(
-            numpy_helper.from_array(np.array(starts, dtype=np.int64), name="starts")
+            numpy_helper.from_array(np.array(starts, dtype=index_dtype), name="starts")
         )
         initializers.append(
-            numpy_helper.from_array(np.array(ends, dtype=np.int64), name="ends")
+            numpy_helper.from_array(np.array(ends, dtype=index_dtype), name="ends")
         )
     else:
-        starts_vi = helper.make_tensor_value_info(
-            "starts", TensorProto.INT64, [len(starts)]
-        )
-        ends_vi = helper.make_tensor_value_info("ends", TensorProto.INT64, [len(ends)])
+        starts_vi = helper.make_tensor_value_info("starts", index_tp, [len(starts)])
+        ends_vi = helper.make_tensor_value_info("ends", index_tp, [len(ends)])
         inputs_list += [starts_vi, ends_vi]
 
     if axes is not None:
         input_names.append("axes")
         if constant_indices:
             initializers.append(
-                numpy_helper.from_array(np.array(axes, dtype=np.int64), name="axes")
+                numpy_helper.from_array(np.array(axes, dtype=index_dtype), name="axes")
             )
         else:
-            axes_vi = helper.make_tensor_value_info(
-                "axes", TensorProto.INT64, [len(axes)]
-            )
+            axes_vi = helper.make_tensor_value_info("axes", index_tp, [len(axes)])
             inputs_list.append(axes_vi)
     if steps is not None:
         input_names.append("steps")
         if constant_indices:
             initializers.append(
-                numpy_helper.from_array(np.array(steps, dtype=np.int64), name="steps")
+                numpy_helper.from_array(
+                    np.array(steps, dtype=index_dtype), name="steps"
+                )
             )
         else:
-            steps_vi = helper.make_tensor_value_info(
-                "steps", TensorProto.INT64, [len(steps)]
-            )
+            steps_vi = helper.make_tensor_value_info("steps", index_tp, [len(steps)])
             inputs_list.append(steps_vi)
 
     Y = helper.make_tensor_value_info("Y", tp, list(output_shape))
@@ -578,6 +609,77 @@ class TestSlice:
         actual, expected = model_runner.run_sample(model, feeds)
         compare_outputs(actual, expected, atol=0)
 
+    @pytest.mark.parametrize("index_dtype", [np.int32, np.int64])
+    def test_slice_negative_graph_indices(self, model_runner, index_dtype):
+        """Graph-input indices with negative bounds, axes, and steps.
+
+        Constants would be folded or widened before wrap_slice. Negative
+        INT32 values are the sign-extension case: a zero-extended -1 is not
+        a valid axis or bound.
+        """
+        # Axis -1 is the last dim (length 6). start=-1, end=-(6+1), step=-1
+        # reverses that dim. Axis -2 reverses the length-4 dim the same way.
+        shape = [4, 6]
+        starts, ends, axes, steps = [-1, -1], [-5, -7], [-2, -1], [-1, -1]
+        out_shape = [4, 6]
+        model, _ = _make_slice_model(
+            np.float32,
+            shape,
+            starts,
+            ends,
+            axes,
+            steps,
+            out_shape,
+            constant_indices=False,
+            index_dtype=index_dtype,
+        )
+        rng = np.random.default_rng(505)
+        x = rng.uniform(-2.0, 2.0, shape).astype(np.float32)
+        feeds = [
+            x,
+            np.array(starts, dtype=index_dtype),
+            np.array(ends, dtype=index_dtype),
+            np.array(axes, dtype=index_dtype),
+            np.array(steps, dtype=index_dtype),
+        ]
+        actual, expected = model_runner.run_sample(model, feeds)
+        compare_outputs(actual, expected, atol=0)
+
+    @pytest.mark.parametrize("seq_len,total_len", [(1, 20), (3, 12), (7, 7)])
+    def test_slice_mask_tail_by_sequence_length(self, model_runner, seq_len, total_len):
+        """Slice(mask, -Shape(ids)[1], INT64_MAX) gating a [B, S, ...] tensor."""
+        nodes = [
+            helper.make_node("Shape", ["ids"], ["ids_shape"]),
+            helper.make_node("Gather", ["ids_shape", "one"], ["seq"], axis=0),
+            helper.make_node("Neg", ["seq"], ["start"]),
+            helper.make_node("Slice", ["mask", "start", "end", "one"], ["tail"]),
+            helper.make_node("Cast", ["tail"], ["keep"], to=TensorProto.BOOL),
+            helper.make_node("Unsqueeze", ["keep", "axes"], ["keep4"]),
+            helper.make_node("Where", ["keep4", "X", "zero"], ["Y"]),
+        ]
+        initializers = [
+            helper.make_tensor("one", TensorProto.INT64, [1], [1]),
+            helper.make_tensor("end", TensorProto.INT64, [1], [np.iinfo(np.int64).max]),
+            helper.make_tensor("axes", TensorProto.INT64, [2], [2, 3]),
+            helper.make_tensor("zero", TensorProto.FLOAT16, [], [0.0]),
+        ]
+        inputs = [
+            helper.make_tensor_value_info("ids", TensorProto.INT64, ["B", "S"]),
+            helper.make_tensor_value_info("mask", TensorProto.INT64, ["B", "T"]),
+            helper.make_tensor_value_info("X", TensorProto.FLOAT16, ["B", "S", 4, 8]),
+        ]
+        outputs = [
+            helper.make_tensor_value_info("Y", TensorProto.FLOAT16, ["B", "S", 4, 8])
+        ]
+        model = make_model_from_nodes(nodes, inputs, outputs, initializers)
+
+        rng = np.random.default_rng(504)
+        ids = rng.integers(0, 1000, [1, seq_len], dtype=np.int64)
+        mask = rng.integers(0, 2, [1, total_len], dtype=np.int64)
+        x = rng.uniform(-2.0, 2.0, [1, seq_len, 4, 8]).astype(np.float16)
+        actual, expected = model_runner.run_sample(model, [ids, mask, x])
+        compare_outputs(actual, expected, atol=0)
+
 
 # ---------------------------------------------------------------------------
 # ScatterND
@@ -696,4 +798,96 @@ class TestScatterND:
         x = rng.uniform(-2.0, 2.0, data_shape).astype(np.float32)
         u = rng.uniform(-2.0, 2.0, updates_shape).astype(np.float32)
         actual, expected = model_runner.run_sample(model, [x, u])
+        compare_outputs(actual, expected, atol=0)
+
+
+# ---------------------------------------------------------------------------
+# DepthToSpace
+# ---------------------------------------------------------------------------
+#
+# Decomposed to expand_shape + hip.transpose + collapse_shape. blocksize 1
+# is forwarded as the input. Both DCR and CRD are checked against ORT.
+
+
+def _make_depth_to_space_model(dtype, shape, blocksize, mode):
+    n, c, h, w = shape
+    out_shape = [
+        n,
+        c // (blocksize * blocksize),
+        h * blocksize,
+        w * blocksize,
+    ]
+    tp = np_to_onnx_type(dtype)
+    x = helper.make_tensor_value_info("X", tp, list(shape))
+    y = helper.make_tensor_value_info("Y", tp, out_shape)
+    node = helper.make_node(
+        "DepthToSpace", ["X"], ["Y"], blocksize=blocksize, mode=mode
+    )
+    return make_model_from_nodes([node], [x], [y])
+
+
+class TestDepthToSpace:
+    @pytest.mark.parametrize(
+        "dtype,shape,blocksize,mode",
+        [
+            (np.float32, [1, 8, 2, 3], 2, "DCR"),
+            (np.float16, [1, 8, 2, 3], 2, "CRD"),
+            (np.int32, [2, 16, 1, 2], 4, "DCR"),
+            (np.float32, [1, 4, 2, 2], 1, "CRD"),
+            (np.int64, [1, 4, 2, 2], 1, "DCR"),
+        ],
+    )
+    def test_depth_to_space(self, model_runner, dtype, shape, blocksize, mode):
+        model = _make_depth_to_space_model(dtype, shape, blocksize, mode)
+        rng = np.random.default_rng(900 + blocksize)
+        if np.issubdtype(dtype, np.integer):
+            x = rng.integers(-50, 50, shape, dtype=dtype)
+        else:
+            x = rng.uniform(-2.0, 2.0, shape).astype(dtype)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0)
+
+
+# ---------------------------------------------------------------------------
+# SpaceToDepth
+# ---------------------------------------------------------------------------
+#
+# Inverse of DepthToSpace DCR: expand_shape + hip.transpose + collapse_shape.
+# blocksize 1 is forwarded as the input. ONNX SpaceToDepth has no mode.
+
+
+def _make_space_to_depth_model(dtype, shape, blocksize):
+    n, c, h, w = shape
+    out_shape = [
+        n,
+        c * blocksize * blocksize,
+        h // blocksize,
+        w // blocksize,
+    ]
+    tp = np_to_onnx_type(dtype)
+    x = helper.make_tensor_value_info("X", tp, list(shape))
+    y = helper.make_tensor_value_info("Y", tp, out_shape)
+    node = helper.make_node("SpaceToDepth", ["X"], ["Y"], blocksize=blocksize)
+    return make_model_from_nodes([node], [x], [y])
+
+
+class TestSpaceToDepth:
+    @pytest.mark.parametrize(
+        "dtype,shape,blocksize",
+        [
+            (np.float32, [1, 3, 4, 6], 2),
+            (np.float16, [1, 3, 8, 8], 4),
+            (np.int32, [2, 1, 4, 4], 2),
+            (np.float32, [1, 4, 2, 2], 1),
+            (np.int64, [1, 2, 2, 2], 1),
+        ],
+    )
+    def test_space_to_depth(self, model_runner, dtype, shape, blocksize):
+        model = _make_space_to_depth_model(dtype, shape, blocksize)
+        rng = np.random.default_rng(910 + blocksize)
+        if np.issubdtype(dtype, np.integer):
+            x = rng.integers(-50, 50, shape, dtype=dtype)
+        else:
+            x = rng.uniform(-2.0, 2.0, shape).astype(dtype)
+        actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=0)

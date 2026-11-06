@@ -5,7 +5,8 @@
 // TEST PURPOSE:
 // Verify hip.resize lowers to llvm.call @wrap_resize with signature
 // (state, input, output, data_type, spatial_rank, N, C, in0..2, out0..2,
-//  mode, coord_transform, nearest_mode) -> i32.
+//  mode, coord_transform, nearest_mode) -> i32. With a scales attribute it
+// calls @wrap_resize_scaled, which adds scale0..2 as f64.
 // ============================================================================
 
 // RUN: hip-mlir-opt %s --convert-hip-to-llvm | FileCheck %s
@@ -49,6 +50,153 @@ module {
                      {mode = 1, coord_transform = 2, nearest_mode = 0}
     // CHECK: llvm.extractvalue %{{.*}}[3, 0]
     // CHECK: llvm.call @wrap_resize
+    return
+  }
+
+  // Test 4: dynamic H/W. Those extents are read from the memref descriptor.
+  func.func @resize_dynamic_spatial_f16(
+      %ctx: !hip.context,
+      %x: memref<?x3x?x?xf16, 1>,
+      %y: memref<?x3x?x?xf16, 1>) {
+    // CHECK-LABEL: llvm.func @resize_dynamic_spatial_f16
+    hip.resize(%ctx) ins(%x : memref<?x3x?x?xf16, 1>)
+                     outs(%y : memref<?x3x?x?xf16, 1>)
+                     {mode = 1, coord_transform = 0, nearest_mode = 0}
+    // CHECK: llvm.extractvalue %{{.*}}[3, 2]
+    // CHECK: llvm.extractvalue %{{.*}}[3, 3]
+    // CHECK: llvm.call @wrap_resize
+    return
+  }
+
+  // Test 4b: dynamic input H/W resized to a static output (shape inference
+  // pinned the output from a constant sizes vector).
+  func.func @resize_dynamic_in_static_out_f32(
+      %ctx: !hip.context,
+      %x: memref<1x3x?x?xf32, 1>,
+      %y: memref<1x3x300x300xf32, 1>) {
+    // CHECK-LABEL: llvm.func @resize_dynamic_in_static_out_f32
+    hip.resize(%ctx) ins(%x : memref<1x3x?x?xf32, 1>)
+                     outs(%y : memref<1x3x300x300xf32, 1>)
+                     {mode = 1, coord_transform = 1, nearest_mode = 2}
+    // CHECK-NOT: hip.resize
+    // CHECK: llvm.call @wrap_resize
+    return
+  }
+
+  // Test 4c: dynamic channel resized to a different static extent.
+  func.func @resize_dynamic_channel_f32(
+      %ctx: !hip.context,
+      %x: memref<1x?x8x8xf32, 1>,
+      %y: memref<1x3x8x8xf32, 1>) {
+    // CHECK-LABEL: llvm.func @resize_dynamic_channel_f32
+    hip.resize(%ctx) ins(%x : memref<1x?x8x8xf32, 1>)
+                     outs(%y : memref<1x3x8x8xf32, 1>)
+                     {mode = 1, coord_transform = 1, nearest_mode = 2}
+    // CHECK-NOT: hip.resize
+    // The dynamic input channel is the first window input and the static
+    // 3-channel extent is the first window output. spatial_rank is the second
+    // constant 3: the first is that output extent. A copied channel would pass
+    // the input extent as prefix C instead.
+    // CHECK: %[[IN_CHANNEL:.*]] = llvm.extractvalue %{{.*}}[3, 1]
+    // CHECK: %[[OUT_CHANNEL:.*]] = llvm.mlir.constant(3 : i64) : i64
+    // CHECK: %[[SPATIAL_RANK:.*]] = llvm.mlir.constant(3 : i64) : i64
+    // CHECK: llvm.call @wrap_resize(%{{[^,]*}}, %{{[^,]*}}, %{{[^,]*}}, %{{[^,]*}}, %[[SPATIAL_RANK]], %{{[^,]*}}, %{{[^,]*}}, %[[IN_CHANNEL]], %{{[^,]*}}, %{{[^,]*}}, %[[OUT_CHANNEL]],
+    return
+  }
+
+  // Test 5: channels-last. Lowered as N, C=1, spatial_rank=3, window (H, W, C).
+  // The channel extent is unchanged, so that window axis is copied.
+  func.func @resize_nhwc_static_f32(
+      %ctx: !hip.context,
+      %x: memref<1x16x16x3xf32, 1>,
+      %y: memref<1x32x32x3xf32, 1>) {
+    // CHECK-LABEL: llvm.func @resize_nhwc_static_f32
+    hip.resize(%ctx) ins(%x : memref<1x16x16x3xf32, 1>)
+                     outs(%y : memref<1x32x32x3xf32, 1>)
+                     {mode = 1, coord_transform = 0, nearest_mode = 0}
+    // CHECK: llvm.call @wrap_resize
+    return
+  }
+
+  // Test 6: static input extents with a dynamic output. The type-only plan
+  // rejects this pair; prefix_count and spatial_rank are the launch chosen
+  // once each output extent had a host index.
+  func.func @resize_host_sizes_f32(
+      %ctx: !hip.context,
+      %x: memref<?x3x1024x1024xf32, 1>,
+      %y: memref<?x?x?x?xf32, 1>) {
+    // CHECK-LABEL: llvm.func @resize_host_sizes_f32
+    hip.resize(%ctx) ins(%x : memref<?x3x1024x1024xf32, 1>)
+                     outs(%y : memref<?x?x?x?xf32, 1>)
+                     {mode = 1, coord_transform = 0, nearest_mode = 2,
+                      prefix_count = 1, spatial_rank = 3}
+    // CHECK: llvm.extractvalue %{{.*}}[3, 1]
+    // CHECK: llvm.call @wrap_resize
+    // CHECK-NOT: hip.resize
+    return
+  }
+
+  // Test 7: nearest uint8. The runtime copies one sample.
+  func.func @resize_nearest_ui8(
+      %ctx: !hip.context,
+      %x: memref<1x256x13x13xui8, 1>,
+      %y: memref<1x256x26x26xui8, 1>) {
+    // CHECK-LABEL: llvm.func @resize_nearest_ui8
+    hip.resize(%ctx) ins(%x : memref<1x256x13x13xui8, 1>)
+                     outs(%y : memref<1x256x26x26xui8, 1>)
+                     {mode = 0, coord_transform = 0, nearest_mode = 1}
+    // CHECK: llvm.call @wrap_resize
+    // CHECK-NOT: hip.resize
+    return
+  }
+
+  // Test 7b: linear uint8 interpolates stored codes through the same wrapper.
+  func.func @resize_linear_ui8(
+      %ctx: !hip.context,
+      %x: memref<1x21x65x65xui8, 1>,
+      %y: memref<1x21x513x513xui8, 1>) {
+    // CHECK-LABEL: llvm.func @resize_linear_ui8
+    hip.resize(%ctx) ins(%x : memref<1x21x65x65xui8, 1>)
+                     outs(%y : memref<1x21x513x513xui8, 1>)
+                     {mode = 1, coord_transform = 2, nearest_mode = 2}
+    // CHECK: llvm.call @wrap_resize
+    // CHECK-NOT: hip.resize
+    return
+  }
+
+  // Test 8: kept ONNX scales call wrap_resize_scaled with one f64 per
+  // spatial axis. Unused slots are 0.
+  func.func @resize_scales_f32(
+      %ctx: !hip.context,
+      %x: memref<1x1x3xf32, 1>,
+      %y: memref<1x1x4xf32, 1>) {
+    // CHECK-LABEL: llvm.func @resize_scales_f32
+    hip.resize(%ctx) ins(%x : memref<1x1x3xf32, 1>)
+                     outs(%y : memref<1x1x4xf32, 1>)
+                     {mode = 1, coord_transform = 0, nearest_mode = 0,
+                      scales = [1.0, 1.0, 1.5]}
+    // CHECK-DAG: llvm.mlir.constant(1.500000e+00 : f64) : f64
+    // CHECK-DAG: llvm.mlir.constant(0.000000e+00 : f64) : f64
+    // CHECK: llvm.call @wrap_resize_scaled
+    // CHECK-SAME: f64, f64, f64) -> i32
+    // CHECK-NOT: hip.resize
+    return
+  }
+
+  // Test 9: axis 1 keeps its extent (floor(3 * 1.1) = 3) but has scale 1.1,
+  // so it joins the window: N, C = 1, window (H, W, C), scales 1.1, 1.5, 1.
+  func.func @resize_scales_unchanged_extent_f32(
+      %ctx: !hip.context,
+      %x: memref<1x3x3x1xf32, 1>,
+      %y: memref<1x3x4x1xf32, 1>) {
+    // CHECK-LABEL: llvm.func @resize_scales_unchanged_extent_f32
+    hip.resize(%ctx) ins(%x : memref<1x3x3x1xf32, 1>)
+                     outs(%y : memref<1x3x4x1xf32, 1>)
+                     {mode = 0, coord_transform = 3, nearest_mode = 2,
+                      scales = [1.0, 1.1, 1.5, 1.0]}
+    // CHECK-DAG: llvm.mlir.constant(1.100000e+00 : f64) : f64
+    // CHECK-DAG: llvm.mlir.constant(1.500000e+00 : f64) : f64
+    // CHECK: llvm.call @wrap_resize_scaled
     return
   }
 }

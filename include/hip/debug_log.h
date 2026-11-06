@@ -7,6 +7,7 @@
 #include "timing.h"
 
 #include "llvm/Support/raw_ostream.h"
+#include <cctype>
 #include <cstdlib>
 #include <string>
 
@@ -43,6 +44,18 @@ inline std::string hip_get_env(const char *name) {
   const char *v = std::getenv(name);
   return v ? std::string(v) : std::string();
 #endif
+}
+
+// Interpret an env var as a boolean switch. Unset or empty means off, and so
+// do the usual negatives -- so `FOO=0` turns a feature off rather than on,
+// which is what anyone flipping a toggle expects. Anything else is on.
+inline bool hip_env_is_on(const char *name) {
+  std::string v = hip_get_env(name);
+  if (v.empty())
+    return false;
+  for (char &c : v)
+    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  return !(v == "0" || v == "false" || v == "off" || v == "no");
 }
 
 inline bool hipdnn_ep_debug_enabled() {

@@ -116,4 +116,40 @@ module {
 
     return %r : tensor<?x4xf32>
   }
+
+  // Test 6: a trailing static empty input is not inserted. Concat of a
+  // length-2 prefix, a length-2 constant, and Slice-past-the-end (tensor<0>)
+  // would otherwise insert the empty piece at offset 4 into a dim of 4.
+  func.func @test_concat_trailing_empty(%a: tensor<2xi64>, %b: tensor<2xi64>,
+                                        %c: tensor<0xi64>) -> tensor<4xi64> {
+    // CHECK-LABEL: func.func @test_concat_trailing_empty
+    %r = "onnx.Concat"(%a, %b, %c) {axis = 0 : si64}
+        : (tensor<2xi64>, tensor<2xi64>, tensor<0xi64>) -> tensor<4xi64>
+
+    // CHECK-NOT: onnx.Concat
+    // CHECK: %[[INIT:.*]] = tensor.empty() : tensor<4xi64>
+    // CHECK: %[[I0:.*]] = tensor.insert_slice %{{.*}} into %[[INIT]][0] [2] [1]
+    // CHECK: tensor.insert_slice %{{.*}} into %[[I0]][2] [2] [1]
+    // CHECK-NOT: tensor.insert_slice
+    // CHECK: return
+
+    return %r : tensor<4xi64>
+  }
+
+  // Test 7: a leading empty input does not shift the later offsets.
+  func.func @test_concat_leading_empty(%a: tensor<0xi64>, %b: tensor<1xi64>,
+                                       %c: tensor<2xi64>) -> tensor<3xi64> {
+    // CHECK-LABEL: func.func @test_concat_leading_empty
+    %r = "onnx.Concat"(%a, %b, %c) {axis = 0 : si64}
+        : (tensor<0xi64>, tensor<1xi64>, tensor<2xi64>) -> tensor<3xi64>
+
+    // CHECK-NOT: onnx.Concat
+    // CHECK: %[[INIT:.*]] = tensor.empty() : tensor<3xi64>
+    // CHECK: %[[I0:.*]] = tensor.insert_slice %{{.*}} into %[[INIT]][0] [1] [1]
+    // CHECK: tensor.insert_slice %{{.*}} into %[[I0]][1] [2] [1]
+    // CHECK-NOT: tensor.insert_slice
+    // CHECK: return
+
+    return %r : tensor<3xi64>
+  }
 }

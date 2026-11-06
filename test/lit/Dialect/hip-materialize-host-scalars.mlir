@@ -63,17 +63,28 @@ func.func @two_scalars_one_scratch(%ctx: !hip.context, %x: i64, %y: i32) -> (i64
   return %va, %vb : i64, i32
 }
 
-// --- Rank-0 f32 host store: a bufferized scalar splat (LayerNorm eps).
-//     The host writes it and a GPU kernel reads it, so it must not land in
-//     the device pool. ---
-// CHECK-LABEL: func.func @rank0_f32_host_scalar
-// CHECK-SAME:    (%[[CTX:.*]]: !hip.context
-// CHECK-NOT:     memref.alloc()
-// CHECK:         %[[SCRATCH:.*]] = hip.get_host_scratch(%[[CTX]],
-// CHECK-SAME:                            : memref<?xi8>
+// --- Host-stored f32 read by a hip op: a candidate. This is the rank-0 fill
+//     hip.trilu broadcasts for Trilu(ConstantOfShape) in ChatGLM. ---
+// CHECK-LABEL: func.func @rank0_f32_hip_consumer
+// CHECK-NOT:     memref.alloc() : memref<f32>
+// CHECK:         %[[SCRATCH:.*]] = hip.get_host_scratch
 // CHECK:         %[[V:.*]] = memref.view %[[SCRATCH]]{{.*}} : memref<?xi8> to memref<f32>
 // CHECK:         memref.store {{.*}}, %[[V]][] : memref<f32>
-func.func @rank0_f32_host_scalar(%ctx: !hip.context, %x: f32) -> f32 {
+// CHECK:         hip.trilu(%{{.*}}) ins(%[[V]] : memref<f32>)
+func.func @rank0_f32_hip_consumer(%ctx: !hip.context, %x: f32,
+                                  %out: memref<4x4xf32>) {
+  %a = memref.alloc() : memref<f32>
+  memref.store %x, %a[] : memref<f32>
+  hip.trilu(%ctx) ins(%a : memref<f32>) outs(%out : memref<4x4xf32>) {upper = 0 : si64}
+  memref.dealloc %a : memref<f32>
+  return
+}
+
+// --- Float element type without a hip consumer: NOT a candidate. ---
+// CHECK-LABEL: func.func @rank0_f32_left_alone
+// CHECK-NOT:   hip.get_host_scratch
+// CHECK:       memref.alloc() : memref<f32>
+func.func @rank0_f32_left_alone(%ctx: !hip.context, %x: f32) -> f32 {
   %a = memref.alloc() : memref<f32>
   memref.store %x, %a[] : memref<f32>
   %v = memref.load %a[] : memref<f32>
@@ -230,18 +241,18 @@ func.func @no_context_arg_left_alone(%x: i64) -> i64 {
   return %v : i64
 }
 
-// A tiny in-module memref.global is host memory. Copy it into host-mapped
-// scratch before a GPU kernel reads it. dense<true> left as a global makes
-// an attention mask all-false.
-// CHECK-LABEL: func.func @global_i1_to_scratch
-// CHECK:         %[[SCRATCH:.*]] = hip.get_host_scratch
-// CHECK:         %[[V:.*]] = memref.view %[[SCRATCH]]{{.*}} : memref<?xi8> to memref<i1>
-// CHECK:         memref.copy %{{.*}}, %[[V]]
-// CHECK:         hip.and{{.*}}ins(%[[V]]
-memref.global "private" constant @__constant_xi1_test : memref<i1> = dense<true>
-func.func @global_i1_to_scratch(%ctx: !hip.context, %mask: memref<4xi1>,
-                                %out: memref<4xi1>) {
-  %g = memref.get_global @__constant_xi1_test : memref<i1>
-  hip.and(%ctx) ins(%g, %mask : memref<i1>, memref<4xi1>) outs(%out : memref<4xi1>)
+// LLVM's i48 array stride is 8 bytes, not its 6-byte payload size.
+// CHECK-LABEL: func.func @padded_elements
+// CHECK: %[[SIZE:.*]] = arith.constant 192 : index
+// CHECK: %[[SCRATCH:.*]] = hip.get_host_scratch(%{{.*}}, %[[SIZE]])
+// CHECK: memref.view %[[SCRATCH]]{{.*}} to memref<10xi48>
+// CHECK: %[[OFFSET:.*]] = arith.constant 128 : index
+// CHECK: memref.view %[[SCRATCH]][%[[OFFSET]]][] {{.*}} to memref<i8>
+func.func @padded_elements(%ctx: !hip.context, %x: i48, %y: i8) {
+  %c0 = arith.constant 0 : index
+  %a = memref.alloc() : memref<10xi48>
+  memref.store %x, %a[%c0] : memref<10xi48>
+  %b = memref.alloc() : memref<i8>
+  memref.store %y, %b[] : memref<i8>
   return
 }

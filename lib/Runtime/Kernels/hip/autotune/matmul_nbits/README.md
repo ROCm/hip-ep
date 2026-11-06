@@ -49,7 +49,7 @@ config table still accepts wins.
 
 | Tier | Key | Answers |
 |---|---|---|
-| **Exact** | phase, bits, `N`, `K`, group_size, zero-point, row-stride, M-bucket | the shapes in `shapes/` — every MatMulNBits node in 20 shipped models |
+| **Exact** | phase, bits, `N`, `K`, group_size, zero-point, row-stride, M-bucket | measured MatMulNBits nodes in 20 shipped models, plus selected decode cells and full prefill ladders from the hand-added `Internal` inventory |
 | **Fuzzy** | same, but `N` and `K` collapsed to octave buckets | a model nobody measured whose layer dims land near a measured one |
 | **Fallback** | phase + bits only | guarantees a hit; the config that won most often for that phase |
 
@@ -83,21 +83,26 @@ changes rather than its existence, and the whole table is rejected.
 ## Regenerating
 
 ```powershell
-# 1. shape inventory (only when the model set changes)
+# 1. shape inventory (only when the model set changes). extract_shapes.py does
+#    not emit the hand-added `Internal` rows; keep them in the new csv.
+#    The inventory can be wider than the decode Exact coverage.
 python scripts/extract_shapes.py `
     --models ../../../../../../ModelFiles/oga_models `
     --out shapes/oga_models_bits4.csv --bits 4
 
 # 2. build the sweep driver. It links tools/empty_lut_data.cpp on purpose:
 #    with the real table linked it would get LUT hits for the very shapes it is
-#    supposed to be measuring.
-clang++ -x hip --offload-arch=gfx1151 -O3 -std=c++17 -w `
+#    supposed to be measuring. Build it like the product (see "Measure the
+#    product binary" below): gfx11-generic -O2 for the gfx1150/1151/1152
+#    tables, gfx1170 -O2 for gfx1170.
+clang++ -x hip --offload-arch=gfx11-generic -O2 -std=c++17 -w `
     -I lib/Runtime/Kernels/include -I <flatbuffers include> -I <generated header dir> `
     tools/matmul_nbits_autotune_sweep.cpp tools/empty_lut_data.cpp matmul_nbits_autotune.cpp `
     ../../matmul_nbits_kernel.hip -o mn_sweep.exe
 
-# 3. measure -> build -> compile
-python scripts/update_lut.py all --sweep mn_sweep.exe --flatc <flatc>
+# 3. measure -> build -> compile. --arch is the chip the sweep runs on (the
+#    table is per chip even though the binary is generic).
+python scripts/update_lut.py all --arch gfx1151 --sweep mn_sweep.exe --flatc <flatc>
 ```
 
 Each sweep process starts with an empty in-process tune map (the tuners no
@@ -109,12 +114,33 @@ in the pipeline re-implements "which config is fastest" — there is one
 implementation of that and it is the one that ships, so the table cannot drift
 from the runtime's own judgement.
 
+### Measure the product binary
+
+The table ranks configs by their speed in the binary that is measured, so that
+binary has to be the one that ships: the SDK pinned in `cmake/deps.txt`, the
+release flags of `cmake/hip_utils.cmake` (`-O2`), and the offload arch of the
+product DLL -- `gfx11-generic` for the gfx1150 / gfx1151 / gfx1152 tables (all
+three run the generic code object), `gfx1170` for the gfx1170 table. A
+`--offload-arch=gfx1151` build compiles every kernel against gfx1151's
+1536-entry VGPR file instead of the generic 1024, so tiles that fit there spill
+in the product: the 128x256 WT2x4 tile was the fastest config on 127 gfx1151
+points in a gfx1151 build and 3.5-4x slower than the 7.14 product in the 7.16
+product binary. Re-measure after every compiler bump
+(`lib/Runtime/Kernels/tools/check_kernel_resources.py` lists the kernels whose
+code changed).
+
 ### Sweep scope
 
 `N >= 65536` (the vocab projection) is swept at `M=1` only. Its B runs to
 600 MB and a WMMA sweep is ~680 dispatches over it — tens of minutes per point —
 for an M that inference never issues, since logits are computed for the last
 token. Fuzzy and Fallback still answer if some caller does hand one a wide M.
+
+For the hand-added `Internal` inventory, the gfx1151 table covers 11 poorly
+matched DecodeDp4a shapes at M=1 and every listed prefill shape at all 12 M
+buckets from 8 through 16384. The 14 prefill shapes have Arrival rows; the
+three padded-K shapes also have Padded rows for the same M ladder. The vocab
+projection has decode coverage only. fp16 GEMV rows are unchanged.
 
 ## Embedding
 

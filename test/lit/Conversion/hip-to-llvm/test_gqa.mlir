@@ -3,7 +3,7 @@
 
 // RUN: hip-mlir-opt --assign-op-state-slots --convert-hip-to-llvm %s | FileCheck %s
 //
-// The trailing i32 on the wrap_group_query_attention call is op_state_slot,
+// The second argument of the runtime call is op_state_slot,
 // threaded by --assign-op-state-slots. It selects this GQA instance's
 // per-instance GqaState (hipBLASLt GEMM descriptor cache), replacing the
 // former shared RuntimeState::gqa_gemm_cache.
@@ -35,9 +35,10 @@ module {
 }
 
 // CHECK-LABEL: llvm.func @test_gqa_lowering
-// CHECK: llvm.call @wrap_group_query_attention({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, f32, i64, i64, f32, i64, i64, i64, i64, i64, i64, i32, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+// CHECK: %[[ABSENT:.*]] = llvm.mlir.constant(0 : i32) : i32
+// CHECK: llvm.call @wrap_group_query_attention_host_length({{.*}}, %[[ABSENT]], %[[ABSENT]], {{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, f32, i64, i64, f32, i64, i64, i64, i64, i64, i64, i32, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i32, i32, !llvm.ptr, i64, i64) -> i32
 
-// Verify 42 parameters (full MS GQA spec signature + no_causal + op_state_slot):
+// Verify 48 parameters:
 // - 19 pointers: state, query, key, value, past_key, past_value, seqlens_k, total_seq_len,
 //                cos_cache(NULL), sin_cache(NULL), position_ids(NULL), attention_bias(NULL),
 //                head_sink(NULL), k_scale(NULL), v_scale(NULL),
@@ -51,5 +52,9 @@ module {
 // - 2 bias broadcast params: attn_bias_batch=1, attn_bias_num_heads=1 (no attention_bias operand)
 // - 1 layout param: kv_bnsd=0 (rank-3 BSHD key; 1 would mean rank-4 BNSD, as the
 //                   MultiHeadAttention cross-attn lowering emits)
+// - 1 key length param: seq_len_new_kv=1 (key dim 1; 0 means attend over the
+//                       past cache only)
 // - 1 i32: op_state_slot (per-instance GqaState; threaded by
 //          --assign-op-state-slots, replaces shared RuntimeState::gqa_gemm_cache)
+// - 2 i32: has_host_length=0, host_length_value=0 (runtime readback)
+// - 3 key bias params: key_bias(NULL), key_bias_batch=0, key_bias_len=0

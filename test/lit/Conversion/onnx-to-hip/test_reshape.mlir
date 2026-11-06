@@ -15,6 +15,9 @@
 // - Rank-reducing collapse:        3D -> 2D (merge leading dims)
 // - Same-rank reshape:             3D -> 3D (collapse to 1D then expand)
 // - Identity reshape:              same shape, replaced by identity
+// - Dynamic collapse:              collapse only when the grouping is unique
+//                                  or proven by the shape operand, otherwise
+//                                  tensor.reshape
 //
 // Model: GPT-OSS-20B head split/merge reshapes
 // ============================================================================
@@ -117,6 +120,49 @@ module {
     return %result : tensor<?x?x2816xf16>
   }
 
+  // --- Dynamic collapse whose grouping the types pin down ---
+  // 4096 can only come from [32, 128], which leaves one way to map the two
+  // leading dynamic dims, so no shape-operand proof is needed.
+  func.func @test_reshape_collapse_dyn_unique(%data: tensor<?x?x32x128xf16>,
+                                              %shape: tensor<3xi64>)
+      -> tensor<?x?x4096xf16> {
+    %result = "onnx.Reshape"(%data, %shape) {allowzero = 0 : si64} : (tensor<?x?x32x128xf16>, tensor<3xi64>) -> tensor<?x?x4096xf16>
+    return %result : tensor<?x?x4096xf16>
+  }
+
+  // --- Ambiguous dynamic collapse with an opaque shape operand ---
+  // Patch-merger reshape [B, h, w, C, 2, 2] -> [B, h*w, 4*C]. Both
+  // [[0], [1], [2, 3, 4, 5]] and [[0], [1, 2], [3, 4, 5]] type-check, and the
+  // shape operand cannot say which, so the runtime shape vector must decide.
+  func.func @test_reshape_collapse_dyn_ambiguous_opaque(
+      %data: tensor<?x?x?x1024x2x2xf16>, %shape: tensor<3xi64>)
+      -> tensor<?x?x?xf16> {
+    %result = "onnx.Reshape"(%data, %shape) {allowzero = 0 : si64} : (tensor<?x?x?x1024x2x2xf16>, tensor<3xi64>) -> tensor<?x?x?xf16>
+    return %result : tensor<?x?x?xf16>
+  }
+
+  // --- Ambiguous dynamic collapse, host shape that cannot be proven ---
+  // The shape vector is host-visible, but its middle entry is a runtime product
+  // of two source dims; equality with a group's extent is not provable at
+  // compile time, so this must not become a collapse either.
+  func.func @test_reshape_collapse_dyn_ambiguous_host_shape(
+      %data: tensor<?x?x?x1024x2x2xf16>)
+      -> tensor<?x?x?xf16> {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c2 = arith.constant 2 : index
+    %d0 = tensor.dim %data, %c0 : tensor<?x?x?x1024x2x2xf16>
+    %d1 = tensor.dim %data, %c1 : tensor<?x?x?x1024x2x2xf16>
+    %d2 = tensor.dim %data, %c2 : tensor<?x?x?x1024x2x2xf16>
+    %hw = arith.muli %d1, %d2 : index
+    %d0_i64 = arith.index_cast %d0 : index to i64
+    %hw_i64 = arith.index_cast %hw : index to i64
+    %c4096 = arith.constant 4096 : i64
+    %shape = tensor.from_elements %d0_i64, %hw_i64, %c4096 : tensor<3xi64>
+    %result = "onnx.Reshape"(%data, %shape) {allowzero = 0 : si64} : (tensor<?x?x?x1024x2x2xf16>, tensor<3xi64>) -> tensor<?x?x?xf16>
+    return %result : tensor<?x?x?xf16>
+  }
+
   // --- Dynamic fallback with Shape(src): extents are already host SSA ---
   // ReshapeShapeFold turns Shape(src) into tensor.from_elements(tensor.dim).
   // Even if the fully dynamic ranks force the tensor.reshape fallback, those
@@ -216,6 +262,29 @@ module {
 // CHECK: tensor.reshape
 // CHECK-NOT: onnx.Reshape
 
+// CHECK-LABEL: func.func @test_reshape_collapse_dyn_unique
+// CHECK: tensor.collapse_shape %{{.*}} {{\[\[}}0], [1], [2, 3]]
+// CHECK-NOT: tensor.reshape
+// CHECK-NOT: onnx.Reshape
+
+// The type-only grouping [[0], [1], [2, 3, 4, 5]] would fold w into the
+// feature dim and shrink the token count from h*w to h.
+// The fallback may still collapse 1-element shape slices for host readback;
+// only a collapse of the data tensor itself is wrong.
+// CHECK-LABEL: func.func @test_reshape_collapse_dyn_ambiguous_opaque
+// CHECK-SAME: %[[DATA:[^:]*]]: tensor<?x?x?x1024x2x2xf16>
+// CHECK-NOT: tensor.collapse_shape %[[DATA]]
+// CHECK: tensor.reshape %[[DATA]](
+// CHECK-NOT: tensor.collapse_shape %[[DATA]]
+// CHECK-NOT: onnx.Reshape
+
+// CHECK-LABEL: func.func @test_reshape_collapse_dyn_ambiguous_host_shape
+// CHECK-SAME: %[[DATA:[^:]*]]: tensor<?x?x?x1024x2x2xf16>
+// CHECK-NOT: tensor.collapse_shape %[[DATA]]
+// CHECK: tensor.reshape %[[DATA]](
+// CHECK-NOT: tensor.collapse_shape %[[DATA]]
+// CHECK-NOT: onnx.Reshape
+
 // Shape(src) is rewritten to host-side tensor.dim values. The dynamic reshape
 // fallback may consume them, but it must not round-trip them through the GPU.
 // CHECK-LABEL: func.func @test_reshape_dynamic_from_shape
@@ -244,7 +313,6 @@ module {
 // CHECK-NEXT: %[[ID0:.*]] = tensor.dim %[[DATA]], %[[C0]] : tensor<?x?x?xf16>
 // CHECK-NEXT: %[[IDC0:.*]] = arith.index_cast %[[ID0]] : index to i64
 // CHECK-NEXT: %[[R0:.*]] = arith.select %[[ISZ0]], %[[IDC0]], %[[E0]] : i64
-// CHECK-NEXT: arith.cmpi sgt, %[[R0]], %[[C1I]] : i64
 // ... and entry 1 against input dim 1: the dim index tracks the entry index
 // rather than being pinned to one dim.
 // CHECK: tensor.extract_slice %[[SHAPE]][1] [1] [1]
@@ -258,7 +326,10 @@ module {
 // divisor.
 // CHECK: tensor.extract_slice %[[SHAPE]][3] [1] [1]
 // CHECK: %[[E3:.*]] = hip.readback_scalar
-// CHECK-NEXT: arith.cmpi sgt, %[[E3]], %[[C1I]] : i64
+// The divisor uses resolved dimensions after all entries are read.
+// CHECK: arith.cmpi sgt, %[[R0]], %[[CZ]] : i64
+// CHECK: arith.cmpi sgt, %[[R1]], %[[CZ]] : i64
+// CHECK: arith.cmpi sgt, %[[E3]], %[[CZ]] : i64
 // CHECK: %[[INF:.*]] = arith.divsi
 // CHECK-NEXT: %[[ISM0:.*]] = arith.cmpi eq, %[[R0]], %[[CM1]] : i64
 // CHECK-NEXT: %[[F0:.*]] = arith.select %[[ISM0]], %[[INF]], %[[R0]] : i64
@@ -276,10 +347,11 @@ module {
 // CHECK-LABEL: func.func @test_reshape_dyn_allowzero
 // CHECK-SAME: %[[DATA:[^:]*]]: tensor<?x?x?xf16>, %[[SHAPE:[^:]*]]: tensor<4xi64>
 // CHECK-DAG: %[[CM1:.*]] = arith.constant -1 : i64
+// CHECK-DAG: %[[CZ:.*]] = arith.constant 0 : i64
 // CHECK-DAG: %[[C1I:.*]] = arith.constant 1 : i64
 // CHECK: tensor.extract_slice %[[SHAPE]][0] [1] [1]
 // CHECK: %[[E0:.*]] = hip.readback_scalar
-// CHECK-NEXT: arith.cmpi sgt, %[[E0]], %[[C1I]] : i64
+// CHECK: arith.cmpi sgt, %[[E0]], %[[CZ]] : i64
 // CHECK: %[[INF:.*]] = arith.divsi
 // CHECK-NEXT: %[[ISM:.*]] = arith.cmpi eq, %[[E0]], %[[CM1]] : i64
 // CHECK-NEXT: %[[F0:.*]] = arith.select %[[ISM]], %[[INF]], %[[E0]] : i64

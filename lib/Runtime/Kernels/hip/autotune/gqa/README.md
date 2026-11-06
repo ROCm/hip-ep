@@ -14,10 +14,11 @@ exported from `custom_kernels_<arch>` (implemented in `gqa_autotune.cpp`). The l
 is **nearest-neighbour**, matmul_nbits style, and hierarchical — most-impactful axis
 first:
 
-1. **Kernel identity — exact match.** `phase` (Decode / PrefillV5 / PrefillV7 /
-   PrefillV8), `head_dim` (D64/D128/D256), `kv_dtype` (Fp16/Int8). These are not
+1. **Kernel identity — exact match.** `phase` (Decode / PrefillV6x / PrefillV8x),
+   `head_dim` (D64/D96/D128/D256), `kv_dtype` (Fp16/Int8). These are not
    distances: `d64` and `d128` are different kernel instantiations, and prefill's
-   variant *is* its head_dim, so borrowing across them is meaningless.
+   variant follows its head_dim (d64, d96 and d128 all run v6x, as separate
+   instantiations), so borrowing across them is meaningless.
 2. **Geometry.** The exact `(num_heads, kv_num_heads)` pair is preferred; if it was
    never measured, the search stays within the same **heads-per-group** ratio (the
    axis the kernels template on), never crossing to a different ratio.
@@ -32,7 +33,8 @@ first:
 
 If a geometry has no usable point, the per-`(phase, head_dim)` **Fallback** row
 answers. If no table loaded at all (arch/schema/ABI mismatch, or an empty embed),
-the compiled-in **Heuristic** answers. Both last resorts return a runnable config, so
+or the table has neither points nor a fallback for the head_dim (a table measured
+before D96 existed), the compiled-in **Heuristic** answers. Both last resorts return a runnable config, so
 the op never fails for lack of a table. `GqaTuneSource` reports which of
 `Exact / Nearest / Fallback / Heuristic` was used — worth logging.
 
@@ -50,6 +52,8 @@ only for some `(head_dim, heads-per-group)` pairs, the split count must be in
 rejected and the search moves to the next-nearest point — the same self-correction
 matmul_nbits uses — so a table measured against a wider kernel set than the running
 one degrades to the nearest *usable* point instead of launching something illegal.
+Prefill points are measured without a window, so a windowed prefill request skips
+8-wave v6x configs (the windowed instances go up to 4 waves) the same way.
 
 ### Decode split counts are clamped
 
@@ -67,7 +71,7 @@ matmul_nbits does:
 
 - **`configs[]`** — every distinct launch config once. A config is `kind`
   (`Decode`/`Prefill`) plus its knobs: decode carries `use_wmma` + `bkv`; prefill
-  carries the v5/v7/v8 tuple (`m_tiles`, `bkv`, `nw`, `mt`, `nd`). At most 256.
+  carries the v6x / v8x tuple (`hb`, `qw`, `mt`, `bkv`, `nd`). At most 256.
 - **`points[]`** — one measured winner per shape: the categorical key, a 1-byte
   `config` index into `configs[]`, a per-point `splits` (decode only), and the
   literal numeric dims `num_heads / kv_num_heads / batch / seq_q / seq_kv`. Thousands
@@ -115,7 +119,7 @@ functions. (The old design embedded the table in `runtime.bc`; this replaced it.
 | `lut/<arch>.json` | The table, per arch. Reviewable source of truth (one entry per line). | `scripts/update_lut.py build` |
 | `lut/<arch>.fb` | What the DLL embeds, produced from the JSON by `flatc`. | `scripts/update_lut.py compile` |
 | `scripts/update_lut.py` | `plan` / `measure` / `build` / `compile` pipeline. | — |
-| `../../test/example/gqa/autotune/` | the GPU sweep driver + Makefile. | — |
+| `tools/gqa_autotune_sweep.cpp` | GPU sweep driver + `maxseq_probe.cpp`. | `tools/Makefile` |
 
 ## Using it
 
@@ -171,19 +175,26 @@ Adding a model geometry: add its `(H, G, d)` to `GEOMETRIES` in
 **Read this before changing `../../gqa_kernel.hip`.** The table is a claim about
 kernels — and about the compiler that built them. Two rules:
 
-- **Sweep with the compiler the model runs under** (currently HIP 7.14 / clang 23).
-  A different clang can reorder the winning configs (this cost 20-30x on prefill v7
-  once), so a table swept on the wrong toolchain is confidently wrong.
+- **Sweep with the compiler and flags the model runs under**: the HIP SDK pinned
+  in `cmake/deps.txt`, `-O2`, and the product's offload arch -- `gfx11-generic`
+  for the gfx1150 / gfx1151 / gfx1152 tables (they all run the generic code
+  object), `gfx1170` for gfx1170. The sweep Makefile defaults to
+  `gfx11-generic` / `-O2`; pass `OFFLOAD=--offload-arch=gfx1170` for the
+  gfx1170 table, and give `update_lut.py --arch` the chip the sweep ran on. A
+  different clang can reorder the winning configs (this cost 20-30x on prefill v7
+  once), and a gfx1151-target build gives every kernel a 1536-entry VGPR file the
+  product does not have, so a table swept on either is confidently wrong.
+  Re-measure after a compiler bump.
 - **Stamp kernel changes.** Bump the kernel's entry in
   `gqa_autotune_sweep.cpp :: kKernelVersions` in the same commit as the kernel change
-  (this marks old readings stale), and re-measure. Bump `kGqaKernelAbi` (`gqa-v3`) in
-  `gqa_autotune.h` when a config's *meaning* changes, so a stale shipped `.fb` is
-  rejected rather than misread.
+  (this marks old readings stale), and re-measure. Bump `kKernelAbi` (`gqa-v4`) in
+  `gqa_autotune.cpp` (and `KERNEL_ABI` in `update_lut.py`) when a config's *meaning*
+  changes, so a stale shipped `.fb` is rejected rather than misread.
 
 | Change | Bump | Costs |
 |---|---|---|
 | A kernel's tiles, inner loop, or candidate set | its `kKernelVersions` entry | remeasure that kernel |
-| A config knob's meaning | `kGqaKernelAbi` (+ `kSchemaVersion` on a layout change) | shipped `.fb` is rejected, not misread |
+| A config knob's meaning | `kKernelAbi` (+ `kSchemaVersion` on a layout change) | shipped `.fb` is rejected, not misread |
 | A new arch / ROCm version | — | loader checks `gpu_arch`; ROCm mismatch only warns |
 
 `test/runtime/test_gqa_autotune.cpp` links the real embedded `.fb` and drives this

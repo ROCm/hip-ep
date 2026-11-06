@@ -16,9 +16,28 @@
 #include "mlir/Dialect/Bufferization/Transforms/BufferViewFlowAnalysis.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/Builders.h"
+#include "llvm/Support/MathExtras.h"
 
 namespace mlir {
 namespace hip {
+
+/// Whether static strides describe one flat run. Unit dimensions span no
+/// distance, so their strides do not affect contiguity.
+inline bool isContiguousRowMajor(ArrayRef<int64_t> shape,
+                                 ArrayRef<int64_t> strides) {
+  if (shape.size() != strides.size())
+    return false;
+  int64_t expected = 1;
+  for (auto [extent, stride] : llvm::reverse(llvm::zip(shape, strides))) {
+    if (extent < 0)
+      return false;
+    if (extent == 1)
+      continue;
+    if (stride != expected || llvm::MulOverflow(expected, extent, expected))
+      return false;
+  }
+  return true;
+}
 
 /// Byte size for a fully-static memref type; returns 0 when any dim is dynamic.
 /// A sub-byte element such as i1 occupies one byte. Runtime kernels store one

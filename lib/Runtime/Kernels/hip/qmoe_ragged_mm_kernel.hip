@@ -304,7 +304,7 @@ __device__ __forceinline__ void qmoe_gemv_task(
     const uint8_t* weights, const _Float16* scales,
     const uint8_t* zero_points, const _Float16* bias, _Float16* output,
     int N, int K, int block_size, int row_begin, int row_count, int n_begin,
-    int weight_row_bytes, int k_blocks) {
+    int weight_row_bytes, int k_blocks, int bits) {
   const int tid = static_cast<int>(threadIdx.x);
   const int wave = tid / 32;
   const int lane = tid & 31;
@@ -328,14 +328,21 @@ __device__ __forceinline__ void qmoe_gemv_task(
         a_sum += a_values[i];
       }
 
-      uint4 packed[kGemvTileN];
+      uint4 packed_u4[kGemvTileN];
+      uint2 packed_u2[kGemvTileN];
       float scale_values[kGemvTileN];
 #pragma unroll
       for (int tn = 0; tn < kGemvTileN; ++tn) {
         const int n = wave_n_begin + tn;
         const int safe_n = n < N ? n : 0;
-        packed[tn] = *reinterpret_cast<const uint4*>(
-            weights + static_cast<size_t>(safe_n) * weight_row_bytes + k32 / 2);
+        const uint8_t* packed =
+            weights + static_cast<size_t>(safe_n) * weight_row_bytes;
+        if (bits == 2)
+          packed_u2[tn] =
+              *reinterpret_cast<const uint2*>(packed + k32 / 4);
+        else
+          packed_u4[tn] =
+              *reinterpret_cast<const uint4*>(packed + k32 / 2);
         scale_values[tn] = static_cast<float>(
             scales[static_cast<size_t>(safe_n) * k_blocks + group]);
       }
@@ -343,32 +350,47 @@ __device__ __forceinline__ void qmoe_gemv_task(
 #pragma unroll
       for (int tn = 0; tn < kGemvTileN; ++tn) {
         float dot = 0.0f;
+        if (bits == 2) {
 #pragma unroll
-        for (int i = 0; i < 8; ++i)
-          dot = __fmaf_rn(a_values[i],
-                          static_cast<float>((packed[tn].x >> (i * 4)) & 15u),
+          for (int i = 0; i < 16; ++i)
+            dot = __fmaf_rn(
+                a_values[i],
+                static_cast<float>((packed_u2[tn].x >> (i * 2)) & 3u), dot);
+#pragma unroll
+          for (int i = 0; i < 16; ++i)
+            dot = __fmaf_rn(
+                a_values[16 + i],
+                static_cast<float>((packed_u2[tn].y >> (i * 2)) & 3u), dot);
+        } else {
+#pragma unroll
+          for (int i = 0; i < 8; ++i)
+            dot =
+                __fmaf_rn(a_values[i],
+                          static_cast<float>(
+                              (packed_u4[tn].x >> (i * 4)) & 15u),
                           dot);
 #pragma unroll
-        for (int i = 0; i < 8; ++i)
-          dot = __fmaf_rn(a_values[8 + i],
-                          static_cast<float>((packed[tn].y >> (i * 4)) & 15u),
-                          dot);
+          for (int i = 0; i < 8; ++i)
+            dot = __fmaf_rn(
+                a_values[8 + i],
+                static_cast<float>((packed_u4[tn].y >> (i * 4)) & 15u), dot);
 #pragma unroll
-        for (int i = 0; i < 8; ++i)
-          dot = __fmaf_rn(a_values[16 + i],
-                          static_cast<float>((packed[tn].z >> (i * 4)) & 15u),
-                          dot);
+          for (int i = 0; i < 8; ++i)
+            dot = __fmaf_rn(
+                a_values[16 + i],
+                static_cast<float>((packed_u4[tn].z >> (i * 4)) & 15u), dot);
 #pragma unroll
-        for (int i = 0; i < 8; ++i)
-          dot = __fmaf_rn(a_values[24 + i],
-                          static_cast<float>((packed[tn].w >> (i * 4)) & 15u),
-                          dot);
+          for (int i = 0; i < 8; ++i)
+            dot = __fmaf_rn(
+                a_values[24 + i],
+                static_cast<float>((packed_u4[tn].w >> (i * 4)) & 15u), dot);
+        }
         const int n = wave_n_begin + tn;
         const int safe_n = n < N ? n : 0;
         const float zp = zero_points
             ? static_cast<float>(zero_points[
                   static_cast<size_t>(safe_n) * k_blocks + group])
-            : 8.0f;
+            : bits == 2 ? 2.0f : 8.0f;
         partial[tn] += (dot - a_sum * zp) * scale_values[tn];
       }
     }
@@ -387,23 +409,37 @@ __device__ __forceinline__ void qmoe_gemv_task(
       for (int tn = 0; tn < kGemvTileN; ++tn) {
         const int n = wave_n_begin + tn;
         const int safe_n = n < N ? n : 0;
-        const uint2 packed = *reinterpret_cast<const uint2*>(
-            weights + static_cast<size_t>(safe_n) * weight_row_bytes + k16 / 2);
         float dot = 0.0f;
+        const uint8_t* packed =
+            weights + static_cast<size_t>(safe_n) * weight_row_bytes;
+        if (bits == 2) {
+          const uint32_t packed_u2 =
+              *reinterpret_cast<const uint32_t*>(packed + k16 / 4);
 #pragma unroll
-        for (int i = 0; i < 8; ++i)
-          dot = __fmaf_rn(a_values[i],
-                          static_cast<float>((packed.x >> (i * 4)) & 15u), dot);
+          for (int i = 0; i < 16; ++i)
+            dot =
+                __fmaf_rn(a_values[i],
+                          static_cast<float>((packed_u2 >> (i * 2)) & 3u), dot);
+        } else {
+          const uint2 packed_u4 =
+              *reinterpret_cast<const uint2*>(packed + k16 / 2);
 #pragma unroll
-        for (int i = 0; i < 8; ++i)
-          dot = __fmaf_rn(a_values[8 + i],
-                          static_cast<float>((packed.y >> (i * 4)) & 15u), dot);
+          for (int i = 0; i < 8; ++i)
+            dot = __fmaf_rn(
+                a_values[i],
+                static_cast<float>((packed_u4.x >> (i * 4)) & 15u), dot);
+#pragma unroll
+          for (int i = 0; i < 8; ++i)
+            dot = __fmaf_rn(
+                a_values[8 + i],
+                static_cast<float>((packed_u4.y >> (i * 4)) & 15u), dot);
+        }
         const float scale = static_cast<float>(
             scales[static_cast<size_t>(safe_n) * k_blocks + group]);
         const float zp = zero_points
             ? static_cast<float>(zero_points[
                   static_cast<size_t>(safe_n) * k_blocks + group])
-            : 8.0f;
+            : bits == 2 ? 2.0f : 8.0f;
         partial[tn] += (dot - a_sum * zp) * scale;
       }
     }
@@ -416,16 +452,18 @@ __device__ __forceinline__ void qmoe_gemv_task(
       for (int tn = 0; tn < kGemvTileN; ++tn) {
         const int n = wave_n_begin + tn;
         const int safe_n = n < N ? n : 0;
-        const uint8_t packed = weights[
-            static_cast<size_t>(safe_n) * weight_row_bytes + k / 2];
+        const uint8_t packed =
+            weights[static_cast<size_t>(safe_n) * weight_row_bytes +
+                    (k * bits) / 8];
+        const unsigned shift = static_cast<unsigned>((k * bits) & 7);
         const float q = static_cast<float>(
-            (k & 1) ? (packed >> 4) : (packed & 15u));
+            (packed >> shift) & static_cast<uint8_t>((1u << bits) - 1u));
         const float scale = static_cast<float>(
             scales[static_cast<size_t>(safe_n) * k_blocks + group]);
         const float zp = zero_points
             ? static_cast<float>(zero_points[
                   static_cast<size_t>(safe_n) * k_blocks + group])
-            : 8.0f;
+            : bits == 2 ? 2.0f : 8.0f;
         partial[tn] = __fmaf_rn(a, (q - zp) * scale, partial[tn]);
       }
     }
@@ -476,6 +514,7 @@ void qmoe_ragged_matmul_nbits_adaptive_kernel(
     int64_t num_experts,
     int64_t N,
     int64_t K,
+    int64_t bits,
     int64_t block_size,
     int gemv_max_rows,
     int wmma16_max_rows) {
@@ -524,13 +563,16 @@ void qmoe_ragged_matmul_nbits_adaptive_kernel(
     const int expert = groups[group_id * 4 + 0];
     const int row_begin = groups[group_id * 4 + 1];
     const int row_count = groups[group_id * 4 + 2];
-    const int task_kind = select_ragged_task_kind(
-        row_count, gemv_max_rows, wmma16_max_rows);
+    const int task_kind =
+        bits == 2 ? kTaskGemv
+                  : select_ragged_task_kind(row_count, gemv_max_rows,
+                                            wmma16_max_rows);
     const int n_begin = n_tile * kColsPerBlock;
     const bool valid_expert = expert >= 0 && expert < num_experts;
 
     const int k_blocks = static_cast<int>((K + block_size - 1) / block_size);
-    const int weight_row_bytes = k_blocks * static_cast<int>(block_size / 2);
+    const int weight_row_bytes =
+        static_cast<int>((K * bits + 7) / 8);
     if (valid_expert) {
       const size_t expert_cols = static_cast<size_t>(expert) * N;
       const uint8_t* expert_weights =
@@ -545,7 +587,7 @@ void qmoe_ragged_matmul_nbits_adaptive_kernel(
                         expert_zeros, expert_bias, output, static_cast<int>(N),
                         static_cast<int>(K), static_cast<int>(block_size),
                         row_begin, row_count, n_begin, weight_row_bytes,
-                        k_blocks);
+                        k_blocks, static_cast<int>(bits));
       } else if (task_kind == kTaskWmma16) {
         qmoe_wmma16_task(
             input, input_row_ids, expert_weights, expert_scales, expert_zeros,
@@ -681,7 +723,7 @@ hipError_t launch_ragged_matmul_nbits(
     const void* row_groups, const void* row_group_count, void* queue_head,
     const void* weights, const void* scales, const void* zero_points_u8,
     const void* bias, void* output, int64_t total_rows, int64_t num_experts,
-    int64_t N, int64_t K, int64_t block_size, int grid_blocks,
+    int64_t N, int64_t K, int64_t bits, int64_t block_size, int grid_blocks,
     int gemv_max_rows, int wmma16_max_rows) {
   hipLaunchKernelGGL(
       qmoe_ragged_matmul_nbits_adaptive_kernel<QueuePolicy>,
@@ -695,60 +737,110 @@ hipError_t launch_ragged_matmul_nbits(
       static_cast<const _Float16 *>(scales),
       static_cast<const uint8_t *>(zero_points_u8),
       static_cast<const _Float16 *>(bias), static_cast<_Float16 *>(output),
-      total_rows, num_experts, N, K, block_size, gemv_max_rows,
+      total_rows, num_experts, N, K, bits, block_size, gemv_max_rows,
       wmma16_max_rows);
   return hipGetLastError();
 }
 
-__global__ void qmoe_reduce_sorted_pairs_kernel(
+constexpr int kReduceBlock = 128;
+
+template <int kVec>
+struct alignas(2 * kVec) HalfVec {
+  __half h[kVec];
+};
+
+// One block per token. Contributions are accumulated in ascending expert-id
+// order (ties to the lower slot; INT32_MAX ids are skipped), with an fp16
+// round after every contribution, to match the host loop this replaced. The
+// order is resolved once per token into LDS; each thread then sums kVec
+// contiguous columns, issuing all k row loads before the first add.
+template <int kVec>
+__global__ void __launch_bounds__(kReduceBlock) qmoe_reduce_sorted_pairs_kernel(
     const __half *__restrict__ sorted_expert_output,
     const int32_t *__restrict__ pair_to_sorted,
     const int32_t *__restrict__ expert_indices,
     const __half *__restrict__ expert_weights,
+    const float *__restrict__ row_scale,
+    const __half *__restrict__ fc2_bias,
     __half *__restrict__ output,
     int64_t num_tokens,
     int64_t width,
     int k) {
-  const int64_t idx =
-      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (idx >= num_tokens * width) {
-    return;
-  }
+  __shared__ int64_t s_row_base[kMaxTopK];
+  __shared__ float s_weight[kMaxTopK];
+  __shared__ float s_scale[kMaxTopK];
+  __shared__ int64_t s_bias_base[kMaxTopK];
+  __shared__ int s_count;
 
-  const int64_t token = idx / width;
-  const int64_t col = idx - token * width;
-  uint32_t used = 0;
-  __half accum = __float2half(0.0f);
-
-  // Match the old host loop: contributions are accumulated in ascending
-  // expert-id order, with an fp16 store/round after every contribution.
-  for (int rank = 0; rank < k; ++rank) {
-    int best_slot = -1;
-    int32_t best_expert = INT32_MAX;
+  const int64_t token = blockIdx.x;
+  const int tid = static_cast<int>(threadIdx.x);
+  const int32_t *ids = expert_indices + token * k;
+  if (tid < k) {
+    const int32_t expert = ids[tid];
+    int rank = 0;
     for (int slot = 0; slot < k; ++slot) {
-      if ((used & (1u << slot)) != 0) {
-        continue;
-      }
-      const int32_t expert = expert_indices[token * k + slot];
-      if (expert < best_expert) {
-        best_expert = expert;
-        best_slot = slot;
-      }
+      const int32_t other = ids[slot];
+      rank += other < expert || (other == expert && slot < tid);
     }
-    if (best_slot < 0) {
-      break;
+    if (expert != INT32_MAX) {
+      const int32_t sorted_row = pair_to_sorted[token * k + tid];
+      s_row_base[rank] = static_cast<int64_t>(sorted_row) * width;
+      s_weight[rank] = static_cast<float>(expert_weights[token * k + tid]);
+      s_scale[rank] = row_scale ? row_scale[sorted_row] : 1.0f;
+      s_bias_base[rank] = static_cast<int64_t>(expert) * width;
     }
-    used |= 1u << best_slot;
-    const int64_t pair = token * k + best_slot;
-    const int32_t sorted_row = pair_to_sorted[pair];
-    const float old_value = static_cast<float>(accum);
-    const float weight = static_cast<float>(expert_weights[pair]);
-    const float value =
-        static_cast<float>(sorted_expert_output[
-            static_cast<int64_t>(sorted_row) * width + col]);
-    accum = __float2half(old_value + weight * value);
   }
-  output[idx] = accum;
+  if (tid == 0) {
+    int valid = 0;
+    for (int slot = 0; slot < k; ++slot) valid += ids[slot] != INT32_MAX;
+    s_count = valid;
+  }
+  __syncthreads();
+
+  using Vec = HalfVec<kVec>;
+  const int n = s_count;
+  const int64_t vec_cols = width / kVec;
+  __half *out_row = output + token * width;
+  for (int64_t c = tid; c < vec_cols; c += kReduceBlock) {
+    Vec v[kMaxTopK];
+#pragma unroll
+    for (int r = 0; r < kMaxTopK; ++r) {
+      if (r < n)
+        v[r] = *reinterpret_cast<const Vec *>(sorted_expert_output +
+                                              s_row_base[r] + c * kVec);
+    }
+    Vec acc;
+#pragma unroll
+    for (int j = 0; j < kVec; ++j) acc.h[j] = __float2half(0.0f);
+#pragma unroll
+    for (int r = 0; r < kMaxTopK; ++r) {
+      // continue, not break: an early exit stops the full unroll and moves v
+      // to scratch memory.
+      if (r >= n) continue;
+      const float weight = s_weight[r];
+      const float s = s_scale[r];
+      float value[kVec];
+#pragma unroll
+      for (int j = 0; j < kVec; ++j) value[j] = static_cast<float>(v[r].h[j]);
+      // The fc2 GEMM saw act / s and no bias, so the true value is s * v + b.
+      // Adding b after the rescale keeps a large bias from swamping v's fp16
+      // mantissa. s is a power of two and uniform across the block.
+      if (s != 1.0f) {
+#pragma unroll
+        for (int j = 0; j < kVec; ++j) value[j] *= s;
+      }
+      if (fc2_bias) {
+        const Vec b = *reinterpret_cast<const Vec *>(fc2_bias +
+                                                     s_bias_base[r] + c * kVec);
+#pragma unroll
+        for (int j = 0; j < kVec; ++j) value[j] += static_cast<float>(b.h[j]);
+      }
+#pragma unroll
+      for (int j = 0; j < kVec; ++j)
+        acc.h[j] = __float2half(static_cast<float>(acc.h[j]) + weight * value[j]);
+    }
+    *reinterpret_cast<Vec *>(out_row + c * kVec) = acc;
+  }
 }
 
 } // namespace
@@ -794,7 +886,8 @@ extern "C" int hip_qmoe_ragged_matmul_nbits(
     const void *row_groups, const void *row_group_count, void *queue_head,
     const void *weights, const void *scales, const void *zero_points_u8,
     const void *bias, void *output, int64_t total_rows, int64_t num_experts,
-    int64_t N, int64_t K, int64_t block_size, int64_t element_size_bytes) {
+    int64_t N, int64_t K, int64_t bits, int64_t block_size,
+    int64_t element_size_bytes) {
   if (!stream || !input || !row_groups || !row_group_count || !queue_head ||
       !weights || !scales || !output) {
     fprintf(stderr,
@@ -807,10 +900,21 @@ extern "C" int hip_qmoe_ragged_matmul_nbits(
             "[custom_kernels] hip_qmoe_ragged_matmul_nbits: fp16 only\n");
     return -1;
   }
-  if (total_rows <= 0 || num_experts <= 0 || N <= 0 || K <= 0 ||
-      block_size <= 0 || (block_size & 1) != 0) {
+  if (bits != 2 && bits != 4) {
+    fprintf(stderr,
+            "[custom_kernels] hip_qmoe_ragged_matmul_nbits: bits must be 2 "
+            "or 4\n");
+    return -1;
+  }
+  if (total_rows <= 0 || num_experts <= 0 || N <= 0 || K <= 0) {
     fprintf(stderr,
             "[custom_kernels] hip_qmoe_ragged_matmul_nbits: invalid shape\n");
+    return -1;
+  }
+  if (block_size < 32 || (block_size & (block_size - 1)) != 0) {
+    fprintf(stderr,
+            "[custom_kernels] hip_qmoe_ragged_matmul_nbits: block_size must "
+            "be a power of two and at least 32\n");
     return -1;
   }
   if (hipdnn_device_is_wave64()) {
@@ -838,35 +942,35 @@ extern "C" int hip_qmoe_ragged_matmul_nbits(
       err = launch_ragged_matmul_nbits<RaggedQueuePolicy::kAtomic1>(
           hip_stream, input, input_row_ids, row_groups, row_group_count,
           queue_head, weights, scales, zero_points_u8, bias, output, total_rows,
-          num_experts, N, K, block_size, config.grid_blocks,
+          num_experts, N, K, bits, block_size, config.grid_blocks,
           task_policy.gemv_max_rows, task_policy.wmma16_max_rows);
       break;
     case RaggedQueuePolicy::kChunk2:
       err = launch_ragged_matmul_nbits<RaggedQueuePolicy::kChunk2>(
           hip_stream, input, input_row_ids, row_groups, row_group_count,
           queue_head, weights, scales, zero_points_u8, bias, output, total_rows,
-          num_experts, N, K, block_size, config.grid_blocks,
+          num_experts, N, K, bits, block_size, config.grid_blocks,
           task_policy.gemv_max_rows, task_policy.wmma16_max_rows);
       break;
     case RaggedQueuePolicy::kChunk4:
       err = launch_ragged_matmul_nbits<RaggedQueuePolicy::kChunk4>(
           hip_stream, input, input_row_ids, row_groups, row_group_count,
           queue_head, weights, scales, zero_points_u8, bias, output, total_rows,
-          num_experts, N, K, block_size, config.grid_blocks,
+          num_experts, N, K, bits, block_size, config.grid_blocks,
           task_policy.gemv_max_rows, task_policy.wmma16_max_rows);
       break;
     case RaggedQueuePolicy::kChunk8:
       err = launch_ragged_matmul_nbits<RaggedQueuePolicy::kChunk8>(
           hip_stream, input, input_row_ids, row_groups, row_group_count,
           queue_head, weights, scales, zero_points_u8, bias, output, total_rows,
-          num_experts, N, K, block_size, config.grid_blocks,
+          num_experts, N, K, bits, block_size, config.grid_blocks,
           task_policy.gemv_max_rows, task_policy.wmma16_max_rows);
       break;
     case RaggedQueuePolicy::kGridStride:
       err = launch_ragged_matmul_nbits<RaggedQueuePolicy::kGridStride>(
           hip_stream, input, input_row_ids, row_groups, row_group_count,
           queue_head, weights, scales, zero_points_u8, bias, output, total_rows,
-          num_experts, N, K, block_size, config.grid_blocks,
+          num_experts, N, K, bits, block_size, config.grid_blocks,
           task_policy.gemv_max_rows, task_policy.wmma16_max_rows);
       break;
   }
@@ -882,8 +986,9 @@ extern "C" int hip_qmoe_ragged_matmul_nbits(
 extern "C" int hip_qmoe_reduce_sorted_pairs(
     void *stream, const void *sorted_expert_output,
     const void *pair_to_sorted, const void *expert_indices,
-    const void *expert_weights, void *output, int64_t num_tokens,
-    int64_t width, int64_t k, int64_t element_size_bytes) {
+    const void *expert_weights, const void *row_scale, const void *fc2_bias,
+    void *output, int64_t num_tokens, int64_t width, int64_t k,
+    int64_t element_size_bytes) {
   if (!stream || !sorted_expert_output || !pair_to_sorted ||
       !expert_indices || !expert_weights || !output) {
     fprintf(stderr,
@@ -899,17 +1004,37 @@ extern "C" int hip_qmoe_reduce_sorted_pairs(
     return -1;
   }
 
-  constexpr int block = 256;
-  const int64_t elems = num_tokens * width;
-  const int grid = static_cast<int>((elems + block - 1) / block);
+  // 16-byte row loads need 8-column rows and 16-byte aligned base pointers.
+  const bool vec8 =
+      width % 8 == 0 &&
+      ((reinterpret_cast<uintptr_t>(sorted_expert_output) |
+        reinterpret_cast<uintptr_t>(output) |
+        reinterpret_cast<uintptr_t>(fc2_bias)) &
+       15) == 0;
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
-  hipLaunchKernelGGL(
-      qmoe_reduce_sorted_pairs_kernel, dim3(grid), dim3(block), 0, hip_stream,
-      static_cast<const __half *>(sorted_expert_output),
-      static_cast<const int32_t *>(pair_to_sorted),
-      static_cast<const int32_t *>(expert_indices),
-      static_cast<const __half *>(expert_weights),
-      static_cast<__half *>(output), num_tokens, width, static_cast<int>(k));
+  const dim3 grid(static_cast<unsigned>(num_tokens));
+  (void)hipGetLastError();
+  if (vec8) {
+    hipLaunchKernelGGL(
+        qmoe_reduce_sorted_pairs_kernel<8>, grid, dim3(kReduceBlock), 0,
+        hip_stream, static_cast<const __half *>(sorted_expert_output),
+        static_cast<const int32_t *>(pair_to_sorted),
+        static_cast<const int32_t *>(expert_indices),
+        static_cast<const __half *>(expert_weights),
+        static_cast<const float *>(row_scale),
+        static_cast<const __half *>(fc2_bias), static_cast<__half *>(output),
+        num_tokens, width, static_cast<int>(k));
+  } else {
+    hipLaunchKernelGGL(
+        qmoe_reduce_sorted_pairs_kernel<1>, grid, dim3(kReduceBlock), 0,
+        hip_stream, static_cast<const __half *>(sorted_expert_output),
+        static_cast<const int32_t *>(pair_to_sorted),
+        static_cast<const int32_t *>(expert_indices),
+        static_cast<const __half *>(expert_weights),
+        static_cast<const float *>(row_scale),
+        static_cast<const __half *>(fc2_bias), static_cast<__half *>(output),
+        num_tokens, width, static_cast<int>(k));
+  }
 
   hipError_t err = hipGetLastError();
   if (err != hipSuccess) {

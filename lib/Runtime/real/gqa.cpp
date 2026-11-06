@@ -7,11 +7,11 @@
 // GQA runtime wrapper (self-contained: optimized fused fast path + legacy
 // decomposed hipBLASLt fallback).
 //
-// The generated IR calls `wrap_group_query_attention` (42-arg ABI, kept in
-// lockstep with the HipToLLVM lowering so the symbol keeps resolving). Path
-// selection:
+// The generated IR calls `wrap_group_query_attention_host_length`, or
+// `wrap_group_query_attention_ring_f16` for proven FP16 Ring candidates.
+// Path selection:
 //
-//   * Common fp16 causal GQA (head_dim in {64,128,256}, templated decode
+//   * Common fp16 causal GQA (head_dim in {64,96,128,256}, templated decode
 //     geometry) -> optimized fused custom kernels:
 //       prefill (sq > 1): [split] -> [rope] -> kv-cache update ->
 //                         hip_gqa_flash_prefill
@@ -22,8 +22,9 @@
 //     max(0, total_seq - window) in the split kernel and folds the sink into
 //     the reduce denominator, and it autotunes (impl, split-count) per shape --
 //     keying sliding layers on the window rather than the full context. Prefill
-//     applies sinks and sliding windows through hip_gqa_flash_prefill for
-//     head_dim == 64; unsupported prefill geometries route to decomposed.
+//     applies sinks through hip_gqa_flash_prefill for head_dim 64 and 96, and
+//     sliding windows for head_dim 64, 96 and 128; unsupported prefill
+//     geometries route to decomposed.
 //
 //   * Everything else the fused kernels do not implement (fp32, no_causal /
 //     bidirectional, additive attention bias, other head_dim, untemplated
@@ -70,6 +71,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -120,9 +122,9 @@ static bool gqa_cache_seqlens_enabled() {
 // they already implement.
 static constexpr int32_t kSeqlensKNotRead = -2;
 
-// Read seqlens_k_val from device (or the per-Compute() cache when
-// HIPDNN_EP_GQA_CACHE_SEQLENS=1) once per call before the fused/decomposed
-// dispatch decision. Two purposes:
+// Read seqlens_k_val from device (or the per-Compute() cache, which is on
+// unless HIPDNN_EP_GQA_CACHE_SEQLENS=0) once per call before the
+// fused/decomposed dispatch decision. Two purposes:
 //   1. Give the smart-dispatch heuristic access to total_seq for the decode
 //      case (sq == 1) so it can compare against gqa_fused_decode_max_t().
 //   2. Populate the per-Compute() cache for B == 1 so subsequent GQA layers
@@ -144,9 +146,15 @@ static constexpr int32_t kSeqlensKNotRead = -2;
 // (total_seq - 1).
 static int32_t read_seqlens_k_for_dispatch(hipStream_t stream,
                                            const void *seqlens_k_ptr, int64_t B,
-                                           RuntimeState *state) {
+                                           RuntimeState *state,
+                                           std::optional<int32_t> host_length) {
   if (!seqlens_k_ptr || B != 1)
     return kSeqlensKNotRead;
+
+  // This value is local to the call. Do not read or update the pointer cache.
+  // The compiler proves that the buffer contains the same value.
+  if (host_length)
+    return *host_length;
 
   if (gqa_cache_seqlens_enabled() && state && state->seqlens_k_cached_valid &&
       state->seqlens_k_cached_ptr == seqlens_k_ptr)
@@ -171,21 +179,25 @@ static int32_t read_seqlens_k_for_dispatch(hipStream_t stream,
 static constexpr int kFlashDecodeMaxSplits = 64;
 
 // Geometry gate for the flash_decode kernel template instantiations. The scalar
-// decode kernel is templated for HpG in {1,2,3,4,5,8,16} (so it covers MHA and
-// the common GQA ratios, incl. Qwen2.5-14B's 40:8=5) at d in {64,128,256}
-// (d=256 covers Qwen3-family 16:4 heads); WMMA is layered on top inside the
-// kernel where it helps (d<=128 only). Anything outside this set has no decode
-// kernel.
+// decode kernel is templated for HpG in {1,2,3,4,5,6,8,16} and 9 at d=128 (so
+// it covers MHA and the common GQA ratios, incl. Qwen2.5-14B's 40:8=5 and the
+// Qwen3.6/3.8-27B 24:4=6) at d in {64,96,128,256} (d=96 covers Phi-3-mini
+// 32:32, d=256 Qwen3-family 16:4 heads); WMMA is layered on top inside the
+// kernel where it helps (d 64/128 only). Anything outside this set has no
+// decode kernel.
 static inline bool flash_decode_geometry_ok(int64_t H, int64_t G, int64_t d) {
   if (G <= 0)
     return false;
-  if (d != 64 && d != 128 && d != 256)
+  if (d != 64 && d != 96 && d != 128 && d != 256)
     return false;
   int64_t hpg = H / G;
   if (hpg * G != H)
     return false;
-  return hpg == 1 || hpg == 2 || hpg == 3 || hpg == 4 || hpg == 5 || hpg == 8 ||
-         hpg == 16;
+  // HpG=9 is instantiated at d=128 only.
+  if (hpg == 9)
+    return d == 128;
+  return hpg == 1 || hpg == 2 || hpg == 3 || hpg == 4 || hpg == 5 || hpg == 6 ||
+         hpg == 8 || hpg == 16;
 }
 
 // Logical storage format of the KV cache the fused path must read/write. This
@@ -213,6 +225,30 @@ static inline int kv_dtype_abi(KvCacheFormat f) {
   }
 }
 
+// Granule the sliding-window write-skip is rounded down to. The windowed v6x
+// prefill loads whole BKV-key tiles from floor(lo / BKV) * BKV, so the keys of
+// its first tile below lo are masked but still read, and a masked key still
+// multiplies its V row by 0, which keeps a NaN a NaN. Every windowed v6x BKV
+// (32, 64) divides this, so a tile never straddles the write bound.
+constexpr int64_t kWindowCopyAlign = 64;
+
+// First past position a sliding-window call (window > 0) copies into a
+// separate present buffer. A call's query rows sit at [past_len, past_len +
+// sq), so the oldest key any of them attends to is past_len - window + 1, the
+// same bound the decode kernels clamp kv_lo to and the decomposed pipeline
+// narrows its GEMMs to. Rounding it down covers the v6x tile reads above.
+//
+// It holds across calls too: the next call has a larger past_len, so its bound
+// is at least this one, and whichever path serves it -- fused or decomposed,
+// prefill or decode -- reads only what this call wrote. Every separate-buffer
+// concat of a windowed call must take its bound from here for that to hold.
+static int64_t window_copy_lo(int64_t past_len, int64_t window) {
+  if (window <= 0)
+    return 0;
+  const int64_t lo = past_len - window + 1;
+  return lo > 0 ? lo / kWindowCopyAlign * kWindowCopyAlign : 0;
+}
+
 //===----------------------------------------------------------------------===//
 // KV cache update: concat past+new, append new tokens in place, or (no_causal)
 // the bidirectional copy/append branch used by the decomposed pipeline.
@@ -234,12 +270,11 @@ static inline int kv_dtype_abi(KvCacheFormat f) {
 //
 // copy_lo bounds the separate-buffer concat from below: past positions
 // [0, copy_lo) are not copied into present and are left whatever the allocator
-// held. It exists for the one caller that can prove it will not read them back
-// -- a sliding-window layer at decode passes the same lower bound it scores
-// from -- and must be 0 for everyone else. It is required rather than defaulted
-// so that a new call site has to say which it is. The append branches ignore
-// it: they only ever write the new tokens, and an in-place cache has no prefix
-// to copy in the first place.
+// held. A sliding-window call passes window_copy_lo() below, which no read of
+// this call or any later one goes beneath; everyone else passes 0. It is
+// required rather than defaulted so that a new call site has to say which it
+// is. The append branches ignore it: they only ever write the new tokens, and
+// an in-place cache has no prefix to copy in the first place.
 static int update_kv_cache(hipStream_t stream, const void *past_key,
                            const void *past_value, const void *new_key,
                            const void *new_value, void *present_key,
@@ -336,6 +371,108 @@ static int update_kv_cache(hipStream_t stream, const void *past_key,
 //===----------------------------------------------------------------------===//
 // Fused-only forward: fp16, causal, GQA. No hipBLASLt, no decomposed fallback.
 //===----------------------------------------------------------------------===//
+
+#if HIP_EP_RING_ENABLED != 0
+// Set before starting inference. Only an explicit "1" opts into Ring;
+// compiling the implementation never changes the default GQA selection.
+static bool gqa_ring_requested() {
+  static const bool enabled = [] {
+    const char *value = std::getenv("HIPDNN_EP_USE_RING_ATTENTION");
+    return value && std::strcmp(value, "1") == 0;
+  }();
+  return enabled;
+}
+
+// Return 1 for a valid call outside Ring's context bound, 0 on success, and
+// -1 on failure. Validate every writable range before updating either cache.
+static int gqa_forward_ring(RuntimeState *state, hipStream_t stream,
+                            const void *query, const void *key,
+                            const void *value, const void *past_key,
+                            const void *past_value, const void *seqlens_k,
+                            void *output, void *present_key,
+                            void *present_value, int64_t sq, int64_t capacity,
+                            int64_t past_capacity,
+                            std::optional<int32_t> host_length) {
+  int32_t last =
+      read_seqlens_k_for_dispatch(stream, seqlens_k, 1, state, host_length);
+  if (last < -1) {
+    fprintf(stderr, "Ring GQA: failed or invalid sequence-length read\n");
+    return -1;
+  }
+  int64_t total = last == -1 ? sq : int64_t(last) + 1;
+  int64_t past = total - sq;
+  if (past < 0 || total > capacity || capacity > INT32_MAX ||
+      past_capacity < 0 || past_capacity > INT32_MAX ||
+      (past && (!past_key || !past_value || past > past_capacity)) ||
+      ((past_key == present_key) != (past_value == present_value)) ||
+      (past_key == present_key && past_capacity != capacity)) {
+    fprintf(stderr,
+            "Ring GQA: invalid cache lengths or inconsistent cache aliases\n");
+    return -1;
+  }
+  if (total > HIP_EP_RING_MAX_KV_LENGTH)
+    return 1;
+
+  struct Range {
+    const void *ptr;
+    size_t bytes;
+  };
+  auto overlaps = [](Range a, Range b) {
+    if (!a.ptr || !b.ptr || !a.bytes || !b.bytes)
+      return false;
+    uintptr_t x = reinterpret_cast<uintptr_t>(a.ptr);
+    uintptr_t y = reinterpret_cast<uintptr_t>(b.ptr);
+    if (a.bytes > UINTPTR_MAX - x || b.bytes > UINTPTR_MAX - y)
+      return true;
+    return x < y + b.bytes && y < x + a.bytes;
+  };
+  const size_t qbytes = size_t(sq) * 24 * 256 * 2;
+  const size_t newbytes = size_t(sq) * 4 * 256 * 2;
+  const size_t cachebytes = size_t(capacity) * 4 * 256 * 2;
+  const size_t pastbytes = size_t(past_capacity) * 4 * 256 * 2;
+  Range q{query, qbytes}, k{key, newbytes}, v{value, newbytes},
+      o{output, qbytes};
+  Range pk{present_key, cachebytes}, pv{present_value, cachebytes};
+  Range oldk{past_key, pastbytes}, oldv{past_value, pastbytes};
+  bool invalid = overlaps(pk, pv) || overlaps(pk, oldv) || overlaps(pv, oldk) ||
+                 (past_key != present_key && overlaps(pk, oldk)) ||
+                 (past_value != present_value && overlaps(pv, oldv));
+  for (Range input : {q, k, v, o})
+    invalid |= overlaps(pk, input) || overlaps(pv, input);
+  for (Range input : {q, k, v, oldk, oldv})
+    invalid |= overlaps(o, input);
+  if (invalid) {
+    fprintf(stderr, "Ring GQA: overlapping input/output/cache buffers\n");
+    return -1;
+  }
+  const size_t bytes = hip_gqa_ring_workspace(int(sq), int(total));
+  if (bytes && hipdnn_ep_state_ensure_workspace(state, bytes) != 0)
+    return -1;
+  void *workspace = bytes ? hipdnn_ep_state_get_workspace(state) : nullptr;
+  if (bytes && !workspace)
+    return -1;
+  for (Range input : {q, k, v, o, pk, pv, oldk, oldv}) {
+    if (overlaps({workspace, bytes}, input)) {
+      fprintf(stderr, "Ring GQA: workspace overlaps an input or output\n");
+      return -1;
+    }
+  }
+  // Pass the validated host length to the same cache-update helper used by
+  // existing GQA; append exactly once and avoid a second device length read.
+  if (update_kv_cache(stream, past_key, past_value, key, value, present_key,
+                      present_value, 1, int(past), int(sq), 4, 256,
+                      int(past_capacity), int(capacity), nullptr, 2, 0) != 0)
+    return -1;
+  RUNTIME_DEBUG_LOG("[REAL] Ring GQA q=%lld past=%lld capacity=%lld\n",
+                    (long long)sq, (long long)past, (long long)capacity);
+  return hip_gqa_ring_attention(stream, query, present_key, present_value,
+                                output, int(sq), int(past), int(capacity),
+                                workspace, bytes) == 0
+             ? 0
+             : -1;
+}
+#endif
+
 static int gqa_forward_fused(
     RuntimeState *state, hipStream_t stream,
     const void *query,    // BSHD [B, sq, H, d] or packed [B, sq, (H+2G)*d]
@@ -349,7 +486,14 @@ static int gqa_forward_fused(
     const void *k_scale = nullptr, const void *v_scale = nullptr,
     KvCacheFormat kv_format = KvCacheFormat::Fp16,
     const void *head_sink = nullptr, bool use_smooth_softmax = false,
-    int local_window_size = -1) {
+    int local_window_size = -1,
+    std::optional<int32_t> host_length = std::nullopt,
+    // [key_bias_batch, key_bias_len] fp16 per-key additive bias, or null.
+    const void *key_bias = nullptr, int64_t key_bias_batch = 0,
+    int64_t key_bias_len = 0) {
+  // One row per batch entry, or one row shared by all of them.
+  const int key_bias_stride =
+      key_bias && key_bias_batch > 1 ? static_cast<int>(key_bias_len) : 0;
 
   // Any non-fp16 cache reads/writes quantized bytes on the concat/append/decode
   // path; the specific scheme is carried by kv_format (extensible to INT4/FP8).
@@ -361,7 +505,7 @@ static int gqa_forward_fused(
 
   // B==1 pre-read (cached per Compute) feeds host past_len where needed.
   const int32_t seqlens_k_pre =
-      read_seqlens_k_for_dispatch(stream, seqlens_k_ptr, B, state);
+      read_seqlens_k_for_dispatch(stream, seqlens_k_ptr, B, state, host_length);
 
   const size_t Q_full_bytes = static_cast<size_t>(B) * sq * H * d * elem_sz;
   const size_t K_full_bytes = static_cast<size_t>(B) * sq * G * d * elem_sz;
@@ -421,7 +565,8 @@ static int gqa_forward_fused(
     if (!flash_decode_geometry_ok(H, G, d)) {
       fprintf(stderr,
               "gqa_forward_fused (decode): unsupported geometry H=%lld G=%lld "
-              "d=%lld (HpG must be 1/2/3/4/5/8/16 and d 64/128/256)\n",
+              "d=%lld (HpG must be 1/2/3/4/5/6/8/16 and d 64/96/128/256, or "
+              "HpG 9 at d 128)\n",
               (long long)H, (long long)G, (long long)d);
       return -1;
     }
@@ -484,20 +629,16 @@ static int gqa_forward_fused(
     // quantize-and-append with the static per-channel scale; fp16 cache: plain
     // append. update_kv_cache dispatches on kv_format internally.
     //
-    // copy_lo stays 0 here even though this path knows its window. Narrowing
-    // the concat needs a separate growing present buffer, and this path never
-    // gets one: seq_len_kv reaches the runtime as the present_key memref's
-    // sequence dim, which for a GroupQueryAttention export with a growing cache
-    // arrives one short of the declared present, and the seqlens_k check above
-    // then rejects the call before it can reach the concat. When the cache is
-    // instead in-place there is no prefix to copy and update_kv_cache appends.
-    // So a bound here would be unreachable, and therefore untestable, code.
+    // A growing present (an onnx.Attention export whose present is past + seq)
+    // takes the separate-buffer concat every step; on a sliding-window layer
+    // the prefix below the window is never read again, so it is not copied.
     if (update_kv_cache(
             stream, past_key, past_value, kSrc, vSrc, present_key,
             present_value, static_cast<int>(B), static_cast<int>(past_len),
             static_cast<int>(sq), static_cast<int>(G), static_cast<int>(d),
             static_cast<int>(past_buf_seq), static_cast<int>(present_seq),
-            seqlens_k_ptr, static_cast<int>(elem_sz), /*copy_lo=*/0,
+            seqlens_k_ptr, static_cast<int>(elem_sz),
+            static_cast<int>(window_copy_lo(past_len, local_window_size)),
             /*no_causal=*/false, /*skv=*/-1, kv_format, k_scale, v_scale) != 0)
       return -1;
 
@@ -522,7 +663,8 @@ static int gqa_forward_fused(
             static_cast<int>(present_seq), kFlashDecodeMaxSplits, scale,
             seqlens_k_ptr, static_cast<int>(local_window_size), head_sink,
             use_smooth_softmax ? 1 : 0, kv_dtype,
-            kv_quantized ? k_scale : nullptr, kv_quantized ? v_scale : nullptr);
+            kv_quantized ? k_scale : nullptr, kv_quantized ? v_scale : nullptr,
+            key_bias, key_bias_stride);
       } else {
         // B==1 already paid (and caches) the seqlens_k read above, so the LUT
         // sees the length the kernel will actually scan without adding a sync.
@@ -553,7 +695,7 @@ static int gqa_forward_fused(
             use_smooth_softmax ? 1 : 0, kv_dtype,
             kv_quantized ? k_scale : nullptr, kv_quantized ? v_scale : nullptr,
             selected.config.use_wmma ? 1 : 0, selected.config.splits,
-            selected.config.bkv);
+            selected.config.bkv, key_bias, key_bias_stride);
         RUNTIME_DEBUG_LOG(
             "[REAL] GQA decode config source=%s impl=%s splits=%d bkv=%d "
             "effective_skv=%d\n",
@@ -692,13 +834,15 @@ static int gqa_forward_fused(
 
   if (present_key && present_value) {
     // Quantized cache: quantize-and-append/concat; fp16: plain. update_kv_cache
-    // dispatches on kv_format internally.
+    // dispatches on kv_format internally. The windowed v6x prefill starts at
+    // the tile holding past_len - window + 1, which window_copy_lo covers.
     if (update_kv_cache(
             stream, past_key, past_value, kSrc, vSrc, present_key,
             present_value, static_cast<int>(B), static_cast<int>(past_len),
             static_cast<int>(sq), static_cast<int>(G), static_cast<int>(d),
             static_cast<int>(past_buf_seq), static_cast<int>(present_seq),
-            seqlens_k_ptr, static_cast<int>(elem_sz), /*copy_lo=*/0,
+            seqlens_k_ptr, static_cast<int>(elem_sz),
+            static_cast<int>(window_copy_lo(past_len, local_window_size)),
             /*no_causal=*/false, /*skv=*/-1, kv_format, k_scale, v_scale) != 0)
       return -1;
   }
@@ -735,14 +879,11 @@ static int gqa_forward_fused(
     attn_max_seq = static_cast<int>(total_seq);
   }
 
-  // d128 runs v6 where it beats v7 and v5: with a window, or with a KV group
-  // of a multiple of 4 heads. d256 runs v6 where it beats v8: a KV group of a
-  // multiple of 3 or 4 heads (d256 prefill never has a window here).
-  // hip_gqa_flash_prefill_v2 applies the same rule when tuning online.
-  const bool v6_prefill =
-      d == 64 || (d == 128 && (local_window_size > 0 || (H / G) % 4 == 0)) ||
-      (d == 256 && ((H / G) % 4 == 0 || (H / G) % 3 == 0));
-  const int fused_prefill_version = v6_prefill ? 6 : (d == 128 ? 7 : 8);
+  // d64, d96 and d128 run v6x, d256 runs v8x (d256 prefill never has a window
+  // or a sink here). hip_gqa_flash_prefill_v2 applies the same split when
+  // tuning online.
+  const bool v8x_prefill = d == 256;
+  const char *fused_prefill_kernel = v8x_prefill ? "v8x" : "v6x";
   int fp_rc;
   if (hip_gqa_autotune_mode(state->gqa_autotune_policy) ==
       static_cast<int>(hipdnn_ep::GqaAutotuneMode::Online)) {
@@ -751,15 +892,12 @@ static int gqa_forward_fused(
         static_cast<int>(H), static_cast<int>(G), static_cast<int>(sq),
         static_cast<int>(total_seq), static_cast<int>(d), attn_max_seq,
         static_cast<int>(past_len), scale, local_window_size, head_sink,
-        static_cast<int>(H), use_smooth_softmax ? 1 : 0);
+        static_cast<int>(H), use_smooth_softmax ? 1 : 0, key_bias,
+        key_bias_stride);
   } else {
-    // v6 configs are keyed in the table as PrefillV5. The table has no d128 or
-    // d256 PrefillV5 points, so those resolve to the heuristic, which is the
-    // only config v6 builds at that head dim.
     const hipdnn_ep::GqaPrefillVariant variant =
-        v6_prefill ? hipdnn_ep::GqaPrefillVariant::V5
-        : d == 128 ? hipdnn_ep::GqaPrefillVariant::V7
-                   : hipdnn_ep::GqaPrefillVariant::V8;
+        v8x_prefill ? hipdnn_ep::GqaPrefillVariant::V8x
+                    : hipdnn_ep::GqaPrefillVariant::V6x;
     const hipdnn_ep::GqaPrefillRequest request{variant,
                                                static_cast<int>(B),
                                                static_cast<int>(H),
@@ -777,8 +915,8 @@ static int gqa_forward_fused(
           static_cast<int>(H), static_cast<int>(G), static_cast<int>(sq),
           static_cast<int>(total_seq), static_cast<int>(d), attn_max_seq,
           static_cast<int>(past_len), scale, local_window_size, head_sink,
-          static_cast<int>(H), use_smooth_softmax ? 1 : 0, config.m_tiles,
-          config.bkv, config.nw, config.mt, config.nd);
+          static_cast<int>(H), use_smooth_softmax ? 1 : 0, config.hb, config.qw,
+          config.mt, config.bkv, config.nd, key_bias, key_bias_stride);
     };
     fp_rc = launch_configured(selected.config);
     if (fp_rc != 0 && selected.source != hipdnn_ep::GqaTuneSource::Heuristic) {
@@ -793,20 +931,20 @@ static int gqa_forward_fused(
       selected = {heuristic, hipdnn_ep::GqaTuneSource::Heuristic, 0.0f};
       fp_rc = launch_configured(selected.config);
     }
-    RUNTIME_DEBUG_LOG("[REAL] GQA prefill config source=%s v%d "
-                      "m_tiles=%d bkv=%d nw=%d mt=%d nd=%d\n",
+    RUNTIME_DEBUG_LOG("[REAL] GQA prefill config source=%s %s "
+                      "hb=%d qw=%d mt=%d bkv=%d nd=%d\n",
                       hipdnn_ep::gqa_tune_source_name(selected.source),
-                      fused_prefill_version, selected.config.m_tiles,
-                      selected.config.bkv, selected.config.nw,
-                      selected.config.mt, selected.config.nd);
+                      fused_prefill_kernel, selected.config.hb,
+                      selected.config.qw, selected.config.mt,
+                      selected.config.bkv, selected.config.nd);
   }
   // window is logged because it selects the HAS_WINDOW instantiation, so a
   // dispatch that looks identical here can be two different kernels.
   RUNTIME_DEBUG_LOG(
-      "[REAL] GQA fused prefill (%s d=%lld -> v%d): B=%lld sq=%lld "
+      "[REAL] GQA fused prefill (%s d=%lld -> %s): B=%lld sq=%lld "
       "total_seq=%lld H=%lld G=%lld past_len=%lld sink=%d smooth=%d window=%d "
       "rc=%d\n",
-      kv_quantized ? "quant" : "fp16", (long long)d, fused_prefill_version,
+      kv_quantized ? "quant" : "fp16", (long long)d, fused_prefill_kernel,
       (long long)B, (long long)sq, (long long)total_seq, (long long)H,
       (long long)G, (long long)past_len, static_cast<int>(head_sink != nullptr),
       static_cast<int>(use_smooth_softmax), local_window_size, fp_rc);
@@ -1210,7 +1348,23 @@ static int gqa_forward_hipblaslt(
     void *present_value, int64_t B, int64_t sq, int64_t skv,
     int64_t past_buf_seq, int64_t H, int64_t G, int64_t d, float scale,
     int64_t do_rotary, int64_t local_window_size, bool no_causal,
-    int64_t element_size_bytes, int op_state_slot, bool kv_bnsd) {
+    int64_t element_size_bytes, int op_state_slot, bool kv_bnsd,
+    bool reuse_past_kv = false,
+    std::optional<int32_t> host_length = std::nullopt,
+    // The bias's own query extent, row stride and element size; 0 means sq,
+    // total_seq and element_size_bytes. A query extent of 1 is a per-key row
+    // that every query row shares (hip.gqa's key_bias).
+    int64_t attn_bias_sq = 0, int64_t attn_bias_total = 0,
+    int64_t attn_bias_elem = 0) {
+
+  void *const out_present_key = present_key;
+  void *const out_present_value = present_value;
+  const int64_t out_present_seq = skv;
+  if (reuse_past_kv) {
+    present_key = const_cast<void *>(past_key);
+    present_value = const_cast<void *>(past_value);
+    skv = past_buf_seq;
+  }
 
   // Bidirectional no-past path. The discriminator is the ABSENCE of a past KV
   // operand, not the absence of an external mask: an additive mask is
@@ -1231,7 +1385,7 @@ static int gqa_forward_hipblaslt(
   bool need_rope = do_rotary && cos_cache && sin_cache;
 
   // Pre-dispatch read of seqlens_k (or per-Compute() cache lookup for B==1
-  // when HIPDNN_EP_GQA_CACHE_SEQLENS=1). Applies to both prefill (sq>1) and
+  // unless HIPDNN_EP_GQA_CACHE_SEQLENS=0). Applies to both prefill (sq>1) and
   // decode (sq==1) for B==1 -- both share the same seqlens_k pointer and
   // benefit from caching. The result is reused by the fused-path
   // need_host_past_len block (eliminating its inline D2H) and the
@@ -1240,7 +1394,7 @@ static int gqa_forward_hipblaslt(
   // paths fall back to their legacy per-call reads. Stored in seqlens_k_pre;
   // total_seq_pre is the derived total_seq (-1 means unknown / not applicable).
   int32_t seqlens_k_pre =
-      read_seqlens_k_for_dispatch(stream, seqlens_k_ptr, B, state);
+      read_seqlens_k_for_dispatch(stream, seqlens_k_ptr, B, state, host_length);
   int64_t total_seq_pre = -1;
   if (bidirectional_no_past) {
     // bidirectional_no_past (Whisper encoder / cross-attn): seqlens_k = skv
@@ -1304,10 +1458,10 @@ static int gqa_forward_hipblaslt(
   // (cross-attn ships it as rank-4 BNSD with Skv != sq). Routing no_causal to
   // the decomposed path keeps a single correct code path for these models.
   bool fused_predicate =
-      (!gqa_fused_decode_disabled() && !no_causal && !attention_bias &&
-       fused_fp16 && fused_d && sq == 1 && kv_inputs_ok && present_key &&
-       present_value && sliding_ok_for_fused && sink_ok_for_fused &&
-       size_ok_for_fused);
+      (!gqa_fused_decode_disabled() && !no_causal && !reuse_past_kv &&
+       !attention_bias && fused_fp16 && fused_d && sq == 1 && kv_inputs_ok &&
+       present_key && present_value && sliding_ok_for_fused &&
+       sink_ok_for_fused && size_ok_for_fused);
 
   //===--------------------------------------------------------------------===//
   // Fused GQA decode fallback (sq == 1, d in {64,128,256}, KV cache on).
@@ -1494,8 +1648,8 @@ static int gqa_forward_hipblaslt(
 
   // D2H readback of seqlens_k is required here because hipBLASLt descriptor
   // creation and workspace sizing are host-side APIs that need total_seq. For
-  // B == 1 the value was already read (and cached when
-  // HIPDNN_EP_GQA_CACHE_SEQLENS=1) by the pre-dispatch helper above; we just
+  // B == 1 the value was already read (and cached unless
+  // HIPDNN_EP_GQA_CACHE_SEQLENS=0) by the pre-dispatch helper above; we just
   // consume seqlens_k_pre. The B > 1 branch keeps the legacy per-call read
   // because per-batch validation requires reading every entry and we have no
   // validated multi-batch decode workload yet.
@@ -1587,8 +1741,17 @@ static int gqa_forward_hipblaslt(
   }
   if (past_len < 0)
     past_len = 0;
+  if (reuse_past_kv && out_present_seq != 0 && out_present_seq < total_seq) {
+    fprintf(stderr,
+            "gqa_forward_hipblaslt: present holds %lld tokens but the reused "
+            "past KV prefix is total_seq=%lld\n",
+            (long long)out_present_seq, (long long)total_seq);
+    return -1;
+  }
 
-  bool packed_qkv = (key == nullptr && value == nullptr);
+  // A zero-length key/value may arrive as null pointers; that is not packed
+  // QKV.
+  bool packed_qkv = (key == nullptr && value == nullptr) && !reuse_past_kv;
 
   //===--------------------------------------------------------------------===//
   // Unified hipBLASLt GQA pipeline (shared by expand and no-expand paths).
@@ -1664,16 +1827,16 @@ static int gqa_forward_hipblaslt(
   //
   // Applying it to prefill as well as decode is what closes the invariant
   // rather than just widening the optimisation. The KV copy below skips writing
-  // [0, kv_lo), so some prefix of `present` is never written on a narrowed
-  // step. Every subsequent call reads from its own kv_lo, and because
-  // past_len' == total_seq > past_len, its kv_lo is strictly greater than this
-  // call's: each read range is a strict subset of the previous write range, for
-  // decode and prefill alike. Leaving prefill unnarrowed would break exactly
-  // that -- a continuation prefill would read from 0 into memory a narrowed
-  // decode never wrote, and unwritten memory can hold a non-finite bit pattern
-  // that no finite mask suppresses (the softmax's first pass reduces with
-  // fmaxf, which ignores NaN, but the second pass accumulates it, so one such
-  // key poisons its whole output row).
+  // [0, kv_lo) rounded down (window_copy_lo), so some prefix of `present` is
+  // never written on a narrowed step. Every subsequent call reads from its own
+  // kv_lo, and because past_len' == total_seq > past_len, its kv_lo is strictly
+  // greater than this call's: each read range is a strict subset of the
+  // previous write range, for decode and prefill alike. Leaving prefill
+  // unnarrowed would break exactly that -- a continuation prefill would read
+  // from 0 into memory a narrowed decode never wrote, and unwritten memory can
+  // hold a non-finite bit pattern that no finite mask suppresses (the softmax's
+  // first pass reduces with fmaxf, which ignores NaN, but the second pass
+  // accumulates it, so one such key poisons its whole output row).
   //
   // Restrictions:
   //  - Not under bidirectional_no_past, which is the one branch where
@@ -1927,10 +2090,13 @@ static int gqa_forward_hipblaslt(
     if (d_hi &&
         hip_gqa_bias_key_extent(
             stream, attention_bias, d_hi, static_cast<int>(attn_bias_batch),
-            static_cast<int>(attn_bias_num_heads), static_cast<int>(sq),
-            static_cast<int>(total_seq), static_cast<int>(sq),
-            static_cast<int>(sq_chunk), static_cast<int>(past_len),
-            static_cast<int>(nchunks), static_cast<int>(elem_sz)) == 0) {
+            static_cast<int>(attn_bias_num_heads),
+            static_cast<int>(attn_bias_sq > 0 ? attn_bias_sq : sq),
+            static_cast<int>(attn_bias_total > 0 ? attn_bias_total : total_seq),
+            static_cast<int>(sq), static_cast<int>(sq_chunk),
+            static_cast<int>(past_len), static_cast<int>(nchunks),
+            static_cast<int>(attn_bias_elem > 0 ? attn_bias_elem : elem_sz)) ==
+            0) {
       std::vector<int32_t> hi(static_cast<size_t>(nchunks), 0);
       if (hipMemcpyAsync(hi.data(), d_hi, hi_bytes, hipMemcpyDeviceToHost,
                          stream) == hipSuccess &&
@@ -2277,14 +2443,15 @@ static int gqa_forward_hipblaslt(
                              static_cast<int>(H), static_cast<int>(d), half_rot,
                              static_cast<int>(past_len), nullptr,
                              static_cast<int>(elem_sz)));
-      HIP_CHECK(hip_gqa_rope(stream, kSrc, d_Kroped, cos_cache, sin_cache,
-                             static_cast<int>(B), static_cast<int>(sq),
-                             static_cast<int>(G), static_cast<int>(d), half_rot,
-                             static_cast<int>(past_len), nullptr,
-                             static_cast<int>(elem_sz)));
-
       qSrc = d_Qroped;
-      kSrc = d_Kroped;
+      if (!reuse_past_kv) {
+        HIP_CHECK(hip_gqa_rope(stream, kSrc, d_Kroped, cos_cache, sin_cache,
+                               static_cast<int>(B), static_cast<int>(sq),
+                               static_cast<int>(G), static_cast<int>(d),
+                               half_rot, static_cast<int>(past_len), nullptr,
+                               static_cast<int>(elem_sz)));
+        kSrc = d_Kroped;
+      }
     }
 
     // ---- Step 3: Q Transpose BSHD [B,sq,H,d] -> BNSD [B,H,sq,d] ----
@@ -2299,27 +2466,44 @@ static int gqa_forward_hipblaslt(
     // ---- Steps 4-5: KV Cache Update (concat/append into BNSD present) ----
     // no-expand hands seqlens_k_ptr to the append kernel (on-device past_len,
     // no D2H); the expand path already read total_seq host-side so passes null.
-    if (present_key && present_value) {
+    if (reuse_past_kv) {
+      // Attention reads past directly; this only fills a consumed present.
+      if (out_present_key && out_present_value && out_present_seq > 0 &&
+          out_present_key != past_key) {
+        const size_t row_bytes = static_cast<size_t>(total_seq) * d * elem_sz;
+        const size_t src_pitch =
+            static_cast<size_t>(past_buf_seq) * d * elem_sz;
+        const size_t dst_pitch =
+            static_cast<size_t>(out_present_seq) * d * elem_sz;
+        const size_t rows = static_cast<size_t>(B) * G;
+        HIP_CHECK(hipMemcpy2DAsync(out_present_key, dst_pitch, past_key,
+                                   src_pitch, row_bytes, rows,
+                                   hipMemcpyDeviceToDevice, stream));
+        HIP_CHECK(hipMemcpy2DAsync(out_present_value, dst_pitch, past_value,
+                                   src_pitch, row_bytes, rows,
+                                   hipMemcpyDeviceToDevice, stream));
+      }
+    } else if (present_key && present_value) {
       // bidirectional_no_past (Whisper encoder / cross-attn, KV-sharing decoder
       // layers): never hand seqlens_k to the append kernel (it would apply the
       // +1 convention). An onnx.Attention with a past KV cache keeps the
       // standard decode KV path (bidirectional_no_past=false).
       //
-      // copy_lo is kv_lo, deliberately the identical value and not a separately
-      // derived one: the bytes this skips writing are then exactly the bytes
-      // the Score and Value GEMMs below skip reading, so the narrowing cannot
-      // be half-applied, and a wrong window is wrong identically for both. That
-      // equality is why this needs no gate of its own -- kv_lo is already 0
-      // whenever no window applies.
+      // copy_lo is kv_lo rounded down by window_copy_lo, and is gated on kv_lo
+      // so that it is 0 whenever narrowing is inactive. The Score and Value
+      // GEMMs below read from kv_lo, inside what this writes. The rounding is
+      // for the fused path: one layer can take this pipeline on one call and
+      // the fused kernels on the next, whose windowed prefill reads whole
+      // tiles below its bound, and both paths writing from the same rounded
+      // bound keeps every later read inside an earlier write.
       //
       // It holds across calls as well as within one. This call writes
-      // [kv_lo, total_seq); the next call has past_len' == total_seq >
-      // past_len, so its own kv_lo == past_len' - W + 1 is strictly greater
-      // than this call's, and its read range is a strict subset of what this
-      // call wrote. That is an induction over calls, not a claim about one
-      // step's stride, so it covers a prefill following a decode as well as
-      // decode following decode -- which is the reason the bound above is
-      // applied at every sq rather than only at sq == 1.
+      // [copy_lo, total_seq); the next call has past_len' == total_seq >
+      // past_len, so its own bound is at least this call's, and its read range
+      // is a subset of what this call wrote. That is an induction over calls,
+      // not a claim about one step's stride, so it covers a prefill following
+      // a decode as well as decode following decode -- which is the reason the
+      // bound above is applied at every sq rather than only at sq == 1.
       //
       // Only the separate-buffer concat can skip anything. When the cache is
       // in-place (past_key == present_key) the prefix is already there and
@@ -2330,7 +2514,9 @@ static int gqa_forward_hipblaslt(
           static_cast<int>(G), static_cast<int>(d),
           static_cast<int>(past_buf_seq), static_cast<int>(present_seq),
           (use_no_expand && !bidirectional_no_past) ? seqlens_k_ptr : nullptr,
-          static_cast<int>(elem_sz), static_cast<int>(kv_lo),
+          static_cast<int>(elem_sz),
+          static_cast<int>(
+              kv_lo > 0 ? window_copy_lo(past_len, local_window_size) : 0),
           bidirectional_no_past, static_cast<int>(skv), KvCacheFormat::Fp16,
           /*k_scale=*/nullptr, /*v_scale=*/nullptr, kv_bnsd));
     }
@@ -2501,9 +2687,12 @@ static int gqa_forward_hipblaslt(
             scoreBatchStride, head_sink, static_cast<int>(H),
             static_cast<int>(use_smooth_softmax), attention_bias,
             static_cast<int>(attn_bias_batch),
-            static_cast<int>(attn_bias_num_heads), static_cast<int>(elem_sz),
-            static_cast<int>(gemm_fp32), static_cast<int>(sq),
-            static_cast<int>(q0), static_cast<int>(total_seq),
+            static_cast<int>(attn_bias_num_heads),
+            static_cast<int>(attn_bias_elem > 0 ? attn_bias_elem : elem_sz),
+            static_cast<int>(gemm_fp32),
+            static_cast<int>(attn_bias_sq > 0 ? attn_bias_sq : sq),
+            static_cast<int>(q0),
+            static_cast<int>(attn_bias_total > 0 ? attn_bias_total : total_seq),
             static_cast<int>(chunk_kv_lo)));
       } else if (gemm_fp32) {
         HIP_CHECK(hip_gqa_softmax_f32_to_f32(
@@ -2688,13 +2877,15 @@ static int ensure_gqa_fp32_adapter_scratch(RuntimeState *state, size_t needed) {
   if (state->gqa_fp32_adapter_scratch) {
     if (state->stream && hipStreamSynchronize(state->stream) != hipSuccess)
       return -1;
-    if (hipFree(state->gqa_fp32_adapter_scratch) != hipSuccess)
+    if (hipdnn_ep_state_device_free(state, state->gqa_fp32_adapter_scratch) !=
+        hipSuccess)
       return -1;
     state->gqa_fp32_adapter_scratch = nullptr;
     state->gqa_fp32_adapter_scratch_size = 0;
   }
 
-  if (hipMalloc(&state->gqa_fp32_adapter_scratch, alloc_size) != hipSuccess) {
+  if (hipdnn_ep_state_device_alloc(state, &state->gqa_fp32_adapter_scratch,
+                                   alloc_size) != hipSuccess) {
     fprintf(stderr,
             "wrap_group_query_attention: fp32 adapter scratch alloc failed "
             "(%zu bytes)\n",
@@ -2727,13 +2918,13 @@ static int gqa_forward_fused_from_fp32(
     int64_t past_buf_seq, int64_t H, int64_t G, int64_t d, float scale,
     int64_t do_rotary, const void *k_scale, const void *v_scale,
     KvCacheFormat kv_format, const void *head_sink, bool use_smooth_softmax,
-    int local_window_size) {
+    int local_window_size, std::optional<int32_t> host_length) {
   const bool packed_qkv = (!key && !value);
   const bool need_rope = do_rotary && cos_cache && sin_cache;
 
   int64_t past_len = 0;
   const int32_t seqlens_k_pre =
-      read_seqlens_k_for_dispatch(stream, seqlens_k, B, state);
+      read_seqlens_k_for_dispatch(stream, seqlens_k, B, state, host_length);
   if (seqlens_k_pre == -1) {
     past_len = 0;
   } else if (seqlens_k_pre >= 0) {
@@ -2788,22 +2979,22 @@ static int gqa_forward_fused_from_fp32(
   if (sin16 && gqa_cast_f32_to_f16(stream, sin_cache, sin16, rope_elems) != 0)
     return -1;
 
-  int rc = gqa_forward_fused(state, stream, q16, k16, v16, past_key, past_value,
-                             seqlens_k, cos16 ? cos16 : cos_cache,
-                             sin16 ? sin16 : sin_cache, out16, present_key,
-                             present_value, B, sq, skv, past_buf_seq, H, G, d,
-                             scale, do_rotary, k_scale, v_scale, kv_format,
-                             head_sink, use_smooth_softmax, local_window_size);
+  int rc = gqa_forward_fused(
+      state, stream, q16, k16, v16, past_key, past_value, seqlens_k,
+      cos16 ? cos16 : cos_cache, sin16 ? sin16 : sin_cache, out16, present_key,
+      present_value, B, sq, skv, past_buf_seq, H, G, d, scale, do_rotary,
+      k_scale, v_scale, kv_format, head_sink, use_smooth_softmax,
+      local_window_size, host_length);
   if (rc != 0)
     return rc;
   return gqa_cast_f16_to_f32(stream, out16, output, out_elems);
 }
 
 //===----------------------------------------------------------------------===//
-// Public wrapper called by generated IR. ABI MUST stay identical to the
-// HipToLLVM lowering (kWrapGQA = "wrap_group_query_attention", 42 params).
+// A proven host length avoids the readback only for batch one. Otherwise,
+// retain the existing readback and per-element validation.
 //===----------------------------------------------------------------------===//
-int wrap_group_query_attention(
+int wrap_group_query_attention_host_length(
     RuntimeState *state, int op_state_slot,
     // Inputs 1-7 (core GQA)
     void *query, void *key, void *value, void *past_key, void *past_value,
@@ -2822,7 +3013,12 @@ int wrap_group_query_attention(
     // Shape values (6)
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
-    int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd) {
+    int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
+    int64_t seq_len_new_kv, int32_t has_host_length, int32_t host_length_value,
+    void *key_bias, int64_t key_bias_batch, int64_t key_bias_len) {
+  const std::optional<int32_t> host_length =
+      has_host_length ? std::optional<int32_t>(host_length_value)
+                      : std::nullopt;
   OP_PROFILE(
       "gqa",
       [&] {
@@ -2879,7 +3075,37 @@ int wrap_group_query_attention(
     fprintf(stderr, "wrap_group_query_attention: qk_output not supported\n");
     return -1;
   }
-  if (!present_key || !present_value) {
+  // key_bias rows are read at every key below the present length, so a shorter
+  // row would be read past its end.
+  if (key_bias != nullptr &&
+      (attention_bias != nullptr || no_causal != 0 ||
+       (key_bias_batch != 1 && key_bias_batch != batch_size) ||
+       key_bias_len < seq_len_kv)) {
+    fprintf(stderr,
+            "wrap_group_query_attention: invalid key_bias [%lld, %lld] "
+            "(batch=%lld seq_len_kv=%lld attention_bias=%d no_causal=%d)\n",
+            (long long)key_bias_batch, (long long)key_bias_len,
+            (long long)batch_size, (long long)seq_len_kv,
+            static_cast<int>(attention_bias != nullptr),
+            static_cast<int>(no_causal));
+    return -1;
+  }
+
+  const bool reuse_past_kv = seq_len_new_kv == 0 && seq_len_q > 0 &&
+                             past_key != nullptr && past_value != nullptr &&
+                             no_causal == 0;
+  // With a causal past cache, the new K/V rows are the sq query tokens being
+  // appended. Any other length would make RoPE and the append read past the
+  // end of key/value.
+  if (key != nullptr && past_key != nullptr && no_causal == 0 &&
+      seq_len_new_kv != 0 && seq_len_new_kv != seq_len_q) {
+    fprintf(stderr,
+            "wrap_group_query_attention: key/value length %lld must be 0 or "
+            "match the query length %lld when a causal past cache is given\n",
+            (long long)seq_len_new_kv, (long long)seq_len_q);
+    return -1;
+  }
+  if (!reuse_past_kv && (!present_key || !present_value)) {
     fprintf(stderr, "wrap_group_query_attention: GQA requires "
                     "present_key/present_value KV cache\n");
     return -1;
@@ -2904,21 +3130,24 @@ int wrap_group_query_attention(
 
   //===------------------------------------------------------------------===//
   // Path selection. The optimized fused/flash kernels are fp16 causal GQA with
-  // head_dim in {64,128,256} and a templated decode geometry (HpG in
-  // {1,2,3,4,5,8,16}). Decode supports sink/window for every templated
-  // geometry; prefill v3 supports sinks at head_dim == 64 and windows at
-  // head_dim == 64 or 128. Everything else uses the feature-complete
-  // decomposed hipBLASLt fallback.
+  // head_dim in {64,96,128,256} and a templated decode geometry (HpG in
+  // {1,2,3,4,5,6,8,16}, plus 9 at d=128). Decode supports sink/window for every
+  // templated geometry; prefill v3 supports sinks at head_dim 64 or 96 and
+  // windows at head_dim 64, 96 or 128. Everything else uses the
+  // feature-complete decomposed hipBLASLt fallback.
   //===------------------------------------------------------------------===//
+
   const bool is_decode = (seq_len_q == 1);
   const bool decode_geometry_ok =
       !is_decode || flash_decode_geometry_ok(num_heads, kv_num_heads, head_dim);
-  // head_dim gate: the fused WMMA prefill (v6/v7/v8) and the scalar
-  // flash-decode kernels both cover d in {64,128,256} now (d=256 for
-  // Qwen3-family 16:4). For decode, flash_decode_geometry_ok already validates
-  // d; for prefill we clamp to the templated set here.
-  const bool head_dim_ok =
-      is_decode ? true : (head_dim == 64 || head_dim == 128 || head_dim == 256);
+  // head_dim gate: the fused WMMA prefill (v6x/v8x) and the scalar
+  // flash-decode kernels both cover d in {64,96,128,256} now (d=96 for
+  // Phi-3-mini, d=256 for Qwen3-family 16:4). For decode,
+  // flash_decode_geometry_ok already validates d; for prefill we clamp to the
+  // templated set here.
+  const bool head_dim_ok = is_decode ? true
+                                     : (head_dim == 64 || head_dim == 96 ||
+                                        head_dim == 128 || head_dim == 256);
   // attention_bias (onnx.Attention external mask) is only applied by the legacy
   // decomposed pipeline (Step 8b); the lean fused path would silently drop it,
   // so exclude it here to route masked attention to gqa_forward_hipblaslt
@@ -2928,31 +3157,43 @@ int wrap_group_query_attention(
   // explicitly 1, matching ORT (gqa_attention_base.h:
   // use_smooth_softmax_ || head_sink != nullptr).
   const bool has_smooth_softmax = (head_sink != nullptr || smooth_softmax == 1);
-  // Sink/window are first-class decode features. Prefill v3 implements both at
-  // D64, and v5 implements the window at D128. D128 sinks and all D256
-  // prefill features must fall back rather than silently drop them.
-  const bool sink_ok = !has_smooth_softmax || is_decode || head_dim == 64;
+  // Sink/window are first-class decode features. Prefill (v6x) implements both
+  // at D64 and D96 and the window at D128. D128 sinks and all D256 prefill
+  // features must fall back rather than silently drop them.
+  const bool sink_ok =
+      !has_smooth_softmax || is_decode || head_dim == 64 || head_dim == 96;
   // Decode handles the window itself (kv_lo clamp), so it is allowed for any
-  // supported geometry; prefill implements it at D64 and D128.
-  const bool window_ok =
-      is_decode || local_window_size <= 0 || head_dim == 64 || head_dim == 128;
+  // supported geometry; prefill implements it at D64, D96 and D128.
+  const bool window_ok = is_decode || local_window_size <= 0 ||
+                         head_dim == 64 || head_dim == 96 || head_dim == 128;
+  // The per-key bias is applied by every decode kernel and by v6x prefill,
+  // which builds it at D128 only.
+  const bool key_bias_ok = key_bias == nullptr || is_decode || head_dim == 128;
   // The whole fused path (gqa_forward_fused, including the sink and windowed
   // prefill kernels above) is built on the RDNA-only WMMA intrinsics, which
   // trap on CDNA (wave64, e.g. MI350). Route wave64 to the decomposed hipBLASLt
   // pipeline below (MFMA GEMMs + wave-portable scalar kernels), which is
   // feature-complete and correct on both wave sizes. RDNA is unaffected.
-  const bool fused_geometry = no_causal == 0 && window_ok && sink_ok &&
-                              head_dim_ok && decode_geometry_ok &&
-                              attention_bias == nullptr &&
+  // Only the decomposed pipeline implements reuse_past_kv, so it bypasses
+  // fused below.
+  if (reuse_past_kv && kv_quantized) {
+    fprintf(stderr, "wrap_group_query_attention: a zero-length key/value over "
+                    "a quantized KV cache is not supported\n");
+    return -1;
+  }
+  const bool fused_geometry = !reuse_past_kv && no_causal == 0 && window_ok &&
+                              sink_ok && key_bias_ok && head_dim_ok &&
+                              decode_geometry_ok && attention_bias == nullptr &&
                               !hipdnn_device_is_wave64();
   const bool fused_supported = fused_geometry && element_size_bytes == 2;
   // fp32 query + INT8 KV cannot use the decomposed fallback (it reads the
   // cache as fp16). Cast QKV/RoPE/output to fp16 and reuse fused. head_sink
-  // is a fused __half buffer; leave that combination rejected until a
-  // dedicated cast is added.
+  // and key_bias are not threaded through that adapter; leave those
+  // combinations rejected until they are.
   const bool fp32_int8_fused =
       kv_quantized && fused_geometry && element_size_bytes == 4 &&
-      (head_dim == 64 || head_dim == 128) && head_sink == nullptr;
+      (head_dim == 64 || head_dim == 96 || head_dim == 128) &&
+      head_sink == nullptr && key_bias == nullptr;
 
   // The quantized-cache kernels live exclusively on the fused path, which is
   // disabled above on wave64 because it is built on the RDNA-only WMMA
@@ -2970,16 +3211,17 @@ int wrap_group_query_attention(
   }
 
   // A quantized KV cache is implemented ONLY on the fused path (quant decode +
-  // fp16 prefill-over-dequant), for head_dim in {64,128}. The legacy decomposed
-  // pipeline reads the cache as fp16 and would misinterpret quantized bytes, so
-  // we must reject rather than silently fall through to it.
+  // fp16 prefill-over-dequant), for head_dim in {64,96,128}. The legacy
+  // decomposed pipeline reads the cache as fp16 and would misinterpret
+  // quantized bytes, so we must reject rather than silently fall through to it.
   if (kv_quantized && !fp32_int8_fused &&
-      (!fused_supported || (head_dim != 64 && head_dim != 128))) {
+      (!fused_supported ||
+       (head_dim != 64 && head_dim != 96 && head_dim != 128))) {
     fprintf(stderr,
             "wrap_group_query_attention: quantized KV cache requires the fused "
             "path (fp16 or fp32-cast-to-fp16, causal, no attention bias, any "
             "window/sink only where the fused kernels implement it, head_dim "
-            "64 or 128); got fused_supported=%d fp32_adapter=%d elem=%lld "
+            "64, 96 or 128); got fused_supported=%d fp32_adapter=%d elem=%lld "
             "head_dim=%lld\n",
             static_cast<int>(fused_supported),
             static_cast<int>(fp32_int8_fused), (long long)element_size_bytes,
@@ -2999,7 +3241,7 @@ int wrap_group_query_attention(
         cos_cache, sin_cache, output, present_key, present_value, batch_size,
         seq_len_q, seq_len_kv, past_buf_seq, num_heads, kv_num_heads, head_dim,
         scale, do_rotary, k_scale, v_scale, kv_format, head_sink,
-        has_smooth_softmax, static_cast<int>(local_window_size));
+        has_smooth_softmax, static_cast<int>(local_window_size), host_length);
     if (arc != 0)
       fprintf(stderr,
               "wrap_group_query_attention: fp32 adapter / gqa_forward_fused "
@@ -3019,19 +3261,27 @@ int wrap_group_query_attention(
         "[REAL] wrap_group_query_attention: routing to legacy decomposed "
         "pipeline "
         "(elem=%lld no_causal=%d window=%lld sink=%d smooth=%lld d=%lld "
-        "sq=%lld geom_ok=%d)\n",
+        "sq=%lld geom_ok=%d attn_bias=%d key_bias=%d)\n",
         (long long)element_size_bytes, static_cast<int>(no_causal),
         (long long)local_window_size, static_cast<int>(head_sink != nullptr),
         (long long)smooth_softmax, (long long)head_dim, (long long)seq_len_q,
-        static_cast<int>(decode_geometry_ok));
+        static_cast<int>(decode_geometry_ok),
+        static_cast<int>(attention_bias != nullptr),
+        static_cast<int>(key_bias != nullptr));
+    // The decomposed pipeline takes a per-key bias as a one-row additive mask:
+    // its biased softmax broadcasts a bias whose query extent is 1.
+    const bool kb = key_bias != nullptr;
     int lrc = gqa_forward_hipblaslt(
         state, stream, ltHandle, query, key, value, past_key, past_value,
         seqlens_k, cos_cache, sin_cache, head_sink, has_smooth_softmax,
-        attention_bias, attn_bias_batch, attn_bias_num_heads, output,
-        present_key, present_value, batch_size, seq_len_q, seq_len_kv,
-        past_buf_seq, num_heads, kv_num_heads, head_dim, scale, do_rotary,
-        local_window_size, no_causal != 0, element_size_bytes, op_state_slot,
-        kv_bnsd != 0);
+        kb ? key_bias : attention_bias, kb ? key_bias_batch : attn_bias_batch,
+        kb ? 1 : attn_bias_num_heads, output, present_key, present_value,
+        batch_size, seq_len_q, seq_len_kv, past_buf_seq, num_heads,
+        kv_num_heads, head_dim, scale, do_rotary, local_window_size,
+        no_causal != 0, element_size_bytes, op_state_slot, kv_bnsd != 0,
+        reuse_past_kv, host_length,
+        /*attn_bias_sq=*/kb ? 1 : 0, /*attn_bias_total=*/kb ? key_bias_len : 0,
+        /*attn_bias_elem=*/kb ? 2 : 0);
     if (lrc != 0)
       fprintf(stderr,
               "wrap_group_query_attention: legacy decomposed pipeline failed "
@@ -3053,11 +3303,79 @@ int wrap_group_query_attention(
       cos_cache, sin_cache, output, present_key, present_value, batch_size,
       seq_len_q, seq_len_kv, past_buf_seq, num_heads, kv_num_heads, head_dim,
       scale, do_rotary, k_scale, v_scale, kv_format, head_sink,
-      has_smooth_softmax, static_cast<int>(local_window_size));
+      has_smooth_softmax, static_cast<int>(local_window_size), host_length,
+      key_bias, key_bias_batch, key_bias_len);
   if (rc != 0)
     fprintf(stderr,
             "wrap_group_query_attention: gqa_forward_fused failed "
             "(rc=%d)\n",
             rc);
   return rc;
+}
+
+// The pointer ABI does not encode dtype: only compiler-proven FP16 operands
+// may enter this wrapper. All ineligible calls keep the original wrapper.
+int wrap_group_query_attention_ring_f16(
+    RuntimeState *state, int op_state_slot,
+    // Inputs 1-7 (core GQA)
+    void *query, void *key, void *value, void *past_key, void *past_value,
+    void *seqlens_k, void *total_seq_len,
+    // Inputs 8-10 (RoPE)
+    void *cos_cache, void *sin_cache, void *position_ids,
+    // Inputs 11-14 (advanced features)
+    void *attention_bias, void *head_sink, void *k_scale, void *v_scale,
+    // Outputs
+    void *output, void *present_key, void *present_value, void *output_qk,
+    // Attributes (13)
+    int64_t num_heads, int64_t kv_num_heads, float scale, int64_t do_rotary,
+    int64_t rotary_interleaved, float softcap, int64_t local_window_size,
+    int64_t smooth_softmax, int64_t qk_output, int64_t k_quant_type,
+    int64_t v_quant_type, int64_t kv_cache_bit_width, int32_t no_causal,
+    // Shape values (6)
+    int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
+    int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
+    int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
+    int64_t seq_len_new_kv, int32_t has_host_length, int32_t host_length_value,
+    void *key_bias, int64_t key_bias_batch, int64_t key_bias_len) {
+#if HIP_EP_RING_ENABLED != 0
+  const std::optional<int32_t> host_length =
+      has_host_length ? std::optional<int32_t>(host_length_value)
+                      : std::nullopt;
+  // Only the compiler's proven-FP16 calls use this entry. Recheck runtime
+  // geometry/features/device before reading lengths or modifying the cache.
+  // Any noncandidate retains the original entry point and its diagnostics.
+  if (gqa_ring_requested() && state && query && output && present_key &&
+      present_value && !position_ids && !output_qk && qk_output == 0 &&
+      softcap == 0.0f && element_size_bytes == 2 && batch_size == 1 &&
+      num_heads == 24 && kv_num_heads == 4 && head_dim == 256 &&
+      seq_len_q >= 1 && seq_len_q <= HIP_EP_RING_MAX_QUERY_LENGTH &&
+      seq_len_new_kv == seq_len_q && key && value && seqlens_k && !kv_bnsd &&
+      k_quant_type == 0 && v_quant_type == 0 && !do_rotary && no_causal == 0 &&
+      (scale == 0.0f || scale == 0.0625f) && local_window_size <= 0 &&
+      !head_sink && smooth_softmax <= 0 && !attention_bias && !key_bias &&
+      hip_gqa_ring_device_supported()) {
+    hipStream_t stream =
+        static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
+    if (stream) {
+      OP_PROFILE(
+          "gqa", [] { return std::string("ring_f16"); }, state);
+      int rc = gqa_forward_ring(state, stream, query, key, value, past_key,
+                                past_value, seqlens_k, output, present_key,
+                                present_value, seq_len_q, seq_len_kv,
+                                past_buf_seq, host_length);
+      if (rc != 1)
+        return rc;
+    }
+  }
+#endif
+  return wrap_group_query_attention_host_length(
+      state, op_state_slot, query, key, value, past_key, past_value, seqlens_k,
+      total_seq_len, cos_cache, sin_cache, position_ids, attention_bias,
+      head_sink, k_scale, v_scale, output, present_key, present_value,
+      output_qk, num_heads, kv_num_heads, scale, do_rotary, rotary_interleaved,
+      softcap, local_window_size, smooth_softmax, qk_output, k_quant_type,
+      v_quant_type, kv_cache_bit_width, no_causal, batch_size, seq_len_q,
+      seq_len_kv, past_buf_seq, head_dim, element_size_bytes, attn_bias_batch,
+      attn_bias_num_heads, kv_bnsd, seq_len_new_kv, has_host_length,
+      host_length_value, key_bias, key_bias_batch, key_bias_len);
 }

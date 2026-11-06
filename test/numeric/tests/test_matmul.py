@@ -62,6 +62,29 @@ class TestMatMul:
         )
         compare_outputs(actual, expected, atol=1e-4)
 
+    @pytest.mark.parametrize(
+        "input_shape,weight_shape",
+        [
+            ([1, 1, 2880], [2880, 128]),  # gpt-oss-120b router
+            ([1, 1, 2880], [2880, 32]),  # gpt-oss-20b router
+            ([1, 520], [520, 8]),
+            ([1, 1, 2048], [2048, 256]),
+            ([1, 1, 2048], [2048, 512]),
+            ([1, 1, 2048], [2048, 520]),  # above the one-row GEMV N cap
+            ([1, 8192], [8192, 128]),
+            ([1, 8200], [8200, 128]),  # above the one-row GEMV K cap
+        ],
+    )
+    def test_matmul_one_row(self, model_runner, input_shape, weight_shape):
+        """One-row MatMul with a narrow weight, the MoE router's shape."""
+        model = _make_matmul_model(input_shape, weight_shape)
+
+        rng = np.random.default_rng(42)
+        x = rng.uniform(-1, 1, input_shape).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x], reference="cpu")
+        compare_outputs(actual, expected, atol=1e-3)
+
     @pytest.mark.parametrize("seq_len", SEQ_LENS)
     def test_matmul_qo_proj_llama_shape(self, model_runner, seq_len):
         """Llama Q/O projection: [1, S, 4096] @ [4096, 4096] -> [1, S, 4096]."""

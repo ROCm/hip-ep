@@ -92,9 +92,30 @@ see [below](#passes-that-are-not-individually-nameable)). Prefer, in order:
 | `onnx-to-hip-pipeline` | `externalize-output-dir`, `externalize-min-num-elements`, `skip-constant-data` | ONNX dialect → fully bufferized, pooled HIP memref IR with resolved extern constants. |
 | `hip-to-llvm-pipeline` | `constants-file` | HIP memref IR → LLVM dialect + the C-ABI interface (`inference_init/compute/cleanup`, metadata). |
 | `hipdnn-pipeline` | `constants-file`, `constants-dir`, `externalize-min-num-elements` | The full ONNX→HIP→LLVM→interface flow (chains the two above). |
+| `rocmlir-pipeline` | — | Prepare HIP tensor IR for rocMLIR kernel offload: split `hip.conv_transpose` into plain convolutions, outline the rocMLIR-eligible ops into `rock.kernel` funcs, then lower those bodies to TOSA. Not part of the default compile — `hip-rocmlir-compiler` runs it. |
 
 Options use MLIR's pipeline-option syntax:
 `onnx-to-hip-pipeline{skip-constant-data=true}`.
+
+`hip-rocmlir-compiler` defaults to quick autotune: it enumerates the rocMLIR
+quick space, compiles every applicable candidate, benchmarks them on the
+current HIP device, and embeds the fastest binary. Every search config in the
+model is compiled in one pool (default: one job per hardware thread;
+`HIP_ROCMLIR_COMPILE_JOBS` overrides the width). GPU benchmarking stays serial,
+and it starts only after that pool finishes, so candidate timings do not
+overlap and a slow config does not stall the next kernel's compiles. Within
+one compile, the first kernel for a rocMLIR problem key (`getTuningProblemStr`,
+plus the selected space) is searched; later kernels with that key compile only
+the winning perfConfig, together in a second pool, and are not benchmarked
+again. The compiled binary is not reused, because each outlined kernel has its
+own symbol. `--autotune[=quick|full|exhaustive]`
+overrides the search space. Set `HIP_ROCMLIR_SKIP_BENCHMARKING=1` (any value
+other than `0`) to skip the GPU search and affix the first enumerated
+perfConfig. The log names the space (`quick`, `full`, or `exhaustive`) and the
+number of configs in each pool. At the end it prints three wall times:
+perfConfig compile (pool wait, summed across the two pools), serial GPU
+benchmark, and HIP-to-LLVM lowering plus bitcode emit. Per-config timing and
+the selected perfConfig string are printed only with `--verbose`.
 
 > These pipeline names reproduce the same flow the EP / `hip-compiler`
 > front-end runs, so composing them is the way to match the default compile
@@ -112,10 +133,12 @@ Options use MLIR's pipeline-option syntax:
 | `simplify-onnx` | module | Pre-lowering ONNX cleanups (`CastLike`→`Cast`, drop dead type-donor args). |
 | `hip-add-context-arg` | module | Inject the `!hip.context` argument into functions. |
 | `onnx-loop-outline` | module | Outline `onnx.Loop` bodies into separate `func.func` ops. |
+| `onnx-scan-outline` | module | Outline supported forward, axis-0 `onnx.Scan` bodies and materialize their state and stacked outputs. |
 | `onnx-if-outline` | module | Outline `onnx.If` branches before ONNX-to-HIP conversion. |
 | `hip-infer-loop-body-shapes` | module | Rank-establish unranked tensors inside outlined loop bodies. |
 | `outline-onnx-to-hipdnn` | module | Outline subgraphs targeted at hipDNN graph compilation. |
-| `convert-onnx-to-hip` | module | Pattern-match ONNX ops by name → HIP dialect; lower both constant sweeps to policy-neutral `hip.constant`; legalize GatherBlockQuantized (INT4 packing, unsigned, quantize_axis). |
+| `convert-onnx-to-hip` | module | Pattern-match ONNX ops by name → HIP dialect; lower both constant sweeps to policy-neutral `hip.constant`; legalize GatherBlockQuantized (INT4 packing, unsigned, quantize_axis). Pre-lowering folds run first on ONNX IR, among them the `onnx.Attention` mask fold (sliding window and key-padding bias, `AttentionWindowFold.cpp`) and the sigmoid + correction-bias QMoE routing fold (`QMoEConversion.cpp`). |
+| `hip-fold-batchnorm` | func.func | Fold an inference `hip.batch_norm` with constant parameters into the filter and bias of the `hip.conv` producing it, directly or through a `hip.add` of two convs (the shift goes into one bias). Every intermediate result must have the batch norm as its only consumer. Reads inline and file-backed constants only; a batch norm over memory-address-backed weights is left in place. |
 | `hip-externalize-constants` | module | Validate explicit serialization order, append unordered carriers deterministically, plan/serialize, then replace `hip.constant` using the existing inline/full/streaming/hybrid metadata contract. Direct threshold default: 0. |
 | `hip-infer-shapes` | module | Refine `?` dims on HIP DPS result types via `ReifyRankedShapedTypeOpInterface`. |
 | `hip-fusion-transform` | module | HIP-to-HIP rewriting at unrestricted arity (one op → many, many → one, or subgraph → subgraph). The patterns live in `lib/Dialect/Transforms/fusion_pattern/` — PDLL files compiled into the library, plus native C++ for rewrites whose shape depends on the matched op's rank — and share one `RewritePatternSet`. |
@@ -136,6 +159,38 @@ Options use MLIR's pipeline-option syntax:
 | `assign-op-state-slots` | module | Assign one op-state slot per stateful op instance (op-state-slots design). No-op without stateful ops. |
 | `generate-op-state-init` | module | Emit `@hipdnn_ep_op_states_init_fn` from each stateful op's `generateOpStateInit`. No-op without stateful ops. |
 | `convert-hip-to-llvm` | module | Lower HIP ops to runtime C-API calls / LLVM dialect. |
+
+### rocMLIR offload passes
+
+Anchored on `func.func`, so the textual form needs `func.func(...)`. These run
+against HIP **tensor** IR (before bufferization) and are reached through
+`rocmlir-pipeline`. `hip-decompose-conv-transpose` also runs in the default
+ONNX-to-HIP tail; the other two do not.
+
+| Name | Anchor | One-liner |
+|---|---|---|
+| `hip-decompose-conv-transpose` | func.func | Rewrite `hip.conv_transpose` into one stride-1 `hip.conv` per stride residue (MIOpen backward-data v4r1), reassembled with `tensor.insert_slice`. Reads the filter from an inline or file-backed `hip.constant`. Rank-3 inputs expand to a unit-height rank-4 conv so dynamic batch and width stay legal. Leaves unsupported cases (grouped, dilated, rank-4 dynamic, non-constant, memory-address-backed or non-f16/bf16/f32 weights, stride > kernel, > 64 residues) for the MIOpen path. Also runs in the ONNX-to-HIP tail, before shape inference. |
+| `hip-fuse-rocmlir` | func.func | Outline rocMLIR-eligible op groups into `rock.kernel` funcs around a gemm/convolution/attention anchor. |
+| `convert-hip-to-tosa` | func.func | Lower the outlined kernel bodies from HIP ops to TOSA. |
+
+Order matters: `hip-decompose-conv-transpose` must run **before**
+`hip-fuse-rocmlir`, because rocMLIR has no transposed-convolution anchor and
+would otherwise refuse to outline the op at all. The registered pipeline runs
+
+```
+func.func(hip-decompose-conv-transpose)
+func.func(hip-fuse-rocmlir)
+duplicate-function-elimination
+func.func(convert-hip-to-tosa)
+canonicalize
+```
+
+The decomposition emits its residues already folded — the sub-filters are
+computed at pass time — so it needs no canonicalize of its own before the fuse
+pass, and none runs there.
+
+> The `hipsr-*` family and `convert-onnx-to-hipsr` are registered but not yet
+> tabulated here.
 
 ### Standard MLIR passes and sub-pipelines
 
@@ -162,7 +217,7 @@ override (so a hand-listed pipeline omitting them will trip the
 | Pass | Why it is not nameable |
 |---|---|
 | `generate-interface` | Requires a `CompilationOptionsT` (not a no-arg pass). Emitted by `hip-to-llvm-pipeline`. |
-| `compile-hipdnn-graphs` | Requires a live runtime handle. Only present on the handle-bearing pipeline overload. |
+| `compile-hipdnn-graphs` | Requires a live hipDNN handle, which exists only when built with `BUILD_HIPDNN_GRAPH=ON` (default OFF). |
 | `expand-strided-metadata` | MLIR utility pass added directly inside `hip-to-llvm-pipeline`. |
 | `lower-affine` | Added directly before buffer-reuse normalization in `onnx-to-hip-pipeline`, and after strided-metadata expansion in `hip-to-llvm-pipeline`. |
 | `convert-linalg-to-loops` | Added directly inside the ONNX→HIP tail. |
@@ -180,12 +235,18 @@ ONNX → HIP  (buildOnnxToHipPipeline)
   «slot: AfterSimplifyOnnx»
   hip-add-context-arg
   onnx-loop-outline
+  onnx-scan-outline
   onnx-if-outline
   hip-infer-loop-body-shapes
-  «slot: AfterOnnxLoopOutline»
-  [outline-onnx-to-hipdnn + compile-hipdnn-graphs]   (handle overload only)
+  «slot: AfterOnnxLoopOutline»  (after Loop / Scan / If outlining)
+  [outline-onnx-to-hipdnn + compile-hipdnn-graphs]   (BUILD_HIPDNN_GRAPH=ON only)
   convert-onnx-to-hip
+  func.func(hip-fold-batchnorm)      (shared with the rocMLIR head, so it runs
+                                      before any conv rewrite or kernel outlining)
   «slot: AfterConvertOnnxToHip»  (supported hip.constant producer boundary)
+  func.func(hip-decompose-conv-transpose)  (rank-3 -> rank-4 hip.conv before
+                                           the MIOpen lowering; rocmlir-pipeline
+                                           runs the same pass in its own head)
   hip-infer-shapes
   hip-fusion-transform               (must precede externalization: its patterns
                                       read hip.constant payloads)
@@ -202,9 +263,9 @@ ONNX → HIP  (buildOnnxToHipPipeline)
   lower-affine
   cse ; canonicalize
   func.func(convert-linalg-to-loops)
+  func.func(hip-materialize-host-scalars)
   func.func(hip-optimize-memrefs)
   func.func(hip-promote-strided-operands)
-  func.func(hip-materialize-host-scalars)
   func.func(hip-resolve-memref-dims)
   func.func(cse)
   func.func(canonicalize)

@@ -36,7 +36,7 @@ flowchart TD
         BCIN --> JIT
         EMBED --> JIT
         KSO -->|"dlopen + DynamicLibrarySearchGenerator"| JIT
-        ROCM["amdhip64.dll\nhipblaslt.dll\nhipdnn_backend.dll"] -->|"DynamicLibrarySearchGenerator::Load"| JIT
+        ROCM["amdhip64.dll\nhipblaslt.dll"] -->|"DynamicLibrarySearchGenerator::Load"| JIT
     end
 ```
 
@@ -196,7 +196,7 @@ endif()
 These are compiled to bitcode (via `clang -emit-llvm`) and merged into `runtime.bc`. They:
 
 - Include `hip_custom_kernels.h` (pure C, Clang-compatible)
-- Implement `wrap_rotary_embedding(...)` and `wrap_group_query_attention(...)` (declared in [hipdnn_ep_runtime.h](lib/Runtime/hipdnn_ep_runtime.h))
+- Implement `wrap_rotary_embedding(...)` and `wrap_group_query_attention(...)` (declared in [hipdnn_ep_runtime.h](../../lib/Runtime/hipdnn_ep_runtime.h))
 - Extract the HIP stream from `RuntimeState*` via `hipdnn_ep_state_get_stream()`
 - Compute shape info from the parameters passed by the compiler lowering
 - Call the `hip_rope_forward()` / `hip_gqa_forward()` C functions
@@ -241,8 +241,8 @@ jit->getMainJITDylib().addGenerator(std::move(*gen));
 
 After `cmake --install`, the install prefix contains:
 
-- Windows: `<prefix>/bin/onnxruntime_morphizen_ep.dll` (the EP) and `<prefix>/bin/custom_kernels_<arch>.dll` (one per requested arch) co-located.
-- Linux:   `<prefix>/lib/libonnxruntime_morphizen_ep.so` (the EP) and `<prefix>/lib/libcustom_kernels_<arch>.so` (one per requested arch) co-located. The EP `.so` is built with `RPATH=$ORIGIN`.
+- Windows: `<prefix>/bin/hipgpu.dll` (the EP) and `<prefix>/bin/custom_kernels_<arch>.dll` (one per requested arch) co-located.
+- Linux:   `<prefix>/lib/libhipgpu.so` (the EP) and `<prefix>/lib/libcustom_kernels_<arch>.so` (one per requested arch) co-located. The EP `.so` is built with `RPATH=$ORIGIN`.
 
 CI workflows assert co-location by checking for `custom_kernels_gfx1151.dll` / `libcustom_kernels_gfx1151.so` in the staging step — failure here means the install rule in `lib/Runtime/Kernels/CMakeLists.txt` regressed.
 

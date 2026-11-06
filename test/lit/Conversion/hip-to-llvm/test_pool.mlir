@@ -131,4 +131,24 @@ module {
     // CHECK: llvm.call @wrap_pool
     return
   }
+
+  // Test 7: uint8 MaxPool. data_type=7 (UINT8), pool_mode=1.
+  func.func @maxpool_2d_static_ui8(
+      %ctx: !hip.context,
+      %x: memref<1x64x8x8xui8, 1>,
+      %y: memref<1x64x4x4xui8, 1>) {
+    // CHECK-LABEL: llvm.func @maxpool_2d_static_ui8
+    hip.pool(%ctx) ins(%x : memref<1x64x8x8xui8, 1>)
+                   outs(%y : memref<1x64x4x4xui8, 1>)
+                   {pool_mode = 1, kernel_shape = [3, 3], strides = [2, 2],
+                    pads = [0, 0, 0, 0], dilations = [1, 1],
+                    ceil_mode = 1, storage_order = 0,
+                    count_include_pad = 0, p = 2}
+
+    // data_type=7 (UINT8) is the first i64 argument. It is materialized
+    // after pool_mode, so a following CHECK for constant(1) never matches.
+    // CHECK: %[[DT:.*]] = llvm.mlir.constant(7 : i64)
+    // CHECK: llvm.call @wrap_pool({{%[^,)]+}}, {{%[^,)]+}}, {{%[^,)]+}}, {{%[^,)]+}}, %[[DT]],
+    return
+  }
 }

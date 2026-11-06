@@ -51,15 +51,17 @@ module {
   // CHECK: tensor.empty({{.*}}, {{.*}}) : tensor<?x?xi64>
   // CHECK: hip.top_k(%[[CTX3]]) ins(%[[X3]], %[[K3]] : tensor<?x?xf32>, tensor<1xi64>) outs({{.*}}, {{.*}} : tensor<?x?xf32>, tensor<?x?xi64>) {axis = 1 : i64} : tensor<?x?xf32>, tensor<?x?xi64>
 
-  func.func @argmax_keepdims0(%x: tensor<1x77xi32>) -> tensor<1xi64> {
-    %y = "onnx.ArgMax"(%x) {axis = -1 : si64, keepdims = 0 : si64, select_last_index = 0 : si64} : (tensor<1x77xi32>) -> tensor<1xi64>
-    return %y : tensor<1xi64>
+  // largest/sorted arrive as si64 from the ONNX importer; 0 must reach hip.top_k.
+  func.func @topk_smallest_unsorted(
+      %x: tensor<3x8xf32>, %k: tensor<1xi64>) -> (tensor<3x3xf32>, tensor<3x3xi64>) {
+    %values, %indices = "onnx.TopK"(%x, %k) {
+      axis = 1 : si64,
+      largest = 0 : si64,
+      sorted = 0 : si64
+    } : (tensor<3x8xf32>, tensor<1xi64>) -> (tensor<3x3xf32>, tensor<3x3xi64>)
+    return %values, %indices : tensor<3x3xf32>, tensor<3x3xi64>
   }
 
-  // CHECK-LABEL: func.func @argmax_keepdims0
-  // CHECK: hip.cast
-  // CHECK: hip.top_k
-  // CHECK-SAME: tensor<1x77xf32>
-  // CHECK: tensor.collapse_shape
-  // CHECK-NOT: onnx.ArgMax
+  // CHECK-LABEL: func.func @topk_smallest_unsorted
+  // CHECK: hip.top_k(%{{.*}}) ins({{.*}}) outs({{.*}}) {axis = 1 : i64, largest = false, sorted = false}
 }

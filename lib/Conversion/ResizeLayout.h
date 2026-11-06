@@ -1,0 +1,147 @@
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
+
+#ifndef HIP_CONVERSION_RESIZELAYOUT_H
+#define HIP_CONVERSION_RESIZELAYOUT_H
+
+#include "mlir/IR/BuiltinTypes.h"
+
+#include <cmath>
+#include <optional>
+
+namespace mlir {
+namespace hip {
+
+// How a ranked resize is passed to the existing runtime kernel. That kernel
+// is (N, C, s0, s1, s2): the prefix axes are copied, and a trailing window of
+// `spatialRank` axes (1..3) is resampled. A copied axis may sit in the window;
+// equal extents make that sample an identity, so rank-4 NHWC
+// `1xHxWxC -> 1xOHxOWxC` is `N`, `C = 1`, `spatialRank = 3`, window `(H, W,
+// C)`.
+struct HipResizeLaunch {
+  int64_t prefixCount;
+  int64_t spatialRank;
+};
+
+// The window is the shortest suffix that contains every statically resized
+// axis. Axes before it are the copied prefix and must number at most 2.
+// A dynamic axis is legal when both sides are dynamic. A dynamic input with a
+// static output is resampled: lowering reads the input extent from the memref
+// descriptor. A static input with a dynamic output is rejected: the output
+// extent is not in either type.
+// `hostExtents` allows that pair only after conversion has a host index for
+// the output extent (a constant, or a synchronized read of a `sizes` element).
+// Callers that pass `hostExtents` record the resulting launch on the op;
+// lowering would otherwise reject the same memref types. In the prefix the
+// output copies the input extent. In the window, conversion fills the output
+// extent and lowering reads it from the memref descriptor. When nothing is
+// statically resized, a trailing static channel after a dynamic axis is
+// channels-last (prefix is N). Otherwise the copied prefix is the leading
+// two axes. `scales` are the ONNX scales kept on hip.resize: an axis whose
+// scale is not 1 is resampled even when its extent is unchanged
+// (floor(3 * 1.1) = 3), so it cannot be in the copied prefix.
+inline std::optional<HipResizeLaunch>
+planHipResizeLaunch(ShapedType inputType, ShapedType outputType,
+                    bool hostExtents = false,
+                    llvm::ArrayRef<double> scales = {}) {
+  if (!inputType.hasRank() || !outputType.hasRank())
+    return std::nullopt;
+  const int64_t rank = inputType.getRank();
+  if (rank < 3 || rank > 5 || outputType.getRank() != rank)
+    return std::nullopt;
+  if (!scales.empty() && static_cast<int64_t>(scales.size()) != rank)
+    return std::nullopt;
+
+  enum class AxisKind { Copied, Resized, Dynamic };
+  auto axis = [&](int64_t i) -> std::optional<AxisKind> {
+    const bool inDyn = inputType.isDynamicDim(i);
+    const bool outDyn = outputType.isDynamicDim(i);
+    if (inDyn && outDyn)
+      return AxisKind::Dynamic;
+    if (hostExtents && !inDyn && outDyn)
+      return AxisKind::Resized;
+    if (inDyn && !outDyn)
+      return AxisKind::Resized;
+    if (inDyn || outDyn)
+      return std::nullopt;
+    return inputType.getDimSize(i) == outputType.getDimSize(i)
+               ? AxisKind::Copied
+               : AxisKind::Resized;
+  };
+
+  AxisKind kinds[5];
+  int64_t firstResized = rank;
+  int64_t firstDynamic = rank;
+  for (int64_t i = 0; i < rank; ++i) {
+    std::optional<AxisKind> kind = axis(i);
+    if (!kind)
+      return std::nullopt;
+    if (!scales.empty() && scales[i] != 1.0)
+      kind = AxisKind::Resized;
+    kinds[i] = *kind;
+    if (*kind == AxisKind::Resized && firstResized == rank)
+      firstResized = i;
+    if (*kind == AxisKind::Dynamic && firstDynamic == rank)
+      firstDynamic = i;
+  }
+
+  int64_t prefixCount;
+  if (firstResized < rank) {
+    prefixCount = std::min<int64_t>(2, firstResized);
+  } else if (firstDynamic < rank) {
+    bool trailingStaticChannel = false;
+    if (kinds[rank - 1] == AxisKind::Copied) {
+      for (int64_t i = 1; i < rank - 1; ++i) {
+        if (kinds[i] == AxisKind::Dynamic) {
+          trailingStaticChannel = true;
+          break;
+        }
+      }
+    }
+    prefixCount = trailingStaticChannel ? std::min<int64_t>(2, firstDynamic)
+                                        : std::min<int64_t>(2, rank - 1);
+  } else {
+    prefixCount = std::min<int64_t>(2, rank - 1);
+  }
+
+  const int64_t spatialRank = rank - prefixCount;
+  if (prefixCount > 2 || spatialRank < 1 || spatialRank > 3)
+    return std::nullopt;
+  for (int64_t i = 0; i < prefixCount; ++i) {
+    if (kinds[i] == AxisKind::Resized)
+      return std::nullopt;
+  }
+  return HipResizeLaunch{prefixCount, spatialRank};
+}
+
+// Whether ONNX `scales` must reach the kernel. The kernel otherwise samples
+// with out_dim / in_dim, which differs from the supplied scale when
+// in_dim * scale is not exactly the output extent (3 * 1.5 = 4.5 -> 4). A
+// dynamic input extent cannot be checked, so a fractional scale on it counts.
+inline bool resizeScalesDifferFromExtents(ShapedType inputType,
+                                          ShapedType outputType,
+                                          llvm::ArrayRef<double> scales) {
+  for (int64_t i = 0; i < static_cast<int64_t>(scales.size()); ++i) {
+    double scale = scales[i];
+    if (scale == 1.0)
+      continue;
+    if (inputType.isDynamicDim(i)) {
+      if (scale != std::floor(scale))
+        return true;
+      continue;
+    }
+    double prod = static_cast<double>(inputType.getDimSize(i)) * scale;
+    if (outputType.isDynamicDim(i)
+            ? prod != std::floor(prod)
+            : prod != static_cast<double>(outputType.getDimSize(i)))
+      return true;
+  }
+  return false;
+}
+
+} // namespace hip
+} // namespace mlir
+
+#endif // HIP_CONVERSION_RESIZELAYOUT_H

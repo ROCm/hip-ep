@@ -47,14 +47,22 @@ set(_kernel_sources
     hip/bias_gelu_kernel.hip
     hip/fast_gelu_kernel.hip
     hip/leaky_relu_kernel.hip
+    hip/prelu_kernel.hip
+    hip/lrn_kernel.hip
+    hip/trilu_kernel.hip
     hip/swish_kernel.hip
+    hip/pow_kernel.hip
+    hip/swiglu_kernel.hip
     hip/softplus_kernel.hip
     hip/elementwise_where_kernel.hip
     hip/qelementwise_kernel.hip
     hip/qmatmul_kernel.hip
     hip/qgemm_kernel.hip
     hip/qconv_kernel.hip
+    hip/qlinear_conv_kernel.hip
+    hip/qlinear_matmul_kernel.hip
     hip/elementwise_unary_kernel.hip
+    hip/isnan_kernel.hip
     hip/elementwise_binary_kernel.hip  # Mul/Add/Min/Max/Div/Mod/Equal/Less
     hip/tile_kernel.hip
     hip/expand_kernel.hip
@@ -63,28 +71,40 @@ set(_kernel_sources
     hip/pad_kernel.hip
     hip/layer_norm_kernel.hip
     hip/instance_norm_kernel.hip
+    hip/batch_norm_kernel.hip
+    hip/group_norm_kernel.hip
     hip/rms_norm_kernel.hip
+    hip/hyper_connection_kernel.hip
     hip/skip_rms_norm_kernel.hip
     hip/cast_kernel.hip
     hip/range_kernel.hip
     hip/gather_kernel.hip
     hip/gather_elements_kernel.hip
     hip/top_k_kernel.hip
+    hip/random_normal_like_kernel.hip
+    hip/arg_max_kernel.hip
     hip/scatter_elements_kernel.hip
     hip/compress_kernel.hip
     hip/one_hot_kernel.hip
+    hip/ngram_hash_mapping_kernel.hip
     hip/reduce_sum_kernel.hip
     hip/pool_kernel.hip
     hip/conv_kernel.hip
+    hip/matmul_i32_kernel.hip
     hip/conv_transpose_kernel.hip
     hip/resize_kernel.hip
     hip/grid_sample_kernel.hip
     hip/global_pool_kernel.hip
     hip/matmul_nbits_kernel.hip
+    hip/gemv_f16_kernel.hip
+    hip/dequant_bnb4_kernel.hip
     hip/qmoe_kernel.hip
     hip/qmoe_ragged_mm_kernel.hip
     hip/qmoe_amd_kernel.hip
     hip/linear_attention_kernel.hip
+    hip/gated_delta_net_kernel.hip
+    hip/dynamic_sparse_attention_kernel.hip
+    hip/sparse_attention_indexer_kernel.hip
     hip/transpose_kernel.hip
     hip/causal_conv_step_kernel.hip
     hip/slice_kernel.hip
@@ -130,6 +150,8 @@ function(_lut_arch_members arch out_var)
         set(_m gfx1030 gfx1031 gfx1032 gfx1033 gfx1034 gfx1035 gfx1036)
     elseif(arch STREQUAL "gfx11-generic")
         set(_m gfx1100 gfx1101 gfx1102 gfx1103 gfx1150 gfx1151 gfx1152 gfx1153)
+    elseif(arch STREQUAL "gfx11-7-generic")
+        set(_m gfx1170 gfx1171 gfx1172)
     elseif(arch STREQUAL "gfx12-generic")
         set(_m gfx1200 gfx1201)
     else()
@@ -222,7 +244,23 @@ endfunction()
 # One SHARED target per arch. Each builds a fatbin with that single slice;
 # OFFLOAD_ARCHS narrows the global list to one element so the resulting
 # DLL/SO is not bloated with code for archs the consumer won't load.
+if(HIP_EP_RING_ENABLED)
+    list(APPEND _kernel_sources hip/ring/ring_gqa.hip)
+endif()
+
 foreach(_arch IN LISTS HIP_ARCHITECTURES)
+    set(_ring_device_enabled 0)
+    # gfx11-generic also runs on Strix Halo. Compile Ring into that release
+    # slice, but retain the gfx1151-only device guard in ring_gqa.hip.
+    if(_arch STREQUAL "gfx1151" OR _arch STREQUAL "gfx11-generic")
+        set(_ring_device_enabled 1)
+    endif()
+    set(_ring_compile_options "")
+    if(HIP_EP_RING_ENABLED)
+        list(APPEND _ring_compile_options
+            -DHIP_EP_RING_ENABLED=${HIP_EP_RING_ENABLED}
+            -DHIP_EP_RING_DEVICE_ENABLED=${_ring_device_enabled})
+    endif()
     set(_target custom_kernels_${_arch})
     _matmul_nbits_lut_data_source(${_arch} _matmul_lut_src)
     _gqa_lut_data_source(${_arch} _gqa_lut_src)
@@ -237,11 +275,15 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
             # flatbuffers is header-only for reading, so no link library needed.
             ${CMAKE_BINARY_DIR}/schemas
             $<TARGET_PROPERTY:flatbuffers::flatbuffers,INTERFACE_INCLUDE_DIRECTORIES>
+        COMPILE_OPTIONS ${_ring_compile_options}
         OFFLOAD_ARCHS
             ${_arch}
         DEPENDS
             HipSchemas
     )
+    if(HIP_EP_RING_ENABLED AND NOT WIN32)
+        target_compile_options(${_target} PRIVATE ${_ring_compile_options})
+    endif()
     set_target_properties(${_target} PROPERTIES
         OUTPUT_NAME custom_kernels_${_arch}
         FOLDER "custom_kernels"
@@ -268,3 +310,13 @@ set(HIP_CUSTOM_KERNELS_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include" PARENT_
 # in-tree header (lib/Runtime/Kernels/include/hip_custom_kernels.h) so
 # the host-side declarations stay in lockstep with the kernel TUs that
 # implement them.
+
+# Standalone kernel unit-test executables for the packaging CI
+# (BUILD_HIP_KERNEL_UNIT_TESTS, default ON). Their drivers link the
+# custom_kernels_<arch> targets above instead of recompiling any .hip file.
+# Added from this directory rather than the top level because hip::host and
+# the hip_utils.cmake variables (HIP_INCLUDE_DIR, ...) are directory-scoped:
+# a sibling directory of this one cannot see them.
+if(BUILD_HIP_KERNEL_UNIT_TESTS)
+    add_subdirectory(unit_test)
+endif()

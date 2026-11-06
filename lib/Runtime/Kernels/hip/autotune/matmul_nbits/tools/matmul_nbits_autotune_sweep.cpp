@@ -17,8 +17,10 @@
  * Shape list is CSV with a header, columns K,N,block_size,has_zp (extra columns
  * ignored) -- i.e. what extract_shapes.py emits.
  *
- * Build (from the repo root):
- *   clang++ -x hip --offload-arch=gfx1151 -O3 -std=c++17 -w \
+ * Build (from the repo root) for the release target at the release -O2, so the
+ * sweep times the code custom_kernels_<arch>.dll runs (gfx11-generic or gfx1170);
+ * the table is still per chip (update_lut.py --arch):
+ *   clang++ -x hip --offload-arch=gfx11-generic -O2 -std=c++17 -w \
  *       -I lib/Runtime/Kernels/include \
  *       lib/Runtime/Kernels/hip/autotune/matmul_nbits/tools/matmul_nbits_autotune_sweep.cpp \
  *       lib/Runtime/Kernels/hip/matmul_nbits_kernel.hip -o matmul_nbits_sweep.exe
@@ -54,7 +56,7 @@ extern "C" int hip_matmul_nbits_u4_wmma_stride(
 extern "C" int hip_matmul_nbits_dp4a(
     void* stream_v, const void* A, const void* B, const void* scales,
     const void* zp_u8, const void* bias, void* out,
-    int64_t N, int64_t K, int64_t block_size,
+    int64_t M, int64_t N, int64_t K, int64_t block_size,
     void* a_qb_scratch, void* a_scale_scratch);
 
 #define HIP_OK(c)                                                             \
@@ -159,15 +161,16 @@ struct Buffers {
 
 int main(int argc, char** argv) {
   const char* shapes_path = nullptr;
-  std::vector<int> m_list = {1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096};
+  std::vector<int> m_list = {1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096,
+                             8192, 16384};
   bool do_prefill = true, do_decode = true, do_dp4a = true, do_padrow = true;
   int limit = 0;
   /* Skip (M, N) pairs whose C alone would exceed this. Sized to pass every real
-   * prefill shape below big_n at the full M ladder -- the widest is N~32768 x
-   * M=4096 = 134 Mi halfs (268 MB) -- while still capping the lm_head columns,
-   * which big_n already forces to M=1. The old 32 Mi cap wrongly dropped real
-   * up/down-proj shapes at M=2048/4096 (e.g. N=17408 K=5120). */
-  long long max_out_elems = 256ll << 20;  // 256 Mi halfs = 512 MB
+   * prefill shape below big_n at the full M ladder -- the widest is N=32768 x
+   * M=16384 = 512 Mi halfs -- while still capping the lm_head columns, which
+   * big_n already forces to M=1. A 32 Mi cap dropped real up/down-proj shapes
+   * (N=17408 K=5120 at M=2048/4096); 256 Mi still drops those at M=16384. */
+  long long max_out_elems = 512ll << 20;  // 512 Mi halfs = 1 GB
   /* Columns at or above this are the lm_head / vocab projection, whose B runs
    * to 600 MB and whose WMMA sweep is ~680 dispatches over it -- tens of
    * minutes per M.
@@ -304,7 +307,7 @@ int main(int argc, char** argv) {
           std::fprintf(stderr, "#SHAPE path=dp4a M=1 N=%d K=%d gs=%d zp=%d\n",
                        s.n, s.k, s.gs, int(s.zp));
           hip_matmul_nbits_dp4a(nullptr, buf.a, buf.b, buf.sc, zp_u, nullptr,
-                                buf.out, s.n, s.k, s.gs, buf.qb, buf.qs);
+                                buf.out, 1, s.n, s.k, s.gs, buf.qb, buf.qs);
           HIP_OK(hipDeviceSynchronize());
         }
         continue;

@@ -134,5 +134,26 @@ module {
   // EXTERN:       %[[EM1:.*]] = hip.mul(%{{.*}}) ins(%[[EA:.*]], %[[EA]] : tensor<1x64x128x128xf16>, tensor<1x64x128x128xf16>) outs({{.*}}) -> tensor<1x64x128x128xf16>
   // EXTERN:       hip.mul(%{{.*}}) ins(%[[EM1]], %[[EA]] : tensor<1x64x128x128xf16>, tensor<1x64x128x128xf16>) outs({{.*}}) -> tensor<1x64x128x128xf16>
 
+  // Test 8: a fractional exponent that Mul / Sqrt / Reciprocal cannot express
+  // lowers to hip.pow. 0.25 is exact in f32 and f64.
+  func.func @test_pow_fractional(%arg0: tensor<4x8xf32>) -> tensor<4x8xf32> {
+    %exp = arith.constant dense<2.500000e-01> : tensor<f32>
+    %0 = "onnx.Pow"(%arg0, %exp) : (tensor<4x8xf32>, tensor<f32>) -> tensor<4x8xf32>
+    return %0 : tensor<4x8xf32>
+  }
+  // CHECK-LABEL: func.func @test_pow_fractional
+  // CHECK-NOT: onnx.Pow
+  // CHECK: hip.pow
+  // CHECK-SAME: exponent = 2.500000e-01 : f64
+
+  // Test 9: a runtime exponent is not a compile-time scalar.
+  func.func @test_pow_runtime_exp(%arg0: tensor<4x8xf32>, %arg1: tensor<f32>) -> tensor<4x8xf32> {
+    %0 = "onnx.Pow"(%arg0, %arg1) : (tensor<4x8xf32>, tensor<f32>) -> tensor<4x8xf32>
+    return %0 : tensor<4x8xf32>
+  }
+  // CHECK-LABEL: func.func @test_pow_runtime_exp
+  // CHECK: onnx.Pow
+  // CHECK-NOT: hip.pow
+
   "onnx.EntryPoint"() {func = @main_graph} : () -> ()
 }

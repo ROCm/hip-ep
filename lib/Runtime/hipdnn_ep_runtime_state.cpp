@@ -9,6 +9,7 @@
 #include "hipdnn_ep_runtime.h"
 #include "op_profile.h"
 #include "runtime_state_internal.h"
+#include "transient_arena.h"
 
 #if defined(HIPDNN_EP_REAL_RUNTIME)
 #include "gqa_autotune.h"
@@ -18,15 +19,327 @@
 #include "model_metadata_generated.h"
 #include "morphizen-foundation/file_io.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <optional>
 #include <string>
 #include <unordered_map>
+#include <vector>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <pthread.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 namespace {
 using ProviderOptions = std::unordered_map<std::string, std::string>;
+
+// Maps the whole file read-only; the view outlives the closed handles.
+void *map_file_readonly(const char *path, size_t *out_size) {
+#ifdef _WIN32
+  HANDLE file = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, nullptr,
+                            OPEN_EXISTING, FILE_FLAG_RANDOM_ACCESS, nullptr);
+  if (file == INVALID_HANDLE_VALUE) {
+    return nullptr;
+  }
+  LARGE_INTEGER size;
+  void *view = nullptr;
+  if (GetFileSizeEx(file, &size) && size.QuadPart > 0) {
+    HANDLE mapping =
+        CreateFileMappingA(file, nullptr, PAGE_READONLY, 0, 0, nullptr);
+    if (mapping) {
+      view = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
+      CloseHandle(mapping);
+    }
+  }
+  CloseHandle(file);
+  *out_size = view ? static_cast<size_t>(size.QuadPart) : 0;
+  return view;
+#else
+  int fd = open(path, O_RDONLY);
+  if (fd < 0) {
+    return nullptr;
+  }
+  struct stat st;
+  void *view = nullptr;
+  if (fstat(fd, &st) == 0 && st.st_size > 0) {
+    view = mmap(nullptr, static_cast<size_t>(st.st_size), PROT_READ, MAP_SHARED,
+                fd, 0);
+    if (view == MAP_FAILED) {
+      view = nullptr;
+    }
+  }
+  close(fd);
+  *out_size = view ? static_cast<size_t>(st.st_size) : 0;
+  return view;
+#endif
 }
+
+// Session transient arena: one device allocation made right after the
+// constants blob, before the host application allocates its own long-lived
+// buffers (e.g. a KV cache). Pools, workspace and op scratch first grow on the
+// first inference; serving them from the arena keeps their placement
+// independent of what was allocated in between. Requests that do not fit fall
+// back to hipMalloc. See docs/design/pool-allocs-memory-planning.md.
+//
+// Sizing: provider option transient_arena_mb, else
+// HIPDNN_EP_TRANSIENT_ARENA_MB, else kDefaultArenaMiB for sessions with at
+// least kArenaMinConstantsMiB of constants (small models reserve nothing). The
+// default covers the first-inference transients of a chunked-prefill MoE
+// decoder session; larger demands spill to hipMalloc.
+constexpr size_t kDefaultArenaMiB = 128;
+constexpr size_t kArenaMinConstantsMiB = 256;
+constexpr size_t kMaxArenaMiB = 4096;
+constexpr double kMiB = 1024.0 * 1024.0;
+
+struct TransientArena {
+  char *base = nullptr;
+  hipdnn_ep::TransientArenaAllocator blocks;
+  std::unordered_map<void *, size_t> direct_live; // fallback ptr -> bytes
+  size_t live = 0, live_hwm = 0;                  // arena + fallback
+
+  void track(const RuntimeState *state, size_t bytes, bool in_arena) {
+    live += bytes;
+    live_hwm = std::max(live_hwm, live);
+    RUNTIME_DEBUG_LOG("[ARENA] alloc state=%p bytes=%zu %s arena_used_mb=%.1f "
+                      "live_mb=%.1f hwm_mb=%.1f\n",
+                      static_cast<const void *>(state), bytes,
+                      in_arena ? "arena" : "fallback", blocks.used() / kMiB,
+                      live / kMiB, live_hwm / kMiB);
+  }
+};
+
+// Returns the arena size in MiB; malformed values keep the default.
+size_t transient_arena_mib(RuntimeState *state, size_t constants_bytes) {
+  const char *v =
+      hipdnn_ep_runtime_get_provider_option(state, "transient_arena_mb");
+  const char *source = "provider option transient_arena_mb";
+  if (!v || !v[0]) {
+    v = getenv("HIPDNN_EP_TRANSIENT_ARENA_MB");
+    source = "HIPDNN_EP_TRANSIENT_ARENA_MB";
+  }
+  const size_t fallback =
+      constants_bytes >= (kArenaMinConstantsMiB << 20) ? kDefaultArenaMiB : 0;
+  if (!v || !v[0])
+    return fallback;
+  char *end = nullptr;
+  const unsigned long long mib = strtoull(v, &end, 10);
+  if (end == v || *end != '\0') {
+    fprintf(stderr, "[ARENA] ignoring malformed %s='%s'\n", source, v);
+    return fallback;
+  }
+  return std::min<size_t>(static_cast<size_t>(mib), kMaxArenaMiB);
+}
+
+void create_transient_arena(RuntimeState *state, size_t constants_bytes) {
+  if (state->transient_arena)
+    return;
+  const size_t bytes = transient_arena_mib(state, constants_bytes) << 20;
+  if (bytes == 0)
+    return;
+  void *p = nullptr;
+  if (hipMalloc(&p, bytes) != hipSuccess) {
+    (void)hipGetLastError();
+    fprintf(stderr,
+            "[ARENA] hipMalloc(%zu) for the transient arena failed; "
+            "transient buffers use hipMalloc\n",
+            bytes);
+    return;
+  }
+  auto *a = new TransientArena();
+  a->base = static_cast<char *>(p);
+  a->blocks.init(bytes);
+  state->transient_arena = a;
+  RUNTIME_DEBUG_LOG("[ARENA] create state=%p base=%p bytes=%zu\n",
+                    static_cast<void *>(state), p, bytes);
+}
+
+void destroy_transient_arena(RuntimeState *state) {
+  auto *a = static_cast<TransientArena *>(state->transient_arena);
+  if (!a)
+    return;
+  RUNTIME_DEBUG_LOG("[ARENA] state=%p arena_mb=%.1f arena_hwm_mb=%.1f "
+                    "transient_hwm_mb=%.1f hits=%zu misses=%zu miss_mb=%.1f\n",
+                    static_cast<void *>(state), a->blocks.size() / kMiB,
+                    a->blocks.highWaterMark() / kMiB, a->live_hwm / kMiB,
+                    a->blocks.hits(), a->blocks.misses(),
+                    a->blocks.missBytes() / kMiB);
+  HIP_CLEANUP(hipFree(a->base));
+  delete a;
+  state->transient_arena = nullptr;
+}
+} // namespace
+
+hipError_t hipdnn_ep_state_device_alloc(RuntimeState *state, void **ptr,
+                                        size_t size) {
+  auto *a =
+      state ? static_cast<TransientArena *>(state->transient_arena) : nullptr;
+  if (!a)
+    return hipMalloc(ptr, size);
+  if (std::optional<size_t> offset = a->blocks.allocate(size)) {
+    *ptr = a->base + *offset;
+    a->track(state, a->blocks.blockBytes(*offset), true);
+    return hipSuccess;
+  }
+  const hipError_t err = hipMalloc(ptr, size);
+  if (err == hipSuccess) {
+    a->direct_live[*ptr] = size;
+    a->track(state, size, false);
+  }
+  return err;
+}
+
+hipError_t hipdnn_ep_state_device_free(RuntimeState *state, void *ptr) {
+  if (!ptr)
+    return hipSuccess;
+  auto *a =
+      state ? static_cast<TransientArena *>(state->transient_arena) : nullptr;
+  if (!a)
+    return hipFree(ptr);
+  char *p = static_cast<char *>(ptr);
+  if (p < a->base || p >= a->base + a->blocks.size()) {
+    auto d = a->direct_live.find(ptr);
+    if (d != a->direct_live.end()) {
+      a->live -= d->second;
+      a->direct_live.erase(d);
+    }
+    return hipFree(ptr);
+  }
+  // hipFree synchronizes the device; returning a block must too, or the next
+  // allocation could hand the region to new work while kernels still use it.
+  const hipError_t err = hipDeviceSynchronize();
+  const size_t offset = static_cast<size_t>(p - a->base);
+  a->live -= a->blocks.blockBytes(offset);
+  if (!a->blocks.release(offset))
+    fprintf(stderr, "[ARENA] free of %p: not a live arena block\n", ptr);
+  return err;
+}
+
+namespace {
+void unmap_file(void *view, size_t size) {
+#ifdef _WIN32
+  (void)size;
+  UnmapViewOfFile(view);
+#else
+  munmap(view, size);
+#endif
+}
+
+struct RowCopyTask {
+  const uint8_t *const *rows;
+  uint8_t *dst;
+  size_t row_bytes;
+  size_t begin;
+  size_t end;
+};
+
+// Prefetch issues the slice's reads concurrently so the copy below does not
+// fault the rows in one at a time. A null row is written as zeros.
+void copy_rows(const RowCopyTask &t) {
+#ifdef _WIN32
+  std::vector<WIN32_MEMORY_RANGE_ENTRY> ranges;
+  ranges.reserve(t.end - t.begin);
+  for (size_t i = t.begin; i < t.end; ++i) {
+    if (t.rows[i]) {
+      ranges.push_back({const_cast<uint8_t *>(t.rows[i]), t.row_bytes});
+    }
+  }
+  if (!ranges.empty()) {
+    PrefetchVirtualMemory(GetCurrentProcess(), ranges.size(), ranges.data(), 0);
+  }
+#else
+  const uintptr_t page = static_cast<uintptr_t>(sysconf(_SC_PAGESIZE));
+  for (size_t i = t.begin; i < t.end; ++i) {
+    if (!t.rows[i]) {
+      continue;
+    }
+    uintptr_t begin = reinterpret_cast<uintptr_t>(t.rows[i]) & ~(page - 1);
+    uintptr_t end = reinterpret_cast<uintptr_t>(t.rows[i]) + t.row_bytes;
+    madvise(reinterpret_cast<void *>(begin), end - begin, MADV_WILLNEED);
+  }
+#endif
+  for (size_t i = t.begin; i < t.end; ++i) {
+    if (t.rows[i]) {
+      std::memcpy(t.dst + i * t.row_bytes, t.rows[i], t.row_bytes);
+    } else {
+      std::memset(t.dst + i * t.row_bytes, 0, t.row_bytes);
+    }
+  }
+}
+
+#ifdef _WIN32
+DWORD WINAPI copy_rows_thread(LPVOID arg) {
+  copy_rows(*static_cast<const RowCopyTask *>(arg));
+  return 0;
+}
+#else
+void *copy_rows_thread(void *arg) {
+  copy_rows(*static_cast<const RowCopyTask *>(arg));
+  return nullptr;
+}
+#endif
+
+void gather_rows(const std::vector<const uint8_t *> &rows, size_t row_bytes,
+                 uint8_t *dst) {
+  constexpr size_t kMaxThreads = 8;
+  constexpr size_t kMinBytesPerThread = 4 << 20;
+  size_t n = rows.size();
+  size_t threads = std::min(
+      kMaxThreads, std::max<size_t>(1, n * row_bytes / kMinBytesPerThread));
+  std::vector<RowCopyTask> tasks(threads);
+  for (size_t t = 0; t < threads; ++t) {
+    tasks[t] = {rows.data(), dst, row_bytes, n * t / threads,
+                n * (t + 1) / threads};
+  }
+#ifdef _WIN32
+  std::vector<HANDLE> handles;
+  for (size_t t = 1; t < threads; ++t) {
+    HANDLE h =
+        CreateThread(nullptr, 0, copy_rows_thread, &tasks[t], 0, nullptr);
+    if (h) {
+      handles.push_back(h);
+    } else {
+      copy_rows(tasks[t]);
+    }
+  }
+  copy_rows(tasks[0]);
+  if (!handles.empty()) {
+    WaitForMultipleObjects(static_cast<DWORD>(handles.size()), handles.data(),
+                           TRUE, INFINITE);
+  }
+  for (HANDLE h : handles) {
+    CloseHandle(h);
+  }
+#else
+  std::vector<pthread_t> handles;
+  for (size_t t = 1; t < threads; ++t) {
+    pthread_t h;
+    if (pthread_create(&h, nullptr, copy_rows_thread, &tasks[t]) == 0) {
+      handles.push_back(h);
+    } else {
+      copy_rows(tasks[t]);
+    }
+  }
+  copy_rows(tasks[0]);
+  for (pthread_t h : handles) {
+    pthread_join(h, nullptr);
+  }
+#endif
+}
+} // namespace
 
 // Forward decl of static helpers defined later in this file.
 static int initialize_state_handles(RuntimeState **out_state);
@@ -94,6 +407,7 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
 #endif
 
   if (!metadata_blob || blob_size == 0) {
+    create_transient_arena(*out_state, 0);
     TIMING_LOG("[Session] hipdnn_ep_state_init_with_fs total: %.3fs (no "
                "constants)\n",
                elapsed_since(t0));
@@ -104,6 +418,7 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   auto *constants = meta->constants();
   int64_t count = constants ? (int64_t)constants->size() : 0;
   if (count <= 0) {
+    create_transient_arena(*out_state, 0);
     TIMING_LOG("[Session] hipdnn_ep_state_init_with_fs total: %.3fs (no "
                "constants)\n",
                elapsed_since(t0));
@@ -162,6 +477,9 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   RUNTIME_DEBUG_LOG("[CONSTANTS] Loaded constants blob: %zu bytes\n",
                     total_size);
 
+  // After the constants blob, so the weights keep their placement priority.
+  create_transient_arena(*out_state, total_size);
+
   TIMING_LOG("[Session] hipdnn_ep_state_init_with_fs total: %.3fs\n",
              elapsed_since(t0));
   return 0;
@@ -187,10 +505,17 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->gpu_constants_blob = nullptr;
   state->gpu_constants = nullptr;
   state->num_constants = 0;
+  state->disk_constants = nullptr;
+  state->disk_gather_staging = nullptr;
+  state->disk_gather_staging_size = 0;
   // Per-domain pool arrays start empty; grown on demand (no compile-time cap).
   state->num_pool_domains = 0;
   state->pool_base = nullptr;
   state->pool_size = nullptr;
+  state->num_scan_pool_domains = 0;
+  state->scan_pool_base = nullptr;
+  state->scan_pool_size = nullptr;
+  state->scan_pool_active = false;
   state->buffer_offsets = nullptr;
   state->num_buffers = 0;
   state->workspace = nullptr;
@@ -202,6 +527,7 @@ static int initialize_state_handles(RuntimeState **out_state) {
   // and hipdnn_ep_alloc_output then forwards each graph-output request to it.
   state->output_allocator.self = nullptr;
   state->output_allocator.allocate = nullptr;
+  state->transient_arena = nullptr;
   state->qmoe_scratch = nullptr;
   state->qmoe_scratch_size = 0;
   state->qmoe_host_scratch = nullptr;
@@ -232,6 +558,9 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->seqlens_k_cached_valid = false;
   state->seqlens_k_cached_val = 0;
   state->seqlens_k_cached_ptr = nullptr;
+  state->sai_past_len_cached_valid = false;
+  state->sai_past_len_cached_val = 0;
+  state->sai_past_len_cached_ptr = nullptr;
   state->loop_iter_cpu_buf = nullptr;
   state->loop_iter_capacity = 0;
   state->loop_iter_dev = nullptr;
@@ -338,6 +667,9 @@ compute_constants_total_size(const mlir::hip::HipModelMetaInfo *meta) {
     return 0;
   size_t total = 0;
   for (int64_t i = 0, n = (int64_t)constants->size(); i < n; ++i) {
+    if (constants->Get(i)->disk_resident()) {
+      continue;
+    }
     size_t end = static_cast<size_t>(constants->Get(i)->offset()) +
                  static_cast<size_t>(constants->Get(i)->size());
     if (end > total)
@@ -370,6 +702,9 @@ static int hipmalloc_and_fixup(RuntimeState *state,
              record_elapsed(t_prev), total_size);
   auto *constants = meta->constants();
   for (int64_t i = 0, n = (int64_t)constants->size(); i < n; ++i) {
+    if (constants->Get(i)->disk_resident()) {
+      continue;
+    }
     size_t offset = static_cast<size_t>(constants->Get(i)->offset());
     state->gpu_constants[i] =
         static_cast<char *>(state->gpu_constants_blob) + offset;
@@ -612,10 +947,23 @@ static int per_entry_load_constants(RuntimeState *state,
 
   // Pre-scan for max tensor size -> one-shot staging alloc.
   size_t max_tensor_size = 0;
+  bool anyDiskResident = false;
   for (int64_t i = 0; i < count; ++i) {
+    if (constants->Get(i)->disk_resident()) {
+      anyDiskResident = true;
+      continue;
+    }
     size_t sz = (size_t)constants->Get(i)->size();
     if (sz > max_tensor_size)
       max_tensor_size = sz;
+  }
+  if (anyDiskResident) {
+    state->disk_constants = static_cast<DiskConstant *>(
+        calloc(static_cast<size_t>(count), sizeof(DiskConstant)));
+    if (!state->disk_constants) {
+      fprintf(stderr, "per_entry: failed to alloc disk constant table\n");
+      return 1;
+    }
   }
   uint8_t *staging =
       max_tensor_size ? (uint8_t *)malloc(max_tensor_size) : nullptr;
@@ -634,9 +982,38 @@ static int per_entry_load_constants(RuntimeState *state,
 
   ConstantsFileReaderCache cfcache; // RAII; default-initialized above
 
+  size_t disk_resident_bytes = 0;
   for (int64_t i = 0; i < count; ++i) {
     auto *c = constants->Get(i);
     size_t sz = (size_t)c->size();
+
+    if (c->disk_resident()) {
+      auto *fref = c->source_as_FileRefSource();
+      const char *path = fref && fref->path() ? fref->path()->c_str() : "";
+      size_t view_size = 0;
+      void *view = map_file_readonly(path, &view_size);
+      int64_t file_offset = fref ? fref->file_offset() : 0;
+      if (view && (file_offset < 0 ||
+                   (uint64_t)file_offset + sz > (uint64_t)view_size)) {
+        unmap_file(view, view_size);
+        view = nullptr;
+      }
+      if (!view) {
+        fprintf(stderr,
+                "per_entry: failed to map disk-resident entry %lld source: "
+                "%s\n",
+                (long long)i, path);
+        free(staging);
+        fref_cache_release(&fcache);
+        return 1;
+      }
+      state->disk_constants[i] = {static_cast<const uint8_t *>(view) +
+                                      file_offset,
+                                  view, view_size, c->size()};
+      disk_resident_bytes += sz;
+      continue;
+    }
+
     void *dst = static_cast<char *>(state->gpu_constants_blob) + c->offset();
 
     switch (c->source_type()) {
@@ -722,8 +1099,9 @@ static int per_entry_load_constants(RuntimeState *state,
     }
   }
 
-  TIMING_LOG("[Session] per_entry upload: %.3fs (%lld constants)\n",
-             record_elapsed(t_prev), (long long)count);
+  TIMING_LOG("[Session] per_entry upload: %.3fs (%lld constants, %zu bytes "
+             "left disk-resident)\n",
+             record_elapsed(t_prev), (long long)count, disk_resident_bytes);
 
   free(staging);
   fref_cache_release(&fcache);
@@ -751,12 +1129,12 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
 
   // Free shared workspace (if allocated)
   if (state->workspace) {
-    HIP_CLEANUP(hipFree(state->workspace));
+    HIP_CLEANUP(hipdnn_ep_state_device_free(state, state->workspace));
   }
 
   // Free qmoe device scratch + pinned host mirror (if allocated)
   if (state->qmoe_scratch) {
-    HIP_CLEANUP(hipFree(state->qmoe_scratch));
+    HIP_CLEANUP(hipdnn_ep_state_device_free(state, state->qmoe_scratch));
   }
   if (state->qmoe_host_scratch) {
     HIP_CLEANUP(hipHostFree(state->qmoe_host_scratch));
@@ -764,7 +1142,7 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
 
   // Free com.amd qmoe device scratch + pinned host mirror (if allocated)
   if (state->qmoe_amd_scratch) {
-    HIP_CLEANUP(hipFree(state->qmoe_amd_scratch));
+    HIP_CLEANUP(hipdnn_ep_state_device_free(state, state->qmoe_amd_scratch));
   }
   if (state->qmoe_amd_host_scratch) {
     HIP_CLEANUP(hipHostFree(state->qmoe_amd_host_scratch));
@@ -773,31 +1151,33 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   // Free the convolution workspace pool (if allocated). The stream
   // sync above has drained any in-flight conv that may still be reading it.
   if (state->conv_scratch) {
-    HIP_CLEANUP(hipFree(state->conv_scratch));
+    HIP_CLEANUP(hipdnn_ep_state_device_free(state, state->conv_scratch));
   }
 
   // Free the QDQ LpNormalization intermediates and scalar parameters.
   if (state->qlpnormalization_scratch) {
-    HIP_CLEANUP(hipFree(state->qlpnormalization_scratch));
+    HIP_CLEANUP(
+        hipdnn_ep_state_device_free(state, state->qlpnormalization_scratch));
   }
 
   if (state->qsigmoid_scratch) {
-    HIP_CLEANUP(hipFree(state->qsigmoid_scratch));
+    HIP_CLEANUP(hipdnn_ep_state_device_free(state, state->qsigmoid_scratch));
   }
 
   // Free the W4A8 dp4a matmul_nbits scratch (if allocated).
   if (state->matmul_dp4a_scratch) {
-    HIP_CLEANUP(hipFree(state->matmul_dp4a_scratch));
+    HIP_CLEANUP(hipdnn_ep_state_device_free(state, state->matmul_dp4a_scratch));
   }
 
   // Free the linear-attention chunk-parallel prefill scratch (if allocated).
   // The stream sync above has drained any in-flight prefill still reading it.
   if (state->la_scratch) {
-    HIP_CLEANUP(hipFree(state->la_scratch));
+    HIP_CLEANUP(hipdnn_ep_state_device_free(state, state->la_scratch));
   }
 
   if (state->gqa_fp32_adapter_scratch) {
-    HIP_CLEANUP(hipFree(state->gqa_fp32_adapter_scratch));
+    HIP_CLEANUP(
+        hipdnn_ep_state_device_free(state, state->gqa_fp32_adapter_scratch));
   }
 
   // Tear down per-op state slots. Each entry's deletor destroys its concrete
@@ -845,7 +1225,7 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   if (state->pool_base) {
     for (int i = 0; i < state->num_pool_domains; ++i) {
       if (state->pool_base[i]) {
-        HIP_CLEANUP(hipFree(state->pool_base[i]));
+        HIP_CLEANUP(hipdnn_ep_state_device_free(state, state->pool_base[i]));
       }
     }
     free(state->pool_base);
@@ -856,9 +1236,27 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     state->pool_size = nullptr;
   }
   state->num_pool_domains = 0;
+  if (state->scan_pool_base) {
+    for (int i = 0; i < state->num_scan_pool_domains; ++i) {
+      if (state->scan_pool_base[i]) {
+        HIP_CLEANUP(
+            hipdnn_ep_state_device_free(state, state->scan_pool_base[i]));
+      }
+    }
+    free(state->scan_pool_base);
+    state->scan_pool_base = nullptr;
+  }
+  if (state->scan_pool_size) {
+    free(state->scan_pool_size);
+    state->scan_pool_size = nullptr;
+  }
+  state->num_scan_pool_domains = 0;
+  state->scan_pool_active = false;
   if (state->buffer_offsets) {
     free(state->buffer_offsets);
   }
+
+  destroy_transient_arena(state);
 
   // Free the single constants blob and the pointer array.
   if (state->gpu_constants_blob) {
@@ -866,6 +1264,18 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   }
   if (state->gpu_constants)
     free(state->gpu_constants);
+  if (state->disk_constants) {
+    for (size_t i = 0; i < state->num_constants; ++i) {
+      if (state->disk_constants[i].view) {
+        unmap_file(state->disk_constants[i].view,
+                   state->disk_constants[i].view_size);
+      }
+    }
+    free(state->disk_constants);
+  }
+  if (state->disk_gather_staging) {
+    HIP_CLEANUP(hipHostFree(state->disk_gather_staging));
+  }
 
   // (The GQA GEMM descriptor cache is no longer freed here: it moved into each
   // gqa instance's GqaState op-state slot, freed by the slot's deletor in the
@@ -928,6 +1338,88 @@ void *hipdnn_ep_constant_get(RuntimeState *state, int64_t index) {
   return state->gpu_constants[index];
 }
 
+static int ensure_disk_gather_staging(RuntimeState *state, size_t size) {
+  if (size <= state->disk_gather_staging_size) {
+    return 0;
+  }
+  if (state->disk_gather_staging) {
+    HIP_CLEANUP(hipHostFree(state->disk_gather_staging));
+    state->disk_gather_staging = nullptr;
+    state->disk_gather_staging_size = 0;
+  }
+  if (hipHostMalloc(&state->disk_gather_staging, size, hipHostMallocDefault) !=
+      hipSuccess) {
+    fprintf(stderr, "disk-resident gather: hipHostMalloc(%zu) failed\n", size);
+    state->disk_gather_staging = nullptr;
+    return 1;
+  }
+  state->disk_gather_staging_size = size;
+  return 0;
+}
+
+int hipdnn_ep_disk_constant_gather_rows(RuntimeState *state,
+                                        int64_t constant_index,
+                                        const void *indices,
+                                        int64_t num_indices,
+                                        int64_t index_bytes, int64_t num_rows,
+                                        int64_t row_bytes, void *dst) {
+  if (!state || !state->disk_constants || constant_index < 0 ||
+      (size_t)constant_index >= state->num_constants || !indices || !dst ||
+      (index_bytes != 4 && index_bytes != 8)) {
+    fprintf(stderr, "disk-resident gather: invalid arguments (index=%lld)\n",
+            (long long)constant_index);
+    return -1;
+  }
+  const DiskConstant &table = state->disk_constants[constant_index];
+  if (!table.data || num_rows <= 0 || row_bytes <= 0 ||
+      row_bytes * num_rows != table.size) {
+    fprintf(stderr,
+            "disk-resident gather: constant %lld is not a disk-resident table "
+            "of %lld rows x %lld bytes\n",
+            (long long)constant_index, (long long)num_rows,
+            (long long)row_bytes);
+    return -1;
+  }
+
+  const size_t indices_size = (size_t)(num_indices * index_bytes);
+  const size_t indices_region = (indices_size + 63) & ~size_t(63);
+  const size_t rows_size = (size_t)(num_indices * row_bytes);
+  if (ensure_disk_gather_staging(state, indices_region + rows_size) != 0) {
+    return -1;
+  }
+  auto *host_indices = static_cast<uint8_t *>(state->disk_gather_staging);
+  uint8_t *host_rows = host_indices + indices_region;
+
+  if (hipMemcpyAsync(host_indices, indices, indices_size, hipMemcpyDeviceToHost,
+                     state->stream) != hipSuccess ||
+      hipStreamSynchronize(state->stream) != hipSuccess) {
+    fprintf(stderr, "disk-resident gather: indices readback failed\n");
+    return -1;
+  }
+
+  std::vector<const uint8_t *> rows((size_t)num_indices);
+  for (int64_t k = 0; k < num_indices; ++k) {
+    int64_t row = index_bytes == 8
+                      ? reinterpret_cast<const int64_t *>(host_indices)[k]
+                      : reinterpret_cast<const int32_t *>(host_indices)[k];
+    if (row < 0) {
+      row += num_rows;
+    }
+    rows[(size_t)k] = row < 0 || row >= num_rows
+                          ? nullptr
+                          : table.data + (size_t)row * (size_t)row_bytes;
+  }
+  gather_rows(rows, (size_t)row_bytes, host_rows);
+
+  if (hipMemcpyAsync(dst, host_rows, rows_size, hipMemcpyHostToDevice,
+                     state->stream) != hipSuccess ||
+      hipStreamSynchronize(state->stream) != hipSuccess) {
+    fprintf(stderr, "disk-resident gather: row upload failed\n");
+    return -1;
+  }
+  return 0;
+}
+
 void *hipdnn_ep_state_get_stream(RuntimeState *state) {
   return state ? static_cast<void *>(state->stream) : nullptr;
 }
@@ -968,6 +1460,8 @@ extern "C"
   }
   state->seqlens_k_cached_valid = false;
   state->seqlens_k_cached_ptr = nullptr;
+  state->sai_past_len_cached_valid = false;
+  state->sai_past_len_cached_ptr = nullptr;
   // Publish the session stream for ABI-fixed helpers (memrefCopy) that run
   // before/within main_graph and otherwise default to stream 0.
   hipdnn_ep_set_current_stream(static_cast<void *>(state->stream));
@@ -1074,7 +1568,8 @@ int hipdnn_ep_pool_init(RuntimeState *state, size_t pool_size,
   // time. Multi-domain functions leave domains 1..N empty here; those are grown
   // on first hip.get_pool call (lazy init).
   if (pool_size > 0) {
-    if (hipMalloc(&state->pool_base[0], pool_size) != hipSuccess) {
+    if (hipdnn_ep_state_device_alloc(state, &state->pool_base[0], pool_size) !=
+        hipSuccess) {
       fprintf(stderr, "Failed to allocate memory pool of size %zu bytes\n",
               pool_size);
       return 2; // Pool allocation failed
@@ -1093,7 +1588,7 @@ int hipdnn_ep_pool_init(RuntimeState *state, size_t pool_size,
     if (!state->buffer_offsets) {
       fprintf(stderr, "Failed to allocate buffer offsets array\n");
       if (state->pool_base[0]) {
-        HIP_CLEANUP(hipFree(state->pool_base[0]));
+        HIP_CLEANUP(hipdnn_ep_state_device_free(state, state->pool_base[0]));
         state->pool_base[0] = nullptr;
       }
       return 1; // Allocation failed
@@ -1177,10 +1672,12 @@ void *hipdnn_ep_get_pool_base(RuntimeState *state, int domain_id,
           "hipdnn_ep_get_pool_base: growing pool[%d] %zu -> %zu bytes "
           "(rare; first time this large input shape was seen)\n",
           domain_id, state->pool_size[domain_id], needed_size);
-      HIP_CLEANUP(hipFree(state->pool_base[domain_id]));
+      HIP_CLEANUP(
+          hipdnn_ep_state_device_free(state, state->pool_base[domain_id]));
     }
     void *new_base = nullptr;
-    if (hipMalloc(&new_base, needed_size) != hipSuccess) {
+    if (hipdnn_ep_state_device_alloc(state, &new_base, needed_size) !=
+        hipSuccess) {
       fprintf(stderr,
               "hipdnn_ep_get_pool_base: hipMalloc failed for pool[%d] grow "
               "(%zu -> %zu bytes)\n",
@@ -1280,12 +1777,13 @@ int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size) {
     if (state->stream) {
       HIP_CLEANUP(hipStreamSynchronize(state->stream));
     }
-    HIP_CLEANUP(hipFree(state->workspace));
+    HIP_CLEANUP(hipdnn_ep_state_device_free(state, state->workspace));
     state->workspace = nullptr;
     state->workspace_size = 0;
   }
 
-  if (hipMalloc(&state->workspace, alloc_size) != hipSuccess) {
+  if (hipdnn_ep_state_device_alloc(state, &state->workspace, alloc_size) !=
+      hipSuccess) {
     fprintf(
         stderr,
         "hipdnn_ep_state_ensure_workspace: hipMalloc failed for %zu bytes\n",
@@ -1341,12 +1839,13 @@ int hipdnn_ep_state_ensure_qmoe_scratch(RuntimeState *state,
     if (state->stream) {
       HIP_CLEANUP(hipStreamSynchronize(state->stream));
     }
-    HIP_CLEANUP(hipFree(state->qmoe_scratch));
+    HIP_CLEANUP(hipdnn_ep_state_device_free(state, state->qmoe_scratch));
     state->qmoe_scratch = nullptr;
     state->qmoe_scratch_size = 0;
   }
 
-  if (hipMalloc(&state->qmoe_scratch, alloc_size) != hipSuccess) {
+  if (hipdnn_ep_state_device_alloc(state, &state->qmoe_scratch, alloc_size) !=
+      hipSuccess) {
     fprintf(stderr,
             "hipdnn_ep_state_ensure_qmoe_scratch: hipMalloc failed for %zu "
             "bytes\n",
@@ -1436,12 +1935,13 @@ int hipdnn_ep_state_ensure_qmoe_amd_scratch(RuntimeState *state,
     if (state->stream) {
       HIP_CLEANUP(hipStreamSynchronize(state->stream));
     }
-    HIP_CLEANUP(hipFree(state->qmoe_amd_scratch));
+    HIP_CLEANUP(hipdnn_ep_state_device_free(state, state->qmoe_amd_scratch));
     state->qmoe_amd_scratch = nullptr;
     state->qmoe_amd_scratch_size = 0;
   }
 
-  if (hipMalloc(&state->qmoe_amd_scratch, alloc_size) != hipSuccess) {
+  if (hipdnn_ep_state_device_alloc(state, &state->qmoe_amd_scratch,
+                                   alloc_size) != hipSuccess) {
     fprintf(stderr,
             "hipdnn_ep_state_ensure_qmoe_amd_scratch: hipMalloc failed for "
             "%zu bytes\n",
@@ -1526,12 +2026,13 @@ int hipdnn_ep_state_ensure_conv_scratch(RuntimeState *state,
     if (state->stream) {
       hipStreamSynchronize(state->stream);
     }
-    HIP_CLEANUP(hipFree(state->conv_scratch));
+    HIP_CLEANUP(hipdnn_ep_state_device_free(state, state->conv_scratch));
     state->conv_scratch = nullptr;
     state->conv_scratch_size = 0;
   }
 
-  if (hipMalloc(&state->conv_scratch, alloc_size) != hipSuccess) {
+  if (hipdnn_ep_state_device_alloc(state, &state->conv_scratch, alloc_size) !=
+      hipSuccess) {
     fprintf(stderr,
             "hipdnn_ep_state_ensure_conv_scratch: hipMalloc failed for %zu "
             "bytes\n",
@@ -1567,12 +2068,14 @@ int hipdnn_ep_state_ensure_qlpnormalization_scratch(RuntimeState *state,
     if (state->stream) {
       HIP_CLEANUP(hipStreamSynchronize(state->stream));
     }
-    HIP_CLEANUP(hipFree(state->qlpnormalization_scratch));
+    HIP_CLEANUP(
+        hipdnn_ep_state_device_free(state, state->qlpnormalization_scratch));
     state->qlpnormalization_scratch = nullptr;
     state->qlpnormalization_scratch_size = 0;
   }
 
-  if (hipMalloc(&state->qlpnormalization_scratch, alloc_size) != hipSuccess) {
+  if (hipdnn_ep_state_device_alloc(state, &state->qlpnormalization_scratch,
+                                   alloc_size) != hipSuccess) {
     fprintf(stderr,
             "hipdnn_ep_state_ensure_qlpnormalization_scratch: hipMalloc "
             "failed for %zu bytes\n",
@@ -1608,12 +2111,13 @@ int hipdnn_ep_state_ensure_qsigmoid_scratch(RuntimeState *state,
     if (state->stream) {
       hipStreamSynchronize(state->stream);
     }
-    HIP_CLEANUP(hipFree(state->qsigmoid_scratch));
+    HIP_CLEANUP(hipdnn_ep_state_device_free(state, state->qsigmoid_scratch));
     state->qsigmoid_scratch = nullptr;
     state->qsigmoid_scratch_size = 0;
   }
 
-  if (hipMalloc(&state->qsigmoid_scratch, alloc_size) != hipSuccess) {
+  if (hipdnn_ep_state_device_alloc(state, &state->qsigmoid_scratch,
+                                   alloc_size) != hipSuccess) {
     fprintf(stderr,
             "hipdnn_ep_state_ensure_qsigmoid_scratch: hipMalloc failed for "
             "%zu bytes\n",
@@ -1652,12 +2156,13 @@ int hipdnn_ep_state_ensure_matmul_dp4a_scratch(RuntimeState *state,
     if (state->stream) {
       hipStreamSynchronize(state->stream);
     }
-    HIP_CLEANUP(hipFree(state->matmul_dp4a_scratch));
+    HIP_CLEANUP(hipdnn_ep_state_device_free(state, state->matmul_dp4a_scratch));
     state->matmul_dp4a_scratch = nullptr;
     state->matmul_dp4a_scratch_size = 0;
   }
 
-  if (hipMalloc(&state->matmul_dp4a_scratch, alloc_size) != hipSuccess) {
+  if (hipdnn_ep_state_device_alloc(state, &state->matmul_dp4a_scratch,
+                                   alloc_size) != hipSuccess) {
     fprintf(stderr,
             "hipdnn_ep_state_ensure_matmul_dp4a_scratch: hipMalloc failed for "
             "%zu bytes\n",
@@ -1701,12 +2206,13 @@ int hipdnn_ep_state_ensure_la_scratch(RuntimeState *state, size_t needed_size) {
     if (state->stream) {
       hipStreamSynchronize(state->stream);
     }
-    HIP_CLEANUP(hipFree(state->la_scratch));
+    HIP_CLEANUP(hipdnn_ep_state_device_free(state, state->la_scratch));
     state->la_scratch = nullptr;
     state->la_scratch_size = 0;
   }
 
-  if (hipMalloc(&state->la_scratch, alloc_size) != hipSuccess) {
+  if (hipdnn_ep_state_device_alloc(state, &state->la_scratch, alloc_size) !=
+      hipSuccess) {
     fprintf(stderr,
             "hipdnn_ep_state_ensure_la_scratch: hipMalloc failed for %zu "
             "bytes\n",
@@ -1728,6 +2234,24 @@ int hipdnn_ep_state_reset_error_flag(RuntimeState *state) {
   }
   hipError_t err =
       hipMemsetAsync(state->device_error_flag, 0, sizeof(int), state->stream);
+  return (err == hipSuccess) ? 0 : -1;
+}
+
+int hipdnn_ep_state_set_error_flag(RuntimeState *state, int code) {
+  if (code == 0)
+    return 0;
+  if (!state || !state->device_error_flag || !state->stream) {
+    fprintf(stderr, "hipdnn_ep_state_set_error_flag: invalid state\n");
+    return -1;
+  }
+  // Same stream as the post-graph read. Synchronize before returning so the
+  // stack source is not read after this call, and so the flag is visible even
+  // if the caller returns without launching another kernel.
+  hipError_t err = hipMemcpyAsync(state->device_error_flag, &code, sizeof(code),
+                                  hipMemcpyHostToDevice, state->stream);
+  if (err != hipSuccess)
+    return -1;
+  err = hipStreamSynchronize(state->stream);
   return (err == hipSuccess) ? 0 : -1;
 }
 

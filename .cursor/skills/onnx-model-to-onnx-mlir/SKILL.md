@@ -50,7 +50,7 @@ Optional second argument overrides the output directory (default: ONNX file dire
 | `hip-onnx-runner` | `$BUILD_DIR/bin/RelWithDebInfo/hip-onnx-runner.exe` (or `Release/` per `--config`) |
 | **Output MLIR** | `<dir-of-onnx>/<stem>.mlir` |
 
-Run from the **hip-ep repo root** (Git Bash launched from an x64 Native Tools prompt; see [docs/quick_start.md](../../docs/quick_start.md)).
+Run from the **hip-ep repo root** (Git Bash launched from an x64 Native Tools prompt; see [docs/quick_start.md](../../../docs/quick_start.md)).
 
 ## Notes
 
