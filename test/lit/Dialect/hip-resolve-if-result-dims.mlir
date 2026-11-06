@@ -240,3 +240,112 @@ module {
 // CHECK: %[[THEN:.*]] = arith.divsi %[[N]], %[[DIVISOR]] : index
 // CHECK: %[[SIZE:.*]] = arith.select %[[COND]], %[[THEN]], %{{.*}} : index
 // CHECK: tensor.empty(%[[SIZE]]) : tensor<?x8x64xf32>
+
+// -----
+
+// i32 shape arithmetic that overflows before the cast to i64: the branch
+// computes Mul(n, n) + 1 in 32 bits, so each step wraps to i32 in the caller
+// too rather than evaluating at index width.
+module {
+  func.func @narrow_overflow_before_widening(%ctx: !hip.context, %c: i1,
+      %x: tensor<?x?xf32>) -> tensor<?x8x64xf32> {
+    %d0 = hip.if_result_dim(%c) captures(%x : tensor<?x?xf32>)
+        then @ovf_then else @ovf_else {result_index = 0 : i32, dim = 0 : i64}
+    %init = tensor.empty(%d0) : tensor<?x8x64xf32>
+    %r = hip.if(%ctx, %c) outs(%init : tensor<?x8x64xf32>)
+        captures(%x : tensor<?x?xf32>) -> (tensor<?x8x64xf32>)
+        then @ovf_then else @ovf_else {num_outputs = 1 : i32}
+    return %r : tensor<?x8x64xf32>
+  }
+
+  func.func private @ovf_then(%ctx: !hip.context, %x: tensor<?x?xf32>)
+      -> tensor<?x8x64xf32> {
+    %c0 = arith.constant 0 : index
+    %n = tensor.dim %x, %c0 : tensor<?x?xf32>
+    %n64 = arith.index_cast %n : index to i64
+    %c8 = arith.constant 8 : i64
+    %c64 = arith.constant 64 : i64
+    %shape = tensor.from_elements %n64, %c8, %c64 : tensor<3xi64>
+    %i32_init = tensor.empty() : tensor<3xi32>
+    %s32 = hip.cast(%ctx) ins(%shape : tensor<3xi64>)
+        outs(%i32_init : tensor<3xi32>) {to = 6 : i64} : tensor<3xi32>
+    %sq = hip.mul(%ctx) ins(%s32, %s32 : tensor<3xi32>, tensor<3xi32>)
+        outs(%i32_init : tensor<3xi32>) -> tensor<3xi32>
+    %one = arith.constant dense<1> : tensor<3xi32>
+    %sum = hip.add(%ctx) ins(%sq, %one : tensor<3xi32>, tensor<3xi32>)
+        outs(%i32_init : tensor<3xi32>) -> tensor<3xi32>
+    %i64_init = tensor.empty() : tensor<3xi64>
+    %wide = hip.cast(%ctx) ins(%sum : tensor<3xi32>)
+        outs(%i64_init : tensor<3xi64>) {to = 7 : i64} : tensor<3xi64>
+    %y = tensor.reshape %x(%wide)
+        : (tensor<?x?xf32>, tensor<3xi64>) -> tensor<?x8x64xf32>
+    return %y : tensor<?x8x64xf32>
+  }
+
+  func.func private @ovf_else(%ctx: !hip.context, %x: tensor<?x?xf32>)
+      -> tensor<?x8x64xf32> {
+    %shape = arith.constant dense<[4, 8, 64]> : tensor<3xi64>
+    %y = tensor.reshape %x(%shape)
+        : (tensor<?x?xf32>, tensor<3xi64>) -> tensor<?x8x64xf32>
+    return %y : tensor<?x8x64xf32>
+  }
+}
+
+// CHECK-LABEL: func.func @narrow_overflow_before_widening(
+// CHECK-SAME: %{{.*}}: !hip.context, %[[COND:.*]]: i1, %[[X:.*]]: tensor<?x?xf32>)
+// CHECK: %[[N:.*]] = tensor.dim %[[X]], %{{.*}} : tensor<?x?xf32>
+// CHECK: %[[N32:.*]] = arith.index_cast %[[N]] : index to i32
+// CHECK: %[[NW:.*]] = arith.index_cast %[[N32]] : i32 to index
+// CHECK: %[[SQ:.*]] = arith.muli %[[NW]], %[[NW]] : index
+// CHECK: %[[SQ32:.*]] = arith.index_cast %[[SQ]] : index to i32
+// CHECK: %[[SQW:.*]] = arith.index_cast %[[SQ32]] : i32 to index
+// CHECK: %[[SUM:.*]] = arith.addi %[[SQW]], %{{.*}} : index
+// CHECK: %[[SUM32:.*]] = arith.index_cast %[[SUM]] : index to i32
+// CHECK: %[[THEN:.*]] = arith.index_cast %[[SUM32]] : i32 to index
+// CHECK: %[[SIZE:.*]] = arith.select %[[COND]], %[[THEN]], %{{.*}} : index
+// CHECK: tensor.empty(%[[SIZE]]) : tensor<?x8x64xf32>
+
+// -----
+
+// An unsigned shape constant is zero-extended: ui8 255 cast to i64 is 255,
+// not the -1 its bit pattern reads as when sign-extended.
+module {
+  func.func @unsigned_constant(%ctx: !hip.context, %c: i1,
+                               %x: tensor<?x?xf32>) -> tensor<?x8x64xf32> {
+    %d0 = hip.if_result_dim(%c) captures(%x : tensor<?x?xf32>)
+        then @u8_then else @u8_else {result_index = 0 : i32, dim = 0 : i64}
+    %init = tensor.empty(%d0) : tensor<?x8x64xf32>
+    %r = hip.if(%ctx, %c) outs(%init : tensor<?x8x64xf32>)
+        captures(%x : tensor<?x?xf32>) -> (tensor<?x8x64xf32>)
+        then @u8_then else @u8_else {num_outputs = 1 : i32}
+    return %r : tensor<?x8x64xf32>
+  }
+
+  func.func private @u8_then(%ctx: !hip.context, %x: tensor<?x?xf32>)
+      -> tensor<?x8x64xf32> {
+    %shape8 = hip.constant {value = dense<[255, 8, 64]> : tensor<3xui8>}
+        : tensor<3xui8>
+    %i64_init = tensor.empty() : tensor<3xi64>
+    %shape = hip.cast(%ctx) ins(%shape8 : tensor<3xui8>)
+        outs(%i64_init : tensor<3xi64>) {to = 7 : i64} : tensor<3xi64>
+    %y = tensor.reshape %x(%shape)
+        : (tensor<?x?xf32>, tensor<3xi64>) -> tensor<?x8x64xf32>
+    return %y : tensor<?x8x64xf32>
+  }
+
+  func.func private @u8_else(%ctx: !hip.context, %x: tensor<?x?xf32>)
+      -> tensor<?x8x64xf32> {
+    %shape = arith.constant dense<[4, 8, 64]> : tensor<3xi64>
+    %y = tensor.reshape %x(%shape)
+        : (tensor<?x?xf32>, tensor<3xi64>) -> tensor<?x8x64xf32>
+    return %y : tensor<?x8x64xf32>
+  }
+}
+
+// CHECK-LABEL: func.func @unsigned_constant(
+// CHECK-SAME: %{{.*}}: !hip.context, %[[COND:.*]]: i1, %{{.*}}: tensor<?x?xf32>)
+// CHECK-DAG: %[[C255:.*]] = arith.constant 255 : index
+// CHECK-DAG: %[[C4:.*]] = arith.constant 4 : index
+// CHECK-NOT: arith.constant -1 : index
+// CHECK: %[[SIZE:.*]] = arith.select %[[COND]], %[[C255]], %[[C4]] : index
+// CHECK: tensor.empty(%[[SIZE]]) : tensor<?x8x64xf32>

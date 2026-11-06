@@ -343,10 +343,17 @@ private:
     else if (auto toTensor = dyn_cast<bufferization::ToTensorOp>(def))
       dense = externalizedConstant(toTensor.getBuffer());
     if (dense) {
-      if (!isa<IntegerType>(dense.getElementType()))
+      auto intTy = dyn_cast<IntegerType>(dense.getElementType());
+      if (!intTy)
         return failure();
       APInt v = dense.isSplat() ? dense.getSplatValue<APInt>()
                                 : *(dense.value_begin<APInt>() + idx);
+      // A bool is 0/1, and an unsigned value keeps its high bit as magnitude.
+      if (intTy.isUnsigned() || intTy.getWidth() == 1) {
+        if (v.getActiveBits() > 63)
+          return failure();
+        return constant(static_cast<int64_t>(v.getZExtValue()));
+      }
       return constant(v.getSExtValue());
     }
 
@@ -444,18 +451,24 @@ private:
       return element(operand, idx, depth + 1);
     };
 
+    // Arithmetic is rebuilt at index width; the branch computes it at the
+    // element width, so results wrap back to that width as the branch's do.
+    auto elemTy = cast<IntegerType>(ty.getElementType());
+
     if (isa<CastOp, NegOp>(def) && ins.size() == 1) {
       FailureOr<Value> x = operandElement(ins[0]);
       if (failed(x))
         return failure();
       if (isa<NegOp>(def))
-        return arith::SubIOp::create(b, loc, constant(0), *x).getResult();
+        return wrapToElement(
+            arith::SubIOp::create(b, loc, constant(0), *x).getResult(),
+            elemTy);
       // A bool source is carried as zero / non-zero; as an integer it is 0/1.
       auto srcTy = cast<RankedTensorType>(ins[0].getType());
       Value v = *x;
       if (srcTy.getElementType().isInteger(1))
         v = asBool(v);
-      return wrapToElement(v, cast<IntegerType>(ty.getElementType()));
+      return wrapToElement(v, elemTy);
     }
 
     if (isa<AddOp, SubOp, MulOp, DivOp, MaxOp, MinOp>(def) && ins.size() == 2) {
@@ -464,11 +477,14 @@ private:
       if (failed(l) || failed(r))
         return failure();
       if (isa<AddOp>(def))
-        return arith::AddIOp::create(b, loc, *l, *r).getResult();
+        return wrapToElement(arith::AddIOp::create(b, loc, *l, *r).getResult(),
+                             elemTy);
       if (isa<SubOp>(def))
-        return arith::SubIOp::create(b, loc, *l, *r).getResult();
+        return wrapToElement(arith::SubIOp::create(b, loc, *l, *r).getResult(),
+                             elemTy);
       if (isa<MulOp>(def))
-        return arith::MulIOp::create(b, loc, *l, *r).getResult();
+        return wrapToElement(arith::MulIOp::create(b, loc, *l, *r).getResult(),
+                             elemTy);
       if (isa<DivOp>(def)) {
         // As in computeScalar: the untaken branch's divisor may be zero.
         Value divisor = *r;
@@ -480,7 +496,10 @@ private:
               arith::SelectOp::create(b, loc, isZero, constant(1), divisor)
                   .getResult();
         }
-        return arith::DivSIOp::create(b, loc, *l, divisor).getResult();
+        // Unsigned operands are already non-negative here, so a signed
+        // divide matches; INT_MIN / -1 wraps like the branch's divide.
+        return wrapToElement(
+            arith::DivSIOp::create(b, loc, *l, divisor).getResult(), elemTy);
       }
       if (isa<MaxOp>(def))
         return arith::MaxSIOp::create(b, loc, *l, *r).getResult();
