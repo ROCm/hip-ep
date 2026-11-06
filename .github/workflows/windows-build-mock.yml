@@ -41,12 +41,21 @@ jobs:
           fetch-depth: 0
           show-progress: false
 
+      # Push runs cache llvm-install; a pull request that missed the cache
+      # gets the prefix its prebuild uploaded as an artifact of this run.
       - name: Restore llvm-install
+        id: restore-llvm
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/llvm-install
           key: ${{ inputs.llvm_cache_key }}
-          fail-on-cache-miss: true
+
+      - name: Download llvm-install
+        if: steps.restore-llvm.outputs.cache-hit != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.llvm_cache_key }}
+          path: ${{ runner.workspace }}/llvm-install
 
       - name: Restore ort-install
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
