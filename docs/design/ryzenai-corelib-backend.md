@@ -264,6 +264,9 @@ K, zero point or scale type), no kernel at the shape or width, no kernel at the
 call's row count (with the largest shipped), the NPU refusing a row count, or
 no NPU stream at all. Ops hip-ep does not route to CoreLib (attention, RoPE,
 elementwise) are not listed: they always run on the GPU.
+CoreLib is set up at the first routed call, so a model with no
+`MatMulNBits`, `SimplifiedLayerNormalization` or
+`SkipSimplifiedLayerNormalization` prints no `[corelib]` line and no report.
 
 ## Testing
 
