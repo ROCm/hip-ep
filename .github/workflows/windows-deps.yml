@@ -90,7 +90,7 @@ jobs:
           RT_COMMIT=$(echo "$LINE" | cut -d';' -f3)
           echo "url=$RT_URL" >> "$GITHUB_OUTPUT"
           echo "commit=$RT_COMMIT" >> "$GITHUB_OUTPUT"
-          echo "value=dep-llvm-rocmlirtriton-${RT_COMMIT}" >> "$GITHUB_OUTPUT"
+          echo "value=dep-llvm-rocmlirtriton-${RT_COMMIT}-verify1468" >> "$GITHUB_OUTPUT"
 
       - name: Probe llvm-install
         id: cache-llvm

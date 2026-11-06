@@ -159,7 +159,7 @@ jobs:
           path: ${{ runner.workspace }}/llvm-install
           # Keyed only on the rocmlirTriton commit: a protobuf/ORT bump must not
           # evict the multi-hour LLVM cache.
-          key: linux-llvm-rocmlirtriton-amdgpu-${{ steps.rocmlir.outputs.commit }}
+          key: linux-llvm-rocmlirtriton-amdgpu-${{ steps.rocmlir.outputs.commit }}-verify1468
 
       - name: Build LLVM/MLIR/LLD from source
         if: steps.cache-llvm.outputs.cache-hit != 'true'
@@ -202,7 +202,7 @@ jobs:
         uses: actions/cache/save@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/llvm-install
-          key: linux-llvm-rocmlirtriton-amdgpu-${{ steps.rocmlir.outputs.commit }}
+          key: linux-llvm-rocmlirtriton-amdgpu-${{ steps.rocmlir.outputs.commit }}-verify1468
 
       # -----------------------------------------------------------------------
       # ONNX Runtime built from source into ort-install (cached): checkout ->

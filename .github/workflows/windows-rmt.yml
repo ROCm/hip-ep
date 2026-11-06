@@ -91,7 +91,7 @@ jobs:
           echo "ort=$ORT_KEY" >> "$GITHUB_OUTPUT"
           echo "amdgpu=$AMD_KEY" >> "$GITHUB_OUTPUT"
           echo "oga=$OGA_KEY" >> "$GITHUB_OUTPUT"
-          echo "llvm=dep-llvm-rocmlirtriton-amdgpu-$(echo "$LINE" | cut -d';' -f3)" >> "$GITHUB_OUTPUT"
+          echo "llvm=dep-llvm-rocmlirtriton-amdgpu-$(echo "$LINE" | cut -d';' -f3)-verify1468" >> "$GITHUB_OUTPUT"
 
       - name: Restore ort-install
         id: restore-ort
