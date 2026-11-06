@@ -58,6 +58,17 @@ constexpr const char *MORPHIZEN_PLACEHOLDER = "morphizen.placeholder";
 constexpr const char *CUSTOM_OP_FUNCTION_NAME = "function_name";
 constexpr const char *CUSTOM_OP_DOMAIN_NAME = "domain_name";
 
+// Cast `to`-attribute enum ambiguity: several distinct ONNX enums collapse
+// onto the same MLIR element type (e.g. UINT8=2 and BOOL=9 both become
+// `ui8`), so once the enum is converted to a TypeAttr the original value is
+// unrecoverable from the type alone. The importer stashes the raw ONNX enum
+// verbatim in this side attribute so later passes (e.g. CastToHip) can
+// recover the real target dtype instead of re-guessing it from the
+// (already ambiguous) result type. It is MLIR-internal bookkeeping and must
+// never be re-emitted as a user-visible ONNX node attribute (see
+// get_attribute_names()'s skip-list).
+constexpr const char *ONNX_TO_ENUM = "onnx_to_enum";
+
 // Attribute names defined in onnx-mlir project
 // The "onnx_node_name"  attribute to represent NodeProto.name
 // This attribute is attached to operations in the onnx-mlir

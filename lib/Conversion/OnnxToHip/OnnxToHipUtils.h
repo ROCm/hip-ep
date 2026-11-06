@@ -202,6 +202,11 @@ inline int64_t getHipdnnInputDataType(mlir::Type elemType) {
 /// Marks a QuantizeLinear / DequantizeLinear whose quantized side is packed.
 constexpr llvm::StringLiteral kPackedInt4Attr = "packed_int4";
 
+/// Preserves the original ONNX `to` enum lost in the Cast importer's lossy
+/// TypeAttr conversion (UINT8=2 and BOOL=9 both become MLIR `ui8`). Mirrors
+/// attr_names::ONNX_TO_ENUM in morphizen/mlir-imp/src/mlir-constants.hpp.
+constexpr llvm::StringLiteral kOnnxToEnumAttr = "onnx_to_enum";
+
 /// Lower a variadic ONNX operation to a chain of binary HIP operations.
 /// Use each pair's broadcast shape for its intermediate result type.
 /// Keep the imported result type at the final step.
