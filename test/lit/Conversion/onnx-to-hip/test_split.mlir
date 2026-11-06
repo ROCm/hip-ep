@@ -225,7 +225,6 @@ module {
 // CHECK-NOT: onnx.Split
 // CHECK-NOT: onnx.NoValue
 // CHECK: tensor.extract_slice{{.*}}[0, {{.*}}, 0] [1, 196, 384] [1, 1, 1]
-  }
 
 // A `none` result is skipped rather than sliced, and the chunk it stands for
 // still shifts the offset of the results after it.

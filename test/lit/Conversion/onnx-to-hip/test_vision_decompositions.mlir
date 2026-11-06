@@ -17,8 +17,8 @@ module {
   // CHECK-NOT: onnx.HardSigmoid
   // CHECK: hip.mul
   // CHECK: hip.add
-  // CHECK: hip.min
   // CHECK: hip.max
+  // CHECK: hip.min
 
   func.func @hard_swish(%x: tensor<2x4xf32>) -> tensor<2x4xf32> {
     %y = "onnx.HardSwish"(%x) : (tensor<2x4xf32>) -> tensor<2x4xf32>
@@ -38,12 +38,7 @@ module {
 
   // CHECK-LABEL: func.func @batch_norm
   // CHECK-NOT: onnx.BatchNormalization
-  // CHECK: tensor.expand_shape
-  // CHECK: hip.sub
-  // CHECK: hip.sqrt
-  // CHECK: hip.div
-  // CHECK: hip.mul
-  // CHECK: hip.add
+  // CHECK: hip.batch_norm
 
   func.func @einsum_qk(%q: tensor<1x2x3x4xf32>, %k: tensor<1x2x5x4xf32>) -> tensor<1x2x3x5xf32> {
     %y = "onnx.Einsum"(%q, %k) {equation = "bhlk,bhtk->bhlt"} : (tensor<1x2x3x4xf32>, tensor<1x2x5x4xf32>) -> tensor<1x2x3x5xf32>
@@ -71,8 +66,10 @@ module {
 
   // CHECK-LABEL: func.func @einsum_bhwc_hkc
   // CHECK: hip.transpose
-  // CHECK: tensor.expand_shape
+  // CHECK: tensor.collapse_shape
   // CHECK: hip.matmul
+  // CHECK: tensor.expand_shape
+  // CHECK: hip.transpose
   // CHECK-NOT: onnx.Einsum
 
   func.func @einsum_bhwc_wkc(%a: tensor<2x3x4x5xf32>, %b: tensor<4x6x5xf32>) -> tensor<2x3x4x6xf32> {
