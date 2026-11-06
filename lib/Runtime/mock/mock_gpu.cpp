@@ -532,8 +532,9 @@ int wrap_group_query_attention_host_length(
     // it).
     int64_t kv_bnsd,
     // key/value sequence length (mock stub ignores it).
-    int64_t seq_len_new_kv, int32_t has_host_length,
-    int32_t host_length_value) {
+    int64_t seq_len_new_kv, int32_t has_host_length, int32_t host_length_value,
+    // Per-key bias row [key_bias_batch, key_bias_len] (mock stub logs it).
+    void *key_bias, int64_t key_bias_batch, int64_t key_bias_len) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_group_query_attention\n");
     return -1;
@@ -573,6 +574,8 @@ int wrap_group_query_attention_host_length(
              "attn_bias_num_heads=%lld,\n",
              attention_bias, (long long)attn_bias_batch,
              (long long)attn_bias_num_heads);
+  MOCK_PRINT("[MOCK]   key_bias=%p, key_bias_batch=%lld, key_bias_len=%lld,\n",
+             key_bias, (long long)key_bias_batch, (long long)key_bias_len);
   MOCK_PRINT("[MOCK]   batch=%lld, seq_q=%lld, seq_kv=%lld, "
              "past_buf_seq=%lld, head_dim=%lld, elem_size=%lld)\n",
              (long long)batch_size, (long long)seq_len_q, (long long)seq_len_kv,
@@ -602,8 +605,8 @@ int wrap_group_query_attention_ring_f16(
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
     int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
-    int64_t seq_len_new_kv, int32_t has_host_length,
-    int32_t host_length_value) {
+    int64_t seq_len_new_kv, int32_t has_host_length, int32_t host_length_value,
+    void *key_bias, int64_t key_bias_batch, int64_t key_bias_len) {
   return wrap_group_query_attention_host_length(
       state, op_state_slot, query, key, value, past_key, past_value, seqlens_k,
       total_seq_len, cos_cache, sin_cache, position_ids, attention_bias,
@@ -613,7 +616,7 @@ int wrap_group_query_attention_ring_f16(
       v_quant_type, kv_cache_bit_width, no_causal, batch_size, seq_len_q,
       seq_len_kv, past_buf_seq, head_dim, element_size_bytes, attn_bias_batch,
       attn_bias_num_heads, kv_bnsd, seq_len_new_kv, has_host_length,
-      host_length_value);
+      host_length_value, key_bias, key_bias_batch, key_bias_len);
 }
 
 int wrap_multi_head_attention(

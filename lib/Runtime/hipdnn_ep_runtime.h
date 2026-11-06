@@ -916,7 +916,11 @@ int wrap_group_query_attention_host_length(
     // When has_host_length is 1, the compiler proves that host_length_value
     // equals seqlens_k[0] for batch one, including the valid -1 sentinel.
     // Otherwise the value is ignored and the runtime reads seqlens_k.
-    int32_t has_host_length, int32_t host_length_value);
+    int32_t has_host_length, int32_t host_length_value,
+    // hip.gqa key_bias: fp16 [key_bias_batch (1 or batch), key_bias_len] bias
+    // per key, added to every query row's scores on top of the causal and
+    // window masks; null when absent. key_bias_len must cover seq_len_kv.
+    void *key_bias, int64_t key_bias_batch, int64_t key_bias_len);
 
 // Compiler-selected entry for proven FP16 Ring candidates. Other shapes and
 // devices fall back to GQA with the same optional host-length contract.
@@ -940,7 +944,8 @@ int wrap_group_query_attention_ring_f16(
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
     int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
-    int64_t seq_len_new_kv, int32_t has_host_length, int32_t host_length_value);
+    int64_t seq_len_new_kv, int32_t has_host_length, int32_t host_length_value,
+    void *key_bias, int64_t key_bias_batch, int64_t key_bias_len);
 
 // MultiHeadAttention operation wrapper (com.microsoft.MultiHeadAttention v1).
 // Called by generated IR for onnx.Custom(MultiHeadAttention) lowering.
