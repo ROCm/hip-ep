@@ -86,8 +86,9 @@ class TestSoftmax:
         x = _random_input([5, cols], dtype, seed=cols)
         _run_and_compare(model_runner, x)
 
-    @pytest.mark.xfail(
-        strict=True,
+    # A skip, not an xfail: with bf16 typed as f32 the kernel reads and writes
+    # twice the buffer sizes, which can fault or corrupt other allocations.
+    @pytest.mark.skip(
         reason="the MorphiZen importer maps ONNX BFLOAT16 to f32 "
         "(onnxElementTypeToMlirElementType), so bf16 data is read as f32",
     )
