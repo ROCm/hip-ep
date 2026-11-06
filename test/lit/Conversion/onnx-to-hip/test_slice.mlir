@@ -449,7 +449,25 @@ module {
     return %r : tensor<?x?xi64>
   }
 
-  // Test 19: a dynamic Slice end of Shape(data)[last] / 2. The divisor is
+  // Test 19: graph-input INT32 indices stay INT32 on hip.slice. A cast to
+  // i64 would skip the sign-extending runtime copy. Negative steps keep
+  // this off the extract_slice fold.
+  func.func @test_slice_i32_indices(%input: tensor<4x6xf32>,
+                                    %starts: tensor<2xi32>,
+                                    %ends: tensor<2xi32>,
+                                    %axes: tensor<2xi32>,
+                                    %steps: tensor<2xi32>) -> tensor<4x6xf32> {
+    // CHECK-LABEL: func.func @test_slice_i32_indices
+    %r = "onnx.Slice"(%input, %starts, %ends, %axes, %steps)
+        : (tensor<4x6xf32>, tensor<2xi32>, tensor<2xi32>,
+           tensor<2xi32>, tensor<2xi32>) -> tensor<4x6xf32>
+
+    // CHECK-NOT: tensor.extract_slice
+    // CHECK: hip.slice({{.*}}) ins({{.*}} : tensor<4x6xf32>, tensor<2xi32>, tensor<2xi32>) axes({{[^:]*}} : tensor<2xi32>) steps({{[^:]*}} : tensor<2xi32>)
+    return %r : tensor<4x6xf32>
+  }
+
+  // Test 20: a dynamic Slice end of Shape(data)[last] / 2. The divisor is
   // the non-zero constant 2, so integer Div resolves and the native Slice
   // is allocated at half the source width. A zero or non-constant divisor
   // stays unresolved and the Slice keeps the source extent.
@@ -473,7 +491,7 @@ module {
     return %r : tensor<?x?xf32>
   }
 
-  // Test 20: the same bound divided by a runtime value. The divisor is not a
+  // Test 21: the same bound divided by a runtime value. The divisor is not a
   // compile-time constant, so the division does not resolve.
   func.func @test_slice_div_nonconstant_extent(%input: tensor<?x2560xf32>,
                                                %divisor: tensor<1xi64>)
@@ -493,7 +511,7 @@ module {
     return %r : tensor<?x?xf32>
   }
 
-  // Test 21: division by the constant 0 does not resolve. A host divsi would
+  // Test 22: division by the constant 0 does not resolve. A host divsi would
   // fault, so the Slice keeps the source extent.
   func.func @test_slice_div_zero_extent(%input: tensor<?x2560xf32>)
       -> tensor<?x?xf32> {

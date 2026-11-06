@@ -2603,6 +2603,34 @@ int wrap_nonzero(RuntimeState *state, void *input, void *output,
   return 0;
 }
 
+int wrap_non_max_suppression(
+    RuntimeState *state, const float *boxes, const float *scores,
+    const int64_t *max_output_boxes_per_class, const float *iou_threshold,
+    const float *score_threshold, int64_t *selected, int32_t *count_ptr,
+    int64_t num_batches, int64_t num_classes, int64_t num_boxes,
+    int64_t capacity, int64_t center_point_box, int64_t has_score_threshold) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_non_max_suppression\n");
+    return -1;
+  }
+  (void)boxes;
+  (void)scores;
+  (void)max_output_boxes_per_class;
+  (void)iou_threshold;
+  (void)score_threshold;
+  (void)selected;
+  // The mock selects nothing; downstream shapes see N = 0.
+  if (count_ptr)
+    *count_ptr = 0;
+  MOCK_PRINT("[MOCK] wrap_non_max_suppression(B=%lld, C=%lld, S=%lld, "
+             "capacity=%lld, center_point_box=%lld, "
+             "has_score_threshold=%lld)\n",
+             (long long)num_batches, (long long)num_classes,
+             (long long)num_boxes, (long long)capacity,
+             (long long)center_point_box, (long long)has_score_threshold);
+  return 0;
+}
+
 int32_t hipdnn_ep_readback_i32(RuntimeState *state, const void *device_scalar) {
   (void)state;
   // Mock "device" memory is host memory: read the scalar directly.
@@ -2892,12 +2920,14 @@ int wrap_gather_nd(RuntimeState *state, void *data, void *indices, void *output,
   return 0;
 }
 
-int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
-               void *axes, void *steps, void *output, const int64_t *data_shape,
-               int64_t data_rank, const int64_t *output_shape,
-               int64_t output_rank, int64_t starts_num_elements,
-               int64_t axes_num_elements, int64_t steps_num_elements,
-               int64_t data_type) {
+int wrap_slice_typed(RuntimeState *state, void *data, void *starts, void *ends,
+                     void *axes, void *steps, void *output,
+                     const int64_t *data_shape, int64_t data_rank,
+                     const int64_t *output_shape, int64_t output_rank,
+                     int64_t starts_num_elements, int64_t axes_num_elements,
+                     int64_t steps_num_elements, int64_t data_type,
+                     int64_t index_type) {
+  (void)index_type;
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_slice\n");
     return -1;
@@ -2917,6 +2947,18 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
              steps ? "yes" : "null", hipdnn_ep_datatype_name(data_type),
              (long long)data_type);
   return 0;
+}
+
+int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
+               void *axes, void *steps, void *output, const int64_t *data_shape,
+               int64_t data_rank, const int64_t *output_shape,
+               int64_t output_rank, int64_t starts_num_elements,
+               int64_t axes_num_elements, int64_t steps_num_elements,
+               int64_t data_type) {
+  return wrap_slice_typed(
+      state, data, starts, ends, axes, steps, output, data_shape, data_rank,
+      output_shape, output_rank, starts_num_elements, axes_num_elements,
+      steps_num_elements, data_type, HIPDNN_EP_DATATYPE_INT64);
 }
 
 int wrap_scatter_nd(RuntimeState *state, void *data, void *indices,
