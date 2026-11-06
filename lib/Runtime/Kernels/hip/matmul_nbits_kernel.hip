@@ -4412,274 +4412,9 @@ __global__ void dequant_u4_to_fp16(
 #define GEMM_WG_SZ(BM, BN, WM, WN) \
     ((BM / (WM * 16)) * (BN / (WN * 16)) * 32)
 
-// A local variant of the fused 128x128 WT4x4 core. Keep the shared core and
-// every other tile unchanged while testing an unpadded, eight-half LDS layout.
-static __device__ __forceinline__ int matmulNbitsK8XorColumn(int row, int k) {
-    return k ^ (((row >> 1) & 3) << 3);
-}
-
-template <bool USE_ZEROS, bool BOUNDS_CHECK>
-__global__
-__attribute__((amdgpu_flat_work_group_size(128, 128)))
-__attribute__((amdgpu_waves_per_eu(8)))
-void MatMulNBitsWMMA_K8Xor(
-    int M, int N, int K,
-    const _Float16* __restrict__ A, int lda,
-    const unsigned char* __restrict__ B_packed,
-    const _Float16* __restrict__ scales,
-    const _Float16* __restrict__ zeros,
-    int group_size, int num_groups_k,
-    _Float16* __restrict__ C, int ldc,
-    int swizzle_n, int b_row_bytes)
-{
-    constexpr int BM_T = 128, BN_T = 128, WT_M = 4, WT_N = 4;
-    constexpr int THR_L = 128, BK_T = 32, K_STR = 32, K_STEPS = 2;
-    constexpr int A_CH = 8, A_NCH = 4, A_ROW_SPLIT = 4, B_U32 = 4;
-    __shared__ __align__(16) _Float16 smA[2][BM_T][K_STR];
-    __shared__ __align__(16) _Float16 smB[2][BN_T][K_STR];
-
-    const int tid = threadIdx.x;
-    const int wid = tid / 32, lid = tid % 32;
-    const int lane = lid % 16, sub = lid / 16;
-    const int wrow = wid / 2, wcol = wid % 2;
-
-    const int n_tiles = gridDim.x, m_tiles = gridDim.y;
-    int by, bx;
-    if (swizzle_n <= 1) {
-        by = static_cast<int>(blockIdx.y);
-        bx = static_cast<int>(blockIdx.x);
-    } else {
-        const int block_id = blockIdx.y * n_tiles + blockIdx.x;
-        const int sw = (n_tiles >= swizzle_n) ? swizzle_n : n_tiles;
-        const int main_cols = (n_tiles / sw) * sw;
-        const int main_blocks = main_cols * m_tiles;
-        if (block_id < main_blocks) {
-            const int super = block_id / (sw * m_tiles);
-            const int rem = block_id % (sw * m_tiles);
-            by = rem / sw;
-            bx = super * sw + rem % sw;
-        } else {
-            const int tail_id = block_id - main_blocks;
-            const int tail_cols = n_tiles - main_cols;
-            by = tail_id / tail_cols;
-            bx = main_cols + (tail_id % tail_cols);
-        }
-    }
-    const int row0 = by * BM_T, col0 = bx * BN_T;
-    const int b_col = tid;
-    const int b_n_raw = col0 + b_col;
-    const bool b_valid = BOUNDS_CHECK ? (b_n_raw < N) : true;
-    const int b_n = (BOUNDS_CHECK && !b_valid) ? 0 : b_n_raw;
-    const int row_bytes =
-        b_row_bytes ? b_row_bytes : (num_groups_k * (group_size >> 1));
-    const unsigned char* b_src =
-        B_packed + static_cast<size_t>(b_n) * row_bytes;
-    const _Float16* s_src = scales + static_cast<size_t>(b_n) * num_groups_k;
-    const _Float16* z_src = nullptr;
-    if constexpr (USE_ZEROS)
-        z_src = zeros + static_cast<size_t>(b_n) * num_groups_k;
-
-    int a_row[A_NCH], a_koff[A_NCH];
-    bool a_valid[A_NCH];
-    const _Float16* a_src[A_NCH];
-#pragma unroll
-    for (int c = 0; c < A_NCH; c++) {
-        const int idx = tid + c * THR_L;
-        a_row[c] = idx / A_ROW_SPLIT;
-        a_koff[c] = (idx % A_ROW_SPLIT) * A_CH;
-        const int logical_row = row0 + a_row[c];
-        a_valid[c] = logical_row < M;
-        const int source_row = a_valid[c] ? logical_row : 0;
-        a_src[c] = A + static_cast<size_t>(source_row) * lda + a_koff[c];
-    }
-
-    float8 acc[WT_M][WT_N];
-#pragma unroll
-    for (int wm = 0; wm < WT_M; wm++)
-#pragma unroll
-        for (int wn = 0; wn < WT_N; wn++)
-#pragma unroll
-            for (int e = 0; e < 8; e++) acc[wm][wn][e] = 0.0f;
-
-    uint32_t pf_a[A_NCH][A_CH / 2];
-    uint32_t pf_b4[B_U32] = {};
-    int grp_cur = 0, grp_k_end = group_size;
-    uint32_t s_pk = 0, bias_pk = 0;
-    constexpr uint32_t kMagicPk = 0x64006400u;
-    auto loadGroupConstants = [&](int grp) __attribute__((always_inline)) {
-        const _Float16 s16 = s_src[grp];
-        _Float16 zp = (_Float16)8;
-        if constexpr (USE_ZEROS) zp = z_src[grp];
-        const _Float16 bias = -((_Float16)1024 + zp);
-        const uint16_t s_bits = __builtin_bit_cast(uint16_t, s16);
-        const uint16_t b_bits = __builtin_bit_cast(uint16_t, bias);
-        s_pk = (uint32_t(s_bits) << 16) | s_bits;
-        bias_pk = (uint32_t(b_bits) << 16) | b_bits;
-    };
-    if (b_valid) loadGroupConstants(0);
-
-    auto issueLoads = [&](int k_abs) __attribute__((always_inline)) {
-#pragma unroll
-        for (int c = 0; c < A_NCH; c++) {
-            const bool ok = BOUNDS_CHECK ? a_valid[c] : true;
-            if (ok) {
-                *reinterpret_cast<u32x4*>(pf_a[c]) =
-                    *reinterpret_cast<const u32x4*>(a_src[c]);
-            } else {
-#pragma unroll
-                for (int e = 0; e < A_CH / 2; e++) pf_a[c][e] = 0;
-            }
-            a_src[c] += BK_T;
-        }
-        if (b_valid) {
-            *reinterpret_cast<u32x4*>(pf_b4) =
-                *reinterpret_cast<const u32x4*>(b_src);
-            b_src += BK_T >> 1;
-            if (__builtin_expect(k_abs >= grp_k_end, 0)) {
-                do {
-                    grp_cur++;
-                    grp_k_end += group_size;
-                } while (k_abs >= grp_k_end);
-                loadGroupConstants(grp_cur);
-            }
-        }
-    };
-
-    auto storeToShared = [&](int buf) __attribute__((always_inline)) {
-        if (b_valid) {
-            const half2v bias2 = __builtin_bit_cast(half2v, bias_pk);
-            const half2v scale2 = __builtin_bit_cast(half2v, s_pk);
-#pragma unroll
-            for (int w = 0; w < B_U32; w++) {
-                const uint32_t packed = pf_b4[w];
-                const uint32_t lo = packed & 0x0F0F0F0Fu;
-                const uint32_t hi = (packed >> 4) & 0x0F0F0F0Fu;
-                u32x4 raw;
-                raw[0] = __builtin_amdgcn_perm(hi, lo, 0x0C040C00u);
-                raw[1] = __builtin_amdgcn_perm(hi, lo, 0x0C050C01u);
-                raw[2] = __builtin_amdgcn_perm(hi, lo, 0x0C060C02u);
-                raw[3] = __builtin_amdgcn_perm(hi, lo, 0x0C070C03u);
-                u32x4 out;
-#pragma unroll
-                for (int i = 0; i < 4; i++) {
-                    const half2v q =
-                        __builtin_bit_cast(half2v, raw[i] | kMagicPk);
-                    out[i] = __builtin_bit_cast(uint32_t, (q + bias2) * scale2);
-                }
-                *reinterpret_cast<u32x4*>(
-                    &smB[buf][b_col][matmulNbitsK8XorColumn(b_col, w * 8)]) = out;
-            }
-        } else {
-            const u32x4 zero4 = {0, 0, 0, 0};
-#pragma unroll
-            for (int w = 0; w < B_U32; w++)
-                *reinterpret_cast<u32x4*>(
-                    &smB[buf][b_col][matmulNbitsK8XorColumn(b_col, w * 8)]) = zero4;
-        }
-#pragma unroll
-        for (int c = 0; c < A_NCH; c++) {
-            _Float16* dst = &smA[buf][a_row[c]][
-                matmulNbitsK8XorColumn(a_row[c], a_koff[c])];
-            *reinterpret_cast<u32x4*>(dst) =
-                *reinterpret_cast<const u32x4*>(pf_a[c]);
-        }
-    };
-
-    auto computeWMMA = [&](int buf, int ks_begin, int ks_end)
-        __attribute__((always_inline)) {
-#pragma unroll
-        for (int ks = ks_begin; ks < ks_end; ks++) {
-            const int k_off = hipdnn_wmma_k_off(sub);
-            half16 b_frag[WT_N];
-#pragma unroll
-            for (int wn = 0; wn < WT_N; wn++) {
-                const int row = (wcol * WT_N + wn) * WMMA_TILE + lane;
-                u32x4* dst = reinterpret_cast<u32x4*>(&b_frag[wn]);
-#pragma unroll
-                for (int i = 0; i < HIPDNN_WMMA_FRAG_ELEMS / 8; i++) {
-                    const int k = ks * WMMA_TILE + k_off + i * 8;
-                    dst[i] = *reinterpret_cast<const u32x4*>(
-                        &smB[buf][row][matmulNbitsK8XorColumn(row, k)]);
-                }
-            }
-#pragma unroll
-            for (int wm = 0; wm < WT_M; wm++) {
-                const int row = (wrow * WT_M + wm) * WMMA_TILE + lane;
-                half16 a_frag;
-                u32x4* dst = reinterpret_cast<u32x4*>(&a_frag);
-#pragma unroll
-                for (int i = 0; i < HIPDNN_WMMA_FRAG_ELEMS / 8; i++) {
-                    const int k = ks * WMMA_TILE + k_off + i * 8;
-                    dst[i] = *reinterpret_cast<const u32x4*>(
-                        &smA[buf][row][matmulNbitsK8XorColumn(row, k)]);
-                }
-#pragma unroll
-                for (int wn = 0; wn < WT_N; wn++)
-                    acc[wm][wn] = HIPDNN_WMMA_F32_16X16X16_F16(
-                        a_frag, b_frag[wn], acc[wm][wn]);
-            }
-        }
-    };
-
-    issueLoads(0);
-    storeToShared(0);
-    HIPDNN_LDS_BARRIER();
-    int buf = 0;
-    for (int t = BK_T; t < K; t += BK_T) {
-        const int nxt = 1 - buf;
-        issueLoads(t);
-        computeWMMA(buf, 0, K_STEPS);
-        storeToShared(nxt);
-        HIPDNN_LDS_BARRIER();
-        buf = nxt;
-    }
-    computeWMMA(buf, 0, K_STEPS);
-
-#pragma unroll
-    for (int wm = 0; wm < WT_M; wm++) {
-        const int mbase = row0 + (wrow * WT_M + wm) * WMMA_TILE;
-#pragma unroll
-        for (int wn = 0; wn < WT_N; wn++) {
-            const int nbase = col0 + (wcol * WT_N + wn) * WMMA_TILE;
-            const int r0 = hipdnn_wmma_acc_row(sub, 0);
-            _Float16* crow =
-                C + static_cast<int64_t>(mbase + r0) * ldc + nbase + lane;
-#pragma unroll
-            for (int e = 0; e < 8; e++) {
-                const int r = hipdnn_wmma_acc_row(sub, e);
-                _Float16* cp = crow + static_cast<int64_t>(r - r0) * ldc;
-                if constexpr (BOUNDS_CHECK) {
-                    if (mbase + r < M && nbase + lane < N)
-                        *cp = (_Float16)acc[wm][wn][e];
-                } else {
-                    *cp = (_Float16)acc[wm][wn][e];
-                }
-            }
-        }
-    }
-}
-
-static bool matmulNbitsK8XorDevice() {
-    int device = 0;
-    if (hipGetDevice(&device) != hipSuccess) return false;
-    // Cache only the current device of this host thread; a device switch
-    // rechecks the architecture instead of applying a process-wide answer.
-    thread_local int cached_device = -1;
-    thread_local bool supported = false;
-    if (cached_device != device) {
-        hipDeviceProp_t properties{};
-        supported = hipGetDeviceProperties(&properties, device) == hipSuccess &&
-                    std::strncmp(properties.gcnArchName, "gfx1151", 7) == 0 &&
-                    (properties.gcnArchName[7] == '\0' ||
-                     properties.gcnArchName[7] == ':');
-        cached_device = device;
-    }
-    return supported;
-}
-
 template <int BM_T = 128, int BN_T = 128, int WT_M = 2, int WT_N = 2,
           int WAVES_EU = 8, bool BC = false,
-          int BK_T = BM_T / (WT_M * WT_N)>
+          int BK_T = BM_T / (WT_M * WT_N), bool K8_XOR = false>
 __global__
 __attribute__((amdgpu_flat_work_group_size(
     GEMM_WG_SZ(BM_T, BN_T, WT_M, WT_N),
@@ -4695,14 +4430,14 @@ void MatMulNBitsWMMA_NoZP(
     _Float16* __restrict__ C, int ldc,
     int swizzle_n = 4, int b_row_bytes = 0)
 {
-    GemmFp16U4Impl<BM_T, BN_T, WT_M, WT_N, false, BC, true, BK_T>(
+    GemmFp16U4Impl<BM_T, BN_T, WT_M, WT_N, false, BC, true, BK_T, false, false, false, false, false, K8_XOR>(
         M, N, K, A, lda, B_packed, scales, zeros,
         group_size, num_groups_k, C, ldc, swizzle_n, b_row_bytes);
 }
 
 template <int BM_T = 128, int BN_T = 128, int WT_M = 2, int WT_N = 2,
           int WAVES_EU = 8, bool BC = false,
-          int BK_T = BM_T / (WT_M * WT_N)>
+          int BK_T = BM_T / (WT_M * WT_N), bool K8_XOR = false>
 __global__
 __attribute__((amdgpu_flat_work_group_size(
     GEMM_WG_SZ(BM_T, BN_T, WT_M, WT_N),
@@ -4718,7 +4453,7 @@ void MatMulNBitsWMMA_ZP(
     _Float16* __restrict__ C, int ldc,
     int swizzle_n = 4, int b_row_bytes = 0)
 {
-    GemmFp16U4Impl<BM_T, BN_T, WT_M, WT_N, true, BC, true, BK_T>(
+    GemmFp16U4Impl<BM_T, BN_T, WT_M, WT_N, true, BC, true, BK_T, false, false, false, false, false, K8_XOR>(
         M, N, K, A, lda, B_packed, scales, zeros,
         group_size, num_groups_k, C, ldc, swizzle_n, b_row_bytes);
 }
@@ -5505,7 +5240,50 @@ static void launchDequant(
                        B_packed, scales, zeros, B_fp16, N, K, gs, ngk);
 }
 
-static void launchWmmaConfig(
+static bool matmulNbitsK8XorDevice(size_t grid_blocks) {
+    int device = 0;
+    if (hipGetDevice(&device) != hipSuccess) return false;
+    // Cache only the current device of this host thread; a device switch
+    // rechecks the architecture instead of applying a process-wide answer.
+    thread_local int cached_device = -1;
+    thread_local bool supported = false;
+    thread_local unsigned minimum_grid_blocks = 1;
+    if (cached_device != device) {
+        hipDeviceProp_t properties{};
+        supported = hipGetDeviceProperties(&properties, device) == hipSuccess &&
+                    std::strncmp(properties.gcnArchName, "gfx1151", 7) == 0 &&
+                    (properties.gcnArchName[7] == '\0' ||
+                     properties.gcnArchName[7] == ':');
+        // The unpadded WT4x4 layout is useful with sustained grid work.
+        // Smaller grids retain padding after bounded class comparisons.
+        minimum_grid_blocks = properties.multiProcessorCount > 0
+                                  ? 32u * static_cast<unsigned>(properties.multiProcessorCount)
+                                  : 32u;
+        cached_device = device;
+    }
+    return supported && grid_blocks >= minimum_grid_blocks;
+}
+
+// Optional standalone-UT audit observes the exact host function enqueued.
+// Product builds compile this away; the UT disables it before timing.
+#ifdef HIPDNN_KERNEL_UT_LAUNCH_AUDIT
+extern "C" bool hipdnnKernelUtLaunchAudit;
+#define MATMUL_NBITS_AUDIT(KERNEL) do { \
+    if (hipdnnKernelUtLaunchAudit) { \
+        hipFunction_t function = nullptr; \
+        const hipError_t audit_status = hipGetFuncBySymbol( \
+            &function, reinterpret_cast<const void*>(KERNEL)); \
+        const char* name = audit_status == hipSuccess ? hipKernelNameRef(function) : nullptr; \
+        std::printf("UT_LAUNCH_ID config_id=%d name=%s\n", \
+                    config_id, name ? name : "UNAVAILABLE"); \
+    } \
+} while (0)
+#else
+#define MATMUL_NBITS_AUDIT(KERNEL) do {} while (0)
+#endif
+
+template <bool K8_XOR>
+static void launchWmmaConfigImpl(
     int config_id, hipStream_t stream,
     int M, int N, int K,
     const _Float16* A, int lda,
@@ -5515,9 +5293,6 @@ static void launchWmmaConfig(
     _Float16* C, int ldc, bool has_zp,
     _Float16* B_fp16_buf = nullptr, int b_row_bytes = 0)
 {
-    if (!wmmaConfigSupported(kWmmaConfigs[config_id], N, K, gs))
-        config_id = wmmaFallbackConfig(N, K, gs);
-
     auto& c = kWmmaConfigs[config_id];
     bool need_bc = (M % c.bm != 0) || (N % c.bn != 0);
 
@@ -5535,6 +5310,7 @@ static void launchWmmaConfig(
         HIP_KERNEL_NAME(MatMulNBitsFp16GEMM<BM_V, BN_V, 2, 2, 8, BC_V>), \
         grid_, block_, 0, stream, \
         M, N, K, A, lda, B_fp16_buf, C, ldc, c.swizzle_n); \
+    MATMUL_NBITS_AUDIT(HIP_KERNEL_NAME(MatMulNBitsFp16GEMM<BM_V, BN_V, 2, 2, 8, BC_V>)); \
 } while(0)
 
 #define FP16_TILE_CASE(BM_V, BN_V) \
@@ -5552,6 +5328,7 @@ static void launchWmmaConfig(
         HIP_KERNEL_NAME(MatMulNBitsFp16GEMM<BM_V, BN_V, 4, 2, 6, BC_V>), \
         grid_, block_, 0, stream, \
         M, N, K, A, lda, B_fp16_buf, C, ldc, c.swizzle_n); \
+    MATMUL_NBITS_AUDIT(HIP_KERNEL_NAME(MatMulNBitsFp16GEMM<BM_V, BN_V, 4, 2, 6, BC_V>)); \
 } while(0)
 
 #define FP16_TILE_CASE_WT4(BM_V, BN_V) \
@@ -5569,6 +5346,7 @@ static void launchWmmaConfig(
         HIP_KERNEL_NAME(MatMulNBitsFp16GEMM<BM_V, BN_V, 2, 1, 8, BC_V>), \
         grid_, block_, 0, stream, \
         M, N, K, A, lda, B_fp16_buf, C, ldc, c.swizzle_n); \
+    MATMUL_NBITS_AUDIT(HIP_KERNEL_NAME(MatMulNBitsFp16GEMM<BM_V, BN_V, 2, 1, 8, BC_V>)); \
 } while(0)
 
 #define FP16_TILE_CASE_WT21(BM_V, BN_V) \
@@ -5586,6 +5364,7 @@ static void launchWmmaConfig(
         HIP_KERNEL_NAME(MatMulNBitsFp16GEMM<BM_V, BN_V, 2, 4, 8, BC_V, BK_V>), \
         grid_, block_, 0, stream, \
         M, N, K, A, lda, B_fp16_buf, C, ldc, c.swizzle_n); \
+    MATMUL_NBITS_AUDIT(HIP_KERNEL_NAME(MatMulNBitsFp16GEMM<BM_V, BN_V, 2, 4, 8, BC_V, BK_V>)); \
 } while(0)
 
 #define FP16_TILE_CASE_WT24(BM_V, BN_V, BK_V) \
@@ -5629,16 +5408,18 @@ static void launchWmmaConfig(
     dim3 block_(THR_); \
     if (has_zp) { \
         hipLaunchKernelGGL( \
-            HIP_KERNEL_NAME(MatMulNBitsWMMA_ZP<BM_V, BN_V, 2, 2, 8, BC_V>), \
+            HIP_KERNEL_NAME(MatMulNBitsWMMA_ZP<BM_V, BN_V, 2, 2, 8, BC_V, (BM_V / (2 * 2)), (K8_XOR && (BM_V / (2 * 2)) == 32)>), \
             grid_, block_, 0, stream, \
             M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
             b_row_bytes); \
+    MATMUL_NBITS_AUDIT(HIP_KERNEL_NAME(MatMulNBitsWMMA_ZP<BM_V, BN_V, 2, 2, 8, BC_V, (BM_V / (2 * 2)), (K8_XOR && (BM_V / (2 * 2)) == 32)>)); \
     } else { \
         hipLaunchKernelGGL( \
-            HIP_KERNEL_NAME(MatMulNBitsWMMA_NoZP<BM_V, BN_V, 2, 2, 8, BC_V>), \
+            HIP_KERNEL_NAME(MatMulNBitsWMMA_NoZP<BM_V, BN_V, 2, 2, 8, BC_V, (BM_V / (2 * 2)), (K8_XOR && (BM_V / (2 * 2)) == 32)>), \
             grid_, block_, 0, stream, \
             M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
             b_row_bytes); \
+    MATMUL_NBITS_AUDIT(HIP_KERNEL_NAME(MatMulNBitsWMMA_NoZP<BM_V, BN_V, 2, 2, 8, BC_V, (BM_V / (2 * 2)), (K8_XOR && (BM_V / (2 * 2)) == 32)>)); \
     } \
 } while(0)
 
@@ -5655,16 +5436,18 @@ static void launchWmmaConfig(
     dim3 block_(THR_); \
     if (has_zp) { \
         hipLaunchKernelGGL( \
-            HIP_KERNEL_NAME(MatMulNBitsWMMA_ZP<BM_V, BN_V, 4, 2, 6, BC_V>), \
+            HIP_KERNEL_NAME(MatMulNBitsWMMA_ZP<BM_V, BN_V, 4, 2, 6, BC_V, (BM_V / (4 * 2)), (K8_XOR && (BM_V / (4 * 2)) == 32)>), \
             grid_, block_, 0, stream, \
             M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
             b_row_bytes); \
+    MATMUL_NBITS_AUDIT(HIP_KERNEL_NAME(MatMulNBitsWMMA_ZP<BM_V, BN_V, 4, 2, 6, BC_V, (BM_V / (4 * 2)), (K8_XOR && (BM_V / (4 * 2)) == 32)>)); \
     } else { \
         hipLaunchKernelGGL( \
-            HIP_KERNEL_NAME(MatMulNBitsWMMA_NoZP<BM_V, BN_V, 4, 2, 6, BC_V>), \
+            HIP_KERNEL_NAME(MatMulNBitsWMMA_NoZP<BM_V, BN_V, 4, 2, 6, BC_V, (BM_V / (4 * 2)), (K8_XOR && (BM_V / (4 * 2)) == 32)>), \
             grid_, block_, 0, stream, \
             M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
             b_row_bytes); \
+    MATMUL_NBITS_AUDIT(HIP_KERNEL_NAME(MatMulNBitsWMMA_NoZP<BM_V, BN_V, 4, 2, 6, BC_V, (BM_V / (4 * 2)), (K8_XOR && (BM_V / (4 * 2)) == 32)>)); \
     } \
 } while(0)
 
@@ -5681,16 +5464,18 @@ static void launchWmmaConfig(
     dim3 block_(THR_); \
     if (has_zp) { \
         hipLaunchKernelGGL( \
-            HIP_KERNEL_NAME(MatMulNBitsWMMA_ZP<BM_V, BN_V, 2, 1, 8, BC_V>), \
+            HIP_KERNEL_NAME(MatMulNBitsWMMA_ZP<BM_V, BN_V, 2, 1, 8, BC_V, (BM_V / (2 * 1)), (K8_XOR && (BM_V / (2 * 1)) == 32)>), \
             grid_, block_, 0, stream, \
             M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
             b_row_bytes); \
+    MATMUL_NBITS_AUDIT(HIP_KERNEL_NAME(MatMulNBitsWMMA_ZP<BM_V, BN_V, 2, 1, 8, BC_V, (BM_V / (2 * 1)), (K8_XOR && (BM_V / (2 * 1)) == 32)>)); \
     } else { \
         hipLaunchKernelGGL( \
-            HIP_KERNEL_NAME(MatMulNBitsWMMA_NoZP<BM_V, BN_V, 2, 1, 8, BC_V>), \
+            HIP_KERNEL_NAME(MatMulNBitsWMMA_NoZP<BM_V, BN_V, 2, 1, 8, BC_V, (BM_V / (2 * 1)), (K8_XOR && (BM_V / (2 * 1)) == 32)>), \
             grid_, block_, 0, stream, \
             M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
             b_row_bytes); \
+    MATMUL_NBITS_AUDIT(HIP_KERNEL_NAME(MatMulNBitsWMMA_NoZP<BM_V, BN_V, 2, 1, 8, BC_V, (BM_V / (2 * 1)), (K8_XOR && (BM_V / (2 * 1)) == 32)>)); \
     } \
 } while(0)
 
@@ -5707,16 +5492,18 @@ static void launchWmmaConfig(
     dim3 block_(THR_); \
     if (has_zp) { \
         hipLaunchKernelGGL( \
-            HIP_KERNEL_NAME(MatMulNBitsWMMA_ZP<BM_V, BN_V, 2, 4, WAVES_V, BC_V, BK_V>), \
+            HIP_KERNEL_NAME(MatMulNBitsWMMA_ZP<BM_V, BN_V, 2, 4, WAVES_V, BC_V, BK_V, false>), \
             grid_, block_, 0, stream, \
             M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
             b_row_bytes); \
+    MATMUL_NBITS_AUDIT(HIP_KERNEL_NAME(MatMulNBitsWMMA_ZP<BM_V, BN_V, 2, 4, WAVES_V, BC_V, BK_V, false>)); \
     } else { \
         hipLaunchKernelGGL( \
-            HIP_KERNEL_NAME(MatMulNBitsWMMA_NoZP<BM_V, BN_V, 2, 4, WAVES_V, BC_V, BK_V>), \
+            HIP_KERNEL_NAME(MatMulNBitsWMMA_NoZP<BM_V, BN_V, 2, 4, WAVES_V, BC_V, BK_V, false>), \
             grid_, block_, 0, stream, \
             M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
             b_row_bytes); \
+    MATMUL_NBITS_AUDIT(HIP_KERNEL_NAME(MatMulNBitsWMMA_NoZP<BM_V, BN_V, 2, 4, WAVES_V, BC_V, BK_V, false>)); \
     } \
 } while(0)
 
@@ -5733,16 +5520,18 @@ static void launchWmmaConfig(
     dim3 block_(THR_); \
     if (has_zp) { \
         hipLaunchKernelGGL( \
-            HIP_KERNEL_NAME(MatMulNBitsWMMA_ZP<BM_V, BN_V, 4, 4, 8, BC_V, BK_V>), \
+            HIP_KERNEL_NAME(MatMulNBitsWMMA_ZP<BM_V, BN_V, 4, 4, 8, BC_V, BK_V, (K8_XOR && BK_V == 32)>), \
             grid_, block_, 0, stream, \
             M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
             b_row_bytes); \
+    MATMUL_NBITS_AUDIT(HIP_KERNEL_NAME(MatMulNBitsWMMA_ZP<BM_V, BN_V, 4, 4, 8, BC_V, BK_V, (K8_XOR && BK_V == 32)>)); \
     } else { \
         hipLaunchKernelGGL( \
-            HIP_KERNEL_NAME(MatMulNBitsWMMA_NoZP<BM_V, BN_V, 4, 4, 8, BC_V, BK_V>), \
+            HIP_KERNEL_NAME(MatMulNBitsWMMA_NoZP<BM_V, BN_V, 4, 4, 8, BC_V, BK_V, (K8_XOR && BK_V == 32)>), \
             grid_, block_, 0, stream, \
             M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
             b_row_bytes); \
+    MATMUL_NBITS_AUDIT(HIP_KERNEL_NAME(MatMulNBitsWMMA_NoZP<BM_V, BN_V, 4, 4, 8, BC_V, BK_V, (K8_XOR && BK_V == 32)>)); \
     } \
 } while(0)
 
@@ -5756,22 +5545,7 @@ static void launchWmmaConfig(
     // instantiation.
     const int c_bk = wmmaBk(c);
     if (c.wt_m == 4 && c.wt_n == 4 && c.bm == 128 && c.bn == 128 && c_bk == 32) {
-        // Keep the original tile and ordering; use the alternate LDS layout
-        // only for these measured group-32 prefill shapes.
-        if (!has_zp && need_bc && gs == 32 && K == 3072 && c.swizzle_n == 4 &&
-            (M == 1842 || M == 1971 || M == 3952) &&
-            (N == 8192 || N == 12288 || N == 16384) &&
-            matmulNbitsLutLookupEnabled() && matmulNbitsK8XorDevice()) {
-            dim3 grid_(static_cast<unsigned>((N + 127) / 128),
-                       static_cast<unsigned>((M + 127) / 128));
-            hipLaunchKernelGGL(
-                HIP_KERNEL_NAME(MatMulNBitsWMMA_K8Xor<false, true>),
-                grid_, dim3(128), 0, stream,
-                M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc,
-                c.swizzle_n, b_row_bytes);
-        } else {
-            WMMA_TILE_CASE_WT44(128, 128, 32);
-        }
+        WMMA_TILE_CASE_WT44(128, 128, 32);
     }
     // The 256-thread 128x128 WT2x4 tile asks for 6 waves: its 40 KB of LDS
     // allows no more than 6 per SIMD anyway, and 6 is a 160-VGPR budget on a
@@ -5812,6 +5586,8 @@ static void launchWmmaConfig(
 }
 
 // Cached temp buffer for dequant+GEMM path
+#undef MATMUL_NBITS_AUDIT
+
 static _Float16* g_dq_buf = nullptr;
 static size_t    g_dq_buf_elems = 0;
 
@@ -5923,6 +5699,32 @@ static _Float16* ensureOutColBuffer(int M, int N) {
  * (64x64 at N=5120 K=4096: 1575 us unpadded against 193 us padded), so a table
  * tuned at one stride ranks the tiles wrongly for the other. Tuning at the
  * stride that will actually be used is the whole point of threading it here. */
+static void launchWmmaConfig(
+    int config_id, hipStream_t stream, int M, int N, int K,
+    const _Float16* A, int lda, const unsigned char* B,
+    const _Float16* scales, const _Float16* zeros, int gs, int ngk,
+    _Float16* C, int ldc, bool has_zp,
+    _Float16* B_fp16_buf = nullptr, int b_row_bytes = 0)
+{
+    if (!wmmaConfigSupported(kWmmaConfigs[config_id], N, K, gs))
+        config_id = wmmaFallbackConfig(N, K, gs);
+    const auto& c = kWmmaConfigs[config_id];
+    const size_t grid_blocks = static_cast<size_t>((M + c.bm - 1) / c.bm) *
+                               static_cast<size_t>((N + c.bn - 1) / c.bn);
+    // Removing LDS padding is reserved for the WT4x4 class with sustained
+    // work: 32 workgroups per CU and at least 64 BK32 stages. The smaller
+    // warp classes, short K loops and padded weight rows retain padding.
+    // Explicit pins, online enumeration and LUT launches use the same rule.
+    const bool xor_candidate = c.fused && wmmaBk(c) == 32 &&
+                               c.wt_m == 4 && c.wt_n == 4 && K >= 64 * 32;
+    if (b_row_bytes == 0 && xor_candidate && matmulNbitsK8XorDevice(grid_blocks))
+        launchWmmaConfigImpl<true>(config_id, stream, M, N, K, A, lda, B,
+            scales, zeros, gs, ngk, C, ldc, has_zp, B_fp16_buf, b_row_bytes);
+    else
+        launchWmmaConfigImpl<false>(config_id, stream, M, N, K, A, lda, B,
+            scales, zeros, gs, ngk, C, ldc, has_zp, B_fp16_buf, b_row_bytes);
+}
+
 static int tuneWmmaConfig(
     hipStream_t stream,
     int M, int N, int K,
@@ -6344,8 +6146,11 @@ extern "C" int hip_matmul_nbits_u4_prepack_padrow(
     return static_cast<int>(hipGetLastError());
 }
 
-/* Fused int4 WMMA prefill against a B whose row stride may be padded.
+/* Int4 WMMA prefill against a B whose row stride may be padded.
  *
+ * Explicit arrival-layout pins support fused and separate-dequant configs.
+ * Padded rows require fused configs because the dequant pass reads the arrival
+ * layout. cfg < 0 retains the existing fused-only stride-aware selection.
  * cfg < 0 autotunes, and because the stride is passed through to the tuning
  * launches and into the cache key, the winner is chosen for the layout that
  * will actually be used. Returns -1 when no fused config can serve the shape,
@@ -6372,10 +6177,11 @@ extern "C" int hip_matmul_nbits_u4_wmma_stride(
 
     // Only fused configs read B directly; a separate-dequant config would need
     // the dequant pass taught about the stride too.
-    if (!kWmmaConfigs[id].fused) return -1;
+    if (!kWmmaConfigs[id].fused && b_row_bytes != 0) return -1;
 
     launchWmmaConfig(id, s, M, N, K, ap, lda, bp, sp, zp, group_size, ngk, cp,
-                     ldc, has_zp, nullptr, b_row_bytes);
+                     ldc, has_zp, kWmmaConfigs[id].fused ? nullptr : ensureDqBuffer(N, K),
+                     b_row_bytes);
     return static_cast<int>(hipGetLastError());
 }
 
