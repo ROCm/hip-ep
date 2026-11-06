@@ -48,6 +48,12 @@ session creation.
 The EP provider option `artifact_format` (`"LLVM_IR"` | `"NATIVE"`) maps to
 this field; the `hip-compiler` CLI exposes it as `--mode {LLVM_IR,NATIVE}`.
 
+The provider option `use_ryzenai_corelib_model` (or the environment variable
+`HIPEP_USE_RYZENAI_CORELIB_MODEL`) is read by the level-1 pass before any MLIR
+is built: when a RyzenAI CoreLib model accepts the whole graph, the graph is not
+compiled at all. It is not a `compilation_options.fbs` field; see
+[ryzenai-corelib-model.md](ryzenai-corelib-model.md).
+
 ---
 
 ## Usage
