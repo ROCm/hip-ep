@@ -10,12 +10,12 @@ namespace hip {
 namespace {
 
 // hip.slice(ctx, data, starts, ends, [axes], [steps], output)
-//   -> wrap_slice(state, data_ptr, starts_ptr, ends_ptr,
-//                 axes_ptr (or null), steps_ptr (or null), out_ptr,
-//                 data_shape_ptr, data_rank,
-//                 output_shape_ptr, output_rank,
-//                 starts_num_elements, axes_num_elements,
-//                 steps_num_elements, data_type, index_type)
+//   -> wrap_slice_typed(state, data_ptr, starts_ptr, ends_ptr,
+//                       axes_ptr (or null), steps_ptr (or null), out_ptr,
+//                       data_shape_ptr, data_rank,
+//                       output_shape_ptr, output_rank,
+//                       starts_num_elements, axes_num_elements,
+//                       steps_num_elements, data_type, index_type)
 //
 // Today the runtime function is a no-op stub that only logs its parameters
 // (see lib/Runtime/real/slice.cpp). This lowering exists to keep the IR

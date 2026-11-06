@@ -3,7 +3,7 @@
 
 // RUN: hip-mlir-opt --convert-hip-to-llvm %s | FileCheck %s
 
-// Verify that hip.slice lowers to a single wrap_slice call with the full
+// Verify that hip.slice lowers to a single wrap_slice_typed call with the full
 // (data, starts, ends, axes-or-null, steps-or-null, output, shape arrays,
 // counts, dtype) parameter pack regardless of whether the optional axes /
 // steps operands are present.
@@ -56,16 +56,16 @@ module {
   }
 }
 
-// Each variant emits the same 16-parameter wrap_slice signature
+// Each variant emits the same 16-parameter wrap_slice_typed signature
 // (4 + 3 pointers, 2 i64 shape ranks, 4 i64 counts/dtype, index dtype).
 
 // CHECK-LABEL: llvm.func @test_slice_full
-// CHECK: llvm.call @wrap_slice({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64, i64, i64, i64) -> i32
+// CHECK: llvm.call @wrap_slice_typed({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64, i64, i64, i64) -> i32
 
 // CHECK-LABEL: llvm.func @test_slice_minimal
 // CHECK: llvm.mlir.zero : !llvm.ptr
 // CHECK: llvm.mlir.zero : !llvm.ptr
-// CHECK: llvm.call @wrap_slice({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64, i64, i64, i64) -> i32
+// CHECK: llvm.call @wrap_slice_typed({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64, i64, i64, i64) -> i32
 
 // CHECK-LABEL: llvm.func @test_slice_i32
 // FLOAT is 0. The constant created immediately after it is the index dtype.
@@ -73,4 +73,4 @@ module {
 // still match if the call passed INT64 (4).
 // CHECK: %[[DATA_TYPE:.*]] = llvm.mlir.constant(0 : i64) : i64
 // CHECK-NEXT: %[[INDEX_TYPE:.*]] = llvm.mlir.constant(3 : i64) : i64
-// CHECK: llvm.call @wrap_slice({{.*}}, %[[DATA_TYPE]], %[[INDEX_TYPE]]) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64, i64, i64, i64) -> i32
+// CHECK: llvm.call @wrap_slice_typed({{.*}}, %[[DATA_TYPE]], %[[INDEX_TYPE]]) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64, i64, i64, i64) -> i32

@@ -259,12 +259,12 @@ LogicalResult populateSliceShapeRegion(OpBuilder &builder, Block &shapeBlock,
 
 namespace {
 
-constexpr const char *kWrapSlice = "wrap_slice";
+constexpr const char *kWrapSlice = "wrap_slice_typed";
 
-// `wrap_slice` resolves the window against the data shape, so the call passes
-// both shapes as host arrays plus how many entries the window holds. The
-// runtime also takes a null window pointer, reading it as ONNX's default, but
-// this op spells every slot out and so never sends one.
+// `wrap_slice_typed` resolves the window against the data shape, so the call
+// passes both shapes as host arrays plus how many entries the window holds.
+// The runtime also takes a null window pointer, reading it as ONNX's default,
+// but this op spells every slot out and so never sends one.
 struct SliceLowering : ConvertOpToLLVMPattern<SliceOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 

@@ -66,7 +66,7 @@
 // CHECK: llvm.mlir.global internal constant @__metadata_json
 // CHECK: llvm.mlir.global internal constant @__metadata_blob
 // CHECK:       llvm.func @wrap_scatter_nd(!llvm.ptr, !llvm.ptr<1>, !llvm.ptr<1>, !llvm.ptr<1>, !llvm.ptr<1>, !llvm.ptr<1>, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64) -> i32
-// CHECK-NEXT:  llvm.func @wrap_slice(!llvm.ptr, !llvm.ptr<1>, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr<1>, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64, i64, i64, i64) -> i32
+// CHECK-NEXT:  llvm.func @wrap_slice_typed(!llvm.ptr, !llvm.ptr<1>, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr<1>, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64, i64, i64, i64) -> i32
 // CHECK-NEXT:  llvm.func @hipdnn_ep_alloc_output(!llvm.ptr, i64, !llvm.ptr, i64, i64) -> !llvm.ptr
 // CHECK-NEXT:  llvm.func @wrap_transpose(!llvm.ptr, !llvm.ptr<1>, !llvm.ptr<1>, i64, !llvm.ptr, !llvm.ptr, i64, i64) -> i32
 // CHECK-NEXT:  llvm.func @wrap_copy_d2h(!llvm.ptr, !llvm.ptr, !llvm.ptr<1>, i64) -> i32
@@ -1807,7 +1807,7 @@
 // CHECK-NEXT:    %[[V1540:.*]] = llvm.mlir.constant(1 : i64) : i64
 // CHECK-NEXT:    %[[V1541:.*]] = llvm.mlir.constant(1 : i64) : i64
 // CHECK-NEXT:    %[[INDEX_TYPE:.*]] = llvm.mlir.constant(4 : i64) : i64
-// CHECK-NEXT:    %[[V1542:.*]] = llvm.call @wrap_slice(%[[ARG0]], %[[V1537]], %[[V1525]], %[[V1527]], %[[V1530]], %[[V1534]], %[[V1538]], %[[V1517]], %[[V1539]], %[[V1521]], %[[V1540]], %[[V1536]], %[[V1536]], %[[V1536]], %[[V1541]], %[[INDEX_TYPE]]) : (!llvm.ptr, !llvm.ptr<1>, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr<1>, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64, i64, i64, i64) -> i32
+// CHECK-NEXT:    %[[V1542:.*]] = llvm.call @wrap_slice_typed(%[[ARG0]], %[[V1537]], %[[V1525]], %[[V1527]], %[[V1530]], %[[V1534]], %[[V1538]], %[[V1517]], %[[V1539]], %[[V1521]], %[[V1540]], %[[V1536]], %[[V1536]], %[[V1536]], %[[V1541]], %[[INDEX_TYPE]]) : (!llvm.ptr, !llvm.ptr<1>, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr<1>, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64, i64, i64, i64) -> i32
 // CHECK-NEXT:    %[[V1543:.*]] = llvm.extractvalue %[[V1320]][0] : !llvm.struct<(ptr, ptr, i64)>
 // CHECK-NEXT:    llvm.call @free(%[[V1543]]) : (!llvm.ptr) -> ()
 // CHECK-NEXT:    %[[V1544:.*]] = llvm.extractvalue %[[V494]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<3 x i64>, array<3 x i64>)>

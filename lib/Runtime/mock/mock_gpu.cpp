@@ -2892,12 +2892,13 @@ int wrap_gather_nd(RuntimeState *state, void *data, void *indices, void *output,
   return 0;
 }
 
-int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
-               void *axes, void *steps, void *output, const int64_t *data_shape,
-               int64_t data_rank, const int64_t *output_shape,
-               int64_t output_rank, int64_t starts_num_elements,
-               int64_t axes_num_elements, int64_t steps_num_elements,
-               int64_t data_type, int64_t index_type) {
+int wrap_slice_typed(RuntimeState *state, void *data, void *starts, void *ends,
+                     void *axes, void *steps, void *output,
+                     const int64_t *data_shape, int64_t data_rank,
+                     const int64_t *output_shape, int64_t output_rank,
+                     int64_t starts_num_elements, int64_t axes_num_elements,
+                     int64_t steps_num_elements, int64_t data_type,
+                     int64_t index_type) {
   (void)index_type;
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_slice\n");
@@ -2918,6 +2919,18 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
              steps ? "yes" : "null", hipdnn_ep_datatype_name(data_type),
              (long long)data_type);
   return 0;
+}
+
+int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
+               void *axes, void *steps, void *output, const int64_t *data_shape,
+               int64_t data_rank, const int64_t *output_shape,
+               int64_t output_rank, int64_t starts_num_elements,
+               int64_t axes_num_elements, int64_t steps_num_elements,
+               int64_t data_type) {
+  return wrap_slice_typed(
+      state, data, starts, ends, axes, steps, output, data_shape, data_rank,
+      output_shape, output_rank, starts_num_elements, axes_num_elements,
+      steps_num_elements, data_type, HIPDNN_EP_DATATYPE_INT64);
 }
 
 int wrap_scatter_nd(RuntimeState *state, void *data, void *indices,
