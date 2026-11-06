@@ -61,8 +61,9 @@ static std::optional<double> getScalarFloatConstant(mlir::Value v) {
     auto resultType =
         mlir::dyn_cast<mlir::ShapedType>(def->getResult(0).getType());
     auto floatType =
-        resultType ? mlir::dyn_cast<mlir::FloatType>(resultType.getElementType())
-                   : nullptr;
+        resultType
+            ? mlir::dyn_cast<mlir::FloatType>(resultType.getElementType())
+            : nullptr;
     if (!floatType)
       return std::nullopt;
     std::optional<double> source = getScalarFloatConstant(def->getOperand(0));
