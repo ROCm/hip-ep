@@ -10,7 +10,7 @@ update_submodules, --config/--cmake_generator/--cmake_extra_defines/
 --skip_submodule_sync conventions) but deliberately plain: it ensures
 submodules, sets up the platform compiler environment, picks the GPU arch, runs
 the cmake configure/build/install for this project's artifacts -- the MorphiZen
-EP shared library (libonnxruntime_morphizen_ep.so / .dll) plus the HIP MLIR
+EP shared library (libhipgpu.so / hipgpu.dll) plus the HIP MLIR
 tools -- and (on Linux) bundles the runtime .so into a self-contained install/.
 
 All C++ dependency *acquisition* is delegated to cmake/deps.cmake: LLVM/MLIR/LLD

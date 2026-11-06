@@ -65,10 +65,17 @@ int wrap_pad(RuntimeState *state, void *data, void *pads, void *constant_value,
       },
       state);
 
-  (void)output_shape;
-  (void)output_rank;
+  // The pool represents an empty tensor with a null data pointer. Padding to
+  // an empty result is therefore a valid no-op, before validating pointers.
+  if (output_shape && output_rank >= 0) {
+    int64_t out_num_elements = 1;
+    for (int64_t d = 0; d < output_rank; ++d)
+      out_num_elements *= output_shape[d];
+    if (out_num_elements == 0)
+      return 0;
+  }
 
-  if (!state || !data || !pads || !output || !data_shape) {
+  if (!state || !pads || !output || !data_shape) {
     RUNTIME_DEBUG_LOG("[REAL] wrap_pad: null required argument\n");
     return -1;
   }
@@ -80,6 +87,18 @@ int wrap_pad(RuntimeState *state, void *data, void *pads, void *constant_value,
   if (data_rank != output_rank) {
     fprintf(stderr, "[REAL] wrap_pad: data_rank(%lld) != output_rank(%lld)\n",
             (long long)data_rank, (long long)output_rank);
+    return -1;
+  }
+  int64_t data_num_elements = 1;
+  for (int64_t d = 0; d < data_rank; ++d)
+    data_num_elements *= data_shape[d];
+  // A constant-mode pad of an empty input never dereferences `data`: every
+  // output coordinate lies outside the input and the kernel writes the
+  // constant value. Empty tensors intentionally have a null data pointer.
+  if (!data && !(data_num_elements == 0 && mode_id == 0)) {
+    RUNTIME_DEBUG_LOG(
+        "[REAL] wrap_pad: null data for %lld-element input (mode=%lld)\n",
+        (long long)data_num_elements, (long long)mode_id);
     return -1;
   }
   if (pads_num_elements <= 0) {

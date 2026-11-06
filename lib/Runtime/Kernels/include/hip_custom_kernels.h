@@ -1283,27 +1283,38 @@ HIP_KERNEL_API int hip_gqa_flash_prefill_v2(
  *                       decomposed path when head_sink is null. head_sink takes
  *                       precedence when both are supplied.
  *
- * Sinks are implemented at d == 64 and d == 96, and windows at d == 64, 96
- * and 128 (all by v6x). Returns 0 on success and -1 when the request cannot
- * be served exactly (a sink with d == 128 or 256, a window with d == 256), so
- * the caller falls back to the decomposed path instead of silently dropping
- * either. A request with neither keeps v2's head-dim coverage. */
+ *   key_bias          : [B, key_bias_stride] __half additive bias per key, or
+ *                       null. Added to every query row's scaled scores, in the
+ *                       units of an ONNX additive mask; key_bias_stride == 0
+ *                       shares one row across the batch. Carries a key-padding
+ *                       mask on top of the built-in causal and window masks.
+ *
+ * Sinks are implemented at d == 64 and d == 96, windows at d == 64, 96 and
+ * 128, and key_bias at d == 128 (all by v6x). Returns 0 on success, -1 when
+ * the request cannot be served exactly (a sink with d == 128 or 256, a window
+ * with d == 256, key_bias with any d but 128), so the caller falls back to the
+ * decomposed path instead of
+ * silently dropping it, and the HIP error of a failed launch otherwise. A
+ * request with none of them keeps v2's head-dim coverage. */
 HIP_KERNEL_API int hip_gqa_flash_prefill(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
     void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
     int past_len, float scale, int local_window_size, const void* head_sink,
-    int num_heads, int smooth_softmax);
+    int num_heads, int smooth_softmax, const void* key_bias,
+    int key_bias_stride);
 
-/* Lookup-only v3 variant. The final five fields are the explicit launch
+/* Lookup-only v3 variant. hb / qw / mt / bkv / nd are the explicit launch
  * config (hipdnn_ep::GqaPrefillConfig): v6x uses hb / qw / mt / bkv, v8x uses
- * nd / hb / bkv; unused fields are zero. This entry validates the tuple against
- * the configs built for the shape and never invokes an online autotuner. */
+ * nd / hb / bkv; unused fields are zero. key_bias is as for
+ * hip_gqa_flash_prefill. This entry validates the tuple against the configs
+ * built for the shape and never invokes an online autotuner. */
 HIP_KERNEL_API int hip_gqa_flash_prefill_v3_configured(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
     void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
     int past_len, float scale, int local_window_size, const void* head_sink,
     int num_heads, int smooth_softmax,
-    int hb, int qw, int mt, int bkv, int nd);
+    int hb, int qw, int mt, int bkv, int nd,
+    const void* key_bias, int key_bias_stride);
 
 /* NB: prefill is compute-bound, so there is deliberately NO separate int8
  * prefill kernel. The runtime (real/gqa.cpp) dequantizes the int8 KV cache to an
@@ -1326,7 +1337,7 @@ HIP_KERNEL_API int hip_mha_flash_prefill(
     void* O, int B, int N, int sq, int skv, int d, int max_seq, float scale);
 
 /* FA-2 split-K GQA decode (sq == 1, d in {64, 96, 128, 256},
- * HPG=H/G in {1,2,3,4,5,6,8,16}):
+ * HPG=H/G in {1,2,3,4,5,6,8,16}, and HPG=9 at d == 128):
  * GQA-aware kernel that loads K/V tiles into LDS once and reuses them
  * across the query heads of each KV group, then a second kernel
  * merges K_SPLITS partial (m, l, O) per query head. fp16 d == 96 runs a
@@ -1373,7 +1384,10 @@ HIP_KERNEL_API int hip_mha_flash_prefill(
  *     INT8 [B,G,max_seq,d] (BNSD); k_scale/v_scale are fp32 [G,d] (one scale per
  *     (kv_head, head_dim) channel, no zero point; dequant x_fp16 = x_i8 *
  *     scale[g*d + c]). The int8 read is 1 byte/elem, halving the DRAM traffic on
- *     the bandwidth-bound decode. Both scales are required for INT8. */
+ *     the bandwidth-bound decode. Both scales are required for INT8.
+ *
+ * key_bias: optional [B, key_bias_stride] __half additive bias per key, as for
+ * hip_gqa_flash_prefill (key_bias_stride == 0 shares one row). */
 HIP_KERNEL_API int hip_gqa_flash_decode(
     void* stream,
     const void* Q, const void* Kcache, const void* Vcache,
@@ -1387,7 +1401,9 @@ HIP_KERNEL_API int hip_gqa_flash_decode(
     int use_smooth_softmax,
     int kv_dtype,
     const void* k_scale,
-    const void* v_scale);
+    const void* v_scale,
+    const void* key_bias,
+    int key_bias_stride);
 
 /* Lookup-only variant of hip_gqa_flash_decode. The caller supplies a
  * validated offline-LUT or heuristic configuration, so this entry never runs
@@ -1409,7 +1425,9 @@ HIP_KERNEL_API int hip_gqa_flash_decode_configured(
     const void* v_scale,
     int use_wmma,
     int splits,
-    int bkv);
+    int bkv,
+    const void* key_bias,
+    int key_bias_stride);
 
 /* =========================================================================
  * Cast (Element Type Conversion)
@@ -1426,8 +1444,18 @@ HIP_KERNEL_API int hip_gqa_flash_decode_configured(
  *   input_dtype  - source data type (hip_dtype_t value cast to int)
  *   output_dtype - destination data type (hip_dtype_t value cast to int)
  *
- * Currently supported conversions: INT64 -> INT32
- * Returns: 0 on success, non-zero on failure
+ * Supported conversions:
+ *   INT64 -> INT32, UINT8; INT32 -> INT64, UINT8; UINT8 -> INT64, INT32
+ *   INT8 -> INT16; INT16 -> UINT8
+ *   FLOAT32 <-> FLOAT16; FLOAT32 -> INT64, INT32
+ *   FLOAT16 -> INT64, INT32, UINT8; INT64/INT32/UINT8 -> FLOAT16, FLOAT32
+ *   BFLOAT16 <-> FLOAT32, FLOAT16, FLOAT64, INT64, INT32, INT16, INT8, UINT8
+ *   (FLOAT64 is kernel-only for now: wrap_cast does not map
+ *   HIPDNN_EP_DATATYPE_DOUBLE yet, so model graphs cannot reach it.)
+ * bf16 conversions go through fp32: fp32 -> bf16 rounds to nearest even
+ * (same as PyTorch and ONNX), bf16 -> fp32 is exact, float -> integer
+ * truncates toward zero.
+ * Returns: 0 on success, non-zero on failure (-1 for an unsupported pair)
  */
 HIP_KERNEL_API int hip_cast(
     void* stream,
@@ -1490,18 +1518,27 @@ HIP_KERNEL_API int hip_gather_elements(
     int element_size_bytes,
     int indices_element_size_bytes);
 
-/* Scratch hip_top_k wants for this shape, or 0 when it needs none (only the
- * chunked two-pass path for long last-axis rows with 2 <= k <= 32 does). With
- * a smaller or null workspace those rows take the one-pass kernel. */
+/* Scratch hip_top_k wants for this shape, or 0 when it needs none. The chunked
+ * two-pass path for long last-axis rows with 2 <= k <= 32 uses it when given,
+ * and otherwise takes the one-pass kernel. The full-sort path for k > 256
+ * requires it. */
 HIP_KERNEL_API size_t hip_top_k_workspace_bytes(int64_t axis, int64_t rank,
                                                 const int64_t* x_shape,
                                                 int64_t k);
 
+/* Nonzero when hip_top_k handles this shape: any k <= 256, or a full sort of
+ * a contiguous last axis (k == axis size) above that. */
+HIP_KERNEL_API int hip_top_k_device_supported(int64_t axis, int64_t rank,
+                                              const int64_t* x_shape,
+                                              int64_t k);
+
+/* Supported hip_dtype: HIP_DTYPE_FLOAT16, HIP_DTYPE_FLOAT32. Other dtypes
+ * return -1. */
 HIP_KERNEL_API int hip_top_k(void* stream, const void* data, void* values,
                              void* indices, int64_t axis, int64_t largest,
                              int64_t sorted, int64_t rank,
                              const int64_t* x_shape, int64_t k,
-                             int element_size_bytes, void* workspace,
+                             int hip_dtype, void* workspace,
                              size_t workspace_bytes);
 
 // Fill `output` with Normal(mean, scale) samples. `shape` has `rank` dims
@@ -2972,6 +3009,30 @@ HIP_KERNEL_API int hip_qmoe_topk_routing(
     int64_t normalize,
     int64_t element_size_bytes);
 
+/* Sigmoid + correction-bias top-k routing.
+ *   logits          - GPU [num_tokens, num_experts] fp32 router logits
+ *   correction_bias - GPU [num_experts] fp32; selection only
+ *   expert_indices  - GPU [num_tokens, k] int32 (output), in descending
+ *                     sigmoid + bias order, ties to the lower expert index
+ *   expert_weights  - GPU [num_tokens, k] fp16 (output):
+ *                     s / sum_k(s) * scale (no sum when normalize == 0),
+ *                     s = sigmoid(logit) of the selected expert
+ * Same output layout as hip_qmoe_topk_routing. element_size_bytes is that
+ * of expert_weights; only fp16 is supported.
+ */
+HIP_KERNEL_API int hip_qmoe_sigmoid_bias_routing(
+    void* stream,
+    const void* logits,
+    const void* correction_bias,
+    void* expert_indices,
+    void* expert_weights,
+    int64_t num_tokens,
+    int64_t num_experts,
+    int64_t k,
+    int64_t normalize,
+    float scale,
+    int64_t element_size_bytes);
+
 /* Gather rows: gathered[i,:] = input[token_ids[i],:]
  *   token_ids - GPU [count] int32
  */
@@ -3000,11 +3061,17 @@ HIP_KERNEL_API int hip_qmoe_add_bias(
  *   G = min(gate, limit)
  *   L = clamp(linear, -limit, limit)
  *   out = G * sigmoid(alpha*G) * (L + beta)
+ *
+ * row_scale (fp32 [n], may be null): row r is stored as out / row_scale[r],
+ * a power of two that keeps the row within fp16 range (1 for ordinary rows).
+ * Pass the same buffer to hip_qmoe_reduce_sorted_pairs. With null, rows are
+ * stored unscaled.
  */
 HIP_KERNEL_API int hip_qmoe_swiglu(
     void* stream,
     const void* input,
     void* output,
+    void* row_scale,
     int64_t n,
     int64_t inter_size,
     float alpha,
@@ -3038,9 +3105,11 @@ HIP_KERNEL_API int hip_qmoe_scatter_add(
  *   expert_weights   - GPU [num_tokens * k] fp16  (input from topk_routing)
  *   expert_counts    - GPU [num_experts]      int32 (output)
  *   expert_offsets   - GPU [num_experts + 1]  int32 (output, exclusive scan)
- *   sorted_token_ids - GPU [num_tokens * k]   int32 (output, grouped by eid)
+ *   sorted_token_ids - GPU [num_tokens * k]   int32 (output, grouped by eid;
+ *                      entries past the last routed pair are zeroed)
  *   sorted_weights   - GPU [num_tokens * k]   fp16  (output, aligned w/ ids)
  *
+ * Pairs whose expert id is outside [0, num_experts) are dropped.
  * Constraints: fp16 only; num_experts <= 1024.
  */
 HIP_KERNEL_API int hip_qmoe_bucket_tokens(
@@ -3151,7 +3220,11 @@ HIP_KERNEL_API int hip_qmoe_ragged_matmul_nbits_get_task_kind(
 
 /* Deterministic routed-pair reduction. Reorders each token's k contributions
  * by ascending expert id and rounds to fp16 after every addition, matching the
- * old serial per-expert scatter-add path without atomics.
+ * old serial per-expert scatter-add path without atomics. row_scale (fp32
+ * [sorted rows], may be null) multiplies each sorted row's contribution; it is
+ * the buffer hip_qmoe_swiglu filled for that row's fc2 input. fc2_bias (fp16
+ * [num_experts, width], may be null) is added to each contribution after the
+ * row scale, so the fc2 GEMM must not also add it.
  */
 HIP_KERNEL_API int hip_qmoe_reduce_sorted_pairs(
     void* stream,
@@ -3159,6 +3232,8 @@ HIP_KERNEL_API int hip_qmoe_reduce_sorted_pairs(
     const void* pair_to_sorted,
     const void* expert_indices,
     const void* expert_weights,
+    const void* row_scale,
+    const void* fc2_bias,
     void* output,
     int64_t num_tokens,
     int64_t width,
@@ -3186,9 +3261,12 @@ HIP_KERNEL_API int hip_qmoe_reduce_sorted_pairs(
  *   fc2_scales       - GPU [E, hidden, n_blk]    fp16
  *   fc2_zero_points  - GPU [E, hidden, packed blocks] uint8
  *   fc2_bias         - GPU [E, hidden] or null   fp16
- *   slot_buf         - GPU [k, hidden]           fp16  (transient scratch)
- *   act_out          - GPU [k, inter]            fp16  (transient scratch)
+ *   slot_buf         - GPU [k, hidden]           fp32  (transient scratch)
+ *   act_out          - GPU [k, inter]            fp32  (transient scratch)
  *   output           - GPU [hidden]              fp16  (final, weighted sum)
+ *
+ * The scratch is fp32 because an expert's SwiGLU activation and weighted
+ * output can exceed the fp16 range while the reduced output still fits.
  *
  * Constraints: fp16 only (element_size_bytes == 2); hidden_size and
  * inter_size both multiples of 32; block_size is a power of two and at
@@ -3215,6 +3293,7 @@ HIP_KERNEL_API int hip_qmoe_decode_fused(
 // HIPDNN_EP_MATMUL_DP4A). Additionally takes 4 scratch buffers: quantized
 // int8 activations + per-group scales for the fc1 input ([hidden]) and the
 // fc2 slot activations ([k, inter]). fp16 only; block_size a multiple of 32.
+// slot_buf and act_out are fp32, as for hip_qmoe_decode_fused.
 // num_tokens > 1 serves a short burst (speculative verify) in the same
 // launches: input/output are [num_tokens, hidden], expert_indices/weights
 // [num_tokens, k], and every scratch buffer is num_tokens times larger.

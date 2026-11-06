@@ -387,9 +387,9 @@ extern "C" int hip_gqa_flash_decode(
     int local_window_size,
     const void* head_sink,
     int use_smooth_softmax,
-    int kv_dtype, const void* k_scale, const void* v_scale);
+    int kv_dtype, const void* k_scale, const void* v_scale,
+    const void* key_bias, int key_bias_stride);
 
-#ifdef HIPDNN_LUT_LINKED_EXTERNALLY
 // Lookup-only sibling: dispatches an explicit config instead of autotuning.
 // Same ABI as hip_gqa_flash_decode plus the three resolved knobs at the end.
 extern "C" int hip_gqa_flash_decode_configured(
@@ -404,8 +404,8 @@ extern "C" int hip_gqa_flash_decode_configured(
     const void* head_sink,
     int use_smooth_softmax,
     int kv_dtype, const void* k_scale, const void* v_scale,
-    int use_wmma, int splits, int bkv);
-#endif
+    int use_wmma, int splits, int bkv,
+    const void* key_bias, int key_bias_stride);
 
 // Legacy one-block-per-head fused decode (the ORIGINAL baseline that the
 // OPTIMIZATION.md 10-20x figure was measured against). No window/sink/split-K.
@@ -437,10 +437,16 @@ struct Case {
   int window;                       // <=0 = full attention
   int sink;                         // head_sink present
   int smooth;                       // use_smooth_softmax (no explicit sink)
+  int pad;                          // > 0: key_bias marks batch b's first
+                                    // b*pad keys as left padding
+  // Bias of a padded key. The fp16 lower bound is what the ONNX mask uses;
+  // -inf (and -3.4e38, which rounds to -inf in fp16) must not turn a fully
+  // masked KV split into NaN.
+  float pad_value = -65504.0f;
 };
 
 // results.csv shape: the parameters that tell any two cases apart. The window,
-// sink and smooth flags appear only when set.
+// sink, smooth and pad fields appear only when set.
 static std::string case_shape(const Case& c) {
   std::string s = "B" + std::to_string(c.B) + "_H" + std::to_string(c.H) +
                   "_G" + std::to_string(c.G) + "_D" + std::to_string(c.D) +
@@ -448,7 +454,21 @@ static std::string case_shape(const Case& c) {
   if (c.window > 0) s += "_win" + std::to_string(c.window);
   if (c.sink) s += "_sink";
   if (c.smooth) s += "_smooth";
+  if (c.pad > 0) s += "_pad" + std::to_string(c.pad);
+  if (c.pad > 0 && std::isinf(c.pad_value)) s += "_ninf";
+  else if (c.pad > 0 && c.pad_value < -65504.0f) s += "_m3e38";
   return s;
+}
+
+// key_bias rows [B, max_seq]: 0 for a real key, pad_value for padding. Empty
+// when the case has no padding.
+static std::vector<float> make_key_bias(const Case& c) {
+  if (c.pad <= 0) return {};
+  std::vector<float> kb((size_t)c.B * c.max_seq, 0.0f);
+  for (int b = 0; b < c.B; ++b)
+    for (int kv = 0; kv < b * c.pad && kv < c.max_seq; ++kv)
+      kb[(size_t)b * c.max_seq + kv] = c.pad_value;
+  return kb;
 }
 
 // One collected result row for the Markdown perf report. The three latency
@@ -477,10 +497,14 @@ static void cpu_reference(const Case& c,
                           const std::vector<float>& V,    // [B,G,max_seq,D]
                           const std::vector<int>& seqlens,// [B]
                           const std::vector<float>& sink, // [H] (natural units)
+                          const std::vector<float>& kb,   // [B,max_seq] or empty
                           float scale,
                           std::vector<float>& O) {        // [B,H,D]
   const int B = c.B, H = c.H, G = c.G, D = c.D, max_seq = c.max_seq;
   const int hpg = H / G;
+  auto bias = [&](int b, int kv) {
+    return kb.empty() ? 0.0f : kb[(size_t)b * max_seq + kv];
+  };
   O.assign((size_t)B * H * D, 0.0f);
   for (int b = 0; b < B; ++b) {
     int raw = seqlens[b] + 1;
@@ -495,7 +519,7 @@ static void cpu_reference(const Case& c,
         const float* k = &K[(((size_t)b * G + g) * max_seq + kv) * D];
         float dot = 0.0f;
         for (int e = 0; e < D; ++e) dot += q[e] * k[e];
-        float s = dot * scale;
+        float s = dot * scale + bias(b, kv);
         if (s > m) m = s;
       }
       if (!std::isfinite(m)) {
@@ -509,7 +533,7 @@ static void cpu_reference(const Case& c,
         const float* v = &V[(((size_t)b * G + g) * max_seq + kv) * D];
         float dot = 0.0f;
         for (int e = 0; e < D; ++e) dot += q[e] * k[e];
-        float p = std::exp(dot * scale - m);
+        float p = std::exp(dot * scale + bias(b, kv) - m);
         l += p;
         for (int e = 0; e < D; ++e) acc[e] += p * v[e];
       }
@@ -549,50 +573,56 @@ static float max_abs(const std::vector<float>& a, const std::vector<float>& b) {
 //   SCALAR8/WMMA8: force one impl at 8 splits (correctness A/B coverage).
 enum DecodeMode { MODE_AUTO, MODE_BASELINE, MODE_SCALAR8, MODE_WMMA8 };
 
-static void set_mode_env(DecodeMode m) {
-  // Cleared ("") => atoi==0 => not forced (launcher reads getenv every call).
-  switch (m) {
-    case MODE_AUTO:
-      _putenv_s("HIPDNN_GQA_DECODE_SCALAR", "");
-      _putenv_s("HIPDNN_GQA_DECODE_WMMA", "");
-      _putenv_s("HIPDNN_GQA_DECODE_SPLITS", "");
-      break;
-    case MODE_BASELINE:  // default impl, fixed 8 splits
-      _putenv_s("HIPDNN_GQA_DECODE_SCALAR", "");
-      _putenv_s("HIPDNN_GQA_DECODE_WMMA", "");
-      _putenv_s("HIPDNN_GQA_DECODE_SPLITS", "8");
-      break;
-    case MODE_SCALAR8:
-      _putenv_s("HIPDNN_GQA_DECODE_SCALAR", "1");
-      _putenv_s("HIPDNN_GQA_DECODE_WMMA", "");
-      _putenv_s("HIPDNN_GQA_DECODE_SPLITS", "8");
-      break;
-    case MODE_WMMA8:
-      _putenv_s("HIPDNN_GQA_DECODE_SCALAR", "");
-      _putenv_s("HIPDNN_GQA_DECODE_WMMA", "1");
-      _putenv_s("HIPDNN_GQA_DECODE_SPLITS", "8");
-      break;
-  }
+// Fixed configs go through hip_gqa_flash_decode_configured: when the kernels
+// are a separate DLL, _putenv_s from this executable does not reach the
+// getenv of the DLL's C runtime, so the HIPDNN_GQA_DECODE_* overrides would be
+// ignored. The overrides are cleared so a statically linked build does not
+// apply them on top of the explicit config.
+static void clear_mode_env() {
+  _putenv_s("HIPDNN_GQA_DECODE_SCALAR", "");
+  _putenv_s("HIPDNN_GQA_DECODE_WMMA", "");
+  _putenv_s("HIPDNN_GQA_DECODE_SPLITS", "");
+}
+
+// Mirrors flash_decode_wmma_supported in gqa_kernel.hip.
+static bool decode_wmma_supported(const Case& c) {
+  const int hpg = c.H / c.G;
+  return (hpg == 4 && (c.D == 64 || c.D == 128)) || (hpg == 8 && c.D == 64);
 }
 
 // ---- run one launcher config; returns avg ms over iters --------------------
 static double run_kernel(DecodeMode mode, const Case& c, float scale,
                          const __half* dQ, const __half* dK, const __half* dV,
                          __half* dO, float* dPart, const int* dSeq,
-                         const __half* dSink, int iters,
+                         const __half* dSink, const __half* dKb, int iters,
                          const hipdnn_ep_test::ColdKvCopies& kv,
                          std::vector<float>& host_O) {
-  set_mode_env(mode);
+  clear_mode_env();
 
   const int B = c.B, H = c.H, G = c.G, D = c.D, max_seq = c.max_seq;
   const void* sinkp = c.sink ? (const void*)dSink : nullptr;
+  // -1 autotunes; otherwise the impl at BASELINE_SPLITS splits. A geometry
+  // without a WMMA instance runs the scalar kernel under MODE_WMMA8.
+  const bool wmma_ok = decode_wmma_supported(c);
+  const int use_wmma = mode == MODE_SCALAR8  ? 0
+                       : mode == MODE_WMMA8  ? (wmma_ok ? 1 : 0)
+                       : mode == MODE_BASELINE ? (wmma_ok && D == 64 ? 1 : 0)
+                                               : -1;
+  auto launch = [&](const void* k, const void* v, int kv_rows) {
+    if (use_wmma < 0)
+      return hip_gqa_flash_decode(nullptr, dQ, k, v, dO, dPart, B, H, G, D,
+                                  c.total, kv_rows, MAX_SPLITS, scale, dSeq,
+                                  c.window, sinkp, c.smooth, HIP_KV_DTYPE_FP16,
+                                  nullptr, nullptr, dKb, max_seq);
+    return hip_gqa_flash_decode_configured(
+        nullptr, dQ, k, v, dO, dPart, B, H, G, D, c.total, kv_rows, MAX_SPLITS,
+        scale, dSeq, c.window, sinkp, c.smooth, HIP_KV_DTYPE_FP16, nullptr,
+        nullptr, use_wmma, BASELINE_SPLITS, /*bkv=*/16, dKb, max_seq);
+  };
 
   // Warmup + correctness fetch. For AUTO this first call also runs the autotune
   // pass (timed candidates) and caches the winner; subsequent calls reuse it.
-  HIP_CHECK((hipError_t)hip_gqa_flash_decode(
-      nullptr, dQ, dK, dV, dO, dPart, B, H, G, D, c.total, max_seq, MAX_SPLITS,
-      scale, dSeq, c.window, sinkp, c.smooth, HIP_KV_DTYPE_FP16, nullptr,
-      nullptr));
+  HIP_CHECK((hipError_t)launch(dK, dV, max_seq));
   HIP_CHECK(hipDeviceSynchronize());
   host_O.resize((size_t)B * H * D);
   {
@@ -603,9 +633,7 @@ static double run_kernel(DecodeMode mode, const Case& c, float scale,
   }
 
   return hipdnn_ep_test::rotatedMeanMs(nullptr, iters, kv, [&](int i) {
-    hip_gqa_flash_decode(nullptr, dQ, kv.k(i), kv.v(i), dO, dPart, B, H, G, D,
-                         c.total, kv.rows(), MAX_SPLITS, scale, dSeq, c.window,
-                         sinkp, c.smooth, HIP_KV_DTYPE_FP16, nullptr, nullptr);
+    launch(kv.k(i), kv.v(i), kv.rows());
   });
 }
 
@@ -616,7 +644,7 @@ static double run_kernel(DecodeMode mode, const Case& c, float scale,
 static double run_kernel_lut(const Case& c, float scale,
                              const __half* dQ, const __half* dK, const __half* dV,
                              __half* dO, float* dPart, const int* dSeq,
-                             const __half* dSink, int iters,
+                             const __half* dSink, const __half* dKb, int iters,
                              const hipdnn_ep_test::ColdKvCopies& kv,
                              std::vector<float>& host_O,
                              hipdnn_ep::GqaTuneSource& out_source,
@@ -649,7 +677,7 @@ static double run_kernel_lut(const Case& c, float scale,
   HIP_CHECK((hipError_t)hip_gqa_flash_decode_configured(
       nullptr, dQ, dK, dV, dO, dPart, B, H, G, D, c.total, max_seq, MAX_SPLITS,
       scale, dSeq, c.window, sinkp, c.smooth, HIP_KV_DTYPE_FP16, nullptr,
-      nullptr, use_wmma, splits, bkv));
+      nullptr, use_wmma, splits, bkv, dKb, max_seq));
   HIP_CHECK(hipDeviceSynchronize());
   host_O.resize((size_t)B * H * D);
   {
@@ -664,7 +692,7 @@ static double run_kernel_lut(const Case& c, float scale,
                                     B, H, G, D, c.total, kv.rows(), MAX_SPLITS,
                                     scale, dSeq, c.window, sinkp, c.smooth,
                                     HIP_KV_DTYPE_FP16, nullptr, nullptr,
-                                    use_wmma, splits, bkv);
+                                    use_wmma, splits, bkv, dKb, max_seq);
   });
 }
 #endif  // HIPDNN_LUT_LINKED_EXTERNALLY
@@ -733,9 +761,17 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose) {
   HIP_CHECK(hipMemcpy(dV, hV.data(), hV.size() * sizeof(__half), hipMemcpyHostToDevice));
   HIP_CHECK(hipMemcpy(dSink, hSink.data(), hSink.size() * sizeof(__half), hipMemcpyHostToDevice));
   HIP_CHECK(hipMemcpy(dSeq, Seq.data(), Seq.size() * sizeof(int), hipMemcpyHostToDevice));
+  const std::vector<float> Kb = make_key_bias(c);
+  __half* dKb = nullptr;
+  if (!Kb.empty()) {
+    const auto hKb = to_half(Kb);
+    HIP_CHECK(hipMalloc(&dKb, hKb.size() * sizeof(__half)));
+    HIP_CHECK(hipMemcpy(dKb, hKb.data(), hKb.size() * sizeof(__half),
+                        hipMemcpyHostToDevice));
+  }
 
   std::vector<float> ref;
-  cpu_reference(c, Q, K, Vv, Seq, Sink, scale, ref);
+  cpu_reference(c, Q, K, Vv, Seq, Sink, Kb, scale, ref);
 
   // The rows a launch reads: the window when there is one, else every key.
   const hipdnn_ep_test::ColdKvCopies kv(
@@ -758,7 +794,7 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose) {
     const std::vector<std::string> lines = hipdnn_ep_test::captureLogLines(
         "HIPDNN_GQA_AUTOTUNE_LOG", "_cfg_capture.tmp", [&]() {
           ms = run_kernel(mode, c, scale, dQ, dK, dV, dO, dPart, dSeq, dSink,
-                          iters, kv, out);
+                          dKb, iters, kv, out);
         });
     if (cfg)
       for (const std::string& line : lines) {
@@ -789,7 +825,7 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose) {
   // valid without window/sink, and very slow at long context, so it is opt-in
   // (--fused) and timed with fewer iters.
   const bool fused_ok_shape =
-      g_do_fused && (c.window <= 0 && !c.sink && !c.smooth);
+      g_do_fused && (c.window <= 0 && !c.sink && !c.smooth && c.pad <= 0);
   double ms_fused = 0.0; double l2_fused = 0.0; bool fused_ran = false;
   if (fused_ok_shape) {
     std::vector<float> O_fused;
@@ -817,7 +853,7 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose) {
     // per-dispatch diagnostic off the console.
     captureLogLines("HIPDNN_GQA_AUTOTUNE_LOG", "_cfg_capture.tmp", [&]() {
       ms_lut = run_kernel_lut(c, scale, dQ, dK, dV, dO, dPart, dSeq, dSink,
-                              iters, kv, O_lut, src, lut_cfg);
+                              dKb, iters, kv, O_lut, src, lut_cfg);
     });
     char lut_config[96];
     std::snprintf(lut_config, sizeof(lut_config),
@@ -901,6 +937,7 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose) {
 
   hipFree(dQ); hipFree(dK); hipFree(dV); hipFree(dO);
   hipFree(dSink); hipFree(dSeq); hipFree(dPart);
+  if (dKb) hipFree(dKb);
   return ok ? 0 : 1;
 }
 
@@ -951,6 +988,7 @@ int main(int argc, char** argv) {
     else if (a == "--window") { next(single.window); have_single = true; }
     else if (a == "--sink") { next(single.sink); have_single = true; }
     else if (a == "--smooth") { next(single.smooth); have_single = true; }
+    else if (a == "--pad") { next(single.pad); have_single = true; }
   }
 
   int dev = 0;
@@ -1018,11 +1056,29 @@ int main(int argc, char** argv) {
       // ---- D96 at GQA ratios (the D=96 kernel streams K/V per wave) ----
       full_cases.push_back({"GQA hpg4 D96",        1, 32,  8,  96, L, L,   0, 0, 0});
       full_cases.push_back({"GQA hpg8 D96 sink",   1, 64,  8,  96, L, L,   0, 1, 0});
+      // ---- Per-key bias (key-padding mask), B=2 with batch 1 left-padded ----
+      // Laguna-S: full layers H48 G8 (hpg6), sliding layers H72 G8 (hpg9,
+      // d128 only) with a 512-key window.
+      full_cases.push_back({"laguna-s full pad",    2, 48,  8, 128, L, L,   0, 0, 0, L / 4});
+      full_cases.push_back({"laguna-s sliding",     1, 72,  8, 128, L, L, 512, 0, 0});
+      full_cases.push_back({"laguna-s sliding pad", 2, 72,  8, 128, L, L, 512, 0, 0, L / 4});
+      // The WMMA and D96 kernels apply the bias on their own paths.
+      full_cases.push_back({"GQA hpg8 D64 pad",     2, 64,  8,  64, L, L,   0, 0, 0, L / 4});
+      full_cases.push_back({"GQA hpg4 D96 pad",     2, 32,  8,  96, L, L,   0, 0, 0, L / 4});
+      // -inf padding: the leading splits of batch 1 see only masked keys.
+      full_cases.push_back({"laguna-s full pad -inf",    2, 48, 8, 128, L, L,   0, 0, 0, L / 4, -INFINITY});
+      full_cases.push_back({"laguna-s sliding pad -inf", 2, 72, 8, 128, L, L, 512, 0, 0, L / 4, -INFINITY});
+      full_cases.push_back({"GQA hpg8 D128 pad -3.4e38", 2, 64, 8, 128, L, L,   0, 0, 0, L / 4, -3.4e38f});
+      full_cases.push_back({"GQA hpg4 D128 pad -inf",    2, 32, 8, 128, L, L,   0, 0, 0, L / 4, -INFINITY});
+      full_cases.push_back({"GQA hpg8 D64 pad -inf",     2, 64, 8,  64, L, L,   0, 0, 0, L / 4, -INFINITY});
+      full_cases.push_back({"GQA hpg4 D96 pad -inf",     2, 32, 8,  96, L, L,   0, 0, 0, L / 4, -INFINITY});
+      full_cases.push_back({"GQA hpg4 D96 pad -3.4e38",  2, 32, 8,  96, L, L,   0, 0, 0, L / 4, -3.4e38f});
     }
 
-    printf("coverage=%d -> running %zu typical length(s) x 17 categorical "
+    printf("coverage=%d -> running %zu typical length(s) x %zu categorical "
            "case(s) = %zu gqa_decode cases\n",
-           coverage_tier, n_lens, full_cases.size());
+           coverage_tier, n_lens, full_cases.size() / n_lens,
+           full_cases.size());
     for (const Case& c : full_cases) {
       if (!g_only.empty() &&
           std::string(c.name).find(g_only) == std::string::npos)

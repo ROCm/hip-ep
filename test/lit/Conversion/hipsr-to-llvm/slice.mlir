@@ -37,7 +37,8 @@
 // CHECK-NEXT:  %[[DATA_RANK:.*]] = llvm.mlir.constant(2 : i64) : i64
 // CHECK-NEXT:  %[[OUT_RANK:.*]] = llvm.mlir.constant(2 : i64) : i64
 // CHECK-NEXT:  %[[DATA_TYPE:.*]] = llvm.mlir.constant(1 : i64) : i64
-// CHECK-NEXT:  llvm.call @wrap_slice(%[[CTX]], %[[DATA_PTR]], %[[STARTS_PTR]], %[[ENDS_PTR]], %[[AXES_PTR]], %[[STEPS_PTR]], %[[OUT_PTR]], %[[DATA_SHAPE]], %[[DATA_RANK]], %[[OUT_SHAPE]], %[[OUT_RANK]], %[[ENTRIES]], %[[ENTRIES]], %[[ENTRIES]], %[[DATA_TYPE]]) : (!llvm.ptr, !llvm.ptr<1>, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr<1>, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64, i64, i64) -> i32
+// CHECK-NEXT:  %[[INDEX_TYPE:.*]] = llvm.mlir.constant(4 : i64) : i64
+// CHECK-NEXT:  llvm.call @wrap_slice_typed(%[[CTX]], %[[DATA_PTR]], %[[STARTS_PTR]], %[[ENDS_PTR]], %[[AXES_PTR]], %[[STEPS_PTR]], %[[OUT_PTR]], %[[DATA_SHAPE]], %[[DATA_RANK]], %[[OUT_SHAPE]], %[[OUT_RANK]], %[[ENTRIES]], %[[ENTRIES]], %[[ENTRIES]], %[[DATA_TYPE]], %[[INDEX_TYPE]]) : (!llvm.ptr, !llvm.ptr<1>, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr<1>, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64, i64, i64, i64) -> i32
 func.func @slice(%ctx: !hipsr.context,
                  %data: memref<8x4xf16, #hipsr.mem<device>>,
                  %ends: memref<1xi64, #hipsr.mem<host>>,

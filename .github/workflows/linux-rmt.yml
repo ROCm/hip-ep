@@ -35,11 +35,11 @@ env:
   # ORT is still built from source either way). Part of the ort-install cache
   # key. Remove a PR once its fix lands in the pinned ONNX Runtime release.
   ONNXRUNTIME_PR_PATCHES: ""
-  OGA_VERSION: "0.17.0"
+  OGA_VERSION: "0.19.0"
   # Space-separated microsoft/onnxruntime-genai PR numbers fetched from
   # pull/<n>.diff and applied on top of v<OGA_VERSION>. Part of the OGA cache
   # key. Remove a PR once it lands in the pinned OGA release.
-  OGA_PR_PATCHES: "2685 2691 2705 2712"
+  OGA_PR_PATCHES: "2875"
   # The GPU arch the artifact targets. CI runners have no GPU, so it is passed
   # explicitly (build.py auto-detects from /sys on a real GPU host).
   HIP_ARCHITECTURES: gfx11-generic
@@ -614,7 +614,7 @@ jobs:
         with:
           name: linux-gpu-test-package-rmt
           path: staging/
-          retention-days: ${{ (github.ref == 'refs/heads/main' || contains(github.ref, 'release')) && 14 || 3 }}
+          retention-days: ${{ (github.ref == 'refs/heads/main' || contains(github.ref, 'release')) && 90 || 3 }}
 
       - name: Save sccache directory
         if: always() && github.ref_name == 'main'
