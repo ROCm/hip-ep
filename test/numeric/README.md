@@ -202,10 +202,13 @@ fails the session creation rather than producing a misleading "pass".
 
 #### Example: MorphiZen EP
 
-A complete recipe for this repo's build of the MorphiZen EP,
-runnable as-is from the repo root after `python build.py`. If you're
-targeting a different EP, substitute the filenames and env vars
-accordingly.
+A complete recipe for this repo's build of the MorphiZen EP
+(`hipgpu`), runnable as-is from the repo root after `python build.py`
+with its default layout: the install prefix is the sibling
+`../install` (`--install_dir`) and the auto-downloaded TheRock SDK
+lives in `../build/<repo>/_therock`. Adjust the paths if you passed
+`--install_dir` or `--therock_dist`. If you're targeting a different
+EP, substitute the filenames and env vars accordingly.
 
 **Windows (cmd):**
 
@@ -213,28 +216,29 @@ accordingly.
 rem One-time per shell: activate conda + VS, expose ROCm runtime DLLs.
 call "%USERPROFILE%\miniforge3\condabin\conda.bat" activate base
 call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
-set "THEROCK_DIST=%CD%\install\therock"
+for %I in (.) do set "REPO_NAME=%~nxI"
+set "THEROCK_DIST=%CD%\..\build\%REPO_NAME%\_therock"
 set "PATH=%THEROCK_DIST%\bin;%PATH%"
 
 rem Run the suite.
 cd test\numeric
 pytest --backend ort_ep ^
-       --ep-name      MorphiZenExecutionProvider ^
-       --ep-dll       "..\..\install\dist\bin\onnxruntime_morphizen_ep.dll" ^
-       --ep-option    config_file=..\..\install\dist\bin\morphizen_config.json
+       --ep-name      hipgpu ^
+       --ep-dll       "..\..\..\install\bin\hipgpu.dll" ^
+       --ep-option    config_file=..\..\..\install\bin\morphizen_config.json
 ```
 
 **Linux (bash):**
 
 ```bash
-export THEROCK_DIST=$PWD/install/therock
+export THEROCK_DIST=$PWD/../build/$(basename $PWD)/_therock
 export PATH=$THEROCK_DIST/bin:$PATH
 
 cd test/numeric
 pytest --backend ort_ep \
-       --ep-name      MorphiZenExecutionProvider \
-       --ep-dll       ../../install/dist/bin/libonnxruntime_morphizen_ep.so \
-       --ep-option    config_file=../../install/dist/bin/morphizen_config.json
+       --ep-name      hipgpu \
+       --ep-dll       ../../../install/lib/libhipgpu.so \
+       --ep-option    config_file=../../../install/bin/morphizen_config.json
 ```
 
 What each piece does:
@@ -244,8 +248,11 @@ What each piece does:
   session-create time; the Windows loader needs `%THEROCK_DIST%\bin`
   on `PATH` to find them. This is the *only* env var the EP requires
   at runtime; everything else is a CLI flag or optional toggle.
-- **`--ep-name MorphiZenExecutionProvider`** -- matches the string
-  the EP's C++ side passes to `OrtEpFactory::CreateEpFactories`.
+- **`--ep-name hipgpu`** -- the alias the DLL is registered under via
+  `register_execution_provider_library`; ORT advertises the EP devices
+  under this name. Any non-empty string works; `hipgpu` matches the
+  EP's default registration name (`MORPHIZEN_EP_REGISTRATION_NAME` in
+  `cmake/deps.cmake`) and the name used in `docs/quick_start.md`.
 - **`--ep-dll`** -- the registered EP DLL. The framework resolves
   the path to absolute before handing it to ORT (because
   `register_execution_provider_library` resolves relative paths
