@@ -917,8 +917,9 @@ MLIRGraph::add_node(const std::string &name, const std::string &op_type,
                 onnxElementTypeToMlirElementType(onnx_type, builder);
             new_attrs.push_back(
                 builder.getNamedAttr("to", mlir::TypeAttr::get(mlir_type)));
-            new_attrs.push_back(builder.getNamedAttr(
-                attr_names::ONNX_TO_ENUM, builder.getI64IntegerAttr(onnx_type)));
+            new_attrs.push_back(
+                builder.getNamedAttr(attr_names::ONNX_TO_ENUM,
+                                     builder.getI64IntegerAttr(onnx_type)));
             continue;
           }
         }
