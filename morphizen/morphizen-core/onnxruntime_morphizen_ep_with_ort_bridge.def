@@ -2,3 +2,5 @@ LIBRARY hipgpu
 EXPORTS
     CreateEpFactories
     ReleaseEpFactory
+    hipdnn_ep_device_api_version
+    hipdnn_ep_copy_state_slots

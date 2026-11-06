@@ -14,7 +14,7 @@
 // 5. causal_conv_dynamic                 — dynamic batch + seq_len (LLM decode)
 // 6. causal_conv_dynamic_no_past_state   — dynamic input with no past_state
 // 7. causal_conv_channels_last_dilated   — channels_last=1, dilation=3
-// 8. causal_conv_state_window            — rejected
+// 8. causal_conv_state_window            — leading state-window axis
 // 9. causal_conv_dilated_channels_first  — rejected
 // 10. causal_conv_bf16                   — rejected
 // 11. causal_conv_channels_last_bad_state — rejected
@@ -238,8 +238,8 @@ module {
   }
 
   // CHECK-LABEL: func.func @causal_conv_state_window
-  // CHECK-NOT: hip.causal_conv_with_state
-  // CHECK: onnx.Custom
+  // CHECK: tensor.empty() : tensor<2x1x64x3xf16>
+  // CHECK: hip.causal_conv_with_state({{.*}}) ins({{.*}} : tensor<1x64x8xf16>, tensor<64x1x4xf16>, tensor<2x1x64x3xf16>) outs({{.*}} : tensor<1x64x8xf16>, tensor<2x1x64x3xf16>) {state_window = 2 : i64}
 
   func.func @causal_conv_dilated_channels_first(
       %input: tensor<1x64x8xf16>,

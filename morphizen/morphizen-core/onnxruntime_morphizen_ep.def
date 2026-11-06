@@ -13,3 +13,5 @@ EXPORTS
     morphizen_get_execution_provider_deletor
     get_compiled_model_compatibility_info
     validate_compiled_model_compatibility_info
+    hipdnn_ep_device_api_version
+    hipdnn_ep_copy_state_slots

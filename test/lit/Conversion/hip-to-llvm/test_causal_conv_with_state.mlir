@@ -21,7 +21,7 @@
 // Expected: wrap_causal_conv_with_state(state, input, weight, bias,
 //           past_state, output, present_state, batch_size, channels,
 //           seq_len, kernel_size, ndim, activation, element_size_bytes,
-//           channels_last, dilation, state_channels_last)
+//           channels_last, dilation, state_channels_last, state_window)
 //
 // Test cases:
 // 1. causal_conv_full                  — all static, bias + past_state, silu
@@ -63,7 +63,7 @@ module {
              memref<1x64x128xf16, 1>, memref<1x64x3xf16, 1>)
         {activation = "silu", ndim = 1 : i64}
 
-    // CHECK: llvm.call @wrap_causal_conv_with_state({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_causal_conv_with_state({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
 
     return
   }
@@ -84,7 +84,7 @@ module {
              memref<1x64x128xf16, 1>, memref<1x64x3xf16, 1>)
         {ndim = 1 : i64}
 
-    // CHECK: llvm.call @wrap_causal_conv_with_state({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_causal_conv_with_state({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
 
     return
   }
@@ -108,7 +108,7 @@ module {
              memref<2x128x64xf16, 1>, memref<2x128x2xf16, 1>)
         {activation = "none", ndim = 1 : i64}
 
-    // CHECK: llvm.call @wrap_causal_conv_with_state({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_causal_conv_with_state({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
 
     return
   }
@@ -146,7 +146,7 @@ module {
     // CHECK: llvm.extractvalue {{.*}}[3, 2]
     // kernel_size = 4 remains a compile-time constant from static weight.
     // CHECK: llvm.mlir.constant(4 : i64)
-    // CHECK: llvm.call @wrap_causal_conv_with_state({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_causal_conv_with_state({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
 
     return
   }
@@ -179,7 +179,7 @@ module {
     // CHECK: llvm.mlir.constant(1 : i64)
     // CHECK: llvm.extractvalue {{.*}}[3, 2]
     // CHECK: llvm.mul
-    // CHECK: llvm.call @wrap_causal_conv_with_state({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_causal_conv_with_state({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
 
     return
   }
@@ -215,7 +215,7 @@ module {
     // CHECK: llvm.mlir.constant(2 : i64)
     // CHECK: llvm.mlir.constant(64 : i64)
     // CHECK: llvm.mlir.constant(128 : i64)
-    // CHECK: llvm.call @wrap_causal_conv_with_state({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_causal_conv_with_state({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
 
     return
   }
@@ -244,7 +244,7 @@ module {
     // channels is static (dim 2); only seq_len (dim 1) is extracted.
     // CHECK: llvm.mlir.constant(64 : i64)
     // CHECK: llvm.extractvalue {{.*}}[3, 1]
-    // CHECK: llvm.call @wrap_causal_conv_with_state({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_causal_conv_with_state({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
 
     return
   }
@@ -269,7 +269,32 @@ module {
 
     // CHECK: %[[DIL:.*]] = llvm.mlir.constant(3 : i64)
     // CHECK: %[[NSC:.*]] = llvm.mlir.constant(1 : i64)
-    // CHECK: llvm.call @wrap_causal_conv_with_state({{.*}}, %[[DIL]], %[[NSC]]) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_causal_conv_with_state({{.*}}, %[[DIL]], %[[NSC]], {{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+
+    return
+  }
+
+  // Test 9: Windowed state has a leading W axis and forwards W to runtime.
+  func.func @causal_conv_state_window(
+      %ctx: !hip.context,
+      %input: memref<1x64x3xf16, 1>,
+      %weight: memref<64x1x4xf16, 1>,
+      %bias: memref<64xf16, 1>,
+      %past_state: memref<7x1x64x3xf16, 1>,
+      %output: memref<1x64x3xf16, 1>,
+      %present_state: memref<7x1x64x3xf16, 1>) {
+    // CHECK-LABEL: llvm.func @causal_conv_state_window
+
+    hip.causal_conv_with_state(%ctx)
+        ins(%input, %weight, %bias, %past_state :
+            memref<1x64x3xf16, 1>, memref<64x1x4xf16, 1>,
+            memref<64xf16, 1>, memref<7x1x64x3xf16, 1>)
+        outs(%output, %present_state :
+             memref<1x64x3xf16, 1>, memref<7x1x64x3xf16, 1>)
+        {activation = "silu", ndim = 1 : i64, state_window = 7 : i64}
+
+    // CHECK: %[[WINDOW:.*]] = llvm.mlir.constant(7 : i64)
+    // CHECK: llvm.call @wrap_causal_conv_with_state({{.*}}, %[[WINDOW]]) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
 
     return
   }

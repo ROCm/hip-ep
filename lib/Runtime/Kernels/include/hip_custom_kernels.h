@@ -3748,6 +3748,14 @@ HIP_KERNEL_API int hip_strided_copy(void *stream, void *dst, const void *src,
                      const int64_t *dst_outer_strides, int64_t row_elems,
                      int64_t outer_total);
 
+// One-launch promotion of a state-window slot for a heterogeneous list of
+// device buffers. `descriptors_device` points to `count` entries in device
+// memory, each containing {base, slot_bytes}. The selected source slot is
+// copied into the destination slot for every descriptor on `stream`.
+HIP_KERNEL_API int hip_state_slot_copy(void *stream,
+                       const void *descriptors_device, int32_t count,
+                       int32_t source_slot, int32_t destination_slot);
+
 /* =========================================================================
  * Causal Depthwise 1D Conv -- single-step "decode" path
  * =========================================================================
@@ -3851,6 +3859,24 @@ HIP_KERNEL_API int hip_causal_conv_prefill_nlc(
     int64_t kernel_size,
     int64_t activation,
     int64_t element_size_bytes);
+
+// Build the right-aligned per-token carry-state window for a channels-first,
+// dilation-1 CausalConvWithState call. past_state_last is the previous
+// window's final slot. Slots that precede this call's sequence are zeroed.
+HIP_KERNEL_API int hip_causal_conv_state_window(
+    void* stream,
+    const void* input,
+    const void* past_state_last,
+    void* present_state,
+    int64_t batch_size,
+    int64_t channels,
+    int64_t seq_len,
+    int64_t kernel_size,
+    int64_t state_window,
+    int64_t element_size_bytes,
+    int64_t channels_last,
+    int64_t dilation,
+    int64_t state_channels_last);
 
 // Channels-last activations AND state, with dilated taps: input and output are
 // [B, L, C], past_state and present_state are [B, S, C] with
