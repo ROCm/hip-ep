@@ -24,6 +24,7 @@
 #include "debug_log.h"
 
 #include <cmath>
+#include <hip/hip_bf16.h>
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 #include <cstdint>
@@ -896,7 +897,7 @@ extern "C" int hip_elementwise_max(void *stream, const void *lhs,
 //
 // MIOpen's miopenOpTensor was pathologically slow on gfx1151 for the
 // vision-encoder elementwise shapes (measured ~390 ms for a 6.3M-element
-// fp16 op), so wrap_elementwise routes the float/half Add/Mul/Min/Max
+// fp16 op), so wrap_elementwise routes the f32/f16/bf16 Add/Mul/Min/Max
 // path here instead. Operand shapes are 4-D (left-padded with 1 by the
 // HipToLLVM lowering); per-axis broadcast is handled by a 0 stride on any
 // axis whose extent is 1. Output writes are fully coalesced; broadcast
@@ -935,6 +936,22 @@ template <> __device__ __forceinline__ float ew_cast<float>(float v) {
 }
 template <> __device__ __forceinline__ __half ew_cast<__half>(float v) {
   return __float2half(v);
+}
+
+// bf16: same pattern as f16 (compute in float, round to nearest even).
+__device__ __forceinline__ float ew_load(const __hip_bfloat16 *p, uint32_t i) {
+  return __bfloat162float(p[i]);
+}
+__device__ __forceinline__ void ew_store(__hip_bfloat16 *p, uint32_t i,
+                                         float v) {
+  p[i] = __float2bfloat16(v);
+}
+__device__ __forceinline__ float ew_to_float(__hip_bfloat16 v) {
+  return __bfloat162float(v);
+}
+template <>
+__device__ __forceinline__ __hip_bfloat16 ew_cast<__hip_bfloat16>(float v) {
+  return __float2bfloat16(v);
 }
 
 // op: 0=add, 1=mul, 2=min, 3=max
@@ -1249,11 +1266,12 @@ extern "C" int hip_elementwise_binary_bcast(void *stream, const void *lhs,
 
   (void)hipGetLastError();
 
-  // 16 bytes per thread: 8 halves or 4 floats.
+  // 16 bytes per thread: 8 halves / bf16s or 4 floats.
   Bcast4DFastMeta fast{};
-  const int vec = (hip_dtype == HIP_DTYPE_FLOAT16)   ? 8
-                  : (hip_dtype == HIP_DTYPE_FLOAT32) ? 4
-                                                     : 0;
+  const int vec = (hip_dtype == HIP_DTYPE_FLOAT16)    ? 8
+                  : (hip_dtype == HIP_DTYPE_BFLOAT16) ? 8
+                  : (hip_dtype == HIP_DTYPE_FLOAT32)  ? 4
+                                                      : 0;
   if (vec && ew_bcast4d_fast_meta(meta.out, meta, vec, lhs, rhs, output, n,
                                   fast)) {
     const uint32_t num_vectors = n / (uint32_t)vec;
@@ -1265,6 +1283,13 @@ extern "C" int hip_elementwise_binary_bcast(void *stream, const void *lhs,
           dim3(kBlockSize), 0, hip_stream, static_cast<const __half *>(lhs),
           static_cast<const __half *>(rhs), static_cast<__half *>(output),
           num_vectors, op, fast);
+    else if (hip_dtype == HIP_DTYPE_BFLOAT16)
+      hipLaunchKernelGGL(
+          (ew_bcast4d_fast_kernel<__hip_bfloat16, 8>), dim3(fast_grid),
+          dim3(kBlockSize), 0, hip_stream,
+          static_cast<const __hip_bfloat16 *>(lhs),
+          static_cast<const __hip_bfloat16 *>(rhs),
+          static_cast<__hip_bfloat16 *>(output), num_vectors, op, fast);
     else
       hipLaunchKernelGGL(
           (ew_bcast4d_fast_kernel<float, 4>), dim3(fast_grid), dim3(kBlockSize),
@@ -1308,6 +1333,20 @@ extern "C" int hip_elementwise_binary_bcast(void *stream, const void *lhs,
                          static_cast<const float *>(lhs),
                          static_cast<const float *>(rhs),
                          static_cast<float *>(output), n, op, meta);
+    break;
+  case HIP_DTYPE_BFLOAT16:
+    if (flat)
+      hipLaunchKernelGGL(ew_flat_kernel<__hip_bfloat16>, dim3(grid_size),
+                         dim3(kBlockSize), 0, hip_stream,
+                         static_cast<const __hip_bfloat16 *>(lhs),
+                         static_cast<const __hip_bfloat16 *>(rhs),
+                         static_cast<__hip_bfloat16 *>(output), n, op);
+    else
+      hipLaunchKernelGGL(ew_bcast4d_kernel<__hip_bfloat16>, dim3(grid_size),
+                         dim3(kBlockSize), 0, hip_stream,
+                         static_cast<const __hip_bfloat16 *>(lhs),
+                         static_cast<const __hip_bfloat16 *>(rhs),
+                         static_cast<__hip_bfloat16 *>(output), n, op, meta);
     break;
   default:
     fprintf(stderr,
