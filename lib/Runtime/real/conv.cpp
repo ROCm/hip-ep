@@ -32,10 +32,11 @@
 //     overwrites rather than accumulates -- so it followed every convolution
 //     with a separate miopenOpTensor pass over the whole output. That pass is
 //     gone.
-//   * There is no op state, no solution cache and no workspace. MIOpen needed a
-//     per-shape Find() and a cached solution; this kernel derives everything
-//     from its arguments, so `op_state_slot` is accepted for ABI stability and
-//     ignored.
+//   * There is no op state and no solution cache. MIOpen needed a per-shape
+//     Find() and a cached solution; this kernel derives everything from its
+//     arguments, so `op_state_slot` is accepted for ABI stability and ignored.
+//     The only scratch is the split-K partial sums of small, long-contraction
+//     fp16 shapes, taken from the session workspace.
 //
 // Only pads_begin is passed. Pad positions are never read, so the trailing pad
 // affects nothing except how many output positions exist, and that is already
@@ -118,10 +119,21 @@ int wrap_conv(RuntimeState *state, int32_t op_state_slot, const void *input,
     return -1;
   }
 
-  // No op state: this kernel needs no cached solution or workspace.
+  // No op state: this kernel needs no cached solution.
   (void)op_state_slot;
 
   void *stream = hipdnn_ep_state_get_stream(state);
+
+  // Split-K partial sums for the shapes that want them, from the session's
+  // shared workspace; without it the kernel runs unsplit.
+  void *workspace = nullptr;
+  const size_t workspace_bytes = hip_conv_workspace_bytes(
+      hip_dtype, static_cast<int>(spatial_rank), N, Cin, Cout, in0, in1, in2,
+      out0, out1, out2, k0, k1, k2, s0, s1, s2, p0, p1, p2, dil0, dil1, dil2,
+      group);
+  if (workspace_bytes > 0 &&
+      hipdnn_ep_state_ensure_workspace(state, workspace_bytes) == 0)
+    workspace = hipdnn_ep_state_get_workspace(state);
 
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_conv: dtype=%s(%lld) spatial_rank=%lld N=%lld Cin=%lld "
@@ -136,10 +148,11 @@ int wrap_conv(RuntimeState *state, int32_t op_state_slot, const void *input,
       (long long)p0, (long long)p1, (long long)p2, (long long)dil0,
       (long long)dil1, (long long)dil2, bias ? "yes" : "null");
 
-  int rc = hip_conv(stream, input, weights, bias, output, hip_dtype,
-                    static_cast<int>(spatial_rank), N, Cin, Cout, in0, in1, in2,
-                    out0, out1, out2, k0, k1, k2, s0, s1, s2, p0, p1, p2, dil0,
-                    dil1, dil2, group);
+  int rc =
+      hip_conv(stream, input, weights, bias, output, hip_dtype,
+               static_cast<int>(spatial_rank), N, Cin, Cout, in0, in1, in2,
+               out0, out1, out2, k0, k1, k2, s0, s1, s2, p0, p1, p2, dil0, dil1,
+               dil2, group, workspace, workspace ? workspace_bytes : 0);
   if (rc != 0) {
     fprintf(stderr, "[REAL] wrap_conv: kernel launch failed (%d)\n", rc);
     return -1;

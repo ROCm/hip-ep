@@ -27,22 +27,23 @@ def _make_conv_model(
     k: int = 3,
     spatial: int = 8,
     seed: int = 7,
+    batch: int = 1,
 ):
     """Build an fp16 2D Conv model with weight+bias initializers.
 
-    input:   [1, in_c, spatial, spatial] f16
+    input:   [batch, in_c, spatial, spatial] f16
     weights: [out_c, in_c // group, k, k] f16  (initializer)
     bias:    [out_c] f16                        (initializer)
-    output:  [1, out_c, spatial, spatial] f16   (stride 1, pad k//2 keeps size)
+    output:  [batch, out_c, spatial, spatial] f16 (stride 1, pad k//2 keeps size)
     """
     assert in_c % group == 0 and out_c % group == 0
     pad = k // 2
 
     inp = helper.make_tensor_value_info(
-        "input", TensorProto.FLOAT16, [1, in_c, spatial, spatial]
+        "input", TensorProto.FLOAT16, [batch, in_c, spatial, spatial]
     )
     out = helper.make_tensor_value_info(
-        "output", TensorProto.FLOAT16, [1, out_c, spatial, spatial]
+        "output", TensorProto.FLOAT16, [batch, out_c, spatial, spatial]
     )
 
     rng = np.random.default_rng(seed)
@@ -85,6 +86,54 @@ class TestConv:
 
         rng = np.random.default_rng(123)
         x = rng.uniform(-1.0, 1.0, [1, in_c, 8, 8]).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=1e-2, rtol=1e-2, cos_threshold=0.999)
+
+    @pytest.mark.parametrize(
+        "in_c,out_c,k",
+        [
+            (1280, 1280, 3),  # SD1.5 UNet 8x8 resnet conv
+            (2560, 1280, 3),  # SD1.5 UNet up-block conv after the skip concat
+            (1280, 1280, 1),  # short contraction: two chunks
+            (1000, 200, 3),  # partial row tile, last chunk shorter than the rest
+        ],
+    )
+    def test_conv_split_k(self, model_runner, in_c, out_c, k):
+        """Small feature map, long contraction: the fp16 path splits K.
+
+        At 8x8 with batch 2 the output is too small to cover the device, so the
+        contraction is cut into chunks whose fp32 partials are summed with the
+        bias afterwards.
+        """
+        model = _make_conv_model(in_c, out_c, 1, k=k, spatial=8, batch=2)
+
+        rng = np.random.default_rng(321)
+        x = rng.uniform(-1.0, 1.0, [2, in_c, 8, 8]).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=2e-2, rtol=1e-2, cos_threshold=0.999)
+
+    @pytest.mark.parametrize(
+        "in_c,out_c,spatial",
+        [
+            (40, 64, 37),  # 32-row tile; last channel slice half full
+            (72, 128, 100),  # 64-row tile; last channel slice half full
+            (64, 64, 20),  # whole channel slices
+        ],
+    )
+    def test_conv_window(self, model_runner, in_c, out_c, spatial):
+        """fp16 3x3 convolutions the window-staging kernel takes.
+
+        The input window is staged 16 channels at a time with its padding
+        resolved at staging, so a channel count that is not a multiple of 16
+        and an output plane that does not divide into the tile both leave
+        staged elements that have to come out as zero.
+        """
+        model = _make_conv_model(in_c, out_c, 1, k=3, spatial=spatial)
+
+        rng = np.random.default_rng(99)
+        x = rng.uniform(-1.0, 1.0, [1, in_c, spatial, spatial]).astype(np.float16)
 
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=1e-2, rtol=1e-2, cos_threshold=0.999)
