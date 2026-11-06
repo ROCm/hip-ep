@@ -743,6 +743,19 @@ inline constexpr int64_t kMaxRotarySections = 256;
 void populateIndexerRotaryFoldPatterns(RewritePatternSet &patterns,
                                        MLIRContext *ctx);
 
+/// Marker IndexerCountsFold stamps on a qsa `SparseAttentionIndexer` it gave
+/// a third result: the i32 [B, S] count of valid selected_indices per row.
+inline constexpr llvm::StringLiteral kSelectedCountsAttr =
+    "hipdnn.selected_counts";
+
+/// Pre-lowering pattern set: replace the
+/// `ReduceSum(Where(GreaterOrEqual(selected_indices, 0), 1, 0))` glue that
+/// counts a qsa `SparseAttentionIndexer`'s valid entries per row with a counts
+/// result of the indexer. Must run BEFORE `lowerOnnxConstants` (it reads the
+/// glue's constants) and `convertComputeOps`. See IndexerCountsFold.cpp.
+void populateIndexerCountsFoldPatterns(RewritePatternSet &patterns,
+                                       MLIRContext *ctx);
+
 /// Pre-lowering pattern set: collapse ORT's inlined `FastGelu` primitive
 /// chain (Pow / Mul / Sum / Tanh) back into a single
 /// `onnx.Gelu(approximate="tanh")`. ORT inlines the Gelu function body

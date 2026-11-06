@@ -3282,13 +3282,13 @@ LogicalResult DynamicSparseAttentionOp::verify() {
 //   ins(query, query_norm_weight, key_norm_weight, cos_cache, sin_cache,
 //       past_key) [mask(mask)] [past_sequence_length(past_sequence_length)]
 //       [rotary_position_ids(rotary_position_ids)]
-//   outs(selected_indices, present_key)
+//   outs(selected_indices, present_key) [counts(selected_counts)]
 //===----------------------------------------------------------------------===//
 
 MutableOperandRange SparseAttentionIndexerOp::getDpsInitsMutable() {
   return MutableOperandRange(
       *this, /*start=*/getSelectedIndicesMutable().getOperandNumber(),
-      /*length=*/2);
+      /*length=*/getSelectedCounts() ? 3 : 2);
 }
 
 void SparseAttentionIndexerOp::getEffects(
@@ -3312,7 +3312,10 @@ LogicalResult SparseAttentionIndexerOp::verify() {
   }
   data.push_back(getSelectedIndices());
   data.push_back(getPresentKey());
-  if (failed(verifyDpsComputeOp(*this, data, 2))) {
+  if (getSelectedCounts()) {
+    data.push_back(getSelectedCounts());
+  }
+  if (failed(verifyDpsComputeOp(*this, data, getSelectedCounts() ? 3 : 2))) {
     return failure();
   }
   const bool gathered = static_cast<bool>(getRotaryPositionIds());
@@ -3457,7 +3460,10 @@ LogicalResult SparseAttentionIndexerOp::verify() {
       failed(check(getSelectedIndices(), "selected_indices", i32,
                    {batch, seq, budget + ratio - 1})) ||
       failed(check(getPresentKey(), "present_key", elem,
-                   {batch, presentRows, kHeadSize}))) {
+                   {batch, presentRows, kHeadSize})) ||
+      (getSelectedCounts() &&
+       failed(
+           check(getSelectedCounts(), "selected_counts", i32, {batch, seq})))) {
     return failure();
   }
   auto sinType = cast<ShapedType>(getSinCache().getType());

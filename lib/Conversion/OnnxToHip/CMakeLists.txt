@@ -68,6 +68,7 @@ add_library(OnnxToHip STATIC
   DynamicSparseAttentionConversion.cpp
   SparseAttentionIndexerConversion.cpp
   IndexerRotaryFold.cpp
+  IndexerCountsFold.cpp
   RangeConversion.cpp
   FastGeluFusion.cpp
   ErfGeluFusion.cpp

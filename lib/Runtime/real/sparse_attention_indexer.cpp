@@ -47,7 +47,7 @@ int wrap_sparse_attention_indexer(
     int64_t mask_len, int64_t cos_batch, int64_t sin_batch, int64_t sin_rows,
     float epsilon, float scale, const void *rotary_position_ids,
     const void *rotary_sections, int64_t id_sections, int64_t id_batch,
-    int64_t id_rows) {
+    int64_t id_rows, void *selected_counts) {
   if (!state || !query || !query_norm_weight || !key_norm_weight ||
       !cos_cache || !sin_cache || (past_rows > 0 && !past_key) ||
       !selected_indices || !present_key ||
@@ -168,7 +168,8 @@ int wrap_sparse_attention_indexer(
       head_size, rotary_width, rotary_rows, rotary_batched, compress_ratio,
       token_budget, static_cast<int>(element_size_bytes), epsilon, scale,
       static_cast<const int64_t *>(rotary_position_ids),
-      static_cast<const uint8_t *>(rotary_sections), id_sections, id_rows);
+      static_cast<const uint8_t *>(rotary_sections), id_sections, id_rows,
+      static_cast<int32_t *>(selected_counts));
   if (rc != 0) {
     fprintf(stderr,
             "wrap_sparse_attention_indexer: hip_sparse_attention_indexer "

@@ -19,7 +19,7 @@ geometries are listed in
 
 | Layer | Indexer | DSA |
 |---|---|---|
-| ONNX to HIP | [SparseAttentionIndexerConversion.cpp](../../lib/Conversion/OnnxToHip/SparseAttentionIndexerConversion.cpp), [IndexerRotaryFold.cpp](../../lib/Conversion/OnnxToHip/IndexerRotaryFold.cpp) | [DynamicSparseAttentionConversion.cpp](../../lib/Conversion/OnnxToHip/DynamicSparseAttentionConversion.cpp) |
+| ONNX to HIP | [SparseAttentionIndexerConversion.cpp](../../lib/Conversion/OnnxToHip/SparseAttentionIndexerConversion.cpp), [IndexerRotaryFold.cpp](../../lib/Conversion/OnnxToHip/IndexerRotaryFold.cpp), [IndexerCountsFold.cpp](../../lib/Conversion/OnnxToHip/IndexerCountsFold.cpp) | [DynamicSparseAttentionConversion.cpp](../../lib/Conversion/OnnxToHip/DynamicSparseAttentionConversion.cpp) |
 | HIP op | `hip.sparse_attention_indexer` in [HipOps.td](../../include/hip/Dialect/IR/HipOps.td) | `hip.dynamic_sparse_attention` |
 | HIP to LLVM | [SparseAttentionIndexerLowering.cpp](../../lib/Conversion/HipToLLVM/SparseAttentionIndexerLowering.cpp) | [DynamicSparseAttentionLowering.cpp](../../lib/Conversion/HipToLLVM/DynamicSparseAttentionLowering.cpp) |
 | Runtime wrapper | [sparse_attention_indexer.cpp](../../lib/Runtime/real/sparse_attention_indexer.cpp) | [dynamic_sparse_attention.cpp](../../lib/Runtime/real/dynamic_sparse_attention.cpp) |
@@ -101,27 +101,67 @@ bit-identical with and without the fold.
   the ids, the strides and the section map. `ropeAngle` reads one base entry per
   channel instead of a materialized table row.
 
+## Indexer counts fold
+
+DSA takes the number of valid `selected_indices` entries of each query row.
+Exporters compute it from the indexer's selection:
+
+```text
+counts = ReduceSum(Where(GreaterOrEqual(selected_indices, 0), 1, 0),
+                   axes = [-1], keepdims = 0)                  [B, S] int32
+```
+
+That is four kernels over the whole `[B, S, K + r - 1]` selection, where `K`
+is `token_budget` and `r` is `compress_ratio`. In prefill the selection grows
+with `S`, so the glue cost grows with it.
+
+`IndexerCountsFold` in
+[IndexerCountsFold.cpp](../../lib/Conversion/OnnxToHip/IndexerCountsFold.cpp)
+is a pre-lowering pattern rooted on the `ReduceSum`. It matches when:
+
+- the threshold is 0 and the `Where` values are 1 and 0;
+- the reduction is over the last axis, without `keepdims`, into an i32
+  `[B, S]` result;
+- the counted tensor is result 0 of a qsa `SparseAttentionIndexer`.
+
+It gives the `onnx.Custom` a third result marked `hipdnn.selected_counts`.
+Several counts reductions of one selection share that result. The converter
+then emits an optional `counts(...)` init:
+
+```mlir
+%r:3 = hip.sparse_attention_indexer(%ctx) ins(...)
+    outs(%sel, %present : ...) counts(%counts : tensor<?x?xi32>) {...}
+```
+
+The lowering appends the counts pointer as the last argument of
+`wrap_sparse_attention_indexer`, or null without counts. The selection kernel
+writes each row's valid entries, all non-negative token positions, ahead of
+the `-1` fill, so it writes their number from one thread. The count is exact.
+Other uses of `selected_indices` keep reading the indices unchanged.
+
 ## Remaining graph glue
 
-These exported subgraphs around QSA still lower op by op:
-
-- `GreaterOrEqual`, `Where` and `ReduceSum` turn `selected_indices` into the
-  per-row counts that DSA consumes.
-- The q/k `SimplifiedLayerNormalization` and `MRotaryEmbedding` before DSA,
-  and the sigmoid gate after it.
+The q/k `SimplifiedLayerNormalization` and `MRotaryEmbedding` before DSA, and
+the sigmoid gate after it, still lower op by op.
 
 ## Validation
 
 - LIT:
   - [test_indexer_rotary_fold.mlir](../../test/lit/Conversion/onnx-to-hip/test_indexer_rotary_fold.mlir)
-    checks the full converted IR of the fold and of each case it rejects.
+    and [test_indexer_counts_fold.mlir](../../test/lit/Conversion/onnx-to-hip/test_indexer_counts_fold.mlir)
+    check the full converted IR of each fold and of each case it rejects.
   - [test_sparse_attention_indexer_rotary_ids.mlir](../../test/lit/Conversion/hip-to-llvm/test_sparse_attention_indexer_rotary_ids.mlir)
     checks the runtime call and the shared section-map global.
+  - [test_sparse_attention_indexer_counts.mlir](../../test/lit/Conversion/hip-to-llvm/test_sparse_attention_indexer_counts.mlir)
+    checks the counts pointer of the runtime call.
   - [hip-sparse-attention-indexer-verifier.mlir](../../test/lit/Dialect/hip-sparse-attention-indexer-verifier.mlir)
     checks the verifier.
-- Numeric: `test_rotary_fold_matches_tables` in
-  [test_sparse_attention_indexer.py](../../test/numeric/tests/test_sparse_attention_indexer.py)
-  requires the folded graph and the materialized tables to agree bit for bit.
+- Numeric, in
+  [test_sparse_attention_indexer.py](../../test/numeric/tests/test_sparse_attention_indexer.py):
+  - `test_rotary_fold_matches_tables` requires the folded graph and the
+    materialized tables to agree bit for bit.
+  - `test_counts_fold` requires the folded counts to equal the number of
+    non-negative entries in each selected row.
 - Kernel resources: run
   [check_kernel_resources.py](../../lib/Runtime/Kernels/tools/check_kernel_resources.py)
   after changing either kernel.
