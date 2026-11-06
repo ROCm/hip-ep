@@ -6,9 +6,9 @@
  *
  * Walks a shape list and touches each (path, shape, M) once, which is enough to
  * make the in-kernel autotuner run and log its winner. The winners are read off
- * stderr by scripts/update_lut.py -- this tool deliberately does not pick or
- * print configs itself, so there is exactly one implementation of "which config
- * wins", the one that ships.
+ * stderr by scripts/update_lut.py. The default mode retains this autotune-log
+ * path. Windows --requests mode instead pins candidate configs for fast LUT
+ * ranking or pairs two libraries' production paths for regression screening.
  *
  * Run with HIPDNN_EP_DEBUG=1 so the in-kernel autotuner logs its winner. Each
  * run starts with an empty in-process tune map (the tuners no longer persist to
@@ -159,7 +159,343 @@ struct Buffers {
   }
 };
 
+// Pinned ranking and paired production screening share the ordinary LUT driver.
+// Ranking values select configs only; formal acceptance uses the pinned UT.
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <chrono>
+#include <cmath>
+#include <functional>
+#include <memory>
+#include <stdexcept>
+
+extern "C" { bool hipdnnKernelUtLaunchAudit = false; }
+
+struct LoadedMatmulNbits {
+  HMODULE library = nullptr;
+  decltype(&hip_matmul_nbits) production = nullptr;
+  decltype(&hip_matmul_nbits_u4_wmma_stride) configured = nullptr;
+  using Padded = int (*)(void*, int, int, int, int, int, const void*, int,
+                        const void*, const void*, const void*, void*, int);
+  Padded padded = nullptr;
+  bool* launch_audit = nullptr;
+  using Flush = int (*)(void*);
+  Flush flush = nullptr;
+  explicit LoadedMatmulNbits(const char* path) {
+    library = LoadLibraryA(path);
+    if (!library) throw std::runtime_error("cannot load measurement library");
+    production = reinterpret_cast<decltype(production)>(GetProcAddress(library, "hip_matmul_nbits"));
+    configured = reinterpret_cast<decltype(configured)>(GetProcAddress(library, "hip_matmul_nbits_u4_wmma_stride"));
+    padded = reinterpret_cast<Padded>(GetProcAddress(library, "hip_matmul_nbits_u4_wmma_padrow"));
+    launch_audit = reinterpret_cast<bool*>(GetProcAddress(library, "hipdnnKernelUtLaunchAudit"));
+    flush = reinterpret_cast<Flush>(GetProcAddress(library, "fflush"));
+    if (!production || !configured || !padded || !launch_audit)
+      throw std::runtime_error("measurement library lacks production exports");
+  }
+};
+
+// Mirror the UT's cold working set, so retained accurate receipts remain
+// compatible with fast ranking and short-M winners do not fit cache residency.
+struct ExactColdWeights {
+  unsigned char* allocation = nullptr;
+  size_t b_offset = 0, scale_offset = 0, zero_offset = 0, stride = 0;
+  int count = 1;
+  size_t weight_bytes = 0;
+  ExactColdWeights(const void* b, size_t bb, const void* scales, size_t sb,
+                   const void* zeros, size_t zb) {
+    weight_bytes = bb + sb + zb;
+    count = std::min(4096, std::max(1, static_cast<int>(((size_t(256) << 20) + weight_bytes - 1) / weight_bytes)));
+    scale_offset = (bb + 15) & ~size_t(15);
+    zero_offset = (scale_offset + sb + 15) & ~size_t(15);
+    stride = (zero_offset + zb + 255) & ~size_t(255);
+    HIP_OK(hipMalloc(&allocation, stride * count));
+    for (int i = 0; i < count; ++i) {
+      HIP_OK(hipMemcpyAsync(allocation + i * stride, b, bb, hipMemcpyDeviceToDevice));
+      HIP_OK(hipMemcpyAsync(allocation + i * stride + scale_offset, scales, sb, hipMemcpyDeviceToDevice));
+      if (zb) HIP_OK(hipMemcpyAsync(allocation + i * stride + zero_offset, zeros, zb, hipMemcpyDeviceToDevice));
+    }
+    HIP_OK(hipDeviceSynchronize());
+  }
+  ~ExactColdWeights() { if (allocation) hipFree(allocation); }
+  const void* part(int turn, size_t offset) const {
+    return allocation + (turn % count) * stride + offset;
+  }
+};
+
+struct ExactSweepRequest {
+  std::string id;
+  int m, n, k, gs;
+  bool zeros, padded;
+  std::vector<int> configs;
+};
+
+static std::vector<ExactSweepRequest> exactSweepRequests(const char* path) {
+  std::ifstream in(path);
+  if (!in) throw std::runtime_error("cannot open exact requests");
+  std::string line;
+  std::getline(in, line);
+  if (line != "id,m,n,k,group_size,zero_point,row_stride,configs")
+    throw std::runtime_error("invalid exact request header");
+  std::vector<ExactSweepRequest> requests;
+  std::set<std::string> ids;
+  while (std::getline(in, line)) {
+    if (line.empty()) continue;
+    if (line.back() == '\r') line.pop_back();
+    std::vector<std::string> fields;
+    std::stringstream ss(line);
+    std::string item;
+    while (std::getline(ss, item, ',')) fields.push_back(item);
+    if (fields.size() != 8) throw std::runtime_error("invalid exact request");
+    ExactSweepRequest r{fields[0], std::stoi(fields[1]), std::stoi(fields[2]),
+        std::stoi(fields[3]), std::stoi(fields[4]), fields[5] == "Asymmetric",
+        fields[6] == "Padded", {}};
+    if (!ids.insert(r.id).second || r.m < 8 || r.n < 1 || r.k < 1 || r.gs < 16
+        || (r.gs & (r.gs - 1)) || (r.k % 32 && r.gs < 32)
+        || (fields[5] != "Symmetric" && fields[5] != "Asymmetric")
+        || (fields[6] != "Arrival" && fields[6] != "Padded")
+        || (r.padded && (r.k % 32 || r.k % r.gs)))
+      throw std::runtime_error("unsupported exact WMMA key");
+    std::stringstream cs(fields[7]);
+    while (std::getline(cs, item, ';')) {
+      const int id = std::stoi(item);
+      if (id < 0 || id >= 72) throw std::runtime_error("invalid config id");
+      r.configs.push_back(id);
+    }
+    if (r.configs.empty() || std::set<int>(r.configs.begin(), r.configs.end()).size() != r.configs.size())
+      throw std::runtime_error("empty or duplicate considered configs");
+    requests.push_back(std::move(r));
+  }
+  return requests;
+}
+
+// A bounded median policy, without per-config thermal qualification. Three
+// samples amortize event overhead; nonpositive/nonfinite samples are retried.
+static double fastPinnedMedian(const std::function<void()>& launch,
+                               std::vector<double>& samples) {
+  hipEvent_t start, stop;
+  HIP_OK(hipEventCreate(&start)); HIP_OK(hipEventCreate(&stop));
+  launch(); launch(); HIP_OK(hipDeviceSynchronize());
+  HIP_OK(hipEventRecord(start)); launch(); HIP_OK(hipEventRecord(stop));
+  HIP_OK(hipEventSynchronize(stop));
+  float pilot = 0;
+  HIP_OK(hipEventElapsedTime(&pilot, start, stop));
+  const int count = std::isfinite(pilot) && pilot > 0
+      ? std::min(200, std::max(1, static_cast<int>(std::ceil(1.0 / pilot)))) : 20;
+  for (int attempt = 0; attempt < 6 && samples.size() < 3; ++attempt) {
+    HIP_OK(hipEventRecord(start));
+    for (int i = 0; i < count; ++i) launch();
+    HIP_OK(hipEventRecord(stop)); HIP_OK(hipEventSynchronize(stop));
+    float ms = 0;
+    HIP_OK(hipEventElapsedTime(&ms, start, stop));
+    if (std::isfinite(ms) && ms > 0) samples.push_back(ms / count);
+  }
+  HIP_OK(hipEventDestroy(start)); HIP_OK(hipEventDestroy(stop));
+  if (samples.size() != 3) throw std::runtime_error("fast measurement incomplete");
+  auto ordered = samples;
+  std::sort(ordered.begin(), ordered.end());
+  return ordered[1];
+}
+
+static float H2F(uint16_t value) {
+  _Float16 h;
+  std::memcpy(&h, &value, 2);
+  return static_cast<float>(h);
+}
+
+static int runExactSweep(int argc, char** argv) {
+  const char *requests_path = nullptr, *candidate_path = nullptr, *baseline_path = nullptr;
+  std::string mode = "rank";
+  for (int i = 1; i < argc; ++i) {
+    const std::string arg = argv[i];
+    if (arg == "--requests" && i + 1 < argc) requests_path = argv[++i];
+    else if (arg == "--candidate-library" && i + 1 < argc) candidate_path = argv[++i];
+    else if (arg == "--baseline-library" && i + 1 < argc) baseline_path = argv[++i];
+    else if (arg == "--measurement-purpose" && i + 1 < argc) mode = argv[++i];
+    else throw std::runtime_error("unknown exact sweep argument");
+  }
+  if (!requests_path || !candidate_path || (mode != "rank" && mode != "screen")
+      || (mode == "screen" && !baseline_path))
+    throw std::runtime_error("exact sweep requires requests, libraries and rank/screen purpose");
+  LoadedMatmulNbits candidate(candidate_path);
+  std::unique_ptr<LoadedMatmulNbits> baseline;
+  if (baseline_path) baseline.reset(new LoadedMatmulNbits(baseline_path));
+  if (mode == "screen" && (!candidate.flush || !baseline->flush))
+    throw std::runtime_error("screen libraries must export their CRT audit flush");
+  hipDeviceProp_t props;
+  HIP_OK(hipGetDeviceProperties(&props, 0));
+  if (std::string(props.gcnArchName).substr(0, 7) != "gfx1151")
+    throw std::runtime_error("exact measurement requires the declared gfx1151 device");
+  const auto requests = exactSweepRequests(requests_path);
+  std::printf("FAST_IDENTITY arch=%s purpose=%s requests=%zu statistic=median3 warmup=2 target_block_ms=1 cache=rotated256MiB_max4096\n", props.gcnArchName, mode.c_str(), requests.size());
+  Buffers buffers;
+  size_t out_bytes = 0, zeros_bytes = 0;
+  bool settled = false;
+  auto last_loaded = std::chrono::steady_clock::now();
+  const auto begin = std::chrono::steady_clock::now();
+  for (size_t index = 0; index < requests.size(); ++index) {
+    const auto& r = requests[index];
+    const int kp = (r.k + 31) & ~31;
+    // Config ranking supplies the prepared A layout. Production screening
+    // supplies the real arrival stride and lets the wrapper pad a K tail.
+    const int lda = mode == "rank" ? kp : r.k;
+    const int groups = (r.k + r.gs - 1) / r.gs;
+    const int row_bytes = groups * (r.gs / 2);
+    std::vector<uint16_t> a(static_cast<size_t>(r.m) * lda, 0);
+    std::vector<uint8_t> b(static_cast<size_t>(r.n) * row_bytes, 0);
+    std::vector<uint16_t> scales(static_cast<size_t>(r.n) * groups);
+    std::vector<uint16_t> zeros(scales.size());
+    for (int m = 0; m < r.m; ++m)
+      for (int k = 0; k < r.k; ++k)
+        a[static_cast<size_t>(m) * lda + k] = F2H(float((m * 3 + k * 7) % 23 - 11) / 32);
+    for (int n = 0; n < r.n; ++n) {
+      for (int k = 0; k < r.k; ++k)
+        b[static_cast<size_t>(n) * row_bytes + k / 2] |= uint8_t(((n * 5 + k * 3) % 16) << (4 * (k & 1)));
+      for (int g = 0; g < groups; ++g) {
+        scales[static_cast<size_t>(n) * groups + g] = F2H(.01f + .001f * ((n + g) % 7));
+        zeros[static_cast<size_t>(n) * groups + g] = F2H(float(7 + (n + g) % 3));
+      }
+    }
+    buffers.grow((void**)&buffers.a, &buffers.a_n, a.size() * 2);
+    buffers.grow((void**)&buffers.b, &buffers.b_n, b.size());
+    buffers.grow((void**)&buffers.sc, &buffers.sc_n, scales.size() * 2);
+    buffers.grow((void**)&buffers.zpf, &zeros_bytes, zeros.size() * 2);
+    buffers.grow((void**)&buffers.out, &out_bytes, static_cast<size_t>(r.m) * r.n * 2);
+    HIP_OK(hipMemcpy(buffers.a, a.data(), a.size() * 2, hipMemcpyHostToDevice));
+    HIP_OK(hipMemcpy(buffers.b, b.data(), b.size(), hipMemcpyHostToDevice));
+    HIP_OK(hipMemcpy(buffers.sc, scales.data(), scales.size() * 2, hipMemcpyHostToDevice));
+    HIP_OK(hipMemcpy(buffers.zpf, zeros.data(), zeros.size() * 2, hipMemcpyHostToDevice));
+    if (r.padded && mode == "rank") {
+      const size_t need = hip_matmul_nbits_u4_padrow_bytes(r.n, r.k);
+      buffers.grow((void**)&buffers.bpad, &buffers.bpad_n, need);
+      if (hip_matmul_nbits_u4_prepack_padrow(nullptr, buffers.b, buffers.bpad, r.n, r.k))
+        throw std::runtime_error("padded input preparation failed");
+      HIP_OK(hipDeviceSynchronize());
+    }
+    const void* cold_source_b = r.padded && mode == "rank" ? buffers.bpad : buffers.b;
+    const size_t cold_b_bytes = r.padded && mode == "rank"
+        ? static_cast<size_t>(r.n) * (r.k / 2 + 128) : b.size();
+    ExactColdWeights cold(cold_source_b, cold_b_bytes, buffers.sc, scales.size() * 2,
+                          buffers.zpf, r.zeros ? zeros.size() * 2 : 0);
+    int turn = 0;
+    auto launch = [&](LoadedMatmulNbits& api, int config) {
+      const void* weight_b = cold.part(turn, 0);
+      const void* weight_scales = cold.part(turn, cold.scale_offset);
+      const void* weight_zeros = r.zeros ? cold.part(turn, cold.zero_offset) : nullptr;
+      ++turn;
+      int rc;
+      if (config >= 0)
+        rc = api.configured(nullptr, config, r.m, r.n, kp, r.gs, buffers.a, kp,
+            weight_b, weight_scales, weight_zeros, buffers.out,
+            r.n, r.padded ? r.k / 2 + 128 : 0);
+      else if (r.padded)
+        rc = api.padded(nullptr, -1, r.m, r.n, r.k, r.gs, buffers.a, lda,
+                        weight_b, weight_scales, weight_zeros, buffers.out, r.n);
+      else
+        rc = api.production(nullptr, buffers.a, weight_b, weight_scales, weight_zeros, nullptr,
+            buffers.out, r.m, r.n, r.k, 1, 4, r.gs, 2, 2, nullptr, nullptr);
+      if (rc) throw std::runtime_error("production/configured launch failed");
+      HIP_OK(hipGetLastError());
+    };
+    // CPU sampling spans tile boundaries, first/last rows and random interior
+    // coordinates. Full CPU-reference leaf coverage remains a final gate.
+    std::vector<std::pair<size_t, float>> reference;
+    const int m_edges[] = {0, r.m - 1, 15, 16, 63, 64, 127, 128};
+    const int n_edges[] = {0, r.n - 1, 15, 16, 63, 64, 127, 128};
+    for (int sample = 0; sample < 64; ++sample) {
+      const int m = sample < 8 ? std::min(r.m - 1, m_edges[sample])
+                              : int((size_t(sample) * 997 + r.m - 1) % r.m);
+      const int n = sample < 8 ? std::min(r.n - 1, n_edges[sample])
+                              : int((size_t(sample) * 787 + r.n - 1) % r.n);
+      float acc = 0;
+      for (int k = 0; k < r.k; ++k) {
+        const unsigned packed = b[static_cast<size_t>(n) * row_bytes + k / 2];
+        const float z = r.zeros ? H2F(zeros[static_cast<size_t>(n) * groups + k / r.gs]) : 8;
+        acc += H2F(a[static_cast<size_t>(m) * lda + k]) * (float((packed >> (4 * (k & 1))) & 15) - z)
+             * H2F(scales[static_cast<size_t>(n) * groups + k / r.gs]);
+      }
+      reference.emplace_back(static_cast<size_t>(m) * r.n + n, acc);
+    }
+    auto verify = [&] {
+      HIP_OK(hipDeviceSynchronize());
+      for (const auto& sample : reference) {
+        uint16_t result;
+        HIP_OK(hipMemcpy(&result, buffers.out + sample.first, 2, hipMemcpyDeviceToHost));
+        const float value = H2F(result);
+        if (!std::isfinite(value) || std::fabs(value - sample.second) > .1f + .05f * std::fabs(sample.second))
+          throw std::runtime_error("sampled CPU correctness failed");
+      }
+    };
+    const bool input_gap = std::chrono::duration<double>(std::chrono::steady_clock::now() - last_loaded).count() > .1;
+    // Fill copies through untimed reads, as the standard UT does.
+    const int read_settle = std::min(cold.count, static_cast<int>(((size_t(128) << 20) + cold.weight_bytes - 1) / cold.weight_bytes));
+    for (int i = 0; i < read_settle; ++i)
+      launch(candidate, mode == "rank" ? r.configs.front() : -1);
+    HIP_OK(hipDeviceSynchronize());
+    if (!settled || input_gap) {
+      const auto load_begin = std::chrono::steady_clock::now();
+      do { launch(candidate, mode == "rank" ? r.configs.front() : -1); HIP_OK(hipDeviceSynchronize()); }
+      while (std::chrono::duration<double>(std::chrono::steady_clock::now() - load_begin).count() < (settled ? .06 : 1));
+      settled = true;
+    }
+    if (mode == "rank") {
+      for (int config : r.configs) {
+        std::printf("FAST_CONFIG_BEGIN id=%s config=%d\n", r.id.c_str(), config);
+        std::fflush(stdout);
+        *candidate.launch_audit = true;
+        launch(candidate, config); HIP_OK(hipDeviceSynchronize());
+        *candidate.launch_audit = false;
+        std::vector<double> samples;
+        const double median = fastPinnedMedian([&]{launch(candidate, config);}, samples);
+        verify();
+        std::printf("FAST_CONFIG id=%s config=%d median_ms=%.9f samples=%.9f;%.9f;%.9f cpu_samples=64 correctness=PASS\n",
+                    r.id.c_str(), config, median, samples[0], samples[1], samples[2]);
+      }
+    } else {
+      for (int side_index = 0; side_index < 2; ++side_index) {
+        const bool is_candidate = ((index + side_index) % 2) != 0;
+        auto& api = is_candidate ? candidate : *baseline;
+        std::printf("FAST_PRODUCTION_BEGIN id=%s side=%s\n", r.id.c_str(), is_candidate ? "candidate" : "baseline");
+        std::fflush(stdout);
+        *api.launch_audit = true;
+        launch(api, -1); HIP_OK(hipDeviceSynchronize());
+        *api.launch_audit = false;
+        // Each DLL owns a CRT buffer. Flush its untimed audit before the
+        // driver writes the result so two library streams remain unambiguous.
+        if (api.flush(nullptr)) throw std::runtime_error("library audit flush failed");
+        std::vector<double> samples;
+        const double median = fastPinnedMedian([&]{launch(api, -1);}, samples);
+        verify();
+        std::printf("FAST_PRODUCTION id=%s side=%s median_ms=%.9f samples=%.9f;%.9f;%.9f cpu_samples=64 correctness=PASS\n",
+                    r.id.c_str(), is_candidate ? "candidate" : "baseline", median, samples[0], samples[1], samples[2]);
+      }
+    }
+    last_loaded = std::chrono::steady_clock::now();
+    const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count();
+    std::printf("FAST_ROW_COMPLETE id=%s completed=%zu required=%zu elapsed_seconds=%.3f\n", r.id.c_str(), index + 1, requests.size(), elapsed);
+    std::fflush(stdout);
+    // Exit at a complete row so the controller can optimize and resume. Never
+    // silently truncate coverage or continue a projected multi-day schedule.
+    if (index >= 7 && elapsed / (index + 1) * requests.size() > 8 * 3600)
+      return 8;
+  }
+  return 0;
+}
+#endif
+
 int main(int argc, char** argv) {
+#ifdef _WIN32
+  for (int i = 1; i < argc; ++i) {
+    if (std::string(argv[i]) == "--requests") {
+      try { return runExactSweep(argc, argv); }
+      catch (const std::exception& error) {
+        std::fprintf(stderr, "EXACT_SWEEP_INCOMPLETE %s\n", error.what()); return 7;
+      }
+    }
+  }
+#endif
   const char* shapes_path = nullptr;
   std::vector<int> m_list = {1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096,
                              8192, 16384};

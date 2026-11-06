@@ -967,7 +967,13 @@ def validate_fast_winner_confirmation(row, source_manifest):
             or not re.fullmatch(r'[0-9a-f]{64}', str(confirmation.get('raw_audit_digest', '')))):
         raise ValueError('checked winner confirmation identity/acceptance binding is incomplete')
     values = {}
-    for side in ('baseline', 'candidate', 'rejected_fast_candidate'):
+    sides = ['baseline', 'candidate', 'rejected_fast_candidate']
+    if 'rejected_fast_baseline' in confirmation:
+        if (confirmation.get('baseline_config_id') != row.get('baseline_source_config_id')
+                or confirmation.get('rejected_fast_baseline_config_id') != row.get('baseline_source_config_id')):
+            raise ValueError('displaced and corrected checks require the same original baseline config')
+        sides.append('rejected_fast_baseline')
+    for side in sides:
         processes = confirmation.get(side)
         if (not isinstance(processes, list) or len(processes) < 5 or len(processes) % 2 == 0
                 or any(not isinstance(blocks, list) or len(blocks) < 5 for blocks in processes)
@@ -975,14 +981,14 @@ def validate_fast_winner_confirmation(row, source_manifest):
                        or not math.isfinite(v) or v <= 0 for blocks in processes for v in blocks)):
             raise ValueError('checked winner requires odd five-process, five-block evidence on each side')
         values[side] = statistics.median(statistics.median(blocks) for blocks in processes)
-    if any(len(confirmation[side]) != len(confirmation['baseline'])
-           for side in ('candidate', 'rejected_fast_candidate')):
+    if any(len(confirmation[side]) != len(confirmation['baseline']) for side in sides):
         raise ValueError('checked winner process counts must match')
     if values['candidate'] / values['baseline'] > 1.02:
         raise ValueError('checked winner has a confirmed regression')
     rejected_id = confirmation.get('rejected_fast_config_id')
     reason = confirmation.get('selection_reason', 'confirmed_regression')
-    justified = values['rejected_fast_candidate'] / values['baseline'] > 1.02
+    displaced_baseline = values.get('rejected_fast_baseline', values['baseline'])
+    justified = values['rejected_fast_candidate'] / displaced_baseline > 1.02
     if reason == 'priority_checked_best':
         justified = (row.get('priority') is True
                      and values['rejected_fast_candidate'] / values['candidate'] > 1.02)
@@ -992,6 +998,72 @@ def validate_fast_winner_confirmation(row, source_manifest):
             or not justified):
         raise ValueError('checked correction requires a confirmed regression or priority improvement')
     return True
+
+
+def validate_fast_regression_selection(row, source_manifest, original_config,
+                                      allow_pending=False):
+    """Bind a bounded regression decision without altering ranking samples.
+
+    Pending alternatives are staging tables only. Final checked alternatives use
+    formal_confirmation; an incomplete bounded check may retain the original
+    production config, as may a byte-identical original kernel.
+    """
+    selection = row.get('regression_selection')
+    if selection is None:
+        return False, False
+    selected = next((c for c in row['configs'] if c['id'] == row['winner']), None)
+    source_digest = hashlib.sha256(json.dumps(source_manifest, sort_keys=True,
+                                              separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
+    if (not isinstance(selection, dict) or selected is None
+            or selection.get('key') != row['key']
+            or selection.get('config_id') != row['winner']
+            or selection.get('lut_config') != selected['lut_config']
+            or selection.get('final_source_manifest_digest') != source_digest
+            or not re.fullmatch(r'[0-9a-f]{64}', str(selection.get('raw_audit_digest', '')))):
+        raise ValueError('regression selection source/key/config binding is incomplete')
+    if selection.get('kind') == 'pending_regression_fix':
+        displaced = selection.get('displaced_config_id')
+        if (not allow_pending or displaced == row['winner']
+                or displaced not in row['legal_config_ids']
+                or selection.get('baseline_config_id') != row.get('baseline_source_config_id')
+                or selection.get('cpu_correct') is not True
+                or selection.get('clock_policy') != 'REALTIME_CPU_2pct'):
+            raise ValueError('pending regression alternative requires explicit staging mode')
+        values = {}
+        for side in ('baseline', 'candidate'):
+            processes = selection.get(side)
+            if (not isinstance(processes, list) or len(processes) < 5 or len(processes) % 2 == 0
+                    or any(not isinstance(b, list) or len(b) < 5 for b in processes)
+                    or any(type(v) not in (int, float) or not math.isfinite(v) or v <= 0
+                           for b in processes for v in b)):
+                raise ValueError('pending fix requires a complete checked displaced-config loss')
+            values[side] = statistics.median(statistics.median(b) for b in processes)
+        if len(selection['baseline']) != len(selection['candidate']):
+            raise ValueError('pending fix requires matched checked process counts')
+        if values['candidate'] / values['baseline'] <= 1.02:
+            raise ValueError('pending fix has no confirmed displaced-config regression')
+        return True, True
+    if (selection.get('kind') != 'retain_original_config'
+            or row['winner'] != row.get('baseline_source_config_id')
+            or (original_config is not None and _answer_of(selected['lut_config']) != _answer_of(original_config))):
+        raise ValueError('bounded fallback must retain the original production config')
+    reason = selection.get('reason')
+    if reason == 'bounded_confirmation_incomplete':
+        if (selection.get('requested_processes') != 5
+                or type(selection.get('accepted_processes')) is not int
+                or not 0 <= selection['accepted_processes'] < 5
+                or selection.get('max_attempts_per_process') != 3):
+            raise ValueError('incomplete fallback requires the bounded confirmation receipt')
+    elif reason == 'unchanged_kernel_isa':
+        payload = selection.get('baseline_payload_sha256')
+        if (not re.fullmatch(r'[0-9a-f]{64}', str(payload))
+                or payload != selection.get('candidate_payload_sha256')
+                or selection.get('metadata_equal') is not True
+                or selection.get('launch_geometry_equal') is not True):
+            raise ValueError('unchanged-code fallback requires identical ISA and launch geometry')
+    else:
+        raise ValueError('unsupported bounded regression fallback')
+    return True, False
 
 
 def cmd_import_fast(args) -> int:
@@ -1052,6 +1124,7 @@ def cmd_import_fast(args) -> int:
     winners = {}
     geometry = {}
     changed = 0
+    pending_selections = 0
     def index_of(config):
         ans = _answer_of(config)
         for i, existing in enumerate(pool):
@@ -1095,7 +1168,13 @@ def cmd_import_fast(args) -> int:
             medians[config['id']] = statistics.median(samples)
         winner = row['winner']
         checked = validate_fast_winner_confirmation(row, source_manifest)
-        if winner not in medians or (medians[winner] > min(medians.values()) * 1.02 and not checked):
+        point_index = row.get('lut_point_index')
+        original_config = (old['configs'][old['points'][point_index]['config']]
+                           if type(point_index) is int and 0 <= point_index < len(old['points']) else None)
+        regression_selected, pending = validate_fast_regression_selection(
+            row, source_manifest, original_config, getattr(args, 'allow_pending_regression', False))
+        pending_selections += int(pending)
+        if winner not in medians or (medians[winner] > min(medians.values()) * 1.02 and not checked and not regression_selected):
             raise ValueError('winner differs from canonical median ranking/tie policy')
         winners[row['id']] = winner
         cfg = geometry[winner]
@@ -1129,7 +1208,9 @@ def cmd_import_fast(args) -> int:
         temporary.replace(out)
     finally:
         if temporary.exists(): temporary.unlink()
-    receipt = dict(status='PASS', dataset_digest=digest, architecture=args.arch,
+    receipt = dict(status='PENDING_PRODUCTION_CONFIRMATION' if pending_selections else 'PASS',
+                   pending_regression_selections=pending_selections,
+                   dataset_digest=digest, architecture=args.arch,
                    input_sha256=hashlib.sha256(input_bytes).hexdigest(),
                    output_sha256=hashlib.sha256(out.read_bytes()).hexdigest(),
                    old_point_count=len(old['points']), new_point_count=len(points),
@@ -1173,6 +1254,8 @@ def main() -> int:
     ap.add_argument("command",
                     choices=["measure", "fit", "build", "compile", "all", "import-ut", "import-fast"])
     ap.add_argument("--winner-data", help="canonical fast winner dataset JSON; import-fast only")
+    ap.add_argument("--allow-pending-regression", action="store_true",
+                    help="build a staging LUT for already-confirmed loss alternatives; final checks still required")
     ap.add_argument("--accepted-ut", help="accepted pinned standard-UT dataset JSON; import-ut only")
     ap.add_argument("--arch", default="gfx1151")
     ap.add_argument("--sweep", default="matmul_nbits_sweep.exe",

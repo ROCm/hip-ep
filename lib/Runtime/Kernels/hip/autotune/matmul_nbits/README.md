@@ -187,11 +187,23 @@ sides' five-process/five-block arrays, shape/config/source identity and raw
 audit digests; the importer recomputes the 2% acceptance check. It never replaces
 prepared-kernel fast samples with padded-wrapper timings. Record both values
 and verify the corrected winner in the final production regression screen.
+When displacement and correction come from separate paired checks, retain
+`rejected_fast_baseline` and bind both baseline config IDs to the original
+production config. Each ratio then uses its own matched baseline arrays.
 For priority model exact points, `selection_reason=priority_checked_best` also
 permits an already checked config when it is more than 2% faster than the
 displaced fast choice and still passes baseline acceptance. This requires
 `priority=true` and the same bound five-process/block arrays; an unchecked gain
 or a tie cannot override fast ranking. Prefer the existing fast tie band first.
+For an already confirmed loss, `--allow-pending-regression` can build a staging
+table with an alternative from the same considered configs. The bound
+`regression_selection` retains the displaced config's checked arrays and source
+identity, and the import receipt stays `PENDING_PRODUCTION_CONFIRMATION` until
+the alternative has its own checked confirmation. This option does not measure
+or replace ranking samples. A bounded incomplete confirmation may instead
+retain the original production config; byte-identical original ISA and launch
+geometry also support retaining that config when timings vary. These retention
+decisions require explicit source, key, config and raw-audit bindings.
 It preserves existing pool indices, unrelated points, fallbacks and fitted
 weights, and adds priority exact points that were explicitly reviewed. The
 atomic import performs no GPU work and refuses a second import against the
@@ -224,6 +236,12 @@ or repeat GPU winner selection for LUT generation. Final affected leaf coverage3
 complete host resolver diff and on-device consumption remain delivery gates.
 
 ### Measure the product binary
+
+The gfx1151 arrival-layout K8-XOR route is restricted to fused WT4x4/BK32
+tiles with at least 32 workgroups per CU and 64 K stages. Smaller warp
+classes, shorter K loops and padded weight rows retain LDS padding. A route
+change invalidates only the affected config cells; retain other measurements
+when device payload, resources and launch geometry still match.
 
 The table ranks configs by their speed in the binary that is measured, so that
 binary has to be the one that ships: the SDK pinned in `cmake/deps.txt`, the
