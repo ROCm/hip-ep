@@ -123,12 +123,39 @@ module {
          qkv_hidden_sizes = [32, 32, 32]}
          : (tensor<?x?x32xf16>, tensor<32x96xf16>, tensor<96xf16>)
          -> tensor<?x?x32xf16>
+    // seqlens_k is broadcast on the device, not filled by a host loop.
+    // CHECK-NOT: tensor.generate
     // CHECK: tensor.dim
-    // CHECK: tensor.generate
+    // CHECK: hip.expand
+    // CHECK-SAME: : tensor<?xi32>
     // CHECK: tensor.from_elements
     // CHECK: hip.gqa
     // CHECK-SAME: no_causal = true
     return %0 : tensor<?x?x32xf16>
+  }
+
+  // CHECK-LABEL: func.func @attn_dynamic_batch_length_mask
+  func.func @attn_dynamic_batch_length_mask(%x: tensor<?x8x32xf16>,
+                                            %qkv_w: tensor<32x96xf16>,
+                                            %qkv_b: tensor<96xf16>,
+                                            %mask: tensor<?xi32>)
+      -> tensor<?x8x32xf16> {
+    %0 = "onnx.Custom"(%x, %qkv_w, %qkv_b, %mask) {function_name = "Attention",
+         domain_name = "com.microsoft", num_heads = 4 : i64,
+         qkv_hidden_sizes = [32, 32, 32]}
+         : (tensor<?x8x32xf16>, tensor<32x96xf16>, tensor<96xf16>, tensor<?xi32>)
+         -> tensor<?x8x32xf16>
+    // The mask is device data, so the padding bias is built from HIP ops.
+    // CHECK-NOT: tensor.generate
+    // CHECK: hip.less
+    // CHECK-SAME: : tensor<?x8xi1>
+    // CHECK: hip.where
+    // CHECK-SAME: : tensor<?x8xf16>
+    // CHECK: hip.expand
+    // CHECK-SAME: : tensor<?x1x8x8xf16>
+    // CHECK: hip.gqa
+    // CHECK-SAME: tensor<?x1x8x8xf16>
+    return %0 : tensor<?x8x32xf16>
   }
 
   // CHECK-LABEL: func.func @attn_length_mask
@@ -142,8 +169,10 @@ module {
          mask_filter_value = -1.000000e+04 : f32}
          : (tensor<1x8x32xf32>, tensor<32x96xf32>, tensor<96xf32>, tensor<1xi32>)
          -> tensor<1x8x32xf32>
-    // CHECK: tensor.generate
-    // CHECK: arith.cmpi slt
+    // CHECK: hip.less
+    // CHECK-SAME: : tensor<1x8xi1>
+    // CHECK: hip.where
+    // CHECK: hip.expand
     // CHECK: hip.gqa
     // CHECK-SAME: tensor<1x1x8x8xf32>
     return %0 : tensor<1x8x32xf32>
@@ -159,8 +188,10 @@ module {
          qkv_hidden_sizes = [32, 32, 32]}
          : (tensor<1x8x32xf16>, tensor<32x96xf16>, tensor<96xf16>, tensor<1x8xi32>)
          -> tensor<1x8x32xf16>
-    // CHECK: tensor.generate
-    // CHECK: arith.cmpi ne
+    // CHECK: hip.equal
+    // CHECK-SAME: : tensor<1x8xi1>
+    // CHECK: hip.where
+    // CHECK: hip.expand
     // CHECK: hip.gqa
     // CHECK-SAME: tensor<1x1x8x8xf16>
     return %0 : tensor<1x8x32xf16>

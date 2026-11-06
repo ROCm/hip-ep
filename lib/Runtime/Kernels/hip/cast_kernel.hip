@@ -249,6 +249,16 @@ __global__ void cast_i8_to_f32_kernel(
   }
 }
 
+__global__ void cast_f32_to_ui8_kernel(
+    const float* __restrict__ input,
+    uint8_t* __restrict__ output,
+    int64_t num_elements) {
+  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    output[idx] = static_cast<uint8_t>(input[idx]);
+  }
+}
+
 __global__ void cast_f16_to_ui8_kernel(
     const __half* __restrict__ input,
     uint8_t* __restrict__ output,
@@ -432,6 +442,11 @@ extern "C" int hip_cast(
                        dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
                        static_cast<const int8_t*>(input),
                        static_cast<int32_t*>(output), num_elements);
+  } else if (input_dtype == HIP_DTYPE_FLOAT32 && output_dtype == HIP_DTYPE_UINT8) {
+    hipLaunchKernelGGL(cast_f32_to_ui8_kernel,
+                       dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const float*>(input),
+                       static_cast<uint8_t*>(output), num_elements);
   } else if (input_dtype == HIP_DTYPE_FLOAT16 && output_dtype == HIP_DTYPE_UINT8) {
     hipLaunchKernelGGL(cast_f16_to_ui8_kernel,
                        dim3(grid_size), dim3(kBlockSize), 0, hip_stream,

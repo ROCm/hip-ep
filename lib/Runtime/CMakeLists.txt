@@ -388,6 +388,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/scatter_nd.cpp runtime_scatter_nd.bc)
     compile_to_bitcode(real/multi_head_attention.cpp runtime_multi_head_attention.bc)
     compile_to_bitcode(real/nonzero.cpp runtime_nonzero.bc)
+    compile_to_bitcode(real/non_max_suppression.cpp runtime_non_max_suppression.bc)
     compile_to_bitcode(real/size.cpp runtime_size.bc)
     compile_to_bitcode(real/pool.cpp runtime_pool.bc)
     compile_to_bitcode(real/conv.cpp runtime_conv.bc)
@@ -493,6 +494,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_scatter_nd.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_multi_head_attention.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_nonzero.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_non_max_suppression.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_size.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_pool.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_conv.bc

@@ -239,6 +239,8 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     MultiHeadAttentionOp::attachInterface<
         HipDstBufferizableModel<MultiHeadAttentionOp>>(*ctx);
     NonZeroOp::attachInterface<HipDstBufferizableModel<NonZeroOp>>(*ctx);
+    NonMaxSuppressionOp::attachInterface<
+        HipDstBufferizableModel<NonMaxSuppressionOp>>(*ctx);
     SizeOp::attachInterface<HipDstBufferizableModel<SizeOp>>(*ctx);
     LoopOp::attachInterface<HipDstBufferizableModel<LoopOp>>(*ctx);
     QAddOp::attachInterface<HipDstBufferizableModel<QAddOp>>(*ctx);
@@ -253,6 +255,11 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     QLpNormalizationOp::attachInterface<
         HipDstBufferizableModel<QLpNormalizationOp>>(*ctx);
     QSigmoidOp::attachInterface<HipDstBufferizableModel<QSigmoidOp>>(*ctx);
+    // hip.random_normal_like is a DPS op. Without this model one-shot-bufferize
+    // aborts with "op was not bufferized" and attributes the failure to the
+    // ONNX source location inherited by the lowered op.
+    RandomNormalLikeOp::attachInterface<
+        HipDstBufferizableModel<RandomNormalLikeOp>>(*ctx);
     // hip.if is a DPS control-flow op (getDpsInitsMutable, results alias
     // o_init) just like hip.loop. Without this model one-shot-bufferize aborts
     // with "op was not bufferized: hip.if" for any graph containing onnx.If,
