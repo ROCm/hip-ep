@@ -843,10 +843,14 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
   // process-wide cache. selectGemmAlgo never throws and always yields a usable
   // entry (a concrete algo, or use_default_algo for shapes with no heuristic).
   if (!have_cached) {
+    // The candidates' timed runs are launched inside this op's range; the
+    // marks keep them apart from the op's own GEMM.
+    OP_ROCTX_MARK("hip_ep.op.gemm.select.benchmark");
     GemmCacheEntry entry =
         selectGemmAlgo(state, handle, matmul_desc, matA_layout, matB_layout,
                        matC_layout, A, B, alpha, M, N, K, transA, transB,
                        typeCode, dataType, computeType, stream);
+    OP_ROCTX_MARK("hip_ep.op.gemm.run.hipblaslt");
     {
       std::lock_guard<std::mutex> lk(table.mu);
       // Another thread may have inserted this key meanwhile; try_emplace keeps

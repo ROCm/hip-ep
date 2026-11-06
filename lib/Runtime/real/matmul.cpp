@@ -547,9 +547,14 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
   // runtime bitcode.)
   if (!cached->tuned.load(std::memory_order_acquire)) {
     std::lock_guard<std::mutex> tuneGuard(cached->tune_mu);
-    if (!cached->tuned.load(std::memory_order_relaxed))
+    if (!cached->tuned.load(std::memory_order_relaxed)) {
+      // The candidates' timed runs are launched inside this op's range; the
+      // marks keep them apart from the op's own GEMM.
+      OP_ROCTX_MARK("hip_ep.op.matmul.select.benchmark");
       autotuneMatmul(handle, stream, cached, B, A, output, ws_ptr, ws_size,
                      key);
+      OP_ROCTX_MARK("hip_ep.op.matmul.run.hipblaslt");
+    }
   }
 
   float alpha = 1.0f;
