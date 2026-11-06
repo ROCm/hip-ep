@@ -137,7 +137,9 @@ What each model in `test/python` can run on the NPU, with
 `MatMulNBits` (K, N, block size) and RMS norm widths against the store's
 `mladfmatmulbias`, `mladfrmsnorm` and `addrmsnorm` kernel names at
 DynamicDispatch tag `corelib/kernels/20261029.0`; a store at another revision
-can differ. Prefill PDIs ship row counts 1 to 4096, decode PDIs one row.
+can differ. `tools/corelib-coverage/corelib_coverage.py` does this for any model
+and suggests its `RYZENAICORELIB_PDI` (see its README). Prefill PDIs ship row
+counts 1 to 4096, decode PDIs one row.
 Everything not listed runs on the GPU, as do attention, RoPE and every other
 op.
 
