@@ -3,6 +3,7 @@
 #
 #   make test        HIP_SDK=<sdk> [OFFLOAD=--offload-arch=<gfx>] [COVERAGE=1|2|3]
 #   make test_custom OFFLOAD=... HIP_SDK=... B=1 H=32 G=8 D=128 MAX_SEQ=4096 TOTAL=2048
+#   make test_fused  OFFLOAD=... HIP_SDK=... [FUSED_ARGS="--h 32 --g 8 --d 128 --len 2048"]
 #   make clean
 #
 # OFFLOAD defaults to the release target, gfx11-generic, and the kernels
@@ -177,6 +178,16 @@ $(TARGET): FORCE mode_info $(LUT_OBJS) $(LUT_HEADER_DEP) | $(BUILD_DIR)
 	$(HIPCC) -c $(KERNEL_FLAGS) $(OFFLOAD) $(INCLUDES) $(KERNEL_HIP) -o $(KERNEL_OBJ)
 	$(HIPCC) $(OFFLOAD) $(TEST_OBJ) $(KERNEL_OBJ) $(LUT_OBJS) -o $(TARGET)
 
+# hip_gqa_flash_decode_fused against the multi-dispatch decode it replaces.
+# Self-contained: no table, so the multi-dispatch path autotunes online.
+FUSED_TARGET := $(BUILD_DIR)/test_gqa_decode_fused.exe
+FUSED_OBJ    := $(BUILD_DIR)/decode_fused_test.obj
+
+$(FUSED_TARGET): FORCE | $(BUILD_DIR)
+	$(HIPCC) -c $(CXXFLAGS) $(OFFLOAD) $(INCLUDES) -x hip test_gqa_decode_fused.cpp -o $(FUSED_OBJ)
+	$(HIPCC) -c $(KERNEL_FLAGS) $(OFFLOAD) $(INCLUDES) $(KERNEL_HIP) -o $(KERNEL_OBJ)
+	$(HIPCC) $(OFFLOAD) $(FUSED_OBJ) $(KERNEL_OBJ) -o $(FUSED_TARGET)
+
 mode_info:
 	@echo [MODE=$(MODE) -^> $(MODE_RESOLVED)] arch=$(ARCH) lut_fb=$(LUT_FB)
 ifeq ($(MODE),lookup)
@@ -220,6 +231,11 @@ ifeq ($(CSV_FRESH),1)
 endif
 	$(call RUN_CMD,$(TARGET)) --b $(B) --h $(H) --g $(G) --d $(D) --max-seq $(MAX_SEQ) --total $(TOTAL) --iters $(ITERS)
 
+# Correctness matrix, then the cold-KV bench of both paths. FUSED_ARGS passes
+# single-shape flags (--h --g --d --len --window --splits --no-bench).
+test_fused: $(FUSED_TARGET)
+	$(call RUN_CMD,$(FUSED_TARGET)) $(FUSED_ARGS)
+
 # Build only. The unit_test/ aggregator passes PKG_DIR and PKG_NAME to collect the
 # exe into its hipdnn-kernel-ut package layout.
 build: $(TARGET)
@@ -232,4 +248,4 @@ endif
 endif
 
 FORCE:
-.PHONY: test test_custom clean build asm mode_info FORCE
+.PHONY: test test_custom test_fused clean build asm mode_info FORCE

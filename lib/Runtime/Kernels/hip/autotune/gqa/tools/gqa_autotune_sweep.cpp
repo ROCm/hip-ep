@@ -540,7 +540,7 @@ struct KernelVersion {
   const char *version;
 };
 constexpr KernelVersion kKernelVersions[] = {
-    {"flash_decode", "decode-2"},
+    {"flash_decode", "decode-3"},
     {"prefill_v6x", "v6x-3"},
     {"prefill_v8x", "v8x-2"},
 };
@@ -644,13 +644,16 @@ std::vector<Result> sweepDecode(const Shape &s, bool verify, double target_ms,
   // Production candidate set, used to flag which rows the runtime can pick. It
   // is always computed at the production ceiling, even when the sweep is
   // exploring above it.
-  int prod_splits[7];
-  int n_prod = 0;
-  flashDecodeCandidateSplits(tune_len, kFlashDecodeMaxSplits, prod_splits,
-                             n_prod);
-  auto is_prod = [&](int sp) {
+  // The ring kernel (the scalar impl at a ring geometry) takes the ladder
+  // without the serial-scan floor; WMMA keeps it.
+  const bool ring = flash_decode_ring_supported(d, hpg);
+  auto is_prod = [&](int sp, bool use_wmma) {
     if (sp > kFlashDecodeMaxSplits)
       return false;
+    int prod_splits[8];
+    int n_prod = 0;
+    flashDecodeCandidateSplits(tune_len, kFlashDecodeMaxSplits,
+                               use_wmma || !ring, prod_splits, n_prod);
     for (int i = 0; i < n_prod; ++i)
       if (prod_splits[i] == sp)
         return true;
@@ -727,7 +730,7 @@ std::vector<Result> sweepDecode(const Shape &s, bool verify, double target_ms,
         r.cfg = name;
         r.ms = ms;
         r.prod_candidate =
-            is_prod(sp) &&
+            is_prod(sp, use_wmma) &&
             (!use_wmma || d != 64 ||
              flashDecodeTallTileUseful(bkv, tune_len, sp));
         r.rel_l2 = err;
@@ -753,7 +756,7 @@ std::vector<Result> sweepDecode(const Shape &s, bool verify, double target_ms,
     // The production tuner sees one cache, because that is what it gets in
     // production too: it tunes on the layer it was called for.
     const FlashDecodeCfg cfg = tuneFlashDecodeConfig(
-        nullptr, d, hpg, tune_len, kFlashDecodeMaxSplits, "sweep_online",
+        nullptr, d, hpg, tune_len, kFlashDecodeMaxSplits, ring, "sweep_online",
         [&](const FlashDecodeCfg &candidate) {
           launchFlashDecodeConfig<KvDtype::kF16>(
               candidate, nullptr, dQ, dK[0], dV[0], nullptr, nullptr, dO,
