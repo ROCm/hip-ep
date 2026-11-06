@@ -107,26 +107,37 @@ def _make_skip_simplified_layer_norm_model(
     return model
 
 
-def _make_fp32_residual_skip_norm_model(input_shape: list[int]):
+def _make_fp32_residual_skip_norm_model(
+    input_shape: list[int], skip16: bool = True, gamma16: bool = True
+):
     """gpt-oss residual layout: fp32 residual, everything else fp16 with Casts.
 
     Y = Cast_f16(SSLN(res32, Cast_f32(skip16), Cast_f32(gamma16)).output)
     Y3 = the fp32 residual sum, which feeds the next layer's norm.
+    With skip16/gamma16 False that input is f32 with no Cast (an fp32 skip, or
+    a gamma whose Cast ORT already constant-folded).
     """
     hidden = input_shape[-1]
     R = helper.make_tensor_value_info("R", TensorProto.FLOAT, input_shape)
-    S = helper.make_tensor_value_info("S", TensorProto.FLOAT16, input_shape)
+    S = helper.make_tensor_value_info(
+        "S", TensorProto.FLOAT16 if skip16 else TensorProto.FLOAT, input_shape
+    )
     Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT16, input_shape)
     Y3 = helper.make_tensor_value_info("Y3", TensorProto.FLOAT, input_shape)
 
     rng = np.random.default_rng(89)
     gamma = rng.uniform(0.5, 1.5, [hidden]).astype(np.float16)
-    nodes = [
-        helper.make_node("Cast", ["S"], ["S32"], to=TensorProto.FLOAT),
-        helper.make_node("Cast", ["gamma"], ["G32"], to=TensorProto.FLOAT),
+    if not gamma16:
+        gamma = gamma.astype(np.float32)
+    nodes = []
+    if skip16:
+        nodes.append(helper.make_node("Cast", ["S"], ["S32"], to=TensorProto.FLOAT))
+    if gamma16:
+        nodes.append(helper.make_node("Cast", ["gamma"], ["G32"], to=TensorProto.FLOAT))
+    nodes += [
         helper.make_node(
             "SkipSimplifiedLayerNormalization",
-            ["R", "S32", "G32"],
+            ["R", "S32" if skip16 else "S", "G32" if gamma16 else "gamma"],
             ["Y32", "", "", "Y3"],
             domain="com.microsoft",
             epsilon=1e-5,
@@ -440,6 +451,26 @@ class TestSkipSimplifiedLayerNorm:
         rng = np.random.default_rng(61)
         res = rng.uniform(-2, 2, input_shape).astype(np.float32)
         skip_input = rng.uniform(-2, 2, input_shape).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [res, skip_input])
+        compare_outputs(actual, expected, atol=2e-3)
+
+    @pytest.mark.parametrize(
+        "skip16,gamma16", [(True, False), (False, False), (False, True)]
+    )
+    @pytest.mark.parametrize("seq_len,hidden", [(1, 2048), (128, 3072), (2, 33)])
+    def test_skip_simplified_layer_norm_fp32_residual_partial(
+        self, model_runner, seq_len, hidden, skip16, gamma16
+    ):
+        """Only some of the Casts present (Laguna: f32 gamma, f32 skip)."""
+        input_shape = [1, seq_len, hidden]
+        model = _make_fp32_residual_skip_norm_model(input_shape, skip16, gamma16)
+
+        rng = np.random.default_rng(67)
+        res = rng.uniform(-2, 2, input_shape).astype(np.float32)
+        skip_input = rng.uniform(-2, 2, input_shape).astype(
+            np.float16 if skip16 else np.float32
+        )
 
         actual, expected = model_runner.run_sample(model, [res, skip_input])
         compare_outputs(actual, expected, atol=2e-3)

@@ -615,6 +615,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
         populateGatherShapeFoldPatterns(preLoweringPatterns, ctx);
         populateTransposeMatMulFoldPatterns(preLoweringPatterns, ctx);
         populateSkipNormCastFoldPatterns(preLoweringPatterns, ctx);
+        populateSoftplusCastFoldPatterns(preLoweringPatterns, ctx);
         populateGatherBlockQuantizedPreparePatterns(preLoweringPatterns, ctx);
         populateReshapeShapeFoldPatterns(preLoweringPatterns, ctx);
         populatePadShapeFoldPatterns(preLoweringPatterns, ctx);
