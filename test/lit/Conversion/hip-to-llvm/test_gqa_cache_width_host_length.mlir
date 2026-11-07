@@ -14,7 +14,7 @@
 // CHECK: %[[W2:.*]] = llvm.mlir.constant(66 : i64) : i64
 // CHECK: %[[W3:.*]] = llvm.mlir.constant(66 : i64) : i64
 // CHECK: %[[FP16:.*]] = llvm.mlir.constant(1 : i32) : i32
-// CHECK: llvm.call @wrap_group_query_attention_v4({{.*}}, %[[PRESENT_A]], %[[A]], %[[W0]], %[[W1]], %[[W2]], %[[W3]], %[[FP16]])
+// CHECK: llvm.call @wrap_group_query_attention_v5({{.*}}, %[[PRESENT_A]], %[[A]], {{[^,]+}}, {{[^,]+}}, {{[^,]+}}, %[[W0]], %[[W1]], %[[W2]], %[[W3]], %[[FP16]])
 // CHECK: llvm.store %[[B:arg[0-9]+]],
 // CHECK: %[[PRESENT_B:.*]] = llvm.mlir.constant(1 : i32) : i32
 // CHECK: %[[W0:.*]] = llvm.mlir.constant(66 : i64) : i64
@@ -22,7 +22,7 @@
 // CHECK: %[[W2:.*]] = llvm.mlir.constant(66 : i64) : i64
 // CHECK: %[[W3:.*]] = llvm.mlir.constant(66 : i64) : i64
 // CHECK: %[[FP16:.*]] = llvm.mlir.constant(1 : i32) : i32
-// CHECK: llvm.call @wrap_group_query_attention_v4({{.*}}, %[[PRESENT_B]], %[[B]], %[[W0]], %[[W1]], %[[W2]], %[[W3]], %[[FP16]])
+// CHECK: llvm.call @wrap_group_query_attention_v5({{.*}}, %[[PRESENT_B]], %[[B]], {{[^,]+}}, {{[^,]+}}, {{[^,]+}}, %[[W0]], %[[W1]], %[[W2]], %[[W3]], %[[FP16]])
 func.func @distinct_lengths(%ctx: !hip.context, %a: i64, %b: i32,
     %q: memref<1x1x256xf16>, %total: memref<i32>, %out: memref<1x1x256xf16>,
     %pk: memref<1x1x128x66xf16>, %pv: memref<1x1x128x66xf16>) {
@@ -60,7 +60,7 @@ func.func @distinct_lengths(%ctx: !hip.context, %a: i64, %b: i32,
 // CHECK: %[[W2:.*]] = llvm.mlir.constant(66 : i64) : i64
 // CHECK: %[[W3:.*]] = llvm.mlir.constant(66 : i64) : i64
 // CHECK: %[[FP16:.*]] = llvm.mlir.constant(1 : i32) : i32
-// CHECK: llvm.call @wrap_group_query_attention_v4({{.*}}, %[[ABSENT]], %[[ABSENT]], %[[W0]], %[[W1]], %[[W2]], %[[W3]], %[[FP16]])
+// CHECK: llvm.call @wrap_group_query_attention_v5({{.*}}, %[[ABSENT]], %[[ABSENT]], {{[^,]+}}, {{[^,]+}}, {{[^,]+}}, %[[W0]], %[[W1]], %[[W2]], %[[W3]], %[[FP16]])
 func.func @rewritten_slot(%ctx: !hip.context, %a: i32, %b: i32, %q: memref<1x1x256xf16>,
     %total: memref<i32>, %out: memref<1x1x256xf16>, %pk: memref<1x1x128x66xf16>,
     %pv: memref<1x1x128x66xf16>) {
@@ -90,7 +90,7 @@ func.func @rewritten_slot(%ctx: !hip.context, %a: i32, %b: i32, %q: memref<1x1x2
 // CHECK: %[[W2:.*]] = llvm.mlir.constant(66 : i64) : i64
 // CHECK: %[[W3:.*]] = llvm.mlir.constant(66 : i64) : i64
 // CHECK: %[[FP16:.*]] = llvm.mlir.constant(1 : i32) : i32
-// CHECK: llvm.call @wrap_group_query_attention_v4({{.*}}, %[[ABSENT]], %[[ABSENT]], %[[W0]], %[[W1]], %[[W2]], %[[W3]], %[[FP16]])
+// CHECK: llvm.call @wrap_group_query_attention_v5({{.*}}, %[[ABSENT]], %[[ABSENT]], {{[^,]+}}, {{[^,]+}}, {{[^,]+}}, %[[W0]], %[[W1]], %[[W2]], %[[W3]], %[[FP16]])
 func.func @device_writer(%ctx: !hip.context, %a: i32, %source: memref<1xi64>,
     %q: memref<1x1x256xf16>, %total: memref<i32>, %out: memref<1x1x256xf16>,
     %pk: memref<1x1x128x66xf16>, %pv: memref<1x1x128x66xf16>) {
@@ -120,7 +120,7 @@ func.func @device_writer(%ctx: !hip.context, %a: i32, %source: memref<1xi64>,
 // CHECK: %[[W2:.*]] = llvm.mlir.constant(66 : i64) : i64
 // CHECK: %[[W3:.*]] = llvm.mlir.constant(66 : i64) : i64
 // CHECK: %[[FP16:.*]] = llvm.mlir.constant(1 : i32) : i32
-// CHECK: llvm.call @wrap_group_query_attention_v4({{.*}}, %[[ABSENT]], %[[ABSENT]], %[[W0]], %[[W1]], %[[W2]], %[[W3]], %[[FP16]])
+// CHECK: llvm.call @wrap_group_query_attention_v5({{.*}}, %[[ABSENT]], %[[ABSENT]], {{[^,]+}}, {{[^,]+}}, {{[^,]+}}, %[[W0]], %[[W1]], %[[W2]], %[[W3]], %[[FP16]])
 func.func @multi_element(%ctx: !hip.context, %a: i32, %b: i32, %q: memref<1x1x256xf16>,
     %total: memref<i32>, %out: memref<1x1x256xf16>, %pk: memref<1x1x128x66xf16>,
     %pv: memref<1x1x128x66xf16>) {

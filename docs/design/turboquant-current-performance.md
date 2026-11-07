@@ -5,7 +5,7 @@ Licensed under the MIT License.
 # Current-branch TurboQuant performance
 
 Revision scope: these tables retain the measured source revision below. Later
-main merges, most recently `f6e2e59ef0597e9dd8243964531f59ef863000cb`, change
+main merges, most recently `4ab7265aa96832ac2cdc73b4b605ec76838f722c`, change
 GQA host-length handling and Qwen LinearAttention/SwiGLU/RMSNorm execution.
 Their sanity validation is separate; these timings have not been remeasured
 on those merges.

@@ -30,6 +30,12 @@
 //   - binary Min and Max broadcast like Add, so an unranked tail after a
 //     ranked producer gets a rank (`min_max_broadcast`). A later input can
 //     still expand that shape (`min_variadic_broadcast`).
+//   - Squeeze of a ranked input ranks an unranked result, including when
+//     the dropped axis is dynamic (`squeeze_unit_axis`,
+//     `squeeze_dynamic_axis_feeds_reshape`). Negative and repeated axes are
+//     normalized first (`squeeze_negative_and_multiple`,
+//     `squeeze_duplicate_axes`). A Slice whose bounds are not
+//     constants stays unranked (`slice_runtime_bounds_stays_unranked`).
 
 // -----------------------------------------------------------------------
 // Forward Concat rule: Concat((1x?x1152, ?x?x?), axis=1) -> 1x?x1152.
@@ -401,4 +407,57 @@ func.func @min_variadic_broadcast(%a: tensor<1xf32>, %b: tensor<1xf32>,
   %open = "onnx.Min"(%a, %b, %unknown)
       : (tensor<1xf32>, tensor<1xf32>, tensor<*xf32>) -> tensor<?xf32>
   return %open : tensor<?xf32>
+}
+
+// Squeeze of a static unit axis. The unranked result takes the kept dims.
+// CHECK-LABEL: func.func @squeeze_unit_axis
+// CHECK:         "onnx.Squeeze"{{.*}} -> tensor<?x?x4xf32>
+func.func @squeeze_unit_axis(%x: tensor<?x?x1x4xf32>) -> tensor<*xf32> {
+  %y = "onnx.Squeeze"(%x) {axes = [2]} : (tensor<?x?x1x4xf32>) -> tensor<*xf32>
+  return %y : tensor<*xf32>
+}
+
+// Dropping a dynamic axis still fixes the rank. Shape of that result has a
+// static length, so the following Reshape gets the same rank.
+// CHECK-LABEL: func.func @squeeze_dynamic_axis_feeds_reshape
+// CHECK:         "onnx.Squeeze"{{.*}} -> tensor<?x?x?xf32>
+// CHECK:         "onnx.Shape"{{.*}} -> tensor<3xi64>
+// CHECK:         "onnx.Reshape"{{.*}} -> tensor<?x?x?xf32>
+func.func @squeeze_dynamic_axis_feeds_reshape(%x: tensor<?x?x?x?xf32>,
+                                              %data: tensor<?x4xf32>) -> tensor<*xf32> {
+  %squeezed = "onnx.Squeeze"(%x) {axes = [0]}
+      : (tensor<?x?x?x?xf32>) -> tensor<*xf32>
+  %shape = "onnx.Shape"(%squeezed) : (tensor<*xf32>) -> tensor<?xi64>
+  %reshaped = "onnx.Reshape"(%data, %shape)
+      : (tensor<?x4xf32>, tensor<?xi64>) -> tensor<*xf32>
+  return %reshaped : tensor<*xf32>
+}
+
+// Runtime starts and ends do not establish a rank. Ranking the result would
+// let slice lowering allocate the input extent: tensor<10xf32> sliced from
+// 2 to 5 would become a length-10 tensor.
+// CHECK-LABEL: func.func @slice_runtime_bounds_stays_unranked
+// CHECK:         "onnx.Slice"{{.*}} -> tensor<*xf32>
+func.func @slice_runtime_bounds_stays_unranked(%x: tensor<10xf32>,
+                                              %starts: tensor<1xi64>,
+                                              %ends: tensor<1xi64>) -> tensor<*xf32> {
+  %y = "onnx.Slice"(%x, %starts, %ends)
+      : (tensor<10xf32>, tensor<1xi64>, tensor<1xi64>) -> tensor<*xf32>
+  return %y : tensor<*xf32>
+}
+
+// Negative axes are normalized, then both are dropped. A repeated axis is
+// not merged: the result stays unranked.
+// CHECK-LABEL: func.func @squeeze_negative_and_multiple
+// CHECK:         "onnx.Squeeze"{{.*}} -> tensor<?x4xf32>
+func.func @squeeze_negative_and_multiple(%x: tensor<1x?x1x4xf32>) -> tensor<*xf32> {
+  %y = "onnx.Squeeze"(%x) {axes = [-4, -2]} : (tensor<1x?x1x4xf32>) -> tensor<*xf32>
+  return %y : tensor<*xf32>
+}
+
+// CHECK-LABEL: func.func @squeeze_duplicate_axes
+// CHECK:         "onnx.Squeeze"{{.*}} -> tensor<*xf32>
+func.func @squeeze_duplicate_axes(%x: tensor<?x?x1x4xf32>) -> tensor<*xf32> {
+  %y = "onnx.Squeeze"(%x) {axes = [2, -2]} : (tensor<?x?x1x4xf32>) -> tensor<*xf32>
+  return %y : tensor<*xf32>
 }

@@ -43,8 +43,8 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         op.getVQuantType() == "NONE" && !op.getDoRotary() &&
         !op.getNoCausal() && op.getLocalWindowSizeAttr().getInt() <= 0 &&
         op.getSmoothSoftmaxAttr().getInt() <= 0 && !op.getQkOutput() &&
-        !op.getHeadSink() && !op.getAttentionBias() && !op.getPositionIds() &&
-        !op.getOutputQk())
+        !op.getHeadSink() && !op.getAttentionBias() && !op.getKeyBias() &&
+        !op.getPositionIds() && !op.getOutputQk())
       callee = kWrapGQARingF16;
 #endif
     Location loc = op.getLoc();
@@ -59,6 +59,12 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
       hostLength = rewriter.getRemappedValue(original);
       if (!hostLength)
         return rewriter.notifyMatchFailure(op, "cannot convert host length");
+      // HostScalarAnalysis forwards total_seq_len for a uniform seqlens_k.
+      if (op.getUniformSeqlensK())
+        hostLength = LLVM::SubOp::create(
+            rewriter, loc, hostLength,
+            LLVM::ConstantOp::create(rewriter, loc, i32Type,
+                                     rewriter.getI32IntegerAttr(1)));
     }
     Value hasHostLength = LLVM::ConstantOp::create(
         rewriter, loc, i32Type, rewriter.getI32IntegerAttr(hostLength ? 1 : 0));
@@ -282,8 +288,23 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
                  : createI64Const(0);
     };
 
-    // All entries carry the optional host length; packed entries add widths.
-    SmallVector<Type, 50> paramTypes = {
+    // key_bias [B or 1, T]: one fp16 row per batch entry, applied by the fused
+    // kernels per key. The runtime checks T against the KV length it scores.
+    Value keyBiasPtr = nullPtr;
+    Value keyBiasBatchVal = createI64Const(0);
+    Value keyBiasLenVal = createI64Const(0);
+    if (op.getKeyBias()) {
+      auto kbType = cast<MemRefType>(op.getKeyBias().getType());
+      keyBiasPtr =
+          extractContiguousMemRefPtr(adaptor.getKeyBias(), rewriter, loc);
+      keyBiasBatchVal =
+          getMemRefDimSize(kbType, 0, adaptor.getKeyBias(), rewriter, loc);
+      keyBiasLenVal =
+          getMemRefDimSize(kbType, 1, adaptor.getKeyBias(), rewriter, loc);
+    }
+
+    // Dense arguments plus the packed-width and FP16 contract.
+    SmallVector<Type, 53> paramTypes = {
         ptrType, // state
         i32Type, // op_state_slot
         // Inputs (14 pointers - some may be nullptr)
@@ -306,7 +327,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         ptrType, // present_key
         ptrType, // present_value
         ptrType, // output_qk
-        // Attributes (12 values)
+        // Attributes (13 values)
         i64Type, // num_heads
         i64Type, // kv_num_heads
         f32Type, // scale
@@ -332,7 +353,11 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         i64Type, // kv_bnsd
         i64Type, // seq_len_new_kv
         i32Type, // has_host_length
-        i32Type  // host_length_value
+        i32Type, // host_length_value
+        // Key bias (3 values)
+        ptrType, // key_bias
+        i64Type, // key_bias_batch
+        i64Type  // key_bias_len
     };
 
     bool fp16Tensors = true;
@@ -346,12 +371,12 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
       paramTypes.push_back(i32Type);
     }
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, widthABI ? "wrap_group_query_attention_v4" : callee,
+        rewriter, module, widthABI ? "wrap_group_query_attention_v5" : callee,
         paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 50> args = {
+    SmallVector<Value, 53> args = {
         statePtr,
         // Per-instance op-state slot (threaded by --assign-op-state-slots)
         getOpStateSlotValue(op, rewriter, loc),
@@ -368,7 +393,9 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         // Shape info (10 values)
         batchSizeVal, seqLenQVal, seqLenKVVal, pastBufSeqVal, headDimVal,
         elemSizeVal, attnBiasBatchVal, attnBiasNumHeadsVal, kvBnsdVal,
-        seqLenNewKVVal, hasHostLength, hostLength};
+        seqLenNewKVVal, hasHostLength, hostLength,
+        // Key bias (3 values)
+        keyBiasPtr, keyBiasBatchVal, keyBiasLenVal};
 
     if (widthABI) {
       args.push_back(cacheWidth(op.getPastKey(), adaptor.getPastKey()));

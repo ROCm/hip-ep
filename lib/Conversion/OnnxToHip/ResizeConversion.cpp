@@ -219,6 +219,18 @@ classifyHostSizes(mlir::Value sizes, int64_t rank) {
         return std::nullopt;
       extents[axis++] = entry.getSExtValue();
     }
+    return extents;
+  }
+  // A sizes vector assembled from slices of constants is constant per entry.
+  for (int64_t axis : llvm::seq<int64_t>(rank)) {
+    std::optional<mlir::OpFoldResult> entry = findHostShapeEntry(sizes, axis);
+    if (!entry)
+      continue;
+    std::optional<int64_t> constant = mlir::getConstantIntValue(*entry);
+    if (constant && *constant <= 0)
+      return std::nullopt;
+    if (constant)
+      extents[axis] = *constant;
   }
   return extents;
 }
@@ -257,6 +269,26 @@ readHostSizeIndexes(mlir::OpBuilder &b, mlir::Location loc, mlir::Value context,
   mlir::SmallVector<mlir::OpFoldResult, 1> one{b.getIndexAttr(1)};
   mlir::SmallVector<mlir::OpFoldResult, 1> strides{b.getIndexAttr(1)};
   for (int64_t axis : llvm::seq<int64_t>(rank)) {
+    if (std::optional<mlir::OpFoldResult> entry =
+            findHostShapeEntry(sizes, axis)) {
+      if (std::optional<int64_t> constant = mlir::getConstantIntValue(*entry)) {
+        if (*constant <= 0)
+          return std::nullopt;
+        indexes.push_back(
+            mlir::arith::ConstantIndexOp::create(b, loc, *constant));
+        continue;
+      }
+      auto value = mlir::dyn_cast<mlir::Value>(*entry);
+      if (value && value.getType().isIndex()) {
+        indexes.push_back(value);
+        continue;
+      }
+      if (value && value.getType().isSignlessInteger()) {
+        indexes.push_back(
+            mlir::arith::IndexCastOp::create(b, loc, b.getIndexType(), value));
+        continue;
+      }
+    }
     mlir::SmallVector<mlir::OpFoldResult, 1> offsets{b.getIndexAttr(axis)};
     mlir::Value slice = mlir::tensor::ExtractSliceOp::create(
         b, loc, sliceType, sizes, offsets, one, strides);
@@ -540,10 +572,11 @@ struct ResizeToHip : public mlir::RewritePattern {
           outputType.getDimSize(axis) != extent)
         return rewriter.notifyMatchFailure(
             op, "Resize: sizes disagrees with static output extent");
-      // A constant extent of a static input axis is written into the type, so
-      // the type-only plan still applies and no readback is required. A
-      // runtime extent stays dynamic; its host index is the readback.
-      if (known && !inputType.isDynamicDim(axis)) {
+      // A known extent is part of the result type even when the input axis
+      // is dynamic. Leaving it dynamic makes the planner copy the input
+      // extent into an output buffer of the known size. A runtime extent
+      // stays dynamic; its host index is the readback.
+      if (known) {
         refinedShape.push_back(extent);
         continue;
       }

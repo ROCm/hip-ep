@@ -90,9 +90,9 @@ Ordinary inference still uses upstream GQA. Set `HIPDNN_EP_USE_RING_ATTENTION=1`
 before process startup for dense Ring; packed-cache options explicitly select
 Ring prefill plus TurboQuant decode/append.
 
-After updating from the earlier `wrap_group_query_attention_v3` build, regenerate
-compiled model/session artifacts with this build. The v4 packed-cache ABI now
-includes main's optional host sequence length; old compiled artifacts are not
+After updating from the earlier v3/v4 packed-width builds, regenerate
+compiled model/session artifacts with this build. The v5 packed-cache ABI now
+includes main's optional host sequence length and per-key bias arguments; old compiled artifacts are not
 binary compatible. Codec files and the packed row format are unchanged.
 
 With `HIP_EP_ENABLE_RING_ATTENTION=OFF`, TurboQuant append is unavailable.
@@ -340,8 +340,7 @@ The GenAI append companion is the only external source change:
 | `src/decoding/standard_decoding_strategy.h` and `.cpp` | Flush a selected token whose KV has not yet been computed before appending a prompt. |
 | `test/cpp/engine/request_lifecycle_tests.cpp` | Assert AMDGPU continuation capability. |
 
-For a GenAI source tree that already includes AMDGPU continuous decoding (such
-as the CI stack using #2691), apply only
+For an older GenAI v0.17 tree that already includes AMDGPU continuous decoding, apply only
 [`onnxruntime-genai-0.17-pending-append.patch`](patches/onnxruntime-genai-0.17-pending-append.patch).
 Use `git apply --check` against the actual dependency revision. Do not apply
 both patches. The shared decoding-strategy change needs broader backend review;
@@ -353,3 +352,8 @@ validated with the Ring ORT 1.31 runtime. HIP-EP itself uses the 1.31 SDK.
 Record these separately rather than implying SDK equivalence. Per-application
 `genai_config.json`, DLL search paths, downloaded SDKs, environments and generated
 codec/model artifacts are setup inputs, not additional source patches.
+
+Main's CI now uses GenAI v0.19.0 (with its configured patch set). The v0.17
+commands above describe the retained local validation environment. Do not apply
+the v0.17 companion patches to v0.19 without checking the corresponding source;
+the local v0.17 results do not qualify the v0.19 dependency stack.

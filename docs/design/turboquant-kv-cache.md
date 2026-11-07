@@ -69,7 +69,7 @@ The codec file has a 40-byte header: eight little-endian uint32 values (magic `0
 
 ## Runtime and compiler integration
 
-The logical attention dimension and physical cache width are different. `GqaLowering` selects `wrap_group_query_attention_v4` for dynamic or packed widths and passes the actual four past/present K/V widths. Static dense shapes use main's optional-host-length ABI. The v4 packed-width entry also carries `has_host_length` and `host_length_value` before the four widths, so compiler-proven lengths avoid device readback on both dense and packed paths. Unproven lengths retain the runtime readback. Regenerate model artifacts produced against the earlier v3 entry. The v4 ABI also carries compiler-proven FP16 tensor eligibility, preventing BF16 from entering packed kernels. The v4 dense path validates widths and delegates to existing GQA.
+The logical attention dimension and physical cache width are different. `GqaLowering` selects `wrap_group_query_attention_v5` for dynamic or packed widths and passes the actual four past/present K/V widths. Static dense shapes use main's optional-host-length ABI. The v5 packed-width entry also carries `has_host_length` and `host_length_value` followed by main's optional per-key bias pointer/batch/length and then the four widths, so compiler-proven lengths avoid device readback on both dense and packed paths. Unproven lengths retain the runtime readback. Regenerate model artifacts produced against the earlier v3/v4 entries. The v5 ABI also carries compiler-proven FP16 tensor eligibility, preventing BF16 from entering packed kernels. The v5 dense path validates widths and delegates to existing GQA.
 
 The runtime checks geometry, feature flags, lengths, shared aliases, physical widths and overlapping ranges before encoding into the cache. It uses the EP stream and runtime-owned workspace. Codec errors and kernel failures propagate to an `OrtStatus`; the custom operator no longer reports successful output after a nonzero runtime return.
 
@@ -79,7 +79,7 @@ Supported experimental contract:
 - Separate FP16 Q/K/V; causal attention; external RoPE; scale 1/16; Q/output in BSHD and cache rows in BNSD order.
 - Fresh or append prefill up to 131,072 new tokens per call, plus single-token decode; capacity and valid history at most 262,144. Full-model 256K prefill is not measured or admitted.
 - Past/present K and V alias their corresponding buffers, with physical width 66. K/V caches cannot overlap each other or activations.
-- No beams/batch expansion, internal rotary, attention bias, sinks, sliding windows, softcap, smooth softmax, QK output or conventional K/V quantization metadata.
+- No beams/batch expansion, internal rotary, attention bias or per-key bias, sinks, sliding windows, softcap, smooth softmax, QK output or conventional K/V quantization metadata.
 
 The longer admission limits are experimental extensions beyond the parent Ring PR's 64K contract. Passing direct-kernel bounds checks does not override the failed full-model 256K numerical test.
 
@@ -160,7 +160,7 @@ makes no further kernel changes.
 `GqaLowering.cpp` selects the versioned packed-width entry for packed or dynamic
 cache shapes. The declaration, real runtime and mock runtime must expose the
 same signature. `lib/Runtime/mock/mock_gpu.cpp` therefore supplies
-`wrap_group_query_attention_v4` for GPU-free compiler/mock builds. It records
+`wrap_group_query_attention_v5` for GPU-free compiler/mock builds. It records
 ordinary mock dispatch; it does not emulate compression or prove GPU accuracy.
 There is no `mock_gpu.hip` in this PR.
 

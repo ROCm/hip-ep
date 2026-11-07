@@ -406,10 +406,10 @@ def kernel_worker(args):
         c.POINTER(DecResult),
     ]
     lib.hip_gqa_flash_prefill_v3_configured.argtypes = (
-        [P] * 5 + [Int] * 8 + [F, Int, P, Int, Int] + [Int] * 5
+        [P] * 5 + [Int] * 8 + [F, Int, P, Int, Int] + [Int] * 5 + [P, Int]
     )
     lib.hip_gqa_flash_decode_configured.argtypes = (
-        [P] * 6 + [Int] * 7 + [F, P, Int, P, Int, Int, P, P, Int, Int, Int]
+        [P] * 6 + [Int] * 7 + [F, P, Int, P, Int, Int, P, P, Int, Int, Int, P, Int]
     )
     lib.hip_gqa_ring_workspace.argtypes = [Int, Int]
     lib.hip_gqa_ring_workspace.restype = S
@@ -474,6 +474,8 @@ def kernel_worker(args):
             pr.config.mt,
             pr.config.bkv,
             pr.config.nd,
+            None,
+            0,
         )
 
     def ring_prefill():
@@ -508,6 +510,8 @@ def kernel_worker(args):
             dr.config.wmma,
             dr.config.splits,
             dr.config.bkv,
+            None,
+            0,
         )
 
     def ring_decode():
