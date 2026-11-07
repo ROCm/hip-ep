@@ -71,6 +71,7 @@ prefix gets one `kernel-tests/<arch>/`, named exactly like that entry's
     hipdnn-kernel-ut-gather-block-quantized-xi64-wfp8-yfp16.exe
     hipdnn-kernel-ut-cast-xany-yany-bf16.exe
     hipdnn-kernel-ut-div-xbf16-wbf16-ybf16.exe
+    hipdnn-kernel-ut-gather-nd-xi64-wu8-yu8.exe
 ```
 
 ### Run (on a machine with a supported AMD GPU)
@@ -262,6 +263,7 @@ unit_test/
   gather_block_quantized/Xi64_W{u4,u8,fp8}_Yfp16/
   cast/Xany_Yany_bf16/
   div/Xbf16_Wbf16_Ybf16/
+  gather_nd/Xi64_Wu8_Yu8/
 ```
 
 `unit_test/` holds one directory per op and nothing else besides the four
@@ -391,6 +393,11 @@ COVERAGE=N` (any leaf, or the top-level aggregator) builds and runs it.
   values plus seeded random values, and one unsupported dtype, on sizes
   COVERAGE thins (tier1 = 2 sizes, tier2 = 3, tier3 = 4). Outputs are
   compared bit-exactly with an fp32-divide-then-round CPU reference.
+- **gather_nd** (`Xi64_Wu8_Yu8`, uint8 data, also the storage of bool):
+  row, element, `batch_dims = 1` and rank-3 gathers with first, last and
+  negative indices, and one unsupported dtype, on sizes COVERAGE thins
+  (tier1 = 2 sizes incl. a 512 x 512 mask, tier2 = 3, tier3 = 4). Outputs are
+  compared bit-exactly with a CPU GatherND reference.
 
 A new op's test cpp should follow whichever of the above shapes fit it best:
 if the kernel's dispatch paths are better covered by a small hand-picked

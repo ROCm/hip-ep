@@ -75,7 +75,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Pad | Custom HIP kernel. The opset<11 form, with `pads` and the fill `value` as attributes, is rewritten to the operand form first |
 | Tile | Custom HIP kernel |
 | Expand | Custom HIP kernel |
-| GatherND | Custom HIP kernel |
+| GatherND | Custom HIP kernel. f16, f32, i32, i64, uint8/bool data; int64 indices |
 | ScatterND | Custom HIP kernel (reductions: none / add / mul / min / max) |
 | ScatterElements | Custom HIP kernel (reductions: none / add / mul / min / max) |
 | Range | Custom HIP kernel |

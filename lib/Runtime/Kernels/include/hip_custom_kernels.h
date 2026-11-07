@@ -1979,7 +1979,8 @@ HIP_KERNEL_API int hip_expand(
  * =========================================================================
  *
  * Pick slices of `data` along the first K = indices.shape[-1] dims (after
- * `batch_dims`), one slice per row of `indices`. INT64 indices only.
+ * `batch_dims`), one slice per row of `indices`. INT64 indices only. Data
+ * may be f16, f32, i32, i64 or uint8 (also the storage of a bool tensor).
  *
  * Shapes pass as host int64 arrays (no GPU shape D2H). K and the rank
  * decomposition are computed on the host; the kernel runs one thread per

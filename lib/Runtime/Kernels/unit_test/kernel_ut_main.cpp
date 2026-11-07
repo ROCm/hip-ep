@@ -70,6 +70,7 @@ static const Leaf kLeaves[] = {
      "hipdnn-kernel-ut-gather-block-quantized-xi64-wfp8-yfp16.exe"},
     {"cast", "Xany_Yany_bf16", "hipdnn-kernel-ut-cast-xany-yany-bf16.exe"},
     {"div", "Xbf16_Wbf16_Ybf16", "hipdnn-kernel-ut-div-xbf16-wbf16-ybf16.exe"},
+    {"gather_nd", "Xi64_Wu8_Yu8", "hipdnn-kernel-ut-gather-nd-xi64-wu8-yu8.exe"},
 };
 
 static std::string executableDirectory() {
