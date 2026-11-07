@@ -190,8 +190,10 @@ tokens and sequence lengths match. Random token prompts intentionally measure
 compute/cache throughput and are not a semantic conversation quality test.
 Logits, answer scoring, cache hashing and LLM judging are absent from timing.
 Raw receipts preserve all samples, loaded DLLs, hashes and launch configurations.
-Memory uses the same process-local HIP allocation counter as PR1366: peak live
-device plus mapped-host requested bytes, including retained EP pools. Weights
+Memory uses the same counter as PR1366: peak live requested device plus
+mapped-host bytes through `hipgpu.dll`'s allocation imports, including retained
+EP pools. Allocations outside those imports (for example runtime/BLAS-internal
+allocations) are not counted. This is a tracked-allocation metric. Weights
 are verified model blobs; KV budgets the model's 32 cache tensors at the measured
 allocator size class, including padding; Other is peak total minus weights and KV.
 Recurrent-state allocations can share a KV size class: extras stay in Other,

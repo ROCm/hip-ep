@@ -219,7 +219,7 @@ def model_worker(args):
         timing_scope="Synchronized wall time; no tracing, logits readback, cache hashing, warmups or accuracy probes",
     )
     report["memory_scope"] = (
-        "Peak live HIP device plus mapped-host requested allocation bytes, including retained EP pools; excludes driver-internal allocations, page rounding, CPU interpreter, and WDDM residency. Same counter as PR1366."
+        "Peak live requested HIP device plus mapped-host bytes through hipgpu.dll allocation imports, including retained EP pools; excludes allocations outside those imports (including runtime/BLAS internals), page rounding, CPU interpreter and WDDM residency. Same counter as PR1366."
     )
     report["memory_counter_sha256"] = sha(MEMORY_COUNTER)
     report["memory_counter_hooks"] = memory.hooked

@@ -24,10 +24,10 @@ is intentionally unpinned in HIP-EP; it is separate from the ORT SDK/runtime.
 For the recorded three-configuration timing and memory campaign, use the
 [performance report](../../docs/design/turboquant-current-performance.md) and
 [manual performance command](../../test/long_context/README.md#performance-only-campaign-windows).
-That historical campaign used GenAI 0.17 with its append companion; it includes
-kernels through 256K, single-turn model runs through 64K, and eight 4K appends,
-without warm-up. Those timings are not a GenAI 0.19 performance measurement.
-Accuracy and judge findings are separate.
+The refreshed campaign uses GenAI 0.19.0 / ORT 1.31.0 and the same installed
+HIP-EP/kernel DLLs for all three modes: kernels through 256K, single-turn model
+runs through 64K, and eight 4K appends, without warm-up. The previous GenAI 0.17
+measurements remain in Git history. Accuracy and judge findings are separate.
 
 Older performance tables used ORT 1.30 and are not current-main measurements.
 Other configurations need separate validation. See the

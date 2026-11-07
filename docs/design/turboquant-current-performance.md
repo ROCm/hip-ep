@@ -2,90 +2,160 @@
 Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 Licensed under the MIT License.
 -->
-# Current-branch TurboQuant performance
+# TurboQuant performance on OGA 0.19 / ORT 1.31
 
-Revision scope: these tables retain the measured source revision below. Later
-main merges, most recently `4ab7265aa96832ac2cdc73b4b605ec76838f722c`, change
-GQA host-length handling and Qwen LinearAttention/SwiGLU/RMSNorm execution.
-Their sanity validation is separate; these timings have not been remeasured
-on those merges or on the later GenAI 0.19 dependency alignment. The GenAI
-0.17 setup used for this campaign is preserved in the
-[pre-migration guide](https://github.com/ROCm/hip-ep/blob/9a95f45e45307c469cdc4ca0733687c12900b14f/tools/turboquant/README.md).
+Fresh three-path measurements use source `d8006b9f25c8b585f74f2be4ca8aa816e6bf223a`, the same HIP-EP/kernel
+DLLs and the same Qwen3.8-27B INT4 group-128 weights in every arm. GenAI 0.19.0
+with HIP-EP main's PR #2875 was built as a matching core/Python wheel against ORT
+SDK 1.31.0 and used with ORT runtime 1.31.0. No TurboQuant-specific GenAI patch
+is applied. These tables replace the earlier OGA 0.17 campaign; its evidence
+remains available at the preceding Git revision.
 
-All three configurations use source `112c3c5b98d82666a9d75205ed149b1d5e8f53d8`, merged main/Ring PR1366, and the same installed HIP-EP/kernel DLLs. No historical kernel measurements or accuracy-diagnostic timings are mixed into these tables. No warm-up calls; every measured request from the final protocol is retained. First-use costs remain in raw samples. Kernel tables use three-round medians; model tables use the arithmetic mean of two measured requests/conversations.
+At 64K, no-Ring / Ring / TurboQuant model decode latency is
+95.002 / 91.919 /
+89.119 ms/token. The no-Ring-to-TurboQuant
+decode speed ratio is **1.066x**. Their peak tracked HIP allocation is
+52.580 /
+52.580 /
+49.850 GiB. This is a timing and
+memory experiment; numerical accuracy and judge findings remain private.
 
-Windows Radeon 8060S (`gfx1151`), AC power, serial GPU jobs; HIP 7.15.26333, ORT 1.31.0, GenAI 0.17.0 plus the documented append companion, NumPy 2.4.3, `OMP_NUM_THREADS=2`, `OPENBLAS_NUM_THREADS=2`. The companion was built against ORT 1.30 SDK and runs with ORT 1.31; HIP-EP was built against 1.31. Debug/performance tracing is disabled. Model construction and explicit harness buffer/generator setup are outside timing. Runtime allocations and deferred initialization performed inside inference remain included. No online GQA tuning: no-Ring uses the current DLL's normal lookup policy/configured entry points.
+## Protocol
 
-Modes: no-Ring is default GQA with FP16 cache; Ring explicitly enables dense Ring; TurboQuant enables Ring prefill and MSE-only 4-bit packed KV decode. The model uses identical INT4 group-128 weights in every arm (`amd/Qwen3.8-27B_gpuep_1.0_gpu_128`, revision `9b37cf56a001720ba7ce98ff80ea651b02e5931b`). This campaign evaluates latency, not semantic quality.
+Windows Radeon 8060S (`gfx1151`), AC power, serial GPU jobs, HIP 7.15.26333,
+Python 3.13, NumPy 2.4.3, two OpenMP/OpenBLAS threads, strict GPU offload.
+**Zero warm-up calls**; all first samples are retained. Debug/performance tracing,
+accuracy probes, logits readback and cache hashing are disabled for timing.
+Model construction/JIT and explicit harness buffer/generator setup are outside
+timing; inference-time allocation and deferred initialization remain included.
+Kernel mode order rotates across rounds; model mode order rotates by length.
 
-## 1. Single-turn kernel performance through 256K
+No Ring uses upstream GQA and FP16 KV; Ring explicitly selects dense Ring;
+TurboQuant selects Ring prefill and MSE-only packed four-bit decode/append.
+The model is `amd/Qwen3.8-27B_gpuep_1.0_gpu_128`, revision
+`9b37cf56a001720ba7ce98ff80ea651b02e5931b`. All modes use identical prompt
+token arrays; greedy generated histories may differ.
 
-B=1, 24 query heads, 4 KV heads, D=256, FP16 Q/output. Fresh causal prefill has query length equal to context. TurboQuant prefill is measured Ring attention plus separately synchronized full-cache encoding; the reported sum includes both stage boundaries. Dense cache preparation/transpose, allocation and transfers are excluded for all arms. Decode has one query and includes attention scan/merge and TurboQuant rotations; KV append/encoding is excluded from decode kernel timing (included in full-model timing). Prefill is three measured single calls; decode is three measured batches of 30 calls with synchronization at each batch boundary. Mode order rotates across rounds. Synchronized host wall time is used, not zero-valued HIP event timestamps. No graph replay or explicit cache displacement. Kernel decode ms/token here means one attention layer, not the entire model.
+## 1. Single-turn kernels through 256K
+
+B=1, 24Q/4KV/D256, FP16 Q/output. Times are **milliseconds**, using three-round
+medians of synchronized host wall time. Prefill measures full causal attention;
+TurboQuant includes a separately timed full-cache encoding stage. Decode
+includes attention scan/merge and TurboQuant rotations, and excludes KV append
+for every mode. Each decode round measures 30 calls. There is no graph replay,
+explicit cache displacement or online GQA tuning. Medians do not represent cold
+startup; raw samples preserve first-use costs.
 
 | Context | No Ring prefill ms | No Ring decode ms/token | Ring prefill ms | Ring decode ms/token | TurboQuant prefill ms | TurboQuant decode ms/token |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 128 | 0.328 | 0.0379 | 0.229 | 0.0271 | 0.561 | 0.0382 |
-| 256 | 0.252 | 0.0485 | 0.294 | 0.0302 | 0.767 | 0.0460 |
-| 512 | 0.447 | 0.0624 | 0.524 | 0.0422 | 1.543 | 0.0611 |
-| 1K | 0.904 | 0.0678 | 3.041 | 0.0635 | 3.927 | 0.0890 |
-| 2K | 2.462 | 0.0892 | 4.356 | 0.0731 | 6.927 | 0.1115 |
-| 4K | 10.677 | 0.1494 | 13.735 | 0.1135 | 19.302 | 0.1744 |
-| 8K | 43.908 | 0.2579 | 51.821 | 0.2410 | 62.780 | 0.3225 |
-| 16K | 164.256 | 0.4001 | 200.050 | 0.3631 | 219.456 | 0.3844 |
-| 32K | 587.200 | 0.7139 | 755.123 | 0.6874 | 778.732 | 0.6348 |
-| 64K | 2400.479 | 1.6747 | 2716.720 | 1.2994 | 2907.068 | 1.1622 |
-| 128K | 9826.987 | 3.2237 | 10800.230 | 2.6642 | 11003.215 | 2.3799 |
-| 256K | 43947.246 | 6.2029 | 43447.455 | 4.9955 | 43799.537 | 4.8205 |
+| 128 | 0.282 | 0.0411 | 0.222 | 0.0223 | 2.112 | 0.0399 |
+| 256 | 0.228 | 0.0479 | 0.273 | 0.0246 | 0.690 | 0.0402 |
+| 512 | 0.363 | 0.0567 | 0.694 | 0.0378 | 1.322 | 0.0546 |
+| 1K | 0.841 | 0.0692 | 1.209 | 0.0517 | 2.676 | 0.0802 |
+| 2K | 2.466 | 0.0914 | 3.257 | 0.0684 | 5.786 | 0.1010 |
+| 4K | 9.162 | 0.1574 | 11.676 | 0.1129 | 17.238 | 0.1420 |
+| 8K | 41.361 | 0.2221 | 47.579 | 0.1505 | 58.842 | 0.2283 |
+| 16K | 152.337 | 0.4173 | 178.530 | 0.3490 | 195.872 | 0.3659 |
+| 32K | 558.001 | 0.7242 | 655.563 | 0.6829 | 686.507 | 0.6629 |
+| 64K | 2336.335 | 1.6801 | 2692.479 | 1.2850 | 2761.306 | 1.1482 |
+| 128K | 9610.752 | 3.1834 | 10724.387 | 2.6050 | 10757.720 | 2.3204 |
+| 256K | 39192.764 | 6.1527 | 42502.924 | 4.9325 | 42645.415 | 4.6786 |
 
-## 2. Single-turn model performance through 64K
+## 2. Single-turn model through 64K
 
-Batch 1, unchunked deterministic random token prompts shared across modes, 128 greedy output tokens. Prefill measures `append_tokens` through device synchronization; decode measures 127 steps after first-token selection, with final synchronization. Every length/configuration starts in a fresh process/model; two requests use separate generators/caches. Short-context means may be sensitive to launch overhead; raw samples are retained. No logits readback, cache hashing, accuracy probes or tracing occurs inside timed regions.
-
-Each model cell is **prefill seconds / decode milliseconds per token / peak total HIP GiB**. Timing is the mean of two requests; memory is the larger peak across those requests. Total = weights + reserved KV allocations + Other, including retained EP pools. Weights are **14.8338 GiB** in every arm; raw receipts include KV payload, allocator padding, Other, and separate prefill/decode peaks. The PR1366 allocation counter tracks live HIP device plus mapped-host requested bytes; it excludes driver-internal allocations, CPU interpreter memory, page rounding and WDDM physical residency. Current main allocates the KV on device by default; the reporting helper recognizes both device and mapped-host allocations without changing that policy. Counter reads are outside timed regions and allocation hooks are active equally for all paths. This is not total physical system-RAM consumption. Reserved capacity is prompt plus 128 output tokens plus 128 spare tokens for a single turn.
+Each cell is **prefill seconds / decode milliseconds per token / peak tracked HIP
+GiB**. Timing is the mean of two measured requests; memory is their larger peak.
+Each length/mode starts in a fresh process/model; the two requests have separate
+generators/caches. Prefill times `append_tokens` through device synchronization.
+Decode times 127 model steps after first-token selection; every request produces
+128 output tokens. KV updates/compression are included. Reserved capacity is
+prompt length + 256 tokens. Short-context means are sensitive to first-use costs.
 
 | Context | No Ring: prefill s / decode ms / peak GiB | Ring: prefill s / decode ms / peak GiB | TurboQuant: prefill s / decode ms / peak GiB |
 | --- | ---: | ---: | ---: |
-| 128 | 0.646 / 74.338 / 15.723 | 0.698 / 73.648 / 15.723 | 0.743 / 74.044 / 15.706 |
-| 256 | 1.008 / 74.384 / 15.767 | 0.990 / 74.174 / 15.767 | 1.045 / 74.312 / 15.746 |
-| 512 | 1.600 / 74.315 / 15.971 | 1.651 / 74.162 / 15.971 | 1.679 / 74.647 / 15.938 |
-| 1K | 2.851 / 74.823 / 16.360 | 2.876 / 74.640 / 16.360 | 2.953 / 74.997 / 16.306 |
-| 2K | 5.305 / 75.300 / 17.007 | 5.276 / 75.062 / 17.007 | 5.386 / 75.764 / 16.903 |
-| 4K | 10.062 / 75.784 / 18.299 | 10.269 / 75.795 / 18.299 | 10.320 / 75.892 / 18.104 |
-| 8K | 20.140 / 77.273 / 20.885 | 20.139 / 77.173 / 20.885 | 20.530 / 77.527 / 20.506 |
-| 16K | 40.848 / 79.912 / 26.056 | 41.452 / 79.761 / 26.056 | 41.703 / 80.001 / 25.368 |
-| 32K | 85.884 / 85.204 / 36.398 | 88.587 / 85.205 / 36.398 | 89.145 / 84.275 / 35.027 |
-| 64K | 191.381 / 98.837 / 57.082 | 202.259 / 95.369 / 57.082 | 203.823 / 92.326 / 54.351 |
+| 128 | 0.730 / 70.463 / 15.723 | 0.812 / 71.296 / 15.723 | 0.827 / 71.602 / 15.706 |
+| 256 | 1.031 / 71.412 / 15.767 | 1.055 / 71.258 / 15.767 | 1.104 / 71.466 / 15.746 |
+| 512 | 1.713 / 71.066 / 15.936 | 1.617 / 71.748 / 15.936 | 1.694 / 71.919 / 15.903 |
+| 1K | 2.742 / 72.236 / 16.290 | 2.748 / 71.791 / 16.290 | 2.844 / 73.053 / 16.235 |
+| 2K | 4.988 / 72.949 / 16.866 | 5.006 / 72.935 / 16.866 | 5.170 / 72.902 / 16.762 |
+| 4K | 9.524 / 73.621 / 18.018 | 9.506 / 73.418 / 18.018 | 9.663 / 73.779 / 17.823 |
+| 8K | 19.033 / 75.234 / 20.322 | 19.035 / 74.087 / 20.322 | 19.159 / 74.174 / 19.943 |
+| 16K | 38.389 / 76.653 / 24.931 | 38.934 / 76.898 / 24.931 | 39.193 / 76.840 / 24.243 |
+| 32K | 80.995 / 82.291 / 34.147 | 83.445 / 81.985 / 34.147 | 84.162 / 80.601 / 32.776 |
+| 64K | 181.048 / 95.002 / 52.580 | 192.578 / 91.919 / 52.580 | 193.136 / 89.119 / 49.850 |
 
-## 3. Eight-turn append model performance
+## 3. Eight-turn append model
 
-Two independent eight-turn conversations per mode, one persistent generator/cache per conversation. Each turn appends exactly 4,096 new deterministic random prompt tokens and generates exactly 128 tokens. Minimum length suppresses EOS early termination for equal work; generated histories are free-running and need not have identical token IDs. Context includes prior generated tokens, so turn 8 prefill ends at 33,664 tokens. Appending processes any outstanding last generated token through the companion's normal lifecycle, included in append time. This is a synthetic append-throughput workload; the separate semantic multi-turn/LLM-judge investigation remains private.
-
-Cells use the same **prefill s / decode ms / peak total HIP GiB** format and memory scope as table 2. Full-conversation reserved cache capacity is 33,920 tokens in each mode; peaks are recorded for each turn, and retained allocator pools remain charged to Other.
+Cells again show **prefill s / decode ms/token / peak tracked HIP GiB**. Each mode
+runs two independent conversations, each with one persistent generator/cache.
+Every turn appends 4,096 new deterministic random prompt tokens and generates
+128 tokens. Pending-token flush is included in append time. Minimum length
+suppresses early EOS for equal work. Capacity is 33,920 tokens; turn-eight
+prefill ends at 33,664 tokens. These synthetic throughput conversations are
+separate from semantic multi-turn accuracy/LLM-judge evaluation.
 
 | Turn / context | No Ring: prefill s / decode ms / peak GiB | Ring: prefill s / decode ms / peak GiB | TurboQuant: prefill s / decode ms / peak GiB |
 | --- | ---: | ---: | ---: |
-| 1 / 4,096 | 10.102 / 76.503 / 20.107 | 10.160 / 76.430 / 20.107 | 10.292 / 76.440 / 18.570 |
-| 2 / 8,320 | 10.043 / 76.464 / 20.107 | 10.034 / 76.750 / 20.107 | 10.552 / 76.956 / 18.570 |
-| 3 / 12,544 | 10.253 / 77.672 / 20.107 | 10.495 / 77.751 / 20.107 | 11.049 / 78.170 / 18.570 |
-| 4 / 16,768 | 10.550 / 79.183 / 20.107 | 10.849 / 79.276 / 20.107 | 11.837 / 78.948 / 18.570 |
-| 5 / 20,992 | 10.836 / 80.520 / 20.107 | 11.252 / 80.482 / 20.107 | 12.219 / 80.065 / 18.570 |
-| 6 / 25,216 | 11.170 / 81.752 / 20.107 | 11.645 / 81.716 / 20.107 | 12.771 / 81.405 / 18.570 |
-| 7 / 29,440 | 11.471 / 83.365 / 20.107 | 12.029 / 83.357 / 20.107 | 13.322 / 82.344 / 18.570 |
-| 8 / 33,664 | 11.765 / 84.699 / 20.107 | 12.432 / 84.743 / 20.107 | 13.973 / 83.501 / 18.570 |
+| 1 / 4,096 | 9.448 / 72.959 / 19.823 | 9.442 / 72.977 / 19.823 | 9.649 / 72.724 / 18.286 |
+| 2 / 8,320 | 9.455 / 73.467 / 19.823 | 9.594 / 73.140 / 19.823 | 10.007 / 73.152 / 18.286 |
+| 3 / 12,544 | 9.727 / 74.570 / 19.823 | 9.910 / 74.388 / 19.823 | 10.532 / 74.287 / 18.286 |
+| 4 / 16,768 | 10.036 / 75.631 / 19.823 | 10.311 / 75.748 / 19.823 | 11.147 / 75.186 / 18.286 |
+| 5 / 20,992 | 10.318 / 77.329 / 19.823 | 10.705 / 77.229 / 19.823 | 11.634 / 76.146 / 18.286 |
+| 6 / 25,216 | 10.614 / 78.766 / 19.823 | 11.085 / 78.588 / 19.823 | 12.243 / 77.595 / 18.286 |
+| 7 / 29,440 | 10.922 / 79.875 / 19.823 | 11.504 / 80.192 / 19.823 | 12.857 / 78.721 / 18.286 |
+| 8 / 33,664 | 11.264 / 81.343 / 19.823 | 11.925 / 81.224 / 19.823 | 13.498 / 80.317 / 18.286 |
 
-Memory breakdown at the longest model cases, GiB (**weights + KV + Other = peak total**):
+## Memory breakdown
 
-- Single-turn 64K, no-ring: 14.8338 + 4.0156 + 38.2322 = 57.0816.
-- Single-turn 64K, ring: 14.8338 + 4.0156 + 38.2322 = 57.0816.
-- Single-turn 64K, turboquant: 14.8338 + 1.0353 + 38.4822 = 54.3512.
-- Turn 8, no-ring: 14.8338 + 2.0703 + 3.2026 = 20.1066.
-- Turn 8, ring: 14.8338 + 2.0703 + 3.2026 = 20.1066.
-- Turn 8, turboquant: 14.8338 + 0.5338 + 3.2026 = 18.5701.
+The PR1366 counter hooks `hipgpu.dll`'s `hipMalloc`, `hipHostMalloc`, `hipFree`
+and `hipHostFree` imports. It measures peak live **requested HIP device plus
+mapped-host allocation bytes through those imports**, including retained EP
+pools. Allocations outside those imports, such as runtime/BLAS-internal
+allocations, are excluded. It also excludes page rounding, CPU interpreter
+memory and WDDM physical residency; this is not total system RAM or all-process
+GPU memory usage. The same counter/hooks apply to every mode. Weight blobs are
+verified against live allocations. KV counts the model's 32 full-attention cache
+tensors at their allocator size class; surplus matching allocations remain in
+Other. Exact cache-address ambiguity, if any, is marked in each receipt.
+Other equals peak total minus weights and reserved KV; it includes scratch,
+recurrent state and retained pools. Counter reads are outside timing, while
+allocation hooks are active equally in all modes. Prefill/decode peaks are
+recorded separately in the raw data.
 
-Initial 128-token timing-only model attempts were superseded when memory accounting was requested; the final model campaign reran those cases in fresh processes. Two memory-attribution setup assertions were corrected before their cases reached inference. These attempts remain archived separately and are excluded from the final dataset; no slow sample from the final protocol was discarded.
+Packed KV **payload** is 132 versus 512 bytes per vector: **3.8788x smaller** at
+the same capacity. Allocator padding can change the ratio of reserved KV bytes.
+Total model memory does not shrink by the payload ratio.
 
-KV attribution uses the known 32 full-attention cache tensors and allocator-rounded sizes, checked against live allocations. At 512-token dense cases, recurrent state shares the same size class; the budget counts only 32 KV buffers and charges the extras to Other. The receipt explicitly marks ambiguous cache-address attribution. Total peak memory is directly counted and does not depend on that split.
+Displayed GiB values are rounded; unrounded byte totals reconcile exactly.
+
+| Case | Mode | Weights GiB | Reserved KV GiB | Other GiB | Peak tracked GiB |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Single-turn 64K | no-ring | 14.8338 | 4.0156 | 33.7311 | 52.5805 |
+| Single-turn 64K | ring | 14.8338 | 4.0156 | 33.7311 | 52.5805 |
+| Single-turn 64K | turboquant | 14.8338 | 1.0353 | 33.9811 | 49.8501 |
+| Turn 8 | no-ring | 14.8338 | 2.0703 | 2.9189 | 19.8230 |
+| Turn 8 | ring | 14.8338 | 2.0703 | 2.9189 | 19.8230 |
+| Turn 8 | turboquant | 14.8338 | 0.5338 | 2.9189 | 18.2864 |
+
+At 64K, TurboQuant's Other allocation is **0.2500 GiB**
+larger than dense attention. This matches the `2 * newbytes` workspace reserved
+for dense fresh-prompt K/V in the [measured source](https://github.com/ROCm/hip-ep/blob/d8006b9f25c8b585f74f2be4ca8aa816e6bf223a/lib/Runtime/real/gqa.cpp#L3654):
+`2 * 65,536 * 4 * 256 * 2` bytes. The allocator retains this workspace, so its
+cost remains included. Existing history stays packed during subsequent append;
+append uses the bounded workspace documented in the design.
 
 ## Evidence and limits
 
-The accompanying `turboquant-current-performance.json` contains every measured timing, resolved kernel launch configuration, binary hashes, prompt hashes and provenance. Reproduce with the explicit manual performance command documented in `test/long_context/README.md`; it is not part of default CI. Two model repeats and three kernel rounds characterize this machine/run, not statistical confidence intervals or all workloads. Initial DLL/kernel setup can be much larger than subsequent calls, especially at short context; no samples were removed from the raw records. Kernel medians do not describe cold process startup. Multi-turn accuracy, numerical deviation, answers and judge scores are deliberately excluded from this report and the PR update. Historical 256K numerical limitations remain unresolved by timing these kernels. Windows RMT workflow is unchanged.
+[`turboquant-current-performance.json`](turboquant-current-performance.json)
+retains all 45 measured case receipts, timing samples, launch configurations,
+binary/source hashes, prompt hashes and memory breakdowns for every model case.
+Reproduce with the [manual performance command](../../test/long_context/README.md#performance-only-campaign-windows).
+Long tests remain excluded from default CI.
+
+Two model repeats and three kernel rounds characterize this machine/run; they
+do not establish confidence intervals or generalize across workloads. A change
+from the previous campaign cannot be attributed solely to OGA because main's
+inference kernels also changed. This timing campaign does not resolve the
+strict encoder or historical synthetic-256K numerical limitations documented
+in the [design](turboquant-kv-cache.md#validation-and-known-limitations).
+Accuracy reports, answers, logits and judge scores remain local pending review.
