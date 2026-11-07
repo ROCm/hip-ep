@@ -23,6 +23,8 @@ static int div_hipdnn_to_hip_dtype(int64_t hipdnn_type) {
     return HIP_DTYPE_FLOAT16;
   case HIPDNN_EP_DATATYPE_FLOAT:
     return HIP_DTYPE_FLOAT32;
+  case HIPDNN_EP_DATATYPE_BFLOAT16:
+    return HIP_DTYPE_BFLOAT16;
   case HIPDNN_EP_DATATYPE_INT32:
     return HIP_DTYPE_INT32;
   case HIPDNN_EP_DATATYPE_INT64:
@@ -60,7 +62,7 @@ int wrap_div(RuntimeState *state, void *lhs, void *rhs, void *output,
   if (hip_dtype < 0) {
     fprintf(stderr,
             "[REAL] wrap_div: unsupported data_type=%s(%lld) "
-            "(supported: f16, f32, i32, i64)\n",
+            "(supported: f16, bf16, f32, i32, i64)\n",
             hipdnn_ep_datatype_name(data_type), (long long)data_type);
     return -1;
   }

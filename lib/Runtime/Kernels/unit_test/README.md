@@ -70,6 +70,7 @@ prefix gets one `kernel-tests/<arch>/`, named exactly like that entry's
     hipdnn-kernel-ut-gather-block-quantized-xi64-wu8-yfp16.exe
     hipdnn-kernel-ut-gather-block-quantized-xi64-wfp8-yfp16.exe
     hipdnn-kernel-ut-cast-xany-yany-bf16.exe
+    hipdnn-kernel-ut-div-xbf16-wbf16-ybf16.exe
 ```
 
 ### Run (on a machine with a supported AMD GPU)
@@ -260,6 +261,7 @@ unit_test/
   qmoe_ragged_mm/Xfp16_Wu4_Yfp16/
   gather_block_quantized/Xi64_W{u4,u8,fp8}_Yfp16/
   cast/Xany_Yany_bf16/
+  div/Xbf16_Wbf16_Ybf16/
 ```
 
 `unit_test/` holds one directory per op and nothing else besides the four
@@ -385,6 +387,10 @@ COVERAGE=N` (any leaf, or the top-level aggregator) builds and runs it.
   f64, i64, i32, i16, i8, u8} and three unsupported pairs, on sizes COVERAGE
   thins (tier1 = 2 sizes, tier2 = 3, tier3 = 4, up to ~1M elements). Outputs
   are compared bit-exactly with a CPU reference.
+- **div** (`Xbf16_Wbf16_Ybf16`): bf16 division over every pair of bf16 special
+  values plus seeded random values, and one unsupported dtype, on sizes
+  COVERAGE thins (tier1 = 2 sizes, tier2 = 3, tier3 = 4). Outputs are
+  compared bit-exactly with an fp32-divide-then-round CPU reference.
 
 A new op's test cpp should follow whichever of the above shapes fit it best:
 if the kernel's dispatch paths are better covered by a small hand-picked
