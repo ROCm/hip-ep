@@ -413,8 +413,11 @@ Type getKernelArgumentType(Value operand, const SetVector<Operation *> &ops) {
   return type;
 }
 
+// `rankOneShape` is the shape operand of every rank-0 promotion in the block,
+// made once by the first kernel that needs it.
 RocMlirOp outline(KernelRegion &region, ArrayRef<Operation *> moved,
-                  RewriterBase &rewriter, int &counter, StringRef arch) {
+                  RewriterBase &rewriter, int &counter, StringRef arch,
+                  Value &rankOneShape) {
   Operation *end = region.getEnd();
   Value context = region.getContext();
   SetVector<Value> &operands = region.getOperands();
@@ -467,7 +470,6 @@ RocMlirOp outline(KernelRegion &region, ArrayRef<Operation *> moved,
   // The graph outside keeps its rank-0 value; only what crosses into the
   // kernel is reshaped, so the dispatch matches the signature built above.
   SmallVector<Value> dispatchOperands;
-  Value rankOneShape;
   for (Value operand : operands) {
     Type promoted = promoteRankZero(operand.getType());
     if (promoted == operand.getType()) {
@@ -475,6 +477,8 @@ RocMlirOp outline(KernelRegion &region, ArrayRef<Operation *> moved,
       continue;
     }
     if (!rankOneShape) {
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToStart(end->getBlock());
       auto shapeType = RankedTensorType::get({1}, rewriter.getIndexType());
       rankOneShape = arith::ConstantOp::create(
           rewriter, loc, shapeType,
@@ -538,23 +542,27 @@ private:
   // anchor writes no float value that a dequantize widened: whatever would
   // return one stays outside.
   bool canTake(Operation *anchor, RocMlirElementwiseOp module,
-               const SetVector<Operation *> &kernel) const {
+               const SetVector<Operation *> &kernel,
+               ArrayRef<Operation *> path) const {
+    auto inKernel = [&](Operation *op) {
+      return op && (kernel.contains(op) || llvm::is_contained(path, op));
+    };
     Block &body = module.getBody().front();
     DenseSet<Value> fromKernel;
     for (auto [input, argument] :
          llvm::zip(module.getInputs(), body.getArguments().drop_front())) {
-      Operation *def = input.getDefiningOp();
-      if (def && kernel.contains(def))
+      if (inKernel(input.getDefiningOp()))
         fromKernel.insert(argument);
       else if (dependsOnChain(input, anchor, kernel))
         return false;
     }
     if (fromKernel.empty())
       return false;
+    Operation *entry = path.empty() ? module.getOperation() : path.front();
     if (!policy.multiOutput &&
         (kernel.size() != 1 || module->getNumResults() != 1 ||
          llvm::any_of(anchor->getUsers(),
-                      [&](Operation *user) { return user != module; })))
+                      [&](Operation *user) { return user != entry; })))
       return false;
 
     bool quantized = isQuantizedAnchor(anchor);
@@ -595,26 +603,45 @@ private:
     return true;
   }
 
+  // The reshapes without an init that lead from a kernel value, each read
+  // only by the next, up to the op that reads the last one. The kernel cannot
+  // store such a reshape, so it goes in only with that op.
+  Operation *walkReshapes(Operation *op, SmallVector<Operation *> &path) const {
+    path.clear();
+    while (!isa<DestinationStyleOpInterface, RocMlirElementwiseOp>(op) &&
+           getFusableViewKind(op) && policy.allowsForwardView(op) &&
+           op->getNumResults() == 1 && op->hasOneUse()) {
+      path.push_back(op);
+      op = *op->user_begin();
+      if (op->getBlock() != &block || taken.contains(op))
+        return nullptr;
+    }
+    return op;
+  }
+
   // A transpose or reshape outside any module, which pass 1 leaves alone
   // because a module of views saves no kernel. Past the anchor it is free: the
   // kernel writes its result through the inverted view.
   bool canTakeView(Operation *anchor, Operation *view,
-                   const SetVector<Operation *> &kernel) const {
+                   const SetVector<Operation *> &kernel,
+                   ArrayRef<Operation *> path) const {
     if (!isa<DestinationStyleOpInterface>(view) ||
         !policy.allowsForwardView(view) || view->getNumResults() != 1 ||
         !isKernelIOValue(view->getResult(0)))
       return false;
     std::optional<SmallVector<Value>> inputs = getDataInputs(view, Value());
     auto fromKernel = [&](Value v) {
+      Operation *def = v.getDefiningOp();
       return isa<ContextType>(v.getType()) ||
-             (v.getDefiningOp() && kernel.contains(v.getDefiningOp()));
+             (def && (kernel.contains(def) || llvm::is_contained(path, def)));
     };
     if (!inputs || !llvm::all_of(*inputs, fromKernel))
       return false;
+    Operation *entry = path.empty() ? view : path.front();
     return policy.multiOutput ||
            (kernel.size() == 1 &&
             llvm::all_of(anchor->getUsers(),
-                         [&](Operation *user) { return user == view; }));
+                         [&](Operation *user) { return user == entry; }));
   }
 
   // Producer anchors first: a module that one anchor takes is not available
@@ -636,14 +663,23 @@ private:
             candidates.push_back(user);
       sortByBlockOrder(candidates);
       candidates.erase(llvm::unique(candidates), candidates.end());
+      SmallVector<Operation *> path;
       for (Operation *candidate : candidates) {
-        auto module = dyn_cast<RocMlirElementwiseOp>(candidate);
-        if (module ? !canTake(plan.anchor, module, kernel)
-                   : !canTakeView(plan.anchor, candidate, kernel))
+        if (taken.contains(candidate))
           continue;
-        kernel.insert(candidate);
-        taken.insert(candidate);
-        plan.epilogue.push_back(candidate);
+        Operation *end = walkReshapes(candidate, path);
+        if (!end)
+          continue;
+        auto module = dyn_cast<RocMlirElementwiseOp>(end);
+        if (module ? !canTake(plan.anchor, module, kernel, path)
+                   : !canTakeView(plan.anchor, end, kernel, path))
+          continue;
+        path.push_back(end);
+        for (Operation *op : path) {
+          kernel.insert(op);
+          taken.insert(op);
+          plan.epilogue.push_back(op);
+        }
         grew = throughModules;
       }
     }
@@ -795,10 +831,21 @@ public:
     AnchorPlanner planner(block, policy);
     SmallVector<KernelPlan> plans = planner.plan();
     claimed = &planner.getTaken();
+    rankOneShape = Value();
+    // A module that no plan takes runs as HIP ops. Inlined now, its views
+    // and unary ops can still be absorbed one by one into the kernels that
+    // read them, which a module with several inputs or several readers
+    // cannot be as a whole.
+    IRRewriter rewriter(&getContext());
+    for (RocMlirElementwiseOp module :
+         llvm::make_early_inc_range(block.getOps<RocMlirElementwiseOp>()))
+      if (!claimed->contains(module)) {
+        rewriter.setInsertionPoint(module);
+        inlineRocMlirElementwise(module, rewriter);
+      }
 
     // The last anchor outlines first, so the kernels keep the names and the
     // order that the greedy fusion gave them.
-    IRRewriter rewriter(&getContext());
     int counter = 0;
     for (KernelPlan &plan : llvm::reverse(plans))
       if (failed(outlinePlan(plan, policy, rewriter, counter)))
@@ -867,11 +914,12 @@ private:
     if (const char *reason =
             region.complete(getInputRoots(chain.front()), moved))
       return chain.front()->emitOpError("cannot be outlined: ") << reason;
-    outline(region, moved, rewriter, counter, arch);
+    outline(region, moved, rewriter, counter, arch, rankOneShape);
     return success();
   }
 
   const DenseSet<Operation *> *claimed = nullptr;
+  Value rankOneShape;
 
   // Ops whose only readers moved into a kernel, such as the dequantizes of a
   // decomposed convolution.
