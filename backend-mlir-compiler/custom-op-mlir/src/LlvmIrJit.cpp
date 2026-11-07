@@ -241,6 +241,37 @@ extern "C" void hipdnn_ep_roctx_range_pop(void);
 extern "C" int hipdnn_ep_roctx_enabled(void);
 extern "C" void hipdnn_ep_roctx_mark(const char *name);
 
+// RyzenAI CoreLib (NPU) wrappers, likewise native (lib/Runtime
+// hipdnn-ep-corelib, a stub when corelib is absent). Signatures match
+// hipdnn_ep_runtime.h.
+struct RuntimeState;
+extern "C" int wrap_corelib_matmul_nbits(RuntimeState *, int, const void *,
+                                         const void *, const void *,
+                                         const void *, const void *,
+                                         const void *, void *, int64_t, int64_t,
+                                         int64_t, int64_t, int64_t, int64_t,
+                                         int64_t, int64_t, int64_t, int64_t);
+extern "C" int wrap_corelib_rms_norm(RuntimeState *, void *, void *, void *,
+                                     int64_t, int64_t, int64_t, int64_t,
+                                     int64_t, float, int64_t, int64_t);
+extern "C" int wrap_corelib_skip_rms_norm(RuntimeState *, void *, void *,
+                                          void *, void *, void *, void *,
+                                          int64_t, int64_t, int64_t, float,
+                                          int64_t);
+
+// DynamicDispatch (NPU) wrappers, likewise native (lib/Runtime hipdnn-ep-dd,
+// a stub when DynamicDispatch is absent).
+extern "C" int wrap_dd_matmul(RuntimeState *, int32_t, const void *,
+                              const void *, const void *, void *, int64_t,
+                              int64_t, int64_t, double, double, int64_t,
+                              int64_t, int64_t);
+extern "C" int wrap_dd_conv2d(RuntimeState *, int32_t, const void *, int64_t,
+                              int64_t, int64_t, int64_t, const void *, int64_t,
+                              const void *, void *, int64_t, int64_t, int64_t,
+                              int64_t, int64_t, int64_t, int64_t, int64_t,
+                              int64_t, int64_t, int64_t, int64_t, int64_t,
+                              int64_t);
+
 llvm::Error installRuntimeNativeShims(llvm::orc::LLJIT &jit) {
   llvm::orc::SymbolMap syms;
   auto add = [&](llvm::StringRef name, void *addr) {
@@ -259,6 +290,14 @@ llvm::Error installRuntimeNativeShims(llvm::orc::LLJIT &jit) {
   add("hipdnn_ep_roctx_enabled",
       reinterpret_cast<void *>(&hipdnn_ep_roctx_enabled));
   add("hipdnn_ep_roctx_mark", reinterpret_cast<void *>(&hipdnn_ep_roctx_mark));
+  add("wrap_corelib_matmul_nbits",
+      reinterpret_cast<void *>(&wrap_corelib_matmul_nbits));
+  add("wrap_corelib_rms_norm",
+      reinterpret_cast<void *>(&wrap_corelib_rms_norm));
+  add("wrap_corelib_skip_rms_norm",
+      reinterpret_cast<void *>(&wrap_corelib_skip_rms_norm));
+  add("wrap_dd_matmul", reinterpret_cast<void *>(&wrap_dd_matmul));
+  add("wrap_dd_conv2d", reinterpret_cast<void *>(&wrap_dd_conv2d));
   return jit.getMainJITDylib().define(
       llvm::orc::absoluteSymbols(std::move(syms)));
 }

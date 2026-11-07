@@ -192,6 +192,13 @@ python build.py --install_dir "$LOCAL_DIR" --cmake_prefix_path "$LOCAL_DIR"
 installed in step 1; omit it and ORT is auto-downloaded. The hipgpu EP, HIP
 tools and LIT tests are built and installed into `../local/`.
 
+Optional: the NPU backends (all opt-in at run time) need their libraries'
+headers at build time: `RYZENAICORELIB_ROOT` for a RyzenAI CoreLib 0.66 or
+later install tree (the folder holding `include/ryzenai/corelib/base.h`), and
+`DYNAMICDISPATCH_ROOT` for a DynamicDispatch tree with its C API. Without them
+stubs are built and everything runs on the GPU. See
+[npu-backends.md](design/npu-backends.md).
+
 #### Running LIT tests manually
 
 `build.py` runs the LIT suite after install by default (`--skip_tests` to

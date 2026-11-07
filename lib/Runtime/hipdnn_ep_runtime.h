@@ -2395,6 +2395,93 @@ int wrap_hipMemcpyD2H(void *dst, const void *src, int64_t size, void *stream);
 // HIP stream synchronization wrapper
 int wrap_hipStreamSynchronize(void *stream);
 
+//===----------------------------------------------------------------------===//
+// RyzenAI CoreLib (NPU) wrappers -- native, in hipdnn-ep-corelib
+//===----------------------------------------------------------------------===//
+//
+// Emitted with --use-ryzenai-corelib. Each takes its GPU wrapper's exact
+// arguments followed by the activation data type (HIPDNN_EP_DATATYPE_*), and
+// returns HIPDNN_EP_CORELIB_NOT_HANDLED when corelib cannot run the call (no
+// NPU, corelib not loadable, unsupported dtype or shape); the generated code
+// then calls the GPU wrapper. These are compiled natively, not into
+// runtime.bc, and reach the JIT as absolute symbols (LlvmIrJit).
+// See docs/design/ryzenai-corelib-backend.md.
+#define HIPDNN_EP_CORELIB_NOT_HANDLED 1
+
+int wrap_corelib_matmul_nbits(RuntimeState *state, int op_state_slot,
+                              const void *A, const void *B, const void *scales,
+                              const void *zero_points, const void *g_idx,
+                              const void *bias, void *output, int64_t M,
+                              int64_t N, int64_t K, int64_t batch_count,
+                              int64_t bits, int64_t block_size,
+                              int64_t elem_size, int64_t zp_elem_size,
+                              int64_t scale_elem_size, int64_t data_type);
+
+int wrap_corelib_rms_norm(RuntimeState *state, void *input, void *scale,
+                          void *output, int64_t input_num_elements,
+                          int64_t scale_num_elements, int64_t norm_num_elements,
+                          int64_t element_size_bytes, int64_t axis,
+                          float epsilon, int64_t stash_type, int64_t data_type);
+
+int wrap_corelib_skip_rms_norm(RuntimeState *state, void *input, void *skip,
+                               void *gamma, void *bias, void *output,
+                               void *input_skip_bias_sum,
+                               int64_t input_num_elements,
+                               int64_t gamma_num_elements,
+                               int64_t element_size_bytes, float epsilon,
+                               int64_t data_type);
+
+//===----------------------------------------------------------------------===//
+// XRT / DynamicDispatch Backend Support
+//===----------------------------------------------------------------------===//
+
+// Get XRT device handle from state (for DynamicDispatch NPU operations)
+// Returns: xrt::device* cast to void* (NULL if XRT not initialized)
+// Ownership: Caller does NOT own handle (destroyed in cleanup)
+//
+// NOTE: XRT context management is not yet implemented in RuntimeState.
+//       This accessor will return NULL until XRT initialization is added.
+void *hipdnn_ep_state_get_xrt_device(RuntimeState *state);
+
+// Get XRT context from state (for DynamicDispatch NPU operations)
+// Returns: ryzenai::dynamic_dispatch::xrt_context* cast to void*
+//          (NULL if XRT not initialized)
+// Ownership: Caller does NOT own context (destroyed in cleanup)
+// NOTE: Context cleanup is not performed in bitcode runtime due to C++
+//       shared_ptr destructor requirements. This results in a small memory
+//       leak on session teardown for DynamicDispatch-enabled models.
+void *hipdnn_ep_state_get_xrt_context(RuntimeState *state);
+
+//===----------------------------------------------------------------------===//
+// DynamicDispatch Operator Wrappers (NPU/IPU Backend)
+//===----------------------------------------------------------------------===//
+//
+// These wrappers expose AMD DynamicDispatch operators (Vitis AI / XRT)
+// for NPU/IPU execution. They follow the same pattern as GPU backend
+// wrappers (MIOpen, hipBLASLt) but target the NPU instead of GPU.
+//
+// Enabled via --use-dynamic-dispatch lowering option.
+//===----------------------------------------------------------------------===//
+
+// DynamicDispatch MatMul/GEMM operation
+// Uses ryzenai::combined_gemm operator for NPU execution
+int wrap_dd_matmul(RuntimeState *state, int32_t op_state_slot,
+                   const void *input_a, const void *input_b, const void *bias,
+                   void *output, int64_t M, int64_t N, int64_t K, double alpha,
+                   double beta, int64_t transA, int64_t transB,
+                   int64_t data_type);
+
+// DynamicDispatch 2D Convolution operation
+// Uses ryzenai::iconv operator for NPU execution
+int wrap_dd_conv2d(RuntimeState *state, int32_t op_state_slot,
+                   const void *input, int64_t n, int64_t c, int64_t h,
+                   int64_t w, const void *weights, int64_t k, const void *bias,
+                   void *output, int64_t out_h, int64_t out_w, int64_t kernel_h,
+                   int64_t kernel_w, int64_t stride_h, int64_t stride_w,
+                   int64_t pad_top, int64_t pad_left, int64_t pad_bottom,
+                   int64_t pad_right, int64_t dilation_h, int64_t dilation_w,
+                   int64_t group, int64_t data_type);
+
 #ifdef __cplusplus
 }
 #endif

@@ -133,6 +133,11 @@ inline constexpr const char *kWrapMultiHeadAttention =
     "wrap_multi_head_attention";
 inline constexpr const char *kWrapMatMulNBits = "wrap_matmul_nbits";
 inline constexpr const char *kWrapDequantBnb4 = "wrap_dequant_bnb4";
+inline constexpr const char *kWrapCorelibMatMulNBits =
+    "wrap_corelib_matmul_nbits";
+inline constexpr const char *kWrapCorelibRmsNorm = "wrap_corelib_rms_norm";
+inline constexpr const char *kWrapCorelibSkipRmsNorm =
+    "wrap_corelib_skip_rms_norm";
 inline constexpr const char *kWrapQMoE = "wrap_qmoe";
 inline constexpr const char *kWrapQMoEAmd = "wrap_qmoe_amd";
 inline constexpr const char *kWrapGatherBlockQuantized =
@@ -495,7 +500,8 @@ void populateFastGeluLoweringPatterns(const LLVMTypeConverter &converter,
 void populateTriluLoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);
 void populateNormLoweringPatterns(const LLVMTypeConverter &converter,
-                                  RewritePatternSet &patterns);
+                                  RewritePatternSet &patterns,
+                                  bool useRyzenAICorelib = false);
 void populateGatherLoweringPatterns(const LLVMTypeConverter &converter,
                                     RewritePatternSet &patterns);
 void populateGatherElementsLoweringPatterns(const LLVMTypeConverter &converter,
@@ -532,9 +538,25 @@ void populateGqaLoweringPatterns(
 void populateMultiHeadAttentionLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns);
 void populateMatMulNBitsLoweringPatterns(const LLVMTypeConverter &converter,
-                                         RewritePatternSet &patterns);
+                                         RewritePatternSet &patterns,
+                                         bool useRyzenAICorelib = false);
+
 void populateDequantBnb4LoweringPatterns(const LLVMTypeConverter &converter,
                                          RewritePatternSet &patterns);
+
+// Must match HIPDNN_EP_CORELIB_NOT_HANDLED in hipdnn_ep_runtime.h.
+inline constexpr int32_t kCorelibNotHandled = 1;
+
+// Emits a call to the GPU wrapper `gpuCallee(args)`. With a non-empty
+// `corelibCallee`, first calls `corelibCallee(args..., dataType)` and reaches
+// the GPU wrapper only when that returns kCorelibNotHandled. Leaves the
+// rewriter's insertion point after the emitted calls. Defined in
+// RyzenAICorelibLowering.cpp.
+LogicalResult
+emitCallWithCorelibFallback(ConversionPatternRewriter &rewriter, Location loc,
+                            ModuleOp module, StringRef gpuCallee,
+                            StringRef corelibCallee, int64_t dataType,
+                            ArrayRef<Type> paramTypes, ArrayRef<Value> args);
 void populateQMoELoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateQMoEAmdLoweringPatterns(const LLVMTypeConverter &converter,
@@ -614,6 +636,12 @@ void populateIfLoweringPatterns(const LLVMTypeConverter &converter,
                                 RewritePatternSet &patterns);
 void populatePoolLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
+// DynamicDispatch backend lowering patterns (NPU/IPU via XRT)
+void populateDynamicDispatchGemmLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns);
+void populateDynamicDispatchConvLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns);
+
 void populateResizeLoweringPatterns(const LLVMTypeConverter &converter,
                                     RewritePatternSet &patterns);
 void populateGridSampleLoweringPatterns(const LLVMTypeConverter &converter,

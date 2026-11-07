@@ -29,6 +29,7 @@ namespace {
 struct ConvertHipToLLVMPass
     : public impl::ConvertHipToLLVMPassBase<ConvertHipToLLVMPass> {
   using Base::Base;
+
   void runOnOperation() override;
 
 private:
@@ -225,9 +226,16 @@ private:
 static void
 populateLoweringPatterns(LLVMTypeConverter &typeConverter,
                          RewritePatternSet &patterns,
-                         const DenseMap<Operation *, Value> &hostScalars) {
+                         const DenseMap<Operation *, Value> &hostScalars,
+                         bool useRyzenAICorelib, bool useDynamicDispatch) {
   // HIP dialect-specific lowerings
   populateMemoryLoweringPatterns(typeConverter, patterns);
+  // DynamicDispatch (NPU) patterns come before the GPU ones so they win for
+  // the shapes DD supports; the GPU patterns lower everything else.
+  if (useDynamicDispatch) {
+    populateDynamicDispatchConvLoweringPatterns(typeConverter, patterns);
+    populateDynamicDispatchGemmLoweringPatterns(typeConverter, patterns);
+  }
   populateConvLoweringPatterns(typeConverter, patterns);
   populateConvTransposeLoweringPatterns(typeConverter, patterns);
   populateMatmulLoweringPatterns(typeConverter, patterns);
@@ -238,7 +246,7 @@ populateLoweringPatterns(LLVMTypeConverter &typeConverter,
   populateBiasGeluLoweringPatterns(typeConverter, patterns);
   populateFastGeluLoweringPatterns(typeConverter, patterns);
   populateTriluLoweringPatterns(typeConverter, patterns);
-  populateNormLoweringPatterns(typeConverter, patterns);
+  populateNormLoweringPatterns(typeConverter, patterns, useRyzenAICorelib);
   populateGatherLoweringPatterns(typeConverter, patterns);
   populateGatherElementsLoweringPatterns(typeConverter, patterns);
   populateTopKLoweringPatterns(typeConverter, patterns);
@@ -254,13 +262,15 @@ populateLoweringPatterns(LLVMTypeConverter &typeConverter,
   populateRopeLoweringPatterns(typeConverter, patterns);
   populateGqaLoweringPatterns(typeConverter, patterns, hostScalars);
   populateMultiHeadAttentionLoweringPatterns(typeConverter, patterns);
-  populateMatMulNBitsLoweringPatterns(typeConverter, patterns);
+  populateMatMulNBitsLoweringPatterns(typeConverter, patterns,
+                                      useRyzenAICorelib);
   populateDequantBnb4LoweringPatterns(typeConverter, patterns);
   populateQMoELoweringPatterns(typeConverter, patterns);
   populateQMoEAmdLoweringPatterns(typeConverter, patterns);
   populateGatherBlockQuantizedLoweringPatterns(typeConverter, patterns);
   populateQdqLoweringPatterns(typeConverter, patterns);
   populateGemmLoweringPatterns(typeConverter, patterns);
+
   populateLinearAttentionLoweringPatterns(typeConverter, patterns);
   populateGatedDeltaNetLoweringPatterns(typeConverter, patterns);
   populateDynamicSparseAttentionLoweringPatterns(typeConverter, patterns);
@@ -395,7 +405,8 @@ void ConvertHipToLLVMPass::runOnOperation() {
   const auto hostScalars = collectHostScalarValues(
       module, overrides, typeConverter.getIndexTypeBitwidth(),
       reportHostScalars);
-  populateLoweringPatterns(typeConverter, patterns, hostScalars);
+  populateLoweringPatterns(typeConverter, patterns, hostScalars,
+                           useRyzenAICorelib, useDynamicDispatch);
   // Preserve native-before-plugin order for equal-benefit patterns.
   for (auto &pattern : alternatives.getNativePatterns())
     patterns.add(std::move(pattern));

@@ -75,6 +75,16 @@ struct HipToLLVMPipelineOptions
       llvm::cl::desc(
           "Constants filename embedded in metadata (default: constants.bin)"),
       llvm::cl::init("constants.bin")};
+  Option<bool> useRyzenAICorelib{
+      *this, "use-ryzenai-corelib",
+      llvm::cl::desc("Try RyzenAI CoreLib (NPU) before the GPU for "
+                     "MatMulNBits, RmsNorm and SkipRmsNorm"),
+      llvm::cl::init(false)};
+  Option<bool> useDynamicDispatch{
+      *this, "use-dynamic-dispatch",
+      llvm::cl::desc(
+          "Use DynamicDispatch (NPU/IPU) backend for GEMM and Conv operations"),
+      llvm::cl::init(false)};
 };
 
 /// Build the common tail of the ONNX-to-HIP pipeline: everything after the
@@ -150,6 +160,16 @@ struct HipdnnPipelineOptions
       llvm::cl::desc(
           "Minimum number of tensor elements to externalize (0 = disabled)"),
       llvm::cl::init(0)};
+  Option<bool> useRyzenAICorelib{
+      *this, "use-ryzenai-corelib",
+      llvm::cl::desc("Try RyzenAI CoreLib (NPU) before the GPU for "
+                     "MatMulNBits, RmsNorm and SkipRmsNorm"),
+      llvm::cl::init(false)};
+  Option<bool> useDynamicDispatch{
+      *this, "use-dynamic-dispatch",
+      llvm::cl::desc(
+          "Use DynamicDispatch (NPU/IPU) backend for GEMM and Conv operations"),
+      llvm::cl::init(false)};
 };
 
 /// Build the complete HIPDNN pipeline: ONNX→HIP→LLVM→Interface.
