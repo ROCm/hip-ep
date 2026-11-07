@@ -125,16 +125,21 @@ their input names match this custom op's contract.
 ## Measured
 
 AIE4 machine (gfx1170 GPU), CoreLib 0.66, Qwen3-4B-Instruct-2507's
-onnxruntime-genai export, onnxruntime-genai's `model_benchmark` (128-token
-prompt, 128 tokens generated, greedy):
+onnxruntime-genai export; ONNX Runtime 1.31, onnxruntime-genai 0.19 and the AMD
+GPU umbrella EP as in [quick_start.md](../quick_start.md); `model_benchmark`
+with a 128-token prompt, 128 tokens generated, one iteration and no warmup:
 
 | | CoreLib model (NPU) | GPU (hip-ep) |
 |---|---|---|
-| Prompt processing | 1515 tokens/s | 1020 tokens/s |
-| Token generation | 29.6 tokens/s (stddev 0.5 ms) | 38.6 tokens/s (stddev 1.4 ms) |
-| Session creation (`onnxruntime_perf_test`) | 1.0 s | 5.9 s |
+| Prompt processing | 931 tokens/s | 303 tokens/s |
+| Token generation | 29.7 tokens/s (stddev 0.8 ms) | 39.2 tokens/s (stddev 0.5 ms) |
+| Model creation | 1.3 s | 13.3 s |
+| Dedicated GPU memory | 280 MB | 3.4 GB |
 
-Both generated the same text.
+Without a warmup the GPU's prompt processing includes first-run costs; the
+CoreLib session's report counted 255 forwards on the NPU (1 prefill, 254
+single-row calls, including the ones `model_benchmark` makes to generate its
+prompt).
 
 ## Limitations
 
