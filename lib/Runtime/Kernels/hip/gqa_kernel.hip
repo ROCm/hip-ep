@@ -4,6 +4,7 @@
  */
 
 #include <hip/hip_runtime.h>
+#include <hip/hip_bf16.h>
 #include <hip/hip_fp16.h>
 #include <cstdint>
 #include <cstdio>
@@ -246,6 +247,10 @@ template <>
 __device__ __forceinline__ float gqa_to_float<float>(float v) {
   return v;
 }
+template <>
+__device__ __forceinline__ float gqa_to_float<__hip_bfloat16>(__hip_bfloat16 v) {
+  return __bfloat162float(v);
+}
 
 template <typename T>
 __device__ __forceinline__ T gqa_from_float(float v);
@@ -256,6 +261,11 @@ __device__ __forceinline__ __half gqa_from_float<__half>(float v) {
 template <>
 __device__ __forceinline__ float gqa_from_float<float>(float v) {
   return v;
+}
+// Round to nearest even, as PyTorch rounds fp32 to bf16.
+template <>
+__device__ __forceinline__ __hip_bfloat16 gqa_from_float<__hip_bfloat16>(float v) {
+  return __float2bfloat16(v);
 }
 
 template <typename T>
@@ -1238,7 +1248,7 @@ __global__ void bias_key_extent_kernel(
         for (int k = scan_lo + threadIdx.x; k < bias_total_seq;
              k += blockDim.x) {
           if (k > best &&
-              static_cast<float>(bias[row_base + k]) > GQA_BIAS_MASKED_MAX)
+              gqa_to_float<TBias>(bias[row_base + k]) > GQA_BIAS_MASKED_MAX)
             best = k;
         }
       }
@@ -1261,7 +1271,7 @@ extern "C" int hip_gqa_bias_key_extent(
     void* stream_ptr, const void* bias, void* out_chunk_hi,
     int bias_batch, int bias_heads, int bias_sq, int bias_total_seq,
     int sq, int sq_chunk, int past_len, int num_chunks,
-    int bias_element_size_bytes) {
+    int bias_dtype) {
   if (!bias || !out_chunk_hi || num_chunks <= 0 || sq_chunk <= 0 ||
       bias_total_seq <= 0 || bias_sq <= 0)
     return -1;
@@ -1271,32 +1281,38 @@ extern "C" int hip_gqa_bias_key_extent(
   if (bias_heads <= 0)
     bias_heads = 1;
   (void)hipGetLastError();
-  if (bias_element_size_bytes == 2) {
-    bias_key_extent_kernel<__half>
-        <<<dim3(num_chunks), GQA_BIAS_EXTENT_THREADS, 0, stream>>>(
-            static_cast<const __half*>(bias), static_cast<int*>(out_chunk_hi),
-            bias_batch, bias_heads, bias_sq, bias_total_seq, sq, sq_chunk,
-            past_len);
-  } else if (bias_element_size_bytes == 4) {
-    bias_key_extent_kernel<float>
-        <<<dim3(num_chunks), GQA_BIAS_EXTENT_THREADS, 0, stream>>>(
-            static_cast<const float*>(bias), static_cast<int*>(out_chunk_hi),
-            bias_batch, bias_heads, bias_sq, bias_total_seq, sq, sq_chunk,
-            past_len);
-  } else {
-    fprintf(stderr, "hip_gqa_bias_key_extent: unsupported bias elem size %d\n",
-            bias_element_size_bytes);
+#define GQA_BIAS_EXTENT(TBIAS)                                                 \
+  bias_key_extent_kernel<TBIAS>                                                \
+      <<<dim3(num_chunks), GQA_BIAS_EXTENT_THREADS, 0, stream>>>(              \
+          static_cast<const TBIAS*>(bias), static_cast<int*>(out_chunk_hi),    \
+          bias_batch, bias_heads, bias_sq, bias_total_seq, sq, sq_chunk,       \
+          past_len)
+  switch (bias_dtype) {
+  case HIP_DTYPE_FLOAT16:
+    GQA_BIAS_EXTENT(__half);
+    break;
+  case HIP_DTYPE_BFLOAT16:
+    GQA_BIAS_EXTENT(__hip_bfloat16);
+    break;
+  case HIP_DTYPE_FLOAT32:
+    GQA_BIAS_EXTENT(float);
+    break;
+  default:
+    fprintf(stderr, "hip_gqa_bias_key_extent: unsupported bias dtype %d\n",
+            bias_dtype);
     return -1;
   }
+#undef GQA_BIAS_EXTENT
   GQA_RETURN_LAUNCH_STATUS();
 }
 
 // Step 9b (fp32->fp16 variant): Softmax reading fp32 scores, writing fp16 output
 // Avoids inf-inf=NaN by operating entirely in fp32 before the final fp16 store.
 
-// Output-type-templated: reads fp32 scores, writes TOut ∈ {__half, float}.
-// fp16 output (TOut=__half) feeds the fp16 Value GEMM; fp32 output (TOut=float)
-// feeds the fp32 Value GEMM on the Whisper no_causal fp32 decomposed path.
+// Output-type-templated: reads fp32 scores, writes TOut ∈ {__half,
+// __hip_bfloat16, float}. fp16 / bf16 output feeds the fp16 / bf16 Value GEMM;
+// fp32 output (TOut=float) feeds the fp32 Value GEMM on the Whisper no_causal
+// fp32 decomposed path.
 //
 // HAS_BIAS folds the external additive mask in here instead of running
 // add_attention_bias_kernel first. That kernel was a full read-modify-write
@@ -1354,7 +1370,7 @@ __global__ void softmax_f32_to_out_kernel(
   auto score_at = [&](int i) -> float {
     float s = in_col[i];
     if (HAS_BIAS)
-      s += static_cast<float>(bias_row[i]);
+      s += gqa_to_float<TBias>(bias_row[i]);
     return s;
   };
 
@@ -1489,11 +1505,28 @@ extern "C" int hip_gqa_softmax_f32_to_f32(
   GQA_RETURN_LAUNCH_STATUS();
 }
 
+// bf16-output variant: fp32 scores -> bf16 probabilities, feeding the bf16
+// Value GEMM of the decomposed path. output_batch_stride is in bf16 elements.
+extern "C" int hip_gqa_softmax_f32_to_bf16(
+    void* stream_ptr, const void* input_f32, void* output_bf16,
+    int total_head_queries, int rows, int cols,
+    int input_batch_stride, int output_batch_stride,
+    const void* head_sink, int num_heads, int use_smooth_softmax) {
+  hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+  (void)hipGetLastError();  // clear stale error for correct attribution
+  launch_softmax_f32_to_out<__hip_bfloat16>(
+      stream, input_f32, output_bf16, total_head_queries, rows, cols,
+      input_batch_stride, output_batch_stride, head_sink, num_heads,
+      use_smooth_softmax);
+  GQA_RETURN_LAUNCH_STATUS();
+}
+
 // Bias-folding variant: adds the external additive mask while reading the score
 // column, replacing a separate hip_gqa_add_attention_bias_f32 pass over the
-// same buffer. bias_element_size_bytes selects the mask dtype (2 = fp16, the
-// usual ONNX Attention export; 4 = fp32). output_fp32 picks the probability
-// dtype, matching the two entries above. The bias extents follow
+// same buffer. bias_dtype is the mask's HIP_DTYPE (fp16, the usual ONNX
+// Attention export; bf16; or fp32) and output_dtype the probabilities' (fp16,
+// bf16 or fp32, matching the entries above). An element size cannot tell fp16
+// from bf16, so both are dtypes. The bias extents follow
 // hip_gqa_add_attention_bias_f32, including its convention that a
 // non-positive bias_sq / bias_total_seq means the bias covers exactly the block
 // passed in; note this kernel's `cols` is the query count and `rows` the key
@@ -1504,16 +1537,21 @@ extern "C" int hip_gqa_softmax_f32_to_out_biased(
     int input_batch_stride, int output_batch_stride,
     const void* head_sink, int num_heads, int use_smooth_softmax,
     const void* bias, int bias_batch, int bias_heads,
-    int bias_element_size_bytes, int output_fp32,
+    int bias_dtype, int output_dtype,
     int bias_sq, int bias_row_offset, int bias_total_seq, int bias_col_offset) {
   if (!bias)
     return -1;
   hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
   (void)hipGetLastError();  // clear stale error for correct attribution
-  if (bias_element_size_bytes != 2 && bias_element_size_bytes != 4) {
+  auto supported = [](int dtype) {
+    return dtype == HIP_DTYPE_FLOAT16 || dtype == HIP_DTYPE_BFLOAT16 ||
+           dtype == HIP_DTYPE_FLOAT32;
+  };
+  if (!supported(bias_dtype) || !supported(output_dtype)) {
     fprintf(stderr,
-            "hip_gqa_softmax_f32_to_out_biased: unsupported bias elem size %d\n",
-            bias_element_size_bytes);
+            "hip_gqa_softmax_f32_to_out_biased: unsupported dtype "
+            "(bias=%d output=%d)\n",
+            bias_dtype, output_dtype);
     return -1;
   }
   if (bias_sq <= 0)
@@ -1526,17 +1564,22 @@ extern "C" int hip_gqa_softmax_f32_to_out_biased(
       input_batch_stride, output_batch_stride, head_sink, num_heads,           \
       use_smooth_softmax, bias, bias_batch, bias_heads, bias_sq,               \
       bias_row_offset, bias_total_seq, bias_col_offset)
-  if (output_fp32) {
-    if (bias_element_size_bytes == 2)
-      GQA_SOFTMAX_BIASED(float, __half);
-    else
-      GQA_SOFTMAX_BIASED(float, float);
-  } else {
-    if (bias_element_size_bytes == 2)
-      GQA_SOFTMAX_BIASED(__half, __half);
-    else
-      GQA_SOFTMAX_BIASED(__half, float);
-  }
+#define GQA_SOFTMAX_BIASED_OUT(TOUT)                                           \
+  do {                                                                         \
+    if (bias_dtype == HIP_DTYPE_FLOAT16)                                       \
+      GQA_SOFTMAX_BIASED(TOUT, __half);                                        \
+    else if (bias_dtype == HIP_DTYPE_BFLOAT16)                                 \
+      GQA_SOFTMAX_BIASED(TOUT, __hip_bfloat16);                                \
+    else                                                                       \
+      GQA_SOFTMAX_BIASED(TOUT, float);                                         \
+  } while (0)
+  if (output_dtype == HIP_DTYPE_FLOAT32)
+    GQA_SOFTMAX_BIASED_OUT(float);
+  else if (output_dtype == HIP_DTYPE_BFLOAT16)
+    GQA_SOFTMAX_BIASED_OUT(__hip_bfloat16);
+  else
+    GQA_SOFTMAX_BIASED_OUT(__half);
+#undef GQA_SOFTMAX_BIASED_OUT
 #undef GQA_SOFTMAX_BIASED
   GQA_RETURN_LAUNCH_STATUS();
 }

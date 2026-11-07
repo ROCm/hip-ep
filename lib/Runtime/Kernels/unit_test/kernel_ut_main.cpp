@@ -58,6 +58,8 @@ static const Leaf kLeaves[] = {
      "hipdnn-kernel-ut-gqa-prefill-xfp16-wfp16-yfp16.exe"},
     {"gqa/prefill", "Xfp16_Wi8_Yfp16",
      "hipdnn-kernel-ut-gqa-prefill-xfp16-wi8-yfp16.exe"},
+    {"gqa/softmax", "Xfp32_Wbf16_Ybf16",
+     "hipdnn-kernel-ut-gqa-softmax-xfp32-wbf16-ybf16.exe"},
     {"qmoe_ragged_mm", "Xfp16_Wu4_Yfp16",
      "hipdnn-kernel-ut-qmoe-ragged-mm-xfp16-wu4-yfp16.exe"},
     {"qmoe_ragged_mm", "Xfp16_Wu2_Yfp16",

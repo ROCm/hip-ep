@@ -1165,11 +1165,14 @@ struct GqaGemmKey {
   int64_t strideA;
   int64_t strideB;
   int64_t strideC;
+  // true = bf16 A/B (and the non-fp32 C/D) instead of fp16; same width, so the
+  // flag is part of the key.
+  bool bf16 = false;
   bool operator==(const GqaGemmKey &o) const {
     return m == o.m && n == o.n && k == o.k && batch == o.batch &&
            transA == o.transA && outputFp32 == o.outputFp32 &&
            inputFp32 == o.inputFp32 && strideA == o.strideA &&
-           strideB == o.strideB && strideC == o.strideC;
+           strideB == o.strideB && strideC == o.strideC && bf16 == o.bf16;
   }
 };
 
@@ -1186,6 +1189,7 @@ struct GqaGemmKeyHash {
     hash_combine_val(h, k.strideA);
     hash_combine_val(h, k.strideB);
     hash_combine_val(h, k.strideC);
+    hash_combine_val(h, k.bf16);
     return h;
   }
 };
@@ -1272,9 +1276,11 @@ static const GqaGemmCacheEntry *queryOrCreateGemmState(RuntimeState *state,
     int64_t strideB = key.strideB != 0 ? key.strideB : n * k;
     int64_t strideC = key.strideC != 0 ? key.strideC : n * m;
 
-    // Input operand element type: HIP_R_16F (fp16 GQA) or HIP_R_32F (fp32
-    // GQA, e.g. Whisper no_causal). Compute is HIPBLAS_COMPUTE_32F either way.
-    hipDataType inType = key.inputFp32 ? HIP_R_32F : HIP_R_16F;
+    // Input operand element type: HIP_R_16F (fp16 GQA), HIP_R_16BF (bf16 GQA)
+    // or HIP_R_32F (fp32 GQA, e.g. Whisper no_causal). Compute is
+    // HIPBLAS_COMPUTE_32F either way.
+    const hipDataType half_type = key.bf16 ? HIP_R_16BF : HIP_R_16F;
+    hipDataType inType = key.inputFp32 ? HIP_R_32F : half_type;
     int64_t a_rows = key.transA ? k : m;
     int64_t a_cols = key.transA ? m : k;
     GQA_CACHE_CHECK(hipblasLtMatrixLayoutCreate(&entry.layA, inType, a_rows,
@@ -1284,7 +1290,7 @@ static const GqaGemmCacheEntry *queryOrCreateGemmState(RuntimeState *state,
     GQA_CACHE_CHECK(hipblasLtMatrixLayoutCreate(&entry.layB, inType, k, n, k));
     GQA_CACHE_CHECK(setLayoutBatch(entry.layB, batch, strideB));
 
-    hipDataType outType = key.outputFp32 ? HIP_R_32F : HIP_R_16F;
+    hipDataType outType = key.outputFp32 ? HIP_R_32F : half_type;
     GQA_CACHE_CHECK(hipblasLtMatrixLayoutCreate(&entry.layC, outType, m, n, m));
     GQA_CACHE_CHECK(setLayoutBatch(entry.layC, batch, strideC));
     GQA_CACHE_CHECK(hipblasLtMatrixLayoutCreate(&entry.layD, outType, m, n, m));
@@ -1358,8 +1364,8 @@ static int gqa_forward_hipblaslt(
     void *present_value, int64_t B, int64_t sq, int64_t skv,
     int64_t past_buf_seq, int64_t H, int64_t G, int64_t d, float scale,
     int64_t do_rotary, int64_t local_window_size, bool no_causal,
-    int64_t element_size_bytes, int op_state_slot, bool kv_bnsd,
-    bool reuse_past_kv = false,
+    int64_t element_size_bytes, int64_t data_type, int op_state_slot,
+    bool kv_bnsd, bool reuse_past_kv = false,
     std::optional<int32_t> host_length = std::nullopt,
     // The bias's own query extent, row stride and element size; 0 means sq,
     // total_seq and element_size_bytes. A query extent of 1 is a per-key row
@@ -1392,6 +1398,19 @@ static int gqa_forward_hipblaslt(
   int64_t present_seq = skv;
   size_t elem_sz = static_cast<size_t>(element_size_bytes);
   bool gemm_fp32 = (elem_sz == 4);
+  // bf16 has fp16's width, so elem_sz alone cannot tell them apart. bf16 keeps
+  // the fp16 buffer layout and switches the GEMM types and the probability /
+  // mask dtypes.
+  const bool bf16 = (data_type == HIPDNN_EP_DATATYPE_BFLOAT16);
+  const int probs_dtype = gemm_fp32
+                              ? HIP_DTYPE_FLOAT32
+                              : (bf16 ? HIP_DTYPE_BFLOAT16 : HIP_DTYPE_FLOAT16);
+  // attention_bias has the query's dtype; a key_bias (attn_bias_elem > 0) is
+  // an fp16 row.
+  const int bias_dtype =
+      attn_bias_elem > 0
+          ? (attn_bias_elem == 4 ? HIP_DTYPE_FLOAT32 : HIP_DTYPE_FLOAT16)
+          : probs_dtype;
   bool need_rope = do_rotary && cos_cache && sin_cache;
 
   // Pre-dispatch read of seqlens_k (or per-Compute() cache lookup for B==1
@@ -1458,8 +1477,9 @@ static int gqa_forward_hipblaslt(
   // them: feeding fp32 buffers to a __half kernel reinterprets the bytes and
   // produces garbage. The decomposed hipBLASLt pipeline below IS fp32-capable,
   // so route fp32 decode there. This is the decode-side analogue of the
-  // no_causal exemption (prefill sq>1 fp32 already used decomposed).
-  bool fused_fp16 = (element_size_bytes == 2);
+  // no_causal exemption (prefill sq>1 fp32 already used decomposed). bf16 has
+  // fp16's width but not its bits, so the gate is the dtype, not the size.
+  bool fused_fp16 = (data_type == HIPDNN_EP_DATATYPE_HALF);
   // no_causal (Whisper encoder / cross-attn) always takes the decomposed
   // hipBLASLt path. hip_gqa_fused_decode is decode-only (sq==1) and reads
   // seqlens_k with the +1 PAST-token convention, plus assumes the KV cache
@@ -2108,8 +2128,7 @@ static int gqa_forward_hipblaslt(
             static_cast<int>(attn_bias_total > 0 ? attn_bias_total : total_seq),
             static_cast<int>(sq), static_cast<int>(sq_chunk),
             static_cast<int>(past_len), static_cast<int>(nchunks),
-            static_cast<int>(attn_bias_elem > 0 ? attn_bias_elem : elem_sz)) ==
-            0) {
+            bias_dtype) == 0) {
       std::vector<int32_t> hi(static_cast<size_t>(nchunks), 0);
       if (hipMemcpyAsync(hi.data(), d_hi, hi_bytes, hipMemcpyDeviceToHost,
                          stream) == hipSuccess &&
@@ -2164,7 +2183,8 @@ static int gqa_forward_hipblaslt(
               gemm_fp32,
               strideA,
               /*strideB=*/chunked ? sq * d : 0,
-              /*strideC=*/0};
+              /*strideC=*/0,
+              bf16};
     *value = {d,
               n_rows,
               kv_ext,
@@ -2174,7 +2194,8 @@ static int gqa_forward_hipblaslt(
               gemm_fp32,
               strideA,
               /*strideB=*/0,
-              /*strideC=*/chunked ? sq * d : 0};
+              /*strideC=*/chunked ? sq * d : 0,
+              bf16};
   };
 
   //===--------------------------------------------------------------------===//
@@ -2270,7 +2291,8 @@ static int gqa_forward_hipblaslt(
                                  /*inputFp32=*/gemm_fp32,
                                  /*strideA=*/present_seq * d,
                                  /*strideB=*/HPG * sq * d,
-                                 /*strideC=*/HPG * sq * kv_span};
+                                 /*strideC=*/HPG * sq * kv_span,
+                                 bf16};
     // Value: C[d, HPG*sq] = V[d, kv_span] * S[kv_span, HPG*sq] per (b, g)
     // pair, writing into BNSD [B, G, HPG, sq, d] which at sq==1 coincides with
     // BSHD [B, 1, H, d].
@@ -2283,7 +2305,8 @@ static int gqa_forward_hipblaslt(
                                  /*inputFp32=*/gemm_fp32,
                                  /*strideA=*/present_seq * d,
                                  /*strideB=*/HPG * sq * kv_span,
-                                 /*strideC=*/HPG * sq * d};
+                                 /*strideC=*/HPG * sq * d,
+                                 bf16};
     const GqaGemmCacheEntry *sSt =
         queryOrCreateGemmState(state, ltHandle, scoreKey, op_state_slot);
     if (!sSt)
@@ -2680,11 +2703,12 @@ static int gqa_forward_hipblaslt(
             static_cast<int>(past_len + q0 - chunk_kv_lo),
             static_cast<int>(local_window_size)));
       }
-      // fp16 GQA: softmax writes fp16 probabilities for the fp16 Value GEMM.
+      // fp16 GQA: softmax writes fp16 probabilities for the fp16 Value GEMM;
+      // bf16 GQA writes bf16 ones for the bf16 Value GEMM.
       // fp32 GQA (Whisper no_causal): softmax writes fp32 probabilities for the
-      // fp32 Value GEMM. d_S_fp16 is the probabilities buffer either way (sized
-      // by elem_sz above), so the name is fp16-specific but holds fp32 when
-      // gemm_fp32.
+      // fp32 Value GEMM. d_S_fp16 is the probabilities buffer in every case
+      // (sized by elem_sz above), so the name is fp16-specific but holds bf16
+      // or fp32 as well.
       //
       // With a bias, the biased entry folds it in while reading the score. It
       // takes the bias's own extents and the chunk's / window's offsets into
@@ -2706,15 +2730,19 @@ static int gqa_forward_hipblaslt(
             scoreBatchStride, head_sink, static_cast<int>(H),
             static_cast<int>(use_smooth_softmax), attention_bias,
             static_cast<int>(attn_bias_batch),
-            static_cast<int>(attn_bias_num_heads),
-            static_cast<int>(attn_bias_elem > 0 ? attn_bias_elem : elem_sz),
-            static_cast<int>(gemm_fp32),
+            static_cast<int>(attn_bias_num_heads), bias_dtype, probs_dtype,
             static_cast<int>(attn_bias_sq > 0 ? attn_bias_sq : sq),
             static_cast<int>(q0),
             static_cast<int>(attn_bias_total > 0 ? attn_bias_total : total_seq),
             static_cast<int>(chunk_kv_lo)));
       } else if (gemm_fp32) {
         HIP_CHECK(hip_gqa_softmax_f32_to_f32(
+            stream, d_S_f32, d_S_fp16, static_cast<int>(B * H * c),
+            static_cast<int>(kv_ext), static_cast<int>(c), scoreBatchStride,
+            scoreBatchStride, head_sink, static_cast<int>(H),
+            static_cast<int>(use_smooth_softmax)));
+      } else if (bf16) {
+        HIP_CHECK(hip_gqa_softmax_f32_to_bf16(
             stream, d_S_f32, d_S_fp16, static_cast<int>(B * H * c),
             static_cast<int>(kv_ext), static_cast<int>(c), scoreBatchStride,
             scoreBatchStride, head_sink, static_cast<int>(H),
@@ -3036,7 +3064,8 @@ int wrap_group_query_attention_host_length(
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
     int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
     int64_t seq_len_new_kv, int32_t has_host_length, int32_t host_length_value,
-    void *key_bias, int64_t key_bias_batch, int64_t key_bias_len) {
+    void *key_bias, int64_t key_bias_batch, int64_t key_bias_len,
+    int64_t data_type) {
   const std::optional<int32_t> host_length =
       has_host_length ? std::optional<int32_t>(host_length_value)
                       : std::nullopt;
@@ -3094,6 +3123,30 @@ int wrap_group_query_attention_host_length(
   const bool kv_quantized = (kv_format != KvCacheFormat::Fp16);
   if (output_qk != nullptr || qk_output != 0) {
     fprintf(stderr, "wrap_group_query_attention: qk_output not supported\n");
+    return -1;
+  }
+  if (data_type != HIPDNN_EP_DATATYPE_HALF &&
+      data_type != HIPDNN_EP_DATATYPE_FLOAT &&
+      data_type != HIPDNN_EP_DATATYPE_BFLOAT16) {
+    fprintf(stderr,
+            "wrap_group_query_attention: unsupported query dtype %lld "
+            "(fp16, bf16 or fp32 only)\n",
+            (long long)data_type);
+    return -1;
+  }
+  // bf16 runs only on the decomposed pipeline (bf16 hipBLASLt GEMMs + bf16
+  // softmax output). RoPE, the quantized KV cache, the per-head sink and the
+  // fp16 key_bias row are fp16-typed there, so reject them rather than
+  // reinterpret bf16 bits as fp16.
+  const bool is_bf16 = data_type == HIPDNN_EP_DATATYPE_BFLOAT16;
+  if (is_bf16 && (do_rotary != 0 || kv_quantized || head_sink != nullptr ||
+                  key_bias != nullptr)) {
+    fprintf(stderr,
+            "wrap_group_query_attention: bf16 does not support do_rotary=%lld "
+            "quantized_kv=%d head_sink=%d key_bias=%d\n",
+            (long long)do_rotary, static_cast<int>(kv_quantized),
+            static_cast<int>(head_sink != nullptr),
+            static_cast<int>(key_bias != nullptr));
     return -1;
   }
   // key_bias rows are read at every key below the present length, so a shorter
@@ -3206,13 +3259,14 @@ int wrap_group_query_attention_host_length(
                               sink_ok && key_bias_ok && head_dim_ok &&
                               decode_geometry_ok && attention_bias == nullptr &&
                               !hipdnn_device_is_wave64();
-  const bool fused_supported = fused_geometry && element_size_bytes == 2;
+  const bool fused_supported =
+      fused_geometry && data_type == HIPDNN_EP_DATATYPE_HALF;
   // fp32 query + INT8 KV cannot use the decomposed fallback (it reads the
   // cache as fp16). Cast QKV/RoPE/output to fp16 and reuse fused. head_sink
   // and key_bias are not threaded through that adapter; leave those
   // combinations rejected until they are.
   const bool fp32_int8_fused =
-      kv_quantized && fused_geometry && element_size_bytes == 4 &&
+      kv_quantized && fused_geometry && data_type == HIPDNN_EP_DATATYPE_FLOAT &&
       (head_dim == 64 || head_dim == 96 || head_dim == 128) &&
       head_sink == nullptr && key_bias == nullptr;
 
@@ -3299,8 +3353,8 @@ int wrap_group_query_attention_host_length(
         kb ? 1 : attn_bias_num_heads, output, present_key, present_value,
         batch_size, seq_len_q, seq_len_kv, past_buf_seq, num_heads,
         kv_num_heads, head_dim, scale, do_rotary, local_window_size,
-        no_causal != 0, element_size_bytes, op_state_slot, kv_bnsd != 0,
-        reuse_past_kv, host_length,
+        no_causal != 0, element_size_bytes, data_type, op_state_slot,
+        kv_bnsd != 0, reuse_past_kv, host_length,
         /*attn_bias_sq=*/kb ? 1 : 0, /*attn_bias_total=*/kb ? key_bias_len : 0,
         /*attn_bias_elem=*/kb ? 2 : 0);
     if (lrc != 0)
@@ -3357,7 +3411,8 @@ int wrap_group_query_attention_ring_f16(
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
     int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
     int64_t seq_len_new_kv, int32_t has_host_length, int32_t host_length_value,
-    void *key_bias, int64_t key_bias_batch, int64_t key_bias_len) {
+    void *key_bias, int64_t key_bias_batch, int64_t key_bias_len,
+    int64_t data_type) {
 #if HIP_EP_RING_ENABLED != 0
   const std::optional<int32_t> host_length =
       has_host_length ? std::optional<int32_t>(host_length_value)
@@ -3367,7 +3422,8 @@ int wrap_group_query_attention_ring_f16(
   // Any noncandidate retains the original entry point and its diagnostics.
   if (gqa_ring_requested() && state && query && output && present_key &&
       present_value && !position_ids && !output_qk && qk_output == 0 &&
-      softcap == 0.0f && element_size_bytes == 2 && batch_size == 1 &&
+      softcap == 0.0f && element_size_bytes == 2 &&
+      data_type == HIPDNN_EP_DATATYPE_HALF && batch_size == 1 &&
       num_heads == 24 && kv_num_heads == 4 && head_dim == 256 &&
       seq_len_q >= 1 && seq_len_q <= HIP_EP_RING_MAX_QUERY_LENGTH &&
       seq_len_new_kv == seq_len_q && key && value && seqlens_k && !kv_bnsd &&
@@ -3398,5 +3454,5 @@ int wrap_group_query_attention_ring_f16(
       v_quant_type, kv_cache_bit_width, no_causal, batch_size, seq_len_q,
       seq_len_kv, past_buf_seq, head_dim, element_size_bytes, attn_bias_batch,
       attn_bias_num_heads, kv_bnsd, seq_len_new_kv, has_host_length,
-      host_length_value, key_bias, key_bias_batch, key_bias_len);
+      host_length_value, key_bias, key_bias_batch, key_bias_len, data_type);
 }
