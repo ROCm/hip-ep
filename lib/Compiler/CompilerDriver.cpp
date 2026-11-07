@@ -43,6 +43,7 @@
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/JSON.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/SourceMgr.h"
@@ -498,6 +499,23 @@ bool CompilerDriver::runMLIRPasses(
       embedOpts.log = &llvm::errs();
       embedOpts.logPrefix = "[CompilerDriver/rocmlir]";
     }
+    embedOpts.strictElementwise = !hip_get_env("HIPDNN_EP_STRICT").empty();
+    std::string fusionReport = hip_get_env("HIPDNN_EP_ROCMLIR_FUSION_REPORT");
+    auto reportHipPath = [&](llvm::StringRef kernel, llvm::StringRef reason) {
+      std::error_code error;
+      std::unique_ptr<llvm::raw_fd_ostream> file;
+      if (fusionReport != "-")
+        file = std::make_unique<llvm::raw_fd_ostream>(fusionReport, error,
+                                                      llvm::sys::fs::OF_Append);
+      if (error)
+        return;
+      llvm::raw_ostream &os = file ? *file : llvm::errs();
+      os << llvm::json::Value(llvm::json::Object{
+                {"kind", "fallback"}, {"name", kernel}, {"reason", reason}})
+         << "\n";
+    };
+    if (!fusionReport.empty())
+      embedOpts.onHipPath = reportHipPath;
 
     // Opt-in: without this the embed falls back to position 0 of the tuning
     // space, which rocMLIR picks for applicability rather than speed. Tuning
