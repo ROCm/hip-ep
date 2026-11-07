@@ -1,0 +1,90 @@
+{
+  "name": "qwen38_27b_eagle4",
+  "model_repo": "amd/Qwen3.8-27B-EAGLE4-Quark-hip-ep",
+  "model_revision": "3538aa16a8826d685672587cd64dbc6b0ded6a64",
+  "hip_ep_ref": "PR #1264 (perf/moe-spec-decode-strix) at cf7e1fd0, which has dd010ba3 (TopK two-pass path for 32 < k <= 256)",
+  "harness": {
+    "script": "scripts/spec_bench.py",
+    "format": "spec_bench",
+    "args": [
+      "--ep-dir",
+      "{ep_dir}",
+      "--therock-bin",
+      "{therock_bin}",
+      "--target",
+      "{model}/target/text_spec_eagle4.onnx",
+      "--eagle4",
+      "{model}/eagle4_step.onnx",
+      "--template",
+      "jinja",
+      "--per-task",
+      "1",
+      "--limit",
+      "{n_prompts}"
+    ]
+  },
+  "prompts": "../prompts/spec_bench_eagle4_ci5.jsonl",
+  "prompts_sha256": "533eae649523f862a92ea8b98fa4632b3abdfc732dbcda77f96fd9c2057dd94f",
+  "question_ids": [
+    87,
+    164,
+    245,
+    326,
+    402
+  ],
+  "max_new": 128,
+  "env": {
+    "HIPDNN_EP_STRICT": "1",
+    "HIPDNN_EP_MATMUL_DP4A_MAX_M": "8"
+  },
+  "baseline_arm": "none",
+  "arms": [
+    "none",
+    "eagle4:5:c:t0.5"
+  ],
+  "tolerance": {
+    "tok_s": 0.08,
+    "speedup": 0.06,
+    "tokens_per_verify": 0.02
+  },
+  "reference": {
+    "calibrated": false,
+    "source": "team reference numbers for Qwen3.8-27B on Strix Halo (plain 13.36 tok/s; MTP ~19.4 1.45x; DSpark ~23.1 1.73x; DFlash2 27.24 2.04x; EAGLE-4 33.19 2.31x); tokens per verify from the board measurement, which is hardware-independent",
+    "arms": {
+      "none": {
+        "tok_s": 13.36
+      },
+      "eagle4:5:c:t0.5": {
+        "tok_s": 33.19,
+        "speedup": 2.31,
+        "tokens_per_verify": 2.943
+      }
+    }
+  },
+  "board_measurement": {
+    "source": "median of 6 runs on Strix Halo (Radeon 8060S, Windows power plan Balanced), hip-ep PR #1264 cf7e1fd0, 2026-11-01",
+    "arms": {
+      "none": {
+        "tok_s": 11.856
+      },
+      "eagle4:5:c:t0.5": {
+        "tok_s": 30.726,
+        "speedup": 2.598,
+        "tokens_per_verify": 2.943
+      }
+    }
+  },
+  "model_card_reference": {
+    "source": "results/spec_bench.json of the model repo (240 Spec-Bench prompts, hip-ep perf/moe-spec-decode-strix), restricted to question_ids 87, 164, 245, 326, 402",
+    "arms": {
+      "none": {
+        "tok_s": 14.21
+      },
+      "eagle4:5:c:t0.5": {
+        "tok_s": 32.73,
+        "speedup": 2.303,
+        "tokens_per_verify": 2.89
+      }
+    }
+  }
+}
