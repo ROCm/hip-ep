@@ -4,10 +4,10 @@
 // ============================================================================
 // TEST PURPOSE:
 // Verify that hip.atan, the lowering of ONNX Atan, becomes TOSA inside a
-// rock.kernel function. atan is already in FuseROCMlir's pointwise list, so an
-// atan sitting behind a matmul is outlined into the kernel whether or not this
-// pass can lower it; left unconverted it reaches rocMLIR as a hip op that
-// rocMLIR cannot compile.
+// rock.kernel function. atan is already in the rocMLIR fusion's pointwise
+// list, so an atan sitting behind a matmul is outlined into the kernel whether
+// or not this pass can lower it; left unconverted it reaches rocMLIR as a hip
+// op that rocMLIR cannot compile.
 //
 // Unlike round and mod, this expansion approximates. TOSA has no arctangent
 // and no identity reaches one from the transcendentals it does carry, so the
@@ -32,7 +32,7 @@
 //   are integers, which ONNX Atan never produces
 // - The expansion emits no tosa.logical_* op, which rocMLIR's
 //   RockTosaToElementwise has no pattern for
-// - atan converts behind a matmul anchor, the shape hip-fuse-rocmlir makes
+// - atan converts behind a matmul anchor, the shape the rocMLIR fusion makes
 // - Outside a rock.kernel the op is left alone for the runtime
 // - Dynamic shapes are rejected, matching the sibling elementwise ops
 // ============================================================================
@@ -138,7 +138,7 @@ func.func @atan_no_logical_ops(%ctx: !hip.context, %x: tensor<4xf32>,
 
 // -----
 
-// The shape hip-fuse-rocmlir produces: a matmul anchor with the pointwise op
+// The shape the rocMLIR fusion produces: a matmul anchor with the pointwise op
 // behind it and a ub.poison standing in for the context. atan is in the
 // pointwise list, so an atan after a matmul is outlined into the kernel
 // whether or not it can be lowered; left unconverted it reaches rocMLIR as a

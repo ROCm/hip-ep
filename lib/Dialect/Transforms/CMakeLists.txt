@@ -34,7 +34,6 @@ add_library(HipDialectTransforms STATIC
   ExternalizeConstants.cpp
   FixLoopAccumulatorOffset.cpp
   FoldBatchNorm.cpp
-  FuseROCMlir.cpp
   FuseRocMlirAnchor.cpp
   FuseROCMlirReport.cpp
   FuseRocMlirElementwise.cpp

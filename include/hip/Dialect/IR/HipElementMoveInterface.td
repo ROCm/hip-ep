@@ -12,7 +12,7 @@ include "mlir/IR/OpBase.td"
 // their moved operands, or one selected among them by comparison, with no
 // arithmetic. A per-tensor quantize then commutes with the op:
 //   q(f(x1, x2, ...)) == f(q(x1), q(x2), ...)
-// so hip-fuse-rocmlir can run the op on the quantized values (see
+// so hip-rocmlir-prepare-quant can run the op on the quantized values (see
 // docs/design/element-move-interface.md).
 //
 // An op may implement the interface only when its 8-bit form lowers both

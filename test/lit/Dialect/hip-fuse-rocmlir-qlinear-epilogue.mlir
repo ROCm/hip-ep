@@ -1,14 +1,13 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-// Past the requantize of a quantized conv, hip-fuse-rocmlir takes the graph
+// Past the requantize of a quantized conv, the rocMLIR fusion takes the graph
 // of dequantizes, pointwise ops and quantizes that reads the conv, and a
 // dequantize that only that graph reads. Inside the kernel, a quantized add
 // or mul of two dequantizes becomes the integer form that ONNX Runtime's
 // QLinearAdd and QLinearMul compute, with a unit-scale quantize. A value that
 // a dequantize widened is never a kernel result.
 
-// RUN: hip-mlir-opt --split-input-file --hip-fuse-rocmlir %s | FileCheck %s
 // RUN: hip-mlir-opt --split-input-file --hip-rocmlir-prepare-quant \
 // RUN:   --hip-fuse-rocmlir-elementwise --hip-fuse-rocmlir-anchor %s \
 // RUN:   | FileCheck %s

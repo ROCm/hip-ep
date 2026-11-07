@@ -91,7 +91,7 @@ bool rocMlirPipelineRequested() {
 // fusion options in --hip-rocmlir-fusion syntax, so that hip-mlir-opt can
 // replay the same fusion without a GPU.
 void dumpPreFusionIR(mlir::ModuleOp module,
-                     const mlir::hip::FuseROCMlirPassOptions &fuseOpts) {
+                     const mlir::hip::FuseRocMlirAnchorPassOptions &fuseOpts) {
   std::string dir = hip_get_env("HIPDNN_EP_ROCMLIR_PRE_FUSION_DUMP");
   if (dir.empty())
     return;
@@ -432,7 +432,7 @@ bool CompilerDriver::runMLIRPasses(
     COMPILER_DEBUG_LOG("[CompilerDriver] HIPDNN_EP_HIPSR set\n");
   } else if (rocMlirPipelineRequested()) {
 #ifdef ENABLE_ROCMLIRTRITON
-    // rocMLIR sits between the ONNX->HIP head and its tail: fuse-rocmlir
+    // rocMLIR sits between the ONNX->HIP head and its tail: the rocMLIR fusion
     // needs tensor-level HIP IR, and each kernel's compiled binary has to be
     // embedded in its hip.rocmlir dispatch before the tail bufferizes that op
     // like any other DPS op. Embedding is not a pass, so the head runs here
@@ -446,10 +446,10 @@ bool CompilerDriver::runMLIRPasses(
     {
       mlir::PassManager headPm(module.getContext());
       // Same handle plumbing as the default arm below. rocMLIR only claims
-      // the subgraphs fuse-rocmlir anchors on; everything else still wants
-      // the hipDNN graph passes, and CompilerAPI needs the compiled graphs to
-      // register. Dropping them here would silently move the rest of the
-      // model off hipDNN the moment HIPDNN_EP_ROCMLIR was set.
+      // the subgraphs the rocMLIR fusion anchors on; everything else still
+      // wants the hipDNN graph passes, and CompilerAPI needs the compiled
+      // graphs to register. Dropping them here would silently move the rest of
+      // the model off hipDNN the moment HIPDNN_EP_ROCMLIR was set.
       if (hipdnnHandle_) {
         compiledGraphs_ =
             std::make_shared<llvm::StringMap<mlir::hip::OwnedGraph>>();
@@ -468,7 +468,7 @@ bool CompilerDriver::runMLIRPasses(
       // HIPDNN_EP_ROCMLIR_FUSE_VIEWS=0 restores the forward-only kernel
       // boundaries and HIPDNN_EP_ROCMLIR_FUSE_GEG=0 keeps gemm pairs in
       // separate kernels, for A/B runs against each fusion.
-      mlir::hip::FuseROCMlirPassOptions fuseOpts;
+      mlir::hip::FuseRocMlirAnchorPassOptions fuseOpts;
       std::string fuseViews = hip_get_env("HIPDNN_EP_ROCMLIR_FUSE_VIEWS");
       fuseOpts.fuseViews = !(fuseViews == "0" || fuseViews == "off");
       std::string fuseGeg = hip_get_env("HIPDNN_EP_ROCMLIR_FUSE_GEG");
@@ -478,20 +478,17 @@ bool CompilerDriver::runMLIRPasses(
           *module.getContext(), fuseOpts.arch);
       fuseOpts.gemmGemmAccelTypes.assign(accelTypes.begin(), accelTypes.end());
       if (mlir::failed(headPm.run(module))) {
-        error_message = "ONNX->HIP passes before fuse-rocmlir failed";
+        error_message = "ONNX->HIP passes before the rocMLIR fusion failed";
         return false;
       }
       dumpPreFusionIR(module, fuseOpts);
       mlir::PassManager fusePm(module.getContext());
       // HIPDNN_EP_ROCMLIR_FUSION_REPORT=<file> appends one JSON line per
       // kernel, to compare the kernels of two fusion pipelines.
-      // HIPDNN_EP_ROCMLIR_TWO_PASS=1 groups the pointwise ops into modules
-      // first, and then outlines each anchor with whole modules.
       mlir::hip::addRocMlirFusionPasses(
-          fusePm, fuseOpts, hip_get_env("HIPDNN_EP_ROCMLIR_FUSION_REPORT"),
-          hip_env_is_on("HIPDNN_EP_ROCMLIR_TWO_PASS"));
+          fusePm, fuseOpts, hip_get_env("HIPDNN_EP_ROCMLIR_FUSION_REPORT"));
       if (mlir::failed(fusePm.run(module))) {
-        error_message = "fuse-rocmlir passes failed";
+        error_message = "rocMLIR fusion passes failed";
         return false;
       }
     }
