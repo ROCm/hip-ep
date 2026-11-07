@@ -166,6 +166,11 @@ if(ENABLE_ROCMLIRTRITON)
       ${llvm_libs}
     )
     add_test(NAME ${_ctest_name} COMMAND ${_target})
+    # TritonToHsaco dlopens triton_amd_codegen by bare name (see deps.cmake).
+    if(NOT WIN32)
+      set_tests_properties(${_ctest_name} PROPERTIES
+        ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}/lib")
+    endif()
     set_target_properties(${_target} PROPERTIES
       FOLDER "mlir/Test/Dialect/Hipsr"
     )
