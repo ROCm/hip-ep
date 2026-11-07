@@ -38,6 +38,7 @@ add_library(HipDialectTransforms STATIC
   FoldConstantExtracts.cpp
   FuseROCMlir.cpp
   FuseROCMlirReport.cpp
+  GemmGemm.cpp
   GenerateInterface.cpp
   GenerateOpStateInit.cpp
   HipFusionTransform.cpp
@@ -51,9 +52,11 @@ add_library(HipDialectTransforms STATIC
   Pipelines.cpp
   PoolAllocs.cpp
   PromoteStridedHipOperands.cpp
+  QLinearPlan.cpp
   QuantizedEpilogue.cpp
   RebiasUnsignedQuantize.cpp
   RelaxMultiDynExpandShape.cpp
+  RocMlirPrepareQuant.cpp
   ResolveExternConstants.cpp
   ResolveMemRefDims.cpp
   ResolveTensorDims.cpp
