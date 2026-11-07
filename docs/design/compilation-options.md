@@ -63,6 +63,14 @@ is built: when a RyzenAI CoreLib model accepts the whole graph, the graph is not
 compiled at all. It is not a `compilation_options.fbs` field; see
 [ryzenai-corelib-model.md](ryzenai-corelib-model.md).
 
+`use_dynamic_dispatch` (`bool`, default `false`) lowers the f16 GEMM and Conv
+shapes DynamicDispatch supports to its NPU wrappers. The EP sets it from the
+provider option `use_dynamic_dispatch`, or from `HIPEP_USE_DYNAMIC_DISPATCH`
+when the provider option is unset; in `hip-mlir-opt` it is the
+`use-dynamic-dispatch` option. See
+[dynamicdispatch-integration.md](dynamicdispatch-integration.md), and
+[npu-backends.md](npu-backends.md) for how the NPU options combine.
+
 ---
 
 ## Usage

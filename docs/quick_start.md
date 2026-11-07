@@ -188,21 +188,16 @@ python build.py --install_dir "$LOCAL_DIR" --cmake_prefix_path "$LOCAL_DIR"
 #   --clean                   remove build/ and install/
 ```
 
-Optional: to build in the RyzenAI CoreLib (AIE4 NPU) backend, set
-`RYZENAICORELIB_ROOT` to a CoreLib 0.66 or later install tree (the folder
-holding `include/ryzenai/corelib/base.h`) before building. Without it a stub is built and
-everything runs on the GPU. See
-[ryzenai-corelib-backend.md](design/ryzenai-corelib-backend.md).
-
 `--cmake_prefix_path "$LOCAL_DIR"` lets the build reuse an ONNX Runtime you
 installed in step 1; omit it and ORT is auto-downloaded. The hipgpu EP, HIP
 tools and LIT tests are built and installed into `../local/`.
 
-Optional: to let whole models run on an AIE4 NPU through RyzenAI CoreLib, set
-`RYZENAICORELIB_ROOT` to a CoreLib 0.66 or later install tree (the folder
-holding `include/ryzenai/corelib/base.h`) before building. Without it a stub is
-built and every model compiles for the GPU. See
-[ryzenai-corelib-model.md](design/ryzenai-corelib-model.md).
+Optional: the NPU backends (all opt-in at run time) need their libraries'
+headers at build time: `RYZENAICORELIB_ROOT` for a RyzenAI CoreLib 0.66 or
+later install tree (the folder holding `include/ryzenai/corelib/base.h`), and
+`DYNAMICDISPATCH_ROOT` for a DynamicDispatch tree with its C API. Without them
+stubs are built and everything runs on the GPU. See
+[npu-backends.md](design/npu-backends.md).
 
 #### Running LIT tests manually
 
