@@ -84,7 +84,7 @@ struct HipToLLVMPipelineOptions
 /// extern-constant resolution) up to -- but not including -- the HIP-to-LLVM
 /// lowering. Exposed
 /// so tools that build a custom head (e.g. hip-rocmlir-compiler, which inserts
-/// fuse-rocmlir + a rocMLIR compile/embed step) can run the standard tail
+/// the rocMLIR fusion + a rocMLIR compile/embed step) can run the standard tail
 /// without duplicating its load-bearing pass ordering.
 void buildOnnxToHipPipelineTail(OpPassManager &pm,
                                 const OnnxToHipPipelineOptions &options,
@@ -158,17 +158,17 @@ struct HipdnnPipelineOptions
 void buildHipdnnPipeline(OpPassManager &pm,
                          const HipdnnPipelineOptions &options);
 
-/// Add the rocMLIR kernel fusion to a module pass manager: the fusion of
-/// main_graph into rock.kernel functions, then the merge of duplicate
-/// kernels. A non-empty reportPath appends the --hip-rocmlir-fusion-report
-/// records to that file. With twoPass, the quantize preparation, the grouping
-/// of pointwise ops into modules and the anchor pass replace
-/// --hip-fuse-rocmlir. Every caller builds the fusion through this function
-/// so that the pass order and the options stay the same across tools.
+/// Add the rocMLIR kernel fusion to a module pass manager: the quantize
+/// preparation, the grouping of the pointwise ops of main_graph into
+/// hip.rocmlir_elementwise modules, the outline of each anchor with its
+/// modules into a rock.kernel function, then the merge of duplicate kernels.
+/// The grouping takes fuse-views from fuseOptions. A non-empty reportPath
+/// appends the --hip-rocmlir-fusion-report records to that file. Every caller
+/// builds the fusion through this function so that the pass order and the
+/// options stay the same across tools.
 void addRocMlirFusionPasses(OpPassManager &pm,
-                            const FuseROCMlirPassOptions &fuseOptions,
-                            llvm::StringRef reportPath = "",
-                            bool twoPass = false);
+                            const FuseRocMlirAnchorPassOptions &fuseOptions,
+                            llvm::StringRef reportPath = "");
 
 struct RocMlirFusionPipelineOptions
     : PassPipelineOptions<RocMlirFusionPipelineOptions> {
@@ -188,10 +188,6 @@ struct RocMlirFusionPipelineOptions
   ListOption<std::string> gemmGemmAccelTypes{
       *this, "gemm-gemm-accel-types",
       llvm::cl::desc("Gemm element types with matrix acceleration")};
-  Option<bool> twoPass{
-      *this, "two-pass",
-      llvm::cl::desc("Group pointwise ops into modules, then outline anchors"),
-      llvm::cl::init(false)};
   Option<std::string> report{
       *this, "report",
       llvm::cl::desc("Append the fusion report records to this file"),

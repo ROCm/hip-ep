@@ -5,8 +5,6 @@
 // transposes around an NHWC convolution stay in main_graph, and the kernel
 // holds only the convolution.
 
-// RUN: hip-mlir-opt --hip-fuse-rocmlir="fuse-views=false" %s \
-// RUN:   | hip-mlir-opt | FileCheck %s
 // RUN: hip-mlir-opt --hip-rocmlir-prepare-quant \
 // RUN:   --hip-fuse-rocmlir-elementwise="fuse-views=false" --hip-fuse-rocmlir-anchor="fuse-views=false" %s \
 // RUN:   | hip-mlir-opt \

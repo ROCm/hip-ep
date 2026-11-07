@@ -5,12 +5,12 @@
 
 // The kernel-compilation half of the rocMLIR offload path.
 //
-// fuse-rocmlir outlines eligible op groups into `rock.kernel` funcs and leaves
-// a `hip.rocmlir` dispatch behind for each. A dispatch carries its GPU binary
-// and launch geometry inline, so something has to run rocMLIR over the kernels
-// and stamp the results back before the module is lowered. That step used to
-// live only in hip-rocmlir-compiler's main(), which is why forcing
-// fuse-rocmlir into the EP's pipeline produced dispatches with an empty
+// The rocMLIR fusion outlines eligible op groups into `rock.kernel` funcs and
+// leaves a `hip.rocmlir` dispatch behind for each. A dispatch carries its GPU
+// binary and launch geometry inline, so something has to run rocMLIR over the
+// kernels and stamp the results back before the module is lowered. That step
+// used to live only in hip-rocmlir-compiler's main(), which is why forcing the
+// rocMLIR fusion into the EP's pipeline produced dispatches with an empty
 // kernel_binary that failed at hipModuleLoadData. It lives here so both the
 // offline tool and the EP's in-process CompilerDriver run the same code.
 //
@@ -92,7 +92,7 @@ struct RocMlirEmbedOptions {
 std::string resolveRocMlirArch();
 
 // The gemm element types, printed as in IR (f16, bf16, ...), that `arch`
-// runs on matrix cores, for fuse-rocmlir's gemm-gemm-accel-types option.
+// runs on matrix cores, for the rocMLIR fusion's gemm-gemm-accel-types option.
 std::vector<std::string> getRocMlirGemmAccelTypes(MLIRContext &context,
                                                   StringRef arch);
 
@@ -113,8 +113,8 @@ OwningOpRef<ModuleOp> buildRocMlirTosaClone(ModuleOp module);
 // embedded -- so this costs nothing beyond the kernels themselves. Outlined
 // kernels are IsolatedFromAbove and carry `rock.arch` on the func, so nothing
 // from the enclosing module needs to come with them. \p arch, when non-empty,
-// replaces the fixed `rock.arch` fuse-rocmlir wrote, so the tuning passes see
-// the chip the backend is targeting. Returns an empty module when there are
+// replaces the fixed `rock.arch` the rocMLIR fusion wrote, so the tuning passes
+// see the chip the backend is targeting. Returns an empty module when there are
 // no kernels, null on failure.
 OwningOpRef<ModuleOp> takeRocMlirKernelsAsTosaModule(ModuleOp module,
                                                      StringRef arch = {});
@@ -131,8 +131,8 @@ OwningOpRef<ModuleOp> takeRocMlirKernelModule(ModuleOp kernelsModule,
 bool runRocMlirHighLevelPipeline(ModuleOp kernelModule);
 
 // Whether `kernelModule` holds a standalone elementwise kernel: a
-// `rock.kernel` func fuse-rocmlir also marked `rock.elementwise` (no conv or
-// gemm in the chain). rocMLIR lowers it through buildElementwisePipeline
+// `rock.kernel` func the rocMLIR fusion also marked `rock.elementwise` (no conv
+// or gemm in the chain). rocMLIR lowers it through buildElementwisePipeline
 // instead of buildKernelPipeline, and it has no tuning space or perf_config.
 bool isRocMlirElementwiseKernelModule(ModuleOp kernelModule);
 
@@ -168,7 +168,7 @@ SmallVector<std::string> collectRocMlirKernelNames(ModuleOp module);
 // funcs are gone from `module`: each one is consumed in place of being cloned
 // and then erased.
 //
-// A module with no kernels succeeds and changes nothing -- fuse-rocmlir
+// A module with no kernels succeeds and changes nothing -- the rocMLIR fusion
 // declining every anchor is the ordinary library-path outcome, not an error.
 LogicalResult compileAndEmbedRocMlirKernels(ModuleOp module,
                                             const RocMlirEmbedOptions &options);

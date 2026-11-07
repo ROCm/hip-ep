@@ -6,7 +6,6 @@
 // empty destinations. A dequantize with the quantize's scale, zero point and
 // type folds to its 8-bit input; any other dequantize is requantized alone.
 
-// RUN: hip-mlir-opt --split-input-file --hip-fuse-rocmlir %s | FileCheck %s
 // RUN: hip-mlir-opt --split-input-file --hip-rocmlir-prepare-quant \
 // RUN:   --hip-fuse-rocmlir-elementwise --hip-fuse-rocmlir-anchor %s \
 // RUN:   | FileCheck %s
