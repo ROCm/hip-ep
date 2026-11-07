@@ -8,10 +8,10 @@
 // Native implementation of the wrap_corelib_* entry points declared in
 // hipdnn_ep_runtime.h. See docs/design/ryzenai-corelib-backend.md.
 //
-// corelib is loaded at runtime rather than linked, so an EP built against its
-// header still loads on a machine without ryzenai_corelib.dll; every call then
-// returns HIPDNN_EP_CORELIB_NOT_HANDLED and the generated code runs the GPU
-// wrapper instead.
+// corelib is loaded at runtime (corelib_loader.h) rather than linked, so an EP
+// built against its header still loads on a machine without
+// ryzenai_corelib.dll; every call then returns HIPDNN_EP_CORELIB_NOT_HANDLED
+// and the generated code runs the GPU wrapper instead.
 //
 // corelib exposes no device pointer, so every call stages through host memory:
 // GPU -> host -> corelib tensor -> NPU -> corelib tensor -> host -> GPU.
@@ -34,33 +34,17 @@ static inline int __builtin_clz(unsigned int x) {
 #include "../hipdnn_ep_runtime.h"
 #include "../runtime_state_internal.h"
 
-// The C headers only: <ryzenai/corelib.h> also pulls in the C++20 wrappers.
-#include <ryzenai/corelib/base.h>
-#include <ryzenai/corelib/ops/matmul_bf16.h>
-#include <ryzenai/corelib/ops/rmsnorm_bf16.h>
-#include <ryzenai/corelib/stream.h>
-#include <ryzenai/corelib/tensor.h>
-#include <ryzenai/corelib/weights.h>
+#include "corelib_loader.h"
 
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <map>
-#include <mutex>
 #include <set>
 #include <string>
 #include <tuple>
 #include <vector>
-
-#ifdef _WIN32
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#else
-#include <dlfcn.h>
-#endif
 
 namespace {
 
@@ -69,141 +53,8 @@ namespace {
 // runs on the GPU, so other models set RYZENAICORELIB_PDI.
 constexpr const char *kDefaultPdis = "1;16";
 
-// std::getenv cannot see the process environment from the static-CRT EP DLL.
-std::string read_env(const char *name) {
-#ifdef _WIN32
-  char buf[1024];
-  DWORD n = GetEnvironmentVariableA(name, buf, sizeof(buf));
-  if (n == 0 || n >= sizeof(buf))
-    return {};
-  return std::string(buf, n);
-#else
-  const char *v = std::getenv(name);
-  return v ? std::string(v) : std::string();
-#endif
-}
-
-//===----------------------------------------------------------------------===//
-// Dynamically loaded corelib C API
-//===----------------------------------------------------------------------===//
-
-#define HIPDNN_EP_CORELIB_FUNCTIONS(X)                                         \
-  X(ryzenai_corelib_get_version)                                               \
-  X(ryzenai_corelib_cleanup)                                                   \
-  X(ryzenai_corelib_npu_usable)                                                \
-  X(ryzenai_corelib_get_last_error_message)                                    \
-  X(ryzenai_corelib_object_release)                                            \
-  X(ryzenai_corelib_create_stream)                                             \
-  X(ryzenai_corelib_stream_use_pdis)                                           \
-  X(ryzenai_corelib_stream_set_enabled_backends)                               \
-  X(ryzenai_corelib_stream_npu_usable)                                         \
-  X(ryzenai_corelib_stream_synchronize)                                        \
-  X(ryzenai_corelib_stream_get_kernels_root)                                   \
-  X(ryzenai_corelib_stream_enable_kernel_bundle)                               \
-  X(ryzenai_corelib_create_device_tensor)                                      \
-  X(ryzenai_corelib_tensor_write)                                              \
-  X(ryzenai_corelib_tensor_read)                                               \
-  X(ryzenai_corelib_matmul_bf16_weights_create)                                \
-  X(ryzenai_corelib_matmul_bf16_enum_kernels)                                  \
-  X(ryzenai_corelib_matmul_bf16)                                               \
-  X(ryzenai_corelib_rmsnorm_bf16_weights_create)                               \
-  X(ryzenai_corelib_rmsnorm_bf16_enum_kernels)                                 \
-  X(ryzenai_corelib_rmsnorm_bf16)                                              \
-  X(ryzenai_corelib_add_rmsnorm_bf16_enum_kernels)                             \
-  X(ryzenai_corelib_add_rmsnorm_bf16)
-
-struct CorelibApi {
-#define HIPDNN_EP_CORELIB_MEMBER(name) decltype(&::name) name = nullptr;
-  HIPDNN_EP_CORELIB_FUNCTIONS(HIPDNN_EP_CORELIB_MEMBER)
-#undef HIPDNN_EP_CORELIB_MEMBER
-};
-
-void *open_library(const std::string &path) {
-#ifdef _WIN32
-  // Search the DLL's own directory first so its dependencies beside it load.
-  DWORD flags =
-      path.find_first_of("/\\") != std::string::npos
-          ? LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS
-          : 0;
-  return reinterpret_cast<void *>(LoadLibraryExA(path.c_str(), nullptr, flags));
-#else
-  return dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
-#endif
-}
-
-void *find_symbol(void *lib, const char *name) {
-#ifdef _WIN32
-  return reinterpret_cast<void *>(
-      GetProcAddress(reinterpret_cast<HMODULE>(lib), name));
-#else
-  return dlsym(lib, name);
-#endif
-}
-
-// Process-wide; the library is never unloaded (see release_session).
-const CorelibApi *load_corelib() {
-  static CorelibApi api;
-  static const CorelibApi *loaded = []() -> const CorelibApi * {
-#ifdef _WIN32
-    const char *kSubdir = "/bin/";
-    const char *kName = "ryzenai_corelib.dll";
-#else
-    const char *kSubdir = "/lib/";
-    const char *kName = "libryzenai_corelib.so";
-#endif
-    std::vector<std::string> candidates;
-    std::string root = read_env("RYZENAICORELIB_ROOT");
-    if (!root.empty()) {
-      candidates.push_back(root + kSubdir + kName);
-      candidates.push_back(root + "/install" + kSubdir + kName);
-    }
-    candidates.push_back(kName);
-
-    void *lib = nullptr;
-    std::string loaded_path;
-    for (const std::string &c : candidates)
-      if ((lib = open_library(c))) {
-        loaded_path = c;
-        break;
-      }
-    if (!lib) {
-      fprintf(stderr,
-              "[corelib] %s not found (RYZENAICORELIB_ROOT='%s'); "
-              "corelib ops run on the GPU\n",
-              kName, root.c_str());
-      return nullptr;
-    }
-
-#define HIPDNN_EP_CORELIB_RESOLVE(name)                                        \
-  api.name = reinterpret_cast<decltype(api.name)>(find_symbol(lib, #name));    \
-  if (!api.name) {                                                             \
-    fprintf(stderr,                                                            \
-            "[corelib] %s has no symbol %s; corelib ops run on the GPU\n",     \
-            loaded_path.c_str(), #name);                                       \
-    return nullptr;                                                            \
-  }
-    // The version comes first: another version's library may lack symbols,
-    // and a mismatch names the real problem better than a missing symbol.
-    // Below 1.0 any minor release may break the ABI.
-    HIPDNN_EP_CORELIB_RESOLVE(ryzenai_corelib_get_version)
-    uint32_t major = 0, minor = 0, patch = 0;
-    api.ryzenai_corelib_get_version(&major, &minor, &patch);
-    if (major != RYZENAI_CORELIB_VERSION_MAJOR ||
-        (major == 0 && minor != RYZENAI_CORELIB_VERSION_MINOR)) {
-      fprintf(stderr,
-              "[corelib] %s is version %u.%u.%u, but hip-ep was built against "
-              "%d.%d.%d; corelib ops run on the GPU\n",
-              loaded_path.c_str(), major, minor, patch,
-              RYZENAI_CORELIB_VERSION_MAJOR, RYZENAI_CORELIB_VERSION_MINOR,
-              RYZENAI_CORELIB_VERSION_PATCH);
-      return nullptr;
-    }
-    HIPDNN_EP_CORELIB_FUNCTIONS(HIPDNN_EP_CORELIB_RESOLVE)
-#undef HIPDNN_EP_CORELIB_RESOLVE
-    return &api;
-  }();
-  return loaded;
-}
+using hipdnn_ep::corelib::CorelibApi;
+using hipdnn_ep::corelib::read_env;
 
 // Parses a comma-separated list of non-negative PDIs; false when malformed.
 bool parse_pdi_list(const std::string &value, std::vector<int32_t> *out) {
@@ -239,11 +90,6 @@ std::string pdi_list_string(const std::vector<int32_t> &pdis) {
     s += (s.empty() ? "" : ",") + std::to_string(p);
   return s;
 }
-
-// ryzenai_corelib_cleanup must run before process exit rather than at DLL
-// unload under the loader lock, so the last session to go calls it.
-std::mutex g_sessions_mu;
-int g_live_sessions = 0;
 
 //===----------------------------------------------------------------------===//
 // Element conversion (host side, for constant weights only)
@@ -432,9 +278,7 @@ void destroy_context(void *p) {
         api.ryzenai_corelib_object_release(entry.weights);
     }
     api.ryzenai_corelib_object_release(ctx->stream);
-    std::lock_guard<std::mutex> lock(g_sessions_mu);
-    if (--g_live_sessions == 0)
-      api.ryzenai_corelib_cleanup();
+    hipdnn_ep::corelib::remove_user(api);
   }
   delete ctx;
 }
@@ -451,7 +295,7 @@ CorelibContext *get_context(RuntimeState *state) {
   ctx->stream_desc = "no NPU stream, every routed op ran on the GPU (see the "
                      "[corelib] line above for why)";
 
-  ctx->api = load_corelib();
+  ctx->api = hipdnn_ep::corelib::load_api();
   if (!ctx->api)
     return ctx;
   const CorelibApi &api = *ctx->api;
@@ -541,8 +385,7 @@ CorelibContext *get_context(RuntimeState *state) {
                      bundle + "', kernels root '" + (root ? root : "") + "'";
   fprintf(stderr, "[corelib] %s\n", ctx->stream_desc.c_str());
   ctx->usable = true;
-  std::lock_guard<std::mutex> lock(g_sessions_mu);
-  ++g_live_sessions;
+  hipdnn_ep::corelib::add_user();
   return ctx;
 }
 

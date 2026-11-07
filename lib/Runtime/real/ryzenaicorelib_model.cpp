@@ -5,159 +5,19 @@
 
 //===- ryzenaicorelib_model.cpp - Whole models through RyzenAI CoreLib ----===//
 //
-// The native side of corelib_model.h: loads ryzenai_corelib.dll at runtime
-// (rather than linking it, so the EP still loads on machines without it),
-// checks its version against the headers, and creates and runs CoreLib model
-// sessions. See docs/design/ryzenai-corelib-model.md.
+// The native side of corelib_model.h: creates and runs CoreLib model
+// sessions, through the shared runtime loader (corelib_loader.h). See
+// docs/design/ryzenai-corelib-model.md.
 //
 //===----------------------------------------------------------------------===//
 
 #include "corelib_model.h"
 
-// The C headers only: <ryzenai/corelib.h> also pulls in the C++20 wrappers.
-#include <ryzenai/corelib/base.h>
-#include <ryzenai/corelib/model.h>
+#include "corelib_loader.h"
 
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
-#include <mutex>
 #include <string>
-#include <vector>
-
-#ifdef _WIN32
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#else
-#include <dlfcn.h>
-#endif
-
-namespace {
-
-// std::getenv cannot see the process environment from the static-CRT EP DLL.
-std::string read_env(const char *name) {
-#ifdef _WIN32
-  char buf[1024];
-  DWORD n = GetEnvironmentVariableA(name, buf, sizeof(buf));
-  if (n == 0 || n >= sizeof(buf))
-    return {};
-  return std::string(buf, n);
-#else
-  const char *v = std::getenv(name);
-  return v ? std::string(v) : std::string();
-#endif
-}
-
-#define HIPDNN_EP_CORELIB_FUNCTIONS(X)                                         \
-  X(ryzenai_corelib_get_version)                                               \
-  X(ryzenai_corelib_cleanup)                                                   \
-  X(ryzenai_corelib_npu_usable)                                                \
-  X(ryzenai_corelib_get_last_error_message)                                    \
-  X(ryzenai_corelib_object_release)                                            \
-  X(ryzenai_corelib_create_model_from_path)                                    \
-  X(ryzenai_corelib_model_create_session)                                      \
-  X(ryzenai_corelib_model_get_metadata)                                        \
-  X(ryzenai_corelib_model_run)
-
-struct CorelibApi {
-#define HIPDNN_EP_CORELIB_MEMBER(name) decltype(&::name) name = nullptr;
-  HIPDNN_EP_CORELIB_FUNCTIONS(HIPDNN_EP_CORELIB_MEMBER)
-#undef HIPDNN_EP_CORELIB_MEMBER
-};
-
-void *open_library(const std::string &path) {
-#ifdef _WIN32
-  // Search the DLL's own directory first so its dependencies beside it load.
-  DWORD flags =
-      path.find_first_of("/\\") != std::string::npos
-          ? LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS
-          : 0;
-  return reinterpret_cast<void *>(LoadLibraryExA(path.c_str(), nullptr, flags));
-#else
-  return dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
-#endif
-}
-
-void *find_symbol(void *lib, const char *name) {
-#ifdef _WIN32
-  return reinterpret_cast<void *>(
-      GetProcAddress(reinterpret_cast<HMODULE>(lib), name));
-#else
-  return dlsym(lib, name);
-#endif
-}
-
-// Process-wide; the library is never unloaded: a CoreLib stream must not
-// outlive it.
-const CorelibApi *load_corelib() {
-  static CorelibApi api;
-  static const CorelibApi *loaded = []() -> const CorelibApi * {
-#ifdef _WIN32
-    const char *kSubdir = "/bin/";
-    const char *kName = "ryzenai_corelib.dll";
-#else
-    const char *kSubdir = "/lib/";
-    const char *kName = "libryzenai_corelib.so";
-#endif
-    std::vector<std::string> candidates;
-    std::string root = read_env("RYZENAICORELIB_ROOT");
-    if (!root.empty()) {
-      candidates.push_back(root + kSubdir + kName);
-      candidates.push_back(root + "/install" + kSubdir + kName);
-    }
-    candidates.push_back(kName);
-
-    void *lib = nullptr;
-    std::string loaded_path;
-    for (const std::string &c : candidates)
-      if ((lib = open_library(c))) {
-        loaded_path = c;
-        break;
-      }
-    if (!lib) {
-      fprintf(stderr, "[corelib] %s not found (RYZENAICORELIB_ROOT='%s')\n",
-              kName, root.c_str());
-      return nullptr;
-    }
-
-#define HIPDNN_EP_CORELIB_RESOLVE(name)                                        \
-  api.name = reinterpret_cast<decltype(api.name)>(find_symbol(lib, #name));    \
-  if (!api.name) {                                                             \
-    fprintf(stderr, "[corelib] %s has no symbol %s\n", loaded_path.c_str(),    \
-            #name);                                                            \
-    return nullptr;                                                            \
-  }
-    // The version comes first: another version's library may lack symbols,
-    // and a mismatch names the real problem better than a missing symbol.
-    // Below 1.0 any minor release may break the ABI.
-    HIPDNN_EP_CORELIB_RESOLVE(ryzenai_corelib_get_version)
-    uint32_t major = 0, minor = 0, patch = 0;
-    api.ryzenai_corelib_get_version(&major, &minor, &patch);
-    if (major != RYZENAI_CORELIB_VERSION_MAJOR ||
-        (major == 0 && minor != RYZENAI_CORELIB_VERSION_MINOR)) {
-      fprintf(stderr,
-              "[corelib] %s is version %u.%u.%u, but hip-ep was built against "
-              "%d.%d.%d\n",
-              loaded_path.c_str(), major, minor, patch,
-              RYZENAI_CORELIB_VERSION_MAJOR, RYZENAI_CORELIB_VERSION_MINOR,
-              RYZENAI_CORELIB_VERSION_PATCH);
-      return nullptr;
-    }
-    HIPDNN_EP_CORELIB_FUNCTIONS(HIPDNN_EP_CORELIB_RESOLVE)
-#undef HIPDNN_EP_CORELIB_RESOLVE
-    return &api;
-  }();
-  return loaded;
-}
-
-// ryzenai_corelib_cleanup must run before process exit rather than at DLL
-// unload under the loader lock, so the last session to go calls it.
-std::mutex g_sessions_mu;
-int g_live_sessions = 0;
-
-} // namespace
 
 namespace hipdnn_ep::corelib {
 
@@ -175,9 +35,7 @@ public:
       api_->ryzenai_corelib_object_release(session_);
     if (model_)
       api_->ryzenai_corelib_object_release(model_);
-    std::lock_guard<std::mutex> lock(g_sessions_mu);
-    if (--g_live_sessions == 0)
-      api_->ryzenai_corelib_cleanup();
+    remove_user(*api_);
   }
 
   const CorelibApi *api_ = nullptr;
@@ -193,7 +51,7 @@ std::shared_ptr<ModelSession> create_model_session(const std::string &arch,
                                                    const std::string &path,
                                                    int64_t max_sequence_length,
                                                    std::string *why) {
-  const CorelibApi *api = load_corelib();
+  const CorelibApi *api = load_api();
   if (!api) {
     *why = "corelib is not loadable (see the [corelib] line above)";
     return nullptr;
@@ -212,10 +70,7 @@ std::shared_ptr<ModelSession> create_model_session(const std::string &arch,
     return nullptr;
   }
   // Counted from here: the destructor releases the model and may clean up.
-  {
-    std::lock_guard<std::mutex> lock(g_sessions_mu);
-    ++g_live_sessions;
-  }
+  add_user();
   auto s = std::make_shared<ModelSession>();
   s->api_ = api;
   s->model_ = model;

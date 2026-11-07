@@ -629,8 +629,9 @@ endif()
 if(RyzenAICorelib_FOUND)
     message(STATUS "RyzenAI CoreLib ${RyzenAICorelib_VERSION}: "
                    "${RyzenAICorelib_INCLUDE_DIR}")
-    add_library(hipdnn-ep-corelib STATIC real/ryzenaicorelib.cpp
-        real/ryzenaicorelib_model.cpp corelib_model_registry.cpp)
+    add_library(hipdnn-ep-corelib STATIC real/corelib_loader.cpp
+        real/ryzenaicorelib.cpp real/ryzenaicorelib_model.cpp
+        corelib_model_registry.cpp)
     target_include_directories(hipdnn-ep-corelib PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/real
