@@ -4,10 +4,6 @@
 // A ui8 quantized tree that reaches an integer anchor becomes i8, and every
 // zero point in it drops by 128, so the anchor reads signed bytes directly.
 
-// RUN: hip-mlir-opt --split-input-file --hip-fuse-rocmlir %s | FileCheck %s
-// RUN: hip-mlir-opt --split-input-file --hip-fuse-rocmlir %s \
-// RUN:   | hip-mlir-opt --split-input-file --convert-hip-to-tosa \
-// RUN:   | FileCheck %s --check-prefix=TOSA
 // RUN: hip-mlir-opt --split-input-file --hip-rocmlir-prepare-quant \
 // RUN:   --hip-fuse-rocmlir-elementwise --hip-fuse-rocmlir-anchor %s \
 // RUN:   | FileCheck %s

@@ -6,7 +6,6 @@
 // correction in i32, scales by x_scale * w_scale and adds the bias in f32, so
 // the ops that read the conv run in the same kernel.
 
-// RUN: hip-mlir-opt --split-input-file --hip-fuse-rocmlir %s | FileCheck %s
 // RUN: hip-mlir-opt --split-input-file --hip-rocmlir-prepare-quant \
 // RUN:   --hip-fuse-rocmlir-elementwise --hip-fuse-rocmlir-anchor %s \
 // RUN:   | FileCheck %s

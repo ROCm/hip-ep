@@ -4,7 +4,7 @@
  */
 
 // The view-op and QDQ rules convert-hip-to-tosa applies, exported for passes
-// that decide what reaches it. hip-fuse-rocmlir outlines subgraphs that must
+// that decide what reaches it. The rocMLIR fusion outlines subgraphs that must
 // lower to TOSA in full; keying its view absorption on these same predicates
 // keeps it from pulling in an op the lowering would then refuse.
 //

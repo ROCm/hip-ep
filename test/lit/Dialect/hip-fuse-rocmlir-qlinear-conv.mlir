@@ -1,12 +1,11 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-// hip-fuse-rocmlir rewrites a QLinearConv with inline constants and a zero
+// The rocMLIR fusion rewrites a QLinearConv with inline constants and a zero
 // weight zero point into hip.quant_conv, a constant zero-point correction,
 // and an f32 requantize, and outlines the chain as one rocMLIR kernel. Every
 // other QLinearConv keeps its HIP kernel.
 
-// RUN: hip-mlir-opt --split-input-file --hip-fuse-rocmlir %s | FileCheck %s
 // RUN: hip-mlir-opt --split-input-file --hip-rocmlir-prepare-quant \
 // RUN:   --hip-fuse-rocmlir-elementwise --hip-fuse-rocmlir-anchor %s \
 // RUN:   | FileCheck %s
