@@ -18,7 +18,17 @@
 #include <cstdlib>
 #include <initializer_list>
 #include <memory>
+#include <string>
 #include <vector>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
 
 // Stable C ABI; avoids C++ vtable/template issues across the DLL boundary.
 #include <ops/dd_c_api.h>
@@ -36,6 +46,104 @@
 //===----------------------------------------------------------------------===//
 
 namespace {
+
+//===----------------------------------------------------------------------===//
+// Loading DynamicDispatch
+//===----------------------------------------------------------------------===//
+//
+// dyn_dispatch_core is loaded on first use instead of linked, so the EP loads
+// on machines without DynamicDispatch; only the C API header is needed to
+// build. The five dd_* entry points are resolved by name.
+//===----------------------------------------------------------------------===//
+
+#define HIPDNN_EP_DD_FUNCTIONS(X)                                              \
+  X(dd_combined_gemm_create)                                                   \
+  X(dd_iconv_create)                                                           \
+  X(dd_op_initialize_weights)                                                  \
+  X(dd_op_execute)                                                             \
+  X(dd_op_destroy)
+
+struct DdApi {
+#define HIPDNN_EP_DD_MEMBER(name) decltype(&::name) name = nullptr;
+  HIPDNN_EP_DD_FUNCTIONS(HIPDNN_EP_DD_MEMBER)
+#undef HIPDNN_EP_DD_MEMBER
+};
+
+// std::getenv cannot see the process environment from the static-CRT EP DLL.
+std::string read_env(const char *name) {
+#ifdef _WIN32
+  char buf[1024];
+  DWORD n = GetEnvironmentVariableA(name, buf, sizeof(buf));
+  return n > 0 && n < sizeof(buf) ? std::string(buf, n) : std::string();
+#else
+  const char *v = std::getenv(name);
+  return v ? std::string(v) : std::string();
+#endif
+}
+
+// Process-wide and never unloaded: DD keeps XRT contexts alive in statics.
+const DdApi *dd_api() {
+  static DdApi api;
+  static const DdApi *loaded = []() -> const DdApi * {
+#ifdef _WIN32
+    const char *kName = "dyn_dispatch_core.dll";
+    const char *kSubdirs[] = {"/bin/", "/"};
+#else
+    const char *kName = "libdyn_dispatch_core.so";
+    const char *kSubdirs[] = {"/lib/", "/"};
+#endif
+    std::vector<std::string> candidates;
+    for (const char *var : {"DYNAMICDISPATCH_ROOT", "DD_ROOT"}) {
+      std::string root = read_env(var);
+      if (!root.empty())
+        for (const char *sub : kSubdirs)
+          candidates.push_back(root + sub + kName);
+    }
+    candidates.push_back(kName);
+    void *lib = nullptr;
+    for (const std::string &c : candidates) {
+#ifdef _WIN32
+      // A full path searches its own directory first, for dyn_bins and the
+      // other DLLs DD ships beside it.
+      DWORD flags = c.find_first_of("/\\") != std::string::npos
+                        ? LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
+                              LOAD_LIBRARY_SEARCH_DEFAULT_DIRS
+                        : 0;
+      lib = reinterpret_cast<void *>(LoadLibraryExA(c.c_str(), nullptr, flags));
+#else
+      lib = dlopen(c.c_str(), RTLD_NOW | RTLD_LOCAL);
+#endif
+      if (lib)
+        break;
+    }
+    if (!lib) {
+      std::fprintf(stderr,
+                   "[DD] %s not found (DYNAMICDISPATCH_ROOT='%s'); "
+                   "DynamicDispatch ops fail\n",
+                   kName, read_env("DYNAMICDISPATCH_ROOT").c_str());
+      return nullptr;
+    }
+#ifdef _WIN32
+#define HIPDNN_EP_DD_RESOLVE(name)                                             \
+  api.name = reinterpret_cast<decltype(api.name)>(                            \
+      GetProcAddress(reinterpret_cast<HMODULE>(lib), #name));
+#else
+#define HIPDNN_EP_DD_RESOLVE(name)                                             \
+  api.name = reinterpret_cast<decltype(api.name)>(dlsym(lib, #name));
+#endif
+    HIPDNN_EP_DD_FUNCTIONS(HIPDNN_EP_DD_RESOLVE)
+#undef HIPDNN_EP_DD_RESOLVE
+#define HIPDNN_EP_DD_CHECK(name)                                               \
+  if (!api.name) {                                                             \
+    std::fprintf(stderr, "[DD] %s has no symbol %s\n", kName, #name);         \
+    return nullptr;                                                            \
+  }
+    HIPDNN_EP_DD_FUNCTIONS(HIPDNN_EP_DD_CHECK)
+#undef HIPDNN_EP_DD_CHECK
+    return &api;
+  }();
+  return loaded;
+}
 
 constexpr size_t kQdqParamSize = 16;
 constexpr const char *kDesignParam = "8x4";
@@ -140,7 +248,7 @@ struct DDGemmState : OpStateT<DDGemmState> {
   static void destroy(OpState *p) { delete static_cast<DDGemmState *>(p); }
   DDGemmState() { deletor = &destroy; }
   ~DDGemmState() {
-    dd_op_destroy(handle);
+    dd_api()->dd_op_destroy(handle);
     dd_log("[DD] wrap_dd_matmul: dd_op_destroy\n");
   }
 };
@@ -157,7 +265,7 @@ struct DDConvState : OpStateT<DDConvState> {
   static void destroy(OpState *p) { delete static_cast<DDConvState *>(p); }
   DDConvState() { deletor = &destroy; }
   ~DDConvState() {
-    dd_op_destroy(handle);
+    dd_api()->dd_op_destroy(handle);
     dd_log("[DD] wrap_dd_conv2d: dd_op_destroy\n");
   }
 };
@@ -201,7 +309,7 @@ static std::unique_ptr<DDGemmState> create_gemm_state(RuntimeState *state,
          cfg.model_name, s.bin, s.b, s.m, s.k, s.n);
   auto gemm = DDGemmState::create();
   gemm->shape = s;
-  gemm->handle = dd_combined_gemm_create(&cfg);
+  gemm->handle = dd_api()->dd_combined_gemm_create(&cfg);
   if (!gemm->handle) {
     dd_log("[DD] wrap_dd_matmul: dd_combined_gemm_create failed\n");
     return nullptr;
@@ -224,7 +332,7 @@ static std::unique_ptr<DDGemmState> create_gemm_state(RuntimeState *state,
       make_dd_tensor(gemm->qdq.data(), {B, N}, "int64"),
       make_dd_tensor(gemm->qdq_params.data(), {B, kQdqParamSize}, "int32"),
   };
-  int rc = dd_op_initialize_weights(gemm->handle, consts, 3);
+  int rc = dd_api()->dd_op_initialize_weights(gemm->handle, consts, 3);
   if (rc != DD_OK) {
     dd_log("[DD] wrap_dd_matmul: dd_op_initialize_weights failed: rc=%d\n", rc);
     return nullptr;
@@ -241,6 +349,8 @@ int wrap_dd_matmul(RuntimeState *state, int32_t op_state_slot,
     dd_log("[DD] wrap_dd_matmul: null RuntimeState\n");
     return HIPDNN_EP_ERR_NULL_POINTER;
   }
+  if (!dd_api()) // dd_api() logs why, once
+    return -1;
   if (data_type != HIPDNN_EP_DATATYPE_HALF) {
     dd_log("[DD] wrap_dd_matmul: unsupported data type %lld (combined_gemm "
            "requires float16 activations)\n",
@@ -297,7 +407,7 @@ int wrap_dd_matmul(RuntimeState *state, int32_t op_state_slot,
                      {size_t(s.bin), size_t(s.m), size_t(s.k)}, "uint16");
   dd_tensor_t out = make_dd_tensor(
       gemm->out_host.data(), {size_t(s.b), size_t(s.m), size_t(s.n)}, "uint16");
-  int rc = dd_op_execute(gemm->handle, &in, &out);
+  int rc = dd_api()->dd_op_execute(gemm->handle, &in, &out);
   log_execute("wrap_dd_matmul", rc, gemm->first_execute);
   if (rc != DD_OK) {
     return -1;
@@ -324,6 +434,8 @@ int wrap_dd_conv2d(RuntimeState *state, int32_t op_state_slot,
     dd_log("[DD] wrap_dd_conv2d: null RuntimeState\n");
     return HIPDNN_EP_ERR_NULL_POINTER;
   }
+  if (!dd_api()) // dd_api() logs why, once
+    return -1;
   if (data_type != HIPDNN_EP_DATATYPE_HALF) {
     dd_log("[DD] wrap_dd_conv2d: unsupported data type %lld (iconv requires "
            "float16 activations)\n",
@@ -366,7 +478,7 @@ int wrap_dd_conv2d(RuntimeState *state, int32_t op_state_slot,
            out_shape[0], out_shape[1], out_shape[2], out_shape[3],
            cfg.strides[0], cfg.strides[1]);
     auto created = DDConvState::create();
-    created->handle = dd_iconv_create(&cfg);
+    created->handle = dd_api()->dd_iconv_create(&cfg);
     if (!created->handle) {
       dd_log("[DD] wrap_dd_conv2d: dd_iconv_create failed\n");
       return -1;
@@ -390,7 +502,7 @@ int wrap_dd_conv2d(RuntimeState *state, int32_t op_state_slot,
         make_dd_tensor(created->qdq.data(), {size_t(k)}, "int64"),
         make_dd_tensor(created->qdq_params.data(), {kQdqParamSize}, "int32"),
     };
-    int rc = dd_op_initialize_weights(created->handle, consts, 3);
+    int rc = dd_api()->dd_op_initialize_weights(created->handle, consts, 3);
     if (rc != DD_OK) {
       dd_log("[DD] wrap_dd_conv2d: dd_op_initialize_weights failed: rc=%d\n",
              rc);
@@ -417,7 +529,7 @@ int wrap_dd_conv2d(RuntimeState *state, int32_t op_state_slot,
   dd_tensor_t out = make_dd_tensor(
       conv->out_host.data(),
       {size_t(n), size_t(k), size_t(out_h), size_t(out_w)}, "uint16");
-  int rc = dd_op_execute(conv->handle, &in, &out);
+  int rc = dd_api()->dd_op_execute(conv->handle, &in, &out);
   log_execute("wrap_dd_conv2d", rc, conv->first_execute);
   if (rc != DD_OK) {
     return -1;

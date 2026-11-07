@@ -108,6 +108,10 @@ endif()
 if(TARGET hipdnn-ep-corelib)
   target_link_libraries(${LIB_NAME} PRIVATE hipdnn-ep-corelib)
 endif()
+# Native DynamicDispatch wrappers, likewise (real or stub; STEP 6c).
+if(TARGET hipdnn-ep-dd)
+  target_link_libraries(${LIB_NAME} PRIVATE hipdnn-ep-dd)
+endif()
 # Shared embedded runtime.bc (single source of truth, lib/Runtime). LlvmIrJit's
 # extern runtime_bc_data reference pulls the embed object in.
 if(TARGET runtime-bc-embed)

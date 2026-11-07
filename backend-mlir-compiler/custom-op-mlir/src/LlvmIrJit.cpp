@@ -259,6 +259,19 @@ extern "C" int wrap_corelib_skip_rms_norm(RuntimeState *, void *, void *,
                                           int64_t, int64_t, int64_t, float,
                                           int64_t);
 
+// DynamicDispatch (NPU) wrappers, likewise native (lib/Runtime hipdnn-ep-dd,
+// a stub when DynamicDispatch is absent).
+extern "C" int wrap_dd_matmul(RuntimeState *, int32_t, const void *,
+                              const void *, const void *, void *, int64_t,
+                              int64_t, int64_t, double, double, int64_t,
+                              int64_t, int64_t);
+extern "C" int wrap_dd_conv2d(RuntimeState *, int32_t, const void *, int64_t,
+                              int64_t, int64_t, int64_t, const void *, int64_t,
+                              const void *, void *, int64_t, int64_t, int64_t,
+                              int64_t, int64_t, int64_t, int64_t, int64_t,
+                              int64_t, int64_t, int64_t, int64_t, int64_t,
+                              int64_t);
+
 llvm::Error installRuntimeNativeShims(llvm::orc::LLJIT &jit) {
   llvm::orc::SymbolMap syms;
   auto add = [&](llvm::StringRef name, void *addr) {
@@ -283,6 +296,8 @@ llvm::Error installRuntimeNativeShims(llvm::orc::LLJIT &jit) {
       reinterpret_cast<void *>(&wrap_corelib_rms_norm));
   add("wrap_corelib_skip_rms_norm",
       reinterpret_cast<void *>(&wrap_corelib_skip_rms_norm));
+  add("wrap_dd_matmul", reinterpret_cast<void *>(&wrap_dd_matmul));
+  add("wrap_dd_conv2d", reinterpret_cast<void *>(&wrap_dd_conv2d));
   return jit.getMainJITDylib().define(
       llvm::orc::absoluteSymbols(std::move(syms)));
 }

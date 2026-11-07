@@ -77,17 +77,13 @@ static CompilationConfig load_config(PassContext *ctx) {
     // Provider option first; the env var serves tools that cannot set one.
     std::string use_corelib =
         ctx->get_provider_option("use_ryzenai_corelib", "");
-    if (use_corelib.empty()) {
-      if (const char *env = std::getenv("HIPEP_USE_RYZENAI_CORELIB"))
-        use_corelib = env;
-    }
+    if (use_corelib.empty())
+      use_corelib = hip_get_env("HIPEP_USE_RYZENAI_CORELIB");
     config.useRyzenAICorelib = use_corelib == "1" || use_corelib == "true";
 
     std::string use_dd = ctx->get_provider_option("use_dynamic_dispatch", "");
-    if (use_dd.empty()) {
-      if (const char *env = std::getenv("HIPEP_USE_DYNAMIC_DISPATCH"))
-        use_dd = env;
-    }
+    if (use_dd.empty())
+      use_dd = hip_get_env("HIPEP_USE_DYNAMIC_DISPATCH");
     config.useDynamicDispatch = use_dd == "1" || use_dd == "true";
 
   } catch (const std::exception &ex) {

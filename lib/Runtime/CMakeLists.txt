@@ -158,32 +158,6 @@ else()
 endif()
 
 # ============================================================================
-# STEP 2.5: Detect DynamicDispatch (for NPU/IPU backend)
-# ============================================================================
-# DynamicDispatch is an optional dependency. If found, the real runtime will
-# use it for NPU/IPU offload. Otherwise, the runtime includes stub wrappers
-# that return errors at runtime.
-
-if(NOT BUILD_MOCK_RUNTIME)
-    find_package(DynamicDispatch QUIET)
-    if(DynamicDispatch_FOUND)
-        message(STATUS "DynamicDispatch found - enabling NPU/IPU backend support")
-        message(STATUS "  Include: ${DynamicDispatch_INCLUDE_DIR}")
-        message(STATUS "  Library: ${DynamicDispatch_LIBRARY}")
-        set(HIPDNN_EP_HAS_DYNAMIC_DISPATCH TRUE)
-    else()
-        message(STATUS "DynamicDispatch not found - NPU/IPU backend will use stubs")
-        message(STATUS "  Set DYNAMICDISPATCH_ROOT environment variable to enable")
-        set(HIPDNN_EP_HAS_DYNAMIC_DISPATCH FALSE)
-    endif()
-else()
-    set(HIPDNN_EP_HAS_DYNAMIC_DISPATCH FALSE)
-endif()
-
-message(STATUS "HIPDNN_EP_HAS_DYNAMIC_DISPATCH = ${HIPDNN_EP_HAS_DYNAMIC_DISPATCH}")
-message(STATUS "DynamicDispatch_FOUND = ${DynamicDispatch_FOUND}")
-
-# ============================================================================
 # STEP 3: Generate LLVM Bitcode from Runtime Modules
 # ============================================================================
 
@@ -258,13 +232,6 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
             message(STATUS "Adding TheRock includes for ${OUTPUT_BC}: ${THEROCK_DIST}/include")
             list(APPEND COMPILE_FLAGS "-I" "${THEROCK_DIST}/include")
             list(APPEND COMPILE_FLAGS "-D__HIP_PLATFORM_AMD__")
-        endif()
-
-        # Add DynamicDispatch includes (for real/dynamic_dispatch.cpp)
-        # Use DD_INCLUDE_DIR which is set by the existing DD detection code (around line 650)
-        if(DD_INCLUDE_DIR)
-            message(STATUS "Adding DynamicDispatch includes for ${OUTPUT_BC}: ${DD_INCLUDE_DIR}")
-            list(APPEND COMPILE_FLAGS "-I" "${DD_INCLUDE_DIR}")
         endif()
 
         list(APPEND IMPL_DEPS
@@ -438,9 +405,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/qlpnormalization.cpp runtime_qlpnormalization.bc)
     compile_to_bitcode(real/qsigmoid.cpp runtime_qsigmoid.bc)
 
-    # DynamicDispatch: Do NOT compile to bitcode
-    # The implementation (real or mock) is in the native hipdnn-ep-dd library (line ~790)
-    # The bitcode just needs external declarations, which are in hipdnn_ep_runtime.h
+    # DynamicDispatch: not bitcode; wrap_dd_* are native (STEP 6c).
 
     set(RUNTIME_BC_MODULES
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_state.bc
@@ -715,6 +680,55 @@ set_target_properties(hipdnn-ep-corelib PROPERTIES POSITION_INDEPENDENT_CODE ON)
 install(TARGETS hipdnn-ep-corelib ARCHIVE DESTINATION lib)
 
 # ============================================================================
+# STEP 6c: DynamicDispatch (NPU) wrappers (NOT bitcode)
+# ============================================================================
+# wrap_dd_* call DynamicDispatch's C API (ops/dd_c_api.h). Like the CoreLib
+# wrappers they are compiled natively and reach the JIT as absolute symbols
+# (LlvmIrJit). dyn_dispatch_core is loaded at runtime, so only the header is
+# needed here: DYNAMICDISPATCH_ROOT (or DD_ROOT) names a DynamicDispatch
+# install or build tree. Without it, or in mock builds, a stub fails every
+# call. See docs/design/dynamicdispatch-integration.md.
+set(_dd_hints "")
+foreach(_dd_var DYNAMICDISPATCH_ROOT DD_ROOT)
+    if(${_dd_var})
+        list(APPEND _dd_hints "${${_dd_var}}")
+    elseif(DEFINED ENV{${_dd_var}})
+        list(APPEND _dd_hints "$ENV{${_dd_var}}")
+    endif()
+endforeach()
+if(NOT BUILD_MOCK_RUNTIME AND _dd_hints)
+    find_path(DD_C_API_INCLUDE_DIR NAMES ops/dd_c_api.h
+        HINTS ${_dd_hints}
+        PATH_SUFFIXES include/ryzenai/dynamic_dispatch include
+        NO_DEFAULT_PATH)
+endif()
+if(NOT BUILD_MOCK_RUNTIME AND DD_C_API_INCLUDE_DIR)
+    message(STATUS "DynamicDispatch C API: ${DD_C_API_INCLUDE_DIR}")
+    add_library(hipdnn-ep-dd STATIC real/dynamic_dispatch.cpp op_state.cpp)
+    target_include_directories(hipdnn-ep-dd PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/real
+        ${PROJECT_SOURCE_DIR}/include
+        ${DD_C_API_INCLUDE_DIR})
+    if(DEFINED THEROCK_DIST)
+        target_include_directories(hipdnn-ep-dd PRIVATE ${THEROCK_DIST}/include)
+    endif()
+    target_link_libraries(hipdnn-ep-dd PRIVATE hip::host)
+    if(NOT WIN32)
+        target_link_libraries(hipdnn-ep-dd PRIVATE ${CMAKE_DL_LIBS})
+    endif()
+else()
+    message(STATUS "DynamicDispatch C API not found (set DYNAMICDISPATCH_ROOT); "
+                   "wrap_dd_* always fail")
+    add_library(hipdnn-ep-dd STATIC mock/dynamic_dispatch_mock.cpp)
+    target_include_directories(hipdnn-ep-dd PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/mock)
+endif()
+set_target_properties(hipdnn-ep-dd PROPERTIES POSITION_INDEPENDENT_CODE ON)
+install(TARGETS hipdnn-ep-dd ARCHIVE DESTINATION lib)
+
+# ============================================================================
 # STEP 7: Shared embedded runtime.bc (single source of truth)
 # ============================================================================
 # Both consumers need runtime.bc embedded as bytes:
@@ -756,433 +770,6 @@ set_target_properties(runtime-bc-embed PROPERTIES POSITION_INDEPENDENT_CODE ON)
 if(TARGET RuntimeBitcode)
     add_dependencies(runtime-bc-embed RuntimeBitcode)
 endif()
-
-# ============================================================================
-# STEP 8: Native DynamicDispatch Library (XRT/NPU Backend)
-# ============================================================================
-# DynamicDispatch wraps XRT C++ APIs which cannot be in bitcode (JIT cannot
-# link external C++ libraries). This native library is linked into the EP DLL
-# and provides wrap_dd_* symbols at runtime via the JIT's process symbol search.
-#
-# The bitcode still includes mock/dynamic_dispatch_mock.cpp (line 362 above)
-# as a fallback, but when the native library is linked, its symbols take
-# precedence via the JIT's ProcessSymbolSearchGenerator.
-if(NOT BUILD_MOCK_RUNTIME)
-    # Allow user to specify DynamicDispatch install directory
-    # Set via: cmake -DDYNAMICDISPATCH_ROOT=<path>
-    # Or environment variable: export DYNAMICDISPATCH_ROOT=<path>
-    if(NOT DEFINED DYNAMICDISPATCH_ROOT)
-        if(DEFINED ENV{DYNAMICDISPATCH_ROOT})
-            set(DYNAMICDISPATCH_ROOT $ENV{DYNAMICDISPATCH_ROOT})
-        endif()
-    endif()
-
-    # Build search paths for find_path/find_library
-    set(DD_SEARCH_PATHS)
-    if(DYNAMICDISPATCH_ROOT)
-        list(APPEND DD_SEARCH_PATHS
-            ${DYNAMICDISPATCH_ROOT}/include
-            ${DYNAMICDISPATCH_ROOT}/lib
-            ${DYNAMICDISPATCH_ROOT}/bin
-            ${DYNAMICDISPATCH_ROOT}/xrt/include
-            ${DYNAMICDISPATCH_ROOT}/xrt/lib
-            ${DYNAMICDISPATCH_ROOT}/boost/include
-        )
-    endif()
-    # Also add DD_ROOT/include for C API headers (if not installed to DYNAMICDISPATCH_ROOT)
-    if(DEFINED ENV{DD_ROOT})
-        list(APPEND DD_SEARCH_PATHS
-            $ENV{DD_ROOT}/src
-        )
-    endif()
-    # Add common installation paths as fallbacks
-    list(APPEND DD_SEARCH_PATHS
-        /opt/xilinx/xrt/include
-        /opt/xilinx/xrt/lib
-    )
-    if(DEFINED ENV{XILINX_XRT})
-        list(APPEND DD_SEARCH_PATHS
-            $ENV{XILINX_XRT}/include
-            $ENV{XILINX_XRT}/lib
-        )
-    endif()
-
-    # Try to find DynamicDispatch / XRT headers
-    find_path(DD_INCLUDE_DIR
-        NAMES ryzenai/dynamic_dispatch/ops/op_interface.hpp
-        PATHS ${DD_SEARCH_PATHS}
-        NO_DEFAULT_PATH
-    )
-
-    if(DD_INCLUDE_DIR)
-        message(STATUS "Found DynamicDispatch headers: ${DD_INCLUDE_DIR}")
-
-        # Find DynamicDispatch core library
-        find_library(DD_CORE_LIB
-            NAMES dyn_dispatch_core
-            PATHS ${DD_SEARCH_PATHS}
-            NO_DEFAULT_PATH
-        )
-
-        if(DD_CORE_LIB)
-            message(STATUS "Found DynamicDispatch library: ${DD_CORE_LIB}")
-
-            # Find additional DD libraries
-            find_library(DD_BINS_LIB
-                NAMES dyn_bins
-                PATHS ${DD_SEARCH_PATHS}
-                NO_DEFAULT_PATH
-            )
-            find_library(DD_TRANSACTION_LIB
-                NAMES transaction
-                PATHS ${DD_SEARCH_PATHS}
-                NO_DEFAULT_PATH
-            )
-            find_library(DD_PM_PACKAGE_LIB
-                NAMES pm_package
-                PATHS ${DD_SEARCH_PATHS}
-                NO_DEFAULT_PATH
-            )
-            find_library(DD_XCLBIN_LIB
-                NAMES xclbin
-                PATHS ${DD_SEARCH_PATHS}
-                NO_DEFAULT_PATH
-            )
-            find_library(DD_HASHLIB_LIB
-                NAMES hashlib
-                PATHS ${DD_SEARCH_PATHS}
-                NO_DEFAULT_PATH
-            )
-            find_library(DD_SPDLOG_LIB
-                NAMES spdlog
-                PATHS ${DD_SEARCH_PATHS}
-                NO_DEFAULT_PATH
-            )
-            find_library(DD_AIEBU_STATIC_LIB
-                NAMES aiebu_static
-                PATHS ${DD_SEARCH_PATHS}
-                NO_DEFAULT_PATH
-            )
-            find_library(DD_AIE_CODEGEN_LIB
-                NAMES aie_codegen
-                PATHS ${DD_SEARCH_PATHS}
-                NO_DEFAULT_PATH
-            )
-            find_library(XRT_COREUTIL_LIB
-                NAMES xrt_coreutil
-                PATHS ${DD_SEARCH_PATHS}
-                NO_DEFAULT_PATH
-            )
-            find_library(ZLIB_LIB
-                NAMES zlib zlibstatic
-                PATHS ${DD_SEARCH_PATHS}
-                NO_DEFAULT_PATH
-            )
-
-            # Find XRT headers (required by DynamicDispatch)
-            find_path(XRT_INCLUDE_DIR
-                NAMES xrt/xrt_bo.h
-                PATHS ${DD_SEARCH_PATHS}
-                NO_DEFAULT_PATH
-            )
-
-            # Find Boost headers (required by XRT)
-            find_path(BOOST_INCLUDE_DIR
-                NAMES boost/any.hpp
-                PATHS ${DD_SEARCH_PATHS}
-                PATH_SUFFIXES boost-1_84 ""
-                NO_DEFAULT_PATH
-            )
-
-            # Find Boost headers (required by XRT)
-            find_path(BOOST_INCLUDE_DIR
-                NAMES boost/any.hpp
-                PATHS $ENV{BOOST_ROOT}
-                PATH_SUFFIXES boost-1_84 ""
-                NO_DEFAULT_PATH
-            )
-
-            # Also check standard BOOST_ROOT location
-            if(NOT BOOST_INCLUDE_DIR AND DEFINED ENV{BOOST_ROOT})
-                find_path(BOOST_INCLUDE_DIR
-                    NAMES boost/any.hpp
-                    PATHS $ENV{BOOST_ROOT}/include
-                    NO_DEFAULT_PATH
-                )
-            endif()
-
-            if(NOT XRT_INCLUDE_DIR)
-                message(WARNING "XRT headers not found. DynamicDispatch library will not be built.")
-            elseif(NOT BOOST_INCLUDE_DIR)
-                message(WARNING "Boost headers not found. DynamicDispatch library will not be built.")
-            else()
-                message(STATUS "Found XRT headers: ${XRT_INCLUDE_DIR}")
-                message(STATUS "Found Boost headers: ${BOOST_INCLUDE_DIR}")
-
-                # Find DynamicDispatch prebuilt libraries
-                find_library(DD_CORE_LIB
-                    NAMES dyn_dispatch_core
-                    PATHS ${DD_SEARCH_PATHS}
-                    NO_DEFAULT_PATH
-                )
-                find_library(DD_TRANSACTION_LIB
-                    NAMES transaction
-                    PATHS ${DD_SEARCH_PATHS}
-                    NO_DEFAULT_PATH
-                )
-
-                if(NOT DD_CORE_LIB)
-                    message(WARNING "DynamicDispatch core library not found. Link will fail with unresolved externals until dyn_dispatch_core.lib provides template instantiations for combined_gemm<uint16_t,uint8_t,uint16_t> and iconv<uint16_t,uint8_t,uint16_t>")
-                else()
-                    message(STATUS "Found DD core library: ${DD_CORE_LIB}")
-                endif()
-
-                if(DD_TRANSACTION_LIB)
-                    message(STATUS "Found DD transaction library: ${DD_TRANSACTION_LIB}")
-                endif()
-
-                # Create native library with wrapper code only
-                # Link against prebuilt DynamicDispatch libraries
-                # NOTE: Currently requires template instantiations in dyn_dispatch_core.lib:
-                #   - combined_gemm<uint16_t, uint8_t, uint16_t>
-                #   - iconv<uint16_t, uint8_t, uint16_t>
-                add_library(hipdnn-ep-dd STATIC
-                    real/dynamic_dispatch.cpp
-                    real/dd_static_init.cpp
-                    # real/dd_template_instantiations.cpp  # Not usable - see note below
-                    op_state.cpp
-                )
-
-                # NOTE: DynamicDispatch template instantiation requirement
-                # ========================================================
-                # The link will currently FAIL with unresolved externals for:
-                #   - ryzenai::combined_gemm<uint16_t, uint8_t, uint16_t>::combined_gemm(...)
-                #   - ryzenai::iconv<uint16_t, uint8_t, uint16_t>::iconv(...)
-                #
-                # These template instantiations must be added to the DynamicDispatch DLL build.
-                # The DD team needs to explicitly instantiate and export these in dyn_dispatch_core.dll
-                # or dyn_bins.dll.
-                #
-                # Once DD is rebuilt with these symbols, this build will succeed and the warning will disappear.
-
-                # Determine DD installation layout
-                # There are three known layouts:
-                #
-                # 1. vai-rt install layout (complete):
-                #    DD_INCLUDE_DIR/ryzenai/dynamic_dispatch/ops/...
-                #    DD_INCLUDE_DIR/ryzenai/dynamic_dispatch/src/ops/... (has coeffs.hpp)
-                #
-                # 2. DD repo build layout (incomplete):
-                #    DD_INCLUDE_DIR/ryzenai/dynamic_dispatch/ops/...
-                #    DD_INCLUDE_DIR/ryzenai/dynamic_dispatch/src/ops/... (MISSING!)
-                #    Need to find src/ elsewhere (e.g., ../../src in DD repo)
-                #
-                # 3. DD source layout (old):
-                #    DD_INCLUDE_DIR/ops/...
-                #    DD_INCLUDE_DIR/src/...
-                #
-                # Issue: combined_gemm.hpp (in ops/) includes coeffs.hpp (in src/ops/).
-                # We must provide both paths or the compile will fail.
-
-                if(EXISTS "${DD_INCLUDE_DIR}/ryzenai/dynamic_dispatch/ops")
-                    # Modern layout (install or repo build)
-                    set(DD_OPS_INCLUDE_DIR "${DD_INCLUDE_DIR}/ryzenai/dynamic_dispatch")
-
-                    # Check if this is vai-rt install (has src/ops) or DD repo build (missing src/ops)
-                    if(EXISTS "${DD_INCLUDE_DIR}/ryzenai/dynamic_dispatch/src/ops")
-                        # vai-rt install layout - complete include structure
-                        set(DD_SRC_INCLUDE_DIR "${DD_INCLUDE_DIR}/ryzenai/dynamic_dispatch/src")
-                        message(STATUS "Using DynamicDispatch vai-rt install layout (complete)")
-                    else()
-                        # DD repo build layout - src/ops not copied to build/include
-                        # Try to find the source tree relative to the build include dir
-                        # Typical DD repo structure: build/relwithdebinfo/include/... and src/...
-                        get_filename_component(DD_BUILD_DIR "${DD_INCLUDE_DIR}/ryzenai/dynamic_dispatch" DIRECTORY)
-                        get_filename_component(DD_BUILD_DIR "${DD_BUILD_DIR}" DIRECTORY)  # Up one more
-                        get_filename_component(DD_BUILD_DIR "${DD_BUILD_DIR}" DIRECTORY)  # Up one more
-                        get_filename_component(DD_BUILD_DIR "${DD_BUILD_DIR}" DIRECTORY)  # Up one more
-                        get_filename_component(DD_REPO_ROOT "${DD_BUILD_DIR}" DIRECTORY)  # Up to repo root
-
-                        if(EXISTS "${DD_REPO_ROOT}/src/ops")
-                            set(DD_SRC_INCLUDE_DIR "${DD_REPO_ROOT}/src")
-                            message(STATUS "Using DynamicDispatch repo build layout")
-                            message(STATUS "  Found src tree at: ${DD_SRC_INCLUDE_DIR}")
-                        else()
-                            message(WARNING "DynamicDispatch layout issue: Found ops/ but not src/ops/")
-                            message(WARNING "  Expected either:")
-                            message(WARNING "    ${DD_INCLUDE_DIR}/ryzenai/dynamic_dispatch/src/ops/ (vai-rt install)")
-                            message(WARNING "    ${DD_REPO_ROOT}/src/ops/ (DD repo)")
-                            message(WARNING "  Build may fail with 'coeffs.hpp: No such file or directory'")
-                            message(WARNING "  Workaround: Set DYNAMICDISPATCH_ROOT to vai-rt install directory")
-                            set(DD_SRC_INCLUDE_DIR "${DD_INCLUDE_DIR}/ryzenai/dynamic_dispatch/src")
-                        endif()
-                    endif()
-                else()
-                    # Legacy source layout - use DD_INCLUDE_DIR directly
-                    set(DD_OPS_INCLUDE_DIR "${DD_INCLUDE_DIR}")
-                    get_filename_component(DD_SRC_INCLUDE_DIR "${DD_OPS_INCLUDE_DIR}" DIRECTORY)  # Up to repo root
-                    get_filename_component(DD_SRC_INCLUDE_DIR "${DD_OPS_INCLUDE_DIR}" DIRECTORY)  # Up to repo root
-                    get_filename_component(DD_SRC_INCLUDE_DIR "${DD_OPS_INCLUDE_DIR}" DIRECTORY)  # Up to repo root
-                    get_filename_component(DD_SRC_INCLUDE_DIR "${DD_OPS_INCLUDE_DIR}" DIRECTORY)  # Up to repo root
-                    set(DD_SRC_INCLUDE_DIR "${DD_SRC_INCLUDE_DIR}/src")
-                    message(STATUS "Using DynamicDispatch legacy source layout: ${DD_INCLUDE_DIR} ${DD_OPS_INCLUDE_DIR} ${DD_SRC_INCLUDE_DIR}")
-                endif()
-
-                target_include_directories(hipdnn-ep-dd PRIVATE
-                    ${CMAKE_CURRENT_SOURCE_DIR}
-                    ${CMAKE_CURRENT_SOURCE_DIR}/real  # For runtime_types.h
-                    ${CMAKE_SOURCE_DIR}/include
-                    ${DD_INCLUDE_DIR}  # For top-level headers
-                    ${DD_OPS_INCLUDE_DIR}  # For ops/... headers
-                    ${DD_SRC_INCLUDE_DIR}  # For src/... headers
-                    ${XRT_INCLUDE_DIR}
-                    ${BOOST_INCLUDE_DIR}
-                )
-
-                target_link_libraries(hipdnn-ep-dd PRIVATE
-                    ${DD_CORE_LIB}
-                    hip::host
-                )
-
-                # Determine if dyn_dispatch_core.lib is a static library or DLL import library.
-                # Static library: requires linking all transitive dependencies.
-                # DLL import lib: dependencies already in the .dll, don't link them again.
-                #
-                # Detection strategy:
-                # 1. Check for dyn_dispatch_core.dll in bin/ directory (same parent as lib/)
-                # 2. If .dll exists, this is an import lib -> skip transitive dependencies
-                # 3. If .dll missing, this is a static lib -> link all dependencies
-                set(DD_IS_STATIC_LIB FALSE)
-                get_filename_component(DD_LIB_DIR "${DD_CORE_LIB}" DIRECTORY)
-                get_filename_component(DD_INSTALL_DIR "${DD_LIB_DIR}" DIRECTORY)
-
-                if(WIN32)
-                    # Check for dyn_dispatch_core.dll in bin/ directory
-                    if(EXISTS "${DD_INSTALL_DIR}/bin/dyn_dispatch_core.dll")
-                        message(STATUS "Detected dyn_dispatch_core.dll -> using DLL import library")
-                        message(STATUS "  Transitive dependencies already linked into DLL")
-                        set(DD_IS_STATIC_LIB FALSE)
-                    else()
-                        message(STATUS "No dyn_dispatch_core.dll found -> using static library")
-                        message(STATUS "  Will link transitive dependencies explicitly")
-                        set(DD_IS_STATIC_LIB TRUE)
-                    endif()
-                else()
-                    # Linux: check for .so file
-                    if(EXISTS "${DD_LIB_DIR}/libdyn_dispatch_core.so")
-                        message(STATUS "Detected libdyn_dispatch_core.so -> using shared library")
-                        set(DD_IS_STATIC_LIB FALSE)
-                    else()
-                        message(STATUS "No libdyn_dispatch_core.so found -> using static library")
-                        set(DD_IS_STATIC_LIB TRUE)
-                    endif()
-                endif()
-
-                # Link additional DD libraries ONLY if dyn_dispatch_core is a static library.
-                # When it's a DLL/shared library, these dependencies are already inside it.
-                # EXCEPTION: XRT must always be linked because dynamic_dispatch.cpp uses XRT C++ types directly.
-                if(DD_IS_STATIC_LIB)
-                    message(STATUS "Linking transitive dependencies for static dyn_dispatch_core:")
-
-                    if(DD_BINS_LIB)
-                        target_link_libraries(hipdnn-ep-dd PRIVATE ${DD_BINS_LIB})
-                        message(STATUS "  - dyn_bins:     ${DD_BINS_LIB}")
-                    endif()
-                    if(DD_TRANSACTION_LIB)
-                        target_link_libraries(hipdnn-ep-dd PRIVATE ${DD_TRANSACTION_LIB})
-                        message(STATUS "  - transaction:  ${DD_TRANSACTION_LIB}")
-                    endif()
-                    if(DD_PM_PACKAGE_LIB)
-                        target_link_libraries(hipdnn-ep-dd PRIVATE ${DD_PM_PACKAGE_LIB})
-                        message(STATUS "  - pm_package:   ${DD_PM_PACKAGE_LIB}")
-                    endif()
-                    if(DD_XCLBIN_LIB)
-                        target_link_libraries(hipdnn-ep-dd PRIVATE ${DD_XCLBIN_LIB})
-                        message(STATUS "  - xclbin:       ${DD_XCLBIN_LIB}")
-                    endif()
-                    if(DD_HASHLIB_LIB)
-                        target_link_libraries(hipdnn-ep-dd PRIVATE ${DD_HASHLIB_LIB})
-                        message(STATUS "  - hashlib:      ${DD_HASHLIB_LIB}")
-                    endif()
-                    if(DD_SPDLOG_LIB)
-                        target_link_libraries(hipdnn-ep-dd PRIVATE ${DD_SPDLOG_LIB})
-                        message(STATUS "  - spdlog:       ${DD_SPDLOG_LIB}")
-                    endif()
-                    if(DD_AIEBU_STATIC_LIB)
-                        target_link_libraries(hipdnn-ep-dd PRIVATE ${DD_AIEBU_STATIC_LIB})
-                        message(STATUS "  - aiebu_static: ${DD_AIEBU_STATIC_LIB}")
-                    endif()
-                    if(DD_AIE_CODEGEN_LIB)
-                        target_link_libraries(hipdnn-ep-dd PRIVATE ${DD_AIE_CODEGEN_LIB})
-                        message(STATUS "  - aie_codegen:  ${DD_AIE_CODEGEN_LIB}")
-                    endif()
-                    if(XRT_COREUTIL_LIB)
-                        target_link_libraries(hipdnn-ep-dd PRIVATE ${XRT_COREUTIL_LIB})
-                        message(STATUS "  - xrt_coreutil: ${XRT_COREUTIL_LIB}")
-                    endif()
-                    if(ZLIB_LIB)
-                        target_link_libraries(hipdnn-ep-dd PRIVATE ${ZLIB_LIB})
-                        message(STATUS "  - zlib:         ${ZLIB_LIB}")
-                    endif()
-                else()
-                    message(STATUS "Skipping transitive dependencies (already in dyn_dispatch_core DLL)")
-                    # XRT must always be linked, even in DLL mode, because our wrapper uses XRT C++ types
-                    if(XRT_COREUTIL_LIB)
-                        target_link_libraries(hipdnn-ep-dd PRIVATE ${XRT_COREUTIL_LIB})
-                        message(STATUS "  - xrt_coreutil: ${XRT_COREUTIL_LIB} (required for XRT C++ symbols)")
-                    endif()
-                    # dyn_bins contains operator template instantiations
-                    if(DD_BINS_LIB)
-                        target_link_libraries(hipdnn-ep-dd PRIVATE ${DD_BINS_LIB})
-                        message(STATUS "  - dyn_bins:     ${DD_BINS_LIB} (contains operator implementations)")
-                    endif()
-                endif()
-
-                set_target_properties(hipdnn-ep-dd PROPERTIES
-                    POSITION_INDEPENDENT_CODE ON
-                    CXX_STANDARD 17
-                )
-
-                # Install the library
-                install(TARGETS hipdnn-ep-dd ARCHIVE DESTINATION lib)
-
-                # Link hipdnn-ep-dd into the EP DLL so DynamicDispatch functions are available at runtime
-                if(DEFINED morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET AND TARGET ${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET})
-                    target_link_libraries(${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET} PRIVATE hipdnn-ep-dd)
-                    message(STATUS "Linked DynamicDispatch via hipdnn-ep-dd target")
-                endif()
-
-                message(STATUS "Building DynamicDispatch native library (XRT backend)")
-            endif()  # XRT_INCLUDE_DIR found
-        else()
-            message(STATUS "DynamicDispatch library not found. DynamicDispatch will use mock implementation.")
-        endif()  # DD_CORE_LIB found
-    else()
-        message(STATUS "DynamicDispatch headers not found. DynamicDispatch will use mock implementation.")
-    endif()  # DD_INCLUDE_DIR found
-
-    # Create native mock library when DD is not available
-    # This provides stub symbols for .def file exports
-    if(NOT TARGET hipdnn-ep-dd)
-        add_library(hipdnn-ep-dd STATIC
-            mock/dynamic_dispatch_mock.cpp
-            op_state.cpp
-        )
-        target_include_directories(hipdnn-ep-dd PRIVATE
-            ${CMAKE_CURRENT_SOURCE_DIR}
-            ${CMAKE_CURRENT_SOURCE_DIR}/mock
-            ${CMAKE_SOURCE_DIR}/include
-        )
-        target_link_libraries(hipdnn-ep-dd PRIVATE hip::host)
-        set_target_properties(hipdnn-ep-dd PROPERTIES
-            POSITION_INDEPENDENT_CODE ON
-            CXX_STANDARD 17
-        )
-        message(STATUS "Created native DD mock library for symbol exports")
-    endif()
-else()  # BUILD_MOCK_RUNTIME
-    message(STATUS "Mock runtime mode: DynamicDispatch will use mock implementation.")
-endif()  # NOT BUILD_MOCK_RUNTIME
 
 message(STATUS "Runtime library configuration:")
 message(STATUS "  Mode: ${BUILD_MOCK_RUNTIME}")
