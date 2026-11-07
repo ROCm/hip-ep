@@ -309,3 +309,62 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<16x8xf16>,
       outs(%ae : tensor<128xf16>) -> tensor<128xf16>
   return %a : tensor<128xf16>
 }
+
+// -----
+
+// R5: a dequantize that only the module reads joins it from above, also when
+// it comes after the module's first op, so the module loads the 8-bit input.
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK-NOT: hip.dequantize_linear
+// CHECK: %[[M:.*]] = hip.rocmlir_elementwise(%{{.*}}) ins(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}} : tensor<1x16x4x4xf32>, tensor<1x16x4x4xi8>, tensor<f32>, tensor<i8>) -> tensor<1x16x4x4xf32>
+// CHECK: hip.neg
+// CHECK: hip.dequantize_linear
+// CHECK: hip.add
+// CHECK: return %[[M]]
+// NOVIEWS-LABEL: func.func @main_graph
+// ROUND-LABEL: func.func @main_graph
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x16x4x4xf32>,
+                      %rq: tensor<1x16x4x4xi8>) -> tensor<1x16x4x4xf32> {
+  %s = hip.constant {value = dense<1.250000e-02> : tensor<f32>} : tensor<f32>
+  %zp = hip.constant {value = dense<0> : tensor<i8>} : tensor<i8>
+  %ne = tensor.empty() : tensor<1x16x4x4xf32>
+  %n = hip.neg(%ctx) ins(%x : tensor<1x16x4x4xf32>)
+      outs(%ne : tensor<1x16x4x4xf32>) : tensor<1x16x4x4xf32>
+  %de = tensor.empty() : tensor<1x16x4x4xf32>
+  %d = hip.dequantize_linear(%ctx) ins(%rq, %s : tensor<1x16x4x4xi8>, tensor<f32>)
+      zero_point(%zp : tensor<i8>) outs(%de : tensor<1x16x4x4xf32>)
+      {axis = 1 : i64, block_size = 0 : i64} : tensor<1x16x4x4xf32>
+  %ae = tensor.empty() : tensor<1x16x4x4xf32>
+  %a = hip.add(%ctx) ins(%n, %d : tensor<1x16x4x4xf32>, tensor<1x16x4x4xf32>)
+      outs(%ae : tensor<1x16x4x4xf32>) -> tensor<1x16x4x4xf32>
+  return %a : tensor<1x16x4x4xf32>
+}
+
+// -----
+
+// A rank-0 value gets no role: the dequantize of a scalar constant stays
+// outside, as a module input.
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK: %[[D:.*]] = hip.dequantize_linear
+// CHECK: hip.rocmlir_elementwise(%{{.*}}) ins(%{{.*}}, %[[D]] : tensor<1x16x4x4xf32>, tensor<f32>) -> tensor<1x16x4x4xf32>
+// CHECK-NOT: hip.dequantize_linear
+// CHECK: hip.mul
+// CHECK: hip.yield
+// NOVIEWS-LABEL: func.func @main_graph
+// ROUND-LABEL: func.func @main_graph
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x16x4x4xf32>)
+    -> tensor<1x16x4x4xf32> {
+  %s = hip.constant {value = dense<1.250000e-02> : tensor<f32>} : tensor<f32>
+  %zp = hip.constant {value = dense<0> : tensor<i8>} : tensor<i8>
+  %q = hip.constant {value = dense<8> : tensor<i8>} : tensor<i8>
+  %de = tensor.empty() : tensor<f32>
+  %d = hip.dequantize_linear(%ctx) ins(%q, %s : tensor<i8>, tensor<f32>)
+      zero_point(%zp : tensor<i8>) outs(%de : tensor<f32>)
+      {axis = 1 : i64, block_size = 0 : i64} : tensor<f32>
+  %me = tensor.empty() : tensor<1x16x4x4xf32>
+  %m = hip.mul(%ctx) ins(%x, %d : tensor<1x16x4x4xf32>, tensor<f32>)
+      outs(%me : tensor<1x16x4x4xf32>) -> tensor<1x16x4x4xf32>
+  return %m : tensor<1x16x4x4xf32>
+}

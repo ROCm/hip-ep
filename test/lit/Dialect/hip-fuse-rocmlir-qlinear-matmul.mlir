@@ -7,6 +7,9 @@
 // kernel. Every other QLinearMatMul keeps its HIP kernel.
 
 // RUN: hip-mlir-opt --split-input-file --hip-fuse-rocmlir %s | FileCheck %s
+// RUN: hip-mlir-opt --split-input-file --hip-rocmlir-prepare-quant \
+// RUN:   --hip-fuse-rocmlir-elementwise --hip-fuse-rocmlir-anchor %s \
+// RUN:   | FileCheck %s
 
 // z' = 3 - 128 = -125 and the column sums of B are [6, 4, 7], so the bias is
 // 125 * [6, 4, 7]. The multipliers 0.5 * [0.5, 0.25, 0.125] / 0.125 stay per

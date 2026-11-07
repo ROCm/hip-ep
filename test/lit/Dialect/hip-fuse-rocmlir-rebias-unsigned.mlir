@@ -8,6 +8,13 @@
 // RUN: hip-mlir-opt --split-input-file --hip-fuse-rocmlir %s \
 // RUN:   | hip-mlir-opt --split-input-file --convert-hip-to-tosa \
 // RUN:   | FileCheck %s --check-prefix=TOSA
+// RUN: hip-mlir-opt --split-input-file --hip-rocmlir-prepare-quant \
+// RUN:   --hip-fuse-rocmlir-elementwise --hip-fuse-rocmlir-anchor %s \
+// RUN:   | FileCheck %s
+// RUN: hip-mlir-opt --split-input-file --hip-rocmlir-prepare-quant \
+// RUN:   --hip-fuse-rocmlir-elementwise --hip-fuse-rocmlir-anchor %s \
+// RUN:   | hip-mlir-opt --split-input-file --convert-hip-to-tosa \
+// RUN:   | FileCheck %s --check-prefix=TOSA
 
 // A quantize that feeds a dequantized conv. The kernel reads i8, so its TOSA
 // has no unsigned widen and shift before the conv.
@@ -21,8 +28,8 @@
 // CHECK: hip.quant_conv(%{{.*}}) ins(%{{.*}}, %{{.*}} : tensor<1x2x4x4xi8>, tensor<2x2x3x3xi8>)
 
 // CHECK-LABEL: func.func @main_graph
-// CHECK: %[[E:.*]] = tensor.empty() : tensor<1x2x4x4xi8>
-// CHECK: %[[Z:.*]] = hip.constant {value = dense<-125> : tensor<i8>}
+// CHECK-DAG: %[[E:.*]] = tensor.empty() : tensor<1x2x4x4xi8>
+// CHECK-DAG: %[[Z:.*]] = hip.constant {value = dense<-125> : tensor<i8>}
 // CHECK: %[[Q:.*]] = hip.quantize_linear(%{{.*}}) ins(%{{.*}}, %{{.*}} : tensor<1x2x4x4xf32>, tensor<f32>) zero_point(%[[Z]] : tensor<i8>) outs(%[[E]] : tensor<1x2x4x4xi8>)
 // CHECK: hip.rocmlir(%{{.*}}) @rocMlir0 ins(%[[Q]], {{.*}} : tensor<1x2x4x4xi8>,
 // CHECK-NOT: ui8

@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 
+#include "QLinearPlan.h"
 #include "RocMlirElementwise.h"
 #include "RocMlirFusionPredicates.h"
 
@@ -62,11 +63,26 @@ SmallVector<Value> getDataOperands(Operation *op) {
   return inputs;
 }
 
+// The anchor pass reads the integer operands of these dequantizes directly
+// (planDequantizedConv), so they stay outside a module.
+bool feedsPlannedDequantizedConv(Operation *op) {
+  return isa<DequantizeLinearOp>(op) &&
+         llvm::any_of(op->getUsers(), [](Operation *user) {
+           return isa<ConvOp>(user) && isPlannedQLinear(user);
+         });
+}
+
 // R1, R2: what a module may hold. A DPS op writes a tensor.empty init, which
 // the module clones. A broadcast, a slice or a dynamic reshape gets no role
-// and stays outside, as a module input.
+// and stays outside, as a module input. So does a rank-0 value, such as the
+// dequantize of a scalar constant: the anchor pass recomputes it in the
+// kernel, and as a module of its own it would take its readers away from the
+// module of the anchor.
 std::optional<Role> getRole(Operation *op, bool fuseViews) {
   if (op->getNumResults() != 1 || op->getNumRegions() != 0)
+    return std::nullopt;
+  auto resultType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
+  if (!resultType || resultType.getRank() == 0)
     return std::nullopt;
   if (auto dps = dyn_cast<DestinationStyleOpInterface>(op)) {
     bool emptyInits = llvm::all_of(dps.getDpsInits(), [](Value init) {
@@ -82,11 +98,14 @@ std::optional<Role> getRole(Operation *op, bool fuseViews) {
   if (isTosaLowerableReshape(op))
     return fuseViews ? std::optional(Role::View) : std::nullopt;
   if (isa<DequantizeLinearOp, QuantizeLinearOp>(op)) {
-    if (!fuseViews || !isTosaLowerableQdq(op))
+    if (!fuseViews || !isTosaLowerableQdq(op) ||
+        feedsPlannedDequantizedConv(op))
       return std::nullopt;
     return isa<DequantizeLinearOp>(op) ? Role::Dequantize : Role::Quantize;
   }
-  if (isTosaExpressiblePointwiseOp(op))
+  // isFusablePointwise also admits ops that HipToTosa lowers only inside an
+  // anchor kernel, such as a Where on a ui8 mask.
+  if (isTosaExpressiblePointwiseOp(op) || isFusablePointwise(op))
     return Role::Compute;
   return std::nullopt;
 }
@@ -94,8 +113,15 @@ std::optional<Role> getRole(Operation *op, bool fuseViews) {
 // The ops of one module, grown from its first op in block order.
 struct Module {
   SetVector<Operation *> ops;
+  // The earliest op in block order; a pulled dequantize can precede the op
+  // the module grew from.
+  Operation *earliest = nullptr;
 
-  Operation *first() const { return ops.front(); }
+  void insert(Operation *op) {
+    ops.insert(op);
+    if (!earliest || op->isBeforeInBlock(earliest))
+      earliest = op;
+  }
   bool readsOutside(Operation *op) const {
     return llvm::any_of(op->getUsers(),
                         [&](Operation *user) { return !ops.contains(user); });
@@ -116,7 +142,7 @@ public:
       if (!role || !llvm::all_of(getDataOperands(&op), isKernelIOValue))
         continue;
       Module module;
-      module.ops.insert(&op);
+      module.insert(&op);
       grow(module);
       trim(module);
       if (!hasComputation(module))
@@ -133,19 +159,26 @@ private:
     while (grew) {
       grew = false;
       SmallVector<Operation *> candidates;
-      for (Operation *op : module.ops)
+      for (Operation *op : module.ops) {
         for (Operation *user : op->getUsers())
           if (user->getBlock() == &block && !module.ops.contains(user) &&
               !assigned.contains(user))
             candidates.push_back(user);
+        for (Value operand : getDataOperands(op))
+          if (Operation *def = operand.getDefiningOp();
+              def && def->getBlock() == &block && !module.ops.contains(def) &&
+              !assigned.contains(def) && isa<DequantizeLinearOp>(def))
+            candidates.push_back(def);
+      }
       llvm::sort(candidates, [](Operation *a, Operation *b) {
         return a->isBeforeInBlock(b);
       });
       candidates.erase(llvm::unique(candidates), candidates.end());
-      for (Operation *user : candidates) {
-        if (module.ops.contains(user) || !canJoin(user, module))
+      for (Operation *candidate : candidates) {
+        if (module.ops.contains(candidate) ||
+            !(canJoin(candidate, module) || canPull(candidate, module)))
           continue;
-        module.ops.insert(user);
+        module.insert(candidate);
         grew = true;
       }
     }
@@ -174,10 +207,24 @@ private:
       if (!isKernelIOValue(operand))
         return false;
       // R8: the module would read its own result through outside ops.
-      if (dependsOnChain(operand, module.first(), module.ops))
+      if (dependsOnChain(operand, module.earliest, module.ops))
         return false;
     }
     return true;
+  }
+
+  // R5: a dequantize that only the module reads joins it from above, as the
+  // other side of a residual add does, so the kernel loads its 8-bit input.
+  bool canPull(Operation *op, const Module &module) const {
+    if (getRole(op, fuseViews) != Role::Dequantize ||
+        !llvm::all_of(op->getUsers(), [&](Operation *user) {
+          return module.ops.contains(user);
+        }))
+      return false;
+    return llvm::all_of(getDataOperands(op), [&](Value operand) {
+      return isKernelIOValue(operand) &&
+             !dependsOnChain(operand, module.earliest, module.ops);
+    });
   }
 
   // R4, R6: a value read outside is a module result, which needs a DPS init

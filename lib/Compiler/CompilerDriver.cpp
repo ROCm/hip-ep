@@ -485,8 +485,11 @@ bool CompilerDriver::runMLIRPasses(
       mlir::PassManager fusePm(module.getContext());
       // HIPDNN_EP_ROCMLIR_FUSION_REPORT=<file> appends one JSON line per
       // kernel, to compare the kernels of two fusion pipelines.
+      // HIPDNN_EP_ROCMLIR_TWO_PASS=1 groups the pointwise ops into modules
+      // first, and then outlines each anchor with whole modules.
       mlir::hip::addRocMlirFusionPasses(
-          fusePm, fuseOpts, hip_get_env("HIPDNN_EP_ROCMLIR_FUSION_REPORT"));
+          fusePm, fuseOpts, hip_get_env("HIPDNN_EP_ROCMLIR_FUSION_REPORT"),
+          hip_env_is_on("HIPDNN_EP_ROCMLIR_TWO_PASS"));
       if (mlir::failed(fusePm.run(module))) {
         error_message = "fuse-rocmlir passes failed";
         return false;

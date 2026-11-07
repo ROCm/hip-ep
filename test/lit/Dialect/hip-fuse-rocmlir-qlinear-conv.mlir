@@ -7,6 +7,9 @@
 // other QLinearConv keeps its HIP kernel.
 
 // RUN: hip-mlir-opt --split-input-file --hip-fuse-rocmlir %s | FileCheck %s
+// RUN: hip-mlir-opt --split-input-file --hip-rocmlir-prepare-quant \
+// RUN:   --hip-fuse-rocmlir-elementwise --hip-fuse-rocmlir-anchor %s \
+// RUN:   | FileCheck %s
 
 // Padding: the correction -z' * sum(w) varies over the output plane. With
 // z' = 3 - 128 = -125, channel 0 reads 12 weight units inside and 6 at a

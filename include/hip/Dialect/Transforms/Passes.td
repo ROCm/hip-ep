@@ -255,6 +255,50 @@ def InlineRocMlirElementwisePass
   }];
 }
 
+def FuseRocMlirAnchorPass
+    : Pass<"hip-fuse-rocmlir-anchor", "mlir::func::FuncOp"> {
+  let summary = "Outline each convolution, matmul and gemm anchor of "
+                "main_graph with its hip.rocmlir_elementwise modules into a "
+                "rocMLIR kernel";
+  let description = [{
+    Plans every kernel first and outlines them after. In block order, each
+    anchor takes the modules that read its result as its epilogue, when the
+    module keeps the shape of every value it reads from the kernel and reads
+    no value that depends on the kernel. A quantized anchor continues through
+    the modules that read its quantized results, and writes no float value
+    that a dequantize widened. Then each anchor takes, as a prologue of an
+    activation operand, a module that only the anchor reads and that has one
+    input that is not an inline scalar. A QLinearConv, a QLinearMatMul and a
+    convolution of dequantizes become integer anchors only when their kernel
+    outlines; a declined op keeps its HIP kernel. Every module that no anchor
+    takes is inlined back. Only main_graph is changed. Run
+    hip-rocmlir-prepare-quant and hip-fuse-rocmlir-elementwise before it.
+  }];
+  let options = [
+    Option<"fuseViews", "fuse-views", "bool", /*default=*/"true",
+           "Absorb the view ops, unary prologues, quantize epilogues and "
+           "extra outputs around an anchor. Off keeps each kernel to one "
+           "result.">,
+    Option<"fuseGemmGemm", "fuse-geg", "bool", /*default=*/"true",
+           "Merge a matmul/gemm kernel into the next one when its only "
+           "result feeds that gemm's A operand and the gemm-elementwise-gemm "
+           "shape gates pass.">,
+    Option<"arch", "arch", "std::string", /*default=*/"\"\"",
+           "Target GPU architecture, stamped as rock.arch on each outlined "
+           "kernel. Empty leaves rock.arch unset.">,
+    ListOption<"gemmGemmAccelTypes", "gemm-gemm-accel-types", "std::string",
+               "Gemm element types (as printed, e.g. f16) that have matrix "
+               "acceleration on the target. Both gemms of a "
+               "gemm-elementwise-gemm kernel must read a listed type; an "
+               "empty list merges no pair.">
+  ];
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::tensor::TensorDialect",
+    "mlir::ub::UBDialect"
+  ];
+}
+
 def FuseROCMlirReportPass
     : Pass<"hip-rocmlir-fusion-report", "mlir::ModuleOp"> {
   let summary = "Write one JSON line per rocMLIR kernel dispatch";

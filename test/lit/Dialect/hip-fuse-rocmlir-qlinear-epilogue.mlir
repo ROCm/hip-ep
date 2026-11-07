@@ -9,6 +9,9 @@
 // a dequantize widened is never a kernel result.
 
 // RUN: hip-mlir-opt --split-input-file --hip-fuse-rocmlir %s | FileCheck %s
+// RUN: hip-mlir-opt --split-input-file --hip-rocmlir-prepare-quant \
+// RUN:   --hip-fuse-rocmlir-elementwise --hip-fuse-rocmlir-anchor %s \
+// RUN:   | FileCheck %s
 
 // Hard swish, y * q(q(y + 3) / 6): one kernel and one u8 result.
 // The add is a * 0.25 / 0.5 + (0 - 0.5 * 128 + 3 * 1 / 0.5) = a * 0.5 - 58.
@@ -24,8 +27,8 @@
 // CHECK-DAG: %[[ONE:.*]] = hip.constant {value = dense<1.000000e+00> : tensor<f32>}
 // CHECK-DAG: %[[Z0:.*]] = hip.constant {value = dense<0> : tensor<ui8>}
 // CHECK: %[[T:.*]] = hip.quantize_linear(%{{.*}}) ins(%[[S]], %[[ONE]] : {{.*}}) zero_point(%[[Z0]] : tensor<ui8>)
-// CHECK: hip.dequantize_linear(%{{.*}}) ins(%[[T]],
-// CHECK: hip.reciprocal
+// CHECK-DAG: hip.dequantize_linear(%{{.*}}) ins(%[[T]],
+// CHECK-DAG: hip.reciprocal
 // CHECK: %[[T2:.*]] = hip.quantize_linear
 // CHECK: %[[T2F:.*]] = hip.cast(%{{.*}}) ins(%[[T2]] :
 // CHECK: %[[YF2:.*]] = hip.cast(%{{.*}}) ins(%[[Y]] :

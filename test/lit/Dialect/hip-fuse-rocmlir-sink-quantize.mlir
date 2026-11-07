@@ -7,6 +7,9 @@
 // type folds to its 8-bit input; any other dequantize is requantized alone.
 
 // RUN: hip-mlir-opt --split-input-file --hip-fuse-rocmlir %s | FileCheck %s
+// RUN: hip-mlir-opt --split-input-file --hip-rocmlir-prepare-quant \
+// RUN:   --hip-fuse-rocmlir-elementwise --hip-fuse-rocmlir-anchor %s \
+// RUN:   | FileCheck %s
 
 // Concat of two inputs with the quantize's parameters: the concat runs on u8.
 
