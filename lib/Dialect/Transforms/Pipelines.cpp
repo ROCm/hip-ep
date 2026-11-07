@@ -511,6 +511,7 @@ void mlir::hip::buildHipToLLVMPipeline(
 
   ConvertHipToLLVMPassOptions hipToLlvmOpts;
   hipToLlvmOpts.useRyzenAICorelib = options.useRyzenAICorelib;
+  hipToLlvmOpts.useDynamicDispatch = options.useDynamicDispatch;
   pm.addPass(createConvertHipToLLVMPass(hipToLlvmOpts));
 
   mlir::hip::CompilationOptionsT compOpts;
@@ -538,6 +539,7 @@ void mlir::hip::buildHipdnnPipeline(OpPassManager &pm,
   HipToLLVMPipelineOptions llvmOpts;
   llvmOpts.constantsFile = options.constantsFile;
   llvmOpts.useRyzenAICorelib = options.useRyzenAICorelib;
+  llvmOpts.useDynamicDispatch = options.useDynamicDispatch;
   buildHipToLLVMPipeline(pm, llvmOpts);
 }
 

@@ -84,6 +84,7 @@ add_library(HipToLLVM STATIC
   QLpNormalizationLowering.cpp
   QSigmoidLowering.cpp
   RyzenAICorelibLowering.cpp
+  DynamicDispatchLowering.cpp
 )
 
 add_dependencies(HipToLLVM

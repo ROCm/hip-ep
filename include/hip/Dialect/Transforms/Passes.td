@@ -150,6 +150,12 @@ def ConvertHipToLLVMPass : Pass<"convert-hip-to-llvm", "mlir::ModuleOp"> {
     With use-ryzenai-corelib, MatMulNBits, RmsNorm and SkipRmsNorm first call
     a RyzenAI CoreLib (NPU) wrapper and fall back to the GPU wrapper when it
     reports the shape unsupported.
+
+    Backend Selection:
+      --use-dynamic-dispatch: Route GEMM and Conv operations to DynamicDispatch
+                              (NPU/IPU via XRT) instead of GPU backends
+                              (MIOpen/hipBLASLt). Other operations continue to
+                              use GPU backends.
   }];
   let options = [
     Option<"reportHostScalars", "report-host-scalars", "bool",
@@ -157,7 +163,10 @@ def ConvertHipToLLVMPass : Pass<"convert-hip-to-llvm", "mlir::ModuleOp"> {
     Option<"useRyzenAICorelib", "use-ryzenai-corelib", "bool",
            /*default=*/"false",
            "Try RyzenAI CoreLib (NPU) before the GPU for MatMulNBits, "
-           "RmsNorm and SkipRmsNorm">
+           "RmsNorm and SkipRmsNorm">,
+    Option<"useDynamicDispatch", "use-dynamic-dispatch", "bool",
+           /*default=*/"false",
+           "Use DynamicDispatch (NPU/IPU) backend for GEMM and Conv instead of GPU">
   ];
   let dependentDialects = [
     "mlir::LLVM::LLVMDialect",

@@ -53,6 +53,7 @@ static CompilationConfig load_config(PassContext *ctx) {
   CompilationConfig config;
   config.artifactFormat = ArtifactFormat::LLVM_IR;
   config.optLevel = 2;
+  config.useDynamicDispatch = false;
 
   auto ep_ctx = ctx->get_session_config("ep.context_enable");
   bool epctxExport = ep_ctx.has_value() && ep_ctx.value() == "1";
@@ -82,6 +83,13 @@ static CompilationConfig load_config(PassContext *ctx) {
     }
     config.useRyzenAICorelib = use_corelib == "1" || use_corelib == "true";
 
+    std::string use_dd = ctx->get_provider_option("use_dynamic_dispatch", "");
+    if (use_dd.empty()) {
+      if (const char *env = std::getenv("HIPEP_USE_DYNAMIC_DISPATCH"))
+        use_dd = env;
+    }
+    config.useDynamicDispatch = use_dd == "1" || use_dd == "true";
+
   } catch (const std::exception &ex) {
     MY_LOG(1) << "Failed to parse provider options: " << ex.what()
               << ", using defaults";
@@ -109,7 +117,9 @@ static CompilationConfig load_config(PassContext *ctx) {
             << (epctxExport ? " (EPContext export -> constants file)"
                             : " (streaming default)")
             << "; useRyzenAICorelib="
-            << (config.useRyzenAICorelib ? "true" : "false");
+            << (config.useRyzenAICorelib ? "true" : "false")
+            << "; useDynamicDispatch="
+            << (config.useDynamicDispatch ? "true" : "false");
 
   return config;
 }
