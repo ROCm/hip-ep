@@ -71,13 +71,17 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<4x16xf16>,
 
 // -----
 
-// A module with no anchor is inlined back into main_graph.
+// A module with no anchor that saves a launch becomes an elementwise kernel.
 
-// CHECK-LABEL: func.func @main_graph
-// CHECK-NOT: hip.rocmlir
+// CHECK-LABEL: func.func @rocMlir0
+// CHECK-SAME: attributes {rock.elementwise, rock.kernel}
 // CHECK: %[[A:.*]] = hip.add
 // CHECK: %[[M:.*]] = hip.mul({{.*}}) ins(%[[A]], %[[A]] :
 // CHECK: return %[[M]]
+// CHECK-LABEL: func.func @main_graph
+// CHECK-NOT: hip.add
+// CHECK: %[[K:.*]] = hip.rocmlir({{.*}}) @rocMlir0
+// CHECK: return %[[K]]
 
 func.func @main_graph(%ctx: !hip.context, %x: tensor<4x16xf16>,
                       %y: tensor<4x16xf16>) -> tensor<4x16xf16> {
@@ -93,17 +97,21 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<4x16xf16>,
 // -----
 
 // An epilogue module that broadcasts the conv result to a larger shape stays
-// outside the kernel, and its ops are inlined back.
+// outside the conv kernel and becomes an elementwise kernel of its own.
 
+// CHECK-LABEL: func.func @rocMlir1
+// CHECK-SAME: attributes {rock.elementwise, rock.kernel}
+// CHECK: %[[A:.*]] = hip.add
+// CHECK: %[[M:.*]] = hip.mul({{.*}}) ins(%[[A]], %[[A]] :
+// CHECK: return %[[M]]
 // CHECK-LABEL: func.func @rocMlir0
 // CHECK: %[[C:.*]] = hip.conv
 // CHECK-NEXT: return %[[C]]
 // CHECK-LABEL: func.func @main_graph
 // CHECK-NOT: hip.rocmlir_elementwise
 // CHECK: %[[K:.*]] = hip.rocmlir({{.*}}) @rocMlir0
-// CHECK: %[[A:.*]] = hip.add({{.*}}) ins(%[[K]],
-// CHECK: %[[M:.*]] = hip.mul({{.*}}) ins(%[[A]], %[[A]] :
-// CHECK: return %[[M]]
+// CHECK: %[[E:.*]] = hip.rocmlir({{.*}}) @rocMlir1 ins(%[[K]],
+// CHECK: return %[[E]]
 
 func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf16>,
                       %w: tensor<16x8x3x3xf16>, %b: tensor<16xf16>,
@@ -125,17 +133,20 @@ func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf16>,
 
 // -----
 
-// A module with two inputs is no prologue as a whole. The pass inlines it, and
-// the conv still absorbs its unary tail; the add stays outside.
+// A module with two inputs is no prologue as a whole. It saves a launch, so it
+// stays whole as an elementwise kernel, and the conv reads its result.
 
-// CHECK-LABEL: func.func @rocMlir0
-// CHECK: %[[MX:.*]] = hip.max
-// CHECK: hip.conv({{.*}}) ins(%[[MX]],
-// CHECK-LABEL: func.func @main_graph
-// CHECK-NOT: hip.max
+// CHECK-LABEL: func.func @rocMlir1
+// CHECK-SAME: attributes {rock.elementwise, rock.kernel}
 // CHECK: %[[A:.*]] = hip.add
+// CHECK: hip.max({{.*}}) ins(%[[A]],
+// CHECK-LABEL: func.func @rocMlir0
 // CHECK-NOT: hip.max
-// CHECK: hip.rocmlir({{.*}}) @rocMlir0 ins(%[[A]],
+// CHECK: hip.conv
+// CHECK-LABEL: func.func @main_graph
+// CHECK-NOT: hip.add
+// CHECK: %[[E:.*]] = hip.rocmlir({{.*}}) @rocMlir1
+// CHECK: hip.rocmlir({{.*}}) @rocMlir0 ins(%[[E]],
 
 func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf16>,
                       %r: tensor<1x8x4x4xf16>, %w: tensor<16x8x3x3xf16>,

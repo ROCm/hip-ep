@@ -152,11 +152,12 @@ and B operands, not the conv filter or the gemm C operand. For a conv of
 dequantizes they are the integer input and weights. The search continues
 through the input views of the module.
 
-Every module that no plan takes is inlined back before the outline. A kernel
-can then still absorb the views and the unary pointwise ops of such a module
-one by one. This matters for a module with several inputs, whose unary tail
-can still be a prologue, and for a module with several readers, such as the
-views and the scale of a shared attention operand.
+A module that no plan takes and that is a valid elementwise kernel (see
+[Elementwise kernels](#elementwise-kernels)) stays whole. Every other module
+that no plan takes is inlined back before the outline. A kernel can then still
+absorb the views and the unary pointwise ops of such a module one by one. This
+matters for a module with several readers, such as the views and the scale of a
+shared attention operand.
 
 ### Outline
 
@@ -179,6 +180,26 @@ anchor. View absorption uses the legality of HIP-to-TOSA
 
 A rank-0 kernel operand is reshaped to rank 1 at the dispatch, and all such
 reshapes in `main_graph` share one shape constant.
+
+### Elementwise kernels
+
+After the plans outline, each module that is still in `main_graph` becomes a
+`rock.kernel` function with the `rock.elementwise` attribute, behind
+`hip.rocmlir`, when these conditions are true:
+
+- Every module op, other than a `tensor.empty` and a static reshape, is a
+  pointwise op that `convert-hip-to-tosa` lowers, a TOSA-lowerable per-tensor
+  dequantize or quantize, or a `hip.transpose`.
+- The module has at least two ops that launch, so the kernel saves a launch.
+  A static reshape does not launch.
+- A module with more than one result has no result that is a transpose of a
+  module input, through static reshapes only. rocMLIR cannot store such a
+  result next to the other results of the kernel.
+
+The inline scalar constants that the module reads are cloned into the kernel.
+Any other module is inlined back. The rocMLIR compile does not autotune an
+elementwise kernel, and outside strict mode a kernel that fails to compile
+falls back to its HIP ops.
 
 ### Integer anchors
 

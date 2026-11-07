@@ -249,9 +249,10 @@ def FuseRocMlirAnchorPass
     a kernel can still absorb its views and unary ops one by one. A
     QLinearConv, a QLinearMatMul and a convolution of dequantizes become
     integer anchors only when their kernel outlines; a declined op keeps its
-    HIP kernel. After the outline, gemm-elementwise-gemm pairs merge. Only
-    main_graph is changed. Run hip-rocmlir-prepare-quant and
-    hip-fuse-rocmlir-elementwise before it.
+    HIP kernel. A module that no anchor takes and that saves a launch stays
+    whole and becomes a rock.elementwise kernel. After the outline, gemm-elementwise-gemm pairs merge. Only
+    main_graph is changed. Run
+    hip-rocmlir-prepare-quant and hip-fuse-rocmlir-elementwise before it.
   }];
   let options = [
     Option<"fuseViews", "fuse-views", "bool", /*default=*/"true",

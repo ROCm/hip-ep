@@ -426,19 +426,22 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<4x8xi64>,
 // -----
 
 // A transpose with a reader outside the kernel would keep running for that
-// reader, so absorbing it saves nothing. It stays outside, and so does the
-// cast that feeds it.
+// reader, so absorbing it saves nothing. It stays outside the conv kernel, and
+// with the cast that feeds it becomes an elementwise kernel.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @rocMlir1
+// CHECK-SAME: attributes {rock.elementwise, rock.kernel}
+// CHECK: %[[CAST:.*]] = hip.cast
+// CHECK: hip.transpose({{.*}}) ins(%[[CAST]]
+// CHECK-LABEL: func.func @rocMlir0
 // CHECK-SAME: (%{{[a-z0-9]+}}: tensor<1x8x4x4xf16>,
 // CHECK-NOT: hip.cast
 // CHECK-NOT: hip.transpose
 // CHECK: hip.conv
 
 // CHECK-LABEL: func.func @main_graph
-// CHECK: %[[CAST:.*]] = hip.cast
-// CHECK: %[[T:.*]] = hip.transpose({{.*}}) ins(%[[CAST]]
-// CHECK: %[[K:.*]] = hip.rocmlir({{.*}}) @rocMlir{{[0-9]*}} ins(%[[T]], {{.*}} :
+// CHECK: %[[T:.*]] = hip.rocmlir({{.*}}) @rocMlir1
+// CHECK: %[[K:.*]] = hip.rocmlir({{.*}}) @rocMlir0 ins(%[[T]], {{.*}} :
 // CHECK: return %[[K]], %[[T]]
 func.func @main_graph(%ctx: !hip.context, %x: tensor<1x4x4x8xf32>,
                       %w: tensor<16x8x3x3xf16>, %b: tensor<16xf16>)

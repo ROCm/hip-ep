@@ -280,11 +280,15 @@ func.func @main_graph(%ctx: !hip.context, %a: tensor<1x4x4x4xui8>)
 
 // The float transpose result has a second reader, so the quantize stays.
 
-// CHECK-LABEL: func.func @main_graph
+// CHECK-LABEL: func.func @rocMlir0
+// CHECK-SAME: attributes {rock.elementwise, rock.kernel}
 // CHECK: hip.dequantize_linear
 // CHECK: %[[T:.*]] = hip.transpose(%{{.*}}) ins(%{{.*}} : tensor<1x4x4x8xf32>)
 // CHECK: %[[Y:.*]] = hip.quantize_linear(%{{.*}}) ins(%[[T]],
-// CHECK: return %[[Y]], %[[T]]
+// CHECK: return %[[T]], %[[Y]]
+// CHECK-LABEL: func.func @main_graph
+// CHECK: %[[K:.*]]:2 = hip.rocmlir({{.*}}) @rocMlir0
+// CHECK: return %[[K]]#1, %[[K]]#0
 
 func.func @main_graph(%ctx: !hip.context, %a: tensor<1x4x4x8xui8>)
     -> (tensor<1x8x4x4xui8>, tensor<1x8x4x4xf32>) {
@@ -309,7 +313,8 @@ func.func @main_graph(%ctx: !hip.context, %a: tensor<1x4x4x8xui8>)
 
 // A per-axis quantize does not commute with a transpose of its axis.
 
-// CHECK-LABEL: func.func @main_graph
+// CHECK-LABEL: func.func @rocMlir0
+// CHECK-SAME: attributes {rock.elementwise, rock.kernel}
 // CHECK: hip.dequantize_linear
 // CHECK: hip.transpose(%{{.*}}) ins(%{{.*}} : tensor<1x4x4x8xf32>)
 // CHECK: hip.quantize_linear(%{{.*}}) ins(%{{.*}} : tensor<1x8x4x4xf32>, tensor<8xf32>)
@@ -341,11 +346,15 @@ func.func @main_graph(%ctx: !hip.context, %a: tensor<1x4x4x8xui8>)
 // An i8 dequantize under a u8 quantize does not fold: the transpose runs on
 // u8 after a requantize of the i8 input.
 
-// CHECK-LABEL: func.func @main_graph
-// CHECK-SAME: %[[A:[^:]*]]: tensor<1x4x4x8xi8>)
+// CHECK-LABEL: func.func @rocMlir0
+// CHECK-SAME: (%[[A:[^:]*]]: tensor<1x4x4x8xi8>)
+// CHECK-SAME: attributes {rock.elementwise, rock.kernel}
 // CHECK: %[[D:.*]] = hip.dequantize_linear(%{{.*}}) ins(%[[A]],
 // CHECK: %[[Q:.*]] = hip.quantize_linear(%{{.*}}) ins(%[[D]], {{.*}} : tensor<1x4x4x8xui8>
-// CHECK: %[[T:.*]] = hip.transpose(%{{.*}}) ins(%[[Q]] : tensor<1x4x4x8xui8>)
+// CHECK: return %[[Q]]
+// CHECK-LABEL: func.func @main_graph
+// CHECK: %[[K:.*]] = hip.rocmlir({{.*}}) @rocMlir0
+// CHECK: %[[T:.*]] = hip.transpose(%{{.*}}) ins(%[[K]] : tensor<1x4x4x8xui8>)
 // CHECK: return %[[T]] : tensor<1x8x4x4xui8>
 
 func.func @main_graph(%ctx: !hip.context, %a: tensor<1x4x4x8xi8>)
