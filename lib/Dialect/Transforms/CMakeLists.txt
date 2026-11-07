@@ -35,6 +35,7 @@ add_library(HipDialectTransforms STATIC
   FixLoopAccumulatorOffset.cpp
   FoldBatchNorm.cpp
   FuseROCMlir.cpp
+  FuseRocMlirAnchor.cpp
   FuseROCMlirReport.cpp
   FuseRocMlirElementwise.cpp
   GemmGemm.cpp
@@ -44,6 +45,7 @@ add_library(HipDialectTransforms STATIC
   HoistAllocSizeArith.cpp
   InferLoopBodyShapesPass.cpp
   InferShapesPass.cpp
+  KernelOutline.cpp
   LoopBodyToOutParams.cpp
   LowerAllocs.cpp
   MaterializeHostScalars.cpp

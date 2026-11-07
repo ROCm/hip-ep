@@ -7,6 +7,9 @@
 // the ops that read the conv run in the same kernel.
 
 // RUN: hip-mlir-opt --split-input-file --hip-fuse-rocmlir %s | FileCheck %s
+// RUN: hip-mlir-opt --split-input-file --hip-rocmlir-prepare-quant \
+// RUN:   --hip-fuse-rocmlir-elementwise --hip-fuse-rocmlir-anchor %s \
+// RUN:   | FileCheck %s
 
 // u8 input with zero point 128, so the rebias needs no correction. The bias
 // dequantizes to [2, -4] * 0.125, and the scale is 0.5 * 0.25.

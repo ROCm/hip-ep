@@ -429,20 +429,20 @@ bool isPlannedQLinear(Operation *op) {
 // The epilogue that both QLinear rewrites share: add the corrected bias, cast
 // to f32, scale, and quantize with unit scale, which rounds half to even,
 // adds the zero point, and saturates, as ORT CPU does.
-Value emitTensorEmpty(PatternRewriter &rewriter, Location loc,
+Value emitTensorEmpty(RewriterBase &rewriter, Location loc,
                       RankedTensorType type) {
   return tensor::EmptyOp::create(rewriter, loc, type.getShape(),
                                  type.getElementType());
 }
 
-Value emitConstant(PatternRewriter &rewriter, Location loc,
+Value emitConstant(RewriterBase &rewriter, Location loc,
                    DenseElementsAttr value) {
   return ConstantOp::create(rewriter, loc,
                             cast<RankedTensorType>(value.getType()), value);
 }
 
 // (acc + bias) in i32, then cast to f32 and multiplied by `multiplier`.
-Value emitScaledAccumulator(PatternRewriter &rewriter, Location loc, Value ctx,
+Value emitScaledAccumulator(RewriterBase &rewriter, Location loc, Value ctx,
                             Value acc, DenseElementsAttr bias,
                             DenseElementsAttr multiplier) {
   auto accType = cast<RankedTensorType>(acc.getType());
@@ -462,7 +462,7 @@ Value emitScaledAccumulator(PatternRewriter &rewriter, Location loc, Value ctx,
       .getResult(0);
 }
 
-Value emitRequantizeEpilogue(PatternRewriter &rewriter, Location loc, Value ctx,
+Value emitRequantizeEpilogue(RewriterBase &rewriter, Location loc, Value ctx,
                              Value acc, const QLinearPlan &plan, Value output) {
   auto resultType = cast<RankedTensorType>(output.getType());
   auto constant = [&](DenseElementsAttr value) {
