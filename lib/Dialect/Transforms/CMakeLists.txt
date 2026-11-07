@@ -38,6 +38,7 @@ add_library(HipDialectTransforms STATIC
   FoldConstantExtracts.cpp
   FuseROCMlir.cpp
   FuseROCMlirReport.cpp
+  FuseRocMlirElementwise.cpp
   GemmGemm.cpp
   GenerateInterface.cpp
   GenerateOpStateInit.cpp

@@ -216,6 +216,45 @@ def RocMlirPrepareQuantPass
   }];
 }
 
+def FuseRocMlirElementwisePass
+    : Pass<"hip-fuse-rocmlir-elementwise", "mlir::func::FuncOp"> {
+  let summary = "Group the pointwise ops of main_graph into "
+                "hip.rocmlir_elementwise modules";
+  let description = [{
+    Walks main_graph in block order. From each pointwise op that is in no
+    module yet, the pass grows a module through the readers of the module,
+    and wraps the module in one hip.rocmlir_elementwise op. A module holds
+    the pointwise ops that HIP-to-TOSA converts, and, with fuse-views,
+    transposes, static reshapes, dequantizes and quantizes. A module ends
+    where an anchor epilogue must end: before an op that broadcasts a module
+    value, after a quantize, and at an op whose other input depends on the
+    module. A dequantize only starts a module. Broadcasts, slices and
+    dynamic reshapes stay outside as module inputs. No input or result is an
+    integer wider than 32 bits, no result is rank 0, and a module of views
+    alone is not made. Inline scalar constants stay outside as inputs.
+    hip-fuse-rocmlir-anchor consumes the modules.
+  }];
+  let options = [
+    Option<"fuseViews", "fuse-views", "bool", /*default=*/"true",
+           "Take transposes, static reshapes, dequantizes and quantizes into "
+           "the modules. Off keeps the modules to pointwise ops.">
+  ];
+  let dependentDialects = [
+    "mlir::tensor::TensorDialect"
+  ];
+}
+
+def InlineRocMlirElementwisePass
+    : Pass<"hip-inline-rocmlir-elementwise", "mlir::func::FuncOp"> {
+  let summary = "Inline every hip.rocmlir_elementwise body back into its "
+                "function";
+  let description = [{
+    Replaces each hip.rocmlir_elementwise op with the ops of its body. With
+    hip-fuse-rocmlir-elementwise before it, the function computes what it
+    computed before the grouping.
+  }];
+}
+
 def FuseROCMlirReportPass
     : Pass<"hip-rocmlir-fusion-report", "mlir::ModuleOp"> {
   let summary = "Write one JSON line per rocMLIR kernel dispatch";
