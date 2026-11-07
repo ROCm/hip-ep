@@ -244,6 +244,10 @@ endfunction()
 # One SHARED target per arch. Each builds a fatbin with that single slice;
 # OFFLOAD_ARCHS narrows the global list to one element so the resulting
 # DLL/SO is not bloated with code for archs the consumer won't load.
+if(HIP_EP_TURBOQUANT_ENABLED)
+    list(APPEND _kernel_sources hip/turboquant_kernel.hip)
+endif()
+
 if(HIP_EP_RING_ENABLED)
     list(APPEND _kernel_sources hip/ring/ring_gqa.hip)
 endif()
@@ -255,7 +259,7 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
     if(_arch STREQUAL "gfx1151" OR _arch STREQUAL "gfx11-generic")
         set(_ring_device_enabled 1)
     endif()
-    set(_ring_compile_options "")
+    set(_ring_compile_options -DHIP_EP_TURBOQUANT_ENABLED=${HIP_EP_TURBOQUANT_ENABLED})
     if(HIP_EP_RING_ENABLED)
         list(APPEND _ring_compile_options
             -DHIP_EP_RING_ENABLED=${HIP_EP_RING_ENABLED}
@@ -281,7 +285,7 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
         DEPENDS
             HipSchemas
     )
-    if(HIP_EP_RING_ENABLED AND NOT WIN32)
+    if(NOT WIN32)
         target_compile_options(${_target} PRIVATE ${_ring_compile_options})
     endif()
     set_target_properties(${_target} PROPERTIES

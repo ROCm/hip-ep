@@ -28,10 +28,17 @@ struct RingTensor {
   int64_t shape[4], stride[4];
 };
 struct RingCall {
+  static constexpr bool stats = false, packed = false;
   RingTensor tensors[4];
   int64_t B, Q, P;
   void *workspace;
   hipStream_t stream;
+};
+template <bool Packed> struct RingStatsCall : RingCall {
+  static constexpr bool stats = true, packed = Packed;
+  float *lse;
+  const float *cbk, *cbv;
+  int capacity;
 };
 RingCall make_call(hipStream_t stream, const void *q, const void *k,
                    const void *v, void *o, int nq, int past, int capacity,
@@ -89,7 +96,8 @@ __device__ U raw(const RingTensor &t, int h, I r, int d) {
 __device__ int swizzle(int d, int k) {
   return (k & ~15) | (((k ^ d) & 1) << 3) | ((k & 15) >> 1);
 }
-__global__ __launch_bounds__(NT) void ring_kv_outer_parallel(RingCall c) {
+template <typename Call>
+__global__ __launch_bounds__(NT) void ring_kv_outer_parallel(Call c) {
   int tid = threadIdx.x,
       lh = __builtin_amdgcn_readfirstlane((tid / (32 * ND)) % HB),
       dw = __builtin_amdgcn_readfirstlane((tid / 32) % ND), lane = tid % 16,
@@ -100,9 +108,9 @@ __global__ __launch_bounds__(NT) void ring_kv_outer_parallel(RingCall c) {
   int group = bid / (nqtiles * cpg), hg = bid % cpg,
       h = group * 6 + hg * HB + lh;
   I base = (nqtiles - 1 - (bid / cpg) % nqtiles) * 16 * QT, q0 = base + qi * 16,
-    q = q0 + lane, C = c.P + c.Q, end = c.P + c.Q;
+    q = q0 + lane, C = c.tensors[1].shape[2], end = C;
   I stop = C < c.P + base + 16 * QT ? C : c.P + base + 16 * QT;
-  stop = stop < end ? stop : end;
+  stop = Call::packed ? end : (stop < end ? stop : end);
   __shared__ __align__(16) U key[KV][KS], value[D][VS];
   __shared__ F8 partial[QT][HB][ND][KT][32];
   V16 qr[DT];
@@ -136,6 +144,19 @@ __global__ __launch_bounds__(NT) void ring_kv_outer_parallel(RingCall c) {
       if (z < 2 * CHUNKS && k0 + kr < C && k0 + kr < end) {
         const RingTensor &src = c.tensors[isk ? 1 : 2];
 
+        if constexpr (Call::packed) {
+          const auto *row = static_cast<const uint32_t *>(src.data) +
+              (int64_t(group) * c.capacity + k0 + kr) * 33;
+          // Match rotated-Q staging's power-of-two scaling. Restore the
+          // QK factor below and V after inverse rotation in join_append.
+          const float norm = __uint_as_float(row[0]) * 0.0625f;
+          const float *book = isk ? c.cbk : c.cbv;
+          _Pragma("unroll") for (int w = 0; w < 2; ++w) {
+            uint32_t codes = row[1 + d / 8 + w];
+            _Pragma("unroll") for (int e = 0; e < 8; ++e)
+              pack[w * 8 + e] = narrow(norm * book[(codes >> (4 * e)) & 15]);
+          }
+        } else {
         const U *ptr =
             static_cast<const U *>(src.data) + at(src, group, k0 + kr, d);
         if (src.stride[3] == 1 && uintptr_t(ptr) % 16 == 0)
@@ -143,6 +164,7 @@ __global__ __launch_bounds__(NT) void ring_kv_outer_parallel(RingCall c) {
         else
           _Pragma("unroll") for (int e = 0; e < 16; ++e) pack[e] =
               raw(src, group, k0 + kr, d + e);
+        }
       }
       pending[r] = pack;
     }
@@ -196,8 +218,8 @@ __global__ __launch_bounds__(NT) void ring_kv_outer_parallel(RingCall c) {
     _Pragma("unroll") for (int kt = 0; kt < KT; ++kt)
         _Pragma("unroll") for (int e = 0; e < 8; ++e) {
       I k = k0 + kt * 16 + 2 * e + par;
-      float x = s[kt][e] * 0.0625f;
-      if (k >= end || k >= C || k > c.P + q)
+      float x = s[kt][e] * (Call::packed ? 16.f : 0.0625f);
+      if (k >= end || k >= C || (!Call::packed && k > c.P + q))
         x = -INFINITY;
       s[kt][e] = x;
       m = fmaxf(m, x);
@@ -275,8 +297,15 @@ __global__ __launch_bounds__(NT) void ring_kv_outer_parallel(RingCall c) {
         _Pragma("unroll") for (int e = 0; e < 8; ++e) {
       int d = (dw * DT + t) * 16 + 2 * e + par;
 
+      if constexpr (Call::stats) {
+        static_cast<float *>(c.tensors[3].data)[(q * HQ + h) * D + d] =
+            out[t][e] / (denom * 32768.f);
+        if (d == 0)
+          c.lse[q * HQ + h] = maximum + logf(denom);
+      } else {
       static_cast<U *>(c.tensors[3].data)[(q * HQ + h) * D + d] =
           narrow(out[t][e] / (denom * 32768.f));
+      }
     }
   }
 }
@@ -448,9 +477,54 @@ hip_gqa_ring_attention(void *stream_ptr, const void *q, const void *k,
   (void)hipGetLastError();
   if (nq == 1)
     return decode::ring_decode_launch(c);
-  hipLaunchKernelGGL(prefill::ring_kv_outer_parallel,
+  hipLaunchKernelGGL(prefill::ring_kv_outer_parallel<RingCall>,
                      dim3(((nq + 31) / 32) * 4), dim3(prefill::NT), 0, stream,
                      c);
+  return int(hipGetLastError());
+#else
+  return int(hipErrorNotSupported);
+#endif
+}
+
+// Attention-only helper. Prefix inputs are packed BNSD, suffix inputs BSHD.
+// Both outputs and natural-log softmax normalizers remain FP32 for the join.
+extern "C" HIP_KERNEL_API int hip_gqa_ring_tq4_prefill(
+    void *stream_ptr, const void *qr, const void *q, const void *pk,
+    const void *pv, const void *k, const void *v, float *prefix, float *suffix,
+    float *prefix_lse, float *suffix_lse, int count, int start, int past,
+    int capacity, const float *cbk, const float *cbv) {
+#if HIP_EP_TURBOQUANT_ENABLED && HIP_EP_RING_DEVICE_ENABLED
+  if (!qr || !q || !pk || !pv || !k || !v || !prefix || !suffix ||
+      !prefix_lse || !suffix_lse || !cbk || !cbv || count < 1 || count > 128 ||
+      start < 0 || start > HIP_EP_RING_MAX_QUERY_LENGTH - count || past < 1 ||
+      capacity < 1 || capacity > 262144 || past > capacity - start - count ||
+      !hip_gqa_ring_device_supported())
+    return int(hipErrorInvalidValue);
+  auto stream = static_cast<hipStream_t>(stream_ptr);
+  RingStatsCall<true> p{};
+  static_cast<RingCall &>(p) = make_call(stream, qr, pk, pv, prefix,
+                                        count, past, capacity, nullptr);
+  p.tensors[1].shape[2] = p.tensors[2].shape[2] = past;
+  p.lse = prefix_lse;
+  p.cbk = cbk;
+  p.cbv = cbv;
+  p.capacity = capacity;
+  RingStatsCall<false> t{};
+  static_cast<RingCall &>(t) = make_call(stream, q, k, v, suffix,
+                                        count, start, start + count, nullptr);
+  for (int i = 1; i <= 2; ++i) {
+    t.tensors[i].stride[1] = 256;
+    t.tensors[i].stride[2] = 4 * 256;
+  }
+  t.lse = suffix_lse;
+  (void)hipGetLastError();
+  hipLaunchKernelGGL(prefill::ring_kv_outer_parallel<RingStatsCall<true>>,
+                    dim3(((count + 31) / 32) * 4), dim3(prefill::NT), 0, stream, p);
+  if (hipGetLastError() != hipSuccess)
+    return -1;
+  hipLaunchKernelGGL(prefill::ring_kv_outer_parallel<RingStatsCall<false>>,
+                    dim3(((count + 31) / 32) * 4), dim3(prefill::NT), 0, stream, t);
+
   return int(hipGetLastError());
 #else
   return int(hipErrorNotSupported);

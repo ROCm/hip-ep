@@ -190,3 +190,7 @@ site/.bundle/
 # The repository-wide models/ rule above is for downloaded model files. Keep
 # the documentation pages under site/docs/models/ tracked.
 !site/docs/models/
+
+# Generated TurboQuant codec/reference assets belong in the build/work tree.
+/tools/turboquant/**/*.bin
+/tools/turboquant/**/*.npz
