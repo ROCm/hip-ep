@@ -166,7 +166,7 @@ module {
 // CHECK: %[[BIAS:.*]] = llvm.addrspacecast
 // CHECK-NEXT: %[[BATCH:.*]] = llvm.mlir.constant(1 : i64)
 // CHECK-NEXT: %[[LENGTH:.*]] = llvm.mlir.constant(128 : i64)
-// CHECK: llvm.call @wrap_group_query_attention_v5({{.*}}, %[[BIAS]], %[[BATCH]], %[[LENGTH]], {{[^,]+}}, {{[^,]+}}, {{[^,]+}}, {{[^,]+}}, {{[^,]+}})
+// CHECK: llvm.call @wrap_group_query_attention_v5({{.*}}, %[[BIAS]], %[[BATCH]], %[[LENGTH]], {{[^,]+}}, {{[^,]+}}, {{[^,]+}}, {{[^,]+}}, {{[^,]+}}, {{[^,]+}})
 
 // -----
 module {
@@ -203,4 +203,4 @@ module {
 // CHECK: %[[BIAS:.*]] = llvm.addrspacecast
 // CHECK-NEXT: %[[BATCH:.*]] = llvm.mlir.constant(1 : i64)
 // CHECK-NEXT: %[[LENGTH:.*]] = llvm.mlir.constant(128 : i64)
-// CHECK: llvm.call @wrap_group_query_attention_v5({{.*}}, %[[BIAS]], %[[BATCH]], %[[LENGTH]], {{[^,]+}}, {{[^,]+}}, {{[^,]+}}, {{[^,]+}}, {{[^,]+}})
+// CHECK: llvm.call @wrap_group_query_attention_v5({{.*}}, %[[BIAS]], %[[BATCH]], %[[LENGTH]], {{[^,]+}}, {{[^,]+}}, {{[^,]+}}, {{[^,]+}}, {{[^,]+}}, {{[^,]+}})
