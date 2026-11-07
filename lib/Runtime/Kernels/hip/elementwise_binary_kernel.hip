@@ -63,6 +63,22 @@ __global__ void elementwise_div_kernel<__half>(const __half *__restrict__ lhs,
   }
 }
 
+// BF16 specialization: divide in float and round once to bf16 (round to
+// nearest even), as PyTorch does for bf16 tensors.
+template <>
+__global__ void elementwise_div_kernel<__hip_bfloat16>(
+    const __hip_bfloat16 *__restrict__ lhs,
+    const __hip_bfloat16 *__restrict__ rhs, __hip_bfloat16 *__restrict__ output,
+    int64_t num_elements) {
+  int64_t idx =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    float a = __bfloat162float(lhs[idx]);
+    float b = __bfloat162float(rhs[idx]);
+    output[idx] = __float2bfloat16(a / b);
+  }
+}
+
 // =====================================================================
 // Equal: y = (a == b)  -- bool output (uint8, 1 byte).
 // Less:  y = (a <  b)  -- bool output (uint8, 1 byte).
@@ -1396,6 +1412,16 @@ extern "C" int hip_elementwise_div(void *stream, const void *lhs,
                        static_cast<const float *>(lhs),
                        static_cast<const float *>(rhs),
                        static_cast<float *>(output), num_elements);
+    break;
+  case HIP_DTYPE_BFLOAT16:
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] hip_elementwise_div: bf16, num=%lld\n",
+        (long long)num_elements);
+    hipLaunchKernelGGL(elementwise_div_kernel<__hip_bfloat16>, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const __hip_bfloat16 *>(lhs),
+                       static_cast<const __hip_bfloat16 *>(rhs),
+                       static_cast<__hip_bfloat16 *>(output), num_elements);
     break;
   case HIP_DTYPE_INT32:
     CUSTOM_KERNELS_DEBUG_LOG(

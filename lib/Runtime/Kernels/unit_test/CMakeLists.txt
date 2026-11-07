@@ -161,6 +161,9 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
   add_kernel_package_ut(${_arch}
     hipdnn-kernel-ut-cast-xany-yany-bf16
     cast/Xany_Yany_bf16/test_cast.cpp)
+  add_kernel_package_ut(${_arch}
+    hipdnn-kernel-ut-div-xbf16-wbf16-ybf16
+    div/Xbf16_Wbf16_Ybf16/test_div.cpp)
 endforeach()
 
 # One package-facing entry point finds the live GPU arch, invokes every leaf
