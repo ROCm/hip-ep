@@ -67,20 +67,20 @@ std::optional<DequantizedConvPlan> planDequantizedConv(ConvOp op);
 /// True when one of the plans above accepts `op`.
 bool isPlannedQLinear(Operation *op);
 
-Value emitTensorEmpty(PatternRewriter &rewriter, Location loc,
+Value emitTensorEmpty(RewriterBase &rewriter, Location loc,
                       RankedTensorType type);
 
-Value emitConstant(PatternRewriter &rewriter, Location loc,
+Value emitConstant(RewriterBase &rewriter, Location loc,
                    DenseElementsAttr value);
 
 /// (acc + bias) in i32, then cast to f32 and multiplied by `multiplier`.
-Value emitScaledAccumulator(PatternRewriter &rewriter, Location loc, Value ctx,
+Value emitScaledAccumulator(RewriterBase &rewriter, Location loc, Value ctx,
                             Value acc, DenseElementsAttr bias,
                             DenseElementsAttr multiplier);
 
 /// The requantize epilogue of `plan` on the i32 accumulator `acc`, written to
 /// `output`.
-Value emitRequantizeEpilogue(PatternRewriter &rewriter, Location loc, Value ctx,
+Value emitRequantizeEpilogue(RewriterBase &rewriter, Location loc, Value ctx,
                              Value acc, const QLinearPlan &plan, Value output);
 
 } // namespace mlir::hip

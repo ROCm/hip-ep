@@ -161,11 +161,14 @@ void buildHipdnnPipeline(OpPassManager &pm,
 /// Add the rocMLIR kernel fusion to a module pass manager: the fusion of
 /// main_graph into rock.kernel functions, then the merge of duplicate
 /// kernels. A non-empty reportPath appends the --hip-rocmlir-fusion-report
-/// records to that file. Every caller builds the fusion through this function
+/// records to that file. With twoPass, the quantize preparation, the grouping
+/// of pointwise ops into modules and the anchor pass replace
+/// --hip-fuse-rocmlir. Every caller builds the fusion through this function
 /// so that the pass order and the options stay the same across tools.
 void addRocMlirFusionPasses(OpPassManager &pm,
                             const FuseROCMlirPassOptions &fuseOptions,
-                            llvm::StringRef reportPath = "");
+                            llvm::StringRef reportPath = "",
+                            bool twoPass = false);
 
 struct RocMlirFusionPipelineOptions
     : PassPipelineOptions<RocMlirFusionPipelineOptions> {
@@ -185,6 +188,10 @@ struct RocMlirFusionPipelineOptions
   ListOption<std::string> gemmGemmAccelTypes{
       *this, "gemm-gemm-accel-types",
       llvm::cl::desc("Gemm element types with matrix acceleration")};
+  Option<bool> twoPass{
+      *this, "two-pass",
+      llvm::cl::desc("Group pointwise ops into modules, then outline anchors"),
+      llvm::cl::init(false)};
   Option<std::string> report{
       *this, "report",
       llvm::cl::desc("Append the fusion report records to this file"),
