@@ -93,6 +93,19 @@ capacity is `search.max_length` from the `genai_config.json` beside the model,
 else CoreLib's own. The runtime side is `lib/Runtime/corelib_model.h`
 (`real/ryzenaicorelib_model.cpp`, `mock/ryzenaicorelib_model_stub.cpp`).
 
+### onnxruntime-genai and device-only memory
+
+The EP's default allocator returns device-only `hipMalloc` memory. An
+onnxruntime-genai build whose AMDGPU device treats that memory as host memory
+(older builds `memset` the KV cache directly when creating a generator) faults
+with an access violation in `OgaCreateGenerator`. The GPU-only path can get
+past it only because the KV cache then happens to land in memory the CPU can
+reach; with the CoreLib model the EP has allocated nothing else, so GenAI's
+first buffer is unmapped GPU address space. Use an onnxruntime-genai whose
+AMDGPU device copies through ONNX Runtime's `CopyTensors`, or set
+`MORPHIZEN_DEFAULT_HIPMALLOC=0`, which makes the default allocator return
+host-mapped `hipHostMalloc` memory (slower for GPU-only runs).
+
 ## Supported models
 
 | CoreLib model | Export it reads |
