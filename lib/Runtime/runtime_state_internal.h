@@ -194,6 +194,12 @@ struct RuntimeState {
   // launches after the previous dp4a gemv has consumed the quantized row).
   void *matmul_dp4a_scratch;
   size_t matmul_dp4a_scratch_size;
+  // Per-session scratch for the row-padded int4 prefill weight
+  // (hip_matmul_nbits_u4_prepack_padrow): one layer's B at the padded stride,
+  // rewritten by every padrow call. Sized to the largest padrow layer seen;
+  // same grow-on-demand / never-shrink policy as matmul_dp4a_scratch.
+  void *matmul_padrow_scratch;
+  size_t matmul_padrow_scratch_size;
 
   // Per-session scratch for the linear-attention chunk-parallel gated_delta
   // prefill (hip_linear_attention_prefill_chunked). One contiguous device

@@ -1429,6 +1429,21 @@ HIP_KERNEL_API int hip_gqa_flash_decode_configured(
     const void* key_bias,
     int key_bias_stride);
 
+// Flash decode (sq=1, fp16, scalar split-K) that also performs the
+// separate-buffer KV concat: reads past K/V [B, G, past_seq, d] plus the new
+// token [B, 1, G, d], writes present [B, G, present_seq, d] positions
+// [0, past_len], and attends over those past_len + 1 keys. Reads past once
+// instead of concat-then-decode reading it twice. B == 1, d 128, HpG
+// 4/5/6/8, no sliding window, 16-byte-aligned buffers; returns -1 otherwise.
+// partials and key_bias as for hip_gqa_flash_decode.
+HIP_KERNEL_API int hip_gqa_flash_decode_fused_copy(
+    void* stream, const void* Q, const void* past_k, const void* past_v,
+    const void* new_k, const void* new_v, void* present_k, void* present_v,
+    void* O, void* partials_workspace, int B, int H, int G, int d,
+    int past_len, int past_seq, int present_seq, int max_splits, int splits,
+    float scale, const void* head_sink, int use_smooth_softmax,
+    const void* key_bias, int key_bias_stride);
+
 /* =========================================================================
  * Cast (Element Type Conversion)
  * =========================================================================
@@ -2788,6 +2803,10 @@ HIP_KERNEL_API void hip_matmul_nbits_dequant_b_fp16(
  * ------------------------------------------------------------------------- */
 HIP_KERNEL_API size_t hip_matmul_nbits_u4_padrow_bytes(int N, int K);
 
+/* Largest padrow_bytes worth padding (HIPDNN_MATMUL_PADROW_MAX_MB, default
+ * 256 MB; 0 disables padrow). Larger layers keep the arrival layout. */
+HIP_KERNEL_API size_t hip_matmul_nbits_u4_padrow_max_bytes(void);
+
 HIP_KERNEL_API int hip_matmul_nbits_u4_prepack_padrow(
     void* stream, const void* B, void* dst, int N, int K);
 
@@ -4107,6 +4126,12 @@ HIP_KERNEL_API int hip_conv_transpose(
 // accumulation. For narrow decode MatMuls such as an MoE router (N=128).
 // N must be a multiple of 8 and B 16-byte aligned; returns -1 otherwise.
 HIP_KERNEL_API int hip_gemv_f16_kn(void* stream, const void* a, const void* B,
+                                   void* out, int64_t K, int64_t N);
+
+// fp32 GEMV out[N] = a[K] . B[K, N], B row-major, for an fp32 MoE router
+// (N=256). N must be a multiple of 4 and B 16-byte aligned; returns -1
+// otherwise.
+HIP_KERNEL_API int hip_gemv_f32_kn(void* stream, const void* a, const void* B,
                                    void* out, int64_t K, int64_t N);
 
 /* =========================================================================

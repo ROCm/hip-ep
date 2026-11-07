@@ -1208,7 +1208,8 @@ bool run_grouped_partial_block_case(hipStream_t stream) {
 
 // The grouped GEMM with an explicit config at a K that takes several waves of
 // K chunks: cfg 0/1 run 18 chunks per wave (a guarded last wave here), cfg 6/7
-// run 16 (even waves). cfg 0/6 take 16-row tiles, cfg 1/7 32-row tiles.
+// run 16 (even waves), cfg 9 runs 8. cfg 0/6 take 16-row tiles, the rest
+// 32-row tiles; cfg 8/9/10 are two columns tiles wide.
 bool run_grouped_cpw_case(hipStream_t stream, int cfg, int k) {
   constexpr int experts = 3;
   constexpr int n = 64;
@@ -1794,7 +1795,7 @@ int main(int argc, char** argv) {
   all_pass = run_reduce_scaled_case(stream, 36) && all_pass;
   all_pass = run_grouped_partial_block_case(stream) && all_pass;
   // K=1024 is 2 waves of 16 chunks, K=3072 is 6.
-  for (int cfg : {0, 6, 1, 7})
+  for (int cfg : {0, 6, 1, 7, 8, 9, 10})
     for (int k : {1024, 3072})
       all_pass = run_grouped_cpw_case(stream, cfg, k) && all_pass;
   HIP_CHECK(hipStreamDestroy(stream));

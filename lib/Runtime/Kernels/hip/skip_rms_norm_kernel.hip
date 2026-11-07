@@ -493,12 +493,30 @@ extern "C" int hip_skip_rms_norm_mixed(
                              input_dtype);
   if (outer <= 0 || norm_size <= 0)
     return 0;
-  if (input_dtype == HIP_DTYPE_FLOAT32 && skip_dtype == HIP_DTYPE_FLOAT16 &&
-      gamma_dtype == HIP_DTYPE_FLOAT16 && output_dtype == HIP_DTYPE_FLOAT16 &&
-      sum_dtype == HIP_DTYPE_FLOAT32)
-    return launch_skip_rms_norm<float, __half, __half, __half, float>(
-        static_cast<hipStream_t>(stream), input, skip, gamma, bias, output,
-        input_skip_bias_sum, outer, norm_size, epsilon);
+  // fp32 residual with an fp16 output: the skip and gamma are each fp16 when
+  // their Cast was folded and fp32 when there was none to fold.
+  if (input_dtype == HIP_DTYPE_FLOAT32 && output_dtype == HIP_DTYPE_FLOAT16 &&
+      sum_dtype == HIP_DTYPE_FLOAT32) {
+    hipStream_t s = static_cast<hipStream_t>(stream);
+    const bool skip16 = skip_dtype == HIP_DTYPE_FLOAT16;
+    const bool gamma16 = gamma_dtype == HIP_DTYPE_FLOAT16;
+    if (skip16 && gamma16)
+      return launch_skip_rms_norm<float, __half, __half, __half, float>(
+          s, input, skip, gamma, bias, output, input_skip_bias_sum, outer,
+          norm_size, epsilon);
+    if (skip16 && gamma_dtype == HIP_DTYPE_FLOAT32)
+      return launch_skip_rms_norm<float, __half, float, __half, float>(
+          s, input, skip, gamma, bias, output, input_skip_bias_sum, outer,
+          norm_size, epsilon);
+    if (skip_dtype == HIP_DTYPE_FLOAT32 && gamma16)
+      return launch_skip_rms_norm<float, float, __half, __half, float>(
+          s, input, skip, gamma, bias, output, input_skip_bias_sum, outer,
+          norm_size, epsilon);
+    if (skip_dtype == HIP_DTYPE_FLOAT32 && gamma_dtype == HIP_DTYPE_FLOAT32)
+      return launch_skip_rms_norm<float, float, float, __half, float>(
+          s, input, skip, gamma, bias, output, input_skip_bias_sum, outer,
+          norm_size, epsilon);
+  }
   fprintf(stderr,
           "[custom_kernels] hip_skip_rms_norm_mixed: unsupported dtypes "
           "in/skip/gamma/out/sum=%d/%d/%d/%d/%d\n",

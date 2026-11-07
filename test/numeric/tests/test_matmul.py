@@ -27,15 +27,18 @@ LLAMA_HIDDEN = 4096
 LLAMA_INTERMEDIATE = 14336
 
 
-def _make_matmul_model(input_shape: list[int], weight_shape: list[int]):
-    """Build a MatMul ONNX model with fp16 input X and constant fp16 weight W."""
-    X = helper.make_tensor_value_info("X", TensorProto.FLOAT16, input_shape)
+def _make_matmul_model(
+    input_shape: list[int], weight_shape: list[int], dtype=np.float16
+):
+    """Build a MatMul ONNX model with input X and constant weight W."""
+    elem = TensorProto.FLOAT16 if dtype == np.float16 else TensorProto.FLOAT
+    X = helper.make_tensor_value_info("X", elem, input_shape)
     output_shape = input_shape[:-1] + [weight_shape[-1]]
-    Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT16, output_shape)
+    Y = helper.make_tensor_value_info("Y", elem, output_shape)
     node = helper.make_node("MatMul", ["X", "W"], ["Y"])
 
     rng = np.random.default_rng(123)
-    w_data = rng.uniform(-0.5, 0.5, weight_shape).astype(np.float16)
+    w_data = rng.uniform(-0.5, 0.5, weight_shape).astype(dtype)
     w_init = numpy_helper.from_array(w_data, name="W")
     return make_model_from_nodes([node], [X], [Y], initializers=[w_init])
 
@@ -84,6 +87,27 @@ class TestMatMul:
 
         actual, expected = model_runner.run_sample(model, [x], reference="cpu")
         compare_outputs(actual, expected, atol=1e-3)
+
+    @pytest.mark.parametrize(
+        "input_shape,weight_shape",
+        [
+            ([1, 1, 2048], [2048, 256]),  # Laguna-XS router
+            ([1, 1, 3072], [3072, 256]),  # Laguna-S router
+            ([1, 520], [520, 4]),
+            ([1, 1, 2048], [2048, 12]),
+            ([1, 1, 2048], [2048, 516]),  # above the one-row GEMV N cap
+            ([1, 8200], [8200, 256]),  # above the one-row GEMV K cap
+        ],
+    )
+    def test_matmul_one_row_f32(self, model_runner, input_shape, weight_shape):
+        """One-row fp32 MatMul with a narrow weight, an fp32 MoE router."""
+        model = _make_matmul_model(input_shape, weight_shape, dtype=np.float32)
+
+        rng = np.random.default_rng(42)
+        x = rng.uniform(-1, 1, input_shape).astype(np.float32)
+
+        actual, expected = model_runner.run_sample(model, [x], reference="cpu")
+        compare_outputs(actual, expected, atol=1e-4)
 
     @pytest.mark.parametrize("seq_len", SEQ_LENS)
     def test_matmul_qo_proj_llama_shape(self, model_runner, seq_len):

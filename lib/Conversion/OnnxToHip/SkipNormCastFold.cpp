@@ -22,9 +22,13 @@
 //   %y16, ..., %sum = onnx.Custom(%res32, %skip16, %gamma16) {...}
 //
 // hip.skip_rms_norm carries the per-tensor types to the
-// wrap_skip_simplified_layer_norm_mixed runtime entry. The fold is
-// all-or-nothing (both input Casts, a sole output Cast, no bias) so the
-// runtime only needs the one mixed dtype combination.
+// wrap_skip_simplified_layer_norm_mixed runtime entry.
+//
+// The sole output Cast is required; the skip and gamma Casts are peeled when
+// present. ORT's constant folding usually turns Cast(gamma16) into an f32
+// initializer before the EP sees the graph, and a skip produced by an fp32
+// Add has no Cast to peel; either input then stays f32, which the norm reads
+// as is (it computes in f32), so the result is unchanged. No bias.
 //
 //===----------------------------------------------------------------------===//
 
@@ -79,13 +83,18 @@ struct FoldCastsIntoSkipSimplifiedLayerNorm : public mlir::RewritePattern {
       return rewriter.notifyMatchFailure(op, "bias present");
     if (!hasElementType(op->getOperand(0), /*f16=*/false))
       return rewriter.notifyMatchFailure(op, "input not f32");
+    if (!hasElementType(op->getOperand(1), /*f16=*/false) ||
+        !hasElementType(op->getOperand(2), /*f16=*/false))
+      return rewriter.notifyMatchFailure(op, "skip/gamma not f32");
 
     mlir::Value skip16 = castF16Source(op->getOperand(1));
     mlir::Value gamma16 = castF16Source(op->getOperand(2));
-    if (!skip16 || !gamma16)
-      return rewriter.notifyMatchFailure(op, "skip/gamma not Cast f16->f32");
+    mlir::Value skip = skip16 ? skip16 : op->getOperand(1);
+    mlir::Value gamma = gamma16 ? gamma16 : op->getOperand(2);
 
     mlir::Value y = op->getResult(0);
+    if (!hasElementType(y, /*f16=*/false))
+      return rewriter.notifyMatchFailure(op, "output not f32");
     if (!y.hasOneUse())
       return rewriter.notifyMatchFailure(op, "output not solely cast");
     mlir::Operation *outCast = *y.getUsers().begin();
@@ -104,20 +113,22 @@ struct FoldCastsIntoSkipSimplifiedLayerNorm : public mlir::RewritePattern {
     resultTypes[0] = outCast->getResult(0).getType();
 
     mlir::OperationState state(op->getLoc(), "onnx.Custom");
-    state.addOperands({op->getOperand(0), skip16, gamma16});
+    state.addOperands({op->getOperand(0), skip, gamma});
     state.addTypes(resultTypes);
     state.addAttributes(op->getAttrs());
     mlir::Operation *folded = rewriter.create(state);
 
-    mlir::Operation *skipCast = op->getOperand(1).getDefiningOp();
-    mlir::Operation *gammaCast = op->getOperand(2).getDefiningOp();
+    mlir::Operation *skipCast =
+        skip16 ? op->getOperand(1).getDefiningOp() : nullptr;
+    mlir::Operation *gammaCast =
+        gamma16 ? op->getOperand(2).getDefiningOp() : nullptr;
     rewriter.replaceOp(outCast, folded->getResult(0));
     for (unsigned i = 1; i < op->getNumResults(); ++i)
       rewriter.replaceAllUsesWith(op->getResult(i), folded->getResult(i));
     rewriter.eraseOp(op);
-    if (skipCast->use_empty())
+    if (skipCast && skipCast->use_empty())
       rewriter.eraseOp(skipCast);
-    if (gammaCast != skipCast && gammaCast->use_empty())
+    if (gammaCast && gammaCast != skipCast && gammaCast->use_empty())
       rewriter.eraseOp(gammaCast);
     ++NumSkipNormCastFolds;
     return mlir::success();

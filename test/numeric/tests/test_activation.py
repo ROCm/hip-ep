@@ -8,7 +8,7 @@ Softplus, Swish, com.microsoft QuickGelu, and fused SwiGLU."""
 
 import numpy as np
 import pytest
-from onnx import helper
+from onnx import TensorProto, helper
 
 from framework.comparator import compare_outputs
 from framework.onnx_utils import make_model_from_nodes, np_to_onnx_type
@@ -200,6 +200,26 @@ class TestSoftplus:
 
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=1e-4)
+
+    @pytest.mark.parametrize("seq_len", [1, 512])
+    def test_softplus_f32_between_casts(self, model_runner, seq_len):
+        """Cast(f16->f32) -> Softplus -> Cast(f32->f16) as the Laguna
+        attention gate exports it ([1, S, 48]); folds to an f16 Softplus."""
+        shape = [1, seq_len, 48]
+        X = helper.make_tensor_value_info("X", TensorProto.FLOAT16, shape)
+        Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT16, shape)
+        nodes = [
+            helper.make_node("Cast", ["X"], ["X32"], to=TensorProto.FLOAT),
+            helper.make_node("Softplus", ["X32"], ["Y32"]),
+            helper.make_node("Cast", ["Y32"], ["Y"], to=TensorProto.FLOAT16),
+        ]
+        model = make_model_from_nodes(nodes, [X], [Y])
+
+        rng = np.random.default_rng(29)
+        x = rng.uniform(-8, 8, shape).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=1e-3)
 
 
 class TestSwish:

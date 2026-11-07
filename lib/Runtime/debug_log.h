@@ -31,6 +31,25 @@ inline bool hipdnn_ep_matmul_dp4a_enabled() {
   return enabled;
 }
 
+// One-row fp32 MatMul against a narrow B (an fp32 MoE router: N=256,
+// K=2048/3072) as one GEMV launch instead of hipBLASLt. Default on;
+// HIPDNN_EP_GEMV_F32=0 restores hipBLASLt for A/B isolation.
+inline bool hipdnn_ep_gemv_f32_enabled() {
+  static const bool enabled =
+      hipdnn_ep::env_enabled_default_on("HIPDNN_EP_GEMV_F32");
+  return enabled;
+}
+
+// Decode with separate past/present KV buffers (past_present_share_buffer
+// off) folds the concat into the flash-decode split kernel, which then reads
+// past once instead of twice. Default on; HIPDNN_EP_GQA_FUSED_KV_COPY=0
+// restores concat + decode for A/B isolation.
+inline bool hipdnn_ep_gqa_fused_kv_copy_enabled() {
+  static const bool enabled =
+      hipdnn_ep::env_enabled_default_on("HIPDNN_EP_GQA_FUSED_KV_COPY");
+  return enabled;
+}
+
 // Widest token burst wrap_qmoe serves by iterating the one-token fused kernel
 // (three launches per token, no host sync, one expert set read per token)
 // instead of the grouped path (one pass over the union of experts in padded

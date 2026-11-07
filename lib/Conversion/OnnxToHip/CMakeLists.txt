@@ -52,6 +52,7 @@ add_library(OnnxToHip STATIC
   GatherShapeFold.cpp
   TransposeMatMulFold.cpp
   SkipNormCastFold.cpp
+  SoftplusCastFold.cpp
   ReshapeShapeFold.cpp
   PadShapeFold.cpp
   SliceShapeFold.cpp
