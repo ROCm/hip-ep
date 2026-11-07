@@ -15,6 +15,7 @@ INT64:
   * Names containing "mask": all ones
   * Other int64: zeros
 
+FLOAT: uniform in [-1, 1]. The full float32 domain overflows typical graphs.
 FLOAT16: uniform in IEEE fp16 finite range (~[-65504, 65504]).
 
 Vocab size is taken from initializer model.embed_tokens.weight dim0 if present.
@@ -106,6 +107,8 @@ def fill_tensor(
         if "mask" in name.lower():
             return np.ones(shape, dtype=np.int64)
         return np.zeros(shape, dtype=np.int64)
+    if elem_type == onnx.TensorProto.FLOAT:
+        return rng.uniform(-1.0, 1.0, size=shape).astype(np.float32)
     if elem_type == onnx.TensorProto.FLOAT16:
         f16_hi = float(np.finfo(np.float16).max)
         f16_lo = float(np.finfo(np.float16).min)

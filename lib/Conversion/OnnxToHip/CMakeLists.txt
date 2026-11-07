@@ -130,6 +130,7 @@ add_library(OnnxToHip STATIC
   ScanOutline.cpp
   IfOutline.cpp
   ReluConversion.cpp
+  HardActivationConversion.cpp
   ImageScalerConversion.cpp
   LeakyReluConversion.cpp
   PReluConversion.cpp

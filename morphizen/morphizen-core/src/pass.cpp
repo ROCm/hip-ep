@@ -139,8 +139,8 @@ calculate_return_values(const Graph &graph, const Node &output_node,
   auto args = node_get_output_node_args(output_node);
   auto graph_outputs = morphizen_cxx::GraphConstRef(graph).outputs();
   for (auto arg : args) {
-    if (arg == nullptr) {
-      // for optional outputs
+    if (arg == nullptr || !node_arg_exists(*arg)) {
+      // Optional outputs are nullptr or an empty node arg.
       continue;
     }
     auto &arg_name = node_arg_get_name(*arg);

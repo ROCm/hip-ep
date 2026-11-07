@@ -330,6 +330,12 @@ their aliases are bounded and their backend readers support mapped inputs. This
 avoids extra device-pool storage when early placement separates them from
 host-written buffers. Copies and payload accesses stay in their original order.
 
+Small initialized `memref.global` constants that are not externalized and have a
+HIP consumer are also selected. The global lives in host memory the device
+cannot read, so the pass copies it into scratch right after its
+`memref.get_global` and redirects every other user to the scratch view.
+Globals are laid out after allocations.
+
 All selected allocations in a function share one `hip.get_host_scratch` buffer. Their offsets are aligned to 64 bytes, independently of PoolAllocs' default 256-byte alignment.
 
 Functions without `!hip.context` as argument zero are skipped.

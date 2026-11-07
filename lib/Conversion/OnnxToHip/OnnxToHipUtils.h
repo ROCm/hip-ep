@@ -577,6 +577,8 @@ void populateConcatConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
 void populateReluConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
+void populateHardActivationConversionPatterns(RewritePatternSet &patterns,
+                                              MLIRContext *ctx);
 void populateImageScalerConversionPatterns(RewritePatternSet &patterns,
                                            MLIRContext *ctx);
 void populateLeakyReluConversionPatterns(RewritePatternSet &patterns,

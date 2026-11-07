@@ -12,6 +12,7 @@
 #include "LoadedArtifact.h" // LoadedArtifact, ArtifactKind
 #include "hip/Support/DiskFileSystem.h"
 #include "hip/artifact_abi.h" // hipdnn::abi symbol names
+#include "hip/timing.h"
 #include <memory>
 // On real (GPU) builds we link hip::host so the output-allocator callback can
 // give the model a real device buffer and copy it back to host for validation
@@ -125,14 +126,22 @@ static void *hip_test_allocate(void *self, int64_t out_idx,
   if (static_cast<size_t>(out_idx) >= ctx->outs.size())
     ctx->outs.resize(static_cast<size_t>(out_idx) + 1);
   OutputSlot &slot = ctx->outs[static_cast<size_t>(out_idx)];
-  slot.shape.assign(shape, shape + rank);
-  slot.elem_size = static_cast<size_t>(elem_size);
+  const std::vector<int64_t> newShape(shape, shape + rank);
   size_t nelem = 1;
   for (int64_t i = 0; i < rank; ++i)
     nelem *= static_cast<size_t>(shape[i]);
-  slot.nbytes = nelem * static_cast<size_t>(elem_size);
-  slot.host.assign(slot.nbytes, 0);
+  const size_t newBytes = nelem * static_cast<size_t>(elem_size);
+  const bool reuse = slot.shape == newShape &&
+                     slot.elem_size == static_cast<size_t>(elem_size) &&
+                     slot.nbytes == newBytes;
+  slot.shape = std::move(newShape);
+  slot.elem_size = static_cast<size_t>(elem_size);
+  slot.nbytes = newBytes;
+  if (!reuse)
+    slot.host.assign(slot.nbytes, 0);
 #ifdef HIPDNN_EP_LINK_HIP_HOST
+  if (slot.gpu && reuse)
+    return slot.gpu;
   if (slot.gpu) {
     (void)hipFree(slot.gpu);
     slot.gpu = nullptr;
@@ -175,6 +184,52 @@ parseShapeOverrides(const std::string &arg) {
   }
 
   return result;
+}
+
+// Parse --inputs arguments: "0=pixels.bin;1=ids.bin". Each file is raw tensor
+// bytes in element order and must match that input's byte size. Paths may
+// contain ':' (Windows drives); ';' separates entries.
+std::map<int, std::string> parseInputFiles(const std::string &arg) {
+  std::map<int, std::string> result;
+  std::istringstream iss(arg);
+  std::string token;
+  while (std::getline(iss, token, ';')) {
+    if (token.empty())
+      continue;
+    size_t eq_pos = token.find('=');
+    if (eq_pos == std::string::npos || eq_pos == 0)
+      continue;
+    int index = std::stoi(token.substr(0, eq_pos));
+    result[index] = token.substr(eq_pos + 1);
+  }
+  return result;
+}
+
+// Replace a generated input buffer with raw bytes from `path`.
+static bool loadRawInput(const std::string &path, std::vector<uint8_t> &buffer,
+                         std::string &error) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in) {
+    error = "cannot open " + path;
+    return false;
+  }
+  in.seekg(0, std::ios::end);
+  const std::streamoff n = in.tellg();
+  if (n < 0 || static_cast<size_t>(n) != buffer.size()) {
+    error = path + " is " + std::to_string(n < 0 ? 0 : static_cast<long long>(n)) +
+            " bytes, expected " + std::to_string(buffer.size());
+    return false;
+  }
+  in.seekg(0, std::ios::beg);
+  if (buffer.empty())
+    return true;
+  in.read(reinterpret_cast<char *>(buffer.data()),
+          static_cast<std::streamsize>(buffer.size()));
+  if (!in) {
+    error = "short read from " + path;
+    return false;
+  }
+  return true;
 }
 
 // Resolve dynamic dimensions to concrete values. Standard ONNX uses -1 for
@@ -231,6 +286,29 @@ void generateTestData(void *data, size_t sizeBytes, size_t elemSize) {
     size_t count = sizeBytes / 2;
     for (size_t i = 0; i < count; i++)
       hdata[i] = floatToHalf(static_cast<float>(i % 100 + 1) * 0.0001f);
+  } else if (elemSize == 8) {
+    // HIP_TEST_I64=0,1,2,3,4,5,6,7 uses those ids instead of raw bytes.
+    // Raw bytes are out of range for an embedding table.
+    if (const char *spec = std::getenv("HIP_TEST_I64")) {
+      auto *idata = static_cast<int64_t *>(data);
+      size_t count = sizeBytes / 8;
+      size_t n = 0;
+      const char *p = spec;
+      while (*p && n < count) {
+        char *end = nullptr;
+        long long v = std::strtoll(p, &end, 10);
+        if (end == p)
+          break;
+        idata[n++] = static_cast<int64_t>(v);
+        p = (*end == ',') ? end + 1 : end;
+      }
+      while (n < count)
+        idata[n++] = 0;
+      return;
+    }
+    auto *bytes = static_cast<uint8_t *>(data);
+    for (size_t i = 0; i < sizeBytes; i++)
+      bytes[i] = static_cast<uint8_t>(i % 256);
   } else {
     auto *bytes = static_cast<uint8_t *>(data);
     for (size_t i = 0; i < sizeBytes; i++)
@@ -287,6 +365,16 @@ bool validateOutput(const void *data, size_t sizeBytes, size_t elemSize,
       }
     }
     std::cout << "\n";
+    if (elemSize == 4 && elemCount > 0) {
+      const auto *fdata = static_cast<const float *>(data);
+      if (const char *dump = std::getenv("HIP_TEST_DUMP")) {
+        std::ofstream out(dump, std::ios::binary);
+        out.write(reinterpret_cast<const char *>(fdata),
+                  static_cast<std::streamsize>(elemCount * sizeof(float)));
+        std::cout << "  Dumped " << elemCount << " f32 values to " << dump
+                  << "\n";
+      }
+    }
   }
 
   // NaN/Inf validation for floating-point types
@@ -374,12 +462,40 @@ static bool parseMetadata(const char *json_str, std::vector<TensorMeta> &inputs,
 
   return parseTensors("inputs", inputs) && parseTensors("outputs", outputs);
 }
+
+/// Parse one stdin record of comma-separated int64 token ids.
+static bool parseTokenIds(const std::string &line, size_t expected,
+                          std::vector<int64_t> &ids, std::string &error) {
+  ids.clear();
+  std::istringstream stream(line);
+  std::string token;
+  while (std::getline(stream, token, ',')) {
+    if (token.empty()) {
+      error = "empty token id";
+      return false;
+    }
+    try {
+      ids.push_back(std::stoll(token));
+    } catch (const std::exception &) {
+      error = "invalid token id '" + token + "'";
+      return false;
+    }
+  }
+  if (ids.size() != expected) {
+    error = "expected " + std::to_string(expected) + " token ids, got " +
+            std::to_string(ids.size());
+    return false;
+  }
+  return true;
+}
+
 int main(int argc, char **argv) {
   hip::install_crash_handlers("hip-test");
   if (argc < 2) {
     std::cerr << "Usage: " << argv[0]
               << " <model.{bc,dll,so}> [--input-shape INDEX=DIMS;...] "
-                 "[--iterations N] [--verbose] [--validate]\n";
+                 "[--inputs INDEX=FILE;...] [--iterations N] [--verbose] "
+                 "[--validate] [--token-ids-stdin POSITION|dynamic]\n";
     std::cerr << "Example: " << argv[0]
               << " model.bc --input-shape 0=8,3,224,224 --iterations 10 "
                  "--verbose --validate\n";
@@ -390,25 +506,41 @@ int main(int argc, char **argv) {
 
   std::string bc_path = argv[1];
   std::map<int, std::vector<int64_t>> shape_overrides;
+  std::map<int, std::string> input_files;
   int iterations = 1;
   bool verbose = false;
   bool validate = false;
+  int64_t tokenIdsPosition = -1;
+  bool tokenIdsStdin = false;
+  bool dynamicTokenIdsPosition = false;
 
   for (int i = 2; i < argc; i++) {
     std::string arg = argv[i];
     if (arg == "--input-shape" && i + 1 < argc) {
       shape_overrides = parseShapeOverrides(argv[++i]);
+    } else if (arg == "--inputs" && i + 1 < argc) {
+      input_files = parseInputFiles(argv[++i]);
     } else if (arg == "--iterations" && i + 1 < argc) {
       iterations = std::stoi(argv[++i]);
     } else if (arg == "--verbose") {
       verbose = true;
     } else if (arg == "--validate") {
       validate = true;
+    } else if (arg == "--token-ids-stdin" && i + 1 < argc) {
+      tokenIdsStdin = true;
+      const std::string positionArg = argv[++i];
+      if (positionArg == "dynamic")
+        dynamicTokenIdsPosition = true;
+      else
+        tokenIdsPosition = std::stoll(positionArg);
     }
   }
 
   if (verbose)
     std::cout << "Loading artifact: " << bc_path << "\n";
+  // Same split as hip-onnx-runner: session is load plus runtime init, and
+  // inference is only the compute call. Input fill sits between the two.
+  const auto sessionStart = std::chrono::steady_clock::now();
   // LoadedArtifact picks the format from the file extension and selects the
   // loader (LlvmIrJit for LLVM IR, morphizen::Plugin for native) -- the same
   // loader the EP uses, so the tool and the library never drift.
@@ -496,6 +628,9 @@ int main(int argc, char **argv) {
     }
   }
 
+  // Load and metadata are part of session setup. Input fill is not.
+  double sessionSeconds = elapsed_since(sessionStart);
+
   // Output shapes are NOT pre-computed here: in output-allocator mode the
   // model.dll sizes each graph output in-graph and requests its buffer via the
   // callback below (hip_test_allocate), passing the concrete shape at that
@@ -515,7 +650,19 @@ int main(int argc, char **argv) {
     size_t count = elementCount(input_shapes[i]);
     size_t sizeBytes = count * input_elem_sizes[i];
     std::vector<uint8_t> buffer(sizeBytes);
-    generateTestData(buffer.data(), sizeBytes, input_elem_sizes[i]);
+    auto file = input_files.find(static_cast<int>(i));
+    if (file != input_files.end()) {
+      std::string loadErr;
+      if (!loadRawInput(file->second, buffer, loadErr)) {
+        std::cerr << "ERROR: input " << i << ": " << loadErr << "\n";
+        return 1;
+      }
+      if (verbose)
+        std::cout << "  Loaded input " << i << " from " << file->second << " ("
+                  << sizeBytes << " bytes)\n";
+    } else {
+      generateTestData(buffer.data(), sizeBytes, input_elem_sizes[i]);
+    }
     input_buffers.push_back(std::move(buffer));
     input_shape_storage.push_back(input_shapes[i]);
 
@@ -549,6 +696,7 @@ int main(int argc, char **argv) {
   // directory, which matches the WORKING_DIRECTORY set in the e2e CMakeLists.
   mlir::hip::DiskFileSystem fs(".");
   void *state = nullptr;
+  const auto initStart = std::chrono::steady_clock::now();
   int ret = init_func(&state, &fs, /*config=*/nullptr);
   if (ret != 0) {
     std::cerr << "ERROR: inference_init failed with code " << ret << "\n";
@@ -558,11 +706,100 @@ int main(int argc, char **argv) {
   // Install the output allocator so the model.dll can request output buffers
   // in-graph. Cleared after the run so a stale `self` can never be used.
   set_alloc_func(state, &alloc);
+  sessionSeconds += elapsed_since(initStart);
+  std::cout << "Session created in "
+            << static_cast<int>(sessionSeconds * 1000) << " ms\n";
 
-  // Run inference
+  // Persistent decode mode used by small autoregressive clients. The model,
+  // constants, HIP state, input allocation, and output allocation stay alive.
+  // Each stdin line updates the one int64 input tensor and prints the argmax
+  // of one output position. This avoids reopening multi-GB constants and
+  // copying an entire logits tensor for every generated token.
+  if (tokenIdsStdin) {
+    if (num_inputs != 1 || input_elem_sizes[0] != sizeof(int64_t) ||
+        input_shapes[0].size() != 2 || input_shapes[0][0] != 1) {
+      std::cerr << "ERROR: --token-ids-stdin requires one [1,N] int64 input\n";
+      set_alloc_func(state, nullptr);
+      cleanup_func(state);
+      return 1;
+    }
+    const size_t tokenCount = elementCount(input_shapes[0]);
+    std::vector<int64_t> tokenIds;
+    std::string line, error;
+    std::cout << "READY\n" << std::flush;
+    while (std::getline(std::cin, line)) {
+      if (line == "QUIT")
+        break;
+      int64_t position = tokenIdsPosition;
+      if (dynamicTokenIdsPosition) {
+        const size_t separator = line.find(';');
+        if (separator == std::string::npos) {
+          std::cerr << "ERROR: expected POSITION;TOKEN_ID,... record\n";
+          continue;
+        }
+        try {
+          position = std::stoll(line.substr(0, separator));
+        } catch (const std::exception &) {
+          std::cerr << "ERROR: invalid logits position\n";
+          continue;
+        }
+        line.erase(0, separator + 1);
+      }
+      if (!parseTokenIds(line, tokenCount, tokenIds, error)) {
+        std::cerr << "ERROR: " << error << "\n";
+        continue;
+      }
+      std::memcpy(input_buffers[0].data(), tokenIds.data(),
+                  tokenCount * sizeof(int64_t));
+      ret = compute_func(state, &inputs_span);
+      if (ret != 0) {
+        std::cerr << "ERROR: inference_compute failed with code " << ret
+                  << "\n";
+        break;
+      }
+      if (octx.outs.empty() || octx.outs[0].elem_size != sizeof(float) ||
+          octx.outs[0].shape.size() != 3 || octx.outs[0].shape[0] != 1 ||
+          position < 0 || position >= octx.outs[0].shape[1]) {
+        std::cerr << "ERROR: expected f32 logits with shape [1,N,V]\n";
+        break;
+      }
+      const OutputSlot &slot = octx.outs[0];
+      const size_t vocab = static_cast<size_t>(slot.shape[2]);
+      const size_t offset = static_cast<size_t>(position) * vocab;
+      std::vector<float> logits(vocab);
+#ifdef HIPDNN_EP_LINK_HIP_HOST
+      hipError_t e = hipMemcpy(logits.data(),
+                               static_cast<const uint8_t *>(slot.gpu) +
+                                   offset * sizeof(float),
+                               vocab * sizeof(float), hipMemcpyDeviceToHost);
+      if (e != hipSuccess) {
+        std::cerr << "ERROR: D2H logits copy failed: " << hipGetErrorString(e)
+                  << "\n";
+        break;
+      }
+#else
+      std::memcpy(logits.data(), slot.host.data() + offset * sizeof(float),
+                  vocab * sizeof(float));
+#endif
+      const auto it = std::max_element(logits.begin(), logits.end());
+      std::cout << std::distance(logits.begin(), it) << "\n" << std::flush;
+    }
+    set_alloc_func(state, nullptr);
+    (void)cleanup_func(state);
+#ifdef HIPDNN_EP_LINK_HIP_HOST
+    for (auto &slot : octx.outs)
+      if (slot.gpu)
+        (void)hipFree(slot.gpu);
+#endif
+    return 0;
+  }
+
+  // Run inference. The timer covers inference_compute only, matching
+  // hip-onnx-runner's session->Run() measurement. Validation copies are later.
   if (verbose)
     std::cout << "Running inference (" << iterations << " iteration(s))...\n";
 
+  const auto inferStart = std::chrono::steady_clock::now();
   for (int iter = 0; iter < iterations; iter++) {
     ret = compute_func(state, &inputs_span);
     if (ret != 0) {
@@ -576,6 +813,9 @@ int main(int argc, char **argv) {
     if (verbose && iterations > 1)
       std::cout << "  Iteration " << (iter + 1) << "/" << iterations << "\n";
   }
+  std::cout << "Inference: "
+            << static_cast<int64_t>(elapsed_since(inferStart) * 1e6)
+            << " us\n";
 
   set_alloc_func(state, nullptr);
 

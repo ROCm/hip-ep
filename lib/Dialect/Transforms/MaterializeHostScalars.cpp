@@ -19,9 +19,21 @@
 //             : memref<?xi8> to memref<1xi32>
 //         memref.store %n, %a[%c0] : memref<1xi32>
 //
+// A small initialized `memref.global` read by a HIP consumer lives in host
+// memory the device cannot read. Copy it into scratch after its get_global
+// and redirect every other user to the scratch view.
+//
+// Before: %g = memref.get_global @mask : memref<1xi1>
+//         hip.op(%ctx, %g, ...)
+// After:  %g = memref.get_global @mask : memref<1xi1>
+//         %v = memref.view %scratch[%offset][] : memref<?xi8> to memref<1xi1>
+//         memref.copy %g, %v : memref<1xi1> to memref<1xi1>
+//         hip.op(%ctx, %v, ...)
+//
 // Limits: at most 16 elements; context in argument zero; no unknown consumers.
-// Float buffers need a HIP consumer. This bounded rule does not make all host
-// accesses safe. Larger and unsupported allocations need separate handling.
+// Float buffers and globals need a HIP consumer. This bounded rule does not
+// make all host accesses safe. Larger and unsupported allocations need
+// separate handling.
 //
 //===----------------------------------------------------------------------===//
 
@@ -33,6 +45,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/IR/SymbolTable.h"
 #include "mlir/Interfaces/DataLayoutInterfaces.h"
 #include "mlir/Interfaces/ViewLikeInterface.h"
 
@@ -173,16 +186,18 @@ static bool isCopyReadbackCandidate(memref::AllocOp allocOp) {
   return hasCopy && hasReadback;
 }
 
-static bool isHostScalarCandidate(memref::AllocOp allocOp) {
-  MemRefType type = allocOp.getType();
-  if (!type.hasStaticShape())
-    return false;
-  if (type.getNumElements() > 16)
+static bool isSmallScalarType(MemRefType type) {
+  if (!type.hasStaticShape() || type.getNumElements() > 16)
     return false;
   Type elem = type.getElementType();
-  bool isFloat = isa<FloatType>(elem);
-  if (!elem.isIntOrIndex() && !isFloat)
+  return elem.isIntOrIndex() || isa<FloatType>(elem);
+}
+
+static bool isHostScalarCandidate(memref::AllocOp allocOp) {
+  MemRefType type = allocOp.getType();
+  if (!isSmallScalarType(type))
     return false;
+  bool isFloat = isa<FloatType>(type.getElementType());
 
   bool hasHostIO = false;
   bool hasHipUser = false;
@@ -190,6 +205,28 @@ static bool isHostScalarCandidate(memref::AllocOp allocOp) {
     return false;
   return (hasHostIO && (!isFloat || hasHipUser)) ||
          isCopyReadbackCandidate(allocOp);
+}
+
+// A bufferized splat below the constant-externalization threshold stays a
+// `memref.global` in host memory that was never registered with the device,
+// so a GPU kernel reading it sees zeros. A one-element `dense<true>` mask is
+// the usual case: every attention position becomes -inf and softmax yields
+// NaN.
+static bool isHostGlobalCandidate(memref::GetGlobalOp getGlobal) {
+  auto global = SymbolTable::lookupNearestSymbolFrom<memref::GlobalOp>(
+      getGlobal, getGlobal.getNameAttr());
+  if (!global || !global.getInitialValue() ||
+      global->hasAttr("hip.external_data"))
+    return false;
+  if (!isSmallScalarType(getGlobal.getType()))
+    return false;
+  // The global itself is the host-side source, so no store is expected; a
+  // HIP consumer is what needs device-readable memory.
+  bool hasHostIO = false;
+  bool hasHipUser = false;
+  if (!classifyHostScalarUsers(getGlobal.getResult(), hasHostIO, hasHipUser))
+    return false;
+  return hasHipUser;
 }
 
 namespace {
@@ -209,10 +246,15 @@ void MaterializeHostScalarsPass::runOnOperation() {
     return;
   Value ctx = funcOp.getArgument(0);
 
-  // Collect candidates before rewriting. Keep their traversal order.
-  SmallVector<memref::AllocOp> candidates;
+  // Collect candidates before rewriting. Keep their traversal order: allocs
+  // first, then globals, so existing alloc scratch offsets are unchanged.
+  SmallVector<Operation *> candidates;
   funcOp.walk([&](memref::AllocOp op) {
     if (isHostScalarCandidate(op))
+      candidates.push_back(op);
+  });
+  funcOp.walk([&](memref::GetGlobalOp op) {
+    if (isHostGlobalCandidate(op))
       candidates.push_back(op);
   });
   if (candidates.empty())
@@ -224,8 +266,8 @@ void MaterializeHostScalarsPass::runOnOperation() {
   int64_t total = 0;
   // Match the default layout used by HIP-to-LLVM, including element padding.
   const DataLayout dataLayout;
-  for (memref::AllocOp allocOp : candidates) {
-    MemRefType ty = allocOp.getType();
+  for (Operation *op : candidates) {
+    auto ty = cast<MemRefType>(op->getResult(0).getType());
     Type elemTy = ty.getElementType();
     int64_t elemBytes =
         llvm::alignTo(dataLayout.getTypeSize(elemTy).getFixedValue(),
@@ -248,23 +290,35 @@ void MaterializeHostScalarsPass::runOnOperation() {
       GetHostScratchOp::create(builder, loc, scratchType, ctx, totalSize);
 
   // The runtime owns scratch. Replace allocations and erase their deallocs.
-  for (auto [allocOp, offset] : llvm::zip(candidates, offsets)) {
-    builder.setInsertionPoint(allocOp);
+  // A global stays as the copy source; its view must follow the get_global.
+  for (auto [op, offset] : llvm::zip(candidates, offsets)) {
+    auto ty = cast<MemRefType>(op->getResult(0).getType());
+    if (isa<memref::GetGlobalOp>(op))
+      builder.setInsertionPointAfter(op);
+    else
+      builder.setInsertionPoint(op);
     Value offsetVal =
-        arith::ConstantIndexOp::create(builder, allocOp.getLoc(), offset);
-    auto view = memref::ViewOp::create(builder, allocOp.getLoc(),
-                                       allocOp.getType(), scratch, offsetVal,
-                                       /*sizes=*/ValueRange{});
+        arith::ConstantIndexOp::create(builder, op->getLoc(), offset);
+    auto view = memref::ViewOp::create(builder, op->getLoc(), ty, scratch,
+                                       offsetVal, /*sizes=*/ValueRange{});
 
-    SmallVector<memref::DeallocOp> deallocs;
-    for (Operation *user : allocOp->getUsers())
-      if (auto d = dyn_cast<memref::DeallocOp>(user))
-        deallocs.push_back(d);
-    for (auto d : deallocs)
-      d.erase();
+    if (auto allocOp = dyn_cast<memref::AllocOp>(op)) {
+      SmallVector<memref::DeallocOp> deallocs;
+      for (Operation *user : allocOp->getUsers())
+        if (auto d = dyn_cast<memref::DeallocOp>(user))
+          deallocs.push_back(d);
+      for (auto d : deallocs)
+        d.erase();
 
-    allocOp.replaceAllUsesWith(view.getResult());
-    allocOp.erase();
+      allocOp.replaceAllUsesWith(view.getResult());
+      allocOp.erase();
+    } else {
+      auto copy = memref::CopyOp::create(builder, op->getLoc(),
+                                         op->getResult(0), view.getResult());
+      op->getResult(0).replaceUsesWithIf(view.getResult(), [&](OpOperand &use) {
+        return use.getOwner() != copy;
+      });
+    }
     ++NumAllocsMaterialized;
     LLVM_DEBUG(llvm::dbgs()
                << "  Materialized " << view << " at offset " << offset << "\n");

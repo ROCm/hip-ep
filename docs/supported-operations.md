@@ -16,7 +16,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | NhwcConv (`com.microsoft`) | Rank-4 NHWC activations and `[M, kH, kW, C/group]` weights are transposed into `hip.conv` and the result is transposed back. Static weights are permuted while lowering |
 | ConvTranspose | Custom HIP kernel |
 | MatMul | hipBLASLt |
-| Einsum | Static binary contraction decomposed to Transpose + MatMul (hipBLASLt). An equation with no contracted index, such as `bc,d->bcd`, is a reshape plus `hip.mul` when the element type is f16 or f32 and the rank is at most 4 |
+| Einsum | Static binary contraction decomposed to Transpose + MatMul (hipBLASLt). An equation with no contracted index, such as `bc,d->bcd`, is a reshape plus `hip.mul` when the element type is f16 or f32 and the rank is at most 4. The attention contractions `bhlk,bhtk->bhlt` and `bhlt,bhtv->bhlv` also lower with dynamic extents |
 | Gemm | hipBLASLt |
 | Transpose | Custom HIP kernel |
 | Mul | Custom HIP kernel |
@@ -134,6 +134,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | CausalConvWithState (`com.microsoft`) | Custom HIP kernel |
 | NGramHashMapping (`com.microsoft`) | Custom HIP kernel. int32/int64 |
 | Relu | Decomposed to Max |
+| HardSwish | Decomposed to HardSigmoid and Mul |
 | LeakyRelu | Custom HIP kernel |
 | PRelu | Custom HIP kernel. Slope broadcasts onto X; f16/bf16/f32/f64 |
 | LRN | Custom HIP kernel. Channel window, rank >= 2, f16/bf16/f32/f64 |

@@ -241,6 +241,22 @@ func.func @no_context_arg_left_alone(%x: i64) -> i64 {
   return %v : i64
 }
 
+// A tiny in-module memref.global is host memory. Copy it into host-mapped
+// scratch before a GPU kernel reads it. dense<true> left as a global makes
+// an attention mask all-false.
+// CHECK-LABEL: func.func @global_i1_to_scratch
+// CHECK:         %[[SCRATCH:.*]] = hip.get_host_scratch
+// CHECK:         %[[V:.*]] = memref.view %[[SCRATCH]]{{.*}} : memref<?xi8> to memref<i1>
+// CHECK:         memref.copy %{{.*}}, %[[V]]
+// CHECK:         hip.and{{.*}}ins(%[[V]]
+memref.global "private" constant @__constant_xi1_test : memref<i1> = dense<true>
+func.func @global_i1_to_scratch(%ctx: !hip.context, %mask: memref<4xi1>,
+                                %out: memref<4xi1>) {
+  %g = memref.get_global @__constant_xi1_test : memref<i1>
+  hip.and(%ctx) ins(%g, %mask : memref<i1>, memref<4xi1>) outs(%out : memref<4xi1>)
+  return
+}
+
 // LLVM's i48 array stride is 8 bytes, not its 6-byte payload size.
 // CHECK-LABEL: func.func @padded_elements
 // CHECK: %[[SIZE:.*]] = arith.constant 192 : index

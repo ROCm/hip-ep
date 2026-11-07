@@ -235,7 +235,9 @@ static MatmulCacheEntry *queryOrCreateMatmul(MatmulAlgoTable &table,
   MATMUL_CACHE_CHECK(hipblasLtMatrixLayoutCreate(&entry.layC, dt, N, M, N));
 
   if (key.batch_count > 1) {
-    int64_t bc = key.batch_count;
+    // hipBLASLt requires int32_t for BATCH_COUNT. An int64_t with sizeof 8
+    // corrupts the layout; the matching GQA/MHA paths already pass int32_t.
+    int32_t bc = static_cast<int32_t>(key.batch_count);
     // layA → user's B. The stride is whatever the compiler computed —
     // 0 for broadcast B (rank-2 [K,N] or rank-N [1,...,1,K,N]), K*N for
     // per-batch B (rank-N with leading-dim product > 1). Setting sA = K*N

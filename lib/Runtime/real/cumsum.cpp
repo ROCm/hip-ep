@@ -75,13 +75,17 @@ int wrap_cumsum(RuntimeState *state, void *x, void *axis, void *y,
 
   // ONNX CumSum-14: axis is a 0-D scalar (single element) of int32 or
   // int64. The MLIR pipeline doesn't fold this constant for us, so we
-  // synchronously D2H-read it. This adds one stall per CumSum call --
+  // synchronously read it back. This adds one stall per CumSum call --
   // acceptable because the op typically occurs once or twice per graph.
+  //
+  // hipMemcpyDefault, not DeviceToHost: a host-written axis (tensor.from_elements
+  // / aten dim) lives in hip-materialize-host-scalars scratch. An explicit D2H
+  // of that pointer returns hipErrorInvalidValue. UVA picks the direction.
   int64_t axis_value = 0;
   if (axis_dtype == HIPDNN_EP_DATATYPE_INT32) {
     int32_t a32 = 0;
     hipError_t err = hipMemcpyAsync(&a32, axis, sizeof(int32_t),
-                                    hipMemcpyDeviceToHost, hip_stream);
+                                    hipMemcpyDefault, hip_stream);
     if (err != hipSuccess) {
       fprintf(stderr, "[REAL] wrap_cumsum: D2H axis (int32) failed: %s\n",
               hipGetErrorString(err));
@@ -97,7 +101,7 @@ int wrap_cumsum(RuntimeState *state, void *x, void *axis, void *y,
     axis_value = static_cast<int64_t>(a32);
   } else if (axis_dtype == HIPDNN_EP_DATATYPE_INT64) {
     hipError_t err = hipMemcpyAsync(&axis_value, axis, sizeof(int64_t),
-                                    hipMemcpyDeviceToHost, hip_stream);
+                                    hipMemcpyDefault, hip_stream);
     if (err != hipSuccess) {
       fprintf(stderr, "[REAL] wrap_cumsum: D2H axis (int64) failed: %s\n",
               hipGetErrorString(err));
