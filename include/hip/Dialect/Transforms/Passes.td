@@ -153,9 +153,9 @@ def ConvertHipToLLVMPass : Pass<"convert-hip-to-llvm", "mlir::ModuleOp"> {
 
     Backend Selection:
       --use-dynamic-dispatch: Route GEMM and Conv operations to DynamicDispatch
-                              (NPU/IPU via XRT) instead of GPU backends
-                              (MIOpen/hipBLASLt). Other operations continue to
-                              use GPU backends.
+                              (NPU/IPU via XRT) instead of the GPU, for the
+                              shapes DynamicDispatch supports. Other operations
+                              continue to use the GPU.
   }];
   let options = [
     Option<"reportHostScalars", "report-host-scalars", "bool",

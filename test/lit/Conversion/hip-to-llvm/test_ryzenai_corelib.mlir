@@ -14,6 +14,8 @@
 // ============================================================================
 
 // RUN: hip-mlir-opt --assign-op-state-slots --convert-hip-to-llvm="use-ryzenai-corelib=true" %s | FileCheck %s
+// With DynamicDispatch also on: it routes other ops, so nothing here changes.
+// RUN: hip-mlir-opt --assign-op-state-slots --convert-hip-to-llvm="use-ryzenai-corelib=true use-dynamic-dispatch=true" %s | FileCheck %s
 // RUN: hip-mlir-opt --assign-op-state-slots --convert-hip-to-llvm %s | FileCheck %s --check-prefix=GPU
 
 // CHECK-DAG: llvm.func @wrap_corelib_matmul_nbits(!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32

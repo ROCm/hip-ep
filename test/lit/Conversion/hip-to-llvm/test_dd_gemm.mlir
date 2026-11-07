@@ -14,6 +14,8 @@
 // ============================================================================
 
 // RUN: hip-mlir-opt %s --convert-hip-to-llvm="use-dynamic-dispatch=true" | FileCheck %s
+// With the CoreLib per-op backend also on: it routes other ops, so nothing here changes.
+// RUN: hip-mlir-opt %s --convert-hip-to-llvm="use-dynamic-dispatch=true use-ryzenai-corelib=true" | FileCheck %s
 
 module {
   // CHECK-DAG: llvm.func @wrap_dd_matmul(!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f64, f64, i64, i64, i64) -> i32

@@ -15,13 +15,13 @@ namespace {
 //===----------------------------------------------------------------------===//
 //
 // These patterns lower HIP dialect operations to DynamicDispatch (Vitis AI /
-// XRT NPU backend) runtime wrappers instead of GPU backends (MIOpen/hipBLASLt).
+// XRT NPU backend) runtime wrappers instead of the GPU wrappers.
 //
 // Enabled via --use-dynamic-dispatch pass option.
 //
 // Pattern:
 //   hip.gemm → wrap_dd_matmul (NPU) instead of wrap_gemm (GPU/hipBLASLt)
-//   hip.conv → wrap_dd_conv2d (NPU) instead of wrap_miopenConvolutionForward
+//   hip.conv → wrap_dd_conv2d (NPU) instead of wrap_conv (GPU)
 //
 // DD kernels only exist for a few exact shapes
 // (hip/dynamic_dispatch_support.h). These patterns are registered alongside the
