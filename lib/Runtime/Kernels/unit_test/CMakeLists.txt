@@ -144,6 +144,9 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
     hipdnn-kernel-ut-gqa-prefill-xfp16-wi8-yfp16
     gqa/prefill/Xfp16_Wi8_Yfp16/test_gqa_prefill_i8.cpp)
   add_kernel_package_ut(${_arch}
+    hipdnn-kernel-ut-gqa-softmax-xfp32-wbf16-ybf16
+    gqa/softmax/Xfp32_Wbf16_Ybf16/test_gqa_softmax.cpp)
+  add_kernel_package_ut(${_arch}
     hipdnn-kernel-ut-qmoe-ragged-mm-xfp16-wu4-yfp16
     qmoe_ragged_mm/Xfp16_Wu4_Yfp16/test_qmoe_ragged_mm.cpp)
   add_kernel_package_ut(${_arch}

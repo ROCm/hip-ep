@@ -66,6 +66,7 @@ prefix gets one `kernel-tests/<arch>/`, named exactly like that entry's
     hipdnn-kernel-ut-gqa-decode-xfp16-wi8-yfp16.exe
     hipdnn-kernel-ut-gqa-prefill-xfp16-wfp16-yfp16.exe
     hipdnn-kernel-ut-gqa-prefill-xfp16-wi8-yfp16.exe
+    hipdnn-kernel-ut-gqa-softmax-xfp32-wbf16-ybf16.exe
     hipdnn-kernel-ut-gather-block-quantized-xi64-wu4-yfp16.exe
     hipdnn-kernel-ut-gather-block-quantized-xi64-wu8-yfp16.exe
     hipdnn-kernel-ut-gather-block-quantized-xi64-wfp8-yfp16.exe
@@ -236,6 +237,7 @@ Examples:
 | `gqa/decode/Xfp16_Wi8_Yfp16` | Q/O fp16, KV cache int8 |
 | `gqa/prefill/Xfp16_Wfp16_Yfp16` | same for prefill |
 | `gqa/prefill/Xfp16_Wi8_Yfp16` | prefill INT8 KV |
+| `gqa/softmax/Xfp32_Wbf16_Ybf16` | decomposed-path softmax: fp32 scores, bf16 mask, bf16 probabilities |
 
 If input becomes fp8 later: add `Xfp8_Wfp16_Yfp16`, do **not** rename the
 existing fp16 leaf to a bare `fp16/` or `fp8/`. A folder named `fp16` or `i8`
@@ -259,6 +261,7 @@ unit_test/
   gqa/decode/Xfp16_Wi8_Yfp16/
   gqa/prefill/Xfp16_Wfp16_Yfp16/
   gqa/prefill/Xfp16_Wi8_Yfp16/
+  gqa/softmax/Xfp32_Wbf16_Ybf16/
   qmoe_ragged_mm/Xfp16_Wu4_Yfp16/
   gather_block_quantized/Xi64_W{u4,u8,fp8}_Yfp16/
   cast/Xany_Yany_bf16/
@@ -398,6 +401,12 @@ COVERAGE=N` (any leaf, or the top-level aggregator) builds and runs it.
   negative indices, and one unsupported dtype, on sizes COVERAGE thins
   (tier1 = 2 sizes incl. a 512 x 512 mask, tier2 = 3, tier3 = 4). Outputs are
   compared bit-exactly with a CPU GatherND reference.
+- **gqa/softmax** (`Xfp32_Wbf16_Ybf16`): the decomposed-GQA softmax with bf16
+  probabilities, unbiased and with full, broadcast one-row and row-offset bf16
+  masks (plus fp16/fp16 and fp32/fp32 mask/output regression cases), and
+  three rejected calls, on shapes COVERAGE thins (tier1 = 3 shapes, tier2 = 5,
+  tier3 = 6). Outputs must be within one unit in the last place (plus a few
+  fp32 ulps of compute error) of a double CPU reference.
 
 A new op's test cpp should follow whichever of the above shapes fit it best:
 if the kernel's dispatch paths are better covered by a small hand-picked
