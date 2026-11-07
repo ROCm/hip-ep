@@ -14,7 +14,10 @@ namespace {
 //===----------------------------------------------------------------------===//
 
 struct MatMulNBitsOpLowering : public ConvertOpToLLVMPattern<MatMulNBitsOp> {
-  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+  MatMulNBitsOpLowering(const LLVMTypeConverter &converter,
+                        bool useRyzenAICorelib)
+      : ConvertOpToLLVMPattern(converter),
+        useRyzenAICorelib(useRyzenAICorelib) {}
 
   LogicalResult
   matchAndRewrite(MatMulNBitsOp op, OpAdaptor adaptor,
@@ -87,12 +90,6 @@ struct MatMulNBitsOpLowering : public ConvertOpToLLVMPattern<MatMulNBitsOp> {
         i64Type  // scale_elem_size
     };
 
-    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kWrapMatMulNBits, paramTypes, i32Type);
-    if (failed(funcOp)) {
-      return failure();
-    }
-
     SmallVector<Value, 18> args = {statePtr,
                                    getOpStateSlotValue(op, rewriter, loc),
                                    APtr,
@@ -112,17 +109,25 @@ struct MatMulNBitsOpLowering : public ConvertOpToLLVMPattern<MatMulNBitsOp> {
                                    zpElemSizeVal,
                                    scaleElemSizeVal};
 
-    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    if (failed(emitCallWithCorelibFallback(
+            rewriter, loc, module, kWrapMatMulNBits,
+            useRyzenAICorelib ? kWrapCorelibMatMulNBits : "",
+            getHipdnnDataType(AType.getElementType()), paramTypes, args)))
+      return failure();
     rewriter.eraseOp(op);
     return success();
   }
+
+private:
+  bool useRyzenAICorelib;
 };
 
 } // namespace
 
 void populateMatMulNBitsLoweringPatterns(const LLVMTypeConverter &converter,
-                                         RewritePatternSet &patterns) {
-  patterns.add<MatMulNBitsOpLowering>(converter);
+                                         RewritePatternSet &patterns,
+                                         bool useRyzenAICorelib) {
+  patterns.add<MatMulNBitsOpLowering>(converter, useRyzenAICorelib);
 }
 
 } // namespace hip

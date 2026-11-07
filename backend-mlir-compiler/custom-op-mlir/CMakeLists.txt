@@ -99,9 +99,14 @@ target_link_libraries(${LIB_NAME} PRIVATE
 # Native current-stream accessor: LlvmIrJit registers hipdnn_ep_get/set_current_
 # stream as absolute JIT symbols, so the host must define them. The reference in
 # LlvmIrJit.cpp also pulls this object into the EP DLL / hip-test / hip-inspect.
-target_link_libraries(${LIB_NAME} PRIVATE hipdnn-ep-corelib) # CORELIBMODEL op
 if(TARGET hipdnn-ep-tls)
   target_link_libraries(${LIB_NAME} PRIVATE hipdnn-ep-tls)
+endif()
+# Native RyzenAI CoreLib wrappers, registered as absolute JIT symbols the same
+# way, and the CORELIBMODEL op's model sessions (real or stub; see
+# lib/Runtime/CMakeLists.txt STEP 6b).
+if(TARGET hipdnn-ep-corelib)
+  target_link_libraries(${LIB_NAME} PRIVATE hipdnn-ep-corelib)
 endif()
 # Shared embedded runtime.bc (single source of truth, lib/Runtime). LlvmIrJit's
 # extern runtime_bc_data reference pulls the embed object in.

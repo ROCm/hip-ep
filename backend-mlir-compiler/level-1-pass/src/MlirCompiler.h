@@ -40,6 +40,7 @@ struct CompilationConfig {
   ArtifactFormat artifactFormat;
   int optLevel;
   bool skipConstantData = true;
+  bool useRyzenAICorelib = false;
 };
 
 // Compiled artifact (bytes + metadata)

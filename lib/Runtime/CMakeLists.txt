@@ -608,13 +608,18 @@ target_compile_definitions(hipdnn-ep-tls PRIVATE HIPDNN_EP_RT_NO_EXPORT)
 install(TARGETS hipdnn-ep-tls ARCHIVE DESTINATION lib)
 
 # ============================================================================
-# STEP 6b: RyzenAI CoreLib whole models (NOT bitcode)
+# STEP 6b: RyzenAI CoreLib (NPU) (NOT bitcode)
 # ============================================================================
-# A whole decoder model handed to CoreLib's model API (corelib_model.h) by the
-# level-1 pass and run by its CORELIBMODEL custom op. corelib itself is loaded
-# at runtime, so only its headers are needed here (RYZENAICORELIB_ROOT).
-# Without them, or in mock builds, a stub refuses every model and graphs
-# compile as usual. See docs/design/ryzenai-corelib-model.md.
+# Two uses of CoreLib, both loading it at runtime so only its headers are
+# needed here (RYZENAICORELIB_ROOT):
+# - per-op: wrap_corelib_* call into ryzenai_corelib, which the JIT cannot
+#   link, so they are compiled natively like hipdnn-ep-tls and reach the JIT
+#   as absolute symbols (LlvmIrJit); see docs/design/ryzenai-corelib-backend.md.
+# - whole models: a decoder handed to CoreLib's model API (corelib_model.h) by
+#   the level-1 pass and run by its CORELIBMODEL custom op; see
+#   docs/design/ryzenai-corelib-model.md.
+# Without CoreLib, or in mock builds, stubs report every op as not handled
+# (the generated code uses the GPU) and refuse every model.
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 if(NOT BUILD_MOCK_RUNTIME)
     find_package(RyzenAICorelib 0.66 QUIET)
@@ -622,11 +627,17 @@ endif()
 if(RyzenAICorelib_FOUND)
     message(STATUS "RyzenAI CoreLib ${RyzenAICorelib_VERSION}: "
                    "${RyzenAICorelib_INCLUDE_DIR}")
-    add_library(hipdnn-ep-corelib STATIC real/ryzenaicorelib_model.cpp
-        corelib_model_registry.cpp)
+    add_library(hipdnn-ep-corelib STATIC real/ryzenaicorelib.cpp
+        real/ryzenaicorelib_model.cpp corelib_model_registry.cpp)
     target_include_directories(hipdnn-ep-corelib PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/real
         ${RyzenAICorelib_INCLUDE_DIR})
+    if(DEFINED THEROCK_DIST)
+        target_include_directories(hipdnn-ep-corelib PRIVATE
+            ${THEROCK_DIST}/include)
+    endif()
+    target_link_libraries(hipdnn-ep-corelib PRIVATE hip::host)
     if(NOT WIN32)
         target_link_libraries(hipdnn-ep-corelib PRIVATE ${CMAKE_DL_LIBS})
     endif()
@@ -640,20 +651,31 @@ else()
         else()
             set(_corelib_root "$ENV{RYZENAICORELIB_ROOT}")
         endif()
+        set(_corelib_found_version "")
+        if(RyzenAICorelib_VERSION)
+            set(_corelib_found_version " (found ${RyzenAICorelib_VERSION})")
+        endif()
         message(WARNING
             "RYZENAICORELIB_ROOT is '${_corelib_root}', but no RyzenAI CoreLib "
-            "0.66 or later is there: include/ryzenai/corelib/base.h is missing "
-            "or too old. Building the stub, so no model is handed to CoreLib.")
+            "0.66 or later is there${_corelib_found_version}: "
+            "include/ryzenai/corelib/base.h is missing or too old. Building the "
+            "stub, so wrap_corelib_* always defer to the GPU and no model is "
+            "handed to CoreLib. Point "
+            "RYZENAICORELIB_ROOT at a CoreLib 0.66+ install, or clear the stale "
+            "RyzenAICorelib_INCLUDE_DIR cache entry.")
     else()
         message(STATUS "RyzenAI CoreLib not found (set RYZENAICORELIB_ROOT); "
-                       "no model is handed to CoreLib")
+                       "wrap_corelib_* always defer to the GPU and no model is "
+                       "handed to CoreLib")
     endif()
-    add_library(hipdnn-ep-corelib STATIC mock/ryzenaicorelib_model_stub.cpp
-        corelib_model_registry.cpp)
+    add_library(hipdnn-ep-corelib STATIC mock/ryzenaicorelib_stub.cpp
+        mock/ryzenaicorelib_model_stub.cpp corelib_model_registry.cpp)
     target_include_directories(hipdnn-ep-corelib PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR})
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/mock)
 endif()
 set_target_properties(hipdnn-ep-corelib PROPERTIES POSITION_INDEPENDENT_CODE ON)
+install(TARGETS hipdnn-ep-corelib ARCHIVE DESTINATION lib)
 
 # ============================================================================
 # STEP 7: Shared embedded runtime.bc (single source of truth)
