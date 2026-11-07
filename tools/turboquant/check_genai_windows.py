@@ -49,6 +49,7 @@ _dll_directories = [os.add_dll_directory(str(p)) for p in paths if p.is_dir()]
 import numpy as np  # noqa: E402 - initialize Windows DLL search paths first
 import onnx  # noqa: E402 - initialize Windows DLL search paths first
 from onnx import helper as h, TensorProto as T, numpy_helper as nh  # noqa: E402 - initialize Windows DLL search paths first
+import onnxruntime as ort  # noqa: E402 - initialize Windows DLL search paths first
 import onnxruntime_genai as og  # noqa: E402 - initialize Windows DLL search paths first
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -369,5 +370,27 @@ for codec, prompt_length in (
     print("PASS", records[-1], flush=True)
     del g, p, m
 (WORK / "receipt.json").write_text(
-    json.dumps({"status": "passed", "records": records}, indent=2) + "\n"
+    json.dumps(
+        {
+            "status": "passed",
+            "environment": {
+                "python": sys.executable,
+                "genai_version": og.__version__,
+                "genai_module": og.__file__,
+                "ort_version": ort.__version__,
+                "ort_module": ort.__file__,
+                "onnx_version": onnx.__version__,
+                "onnx_module": onnx.__file__,
+                "numpy_version": np.__version__,
+                "numpy_module": np.__file__,
+                "thread_settings": {
+                    key: os.environ.get(key)
+                    for key in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS")
+                },
+            },
+            "records": records,
+        },
+        indent=2,
+    )
+    + "\n"
 )

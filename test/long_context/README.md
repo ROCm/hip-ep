@@ -19,8 +19,9 @@ Use one HIP-EP build for the three OGA paths, with an optional independent BF16 
 | `turboquant` | `HIPDNN_EP_USE_RING_ATTENTION=1` plus codec provider options | packed 4-bit / Ring with mixed-cache append / TurboQuant |
 
 Both `HIP_EP_ENABLE_RING_ATTENTION` and `HIP_EP_ENABLE_TURBOQUANT` default ON.
-Use a compatible GenAI with AMDGPU continuous append and pending-token handling;
-see [the companion patch](../../tools/turboquant/patches/onnxruntime-genai-0.17-amdgpu-append.patch).
+Use HIP-EP main's GenAI 0.19.0 + PR #2875 and ORT 1.31.0. AMDGPU continuous
+append and pending-token handling are already upstream; follow the
+[matching SDK and Python-wheel setup](../../tools/turboquant/README.md#3-build-the-same-genai-stack-as-hip-ep-main).
 Generate codec assets during build/setup, never add BIN/NPZ/model/logit files to Git.
 The harness requires the Qwen geometry (24Q/4KV/D256 and 16 full-attention layers).
 
@@ -105,7 +106,7 @@ branch or PR description. Do not report an unrun judge as passed.
 Omit both `--torch-model` and `--torch-python` for the three OGA paths alone.
 For four paths, use the matching original BF16 checkpoint and an isolated Python
 environment that reuses the established Ring dependency paths: NumPy 2.4.3,
-ORT 1.31.0, GenAI 0.17.0, HIP 7.15, and `OMP_NUM_THREADS=2` /
+ORT 1.31.0, GenAI 0.19.0 + PR #2875, HIP 7.15, and `OMP_NUM_THREADS=2` /
 `OPENBLAS_NUM_THREADS=2`. Verify imported module paths as well as versions;
 creating a system-site-packages venv alone can expose the base Conda NumPy
 instead of Ring's NumPy. Do not replace the validated NumPy or allow duplicate
@@ -135,17 +136,17 @@ general long-context answer quality, even when the judge assigns perfect scores.
 ### Environment
 
 Use the [tested setup](../../tools/turboquant/README.md#enable-turboquant-on-the-tested-windows-setup)
-for all OGA arms, including the GenAI append companion. Record interpreter and
-package paths, toolchain, DLL hashes and thread settings. Enable debug tracing
+for all OGA arms, including the matching GenAI 0.19 core and Python binding.
+Record interpreter and package paths, toolchain, DLL hashes and thread settings. Enable debug tracing
 for dispatch checks; disable it for the separate performance campaign.
 
 ## Performance-only campaign (Windows)
 
 `run_turboquant_performance.py` explicitly measures all three OGA configurations
 from the same installed build. It is absent from default CI/CTest/pytest. Use the
-PR1366 Python/ROCm environment and the append-capable GenAI companion described
-above. It forces debug/performance tracing off, two OpenMP/OpenBLAS threads and
-strict GPU offload. Run on AC power with no other GPU jobs or builds.
+prepared Python/ROCm environment and the same GenAI 0.19 / ORT 1.31 stack
+for every OGA arm, as described above. It forces debug/performance tracing off,
+two OpenMP/OpenBLAS threads and strict GPU offload. Run on AC power with no other GPU jobs or builds.
 
 ```powershell
 # Build the small allocation counter once in an MSVC developer shell.
@@ -161,7 +162,7 @@ python test/long_context/run_turboquant_performance.py all `
   --constants C:/work/reference/codec/constants.npz `
   --sdk-devel C:/path/to/_rocm_sdk_devel `
   --sdk-core C:/path/to/_rocm_sdk_core `
-  --genai-pythonpath C:/work/install/genai-append `
+  --genai-pythonpath C:/work/install/genai019_ci131 `
   --memory-counter C:/work/build/windows_memory_counter.dll `
   --output C:/work/results/current-performance
 ```

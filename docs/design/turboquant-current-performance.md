@@ -8,7 +8,9 @@ Revision scope: these tables retain the measured source revision below. Later
 main merges, most recently `4ab7265aa96832ac2cdc73b4b605ec76838f722c`, change
 GQA host-length handling and Qwen LinearAttention/SwiGLU/RMSNorm execution.
 Their sanity validation is separate; these timings have not been remeasured
-on those merges.
+on those merges or on the later GenAI 0.19 dependency alignment. The GenAI
+0.17 setup used for this campaign is preserved in the
+[pre-migration guide](https://github.com/ROCm/hip-ep/blob/9a95f45e45307c469cdc4ca0733687c12900b14f/tools/turboquant/README.md).
 
 All three configurations use source `112c3c5b98d82666a9d75205ed149b1d5e8f53d8`, merged main/Ring PR1366, and the same installed HIP-EP/kernel DLLs. No historical kernel measurements or accuracy-diagnostic timings are mixed into these tables. No warm-up calls; every measured request from the final protocol is retained. First-use costs remain in raw samples. Kernel tables use three-round medians; model tables use the arithmetic mean of two measured requests/conversations.
 

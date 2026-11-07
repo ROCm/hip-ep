@@ -16,13 +16,18 @@ is not a production-quality accuracy claim.
 This walkthrough covers Radeon 8060S (`gfx1151`), batch one, Qwen3.8-27B with
 24 query heads, four KV heads, head dimension 256, FP16 activations/cache carrier,
 and external RoPE. INT4 **weights** alone do not enable compressed KV. The
-current environment uses Python 3.13, ORT 1.31.0, NumPy 2.4.3, GenAI 0.17.0
-with the append companion, and TheRock 7.15.26333, aligned with Ring PR1366.
+dependency stack follows HIP-EP main: **GenAI 0.19.0 + PR #2875 and ORT
+1.31.0**, as pinned in [Windows dependencies](../../.github/workflows/windows-deps.yml)
+and [`cmake/deps.txt`](../../cmake/deps.txt). The local qualification uses Python
+3.13, NumPy 2.4.3, ONNX 1.19.1 and TheRock 7.15.26333. The Python `onnx` package
+is intentionally unpinned in HIP-EP; it is separate from the ORT SDK/runtime.
 For the recorded three-configuration timing and memory campaign, use the
 [performance report](../../docs/design/turboquant-current-performance.md) and
 [manual performance command](../../test/long_context/README.md#performance-only-campaign-windows).
-It includes kernels through 256K, single-turn model runs through 64K, and eight
-4K appends, without warm-up. Accuracy and judge findings are separate.
+That historical campaign used GenAI 0.17 with its append companion; it includes
+kernels through 256K, single-turn model runs through 64K, and eight 4K appends,
+without warm-up. Those timings are not a GenAI 0.19 performance measurement.
+Accuracy and judge findings are separate.
 
 Older performance tables used ORT 1.30 and are not current-main measurements.
 Other configurations need separate validation. See the
@@ -64,7 +69,8 @@ build, instead of inheriting a different Conda NumPy or upgrading dependencies.
 Verify imported paths as well as versions. Required setup packages include
 SciPy, pytest, ONNX and psutil. Do not use `KMP_DUPLICATE_LIB_OK` to bypass an
 OpenMP conflict. HIP-EP builds against the ORT 1.31 SDK and uses the 1.31 runtime.
-The retained GenAI companion has separate SDK provenance described in step 3.
+Build GenAI against that same SDK and build its matching Python wheel as in
+step 3. Do not reuse a GenAI 0.17 binding with the 0.19 core DLL.
 
 ### 2. Build Ring-KV plus TurboQuant and generate the codec
 
@@ -111,54 +117,57 @@ Use a library built with Ring unavailable for this check, not the enabled
 For an already configured build, the exact CMake-only generation commands and
 hash checks are in [Generate codec assets](#generate-codec-assets-during-build-or-test-setup).
 
-### 3. Build the GenAI companion patch for multi-turn append
+### 3. Build the same GenAI stack as HIP-EP main
 
-Single-turn use can use stock GenAI 0.17, but repeated prompt append on AMDGPU
-requires this patch. Start from a separate **v0.17.0** source tree and a matching
-ORT 1.30.0 SDK containing headers and libraries. Use an SDK prepared through the
-quick start or the matching official ORT release archive; the Python wheel alone
-is not the C++ SDK. Set `$GenaiOrtSdk` to its extracted root. This retained
-companion is loaded with the Ring ORT 1.31 runtime; only the GenAI core DLL
-differs from the original Ring Python package. Its release C API is validated
-by the append integration test. Stock v0.17 experimental ModelPackage headers
-prevent a straightforward rebuild with the 1.31 SDK, so do not silently treat
-these SDKs as interchangeable or claim the companion was rebuilt with 1.31.
+GenAI 0.19 already admits AMDGPU continuous decoding and calls
+`RunGeneratedToken()` before a new prompt append. No TurboQuant companion patch
+is needed. Use main's existing PR #2875, which updates ONNX Runtime Extensions;
+it is not a TurboQuant lifecycle patch. Keep the revision/patch set aligned with
+the dependency workflow if main changes.
+
+From the prepared x64 MSVC developer shell, with NuGet, CMake and Ninja on
+`PATH`, use a fresh source/build/package directory:
 
 ```powershell
-$GenaiSource = "$WorkRoot/deps/genai-append-src"
-$GenaiBuild = "$WorkRoot/build/genai-append"
-$GenaiPackageRoot = "$WorkRoot/install/genai_append"
-$GenaiOrtSdk = "$WorkRoot/deps/onnxruntime-sdk/onnxruntime-win-x64-1.30.0"
-# Clone only if this source directory does not already exist.
-git clone --branch v0.17.0 --depth 1 https://github.com/microsoft/onnxruntime-genai.git $GenaiSource
-$Patch = "$Repo/tools/turboquant/patches/onnxruntime-genai-0.17-amdgpu-append.patch"
-git -C $GenaiSource apply --check $Patch
-git -C $GenaiSource apply $Patch
-cmake -S $GenaiSource -B $GenaiBuild -G Ninja -DCMAKE_BUILD_TYPE=Release `
-  "-DORT_HOME=$GenaiOrtSdk" -DUSE_CUDA=OFF -DUSE_DML=OFF -DENABLE_PYTHON=OFF `
-  -DENABLE_TESTS=OFF -DENABLE_MODEL_BENCHMARK=OFF -DENABLE_TELEMETRY=OFF
-cmake --build $GenaiBuild --target onnxruntime-genai --parallel 12
-```
-
-CMake fetches its pinned dependencies, including ONNX Runtime Extensions.
-The tested setup reused the existing **cp313 GenAI 0.17** Python binding and
-replaced only the core DLL in a separate package. With that same version/ABI:
-
-```powershell
-# Run before pointing PYTHONPATH at a patched package.
-$StockPackage = & $Python -c 'import importlib.util,pathlib; print(pathlib.Path(importlib.util.find_spec("onnxruntime_genai").origin).parent)'
-New-Item -ItemType Directory -Force $GenaiPackageRoot | Out-Null
-Copy-Item -LiteralPath $StockPackage -Destination $GenaiPackageRoot -Recurse
-Copy-Item -LiteralPath "$GenaiBuild/onnxruntime-genai.dll" `
-  -Destination "$GenaiPackageRoot/onnxruntime_genai/onnxruntime-genai.dll" -Force
+$GenaiSource = "$WorkRoot/deps/genai-0.19-ci-src"
+$GenaiBuild = "$WorkRoot/build/genai019-ci131"
+$GenaiPackageRoot = "$WorkRoot/install/genai019_ci131"
+git clone --branch v0.19.0 https://github.com/microsoft/onnxruntime-genai.git $GenaiSource
+$Patch = "$WorkRoot/deps/oga-pr-2875.diff"
+Invoke-WebRequest https://github.com/microsoft/onnxruntime-genai/pull/2875.diff -OutFile $Patch
+git -C $GenaiSource apply --whitespace=nowarn --3way `
+  --exclude='test/*' --exclude='.github/*' --exclude='*.md' $Patch
+Get-FileHash $Patch -Algorithm SHA256
+if (!(Test-Path "$OrtSdk/include/dml_provider_factory.h")) {
+  Invoke-WebRequest 'https://raw.githubusercontent.com/microsoft/onnxruntime/v1.31.0/include/onnxruntime/core/providers/dml/dml_provider_factory.h' `
+    -OutFile "$OrtSdk/include/dml_provider_factory.h"
+}
+& $Python -m pip install requests wheel setuptools packaging
+& $Python "$GenaiSource/build.py" --config Release --cmake_generator Ninja `
+  --use_dml --no_telemetry --ort_home $OrtSdk --skip_tests --skip_examples `
+  --parallel --build_dir $GenaiBuild --cmake_extra_defines ENABLE_TESTS=OFF `
+  "PYTHON_EXECUTABLE=$Python" "Python_EXECUTABLE=$Python"
+$Wheels = @(Get-ChildItem "$GenaiBuild/Release/wheel" -Filter 'onnxruntime_genai_directml-0.19.0-*.whl')
+if ($Wheels.Count -ne 1) { throw 'Expected exactly one matching GenAI wheel' }
+& $Python -m pip install --no-deps --target $GenaiPackageRoot $Wheels[0].FullName
 $env:PYTHONPATH = $GenaiPackageRoot
-& $Python -c 'import onnxruntime_genai as og; print(og.__file__)'
+& $Python -c 'import onnxruntime as ort, onnxruntime_genai as og; print(ort.__version__, ort.__file__); print(og.__version__, og.__file__)'
 ```
 
-Verify that the printed path points into `install/genai_append`. For another
-Python/GenAI ABI, build a matching Python package instead of swapping a DLL into
-an unrelated binding. The shared strategy patch still needs broader backend
-qualification; these instructions do not claim the upstream C++ test suite passed.
+Use ORT 1.31.0 for **both** the SDK supplied to the GenAI/HIP-EP builds and the
+runtime loaded by Python. Keep the existing NumPy/ONNX/ROCm environment; `--no-deps`
+prevents the GenAI install from replacing it. The DirectML build option matches
+HIP-EP's Windows dependency workflow; the model still explicitly selects AMDGPU.
+The workflow's source-built SDK contains `dml_provider_factory.h`; the official
+CPU SDK archive may omit it. The command above adds the unchanged header from
+the same ORT release. Use an isolated SDK copy if another build shares yours.
+Local AMDGPU qualification uses the existing ORT 1.31 CPU runtime plus the EP
+plugin; it does not qualify DirectML inference or reproduce every CI build flag.
+The wheel builds the core DLL and Python extension together. Do not copy the
+new DLL into an old package. Verify the imported path is `genai019_ci131` and
+the versions are GenAI 0.19.0 / ORT 1.31.0 before running the integration check.
+Record source commit, applied diff hash, build flags and actual loaded DLLs.
+These checks do not replace GenAI's upstream C++ suite (`ENABLE_TESTS=OFF`).
 
 ### 4. Configure the model and runtime
 
@@ -322,7 +331,7 @@ codec files, logits, answers and receipts outside Git.
 
 | Symptom | Check |
 | --- | --- |
-| AMDGPU continuous decoding rejected | Imported GenAI package/DLL and the companion patch in step 3. |
+| AMDGPU continuous decoding rejected | Imported GenAI 0.19 package/core and the dependency setup in step 3. |
 | Missing/invalid codec | All three decoder options, absolute codec path and manifest/hash. |
 | Unsupported geometry/device | gfx1151, Ring build, batch one, H24/G4/D256, FP16 and shared buffers. |
 | Wrong DLL or missing dependency | `AMDGPU_EP_PATH`, SDK DLL search directories and receipt library hashes. |
@@ -330,30 +339,19 @@ codec files, logits, answers and receipts outside Git.
 
 ## External dependencies
 
-HIP-EP needs no ONNX Runtime core patch, ONNX schema change, cache allocator
-patch, weight conversion or production graph rewrite for this feature.
-The GenAI append companion is the only external source change:
+TurboQuant needs **no additional OGA or ONNX Runtime source patch**, ONNX schema
+change, cache allocator change, weight conversion or production graph rewrite
+on the HIP-EP main dependency stack. Keep main's OGA PR #2875 patch; no workflow
+changes are needed for this feature.
 
-| GenAI source | Purpose |
+| GenAI 0.19 code | Existing support used by TurboQuant |
 | --- | --- |
-| `src/generator/generators.cpp` | Admit AMDGPU continuous decoding on stock v0.17.0. |
-| `src/decoding/standard_decoding_strategy.h` and `.cpp` | Flush a selected token whose KV has not yet been computed before appending a prompt. |
-| `test/cpp/engine/request_lifecycle_tests.cpp` | Assert AMDGPU continuation capability. |
+| [`src/generator/generators.cpp`](https://github.com/microsoft/onnxruntime-genai/blob/v0.19.0/src/generator/generators.cpp) | AMDGPU continuous decoding; both `AppendTokens` overloads flush a pending selected token through `RunGeneratedToken()` before starting the next turn. |
+| [`src/models/io/quantized_kv_cache.cpp`](https://github.com/microsoft/onnxruntime-genai/blob/v0.19.0/src/models/io/quantized_kv_cache.cpp) | Four-bit cache allocation: D256 becomes 66 FP16 carrier elements / 132 bytes per row. |
+| [`src/ep/amdgpu/interface.cpp`](https://github.com/microsoft/onnxruntime-genai/blob/v0.19.0/src/ep/amdgpu/interface.cpp) | Reads AMDGPU `kvCacheQuantizationBits` for cache allocation. |
 
-For an older GenAI v0.17 tree that already includes AMDGPU continuous decoding, apply only
-[`onnxruntime-genai-0.17-pending-append.patch`](patches/onnxruntime-genai-0.17-pending-append.patch).
-Use `git apply --check` against the actual dependency revision. Do not apply
-both patches. The shared decoding-strategy change needs broader backend review;
-local integration checks do not replace GenAI's upstream C++ suite.
-
-The retained Windows companion reuses matching cp313 GenAI 0.17 bindings and
-replaces only its core DLL. That companion was built with the ORT 1.30 SDK and
-validated with the Ring ORT 1.31 runtime. HIP-EP itself uses the 1.31 SDK.
-Record these separately rather than implying SDK equivalence. Per-application
+The old GenAI 0.17 companion patches are obsolete on this stack and have been
+removed. Do not port their decoding-strategy override to 0.19: pending-token
+handling now belongs to `Generator::AppendTokens` itself. Application
 `genai_config.json`, DLL search paths, downloaded SDKs, environments and generated
-codec/model artifacts are setup inputs, not additional source patches.
-
-Main's CI now uses GenAI v0.19.0 (with its configured patch set). The v0.17
-commands above describe the retained local validation environment. Do not apply
-the v0.17 companion patches to v0.19 without checking the corresponding source;
-the local v0.17 results do not qualify the v0.19 dependency stack.
+codec/model artifacts remain setup inputs, not external source patches.

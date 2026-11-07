@@ -51,7 +51,7 @@ Zero vectors have zero norm and zero code bytes. Exact equal-distance ties selec
 
 Each vector occupies **132 bytes**: a little-endian FP32 norm followed by 128 bytes containing two 4-bit indices each, lower index in the low nibble. Eight indices occupy each packed 32-bit code word. The norm precedes the codes. Compared with 512 bytes for FP16, the payload reduction is **512/132 = 3.8788x**. Constants, scratch and allocator padding are separate. Total model memory does not decrease by that factor.
 
-GenAI 0.17 already supports `kvCacheQuantizationBits=4` for AMDGPU cache allocation. For head dimension 256, it creates a physical last dimension of **66 FP16 carrier elements**, equivalent to 132 bytes, rather than 256 dense elements. The graph still has the usual K and V cache tensors. Their contents are a versioned packed format, not ordinary FP16 values and not conventional linear INT4. No ONNX schema or GenAI cache-allocation change is needed. Multi-turn use with GenAI 0.17 requires the companion append-enablement patch described below.
+GenAI 0.19 already supports `kvCacheQuantizationBits=4` for AMDGPU cache allocation. For head dimension 256, it creates a physical last dimension of **66 FP16 carrier elements**, equivalent to 132 bytes, rather than 256 dense elements. The graph still has the usual K and V cache tensors. Their contents are a versioned packed format, not ordinary FP16 values and not conventional linear INT4. No ONNX schema or GenAI cache-allocation change is needed. GenAI 0.19 already handles AMDGPU continuation and pending-token flush before append; no TurboQuant companion patch is needed.
 
 Use these AMDGPU provider options together:
 
@@ -169,8 +169,10 @@ There is no `mock_gpu.hip` in this PR.
 Repeated prompt append requires AMDGPU continuous decoding and flushing any
 selected token whose KV has not been computed yet. This lifecycle requirement
 applies to all three OGA modes. The [setup guide](../../tools/turboquant/README.md#external-dependencies)
-owns the two companion patch choices, affected external files and exact SDK
-provenance. HIP-EP does not require an ONNX schema or cache-allocation patch.
+documents main's GenAI 0.19.0 + PR #2875 / ORT 1.31.0 dependency stack and
+the matching core/Python-wheel build. Both lifecycle fixes from the older 0.17
+companion are upstream; no additional GenAI source patch is required. HIP-EP
+does not require an ONNX schema or cache-allocation patch.
 
 ## Validation and known limitations
 
