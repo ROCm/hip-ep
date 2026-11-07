@@ -4,7 +4,9 @@
  */
 
 #include "MlirCompiler.h"
+#include "corelib_model.h"
 #include "hip/Compiler/RocMlirArtifactTarget.h"
+#include "hip/debug_log.h"
 
 // Morphizen headers
 #include "hip/native_artifacts.h"
@@ -18,12 +20,15 @@
 #include <fstream>
 #include <glog/logging.h>
 #include <limits>
+#include <regex>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <unordered_set>
 #include <vector>
 
 // Protobuf
+#include "google/protobuf/struct.pb.h"
 #include "google/protobuf/util/json_util.h"
 #include "metadata.pb.h"
 
@@ -234,8 +239,9 @@ static std::string build_metadata_json(const CompilationArtifact &artifact,
 
 // Step 7: Fuse graph into single MLIR custom op
 static bool fuse_graph(IPass &self, Graph &graph, const std::string &metadata,
-                       const std::string &unique_id) {
-  MY_LOG(1) << "Attempting to fuse entire graph with domain 'MLIR'";
+                       const std::string &unique_id,
+                       const char *domain = "MLIR") {
+  MY_LOG(1) << "Attempting to fuse entire graph with domain '" << domain << "'";
 
   GraphRef graphRef(graph);
 
@@ -266,12 +272,13 @@ static bool fuse_graph(IPass &self, Graph &graph, const std::string &metadata,
   auto [meta_def, fuse_error] =
       self.try_fuse(graphRef, unique_id, input_names, output_names,
                     {},    // constant_initializers (empty for now)
-                    "MLIR" // domain name
+                    domain // domain name
       );
 
   if (meta_def == nullptr) {
     MY_LOG(1) << "Fusion failed: " << fuse_error.comments;
-    LOG(WARNING) << "Failed to create MLIR fusion: " << fuse_error.comments;
+    LOG(WARNING) << "Failed to create " << domain
+                 << " fusion: " << fuse_error.comments;
     return false;
   }
 
@@ -318,6 +325,103 @@ static bool fuse_graph(IPass &self, Graph &graph, const std::string &metadata,
 }
 
 // ============================================================================
+// Model-level CoreLib path
+// ============================================================================
+
+// Whole-model offload: provider option first, then the env var for tools that
+// cannot set one.
+static bool use_corelib_model(PassContext *ctx) {
+  std::string v = ctx->get_provider_option("use_ryzenai_corelib_model", "");
+  if (v.empty())
+    v = hip_get_env("HIPEP_USE_RYZENAI_CORELIB_MODEL");
+  return v == "1" || v == "true";
+}
+
+// An onnxruntime-genai decoder: input_ids, attention_mask and a KV cache in,
+// logits and the updated cache out. Which architecture it is, CoreLib decides.
+static bool is_genai_decoder(Graph &graph) {
+  GraphConstRef g(GraphRef{graph});
+  bool ids = false, mask = false, past = false, logits = false, present = false;
+  for (const auto &in : g.inputs()) {
+    const std::string &n = in.name();
+    ids |= n == "input_ids";
+    mask |= n == "attention_mask";
+    past |= n.rfind("past_key_values.", 0) == 0;
+  }
+  for (const auto &out : g.outputs()) {
+    const std::string &n = out.name();
+    logits |= n == "logits";
+    present |= n.rfind("present.", 0) == 0;
+  }
+  bool gqa = false, nbits = false;
+  for (const auto &node : g.nodes()) {
+    gqa |= node.op_type() == "GroupQueryAttention";
+    nbits |= node.op_type() == "MatMulNBits";
+  }
+  return ids && mask && past && logits && present && gqa && nbits;
+}
+
+// The context onnxruntime-genai runs the model at (search.max_length in the
+// genai_config.json beside it), or 0 for CoreLib's own.
+static int64_t genai_max_length(const std::filesystem::path &model) {
+  std::ifstream f(model.parent_path() / "genai_config.json");
+  if (!f)
+    return 0;
+  std::stringstream ss;
+  ss << f.rdbuf();
+  const std::string text = ss.str();
+  static const std::regex kMaxLength(R"re("max_length"\s*:\s*(\d+))re");
+  std::smatch m;
+  if (std::regex_search(text, m, kMaxLength))
+    return std::stoll(m[1].str());
+  return 0;
+}
+
+// The corelib models tried, by name, for a matching graph.
+static const char *const kCorelibModels[] = {"qwen3"};
+
+// Hands the whole graph to a CoreLib model when one takes it: fuses it under
+// CORELIBMODEL with the parameter {arch, path, max_sequence_length} and
+// leaves the session for the custom op. False, after one line saying why, when
+// the graph is to be compiled as usual.
+static bool try_corelib_model(IPass &self, Graph &graph) {
+  PassContext *ctx = self.get_context().get();
+  if (!use_corelib_model(ctx) || !is_genai_decoder(graph))
+    return false;
+  const std::filesystem::path model = ctx->get_model_path();
+  if (model.empty()) {
+    fprintf(stderr, "[corelib] model: no model file path (an in-memory "
+                    "model); compiling it for the GPU\n");
+    return false;
+  }
+  const int64_t max_len = genai_max_length(model);
+  std::string why;
+  for (const char *arch : kCorelibModels) {
+    auto session = hipdnn_ep::corelib::create_model_session(
+        arch, model.string(), max_len, &why);
+    if (!session)
+      continue;
+    const std::string id = std::string("corelib_model_") + arch;
+    // The fused node's parameter must be a JSON object (a protobuf Struct).
+    google::protobuf::Struct param;
+    auto &fields = *param.mutable_fields();
+    fields["arch"].set_string_value(arch);
+    fields["path"].set_string_value(model.string());
+    fields["max_sequence_length"].set_number_value(double(max_len));
+    std::string param_json;
+    CHECK(google::protobuf::util::MessageToJsonString(param, &param_json).ok());
+    // A refused fusion falls through to the usual compile.
+    if (!fuse_graph(self, graph, param_json, id, "CORELIBMODEL"))
+      return false;
+    hipdnn_ep::corelib::put_session(id, std::move(session));
+    return true;
+  }
+  fprintf(stderr, "[corelib] model: %s; compiling it for the GPU\n",
+          why.c_str());
+  return false;
+}
+
+// ============================================================================
 // Pass Implementation
 // ============================================================================
 
@@ -334,6 +438,12 @@ struct Level1MlirPass {
     auto config = load_config(self.get_context().get());
 
     TIMING_LOG("[Session] load_config: %.3fs\n", record_elapsed(t_prev));
+
+    // A whole model CoreLib runs skips the MLIR compile.
+    if (try_corelib_model(self, graph)) {
+      TIMING_LOG("[Session] CoreLib model: %.3fs\n", record_elapsed(t_prev));
+      return;
+    }
 
     // Step 2: Get MLIR bytecode from graph
     auto mlir_bytecode = get_mlir_bytecode(self.get_context().get(), graph);
