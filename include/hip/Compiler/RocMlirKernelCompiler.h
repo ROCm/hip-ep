@@ -79,6 +79,13 @@ struct RocMlirEmbedOptions {
   RocMlirKernelCompileFn compileOne = RocMlirKernelCompileFn();
   // Empty means every kernel is complete when `compileOne` returns.
   RocMlirFinishCompilesFn finishCompiles = RocMlirFinishCompilesFn();
+  // An elementwise kernel that rocMLIR fails to compile fails the module, as
+  // a conv or gemm does. A kernel that folds away still runs as its hip ops.
+  bool strictElementwise = false;
+  // Called for each elementwise kernel that runs as its hip ops, with the
+  // reason: "folded" or the stage that failed.
+  llvm::function_ref<void(StringRef kernel, StringRef reason)> onHipPath =
+      nullptr;
 };
 
 // ROCK_ARCH wins, else a default the rock backend can parse.
