@@ -413,16 +413,27 @@ Type getKernelArgumentType(Value operand, const SetVector<Operation *> &ops) {
   return type;
 }
 
+// The ops of one kernel, as the outline takes them: `ops` in clone order, the
+// dispatch at `end`, and `moved` the outside readers to put below it.
+struct KernelParts {
+  Operation *end;
+  Value context;
+  const SetVector<Value> &operands;
+  const SetVector<Operation *> &ops;
+  ArrayRef<Value> results;
+  ArrayRef<Operation *> moved;
+};
+
 // `rankOneShape` is the shape operand of every rank-0 promotion in the block,
 // made once by the first kernel that needs it.
-RocMlirOp outline(KernelRegion &region, ArrayRef<Operation *> moved,
+RocMlirOp outline(const KernelParts &parts, bool elementwise,
                   RewriterBase &rewriter, int &counter, StringRef arch,
                   Value &rankOneShape) {
-  Operation *end = region.getEnd();
-  Value context = region.getContext();
-  SetVector<Value> &operands = region.getOperands();
-  SetVector<Operation *> &ops = region.getOps();
-  ArrayRef<Value> results = region.getResults();
+  Operation *end = parts.end;
+  Value context = parts.context;
+  const SetVector<Value> &operands = parts.operands;
+  const SetVector<Operation *> &ops = parts.ops;
+  ArrayRef<Value> results = parts.results;
   auto resultTypes =
       llvm::map_to_vector(results, [](Value v) -> Type { return v.getType(); });
   Location loc = rewriter.getUnknownLoc();
@@ -439,6 +450,8 @@ RocMlirOp outline(KernelRegion &region, ArrayRef<Operation *> moved,
     kernel = func::FuncOp::create(
         rewriter, loc, "rocMlir" + std::to_string(counter++), funcType);
     kernel->setAttr("rock.kernel", rewriter.getUnitAttr());
+    if (elementwise)
+      kernel->setAttr("rock.elementwise", rewriter.getUnitAttr());
     if (!arch.empty())
       kernel->setAttr("rock.arch", rewriter.getStringAttr(arch));
     Block *body = kernel.addEntryBlock();
@@ -461,7 +474,7 @@ RocMlirOp outline(KernelRegion &region, ArrayRef<Operation *> moved,
   }
 
   Operation *last = end;
-  for (Operation *op : moved) {
+  for (Operation *op : parts.moved) {
     rewriter.moveOpAfter(op, last);
     last = op;
   }
@@ -836,10 +849,12 @@ public:
     // and unary ops can still be absorbed one by one into the kernels that
     // read them, which a module with several inputs or several readers
     // cannot be as a whole.
+    // A module that saves a launch stays whole and becomes a kernel of its
+    // own instead.
     IRRewriter rewriter(&getContext());
     for (RocMlirElementwiseOp module :
          llvm::make_early_inc_range(block.getOps<RocMlirElementwiseOp>()))
-      if (!claimed->contains(module)) {
+      if (!claimed->contains(module) && !outlinesAlone(module)) {
         rewriter.setInsertionPoint(module);
         inlineRocMlirElementwise(module, rewriter);
       }
@@ -854,6 +869,10 @@ public:
     SmallVector<RocMlirElementwiseOp> leftover(
         block.getOps<RocMlirElementwiseOp>());
     for (RocMlirElementwiseOp module : leftover) {
+      if (outlinesAlone(module)) {
+        outlineElementwise(module, rewriter, counter);
+        continue;
+      }
       rewriter.setInsertionPoint(module);
       inlineRocMlirElementwise(module, rewriter);
     }
@@ -914,8 +933,60 @@ private:
     if (const char *reason =
             region.complete(getInputRoots(chain.front()), moved))
       return chain.front()->emitOpError("cannot be outlined: ") << reason;
-    outline(region, moved, rewriter, counter, arch, rankOneShape);
+    outline({region.getEnd(), region.getContext(), region.getOperands(),
+             region.getOps(), region.getResults(), moved},
+            /*elementwise=*/false, rewriter, counter, arch, rankOneShape);
     return success();
+  }
+
+  // A module outlines alone only when it saves a launch. A static reshape is a
+  // free view on the host, so the module needs two other ops, and each op must
+  // lower to TOSA outside an anchor kernel. rocMLIR's elementwise pipeline
+  // cannot store a result that only transposes a kernel argument (through
+  // reshapes) next to other results; such a module stays on the host.
+  bool outlinesAlone(RocMlirElementwiseOp module) const {
+    Block &body = module.getBody().front();
+    int launches = 0;
+    for (Operation &op : body.without_terminator()) {
+      if (isa<tensor::EmptyOp>(op) || isTosaLowerableReshape(&op))
+        continue;
+      if (!isTosaExpressiblePointwiseOp(&op) && !isTosaLowerableQdq(&op))
+        return false;
+      ++launches;
+    }
+    if (launches < 2)
+      return false;
+    auto movesArgument = [](Value result) {
+      auto transpose = result.getDefiningOp<TransposeOp>();
+      if (!transpose)
+        return false;
+      Value source = transpose.getInput();
+      while (Operation *def = source.getDefiningOp()) {
+        if (!isTosaLowerableReshape(def))
+          return false;
+        source = def->getOperand(0);
+      }
+      return true;
+    };
+    auto yield = cast<YieldOp>(body.getTerminator());
+    return yield.getValues().size() == 1 ||
+           llvm::none_of(yield.getValues(), movesArgument);
+  }
+
+  void outlineElementwise(RocMlirElementwiseOp module, IRRewriter &rewriter,
+                          int &counter) {
+    SetVector<Operation *> ops;
+    SetVector<Value> operands;
+    for (Value input : module.getInputs()) {
+      if (isInlineScalarConstant(input))
+        ops.insert(input.getDefiningOp());
+      else
+        operands.insert(input);
+    }
+    ops.insert(module);
+    SmallVector<Value> results(module.getResults());
+    outline({module, module.getCtx(), operands, ops, results, {}},
+            /*elementwise=*/true, rewriter, counter, arch, rankOneShape);
   }
 
   const DenseSet<Operation *> *claimed = nullptr;
