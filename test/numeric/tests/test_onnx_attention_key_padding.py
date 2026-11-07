@@ -35,7 +35,7 @@ KV_HEADS = 2
 DROP = -65504.0
 
 
-def _make_model(q_heads, window, drop, hd, dynamic_cache_width=False):
+def _make_model(q_heads, window, drop, hd):
     """Attention whose mask is Unsqueeze(Cast_f16(Where(keep, 0, drop))) with
     keep = And(pad, causal[, window]) over CumSum positions of the mask; the
     query positions are the last S of them."""
@@ -83,43 +83,24 @@ def _make_model(q_heads, window, drop, hd, dynamic_cache_width=False):
     ]
     # Symbolic batch and lengths, as in the exports.
     f16 = TensorProto.FLOAT16
-    cache_width = "cache_head_dim" if dynamic_cache_width else hd
     inputs = [
         helper.make_tensor_value_info("q", f16, ["B", "S", q_heads * hd]),
         helper.make_tensor_value_info("k", f16, ["B", "S", KV_HEADS * hd]),
         helper.make_tensor_value_info("v", f16, ["B", "S", KV_HEADS * hd]),
-        helper.make_tensor_value_info(
-            "past_key", f16, ["B", KV_HEADS, "P", cache_width]
-        ),
-        helper.make_tensor_value_info(
-            "past_value", f16, ["B", KV_HEADS, "P", cache_width]
-        ),
+        helper.make_tensor_value_info("past_key", f16, ["B", KV_HEADS, "P", hd]),
+        helper.make_tensor_value_info("past_value", f16, ["B", KV_HEADS, "P", hd]),
         helper.make_tensor_value_info("attention_mask", TensorProto.INT64, ["B", "T"]),
     ]
     outputs = [
         helper.make_tensor_value_info("y", f16, ["B", "S", q_heads * hd]),
-        helper.make_tensor_value_info(
-            "present_key", f16, ["B", KV_HEADS, "T", cache_width]
-        ),
-        helper.make_tensor_value_info(
-            "present_value", f16, ["B", KV_HEADS, "T", cache_width]
-        ),
+        helper.make_tensor_value_info("present_key", f16, ["B", KV_HEADS, "T", hd]),
+        helper.make_tensor_value_info("present_value", f16, ["B", KV_HEADS, "T", hd]),
     ]
     return make_model_from_nodes(nodes, inputs, outputs, initializers=inits, opset=23)
 
 
 def _run(
-    model_runner,
-    batch,
-    seq,
-    past,
-    q_heads,
-    window,
-    pad,
-    left,
-    drop=DROP,
-    hd=HEAD_DIM,
-    dynamic_cache_width=False,
+    model_runner, batch, seq, past, q_heads, window, pad, left, drop=DROP, hd=HEAD_DIM
 ):
     """Batch b > 0 pads b * pad keys, on the left (generation) or the right."""
     total = seq + past
@@ -137,7 +118,7 @@ def _run(
         else:
             mask[b, total - n :] = 0
 
-    model = _make_model(q_heads, window, drop, hd, dynamic_cache_width)
+    model = _make_model(q_heads, window, drop, hd)
     actual, expected = model_runner.run_sample(model, [q, k, v, pk, pv, mask])
     real = mask[:, past:].astype(bool)
     kept = max(0, past - window + 1) if window else 0
@@ -243,19 +224,3 @@ class TestOnnxAttentionKeyPadding:
             drop=drop,
             hd=64,
         )
-
-
-@pytest.mark.parametrize("seq,past", [(16, 0), (1, 47)])
-def test_key_bias_dynamic_cache_width(model_runner, seq, past):
-    """The physical-width ABI must forward per-key bias on dense fallback."""
-    _run(
-        model_runner,
-        batch=2,
-        seq=seq,
-        past=past,
-        q_heads=12,
-        window=0,
-        pad=3,
-        left=True,
-        dynamic_cache_width=True,
-    )

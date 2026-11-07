@@ -161,4 +161,46 @@ module {
 }
 
 // CHECK-LABEL: llvm.func @packed_key_bias(
-// CHECK: llvm.call @wrap_group_query_attention_v5(
+// The byte-size constant precedes the bias pointer extraction.
+// CHECK: llvm.mlir.constant(2 : i64)
+// CHECK: %[[BIAS:.*]] = llvm.addrspacecast
+// CHECK-NEXT: %[[BATCH:.*]] = llvm.mlir.constant(1 : i64)
+// CHECK-NEXT: %[[LENGTH:.*]] = llvm.mlir.constant(128 : i64)
+// CHECK: llvm.call @wrap_group_query_attention_v5({{.*}}, %[[BIAS]], %[[BATCH]], %[[LENGTH]], {{[^,]+}}, {{[^,]+}}, {{[^,]+}}, {{[^,]+}}, {{[^,]+}})
+
+// -----
+module {
+  func.func @dynamic_key_bias(%ctx: !hip.context,
+                                %query: memref<1x1x6144xf16, 1>,
+                                %key: memref<1x1x1024xf16, 1>,
+                                %value: memref<1x1x1024xf16, 1>,
+                                %past_key: memref<1x4x127x?xf16, 1>,
+                                %past_value: memref<1x4x127x?xf16, 1>,
+                                %seqlens_k: memref<1x1xi32, 1>,
+                                %total_seq_len: memref<i32, 1>,
+                                %key_bias: memref<1x128xf16, 1>,
+                                %output: memref<1x1x6144xf16, 1>,
+                                %present_key: memref<1x4x128x?xf16, 1>,
+                                %present_value: memref<1x4x128x?xf16, 1>) {
+    hip.gqa(%ctx)
+        ins(%query, %key, %value, %past_key, %past_value, %seqlens_k, %total_seq_len :
+            memref<1x1x6144xf16, 1>, memref<1x1x1024xf16, 1>, memref<1x1x1024xf16, 1>,
+            memref<1x4x127x?xf16, 1>, memref<1x4x127x?xf16, 1>,
+            memref<1x1xi32, 1>, memref<i32, 1>)
+        key_bias(%key_bias : memref<1x128xf16, 1>)
+        outs(%output, %present_key, %present_value :
+             memref<1x1x6144xf16, 1>, memref<1x4x128x?xf16, 1>, memref<1x4x128x?xf16, 1>)
+        {num_heads = 24 : i64, kv_num_heads = 4 : i64,
+         scale = 0.0625 : f32, softcap = 0.000000e+00 : f32,
+         do_rotary = 0 : i64, rotary_interleaved = 0 : i64}
+    return
+  }
+}
+
+// CHECK-LABEL: llvm.func @dynamic_key_bias(
+// The byte-size constant precedes the bias pointer extraction.
+// CHECK: llvm.mlir.constant(2 : i64)
+// CHECK: %[[BIAS:.*]] = llvm.addrspacecast
+// CHECK-NEXT: %[[BATCH:.*]] = llvm.mlir.constant(1 : i64)
+// CHECK-NEXT: %[[LENGTH:.*]] = llvm.mlir.constant(128 : i64)
+// CHECK: llvm.call @wrap_group_query_attention_v5({{.*}}, %[[BIAS]], %[[BATCH]], %[[LENGTH]], {{[^,]+}}, {{[^,]+}}, {{[^,]+}}, {{[^,]+}}, {{[^,]+}})
