@@ -2419,8 +2419,7 @@ int wrap_corelib_matmul_nbits(RuntimeState *state, int op_state_slot,
 
 int wrap_corelib_rms_norm(RuntimeState *state, void *input, void *scale,
                           void *output, int64_t input_num_elements,
-                          int64_t scale_num_elements,
-                          int64_t norm_num_elements,
+                          int64_t scale_num_elements, int64_t norm_num_elements,
                           int64_t element_size_bytes, int64_t axis,
                           float epsilon, int64_t stash_type, int64_t data_type);
 
@@ -2477,11 +2476,11 @@ int wrap_dd_matmul(RuntimeState *state, int32_t op_state_slot,
 int wrap_dd_conv2d(RuntimeState *state, int32_t op_state_slot,
                    const void *input, int64_t n, int64_t c, int64_t h,
                    int64_t w, const void *weights, int64_t k, const void *bias,
-                   void *output, int64_t out_h, int64_t out_w,
-                   int64_t kernel_h, int64_t kernel_w, int64_t stride_h,
-                   int64_t stride_w, int64_t pad_top, int64_t pad_left,
-                   int64_t pad_bottom, int64_t pad_right, int64_t dilation_h,
-                   int64_t dilation_w, int64_t group, int64_t data_type);
+                   void *output, int64_t out_h, int64_t out_w, int64_t kernel_h,
+                   int64_t kernel_w, int64_t stride_h, int64_t stride_w,
+                   int64_t pad_top, int64_t pad_left, int64_t pad_bottom,
+                   int64_t pad_right, int64_t dilation_h, int64_t dilation_w,
+                   int64_t group, int64_t data_type);
 
 #ifdef __cplusplus
 }

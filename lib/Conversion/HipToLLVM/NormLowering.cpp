@@ -908,11 +908,11 @@ void populateNormLoweringPatterns(const LLVMTypeConverter &converter,
                                   bool useRyzenAICorelib) {
   patterns.add<RmsNormOpLowering, SkipRmsNormOpLowering>(converter,
                                                          useRyzenAICorelib);
-  patterns.add<LayerNormOpLowering, InstanceNormOpLowering, BatchNormOpLowering,
-               GroupNormOpLowering, GatedRmsNormOpLowering,
-               EngramGateOpLowering, HyperConnectionPreMixOpLowering,
-               HyperConnectionPostMixOpLowering,
-               HyperConnectionPostMixNormOpLowering>(converter);
+  patterns
+      .add<LayerNormOpLowering, InstanceNormOpLowering, BatchNormOpLowering,
+           GroupNormOpLowering, GatedRmsNormOpLowering, EngramGateOpLowering,
+           HyperConnectionPreMixOpLowering, HyperConnectionPostMixOpLowering,
+           HyperConnectionPostMixNormOpLowering>(converter);
 }
 
 } // namespace hip

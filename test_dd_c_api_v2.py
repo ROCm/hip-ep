@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+#
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the MIT License.
+#
 """
 Test DD C API integration - Weight Quantization Issue Demonstration
 
@@ -13,6 +17,7 @@ RESULT: Test runs successfully but falls back to CPU/GPU instead of NPU.
 
 See docs/DynamicDispatch-Weight-Quantization-Issue.md for details.
 """
+
 import os
 import sys
 import pathlib
@@ -20,14 +25,13 @@ import numpy as np
 import time
 
 # Enable Dynamic Dispatch
-os.environ['HIPEP_USE_DYNAMIC_DISPATCH'] = '1'
+os.environ["HIPEP_USE_DYNAMIC_DISPATCH"] = "1"
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO_ROOT / "test" / "python"))
 
 import onnxruntime as ort
 from conftest import register_morphizen_ep
-import onnx
 from onnx import helper, TensorProto
 
 print("=" * 70)
@@ -43,21 +47,21 @@ devices = register_morphizen_ep(REPO_ROOT)
 # This will trigger DD but fail initialization
 M, K, N = 11, 271, 173
 
-A = helper.make_tensor_value_info('A', TensorProto.FLOAT16, [M, K])
-C = helper.make_tensor_value_info('C', TensorProto.FLOAT16, [M, N])
+A = helper.make_tensor_value_info("A", TensorProto.FLOAT16, [M, K])
+C = helper.make_tensor_value_info("C", TensorProto.FLOAT16, [M, N])
 
 # Weight as float16 constant (this is the problem - DD expects uint8)
 B_data = np.random.rand(K, N).astype(np.float16)
 B_initializer = helper.make_tensor(
-    name='B',
+    name="B",
     data_type=TensorProto.FLOAT16,
     dims=[K, N],
     vals=B_data.tobytes(),
-    raw=True
+    raw=True,
 )
 
-matmul = helper.make_node('MatMul', inputs=['A', 'B'], outputs=['C'])
-graph = helper.make_graph([matmul], 'dd_weight_issue_test', [A], [C], [B_initializer])
+matmul = helper.make_node("MatMul", inputs=["A", "B"], outputs=["C"])
+graph = helper.make_graph([matmul], "dd_weight_issue_test", [A], [C], [B_initializer])
 model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 14)])
 
 print(f"\nModel: {M}x{K} @ {K}x{N} MatMul with float16 weights")
@@ -66,8 +70,7 @@ print(f"  Weight B: constant float16 [{K}x{N}]  <-- PROBLEM: DD expects uint8")
 print(f"  Output C: float16 [{M}x{N}]")
 
 sess = ort.InferenceSession(
-    model.SerializeToString(),
-    providers=[('AMDGPUExecutionProvider', {})]
+    model.SerializeToString(), providers=[("AMDGPUExecutionProvider", {})]
 )
 
 A_data = np.random.rand(M, K).astype(np.float16)
@@ -82,11 +85,13 @@ iteration = 0
 
 try:
     while time.time() - start_time < 5.0:
-        result = sess.run(None, {'A': A_data})
+        result = sess.run(None, {"A": A_data})
         iteration += 1
         if iteration == 1 or iteration % 10 == 0:
             elapsed = time.time() - start_time
-            print(f"  [{elapsed:5.2f}s] Iteration {iteration:3d} - shape: {result[0].shape}")
+            print(
+                f"  [{elapsed:5.2f}s] Iteration {iteration:3d} - shape: {result[0].shape}"
+            )
 
     elapsed = time.time() - start_time
 
@@ -95,7 +100,7 @@ try:
     print("=" * 70)
     print(f"  Iterations: {iteration}")
     print(f"  Time: {elapsed:.2f}s")
-    print(f"  Avg: {elapsed/iteration*1000:.2f}ms per iteration")
+    print(f"  Avg: {elapsed / iteration * 1000:.2f}ms per iteration")
     print(f"  Output: shape={result[0].shape}, dtype={result[0].dtype}")
     print("\n" + "=" * 70)
     print("ANALYSIS (check stderr)")
@@ -110,13 +115,14 @@ try:
     print("  C API: WORKING (no access violations)")
     print("  NPU Usage: NOT WORKING (falls back to CPU/GPU)")
     print("  Root Cause: DD expects quantized uint8 weights, not float16")
-    print(f"\n  See: docs/DynamicDispatch-Weight-Quantization-Issue.md")
+    print("\n  See: docs/DynamicDispatch-Weight-Quantization-Issue.md")
     print("=" * 70)
 
 except Exception as e:
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"EXCEPTION: {e}")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
     import traceback
+
     traceback.print_exc()
     sys.exit(1)

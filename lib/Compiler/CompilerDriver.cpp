@@ -803,7 +803,8 @@ void CompilerDriver::discoverInTreeLibraries(
   }
 
   // DynamicDispatch (NPU/IPU backend): only linked when models use DD operators
-  // Environment variable DYNAMICDISPATCH_ROOT or VAI_RT_ROOT specifies install path
+  // Environment variable DYNAMICDISPATCH_ROOT or VAI_RT_ROOT specifies install
+  // path
   {
     std::string dd_root = hip_get_env("DYNAMICDISPATCH_ROOT");
     if (dd_root.empty())
@@ -815,10 +816,12 @@ void CompilerDriver::discoverInTreeLibraries(
       if (llvm::sys::fs::exists(dd_lib_path)) {
         library_paths.push_back(dd_lib_dir);
         libraries.push_back("dyn_dispatch_core");
-        COMPILER_DEBUG_LOG("  DynamicDispatch (NPU/IPU): dyn_dispatch_core from "
-                           << dd_lib_dir << "\n");
+        COMPILER_DEBUG_LOG(
+            "  DynamicDispatch (NPU/IPU): dyn_dispatch_core from " << dd_lib_dir
+                                                                   << "\n");
       } else {
-        COMPILER_DEBUG_LOG("  DynamicDispatch not found at: " << dd_lib_path
+        COMPILER_DEBUG_LOG("  DynamicDispatch not found at: "
+                           << dd_lib_path
                            << " (NPU/IPU backend unavailable)\n");
       }
     }

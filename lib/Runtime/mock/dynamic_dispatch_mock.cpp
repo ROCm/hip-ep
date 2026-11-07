@@ -44,11 +44,11 @@ int wrap_dd_matmul(RuntimeState *state, int32_t op_state_slot,
 int wrap_dd_conv2d(RuntimeState *state, int32_t op_state_slot,
                    const void *input, int64_t n, int64_t c, int64_t h,
                    int64_t w, const void *weights, int64_t k, const void *bias,
-                   void *output, int64_t out_h, int64_t out_w,
-                   int64_t kernel_h, int64_t kernel_w, int64_t stride_h,
-                   int64_t stride_w, int64_t pad_top, int64_t pad_left,
-                   int64_t pad_bottom, int64_t pad_right, int64_t dilation_h,
-                   int64_t dilation_w, int64_t group, int64_t data_type) {
+                   void *output, int64_t out_h, int64_t out_w, int64_t kernel_h,
+                   int64_t kernel_w, int64_t stride_h, int64_t stride_w,
+                   int64_t pad_top, int64_t pad_left, int64_t pad_bottom,
+                   int64_t pad_right, int64_t dilation_h, int64_t dilation_w,
+                   int64_t group, int64_t data_type) {
   (void)state;
   (void)op_state_slot;
   (void)input;

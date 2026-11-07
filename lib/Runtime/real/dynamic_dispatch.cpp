@@ -125,7 +125,7 @@ const DdApi *dd_api() {
     }
 #ifdef _WIN32
 #define HIPDNN_EP_DD_RESOLVE(name)                                             \
-  api.name = reinterpret_cast<decltype(api.name)>(                            \
+  api.name = reinterpret_cast<decltype(api.name)>(                             \
       GetProcAddress(reinterpret_cast<HMODULE>(lib), #name));
 #else
 #define HIPDNN_EP_DD_RESOLVE(name)                                             \
@@ -135,7 +135,7 @@ const DdApi *dd_api() {
 #undef HIPDNN_EP_DD_RESOLVE
 #define HIPDNN_EP_DD_CHECK(name)                                               \
   if (!api.name) {                                                             \
-    std::fprintf(stderr, "[DD] %s has no symbol %s\n", kName, #name);         \
+    std::fprintf(stderr, "[DD] %s has no symbol %s\n", kName, #name);          \
     return nullptr;                                                            \
   }
     HIPDNN_EP_DD_FUNCTIONS(HIPDNN_EP_DD_CHECK)

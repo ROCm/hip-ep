@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
+#
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the MIT License.
+#
 """
 Test DD C API integration - iconv (integer convolution) operator
 
 This tests whether DD's iconv operator can activate the NPU.
 Like combined_gemm, iconv likely expects quantized uint8 weights.
 """
+
 import os
 import sys
 import pathlib
@@ -12,14 +17,13 @@ import numpy as np
 import time
 
 # Enable Dynamic Dispatch
-os.environ['HIPEP_USE_DYNAMIC_DISPATCH'] = '1'
+os.environ["HIPEP_USE_DYNAMIC_DISPATCH"] = "1"
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO_ROOT / "test" / "python"))
 
 import onnxruntime as ort
 from conftest import register_morphizen_ep
-import onnx
 from onnx import helper, TensorProto
 
 print("=" * 70)
@@ -38,53 +42,46 @@ K, KH, KW = 64, 3, 3
 out_H, out_W = H - KH + 1, W - KW + 1  # No padding, stride=1
 
 # Input tensor
-X = helper.make_tensor_value_info('input', TensorProto.FLOAT16, [N, C, H, W])
+X = helper.make_tensor_value_info("input", TensorProto.FLOAT16, [N, C, H, W])
 
 # Output tensor
-Y = helper.make_tensor_value_info('output', TensorProto.FLOAT16, [N, K, out_H, out_W])
+Y = helper.make_tensor_value_info("output", TensorProto.FLOAT16, [N, K, out_H, out_W])
 
 # Weight tensor (constant) - float16
 W_data = np.random.randn(K, C, KH, KW).astype(np.float16)
 W_init = helper.make_tensor(
-    name='weight',
+    name="weight",
     data_type=TensorProto.FLOAT16,
     dims=[K, C, KH, KW],
     vals=W_data.tobytes(),
-    raw=True
+    raw=True,
 )
 
 # Conv node (no bias for simplicity)
 conv = helper.make_node(
-    'Conv',
-    inputs=['input', 'weight'],
-    outputs=['output'],
+    "Conv",
+    inputs=["input", "weight"],
+    outputs=["output"],
     kernel_shape=[KH, KW],
     strides=[1, 1],
     pads=[0, 0, 0, 0],  # No padding
     dilations=[1, 1],
-    group=1
+    group=1,
 )
 
-graph = helper.make_graph(
-    [conv],
-    'dd_iconv_test',
-    [X],
-    [Y],
-    [W_init]
-)
+graph = helper.make_graph([conv], "dd_iconv_test", [X], [Y], [W_init])
 
 model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 14)])
 
-print(f"\nModel: Conv2D")
+print("\nModel: Conv2D")
 print(f"  Input:  [{N}, {C}, {H}, {W}] (NCHW) - float16")
 print(f"  Weight: [{K}, {C}, {KH}, {KW}] - float16 constant")
 print(f"  Output: [{N}, {K}, {out_H}, {out_W}] - float16")
 print(f"  Params: kernel={KH}x{KW}, stride=1, padding=0")
-print(f"\n  NOTE: DD iconv expects uint8 weights, but we're passing float16")
+print("\n  NOTE: DD iconv expects uint8 weights, but we're passing float16")
 
 sess = ort.InferenceSession(
-    model.SerializeToString(),
-    providers=[('AMDGPUExecutionProvider', {})]
+    model.SerializeToString(), providers=[("AMDGPUExecutionProvider", {})]
 )
 
 X_data = np.random.randn(N, C, H, W).astype(np.float16)
@@ -99,11 +96,13 @@ iteration = 0
 
 try:
     while time.time() - start_time < 5.0:
-        result = sess.run(None, {'input': X_data})
+        result = sess.run(None, {"input": X_data})
         iteration += 1
         if iteration == 1 or iteration % 5 == 0:
             elapsed = time.time() - start_time
-            print(f"  [{elapsed:5.2f}s] Iteration {iteration:3d} - shape: {result[0].shape}")
+            print(
+                f"  [{elapsed:5.2f}s] Iteration {iteration:3d} - shape: {result[0].shape}"
+            )
 
     elapsed = time.time() - start_time
 
@@ -112,7 +111,7 @@ try:
     print("=" * 70)
     print(f"  Iterations: {iteration}")
     print(f"  Time: {elapsed:.2f}s")
-    print(f"  Avg: {elapsed/iteration*1000:.2f}ms per iteration")
+    print(f"  Avg: {elapsed / iteration * 1000:.2f}ms per iteration")
     print(f"  Output: shape={result[0].shape}, dtype={result[0].dtype}")
     print("\n" + "=" * 70)
     print("ANALYSIS (check stderr)")
@@ -131,9 +130,10 @@ try:
     print("=" * 70)
 
 except Exception as e:
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"EXCEPTION: {e}")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
     import traceback
+
     traceback.print_exc()
     sys.exit(1)
