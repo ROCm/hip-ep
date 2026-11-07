@@ -4282,11 +4282,12 @@ def Hip_GqaOp : Hip_DpsOp_AutoReify<"gqa", [AttrSizedOperandSegments, OpStateOpI
 // ===== hipDNN Graph Outlining + Execution ====================================
 
 def Hip_YieldOp : Hip_Op<"yield", [Pure, Terminator,
-    HasParent<"HipDNNGraphOutlineOp">]> {
-  let summary = "Yield results from a hipDNN graph outline region";
+    ParentOneOf<["HipDNNGraphOutlineOp", "RocMlirElementwiseOp"]>]> {
+  let summary = "Yield results from an outline region";
   let description = [{
-    Terminates the body of a `hip.hipdnn_graph_outline` operation, forwarding
-    the computed results back to the parent op.
+    Terminates the body of a `hip.hipdnn_graph_outline` or
+    `hip.rocmlir_elementwise` operation, forwarding the computed results back
+    to the parent op.
 
     Example:
     ```mlir
@@ -4341,6 +4342,50 @@ def Hip_HipDNNGraphOutlineOp : Hip_Op<"hipdnn_graph_outline", [
     `ins` `(` $inputs `:` type($inputs) `)` `->` type($results)
     $body attr-dict
   }];
+}
+
+def Hip_RocMlirElementwiseOp : Hip_Op<"rocmlir_elementwise", [
+    SingleBlockImplicitTerminator<"YieldOp">,
+    IsolatedFromAbove,
+    RecursiveMemoryEffects
+]> {
+  let summary = "A group of pointwise ops for one rocMLIR kernel";
+  let description = [{
+    Groups pointwise ops, transposes, static reshapes and quantize ops of
+    main_graph that hip-fuse-rocmlir-elementwise selected for one rocMLIR
+    kernel. hip-fuse-rocmlir-anchor then takes the group into the epilogue
+    or prologue of an anchor kernel, or inlines it back. No op of this kind
+    survives the rocMLIR fusion.
+
+    The block arguments are the context, then the inputs. The body holds
+    the grouped ops and the tensor.empty inits they write. Every input and
+    result has a static shape and no integer wider than 32 bits; a result
+    is never rank 0.
+
+    Example:
+    ```mlir
+    %r = hip.rocmlir_elementwise(%ctx)
+        ins(%x, %b : tensor<1x64x56x56xf16>, tensor<1x64x1x1xf16>)
+        -> tensor<1x64x56x56xf16> {
+    ^bb0(%c: !hip.context, %a0: tensor<1x64x56x56xf16>,
+         %a1: tensor<1x64x1x1xf16>):
+      %e = tensor.empty() : tensor<1x64x56x56xf16>
+      %s = hip.add(%c) ins(%a0, %a1 : tensor<1x64x56x56xf16>,
+                                     tensor<1x64x1x1xf16>)
+          outs(%e : tensor<1x64x56x56xf16>) -> tensor<1x64x56x56xf16>
+      hip.yield %s : tensor<1x64x56x56xf16>
+    }
+    ```
+  }];
+
+  let arguments = (ins Hip_ContextType:$ctx, Variadic<AnyRankedTensor>:$inputs);
+  let results = (outs Variadic<AnyRankedTensor>:$results);
+  let regions = (region SizedRegion<1>:$body);
+  let assemblyFormat = [{
+    `(` $ctx `)` (`ins` `(` $inputs^ `:` type($inputs) `)`)? `->`
+    type($results) $body attr-dict
+  }];
+  let hasVerifier = 1;
 }
 
 // ===== hipDNN Graph Execution ================================================

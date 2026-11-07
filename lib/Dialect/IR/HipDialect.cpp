@@ -9,7 +9,9 @@
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/MathExtras.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/OpDefinition.h"
@@ -114,6 +116,56 @@ LogicalResult AllocOutputOp::verify() {
     return emitOpError("expected ")
            << memrefTy.getNumDynamicDims() << " dynamic size operand(s), got "
            << getDynamicSizes().size();
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// RocMlirElementwiseOp
+//===----------------------------------------------------------------------===//
+
+// rock.blockwise_load and rock.blockwise_store take integers of at most 32
+// bits, so a wider integer tensor cannot cross a kernel boundary.
+static bool isRocMlirKernelIOType(RankedTensorType type) {
+  auto intType = dyn_cast<IntegerType>(type.getElementType());
+  return type.hasStaticShape() && (!intType || intType.getWidth() <= 32);
+}
+
+LogicalResult RocMlirElementwiseOp::verify() {
+  Block &body = getBody().front();
+  if (body.getNumArguments() != getInputs().size() + 1 ||
+      !isa<ContextType>(body.getArgument(0).getType()))
+    return emitOpError("expects a !hip.context block argument followed by "
+                       "one block argument per input");
+  for (auto [input, arg] :
+       llvm::zip(getInputs(), body.getArguments().drop_front())) {
+    if (input.getType() != arg.getType())
+      return emitOpError("block argument type ")
+             << arg.getType() << " does not match input type "
+             << input.getType();
+    if (!isRocMlirKernelIOType(cast<RankedTensorType>(input.getType())))
+      return emitOpError("input type ")
+             << input.getType()
+             << " is not static or has an integer wider than 32 bits";
+  }
+  for (Type type : getResultTypes()) {
+    auto tensorType = cast<RankedTensorType>(type);
+    if (!isRocMlirKernelIOType(tensorType) || tensorType.getRank() == 0)
+      return emitOpError("result type ")
+             << type
+             << " is rank 0, not static, or has an integer wider than 32 bits";
+  }
+  auto yield = cast<YieldOp>(body.getTerminator());
+  if (yield.getValues().getTypes() != getResultTypes())
+    return emitOpError("yields types that do not match the results");
+  for (Operation &op : body.without_terminator()) {
+    StringRef dialect = op.getDialect() ? op.getDialect()->getNamespace() : "";
+    bool allowed = op.getNumRegions() == 0 &&
+                   (dialect == HipDialect::getDialectNamespace() ||
+                    isa<tensor::EmptyOp, tensor::ExpandShapeOp,
+                        tensor::CollapseShapeOp, arith::ConstantOp>(op));
+    if (!allowed)
+      return op.emitOpError("is not allowed in a hip.rocmlir_elementwise body");
+  }
   return success();
 }
 
