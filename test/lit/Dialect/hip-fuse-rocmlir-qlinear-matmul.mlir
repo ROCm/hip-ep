@@ -1,12 +1,11 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-// hip-fuse-rocmlir rewrites a QLinearMatMul with inline constant parameters
+// The rocMLIR fusion rewrites a QLinearMatMul with inline constant parameters
 // and a zero B zero point into hip.quant_matmul, a per-column zero-point
 // correction, and an f32 requantize, and outlines the chain as one rocMLIR
 // kernel. Every other QLinearMatMul keeps its HIP kernel.
 
-// RUN: hip-mlir-opt --split-input-file --hip-fuse-rocmlir %s | FileCheck %s
 // RUN: hip-mlir-opt --split-input-file --hip-rocmlir-prepare-quant \
 // RUN:   --hip-fuse-rocmlir-elementwise --hip-fuse-rocmlir-anchor %s \
 // RUN:   | FileCheck %s

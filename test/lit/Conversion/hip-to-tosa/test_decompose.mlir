@@ -71,7 +71,7 @@ func.func @leaky_relu_alpha(%ctx: !hip.context, %x: tensor<4xf32>,
   return %r : tensor<4xf32>
 }
 
-// The shape hip-fuse-rocmlir actually produces: the !hip.context is a
+// The shape the rocMLIR fusion actually produces: the !hip.context is a
 // ub.poison materialized inside the outlined kernel rather than a block
 // argument.
 // CHECK-LABEL: func.func @leaky_relu_outlined_kernel

@@ -6418,10 +6418,9 @@ def Hip_QuantConvOp : Hip_DpsOp_AutoReifyInfer<"quant_conv"> {
     i8 input, so `x - offset` is always an i8 value. Padding contributes 0
     to the sum. The weights are i8.
 
-    The op has no zero points, scales, or bias. hip-fuse-rocmlir creates it
-    inside a rocMLIR kernel, together with the constant zero-point correction
-    and the f32 scale epilogue. The op has no lowering outside a rocMLIR
-    kernel.
+    The op has no zero points, scales, or bias. hip-fuse-rocmlir-anchor creates
+    it inside a rocMLIR kernel, together with the constant zero-point correction
+    and the f32 scale epilogue. The op has no lowering outside a rocMLIR kernel.
   }];
 
   let arguments = (ins
@@ -6504,9 +6503,9 @@ def Hip_QuantMatmulOp : Hip_DpsOp_AutoReifyInfer<"quant_matmul"> {
     [M, N]. `offset` is 128 for a ui8 `a` and 0 for an i8 `a`, so
     `a - offset` is always an i8 value. `b` is i8.
 
-    The op has no zero points or scales. hip-fuse-rocmlir creates it inside
-    a rocMLIR kernel, together with the constant zero-point correction and
-    the requantize epilogue. The op has no lowering outside a rocMLIR
+    The op has no zero points or scales. hip-fuse-rocmlir-anchor creates it
+    inside a rocMLIR kernel, together with the constant zero-point correction
+    and the requantize epilogue. The op has no lowering outside a rocMLIR
     kernel.
   }];
 

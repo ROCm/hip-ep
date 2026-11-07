@@ -1537,7 +1537,7 @@ struct SqrtConverter final : public OpConversionPattern<SqrtOp> {
 // TOSA has no silu/swish. Both expand to the ONNX definition:
 //   silu(x)        = x * sigmoid(x)
 //   swish(x,alpha) = x * sigmoid(alpha * x)
-// with alpha default 1, which is silu. hip.silu is already a FuseROCMlir
+// with alpha default 1, which is silu. hip.silu is already a rocMLIR fusion
 // pointwise consumer; hip.swish is not, so the swish pattern still needs
 // rock.kernel on the test function.
 //
@@ -2016,8 +2016,8 @@ struct WhereConverter final : public OpConversionPattern<WhereOp> {
           op, "condition is not a tosa-broadcastable tensor");
     if (condType.getElementType().isUnsignedInteger(8) ||
         condType.getElementType().isSignlessInteger(8)) {
-      // ONNX BOOL arrives from MorphiZen as ui8. FuseROCMlir rewrites only
-      // Where-condition kernel arguments to signless i8, preserving the
+      // ONNX BOOL arrives from MorphiZen as ui8. The rocMLIR fusion rewrites
+      // only Where-condition kernel arguments to signless i8, preserving the
       // one-byte 0/1 storage while making rocMLIR arithmetic legal. Convert
       // either representation to TOSA's i1 predicate by comparing with zero
       // and inverting the result. A narrowing cast would not mean "nonzero".
@@ -8521,13 +8521,13 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         });
     conversion.addDynamicallyLegalOp<tensor::SplatOp>(
         [](tensor::SplatOp op) { return !isTosaExpressibleSplat(op); });
-    // Neither op is a FuseROCMlir anchor or a pointwise op, so neither reaches
-    // this pass from buildRocMlirPipeline today -- only from a hand-written
-    // rock.kernel. Declining therefore leaves the op in place rather than
-    // failing the pass, which keeps the unsupported configurations testable.
-    // If either becomes a fusion anchor this has to turn into a hard failure
-    // like hip.div's: a hip op surviving inside a rock.kernel fails in rocMLIR,
-    // it does not fall back to the HIP kernel.
+    // Neither op is a rocMLIR fusion anchor or a pointwise op, so neither
+    // reaches this pass from buildRocMlirPipeline today -- only from a
+    // hand-written rock.kernel. Declining therefore leaves the op in place
+    // rather than failing the pass, which keeps the unsupported configurations
+    // testable. If either becomes a fusion anchor this has to turn into a hard
+    // failure like hip.div's: a hip op surviving inside a rock.kernel fails in
+    // rocMLIR, it does not fall back to the HIP kernel.
     conversion.addDynamicallyLegalOp<GatherBlockQuantizedOp>(
         [](GatherBlockQuantizedOp op) {
           return !isTosaExpressibleGatherBlockQuantized(op);
@@ -8622,7 +8622,7 @@ bool isTosaLowerableSlice(tensor::ExtractSliceOp op) {
 bool isTosaLowerableExpand(ExpandOp op) { return isTosaExpressibleExpand(op); }
 
 // A subset of what matchQdqCommon and the two converters accept: the
-// per-tensor and per-axis forms, which are all hip-fuse-rocmlir needs.
+// per-tensor and per-axis forms, which are all the rocMLIR fusion needs.
 bool isTosaLowerableQdq(Operation *op) {
   Value input, scale, zeroPoint;
   int64_t axis, blockSize;

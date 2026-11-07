@@ -228,7 +228,7 @@ func.func @cast_outlined_kernel(%x: tensor<2x8xf32>, %init: tensor<2x8xf16>)
   return %r : tensor<2x8xf16>
 }
 
-// The shape hip-fuse-rocmlir actually produces: the !hip.context is a
+// The shape the rocMLIR fusion actually produces: the !hip.context is a
 // ub.poison materialized inside the outlined kernel rather than a block
 // argument. The ConversionTarget marks ub.poison legal so it survives as dead
 // IR for the canonicalizer to drop, instead of failing legalization.

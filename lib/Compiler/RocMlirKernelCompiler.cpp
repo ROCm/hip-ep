@@ -429,13 +429,14 @@ OwningOpRef<ModuleOp> takeRocMlirKernelsAsTosaModule(ModuleOp module,
   // from here on -- its body ships as an embedded binary and the symbol goes
   // away -- so there is nothing to preserve, and an outlined kernel is
   // IsolatedFromAbove, so no enclosing SSA value or module attribute has to
-  // travel with it (rock.arch rides on the func, put there by fuse-rocmlir).
+  // travel with it (rock.arch rides on the func, put there by the rocMLIR
+  // fusion).
   for (auto func : llvm::make_early_inc_range(module.getOps<func::FuncOp>())) {
     if (!func->hasAttr("rock.kernel"))
       continue;
-    // The rock tuning passes read rock.arch from the func, and fuse-rocmlir
-    // leaves it unset when it ran without an arch option. Point it at the
-    // arch we are actually compiling for, or the tuning parameters get
+    // The rock tuning passes read rock.arch from the func, and the rocMLIR
+    // fusion leaves it unset when it ran without an arch option. Point it at
+    // the arch we are actually compiling for, or the tuning parameters get
     // chosen for a different chip than the backend emits code for.
     if (!arch.empty())
       func->setAttr("rock.arch", builder.getStringAttr(arch));

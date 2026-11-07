@@ -17,7 +17,7 @@ namespace {
 // and does not describe this codebook, so the weight becomes hip.dequant_bnb4
 // and the product becomes hip.matmul with transB = 1.
 //
-// hip-fuse-rocmlir can pull a single-use dequant into the matmul's rock
+// The rocMLIR fusion can pull a single-use dequant into the matmul's rock
 // kernel when every shape is static; HipToTosa then lowers both. A dynamic
 // activation is rejected by that fusion, leaving the dequant on the HIP
 // kernel and the GEMM on hipBLASLt.

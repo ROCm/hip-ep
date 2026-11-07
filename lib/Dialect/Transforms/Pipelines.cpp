@@ -550,29 +550,20 @@ void mlir::hip::buildRocMlirPipeline(
   // rocMLIR has no transposed-convolution anchor, so split conv_transpose into
   // plain convolutions before anything tries to outline a kernel around it.
   pm.addPass(mlir::hip::createDecomposeConvTransposePass());
-  addRocMlirFusionPasses(pm, FuseROCMlirPassOptions());
+  addRocMlirFusionPasses(pm, FuseRocMlirAnchorPassOptions());
   pm.addPass(mlir::hip::createConvertHipToTosaPass());
   pm.addPass(mlir::createCanonicalizerPass());
 }
 
 void mlir::hip::addRocMlirFusionPasses(
-    OpPassManager &pm, const FuseROCMlirPassOptions &fuseOptions,
-    llvm::StringRef reportPath, bool twoPass) {
-  if (twoPass) {
-    pm.addNestedPass<func::FuncOp>(createRocMlirPrepareQuantPass());
-    FuseRocMlirElementwisePassOptions elementwiseOptions;
-    elementwiseOptions.fuseViews = fuseOptions.fuseViews;
-    pm.addNestedPass<func::FuncOp>(
-        createFuseRocMlirElementwisePass(elementwiseOptions));
-    FuseRocMlirAnchorPassOptions anchorOptions;
-    anchorOptions.fuseViews = fuseOptions.fuseViews;
-    anchorOptions.fuseGemmGemm = fuseOptions.fuseGemmGemm;
-    anchorOptions.arch = fuseOptions.arch;
-    anchorOptions.gemmGemmAccelTypes = fuseOptions.gemmGemmAccelTypes;
-    pm.addNestedPass<func::FuncOp>(createFuseRocMlirAnchorPass(anchorOptions));
-  } else {
-    pm.addNestedPass<func::FuncOp>(createFuseROCMlirPass(fuseOptions));
-  }
+    OpPassManager &pm, const FuseRocMlirAnchorPassOptions &fuseOptions,
+    llvm::StringRef reportPath) {
+  pm.addNestedPass<func::FuncOp>(createRocMlirPrepareQuantPass());
+  FuseRocMlirElementwisePassOptions elementwiseOptions;
+  elementwiseOptions.fuseViews = fuseOptions.fuseViews;
+  pm.addNestedPass<func::FuncOp>(
+      createFuseRocMlirElementwisePass(elementwiseOptions));
+  pm.addNestedPass<func::FuncOp>(createFuseRocMlirAnchorPass(fuseOptions));
   pm.addPass(func::createDuplicateFunctionEliminationPass());
   if (!reportPath.empty()) {
     FuseROCMlirReportPassOptions reportOptions;
@@ -583,13 +574,13 @@ void mlir::hip::addRocMlirFusionPasses(
 
 void mlir::hip::buildRocMlirFusionPipeline(
     OpPassManager &pm, const RocMlirFusionPipelineOptions &options) {
-  FuseROCMlirPassOptions fuseOptions;
+  FuseRocMlirAnchorPassOptions fuseOptions;
   fuseOptions.fuseViews = options.fuseViews;
   fuseOptions.fuseGemmGemm = options.fuseGemmGemm;
   fuseOptions.arch = options.arch;
   fuseOptions.gemmGemmAccelTypes.assign(options.gemmGemmAccelTypes.begin(),
                                         options.gemmGemmAccelTypes.end());
-  addRocMlirFusionPasses(pm, fuseOptions, options.report, options.twoPass);
+  addRocMlirFusionPasses(pm, fuseOptions, options.report);
 }
 
 void mlir::hip::registerHipPipelines() {

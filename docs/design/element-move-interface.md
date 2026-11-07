@@ -6,7 +6,7 @@ Licensed under the MIT License.
 
 `ElementMoveOpInterface` (`include/hip/Dialect/IR/HipElementMoveInterface.td`)
 marks ops whose result elements are copies of elements of some operands, or
-are selected among them by comparison, with no arithmetic. `hip-fuse-rocmlir`
+are selected among them by comparison, with no arithmetic. The rocMLIR fusion
 uses it to run those ops on 8-bit values in quantized graphs.
 
 ## Why a quantize commutes with these ops
@@ -26,7 +26,8 @@ half a unit.
 ## The rewrite
 
 `sinkQuantizeThroughElementMoves` (`lib/Dialect/Transforms/SinkQuantize.cpp`)
-runs first in `hip-fuse-rocmlir`, so only the rocMLIR path uses it. For each
+runs in `hip-rocmlir-prepare-quant`, before the other rocMLIR fusion passes,
+so only the rocMLIR path uses it. For each
 per-tensor `hip.quantize_linear` with inline scalar parameters, a static shape,
 block size 0 and saturation on:
 
@@ -100,7 +101,7 @@ ui8. Otherwise every value becomes i8 and every zero point in the set drops by
 | `hip.resize` | input | Nearest mode only; the runtime kernel takes i8 and ui8 for nearest |
 
 The tensor external models are registered by
-`registerElementMoveExternalModels`, which `hip-fuse-rocmlir` adds to its
+`registerElementMoveExternalModels`, which `hip-rocmlir-prepare-quant` adds to its
 dependent dialect registry, so every tool that runs the pass has them.
 
 Ops such as `hip.slice`, `hip.gather`, `hip.pad` and a max `hip.pool` can
