@@ -6,6 +6,7 @@
 #include "MlirCompiler.h"
 #include "corelib_model.h"
 #include "hip/Compiler/RocMlirArtifactTarget.h"
+#include "hip/debug_log.h"
 
 // Morphizen headers
 #include "hip/native_artifacts.h"
@@ -331,10 +332,8 @@ static bool fuse_graph(IPass &self, Graph &graph, const std::string &metadata,
 // cannot set one.
 static bool use_corelib_model(PassContext *ctx) {
   std::string v = ctx->get_provider_option("use_ryzenai_corelib_model", "");
-  if (v.empty()) {
-    if (const char *env = std::getenv("HIPEP_USE_RYZENAI_CORELIB_MODEL"))
-      v = env;
-  }
+  if (v.empty())
+    v = hip_get_env("HIPEP_USE_RYZENAI_CORELIB_MODEL");
   return v == "1" || v == "true";
 }
 

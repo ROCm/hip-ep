@@ -101,10 +101,16 @@ onnxruntime-genai build whose AMDGPU device treats that memory as host memory
 with an access violation in `OgaCreateGenerator`. The GPU-only path can get
 past it only because the KV cache then happens to land in memory the CPU can
 reach; with the CoreLib model the EP has allocated nothing else, so GenAI's
-first buffer is unmapped GPU address space. Use an onnxruntime-genai whose
-AMDGPU device copies through ONNX Runtime's `CopyTensors`, or set
-`MORPHIZEN_DEFAULT_HIPMALLOC=0`, which makes the default allocator return
-host-mapped `hipHostMalloc` memory (slower for GPU-only runs).
+first buffer is unmapped GPU address space. Use the onnxruntime-genai that
+[quick_start.md](../quick_start.md) builds (upstream v0.19.0; any release from
+v0.16.0 has the AMDGPU device that copies through ONNX Runtime's
+`CopyTensors`), or set `MORPHIZEN_DEFAULT_HIPMALLOC=0`, which makes the default
+allocator return host-mapped `hipHostMalloc` memory (slower for GPU-only runs).
+
+With that onnxruntime-genai the `AMDGPU` provider loads the AMD GPU umbrella EP
+(`amdgpu-ep.dll` with `"profile": "hip"`), which loads hip-ep. If the umbrella
+does not pass `use_ryzenai_corelib_model` through to hip-ep, set
+`HIPEP_USE_RYZENAI_CORELIB_MODEL=1` instead.
 
 ## Supported models
 
