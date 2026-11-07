@@ -146,6 +146,12 @@ struct MatMulLowering : ConvertOpToLLVMPattern<MatMulOp> {
       return rewriter.notifyMatchFailure(
           op, "operands must be memrefs (run bufferization first)");
     }
+    // Pass the element type (HIPDNN_EP_DATATYPE_*), not its byte size: f16
+    // and bf16 are both 2 bytes but need different hipBLASLt types.
+    int64_t dataType = getHipdnnDataType(aType.getElementType());
+    if (dataType < 0) {
+      return rewriter.notifyMatchFailure(op, "unsupported element type");
+    }
 
     Type i64Type = rewriter.getI64Type();
     auto createI64Const = [&](int64_t value) {
@@ -204,7 +210,6 @@ struct MatMulLowering : ConvertOpToLLVMPattern<MatMulOp> {
       }
     }
 
-    int64_t elementSize = aType.getElementType().getIntOrFloatBitWidth() / 8;
     using MatMulCall =
         RuntimeFunc<i32, hostPtr, slotIndex, devicePtr, devicePtr, devicePtr,
                     i64, i64, i64, i64, i64, i64, i64, i64>;
@@ -215,7 +220,7 @@ struct MatMulLowering : ConvertOpToLLVMPattern<MatMulOp> {
     }
     if (failed(matMulFunc->call(
             adaptor.getCtx(), SlotIndex{op.getOperation()}, adaptor.getA(),
-            adaptor.getB(), adaptor.getInit(), m, n, k, batchCount, elementSize,
+            adaptor.getB(), adaptor.getInit(), m, n, k, batchCount, dataType,
             bBatchStride, static_cast<int64_t>(0), static_cast<int64_t>(0)))) {
       return failure();
     }
