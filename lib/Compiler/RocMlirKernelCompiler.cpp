@@ -557,7 +557,7 @@ compileAndEmbedRocMlirKernels(ModuleOp module,
   // cannot compile still fails the module. An elementwise kernel can fold
   // away (hip.max(%x, %x)) or fail in the backend (an i64 chain:
   // rock.blockwise_load/store stop at 32-bit integers); that kernel runs as
-  // its hip ops.
+  // its hip ops. With `strictElementwise`, only a kernel that folds away does.
   OwningOpRef<ModuleOp> hipKernels = ModuleOp::create(module.getLoc());
   for (auto func : module.getOps<func::FuncOp>())
     if (func->hasAttr("rock.kernel"))
@@ -566,15 +566,20 @@ compileAndEmbedRocMlirKernels(ModuleOp module,
     auto func = hipKernels->lookupSymbol<func::FuncOp>(name);
     return func && func->hasAttr("rock.elementwise");
   };
+  auto canFallBack = [&](StringRef name) {
+    return !options.strictElementwise && elementwiseKernel(name);
+  };
   llvm::StringSet<> onHipPath;
-  auto runOnHipPath = [&](StringRef name) {
+  auto runOnHipPath = [&](StringRef name, StringRef reason) {
     inlineRocMlirKernel(module, hipKernels->lookupSymbol<func::FuncOp>(name));
     onHipPath.insert(name);
+    if (options.onHipPath)
+      options.onHipPath(name, reason);
   };
   auto fallBack = [&](StringRef name, StringRef stage) {
     llvm::errs() << "warning: rocMLIR " << stage << " failed for kernel '"
                  << name << "'; running its hip ops instead\n";
-    runOnHipPath(name);
+    runOnHipPath(name, stage);
   };
 
   // Lift the kernels out of `module` and convert them all to tosa in one go.
@@ -611,7 +616,7 @@ compileAndEmbedRocMlirKernels(ModuleOp module,
     // only see anything once the kernel is in rock form. Handing the callback
     // raw tosa instead gave --autotune an empty search space.
     if (!runRocMlirHighLevelPipeline(*single)) {
-      if (!elementwiseKernel(name))
+      if (!canFallBack(name))
         return module.emitError()
                << "rocMLIR high-level pipeline failed for kernel '" << name
                << "'";
@@ -624,7 +629,7 @@ compileAndEmbedRocMlirKernels(ModuleOp module,
         *options.log << options.logPrefix << " kernel '" << name
                      << "' has no computation left after lowering; running "
                         "its hip ops instead\n";
-      runOnHipPath(name);
+      runOnHipPath(name, "folded");
       continue;
     }
 
@@ -633,7 +638,7 @@ compileAndEmbedRocMlirKernels(ModuleOp module,
                   ? options.compileOne(*single, name, out)
                   : compileRocMlirDefaultPerfConfig(*single, options.arch, out);
     if (!ok) {
-      if (!elementwiseKernel(name))
+      if (!canFallBack(name))
         return module.emitError()
                << "rocMLIR failed to compile kernel '" << name << "'";
       fallBack(name, "compile");
@@ -650,7 +655,7 @@ compileAndEmbedRocMlirKernels(ModuleOp module,
       continue;
     auto it = compiledByKernel.find(name);
     if (it == compiledByKernel.end() || it->second.binary.empty()) {
-      if (!elementwiseKernel(name))
+      if (!canFallBack(name))
         return module.emitError() << "rocMLIR deferred kernel compiles failed";
       compiledByKernel.erase(name);
       fallBack(name, "deferred compile");
