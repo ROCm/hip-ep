@@ -15,6 +15,18 @@
 // RUN: hip-mlir-opt --split-input-file --hip-fuse-rocmlir %s \
 // RUN:   | hip-mlir-opt --split-input-file \
 // RUN:   | FileCheck %s --check-prefixes=NOGEG,NOARCH
+// RUN: hip-mlir-opt --split-input-file --hip-rocmlir-prepare-quant \
+// RUN:   --hip-fuse-rocmlir-elementwise --hip-fuse-rocmlir-anchor="arch=gfx1151 gemm-gemm-accel-types=f16,bf16" %s \
+// RUN:   | hip-mlir-opt --split-input-file \
+// RUN:   | FileCheck %s
+// RUN: hip-mlir-opt --split-input-file --hip-rocmlir-prepare-quant \
+// RUN:   --hip-fuse-rocmlir-elementwise --hip-fuse-rocmlir-anchor="fuse-geg=false gemm-gemm-accel-types=f16,bf16" %s \
+// RUN:   | hip-mlir-opt --split-input-file \
+// RUN:   | FileCheck %s --check-prefix=NOGEG
+// RUN: hip-mlir-opt --split-input-file --hip-rocmlir-prepare-quant \
+// RUN:   --hip-fuse-rocmlir-elementwise --hip-fuse-rocmlir-anchor %s \
+// RUN:   | hip-mlir-opt --split-input-file \
+// RUN:   | FileCheck %s --check-prefixes=NOGEG,NOARCH
 
 // A column-vector intermediate (n == 1) passes the gate: one kernel runs
 // matmul -> sigmoid -> matmul, and the dispatch reads x and both weights.

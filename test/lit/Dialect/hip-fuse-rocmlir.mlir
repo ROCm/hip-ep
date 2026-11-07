@@ -8,7 +8,11 @@
 // fail later, in whichever module-level pass happens to run next.
 
 // RUN: hip-mlir-opt --split-input-file --hip-fuse-rocmlir %s \
-// RUN:   | hip-mlir-opt --split-input-file | FileCheck %s
+// RUN:   | hip-mlir-opt --split-input-file | FileCheck %s --check-prefixes=CHECK,ONE
+// RUN: hip-mlir-opt --split-input-file --hip-rocmlir-prepare-quant \
+// RUN:   --hip-fuse-rocmlir-elementwise --hip-fuse-rocmlir-anchor %s \
+// RUN:   | hip-mlir-opt --split-input-file \
+// RUN:   | FileCheck %s --check-prefixes=CHECK,TWO
 
 // A bare `tensor.empty` init is cloned into the kernel, as it always was.
 
@@ -752,7 +756,9 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf16>,
 // A transposed conv output that is both returned and read as another kernel's
 // residual stays the first kernel's epilogue. The second kernel does not take
 // the transpose as a view: that would leave the transpose running for the
-// other reader and stop the first conv from growing through it.
+// other reader and stop the first conv from growing through it. The two-pass
+// fusion takes the add into the first conv's kernel, which then also returns
+// the transposed output; the second conv writes its own transposed result.
 
 // CHECK-LABEL: func.func @rocMlir
 // CHECK-LABEL: func.func @rocMlir
@@ -761,8 +767,9 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf16>,
 // CHECK: %[[K1:.*]] = hip.rocmlir
 // CHECK-SAME: outs({{.*}} : tensor<1x4x4x16xf16>)
 // CHECK-NOT: hip.transpose
-// CHECK: %[[K2:.*]] = hip.rocmlir({{.*}}) @rocMlir{{[0-9]+}} ins({{.*}}, %[[K1]] :
-// CHECK: return %[[K2]], %[[K1]]
+// CHECK: %[[K2:[0-9]+]]{{(:2)?}} = hip.rocmlir({{.*}}) @rocMlir{{[0-9]+}} ins({{.*}}, %[[K1]] :
+// ONE: return %[[K2]], %[[K1]]
+// TWO: return %[[K2]]#1, %[[K2]]#0
 func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf16>,
                       %x2: tensor<1x8x4x4xf16>, %w: tensor<16x8x3x3xf16>,
                       %b: tensor<16xf16>)

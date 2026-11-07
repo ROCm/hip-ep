@@ -7,6 +7,10 @@
 
 // RUN: hip-mlir-opt --hip-fuse-rocmlir="fuse-views=false" %s \
 // RUN:   | hip-mlir-opt | FileCheck %s
+// RUN: hip-mlir-opt --hip-rocmlir-prepare-quant \
+// RUN:   --hip-fuse-rocmlir-elementwise="fuse-views=false" --hip-fuse-rocmlir-anchor="fuse-views=false" %s \
+// RUN:   | hip-mlir-opt \
+// RUN:   | FileCheck %s
 
 // CHECK-LABEL: func.func @rocMlir
 // CHECK-SAME: (%{{[a-z0-9]+}}: tensor<1x8x4x4xf16>, %{{[a-z0-9]+}}: tensor<16x8x3x3xf16>, %{{[a-z0-9]+}}: tensor<16xf16>) -> tensor<1x16x4x4xf16>
