@@ -33,6 +33,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/IR/BuiltinOps.h"
 #include "mlir/Interfaces/DataLayoutInterfaces.h"
 #include "mlir/Interfaces/ViewLikeInterface.h"
 
@@ -192,6 +193,78 @@ static bool isHostScalarCandidate(memref::AllocOp allocOp) {
          isCopyReadbackCandidate(allocOp);
 }
 
+/// Small tensor constants a converter emits after hip-externalize-constants
+/// (e.g. a folded class count fed to hip.mul) bufferize to a
+/// `memref.get_global` of a host `.data` global, which a hip kernel cannot
+/// read. Rewrite each one a hip op reads into a `memref.alloc` plus host
+/// stores of its values, so it becomes an ordinary candidate below.
+static void stageHipReadConstantGlobals(func::FuncOp funcOp) {
+  auto module = funcOp->getParentOfType<ModuleOp>();
+  if (!module)
+    return;
+  SmallVector<memref::GetGlobalOp> getGlobals;
+  funcOp.walk([&](memref::GetGlobalOp op) { getGlobals.push_back(op); });
+  for (memref::GetGlobalOp getGlobal : getGlobals) {
+    MemRefType type = getGlobal.getType();
+    if (!type.hasStaticShape() || type.getNumElements() > 16 ||
+        !type.getLayout().isIdentity())
+      continue;
+    Type elem = type.getElementType();
+    if (!elem.isIntOrIndex() && !isa<FloatType>(elem))
+      continue;
+    auto global =
+        module.lookupSymbol<memref::GlobalOp>(getGlobal.getNameAttr());
+    if (!global || !global.getConstant())
+      continue;
+    auto init =
+        dyn_cast_or_null<DenseElementsAttr>(global.getInitialValueAttr());
+    if (!init)
+      continue;
+    bool sawHostIO = false, sawHipUser = false;
+    if (!classifyHostScalarUsers(getGlobal.getResult(), sawHostIO,
+                                 sawHipUser) ||
+        !sawHipUser)
+      continue;
+
+    OpBuilder builder(getGlobal);
+    Location loc = getGlobal.getLoc();
+    // arith.constant only takes signless integers. A signed/unsigned element
+    // (e.g. a QLinear ui8 zero point) is built at the same width and cast
+    // back; the LLVM lowering maps both to the same integer type.
+    auto intElem = dyn_cast<IntegerType>(elem);
+    IntegerType signlessElem = intElem && !intElem.isSignless()
+                                   ? builder.getIntegerType(intElem.getWidth())
+                                   : IntegerType();
+    auto alloc = memref::AllocOp::create(builder, loc, type);
+    ArrayRef<int64_t> shape = type.getShape();
+    SmallVector<Attribute> values(init.getValues<Attribute>());
+    for (int64_t linear = 0; linear < type.getNumElements(); ++linear) {
+      SmallVector<Value> indices(shape.size());
+      int64_t rem = linear;
+      for (int64_t d = static_cast<int64_t>(shape.size()) - 1; d >= 0; --d) {
+        indices[d] =
+            arith::ConstantIndexOp::create(builder, loc, rem % shape[d]);
+        rem /= shape[d];
+      }
+      Attribute v =
+          init.isSplat() ? init.getSplatValue<Attribute>() : values[linear];
+      Value scalar;
+      if (signlessElem) {
+        APInt bits = cast<IntegerAttr>(v).getValue();
+        Value raw = arith::ConstantOp::create(
+            builder, loc, builder.getIntegerAttr(signlessElem, bits));
+        scalar = UnrealizedConversionCastOp::create(builder, loc, elem, raw)
+                     .getResult(0);
+      } else {
+        scalar = arith::ConstantOp::create(builder, loc, cast<TypedAttr>(v));
+      }
+      memref::StoreOp::create(builder, loc, scalar, alloc, indices);
+    }
+    getGlobal.replaceAllUsesWith(alloc.getResult());
+    getGlobal.erase();
+  }
+}
+
 namespace {
 struct MaterializeHostScalarsPass
     : public impl::MaterializeHostScalarsPassBase<MaterializeHostScalarsPass> {
@@ -208,6 +281,8 @@ void MaterializeHostScalarsPass::runOnOperation() {
       !isa<ContextType>(funcOp.getArgument(0).getType()))
     return;
   Value ctx = funcOp.getArgument(0);
+
+  stageHipReadConstantGlobals(funcOp);
 
   // Collect candidates before rewriting. Keep their traversal order.
   SmallVector<memref::AllocOp> candidates;
