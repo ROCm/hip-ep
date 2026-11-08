@@ -145,11 +145,19 @@ graph of readers and not only a chain.
 ### Prologue
 
 Then each anchor takes, as the prologue of an activation operand, a module
-that only the anchor reads and that has one input that is not an inline
-scalar. The activation operands are the conv input and the matmul and gemm A
+that only the anchor reads. The module can have several inputs, such as the
+two sides of a residual add; the kernel loads each input and recomputes the
+module on every load. The anchor loads each activation element about once for
+each filter tap that covers it (the filter size divided by the stride) and
+once for each tile of 128 output columns. A module with more than one
+non-scalar input joins only while this reload count, times the number of
+full-size inputs that the prologue loads, is 9 or less. Thus a 1x1 conv or a
+narrow matmul takes a residual add, but a 5x5 conv or a wide gemm leaves the
+module as its own kernel, which computes it once. A module with one input
+always joins. The activation operands are the conv input and the matmul and gemm A
 and B operands, not the conv filter or the gemm C operand. For a conv of
 dequantizes they are the integer input and weights. The search continues
-through the input views of the module.
+through the input views and the producer modules of each module input.
 
 A module that no plan takes and that is a valid elementwise kernel (see
 [Elementwise kernels](#elementwise-kernels)) stays whole. Every other module
