@@ -20,7 +20,8 @@
 //         memref.store %n, %a[%c0] : memref<1xi32>
 //
 // Limits: at most 16 elements; context in argument zero; no unknown consumers.
-// Float buffers need a HIP consumer. This bounded rule does not make all host
+// Float buffers need a HIP consumer. A small in-module memref.global with a
+// HIP consumer is copied into scratch. This bounded rule does not make all host
 // accesses safe. Larger and unsupported allocations need separate handling.
 //
 //===----------------------------------------------------------------------===//
@@ -33,6 +34,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/IR/SymbolTable.h"
 #include "mlir/Interfaces/DataLayoutInterfaces.h"
 #include "mlir/Interfaces/ViewLikeInterface.h"
 
@@ -173,16 +175,18 @@ static bool isCopyReadbackCandidate(memref::AllocOp allocOp) {
   return hasCopy && hasReadback;
 }
 
-static bool isHostScalarCandidate(memref::AllocOp allocOp) {
-  MemRefType type = allocOp.getType();
-  if (!type.hasStaticShape())
-    return false;
-  if (type.getNumElements() > 16)
+static bool isSmallHostScalarType(MemRefType type) {
+  if (!type.hasStaticShape() || type.getNumElements() > 16)
     return false;
   Type elem = type.getElementType();
-  bool isFloat = isa<FloatType>(elem);
-  if (!elem.isIntOrIndex() && !isFloat)
+  return elem.isIntOrIndex() || isa<FloatType>(elem);
+}
+
+static bool isHostScalarCandidate(memref::AllocOp allocOp) {
+  MemRefType type = allocOp.getType();
+  if (!isSmallHostScalarType(type))
     return false;
+  bool isFloat = isa<FloatType>(type.getElementType());
 
   bool hasHostIO = false;
   bool hasHipUser = false;
@@ -190,6 +194,26 @@ static bool isHostScalarCandidate(memref::AllocOp allocOp) {
     return false;
   return (hasHostIO && (!isFloat || hasHipUser)) ||
          isCopyReadbackCandidate(allocOp);
+}
+
+// A splat below the constant-externalization threshold stays a host-memory
+// `memref.global`. A GPU kernel given that address reads zeros, because the
+// device never sees it. A one-element `dense<true>` mask makes every attention
+// position -inf and softmax yields NaN. Copy the bytes into mapped scratch.
+static bool isHostGlobalCandidate(memref::GetGlobalOp getGlobal) {
+  auto global = SymbolTable::lookupNearestSymbolFrom<memref::GlobalOp>(
+      getGlobal, getGlobal.getNameAttr());
+  if (!global || !global.getInitialValue() ||
+      global->hasAttr("hip.external_data"))
+    return false;
+  if (!isSmallHostScalarType(getGlobal.getType()))
+    return false;
+  bool hasHostIO = false;
+  bool hasHipUser = false;
+  if (!classifyHostScalarUsers(getGlobal.getResult(), hasHostIO, hasHipUser))
+    return false;
+  // The global is the host-side source, so no store is expected.
+  return hasHipUser;
 }
 
 namespace {
@@ -209,8 +233,9 @@ void MaterializeHostScalarsPass::runOnOperation() {
     return;
   Value ctx = funcOp.getArgument(0);
 
-  // Collect candidates before rewriting. Keep their traversal order.
-  SmallVector<memref::AllocOp> candidates;
+  // Collect candidates before rewriting. Keep their traversal order: allocs
+  // first, then globals, so the alloc offsets do not move.
+  SmallVector<Operation *> candidates;
   funcOp.walk([&](memref::AllocOp op) {
     if (isHostScalarCandidate(op))
       candidates.push_back(op);
@@ -228,8 +253,8 @@ void MaterializeHostScalarsPass::runOnOperation() {
   int64_t total = 0;
   // Match the default layout used by HIP-to-LLVM, including element padding.
   const DataLayout dataLayout;
-  for (memref::AllocOp allocOp : candidates) {
-    MemRefType ty = allocOp.getType();
+  for (Operation *op : candidates) {
+    auto ty = cast<MemRefType>(op->getResult(0).getType());
     Type elemTy = ty.getElementType();
     int64_t elemBytes =
         llvm::alignTo(dataLayout.getTypeSize(elemTy).getFixedValue(),
@@ -237,7 +262,7 @@ void MaterializeHostScalarsPass::runOnOperation() {
     int64_t bytes = std::max(int64_t{1}, ty.getNumElements() * elemBytes);
     int64_t off = llvm::alignTo(total, kAlign);
     offsets.push_back(off);
-    total = off + scalarByteSize(ty);
+    total = off + bytes;
   }
   total = llvm::alignTo(total, kAlign);
 
@@ -252,20 +277,26 @@ void MaterializeHostScalarsPass::runOnOperation() {
       GetHostScratchOp::create(builder, loc, scratchType, ctx, totalSize);
 
   // The runtime owns scratch. Replace allocations and erase their deallocs.
-  for (auto [allocOp, offset] : llvm::zip(candidates, offsets)) {
-    builder.setInsertionPoint(allocOp);
+  for (auto [op, offset] : llvm::zip(candidates, offsets)) {
+    // The global copy must follow the get_global it reads. An alloc is
+    // replaced, so its view goes in front of it.
+    if (isa<memref::GetGlobalOp>(op))
+      builder.setInsertionPointAfter(op);
+    else
+      builder.setInsertionPoint(op);
     Value offsetVal =
-        arith::ConstantIndexOp::create(builder, allocOp.getLoc(), offset);
-    auto view = memref::ViewOp::create(builder, allocOp.getLoc(),
-                                       allocOp.getType(), scratch, offsetVal,
-                                       /*sizes=*/ValueRange{});
+        arith::ConstantIndexOp::create(builder, op->getLoc(), offset);
+    auto view = memref::ViewOp::create(
+        builder, op->getLoc(), cast<MemRefType>(op->getResult(0).getType()),
+        scratch, offsetVal, /*sizes=*/ValueRange{});
 
-    SmallVector<memref::DeallocOp> deallocs;
-    for (Operation *user : allocOp->getUsers())
-      if (auto d = dyn_cast<memref::DeallocOp>(user))
-        deallocs.push_back(d);
-    for (auto d : deallocs)
-      d.erase();
+    if (auto allocOp = dyn_cast<memref::AllocOp>(op)) {
+      SmallVector<memref::DeallocOp> deallocs;
+      for (Operation *user : allocOp->getUsers())
+        if (auto d = dyn_cast<memref::DeallocOp>(user))
+          deallocs.push_back(d);
+      for (auto d : deallocs)
+        d.erase();
 
       allocOp.replaceAllUsesWith(view.getResult());
       allocOp.erase();
