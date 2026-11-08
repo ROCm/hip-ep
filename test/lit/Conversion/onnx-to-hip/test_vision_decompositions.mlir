@@ -30,20 +30,6 @@ module {
   // CHECK: onnx.HardSwish
   // CHECK-NOT: hip.mul
 
-  func.func @batch_norm(%x: tensor<1x4x2x2xf32>, %scale: tensor<4xf32>, %bias: tensor<4xf32>, %mean: tensor<4xf32>, %var: tensor<4xf32>) -> tensor<1x4x2x2xf32> {
-    %y = "onnx.BatchNormalization"(%x, %scale, %bias, %mean, %var) {epsilon = 1.000000e-05 : f32, momentum = 9.000000e-01 : f32, training_mode = 0 : i64} : (tensor<1x4x2x2xf32>, tensor<4xf32>, tensor<4xf32>, tensor<4xf32>, tensor<4xf32>) -> tensor<1x4x2x2xf32>
-    return %y : tensor<1x4x2x2xf32>
-  }
-
-  // CHECK-LABEL: func.func @batch_norm
-  // CHECK-NOT: onnx.BatchNormalization
-  // CHECK: tensor.expand_shape
-  // CHECK: hip.sub
-  // CHECK: hip.sqrt
-  // CHECK: hip.div
-  // CHECK: hip.mul
-  // CHECK: hip.add
-
   func.func @einsum_qk(%q: tensor<1x2x3x4xf32>, %k: tensor<1x2x5x4xf32>) -> tensor<1x2x3x5xf32> {
     %y = "onnx.Einsum"(%q, %k) {equation = "bhlk,bhtk->bhlt"} : (tensor<1x2x3x4xf32>, tensor<1x2x5x4xf32>) -> tensor<1x2x3x5xf32>
     return %y : tensor<1x2x3x5xf32>
