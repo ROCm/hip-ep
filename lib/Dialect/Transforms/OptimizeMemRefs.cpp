@@ -29,10 +29,6 @@
 //
 //   Result for attention: 8 allocs -> 4 allocs (50% reduction).
 //
-// Allocations the host reads or writes (memref.load / memref.store, directly
-// or through a view) are left out entirely: they neither take nor donate a
-// slot, so hip-materialize-host-scalars still sees them as separate allocs.
-//
 // Compatibility rules:
 //   - Static shapes: any alloc whose byte-size fits inside an earlier slot
 //     (same element type and memory space).  A memref.reinterpret_cast is
@@ -52,7 +48,6 @@
 #include "mlir/Dialect/Arith/Transforms/BufferViewFlowOpInterfaceImpl.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
-#include "mlir/Interfaces/ViewLikeInterface.h"
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Statistic.h"
@@ -101,22 +96,6 @@ static SmallVector<int64_t> getContiguousStrides(MemRefType type) {
     stride *= shape[i];
   }
   return strides;
-}
-
-/// True if host code reads or writes \p memrefVal, directly or through a view
-/// of it. Such buffers must stay separate allocations so
-/// hip-materialize-host-scalars can move them out of the GPU pool; merged into
-/// a device slot, the host access would land in device memory.
-static bool hasHostAccess(Value memrefVal) {
-  for (Operation *user : memrefVal.getUsers()) {
-    if (isa<memref::StoreOp, memref::LoadOp>(user))
-      return true;
-    if (auto view = dyn_cast<ViewLikeOpInterface>(user))
-      if (view.getViewSource() == memrefVal &&
-          hasHostAccess(view->getResult(0)))
-        return true;
-  }
-  return false;
 }
 
 /// Returns true if \p slot can serve an allocation of \p neededType with
@@ -197,8 +176,6 @@ void OptimizeMemRefsPass::runOnOperation() {
 
     Value result = allocOp.getResult();
     if (result.use_empty())
-      continue;
-    if (hasHostAccess(result))
       continue;
 
     unsigned lastUse = findLastAliasedUseIndex(result, aliasAnalysis, block,

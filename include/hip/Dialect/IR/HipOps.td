@@ -5653,6 +5653,9 @@ def Hip_ResizeOp : Hip_DpsOp_AutoReify<"resize"> {
     ONNX `scales` order) overrides that ratio: when floor(in_dim * scale)
     rounds, e.g. 3 * 1.5 -> 4, ONNX samples with the supplied scale and the
     extent ratio would shift every coordinate.  align_corners ignores it.
+    `runtime_scales` (one f64 per window axis, read on the host at run time)
+    does the same for a scales vector that does not fold; it requires the
+    saved `prefix_count` / `spatial_rank` launch and excludes `scales`.
     A dynamic window extent is filled in at conversion from a
     compile-time constant `scales` vector (scale 1 copies the input dim;
     any other scale is floor(input_dim * scale)).  When `scales` is absent, a
@@ -5675,6 +5678,7 @@ def Hip_ResizeOp : Hip_DpsOp_AutoReify<"resize"> {
   let arguments = (ins
     Hip_ContextType:$ctx,
     Hip_TensorOrMemRef:$input,
+    Variadic<F64>:$runtime_scales,
     Hip_TensorOrMemRef:$output,
     I64Attr:$mode,
     I64Attr:$coord_transform,
@@ -5684,9 +5688,11 @@ def Hip_ResizeOp : Hip_DpsOp_AutoReify<"resize"> {
 
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    (`scales` `(` $runtime_scales^ `:` type($runtime_scales) `)`)?
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+  let hasVerifier = 1;
 }
 
 def Hip_GridSampleOp : Hip_DpsOp_AutoReifyInfer<"grid_sample"> {

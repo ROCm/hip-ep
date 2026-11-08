@@ -33,6 +33,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/IR/BuiltinOps.h"
 #include "mlir/Interfaces/DataLayoutInterfaces.h"
 #include "mlir/Interfaces/ViewLikeInterface.h"
 
@@ -208,10 +209,8 @@ static void stageHipReadConstantGlobals(func::FuncOp funcOp) {
     if (!type.hasStaticShape() || type.getNumElements() > 16 ||
         !type.getLayout().isIdentity())
       continue;
-    // arith.constant only takes signless integers, so signed/unsigned
-    // constants (e.g. QLinear ui8 zero points) stay globals.
     Type elem = type.getElementType();
-    if (!elem.isSignlessIntOrIndex() && !isa<FloatType>(elem))
+    if (!elem.isIntOrIndex() && !isa<FloatType>(elem))
       continue;
     auto global =
         module.lookupSymbol<memref::GlobalOp>(getGlobal.getNameAttr());
@@ -229,6 +228,13 @@ static void stageHipReadConstantGlobals(func::FuncOp funcOp) {
 
     OpBuilder builder(getGlobal);
     Location loc = getGlobal.getLoc();
+    // arith.constant only takes signless integers. A signed/unsigned element
+    // (e.g. a QLinear ui8 zero point) is built at the same width and cast
+    // back; the LLVM lowering maps both to the same integer type.
+    auto intElem = dyn_cast<IntegerType>(elem);
+    IntegerType signlessElem = intElem && !intElem.isSignless()
+                                   ? builder.getIntegerType(intElem.getWidth())
+                                   : IntegerType();
     auto alloc = memref::AllocOp::create(builder, loc, type);
     ArrayRef<int64_t> shape = type.getShape();
     SmallVector<Attribute> values(init.getValues<Attribute>());
@@ -242,8 +248,16 @@ static void stageHipReadConstantGlobals(func::FuncOp funcOp) {
       }
       Attribute v =
           init.isSplat() ? init.getSplatValue<Attribute>() : values[linear];
-      Value scalar =
-          arith::ConstantOp::create(builder, loc, cast<TypedAttr>(v));
+      Value scalar;
+      if (signlessElem) {
+        APInt bits = cast<IntegerAttr>(v).getValue();
+        Value raw = arith::ConstantOp::create(
+            builder, loc, builder.getIntegerAttr(signlessElem, bits));
+        scalar = UnrealizedConversionCastOp::create(builder, loc, elem, raw)
+                     .getResult(0);
+      } else {
+        scalar = arith::ConstantOp::create(builder, loc, cast<TypedAttr>(v));
+      }
       memref::StoreOp::create(builder, loc, scalar, alloc, indices);
     }
     getGlobal.replaceAllUsesWith(alloc.getResult());

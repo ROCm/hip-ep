@@ -4384,7 +4384,8 @@ planResizeAxis(int64_t inExtent, int64_t outExtent, int64_t coordTransform) {
 // the result scaled by scale_y_n * scale_x_n for a following rescale to undo,
 // and this pass emits no such rescale. ONNX Resize on a real model is float.
 static bool isTosaExpressibleResize(hip::ResizeOp op) {
-  if (op->getNumResults() != 1)
+  // tosa.resize takes its scale as a compile-time constant.
+  if (op->getNumResults() != 1 || !op.getRuntimeScales().empty())
     return false;
 
   auto inputType = dyn_cast<RankedTensorType>(op.getInput().getType());

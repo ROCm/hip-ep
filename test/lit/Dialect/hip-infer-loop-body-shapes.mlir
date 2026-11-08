@@ -476,3 +476,71 @@ func.func @squeeze_duplicate_axes(%x: tensor<?x?x1x4xf32>) -> tensor<*xf32> {
   %y = "onnx.Squeeze"(%x) {axes = [2, -2]} : (tensor<?x?x1x4xf32>) -> tensor<*xf32>
   return %y : tensor<*xf32>
 }
+
+// ConstantOfShape: a constant shape vector gives static extents; a runtime
+// one of static length fixes only the rank.
+// CHECK-LABEL: func.func @constant_of_shape_extents
+// CHECK:         "onnx.ConstantOfShape"{{.*}} -> tensor<2x3xf32>
+// CHECK:         "onnx.ConstantOfShape"{{.*}} -> tensor<?x?x?xf32>
+func.func @constant_of_shape_extents(%s: tensor<3xi64>)
+    -> (tensor<*xf32>, tensor<*xf32>) {
+  %c = "onnx.Constant"() {value = dense<[2, 3]> : tensor<2xi64>} : () -> tensor<2xi64>
+  %a = "onnx.ConstantOfShape"(%c) {value = dense<0.0> : tensor<1xf32>}
+      : (tensor<2xi64>) -> tensor<*xf32>
+  %b = "onnx.ConstantOfShape"(%s) {value = dense<0.0> : tensor<1xf32>}
+      : (tensor<3xi64>) -> tensor<*xf32>
+  return %a, %b : tensor<*xf32>, tensor<*xf32>
+}
+
+// Expand broadcasts the input against the shape vector: a 1 in the shape
+// keeps the input dim, and a longer shape adds leading dims.
+// CHECK-LABEL: func.func @expand_broadcast
+// CHECK:         "onnx.Expand"{{.*}} -> tensor<2x3x4xf32>
+func.func @expand_broadcast(%x: tensor<1x4xf32>) -> tensor<*xf32> {
+  %s = "onnx.Constant"() {value = dense<[2, 3, 1]> : tensor<3xi64>} : () -> tensor<3xi64>
+  %y = "onnx.Expand"(%x, %s) : (tensor<1x4xf32>, tensor<3xi64>) -> tensor<*xf32>
+  return %y : tensor<*xf32>
+}
+
+// NonZero: one row per input dim, a runtime count of columns.
+// CHECK-LABEL: func.func @nonzero_rows
+// CHECK:         "onnx.NonZero"{{.*}} -> tensor<2x?xi64>
+func.func @nonzero_rows(%x: tensor<?x3xf32>) -> tensor<*xi64> {
+  %y = "onnx.NonZero"(%x) : (tensor<?x3xf32>) -> tensor<*xi64>
+  return %y : tensor<*xi64>
+}
+
+// Flatten folds dims before `axis` into the first output dim; a dynamic dim
+// makes its side dynamic.
+// CHECK-LABEL: func.func @flatten_axis
+// CHECK:         "onnx.Flatten"{{.*}} -> tensor<6x20xf32>
+// CHECK:         "onnx.Flatten"{{.*}} -> tensor<?x12xf32>
+func.func @flatten_axis(%x: tensor<2x3x4x5xf32>, %d: tensor<?x3x4xf32>)
+    -> (tensor<*xf32>, tensor<*xf32>) {
+  %a = "onnx.Flatten"(%x) {axis = 2 : si64} : (tensor<2x3x4x5xf32>) -> tensor<*xf32>
+  %b = "onnx.Flatten"(%d) {axis = -2 : si64} : (tensor<?x3x4xf32>) -> tensor<*xf32>
+  return %a, %b : tensor<*xf32>, tensor<*xf32>
+}
+
+// TopK: both results keep the input shape with a constant k on `axis`.
+// CHECK-LABEL: func.func @topk_constant_k
+// CHECK:         "onnx.TopK"{{.*}} -> (tensor<?x10xf32>, tensor<?x10xi64>)
+func.func @topk_constant_k(%x: tensor<?x100xf32>) -> (tensor<*xf32>, tensor<*xi64>) {
+  %k = "onnx.Constant"() {value = dense<10> : tensor<1xi64>} : () -> tensor<1xi64>
+  %v, %i = "onnx.TopK"(%x, %k) {axis = 1 : si64, largest = 1 : si64, sorted = 1 : si64}
+      : (tensor<?x100xf32>, tensor<1xi64>) -> (tensor<*xf32>, tensor<*xi64>)
+  return %v, %i : tensor<*xf32>, tensor<*xi64>
+}
+
+// Clip keeps the input shape; Where broadcasts all three operands.
+// CHECK-LABEL: func.func @clip_and_where
+// CHECK:         "onnx.Clip"{{.*}} -> tensor<?x4xf32>
+// CHECK:         "onnx.Where"{{.*}} -> tensor<?x4xf32>
+func.func @clip_and_where(%x: tensor<?x4xf32>, %c: tensor<?x1xi1>,
+                          %a: tensor<1x4xf32>, %b: tensor<f32>)
+    -> (tensor<*xf32>, tensor<*xf32>) {
+  %none = "onnx.NoValue"() {value} : () -> none
+  %y = "onnx.Clip"(%x, %none, %none) : (tensor<?x4xf32>, none, none) -> tensor<*xf32>
+  %w = "onnx.Where"(%c, %a, %b) : (tensor<?x1xi1>, tensor<1x4xf32>, tensor<f32>) -> tensor<*xf32>
+  return %y, %w : tensor<*xf32>, tensor<*xf32>
+}

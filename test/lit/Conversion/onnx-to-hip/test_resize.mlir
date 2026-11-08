@@ -553,7 +553,9 @@ module {
 
   // Test 25: MaskRCNN FPN upsample. A non-empty roi is ignored outside
   // tf_crop_and_resize. Scales are Concat([1, 1], runtime): the prefix folds,
-  // and each window scale is read back to size the dynamic H and W.
+  // and each window scale is read back once. It sizes the dynamic H and W
+  // (extent 0 for a NaN or non-positive product) and goes to the kernel,
+  // which samples with it.
   func.func @test_resize_runtime_window_scales(%arg0: tensor<1x256x?x?xf32>,
                                                %window: tensor<2xf32>)
       -> tensor<?x?x?x?xf32> {
@@ -570,13 +572,45 @@ module {
         : (tensor<1x256x?x?xf32>, tensor<8xf32>, tensor<4xf32>)
         -> tensor<?x?x?x?xf32>
     // CHECK-NOT: onnx.Resize
-    // CHECK-COUNT-2: hip.readback_scalar
+    // CHECK: hip.readback_scalar
+    // CHECK: %[[SH:.*]] = arith.extf %{{.*}} : f32 to f64
+    // CHECK: hip.readback_scalar
+    // CHECK: %[[SW:.*]] = arith.extf %{{.*}} : f32 to f64
+    // CHECK-NOT: hip.readback_scalar
+    // CHECK: arith.cmpf ogt
+    // CHECK: arith.cmpf olt
+    // CHECK: arith.select
     // CHECK: tensor.empty(%{{.*}}, %{{.*}}) : tensor<1x256x?x?xf32>
-    // CHECK: hip.resize
-    // CHECK-NOT: prefix_count
+    // CHECK: hip.resize(%{{.*}}) ins(%{{.*}} : tensor<1x256x?x?xf32>) scales(%[[SH]], %[[SW]] : f64, f64) outs(
+    // CHECK-SAME: prefix_count = 2 : i64
+    // CHECK-SAME: spatial_rank = 2 : i64
     // CHECK: tensor.cast %{{.*}} : tensor<1x256x?x?xf32> to tensor<?x?x?x?xf32>
     // CHECK: return
     return %y : tensor<?x?x?x?xf32>
+  }
+
+  // Test 27: the result type already fixes H and W, but ONNX still samples
+  // with the runtime scale, which can differ from out / in when the product
+  // rounds. Each window scale is read back and passed to the kernel.
+  func.func @test_resize_runtime_scales_static_output(
+      %arg0: tensor<1x8x3x3xf32>, %window: tensor<2xf32>)
+      -> tensor<1x8x4x4xf32> {
+    // CHECK-LABEL: func.func @test_resize_runtime_scales_static_output
+    %roi = "onnx.NoValue"() {value} : () -> none
+    %prefix = "onnx.Constant"() {value = dense<1.0> : tensor<2xf32>}
+        : () -> tensor<2xf32>
+    %scales = "onnx.Concat"(%prefix, %window) {axis = 0 : si64}
+        : (tensor<2xf32>, tensor<2xf32>) -> tensor<4xf32>
+    %y = "onnx.Resize"(%arg0, %roi, %scales)
+        {mode = "linear", coordinate_transformation_mode = "half_pixel"}
+        : (tensor<1x8x3x3xf32>, none, tensor<4xf32>) -> tensor<1x8x4x4xf32>
+    // CHECK-NOT: onnx.Resize
+    // CHECK-COUNT-2: hip.readback_scalar
+    // CHECK: tensor.empty() : tensor<1x8x4x4xf32>
+    // CHECK: hip.resize(%{{.*}}) ins(%{{.*}} : tensor<1x8x3x3xf32>) scales(%{{.*}}, %{{.*}} : f64, f64) outs(
+    // CHECK-NOT: tensor.cast
+    // CHECK: return
+    return %y : tensor<1x8x4x4xf32>
   }
 
   // Test 26: a runtime scale on a copied prefix axis cannot be proven to be 1.

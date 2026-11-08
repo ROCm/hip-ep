@@ -83,11 +83,19 @@ struct ClipToHipMinMax : public mlir::RewritePattern {
                                                unrankedResult.getElementType());
     }
 
-    // Both bounds missing: pure identity.
-    if (!loV && !hiV) {
-      rewriter.replaceOp(op, x);
+    // Users of an unranked result still expect `tensor<*xT>`.
+    mlir::Type origResultType = op->getResult(0).getType();
+    auto replaceWith = [&](mlir::Value value) {
+      if (value.getType() != origResultType)
+        value =
+            mlir::tensor::CastOp::create(rewriter, loc, origResultType, value);
+      rewriter.replaceOp(op, value);
       return mlir::success();
-    }
+    };
+
+    // Both bounds missing: pure identity.
+    if (!loV && !hiV)
+      return replaceWith(x);
 
     auto ctxOrFailure = getContextArg(op, rewriter);
     if (mlir::failed(ctxOrFailure))
@@ -108,8 +116,7 @@ struct ClipToHipMinMax : public mlir::RewritePattern {
                 ->getResult(0);
     }
 
-    rewriter.replaceOp(op, cur);
-    return mlir::success();
+    return replaceWith(cur);
   }
 };
 
