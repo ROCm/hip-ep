@@ -89,4 +89,17 @@ module {
   // CHECK: tensor.empty(%[[N]], %[[C]]) : tensor<?x?x7x7xf32>
   // CHECK: hip.roi_align(%[[CTX]])
   // CHECK-SAME: half_pixel = 1 : i64, mode = 0 : i64
+
+  // rois must have 4 columns. The rejection comes before any operand is cast,
+  // so the unranked X is left without a stray tensor.cast.
+  func.func @roi_align_bad_rois_unranked_x(%X: tensor<*xf32>, %R: tensor<?x5xf32>, %I: tensor<?xi64>) -> tensor<?x8x7x7xf32> {
+    %Y = "onnx.RoiAlign"(%X, %R, %I) {output_height = 7 : si64, output_width = 7 : si64} : (tensor<*xf32>, tensor<?x5xf32>, tensor<?xi64>) -> tensor<?x8x7x7xf32>
+    return %Y : tensor<?x8x7x7xf32>
+  }
+
+  // CHECK-LABEL: func.func @roi_align_bad_rois_unranked_x
+  // CHECK-NOT: tensor.cast
+  // CHECK: onnx.RoiAlign
+  // CHECK-NOT: hip.roi_align
+  // CHECK: return
 }

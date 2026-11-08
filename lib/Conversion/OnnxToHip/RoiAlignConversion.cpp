@@ -35,23 +35,24 @@ namespace {
 //          {half_pixel = 1, mode = 0, output_height = 7, output_width = 7,
 //           sampling_ratio = 2, spatial_scale = 2.500000e-01 : f32}
 
-mlir::FailureOr<mlir::Value> castToRank(mlir::PatternRewriter &rewriter,
-                                        mlir::Location loc, mlir::Value value,
-                                        int64_t rank) {
+/// The ranked type `value` is used as: its own type when it already has
+/// `rank`, all-dynamic extents when unranked, null otherwise. Builds no IR.
+mlir::RankedTensorType rankedTypeFor(mlir::Value value, int64_t rank) {
   mlir::Type type = value.getType();
-  if (auto ranked = mlir::dyn_cast<mlir::RankedTensorType>(type)) {
-    if (ranked.getRank() != rank)
-      return mlir::failure();
-    return value;
-  }
+  if (auto ranked = mlir::dyn_cast<mlir::RankedTensorType>(type))
+    return ranked.getRank() == rank ? ranked : mlir::RankedTensorType();
   auto unranked = mlir::dyn_cast<mlir::UnrankedTensorType>(type);
   if (!unranked)
-    return mlir::failure();
+    return {};
   llvm::SmallVector<int64_t> shape(rank, mlir::ShapedType::kDynamic);
-  auto rankedType =
-      mlir::RankedTensorType::get(shape, unranked.getElementType());
-  return mlir::tensor::CastOp::create(rewriter, loc, rankedType, value)
-      .getResult();
+  return mlir::RankedTensorType::get(shape, unranked.getElementType());
+}
+
+mlir::Value castTo(mlir::PatternRewriter &rewriter, mlir::Location loc,
+                   mlir::Value value, mlir::RankedTensorType type) {
+  if (value.getType() == type)
+    return value;
+  return mlir::tensor::CastOp::create(rewriter, loc, type, value).getResult();
 }
 
 struct RoiAlignToHip : public mlir::RewritePattern {
@@ -145,18 +146,20 @@ struct RoiAlignToHip : public mlir::RewritePattern {
     if (auto attr = op->getAttrOfType<mlir::FloatAttr>("spatial_scale"))
       spatialScale = static_cast<float>(attr.getValueAsDouble());
 
-    auto input = castToRank(rewriter, loc, op->getOperand(0), 4);
-    auto rois = castToRank(rewriter, loc, op->getOperand(1), 2);
-    auto indices = castToRank(rewriter, loc, op->getOperand(2), 1);
-    if (mlir::failed(input) || mlir::failed(rois) || mlir::failed(indices))
+    // Every check runs before the first cast, so a failure leaves the IR
+    // unchanged.
+    auto inputType = rankedTypeFor(op->getOperand(0), 4);
+    auto roisType = rankedTypeFor(op->getOperand(1), 2);
+    auto indicesType = rankedTypeFor(op->getOperand(2), 1);
+    if (!inputType || !roisType || !indicesType)
       return rewriter.notifyMatchFailure(
           op, "expected 4-D X, 2-D rois and 1-D batch_indices");
-
-    auto inputType = mlir::cast<mlir::RankedTensorType>(input->getType());
-    auto roisType = mlir::cast<mlir::RankedTensorType>(rois->getType());
-    auto indicesType = mlir::cast<mlir::RankedTensorType>(indices->getType());
     if (!roisType.isDynamicDim(1) && roisType.getDimSize(1) != 4)
       return rewriter.notifyMatchFailure(op, "rois last dim must be 4");
+
+    mlir::Value input = castTo(rewriter, loc, op->getOperand(0), inputType);
+    mlir::Value rois = castTo(rewriter, loc, op->getOperand(1), roisType);
+    mlir::Value indices = castTo(rewriter, loc, op->getOperand(2), indicesType);
 
     // Static extents from whichever side knows them; the result type of the
     // ONNX op wins when it is more precise than the operands.
@@ -173,9 +176,9 @@ struct RoiAlignToHip : public mlir::RewritePattern {
 
     llvm::SmallVector<mlir::Value> dynSizes;
     if (mlir::ShapedType::isDynamic(numRois))
-      dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc, *rois, 0));
+      dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc, rois, 0));
     if (mlir::ShapedType::isDynamic(channels))
-      dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc, *input, 1));
+      dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc, input, 1));
 
     auto outputType =
         mlir::RankedTensorType::get({numRois, channels, outH, outW}, elemTy);
@@ -183,7 +186,7 @@ struct RoiAlignToHip : public mlir::RewritePattern {
         rewriter, loc, outputType.getShape(), elemTy, dynSizes);
 
     auto hipOp = mlir::hip::RoiAlignOp::create(
-        rewriter, loc, context, *input, *rois, *indices, init,
+        rewriter, loc, context, input, rois, indices, init,
         rewriter.getI64IntegerAttr(modeId), rewriter.getI64IntegerAttr(outH),
         rewriter.getI64IntegerAttr(outW),
         rewriter.getI64IntegerAttr(samplingRatio),
