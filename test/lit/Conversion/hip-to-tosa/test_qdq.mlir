@@ -8,9 +8,13 @@
 // fused kernel.
 //
 // Dequantize: (cast(x) - cast(zp)) * scale
-// Quantize:   saturate(x * reciprocal(scale) + zp), with float->int via
-//             tosa.custom fp_to_int_cast (plain tosa.cast is illegal in
-//             rock-tosa-to-elementwise).
+// Quantize:   saturate(round(x * reciprocal(scale)) + zp), rounding half to
+//             even with a plain tosa.cast to i32. The fp_to_int_cast custom
+//             op truncates, as ONNX Cast does, and would be off by one.
+//
+// rocMLIR takes only signless integers, so a kernel whose unsigned values
+// only meet signedness-neutral ops is retyped to signless; the rocmlir
+// unsigned_cast custom op keeps the unsigned meaning.
 //
 // FILE LAYOUT:
 // Converting cases in the first --split-input-file chunk; each rejection
@@ -55,11 +59,14 @@ func.func @dequantize_per_axis(%ctx: !hip.context, %x: tensor<1x64x32xi8>,
   return %r : tensor<1x64x32xf32>
 }
 
-// Quantize without zp: reciprocal, mul, fp_to_int_cast.
+// Quantize without zp: reciprocal, mul, round to i32, clamp, narrow.
 // CHECK-LABEL: func.func @quantize_no_zp
 // CHECK: tosa.reciprocal
 // CHECK: tosa.mul
-// CHECK: tosa.custom {{.*}}operator_name = "fp_to_int_cast"
+// CHECK-NOT: fp_to_int_cast
+// CHECK: tosa.cast {{.*}} -> tensor<2x8xi32>
+// CHECK: tosa.clamp {{.*}} {max_val = 127 : i32, min_val = -128 : i32
+// CHECK: tosa.cast {{.*}} -> tensor<2x8xi8>
 // CHECK-NOT: hip.quantize_linear
 func.func @quantize_no_zp(%ctx: !hip.context, %x: tensor<2x8xf32>,
                             %scale: tensor<f32>, %init: tensor<2x8xi8>)
@@ -72,11 +79,12 @@ func.func @quantize_no_zp(%ctx: !hip.context, %x: tensor<2x8xf32>,
   return %r : tensor<2x8xi8>
 }
 
-// Quantize with zp: widen to i32, add, clamp, custom-cast to i8.
+// Quantize with zp: round to i32, add, clamp, cast to i8.
 // CHECK-LABEL: func.func @quantize_with_zp
 // CHECK: tosa.reciprocal
 // CHECK: tosa.mul
-// CHECK: tosa.custom {{.*}}operator_name = "fp_to_int_cast"
+// CHECK-NOT: fp_to_int_cast
+// CHECK: tosa.cast {{.*}} -> tensor<2x8xi32>
 // CHECK: tosa.add
 // CHECK: tosa.clamp
 // CHECK: tosa.cast
@@ -123,6 +131,65 @@ func.func @dequantize_rank0_scale1(%ctx: !hip.context, %x: tensor<i8>,
          outs(%init : tensor<f32>)
          {axis = 0 : i64, block_size = 0 : i64} : tensor<f32>
   return %r : tensor<f32>
+}
+
+// A ui8 dequantize reaches rocMLIR as i8 bytes. The zero point keeps its bit
+// pattern (128 reads back as -128 signless), and unsigned_cast widens it as
+// unsigned.
+// CHECK-LABEL: func.func @dequantize_ui8_signless
+// CHECK-SAME: (%{{.*}}: tensor<2x8xi8>, %{{.*}}: tensor<f32>) -> tensor<2x8xf32>
+// CHECK-NOT: ui8
+// CHECK: tosa.const{{.*}}dense<-128>
+// CHECK-NOT: ui8
+// CHECK: tosa.custom {{.*}}operator_name = "unsigned_cast"
+// CHECK-NOT: ui8
+// CHECK: return
+func.func @dequantize_ui8_signless(%x: tensor<2x8xui8>, %scale: tensor<f32>)
+    -> tensor<2x8xf32> attributes {rock.kernel} {
+  %ctx = ub.poison : !hip.context
+  %zp = hip.constant {value = dense<128> : tensor<ui8>} : tensor<ui8>
+  %init = tensor.empty() : tensor<2x8xf32>
+  %r = hip.dequantize_linear(%ctx)
+         ins(%x, %scale : tensor<2x8xui8>, tensor<f32>)
+         zero_point(%zp : tensor<ui8>)
+         outs(%init : tensor<2x8xf32>)
+         {axis = 1 : i64, block_size = 0 : i64} : tensor<2x8xf32>
+  return %r : tensor<2x8xf32>
+}
+
+// A ui8 quantize returns i8 bytes; the i32 result narrows through
+// unsigned_cast after the [0, 255] clamp.
+// CHECK-LABEL: func.func @quantize_ui8_signless
+// CHECK-SAME: -> tensor<2x8xi8>
+// CHECK: tosa.clamp {{.*}} {max_val = 255 : i32, min_val = 0 : i32
+// CHECK: tosa.custom {{.*}}operator_name = "unsigned_cast"{{.*}} -> tensor<2x8xi8>
+// CHECK-NOT: ui8
+// CHECK: return
+func.func @quantize_ui8_signless(%x: tensor<2x8xf32>, %scale: tensor<f32>)
+    -> tensor<2x8xui8> attributes {rock.kernel} {
+  %ctx = ub.poison : !hip.context
+  %zp = hip.constant {value = dense<128> : tensor<ui8>} : tensor<ui8>
+  %init = tensor.empty() : tensor<2x8xui8>
+  %r = hip.quantize_linear(%ctx)
+         ins(%x, %scale : tensor<2x8xf32>, tensor<f32>)
+         zero_point(%zp : tensor<ui8>)
+         outs(%init : tensor<2x8xui8>)
+         {axis = 1 : i64, block_size = 0 : i64, precision = 0 : i64,
+          saturate = 1 : i64} : tensor<2x8xui8>
+  return %r : tensor<2x8xui8>
+}
+
+// An unsigned value that reaches an op whose meaning depends on signedness
+// keeps its type, so the kernel is not silently reinterpreted.
+// CHECK-LABEL: func.func @ui8_max_keeps_type
+// CHECK-SAME: tensor<2x8xui8>
+func.func @ui8_max_keeps_type(%a: tensor<2x8xui8>, %b: tensor<2x8xui8>)
+    -> tensor<2x8xui8> attributes {rock.kernel} {
+  %ctx = ub.poison : !hip.context
+  %init = tensor.empty() : tensor<2x8xui8>
+  %r = hip.max(%ctx) ins(%a, %b : tensor<2x8xui8>, tensor<2x8xui8>)
+         outs(%init : tensor<2x8xui8>) : tensor<2x8xui8>
+  return %r : tensor<2x8xui8>
 }
 
 // -----
