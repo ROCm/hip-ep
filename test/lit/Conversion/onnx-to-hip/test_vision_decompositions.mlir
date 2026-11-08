@@ -56,8 +56,12 @@ module {
 
   // CHECK-LABEL: func.func @einsum_bhwc_hkc
   // CHECK: hip.transpose
-  // CHECK: tensor.expand_shape
+  // CHECK-SAME: perm = [1, 0, 2, 3]
+  // CHECK: tensor.collapse_shape
   // CHECK: hip.matmul
+  // CHECK-SAME: transB = 1
+  // CHECK: tensor.expand_shape
+  // CHECK: hip.transpose
   // CHECK-NOT: onnx.Einsum
 
   func.func @einsum_bhwc_wkc(%a: tensor<2x3x4x5xf32>, %b: tensor<4x6x5xf32>) -> tensor<2x3x4x6xf32> {
