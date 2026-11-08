@@ -1029,6 +1029,15 @@ struct UnsqueezeToStdTensor : public mlir::RewritePattern {
     if (!reassocOpt)
       return rewriter.notifyMatchFailure(
           op, "cannot compute unsqueeze reassociation");
+    // The output-shape builder declines these groups; reject them before the
+    // refining cast so a failed rewrite leaves the IR unchanged.
+    mlir::RankedTensorType sourceType = refinedType ? refinedType : inputType;
+    for (auto [g, group] : llvm::enumerate(*reassocOpt)) {
+      int64_t dynOut = countDynOutDims(outputType, group);
+      if (dynOut > 1 || (dynOut == 1 && !sourceType.isDynamicDim(g)))
+        return rewriter.notifyMatchFailure(
+            op, "unsqueeze: group has no derivable output extent");
+    }
 
     mlir::Location loc = op->getLoc();
     if (refinedType)
