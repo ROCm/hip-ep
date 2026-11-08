@@ -48,10 +48,13 @@ add_library(HipDialectTransforms STATIC
   Pipelines.cpp
   PoolAllocs.cpp
   PromoteStridedHipOperands.cpp
+  QuantizedEpilogue.cpp
+  RebiasUnsignedQuantize.cpp
   RelaxMultiDynExpandShape.cpp
   ResolveExternConstants.cpp
   ResolveMemRefDims.cpp
   ResolveTensorDims.cpp
+  SinkQuantize.cpp
   SplitDuplicateDpsInits.cpp
   UseOutputAllocator.cpp
 )
