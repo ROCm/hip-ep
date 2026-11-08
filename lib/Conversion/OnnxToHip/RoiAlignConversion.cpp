@@ -118,6 +118,8 @@ struct RoiAlignToHip : public mlir::RewritePattern {
       return rewriter.notifyMatchFailure(op,
                                          "RoiAlign mode must be avg or max");
 
+    // half_pixel is the opset-16 default. RoiAlign-10 has no attribute and
+    // samples like output_half_pixel; the ORT import records that explicitly.
     std::string ctm =
         getStrAttr("coordinate_transformation_mode", "half_pixel");
     int64_t halfPixel;
