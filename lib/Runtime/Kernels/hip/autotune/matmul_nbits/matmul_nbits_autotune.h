@@ -73,6 +73,10 @@ struct WmmaAnswer {
   int wt_n = 0;
   int bk = 0;
   bool fused = true;
+  /* Set when the table lists the config as an extended entry
+   * (WMMA_EXT_CONFIGS), with that entry's pipeline options. */
+  bool ext = false;
+  int variant = 0;
 };
 
 /* (BLOCK_SIZE, TILE_N) for the GEMV decode path, matched against
@@ -111,6 +115,10 @@ using GemvValidator = bool (*)(void* ctx, const GemvAnswer&);
 
 Result resolve(const Request& request, WmmaValidator wmma_valid,
                GemvValidator gemv_valid, void* ctx);
+
+/* Whether the table names an extended WMMA entry, i.e. the device was measured
+ * with them. Only then does the runtime sweep time them too. */
+bool extendedConfigsMeasured();
 
 /* Diagnostics for the debug log: whether a table loaded at all, how many
  * points it has, and how many were dropped as unusable. */
