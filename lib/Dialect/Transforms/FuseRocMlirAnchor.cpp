@@ -87,6 +87,35 @@ SmallVector<std::pair<Value, bool>> getPrologueRoots(Operation *anchor,
   return getInputRoots(anchor);
 }
 
+// About how many times the anchor loads each activation element: once for
+// each filter tap that covers it, and once for each tile of output columns.
+// The tile width is a typical rocMLIR value; the estimate only ranks anchors.
+int64_t estimateActivationReloads(Operation *anchor) {
+  constexpr int64_t kColumnTile = 128;
+  auto getI64s = [](ArrayAttr attr) {
+    return llvm::map_to_vector(
+        attr, [](Attribute a) { return cast<IntegerAttr>(a).getInt(); });
+  };
+  SmallVector<int64_t> kernel, strides;
+  Value weights;
+  if (auto conv = dyn_cast<ConvOp>(anchor)) {
+    weights = conv.getWeights();
+    strides = getI64s(conv.getStrides());
+  } else if (auto conv = dyn_cast<QLinearConvOp>(anchor)) {
+    weights = conv.getWeights();
+    strides = getI64s(conv.getStrides());
+  }
+  if (weights)
+    kernel = llvm::to_vector(
+        cast<ShapedType>(weights.getType()).getShape().drop_front(2));
+  auto result = cast<ShapedType>(anchor->getResult(0).getType());
+  int64_t columns = weights ? result.getDimSize(1) : result.getShape().back();
+  int64_t reloads = llvm::divideCeil(columns, kColumnTile);
+  for (auto [i, size] : llvm::enumerate(kernel))
+    reloads *= llvm::divideCeil(size, i < strides.size() ? strides[i] : 1);
+  return std::max<int64_t>(reloads, 1);
+}
+
 // One kernel: an anchor and the modules it takes.
 struct KernelPlan {
   Operation *anchor;
@@ -677,16 +706,21 @@ private:
     sortByBlockOrder(plan.epilogue);
   }
 
-  // A module that only this anchor reads, with one input that is not an
-  // inline scalar, runs as the prologue of an activation operand: the anchor
-  // loads the input and computes the module on the fly. Views in between are
-  // absorbed with it.
+  // A module that only this anchor reads runs as the prologue of an
+  // activation operand: the anchor loads the module inputs and computes the
+  // module on the fly. Views in between are absorbed with it. The anchor
+  // repeats those loads and that computation on every reload of the operand,
+  // so a module with several inputs joins only while the full-size loads
+  // times the reloads stay small; else a separate kernel computes it once.
   void planPrologue(KernelPlan &plan) {
+    constexpr int64_t kMaxPrologueLoads = 9;
+    int64_t reloads = estimateActivationReloads(plan.anchor);
     DenseSet<Operation *> readers = {plan.anchor};
     for (auto [root, allowPointwise] :
          getPrologueRoots(plan.anchor, plan.kind)) {
       if (!allowPointwise)
         continue;
+      int64_t fullLoads = 1;
       SmallVector<Value> worklist = {root};
       while (!worklist.empty()) {
         Operation *producer = worklist.pop_back_val().getDefiningOp();
@@ -704,12 +738,23 @@ private:
               llvm::filter_to_vector(module.getInputs(), [](Value v) {
                 return !isInlineScalarConstant(v);
               });
-          if (inputs.size() != 1)
-            continue;
+          if (inputs.size() > 1) {
+            int64_t resultSize = 0;
+            for (Type type : module->getResultTypes())
+              resultSize =
+                  std::max(resultSize, cast<ShapedType>(type).getNumElements());
+            int64_t moduleLoads = llvm::count_if(inputs, [&](Value v) {
+              return cast<ShapedType>(v.getType()).getNumElements() >=
+                     resultSize;
+            });
+            if ((fullLoads + moduleLoads - 1) * reloads > kMaxPrologueLoads)
+              continue;
+            fullLoads += moduleLoads - 1;
+          }
           taken.insert(module);
           plan.prologue.insert(module);
           readers.insert(module);
-          worklist.push_back(inputs.front());
+          llvm::append_range(worklist, inputs);
         } else if (allowsInputView(producer)) {
           readers.insert(producer);
           if (std::optional<SmallVector<Value>> inputs =

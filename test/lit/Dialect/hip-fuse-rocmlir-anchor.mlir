@@ -133,20 +133,54 @@ func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf16>,
 
 // -----
 
-// A module with two inputs is no prologue as a whole. It saves a launch, so it
-// stays whole as an elementwise kernel, and the conv reads its result.
+// A module with two inputs is a prologue too: the 1x1 conv kernel loads both
+// inputs and computes the add and the max on the fly.
 
-// CHECK-LABEL: func.func @rocMlir1
-// CHECK-SAME: attributes {rock.elementwise, rock.kernel}
-// CHECK: %[[A:.*]] = hip.add
-// CHECK: hip.max({{.*}}) ins(%[[A]],
 // CHECK-LABEL: func.func @rocMlir0
-// CHECK-NOT: hip.max
-// CHECK: hip.conv
+// CHECK-SAME: attributes {rock.kernel}
+// CHECK: %[[A:.*]] = hip.add
+// CHECK: %[[MX:.*]] = hip.max({{.*}}) ins(%[[A]],
+// CHECK: hip.conv({{.*}}) ins(%[[MX]],
 // CHECK-LABEL: func.func @main_graph
 // CHECK-NOT: hip.add
-// CHECK: %[[E:.*]] = hip.rocmlir({{.*}}) @rocMlir1
-// CHECK: hip.rocmlir({{.*}}) @rocMlir0 ins(%[[E]],
+// CHECK: hip.rocmlir({{.*}}) @rocMlir0 ins(%arg1, %arg2, %arg3, %arg4 :
+// CHECK-NOT: hip.rocmlir
+
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf16>,
+                      %r: tensor<1x8x4x4xf16>, %w: tensor<16x8x1x1xf16>,
+                      %b: tensor<16xf16>) -> tensor<1x16x4x4xf16> {
+  %zero = hip.constant {value = dense<0.000000e+00> : tensor<f16>} : tensor<f16>
+  %ae = tensor.empty() : tensor<1x8x4x4xf16>
+  %a = hip.add(%ctx) ins(%x, %r : tensor<1x8x4x4xf16>, tensor<1x8x4x4xf16>)
+      outs(%ae : tensor<1x8x4x4xf16>) -> tensor<1x8x4x4xf16>
+  %me = tensor.empty() : tensor<1x8x4x4xf16>
+  %m = hip.max(%ctx) ins(%a, %zero : tensor<1x8x4x4xf16>, tensor<f16>)
+      outs(%me : tensor<1x8x4x4xf16>) : tensor<1x8x4x4xf16>
+  %e = tensor.empty() : tensor<1x16x4x4xf16>
+  %c = hip.conv(%ctx) ins(%m, %w, %b : tensor<1x8x4x4xf16>,
+                                      tensor<16x8x1x1xf16>, tensor<16xf16>)
+      outs(%e : tensor<1x16x4x4xf16>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [1, 1],
+       pads = [0, 0, 0, 0], strides = [1, 1]} : tensor<1x16x4x4xf16>
+  return %c : tensor<1x16x4x4xf16>
+}
+
+// -----
+
+// A 3x3 conv loads each input element nine times, so the two-input module
+// stays its own kernel and computes the add and the max once.
+
+// CHECK-LABEL: func.func @rocMlir1
+// CHECK-SAME: rock.elementwise
+// CHECK: hip.add
+// CHECK: hip.max
+// CHECK-LABEL: func.func @rocMlir0
+// CHECK-SAME: attributes {rock.kernel}
+// CHECK-NOT: hip.add
+// CHECK: hip.conv
+// CHECK-LABEL: func.func @main_graph
+// CHECK: %[[M:.*]] = hip.rocmlir({{.*}}) @rocMlir1 ins(%arg1, %arg2 :
+// CHECK: hip.rocmlir({{.*}}) @rocMlir0 ins(%[[M]], %arg3, %arg4 :
 
 func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf16>,
                       %r: tensor<1x8x4x4xf16>, %w: tensor<16x8x3x3xf16>,
