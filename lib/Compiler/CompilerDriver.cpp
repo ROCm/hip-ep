@@ -111,10 +111,8 @@ void dumpPreFusionIR(mlir::ModuleOp module,
                  << ec.message() << "\n";
     return;
   }
-  os << "// hip-rocmlir-fusion: fuse-views="
-     << (fuseOpts.fuseViews ? "true" : "false")
-     << " fuse-geg=" << (fuseOpts.fuseGemmGemm ? "true" : "false")
-     << " arch=" << fuseOpts.arch << " gemm-gemm-accel-types="
+  os << "// hip-rocmlir-fusion: arch=" << fuseOpts.arch
+     << " gemm-gemm-accel-types="
      << llvm::join(fuseOpts.gemmGemmAccelTypes, ",") << "\n";
   module->print(os);
 }
@@ -465,14 +463,7 @@ bool CompilerDriver::runMLIRPasses(
       headPm.addNestedPass<mlir::func::FuncOp>(
           mlir::hip::createDecomposeConvTransposePass());
       headPm.addPass(mlir::createCanonicalizerPass());
-      // HIPDNN_EP_ROCMLIR_FUSE_VIEWS=0 restores the forward-only kernel
-      // boundaries and HIPDNN_EP_ROCMLIR_FUSE_GEG=0 keeps gemm pairs in
-      // separate kernels, for A/B runs against each fusion.
       mlir::hip::FuseRocMlirAnchorPassOptions fuseOpts;
-      std::string fuseViews = hip_get_env("HIPDNN_EP_ROCMLIR_FUSE_VIEWS");
-      fuseOpts.fuseViews = !(fuseViews == "0" || fuseViews == "off");
-      std::string fuseGeg = hip_get_env("HIPDNN_EP_ROCMLIR_FUSE_GEG");
-      fuseOpts.fuseGemmGemm = !(fuseGeg == "0" || fuseGeg == "off");
       fuseOpts.arch = mlir::hip::resolveRocMlirArch();
       std::vector<std::string> accelTypes = mlir::hip::getRocMlirGemmAccelTypes(
           *module.getContext(), fuseOpts.arch);

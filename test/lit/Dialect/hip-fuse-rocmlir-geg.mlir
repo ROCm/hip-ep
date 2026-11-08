@@ -4,16 +4,12 @@
 // Gemm-pointwise-gemm: two outlined matmul kernels merge into one when the
 // first kernel's only result feeds the second gemm's A operand, both gemms
 // read a type in gemm-gemm-accel-types, and the shape gates pass.
-// fuse-geg=false keeps them apart, and so does an empty type list.
+// An empty type list keeps them apart.
 
 // RUN: hip-mlir-opt --split-input-file --hip-rocmlir-prepare-quant \
 // RUN:   --hip-fuse-rocmlir-elementwise --hip-fuse-rocmlir-anchor="arch=gfx1151 gemm-gemm-accel-types=f16,bf16" %s \
 // RUN:   | hip-mlir-opt --split-input-file \
 // RUN:   | FileCheck %s
-// RUN: hip-mlir-opt --split-input-file --hip-rocmlir-prepare-quant \
-// RUN:   --hip-fuse-rocmlir-elementwise --hip-fuse-rocmlir-anchor="fuse-geg=false gemm-gemm-accel-types=f16,bf16" %s \
-// RUN:   | hip-mlir-opt --split-input-file \
-// RUN:   | FileCheck %s --check-prefix=NOGEG
 // RUN: hip-mlir-opt --split-input-file --hip-rocmlir-prepare-quant \
 // RUN:   --hip-fuse-rocmlir-elementwise --hip-fuse-rocmlir-anchor %s \
 // RUN:   | hip-mlir-opt --split-input-file \

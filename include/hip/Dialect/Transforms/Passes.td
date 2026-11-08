@@ -198,8 +198,8 @@ def FuseRocMlirElementwisePass
     Walks main_graph in block order. From each pointwise op that is in no
     module yet, the pass grows a module through the readers of the module,
     and wraps the module in one hip.rocmlir_elementwise op. A module holds
-    the pointwise ops that HIP-to-TOSA converts, and, with fuse-views,
-    transposes, static reshapes, dequantizes and quantizes. A module ends
+    the pointwise ops that HIP-to-TOSA converts, transposes, static
+    reshapes, dequantizes and quantizes. A module ends
     where an anchor epilogue must end: before an op that broadcasts a module
     value, after a quantize, and at an op whose other input depends on the
     module. A dequantize only starts a module. Broadcasts, slices and
@@ -208,11 +208,6 @@ def FuseRocMlirElementwisePass
     alone is not made. Inline scalar constants stay outside as inputs.
     hip-fuse-rocmlir-anchor consumes the modules.
   }];
-  let options = [
-    Option<"fuseViews", "fuse-views", "bool", /*default=*/"true",
-           "Take transposes, static reshapes, dequantizes and quantizes into "
-           "the modules. Off keeps the modules to pointwise ops.">
-  ];
   let dependentDialects = [
     "mlir::tensor::TensorDialect"
   ];
@@ -250,19 +245,13 @@ def FuseRocMlirAnchorPass
     QLinearConv, a QLinearMatMul and a convolution of dequantizes become
     integer anchors only when their kernel outlines; a declined op keeps its
     HIP kernel. A module that no anchor takes and that saves a launch stays
-    whole and becomes a rock.elementwise kernel. After the outline, gemm-elementwise-gemm pairs merge. Only
-    main_graph is changed. Run
-    hip-rocmlir-prepare-quant and hip-fuse-rocmlir-elementwise before it.
+    whole and becomes a rock.elementwise kernel. After the outline, a
+    matmul or gemm kernel whose only result feeds the A operand of the next
+    gemm merges into it when the gemm-elementwise-gemm shape gates pass.
+    Only main_graph is changed. Run hip-rocmlir-prepare-quant and
+    hip-fuse-rocmlir-elementwise before it.
   }];
   let options = [
-    Option<"fuseViews", "fuse-views", "bool", /*default=*/"true",
-           "Absorb the view ops, unary prologues, quantize epilogues and "
-           "extra outputs around an anchor. Off keeps each kernel to one "
-           "result.">,
-    Option<"fuseGemmGemm", "fuse-geg", "bool", /*default=*/"true",
-           "Merge a matmul/gemm kernel into the next one when its only "
-           "result feeds that gemm's A operand and the gemm-elementwise-gemm "
-           "shape gates pass.">,
     Option<"arch", "arch", "std::string", /*default=*/"\"\"",
            "Target GPU architecture, stamped as rock.arch on each outlined "
            "kernel. Empty leaves rock.arch unset.">,

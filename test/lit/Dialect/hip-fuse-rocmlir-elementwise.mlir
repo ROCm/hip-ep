@@ -5,9 +5,6 @@
 
 // RUN: hip-mlir-opt --split-input-file --hip-fuse-rocmlir-elementwise %s \
 // RUN:   | hip-mlir-opt --split-input-file | FileCheck %s
-// RUN: hip-mlir-opt --split-input-file \
-// RUN:   --hip-fuse-rocmlir-elementwise="fuse-views=false" %s \
-// RUN:   | FileCheck %s --check-prefix=NOVIEWS
 // RUN: hip-mlir-opt --split-input-file --hip-fuse-rocmlir-elementwise \
 // RUN:   --hip-inline-rocmlir-elementwise %s \
 // RUN:   | FileCheck %s --check-prefix=ROUND
@@ -34,7 +31,6 @@
 // ROUND: %[[A:.*]] = hip.add(%{{.*}}) ins(%[[C]],
 // ROUND: %[[MX:.*]] = hip.max(%{{.*}}) ins(%[[A]],
 // ROUND: return %[[MX]]
-// NOVIEWS-LABEL: func.func @main_graph
 func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf16>,
                       %w: tensor<16x8x3x3xf16>, %b: tensor<16xf16>,
                       %r: tensor<1x16x4x4xf16>) -> tensor<1x16x4x4xf16> {
@@ -64,7 +60,6 @@ func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf16>,
 // CHECK: hip.mul
 // CHECK-NOT: hip.expand
 // CHECK: hip.yield
-// NOVIEWS-LABEL: func.func @main_graph
 // ROUND-LABEL: func.func @main_graph
 func.func @main_graph(%ctx: !hip.context, %x: tensor<1x16x4x4xf16>,
                       %s: tensor<1x16x1x1xf16>) -> tensor<1x16x4x4xf16> {
@@ -91,7 +86,6 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x16x4x4xf16>,
 // CHECK: %[[A:.*]] = hip.rocmlir_elementwise(%{{.*}}) ins(%[[M]], %{{.*}} : tensor<1x1x16xf16>, tensor<1x2x16xf16>) -> tensor<1x2x16xf16>
 // CHECK: hip.add
 // CHECK: return %[[A]]
-// NOVIEWS-LABEL: func.func @main_graph
 // ROUND-LABEL: func.func @main_graph
 func.func @main_graph(%ctx: !hip.context, %x: tensor<1x1x16xf16>,
                       %y: tensor<1x1x16xf16>, %z: tensor<1x2x16xf16>)
@@ -117,7 +111,6 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x1x16xf16>,
 // CHECK: hip.yield %[[A]], %[[M]]
 // CHECK: %[[V:.*]] = tensor.collapse_shape %[[G]]#1
 // CHECK: return %[[G]]#0, %[[G]]#1, %[[V]]
-// NOVIEWS-LABEL: func.func @main_graph
 // ROUND-LABEL: func.func @main_graph
 func.func @main_graph(%ctx: !hip.context, %x: tensor<4x16xf16>,
                       %y: tensor<4x16xf16>)
@@ -148,13 +141,6 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<4x16xf16>,
 // CHECK: hip.mul
 // CHECK: return %[[M]]
 
-// NOVIEWS-LABEL: func.func @main_graph
-// NOVIEWS: hip.dequantize_linear
-// NOVIEWS: hip.rocmlir_elementwise
-// NOVIEWS: hip.add
-// NOVIEWS: hip.yield
-// NOVIEWS: hip.quantize_linear
-// NOVIEWS: hip.dequantize_linear
 // ROUND-LABEL: func.func @main_graph
 func.func @main_graph(%ctx: !hip.context, %xq: tensor<1x16x4x4xi8>,
                       %r: tensor<1x16x4x4xf32>) -> tensor<1x16x4x4xf32> {
@@ -195,7 +181,6 @@ func.func @main_graph(%ctx: !hip.context, %xq: tensor<1x16x4x4xi8>,
 // CHECK: hip.yield
 // CHECK: %[[I:.*]] = hip.cast({{.*}}) ins(%[[M]] :
 // CHECK: return %[[A]], %[[I]]
-// NOVIEWS-LABEL: func.func @main_graph
 // ROUND-LABEL: func.func @main_graph
 func.func @main_graph(%ctx: !hip.context, %x: tensor<4x8xi64>,
                       %y: tensor<4x8xf32>) -> (tensor<4x8xi64>, tensor<4x8xi64>) {
@@ -219,7 +204,6 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<4x8xi64>,
 // CHECK-NOT: hip.rocmlir_elementwise
 // CHECK: hip.transpose
 // CHECK: tensor.collapse_shape
-// NOVIEWS-LABEL: func.func @main_graph
 // ROUND-LABEL: func.func @main_graph
 func.func @main_graph(%ctx: !hip.context, %x: tensor<16x8xf16>)
     -> tensor<128xf16> {
@@ -244,7 +228,6 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<16x8xf16>)
 // CHECK: %[[M:.*]] = hip.rocmlir_elementwise(%{{.*}}) ins(%[[A]], %[[C]] :
 // CHECK: hip.mul
 // CHECK: return %[[M]]
-// NOVIEWS-LABEL: func.func @main_graph
 // ROUND-LABEL: func.func @main_graph
 func.func @main_graph(%ctx: !hip.context, %x: tensor<1x16x4x4xf16>,
                       %w: tensor<16x16x3x3xf16>, %b: tensor<16xf16>)
@@ -267,7 +250,6 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x16x4x4xf16>,
 // -----
 
 // A transpose and a static reshape between pointwise ops stay in the module.
-// With fuse-views=false they stay outside and split it.
 
 // CHECK-LABEL: func.func @main_graph
 // CHECK: %[[G:.*]] = hip.rocmlir_elementwise(%{{.*}}) ins(%{{.*}}, %{{.*}} : tensor<16x8xf16>, tensor<128xf16>) -> tensor<128xf16>
@@ -277,16 +259,6 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x16x4x4xf16>,
 // CHECK: %[[A:.*]] = hip.add({{.*}}) ins(%[[V]],
 // CHECK: hip.yield %[[A]]
 // CHECK: return %[[G]]
-
-// NOVIEWS-LABEL: func.func @main_graph
-// NOVIEWS: hip.rocmlir_elementwise
-// NOVIEWS: hip.neg
-// NOVIEWS: hip.yield
-// NOVIEWS: hip.transpose
-// NOVIEWS: tensor.collapse_shape
-// NOVIEWS: hip.rocmlir_elementwise
-// NOVIEWS: hip.add
-// NOVIEWS: hip.yield
 
 // ROUND-LABEL: func.func @main_graph
 // ROUND-NOT: hip.rocmlir_elementwise
@@ -322,7 +294,6 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<16x8xf16>,
 // CHECK: hip.dequantize_linear
 // CHECK: hip.add
 // CHECK: return %[[M]]
-// NOVIEWS-LABEL: func.func @main_graph
 // ROUND-LABEL: func.func @main_graph
 func.func @main_graph(%ctx: !hip.context, %x: tensor<1x16x4x4xf32>,
                       %rq: tensor<1x16x4x4xi8>) -> tensor<1x16x4x4xf32> {
@@ -352,7 +323,6 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x16x4x4xf32>,
 // CHECK-NOT: hip.dequantize_linear
 // CHECK: hip.mul
 // CHECK: hip.yield
-// NOVIEWS-LABEL: func.func @main_graph
 // ROUND-LABEL: func.func @main_graph
 func.func @main_graph(%ctx: !hip.context, %x: tensor<1x16x4x4xf32>)
     -> tensor<1x16x4x4xf32> {

@@ -78,7 +78,7 @@ bool feedsPlannedDequantizedConv(Operation *op) {
 // dequantize of a scalar constant: the anchor pass recomputes it in the
 // kernel, and as a module of its own it would take its readers away from the
 // module of the anchor.
-std::optional<Role> getRole(Operation *op, bool fuseViews) {
+std::optional<Role> getRole(Operation *op) {
   if (op->getNumResults() != 1 || op->getNumRegions() != 0)
     return std::nullopt;
   auto resultType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
@@ -92,14 +92,12 @@ std::optional<Role> getRole(Operation *op, bool fuseViews) {
       return std::nullopt;
   }
   if (isa<TransposeOp>(op))
-    return fuseViews && isTosaExpressiblePointwiseOp(op)
-               ? std::optional(Role::View)
-               : std::nullopt;
+    return isTosaExpressiblePointwiseOp(op) ? std::optional(Role::View)
+                                            : std::nullopt;
   if (isTosaLowerableReshape(op))
-    return fuseViews ? std::optional(Role::View) : std::nullopt;
+    return Role::View;
   if (isa<DequantizeLinearOp, QuantizeLinearOp>(op)) {
-    if (!fuseViews || !isTosaLowerableQdq(op) ||
-        feedsPlannedDequantizedConv(op))
+    if (!isTosaLowerableQdq(op) || feedsPlannedDequantizedConv(op))
       return std::nullopt;
     return isa<DequantizeLinearOp>(op) ? Role::Dequantize : Role::Quantize;
   }
@@ -130,15 +128,14 @@ struct Module {
 
 class ModulePlanner {
 public:
-  ModulePlanner(Block &block, bool fuseViews)
-      : block(block), fuseViews(fuseViews) {}
+  explicit ModulePlanner(Block &block) : block(block) {}
 
   SmallVector<Module> plan() {
     SmallVector<Module> modules;
     for (Operation &op : block) {
       if (assigned.contains(&op))
         continue;
-      std::optional<Role> role = getRole(&op, fuseViews);
+      std::optional<Role> role = getRole(&op);
       if (!role || !llvm::all_of(getDataOperands(&op), isKernelIOValue))
         continue;
       Module module;
@@ -185,7 +182,7 @@ private:
   }
 
   bool canJoin(Operation *op, const Module &module) const {
-    std::optional<Role> role = getRole(op, fuseViews);
+    std::optional<Role> role = getRole(op);
     // R5: a dequantize only starts a module.
     if (!role || *role == Role::Dequantize)
       return false;
@@ -216,7 +213,7 @@ private:
   // R5: a dequantize that only the module reads joins it from above, as the
   // other side of a residual add does, so the kernel loads its 8-bit input.
   bool canPull(Operation *op, const Module &module) const {
-    if (getRole(op, fuseViews) != Role::Dequantize ||
+    if (getRole(op) != Role::Dequantize ||
         !llvm::all_of(op->getUsers(), [&](Operation *user) {
           return module.ops.contains(user);
         }))
@@ -261,13 +258,11 @@ private:
 
   // R7: a module of views alone saves no kernel.
   bool hasComputation(const Module &module) const {
-    return llvm::any_of(module.ops, [&](Operation *op) {
-      return getRole(op, fuseViews) != Role::View;
-    });
+    return llvm::any_of(
+        module.ops, [&](Operation *op) { return getRole(op) != Role::View; });
   }
 
   Block &block;
-  bool fuseViews;
   DenseSet<Operation *> assigned;
 };
 
@@ -398,7 +393,7 @@ struct FuseRocMlirElementwisePass
     if (funcOp.getSymName() != "main_graph" || funcOp.isExternal())
       return;
     SmallVector<Module> modules =
-        ModulePlanner(funcOp.getBody().front(), fuseViews).plan();
+        ModulePlanner(funcOp.getBody().front()).plan();
     IRRewriter rewriter(&getContext());
     for (const Module &module : modules)
       materialize(module, rewriter);

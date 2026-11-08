@@ -102,10 +102,9 @@ struct KernelPlan {
 // stays one op here, and is inlined only in the outlined kernel.
 class KernelRegion {
 public:
-  KernelRegion(Operation *anchor, const FusionPolicy &policy,
-               const SetVector<Operation *> &prologue,
+  KernelRegion(Operation *anchor, const SetVector<Operation *> &prologue,
                const DenseSet<Operation *> &claimed)
-      : anchor(anchor), policy(policy), prologue(prologue), claimed(claimed) {}
+      : anchor(anchor), prologue(prologue), claimed(claimed) {}
 
   Operation *getEnd() const { return end; }
   ArrayRef<Value> getResults() const { return results; }
@@ -129,7 +128,6 @@ private:
   std::optional<SmallVector<Operation *>> readersToMove() const;
 
   Operation *anchor;
-  const FusionPolicy &policy;
   const SetVector<Operation *> &prologue;
   // The ops that some plan takes; only this plan's prologue may be absorbed.
   const DenseSet<Operation *> &claimed;
@@ -218,13 +216,11 @@ void KernelRegion::absorbDequantBnb4() {
 }
 
 // Pulls the producers of kernel inputs into the kernel: the prologue modules
-// of the plan, any view the policy allows, and on a root that permits it a
-// unary pointwise op. A producer is absorbed only when the kernel is its only
+// of the plan, any input view, and on a root that permits it a unary
+// pointwise op. A producer is absorbed only when the kernel is its only
 // reader; one that keeps running for another reader saves nothing.
 void KernelRegion::absorbInputProducers(
     ArrayRef<std::pair<Value, bool>> roots) {
-  if (!policy.absorbsInputs())
-    return;
   auto onlyReadInKernel = [&](Operation *op) {
     return llvm::all_of(op->getUsers(),
                         [&](Operation *user) { return ops.contains(user); });
@@ -251,10 +247,9 @@ void KernelRegion::absorbInputProducers(
     for (Value input : *dataInputs)
       if (!isInlineScalarConstant(input))
         inputs.push_back(input);
-    bool absorb = prologue.contains(producer) ||
-                  policy.allowsInputView(producer) ||
-                  (allowPointwise && policy.activationPrologue &&
-                   isFusablePrologue(producer) && inputs.size() == 1);
+    bool absorb =
+        prologue.contains(producer) || allowsInputView(producer) ||
+        (allowPointwise && isFusablePrologue(producer) && inputs.size() == 1);
     if (!absorb || !llvm::all_of(inputs, isStaticTensor) ||
         !llvm::all_of(inputs, isKernelIOValue))
       continue;
@@ -529,8 +524,7 @@ RocMlirOp outline(const KernelParts &parts, bool elementwise,
 
 class AnchorPlanner {
 public:
-  AnchorPlanner(Block &block, const FusionPolicy &policy)
-      : block(block), policy(policy) {}
+  explicit AnchorPlanner(Block &block) : block(block) {}
 
   SmallVector<KernelPlan> plan() {
     SmallVector<KernelPlan> plans;
@@ -549,8 +543,8 @@ public:
 private:
   // Whether `module` can run in the epilogue of the kernel that `kernel`
   // holds. Every value it computes from a kernel value keeps that value's
-  // shape, since rocMLIR cannot invert a broadcast of an epilogue value. A
-  // view inverts only as the policy allows. The other inputs must not depend
+  // shape, since rocMLIR cannot invert a broadcast of an epilogue value. Only
+  // a transpose or a reshape inverts. The other inputs must not depend
   // on the kernel, or the kernel would read its own result. A quantized
   // anchor writes no float value that a dequantize widened: whatever would
   // return one stays outside.
@@ -571,12 +565,6 @@ private:
     }
     if (fromKernel.empty())
       return false;
-    Operation *entry = path.empty() ? module.getOperation() : path.front();
-    if (!policy.multiOutput &&
-        (kernel.size() != 1 || module->getNumResults() != 1 ||
-         llvm::any_of(anchor->getUsers(),
-                      [&](Operation *user) { return user != entry; })))
-      return false;
 
     bool quantized = isQuantizedAnchor(anchor);
     DenseSet<Value> dequantized;
@@ -594,12 +582,11 @@ private:
         continue;
       fromKernel.insert(op.result_begin(), op.result_end());
       if (getFusableViewKind(&op)) {
-        if (!policy.allowsForwardView(&op))
+        if (!allowsForwardView(&op))
           return false;
         continue;
       }
-      if ((isa<DequantizeLinearOp>(op) && !quantized) ||
-          (isa<QuantizeLinearOp>(op) && !policy.quantizeEpilogue))
+      if (isa<DequantizeLinearOp>(op) && !quantized)
         return false;
       ArrayRef<int64_t> shape =
           cast<ShapedType>(op.getResult(0).getType()).getShape();
@@ -622,8 +609,8 @@ private:
   Operation *walkReshapes(Operation *op, SmallVector<Operation *> &path) const {
     path.clear();
     while (!isa<DestinationStyleOpInterface, RocMlirElementwiseOp>(op) &&
-           getFusableViewKind(op) && policy.allowsForwardView(op) &&
-           op->getNumResults() == 1 && op->hasOneUse()) {
+           allowsForwardView(op) && op->getNumResults() == 1 &&
+           op->hasOneUse()) {
       path.push_back(op);
       op = *op->user_begin();
       if (op->getBlock() != &block || taken.contains(op))
@@ -635,12 +622,10 @@ private:
   // A transpose or reshape outside any module, which pass 1 leaves alone
   // because a module of views saves no kernel. Past the anchor it is free: the
   // kernel writes its result through the inverted view.
-  bool canTakeView(Operation *anchor, Operation *view,
-                   const SetVector<Operation *> &kernel,
+  bool canTakeView(Operation *view, const SetVector<Operation *> &kernel,
                    ArrayRef<Operation *> path) const {
-    if (!isa<DestinationStyleOpInterface>(view) ||
-        !policy.allowsForwardView(view) || view->getNumResults() != 1 ||
-        !isKernelIOValue(view->getResult(0)))
+    if (!isa<DestinationStyleOpInterface>(view) || !allowsForwardView(view) ||
+        view->getNumResults() != 1 || !isKernelIOValue(view->getResult(0)))
       return false;
     std::optional<SmallVector<Value>> inputs = getDataInputs(view, Value());
     auto fromKernel = [&](Value v) {
@@ -648,13 +633,7 @@ private:
       return isa<ContextType>(v.getType()) ||
              (def && (kernel.contains(def) || llvm::is_contained(path, def)));
     };
-    if (!inputs || !llvm::all_of(*inputs, fromKernel))
-      return false;
-    Operation *entry = path.empty() ? view : path.front();
-    return policy.multiOutput ||
-           (kernel.size() == 1 &&
-            llvm::all_of(anchor->getUsers(),
-                         [&](Operation *user) { return user == entry; }));
+    return inputs && llvm::all_of(*inputs, fromKernel);
   }
 
   // Producer anchors first: a module that one anchor takes is not available
@@ -663,8 +642,7 @@ private:
   void planEpilogue(KernelPlan &plan) {
     SetVector<Operation *> kernel;
     kernel.insert(plan.anchor);
-    bool throughModules = isQuantizedAnchor(plan.anchor) &&
-                          policy.multiOutput && policy.quantizeEpilogue;
+    bool throughModules = isQuantizedAnchor(plan.anchor);
     bool grew = true;
     while (grew) {
       grew = false;
@@ -685,7 +663,7 @@ private:
           continue;
         auto module = dyn_cast<RocMlirElementwiseOp>(end);
         if (module ? !canTake(plan.anchor, module, kernel, path)
-                   : !canTakeView(plan.anchor, end, kernel, path))
+                   : !canTakeView(end, kernel, path))
           continue;
         path.push_back(end);
         for (Operation *op : path) {
@@ -704,8 +682,6 @@ private:
   // loads the input and computes the module on the fly. Views in between are
   // absorbed with it.
   void planPrologue(KernelPlan &plan) {
-    if (!policy.activationPrologue)
-      return;
     DenseSet<Operation *> readers = {plan.anchor};
     for (auto [root, allowPointwise] :
          getPrologueRoots(plan.anchor, plan.kind)) {
@@ -734,7 +710,7 @@ private:
           plan.prologue.insert(module);
           readers.insert(module);
           worklist.push_back(inputs.front());
-        } else if (policy.allowsInputView(producer)) {
+        } else if (allowsInputView(producer)) {
           readers.insert(producer);
           if (std::optional<SmallVector<Value>> inputs =
                   getDataInputs(producer, Value()))
@@ -745,7 +721,6 @@ private:
   }
 
   Block &block;
-  const FusionPolicy &policy;
   DenseSet<Operation *> taken;
 };
 
@@ -760,9 +735,8 @@ SmallVector<Operation *> getChain(Operation *anchor,
 
 // Replaces a planned QLinear op or convolution of dequantizes with the integer
 // anchor and its requantize ops, and returns them in block order, anchor
-// first. Without the quantize epilogue the final quantize stays outside.
+// first.
 SmallVector<Operation *> decompose(const KernelPlan &plan,
-                                   const FusionPolicy &policy,
                                    RewriterBase &rewriter) {
   Operation *op = plan.anchor;
   Block *block = op->getBlock();
@@ -824,8 +798,6 @@ SmallVector<Operation *> decompose(const KernelPlan &plan,
     if (isa<DestinationStyleOpInterface>(emitted) &&
         !isa<tensor::EmptyOp>(emitted))
       chain.push_back(emitted);
-  if (!policy.quantizeEpilogue && isa<QuantizeLinearOp>(chain.back()))
-    chain.pop_back();
   return chain;
 }
 
@@ -840,8 +812,7 @@ public:
     if (funcOp.getSymName() != "main_graph" || funcOp.isExternal())
       return;
     Block &block = funcOp.getBody().front();
-    FusionPolicy policy = getFusionPolicy(fuseViews);
-    AnchorPlanner planner(block, policy);
+    AnchorPlanner planner(block);
     SmallVector<KernelPlan> plans = planner.plan();
     claimed = &planner.getTaken();
     rankOneShape = Value();
@@ -863,7 +834,7 @@ public:
     // order that the greedy fusion gave them.
     int counter = 0;
     for (KernelPlan &plan : llvm::reverse(plans))
-      if (failed(outlinePlan(plan, policy, rewriter, counter)))
+      if (failed(outlinePlan(plan, rewriter, counter)))
         return signalPassFailure();
 
     SmallVector<RocMlirElementwiseOp> leftover(
@@ -888,8 +859,7 @@ public:
     });
     if (remaining.wasInterrupted())
       return signalPassFailure();
-    if (fuseGemmGemm)
-      fuseGemmGemmKernels(funcOp, counter, gemmGemmAccelTypes);
+    fuseGemmGemmKernels(funcOp, counter, gemmGemmAccelTypes);
   }
 
 private:
@@ -898,10 +868,10 @@ private:
   // of dequantizes is decomposed only after that check passes, so a declined
   // op keeps its HIP kernel. Without the prologue modules a plan may still
   // outline; they are then inlined back with the other leftovers.
-  LogicalResult outlinePlan(KernelPlan &plan, const FusionPolicy &policy,
-                            IRRewriter &rewriter, int &counter) {
+  LogicalResult outlinePlan(KernelPlan &plan, IRRewriter &rewriter,
+                            int &counter) {
     auto check = [&](const SetVector<Operation *> &prologue) {
-      KernelRegion trial(plan.anchor, policy, prologue, *claimed);
+      KernelRegion trial(plan.anchor, prologue, *claimed);
       trial.setChain(getChain(plan.anchor, plan.epilogue));
       SmallVector<Operation *> moved;
       const char *reason = trial.complete(getInputRoots(plan.anchor), moved);
@@ -924,10 +894,10 @@ private:
     if (plan.kind == Decomposition::None) {
       chain = getChain(plan.anchor, plan.epilogue);
     } else {
-      chain = decompose(plan, policy, rewriter);
+      chain = decompose(plan, rewriter);
       llvm::append_range(chain, plan.epilogue);
     }
-    KernelRegion region(chain.front(), policy, plan.prologue, *claimed);
+    KernelRegion region(chain.front(), plan.prologue, *claimed);
     region.setChain(chain);
     SmallVector<Operation *> moved;
     if (const char *reason =
