@@ -559,10 +559,7 @@ void mlir::hip::addRocMlirFusionPasses(
     OpPassManager &pm, const FuseRocMlirAnchorPassOptions &fuseOptions,
     llvm::StringRef reportPath) {
   pm.addNestedPass<func::FuncOp>(createRocMlirPrepareQuantPass());
-  FuseRocMlirElementwisePassOptions elementwiseOptions;
-  elementwiseOptions.fuseViews = fuseOptions.fuseViews;
-  pm.addNestedPass<func::FuncOp>(
-      createFuseRocMlirElementwisePass(elementwiseOptions));
+  pm.addNestedPass<func::FuncOp>(createFuseRocMlirElementwisePass());
   pm.addNestedPass<func::FuncOp>(createFuseRocMlirAnchorPass(fuseOptions));
   pm.addPass(func::createDuplicateFunctionEliminationPass());
   if (!reportPath.empty()) {
@@ -575,8 +572,6 @@ void mlir::hip::addRocMlirFusionPasses(
 void mlir::hip::buildRocMlirFusionPipeline(
     OpPassManager &pm, const RocMlirFusionPipelineOptions &options) {
   FuseRocMlirAnchorPassOptions fuseOptions;
-  fuseOptions.fuseViews = options.fuseViews;
-  fuseOptions.fuseGemmGemm = options.fuseGemmGemm;
   fuseOptions.arch = options.arch;
   fuseOptions.gemmGemmAccelTypes.assign(options.gemmGemmAccelTypes.begin(),
                                         options.gemmGemmAccelTypes.end());
