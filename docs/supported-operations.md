@@ -134,7 +134,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | CausalConvWithState (`com.microsoft`) | Custom HIP kernel |
 | NGramHashMapping (`com.microsoft`) | Custom HIP kernel. int32/int64 |
 | Relu | Decomposed to Max |
-| HardSwish | Decomposed to HardSigmoid and Mul |
+| HardSwish | Decomposed to HardSigmoid and Mul. f16 and f32 only; bf16 and f64 are left to another EP |
 | BatchNormalization | Inference form decomposed to channel broadcast, Sub, Add, Sqrt, Div, and Mul |
 | Einsum | `bhlk,bhtk->bhlt`, `bhlt,bhtv->bhlv`, `bhwc,hkc->bhwk`, and `bhwc,wkc->bhwk` lowered to batched MatMul |
 | LeakyRelu | Custom HIP kernel |

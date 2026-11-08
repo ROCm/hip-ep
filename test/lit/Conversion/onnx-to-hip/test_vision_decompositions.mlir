@@ -19,6 +19,17 @@ module {
   // CHECK: hip.max
   // CHECK: hip.mul
 
+  // The emitted elementwise ops have no f64 runtime path, so the op stays
+  // for another EP.
+  func.func @hard_swish_f64_unconverted(%x: tensor<2x4xf64>) -> tensor<2x4xf64> {
+    %y = "onnx.HardSwish"(%x) : (tensor<2x4xf64>) -> tensor<2x4xf64>
+    return %y : tensor<2x4xf64>
+  }
+
+  // CHECK-LABEL: func.func @hard_swish_f64_unconverted
+  // CHECK: onnx.HardSwish
+  // CHECK-NOT: hip.mul
+
   func.func @batch_norm(%x: tensor<1x4x2x2xf32>, %scale: tensor<4xf32>, %bias: tensor<4xf32>, %mean: tensor<4xf32>, %var: tensor<4xf32>) -> tensor<1x4x2x2xf32> {
     %y = "onnx.BatchNormalization"(%x, %scale, %bias, %mean, %var) {epsilon = 1.000000e-05 : f32, momentum = 9.000000e-01 : f32, training_mode = 0 : i64} : (tensor<1x4x2x2xf32>, tensor<4xf32>, tensor<4xf32>, tensor<4xf32>, tensor<4xf32>) -> tensor<1x4x2x2xf32>
     return %y : tensor<1x4x2x2xf32>

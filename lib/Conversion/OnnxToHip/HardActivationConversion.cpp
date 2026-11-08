@@ -4,7 +4,7 @@
  */
 //===- HardActivationConversion.cpp - HardSwish ---------------------------===//
 //
-// onnx.HardSwish:   y = x * HardSigmoid(x) with alpha = 1/6 and beta = 1/2
+// onnx.HardSwish: y = x * max(0, min(1, x / 6 + 1 / 2))
 //
 // Emit hip.mul / hip.add / hip.min / hip.max directly. The convert pass runs
 // with GreedyRewriteStrictness::ExistingOps, so a synthesized onnx.* op would
@@ -12,13 +12,14 @@
 // HardSigmoidConversion.cpp.
 //
 //   Before:
-//     %y = "onnx.HardSigmoid"(%x) {alpha = 0.2 : f32, beta = 0.5 : f32}
+//     %y = "onnx.HardSwish"(%x)
 //
 //   After:
 //     %s = hip.mul(%ctx) ins(%x, %alpha : ...)
 //     %a = hip.add(%ctx) ins(%s, %beta : ...)
 //     %c = hip.min(%ctx) ins(%a, %one : ...)
-//     %y = hip.max(%ctx) ins(%c, %zero : ...)
+//     %h = hip.max(%ctx) ins(%c, %zero : ...)
+//     %y = hip.mul(%ctx) ins(%x, %h : ...)
 //
 //===----------------------------------------------------------------------===//
 
@@ -104,6 +105,12 @@ struct HardSwishToHip : public mlir::RewritePattern {
     if (!resultType || !mlir::isa<mlir::FloatType>(resultType.getElementType()))
       return rewriter.notifyMatchFailure(
           op, "onnx.HardSwish expects a ranked float result");
+    // The emitted elementwise primitives implement only f16 and f32. Leave
+    // other types unconverted so they are rejected at compile time.
+    mlir::Type elemType = resultType.getElementType();
+    if (!elemType.isF16() && !elemType.isF32())
+      return rewriter.notifyMatchFailure(
+          op, "onnx.HardSwish lowers only f16 and f32 element types");
 
     auto ctxOrFailure = getContextArg(op, rewriter);
     if (mlir::failed(ctxOrFailure))
