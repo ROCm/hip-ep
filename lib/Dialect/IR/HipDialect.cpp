@@ -327,6 +327,97 @@ LoopOp::inferReturnTypes(MLIRContext *context, std::optional<Location> location,
 }
 
 //===----------------------------------------------------------------------===//
+// ScanOp: outlined-body scan (DPS)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ScanOp::getDpsInitsMutable() { return getInitsMutable(); }
+
+void ScanOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  for (OpOperand &operand : getScanInputsMutable())
+    if (isa<MemRefType>(operand.get().getType()))
+      effects.emplace_back(MemoryEffects::Read::get(), &operand,
+                           SideEffects::DefaultResource::get());
+  for (OpOperand &operand : getCapturesMutable())
+    if (isa<MemRefType>(operand.get().getType()))
+      effects.emplace_back(MemoryEffects::Read::get(), &operand,
+                           SideEffects::DefaultResource::get());
+  for (OpOperand &operand : getStateScratchMutable())
+    if (isa<MemRefType>(operand.get().getType()))
+      effects.emplace_back(MemoryEffects::Write::get(), &operand,
+                           SideEffects::DefaultResource::get());
+  for (auto [i, operand] : llvm::enumerate(getInitsMutable())) {
+    if (!isa<MemRefType>(operand.get().getType()))
+      continue;
+    if (i < getNumStateVariables())
+      effects.emplace_back(MemoryEffects::Read::get(), &operand,
+                           SideEffects::DefaultResource::get());
+    effects.emplace_back(MemoryEffects::Write::get(), &operand,
+                         SideEffects::DefaultResource::get());
+  }
+}
+
+LogicalResult ScanOp::verify() {
+  uint32_t numState = getNumStateVariables();
+  uint32_t numScanInputs = getNumScanInputs();
+  uint32_t numScanOutputs = getNumScanOutputs();
+  if (numScanInputs == 0)
+    return emitOpError("requires at least one scan input");
+  if (numScanInputs != getScanInputs().size())
+    return emitOpError("num_scan_inputs (")
+           << numScanInputs << ") must equal the scan_inputs count ("
+           << getScanInputs().size() << ")";
+  if (numState + numScanOutputs != getInits().size())
+    return emitOpError("expected ")
+           << (numState + numScanOutputs) << " init operands, got "
+           << getInits().size();
+
+  bool tensorMode =
+      getInits().empty() || isa<RankedTensorType>(getInits().front().getType());
+  if (tensorMode) {
+    if (!getStateScratch().empty())
+      return emitOpError("tensor mode must not have state scratch operands");
+    if (getNumResults() != getInits().size())
+      return emitOpError("tensor mode result count must equal init count");
+    for (auto [result, init] : llvm::zip(getOutputs(), getInits()))
+      if (result.getType() != init.getType())
+        return emitOpError("result and init types must match");
+  } else {
+    if (getNumResults() != 0)
+      return emitOpError("memref mode must have no results");
+    if (!getStateScratch().empty() && getStateScratch().size() != numState)
+      return emitOpError("memref mode state scratch count must be zero or ")
+             << numState;
+    for (auto [scratch, init] :
+         llvm::zip(getStateScratch(), getInits().take_front(numState)))
+      if (scratch.getType() != init.getType())
+        return emitOpError("state scratch and state init types must match");
+  }
+  return success();
+}
+
+LogicalResult ScanOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  if (!symbolTable.lookupNearestSymbolFrom<func::FuncOp>(*this,
+                                                         getBodyFuncAttr()))
+    return emitOpError("body_func '")
+           << getBodyFunc() << "' does not reference a func.func";
+  return success();
+}
+
+LogicalResult
+ScanOp::inferReturnTypes(MLIRContext *context, std::optional<Location> location,
+                         ValueRange operands, DictionaryAttr attributes,
+                         PropertyRef properties, RegionRange regions,
+                         SmallVectorImpl<Type> &inferredReturnTypes) {
+  ScanOpAdaptor adaptor(operands, attributes, properties, regions);
+  for (Value init : adaptor.getInits())
+    if (isa<RankedTensorType>(init.getType()))
+      inferredReturnTypes.push_back(init.getType());
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // IfOp: outlined then/else conditional (DPS)
 //===----------------------------------------------------------------------===//
 
@@ -2480,70 +2571,6 @@ LogicalResult RoiAlignOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
-// NonMaxSuppressionOp: ins(boxes, scores), outs(selected, count)
-//===----------------------------------------------------------------------===//
-
-// Operand order is (ctx, boxes, scores, selected, count); the two DPS inits
-// are the trailing contiguous range, as required by
-// DestinationStyleOpInterface.
-MutableOperandRange NonMaxSuppressionOp::getDpsInitsMutable() {
-  return MutableOperandRange(*this, /*start=*/3, /*length=*/2);
-}
-
-void NonMaxSuppressionOp::getEffects(
-    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
-        &effects) {
-  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
-}
-
-LogicalResult NonMaxSuppressionOp::verify() {
-  SmallVector<Value> dataOperands{getBoxes(), getScores(), getSelected(),
-                                  getCount()};
-  if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/2)))
-    return failure();
-
-  auto boxesShape = detail::getShapeOf(getBoxes());
-  auto scoresShape = detail::getShapeOf(getScores());
-  auto selectedShape = detail::getShapeOf(getSelected());
-  auto countShape = detail::getShapeOf(getCount());
-  if (boxesShape.size() != 3 ||
-      (!ShapedType::isDynamic(boxesShape[2]) && boxesShape[2] != 4))
-    return emitOpError("expected boxes of shape (B, N, 4)");
-  if (scoresShape.size() != 3)
-    return emitOpError("expected scores of shape (B, C, N)");
-  if (selectedShape.size() != 2 ||
-      (!ShapedType::isDynamic(selectedShape[1]) && selectedShape[1] != 3))
-    return emitOpError("expected selected of shape (capacity, 3)");
-  if (!countShape.empty())
-    return emitOpError("expected a rank-0 count");
-
-  auto sameOrDynamic = [](int64_t a, int64_t b) {
-    return ShapedType::isDynamic(a) || ShapedType::isDynamic(b) || a == b;
-  };
-  if (!sameOrDynamic(boxesShape[0], scoresShape[0]) ||
-      !sameOrDynamic(boxesShape[1], scoresShape[2]))
-    return emitOpError("boxes (B, N, 4) and scores (B, C, N) disagree");
-
-  if (!getElementTypeOrSelf(getBoxes().getType()).isF32() ||
-      !getElementTypeOrSelf(getScores().getType()).isF32())
-    return emitOpError("boxes and scores must be f32");
-  if (!getElementTypeOrSelf(getSelected().getType()).isInteger(64))
-    return emitOpError("selected must be i64");
-  if (!getElementTypeOrSelf(getCount().getType()).isInteger(32))
-    return emitOpError("count must be i32");
-
-  int64_t center = getCenterPointBox();
-  if (center != 0 && center != 1)
-    return emitOpError("center_point_box must be 0 or 1, got ") << center;
-  int64_t hasScore = getHasScoreThreshold();
-  if (hasScore != 0 && hasScore != 1)
-    return emitOpError("has_score_threshold must be 0 or 1, got ") << hasScore;
-  if (getMaxOutputBoxesPerClass() < 0)
-    return emitOpError("max_output_boxes_per_class must be >= 0");
-  return success();
-}
-
-//===----------------------------------------------------------------------===//
 // GlobalPoolOp: ins(input), outs(output)
 //===----------------------------------------------------------------------===//
 
@@ -2785,6 +2812,39 @@ LogicalResult DequantBnb4Op::verify() {
 //===----------------------------------------------------------------------===//
 
 MutableOperandRange QMoEOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+LogicalResult QMoEOp::verify() {
+  StringRef routing = getRoutingType();
+  if (routing == "softmax") {
+    if (getCorrectionBias())
+      return emitOpError("correction_bias requires routing_type sigmoid_bias");
+    return success();
+  }
+  if (routing != "sigmoid_bias")
+    return emitOpError("routing_type must be softmax or sigmoid_bias, got ")
+           << routing;
+  if (getRouterWeights())
+    return emitOpError("sigmoid_bias routing computes its own weights; "
+                       "router_weights must be absent");
+  auto logitsTy = dyn_cast<ShapedType>(getRouterProbs().getType());
+  auto biasTy = getCorrectionBias()
+                    ? dyn_cast<ShapedType>(getCorrectionBias().getType())
+                    : ShapedType();
+  if (!logitsTy || !logitsTy.getElementType().isF32())
+    return emitOpError("sigmoid_bias routing needs fp32 router logits");
+  if (!biasTy || biasTy.getRank() != 1 || !biasTy.getElementType().isF32())
+    return emitOpError("sigmoid_bias routing needs a rank-1 fp32 "
+                       "correction_bias");
+  if (logitsTy.hasRank() && logitsTy.getRank() > 0) {
+    int64_t experts = logitsTy.getDimSize(logitsTy.getRank() - 1);
+    int64_t biasLen = biasTy.getDimSize(0);
+    if (!ShapedType::isDynamic(experts) && !ShapedType::isDynamic(biasLen) &&
+        experts != biasLen)
+      return emitOpError("correction_bias length ")
+             << biasLen << " does not match " << experts << " experts";
+  }
+  return success();
+}
 
 void QMoEOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
@@ -3536,6 +3596,8 @@ MutableOperandRange GqaOp::getDpsInitsMutable() {
     ++numInputs;
   if (getVScale())
     ++numInputs;
+  if (getKeyBias())
+    ++numInputs;
 
   // DPS inits: output, present_key, present_value, [output_qk]
   unsigned numInits = 3;
@@ -3621,6 +3683,21 @@ LogicalResult GqaOp::verify() {
                        "(found key=")
            << (hasKey ? "present" : "absent")
            << ", value=" << (hasValue ? "present" : "absent") << ")";
+  }
+
+  // key_bias is one fp16 row per batch entry, [B, T]. It refines the mask the
+  // runtime already applies, so it cannot stand in for a full attention_bias.
+  if (Value keyBias = getKeyBias()) {
+    auto type = dyn_cast<ShapedType>(keyBias.getType());
+    if (!type || !type.hasRank() || type.getRank() != 2 ||
+        !type.getElementType().isF16())
+      return emitOpError("key_bias must be a rank-2 f16 [batch, total_seq_len]"
+                         " tensor or memref");
+    if (getAttentionBias())
+      return emitOpError("key_bias and attention_bias are mutually exclusive");
+    if (getNoCausal())
+      return emitOpError("key_bias requires causal attention (no_causal must "
+                         "be false)");
   }
 
   return success();
@@ -4025,6 +4102,16 @@ MutableOperandRange NonZeroOp::getDpsInitsMutable() {
 }
 
 void NonZeroOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+MutableOperandRange NonMaxSuppressionOp::getDpsInitsMutable() {
+  return MutableOperandRange(*this, /*start=*/6, /*length=*/2);
+}
+
+void NonMaxSuppressionOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);

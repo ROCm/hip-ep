@@ -155,8 +155,6 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     ResizeOp::attachInterface<HipDstBufferizableModel<ResizeOp>>(*ctx);
     GridSampleOp::attachInterface<HipDstBufferizableModel<GridSampleOp>>(*ctx);
     RoiAlignOp::attachInterface<HipDstBufferizableModel<RoiAlignOp>>(*ctx);
-    NonMaxSuppressionOp::attachInterface<
-        HipDstBufferizableModel<NonMaxSuppressionOp>>(*ctx);
     GlobalPoolOp::attachInterface<HipDstBufferizableModel<GlobalPoolOp>>(*ctx);
     ReciprocalOp::attachInterface<HipDstBufferizableModel<ReciprocalOp>>(*ctx);
     SqrtOp::attachInterface<HipDstBufferizableModel<SqrtOp>>(*ctx);
@@ -242,8 +240,11 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     MultiHeadAttentionOp::attachInterface<
         HipDstBufferizableModel<MultiHeadAttentionOp>>(*ctx);
     NonZeroOp::attachInterface<HipDstBufferizableModel<NonZeroOp>>(*ctx);
+    NonMaxSuppressionOp::attachInterface<
+        HipDstBufferizableModel<NonMaxSuppressionOp>>(*ctx);
     SizeOp::attachInterface<HipDstBufferizableModel<SizeOp>>(*ctx);
     LoopOp::attachInterface<HipDstBufferizableModel<LoopOp>>(*ctx);
+    ScanOp::attachInterface<HipDstBufferizableModel<ScanOp>>(*ctx);
     QAddOp::attachInterface<HipDstBufferizableModel<QAddOp>>(*ctx);
     QMulOp::attachInterface<HipDstBufferizableModel<QMulOp>>(*ctx);
     QMatMulOp::attachInterface<HipDstBufferizableModel<QMatMulOp>>(*ctx);
@@ -256,6 +257,11 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     QLpNormalizationOp::attachInterface<
         HipDstBufferizableModel<QLpNormalizationOp>>(*ctx);
     QSigmoidOp::attachInterface<HipDstBufferizableModel<QSigmoidOp>>(*ctx);
+    // hip.random_normal_like is a DPS op. Without this model one-shot-bufferize
+    // aborts with "op was not bufferized" and attributes the failure to the
+    // ONNX source location inherited by the lowered op.
+    RandomNormalLikeOp::attachInterface<
+        HipDstBufferizableModel<RandomNormalLikeOp>>(*ctx);
     // hip.if is a DPS control-flow op (getDpsInitsMutable, results alias
     // o_init) just like hip.loop. Without this model one-shot-bufferize aborts
     // with "op was not bufferized: hip.if" for any graph containing onnx.If,

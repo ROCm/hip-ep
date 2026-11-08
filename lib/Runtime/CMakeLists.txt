@@ -388,6 +388,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/scatter_nd.cpp runtime_scatter_nd.bc)
     compile_to_bitcode(real/multi_head_attention.cpp runtime_multi_head_attention.bc)
     compile_to_bitcode(real/nonzero.cpp runtime_nonzero.bc)
+    compile_to_bitcode(real/non_max_suppression.cpp runtime_non_max_suppression.bc)
     compile_to_bitcode(real/size.cpp runtime_size.bc)
     compile_to_bitcode(real/pool.cpp runtime_pool.bc)
     compile_to_bitcode(real/conv.cpp runtime_conv.bc)
@@ -395,7 +396,6 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/resize.cpp runtime_resize.bc)
     compile_to_bitcode(real/grid_sample.cpp runtime_grid_sample.bc)
     compile_to_bitcode(real/roi_align.cpp runtime_roi_align.bc)
-    compile_to_bitcode(real/non_max_suppression.cpp runtime_non_max_suppression.bc)
     compile_to_bitcode(real/global_pool.cpp runtime_global_pool.bc)
     compile_to_bitcode(real/qelementwise.cpp runtime_qelementwise.bc)
     compile_to_bitcode(real/qmatmul.cpp runtime_qmatmul.bc)
@@ -495,6 +495,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_scatter_nd.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_multi_head_attention.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_nonzero.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_non_max_suppression.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_size.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_pool.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_conv.bc
@@ -502,7 +503,6 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_resize.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_grid_sample.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_roi_align.bc
-        ${CMAKE_CURRENT_BINARY_DIR}/runtime_non_max_suppression.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_global_pool.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_gather_block_quantized.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qdq.bc
@@ -577,7 +577,7 @@ set(RUNTIME_BC_PATH ${CMAKE_CURRENT_BINARY_DIR}/runtime.bc PARENT_SCOPE)
 add_custom_target(RuntimeBitcode DEPENDS HipRuntime)
 
 # ============================================================================
-# STEP 6: Native current-stream accessor (NOT bitcode)
+# STEP 6: Native runtime shims (NOT bitcode)
 # ============================================================================
 # The per-thread session-stream slot is compiled natively here, deliberately
 # kept out of runtime.bc. A thread_local inside runtime.bc would force the JIT
@@ -586,19 +586,27 @@ add_custom_target(RuntimeBitcode DEPENDS HipRuntime)
 # external functions: the host (EP DLL / hip-test / hip-inspect) defines them
 # (see LlvmIrJit absolute-symbol registration), and native model DLLs link
 # their own copy of this lib (CompilerDriver::discoverLibraries).
-add_library(hipdnn-ep-tls STATIC tls_stream.cpp)
+#
+# The optional ROCTx bridge follows the same dual-path contract: runtime.bc
+# calls exported shim functions, while this native library dynamically resolves
+# ROCTx only when requested. Keeping both shims in one archive means the
+# existing JIT host and native-model link paths need no additional library.
+add_library(hipdnn-ep-tls STATIC tls_stream.cpp roctx_shim.cpp)
 set_target_properties(hipdnn-ep-tls PROPERTIES POSITION_INDEPENDENT_CODE ON)
-target_include_directories(hipdnn-ep-tls PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(hipdnn-ep-tls PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/include)
 # Linked into hipgpu.dll; do not dllexport. ORT only looks up the plugin EP
 # entry points. JIT resolves these by address; native model DLLs link their
 # own copy of this lib.
 target_compile_definitions(hipdnn-ep-tls PRIVATE HIPDNN_EP_RT_NO_EXPORT)
 
-# Install the import/static lib so NATIVE model DLLs can link it on a deploy
+# Install the static shim lib so NATIVE model DLLs can link it on a deploy
 # host that only has the packaged tree (no build dir). CompilerDriver bakes the
 # build-tree path into HIPDNN_EP_TLS_LIB_DIR, which does not exist on the GPU
 # test machine; staging hipdnn-ep-tls.lib into install/lib (then onto LIB) lets
-# lld-link resolve it there. Bitcode (default) does not need it.
+# lld-link resolve it there. The bitcode path resolves the same shim functions
+# from the JIT host through LlvmIrJit's absolute-symbol table.
 install(TARGETS hipdnn-ep-tls ARCHIVE DESTINATION lib)
 
 # ============================================================================

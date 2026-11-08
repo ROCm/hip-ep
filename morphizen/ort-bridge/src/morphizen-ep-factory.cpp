@@ -411,7 +411,19 @@ OrtStatus *ORT_API_CALL MorphiZenEpFactory::CreateAllocatorImpl(
 #if defined(MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR) &&                             \
     MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR
   if (memory_info != nullptr) {
-    *allocator = new HipGpuAllocator(memory_info, factory->ort_api);
+    int device_id = -1;
+    if (OrtStatus *status =
+            factory->ort_api.MemoryInfoGetId(memory_info, &device_id)) {
+      return status;
+    }
+    const auto key = std::make_pair(
+        factory->ort_api.MemoryInfoGetDeviceMemType(memory_info), device_id);
+    std::lock_guard<std::mutex> lock(factory->allocators_mutex_);
+    auto &slot = factory->allocators_[key];
+    if (!slot) {
+      slot = std::make_unique<HipGpuAllocator>(memory_info, factory->ort_api);
+    }
+    *allocator = slot.get();
     return nullptr;
   }
 #endif
@@ -423,14 +435,9 @@ OrtStatus *ORT_API_CALL MorphiZenEpFactory::CreateAllocatorImpl(
 }
 
 void ORT_API_CALL MorphiZenEpFactory::ReleaseAllocatorImpl(
-    OrtEpFactory * /*this*/, OrtAllocator *allocator) noexcept {
-#if defined(MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR) &&                             \
-    MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR
-  if (allocator != nullptr) {
-    delete static_cast<HipGpuAllocator *>(allocator);
-  }
-#else
-  (void)allocator;
+    OrtEpFactory * /*this*/, OrtAllocator * /*allocator*/) noexcept {
+#if !(defined(MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR) &&                           \
+      MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR)
   // Should never be called when CreateAllocator returns an error.
   LOG(FATAL) << "TODO";
 #endif
