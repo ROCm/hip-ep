@@ -50,32 +50,8 @@ bool isKernelIOType(Type type) {
 
 bool isKernelIOValue(Value v) { return isKernelIOType(v.getType()); }
 
-// A dequantize there would only widen the output again, so it waits to be the
-// prologue of whichever kernel reads it.
-bool isFusableQuantizeEpilogue(Operation *op) {
-  return isa_and_present<QuantizeLinearOp>(op) && isTosaLowerableQdq(op);
-}
-
 bool isFusablePrologue(Operation *op) {
   return isFusablePointwise(op) || isTosaLowerableQdq(op);
-}
-
-static bool hasViewKind(Operation *op, unsigned kinds) {
-  std::optional<ViewKind> kind = getFusableViewKind(op);
-  return kind && (kinds & static_cast<unsigned>(*kind));
-}
-
-bool FusionPolicy::allowsEpilogue(Operation *op) const {
-  return isFusablePointwise(op) ||
-         (quantizeEpilogue && isFusableQuantizeEpilogue(op));
-}
-
-bool FusionPolicy::allowsInputView(Operation *op) const {
-  return hasViewKind(op, inputViewKinds);
-}
-
-bool FusionPolicy::allowsForwardView(Operation *op) const {
-  return hasViewKind(op, forwardViewKinds);
 }
 
 // rocMLIR reads every kernel input through rock.transform maps, so a view on
@@ -91,19 +67,13 @@ bool FusionPolicy::allowsForwardView(Operation *op) const {
 // A value on the chain that something outside also reads is written out as
 // one more kernel result instead of ending the chain: it is stored either way,
 // and the epilogue no longer has to load it back.
-FusionPolicy getFusionPolicy(bool fuseViews) {
-  FusionPolicy policy;
-  if (fuseViews) {
-    policy.forwardViewKinds = static_cast<unsigned>(ViewKind::Transpose) |
-                              static_cast<unsigned>(ViewKind::Reshape);
-    policy.inputViewKinds = policy.forwardViewKinds |
-                            static_cast<unsigned>(ViewKind::Slice) |
-                            static_cast<unsigned>(ViewKind::Broadcast);
-    policy.activationPrologue = true;
-    policy.quantizeEpilogue = true;
-    policy.multiOutput = true;
-  }
-  return policy;
+bool allowsInputView(Operation *op) {
+  return getFusableViewKind(op).has_value();
+}
+
+bool allowsForwardView(Operation *op) {
+  std::optional<ViewKind> kind = getFusableViewKind(op);
+  return kind == ViewKind::Transpose || kind == ViewKind::Reshape;
 }
 
 // A conv's filter takes no pointwise prologue: an elementwise op on it would
