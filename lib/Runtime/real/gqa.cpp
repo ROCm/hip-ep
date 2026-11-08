@@ -630,46 +630,18 @@ static int gqa_forward_fused(
       kSrc = d_Kroped; // V is never RoPE'd.
     }
 
-    // Decode is bandwidth-bound: a quantized cache is read directly (e.g.
-    // int8 halves the DRAM traffic). One entry serves every format --
-    // kv_dtype selects the code path inside the kernel; scales feed dequant.
-    //
-    // Decode structurally clamps kv_lo to the requested local window. Keep
-    // the window in the LUT key: it changes the range the split-K kernels
-    // scan and therefore the split count that wins.
-    const int kv_dtype = kv_dtype_abi(kv_format);
+    // A growing present (an onnx.Attention export whose present is past +
+    // seq) needs the separate-buffer concat every step. On a full-attention
+    // layer the scalar decode kernel does that copy itself while staging its
+    // tiles, so past is read once: one read and one write of the cache
+    // against concat + decode's two reads and a write, which no decode
+    // config (WMMA included) recovers. The copy also makes it bandwidth-bound
+    // at far fewer splits than the table's decode entries, so it sizes its
+    // own. The window case keeps the concat: it copies from a rounded-down
+    // bound that the decode's exact kv_lo would not cover.
     const bool online_tune =
         hip_gqa_autotune_mode(state->gqa_autotune_policy) ==
         static_cast<int>(hipdnn_ep::GqaAutotuneMode::Online);
-    // B==1 already paid (and caches) the seqlens_k read above, so the LUT
-    // sees the length the kernel will actually scan without adding a sync.
-    // For B>1 this is the host-known shape length, which is the upper
-    // bound; the nearest-neighbour lookup answers it from the closest
-    // measured length either way.
-    int effective_skv = static_cast<int>(skv);
-    if (seqlens_k_pre != kSeqlensKNotRead && seqlens_k_pre >= 0)
-      effective_skv = seqlens_k_pre + 1;
-    hipdnn_ep::GqaDecodeResult selected;
-    if (!online_tune) {
-      const hipdnn_ep::GqaDecodeRequest request{
-          kv_dtype,
-          static_cast<int>(B),
-          static_cast<int>(H),
-          static_cast<int>(G),
-          static_cast<int>(d),
-          effective_skv,
-          kFlashDecodeMaxSplits,
-          static_cast<int>(local_window_size)};
-      hip_gqa_autotune_resolve_decode(state->gqa_autotune_policy, &request,
-                                      &selected);
-    }
-
-    // A growing present (an onnx.Attention export whose present is past +
-    // seq) needs the separate-buffer concat every step. On a full-attention
-    // layer with a scalar config the decode kernel does that copy itself
-    // while staging its tiles, so past is read once. The window case keeps
-    // the concat: it copies from a rounded-down bound that the decode's exact
-    // kv_lo would not cover.
     const int64_t hpg = H / G;
     auto aligned16 = [](const void *p) {
       return (reinterpret_cast<uintptr_t>(p) & 15) == 0;
@@ -677,8 +649,7 @@ static int gqa_forward_fused(
     const bool fused_copy =
         !online_tune && !kv_quantized && B == 1 && past_key && past_value &&
         past_len > 0 && past_key != present_key && local_window_size <= 0 &&
-        !selected.config.use_wmma && d == 128 &&
-        (hpg == 4 || hpg == 5 || hpg == 6 || hpg == 8) &&
+        d == 128 && (hpg == 4 || hpg == 5 || hpg == 6 || hpg == 8) &&
         past_len <= past_buf_seq && past_len + 1 <= present_seq &&
         aligned16(past_key) && aligned16(past_value) && aligned16(kSrc) &&
         aligned16(vSrc) && aligned16(present_key) && aligned16(present_value);
@@ -702,6 +673,14 @@ static int gqa_forward_fused(
     {
       char *ws = static_cast<char *>(hipdnn_ep_state_get_workspace(state));
       void *partials = ws + off_partials;
+      // Decode is bandwidth-bound: a quantized cache is read directly (e.g.
+      // int8 halves the DRAM traffic). One entry serves every format --
+      // kv_dtype selects the code path inside the kernel; scales feed dequant.
+      //
+      // Decode structurally clamps kv_lo to the requested local window. Keep
+      // the window in the LUT key: it changes the range the split-K kernels
+      // scan and therefore the split count that wins.
+      const int kv_dtype = kv_dtype_abi(kv_format);
       int drc;
       OP_ROCTX_MARK("hip_ep.op.gqa.attn.flash_decode");
       if (fused_copy) {
@@ -711,8 +690,8 @@ static int gqa_forward_fused(
             static_cast<int>(H), static_cast<int>(G), static_cast<int>(d),
             static_cast<int>(past_len), static_cast<int>(past_buf_seq),
             static_cast<int>(present_seq), kFlashDecodeMaxSplits,
-            selected.config.splits, scale, head_sink,
-            use_smooth_softmax ? 1 : 0, key_bias, key_bias_stride);
+            /*splits=*/0, scale, head_sink, use_smooth_softmax ? 1 : 0,
+            key_bias, key_bias_stride);
       } else if (online_tune) {
         drc = hip_gqa_flash_decode(
             stream, qSrc, present_key, present_value, output, partials,
@@ -724,6 +703,26 @@ static int gqa_forward_fused(
             kv_quantized ? k_scale : nullptr, kv_quantized ? v_scale : nullptr,
             key_bias, key_bias_stride);
       } else {
+        // B==1 already paid (and caches) the seqlens_k read above, so the LUT
+        // sees the length the kernel will actually scan without adding a sync.
+        // For B>1 this is the host-known shape length, which is the upper
+        // bound; the nearest-neighbour lookup answers it from the closest
+        // measured length either way.
+        int effective_skv = static_cast<int>(skv);
+        if (seqlens_k_pre != kSeqlensKNotRead && seqlens_k_pre >= 0)
+          effective_skv = seqlens_k_pre + 1;
+        const hipdnn_ep::GqaDecodeRequest request{
+            kv_dtype,
+            static_cast<int>(B),
+            static_cast<int>(H),
+            static_cast<int>(G),
+            static_cast<int>(d),
+            effective_skv,
+            kFlashDecodeMaxSplits,
+            static_cast<int>(local_window_size)};
+        hipdnn_ep::GqaDecodeResult selected;
+        hip_gqa_autotune_resolve_decode(state->gqa_autotune_policy, &request,
+                                        &selected);
         drc = hip_gqa_flash_decode_configured(
             stream, qSrc, present_key, present_value, output, partials,
             static_cast<int>(B), static_cast<int>(H), static_cast<int>(G),

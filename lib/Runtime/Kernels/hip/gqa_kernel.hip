@@ -1966,7 +1966,12 @@ gqa_flash_decode_kernel(
           Vsv[i] = Vv[i];
         }
       }
-      __syncthreads();
+      // The copy shares tiles only through LDS and never reads back the
+      // present it writes, so its barriers need not drain the stores.
+      if constexpr (COPY)
+        HIPDNN_LDS_BARRIER();
+      else
+        __syncthreads();
       Kt = K_lds;
       Vt = V_lds;
     } else {
@@ -2073,7 +2078,10 @@ gqa_flash_decode_kernel(
       }
       m_acc = m_new;
     }
-    if constexpr (kStage) __syncthreads();
+    if constexpr (COPY)
+      HIPDNN_LDS_BARRIER();
+    else if constexpr (kStage)
+      __syncthreads();
   }
 
   // Write partial (m, l, O) for this wave's query head.
@@ -3076,6 +3084,32 @@ static int flashDecodeDefaultSplits(bool use_wmma, int B, int H, int G, int skv,
   return split_set[n - 1];  // ascending; nothing reaches the target
 }
 
+// Split count of the fused-copy decode. That kernel streams past into present
+// as it attends, so it is bound by a read plus a write of the cache, and it
+// reaches that floor with about 4 blocks (B*G*splits) per reported
+// multiprocessor, 80 on a 20-WGP part. Measured on gfx1151 at HpG 4/5/6/8 and
+// G 2-32, that count is the best one or within 2% of it from 8K keys up and
+// within 5 us below that, while the decode table's counts for the same shapes
+// (32 or more at G=8) are 8-14% slower from 2K to 16K keys. Some counts just
+// past it are up to a third slower (16 at G=8, 32 at G=4, 8 at G=16), so it
+// is not rounded up to a power of two. Below one 16-key tile per split the
+// extra blocks scan nothing.
+static int flashDecodeFusedCopySplits(int B, int G, int kv_len, int cap) {
+  static const int target_blocks = [] {
+    int dev = 0;
+    hipDeviceProp_t prop{};
+    if (hipGetDevice(&dev) != hipSuccess ||
+        hipGetDeviceProperties(&prop, dev) != hipSuccess ||
+        prop.multiProcessorCount <= 0)
+      return 80;
+    return 4 * prop.multiProcessorCount;
+  }();
+  const int per_split = std::max(1, B * G);
+  int splits = (target_blocks + per_split / 2) / per_split;
+  splits = std::min(splits, (kv_len + 15) / 16);
+  return std::max(1, std::min(splits, cap));
+}
+
 // A taller WMMA tile pays for itself by halving the barriers per KV element,
 // but it only amortises once a split spans many tiles, and it costs registers
 // and a longer ragged tail. Measured on gfx1151, BKV=32 wins by 4-6% once a
@@ -3540,6 +3574,12 @@ extern "C" int hip_gqa_flash_decode_fused_copy(
   const bool hpg_ok = hpg == 4 || hpg == 5 || hpg == 6 || hpg == 8;
   int cap = max_splits < kFlashDecodeMaxSplits ? max_splits
                                                : kFlashDecodeMaxSplits;
+  if (splits <= 0 && cap >= 1)
+    splits = flashDecodeFusedCopySplits(B, G, past_len + 1, cap);
+  if (const char* e = getenv("HIPDNN_GQA_DECODE_SPLITS")) {
+    const int v = atoi(e);
+    if (v >= 1) splits = v > cap ? cap : v;
+  }
   auto aligned = [](const void* p) {
     return (reinterpret_cast<uintptr_t>(p) & 15) == 0;
   };

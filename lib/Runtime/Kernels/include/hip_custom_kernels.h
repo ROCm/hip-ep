@@ -1435,7 +1435,9 @@ HIP_KERNEL_API int hip_gqa_flash_decode_configured(
 // [0, past_len], and attends over those past_len + 1 keys. Reads past once
 // instead of concat-then-decode reading it twice. B == 1, d 128, HpG
 // 4/5/6/8, no sliding window, 16-byte-aligned buffers; returns -1 otherwise.
-// partials and key_bias as for hip_gqa_flash_decode.
+// partials and key_bias as for hip_gqa_flash_decode. splits <= 0 lets the
+// launcher size the split count for the copy; HIPDNN_GQA_DECODE_SPLITS
+// overrides either.
 HIP_KERNEL_API int hip_gqa_flash_decode_fused_copy(
     void* stream, const void* Q, const void* past_k, const void* past_v,
     const void* new_k, const void* new_v, void* present_k, void* present_v,

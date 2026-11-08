@@ -185,17 +185,27 @@ class TestOnnxAttentionKeyPadding:
             left=True,
         )
 
+    @pytest.mark.parametrize(
+        "q_heads",
+        [
+            pytest.param(8, id="hpg4"),
+            pytest.param(10, id="hpg5"),
+            pytest.param(12, id="hpg6"),
+            pytest.param(16, id="hpg8"),
+        ],
+    )
     @pytest.mark.parametrize("past", [1, 33, 1000, 4095])
-    def test_decode_separate_past_present(self, model_runner, past):
+    def test_decode_separate_past_present(self, model_runner, q_heads, past):
         """Batch-1 full-attention decode: present is a separate buffer, so
-        the decode kernel writes present while it stages past (fused copy).
-        Lengths cover a single key, a partial tile and many tiles per split."""
+        the decode kernel writes present while it stages past (fused copy),
+        for every group size it is built for. Lengths cover a single key, a
+        partial tile and several tiles per split."""
         _run(
             model_runner,
             batch=1,
             seq=1,
             past=past,
-            q_heads=12,
+            q_heads=q_heads,
             window=0,
             pad=0,
             left=True,
