@@ -2,14 +2,14 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-//===- HardActivationConversion.cpp - HardSigmoid / HardSwish ------------===//
+//===- HardActivationConversion.cpp - HardSwish ---------------------------===//
 //
-// onnx.HardSigmoid: y = max(0, min(1, alpha * x + beta))
 // onnx.HardSwish:   y = x * HardSigmoid(x) with alpha = 1/6 and beta = 1/2
 //
 // Emit hip.mul / hip.add / hip.min / hip.max directly. The convert pass runs
 // with GreedyRewriteStrictness::ExistingOps, so a synthesized onnx.* op would
-// survive and fail one-shot bufferize.
+// survive and fail one-shot bufferize. onnx.HardSigmoid is lowered by
+// HardSigmoidConversion.cpp.
 //
 //   Before:
 //     %y = "onnx.HardSigmoid"(%x) {alpha = 0.2 : f32, beta = 0.5 : f32}
@@ -89,40 +89,6 @@ static mlir::Value emitHardSigmoid(mlir::PatternRewriter &rewriter,
       ->getResult(0);
 }
 
-struct HardSigmoidToHip : public mlir::RewritePattern {
-  HardSigmoidToHip(mlir::MLIRContext *ctx)
-      : RewritePattern("onnx.HardSigmoid", /*benefit=*/1, ctx) {}
-
-  mlir::LogicalResult
-  matchAndRewrite(mlir::Operation *op,
-                  mlir::PatternRewriter &rewriter) const override {
-    if (op->getNumOperands() != 1 || op->getNumResults() != 1)
-      return rewriter.notifyMatchFailure(
-          op, "onnx.HardSigmoid expects 1 operand and 1 result");
-    auto resultType =
-        mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
-    if (!resultType || !mlir::isa<mlir::FloatType>(resultType.getElementType()))
-      return rewriter.notifyMatchFailure(
-          op, "onnx.HardSigmoid expects a ranked float result");
-
-    double alpha = 0.2;
-    double beta = 0.5;
-    if (auto attr = op->getAttrOfType<mlir::FloatAttr>("alpha"))
-      alpha = attr.getValueAsDouble();
-    if (auto attr = op->getAttrOfType<mlir::FloatAttr>("beta"))
-      beta = attr.getValueAsDouble();
-
-    auto ctxOrFailure = getContextArg(op, rewriter);
-    if (mlir::failed(ctxOrFailure))
-      return mlir::failure();
-
-    mlir::Value y = emitHardSigmoid(rewriter, op->getLoc(), *ctxOrFailure,
-                                    op->getOperand(0), resultType, alpha, beta);
-    rewriter.replaceOp(op, y);
-    return mlir::success();
-  }
-};
-
 struct HardSwishToHip : public mlir::RewritePattern {
   HardSwishToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.HardSwish", /*benefit=*/1, ctx) {}
@@ -160,7 +126,7 @@ struct HardSwishToHip : public mlir::RewritePattern {
 
 void populateHardActivationConversionPatterns(RewritePatternSet &patterns,
                                               MLIRContext *ctx) {
-  patterns.add<HardSigmoidToHip, HardSwishToHip>(ctx);
+  patterns.add<HardSwishToHip>(ctx);
 }
 
 } // namespace hip

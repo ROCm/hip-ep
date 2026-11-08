@@ -8,18 +8,6 @@ module {
     return %arg0 : tensor<1x3x8x8xf32>
   }
 
-  func.func @hard_sigmoid(%x: tensor<2x4xf32>) -> tensor<2x4xf32> {
-    %y = "onnx.HardSigmoid"(%x) {alpha = 2.000000e-01 : f32, beta = 5.000000e-01 : f32} : (tensor<2x4xf32>) -> tensor<2x4xf32>
-    return %y : tensor<2x4xf32>
-  }
-
-  // CHECK-LABEL: func.func @hard_sigmoid
-  // CHECK-NOT: onnx.HardSigmoid
-  // CHECK: hip.mul
-  // CHECK: hip.add
-  // CHECK: hip.min
-  // CHECK: hip.max
-
   func.func @hard_swish(%x: tensor<2x4xf32>) -> tensor<2x4xf32> {
     %y = "onnx.HardSwish"(%x) : (tensor<2x4xf32>) -> tensor<2x4xf32>
     return %y : tensor<2x4xf32>
