@@ -135,7 +135,6 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | NGramHashMapping (`com.microsoft`) | Custom HIP kernel. int32/int64 |
 | Relu | Decomposed to Max |
 | HardSwish | Decomposed to HardSigmoid and Mul. f16 and f32 only; bf16 and f64 are left to another EP |
-| Einsum | `bhlk,bhtk->bhlt`, `bhlt,bhtv->bhlv`, `bhwc,hkc->bhwk`, and `bhwc,wkc->bhwk` lowered to batched MatMul |
 | LeakyRelu | Custom HIP kernel |
 | PRelu | Custom HIP kernel. Slope broadcasts onto X; f16/bf16/f32/f64 |
 | LRN | Custom HIP kernel. Channel window, rank >= 2, f16/bf16/f32/f64 |
@@ -167,7 +166,6 @@ These operations are handled through standard MLIR transformations and generally
 | Operation | Implementation | Notes |
 |---|---|---|
 | Reshape | `tensor.expand_shape` / `tensor.collapse_shape` | Metadata-only where representable; dynamic dimensions are supported |
-| DepthToSpace | `tensor.expand_shape`, `hip.transpose`, `tensor.collapse_shape` | CRD and DCR, static rank-4 |
 | Unsqueeze | `tensor.expand_shape` | Inserts size-one axes |
 | Squeeze | `tensor.collapse_shape` | Removes size-one axes |
 | Split | `tensor.extract_slice` | Produces tensor slices that bufferize to views |

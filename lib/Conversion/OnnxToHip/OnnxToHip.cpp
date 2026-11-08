@@ -344,8 +344,6 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateConcatConversionPatterns(patterns, ctx);
   populateReluConversionPatterns(patterns, ctx);
   populateHardActivationConversionPatterns(patterns, ctx);
-  populateEinsumConversionPatterns(patterns, ctx);
-  populateDepthToSpaceConversionPatterns(patterns, ctx);
   populateImageScalerConversionPatterns(patterns, ctx);
   populateLeakyReluConversionPatterns(patterns, ctx);
   populatePReluConversionPatterns(patterns, ctx);
