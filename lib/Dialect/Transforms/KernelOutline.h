@@ -32,37 +32,15 @@ bool isStaticTensor(Value v);
 bool isKernelIOType(Type type);
 bool isKernelIOValue(Value v);
 
-/// A quantize on the way out lets the kernel write the narrow type.
-bool isFusableQuantizeEpilogue(Operation *op);
-
 /// A dequantize on the way in lets the kernel read the narrow type, and a
 /// quantize feeding it folds the round trip into the load.
 bool isFusablePrologue(Operation *op);
 
-/// Which neighbours of an anchor may join its kernel, beyond the forward
-/// pointwise chain every anchor takes.
-struct FusionPolicy {
-  // ViewKind bits the input absorption may take.
-  unsigned inputViewKinds = 0;
-  // ViewKind bits the forward chain past the anchor may take.
-  unsigned forwardViewKinds = 0;
-  // A unary pointwise producer of an input root that allows one.
-  bool activationPrologue = false;
-  // A quantize on the forward chain.
-  bool quantizeEpilogue = false;
-  // The forward chain may pass a value that is also read outside the kernel;
-  // the kernel then returns that value as an extra result.
-  bool multiOutput = false;
+/// A view that the kernel may absorb on one of its inputs.
+bool allowsInputView(Operation *op);
 
-  bool allowsEpilogue(Operation *op) const;
-  bool allowsInputView(Operation *op) const;
-  bool allowsForwardView(Operation *op) const;
-  bool absorbsInputs() const {
-    return inputViewKinds != 0 || activationPrologue;
-  }
-};
-
-FusionPolicy getFusionPolicy(bool fuseViews);
+/// A view that the kernel may absorb past the anchor.
+bool allowsForwardView(Operation *op);
 
 /// Where input absorption starts, with whether each root may take a pointwise
 /// prologue.

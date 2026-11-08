@@ -162,7 +162,7 @@ void buildHipdnnPipeline(OpPassManager &pm,
 /// preparation, the grouping of the pointwise ops of main_graph into
 /// hip.rocmlir_elementwise modules, the outline of each anchor with its
 /// modules into a rock.kernel function, then the merge of duplicate kernels.
-/// The grouping takes fuse-views from fuseOptions. A non-empty reportPath
+/// A non-empty reportPath
 /// appends the --hip-rocmlir-fusion-report records to that file. Every caller
 /// builds the fusion through this function so that the pass order and the
 /// options stay the same across tools.
@@ -172,15 +172,6 @@ void addRocMlirFusionPasses(OpPassManager &pm,
 
 struct RocMlirFusionPipelineOptions
     : PassPipelineOptions<RocMlirFusionPipelineOptions> {
-  Option<bool> fuseViews{
-      *this, "fuse-views",
-      llvm::cl::desc("Absorb views, prologues, quantize epilogues and extra "
-                     "outputs around an anchor"),
-      llvm::cl::init(true)};
-  Option<bool> fuseGemmGemm{
-      *this, "fuse-geg",
-      llvm::cl::desc("Merge gemm-elementwise-gemm kernel pairs"),
-      llvm::cl::init(true)};
   Option<std::string> arch{
       *this, "arch",
       llvm::cl::desc("Target GPU architecture stamped as rock.arch"),

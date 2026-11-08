@@ -76,9 +76,9 @@ every init is a `tensor.empty`:
   (`isTosaExpressiblePointwiseOp`), or an op that it lowers only inside an
   anchor kernel (`isFusablePointwise`, for example a `hip.where` on a ui8
   mask).
-- With `fuse-views`, a transpose or a static reshape is a view, and a
-  TOSA-lowerable per-tensor dequantize or quantize is a dequantize or a
-  quantize. A dequantize that feeds a convolution of dequantizes that
+- A transpose or a static reshape is a view, and a TOSA-lowerable
+  per-tensor dequantize or quantize is a dequantize or a quantize. A
+  dequantize that feeds a convolution of dequantizes that
   becomes an integer anchor gets no role, because the anchor pass reads its
   integer operand directly.
 
@@ -125,8 +125,7 @@ kernel when these conditions are true:
   inverts them to map each output element back to its tile.
 - No other module input depends on the kernel.
 - A dequantize of a kernel value occurs only after a quantized anchor, because
-  after a float anchor it would widen the kernel output again. A quantize
-  needs `fuse-views`.
+  after a float anchor it would widen the kernel output again.
 - After a quantized anchor, no kernel result is a float value that a
   dequantize widened. Every result is an integer value or a value from before
   the first dequantize.
@@ -137,7 +136,7 @@ that leads from a kernel value to such a view or to a module. The kernel
 cannot store such a reshape, so it goes in only with the op at the end of the
 chain.
 
-With `fuse-views`, a kernel value with a reader outside the kernel is an
+A kernel value with a reader outside the kernel is an
 extra `hip.rocmlir` result, and the outside readers above the kernel move
 below the dispatch. A quantized anchor continues through the modules that
 read the modules it took, past each quantize and dequantize, so it takes the
@@ -203,7 +202,7 @@ falls back to its HIP ops.
 
 ### Integer anchors
 
-With `fuse-views`, these ops become integer anchors:
+These ops become integer anchors:
 
 - A `hip.qlinear_conv` with static shapes, inline constant parameters,
   weights and bias, a zero weight zero point and per-tensor activation
@@ -256,10 +255,10 @@ the A operand of the second gemm through pointwise ops and row-only reshapes
 
 ## Options
 
-| Option | EP variable | Effect |
+The fusion rules have no switches. The two options describe the target.
+
+| Option | EP value | Effect |
 |---|---|---|
-| `fuse-views=false` | `HIPDNN_EP_ROCMLIR_FUSE_VIEWS=0` | Modules hold only pointwise ops; each kernel has one result and no prologue, view or quantize epilogue. For A/B runs. |
-| `fuse-geg=false` | `HIPDNN_EP_ROCMLIR_FUSE_GEG=0` | No gemm-elementwise-gemm merge. |
 | `arch=<gfx>` | detected | Stamps `rock.arch` on each kernel. |
 | `gemm-gemm-accel-types=<types>` | detected | The element types for the gemm-gemm gate. |
 
