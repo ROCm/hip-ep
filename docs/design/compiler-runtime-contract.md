@@ -237,7 +237,7 @@ wrap_rocmlir(state, kernel_binary, func_name, block_size, grid_size,
              kernargs, N * sizeof(void*))
 ```
 
-- `kernel_binary` is the code object that `hip-fuse-rocmlir` outlined and
+- `kernel_binary` is the code object that `hip-fuse-rocmlir-anchor` outlined and
   rocMLIR compiled. `func_name`, `block_size` and `grid_size` come from the
   same compile.
 - `kernargs` holds `N` bare device pointers: the `ins` operands in order, then

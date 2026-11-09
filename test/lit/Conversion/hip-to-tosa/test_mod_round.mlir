@@ -4,10 +4,10 @@
 // ============================================================================
 // TEST PURPOSE:
 // Verify that hip.round and hip.mod, the lowerings of ONNX Round and ONNX Mod,
-// become TOSA inside a rock.kernel function. Both are already in FuseROCMlir's
-// pointwise list, so either one sitting behind a matmul is outlined into the
-// kernel whether or not this pass can lower it; left unconverted it reaches
-// rocMLIR as a hip op that rocMLIR cannot compile.
+// become TOSA inside a rock.kernel function. Both are already in the rocMLIR
+// fusion's pointwise list, so either one sitting behind a matmul is outlined
+// into the kernel whether or not this pass can lower it; left unconverted it
+// reaches rocMLIR as a hip op that rocMLIR cannot compile.
 //
 // TOSA has an op for neither, so each is spelled out. Both expansions are
 // exact -- nothing here approximates.
@@ -44,7 +44,7 @@
 // - Signless i32 and i64, the only widths tosa.intdiv accepts, both convert
 // - A lower-rank divisor is reshaped with leading 1s first, since TOSA
 //   broadcasts size-1 dimensions only once both operands carry the result rank
-// - Each op converts behind a matmul anchor, the shape hip-fuse-rocmlir makes
+// - Each op converts behind a matmul anchor, the shape the rocMLIR fusion makes
 // - Float mod is rejected with the reason named: fmod needs the exact truncated
 //   quotient, which a reciprocal and a multiply cannot supply
 // - Integer widths tosa.intdiv cannot take are rejected with the type named
@@ -230,10 +230,10 @@ func.func @mod_rank_extending(%ctx: !hip.context, %a: tensor<4x8xi32>,
 // -----
 
 //===----------------------------------------------------------------------===//
-// Behind an anchor, in the shape hip-fuse-rocmlir produces.
+// Behind an anchor, in the shape the rocMLIR fusion produces.
 //===----------------------------------------------------------------------===//
 
-// The reason for converting these at all. Both ops are in FuseROCMlir's
+// The reason for converting these at all. Both ops are in the rocMLIR fusion's
 // pointwise list, so a round after a matmul is outlined into the kernel whether
 // or not it can be lowered; left unconverted it reaches rocMLIR as a hip op fed
 // by a ub.poison context, neither of which rocMLIR knows.
