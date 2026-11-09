@@ -692,6 +692,10 @@ static int gqa_forward_fused(
             static_cast<int>(present_seq), kFlashDecodeMaxSplits,
             /*splits=*/0, scale, head_sink, use_smooth_softmax ? 1 : 0,
             key_bias, key_bias_stride);
+        RUNTIME_DEBUG_LOG("[REAL] GQA decode fused KV copy: past_len=%lld "
+                          "hpg=%lld key_bias=%d\n",
+                          (long long)past_len, (long long)hpg,
+                          static_cast<int>(key_bias != nullptr));
       } else if (online_tune) {
         drc = hip_gqa_flash_decode(
             stream, qSrc, present_key, present_value, output, partials,

@@ -3092,8 +3092,8 @@ static int flashDecodeDefaultSplits(bool use_wmma, int B, int H, int G, int skv,
 // within 5 us below that, while the decode table's counts for the same shapes
 // (32 or more at G=8) are 8-14% slower from 2K to 16K keys. Some counts just
 // past it are up to a third slower (16 at G=8, 32 at G=4, 8 at G=16), so it
-// is not rounded up to a power of two. Below one 16-key tile per split the
-// extra blocks scan nothing.
+// is not rounded up to a power of two. Like the decode table's clamp, it keeps
+// at least 16 keys per split.
 static int flashDecodeFusedCopySplits(int B, int G, int kv_len, int cap) {
   static const int target_blocks = [] {
     int dev = 0;
