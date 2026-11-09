@@ -85,9 +85,16 @@ struct RuntimeState {
   // the grow-on-demand contract of the individual pools. realloc-move is safe
   // because nothing caches &pool_base[i] across calls; pool_base[domain_id] is
   // re-derived from state on every access.
-  int num_pool_domains;   // Number of slots currently allocated in the arrays
-  void **pool_base;       // [num_pool_domains] per-domain GPU pool base ptrs
-  size_t *pool_size;      // [num_pool_domains] per-domain pool size in bytes
+  int num_pool_domains; // Number of slots currently allocated in the arrays
+  void **pool_base;     // [num_pool_domains] per-domain GPU pool base ptrs
+  size_t *pool_size;    // [num_pool_domains] per-domain pool size in bytes
+  // Outlined Scan bodies are independently pool-planned functions whose
+  // domain ids also start at zero. Keep a separate cached domain set while a
+  // body runs so its temporaries cannot overwrite parent-function captures.
+  int num_scan_pool_domains;
+  void **scan_pool_base;
+  size_t *scan_pool_size;
+  bool scan_pool_active;
   size_t *buffer_offsets; // Offsets for static buffers in domain 0
   size_t num_buffers;     // Static buffer count in domain 0
 
@@ -281,6 +288,11 @@ struct RuntimeState {
   bool seqlens_k_cached_valid;
   int32_t seqlens_k_cached_val;
   const void *seqlens_k_cached_ptr;
+
+  // SparseAttentionIndexer past_sequence_length, same lifetime as above.
+  bool sai_past_len_cached_valid;
+  int32_t sai_past_len_cached_val;
+  const void *sai_past_len_cached_ptr;
 
   // ONNX Loop driver state. Lazily allocated by hipdnn_ep_run_counted_loop /
   // hipdnn_ep_run_loop on first call; freed in hipdnn_ep_state_cleanup.

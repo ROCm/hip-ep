@@ -28,6 +28,7 @@ module {
     // CHECK: %[[B:.*]] = llvm.extractvalue %[[Q:.*]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<3 x i64>, array<3 x i64>)>
     // CHECK: %[[S:.*]] = llvm.extractvalue %[[Q]][3, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<3 x i64>, array<3 x i64>)>
     // CHECK: %[[P:.*]] = llvm.extractvalue %[[PAST:.*]][3, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<3 x i64>, array<3 x i64>)>
+    // CHECK: %[[PR:.*]] = llvm.extractvalue %{{.*}}[3, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<3 x i64>, array<3 x i64>)>
     // CHECK: %[[N:.*]] = llvm.mlir.constant(4 : i64) : i64
     // CHECK: %[[D:.*]] = llvm.mlir.constant(128 : i64) : i64
     // CHECK: %[[R:.*]] = llvm.mlir.constant(64 : i64) : i64
@@ -44,7 +45,7 @@ module {
     // CHECK: %[[SR:.*]] = llvm.extractvalue %[[SIN]][3, 1]
     // CHECK: %[[EPS:.*]] = llvm.mlir.constant(9.99999997E-7 : f32) : f32
     // CHECK: %[[SCALE:.*]] = llvm.mlir.constant(0.0883883461 : f32) : f32
-    // CHECK: llvm.call @wrap_sparse_attention_indexer(%{{.*}}, %[[B]], %[[S]], %[[P]], %[[N]], %[[D]], %[[R]], %[[X]], %[[BATCHED]], %[[RATIO]], %[[BUDGET]], %[[ELEM]], %[[PB]], %[[MB]], %[[ML]], %[[CB]], %[[SB]], %[[SR]], %[[EPS]], %[[SCALE]]) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32) -> i32
+    // CHECK: llvm.call @wrap_sparse_attention_indexer(%{{.*}}, %[[B]], %[[S]], %[[P]], %[[PR]], %[[N]], %[[D]], %[[R]], %[[X]], %[[BATCHED]], %[[RATIO]], %[[BUDGET]], %[[ELEM]], %[[PB]], %[[MB]], %[[ML]], %[[CB]], %[[SB]], %[[SR]], %[[EPS]], %[[SCALE]]) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32) -> i32
     return
   }
 
@@ -68,6 +69,8 @@ module {
          epsilon = 9.99999997E-7 : f32, scale = 0.0883883461 : f32}
     // CHECK-LABEL: llvm.func @sai_no_mask(
     // CHECK: %[[NOMASK:.*]] = llvm.mlir.zero : !llvm.ptr
+    // CHECK-NEXT: %[[NOPSL:.*]] = llvm.mlir.zero : !llvm.ptr
+    // CHECK: %[[PR:.*]] = llvm.mlir.constant(8 : i64) : i64
     // CHECK: %[[X:.*]] = llvm.mlir.constant(64 : i64) : i64
     // CHECK-NEXT: %[[BATCHED:.*]] = llvm.mlir.constant(0 : i64) : i64
     // CHECK-NEXT: %[[RATIO:.*]] = llvm.mlir.constant(4 : i64) : i64
@@ -79,7 +82,36 @@ module {
     // CHECK-NEXT: %[[CB:.*]] = llvm.mlir.constant(0 : i64) : i64
     // CHECK-NEXT: %[[SB:.*]] = llvm.mlir.constant(0 : i64) : i64
     // CHECK-NEXT: %[[SR:.*]] = llvm.mlir.constant(64 : i64) : i64
-    // CHECK: llvm.call @wrap_sparse_attention_indexer(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %[[NOMASK]], %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %[[X]], %[[BATCHED]], %[[RATIO]], %[[BUDGET]], %[[ELEM]], %[[PB]], %[[MB]], %[[ML]], %[[CB]], %[[SB]], %[[SR]], %{{.*}}, %{{.*}})
+    // CHECK: llvm.call @wrap_sparse_attention_indexer(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %[[NOMASK]], %[[NOPSL]], %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %[[PR]], %{{.*}}, %{{.*}}, %{{.*}}, %[[X]], %[[BATCHED]], %[[RATIO]], %[[BUDGET]], %[[ELEM]], %[[PB]], %[[MB]], %[[ML]], %[[CB]], %[[SB]], %[[SR]], %{{.*}}, %{{.*}})
+    return
+  }
+
+  func.func @sai_past_sequence_length(
+      %ctx: !hip.context,
+      %qk: memref<1x1x640xf16, 1>,
+      %qw: memref<128xf16, 1>,
+      %kw: memref<128xf16, 1>,
+      %cos: memref<4096x64xf16, 1>,
+      %sin: memref<4096x64xf16, 1>,
+      %past: memref<1x?x128xf16, 1>,
+      %psl: memref<1xi32, 1>,
+      %sel: memref<1x1x2051xi32, 1>,
+      %present: memref<1x?x128xf16, 1>) {
+    hip.sparse_attention_indexer(%ctx)
+        ins(%qk, %qw, %kw, %cos, %sin, %past :
+            memref<1x1x640xf16, 1>, memref<128xf16, 1>, memref<128xf16, 1>,
+            memref<4096x64xf16, 1>, memref<4096x64xf16, 1>,
+            memref<1x?x128xf16, 1>)
+        past_sequence_length(%psl : memref<1xi32, 1>)
+        outs(%sel, %present : memref<1x1x2051xi32, 1>, memref<1x?x128xf16, 1>)
+        {compress_ratio = 4 : i64, token_budget = 2048 : i64,
+         epsilon = 9.99999997E-7 : f32, scale = 0.0883883461 : f32}
+    // CHECK-LABEL: llvm.func @sai_past_sequence_length(
+    // CHECK: %[[NOMASK:.*]] = llvm.mlir.zero : !llvm.ptr
+    // CHECK-NEXT: %[[PSL:.*]] = llvm.extractvalue %{{.*}}[1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
+    // CHECK: %[[P:.*]] = llvm.extractvalue %{{.*}}[3, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<3 x i64>, array<3 x i64>)>
+    // CHECK-NEXT: %[[PR:.*]] = llvm.extractvalue %{{.*}}[3, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<3 x i64>, array<3 x i64>)>
+    // CHECK: llvm.call @wrap_sparse_attention_indexer(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %[[NOMASK]], %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %[[P]], %[[PR]],
     return
   }
 }

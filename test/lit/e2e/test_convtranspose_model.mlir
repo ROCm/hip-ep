@@ -11,14 +11,19 @@
 //
 // Verifies the complete hipdnn-pipeline:
 // 1. convert-onnx-to-hip: onnx.ConvTranspose -> hip.conv_transpose
-// 2. bufferize / canonicalize
-// 3. convert-hip-to-llvm: hip.conv_transpose -> wrap_conv_transpose
-// 4. generate-interface: Create inference_init/compute/cleanup/metadata
+// 2. hip-decompose-conv-transpose: this static rank-4 op becomes one
+//    stride-1 hip.conv. The bias is a broadcast hip.add on the result.
+// 3. bufferize / canonicalize
+// 4. convert-hip-to-llvm: hip.conv -> wrap_conv
+// 5. generate-interface: Create inference_init/compute/cleanup/metadata
+//
+// The trailing '(' distinguishes wrap_conv from wrap_conv_transpose.
 
 // CHECK: module attributes {
 // CHECK-SAME: hipdnn.input_count = 1
 // CHECK-SAME: hipdnn.output_count = 1
-// CHECK: llvm.func @wrap_conv_transpose
+// CHECK: llvm.func @wrap_conv(
+// CHECK-NOT: llvm.func @wrap_conv_transpose
 // CHECK: llvm.func @inference_init
 // CHECK: llvm.func @inference_compute
 // CHECK: llvm.func @inference_cleanup

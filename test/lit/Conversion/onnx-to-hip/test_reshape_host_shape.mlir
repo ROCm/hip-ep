@@ -177,3 +177,101 @@ func.func @dynamic_slice(%data: tensor<?x?x?xf32>, %offset: index, %entry: i64) 
   %result = "onnx.Reshape"(%data, %shape) : (tensor<?x?x?xf32>, tensor<4xi64>) -> tensor<?x?x?x?xf32>
   return %result : tensor<?x?x?x?xf32>
 }
+
+// A constant index vector is applied on the host. Indices [2, 0, 3] select
+// d2, d0, d3. No entry is read back from the device.
+// CHECK-LABEL: func.func @gather_index_vector
+// CHECK-SAME: %[[DATA:.*]]: tensor<?x4xf32>, %[[D0:.*]]: i64, %[[D1:.*]]: i64, %[[D2:.*]]: i64, %[[D3:.*]]: i64
+// CHECK-NOT: hip.readback_scalar
+// CHECK: arith.select %{{.*}}, %{{.*}}, %[[D2]] : i64
+// CHECK: arith.select %{{.*}}, %{{.*}}, %[[D0]] : i64
+// CHECK: arith.select %{{.*}}, %{{.*}}, %[[D3]] : i64
+// CHECK: tensor.reshape
+// CHECK-NOT: hip.readback_scalar
+// CHECK: return
+func.func @gather_index_vector(%data: tensor<?x4xf32>, %d0: i64, %d1: i64, %d2: i64, %d3: i64) -> tensor<?x?x?xf32> {
+  %base = tensor.from_elements %d0, %d1, %d2, %d3 : tensor<4xi64>
+  %indices = "onnx.Constant"() {value = dense<[2, 0, 3]> : tensor<3xi64>} : () -> tensor<3xi64>
+  %shape = "onnx.Gather"(%base, %indices) {axis = 0 : si64} : (tensor<4xi64>, tensor<3xi64>) -> tensor<3xi64>
+  %result = "onnx.Reshape"(%data, %shape) : (tensor<?x4xf32>, tensor<3xi64>) -> tensor<?x?x?xf32>
+  return %result : tensor<?x?x?xf32>
+}
+
+// A one-element index vector. Index 2 selects d2.
+// CHECK-LABEL: func.func @gather_scalar_index
+// CHECK-SAME: %[[DATA:.*]]: tensor<8xf32>, %[[D0:.*]]: i64, %[[D1:.*]]: i64, %[[D2:.*]]: i64, %[[D3:.*]]: i64
+// CHECK-NOT: hip.readback_scalar
+// CHECK: arith.select %{{.*}}, %{{.*}}, %[[D2]] : i64
+// CHECK: tensor.reshape
+// CHECK-NOT: hip.readback_scalar
+// CHECK: return
+func.func @gather_scalar_index(%data: tensor<8xf32>, %d0: i64, %d1: i64, %d2: i64, %d3: i64) -> tensor<?xf32> {
+  %base = tensor.from_elements %d0, %d1, %d2, %d3 : tensor<4xi64>
+  %indices = "onnx.Constant"() {value = dense<2> : tensor<1xi64>} : () -> tensor<1xi64>
+  %shape = "onnx.Gather"(%base, %indices) {axis = 0 : si64} : (tensor<4xi64>, tensor<1xi64>) -> tensor<1xi64>
+  %result = "onnx.Reshape"(%data, %shape) : (tensor<8xf32>, tensor<1xi64>) -> tensor<?xf32>
+  return %result : tensor<?xf32>
+}
+
+// A rank-0 index is the scalar form. Index 1 selects d1, and unsqueeze
+// makes the rank-1 shape tensor Reshape requires.
+// CHECK-LABEL: func.func @gather_scalar_rank0
+// CHECK-SAME: %[[DATA:.*]]: tensor<8xf32>, %[[D0:.*]]: i64, %[[D1:.*]]: i64, %[[D2:.*]]: i64, %[[D3:.*]]: i64
+// CHECK-NOT: hip.readback_scalar
+// CHECK: arith.select %{{.*}}, %{{.*}}, %[[D1]] : i64
+// CHECK: tensor.reshape
+// CHECK-NOT: hip.readback_scalar
+// CHECK: return
+func.func @gather_scalar_rank0(%data: tensor<8xf32>, %d0: i64, %d1: i64, %d2: i64, %d3: i64) -> tensor<?xf32> {
+  %base = tensor.from_elements %d0, %d1, %d2, %d3 : tensor<4xi64>
+  %indices = "onnx.Constant"() {value = dense<1> : tensor<i64>} : () -> tensor<i64>
+  %picked = "onnx.Gather"(%base, %indices) {axis = 0 : si64} : (tensor<4xi64>, tensor<i64>) -> tensor<i64>
+  %axes = "onnx.Constant"() {value = dense<0> : tensor<1xi64>} : () -> tensor<1xi64>
+  %shape = "onnx.Unsqueeze"(%picked, %axes) : (tensor<i64>, tensor<1xi64>) -> tensor<1xi64>
+  %result = "onnx.Reshape"(%data, %shape) : (tensor<8xf32>, tensor<1xi64>) -> tensor<?xf32>
+  return %result : tensor<?xf32>
+}
+
+// Index -1 is the last element of the length-4 vector, d3.
+// CHECK-LABEL: func.func @gather_negative_index
+// CHECK-SAME: %[[DATA:.*]]: tensor<8xf32>, %[[D0:.*]]: i64, %[[D1:.*]]: i64, %[[D2:.*]]: i64, %[[D3:.*]]: i64
+// CHECK-NOT: hip.readback_scalar
+// CHECK: arith.select %{{.*}}, %{{.*}}, %[[D3]] : i64
+// CHECK: tensor.reshape
+// CHECK-NOT: hip.readback_scalar
+// CHECK: return
+func.func @gather_negative_index(%data: tensor<8xf32>, %d0: i64, %d1: i64, %d2: i64, %d3: i64) -> tensor<?xf32> {
+  %base = tensor.from_elements %d0, %d1, %d2, %d3 : tensor<4xi64>
+  %indices = "onnx.Constant"() {value = dense<-1> : tensor<1xi64>} : () -> tensor<1xi64>
+  %shape = "onnx.Gather"(%base, %indices) {axis = 0 : si64} : (tensor<4xi64>, tensor<1xi64>) -> tensor<1xi64>
+  %result = "onnx.Reshape"(%data, %shape) : (tensor<8xf32>, tensor<1xi64>) -> tensor<?xf32>
+  return %result : tensor<?xf32>
+}
+
+// Axis -1 on a rank-1 shape vector is the same axis as 0.
+// CHECK-LABEL: func.func @gather_negative_axis
+// CHECK-SAME: %[[DATA:.*]]: tensor<8xf32>, %[[D0:.*]]: i64, %[[D1:.*]]: i64, %[[D2:.*]]: i64, %[[D3:.*]]: i64
+// CHECK-NOT: hip.readback_scalar
+// CHECK: arith.select %{{.*}}, %{{.*}}, %[[D2]] : i64
+// CHECK: tensor.reshape
+// CHECK-NOT: hip.readback_scalar
+// CHECK: return
+func.func @gather_negative_axis(%data: tensor<8xf32>, %d0: i64, %d1: i64, %d2: i64, %d3: i64) -> tensor<?xf32> {
+  %base = tensor.from_elements %d0, %d1, %d2, %d3 : tensor<4xi64>
+  %indices = "onnx.Constant"() {value = dense<2> : tensor<1xi64>} : () -> tensor<1xi64>
+  %shape = "onnx.Gather"(%base, %indices) {axis = -1 : si64} : (tensor<4xi64>, tensor<1xi64>) -> tensor<1xi64>
+  %result = "onnx.Reshape"(%data, %shape) : (tensor<8xf32>, tensor<1xi64>) -> tensor<?xf32>
+  return %result : tensor<?xf32>
+}
+
+// A runtime index cannot be folded. The shape entry is read back.
+// CHECK-LABEL: func.func @gather_runtime_index
+// CHECK: hip.gather
+// CHECK: hip.readback_scalar
+// CHECK: tensor.reshape
+func.func @gather_runtime_index(%data: tensor<8xf32>, %d0: i64, %d1: i64, %d2: i64, %d3: i64, %index: tensor<1xi64>) -> tensor<?xf32> {
+  %base = tensor.from_elements %d0, %d1, %d2, %d3 : tensor<4xi64>
+  %shape = "onnx.Gather"(%base, %index) {axis = 0 : si64} : (tensor<4xi64>, tensor<1xi64>) -> tensor<1xi64>
+  %result = "onnx.Reshape"(%data, %shape) : (tensor<8xf32>, tensor<1xi64>) -> tensor<?xf32>
+  return %result : tensor<?xf32>
+}
