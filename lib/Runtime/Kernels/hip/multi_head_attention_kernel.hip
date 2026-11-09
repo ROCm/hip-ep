@@ -384,6 +384,13 @@ extern "C" int hip_mha_flash_prefill(void *stream, const void *Q,
   case 96:  return launch_mha_prefill<96>(s, q, k, v, o, B, N, sq, skv, d, max_seq, scale);
   case 112: return launch_mha_prefill<112>(s, q, k, v, o, B, N, sq, skv, d, max_seq, scale);
   case 128: return launch_mha_prefill<128>(s, q, k, v, o, B, N, sq, skv, d, max_seq, scale);
+  case 144: return launch_mha_prefill<144>(s, q, k, v, o, B, N, sq, skv, d, max_seq, scale);
+  case 160: return launch_mha_prefill<160>(s, q, k, v, o, B, N, sq, skv, d, max_seq, scale);
+  case 176: return launch_mha_prefill<176>(s, q, k, v, o, B, N, sq, skv, d, max_seq, scale);
+  case 192: return launch_mha_prefill<192>(s, q, k, v, o, B, N, sq, skv, d, max_seq, scale);
+  case 208: return launch_mha_prefill<208>(s, q, k, v, o, B, N, sq, skv, d, max_seq, scale);
+  case 224: return launch_mha_prefill<224>(s, q, k, v, o, B, N, sq, skv, d, max_seq, scale);
+  case 240: return launch_mha_prefill<240>(s, q, k, v, o, B, N, sq, skv, d, max_seq, scale);
   case 256: return launch_mha_prefill<256>(s, q, k, v, o, B, N, sq, skv, d, max_seq, scale);
   default:
     fprintf(stderr, "[hip_mha_flash_prefill] unsupported head dim d=%d (d_pad=%d)\n",

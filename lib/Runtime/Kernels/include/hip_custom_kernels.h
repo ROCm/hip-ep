@@ -4040,6 +4040,11 @@ HIP_KERNEL_API int hip_sparse_attention_indexer(
  * Supported hip_dtypes: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
  * HIP_DTYPE_BFLOAT16, HIP_DTYPE_INT32. All of input / weights / bias / output
  * share the dtype.
+ *
+ * `workspace` is device scratch of at least hip_conv_workspace_bytes() for the
+ * same arguments. A fp16 convolution too small to cover the device but with a
+ * long contraction splits that contraction over it; with a NULL or smaller
+ * workspace it runs unsplit, which is correct but slower.
  * Returns: 0 on success, non-zero on failure.
  */
 HIP_KERNEL_API int hip_conv(
@@ -4048,6 +4053,22 @@ HIP_KERNEL_API int hip_conv(
     const void* weights,
     const void* bias,         /* nullable */
     void* output,
+    int hip_dtype,
+    int spatial_rank,
+    int64_t N, int64_t Cin, int64_t Cout,
+    int64_t in_d0, int64_t in_d1, int64_t in_d2,
+    int64_t out_d0, int64_t out_d1, int64_t out_d2,
+    int64_t k0, int64_t k1, int64_t k2,
+    int64_t s0, int64_t s1, int64_t s2,
+    int64_t p0, int64_t p1, int64_t p2,
+    int64_t dil0, int64_t dil1, int64_t dil2,
+    int64_t group,
+    void* workspace,          /* nullable */
+    size_t workspace_bytes);
+
+/* Device scratch hip_conv wants for these arguments, in bytes; 0 when the
+ * convolution runs without any. */
+HIP_KERNEL_API size_t hip_conv_workspace_bytes(
     int hip_dtype,
     int spatial_rank,
     int64_t N, int64_t Cin, int64_t Cout,

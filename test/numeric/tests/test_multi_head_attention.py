@@ -193,3 +193,20 @@ class TestMultiHeadAttention:
         # Slightly more forgiving thresholds at hidden=4096 because the
         # softmax + Value-GEMM accumulation stretches fp16 precision.
         compare_outputs(actual, expected, atol=2e-2, rtol=2e-2, cos_threshold=0.998)
+
+    @pytest.mark.parametrize("seq_kv", [256, 77])
+    @pytest.mark.parametrize("head_dim", [40, 80, 160])
+    def test_flash_prefill_head_dims(self, model_runner, head_dim, seq_kv):
+        """Non-causal prefill on the flash kernel at the SD1.5 UNet head sizes.
+
+        40 is padded to a 48-wide tile and 160 needs its own instantiation;
+        seq_kv=77 is the text-encoder length of the UNet's cross-attention,
+        not a multiple of the kernel's key block.
+        """
+        batch, seq_q, num_heads = 2, 256, 8
+        model = _make_mha_model(batch, seq_q, seq_kv, num_heads, head_dim)
+
+        q, k, v = _qkv_inputs(batch, seq_q, seq_kv, num_heads, head_dim)
+
+        actual, expected = model_runner.run_sample(model, [q, k, v])
+        compare_outputs(actual, expected, atol=1e-2, rtol=1e-2, cos_threshold=0.999)
