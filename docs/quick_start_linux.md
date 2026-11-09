@@ -113,11 +113,11 @@ cp build/Linux/Release/libonnxruntime*.so* "$ORT_HOME/lib/"
 cd ..
 # Clone with full history: `git apply --3way` below needs the blob each PR was
 # prepared from, which lives at that PR's merge base.
-git clone --branch v0.17.0 https://github.com/microsoft/onnxruntime-genai.git
+git clone --branch v0.19.0 https://github.com/microsoft/onnxruntime-genai.git
 cd onnxruntime-genai
 git submodule update --init --recursive
 
-for pr in 2685 2691; do
+for pr in 2875; do
   curl -fsSL "https://github.com/microsoft/onnxruntime-genai/pull/${pr}.diff" \
     -o "/tmp/oga-${pr}.diff"
   git apply --whitespace=nowarn --3way --exclude='test/*' "/tmp/oga-${pr}.diff"
@@ -131,7 +131,7 @@ python3 build.py --config Release --ort_home "$ORT_HOME" --no_telemetry \
   --build_wheel --skip_tests --skip_examples --parallel
 ```
 
-The wheel lands under `build/Linux/Release/wheel/onnxruntime_genai-0.17.0-cp310-cp310-linux_x86_64.whl`.
+The wheel lands under `build/Linux/Release/wheel/onnxruntime_genai-0.19.0-cp310-cp310-linux_x86_64.whl`.
 
 **Install `model_benchmark`:**
 
@@ -177,12 +177,13 @@ to match OGA's auto-discovery convention. This happens only in Linux CI
 packaging, not in a local build. Do it manually if building locally:
 
 ($WORKSPACE is the workspace you used to natively build hip-ep itself
-(see "Native" above). It is the dir containing install/ and therock-dist/.)
+(see "Native" above). It is the dir containing install/ and build/. Use your
+own path for THEROCK_DIST if you passed `--therock_dist`.)
 
 ```bash
 export WORKSPACE=/path/to/your/hip-ep/workspace
 export ROOT="$WORKSPACE/install"
-export THEROCK_DIST="$WORKSPACE/therock-dist"
+export THEROCK_DIST="$WORKSPACE/build/hip-ep/_therock"
 export LD_LIBRARY_PATH="$ROOT/lib:$THEROCK_DIST/lib"
 export LIBRARY_PATH="$ROOT/lib:$THEROCK_DIST/lib"
 export PATH="$ROOT/bin:$PATH"
@@ -305,7 +306,7 @@ export ROOT="$WORKSPACE/install"            # built from source
 # the EP `.so` under `$ROOT/lib`. The EP `.so` is built with
 # `RPATH=$ORIGIN`, so LlvmIrJit's `dlopen` of the matching variant
 # resolves through the loader without needing it on `LD_LIBRARY_PATH`.
-export THEROCK_DIST="$WORKSPACE/therock-dist"
+export THEROCK_DIST="$WORKSPACE/build/hip-ep/_therock"
 export LD_LIBRARY_PATH="$ROOT/lib:$THEROCK_DIST/lib"
 export LIBRARY_PATH="$ROOT/lib:$THEROCK_DIST/lib"
 # clang/lld for the per-model DLL link (the prebuilt package ships it in
@@ -414,7 +415,7 @@ decode token generation). Prebuilt package includes it.
 
 The EP is selected by the model's `genai_config.json` `provider_options` and
 auto-discovered next to the OGA runtime lib -- do NOT pass `--ep_library`
-(upstream `model_benchmark` rejects it). With the upstream OGA (v0.17.0)
+(upstream `model_benchmark` rejects it). With the upstream OGA (v0.19.0)
 the EP is the AMD GPU umbrella (`provider_options [{ "AMDGPU": {"profile": "hip"} }]`);
 the prebuilt package bundles the umbrella libs.
 

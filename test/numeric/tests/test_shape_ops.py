@@ -21,7 +21,7 @@ data dtype set is:
     Expand    : f16, f32, i32, i64
     Pad       : f16, f32, i32, i64       (modes: constant, reflect, edge, wrap)
     GatherND  : f16, f32, i32, i64       (indices: int64 only)
-    Slice     : f16, f32, i32, i64       (starts/ends/axes/steps: int64 only)
+    Slice     : f16, f32, i32, i64       (starts/ends/axes/steps: int32 or int64)
     ScatterND : f16, f32, i32, i64       (indices: int64 only;
                                           reductions: none, add, mul, min, max)
 """
@@ -280,6 +280,38 @@ class TestPad:
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=0)
 
+    def test_pad_empty_output(self, model_runner):
+        """An empty input with no padding returns the same shaped empty."""
+        shape = [0, 3]
+        model = _make_pad_model(
+            np.float32, shape, [0, 0, 0, 0], mode="constant", constant_value=2.5
+        )
+        x = np.empty(shape, dtype=np.float32)
+
+        actual, expected = model_runner.run_sample(model, [x])
+
+        assert actual[0].shape == (0, 3)
+        compare_outputs(actual, expected, atol=0)
+
+    def test_pad_empty_input_fills_output(self, model_runner):
+        """Padding [0, 3] to [2, 3] fills every element with the constant."""
+        shape = [0, 3]
+        constant = np.float32(2.5)
+        model = _make_pad_model(
+            np.float32,
+            shape,
+            [1, 0, 1, 0],
+            mode="constant",
+            constant_value=constant,
+        )
+        x = np.empty(shape, dtype=np.float32)
+
+        actual, expected = model_runner.run_sample(model, [x])
+
+        assert actual[0].shape == (2, 3)
+        np.testing.assert_array_equal(actual[0], np.full((2, 3), constant))
+        compare_outputs(actual, expected, atol=0)
+
     @pytest.mark.parametrize("mode", ["reflect", "edge", "wrap"])
     def test_pad_modes(self, model_runner, mode):
         """Cover the three non-constant Pad modes on fp16 input."""
@@ -399,6 +431,7 @@ def _make_slice_model(
     steps: list[int] | None,
     output_shape: list[int],
     constant_indices: bool,
+    index_dtype=np.int64,
 ):
     """Build a Slice model.
 
@@ -409,6 +442,7 @@ def _make_slice_model(
     runtime kernel path.
     """
     tp = np_to_onnx_type(dtype)
+    index_tp = np_to_onnx_type(index_dtype)
     X = helper.make_tensor_value_info("X", tp, list(input_shape))
 
     input_names = ["X", "starts", "ends"]
@@ -417,39 +451,35 @@ def _make_slice_model(
 
     if constant_indices:
         initializers.append(
-            numpy_helper.from_array(np.array(starts, dtype=np.int64), name="starts")
+            numpy_helper.from_array(np.array(starts, dtype=index_dtype), name="starts")
         )
         initializers.append(
-            numpy_helper.from_array(np.array(ends, dtype=np.int64), name="ends")
+            numpy_helper.from_array(np.array(ends, dtype=index_dtype), name="ends")
         )
     else:
-        starts_vi = helper.make_tensor_value_info(
-            "starts", TensorProto.INT64, [len(starts)]
-        )
-        ends_vi = helper.make_tensor_value_info("ends", TensorProto.INT64, [len(ends)])
+        starts_vi = helper.make_tensor_value_info("starts", index_tp, [len(starts)])
+        ends_vi = helper.make_tensor_value_info("ends", index_tp, [len(ends)])
         inputs_list += [starts_vi, ends_vi]
 
     if axes is not None:
         input_names.append("axes")
         if constant_indices:
             initializers.append(
-                numpy_helper.from_array(np.array(axes, dtype=np.int64), name="axes")
+                numpy_helper.from_array(np.array(axes, dtype=index_dtype), name="axes")
             )
         else:
-            axes_vi = helper.make_tensor_value_info(
-                "axes", TensorProto.INT64, [len(axes)]
-            )
+            axes_vi = helper.make_tensor_value_info("axes", index_tp, [len(axes)])
             inputs_list.append(axes_vi)
     if steps is not None:
         input_names.append("steps")
         if constant_indices:
             initializers.append(
-                numpy_helper.from_array(np.array(steps, dtype=np.int64), name="steps")
+                numpy_helper.from_array(
+                    np.array(steps, dtype=index_dtype), name="steps"
+                )
             )
         else:
-            steps_vi = helper.make_tensor_value_info(
-                "steps", TensorProto.INT64, [len(steps)]
-            )
+            steps_vi = helper.make_tensor_value_info("steps", index_tp, [len(steps)])
             inputs_list.append(steps_vi)
 
     Y = helper.make_tensor_value_info("Y", tp, list(output_shape))
@@ -575,6 +605,42 @@ class TestSlice:
             np.array(ends, dtype=np.int64),
             np.array(axes, dtype=np.int64),
             np.array(steps, dtype=np.int64),
+        ]
+        actual, expected = model_runner.run_sample(model, feeds)
+        compare_outputs(actual, expected, atol=0)
+
+    @pytest.mark.parametrize("index_dtype", [np.int32, np.int64])
+    def test_slice_negative_graph_indices(self, model_runner, index_dtype):
+        """Graph-input indices with negative bounds, axes, and steps.
+
+        Constants would be folded or widened before wrap_slice. Negative
+        INT32 values are the sign-extension case: a zero-extended -1 is not
+        a valid axis or bound.
+        """
+        # Axis -1 is the last dim (length 6). start=-1, end=-(6+1), step=-1
+        # reverses that dim. Axis -2 reverses the length-4 dim the same way.
+        shape = [4, 6]
+        starts, ends, axes, steps = [-1, -1], [-5, -7], [-2, -1], [-1, -1]
+        out_shape = [4, 6]
+        model, _ = _make_slice_model(
+            np.float32,
+            shape,
+            starts,
+            ends,
+            axes,
+            steps,
+            out_shape,
+            constant_indices=False,
+            index_dtype=index_dtype,
+        )
+        rng = np.random.default_rng(505)
+        x = rng.uniform(-2.0, 2.0, shape).astype(np.float32)
+        feeds = [
+            x,
+            np.array(starts, dtype=index_dtype),
+            np.array(ends, dtype=index_dtype),
+            np.array(axes, dtype=index_dtype),
+            np.array(steps, dtype=index_dtype),
         ]
         actual, expected = model_runner.run_sample(model, feeds)
         compare_outputs(actual, expected, atol=0)

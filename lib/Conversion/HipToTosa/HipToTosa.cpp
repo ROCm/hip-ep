@@ -428,13 +428,16 @@ struct MatMulConverter final : public OpConversionPattern<hip::MatmulOp> {
     // dims differs, so they cannot be spelled as one case.
     int64_t batch = 1;
     int64_t m = aShape[aShape.size() - (transA ? 1 : 2)];
-    if (bType.getRank() == 2) {
-      // B is the same matrix for every batch element, so flattening A's
-      // leading dims into M leaves the arithmetic untouched and avoids
-      // broadcasting B's batch up to A's:
+    bool bHasOnlyUnitBatchDims = llvm::all_of(
+        bShape.drop_back(2), [](int64_t dimension) { return dimension == 1; });
+    if (bHasOnlyUnitBatchDims) {
+      // B is the same matrix for every batch element when it is unbatched or
+      // has only unit batch dimensions. Flattening A's leading dims into M
+      // leaves the arithmetic untouched and avoids broadcasting B's batch up
+      // to A's:
       //
       //   A[.., M, K] -> [1, prod(..)*M, K]
-      //   B[K, N]     -> [1, K, N]
+      //   B[1,..,1,K,N] -> [1, K, N]
       //   matmul      -> [1, prod(..)*M, N]
       //   result      -> [.., M, N]   (original result shape)
       for (int64_t d : aShape.drop_back(2))
@@ -1741,6 +1744,32 @@ struct SignConverter final : public OpConversionPattern<SignOp> {
   }
 };
 
+// rocMLIR's rock-tosa-to-elementwise lowers these tosa.custom names; a plain
+// tosa.cast float->int is illegal there.
+constexpr StringLiteral kRockCustomOpDomain = "rocmlir";
+constexpr StringLiteral kRockUnsignedCast = "unsigned_cast";
+constexpr StringLiteral kRockFpToIntCast = "fp_to_int_cast";
+
+Value emitTosaCast(ConversionPatternRewriter &rewriter, Location loc,
+                   Value input, Type resElemType) {
+  auto inType = cast<RankedTensorType>(input.getType());
+  Type inElem = inType.getElementType();
+  auto outType = RankedTensorType::get(inType.getShape(), resElemType);
+  if (inElem == resElemType)
+    return input;
+  if (inElem.isUnsignedInteger() || resElemType.isUnsignedInteger()) {
+    return tosa::CustomOp::create(rewriter, loc, outType, kRockUnsignedCast,
+                                  kRockCustomOpDomain, "", input)
+        .getResult(0);
+  }
+  if (isa<FloatType>(inElem) && isa<IntegerType>(resElemType)) {
+    return tosa::CustomOp::create(rewriter, loc, outType, kRockFpToIntCast,
+                                  kRockCustomOpDomain, "", input)
+        .getResult(0);
+  }
+  return tosa::CastOp::create(rewriter, loc, outType, input);
+}
+
 // hip.where is ternary (cond, x, y). tosa.select is the 1-1 mapping; it cannot
 // use BinaryConverter because the predicate is i1 while the result is not.
 // EqualizeRanks is pairwise, so the three operands are equalized the same way
@@ -1768,10 +1797,35 @@ struct WhereConverter final : public OpConversionPattern<WhereOp> {
       return rewriter.notifyMatchFailure(op, "operand ranks not equalizable");
 
     auto condType = dyn_cast<RankedTensorType>(cond.getType());
-    if (!condType || !condType.getElementType().isInteger(1) ||
-        !isTosaBroadcastableShape(condType, resultType))
+    if (!condType || !isTosaBroadcastableShape(condType, resultType))
       return rewriter.notifyMatchFailure(
-          op, "condition is not a tosa-broadcastable i1 tensor");
+          op, "condition is not a tosa-broadcastable tensor");
+    if (condType.getElementType().isUnsignedInteger(8) ||
+        condType.getElementType().isSignlessInteger(8)) {
+      // ONNX BOOL arrives from MorphiZen as ui8. FuseROCMlir rewrites only
+      // Where-condition kernel arguments to signless i8, preserving the
+      // one-byte 0/1 storage while making rocMLIR arithmetic legal. Convert
+      // either representation to TOSA's i1 predicate by comparing with zero
+      // and inverting the result. A narrowing cast would not mean "nonzero".
+      // Inversion is xor with true because RockTosaToElementwise lowers
+      // tosa.bitwise_xor and has no tosa.bitwise_not pattern.
+      Value zero = tosa::ConstOp::create(
+          rewriter, loc, condType,
+          DenseElementsAttr::get(
+              condType, rewriter.getIntegerAttr(condType.getElementType(), 0)));
+      auto predicateType =
+          RankedTensorType::get(condType.getShape(), rewriter.getI1Type());
+      Value isZero =
+          tosa::EqualOp::create(rewriter, loc, predicateType, cond, zero);
+      Value ones = tosa::ConstOp::create(
+          rewriter, loc, predicateType,
+          DenseElementsAttr::get(predicateType, rewriter.getBoolAttr(true)));
+      cond = tosa::BitwiseXorOp::create(rewriter, loc, predicateType, isZero,
+                                        ones);
+      condType = predicateType;
+    }
+    if (!condType.getElementType().isInteger(1))
+      return rewriter.notifyMatchFailure(op, "condition is not an i1 tensor");
     if (!isTosaCompatibleOperand(x, resultType) ||
         !isTosaCompatibleOperand(y, resultType))
       return rewriter.notifyMatchFailure(op, "operands not tosa-broadcastable");
@@ -2243,34 +2297,9 @@ struct ReduceL2Converter final : public OpConversionPattern<ReduceL2Op> {
   }
 };
 
-// rocMLIR's rock-tosa-to-elementwise lowers these tosa.custom names; a plain
-// tosa.cast float->int is illegal there.
-constexpr StringLiteral kRockCustomOpDomain = "rocmlir";
-constexpr StringLiteral kRockUnsignedCast = "unsigned_cast";
-constexpr StringLiteral kRockFpToIntCast = "fp_to_int_cast";
 constexpr int64_t kPoolAverage = 0;
 constexpr int64_t kPoolMax = 1;
 constexpr int64_t kPoolLp = 2;
-
-Value emitTosaCast(ConversionPatternRewriter &rewriter, Location loc,
-                   Value input, Type resElemType) {
-  auto inType = cast<RankedTensorType>(input.getType());
-  Type inElem = inType.getElementType();
-  auto outType = RankedTensorType::get(inType.getShape(), resElemType);
-  if (inElem == resElemType)
-    return input;
-  if (inElem.isUnsignedInteger() || resElemType.isUnsignedInteger()) {
-    return tosa::CustomOp::create(rewriter, loc, outType, kRockUnsignedCast,
-                                  kRockCustomOpDomain, "", input)
-        .getResult(0);
-  }
-  if (isa<FloatType>(inElem) && isa<IntegerType>(resElemType)) {
-    return tosa::CustomOp::create(rewriter, loc, outType, kRockFpToIntCast,
-                                  kRockCustomOpDomain, "", input)
-        .getResult(0);
-  }
-  return tosa::CastOp::create(rewriter, loc, outType, input);
-}
 
 Value emitTosaMul(ConversionPatternRewriter &rewriter, Location loc, Value lhs,
                   Value rhs, RankedTensorType resultType) {
@@ -6697,6 +6726,12 @@ struct GqaConverter final : public OpConversionPattern<GqaOp> {
     if (!yType || !yType.hasStaticShape() || !pkType ||
         !pkType.hasStaticShape() || !pvType || !pvType.hasStaticShape())
       return rewriter.notifyMatchFailure(op, "expected static ranked tensors");
+    auto kbTy = adaptor.getKeyBias()
+                    ? dyn_cast<RankedTensorType>(adaptor.getKeyBias().getType())
+                    : RankedTensorType();
+    if (adaptor.getKeyBias() &&
+        (!kbTy || !kbTy.hasStaticShape() || kbTy.getRank() != 2))
+      return rewriter.notifyMatchFailure(op, "key_bias must be static");
 
     // Dialect verify already restricts bit width to 4 or 8. INT4 is legal on
     // hip.gqa; this expansion only implements the INT8 / float cache path.
@@ -6861,6 +6896,15 @@ struct GqaConverter final : public OpConversionPattern<GqaOp> {
         failed(addAttentionBias(scores, adaptor.getAttentionBias(), qkTy, batch,
                                 numHeads, rewriter, loc, op)))
       return failure();
+    if (Value keyBias = adaptor.getKeyBias()) {
+      if (kbTy.getElementType() != attnElem)
+        keyBias = emitTosaCast(rewriter, loc, keyBias, attnElem);
+      keyBias = reshapeTo(
+          keyBias, {kbTy.getDimSize(0), 1, 1, kbTy.getDimSize(1)}, rewriter);
+      if (failed(addAttentionBias(scores, keyBias, qkTy, batch, numHeads,
+                                  rewriter, loc, op)))
+        return failure();
+    }
 
     Value kIdx = createArangeI32(rewriter, loc, seqKv);
     kIdx = reshapeTo(kIdx, {1, 1, seqKv}, rewriter);
@@ -7721,6 +7765,8 @@ std::optional<QMoEPlan> planQMoE(hip::QMoEOp op) {
     return std::nullopt;
   // router_weights overrides router_probs and skips the softmax; not modelled.
   if (op.getRouterWeights())
+    return std::nullopt;
+  if (op.getRoutingType() != "softmax")
     return std::nullopt;
   if (op.getExpertWeightBits() != 4)
     return std::nullopt;

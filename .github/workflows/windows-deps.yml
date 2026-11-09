@@ -40,11 +40,11 @@ env:
   # in cmake/deps.cmake); the commit is the llvm-install cache key.
   ONNXRUNTIME_VERSION: "1.31.0"
   ONNXRUNTIME_PR_PATCHES: ""
-  OGA_VERSION: "0.17.0"
+  OGA_VERSION: "0.19.0"
   # Space-separated microsoft/onnxruntime-genai PR numbers fetched from
   # pull/<n>.diff and applied on top of v<OGA_VERSION>. Part of the OGA cache
   # key. Remove a PR once it lands in the pinned OGA release.
-  OGA_PR_PATCHES: "2685 2691 2705 2712 2792 2801"
+  OGA_PR_PATCHES: "2875"
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
   AMDGPU_EP_REF: "f3dccce2a142567da050da1032617fb39db4086a"
   # Space-separated onnxruntime/onnxruntime-ep-amdgpu PR numbers applied on top
@@ -82,7 +82,7 @@ jobs:
           RT_COMMIT=$(echo "$LINE" | cut -d';' -f3)
           echo "url=$RT_URL" >> "$GITHUB_OUTPUT"
           echo "commit=$RT_COMMIT" >> "$GITHUB_OUTPUT"
-          echo "value=dep-llvm-rocmlirtriton-${RT_COMMIT}" >> "$GITHUB_OUTPUT"
+          echo "value=windows-llvm-rocmlirtriton-${RT_COMMIT}" >> "$GITHUB_OUTPUT"
 
       - name: Probe llvm-install
         id: cache-llvm
@@ -129,7 +129,9 @@ jobs:
           # LLVM/MLIR/LLD come from the llvm-project subtree vendored inside
           # rocmlirTriton (external/llvm-project); a shallow clone of the pinned
           # commit already carries it (git subtree, not a submodule). Recipe
-          # matches cmake/deps.cmake's from-source fallback.
+          # matches cmake/deps.cmake's from-source fallback; the install holds
+          # only LLVM_DISTRIBUTION_COMPONENTS, which also scopes the exported
+          # CMake targets so find_package does not expect the omitted tools.
           SRC="${{ runner.workspace }}/rocmlirTriton"
           git init "$SRC"
           git -C "$SRC" remote add origin "${{ steps.key.outputs.url }}"
@@ -149,9 +151,17 @@ jobs:
             -DLLVM_INCLUDE_BENCHMARKS=OFF \
             -DLLVM_BUILD_TOOLS=ON \
             -DLLVM_INSTALL_UTILS=ON \
+            -DLLVM_BUILD_LLVM_C_DYLIB=OFF \
+            -DLLVM_TOOL_LTO_BUILD=OFF \
+            -DLLVM_TOOL_REMARKS_SHLIB_BUILD=OFF \
+            -DLLVM_DISTRIBUTION_COMPONENTS="clang;clang-resource-headers;llvm-link;llvm-config;llvm-tblgen;mlir-tblgen;mlir-pdll;mlir-linalg-ods-yaml-gen;FileCheck;not;count;split-file;llvm-headers;llvm-libraries;cmake-exports;mlir-headers;mlir-libraries;mlir-cmake-exports;lld-headers;lld-libraries;lld-cmake-exports" \
             -DCMAKE_C_COMPILER_LAUNCHER=sccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
-          cmake --build "${{ runner.workspace }}/build-llvm" --target install
+          cmake --build "${{ runner.workspace }}/build-llvm" --target install-distribution
+          # The clang component installs its aliases as full copies on Windows;
+          # only clang.exe is invoked.
+          rm -f "${{ runner.workspace }}"/llvm-install/bin/{clang++,clang-cl,clang-cpp}.exe
+          du -sh "${{ runner.workspace }}"/llvm-install/{bin,include,lib}
 
       - name: Save llvm-install
         if: steps.cache-llvm.outputs.cache-hit != 'true'

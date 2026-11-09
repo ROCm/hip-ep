@@ -20,12 +20,12 @@ compile option (`artifact_format` / `CompilationOptions.output_mode`):
 
 **LLVM IR (default, production).**
 - `hip-compiler` emits OS-portable `.bc` into the [EPContext](https://onnxruntime.ai/docs/execution-providers/EP-Context-Design.html) tar via `morphizen::FileSystem` (see [design/compilation-options.md](design/compilation-options.md)). The bitcode is emitted with empty triple and empty datalayout.
-- `onnxruntime_morphizen_ep.dll` JITs that bitcode in-process at session creation via `LlvmIrJit::create` (`backend-mlir-compiler/custom-op-mlir/src/LlvmIrJit.cpp`). The JIT stamps the host triple/datalayout onto both the per-model module and an embedded per-OS `runtime.bc`, then `addIRModule`s them into one ORC LLJIT JITDylib over a shared `LLVMContext`.
+- `hipgpu.dll` JITs that bitcode in-process at session creation via `LlvmIrJit::create` (`backend-mlir-compiler/custom-op-mlir/src/LlvmIrJit.cpp`). The JIT stamps the host triple/datalayout onto both the per-model module and an embedded per-OS `runtime.bc`, then `addIRModule`s them into one ORC LLJIT JITDylib over a shared `LLVMContext`.
 - At inference time the EP holds function pointers obtained via `LlvmIrJit::lookup_raw` and calls them per `Compute()`. No LLVM machinery runs on that hot path.
 
 **Native DLL (opt-in, benchmarking/dev).**
 - `hip-compiler` merges the embedded `runtime.bc` at producer time (`LLVMBackend::linkRuntimeModule`), emits a host object (`compileToObjectFile`, PIC), and links a per-OS `.dll`/`.so` via `DLLLinker` (in-process `lld-link` COFF on Windows; `clang++ -shared -fuse-ld=lld` subprocess on Linux), linking the per-arch `custom_kernels_<arch>` import lib + ROCm import libs.
-- `onnxruntime_morphizen_ep.dll` writes the artifact bytes to a temp file and loads it via `morphizen::Plugin` (`LoadLibraryW` / `dlopen`), resolving the same five-symbol C ABI through `get_method` (`GetProcAddress` / `dlsym`). The temp file is deleted on session teardown.
+- `hipgpu.dll` writes the artifact bytes to a temp file and loads it via `morphizen::Plugin` (`LoadLibraryW` / `dlopen`), resolving the same five-symbol C ABI through `get_method` (`GetProcAddress` / `dlsym`). The temp file is deleted on session teardown.
 - The EP picks the loader from the `artifact_format` field in the EPContext metadata (`mlir_metadata::Metadata`); the compiler always records it, and an empty/unknown value is fatal.
 - Native support is a build-time option, `HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS`, default `OFF`. When it is off, `DLLLinker` and in-process `lld` are not linked, and `artifact_format=NATIVE` throws `std::runtime_error` at session setup (the same exception is thrown when loading an EPContext recorded as `NATIVE`). Enable it with `-DHIPDNN_EP_ENABLE_NATIVE_ARTIFACTS=ON`.
 
@@ -45,7 +45,7 @@ Per-model machine code generated on the user's machine cannot be signed by AMD. 
 - `LoadLibrary("model.dll")` from disk: fails the policy directly.
 - `MemoryModule` (Windows) / `memfd_create` + `dlopen` (Linux) of a per-model image embedded in the EPContext: bypasses the OS loader's signature check, which *is* the policy violation, not a workaround for it.
 
-The IR/JIT path side-steps the policy entirely. The only DLL the OS loader maps is `onnxruntime_morphizen_ep.dll` (signed once, by AMD). Per-model bitcode is data; LLVM ORC allocates an executable code page inside the EP DLL's address space via its own memory manager and emits codegen output into it. No `LoadLibrary`, no `dlopen`, no per-model file on disk.
+The IR/JIT path side-steps the policy entirely. The only DLL the OS loader maps is `hipgpu.dll` (signed once, by AMD). Per-model bitcode is data; LLVM ORC allocates an executable code page inside the EP DLL's address space via its own memory manager and emits codegen output into it. No `LoadLibrary`, no `dlopen`, no per-model file on disk.
 
 This is the constraint that closes the design. The other two reasons below would not, by themselves, be enough.
 

@@ -901,7 +901,7 @@ static void initialize_mlir_api() {
   the_mlir_instance_of_morphizen_ort_api.node_attributes_delete =
       [](morphizen::NodeAttributes *p) -> void {
     if (p) {
-      // reinterpret_cast<mlir::Operation*>(p);
+      reinterpret_cast<mlir::Operation *>(p)->erase();
     }
   };
 

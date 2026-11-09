@@ -353,6 +353,56 @@ def Hip_LoopOp : Hip_Op<"loop",
   let hasVerifier = 1;
 }
 
+def Hip_ScanOp : Hip_Op<"scan",
+    [AttrSizedOperandSegments,
+     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+     DeclareOpInterfaceMethods<DestinationStyleOpInterface,
+                               ["getDpsInitsMutable"]>,
+     DeclareOpInterfaceMethods<InferTypeOpInterface,
+                               ["inferReturnTypes"]>,
+     DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "Outlined-body ONNX Scan";
+  let description = [{
+    Executes an outlined Scan body once for every slice of the scan inputs.
+    The first `$num_state_variables` init operands are loop-carried state
+    buffers; the remaining inits are the stacked scan-output buffers.
+    After bufferization, `$state_scratch` contains one caller-owned temporary
+    per state variable. These temporaries keep delayed state writeback from
+    aliasing either the state inputs or the caller's other pooled buffers.
+
+    This initial implementation accepts forward scans on axis zero. The
+    outlining pass validates the ONNX axis/direction attributes before
+    creating this op.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Variadic<Hip_TensorOrMemRef>:$scan_inputs,
+    Variadic<AnyType>:$captures,
+    Variadic<Hip_TensorOrMemRef>:$state_scratch,
+    Variadic<Hip_TensorOrMemRef>:$inits,
+    FlatSymbolRefAttr:$body_func,
+    I32Attr:$num_state_variables,
+    I32Attr:$num_scan_inputs,
+    I32Attr:$num_scan_outputs
+  );
+
+  let results = (outs Variadic<AnyRankedTensor>:$outputs);
+
+  let assemblyFormat = [{
+    `(` $ctx `)`
+    `scan_inputs` `(` $scan_inputs `:` type($scan_inputs) `)`
+    ( `captures` `(` $captures^ `:` type($captures) `)` )?
+    ( `state_scratch` `(` $state_scratch^ `:` type($state_scratch) `)` )?
+    `outs` `(` $inits `:` type($inits) `)`
+    ( `->` `(` type($outputs)^ `)` )?
+    `body` $body_func
+    attr-dict
+  }];
+
+  let hasVerifier = 1;
+}
+
 def Hip_IfOp : Hip_Op<"if",
     [AttrSizedOperandSegments,
      DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
@@ -954,6 +1004,16 @@ def Hip_QMoEOp : Hip_DpsOp_WithInfer<"qmoe", "Output", [AttrSizedOperandSegments
       fc1/fc2/fc3_zero_points: per-block zero points (optional)
       router_weights: alternative aggregation weights (optional, ONNX v1.25+, takes precedence over router_probs)
 
+    Routing (`routing_type`):
+      "softmax" (default): experts are the top-k of softmax(router_probs);
+        weights are those probabilities (or router_weights when present),
+        renormalized over k when normalize_routing_weights=1.
+      "sigmoid_bias": router_probs holds fp32 router logits. With
+        s = sigmoid(router_probs), experts are the top-k of
+        s + correction_bias (ties to the lower index), and the weights are
+        s / sum_k(s) * routed_scaling_factor (no sum when
+        normalize_routing_weights=0). router_weights must be absent.
+
     Uses destination-passing style: output buffer is provided as argument.
 
     Example:
@@ -987,6 +1047,7 @@ def Hip_QMoEOp : Hip_DpsOp_WithInfer<"qmoe", "Output", [AttrSizedOperandSegments
     Optional<Hip_TensorOrMemRef>:$fc2_zero_points,        // fc2 dequant zero points
     Optional<Hip_TensorOrMemRef>:$fc3_zero_points,        // fc3 dequant zero points
     Optional<Hip_TensorOrMemRef>:$router_weights,         // [num_tokens, num_experts] alternative routing weights (ONNX v1.25+)
+    Optional<Hip_TensorOrMemRef>:$correction_bias,        // [num_experts] fp32, sigmoid_bias routing only
     Hip_TensorOrMemRef:$output,                 // DPS init [batch, seq, hidden]
     I64Attr:$expert_weight_bits,
     I64Attr:$k,
@@ -997,8 +1058,11 @@ def Hip_QMoEOp : Hip_DpsOp_WithInfer<"qmoe", "Output", [AttrSizedOperandSegments
     F32Attr:$activation_alpha,
     F32Attr:$activation_beta,
     F32Attr:$swiglu_limit,
-    StrAttr:$activation_type
+    StrAttr:$activation_type,
+    DefaultValuedStrAttr<StrAttr, "softmax">:$routing_type,
+    DefaultValuedAttr<F32Attr, "1.0f">:$routed_scaling_factor
   );
+  let hasVerifier = 1;
 
   let assemblyFormat = [{
     `(` $handle `)` `ins` `(`
@@ -1018,6 +1082,7 @@ def Hip_QMoEOp : Hip_DpsOp_WithInfer<"qmoe", "Output", [AttrSizedOperandSegments
     (`fc2_zero_points` `(` $fc2_zero_points^ `:` type($fc2_zero_points) `)`)?
     (`fc3_zero_points` `(` $fc3_zero_points^ `:` type($fc3_zero_points) `)`)?
     (`router_weights` `(` $router_weights^ `:` type($router_weights) `)`)?
+    (`correction_bias` `(` $correction_bias^ `:` type($correction_bias) `)`)?
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
@@ -2866,7 +2931,8 @@ def Hip_SwigluOp : Hip_DpsOp_AutoReify<"swiglu"> {
 
     The operands and output must have identical shapes; this operation does
     not perform broadcasting. The fused runtime kernel supports f16, f32,
-    bf16, and f64.
+    bf16, and f64. With promote_activation, f16 inputs and output use f32
+    sigmoid and multiply intermediates; only the final result rounds to f16.
 
     Example:
     ```mlir
@@ -2880,7 +2946,8 @@ def Hip_SwigluOp : Hip_DpsOp_AutoReify<"swiglu"> {
     Hip_ContextType:$ctx,
     Hip_TensorOrMemRef:$gate,
     Hip_TensorOrMemRef:$up,
-    Hip_TensorOrMemRef:$output
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<BoolAttr, "false">:$promote_activation
   );
 
   let assemblyFormat = [{
@@ -4095,6 +4162,12 @@ def Hip_GqaOp : Hip_DpsOp_AutoReify<"gqa", [AttrSizedOperandSegments, OpStateOpI
     Optional<Hip_TensorOrMemRef>:$k_scale,        // Broadcastable to present_key shape
     Optional<Hip_TensorOrMemRef>:$v_scale,        // Broadcastable to present_value shape
 
+    // HIP extension (not in the MS spec): an additive fp16 bias per key,
+    // [batch, total_seq_len], added to every query row's scores on top of the
+    // causal and window masks. It carries a key-padding mask in a form the
+    // fused flash kernels apply directly, which a full attention_bias is not.
+    Optional<Hip_TensorOrMemRef>:$key_bias,
+
     // === DPS-style output buffers ===
     Hip_TensorOrMemRef:$output,        // 3D (batch, seq_len, hidden_size)
     Hip_TensorOrMemRef:$present_key,   // 4D BNSH format
@@ -4124,7 +4197,13 @@ def Hip_GqaOp : Hip_DpsOp_AutoReify<"gqa", [AttrSizedOperandSegments, OpStateOpI
     // Whisper / bidirectional-attention enabler: when true, the causal mask
     // step in the runtime is skipped. Default false preserves all existing
     // Llama / gpt-oss callers' behaviour.
-    DefaultValuedAttr<BoolAttr, "false">:$no_causal
+    DefaultValuedAttr<BoolAttr, "false">:$no_causal,
+
+    // HIP extension: every seqlens_k entry is total_seq_len - 1. A converter
+    // that broadcasts one host-computed length to [batch] on the device sets
+    // it, so HIP-to-LLVM can still forward the host-written total_seq_len and
+    // the runtime skips its seqlens_k readback.
+    UnitAttr:$uniform_seqlens_k
   );
 
   let assemblyFormat = [{
@@ -4157,6 +4236,7 @@ def Hip_GqaOp : Hip_DpsOp_AutoReify<"gqa", [AttrSizedOperandSegments, OpStateOpI
         ( `,` type($k_scale)^ )?
         ( `,` type($v_scale)^ )?
     `)`
+    ( `key_bias` `(` $key_bias^ `:` type($key_bias) `)` )?
     `outs` `(`
         $output `,` $present_key `,` $present_value
         ( `,` $output_qk^ )?
@@ -5405,6 +5485,60 @@ def Hip_NonZeroOp : Hip_DpsOp_AutoReify<"nonzero"> {
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
     `outs` `(` $y `,` $count `:` type($y) `,` type($count) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_NonMaxSuppressionOp : Hip_DpsOp_AutoReify<"non_max_suppression"> {
+  let summary = "Greedy box selection (ONNX NonMaxSuppression)";
+  let description = [{
+    Implements ONNX NonMaxSuppression (opset 11+). `boxes` is `[B, S, 4]`
+    f32, `scores` is `[B, C, S]` f32. The three scalar operands are the
+    ONNX `max_output_boxes_per_class` (i64), `iou_threshold` (f32) and
+    `score_threshold` (f32); `has_score_threshold` is false when the ONNX
+    node omitted the last one, in which case its operand is ignored.
+
+    For every (batch, class) the op keeps boxes in descending score order
+    whose IoU with each already kept box is at most `iou_threshold`, up to
+    `max_output_boxes_per_class`. `selected` is `[N, 3]` i64 of
+    `(batch, class, box)` triples. N is data-dependent: the destination is
+    over-allocated to `B * C * S` rows and the true count is written to the
+    device i32 scalar `count`, which the converter reads back with
+    `hip.readback_dim` to slice `selected` to `[N, 3]`.
+
+    `center_point_box` is 0 for `[y1, x1, y2, x2]` corners and 1 for
+    `[x_center, y_center, width, height]`.
+
+    Example:
+    ```mlir
+    hip.non_max_suppression(%ctx)
+        ins(%boxes, %scores, %max, %iou, %score :
+            memref<1x?x4xf32, 1>, memref<1x1x?xf32, 1>, memref<i64, 1>,
+            memref<f32, 1>, memref<f32, 1>)
+        outs(%selected, %count : memref<?x3xi64, 1>, memref<i32, 1>)
+        {center_point_box = 0 : i64, has_score_threshold = true}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$boxes,
+    Hip_TensorOrMemRef:$scores,
+    Hip_TensorOrMemRef:$max_output_boxes_per_class,
+    Hip_TensorOrMemRef:$iou_threshold,
+    Hip_TensorOrMemRef:$score_threshold,
+    Hip_TensorOrMemRef:$selected,
+    Hip_TensorOrMemRef:$count,
+    I64Attr:$center_point_box,
+    BoolAttr:$has_score_threshold
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $boxes `,` $scores `,` $max_output_boxes_per_class
+    `,` $iou_threshold `,` $score_threshold `:` type($boxes) `,`
+    type($scores) `,` type($max_output_boxes_per_class) `,`
+    type($iou_threshold) `,` type($score_threshold) `)`
+    `outs` `(` $selected `,` $count `:` type($selected) `,` type($count) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
 }
