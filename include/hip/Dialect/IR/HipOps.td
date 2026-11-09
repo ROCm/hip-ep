@@ -3335,11 +3335,7 @@ def Hip_NotOp : Hip_DpsOp_AutoReifyInfer<"not", "Y"> {
   }];
 }
 
-def Hip_IsInfOp : Hip_DpsOp<"isinf", /*traits=*/[],
-                            /*outsAccessor=*/"Y",
-                            /*autoReify=*/1,
-                            /*autoInfer=*/1,
-                            /*declareInfer=*/1> {
+def Hip_IsInfOp : Hip_DpsOp_AutoReifyInfer<"isinf", "Y"> {
   let summary = "Element-wise infinity test: y = isinf(x)";
   let description = [{
     Maps each element to true when it is an infinity of a detected sign,
