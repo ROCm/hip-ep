@@ -334,8 +334,13 @@ def DecomposeConvTransposePass
     The per-residue tap selection, spatial flip, and channel swap apply only
     to the filter, so they are constant-folded into fresh `hip.constant`s
     rather than emitted as ops -- TOSA has no strided slice to lower a tap
-    stride to. Reassembly is one strided `tensor.insert_slice` per residue,
-    which bufferizes to a `memref.subview` plus a copy.
+    stride to. When every residue shares a kernel shape and padding, their
+    filters are stacked on the output-channel axis into one convolution whose
+    result is viewed as [N, S0, S1, M, Ht0, Ht1] and transposed to
+    [N, M, Ht0, S0, Ht1, S1] (DepthToSpace); `hip-fuse-rocmlir-anchor` folds
+    that transpose into the convolution's store. Residues whose tap counts differ stay on one
+    strided `tensor.insert_slice` each, which bufferizes to a
+    `memref.subview` plus a copy.
 
     Rank-4 inputs must be statically shaped. A rank-3 input is expanded to
     rank 4 with a unit height so dynamic batch and width stay legal; the
