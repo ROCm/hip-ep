@@ -388,7 +388,7 @@ bool compilePerfConfig(StringRef rockModule, StringRef arch,
   if (!parsed)
     return false;
   ModuleOp parsedModule = *parsed;
-  if (!rock::tuningSetStr(parsedModule, perfConfig))
+  if (!perfConfig.empty() && !rock::tuningSetStr(parsedModule, perfConfig))
     return false;
   return compileRocMlirBackend(parsedModule, arch, perfConfig, out);
 }
@@ -852,6 +852,22 @@ bool RocMlirAutotuner::Impl::autotuneKernel(ModuleOp module,
   }
   ensureDialectsLoaded();
 
+  // An elementwise kernel has no tuning space or perfConfig, so there is
+  // nothing to search or cache: it compiles once with an empty perfConfig.
+  if (isRocMlirElementwiseKernelModule(module)) {
+    if (deferCacheHits) {
+      DeferredCacheHit hit;
+      hit.kernelName = kernelName.str();
+      hit.rockModule = std::move(rockModule);
+      cacheHits.push_back(std::move(hit));
+      return true;
+    }
+    const auto compileStart = std::chrono::steady_clock::now();
+    bool ok = compilePerfConfig(rockModule, arch, /*perfConfig=*/"", out);
+    times.perfConfigCompileMs += millisecondsSince(compileStart);
+    return ok;
+  }
+
   // Look up before building the search space. A known winner is compiled in
   // the second pool. A problem already queued in this compile waits for that
   // same pool once the search has been benchmarked. A later compile failure
@@ -1065,6 +1081,10 @@ bool RocMlirAutotuner::Impl::compileDeferredCacheHits(
       byKernel[hit.kernelName] = std::move(hit.kernel);
       continue;
     }
+    // An elementwise kernel has no perfConfig to search; its kernel is left
+    // without a binary and goes back to the hip ops.
+    if (hit.perfConfig.empty())
+      continue;
     llvm::errs() << "warning: cached perfConfig failed to compile for '"
                  << hit.kernelName << "'; searching the "
                  << autotuneSpaceName(options.space) << " space\n";
