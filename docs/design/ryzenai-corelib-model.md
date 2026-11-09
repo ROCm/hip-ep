@@ -159,25 +159,28 @@ embedding as a separate model, so the decoder hip-ep sees takes
 | Model | Run through hip-ep |
 |---|---|
 | Qwen3-4B-Instruct-2507 (`qwen3`) | yes, measured below |
-| Phi-4-mini-instruct (`phi4mini`, `amd/phi-4-mini-instruct-oga-dml`) | taken by CoreLib; capacity 4096 from ONNX |
+| Phi-4-mini-instruct (`phi4mini`, `amd/phi-4-mini-instruct-oga-dml`) | yes, measured below; CoreLib holds 4096 positions from ONNX |
 | Gemma 4, Qwen3.6 | not yet tried |
 
 ## Measured
 
-AIE4 machine (gfx1170 GPU), CoreLib 0.66, Qwen3-4B-Instruct-2507's
-onnxruntime-genai export; ONNX Runtime 1.31, onnxruntime-genai 0.19 and the AMD
+AIE4 machine (gfx1170 GPU), CoreLib 0.66; ONNX Runtime 1.31, onnxruntime-genai 0.19 and the AMD
 GPU umbrella EP as in [quick_start.md](../quick_start.md); `model_benchmark -l
 128 -g 128 -r 3 -w 1` (128-token prompt, 128 tokens generated, 3 iterations
 after 1 warmup):
 
-| | CoreLib model (NPU) | GPU (hip-ep) |
-|---|---|---|
-| Prompt processing | 1298 tokens/s (stddev 2.4 ms) | 914 tokens/s (stddev 0.4 ms) |
-| Token generation | 29.5 tokens/s (stddev 0.8 ms) | 39.6 tokens/s (stddev 1.8 ms) |
-| Model creation | 1.1 s | 10.9 s |
-| Dedicated GPU memory | 280 MB | 3.4 GB |
+| | Qwen3-4B, CoreLib model (NPU) | Qwen3-4B, GPU (hip-ep) | Phi-4-mini, CoreLib model (NPU) | Phi-4-mini, GPU (hip-ep) |
+|---|---|---|---|---|
+| Prompt processing | 1298 tokens/s | 914 tokens/s | 1460 tokens/s | 460 tokens/s |
+| Token generation | 29.5 tokens/s | 39.6 tokens/s | 33.4 tokens/s | 44.3 tokens/s |
+| Model creation | 1.1 s | 10.9 s | 1.0 s | 8.5 s |
+| Dedicated GPU memory | 280 MB | 3.4 GB | 291 MB | 3.7 GB |
 
-The CoreLib session's report counted 639 forwards on the NPU: 4 prefills
+Qwen3 is Qwen3-4B-Instruct-2507's onnxruntime-genai export; Phi-4-mini is
+`amd/phi-4-mini-instruct-oga-dml` (revision `e751fb68`, the export CoreLib's
+`docs/phi4mini.md` names).
+
+For each model the CoreLib session's report counted 639 forwards on the NPU: 4 prefills
 (warmup and iterations) and 635 single-row calls, including the ones
 `model_benchmark` makes to generate its prompt.
 
