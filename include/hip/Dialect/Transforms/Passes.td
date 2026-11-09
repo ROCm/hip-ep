@@ -177,6 +177,25 @@ def OptimizeMemRefsPass : Pass<"hip-optimize-memrefs", "mlir::func::FuncOp"> {
   ];
 }
 
+def HoistPointwiseOverViewsPass
+    : Pass<"hip-hoist-pointwise-over-views", "mlir::func::FuncOp"> {
+  let summary = "Move pointwise ops above the views that follow an anchor";
+  let description = [{
+    A pointwise op that HIP-to-TOSA converts, whose other inputs are constant
+    scalars, maps each element of its one tensor input on its own, so it
+    commutes with ops that only move elements. When that input is a chain of
+    single-use element-move ops (reshapes, transposes, slices) over the
+    single-use result of a gemm or convolution anchor, the op is rebuilt on
+    the anchor's result and the chain is replayed after it. The anchor fusion
+    then takes the op into the kernel's epilogue instead of running it as a
+    kernel of its own behind a view it cannot absorb, such as the crop after
+    a decomposed ConvTranspose. The op then also computes the elements that
+    the chain drops, so the anchor's result may have at most 50% more
+    elements than the op's input.
+  }];
+  let dependentDialects = ["mlir::tensor::TensorDialect"];
+}
+
 def RocMlirPrepareQuantPass
     : Pass<"hip-rocmlir-prepare-quant", "mlir::func::FuncOp"> {
   let summary = "Prepare the quantize trees of main_graph for rocMLIR kernels";
