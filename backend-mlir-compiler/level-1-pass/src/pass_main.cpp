@@ -20,7 +20,6 @@
 #include <fstream>
 #include <glog/logging.h>
 #include <limits>
-#include <regex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -366,20 +365,45 @@ static bool is_genai_decoder(Graph &graph,
   return mask && past && logits && present;
 }
 
-// The context onnxruntime-genai runs the model at (search.max_length in the
-// genai_config.json beside it), or 0 for CoreLib's own.
-static int64_t genai_max_length(const std::filesystem::path &model) {
+// What the genai_config.json beside the model says: the context
+// onnxruntime-genai runs it at (search.max_length, 0 for CoreLib's own) and
+// its model type (model.type, e.g. "qwen3"), empty when absent.
+struct GenaiConfig {
+  int64_t max_length = 0;
+  std::string model_type;
+};
+
+static GenaiConfig read_genai_config(const std::filesystem::path &model) {
+  GenaiConfig out;
   std::ifstream f(model.parent_path() / "genai_config.json");
   if (!f)
-    return 0;
+    return out;
   std::stringstream ss;
   ss << f.rdbuf();
-  const std::string text = ss.str();
-  static const std::regex kMaxLength(R"re("max_length"\s*:\s*(\d+))re");
-  std::smatch m;
-  if (std::regex_search(text, m, kMaxLength))
-    return std::stoll(m[1].str());
-  return 0;
+  google::protobuf::Struct config;
+  google::protobuf::util::JsonParseOptions options;
+  options.ignore_unknown_fields = true;
+  if (!google::protobuf::util::JsonStringToMessage(ss.str(), &config, options)
+           .ok())
+    return out;
+  auto object = [](const google::protobuf::Struct &s,
+                   const char *key) -> const google::protobuf::Struct * {
+    auto it = s.fields().find(key);
+    return it != s.fields().end() && it->second.has_struct_value()
+               ? &it->second.struct_value()
+               : nullptr;
+  };
+  if (const auto *search = object(config, "search")) {
+    auto it = search->fields().find("max_length");
+    if (it != search->fields().end() && it->second.has_number_value())
+      out.max_length = int64_t(it->second.number_value());
+  }
+  if (const auto *m = object(config, "model")) {
+    auto it = m->fields().find("type");
+    if (it != m->fields().end() && it->second.has_string_value())
+      out.model_type = it->second.string_value();
+  }
+  return out;
 }
 
 // Hands the whole graph to a CoreLib model when one takes it: fuses it under
@@ -398,7 +422,10 @@ static bool try_corelib_model(IPass &self, Graph &graph) {
                     "model); compiling it for the GPU\n");
     return false;
   }
-  const int64_t max_len = genai_max_length(model);
+  const GenaiConfig genai = read_genai_config(model);
+  const int64_t max_len = genai.max_length;
+  // A hint, not a filter: the model onnxruntime-genai names is tried first.
+  sig.model_type = genai.model_type;
   std::string why;
   auto session = hipdnn_ep::corelib::create_model_session("", model.string(),
                                                           max_len, sig, &why);

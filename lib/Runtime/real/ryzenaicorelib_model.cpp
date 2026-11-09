@@ -462,8 +462,19 @@ std::shared_ptr<ModelSession> create_model_session(const std::string &arch,
     *why = "the graph's logits have no static width to match a model by";
     return nullptr;
   }
-  const std::vector<std::string> names =
+  std::vector<std::string> names =
       arch.empty() ? model_names(*api) : std::vector<std::string>{arch};
+  // The model the export was made for goes first: a model offered a file it
+  // was not exported for should refuse it, but need not do so cheaply (or at
+  // all safely).
+  if (arch.empty() && !graph.model_type.empty()) {
+    std::string hint = graph.model_type;
+    std::transform(hint.begin(), hint.end(), hint.begin(),
+                   [](unsigned char c) { return char(std::tolower(c)); });
+    auto it = std::find(names.begin(), names.end(), hint);
+    if (it != names.end())
+      std::rotate(names.begin(), it, it + 1);
+  }
   if (names.empty()) {
     *why = "corelib ships no model libraries beside it (" + api->dir.string() +
            "; RYZENAICORELIB_MODELS names built-in ones)";
