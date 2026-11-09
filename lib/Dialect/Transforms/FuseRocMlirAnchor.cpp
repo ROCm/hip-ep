@@ -960,6 +960,8 @@ private:
   // cannot store a result that only transposes a kernel argument (through
   // reshapes) next to other results; such a module stays on the host.
   bool outlinesAlone(RocMlirElementwiseOp module) const {
+    if (!standaloneElementwise)
+      return false;
     Block &body = module.getBody().front();
     int launches = 0;
     for (Operation &op : body.without_terminator()) {
