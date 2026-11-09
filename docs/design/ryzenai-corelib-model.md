@@ -122,7 +122,10 @@ they are in GPU memory; CoreLib itself takes host buffers.
 So the contract is onnxruntime-genai generation, not full ONNX semantics: a
 caller reading every row's logits or the KV tensors gets zeros. The session's
 capacity is `search.max_length` from that `genai_config.json`,
-else CoreLib's own. The runtime side is `lib/Runtime/corelib_model.h`
+else CoreLib's own. When the model holds fewer positions than `max_length`
+asks for (configs often ask for the base model's whole context), the
+session holds the model's own instead, with a `[corelib] model: holding the
+model's own context ...` line; a generation past it fails on that forward. The runtime side is `lib/Runtime/corelib_model.h`
 (`real/ryzenaicorelib_model.cpp`, `mock/ryzenaicorelib_model_stub.cpp`).
 
 ### onnxruntime-genai and device-only memory
@@ -156,7 +159,8 @@ embedding as a separate model, so the decoder hip-ep sees takes
 | Model | Run through hip-ep |
 |---|---|
 | Qwen3-4B-Instruct-2507 (`qwen3`) | yes, measured below |
-| Phi-4-mini, Gemma 4, Qwen3.6 | not yet tried |
+| Phi-4-mini-instruct (`phi4mini`, `amd/phi-4-mini-instruct-oga-dml`) | taken by CoreLib; capacity 4096 from ONNX |
+| Gemma 4, Qwen3.6 | not yet tried |
 
 ## Measured
 
