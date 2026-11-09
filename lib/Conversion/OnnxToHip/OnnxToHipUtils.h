@@ -385,6 +385,12 @@ readbackShapeEntryToHostOrExtract(mlir::PatternRewriter &rewriter,
   return readbackShapeEntryToHost(rewriter, loc, *ctx, shape, idx);
 }
 
+/// Element `index` of a small 1-D shape tensor, traced through its
+/// construction (constants, from_elements, slices, constant-index gathers)
+/// without reading device data. Returns an attribute for a compile-time
+/// entry, the host scalar it was built from, or nullopt.
+std::optional<OpFoldResult> findHostShapeEntry(Value shape, int64_t index);
+
 // Pattern population functions (one per operator file)
 void populateMatMulConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
@@ -690,6 +696,14 @@ void populatePackBroadcastTo4DPatterns(RewritePatternSet &patterns,
 /// AttentionWindowFold.cpp.
 void populateAttentionWindowFoldPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
+
+/// Pre-lowering pattern set: fold a sigmoid + correction-bias router built
+/// outside a com.microsoft QMoE (TopK, GatherElements, ReduceSum and two
+/// ScatterElements feeding router_probs / router_weights) into
+/// `hip.qmoe {routing_type = "sigmoid_bias"}` over the fp32 logits. Must run
+/// before `convertComputeOps` rewrites the chain. See QMoEConversion.cpp.
+void populateQMoESigmoidRoutingFoldPatterns(RewritePatternSet &patterns,
+                                            MLIRContext *ctx);
 
 /// Pre-lowering pattern set: collapse ORT's inlined `FastGelu` primitive
 /// chain (Pow / Mul / Sum / Tanh) back into a single

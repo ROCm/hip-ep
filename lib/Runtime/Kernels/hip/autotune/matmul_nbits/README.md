@@ -60,8 +60,21 @@ they already keep separate tune caches at runtime — they need separate rows fo
 the same reason.
 
 Row stride is part of the prefill key because a padded buffer has a different
-winner (measured: cfg11 -> cfg3 at N=5120 K=4096), so the two layouts must not
-share a row.
+winner (measured: cfg11 -> cfg3 at N=5120 K=4096), so layouts must not share a
+row. Each pad is its own category, matched exactly: `Arrival` (dense) and
+`Padded` (arrival + 128 B, the per-call repack). The lookup takes the pad from
+the request's row pitch (a pitch of K/2 is dense); a pad with no category skips
+the point groups and goes to the phase's fallback, so a lookup never uses a
+point measured at another pitch. The sweep driver logs the pad of each
+`prefill_padrow` measurement (`pad=`), and `update_lut.py` maps it to the
+category.
+
+`--out` names the JSON that `update_lut.py build` and `merge` write and
+`compile` reads; `--fb-out` names the binary, which defaults to `lut/<arch>.fb`
+only for the default JSON, so a scratch build never overwrites the shipped
+table. Every step checks the table it writes or reads (`check_table`) and
+rejects one the loader would read differently, for example a config index out
+of range or an extended entry the kernel library does not compile.
 
 ## Why the row stores geometry, not a config index
 
@@ -77,6 +90,18 @@ this shape, makes the probe **fall through to the next tier** instead of
 returning something unlaunchable. Stale table, degraded answer, never a wrong
 one.
 
+A config that names an extended WMMA entry (`WMMA_EXT_CONFIGS`: the
+`GemmFp16U4ImplX` pipeline options, `variant` bit 7 selecting the CU-mode
+build) is listed in `extended_configs` with that entry's `variant`; it matches
+only extended entries, and an unlisted config only the original ones. A table
+that lists none also keeps the extended entries out of the runtime sweep, so a
+device without measurements searches exactly the original table. The
+extended entries run only on gfx1151, where they were measured: on any other
+device the kernel library refuses them whatever the table says. To measure
+them, run the sweep driver with `--extended` (`update_lut.py all
+--sweep-args --extended`) on gfx1151; its winners then carry the entry and
+variant, and `build` lists them in `extended_configs`.
+
 `kernel_abi` (`"matmul_nbits-v1"`) is the coarser guard: bump it when a config's *meaning*
 changes rather than its existence, and the whole table is rejected.
 
@@ -86,6 +111,15 @@ Incremental LUT refresh uses candidate-only fast ranking and direct import.
 Kernel acceptance uses checked pinned-config UT confirmation on priority,
 boundary and production-screen suspect shapes. The existing sweep commands
 also retain the older autotune-log regeneration path.
+
+The import packet formats below retain their legacy process/block protocol.
+They do not qualify `ut-adaptive-v2` measurements. Native UT ranking uses the
+owning timer's `screen` preset; selected priority, boundary and suspect paths
+use `confirm`, with at least 10,000 valid GPU ms and ten complete calls in five
+groups per cell. Its value is the median of complete-call group means. Keep
+source, executable, runtime, wrapper, zero-point representation and config
+bindings with the raw log/CSV; retain slow valid groups and all confirmation
+epochs. Equal tile dimensions do not equate ordinary and extended configs.
 
 ```powershell
 # 1. shape inventory (only when the model set changes). extract_shapes.py does
@@ -118,7 +152,7 @@ The `measure`/`build` path reads the in-kernel autotuner's debug log. Those
 timings do not provide the checked symmetric pinned-UT evidence required to
 accept a kernel optimization or its LUT winners.
 
-### Import accepted pinned-config UT measurements
+### Import accepted legacy pinned-config UT measurements
 
 Use the existing FP16/U4 UT to confirm selected configs on priority model keys,
 class-boundary sentinels and production-screen suspects. Each selected config
@@ -237,11 +271,11 @@ complete host resolver diff and on-device consumption remain delivery gates.
 
 ### Measure the product binary
 
-The gfx1151 arrival-layout K8-XOR route is restricted to fused WT4x4/BK32
-tiles with at least 32 workgroups per CU and 64 K stages. Smaller warp
-classes, shorter K loops and padded weight rows retain LDS padding. A route
-change invalidates only the affected config cells; retain other measurements
-when device payload, resources and launch geometry still match.
+The ordinary fused WMMA path uses padded LDS rows. Extended entries use
+the pipeline named by `extended_configs`; their `variant` is part of the
+config identity even when their tile geometry matches an ordinary entry.
+Revalidate affected measurements after a source, wrapper, config or compiler
+change, preserving complete build and launch identities.
 
 The table ranks configs by their speed in the binary that is measured, so that
 binary has to be the one that ships: the SDK pinned in `cmake/deps.txt`, the

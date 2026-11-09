@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 #include "../hipdnn_ep_runtime.h"
+#include "../op_profile.h"
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
 
@@ -59,6 +60,13 @@ static std::unordered_set<void *> &deviceAllocs() {
 }
 
 extern "C" void *hip_device_malloc(int64_t size) {
+  if (size == 0)
+    return nullptr;
+  if (size < 0) {
+    fprintf(stderr, "hip_device_malloc(%lld) failed: negative size\n",
+            (long long)size);
+    return nullptr;
+  }
   void *ptr = nullptr;
   hipError_t err = hipMalloc(&ptr, size);
   if (err != hipSuccess) {
@@ -151,6 +159,7 @@ extern "C" void memrefCopy(int64_t elemSize, UnrankedMemRefHeader *src,
                            UnrankedMemRefHeader *dst) {
   if (!src || !dst || !src->descPtr || !dst->descPtr)
     return;
+  OP_ROCTX_SCOPE("memref_copy");
   auto *sd = static_cast<StridedMemRefDescriptor *>(src->descPtr);
   auto *dd = static_cast<StridedMemRefDescriptor *>(dst->descPtr);
   int64_t rank = src->rank;

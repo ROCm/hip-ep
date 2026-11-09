@@ -267,6 +267,7 @@ populateLoweringPatterns(LLVMTypeConverter &typeConverter,
   populateSparseAttentionIndexerLoweringPatterns(typeConverter, patterns);
   populateGraphLoweringPatterns(typeConverter, patterns);
   populateLoopLoweringPatterns(typeConverter, patterns);
+  populateScanLoweringPatterns(typeConverter, patterns);
   populateIfLoweringPatterns(typeConverter, patterns);
   populateCausalConvWithStateLoweringPatterns(typeConverter, patterns);
   populateNGramHashMappingLoweringPatterns(typeConverter, patterns);

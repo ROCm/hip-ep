@@ -34,7 +34,9 @@ static bool acceptWmma(void*, const WmmaAnswer&) { return true; }
 static bool acceptGemv(void*, const GemvAnswer&) { return true; }
 
 // Use the same geometry legality as the dense U4 entry when reviewing a
-// production nearest match. Generic table dumps retain their existing policy.
+// production nearest match. This GPU-free query checks geometry only; the
+// product additionally checks device support and maxGridSize at runtime.
+// Generic table dumps retain their existing policy.
 static bool acceptProductionWmma(void* context, const WmmaAnswer& answer) {
   const Request& q = *static_cast<const Request*>(context);
   if (answer.bm <= 0 || answer.bn <= 0 || answer.wt_m <= 0 || answer.wt_n <= 0 || answer.bk <= 0)
@@ -44,7 +46,7 @@ static bool acceptProductionWmma(void* context, const WmmaAnswer& answer) {
   if (threads <= 0 || (answer.bn * answer.bk) % threads) return false;
   const int nibbles = answer.bn * answer.bk / threads;
   return nibbles > 0 && q.group_size % nibbles == 0 && q.k % answer.bk == 0
-      && (answer.bn >= 64 || q.n <= 2 * answer.bn)
+      && (answer.ext || answer.bn >= 64 || q.n <= 2 * answer.bn)
       && (q.b_row_bytes == 0 || answer.fused);
 }
 
@@ -182,10 +184,10 @@ int main(int argc, char** argv) {
           // The source is deliberately not printed: adding measurements moves
           // which point answers, and that is allowed. Only the config matters.
           if (p == Phase::Prefill)
-            std::printf("P m=%d n=%d k=%d gs=%d zp=%d -> %d %d %d %d %d %d %d\n",
+            std::printf("P m=%d n=%d k=%d gs=%d zp=%d -> %d %d %d %d %d %d %d ext=%d variant=%d\n",
                         m, r.n, r.k, r.gs, r.zp, res.wmma.bm, res.wmma.bn,
                         res.wmma.swizzle_n, res.wmma.wt_m, res.wmma.wt_n,
-                        res.wmma.bk, int(res.wmma.fused));
+                        res.wmma.bk, int(res.wmma.fused), int(res.wmma.ext), res.wmma.variant);
           else
             std::printf("%s m=%d n=%d k=%d gs=%d zp=%d -> %d %d\n",
                         p == Phase::Decode ? "D" : "Q", m, r.n, r.k, r.gs,

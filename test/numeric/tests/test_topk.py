@@ -11,6 +11,9 @@ buffer at run time (real/top_k.cpp does a D2H copy of k), so the GPU kernel is
 exercised. `largest` and `sorted` are both covered.
 
 Outputs are compared bit-exact against the ORT CPU reference (atol=0).
+K above 256 runs on the GPU for full contiguous last-axis sorts and on the host
+otherwise; both are covered. The GPU full-sort NaN case checks the documented
+GPU policy directly because ONNX does not define NaN ordering.
 """
 
 from __future__ import annotations
@@ -73,6 +76,20 @@ class TestTopK:
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=0)
 
+    def test_topk_large_full_sort_f16(self, model_runner):
+        """f16 values are represented exactly by the f32 workspace keys."""
+        cols = 1024
+        model = _make_topk_model(
+            [1, cols], cols, axis=1, largest=0, sorted_=1, dtype=np.float16
+        )
+        x = (
+            np.random.default_rng(605)
+            .permutation(cols)
+            .astype(np.float16)[np.newaxis, :]
+        )
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0)
+
     @pytest.mark.parametrize("largest", [1, 0])
     @pytest.mark.parametrize(
         "rows,cols,k",
@@ -132,3 +149,40 @@ class TestTopK:
 
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=0)
+
+    @pytest.mark.parametrize("largest", [1, 0])
+    @pytest.mark.parametrize("cols", [256, 257, 1024, 9460])
+    def test_topk_large_full_sort(self, model_runner, cols, largest):
+        """Full sorts cover the K=256/257 dispatch boundary and large K."""
+        x_shape = [2, cols]
+        model = _make_topk_model(x_shape, cols, axis=1, largest=largest, sorted_=1)
+        rng = np.random.default_rng(604)
+        x = _distinct_rows(rng, x_shape[0], x_shape[1])
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0)
+
+    @pytest.mark.parametrize("largest", [1, 0])
+    def test_topk_large_full_sort_nan_policy(self, model_runner, largest):
+        """Finite values precede NaNs; ties, including NaNs, use lower indices."""
+        cols = 512
+        model = _make_topk_model([1, cols], cols, axis=1, largest=largest, sorted_=1)
+        x = (np.arange(cols, dtype=np.float32) % 17)[np.newaxis, :]
+        x[0, [3, 100, 400]] = np.nan
+        actual, _ = model_runner.run_sample(model, [x])
+
+        expected_indices = sorted(
+            range(cols),
+            key=lambda i: (
+                bool(np.isnan(x[0, i])),
+                0.0
+                if np.isnan(x[0, i])
+                else (-float(x[0, i]) if largest else float(x[0, i])),
+                i,
+            ),
+        )
+        np.testing.assert_array_equal(
+            actual[1][0], np.asarray(expected_indices, dtype=np.int64)
+        )
+        finite_count = cols - 3
+        assert not np.isnan(actual[0][0, :finite_count]).any()
+        assert np.isnan(actual[0][0, finite_count:]).all()

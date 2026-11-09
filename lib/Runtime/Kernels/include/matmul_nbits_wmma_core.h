@@ -90,8 +90,7 @@ template <int BM_T, int BN_T, int WT_M, int WT_N, bool USE_ZEROS,
           bool BOUNDS_CHECK = false, bool FUSED_DQ = true,
           int BK_IN = BM_T / (WT_M * WT_N), bool ZEROS_U8 = false,
           bool ADD_BIAS = false, bool EXPLICIT_TILE = false,
-          bool CHECK_K_TAIL = false, bool RUNTIME_OPTIONAL = false,
-          bool K8_XOR = false>
+          bool CHECK_K_TAIL = false, bool RUNTIME_OPTIONAL = false>
 __device__ __forceinline__
 void GemmFp16U4Impl(
     int M, int N, int K,
@@ -137,16 +136,7 @@ void GemmFp16U4Impl(
      * BK_T+8 stays conflict-free for every BK_T the config table uses: the dword
      * row stride is then 12, 20 or 36, and 8 consecutive lanes reading 4 dwords
      * each cover 32 distinct banks in all three cases. */
-    // BK32 may permute aligned eight-half chunks instead of padding rows.
-    // Callers opt in explicitly; grouped and other architecture callers keep
-    // the padded layout. The permutation is its own inverse.
-    static_assert(!K8_XOR || (BK_T == 32 && FUSED_DQ),
-                  "eight-half XOR requires fused BK32");
-    auto ldsColumn = [](int row, int k) __attribute__((always_inline)) {
-        if constexpr (K8_XOR) return k ^ (((row >> 1) & 3) << 3);
-        return k;
-    };
-    constexpr int PAD_K   = K8_XOR ? 0 : 8;
+    constexpr int PAD_K   = 8;
     constexpr int K_STR   = BK_T + PAD_K;
     constexpr int K_STEPS = BK_T / WMMA_TILE;
 
@@ -508,27 +498,24 @@ void GemmFp16U4Impl(
                             __builtin_bit_cast(half2v, raw[i] | kMagicPk);
                         out[i] = __builtin_bit_cast(uint32_t, (q + bias2) * scale2);
                     }
-                    *reinterpret_cast<u32x4*>(
-                    &smB[buf][b_col][ldsColumn(b_col, b_k8 + w * 8)]) = out;
+                    reinterpret_cast<u32x4*>(&smB[buf][b_col][b_k8])[w] = out;
                 }
             } else {
 #pragma unroll
                 for (int w = 0; w < B_U32; w++)
-                    *reinterpret_cast<u32x4*>(
-                    &smB[buf][b_col][ldsColumn(b_col, b_k8 + w * 8)]) = pf_bfp[w];
+                    reinterpret_cast<u32x4*>(&smB[buf][b_col][b_k8])[w] = pf_bfp[w];
             }
         } else {
             const u32x4 zero4 = {0, 0, 0, 0};
 #pragma unroll
             for (int w = 0; w < B_U32; w++)
-                *reinterpret_cast<u32x4*>(
-                    &smB[buf][b_col][ldsColumn(b_col, b_k8 + w * 8)]) = zero4;
+                reinterpret_cast<u32x4*>(&smB[buf][b_col][b_k8])[w] = zero4;
         }
 
 #pragma unroll
         for(int c = 0; c < A_NCH; c++)
         {
-            _Float16* dst = &smA[buf][a_row[c]][ldsColumn(a_row[c], a_koff[c])];
+            _Float16* dst = &smA[buf][a_row[c]][a_koff[c]];
             if constexpr (A_CH == 8)
                 *reinterpret_cast<u32x4*>(dst) = *reinterpret_cast<const u32x4*>(pf_a[c]);
             else
@@ -575,11 +562,11 @@ void GemmFp16U4Impl(
                 {
                     int moff         = (wrow * WT_M + wm) * WMMA_TILE;
                     u32x4* dst       = reinterpret_cast<u32x4*>(&a_frag[wm]);
-                    #pragma unroll
+                    const u32x4* src = reinterpret_cast<const u32x4*>(
+                        &smA[buf][moff + lane][ks * WMMA_TILE + k_off]);
+#pragma unroll
                     for(int i = 0; i < HIPDNN_WMMA_FRAG_ELEMS / 8; i++)
-                        dst[i] = *reinterpret_cast<const u32x4*>(
-                            &smA[buf][moff + lane][ldsColumn(
-                                moff + lane, ks * WMMA_TILE + k_off + i * 8)]);
+                        dst[i] = src[i];
                 }
 #pragma unroll
                 for(int wn = 0; wn < WT_N; wn++)
@@ -587,11 +574,11 @@ void GemmFp16U4Impl(
                     int noff         = (wcol * WT_N + wn) * WMMA_TILE;
                     half16 b_frag;
                     u32x4* dst       = reinterpret_cast<u32x4*>(&b_frag);
-                    #pragma unroll
+                    const u32x4* src = reinterpret_cast<const u32x4*>(
+                        &smB[buf][noff + lane][ks * WMMA_TILE + k_off]);
+#pragma unroll
                     for(int i = 0; i < HIPDNN_WMMA_FRAG_ELEMS / 8; i++)
-                        dst[i] = *reinterpret_cast<const u32x4*>(
-                            &smB[buf][noff + lane][ldsColumn(
-                                noff + lane, ks * WMMA_TILE + k_off + i * 8)]);
+                        dst[i] = src[i];
 #pragma unroll
                     for(int wm = 0; wm < WT_M; wm++)
                         acc[wm][wn] = HIPDNN_WMMA_F32_16X16X16_F16(
@@ -606,11 +593,11 @@ void GemmFp16U4Impl(
             {
                 int noff            = (wcol * WT_N + wn) * WMMA_TILE;
                 u32x4* dst          = reinterpret_cast<u32x4*>(&b_frag[wn]);
-                #pragma unroll
-                    for(int i = 0; i < HIPDNN_WMMA_FRAG_ELEMS / 8; i++)
-                        dst[i] = *reinterpret_cast<const u32x4*>(
-                            &smB[buf][noff + lane][ldsColumn(
-                                noff + lane, ks * WMMA_TILE + k_off + i * 8)]);
+                const u32x4* src    = reinterpret_cast<const u32x4*>(
+                    &smB[buf][noff + lane][ks * WMMA_TILE + k_off]);
+#pragma unroll
+                for(int i = 0; i < HIPDNN_WMMA_FRAG_ELEMS / 8; i++)
+                    dst[i] = src[i];
             }
 #pragma unroll
             for(int wm = 0; wm < WT_M; wm++)
@@ -618,11 +605,11 @@ void GemmFp16U4Impl(
                 int moff            = (wrow * WT_M + wm) * WMMA_TILE;
                 half16 a_frag;
                 u32x4* dst          = reinterpret_cast<u32x4*>(&a_frag);
-                #pragma unroll
-                    for(int i = 0; i < HIPDNN_WMMA_FRAG_ELEMS / 8; i++)
-                        dst[i] = *reinterpret_cast<const u32x4*>(
-                            &smA[buf][moff + lane][ldsColumn(
-                                moff + lane, ks * WMMA_TILE + k_off + i * 8)]);
+                const u32x4* src    = reinterpret_cast<const u32x4*>(
+                    &smA[buf][moff + lane][ks * WMMA_TILE + k_off]);
+#pragma unroll
+                for(int i = 0; i < HIPDNN_WMMA_FRAG_ELEMS / 8; i++)
+                    dst[i] = src[i];
 
 #pragma unroll
                 for(int wn = 0; wn < WT_N; wn++)

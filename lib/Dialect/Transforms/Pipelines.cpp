@@ -119,6 +119,13 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   // The rocMLIR path runs the same pass in its separate pre-fusion head.
   pm.addNestedPass<func::FuncOp>(mlir::hip::createDecomposeConvTransposePass());
 
+  // 1a*. Resolve constant-index `tensor.extract` of assembled constant
+  //      vectors (ONNX shape vectors) to the scalar they read, so 1b sees
+  //      them as constants and no host readback is left for them. Reads
+  //      inline `hip.constant` payloads, so it must precede
+  //      `hip-externalize-constants`.
+  pm.addNestedPass<func::FuncOp>(mlir::hip::createFoldConstantExtractsPass());
+
   // 1b. Refine `?` (kDynamic) dims on HIP DPS op result types using each
   //     op's `ReifyRankedShapedTypeOpInterface` impl. Placed here so the
   //     refinements propagate through bufferize and into pool / alloc
@@ -403,6 +410,7 @@ void mlir::hip::buildOnnxToHipPipelineHead(OpPassManager &pm,
   // every Python perf test under `test/python/` on a Loop-heavy
   // model end-to-end, then delete this TODO.
   pm.addPass(createOnnxLoopOutlinePass());
+  pm.addPass(createOnnxScanOutlinePass());
   pm.addPass(createOnnxIfOutlinePass());
 
   // Rank-establish unranked tensors inside outlined loop bodies (e.g. a
@@ -412,7 +420,7 @@ void mlir::hip::buildOnnxToHipPipelineHead(OpPassManager &pm,
   // func signature and later bufferization.
   pm.addPass(createInferLoopBodyShapesPass());
 
-  // Plugin slot: AfterOnnxLoopOutline. Operate on outlined ONNX loop
+  // Plugin slot: AfterOnnxLoopOutline. Operate on outlined ONNX control-flow
   // bodies before the main lowering runs.
   addPluginPassesForSlot(pm,
                          ::hip::compiler::PipelineSlot::AfterOnnxLoopOutline);
