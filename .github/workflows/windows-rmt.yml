@@ -23,6 +23,11 @@ permissions:
 
 jobs:
   prebuild:
+    # Same group as Windows Build's prebuild. See that workflow: a queued
+    # inner llvm job is cancelled if this run joins the deps group first.
+    concurrency:
+      group: windows-deps-${{ github.ref }}
+      cancel-in-progress: false
     uses: ./.github/workflows/windows-deps.yml
 
   # Job-level continue-on-error keeps the run green but still marks this

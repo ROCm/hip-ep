@@ -17,6 +17,13 @@ permissions:
 
 jobs:
   prebuild:
+    # Serialize with Windows RMT Build. The inner deps jobs share a group, and
+    # GitHub cancels a still-queued job when the sibling run joins that group.
+    # Holding the lock here means the second prebuild does not start until the
+    # first has finished and filled the cache.
+    concurrency:
+      group: windows-deps-${{ github.ref }}
+      cancel-in-progress: false
     uses: ./.github/workflows/windows-deps.yml
 
   build_real:
