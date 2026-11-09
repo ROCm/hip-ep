@@ -192,7 +192,8 @@ reshapes in `main_graph` share one shape constant.
 
 After the plans outline, each module that is still in `main_graph` becomes a
 `rock.kernel` function with the `rock.elementwise` attribute, behind
-`hip.rocmlir`, when these conditions are true:
+`hip.rocmlir`, when `standalone-elementwise` is on and these conditions are
+true:
 
 - Every module op, other than a `tensor.empty` and a static reshape, is a
   pointwise op that `convert-hip-to-tosa` lowers, a TOSA-lowerable per-tensor
@@ -202,6 +203,19 @@ After the plans outline, each module that is still in `main_graph` becomes a
 - A module with more than one result has no result that is a transpose of a
   module input, through static reshapes only. rocMLIR cannot store such a
   result next to the other results of the kernel.
+
+rocMLIR tiles an elementwise kernel over its flattened output, so a transpose
+that moves the innermost dimension makes one side of the kernel access memory
+with a stride. Before such a module outlines, its boundary transposes of this
+kind leave the kernel and run as HIP transposes:
+
+- a result transpose, with the static reshapes around it, that only module
+  results read; the kernel stores the value that the transpose read;
+- an input transpose, with the static reshapes before it, of a module input;
+  the kernel reads the transposed tensor.
+
+The remaining ops form the module again, and the conditions above apply once
+more. A module with no compute op left keeps its transposes.
 
 The inline scalar constants that the module reads are cloned into the kernel.
 Any other module is inlined back. The rocMLIR compile does not autotune an
@@ -263,12 +277,14 @@ the A operand of the second gemm through pointwise ops and row-only reshapes
 
 ## Options
 
-The fusion rules have no switches. The two options describe the target.
+`arch` and `gemm-gemm-accel-types` describe the target. `standalone-elementwise`
+is the only fusion switch.
 
 | Option | EP value | Effect |
 |---|---|---|
 | `arch=<gfx>` | detected | Stamps `rock.arch` on each kernel. |
 | `gemm-gemm-accel-types=<types>` | detected | The element types for the gemm-gemm gate. |
+| `standalone-elementwise=<bool>` | `true`; `false` with `HIPDNN_EP_ROCMLIR_NO_STANDALONE_ELEMENTWISE=1` | Outlines a module that no anchor takes as an elementwise kernel. |
 
 ## Tests and tools
 
