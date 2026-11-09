@@ -44,6 +44,13 @@ int hipdnn_ep_disk_constant_gather_rows(RuntimeState *state,
                                         int64_t index_bytes, int64_t num_rows,
                                         int64_t row_bytes, void *dst);
 
+// Host value of a qsa SparseAttentionIndexer's device int32
+// past_sequence_length. The first read of `ptr` in a Compute copies it to the
+// host and synchronizes `stream`; later reads, including the paired
+// DynamicSparseAttention's, hit sai_past_len_cached_*.
+bool hipdnn_ep_read_past_sequence_length(RuntimeState *state, void *stream,
+                                         const void *ptr, int64_t *out);
+
 // Internal runtime state structure
 // This struct is opaque to generated code (passed as void*)
 struct RuntimeState {
