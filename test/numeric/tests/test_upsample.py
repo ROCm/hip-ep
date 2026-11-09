@@ -116,6 +116,31 @@ def _make_resize_scales_model(
     )
 
 
+def _make_resize_runtime_scales_model(
+    shape: list[int], window: int, out_shape: list[int | None]
+):
+    """Scales are Concat(constant ones, graph input), so only the window
+    scales are runtime values, as in the MaskRCNN FPN upsample."""
+    prefix = len(shape) - window
+    x_info = helper.make_tensor_value_info("X", TensorProto.FLOAT, list(shape))
+    w_info = helper.make_tensor_value_info("W", TensorProto.FLOAT, [window])
+    y_info = helper.make_tensor_value_info("Y", TensorProto.FLOAT, out_shape)
+    ones = helper.make_tensor("ones", TensorProto.FLOAT, [prefix], [1.0] * prefix)
+    nodes = [
+        helper.make_node("Concat", ["ones", "W"], ["scales"], axis=0),
+        helper.make_node(
+            "Resize",
+            ["X", "", "scales"],
+            ["Y"],
+            mode="linear",
+            coordinate_transformation_mode="half_pixel",
+        ),
+    ]
+    return make_model_from_nodes(
+        nodes, [x_info, w_info], [y_info], initializers=[ones], opset=13
+    )
+
+
 class TestUpsample:
     @pytest.mark.parametrize(
         "shape,scales,dtype",
@@ -231,6 +256,36 @@ class TestResize:
         actual, reference = model_runner.run_sample(model, [x])
         compare_outputs(actual, reference, atol=0)
         np.testing.assert_array_equal(actual[0].reshape(-1), [0, 0, 1, 1, 2, 2, 3, 3])
+
+    @pytest.mark.parametrize(
+        "out_shape",
+        [
+            pytest.param([1, 1, 4], id="static-output"),
+            pytest.param([1, 1, None], id="dynamic-output"),
+        ],
+    )
+    def test_runtime_scales_sample_with_scale(self, model_runner, out_shape):
+        # floor(3 * 1.5) = 4, so out / in = 4 / 3 would shift every sample.
+        model = _make_resize_runtime_scales_model([1, 1, 3], 1, out_shape)
+        x = np.arange(3, dtype=np.float32).reshape(1, 1, 3)
+        w = np.array([1.5], dtype=np.float32)
+        actual, reference = model_runner.run_sample(model, [x, w])
+        compare_outputs(actual, reference, atol=1e-5)
+        np.testing.assert_allclose(
+            actual[0].reshape(-1),
+            np.array([0.0, 0.5, 1.1666667, 1.8333334], np.float32),
+            atol=1e-5,
+        )
+
+    def test_runtime_scales_window_2d(self, model_runner):
+        shape = [1, 3, 7, 9]
+        model = _make_resize_runtime_scales_model(shape, 2, [1, 3, None, None])
+        rng = np.random.default_rng(302)
+        x = rng.uniform(-1.0, 1.0, shape).astype(np.float32)
+        w = np.array([1.5, 2.3], dtype=np.float32)
+        actual, reference = model_runner.run_sample(model, [x, w])
+        compare_outputs(actual, reference, atol=1e-4, rtol=1e-4)
+        assert actual[0].shape == (1, 3, 10, 20)
 
 
 class TestResizeRowKernel:
