@@ -71,14 +71,18 @@ the path before building any MLIR when:
   `past_key_values.*`; outputs `logits`, with a static vocabulary width, and
   `present.*`;
 - a CoreLib model takes the model file and fits the graph. The pass tries each
-  model library beside CoreLib, in name order, with
+  model library beside CoreLib: first the one named like `model.type` in the
+  `genai_config.json` beside the model (e.g. `qwen3`), then the rest in name
+  order, with
   `ryzenai_corelib_create_model_from_path`, which reads the file's
   initializers and refuses what it does not recognize. A model that takes the
   file must also fit: its vocabulary is the width of the graph's `logits`
   (CoreLib's test model reads any file, so this is what turns it away), and
   every input its `forward` requires (`ryzenai_corelib_model_get_method`) is a
   graph input, but for `position`, which the op derives. The first that fits
-  is used.
+  is used. `model.type` is only an ordering hint: a model offered a file it
+  was not exported for should refuse it, but CoreLib 0.66 has one that faults
+  instead, so the hint keeps the matching model ahead of the others.
 
 On success the whole graph is fused under the `CORELIBMODEL` domain, with the
 parameter `{arch, path, max_sequence_length}`, and no MLIR is compiled. The
@@ -117,7 +121,7 @@ they are in GPU memory; CoreLib itself takes host buffers.
 
 So the contract is onnxruntime-genai generation, not full ONNX semantics: a
 caller reading every row's logits or the KV tensors gets zeros. The session's
-capacity is `search.max_length` from the `genai_config.json` beside the model,
+capacity is `search.max_length` from that `genai_config.json`,
 else CoreLib's own. The runtime side is `lib/Runtime/corelib_model.h`
 (`real/ryzenaicorelib_model.cpp`, `mock/ryzenaicorelib_model_stub.cpp`).
 
