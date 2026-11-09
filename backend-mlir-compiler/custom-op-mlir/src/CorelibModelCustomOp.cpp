@@ -75,6 +75,29 @@ std::vector<int64_t> read_ints(const Ort::ConstValue &v, size_t n) {
   return out;
 }
 
+// The runtime's element type for an ONNX one, and its size; false for a type
+// no CoreLib input takes.
+bool element_type(ONNXTensorElementDataType t,
+                  hipdnn_ep::corelib::ElementType *out, size_t *bytes) {
+  using hipdnn_ep::corelib::ElementType;
+  switch (t) {
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:
+    *out = ElementType::Int32, *bytes = 4;
+    return true;
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:
+    *out = ElementType::Int64, *bytes = 8;
+    return true;
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
+    *out = ElementType::Float16, *bytes = 2;
+    return true;
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
+    *out = ElementType::Float32, *bytes = 4;
+    return true;
+  default:
+    return false;
+  }
+}
+
 } // namespace
 
 CorelibModelCustomOp::CorelibModelCustomOp(
@@ -82,11 +105,10 @@ CorelibModelCustomOp::CorelibModelCustomOp(
     const std::shared_ptr<morphizen::MetaDefProto> &meta_def,
     onnxruntime::Model *model)
     : CustomOpImp(context, meta_def, model) {
-  ids_ = find(meta_def->inputs(), "input_ids");
   mask_ = find(meta_def->inputs(), "attention_mask");
   logits_ = find(meta_def->outputs(), "logits");
-  if (ids_ < 0 || mask_ < 0 || logits_ < 0)
-    fail("the fused graph lacks input_ids, attention_mask or logits");
+  if (mask_ < 0 || logits_ < 0)
+    fail("the fused graph lacks attention_mask or logits");
   for (int o = 0; o < meta_def->outputs_size(); ++o) {
     const std::string &name = meta_def->outputs(o);
     if (name.rfind("present.", 0) != 0)
@@ -115,32 +137,59 @@ CorelibModelCustomOp::CorelibModelCustomOp(
     auto len = fields.find("max_sequence_length");
     const int64_t max_len =
         len == fields.end() ? 0 : int64_t(len->second.number_value());
+    hipdnn_ep::corelib::GraphSignature sig;
+    sig.inputs.assign(meta_def->inputs().begin(), meta_def->inputs().end());
     std::string why;
     session_ = hipdnn_ep::corelib::create_model_session(
-        text("arch"), text("path"), max_len, &why);
+        text("arch"), text("path"), max_len, sig, &why);
     if (!session_)
       fail(why);
   }
+  for (const std::string &name : hipdnn_ep::corelib::forward_inputs(*session_))
+    inputs_.emplace_back(find(meta_def->inputs(), name), name);
+  host_inputs_.resize(inputs_.size());
   logits_buf_.resize(size_t(hipdnn_ep::corelib::vocab_size(*session_)));
 }
 
 void CorelibModelCustomOp::Compute(const OrtApi * /*api*/,
                                    OrtKernelContext *context) const {
   Ort::KernelContext ctx(context);
-  Ort::ConstValue ids = ctxGetInput(ctx, ids_);
-  Ort::ConstValue mask = ctxGetInput(ctx, mask_);
-  const std::vector<int64_t> ids_shape =
-      ids.GetTensorTypeAndShapeInfo().GetShape();
-  const std::vector<int64_t> mask_shape =
-      mask.GetTensorTypeAndShapeInfo().GetShape();
-  if (ids_shape.size() != 2 || ids_shape[0] != 1 || mask_shape.size() != 2)
-    fail("only batch size 1 is supported");
-  const int64_t rows = ids_shape[1];
+
+  // The inputs forward takes, batch 1, in host memory without the batch
+  // dimension. Their first (sequence) dimension is the rows run.
+  std::vector<hipdnn_ep::corelib::HostTensor> inputs;
+  int64_t rows = 0;
+  for (size_t i = 0; i < inputs_.size(); ++i) {
+    Ort::ConstValue v = ctxGetInput(ctx, inputs_[i].first);
+    auto info = v.GetTensorTypeAndShapeInfo();
+    const std::vector<int64_t> shape = info.GetShape();
+    if (shape.size() < 2 || shape[0] != 1)
+      fail(inputs_[i].second + ": only batch size 1 is supported");
+    hipdnn_ep::corelib::HostTensor t;
+    size_t elem = 0;
+    if (!element_type(info.GetElementType(), &t.type, &elem))
+      fail(inputs_[i].second + " has an unsupported element type");
+    t.name = inputs_[i].second;
+    t.dims.assign(shape.begin() + 1, shape.end());
+    std::vector<uint8_t> &host = host_inputs_[i];
+    host.resize(info.GetElementCount() * elem);
+    copy(host.data(), v.GetTensorRawData(), host.size(),
+         on_gpu(v.GetTensorMemoryInfo()), false);
+    t.data = host.data();
+    if (rows == 0)
+      rows = shape[1];
+    inputs.push_back(std::move(t));
+  }
 
   // attention_mask spans the positions so far plus these rows. A mask holding
   // fewer (onnxruntime_perf_test's generated zeros) starts a new sequence.
   if (rows <= 0)
-    fail("input_ids is empty");
+    fail(inputs_[0].second + " is empty");
+  Ort::ConstValue mask = ctxGetInput(ctx, mask_);
+  const std::vector<int64_t> mask_shape =
+      mask.GetTensorTypeAndShapeInfo().GetShape();
+  if (mask_shape.size() != 2 || mask_shape[0] != 1)
+    fail("only batch size 1 is supported");
   int64_t total = 0;
   for (int64_t m : read_ints(mask, size_t(mask_shape[1])))
     total += m;
@@ -156,13 +205,9 @@ void CorelibModelCustomOp::Compute(const OrtApi * /*api*/,
   }
   const int64_t position = total - rows;
 
-  const std::vector<int64_t> ids_host = read_ints(ids, size_t(rows));
-  tokens_.resize(size_t(rows));
-  for (int64_t i = 0; i < rows; ++i)
-    tokens_[size_t(i)] = static_cast<int32_t>(ids_host[size_t(i)]);
   std::string why;
-  if (!hipdnn_ep::corelib::forward(*session_, tokens_.data(), size_t(rows),
-                                   position, logits_buf_.data(), &why))
+  if (!hipdnn_ep::corelib::forward(*session_, inputs, position,
+                                   logits_buf_.data(), &why))
     fail(why);
 
   // CoreLib computes the last row only, the one generation reads; the others
