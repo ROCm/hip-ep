@@ -523,6 +523,8 @@ bool CompilerDriver::runMLIRPasses(
       std::vector<std::string> accelTypes = mlir::hip::getRocMlirGemmAccelTypes(
           *module.getContext(), fuseOpts.arch);
       fuseOpts.gemmGemmAccelTypes.assign(accelTypes.begin(), accelTypes.end());
+      // HIPDNN_EP_ROCMLIR_NO_STANDALONE_ELEMENTWISE=1 runs every elementwise
+      // module that no anchor takes as HIP ops, to compare the two paths.
       fuseOpts.standaloneElementwise =
           !hip_env_is_on("HIPDNN_EP_ROCMLIR_NO_STANDALONE_ELEMENTWISE");
       // Autotuning skips the perfConfigs under which rocMLIR cannot pack an
