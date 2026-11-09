@@ -212,6 +212,11 @@ void *hipRuntimeSymbol(const char *name) {
   X(hipMalloc, hipError_t, (void **, size_t))                                  \
   X(hipFree, hipError_t, (void *))                                             \
   X(hipMemsetAsync, hipError_t, (void *, int, size_t, hipStream_t))            \
+  X(hipMemsetD8Async, hipError_t,                                              \
+    (hipDeviceptr_t, unsigned char, size_t, hipStream_t))                      \
+  X(hipMemsetD16Async, hipError_t,                                             \
+    (hipDeviceptr_t, unsigned short, size_t, hipStream_t))                     \
+  X(hipMemsetD32Async, hipError_t, (hipDeviceptr_t, int, size_t, hipStream_t)) \
   X(hipMemcpy, hipError_t, (void *, const void *, size_t, hipMemcpyKind))      \
   X(hipModuleLoadData, hipError_t, (hipModule_t *, const void *))              \
   X(hipModuleUnload, hipError_t, (hipModule_t))                                \
@@ -450,10 +455,12 @@ public:
 
   hipStream_t getStream() const { return stream; }
   std::vector<void *> &getDeviceBuffers() { return deviceBuffers; }
+  size_t getBufferBytes(size_t index) const { return bufferBytes[index]; }
 
 private:
   hipStream_t stream = nullptr;
   std::vector<void *> deviceBuffers;
+  std::vector<size_t> bufferBytes;
 };
 
 } // namespace
@@ -597,6 +604,7 @@ bool AutotuneBuffers::initialize(ModuleOp module,
       return false;
     }
     deviceBuffers.push_back(buffer);
+    bufferBytes.push_back(bytes);
     Type elementType = cast<ShapedType>(type).getElementType();
     if (!fillBenchmarkPattern(elementType, argIndex, pattern)) {
       if (hipError_t status = fns.hipMemsetAsync(buffer, 0, bytes, stream);
@@ -660,6 +668,31 @@ bool RocMlirAutotuner::Impl::launch(hipFunction_t function,
                                     AutotuneBuffers &buffers) const {
   const HipRuntime &fns = hipRuntime();
   std::vector<void *> &deviceBuffers = buffers.getDeviceBuffers();
+  // The arguments rocMLIR marks rock.prefill are filled before every launch,
+  // as at inference, so a split-K candidate is both correct and timed with
+  // its fill.
+  for (const KernelPrefill &prefill : kernel.prefills) {
+    if (prefill.argIndex < 0 ||
+        static_cast<size_t>(prefill.argIndex) >= deviceBuffers.size())
+      return false;
+    auto *device = static_cast<hipDeviceptr_t>(deviceBuffers[prefill.argIndex]);
+    size_t count =
+        buffers.getBufferBytes(prefill.argIndex) / prefill.elementBytes;
+    hipError_t status = hipErrorInvalidValue;
+    if (prefill.elementBytes == 1)
+      status = fns.hipMemsetD8Async(device,
+                                    static_cast<unsigned char>(prefill.pattern),
+                                    count, buffers.getStream());
+    else if (prefill.elementBytes == 2)
+      status = fns.hipMemsetD16Async(
+          device, static_cast<unsigned short>(prefill.pattern), count,
+          buffers.getStream());
+    else if (prefill.elementBytes == 4)
+      status = fns.hipMemsetD32Async(device, static_cast<int>(prefill.pattern),
+                                     count, buffers.getStream());
+    if (!reportError(status, "hipMemsetD*Async(prefill)"))
+      return false;
+  }
   size_t kernargSize = deviceBuffers.size() * sizeof(void *);
   void *config[] = {HIP_LAUNCH_PARAM_BUFFER_POINTER, deviceBuffers.data(),
                     HIP_LAUNCH_PARAM_BUFFER_SIZE, &kernargSize,
