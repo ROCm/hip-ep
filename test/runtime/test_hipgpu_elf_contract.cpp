@@ -6,7 +6,8 @@
 // ORT dlcloses the EP when GetProvider is missing. -z nodelete keeps the DSO
 // mapped across that close. The comgr loader pins libamd_comgr.so on its own,
 // so a dlopen/dlclose cycle cannot reproduce the spirv-expand-step abort.
-// Require DF_1_NODELETE, and check that the plugin entry points resolve.
+// Require DF_1_NODELETE, and check that the plugin and versioned device-API
+// entry points resolve.
 
 #include <dlfcn.h>
 
@@ -104,11 +105,25 @@ int main(int argc, char **argv) {
   }
 
   dlerror();
+#ifdef HIPDNN_EP_EXPECT_DEVICE_API
+  auto device_api_version = reinterpret_cast<uint32_t (*)()>(
+      dlsym(handle, "hipdnn_ep_device_api_version"));
+#endif
   if (!dlsym(handle, "CreateEpFactories") ||
       !dlsym(handle, "ReleaseEpFactory")) {
     std::cerr << "plugin entry points missing: " << dlerror() << "\n";
     return 1;
   }
+#ifdef HIPDNN_EP_EXPECT_DEVICE_API
+  if (!device_api_version || !dlsym(handle, "hipdnn_ep_copy_state_slots")) {
+    std::cerr << "device API entry points missing: " << dlerror() << "\n";
+    return 1;
+  }
+  if (device_api_version() != 1) {
+    std::cerr << "unexpected HIP EP device API version\n";
+    return 1;
+  }
+#endif
 
   dlerror();
   if (dlclose(handle) != 0) {
@@ -116,6 +131,10 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  std::cout << hipgpu << " has DF_1_NODELETE and the plugin entry points\n";
+  std::cout << hipgpu << " has DF_1_NODELETE and the plugin entry points";
+#ifdef HIPDNN_EP_EXPECT_DEVICE_API
+  std::cout << " plus device API v1";
+#endif
+  std::cout << "\n";
   return 0;
 }

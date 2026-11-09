@@ -28,6 +28,7 @@ Shape footprint observed in the chunk_opt prefill / decode models
 """
 
 import numpy as np
+import onnx
 import pytest
 from onnx import TensorProto, helper, numpy_helper
 
@@ -60,6 +61,7 @@ def _make_causal_conv_with_state_model(
     activation: str = "silu",
     with_bias: bool = True,
     dtype: np.dtype = np.float16,
+    state_window: int = 0,
 ):
     """Build a 1D CausalConvWithState ONNX model with weight/bias as
     initializers and runtime inputs for the data tensor and carry state.
@@ -71,13 +73,12 @@ def _make_causal_conv_with_state_model(
     state_len = kernel_size - 1
 
     X = helper.make_tensor_value_info("input", tp, [batch, channels, seq_len])
-    State = helper.make_tensor_value_info(
-        "past_state", tp, [batch, channels, state_len]
-    )
+    state_shape = [batch, channels, state_len]
+    if state_window > 0:
+        state_shape = [state_window, *state_shape]
+    State = helper.make_tensor_value_info("past_state", tp, state_shape)
     Y = helper.make_tensor_value_info("output", tp, [batch, channels, seq_len])
-    Present = helper.make_tensor_value_info(
-        "present_state", tp, [batch, channels, state_len]
-    )
+    Present = helper.make_tensor_value_info("present_state", tp, state_shape)
 
     # Weight / bias are realistic small magnitudes; keeping them tight
     # avoids fp16 overflow in long-S prefill cases when SiLU saturates.
@@ -100,10 +101,11 @@ def _make_causal_conv_with_state_model(
         domain="com.microsoft",
         activation=activation,
         ndim=1,
+        state_window=state_window,
     )
 
     ms_opset = helper.make_opsetid("com.microsoft", 1)
-    return make_model_from_nodes(
+    model = make_model_from_nodes(
         [node],
         [X, State],
         [Y, Present],
@@ -111,6 +113,17 @@ def _make_causal_conv_with_state_model(
         opset=17,
         extra_opsets=[ms_opset],
     )
+    # ORT 1.30 (used by the HIP EP test package) supports through IR 13.
+    model.ir_version = min(model.ir_version, 13)
+    return model
+
+
+def _run_backend(model_runner, model, feeds, name):
+    """Run only HIP EP for custom-op contracts unavailable on ORT CPU."""
+    subdir = model_runner._last_subdir or model_runner._next_subdir(name)
+    model_path = subdir / f"{name}.onnx"
+    onnx.save_model(model, model_path)
+    return model_runner.backend.run(str(model_path), feeds)
 
 
 def _make_channels_last_model(
@@ -157,7 +170,7 @@ def _make_channels_last_model(
     ]
 
     ms_opset = helper.make_opsetid("com.microsoft", 1)
-    return make_model_from_nodes(
+    model = make_model_from_nodes(
         nodes,
         [X, State],
         [Y, Present],
@@ -168,6 +181,9 @@ def _make_channels_last_model(
         opset=17,
         extra_opsets=[ms_opset],
     )
+    # ORT 1.30 (used by the HIP EP test package) supports through IR 13.
+    model.ir_version = min(model.ir_version, 13)
+    return model
 
 
 def _make_nlc_state_model(
@@ -220,7 +236,7 @@ def _make_nlc_state_model(
     )
 
     ms_opset = helper.make_opsetid("com.microsoft", 1)
-    return make_model_from_nodes(
+    model = make_model_from_nodes(
         [node],
         [X, State] if with_past else [X],
         [Y, Present],
@@ -228,12 +244,63 @@ def _make_nlc_state_model(
         opset=17,
         extra_opsets=[ms_opset],
     )
+    # ORT 1.30 (used by the HIP EP test package) supports through IR 13.
+    model.ir_version = min(model.ir_version, 13)
+    return model
 
 
 class TestCausalConvWithState:
     """SiLU is the only activation observed in chunk_opt; we additionally
     cover 'none' on a tiny shape so a regression in the activation branch
     surfaces independently of the SiLU code path."""
+
+    @pytest.mark.parametrize("seq_len", [3, 5])
+    def test_ccws_state_window(self, model_runner, seq_len):
+        """Each retained slot is the legacy carry state after that token."""
+        batch, channels, kernel_size, state_window = 2, 2, 3, 4
+        window_model = _make_causal_conv_with_state_model(
+            batch,
+            channels,
+            seq_len,
+            kernel_size,
+            activation="none",
+            dtype=np.float32,
+            state_window=state_window,
+        )
+
+        rng = np.random.default_rng(0x51A7E)
+        x = rng.standard_normal((batch, channels, seq_len)).astype(np.float32)
+        state = rng.standard_normal(
+            (state_window, batch, channels, kernel_size - 1)
+        ).astype(np.float32)
+        window_output, window_states = _run_backend(
+            model_runner, window_model, [x, state], "ccws_state_window"
+        )
+
+        expected_states = np.zeros_like(window_states)
+        legacy_output = None
+        first_retained_prefix = max(1, seq_len - state_window + 1)
+        for prefix in range(first_retained_prefix, seq_len + 1):
+            legacy_model = _make_causal_conv_with_state_model(
+                batch,
+                channels,
+                prefix,
+                kernel_size,
+                activation="none",
+                dtype=np.float32,
+            )
+            prefix_output, prefix_state = _run_backend(
+                model_runner,
+                legacy_model,
+                [x[:, :, :prefix], state[-1]],
+                f"ccws_state_window_prefix_{prefix}",
+            )
+            expected_states[state_window - seq_len + prefix - 1] = prefix_state
+            if prefix == seq_len:
+                legacy_output = prefix_output
+
+        np.testing.assert_allclose(window_output, legacy_output, atol=1e-5, rtol=1e-5)
+        np.testing.assert_allclose(window_states, expected_states, atol=1e-5, rtol=1e-5)
 
     @pytest.mark.parametrize(
         "batch,channels,seq_len,kernel_size,activation",

@@ -24,6 +24,7 @@
 // HIPDNN_EP_PERF instrumentation dependencies
 #ifdef HIPDNN_EP_LINK_HIP_HOST
 #include <hip/hip_runtime_api.h>
+extern "C" void hipdnn_ep_set_current_stream(void *stream);
 #endif
 #include <algorithm>
 #include <chrono>
@@ -867,6 +868,12 @@ void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
   // LOG(WARNING). The call is a single cached indirect dispatch, so
   // leaving it on the fast path costs ~1 ns.
   inference_state_->begin_compute();
+#ifdef HIPDNN_EP_LINK_HIP_HOST
+  // The model artifact and the provider each own a native TLS shim. Publish
+  // the artifact's session stream into the provider copy as well so external
+  // device APIs invoked between Compute calls enqueue after this forward.
+  hipdnn_ep_set_current_stream(inference_state_->get_stream_raw());
+#endif
 
   // Does everything: input marshaling, in-graph output allocation via the
   // callback, post-compute host D2H, and (when HIPDNN_EP_PERF is set) its own

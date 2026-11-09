@@ -109,6 +109,9 @@ LinearAttentionToHip::matchAndRewrite(mlir::Operation *op,
   auto scaleAttr = getFloatAttr("scale", defaultScale);
   auto chunkSizeAttr = getI64Attr("chunk_size", 0);
   auto updateRuleAttr = getStrAttr("update_rule", "gated_delta");
+  auto stateWindowAttr = getI64Attr("state_window", 0);
+  if (stateWindowAttr.getInt() < 0)
+    return rewriter.notifyMatchFailure(op, "state_window must be nonnegative");
 
   // === Check Outputs (always 2: output, present_state) ===
   size_t numResults = op->getNumResults();
@@ -151,6 +154,8 @@ LinearAttentionToHip::matchAndRewrite(mlir::Operation *op,
   attrs.push_back(rewriter.getNamedAttr("scale", scaleAttr));
   attrs.push_back(rewriter.getNamedAttr("chunk_size", chunkSizeAttr));
   attrs.push_back(rewriter.getNamedAttr("update_rule", updateRuleAttr));
+  if (stateWindowAttr.getInt() > 0)
+    attrs.push_back(rewriter.getNamedAttr("state_window", stateWindowAttr));
 
   auto state = mlir::OperationState(loc, "hip.linear_attention");
   state.addOperands(operands);

@@ -69,6 +69,7 @@ add_library(${LIB_NAME} STATIC
   src/InferenceState.cpp
   src/LlvmIrJit.cpp
   src/LoadedArtifact.cpp
+  src/DeviceApi.cpp
 )
 if(TARGET RuntimeBitcode)
   add_dependencies(${LIB_NAME} RuntimeBitcode)
@@ -115,6 +116,7 @@ target_include_directories(${LIB_NAME} PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${CMAKE_CURRENT_BINARY_DIR}/..  # For generated protobuf headers (metadata.pb.h)
   ${CMAKE_SOURCE_DIR}/include     # Shared project headers (timing.h, etc.)
+  ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/include
   ${LLVM_INCLUDE_DIRS}            # LLVM ORC headers consumed by LlvmIrJit.cpp
 )
 

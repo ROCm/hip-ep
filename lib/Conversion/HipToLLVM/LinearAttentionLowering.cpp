@@ -63,6 +63,8 @@ struct LinearAttentionOpLowering
     Value kvNumHeads = createI64Const(op.getKvNumHeads());
     Value scale = createF32Const(op.getScale().convertToFloat());
     Value chunkSize = createI64Const(op.getChunkSize());
+    int64_t stateWindowValue = op.getStateWindow();
+    Value stateWindow = createI64Const(stateWindowValue);
 
     // Convert update_rule string to integer enum:
     // "linear"=0, "gated"=1, "delta"=2, "gated_delta"=3
@@ -110,11 +112,17 @@ struct LinearAttentionOpLowering
     Value nKHeadsVal =
         LLVM::UDivOp::create(rewriter, loc, keyHiddenVal, headDimKVal);
 
-    // Derive d_v from present_state shape: [B, H_kv, d_k, d_v].
-    // present_state is always 4D per spec, so index 3 is safe.
+    // Derive d_v from present_state shape. Windowed state gains a leading W
+    // axis: [W, B, H_kv, d_k, d_v].
     auto presentStateType = cast<MemRefType>(op.getPresentState().getType());
-    Value headDimVVal = getMemRefDimSize(
-        presentStateType, 3, adaptor.getPresentState(), rewriter, loc);
+    int64_t expectedStateRank = stateWindowValue > 0 ? 5 : 4;
+    if (presentStateType.getRank() != expectedStateRank)
+      return op.emitError("present_state rank must be ")
+             << expectedStateRank << " for state_window=" << stateWindowValue;
+    int64_t headDimVIndex = stateWindowValue > 0 ? 4 : 3;
+    Value headDimVVal =
+        getMemRefDimSize(presentStateType, headDimVIndex,
+                         adaptor.getPresentState(), rewriter, loc);
 
     // Derive layout flags for the optional decay / beta tensors so the
     // runtime can pick the correct per-token stride:
@@ -169,8 +177,8 @@ struct LinearAttentionOpLowering
     //   + 2 optional-input layout flags (decay_per_key_dim, beta_per_head)
     //   + 3 scalar attrs (scale, chunk_size, update_rule)
     //   + 5 shape params (B, seq_len, dk, dv, type)
-    // = 22 parameters total.
-    SmallVector<Type, 22> paramTypes = {
+    // = 23 parameters total.
+    SmallVector<Type, 23> paramTypes = {
         ptrType, // state
         ptrType, // query
         ptrType, // key
@@ -192,7 +200,8 @@ struct LinearAttentionOpLowering
         i64Type, // seq_len
         i64Type, // dk
         i64Type, // dv
-        i64Type  // type (HIPDNN_EP_DATATYPE_FLOAT/HALF/BFLOAT16)
+        i64Type, // type (HIPDNN_EP_DATATYPE_FLOAT/HALF/BFLOAT16)
+        i64Type  // state_window
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
@@ -200,13 +209,13 @@ struct LinearAttentionOpLowering
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 22> args = {
+    SmallVector<Value, 23> args = {
         statePtr,          queryPtr,       keyPtr,     valuePtr,
         pastStatePtr,      decayPtr,       betaPtr,    outputPtr,
         presentStatePtr,   qNumHeads,      kvNumHeads, nKHeadsVal,
         decayPerKeyDimVal, betaPerHeadVal, scale,      chunkSize,
         updateRule,        batchSizeVal,   seqLenVal,  headDimKVal,
-        headDimVVal,       typeVal};
+        headDimVVal,       typeVal,        stateWindow};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 

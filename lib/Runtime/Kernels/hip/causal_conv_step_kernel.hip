@@ -874,6 +874,89 @@ hipError_t launch_prefill_nlc_any(
                                       act_silu);
 }
 
+template <typename T>
+__global__ void causal_conv_state_window_kernel(
+    const T* __restrict__ input,
+    const T* __restrict__ past_state_last,
+    T* __restrict__ present_state,
+    int batch_size,
+    int channels,
+    int seq_len,
+    int state_len,
+    int state_window,
+    bool channels_last,
+    bool state_channels_last) {
+    const int planes = batch_size * channels;
+    const int64_t total =
+        static_cast<int64_t>(state_window) * planes * state_len;
+    const int64_t index =
+        static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (index >= total)
+        return;
+
+    const int j = static_cast<int>(index % state_len);
+    const int64_t plane_slot = index / state_len;
+    const int plane = static_cast<int>(plane_slot % planes);
+    const int slot = static_cast<int>(plane_slot / planes);
+    const int b = plane / channels;
+    const int c = plane % channels;
+    const int token = slot + seq_len - state_window;
+
+    T value = from_f32<T>(0.0f);
+    if (token >= 0) {
+        const int virtual_index = token + 1 + j;
+        if (virtual_index < state_len) {
+            if (past_state_last) {
+                const int64_t past_index = state_channels_last
+                    ? (static_cast<int64_t>(b) * state_len + virtual_index) *
+                          channels + c
+                    : static_cast<int64_t>(plane) * state_len + virtual_index;
+                value = past_state_last[past_index];
+            }
+        } else {
+            const int input_index = virtual_index - state_len;
+            const int64_t input_offset = channels_last
+                ? (static_cast<int64_t>(b) * seq_len + input_index) *
+                      channels + c
+                : static_cast<int64_t>(plane) * seq_len + input_index;
+            value = input[input_offset];
+        }
+    }
+    const int64_t output_index = state_channels_last
+        ? ((static_cast<int64_t>(slot) * batch_size + b) * state_len + j) *
+              channels + c
+        : ((static_cast<int64_t>(slot) * batch_size + b) * channels + c) *
+              state_len + j;
+    present_state[output_index] = value;
+}
+
+template <typename T>
+hipError_t launch_state_window(
+    hipStream_t stream,
+    const T* input,
+    const T* past_state_last,
+    T* present_state,
+    int batch_size,
+    int channels,
+    int seq_len,
+    int state_len,
+    int state_window,
+    bool channels_last,
+    bool state_channels_last) {
+    if (state_len == 0)
+        return hipSuccess;
+    const int planes = batch_size * channels;
+    const int64_t total =
+        static_cast<int64_t>(state_window) * planes * state_len;
+    const int block = 256;
+    const int grid = static_cast<int>((total + block - 1) / block);
+    hipLaunchKernelGGL(
+        (causal_conv_state_window_kernel<T>), dim3(grid), dim3(block), 0,
+        stream, input, past_state_last, present_state, batch_size, channels,
+        seq_len, state_len, state_window, channels_last, state_channels_last);
+    return hipGetLastError();
+}
+
 } // namespace
 
 extern "C" int hip_causal_conv_step_decode(
@@ -959,6 +1042,61 @@ extern "C" int hip_causal_conv_step_decode(
         fprintf(stderr,
                 "[custom_kernels] hip_causal_conv_step_decode: launch failed "
                 "(%s)\n",
+                hipGetErrorString(err));
+        return static_cast<int>(err);
+    }
+    return 0;
+}
+
+extern "C" int hip_causal_conv_state_window(
+    void* stream,
+    const void* input,
+    const void* past_state_last,
+    void* present_state,
+    int64_t batch_size,
+    int64_t channels,
+    int64_t seq_len,
+    int64_t kernel_size,
+    int64_t state_window,
+    int64_t element_size_bytes,
+    int64_t channels_last,
+    int64_t dilation,
+    int64_t state_channels_last) {
+    if (!input || !present_state || batch_size <= 0 || channels <= 0 ||
+        seq_len <= 0 || kernel_size < 1 || state_window <= 0 ||
+        dilation < 1) {
+        fprintf(stderr,
+                "[custom_kernels] hip_causal_conv_state_window: invalid "
+                "argument\n");
+        return -1;
+    }
+
+    hipStream_t s = static_cast<hipStream_t>(stream);
+    const int64_t state_len = (kernel_size - 1) * dilation;
+    hipError_t err;
+    if (element_size_bytes == 4) {
+        err = launch_state_window<float>(
+            s, static_cast<const float*>(input),
+            static_cast<const float*>(past_state_last),
+            static_cast<float*>(present_state), static_cast<int>(batch_size),
+            static_cast<int>(channels), static_cast<int>(seq_len),
+            static_cast<int>(state_len), static_cast<int>(state_window),
+            channels_last != 0, state_channels_last != 0);
+    } else if (element_size_bytes == 2) {
+        err = launch_state_window<__half>(
+            s, static_cast<const __half*>(input),
+            static_cast<const __half*>(past_state_last),
+            static_cast<__half*>(present_state), static_cast<int>(batch_size),
+            static_cast<int>(channels), static_cast<int>(seq_len),
+            static_cast<int>(state_len), static_cast<int>(state_window),
+            channels_last != 0, state_channels_last != 0);
+    } else {
+        return -1;
+    }
+    if (err != hipSuccess) {
+        fprintf(stderr,
+                "[custom_kernels] hip_causal_conv_state_window: launch "
+                "failed (%s)\n",
                 hipGetErrorString(err));
         return static_cast<int>(err);
     }

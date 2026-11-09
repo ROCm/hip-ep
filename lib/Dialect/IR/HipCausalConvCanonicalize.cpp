@@ -179,7 +179,8 @@ struct FoldTransposePairIntoChannelsLast
         TypeRange{nlcOutputType, conv->getResult(1).getType()}, conv.getCtx(),
         nlcInput, conv.getWeight(), conv.getBias(), conv.getPastState(),
         outputInit, conv.getPresentState(), conv.getActivation(),
-        conv.getNdim(), /*channels_last=*/true);
+        conv.getNdim(), /*channels_last=*/true, conv.getDilation(),
+        conv.getStateChannelsLast(), conv.getStateWindow());
 
     rewriter.replaceOp(trailing, folded->getResult(0));
     rewriter.replaceOp(conv, {folded->getResult(0), folded->getResult(1)});
