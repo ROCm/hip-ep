@@ -684,18 +684,33 @@ static int hipmalloc_and_fixup(RuntimeState *state,
                                const mlir::hip::HipModelMetaInfo *meta,
                                size_t total_size) {
   auto t_prev = timing_now();
-  if (hipMalloc(&state->gpu_constants_blob, total_size) != hipSuccess) {
+  const hipError_t alloc_err =
+      hipMalloc(&state->gpu_constants_blob, total_size);
+  if (alloc_err != hipSuccess) {
     (void)hipGetLastError();
-    // A constants blob larger than physical RAM can still live in the page
-    // file. Managed memory is paged; a plain device alloc is not.
-    if (hipMallocManaged(&state->gpu_constants_blob, total_size,
-                         hipMemAttachGlobal) != hipSuccess) {
-      fprintf(stderr, "hipMalloc failed for constants blob (%zu bytes)\n",
-              total_size);
+    // Only device exhaustion is recoverable here: a constants blob larger than
+    // physical VRAM can still live in managed (paged) memory. Any other failure
+    // (invalid device, context error, ...) would fail the managed allocation
+    // too, so report it instead of masking it. Constants that are only gathered
+    // along axis 0 avoid this path entirely via `disk_resident`.
+    if (alloc_err != hipErrorOutOfMemory) {
+      fprintf(stderr, "hipMalloc failed for constants blob (%zu bytes): %s\n",
+              total_size, hipGetErrorString(alloc_err));
+      return 1;
+    }
+    const hipError_t managed_err = hipMallocManaged(
+        &state->gpu_constants_blob, total_size, hipMemAttachGlobal);
+    if (managed_err != hipSuccess) {
+      (void)hipGetLastError();
+      fprintf(stderr,
+              "hipMalloc and hipMallocManaged failed for constants blob "
+              "(%zu bytes): %s\n",
+              total_size, hipGetErrorString(managed_err));
       return 1;
     }
     fprintf(stderr,
-            "hipMalloc failed; constants blob uses managed memory (%zu bytes)\n",
+            "hipMalloc ran out of device memory; constants blob uses managed "
+            "memory (%zu bytes)\n",
             total_size);
   }
   TIMING_LOG("[Session] hipMalloc VRAM: %.3fs (%zu bytes)\n",

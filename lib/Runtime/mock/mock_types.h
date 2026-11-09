@@ -25,6 +25,9 @@ struct hipDeviceProp_t {
 };
 
 #define hipSuccess 0
+// Matches the real HIP value so OOM-specific fallbacks can be exercised.
+#define hipErrorOutOfMemory 2
+#define hipMemAttachGlobal 1
 #define HIPBLAS_STATUS_SUCCESS 0
 #define hipMemcpyHostToDevice 0
 #define hipMemcpyDeviceToHost 1
@@ -46,6 +49,8 @@ extern "C" hipError_t hipStreamDestroy(hipStream_t stream);
 extern "C" hipError_t hipStreamSynchronize(hipStream_t stream);
 extern "C" hipError_t hipDeviceSynchronize();
 extern "C" hipError_t hipMalloc(void **ptr, size_t size);
+extern "C" hipError_t hipMallocManaged(void **ptr, size_t size,
+                                       unsigned int flags);
 extern "C" hipError_t hipFree(void *ptr);
 extern "C" hipError_t hipHostMalloc(void **ptr, size_t size,
                                     unsigned int flags);

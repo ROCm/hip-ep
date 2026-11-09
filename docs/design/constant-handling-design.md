@@ -290,6 +290,11 @@ runtime reads `constants_filename` and per-constant offsets, then:
    constants blob (`hipMalloc`). Same path on both dGPU and iGPU — the
    one-time copy cost at init is negligible compared to per-inference VRAM
    access savings.
+   If `hipMalloc` fails with `hipErrorOutOfMemory`, the runtime retries with
+   `hipMallocManaged`, so a blob larger than device memory is paged instead of
+   failing session creation. Any other `hipMalloc` error is reported and fails
+   initialization. Only the constants blob falls back this way; the PoolAllocs
+   pools and other runtime buffers still use `hipMalloc`.
 3. Copies the file contents into the GPU buffer in one operation.
 4. Sets each per-constant GPU pointer to the stored offset within the buffer —
    no per-constant allocation or copy.
