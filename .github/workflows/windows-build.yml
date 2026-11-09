@@ -16,7 +16,12 @@ permissions:
   contents: read
 
 jobs:
+  build_required:
+    uses: ./.github/workflows/build-required.yml
+
   prebuild:
+    needs: build_required
+    if: needs.build_required.outputs.run == 'true'
     uses: ./.github/workflows/windows-deps.yml
 
   build_real:

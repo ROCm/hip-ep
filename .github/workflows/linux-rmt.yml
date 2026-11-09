@@ -46,8 +46,15 @@ env:
   SCCACHE_CACHE_SIZE: "200M"
 
 jobs:
+  build_required:
+    uses: ./.github/workflows/build-required.yml
+
   build-linux-rmt:
-    # No draft-PR gate: the cache-priming strategy needs every PR push.
+    needs: build_required
+    if: needs.build_required.outputs.run == 'true'
+    # No draft-PR gate: cache priming needs every code push, including
+    # drafts. build-required.yml skips this job when the diff is only
+    # documentation or the Jekyll site; those diffs do not move the caches.
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
