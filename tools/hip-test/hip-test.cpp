@@ -217,7 +217,8 @@ static bool loadRawInput(const std::string &path, std::vector<uint8_t> &buffer,
   in.seekg(0, std::ios::end);
   const std::streamoff n = in.tellg();
   if (n < 0 || static_cast<size_t>(n) != buffer.size()) {
-    error = path + " is " + std::to_string(n < 0 ? 0 : static_cast<long long>(n)) +
+    error = path + " is " +
+            std::to_string(n < 0 ? 0 : static_cast<long long>(n)) +
             " bytes, expected " + std::to_string(buffer.size());
     return false;
   }
@@ -727,8 +728,8 @@ int main(int argc, char **argv) {
   // in-graph. Cleared after the run so a stale `self` can never be used.
   set_alloc_func(state, &alloc);
   sessionSeconds += elapsed_since(initStart);
-  std::cout << "Session created in "
-            << static_cast<int>(sessionSeconds * 1000) << " ms\n";
+  std::cout << "Session created in " << static_cast<int>(sessionSeconds * 1000)
+            << " ms\n";
 
   // Persistent decode mode used by small autoregressive clients. The model,
   // constants, HIP state, input allocation, and output allocation stay alive.
@@ -779,7 +780,8 @@ int main(int argc, char **argv) {
       }
       const bool logitsPresent = !octx.outs.empty();
       const size_t elem = logitsPresent ? octx.outs[0].elem_size : 0;
-      if (!logitsPresent || (elem != sizeof(float) && elem != sizeof(uint16_t)) ||
+      if (!logitsPresent ||
+          (elem != sizeof(float) && elem != sizeof(uint16_t)) ||
           octx.outs[0].shape.size() != 3 || octx.outs[0].shape[0] != 1 ||
           position < 0 || position >= octx.outs[0].shape[1]) {
         std::cerr << "ERROR: expected f32 or f16 logits with shape [1,N,V]\n";
@@ -801,7 +803,8 @@ int main(int argc, char **argv) {
 #else
       std::memcpy(logits.data(), slot.host.data() + offset, logits.size());
 #endif
-      std::cout << argmaxLogits(logits.data(), vocab, elem) << "\n" << std::flush;
+      std::cout << argmaxLogits(logits.data(), vocab, elem) << "\n"
+                << std::flush;
     }
     set_alloc_func(state, nullptr);
     (void)cleanup_func(state);
@@ -833,8 +836,7 @@ int main(int argc, char **argv) {
       std::cout << "  Iteration " << (iter + 1) << "/" << iterations << "\n";
   }
   std::cout << "Inference: "
-            << static_cast<int64_t>(elapsed_since(inferStart) * 1e6)
-            << " us\n";
+            << static_cast<int64_t>(elapsed_since(inferStart) * 1e6) << " us\n";
 
   set_alloc_func(state, nullptr);
 

@@ -57,7 +57,8 @@ struct CastOpLowering : public ConvertOpToLLVMPattern<CastOp> {
     }
 
     // Get source and destination data type enums. i1 maps to UINT8: a mask is
-    // stored as a 1-byte 0/1 value, and the existing byte cast kernels cover it.
+    // stored as a 1-byte 0/1 value, and the existing byte cast kernels cover
+    // it.
     int64_t srcDataType = getHipdnnDataType(inputType.getElementType());
     int64_t dstDataType = getHipdnnDataType(outputType.getElementType());
 

@@ -78,9 +78,10 @@ int wrap_cumsum(RuntimeState *state, void *x, void *axis, void *y,
   // synchronously read it back. This adds one stall per CumSum call --
   // acceptable because the op typically occurs once or twice per graph.
   //
-  // hipMemcpyDefault, not DeviceToHost: a host-written axis (tensor.from_elements
-  // / aten dim) lives in hip-materialize-host-scalars scratch. An explicit D2H
-  // of that pointer returns hipErrorInvalidValue. UVA picks the direction.
+  // hipMemcpyDefault, not DeviceToHost: a host-written axis
+  // (tensor.from_elements / aten dim) lives in hip-materialize-host-scalars
+  // scratch. An explicit D2H of that pointer returns hipErrorInvalidValue. UVA
+  // picks the direction.
   int64_t axis_value = 0;
   if (axis_dtype == HIPDNN_EP_DATATYPE_INT32) {
     int32_t a32 = 0;
