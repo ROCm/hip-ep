@@ -337,28 +337,33 @@ static bool use_corelib_model(PassContext *ctx) {
   return v == "1" || v == "true";
 }
 
-// An onnxruntime-genai decoder: input_ids, attention_mask and a KV cache in,
-// logits and the updated cache out. Which architecture it is, CoreLib decides.
-static bool is_genai_decoder(Graph &graph) {
+// An onnxruntime-genai decoder: attention_mask and a KV cache in, logits and
+// the updated cache out. What it is and which of its other inputs a model
+// takes, CoreLib decides; filled into `sig` when the graph qualifies.
+static bool is_genai_decoder(Graph &graph,
+                             hipdnn_ep::corelib::GraphSignature *sig) {
   GraphConstRef g(GraphRef{graph});
-  bool ids = false, mask = false, past = false, logits = false, present = false;
+  bool mask = false, past = false, logits = false, present = false;
+  sig->inputs.clear();
+  sig->vocab_size = -1;
   for (const auto &in : g.inputs()) {
     const std::string &n = in.name();
-    ids |= n == "input_ids";
+    sig->inputs.push_back(n);
     mask |= n == "attention_mask";
     past |= n.rfind("past_key_values.", 0) == 0;
   }
   for (const auto &out : g.outputs()) {
     const std::string &n = out.name();
-    logits |= n == "logits";
     present |= n.rfind("present.", 0) == 0;
+    if (n != "logits")
+      continue;
+    logits = true;
+    auto shape = out.shape();
+    if (shape && !out.is_unknown_shape() && !shape->empty() &&
+        shape->back() > 0)
+      sig->vocab_size = shape->back();
   }
-  bool gqa = false, nbits = false;
-  for (const auto &node : g.nodes()) {
-    gqa |= node.op_type() == "GroupQueryAttention";
-    nbits |= node.op_type() == "MatMulNBits";
-  }
-  return ids && mask && past && logits && present && gqa && nbits;
+  return mask && past && logits && present;
 }
 
 // The context onnxruntime-genai runs the model at (search.max_length in the
@@ -377,16 +382,15 @@ static int64_t genai_max_length(const std::filesystem::path &model) {
   return 0;
 }
 
-// The corelib models tried, by name, for a matching graph.
-static const char *const kCorelibModels[] = {"qwen3"};
-
 // Hands the whole graph to a CoreLib model when one takes it: fuses it under
 // CORELIBMODEL with the parameter {arch, path, max_sequence_length} and
 // leaves the session for the custom op. False, after one line saying why, when
-// the graph is to be compiled as usual.
+// the graph is to be compiled as usual. No model is named here: CoreLib's own
+// are tried, so a CoreLib with new models needs no change.
 static bool try_corelib_model(IPass &self, Graph &graph) {
   PassContext *ctx = self.get_context().get();
-  if (!use_corelib_model(ctx) || !is_genai_decoder(graph))
+  hipdnn_ep::corelib::GraphSignature sig;
+  if (!use_corelib_model(ctx) || !is_genai_decoder(graph, &sig))
     return false;
   const std::filesystem::path model = ctx->get_model_path();
   if (model.empty()) {
@@ -396,29 +400,28 @@ static bool try_corelib_model(IPass &self, Graph &graph) {
   }
   const int64_t max_len = genai_max_length(model);
   std::string why;
-  for (const char *arch : kCorelibModels) {
-    auto session = hipdnn_ep::corelib::create_model_session(
-        arch, model.string(), max_len, &why);
-    if (!session)
-      continue;
-    const std::string id = std::string("corelib_model_") + arch;
-    // The fused node's parameter must be a JSON object (a protobuf Struct).
-    google::protobuf::Struct param;
-    auto &fields = *param.mutable_fields();
-    fields["arch"].set_string_value(arch);
-    fields["path"].set_string_value(model.string());
-    fields["max_sequence_length"].set_number_value(double(max_len));
-    std::string param_json;
-    CHECK(google::protobuf::util::MessageToJsonString(param, &param_json).ok());
-    // A refused fusion falls through to the usual compile.
-    if (!fuse_graph(self, graph, param_json, id, "CORELIBMODEL"))
-      return false;
-    hipdnn_ep::corelib::put_session(id, std::move(session));
-    return true;
+  auto session = hipdnn_ep::corelib::create_model_session("", model.string(),
+                                                          max_len, sig, &why);
+  if (!session) {
+    fprintf(stderr, "[corelib] model: %s; compiling it for the GPU\n",
+            why.c_str());
+    return false;
   }
-  fprintf(stderr, "[corelib] model: %s; compiling it for the GPU\n",
-          why.c_str());
-  return false;
+  const std::string &arch = hipdnn_ep::corelib::architecture(*session);
+  const std::string id = "corelib_model_" + arch;
+  // The fused node's parameter must be a JSON object (a protobuf Struct).
+  google::protobuf::Struct param;
+  auto &fields = *param.mutable_fields();
+  fields["arch"].set_string_value(arch);
+  fields["path"].set_string_value(model.string());
+  fields["max_sequence_length"].set_number_value(double(max_len));
+  std::string param_json;
+  CHECK(google::protobuf::util::MessageToJsonString(param, &param_json).ok());
+  // A refused fusion falls through to the usual compile.
+  if (!fuse_graph(self, graph, param_json, id, "CORELIBMODEL"))
+    return false;
+  hipdnn_ep::corelib::put_session(id, std::move(session));
+  return true;
 }
 
 // ============================================================================
