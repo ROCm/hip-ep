@@ -216,6 +216,7 @@ static MatmulCacheEntry *queryOrCreateMatmul(MatmulAlgoTable &table,
   if (key.batch_count > 1) {
     // hipBLASLt requires int32_t for BATCH_COUNT. An int64_t with sizeof 8
     // corrupts the layout; the matching GQA/MHA paths already pass int32_t.
+    // wrap_hipblasLtMatmul rejects counts that do not fit.
     int32_t bc = static_cast<int32_t>(key.batch_count);
     // layA → user's B. The stride is whatever the compiler computed —
     // 0 for broadcast B (rank-2 [K,N] or rank-N [1,...,1,K,N]), K*N for
@@ -467,6 +468,17 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
       state);
   if (!state || !A || !B || !output) {
     fprintf(stderr, "Invalid arguments to wrap_hipblasLtMatmul\n");
+    return -1;
+  }
+
+  // hipBLASLt stores the layout BATCH_COUNT as int32_t (see
+  // queryOrCreateMatmul), so reject a count it cannot represent instead of
+  // silently truncating it into a wrong layout.
+  if (batch_count > std::numeric_limits<int32_t>::max()) {
+    fprintf(stderr,
+            "wrap_hipblasLtMatmul: batch count %lld exceeds the hipBLASLt "
+            "int32_t limit\n",
+            (long long)batch_count);
     return -1;
   }
 
