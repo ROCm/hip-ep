@@ -697,6 +697,17 @@ LogicalResult RocMlirOp::verify() {
       }))
     return emitOpError("requires ins operands of the same kind as its outs "
                        "(all tensors or all memrefs)");
+  ArrayRef<int64_t> prefill = getPrefill();
+  if (prefill.size() % 3 != 0)
+    return emitOpError("prefill holds (index, bytes, pattern) triples");
+  int64_t numArgs = getInputs().size() + getOutputs().size();
+  for (size_t i = 0; i < prefill.size(); i += 3) {
+    if (prefill[i] < 0 || prefill[i] >= numArgs)
+      return emitOpError("prefill argument index ")
+             << prefill[i] << " is out of range";
+    if (prefill[i + 1] != 1 && prefill[i + 1] != 2 && prefill[i + 1] != 4)
+      return emitOpError("prefill element size must be 1, 2 or 4 bytes");
+  }
   if (!tensorOuts) {
     if (getNumResults() != 0)
       return emitOpError("on memrefs has no results");

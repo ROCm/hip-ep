@@ -142,10 +142,37 @@ bool buildBackendPipelineFor(OpPassManager &pm, StringRef arch,
   return true;
 }
 
+// One `rock.prefill` entry, {index, value}. The value has the buffer's
+// element type, and the fill repeats its bit pattern. Nullopt for a value or
+// a width that the fill cannot write.
+static std::optional<KernelPrefill> parsePrefill(Attribute entry) {
+  auto dict = dyn_cast<DictionaryAttr>(entry);
+  if (!dict)
+    return std::nullopt;
+  auto index = dyn_cast_if_present<IntegerAttr>(dict.get("index"));
+  Attribute value = dict.get("value");
+  APInt bits;
+  if (auto integer = dyn_cast_if_present<IntegerAttr>(value))
+    bits = integer.getValue();
+  else if (auto real = dyn_cast_if_present<FloatAttr>(value))
+    bits = real.getValue().bitcastToAPInt();
+  else
+    return std::nullopt;
+  unsigned width = bits.getBitWidth();
+  if (!index || (width != 8 && width != 16 && width != 32))
+    return std::nullopt;
+  KernelPrefill prefill;
+  prefill.argIndex = index.getInt();
+  prefill.elementBytes = width / 8;
+  prefill.pattern = bits.getZExtValue();
+  return prefill;
+}
+
 // Walk the compiled module for the single gpu.binary object and pull out its
-// ELF blob plus the {block, grid} launch geometry.
+// ELF blob, the {block, grid} launch geometry and the arguments to pre-fill.
 bool extractCompiledKernel(ModuleOp mod, CompiledKernel &out) {
   unsigned count = 0;
+  bool unsupportedPrefill = false;
   mod.walk([&](gpu::BinaryOp binary) {
     auto object = llvm::cast<gpu::ObjectAttr>(binary.getObjects()[0]);
     StringRef blob = object.getObject().getValue();
@@ -159,10 +186,23 @@ bool extractCompiledKernel(ModuleOp mod, CompiledKernel &out) {
         continue;
       out.blockSize = block.getInt();
       out.gridSize = grid.getInt();
+      out.prefills.clear();
+      if (auto prefills =
+              kernel.getAttr<ArrayAttr>(rock::PrefillAttr::getMnemonic())) {
+        for (Attribute entry : prefills) {
+          if (std::optional<KernelPrefill> prefill = parsePrefill(entry))
+            out.prefills.push_back(*prefill);
+          else
+            unsupportedPrefill = true;
+        }
+      }
       ++count;
     }
   });
-  return count == 1 && !out.binary.empty();
+  if (unsupportedPrefill)
+    llvm::errs() << "error: rocMLIR kernel needs a pre-fill that is not a "
+                    "1-, 2- or 4-byte integer or float value\n";
+  return count == 1 && !out.binary.empty() && !unsupportedPrefill;
 }
 
 #if defined(HIPDNN_EP_LINK_HIP_HOST) && defined(HIPDNN_HIP_RUNTIME_LIB)
@@ -474,6 +514,11 @@ compileAndEmbedRocMlirKernels(ModuleOp module,
         context, StringRef(kernel.binary.data(), kernel.binary.size())));
     op.setGridSizeAttr(IntegerAttr::get(i64, kernel.gridSize));
     op.setBlockSizeAttr(IntegerAttr::get(i64, kernel.blockSize));
+    SmallVector<int64_t> prefill;
+    for (const KernelPrefill &entry : kernel.prefills)
+      llvm::append_values(prefill, entry.argIndex, entry.elementBytes,
+                          static_cast<int64_t>(entry.pattern));
+    op.setPrefill(prefill);
     totalBytes += kernel.binary.size();
     return WalkResult::advance();
   });

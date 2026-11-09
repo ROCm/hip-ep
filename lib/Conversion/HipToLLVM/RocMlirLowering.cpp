@@ -18,6 +18,7 @@ namespace {
 //   store in0_ptr,  kernargs[0]
 //   ...
 //   store outK_ptr, kernargs[N-1]
+//   wrap_rocmlir_prefill(state, arg_ptr, count, bytes, pattern)  (per prefill)
 //   wrap_rocmlir(state, kernel_binary_str, func_name_str,
 //                block_size, grid_size, kernargs, N * sizeof(void*))
 //
@@ -96,11 +97,36 @@ struct RocMlirOpLowering : public ConvertOpToLLVMPattern<RocMlirOp> {
 
     // Byte size of the kernargs buffer (N * sizeof(void*)).
     Value kernargsSize = i64Const(numArgs * 8);
+    Value statePtr = adaptor.getCtx();
+
+    // wrap_rocmlir_prefill(state, buffer, count, element_bytes, pattern) for
+    // each argument the kernel needs filled before it runs, on the same
+    // stream, so the fill completes before the launch.
+    ArrayRef<int64_t> prefill = op.getPrefill();
+    if (!prefill.empty()) {
+      SmallVector<Type> operandTypes(op.getInputs().getTypes());
+      llvm::append_range(operandTypes, op.getOutputs().getTypes());
+      SmallVector<Type, 5> fillParams = {ptrType, ptrType, i64Type, i64Type,
+                                         i64Type};
+      FailureOr<LLVM::LLVMFuncOp> fillFn = LLVM::lookupOrCreateFn(
+          rewriter, module, kWrapRocMlirPrefill, fillParams, i32Type);
+      if (failed(fillFn))
+        return failure();
+      for (size_t i = 0; i < prefill.size(); i += 3) {
+        auto type = dyn_cast<MemRefType>(operandTypes[prefill[i]]);
+        if (!type || !type.hasStaticShape())
+          return rewriter.notifyMatchFailure(
+              op, "a pre-filled rocMLIR argument needs a static memref");
+        SmallVector<Value, 5> fillArgs = {
+            statePtr, argPtrs[prefill[i]], i64Const(type.getNumElements()),
+            i64Const(prefill[i + 1]), i64Const(prefill[i + 2])};
+        LLVM::CallOp::create(rewriter, loc, *fillFn, fillArgs);
+      }
+    }
 
     // wrap_rocmlir(RuntimeState* state, const char* kernel_binary,
     //              char* func_name, int64_t block_size, int64_t grid_size,
     //              void* kernargs, size_t size)
-    Value statePtr = adaptor.getCtx();
     SmallVector<Type, 7> paramTypes = {ptrType, ptrType, ptrType, i64Type,
                                        i64Type, ptrType, i64Type};
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
