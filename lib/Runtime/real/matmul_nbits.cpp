@@ -849,6 +849,33 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
     }
   }
 
+  // fp32 A/C: the int4 kernels compute in fp16, so A is cast into a session
+  // scratch, the fp16 kernel writes beside it and its result is widened into
+  // the output. hip_matmul_nbits' own fp32 entry does the same through
+  // process-global buffers that concurrent sessions would share; it stays for
+  // standalone tools. Same casts and kernel as that entry, so bit-identical.
+  if (elem_size == 4) {
+    const size_t a_elems = static_cast<size_t>(batch_count * M * K);
+    const size_t c_elems = static_cast<size_t>(batch_count * M * N);
+    const size_t c_off = (a_elems * 2 + 255) & ~static_cast<size_t>(255);
+    if (hipdnn_ep_state_ensure_matmul_fp32_cast_scratch(
+            state, c_off + c_elems * 2) != 0)
+      return -1;
+    char *base = static_cast<char *>(
+        hipdnn_ep_state_get_matmul_fp32_cast_scratch(state));
+    void *a16 = base;
+    void *c16 = base + c_off;
+    HIP_CHECK(hip_cast(stream, A, a16, static_cast<int64_t>(a_elems),
+                       HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16));
+    HIP_CHECK(hip_matmul_nbits(stream, a16, B, scales, zero_points, bias, c16,
+                               M, N, K, batch_count, bits, block_size,
+                               /*element_size_bytes=*/2, zp_elem_size,
+                               pre_zp_u8, pre_zp_fp16));
+    HIP_CHECK(hip_cast(stream, c16, output, static_cast<int64_t>(c_elems),
+                       HIP_DTYPE_FLOAT16, HIP_DTYPE_FLOAT32));
+    goto cleanup;
+  }
+
   HIP_CHECK(hip_matmul_nbits(stream, A, B, scales, zero_points, bias, output, M,
                              N, K, batch_count, bits, block_size, elem_size,
                              zp_elem_size, pre_zp_u8, pre_zp_fp16));

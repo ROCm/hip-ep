@@ -303,6 +303,8 @@ Every extended entry is forced by index in the `Xfp16_Wu4_Yfp16` kernel unit tes
 
 **Row-padded int4 B (`padrow`)**: when the packed row stride K/2 is a whole number of 128-byte lines sharing a factor of at least 8 with the 64 L1 sets (`shouldPadRow`: K=2048, 4096, 6144, 8192; not 2880 or 3072), the rows of a WMMA tile land in a few sets and evict each other. `hip_matmul_nbits_u4_prepack_padrow` copies B into a stride one line longer before the strided WMMA kernel. The EP passes a session-owned scratch (`hipdnn_ep_state_ensure_matmul_padrow_scratch`, capped at `hip_matmul_nbits_u4_padrow_max_bytes()`), so concurrent sessions never share the padded copy.
 
+**fp32 activations**: the int4 kernels compute in fp16, so `hip_matmul_nbits` with `element_size_bytes` 4 casts A to fp16, runs the fp16 path and widens the result, through process-global buffers that serve standalone callers. `wrap_matmul_nbits` does the same casts with `hip_cast` through a session-owned scratch (`hipdnn_ep_state_ensure_matmul_fp32_cast_scratch`) and calls the fp16 entry, so the result is bit-identical and concurrent sessions never share the buffers.
+
 ### 11. `lib/Runtime/Kernels/hip/gemv_f16_kernel.hip`
 
 Dense M=1 GEMVs that `wrap_hipblasLtMatmul` takes ahead of hipBLASLt, whose fixed per-call cost dominates single-row products. `hip_gemv_f16_kn` serves fp16 `[1, K] x [K, N]`; `hip_gemv_f32_kn` serves fp32 with N ≤ 512, N % 4 == 0 and a 16-byte-aligned B, the shape of an fp32 MoE router (Laguna: K=2048/3072, N=256), where hipBLASLt takes 32-57 us a call against an 8-12 us read floor and the GEMV reaches 82-91% of it. One float4 of columns per lane, a full-K reduction per row group in LDS.

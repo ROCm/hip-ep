@@ -207,6 +207,11 @@ struct RuntimeState {
   // seen and never shrunk.
   void *matmul_padrow_scratch;
   size_t matmul_padrow_scratch_size;
+  // Per-session scratch for fp32-activation matmul_nbits: the fp16 copy of A
+  // and the fp16 result the int4 kernels produce before it is widened back.
+  // Sized to the largest call seen and never shrunk.
+  void *matmul_fp32_cast_scratch;
+  size_t matmul_fp32_cast_scratch_size;
 
   // Per-session scratch for the linear-attention chunk-parallel gated_delta
   // prefill (hip_linear_attention_prefill_chunked). One contiguous device

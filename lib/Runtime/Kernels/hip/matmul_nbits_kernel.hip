@@ -8716,7 +8716,9 @@ extern "C" int hip_matmul_nbits(
   // All bits widths (2/3/4/8) route fp32 A/C through the shared fp16 cast
   // scratch: cast A to fp16, run the unchanged fp16 compute path, cast the
   // fp16 result back to fp32. bits=8 is included so the int8 dispatch below
-  // stays fp16-only (no element-type template, no code-size growth).
+  // stays fp16-only (no element-type template, no code-size growth). The EP
+  // does the same casts through a per-session scratch (wrap_matmul_nbits);
+  // these process-global buffers serve standalone callers.
   if (element_size_bytes == 4) {
     hipStream_t cast_stream = static_cast<hipStream_t>(stream);
     const int64_t a_elems = batch_count * M * K;

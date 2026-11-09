@@ -423,6 +423,13 @@ void *hipdnn_ep_state_get_matmul_padrow_scratch(RuntimeState *state);
 int hipdnn_ep_state_ensure_matmul_padrow_scratch(RuntimeState *state,
                                                  size_t needed_size);
 
+// Per-session scratch for fp32-activation matmul_nbits: A is cast to fp16
+// here, the int4 kernel writes its fp16 result here, and that is widened into
+// the fp32 output. Grows to the largest call seen and never shrinks.
+void *hipdnn_ep_state_get_matmul_fp32_cast_scratch(RuntimeState *state);
+int hipdnn_ep_state_ensure_matmul_fp32_cast_scratch(RuntimeState *state,
+                                                    size_t needed_size);
+
 // Per-session scratch for the linear-attention chunk-parallel gated_delta
 // prefill (hip_linear_attention_prefill_chunked). Lazily grown via
 // hipdnn_ep_state_ensure_la_scratch (same policy as conv_scratch: never
