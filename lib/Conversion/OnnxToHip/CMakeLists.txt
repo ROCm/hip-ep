@@ -110,6 +110,7 @@ add_library(OnnxToHip STATIC
   AbsConversion.cpp
   SizeConversion.cpp
   NonZeroConversion.cpp
+  NonMaxSuppressionConversion.cpp
   ConcatConversion.cpp
   PoolConversion.cpp
   ResizeConversion.cpp
@@ -126,6 +127,7 @@ add_library(OnnxToHip STATIC
   ConvIntegerConversion.cpp
   MatMulIntegerConversion.cpp
   LoopOutline.cpp
+  ScanOutline.cpp
   IfOutline.cpp
   ReluConversion.cpp
   ImageScalerConversion.cpp
@@ -151,6 +153,7 @@ target_link_libraries(OnnxToHip PUBLIC
   MLIRPass
   MLIRFuncDialect
   MLIRArithDialect
+  MLIRSCFDialect
   MLIRTensorDialect
   MLIRLinalgDialect
   MLIRMemRefDialect

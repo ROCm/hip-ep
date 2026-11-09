@@ -230,11 +230,14 @@ def DecomposeConvTransposePass
     stride to. Reassembly is one strided `tensor.insert_slice` per residue,
     which bufferizes to a `memref.subview` plus a copy.
 
-    Restricted to the statically shaped, non-grouped, dilation-1 case with
-    `stride <= kernel` (so the residues tile the output with no holes) and a
-    compile-time filter. Anything else is left for the MIOpen path.
+    Rank-4 inputs must be statically shaped. A rank-3 input is expanded to
+    rank 4 with a unit height so dynamic batch and width stay legal; the
+    filter and residue geometry stay static. Grouped, dilated, and
+    `stride > kernel` cases, and filters that are not readable at compile
+    time, are left for the MIOpen path.
   }];
   let dependentDialects = [
+    "mlir::arith::ArithDialect",
     "mlir::tensor::TensorDialect"
   ];
 }
@@ -595,6 +598,39 @@ def UseOutputAllocatorPass
   let dependentDialects = [
     "mlir::hip::HipDialect",
     "mlir::memref::MemRefDialect"
+  ];
+}
+
+def FoldConstantExtractsPass
+    : Pass<"hip-fold-constant-extracts", "mlir::func::FuncOp"> {
+  let summary = "Resolve constant-index `tensor.extract` of assembled "
+                "constant vectors to the scalar they read";
+  let description = [{
+    Resolves a `tensor.extract` whose indices are constants through a chain
+    of static-offset, unit-stride `tensor.insert_slice` ops to the element
+    it reads: an operand of a `tensor.from_elements`, an element of an
+    inline integer `hip.constant`, or an element of any other integer
+    constant. Other producers, non-constant indices, and dynamic or strided
+    slices keep the extract.
+
+    The canonical case is an ONNX shape vector such as
+    `ConstantOfShape(Concat(Shape(q)[0:1], [0, 512]))`: upstream folds stop
+    at the `insert_slice` and `hip.constant` has no folder, so without this
+    pass each element reaches runtime as a device-to-host copy plus a
+    stream sync.
+
+    Only the resolved extracts are rewritten, and only the producers they
+    leave without uses are erased. Everything else, including code that was
+    already dead, is left as is, so functions without a resolvable extract
+    are unchanged.
+
+    Pipeline placement: immediately before `--hip-infer-shapes`, whose
+    reify walk then sees these scalars as constants, and before
+    `--hip-externalize-constants`, which may replace the inline
+    `hip.constant` payloads read here. Idempotent.
+  }];
+  let dependentDialects = [
+    "mlir::arith::ArithDialect"
   ];
 }
 

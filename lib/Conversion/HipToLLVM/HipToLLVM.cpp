@@ -267,6 +267,7 @@ populateLoweringPatterns(LLVMTypeConverter &typeConverter,
   populateSparseAttentionIndexerLoweringPatterns(typeConverter, patterns);
   populateGraphLoweringPatterns(typeConverter, patterns);
   populateLoopLoweringPatterns(typeConverter, patterns);
+  populateScanLoweringPatterns(typeConverter, patterns);
   populateIfLoweringPatterns(typeConverter, patterns);
   populateCausalConvWithStateLoweringPatterns(typeConverter, patterns);
   populateNGramHashMappingLoweringPatterns(typeConverter, patterns);
@@ -286,6 +287,7 @@ populateLoweringPatterns(LLVMTypeConverter &typeConverter,
   populateSliceLoweringPatterns(typeConverter, patterns);
   populateScatterNDLoweringPatterns(typeConverter, patterns);
   populateNonZeroLoweringPatterns(typeConverter, patterns);
+  populateNonMaxSuppressionLoweringPatterns(typeConverter, patterns);
   populateReadbackDimLoweringPatterns(typeConverter, patterns, hostScalars);
   populateReadbackScalarLoweringPatterns(typeConverter, patterns, hostScalars);
   populateSizeLoweringPatterns(typeConverter, patterns);

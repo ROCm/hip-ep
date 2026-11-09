@@ -48,12 +48,15 @@ KERNEL_ABI = "matmul_nbits-v1"
 
 GROUP_SIZES = {16: "G16", 32: "G32", 64: "G64", 128: "G128", 256: "G256",
                512: "G512"}
+# prefill_padrow is measured at arrival + `pad=` bytes (128 when the sweep log
+# predates the field); a pad without a row-stride category is skipped.
 PATH_TO_PHASE = {"prefill": "Prefill", "prefill_padrow": "Prefill",
                  "decode": "Decode", "dp4a": "DecodeDp4a"}
 PATH_TO_STRIDE = {"prefill": "Arrival", "prefill_padrow": "Padded",
                   "decode": "Any", "dp4a": "Any"}
 PATH_TO_KIND = {"prefill": "Wmma", "prefill_padrow": "Wmma",
                 "decode": "Gemv", "dp4a": "Gemv"}
+PADROW_PATH = {128: "prefill_padrow"}
 
 
 # ---------------------------------------------------------------------------
@@ -95,10 +98,11 @@ def cmd_measure(args) -> int:
 # ---------------------------------------------------------------------------
 
 SHAPE_RE = re.compile(
-    r"^#SHAPE path=(\w+) M=(\d+) N=(\d+) K=(\d+) gs=(\d+) zp=(\d+)")
+    r"^#SHAPE path=(\w+) M=(\d+) N=(\d+) K=(\d+) gs=(\d+) zp=(\d+)(?: pad=(\d+))?")
 WMMA_WIN_RE = re.compile(
     r"WMMA autotune:.*-> best config\[(\d+)\] (fused|dq\+gemm) "
-    r"bm=(\d+) bn=(\d+) sw=(\d+) wt=(\d+)x(\d+) bk=(\d+)")
+    r"bm=(\d+) bn=(\d+) sw=(\d+) wt=(\d+)x(\d+) bk=(\d+)"
+    r"(?: ext=(\d+) var=(\d+))?")
 GEMV_WIN_RE = re.compile(
     r"GEMV(?:-dp4a)? autotune:.*-> best config\[(\d+)\] "
     r"threads=(\d+) tile_n=(\d+)")
@@ -111,28 +115,36 @@ GEMV_WIN_RE = re.compile(
 # best-of that only covered the fused half of the table.
 WMMA_TIME_RE = re.compile(
     r"^\[custom_kernels\]\s+wmma config\[\s*\d+\] (fused|dq\+gemm?)\s+"
-    r"bm=\s*(\d+) bn=\s*(\d+) sw=(\d+) wt=(\d+)x(\d+) bk=(\d+) : "
-    r"([\d.]+) ms")
+    r"bm=\s*(\d+) bn=\s*(\d+) sw=(\d+) wt=(\d+)x(\d+) bk=\s*(\d+)"
+    r"(?: ext=(\d+) var=(\d+))? : ([\d.]+) ms")
 GEMV_TIME_RE = re.compile(
     r"^\[custom_kernels\]\s+(?:dp4a )?config\[\s*\d+\] "
     r"threads=\s*(\d+) tile_n=(\d+) : ([\d.]+) ms")
 
 
 def answer_key(ans: dict):
-    """Hashable identity of an answer: the dedup key and the comparison key."""
+    """Hashable identity of an answer: the dedup key and the comparison key.
+    The last two fields name an extended WMMA entry (WMMA_EXT_CONFIGS): 1 and
+    its variant, or 0 and 0 for an original kWmmaConfigs entry."""
     if ans["kind"] == "Wmma":
+        ext = 1 if ans.get("ext") else 0
         return ("Wmma", ans["bm"], ans["bn"], ans["swizzle"], ans["wt_m"],
-                ans["wt_n"], ans["bk"], 1 if ans["fused"] else 0)
+                ans["wt_n"], ans["bk"], 1 if ans["fused"] else 0,
+                ext, ans.get("variant", 0) if ext else 0)
     return ("Gemv", ans["threads"], ans["tile_n"])
 
 
 def config_entry(key) -> dict:
-    """answer_key tuple -> a MatmulNbitsTuneConfig dict."""
+    """answer_key tuple -> a MatmulNbitsTuneConfig dict. An extended entry also
+    carries "ext"/"variant", which write_lut_json moves to extended_configs."""
     if key[0] == "Wmma":
-        _, bm, bn, sw, wm, wn, bk, fused = key
-        return {"kind": "Wmma", "bm16": bm // 16, "bn16": bn // 16,
-                "swizzle": sw, "wt_m": wm, "wt_n": wn, "bk": bk,
-                "fused": fused, "threads": 0, "tile_n": 0}
+        _, bm, bn, sw, wm, wn, bk, fused, ext, variant = key
+        entry = {"kind": "Wmma", "bm16": bm // 16, "bn16": bn // 16,
+                 "swizzle": sw, "wt_m": wm, "wt_n": wn, "bk": bk,
+                 "fused": fused, "threads": 0, "tile_n": 0}
+        if ext:
+            entry.update(ext=1, variant=variant)
+        return entry
     _, threads, tile_n = key
     return {"kind": "Gemv", "bm16": 0, "bn16": 0, "swizzle": 0, "wt_m": 0,
             "wt_n": 0, "bk": 0, "fused": 0, "threads": threads,
@@ -154,7 +166,16 @@ def parse_log(path: Path):
             if m:
                 if cur is not None:
                     n_orphan += 1          # marker with no winner line after
-                cur = (m.group(1), int(m.group(2)), int(m.group(3)),
+                path_kind = m.group(1)
+                if path_kind == "prefill_padrow":
+                    path_kind = PADROW_PATH.get(int(m.group(7) or 128))
+                    if path_kind is None:
+                        print(f"[build] {path.name}: no row-stride category for "
+                              f"pad={m.group(7)}, skipping: {line.strip()}",
+                              file=sys.stderr)
+                        cur, times = None, {}
+                        continue
+                cur = (path_kind, int(m.group(2)), int(m.group(3)),
                        int(m.group(4)), int(m.group(5)), int(m.group(6)))
                 times = {}
                 continue
@@ -167,14 +188,16 @@ def parse_log(path: Path):
                 if t:
                     times[("Wmma", int(t.group(2)), int(t.group(3)),
                            int(t.group(4)), int(t.group(5)), int(t.group(6)),
-                           int(t.group(7)), 1 if t.group(1) == "fused" else 0)
-                          ] = float(t.group(8))
+                           int(t.group(7)), 1 if t.group(1) == "fused" else 0,
+                           int(t.group(8) or 0), int(t.group(9) or 0))
+                          ] = float(t.group(10))
                     continue
                 w = WMMA_WIN_RE.search(line)
                 if w:
                     key = ("Wmma", int(w.group(3)), int(w.group(4)),
                            int(w.group(5)), int(w.group(6)), int(w.group(7)),
-                           int(w.group(8)), 1 if w.group(2) == "fused" else 0)
+                           int(w.group(8)), 1 if w.group(2) == "fused" else 0,
+                           int(w.group(9) or 0), int(w.group(10) or 0))
                     yield cur, key, times
                     cur, times = None, {}
                 continue
@@ -270,7 +293,7 @@ def _tiebreak_rank(ans_key):
     noise, which cannot see cross-dispatch overlap. GEMV/dp4a configs have no
     warp tile, so they rank (0, 0) and the tie reduces to fastest-wins."""
     if ans_key[0] == "Wmma":
-        _, bm, bn, _sw, wt_m, wt_n, _bk, _fused = ans_key
+        _, bm, bn, _sw, wt_m, wt_n, _bk, _fused, _ext, _var = ans_key
         return (wt_m * wt_n, bm * bn)
     return (0, 0)
 
@@ -520,8 +543,10 @@ def choose_fallbacks(points):
 def _answer_of(cfg: dict):
     """A table config entry -> answer_key, the inverse of config_entry()."""
     if cfg["kind"] == "Wmma":
+        ext = 1 if cfg.get("ext") else 0
         return ("Wmma", cfg["bm16"] * 16, cfg["bn16"] * 16, cfg["swizzle"],
-                cfg["wt_m"], cfg["wt_n"], cfg["bk"], cfg["fused"])
+                cfg["wt_m"], cfg["wt_n"], cfg["bk"], cfg["fused"], ext,
+                cfg.get("variant", 0) if ext else 0)
     return ("Gemv", cfg["threads"], cfg["tile_n"])
 
 
@@ -536,21 +561,113 @@ def _geomean_slowdown(ans, pts):
     return math.exp(sum(logs) / len(logs)) if logs else float("inf")
 
 
+class LutError(ValueError):
+    """A table the loader would read differently from what was meant."""
+
+
+KERNEL_SRC = ROOT.parent.parent / "matmul_nbits_kernel.hip"
+PHASES = ("Prefill", "Decode", "DecodeDp4a")
+STRIDES = ("Arrival", "Padded")
+ZERO_POINTS = ("Symmetric", "Asymmetric")
+
+
+def compiled_extended_entries():
+    """(bm, bn, wt_m, wt_n, bk, variant, swizzle) of every WMMA_EXT_CONFIGS
+    entry the kernel library is built with."""
+    src = KERNEL_SRC.read_text(encoding="utf-8")
+    block = src[src.index("#define WMMA_EXT_CONFIGS(X)"):]
+    block = block[:block.index("\n\n")]
+    return {tuple(int(v) for v in m.groups())
+            for m in re.finditer(r"X\(\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),"
+                                 r"\s*(\d+),\s*(\d+),\s*(\d+)\)", block)}
+
+
+def check_table(t: dict) -> None:
+    """Raises LutError unless every reference and key in table `t` (the JSON
+    form) means one thing to the C++ loader, which drops what it cannot read
+    rather than failing; build, merge and compile all run it, so a table cannot
+    be written or shipped with entries the loader would silently skip."""
+    errors = []
+    configs = t.get("configs", [])
+    if len(configs) > 256:
+        errors.append(f"{len(configs)} configs exceed the ubyte config index")
+
+    def kind_of(i):
+        return configs[i].get("kind") if 0 <= i < len(configs) else None
+
+    for name in ("points", "fallbacks"):
+        for r in t.get(name, []):
+            phase, i = r.get("phase"), r.get("config", -1)
+            if phase not in PHASES:
+                errors.append(f"{name}: unknown phase {phase!r}: {r}")
+                continue
+            want = "Wmma" if phase == "Prefill" else "Gemv"
+            if kind_of(i) != want:
+                errors.append(f"{name}: config {i} is not a {want} config: {r}")
+            if name == "points":
+                stride = r.get("row_stride")
+                if (phase == "Prefill") != (stride in STRIDES) or \
+                        (phase != "Prefill" and stride != "Any"):
+                    errors.append(f"points: row_stride {stride!r} for {phase}: {r}")
+                if r.get("group_size") not in GROUP_SIZES.values() or \
+                        r.get("zero_point") not in ZERO_POINTS:
+                    errors.append(f"points: unknown group size or zero point: {r}")
+    compiled = compiled_extended_entries()
+    seen = set()
+    for e in t.get("extended_configs", []):
+        i = e.get("config", -1)
+        if kind_of(i) != "Wmma":
+            errors.append(f"extended_configs: config {i} is not a Wmma config: {e}")
+            continue
+        if i in seen:
+            errors.append(f"extended_configs: config {i} listed twice")
+        seen.add(i)
+        c = configs[i]
+        entry = (c["bm16"] * 16, c["bn16"] * 16, c["wt_m"], c["wt_n"], c["bk"],
+                 e.get("variant"), c["swizzle"])
+        if entry not in compiled:
+            errors.append(f"extended_configs: no WMMA_EXT_CONFIGS entry {entry}")
+    if errors:
+        raise LutError("\n".join(errors))
+
+
+def with_extended(configs, extended):
+    """The table's configs with "ext"/"variant" put back on the ones its
+    extended_configs list names (the in-memory form config_entry() makes)."""
+    configs = [dict(c) for c in configs]
+    for e in extended or []:
+        configs[e["config"]].update(ext=1, variant=e["variant"])
+    return configs
+
+
 def write_lut_json(out: Path, doc: dict, configs, fallbacks, points) -> None:
     # One entry per line: compact enough to keep the file reviewable and to make
     # a regeneration diff readable, without the 20x blowup of indent=1.
+    plain, extended = [], []
+    for i, c in enumerate(configs):
+        c = dict(c)
+        if c.pop("ext", 0):
+            extended.append({"config": i, "variant": c.pop("variant")})
+        c.pop("variant", None)
+        plain.append(c)
+    check_table({**doc, "configs": plain, "fallbacks": fallbacks,
+                 "points": points, "extended_configs": extended})
     with open(out, "w", encoding="utf-8") as f:
         f.write("{\n")
         for k in doc:
             f.write(f' "{k}": {json.dumps(doc[k])},\n')
         f.write(' "configs": [\n')
-        f.write(",\n".join("  " + json.dumps(c, sort_keys=True) for c in configs))
+        f.write(",\n".join("  " + json.dumps(c, sort_keys=True) for c in plain))
         f.write("\n ],\n \"fallbacks\": [\n")
         f.write(",\n".join("  " + json.dumps(r, sort_keys=True)
                            for r in fallbacks))
         f.write("\n ],\n \"points\": [\n")
         f.write(",\n".join("  " + json.dumps(r, sort_keys=True)
                            for r in points))
+        if extended:
+            f.write("\n ],\n \"extended_configs\": [\n")
+            f.write(",\n".join("  " + json.dumps(e, sort_keys=True)
+                               for e in extended))
         f.write("\n ]\n}\n")
 
 
@@ -579,7 +696,8 @@ def cmd_merge(args) -> int:
     print(f"[merge] {len(measured)} measured {phase} points")
     src = LUT_DIR / f"{args.arch}.json"
     old = json.loads(src.read_text(encoding="utf-8"))
-    pool = old["configs"]
+    check_table(old)
+    pool = with_extended(old["configs"], old.get("extended_configs"))
     gain = 1.0 + args.min_gain
 
     def row_key(r):
@@ -651,8 +769,8 @@ def cmd_merge(args) -> int:
     fallback_rows = [resolved(r, a) for r, a in fb_rows]
     point_rows = [resolved(r, a) for r, a in rows]
     doc = {k: v for k, v in old.items()
-           if k not in ("configs", "fallbacks", "points")}
-    out = Path(args.out) if args.out else LUT_DIR / f"{args.arch}.json"
+           if k not in ("configs", "fallbacks", "points", "extended_configs")}
+    out = args.json_out
     write_lut_json(out, doc, new_pool, fallback_rows, point_rows)
     print(f"[merge] {len(changes)} {phase} rows changed, {kept_ties} kept as "
           f"within {args.min_gain:.0%}, {len(point_rows)} points total -> {out}")
@@ -751,7 +869,7 @@ def cmd_build(args) -> int:
         "weight_k": weights[2],
     }
     LUT_DIR.mkdir(parents=True, exist_ok=True)
-    out = Path(args.out) if args.out else LUT_DIR / f"{args.arch}.json"
+    out = args.json_out
     write_lut_json(out, doc, pool, fallback_rows, point_rows)
 
     groups = len({(r["phase"], r["group_size"], r["zero_point"],
@@ -769,10 +887,11 @@ def cmd_build(args) -> int:
 # ---------------------------------------------------------------------------
 
 def cmd_compile(args) -> int:
-    lut_json = LUT_DIR / f"{args.arch}.json"
+    lut_json = args.json_out
     if not lut_json.exists():
         print(f"[compile] no {lut_json}; run build first", file=sys.stderr)
         return 1
+    check_table(json.loads(lut_json.read_text(encoding="utf-8")))
     with tempfile.TemporaryDirectory() as tmp:
         cmd = [args.flatc, "--binary", "--strict-json", "-o", tmp, str(FBS),
                str(lut_json)]
@@ -784,7 +903,8 @@ def cmd_compile(args) -> int:
         if not produced:
             print("[compile] flatc produced nothing", file=sys.stderr)
             return 1
-        dst = LUT_DIR / f"{args.arch}.fb"
+        dst = args.fb_out
+        dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(produced[0], dst)
     # Only the .fb is checked in; the build turns it into the linkable
     # kMatmulNbitsLutBlobs[] symbol at compile time via cmake/embed_fb.cmake
@@ -809,7 +929,12 @@ def main() -> int:
                          "one; build reads every <arch>*_sweep.log")
     ap.add_argument("--sweep-args", nargs=argparse.REMAINDER, default=[],
                     help="everything after this is passed to the sweep binary")
-    ap.add_argument("--out", default=None, help="override the output json path")
+    ap.add_argument("--out", "--json-out", dest="out", default=None,
+                    help="JSON that build/merge write and compile reads "
+                         "(default lut/<arch>.json)")
+    ap.add_argument("--fb-out", default=None,
+                    help="FlatBuffer that compile writes (default lut/<arch>.fb "
+                         "for the default JSON, else the JSON's path with .fb)")
     ap.add_argument("--flatc", default="flatc")
     ap.add_argument("--rocm-version", type=int, default=70100)
     ap.add_argument("--model-key", default="oga_models bits=4")
@@ -842,7 +967,20 @@ def main() -> int:
                          "in-model first")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
+    # One set of paths for every step, so `all --out X` compiles X.
+    canonical = LUT_DIR / f"{args.arch}.json"
+    args.json_out = Path(args.out) if args.out else canonical
+    args.fb_out = (Path(args.fb_out) if args.fb_out
+                   else LUT_DIR / f"{args.arch}.fb" if args.json_out == canonical
+                   else args.json_out.with_suffix(".fb"))
+    try:
+        return run(args)
+    except LutError as e:
+        print(f"[{args.command}] table rejected:\n{e}", file=sys.stderr)
+        return 1
 
+
+def run(args) -> int:
     if args.command in ("measure", "all"):
         rc = cmd_measure(args)
         if rc:
