@@ -165,6 +165,20 @@ private:
       tree.feedsAnchor = true;
       return true;
     }
+    // An integer conv or matmul reads a ui8 value as value - 128 and an i8
+    // value as it is, so the retyped tree gives the same sum.
+    if (auto conv = dyn_cast<QuantConvOp>(user)) {
+      if (&use != &conv.getInputMutable())
+        return false;
+      tree.feedsAnchor = true;
+      return true;
+    }
+    if (auto matmul = dyn_cast<QuantMatmulOp>(user)) {
+      if (&use != &matmul.getAMutable())
+        return false;
+      tree.feedsAnchor = true;
+      return true;
+    }
     auto move = dyn_cast<ElementMoveOpInterface>(user);
     if (!move || user->getNumResults() != 1 || !move.movesElements() ||
         !llvm::is_contained(move.getMovedOperands(), &use))
