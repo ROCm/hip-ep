@@ -2014,7 +2014,7 @@ HIP_KERNEL_API int hip_expand(
  *
  * Pick slices of `data` along the first K = indices.shape[-1] dims (after
  * `batch_dims`), one slice per row of `indices`. Indices are INT64. Data
- * may be f16, f32, i32, i64, or ui8.
+ * may be f16, f32, i32, i64, i8, or ui8.
  *
  * Shapes pass as host int64 arrays (no GPU shape D2H). K and the rank
  * decomposition are computed on the host; the kernel runs one thread per
@@ -3976,53 +3976,14 @@ HIP_KERNEL_API int hip_matmul_i32(
     int64_t batch,
     int64_t b_batch_stride);
 
-// Per-head prologue of hip_dynamic_sparse_attention: every query and key head
-// is RMS-normalized, rounded to fp16, and its first rotary_dim channels are
-// rotated by split-half MRoPE, rounded to fp16 again, exactly as an unfused
-// SimplifiedLayerNormalization then MRotaryEmbedding (interleaved = 0,
-// scale = 1) would. Frequency j < rotary_dim / 2 reads its position from row
-// 0 (T), 1 (H) or 2 (W) of position_ids, the MRoPE section that section and
-// layout give it (0: contiguous sections, 1: interleaved); a position outside
-// [0, rotary_rows) leaves the pair unrotated.
-typedef struct HipDsaPrologue {
-  const void* q_norm_weight;   // [D] fp16
-  const void* k_norm_weight;   // [D] fp16
-  const int64_t* position_ids; // [3, B, S]
-  const void* cos_cache;       // [rotary_rows, rotary_dim / 2] fp16
-  const void* sin_cache;       // [rotary_rows, rotary_dim / 2] fp16
-  int64_t rotary_rows;
-  int64_t rotary_dim;
-  int64_t section[3];
-  int64_t layout;
-  float epsilon;
-} HipDsaPrologue;
-
-// Pairing of hip_dynamic_sparse_attention with a pair_format
-// hip_sparse_attention_indexer of past length past_len that wrote
-// selected_indices. Rows s < clamp(max_selected - past_len, 0, S) of every
-// batch are dense: they take positions 0, 1, ... (their count of them) and
-// their selected_indices rows are never read. When enough rows are dense, the
-// attention runs them as one causal GQA prefill under gqa_policy (the
-// session's autotune policy, may be null) and only redoes a batch whose
-// seqlens_k disagrees with past_len.
-typedef struct HipDsaPair {
-  int64_t past_len;
-  void* gqa_policy;
-} HipDsaPair;
-
 // com.microsoft DynamicSparseAttention, attention_mode=selected_only over the
-// main cache, fp16, no sink.
-//   query            [B, S, N*D], or packed [B, S, (N + 2*kvN)*D] (q, k, v
-//                    per token) when key and value are both null
+// main cache, fp16, no rotary / qk-norm / sink.
+//   query            [B, S, N*D]
 //   key, value       [B, S, kvN*D]
 //   past_*, present_* [B, kvN, capacity, D]; past may alias present, otherwise
 //                    present is first filled from past
 //   selected_indices [B*S, max_selected] int32
 //   selected_counts  [B*S] int32, seqlens_k [B] int32
-//   gate             [B, S, N*D] or null: output = attention * Sigmoid(gate)
-//                    with the rounding of an unfused Sigmoid then Mul
-//   prologue         null, or the q/k norm and MRoPE above
-//   pair             null, or the pairing above
 //   output           [B, S, N*D]
 // D must be 128 or 256, N/kvN at most 16, all tensors 16-byte aligned.
 // workspace must hold hip_dynamic_sparse_attention_workspace_size() bytes.
@@ -4032,8 +3993,7 @@ HIP_KERNEL_API size_t hip_dynamic_sparse_attention_workspace_size(
     int64_t num_heads,
     int64_t kv_num_heads,
     int64_t head_size,
-    int64_t max_selected,
-    int has_prologue);
+    int64_t max_selected);
 
 HIP_KERNEL_API int hip_dynamic_sparse_attention(
     void* stream,
@@ -4045,8 +4005,6 @@ HIP_KERNEL_API int hip_dynamic_sparse_attention(
     const int32_t* selected_indices,
     const int32_t* selected_counts,
     const int32_t* seqlens_k,
-    const void* gate,
-    const HipDsaPrologue* prologue,
     void* output,
     void* present_key,
     void* present_value,
@@ -4059,15 +4017,13 @@ HIP_KERNEL_API int hip_dynamic_sparse_attention(
     int64_t head_size,
     int64_t capacity,
     int64_t max_selected,
-    float scale,
-    const HipDsaPair* pair);
+    float scale);
 
 // com.microsoft SparseAttentionIndexer, policy_mode=qsa, packed QK.
 // T = fp16 (element_size_bytes 2) or fp32 (4).
 //   query            [B, S, (N+1)*D] T; the last D channels are the key
 //   query/key_norm_weight [D] T
-//   cos/sin_cache    [X, R] (rotary_batched 0) or [B, X, R] (1) T, or with
-//                    rotary_position_ids [rotary_rows, R/2] T base tables
+//   cos/sin_cache    [X, R] (rotary_batched 0) or [B, X, R] (1) T
 //   mask             [B, P+S] int64 or null (all visible)
 //   past_key         [B, past_rows, D] T, P <= past_rows; may be null when
 //                    P == 0
@@ -4075,17 +4031,6 @@ HIP_KERNEL_API int hip_dynamic_sparse_attention(
 //   present_key      [B, present_rows, D] T, P+S <= present_rows; may alias
 //                    past_key when present_rows == past_rows, in which case
 //                    rows < P are not rewritten
-//   rotary_position_ids [id_sections, B, id_rows] int64 or null; frequency f
-//                    of row t reads base row
-//                    rotary_position_ids[rotary_sections[f], b, t]
-//   rotary_sections  host [R/2] bytes, each frequency's MRoPE section,
-//                    < id_sections (with ids only)
-//   selected_counts  [B, S] int32 or null; receives the number of valid
-//                    (non-negative) entries of each selected_indices row
-//   pair_format      0, or 1 (needs selected_counts and no mask): rows with
-//                    P + s + 1 <= token_budget + r - 1 select every position
-//                    and only get their count; the other rows list their
-//                    blocks by ascending index instead of by score
 // D must be 128, 1 <= N <= 8, R even in (0, D], token_budget / r <= 512.
 // workspace must hold hip_sparse_attention_indexer_workspace_size() bytes.
 HIP_KERNEL_API size_t hip_sparse_attention_indexer_workspace_size(
@@ -4123,13 +4068,7 @@ HIP_KERNEL_API int hip_sparse_attention_indexer(
     int64_t token_budget,
     int element_size_bytes,
     float epsilon,
-    float scale,
-    const int64_t* rotary_position_ids,
-    const uint8_t* rotary_sections,
-    int64_t id_sections,
-    int64_t id_rows,
-    int32_t* selected_counts,
-    int pair_format);
+    float scale);
 
 /* =========================================================================
  * Conv — general forward convolution (1D / 2D / 3D spatial)
