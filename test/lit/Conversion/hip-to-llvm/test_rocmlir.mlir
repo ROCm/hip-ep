@@ -34,4 +34,31 @@ module {
         {block_size = 128 : i64, grid_size = 4 : i64, kernel_binary = "ELF"}
     return
   }
+
+  // A split-K kernel accumulates into its output, so rocMLIR asks for it to
+  // start at 0: the fill of the 1x4x4x4 i32 output (64 elements, 4 bytes,
+  // pattern 0) is on the stream before the launch.
+  // CHECK-LABEL: llvm.func @rocmlir_prefill
+  // CHECK-SAME: (%[[CTX:arg0]]: !llvm.ptr,
+  func.func @rocmlir_prefill(
+      %ctx: !hip.context,
+      %x: memref<1x8x4x4xi8, 1>,
+      %w: memref<4x8x3x3xi8, 1>,
+      %y: memref<1x4x4x4xi32, 1>) {
+    // CHECK: llvm.addrspacecast
+    // CHECK: llvm.addrspacecast
+    // CHECK: %[[OUT:.*]] = llvm.addrspacecast
+    // CHECK-DAG: %[[COUNT:.*]] = llvm.mlir.constant(64 : i64) : i64
+    // CHECK-DAG: %[[BYTES:.*]] = llvm.mlir.constant(4 : i64) : i64
+    // CHECK-DAG: %[[ZERO:.*]] = llvm.mlir.constant(0 : i64) : i64
+    // CHECK: llvm.call @wrap_rocmlir_prefill(%[[CTX]], %[[OUT]], %[[COUNT]], %[[BYTES]], %[[ZERO]])
+    // CHECK-NOT: llvm.call
+    // CHECK: llvm.call @wrap_rocmlir(
+    hip.rocmlir(%ctx) @rocMlir1 ins(%x, %w : memref<1x8x4x4xi8, 1>,
+                                             memref<4x8x3x3xi8, 1>)
+        outs(%y : memref<1x4x4x4xi32, 1>)
+        {block_size = 128 : i64, grid_size = 4 : i64, kernel_binary = "ELF",
+         prefill = array<i64: 2, 4, 0>}
+    return
+  }
 }

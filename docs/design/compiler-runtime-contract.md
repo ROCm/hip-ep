@@ -251,6 +251,20 @@ wrap_rocmlir(state, kernel_binary, func_name, block_size, grid_size,
 The runtime wrapper does not depend on the operand count, so a kernel with
 more results needs no runtime change.
 
+A kernel argument that rocMLIR marks `rock.prefill` must hold a given value
+before every launch. A split-K kernel adds its partial sums into its output
+with atomics, so it asks for that output to start at 0. The compile stamps
+these arguments on the op as `prefill` (argument index, bytes per element,
+element bit pattern), and each one lowers to a call before the launch, on the
+same stream:
+
+```text
+wrap_rocmlir_prefill(state, kernargs[index], num_elements, bytes, pattern)
+```
+
+The autotuner fills the same arguments before every candidate launch, so a
+split-K config is timed with its fill.
+
 ---
 
 ## Consumers
