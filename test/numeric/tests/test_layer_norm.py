@@ -311,6 +311,21 @@ class TestSimplifiedLayerNorm:
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=1e-4)
 
+    @pytest.mark.parametrize("seq_len", [1, 3])
+    @pytest.mark.parametrize("hidden", [2560, 3000, 8192, 8194])
+    def test_simplified_layer_norm_row_widths(self, model_runner, hidden, seq_len):
+        """Even rows of 5, 6 (the last partly past the row) and 16 half2 per
+        thread of a 256-thread block, which hold the row in registers, and
+        8194, one pair past that limit, which takes the two-pass kernel."""
+        input_shape = [1, seq_len, hidden]
+        model = _make_simplified_layer_norm_model(input_shape)
+
+        rng = np.random.default_rng(45)
+        x = rng.uniform(-2, 2, input_shape).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=1e-4)
+
     @pytest.mark.parametrize("hidden", ODD_HIDDENS)
     def test_simplified_layer_norm_odd_hidden(self, model_runner, hidden):
         """Odd hidden size forces the scalar fp16 body.

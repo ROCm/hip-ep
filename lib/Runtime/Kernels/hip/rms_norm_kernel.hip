@@ -24,7 +24,9 @@
  *
  * The VEC2 template parameter selects a packed __half2 body. RMS norm is
  * memory-bound, so 2-wide loads/stores are the main lever; the launcher picks
- * it only when norm_size is even and every pointer is 4-byte aligned.
+ * it only when norm_size is even and every pointer is 4-byte aligned. Such
+ * rows of up to 16 half2 per thread run hip_rms_norm_row_kernel instead, which
+ * reads the row once and computes the same result.
  *
  * Structurally mirrors layer_norm_kernel.hip (same block size, same reduction
  * shape) minus the mean subtraction and the bias term.
@@ -180,6 +182,81 @@ void hip_rms_norm_narrow_kernel(const __half *__restrict__ input,
     result.x = values[i].x * inv_rms * gain.x;
     result.y = values[i].y * inv_rms * gain.y;
     y[lane + i * kWave] = __float22half2_rn(result);
+  }
+}
+
+// One block per row, as hip_rms_norm_kernel<__half, true>, for rows of
+// PAIRS = ceil(norm_size / 2 / 256) half2 per thread. A single-row decode
+// norm is latency-bound: the two-pass kernel waits on the row twice and on
+// eight barriers in between. Here each thread loads its pairs and their gains
+// once, into registers; only the last pair can be past the row, so the others
+// are loaded unconditionally and issue together. After one barrier every wave
+// sums the 256 partials itself, in the original tree's order: the three
+// cross-wave levels (strides 128, 64, 32) from shared memory, the last five
+// with shuffles. Per-thread partials, that order and the output expression
+// are the two-pass kernel's, so the result is identical to it.
+template <int PAIRS>
+__global__ __launch_bounds__(kRmsNormBlockSize)
+void hip_rms_norm_row_kernel(const __half *__restrict__ input,
+                             const __half *__restrict__ scale,
+                             __half *__restrict__ output, int64_t outer,
+                             int64_t norm_size, int64_t scale_rows,
+                             float epsilon) {
+  constexpr int kWave = 32;
+  const int64_t row = blockIdx.x;
+  if (row >= outer)
+    return;
+  const int64_t pairs = norm_size / 2;
+  const int tid = threadIdx.x;
+  const __half2 *x = reinterpret_cast<const __half2 *>(input + row * norm_size);
+  const __half2 *g = reinterpret_cast<const __half2 *>(
+      scale + (row % scale_rows) * norm_size);
+  __half2 *y = reinterpret_cast<__half2 *>(output + row * norm_size);
+  auto in_row = [&](int j) __attribute__((always_inline)) {
+    return j < PAIRS - 1 ||
+           tid + static_cast<int64_t>(j) * kRmsNormBlockSize < pairs;
+  };
+
+  float2 values[PAIRS];
+  float2 gains[PAIRS];
+#pragma unroll
+  for (int j = 0; j < PAIRS; ++j) {
+    if (in_row(j)) {
+      const int64_t i = tid + static_cast<int64_t>(j) * kRmsNormBlockSize;
+      values[j] = __half22float2(x[i]);
+      gains[j] = __half22float2(g[i]);
+    }
+  }
+  float local_sumsq = 0.0f;
+#pragma unroll
+  for (int j = 0; j < PAIRS; ++j) {
+    if (in_row(j))
+      local_sumsq += values[j].x * values[j].x + values[j].y * values[j].y;
+  }
+
+  __shared__ float s_partial[kRmsNormBlockSize];
+  s_partial[tid] = local_sumsq;
+  __syncthreads();
+  const int l = tid % kWave;
+  float sumsq = ((s_partial[l] + s_partial[l + 128]) +
+                 (s_partial[l + 64] + s_partial[l + 192])) +
+                ((s_partial[l + 32] + s_partial[l + 160]) +
+                 (s_partial[l + 96] + s_partial[l + 224]));
+#pragma unroll
+  for (int offset = 16; offset > 0; offset >>= 1)
+    sumsq += __shfl_down(sumsq, offset, kWave);
+  sumsq = __shfl(sumsq, 0, kWave);
+  const float inv_rms = rsqrtf(sumsq / static_cast<float>(norm_size) + epsilon);
+
+#pragma unroll
+  for (int j = 0; j < PAIRS; ++j) {
+    if (in_row(j)) {
+      const int64_t i = tid + static_cast<int64_t>(j) * kRmsNormBlockSize;
+      float2 r;
+      r.x = values[j].x * inv_rms * gains[j].x;
+      r.y = values[j].y * inv_rms * gains[j].y;
+      y[i] = __float22half2_rn(r);
+    }
   }
 }
 
@@ -462,6 +539,34 @@ extern "C" int hip_rms_norm(void *stream, const void *input, const void *scale,
                            static_cast<__half *>(output), outer, scale_rows,
                            epsilon);
       }
+    } else if (vec2 && norm_size / 2 <= 16 * kRmsNormBlockSize) {
+      const int64_t per_thread =
+          (norm_size / 2 + kRmsNormBlockSize - 1) / kRmsNormBlockSize;
+#define RMS_ROW_CASE(P)                                                        \
+  hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_rms_norm_row_kernel<P>), grid, block, \
+                     0, hip_stream, static_cast<const __half *>(input),        \
+                     static_cast<const __half *>(scale),                       \
+                     static_cast<__half *>(output), outer, norm_size,          \
+                     scale_rows, epsilon)
+      switch (per_thread) {
+      case 1: RMS_ROW_CASE(1); break;
+      case 2: RMS_ROW_CASE(2); break;
+      case 3: RMS_ROW_CASE(3); break;
+      case 4: RMS_ROW_CASE(4); break;
+      case 5: RMS_ROW_CASE(5); break;
+      case 6: RMS_ROW_CASE(6); break;
+      case 7: RMS_ROW_CASE(7); break;
+      case 8: RMS_ROW_CASE(8); break;
+      case 9: RMS_ROW_CASE(9); break;
+      case 10: RMS_ROW_CASE(10); break;
+      case 11: RMS_ROW_CASE(11); break;
+      case 12: RMS_ROW_CASE(12); break;
+      case 13: RMS_ROW_CASE(13); break;
+      case 14: RMS_ROW_CASE(14); break;
+      case 15: RMS_ROW_CASE(15); break;
+      default: RMS_ROW_CASE(16); break;
+      }
+#undef RMS_ROW_CASE
     } else if (vec2) {
       hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_rms_norm_kernel<__half, true>),
                          grid, block, 0, hip_stream,
