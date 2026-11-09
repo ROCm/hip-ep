@@ -166,6 +166,10 @@ extern "C" int hip_gather_nd(void *stream, const void *input,
       hip_dtype, data_rank, indices_rank, K, batch_dims, (long long)slice_size,
       (long long)total_slices, (long long)num_output_elements);
 
+  // Drop a sticky error from an earlier launch so this kernel's status
+  // is the one hipGetLastError reports.
+  (void)hipGetLastError();
+
   switch (hip_dtype) {
   case HIP_DTYPE_FLOAT16:
     hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_gather_nd_kernel<__half>),
