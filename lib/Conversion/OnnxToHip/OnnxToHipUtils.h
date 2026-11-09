@@ -551,6 +551,8 @@ void populateIsNaNConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
 void populateNotConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
+void populateIsInfConversionPatterns(RewritePatternSet &patterns,
+                                     MLIRContext *ctx);
 void populateCosConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateErfConversionPatterns(RewritePatternSet &patterns,

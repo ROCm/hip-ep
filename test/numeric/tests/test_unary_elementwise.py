@@ -3,7 +3,7 @@
 # Licensed under the MIT License.
 #
 
-"""Tests for unary elementwise ops: Neg, Sign, Cos, Sin, Not, IsNaN.
+"""Tests for unary elementwise ops: Neg, Sign, Cos, Sin, Not, IsNaN, IsInf.
 
 These ops share the same
 host-side shape: one input, one output, identical shape, no broadcasting.
@@ -18,6 +18,7 @@ lib/Runtime/real/<op>.cpp):
     Sin   : f16, f32           (trig kernels are float-only)
     Not   : bool only          (treated as 1-byte stream)
     IsNaN : f16, f32, f64      (bool output, one byte per element)
+    IsInf : f16, f32, f64       (output: bool)
 
 All tests cover a small shape (smoke) plus a llama-3.1-8B-style
 [1, S, 4096] shape for S in {1, 128}, which is the dominant tensor
@@ -28,7 +29,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from onnx import helper
+from onnx import TensorProto, helper
 
 from framework.comparator import compare_outputs
 from framework.onnx_utils import make_model_from_nodes, np_to_onnx_type
@@ -234,5 +235,59 @@ class TestIsNaN:
         rng = np.random.default_rng(112)
         x = rng.uniform(-1.0, 1.0, shape).astype(np.float16)
         x[0, 0, 0, 0] = np.nan
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0)
+
+
+def _make_isinf_model(
+    dtype: np.dtype,
+    shape: list[int],
+    detect_negative: int = 1,
+    detect_positive: int = 1,
+):
+    tp = np_to_onnx_type(dtype)
+    X = helper.make_tensor_value_info("X", tp, list(shape))
+    Y = helper.make_tensor_value_info("Y", TensorProto.BOOL, list(shape))
+    node = helper.make_node(
+        "IsInf",
+        ["X"],
+        ["Y"],
+        detect_negative=detect_negative,
+        detect_positive=detect_positive,
+    )
+    return make_model_from_nodes([node], [X], [Y])
+
+
+# ---------------------------------------------------------------------------
+# IsInf : y = isinf(x), bool output
+# ---------------------------------------------------------------------------
+class TestIsInf:
+    @pytest.mark.parametrize("dtype", [np.float16, np.float32, np.float64])
+    def test_isinf(self, model_runner, dtype):
+        shape = [4, 8]
+        model = _make_isinf_model(dtype, shape)
+        x = np.array(
+            [[0.0, 1.0, np.inf, -np.inf], [np.nan, -1.0, 2.0, -2.0]],
+            dtype=dtype,
+        )
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0)
+
+    @pytest.mark.parametrize("dtype", [np.float16, np.float32])
+    def test_isinf_detect_positive_only(self, model_runner, dtype):
+        shape = [4]
+        model = _make_isinf_model(dtype, shape, detect_negative=0, detect_positive=1)
+        x = np.array([0.0, np.inf, -np.inf, 1.0], dtype=dtype)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0)
+
+    @pytest.mark.parametrize("seq_len", SEQ_LENS)
+    def test_isinf_llama_shape(self, model_runner, seq_len):
+        shape = [1, seq_len, HIDDEN]
+        model = _make_isinf_model(np.float16, shape)
+        rng = np.random.default_rng(111)
+        x = rng.uniform(-3.0, 3.0, shape).astype(np.float16)
+        x[0, 0, 0] = np.inf
+        x[0, 0, 1] = -np.inf
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=0)

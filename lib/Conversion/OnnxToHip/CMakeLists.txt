@@ -82,6 +82,7 @@ add_library(OnnxToHip STATIC
   MaxConversion.cpp
   IsNaNConversion.cpp
   NotConversion.cpp
+  IsInfConversion.cpp
   CosConversion.cpp
   ErfConversion.cpp
   SinConversion.cpp

@@ -215,6 +215,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     DivOp::attachInterface<HipDstBufferizableModel<DivOp>>(*ctx);
     IsNaNOp::attachInterface<HipDstBufferizableModel<IsNaNOp>>(*ctx);
     NotOp::attachInterface<HipDstBufferizableModel<NotOp>>(*ctx);
+    IsInfOp::attachInterface<HipDstBufferizableModel<IsInfOp>>(*ctx);
     OrOp::attachInterface<HipDstBufferizableModel<OrOp>>(*ctx);
     AndOp::attachInterface<HipDstBufferizableModel<AndOp>>(*ctx);
     CosOp::attachInterface<HipDstBufferizableModel<CosOp>>(*ctx);
