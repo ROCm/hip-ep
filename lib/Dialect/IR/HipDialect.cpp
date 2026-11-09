@@ -2603,6 +2603,22 @@ void ResizeOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
+LogicalResult ResizeOp::verify() {
+  if (getRuntimeScales().empty())
+    return success();
+  // Runtime scales are indexed by window axis, so the launch split cannot be
+  // replanned from compile-time scales during lowering.
+  if (getScalesAttr())
+    return emitOpError("runtime_scales and scales are mutually exclusive");
+  auto spatialAttr = (*this)->getAttrOfType<IntegerAttr>("spatial_rank");
+  if (!spatialAttr || !(*this)->hasAttr("prefix_count"))
+    return emitOpError("runtime_scales requires prefix_count and spatial_rank");
+  if (static_cast<int64_t>(getRuntimeScales().size()) != spatialAttr.getInt())
+    return emitOpError("expected one runtime scale per window axis (")
+           << spatialAttr.getInt() << "), got " << getRuntimeScales().size();
+  return success();
+}
+
 //===----------------------------------------------------------------------===//
 // GridSampleOp: ins(input, grid), outs(output)
 //===----------------------------------------------------------------------===//

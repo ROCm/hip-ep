@@ -47,10 +47,12 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/Interfaces/DataLayoutInterfaces.h"
 #include "mlir/Interfaces/ViewLikeInterface.h"
 
+#include "llvm/ADT/APInt.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Support/Debug.h"
@@ -210,16 +212,15 @@ static bool isHostScalarCandidate(memref::AllocOp allocOp) {
 }
 
 /// Return the initial value of the global \p op reads if it is a tiny inline
-/// constant read by a HIP op, or null.
+/// constant read by a HIP op, or null. Signed and unsigned integers are
+/// included; the fill casts them, because `arith.constant` is signless.
 static DenseElementsAttr getHostConstantCandidate(memref::GetGlobalOp op) {
   MemRefType type = op.getType();
   if (!type.hasStaticShape() || !type.getLayout().isIdentity() ||
       type.getNumElements() > 16)
     return {};
-  // The host fill is `arith.constant` + `memref.store`, and `arith.constant`
-  // only produces signless integers.
   Type elem = type.getElementType();
-  if (!elem.isSignlessIntOrIndex() && !isa<FloatType>(elem))
+  if (!elem.isIntOrIndex() && !isa<FloatType>(elem))
     return {};
   auto global = SymbolTable::lookupNearestSymbolFrom<memref::GlobalOp>(
       op, op.getNameAttr());
@@ -341,8 +342,22 @@ static void materialize(FunctionScratch &plan, int64_t total) {
     for (int64_t linear = 0; linear < type.getNumElements(); ++linear) {
       Attribute elem = init.isSplat() ? init.getSplatValue<Attribute>()
                                       : *(values.begin() + linear);
-      Value value =
-          arith::ConstantOp::create(builder, opLoc, cast<TypedAttr>(elem));
+      // arith.constant only takes signless integers. A signed or unsigned
+      // element (a QLinear ui8 zero point) is built at the same width and
+      // cast back; the LLVM lowering maps both to the same integer type.
+      Value value;
+      auto intElem = dyn_cast<IntegerType>(type.getElementType());
+      if (intElem && !intElem.isSignless()) {
+        APInt bits = cast<IntegerAttr>(elem).getValue();
+        Value raw = arith::ConstantOp::create(
+            builder, opLoc,
+            builder.getIntegerAttr(builder.getIntegerType(intElem.getWidth()),
+                                   bits));
+        value = UnrealizedConversionCastOp::create(builder, opLoc, intElem, raw)
+                    .getResult(0);
+      } else {
+        value = arith::ConstantOp::create(builder, opLoc, cast<TypedAttr>(elem));
+      }
       SmallVector<Value> indices(shape.size());
       int64_t rest = linear;
       for (int64_t d = static_cast<int64_t>(shape.size()) - 1; d >= 0; --d) {

@@ -13,6 +13,7 @@
 
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/APInt.h"
+#include "llvm/ADT/STLExtras.h"
 
 namespace mlir {
 namespace hip {
@@ -50,8 +51,9 @@ namespace {
 //      `hip.readback_scalar` (the shape may be in device memory) +
 //      `arith.index_cast` and the fill value is built as a scalar
 //      `arith.constant`. A dynamic-shaped result is filled on the device by
-//      `hip.expand` of a rank-0 fill value; a static result (or an element
-//      type the expand kernel lacks) is produced via `tensor.splat`.
+//      `hip.expand`, which copies elements by width. A static result, an
+//      element width the expand kernel lacks, or a result only Trilu reads,
+//      uses `tensor.splat`.
 
 /// Return the dense-elements attribute backing \p value if it can be
 /// determined at compile time (the same forms recognised by ReshapeConversion
@@ -442,10 +444,15 @@ struct ConstantOfShapeDynamic : public mlir::RewritePattern {
 
     // A dynamic tensor.splat bufferizes to host loops that store into a
     // GPU-pool buffer, which faults when the pool is device memory. Fill on
-    // the device instead: hip.expand broadcasts a rank-0 fill value (built as
-    // in ConstantOfShapeAsScalar) to the runtime shape. Element types the
-    // expand kernel lacks keep the splat.
-    if (!resultType.hasStaticShape() && isExpandFillElementType(elemType)) {
+    // the device instead: hip.expand broadcasts a rank-0 fill value to the
+    // runtime shape. It copies elements by width, so every 1/2/4/8-byte
+    // element type takes this path. Trilu consumers keep the splat: they
+    // read its scalar and the splat dies.
+    bool onlyTriluUsers = llvm::all_of(op->getUsers(), [](mlir::Operation *u) {
+      return u->getName().getStringRef() == "onnx.Trilu";
+    });
+    if (!resultType.hasStaticShape() && isExpandFillElementType(elemType) &&
+        !(onlyTriluUsers && !op->use_empty())) {
       if (mlir::succeeded(ctxOrFailure)) {
         auto scalarTensorTy = mlir::RankedTensorType::get({}, elemType);
         mlir::Value empty =
