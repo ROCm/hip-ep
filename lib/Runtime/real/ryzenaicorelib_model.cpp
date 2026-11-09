@@ -199,6 +199,11 @@ std::vector<std::string> model_names(const CorelibApi &api) {
     while (pos <= listed.size()) {
       size_t end = listed.find(',', pos);
       std::string n = listed.substr(pos, end - pos);
+      // cmd keeps a trailing space after `set VAR=value `.
+      const size_t first = n.find_first_not_of(" \t");
+      n = first == std::string::npos
+              ? std::string()
+              : n.substr(first, n.find_last_not_of(" \t") - first + 1);
       if (!n.empty())
         names.push_back(n);
       if (end == std::string::npos)
@@ -503,6 +508,11 @@ std::shared_ptr<ModelSession> create_model_session(const std::string &arch,
     if (auto s =
             try_model(*api, name, path, max_sequence_length, graph, &reason))
       return s;
+    // One line for every model: a model listing all its problems with the
+    // file would otherwise fill the screen.
+    constexpr size_t kMaxReason = 200;
+    if (reason.size() > kMaxReason)
+      reason = reason.substr(0, kMaxReason) + "...";
     refusals += (refusals.empty() ? "" : "; ") + name + ": " + reason;
   }
   *why = "no corelib model takes " + path + " (" + refusals + ")";
