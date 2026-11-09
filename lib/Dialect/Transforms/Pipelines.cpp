@@ -559,6 +559,9 @@ void mlir::hip::buildRocMlirPipeline(
   // rocMLIR has no transposed-convolution anchor, so split conv_transpose into
   // plain convolutions before anything tries to outline a kernel around it.
   pm.addPass(mlir::hip::createDecomposeConvTransposePass());
+  // hip.multi_head_attention is not an outlining anchor, so split the static
+  // form into matmuls before fusion.
+  pm.addPass(mlir::hip::createDecomposeMultiHeadAttentionPass());
   addRocMlirFusionPasses(pm, FuseRocMlirAnchorPassOptions());
   pm.addPass(mlir::hip::createConvertHipToTosaPass());
   pm.addPass(mlir::createCanonicalizerPass());

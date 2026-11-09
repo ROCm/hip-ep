@@ -172,6 +172,7 @@ ONNX-to-HIP tail; the others do not. The fusion design is in
 | Name | Anchor | One-liner |
 |---|---|---|
 | `hip-decompose-conv-transpose` | func.func | Rewrite `hip.conv_transpose` into stride-1 `hip.conv`s, one per stride residue (MIOpen backward-data v4r1). Residues with equal tap counts, or unequal ones whose zero-padded filters cost at most twice the real taps, stack on the output-channel axis into one convolution with the constant bias tiled into it; its result is interleaved by an expand, a transpose (DepthToSpace) and a collapse, then cropped. Other residues are one convolution each, with the bias, reassembled with `tensor.insert_slice`. Reads the filter from an inline or file-backed `hip.constant`. Rank-3 inputs expand to a unit-height rank-4 conv so dynamic batch and width stay legal. Leaves unsupported cases (grouped, dilated, rank-4 dynamic, non-constant, memory-address-backed or non-f16/bf16/f32 weights, stride > kernel, > 64 residues) for the MIOpen path. Also runs in the ONNX-to-HIP tail, before shape inference. |
+| `hip-decompose-multi-head-attention` | func.func | Rewrite a static f16, bf16, or f32 `hip.multi_head_attention` with separate query, key, and value into two `hip.matmul`s, a scale `hip.mul`, and `hip.miopen.softmax`. Packed QKV, bias, masks, past key or value, causal masking, dynamic shapes, and any other float type stay on the runtime kernel. |
 | `hip-hoist-pointwise-over-views` | func.func | Move a pointwise op whose other inputs are constant scalars above a chain of single-use element-move views over a single-use conv, matmul or gemm result, so the anchor fusion takes it into the epilogue. The anchor result may have at most 50% more elements than the op's input. |
 | `hip-rocmlir-prepare-quant` | func.func | Sink each per-tensor `hip.quantize_linear` back through element-move ops to its dequantizes, split each QLinearConv / QLinearMatMul with ui8 weights or a non-zero weight zero point into integer ops on `w - offset` and over the shifted zero point, then rebias each ui8 tree that reaches an integer anchor to i8. |
 | `hip-fuse-rocmlir-elementwise` | func.func | Group the pointwise ops, transposes, static reshapes and per-tensor quantizes and dequantizes into `hip.rocmlir_elementwise` modules that an anchor can take whole. |
@@ -180,16 +181,19 @@ ONNX-to-HIP tail; the others do not. The fusion design is in
 | `hip-rocmlir-fusion-report` | module | Append one JSON line for each kernel and host function to the `report` file. |
 | `convert-hip-to-tosa` | func.func | Lower the outlined kernel bodies from HIP ops to TOSA. |
 
-Order matters: `hip-decompose-conv-transpose` must run **before** the fusion,
-because rocMLIR has no transposed-convolution anchor and would otherwise refuse
-to outline the op at all. `hip-hoist-pointwise-over-views` then moves the
-activation after the interleave and crop onto the convolution's result.
-`hip-rocmlir-prepare-quant` fixes the quantize trees
+Order matters: `hip-decompose-conv-transpose` and
+`hip-decompose-multi-head-attention` must run **before** the fusion.
+rocMLIR has no transposed-convolution anchor, and
+`hip.multi_head_attention` is not an outlining anchor, so both would
+otherwise stay outside a `rock.kernel`. `hip-hoist-pointwise-over-views`
+then moves the activation after the interleave and crop onto the
+convolution's result. `hip-rocmlir-prepare-quant` fixes the quantize trees
 before the elementwise pass groups them, and the anchor pass plans its kernels
 on those modules. The registered pipeline runs
 
 ```
 func.func(hip-decompose-conv-transpose)
+func.func(hip-decompose-multi-head-attention)
 func.func(hip-hoist-pointwise-over-views)
 func.func(hip-rocmlir-prepare-quant)
 func.func(hip-fuse-rocmlir-elementwise)
