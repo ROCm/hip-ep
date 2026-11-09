@@ -320,6 +320,9 @@ private:
       return v;
     if (!ty.isIndex() && !ty.isSignlessInteger())
       return failure();
+    // A bool is 0/1 (as in the dense-constant path), not 0/-1.
+    if (v.getType().isInteger(1))
+      return b.createOrFold<arith::IndexCastUIOp>(branch.getLoc(), ty, v);
     return b.createOrFold<arith::IndexCastOp>(branch.getLoc(), ty, v);
   }
 

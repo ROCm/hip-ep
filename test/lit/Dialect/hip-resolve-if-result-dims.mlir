@@ -413,3 +413,65 @@ module {
 // CHECK: %[[SIZE:.*]] = arith.select %[[COND]], %[[N]], %{{.*}} : index
 // CHECK: tensor.empty(%[[SIZE]]) : tensor<?x8x64xf32>
 // CHECK-NOT: hip.if_result_dim
+
+// -----
+
+// A bool shape predicate packed with from_elements is 0/1, like a dense bool
+// constant: comparing it with dense<true> must see true == true, so the
+// predicate is zero-extended (index_castui), not sign-extended to -1.
+module {
+  func.func @bool_from_elements(%ctx: !hip.context, %c: i1,
+                                %x: tensor<?x?xf32>) -> tensor<?x8x64xf32> {
+    %d0 = hip.if_result_dim(%c) captures(%x : tensor<?x?xf32>)
+        then @bool_then else @bool_else {result_index = 0 : i32, dim = 0 : i64}
+    %init = tensor.empty(%d0) : tensor<?x8x64xf32>
+    %r = hip.if(%ctx, %c) outs(%init : tensor<?x8x64xf32>)
+        captures(%x : tensor<?x?xf32>) -> (tensor<?x8x64xf32>)
+        then @bool_then else @bool_else {num_outputs = 1 : i32}
+    return %r : tensor<?x8x64xf32>
+  }
+
+  func.func private @bool_then(%ctx: !hip.context, %x: tensor<?x?xf32>)
+      -> tensor<?x8x64xf32> {
+    %c0 = arith.constant 0 : index
+    %n = tensor.dim %x, %c0 : tensor<?x?xf32>
+    %pos = arith.cmpi sgt, %n, %c0 : index
+    %t = arith.constant true
+    %mask = tensor.from_elements %pos, %t, %t : tensor<3xi1>
+    %trues = arith.constant dense<true> : tensor<3xi1>
+    %eq_init = tensor.empty() : tensor<3xui8>
+    %eq = hip.equal(%ctx) ins(%mask, %trues : tensor<3xi1>, tensor<3xi1>)
+        outs(%eq_init : tensor<3xui8>) : tensor<3xui8>
+    %n64 = arith.index_cast %n : index to i64
+    %c8 = arith.constant 8 : i64
+    %c64 = arith.constant 64 : i64
+    %shape = tensor.from_elements %n64, %c8, %c64 : tensor<3xi64>
+    %fallback = arith.constant dense<[1, 8, 64]> : tensor<3xi64>
+    %w_init = tensor.empty() : tensor<3xi64>
+    %w = hip.where(%ctx) ins(%eq, %shape, %fallback
+        : tensor<3xui8>, tensor<3xi64>, tensor<3xi64>)
+        outs(%w_init : tensor<3xi64>) : tensor<3xi64>
+    %y = tensor.reshape %x(%w)
+        : (tensor<?x?xf32>, tensor<3xi64>) -> tensor<?x8x64xf32>
+    return %y : tensor<?x8x64xf32>
+  }
+
+  func.func private @bool_else(%ctx: !hip.context, %x: tensor<?x?xf32>)
+      -> tensor<?x8x64xf32> {
+    %shape = arith.constant dense<[4, 8, 64]> : tensor<3xi64>
+    %y = tensor.reshape %x(%shape)
+        : (tensor<?x?xf32>, tensor<3xi64>) -> tensor<?x8x64xf32>
+    return %y : tensor<?x8x64xf32>
+  }
+}
+
+// CHECK-LABEL: func.func @bool_from_elements(
+// CHECK-SAME: %{{.*}}: !hip.context, %[[COND:.*]]: i1, %[[X:.*]]: tensor<?x?xf32>)
+// CHECK: %[[N:.*]] = tensor.dim %[[X]], %{{.*}} : tensor<?x?xf32>
+// CHECK: %[[POS:.*]] = arith.cmpi sgt, %[[N]], %{{.*}} : index
+// CHECK-NOT: arith.index_cast %[[POS]] : i1 to index
+// CHECK: %[[B:.*]] = arith.index_castui %[[POS]] : i1 to index
+// CHECK: %[[EQ:.*]] = arith.cmpi eq, %[[B]], %{{.*}} : index
+// CHECK: %[[SIZE:.*]] = arith.select %[[COND]], %{{.*}}, %{{.*}} : index
+// CHECK: tensor.empty(%[[SIZE]]) : tensor<?x8x64xf32>
+// CHECK-NOT: hip.if_result_dim
