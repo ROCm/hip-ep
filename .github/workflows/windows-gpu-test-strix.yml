@@ -25,7 +25,7 @@ jobs:
 
     env:
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
-      STRIX_HF_MODELS: "amd/Qwen3.8-27B_gpuep_1.0_gpu_128"
+      STRIX_HF_MODELS: "amd/Qwen3.5-9B_gpuep_1.0_gpu_128"
 
     steps:
       - name: Clean workspace
