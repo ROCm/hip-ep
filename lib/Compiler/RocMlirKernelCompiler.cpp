@@ -152,10 +152,37 @@ bool buildBackendPipelineFor(OpPassManager &pm, StringRef arch,
   return true;
 }
 
+// One `rock.prefill` entry, {index, value}. The value has the buffer's
+// element type, and the fill repeats its bit pattern. Nullopt for a value or
+// a width that the fill cannot write.
+static std::optional<KernelPrefill> parsePrefill(Attribute entry) {
+  auto dict = dyn_cast<DictionaryAttr>(entry);
+  if (!dict)
+    return std::nullopt;
+  auto index = dyn_cast_if_present<IntegerAttr>(dict.get("index"));
+  Attribute value = dict.get("value");
+  APInt bits;
+  if (auto integer = dyn_cast_if_present<IntegerAttr>(value))
+    bits = integer.getValue();
+  else if (auto real = dyn_cast_if_present<FloatAttr>(value))
+    bits = real.getValue().bitcastToAPInt();
+  else
+    return std::nullopt;
+  unsigned width = bits.getBitWidth();
+  if (!index || (width != 8 && width != 16 && width != 32))
+    return std::nullopt;
+  KernelPrefill prefill;
+  prefill.argIndex = index.getInt();
+  prefill.elementBytes = width / 8;
+  prefill.pattern = bits.getZExtValue();
+  return prefill;
+}
+
 // Walk the compiled module for the single gpu.binary object and pull out its
-// ELF blob plus the {block, grid} launch geometry.
+// ELF blob, the {block, grid} launch geometry and the arguments to pre-fill.
 bool extractCompiledKernel(ModuleOp mod, CompiledKernel &out) {
   unsigned count = 0;
+  bool unsupportedPrefill = false;
   mod.walk([&](gpu::BinaryOp binary) {
     auto object = llvm::cast<gpu::ObjectAttr>(binary.getObjects()[0]);
     StringRef blob = object.getObject().getValue();
@@ -169,10 +196,23 @@ bool extractCompiledKernel(ModuleOp mod, CompiledKernel &out) {
         continue;
       out.blockSize = block.getInt();
       out.gridSize = grid.getInt();
+      out.prefills.clear();
+      if (auto prefills =
+              kernel.getAttr<ArrayAttr>(rock::PrefillAttr::getMnemonic())) {
+        for (Attribute entry : prefills) {
+          if (std::optional<KernelPrefill> prefill = parsePrefill(entry))
+            out.prefills.push_back(*prefill);
+          else
+            unsupportedPrefill = true;
+        }
+      }
       ++count;
     }
   });
-  return count == 1 && !out.binary.empty();
+  if (unsupportedPrefill)
+    llvm::errs() << "error: rocMLIR kernel needs a pre-fill that is not a "
+                    "1-, 2- or 4-byte integer or float value\n";
+  return count == 1 && !out.binary.empty() && !unsupportedPrefill;
 }
 
 #if defined(HIPDNN_EP_LINK_HIP_HOST) && defined(HIPDNN_HIP_RUNTIME_LIB)
@@ -390,13 +430,14 @@ OwningOpRef<ModuleOp> takeRocMlirKernelsAsTosaModule(ModuleOp module,
   // from here on -- its body ships as an embedded binary and the symbol goes
   // away -- so there is nothing to preserve, and an outlined kernel is
   // IsolatedFromAbove, so no enclosing SSA value or module attribute has to
-  // travel with it (rock.arch rides on the func, put there by fuse-rocmlir).
+  // travel with it (rock.arch rides on the func, put there by the rocMLIR
+  // fusion).
   for (auto func : llvm::make_early_inc_range(module.getOps<func::FuncOp>())) {
     if (!func->hasAttr("rock.kernel"))
       continue;
-    // The rock tuning passes read rock.arch from the func, and fuse-rocmlir
-    // leaves it unset when it ran without an arch option. Point it at the
-    // arch we are actually compiling for, or the tuning parameters get
+    // The rock tuning passes read rock.arch from the func, and the rocMLIR
+    // fusion leaves it unset when it ran without an arch option. Point it at
+    // the arch we are actually compiling for, or the tuning parameters get
     // chosen for a different chip than the backend emits code for.
     if (!arch.empty())
       func->setAttr("rock.arch", builder.getStringAttr(arch));
@@ -554,7 +595,8 @@ compileAndEmbedRocMlirKernels(ModuleOp module,
   // Past TOSA, a conv or gemm that rocMLIR cannot compile still fails the
   // module. An elementwise kernel can fold away (hip.max(%x, %x)) or fail in
   // the backend (an i64 chain: rock.blockwise_load/store stop at 32-bit
-  // integers); that kernel runs as its hip ops.
+  // integers); that kernel runs as its hip ops. With `strictElementwise`, only
+  // a kernel that folds away does.
   OwningOpRef<ModuleOp> hipKernels = ModuleOp::create(module.getLoc());
   for (auto func : module.getOps<func::FuncOp>())
     if (func->hasAttr("rock.kernel"))
@@ -563,15 +605,20 @@ compileAndEmbedRocMlirKernels(ModuleOp module,
     auto func = hipKernels->lookupSymbol<func::FuncOp>(name);
     return func && func->hasAttr("rock.elementwise");
   };
+  auto canFallBack = [&](StringRef name) {
+    return !options.strictElementwise && elementwiseKernel(name);
+  };
   llvm::StringSet<> onHipPath;
-  auto runOnHipPath = [&](StringRef name) {
+  auto runOnHipPath = [&](StringRef name, StringRef reason) {
     inlineRocMlirKernel(module, hipKernels->lookupSymbol<func::FuncOp>(name));
     onHipPath.insert(name);
+    if (options.onHipPath)
+      options.onHipPath(name, reason);
   };
   auto fallBack = [&](StringRef name, StringRef stage) {
     llvm::errs() << "warning: rocMLIR " << stage << " failed for kernel '"
                  << name << "'; running its hip ops instead\n";
-    runOnHipPath(name);
+    runOnHipPath(name, stage);
   };
 
   // Lift the kernels out of `module` and convert them all to tosa in one go.
@@ -616,7 +663,7 @@ compileAndEmbedRocMlirKernels(ModuleOp module,
     // only see anything once the kernel is in rock form. Handing the callback
     // raw tosa instead gave --autotune an empty search space.
     if (!runRocMlirHighLevelPipeline(*single)) {
-      if (!elementwiseKernel(name))
+      if (!canFallBack(name))
         return module.emitError()
                << "rocMLIR high-level pipeline failed for kernel '" << name
                << "'";
@@ -629,7 +676,7 @@ compileAndEmbedRocMlirKernels(ModuleOp module,
         *options.log << options.logPrefix << " kernel '" << name
                      << "' has no computation left after lowering; running "
                         "its hip ops instead\n";
-      runOnHipPath(name);
+      runOnHipPath(name, "folded");
       continue;
     }
 
@@ -638,7 +685,7 @@ compileAndEmbedRocMlirKernels(ModuleOp module,
                   ? options.compileOne(*single, name, out)
                   : compileRocMlirDefaultPerfConfig(*single, options.arch, out);
     if (!ok) {
-      if (!elementwiseKernel(name))
+      if (!canFallBack(name))
         return module.emitError()
                << "rocMLIR failed to compile kernel '" << name << "'";
       fallBack(name, "compile");
@@ -655,7 +702,7 @@ compileAndEmbedRocMlirKernels(ModuleOp module,
       continue;
     auto it = compiledByKernel.find(name);
     if (it == compiledByKernel.end() || it->second.binary.empty()) {
-      if (!elementwiseKernel(name))
+      if (!canFallBack(name))
         return module.emitError() << "rocMLIR deferred kernel compiles failed";
       compiledByKernel.erase(name);
       fallBack(name, "deferred compile");
@@ -684,6 +731,11 @@ compileAndEmbedRocMlirKernels(ModuleOp module,
         context, StringRef(kernel.binary.data(), kernel.binary.size())));
     op.setGridSizeAttr(IntegerAttr::get(i64, kernel.gridSize));
     op.setBlockSizeAttr(IntegerAttr::get(i64, kernel.blockSize));
+    SmallVector<int64_t> prefill;
+    for (const KernelPrefill &entry : kernel.prefills)
+      llvm::append_values(prefill, entry.argIndex, entry.elementBytes,
+                          static_cast<int64_t>(entry.pattern));
+    op.setPrefill(prefill);
     totalBytes += kernel.binary.size();
     return WalkResult::advance();
   });

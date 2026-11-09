@@ -550,11 +550,35 @@ void mlir::hip::buildRocMlirPipeline(
   // rocMLIR has no transposed-convolution anchor, so split conv_transpose into
   // plain convolutions before anything tries to outline a kernel around it.
   pm.addPass(mlir::hip::createDecomposeConvTransposePass());
+  // hip.multi_head_attention is not an outlining anchor, so split the static
+  // form into matmuls before fusion.
   pm.addPass(mlir::hip::createDecomposeMultiHeadAttentionPass());
-  pm.addPass(mlir::hip::createFuseROCMlirPass());
-  pm.addPass(func::createDuplicateFunctionEliminationPass());
+  addRocMlirFusionPasses(pm, FuseRocMlirAnchorPassOptions());
   pm.addPass(mlir::hip::createConvertHipToTosaPass());
   pm.addPass(mlir::createCanonicalizerPass());
+}
+
+void mlir::hip::addRocMlirFusionPasses(
+    OpPassManager &pm, const FuseRocMlirAnchorPassOptions &fuseOptions,
+    llvm::StringRef reportPath) {
+  pm.addNestedPass<func::FuncOp>(createRocMlirPrepareQuantPass());
+  pm.addNestedPass<func::FuncOp>(createFuseRocMlirElementwisePass());
+  pm.addNestedPass<func::FuncOp>(createFuseRocMlirAnchorPass(fuseOptions));
+  pm.addPass(func::createDuplicateFunctionEliminationPass());
+  if (!reportPath.empty()) {
+    FuseROCMlirReportPassOptions reportOptions;
+    reportOptions.output = reportPath.str();
+    pm.addPass(createFuseROCMlirReportPass(reportOptions));
+  }
+}
+
+void mlir::hip::buildRocMlirFusionPipeline(
+    OpPassManager &pm, const RocMlirFusionPipelineOptions &options) {
+  FuseRocMlirAnchorPassOptions fuseOptions;
+  fuseOptions.arch = options.arch;
+  fuseOptions.gemmGemmAccelTypes.assign(options.gemmGemmAccelTypes.begin(),
+                                        options.gemmGemmAccelTypes.end());
+  addRocMlirFusionPasses(pm, fuseOptions, options.report);
 }
 
 void mlir::hip::registerHipPipelines() {
@@ -577,4 +601,9 @@ void mlir::hip::registerHipPipelines() {
 
   PassPipelineRegistration<RocMlirPipelineOptions>(
       "rocmlir-pipeline", "RocMLIR pipeline", buildRocMlirPipeline);
+
+  PassPipelineRegistration<RocMlirFusionPipelineOptions>(
+      "hip-rocmlir-fusion",
+      "Fuse main_graph into rocMLIR kernels and merge duplicate kernels",
+      buildRocMlirFusionPipeline);
 }

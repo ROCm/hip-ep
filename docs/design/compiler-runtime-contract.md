@@ -237,7 +237,7 @@ wrap_rocmlir(state, kernel_binary, func_name, block_size, grid_size,
              kernargs, N * sizeof(void*))
 ```
 
-- `kernel_binary` is the code object that `hip-fuse-rocmlir` outlined and
+- `kernel_binary` is the code object that `hip-fuse-rocmlir-anchor` outlined and
   rocMLIR compiled. `func_name`, `block_size` and `grid_size` come from the
   same compile.
 - `kernargs` holds `N` bare device pointers: the `ins` operands in order, then
@@ -250,6 +250,20 @@ wrap_rocmlir(state, kernel_binary, func_name, block_size, grid_size,
 
 The runtime wrapper does not depend on the operand count, so a kernel with
 more results needs no runtime change.
+
+A kernel argument that rocMLIR marks `rock.prefill` must hold a given value
+before every launch. A split-K kernel adds its partial sums into its output
+with atomics, so it asks for that output to start at 0. The compile stamps
+these arguments on the op as `prefill` (argument index, bytes per element,
+element bit pattern), and each one lowers to a call before the launch, on the
+same stream:
+
+```text
+wrap_rocmlir_prefill(state, kernargs[index], num_elements, bytes, pattern)
+```
+
+The autotuner fills the same arguments before every candidate launch, so a
+split-K config is timed with its fill.
 
 ---
 

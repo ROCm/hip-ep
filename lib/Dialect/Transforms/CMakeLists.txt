@@ -36,13 +36,17 @@ add_library(HipDialectTransforms STATIC
   FixLoopAccumulatorOffset.cpp
   FoldBatchNorm.cpp
   FoldConstantExtracts.cpp
-  FuseROCMlir.cpp
+  FuseRocMlirAnchor.cpp
+  FuseROCMlirReport.cpp
+  FuseRocMlirElementwise.cpp
+  GemmGemm.cpp
   GenerateInterface.cpp
   GenerateOpStateInit.cpp
   HipFusionTransform.cpp
   HoistAllocSizeArith.cpp
   InferLoopBodyShapesPass.cpp
   InferShapesPass.cpp
+  KernelOutline.cpp
   LoopBodyToOutParams.cpp
   LowerAllocs.cpp
   MaterializeHostScalars.cpp
@@ -50,10 +54,15 @@ add_library(HipDialectTransforms STATIC
   Pipelines.cpp
   PoolAllocs.cpp
   PromoteStridedHipOperands.cpp
+  QLinearPlan.cpp
+  QuantizedEpilogue.cpp
+  RebiasUnsignedQuantize.cpp
   RelaxMultiDynExpandShape.cpp
+  RocMlirPrepareQuant.cpp
   ResolveExternConstants.cpp
   ResolveMemRefDims.cpp
   ResolveTensorDims.cpp
+  SinkQuantize.cpp
   SplitDuplicateDpsInits.cpp
   UseOutputAllocator.cpp
 )
