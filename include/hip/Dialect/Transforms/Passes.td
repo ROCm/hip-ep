@@ -273,6 +273,11 @@ def FuseRocMlirAnchorPass
                "acceleration on the target. Both gemms of a "
                "gemm-elementwise-gemm kernel must read a listed type; an "
                "empty list merges no pair.">,
+    Option<"standaloneElementwise", "standalone-elementwise", "bool",
+           /*default=*/"true",
+           "Outline an elementwise module that no anchor takes as a rocMLIR "
+           "kernel of its own. False inlines every such module, so its ops "
+           "run as HIP kernels.">,
     Option<"int4Weights", "int4-weights", "bool", /*default=*/"false",
            "Take the packed-int4 weight dequantize of a 1x1 convolution, or "
            "of the B operand of a matmul or gemm (per column or blocked along "
