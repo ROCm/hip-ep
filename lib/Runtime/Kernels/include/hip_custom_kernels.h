@@ -1850,6 +1850,43 @@ HIP_KERNEL_API int hip_grid_sample(
     int hip_dtype);
 
 /* =========================================================================
+ * RoiAlign (ONNX 4-D NCHW)
+ * =========================================================================
+ *
+ * Pools each region of input (N, C, H, W) into (out_h, out_w) bins by
+ * bilinear sampling. rois is (num_rois, 4) as (x1, y1, x2, y2) in the input
+ * element type; batch_indices is (num_rois) int64. Output is
+ * (num_rois, C, out_h, out_w). Regions whose batch index is out of range
+ * produce zeros.
+ *
+ *  sampling_ratio: samples per bin per axis; 0 = ceil(roi_extent / out)
+ *  half_pixel:     1 = shift corners by -0.5 ("half_pixel"),
+ *                  0 = no shift, extents clamped to >= 1
+ *                      ("output_half_pixel")
+ *  mode:           0 = avg, 1 = max (ONNX Runtime semantics: max over
+ *                  samples of the largest weighted bilinear tap)
+ *
+ * Supported hip_dtypes: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
+ * HIP_DTYPE_BFLOAT16, HIP_DTYPE_FLOAT64.
+ * Returns: 0 on success, non-zero on failure.
+ */
+HIP_KERNEL_API int hip_roi_align(
+    void* stream,
+    const void* input,
+    const void* rois,
+    const void* batch_indices,
+    void* output,
+    int64_t n, int64_t c,
+    int64_t in_h, int64_t in_w,
+    int64_t num_rois,
+    int64_t out_h, int64_t out_w,
+    int sampling_ratio,
+    float spatial_scale,
+    int half_pixel,
+    int mode,
+    int hip_dtype);
+
+/* =========================================================================
  * Global pool (avg / max / lp)
  * =========================================================================
  *

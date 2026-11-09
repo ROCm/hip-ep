@@ -643,6 +643,8 @@ void populateUpsampleConversionPatterns(RewritePatternSet &patterns,
                                         MLIRContext *ctx);
 void populateGridSampleConversionPatterns(RewritePatternSet &patterns,
                                           MLIRContext *ctx);
+void populateRoiAlignConversionPatterns(RewritePatternSet &patterns,
+                                        MLIRContext *ctx);
 void populateGlobalPoolConversionPatterns(RewritePatternSet &patterns,
                                           MLIRContext *ctx);
 void populateFlattenConversionPatterns(RewritePatternSet &patterns,

@@ -2656,6 +2656,76 @@ LogicalResult GridSampleOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// RoiAlignOp: ins(input, rois, batch_indices), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange RoiAlignOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void RoiAlignOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult RoiAlignOp::verify() {
+  SmallVector<Value> dataOperands{getInput(), getRois(), getBatchIndices(),
+                                  getOutput()};
+  if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/1)))
+    return failure();
+
+  auto inputShape = detail::getShapeOf(getInput());
+  auto roisShape = detail::getShapeOf(getRois());
+  auto indicesShape = detail::getShapeOf(getBatchIndices());
+  auto outputShape = detail::getShapeOf(getOutput());
+  if (inputShape.size() != 4)
+    return emitOpError("expected 4-D input (N, C, H, W)");
+  if (roisShape.size() != 2 ||
+      (!ShapedType::isDynamic(roisShape[1]) && roisShape[1] != 4))
+    return emitOpError("expected rois of shape (num_rois, 4)");
+  if (indicesShape.size() != 1)
+    return emitOpError("expected 1-D batch_indices (num_rois)");
+  if (outputShape.size() != 4)
+    return emitOpError(
+        "expected 4-D output (num_rois, C, output_height, output_width)");
+
+  Type elemTy = getElementTypeOrSelf(getInput().getType());
+  if (getElementTypeOrSelf(getRois().getType()) != elemTy ||
+      getElementTypeOrSelf(getOutput().getType()) != elemTy)
+    return emitOpError("input, rois and output must share an element type");
+  if (!getElementTypeOrSelf(getBatchIndices().getType()).isInteger(64))
+    return emitOpError("batch_indices must be i64");
+
+  int64_t mode = getMode();
+  if (mode != 0 && mode != 1)
+    return emitOpError("mode must be 0 (avg) or 1 (max), got ") << mode;
+  if (getOutputHeight() < 1 || getOutputWidth() < 1)
+    return emitOpError("output_height and output_width must be >= 1");
+  if (getSamplingRatio() < 0)
+    return emitOpError("sampling_ratio must be >= 0");
+  int64_t halfPixel = getHalfPixel();
+  if (halfPixel != 0 && halfPixel != 1)
+    return emitOpError("half_pixel must be 0 or 1, got ") << halfPixel;
+
+  auto checkDim = [&](int64_t outDim, int64_t expected,
+                      StringRef what) -> LogicalResult {
+    if (ShapedType::isDynamic(outDim) || ShapedType::isDynamic(expected) ||
+        outDim == expected)
+      return success();
+    return emitOpError("output ")
+           << what << " " << outDim << " does not match expected " << expected;
+  };
+  if (failed(checkDim(outputShape[0], roisShape[0], "num_rois")) ||
+      failed(checkDim(outputShape[0], indicesShape[0], "num_rois")) ||
+      failed(checkDim(outputShape[1], inputShape[1], "channels")) ||
+      failed(checkDim(outputShape[2], getOutputHeight(), "height")) ||
+      failed(checkDim(outputShape[3], getOutputWidth(), "width")))
+    return failure();
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // GlobalPoolOp: ins(input), outs(output)
 //===----------------------------------------------------------------------===//
 
