@@ -10,7 +10,7 @@ import pytest
 from onnx import TensorProto, helper, numpy_helper
 
 from framework.comparator import compare_outputs
-from framework.onnx_utils import make_model_from_nodes
+from framework.onnx_utils import make_model_from_nodes, np_to_onnx_type
 
 _FLT_MIN = float(np.finfo(np.float32).min)
 
@@ -44,6 +44,29 @@ class TestConstantOfShape:
             model, [np.array([3, 4], dtype=np.int64), data]
         )
         compare_outputs(actual, expected)
+
+    @pytest.mark.parametrize(
+        "dtype,value",
+        [
+            (np.bool_, True),
+            (np.int8, -7),
+            (np.int16, -300),
+            (np.uint16, 60000),
+            (np.float16, float(np.finfo(np.float16).min)),
+        ],
+    )
+    def test_dynamic_shape_element_types(self, model_runner, dtype, value):
+        """A runtime-shaped fill of each element width is broadcast on the
+        device: the expand kernel copies elements by width, so no element
+        type falls back to host loops."""
+        shape = helper.make_tensor_value_info("shape", TensorProto.INT64, [2])
+        y = helper.make_tensor_value_info("fill", np_to_onnx_type(dtype), ["M", "N"])
+        model = make_model_from_nodes([_fill_node(value, dtype)], [shape], [y])
+        actual, expected = model_runner.run_sample(
+            model, [np.array([3, 5], dtype=np.int64)]
+        )
+        compare_outputs(actual, expected, atol=0)
+        assert actual[0].shape == (3, 5)
 
     def test_causal_mask_with_shape_consumer(self, model_runner):
         """Whisper decoder causal mask: Where(mask, 0, fill) where the fill is

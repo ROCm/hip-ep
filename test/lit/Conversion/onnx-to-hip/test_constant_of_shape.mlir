@@ -12,7 +12,8 @@
 //      result has at least one dynamic dim -> dynamic dim sizes are read out
 //      of the shape tensor at runtime via hip.readback_scalar + arith.index_cast,
 //      and the result is filled on the device by hip.expand of a rank-0
-//      fill (tensor.splat for element types the expand kernel lacks).
+//      fill. hip.expand copies elements by width. tensor.splat remains for
+//      a result that only Trilu reads.
 
 // RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
 
@@ -118,17 +119,25 @@ module {
     return %r : tensor<3x?xi64>
   }
 
-  // Test 5b: an element type the expand kernel lacks (i1) keeps the
-  // tensor.splat fallback.
+  // Test 5b: a bool fill also broadcasts on the device. hip.expand copies
+  // elements by width. The dynamic dim is read back, not extracted on the host.
   func.func @test_constant_of_shape_dynamic_bool(%shape: tensor<1xi64>) -> tensor<?xi1> {
     // CHECK-LABEL: func.func @test_constant_of_shape_dynamic_bool
+    // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[SHAPE:.*]]: tensor<1xi64>)
     %r = "onnx.ConstantOfShape"(%shape) {
       value = dense<true> : tensor<1xi1>
     } : (tensor<1xi64>) -> tensor<?xi1>
 
     // CHECK-NOT: onnx.ConstantOfShape
-    // CHECK-NOT: hip.expand
-    // CHECK: tensor.splat %{{.*}}{{\[}}%{{.*}}{{\]}} : tensor<?xi1>
+    // CHECK-NOT: tensor.splat
+    // CHECK-NOT: tensor.extract %
+    // CHECK-DAG: %[[VAL:.*]] = arith.constant true
+    // CHECK-DAG: %[[S0:.*]] = tensor.extract_slice %[[SHAPE]][0] [1] [1]
+    // CHECK-DAG: %[[E0:.*]] = hip.readback_scalar(%[[CTX]], %{{.*}}) {{.*}}-> i64
+    // CHECK-DAG: %[[D0:.*]] = arith.index_cast %[[E0]] : i64 to index
+    // CHECK: %[[F:.*]] = linalg.fill ins(%[[VAL]] : i1) outs(%{{.*}} : tensor<i1>) -> tensor<i1>
+    // CHECK: %[[I:.*]] = tensor.empty(%[[D0]]) : tensor<?xi1>
+    // CHECK: hip.expand(%[[CTX]]) ins(%[[F]], %[[SHAPE]] : tensor<i1>, tensor<1xi64>) outs(%[[I]] : tensor<?xi1>)
 
     return %r : tensor<?xi1>
   }

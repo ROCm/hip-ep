@@ -51,9 +51,9 @@ namespace {
 //      `hip.readback_scalar` (the shape may be in device memory) +
 //      `arith.index_cast` and the fill value is built as a scalar
 //      `arith.constant`. A dynamic-shaped result is filled on the device by
-//      `hip.expand` of a rank-0 fill value. A static result, an element type
-//      the expand kernel lacks, or a result only Trilu reads, uses
-//      `tensor.splat`.
+//      `hip.expand`, which copies elements by width. A static result, an
+//      element width the expand kernel lacks, or a result only Trilu reads,
+//      uses `tensor.splat`.
 
 /// Return the dense-elements attribute backing \p value if it can be
 /// determined at compile time (the same forms recognised by ReshapeConversion
@@ -362,10 +362,20 @@ struct ConstantOfShapeFold : public mlir::RewritePattern {
   }
 };
 
-/// Element types the runtime expand kernel (`wrap_expand`) supports.
+/// Widths the runtime expand kernel copies. i1 is stored as one byte.
 static bool isExpandFillElementType(mlir::Type type) {
-  return type.isF16() || type.isF32() || type.isInteger(32) ||
-         type.isInteger(64) || type.isUnsignedInteger(8);
+  if (!type.isIntOrFloat())
+    return false;
+  switch (type.getIntOrFloatBitWidth()) {
+  case 1:
+  case 8:
+  case 16:
+  case 32:
+  case 64:
+    return true;
+  default:
+    return false;
+  }
 }
 
 /// Dynamic-shape fallback: produce a `hip.expand` (or `tensor.splat`) whose
@@ -435,8 +445,9 @@ struct ConstantOfShapeDynamic : public mlir::RewritePattern {
     // A dynamic tensor.splat bufferizes to host loops that store into a
     // GPU-pool buffer, which faults when the pool is device memory. Fill on
     // the device instead: hip.expand broadcasts a rank-0 fill value to the
-    // runtime shape. Trilu consumers keep the splat: they read its scalar and
-    // the splat dies. Element types the expand kernel lacks keep it too.
+    // runtime shape. It copies elements by width, so every 1/2/4/8-byte
+    // element type takes this path. Trilu consumers keep the splat: they
+    // read its scalar and the splat dies.
     bool onlyTriluUsers = llvm::all_of(op->getUsers(), [](mlir::Operation *u) {
       return u->getName().getStringRef() == "onnx.Trilu";
     });
