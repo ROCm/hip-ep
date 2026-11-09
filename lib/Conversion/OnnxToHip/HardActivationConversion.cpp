@@ -11,6 +11,10 @@
 // survive and fail one-shot bufferize. onnx.HardSigmoid is lowered by
 // HardSigmoidConversion.cpp.
 //
+// The five primitives are separate launches with a materialized intermediate
+// each; no pass fuses them today. Only f16/f32 and rank <= 4 are lowered; other
+// HardSwish ops stay unconverted for another EP.
+//
 //   Before:
 //     %y = "onnx.HardSwish"(%x)
 //
@@ -49,18 +53,23 @@ static mlir::Value floatScalar(mlir::PatternRewriter &rewriter,
   return rewriter.create(state)->getResult(0);
 }
 
-static mlir::Value emitBinary(mlir::PatternRewriter &rewriter,
-                              mlir::Location loc, mlir::Value context,
-                              mlir::RankedTensorType resultType,
-                              mlir::Value lhs, mlir::Value rhs,
-                              bool isMul) {
+// hip.mul / hip.add / hip.min / hip.max lower through the 4D shape-passing
+// elementwise ABI (ElementwiseOpLowering in HipToLLVM/ElementwiseLowering.cpp),
+// which rejects higher ranks. Keep this in sync with that limit so higher-rank
+// HardSwish stays unconverted instead of failing later in HipToLLVM.
+constexpr int64_t kMaxElementwiseRank = 4;
+
+/// Emits `lhs <OpTy> rhs` into a fresh DPS init shaped like \p resultType.
+/// \p OpTy is one of hip::MulOp, hip::AddOp, hip::MinOp or hip::MaxOp; they
+/// share the same builder signature.
+template <typename OpTy>
+static mlir::Value emitElementwise(mlir::PatternRewriter &rewriter,
+                                   mlir::Location loc, mlir::Value context,
+                                   mlir::RankedTensorType resultType,
+                                   mlir::Value lhs, mlir::Value rhs) {
   mlir::Value init = createEmptyTensor(rewriter, loc, resultType, lhs);
-  if (isMul) {
-    return mlir::hip::MulOp::create(rewriter, loc, context, lhs, rhs, init)
-        ->getResult(0);
-  }
-  return mlir::hip::AddOp::create(rewriter, loc, context, lhs, rhs, init)
-      ->getResult(0);
+  return OpTy::create(rewriter, loc, resultType, context, lhs, rhs, init)
+      .getResult(0);
 }
 
 /// y = max(0, min(1, alpha * x + beta)).
@@ -75,19 +84,14 @@ static mlir::Value emitHardSigmoid(mlir::PatternRewriter &rewriter,
   mlir::Value oneV = floatScalar(rewriter, loc, elemType, 1.0);
   mlir::Value zeroV = floatScalar(rewriter, loc, elemType, 0.0);
 
-  mlir::Value scaled =
-      emitBinary(rewriter, loc, context, resultType, x, alphaV, /*isMul=*/true);
-  mlir::Value shifted = emitBinary(rewriter, loc, context, resultType, scaled,
-                                   betaV, /*isMul=*/false);
-  mlir::Value initHi = createEmptyTensor(rewriter, loc, resultType, shifted);
-  mlir::Value clippedHi =
-      mlir::hip::MinOp::create(rewriter, loc, resultType, context, shifted,
-                               oneV, initHi)
-          ->getResult(0);
-  mlir::Value initLo = createEmptyTensor(rewriter, loc, resultType, clippedHi);
-  return mlir::hip::MaxOp::create(rewriter, loc, resultType, context, clippedHi,
-                                 zeroV, initLo)
-      ->getResult(0);
+  mlir::Value scaled = emitElementwise<mlir::hip::MulOp>(rewriter, loc, context,
+                                                         resultType, x, alphaV);
+  mlir::Value shifted = emitElementwise<mlir::hip::AddOp>(
+      rewriter, loc, context, resultType, scaled, betaV);
+  mlir::Value clippedHi = emitElementwise<mlir::hip::MinOp>(
+      rewriter, loc, context, resultType, shifted, oneV);
+  return emitElementwise<mlir::hip::MaxOp>(rewriter, loc, context, resultType,
+                                           clippedHi, zeroV);
 }
 
 struct HardSwishToHip : public mlir::RewritePattern {
@@ -112,6 +116,10 @@ struct HardSwishToHip : public mlir::RewritePattern {
       return rewriter.notifyMatchFailure(
           op, "onnx.HardSwish lowers only f16 and f32 element types");
 
+    if (resultType.getRank() > kMaxElementwiseRank)
+      return rewriter.notifyMatchFailure(
+          op, "onnx.HardSwish lowers only for rank <= 4");
+
     auto ctxOrFailure = getContextArg(op, rewriter);
     if (mlir::failed(ctxOrFailure))
       return mlir::failure();
@@ -121,9 +129,8 @@ struct HardSwishToHip : public mlir::RewritePattern {
     // ONNX HardSwish fixes alpha = 1/6 and beta = 1/2.
     mlir::Value sig = emitHardSigmoid(rewriter, loc, *ctxOrFailure, x,
                                       resultType, 1.0 / 6.0, 0.5);
-    mlir::Value y =
-        emitBinary(rewriter, loc, *ctxOrFailure, resultType, x, sig,
-                   /*isMul=*/true);
+    mlir::Value y = emitElementwise<mlir::hip::MulOp>(
+        rewriter, loc, *ctxOrFailure, resultType, x, sig);
     rewriter.replaceOp(op, y);
     return mlir::success();
   }

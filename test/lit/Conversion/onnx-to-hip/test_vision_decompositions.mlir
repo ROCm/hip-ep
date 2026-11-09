@@ -30,6 +30,31 @@ module {
   // CHECK: onnx.HardSwish
   // CHECK-NOT: hip.mul
 
+  // hip.mul/add/min/max lower only up to rank 4, so a rank-5 HardSwish stays
+  // for another EP instead of failing in HipToLLVM.
+  func.func @hard_swish_rank5_unconverted(%x: tensor<1x2x3x4x5xf32>) -> tensor<1x2x3x4x5xf32> {
+    %y = "onnx.HardSwish"(%x) : (tensor<1x2x3x4x5xf32>) -> tensor<1x2x3x4x5xf32>
+    return %y : tensor<1x2x3x4x5xf32>
+  }
+
+  // CHECK-LABEL: func.func @hard_swish_rank5_unconverted
+  // CHECK: onnx.HardSwish
+  // CHECK-NOT: hip.mul
+
+  // Rank 4 is the largest rank that still lowers.
+  func.func @hard_swish_rank4(%x: tensor<1x2x3x4xf16>) -> tensor<1x2x3x4xf16> {
+    %y = "onnx.HardSwish"(%x) : (tensor<1x2x3x4xf16>) -> tensor<1x2x3x4xf16>
+    return %y : tensor<1x2x3x4xf16>
+  }
+
+  // CHECK-LABEL: func.func @hard_swish_rank4
+  // CHECK-NOT: onnx.HardSwish
+  // CHECK: hip.mul
+  // CHECK: hip.add
+  // CHECK: hip.min
+  // CHECK: hip.max
+  // CHECK: hip.mul
+
   func.func @einsum_qk(%q: tensor<1x2x3x4xf32>, %k: tensor<1x2x5x4xf32>) -> tensor<1x2x3x5xf32> {
     %y = "onnx.Einsum"(%q, %k) {equation = "bhlk,bhtk->bhlt"} : (tensor<1x2x3x4xf32>, tensor<1x2x5x4xf32>) -> tensor<1x2x3x5xf32>
     return %y : tensor<1x2x3x5xf32>
