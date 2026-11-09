@@ -2096,6 +2096,9 @@ int wrap_not(RuntimeState *state, void *input, void *output,
 // consumed by wrap_where.
 int wrap_isnan(RuntimeState *state, void *input, void *output,
                int64_t num_elements, int64_t data_type);
+int wrap_isinf(RuntimeState *state, void *input, void *output,
+               int64_t num_elements, int64_t data_type, int64_t detect_negative,
+               int64_t detect_positive);
 
 // ONNX NonZero wrapper.
 // Returns the indices of the non-zero elements of `input` in row-major

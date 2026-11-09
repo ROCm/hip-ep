@@ -161,6 +161,7 @@ inline constexpr const char *kWrapAbs = "wrap_abs";
 inline constexpr const char *kWrapNeg = "wrap_neg";
 inline constexpr const char *kWrapIsNaN = "wrap_isnan";
 inline constexpr const char *kWrapNot = "wrap_not";
+inline constexpr const char *kWrapIsInf = "wrap_isinf";
 inline constexpr const char *kWrapCos = "wrap_cos";
 inline constexpr const char *kWrapErf = "wrap_erf";
 inline constexpr const char *kWrapSin = "wrap_sin";
@@ -562,6 +563,8 @@ void populateDynamicSparseAttentionLoweringPatterns(
 void populateSparseAttentionIndexerLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns);
 void populateEqualLoweringPatterns(const LLVMTypeConverter &converter,
+                                   RewritePatternSet &patterns);
+void populateIsInfLoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);
 void populateOrLoweringPatterns(const LLVMTypeConverter &converter,
                                 RewritePatternSet &patterns);

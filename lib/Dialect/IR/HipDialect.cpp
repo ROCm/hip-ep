@@ -3864,6 +3864,18 @@ void NotOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// IsInfOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange IsInfOp::getDpsInitsMutable() { return getYMutable(); }
+
+void IsInfOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // OrOp: ins(lhs, rhs), outs(output)
 //===----------------------------------------------------------------------===//
 

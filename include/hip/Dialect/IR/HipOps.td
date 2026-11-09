@@ -3245,6 +3245,42 @@ def Hip_NotOp : Hip_DpsOp_AutoReifyInfer<"not", "Y"> {
   }];
 }
 
+def Hip_IsInfOp : Hip_DpsOp_AutoReifyInfer<"isinf", "Y"> {
+  let summary = "Element-wise infinity test: y = isinf(x)";
+  let description = [{
+    Maps each element to true when it is an infinity of a detected sign,
+    otherwise false. Implements the standard ONNX IsInf operator.
+
+    Formula: Y = isinf(X) with optional positive/negative infinity filtering
+    via `detect_positive` and `detect_negative`.
+
+    Lowered via wrap_isinf (float input, bool output).
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.isinf(%ctx) ins(%x : memref<3x4xf16, 1>)
+                    outs(%y : memref<3x4xi1, 1>)
+                    {detect_negative = 1 : i64, detect_positive = 1 : i64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$y,
+    DefaultValuedAttr<I64Attr, "1">:$detect_negative,
+    DefaultValuedAttr<I64Attr, "1">:$detect_positive
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
+    `outs` `(` $y `:` type($y) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_CosOp : Hip_DpsOp_AutoReifyInfer<"cos", "Y"> {
   let summary = "Element-wise cosine: y = cos(x)";
   let description = [{
