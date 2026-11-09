@@ -7,9 +7,21 @@
 
 // RUN: hip-mlir-opt --split-input-file --hip-rocmlir-fusion %s \
 // RUN:   | hip-mlir-opt --split-input-file | FileCheck %s
+// RUN: hip-mlir-opt --split-input-file \
+// RUN:   --hip-rocmlir-fusion="standalone-elementwise=false" %s \
+// RUN:   | FileCheck %s --check-prefix=NOEW
 
 // A chain with no anchor is one kernel. Its inline scalar constant is cloned
-// into the kernel, not passed as an argument.
+// into the kernel, not passed as an argument. With standalone-elementwise=false
+// no module becomes a kernel of its own, in this case or any later one.
+
+// NOEW-NOT: rock.elementwise
+// NOEW-LABEL: func.func @main_graph
+// NOEW-NOT: hip.rocmlir
+// NOEW: hip.add
+// NOEW: hip.max
+// NOEW: hip.neg
+// NOEW-NOT: rock.elementwise
 
 // CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: (%[[X:.*]]: tensor<4x8xf16>, %[[Y:.*]]: tensor<4x8xf16>) -> tensor<4x8xf16>
