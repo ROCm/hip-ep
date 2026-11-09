@@ -337,10 +337,13 @@ def DecomposeConvTransposePass
     stride to. When every residue shares a kernel shape and padding, their
     filters are stacked on the output-channel axis into one convolution whose
     result is viewed as [N, S0, S1, M, Ht0, Ht1] and transposed to
-    [N, M, Ht0, S0, Ht1, S1] (DepthToSpace); `hip-fuse-rocmlir-anchor` folds
-    that transpose into the convolution's store. Residues whose tap counts differ stay on one
-    strided `tensor.insert_slice` each, which bufferizes to a
-    `memref.subview` plus a copy.
+    [N, M, Ht0, S0, Ht1, S1] (DepthToSpace); the anchor fusion folds that
+    transpose into the convolution's store. Residues whose tap counts differ
+    are zero-padded to the largest count when the padded filters cost at most
+    twice the real taps, and then take the same path. A constant bias is tiled
+    once per residue into the wide convolution. The other residues stay on one
+    convolution each, with the bias, and one strided `tensor.insert_slice`
+    each, which bufferizes to a `memref.subview` plus a copy.
 
     Rank-4 inputs must be statically shaped. A rank-3 input is expanded to
     rank 4 with a unit height so dynamic batch and width stay legal; the
