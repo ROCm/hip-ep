@@ -594,8 +594,11 @@ bool compileRocMlirDefaultPerfConfig(ModuleOp kernelModule, StringRef arch,
                 {diag.getLocation(), diag.getSeverity(), diag.str()});
             return success();
           });
-      compiled = rock::tuningSetStr(*attempt, perfConfig) &&
-                 compileRocMlirBackend(*attempt, arch, perfConfig, out);
+      // tuningSetStr takes a non-const ModuleOp reference, so the clone has
+      // to be an lvalue. OwningOpRef's operator* returns a temporary.
+      ModuleOp attemptModule = *attempt;
+      compiled = rock::tuningSetStr(attemptModule, perfConfig) &&
+                 compileRocMlirBackend(attemptModule, arch, perfConfig, out);
     }
     if (compiled) {
       replayCaptured();

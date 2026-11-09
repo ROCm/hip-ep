@@ -269,8 +269,6 @@ static bool collectCandidates(func::FuncOp funcOp, FunctionScratch &plan) {
       !isa<ContextType>(funcOp.getArgument(0).getType()))
     return false;
 
-  stageHipReadConstantGlobals(funcOp);
-
   // Collect candidates before rewriting. Keep their traversal order.
   plan.funcOp = funcOp;
   funcOp.walk([&](memref::AllocOp op) {
