@@ -124,3 +124,170 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x8x3xf32>,
       outs(%te : tensor<1x3x8x8xf32>) {perm = [0, 3, 1, 2]} : tensor<1x3x8x8xf32>
   return %m, %t : tensor<1x8x8x3xf32>, tensor<1x3x8x8xf32>
 }
+
+// -----
+
+// A result transpose that moves the innermost dimension leaves the kernel:
+// the kernel stores the value in the layout it computes in, and a HIP
+// transpose follows it.
+
+// CHECK-LABEL: func.func @rocMlir0
+// CHECK-SAME: -> tensor<1x8x8x16xf16>
+// CHECK-SAME: attributes {rock.elementwise, rock.kernel}
+// CHECK-NOT: hip.transpose
+// CHECK: return
+// CHECK-LABEL: func.func @main_graph
+// CHECK: %[[K:.*]] = hip.rocmlir({{.*}}) @rocMlir0
+// CHECK: %[[T:.*]] = hip.transpose({{.*}}) ins(%[[K]] :
+// CHECK: return %[[T]]
+
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x8x16xf16>,
+                      %y: tensor<1x8x8x16xf16>) -> tensor<1x16x8x8xf16> {
+  %ae = tensor.empty() : tensor<1x8x8x16xf16>
+  %a = hip.add(%ctx) ins(%x, %y : tensor<1x8x8x16xf16>, tensor<1x8x8x16xf16>)
+      outs(%ae : tensor<1x8x8x16xf16>) -> tensor<1x8x8x16xf16>
+  %me = tensor.empty() : tensor<1x8x8x16xf16>
+  %m = hip.mul(%ctx) ins(%a, %a : tensor<1x8x8x16xf16>, tensor<1x8x8x16xf16>)
+      outs(%me : tensor<1x8x8x16xf16>) -> tensor<1x8x8x16xf16>
+  %te = tensor.empty() : tensor<1x16x8x8xf16>
+  %t = hip.transpose(%ctx) ins(%m : tensor<1x8x8x16xf16>)
+      outs(%te : tensor<1x16x8x8xf16>) {perm = [0, 3, 1, 2]} : tensor<1x16x8x8xf16>
+  return %t : tensor<1x16x8x8xf16>
+}
+
+// -----
+
+// When the graph also returns the untransposed value, the kernel has that one
+// result, and the HIP transpose reads it.
+
+// CHECK-LABEL: func.func @rocMlir0
+// CHECK-SAME: -> tensor<1x8x8x16xf16>
+// CHECK-SAME: attributes {rock.elementwise, rock.kernel}
+// CHECK-NOT: hip.transpose
+// CHECK: return
+// CHECK-LABEL: func.func @main_graph
+// CHECK: %[[K:.*]] = hip.rocmlir({{.*}}) @rocMlir0
+// CHECK: %[[T:.*]] = hip.transpose({{.*}}) ins(%[[K]] :
+// CHECK: return %[[K]], %[[T]]
+
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x8x16xf16>,
+                      %y: tensor<1x8x8x16xf16>)
+    -> (tensor<1x8x8x16xf16>, tensor<1x16x8x8xf16>) {
+  %ae = tensor.empty() : tensor<1x8x8x16xf16>
+  %a = hip.add(%ctx) ins(%x, %y : tensor<1x8x8x16xf16>, tensor<1x8x8x16xf16>)
+      outs(%ae : tensor<1x8x8x16xf16>) -> tensor<1x8x8x16xf16>
+  %me = tensor.empty() : tensor<1x8x8x16xf16>
+  %m = hip.mul(%ctx) ins(%a, %a : tensor<1x8x8x16xf16>, tensor<1x8x8x16xf16>)
+      outs(%me : tensor<1x8x8x16xf16>) -> tensor<1x8x8x16xf16>
+  %te = tensor.empty() : tensor<1x16x8x8xf16>
+  %t = hip.transpose(%ctx) ins(%m : tensor<1x8x8x16xf16>)
+      outs(%te : tensor<1x16x8x8xf16>) {perm = [0, 3, 1, 2]} : tensor<1x16x8x8xf16>
+  return %m, %t : tensor<1x8x8x16xf16>, tensor<1x16x8x8xf16>
+}
+
+// -----
+
+// An input transpose that moves the innermost dimension runs before the
+// kernel, which reads the transposed tensor.
+
+// CHECK-LABEL: func.func @rocMlir0
+// CHECK-SAME: (%{{.*}}: tensor<1x16x8x8xf16>, %{{.*}}: tensor<1x16x8x8xf16>) -> tensor<1x16x8x8xf16>
+// CHECK-SAME: attributes {rock.elementwise, rock.kernel}
+// CHECK-NOT: hip.transpose
+// CHECK: return
+// CHECK-LABEL: func.func @main_graph
+// CHECK: %[[T:.*]] = hip.transpose({{.*}}) ins(%{{.*}} : tensor<1x8x8x16xf16>)
+// CHECK: hip.rocmlir({{.*}}) @rocMlir0 ins(%[[T]],
+
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x8x16xf16>,
+                      %y: tensor<1x16x8x8xf16>) -> tensor<1x16x8x8xf16> {
+  %te = tensor.empty() : tensor<1x16x8x8xf16>
+  %t = hip.transpose(%ctx) ins(%x : tensor<1x8x8x16xf16>)
+      outs(%te : tensor<1x16x8x8xf16>) {perm = [0, 3, 1, 2]} : tensor<1x16x8x8xf16>
+  %ae = tensor.empty() : tensor<1x16x8x8xf16>
+  %a = hip.add(%ctx) ins(%t, %y : tensor<1x16x8x8xf16>, tensor<1x16x8x8xf16>)
+      outs(%ae : tensor<1x16x8x8xf16>) -> tensor<1x16x8x8xf16>
+  %me = tensor.empty() : tensor<1x16x8x8xf16>
+  %m = hip.mul(%ctx) ins(%a, %a : tensor<1x16x8x8xf16>, tensor<1x16x8x8xf16>)
+      outs(%me : tensor<1x16x8x8xf16>) -> tensor<1x16x8x8xf16>
+  return %m : tensor<1x16x8x8xf16>
+}
+
+// -----
+
+// A transpose that keeps the innermost dimension in place stays in the kernel.
+
+// CHECK-LABEL: func.func @rocMlir0
+// CHECK-SAME: attributes {rock.elementwise, rock.kernel}
+// CHECK: hip.transpose
+// CHECK-LABEL: func.func @main_graph
+// CHECK-NOT: hip.transpose
+// CHECK: %[[K:.*]] = hip.rocmlir({{.*}}) @rocMlir0
+// CHECK: return %[[K]]
+
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x16xf16>,
+                      %y: tensor<1x8x4x16xf16>) -> tensor<1x4x8x16xf16> {
+  %ae = tensor.empty() : tensor<1x8x4x16xf16>
+  %a = hip.add(%ctx) ins(%x, %y : tensor<1x8x4x16xf16>, tensor<1x8x4x16xf16>)
+      outs(%ae : tensor<1x8x4x16xf16>) -> tensor<1x8x4x16xf16>
+  %me = tensor.empty() : tensor<1x8x4x16xf16>
+  %m = hip.mul(%ctx) ins(%a, %a : tensor<1x8x4x16xf16>, tensor<1x8x4x16xf16>)
+      outs(%me : tensor<1x8x4x16xf16>) -> tensor<1x8x4x16xf16>
+  %te = tensor.empty() : tensor<1x4x8x16xf16>
+  %t = hip.transpose(%ctx) ins(%m : tensor<1x8x4x16xf16>)
+      outs(%te : tensor<1x4x8x16xf16>) {perm = [0, 2, 1, 3]} : tensor<1x4x8x16xf16>
+  return %t : tensor<1x4x8x16xf16>
+}
+
+// -----
+
+// After the peel, one op is left; it saves no launch, so both ops stay HIP ops.
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.neg
+// CHECK: hip.transpose
+
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x8x16xf16>)
+    -> tensor<1x16x8x8xf16> {
+  %ne = tensor.empty() : tensor<1x8x8x16xf16>
+  %n = hip.neg(%ctx) ins(%x : tensor<1x8x8x16xf16>)
+      outs(%ne : tensor<1x8x8x16xf16>) : tensor<1x8x8x16xf16>
+  %te = tensor.empty() : tensor<1x16x8x8xf16>
+  %t = hip.transpose(%ctx) ins(%n : tensor<1x8x8x16xf16>)
+      outs(%te : tensor<1x16x8x8xf16>) {perm = [0, 3, 1, 2]} : tensor<1x16x8x8xf16>
+  return %t : tensor<1x16x8x8xf16>
+}
+
+// -----
+
+// The transpose reads a reshape that another module op also reads. It leaves
+// the kernel with its own copy of the reshape, and the kernel keeps the other.
+
+// CHECK-LABEL: func.func @rocMlir0
+// CHECK-SAME: -> (tensor<1x64x16xf16>, tensor<1x8x8x16xf16>)
+// CHECK-SAME: attributes {rock.elementwise, rock.kernel}
+// CHECK-NOT: hip.transpose
+// CHECK: return
+// CHECK-LABEL: func.func @main_graph
+// CHECK: %[[K:.*]]:2 = hip.rocmlir({{.*}}) @rocMlir0
+// CHECK: %[[E:.*]] = tensor.expand_shape %[[K]]#0
+// CHECK: %[[T:.*]] = hip.transpose({{.*}}) ins(%[[E]] :
+// CHECK: return %[[T]], %[[K]]#1
+
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x64x16xf16>,
+                      %y: tensor<1x64x16xf16>, %z: tensor<1x8x8x16xf16>)
+    -> (tensor<1x16x8x8xf16>, tensor<1x8x8x16xf16>) {
+  %ae = tensor.empty() : tensor<1x64x16xf16>
+  %a = hip.add(%ctx) ins(%x, %y : tensor<1x64x16xf16>, tensor<1x64x16xf16>)
+      outs(%ae : tensor<1x64x16xf16>) -> tensor<1x64x16xf16>
+  %e = tensor.expand_shape %a [[0], [1, 2], [3]] output_shape [1, 8, 8, 16]
+      : tensor<1x64x16xf16> into tensor<1x8x8x16xf16>
+  %te = tensor.empty() : tensor<1x16x8x8xf16>
+  %t = hip.transpose(%ctx) ins(%e : tensor<1x8x8x16xf16>)
+      outs(%te : tensor<1x16x8x8xf16>) {perm = [0, 3, 1, 2]} : tensor<1x16x8x8xf16>
+  %me = tensor.empty() : tensor<1x8x8x16xf16>
+  %m = hip.mul(%ctx) ins(%e, %z : tensor<1x8x8x16xf16>, tensor<1x8x8x16xf16>)
+      outs(%me : tensor<1x8x8x16xf16>) -> tensor<1x8x8x16xf16>
+  return %t, %m : tensor<1x16x8x8xf16>, tensor<1x8x8x16xf16>
+}
