@@ -29,21 +29,24 @@ namespace hipdnn_ep::corelib {
 
 class ModelSession;
 
-// What the graph offers a model: its input names and the width of its logits
-// (-1 when not static).
+// What the graph offers a model: its input names, the width of its logits
+// (-1 when not static), and the model type onnxruntime-genai records for it
+// (genai_config.json's model.type), if any.
 struct GraphSignature {
   std::vector<std::string> inputs;
   int64_t vocab_size = -1;
+  std::string model_type;
 };
 
 // Creates a session of the first CoreLib model that takes the ONNX file at
 // `path` and fits `graph`: its vocabulary is the logits' width, and every
 // input its `forward` requires is a graph input (or `position`, which the
 // caller supplies). `arch` names the one model to try, as recorded when a
-// session was first created; empty tries each model CoreLib ships, in name
-// order. The session holds `max_sequence_length` positions (0: the model's
-// own). Null with `*why` set when CoreLib is not built in or not loadable,
-// there is no usable NPU, or no model takes the file.
+// session was first created; empty tries each model CoreLib ships: first the
+// one named like `graph.model_type`, then the rest in name order. The session
+// holds `max_sequence_length` positions (0: the model's own). Null with `*why`
+// set when CoreLib is not built in or not loadable, there is no usable NPU, or
+// no model takes the file.
 std::shared_ptr<ModelSession> create_model_session(const std::string &arch,
                                                    const std::string &path,
                                                    int64_t max_sequence_length,
