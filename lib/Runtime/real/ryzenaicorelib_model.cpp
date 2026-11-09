@@ -307,8 +307,20 @@ try_model(const CorelibApi &api, const std::string &arch,
   // pick and gathers CoreLib runs there.
   options.enabled_backends =
       ryzenai_corelib_backend_npu | ryzenai_corelib_backend_cpu;
-  if (api.ryzenai_corelib_model_create_session(model, &options, &s->session_) !=
-      ryzenai_corelib_status_success) {
+  ryzenai_corelib_status status =
+      api.ryzenai_corelib_model_create_session(model, &options, &s->session_);
+  // onnxruntime-genai configs often ask for the base model's whole context
+  // while a model holds less from this file; a session at the model's own
+  // capacity still serves every generation that fits it, and one that does
+  // not fails on the forward past it, saying so.
+  std::string capped;
+  if (status != ryzenai_corelib_status_success && max_sequence_length > 0) {
+    capped = api.ryzenai_corelib_get_last_error_message();
+    options.max_sequence_length = 0;
+    status =
+        api.ryzenai_corelib_model_create_session(model, &options, &s->session_);
+  }
+  if (status != ryzenai_corelib_status_success) {
     *why = std::string("creating a session failed: ") +
            api.ryzenai_corelib_get_last_error_message();
     return nullptr;
@@ -369,6 +381,11 @@ try_model(const CorelibApi &api, const std::string &arch,
           arch.c_str(), path.c_str(), (long long)metadata.layer_count,
           (long long)metadata.hidden_size, (long long)metadata.vocab_size,
           (long long)metadata.context_length, taken.c_str());
+  if (!capped.empty())
+    fprintf(stderr,
+            "[corelib] model: holding the model's own context, not the %lld "
+            "positions genai_config.json's max_length asks for (%s)\n",
+            (long long)max_sequence_length, capped.c_str());
   return s;
 }
 
