@@ -870,6 +870,14 @@ int wrap_rocmlir(RuntimeState *state, const char *kernel_binary,
                  char *func_name, int64_t block_size, int64_t grid_size,
                  void *kernargs, size_t size);
 
+// Fills `count` elements of `element_bytes` (1, 2 or 4) at `buffer` with the
+// low bits of `pattern`, on the state's stream. The generated IR calls it
+// before wrap_rocmlir for each kernel argument that rocMLIR marks
+// `rock.prefill`, such as the output of a split-K kernel, which the kernel
+// accumulates into.
+int wrap_rocmlir_prefill(RuntimeState *state, void *buffer, int64_t count,
+                         int64_t element_bytes, uint64_t pattern);
+
 // GroupQueryAttention operation wrapper (Full MS spec)
 // Called by generated IR for onnx.Custom(GroupQueryAttention) lowering
 // GQA runtime wrapper following the complete Microsoft ONNX Runtime
