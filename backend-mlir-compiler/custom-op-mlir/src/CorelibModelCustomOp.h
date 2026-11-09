@@ -7,10 +7,11 @@
 //
 // The custom op for the CORELIBMODEL domain: a whole onnxruntime-genai decoder
 // the level-1 pass handed to a CoreLib model (corelib_model.h) instead of
-// compiling. Each Compute runs input_ids through the model at the position
-// attention_mask implies and writes the last row's logits. CoreLib keeps the
-// KV cache, so past_key_values are not read and present.* not written. See
-// docs/design/ryzenai-corelib-model.md.
+// compiling. Each Compute passes the graph inputs the model's forward takes
+// (input_ids, inputs_embeds, ...: CoreLib's names, which are
+// onnxruntime-genai's) at the position attention_mask implies, and writes the
+// last row's logits. CoreLib keeps the KV cache, so past_key_values are not
+// read and present.* not written. See docs/design/ryzenai-corelib-model.md.
 //
 //===----------------------------------------------------------------------===//
 
@@ -37,10 +38,12 @@ public:
 
 private:
   std::shared_ptr<hipdnn_ep::corelib::ModelSession> session_;
-  int ids_ = -1, mask_ = -1, logits_ = -1; // meta_def indices
+  int mask_ = -1, logits_ = -1; // meta_def indices
+  // The inputs forward takes: meta_def index and name.
+  std::vector<std::pair<int, std::string>> inputs_;
   // present.* output index -> the past_key_values input whose shape it takes.
   std::vector<std::pair<int, int>> presents_;
-  mutable std::vector<int32_t> tokens_;
+  mutable std::vector<std::vector<uint8_t>> host_inputs_;
   mutable std::vector<float> logits_buf_;
   mutable std::vector<Ort::Float16_t> logits_fp16_;
   mutable bool warned_mask_ = false;
