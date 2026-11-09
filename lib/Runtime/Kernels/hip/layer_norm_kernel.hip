@@ -117,12 +117,13 @@ __global__ void hip_layer_norm_kernel(const T_IN *__restrict__ input,
       inv_std_out[row] = store_from_float<MEAN_OUT_T>(inv_std);
   }
 
-  // Pass B: per-element normalize + affine.
+  // Pass B: (x - x[0]) - E[d] keeps the precision that x - mean loses when
+  // |mean| is large.
   for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
-    float v = load_as_float<T_IN, T_SCALE>(x_row + i);
+    float d = load_as_float<T_IN, T_SCALE>(x_row + i) - shift;
     float s = load_as_float<T_SCALE, T_SCALE>(scale + i);
     float b = bias ? load_as_float<T_SCALE, T_SCALE>(bias + i) : 0.0f;
-    float n = (v - mean) * inv_std * s + b;
+    float n = (d - mean_d) * inv_std * s + b;
     y_row[i] = store_from_float<T_IN>(n);
   }
 }

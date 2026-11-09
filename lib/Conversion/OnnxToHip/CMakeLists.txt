@@ -71,6 +71,7 @@ add_library(OnnxToHip STATIC
   FastGeluFusion.cpp
   ErfGeluFusion.cpp
   GroupNormDecompositionFusion.cpp
+  LayerNormFusion.cpp
   ProjectorOpsRewrites.cpp
   LpNormalizationConversion.cpp
   EqualConversion.cpp
@@ -130,6 +131,7 @@ add_library(OnnxToHip STATIC
   LoopOutline.cpp
   ScanOutline.cpp
   IfOutline.cpp
+  IfResultDims.cpp
   ReluConversion.cpp
   ImageScalerConversion.cpp
   LeakyReluConversion.cpp

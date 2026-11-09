@@ -13,7 +13,7 @@
 // i64 staging buffers landed in the GPU pool and were written from host code.
 //===----------------------------------------------------------------------===//
 
-// RUN: hip-mlir-opt --hip-materialize-host-scalars %s 2>&1 | FileCheck %s
+// RUN: hip-mlir-opt --hip-materialize-host-scalars --split-input-file %s 2>&1 | FileCheck %s
 
 // --- Rank-0 i64 alloc + host store + host load: classic Shape->Sub->Cast
 //     pattern after bufferization. Should be redirected to host scratch. ---
@@ -33,6 +33,8 @@ func.func @rank0_i64_host_scalar(%ctx: !hip.context, %x: i64) -> i64 {
   return %v : i64
 }
 
+// -----
+
 // --- 1xi64 (e.g., gathered shape index) — also a candidate. ---
 // CHECK-LABEL: func.func @rank1_1xi64_host_scalar
 // CHECK-NOT:     memref.alloc()
@@ -46,6 +48,8 @@ func.func @rank1_1xi64_host_scalar(%ctx: !hip.context, %x: i64) -> i64 {
   memref.dealloc %a : memref<1xi64>
   return %v : i64
 }
+
+// -----
 
 // --- Multiple candidates share a single get_host_scratch. ---
 // CHECK-LABEL: func.func @two_scalars_one_scratch
@@ -62,6 +66,8 @@ func.func @two_scalars_one_scratch(%ctx: !hip.context, %x: i64, %y: i32) -> (i64
   memref.dealloc %b : memref<i32>
   return %va, %vb : i64, i32
 }
+
+// -----
 
 // --- Host-stored f32 read by a hip op: a candidate. This is the rank-0 fill
 //     hip.trilu broadcasts for Trilu(ConstantOfShape) in ChatGLM. ---
@@ -80,6 +86,8 @@ func.func @rank0_f32_hip_consumer(%ctx: !hip.context, %x: f32,
   return
 }
 
+// -----
+
 // --- Float element type without a hip consumer: NOT a candidate. ---
 // CHECK-LABEL: func.func @rank0_f32_left_alone
 // CHECK-NOT:   hip.get_host_scratch
@@ -91,6 +99,8 @@ func.func @rank0_f32_left_alone(%ctx: !hip.context, %x: f32) -> f32 {
   memref.dealloc %a : memref<f32>
   return %v : f32
 }
+
+// -----
 
 // --- Larger int alloc (>16 elements): NOT a candidate. ---
 // CHECK-LABEL: func.func @large_int_left_alone
@@ -105,6 +115,8 @@ func.func @large_int_left_alone(%ctx: !hip.context, %x: i32) -> i32 {
   return %v : i32
 }
 
+// -----
+
 // --- Alloc with NO host I/O (pure GPU producer + GPU consumer): NOT a
 //     candidate, must stay in GPU pool. ---
 // CHECK-LABEL: func.func @pure_gpu_left_alone
@@ -118,6 +130,8 @@ func.func @pure_gpu_left_alone(%ctx: !hip.context,
   hip.cast(%ctx) ins(%src : memref<i64>) outs(%a : memref<i32>) {to = 6 : i64}
   return %a : memref<i32>
 }
+
+// -----
 
 // --- Alloc with BOTH host store AND hip-op consumer: this is the regression
 //     pattern (rank-0 i64 stored from host, then read by hip.cast for GQA
@@ -139,6 +153,8 @@ func.func @host_store_then_hip_consumer(%ctx: !hip.context,
   memref.dealloc %a : memref<i64>
   return
 }
+
+// -----
 
 // --- Host scalar reached through memref.reinterpret_cast: CSE fuses two
 //     from_elements shape-arith buffers into one alloc and reinterpret_casts
@@ -167,6 +183,8 @@ func.func @host_scalar_via_reinterpret_cast(%ctx: !hip.context, %x: i64,
   return
 }
 
+// -----
+
 // --- Host scalar whose view escapes to a consumer we can't vouch for (here:
 //     returned from the function): the recursion must still REJECT it, since
 //     we can't reason about the escaped view's memory expectations. ---
@@ -181,6 +199,8 @@ func.func @host_scalar_view_escapes_left_alone(%ctx: !hip.context,
   %rc = memref.reinterpret_cast %a to offset: [0], sizes: [1], strides: [1] : memref<3xi64> to memref<1xi64>
   return %rc : memref<1xi64>
 }
+
+// -----
 
 // --- Host scalar consumed by memref.copy (the bufferized Concat /
 //     insert_slice that stages grid-dim scalars into a shape vector, e.g.
@@ -205,6 +225,8 @@ func.func @host_scalar_via_memref_copy(%ctx: !hip.context, %x: i64,
   return
 }
 
+// -----
+
 // --- Host scalar used as the SHAPE operand of memref.reshape: the reshape
 //     reads the (host-staged) shape vector; its result aliases the data
 //     operand, not our buffer, so it is a terminal accept. The pass MUST
@@ -224,6 +246,8 @@ func.func @host_scalar_as_reshape_shape(%ctx: !hip.context, %x: i64,
   return %r : memref<?x?xf16>
 }
 
+// -----
+
 // --- Function whose arg 0 is NOT a !hip.context: the pass silently leaves
 //     it alone (best-effort mitigation; utility funcs without runtime
 //     access don't have a context to call hip.get_host_scratch on). The
@@ -241,6 +265,8 @@ func.func @no_context_arg_left_alone(%x: i64) -> i64 {
   return %v : i64
 }
 
+// -----
+
 // LLVM's i48 array stride is 8 bytes, not its 6-byte payload size.
 // CHECK-LABEL: func.func @padded_elements
 // CHECK: %[[SIZE:.*]] = arith.constant 192 : index
@@ -254,5 +280,117 @@ func.func @padded_elements(%ctx: !hip.context, %x: i48, %y: i8) {
   memref.store %x, %a[%c0] : memref<10xi48>
   %b = memref.alloc() : memref<i8>
   memref.store %y, %b[] : memref<i8>
+  return
+}
+
+// -----
+
+// --- Inline constant global read by a hip op: the folded `Shape(ids)[1]`
+//     of Whisper decoder_with_past, added on the GPU to the past length. The
+//     global lowers to host JIT-module storage, so it MUST be replaced by a
+//     host-filled scratch view. It lands after the alloc candidate. ---
+memref.global "private" constant @__constant_xi64 : memref<i64> = dense<1>
+// CHECK-LABEL: func.func @constant_global_hip_consumer
+// CHECK-SAME:    (%[[CTX:.*]]: !hip.context
+// CHECK:         %[[SCRATCH:.*]] = hip.get_host_scratch(%[[CTX]], %c128)
+// CHECK:         %[[A:.*]] = memref.view %[[SCRATCH]][%c0{{.*}}][] : memref<?xi8> to memref<i64>
+// CHECK-NOT:     memref.get_global
+// CHECK:         %[[G:.*]] = memref.view %[[SCRATCH]][%c64{{.*}}][] : memref<?xi8> to memref<i64>
+// CHECK:         %[[ONE:.*]] = arith.constant 1 : i64
+// CHECK:         memref.store %[[ONE]], %[[G]][] : memref<i64>
+// CHECK:         hip.add(%[[CTX]]) ins(%[[A]], %[[G]] : memref<i64>, memref<i64>)
+func.func @constant_global_hip_consumer(%ctx: !hip.context, %x: i64,
+                                        %out: memref<i64>) {
+  %a = memref.alloc() : memref<i64>
+  memref.store %x, %a[] : memref<i64>
+  %g = memref.get_global @__constant_xi64 : memref<i64>
+  hip.add(%ctx) ins(%a, %g : memref<i64>, memref<i64>) outs(%out : memref<i64>)
+  return
+}
+
+// -----
+
+// --- A non-splat constant is stored element by element. ---
+memref.global "private" constant @__constant_2xi64 : memref<2xi64> = dense<[7, -3]>
+// CHECK-LABEL: func.func @constant_global_vector
+// CHECK:         %[[G:.*]] = memref.view %{{.*}} : memref<?xi8> to memref<2xi64>
+// CHECK:         %[[V0:.*]] = arith.constant 7 : i64
+// CHECK:         memref.store %[[V0]], %[[G]][%c0{{.*}}] : memref<2xi64>
+// CHECK:         %[[V1:.*]] = arith.constant -3 : i64
+// CHECK:         memref.store %[[V1]], %[[G]][%c1{{.*}}] : memref<2xi64>
+// CHECK:         hip.cast{{.*}} ins(%[[G]] : memref<2xi64>)
+func.func @constant_global_vector(%ctx: !hip.context, %out: memref<2xi32>) {
+  %g = memref.get_global @__constant_2xi64 : memref<2xi64>
+  hip.cast(%ctx) ins(%g : memref<2xi64>) outs(%out : memref<2xi32>) {to = 6 : i64}
+  return
+}
+
+// -----
+
+// --- A constant global only the host reads stays a global. ---
+memref.global "private" constant @__constant_xi64 : memref<i64> = dense<1>
+// CHECK-LABEL: func.func @constant_global_host_only_left_alone
+// CHECK-NOT:   hip.get_host_scratch
+// CHECK:       memref.get_global @__constant_xi64
+func.func @constant_global_host_only_left_alone(%ctx: !hip.context) -> i64 {
+  %g = memref.get_global @__constant_xi64 : memref<i64>
+  %v = memref.load %g[] : memref<i64>
+  return %v : i64
+}
+
+// -----
+
+// --- An externalized constant is uploaded to the device by the runtime and
+//     must not be touched. ---
+memref.global "private" @hip_ext_constant_0 : memref<i64> {hip.external_data = {index = 0 : i64, offset = 0 : i64, size = 8 : i64}}
+// CHECK-LABEL: func.func @external_global_left_alone
+// CHECK-NOT:   hip.get_host_scratch
+// CHECK:       memref.get_global @hip_ext_constant_0
+func.func @external_global_left_alone(%ctx: !hip.context, %out: memref<i32>) {
+  %g = memref.get_global @hip_ext_constant_0 : memref<i64>
+  hip.cast(%ctx) ins(%g : memref<i64>) outs(%out : memref<i32>) {to = 6 : i64}
+  return
+}
+
+// -----
+
+// --- A mutable global may be written elsewhere, so its initial value is not
+//     what the read observes: it stays a global. ---
+memref.global "private" @mutable_xi64 : memref<i64> = dense<1>
+// CHECK-LABEL: func.func @mutable_global_left_alone
+// CHECK-NOT:   hip.get_host_scratch
+// CHECK:       memref.get_global @mutable_xi64
+func.func @mutable_global_left_alone(%ctx: !hip.context, %out: memref<i32>) {
+  %g = memref.get_global @mutable_xi64 : memref<i64>
+  hip.cast(%ctx) ins(%g : memref<i64>) outs(%out : memref<i32>) {to = 6 : i64}
+  return
+}
+
+// -----
+
+// --- Every function shares the session scratch buffer, and the caller's
+//     view stays live across the call into an outlined branch. Functions get
+//     disjoint offsets and all request the module total, so the branch
+//     neither overwrites the caller's slot nor regrows the buffer. ---
+// CHECK-LABEL: func.func @caller_keeps_slot
+// CHECK:         %[[S:.*]] = hip.get_host_scratch(%{{.*}}, %c128)
+// CHECK:         %[[A:.*]] = memref.view %[[S]][%c0{{.*}}][] : memref<?xi8> to memref<i64>
+// CHECK:         call @branch_slot
+// CHECK:         hip.cast{{.*}} ins(%[[A]] : memref<i64>)
+// CHECK-LABEL: func.func @branch_slot
+// CHECK:         %[[S:.*]] = hip.get_host_scratch(%{{.*}}, %c128)
+// CHECK:         memref.view %[[S]][%c64{{.*}}][] : memref<?xi8> to memref<i64>
+func.func @caller_keeps_slot(%ctx: !hip.context, %x: i64,
+                             %out: memref<i32>) {
+  %a = memref.alloc() : memref<i64>
+  memref.store %x, %a[] : memref<i64>
+  call @branch_slot(%ctx, %x, %out) : (!hip.context, i64, memref<i32>) -> ()
+  hip.cast(%ctx) ins(%a : memref<i64>) outs(%out : memref<i32>) {to = 6 : i64}
+  return
+}
+func.func @branch_slot(%ctx: !hip.context, %x: i64, %out: memref<i32>) {
+  %b = memref.alloc() : memref<i64>
+  memref.store %x, %b[] : memref<i64>
+  hip.cast(%ctx) ins(%b : memref<i64>) outs(%out : memref<i32>) {to = 6 : i64}
   return
 }

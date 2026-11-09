@@ -16,9 +16,10 @@ module {
 
 // -----
 
-// ChatGLM causal mask: Trilu of a dynamic ConstantOfShape. The fill value is
-// written by the host into host-mapped scratch, and wrap_trilu reads that
-// one-element buffer instead of a full-size device tensor.
+// ChatGLM causal mask: Trilu of a dynamic ConstantOfShape. The result extents
+// are read back from the shape input, the fill value is written by the host
+// into host-mapped scratch, and wrap_trilu reads that one-element buffer
+// instead of a full-size device tensor.
 module {
   func.func @main_graph(%shape: tensor<3xi64>) -> tensor<?x?x?xf32> {
     %ones = "onnx.ConstantOfShape"(%shape) {value = dense<1.000000e+00> : tensor<1xf32>} : (tensor<3xi64>) -> tensor<?x?x?xf32>
@@ -34,7 +35,10 @@ module {
 // CHECK: %[[ONE:.*]] = llvm.mlir.constant(1.000000e+00 : f32) : f32
 // CHECK: %[[SCRATCH:.*]] = llvm.call @hipdnn_ep_get_host_scratch_base(
 // CHECK: llvm.insertvalue %[[SCRATCH]]
-// CHECK: llvm.store %[[ONE]], %{{.*}} : f32, !llvm.ptr
-// CHECK-NEXT: %[[FILL:.*]] = llvm.extractvalue
+// CHECK-COUNT-3: llvm.call @hipdnn_ep_readback_scalar(
+// CHECK: %[[DESC:.*]] = llvm.insertvalue %{{.*}}[2] : !llvm.struct<(ptr, ptr, i64)>
+// CHECK: %[[PTR:.*]] = llvm.extractvalue %[[DESC]][1] : !llvm.struct<(ptr, ptr, i64)>
+// CHECK: llvm.store %[[ONE]], %[[PTR]] : f32, !llvm.ptr
+// CHECK: %[[FILL:.*]] = llvm.extractvalue %[[DESC]][1] : !llvm.struct<(ptr, ptr, i64)>
 // CHECK: llvm.call @wrap_trilu(%{{.*}}, %[[FILL]],
 // CHECK: llvm.func @inference_cleanup

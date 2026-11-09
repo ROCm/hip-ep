@@ -4,6 +4,7 @@
  */
 
 #include "OnnxToHipUtils.h"
+#include "ReadbackScalar.h"
 
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -44,13 +45,12 @@ namespace {
 //
 //   3. ConstantOfShapeDynamic (benefit=1): fallback for non-constant shape
 //      input OR a result type with at least one dynamic dim. Each dynamic
-//      dim is materialised from the shape input via `tensor.extract` +
-//      `arith.index_cast`, the fill value is built as a scalar
-//      `arith.constant`, and the output tensor is produced via
-//      `tensor.splat` (which broadcasts a scalar to a ranked tensor with
-//      arbitrary static + dynamic dims). No HIP dialect op or runtime
-//      function is needed -- `tensor.splat` bufferizes naturally and lowers
-//      through the standard MLIR pipeline.
+//      dim is materialised from the shape input via a synchronized
+//      `hip.readback_scalar` (the shape may be in device memory) +
+//      `arith.index_cast` and the fill value is built as a scalar
+//      `arith.constant`. A dynamic-shaped result is filled on the device by
+//      `hip.expand` of a rank-0 fill value; a static result (or an element
+//      type the expand kernel lacks) is produced via `tensor.splat`.
 
 /// Return the dense-elements attribute backing \p value if it can be
 /// determined at compile time (the same forms recognised by ReshapeConversion
@@ -357,8 +357,14 @@ struct ConstantOfShapeFold : public mlir::RewritePattern {
   }
 };
 
-/// Dynamic-shape fallback: produce a `tensor.splat` whose dynamic dim sizes
-/// are read out of the shape input at runtime via `tensor.extract`.
+/// Element types the runtime expand kernel (`wrap_expand`) supports.
+static bool isExpandFillElementType(mlir::Type type) {
+  return type.isF16() || type.isF32() || type.isInteger(32) ||
+         type.isInteger(64) || type.isUnsignedInteger(8);
+}
+
+/// Dynamic-shape fallback: produce a `hip.expand` (or `tensor.splat`) whose
+/// dynamic dim sizes are read back from the shape input at runtime.
 /// Handles either (a) a non-constant shape input or (b) a result type with
 /// at least one dynamic dim.
 struct ConstantOfShapeDynamic : public mlir::RewritePattern {
@@ -392,16 +398,26 @@ struct ConstantOfShapeDynamic : public mlir::RewritePattern {
 
     // For each dynamic result dim, read the corresponding entry from the
     // shape tensor and cast to `index`. The shape tensor's length must
-    // equal the result rank; we trust shape inference and only emit an
-    // extract per dynamic dim (static dims are encoded directly in the
-    // result type).
+    // equal the result rank; we trust shape inference and only emit a
+    // read per dynamic dim (static dims are encoded directly in the
+    // result type). The shape may live in device memory (e.g. a graph
+    // input), so with a context it is read back synchronized rather than
+    // by a host `tensor.extract`.
+    auto ctxOrFailure = getContextArg(op, rewriter);
     llvm::SmallVector<mlir::Value> dynSizes;
     for (int64_t i = 0; i < resultType.getRank(); ++i) {
       if (!resultType.isDynamicDim(i))
         continue;
-      mlir::Value idx = mlir::arith::ConstantIndexOp::create(rewriter, loc, i);
-      mlir::Value extracted = mlir::tensor::ExtractOp::create(
-          rewriter, loc, shapeInput, mlir::ValueRange{idx});
+      mlir::Value extracted;
+      if (mlir::succeeded(ctxOrFailure)) {
+        extracted = mlir::hip::readbackShapeEntryToHost(
+            rewriter, loc, *ctxOrFailure, shapeInput, i);
+      } else {
+        mlir::Value idx =
+            mlir::arith::ConstantIndexOp::create(rewriter, loc, i);
+        extracted = mlir::tensor::ExtractOp::create(rewriter, loc, shapeInput,
+                                                    mlir::ValueRange{idx});
+      }
       mlir::Value asIndex = mlir::arith::IndexCastOp::create(
           rewriter, loc, rewriter.getIndexType(), extracted);
       dynSizes.push_back(asIndex);
@@ -410,6 +426,30 @@ struct ConstantOfShapeDynamic : public mlir::RewritePattern {
     mlir::Value scalar;
     if (mlir::failed(buildScalarFillValue(op, rewriter, loc, elemType, scalar)))
       return mlir::failure();
+
+    // A dynamic tensor.splat bufferizes to host loops that store into a
+    // GPU-pool buffer, which faults when the pool is device memory. Fill on
+    // the device instead: hip.expand broadcasts a rank-0 fill value (built as
+    // in ConstantOfShapeAsScalar) to the runtime shape. Element types the
+    // expand kernel lacks keep the splat.
+    if (!resultType.hasStaticShape() && isExpandFillElementType(elemType)) {
+      if (mlir::succeeded(ctxOrFailure)) {
+        auto scalarTensorTy = mlir::RankedTensorType::get({}, elemType);
+        mlir::Value empty =
+            mlir::tensor::EmptyOp::create(rewriter, loc, scalarTensorTy,
+                                          /*dynamicSizes=*/mlir::ValueRange{});
+        mlir::Value fill = mlir::linalg::FillOp::create(
+                               rewriter, loc, mlir::ValueRange{scalar},
+                               mlir::ValueRange{empty})
+                               .getResult(0);
+        mlir::Value init =
+            mlir::tensor::EmptyOp::create(rewriter, loc, resultType, dynSizes);
+        auto expand = mlir::hip::ExpandOp::create(rewriter, loc, *ctxOrFailure,
+                                                  fill, shapeInput, init);
+        rewriter.replaceOp(op, expand->getResult(0));
+        return mlir::success();
+      }
+    }
 
     // tensor.splat broadcasts a scalar to a ranked (possibly dynamic) shape;
     // dynamic dims must be supplied positionally in the same order they
