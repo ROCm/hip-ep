@@ -63,16 +63,21 @@ struct DimInfo {
 /// convolution, and its result is reassembled as a DepthToSpace: reshape the
 /// channels to `[strideH, strideW, M]`, `hip.transpose` so each length sits
 /// next to its stride, then reshape to `[N, M, Ht*strideH, Wt*strideW]`.
-/// Emitting per-residue convolutions joined by a concat instead leaves the
-/// concat to bufferize into one strided copy per residue, element by element.
-/// A single residue (stride 1) has nothing to interleave and is copied onto
-/// the grid with one `tensor.insert_slice`.
+/// The rocMLIR anchor fusion folds that transpose into the convolution's
+/// store. Emitting per-residue convolutions joined by a concat instead leaves
+/// the concat to bufferize into one strided copy per residue. Residues with
+/// fewer taps are padded with zero taps to the same kernel when that at most
+/// doubles the multiply-adds (a 3x3 filter at stride 2), so they take the
+/// same path. A single residue (stride 1) has nothing to interleave and is
+/// copied onto the grid with one `tensor.insert_slice`.
 ///
-/// When the tap counts differ, those convolutions cannot share one weight, so
-/// reassembly stays a strided `tensor.insert_slice` per residue, which
-/// bufferizes to a `memref.subview` + `memref.copy`. When every residue is
-/// non-empty (stride <= kernel) the residues tile the grid exactly, so the
-/// destination needs no zero-fill.
+/// Otherwise the convolutions cannot share one weight, so reassembly stays a
+/// strided `tensor.insert_slice` per residue, which bufferizes to a
+/// `memref.subview` + `memref.copy`. When every residue is non-empty
+/// (stride <= kernel) the residues tile the grid exactly, so the destination
+/// needs no zero-fill. For the same reason a bias becomes the bias of the
+/// residue convolutions; only a run-time bias on the wide convolution, which
+/// cannot be repeated per residue here, stays an add after the crop.
 ///
 /// Taking a 1-D slice of the unequal-tap case, with a 3-tap filter [w0 w1 w2]
 /// over a 4-long input, before:
@@ -481,13 +486,28 @@ DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
   SmallVector<Residue> residues;
   residues.reserve(dims[0].stride * dims[1].stride);
 
+  // Taps kept by residue `it` along dim `d`.
+  auto residueTaps = [&](int64_t d, int64_t it) {
+    return (dims[d].kernel - it + dims[d].stride - 1) / dims[d].stride;
+  };
+  // A residue with fewer than `ydot` taps can be widened to `ydot` with zero
+  // taps in front: its leading pad grows by the same amount, so every output
+  // reads the same inputs, and all residues then share one wide convolution.
+  // The zero taps cost multiply-adds, so pad only while they at most double
+  // the real ones (a 3x3 filter at stride 2 needs 16 taps for 9).
+  constexpr int64_t kMaxPaddedTapRatio = 2;
+  int64_t realTaps = 0;
+  for (int64_t it0 : llvm::seq<int64_t>(dims[0].stride))
+    for (int64_t it1 : llvm::seq<int64_t>(dims[1].stride))
+      realTaps += residueTaps(0, it0) * residueTaps(1, it1);
+  const bool padResidues =
+      dims[0].stride * dims[1].stride * dims[0].ydot * dims[1].ydot <=
+      kMaxPaddedTapRatio * realTaps;
+
   for (int64_t it0 : llvm::seq<int64_t>(dims[0].stride)) {
     for (int64_t it1 : llvm::seq<int64_t>(dims[1].stride)) {
-      // Taps kept by this residue along each dim.
-      const int64_t taps0 =
-          (dims[0].kernel - it0 + dims[0].stride - 1) / dims[0].stride;
-      const int64_t taps1 =
-          (dims[1].kernel - it1 + dims[1].stride - 1) / dims[1].stride;
+      const int64_t taps0 = padResidues ? dims[0].ydot : residueTaps(0, it0);
+      const int64_t taps1 = padResidues ? dims[1].ydot : residueTaps(1, it1);
       const int64_t padBegin0 = taps0 - 1;
       const int64_t padBegin1 = taps1 - 1;
       const int64_t padEnd0 = dims[0].trailingPad();
@@ -499,7 +519,8 @@ DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
 
   // Writes residue `r`'s filter, [M, C, taps0, taps1] row-major, into
   // `values`: taps {it, it + stride, ...} reversed, input/output channels
-  // swapped relative to the ConvTranspose weight.
+  // swapped relative to the ConvTranspose weight. Positions of a padded
+  // residue that fall past the filter keep the zero `values` starts with.
   auto fillSubWeight = [&](const Residue &r, MutableArrayRef<APFloat> values) {
     SmallVector<int64_t, 4> subShape{outChannels, inChannels, r.taps0, r.taps1};
     for (int64_t m : llvm::seq<int64_t>(outChannels))
@@ -509,6 +530,8 @@ DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
             // Reversed tap order: position a holds tap (taps0 - 1 - a).
             const int64_t y0 = r.it0 + (r.taps0 - 1 - a) * dims[0].stride;
             const int64_t y1 = r.it1 + (r.taps1 - 1 - b) * dims[1].stride;
+            if (y0 >= dims[0].kernel || y1 >= dims[1].kernel)
+              continue;
             values[flatIndex(subShape, m, c, a, b)] =
                 weightValues[flatIndex(weightShape, c, m, y0, y1)];
           }
@@ -517,7 +540,8 @@ DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
   // A stride-1 convolution with `r`'s taps and pads producing `channels`
   // output channels on the [Ht0, Ht1] residue grid.
   auto emitResidueConv = [&](const Residue &r, int64_t channels,
-                             ArrayRef<APFloat> values) -> Value {
+                             ArrayRef<APFloat> values,
+                             Value convBias) -> Value {
     auto weightTy = RankedTensorType::get(
         {channels, inChannels, r.taps0, r.taps1}, elementType);
     Value weight = ConstantOp::create(rewriter, loc, weightTy,
@@ -528,9 +552,12 @@ DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
     Value init =
         tensor::EmptyOp::create(rewriter, loc, outTy.getShape(), elementType)
             .getResult();
+    SmallVector<Value> operands{ctx, op.getInput(), weight};
+    if (convBias)
+      operands.push_back(convBias);
+    operands.push_back(init);
     return ConvOp::create(
-               rewriter, loc, TypeRange{outTy},
-               ValueRange{ctx, op.getInput(), weight, init},
+               rewriter, loc, TypeRange{outTy}, operands,
                ArrayRef<NamedAttribute>{
                    rewriter.getNamedAttr(
                        "kernel_shape",
@@ -558,12 +585,18 @@ DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
                residue.padEnd1 == first.padEnd1;
       });
 
+  // The residues tile the grid, so every output element, the zero slack
+  // included, comes from exactly one residue convolution, and the bias can
+  // be that convolution's bias. There it stays in the kernel epilogue
+  // instead of costing an add after the crop.
+  bool biasFolded = false;
+
   Value scattered;
   if (equalResidues) {
-    // One convolution for all residues. Its output channel is (it0 * strideW +
-    // it1) * M + m, so viewing it as [N, S0, S1, M, Ht0, Ht1] and moving each
-    // stride next to its length is a DepthToSpace (DCR) -- one transpose, no
-    // concat.
+    // One convolution for all residues. Its output channel is
+    // (it0 * strideW + it1) * M + m, so viewing it as [N, S0, S1, M, Ht0, Ht1]
+    // and moving each stride next to its length is a DepthToSpace (DCR) --
+    // one transpose, no concat.
     const int64_t ht0 = dims[0].htilda;
     const int64_t ht1 = dims[1].htilda;
     const int64_t stride0 = dims[0].stride;
@@ -575,7 +608,31 @@ DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
     for (int64_t i : llvm::seq<int64_t>(numResidues))
       fillSubWeight(residues[i], MutableArrayRef<APFloat>(wideValues)
                                      .slice(i * perResidue, perResidue));
-    Value wide = emitResidueConv(first, numResidues * outChannels, wideValues);
+    // The wide bias repeats the bias once per residue, so it must be readable
+    // here; a bias computed at run time stays an add after the crop.
+    Value wideBias;
+    if (bias)
+      if (auto biasConst = bias.getDefiningOp<ConstantOp>()) {
+        auto biasType = cast<RankedTensorType>(bias.getType());
+        FailureOr<DenseElementsAttr> biasData =
+            readConstantData(biasConst, biasType);
+        if (succeeded(biasData)) {
+          SmallVector<APFloat> tiled;
+          tiled.reserve(numResidues * outChannels);
+          for (int64_t i = 0; i < numResidues; ++i)
+            tiled.append(biasData->getValues<APFloat>().begin(),
+                         biasData->getValues<APFloat>().end());
+          auto wideBiasType =
+              RankedTensorType::get({numResidues * outChannels}, elementType);
+          wideBias =
+              ConstantOp::create(rewriter, loc, wideBiasType,
+                                 DenseElementsAttr::get(wideBiasType, tiled))
+                  .getResult();
+          biasFolded = true;
+        }
+      }
+    Value wide =
+        emitResidueConv(first, numResidues * outChannels, wideValues, wideBias);
 
     auto splitType = RankedTensorType::get(
         {numBatch, stride0, stride1, outChannels, ht0, ht1}, elementType);
@@ -610,7 +667,7 @@ DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
       SmallVector<APFloat> subValues(
           outChannels * inChannels * residue.taps0 * residue.taps1, zero);
       fillSubWeight(residue, subValues);
-      residue.partial = emitResidueConv(residue, outChannels, subValues);
+      residue.partial = emitResidueConv(residue, outChannels, subValues, bias);
       // Residue itilda lands on output positions {itilda + k * stride}.
       SmallVector<OpFoldResult> offsets{rewriter.getIndexAttr(0),
                                         rewriter.getIndexAttr(0),
@@ -629,6 +686,7 @@ DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
                                                 insertStrides)
                       .getResult();
     }
+    biasFolded = true;
   }
 
   // Crop the padding region (and any residue slack) down to the result.
@@ -645,12 +703,7 @@ DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
                                      cropOffsets, cropSizes, cropStrides)
           .getResult();
 
-  // One broadcast add on the final shape. The residues tile the grid, so each
-  // output element belongs to exactly one of them and passing the bias to every
-  // residue convolution would be equally correct -- and would fuse into the
-  // convolution epilogue instead of costing a separate dispatch. Kept separate
-  // here so the bias does not depend on the residue tiling.
-  if (bias) {
+  if (bias && !biasFolded) {
     auto biasType = cast<RankedTensorType>(bias.getType());
     // Broadcast against [N, M, H, W] rather than the trailing axis.
     auto shapedBiasType =
