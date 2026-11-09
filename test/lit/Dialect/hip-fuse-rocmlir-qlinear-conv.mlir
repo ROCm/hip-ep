@@ -162,11 +162,13 @@ func.func @main_graph(%ctx: !hip.context, %a: tensor<1x2x3x3xf32>)
 
 // -----
 
-// A non-zero weight zero point has no rocMLIR form.
+// A non-zero weight zero point adds a second integer conv over the zero
+// point, so the op becomes two rocMLIR kernels (values pinned in
+// hip-rocmlir-split-asymmetric-qlinear.mlir).
 
 // CHECK-LABEL: func.func @main_graph
-// CHECK-NOT: hip.rocmlir
-// CHECK: hip.qlinear_conv
+// CHECK-COUNT-2: hip.rocmlir(
+// CHECK-NOT: hip.qlinear_conv
 func.func @main_graph(%ctx: !hip.context, %x: tensor<1x2x3x3xui8>)
     -> tensor<1x2x3x3xui8> {
   %xs = hip.constant {value = dense<0.5> : tensor<f32>} : tensor<f32>
