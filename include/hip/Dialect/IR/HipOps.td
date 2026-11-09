@@ -2989,6 +2989,43 @@ def Hip_SwigluOp : Hip_DpsOp_AutoReify<"swiglu"> {
   }];
 }
 
+def Hip_GegluOp : Hip_DpsOp_AutoReify<"geglu"> {
+  let summary = "Fused GeGLU activation";
+  let description = [{
+    Applies the gated activation element-wise:
+
+      output = gelu(gate) * up
+
+    where gelu takes the same `approximate` modes as hip.gelu: "none" (erf)
+    or "tanh". The operands and output must have identical shapes; this
+    operation does not perform broadcasting. The fused runtime kernel supports
+    f16, f32, bf16, and f64, and rounds gelu(gate) to the element type before
+    the multiply, as the hip.gelu and hip.mul pair it replaces does.
+
+    Example:
+    ```mlir
+    hip.geglu(%ctx) ins(%gate, %up : memref<3x4xf16, 1>,
+                                     memref<3x4xf16, 1>)
+                      outs(%output : memref<3x4xf16, 1>)
+                      {approximate = "tanh"}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$gate,
+    Hip_TensorOrMemRef:$up,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<StrAttr, "\"none\"">:$approximate
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $gate `,` $up `:` type($gate) `,` type($up) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_ReciprocalOp : Hip_DpsOp_AutoReifyInfer<"reciprocal", "Y"> {
   let summary = "Element-wise reciprocal: y = 1/x";
   let description = [{

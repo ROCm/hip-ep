@@ -44,9 +44,9 @@ void mlir::hip::registerRuntimeAccessOpInterfaceExternalModels(
     TopKOp::attachInterface<TopKAccess>(*ctx);
     attachAll<OrderedAccess, MulOp, MinOp, MaxOp, SubOp, GqaOp, NonZeroOp,
               AndOp, OrOp, NotOp, EqualOp, LessOp, WhereOp, ExpandOp, GatherOp,
-              GatherElementsOp, ScatterElementsOp, CumSumOp, GeluOp, SigmoidOp,
-              TanhOp, SoftplusOp, SwishOp, SqrtOp, ReciprocalOp, ReduceMeanOp,
-              ReduceSumOp, RmsNormOp, SkipRmsNormOp, RopeOp, MatmulOp,
-              MatMulNBitsOp, QMoEOp, MiopenSoftmaxOp>(ctx);
+              GatherElementsOp, ScatterElementsOp, CumSumOp, GeluOp, GegluOp,
+              SigmoidOp, TanhOp, SoftplusOp, SwishOp, SqrtOp, ReciprocalOp,
+              ReduceMeanOp, ReduceSumOp, RmsNormOp, SkipRmsNormOp, RopeOp,
+              MatmulOp, MatMulNBitsOp, QMoEOp, MiopenSoftmaxOp>(ctx);
   });
 }

@@ -2423,6 +2423,18 @@ void SwigluOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// GegluOp: ins(gate, up), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange GegluOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void GegluOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // PoolOp: ins(input), outs([output] or [output, indices])
 //===----------------------------------------------------------------------===//
 

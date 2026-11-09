@@ -855,8 +855,9 @@ inline void registerNativeHelpers(mlir::PDLPatternModule &pdlPatterns) {
 /// rather than at the `hip.quantize_linear` it replaces.
 constexpr unsigned kPatchEmbedConvToGemmBenefit = 5;
 
-/// The SwiGLU fusion is the only pattern in this set rooted at `hip.mul`, so
-/// this benefit is never ranked against another pattern. `HipQMul` also
+/// The SwiGLU and GeGLU fusions are the only patterns in this set rooted at
+/// `hip.mul`, and they need disjoint producers (`hip.sigmoid` vs `hip.gelu`),
+/// so this benefit is never ranked against another pattern. `HipQMul` also
 /// matches a `hip.mul`, but it roots at the `hip.quantize_linear` that
 /// consumes it.
 constexpr unsigned kSwigluFusionBenefit = 2;
@@ -879,6 +880,8 @@ inline mlir::LogicalResult run(mlir::ModuleOp module,
       patterns, mlir::PatternBenefit(kPatchEmbedConvToGemmBenefit));
   populateSwigluFusionPattern(patterns,
                               mlir::PatternBenefit(kSwigluFusionBenefit));
+  populateGegluFusionPattern(patterns,
+                             mlir::PatternBenefit(kSwigluFusionBenefit));
   populateLinearAttentionGroupFoldPattern(
       patterns, mlir::PatternBenefit(kLinearAttentionGroupFoldBenefit));
 

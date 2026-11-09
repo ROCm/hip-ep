@@ -878,8 +878,23 @@ HIP_KERNEL_API int hip_swiglu(void *stream, const void *gate, const void *up,
 
 // Half input/output, with FP32 activation intermediates.
 HIP_KERNEL_API int hip_swiglu_promoted(void *stream, const void *gate,
-                                      const void *up, void *output,
-                                      int64_t num_elements, int hip_dtype);
+                                       const void *up, void *output,
+                                       int64_t num_elements, int hip_dtype);
+
+/* =========================================================================
+ * Fused GeGLU Activation
+ * =========================================================================
+ *
+ * Applies output = gelu(gate) * up element-wise, with gelu computed as
+ * hip_elementwise_gelu does (approximate: 0 = erf, 1 = tanh) and rounded to
+ * the data type before the multiply. Supports HIP_DTYPE_FLOAT16,
+ * HIP_DTYPE_FLOAT32, HIP_DTYPE_BFLOAT16, and HIP_DTYPE_FLOAT64.
+ *
+ * Returns: 0 on success (hipSuccess), non-zero hipError_t on failure.
+ */
+HIP_KERNEL_API int hip_geglu(void *stream, const void *gate, const void *up,
+                             void *output, int64_t num_elements, int hip_dtype,
+                             int64_t approximate);
 
 /* =========================================================================
  * Softplus activation

@@ -454,12 +454,78 @@ struct PromotedSwigluFusion : public mlir::OpRewritePattern<mlir::hip::CastOp> {
   }
 };
 
+// hip.gelu(gate) * up -> hip.geglu, under the SwiGLU shape contract.
+//
+//   Before:
+//     %g = hip.gelu(%ctx) ins(%gate : t) outs(%e0 : t) {approximate = "tanh"}
+//     %y = hip.mul(%ctx) ins(%g, %up : t, t) outs(%e1 : t) -> t
+//   After:
+//     %y = hip.geglu(%ctx) ins(%gate, %up : t, t) outs(%e1 : t)
+//                          {approximate = "tanh"}
+struct GegluFusion : public mlir::OpRewritePattern<mlir::hip::MulOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::hip::MulOp mul,
+                  mlir::PatternRewriter &rewriter) const override {
+    mlir::hip::GeluOp gelu = mul.getLhs().getDefiningOp<mlir::hip::GeluOp>();
+    mlir::Value up = mul.getRhs();
+    if (!gelu) {
+      gelu = mul.getRhs().getDefiningOp<mlir::hip::GeluOp>();
+      up = mul.getLhs();
+    }
+    if (!gelu)
+      return rewriter.notifyMatchFailure(mul, "no hip.gelu operand");
+    llvm::StringRef approximate = gelu.getApproximate();
+    if (approximate != "none" && approximate != "tanh")
+      return rewriter.notifyMatchFailure(mul, "unknown gelu approximation");
+    if (!gelu.getCtx() || gelu.getCtx() != mul.getCtx())
+      return rewriter.notifyMatchFailure(mul, "GeGLU ops must share a context");
+    if (!hasSingleValueUse(gelu->getResult(0), mul))
+      return rewriter.notifyMatchFailure(
+          mul, "GeGLU intermediate must have one value use");
+
+    mlir::Value gate = gelu.getInput();
+    auto gateType = mlir::dyn_cast<mlir::RankedTensorType>(gate.getType());
+    auto resultType =
+        mlir::dyn_cast<mlir::RankedTensorType>(mul->getResult(0).getType());
+    if (!gateType || gateType != up.getType() ||
+        gateType != gelu->getResult(0).getType() || gateType != resultType)
+      return rewriter.notifyMatchFailure(mul,
+                                         "GeGLU does not support broadcasting");
+    mlir::Type elemType = gateType.getElementType();
+    if (!elemType.isF16() && !elemType.isF32() && !elemType.isBF16() &&
+        !elemType.isF64())
+      return rewriter.notifyMatchFailure(
+          mul, "GeGLU supports only f16, f32, bf16, and f64");
+    if (!sameRuntimeShape(gate, up))
+      return rewriter.notifyMatchFailure(
+          mul, "dynamic dimensions are not known to match");
+
+    mlir::Operation *geluInitDef = gelu.getOutput().getDefiningOp();
+    retargetShapeQueries(rewriter, gelu->getResult(0), gate);
+    auto geglu = mlir::hip::GegluOp::create(
+        rewriter, mul.getLoc(), resultType, mul.getCtx(), gate, up,
+        mul.getOutput(), rewriter.getStringAttr(approximate));
+    rewriter.replaceOp(mul, geglu.getResult(0));
+    rewriter.eraseOp(gelu);
+    if (geluInitDef && mlir::isOpTriviallyDead(geluInitDef))
+      rewriter.eraseOp(geluInitDef);
+    return mlir::success();
+  }
+};
+
 } // namespace
 
 void populateSwigluFusionPattern(mlir::RewritePatternSet &patterns,
                                  mlir::PatternBenefit benefit) {
   patterns.add<SwigluFusion, PromotedSwigluFusion>(patterns.getContext(),
                                                    benefit);
+}
+
+void populateGegluFusionPattern(mlir::RewritePatternSet &patterns,
+                                mlir::PatternBenefit benefit) {
+  patterns.add<GegluFusion>(patterns.getContext(), benefit);
 }
 
 } // namespace fusion_transform

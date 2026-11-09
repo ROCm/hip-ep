@@ -3204,3 +3204,14 @@ int wrap_swiglu_promoted(RuntimeState *state, void *gate, void *up,
              (long long)num_elements);
   return 0;
 }
+
+int wrap_geglu(RuntimeState *state, void *gate, void *up, void *output,
+               int64_t num_elements, int64_t data_type, int64_t approximate) {
+  if (!state || !gate || !up || !output)
+    return -1;
+  MOCK_PRINT("[MOCK] wrap_geglu(num_elements=%lld, data_type=%s(%lld), "
+             "approximate=%lld)\n",
+             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
+             (long long)data_type, (long long)approximate);
+  return 0;
+}

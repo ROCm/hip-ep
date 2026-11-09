@@ -1454,6 +1454,12 @@ int wrap_swiglu(RuntimeState *state, void *gate, void *up, void *output,
 int wrap_swiglu_promoted(RuntimeState *state, void *gate, void *up,
                          void *output, int64_t num_elements, int64_t data_type);
 
+// Fused GeGLU wrapper: output = gelu(gate) * up, with gelu rounded to the
+// data type before the multiply. All buffers have identical shape and type.
+// approximate: 0 = exact (erf), 1 = tanh approximation (as wrap_gelu).
+int wrap_geglu(RuntimeState *state, void *gate, void *up, void *output,
+               int64_t num_elements, int64_t data_type, int64_t approximate);
+
 // Window-pool wrapper (uses custom HIP kernel).
 // Generic ONNX MaxPool / AveragePool / LpPool over (N, C, D_1[, D_2[, D_3]])
 // input with row-major output layout.  `pool_mode` (HIPDNN_EP_POOL_*) selects
