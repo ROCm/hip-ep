@@ -747,9 +747,11 @@ int wrap_gated_delta_net(RuntimeState *state, const void *qkv,
 int wrap_dynamic_sparse_attention(
     RuntimeState *state, const void *query, const void *key, const void *value,
     const void *past_key, const void *past_value, const void *selected_indices,
-    const void *selected_counts, const void *seqlens_k, void *output,
-    void *present_key, void *present_value, int64_t batch, int64_t seq_len,
-    int64_t num_heads, int64_t kv_num_heads, int64_t head_size,
+    const void *selected_counts, const void *seqlens_k, const void *gate,
+    const void *q_norm_weight, const void *k_norm_weight,
+    const void *position_ids, const void *cos_cache, const void *sin_cache,
+    void *output, void *present_key, void *present_value, int64_t batch,
+    int64_t seq_len, int64_t num_heads, int64_t kv_num_heads, int64_t head_size,
     int64_t capacity, int64_t max_selected, int64_t past_key_batch,
     int64_t past_key_heads, int64_t past_key_head_size,
     int64_t past_value_batch, int64_t past_value_heads,
@@ -759,14 +761,42 @@ int wrap_dynamic_sparse_attention(
     int64_t indices_rows, int64_t counts_rows, int64_t seqlens_len,
     int64_t key_batch, int64_t key_seq_len, int64_t key_width,
     int64_t value_batch, int64_t value_seq_len, int64_t value_width,
-    float scale) {
-  if (!state || !query || !key || !value || !past_key || !past_value ||
-      !selected_counts || !seqlens_k || !output || !present_key ||
-      !present_value) {
+    int64_t gate_batch, int64_t gate_seq_len, int64_t gate_width,
+    int64_t q_norm_len, int64_t k_norm_len, int64_t position_sections,
+    int64_t position_batch, int64_t position_seq_len, int64_t cos_rows,
+    int64_t cos_width, int64_t sin_rows, int64_t sin_width, int64_t section_t,
+    int64_t section_h, int64_t section_w, int64_t mrope_layout, float scale,
+    float norm_epsilon, const void *past_sequence_length) {
+  const bool packed = !key && !value;
+  const int prologue_parts = (q_norm_weight != nullptr) +
+                             (k_norm_weight != nullptr) +
+                             (position_ids != nullptr) +
+                             (cos_cache != nullptr) + (sin_cache != nullptr);
+  if (!state || !query || (!packed && (!key || !value)) || !past_key ||
+      !past_value || !selected_counts || !seqlens_k || !output ||
+      !present_key || !present_value ||
+      (prologue_parts != 0 && prologue_parts != 5)) {
     fprintf(stderr,
             "Invalid required argument in wrap_dynamic_sparse_attention\n");
     return -1;
   }
+  (void)gate_batch;
+  (void)gate_seq_len;
+  (void)gate_width;
+  (void)q_norm_len;
+  (void)k_norm_len;
+  (void)position_sections;
+  (void)position_batch;
+  (void)position_seq_len;
+  (void)cos_rows;
+  (void)cos_width;
+  (void)sin_rows;
+  (void)sin_width;
+  (void)section_t;
+  (void)section_h;
+  (void)section_w;
+  (void)mrope_layout;
+  (void)norm_epsilon;
   (void)key_batch;
   (void)key_seq_len;
   (void)key_width;
@@ -790,11 +820,13 @@ int wrap_dynamic_sparse_attention(
   (void)seqlens_len;
   MOCK_PRINT("[MOCK] wrap_dynamic_sparse_attention(B=%lld, S=%lld, N=%lld, "
              "kvN=%lld, D=%lld, cap=%lld, max_selected=%lld, scale=%f, "
-             "shared_cache=%d)\n",
+             "shared_cache=%d, packed=%d, prologue=%d, gate=%d, paired=%d)\n",
              (long long)batch, (long long)seq_len, (long long)num_heads,
              (long long)kv_num_heads, (long long)head_size, (long long)capacity,
              (long long)max_selected, (double)scale,
-             past_key == present_key ? 1 : 0);
+             past_key == present_key ? 1 : 0, packed ? 1 : 0,
+             prologue_parts != 0 ? 1 : 0, gate ? 1 : 0,
+             past_sequence_length ? 1 : 0);
   return 0;
 }
 
@@ -808,10 +840,14 @@ int wrap_sparse_attention_indexer(
     int64_t rotary_batched, int64_t compress_ratio, int64_t token_budget,
     int64_t element_size_bytes, int64_t past_batch, int64_t mask_batch,
     int64_t mask_len, int64_t cos_batch, int64_t sin_batch, int64_t sin_rows,
-    float epsilon, float scale) {
+    float epsilon, float scale, const void *rotary_position_ids,
+    const void *rotary_sections, int64_t id_sections, int64_t id_batch,
+    int64_t id_rows, void *selected_counts, int64_t pair_format) {
   if (!state || !query || !query_norm_weight || !key_norm_weight ||
       !cos_cache || !sin_cache || (past_rows > 0 && !past_key) ||
-      !selected_indices || !present_key) {
+      !selected_indices || !present_key ||
+      (rotary_position_ids && !rotary_sections) ||
+      (pair_format && (mask || !past_sequence_length || !selected_counts))) {
     fprintf(stderr,
             "Invalid required argument in wrap_sparse_attention_indexer\n");
     return -1;
@@ -824,15 +860,20 @@ int wrap_sparse_attention_indexer(
   (void)cos_batch;
   (void)sin_batch;
   (void)sin_rows;
+  (void)id_sections;
+  (void)id_batch;
   MOCK_PRINT("[MOCK] wrap_sparse_attention_indexer(B=%lld, S=%lld, "
              "past_rows=%lld, N=%lld, D=%lld, R=%lld, X=%lld, batched=%lld, "
-             "r=%lld, budget=%lld, elem=%lld, eps=%g, scale=%f, mask=%d)\n",
+             "r=%lld, budget=%lld, elem=%lld, eps=%g, scale=%f, mask=%d, "
+             "id_rows=%lld, counts=%d, pair=%d)\n",
              (long long)batch, (long long)seq_len, (long long)past_rows,
              (long long)num_heads, (long long)head_size,
              (long long)rotary_width, (long long)rotary_rows,
              (long long)rotary_batched, (long long)compress_ratio,
              (long long)token_budget, (long long)element_size_bytes,
-             (double)epsilon, (double)scale, mask ? 1 : 0);
+             (double)epsilon, (double)scale, mask ? 1 : 0,
+             (long long)(rotary_position_ids ? id_rows : 0),
+             selected_counts ? 1 : 0, pair_format ? 1 : 0);
   return 0;
 }
 
