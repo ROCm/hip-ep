@@ -4,6 +4,7 @@
  */
 
 #include "OnnxToHipUtils.h"
+#include "ReadbackScalar.h"
 
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -45,7 +46,8 @@ namespace {
 //
 //   3. ConstantOfShapeDynamic (benefit=1): fallback for non-constant shape
 //      input OR a result type with at least one dynamic dim. Each dynamic
-//      dim is materialised from the shape input via `tensor.extract` +
+//      dim is materialised from the shape input via a synchronized
+//      `hip.readback_scalar` (the shape may be in device memory) +
 //      `arith.index_cast` and the fill value is built as a scalar
 //      `arith.constant`. A dynamic-shaped result is filled on the device by
 //      `hip.expand` of a rank-0 fill value; a static result (or an element
@@ -358,9 +360,24 @@ struct ConstantOfShapeFold : public mlir::RewritePattern {
   }
 };
 
+/// Widths the runtime expand kernel copies. i1 is stored as one byte.
+static bool isExpandFillElementType(mlir::Type type) {
+  if (!type.isIntOrFloat())
+    return false;
+  switch (type.getIntOrFloatBitWidth()) {
+  case 1:
+  case 8:
+  case 16:
+  case 32:
+  case 64:
+    return true;
+  default:
+    return false;
+  }
+}
+
 /// Dynamic-shape fallback: produce a `hip.expand` (or `tensor.splat`) whose
-/// dynamic dim sizes are read out of the shape input at runtime via
-/// `tensor.extract`.
+/// dynamic dim sizes are read back from the shape input at runtime.
 /// Handles either (a) a non-constant shape input or (b) a result type with
 /// at least one dynamic dim.
 struct ConstantOfShapeDynamic : public mlir::RewritePattern {
@@ -394,16 +411,26 @@ struct ConstantOfShapeDynamic : public mlir::RewritePattern {
 
     // For each dynamic result dim, read the corresponding entry from the
     // shape tensor and cast to `index`. The shape tensor's length must
-    // equal the result rank; we trust shape inference and only emit an
-    // extract per dynamic dim (static dims are encoded directly in the
-    // result type).
+    // equal the result rank; we trust shape inference and only emit a
+    // read per dynamic dim (static dims are encoded directly in the
+    // result type). The shape may live in device memory (e.g. a graph
+    // input), so with a context it is read back synchronized rather than
+    // by a host `tensor.extract`.
+    auto ctxOrFailure = getContextArg(op, rewriter);
     llvm::SmallVector<mlir::Value> dynSizes;
     for (int64_t i = 0; i < resultType.getRank(); ++i) {
       if (!resultType.isDynamicDim(i))
         continue;
-      mlir::Value idx = mlir::arith::ConstantIndexOp::create(rewriter, loc, i);
-      mlir::Value extracted = mlir::tensor::ExtractOp::create(
-          rewriter, loc, shapeInput, mlir::ValueRange{idx});
+      mlir::Value extracted;
+      if (mlir::succeeded(ctxOrFailure)) {
+        extracted = mlir::hip::readbackShapeEntryToHost(
+            rewriter, loc, *ctxOrFailure, shapeInput, i);
+      } else {
+        mlir::Value idx =
+            mlir::arith::ConstantIndexOp::create(rewriter, loc, i);
+        extracted = mlir::tensor::ExtractOp::create(rewriter, loc, shapeInput,
+                                                    mlir::ValueRange{idx});
+      }
       mlir::Value asIndex = mlir::arith::IndexCastOp::create(
           rewriter, loc, rewriter.getIndexType(), extracted);
       dynSizes.push_back(asIndex);
@@ -416,9 +443,9 @@ struct ConstantOfShapeDynamic : public mlir::RewritePattern {
     // A dynamic tensor.splat bufferizes to host loops that store into a
     // GPU-pool buffer, which faults when the pool is device memory. Fill on
     // the device instead: hip.expand broadcasts a rank-0 fill value (built as
-    // in ConstantOfShapeAsScalar) to the runtime shape.
-    if (!resultType.hasStaticShape()) {
-      auto ctxOrFailure = getContextArg(op, rewriter);
+    // in ConstantOfShapeAsScalar) to the runtime shape. Element types the
+    // expand kernel lacks keep the splat.
+    if (!resultType.hasStaticShape() && isExpandFillElementType(elemType)) {
       if (mlir::succeeded(ctxOrFailure)) {
         auto scalarTensorTy = mlir::RankedTensorType::get({}, elemType);
         mlir::Value empty =
