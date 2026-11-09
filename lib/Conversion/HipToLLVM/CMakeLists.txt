@@ -75,6 +75,7 @@ add_library(HipToLLVM STATIC
   PoolLowering.cpp
   ResizeLowering.cpp
   GridSampleLowering.cpp
+  RoiAlignLowering.cpp
   GlobalPoolLowering.cpp
   QElementwiseLowering.cpp
   QMatMulLowering.cpp
