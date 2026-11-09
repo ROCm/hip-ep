@@ -472,7 +472,8 @@ RocMlirOp outline(const KernelParts &parts, bool elementwise,
             operands, [&](Value v) { return getKernelArgumentType(v, ops); }),
         resultTypes);
     kernel = func::FuncOp::create(
-        rewriter, loc, "rocMlir" + std::to_string(counter++), funcType);
+        rewriter, loc,
+        rocMlirKernelName(ops.getArrayRef(), counter++), funcType);
     kernel->setAttr("rock.kernel", rewriter.getUnitAttr());
     if (elementwise)
       kernel->setAttr("rock.elementwise", rewriter.getUnitAttr());

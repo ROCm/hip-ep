@@ -9,11 +9,35 @@
 
 #include "hip/Conversion/HipToTosa/HipToTosaLegality.h"
 
+#include <mlir/Dialect/Arith/IR/Arith.h>
+#include <mlir/Dialect/Func/IR/FuncOps.h>
+#include <mlir/Dialect/Tensor/IR/Tensor.h>
+#include <mlir/Dialect/UB/IR/UBOps.h>
 #include <mlir/IR/TypeUtilities.h>
 #include <mlir/Interfaces/DestinationStyleOpInterface.h>
 #include <mlir/Interfaces/SideEffectInterfaces.h>
 
 namespace mlir::hip {
+
+// Bookkeeping cloned so the kernel is IsolatedFromAbove is not part of the
+// name. A return is not either: gemm-gemm walks a finished kernel body.
+static bool isRocMlirKernelNameOp(Operation *op) {
+  return !isa<tensor::EmptyOp, tensor::ExpandShapeOp, tensor::CollapseShapeOp,
+              arith::ConstantOp, ub::PoisonOp, ConstantOp, func::ReturnOp>(op);
+}
+
+std::string rocMlirKernelName(ArrayRef<Operation *> ops, int index) {
+  std::string name = "mlir";
+  for (Operation *op : ops) {
+    if (!isRocMlirKernelNameOp(op))
+      continue;
+    name.push_back('_');
+    name += op->getName().stripDialect().str();
+  }
+  name.push_back('_');
+  name += std::to_string(index);
+  return name;
+}
 
 bool isInlineScalarConstant(Value v) {
   auto type = dyn_cast<RankedTensorType>(v.getType());

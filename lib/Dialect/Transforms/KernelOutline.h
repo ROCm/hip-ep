@@ -12,6 +12,7 @@
 #include <mlir/IR/PatternMatch.h>
 
 #include <optional>
+#include <string>
 #include <utility>
 
 namespace mlir::hip {
@@ -20,6 +21,11 @@ namespace mlir::hip {
 /// bounds, residual Mul scale). File- and memory-backed carriers have no dense
 /// attr for in-kernel tosa.const and stay kernel arguments.
 bool isInlineScalarConstant(Value v);
+
+/// Symbol for an outlined rocMLIR kernel, named from its ops the way MIGraphX
+/// names one: `mlir_<op>_<op>_..._<n>`. `_n` keeps two chains with the same
+/// ops unique in one module.
+std::string rocMlirKernelName(ArrayRef<Operation *> ops, int index);
 
 /// The kernel ABI rocMLIR expects for a scalar: tensor<1xT> for a rank-0
 /// value, every other type unchanged.

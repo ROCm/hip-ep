@@ -4,6 +4,7 @@
  */
 
 #include "GemmGemm.h"
+#include "KernelOutline.h"
 #include "RocMlirFusionPredicates.h"
 
 #include "hip/Dialect/IR/HipDialect.h"
@@ -217,8 +218,14 @@ static bool fuseGemmGemmPair(RocMlirOp second, int &counter,
            llvm::enumerate(secondKernel.getArgumentTypes()))
         if (argIndex != index)
           argTypes.push_back(type);
+      SmallVector<Operation *> named;
+      for (Operation &op : firstKernel.getBody().front())
+        named.push_back(&op);
+      for (Operation &op : secondKernel.getBody().front())
+        named.push_back(&op);
       merged = func::FuncOp::create(
-          builder, secondKernel.getLoc(), "rocMlir" + std::to_string(counter++),
+          builder, secondKernel.getLoc(),
+          rocMlirKernelName(named, counter++),
           builder.getFunctionType(argTypes,
                                   secondKernel.getFunctionType().getResults()));
       merged->setAttrs(secondKernel->getDiscardableAttrDictionary());
