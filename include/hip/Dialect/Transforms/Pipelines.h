@@ -179,6 +179,11 @@ struct RocMlirFusionPipelineOptions
   ListOption<std::string> gemmGemmAccelTypes{
       *this, "gemm-gemm-accel-types",
       llvm::cl::desc("Gemm element types with matrix acceleration")};
+  Option<bool> standaloneElementwise{
+      *this, "standalone-elementwise",
+      llvm::cl::desc("Outline unclaimed elementwise modules as rocMLIR "
+                     "kernels of their own"),
+      llvm::cl::init(true)};
   Option<std::string> report{
       *this, "report",
       llvm::cl::desc("Append the fusion report records to this file"),
