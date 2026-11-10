@@ -15,6 +15,7 @@
 #include <hip/hip_fp16.h>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
 #include <mutex>
 #include <unordered_map>
 
@@ -1145,42 +1146,56 @@ extern "C" int hip_qmoe_bucket_tokens_ragged(
 
 // ---------------------------------------------------------------------------
 // Device-side row tiles for the grouped expert GEMM. Experts with
-// 0 < count <= split_rows get tiles of rows_small rows, larger ones tiles of
-// rows_big, each as (expert, row0, rows) in ascending expert order. Counts are
-// staged in LDS so the serial scan on thread 0 never waits on global memory.
+// 0 < count <= split_rows get tiles of rows_small rows, those up to
+// split_dense tiles of rows_big and larger ones tiles of rows_dense, each as
+// (expert, row0, rows) in ascending expert order. Counts are staged in LDS so
+// the serial scan on thread 0 never waits on global memory.
 // ---------------------------------------------------------------------------
 __global__ void qmoe_build_row_tiles_kernel(
     const int32_t* __restrict__ expert_counts, int num_experts, int split_rows,
-    int rows_small, int rows_big, int32_t* __restrict__ tiles_small,
-    int32_t* __restrict__ num_small, int32_t* __restrict__ tiles_big,
-    int32_t* __restrict__ num_big) {
-  extern __shared__ int32_t tile_base[];  // [2][num_experts]
+    int split_dense, int rows_small, int rows_big, int rows_dense,
+    int32_t* __restrict__ tiles_small, int32_t* __restrict__ num_small,
+    int32_t* __restrict__ tiles_big, int32_t* __restrict__ num_big,
+    int32_t* __restrict__ tiles_dense, int32_t* __restrict__ num_dense) {
+  extern __shared__ int32_t tile_base[];  // [3][num_experts]
+  auto tier = [&](int c) { return c <= split_rows ? 0 : c <= split_dense ? 1 : 2; };
+  const int tier_rows[3] = {rows_small, rows_big, rows_dense};
   for (int e = threadIdx.x; e < num_experts; e += blockDim.x) {
     const int c = expert_counts[e];
-    tile_base[e] = (c > 0 && c <= split_rows) ? (c + rows_small - 1) / rows_small : 0;
-    tile_base[num_experts + e] = c > split_rows ? (c + rows_big - 1) / rows_big : 0;
+    for (int t = 0; t < 3; t++) {
+      tile_base[t * num_experts + e] = 0;
+    }
+    if (c > 0) {
+      const int t = tier(c);
+      tile_base[t * num_experts + e] = (c + tier_rows[t] - 1) / tier_rows[t];
+    }
   }
   __syncthreads();
   if (threadIdx.x == 0) {
-    int s = 0, b = 0;
+    int n[3] = {0, 0, 0};
     for (int e = 0; e < num_experts; e++) {
-      const int ns = tile_base[e], nb = tile_base[num_experts + e];
-      tile_base[e] = s;
-      tile_base[num_experts + e] = b;
-      s += ns;
-      b += nb;
+      for (int t = 0; t < 3; t++) {
+        const int nt = tile_base[t * num_experts + e];
+        tile_base[t * num_experts + e] = n[t];
+        n[t] += nt;
+      }
     }
-    *num_small = s;
-    *num_big = b;
+    *num_small = n[0];
+    *num_big = n[1];
+    if (num_dense) {
+      *num_dense = n[2];
+    }
   }
   __syncthreads();
+  int32_t* const tier_tiles[3] = {tiles_small, tiles_big, tiles_dense};
   for (int e = threadIdx.x; e < num_experts; e += blockDim.x) {
     const int c = expert_counts[e];
-    if (c <= 0) continue;
-    const bool small = c <= split_rows;
-    const int rows = small ? rows_small : rows_big;
-    int32_t* out = (small ? tiles_small : tiles_big) +
-                   3 * tile_base[(small ? 0 : num_experts) + e];
+    if (c <= 0) {
+      continue;
+    }
+    const int t = tier(c);
+    const int rows = tier_rows[t];
+    int32_t* out = tier_tiles[t] + 3 * tile_base[t * num_experts + e];
     for (int r0 = 0; r0 < c; r0 += rows, out += 3) {
       out[0] = e;
       out[1] = r0;
@@ -1192,20 +1207,31 @@ __global__ void qmoe_build_row_tiles_kernel(
 extern "C" int hip_qmoe_build_row_tiles(
     void* stream, const void* expert_counts, int64_t num_experts,
     int64_t split_rows, int64_t rows_small, int64_t rows_big, void* tiles_small,
-    void* num_small, void* tiles_big, void* num_big) {
+    void* num_small, void* tiles_big, void* num_big, int64_t split_dense,
+    int64_t rows_dense, void* tiles_dense, void* num_dense) {
   if (num_experts <= 0 || split_rows < 0 || rows_small <= 0 || rows_big <= 0)
     return -1;
+  if (tiles_dense &&
+      (!num_dense || split_dense < split_rows || rows_dense <= 0)) {
+    return -1;
+  }
+  const int dense_split = tiles_dense
+                              ? static_cast<int>(split_dense)
+                              : std::numeric_limits<int>::max();
   hipStream_t s = static_cast<hipStream_t>(stream);
-  const size_t shmem = 2 * static_cast<size_t>(num_experts) * sizeof(int32_t);
+  const size_t shmem = 3 * static_cast<size_t>(num_experts) * sizeof(int32_t);
   (void)hipGetLastError();
   hipLaunchKernelGGL(qmoe_build_row_tiles_kernel, dim3(1), dim3(kBlock), shmem,
                      s, static_cast<const int32_t*>(expert_counts),
                      static_cast<int>(num_experts), static_cast<int>(split_rows),
-                     static_cast<int>(rows_small), static_cast<int>(rows_big),
+                     dense_split, static_cast<int>(rows_small),
+                     static_cast<int>(rows_big), static_cast<int>(rows_dense),
                      static_cast<int32_t*>(tiles_small),
                      static_cast<int32_t*>(num_small),
                      static_cast<int32_t*>(tiles_big),
-                     static_cast<int32_t*>(num_big));
+                     static_cast<int32_t*>(num_big),
+                     static_cast<int32_t*>(tiles_dense),
+                     static_cast<int32_t*>(num_dense));
   hipError_t err = hipGetLastError();
   if (err != hipSuccess)
     fprintf(stderr, "[custom_kernels] hip_qmoe_build_row_tiles failed: %s\n",

@@ -82,6 +82,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <initializer_list>
 #include <mutex>
 #include <string>
 #include <type_traits>
@@ -5062,6 +5063,165 @@ extern "C" int hip_matmul_nbits_wmma_smallm_grouped(
 
 #undef SMALLM_WMMA_CASES
 
+/* -----------------------------------------------------------------------
+ * Section 2b-dense-tiles: LDS-staged WMMA over a row-tile list (MoE experts
+ * with many rows)
+ *
+ * WHY: the small-M grouped kernel dequantizes B in registers per row tile, so
+ * an expert cut into several 32-row tiles streams and dequantizes its weights
+ * once per tile. GemmFp16U4ImplX stages the dequantized B tile in LDS and
+ * shares it across 64 rows. gfx1151, Qwen3.8-Flash-Next expert shapes (fc1
+ * N=1280 K=2560, fc2 N=2560 K=640, block 32), 512-token prefill on recorded
+ * routing: moving experts above 32 rows here makes the expert GEMMs above 16
+ * rows 7-13% and the whole QMoE 4-6% faster. 32-row dense tiles were slower
+ * than the small-M kernel, so experts of up to 32 rows stay there.
+ * ----------------------------------------------------------------------- */
+
+constexpr int kMaxCachedDevices = 16;
+
+// True when the current device's gcnArchName, which may carry feature
+// suffixes ("gfx1151:xnack-"), names one of `archs`. `cache` keeps the answer
+// per device ordinal: 0 == not probed yet, 1 == no, 2 == yes.
+static bool currentDeviceArchIn(int (&cache)[kMaxCachedDevices],
+                                std::initializer_list<const char*> archs) {
+    auto probe = [&](int d) {
+        hipDeviceProp_t p;
+        if (hipGetDeviceProperties(&p, d) != hipSuccess) {
+            return false;
+        }
+        for (const char* arch : archs) {
+            const size_t len = std::strlen(arch);
+            if (std::strncmp(p.gcnArchName, arch, len) == 0 &&
+                (p.gcnArchName[len] == '\0' || p.gcnArchName[len] == ':')) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    int dev = 0;
+    if (hipGetDevice(&dev) != hipSuccess || dev < 0) {
+        return false;
+    }
+    if (dev >= kMaxCachedDevices) {
+        return probe(dev);
+    }
+    if (cache[dev] == 0) {
+        cache[dev] = probe(dev) ? 2 : 1;
+    }
+    return cache[dev] == 2;
+}
+
+// gfx1150 / 1151 / 1152 run the same gfx11-generic code object; the tile
+// choice above was measured on gfx1151.
+static bool denseTilesDevice() {
+    static int cache[kMaxCachedDevices] = {};
+    return currentDeviceArchIn(cache, {"gfx1150", "gfx1151", "gfx1152"});
+}
+
+constexpr int kDenseTileRows = 64;
+constexpr int kDenseTileCols = 64;
+constexpr int kDenseTileBk = 32;
+constexpr int kDenseTileThreads = GEMM_WG_SZ(kDenseTileRows, kDenseTileCols, 2, 2);
+
+#if defined(__HIP_DEVICE_COMPILE__)
+#define MATMUL_NBITS_DENSE_TILES_CU_MODE __attribute__((target("cumode")))
+#else
+#define MATMUL_NBITS_DENSE_TILES_CU_MODE
+#endif
+
+// Slots at or past *num_row_tiles exit before touching memory; blockIdx.x is
+// the column tile. Two-deep global prefetch (GemmFp16U4ImplX PGR_P=2); CU
+// mode measured 0-1.4% faster than WGP mode on the routing above.
+__global__ __attribute__((amdgpu_flat_work_group_size(kDenseTileThreads,
+                                                      kDenseTileThreads)))
+__attribute__((amdgpu_waves_per_eu(1))) MATMUL_NBITS_DENSE_TILES_CU_MODE
+void MatMulNBitsWMMA_DenseTiles(
+    int N, int K, const _Float16* __restrict__ A,
+    const unsigned char* __restrict__ B, int b_row_bytes,
+    const _Float16* __restrict__ scales, const _Float16* __restrict__ bias,
+    const int32_t* __restrict__ expert_row_offsets,
+    const int32_t* __restrict__ row_tiles,
+    const int32_t* __restrict__ num_row_tiles, int group_size,
+    int num_groups_k, _Float16* __restrict__ C)
+{
+    const int slot = static_cast<int>(blockIdx.y);
+    if (slot >= *num_row_tiles) {
+        return;
+    }
+    const int expert = row_tiles[3 * slot];
+    const int row0 = expert_row_offsets[expert] + row_tiles[3 * slot + 1];
+    const int rows = row_tiles[3 * slot + 2];
+    const size_t e_rows = static_cast<size_t>(expert) * N;
+    GemmFp16U4ImplX<kDenseTileRows, kDenseTileCols, 2, 2, false, true,
+                    kDenseTileBk, 2, 0, 0, 0, 0, 0, true>(
+        row0 + rows, N, K, A, K, B + e_rows * b_row_bytes,
+        scales + e_rows * num_groups_k, nullptr, group_size, num_groups_k, C, N,
+        /*swizzle_n=*/1, b_row_bytes, row0,
+        static_cast<int>(blockIdx.x) * kDenseTileCols,
+        bias ? bias + e_rows : nullptr);
+}
+#undef MATMUL_NBITS_DENSE_TILES_CU_MODE
+
+static bool denseTilesSupported(int64_t tile_rows, int64_t N, int64_t K,
+                                int64_t bits, int64_t block_size,
+                                int64_t element_size_bytes) {
+    return tile_rows > 0 && tile_rows <= kDenseTileRows &&
+           N > 0 && K > 0 && bits == 4 && element_size_bytes == 2 &&
+           (K % kDenseTileBk) == 0 && block_size >= 32 &&
+           (block_size & (block_size - 1)) == 0 && denseTilesDevice();
+}
+
+extern "C" int hip_matmul_nbits_wmma_dense_grouped_supported(
+    int64_t tile_rows, int64_t N, int64_t K, int64_t bits, int64_t block_size,
+    int64_t element_size_bytes) {
+  return denseTilesSupported(tile_rows, N, K, bits, block_size,
+                             element_size_bytes)
+             ? 1
+             : 0;
+}
+
+extern "C" int hip_matmul_nbits_wmma_dense_grouped(
+    void* stream, const void* A, const void* B, const void* scales,
+    const void* bias, const void* expert_row_offsets, const void* row_tiles,
+    const void* num_row_tiles, void* output, int64_t max_row_tiles,
+    int64_t tile_rows, int64_t N, int64_t K, int64_t bits, int64_t block_size,
+    int64_t element_size_bytes) {
+  if (max_row_tiles <= 0 || N <= 0 || K <= 0) {
+    return 0;
+  }
+  if (!denseTilesSupported(tile_rows, N, K, bits, block_size,
+                           element_size_bytes)) {
+    return -1;
+  }
+
+  hipStream_t s = static_cast<hipStream_t>(stream);
+  dim3 grid(static_cast<unsigned>((N + kDenseTileCols - 1) / kDenseTileCols),
+            static_cast<unsigned>(max_row_tiles));
+  (void)hipGetLastError();
+  hipLaunchKernelGGL(MatMulNBitsWMMA_DenseTiles, grid, dim3(kDenseTileThreads),
+                     0, s, static_cast<int>(N), static_cast<int>(K),
+                     static_cast<const _Float16*>(A),
+                     static_cast<const unsigned char*>(B),
+                     static_cast<int>((K + 1) / 2),
+                     static_cast<const _Float16*>(scales),
+                     static_cast<const _Float16*>(bias),
+                     static_cast<const int32_t*>(expert_row_offsets),
+                     static_cast<const int32_t*>(row_tiles),
+                     static_cast<const int32_t*>(num_row_tiles),
+                     static_cast<int>(block_size),
+                     static_cast<int>((K + block_size - 1) / block_size),
+                     static_cast<_Float16*>(output));
+
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess) {
+    fprintf(stderr,
+            "[custom_kernels] hip_matmul_nbits_wmma_dense_grouped failed: %s\n",
+            hipGetErrorString(err));
+  }
+  return static_cast<int>(err);
+}
+
 /* fp16 GEMM kernel entry (for pre-dequantized B, FUSED_DQ=false) */
 
 template <int BM_T = 128, int BN_T = 128, int WT_M = 2, int WT_N = 2,
@@ -5121,22 +5281,8 @@ static constexpr bool wmmaConfigIsExt(const WmmaConfig& c) { return c.ext; }
 // gcnArchName may carry feature suffixes ("gfx1151:xnack-"). Cached per device
 // ordinal like hipdnn_device_wave_size().
 static bool wmmaExtDevice() {
-    constexpr int kMaxCachedDevices = 16;
-    // 0 == not probed yet, 1 == no, 2 == yes.
-    static int cached[kMaxCachedDevices] = {};
-
-    auto probe = [](int d) {
-        hipDeviceProp_t p;
-        if (hipGetDeviceProperties(&p, d) != hipSuccess) return false;
-        return std::strncmp(p.gcnArchName, "gfx1151", 7) == 0 &&
-               (p.gcnArchName[7] == '\0' || p.gcnArchName[7] == ':');
-    };
-
-    int dev = 0;
-    if (hipGetDevice(&dev) != hipSuccess || dev < 0) return false;
-    if (dev >= kMaxCachedDevices) return probe(dev);
-    if (cached[dev] == 0) cached[dev] = probe(dev) ? 2 : 1;
-    return cached[dev] == 2;
+    static int cache[kMaxCachedDevices] = {};
+    return currentDeviceArchIn(cache, {"gfx1151"});
 }
 
 // Extended fused int4 entries: (bm, bn, wt_m, wt_n, bk, variant, swizzle).

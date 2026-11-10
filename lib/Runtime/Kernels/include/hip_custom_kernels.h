@@ -2724,6 +2724,25 @@ HIP_KERNEL_API int hip_matmul_nbits_wmma_smallm_grouped_supported(
     int cfg, int64_t tile_rows, int64_t N, int64_t K, int64_t bits,
     int64_t block_size, int64_t element_size_bytes);
 
+/* Same operation and A / B / scales / bias / row-tile layout as
+ * hip_matmul_nbits_wmma_smallm_grouped, for tiles of up to 64 rows: the
+ * dequantized weight tile is staged in LDS and shared by all rows of the tile,
+ * which pays off for experts with many rows. Symmetric weights only (zero
+ * point 8). Requires gfx1150 / 1151 / 1152, bits == 4, fp16, K % 32 == 0,
+ * power-of-two block_size >= 32 and tile_rows <= 64; returns -1 otherwise. */
+HIP_KERNEL_API int hip_matmul_nbits_wmma_dense_grouped(
+    void* stream, const void* A, const void* B, const void* scales,
+    const void* bias, const void* expert_row_offsets, const void* row_tiles,
+    const void* num_row_tiles, void* output, int64_t max_row_tiles,
+    int64_t tile_rows, int64_t N, int64_t K, int64_t bits, int64_t block_size,
+    int64_t element_size_bytes);
+
+/* 1 when hip_matmul_nbits_wmma_dense_grouped accepts this shape on the
+ * current device, else 0. */
+HIP_KERNEL_API int hip_matmul_nbits_wmma_dense_grouped_supported(
+    int64_t tile_rows, int64_t N, int64_t K, int64_t bits, int64_t block_size,
+    int64_t element_size_bytes);
+
 /* W4A8 integer-dot-product (dp4a) GEMV for a single decode row (M==1).
  * Dynamically quantizes the fp16 activation row to per-group int8 (into
  * caller-owned scratch) and runs a `v_dot4_i32_iu8` (`__builtin_amdgcn_sudot4`)
@@ -3204,15 +3223,20 @@ HIP_KERNEL_API int hip_qmoe_bucket_tokens_ragged(
 /* Row tiles for hip_matmul_nbits_wmma_smallm_grouped, built on the device from
  * the bucketed expert counts. Experts with 0 < count <= split_rows are cut into
  * tiles of rows_small rows (tiles_small), larger ones into tiles of rows_big
- * (tiles_big). Each tile is int32 (expert, row0, rows), in ascending expert
- * order; num_small / num_big are int32 device scalars receiving the counts.
- * Capacity the caller must provide: tiles_small holds at most
- * sum over small experts of ceil(count / rows_small), tiles_big
- * total_rows / rows_big + (number of experts above split_rows). */
+ * (tiles_big). With tiles_dense non-null, experts above split_dense
+ * (>= split_rows) go to tiles of rows_dense rows in tiles_dense instead
+ * (hip_matmul_nbits_wmma_dense_grouped). Each tile is int32 (expert, row0,
+ * rows), in ascending expert order; num_small / num_big / num_dense are int32
+ * device scalars receiving the counts. Capacity the caller must provide:
+ * tiles_small holds at most sum over small experts of
+ * ceil(count / rows_small), tiles_big total_rows / rows_big + (number of
+ * experts above split_rows), tiles_dense total_rows / rows_dense + (number
+ * of experts above split_dense). */
 HIP_KERNEL_API int hip_qmoe_build_row_tiles(
     void* stream, const void* expert_counts, int64_t num_experts,
     int64_t split_rows, int64_t rows_small, int64_t rows_big, void* tiles_small,
-    void* num_small, void* tiles_big, void* num_big);
+    void* num_small, void* tiles_big, void* num_big, int64_t split_dense,
+    int64_t rows_dense, void* tiles_dense, void* num_dense);
 
 /* One-launch ragged quantized MatMulNBits over every row group/expert.
  * input_row_ids may be null for already-sorted input rows; otherwise it maps
