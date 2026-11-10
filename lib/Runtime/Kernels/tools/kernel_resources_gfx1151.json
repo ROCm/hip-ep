@@ -579,7 +579,7 @@
 "_ZN12_GLOBAL__N_116fast_gelu_kernelIfEEvPKT_S3_PS1_xx":[11,0,0,16,236,0,0]
 },
 "gated_delta_net_kernel":{
-"_ZN12_GLOBAL__N_126gatedDeltaNetChunkedKernelEPK6__halfPKfS4_S4_S4_S4_PS0_Pfiiiif":[251,0,0,4,4442,354,4293],
+"_ZN12_GLOBAL__N_126gatedDeltaNetChunkedKernelEPK6__halfPKfS4_S4_S4_S4_PS0_Pfiiiif":[247,0,0,4,4215,337,4036],
 "_ZN12_GLOBAL__N_128gatedDeltaNetRecurrentKernelI6__halfLi128EEEvPKT_PKfS6_S6_S6_S6_PS2_Pfiiiif":[165,0,0,9,1452,71,568],
 "_ZN12_GLOBAL__N_128gatedDeltaNetRecurrentKernelI6__halfLi256EEEvPKT_PKfS6_S6_S6_S6_PS2_Pfiiiif":[185,0,0,8,1546,65,520],
 "_ZN12_GLOBAL__N_128gatedDeltaNetRecurrentKernelI6__halfLi32EEEvPKT_PKfS6_S6_S6_S6_PS2_Pfiiiif":[94,0,0,16,1041,17,264],

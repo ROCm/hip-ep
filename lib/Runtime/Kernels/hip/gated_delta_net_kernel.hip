@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 #include <type_traits>
@@ -193,9 +194,6 @@ constexpr int kChunkDk = 128;
 constexpr int kWt = 16;
 constexpr int kRawStride = kChunkDk + 8;
 constexpr int kTileStride = kChunk + 4;
-// Largest magnitude a split operand may take: its fp16 hi part must stay
-// finite.
-constexpr float kSplitSafeMax = 32768.0f;
 // Shorter sequences run faster on the recurrent kernel.
 constexpr int kChunkedMinSeqLen = 16;
 
@@ -241,14 +239,12 @@ __device__ __forceinline__ void gdnMma(gdnFloat8 &acc, int lane, FA a, FB b) {
     acc = HIPDNN_WMMA_F32_16X16X16_F16(aLo, bHi, acc);
   }
 #else
-#pragma unroll
-  for (int e = 0; e < 8; ++e) {
-    float s = 0.0f;
-    for (int kk = 0; kk < kWt; ++kk) {
-      s += a(e * 2 + pr, kk) * b(kk, ln);
-    }
-    acc[e] += s;
-  }
+  (void)acc;
+  (void)ln;
+  (void)pr;
+  (void)a;
+  (void)b;
+  __builtin_trap();
 #endif
 }
 
@@ -261,9 +257,12 @@ __device__ __forceinline__ void gdnMma(gdnFloat8 &acc, int lane, FA a, FB b) {
 //   S = e^{G_last} S0 + sum_j e^{G_last-G_j} u_j k_j^T
 // Products run on the matrix cores with fp32 accumulation. q and k enter as
 // their raw fp16 inputs (the L2 norms are applied in fp32 afterwards); fp32
-// operands are split into fp16 hi + lo. The state stays in fp32 accumulators
-// for the whole sequence. Each block reads its own state slice before writing
-// it, so initial_state may alias final_state.
+// operands are split into fp16 hi + lo, so they must stay inside the fp16
+// range. |T_ij| <= 1 (T_ij is -beta_i k_j^T (a product of contractions) k_i)
+// and |P_ij| <= 1; the state, R and U are bounded by the magnitudes of
+// initial_state and v. The state stays in fp32 accumulators for the whole
+// sequence. Each block reads its own state slice before writing it, so
+// initial_state may alias final_state.
 __global__ void __launch_bounds__(kBlockSize) gatedDeltaNetChunkedKernel(
     const __half *__restrict__ qkv, const float *__restrict__ decay,
     const float *__restrict__ beta, const float *initialState,
@@ -299,7 +298,6 @@ __global__ void __launch_bounds__(kBlockSize) gatedDeltaNetChunkedKernel(
   __shared__ float kNorm[kChunk];
   __shared__ float qNorm[kChunk];
   __shared__ float wLast[kChunk];
-  __shared__ bool tLargeS;
 
   const int64_t packed = static_cast<int64_t>(2) * numHeadsQk * DK +
                          static_cast<int64_t>(numHeadsV) * headSizeV;
@@ -362,11 +360,14 @@ __global__ void __launch_bounds__(kBlockSize) gatedDeltaNetChunkedKernel(
         static_cast<int64_t>(b) * seqLen + t0 + min(lane, n - 1);
     pDecay = decay[gateTok * numHeadsV + hv];
     pBeta = beta[gateTok * numHeadsV + hv];
+    if (side == 0) {
 #pragma unroll
-    for (int e = 0; e < 8; ++e) {
-      const int i = ti * kWt + gdnAccRow(pr, e);
-      const int64_t tok = static_cast<int64_t>(b) * seqLen + t0 + min(i, n - 1);
-      pv[e] = __half2float(qkv[tok * packed + vOffset + tc * kWt + ln]);
+      for (int e = 0; e < 8; ++e) {
+        const int i = ti * kWt + gdnAccRow(pr, e);
+        const int64_t tok =
+            static_cast<int64_t>(b) * seqLen + t0 + min(i, n - 1);
+        pv[e] = __half2float(qkv[tok * packed + vOffset + tc * kWt + ln]);
+      }
     }
   };
   prefetch(0);
@@ -485,7 +486,6 @@ __global__ void __launch_bounds__(kBlockSize) gatedDeltaNetChunkedKernel(
 
     if (wave == 0) {
       float tcol[kChunk];
-      float tMax = 0.0f;
 #pragma unroll
       for (int i = 0; i < kChunk; ++i) {
         float acc = i == lane ? 1.0f : 0.0f;
@@ -494,24 +494,15 @@ __global__ void __launch_bounds__(kBlockSize) gatedDeltaNetChunkedKernel(
           acc -= aTri[i][j] * tcol[j];
         }
         tcol[i] = acc;
-        tMax = fmaxf(tMax, fabsf(acc));
       }
 #pragma unroll
       for (int i = 0; i < kChunk; ++i) {
         aTri[i][lane] = tcol[i];
       }
-      for (int off = kLanes / 2; off > 0; off >>= 1) {
-        tMax = fmaxf(tMax, __shfl_xor(tMax, off, kLanes));
-      }
-      if (lane == 0) {
-        tLargeS = !(tMax < kSplitSafeMax);
-      }
     }
     __syncthreads();
 
-    // Entries of T can grow geometrically along a chunk; past the fp16 range
-    // of the split operands, T R runs in fp32.
-    if (side == 0 && !tLargeS) {
+    if (side == 0) {
       gdnFloat8 acc = {};
       for (int tj = 0; tj <= ti; ++tj) {
         gdnMma<true, true>(
@@ -522,19 +513,6 @@ __global__ void __launch_bounds__(kBlockSize) gatedDeltaNetChunkedKernel(
 #pragma unroll
       for (int e = 0; e < 8; ++e) {
         uT[tc * kWt + ln][ti * kWt + gdnAccRow(pr, e)] = acc[e];
-      }
-    } else if (side == 0) {
-      const float *rRow = rT[tc * kWt + ln];
-#pragma unroll
-      for (int e = 0; e < 8; ++e) {
-        const int i = ti * kWt + gdnAccRow(pr, e);
-        float acc = 0.0f;
-        for (int j = 0; j < (ti + 1) * kWt; j += 4) {
-          const float4 t4 = *reinterpret_cast<const float4 *>(&aTri[i][j]);
-          const float4 r4 = *reinterpret_cast<const float4 *>(&rRow[j]);
-          acc += t4.x * r4.x + t4.y * r4.y + t4.z * r4.z + t4.w * r4.w;
-        }
-        uT[tc * kWt + ln][i] = acc;
       }
     }
     __syncthreads();
@@ -587,6 +565,34 @@ __global__ void __launch_bounds__(kBlockSize) gatedDeltaNetChunkedKernel(
       finalState[stateBase + static_cast<int64_t>(v) * DK + k] = sAcc[q][e];
     }
   }
+}
+
+// The chunked kernel is verified on the gfx11 WMMA encoding only; gfx117x
+// (gfx12-style WMMA) and devices without WMMA keep the recurrent kernel.
+// gcnArchName may carry feature suffixes ("gfx1151:xnack-").
+bool chunkedDevice() {
+  constexpr int kMaxCachedDevices = 16;
+  // 0 == not probed yet, 1 == no, 2 == yes.
+  static int cached[kMaxCachedDevices] = {};
+  auto probe = [](int d) {
+    hipDeviceProp_t p;
+    if (hipGetDeviceProperties(&p, d) != hipSuccess) {
+      return false;
+    }
+    return std::strncmp(p.gcnArchName, "gfx11", 5) == 0 &&
+           std::strncmp(p.gcnArchName, "gfx117", 6) != 0;
+  };
+  int dev = 0;
+  if (hipGetDevice(&dev) != hipSuccess || dev < 0) {
+    return false;
+  }
+  if (dev >= kMaxCachedDevices) {
+    return probe(dev);
+  }
+  if (cached[dev] == 0) {
+    cached[dev] = probe(dev) ? 2 : 1;
+  }
+  return cached[dev] == 2;
 }
 
 hipError_t launchChunked(hipStream_t stream, const void *qkv,
@@ -645,7 +651,8 @@ hipError_t dispatchHeadSize(hipStream_t stream, int64_t headSizeQk,
                                   scale);
   case 128:
     if constexpr (std::is_same<T, __half>::value) {
-      if (seqLen >= kChunkedMinSeqLen && headSizeV % kSliceV == 0) {
+      if (seqLen >= kChunkedMinSeqLen && headSizeV % kSliceV == 0 &&
+          chunkedDevice()) {
         return launchChunked(stream, qkv, decay, beta, initialState, aLog,
                              dtBias, output, finalState, batch, seqLen,
                              numHeadsQk, numHeadsV, headSizeV, scale);

@@ -120,25 +120,28 @@ def _make_reference_model(Hq, Hv, dk, dv, B, L, t_onnx, a_log, dt_bias):
 
 
 _CASES = [
-    # (Hq, Hv, dk, dv, B, L, dtype)
-    *[(16, 48, 128, 128, 1, L, np.float16) for L in (1, 7, 64, 130, 512)],
-    (16, 48, 128, 128, 2, 40, np.float16),
-    (2, 6, 32, 16, 2, 5, np.float16),
-    (2, 6, 32, 16, 2, 5, np.float32),
-    (4, 4, 64, 64, 1, 3, np.float32),
-    (2, 4, 256, 128, 1, 9, np.float16),
+    # (Hq, Hv, dk, dv, B, L, dtype, inputs)
+    *[(16, 48, 128, 128, 1, L, np.float16, "rand") for L in (1, 7, 64, 130, 512)],
+    (16, 48, 128, 128, 2, 40, np.float16, "rand"),
+    (16, 48, 128, 128, 1, 512, np.float16, "weak_decay"),
+    (16, 48, 128, 128, 1, 64, np.float16, "alternating_keys"),
+    (4, 4, 128, 64, 1, 100, np.float16, "rand"),
+    (2, 6, 32, 16, 2, 5, np.float16, "rand"),
+    (2, 6, 32, 16, 2, 5, np.float32, "rand"),
+    (4, 4, 64, 64, 1, 3, np.float32, "rand"),
+    (2, 4, 256, 128, 1, 9, np.float16, "rand"),
 ]
 
 
 @pytest.mark.parametrize(
-    "Hq,Hv,dk,dv,B,L,dtype",
+    "Hq,Hv,dk,dv,B,L,dtype,inputs",
     _CASES,
     ids=[
-        f"hq{c[0]}_hv{c[1]}_dk{c[2]}_dv{c[3]}_b{c[4]}_l{c[5]}_{c[6].__name__}"
+        f"hq{c[0]}_hv{c[1]}_dk{c[2]}_dv{c[3]}_b{c[4]}_l{c[5]}_{c[6].__name__}_{c[7]}"
         for c in _CASES
     ],
 )
-def test_gated_delta_net(model_runner, Hq, Hv, dk, dv, B, L, dtype):
+def test_gated_delta_net(model_runner, Hq, Hv, dk, dv, B, L, dtype, inputs):
     t_onnx = TP.FLOAT16 if dtype == np.float16 else TP.FLOAT
     rng = np.random.default_rng(1234 + L)
 
@@ -148,6 +151,17 @@ def test_gated_delta_net(model_runner, Hq, Hv, dk, dv, B, L, dtype):
     query = u(B, L, 2 * Hq * dk + Hv * dv).astype(dtype)
     decay = (-0.05 * (u(B, L, Hv) + 1.2)).astype(np.float32)
     beta = u(B, L, Hv)
+    if inputs == "weak_decay":
+        # Per-token log decay of about -0.007 to -0.05: the state keeps
+        # contributions from the whole sequence.
+        decay = (u(B, L, Hv) - 4.0).astype(np.float32)
+    elif inputs == "alternating_keys":
+        # Each token's key is +-k0 with beta ~ 1 and almost no decay.
+        k = query[:, :, Hq * dk : 2 * Hq * dk]
+        sign = np.where(np.arange(L) % 2 == 0, 1, -1).astype(dtype)
+        k[:] = k[:, :1, :] * sign[None, :, None]
+        decay = np.full((B, L, Hv), -20.0, np.float32)
+        beta = np.full((B, L, Hv), 10.0, np.float32)
     initial_state = (0.05 * u(B, Hv, dv, dk)).astype(np.float32)
     a_log = (0.1 * u(Hv)).astype(np.float32)
     dt_bias = (0.1 * u(Hv)).astype(np.float32)
