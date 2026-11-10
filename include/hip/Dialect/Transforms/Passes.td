@@ -269,7 +269,17 @@ def FuseRocMlirAnchorPass
            /*default=*/"true",
            "Outline an elementwise module that no anchor takes as a rocMLIR "
            "kernel of its own. False inlines every such module, so its ops "
-           "run as HIP kernels.">
+           "run as HIP kernels.">,
+    Option<"peelMinInputElements", "peel-min-input-elements", "int64_t",
+           /*default=*/"8",
+           "A transpose at the edge of a standalone elementwise module leaves "
+           "the kernel only when its input innermost dimension has at least "
+           "this many elements.">,
+    Option<"peelMinOutputElements", "peel-min-output-elements", "int64_t",
+           /*default=*/"32",
+           "A transpose at the edge of a standalone elementwise module leaves "
+           "the kernel only when its output innermost dimension has at least "
+           "this many elements.">
   ];
   let dependentDialects = [
     "mlir::arith::ArithDialect",
