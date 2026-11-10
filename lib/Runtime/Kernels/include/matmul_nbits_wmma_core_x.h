@@ -4,9 +4,9 @@
  *
  * Extended packed-U4 / FP16 WMMA tile core, GemmFp16U4ImplX. Same tile model as
  * GemmFp16U4Impl (matmul_nbits_wmma_core.h, which every existing kWmmaConfigs
- * entry keeps using) plus these pipeline options, specialized to the one
- * contract its callers use (fused int4 dequant, fp16 zero points, dense tile
- * mapping, whole K-steps, no bias):
+ * entry keeps using) plus these pipeline options, specialized to the
+ * contract its callers use (fused int4 dequant, fp16 zero points, whole
+ * K-steps; dense tile mapping and no bias unless EXPLICIT_TILE):
  *   PGR_P   global prefetch depth (1, or 2 register sets)
  *   ADDR_P  1 = wave-uniform source base plus 32-bit per-thread offsets
  *   PIPE_P  1 = store-first: write tile i+1 to LDS, issue tile i+2, then run
@@ -36,7 +36,8 @@
  * Matrix Core op drop by a quarter. */
 template <int BM_T, int BN_T, int WT_M, int WT_N, bool USE_ZEROS,
           bool BOUNDS_CHECK, int BK_IN, int PGR_P = 1, int ADDR_P = 0,
-          int PIPE_P = 0, int SCHED_P = 0, int EPI_P = 0, int XOR_P = 0>
+          int PIPE_P = 0, int SCHED_P = 0, int EPI_P = 0, int XOR_P = 0,
+          bool EXPLICIT_TILE = false>
 __device__ __forceinline__
 void GemmFp16U4ImplX(
     int M, int N, int K,
@@ -55,8 +56,14 @@ void GemmFp16U4ImplX(
      * serves both layouts and the autotuner stays free to pick any tile for a
      * padded buffer. As a template parameter it would multiply the
      * instantiation count of every tile shape. */
-    int b_row_bytes = 0)
+    int b_row_bytes = 0,
+    /* EXPLICIT_TILE: the caller places the tile at (tile_row0, tile_col0)
+     * instead of the blockIdx mapping; rows at or past M are neither read
+     * nor written. output_bias (fp16 [N] or nullptr) is added to C. */
+    int tile_row0 = 0, int tile_col0 = 0,
+    const _Float16* __restrict__ output_bias = nullptr)
 {
+    static_assert(!EXPLICIT_TILE || BOUNDS_CHECK, "an explicit tile is bounded by M");
     constexpr int WM_L   = BM_T / (WT_M * 16);
     constexpr int WN_L   = BN_T / (WT_N * 16);
     constexpr int THR_L  = WM_L * WN_L * 32;
@@ -204,7 +211,10 @@ void GemmFp16U4ImplX(
     // output data from prior kernel launches.
     int row0;
     int col0;
-    {
+    if constexpr (EXPLICIT_TILE) {
+        row0 = tile_row0;
+        col0 = tile_col0;
+    } else {
         const int n_tiles  = gridDim.x;
         const int m_tiles  = gridDim.y;
         int by, bx;
@@ -797,13 +807,24 @@ void GemmFp16U4ImplX(
             // every stored element.
             const int r0 = hipdnn_wmma_acc_row(sub, 0);
             _Float16* crow = C + static_cast<int64_t>(mbase + r0) * ldc + nbase + lane;
+            [[maybe_unused]] float bias_v = 0.0f;
+            if constexpr (EXPLICIT_TILE) {
+                if (output_bias && nbase + lane < N) {
+                    bias_v = static_cast<float>(output_bias[nbase + lane]);
+                }
+            }
 #pragma unroll
             for(int e = 0; e < 8; e++)
             {
                 int r = hipdnn_wmma_acc_row(sub, e);
                 _Float16* cp = crow + static_cast<int64_t>(r - r0) * ldc;
-                if (!BOUNDS_CHECK || (mbase + r < M && nbase + lane < N))
-                    *cp = (_Float16)acc[wm][wn][e];
+                if (!BOUNDS_CHECK || (mbase + r < M && nbase + lane < N)) {
+                    if constexpr (EXPLICIT_TILE) {
+                        *cp = (_Float16)(acc[wm][wn][e] + bias_v);
+                    } else {
+                        *cp = (_Float16)acc[wm][wn][e];
+                    }
+                }
             }
         }
     }

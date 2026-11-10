@@ -1298,6 +1298,125 @@ bool run_grouped_cpw_case(hipStream_t stream, int cfg, int k) {
   return pass;
 }
 
+// Experts of 7 / 20 / 33 / 64 / 100 rows split by hip_qmoe_build_row_tiles at
+// 16 and 32: the last three land on 64-row dense tiles (one partial, one full,
+// one full plus a partial). N=96 leaves the second column tile half outside.
+// Rows of the other experts must stay untouched.
+bool run_grouped_dense_case(hipStream_t stream) {
+  constexpr int n = 96;
+  constexpr int k = 320;
+  constexpr int block_size = 32;
+  const std::string shape = "grouped_dense";
+  if (!hip_matmul_nbits_wmma_dense_grouped_supported(64, n, k, 4, block_size,
+                                                     2)) {
+    std::cout << "SKIP shape=" << shape << " (unsupported device)\n";
+    return true;
+  }
+  const std::vector<int32_t> counts = {7, 20, 33, 64, 100};
+  const int experts = static_cast<int>(counts.size());
+  std::vector<int32_t> expert_offsets = {0};
+  for (int c : counts) {
+    expert_offsets.push_back(expert_offsets.back() + c);
+  }
+  const int rows = expert_offsets.back();
+  const std::vector<int32_t> expected_tiles = {2, 0, 33, 3, 0,  64,
+                                               4, 0, 64, 4, 64, 36};
+  const PackedMatrix matrix = make_matrix(experts, n, k, block_size, 29);
+
+  std::vector<__half> input(static_cast<size_t>(rows) * k);
+  for (int row = 0; row < rows; ++row) {
+    for (int col = 0; col < k; ++col) {
+      input[static_cast<size_t>(row) * k + col] =
+          float_to_half(input_value(row + 5, col));
+    }
+  }
+  std::vector<__half> expected(static_cast<size_t>(rows) * n,
+                               float_to_half(0.0f));
+  for (int expert = 2; expert < experts; ++expert) {
+    for (int row = expert_offsets[expert]; row < expert_offsets[expert + 1];
+         ++row) {
+      for (int col = 0; col < n; ++col) {
+        const size_t expert_col = static_cast<size_t>(expert) * n + col;
+        float accumulator = 0.0f;
+        for (int col_k = 0; col_k < k; ++col_k) {
+          const uint8_t packed =
+              matrix.weights[expert_col * matrix.row_bytes + col_k / 2];
+          const float q = (col_k & 1) ? static_cast<float>(packed >> 4)
+                                      : static_cast<float>(packed & 0x0f);
+          const float scale = half_to_float(
+              matrix.scales[expert_col * matrix.k_blocks + col_k / block_size]);
+          accumulator +=
+              half_to_float(input[static_cast<size_t>(row) * k + col_k]) *
+              (q - 8.0f) * scale;
+        }
+        expected[static_cast<size_t>(row) * n + col] = float_to_half(
+            accumulator + half_to_float(matrix.bias[expert_col]));
+      }
+    }
+  }
+
+  const int max_tiles = rows / 64 + experts;
+  DeviceBuffer<int32_t> d_counts(counts.size());
+  DeviceBuffer<int32_t> d_tiles_small(3 * experts);
+  DeviceBuffer<int32_t> d_tiles_big(3 * max_tiles);
+  DeviceBuffer<int32_t> d_tiles_dense(3 * max_tiles);
+  DeviceBuffer<int32_t> d_num_tiles(3);
+  DeviceBuffer<__half> d_input(input.size());
+  DeviceBuffer<uint8_t> d_weights(matrix.weights.size());
+  DeviceBuffer<__half> d_scales(matrix.scales.size());
+  DeviceBuffer<__half> d_bias(matrix.bias.size());
+  DeviceBuffer<int32_t> d_expert_offsets(expert_offsets.size());
+  DeviceBuffer<__half> d_output(expected.size());
+  upload(d_counts, counts);
+  upload(d_input, input);
+  upload(d_weights, matrix.weights);
+  upload(d_scales, matrix.scales);
+  upload(d_bias, matrix.bias);
+  upload(d_expert_offsets, expert_offsets);
+  HIP_CHECK(hipMemset(d_output.get(), 0, expected.size() * sizeof(__half)));
+
+  int status = hip_qmoe_build_row_tiles(
+      reinterpret_cast<void*>(stream), d_counts.get(), experts, 16, 16, 32,
+      d_tiles_small.get(), d_num_tiles.get(), d_tiles_big.get(),
+      d_num_tiles.get() + 1, 32, 64, d_tiles_dense.get(),
+      d_num_tiles.get() + 2);
+  bool tiles_ok = false;
+  if (status == static_cast<int>(hipSuccess)) {
+    HIP_CHECK(hipStreamSynchronize(stream));
+    std::vector<int32_t> num_tiles(3);
+    HIP_CHECK(hipMemcpy(num_tiles.data(), d_num_tiles.get(),
+                        num_tiles.size() * sizeof(int32_t),
+                        hipMemcpyDeviceToHost));
+    std::vector<int32_t> dense_tiles(expected_tiles.size());
+    HIP_CHECK(hipMemcpy(dense_tiles.data(), d_tiles_dense.get(),
+                        dense_tiles.size() * sizeof(int32_t),
+                        hipMemcpyDeviceToHost));
+    tiles_ok = num_tiles[0] == 1 && num_tiles[1] == 1 &&
+               num_tiles[2] == static_cast<int>(expected_tiles.size() / 3) &&
+               dense_tiles == expected_tiles;
+    status = hip_matmul_nbits_wmma_dense_grouped(
+        reinterpret_cast<void*>(stream), d_input.get(), d_weights.get(),
+        d_scales.get(), d_bias.get(), d_expert_offsets.get(),
+        d_tiles_dense.get(), d_num_tiles.get() + 2, d_output.get(), max_tiles,
+        64, n, k, 4, block_size, sizeof(__half));
+  }
+  Metrics metrics;
+  if (status == static_cast<int>(hipSuccess)) {
+    HIP_CHECK(hipStreamSynchronize(stream));
+    std::vector<__half> actual(expected.size());
+    HIP_CHECK(hipMemcpy(actual.data(), d_output.get(),
+                        actual.size() * sizeof(__half), hipMemcpyDeviceToHost));
+    metrics = compare(actual, expected);
+  }
+  const bool pass = tiles_ok && metrics.finite && metrics.rel_l2 <= 5e-3;
+  std::cout << (pass ? "PASS" : "FAIL") << " relL2=" << metrics.rel_l2
+            << " tiles_ok=" << tiles_ok << " status=" << status
+            << " shape=" << shape << '\n';
+  ResultRow result(shape, "fixed:N=96 K=320 block_size=32");
+  result.finish(metrics.rel_l2, pass);
+  return pass;
+}
+
 // Rows with a SwiGLU row scale s > 1 hold v = fc2(act / s) without bias, so
 // each contribution is s * v + b. b is large next to v so that applying it
 // before the rescale, or scaling it with the row, is visible.
@@ -1736,12 +1855,14 @@ int main(int argc, char** argv) {
   constexpr int reduce_scaled_cases = 2;
   constexpr int grouped_partial_block_cases = 1;
   constexpr int grouped_cpw_cases = 8;
+  constexpr int grouped_dense_cases = 1;
   std::cout << "qmoe_ragged_mm coverage=" << coverage
             << " cases=" << shape_count * category_count + model_shape_cases +
                                adaptive_shape_cases + descriptor_cases +
                                task_policy_cases + launcher_cases +
                                pipeline_cases + reduce_scaled_cases +
-                               grouped_partial_block_cases + grouped_cpw_cases
+                               grouped_partial_block_cases + grouped_cpw_cases +
+                               grouped_dense_cases
             << '\n';
 
   hipStream_t stream = nullptr;
@@ -1797,6 +1918,7 @@ int main(int argc, char** argv) {
   for (int cfg : {0, 6, 1, 7})
     for (int k : {1024, 3072})
       all_pass = run_grouped_cpw_case(stream, cfg, k) && all_pass;
+  all_pass = run_grouped_dense_case(stream) && all_pass;
   HIP_CHECK(hipStreamDestroy(stream));
 
   std::cout << (all_pass ? "ALL PASS" : "SOME FAIL") << '\n';

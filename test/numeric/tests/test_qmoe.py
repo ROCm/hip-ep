@@ -466,7 +466,8 @@ class TestQMoE:
         """Qwen3.8-Flash-Next expert shapes (hidden 2560, fused gate/up 1280,
         top-10): the prefill grouped GEMMs run at K = 2560 and K = 640, which
         pick their own small-M configs. Skewed routing yields both 16-row and
-        32-row tiles.
+        32-row tiles, and at 512 tokens experts above 32 rows (64-row dense
+        tiles where hip_matmul_nbits_wmma_dense_grouped runs).
         """
         hidden, intermediate, num_experts, top_k = 2560, 1280, 64, 10
         model = _make_qmoe_model(
