@@ -121,7 +121,8 @@ def _make_reference_model(Hq, Hv, dk, dv, B, L, t_onnx, a_log, dt_bias):
 
 _CASES = [
     # (Hq, Hv, dk, dv, B, L, dtype)
-    *[(16, 48, 128, 128, 1, L, np.float16) for L in (1, 7, 64)],
+    *[(16, 48, 128, 128, 1, L, np.float16) for L in (1, 7, 64, 130, 512)],
+    (16, 48, 128, 128, 2, 40, np.float16),
     (2, 6, 32, 16, 2, 5, np.float16),
     (2, 6, 32, 16, 2, 5, np.float32),
     (4, 4, 64, 64, 1, 3, np.float32),
