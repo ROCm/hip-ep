@@ -146,11 +146,14 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
                                  expert_weight_bits, block_size, elem_size);
   // Tile-list capacities (see hip_qmoe_build_row_tiles): a small expert is one
   // tile; larger experts need routed_rows / tile rows plus one partial tile
-  // each.
+  // each. With the dense tier the 32-row list holds only experts of up to
+  // kGroupedDenseSplit rows, one tile each.
+  static_assert(kGroupedDenseSplit <= kGroupedBigTile,
+                "experts below the dense split fit one 32-row tile");
   const int64_t max_small_tiles = std::min(num_experts, routed_rows);
   const int64_t max_big_tiles =
-      routed_rows / kGroupedBigTile +
-      std::min(num_experts, routed_rows / (kGroupedSplitRows + 1));
+      std::min(num_experts, routed_rows / (kGroupedSplitRows + 1)) +
+      (grouped_dense ? 0 : routed_rows / kGroupedBigTile);
   const int64_t max_dense_tiles =
       routed_rows / kGroupedDenseTile +
       std::min(num_experts, routed_rows / (kGroupedDenseSplit + 1));

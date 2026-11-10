@@ -1298,29 +1298,33 @@ bool run_grouped_cpw_case(hipStream_t stream, int cfg, int k) {
   return pass;
 }
 
-// Experts of 7 / 20 / 33 / 64 / 100 rows split by hip_qmoe_build_row_tiles at
-// 16 and 32: the last three land on 64-row dense tiles (one partial, one full,
-// one full plus a partial). N=96 leaves the second column tile half outside.
-// Rows of the other experts must stay untouched.
-bool run_grouped_dense_case(hipStream_t stream) {
+// Experts of 33 / 7 / 100 / 20 / 64 rows split by hip_qmoe_build_row_tiles at
+// 16 and 32: experts 0, 2 and 4 land on 64-row dense tiles (one partial, a
+// full plus a partial, one full). Each partial dense tile is followed by the
+// rows of an expert this launch must not write, and the output carries guard
+// rows past the last expert, so a store past a tile's rows lands on rows that
+// must stay zero. N=96 leaves the second column tile half outside. K=320 at
+// block 128 ends in a partial quantization group.
+bool run_grouped_dense_case(hipStream_t stream, int block_size) {
   constexpr int n = 96;
   constexpr int k = 320;
-  constexpr int block_size = 32;
-  const std::string shape = "grouped_dense";
+  constexpr int guard_rows = 64;
+  const std::string shape = "grouped_dense_bs" + std::to_string(block_size);
   if (!hip_matmul_nbits_wmma_dense_grouped_supported(64, n, k, 4, block_size,
                                                      2)) {
     std::cout << "SKIP shape=" << shape << " (unsupported device)\n";
     return true;
   }
-  const std::vector<int32_t> counts = {7, 20, 33, 64, 100};
+  const std::vector<int32_t> counts = {33, 7, 100, 20, 64};
+  const std::vector<bool> dense = {true, false, true, false, true};
   const int experts = static_cast<int>(counts.size());
   std::vector<int32_t> expert_offsets = {0};
   for (int c : counts) {
     expert_offsets.push_back(expert_offsets.back() + c);
   }
-  const int rows = expert_offsets.back();
-  const std::vector<int32_t> expected_tiles = {2, 0, 33, 3, 0,  64,
-                                               4, 0, 64, 4, 64, 36};
+  const int rows = expert_offsets.back() + guard_rows;
+  const std::vector<int32_t> expected_tiles = {0, 0,  33, 2, 0, 64,
+                                               2, 64, 36, 4, 0, 64};
   const PackedMatrix matrix = make_matrix(experts, n, k, block_size, 29);
 
   std::vector<__half> input(static_cast<size_t>(rows) * k);
@@ -1332,7 +1336,10 @@ bool run_grouped_dense_case(hipStream_t stream) {
   }
   std::vector<__half> expected(static_cast<size_t>(rows) * n,
                                float_to_half(0.0f));
-  for (int expert = 2; expert < experts; ++expert) {
+  for (int expert = 0; expert < experts; ++expert) {
+    if (!dense[expert]) {
+      continue;
+    }
     for (int row = expert_offsets[expert]; row < expert_offsets[expert + 1];
          ++row) {
       for (int col = 0; col < n; ++col) {
@@ -1401,18 +1408,36 @@ bool run_grouped_dense_case(hipStream_t stream) {
         64, n, k, 4, block_size, sizeof(__half));
   }
   Metrics metrics;
+  int stray_writes = -1;
   if (status == static_cast<int>(hipSuccess)) {
     HIP_CHECK(hipStreamSynchronize(stream));
     std::vector<__half> actual(expected.size());
     HIP_CHECK(hipMemcpy(actual.data(), d_output.get(),
                         actual.size() * sizeof(__half), hipMemcpyDeviceToHost));
     metrics = compare(actual, expected);
+    stray_writes = 0;
+    for (int row = 0; row < rows; ++row) {
+      const auto owner =
+          std::upper_bound(expert_offsets.begin(), expert_offsets.end(), row) -
+          expert_offsets.begin() - 1;
+      if (owner < experts && dense[owner]) {
+        continue;
+      }
+      for (int col = 0; col < n; ++col) {
+        uint16_t bits = 0;
+        std::memcpy(&bits, &actual[static_cast<size_t>(row) * n + col],
+                    sizeof(bits));
+        stray_writes += bits != 0 ? 1 : 0;
+      }
+    }
   }
-  const bool pass = tiles_ok && metrics.finite && metrics.rel_l2 <= 5e-3;
+  const bool pass = tiles_ok && stray_writes == 0 && metrics.finite &&
+                    metrics.rel_l2 <= 5e-3;
   std::cout << (pass ? "PASS" : "FAIL") << " relL2=" << metrics.rel_l2
-            << " tiles_ok=" << tiles_ok << " status=" << status
-            << " shape=" << shape << '\n';
-  ResultRow result(shape, "fixed:N=96 K=320 block_size=32");
+            << " tiles_ok=" << tiles_ok << " stray_writes=" << stray_writes
+            << " status=" << status << " shape=" << shape << '\n';
+  ResultRow result(shape, "fixed:N=96 K=320 block_size=" +
+                              std::to_string(block_size) + " guard=64");
   result.finish(metrics.rel_l2, pass);
   return pass;
 }
@@ -1855,7 +1880,7 @@ int main(int argc, char** argv) {
   constexpr int reduce_scaled_cases = 2;
   constexpr int grouped_partial_block_cases = 1;
   constexpr int grouped_cpw_cases = 8;
-  constexpr int grouped_dense_cases = 1;
+  constexpr int grouped_dense_cases = 2;
   std::cout << "qmoe_ragged_mm coverage=" << coverage
             << " cases=" << shape_count * category_count + model_shape_cases +
                                adaptive_shape_cases + descriptor_cases +
@@ -1918,7 +1943,9 @@ int main(int argc, char** argv) {
   for (int cfg : {0, 6, 1, 7})
     for (int k : {1024, 3072})
       all_pass = run_grouped_cpw_case(stream, cfg, k) && all_pass;
-  all_pass = run_grouped_dense_case(stream) && all_pass;
+  for (int block_size : {32, 128}) {
+    all_pass = run_grouped_dense_case(stream, block_size) && all_pass;
+  }
   HIP_CHECK(hipStreamDestroy(stream));
 
   std::cout << (all_pass ? "ALL PASS" : "SOME FAIL") << '\n';

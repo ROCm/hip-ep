@@ -1202,7 +1202,8 @@ extern "C" int hip_qmoe_build_row_tiles(
     int64_t rows_dense, void* tiles_dense, void* num_dense) {
   if (num_experts <= 0 || split_rows < 0 || rows_small <= 0 || rows_big <= 0)
     return -1;
-  if (tiles_dense && (split_dense < split_rows || rows_dense <= 0)) {
+  if (tiles_dense &&
+      (!num_dense || split_dense < split_rows || rows_dense <= 0)) {
     return -1;
   }
   const int dense_split = tiles_dense

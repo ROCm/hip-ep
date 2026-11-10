@@ -82,6 +82,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <initializer_list>
 #include <mutex>
 #include <string>
 #include <type_traits>
@@ -5073,26 +5074,25 @@ extern "C" int hip_matmul_nbits_wmma_smallm_grouped(
  * N=1280 K=2560, fc2 N=2560 K=640, block 32), 512-token prefill on recorded
  * routing: moving experts above 32 rows here makes the expert GEMMs above 16
  * rows 7-13% and the whole QMoE 4-6% faster. 32-row dense tiles were slower
- * than the small-M kernel,
- * so experts of up to 32 rows stay there.
+ * than the small-M kernel, so experts of up to 32 rows stay there.
  * ----------------------------------------------------------------------- */
 
-// gfx1150 / 1151 / 1152 run the same gfx11-generic code object; the tile
-// choice above was measured on gfx1151. gcnArchName may carry feature
-// suffixes ("gfx1151:xnack-"). Cached per device ordinal.
-static bool denseTilesDevice() {
-    constexpr int kMaxCachedDevices = 16;
-    // 0 == not probed yet, 1 == no, 2 == yes.
-    static int cached[kMaxCachedDevices] = {};
+constexpr int kMaxCachedDevices = 16;
 
-    auto probe = [](int d) {
+// True when the current device's gcnArchName, which may carry feature
+// suffixes ("gfx1151:xnack-"), names one of `archs`. `cache` keeps the answer
+// per device ordinal: 0 == not probed yet, 1 == no, 2 == yes.
+static bool currentDeviceArchIn(int (&cache)[kMaxCachedDevices],
+                                std::initializer_list<const char*> archs) {
+    auto probe = [&](int d) {
         hipDeviceProp_t p;
         if (hipGetDeviceProperties(&p, d) != hipSuccess) {
             return false;
         }
-        for (const char* arch : {"gfx1150", "gfx1151", "gfx1152"}) {
-            if (std::strncmp(p.gcnArchName, arch, 7) == 0 &&
-                (p.gcnArchName[7] == '\0' || p.gcnArchName[7] == ':')) {
+        for (const char* arch : archs) {
+            const size_t len = std::strlen(arch);
+            if (std::strncmp(p.gcnArchName, arch, len) == 0 &&
+                (p.gcnArchName[len] == '\0' || p.gcnArchName[len] == ':')) {
                 return true;
             }
         }
@@ -5106,10 +5106,17 @@ static bool denseTilesDevice() {
     if (dev >= kMaxCachedDevices) {
         return probe(dev);
     }
-    if (cached[dev] == 0) {
-        cached[dev] = probe(dev) ? 2 : 1;
+    if (cache[dev] == 0) {
+        cache[dev] = probe(dev) ? 2 : 1;
     }
-    return cached[dev] == 2;
+    return cache[dev] == 2;
+}
+
+// gfx1150 / 1151 / 1152 run the same gfx11-generic code object; the tile
+// choice above was measured on gfx1151.
+static bool denseTilesDevice() {
+    static int cache[kMaxCachedDevices] = {};
+    return currentDeviceArchIn(cache, {"gfx1150", "gfx1151", "gfx1152"});
 }
 
 constexpr int kDenseTileRows = 64;
@@ -5274,22 +5281,8 @@ static constexpr bool wmmaConfigIsExt(const WmmaConfig& c) { return c.ext; }
 // gcnArchName may carry feature suffixes ("gfx1151:xnack-"). Cached per device
 // ordinal like hipdnn_device_wave_size().
 static bool wmmaExtDevice() {
-    constexpr int kMaxCachedDevices = 16;
-    // 0 == not probed yet, 1 == no, 2 == yes.
-    static int cached[kMaxCachedDevices] = {};
-
-    auto probe = [](int d) {
-        hipDeviceProp_t p;
-        if (hipGetDeviceProperties(&p, d) != hipSuccess) return false;
-        return std::strncmp(p.gcnArchName, "gfx1151", 7) == 0 &&
-               (p.gcnArchName[7] == '\0' || p.gcnArchName[7] == ':');
-    };
-
-    int dev = 0;
-    if (hipGetDevice(&dev) != hipSuccess || dev < 0) return false;
-    if (dev >= kMaxCachedDevices) return probe(dev);
-    if (cached[dev] == 0) cached[dev] = probe(dev) ? 2 : 1;
-    return cached[dev] == 2;
+    static int cache[kMaxCachedDevices] = {};
+    return currentDeviceArchIn(cache, {"gfx1151"});
 }
 
 // Extended fused int4 entries: (bm, bn, wt_m, wt_n, bk, variant, swizzle).
