@@ -118,10 +118,20 @@ int wrap_conv(RuntimeState *state, int32_t op_state_slot, const void *input,
     return -1;
   }
 
-  // No op state: this kernel needs no cached solution or workspace.
+  // No op state: this kernel needs no cached solution.
   (void)op_state_slot;
 
   void *stream = hipdnn_ep_state_get_stream(state);
+
+  // Small output planes with long contractions split the contraction across
+  // blocks and sum fp32 partials in the shared workspace.
+  const size_t ws_bytes = hip_conv_workspace_bytes(
+      hip_dtype, static_cast<int>(spatial_rank), N, Cin, Cout, in0, in1, in2,
+      out0, out1, out2, k0, k1, k2, s0, s1, s2, p0, p1, p2, dil0, dil1, dil2,
+      group);
+  void *workspace = nullptr;
+  if (ws_bytes > 0 && hipdnn_ep_state_ensure_workspace(state, ws_bytes) == 0)
+    workspace = hipdnn_ep_state_get_workspace(state);
 
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_conv: dtype=%s(%lld) spatial_rank=%lld N=%lld Cin=%lld "
@@ -136,10 +146,11 @@ int wrap_conv(RuntimeState *state, int32_t op_state_slot, const void *input,
       (long long)p0, (long long)p1, (long long)p2, (long long)dil0,
       (long long)dil1, (long long)dil2, bias ? "yes" : "null");
 
-  int rc = hip_conv(stream, input, weights, bias, output, hip_dtype,
-                    static_cast<int>(spatial_rank), N, Cin, Cout, in0, in1, in2,
-                    out0, out1, out2, k0, k1, k2, s0, s1, s2, p0, p1, p2, dil0,
-                    dil1, dil2, group);
+  int rc = hip_conv_ws(stream, input, weights, bias, output, workspace,
+                       workspace ? ws_bytes : 0, hip_dtype,
+                       static_cast<int>(spatial_rank), N, Cin, Cout, in0, in1,
+                       in2, out0, out1, out2, k0, k1, k2, s0, s1, s2, p0, p1,
+                       p2, dil0, dil1, dil2, group);
   if (rc != 0) {
     fprintf(stderr, "[REAL] wrap_conv: kernel launch failed (%d)\n", rc);
     return -1;

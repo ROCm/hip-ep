@@ -4155,6 +4155,41 @@ HIP_KERNEL_API int hip_conv(
     int64_t dil0, int64_t dil1, int64_t dil2,
     int64_t group);
 
+/* Scratch hip_conv_ws can use for this shape: nonzero for the fp16 shapes with
+ * a small output plane and a long contraction, which split the contraction
+ * across blocks and sum fp32 partials. Same geometry arguments as hip_conv. */
+HIP_KERNEL_API size_t hip_conv_workspace_bytes(
+    int hip_dtype, int spatial_rank,
+    int64_t N, int64_t Cin, int64_t Cout,
+    int64_t in_d0, int64_t in_d1, int64_t in_d2,
+    int64_t out_d0, int64_t out_d1, int64_t out_d2,
+    int64_t k0, int64_t k1, int64_t k2,
+    int64_t s0, int64_t s1, int64_t s2,
+    int64_t p0, int64_t p1, int64_t p2,
+    int64_t dil0, int64_t dil1, int64_t dil2,
+    int64_t group);
+
+/* hip_conv with a device workspace of `workspace_bytes` (may be null / 0, in
+ * which case it is exactly hip_conv). */
+HIP_KERNEL_API int hip_conv_ws(
+    void* stream,
+    const void* input,
+    const void* weights,
+    const void* bias,         /* nullable */
+    void* output,
+    void* workspace,          /* nullable */
+    size_t workspace_bytes,
+    int hip_dtype,
+    int spatial_rank,
+    int64_t N, int64_t Cin, int64_t Cout,
+    int64_t in_d0, int64_t in_d1, int64_t in_d2,
+    int64_t out_d0, int64_t out_d1, int64_t out_d2,
+    int64_t k0, int64_t k1, int64_t k2,
+    int64_t s0, int64_t s1, int64_t s2,
+    int64_t p0, int64_t p1, int64_t p2,
+    int64_t dil0, int64_t dil1, int64_t dil2,
+    int64_t group);
+
 /* =========================================================================
  * ConvTranspose — forward transposed convolution (2D spatial)
  * =========================================================================
