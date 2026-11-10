@@ -44,7 +44,7 @@ ifeq ($(HIP_SDK),)
 endif
 
 # Named UT preset; numeric sampling belongs to common/hip_adaptive_timing.h.
-TIMING ?= confirm
+TIMING ?= standard
 
 # ---- Paths ----
 

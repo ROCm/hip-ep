@@ -5,17 +5,20 @@
 MatMulNBits, GQA decode/prefill and ragged W4 MatMul use this implementation.
 Operators with other timing implementations are not qualified by this change.
 
-Run the packaged tests with `hipdnn-kernel-ut.exe --timing confirm`, or use
-`make test TIMING=confirm HIP_SDK=<sdk>` at the unit-test root. Standalone leaves
-read `HIPDNN_UT_TIMING=screen|confirm` (default `confirm`). This setting changes
+Run the packaged tests with `hipdnn-kernel-ut.exe [--timing screen|standard|confirm]`,
+or use `make test TIMING=<preset> HIP_SDK=<sdk>` at the unit-test root. Standalone
+leaves read `HIPDNN_UT_TIMING=screen|standard|confirm` (default `standard`). This setting changes
 sampling, not shapes, correctness checks, dispatch or config selection. Legacy
 leaf `--iters` arguments no longer select the measured launch count; actual
 counts are in `UT_TIMING` records.
 
-The formal `confirm` mode accumulates at least 10,000 ms of valid GPU time per
-measurement. `screen` normally accumulates at least 100 ms for LUT config ranking; use
-formal confirmation for priority shapes, boundaries and suspect regressions.
-Each uses five groups and at least two complete calls per group (ten total).
+The default `standard` mode accumulates at least 1,000 ms of valid GPU time per
+measurement (2,000 ms soft) and is meant for routine and CI runs. The formal
+`confirm` mode accumulates at least 10,000 ms; request it explicitly for priority
+shapes, boundaries, suspect regressions and published performance evidence.
+`screen` normally accumulates at least 100 ms for LUT config ranking.
+Each uses five groups and at least two complete calls per group (ten total), so
+calls of 100 ms or more cost the same ten calls in every mode.
 The duration target is shared across the five groups, not multiplied by five.
 Each group's result is total valid GPU time divided by actual complete calls;
 the reported result is the median of the five group means. Every valid batch,
@@ -45,7 +48,7 @@ Do not extend an event interval to millions of commands to meet a duration goal.
 No architecture-specific iteration table is needed: a faster device receives
 more calls, a slower device fewer, based on its own pilot and subsequent batches.
 
-20,000 ms (`confirm`) / 200 ms (`screen`) are soft cumulative thresholds. A very
+20,000 ms (`confirm`) / 2,000 ms (`standard`) / 200 ms (`screen`) are soft cumulative thresholds. A very
 large call can overshoot, and ten complete calls take precedence. Never truncate
 a running call or report a projected iteration as completed. Invalid, zero,
 negative or nonfinite durations get at most two retries shared across the entire cell (including the pilot),

@@ -204,7 +204,7 @@ int main(int argc, char** argv) {
   std::string arch;
   std::string mode = "lookup";
   const char* timing_env = std::getenv("HIPDNN_UT_TIMING");
-  std::string timing = timing_env && timing_env[0] ? timing_env : "confirm";
+  std::string timing = timing_env && timing_env[0] ? timing_env : "standard";
   int coverage = 3;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--arch") == 0 && i + 1 < argc)
@@ -218,7 +218,7 @@ int main(int argc, char** argv) {
     else if (std::strcmp(argv[i], "--help") == 0) {
       std::printf("Usage: hipdnn-kernel-ut.exe [--arch gfxNNNN] "
                   "[--mode lookup|autotune] [--coverage 1|2|3] "
-                  "[--timing screen|confirm]\n");
+                  "[--timing screen|standard|confirm]\n");
       return 0;
     } else {
       std::fprintf(stderr, "unrecognized argument: %s\n", argv[i]);
@@ -226,8 +226,8 @@ int main(int argc, char** argv) {
     }
   }
 
-  if (timing != "screen" && timing != "confirm") {
-    std::fprintf(stderr, "--timing must be screen or confirm\n");
+  if (timing != "screen" && timing != "standard" && timing != "confirm") {
+    std::fprintf(stderr, "--timing must be screen, standard or confirm\n");
     return 2;
   }
   if (!setEnvironment("HIPDNN_UT_TIMING", timing)) return 1;

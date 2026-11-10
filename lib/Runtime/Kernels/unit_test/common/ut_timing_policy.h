@@ -17,7 +17,7 @@ namespace timing {
 inline constexpr const char* kPolicyVersion = "ut-adaptive-v2";
 inline constexpr size_t kGroups = 5;
 
-enum class Preset { Screen, Confirm };
+enum class Preset { Screen, Standard, Confirm };
 
 // These are cumulative GPU-time goals for ONE measurement, not per batch.
 // The cap bounds the number of complete op calls between two HIP events; it
@@ -38,8 +38,21 @@ struct Policy {
     return p;
   }
 
+  static Policy standard() {
+    Policy p;
+    p.preset = Preset::Standard;
+    p.target_ms = 1000.0;
+    p.soft_limit_ms = 2000.0;
+    return p;
+  }
+
   const char* name() const {
-    return preset == Preset::Screen ? "screen" : "confirm";
+    switch (preset) {
+      case Preset::Screen: return "screen";
+      case Preset::Standard: return "standard";
+      case Preset::Confirm: return "confirm";
+    }
+    return "confirm";
   }
 
   void validate() const {

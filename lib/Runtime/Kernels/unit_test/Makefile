@@ -29,7 +29,7 @@ OFFLOAD  ?= --offload-arch=gfx11-generic
 HIP_SDK  ?=
 MODE     ?= lookup
 COVERAGE ?= 3
-TIMING   ?= confirm
+TIMING   ?= standard
 
 ifeq ($(HIP_SDK),)
     $(error pass HIP_SDK=<HIP SDK root>)

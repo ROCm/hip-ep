@@ -43,9 +43,11 @@ inline void checkHip(hipError_t status, const char* operation) {
 
 inline Policy environmentPolicy() {
   const char* value = std::getenv("HIPDNN_UT_TIMING");
-  if (!value || !value[0] || std::strcmp(value, "confirm") == 0) return Policy{};
+  if (!value || !value[0] || std::strcmp(value, "standard") == 0)
+    return Policy::standard();
+  if (std::strcmp(value, "confirm") == 0) return Policy{};
   if (std::strcmp(value, "screen") == 0) return Policy::screen();
-  throw std::invalid_argument("HIPDNN_UT_TIMING must be screen or confirm");
+  throw std::invalid_argument("HIPDNN_UT_TIMING must be screen, standard or confirm");
 }
 
 inline const char* envOr(const char* name, const char* fallback = "") {

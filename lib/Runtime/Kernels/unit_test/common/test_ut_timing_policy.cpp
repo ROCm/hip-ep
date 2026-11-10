@@ -47,6 +47,13 @@ int main() {
   }
   auto screen = measure(Policy::screen(), [](uint32_t n) { return 0.01 * n; });
   assert(screen.elapsed_ms >= 100.0 && screen.elapsed_ms < 100.1);
+  assert(std::string(Policy::screen().name()) == "screen");
+  assert(std::string(Policy::standard().name()) == "standard");
+  assert(std::string(Policy{}.name()) == "confirm");
+  auto standard = measure(Policy::standard(), [](uint32_t n) { return 0.01 * n; });
+  assert(standard.elapsed_ms >= 1000.0 && standard.elapsed_ms < 1000.1);
+  auto standard_long = measure(Policy::standard(), [](uint32_t n) { return 1500.0 * n; });
+  assert(standard_long.calls == 10 && standard_long.exceeded_soft_limit);
 
   int bad = 0;
   auto recovered = measure(Policy::screen(), [&](uint32_t n) {
