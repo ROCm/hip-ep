@@ -5077,7 +5077,40 @@ extern "C" int hip_matmul_nbits_wmma_smallm_grouped(
  * so experts of up to 32 rows stay there.
  * ----------------------------------------------------------------------- */
 
-static bool wmmaExtDevice();
+// gfx1150 / 1151 / 1152 run the same gfx11-generic code object; the tile
+// choice above was measured on gfx1151. gcnArchName may carry feature
+// suffixes ("gfx1151:xnack-"). Cached per device ordinal.
+static bool denseTilesDevice() {
+    constexpr int kMaxCachedDevices = 16;
+    // 0 == not probed yet, 1 == no, 2 == yes.
+    static int cached[kMaxCachedDevices] = {};
+
+    auto probe = [](int d) {
+        hipDeviceProp_t p;
+        if (hipGetDeviceProperties(&p, d) != hipSuccess) {
+            return false;
+        }
+        for (const char* arch : {"gfx1150", "gfx1151", "gfx1152"}) {
+            if (std::strncmp(p.gcnArchName, arch, 7) == 0 &&
+                (p.gcnArchName[7] == '\0' || p.gcnArchName[7] == ':')) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    int dev = 0;
+    if (hipGetDevice(&dev) != hipSuccess || dev < 0) {
+        return false;
+    }
+    if (dev >= kMaxCachedDevices) {
+        return probe(dev);
+    }
+    if (cached[dev] == 0) {
+        cached[dev] = probe(dev) ? 2 : 1;
+    }
+    return cached[dev] == 2;
+}
 
 constexpr int kDenseTileRows = 64;
 constexpr int kDenseTileCols = 64;
@@ -5129,8 +5162,7 @@ static bool denseTilesSupported(int64_t tile_rows, int64_t N, int64_t K,
     return tile_rows > 0 && tile_rows <= kDenseTileRows &&
            N > 0 && K > 0 && bits == 4 && element_size_bytes == 2 &&
            (K % kDenseTileBk) == 0 && block_size >= 32 &&
-           (block_size & (block_size - 1)) == 0 && !hipdnn_device_is_wave64() &&
-           wmmaExtDevice();
+           (block_size & (block_size - 1)) == 0 && denseTilesDevice();
 }
 
 extern "C" int hip_matmul_nbits_wmma_dense_grouped_supported(

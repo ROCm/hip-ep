@@ -2711,8 +2711,8 @@ HIP_KERNEL_API int hip_matmul_nbits_wmma_smallm_grouped_supported(
  * hip_matmul_nbits_wmma_smallm_grouped, for tiles of up to 64 rows: the
  * dequantized weight tile is staged in LDS and shared by all rows of the tile,
  * which pays off for experts with many rows. Symmetric weights only (zero
- * point 8). Requires gfx1151, bits == 4, fp16, K % 32 == 0, power-of-two
- * block_size >= 32 and tile_rows <= 64; returns -1 otherwise. */
+ * point 8). Requires gfx1150 / 1151 / 1152, bits == 4, fp16, K % 32 == 0,
+ * power-of-two block_size >= 32 and tile_rows <= 64; returns -1 otherwise. */
 HIP_KERNEL_API int hip_matmul_nbits_wmma_dense_grouped(
     void* stream, const void* A, const void* B, const void* scales,
     const void* bias, const void* expert_row_offsets, const void* row_tiles,
