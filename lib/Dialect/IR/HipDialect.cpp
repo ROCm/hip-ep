@@ -3166,8 +3166,10 @@ LogicalResult GatedDeltaNetOp::verify() {
 
 //===----------------------------------------------------------------------===//
 // DynamicSparseAttentionOp:
-//   ins(query, key, value, past_key, past_value, selected_indices,
-//       selected_counts, seqlens_k)
+//   ins(query) [kv(key, value)] cache(past_key, past_value)
+//   select(selected_indices, selected_counts, seqlens_k) [gate(gate)]
+//   [prologue(q_norm_weight, k_norm_weight, position_ids, cos_cache,
+//             sin_cache)] [pair(past_sequence_length)]
 //   outs(output, present_key, present_value)
 //===----------------------------------------------------------------------===//
 
@@ -3183,11 +3185,39 @@ void DynamicSparseAttentionOp::getEffects(
 }
 
 LogicalResult DynamicSparseAttentionOp::verify() {
-  SmallVector<Value> data = {
-      getQuery(),          getKey(),         getValue(),
-      getPastKey(),        getPastValue(),   getSelectedIndices(),
-      getSelectedCounts(), getSeqlensK(),    getOutput(),
-      getPresentKey(),     getPresentValue()};
+  if (static_cast<bool>(getKey()) != static_cast<bool>(getValue())) {
+    return emitOpError("key and value must be both given or both absent");
+  }
+  const SmallVector<Value> prologue = {getQNormWeight(), getKNormWeight(),
+                                       getPositionIds(), getCosCache(),
+                                       getSinCache()};
+  const int64_t prologueParts =
+      llvm::count_if(prologue, [](Value v) { return static_cast<bool>(v); });
+  const int64_t prologueAttrs = static_cast<int64_t>(bool(getNormEpsilon())) +
+                                bool(getMropeSection()) +
+                                bool(getMropeLayout());
+  const bool hasPrologue = prologueParts == 5 && prologueAttrs == 3;
+  if (!hasPrologue && (prologueParts != 0 || prologueAttrs != 0)) {
+    return emitOpError("q_norm_weight, k_norm_weight, position_ids, "
+                       "cos_cache, sin_cache, norm_epsilon, mrope_section and "
+                       "mrope_layout must be given together");
+  }
+  SmallVector<Value> data = {getQuery()};
+  if (getKey()) {
+    data.append({getKey(), getValue()});
+  }
+  data.append({getPastKey(), getPastValue(), getSelectedIndices(),
+               getSelectedCounts(), getSeqlensK()});
+  if (getGate()) {
+    data.push_back(getGate());
+  }
+  if (hasPrologue) {
+    data.append(prologue.begin(), prologue.end());
+  }
+  if (getPastSequenceLength()) {
+    data.push_back(getPastSequenceLength());
+  }
+  data.append({getOutput(), getPresentKey(), getPresentValue()});
   if (failed(verifyDpsComputeOp(*this, data, 3))) {
     return failure();
   }
@@ -3211,14 +3241,38 @@ LogicalResult DynamicSparseAttentionOp::verify() {
 
   constexpr int64_t kAny = ShapedType::kDynamic;
   auto queryType = cast<ShapedType>(getQuery().getType());
+  const bool packed = !getKey();
+  const int64_t queryHeads = packed ? numHeads + 2 * kvNumHeads : numHeads;
   if (queryType.getRank() != 3 || queryType.isDynamicDim(2) ||
-      queryType.getDimSize(2) % numHeads != 0) {
+      queryType.getDimSize(2) % queryHeads != 0) {
     return emitOpError("query must be rank 3 with a static last dim that is a "
-                       "multiple of num_heads");
+                       "multiple of ")
+           << (packed ? "num_heads + 2 * kv_num_heads" : "num_heads");
   }
-  const int64_t headSize = queryType.getDimSize(2) / numHeads;
+  const int64_t headSize = queryType.getDimSize(2) / queryHeads;
   if (headSize != 128 && headSize != 256) {
     return emitOpError("head size must be 128 or 256, got ") << headSize;
+  }
+  int64_t halfRotary = kAny;
+  if (hasPrologue) {
+    ArrayRef<int64_t> section = *getMropeSection();
+    const float eps = getNormEpsilon()->convertToFloat();
+    if (section.size() != 3 ||
+        llvm::any_of(section, [](int64_t s) { return s < 0; })) {
+      return emitOpError("mrope_section must be three non-negative entries");
+    }
+    halfRotary = section[0] + section[1] + section[2];
+    if (halfRotary <= 0 || 2 * halfRotary > headSize) {
+      return emitOpError("rotary width 2 * sum(mrope_section) must be in "
+                         "(0, head size], got ")
+             << 2 * halfRotary;
+    }
+    if (*getMropeLayout() != 0 && *getMropeLayout() != 1) {
+      return emitOpError("mrope_layout must be 0 or 1");
+    }
+    if (!std::isfinite(eps) || eps < 0.0f) {
+      return emitOpError("norm_epsilon must be finite and non-negative");
+    }
   }
   auto pastType = cast<ShapedType>(getPastKey().getType());
   if (pastType.getRank() != 4) {
@@ -3256,20 +3310,32 @@ LogicalResult DynamicSparseAttentionOp::verify() {
   };
 
   const SmallVector<int64_t> cacheShape = {batch, kvNumHeads, cap, headSize};
-  if (failed(
-          check(getQuery(), "query", f16, {batch, seq, numHeads * headSize})) ||
-      failed(
-          check(getKey(), "key", f16, {batch, seq, kvNumHeads * headSize})) ||
-      failed(check(getValue(), "value", f16,
-                   {batch, seq, kvNumHeads * headSize})) ||
+  const int64_t qWidth = numHeads * headSize;
+  const int64_t kvWidth = kvNumHeads * headSize;
+  if (failed(check(getQuery(), "query", f16,
+                   {batch, seq, queryHeads * headSize})) ||
+      (!packed &&
+       (failed(check(getKey(), "key", f16, {batch, seq, kvWidth})) ||
+        failed(check(getValue(), "value", f16, {batch, seq, kvWidth})))) ||
+      (getGate() &&
+       failed(check(getGate(), "gate", f16, {batch, seq, qWidth}))) ||
+      (hasPrologue &&
+       (failed(check(getQNormWeight(), "q_norm_weight", f16, {headSize})) ||
+        failed(check(getKNormWeight(), "k_norm_weight", f16, {headSize})) ||
+        failed(check(getPositionIds(), "position_ids",
+                     IntegerType::get(getContext(), 64), {3, batch, seq})) ||
+        failed(check(getCosCache(), "cos_cache", f16, {kAny, halfRotary})) ||
+        failed(check(getSinCache(), "sin_cache", f16, {kAny, halfRotary})))) ||
       failed(check(getPastKey(), "past_key", f16, cacheShape)) ||
       failed(check(getPastValue(), "past_value", f16, cacheShape)) ||
       failed(
           check(getSelectedIndices(), "selected_indices", i32, {rows, kAny})) ||
       failed(check(getSelectedCounts(), "selected_counts", i32, {rows})) ||
       failed(check(getSeqlensK(), "seqlens_k", i32, {batch})) ||
-      failed(check(getOutput(), "output", f16,
-                   {batch, seq, numHeads * headSize})) ||
+      (getPastSequenceLength() &&
+       failed(
+           check(getPastSequenceLength(), "past_sequence_length", i32, {1}))) ||
+      failed(check(getOutput(), "output", f16, {batch, seq, qWidth})) ||
       failed(check(getPresentKey(), "present_key", f16, cacheShape)) ||
       failed(check(getPresentValue(), "present_value", f16, cacheShape))) {
     return failure();
@@ -3281,13 +3347,14 @@ LogicalResult DynamicSparseAttentionOp::verify() {
 // SparseAttentionIndexerOp:
 //   ins(query, query_norm_weight, key_norm_weight, cos_cache, sin_cache,
 //       past_key) [mask(mask)] [past_sequence_length(past_sequence_length)]
-//   outs(selected_indices, present_key)
+//       [rotary_position_ids(rotary_position_ids)]
+//   outs(selected_indices, present_key) [counts(selected_counts)]
 //===----------------------------------------------------------------------===//
 
 MutableOperandRange SparseAttentionIndexerOp::getDpsInitsMutable() {
   return MutableOperandRange(
       *this, /*start=*/getSelectedIndicesMutable().getOperandNumber(),
-      /*length=*/2);
+      /*length=*/getSelectedCounts() ? 3 : 2);
 }
 
 void SparseAttentionIndexerOp::getEffects(
@@ -3306,10 +3373,26 @@ LogicalResult SparseAttentionIndexerOp::verify() {
   if (getPastSequenceLength()) {
     data.push_back(getPastSequenceLength());
   }
+  if (getRotaryPositionIds()) {
+    data.push_back(getRotaryPositionIds());
+  }
   data.push_back(getSelectedIndices());
   data.push_back(getPresentKey());
-  if (failed(verifyDpsComputeOp(*this, data, 2))) {
+  if (getSelectedCounts()) {
+    data.push_back(getSelectedCounts());
+  }
+  if (failed(verifyDpsComputeOp(*this, data, getSelectedCounts() ? 3 : 2))) {
     return failure();
+  }
+  const bool gathered = static_cast<bool>(getRotaryPositionIds());
+  if (gathered != getRotarySections().has_value()) {
+    return emitOpError(
+        "rotary_position_ids and rotary_sections must be given together");
+  }
+  if (getPairFormat() &&
+      (getMask() || !getPastSequenceLength() || !getSelectedCounts())) {
+    return emitOpError("pair_format needs past_sequence_length and "
+                       "selected_counts and no mask");
   }
 
   const int64_t ratio = getCompressRatio();
@@ -3354,7 +3437,11 @@ LogicalResult SparseAttentionIndexerOp::verify() {
   if ((cosRank != 2 && cosRank != 3) || cosType.isDynamicDim(cosRank - 1)) {
     return emitOpError("cos_cache must be rank 2 or 3 with a static width");
   }
-  const int64_t rotary = cosType.getDimSize(cosRank - 1);
+  if (gathered && cosRank != 2) {
+    return emitOpError("cos_cache must be a rank 2 base table with "
+                       "rotary_position_ids");
+  }
+  const int64_t rotary = cosType.getDimSize(cosRank - 1) * (gathered ? 2 : 1);
   if (rotary <= 0 || rotary % 2 != 0 || rotary > kHeadSize) {
     return emitOpError("rotary width must be even and in (0, 128], got ")
            << rotary;
@@ -3404,9 +3491,33 @@ LogicalResult SparseAttentionIndexerOp::verify() {
     return success();
   };
 
-  SmallVector<int64_t> cacheShape = {kAny, rotary};
+  SmallVector<int64_t> cacheShape = {kAny, gathered ? rotary / 2 : rotary};
   if (cosRank == 3) {
     cacheShape.insert(cacheShape.begin(), batch);
+  }
+  if (gathered) {
+    Value ids = getRotaryPositionIds();
+    if (failed(check(ids, "rotary_position_ids", i64, {kAny, batch, kAny}))) {
+      return failure();
+    }
+    ArrayRef<int32_t> sections = *getRotarySections();
+    if (static_cast<int64_t>(sections.size()) != rotary / 2) {
+      return emitOpError("rotary_sections must have ")
+             << rotary / 2 << " entries, got " << sections.size();
+    }
+    // The kernels store the section map as bytes.
+    constexpr int64_t kMaxRotarySections = 256;
+    const int64_t numSections = cast<ShapedType>(ids.getType()).getDimSize(0);
+    const int64_t limit =
+        ShapedType::isDynamic(numSections)
+            ? kMaxRotarySections
+            : std::min<int64_t>(numSections, kMaxRotarySections);
+    for (int32_t s : sections) {
+      if (s < 0 || s >= limit) {
+        return emitOpError("rotary_sections entries must be in [0, ")
+               << limit << "), got " << s;
+      }
+    }
   }
   if (failed(check(getQueryNormWeight(), "query_norm_weight", elem,
                    {kHeadSize})) ||
@@ -3420,7 +3531,10 @@ LogicalResult SparseAttentionIndexerOp::verify() {
       failed(check(getSelectedIndices(), "selected_indices", i32,
                    {batch, seq, budget + ratio - 1})) ||
       failed(check(getPresentKey(), "present_key", elem,
-                   {batch, presentRows, kHeadSize}))) {
+                   {batch, presentRows, kHeadSize})) ||
+      (getSelectedCounts() &&
+       failed(
+           check(getSelectedCounts(), "selected_counts", i32, {batch, seq})))) {
     return failure();
   }
   auto sinType = cast<ShapedType>(getSinCache().getType());
