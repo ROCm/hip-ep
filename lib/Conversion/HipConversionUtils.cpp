@@ -84,6 +84,38 @@ FailureOr<Value> createBroadcastEmptyTensor(OpBuilder &builder, Location loc,
   return result;
 }
 
+FailureOr<Value> createReductionEmptyTensor(
+    OpBuilder &builder, Location loc, RankedTensorType resultType, Value data,
+    llvm::ArrayRef<int64_t> axes, int64_t keepdims, int64_t noopWithEmptyAxes) {
+  // As in createBroadcastEmptyTensor, build detached until the checks pass.
+  Block pending;
+  OpBuilder shapeBuilder(builder.getContext());
+  shapeBuilder.setInsertionPointToEnd(&pending);
+  llvm::SmallVector<OpFoldResult> shape;
+  if (failed(reifyReductionWithKeepdims(shapeBuilder, loc, data, axes, keepdims,
+                                        noopWithEmptyAxes, shape)) ||
+      static_cast<int64_t>(shape.size()) != resultType.getRank())
+    return failure();
+
+  llvm::SmallVector<Value> dynSizes;
+  for (auto [extent, reified] : llvm::zip_equal(resultType.getShape(), shape)) {
+    auto constant = getConstantIntValue(reified);
+    if (constant && !ShapedType::isDynamic(extent) && extent != *constant)
+      return failure();
+    if (ShapedType::isDynamic(extent))
+      dynSizes.push_back(
+          getValueOrCreateConstantIndexOp(shapeBuilder, loc, reified));
+  }
+  Value result =
+      tensor::EmptyOp::create(shapeBuilder, loc, resultType, dynSizes);
+  while (!pending.empty()) {
+    Operation *op = &pending.front();
+    op->remove();
+    builder.insert(op);
+  }
+  return result;
+}
+
 FailureOr<Value> getContextArg(Operation *op, PatternRewriter &rewriter) {
   auto funcOp = op->getParentOfType<func::FuncOp>();
   if (!funcOp)

@@ -16,15 +16,23 @@ LogicalResult mlir::hip::reifyReductionWithKeepdims(
     OpBuilder &b, Location loc, Value data, Value axes, int64_t keepdims,
     int64_t noopWithEmptyAxes, SmallVectorImpl<OpFoldResult> &out) {
   out.clear();
+  SmallVector<int64_t> axesList;
+  if (!matchConstantIntTensor(axes, axesList))
+    return failure();
+  return reifyReductionWithKeepdims(b, loc, data, axesList, keepdims,
+                                    noopWithEmptyAxes, out);
+}
+
+LogicalResult mlir::hip::reifyReductionWithKeepdims(
+    OpBuilder &b, Location loc, Value data, ArrayRef<int64_t> axesList,
+    int64_t keepdims, int64_t noopWithEmptyAxes,
+    SmallVectorImpl<OpFoldResult> &out) {
+  out.clear();
   auto dataType = dyn_cast<RankedTensorType>(data.getType());
   if (!dataType)
     return failure();
   ArrayRef<int64_t> dataShape = dataType.getShape();
   int64_t dataRank = dataType.getRank();
-
-  SmallVector<int64_t> axesList;
-  if (!matchConstantIntTensor(axes, axesList))
-    return failure();
 
   if (axesList.empty()) {
     if (noopWithEmptyAxes != 0) {
