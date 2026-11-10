@@ -57,6 +57,13 @@ struct RuntimeState {
   hipStream_t stream;
   hipblasLtHandle_t hipblas_handle;
 
+  // XRT context for DynamicDispatch NPU/IPU backend (optional).
+  // Initialized when --use-dynamic-dispatch lowering is active.
+  // Cast from ryzenai::dynamic_dispatch::xrt_context* (C++ object).
+  // Owned by RuntimeState; allocated in initialize_state_handles,
+  // freed in hipdnn_ep_state_cleanup.
+  void *xrt_context;
+
   // Single allocation holding all constants as one blob.
   // gpu_constants[i] points into gpu_constants_blob at the offset stored in
   // ConstantInfo, so only one allocation/copy is needed at init time.
@@ -248,6 +255,13 @@ struct RuntimeState {
   // per-instance ZpUnpackCache in its MatmulNbitsState op-state slot. This
   // field is therefore qmoe-owned.
   void *zp_unpack_cache;
+
+  // RyzenAI CoreLib (NPU) session context, created by the native
+  // hipdnn-ep-corelib library on the first wrap_corelib_* call. The runtime
+  // cannot name its type, so the library also sets the destroy callback that
+  // hipdnn_ep_state_cleanup invokes.
+  void *corelib_ctx;
+  void (*corelib_ctx_destroy)(void *);
 
   // Per-operator profiling state (OpProfileState*, gated on HIPDNN_EP_PERF).
   // Allocated in state_init, freed in state_cleanup.

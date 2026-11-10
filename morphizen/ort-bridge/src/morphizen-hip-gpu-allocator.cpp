@@ -24,9 +24,17 @@
 #include <onnxruntime_cxx_api.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 namespace morphizen {
 
@@ -133,10 +141,21 @@ bool UseDeviceOnly(const OrtMemoryInfo *memory_info) noexcept {
   if (memory_info == nullptr) {
     return false;
   }
+  // Not std::getenv: the static-CRT EP DLL's copy of the environment can miss
+  // the host process's variables.
+#ifdef _WIN32
+  char env[8];
+  DWORD n = ::GetEnvironmentVariableA("MORPHIZEN_DEFAULT_HIPMALLOC", env,
+                                      sizeof(env));
+  if (n == 1 && env[0] == '0') {
+    return false;
+  }
+#else
   const char *env = std::getenv("MORPHIZEN_DEFAULT_HIPMALLOC");
   if (env != nullptr && std::strcmp(env, "0") == 0) {
     return false;
   }
+#endif
   try {
     return Ort::ConstMemoryInfo(memory_info).GetDeviceMemoryType() ==
            OrtDeviceMemoryType_DEFAULT;
@@ -341,6 +360,13 @@ void *ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator *this_,
     }
   }
   if (err != hipSuccess) {
+    // Also straight to stderr: glog goes through ORT's logger, which a host
+    // such as onnxruntime-genai may silence, and some callers use the null
+    // pointer without checking it.
+    fprintf(stderr, "[MorphiZen HIP] %s failed for %zu bytes (device %d): %s\n",
+            self->device_only_ ? "hipMalloc" : "hipHostMalloc", alloc_size,
+            self->device_id_, hipGetErrorString(err));
+    fflush(stderr);
     LOG(ERROR) << "[MorphiZen HIP] "
                << (self->device_only_ ? "hipMalloc" : "hipHostMalloc")
                << " failed for " << alloc_size << " bytes (device "

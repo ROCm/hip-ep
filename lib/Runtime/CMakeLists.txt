@@ -405,6 +405,8 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/qlpnormalization.cpp runtime_qlpnormalization.bc)
     compile_to_bitcode(real/qsigmoid.cpp runtime_qsigmoid.bc)
 
+    # DynamicDispatch: not bitcode; wrap_dd_* are native (STEP 6c).
+
     set(RUNTIME_BC_MODULES
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_state.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_tensor.bc
@@ -606,6 +608,130 @@ target_compile_definitions(hipdnn-ep-tls PRIVATE HIPDNN_EP_RT_NO_EXPORT)
 # lld-link resolve it there. The bitcode path resolves the same shim functions
 # from the JIT host through LlvmIrJit's absolute-symbol table.
 install(TARGETS hipdnn-ep-tls ARCHIVE DESTINATION lib)
+
+# ============================================================================
+# STEP 6b: RyzenAI CoreLib (NPU) (NOT bitcode)
+# ============================================================================
+# Two uses of CoreLib, both loading it at runtime so only its headers are
+# needed here (RYZENAICORELIB_ROOT):
+# - per-op: wrap_corelib_* call into ryzenai_corelib, which the JIT cannot
+#   link, so they are compiled natively like hipdnn-ep-tls and reach the JIT
+#   as absolute symbols (LlvmIrJit); see docs/design/ryzenai-corelib-backend.md.
+# - whole models: a decoder handed to CoreLib's model API (corelib_model.h) by
+#   the level-1 pass and run by its CORELIBMODEL custom op; see
+#   docs/design/ryzenai-corelib-model.md.
+# Without CoreLib, or in mock builds, stubs report every op as not handled
+# (the generated code uses the GPU) and refuse every model.
+list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
+if(NOT BUILD_MOCK_RUNTIME)
+    find_package(RyzenAICorelib 0.66 QUIET)
+endif()
+if(RyzenAICorelib_FOUND)
+    message(STATUS "RyzenAI CoreLib ${RyzenAICorelib_VERSION}: "
+                   "${RyzenAICorelib_INCLUDE_DIR}")
+    add_library(hipdnn-ep-corelib STATIC real/corelib_loader.cpp
+        real/ryzenaicorelib.cpp real/ryzenaicorelib_model.cpp
+        corelib_model_registry.cpp)
+    target_include_directories(hipdnn-ep-corelib PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/real
+        ${RyzenAICorelib_INCLUDE_DIR})
+    if(DEFINED THEROCK_DIST)
+        target_include_directories(hipdnn-ep-corelib PRIVATE
+            ${THEROCK_DIST}/include)
+    endif()
+    target_link_libraries(hipdnn-ep-corelib PRIVATE hip::host)
+    if(NOT WIN32)
+        target_link_libraries(hipdnn-ep-corelib PRIVATE ${CMAKE_DL_LIBS})
+    endif()
+else()
+    # A root that is set but unusable (typically an older CoreLib) would
+    # otherwise build the stub silently.
+    if(NOT BUILD_MOCK_RUNTIME AND (RYZENAICORELIB_ROOT OR
+                                   DEFINED ENV{RYZENAICORELIB_ROOT}))
+        if(RYZENAICORELIB_ROOT)
+            set(_corelib_root "${RYZENAICORELIB_ROOT}")
+        else()
+            set(_corelib_root "$ENV{RYZENAICORELIB_ROOT}")
+        endif()
+        set(_corelib_found_version "")
+        if(RyzenAICorelib_VERSION)
+            set(_corelib_found_version " (found ${RyzenAICorelib_VERSION})")
+        endif()
+        message(WARNING
+            "RYZENAICORELIB_ROOT is '${_corelib_root}', but no RyzenAI CoreLib "
+            "0.66 or later is there${_corelib_found_version}: "
+            "include/ryzenai/corelib/base.h is missing or too old. Building the "
+            "stub, so wrap_corelib_* always defer to the GPU and no model is "
+            "handed to CoreLib. Point "
+            "RYZENAICORELIB_ROOT at a CoreLib 0.66+ install, or clear the stale "
+            "RyzenAICorelib_INCLUDE_DIR cache entry.")
+    else()
+        message(STATUS "RyzenAI CoreLib not found (set RYZENAICORELIB_ROOT); "
+                       "wrap_corelib_* always defer to the GPU and no model is "
+                       "handed to CoreLib")
+    endif()
+    add_library(hipdnn-ep-corelib STATIC mock/ryzenaicorelib_stub.cpp
+        mock/ryzenaicorelib_model_stub.cpp corelib_model_registry.cpp)
+    target_include_directories(hipdnn-ep-corelib PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/mock)
+endif()
+set_target_properties(hipdnn-ep-corelib PROPERTIES POSITION_INDEPENDENT_CODE ON)
+install(TARGETS hipdnn-ep-corelib ARCHIVE DESTINATION lib)
+
+# ============================================================================
+# STEP 6c: DynamicDispatch (NPU) wrappers (NOT bitcode)
+# ============================================================================
+# wrap_dd_* call DynamicDispatch's C API (ops/dd_c_api.h). Like the CoreLib
+# wrappers they are compiled natively and reach the JIT as absolute symbols
+# (LlvmIrJit). dyn_dispatch_core is loaded at runtime, so only the header is
+# needed here: DYNAMICDISPATCH_ROOT (or DD_ROOT) names a DynamicDispatch
+# install or build tree. Without it, or in mock builds, a stub fails every
+# call. See docs/design/dynamicdispatch-integration.md.
+set(_dd_hints "")
+foreach(_dd_var DYNAMICDISPATCH_ROOT DD_ROOT)
+    if(${_dd_var})
+        list(APPEND _dd_hints "${${_dd_var}}")
+    elseif(DEFINED ENV{${_dd_var}})
+        list(APPEND _dd_hints "$ENV{${_dd_var}}")
+    endif()
+endforeach()
+if(NOT BUILD_MOCK_RUNTIME AND _dd_hints)
+    find_path(DD_C_API_INCLUDE_DIR NAMES ops/dd_c_api.h
+        HINTS ${_dd_hints}
+        PATH_SUFFIXES include/ryzenai/dynamic_dispatch include
+        NO_DEFAULT_PATH)
+endif()
+if(NOT BUILD_MOCK_RUNTIME AND DD_C_API_INCLUDE_DIR)
+    message(STATUS "DynamicDispatch C API: ${DD_C_API_INCLUDE_DIR}")
+    add_library(hipdnn-ep-dd STATIC real/dynamic_dispatch.cpp op_state.cpp)
+    target_include_directories(hipdnn-ep-dd PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/real
+        ${PROJECT_SOURCE_DIR}/include
+        ${DD_C_API_INCLUDE_DIR})
+    if(DEFINED THEROCK_DIST)
+        target_include_directories(hipdnn-ep-dd PRIVATE ${THEROCK_DIST}/include)
+    endif()
+    target_link_libraries(hipdnn-ep-dd PRIVATE hip::host)
+    if(MSVC)
+        target_compile_options(hipdnn-ep-dd PRIVATE
+            /FI${CMAKE_CURRENT_SOURCE_DIR}/real/msvc_builtins.h)
+    endif()
+    if(NOT WIN32)
+        target_link_libraries(hipdnn-ep-dd PRIVATE ${CMAKE_DL_LIBS})
+    endif()
+else()
+    message(STATUS "DynamicDispatch C API not found (set DYNAMICDISPATCH_ROOT); "
+                   "wrap_dd_* always fail")
+    add_library(hipdnn-ep-dd STATIC mock/dynamic_dispatch_mock.cpp)
+    target_include_directories(hipdnn-ep-dd PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/mock)
+endif()
+set_target_properties(hipdnn-ep-dd PROPERTIES POSITION_INDEPENDENT_CODE ON)
+install(TARGETS hipdnn-ep-dd ARCHIVE DESTINATION lib)
 
 # ============================================================================
 # STEP 7: Shared embedded runtime.bc (single source of truth)

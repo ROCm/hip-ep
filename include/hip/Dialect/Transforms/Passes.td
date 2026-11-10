@@ -142,13 +142,32 @@ def GenerateOpStateInitPass
 
 def ConvertHipToLLVMPass : Pass<"convert-hip-to-llvm", "mlir::ModuleOp"> {
   let summary = "Convert HIP dialect to LLVM dialect";
-  let options = [Option<"reportHostScalars", "report-host-scalars", "bool",
-                        "false", "Report host-scalar forwarding or rejection">];
   let description = [{
     Lowers HIP dialect operations to LLVM dialect by converting each HIP op
     into calls to the HIP runtime C API (hipCreateHandle, hipblasltMatmul,
     etc.). MemRef operands are unpacked into bare pointers for the C calls.
+
+    With use-ryzenai-corelib, MatMulNBits, RmsNorm and SkipRmsNorm first call
+    a RyzenAI CoreLib (NPU) wrapper and fall back to the GPU wrapper when it
+    reports the shape unsupported.
+
+    Backend Selection:
+      --use-dynamic-dispatch: Route GEMM and Conv operations to DynamicDispatch
+                              (NPU/IPU via XRT) instead of the GPU, for the
+                              shapes DynamicDispatch supports. Other operations
+                              continue to use the GPU.
   }];
+  let options = [
+    Option<"reportHostScalars", "report-host-scalars", "bool",
+           /*default=*/"false", "Report host-scalar forwarding or rejection">,
+    Option<"useRyzenAICorelib", "use-ryzenai-corelib", "bool",
+           /*default=*/"false",
+           "Try RyzenAI CoreLib (NPU) before the GPU for MatMulNBits, "
+           "RmsNorm and SkipRmsNorm">,
+    Option<"useDynamicDispatch", "use-dynamic-dispatch", "bool",
+           /*default=*/"false",
+           "Use DynamicDispatch (NPU/IPU) backend for GEMM and Conv instead of GPU">
+  ];
   let dependentDialects = [
     "mlir::LLVM::LLVMDialect",
     "mlir::memref::MemRefDialect"

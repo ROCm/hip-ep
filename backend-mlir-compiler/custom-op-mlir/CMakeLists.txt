@@ -66,6 +66,7 @@ set(LIB_NAME morphizen-custom-op-mlir)
 add_library(${LIB_NAME} STATIC
   src/plugin_registration.cpp
   src/MlirCustomOp.cpp
+  src/CorelibModelCustomOp.cpp
   src/InferenceState.cpp
   src/LlvmIrJit.cpp
   src/LoadedArtifact.cpp
@@ -101,6 +102,16 @@ target_link_libraries(${LIB_NAME} PRIVATE
 if(TARGET hipdnn-ep-tls)
   target_link_libraries(${LIB_NAME} PRIVATE hipdnn-ep-tls)
 endif()
+# Native RyzenAI CoreLib wrappers, registered as absolute JIT symbols the same
+# way, and the CORELIBMODEL op's model sessions (real or stub; see
+# lib/Runtime/CMakeLists.txt STEP 6b).
+if(TARGET hipdnn-ep-corelib)
+  target_link_libraries(${LIB_NAME} PRIVATE hipdnn-ep-corelib)
+endif()
+# Native DynamicDispatch wrappers, likewise (real or stub; STEP 6c).
+if(TARGET hipdnn-ep-dd)
+  target_link_libraries(${LIB_NAME} PRIVATE hipdnn-ep-dd)
+endif()
 # Shared embedded runtime.bc (single source of truth, lib/Runtime). LlvmIrJit's
 # extern runtime_bc_data reference pulls the embed object in.
 if(TARGET runtime-bc-embed)
@@ -115,6 +126,7 @@ target_include_directories(${LIB_NAME} PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${CMAKE_CURRENT_BINARY_DIR}/..  # For generated protobuf headers (metadata.pb.h)
   ${CMAKE_SOURCE_DIR}/include     # Shared project headers (timing.h, etc.)
+  ${CMAKE_SOURCE_DIR}/lib/Runtime # corelib_model.h
   ${LLVM_INCLUDE_DIRS}            # LLVM ORC headers consumed by LlvmIrJit.cpp
 )
 
