@@ -37,7 +37,15 @@ Against the in-process CPU reference:
 - occupancy-capped persistent launch grids, including task-bound and
   occupancy-bound cases;
 - one ragged FC1 launch, one SwiGLU launch, one ragged FC2 launch, followed by
-  deterministic sorted reduction (20 byte-identical repetitions).
+  deterministic sorted reduction (20 byte-identical repetitions);
+- the grouped prefill GEMMs over device row-tile lists: the direct-B small-M
+  kernel (`hip_matmul_nbits_wmma_smallm_grouped`) on partial K blocks and
+  multi-wave K, the prefill tile classes of `hip_qmoe_build_row_tile_classes`
+  (exact lists at the 16/32/64/128-row boundaries), and the 128-row LDS-staged
+  tile (`hip_matmul_nbits_wmma_tiled_grouped`) with partial row and column
+  tiles, odd and even K-step counts, and bias on and off. These link the
+  MatMulNBits kernels from `custom_kernels_<arch>.dll`, so they run in the
+  package build.
 
 ## Shape coverage (3 tiers)
 

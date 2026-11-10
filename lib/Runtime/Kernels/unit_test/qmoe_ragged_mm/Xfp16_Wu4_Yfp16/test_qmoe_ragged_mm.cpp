@@ -1298,6 +1298,206 @@ bool run_grouped_cpw_case(hipStream_t stream, int cfg, int k) {
   return pass;
 }
 
+struct TileClassSpec {
+  int64_t lo, hi, rows;
+};
+
+// Host model of hip_qmoe_build_row_tile_classes for one class.
+std::vector<int32_t> expected_class_tiles(const std::vector<int32_t>& counts,
+                                          const TileClassSpec& tc) {
+  std::vector<int32_t> tiles;
+  for (int expert = 0; expert < static_cast<int>(counts.size()); ++expert) {
+    const int count = counts[expert];
+    if (count <= tc.lo || (tc.hi >= 0 && count > tc.hi))
+      continue;
+    for (int row0 = 0; row0 < count; row0 += static_cast<int>(tc.rows))
+      tiles.insert(tiles.end(),
+                   {expert, row0,
+                    std::min(static_cast<int>(tc.rows), count - row0)});
+  }
+  return tiles;
+}
+
+int64_t class_capacity(const std::vector<int32_t>& counts,
+                       const TileClassSpec& tc) {
+  int64_t total = 0;
+  for (int32_t count : counts) total += count;
+  const int64_t experts = static_cast<int64_t>(counts.size());
+  return tc.hi >= 0 && tc.hi <= tc.rows ? experts : total / tc.rows + experts;
+}
+
+// Offsets (in int32) of each class's list in one buffer; the last entry is
+// the buffer size.
+std::vector<size_t> tile_list_offsets(const std::vector<int32_t>& counts,
+                                      const std::vector<TileClassSpec>& classes) {
+  std::vector<size_t> offsets = {0};
+  for (const TileClassSpec& tc : classes)
+    offsets.push_back(offsets.back() +
+                      static_cast<size_t>(class_capacity(counts, tc)) * 3);
+  return offsets;
+}
+
+// Builds per-class row-tile lists on the device into tiles at
+// tile_list_offsets; returns false on a launch error.
+bool build_row_tile_classes(hipStream_t stream,
+                            const std::vector<int32_t>& counts,
+                            const std::vector<TileClassSpec>& classes,
+                            DeviceBuffer<int32_t>* tiles,
+                            DeviceBuffer<int32_t>* num_tiles) {
+  DeviceBuffer<int32_t> d_counts(counts.size());
+  upload(d_counts, counts);
+  const std::vector<size_t> offsets = tile_list_offsets(counts, classes);
+  std::vector<int64_t> lo, hi, rows;
+  std::vector<void*> tile_ptrs;
+  for (size_t c = 0; c < classes.size(); ++c) {
+    lo.push_back(classes[c].lo);
+    hi.push_back(classes[c].hi);
+    rows.push_back(classes[c].rows);
+    tile_ptrs.push_back(tiles->get() + offsets[c]);
+  }
+  const int status = hip_qmoe_build_row_tile_classes(
+      reinterpret_cast<void*>(stream), d_counts.get(),
+      static_cast<int64_t>(counts.size()),
+      static_cast<int64_t>(classes.size()), lo.data(), hi.data(), rows.data(),
+      tile_ptrs.data(), num_tiles->get());
+  if (status != static_cast<int>(hipSuccess))
+    return false;
+  HIP_CHECK(hipStreamSynchronize(stream));
+  return true;
+}
+
+// The prefill tile classes over boundary counts (0, 16/17, 32/33, 64/65,
+// multiples of 128 +- 1) followed by pseudo-random experts; every list must
+// match the host model exactly, in ascending expert order.
+bool run_row_tile_classes_case(hipStream_t stream) {
+  std::vector<int32_t> counts = {0,  1,  16,  17,  32,  33,  64,  65,
+                                 127, 128, 129, 255, 256, 257, 0,  700};
+  for (int expert = 0; expert < 600; ++expert)
+    counts.push_back((expert * 37 + 11) % 97 == 0 ? 0 : (expert * 53) % 211);
+  const std::vector<TileClassSpec> classes = {
+      {0, 16, 16}, {16, 32, 32}, {32, 64, 64}, {64, -1, 128}};
+
+  const std::vector<size_t> offsets = tile_list_offsets(counts, classes);
+  DeviceBuffer<int32_t> d_tiles(offsets.back());
+  DeviceBuffer<int32_t> d_num_tiles(classes.size());
+  bool pass = build_row_tile_classes(stream, counts, classes, &d_tiles,
+                                     &d_num_tiles);
+  std::vector<int32_t> num_tiles(classes.size(), -1);
+  if (pass)
+    HIP_CHECK(hipMemcpy(num_tiles.data(), d_num_tiles.get(),
+                        num_tiles.size() * sizeof(int32_t),
+                        hipMemcpyDeviceToHost));
+  for (size_t c = 0; pass && c < classes.size(); ++c) {
+    const std::vector<int32_t> expected = expected_class_tiles(counts, classes[c]);
+    std::vector<int32_t> actual(expected.size());
+    if (num_tiles[c] * 3 != static_cast<int32_t>(expected.size())) {
+      pass = false;
+      break;
+    }
+    if (!actual.empty())
+      HIP_CHECK(hipMemcpy(actual.data(), d_tiles.get() + offsets[c],
+                          actual.size() * sizeof(int32_t),
+                          hipMemcpyDeviceToHost));
+    pass = actual == expected;
+  }
+  std::cout << (pass ? "PASS" : "FAIL") << " shape=row_tile_classes"
+            << " experts=" << counts.size() << '\n';
+  ResultRow result("row_tile_classes", "fixed:classes=16/32/64/128");
+  result.finish(pass ? 0.0 : 1.0, pass);
+  return pass;
+}
+
+// The tall grouped tile over a device-built 128-row list: experts with one
+// row, a partial tile, an exact tile and several tiles; n = 192 leaves a
+// partial column tile, k = 96 an odd and k = 640 an even number of K steps.
+bool run_tiled_grouped_case(hipStream_t stream, int n, int k, int block_size,
+                            bool use_bias) {
+  const std::vector<int32_t> counts = {1, 0, 65, 128, 129, 300};
+  const int experts = static_cast<int>(counts.size());
+  std::vector<int32_t> expert_offsets = {0};
+  for (int32_t count : counts)
+    expert_offsets.push_back(expert_offsets.back() + count);
+  const int rows = expert_offsets.back();
+  const PackedMatrix matrix = make_matrix(experts, n, k, block_size, 29);
+
+  std::vector<__half> input(static_cast<size_t>(rows) * k);
+  for (int row = 0; row < rows; ++row)
+    for (int col = 0; col < k; ++col)
+      input[static_cast<size_t>(row) * k + col] =
+          float_to_half(input_value(row + 5, col));
+
+  std::vector<__half> expected(static_cast<size_t>(rows) * n);
+  for (int expert = 0; expert < experts; ++expert) {
+    for (int row = expert_offsets[expert]; row < expert_offsets[expert + 1];
+         ++row) {
+      for (int col = 0; col < n; ++col) {
+        const size_t expert_col = static_cast<size_t>(expert) * n + col;
+        float accumulator = 0.0f;
+        for (int col_k = 0; col_k < k; ++col_k) {
+          const uint8_t packed =
+              matrix.weights[expert_col * matrix.row_bytes + col_k / 2];
+          const float q = (col_k & 1) ? static_cast<float>(packed >> 4)
+                                      : static_cast<float>(packed & 0x0f);
+          const float scale = half_to_float(
+              matrix.scales[expert_col * matrix.k_blocks + col_k / block_size]);
+          accumulator +=
+              half_to_float(input[static_cast<size_t>(row) * k + col_k]) *
+              (q - 8.0f) * scale;
+        }
+        if (use_bias) accumulator += half_to_float(matrix.bias[expert_col]);
+        expected[static_cast<size_t>(row) * n + col] =
+            float_to_half(accumulator);
+      }
+    }
+  }
+
+  const std::vector<TileClassSpec> classes = {
+      {0, -1, HIP_MATMUL_NBITS_TILED_GROUPED_ROWS}};
+  DeviceBuffer<int32_t> d_tiles(tile_list_offsets(counts, classes).back());
+  DeviceBuffer<int32_t> d_num_tiles(1);
+  const std::string shape = "tiled_grouped_N" + std::to_string(n) + "_K" +
+                            std::to_string(k) + "_bs" +
+                            std::to_string(block_size) +
+                            (use_bias ? "_bias" : "");
+  int status = -1;
+  Metrics metrics;
+  if (build_row_tile_classes(stream, counts, classes, &d_tiles,
+                             &d_num_tiles)) {
+    DeviceBuffer<__half> d_input(input.size());
+    DeviceBuffer<uint8_t> d_weights(matrix.weights.size());
+    DeviceBuffer<__half> d_scales(matrix.scales.size());
+    DeviceBuffer<__half> d_bias(matrix.bias.size());
+    DeviceBuffer<int32_t> d_expert_offsets(expert_offsets.size());
+    DeviceBuffer<__half> d_output(expected.size());
+    upload(d_input, input);
+    upload(d_weights, matrix.weights);
+    upload(d_scales, matrix.scales);
+    upload(d_bias, matrix.bias);
+    upload(d_expert_offsets, expert_offsets);
+    status = hip_matmul_nbits_wmma_tiled_grouped(
+        reinterpret_cast<void*>(stream), d_input.get(), d_weights.get(),
+        d_scales.get(), use_bias ? d_bias.get() : nullptr,
+        d_expert_offsets.get(), d_tiles.get(), d_num_tiles.get(),
+        d_output.get(), class_capacity(counts, classes[0]), n, k, 4,
+        block_size, sizeof(__half));
+    if (status == static_cast<int>(hipSuccess)) {
+      HIP_CHECK(hipStreamSynchronize(stream));
+      std::vector<__half> actual(expected.size());
+      HIP_CHECK(hipMemcpy(actual.data(), d_output.get(),
+                          actual.size() * sizeof(__half),
+                          hipMemcpyDeviceToHost));
+      metrics = compare(actual, expected);
+    }
+  }
+  const bool pass = metrics.finite && metrics.rel_l2 <= 5e-3;
+  std::cout << (pass ? "PASS" : "FAIL") << " relL2=" << metrics.rel_l2
+            << " status=" << status << " shape=" << shape << '\n';
+  ResultRow result(shape, "fixed:tile=128 block_size=" +
+                              std::to_string(block_size));
+  result.finish(metrics.rel_l2, pass);
+  return pass;
+}
+
 // Rows with a SwiGLU row scale s > 1 hold v = fc2(act / s) without bias, so
 // each contribution is s * v + b. b is large next to v so that applying it
 // before the rescale, or scaling it with the row, is visible.
@@ -1736,12 +1936,15 @@ int main(int argc, char** argv) {
   constexpr int reduce_scaled_cases = 2;
   constexpr int grouped_partial_block_cases = 1;
   constexpr int grouped_cpw_cases = 8;
+  constexpr int row_tile_class_cases = 1;
+  constexpr int tiled_grouped_cases = 4;
   std::cout << "qmoe_ragged_mm coverage=" << coverage
             << " cases=" << shape_count * category_count + model_shape_cases +
                                adaptive_shape_cases + descriptor_cases +
                                task_policy_cases + launcher_cases +
                                pipeline_cases + reduce_scaled_cases +
-                               grouped_partial_block_cases + grouped_cpw_cases
+                               grouped_partial_block_cases + grouped_cpw_cases +
+                               row_tile_class_cases + tiled_grouped_cases
             << '\n';
 
   hipStream_t stream = nullptr;
@@ -1797,6 +2000,11 @@ int main(int argc, char** argv) {
   for (int cfg : {0, 6, 1, 7})
     for (int k : {1024, 3072})
       all_pass = run_grouped_cpw_case(stream, cfg, k) && all_pass;
+  all_pass = run_row_tile_classes_case(stream) && all_pass;
+  all_pass = run_tiled_grouped_case(stream, 256, 640, 32, true) && all_pass;
+  all_pass = run_tiled_grouped_case(stream, 192, 640, 64, false) && all_pass;
+  all_pass = run_tiled_grouped_case(stream, 256, 96, 32, true) && all_pass;
+  all_pass = run_tiled_grouped_case(stream, 128, 2560, 128, true) && all_pass;
   HIP_CHECK(hipStreamDestroy(stream));
 
   std::cout << (all_pass ? "ALL PASS" : "SOME FAIL") << '\n';

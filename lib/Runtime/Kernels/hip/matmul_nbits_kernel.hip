@@ -5062,6 +5062,93 @@ extern "C" int hip_matmul_nbits_wmma_smallm_grouped(
 
 #undef SMALLM_WMMA_CASES
 
+// Tall row tiles over the same device-built tile list: one workgroup computes
+// a whole (expert, row0, rows) slot x BN columns with the LDS-staged core, so
+// an expert's weights are read once per BM rows instead of once per 16-64.
+// Column-fastest order, as in the direct-B kernel, keeps the running
+// workgroups on one expert's weights. The tile is the 4x4-warp-tile,
+// two-deep-prefetch entry of the dense table (128 threads); A and C are
+// offset to the slot's first row, so the core sees a single row tile.
+static constexpr int kTiledGroupedBm = HIP_MATMUL_NBITS_TILED_GROUPED_ROWS;
+static constexpr int kTiledGroupedBn = 128;
+
+__global__
+__attribute__((amdgpu_flat_work_group_size(
+    GEMM_WG_SZ(kTiledGroupedBm, kTiledGroupedBn, 4, 4),
+    GEMM_WG_SZ(kTiledGroupedBm, kTiledGroupedBn, 4, 4))))
+__attribute__((amdgpu_waves_per_eu(1)))
+void MatMulNBitsWMMA_Tiled_Grouped(
+    int N, int K,
+    const _Float16* __restrict__ A,
+    const unsigned char* __restrict__ B, int b_row_bytes,
+    const _Float16* __restrict__ scales,
+    const _Float16* __restrict__ bias,
+    const int32_t* __restrict__ expert_row_offsets,
+    const int32_t* __restrict__ row_tiles,
+    const int32_t* __restrict__ num_row_tiles,
+    int group_size, int num_groups_k,
+    _Float16* __restrict__ C)
+{
+    const int slot = static_cast<int>(blockIdx.y);
+    if (slot >= *num_row_tiles) return;
+    const int expert = row_tiles[3 * slot];
+    const int rows = row_tiles[3 * slot + 2];
+    const size_t row0 = static_cast<size_t>(expert_row_offsets[expert]) +
+                        static_cast<size_t>(row_tiles[3 * slot + 1]);
+    const size_t e_cols = static_cast<size_t>(expert) * N;
+    GemmFp16U4ImplX<kTiledGroupedBm, kTiledGroupedBn, 4, 4, /*USE_ZEROS=*/false,
+                    /*BOUNDS_CHECK=*/true, /*BK_IN=*/32, /*PGR_P=*/2>(
+        rows, N, K, A + row0 * K, K, B + e_cols * b_row_bytes,
+        scales + e_cols * num_groups_k, nullptr, group_size, num_groups_k,
+        C + row0 * N, N, /*swizzle_n=*/1, b_row_bytes, /*fixed_row_tile=*/0,
+        bias ? bias + e_cols : nullptr);
+}
+
+extern "C" int hip_matmul_nbits_wmma_tiled_grouped_supported(
+    int64_t N, int64_t K, int64_t bits, int64_t block_size,
+    int64_t element_size_bytes) {
+  return !hipdnn_device_is_wave64() && bits == 4 && element_size_bytes == 2 &&
+                 N > 0 && K > 0 && (K % 32) == 0 && block_size >= 32 &&
+                 (block_size & (block_size - 1)) == 0
+             ? 1
+             : 0;
+}
+
+extern "C" int hip_matmul_nbits_wmma_tiled_grouped(
+    void* stream, const void* A, const void* B, const void* scales,
+    const void* bias, const void* expert_row_offsets, const void* row_tiles,
+    const void* num_row_tiles, void* output, int64_t max_row_tiles, int64_t N,
+    int64_t K, int64_t bits, int64_t block_size, int64_t element_size_bytes) {
+  if (max_row_tiles <= 0 || N <= 0 || K <= 0) return 0;
+  if (!hip_matmul_nbits_wmma_tiled_grouped_supported(N, K, bits, block_size,
+                                                     element_size_bytes))
+    return -1;
+
+  const int ngk = static_cast<int>((K + block_size - 1) / block_size);
+  const int b_row_bytes = static_cast<int>((K + 1) / 2);
+  const dim3 grid(static_cast<unsigned>((N + kTiledGroupedBn - 1) / kTiledGroupedBn),
+                  static_cast<unsigned>(max_row_tiles));
+  (void)hipGetLastError();
+  hipLaunchKernelGGL(
+      MatMulNBitsWMMA_Tiled_Grouped, grid,
+      dim3(GEMM_WG_SZ(kTiledGroupedBm, kTiledGroupedBn, 4, 4)), 0,
+      static_cast<hipStream_t>(stream), static_cast<int>(N),
+      static_cast<int>(K), static_cast<const _Float16*>(A),
+      static_cast<const unsigned char*>(B), b_row_bytes,
+      static_cast<const _Float16*>(scales), static_cast<const _Float16*>(bias),
+      static_cast<const int32_t*>(expert_row_offsets),
+      static_cast<const int32_t*>(row_tiles),
+      static_cast<const int32_t*>(num_row_tiles), static_cast<int>(block_size),
+      ngk, static_cast<_Float16*>(output));
+
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess)
+    fprintf(stderr,
+            "[custom_kernels] hip_matmul_nbits_wmma_tiled_grouped failed: %s\n",
+            hipGetErrorString(err));
+  return static_cast<int>(err);
+}
+
 /* fp16 GEMM kernel entry (for pre-dequantized B, FUSED_DQ=false) */
 
 template <int BM_T = 128, int BN_T = 128, int WT_M = 2, int WT_N = 2,

@@ -6,7 +6,7 @@
  * GemmFp16U4Impl (matmul_nbits_wmma_core.h, which every existing kWmmaConfigs
  * entry keeps using) plus these pipeline options, specialized to the one
  * contract its callers use (fused int4 dequant, fp16 zero points, dense tile
- * mapping, whole K-steps, no bias):
+ * mapping or one pinned row tile, whole K-steps, optional output bias):
  *   PGR_P   global prefetch depth (1, or 2 register sets)
  *   ADDR_P  1 = wave-uniform source base plus 32-bit per-thread offsets
  *   PIPE_P  1 = store-first: write tile i+1 to LDS, issue tile i+2, then run
@@ -55,7 +55,13 @@ void GemmFp16U4ImplX(
      * serves both layouts and the autotuner stays free to pick any tile for a
      * padded buffer. As a template parameter it would multiply the
      * instantiation count of every tile shape. */
-    int b_row_bytes = 0)
+    int b_row_bytes = 0,
+    /* >= 0 pins the row tile instead of deriving it from blockIdx.y, for a
+     * grouped launcher whose grid y indexes a tile list and whose A/C already
+     * point at the tile's first row. Needs swizzle_n <= 1. */
+    int fixed_row_tile = -1,
+    /* Optional fp16 [N] bias added in fp32 before the output conversion. */
+    const _Float16* __restrict__ output_bias = nullptr)
 {
     constexpr int WM_L   = BM_T / (WT_M * 16);
     constexpr int WN_L   = BN_T / (WT_N * 16);
@@ -212,7 +218,7 @@ void GemmFp16U4ImplX(
             // Direct mapping is used by ragged grouped WMMA: its launcher can
             // then reject blockIdx.y tiles beyond each expert's row count before
             // entering the expensive K loop.
-            by = static_cast<int>(blockIdx.y);
+            by = fixed_row_tile >= 0 ? fixed_row_tile : static_cast<int>(blockIdx.y);
             bx = static_cast<int>(blockIdx.x);
         } else {
             const int block_id = blockIdx.y * n_tiles + blockIdx.x;
@@ -766,7 +772,9 @@ void GemmFp16U4ImplX(
                     for (int e = 0; e < 8; e++) {
                         const int r = (wrow * WT_M + wm) * WMMA_TILE + hipdnn_wmma_acc_row(sub, e);
                         const int cc = (wcol * WT_N + wn) * WMMA_TILE + lane;
-                        smC[r * C_STR + cc] = (_Float16)acc[wm][wn][e];
+                        float value = acc[wm][wn][e];
+                        if (output_bias) value += static_cast<float>(output_bias[col0 + cc]);
+                        smC[r * C_STR + cc] = (_Float16)value;
                     }
             HIPDNN_LDS_BARRIER();
 #pragma unroll
@@ -802,8 +810,11 @@ void GemmFp16U4ImplX(
             {
                 int r = hipdnn_wmma_acc_row(sub, e);
                 _Float16* cp = crow + static_cast<int64_t>(r - r0) * ldc;
-                if (!BOUNDS_CHECK || (mbase + r < M && nbase + lane < N))
-                    *cp = (_Float16)acc[wm][wn][e];
+                if (!BOUNDS_CHECK || (mbase + r < M && nbase + lane < N)) {
+                    float value = acc[wm][wn][e];
+                    if (output_bias) value += static_cast<float>(output_bias[nbase + lane]);
+                    *cp = (_Float16)value;
+                }
             }
         }
     }
