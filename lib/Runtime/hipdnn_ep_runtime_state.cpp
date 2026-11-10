@@ -2,6 +2,7 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
+#include "constants_blob_alloc.h"
 #include "debug_log.h"
 #include "hip/init_config_abi.h"
 #include "hip/timing.h"
@@ -684,35 +685,9 @@ static int hipmalloc_and_fixup(RuntimeState *state,
                                const mlir::hip::HipModelMetaInfo *meta,
                                size_t total_size) {
   auto t_prev = timing_now();
-  const hipError_t alloc_err =
-      hipMalloc(&state->gpu_constants_blob, total_size);
-  if (alloc_err != hipSuccess) {
-    (void)hipGetLastError();
-    // Only device exhaustion is recoverable here: a constants blob larger than
-    // physical VRAM can still live in managed (paged) memory. Any other failure
-    // (invalid device, context error, ...) would fail the managed allocation
-    // too, so report it instead of masking it. Constants that are only gathered
-    // along axis 0 avoid this path entirely via `disk_resident`.
-    if (alloc_err != hipErrorOutOfMemory) {
-      fprintf(stderr, "hipMalloc failed for constants blob (%zu bytes): %s\n",
-              total_size, hipGetErrorString(alloc_err));
-      return 1;
-    }
-    const hipError_t managed_err = hipMallocManaged(
-        &state->gpu_constants_blob, total_size, hipMemAttachGlobal);
-    if (managed_err != hipSuccess) {
-      (void)hipGetLastError();
-      fprintf(stderr,
-              "hipMalloc and hipMallocManaged failed for constants blob "
-              "(%zu bytes): %s\n",
-              total_size, hipGetErrorString(managed_err));
-      return 1;
-    }
-    fprintf(stderr,
-            "hipMalloc ran out of device memory; constants blob uses managed "
-            "memory (%zu bytes)\n",
-            total_size);
-  }
+  if (hipdnn_ep::alloc_constants_blob(&state->gpu_constants_blob, total_size) !=
+      0)
+    return 1;
   TIMING_LOG("[Session] hipMalloc VRAM: %.3fs (%zu bytes)\n",
              record_elapsed(t_prev), total_size);
   auto *constants = meta->constants();

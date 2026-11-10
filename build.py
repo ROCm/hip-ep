@@ -388,7 +388,7 @@ def run_tests(args, build_dir):
             args.config,
             "-R",
             "StaticPlugins|OutputAllocator|LdsBarrierArchGate|AdaptiveBenchmark"
-            "|RuntimeLoweringContractsUnit|MatMulNBitsAutotune",
+            "|RuntimeLoweringContractsUnit|MatMulNBitsAutotune|ConstantsBlobAlloc",
             "--output-on-failure",
         ]
     )

@@ -46,6 +46,17 @@ target_include_directories(test-transient-arena PRIVATE
 add_test(NAME TransientArenaUnitTest COMMAND test-transient-arena)
 set_target_properties(test-transient-arena PROPERTIES FOLDER "runtime-tests")
 
+# Constants-blob allocation policy (managed-memory fallback on device OOM only).
+# Header-only; the test fakes the HIP entry points, so it links no runtime.
+add_executable(test-constants-blob-alloc test_constants_blob_alloc.cpp)
+target_compile_features(test-constants-blob-alloc PRIVATE cxx_std_17)
+target_include_directories(test-constants-blob-alloc PRIVATE
+    ${CMAKE_SOURCE_DIR}/lib/Runtime
+    ${CMAKE_SOURCE_DIR}/lib/Runtime/mock
+)
+add_test(NAME ConstantsBlobAllocUnitTest COMMAND test-constants-blob-alloc)
+set_target_properties(test-constants-blob-alloc PROPERTIES FOLDER "runtime-tests")
+
 # GQA offline autotune tests are GPU-free: they link the real embedded table
 # (lut/gfx1151.fb) and drive the same resolver that ships in
 # custom_kernels_<arch>, through the exported extern "C" shims. The resolver's
