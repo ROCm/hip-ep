@@ -189,6 +189,7 @@ hipError_t launchRecurrent(hipStream_t stream, const void *qkv,
   constexpr int kRowsPerBlock = kBlockSize / kTpr;
   const int rowGroups = (headSizeV + kRowsPerBlock - 1) / kRowsPerBlock;
   const dim3 grid(static_cast<unsigned>(batch * numHeadsV * rowGroups));
+  (void)hipGetLastError();
   hipLaunchKernelGGL((gatedDeltaNetRecurrentKernel<T, DK>), grid,
                      dim3(kBlockSize), 0, stream, static_cast<const T *>(qkv),
                      decay, beta, initialState, aLog, dtBias,
