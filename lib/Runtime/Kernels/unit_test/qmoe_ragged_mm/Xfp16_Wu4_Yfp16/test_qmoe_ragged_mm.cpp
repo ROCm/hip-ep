@@ -17,6 +17,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <numeric>
 #include <string>
@@ -1206,14 +1207,37 @@ bool run_grouped_partial_block_case(hipStream_t stream) {
   return pass;
 }
 
-// The grouped GEMM with an explicit config at a K that takes several waves of
-// K chunks: cfg 0/1 run 18 chunks per wave (a guarded last wave here), cfg 6/7
-// run 16 (even waves). cfg 0/6 take 16-row tiles, cfg 1/7 32-row tiles.
-bool run_grouped_cpw_case(hipStream_t stream, int cfg, int k) {
+// Every grouped config runs K = 640 (20 chunks), so the first config id that
+// does not is the end of the config table.
+int grouped_config_count() {
+  int cfg = 0;
+  while (hip_matmul_nbits_wmma_smallm_grouped_supported(cfg, 16, 64, 640, 4,
+                                                        128, sizeof(__half)))
+    ++cfg;
+  return cfg;
+}
+
+// Chunk counts 20, 80, 84, 88, 90 and 96: every CPW of the config table
+// divides one of them (all waves full) and leaves a guarded last wave at
+// another.
+constexpr int kGroupedCpwKs[] = {640, 2560, 2688, 2816, 2880, 3072};
+// The default rule (cfg -1): one or two waves (512, 640), a padded last wave
+// (1856), even waves (2688, 3072), only odd ones (2880), and 9216, the largest
+// K the CPW 18 fallback reaches.
+constexpr int kGroupedDefaultKs[] = {512, 640, 1856, 2688, 2880, 3072, 9216};
+// Past the fallback's reach the default stays unsupported even where a larger
+// CPW would fit in 16 waves (9984 = 13 waves of 24).
+constexpr int kGroupedUnsupportedKs[] = {9248, 9984};
+
+// Quantization blocks of 32 (one scale per chunk) and 128 (four chunks per
+// scale, so a wave's chunk range can start inside a block).
+constexpr int kGroupedBlockSizes[] = {32, 128};
+
+// The grouped GEMM with config cfg (-1: the default for tile_rows) at K = k.
+bool run_grouped_cpw_case(hipStream_t stream, int cfg, int tile_rows, int k,
+                          int block_size) {
   constexpr int experts = 3;
   constexpr int n = 64;
-  constexpr int block_size = 128;
-  const int tile_rows = (cfg == 0 || cfg == 6) ? 16 : 32;
   const std::vector<int32_t> expert_rows =
       tile_rows == 16 ? std::vector<int32_t>{5, 16, 11}
                       : std::vector<int32_t>{20, 32, 7};
@@ -1275,7 +1299,8 @@ bool run_grouped_cpw_case(hipStream_t stream, int cfg, int k) {
 
   const std::string shape = "grouped_cfg" + std::to_string(cfg) + "_K" +
                             std::to_string(k) + "_tile" +
-                            std::to_string(tile_rows);
+                            std::to_string(tile_rows) + "_bs" +
+                            std::to_string(block_size);
   const int status = hip_matmul_nbits_wmma_smallm_grouped(
       reinterpret_cast<void*>(stream), cfg, d_input.get(), d_weights.get(),
       d_scales.get(), nullptr, /*zp_packed_u4=*/1, d_bias.get(),
@@ -1293,8 +1318,26 @@ bool run_grouped_cpw_case(hipStream_t stream, int cfg, int k) {
   std::cout << (pass ? "PASS" : "FAIL") << " relL2=" << metrics.rel_l2
             << " status=" << status << " shape=" << shape << '\n';
   ResultRow result(shape, "fixed:cfg=" + std::to_string(cfg) +
-                              " block_size=128");
+                              " block_size=" + std::to_string(block_size));
   result.finish(metrics.rel_l2, pass);
+  return pass;
+}
+
+// The default config is unsupported at K = k: the query says so and the
+// launch returns -1 before touching any buffer.
+bool run_grouped_unsupported_case(int tile_rows, int k) {
+  const int supported = hip_matmul_nbits_wmma_smallm_grouped_supported(
+      -1, tile_rows, 64, k, 4, 128, sizeof(__half));
+  const int status = hip_matmul_nbits_wmma_smallm_grouped(
+      nullptr, -1, nullptr, nullptr, nullptr, nullptr, 1, nullptr, nullptr,
+      nullptr, nullptr, nullptr, 1, tile_rows, 64, k, 4, 128, sizeof(__half));
+  const bool pass = supported == 0 && status == -1;
+  const std::string shape = "grouped_unsupported_K" + std::to_string(k) +
+                            "_tile" + std::to_string(tile_rows);
+  std::cout << (pass ? "PASS" : "FAIL") << " supported=" << supported
+            << " status=" << status << " shape=" << shape << '\n';
+  ResultRow result(shape, "fixed:cfg=-1 block_size=128");
+  result.finish(0.0, pass);
   return pass;
 }
 
@@ -1735,7 +1778,13 @@ int main(int argc, char** argv) {
   constexpr int pipeline_cases = 1;
   constexpr int reduce_scaled_cases = 2;
   constexpr int grouped_partial_block_cases = 1;
-  constexpr int grouped_cpw_cases = 8;
+  const int grouped_configs = grouped_config_count();
+  const int grouped_blocks = static_cast<int>(std::size(kGroupedBlockSizes));
+  const int grouped_cpw_cases =
+      grouped_configs * grouped_blocks *
+          static_cast<int>(std::size(kGroupedCpwKs)) +
+      2 * (grouped_blocks * static_cast<int>(std::size(kGroupedDefaultKs)) +
+           static_cast<int>(std::size(kGroupedUnsupportedKs)));
   std::cout << "qmoe_ragged_mm coverage=" << coverage
             << " cases=" << shape_count * category_count + model_shape_cases +
                                adaptive_shape_cases + descriptor_cases +
@@ -1793,10 +1842,27 @@ int main(int argc, char** argv) {
   all_pass = run_reduce_scaled_case(stream, 64) && all_pass;
   all_pass = run_reduce_scaled_case(stream, 36) && all_pass;
   all_pass = run_grouped_partial_block_case(stream) && all_pass;
-  // K=1024 is 2 waves of 16 chunks, K=3072 is 6.
-  for (int cfg : {0, 6, 1, 7})
-    for (int k : {1024, 3072})
-      all_pass = run_grouped_cpw_case(stream, cfg, k) && all_pass;
+  // Each config at its tallest tile: 32 rows where it takes them, else 16.
+  for (int cfg = 0; cfg < grouped_configs; ++cfg) {
+    const int tile_rows = hip_matmul_nbits_wmma_smallm_grouped_supported(
+                              cfg, 32, 64, 640, 4, 128, sizeof(__half))
+                              ? 32
+                              : 16;
+    for (int block_size : kGroupedBlockSizes)
+      for (int k : kGroupedCpwKs)
+        all_pass =
+            run_grouped_cpw_case(stream, cfg, tile_rows, k, block_size) &&
+            all_pass;
+  }
+  for (int tile_rows : {16, 32}) {
+    for (int block_size : kGroupedBlockSizes)
+      for (int k : kGroupedDefaultKs)
+        all_pass =
+            run_grouped_cpw_case(stream, -1, tile_rows, k, block_size) &&
+            all_pass;
+    for (int k : kGroupedUnsupportedKs)
+      all_pass = run_grouped_unsupported_case(tile_rows, k) && all_pass;
+  }
   HIP_CHECK(hipStreamDestroy(stream));
 
   std::cout << (all_pass ? "ALL PASS" : "SOME FAIL") << '\n';

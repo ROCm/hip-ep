@@ -462,13 +462,30 @@ class TestQMoE:
         _compare_gpt_oss_shape(actual, expected, seq_len)
 
     @pytest.mark.parametrize("seq_len", [37, 512])
-    def test_qmoe_qwen38_flash_shape_skewed_routing(self, model_runner, seq_len):
-        """Qwen3.8-Flash-Next expert shapes (hidden 2560, fused gate/up 1280,
-        top-10): the prefill grouped GEMMs run at K = 2560 and K = 640, which
-        pick their own small-M configs. Skewed routing yields both 16-row and
-        32-row tiles.
+    @pytest.mark.parametrize(
+        ("hidden", "intermediate"),
+        [
+            # K = 2560: 4 waves of 20 chunks; 640: 2 waves of 10, not 1 of 20.
+            (2560, 1280),
+            # K = 2816: 4 waves of 22; 704: a single wave of 22.
+            (2816, 1408),
+            # K = 2688: 4 waves of 21; 768: a single wave of 24.
+            (2688, 1536),
+            # K = 3584: 8 waves of 14, not 7 of 16.
+            (3584, 1280),
+            # K = 1856: no candidate divides 58 chunks; 3 waves of 20 pad 2.
+            (1024, 3712),
+        ],
+    )
+    def test_qmoe_grouped_shapes_skewed_routing(
+        self, model_runner, hidden, intermediate, seq_len
+    ):
+        """Prefill grouped GEMMs at fc1 K = hidden and fc2 K = intermediate / 2
+        (the fused gate/up width halved by SwiGLU) chosen so the default
+        small-M config rule takes each of its branches. Skewed routing over
+        64 experts, top-10, yields both 16-row and 32-row tiles.
         """
-        hidden, intermediate, num_experts, top_k = 2560, 1280, 64, 10
+        num_experts, top_k = 64, 10
         model = _make_qmoe_model(
             1, seq_len, hidden, intermediate, num_experts, top_k, BLOCK_SIZE
         )

@@ -84,6 +84,7 @@
 #include <functional>
 #include <mutex>
 #include <string>
+#include <tuple>
 #include <type_traits>
 #include <unordered_map>
 
@@ -4681,18 +4682,39 @@ struct SmallMWmmaConfig {
     int tm, tn, cpw, db, da;
 };
 
-// tm x 16 rows and tn x 16 columns per workgroup, CPW chunks of 32 k per wave,
-// DB / DA chunks of B / A in flight per wave. The first three are the defaults
-// for M <= 16, M <= 32 and larger; configs 3 and 4 (CPW 10) and the last two
-// (CPW 16) replace the first two at the K values listed in
-// smallMWmmaDefaultConfig; config 5 is an alternative for sweeps.
+// X(id, tm, tn, cpw, db, da): tm x 16 rows and tn x 16 columns per workgroup,
+// CPW chunks of 32 k per wave, DB / DA chunks of B / A in flight per wave.
+// The tm 1 and tm 2 configs with tn 1 are the CPW candidates of
+// smallMWmmaDefaultConfig for M <= 16 and M <= 32, configs 0 and 1 (CPW 18)
+// also its fallbacks; config 2 is the default above and config 5 an
+// alternative for sweeps.
+#define SMALLM_WMMA_CASES(X)                                                  \
+    X(0, 1, 1, 18, 18, 2) X(1, 2, 1, 18, 18, 1) X(2, 4, 1, 10, 10, 1)         \
+    X(3, 1, 1, 10, 10, 2) X(4, 2, 1, 10, 10, 1) X(5, 4, 1, 6, 6, 1)          \
+    X(6, 1, 1, 16, 16, 2) X(7, 2, 1, 16, 16, 1)                               \
+    X(8, 1, 1, 14, 14, 2) X(9, 2, 1, 14, 14, 1)                               \
+    X(10, 1, 1, 20, 20, 2) X(11, 2, 1, 20, 20, 1)                             \
+    X(12, 1, 1, 21, 21, 2) X(13, 2, 1, 21, 21, 1)                             \
+    X(14, 1, 1, 22, 22, 2) X(15, 2, 1, 22, 22, 1)                             \
+    X(16, 1, 1, 24, 24, 2) X(17, 2, 1, 24, 24, 1)
+
+#define SMALLM_WMMA_CONFIG(ID, TM, TN, CPW, DB, DA) {TM, TN, CPW, DB, DA},
 static constexpr SmallMWmmaConfig kSmallMWmmaConfigs[] = {
-    {1, 1, 18, 18, 2}, {2, 1, 18, 18, 1}, {4, 1, 10, 10, 1},
-    {1, 1, 10, 10, 2}, {2, 1, 10, 10, 1}, {4, 1, 6, 6, 1},
-    {1, 1, 16, 16, 2}, {2, 1, 16, 16, 1},
-};
+    SMALLM_WMMA_CASES(SMALLM_WMMA_CONFIG)};
+#undef SMALLM_WMMA_CONFIG
 static constexpr int kNumSmallMWmmaConfigs =
     static_cast<int>(sizeof(kSmallMWmmaConfigs) / sizeof(kSmallMWmmaConfigs[0]));
+
+// The launch switch dispatches on the X ids, the plan indexes the table.
+#define SMALLM_WMMA_ID(ID, TM, TN, CPW, DB, DA) ID,
+static constexpr int kSmallMWmmaIds[] = {SMALLM_WMMA_CASES(SMALLM_WMMA_ID)};
+#undef SMALLM_WMMA_ID
+static constexpr bool smallMWmmaIdsSequential() {
+    for (int i = 0; i < kNumSmallMWmmaConfigs; ++i)
+        if (kSmallMWmmaIds[i] != i) return false;
+    return true;
+}
+static_assert(smallMWmmaIdsSequential(), "SMALLM_WMMA_CASES ids must be 0, 1, ...");
 
 // Eight packed nibbles (k..k+7 of one B column) -> four half2 words holding
 // (q - zp) * s in k order. Same instruction sequence and rounding as the
@@ -4942,21 +4964,43 @@ void MatMulNBitsWMMA_SmallM_Grouped(
         num_groups_k, C + off * N, N);
 }
 
-// Config chosen by tile height when the caller passes cfg < 0. Picked from a
-// sweep on gfx1151 with the gpt-oss expert shapes (fc1 N=5760 / fc2 N=2880,
-// K=2880, block 32). The CPW 16 variants are used only at the K values where
-// they were measured faster than CPW 18 (gfx1151, grouped expert GEMMs at
-// block 128, 16- and 32-row tiles: 9-14% at K=512, 1024, 2048 and 3072). At
-// the Qwen3.8-Flash-Next expert shapes (block 32, 512 experts, top 10) CPW 16
-// at K=2560 and CPW 10 at K=640 make a 512-token QMoE prefill 25% faster on
-// gfx1151. Every other K keeps the CPW 18 default.
+// Config chosen by tile height when the caller passes cfg < 0. For M <= 32,
+// among the tm 1 (M <= 16) or tm 2 configs with tn 1 that cover the K / 32
+// chunks in at most 16 waves, prefer the fewest padded chunks (idle slots of
+// the last wave), then at least two waves, then an even wave count when no
+// chunk is padded, then the largest CPW. Measured on gfx1151 by replaying
+// routed QMoE prefill grouped GEMMs of 24 MoE expert shapes (K = 512..8192,
+// blocks 32 and 128), each config timed against the others in the same
+// rounds: CPW 18, which pads 13 to 15 chunks at K = 736, 1856 and 2400, ran
+// 9 to 34% slower than the fewest padded config; one wave of 20 chunks ran
+// 4% slower than two of 10; an even wave count won at two of the three K
+// where it decided the 32-row pick, by up to 6%, and lost at the third by 4%.
+// K past the CPW 18 configs' 16-wave reach keeps them and so stays
+// unsupported: the rule changes which config runs a shape, not which shapes
+// run.
 static int smallMWmmaDefaultConfig(int64_t M, int64_t K) {
-    const bool cpw16 =
-        K == 512 || K == 1024 || K == 2048 || K == 2560 || K == 3072;
-    const bool cpw10 = K == 640;
-    if (M <= 16) return cpw16 ? 6 : cpw10 ? 3 : 0;
-    if (M <= 32) return cpw16 ? 7 : cpw10 ? 4 : 1;
-    return 2;
+    if (M > 32) return 2;
+    const int tm = M <= 16 ? 1 : 2;
+    const int fallback = tm == 1 ? 0 : 1;
+    const int64_t nchunk = K / 32;
+    if (K <= 0 || K % 32 || nchunk > 16 * kSmallMWmmaConfigs[fallback].cpw)
+        return fallback;
+    int best = fallback;
+    std::tuple<int64_t, bool, bool, int> best_key{INT64_MIN, false, false, 0};
+    for (int i = 0; i < kNumSmallMWmmaConfigs; ++i) {
+        const SmallMWmmaConfig& c = kSmallMWmmaConfigs[i];
+        if (c.tm != tm || c.tn != 1) continue;
+        const int64_t waves = (nchunk + c.cpw - 1) / c.cpw;
+        if (waves > 16) continue;
+        const int64_t padded = waves * c.cpw - nchunk;
+        const std::tuple<int64_t, bool, bool, int> key{
+            -padded, waves >= 2, padded > 0 || waves % 2 == 0, c.cpw};
+        if (key > best_key) {
+            best = i;
+            best_key = key;
+        }
+    }
+    return best;
 }
 
 // Launch geometry; false when the shape or config cannot run this kernel.
@@ -5002,11 +5046,6 @@ extern "C" int hip_matmul_nbits_wmma_smallm_grouped_supported(
     return 0;
   return tile_rows <= p.c.tm * 16 ? 1 : 0;
 }
-
-#define SMALLM_WMMA_CASES(X)                                                  \
-    X(0, 1, 1, 18, 18, 2) X(1, 2, 1, 18, 18, 1) X(2, 4, 1, 10, 10, 1)         \
-    X(3, 1, 1, 10, 10, 2) X(4, 2, 1, 10, 10, 1) X(5, 4, 1, 6, 6, 1)          \
-    X(6, 1, 1, 16, 16, 2) X(7, 2, 1, 16, 16, 1)
 
 extern "C" int hip_matmul_nbits_wmma_smallm_grouped(
     void* stream, int cfg,
