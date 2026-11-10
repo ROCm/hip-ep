@@ -492,6 +492,24 @@ extern "C" int wrap_multi_head_attention(
   // on launch, so wave64 takes the decomposed path instead.
   if (Sq > 1 && unidirectional != 1 && (((H + 15) / 16) * 16) <= 256 &&
       !hipdnn_device_is_wave64()) {
+    // Q, K, V and O are all BSND here, which the BSND kernel reads in place;
+    // it declines (rc 1) the head dims and alignments it does not take.
+    OP_ROCTX_MARK("hip_ep.op.multi_head_attention.attn.flash_bsnd");
+    const int bsnd_rc = hip_mha_flash_prefill_bsnd(
+        stream, query, key, value, output, static_cast<int>(B),
+        static_cast<int>(N), static_cast<int>(Sq), static_cast<int>(Skv),
+        static_cast<int>(H), scale);
+    if (bsnd_rc == 0)
+      return 0;
+    if (bsnd_rc < 0) {
+      fprintf(stderr,
+              "[multi_head_attention] ERROR: hip_mha_flash_prefill_bsnd failed "
+              "for B=%lld N=%lld Sq=%lld Skv=%lld H=%lld\n",
+              (long long)B, (long long)N, (long long)Sq, (long long)Skv,
+              (long long)H);
+      return -1;
+    }
+
     const size_t fa_align = 64;
     auto fa_align_up = [&](size_t v) {
       return (v + fa_align - 1) & ~(fa_align - 1);

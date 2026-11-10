@@ -697,6 +697,15 @@ void populatePackBroadcastTo4DPatterns(RewritePatternSet &patterns,
 void populateAttentionWindowFoldPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
 
+/// Pre-lowering pattern set: rewrite primitive scaled-dot-product attention
+/// (Transpose / scalar scale / MatMul / Softmax / MatMul / Transpose over
+/// BSNH projections) into `com.microsoft.MultiHeadAttention`, whose runtime
+/// runs a flash kernel instead of materialising the scores. Must run while
+/// the chain is still generic ONNX, before `convertComputeOps` lowers its
+/// members one by one. See DecomposedAttentionFusion.cpp.
+void populateDecomposedAttentionFusionPatterns(RewritePatternSet &patterns,
+                                               MLIRContext *ctx);
+
 /// Pre-lowering pattern set: fold a sigmoid + correction-bias router built
 /// outside a com.microsoft QMoE (TopK, GatherElements, ReduceSum and two
 /// ScatterElements feeding router_probs / router_weights) into

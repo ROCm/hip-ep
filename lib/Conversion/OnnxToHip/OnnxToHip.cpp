@@ -621,6 +621,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
         populateSliceShapeFoldPatterns(preLoweringPatterns, ctx);
         populatePackBroadcastTo4DPatterns(preLoweringPatterns, ctx);
         populateAttentionWindowFoldPatterns(preLoweringPatterns, ctx);
+        populateDecomposedAttentionFusionPatterns(preLoweringPatterns, ctx);
         populateQMoESigmoidRoutingFoldPatterns(preLoweringPatterns, ctx);
         populateIndexerRotaryFoldPatterns(preLoweringPatterns, ctx);
         populateIndexerCountsFoldPatterns(preLoweringPatterns, ctx);
