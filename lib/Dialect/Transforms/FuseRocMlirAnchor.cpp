@@ -1008,10 +1008,24 @@ private:
     Block &body = module.getBody().front();
     Operation *yield = body.getTerminator();
     DenseSet<Value> yielded(yield->operand_begin(), yield->operand_end());
-    auto movesInnermost = [](TransposeOp transpose) {
+    // When the innermost dimension of the input or of the output is small,
+    // the tile still reads or writes a few contiguous streams, and the kernel
+    // beats a separate HIP transpose. Only both at 32 bytes or more peel.
+    constexpr int64_t kMinPeeledInnermostBytes = 32;
+    auto wideInnermost = [&](Value value) {
+      auto type = cast<ShapedType>(value.getType());
+      int64_t size = type.getShape().back();
+      return !ShapedType::isDynamic(size) &&
+             size * type.getElementTypeBitWidth() >=
+                 kMinPeeledInnermostBytes * 8;
+    };
+    auto movesInnermost = [&](TransposeOp transpose) {
       ArrayAttr perm = transpose.getPerm();
       int64_t last = static_cast<int64_t>(perm.size()) - 1;
-      return last > 0 && cast<IntegerAttr>(perm[last]).getInt() != last;
+      if (last <= 0 || cast<IntegerAttr>(perm[last]).getInt() == last)
+        return false;
+      return wideInnermost(transpose.getInput()) &&
+             wideInnermost(transpose->getResult(0));
     };
     auto storable = [&](Value value) {
       auto type = dyn_cast<RankedTensorType>(value.getType());

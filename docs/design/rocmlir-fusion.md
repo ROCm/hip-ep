@@ -206,8 +206,12 @@ true:
 
 rocMLIR tiles an elementwise kernel over its flattened output, so a transpose
 that moves the innermost dimension makes one side of the kernel access memory
-with a stride. Before such a module outlines, its boundary transposes of this
-kind leave the kernel and run as HIP transposes:
+with a stride. When the innermost dimension of the transpose input or output is
+small, the tile still reads or writes a few contiguous streams. So before such
+a module outlines, its boundary transposes of this kind whose input and output
+innermost dimensions are both at least 32 bytes leave the kernel and run as HIP
+transposes.
+The peeled transposes are:
 
 - a result transpose, with the static reshapes around it, that only module
   results read; the kernel stores the value that the transpose read;
