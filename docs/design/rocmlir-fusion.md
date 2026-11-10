@@ -206,8 +206,15 @@ true:
 
 rocMLIR tiles an elementwise kernel over its flattened output, so a transpose
 that moves the innermost dimension makes one side of the kernel access memory
-with a stride. Before such a module outlines, its boundary transposes of this
-kind leave the kernel and run as HIP transposes:
+with a stride. When the innermost dimension of the transpose input or output is
+small, the tile still reads or writes a few contiguous streams. So before such
+a module outlines, its boundary transposes of this kind leave the kernel and run
+as HIP transposes when the input innermost dimension has at least 8 elements
+(`peel-min-input-elements`) and the output innermost dimension at least 32
+(`peel-min-output-elements`). These limits are where peeling starts to win in a
+sweep of 2 to 256 elements on gfx1151; the crossover was the same for f16, f32
+and i8.
+The peeled transposes are:
 
 - a result transpose, with the static reshapes around it, that only module
   results read; the kernel stores the value that the transpose read;
