@@ -181,14 +181,15 @@ static constexpr int kFlashDecodeMaxSplits = 64;
 // Geometry gate for the flash_decode kernel template instantiations. The scalar
 // decode kernel is templated for HpG in {1,2,3,4,5,6,8,16} and 9 at d=128 (so
 // it covers MHA and the common GQA ratios, incl. Qwen2.5-14B's 40:8=5 and the
-// Qwen3.6/3.8-27B 24:4=6) at d in {64,96,128,256} (d=96 covers Phi-3-mini
-// 32:32, d=256 Qwen3-family 16:4 heads); WMMA is layered on top inside the
-// kernel where it helps (d 64/128 only). Anything outside this set has no
-// decode kernel.
+// Qwen3.6/3.8-27B 24:4=6) at d in {64,96,128,256,512} (d=96 covers Phi-3-mini
+// 32:32, d=256 Qwen3-family 16:4 heads; d=512 needs an fp16 cache, which the
+// quantized-cache gate below already requires above d=128); WMMA is layered
+// on top inside the kernel where it helps (d 64/128 only). Anything outside
+// this set has no decode kernel.
 static inline bool flash_decode_geometry_ok(int64_t H, int64_t G, int64_t d) {
   if (G <= 0)
     return false;
-  if (d != 64 && d != 96 && d != 128 && d != 256)
+  if (d != 64 && d != 96 && d != 128 && d != 256 && d != 512)
     return false;
   int64_t hpg = H / G;
   if (hpg * G != H)
@@ -493,10 +494,24 @@ static int gqa_forward_fused(
     std::optional<int32_t> host_length = std::nullopt,
     // [key_bias_batch, key_bias_len] fp16 per-key additive bias, or null.
     const void *key_bias = nullptr, int64_t key_bias_batch = 0,
-    int64_t key_bias_len = 0) {
+    int64_t key_bias_len = 0,
+    // Zero-length key/value over a past cache another layer fills (KV
+    // sharing): attend over the past in place, with nothing to append. Decode
+    // only, and the caller keeps any present that would need a copy on the
+    // decomposed path.
+    bool reuse_past_kv = false) {
   // One row per batch entry, or one row shared by all of them.
   const int key_bias_stride =
       key_bias && key_bias_batch > 1 ? static_cast<int>(key_bias_len) : 0;
+  if (reuse_past_kv) {
+    if (sq != 1 || !past_key || !past_value) {
+      fprintf(stderr, "gqa_forward_fused: a reused past KV is decode only\n");
+      return -1;
+    }
+    present_key = const_cast<void *>(past_key);
+    present_value = const_cast<void *>(past_value);
+    skv = past_buf_seq;
+  }
 
   // Any non-fp16 cache reads/writes quantized bytes on the concat/append/decode
   // path; the specific scheme is carried by kv_format (extensible to INT4/FP8).
@@ -504,7 +519,9 @@ static int gqa_forward_fused(
   const int64_t present_seq = skv; // present_key buffer stride (may be max_seq)
   const size_t elem_sz = 2;        // fp16 only on the fused path
   const bool need_rope = do_rotary && cos_cache && sin_cache;
-  const bool packed_qkv = (!key && !value);
+  // A zero-length key/value may arrive as null pointers; that is not packed
+  // QKV.
+  const bool packed_qkv = (!key && !value) && !reuse_past_kv;
 
   // B==1 pre-read (cached per Compute) feeds host past_len where needed.
   const int32_t seqlens_k_pre =
@@ -568,8 +585,8 @@ static int gqa_forward_fused(
     if (!flash_decode_geometry_ok(H, G, d)) {
       fprintf(stderr,
               "gqa_forward_fused (decode): unsupported geometry H=%lld G=%lld "
-              "d=%lld (HpG must be 1/2/3/4/5/6/8/16 and d 64/96/128/256, or "
-              "HpG 9 at d 128)\n",
+              "d=%lld (HpG must be 1/2/3/4/5/6/8/16 and d 64/96/128/256/512, "
+              "or HpG 9 at d 128)\n",
               (long long)H, (long long)G, (long long)d);
       return -1;
     }
@@ -620,14 +637,16 @@ static int gqa_forward_fused(
                        static_cast<int>(past_len), seqlens_k_ptr,
                        static_cast<int>(elem_sz)) != 0)
         return -1;
-      if (hip_gqa_rope(stream, kSrc, d_Kroped, cos_cache, sin_cache,
-                       static_cast<int>(B), static_cast<int>(sq),
-                       static_cast<int>(G), static_cast<int>(d), half_rot,
-                       static_cast<int>(past_len), seqlens_k_ptr,
-                       static_cast<int>(elem_sz)) != 0)
-        return -1;
       qSrc = d_Qroped;
-      kSrc = d_Kroped; // V is never RoPE'd.
+      if (!reuse_past_kv) {
+        if (hip_gqa_rope(stream, kSrc, d_Kroped, cos_cache, sin_cache,
+                         static_cast<int>(B), static_cast<int>(sq),
+                         static_cast<int>(G), static_cast<int>(d), half_rot,
+                         static_cast<int>(past_len), seqlens_k_ptr,
+                         static_cast<int>(elem_sz)) != 0)
+          return -1;
+        kSrc = d_Kroped; // V is never RoPE'd.
+      }
     }
 
     // A growing present (an onnx.Attention export whose present is past +
@@ -658,8 +677,8 @@ static int gqa_forward_fused(
     // quantize-and-append with the static per-channel scale; fp16 cache: plain
     // append. update_kv_cache dispatches on kv_format internally. On a
     // sliding-window layer the prefix below the window is never read again,
-    // so it is not copied.
-    if (!fused_copy &&
+    // so it is not copied. A layer that reuses another's KV writes none.
+    if (!fused_copy && !reuse_past_kv &&
         update_kv_cache(
             stream, past_key, past_value, kSrc, vSrc, present_key,
             present_value, static_cast<int>(B), static_cast<int>(past_len),
@@ -3230,17 +3249,22 @@ int wrap_group_query_attention_host_length(
   // trap on CDNA (wave64, e.g. MI350). Route wave64 to the decomposed hipBLASLt
   // pipeline below (MFMA GEMMs + wave-portable scalar kernels), which is
   // feature-complete and correct on both wave sizes. RDNA is unaffected.
-  // Only the decomposed pipeline implements reuse_past_kv, so it bypasses
-  // fused below.
+  // The fused path serves reuse_past_kv at decode when there is no separate
+  // present to fill (absent, empty, or the past buffer itself); the
+  // decomposed pipeline implements every other reuse.
   if (reuse_past_kv && kv_quantized) {
     fprintf(stderr, "wrap_group_query_attention: a zero-length key/value over "
                     "a quantized KV cache is not supported\n");
     return -1;
   }
-  const bool fused_geometry = !reuse_past_kv && no_causal == 0 && window_ok &&
-                              sink_ok && key_bias_ok && head_dim_ok &&
-                              decode_geometry_ok && attention_bias == nullptr &&
-                              !hipdnn_device_is_wave64();
+  const bool present_needs_fill =
+      seq_len_kv > 0 && ((present_key && present_key != past_key) ||
+                         (present_value && present_value != past_value));
+  const bool reuse_fused_ok = is_decode && !present_needs_fill;
+  const bool fused_geometry =
+      (!reuse_past_kv || reuse_fused_ok) && no_causal == 0 && window_ok &&
+      sink_ok && key_bias_ok && head_dim_ok && decode_geometry_ok &&
+      attention_bias == nullptr && !hipdnn_device_is_wave64();
   const bool fused_supported = fused_geometry && element_size_bytes == 2;
   // fp32 query + INT8 KV cannot use the decomposed fallback (it reads the
   // cache as fp16). Cast QKV/RoPE/output to fp16 and reuse fused. head_sink
@@ -3360,7 +3384,7 @@ int wrap_group_query_attention_host_length(
       seq_len_q, seq_len_kv, past_buf_seq, num_heads, kv_num_heads, head_dim,
       scale, do_rotary, k_scale, v_scale, kv_format, head_sink,
       has_smooth_softmax, static_cast<int>(local_window_size), host_length,
-      key_bias, key_bias_batch, key_bias_len);
+      key_bias, key_bias_batch, key_bias_len, reuse_past_kv);
   if (rc != 0)
     fprintf(stderr,
             "wrap_group_query_attention: gqa_forward_fused failed "

@@ -1650,9 +1650,9 @@ hipdnn_wmma_f32_16x16x16_f16_unavailable(half16, half16, float8 c) {
 //   - HPG=8  (gpt-oss-20b at d=64; 64 q heads / 8 kv heads)
 //
 // Constraints (asserted at launcher):
-//   - D must be 64, 96, 128 or 256 (EPT = D/32 in 1..8; D=256 -> BKV=8 to keep
-//     the LDS tile small; D=96 -> EPT=3, see kPairSlots). The scalar kernel is
-//     otherwise D-generic.
+//   - D must be 64, 96, 128, 256 or 512 (EPT = D/32 in 1..16; D>=256 ->
+//     BKV=8 to keep the LDS tile small; D=96 -> EPT=3, see kPairSlots). D=512
+//     is fp16 only. The scalar kernel is otherwise D-generic.
 //   - RDNA wave32 (uses __shfl_xor across 32 lanes).
 //===----------------------------------------------------------------------===//
 
@@ -1758,7 +1758,7 @@ gqa_flash_decode_kernel(
   // traps instead of silently dropping a third of the row.
   static_assert(D % WAVE_SIZE == 0 || WAVE_SIZE != 32,
                 "D must be a multiple of WAVE_SIZE");
-  static_assert(EPT >= 1 && EPT <= 8, "EPT must be 1..8");
+  static_assert(EPT >= 1 && EPT <= 16, "EPT must be 1..16");
   if constexpr (D % WAVE_SIZE != 0) __builtin_trap();
 
   const int batch     = __builtin_amdgcn_readfirstlane(blockIdx.x / G);
@@ -2855,7 +2855,10 @@ static inline void launchFlashDecodeReduce(hipStream_t stream, const float* hP,
                                            int use_smooth_softmax,
                                            int splits) {
   dim3 grid_reduce(B * H);
-  if (d == 256)
+  if (d == 512)
+    gqa_flash_decode_reduce_kernel<512><<<grid_reduce, 512, 0, stream>>>(
+        hP, hO, H, hSink, H, use_smooth_softmax, splits);
+  else if (d == 256)
     gqa_flash_decode_reduce_kernel<256><<<grid_reduce, 256, 0, stream>>>(
         hP, hO, H, hSink, H, use_smooth_softmax, splits);
   else if (d == 128)
@@ -2958,9 +2961,13 @@ static inline void launchFlashDecodeConfig(
         } else                                                                 \
           LAUNCH_SCALAR_D(96, HPG_);                                           \
       } while (0)
+    // D=512 is fp16 only: the INT8 cache is limited to d <= 128 upstream.
     #define LAUNCH_SCALAR(HPG_)                                                \
       do {                                                                     \
-        if (d == 256)      LAUNCH_SCALAR_D(256, HPG_);                         \
+        if (d == 512) {                                                        \
+          if constexpr (FMT == KvDtype::kF16) LAUNCH_SCALAR_D(512, HPG_);      \
+        }                                                                      \
+        else if (d == 256) LAUNCH_SCALAR_D(256, HPG_);                         \
         else if (d == 128) LAUNCH_SCALAR_D(128, HPG_);                         \
         else if (d == 96)  LAUNCH_SCALAR_D96(HPG_);                            \
         else               LAUNCH_SCALAR_D(64, HPG_);                          \
@@ -3356,10 +3363,15 @@ static int runGqaFlashDecode(
             hpg, H, G, d);
     return -1;
   }
-  if (d != 64 && d != 96 && d != 128 && d != 256) {
+  if (d != 64 && d != 96 && d != 128 && d != 256 && d != 512) {
     fprintf(stderr,
-            "hip_gqa_flash_decode: unsupported d=%d (must be 64/96/128/256)\n",
+            "hip_gqa_flash_decode: unsupported d=%d (must be "
+            "64/96/128/256/512)\n",
             d);
+    return -1;
+  }
+  if (d == 512 && kv_dtype != HIP_KV_DTYPE_FP16) {
+    fprintf(stderr, "hip_gqa_flash_decode: d=512 needs an fp16 KV cache\n");
     return -1;
   }
   // Cache format is chosen by kv_dtype (extensible: add a case for INT4/FP8).
