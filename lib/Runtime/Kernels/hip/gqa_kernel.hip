@@ -229,7 +229,12 @@ static constexpr float LOG2E = 1.4426950408889634f;
 //   out[d_i]      = in[d_i]*cos[pos,d_i] - in[d_i+half]*sin[pos,d_i]
 //   out[d_i+half] = in[d_i+half]*cos[pos,d_i] + in[d_i]*sin[pos,d_i]
 //
-// Thread: one per (b,s,h,d_i) where d_i in [0, half_rot). blockIdx.y = batch.
+// Partial rotary (2*half_rot < head_dim): dims [2*half_rot, head_dim) are
+// copied through unrotated, since the output is a separate buffer.
+//
+// Thread: one per (b,s,h,j) where j in [0, head_dim - half_rot): j < half_rot
+// rotates the pair (j, j+half_rot), larger j copies one pass-through dim.
+// blockIdx.y = batch.
 // Ref: onnxruntime/core/mlas/lib/rotary_embedding.cpp (MlasRotaryEmbedOneRow)
 // -------------------------------------------------------------------------
 
@@ -273,18 +278,24 @@ __global__ void rope_kernel(
   // (ORT convention: seqlens_k[b] = total_tokens - 1, so past_len = total - sq).
   // All threads read the same address; hardware coalesces into a broadcast.
   int eff_past_len = seqlens_k ? (seqlens_k[batch_idx] + 1 - seq_len) : past_len;
-  int elems = seq_len * num_heads * half_rot;
+  const int per_head = head_dim - half_rot;
+  int elems = seq_len * num_heads * per_head;
   if (idx >= elems) return;
 
-  int d = idx % half_rot;
-  int remaining = idx / half_rot;
+  int d = idx % per_head;
+  int remaining = idx / per_head;
   int h = remaining % num_heads;
   int s = remaining / num_heads;
   if (s >= seq_len) return;
 
-  int pos = eff_past_len + s;
   int base = ((batch_idx * seq_len + s) * num_heads + h) * head_dim;
+  if (d >= half_rot) {
+    const int pass = d + half_rot;
+    output[base + pass] = input[base + pass];
+    return;
+  }
 
+  int pos = eff_past_len + s;
   float x1 = gqa_to_float<T>(input[base + d]);
   float x2 = gqa_to_float<T>(input[base + d + half_rot]);
   float c  = gqa_to_float<T>(cos_cache[pos * half_rot + d]);
@@ -820,7 +831,7 @@ static void launch_rope(
     const void* cos_cache, const void* sin_cache,
     int batch_size, int seq_len, int num_heads,
     int head_dim, int half_rot, int past_len, const void* seqlens_k) {
-  int elems = seq_len * num_heads * half_rot;
+  int elems = seq_len * num_heads * (head_dim - half_rot);
   int blocks = (elems + GQA_THREADS - 1) / GQA_THREADS;
   rope_kernel<T><<<dim3(blocks, batch_size), GQA_THREADS, 0, stream>>>(
       static_cast<const T*>(input), static_cast<T*>(output),
@@ -919,6 +930,11 @@ extern "C" int hip_gqa_rope(
     int batch_size, int seq_len, int num_heads,
     int head_dim, int half_rot, int past_len,
     const void* seqlens_k, int element_size_bytes) {
+  if (half_rot <= 0 || 2 * half_rot > head_dim) {
+    fprintf(stderr, "%s: half_rot=%d must be in (0, head_dim/2], head_dim=%d\n",
+            __func__, half_rot, head_dim);
+    return -1;
+  }
   hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
   GQA_DISPATCH_BY_ELEM_SIZE(element_size_bytes, launch_rope, stream, input,
                             output, cos_cache, sin_cache, batch_size, seq_len,

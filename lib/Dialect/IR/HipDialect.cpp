@@ -3718,6 +3718,30 @@ LogicalResult GqaOp::verify() {
            << ", sin_cache=" << (hasSinCache ? "present" : "absent") << ")";
   }
 
+  // cos/sin are [max_pos, rotary_dim / 2]; the rotated width cannot exceed
+  // head_dim. Checked here when the extents are static.
+  if (hasCosCache) {
+    auto cosType = dyn_cast<ShapedType>(getCosCache().getType());
+    auto sinType = dyn_cast<ShapedType>(getSinCache().getType());
+    if (cosType && sinType && cosType.hasStaticShape() &&
+        sinType.hasStaticShape() && cosType.getShape() != sinType.getShape())
+      return emitOpError("cos_cache and sin_cache shapes differ");
+    auto queryType = dyn_cast<ShapedType>(getQuery().getType());
+    int64_t heads =
+        getKey() ? getNumHeads() : getNumHeads() + 2 * getKvNumHeads();
+    if (cosType && cosType.hasRank() && cosType.getRank() >= 1 && queryType &&
+        queryType.hasRank() && queryType.getRank() == 3 && heads > 0 &&
+        !cosType.isDynamicDim(cosType.getRank() - 1) &&
+        !queryType.isDynamicDim(2)) {
+      int64_t width = cosType.getDimSize(cosType.getRank() - 1);
+      int64_t headDim = queryType.getDimSize(2) / heads;
+      if (width <= 0 || 2 * width > headDim)
+        return emitOpError("cos_cache width ")
+               << width << " gives rotary_dim " << 2 * width
+               << ", which must be in (0, head_dim = " << headDim << "]";
+    }
+  }
+
   // Verify paired optional inputs: key/value must both be present or both
   // absent
   bool hasKey = getKey() != nullptr;

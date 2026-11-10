@@ -517,11 +517,11 @@ int wrap_group_query_attention_host_length(
     void *attention_bias, void *head_sink, void *k_scale, void *v_scale,
     // Outputs
     void *output, void *present_key, void *present_value, void *output_qk,
-    // Attributes (13)
+    // Attributes (14)
     int64_t num_heads, int64_t kv_num_heads, float scale, int64_t do_rotary,
-    int64_t rotary_interleaved, float softcap, int64_t local_window_size,
-    int64_t smooth_softmax, int64_t qk_output, int64_t k_quant_type,
-    int64_t v_quant_type, int64_t kv_cache_bit_width,
+    int64_t rotary_interleaved, int64_t rotary_dim, float softcap,
+    int64_t local_window_size, int64_t smooth_softmax, int64_t qk_output,
+    int64_t k_quant_type, int64_t v_quant_type, int64_t kv_cache_bit_width,
     // Whisper bidirectional-attention flag (mock stub ignores it).
     int32_t no_causal,
     // Shape values (6)
@@ -568,8 +568,10 @@ int wrap_group_query_attention_host_length(
              (long long)num_heads, (long long)kv_num_heads);
   MOCK_PRINT("[MOCK]   scale=%f, softcap=%f,\n", (double)scale,
              (double)softcap);
-  MOCK_PRINT("[MOCK]   do_rotary=%lld, rotary_interleaved=%lld,\n",
-             (long long)do_rotary, (long long)rotary_interleaved);
+  MOCK_PRINT("[MOCK]   do_rotary=%lld, rotary_interleaved=%lld, "
+             "rotary_dim=%lld,\n",
+             (long long)do_rotary, (long long)rotary_interleaved,
+             (long long)rotary_dim);
   MOCK_PRINT("[MOCK]   attention_bias=%p, attn_bias_batch=%lld, "
              "attn_bias_num_heads=%lld,\n",
              attention_bias, (long long)attn_bias_batch,
@@ -596,11 +598,12 @@ int wrap_group_query_attention_ring_f16(
     void *attention_bias, void *head_sink, void *k_scale, void *v_scale,
     // Outputs
     void *output, void *present_key, void *present_value, void *output_qk,
-    // Attributes (13)
+    // Attributes (14)
     int64_t num_heads, int64_t kv_num_heads, float scale, int64_t do_rotary,
-    int64_t rotary_interleaved, float softcap, int64_t local_window_size,
-    int64_t smooth_softmax, int64_t qk_output, int64_t k_quant_type,
-    int64_t v_quant_type, int64_t kv_cache_bit_width, int32_t no_causal,
+    int64_t rotary_interleaved, int64_t rotary_dim, float softcap,
+    int64_t local_window_size, int64_t smooth_softmax, int64_t qk_output,
+    int64_t k_quant_type, int64_t v_quant_type, int64_t kv_cache_bit_width,
+    int32_t no_causal,
     // Shape values (6)
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
@@ -612,11 +615,12 @@ int wrap_group_query_attention_ring_f16(
       total_seq_len, cos_cache, sin_cache, position_ids, attention_bias,
       head_sink, k_scale, v_scale, output, present_key, present_value,
       output_qk, num_heads, kv_num_heads, scale, do_rotary, rotary_interleaved,
-      softcap, local_window_size, smooth_softmax, qk_output, k_quant_type,
-      v_quant_type, kv_cache_bit_width, no_causal, batch_size, seq_len_q,
-      seq_len_kv, past_buf_seq, head_dim, element_size_bytes, attn_bias_batch,
-      attn_bias_num_heads, kv_bnsd, seq_len_new_kv, has_host_length,
-      host_length_value, key_bias, key_bias_batch, key_bias_len);
+      rotary_dim, softcap, local_window_size, smooth_softmax, qk_output,
+      k_quant_type, v_quant_type, kv_cache_bit_width, no_causal, batch_size,
+      seq_len_q, seq_len_kv, past_buf_seq, head_dim, element_size_bytes,
+      attn_bias_batch, attn_bias_num_heads, kv_bnsd, seq_len_new_kv,
+      has_host_length, host_length_value, key_bias, key_bias_batch,
+      key_bias_len);
 }
 
 int wrap_multi_head_attention(

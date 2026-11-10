@@ -36,15 +36,15 @@ module {
 
 // CHECK-LABEL: llvm.func @test_gqa_lowering
 // CHECK: %[[ABSENT:.*]] = llvm.mlir.constant(0 : i32) : i32
-// CHECK: llvm.call @wrap_group_query_attention_host_length({{.*}}, %[[ABSENT]], %[[ABSENT]], {{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, f32, i64, i64, f32, i64, i64, i64, i64, i64, i64, i32, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i32, i32, !llvm.ptr, i64, i64) -> i32
+// CHECK: llvm.call @wrap_group_query_attention_host_length({{.*}}, %[[ABSENT]], %[[ABSENT]], {{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, f32, i64, i64, i64, f32, i64, i64, i64, i64, i64, i64, i32, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i32, i32, !llvm.ptr, i64, i64) -> i32
 
-// Verify 48 parameters:
+// Verify 49 parameters:
 // - 19 pointers: state, query, key, value, past_key, past_value, seqlens_k, total_seq_len,
 //                cos_cache(NULL), sin_cache(NULL), position_ids(NULL), attention_bias(NULL),
 //                head_sink(NULL), k_scale(NULL), v_scale(NULL),
 //                output, present_key, present_value, output_qk(NULL)
-// - 13 attributes: num_heads=32, kv_num_heads=8, scale=0.0883883461, do_rotary=0, rotary_interleaved=0,
-//                  softcap=0.0, local_window_size=-1, smooth_softmax=0, qk_output=0,
+// - 14 attributes: num_heads=32, kv_num_heads=8, scale=0.0883883461, do_rotary=0, rotary_interleaved=0,
+//                  rotary_dim=0 (no cos_cache), softcap=0.0, local_window_size=-1, smooth_softmax=0, qk_output=0,
 //                  k_quant_type=0(NONE), v_quant_type=0(NONE), kv_cache_bit_width=8,
 //                  no_causal=0(i32)
 // - 6 shape params: batch_size=1, seq_len_q=1, seq_len_kv=128, past_buf_seq=127, head_dim=128,
