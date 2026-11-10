@@ -167,6 +167,10 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
   auto scaleAttr = getFloatAttr("scale", defaultScale);
   auto doRotaryAttr = getI64Attr("do_rotary", 0);
   auto rotaryInterleavedAttr = getI64Attr("rotary_interleaved", 0);
+  // The in-op RoPE kernel implements the half-rotated pairing only.
+  if (doRotaryAttr.getInt() != 0 && rotaryInterleavedAttr.getInt() != 0)
+    return rewriter.notifyMatchFailure(
+        op, "in-op RoPE with rotary_interleaved=1 is unsupported");
   auto softcapAttr = getFloatAttr("softcap", 0.0f);
   auto localWindowSizeAttr = getI64Attr("local_window_size", -1);
   auto smoothSoftmaxAttr = getI64Attr("smooth_softmax", 0);

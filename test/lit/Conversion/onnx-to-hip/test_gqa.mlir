@@ -223,4 +223,29 @@ module {
 
     return %out#0, %out#1, %out#2, %out#3 : tensor<1x128x4096xf16>, tensor<1x8x128x128xf16>, tensor<1x8x128x128xf16>, tensor<1x32x128x128xf16>
   }
+
+  // In-op RoPE with interleaved pairing has no kernel: rejected rather than
+  // computed with the half-rotated pairing.
+  func.func @test_rotary_interleaved_rejected(
+      %query: tensor<1x4x256xf16>, %key: tensor<1x4x128xf16>,
+      %value: tensor<1x4x128xf16>, %past_key: tensor<1x2x0x64xf16>,
+      %past_value: tensor<1x2x0x64xf16>, %seqlens_k: tensor<1xi32>,
+      %total_seq_len: tensor<i32>, %cos_cache: tensor<16x32xf16>,
+      %sin_cache: tensor<16x32xf16>
+  ) -> (tensor<1x4x256xf16>, tensor<1x2x4x64xf16>, tensor<1x2x4x64xf16>) {
+    // CHECK-LABEL: func.func @test_rotary_interleaved_rejected
+    // CHECK-NOT: hip.gqa
+    // CHECK: onnx.Custom
+    %out:3 = "onnx.Custom"(%query, %key, %value, %past_key, %past_value,
+                           %seqlens_k, %total_seq_len, %cos_cache, %sin_cache)
+        <{function_name = "GroupQueryAttention"}>
+        {domain_name = "com.microsoft", num_heads = 4 : si64,
+         kv_num_heads = 2 : si64, do_rotary = 1 : si64,
+         rotary_interleaved = 1 : si64}
+        : (tensor<1x4x256xf16>, tensor<1x4x128xf16>, tensor<1x4x128xf16>,
+           tensor<1x2x0x64xf16>, tensor<1x2x0x64xf16>, tensor<1xi32>,
+           tensor<i32>, tensor<16x32xf16>, tensor<16x32xf16>)
+        -> (tensor<1x4x256xf16>, tensor<1x2x4x64xf16>, tensor<1x2x4x64xf16>)
+    return %out#0, %out#1, %out#2 : tensor<1x4x256xf16>, tensor<1x2x4x64xf16>, tensor<1x2x4x64xf16>
+  }
 }
