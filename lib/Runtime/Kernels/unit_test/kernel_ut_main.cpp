@@ -30,6 +30,10 @@ struct Leaf {
 };
 
 static const Leaf kLeaves[] = {
+    {"gather", "Xfp16_Wi64_Yfp16", "hipdnn-kernel-ut-gather-xfp16-wi64-yfp16.exe"},
+    {"gather", "Xi64_Wi64_Yi64", "hipdnn-kernel-ut-gather-xi64-wi64-yi64.exe"},
+    {"layer_norm", "Xfp16_Wfp16_Yfp16", "hipdnn-kernel-ut-layer-norm-xfp16-wfp16-yfp16.exe"},
+    {"layer_norm", "Xfp32_Wfp32_Yfp32", "hipdnn-kernel-ut-layer-norm-xfp32-wfp32-yfp32.exe"},
 #if HIP_EP_RING_ENABLED
     {"gqa/ring", "Xfp16_Wfp16_Yfp16",
      "hipdnn-kernel-ut-gqa-ring-xfp16-wfp16-yfp16.exe"},

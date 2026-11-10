@@ -102,6 +102,18 @@ function(add_kernel_package_ut arch executable_name source_file)
 endfunction()
 
 foreach(_arch IN LISTS HIP_ARCHITECTURES)
+  add_kernel_package_ut(${_arch}
+    hipdnn-kernel-ut-gather-xfp16-wi64-yfp16
+    gather/Xfp16_Wi64_Yfp16/test_gather.cpp)
+  add_kernel_package_ut(${_arch}
+    hipdnn-kernel-ut-gather-xi64-wi64-yi64
+    gather/Xi64_Wi64_Yi64/test_gather.cpp)
+  add_kernel_package_ut(${_arch}
+    hipdnn-kernel-ut-layer-norm-xfp16-wfp16-yfp16
+    layer_norm/Xfp16_Wfp16_Yfp16/test_layer_norm.cpp)
+  add_kernel_package_ut(${_arch}
+    hipdnn-kernel-ut-layer-norm-xfp32-wfp32-yfp32
+    layer_norm/Xfp32_Wfp32_Yfp32/test_layer_norm.cpp)
   if(HIP_EP_RING_ENABLED AND (_arch STREQUAL "gfx1151" OR _arch STREQUAL "gfx11-generic"))
     add_kernel_package_ut(${_arch}
       hipdnn-kernel-ut-gqa-ring-xfp16-wfp16-yfp16

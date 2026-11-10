@@ -54,6 +54,10 @@ prefix gets one `kernel-tests/<arch>/`, named exactly like that entry's
   hipdnn-kernel-ut.exe                          # suite controller (one)
   custom_kernels_<arch>.dll                     # installed already, one per arch
   kernel-tests/<arch>/
+    hipdnn-kernel-ut-gather-xfp16-wi64-yfp16.exe
+    hipdnn-kernel-ut-gather-xi64-wi64-yi64.exe
+    hipdnn-kernel-ut-layer-norm-xfp16-wfp16-yfp16.exe
+    hipdnn-kernel-ut-layer-norm-xfp32-wfp32-yfp32.exe
     hipdnn-kernel-ut-matmul-nbits-xfp16-wu2-yfp16.exe
     hipdnn-kernel-ut-matmul-nbits-xfp16-wu3-yfp16.exe
     hipdnn-kernel-ut-matmul-nbits-xfp16-wu4-yfp16.exe
@@ -91,7 +95,7 @@ controller from that `bin` directory:
 | `--mode` | `lookup`, `autotune` | `lookup` | `lookup` uses the tables embedded in `custom_kernels_<arch>.dll` and falls through to autotune on a miss, like production. `autotune` bypasses the tables (production's `online` mode). |
 | `--coverage` | `1`, `2`, `3` | `3` | Shape tier; see "Shape coverage". `1` suits a per-PR job, `3` a nightly one. |
 
-The controller runs the 17 leaves serially, with `bin` as the working
+The controller runs the registered leaves serially, with `bin` as the working
 directory so every leaf finds `custom_kernels_<arch>.dll`. It prints one
 `[<op>/<leaf>] PASS|FAIL (<ms> ms)` line per leaf and finally
 `Combined report: <path>`.
@@ -194,7 +198,7 @@ Concretely:
   never drops a categorical situation.
 
 A tier3 (default) run of one leaf is on the order of tens to ~150 cases, and
-the whole 17-leaf suite at tier3 is budgeted at **up to ~30 min total**
+the whole suite at tier3 is budgeted at **up to ~30 min total**
 (measured ~20-25 min in practice) — this is intentionally wider than a
 "finishes in a minute" smoke test, because the shape axis (M=1 vs M>1,
 multiple K/N/seq scenarios) needs real coverage too, not just the categorical
@@ -562,8 +566,8 @@ the fp8 scale granularity `_tensor` / `_row` / `_block`; its `config` is always
 `fixed:elementwise` and its `time_ms` 0.
 
 `time_ms` is the **mean per-launch** time of that case's timed launches (the
-leaf's fixed count of launches between two HIP events), not a total, and it is
-measured **cold**. In a model a kernel's weights or KV cache are read once per
+leaf's fixed count of launches between two HIP events), not a total. The
+MatMulNBits/GQA operand-rotation protocol below models **cold** weight/KV reads. In a model a kernel's weights or KV cache are read once per
 step, and the rest of the model streams through the GPU caches before they are
 read again, so every launch reads them from DRAM. The timed launches therefore
 rotate over copies of that operand -- the MatMulNBits and qmoe_ragged_mm
@@ -624,3 +628,20 @@ overall `PASS`/`FAIL`.
 
 Each leaf inlines its own ~30-line `CsvWriter`/`CsvRow` (no shared header) —
 see the top of any `test_<op>.cpp`.
+
+
+## Gather and LayerNormalization coverage
+
+The controller also registers `gather/Xfp16_Wi64_Yfp16`,
+`gather/Xi64_Wi64_Yi64`, `layer_norm/Xfp16_Wfp16_Yfp16` and
+`layer_norm/Xfp32_Wfp32_Yfp32`. Each follows the same standalone and package API.
+See each leaf README for the complete categorical axes, single-shape flags,
+correctness criteria and owning-main cold timing provenance. These tests call
+production launchers and are not a profiling-only kernel implementation.
+
+
+For the fixed Gather launcher, synthetic-index locality affects the touched data
+working set: copying the whole table does not prove its selected rows missed the
+cache. The log records the touched-byte upper bound and copy count. LayerNorm
+rotates its input, scale and optional bias. These leaves preserve the owning
+main's event/rotation protocol; their times do not measure physical DRAM traffic.
