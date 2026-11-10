@@ -80,9 +80,10 @@ the path before building any MLIR when:
   (CoreLib's test model reads any file, so this is what turns it away), and
   every input its `forward` requires (`ryzenai_corelib_model_get_method`) is a
   graph input, but for `position`, which the op derives. The first that fits
-  is used. `model.type` is only an ordering hint: a model offered a file it
-  was not exported for should refuse it, but CoreLib 0.66 has one that faults
-  instead, so the hint keeps the matching model ahead of the others.
+  is used. `model.type` is only an ordering hint: every CoreLib 0.66 model
+  refused the Qwen3 and Llama exports it was not exported for, cleanly and
+  with a reason, so the hint changes no outcome; it keeps the matching model
+  ahead of the others, which saves loading attempts.
 
 On success the whole graph is fused under the `CORELIBMODEL` domain, with the
 parameter `{arch, path, max_sequence_length}`, and no MLIR is compiled. The
