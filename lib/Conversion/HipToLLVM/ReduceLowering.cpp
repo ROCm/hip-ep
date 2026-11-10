@@ -224,9 +224,15 @@ struct ReduceOpLowering : public ConvertOpToLLVMPattern<OpTy> {
         innerSize = 1;
       innerSizeVal = createI64Const(innerSize);
     } else {
+      // inner_size = 1 is only right for a trailing reduce, so an axis the
+      // shapes cannot pin down is rejected rather than guessed.
       int64_t axis = inferSingleReducedAxis(
           dataType.getShape(), outputType.getShape(), op.getKeepdims() != 0);
-      innerSizeVal = axis >= 0 ? innerSizeAfter(axis) : createI64Const(1);
+      if (axis < 0)
+        return rewriter.notifyMatchFailure(
+            op, "reduced axis is ambiguous: runtime axes and dynamic shapes "
+                "do not identify a single axis");
+      innerSizeVal = innerSizeAfter(axis);
     }
 
     SmallVector<Type, 11> paramTypes = {ptrType, ptrType, ptrType, ptrType,

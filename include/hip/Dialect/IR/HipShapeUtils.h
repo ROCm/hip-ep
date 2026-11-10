@@ -113,6 +113,13 @@ LogicalResult reifyReductionWithKeepdims(OpBuilder &b, Location loc, Value data,
                                          int64_t noopWithEmptyAxes,
                                          SmallVectorImpl<OpFoldResult> &out);
 
+/// Same rule with the axes already known; they may be negative or repeated.
+LogicalResult reifyReductionWithKeepdims(OpBuilder &b, Location loc, Value data,
+                                         ArrayRef<int64_t> axes,
+                                         int64_t keepdims,
+                                         int64_t noopWithEmptyAxes,
+                                         SmallVectorImpl<OpFoldResult> &out);
+
 /// Reify a reduction from constant axes when possible.
 /// If the axes cannot be used, query the DPS destination shape.
 /// Require a ranked tensor input and at least one result.
