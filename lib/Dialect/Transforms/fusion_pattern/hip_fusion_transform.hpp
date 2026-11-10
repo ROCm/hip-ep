@@ -862,6 +862,11 @@ constexpr unsigned kPatchEmbedConvToGemmBenefit = 5;
 /// consumes it.
 constexpr unsigned kSwigluFusionBenefit = 2;
 
+/// The RMS norm residual fusion is the only C++ pattern rooted at `hip.add`.
+/// `HipQAdd` also matches a `hip.add`, of two `hip.dequantize_linear`
+/// results, and roots at the `hip.quantize_linear` that consumes it.
+constexpr unsigned kRmsNormAddFusionBenefit = 2;
+
 /// The only pattern rooted at `hip.linear_attention`.
 constexpr unsigned kLinearAttentionGroupFoldBenefit = 1;
 
@@ -882,6 +887,8 @@ inline mlir::LogicalResult run(mlir::ModuleOp module,
                               mlir::PatternBenefit(kSwigluFusionBenefit));
   populateGegluFusionPattern(patterns,
                              mlir::PatternBenefit(kSwigluFusionBenefit));
+  populateRmsNormAddFusionPattern(
+      patterns, mlir::PatternBenefit(kRmsNormAddFusionBenefit));
   populateLinearAttentionGroupFoldPattern(
       patterns, mlir::PatternBenefit(kLinearAttentionGroupFoldBenefit));
 

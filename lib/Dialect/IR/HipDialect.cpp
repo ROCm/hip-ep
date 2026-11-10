@@ -1216,6 +1216,31 @@ LogicalResult RmsNormOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// RmsNormAddOp: ins(input, scale, residual), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange RmsNormAddOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void RmsNormAddOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult RmsNormAddOp::verify() {
+  if (failed(verifyDpsComputeOp(
+          *this, {getInput(), getScale(), getResidual(), getOutput()},
+          /*numInits=*/1)))
+    return failure();
+  if (getInput().getType() != getResidual().getType() ||
+      getInput().getType() != getOutput().getType())
+    return emitOpError("expects input, residual and output of one type");
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // SkipRmsNormOp: ins(input, skip, gamma, [bias])  outs(...variadic...)
 //===----------------------------------------------------------------------===//
 

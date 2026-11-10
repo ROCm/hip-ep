@@ -29,6 +29,11 @@ namespace fusion_transform {
 void populateSwigluFusionPattern(mlir::RewritePatternSet &patterns,
                                  mlir::PatternBenefit benefit);
 
+// hip.rms_norm + residual hip.add to hip.rms_norm_add, under the same shape
+// contract.
+void populateRmsNormAddFusionPattern(mlir::RewritePatternSet &patterns,
+                                     mlir::PatternBenefit benefit);
+
 // hip.gelu + hip.mul to hip.geglu, under the same shape contract.
 void populateGegluFusionPattern(mlir::RewritePatternSet &patterns,
                                 mlir::PatternBenefit benefit);

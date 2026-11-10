@@ -326,6 +326,66 @@ class TestSimplifiedLayerNorm:
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=1e-4)
 
+    @staticmethod
+    def _residual_model(input_shape, expose_norm=False):
+        """residual + SimplifiedLayerNormalization(x), a post-norm residual.
+
+        ``expose_norm`` also returns the norm, a second use that keeps it out
+        of hip.rms_norm_add.
+        """
+        model = _make_simplified_layer_norm_model(input_shape)
+        graph = model.graph
+        graph.input.append(
+            helper.make_tensor_value_info("residual", TensorProto.FLOAT16, input_shape)
+        )
+        graph.node.append(helper.make_node("Add", ["residual", "Y"], ["sum"]))
+        outputs = [
+            helper.make_tensor_value_info("sum", TensorProto.FLOAT16, input_shape)
+        ]
+        if expose_norm:
+            outputs.append(
+                helper.make_tensor_value_info("Y", TensorProto.FLOAT16, input_shape)
+            )
+        del graph.output[:]
+        graph.output.extend(outputs)
+        return model
+
+    @pytest.mark.parametrize(
+        "input_shape", [[1, 1, 2560], [1, 3, 2560], [2, 5, 3000], [1, 4, 33]]
+    )
+    def test_simplified_layer_norm_residual_add(self, model_runner, input_shape):
+        """Norm then a residual add, fused into hip.rms_norm_add: the row,
+        two-pass (several rows) and scalar (odd width) kernels."""
+        model = self._residual_model(input_shape)
+        rng = np.random.default_rng(46)
+        x = rng.uniform(-2, 2, input_shape).astype(np.float16)
+        residual = rng.uniform(-4, 4, input_shape).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x, residual])
+        compare_outputs(actual, expected, atol=4e-3)
+
+    @pytest.mark.parametrize("input_shape", [[1, 1, 2560], [2, 5, 3000], [1, 4, 33]])
+    def test_simplified_layer_norm_residual_add_matches_unfused(
+        self, model_runner, tmp_path, input_shape
+    ):
+        """The fused residual add rounds exactly as the norm and add do."""
+        import onnx
+
+        rng = np.random.default_rng(47)
+        x = rng.uniform(-2, 2, input_shape).astype(np.float16)
+        residual = rng.uniform(-4, 4, input_shape).astype(np.float16)
+        outputs = []
+        for expose in (False, True):
+            path = tmp_path / f"norm_residual_{expose}.onnx"
+            onnx.save(self._residual_model(input_shape, expose), path)
+            outputs.append(model_runner.backend.run(str(path), [x, residual])[0])
+        fused, unfused = outputs
+        assert fused.shape == unfused.shape
+        mismatched = int(
+            np.count_nonzero(fused.view(np.uint16) != unfused.view(np.uint16))
+        )
+        assert mismatched == 0, f"{mismatched} of {fused.size} outputs differ"
+
     @pytest.mark.parametrize("hidden", ODD_HIDDENS)
     def test_simplified_layer_norm_odd_hidden(self, model_runner, hidden):
         """Odd hidden size forces the scalar fp16 body.

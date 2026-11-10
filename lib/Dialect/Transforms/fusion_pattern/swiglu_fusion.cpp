@@ -196,9 +196,39 @@ std::optional<Extent> shapeSizeExtent(mlir::OpFoldResult size) {
   return std::nullopt;
 }
 
+// Bounds the nesting of select arms traced by selectExtent.
+constexpr int kMaxSelectDepth = 4;
+
+llvm::SmallVector<Extent> traceExtents(mlir::Value value, int64_t dim,
+                                       int selectDepth = 0);
+
+// A select of two extents proven equal is that extent whatever the
+// condition. This is how an elementwise op sizes its destination when its
+// operands could broadcast: select(lhs == 1, rhs, lhs) per axis.
+std::optional<Extent> selectExtent(mlir::Value value, int selectDepth) {
+  auto select = value.getDefiningOp<mlir::arith::SelectOp>();
+  if (!select || selectDepth >= kMaxSelectDepth)
+    return std::nullopt;
+  std::optional<Extent> lhs = shapeSizeExtent(select.getTrueValue());
+  std::optional<Extent> rhs = shapeSizeExtent(select.getFalseValue());
+  if (!lhs || !rhs)
+    return std::nullopt;
+  auto expand = [&](const Extent &e) {
+    if (e.isStatic || e.dim < 0)
+      return llvm::SmallVector<Extent>{e};
+    return traceExtents(e.value, e.dim, selectDepth + 1);
+  };
+  for (const Extent &l : expand(*lhs))
+    for (const Extent &r : expand(*rhs))
+      if (l == r)
+        return l;
+  return std::nullopt;
+}
+
 // Keep every proven anchor, so two branches can meet at a local shared input
 // without having to reach the beginning of an arbitrarily deep residual graph.
-llvm::SmallVector<Extent> traceExtents(mlir::Value value, int64_t dim) {
+llvm::SmallVector<Extent> traceExtents(mlir::Value value, int64_t dim,
+                                       int selectDepth) {
   llvm::SmallVector<Extent> extents;
   mlir::Value current = value;
   int64_t axis = dim;
@@ -266,6 +296,10 @@ llvm::SmallVector<Extent> traceExtents(mlir::Value value, int64_t dim) {
     }
     if (!sizeExtent)
       break;
+    if (!sizeExtent->isStatic && sizeExtent->dim == -1)
+      if (std::optional<Extent> common =
+              selectExtent(sizeExtent->value, selectDepth))
+        sizeExtent = common;
     if (sizeExtent->isStatic || sizeExtent->dim == -1) {
       extents.push_back(*sizeExtent);
       break;
@@ -515,7 +549,68 @@ struct GegluFusion : public mlir::OpRewritePattern<mlir::hip::MulOp> {
   }
 };
 
+// hip.rms_norm(x) + r -> hip.rms_norm_add, a post-norm residual connection,
+// under the same shape contract.
+//
+//   Before:
+//     %n = hip.rms_norm(%ctx) ins(%x, %g : t, tg) outs(%e0 : t) {...}
+//     %y = hip.add(%ctx) ins(%r, %n : t, t) outs(%e1 : t) -> t
+//   After:
+//     %y = hip.rms_norm_add(%ctx) ins(%x, %g, %r : t, tg, t) outs(%e1 : t)
+//
+// stash_type is dropped: hip.rms_norm accumulates in fp32 whatever it says.
+struct RmsNormAddFusion : public mlir::OpRewritePattern<mlir::hip::AddOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::hip::AddOp add,
+                  mlir::PatternRewriter &rewriter) const override {
+    auto norm = add.getLhs().getDefiningOp<mlir::hip::RmsNormOp>();
+    mlir::Value residual = add.getRhs();
+    if (!norm) {
+      norm = add.getRhs().getDefiningOp<mlir::hip::RmsNormOp>();
+      residual = add.getLhs();
+    }
+    if (!norm)
+      return rewriter.notifyMatchFailure(add, "no hip.rms_norm operand");
+    if (!norm.getCtx() || norm.getCtx() != add.getCtx())
+      return rewriter.notifyMatchFailure(add, "ops must share a context");
+    if (!hasSingleValueUse(norm->getResult(0), add))
+      return rewriter.notifyMatchFailure(
+          add, "rms_norm result must have one value use");
+
+    auto type =
+        mlir::dyn_cast<mlir::RankedTensorType>(add->getResult(0).getType());
+    if (!type || norm->getResult(0).getType() != type ||
+        norm.getInput().getType() != type || residual.getType() != type)
+      return rewriter.notifyMatchFailure(add,
+                                         "residual add does not broadcast");
+    if (!type.getElementType().isF16())
+      return rewriter.notifyMatchFailure(add, "fused residual add is f16 only");
+    if (!sameRuntimeShape(norm.getInput(), residual))
+      return rewriter.notifyMatchFailure(
+          add, "dynamic dimensions are not known to match");
+
+    mlir::Operation *normInitDef = norm.getOutput().getDefiningOp();
+    retargetShapeQueries(rewriter, norm->getResult(0), norm.getInput());
+    auto fused = mlir::hip::RmsNormAddOp::create(
+        rewriter, add.getLoc(), type, add.getCtx(), norm.getInput(),
+        norm.getScale(), residual, add.getOutput(), norm.getAxisAttr(),
+        norm.getEpsilonAttr());
+    rewriter.replaceOp(add, fused->getResult(0));
+    rewriter.eraseOp(norm);
+    if (normInitDef && mlir::isOpTriviallyDead(normInitDef))
+      rewriter.eraseOp(normInitDef);
+    return mlir::success();
+  }
+};
+
 } // namespace
+
+void populateRmsNormAddFusionPattern(mlir::RewritePatternSet &patterns,
+                                     mlir::PatternBenefit benefit) {
+  patterns.add<RmsNormAddFusion>(patterns.getContext(), benefit);
+}
 
 void populateSwigluFusionPattern(mlir::RewritePatternSet &patterns,
                                  mlir::PatternBenefit benefit) {

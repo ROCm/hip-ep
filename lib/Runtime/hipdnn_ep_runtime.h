@@ -1581,6 +1581,16 @@ int wrap_rms_norm(RuntimeState *state, void *input, void *scale, void *output,
                   int64_t norm_num_elements, int64_t element_size_bytes,
                   int64_t axis, float epsilon, int64_t stash_type);
 
+// RMS norm followed by a residual add (hip.rms_norm_add):
+//   output = residual + rms_norm(input) * scale
+// with the normalized value rounded to the element type before the add.
+// `residual` and `output` have the input's shape; the other arguments are
+// as for wrap_rms_norm.
+int wrap_rms_norm_add(RuntimeState *state, void *input, void *scale,
+                      void *residual, void *output, int64_t input_num_elements,
+                      int64_t scale_num_elements, int64_t norm_num_elements,
+                      int64_t element_size_bytes, float epsilon);
+
 // LayerNormalization operation wrapper (standard ONNX opset 17+)
 // bias, mean, inv_std may be nullptr when optional inputs/outputs are absent
 int wrap_layer_normalization(RuntimeState *state, void *input, void *scale,

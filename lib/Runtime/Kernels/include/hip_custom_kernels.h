@@ -2365,6 +2365,22 @@ HIP_KERNEL_API int hip_rms_norm(
     float epsilon,
     int hip_dtype);
 
+/* hip_rms_norm followed by a residual add: output = residual + y, where y is
+ * the normalized row rounded to `hip_dtype`. `residual` has the input's shape
+ * and may be null, which is hip_rms_norm. The result equals the norm followed
+ * by a separate elementwise add. */
+HIP_KERNEL_API int hip_rms_norm_add(
+    void* stream,
+    const void* input,
+    const void* scale,
+    const void* residual,
+    void* output,
+    int64_t outer,
+    int64_t norm_size,
+    int64_t scale_rows,
+    float epsilon,
+    int hip_dtype);
+
 /* =========================================================================
  * Gated RMS Normalization (com.microsoft GatedRMSNorm)
  * =========================================================================

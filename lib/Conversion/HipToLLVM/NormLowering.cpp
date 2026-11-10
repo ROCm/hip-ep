@@ -128,6 +128,76 @@ struct RmsNormOpLowering : public ConvertOpToLLVMPattern<RmsNormOp> {
   }
 };
 
+// hip.rms_norm_add: hip.rms_norm's arguments plus the residual, which has the
+// input's shape.
+struct RmsNormAddOpLowering : public ConvertOpToLLVMPattern<RmsNormAddOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(RmsNormAddOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i64Type = rewriter.getI64Type();
+    Type f32Type = rewriter.getF32Type();
+
+    auto inputType = cast<MemRefType>(op.getInput().getType());
+    auto scaleType = cast<MemRefType>(op.getScale().getType());
+    int64_t rank = inputType.getRank();
+    int64_t normAxis = op.getAxis();
+    if (normAxis < 0)
+      normAxis += rank;
+    if (normAxis < 0 || normAxis >= rank)
+      return rewriter.notifyMatchFailure(op, "rms_norm_add.axis_out_of_range");
+
+    Value inputNumElements =
+        computeNumElements(inputType, adaptor.getInput(), rewriter, loc);
+    Value scaleNumElements =
+        computeNumElements(scaleType, adaptor.getScale(), rewriter, loc);
+    Value normNumElements = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(1));
+    for (int64_t dimIdx = normAxis; dimIdx < rank; ++dimIdx)
+      normNumElements = LLVM::MulOp::create(
+          rewriter, loc, normNumElements,
+          getMemRefDimSize(inputType, static_cast<unsigned>(dimIdx),
+                           adaptor.getInput(), rewriter, loc));
+    Value elementSize = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type,
+        rewriter.getI64IntegerAttr(
+            inputType.getElementType().getIntOrFloatBitWidth() / 8));
+    Value epsilon =
+        LLVM::ConstantOp::create(rewriter, loc, f32Type, op.getEpsilonAttr());
+
+    SmallVector<Type> paramTypes = {
+        ptrType,                            // state
+        ptrType, ptrType, ptrType, ptrType, // input, scale, residual, output
+        i64Type, i64Type,                   // input/scale element counts
+        i64Type, i64Type,                   // norm width, element size
+        f32Type                             // epsilon
+    };
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapRmsNormAdd, paramTypes, rewriter.getI32Type());
+    if (failed(funcOp))
+      return failure();
+
+    SmallVector<Value> args = {
+        adaptor.getCtx(),
+        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getScale(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getResidual(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc),
+        inputNumElements,
+        scaleNumElements,
+        normNumElements,
+        elementSize,
+        epsilon};
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 // hip.skip_rms_norm lowering with dynamic shape support
 struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
@@ -898,9 +968,9 @@ struct HyperConnectionPostMixNormOpLowering
 void populateNormLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns) {
   patterns
-      .add<RmsNormOpLowering, SkipRmsNormOpLowering, LayerNormOpLowering,
-           InstanceNormOpLowering, BatchNormOpLowering, GroupNormOpLowering,
-           GatedRmsNormOpLowering, EngramGateOpLowering,
+      .add<RmsNormOpLowering, RmsNormAddOpLowering, SkipRmsNormOpLowering,
+           LayerNormOpLowering, InstanceNormOpLowering, BatchNormOpLowering,
+           GroupNormOpLowering, GatedRmsNormOpLowering, EngramGateOpLowering,
            HyperConnectionPreMixOpLowering, HyperConnectionPostMixOpLowering,
            HyperConnectionPostMixNormOpLowering>(converter);
 }
