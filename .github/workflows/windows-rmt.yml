@@ -9,7 +9,7 @@ name: Windows RMT Build
 # runs the same deps prebuild first. Those jobs share per-commit concurrency
 # groups with Windows Build and do not cancel an in-progress deps job, so a
 # cold cache is built once per commit and this build restores it afterwards.
-# amdgpu and OGA fall back to the artifacts this run's prebuild uploaded.
+# ORT, amdgpu and OGA fall back to the artifacts this run's prebuild uploaded.
 # Not part of the merge queue.
 on:
   workflow_dispatch:
@@ -43,8 +43,8 @@ jobs:
       SCCACHE_CACHE_SIZE: "200M"
       ONNXRUNTIME_VERSION: "1.31.0"
       ONNXRUNTIME_PR_PATCHES: ""
-      OGA_VERSION: "0.17.0"
-      OGA_PR_PATCHES: "2685 2691 2705 2712 2792 2801"
+      OGA_VERSION: "0.19.0"
+      OGA_PR_PATCHES: "2875"
       AMDGPU_EP_REF: "f3dccce2a142567da050da1032617fb39db4086a"
       AMDGPU_PR_PATCHES: ""
 
@@ -58,7 +58,7 @@ jobs:
           fetch-depth: 1
           show-progress: false
 
-      - name: Compute dependency cache keys
+      - name: Resolve LLVM branch tip
         id: deps
         if: ${{ !contains(steps.*.outcome, 'failure') }}
         continue-on-error: true
@@ -69,9 +69,18 @@ jobs:
           EP_REF="${{ env.AMDGPU_EP_REF }}"
           AMDPR_KEY="${{ env.AMDGPU_PR_PATCHES }}"
           AMDPR_KEY="${AMDPR_KEY// /-}"
-          LINE=$(grep -E '^rocmlirtriton;' cmake/deps.txt)
-          echo "url=$(echo "$LINE" | cut -d';' -f2)" >> "$GITHUB_OUTPUT"
-          echo "commit=$(echo "$LINE" | cut -d';' -f3)" >> "$GITHUB_OUTPUT"
+          LINE=$(grep -E '^llvm_project;' cmake/deps.txt)
+          LLVM_URL=$(echo "$LINE" | cut -d';' -f2)
+          LLVM_REF=$(echo "$LINE" | cut -d';' -f3)
+          LLVM_COMMIT=$(git ls-remote "$LLVM_URL" "refs/heads/$LLVM_REF" | awk '{print $1}')
+          if [ -z "$LLVM_COMMIT" ]; then
+            echo "ERROR: no tip for $LLVM_URL refs/heads/$LLVM_REF" >&2
+            exit 1
+          fi
+          echo "url=$LLVM_URL" >> "$GITHUB_OUTPUT"
+          echo "ref=$LLVM_REF" >> "$GITHUB_OUTPUT"
+          echo "commit=$LLVM_COMMIT" >> "$GITHUB_OUTPUT"
+          echo "llvm=dep-llvm-amdgpu-${LLVM_COMMIT}" >> "$GITHUB_OUTPUT"
           # Keys from this run's prebuild. Recompute only if an output is empty.
           ORT_KEY="${{ needs.prebuild.outputs.ort_cache_key }}"
           AMD_KEY="${{ needs.prebuild.outputs.amdgpu_cache_key }}"
@@ -88,7 +97,6 @@ jobs:
           echo "ort=$ORT_KEY" >> "$GITHUB_OUTPUT"
           echo "amdgpu=$AMD_KEY" >> "$GITHUB_OUTPUT"
           echo "oga=$OGA_KEY" >> "$GITHUB_OUTPUT"
-          echo "llvm=dep-llvm-rocmlirtriton-amdgpu-$(echo "$LINE" | cut -d';' -f3)" >> "$GITHUB_OUTPUT"
 
       - name: Restore ort-install
         id: restore-ort
@@ -98,10 +106,18 @@ jobs:
         with:
           path: ${{ runner.workspace }}/ort-install
           key: ${{ steps.deps.outputs.ort }}
-          fail-on-cache-miss: true
 
-      # Caches are the fast path. On a cold key the prebuild uploads the same
-      # tree, and that artifact is the reliable handoff inside this run.
+      - name: Download ort-install
+        id: download-ort
+        if: ${{ !contains(steps.*.outcome, 'failure') && steps.restore-ort.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.deps.outputs.ort }}
+          path: ${{ runner.workspace }}/ort-install
+
+      # Caches are the fast path. The prebuild always uploads this run's copy,
+      # so download-artifact still works after a later cache eviction.
       - name: Restore amdgpu-artifacts
         id: restore-amdgpu
         if: ${{ !contains(steps.*.outcome, 'failure') }}
@@ -159,12 +175,14 @@ jobs:
         continue-on-error: true
         shell: bash
         run: |
-          SRC="${{ runner.workspace }}/rocmlirTriton"
+          # Shallow clone of the deps.txt llvm_project branch tip. The cmake
+          # project lives at llvm/. AMDGPU stays enabled; only the source changed.
+          SRC="${{ runner.workspace }}/llvm-project"
           git init "$SRC"
           git -C "$SRC" remote add origin "${{ steps.deps.outputs.url }}"
           git -C "$SRC" fetch --depth 1 origin "${{ steps.deps.outputs.commit }}"
           git -C "$SRC" checkout FETCH_HEAD
-          cmake -G Ninja -S "$SRC/external/llvm-project/llvm" -B "${{ runner.workspace }}/build-llvm" \
+          cmake -G Ninja -S "$SRC/llvm" -B "${{ runner.workspace }}/build-llvm" \
             -DCMAKE_BUILD_TYPE=Release \
             -DLLVM_ENABLE_PROJECTS="clang;mlir;lld" \
             -DLLVM_TARGETS_TO_BUILD="X86;AMDGPU" \

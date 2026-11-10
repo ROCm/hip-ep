@@ -292,6 +292,20 @@ HIPDNN_EP_RT_EXPORT void *hipdnn_ep_get_current_stream(void);
 // tls_stream.cpp alongside the getter.
 HIPDNN_EP_RT_EXPORT void hipdnn_ep_set_current_stream(void *stream);
 
+// Optional host-native ROCTx bridge used by OP_PROFILE scopes. The bridge
+// dynamically resolves ROCTx only when HIPDNN_EP_ROCTX is enabled, so these
+// calls are safe no-ops when no ROCTx runtime is available. Kept outside
+// runtime.bc for the same JIT/native-model dual-path reason as tls_stream.cpp.
+// push returns the ROCTx nesting level, or a negative value when disabled.
+// enabled returns nonzero once the range API has been resolved, so callers can
+// skip building a range label when nothing would record it.
+HIPDNN_EP_RT_EXPORT int hipdnn_ep_roctx_range_push(const char *name);
+HIPDNN_EP_RT_EXPORT void hipdnn_ep_roctx_range_pop(void);
+HIPDNN_EP_RT_EXPORT int hipdnn_ep_roctx_enabled(void);
+// Instant ROCTx mark naming the step whose launches follow, inside an
+// operator range. No-op when ROCTx is off or the library has no roctxMarkA.
+HIPDNN_EP_RT_EXPORT void hipdnn_ep_roctx_mark(const char *name);
+
 // Get hipBLASLt handle from state (for GEMM operations)
 // Returns: hipblasLtHandle_t cast to void* (NULL on error)
 // Ownership: Caller does NOT own handle (destroyed in cleanup)
@@ -916,7 +930,11 @@ int wrap_group_query_attention_host_length(
     // When has_host_length is 1, the compiler proves that host_length_value
     // equals seqlens_k[0] for batch one, including the valid -1 sentinel.
     // Otherwise the value is ignored and the runtime reads seqlens_k.
-    int32_t has_host_length, int32_t host_length_value);
+    int32_t has_host_length, int32_t host_length_value,
+    // hip.gqa key_bias: fp16 [key_bias_batch (1 or batch), key_bias_len] bias
+    // per key, added to every query row's scores on top of the causal and
+    // window masks; null when absent. key_bias_len must cover seq_len_kv.
+    void *key_bias, int64_t key_bias_batch, int64_t key_bias_len);
 
 // Compiler-selected entry for proven FP16 Ring candidates. Other shapes and
 // devices fall back to GQA with the same optional host-length contract.
@@ -940,7 +958,8 @@ int wrap_group_query_attention_ring_f16(
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
     int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
-    int64_t seq_len_new_kv, int32_t has_host_length, int32_t host_length_value);
+    int64_t seq_len_new_kv, int32_t has_host_length, int32_t host_length_value,
+    void *key_bias, int64_t key_bias_batch, int64_t key_bias_len);
 
 // MultiHeadAttention operation wrapper (com.microsoft.MultiHeadAttention v1).
 // Called by generated IR for onnx.Custom(MultiHeadAttention) lowering.
@@ -1236,7 +1255,7 @@ int wrap_gather_elements(RuntimeState *state, void *data, void *indices,
 int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
                void *indices, int64_t axis, int64_t largest, int64_t sorted,
                int64_t rank, const int64_t *x_shape, int64_t num_elements,
-               int64_t element_size_bytes);
+               int64_t data_type);
 
 // RandomNormalLike. `shape` is the output rank's sizes, including dynamic
 // dims filled in by the HIP-to-LLVM lowering. The input tensor is not
@@ -1794,6 +1813,13 @@ int wrap_dequantize_linear(
 // results.
 // Optional pointer args: pass nullptr if the corresponding input is absent.
 #define HIPDNN_EP_QMOE_ACTIVATION_RELU2 5
+// routing_type: SOFTMAX routes by softmax(router_probs) (or router_weights);
+// SIGMOID_BIAS reads fp32 logits in router_probs, selects the top-k of
+// sigmoid + correction_bias, and weights by the selected sigmoid scores,
+// normalized over k when normalize_routing_weights, times
+// routed_scaling_factor.
+#define HIPDNN_EP_QMOE_ROUTING_SOFTMAX 0
+#define HIPDNN_EP_QMOE_ROUTING_SIGMOID_BIAS 1
 
 int wrap_qmoe(
     RuntimeState *state,
@@ -1819,7 +1845,10 @@ int wrap_qmoe(
     int64_t activation_type, // 0=relu,1=gelu,2=silu,3=swiglu,4=identity,
                              // 5=relu2
     float activation_alpha, float activation_beta, float swiglu_limit,
-    int64_t normalize_routing_weights, int64_t elem_size);
+    int64_t normalize_routing_weights, int64_t elem_size,
+    const void *correction_bias, // (nullable) [num_experts] fp32
+    int64_t routing_type,        // HIPDNN_EP_QMOE_ROUTING_*
+    float routed_scaling_factor);
 
 // com.amd QMoE operation wrapper (LatentMoE).
 //
@@ -1960,14 +1989,24 @@ int wrap_gated_delta_net(RuntimeState *state, const void *qkv,
                          int64_t element_size_bytes);
 
 // fp16 only. past_* may alias present_*. head_size is query width / num_heads
-// and capacity is past_key dim 2; the remaining dims are runtime shapes that
-// must agree with them, else -1 before any launch.
+// (/ (num_heads + 2 * kv_num_heads) for a packed query, when key and value
+// are null and their dims ignored) and capacity is past_key dim 2; the
+// remaining dims are runtime shapes that must agree with them, else -1 before
+// any launch. gate may be null (gate_* ignored). q_norm_weight, k_norm_weight,
+// position_ids, cos_cache and sin_cache are all null (their dims, section_*,
+// mrope_layout and norm_epsilon ignored) or all set: the q/k norm and MRoPE
+// prologue of hip_dynamic_sparse_attention, rotary width 2 * sum(section).
+// past_sequence_length (device int32 [1]) may be null; when given it is the
+// past length of the pair_format indexer that wrote selected_indices, whose
+// dense rows (past + s + 1 <= max_selected) take positions 0, 1, ... in order.
 int wrap_dynamic_sparse_attention(
     RuntimeState *state, const void *query, const void *key, const void *value,
     const void *past_key, const void *past_value, const void *selected_indices,
-    const void *selected_counts, const void *seqlens_k, void *output,
-    void *present_key, void *present_value, int64_t batch, int64_t seq_len,
-    int64_t num_heads, int64_t kv_num_heads, int64_t head_size,
+    const void *selected_counts, const void *seqlens_k, const void *gate,
+    const void *q_norm_weight, const void *k_norm_weight,
+    const void *position_ids, const void *cos_cache, const void *sin_cache,
+    void *output, void *present_key, void *present_value, int64_t batch,
+    int64_t seq_len, int64_t num_heads, int64_t kv_num_heads, int64_t head_size,
     int64_t capacity, int64_t max_selected, int64_t past_key_batch,
     int64_t past_key_heads, int64_t past_key_head_size,
     int64_t past_value_batch, int64_t past_value_heads,
@@ -1977,11 +2016,26 @@ int wrap_dynamic_sparse_attention(
     int64_t indices_rows, int64_t counts_rows, int64_t seqlens_len,
     int64_t key_batch, int64_t key_seq_len, int64_t key_width,
     int64_t value_batch, int64_t value_seq_len, int64_t value_width,
-    float scale);
+    int64_t gate_batch, int64_t gate_seq_len, int64_t gate_width,
+    int64_t q_norm_len, int64_t k_norm_len, int64_t position_sections,
+    int64_t position_batch, int64_t position_seq_len, int64_t cos_rows,
+    int64_t cos_width, int64_t sin_rows, int64_t sin_width, int64_t section_t,
+    int64_t section_h, int64_t section_w, int64_t mrope_layout, float scale,
+    float norm_epsilon, const void *past_sequence_length);
 
 // past_key may be null when past_len == 0; mask may be null (all visible).
 // mask_* are ignored without a mask and cos_batch / sin_batch unless
 // rotary_batched; shape disagreement returns -1 before any launch.
+// With rotary_position_ids ([id_sections, id_batch, id_rows] int64),
+// cos/sin_cache are [rotary_rows, rotary_width / 2] base tables and
+// rotary_sections (host, rotary_width / 2 bytes) gives each frequency's MRoPE
+// section, the ids row of its positions; without the ids, rotary_sections and
+// id_* are ignored.
+// selected_counts ([batch, seq_len] int32) may be null; when given it receives
+// the number of valid entries of each selected_indices row. pair_format != 0
+// (needs past_sequence_length and selected_counts, no mask) leaves the rows
+// that select every position unwritten and lists the others' blocks in
+// ascending order, for a paired wrap_dynamic_sparse_attention.
 int wrap_sparse_attention_indexer(
     RuntimeState *state, const void *query, const void *query_norm_weight,
     const void *key_norm_weight, const void *cos_cache, const void *sin_cache,
@@ -1992,7 +2046,9 @@ int wrap_sparse_attention_indexer(
     int64_t rotary_batched, int64_t compress_ratio, int64_t token_budget,
     int64_t element_size_bytes, int64_t past_batch, int64_t mask_batch,
     int64_t mask_len, int64_t cos_batch, int64_t sin_batch, int64_t sin_rows,
-    float epsilon, float scale);
+    float epsilon, float scale, const void *rotary_position_ids,
+    const void *rotary_sections, int64_t id_sections, int64_t id_batch,
+    int64_t id_rows, void *selected_counts, int64_t pair_format);
 
 //==============================================================================
 // ONNX Gemm via hipBLASLt
@@ -2064,6 +2120,20 @@ int wrap_nonzero(RuntimeState *state, void *input, void *output,
                  int32_t *count_ptr, int64_t input_num_elements,
                  int64_t input_rank, const int64_t *input_dims,
                  int64_t output_capacity, int64_t input_data_type);
+
+// ONNX NonMaxSuppression wrapper. `boxes` is [num_batches, num_boxes, 4] f32,
+// `scores` is [num_batches, num_classes, num_boxes] f32 and the three scalar
+// inputs are device-resident. Writes up to `capacity` (batch, class, box)
+// int64 triples to `selected` and the true triple count to the device i32
+// `count_ptr`. `score_threshold` is ignored when `has_score_threshold` is 0.
+// Runs on the host after a stream sync: selection is a short sequential scan
+// per (batch, class) over at most `num_boxes` candidates.
+int wrap_non_max_suppression(
+    RuntimeState *state, const float *boxes, const float *scores,
+    const int64_t *max_output_boxes_per_class, const float *iou_threshold,
+    const float *score_threshold, int64_t *selected, int32_t *count_ptr,
+    int64_t num_batches, int64_t num_classes, int64_t num_boxes,
+    int64_t capacity, int64_t center_point_box, int64_t has_score_threshold);
 
 // Synchronize the GPU stream (so the producing kernel has completed), then
 // copy a single device-resident i32 scalar back to the host and return it.
@@ -2213,12 +2283,22 @@ int wrap_mod(RuntimeState *state, void *lhs, void *rhs, void *output,
 // run end-to-end for IR-shape debugging.
 //
 // axes / steps may be nullptr when the corresponding optional input is absent.
+// The original entry point is retained for cached bitcode and reads INT64
+// indices. New code calls wrap_slice_typed, whose `index_type` is the shared
+// element type of starts, ends, axes and steps (INT32 or INT64).
 int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
                void *axes, void *steps, void *output, const int64_t *data_shape,
                int64_t data_rank, const int64_t *output_shape,
                int64_t output_rank, int64_t starts_num_elements,
                int64_t axes_num_elements, int64_t steps_num_elements,
                int64_t data_type);
+int wrap_slice_typed(RuntimeState *state, void *data, void *starts, void *ends,
+                     void *axes, void *steps, void *output,
+                     const int64_t *data_shape, int64_t data_rank,
+                     const int64_t *output_shape, int64_t output_rank,
+                     int64_t starts_num_elements, int64_t axes_num_elements,
+                     int64_t steps_num_elements, int64_t data_type,
+                     int64_t index_type);
 
 // ScatterND: output = copy(data), then output[indices[i]] (reduction)
 // updates[i].
@@ -2298,6 +2378,19 @@ int hipdnn_ep_run_loop(RuntimeState *state, HipdnnEpLoopBodyFn body_fn,
                        int64_t max_trip_count, bool cond_init,
                        int32_t num_loop_carried, int32_t num_captures,
                        void **loop_carried_descs, void **capture_descs);
+
+// ONNX Scan driver. Descriptor slicing is performed by the generated
+// trampoline; the runtime only supplies the monotonically increasing
+// iteration number and preserves stream submission order.
+typedef int (*HipdnnEpScanBodyFn)(RuntimeState *state, int64_t iteration,
+                                  void **state_descs, void **scan_input_descs,
+                                  void **capture_descs,
+                                  void **scan_output_descs);
+
+int hipdnn_ep_run_scan(RuntimeState *state, HipdnnEpScanBodyFn body_fn,
+                       int64_t trip_count, void **state_descs,
+                       void **scan_input_descs, void **capture_descs,
+                       void **scan_output_descs);
 
 // ONNX If driver. Dispatches to exactly one of the two branch trampolines
 // based on `cond`. Each trampoline writes branch outputs into the shared

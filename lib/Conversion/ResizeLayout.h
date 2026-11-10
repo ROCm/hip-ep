@@ -27,8 +27,10 @@ struct HipResizeLaunch {
 
 // The window is the shortest suffix that contains every statically resized
 // axis. Axes before it are the copied prefix and must number at most 2.
-// A dynamic axis is legal when both sides are dynamic. A static input with a
-// dynamic output is rejected: the output extent is not in either type.
+// A dynamic axis is legal when both sides are dynamic. A dynamic input with a
+// static output is resampled: lowering reads the input extent from the memref
+// descriptor. A static input with a dynamic output is rejected: the output
+// extent is not in either type.
 // `hostExtents` allows that pair only after conversion has a host index for
 // the output extent (a constant, or a synchronized read of a `sizes` element).
 // Callers that pass `hostExtents` record the resulting launch on the op;
@@ -59,6 +61,8 @@ planHipResizeLaunch(ShapedType inputType, ShapedType outputType,
     if (inDyn && outDyn)
       return AxisKind::Dynamic;
     if (hostExtents && !inDyn && outDyn)
+      return AxisKind::Resized;
+    if (inDyn && !outDyn)
       return AxisKind::Resized;
     if (inDyn || outDyn)
       return std::nullopt;

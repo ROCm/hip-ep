@@ -25,31 +25,37 @@ concurrency:
 
 env:
   # Pins (kept in lockstep with cmake/deps.txt).
-  # LLVM/MLIR/LLD are built from source from the llvm-project subtree vendored
-  # inside rocmlirTriton (external/llvm-project); the repo + pinned commit are
-  # read from cmake/deps.txt at build time and the commit keys the llvm-install
-  # cache. Bumping the pin only invalidates that cache.
+  # LLVM/MLIR/LLD are cloned from deps.txt llvm_project. The hash column is a
+  # branch name, so the llvm-install cache key is that branch's current tip.
+  # rocmlirTriton's vendored external/llvm-project is not built. The AMDGPU
+  # target set keeps this prefix separate from Linux Build.
   ONNXRUNTIME_VERSION: "1.31.0"
   # Space-separated microsoft/onnxruntime PR numbers `git apply`-ed on top of
   # the pinned tag during the from-source build (an empty list applies nothing;
   # ORT is still built from source either way). Part of the ort-install cache
   # key. Remove a PR once its fix lands in the pinned ONNX Runtime release.
   ONNXRUNTIME_PR_PATCHES: ""
-  OGA_VERSION: "0.17.0"
+  OGA_VERSION: "0.19.0"
   # Space-separated microsoft/onnxruntime-genai PR numbers fetched from
   # pull/<n>.diff and applied on top of v<OGA_VERSION>. Part of the OGA cache
   # key. Remove a PR once it lands in the pinned OGA release.
-  OGA_PR_PATCHES: "2685 2691 2705 2712"
+  OGA_PR_PATCHES: "2875"
   # The GPU arch the artifact targets. CI runners have no GPU, so it is passed
   # explicitly (build.py auto-detects from /sys on a real GPU host).
   HIP_ARCHITECTURES: gfx11-generic
   SCCACHE_CACHE_SIZE: "200M"
 
 jobs:
-  build-linux-rmt:
+  # LLVM and ONNX Runtime finish in this job so their caches are saved before
+  # the six-hour runner limit. The hip-ep link is the next job and gets its
+  # own budget. A single job built both, then died while linking and never
+  # stored the LLVM prefix.
+  deps-linux-rmt:
     # No draft-PR gate: the cache-priming strategy needs every PR push.
     runs-on: ubuntu-latest
     continue-on-error: true
+    outputs:
+      llvm_commit: ${{ steps.llvm.outputs.commit }}
     steps:
       # MorphiZen is vendored in-tree as a git subtree under morphizen,
       # so no deploy key or submodule initialization is needed.
@@ -86,6 +92,8 @@ jobs:
 
       # ubuntu-latest ships ~14 GB usable SSD; the from-source LLVM build + ORT
       # need much more. Reclaim ~30 GB by pruning preinstalled toolchains.
+      # Keep swap. Deleting it makes the rmt-core LLVM link OOM the runner,
+      # which GitHub reports as "lost communication" and drops the log.
       - name: Free disk space
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
         with:
@@ -95,7 +103,7 @@ jobs:
           dotnet: true
           haskell: true
           large-packages: false
-          swap-storage: true
+          swap-storage: false
 
       # Pin the Python the whole job uses (ORT/OGA wheels are built against it).
       - name: Setup Python 3.14
@@ -138,41 +146,48 @@ jobs:
 
       # -----------------------------------------------------------------------
       # LLVM/MLIR/LLD/Clang from source -> llvm-install (cached). Caching is a CI
-      # concern, so the prefix build lives here (not in build.py). Source is the
-      # llvm-project subtree vendored inside rocmlirTriton (external/llvm-project);
-      # repo + pinned commit come from cmake/deps.txt. Recipe matches
-      # cmake/deps.cmake's from-source fallback: clang;mlir;lld, X86 and AMDGPU,
-      # RTTI on, zlib/zstd off, INSTALL_UTILS on.
+      # concern, so the prefix build lives here (not in build.py). Source is
+      # deps.txt llvm_project (a branch; the cache key is its current tip).
+      # Recipe matches cmake/deps.cmake's RMT from-source fallback:
+      # clang;mlir;lld, X86 and AMDGPU, RTTI on, zlib/zstd off, INSTALL_UTILS on.
       # -----------------------------------------------------------------------
-      - name: Resolve rocmlirTriton pin
-        id: rocmlir
+      - name: Resolve LLVM branch tip
+        id: llvm
         run: |
           set -euo pipefail
-          LINE=$(grep -E '^rocmlirtriton;' cmake/deps.txt)
-          echo "url=$(echo "$LINE" | cut -d';' -f2)" >> "$GITHUB_OUTPUT"
-          echo "commit=$(echo "$LINE" | cut -d';' -f3)" >> "$GITHUB_OUTPUT"
+          LINE=$(grep -E '^llvm_project;' cmake/deps.txt)
+          LLVM_URL=$(echo "$LINE" | cut -d';' -f2)
+          LLVM_REF=$(echo "$LINE" | cut -d';' -f3)
+          LLVM_COMMIT=$(git ls-remote "$LLVM_URL" "refs/heads/$LLVM_REF" | awk '{print $1}')
+          if [ -z "$LLVM_COMMIT" ]; then
+            echo "ERROR: no tip for $LLVM_URL refs/heads/$LLVM_REF" >&2
+            exit 1
+          fi
+          echo "url=$LLVM_URL" >> "$GITHUB_OUTPUT"
+          echo "ref=$LLVM_REF" >> "$GITHUB_OUTPUT"
+          echo "commit=$LLVM_COMMIT" >> "$GITHUB_OUTPUT"
 
       - name: Cache LLVM install prefix
         id: cache-llvm
         uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/llvm-install
-          # Keyed only on the rocmlirTriton commit: a protobuf/ORT bump must not
-          # evict the multi-hour LLVM cache.
-          key: linux-llvm-rocmlirtriton-amdgpu-${{ steps.rocmlir.outputs.commit }}
+          # Keyed on the resolved branch tip, with an AMDGPU prefix so this
+          # does not collide with the X86 Linux Build cache.
+          key: linux-llvm-amdgpu-${{ steps.llvm.outputs.commit }}
 
       - name: Build LLVM/MLIR/LLD from source
         if: steps.cache-llvm.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          # A shallow clone of the pinned commit already carries
-          # external/llvm-project (git subtree, not a submodule).
-          SRC="${{ runner.workspace }}/rocmlirTriton"
+          # Shallow clone of the branch tip. The cmake project lives at llvm/.
+          SRC="${{ runner.workspace }}/llvm-project"
           git init "$SRC"
-          git -C "$SRC" remote add origin "${{ steps.rocmlir.outputs.url }}"
-          git -C "$SRC" fetch --depth 1 origin "${{ steps.rocmlir.outputs.commit }}"
+          git -C "$SRC" remote add origin "${{ steps.llvm.outputs.url }}"
+          git -C "$SRC" fetch --depth 1 origin "${{ steps.llvm.outputs.commit }}"
           git -C "$SRC" checkout FETCH_HEAD
-          cmake -G Ninja -S "$SRC/external/llvm-project/llvm" -B "${{ runner.workspace }}/build-llvm" \
+          rm -rf "$SRC/.git"
+          cmake -G Ninja -S "$SRC/llvm" -B "${{ runner.workspace }}/build-llvm" \
             -DCMAKE_BUILD_TYPE=Release \
             -DLLVM_ENABLE_PROJECTS="clang;mlir;lld" \
             -DLLVM_TARGETS_TO_BUILD="X86;AMDGPU" \
@@ -185,6 +200,7 @@ jobs:
             -DLLVM_INCLUDE_BENCHMARKS=OFF \
             -DLLVM_BUILD_TOOLS=ON \
             -DLLVM_INSTALL_UTILS=ON \
+            -DLLVM_PARALLEL_LINK_JOBS=4 \
             -DCMAKE_CXX_VISIBILITY_PRESET=hidden \
             -DCMAKE_C_VISIBILITY_PRESET=hidden \
             -DCMAKE_VISIBILITY_INLINES_HIDDEN=ON \
@@ -290,6 +306,75 @@ jobs:
           mkdir -p "${{ runner.workspace }}/ort-install/wheels"
           cp "$ORT_WHEEL" "${{ runner.workspace }}/ort-install/wheels/"
           echo "Cached ORT wheel: $(basename "$ORT_WHEEL")"
+
+  build-linux-rmt:
+    needs: deps-linux-rmt
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: false
+          fetch-depth: 1
+          show-progress: false
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+        with:
+          tool-cache: false
+          docker-images: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          swap-storage: false
+
+      - name: Setup Python 3.14
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.14"
+
+      - name: Install build toolchain
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ninja-build git ca-certificates curl
+          python3 -m pip install --upgrade pip
+          python3 -m pip install cmake ninja lit numpy wheel setuptools packaging requests
+          cmake --version
+          ninja --version
+
+      - name: Prepare sccache local cache
+        run: |
+          echo "SCCACHE_DIR=${{ runner.workspace }}/sccache-dir" >> $GITHUB_ENV
+          echo "SCCACHE_KEY_DATE=$(date -u +'%Y%m%d')" >> $GITHUB_ENV
+
+      - name: Restore sccache directory
+        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/sccache-dir
+          key: sccache-linux-rmt-${{ env.SCCACHE_KEY_DATE }}
+          restore-keys: |
+            sccache-linux-rmt-
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Restore LLVM install prefix
+        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/llvm-install
+          key: linux-llvm-amdgpu-${{ needs.deps-linux-rmt.outputs.llvm_commit }}
+          fail-on-cache-miss: true
+
+      - name: Restore ONNX Runtime install prefix
+        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/ort-install
+          key: linux-ort-${{ env.ONNXRUNTIME_VERSION }}-ortpr-${{ env.ONNXRUNTIME_PR_PATCHES }}-whl
+          fail-on-cache-miss: true
 
       # TheRock is auto-downloaded fresh by cmake/deps.cmake during the configure
       # (not cached).

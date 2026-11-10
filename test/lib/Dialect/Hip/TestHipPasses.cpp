@@ -22,6 +22,7 @@ class TestMalformedReifyOp final
                       mlir::OpTrait::VariadicResults,
                       mlir::ReifyRankedShapedTypeOpInterface::Trait> {
 public:
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(TestMalformedReifyOp)
   using Op::Op;
 
   static llvm::StringRef getOperationName() {

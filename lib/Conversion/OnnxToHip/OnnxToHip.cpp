@@ -340,6 +340,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateAbsConversionPatterns(patterns, ctx);
   populateSizeConversionPatterns(patterns, ctx);
   populateNonZeroConversionPatterns(patterns, ctx);
+  populateNonMaxSuppressionConversionPatterns(patterns, ctx);
   populateConcatConversionPatterns(patterns, ctx);
   populateReluConversionPatterns(patterns, ctx);
   populateImageScalerConversionPatterns(patterns, ctx);
@@ -620,6 +621,11 @@ void ConvertOnnxToHipPass::runOnOperation() {
         populateSliceShapeFoldPatterns(preLoweringPatterns, ctx);
         populatePackBroadcastTo4DPatterns(preLoweringPatterns, ctx);
         populateAttentionWindowFoldPatterns(preLoweringPatterns, ctx);
+        populateQMoESigmoidRoutingFoldPatterns(preLoweringPatterns, ctx);
+        populateIndexerRotaryFoldPatterns(preLoweringPatterns, ctx);
+        populateIndexerCountsFoldPatterns(preLoweringPatterns, ctx);
+        populateDsaPrologueFoldPatterns(preLoweringPatterns, ctx);
+        populateQsaPairFoldPatterns(preLoweringPatterns, ctx);
         populateFastGeluFusionPatterns(preLoweringPatterns, ctx);
         populateErfGeluFusionPatterns(preLoweringPatterns, ctx);
         populateProjectorOpsRewritePatterns(preLoweringPatterns, ctx);

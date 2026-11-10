@@ -238,3 +238,33 @@ func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf16>,
       outs(%maxInit : tensor<1x16x4x4xf16>) : tensor<1x16x4x4xf16>
   return %r : tensor<1x16x4x4xf16>
 }
+
+// -----
+
+// ONNX BOOL is ui8 outside the kernel. A ui8 value used specifically as a
+// Where condition becomes signless i8 in the private rocMLIR kernel ABI, so
+// its byte storage can feed rocMLIR arithmetic without a conversion op.
+
+// CHECK-LABEL: func.func @rocMlir
+// CHECK-SAME: {{.*}}tensor<1x2x4x3xf32>{{.*}}tensor<1x1x3x5xf32>{{.*}}tensor<1x1x4x5xi8>
+// CHECK: hip.where
+// CHECK-SAME: tensor<1x1x4x5xi8>
+
+// CHECK-LABEL: func.func @main_graph
+func.func @main_graph(%ctx: !hip.context, %a: tensor<1x2x4x3xf32>,
+                      %b: tensor<1x1x3x5xf32>,
+                      %cond: tensor<1x1x4x5xui8>,
+                      %x: tensor<f32>) -> tensor<1x2x4x5xf32> {
+  %matmulInit = tensor.empty() : tensor<1x2x4x5xf32>
+  %matmul = hip.matmul(%ctx) ins(%a, %b :
+      tensor<1x2x4x3xf32>, tensor<1x1x3x5xf32>)
+      outs(%matmulInit : tensor<1x2x4x5xf32>)
+      {transA = 0 : i64, transB = 0 : i64} : tensor<1x2x4x5xf32>
+  %whereInit = tensor.empty() : tensor<1x2x4x5xf32>
+  // CHECK: hip.rocmlir
+  // CHECK-SAME: %{{.*}} : tensor<1x2x4x3xf32>, tensor<1x1x3x5xf32>, tensor<1x1x4x5xui8>, tensor<1xf32>)
+  %result = hip.where(%ctx) ins(%cond, %x, %matmul :
+      tensor<1x1x4x5xui8>, tensor<f32>, tensor<1x2x4x5xf32>)
+      outs(%whereInit : tensor<1x2x4x5xf32>) : tensor<1x2x4x5xf32>
+  return %result : tensor<1x2x4x5xf32>
+}

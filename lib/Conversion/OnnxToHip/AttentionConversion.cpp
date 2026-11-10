@@ -5,6 +5,7 @@
 
 #include "OnnxToHipUtils.h"
 
+#include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 
@@ -51,61 +52,177 @@ struct AttentionToHip : public mlir::RewritePattern {
                   mlir::PatternRewriter &rewriter) const override;
 };
 
+/// Rank-0 onnx.Constant holding \p value.
+mlir::Value buildRank0Constant(mlir::PatternRewriter &rewriter,
+                               mlir::Location loc, mlir::TypedAttr value) {
+  auto type = mlir::RankedTensorType::get({}, value.getType());
+  mlir::OperationState state(loc, "onnx.Constant");
+  state.addTypes(type);
+  state.addAttribute("value", mlir::DenseElementsAttr::get(type, value));
+  return rewriter.create(state)->getResult(0);
+}
+
+/// Size of dimension \p dim of \p value, folded when static.
+mlir::OpFoldResult dimOf(mlir::PatternRewriter &rewriter, mlir::Location loc,
+                         mlir::Value value, int64_t dim) {
+  auto type = mlir::cast<mlir::RankedTensorType>(value.getType());
+  if (!type.isDynamicDim(dim))
+    return rewriter.getIndexAttr(type.getDimSize(dim));
+  return mlir::tensor::DimOp::create(rewriter, loc, value, dim).getResult();
+}
+
+/// The 1-D i64 target shape hip.expand takes for \p dims.
+mlir::Value buildShapeTensor(mlir::PatternRewriter &rewriter,
+                             mlir::Location loc,
+                             llvm::ArrayRef<mlir::OpFoldResult> dims) {
+  auto i64Ty = rewriter.getI64Type();
+  llvm::SmallVector<mlir::Value> elems;
+  for (mlir::OpFoldResult dim : dims) {
+    if (auto value = mlir::dyn_cast<mlir::Value>(dim)) {
+      elems.push_back(
+          mlir::arith::IndexCastOp::create(rewriter, loc, i64Ty, value));
+      continue;
+    }
+    elems.push_back(mlir::arith::ConstantOp::create(
+        rewriter, loc,
+        rewriter.getI64IntegerAttr(*mlir::getConstantIntValue(dim))));
+  }
+  auto shapeType =
+      mlir::RankedTensorType::get({static_cast<int64_t>(elems.size())}, i64Ty);
+  return mlir::tensor::FromElementsOp::create(rewriter, loc, shapeType, elems);
+}
+
 /// Rank-1 mask_index is a per-batch count of valid leading tokens. Rank-2 is a
 /// 0/1 token mask (nonzero = keep). hip.gqa indexes attention_bias as
 /// [batch, heads, query, key] and does not broadcast a query extent of 1, so
 /// the key mask is repeated on every query row. heads is 1 and does broadcast.
-mlir::FailureOr<mlir::Value>
-buildPaddingBias(mlir::PatternRewriter &rewriter, mlir::Location loc,
-                 mlir::Value hidden, mlir::RankedTensorType hiddenType,
-                 mlir::Value mask, int64_t maskRank, mlir::Type biasElem,
-                 double filter) {
+///
+/// mask_index is usually computed on the device, so the bias is built from HIP
+/// ops. Host loops would read it from, and write the bias into, device memory.
+///
+///   keep [B, S] = rank 1: hip.less(range(S)[1, S], mask[B, 1])
+///                 rank 2: hip.equal(mask, 0) selects the filter instead
+///   row  [B, S] = hip.where(keep, 0, filter)
+///   bias         = hip.expand(row[B, 1, 1, S]) : [B, 1, S, S]
+mlir::FailureOr<mlir::Value> buildPaddingBias(
+    mlir::PatternRewriter &rewriter, mlir::Location loc, mlir::Value context,
+    mlir::Value hidden, mlir::RankedTensorType hiddenType, mlir::Value mask,
+    mlir::RankedTensorType maskType, mlir::Type biasElem, double filter) {
   const int64_t batch = hiddenType.getDimSize(0);
   const int64_t seqLen = hiddenType.getDimSize(1);
-  auto biasType =
-      mlir::RankedTensorType::get({batch, 1, seqLen, seqLen}, biasElem);
-  llvm::SmallVector<mlir::Value> dynSizes;
-  if (hiddenType.isDynamicDim(0))
-    dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc, hidden, 0));
-  if (hiddenType.isDynamicDim(1)) {
-    mlir::Value seq = mlir::tensor::DimOp::create(rewriter, loc, hidden, 1);
-    dynSizes.push_back(seq);
-    dynSizes.push_back(seq);
+  mlir::OpFoldResult batchSize = dimOf(rewriter, loc, hidden, 0);
+  mlir::OpFoldResult seqSize = dimOf(rewriter, loc, hidden, 1);
+  auto i1Ty = rewriter.getI1Type();
+
+  mlir::Value accepted =
+      buildRank0Constant(rewriter, loc, rewriter.getFloatAttr(biasElem, 0.0));
+  mlir::Value rejected = buildRank0Constant(
+      rewriter, loc, rewriter.getFloatAttr(biasElem, filter));
+
+  mlir::Value cond, onTrue, onFalse;
+  if (maskType.getRank() == 1) {
+    auto lenType = mlir::cast<mlir::IntegerType>(maskType.getElementType());
+    auto keysType = mlir::RankedTensorType::get({seqLen}, lenType);
+    mlir::Value keys;
+    if (!hiddenType.isDynamicDim(1)) {
+      llvm::SmallVector<llvm::APInt> indices;
+      for (int64_t i : llvm::seq<int64_t>(seqLen))
+        indices.push_back(
+            llvm::APInt(lenType.getWidth(), i, /*isSigned=*/true));
+      mlir::OperationState state(loc, "onnx.Constant");
+      state.addTypes(keysType);
+      state.addAttribute("value",
+                         mlir::DenseElementsAttr::get(keysType, indices));
+      keys = rewriter.create(state)->getResult(0);
+    } else {
+      mlir::Value seq = mlir::cast<mlir::Value>(seqSize);
+      mlir::Value start = buildRank0Constant(
+          rewriter, loc, rewriter.getIntegerAttr(lenType, 0));
+      mlir::Value delta = buildRank0Constant(
+          rewriter, loc, rewriter.getIntegerAttr(lenType, 1));
+      mlir::Value limit = mlir::tensor::FromElementsOp::create(
+          rewriter, loc, mlir::RankedTensorType::get({}, lenType),
+          mlir::ValueRange{
+              mlir::arith::IndexCastOp::create(rewriter, loc, lenType, seq)});
+      mlir::Value init = mlir::tensor::EmptyOp::create(rewriter, loc, keysType,
+                                                       mlir::ValueRange{seq});
+      keys = mlir::hip::RangeOp::create(rewriter, loc, context, start, limit,
+                                        delta, init)
+                 ->getResult(0);
+    }
+
+    llvm::SmallVector<mlir::ReassociationIndices> toPair = {{0, 1}};
+    auto keyRowType = mlir::RankedTensorType::get({1, seqLen}, lenType);
+    mlir::Value keyRow = mlir::tensor::ExpandShapeOp::create(
+        rewriter, loc, keyRowType, keys, toPair,
+        llvm::SmallVector<mlir::OpFoldResult>{rewriter.getIndexAttr(1),
+                                              seqSize});
+    const int64_t maskBatch = maskType.getDimSize(0);
+    auto lenColType = mlir::RankedTensorType::get({maskBatch, 1}, lenType);
+    mlir::Value lenCol = mlir::tensor::ExpandShapeOp::create(
+        rewriter, loc, lenColType, mask, toPair,
+        llvm::SmallVector<mlir::OpFoldResult>{dimOf(rewriter, loc, mask, 0),
+                                              rewriter.getIndexAttr(1)});
+
+    auto keepType = mlir::RankedTensorType::get({maskBatch, seqLen}, i1Ty);
+    llvm::SmallVector<mlir::Value> keepDyn;
+    if (keepType.isDynamicDim(0))
+      keepDyn.push_back(mlir::tensor::DimOp::create(rewriter, loc, mask, 0));
+    if (keepType.isDynamicDim(1))
+      keepDyn.push_back(mlir::cast<mlir::Value>(seqSize));
+    mlir::Value keepInit =
+        mlir::tensor::EmptyOp::create(rewriter, loc, keepType, keepDyn);
+    cond = mlir::hip::LessOp::create(rewriter, loc, context, keyRow, lenCol,
+                                     keepInit)
+               ->getResult(0);
+    onTrue = accepted;
+    onFalse = rejected;
+  } else if (maskType.getElementType().isInteger(1)) {
+    cond = mask;
+    onTrue = accepted;
+    onFalse = rejected;
+  } else {
+    mlir::Value zero = buildRank0Constant(
+        rewriter, loc, rewriter.getIntegerAttr(maskType.getElementType(), 0));
+    auto padType = mlir::RankedTensorType::get(maskType.getShape(), i1Ty);
+    mlir::Value padInit = createEmptyTensor(rewriter, loc, padType, mask);
+    cond =
+        mlir::hip::EqualOp::create(rewriter, loc, context, mask, zero, padInit)
+            ->getResult(0);
+    onTrue = rejected;
+    onFalse = accepted;
   }
 
-  auto gen = mlir::tensor::GenerateOp::create(
-      rewriter, loc, biasType, dynSizes,
-      [&](mlir::OpBuilder &b, mlir::Location bodyLoc, mlir::ValueRange ivs) {
-        mlir::Value batchIdx = ivs[0];
-        mlir::Value keyIdx = ivs[3];
-        mlir::Value keep;
-        if (maskRank == 1) {
-          mlir::Value len = mlir::tensor::ExtractOp::create(
-                                b, bodyLoc, mask, mlir::ValueRange{batchIdx})
-                                .getResult();
-          mlir::Value keyInt = mlir::arith::IndexCastOp::create(
-              b, bodyLoc, len.getType(), keyIdx);
-          keep = mlir::arith::CmpIOp::create(
-              b, bodyLoc, mlir::arith::CmpIPredicate::slt, keyInt, len);
-        } else {
-          mlir::Value bit =
-              mlir::tensor::ExtractOp::create(
-                  b, bodyLoc, mask, mlir::ValueRange{batchIdx, keyIdx})
-                  .getResult();
-          mlir::Value zero = mlir::arith::ConstantOp::create(
-              b, bodyLoc, b.getIntegerAttr(bit.getType(), 0));
-          keep = mlir::arith::CmpIOp::create(
-              b, bodyLoc, mlir::arith::CmpIPredicate::ne, bit, zero);
-        }
-        mlir::Value accepted = mlir::arith::ConstantOp::create(
-            b, bodyLoc, b.getFloatAttr(biasElem, 0.0));
-        mlir::Value rejected = mlir::arith::ConstantOp::create(
-            b, bodyLoc, b.getFloatAttr(biasElem, filter));
-        mlir::Value chosen =
-            mlir::arith::SelectOp::create(b, bodyLoc, keep, accepted, rejected);
-        mlir::tensor::YieldOp::create(b, bodyLoc, chosen);
-      });
-  return gen.getResult();
+  auto condType = mlir::cast<mlir::RankedTensorType>(cond.getType());
+  auto rowType = mlir::RankedTensorType::get(condType.getShape(), biasElem);
+  mlir::Value rowInit = createEmptyTensor(rewriter, loc, rowType, cond);
+  mlir::Value row = mlir::hip::WhereOp::create(rewriter, loc, context, cond,
+                                               onTrue, onFalse, rowInit)
+                        ->getResult(0);
+
+  auto row4Type = mlir::RankedTensorType::get(
+      {rowType.getDimSize(0), 1, 1, rowType.getDimSize(1)}, biasElem);
+  mlir::Value row4 = mlir::tensor::ExpandShapeOp::create(
+      rewriter, loc, row4Type, row,
+      llvm::SmallVector<mlir::ReassociationIndices>{{0, 1, 2}, {3}},
+      llvm::SmallVector<mlir::OpFoldResult>{
+          dimOf(rewriter, loc, row, 0), rewriter.getIndexAttr(1),
+          rewriter.getIndexAttr(1), dimOf(rewriter, loc, row, 1)});
+
+  auto biasType =
+      mlir::RankedTensorType::get({batch, 1, seqLen, seqLen}, biasElem);
+  llvm::SmallVector<mlir::OpFoldResult> biasDims = {
+      batchSize, rewriter.getIndexAttr(1), seqSize, seqSize};
+  llvm::SmallVector<mlir::Value> biasDyn;
+  for (mlir::OpFoldResult dim : biasDims)
+    if (auto value = mlir::dyn_cast<mlir::Value>(dim))
+      biasDyn.push_back(value);
+  mlir::Value biasInit =
+      mlir::tensor::EmptyOp::create(rewriter, loc, biasType, biasDyn);
+  return mlir::hip::ExpandOp::create(rewriter, loc, context, row4,
+                                     buildShapeTensor(rewriter, loc, biasDims),
+                                     biasInit)
+      ->getResult(0);
 }
 
 mlir::LogicalResult
@@ -240,6 +357,11 @@ AttentionToHip::matchAndRewrite(mlir::Operation *op,
     return rewriter.notifyMatchFailure(
         op, "Attention output shape must match input hidden shape");
 
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return rewriter.notifyMatchFailure(op, "missing context argument");
+  mlir::Value context = *ctxOrFailure;
+
   mlir::Type elemType = hiddenType.getElementType();
   mlir::Value attentionBias;
   if (mask) {
@@ -265,17 +387,13 @@ AttentionToHip::matchAndRewrite(mlir::Operation *op,
     if (auto filterAttr =
             op->getAttrOfType<mlir::FloatAttr>("mask_filter_value"))
       filter = filterAttr.getValue().convertToDouble();
-    auto biasOr = buildPaddingBias(rewriter, op->getLoc(), hidden, hiddenType,
-                                   mask, maskType.getRank(), elemType, filter);
+    auto biasOr =
+        buildPaddingBias(rewriter, op->getLoc(), context, hidden, hiddenType,
+                         mask, maskType, elemType, filter);
     if (mlir::failed(biasOr))
       return mlir::failure();
     attentionBias = *biasOr;
   }
-
-  auto ctxOrFailure = getContextArg(op, rewriter);
-  if (mlir::failed(ctxOrFailure))
-    return rewriter.notifyMatchFailure(op, "missing context argument");
-  mlir::Value context = *ctxOrFailure;
 
   mlir::Location loc = op->getLoc();
   const int64_t batch = hiddenType.getDimSize(0);
@@ -344,18 +462,22 @@ AttentionToHip::matchAndRewrite(mlir::Operation *op,
   auto i32Ty = rewriter.getIntegerType(32);
   auto seqlensKType = mlir::RankedTensorType::get(
       {hiddenType.isDynamicDim(0) ? mlir::ShapedType::kDynamic : batch}, i32Ty);
+  // A dynamic batch broadcasts one rank-0 value on the device; a host fill
+  // loop would store into a pooled device buffer.
+  auto broadcastToBatch = [&](mlir::Value scalar) {
+    mlir::Value shape =
+        buildShapeTensor(rewriter, loc, mlir::OpFoldResult(batchDyn));
+    mlir::Value init = mlir::tensor::EmptyOp::create(
+        rewriter, loc, seqlensKType, mlir::ValueRange{batchDyn});
+    return mlir::hip::ExpandOp::create(rewriter, loc, context, scalar, shape,
+                                       init)
+        ->getResult(0);
+  };
   mlir::Value seqlensK;
   if (!noCausal) {
     if (batchDyn) {
-      mlir::Value negOne = mlir::arith::ConstantOp::create(
-          rewriter, loc, rewriter.getIntegerAttr(i32Ty, -1));
-      seqlensK = mlir::tensor::GenerateOp::create(
-                     rewriter, loc, seqlensKType, mlir::ValueRange{batchDyn},
-                     [&](mlir::OpBuilder &b, mlir::Location bodyLoc,
-                         mlir::ValueRange) {
-                       mlir::tensor::YieldOp::create(b, bodyLoc, negOne);
-                     })
-                     .getResult();
+      seqlensK = broadcastToBatch(buildRank0Constant(
+          rewriter, loc, rewriter.getIntegerAttr(i32Ty, -1)));
     } else {
       auto attr = mlir::DenseElementsAttr::get(
           seqlensKType, rewriter.getIntegerAttr(i32Ty, -1));
@@ -374,19 +496,16 @@ AttentionToHip::matchAndRewrite(mlir::Operation *op,
     seqlensK = mlir::tensor::FromElementsOp::create(rewriter, loc, seqlensKType,
                                                     elems);
   } else {
-    mlir::Value seqI32;
+    mlir::Value seqScalar;
     if (seqDyn)
-      seqI32 = mlir::arith::IndexCastOp::create(rewriter, loc, i32Ty, seqDyn);
+      seqScalar = mlir::tensor::FromElementsOp::create(
+          rewriter, loc, mlir::RankedTensorType::get({}, i32Ty),
+          mlir::ValueRange{
+              mlir::arith::IndexCastOp::create(rewriter, loc, i32Ty, seqDyn)});
     else
-      seqI32 = mlir::arith::ConstantOp::create(
-          rewriter, loc, rewriter.getIntegerAttr(i32Ty, seqLen));
-    seqlensK =
-        mlir::tensor::GenerateOp::create(
-            rewriter, loc, seqlensKType, mlir::ValueRange{batchDyn},
-            [&](mlir::OpBuilder &b, mlir::Location bodyLoc, mlir::ValueRange) {
-              mlir::tensor::YieldOp::create(b, bodyLoc, seqI32);
-            })
-            .getResult();
+      seqScalar = buildRank0Constant(rewriter, loc,
+                                     rewriter.getIntegerAttr(i32Ty, seqLen));
+    seqlensK = broadcastToBatch(seqScalar);
   }
 
   // The runtime derives the KV span from seqlens_k. total_seq_len is still a
