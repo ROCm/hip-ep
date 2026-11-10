@@ -859,6 +859,13 @@ void populateHardSigmoidConversionPatterns(RewritePatternSet &patterns,
 void populateLpNormalizationConversionPatterns(RewritePatternSet &patterns,
                                                MLIRContext *ctx);
 
+/// Pre-lowering pattern set: decompose `onnx.ReduceSumSquare` into
+/// onnx.Mul + onnx.ReduceSum, its ONNX function body. Lives in the
+/// pre-lowering loop for the same reason as LpNormalization. See
+/// ReduceSumSquareConversion.cpp.
+void populateReduceSumSquareConversionPatterns(RewritePatternSet &patterns,
+                                               MLIRContext *ctx);
+
 } // namespace hip
 } // namespace mlir
 
