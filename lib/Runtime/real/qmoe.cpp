@@ -126,6 +126,22 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   // the small-M kernel cannot run use the ragged GEMM; a class its kernel
   // cannot run folds into the class below.
   constexpr int64_t kGroupedTallRows = 64;
+  // Each class is one launch even when empty, since the host does not see the
+  // expert counts, and a taller tile only pays off once it is mostly full or
+  // saves enough weight reads. So the 64- and 128-row classes run only above
+  // an average of kGroupedTallMinAvgRows routed rows per expert, and for
+  // experts whose fc1 weights are under kGroupedSmallExpertBytes only above
+  // kGroupedTallMinAvgRowsSmall; otherwise those experts stay in the 32-row
+  // class.
+  constexpr int64_t kGroupedTallMinAvgRows = 16;
+  constexpr int64_t kGroupedTallMinAvgRowsSmall = 64;
+  constexpr int64_t kGroupedSmallExpertBytes = int64_t{3} << 19;
+  const int64_t fc1_expert_bytes =
+      fusion_inter * hidden_size * expert_weight_bits / 8;
+  const int64_t min_avg_rows = fc1_expert_bytes < kGroupedSmallExpertBytes
+                                   ? kGroupedTallMinAvgRowsSmall
+                                   : kGroupedTallMinAvgRows;
+  const bool many_rows = routed_rows > min_avg_rows * num_experts;
   auto grouped_fits = [&](int64_t tile_rows) {
     return hip_matmul_nbits_wmma_smallm_grouped_supported(
                -1, tile_rows, fusion_inter, hidden_size, expert_weight_bits,
@@ -138,9 +154,9 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   const bool grouped =
       num_tokens > 1 && grouped_fits(16) && grouped_fits(32) &&
       (HIP_QMOE_MAX_ROW_TILE_CLASSES + 1) * num_experts * 4 <= 65536;
-  const bool wide = grouped && grouped_fits(64);
+  const bool wide = grouped && many_rows && grouped_fits(64);
   const bool tall =
-      grouped && !fc1_zero_points && !fc2_zero_points &&
+      grouped && many_rows && !fc1_zero_points && !fc2_zero_points &&
       hip_matmul_nbits_wmma_tiled_grouped_supported(fusion_inter, hidden_size,
                                                     expert_weight_bits,
                                                     block_size, elem_size) &&

@@ -6,8 +6,7 @@
  * GemmFp16U4Impl (matmul_nbits_wmma_core.h, which every existing kWmmaConfigs
  * entry keeps using) plus these pipeline options, specialized to the one
  * contract its callers use (fused int4 dequant, fp16 zero points, dense tile
- * mapping or one pinned row tile, whole K-steps, optional output bias and
- * gathered A rows):
+ * mapping, whole K-steps, no bias):
  *   PGR_P   global prefetch depth (1, or 2 register sets)
  *   ADDR_P  1 = wave-uniform source base plus 32-bit per-thread offsets
  *   PIPE_P  1 = store-first: write tile i+1 to LDS, issue tile i+2, then run
@@ -16,6 +15,9 @@
  *           2 LDS reads + global loads, 3 dequant VALU only
  *   EPI_P   1 = stage C through LDS and write 16-byte rows
  *   XOR_P   1 = XOR-swizzle 16-byte LDS chunks instead of padding rows
+ *   GROUPED_P 1 = grouped launcher contract instead: one pinned row tile, an
+ *           optional output bias and optional gathered A rows. A separate
+ *           instantiation, so the dense entries' code does not change.
  * Device-only implementation; no public ABI.
  */
 
@@ -37,7 +39,8 @@
  * Matrix Core op drop by a quarter. */
 template <int BM_T, int BN_T, int WT_M, int WT_N, bool USE_ZEROS,
           bool BOUNDS_CHECK, int BK_IN, int PGR_P = 1, int ADDR_P = 0,
-          int PIPE_P = 0, int SCHED_P = 0, int EPI_P = 0, int XOR_P = 0>
+          int PIPE_P = 0, int SCHED_P = 0, int EPI_P = 0, int XOR_P = 0,
+          bool GROUPED_P = false>
 __device__ __forceinline__
 void GemmFp16U4ImplX(
     int M, int N, int K,
@@ -57,14 +60,16 @@ void GemmFp16U4ImplX(
      * padded buffer. As a template parameter it would multiply the
      * instantiation count of every tile shape. */
     int b_row_bytes = 0,
-    /* >= 0 pins the row tile instead of deriving it from blockIdx.y, for a
-     * grouped launcher whose grid y indexes a tile list and whose A/C already
-     * point at the tile's first row. Needs swizzle_n <= 1. */
-    int fixed_row_tile = -1,
-    /* Optional fp16 [N] bias added in fp32 before the output conversion. */
+    /* GROUPED_P only. The row tile, used instead of blockIdx.y by a grouped
+     * launcher whose grid y indexes a tile list and whose A/C already point
+     * at the tile's first row. Needs swizzle_n <= 1. */
+    int fixed_row_tile = 0,
+    /* GROUPED_P only. Optional fp16 [N] bias added in fp32 before the output
+     * conversion. */
     const _Float16* __restrict__ output_bias = nullptr,
-    /* Optional source row per A row: row r reads A row a_row_ids[r], so a
-     * caller can gather rows without staging them. Needs ADDR_P = 0. */
+    /* GROUPED_P only. Optional source row per A row: row r reads A row
+     * a_row_ids[r], so a caller can gather rows without staging them. Needs
+     * ADDR_P = 0. */
     const int32_t* __restrict__ a_row_ids = nullptr)
 {
     constexpr int WM_L   = BM_T / (WT_M * 16);
@@ -222,7 +227,7 @@ void GemmFp16U4ImplX(
             // Direct mapping is used by ragged grouped WMMA: its launcher can
             // then reject blockIdx.y tiles beyond each expert's row count before
             // entering the expensive K loop.
-            by = fixed_row_tile >= 0 ? fixed_row_tile : static_cast<int>(blockIdx.y);
+            by = GROUPED_P ? fixed_row_tile : static_cast<int>(blockIdx.y);
             bx = static_cast<int>(blockIdx.x);
         } else {
             const int block_id = blockIdx.y * n_tiles + blockIdx.x;
@@ -300,7 +305,7 @@ void GemmFp16U4ImplX(
         const int logical_row = row0 + a_row[c];
         a_valid[c] = logical_row < M;
         int source_row = a_valid[c] ? logical_row : 0;
-        if (a_row_ids) source_row = a_row_ids[source_row];
+        if (GROUPED_P && a_row_ids) source_row = a_row_ids[source_row];
         a_src[c] = A + static_cast<size_t>(source_row) * lda + a_koff[c];
     }
 
@@ -778,7 +783,8 @@ void GemmFp16U4ImplX(
                         const int r = (wrow * WT_M + wm) * WMMA_TILE + hipdnn_wmma_acc_row(sub, e);
                         const int cc = (wcol * WT_N + wn) * WMMA_TILE + lane;
                         float value = acc[wm][wn][e];
-                        if (output_bias) value += static_cast<float>(output_bias[col0 + cc]);
+                        if (GROUPED_P && output_bias)
+                            value += static_cast<float>(output_bias[col0 + cc]);
                         smC[r * C_STR + cc] = (_Float16)value;
                     }
             HIPDNN_LDS_BARRIER();
@@ -817,7 +823,8 @@ void GemmFp16U4ImplX(
                 _Float16* cp = crow + static_cast<int64_t>(r - r0) * ldc;
                 if (!BOUNDS_CHECK || (mbase + r < M && nbase + lane < N)) {
                     float value = acc[wm][wn][e];
-                    if (output_bias) value += static_cast<float>(output_bias[nbase + lane]);
+                    if (GROUPED_P && output_bias)
+                        value += static_cast<float>(output_bias[nbase + lane]);
                     *cp = (_Float16)value;
                 }
             }
