@@ -630,6 +630,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
         populateFastGeluFusionPatterns(preLoweringPatterns, ctx);
         populateErfGeluFusionPatterns(preLoweringPatterns, ctx);
         populateGegluFusionPatterns(preLoweringPatterns, ctx);
+        populateGroupNormFusionPatterns(preLoweringPatterns, ctx);
         populateProjectorOpsRewritePatterns(preLoweringPatterns, ctx);
         populateLpNormalizationConversionPatterns(preLoweringPatterns, ctx);
         populatePowDecompositionPatterns(preLoweringPatterns, ctx);

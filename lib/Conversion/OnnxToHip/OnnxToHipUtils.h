@@ -845,6 +845,14 @@ void populateErfGeluFusionPatterns(RewritePatternSet &patterns,
 /// GegluFusion.cpp.
 void populateGegluFusionPatterns(RewritePatternSet &patterns, MLIRContext *ctx);
 
+/// Pre-lowering pattern set: rewrite the InstanceNormalization spelling of an
+/// NCHW GroupNorm (Reshape / InstanceNormalization / Reshape / per-channel Mul
+/// and Add, optionally followed by SiLU) into `com.microsoft.GroupNorm` with
+/// channels_last = 0. Must run while the constants are still `onnx.Constant`.
+/// See GroupNormFusion.cpp.
+void populateGroupNormFusionPatterns(RewritePatternSet &patterns,
+                                     MLIRContext *ctx);
+
 /// Pre-lowering pattern set: decompose vision/projector ops that have no
 /// direct MorphiZen converter into supported primitives —
 /// AveragePool(kernel==stride) → Reshape/Transpose/ReduceMean, Pow(x, c) →

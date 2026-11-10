@@ -153,6 +153,83 @@ __global__ void hip_group_norm_kernel(const T *__restrict__ input,
   }
 }
 
+// fp16 NCHW with spatial % 8 == 0 and 16-byte aligned buffers. In NCHW the
+// group of one image is cpg * spatial contiguous elements, and with that
+// divisibility every 8-element vector of it lies inside one channel, so both
+// passes run on 16-byte loads with no per-element index math. The sums are
+// taken relative to the group's first element, which keeps E[x^2] - E[x]^2
+// from cancelling when the mean is large against the spread.
+constexpr int kGroupNormVecThreads = 512;
+
+__device__ inline float groupNormBlockSum(float v, float *smem) {
+  for (int off = 16; off > 0; off >>= 1)
+    v += __shfl_xor(v, off, 32);
+  const int wave = threadIdx.x / 32;
+  __syncthreads(); // smem reuse across calls
+  if (threadIdx.x % 32 == 0)
+    smem[wave] = v;
+  __syncthreads();
+  float t = 0.0f;
+  for (int w = 0; w < kGroupNormVecThreads / 32; ++w)
+    t += smem[w];
+  return t;
+}
+
+__global__ __launch_bounds__(kGroupNormVecThreads) void
+hip_group_norm_nchw_vec_kernel(const __half *__restrict__ input,
+                               const __half *__restrict__ scale,
+                               const __half *__restrict__ bias,
+                               __half *__restrict__ output, int64_t channels,
+                               int64_t spatial, int64_t groups, int activation,
+                               float epsilon) {
+  __shared__ float smem[kGroupNormVecThreads / 32];
+  const int64_t row = blockIdx.x; // n * groups + group
+  const int64_t group = row % groups;
+  const int64_t cpg = channels / groups;
+  const int64_t count = cpg * spatial;
+  const int64_t base = row * count;
+  const uint4 *in = reinterpret_cast<const uint4 *>(input + base);
+  uint4 *out = reinterpret_cast<uint4 *>(output + base);
+  const uint32_t vecs = static_cast<uint32_t>(count / 8);
+  const uint32_t vecsPerChannel = static_cast<uint32_t>(spatial / 8);
+
+  const float shift = __half2float(input[base]);
+  float s = 0.0f, ss = 0.0f;
+  for (uint32_t v = threadIdx.x; v < vecs; v += kGroupNormVecThreads) {
+    uint4 raw = in[v];
+    const __half *h = reinterpret_cast<const __half *>(&raw);
+#pragma unroll
+    for (int e = 0; e < 8; ++e) {
+      const float d = __half2float(h[e]) - shift;
+      s += d;
+      ss += d * d;
+    }
+  }
+  s = groupNormBlockSum(s, smem);
+  ss = groupNormBlockSum(ss, smem);
+  const float inv = 1.0f / static_cast<float>(count);
+  const float dmean = s * inv;
+  const float var = fmaxf(ss * inv - dmean * dmean, 0.0f);
+  const float mean = shift + dmean;
+  const float invStd = rsqrtf(var + epsilon);
+
+  for (uint32_t v = threadIdx.x; v < vecs; v += kGroupNormVecThreads) {
+    const int64_t c = group * cpg + v / vecsPerChannel;
+    const float a = invStd * __half2float(scale[c]);
+    const float b = __half2float(bias[c]) - mean * a;
+    uint4 raw = in[v];
+    __half *h = reinterpret_cast<__half *>(&raw);
+#pragma unroll
+    for (int e = 0; e < 8; ++e) {
+      float y = __half2float(h[e]) * a + b;
+      if (activation)
+        y = y / (1.0f + __expf(-y));
+      h[e] = __float2half(y);
+    }
+    out[v] = raw;
+  }
+}
+
 extern "C" int hip_group_norm(void *stream, const void *input,
                               const void *scale, const void *bias, void *output,
                               int64_t n, int64_t c, int64_t spatial,
@@ -180,7 +257,20 @@ extern "C" int hip_group_norm(void *stream, const void *input,
       hip_dtype, (long long)n, (long long)c, (long long)spatial,
       (long long)groups, channels_last, activation, epsilon);
 
-  if (hip_dtype == HIP_DTYPE_FLOAT16) {
+  auto aligned16 = [](const void *p) {
+    return (reinterpret_cast<uintptr_t>(p) & 15u) == 0;
+  };
+  if (hip_dtype == HIP_DTYPE_FLOAT16 && channels_last == 0 &&
+      spatial % 8 == 0 && (c / groups) * spatial < (int64_t{1} << 31) &&
+      aligned16(input) && aligned16(output)) {
+    hipLaunchKernelGGL(hip_group_norm_nchw_vec_kernel, grid,
+                       dim3(kGroupNormVecThreads), 0, hip_stream,
+                       static_cast<const __half *>(input),
+                       static_cast<const __half *>(scale),
+                       static_cast<const __half *>(bias),
+                       static_cast<__half *>(output), c, spatial, groups,
+                       activation, epsilon);
+  } else if (hip_dtype == HIP_DTYPE_FLOAT16) {
     hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_group_norm_kernel<__half>), grid,
                        block, 0, hip_stream, static_cast<const __half *>(input),
                        static_cast<const __half *>(scale),

@@ -76,6 +76,7 @@ add_library(OnnxToHip STATIC
   FastGeluFusion.cpp
   ErfGeluFusion.cpp
   GegluFusion.cpp
+  GroupNormFusion.cpp
   ProjectorOpsRewrites.cpp
   LpNormalizationConversion.cpp
   EqualConversion.cpp
