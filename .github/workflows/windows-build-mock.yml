@@ -41,19 +41,35 @@ jobs:
           fetch-depth: 0
           show-progress: false
 
+      # Caches are the fast path. The prebuild always uploads this run's copy,
+      # so download-artifact still works after a later cache eviction.
       - name: Restore llvm-install
+        id: restore-llvm
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/llvm-install
           key: ${{ inputs.llvm_cache_key }}
-          fail-on-cache-miss: true
+
+      - name: Download llvm-install
+        if: steps.restore-llvm.outputs.cache-hit != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.llvm_cache_key }}
+          path: ${{ runner.workspace }}/llvm-install
 
       - name: Restore ort-install
+        id: restore-ort
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/ort-install
           key: ${{ inputs.ort_cache_key }}
-          fail-on-cache-miss: true
+
+      - name: Download ort-install
+        if: steps.restore-ort.outputs.cache-hit != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.ort_cache_key }}
+          path: ${{ runner.workspace }}/ort-install
 
       # -----------------------------------------------------------------------
       # llvm-lit.py requires the lit pip package at runtime. Pin Python to
