@@ -284,8 +284,6 @@ __global__ void __launch_bounds__(kBlockSize) gatedDeltaNetChunkedKernel(
   const int wave = tid / kLanes;
   const int ln = lane % kWt;
   const int pr = lane / kWt;
-  // Tile owned in the kChunk x kChunk phases: side 0 carries k.k, R and U;
-  // side 1 carries q.k, S0 q and O.
   const int side = wave / 4;
   const int ti = (wave % 4) / 2;
   const int tc = (wave % 4) % 2;
@@ -315,7 +313,6 @@ __global__ void __launch_bounds__(kBlockSize) gatedDeltaNetChunkedKernel(
        slice * kSliceV) *
       DK;
 
-  // State tiles (v tile, k tile) = (wave / 4, (wave % 4) * kStateTiles + q).
   gdnFloat8 sAcc[kStateTiles];
   auto storeStateCopy = [&](int q) {
 #pragma unroll
@@ -338,9 +335,6 @@ __global__ void __launch_bounds__(kBlockSize) gatedDeltaNetChunkedKernel(
     storeStateCopy(q);
   }
 
-  // The next chunk's inputs are fetched into registers while the current one
-  // is computed: q / k by one wave per token, the gates of token `lane`, and
-  // the R tile's v.
   gdnHalf4 pq[kTokensPerWave];
   gdnHalf4 pk[kTokensPerWave];
   float pDecay;
@@ -416,7 +410,6 @@ __global__ void __launch_bounds__(kBlockSize) gatedDeltaNetChunkedKernel(
       prefetch(t0 + kChunk);
     }
 
-    // In-chunk cumulative log decay (lane c holds G_c).
     float gCum = gTok;
 #pragma unroll
     for (int off = 1; off < kLanes; off <<= 1) {
@@ -431,7 +424,6 @@ __global__ void __launch_bounds__(kBlockSize) gatedDeltaNetChunkedKernel(
     }
 
     _Float16(*lhs)[kRawStride] = side == 0 ? kRaw : qRaw;
-    // A (side 0, from k.k) and P (side 1, from q.k).
     {
       gdnFloat8 acc = {};
       if (ti >= tc) {
@@ -463,7 +455,6 @@ __global__ void __launch_bounds__(kBlockSize) gatedDeltaNetChunkedKernel(
         }
       }
     }
-    // S0 k (side 0, into R) and S0 q (side 1, kept as the O accumulator).
     gdnFloat8 oAcc = {};
     {
       gdnFloat8 acc = {};
@@ -492,7 +483,6 @@ __global__ void __launch_bounds__(kBlockSize) gatedDeltaNetChunkedKernel(
     }
     __syncthreads();
 
-    // T = (I + A)^-1 by forward substitution; lane c owns column c.
     if (wave == 0) {
       float tcol[kChunk];
       float tMax = 0.0f;
@@ -519,8 +509,8 @@ __global__ void __launch_bounds__(kBlockSize) gatedDeltaNetChunkedKernel(
     }
     __syncthreads();
 
-    // U = T R. Entries of T can grow geometrically along a chunk; past the
-    // fp16 range of the split operands the product runs in fp32.
+    // Entries of T can grow geometrically along a chunk; past the fp16 range
+    // of the split operands, T R runs in fp32.
     if (side == 0 && !tLargeS) {
       gdnFloat8 acc = {};
       for (int tj = 0; tj <= ti; ++tj) {
@@ -549,7 +539,6 @@ __global__ void __launch_bounds__(kBlockSize) gatedDeltaNetChunkedKernel(
     }
     __syncthreads();
 
-    // O = scale (S0 q + P U).
     if (side == 1) {
       for (int tj = 0; tj <= ti; ++tj) {
         gdnMma<true, true>(
@@ -568,7 +557,6 @@ __global__ void __launch_bounds__(kBlockSize) gatedDeltaNetChunkedKernel(
       }
     }
 
-    // S = e^{G_last} S0 + (w U)^T k_raw.
     const float eLast = __expf(gLast);
 #pragma unroll
     for (int q = 0; q < kStateTiles; ++q) {
