@@ -4723,7 +4723,8 @@ __device__ __forceinline__ void smallmDequant8(uint32_t packed, uint32_t bias_pk
 // buffer, [waves][TM*TN][8][32] floats. zp_mode: 0 none (symmetric 8),
 // kSmallMZpFp16 fp16 [N][zp_stride], kSmallMZpU4 MatMulNBits packed nibbles
 // [N][zp_stride bytes]; a 4-bit integer converts to fp16 exactly, so both give
-// the same B values.
+// the same B values. A non-null a_row_ids gathers A: row m reads A row
+// a_row_ids[m].
 constexpr int kSmallMZpFp16 = 1;
 constexpr int kSmallMZpU4 = 2;
 
@@ -4736,7 +4737,8 @@ __device__ __forceinline__ void SmallMWmmaImpl(
     const void* __restrict__ zeros, int zp_mode, int zp_stride,
     const _Float16* __restrict__ bias,
     int group_shift, int num_groups_k,
-    _Float16* __restrict__ C, int ldc)
+    _Float16* __restrict__ C, int ldc,
+    const int32_t* __restrict__ a_row_ids = nullptr)
 {
     // Fragment words: a gfx11 lane holds the whole 16-wide K step (8 dwords of
     // fp16), a gfx12-style lane half of it (4 dwords).
@@ -4800,7 +4802,8 @@ __device__ __forceinline__ void SmallMWmmaImpl(
     for (int tm = 0; tm < TM; tm++) {
         const int m = row0 + tm * 16 + lane;
         a_ok[tm] = m < M;
-        a_row[tm] = A + static_cast<size_t>(a_ok[tm] ? m : 0) * lda + c0 * 32 + k_off;
+        const int src = a_ok[tm] ? (a_row_ids ? a_row_ids[m] : m) : 0;
+        a_row[tm] = A + static_cast<size_t>(src) * lda + c0 * 32 + k_off;
     }
 
     u32x4    rb[DB][TN];
@@ -4901,7 +4904,8 @@ __device__ __forceinline__ void SmallMWmmaImpl(
 
 // Ragged expert batch over a device-built row-tile list: blockIdx.y is a tile
 // slot holding (expert, row0, rows) with rows <= TM*16, blockIdx.x the column
-// tile. The expert's rows start at expert_row_offsets[expert] in both A and C;
+// tile. The expert's rows start at expert_row_offsets[expert] in C, and in A
+// too unless a_row_ids is given: then grouped row r reads A row a_row_ids[r].
 // B, scales, zeros and bias are expert-major. Slots at or past *num_row_tiles
 // exit before touching memory, so grid.y only needs a host-side upper bound.
 // Column-fastest order keeps concurrently running workgroups on contiguous
@@ -4912,6 +4916,7 @@ __global__ __launch_bounds__(512)
 void MatMulNBitsWMMA_SmallM_Grouped(
     int N, int K,
     const _Float16* __restrict__ A,
+    const int32_t* __restrict__ a_row_ids,
     const unsigned char* __restrict__ B, int b_row_bytes,
     const _Float16* __restrict__ scales,
     const void* __restrict__ zeros, int zp_mode, int zp_stride,
@@ -4933,13 +4938,13 @@ void MatMulNBitsWMMA_SmallM_Grouped(
     const size_t zp_elem = zp_mode == kSmallMZpFp16 ? sizeof(_Float16) : 1;
     SmallMWmmaImpl<TM, TN, CPW, DB, DA, FULL>(
         smallm_red, row0 + rows, N, K, row0,
-        static_cast<int>(blockIdx.x) * TN * 16, A + off * K, K,
+        static_cast<int>(blockIdx.x) * TN * 16, a_row_ids ? A : A + off * K, K,
         B + e_rows * b_row_bytes, b_row_bytes,
         scales + e_rows * num_groups_k,
         zp_mode ? static_cast<const char*>(zeros) + e_rows * zp_stride * zp_elem
                 : nullptr,
         zp_mode, zp_stride, bias ? bias + e_rows : nullptr, group_shift,
-        num_groups_k, C + off * N, N);
+        num_groups_k, C + off * N, N, a_row_ids ? a_row_ids + off : nullptr);
 }
 
 // Config chosen by tile height when the caller passes cfg < 0. Picked from a
@@ -5009,8 +5014,8 @@ extern "C" int hip_matmul_nbits_wmma_smallm_grouped_supported(
     X(6, 1, 1, 16, 16, 2) X(7, 2, 1, 16, 16, 1)
 
 extern "C" int hip_matmul_nbits_wmma_smallm_grouped(
-    void* stream, int cfg,
-    const void* A, const void* B, const void* scales, const void* zero_points,
+    void* stream, int cfg, const void* A, const void* a_row_ids,
+    const void* B, const void* scales, const void* zero_points,
     int zp_packed_u4, const void* bias, const void* expert_row_offsets,
     const void* row_tiles, const void* num_row_tiles, void* output,
     int64_t max_row_tiles, int64_t tile_rows, int64_t N, int64_t K,
@@ -5035,6 +5040,7 @@ extern "C" int hip_matmul_nbits_wmma_smallm_grouped(
           MatMulNBitsWMMA_SmallM_Grouped<TM, TN, CPW, DB, DA, FULL>),         \
       grid, block, p.lds_bytes, s, static_cast<int>(N), static_cast<int>(K),  \
       static_cast<const _Float16*>(A),                                        \
+      static_cast<const int32_t*>(a_row_ids),                                 \
       static_cast<const unsigned char*>(B), p.b_row_bytes,                    \
       static_cast<const _Float16*>(scales), zero_points, p.zp_mode,           \
       p.zp_stride, static_cast<const _Float16*>(bias),                        \
@@ -5067,8 +5073,9 @@ extern "C" int hip_matmul_nbits_wmma_smallm_grouped(
 // an expert's weights are read once per BM rows instead of once per 16-64.
 // Column-fastest order, as in the direct-B kernel, keeps the running
 // workgroups on one expert's weights. The tile is the 4x4-warp-tile,
-// two-deep-prefetch entry of the dense table (128 threads); A and C are
-// offset to the slot's first row, so the core sees a single row tile.
+// two-deep-prefetch entry of the dense table (128 threads); C, and A or
+// a_row_ids, are offset to the slot's first row, so the core sees a single
+// row tile.
 static constexpr int kTiledGroupedBm = HIP_MATMUL_NBITS_TILED_GROUPED_ROWS;
 static constexpr int kTiledGroupedBn = 128;
 
@@ -5080,6 +5087,7 @@ __attribute__((amdgpu_waves_per_eu(1)))
 void MatMulNBitsWMMA_Tiled_Grouped(
     int N, int K,
     const _Float16* __restrict__ A,
+    const int32_t* __restrict__ a_row_ids,
     const unsigned char* __restrict__ B, int b_row_bytes,
     const _Float16* __restrict__ scales,
     const _Float16* __restrict__ bias,
@@ -5098,10 +5106,10 @@ void MatMulNBitsWMMA_Tiled_Grouped(
     const size_t e_cols = static_cast<size_t>(expert) * N;
     GemmFp16U4ImplX<kTiledGroupedBm, kTiledGroupedBn, 4, 4, /*USE_ZEROS=*/false,
                     /*BOUNDS_CHECK=*/true, /*BK_IN=*/32, /*PGR_P=*/2>(
-        rows, N, K, A + row0 * K, K, B + e_cols * b_row_bytes,
+        rows, N, K, a_row_ids ? A : A + row0 * K, K, B + e_cols * b_row_bytes,
         scales + e_cols * num_groups_k, nullptr, group_size, num_groups_k,
         C + row0 * N, N, /*swizzle_n=*/1, b_row_bytes, /*fixed_row_tile=*/0,
-        bias ? bias + e_cols : nullptr);
+        bias ? bias + e_cols : nullptr, a_row_ids ? a_row_ids + row0 : nullptr);
 }
 
 extern "C" int hip_matmul_nbits_wmma_tiled_grouped_supported(
@@ -5115,8 +5123,9 @@ extern "C" int hip_matmul_nbits_wmma_tiled_grouped_supported(
 }
 
 extern "C" int hip_matmul_nbits_wmma_tiled_grouped(
-    void* stream, const void* A, const void* B, const void* scales,
-    const void* bias, const void* expert_row_offsets, const void* row_tiles,
+    void* stream, const void* A, const void* a_row_ids, const void* B,
+    const void* scales, const void* bias, const void* expert_row_offsets,
+    const void* row_tiles,
     const void* num_row_tiles, void* output, int64_t max_row_tiles, int64_t N,
     int64_t K, int64_t bits, int64_t block_size, int64_t element_size_bytes) {
   if (max_row_tiles <= 0 || N <= 0 || K <= 0) return 0;
@@ -5134,6 +5143,7 @@ extern "C" int hip_matmul_nbits_wmma_tiled_grouped(
       dim3(GEMM_WG_SZ(kTiledGroupedBm, kTiledGroupedBn, 4, 4)), 0,
       static_cast<hipStream_t>(stream), static_cast<int>(N),
       static_cast<int>(K), static_cast<const _Float16*>(A),
+      static_cast<const int32_t*>(a_row_ids),
       static_cast<const unsigned char*>(B), b_row_bytes,
       static_cast<const _Float16*>(scales), static_cast<const _Float16*>(bias),
       static_cast<const int32_t*>(expert_row_offsets),

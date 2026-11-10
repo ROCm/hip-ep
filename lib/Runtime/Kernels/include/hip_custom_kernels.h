@@ -2691,6 +2691,10 @@ HIP_KERNEL_API int hip_matmul_nbits_grouped_wmma(
  *   A / output         : fp16 rows packed back-to-back in expert order; expert
  *                        e's rows start at expert_row_offsets[e] (int32,
  *                        device). A is [rows, K], output [rows, N].
+ *   a_row_ids          : nullptr, or int32 [rows] (device): grouped row r then
+ *                        reads row a_row_ids[r] of A, so the expert rows are
+ *                        gathered from A (e.g. the token rows of a MoE input)
+ *                        without staging them.
  *   B, scales          : expert-major MatMulNBits layout
  *                        ([E, N, ceil(K/2)] packed, fp16 [E, N, ceil(K/bs)])
  *   zero_points        : nullptr for symmetric (zp = 8); with zp_packed_u4 != 0
@@ -2710,8 +2714,8 @@ HIP_KERNEL_API int hip_matmul_nbits_grouped_wmma(
  * (default configs: K <= 9216 for tile_rows <= 32, K <= 5120 above); returns
  * -1 otherwise. */
 HIP_KERNEL_API int hip_matmul_nbits_wmma_smallm_grouped(
-    void* stream, int cfg,
-    const void* A, const void* B, const void* scales, const void* zero_points,
+    void* stream, int cfg, const void* A, const void* a_row_ids,
+    const void* B, const void* scales, const void* zero_points,
     int zp_packed_u4, const void* bias, const void* expert_row_offsets,
     const void* row_tiles, const void* num_row_tiles, void* output,
     int64_t max_row_tiles, int64_t tile_rows, int64_t N, int64_t K,
@@ -2736,9 +2740,10 @@ HIP_KERNEL_API int hip_matmul_nbits_wmma_smallm_grouped_supported(
  * Requires wave32 WMMA, bits == 4, fp16, K % 32 == 0 and a power-of-two
  * block_size >= 32; returns -1 otherwise. */
 HIP_KERNEL_API int hip_matmul_nbits_wmma_tiled_grouped(
-    void* stream, const void* A, const void* B, const void* scales,
-    const void* bias, const void* expert_row_offsets, const void* row_tiles,
-    const void* num_row_tiles, void* output, int64_t max_row_tiles, int64_t N,
+    void* stream, const void* A, const void* a_row_ids, const void* B,
+    const void* scales, const void* bias, const void* expert_row_offsets,
+    const void* row_tiles, const void* num_row_tiles, void* output,
+    int64_t max_row_tiles, int64_t N,
     int64_t K, int64_t bits, int64_t block_size, int64_t element_size_bytes);
 
 /* 1 when hip_matmul_nbits_wmma_tiled_grouped accepts this shape, else 0. */

@@ -225,10 +225,8 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
       align_up_64(num_tokens * k * inter_size * sizeof(int8_t));
   size_t sz_a_scale_mid =
       align_up_64(num_tokens * k * k_blocks_fc2 * sizeof(float));
-  // Grouped prefill only: the gathered fc1 input rows, the row-tile lists
-  // (3 int32 per tile) and their device-side lengths.
-  size_t sz_gather_buf =
-      grouped ? align_up_64(routed_rows * hidden_size * elem_size) : 0;
+  // Grouped prefill only: the row-tile lists (3 int32 per tile) and their
+  // device-side lengths.
   size_t tile_list_off[HIP_QMOE_MAX_ROW_TILE_CLASSES] = {};
   size_t sz_tile_lists = 0;
   for (int c = 0; c < num_tile_classes; c++) {
@@ -256,8 +254,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   size_t off_a_scale_in = off_a_qb_in + sz_a_qb_in;
   size_t off_a_qb_mid = off_a_scale_in + sz_a_scale_in;
   size_t off_a_scale_mid = off_a_qb_mid + sz_a_qb_mid;
-  size_t off_gather_buf = off_a_scale_mid + sz_a_scale_mid;
-  size_t off_tile_lists = off_gather_buf + sz_gather_buf;
+  size_t off_tile_lists = off_a_scale_mid + sz_a_scale_mid;
   size_t off_num_tiles = off_tile_lists + sz_tile_lists;
   size_t off_row_scale = off_num_tiles + sz_num_tiles;
   size_t total_scratch = off_row_scale + sz_row_scale;
@@ -295,7 +292,6 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   void *d_a_scale_in = scratch_base + off_a_scale_in;
   void *d_a_qb_mid = scratch_base + off_a_qb_mid;
   void *d_a_scale_mid = scratch_base + off_a_scale_mid;
-  void *d_gather_buf = scratch_base + off_gather_buf;
   void *d_tile_lists[HIP_QMOE_MAX_ROW_TILE_CLASSES] = {};
   for (int c = 0; c < num_tile_classes; c++)
     d_tile_lists[c] = scratch_base + off_tile_lists + tile_list_off[c];
@@ -499,26 +495,24 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
             stream, d_expert_counts, num_experts, num_tile_classes, lo, hi,
             rows, d_tile_lists, d_num_tiles));
       }
-      OP_ROCTX_MARK("hip_ep.op.qmoe.prefill.gather");
-      HIP_CHECK(hip_qmoe_gather_tokens(stream, input, d_gather_buf,
-                                       d_sorted_token_ids, hidden_size,
-                                       routed_rows, elem_size));
-
-      auto grouped_fc = [&](const void *a, const void *w, const void *s,
-                            const void *zp, const void *b, void *out, int64_t n,
-                            int64_t kdim) -> int {
+      // fc1 reads its rows straight from the input through the sorted token
+      // ids; fc2 reads the activation rows, already in expert order.
+      auto grouped_fc = [&](const void *a, const void *a_row_ids, const void *w,
+                            const void *s, const void *zp, const void *b,
+                            void *out, int64_t n, int64_t kdim) -> int {
         for (int c = 0; c < num_tile_classes; c++) {
           const TileClass &tc = tile_classes[c];
           const int rc =
               tc.tiled
                   ? hip_matmul_nbits_wmma_tiled_grouped(
-                        stream, a, w, s, b, d_expert_offsets, d_tile_lists[c],
-                        d_num_tiles + c, out, max_class_tiles[c], n, kdim,
-                        expert_weight_bits, block_size, elem_size)
+                        stream, a, a_row_ids, w, s, b, d_expert_offsets,
+                        d_tile_lists[c], d_num_tiles + c, out,
+                        max_class_tiles[c], n, kdim, expert_weight_bits,
+                        block_size, elem_size)
                   : hip_matmul_nbits_wmma_smallm_grouped(
-                        stream, -1, a, w, s, zp, /*zp_packed_u4=*/1, b,
-                        d_expert_offsets, d_tile_lists[c], d_num_tiles + c, out,
-                        max_class_tiles[c], tc.rows, n, kdim,
+                        stream, -1, a, a_row_ids, w, s, zp, /*zp_packed_u4=*/1,
+                        b, d_expert_offsets, d_tile_lists[c], d_num_tiles + c,
+                        out, max_class_tiles[c], tc.rows, n, kdim,
                         expert_weight_bits, block_size, elem_size);
           if (rc != 0)
             return rc;
@@ -526,13 +520,14 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
         return 0;
       };
       OP_ROCTX_MARK("hip_ep.op.qmoe.prefill.fc1");
-      HIP_CHECK(grouped_fc(d_gather_buf, fc1_weights, fc1_scales,
+      HIP_CHECK(grouped_fc(input, d_sorted_token_ids, fc1_weights, fc1_scales,
                            fc1_zero_points, fc1_bias, d_fc1_buf, fusion_inter,
                            hidden_size));
       HIP_CHECK(activate());
       OP_ROCTX_MARK("hip_ep.op.qmoe.prefill.fc2");
-      HIP_CHECK(grouped_fc(d_act_buf, fc2_weights, fc2_scales, fc2_zero_points,
-                           fc2_gemm_bias, d_fc2_buf, hidden_size, inter_size));
+      HIP_CHECK(grouped_fc(d_act_buf, nullptr, fc2_weights, fc2_scales,
+                           fc2_zero_points, fc2_gemm_bias, d_fc2_buf,
+                           hidden_size, inter_size));
       OP_ROCTX_MARK("hip_ep.op.qmoe.prefill.reduce");
       HIP_CHECK(hip_qmoe_reduce_sorted_pairs(
           stream, d_fc2_buf, d_pair_to_sorted, d_expert_indices,

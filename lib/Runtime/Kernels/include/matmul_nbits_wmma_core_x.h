@@ -6,7 +6,8 @@
  * GemmFp16U4Impl (matmul_nbits_wmma_core.h, which every existing kWmmaConfigs
  * entry keeps using) plus these pipeline options, specialized to the one
  * contract its callers use (fused int4 dequant, fp16 zero points, dense tile
- * mapping or one pinned row tile, whole K-steps, optional output bias):
+ * mapping or one pinned row tile, whole K-steps, optional output bias and
+ * gathered A rows):
  *   PGR_P   global prefetch depth (1, or 2 register sets)
  *   ADDR_P  1 = wave-uniform source base plus 32-bit per-thread offsets
  *   PIPE_P  1 = store-first: write tile i+1 to LDS, issue tile i+2, then run
@@ -61,7 +62,10 @@ void GemmFp16U4ImplX(
      * point at the tile's first row. Needs swizzle_n <= 1. */
     int fixed_row_tile = -1,
     /* Optional fp16 [N] bias added in fp32 before the output conversion. */
-    const _Float16* __restrict__ output_bias = nullptr)
+    const _Float16* __restrict__ output_bias = nullptr,
+    /* Optional source row per A row: row r reads A row a_row_ids[r], so a
+     * caller can gather rows without staging them. Needs ADDR_P = 0. */
+    const int32_t* __restrict__ a_row_ids = nullptr)
 {
     constexpr int WM_L   = BM_T / (WT_M * 16);
     constexpr int WN_L   = BN_T / (WT_N * 16);
@@ -295,7 +299,8 @@ void GemmFp16U4ImplX(
         a_koff[c]     = (idx % A_ROW_SPLIT) * A_CH;
         const int logical_row = row0 + a_row[c];
         a_valid[c] = logical_row < M;
-        const int source_row = a_valid[c] ? logical_row : 0;
+        int source_row = a_valid[c] ? logical_row : 0;
+        if (a_row_ids) source_row = a_row_ids[source_row];
         a_src[c] = A + static_cast<size_t>(source_row) * lda + a_koff[c];
     }
 

@@ -1182,8 +1182,8 @@ bool run_grouped_partial_block_case(hipStream_t stream) {
   upload(d_num_row_tiles, num_row_tiles);
 
   const int status = hip_matmul_nbits_wmma_smallm_grouped(
-      reinterpret_cast<void*>(stream), -1, d_input.get(), d_weights.get(),
-      d_scales.get(), nullptr, /*zp_packed_u4=*/1, d_bias.get(),
+      reinterpret_cast<void*>(stream), -1, d_input.get(), nullptr,
+      d_weights.get(), d_scales.get(), nullptr, /*zp_packed_u4=*/1, d_bias.get(),
       d_expert_offsets.get(), d_row_tiles.get(), d_num_row_tiles.get(),
       d_output.get(), num_row_tiles[0], tile_rows, n, k, 4, block_size,
       sizeof(__half));
@@ -1209,7 +1209,8 @@ bool run_grouped_partial_block_case(hipStream_t stream) {
 // The grouped GEMM with an explicit config at a K that takes several waves of
 // K chunks: cfg 0/1 run 18 chunks per wave (a guarded last wave here), cfg 6/7
 // run 16 (even waves). cfg 0/6 take 16-row tiles, cfg 1/7 32-row tiles.
-bool run_grouped_cpw_case(hipStream_t stream, int cfg, int k) {
+// gather reads the grouped rows from a shorter token matrix through row ids.
+bool run_grouped_cpw_case(hipStream_t stream, int cfg, int k, bool gather) {
   constexpr int experts = 3;
   constexpr int n = 64;
   constexpr int block_size = 128;
@@ -1227,8 +1228,12 @@ bool run_grouped_cpw_case(hipStream_t stream, int cfg, int k) {
   const std::vector<int32_t> num_row_tiles = {experts};
   const PackedMatrix matrix = make_matrix(experts, n, k, block_size, 21);
 
-  std::vector<__half> input(static_cast<size_t>(rows) * k);
+  const int src_rows = gather ? rows / 2 + 3 : rows;
+  std::vector<int32_t> row_ids(rows);
   for (int row = 0; row < rows; ++row)
+    row_ids[row] = gather ? (row * 7 + 3) % src_rows : row;
+  std::vector<__half> input(static_cast<size_t>(src_rows) * k);
+  for (int row = 0; row < src_rows; ++row)
     for (int col = 0; col < k; ++col)
       input[static_cast<size_t>(row) * k + col] =
           float_to_half(input_value(row + 3, col));
@@ -1237,6 +1242,7 @@ bool run_grouped_cpw_case(hipStream_t stream, int cfg, int k) {
   for (int expert = 0; expert < experts; ++expert) {
     for (int row = expert_offsets[expert]; row < expert_offsets[expert + 1];
          ++row) {
+      const __half* a_row = &input[static_cast<size_t>(row_ids[row]) * k];
       for (int col = 0; col < n; ++col) {
         const size_t expert_col = static_cast<size_t>(expert) * n + col;
         float accumulator = 0.0f;
@@ -1247,9 +1253,7 @@ bool run_grouped_cpw_case(hipStream_t stream, int cfg, int k) {
                                       : static_cast<float>(packed & 0x0f);
           const float scale = half_to_float(
               matrix.scales[expert_col * matrix.k_blocks + col_k / block_size]);
-          accumulator +=
-              half_to_float(input[static_cast<size_t>(row) * k + col_k]) *
-              (q - 8.0f) * scale;
+          accumulator += half_to_float(a_row[col_k]) * (q - 8.0f) * scale;
         }
         expected[static_cast<size_t>(row) * n + col] = float_to_half(
             accumulator + half_to_float(matrix.bias[expert_col]));
@@ -1264,6 +1268,7 @@ bool run_grouped_cpw_case(hipStream_t stream, int cfg, int k) {
   DeviceBuffer<int32_t> d_expert_offsets(expert_offsets.size());
   DeviceBuffer<int32_t> d_row_tiles(row_tiles.size());
   DeviceBuffer<int32_t> d_num_row_tiles(num_row_tiles.size());
+  DeviceBuffer<int32_t> d_row_ids(row_ids.size());
   DeviceBuffer<__half> d_output(expected.size());
   upload(d_input, input);
   upload(d_weights, matrix.weights);
@@ -1272,12 +1277,15 @@ bool run_grouped_cpw_case(hipStream_t stream, int cfg, int k) {
   upload(d_expert_offsets, expert_offsets);
   upload(d_row_tiles, row_tiles);
   upload(d_num_row_tiles, num_row_tiles);
+  upload(d_row_ids, row_ids);
 
   const std::string shape = "grouped_cfg" + std::to_string(cfg) + "_K" +
                             std::to_string(k) + "_tile" +
-                            std::to_string(tile_rows);
+                            std::to_string(tile_rows) +
+                            (gather ? "_gather" : "");
   const int status = hip_matmul_nbits_wmma_smallm_grouped(
-      reinterpret_cast<void*>(stream), cfg, d_input.get(), d_weights.get(),
+      reinterpret_cast<void*>(stream), cfg, d_input.get(),
+      gather ? d_row_ids.get() : nullptr, d_weights.get(),
       d_scales.get(), nullptr, /*zp_packed_u4=*/1, d_bias.get(),
       d_expert_offsets.get(), d_row_tiles.get(), d_num_row_tiles.get(),
       d_output.get(), experts, tile_rows, n, k, 4, block_size, sizeof(__half));
@@ -1410,8 +1418,9 @@ bool run_row_tile_classes_case(hipStream_t stream) {
 // The tall grouped tile over a device-built 128-row list: experts with one
 // row, a partial tile, an exact tile and several tiles; n = 192 leaves a
 // partial column tile, k = 96 an odd and k = 640 an even number of K steps.
+// gather reads the grouped rows from a shorter token matrix through row ids.
 bool run_tiled_grouped_case(hipStream_t stream, int n, int k, int block_size,
-                            bool use_bias) {
+                            bool use_bias, bool gather) {
   const std::vector<int32_t> counts = {1, 0, 65, 128, 129, 300};
   const int experts = static_cast<int>(counts.size());
   std::vector<int32_t> expert_offsets = {0};
@@ -1420,8 +1429,12 @@ bool run_tiled_grouped_case(hipStream_t stream, int n, int k, int block_size,
   const int rows = expert_offsets.back();
   const PackedMatrix matrix = make_matrix(experts, n, k, block_size, 29);
 
-  std::vector<__half> input(static_cast<size_t>(rows) * k);
+  const int src_rows = gather ? rows / 3 + 5 : rows;
+  std::vector<int32_t> row_ids(rows);
   for (int row = 0; row < rows; ++row)
+    row_ids[row] = gather ? (row * 11 + 4) % src_rows : row;
+  std::vector<__half> input(static_cast<size_t>(src_rows) * k);
+  for (int row = 0; row < src_rows; ++row)
     for (int col = 0; col < k; ++col)
       input[static_cast<size_t>(row) * k + col] =
           float_to_half(input_value(row + 5, col));
@@ -1430,6 +1443,7 @@ bool run_tiled_grouped_case(hipStream_t stream, int n, int k, int block_size,
   for (int expert = 0; expert < experts; ++expert) {
     for (int row = expert_offsets[expert]; row < expert_offsets[expert + 1];
          ++row) {
+      const __half* a_row = &input[static_cast<size_t>(row_ids[row]) * k];
       for (int col = 0; col < n; ++col) {
         const size_t expert_col = static_cast<size_t>(expert) * n + col;
         float accumulator = 0.0f;
@@ -1440,9 +1454,7 @@ bool run_tiled_grouped_case(hipStream_t stream, int n, int k, int block_size,
                                       : static_cast<float>(packed & 0x0f);
           const float scale = half_to_float(
               matrix.scales[expert_col * matrix.k_blocks + col_k / block_size]);
-          accumulator +=
-              half_to_float(input[static_cast<size_t>(row) * k + col_k]) *
-              (q - 8.0f) * scale;
+          accumulator += half_to_float(a_row[col_k]) * (q - 8.0f) * scale;
         }
         if (use_bias) accumulator += half_to_float(matrix.bias[expert_col]);
         expected[static_cast<size_t>(row) * n + col] =
@@ -1458,7 +1470,8 @@ bool run_tiled_grouped_case(hipStream_t stream, int n, int k, int block_size,
   const std::string shape = "tiled_grouped_N" + std::to_string(n) + "_K" +
                             std::to_string(k) + "_bs" +
                             std::to_string(block_size) +
-                            (use_bias ? "_bias" : "");
+                            (use_bias ? "_bias" : "") +
+                            (gather ? "_gather" : "");
   int status = -1;
   Metrics metrics;
   if (build_row_tile_classes(stream, counts, classes, &d_tiles,
@@ -1468,15 +1481,18 @@ bool run_tiled_grouped_case(hipStream_t stream, int n, int k, int block_size,
     DeviceBuffer<__half> d_scales(matrix.scales.size());
     DeviceBuffer<__half> d_bias(matrix.bias.size());
     DeviceBuffer<int32_t> d_expert_offsets(expert_offsets.size());
+    DeviceBuffer<int32_t> d_row_ids(row_ids.size());
     DeviceBuffer<__half> d_output(expected.size());
     upload(d_input, input);
     upload(d_weights, matrix.weights);
     upload(d_scales, matrix.scales);
     upload(d_bias, matrix.bias);
     upload(d_expert_offsets, expert_offsets);
+    upload(d_row_ids, row_ids);
     status = hip_matmul_nbits_wmma_tiled_grouped(
-        reinterpret_cast<void*>(stream), d_input.get(), d_weights.get(),
-        d_scales.get(), use_bias ? d_bias.get() : nullptr,
+        reinterpret_cast<void*>(stream), d_input.get(),
+        gather ? d_row_ids.get() : nullptr, d_weights.get(), d_scales.get(),
+        use_bias ? d_bias.get() : nullptr,
         d_expert_offsets.get(), d_tiles.get(), d_num_tiles.get(),
         d_output.get(), class_capacity(counts, classes[0]), n, k, 4,
         block_size, sizeof(__half));
@@ -1996,15 +2012,18 @@ int main(int argc, char** argv) {
   all_pass = run_reduce_scaled_case(stream, 64) && all_pass;
   all_pass = run_reduce_scaled_case(stream, 36) && all_pass;
   all_pass = run_grouped_partial_block_case(stream) && all_pass;
-  // K=1024 is 2 waves of 16 chunks, K=3072 is 6.
+  // K=1024 is 2 waves of 16 chunks, K=3072 is 6; the K=3072 runs gather A.
   for (int cfg : {0, 6, 1, 7})
     for (int k : {1024, 3072})
-      all_pass = run_grouped_cpw_case(stream, cfg, k) && all_pass;
+      all_pass = run_grouped_cpw_case(stream, cfg, k, k == 3072) && all_pass;
   all_pass = run_row_tile_classes_case(stream) && all_pass;
-  all_pass = run_tiled_grouped_case(stream, 256, 640, 32, true) && all_pass;
-  all_pass = run_tiled_grouped_case(stream, 192, 640, 64, false) && all_pass;
-  all_pass = run_tiled_grouped_case(stream, 256, 96, 32, true) && all_pass;
-  all_pass = run_tiled_grouped_case(stream, 128, 2560, 128, true) && all_pass;
+  all_pass =
+      run_tiled_grouped_case(stream, 256, 640, 32, true, false) && all_pass;
+  all_pass =
+      run_tiled_grouped_case(stream, 192, 640, 64, false, true) && all_pass;
+  all_pass = run_tiled_grouped_case(stream, 256, 96, 32, true, false) && all_pass;
+  all_pass =
+      run_tiled_grouped_case(stream, 128, 2560, 128, true, true) && all_pass;
   HIP_CHECK(hipStreamDestroy(stream));
 
   std::cout << (all_pass ? "ALL PASS" : "SOME FAIL") << '\n';

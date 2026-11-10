@@ -43,9 +43,9 @@ Against the in-process CPU reference:
   multi-wave K, the prefill tile classes of `hip_qmoe_build_row_tile_classes`
   (exact lists at the 16/32/64/128-row boundaries), and the 128-row LDS-staged
   tile (`hip_matmul_nbits_wmma_tiled_grouped`) with partial row and column
-  tiles, odd and even K-step counts, and bias on and off. These link the
-  MatMulNBits kernels from `custom_kernels_<arch>.dll`, so they run in the
-  package build.
+  tiles, odd and even K-step counts, and bias on and off; both read A rows
+  gathered through row ids. These link the MatMulNBits kernels from
+  `custom_kernels_<arch>.dll`, so they run in the package build.
 
 ## Shape coverage (3 tiers)
 
