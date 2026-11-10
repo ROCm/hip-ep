@@ -172,10 +172,14 @@ after 1 warmup):
 
 | | Qwen3-4B, CoreLib model (NPU) | Qwen3-4B, GPU (hip-ep) | Phi-4-mini, CoreLib model (NPU) | Phi-4-mini, GPU (hip-ep) |
 |---|---|---|---|---|
-| Prompt processing | 1298 tokens/s | 914 tokens/s | 1460 tokens/s | 460 tokens/s |
-| Token generation | 29.5 tokens/s | 39.6 tokens/s | 33.4 tokens/s | 44.3 tokens/s |
-| Model creation | 1.1 s | 10.9 s | 1.0 s | 8.5 s |
+| Prompt processing | 1815 tokens/s | 327 tokens/s | 1460 tokens/s | 460 tokens/s |
+| Token generation | 34.7 tokens/s | 40.4 tokens/s | 33.4 tokens/s | 44.3 tokens/s |
+| Model creation | 1.1 s | 8.7 s | 1.0 s | 8.5 s |
 | Dedicated GPU memory | 280 MB | 3.4 GB | 291 MB | 3.7 GB |
+
+Each model's two columns were measured back to back. The GPU's Qwen3 prompt
+figure varied widely within the run (stddev 32 ms on a 390 ms prompt; another
+day measured 914 tokens/s), the NPU's held within 0.2 ms.
 
 Qwen3 is Qwen3-4B-Instruct-2507's onnxruntime-genai export; Phi-4-mini is
 `amd/phi-4-mini-instruct-oga-dml` (revision `e751fb68`, the export CoreLib's
