@@ -2423,6 +2423,47 @@ void SwigluOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// GegluOp: ins(input [.., 2F]), outs(output [.., F])
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange GegluOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void GegluOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult GegluOp::verify() {
+  if (failed(verifyDpsComputeOp(*this, {getInput(), getOutput()},
+                                /*numInits=*/1)))
+    return failure();
+  auto inputType = dyn_cast<ShapedType>(getInput().getType());
+  auto outputType = dyn_cast<ShapedType>(getOutput().getType());
+  if (!inputType || !outputType || !inputType.hasRank() ||
+      !outputType.hasRank() || inputType.getRank() < 1 ||
+      inputType.getRank() != outputType.getRank())
+    return emitOpError("expected input and output of the same rank >= 1");
+  if (inputType.getElementType() != outputType.getElementType())
+    return emitOpError("input and output element types must match");
+  const int64_t rank = inputType.getRank();
+  for (int64_t d : llvm::seq<int64_t>(0, rank - 1)) {
+    const int64_t in = inputType.getDimSize(d), out = outputType.getDimSize(d);
+    if (!ShapedType::isDynamic(in) && !ShapedType::isDynamic(out) && in != out)
+      return emitOpError("leading extent ")
+             << d << " differs between input (" << in << ") and output (" << out
+             << ")";
+  }
+  const int64_t in = inputType.getDimSize(rank - 1);
+  const int64_t out = outputType.getDimSize(rank - 1);
+  if (!ShapedType::isDynamic(in) && !ShapedType::isDynamic(out) &&
+      in != 2 * out)
+    return emitOpError("input last extent ")
+           << in << " must be twice the output's " << out;
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // PoolOp: ins(input), outs([output] or [output, indices])
 //===----------------------------------------------------------------------===//
 

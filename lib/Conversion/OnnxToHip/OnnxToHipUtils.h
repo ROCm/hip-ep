@@ -837,6 +837,14 @@ void populatePowDecompositionPatterns(RewritePatternSet &patterns,
 void populateErfGeluFusionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 
+/// Pre-lowering pattern set: fold the GEGLU chain (two last-axis Slices of one
+/// projection, the exact-GELU primitives or onnx.Gelu on the gate half, and
+/// the gating Mul) into `hip.geglu`, which reads the projection once instead
+/// of copying both halves out and making five elementwise passes. Must run
+/// while the slice bounds and GELU literals are still `onnx.Constant`. See
+/// GegluFusion.cpp.
+void populateGegluFusionPatterns(RewritePatternSet &patterns, MLIRContext *ctx);
+
 /// Pre-lowering pattern set: decompose vision/projector ops that have no
 /// direct MorphiZen converter into supported primitives —
 /// AveragePool(kernel==stride) → Reshape/Transpose/ReduceMean, Pow(x, c) →

@@ -400,6 +400,36 @@ int wrap_swiglu(RuntimeState *state, void *gate, void *up, void *output,
   return 0;
 }
 
+int wrap_geglu(RuntimeState *state, void *input, void *output, int64_t rows,
+               int64_t half_cols, int64_t data_type) {
+  OP_PROFILE(
+      "geglu",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "%lldx%lld", (long long)rows,
+                 (long long)half_cols);
+        return std::string(b);
+      },
+      state);
+  if (!state || !input || !output) {
+    fprintf(stderr, "[REAL] wrap_geglu: null argument\n");
+    return -1;
+  }
+  int hip_dtype = hipdnn_ep_to_hip_dtype_elementwise_unary(data_type);
+  if (hip_dtype != HIP_DTYPE_FLOAT16 && hip_dtype != HIP_DTYPE_FLOAT32) {
+    fprintf(stderr, "[REAL] wrap_geglu: unsupported data_type %lld\n",
+            (long long)data_type);
+    return -1;
+  }
+  int result = hip_geglu(hipdnn_ep_state_get_stream(state), input, output, rows,
+                         half_cols, hip_dtype);
+  if (result != 0) {
+    fprintf(stderr, "[REAL] wrap_geglu: kernel launch failed (%d)\n", result);
+    return -1;
+  }
+  return 0;
+}
+
 // The same flat shape contract as wrap_swiglu, with FP32 intermediates.
 int wrap_swiglu_promoted(RuntimeState *state, void *gate, void *up,
                          void *output, int64_t num_elements,

@@ -881,6 +881,13 @@ HIP_KERNEL_API int hip_swiglu_promoted(void *stream, const void *gate,
                                       const void *up, void *output,
                                       int64_t num_elements, int hip_dtype);
 
+/* hip_geglu: output[r, j] = input[r, j] * gelu(input[r, half_cols + j]) with
+ * the exact (erf) GELU, over a contiguous [rows, 2 * half_cols] input and a
+ * [rows, half_cols] output. f16 / f32 storage, f32 math. Returns 0 on
+ * success, non-zero hipError_t (or -1 for an unsupported dtype) on failure. */
+HIP_KERNEL_API int hip_geglu(void *stream, const void *input, void *output,
+                             int64_t rows, int64_t half_cols, int hip_dtype);
+
 /* =========================================================================
  * Softplus activation
  * =========================================================================

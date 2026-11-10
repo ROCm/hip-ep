@@ -2957,6 +2957,40 @@ def Hip_SwigluOp : Hip_DpsOp_AutoReify<"swiglu"> {
   }];
 }
 
+def Hip_GegluOp : Hip_DpsOp_AutoReifyInfer<"geglu"> {
+  let summary = "GELU-gated linear unit over the two halves of the last axis";
+  let description = [{
+    Splits the last axis of `input` (extent 2F) into a value half and a gate
+    half and multiplies the value by the exact (erf) GELU of the gate:
+
+      output[..., j] = input[..., j] * gelu(input[..., F + j]),   j < F
+
+    This is the GEGLU feed-forward of diffusers' transformer blocks
+    (`hidden, gate = proj(x).chunk(2, dim=-1)`). The leading extents of input
+    and output are equal and the output's last extent is F. f16 and f32;
+    the arithmetic is f32.
+
+    Example:
+    ```mlir
+    hip.geglu(%ctx) ins(%input : memref<2x4096x2560xf16, 1>)
+                    outs(%output : memref<2x4096x1280xf16, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+  let hasVerifier = 1;
+}
+
 def Hip_ReciprocalOp : Hip_DpsOp_AutoReifyInfer<"reciprocal", "Y"> {
   let summary = "Element-wise reciprocal: y = 1/x";
   let description = [{

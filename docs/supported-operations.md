@@ -187,3 +187,4 @@ These exporter spellings of larger blocks are rewritten so the whole block runs 
 | Pattern | Rewritten to | Conditions |
 |---|---|---|
 | Scaled-dot-product attention as primitives: Q/K/V `Transpose`s of `[B, S, N, H]` projections, a scalar scale on Q, K or the scores (`Mul`, `Div` or `Mul(Reciprocal)`), `MatMul`, last-axis `Softmax`, `MatMul`, output `Transpose` | `MultiHeadAttention` (`com.microsoft`), whose flash kernel never materializes the scores | Static fp16 shapes, no mask, `Sq > 1`, head dim `<= 256` |
+| GEGLU: two last-axis halves of one projection, the exact (erf) GELU of the second half as primitives or `Gelu`, and the gating `Mul` | `hip.geglu`, one pass over the projection | f16/f32, static last axis, intermediates used only by the chain |
