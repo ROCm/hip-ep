@@ -4683,9 +4683,9 @@ struct SmallMWmmaConfig {
 
 // tm x 16 rows and tn x 16 columns per workgroup, CPW chunks of 32 k per wave,
 // DB / DA chunks of B / A in flight per wave. The first three are the defaults
-// for M <= 16, M <= 32 and larger; the last two replace the first two when
-// only CPW 16 divides K / 32 (see smallMWmmaDefaultConfig); the rest are
-// alternatives for sweeps.
+// for M <= 16, M <= 32 and larger; configs 3 and 4 (CPW 10) and the last two
+// (CPW 16) replace the first two at the K values listed in
+// smallMWmmaDefaultConfig; config 5 is an alternative for sweeps.
 static constexpr SmallMWmmaConfig kSmallMWmmaConfigs[] = {
     {1, 1, 18, 18, 2}, {2, 1, 18, 18, 1}, {4, 1, 10, 10, 1},
     {1, 1, 10, 10, 2}, {2, 1, 10, 10, 1}, {4, 1, 6, 6, 1},
@@ -4946,12 +4946,16 @@ void MatMulNBitsWMMA_SmallM_Grouped(
 // sweep on gfx1151 with the gpt-oss expert shapes (fc1 N=5760 / fc2 N=2880,
 // K=2880, block 32). The CPW 16 variants are used only at the K values where
 // they were measured faster than CPW 18 (gfx1151, grouped expert GEMMs at
-// block 128, 16- and 32-row tiles: 9-14% at K=512, 1024, 2048 and 3072); every
-// other K keeps the CPW 18 default.
+// block 128, 16- and 32-row tiles: 9-14% at K=512, 1024, 2048 and 3072). At
+// the Qwen3.8-Flash-Next expert shapes (block 32, 512 experts, top 10) CPW 16
+// at K=2560 and CPW 10 at K=640 make a 512-token QMoE prefill 25% faster on
+// gfx1151. Every other K keeps the CPW 18 default.
 static int smallMWmmaDefaultConfig(int64_t M, int64_t K) {
-    const bool cpw16 = K == 512 || K == 1024 || K == 2048 || K == 3072;
-    if (M <= 16) return cpw16 ? 6 : 0;
-    if (M <= 32) return cpw16 ? 7 : 1;
+    const bool cpw16 =
+        K == 512 || K == 1024 || K == 2048 || K == 2560 || K == 3072;
+    const bool cpw10 = K == 640;
+    if (M <= 16) return cpw16 ? 6 : cpw10 ? 3 : 0;
+    if (M <= 32) return cpw16 ? 7 : cpw10 ? 4 : 1;
     return 2;
 }
 

@@ -461,6 +461,32 @@ class TestQMoE:
         actual, expected = model_runner.run_sample(model, [x, router])
         _compare_gpt_oss_shape(actual, expected, seq_len)
 
+    @pytest.mark.parametrize("seq_len", [37, 512])
+    def test_qmoe_qwen38_flash_shape_skewed_routing(self, model_runner, seq_len):
+        """Qwen3.8-Flash-Next expert shapes (hidden 2560, fused gate/up 1280,
+        top-10): the prefill grouped GEMMs run at K = 2560 and K = 640, which
+        pick their own small-M configs. Skewed routing yields both 16-row and
+        32-row tiles.
+        """
+        hidden, intermediate, num_experts, top_k = 2560, 1280, 64, 10
+        model = _make_qmoe_model(
+            1, seq_len, hidden, intermediate, num_experts, top_k, BLOCK_SIZE
+        )
+
+        rng = np.random.default_rng(8)
+        x = rng.uniform(-1, 1, [1, seq_len, hidden]).astype(np.float16)
+        skew = np.linspace(3.0, -3.0, num_experts)
+        noisy = rng.standard_normal([seq_len, num_experts]) * 1.2 + skew
+        # Each token's logits are distinct fp16 levels ranked by the skewed
+        # noise: a tie at the k-th logit would make the expert choice
+        # backend-defined.
+        levels = np.linspace(-4.0, 4.0, num_experts).astype(np.float16)
+        assert len(np.unique(levels)) == num_experts
+        router = levels[noisy.argsort(axis=1).argsort(axis=1)]
+
+        actual, expected = model_runner.run_sample(model, [x, router])
+        _compare_gpt_oss_shape(actual, expected, seq_len)
+
     @pytest.mark.parametrize("normalize", [0, 1])
     @pytest.mark.parametrize(
         "seq_len",
