@@ -630,14 +630,37 @@ static int gqa_forward_fused(
       kSrc = d_Kroped; // V is never RoPE'd.
     }
 
+    // A growing present (an onnx.Attention export whose present is past +
+    // seq) needs the separate-buffer concat every step. On a full-attention
+    // layer the scalar decode kernel does that copy itself while staging its
+    // tiles, so past is read once: one read and one write of the cache
+    // against concat + decode's two reads and a write, which no decode
+    // config (WMMA included) recovers. The copy also makes it bandwidth-bound
+    // at far fewer splits than the table's decode entries, so it sizes its
+    // own. The window case keeps the concat: it copies from a rounded-down
+    // bound that the decode's exact kv_lo would not cover.
+    const bool online_tune =
+        hip_gqa_autotune_mode(state->gqa_autotune_policy) ==
+        static_cast<int>(hipdnn_ep::GqaAutotuneMode::Online);
+    const int64_t hpg = H / G;
+    auto aligned16 = [](const void *p) {
+      return (reinterpret_cast<uintptr_t>(p) & 15) == 0;
+    };
+    const bool fused_copy =
+        !online_tune && !kv_quantized && B == 1 && past_key && past_value &&
+        past_len > 0 && past_key != present_key && local_window_size <= 0 &&
+        d == 128 && (hpg == 4 || hpg == 5 || hpg == 6 || hpg == 8) &&
+        past_len <= past_buf_seq && past_len + 1 <= present_seq &&
+        aligned16(past_key) && aligned16(past_value) && aligned16(kSrc) &&
+        aligned16(vSrc) && aligned16(present_key) && aligned16(present_value);
+
     // Append the new token to the KV cache. Quantized cache:
     // quantize-and-append with the static per-channel scale; fp16 cache: plain
-    // append. update_kv_cache dispatches on kv_format internally.
-    //
-    // A growing present (an onnx.Attention export whose present is past + seq)
-    // takes the separate-buffer concat every step; on a sliding-window layer
-    // the prefix below the window is never read again, so it is not copied.
-    if (update_kv_cache(
+    // append. update_kv_cache dispatches on kv_format internally. On a
+    // sliding-window layer the prefix below the window is never read again,
+    // so it is not copied.
+    if (!fused_copy &&
+        update_kv_cache(
             stream, past_key, past_value, kSrc, vSrc, present_key,
             present_value, static_cast<int>(B), static_cast<int>(past_len),
             static_cast<int>(sq), static_cast<int>(G), static_cast<int>(d),
@@ -660,8 +683,20 @@ static int gqa_forward_fused(
       const int kv_dtype = kv_dtype_abi(kv_format);
       int drc;
       OP_ROCTX_MARK("hip_ep.op.gqa.attn.flash_decode");
-      if (hip_gqa_autotune_mode(state->gqa_autotune_policy) ==
-          static_cast<int>(hipdnn_ep::GqaAutotuneMode::Online)) {
+      if (fused_copy) {
+        drc = hip_gqa_flash_decode_fused_copy(
+            stream, qSrc, past_key, past_value, kSrc, vSrc, present_key,
+            present_value, output, partials, static_cast<int>(B),
+            static_cast<int>(H), static_cast<int>(G), static_cast<int>(d),
+            static_cast<int>(past_len), static_cast<int>(past_buf_seq),
+            static_cast<int>(present_seq), kFlashDecodeMaxSplits,
+            /*splits=*/0, scale, head_sink, use_smooth_softmax ? 1 : 0,
+            key_bias, key_bias_stride);
+        RUNTIME_DEBUG_LOG("[REAL] GQA decode fused KV copy: past_len=%lld "
+                          "hpg=%lld key_bias=%d\n",
+                          (long long)past_len, (long long)hpg,
+                          static_cast<int>(key_bias != nullptr));
+      } else if (online_tune) {
         drc = hip_gqa_flash_decode(
             stream, qSrc, present_key, present_value, output, partials,
             static_cast<int>(B), static_cast<int>(H), static_cast<int>(G),
