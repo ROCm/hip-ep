@@ -373,3 +373,114 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x128x32xf16>,
       outs(%me : tensor<1x4x32x32xf16>) -> tensor<1x4x32x32xf16>
   return %t, %m : tensor<1x32x4x32xf16>, tensor<1x4x32x32xf16>
 }
+
+// -----
+
+// A crop that the module reads moves into the kernel, which reads the uncropped
+// tensor through the slice instead of a strided copy of it.
+
+// CHECK-LABEL: func.func @rocMlir0
+// CHECK-SAME: (%[[X:.*]]: tensor<1x8x10x10xf16>, %{{.*}}: tensor<1x8x1x1xf16>) -> tensor<1x8x8x8xf16>
+// CHECK-SAME: attributes {rock.elementwise, rock.kernel}
+// CHECK: tensor.extract_slice %[[X]][0, 0, 1, 1] [1, 8, 8, 8] [1, 1, 1, 1]
+// CHECK: hip.add
+// CHECK: hip.leaky_relu
+// CHECK-LABEL: func.func @main_graph
+// CHECK-NOT: tensor.extract_slice
+// CHECK: %[[K:.*]] = hip.rocmlir({{.*}}) @rocMlir0 ins(%{{.*}}, %{{.*}} : tensor<1x8x10x10xf16>, tensor<1x8x1x1xf16>)
+// CHECK: return %[[K]]
+
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x10x10xf16>,
+                      %b: tensor<1x8x1x1xf16>) -> tensor<1x8x8x8xf16> {
+  %s = tensor.extract_slice %x[0, 0, 1, 1] [1, 8, 8, 8] [1, 1, 1, 1]
+      : tensor<1x8x10x10xf16> to tensor<1x8x8x8xf16>
+  %ae = tensor.empty() : tensor<1x8x8x8xf16>
+  %a = hip.add(%ctx) ins(%s, %b : tensor<1x8x8x8xf16>, tensor<1x8x1x1xf16>)
+      outs(%ae : tensor<1x8x8x8xf16>) -> tensor<1x8x8x8xf16>
+  %le = tensor.empty() : tensor<1x8x8x8xf16>
+  %l = hip.leaky_relu(%ctx) ins(%a : tensor<1x8x8x8xf16>)
+      outs(%le : tensor<1x8x8x8xf16>) {alpha = 1.000000e-01 : f64} : tensor<1x8x8x8xf16>
+  return %l : tensor<1x8x8x8xf16>
+}
+
+// -----
+
+// A channel slice of an interleaved [N, 2] tensor, with the reshape before it,
+// moves into the kernel too.
+
+// CHECK-LABEL: func.func @rocMlir0
+// CHECK-SAME: (%[[F:.*]]: tensor<1x8x8x2xf16>, %{{.*}}: tensor<1x64x1xf16>) -> tensor<1x64x1xf16>
+// CHECK: tensor.collapse_shape %[[F]]
+// CHECK: tensor.extract_slice
+// CHECK: hip.add
+// CHECK: hip.mul
+// CHECK-LABEL: func.func @main_graph
+// CHECK-NOT: tensor.extract_slice
+// CHECK: hip.rocmlir({{.*}}) @rocMlir0 ins(%{{.*}}, %{{.*}} : tensor<1x8x8x2xf16>, tensor<1x64x1xf16>)
+
+func.func @main_graph(%ctx: !hip.context, %f: tensor<1x8x8x2xf16>,
+                      %g: tensor<1x64x1xf16>) -> tensor<1x64x1xf16> {
+  %c = tensor.collapse_shape %f [[0], [1, 2], [3]]
+      : tensor<1x8x8x2xf16> into tensor<1x64x2xf16>
+  %s = tensor.extract_slice %c[0, 0, 1] [1, 64, 1] [1, 1, 1]
+      : tensor<1x64x2xf16> to tensor<1x64x1xf16>
+  %ae = tensor.empty() : tensor<1x64x1xf16>
+  %a = hip.add(%ctx) ins(%s, %g : tensor<1x64x1xf16>, tensor<1x64x1xf16>)
+      outs(%ae : tensor<1x64x1xf16>) -> tensor<1x64x1xf16>
+  %me = tensor.empty() : tensor<1x64x1xf16>
+  %m = hip.mul(%ctx) ins(%a, %g : tensor<1x64x1xf16>, tensor<1x64x1xf16>)
+      outs(%me : tensor<1x64x1xf16>) -> tensor<1x64x1xf16>
+  return %m : tensor<1x64x1xf16>
+}
+
+// -----
+
+// The graph also returns the crop, so the crop stays for that reader, and the
+// kernel reads the uncropped tensor through its own copy of the slice.
+
+// CHECK-LABEL: func.func @rocMlir0
+// CHECK-SAME: (%{{.*}}: tensor<1x8x10x10xf16>, %{{.*}}: tensor<1x8x1x1xf16>)
+// CHECK: tensor.extract_slice
+// CHECK-LABEL: func.func @main_graph
+// CHECK: %[[S:.*]] = tensor.extract_slice
+// CHECK: %[[K:.*]] = hip.rocmlir({{.*}}) @rocMlir0 ins(%{{.*}}, %{{.*}} : tensor<1x8x10x10xf16>, tensor<1x8x1x1xf16>)
+// CHECK: return %[[K]], %[[S]]
+
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x10x10xf16>,
+                      %b: tensor<1x8x1x1xf16>)
+    -> (tensor<1x8x8x8xf16>, tensor<1x8x8x8xf16>) {
+  %s = tensor.extract_slice %x[0, 0, 1, 1] [1, 8, 8, 8] [1, 1, 1, 1]
+      : tensor<1x8x10x10xf16> to tensor<1x8x8x8xf16>
+  %ae = tensor.empty() : tensor<1x8x8x8xf16>
+  %a = hip.add(%ctx) ins(%s, %b : tensor<1x8x8x8xf16>, tensor<1x8x1x1xf16>)
+      outs(%ae : tensor<1x8x8x8xf16>) -> tensor<1x8x8x8xf16>
+  %le = tensor.empty() : tensor<1x8x8x8xf16>
+  %l = hip.leaky_relu(%ctx) ins(%a : tensor<1x8x8x8xf16>)
+      outs(%le : tensor<1x8x8x8xf16>) {alpha = 1.000000e-01 : f64} : tensor<1x8x8x8xf16>
+  return %l, %s : tensor<1x8x8x8xf16>, tensor<1x8x8x8xf16>
+}
+
+// -----
+
+// rocMLIR has no strided slice, so a slice with stride 2 stays outside, and the
+// kernel reads its result.
+
+// CHECK-LABEL: func.func @rocMlir0
+// CHECK-SAME: (%{{.*}}: tensor<1x8x4x4xf16>, %{{.*}}: tensor<1x8x1x1xf16>)
+// CHECK-NOT: tensor.extract_slice
+// CHECK-LABEL: func.func @main_graph
+// CHECK: %[[S:.*]] = tensor.extract_slice
+// CHECK: hip.rocmlir({{.*}}) @rocMlir0 ins(%[[S]],
+
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x8x8xf16>,
+                      %b: tensor<1x8x1x1xf16>) -> tensor<1x8x4x4xf16> {
+  %s = tensor.extract_slice %x[0, 0, 0, 0] [1, 8, 4, 4] [1, 1, 2, 2]
+      : tensor<1x8x8x8xf16> to tensor<1x8x4x4xf16>
+  %ae = tensor.empty() : tensor<1x8x4x4xf16>
+  %a = hip.add(%ctx) ins(%s, %b : tensor<1x8x4x4xf16>, tensor<1x8x1x1xf16>)
+      outs(%ae : tensor<1x8x4x4xf16>) -> tensor<1x8x4x4xf16>
+  %le = tensor.empty() : tensor<1x8x4x4xf16>
+  %l = hip.leaky_relu(%ctx) ins(%a : tensor<1x8x4x4xf16>)
+      outs(%le : tensor<1x8x4x4xf16>) {alpha = 1.000000e-01 : f64} : tensor<1x8x4x4xf16>
+  return %l : tensor<1x8x4x4xf16>
+}

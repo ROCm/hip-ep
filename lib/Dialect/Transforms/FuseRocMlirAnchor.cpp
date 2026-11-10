@@ -889,6 +889,9 @@ public:
         module = peelBoundaryTransposes(module, rewriter);
         if (!module)
           continue;
+        module = absorbInputViews(module, rewriter);
+        if (!module)
+          continue;
         if (outlinesAlone(module)) {
           outlineElementwise(module, rewriter, counter);
           continue;
@@ -970,7 +973,8 @@ private:
     Block &body = module.getBody().front();
     int launches = 0;
     for (Operation &op : body.without_terminator()) {
-      if (isa<tensor::EmptyOp>(op) || isTosaLowerableReshape(&op))
+      if (isa<tensor::EmptyOp>(op) || isTosaLowerableReshape(&op) ||
+          isLowerableSlice(&op))
         continue;
       if (!isTosaExpressiblePointwiseOp(&op) && !isTosaLowerableQdq(&op))
         return false;
@@ -1104,7 +1108,8 @@ private:
       if (isa<tensor::EmptyOp>(op) || peel.contains(&op))
         continue;
       kept.push_back(&op);
-      computes |= !isa<TransposeOp>(op) && !isTosaLowerableReshape(&op);
+      computes |= !isa<TransposeOp>(op) && !isTosaLowerableReshape(&op) &&
+                  !isLowerableSlice(&op);
     }
     if (!computes)
       return module;
@@ -1112,6 +1117,74 @@ private:
     rewriter.setInsertionPoint(module);
     inlineRocMlirElementwise(module, rewriter);
     return groupIntoRocMlirElementwise(kept, rewriter);
+  }
+
+  static bool isLowerableSlice(Operation *op) {
+    auto slice = dyn_cast<tensor::ExtractSliceOp>(op);
+    return slice && isTosaLowerableSlice(slice);
+  }
+
+  // A slice that a module reads would run as a strided copy before the kernel.
+  // rocMLIR folds a static slice into the kernel's loads, so each module input
+  // that comes from a chain of such slices and static reshapes gets its own
+  // copy of that chain in the module, which then reads the chain's source.
+  // Another reader of the slice keeps the original. Returns the module that
+  // remains, or null when its ops could not form one again and stay as HIP
+  // ops.
+  RocMlirElementwiseOp absorbInputViews(RocMlirElementwiseOp module,
+                                        IRRewriter &rewriter) {
+    auto loadable = [](Value value) {
+      auto type = dyn_cast<RankedTensorType>(value.getType());
+      if (!type || !type.hasStaticShape() || type.getRank() == 0)
+        return false;
+      auto intType = dyn_cast<IntegerType>(type.getElementType());
+      return !intType || intType.getWidth() <= 32;
+    };
+    SmallVector<std::pair<Value, SmallVector<Operation *>>> chains;
+    for (Value input : module.getInputs()) {
+      SmallVector<Operation *> chain;
+      bool slices = false;
+      Value source = input;
+      while (Operation *def = source.getDefiningOp()) {
+        if (isLowerableSlice(def))
+          slices = true;
+        else if (!isTosaLowerableReshape(def))
+          break;
+        chain.push_back(def);
+        source = def->getOperand(0);
+      }
+      if (slices && loadable(source))
+        chains.push_back({input, std::move(chain)});
+    }
+    if (chains.empty())
+      return module;
+
+    Block &body = module.getBody().front();
+    SmallVector<Operation *> ops;
+    for (Operation &op : body.without_terminator())
+      if (!isa<tensor::EmptyOp>(op))
+        ops.push_back(&op);
+    DenseSet<Operation *> inBody(ops.begin(), ops.end());
+
+    rewriter.setInsertionPoint(module);
+    SmallVector<std::pair<Value, Value>> replacements;
+    for (auto &[input, chain] : chains) {
+      Value copy = chain.back()->getOperand(0);
+      for (Operation *view : llvm::reverse(chain)) {
+        IRMapping mapping;
+        mapping.map(view->getOperand(0), copy);
+        Operation *clone = rewriter.clone(*view, mapping);
+        ops.push_back(clone);
+        copy = clone->getResult(0);
+      }
+      replacements.push_back({input, copy});
+    }
+    inlineRocMlirElementwise(module, rewriter);
+    for (auto [input, copy] : replacements)
+      rewriter.replaceUsesWithIf(input, copy, [&](OpOperand &use) {
+        return inBody.contains(use.getOwner());
+      });
+    return groupIntoRocMlirElementwise(ops, rewriter);
   }
 
   void outlineElementwise(RocMlirElementwiseOp module, IRRewriter &rewriter,

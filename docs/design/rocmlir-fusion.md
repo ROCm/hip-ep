@@ -224,6 +224,13 @@ The peeled transposes are:
 The remaining ops form the module again, and the conditions above apply once
 more. A module with no compute op left keeps its transposes.
 
+A module input that comes from a chain of static, unit-stride slices and static
+reshapes, with at least one slice, would otherwise run as a strided copy before
+the kernel; a crop of a pixel-shuffle output is the common case. The module gets
+its own copy of that chain and reads the chain's source, and rocMLIR folds the
+slice into the kernel's loads. Another reader of the slice keeps the original.
+A slice counts as a view, not a launch, when the module is checked again.
+
 The inline scalar constants that the module reads are cloned into the kernel.
 Any other module is inlined back. The rocMLIR compile does not autotune an
 elementwise kernel, and outside strict mode a kernel that fails to compile
