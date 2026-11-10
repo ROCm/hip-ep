@@ -132,7 +132,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x8x3xf32>,
 // transpose follows it.
 
 // CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
-// CHECK-SAME: -> tensor<1x8x8x16xf16>
+// CHECK-SAME: -> tensor<1x4x32x32xf16>
 // CHECK-SAME: attributes {rock.elementwise, rock.kernel}
 // CHECK-NOT: hip.transpose
 // CHECK: return
@@ -141,18 +141,18 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x8x3xf32>,
 // CHECK: %[[T:.*]] = hip.transpose({{.*}}) ins(%[[K]] :
 // CHECK: return %[[T]]
 
-func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x8x16xf16>,
-                      %y: tensor<1x8x8x16xf16>) -> tensor<1x16x8x8xf16> {
-  %ae = tensor.empty() : tensor<1x8x8x16xf16>
-  %a = hip.add(%ctx) ins(%x, %y : tensor<1x8x8x16xf16>, tensor<1x8x8x16xf16>)
-      outs(%ae : tensor<1x8x8x16xf16>) -> tensor<1x8x8x16xf16>
-  %me = tensor.empty() : tensor<1x8x8x16xf16>
-  %m = hip.mul(%ctx) ins(%a, %a : tensor<1x8x8x16xf16>, tensor<1x8x8x16xf16>)
-      outs(%me : tensor<1x8x8x16xf16>) -> tensor<1x8x8x16xf16>
-  %te = tensor.empty() : tensor<1x16x8x8xf16>
-  %t = hip.transpose(%ctx) ins(%m : tensor<1x8x8x16xf16>)
-      outs(%te : tensor<1x16x8x8xf16>) {perm = [0, 3, 1, 2]} : tensor<1x16x8x8xf16>
-  return %t : tensor<1x16x8x8xf16>
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x4x32x32xf16>,
+                      %y: tensor<1x4x32x32xf16>) -> tensor<1x32x4x32xf16> {
+  %ae = tensor.empty() : tensor<1x4x32x32xf16>
+  %a = hip.add(%ctx) ins(%x, %y : tensor<1x4x32x32xf16>, tensor<1x4x32x32xf16>)
+      outs(%ae : tensor<1x4x32x32xf16>) -> tensor<1x4x32x32xf16>
+  %me = tensor.empty() : tensor<1x4x32x32xf16>
+  %m = hip.mul(%ctx) ins(%a, %a : tensor<1x4x32x32xf16>, tensor<1x4x32x32xf16>)
+      outs(%me : tensor<1x4x32x32xf16>) -> tensor<1x4x32x32xf16>
+  %te = tensor.empty() : tensor<1x32x4x32xf16>
+  %t = hip.transpose(%ctx) ins(%m : tensor<1x4x32x32xf16>)
+      outs(%te : tensor<1x32x4x32xf16>) {perm = [0, 3, 1, 2]} : tensor<1x32x4x32xf16>
+  return %t : tensor<1x32x4x32xf16>
 }
 
 // -----
@@ -161,7 +161,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x8x16xf16>,
 // result, and the HIP transpose reads it.
 
 // CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
-// CHECK-SAME: -> tensor<1x8x8x16xf16>
+// CHECK-SAME: -> tensor<1x4x32x32xf16>
 // CHECK-SAME: attributes {rock.elementwise, rock.kernel}
 // CHECK-NOT: hip.transpose
 // CHECK: return
@@ -170,19 +170,19 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x8x16xf16>,
 // CHECK: %[[T:.*]] = hip.transpose({{.*}}) ins(%[[K]] :
 // CHECK: return %[[K]], %[[T]]
 
-func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x8x16xf16>,
-                      %y: tensor<1x8x8x16xf16>)
-    -> (tensor<1x8x8x16xf16>, tensor<1x16x8x8xf16>) {
-  %ae = tensor.empty() : tensor<1x8x8x16xf16>
-  %a = hip.add(%ctx) ins(%x, %y : tensor<1x8x8x16xf16>, tensor<1x8x8x16xf16>)
-      outs(%ae : tensor<1x8x8x16xf16>) -> tensor<1x8x8x16xf16>
-  %me = tensor.empty() : tensor<1x8x8x16xf16>
-  %m = hip.mul(%ctx) ins(%a, %a : tensor<1x8x8x16xf16>, tensor<1x8x8x16xf16>)
-      outs(%me : tensor<1x8x8x16xf16>) -> tensor<1x8x8x16xf16>
-  %te = tensor.empty() : tensor<1x16x8x8xf16>
-  %t = hip.transpose(%ctx) ins(%m : tensor<1x8x8x16xf16>)
-      outs(%te : tensor<1x16x8x8xf16>) {perm = [0, 3, 1, 2]} : tensor<1x16x8x8xf16>
-  return %m, %t : tensor<1x8x8x16xf16>, tensor<1x16x8x8xf16>
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x4x32x32xf16>,
+                      %y: tensor<1x4x32x32xf16>)
+    -> (tensor<1x4x32x32xf16>, tensor<1x32x4x32xf16>) {
+  %ae = tensor.empty() : tensor<1x4x32x32xf16>
+  %a = hip.add(%ctx) ins(%x, %y : tensor<1x4x32x32xf16>, tensor<1x4x32x32xf16>)
+      outs(%ae : tensor<1x4x32x32xf16>) -> tensor<1x4x32x32xf16>
+  %me = tensor.empty() : tensor<1x4x32x32xf16>
+  %m = hip.mul(%ctx) ins(%a, %a : tensor<1x4x32x32xf16>, tensor<1x4x32x32xf16>)
+      outs(%me : tensor<1x4x32x32xf16>) -> tensor<1x4x32x32xf16>
+  %te = tensor.empty() : tensor<1x32x4x32xf16>
+  %t = hip.transpose(%ctx) ins(%m : tensor<1x4x32x32xf16>)
+      outs(%te : tensor<1x32x4x32xf16>) {perm = [0, 3, 1, 2]} : tensor<1x32x4x32xf16>
+  return %m, %t : tensor<1x4x32x32xf16>, tensor<1x32x4x32xf16>
 }
 
 // -----
@@ -191,26 +191,108 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x8x16xf16>,
 // kernel, which reads the transposed tensor.
 
 // CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
-// CHECK-SAME: (%{{.*}}: tensor<1x16x8x8xf16>, %{{.*}}: tensor<1x16x8x8xf16>) -> tensor<1x16x8x8xf16>
+// CHECK-SAME: (%{{.*}}: tensor<1x32x4x32xf16>, %{{.*}}: tensor<1x32x4x32xf16>) -> tensor<1x32x4x32xf16>
 // CHECK-SAME: attributes {rock.elementwise, rock.kernel}
 // CHECK-NOT: hip.transpose
 // CHECK: return
 // CHECK-LABEL: func.func @main_graph
-// CHECK: %[[T:.*]] = hip.transpose({{.*}}) ins(%{{.*}} : tensor<1x8x8x16xf16>)
+// CHECK: %[[T:.*]] = hip.transpose({{.*}}) ins(%{{.*}} : tensor<1x4x32x32xf16>)
 // CHECK: hip.rocmlir({{.*}}) @mlir_{{[a-z0-9_]+}} ins(%[[T]],
 
-func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x8x16xf16>,
-                      %y: tensor<1x16x8x8xf16>) -> tensor<1x16x8x8xf16> {
-  %te = tensor.empty() : tensor<1x16x8x8xf16>
-  %t = hip.transpose(%ctx) ins(%x : tensor<1x8x8x16xf16>)
-      outs(%te : tensor<1x16x8x8xf16>) {perm = [0, 3, 1, 2]} : tensor<1x16x8x8xf16>
-  %ae = tensor.empty() : tensor<1x16x8x8xf16>
-  %a = hip.add(%ctx) ins(%t, %y : tensor<1x16x8x8xf16>, tensor<1x16x8x8xf16>)
-      outs(%ae : tensor<1x16x8x8xf16>) -> tensor<1x16x8x8xf16>
-  %me = tensor.empty() : tensor<1x16x8x8xf16>
-  %m = hip.mul(%ctx) ins(%a, %a : tensor<1x16x8x8xf16>, tensor<1x16x8x8xf16>)
-      outs(%me : tensor<1x16x8x8xf16>) -> tensor<1x16x8x8xf16>
-  return %m : tensor<1x16x8x8xf16>
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x4x32x32xf16>,
+                      %y: tensor<1x32x4x32xf16>) -> tensor<1x32x4x32xf16> {
+  %te = tensor.empty() : tensor<1x32x4x32xf16>
+  %t = hip.transpose(%ctx) ins(%x : tensor<1x4x32x32xf16>)
+      outs(%te : tensor<1x32x4x32xf16>) {perm = [0, 3, 1, 2]} : tensor<1x32x4x32xf16>
+  %ae = tensor.empty() : tensor<1x32x4x32xf16>
+  %a = hip.add(%ctx) ins(%t, %y : tensor<1x32x4x32xf16>, tensor<1x32x4x32xf16>)
+      outs(%ae : tensor<1x32x4x32xf16>) -> tensor<1x32x4x32xf16>
+  %me = tensor.empty() : tensor<1x32x4x32xf16>
+  %m = hip.mul(%ctx) ins(%a, %a : tensor<1x32x4x32xf16>, tensor<1x32x4x32xf16>)
+      outs(%me : tensor<1x32x4x32xf16>) -> tensor<1x32x4x32xf16>
+  return %m : tensor<1x32x4x32xf16>
+}
+
+// -----
+
+// An input innermost dimension of 3 elements, under peel-min-input-elements,
+// gives a stride that still uses several elements of each cache line, so the
+// transpose stays.
+
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
+// CHECK-SAME: attributes {rock.elementwise, rock.kernel}
+// CHECK: hip.transpose
+// CHECK-LABEL: func.func @main_graph
+// CHECK-NOT: hip.transpose
+// CHECK: %[[K:.*]] = hip.rocmlir({{.*}}) @mlir_{{[a-z0-9_]+}}
+// CHECK: return %[[K]]
+
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x8x3xf16>,
+                      %y: tensor<1x8x8x3xf16>) -> tensor<1x3x8x8xf16> {
+  %ae = tensor.empty() : tensor<1x8x8x3xf16>
+  %a = hip.add(%ctx) ins(%x, %y : tensor<1x8x8x3xf16>, tensor<1x8x8x3xf16>)
+      outs(%ae : tensor<1x8x8x3xf16>) -> tensor<1x8x8x3xf16>
+  %me = tensor.empty() : tensor<1x8x8x3xf16>
+  %m = hip.mul(%ctx) ins(%a, %a : tensor<1x8x8x3xf16>, tensor<1x8x8x3xf16>)
+      outs(%me : tensor<1x8x8x3xf16>) -> tensor<1x8x8x3xf16>
+  %te = tensor.empty() : tensor<1x3x8x8xf16>
+  %t = hip.transpose(%ctx) ins(%m : tensor<1x8x8x3xf16>)
+      outs(%te : tensor<1x3x8x8xf16>) {perm = [0, 3, 1, 2]} : tensor<1x3x8x8xf16>
+  return %t : tensor<1x3x8x8xf16>
+}
+
+// -----
+
+// With an output innermost dimension of 2, under peel-min-output-elements, the
+// tile reads two contiguous input planes, so the transpose stays.
+
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
+// CHECK-SAME: attributes {rock.elementwise, rock.kernel}
+// CHECK: hip.transpose
+// CHECK-LABEL: func.func @main_graph
+// CHECK-NOT: hip.transpose
+// CHECK: %[[K:.*]] = hip.rocmlir({{.*}}) @mlir_{{[a-z0-9_]+}}
+// CHECK: return %[[K]]
+
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x2x16x16xf16>,
+                      %y: tensor<1x2x16x16xf16>) -> tensor<1x16x16x2xf16> {
+  %ae = tensor.empty() : tensor<1x2x16x16xf16>
+  %a = hip.add(%ctx) ins(%x, %y : tensor<1x2x16x16xf16>, tensor<1x2x16x16xf16>)
+      outs(%ae : tensor<1x2x16x16xf16>) -> tensor<1x2x16x16xf16>
+  %me = tensor.empty() : tensor<1x2x16x16xf16>
+  %m = hip.mul(%ctx) ins(%a, %a : tensor<1x2x16x16xf16>, tensor<1x2x16x16xf16>)
+      outs(%me : tensor<1x2x16x16xf16>) -> tensor<1x2x16x16xf16>
+  %te = tensor.empty() : tensor<1x16x16x2xf16>
+  %t = hip.transpose(%ctx) ins(%m : tensor<1x2x16x16xf16>)
+      outs(%te : tensor<1x16x16x2xf16>) {perm = [0, 2, 3, 1]} : tensor<1x16x16x2xf16>
+  return %t : tensor<1x16x16x2xf16>
+}
+
+// -----
+
+// An output innermost dimension of 16 elements is under
+// peel-min-output-elements, so the transpose stays.
+
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
+// CHECK-SAME: attributes {rock.elementwise, rock.kernel}
+// CHECK: hip.transpose
+// CHECK-LABEL: func.func @main_graph
+// CHECK-NOT: hip.transpose
+// CHECK: %[[K:.*]] = hip.rocmlir({{.*}}) @mlir_{{[a-z0-9_]+}}
+// CHECK: return %[[K]]
+
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x16x32xf32>,
+                      %y: tensor<1x16x32xf32>) -> tensor<1x32x16xf32> {
+  %ae = tensor.empty() : tensor<1x16x32xf32>
+  %a = hip.add(%ctx) ins(%x, %y : tensor<1x16x32xf32>, tensor<1x16x32xf32>)
+      outs(%ae : tensor<1x16x32xf32>) -> tensor<1x16x32xf32>
+  %me = tensor.empty() : tensor<1x16x32xf32>
+  %m = hip.mul(%ctx) ins(%a, %a : tensor<1x16x32xf32>, tensor<1x16x32xf32>)
+      outs(%me : tensor<1x16x32xf32>) -> tensor<1x16x32xf32>
+  %te = tensor.empty() : tensor<1x32x16xf32>
+  %t = hip.transpose(%ctx) ins(%m : tensor<1x16x32xf32>)
+      outs(%te : tensor<1x32x16xf32>) {perm = [0, 2, 1]} : tensor<1x32x16xf32>
+  return %t : tensor<1x32x16xf32>
 }
 
 // -----
@@ -248,15 +330,15 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x16xf16>,
 // CHECK: hip.neg
 // CHECK: hip.transpose
 
-func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x8x16xf16>)
-    -> tensor<1x16x8x8xf16> {
-  %ne = tensor.empty() : tensor<1x8x8x16xf16>
-  %n = hip.neg(%ctx) ins(%x : tensor<1x8x8x16xf16>)
-      outs(%ne : tensor<1x8x8x16xf16>) : tensor<1x8x8x16xf16>
-  %te = tensor.empty() : tensor<1x16x8x8xf16>
-  %t = hip.transpose(%ctx) ins(%n : tensor<1x8x8x16xf16>)
-      outs(%te : tensor<1x16x8x8xf16>) {perm = [0, 3, 1, 2]} : tensor<1x16x8x8xf16>
-  return %t : tensor<1x16x8x8xf16>
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x4x32x32xf16>)
+    -> tensor<1x32x4x32xf16> {
+  %ne = tensor.empty() : tensor<1x4x32x32xf16>
+  %n = hip.neg(%ctx) ins(%x : tensor<1x4x32x32xf16>)
+      outs(%ne : tensor<1x4x32x32xf16>) : tensor<1x4x32x32xf16>
+  %te = tensor.empty() : tensor<1x32x4x32xf16>
+  %t = hip.transpose(%ctx) ins(%n : tensor<1x4x32x32xf16>)
+      outs(%te : tensor<1x32x4x32xf16>) {perm = [0, 3, 1, 2]} : tensor<1x32x4x32xf16>
+  return %t : tensor<1x32x4x32xf16>
 }
 
 // -----
@@ -265,7 +347,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x8x16xf16>)
 // the kernel with its own copy of the reshape, and the kernel keeps the other.
 
 // CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
-// CHECK-SAME: -> (tensor<1x64x16xf16>, tensor<1x8x8x16xf16>)
+// CHECK-SAME: -> (tensor<1x128x32xf16>, tensor<1x4x32x32xf16>)
 // CHECK-SAME: attributes {rock.elementwise, rock.kernel}
 // CHECK-NOT: hip.transpose
 // CHECK: return
@@ -275,19 +357,19 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x8x16xf16>)
 // CHECK: %[[T:.*]] = hip.transpose({{.*}}) ins(%[[E]] :
 // CHECK: return %[[T]], %[[K]]#1
 
-func.func @main_graph(%ctx: !hip.context, %x: tensor<1x64x16xf16>,
-                      %y: tensor<1x64x16xf16>, %z: tensor<1x8x8x16xf16>)
-    -> (tensor<1x16x8x8xf16>, tensor<1x8x8x16xf16>) {
-  %ae = tensor.empty() : tensor<1x64x16xf16>
-  %a = hip.add(%ctx) ins(%x, %y : tensor<1x64x16xf16>, tensor<1x64x16xf16>)
-      outs(%ae : tensor<1x64x16xf16>) -> tensor<1x64x16xf16>
-  %e = tensor.expand_shape %a [[0], [1, 2], [3]] output_shape [1, 8, 8, 16]
-      : tensor<1x64x16xf16> into tensor<1x8x8x16xf16>
-  %te = tensor.empty() : tensor<1x16x8x8xf16>
-  %t = hip.transpose(%ctx) ins(%e : tensor<1x8x8x16xf16>)
-      outs(%te : tensor<1x16x8x8xf16>) {perm = [0, 3, 1, 2]} : tensor<1x16x8x8xf16>
-  %me = tensor.empty() : tensor<1x8x8x16xf16>
-  %m = hip.mul(%ctx) ins(%e, %z : tensor<1x8x8x16xf16>, tensor<1x8x8x16xf16>)
-      outs(%me : tensor<1x8x8x16xf16>) -> tensor<1x8x8x16xf16>
-  return %t, %m : tensor<1x16x8x8xf16>, tensor<1x8x8x16xf16>
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x128x32xf16>,
+                      %y: tensor<1x128x32xf16>, %z: tensor<1x4x32x32xf16>)
+    -> (tensor<1x32x4x32xf16>, tensor<1x4x32x32xf16>) {
+  %ae = tensor.empty() : tensor<1x128x32xf16>
+  %a = hip.add(%ctx) ins(%x, %y : tensor<1x128x32xf16>, tensor<1x128x32xf16>)
+      outs(%ae : tensor<1x128x32xf16>) -> tensor<1x128x32xf16>
+  %e = tensor.expand_shape %a [[0], [1, 2], [3]] output_shape [1, 4, 32, 32]
+      : tensor<1x128x32xf16> into tensor<1x4x32x32xf16>
+  %te = tensor.empty() : tensor<1x32x4x32xf16>
+  %t = hip.transpose(%ctx) ins(%e : tensor<1x4x32x32xf16>)
+      outs(%te : tensor<1x32x4x32xf16>) {perm = [0, 3, 1, 2]} : tensor<1x32x4x32xf16>
+  %me = tensor.empty() : tensor<1x4x32x32xf16>
+  %m = hip.mul(%ctx) ins(%e, %z : tensor<1x4x32x32xf16>, tensor<1x4x32x32xf16>)
+      outs(%me : tensor<1x4x32x32xf16>) -> tensor<1x4x32x32xf16>
+  return %t, %m : tensor<1x32x4x32xf16>, tensor<1x4x32x32xf16>
 }
