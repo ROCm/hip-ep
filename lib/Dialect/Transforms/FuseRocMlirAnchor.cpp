@@ -1107,10 +1107,21 @@ private:
     Block &body = module.getBody().front();
     Operation *yield = body.getTerminator();
     DenseSet<Value> yielded(yield->operand_begin(), yield->operand_end());
-    auto movesInnermost = [](TransposeOp transpose) {
+    // When the innermost dimension of the input or of the output is small,
+    // the tile still reads or writes a few contiguous streams, and the kernel
+    // beats a separate HIP transpose. The crossover goes with the element
+    // count, the same for f16, f32 and i8.
+    auto innermostAtLeast = [](Value value, int64_t elements) {
+      int64_t size = cast<ShapedType>(value.getType()).getShape().back();
+      return !ShapedType::isDynamic(size) && size >= elements;
+    };
+    auto movesInnermost = [&](TransposeOp transpose) {
       ArrayAttr perm = transpose.getPerm();
       int64_t last = static_cast<int64_t>(perm.size()) - 1;
-      return last > 0 && cast<IntegerAttr>(perm[last]).getInt() != last;
+      if (last <= 0 || cast<IntegerAttr>(perm[last]).getInt() == last)
+        return false;
+      return innermostAtLeast(transpose.getInput(), peelMinInputElements) &&
+             innermostAtLeast(transpose->getResult(0), peelMinOutputElements);
     };
     auto storable = [&](Value value) {
       auto type = dyn_cast<RankedTensorType>(value.getType());
