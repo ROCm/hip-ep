@@ -278,6 +278,16 @@ def FuseRocMlirAnchorPass
            "Outline an elementwise module that no anchor takes as a rocMLIR "
            "kernel of its own. False inlines every such module, so its ops "
            "run as HIP kernels.">,
+    Option<"peelMinInputElements", "peel-min-input-elements", "int64_t",
+           /*default=*/"8",
+           "A transpose at the edge of a standalone elementwise module leaves "
+           "the kernel only when its input innermost dimension has at least "
+           "this many elements.">,
+    Option<"peelMinOutputElements", "peel-min-output-elements", "int64_t",
+           /*default=*/"32",
+           "A transpose at the edge of a standalone elementwise module leaves "
+           "the kernel only when its output innermost dimension has at least "
+           "this many elements.">,
     Option<"int4Weights", "int4-weights", "bool", /*default=*/"false",
            "Take the packed-int4 weight dequantize of a 1x1 convolution, or "
            "of the B operand of a matmul or gemm (per column or blocked along "
