@@ -60,6 +60,15 @@ inline bool hipdnn_ep_qmoe_burst_enabled() {
   return enabled;
 }
 
+// W4A8 grouped QMoE prefill: the expert GEMM inputs are quantized per weight
+// group to int8 and the GEMMs run on int8 WMMA. Default on;
+// HIPDNN_EP_QMOE_PREFILL_W4A8=0 restores the fp16 grouped GEMMs for A/B.
+inline bool hipdnn_ep_qmoe_prefill_w4a8_enabled() {
+  static const bool enabled =
+      hipdnn_ep::env_enabled_default_on("HIPDNN_EP_QMOE_PREFILL_W4A8");
+  return enabled;
+}
+
 // Longest sequence wrap_linear_attention runs through the one-launch burst
 // kernel (decode included) instead of copy + per-step decode or the chunked
 // prefill scan. Clamped to [0, 64]; 0 disables.

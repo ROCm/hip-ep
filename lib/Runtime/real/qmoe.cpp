@@ -134,6 +134,19 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   };
   const bool grouped = num_tokens > 1 && grouped_fits(kGroupedSmallTile) &&
                        grouped_fits(kGroupedBigTile);
+  auto grouped_w4a8_fits = [&](int64_t tile_rows) {
+    return hip_matmul_nbits_wmma_smallm_grouped_w4a8_supported(
+               -1, tile_rows, fusion_inter, hidden_size, expert_weight_bits,
+               block_size, elem_size) &&
+           hip_matmul_nbits_wmma_smallm_grouped_w4a8_supported(
+               -1, tile_rows, hidden_size, inter_size, expert_weight_bits,
+               block_size, elem_size);
+  };
+  const bool grouped_w4a8 = grouped && hipdnn_ep_qmoe_prefill_w4a8_enabled() &&
+                            hidden_size % block_size == 0 &&
+                            inter_size % block_size == 0 &&
+                            grouped_w4a8_fits(kGroupedSmallTile) &&
+                            grouped_w4a8_fits(kGroupedBigTile);
   // Tile-list capacities (see hip_qmoe_build_row_tiles): a small expert is one
   // tile; big experts need routed_rows / 32 plus one partial tile each.
   const int64_t max_small_tiles = std::min(num_experts, routed_rows);
@@ -195,7 +208,22 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   // Grouped prefill only: the gathered fc1 input rows, the two row-tile lists
   // (3 int32 per tile) and their device-side lengths.
   size_t sz_gather_buf =
-      grouped ? align_up_64(routed_rows * hidden_size * elem_size) : 0;
+      grouped && !grouped_w4a8
+          ? align_up_64(routed_rows * hidden_size * elem_size)
+          : 0;
+  // W4A8 grouped prefill only: int8 rows plus a [rows, k_blocks] fp32 scale
+  // block followed by an int32 sum block, for the token rows, the gathered
+  // fc1 input rows and the fc2 input rows.
+  auto w4a8_sizes = [&](int64_t rows, int64_t width, int64_t k_blocks,
+                        size_t *q, size_t *meta) {
+    *q = grouped_w4a8 ? align_up_64(rows * width) : 0;
+    *meta = grouped_w4a8 ? align_up_64(2 * rows * k_blocks * sizeof(float)) : 0;
+  };
+  size_t sz_q_tok, sz_q_tok_meta, sz_q_in, sz_q_in_meta, sz_q_mid,
+      sz_q_mid_meta;
+  w4a8_sizes(num_tokens, hidden_size, k_blocks_fc1, &sz_q_tok, &sz_q_tok_meta);
+  w4a8_sizes(routed_rows, hidden_size, k_blocks_fc1, &sz_q_in, &sz_q_in_meta);
+  w4a8_sizes(routed_rows, inter_size, k_blocks_fc2, &sz_q_mid, &sz_q_mid_meta);
   size_t sz_tiles_small =
       grouped ? align_up_64(max_small_tiles * 3 * sizeof(int32_t)) : 0;
   size_t sz_tiles_big =
@@ -225,7 +253,13 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   size_t off_tiles_big = off_tiles_small + sz_tiles_small;
   size_t off_num_tiles = off_tiles_big + sz_tiles_big;
   size_t off_row_scale = off_num_tiles + sz_num_tiles;
-  size_t total_scratch = off_row_scale + sz_row_scale;
+  size_t off_q_tok = off_row_scale + sz_row_scale;
+  size_t off_q_tok_meta = off_q_tok + sz_q_tok;
+  size_t off_q_in = off_q_tok_meta + sz_q_tok_meta;
+  size_t off_q_in_meta = off_q_in + sz_q_in;
+  size_t off_q_mid = off_q_in_meta + sz_q_in_meta;
+  size_t off_q_mid_meta = off_q_mid + sz_q_mid;
+  size_t total_scratch = off_q_mid_meta + sz_q_mid_meta;
 
   if (hipdnn_ep_state_ensure_qmoe_scratch(state, total_scratch) != 0) {
     fprintf(stderr, "wrap_qmoe: ensure_qmoe_scratch(%zu) failed\n",
@@ -267,6 +301,23 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
       reinterpret_cast<int32_t *>(scratch_base + off_num_tiles);
   // relu2 activations are stored unscaled, so only SwiGLU has row scales.
   void *d_row_scale = swiglu ? scratch_base + off_row_scale : nullptr;
+  struct QuantRows {
+    void *q;
+    float *scale;
+    int32_t *sum;
+  };
+  auto quant_rows = [&](size_t q_off, size_t meta_off, int64_t rows,
+                        int64_t k_blocks) {
+    float *meta = reinterpret_cast<float *>(scratch_base + meta_off);
+    return QuantRows{scratch_base + q_off, meta,
+                     reinterpret_cast<int32_t *>(meta + rows * k_blocks)};
+  };
+  const QuantRows q_tok =
+      quant_rows(off_q_tok, off_q_tok_meta, num_tokens, k_blocks_fc1);
+  const QuantRows q_in =
+      quant_rows(off_q_in, off_q_in_meta, routed_rows, k_blocks_fc1);
+  const QuantRows q_mid =
+      quant_rows(off_q_mid, off_q_mid_meta, routed_rows, k_blocks_fc2);
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: %s routing(tokens=%lld, experts=%lld, "
                     "k=%lld, normalize=%lld, router_weights=%s)\n",
@@ -436,8 +487,10 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
     const void *fc2_reduce_bias = d_row_scale ? fc2_bias : nullptr;
     RUNTIME_DEBUG_LOG(
         "[REAL] wrap_qmoe: device %s prefill rows=%lld experts=%lld\n",
-        grouped ? "grouped" : "ragged", (long long)routed_rows,
-        (long long)num_experts);
+        grouped_w4a8 ? "grouped w4a8"
+        : grouped    ? "grouped"
+                     : "ragged",
+        (long long)routed_rows, (long long)num_experts);
     // Bucketing zeroes the sorted-id tail left by routing slots that name no
     // expert, so the fixed-size gather below stays in bounds.
     OP_ROCTX_MARK("hip_ep.op.qmoe.prefill.bucket");
@@ -454,34 +507,70 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
           stream, d_expert_counts, num_experts, kGroupedSplitRows,
           kGroupedSmallTile, kGroupedBigTile, d_tiles_small, d_num_tiles,
           d_tiles_big, d_num_tiles + 1));
-      OP_ROCTX_MARK("hip_ep.op.qmoe.prefill.gather");
-      HIP_CHECK(hip_qmoe_gather_tokens(stream, input, d_gather_buf,
-                                       d_sorted_token_ids, hidden_size,
-                                       routed_rows, elem_size));
-
-      auto grouped_fc = [&](const void *a, const void *w, const void *s,
-                            const void *zp, const void *b, void *out, int64_t n,
-                            int64_t kdim, const char *small_step,
-                            const char *big_step) -> int {
+      auto grouped_fc =
+          [&](const void *a, const QuantRows *a_q, const void *w, const void *s,
+              const void *zp, const void *b, void *out, int64_t n, int64_t kdim,
+              const char *small_step, const char *big_step) -> int {
+        auto run = [&](const void *tiles, const void *num, int64_t max_tiles,
+                       int64_t tile_rows) {
+          if (a_q)
+            return hip_matmul_nbits_wmma_smallm_grouped_w4a8(
+                stream, -1, a_q->q, a_q->scale, a_q->sum, w, s, zp,
+                /*zp_packed_u4=*/1, b, d_expert_offsets, tiles, num, out,
+                max_tiles, tile_rows, n, kdim, expert_weight_bits, block_size,
+                elem_size);
+          return hip_matmul_nbits_wmma_smallm_grouped(
+              stream, -1, a, w, s, zp, /*zp_packed_u4=*/1, b, d_expert_offsets,
+              tiles, num, out, max_tiles, tile_rows, n, kdim,
+              expert_weight_bits, block_size, elem_size);
+        };
         OP_ROCTX_MARK(small_step);
-        int rc = hip_matmul_nbits_wmma_smallm_grouped(
-            stream, -1, a, w, s, zp, /*zp_packed_u4=*/1, b, d_expert_offsets,
-            d_tiles_small, d_num_tiles, out, max_small_tiles, kGroupedSmallTile,
-            n, kdim, expert_weight_bits, block_size, elem_size);
+        int rc =
+            run(d_tiles_small, d_num_tiles, max_small_tiles, kGroupedSmallTile);
         if (rc != 0)
           return rc;
         OP_ROCTX_MARK(big_step);
-        return hip_matmul_nbits_wmma_smallm_grouped(
-            stream, -1, a, w, s, zp, /*zp_packed_u4=*/1, b, d_expert_offsets,
-            d_tiles_big, d_num_tiles + 1, out, max_big_tiles, kGroupedBigTile,
-            n, kdim, expert_weight_bits, block_size, elem_size);
+        return run(d_tiles_big, d_num_tiles + 1, max_big_tiles,
+                   kGroupedBigTile);
       };
-      HIP_CHECK(grouped_fc(d_gather_buf, fc1_weights, fc1_scales,
-                           fc1_zero_points, fc1_bias, d_fc1_buf, fusion_inter,
-                           hidden_size, "hip_ep.op.qmoe.prefill.fc1_small",
+
+      if (grouped_w4a8) {
+        // The token rows are quantized once; the gathers copy the int8 rows,
+        // scales and sums as fp16 bit patterns.
+        OP_ROCTX_MARK("hip_ep.op.qmoe.prefill.quant_in");
+        HIP_CHECK(hip_qmoe_quant_act_i8(stream, input, q_tok.q, q_tok.scale,
+                                        q_tok.sum, num_tokens, hidden_size,
+                                        block_size, elem_size));
+        OP_ROCTX_MARK("hip_ep.op.qmoe.prefill.gather");
+        HIP_CHECK(hip_qmoe_gather_tokens(stream, q_tok.q, q_in.q,
+                                         d_sorted_token_ids, hidden_size / 2,
+                                         routed_rows, 2));
+        HIP_CHECK(hip_qmoe_gather_tokens(stream, q_tok.scale, q_in.scale,
+                                         d_sorted_token_ids, 2 * k_blocks_fc1,
+                                         routed_rows, 2));
+        HIP_CHECK(hip_qmoe_gather_tokens(stream, q_tok.sum, q_in.sum,
+                                         d_sorted_token_ids, 2 * k_blocks_fc1,
+                                         routed_rows, 2));
+      } else {
+        OP_ROCTX_MARK("hip_ep.op.qmoe.prefill.gather");
+        HIP_CHECK(hip_qmoe_gather_tokens(stream, input, d_gather_buf,
+                                         d_sorted_token_ids, hidden_size,
+                                         routed_rows, elem_size));
+      }
+      HIP_CHECK(grouped_fc(d_gather_buf, grouped_w4a8 ? &q_in : nullptr,
+                           fc1_weights, fc1_scales, fc1_zero_points, fc1_bias,
+                           d_fc1_buf, fusion_inter, hidden_size,
+                           "hip_ep.op.qmoe.prefill.fc1_small",
                            "hip_ep.op.qmoe.prefill.fc1_big"));
       HIP_CHECK(activate());
-      HIP_CHECK(grouped_fc(d_act_buf, fc2_weights, fc2_scales, fc2_zero_points,
+      if (grouped_w4a8) {
+        OP_ROCTX_MARK("hip_ep.op.qmoe.prefill.quant_mid");
+        HIP_CHECK(hip_qmoe_quant_act_i8(stream, d_act_buf, q_mid.q, q_mid.scale,
+                                        q_mid.sum, routed_rows, inter_size,
+                                        block_size, elem_size));
+      }
+      HIP_CHECK(grouped_fc(d_act_buf, grouped_w4a8 ? &q_mid : nullptr,
+                           fc2_weights, fc2_scales, fc2_zero_points,
                            fc2_gemm_bias, d_fc2_buf, hidden_size, inter_size,
                            "hip_ep.op.qmoe.prefill.fc2_small",
                            "hip_ep.op.qmoe.prefill.fc2_big"));

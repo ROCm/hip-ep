@@ -2724,6 +2724,25 @@ HIP_KERNEL_API int hip_matmul_nbits_wmma_smallm_grouped_supported(
     int cfg, int64_t tile_rows, int64_t N, int64_t K, int64_t bits,
     int64_t block_size, int64_t element_size_bytes);
 
+/* W4A8 form of hip_matmul_nbits_wmma_smallm_grouped: same B / scales /
+ * zero_points / bias / row-tile arguments and cfg rule, with A given as the
+ * hip_qmoe_quant_act_i8 output for [rows, K] at this block_size (A int8,
+ * a_scale fp32, a_sum int32, all non-null). The output differs from the fp16
+ * kernel by the activation rounding. gfx11 WMMA256b devices only (not
+ * gfx117x); returns -1 where the _supported query is 0. */
+HIP_KERNEL_API int hip_matmul_nbits_wmma_smallm_grouped_w4a8(
+    void* stream, int cfg,
+    const void* A, const void* a_scale, const void* a_sum,
+    const void* B, const void* scales, const void* zero_points,
+    int zp_packed_u4, const void* bias, const void* expert_row_offsets,
+    const void* row_tiles, const void* num_row_tiles, void* output,
+    int64_t max_row_tiles, int64_t tile_rows, int64_t N, int64_t K,
+    int64_t bits, int64_t block_size, int64_t element_size_bytes);
+
+HIP_KERNEL_API int hip_matmul_nbits_wmma_smallm_grouped_w4a8_supported(
+    int cfg, int64_t tile_rows, int64_t N, int64_t K, int64_t bits,
+    int64_t block_size, int64_t element_size_bytes);
+
 /* W4A8 integer-dot-product (dp4a) GEMV for a single decode row (M==1).
  * Dynamically quantizes the fp16 activation row to per-group int8 (into
  * caller-owned scratch) and runs a `v_dot4_i32_iu8` (`__builtin_amdgcn_sudot4`)
@@ -3363,6 +3382,17 @@ HIP_KERNEL_API int hip_qmoe_decode_fused_dp4a(
     int64_t k, int64_t block_size,
     float swiglu_alpha, float swiglu_beta, float swiglu_limit,
     int64_t element_size_bytes, int64_t num_tokens);
+
+// Per-group int8 quantization of fp16 rows [rows, row_len] for
+// hip_matmul_nbits_wmma_smallm_grouped_w4a8: a_qb int8 [rows, row_len] with
+// each 8 values stored even-k first then odd-k, a_scale fp32 and a_sum int32
+// (sum of the group's int8 values, may be null) [rows, row_len / block_size].
+// row_len must be a multiple of block_size, block_size a multiple of 32.
+HIP_KERNEL_API int hip_qmoe_quant_act_i8(void* stream, const void* input,
+                                         void* a_qb, void* a_scale, void* a_sum,
+                                         int64_t rows, int64_t row_len,
+                                         int64_t block_size,
+                                         int64_t element_size_bytes);
 
 /* =========================================================================
  * com.amd QMoE Sub-Kernels (LatentMoE)

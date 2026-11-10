@@ -44,6 +44,7 @@ from framework.onnx_utils import make_model_from_nodes
 # live in the first band.
 SEQ_LENS = [1, 2, 5, 8, 9, 128]
 FUSED_MAX_TOKENS = int(os.environ.get("HIPDNN_EP_QMOE_FUSED_MAX_TOKENS", "8"))
+PREFILL_W4A8 = not os.environ.get("HIPDNN_EP_QMOE_PREFILL_W4A8", "").startswith("0")
 HIDDEN = 2880
 INTERMEDIATE = 5760
 NUM_EXPERTS = 32
@@ -55,11 +56,12 @@ EXPERT_WEIGHT_BITS = 4
 def _compare_gpt_oss_shape(actual, expected, seq_len):
     """The fused decode kernels quantize activations to int8 per 32-element
     group by default (W4A8, HIPDNN_EP_MATMUL_DP4A), an error that scales with
-    the output (|output| reaches ~100 at these shapes). Fused token counts are
-    bounded at 2% of the largest |output| with a tighter cosine instead of the
-    grouped path's fixed atol.
+    the output (|output| reaches ~100 at these shapes), and so do the grouped
+    prefill GEMMs (HIPDNN_EP_QMOE_PREFILL_W4A8). Both are bounded at 2% of the
+    largest |output| with a tighter cosine; the fp16 grouped GEMMs keep the
+    fixed atol.
     """
-    if seq_len <= FUSED_MAX_TOKENS:
+    if seq_len <= FUSED_MAX_TOKENS or PREFILL_W4A8:
         scale = float(np.abs(expected[0].astype(np.float32)).max())
         compare_outputs(
             actual, expected, atol=2e-2 * scale, rtol=1e-2, cos_threshold=0.9999
@@ -488,21 +490,7 @@ class TestQMoE:
         _compare_gpt_oss_shape(actual, expected, seq_len)
 
     @pytest.mark.parametrize("normalize", [0, 1])
-    @pytest.mark.parametrize(
-        "seq_len",
-        [
-            pytest.param(
-                1,
-                marks=pytest.mark.xfail(
-                    reason="fused decode exceeds atol=0.1 here, as "
-                    "test_qmoe_gpt_oss_shape[1] does without router_weights",
-                    strict=False,
-                ),
-            ),
-            37,
-            128,
-        ],
-    )
+    @pytest.mark.parametrize("seq_len", [1, 37, 128])
     def test_qmoe_gpt_oss_shape_mix_weights(self, model_runner, seq_len, normalize):
         """router_weights (QMoE input 14): the logits only pick the top-k
         experts; the mixing weights are gathered from a separate tensor and
@@ -535,7 +523,7 @@ class TestQMoE:
         mix = rng.uniform(0.05, 0.45, [seq_len, NUM_EXPERTS]).astype(np.float16)
 
         actual, expected = model_runner.run_sample(model, [x, router, mix])
-        compare_outputs(actual, expected, atol=1e-1, rtol=1e-2, cos_threshold=0.99)
+        _compare_gpt_oss_shape(actual, expected, seq_len)
 
 
 @dataclass(frozen=True)
@@ -954,10 +942,11 @@ class TestQMoESigmoidBiasRouting:
         assert not (ranked[:, k - 1] == ranked[:, k]).any()
 
         actual, expected = model_runner.run_sample(model, [x, logits])
-        if seq_len <= FUSED_MAX_TOKENS:
-            # W4A8 decode (HIPDNN_EP_MATMUL_DP4A, default on): ten int8-quantized
+        if seq_len <= FUSED_MAX_TOKENS or PREFILL_W4A8:
+            # W4A8 decode (HIPDNN_EP_MATMUL_DP4A) and prefill
+            # (HIPDNN_EP_QMOE_PREFILL_W4A8), both default on: ten int8-quantized
             # expert paths per token measure cosine ~0.99988 here, and 0.9999
-            # or better with HIPDNN_EP_MATMUL_DP4A=0.
+            # or better with the fp16 GEMMs.
             scale = float(np.abs(expected[0].astype(np.float32)).max())
             compare_outputs(
                 actual, expected, atol=2e-2 * scale, rtol=1e-2, cos_threshold=0.9995

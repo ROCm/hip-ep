@@ -2053,11 +2053,14 @@ extern "C" int hip_qmoe_decode_fused(
 // into a_qb + r*row_len (int8) with per-group scale a_scale[r*n_blk + grp].
 // Requires row_len % 8 == 0 (guaranteed: block_size is a power of two >= 32).
 // TIn is __half for the fc1 input and float for the fc2 slot activations.
+// a_sum (may be null) receives the sum of each group's int8 values, at the
+// same [row][grp] index as a_scale.
 template <int BLOCK_SIZE, typename TIn>
 __global__ void qmoe_quant_act_i8_kernel(
     const TIn*    __restrict__ A,
     int8_t*       __restrict__ a_qb,
     float*        __restrict__ a_scale,
+    int32_t*      __restrict__ a_sum,
     int row_len, int block_size, int n_blk) {
   const int grp = blockIdx.x;
   const int row = blockIdx.y;
@@ -2098,6 +2101,7 @@ __global__ void qmoe_quant_act_i8_kernel(
   if (tid == 0)
     a_scale[static_cast<size_t>(row) * n_blk + grp] = scale;
 
+  int local_sum = 0;
   for (int k = g0 + tid; k < g1; k += BLOCK_SIZE) {
     int q = __float2int_rn(static_cast<float>(Arow[k]) * inv_scale);
     q = max(-127, min(127, q));
@@ -2105,6 +2109,69 @@ __global__ void qmoe_quant_act_i8_kernel(
     const int p = k & 7;
     const int off = (p & 1) ? (c * 8 + 4 + (p >> 1)) : (c * 8 + (p >> 1));
     qrow[off] = static_cast<int8_t>(q);
+    local_sum += q;
+  }
+  if (a_sum) {
+    for (int off = RED_SPAN >> 1; off > 0; off >>= 1)
+      local_sum += __shfl_down(local_sum, off);
+    __shared__ int ssum[NUM_WARPS];
+    if ((tid & (WARP_SIZE - 1)) == 0)
+      ssum[tid / WARP_SIZE] = local_sum;
+    __syncthreads();
+    if (tid == 0) {
+      int t = 0;
+#pragma unroll
+      for (int i = 0; i < NUM_WARPS; i++)
+        t += ssum[i];
+      a_sum[static_cast<size_t>(row) * n_blk + grp] = t;
+    }
+  }
+}
+
+// block_size 32 form of qmoe_quant_act_i8_kernel for many rows, same output:
+// a lane quantizes 8 consecutive values from one 16-byte load and a group is
+// 4 adjacent lanes. total8 = rows * row_len / 8, row_len % 32 == 0.
+__global__ void qmoe_quant_act_i8_g32_kernel(
+    const __half* __restrict__ A,
+    int8_t*       __restrict__ a_qb,
+    float*        __restrict__ a_scale,
+    int32_t*      __restrict__ a_sum,
+    int64_t total8) {
+  const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const bool ok = i < total8;
+  uint4 raw = make_uint4(0, 0, 0, 0);
+  if (ok) raw = reinterpret_cast<const uint4*>(A)[i];
+  const uint32_t w[4] = {raw.x, raw.y, raw.z, raw.w};
+  float v[8];
+  float m = 0.0f;
+#pragma unroll
+  for (int p = 0; p < 4; p++) {
+    const float2 f = __half22float2(__builtin_bit_cast(__half2, w[p]));
+    v[2 * p] = f.x;
+    v[2 * p + 1] = f.y;
+    m = fmaxf(m, fmaxf(fabsf(f.x), fabsf(f.y)));
+  }
+  m = fmaxf(m, __shfl_xor(m, 1));
+  m = fmaxf(m, __shfl_xor(m, 2));
+  const float scale = (m > 0.0f) ? (m * (1.0f / 127.0f)) : 1.0f;
+  const float inv_scale = (m > 0.0f) ? (127.0f / m) : 0.0f;
+  uint32_t even = 0, odd = 0;
+  int sum = 0;
+#pragma unroll
+  for (int p = 0; p < 8; p++) {
+    int q = __float2int_rn(v[p] * inv_scale);
+    q = max(-127, min(127, q));
+    sum += q;
+    const uint32_t b = static_cast<uint32_t>(q) & 0xFFu;
+    if (p & 1) odd |= b << (8 * (p >> 1));
+    else even |= b << (8 * (p >> 1));
+  }
+  if (ok) reinterpret_cast<uint2*>(a_qb)[i] = make_uint2(even, odd);
+  sum += __shfl_xor(sum, 1);
+  sum += __shfl_xor(sum, 2);
+  if (ok && (threadIdx.x & 3) == 0) {
+    a_scale[i >> 2] = scale;
+    if (a_sum) a_sum[i >> 2] = sum;
   }
 }
 
@@ -2568,7 +2635,7 @@ extern "C" int hip_qmoe_decode_fused_dp4a(
     hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_quant_act_i8_kernel<128, __half>),
                        grid, dim3(128), 0, s, static_cast<const __half*>(input),
                        static_cast<int8_t*>(a_qb_in),
-                       static_cast<float*>(a_scale_in),
+                       static_cast<float*>(a_scale_in), nullptr,
                        static_cast<int>(hidden_size),
                        static_cast<int>(block_size), n_blk_in);
     hipError_t e = hipGetLastError();
@@ -2617,7 +2684,7 @@ extern "C" int hip_qmoe_decode_fused_dp4a(
     hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_quant_act_i8_kernel<128, float>),
                        grid, dim3(128), 0, s, static_cast<const float*>(act_out),
                        static_cast<int8_t*>(a_qb_mid),
-                       static_cast<float*>(a_scale_mid),
+                       static_cast<float*>(a_scale_mid), nullptr,
                        static_cast<int>(inter_size),
                        static_cast<int>(block_size), n_blk_mid);
     hipError_t e = hipGetLastError();
@@ -2676,4 +2743,43 @@ extern "C" int hip_qmoe_decode_fused_dp4a(
   }
 
   return 0;
+}
+
+extern "C" int hip_qmoe_quant_act_i8(void* stream, const void* input,
+                                     void* a_qb, void* a_scale, void* a_sum,
+                                     int64_t rows, int64_t row_len,
+                                     int64_t block_size,
+                                     int64_t element_size_bytes) {
+  if (rows <= 0) return 0;
+  if (element_size_bytes != 2 || block_size < 32 || (block_size & 31) != 0 ||
+      row_len <= 0 || (row_len % block_size) != 0) {
+    fprintf(stderr,
+            "[custom_kernels] hip_qmoe_quant_act_i8: unsupported shape "
+            "(row_len=%lld block=%lld elem=%lld)\n",
+            (long long)row_len, (long long)block_size,
+            (long long)element_size_bytes);
+    return -1;
+  }
+  hipStream_t s = static_cast<hipStream_t>(stream);
+  const int n_blk = static_cast<int>(row_len / block_size);
+  dim3 grid(static_cast<unsigned>(n_blk), static_cast<unsigned>(rows));
+  if (block_size == 32) {
+    const int64_t total8 = rows * row_len / 8;
+    hipLaunchKernelGGL(qmoe_quant_act_i8_g32_kernel,
+                       dim3(static_cast<unsigned>((total8 + 255) / 256)),
+                       dim3(256), 0, s, static_cast<const __half*>(input),
+                       static_cast<int8_t*>(a_qb), static_cast<float*>(a_scale),
+                       static_cast<int32_t*>(a_sum), total8);
+  } else {
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_quant_act_i8_kernel<128, __half>),
+                       grid, dim3(128), 0, s, static_cast<const __half*>(input),
+                       static_cast<int8_t*>(a_qb), static_cast<float*>(a_scale),
+                       static_cast<int32_t*>(a_sum), static_cast<int>(row_len),
+                       static_cast<int>(block_size), n_blk);
+  }
+  hipError_t e = hipGetLastError();
+  if (e != hipSuccess)
+    fprintf(stderr, "[custom_kernels] hip_qmoe_quant_act_i8 failed: %s\n",
+            hipGetErrorString(e));
+  return static_cast<int>(e);
 }
