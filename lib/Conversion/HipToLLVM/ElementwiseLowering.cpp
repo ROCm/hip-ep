@@ -100,8 +100,9 @@ struct ElementwiseOpLowering : public ConvertOpToLLVMPattern<OpTy> {
     auto rhsType = cast<MemRefType>(op.getRhs().getType());
     auto outputType = cast<MemRefType>(op.getOutput().getType());
 
-    if (lhsType.getRank() > 4 || rhsType.getRank() > 4 ||
-        outputType.getRank() > 4)
+    if (lhsType.getRank() > kMaxElementwiseRank ||
+        rhsType.getRank() > kMaxElementwiseRank ||
+        outputType.getRank() > kMaxElementwiseRank)
       return rewriter.notifyMatchFailure(
           op, "rank > 4 unsupported by the 4D shape-passing ABI");
 
@@ -172,8 +173,9 @@ struct SubOpLowering : public ConvertOpToLLVMPattern<SubOp> {
     auto rhsType = cast<MemRefType>(op.getRhs().getType());
     auto outputType = cast<MemRefType>(op.getOutput().getType());
 
-    if (lhsType.getRank() > 4 || rhsType.getRank() > 4 ||
-        outputType.getRank() > 4)
+    if (lhsType.getRank() > kMaxElementwiseRank ||
+        rhsType.getRank() > kMaxElementwiseRank ||
+        outputType.getRank() > kMaxElementwiseRank)
       return rewriter.notifyMatchFailure(
           op, "rank > 4 unsupported by 4D broadcast descriptor API");
 

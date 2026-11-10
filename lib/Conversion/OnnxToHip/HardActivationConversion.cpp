@@ -53,12 +53,6 @@ static mlir::Value floatScalar(mlir::PatternRewriter &rewriter,
   return rewriter.create(state)->getResult(0);
 }
 
-// hip.mul / hip.add / hip.min / hip.max lower through the 4D shape-passing
-// elementwise ABI (ElementwiseOpLowering in HipToLLVM/ElementwiseLowering.cpp),
-// which rejects higher ranks. Keep this in sync with that limit so higher-rank
-// HardSwish stays unconverted instead of failing later in HipToLLVM.
-constexpr int64_t kMaxElementwiseRank = 4;
-
 /// Emits `lhs <OpTy> rhs` into a fresh DPS init shaped like \p resultType.
 /// \p OpTy is one of hip::MulOp, hip::AddOp, hip::MinOp or hip::MaxOp; they
 /// share the same builder signature.
