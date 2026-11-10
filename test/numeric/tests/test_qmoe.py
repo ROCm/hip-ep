@@ -790,6 +790,20 @@ class TestQMoERelu2:
         actual, expected = _run_relu2(model_runner, cfg)
         compare_outputs(actual, expected, atol=5e-2, rtol=1e-2, cos_threshold=0.999)
 
+    @pytest.mark.parametrize("num_experts,top_k", [(512, 22), (64, 32)])
+    @pytest.mark.parametrize("seq_len", [1, 37])
+    def test_qmoe_relu2_top_k_above_16(self, model_runner, seq_len, num_experts, top_k):
+        cfg = Relu2Config(
+            seq_len=seq_len,
+            hidden=64,
+            inter=64,
+            num_experts=num_experts,
+            top_k=top_k,
+            with_mix_weights=True,
+        )
+        actual, expected = _run_relu2(model_runner, cfg)
+        compare_outputs(actual, expected, atol=5e-2, rtol=1e-2, cos_threshold=0.999)
+
     @pytest.mark.parametrize("seq_len", [1, 128])
     def test_qmoe_relu2_large_shape(self, model_runner, seq_len):
         """Production-sized expert shapes; 16 experts keep the reference small."""
@@ -915,12 +929,15 @@ class TestQMoESigmoidBiasRouting:
     ORT CPU reference stays small. seq_len 1 and 5 take the fused decode
     kernels, 9 and up the grouped prefill path; every token count goes
     through the folded routing kernel. Up to 256 experts route with one wave
-    per token, 384 with the block kernel."""
+    per token, 384 and 512 with the block kernel. Top-22 over 512 experts and
+    top-32 cover k above 16."""
 
-    @pytest.mark.parametrize("num_experts", [100, 256, 384])
+    @pytest.mark.parametrize(
+        "num_experts,k", [(100, 10), (256, 10), (384, 10), (256, 32), (512, 22)]
+    )
     @pytest.mark.parametrize("seq_len", [1, 5, 9, 128, 512])
-    def test_qmoe_sigmoid_bias_routing(self, model_runner, seq_len, num_experts):
-        e, k = num_experts, 10
+    def test_qmoe_sigmoid_bias_routing(self, model_runner, seq_len, num_experts, k):
+        e = num_experts
         model = _make_sigmoid_bias_qmoe_model(
             hidden=512, inter=256, num_experts=e, top_k=k, block_size=128, scale=2.5
         )

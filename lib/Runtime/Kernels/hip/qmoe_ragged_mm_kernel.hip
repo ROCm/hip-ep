@@ -36,7 +36,9 @@ constexpr int kKTile = 32;
 constexpr int kThreadsPerBlock = 128;
 // HIP reports WGPs in multiProcessorCount on RDNA; each WGP contains two CUs.
 constexpr int kComputeUnitsPerWgp = 2;
-constexpr int kMaxTopK = 16;
+constexpr int kMaxTopK = 32;
+static_assert(kMaxTopK <= 32, "qmoe_reduce_sorted_pairs_kernel tracks used "
+                              "slots in a uint32_t mask");
 constexpr int kGemvTileN = 16;
 constexpr int64_t kTwoWindowMinRows = 512;
 
@@ -743,6 +745,9 @@ hipError_t launch_ragged_matmul_nbits(
 }
 
 constexpr int kReduceBlock = 128;
+// Rows a reduce thread holds in registers at once. Holding all kMaxTopK rows
+// spills at kVec = 8.
+constexpr int kReduceRowBatch = 16;
 
 template <int kVec>
 struct alignas(2 * kVec) HalfVec {
@@ -753,7 +758,8 @@ struct alignas(2 * kVec) HalfVec {
 // order (ties to the lower slot; INT32_MAX ids are skipped), with an fp16
 // round after every contribution, to match the host loop this replaced. The
 // order is resolved once per token into LDS; each thread then sums kVec
-// contiguous columns, issuing all k row loads before the first add.
+// contiguous columns, issuing the row loads of each batch of up to
+// kReduceRowBatch rows before its first add.
 template <int kVec>
 __global__ void __launch_bounds__(kReduceBlock) qmoe_reduce_sorted_pairs_kernel(
     const __half *__restrict__ sorted_expert_output,
@@ -802,42 +808,45 @@ __global__ void __launch_bounds__(kReduceBlock) qmoe_reduce_sorted_pairs_kernel(
   const int64_t vec_cols = width / kVec;
   __half *out_row = output + token * width;
   for (int64_t c = tid; c < vec_cols; c += kReduceBlock) {
-    Vec v[kMaxTopK];
-#pragma unroll
-    for (int r = 0; r < kMaxTopK; ++r) {
-      if (r < n)
-        v[r] = *reinterpret_cast<const Vec *>(sorted_expert_output +
-                                              s_row_base[r] + c * kVec);
-    }
     Vec acc;
 #pragma unroll
     for (int j = 0; j < kVec; ++j) acc.h[j] = __float2half(0.0f);
+    for (int r0 = 0; r0 < n; r0 += kReduceRowBatch) {
+      Vec v[kReduceRowBatch];
 #pragma unroll
-    for (int r = 0; r < kMaxTopK; ++r) {
-      // continue, not break: an early exit stops the full unroll and moves v
-      // to scratch memory.
-      if (r >= n) continue;
-      const float weight = s_weight[r];
-      const float s = s_scale[r];
-      float value[kVec];
-#pragma unroll
-      for (int j = 0; j < kVec; ++j) value[j] = static_cast<float>(v[r].h[j]);
-      // The fc2 GEMM saw act / s and no bias, so the true value is s * v + b.
-      // Adding b after the rescale keeps a large bias from swamping v's fp16
-      // mantissa. s is a power of two and uniform across the block.
-      if (s != 1.0f) {
-#pragma unroll
-        for (int j = 0; j < kVec; ++j) value[j] *= s;
-      }
-      if (fc2_bias) {
-        const Vec b = *reinterpret_cast<const Vec *>(fc2_bias +
-                                                     s_bias_base[r] + c * kVec);
-#pragma unroll
-        for (int j = 0; j < kVec; ++j) value[j] += static_cast<float>(b.h[j]);
+      for (int r = 0; r < kReduceRowBatch; ++r) {
+        if (r0 + r < n)
+          v[r] = *reinterpret_cast<const Vec *>(sorted_expert_output +
+                                                s_row_base[r0 + r] + c * kVec);
       }
 #pragma unroll
-      for (int j = 0; j < kVec; ++j)
-        acc.h[j] = __float2half(static_cast<float>(acc.h[j]) + weight * value[j]);
+      for (int r = 0; r < kReduceRowBatch; ++r) {
+        // continue, not break: an early exit stops the full unroll and moves v
+        // to scratch memory.
+        if (r0 + r >= n) continue;
+        const float weight = s_weight[r0 + r];
+        const float s = s_scale[r0 + r];
+        float value[kVec];
+#pragma unroll
+        for (int j = 0; j < kVec; ++j) value[j] = static_cast<float>(v[r].h[j]);
+        // The fc2 GEMM saw act / s and no bias, so the true value is s * v + b.
+        // Adding b after the rescale keeps a large bias from swamping v's fp16
+        // mantissa. s is a power of two and uniform across the block.
+        if (s != 1.0f) {
+#pragma unroll
+          for (int j = 0; j < kVec; ++j) value[j] *= s;
+        }
+        if (fc2_bias) {
+          const Vec b = *reinterpret_cast<const Vec *>(
+              fc2_bias + s_bias_base[r0 + r] + c * kVec);
+#pragma unroll
+          for (int j = 0; j < kVec; ++j) value[j] += static_cast<float>(b.h[j]);
+        }
+#pragma unroll
+        for (int j = 0; j < kVec; ++j)
+          acc.h[j] =
+              __float2half(static_cast<float>(acc.h[j]) + weight * value[j]);
+      }
     }
     *reinterpret_cast<Vec *>(out_row + c * kVec) = acc;
   }
