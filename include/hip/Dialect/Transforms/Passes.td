@@ -285,7 +285,12 @@ def FuseRocMlirAnchorPass
                "Gemm element types (as printed, e.g. f16) that have matrix "
                "acceleration on the target. Both gemms of a "
                "gemm-elementwise-gemm kernel must read a listed type; an "
-               "empty list merges no pair.">
+               "empty list merges no pair.">,
+    Option<"standaloneElementwise", "standalone-elementwise", "bool",
+           /*default=*/"true",
+           "Outline an elementwise module that no anchor takes as a rocMLIR "
+           "kernel of its own. False inlines every such module, so its ops "
+           "run as HIP kernels.">
   ];
   let dependentDialects = [
     "mlir::arith::ArithDialect",
