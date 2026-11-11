@@ -29,6 +29,24 @@
 namespace mlir {
 namespace hip {
 
+/// Reject any attribute other than the reduce attributes the converters read
+/// and ONNX-MLIR import metadata, so an attribute a future opset adds fails
+/// the match instead of being dropped.
+inline mlir::LogicalResult
+checkReductionAttributes(mlir::Operation *op, mlir::PatternRewriter &rewriter,
+                         llvm::StringRef name) {
+  for (mlir::NamedAttribute attr : op->getAttrs()) {
+    llvm::StringRef key = attr.getName().getValue();
+    if (llvm::is_contained({"axes", "keepdims", "noop_with_empty_axes",
+                            "onnx_node_name", "node.outputs"},
+                           key))
+      continue;
+    return rewriter.notifyMatchFailure(op, name + ": unsupported attribute '" +
+                                               key + "'");
+  }
+  return mlir::success();
+}
+
 /// Split sorted, unique axes into maximal runs of consecutive axes.
 inline llvm::SmallVector<llvm::SmallVector<int64_t>>
 splitContiguousAxes(llvm::ArrayRef<int64_t> axes) {
@@ -61,6 +79,8 @@ template <typename HipOp>
 mlir::LogicalResult convertOnnxReduction(mlir::Operation *op,
                                          mlir::PatternRewriter &rewriter,
                                          llvm::StringRef name, bool separable) {
+  if (mlir::failed(checkReductionAttributes(op, rewriter, name)))
+    return mlir::failure();
   auto ctxOrFailure = getContextArg(op, rewriter);
   if (mlir::failed(ctxOrFailure))
     return mlir::failure();

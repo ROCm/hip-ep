@@ -3,7 +3,7 @@
  * Licensed under the MIT License.
  */
 
-#include "OnnxToHipUtils.h"
+#include "ReduceConversionUtils.h"
 
 #include "llvm/ADT/APInt.h"
 
@@ -76,6 +76,8 @@ struct ReduceL2ToHip : public mlir::RewritePattern {
 mlir::LogicalResult
 ReduceL2ToHip::matchAndRewrite(mlir::Operation *op,
                                mlir::PatternRewriter &rewriter) const {
+  if (mlir::failed(checkReductionAttributes(op, rewriter, "ReduceL2")))
+    return mlir::failure();
   auto ctxOrFailure = getContextArg(op, rewriter);
   if (mlir::failed(ctxOrFailure))
     return mlir::failure();
