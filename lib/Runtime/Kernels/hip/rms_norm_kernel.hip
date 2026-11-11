@@ -226,6 +226,60 @@ __global__ void hip_gated_rms_norm_kernel(const T *__restrict__ input,
   }
 }
 
+// hip_gated_rms_norm_kernel for 128-wide rows: one wave per row, eight rows
+// per block, no LDS or barriers, and the row stays in registers for the output
+// pass. Lane l holds elements l, l+32, l+64, l+96; pairing them as the
+// 128-thread tree's first two strides do and then the shuffle tree reproduces
+// that reduction exactly, so the results match the block kernel bit for bit.
+template <typename T, bool SILU>
+__global__ __launch_bounds__(256) void hip_gated_rms_norm_128_kernel(
+    const T *__restrict__ input, const T *__restrict__ scale,
+    const T *__restrict__ gate, T *__restrict__ output, int64_t outer,
+    float epsilon) {
+  constexpr int kWave = 32;
+  constexpr int kRowsPerBlock = 8;
+  constexpr int kNorm = 128;
+  constexpr int kPerLane = kNorm / kWave;
+  const int lane = threadIdx.x % kWave;
+  const int64_t row = static_cast<int64_t>(blockIdx.x) * kRowsPerBlock +
+                      threadIdx.x / kWave;
+  if (row >= outer)
+    return;
+  const T *x_row = input + row * kNorm;
+  const T *z_row = gate + row * kNorm;
+  T *y_row = output + row * kNorm;
+  float v[kPerLane];
+  float sq[kPerLane];
+#pragma unroll
+  for (int i = 0; i < kPerLane; ++i)
+    v[i] = rms_load(x_row + lane + i * kWave);
+  float sumsq;
+  {
+#pragma clang fp contract(off)
+#pragma unroll
+    for (int i = 0; i < kPerLane; ++i)
+      sq[i] = v[i] * v[i];
+    sumsq = (sq[0] + sq[2]) + (sq[1] + sq[3]);
+  }
+#pragma unroll
+  for (int offset = kWave / 2; offset > 0; offset >>= 1)
+    sumsq += __shfl_down(sumsq, offset, kWave);
+  sumsq = __shfl(sumsq, 0, kWave);
+  const float inv_rms =
+      rsqrtf(sumsq / static_cast<float>(kNorm) + epsilon);
+#pragma unroll
+  for (int i = 0; i < kPerLane; ++i) {
+    const int h = lane + i * kWave;
+    float g = rms_load(scale + h);
+    float z = rms_load(z_row + h);
+    float act = 1.0f / (1.0f + expf(-z));
+    if constexpr (SILU) {
+      act *= z;
+    }
+    rms_store(y_row + h, v[i] * inv_rms * g * act);
+  }
+}
+
 // rms_block_sum with a trailing barrier, so the next reduction may reuse
 // s_reduce while slower threads are still reading this total.
 __device__ inline float rms_block_sum_reuse(float partial, float *s_reduce) {
@@ -471,7 +525,49 @@ extern "C" int hip_gated_rms_norm(void *stream, const void *input,
       hip_dtype, (long long)outer, (long long)norm_size, activation,
       block_size);
 
-  if (hip_dtype == HIP_DTYPE_FLOAT16) {
+  // A decode-sized call (a few hundred rows) is launch-bound and stays on the
+  // block kernel; the wave-per-row kernel pays off on prefill-sized grids.
+  constexpr int64_t kMinNarrowRows = 4096;
+  if (norm_size == 128 && outer >= kMinNarrowRows &&
+      (hip_dtype == HIP_DTYPE_FLOAT16 || hip_dtype == HIP_DTYPE_FLOAT32)) {
+    constexpr int64_t kRowsPerBlock = 8;
+    const int64_t blocks = (outer + kRowsPerBlock - 1) / kRowsPerBlock;
+    if (blocks > 0x7fffffff)
+      return -1;
+    dim3 narrow_grid(static_cast<unsigned int>(blocks));
+    dim3 narrow_block(256);
+    if (hip_dtype == HIP_DTYPE_FLOAT16) {
+      auto *x = static_cast<const __half *>(input);
+      auto *s = static_cast<const __half *>(scale);
+      auto *z = static_cast<const __half *>(gate);
+      auto *y = static_cast<__half *>(output);
+      if (silu)
+        hipLaunchKernelGGL(
+            HIP_KERNEL_NAME(hip_gated_rms_norm_128_kernel<__half, true>),
+            narrow_grid, narrow_block, 0, hip_stream, x, s, z, y, outer,
+            epsilon);
+      else
+        hipLaunchKernelGGL(
+            HIP_KERNEL_NAME(hip_gated_rms_norm_128_kernel<__half, false>),
+            narrow_grid, narrow_block, 0, hip_stream, x, s, z, y, outer,
+            epsilon);
+    } else {
+      auto *x = static_cast<const float *>(input);
+      auto *s = static_cast<const float *>(scale);
+      auto *z = static_cast<const float *>(gate);
+      auto *y = static_cast<float *>(output);
+      if (silu)
+        hipLaunchKernelGGL(
+            HIP_KERNEL_NAME(hip_gated_rms_norm_128_kernel<float, true>),
+            narrow_grid, narrow_block, 0, hip_stream, x, s, z, y, outer,
+            epsilon);
+      else
+        hipLaunchKernelGGL(
+            HIP_KERNEL_NAME(hip_gated_rms_norm_128_kernel<float, false>),
+            narrow_grid, narrow_block, 0, hip_stream, x, s, z, y, outer,
+            epsilon);
+    }
+  } else if (hip_dtype == HIP_DTYPE_FLOAT16) {
     auto *x = static_cast<const __half *>(input);
     auto *s = static_cast<const __half *>(scale);
     auto *z = static_cast<const __half *>(gate);
