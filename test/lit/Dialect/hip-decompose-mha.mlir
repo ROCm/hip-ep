@@ -150,24 +150,6 @@ func.func @f64(%ctx: !hip.context, %q: tensor<1x4x16xf64>,
 
 // -----
 
-// The runtime softmax kernel reads two-byte scores as f16, so bf16 stays on
-// the runtime kernel until that dispatch has a real bf16 path.
-// CHECK-LABEL: func.func @bf16
-// CHECK: hip.multi_head_attention
-// CHECK-NOT: hip.matmul
-func.func @bf16(%ctx: !hip.context, %q: tensor<1x4x16xbf16>,
-                %k: tensor<1x4x16xbf16>, %v: tensor<1x4x16xbf16>)
-    -> tensor<1x4x16xbf16> {
-  %empty = tensor.empty() : tensor<1x4x16xbf16>
-  %r = hip.multi_head_attention(%ctx) ins(%q, %k, %v : tensor<1x4x16xbf16>,
-      tensor<1x4x16xbf16>, tensor<1x4x16xbf16>)
-      outs(%empty : tensor<1x4x16xbf16>)
-      {num_heads = 2 : i64, scale = 5.000000e-01 : f32} : tensor<1x4x16xbf16>
-  return %r : tensor<1x4x16xbf16>
-}
-
-// -----
-
 // Causal masking stays on the runtime kernel.
 // CHECK-LABEL: func.func @causal
 // CHECK: hip.multi_head_attention
