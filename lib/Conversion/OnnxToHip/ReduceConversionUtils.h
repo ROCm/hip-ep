@@ -149,44 +149,55 @@ mlir::LogicalResult convertOnnxReduction(mlir::Operation *op,
           op, name + ": result type conflicts with the reduced axes");
   }
 
-  mlir::Value axesOperand;
-  if (op->getNumOperands() > 1) {
-    axesOperand = op->getOperand(1);
-  } else {
-    auto axesType = mlir::RankedTensorType::get(
-        {static_cast<int64_t>(axesVec.size())}, rewriter.getI64Type());
-    axesOperand = mlir::arith::ConstantOp::create(
-        rewriter, loc, axesType,
-        mlir::DenseIntElementsAttr::get(axesType, llvm::ArrayRef(axesVec)));
-  }
+  // Build detached until every step has succeeded, as in
+  // createReductionEmptyTensor, so a rejection leaves the IR unchanged.
+  mlir::Block pending;
+  mlir::OpBuilder builder(rewriter.getContext());
+  builder.setInsertionPointToEnd(&pending);
+  auto commit = [&](mlir::Value result) {
+    while (!pending.empty()) {
+      mlir::Operation *created = &pending.front();
+      created->remove();
+      rewriter.insert(created);
+    }
+    rewriter.replaceOp(op, result);
+    return mlir::success();
+  };
 
+  auto createAxes = [&](llvm::ArrayRef<int64_t> axes) -> mlir::Value {
+    auto axesType = mlir::RankedTensorType::get(
+        {static_cast<int64_t>(axes.size())}, builder.getI64Type());
+    return mlir::arith::ConstantOp::create(
+        builder, loc, axesType,
+        mlir::DenseIntElementsAttr::get(axesType, axes));
+  };
   auto createOp = [&](mlir::Value input, mlir::Value axes, mlir::Value init,
                       int64_t noop, mlir::DenseI64ArrayAttr reducedAxes) {
-    return HipOp::create(rewriter, loc, context, input, axes, init,
-                         rewriter.getI64IntegerAttr(keepdims),
-                         rewriter.getI64IntegerAttr(noop), reducedAxes)
+    return HipOp::create(builder, loc, context, input, axes, init,
+                         builder.getI64IntegerAttr(keepdims),
+                         builder.getI64IntegerAttr(noop), reducedAxes)
         ->getResult(0);
   };
 
   // Runtime axes: the destination can only follow the data positionally.
   if (!reduced) {
-    mlir::Value init = createEmptyTensor(rewriter, loc, resultType, data);
-    rewriter.replaceOp(
-        op, createOp(data, axesOperand, init, noopWithEmptyAxes, nullptr));
-    return mlir::success();
+    mlir::Value init = createEmptyTensor(builder, loc, resultType, data);
+    return commit(
+        createOp(data, op->getOperand(1), init, noopWithEmptyAxes, nullptr));
   }
 
   auto runs = splitContiguousAxes(reduced.asArrayRef());
   if (runs.size() <= 1 || !separable) {
     mlir::FailureOr<mlir::Value> init = createReductionEmptyTensor(
-        rewriter, loc, resultType, data, reduced.asArrayRef(), keepdims,
+        builder, loc, resultType, data, reduced.asArrayRef(), keepdims,
         noopWithEmptyAxes);
     if (mlir::failed(init))
       return rewriter.notifyMatchFailure(
           op, name + ": destination shape conflicts with the result type");
-    rewriter.replaceOp(
-        op, createOp(data, axesOperand, *init, noopWithEmptyAxes, reduced));
-    return mlir::success();
+    mlir::Value axesOperand =
+        op->getNumOperands() > 1 ? op->getOperand(1) : createAxes(axesVec);
+    return commit(
+        createOp(data, axesOperand, *init, noopWithEmptyAxes, reduced));
   }
 
   if (!inputType)
@@ -198,20 +209,14 @@ mlir::LogicalResult convertOnnxReduction(mlir::Operation *op,
     mlir::RankedTensorType stepType =
         i == 0 ? resultType : reducedType(currentType, run, keepdims);
     mlir::FailureOr<mlir::Value> init = createReductionEmptyTensor(
-        rewriter, loc, stepType, current, run, keepdims, /*noop=*/0);
+        builder, loc, stepType, current, run, keepdims, /*noop=*/0);
     if (mlir::failed(init))
       return rewriter.notifyMatchFailure(
           op, name + ": destination shape conflicts with the result type");
-    auto axesType = mlir::RankedTensorType::get(
-        {static_cast<int64_t>(run.size())}, rewriter.getI64Type());
-    mlir::Value runAxes = mlir::arith::ConstantOp::create(
-        rewriter, loc, axesType,
-        mlir::DenseIntElementsAttr::get(axesType, run));
-    current = createOp(current, runAxes, *init, /*noop=*/0,
-                       rewriter.getDenseI64ArrayAttr(run));
+    current = createOp(current, createAxes(run), *init, /*noop=*/0,
+                       builder.getDenseI64ArrayAttr(run));
   }
-  rewriter.replaceOp(op, current);
-  return mlir::success();
+  return commit(current);
 }
 
 } // namespace hip
