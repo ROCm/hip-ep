@@ -171,7 +171,8 @@ template <typename T, int VEC> struct alignas(sizeof(T) * VEC) VecOf {
 
 // grid.x * blockDim.x and grid.y * blockDim.y must each fit in 32 bits, so
 // the host caps both grid dimensions and the kernels loop over rows and over
-// the lanes of a long row.
+// the lanes of a long row. The loop counters are 64-bit: the step past the
+// last row or lane can exceed INT32_MAX when rows or lanes is close to it.
 __device__ inline void decode_row(const RowShape& s, int row, int& nc, int& od,
                                   int& oh) {
   oh = row % s.out_h;
@@ -201,9 +202,9 @@ __global__ void resize_nearest_rows_kernel(const T* __restrict__ input,
                                            T* __restrict__ output, RowShape s,
                                            int coord_transform,
                                            int nearest_mode) {
-  for (int row = first_row(); row < s.rows; row += row_stride()) {
+  for (int64_t row = first_row(); row < s.rows; row += row_stride()) {
     int nc, od, oh;
-    decode_row(s, row, nc, od, oh);
+    decode_row(s, static_cast<int>(row), nc, od, oh);
     int id = nearest_index(od, s.out_d, s.in_d, coord_transform, nearest_mode,
                            s.s_d);
     int ih = nearest_index(oh, s.out_h, s.in_h, coord_transform, nearest_mode,
@@ -213,8 +214,8 @@ __global__ void resize_nearest_rows_kernel(const T* __restrict__ input,
         ((static_cast<int64_t>(nc) * s.in_d + id) * s.in_h + ih) * s.in_w;
     T* dst = output + static_cast<int64_t>(row) * s.out_w;
 
-    for (int lane = first_lane(); lane < s.lanes; lane += lane_stride()) {
-      int w0 = lane * VEC;
+    for (int64_t lane = first_lane(); lane < s.lanes; lane += lane_stride()) {
+      int w0 = static_cast<int>(lane) * VEC;
       VecOf<T, VEC> out;
 #pragma unroll
       for (int k = 0; k < VEC; ++k)
@@ -241,9 +242,9 @@ __global__ void resize_linear_rows_kernel(const T* __restrict__ input,
                                           int spatial_rank,
                                           int coord_transform) {
   const int64_t plane = static_cast<int64_t>(s.in_h) * s.in_w;
-  for (int row = first_row(); row < s.rows; row += row_stride()) {
+  for (int64_t row = first_row(); row < s.rows; row += row_stride()) {
     int nc, od, oh;
-    decode_row(s, row, nc, od, oh);
+    decode_row(s, static_cast<int>(row), nc, od, oh);
     LinearTap td = {0, 0, 0.0f};
     LinearTap th = {0, 0, 0.0f};
     if (spatial_rank >= 3)
@@ -259,8 +260,8 @@ __global__ void resize_linear_rows_kernel(const T* __restrict__ input,
 
     T* dst = output + static_cast<int64_t>(row) * s.out_w;
 
-    for (int lane = first_lane(); lane < s.lanes; lane += lane_stride()) {
-      int w0 = lane * VEC;
+    for (int64_t lane = first_lane(); lane < s.lanes; lane += lane_stride()) {
+      int w0 = static_cast<int>(lane) * VEC;
       VecOf<T, VEC> out;
 #pragma unroll
       for (int k = 0; k < VEC; ++k) {
@@ -296,9 +297,9 @@ __global__ void resize_nearest_passthrough_kernel(const T* __restrict__ input,
                                                   RowShape s,
                                                   int coord_transform,
                                                   int nearest_mode) {
-  for (int row = first_row(); row < s.rows; row += row_stride()) {
+  for (int64_t row = first_row(); row < s.rows; row += row_stride()) {
     int nc, od, oh;
-    decode_row(s, row, nc, od, oh);
+    decode_row(s, static_cast<int>(row), nc, od, oh);
     int id = nearest_index(od, s.out_d, s.in_d, coord_transform, nearest_mode,
                            s.s_d);
     int ih = nearest_index(oh, s.out_h, s.in_h, coord_transform, nearest_mode,
@@ -307,8 +308,8 @@ __global__ void resize_nearest_passthrough_kernel(const T* __restrict__ input,
         input +
         ((static_cast<int64_t>(nc) * s.in_d + id) * s.in_h + ih) * s.in_w;
     T* dst = output + static_cast<int64_t>(row) * s.out_w;
-    for (int lane = first_lane(); lane < s.lanes; lane += lane_stride()) {
-      int w0 = lane * VEC;
+    for (int64_t lane = first_lane(); lane < s.lanes; lane += lane_stride()) {
+      int w0 = static_cast<int>(lane) * VEC;
       *reinterpret_cast<VecOf<T, VEC>*>(dst + w0) = load_vec<T, VEC>(src + w0);
     }
   }
@@ -322,9 +323,9 @@ __global__ void resize_linear_passthrough_kernel(const T* __restrict__ input,
                                                  RowShape s, int spatial_rank,
                                                  int coord_transform) {
   const int64_t plane = static_cast<int64_t>(s.in_h) * s.in_w;
-  for (int row = first_row(); row < s.rows; row += row_stride()) {
+  for (int64_t row = first_row(); row < s.rows; row += row_stride()) {
     int nc, od, oh;
-    decode_row(s, row, nc, od, oh);
+    decode_row(s, static_cast<int>(row), nc, od, oh);
     LinearTap td = {0, 0, 0.0f};
     if (spatial_rank >= 3)
       td = linear_tap(od, s.out_d, s.in_d, coord_transform, s.s_d);
@@ -337,8 +338,8 @@ __global__ void resize_linear_passthrough_kernel(const T* __restrict__ input,
     const T* r11 = base + td.hi * plane + static_cast<int64_t>(th.hi) * s.in_w;
     T* dst = output + static_cast<int64_t>(row) * s.out_w;
 
-    for (int lane = first_lane(); lane < s.lanes; lane += lane_stride()) {
-      int w0 = lane * VEC;
+    for (int64_t lane = first_lane(); lane < s.lanes; lane += lane_stride()) {
+      int w0 = static_cast<int>(lane) * VEC;
       VecOf<T, VEC> a = load_vec<T, VEC>(r00 + w0);
       VecOf<T, VEC> b = load_vec<T, VEC>(r01 + w0);
       VecOf<T, VEC> c = a, d = b;
