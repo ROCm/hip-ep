@@ -1515,6 +1515,18 @@ int wrap_grid_sample(RuntimeState *state, void *input, void *grid, void *output,
                      int64_t in_w, int64_t out_h, int64_t out_w, int64_t mode,
                      int64_t padding_mode, int64_t align_corners);
 
+// RoiAlign (4-D NCHW). rois is (num_rois, 4) as (x1, y1, x2, y2) in the same
+// element type as input; batch_indices is (num_rois) int64. Output is
+// (num_rois, C, out_h, out_w). sampling_ratio: 0 = adaptive. half_pixel: 1 =
+// "half_pixel", 0 = "output_half_pixel". mode: 0=avg, 1=max. data_type:
+// HIPDNN_EP_DATATYPE_* (FLOAT/HALF/BFLOAT16/DOUBLE).
+int wrap_roi_align(RuntimeState *state, void *input, void *rois,
+                   void *batch_indices, void *output, int64_t data_type,
+                   int64_t n, int64_t c, int64_t in_h, int64_t in_w,
+                   int64_t num_rois, int64_t out_h, int64_t out_w,
+                   int64_t sampling_ratio, float spatial_scale,
+                   int64_t half_pixel, int64_t mode);
+
 // Global pool wrapper (uses custom HIP kernel).
 // Treats the data as a flat [outer, reduce_size] matrix and writes one
 // reduced value per row into output. Covers ONNX GlobalAveragePool /
