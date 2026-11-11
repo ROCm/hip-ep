@@ -251,8 +251,10 @@ class TestMatMulNBits:
         n_blocks = K // block_size
         zp = None
         if explicit_zp:
-            zp = np.random.default_rng(7).integers(0, 16, [N, n_blocks]).astype(
-                np.float16
+            zp = (
+                np.random.default_rng(7)
+                .integers(0, 16, [N, n_blocks])
+                .astype(np.float16)
             )
         model = _make_matmul_nbits_model(
             1,
