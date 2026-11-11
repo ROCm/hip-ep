@@ -39,6 +39,9 @@ ifeq ($(HIP_SDK),)
     $(error pass HIP_SDK=<HIP SDK root>)
 endif
 
+# Named UT preset; numeric sampling belongs to common/hip_adaptive_timing.h.
+TIMING ?= standard
+
 # ---- Paths ----
 
 HIPCC       := $(HIP_SDK)/bin/hipcc.exe
@@ -63,13 +66,13 @@ INCLUDES     := -I$(INCLUDE_DIR)
 
 ifeq ($(DETECTED_OS),Windows)
     HIP_SDK_WIN := $(subst /,\,$(HIP_SDK))
-    RUN_CMD     = set "PATH=$(HIP_SDK_WIN)\bin;%PATH%" && set "HIPDNN_RESULTS_CSV=$(subst /,\,$(RESULTS_CSV))" && set "HIPDNN_RESULTS_OP=qmoe_ragged_mm" && set "HIPDNN_RESULTS_LEAF=Xfp16_Wu4_Yfp16" && set "HIPDNN_RESULTS_ARCH=$(ARCH)" && set "HIPDNN_RESULTS_MODE=$(MODE)" && $(subst /,\,.\$(1))
+    RUN_CMD     = set "PATH=$(HIP_SDK_WIN)\bin;%PATH%" && set "HIPDNN_UT_TIMING=$(TIMING)" && set "HIPDNN_RESULTS_CSV=$(subst /,\,$(RESULTS_CSV))" && set "HIPDNN_RESULTS_OP=qmoe_ragged_mm" && set "HIPDNN_RESULTS_LEAF=Xfp16_Wu4_Yfp16" && set "HIPDNN_RESULTS_ARCH=$(ARCH)" && set "HIPDNN_RESULTS_MODE=$(MODE)" && $(subst /,\,.\$(1))
     define DO_CLEAN
 	if exist $(BUILD_DIR) rmdir /s /q $(BUILD_DIR)
     endef
 else
     HIP_SDK_WIN := $(shell wslpath -w "$(HIP_SDK)")
-    RUN_CMD     = cmd.exe /c "set PATH=$(HIP_SDK_WIN)\bin;%PATH% && set HIPDNN_RESULTS_CSV=$(RESULTS_CSV) && set HIPDNN_RESULTS_OP=qmoe_ragged_mm && set HIPDNN_RESULTS_LEAF=Xfp16_Wu4_Yfp16 && set HIPDNN_RESULTS_ARCH=$(ARCH) && set HIPDNN_RESULTS_MODE=$(MODE) && %CD%\$(1)"
+    RUN_CMD     = cmd.exe /c "set PATH=$(HIP_SDK_WIN)\bin;%PATH% && set HIPDNN_UT_TIMING=$(TIMING) && set HIPDNN_RESULTS_CSV=$(RESULTS_CSV) && set HIPDNN_RESULTS_OP=qmoe_ragged_mm && set HIPDNN_RESULTS_LEAF=Xfp16_Wu4_Yfp16 && set HIPDNN_RESULTS_ARCH=$(ARCH) && set HIPDNN_RESULTS_MODE=$(MODE) && %CD%\$(1)"
     define DO_CLEAN
 	rm -rf $(BUILD_DIR)
     endef

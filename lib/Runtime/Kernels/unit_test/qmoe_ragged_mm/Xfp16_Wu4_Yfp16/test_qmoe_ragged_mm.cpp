@@ -9,6 +9,7 @@
 
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
+#include "../../common/hip_adaptive_timing.h"
 
 #include <algorithm>
 #include <cmath>
@@ -136,43 +137,16 @@ inline int* holdReleaseFlag() {
   return flag;
 }
 
-// Mean milliseconds per launch over `iters` back-to-back launches on `stream`,
-// launch(c) reading copy c. Untimed launches over the rotation go first, until
-// kColdSettleBytes have been read.
-template <class Launch>
-double rotatedMeanMs(hipStream_t stream, int iters, const ColdCopies& copies,
-                     Launch&& launch) {
-  const int n = copies.count();
-  int turn = 0;
-  if (n > 1) {
-    const size_t settle = std::min<size_t>(
-        n, (kColdSettleBytes + copies.bytes() - 1) / copies.bytes());
-    for (size_t i = 0; i < settle; ++i) launch(turn++ % n);
-  }
-  // Drained, so the hold below holds the timed launches rather than being
-  // released while earlier launches are still queued ahead of it.
-  (void)hipStreamSynchronize(stream);
-  volatile int* release = holdReleaseFlag();
-  void* release_dev = nullptr;
-  if (release &&
-      hipHostGetDevicePointer(&release_dev, const_cast<int*>(release), 0) ==
-          hipSuccess) {
-    *release = 0;
-    holdStreamKernel<<<1, 1, 0, stream>>>(static_cast<const int*>(release_dev));
-  }
-  hipEvent_t start, stop;
-  (void)hipEventCreate(&start);
-  (void)hipEventCreate(&stop);
-  (void)hipEventRecord(start, stream);
-  for (int i = 0; i < iters; ++i) launch(turn++ % n);
-  (void)hipEventRecord(stop, stream);
-  if (release) *release = 1;
-  (void)hipEventSynchronize(stop);
-  float ms = 0.0f;
-  (void)hipEventElapsedTime(&ms, start, stop);
-  (void)hipEventDestroy(start);
-  (void)hipEventDestroy(stop);
-  return iters > 0 ? ms / iters : 0.0;
+// The shared UT policy selects the actual call count from a device pilot.
+// launch(c) invokes the complete op with operand copy c.
+template <class Launch, class Prepare>
+double rotatedMeanMs(hipStream_t stream, int /*legacy_iters*/, const ColdCopies& copies,
+                     Launch&& launch, Prepare&& prepare) {
+  return timing::adaptiveRotatedMeanMs(
+      stream, copies, launch, holdReleaseFlag(),
+      [&](const int* flag) { holdStreamKernel<<<1, 1, 0, stream>>>(flag); },
+      warmTiming(), kColdSettleBytes, "qmoe_ragged_mm_xfp16_wu4_yfp16",
+      "hip_qmoe_ragged_matmul_nbits", prepare);
 }
 }  // namespace hipdnn_ep_test
 
@@ -499,6 +473,7 @@ class CsvWriter {
   }
   ~CsvWriter() { if (f_) std::fclose(f_); }
   void write(const CsvRow& r) {
+    hipdnn_ep_test::timing::emitCsvBinding(r.shape, r.config, r.verdict, r.rel_l2, r.time_ms);
     if (!f_) return;
     std::fprintf(f_, "%s,%s,%s,%s,%s,%s,%.6f,%.6e,%s\n",
                  env_or("HIPDNN_RESULTS_OP", "qmoe_ragged_mm"),
@@ -606,6 +581,10 @@ std::string case_shape(const Shape& shape, Routing routing, bool gather,
 
 bool run_case(const Shape& shape, Routing routing, bool gather, bool use_bias,
               bool use_zero_points, hipStream_t stream) {
+  hipdnn_ep_test::timing::CaseScope timing_case(
+      "qmoe_ragged_mm/Xfp16_Wu4_Yfp16",
+      case_shape(shape, routing, gather, use_bias, use_zero_points),
+      "hip_qmoe_ragged_matmul_nbits");
   ResultRow result(
       case_shape(shape, routing, gather, use_bias, use_zero_points),
       "unlogged");
@@ -776,13 +755,13 @@ bool run_case(const Shape& shape, Routing routing, bool gather, bool use_bias,
        {d_scales.get(), scales.size() * sizeof(__half)},
        {d_zero_points.get(), use_zero_points ? zero_points.size() : 0},
        {d_bias.get(), use_bias ? bias.size() * sizeof(__half) : 0}});
-  const int launches = expert_weights.count() + kIters;
+  const uint32_t launches = hipdnn_ep_test::timing::Policy{}.max_calls_per_batch;
   DeviceBuffer<uint32_t> d_queue_heads(launches);
   HIP_CHECK(hipMemset(d_queue_heads.get(), 0, launches * sizeof(uint32_t)));
   int next_head = 0;
   const double time_ms = hipdnn_ep_test::rotatedMeanMs(
       stream, kIters, expert_weights, [&](int c) {
-        hip_qmoe_ragged_matmul_nbits(
+        return hip_qmoe_ragged_matmul_nbits(
             reinterpret_cast<void*>(stream), d_input.get(),
             gather ? static_cast<const void*>(d_input_row_ids.get()) : nullptr,
             d_groups.get(), d_group_count.get(),
@@ -792,6 +771,12 @@ bool run_case(const Shape& shape, Routing routing, bool gather, bool use_bias,
             use_bias ? expert_weights.part(c, 3) : nullptr, output, shape.rows,
             shape.experts, shape.n, shape.k, 4, shape.block_size,
             sizeof(__half));
+      }, [&](uint32_t count) {
+        // Adaptive timing has no total-call cap. Reuse at most one bounded
+        // batch of zeroed queue heads, prepared before the stream gate/events.
+        next_head = 0;
+        HIP_CHECK(hipMemsetAsync(d_queue_heads.get(), 0,
+                                count * sizeof(uint32_t), stream));
       });
 
   std::cout << (pass ? "PASS" : "FAIL") << " relL2=" << metrics.rel_l2
@@ -1710,6 +1695,7 @@ bool parse_options(int argc, char** argv, Options* options) {
 } // namespace
 
 int main(int argc, char** argv) {
+  hipdnn_ep_test::timing::printTimingMode();
   Options options;
   if (!parse_options(argc, argv, &options)) {
     return 2;

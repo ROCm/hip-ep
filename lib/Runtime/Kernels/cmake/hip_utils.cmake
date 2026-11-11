@@ -294,6 +294,10 @@ function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS 
         foreach(source ${HIP_SOURCES})
             get_filename_component(source_name ${source} NAME_WE)
             get_filename_component(source_abs ${source} ABSOLUTE)
+            get_source_file_property(source_extra_dependencies ${source_abs} OBJECT_DEPENDS)
+            if(NOT source_extra_dependencies)
+                set(source_extra_dependencies "")
+            endif()
             set(output_obj "${obj_dir}/${source_name}.obj")
 
             # Use generator expressions for config-specific flags
@@ -317,7 +321,7 @@ function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS 
                     $<$<CONFIG:RelWithDebInfo>:-g>
                     ${HIP_COMPILE_OPTIONS}
                     ${COMPILE_OPTS}
-                DEPENDS ${source_abs}
+                DEPENDS ${source_abs} ${source_extra_dependencies}
                 COMMENT "Compiling HIP source: ${source_name}.hip ($<CONFIG>)"
                 VERBATIM
                 COMMAND_EXPAND_LISTS
@@ -335,6 +339,10 @@ function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS 
         foreach(source ${HIP_SOURCES})
             get_filename_component(source_name ${source} NAME_WE)
             get_filename_component(source_abs ${source} ABSOLUTE)
+            get_source_file_property(source_extra_dependencies ${source_abs} OBJECT_DEPENDS)
+            if(NOT source_extra_dependencies)
+                set(source_extra_dependencies "")
+            endif()
             set(output_obj "${obj_dir}/${source_name}.obj")
 
             add_custom_command(
@@ -350,7 +358,7 @@ function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS 
                     ${build_flags}
                     ${HIP_COMPILE_OPTIONS}
                     ${COMPILE_OPTS}
-                DEPENDS ${source_abs}
+                DEPENDS ${source_abs} ${source_extra_dependencies}
                 COMMENT "Compiling HIP source: ${source_name}.hip"
                 VERBATIM
             )

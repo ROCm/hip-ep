@@ -203,17 +203,22 @@ static bool runLeaf(const fs::path& executable, const fs::path& working_dir,
 int main(int argc, char** argv) {
   std::string arch;
   std::string mode = "lookup";
+  const char* timing_env = std::getenv("HIPDNN_UT_TIMING");
+  std::string timing = timing_env && timing_env[0] ? timing_env : "standard";
   int coverage = 3;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--arch") == 0 && i + 1 < argc)
       arch = argv[++i];
     else if (std::strcmp(argv[i], "--mode") == 0 && i + 1 < argc)
       mode = argv[++i];
+    else if (std::strcmp(argv[i], "--timing") == 0 && i + 1 < argc)
+      timing = argv[++i];
     else if (std::strcmp(argv[i], "--coverage") == 0 && i + 1 < argc)
       coverage = std::atoi(argv[++i]);
     else if (std::strcmp(argv[i], "--help") == 0) {
       std::printf("Usage: hipdnn-kernel-ut.exe [--arch gfxNNNN] "
-                  "[--mode lookup|autotune] [--coverage 1|2|3]\n");
+                  "[--mode lookup|autotune] [--coverage 1|2|3] "
+                  "[--timing screen|standard|confirm]\n");
       return 0;
     } else {
       std::fprintf(stderr, "unrecognized argument: %s\n", argv[i]);
@@ -221,6 +226,11 @@ int main(int argc, char** argv) {
     }
   }
 
+  if (timing != "screen" && timing != "standard" && timing != "confirm") {
+    std::fprintf(stderr, "--timing must be screen, standard or confirm\n");
+    return 2;
+  }
+  if (!setEnvironment("HIPDNN_UT_TIMING", timing)) return 1;
   if (mode != "lookup" && mode != "autotune") {
     std::fprintf(stderr, "--mode must be lookup or autotune, got %s\n",
                  mode.c_str());

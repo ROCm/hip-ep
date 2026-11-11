@@ -67,6 +67,13 @@ function(add_kernel_package_ut arch executable_name source_file)
   endif()
 
   set(target ${executable_name}-${arch})
+  # hipcc custom commands do not inherit the C++ compiler's header dependency
+  # scanner. Bind the shared UT policy/profile/context explicitly so a header
+  # edit cannot leave a previously compiled leaf executable in the package.
+  file(GLOB _ut_common_headers CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/common/*.h")
+  set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/${source_file}
+    PROPERTIES OBJECT_DEPENDS "${_ut_common_headers}")
   hip_add_executable(${target}
     ${CMAKE_CURRENT_SOURCE_DIR}/${source_file}
     INCLUDE_DIRECTORIES
