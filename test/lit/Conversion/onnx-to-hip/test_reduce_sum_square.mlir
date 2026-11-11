@@ -4,14 +4,15 @@
 // ============================================================================
 // TEST PURPOSE:
 // Verify onnx.ReduceSumSquare is decomposed to its ONNX function body,
-// hip.mul(x, x) followed by hip.reduce_sum, with axes / keepdims /
-// noop_with_empty_axes passed through to the ReduceSum converter.
+// hip.mul(x, x) followed by hip.reduce_sum, with the axes operand and all
+// attributes passed through to the ReduceSum converter.
 //
 // Test cases:
 // 1. rss_keepdims_axes_operand  — dynamic dims, constant axes operand, keepdims=1
 // 2. rss_no_keepdims            — keepdims=0 drops the reduced axis
 // 3. rss_axes_attribute         — opset-13 form, axes as an attribute
 // 4. rss_runtime_axes           — axes is a runtime operand
+// 5. rss_attributes_forwarded   — unknown and metadata attributes are forwarded
 // ============================================================================
 
 // RUN: hip-mlir-opt %s --hip-add-context-arg --convert-onnx-to-hip | FileCheck %s
@@ -80,4 +81,19 @@ module {
   // CHECK: hip.reduce_sum(%[[CTX4]]) ins(%[[SQ4]], %[[AX4]] : tensor<2x3x5xf16>, tensor<1xi64>) outs(%{{.*}} : tensor<2x3x1xf16>)
   // CHECK-NOT: reduced_axes
   // CHECK-NOT: onnx.ReduceSumSquare
+
+  // --------------------------------------------------------------------------
+  // 5. Every attribute, including ones the converter does not read, reaches
+  //    onnx.ReduceSum. An unranked input keeps it unconverted so the
+  //    forwarded attributes stay visible.
+  // --------------------------------------------------------------------------
+  func.func @rss_attributes_forwarded(%x: tensor<*xf16>) -> tensor<*xf16> {
+    %y = "onnx.ReduceSumSquare"(%x) {future_attr = 1 : si64, keepdims = 0 : si64, onnx_node_name = "rss"}
+      : (tensor<*xf16>) -> tensor<*xf16>
+    return %y : tensor<*xf16>
+  }
+
+  // CHECK-LABEL: func.func @rss_attributes_forwarded
+  // CHECK-NOT: onnx.ReduceSumSquare
+  // CHECK: "onnx.ReduceSum"(%{{.*}}) {future_attr = 1 : si64, keepdims = 0 : si64, onnx_node_name = "rss"}
 }

@@ -10,10 +10,11 @@
 //   %x_sq = onnx.Mul(%x, %x)
 //   %y    = onnx.ReduceSum(%x_sq, %axes) {keepdims, noop_with_empty_axes}
 //
-// axes (operand or attribute), keepdims and noop_with_empty_axes pass through
-// unchanged, so the ReduceSum converter owns the destination shape and the
-// reduced-axes handling. x^2 is rounded to the element type before the sum,
-// as in the function body; the fp16 reduce_sum kernel accumulates in float.
+// The axes operand and every attribute pass through unchanged, so the
+// ReduceSum converter owns the destination shape, the reduced-axes handling
+// and the decision on attributes it does not support. x^2 is rounded to the
+// element type before the sum, as in the function body; the fp16 reduce_sum
+// kernel accumulates in float.
 //
 // Like LpNormalization, this lives in the convert-onnx-to-hip pre-lowering
 // loop: the main compute-op driver is single-shot and would leave the
@@ -51,9 +52,7 @@ struct ReduceSumSquareDecompose : public mlir::RewritePattern {
     reduceState.addOperands(xSq);
     if (op->getNumOperands() == 2)
       reduceState.addOperands(op->getOperand(1));
-    for (llvm::StringRef name : {"axes", "keepdims", "noop_with_empty_axes"})
-      if (mlir::Attribute attr = op->getAttr(name))
-        reduceState.addAttribute(name, attr);
+    reduceState.addAttributes(op->getAttrs());
     reduceState.addTypes(op->getResult(0).getType());
     mlir::Value result = rewriter.create(reduceState)->getResult(0);
 
