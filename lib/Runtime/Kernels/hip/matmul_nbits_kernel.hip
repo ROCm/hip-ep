@@ -5060,6 +5060,454 @@ extern "C" int hip_matmul_nbits_wmma_smallm_grouped(
   return static_cast<int>(err);
 }
 
+/* -----------------------------------------------------------------------
+ * Section 2b-smallm-w4a8: the small-M grouped GEMM on int8 WMMA
+ *
+ * Same row tiles, launch order, CPW / DB / DA runs and LDS reduction as
+ * MatMulNBitsWMMA_SmallM_Grouped, with A quantized per weight group by
+ * hip_qmoe_quant_act_i8 (int8, each run of 8 values stored even k first;
+ * fp32 scale and int32 sum per group). In that layout byte & 0x0F of the
+ * packed weights holds the even k of a run and byte >> 4 the odd k, so a
+ * 32-wide chunk is two v_wmma_i32_16x16x16_iu8 over the even and the odd k
+ * with no dequant. Per group: C += a_scale * w_scale * (dot - zp * a_sum).
+ *
+ * Accumulator element e belongs to row 2e + lane / 16, not to the lane's A
+ * row, so each wave stages a_scale and a_scale * a_sum of its chunks in LDS
+ * as [half][scale | scale * sum][e], read back with two 16-byte loads each.
+ * gfx11 WMMA256b only: gfx1170 implements the gfx12 encoding, and its image
+ * of this kernel is empty.
+ * ----------------------------------------------------------------------- */
+
+#if defined(__has_builtin) && \
+    __has_builtin(__builtin_amdgcn_wmma_i32_16x16x16_iu8_w32)
+#define SMALLM_HAS_IU8_WMMA 1
+#else
+#define SMALLM_HAS_IU8_WMMA 0
+#endif
+
+typedef int32_t smallm_i32x4 __attribute__((ext_vector_type(4)));
+typedef int32_t smallm_i32x8 __attribute__((ext_vector_type(8)));
+
+constexpr int kSmallMW4A8MetaPerChunk = 32;
+
+// SYM32: block_size 32 and no zero points.
+template <int TM, int TN, int CPW, int DB, int DA, bool FULL, bool SYM32>
+__device__ __forceinline__ void SmallMW4A8Impl(
+    float* red, float* meta, int M, int N, int K, int row0, int col0,
+    const int8_t* __restrict__ A, const float* __restrict__ a_scale,
+    const int32_t* __restrict__ a_sum,
+    const unsigned char* __restrict__ B, int b_row_bytes,
+    const _Float16* __restrict__ scales,
+    const void* __restrict__ zeros, int zp_mode, int zp_stride,
+    const _Float16* __restrict__ bias,
+    int group_shift, int num_groups_k,
+    _Float16* __restrict__ C, int ldc)
+{
+#if !SMALLM_HAS_IU8_WMMA
+    (void)red; (void)meta; (void)M; (void)N; (void)K; (void)row0; (void)col0;
+    (void)A; (void)a_scale; (void)a_sum; (void)B; (void)b_row_bytes;
+    (void)scales; (void)zeros; (void)zp_mode; (void)zp_stride; (void)bias;
+    (void)group_shift; (void)num_groups_k; (void)C; (void)ldc;
+#else
+    constexpr int T = TM * TN;
+
+    const int lid  = threadIdx.x & 31;
+    const int wid  = threadIdx.x >> 5;
+    const int lane = lid & 15;
+    const int half = lid >> 4;
+    const int c0 = wid * CPW;
+    const int cnt = FULL ? CPW : min(CPW, (K >> 5) - c0);
+    const int gmask = (1 << group_shift) - 1;
+
+    const unsigned char* b_col[TN];
+    size_t ns[TN];
+    int grp[CPW];
+#pragma unroll
+    for (int j = 0; j < CPW; j++)
+        grp[j] = (FULL || j < cnt) ? (c0 + j) >> group_shift : 0;
+    float rs[CPW][TN], rz[CPW][TN];
+#pragma unroll
+    for (int tn = 0; tn < TN; tn++) {
+        const int n = col0 + tn * 16 + lane;
+        ns[tn] = static_cast<size_t>(n < N ? n : 0);
+        b_col[tn] = B + ns[tn] * b_row_bytes + c0 * 16;
+        const _Float16* s_col = scales + ns[tn] * num_groups_k;
+#pragma unroll
+        for (int j = 0; j < CPW; j++) {
+            const float s = static_cast<float>(s_col[grp[j]]);
+            rs[j][tn] = (FULL || j < cnt) ? s : 0.0f;
+            rz[j][tn] = 8.0f;
+        }
+    }
+    if (zp_mode == kSmallMZpU4) {
+#pragma unroll
+        for (int tn = 0; tn < TN; tn++) {
+            const uint8_t* z4 = static_cast<const uint8_t*>(zeros) + ns[tn] * zp_stride;
+#pragma unroll
+            for (int j = 0; j < CPW; j++) {
+                const uint8_t b = z4[grp[j] >> 1];
+                rz[j][tn] = static_cast<float>((grp[j] & 1) ? (b >> 4) : (b & 0xF));
+            }
+        }
+    } else if (zp_mode == kSmallMZpFp16) {
+#pragma unroll
+        for (int tn = 0; tn < TN; tn++) {
+            const _Float16* z16 = static_cast<const _Float16*>(zeros) + ns[tn] * zp_stride;
+#pragma unroll
+            for (int j = 0; j < CPW; j++) rz[j][tn] = static_cast<float>(z16[grp[j]]);
+        }
+    }
+
+    float* wmeta = meta + wid * TM * CPW * kSmallMW4A8MetaPerChunk;
+    const int8_t* a_row[TM];
+    bool a_ok[TM];
+#pragma unroll
+    for (int tm = 0; tm < TM; tm++) {
+        const int m = row0 + tm * 16 + lane;
+        a_ok[tm] = m < M;
+        const size_t mr = static_cast<size_t>(a_ok[tm] ? m : 0);
+        a_row[tm] = A + mr * K + c0 * 32;
+        if (half == 0) {
+            const float* sr = a_scale + mr * num_groups_k;
+            const int32_t* ur = a_sum + mr * num_groups_k;
+            float* dst = wmeta + tm * CPW * kSmallMW4A8MetaPerChunk +
+                         (lane & 1) * 16 + (lane >> 1);
+#pragma unroll
+            for (int j = 0; j < CPW; j++) {
+                float sa = 0.0f, cs = 0.0f;
+                if (a_ok[tm] && (FULL || j < cnt)) {
+                    sa = sr[grp[j]];
+                    if (!SYM32) cs = sa * static_cast<float>(ur[grp[j]]);
+                }
+                dst[j * kSmallMW4A8MetaPerChunk] = sa;
+                dst[j * kSmallMW4A8MetaPerChunk + 8] = cs;
+            }
+        }
+    }
+    __syncthreads();
+
+    u32x4 rb[DB][TN];
+    u32x4 ra[DA][TM][2];
+
+    auto issueB = [&](int slot, int j) __attribute__((always_inline)) {
+#pragma unroll
+        for (int tn = 0; tn < TN; tn++) {
+            u32x4 v = {0, 0, 0, 0};
+            if (FULL || j < cnt) v = *reinterpret_cast<const u32x4*>(b_col[tn] + j * 16);
+            rb[slot][tn] = v;
+        }
+    };
+    auto issueA = [&](int slot, int j) __attribute__((always_inline)) {
+#pragma unroll
+        for (int tm = 0; tm < TM; tm++)
+#pragma unroll
+            for (int h = 0; h < 2; h++) {
+                u32x4 v = {0, 0, 0, 0};
+                if (a_ok[tm] && (FULL || j < cnt))
+                    v = *reinterpret_cast<const u32x4*>(a_row[tm] + j * 32 + h * 16);
+                ra[slot][tm][h] = v;
+            }
+    };
+
+    float8 acc[TM][TN];
+    smallm_i32x8 idot[TM][TN];
+#pragma unroll
+    for (int tm = 0; tm < TM; tm++)
+#pragma unroll
+        for (int tn = 0; tn < TN; tn++)
+#pragma unroll
+            for (int e = 0; e < 8; e++) {
+                acc[tm][tn][e] = 0.0f;
+                idot[tm][tn][e] = 0;
+            }
+
+    constexpr int PRO = DB > DA ? DB : DA;
+#pragma unroll
+    for (int j = 0; j < PRO && j < CPW; j++) {
+        if (j < DB) issueB(j, j);
+        if (j < DA) issueA(j, j);
+    }
+
+    if constexpr (SYM32) {
+        // One group per chunk and zero point 8: the nibbles become signed
+        // 16 * (q - 8) (high nibble of each byte), so the group needs no
+        // a_sum term. A chunk is scaled after the next chunk's WMMAs.
+        smallm_i32x8 pd[2][TM][TN];
+        const smallm_i32x8 zero8 = {0, 0, 0, 0, 0, 0, 0, 0};
+        auto scale_chunk = [&](int jj) __attribute__((always_inline)) {
+#pragma unroll
+            for (int tm = 0; tm < TM; tm++) {
+                const float8 msa = *reinterpret_cast<const float8*>(
+                    wmeta + (tm * CPW + jj) * kSmallMW4A8MetaPerChunk + half * 16);
+#pragma unroll
+                for (int tn = 0; tn < TN; tn++) {
+                    const float sw = rs[jj][tn] * 0.0625f;
+#pragma unroll
+                    for (int e = 0; e < 8; e++)
+                        acc[tm][tn][e] = fmaf(
+                            sw, static_cast<float>(pd[jj & 1][tm][tn][e]) * msa[e],
+                            acc[tm][tn][e]);
+                }
+            }
+        };
+        // A runtime bound per chunk, also under FULL: without it the FULL
+        // instances spill (256 VGPRs, ~300 spilled values at CPW 16).
+        auto live = [&](int jj) __attribute__((always_inline)) {
+            return FULL ? ((c0 + jj) << 5) < K : jj < cnt;
+        };
+#pragma unroll
+        for (int j = 0; j < CPW; j++) {
+            const int sb = j % DB, sa = j % DA;
+            if (live(j)) {
+#pragma unroll
+                for (int tn = 0; tn < TN; tn++) {
+                    smallm_i32x4 b_even, b_odd;
+#pragma unroll
+                    for (int w = 0; w < 4; w++) {
+                        const uint32_t p = rb[sb][tn][w] ^ 0x88888888u;
+                        b_even[w] = static_cast<int32_t>((p << 4) & 0xF0F0F0F0u);
+                        b_odd[w] = static_cast<int32_t>(p & 0xF0F0F0F0u);
+                    }
+#pragma unroll
+                    for (int tm = 0; tm < TM; tm++) {
+                        const u32x4 lo = ra[sa][tm][0], hi = ra[sa][tm][1];
+                        const smallm_i32x4 a_even = {
+                            static_cast<int32_t>(lo[0]), static_cast<int32_t>(lo[2]),
+                            static_cast<int32_t>(hi[0]), static_cast<int32_t>(hi[2])};
+                        const smallm_i32x4 a_odd = {
+                            static_cast<int32_t>(lo[1]), static_cast<int32_t>(lo[3]),
+                            static_cast<int32_t>(hi[1]), static_cast<int32_t>(hi[3])};
+                        pd[j & 1][tm][tn] = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32(
+                            true, a_even, true, b_even, zero8, false);
+                        pd[j & 1][tm][tn] = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32(
+                            true, a_odd, true, b_odd, pd[j & 1][tm][tn], false);
+                    }
+                }
+                if (j > 0) scale_chunk(j - 1);
+            }
+            if (j + DB < CPW) issueB(sb, j + DB);
+            if (j + DA < CPW) issueA(sa, j + DA);
+        }
+        if (FULL) {
+            scale_chunk(CPW - 1);
+        } else if (cnt > 0) {
+#pragma unroll
+            for (int j = 0; j < CPW; j++) {
+                if (j == cnt - 1) scale_chunk(j);
+            }
+        }
+    } else {
+#pragma unroll
+    for (int j = 0; j < CPW; j++) {
+        const int sb = j % DB, sa = j % DA;
+        if (FULL || j < cnt) {
+#pragma unroll
+            for (int tn = 0; tn < TN; tn++) {
+                smallm_i32x4 b_even, b_odd;
+#pragma unroll
+                for (int w = 0; w < 4; w++) {
+                    const uint32_t p = rb[sb][tn][w];
+                    b_even[w] = static_cast<int32_t>(p & 0x0F0F0F0Fu);
+                    b_odd[w] = static_cast<int32_t>((p >> 4) & 0x0F0F0F0Fu);
+                }
+#pragma unroll
+                for (int tm = 0; tm < TM; tm++) {
+                    const u32x4 lo = ra[sa][tm][0], hi = ra[sa][tm][1];
+                    const smallm_i32x4 a_even = {
+                        static_cast<int32_t>(lo[0]), static_cast<int32_t>(lo[2]),
+                        static_cast<int32_t>(hi[0]), static_cast<int32_t>(hi[2])};
+                    const smallm_i32x4 a_odd = {
+                        static_cast<int32_t>(lo[1]), static_cast<int32_t>(lo[3]),
+                        static_cast<int32_t>(hi[1]), static_cast<int32_t>(hi[3])};
+                    idot[tm][tn] = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32(
+                        true, a_even, false, b_even, idot[tm][tn], false);
+                    idot[tm][tn] = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32(
+                        true, a_odd, false, b_odd, idot[tm][tn], false);
+                }
+            }
+            if (((c0 + j + 1) & gmask) == 0 || j == cnt - 1) {
+#pragma unroll
+                for (int tm = 0; tm < TM; tm++) {
+                    const float* mp = wmeta +
+                        (tm * CPW + j) * kSmallMW4A8MetaPerChunk + half * 16;
+                    const float8 msa = *reinterpret_cast<const float8*>(mp);
+                    const float8 mcs = *reinterpret_cast<const float8*>(mp + 8);
+#pragma unroll
+                    for (int tn = 0; tn < TN; tn++) {
+                        const float sw = rs[j][tn];
+                        const float nzw = -rz[j][tn] * sw;
+#pragma unroll
+                        for (int e = 0; e < 8; e++) {
+                            const float x = static_cast<float>(idot[tm][tn][e]) * msa[e];
+                            acc[tm][tn][e] = fmaf(sw, x, acc[tm][tn][e]);
+                            acc[tm][tn][e] = fmaf(nzw, mcs[e], acc[tm][tn][e]);
+                            idot[tm][tn][e] = 0;
+                        }
+                    }
+                }
+            }
+        }
+        if (j + DB < CPW) issueB(sb, j + DB);
+        if (j + DA < CPW) issueA(sa, j + DA);
+    }
+    }
+
+#pragma unroll
+    for (int t = 0; t < T; t++)
+#pragma unroll
+        for (int e = 0; e < 8; e++)
+            red[((wid * T + t) * 8 + e) * 32 + lid] = acc[t / TN][t % TN][e];
+    __syncthreads();
+
+    const int waves = static_cast<int>(blockDim.x) >> 5;
+    for (int idx = threadIdx.x; idx < T * 256; idx += blockDim.x) {
+        const int l32 = idx & 31;
+        const int e = (idx >> 5) & 7;
+        const int t = idx >> 8;
+        float v = 0.0f;
+        for (int w = 0; w < waves; w++) v += red[((w * T + t) * 8 + e) * 32 + l32];
+        const int row = row0 + (t / TN) * 16 + hipdnn_wmma_acc_row(l32 >> 4, e);
+        const int col = col0 + (t % TN) * 16 + (l32 & 15);
+        if (row < M && col < N) {
+            if (bias) v += static_cast<float>(bias[col]);
+            C[static_cast<size_t>(row) * ldc + col] = static_cast<_Float16>(v);
+        }
+    }
+#endif
+}
+
+template <int TM, int TN, int CPW, int DB, int DA, bool FULL, bool SYM32>
+__global__ __launch_bounds__(512)
+void MatMulNBitsWMMA_SmallM_Grouped_W4A8(
+    int N, int K,
+    const int8_t* __restrict__ A,
+    const float* __restrict__ a_scale,
+    const int32_t* __restrict__ a_sum,
+    const unsigned char* __restrict__ B, int b_row_bytes,
+    const _Float16* __restrict__ scales,
+    const void* __restrict__ zeros, int zp_mode, int zp_stride,
+    const _Float16* __restrict__ bias,
+    const int32_t* __restrict__ expert_row_offsets,
+    const int32_t* __restrict__ row_tiles,
+    const int32_t* __restrict__ num_row_tiles,
+    int group_shift, int num_groups_k,
+    _Float16* __restrict__ C)
+{
+    extern __shared__ float smallm_w4a8_lds[];
+    const int slot = static_cast<int>(blockIdx.y);
+    if (slot >= *num_row_tiles) return;
+    const int expert = row_tiles[3 * slot];
+    const int row0 = row_tiles[3 * slot + 1];
+    const int rows = row_tiles[3 * slot + 2];
+    const size_t off = static_cast<size_t>(expert_row_offsets[expert]);
+    const size_t e_rows = static_cast<size_t>(expert) * N;
+    const size_t zp_elem = zp_mode == kSmallMZpFp16 ? sizeof(_Float16) : 1;
+    const int waves = static_cast<int>(blockDim.x) >> 5;
+    float* meta = smallm_w4a8_lds + waves * TM * TN * 256;
+    SmallMW4A8Impl<TM, TN, CPW, DB, DA, FULL, SYM32>(
+        smallm_w4a8_lds, meta, row0 + rows, N, K, row0,
+        static_cast<int>(blockIdx.x) * TN * 16, A + off * K,
+        a_scale + off * num_groups_k, a_sum + off * num_groups_k,
+        B + e_rows * b_row_bytes, b_row_bytes,
+        scales + e_rows * num_groups_k,
+        zp_mode ? static_cast<const char*>(zeros) + e_rows * zp_stride * zp_elem
+                : nullptr,
+        zp_mode, zp_stride, bias ? bias + e_rows : nullptr, group_shift,
+        num_groups_k, C + off * N, N);
+}
+
+static bool smallMW4A8Device() {
+    static const bool has = [] {
+        int dev = 0;
+        if (hipGetDevice(&dev) != hipSuccess) return false;
+        hipDeviceProp_t p;
+        if (hipGetDeviceProperties(&p, dev) != hipSuccess) return false;
+        return std::strncmp(p.gcnArchName, "gfx11", 5) == 0 &&
+               std::strncmp(p.gcnArchName, "gfx117", 6) != 0;
+    }();
+    return has;
+}
+
+static bool smallMW4A8Plan(int cfg, int64_t tile_rows, int64_t N, int64_t K,
+                           int64_t bits, int64_t block_size,
+                           int64_t element_size_bytes, const void* zero_points,
+                           int zp_packed_u4, SmallMWmmaLaunch* p) {
+    if (!smallMW4A8Device() || tile_rows <= 0) return false;
+    if (!smallMWmmaPlan(cfg, N, K, bits, block_size, element_size_bytes,
+                        zero_points, zp_packed_u4, p))
+        return false;
+    if (tile_rows > p->c.tm * 16) return false;
+    p->lds_bytes += static_cast<size_t>(p->waves) * p->c.tm * p->c.cpw *
+                    kSmallMW4A8MetaPerChunk * sizeof(float);
+    return p->lds_bytes <= 64 * 1024;
+}
+
+extern "C" int hip_matmul_nbits_wmma_smallm_grouped_w4a8_supported(
+    int cfg, int64_t tile_rows, int64_t N, int64_t K, int64_t bits,
+    int64_t block_size, int64_t element_size_bytes) {
+  if (cfg < 0) cfg = smallMWmmaDefaultConfig(tile_rows, K);
+  SmallMWmmaLaunch p;
+  return smallMW4A8Plan(cfg, tile_rows, N, K, bits, block_size,
+                        element_size_bytes, nullptr, 0, &p)
+             ? 1
+             : 0;
+}
+
+extern "C" int hip_matmul_nbits_wmma_smallm_grouped_w4a8(
+    void* stream, int cfg,
+    const void* A, const void* a_scale, const void* a_sum,
+    const void* B, const void* scales, const void* zero_points,
+    int zp_packed_u4, const void* bias, const void* expert_row_offsets,
+    const void* row_tiles, const void* num_row_tiles, void* output,
+    int64_t max_row_tiles, int64_t tile_rows, int64_t N, int64_t K,
+    int64_t bits, int64_t block_size, int64_t element_size_bytes) {
+  if (max_row_tiles <= 0 || N <= 0 || K <= 0) return 0;
+  if (cfg < 0) cfg = smallMWmmaDefaultConfig(tile_rows, K);
+  SmallMWmmaLaunch p;
+  if (!smallMW4A8Plan(cfg, tile_rows, N, K, bits, block_size,
+                      element_size_bytes, zero_points, zp_packed_u4, &p))
+    return -1;
+
+  hipStream_t s = static_cast<hipStream_t>(stream);
+  dim3 grid(static_cast<unsigned>((N + p.c.tn * 16 - 1) / (p.c.tn * 16)),
+            static_cast<unsigned>(max_row_tiles));
+  dim3 block(static_cast<unsigned>(p.waves * 32));
+
+  const bool sym32 = p.zp_mode == 0 && block_size == 32;
+#define SMALLM_W4A8_LAUNCH_ONE(TM, TN, CPW, DB, DA, FULL, SYM)                  \
+  hipLaunchKernelGGL(                                                         \
+      HIP_KERNEL_NAME(                                                        \
+          MatMulNBitsWMMA_SmallM_Grouped_W4A8<TM, TN, CPW, DB, DA, FULL, SYM>), \
+      grid, block, p.lds_bytes, s, static_cast<int>(N), static_cast<int>(K),  \
+      static_cast<const int8_t*>(A), static_cast<const float*>(a_scale),      \
+      static_cast<const int32_t*>(a_sum),                                     \
+      static_cast<const unsigned char*>(B), p.b_row_bytes,                    \
+      static_cast<const _Float16*>(scales), zero_points, p.zp_mode,           \
+      p.zp_stride, static_cast<const _Float16*>(bias),                        \
+      static_cast<const int32_t*>(expert_row_offsets),                        \
+      static_cast<const int32_t*>(row_tiles),                                 \
+      static_cast<const int32_t*>(num_row_tiles), p.group_shift, p.ngk,       \
+      static_cast<_Float16*>(output))
+#define SMALLM_W4A8_LAUNCH(ID, TM, TN, CPW, DB, DA)                            \
+  case ID:                                                                    \
+    if (p.full && sym32) SMALLM_W4A8_LAUNCH_ONE(TM, TN, CPW, DB, DA, true, true);   \
+    else if (p.full) SMALLM_W4A8_LAUNCH_ONE(TM, TN, CPW, DB, DA, true, false);      \
+    else if (sym32) SMALLM_W4A8_LAUNCH_ONE(TM, TN, CPW, DB, DA, false, true);       \
+    else SMALLM_W4A8_LAUNCH_ONE(TM, TN, CPW, DB, DA, false, false);                 \
+    break;
+  (void)hipGetLastError();
+  switch (cfg) { SMALLM_WMMA_CASES(SMALLM_W4A8_LAUNCH) }
+#undef SMALLM_W4A8_LAUNCH
+#undef SMALLM_W4A8_LAUNCH_ONE
+
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess)
+    fprintf(stderr,
+            "[custom_kernels] hip_matmul_nbits_wmma_smallm_grouped_w4a8 failed: %s\n",
+            hipGetErrorString(err));
+  return static_cast<int>(err);
+}
+
 #undef SMALLM_WMMA_CASES
 
 /* fp16 GEMM kernel entry (for pre-dequantized B, FUSED_DQ=false) */

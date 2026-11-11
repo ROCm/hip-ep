@@ -1298,6 +1298,105 @@ bool run_grouped_cpw_case(hipStream_t stream, int cfg, int k) {
   return pass;
 }
 
+// hip_qmoe_quant_act_i8 followed by the W4A8 grouped GEMM against the fp32
+// reference on the unquantized input; the tolerance covers the int8 rounding
+// of the activations. block_size 32 without zero points is the signed-weight
+// path; the others carry the a_sum correction, and block_size 64 at K=704
+// has groups spanning two chunks and a short last wave.
+bool run_grouped_w4a8_case(hipStream_t stream, int k, int block_size,
+                           bool use_zero_points, int tile_rows) {
+  constexpr int experts = 3;
+  constexpr int n = 64;
+  const std::string shape = "grouped_w4a8_K" + std::to_string(k) + "_bs" +
+                            std::to_string(block_size) +
+                            (use_zero_points ? "_zp" : "") + "_tile" +
+                            std::to_string(tile_rows);
+  if (!hip_matmul_nbits_wmma_smallm_grouped_w4a8_supported(
+          -1, tile_rows, n, k, 4, block_size, sizeof(__half))) {
+    std::cout << "SKIP shape=" << shape << " (no W4A8 WMMA on this device)\n";
+    return true;
+  }
+  const std::vector<int32_t> expert_rows =
+      tile_rows == 16 ? std::vector<int32_t>{5, 16, 11}
+                      : std::vector<int32_t>{20, 32, 7};
+  std::vector<int32_t> expert_offsets = {0};
+  std::vector<int32_t> row_tiles;
+  for (int expert = 0; expert < experts; ++expert) {
+    expert_offsets.push_back(expert_offsets.back() + expert_rows[expert]);
+    row_tiles.insert(row_tiles.end(), {expert, 0, expert_rows[expert]});
+  }
+  const int rows = expert_offsets.back();
+  const std::vector<int32_t> num_row_tiles = {experts};
+  PackedMatrix matrix = make_matrix(experts, n, k, block_size, 29);
+  if (!use_zero_points)
+    std::fill(matrix.zero_points.begin(), matrix.zero_points.end(), 8);
+  const int zp_stride = (matrix.k_blocks + 1) / 2;
+  std::vector<uint8_t> packed_zp(static_cast<size_t>(experts) * n * zp_stride, 0);
+  for (size_t col = 0; col < static_cast<size_t>(experts) * n; ++col)
+    for (int group = 0; group < matrix.k_blocks; ++group)
+      packed_zp[col * zp_stride + group / 2] |= static_cast<uint8_t>(
+          matrix.zero_points[col * matrix.k_blocks + group] << (4 * (group & 1)));
+
+  std::vector<__half> input(static_cast<size_t>(rows) * k);
+  for (int row = 0; row < rows; ++row)
+    for (int col = 0; col < k; ++col)
+      input[static_cast<size_t>(row) * k + col] =
+          float_to_half(input_value(row + 5, col));
+  std::vector<__half> expected(static_cast<size_t>(rows) * n);
+  for (int expert = 0; expert < experts; ++expert)
+    for (int row = expert_offsets[expert]; row < expert_offsets[expert + 1]; ++row)
+      cpu_matrix_row(&input[static_cast<size_t>(row) * k], expert, matrix,
+                     &expected[static_cast<size_t>(row) * n]);
+
+  DeviceBuffer<__half> d_input(input.size());
+  DeviceBuffer<int8_t> d_q(input.size());
+  DeviceBuffer<float> d_q_scale(static_cast<size_t>(rows) * matrix.k_blocks);
+  DeviceBuffer<int32_t> d_q_sum(static_cast<size_t>(rows) * matrix.k_blocks);
+  DeviceBuffer<uint8_t> d_weights(matrix.weights.size());
+  DeviceBuffer<__half> d_scales(matrix.scales.size());
+  DeviceBuffer<uint8_t> d_zero_points(packed_zp.size());
+  DeviceBuffer<__half> d_bias(matrix.bias.size());
+  DeviceBuffer<int32_t> d_expert_offsets(expert_offsets.size());
+  DeviceBuffer<int32_t> d_row_tiles(row_tiles.size());
+  DeviceBuffer<int32_t> d_num_row_tiles(num_row_tiles.size());
+  DeviceBuffer<__half> d_output(expected.size());
+  upload(d_input, input);
+  upload(d_weights, matrix.weights);
+  upload(d_scales, matrix.scales);
+  upload(d_zero_points, packed_zp);
+  upload(d_bias, matrix.bias);
+  upload(d_expert_offsets, expert_offsets);
+  upload(d_row_tiles, row_tiles);
+  upload(d_num_row_tiles, num_row_tiles);
+
+  int status = hip_qmoe_quant_act_i8(
+      reinterpret_cast<void*>(stream), d_input.get(), d_q.get(),
+      d_q_scale.get(), d_q_sum.get(), rows, k, block_size, sizeof(__half));
+  if (status == static_cast<int>(hipSuccess))
+    status = hip_matmul_nbits_wmma_smallm_grouped_w4a8(
+        reinterpret_cast<void*>(stream), -1, d_q.get(), d_q_scale.get(),
+        d_q_sum.get(), d_weights.get(), d_scales.get(),
+        use_zero_points ? d_zero_points.get() : nullptr, /*zp_packed_u4=*/1,
+        d_bias.get(), d_expert_offsets.get(), d_row_tiles.get(),
+        d_num_row_tiles.get(), d_output.get(), experts, tile_rows, n, k, 4,
+        block_size, sizeof(__half));
+  Metrics metrics;
+  if (status == static_cast<int>(hipSuccess)) {
+    HIP_CHECK(hipStreamSynchronize(stream));
+    std::vector<__half> actual(expected.size());
+    HIP_CHECK(hipMemcpy(actual.data(), d_output.get(),
+                        actual.size() * sizeof(__half), hipMemcpyDeviceToHost));
+    metrics = compare(actual, expected);
+  }
+  const bool pass = metrics.finite && metrics.rel_l2 <= 1.5e-2;
+  std::cout << (pass ? "PASS" : "FAIL") << " relL2=" << metrics.rel_l2
+            << " status=" << status << " shape=" << shape << '\n';
+  ResultRow result(shape, "fixed:block_size=" + std::to_string(block_size) +
+                              (use_zero_points ? " zp=packed" : " zp=8"));
+  result.finish(metrics.rel_l2, pass);
+  return pass;
+}
+
 // Rows with a SwiGLU row scale s > 1 hold v = fc2(act / s) without bias, so
 // each contribution is s * v + b. b is large next to v so that applying it
 // before the rescale, or scaling it with the row, is visible.
@@ -1736,12 +1835,14 @@ int main(int argc, char** argv) {
   constexpr int reduce_scaled_cases = 2;
   constexpr int grouped_partial_block_cases = 1;
   constexpr int grouped_cpw_cases = 8;
+  constexpr int grouped_w4a8_cases = 5;
   std::cout << "qmoe_ragged_mm coverage=" << coverage
             << " cases=" << shape_count * category_count + model_shape_cases +
                                adaptive_shape_cases + descriptor_cases +
                                task_policy_cases + launcher_cases +
                                pipeline_cases + reduce_scaled_cases +
-                               grouped_partial_block_cases + grouped_cpw_cases
+                               grouped_partial_block_cases + grouped_cpw_cases +
+                               grouped_w4a8_cases
             << '\n';
 
   hipStream_t stream = nullptr;
@@ -1797,6 +1898,11 @@ int main(int argc, char** argv) {
   for (int cfg : {0, 6, 1, 7})
     for (int k : {1024, 3072})
       all_pass = run_grouped_cpw_case(stream, cfg, k) && all_pass;
+  all_pass = run_grouped_w4a8_case(stream, 2560, 32, false, 16) && all_pass;
+  all_pass = run_grouped_w4a8_case(stream, 640, 32, false, 32) && all_pass;
+  all_pass = run_grouped_w4a8_case(stream, 608, 32, false, 32) && all_pass;
+  all_pass = run_grouped_w4a8_case(stream, 1024, 128, true, 16) && all_pass;
+  all_pass = run_grouped_w4a8_case(stream, 704, 64, true, 32) && all_pass;
   HIP_CHECK(hipStreamDestroy(stream));
 
   std::cout << (all_pass ? "ALL PASS" : "SOME FAIL") << '\n';
