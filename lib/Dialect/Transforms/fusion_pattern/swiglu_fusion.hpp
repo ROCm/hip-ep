@@ -38,5 +38,11 @@ void populateRmsNormAddFusionPattern(mlir::RewritePatternSet &patterns,
 void populateGegluFusionPattern(mlir::RewritePatternSet &patterns,
                                 mlir::PatternBenefit benefit);
 
+// An unscaled RMS norm written out in f32 primitives (cast, x*x, last-axis
+// mean, + eps, sqrt, reciprocal, multiply, cast back to f16) to hip.rms_norm
+// with a scale of ones.
+void populateUnscaledRmsNormFusionPattern(mlir::RewritePatternSet &patterns,
+                                          mlir::PatternBenefit benefit);
+
 } // namespace fusion_transform
 } // namespace hip

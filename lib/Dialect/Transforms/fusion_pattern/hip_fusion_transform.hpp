@@ -867,6 +867,11 @@ constexpr unsigned kSwigluFusionBenefit = 2;
 /// results, and roots at the `hip.quantize_linear` that consumes it.
 constexpr unsigned kRmsNormAddFusionBenefit = 2;
 
+/// Rooted at the closing `hip.cast`, as the promoted SwiGLU fusion is; that
+/// one needs a `hip.swiglu` producer and this one a `hip.mul`, so the two are
+/// never ranked against each other.
+constexpr unsigned kUnscaledRmsNormFusionBenefit = 2;
+
 /// The only pattern rooted at `hip.linear_attention`.
 constexpr unsigned kLinearAttentionGroupFoldBenefit = 1;
 
@@ -889,6 +894,8 @@ inline mlir::LogicalResult run(mlir::ModuleOp module,
                              mlir::PatternBenefit(kSwigluFusionBenefit));
   populateRmsNormAddFusionPattern(
       patterns, mlir::PatternBenefit(kRmsNormAddFusionBenefit));
+  populateUnscaledRmsNormFusionPattern(
+      patterns, mlir::PatternBenefit(kUnscaledRmsNormFusionBenefit));
   populateLinearAttentionGroupFoldPattern(
       patterns, mlir::PatternBenefit(kLinearAttentionGroupFoldBenefit));
 

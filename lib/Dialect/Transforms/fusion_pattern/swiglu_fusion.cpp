@@ -605,11 +605,180 @@ struct RmsNormAddFusion : public mlir::OpRewritePattern<mlir::hip::AddOp> {
   }
 };
 
+// An RMS norm without a scale, written out in f32 primitives, to hip.rms_norm
+// with a scale of ones. Gemma's value norm is exported this way; the f32
+// round trip is the contract hip.rms_norm already keeps (fp32 accumulation,
+// result rounded once to f16).
+//
+//   Before:
+//     %x32 = hip.cast(%ctx) ins(%x : t16) outs(..) {to = 1}
+//     %sq  = hip.mul(%ctx) ins(%x32, %x32 : t32, t32) outs(..)
+//     %m   = hip.reduce_mean(%ctx) ins(%sq, %axes) outs(..)
+//            {reduced_axes = array<i64: last>}                  // keeps dims
+//     %a   = hip.add(%ctx) ins(%m, %eps : r32, tensor<1xf32>) outs(..)
+//     %s   = hip.sqrt(%ctx) ins(%a) outs(..)
+//     %r   = hip.reciprocal(%ctx) ins(%s) outs(..)
+//     %y32 = hip.mul(%ctx) ins(%x32, %r : t32, r32) outs(..)
+//     %y   = hip.cast(%ctx) ins(%y32 : t32) outs(%e : t16) {to = 10}
+//   After:
+//     %ones = hip.constant {value = dense<1.0> : tensor<Dxf16>}
+//     %y = hip.rms_norm(%ctx) ins(%x, %ones) outs(%e : t16)
+//          {axis = -1, epsilon = eps, stash_type = 1}
+//
+// The chain's results also size the inits that follow them through
+// tensor.dim. Those queries move to %x: a full-width result has its shape,
+// and a reduced one shares every axis but the last, which only a static 1
+// stands for. A query of the last axis of a reduced result declines.
+struct UnscaledRmsNormFusion
+    : public mlir::OpRewritePattern<mlir::hip::CastOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::hip::CastOp outCast,
+                  mlir::PatternRewriter &rewriter) const override {
+    auto outType =
+        mlir::dyn_cast<mlir::RankedTensorType>(outCast.getResult(0).getType());
+    if (!outType || !outType.getElementType().isF16() || outType.getRank() < 1)
+      return rewriter.notifyMatchFailure(outCast, "not an f16 result");
+    const int64_t rank = outType.getRank();
+    const int64_t width = outType.getShape().back();
+    if (mlir::ShapedType::isDynamic(width))
+      return rewriter.notifyMatchFailure(outCast, "normalized axis is dynamic");
+
+    auto yMul = outCast.getInput().getDefiningOp<mlir::hip::MulOp>();
+    if (!yMul)
+      return rewriter.notifyMatchFailure(outCast, "no hip.mul producer");
+    mlir::Value x32 = yMul.getLhs();
+    auto recip = yMul.getRhs().getDefiningOp<mlir::hip::ReciprocalOp>();
+    if (!recip) {
+      x32 = yMul.getRhs();
+      recip = yMul.getLhs().getDefiningOp<mlir::hip::ReciprocalOp>();
+    }
+    if (!recip)
+      return rewriter.notifyMatchFailure(outCast, "no hip.reciprocal operand");
+    auto inCast = x32.getDefiningOp<mlir::hip::CastOp>();
+    auto sqrt = recip->getOperand(1).getDefiningOp<mlir::hip::SqrtOp>();
+    if (!inCast || !sqrt)
+      return rewriter.notifyMatchFailure(outCast, "not cast(x) * 1/sqrt(.)");
+    auto add = sqrt->getOperand(1).getDefiningOp<mlir::hip::AddOp>();
+    if (!add)
+      return rewriter.notifyMatchFailure(outCast, "no hip.add under sqrt");
+    mlir::Value epsValue = add.getRhs();
+    auto mean = add.getLhs().getDefiningOp<mlir::hip::ReduceMeanOp>();
+    if (!mean) {
+      epsValue = add.getLhs();
+      mean = add.getRhs().getDefiningOp<mlir::hip::ReduceMeanOp>();
+    }
+    if (!mean)
+      return rewriter.notifyMatchFailure(outCast, "no hip.reduce_mean");
+    auto sqMul = mean->getOperand(1).getDefiningOp<mlir::hip::MulOp>();
+    if (!sqMul || sqMul.getLhs() != x32 || sqMul.getRhs() != x32)
+      return rewriter.notifyMatchFailure(outCast, "mean is not over x * x");
+
+    mlir::Value x = inCast.getInput();
+    auto xType = mlir::dyn_cast<mlir::RankedTensorType>(x.getType());
+    auto x32Type = mlir::dyn_cast<mlir::RankedTensorType>(x32.getType());
+    auto meanType =
+        mlir::dyn_cast<mlir::RankedTensorType>(mean->getResult(0).getType());
+    if (xType != outType || !x32Type || !x32Type.getElementType().isF32() ||
+        x32Type.getShape() != outType.getShape() ||
+        yMul->getResult(0).getType() != x32Type ||
+        sqMul->getResult(0).getType() != x32Type || !meanType ||
+        meanType.getRank() != rank || meanType.getShape().back() != 1)
+      return rewriter.notifyMatchFailure(outCast, "unexpected chain types");
+    for (mlir::Value reduced :
+         {add->getResult(0), sqrt->getResult(0), recip->getResult(0)})
+      if (reduced.getType() != meanType)
+        return rewriter.notifyMatchFailure(outCast, "unexpected reduced types");
+    auto axes = mean->getAttrOfType<mlir::DenseI64ArrayAttr>("reduced_axes");
+    if (!axes || axes.size() != 1 || (axes[0] != rank - 1 && axes[0] != -1))
+      return rewriter.notifyMatchFailure(outCast, "not a last-axis mean");
+    auto epsConst = epsValue.getDefiningOp<mlir::hip::ConstantOp>();
+    auto epsPayload = epsConst
+                          ? mlir::dyn_cast_or_null<mlir::DenseElementsAttr>(
+                                epsConst->getAttr("value"))
+                          : mlir::DenseElementsAttr();
+    if (!epsPayload || epsPayload.getNumElements() != 1 ||
+        !epsPayload.getElementType().isF32())
+      return rewriter.notifyMatchFailure(outCast,
+                                         "epsilon is not an f32 scalar");
+    const float eps =
+        epsPayload.getSplatValue<llvm::APFloat>().convertToFloat();
+    if (!(eps >= 0.0f))
+      return rewriter.notifyMatchFailure(outCast, "negative epsilon");
+
+    mlir::Value ctx = outCast.getCtx();
+    for (mlir::Operation *op :
+         {yMul.getOperation(), recip.getOperation(), sqrt.getOperation(),
+          add.getOperation(), mean.getOperation(), sqMul.getOperation(),
+          inCast.getOperation()})
+      if (op->getOperand(0) != ctx)
+        return rewriter.notifyMatchFailure(outCast, "ops must share a context");
+
+    // Every value use stays inside the chain; the rest are shape queries.
+    if (!hasSingleValueUse(yMul->getResult(0), outCast) ||
+        !hasSingleValueUse(recip->getResult(0), yMul) ||
+        !hasSingleValueUse(sqrt->getResult(0), recip) ||
+        !hasSingleValueUse(add->getResult(0), sqrt) ||
+        !hasSingleValueUse(mean->getResult(0), add) ||
+        !hasSingleValueUse(sqMul->getResult(0), mean))
+      return rewriter.notifyMatchFailure(outCast, "intermediate escapes");
+    for (mlir::OpOperand &use : x32.getUses()) {
+      mlir::Operation *owner = use.getOwner();
+      if (owner != sqMul && owner != yMul &&
+          !mlir::isa<mlir::tensor::DimOp>(owner))
+        return rewriter.notifyMatchFailure(outCast, "cast result escapes");
+    }
+    for (mlir::Value reduced : {mean->getResult(0), add->getResult(0),
+                                sqrt->getResult(0), recip->getResult(0)})
+      for (mlir::Operation *user : reduced.getUsers())
+        if (auto dim = mlir::dyn_cast<mlir::tensor::DimOp>(user)) {
+          std::optional<int64_t> index = dim.getConstantIndex();
+          if (!index || *index < 0 || *index >= rank - 1)
+            return rewriter.notifyMatchFailure(outCast,
+                                               "query of the reduced axis");
+        }
+
+    auto scaleType =
+        mlir::RankedTensorType::get({width}, outType.getElementType());
+    auto ones = mlir::hip::ConstantOp::create(
+        rewriter, outCast.getLoc(), scaleType,
+        mlir::DenseElementsAttr::get(
+            scaleType, llvm::ArrayRef<mlir::Attribute>{rewriter.getFloatAttr(
+                           outType.getElementType(), 1.0)}));
+    auto norm = mlir::hip::RmsNormOp::create(
+        rewriter, outCast.getLoc(), outType, ctx, x, ones.getResult(),
+        outCast.getOutput(), rewriter.getI64IntegerAttr(-1),
+        rewriter.getF32FloatAttr(eps), rewriter.getI64IntegerAttr(1));
+    rewriter.replaceOp(outCast, norm->getResult(0));
+
+    // Last consumer first, so each op has only shape queries left when it
+    // goes.
+    for (mlir::Operation *op :
+         {yMul.getOperation(), recip.getOperation(), sqrt.getOperation(),
+          add.getOperation(), mean.getOperation(), sqMul.getOperation(),
+          inCast.getOperation()}) {
+      mlir::Operation *initDef =
+          op->getOperand(op->getNumOperands() - 1).getDefiningOp();
+      retargetShapeQueries(rewriter, op->getResult(0), x);
+      rewriter.eraseOp(op);
+      if (initDef && mlir::isOpTriviallyDead(initDef))
+        rewriter.eraseOp(initDef);
+    }
+    return mlir::success();
+  }
+};
+
 } // namespace
 
 void populateRmsNormAddFusionPattern(mlir::RewritePatternSet &patterns,
                                      mlir::PatternBenefit benefit) {
   patterns.add<RmsNormAddFusion>(patterns.getContext(), benefit);
+}
+
+void populateUnscaledRmsNormFusionPattern(mlir::RewritePatternSet &patterns,
+                                          mlir::PatternBenefit benefit) {
+  patterns.add<UnscaledRmsNormFusion>(patterns.getContext(), benefit);
 }
 
 void populateSwigluFusionPattern(mlir::RewritePatternSet &patterns,
