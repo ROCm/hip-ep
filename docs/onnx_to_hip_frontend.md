@@ -76,6 +76,7 @@ existing `--convert-hip-to-llvm` pipeline.
 | `SkipSimplifiedLayerNormalization` | `hip.skip_rms_norm` | `skip_rms_norm_kernel.hip` |
 | `BranchwiseRMSNorm` (`com.microsoft`) | `hip.rms_norm` | `rms_norm_kernel.hip`; per-branch gain via grouped scale |
 | `GatedRMSNorm` (`com.microsoft`) | `hip.gated_rms_norm` | `rms_norm_kernel.hip` |
+| Linear-attention core (`CausalConvWithState` of the leading projection columns, f32 casts of the decay and beta columns, `GatedDeltaNet`, sigmoid `GatedRMSNorm` with the trailing projection columns) | `hip.gated_delta_net_conv_norm` (formed by `hip-fusion-transform`) | `gated_delta_net_kernel.hip`; one fused kernel for up to 15 tokens, otherwise the separate conv, recurrence and norm kernels |
 | `EngramGate` (`com.microsoft`) | `hip.engram_gate` | `rms_norm_kernel.hip` |
 | `HyperConnectionPreMix` (`com.microsoft`) | `hip.hyper_connection_pre_mix` | `hyper_connection_kernel.hip` |
 | `HyperConnectionPostMix` (`com.microsoft`) | `hip.hyper_connection_post_mix` | `hyper_connection_kernel.hip` |

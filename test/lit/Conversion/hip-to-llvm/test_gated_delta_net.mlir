@@ -34,4 +34,46 @@ module {
     // CHECK: llvm.call @wrap_gated_delta_net(%{{.*}}, %[[B]], %[[L]], %[[HQK]], %[[HV]], %[[DK]], %[[DV]], %[[SCALE]], %[[ELEM]]) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, f32, i64) -> i32
     return
   }
+
+  // Projection and gate widths, conv width and columns are constants; the
+  // row and state-batch extents arrive as element counts.
+  func.func @gdn_conv_norm(
+      %ctx: !hip.context, %proj: memref<?x?x768xf16, 1>,
+      %w: memref<512x1x4xf16, 1>, %bias: memref<512xf16, 1>,
+      %past: memref<?x512x3xf16, 1>, %gates: memref<?x?x6xf16, 1>,
+      %S: memref<?x2x128x128xf32, 1>, %A: memref<2xf32, 1>,
+      %dt: memref<2xf32, 1>, %nw: memref<128xf16, 1>,
+      %out: memref<?x?x256xf16, 1>, %present: memref<?x512x3xf16, 1>,
+      %final: memref<?x2x128x128xf32, 1>, %cin: memref<?x?x512xf16, 1>,
+      %cout: memref<?x?x512xf16, 1>, %d: memref<?x?x2xf32, 1>,
+      %b: memref<?x?x2xf32, 1>, %o: memref<?x?x2x128xf16, 1>,
+      %z: memref<?x?x256xf16, 1>) {
+    hip.gated_delta_net_conv_norm(%ctx)
+        ins(%proj, %w, %bias, %past, %gates, %S, %A, %dt, %nw :
+            memref<?x?x768xf16, 1>, memref<512x1x4xf16, 1>,
+            memref<512xf16, 1>, memref<?x512x3xf16, 1>,
+            memref<?x?x6xf16, 1>, memref<?x2x128x128xf32, 1>,
+            memref<2xf32, 1>, memref<2xf32, 1>, memref<128xf16, 1>)
+        outs(%out, %present, %final, %cin, %cout, %d, %b, %o, %z :
+             memref<?x?x256xf16, 1>, memref<?x512x3xf16, 1>,
+             memref<?x2x128x128xf32, 1>, memref<?x?x512xf16, 1>,
+             memref<?x?x512xf16, 1>, memref<?x?x2xf32, 1>,
+             memref<?x?x2xf32, 1>, memref<?x?x2x128xf16, 1>,
+             memref<?x?x256xf16, 1>)
+        {beta_column = 3 : i64, conv_channels = 512 : i64,
+         decay_column = 1 : i64, epsilon = 9.99999997E-7 : f32,
+         z_column = 512 : i64}
+    // CHECK-LABEL: llvm.func @gdn_conv_norm
+    // CHECK: %[[GSTRIDE:.*]] = llvm.mlir.constant(6 : i64) : i64
+    // CHECK: %[[C:.*]] = llvm.mlir.constant(512 : i64) : i64
+    // CHECK: %[[K:.*]] = llvm.mlir.constant(4 : i64) : i64
+    // CHECK: %[[DC:.*]] = llvm.mlir.constant(1 : i64) : i64
+    // CHECK: %[[BC:.*]] = llvm.mlir.constant(3 : i64) : i64
+    // CHECK: %[[ZC:.*]] = llvm.mlir.constant(512 : i64) : i64
+    // CHECK: %[[HQK:.*]] = llvm.mlir.constant(1 : i64) : i64
+    // CHECK: %[[HV:.*]] = llvm.mlir.constant(2 : i64) : i64
+    // CHECK: %[[EPS:.*]] = llvm.mlir.constant(9.99999997E-7 : f32) : f32
+    // CHECK: llvm.call @wrap_gated_delta_net_conv_norm(%{{.*}}, %[[GSTRIDE]], %[[C]], %[[K]], %[[DC]], %[[BC]], %[[ZC]], %[[HQK]], %[[HV]], %{{.*}}, %{{.*}}, %{{.*}}, %[[EPS]]) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32) -> i32
+    return
+  }
 }

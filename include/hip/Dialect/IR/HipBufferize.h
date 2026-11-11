@@ -189,6 +189,8 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
         HipDstBufferizableModel<LinearAttentionOp>>(*ctx);
     GatedDeltaNetOp::attachInterface<HipDstBufferizableModel<GatedDeltaNetOp>>(
         *ctx);
+    GatedDeltaNetConvNormOp::attachInterface<
+        HipDstBufferizableModel<GatedDeltaNetConvNormOp>>(*ctx);
     DynamicSparseAttentionOp::attachInterface<
         HipDstBufferizableModel<DynamicSparseAttentionOp>>(*ctx);
     SparseAttentionIndexerOp::attachInterface<

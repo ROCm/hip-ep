@@ -3235,6 +3235,127 @@ LogicalResult GatedDeltaNetOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// GatedDeltaNetConvNormOp:
+//   ins(proj, conv_weight, conv_bias, conv_state, gates, recurrent_state,
+//       a_log, dt_bias, norm_weight)
+//   outs(output, conv_state_out, recurrent_state_out, conv_in, conv_out,
+//        decay, beta, gdn_out, z)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange GatedDeltaNetConvNormOp::getDpsInitsMutable() {
+  return getOutputsMutable();
+}
+
+void GatedDeltaNetConvNormOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult GatedDeltaNetConvNormOp::verify() {
+  if (getOutputs().size() != 9)
+    return emitOpError("expected output, conv_state_out, recurrent_state_out "
+                       "and six scratch outputs");
+  SmallVector<Value> data = {
+      getProj(),      getConvWeight(), getConvBias(),
+      getConvState(), getGates(),      getRecurrentState(),
+      getALog(),      getDtBias(),     getNormWeight()};
+  llvm::append_range(data, getOutputs());
+  if (failed(verifyDpsComputeOp(*this, data, /*numInits=*/9)))
+    return failure();
+
+  constexpr int64_t kAny = ShapedType::kDynamic;
+  Type f16 = Float16Type::get(getContext());
+  Type f32 = Float32Type::get(getContext());
+  auto projType = cast<ShapedType>(getProj().getType());
+  auto gatesType = cast<ShapedType>(getGates().getType());
+  auto stateType = cast<ShapedType>(getRecurrentState().getType());
+  auto weightType = cast<ShapedType>(getConvWeight().getType());
+  if (projType.getRank() != 3 || projType.isDynamicDim(2) ||
+      gatesType.getRank() != 3 || gatesType.isDynamicDim(2))
+    return emitOpError("proj and gates must be rank 3 with a static last dim");
+  if (stateType.getRank() != 4 ||
+      llvm::any_of(llvm::seq<int64_t>(1, 4),
+                   [&](int64_t i) { return stateType.isDynamicDim(i); }))
+    return emitOpError("recurrent_state must be [B, Hv, dv, dk] with static "
+                       "Hv, dv, dk");
+  if (weightType.getRank() != 3 || !weightType.hasStaticShape())
+    return emitOpError("conv_weight must be a static [C, 1, K]");
+
+  const int64_t channels = getConvChannels();
+  const int64_t numHeadsV = stateType.getDimSize(1);
+  const int64_t headSizeV = stateType.getDimSize(2);
+  const int64_t headSizeQk = stateType.getDimSize(3);
+  const int64_t kernelSize = weightType.getDimSize(2);
+  const int64_t valueWidth = numHeadsV * headSizeV;
+  if (headSizeQk != 128 || headSizeV != 128)
+    return emitOpError("dk and dv must be 128");
+  const int64_t qkWidth = channels - valueWidth;
+  if (qkWidth <= 0 || qkWidth % (2 * headSizeQk) != 0 ||
+      numHeadsV % (qkWidth / (2 * headSizeQk)) != 0)
+    return emitOpError("conv_channels must be 2*Hqk*dk + Hv*dv with Hv a "
+                       "multiple of Hqk");
+  if (kernelSize < 2)
+    return emitOpError("conv kernel size must be at least 2");
+  const int64_t projWidth = projType.getDimSize(2);
+  const int64_t gateWidth = gatesType.getDimSize(2);
+  if (channels > projWidth || getZColumn() < 0 ||
+      getZColumn() + valueWidth > projWidth)
+    return emitOpError("conv and z columns must lie within proj");
+  if (getDecayColumn() < 0 || getDecayColumn() + numHeadsV > gateWidth ||
+      getBetaColumn() < 0 || getBetaColumn() + numHeadsV > gateWidth)
+    return emitOpError("decay and beta columns must lie within gates");
+
+  auto check = [&](Value v, StringRef name, Type expectedElem,
+                   ArrayRef<int64_t> expected) -> LogicalResult {
+    auto type = cast<ShapedType>(v.getType());
+    if (type.getElementType() != expectedElem)
+      return emitOpError() << name << " must have element type " << expectedElem
+                           << ", got " << type.getElementType();
+    if (type.getRank() != static_cast<int64_t>(expected.size()))
+      return emitOpError() << name << " must be rank " << expected.size()
+                           << ", got rank " << type.getRank();
+    for (auto [i, want] : llvm::enumerate(expected)) {
+      int64_t got = type.getDimSize(i);
+      if (want != kAny && got != ShapedType::kDynamic && got != want)
+        return emitOpError() << name << " dim " << i << " must be " << want
+                             << ", got " << got;
+    }
+    return success();
+  };
+  const int64_t batch = projType.getDimSize(0);
+  const int64_t seq = projType.getDimSize(1);
+  const int64_t stateBatch = stateType.getDimSize(0);
+  auto outs = getOutputs();
+  if (failed(check(getProj(), "proj", f16, {kAny, kAny, projWidth})) ||
+      failed(check(getGates(), "gates", f16, {kAny, kAny, gateWidth})) ||
+      failed(check(getConvWeight(), "conv_weight", f16,
+                   {channels, 1, kernelSize})) ||
+      failed(check(getConvBias(), "conv_bias", f16, {channels})) ||
+      failed(check(getConvState(), "conv_state", f16,
+                   {kAny, channels, kernelSize - 1})) ||
+      failed(check(getRecurrentState(), "recurrent_state", f32,
+                   {kAny, numHeadsV, headSizeV, headSizeQk})) ||
+      failed(check(getALog(), "a_log", f32, {numHeadsV})) ||
+      failed(check(getDtBias(), "dt_bias", f32, {numHeadsV})) ||
+      failed(check(getNormWeight(), "norm_weight", f16, {headSizeV})) ||
+      failed(check(outs[0], "output", f16, {batch, seq, valueWidth})) ||
+      failed(check(outs[1], "conv_state_out", f16,
+                   {kAny, channels, kernelSize - 1})) ||
+      failed(check(outs[2], "recurrent_state_out", f32,
+                   {stateBatch, numHeadsV, headSizeV, headSizeQk})) ||
+      failed(check(outs[3], "conv_in", f16, {batch, seq, channels})) ||
+      failed(check(outs[4], "conv_out", f16, {batch, seq, channels})) ||
+      failed(check(outs[5], "decay", f32, {kAny, kAny, numHeadsV})) ||
+      failed(check(outs[6], "beta", f32, {kAny, kAny, numHeadsV})) ||
+      failed(
+          check(outs[7], "gdn_out", f16, {batch, seq, numHeadsV, headSizeV})) ||
+      failed(check(outs[8], "z", f16, {batch, seq, valueWidth})))
+    return failure();
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // DynamicSparseAttentionOp:
 //   ins(query) [kv(key, value)] cache(past_key, past_value)
 //   select(selected_indices, selected_counts, seqlens_k) [gate(gate)]

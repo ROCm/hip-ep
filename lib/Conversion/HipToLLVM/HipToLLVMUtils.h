@@ -144,6 +144,8 @@ inline constexpr const char *kWrapDequantizeLinear = "wrap_dequantize_linear";
 inline constexpr const char *kWrapGemm = "wrap_gemm";
 inline constexpr const char *kWrapLinearAttention = "wrap_linear_attention";
 inline constexpr const char *kWrapGatedDeltaNet = "wrap_gated_delta_net";
+inline constexpr const char *kWrapGatedDeltaNetConvNorm =
+    "wrap_gated_delta_net_conv_norm";
 inline constexpr const char *kWrapDynamicSparseAttention =
     "wrap_dynamic_sparse_attention";
 inline constexpr const char *kWrapSparseAttentionIndexer =

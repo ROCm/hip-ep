@@ -31,6 +31,14 @@ inline bool hipdnn_ep_matmul_dp4a_enabled() {
   return enabled;
 }
 
+// hip.gated_delta_net_conv_norm runs few-token calls as one fused kernel.
+// 0 keeps every call on the separate kernels, the A/B control.
+inline bool hipdnn_ep_gdn_conv_norm_fused_enabled() {
+  static const bool enabled =
+      hipdnn_ep::env_enabled_default_on("HIPDNN_EP_GDN_CONV_NORM_FUSED");
+  return enabled;
+}
+
 // Widest token burst wrap_qmoe serves by iterating the one-token fused kernel
 // (three launches per token, no host sync, one expert set read per token)
 // instead of the grouped path (one pass over the union of experts in padded

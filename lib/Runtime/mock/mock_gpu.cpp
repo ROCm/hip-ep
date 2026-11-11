@@ -744,6 +744,41 @@ int wrap_gated_delta_net(RuntimeState *state, const void *qkv,
   return 0;
 }
 
+int wrap_gated_delta_net_conv_norm(
+    RuntimeState *state, void *proj, void *conv_weight, void *conv_bias,
+    void *conv_state, void *gates, void *recurrent_state, void *a_log,
+    void *dt_bias, void *norm_weight, void *output, void *conv_state_out,
+    void *recurrent_state_out, void *conv_in, void *conv_out, void *decay,
+    void *beta, void *gdn_out, void *gate_z, int64_t proj_num_elements,
+    int64_t proj_stride, int64_t conv_state_num_elements, int64_t gate_stride,
+    int64_t conv_channels, int64_t kernel_size, int64_t decay_column,
+    int64_t beta_column, int64_t z_column, int64_t num_heads_qk,
+    int64_t num_heads_v, int64_t head_size_qk, int64_t head_size_v, float scale,
+    float epsilon) {
+  if (!state || !proj || !conv_weight || !conv_bias || !conv_state || !gates ||
+      !recurrent_state || !a_log || !dt_bias || !norm_weight || !output ||
+      !conv_state_out || !recurrent_state_out || !conv_in || !conv_out ||
+      !decay || !beta || !gdn_out || !gate_z) {
+    fprintf(stderr,
+            "Invalid required argument in wrap_gated_delta_net_conv_norm\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_gated_delta_net_conv_norm(proj=%lld, stride=%lld, "
+             "C=%lld, K=%lld, Hqk=%lld, Hv=%lld, dk=%lld, dv=%lld)\n",
+             (long long)proj_num_elements, (long long)proj_stride,
+             (long long)conv_channels, (long long)kernel_size,
+             (long long)num_heads_qk, (long long)num_heads_v,
+             (long long)head_size_qk, (long long)head_size_v);
+  (void)conv_state_num_elements;
+  (void)gate_stride;
+  (void)decay_column;
+  (void)beta_column;
+  (void)z_column;
+  (void)scale;
+  (void)epsilon;
+  return 0;
+}
+
 int wrap_dynamic_sparse_attention(
     RuntimeState *state, const void *query, const void *key, const void *value,
     const void *past_key, const void *past_value, const void *selected_indices,

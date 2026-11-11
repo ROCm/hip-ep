@@ -46,26 +46,25 @@ __device__ __forceinline__ float softplus(float x) {
 
 // TPR consecutive threads own one state row S[v, :] of one (batch, value
 // head), E = DK / TPR contiguous floats each, held in registers for the whole
-// sequence; the kernel is sequential in t. Keeping a row in at most a few
+// sequence; the loop is sequential in t. Keeping a row in at most a few
 // lanes is what makes a token step cheap: the two row dot products reduce over
 // TPR lanes instead of a full wave. Each row is read before it is written by
 // the threads that own it, so an initial_state aliasing final_state is safe.
-template <typename T, int DK>
-__global__ void __launch_bounds__(kBlockSize) gatedDeltaNetRecurrentKernel(
-    const T *__restrict__ qkv, const float *__restrict__ decay,
-    const float *__restrict__ beta, const float *initialState,
-    const float *__restrict__ aLog, const float *__restrict__ dtBias,
-    T *__restrict__ output, float *finalState, int seqLen, int numHeadsQk,
-    int numHeadsV, int headSizeV, float scale) {
+//
+// load(t, lane, leadWave, v, active, qv, kv, rawDecay, rawBeta, vNext) fetches
+// token t: q, k (lane-strided), decay and beta on the lead wave, row v of v
+// everywhere. store(t, v, o) receives row v's scaled output.
+template <int DK, typename Load, typename Store>
+__device__ __forceinline__ void
+gdnRecurrentRows(const float *initialState, float *finalState, int b, int hv,
+                 int rowGroup, int seqLen, int numHeadsV, int headSizeV,
+                 const float *__restrict__ aLog,
+                 const float *__restrict__ dtBias, float scale, Load load,
+                 Store store) {
   constexpr int kTpr = DK >= 64 ? DK / 64 : 1;
   constexpr int kE = DK / kTpr;
   constexpr int kRowsPerBlock = kBlockSize / kTpr;
   constexpr int kQkPerLane = DK / kLanes;
-  const int rowGroups = (headSizeV + kRowsPerBlock - 1) / kRowsPerBlock;
-  const int rowGroup = static_cast<int>(blockIdx.x) % rowGroups;
-  const int hv = (static_cast<int>(blockIdx.x) / rowGroups) % numHeadsV;
-  const int b = static_cast<int>(blockIdx.x) / (rowGroups * numHeadsV);
-  const int hq = hv * numHeadsQk / numHeadsV;
   const int tid = static_cast<int>(threadIdx.x);
   const int lane = tid % kLanes;
   const bool leadWave = tid < kLanes;
@@ -78,10 +77,6 @@ __global__ void __launch_bounds__(kBlockSize) gatedDeltaNetRecurrentKernel(
   __shared__ float gateScale;
   __shared__ float betaScalar;
 
-  const int64_t packed = static_cast<int64_t>(2) * numHeadsQk * DK +
-                         static_cast<int64_t>(numHeadsV) * headSizeV;
-  const int64_t vOffset = static_cast<int64_t>(2) * numHeadsQk * DK +
-                          static_cast<int64_t>(hv) * headSizeV;
   const int64_t rowState =
       ((static_cast<int64_t>(b) * numHeadsV + hv) * headSizeV + v) * DK +
       part * kE;
@@ -101,25 +96,7 @@ __global__ void __launch_bounds__(kBlockSize) gatedDeltaNetRecurrentKernel(
   float rawDecay = 0.0f;
   float rawBeta = 0.0f;
   float vNext = 0.0f;
-  auto load = [&](int t) {
-    const int64_t tok = static_cast<int64_t>(b) * seqLen + t;
-    const T *row = qkv + tok * packed;
-    if (leadWave) {
-      const T *qh = row + static_cast<int64_t>(hq) * DK;
-      const T *kh = row + static_cast<int64_t>(numHeadsQk + hq) * DK;
-#pragma unroll
-      for (int e = 0; e < kQkPerLane; ++e) {
-        qv[e] = toF32(qh[lane + e * kLanes]);
-        kv[e] = toF32(kh[lane + e * kLanes]);
-      }
-      if (lane == 0) {
-        rawDecay = decay[tok * numHeadsV + hv];
-        rawBeta = beta[tok * numHeadsV + hv];
-      }
-    }
-    vNext = active ? toF32(row[vOffset + v]) : 0.0f;
-  };
-  load(0);
+  load(0, lane, leadWave, v, active, qv, kv, rawDecay, rawBeta, vNext);
 
   for (int t = 0; t < seqLen; ++t) {
     if (leadWave) {
@@ -145,7 +122,7 @@ __global__ void __launch_bounds__(kBlockSize) gatedDeltaNetRecurrentKernel(
     const float vCur = vNext;
     __syncthreads();
     if (t + 1 < seqLen) {
-      load(t + 1);
+      load(t + 1, lane, leadWave, v, active, qv, kv, rawDecay, rawBeta, vNext);
     }
 
     const float a = gateScale;
@@ -167,8 +144,7 @@ __global__ void __launch_bounds__(kBlockSize) gatedDeltaNetRecurrentKernel(
     }
     o = groupSum<kTpr>(o);
     if (active && part == 0) {
-      const int64_t tok = static_cast<int64_t>(b) * seqLen + t;
-      output[(tok * numHeadsV + hv) * headSizeV + v] = fromF32<T>(scale * o);
+      store(t, v, scale * o);
     }
     __syncthreads();
   }
@@ -179,6 +155,53 @@ __global__ void __launch_bounds__(kBlockSize) gatedDeltaNetRecurrentKernel(
       finalState[rowState + i] = s[i];
     }
   }
+}
+
+template <typename T, int DK>
+__global__ void __launch_bounds__(kBlockSize) gatedDeltaNetRecurrentKernel(
+    const T *__restrict__ qkv, const float *__restrict__ decay,
+    const float *__restrict__ beta, const float *initialState,
+    const float *__restrict__ aLog, const float *__restrict__ dtBias,
+    T *__restrict__ output, float *finalState, int seqLen, int numHeadsQk,
+    int numHeadsV, int headSizeV, float scale) {
+  constexpr int kTpr = DK >= 64 ? DK / 64 : 1;
+  constexpr int kRowsPerBlock = kBlockSize / kTpr;
+  const int rowGroups = (headSizeV + kRowsPerBlock - 1) / kRowsPerBlock;
+  const int rowGroup = static_cast<int>(blockIdx.x) % rowGroups;
+  const int hv = (static_cast<int>(blockIdx.x) / rowGroups) % numHeadsV;
+  const int b = static_cast<int>(blockIdx.x) / (rowGroups * numHeadsV);
+  const int hq = hv * numHeadsQk / numHeadsV;
+  const int64_t packed = static_cast<int64_t>(2) * numHeadsQk * DK +
+                         static_cast<int64_t>(numHeadsV) * headSizeV;
+  const int64_t vOffset = static_cast<int64_t>(2) * numHeadsQk * DK +
+                          static_cast<int64_t>(hv) * headSizeV;
+  gdnRecurrentRows<DK>(
+      initialState, finalState, b, hv, rowGroup, seqLen, numHeadsV, headSizeV,
+      aLog, dtBias, scale,
+      [&](int t, int lane, bool leadWave, int v, bool active, auto &qv,
+          auto &kv, float &rawDecay, float &rawBeta, float &vNext) {
+        constexpr int kQkPerLane = DK / kLanes;
+        const int64_t tok = static_cast<int64_t>(b) * seqLen + t;
+        const T *row = qkv + tok * packed;
+        if (leadWave) {
+          const T *qh = row + static_cast<int64_t>(hq) * DK;
+          const T *kh = row + static_cast<int64_t>(numHeadsQk + hq) * DK;
+#pragma unroll
+          for (int e = 0; e < kQkPerLane; ++e) {
+            qv[e] = toF32(qh[lane + e * kLanes]);
+            kv[e] = toF32(kh[lane + e * kLanes]);
+          }
+          if (lane == 0) {
+            rawDecay = decay[tok * numHeadsV + hv];
+            rawBeta = beta[tok * numHeadsV + hv];
+          }
+        }
+        vNext = active ? toF32(row[vOffset + v]) : 0.0f;
+      },
+      [&](int t, int v, float o) {
+        const int64_t tok = static_cast<int64_t>(b) * seqLen + t;
+        output[(tok * numHeadsV + hv) * headSizeV + v] = fromF32<T>(o);
+      });
 }
 
 typedef float gdnFloat8 __attribute__((ext_vector_type(8)));
@@ -673,6 +696,177 @@ hipError_t dispatchHeadSize(hipStream_t stream, int64_t headSizeQk,
   }
 }
 
+// --- conv + recurrence + gated RMS norm ------------------------------------
+
+// The separate path runs the recurrent kernel below kChunkedMinSeqLen, which
+// is what lets the fused kernel reproduce it.
+constexpr int kFusedMaxSeq = kChunkedMinSeqLen - 1;
+constexpr int kFusedHead = 128;
+
+// One block per (batch, value head) for up to kFusedMaxSeq tokens:
+//  1. the depthwise causal conv (SiLU) of the head's q, k and v channels,
+//     read in place from the projection row; the first value head of each
+//     q/k group writes the q/k carry state;
+//  2. the recurrence (gdnRecurrentRows) over those LDS-resident rows, with
+//     decay and beta read in place from the gate projection;
+//  3. the 128-wide sigmoid-gated RMS norm of each output row, gate z read in
+//     place from the projection.
+// Every step rounds to fp16 where the separate conv, cast, recurrent and norm
+// kernels round, and accumulates in their order (the decode conv kernel for
+// one token, the channels-last prefill kernel otherwise), so the output is
+// the same bit for bit. The q/k carry state is read by several blocks and
+// written by one, so present_conv must not alias past_conv.
+template <int K>
+__global__ void __launch_bounds__(kBlockSize) gatedDeltaNetConvNormKernel(
+    const __half *__restrict__ proj, int64_t projStride,
+    const __half *__restrict__ convWeight, const __half *__restrict__ convBias,
+    const __half *__restrict__ pastConv, __half *__restrict__ presentConv,
+    const __half *__restrict__ gates, int64_t gateStride, int decayColumn,
+    int betaColumn, int zColumn, const float *initialState, float *finalState,
+    const float *__restrict__ aLog, const float *__restrict__ dtBias,
+    const __half *__restrict__ normWeight, __half *__restrict__ output,
+    int seqLen, int numHeadsQk, int numHeadsV, float scale, float epsilon) {
+  constexpr int DK = kFusedHead;
+  constexpr int kState = K - 1;
+  const int hv = static_cast<int>(blockIdx.x) % numHeadsV;
+  const int b = static_cast<int>(blockIdx.x) / numHeadsV;
+  const int hq = hv * numHeadsQk / numHeadsV;
+  const bool ownsQk = hv % (numHeadsV / numHeadsQk) == 0;
+  const int convChannels = (2 * numHeadsQk + numHeadsV) * DK;
+  const int tid = static_cast<int>(threadIdx.x);
+  const int64_t tok0 = static_cast<int64_t>(b) * seqLen;
+
+  __shared__ float sQkv[3][kFusedMaxSeq][DK];
+  __shared__ float sOut[kFusedMaxSeq][DK];
+
+  for (int slot = tid; slot < 3 * DK; slot += kBlockSize) {
+    const int seg = slot / DK;
+    const int i = slot % DK;
+    const int c = seg == 0   ? hq * DK + i
+                  : seg == 1 ? (numHeadsQk + hq) * DK + i
+                             : (2 * numHeadsQk + hv) * DK + i;
+    float w[K];
+#pragma unroll
+    for (int j = 0; j < K; ++j)
+      w[j] = __half2float(convWeight[static_cast<int64_t>(c) * K + j]);
+    const float bias = __half2float(convBias[c]);
+    const int64_t plane = static_cast<int64_t>(b) * convChannels + c;
+    float win[K];
+#pragma unroll
+    for (int j = 0; j < kState; ++j)
+      win[j] = __half2float(pastConv[plane * kState + j]);
+    for (int t = 0; t < seqLen; ++t) {
+      const float x = __half2float(proj[(tok0 + t) * projStride + c]);
+      float y;
+      if (seqLen == 1) {
+        y = w[K - 1] * x;
+#pragma unroll
+        for (int j = 0; j < kState; ++j)
+          y += w[j] * win[j];
+      } else {
+        win[K - 1] = x;
+        y = 0.0f;
+#pragma unroll
+        for (int j = 0; j < K; ++j)
+          y += w[j] * win[j];
+      }
+      y += bias;
+      const float s = 1.0f / (1.0f + expf(-y));
+      y *= s;
+      sQkv[seg][t][i] = __half2float(__float2half(y));
+#pragma unroll
+      for (int j = 0; j + 1 < kState; ++j)
+        win[j] = win[j + 1];
+      if (kState > 0)
+        win[kState - 1] = x;
+    }
+    if (seg == 2 || ownsQk) {
+#pragma unroll
+      for (int j = 0; j < kState; ++j)
+        presentConv[plane * kState + j] = __float2half(win[j]);
+    }
+  }
+  __syncthreads();
+
+  gdnRecurrentRows<DK>(
+      initialState, finalState, b, hv, /*rowGroup=*/0, seqLen, numHeadsV, DK,
+      aLog, dtBias, scale,
+      [&](int t, int lane, bool leadWave, int v, bool active, auto &qv,
+          auto &kv, float &rawDecay, float &rawBeta, float &vNext) {
+        constexpr int kQkPerLane = DK / kLanes;
+        if (leadWave) {
+#pragma unroll
+          for (int e = 0; e < kQkPerLane; ++e) {
+            qv[e] = sQkv[0][t][lane + e * kLanes];
+            kv[e] = sQkv[1][t][lane + e * kLanes];
+          }
+          if (lane == 0) {
+            const __half *g = gates + (tok0 + t) * gateStride + hv;
+            rawDecay = __half2float(g[decayColumn]);
+            rawBeta = __half2float(g[betaColumn]);
+          }
+        }
+        vNext = active ? sQkv[2][t][v] : 0.0f;
+      },
+      [&](int t, int v, float o) {
+        sOut[t][v] = __half2float(__float2half(o));
+      });
+
+  // hip_gated_rms_norm_128_kernel's reduction, one wave per token row.
+  constexpr int kPerLane = DK / kLanes;
+  const int lane = tid % kLanes;
+  for (int t = tid / kLanes; t < seqLen; t += kBlockSize / kLanes) {
+    float v[kPerLane];
+    float sq[kPerLane];
+#pragma unroll
+    for (int i = 0; i < kPerLane; ++i)
+      v[i] = sOut[t][lane + i * kLanes];
+    float sumsq;
+    {
+#pragma clang fp contract(off)
+#pragma unroll
+      for (int i = 0; i < kPerLane; ++i)
+        sq[i] = v[i] * v[i];
+      sumsq = (sq[0] + sq[2]) + (sq[1] + sq[3]);
+    }
+#pragma unroll
+    for (int offset = kLanes / 2; offset > 0; offset >>= 1)
+      sumsq += __shfl_down(sumsq, offset, kLanes);
+    sumsq = __shfl(sumsq, 0, kLanes);
+    const float invRms = rsqrtf(sumsq / static_cast<float>(DK) + epsilon);
+    const __half *zRow = proj + (tok0 + t) * projStride + zColumn + hv * DK;
+    __half *yRow =
+        output + ((tok0 + t) * numHeadsV + hv) * static_cast<int64_t>(DK);
+#pragma unroll
+    for (int i = 0; i < kPerLane; ++i) {
+      const int h = lane + i * kLanes;
+      const float g = __half2float(normWeight[h]);
+      const float z = __half2float(zRow[h]);
+      const float act = 1.0f / (1.0f + expf(-z));
+      yRow[h] = __float2half(v[i] * invRms * g * act);
+    }
+  }
+}
+
+// Separate path: decay and beta columns of the gate projection as
+// contiguous fp32, the two hip.cast + copy pairs of the unfused graph.
+__global__ void gatedDeltaNetSplitGatesKernel(const __half *__restrict__ gates,
+                                              int64_t gateStride,
+                                              int decayColumn, int betaColumn,
+                                              float *__restrict__ decay,
+                                              float *__restrict__ beta,
+                                              int64_t rows, int numHeadsV) {
+  const int64_t i =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (i >= rows * numHeadsV)
+    return;
+  const int64_t row = i / numHeadsV;
+  const int h = static_cast<int>(i - row * numHeadsV);
+  const __half *g = gates + row * gateStride + h;
+  decay[i] = __half2float(g[decayColumn]);
+  beta[i] = __half2float(g[betaColumn]);
+}
+
 } // namespace
 
 extern "C" int hip_gated_delta_net(
@@ -732,4 +926,84 @@ extern "C" int hip_gated_delta_net(
     return static_cast<int>(err);
   }
   return 0;
+}
+
+extern "C" int hip_gated_delta_net_conv_norm_ok(
+    int64_t batch, int64_t seq_len, int64_t kernel_size, int64_t num_heads_qk,
+    int64_t num_heads_v, int64_t head_size_qk, int64_t head_size_v) {
+  return batch >= 1 && seq_len >= 1 && seq_len <= kFusedMaxSeq &&
+         kernel_size >= 2 && kernel_size <= 4 && num_heads_qk >= 1 &&
+         num_heads_v % num_heads_qk == 0 && head_size_qk == kFusedHead &&
+         head_size_v == kFusedHead && batch * num_heads_v <= 0x7fffffff;
+}
+
+extern "C" int hip_gated_delta_net_conv_norm(
+    void *stream, const void *proj, int64_t proj_stride,
+    const void *conv_weight, const void *conv_bias, const void *past_conv,
+    void *present_conv, const void *gates, int64_t gate_stride,
+    int64_t decay_column, int64_t beta_column, int64_t z_column,
+    const float *initial_state, float *final_state, const float *a_log,
+    const float *dt_bias, const void *norm_weight, void *output, int64_t batch,
+    int64_t seq_len, int64_t kernel_size, int64_t num_heads_qk,
+    int64_t num_heads_v, float scale, float epsilon) {
+  if (!proj || !conv_weight || !conv_bias || !past_conv || !present_conv ||
+      !gates || !initial_state || !final_state || !a_log || !dt_bias ||
+      !norm_weight || !output ||
+      !hip_gated_delta_net_conv_norm_ok(batch, seq_len, kernel_size,
+                                        num_heads_qk, num_heads_v, kFusedHead,
+                                        kFusedHead))
+    return hipErrorInvalidValue;
+  const dim3 grid(static_cast<unsigned>(batch * num_heads_v));
+  auto launch = [&](auto kConst) {
+    constexpr int Kc = decltype(kConst)::value;
+    hipLaunchKernelGGL(
+        (gatedDeltaNetConvNormKernel<Kc>), grid, dim3(kBlockSize), 0,
+        static_cast<hipStream_t>(stream), static_cast<const __half *>(proj),
+        proj_stride, static_cast<const __half *>(conv_weight),
+        static_cast<const __half *>(conv_bias),
+        static_cast<const __half *>(past_conv),
+        static_cast<__half *>(present_conv),
+        static_cast<const __half *>(gates), gate_stride,
+        static_cast<int>(decay_column), static_cast<int>(beta_column),
+        static_cast<int>(z_column), initial_state, final_state, a_log, dt_bias,
+        static_cast<const __half *>(norm_weight), static_cast<__half *>(output),
+        static_cast<int>(seq_len), static_cast<int>(num_heads_qk),
+        static_cast<int>(num_heads_v), scale, epsilon);
+  };
+  (void)hipGetLastError();
+  switch (kernel_size) {
+  case 2:
+    launch(std::integral_constant<int, 2>{});
+    break;
+  case 3:
+    launch(std::integral_constant<int, 3>{});
+    break;
+  default:
+    launch(std::integral_constant<int, 4>{});
+    break;
+  }
+  return static_cast<int>(hipGetLastError());
+}
+
+extern "C" int hip_gated_delta_net_split_gates(
+    void *stream, const void *gates, int64_t gate_stride, int64_t decay_column,
+    int64_t beta_column, float *decay, float *beta, int64_t rows,
+    int64_t num_heads_v) {
+  if (!gates || !decay || !beta || rows < 0 || num_heads_v <= 0)
+    return hipErrorInvalidValue;
+  const int64_t total = rows * num_heads_v;
+  if (total == 0)
+    return 0;
+  const int64_t blocks = (total + kBlockSize - 1) / kBlockSize;
+  if (blocks > 0x7fffffff)
+    return hipErrorInvalidValue;
+  (void)hipGetLastError();
+  hipLaunchKernelGGL(gatedDeltaNetSplitGatesKernel,
+                     dim3(static_cast<unsigned>(blocks)), dim3(kBlockSize), 0,
+                     static_cast<hipStream_t>(stream),
+                     static_cast<const __half *>(gates), gate_stride,
+                     static_cast<int>(decay_column),
+                     static_cast<int>(beta_column), decay, beta, rows,
+                     static_cast<int>(num_heads_v));
+  return static_cast<int>(hipGetLastError());
 }

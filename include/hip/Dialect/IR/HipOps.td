@@ -4697,6 +4697,67 @@ def Hip_GatedDeltaNetOp : Hip_DpsOp_AutoReify<"gated_delta_net"> {
   let hasVerifier = 1;
 }
 
+def Hip_GatedDeltaNetConvNormOp : Hip_DpsOp_AutoReify<"gated_delta_net_conv_norm"> {
+  let summary = "Causal conv, gated delta rule and gated RMS norm as one op";
+  let description = [{
+    The linear-attention core between the input projections and the output
+    projection, f16 with dk = dv = 128. `proj` is [B, L, P] and `gates`
+    [B, L, G]; with C = `conv_channels` and Hv, dv, dk taken from
+    `recurrent_state`:
+
+      x, conv_state_out = causal_conv_with_state(proj[..., :C], conv_weight,
+                              conv_bias, conv_state)   (channels-last, SiLU)
+      decay = f32(gates[..., decay_column : decay_column + Hv])
+      beta  = f32(gates[..., beta_column : beta_column + Hv])
+      o, recurrent_state_out = gated_delta_net(x, decay, beta,
+                                   recurrent_state, a_log, dt_bias)
+      output = gated_rms_norm(collapse(o), norm_weight,
+                              proj[..., z_column : z_column + Hv*dv])
+                              (sigmoid gate, epsilon)
+
+    `outputs` is [output, conv_state_out, recurrent_state_out, conv_in,
+    conv_out, decay, beta, gdn_out, z]. The last six are scratch with
+    unspecified contents: the runtime runs few-token calls (decode) as one
+    kernel, bit-exact with the separate kernels, and otherwise runs the
+    separate kernels through that scratch. `conv_state` is [B, C, K-1] and
+    `conv_weight` [C, 1, K]. `scale` = 0 means 1 / sqrt(dk).
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$proj,
+    Hip_TensorOrMemRef:$conv_weight,
+    Hip_TensorOrMemRef:$conv_bias,
+    Hip_TensorOrMemRef:$conv_state,
+    Hip_TensorOrMemRef:$gates,
+    Hip_TensorOrMemRef:$recurrent_state,
+    Hip_TensorOrMemRef:$a_log,
+    Hip_TensorOrMemRef:$dt_bias,
+    Hip_TensorOrMemRef:$norm_weight,
+    Variadic<Hip_TensorOrMemRef>:$outputs,
+    I64Attr:$conv_channels,
+    I64Attr:$decay_column,
+    I64Attr:$beta_column,
+    I64Attr:$z_column,
+    DefaultValuedAttr<F32Attr, "0.0">:$scale,
+    F32Attr:$epsilon
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $proj `,` $conv_weight `,` $conv_bias `,` $conv_state `,` $gates `,`
+        $recurrent_state `,` $a_log `,` $dt_bias `,` $norm_weight
+        `:` type($proj) `,` type($conv_weight) `,` type($conv_bias) `,`
+        type($conv_state) `,` type($gates) `,` type($recurrent_state) `,`
+        type($a_log) `,` type($dt_bias) `,` type($norm_weight)
+    `)`
+    `outs` `(` $outputs `:` type($outputs) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  let hasVerifier = 1;
+}
+
 def Hip_DynamicSparseAttentionOp : Hip_DpsOp_AutoReify<"dynamic_sparse_attention",
     [AttrSizedOperandSegments]> {
   let summary = "Attention over per-row selected KV positions "

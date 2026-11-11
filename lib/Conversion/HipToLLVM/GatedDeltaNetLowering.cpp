@@ -73,11 +73,84 @@ struct GatedDeltaNetOpLowering
   }
 };
 
+struct GatedDeltaNetConvNormOpLowering
+    : public ConvertOpToLLVMPattern<GatedDeltaNetConvNormOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(GatedDeltaNetConvNormOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i64Type = rewriter.getI64Type();
+    Type f32Type = rewriter.getF32Type();
+    auto outputs = adaptor.getOutputs();
+    if (outputs.size() != 9)
+      return failure();
+
+    auto i64Const = [&](int64_t value) -> Value {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(value));
+    };
+    auto f32Const = [&](float value) -> Value {
+      return LLVM::ConstantOp::create(rewriter, loc, f32Type,
+                                      rewriter.getF32FloatAttr(value));
+    };
+    auto projType = cast<MemRefType>(op.getProj().getType());
+    auto gatesType = cast<MemRefType>(op.getGates().getType());
+    auto convStateType = cast<MemRefType>(op.getConvState().getType());
+    auto stateType = cast<MemRefType>(op.getRecurrentState().getType());
+    auto weightType = cast<MemRefType>(op.getConvWeight().getType());
+    const int64_t numHeadsV = stateType.getDimSize(1);
+    const int64_t headSizeV = stateType.getDimSize(2);
+    const int64_t headSizeQk = stateType.getDimSize(3);
+    const int64_t channels = op.getConvChannels();
+    const int64_t numHeadsQk =
+        (channels - numHeadsV * headSizeV) / (2 * headSizeQk);
+
+    SmallVector<Value> args = {adaptor.getCtx()};
+    for (Value operand :
+         {adaptor.getProj(), adaptor.getConvWeight(), adaptor.getConvBias(),
+          adaptor.getConvState(), adaptor.getGates(),
+          adaptor.getRecurrentState(), adaptor.getALog(), adaptor.getDtBias(),
+          adaptor.getNormWeight()})
+      args.push_back(extractContiguousMemRefPtr(operand, rewriter, loc));
+    for (Value output : outputs)
+      args.push_back(extractContiguousMemRefPtr(output, rewriter, loc));
+    args.append({computeNumElements(projType, adaptor.getProj(), rewriter, loc),
+                 i64Const(projType.getDimSize(2)),
+                 computeNumElements(convStateType, adaptor.getConvState(),
+                                    rewriter, loc),
+                 i64Const(gatesType.getDimSize(2)), i64Const(channels),
+                 i64Const(weightType.getDimSize(2)),
+                 i64Const(op.getDecayColumn()), i64Const(op.getBetaColumn()),
+                 i64Const(op.getZColumn()), i64Const(numHeadsQk),
+                 i64Const(numHeadsV), i64Const(headSizeQk), i64Const(headSizeV),
+                 f32Const(op.getScale().convertToFloat()),
+                 f32Const(op.getEpsilon().convertToFloat())});
+
+    // ctx, nine inputs and nine outputs.
+    SmallVector<Type> paramTypes(19, ptrType);
+    paramTypes.append(13, i64Type);
+    paramTypes.append(2, f32Type);
+    FailureOr<LLVM::LLVMFuncOp> funcOp =
+        LLVM::lookupOrCreateFn(rewriter, module, kWrapGatedDeltaNetConvNorm,
+                               paramTypes, rewriter.getI32Type());
+    if (failed(funcOp))
+      return failure();
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 } // namespace
 
 void populateGatedDeltaNetLoweringPatterns(const LLVMTypeConverter &converter,
                                            RewritePatternSet &patterns) {
-  patterns.add<GatedDeltaNetOpLowering>(converter);
+  patterns.add<GatedDeltaNetOpLowering, GatedDeltaNetConvNormOpLowering>(
+      converter);
 }
 
 } // namespace hip

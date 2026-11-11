@@ -3990,6 +3990,62 @@ HIP_KERNEL_API int hip_gated_delta_net(
     float scale,
     int element_size_bytes);
 
+// hip.gated_delta_net_conv_norm, fp16. One launch for the causal conv (SiLU,
+// bias, carry state [B, C, K-1]) of proj[:, :C], the recurrence above, and
+// the sigmoid-gated RMS norm of each 128-wide output row with gate
+// proj[:, z_column:]. proj rows are proj_stride apart and gates rows (decay
+// and beta columns) gate_stride apart; C = (2*Hqk + Hv) * 128. Bit-exact with
+// the separate conv, cast, recurrent and norm kernels. Only valid when
+// _conv_norm_ok holds; present_conv must not alias past_conv.
+HIP_KERNEL_API int hip_gated_delta_net_conv_norm_ok(
+    int64_t batch,
+    int64_t seq_len,
+    int64_t kernel_size,
+    int64_t num_heads_qk,
+    int64_t num_heads_v,
+    int64_t head_size_qk,
+    int64_t head_size_v);
+
+HIP_KERNEL_API int hip_gated_delta_net_conv_norm(
+    void* stream,
+    const void* proj,
+    int64_t proj_stride,
+    const void* conv_weight,
+    const void* conv_bias,
+    const void* past_conv,
+    void* present_conv,
+    const void* gates,
+    int64_t gate_stride,
+    int64_t decay_column,
+    int64_t beta_column,
+    int64_t z_column,
+    const float* initial_state,
+    float* final_state,
+    const float* a_log,
+    const float* dt_bias,
+    const void* norm_weight,
+    void* output,
+    int64_t batch,
+    int64_t seq_len,
+    int64_t kernel_size,
+    int64_t num_heads_qk,
+    int64_t num_heads_v,
+    float scale,
+    float epsilon);
+
+// fp16 gates [rows, gate_stride] -> contiguous fp32 decay / beta [rows, Hv]
+// from the columns starting at decay_column / beta_column.
+HIP_KERNEL_API int hip_gated_delta_net_split_gates(
+    void* stream,
+    const void* gates,
+    int64_t gate_stride,
+    int64_t decay_column,
+    int64_t beta_column,
+    float* decay,
+    float* beta,
+    int64_t rows,
+    int64_t num_heads_v);
+
 /* Exact int32 matmul. A is [batch, M, K]. b_batch_stride is 0 when every
  * batch reuses one [K, N] matrix and K*N when B is batch-contiguous.
  * Accumulates in int64 and stores a wrapping int32. transA/transB are not

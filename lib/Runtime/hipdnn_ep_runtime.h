@@ -2000,6 +2000,21 @@ int wrap_gated_delta_net(RuntimeState *state, const void *qkv,
                          int64_t head_size_v, float scale,
                          int64_t element_size_bytes);
 
+// hip.gated_delta_net_conv_norm, fp16. proj is [rows, proj_stride] and gates
+// [rows, gate_stride]; conv_in, conv_out, decay, beta, gdn_out and gate_z are
+// scratch for the separate-kernel path. scale == 0 means 1 / sqrt(dk).
+int wrap_gated_delta_net_conv_norm(
+    RuntimeState *state, void *proj, void *conv_weight, void *conv_bias,
+    void *conv_state, void *gates, void *recurrent_state, void *a_log,
+    void *dt_bias, void *norm_weight, void *output, void *conv_state_out,
+    void *recurrent_state_out, void *conv_in, void *conv_out, void *decay,
+    void *beta, void *gdn_out, void *gate_z, int64_t proj_num_elements,
+    int64_t proj_stride, int64_t conv_state_num_elements, int64_t gate_stride,
+    int64_t conv_channels, int64_t kernel_size, int64_t decay_column,
+    int64_t beta_column, int64_t z_column, int64_t num_heads_qk,
+    int64_t num_heads_v, int64_t head_size_qk, int64_t head_size_v, float scale,
+    float epsilon);
+
 // fp16 only. past_* may alias present_*. head_size is query width / num_heads
 // (/ (num_heads + 2 * kv_num_heads) for a packed query, when key and value
 // are null and their dims ignored) and capacity is past_key dim 2; the
