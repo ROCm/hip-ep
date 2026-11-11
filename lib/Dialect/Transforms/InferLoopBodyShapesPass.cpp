@@ -1496,7 +1496,8 @@ static LogicalResult inferUnrankedOnnxResults(Operation *op,
     return pushSingle(inferAveragePoolResult(op));
   if (name == "onnx.ConvTranspose")
     return pushSingle(inferConvTransposeResult(op));
-  if (name == "onnx.InstanceNormalization") {
+  if (name == "onnx.InstanceNormalization" ||
+      name == "onnx.GroupNormalization") {
     if (op->getNumOperands() < 1)
       return failure();
     return pushSingle(
