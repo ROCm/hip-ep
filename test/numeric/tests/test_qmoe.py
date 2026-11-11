@@ -461,6 +461,32 @@ class TestQMoE:
         actual, expected = model_runner.run_sample(model, [x, router])
         _compare_gpt_oss_shape(actual, expected, seq_len)
 
+    @pytest.mark.parametrize("seq_len", [37, 512])
+    def test_qmoe_qwen38_flash_shape_skewed_routing(self, model_runner, seq_len):
+        """Qwen3.8-Flash-Next expert shapes (hidden 2560, fused gate/up 1280,
+        top-10): the prefill grouped GEMMs run at K = 2560 and K = 640, which
+        pick their own small-M configs. Skewed routing yields both 16-row and
+        32-row tiles.
+        """
+        hidden, intermediate, num_experts, top_k = 2560, 1280, 64, 10
+        model = _make_qmoe_model(
+            1, seq_len, hidden, intermediate, num_experts, top_k, BLOCK_SIZE
+        )
+
+        rng = np.random.default_rng(8)
+        x = rng.uniform(-1, 1, [1, seq_len, hidden]).astype(np.float16)
+        skew = np.linspace(3.0, -3.0, num_experts)
+        noisy = rng.standard_normal([seq_len, num_experts]) * 1.2 + skew
+        # Each token's logits are distinct fp16 levels ranked by the skewed
+        # noise: a tie at the k-th logit would make the expert choice
+        # backend-defined.
+        levels = np.linspace(-4.0, 4.0, num_experts).astype(np.float16)
+        assert len(np.unique(levels)) == num_experts
+        router = levels[noisy.argsort(axis=1).argsort(axis=1)]
+
+        actual, expected = model_runner.run_sample(model, [x, router])
+        _compare_gpt_oss_shape(actual, expected, seq_len)
+
     @pytest.mark.parametrize("normalize", [0, 1])
     @pytest.mark.parametrize(
         "seq_len",
@@ -764,6 +790,20 @@ class TestQMoERelu2:
         actual, expected = _run_relu2(model_runner, cfg)
         compare_outputs(actual, expected, atol=5e-2, rtol=1e-2, cos_threshold=0.999)
 
+    @pytest.mark.parametrize("num_experts,top_k", [(512, 22), (64, 32)])
+    @pytest.mark.parametrize("seq_len", [1, 37])
+    def test_qmoe_relu2_top_k_above_16(self, model_runner, seq_len, num_experts, top_k):
+        cfg = Relu2Config(
+            seq_len=seq_len,
+            hidden=64,
+            inter=64,
+            num_experts=num_experts,
+            top_k=top_k,
+            with_mix_weights=True,
+        )
+        actual, expected = _run_relu2(model_runner, cfg)
+        compare_outputs(actual, expected, atol=5e-2, rtol=1e-2, cos_threshold=0.999)
+
     @pytest.mark.parametrize("seq_len", [1, 128])
     def test_qmoe_relu2_large_shape(self, model_runner, seq_len):
         """Production-sized expert shapes; 16 experts keep the reference small."""
@@ -889,12 +929,15 @@ class TestQMoESigmoidBiasRouting:
     ORT CPU reference stays small. seq_len 1 and 5 take the fused decode
     kernels, 9 and up the grouped prefill path; every token count goes
     through the folded routing kernel. Up to 256 experts route with one wave
-    per token, 384 with the block kernel."""
+    per token, 384 and 512 with the block kernel. Top-22 over 512 experts and
+    top-32 cover k above 16."""
 
-    @pytest.mark.parametrize("num_experts", [100, 256, 384])
+    @pytest.mark.parametrize(
+        "num_experts,k", [(100, 10), (256, 10), (384, 10), (256, 32), (512, 22)]
+    )
     @pytest.mark.parametrize("seq_len", [1, 5, 9, 128, 512])
-    def test_qmoe_sigmoid_bias_routing(self, model_runner, seq_len, num_experts):
-        e, k = num_experts, 10
+    def test_qmoe_sigmoid_bias_routing(self, model_runner, seq_len, num_experts, k):
+        e = num_experts
         model = _make_sigmoid_bias_qmoe_model(
             hidden=512, inter=256, num_experts=e, top_k=k, block_size=128, scale=2.5
         )

@@ -73,6 +73,8 @@ if(BUILD_HIP_UNIT_TESTS)
   )
   target_link_libraries(hip-mlir-opt PRIVATE HipTestPasses)
 endif()
+# After the other libraries so the GNU ld rescan group is the last link item.
+hip_link_rocmlir_closure(hip-mlir-opt)
 
 # Install target
 install(TARGETS hip-mlir-opt

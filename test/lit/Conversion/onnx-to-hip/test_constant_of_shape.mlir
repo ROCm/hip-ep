@@ -9,10 +9,10 @@
 //   2. ConstantOfShapeFold: shape input is a compile-time constant AND result
 //      type is fully static -> single splat arith.constant; no runtime work.
 //   3. ConstantOfShapeDynamic (fallback): shape input is non-constant OR
-//      result has at least one dynamic dim -> hip.expand of a rank-0
-//      linalg.fill into a tensor.empty whose dynamic dim sizes are read out
-//      of the shape tensor at runtime via tensor.extract + arith.index_cast
-//      (tensor.splat for element types hip.expand lacks).
+//      result has at least one dynamic dim -> dynamic dim sizes are read out
+//      of the shape tensor at runtime via tensor.extract + arith.index_cast,
+//      and the result is filled on the device by hip.expand of a rank-0
+//      fill, for every element type.
 
 // RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
 
@@ -68,10 +68,10 @@ module {
 
   // Test 4: dynamic result shape with a non-constant shape input -- the
   // fold path bails (no compile-time shape attr AND result is dynamic)
-  // and the dynamic pattern broadcasts a rank-0 fill with hip.expand into
-  // a tensor.empty sized by per-dim tensor.extract + index_cast. No
-  // tensor.splat: a dynamic one bufferizes to host loops that store into
-  // the GPU result buffer.
+  // and the dynamic pattern reads each dynamic result dim with
+  // tensor.extract + index_cast, then fills on the device with hip.expand
+  // of a rank-0 fill. A tensor.splat here would bufferize to host loops
+  // storing into GPU-pool memory.
   func.func @test_constant_of_shape_dynamic(%shape: tensor<2xi64>) -> tensor<?x?xf32> {
     // CHECK-LABEL: func.func @test_constant_of_shape_dynamic
     // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[SHAPE:.*]]: tensor<2xi64>)
@@ -87,9 +87,9 @@ module {
     // CHECK-DAG: %[[E1:.*]] = tensor.extract %[[SHAPE]][%[[C1]]] : tensor<2xi64>
     // CHECK-DAG: %[[D1:.*]] = arith.index_cast %[[E1]] : i64 to index
     // CHECK: %[[S:.*]] = tensor.empty() : tensor<f32>
-    // CHECK: %[[FILL:.*]] = linalg.fill ins(%[[ZERO]] : f32) outs(%[[S]] : tensor<f32>) -> tensor<f32>
-    // CHECK: %[[INIT:.*]] = tensor.empty(%[[D0]], %[[D1]]) : tensor<?x?xf32>
-    // CHECK: hip.expand(%[[CTX]]) ins(%[[FILL]], %[[SHAPE]] : tensor<f32>, tensor<2xi64>) outs(%[[INIT]] : tensor<?x?xf32>)
+    // CHECK: %[[F:.*]] = linalg.fill ins(%[[ZERO]] : f32) outs(%[[S]] : tensor<f32>) -> tensor<f32>
+    // CHECK: %[[I:.*]] = tensor.empty(%[[D0]], %[[D1]]) : tensor<?x?xf32>
+    // CHECK: hip.expand(%[[CTX]]) ins(%[[F]], %[[SHAPE]] : tensor<f32>, tensor<2xi64>) outs(%[[I]] : tensor<?x?xf32>)
 
     return %r : tensor<?x?xf32>
   }
@@ -110,24 +110,31 @@ module {
     // CHECK-DAG: %[[C1:.*]] = arith.constant 1 : index
     // CHECK-DAG: %[[E1:.*]] = tensor.extract %[[SHAPE]][%[[C1]]] : tensor<2xi64>
     // CHECK-DAG: %[[D1:.*]] = arith.index_cast %[[E1]] : i64 to index
-    // CHECK: %[[FILL:.*]] = linalg.fill ins(%[[VAL]] : i64) outs(%{{.*}} : tensor<i64>) -> tensor<i64>
-    // CHECK: %[[INIT:.*]] = tensor.empty(%[[D1]]) : tensor<3x?xi64>
-    // CHECK: hip.expand(%[[CTX]]) ins(%[[FILL]], %[[SHAPE]] : tensor<i64>, tensor<2xi64>) outs(%[[INIT]] : tensor<3x?xi64>)
+    // CHECK: %[[F:.*]] = linalg.fill ins(%[[VAL]] : i64) outs(%{{.*}} : tensor<i64>) -> tensor<i64>
+    // CHECK: %[[I:.*]] = tensor.empty(%[[D1]]) : tensor<3x?xi64>
+    // CHECK: hip.expand(%[[CTX]]) ins(%[[F]], %[[SHAPE]] : tensor<i64>, tensor<2xi64>) outs(%[[I]] : tensor<3x?xi64>)
 
     return %r : tensor<3x?xi64>
   }
 
-  // Test 5b: an element type hip.expand does not broadcast (i1) keeps the
-  // tensor.splat fallback.
-  func.func @test_constant_of_shape_dynamic_i1(%shape: tensor<1xi64>) -> tensor<?xi1> {
-    // CHECK-LABEL: func.func @test_constant_of_shape_dynamic_i1
+  // Test 5b: a bool fill also broadcasts on the device. hip.expand copies
+  // elements by width, so no element type falls back to tensor.splat.
+  func.func @test_constant_of_shape_dynamic_bool(%shape: tensor<1xi64>) -> tensor<?xi1> {
+    // CHECK-LABEL: func.func @test_constant_of_shape_dynamic_bool
+    // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[SHAPE:.*]]: tensor<1xi64>)
     %r = "onnx.ConstantOfShape"(%shape) {
       value = dense<true> : tensor<1xi1>
     } : (tensor<1xi64>) -> tensor<?xi1>
 
     // CHECK-NOT: onnx.ConstantOfShape
-    // CHECK-NOT: hip.expand
-    // CHECK: tensor.splat %{{.*}}{{\[}}%{{.*}}{{\]}} : tensor<?xi1>
+    // CHECK-NOT: tensor.splat
+    // CHECK-DAG: %[[VAL:.*]] = arith.constant true
+    // CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
+    // CHECK-DAG: %[[E0:.*]] = tensor.extract %[[SHAPE]][%[[C0]]] : tensor<1xi64>
+    // CHECK-DAG: %[[D0:.*]] = arith.index_cast %[[E0]] : i64 to index
+    // CHECK: %[[F:.*]] = linalg.fill ins(%[[VAL]] : i1) outs(%{{.*}} : tensor<i1>) -> tensor<i1>
+    // CHECK: %[[I:.*]] = tensor.empty(%[[D0]]) : tensor<?xi1>
+    // CHECK: hip.expand(%[[CTX]]) ins(%[[F]], %[[SHAPE]] : tensor<i1>, tensor<1xi64>) outs(%[[I]] : tensor<?xi1>)
 
     return %r : tensor<?xi1>
   }

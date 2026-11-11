@@ -45,12 +45,10 @@ namespace {
 //   3. ConstantOfShapeDynamic (benefit=1): fallback for non-constant shape
 //      input OR a result type with at least one dynamic dim. Each dynamic
 //      dim is materialised from the shape input via `tensor.extract` +
-//      `arith.index_cast`, the fill value is built as a scalar
-//      `arith.constant`. A dynamic result is produced by `hip.expand` of a
-//      rank-0 `linalg.fill` (a GPU broadcast); a dynamic `tensor.splat`
-//      would bufferize to host loops storing into the GPU result buffer.
-//      Static results, and element types hip.expand does not handle, use
-//      `tensor.splat`.
+//      `arith.index_cast` and the fill value is built as a scalar
+//      `arith.constant`. A dynamic-shaped result is filled on the device by
+//      `hip.expand` of a rank-0 fill value; a static result (or an element
+//      type the expand kernel lacks) is produced via `tensor.splat`.
 
 /// Return the dense-elements attribute backing \p value if it can be
 /// determined at compile time (the same forms recognised by ReshapeConversion
@@ -357,18 +355,9 @@ struct ConstantOfShapeFold : public mlir::RewritePattern {
   }
 };
 
-/// Element types wrap_expand broadcasts.
-static bool isExpandElementType(mlir::Type type) {
-  if (type.isF16() || type.isF32())
-    return true;
-  auto intTy = mlir::dyn_cast<mlir::IntegerType>(type);
-  return intTy && !intTy.isUnsigned() &&
-         (intTy.getWidth() == 32 || intTy.getWidth() == 64);
-}
-
-/// Dynamic-shape fallback: broadcast the fill value with `hip.expand` (or,
-/// for element types hip.expand lacks, a `tensor.splat`) whose dynamic sizes
-/// are read out of the shape input at runtime via `tensor.extract`.
+/// Dynamic-shape fallback: produce a `hip.expand` (or `tensor.splat`) whose
+/// dynamic dim sizes are read out of the shape input at runtime via
+/// `tensor.extract`.
 /// Handles either (a) a non-constant shape input or (b) a result type with
 /// at least one dynamic dim.
 struct ConstantOfShapeDynamic : public mlir::RewritePattern {
@@ -421,27 +410,27 @@ struct ConstantOfShapeDynamic : public mlir::RewritePattern {
     if (mlir::failed(buildScalarFillValue(op, rewriter, loc, elemType, scalar)))
       return mlir::failure();
 
-    // A dynamic tensor.splat bufferizes to host loops that store straight
-    // into the (GPU pool) result buffer. Broadcast a rank-0 fill on the GPU
-    // instead; the rank-0 fill is a single host store that
-    // hip-materialize-host-scalars moves to host-mapped scratch. Trilu
-    // consumers keep the splat: they read its scalar and the splat dies.
+    // A dynamic tensor.splat bufferizes to host loops that store into a
+    // GPU-pool buffer, which faults when the pool is device memory. Fill on
+    // the device instead: hip.expand broadcasts a rank-0 fill value (built as
+    // in ConstantOfShapeAsScalar) to the runtime shape. Trilu consumers keep
+    // the splat: they read its scalar and the splat dies.
     bool onlyTriluUsers = llvm::all_of(op->getUsers(), [](mlir::Operation *u) {
       return u->getName().getStringRef() == "onnx.Trilu";
     });
-    if (!resultType.hasStaticShape() && isExpandElementType(elemType) &&
-        !(onlyTriluUsers && !op->use_empty())) {
+    if (!resultType.hasStaticShape() && !(onlyTriluUsers && !op->use_empty())) {
       auto ctxOrFailure = getContextArg(op, rewriter);
       if (mlir::succeeded(ctxOrFailure)) {
         auto scalarTensorTy = mlir::RankedTensorType::get({}, elemType);
-        mlir::Value empty = mlir::tensor::EmptyOp::create(
-            rewriter, loc, scalarTensorTy, mlir::ValueRange{});
+        mlir::Value empty =
+            mlir::tensor::EmptyOp::create(rewriter, loc, scalarTensorTy,
+                                          /*dynamicSizes=*/mlir::ValueRange{});
         mlir::Value fill = mlir::linalg::FillOp::create(
                                rewriter, loc, mlir::ValueRange{scalar},
                                mlir::ValueRange{empty})
                                .getResult(0);
-        mlir::Value init = mlir::tensor::EmptyOp::create(
-            rewriter, loc, resultType.getShape(), elemType, dynSizes);
+        mlir::Value init =
+            mlir::tensor::EmptyOp::create(rewriter, loc, resultType, dynSizes);
         auto expand = mlir::hip::ExpandOp::create(rewriter, loc, *ctxOrFailure,
                                                   fill, shapeInput, init);
         rewriter.replaceOp(op, expand->getResult(0));

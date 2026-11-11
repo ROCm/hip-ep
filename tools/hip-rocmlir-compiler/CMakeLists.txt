@@ -5,6 +5,12 @@
 
 add_executable(hip-rocmlir-compiler hip-rocmlir-compiler.cpp)
 
+# Same reason as LibHipCompiler: this target includes InitRocMLIRDialects.h,
+# whose Triton headers require C++20.
+set_target_properties(hip-rocmlir-compiler PROPERTIES
+  CXX_STANDARD 20
+  CXX_STANDARD_REQUIRED YES)
+
 add_dependencies(hip-rocmlir-compiler
   HipDialectIncGen
   HipsrDialectIncGen
@@ -18,18 +24,10 @@ add_dependencies(hip-rocmlir-compiler
 # executable (ENABLE_ROCMLIRTRITON), so its pipeline/tuning libraries are
 # called in-process -- no dlopen, no serialized-IR hand-off.
 #
-# LibHipCompiler links the rock/triton closure PRIVATE (so its OBJECT-library
-# members are not absorbed into every static archive that links it; see
-# lib/Compiler/CMakeLists.txt). PRIVATE drops include-dir propagation, so name
-# the closure here too: this executable includes rocMLIR headers directly
-# (mlir/Dialect/Rock/*). Using the same ${HIPDNN_ROCMLIR_LINK_LIBS} RESCAN
-# group keeps the link feature identical to LibHipCompiler's own use, so CMake
-# does not reject the shared items as occurring "with different features".
-if(CMAKE_LINK_GROUP_USING_RESCAN_SUPPORTED)
-  set(_rocmlir_link_closure "$<LINK_GROUP:RESCAN,${HIPDNN_ROCMLIR_LINK_LIBS}>")
-else()
-  set(_rocmlir_link_closure "${HIPDNN_ROCMLIR_LINK_LIBS}")
-endif()
+# hip_link_rocmlir_closure adds the Triton objects once and appends the
+# non-object archives after LibHipCompiler. The includes are applied directly
+# because this executable includes rocMLIR headers (mlir/Dialect/Rock/*).
+hip_rocmlir_apply_includes(hip-rocmlir-compiler)
 target_link_libraries(hip-rocmlir-compiler PRIVATE
   HipSupport
   LibHipCompiler
@@ -44,10 +42,11 @@ target_link_libraries(hip-rocmlir-compiler PRIVATE
   MLIRPass
   MLIRTransforms
   MLIRFuncTransforms
-  "${_rocmlir_link_closure}"
   # LLVM/MLIR come from ${llvm_libs} -- no bundled second copy.
   ${llvm_libs}
 )
+# After LibHipCompiler so the GNU ld rescan group is the last link item.
+hip_link_rocmlir_closure(hip-rocmlir-compiler)
 
 # Follows what LibHipCompiler actually built, not BUILD_MOCK_RUNTIME: the
 # benchmarking code lives there now and stubs itself out when the build does not
