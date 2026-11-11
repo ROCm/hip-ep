@@ -94,6 +94,7 @@ set(_kernel_sources
     hip/conv_transpose_kernel.hip
     hip/resize_kernel.hip
     hip/grid_sample_kernel.hip
+    hip/roi_align_kernel.hip
     hip/global_pool_kernel.hip
     hip/matmul_nbits_kernel.hip
     hip/gemv_f16_kernel.hip

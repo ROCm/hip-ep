@@ -5813,6 +5813,62 @@ def Hip_GridSampleOp : Hip_DpsOp_AutoReifyInfer<"grid_sample"> {
   let hasVerifier = 1;
 }
 
+def Hip_RoiAlignOp : Hip_DpsOp_AutoReifyInfer<"roi_align"> {
+  let summary = "Region-of-interest align (ONNX RoiAlign)";
+  let description = [{
+    Pools each region of interest of a 4-D input `X` of shape (N, C, H, W)
+    into a fixed (output_height, output_width) grid by averaging (or taking
+    the max of) bilinearly interpolated samples.
+
+    `rois` is (num_rois, 4) holding (x1, y1, x2, y2) in input-image
+    coordinates; `spatial_scale` maps them onto `X`. `batch_indices` is
+    (num_rois) i64 selecting the batch image of each region. Output `Y` is
+    (num_rois, C, output_height, output_width); num_rois may be dynamic.
+
+    Attribute encoding (decoded at ONNX->HIP conversion):
+      * mode: 0 = avg, 1 = max
+      * half_pixel: 1 = "half_pixel" (shift region corners by -0.5),
+                    0 = "output_half_pixel" (no shift; regions narrower
+                    than one pixel are widened to one)
+      * sampling_ratio: samples per bin along each axis; 0 = adaptive,
+        ceil(region_extent / output_extent)
+
+    Example:
+    ```mlir
+    hip.roi_align(%ctx)
+        ins(%x, %rois, %idx : memref<1x256x32x32xf32, 1>, memref<?x4xf32, 1>,
+                              memref<?xi64, 1>)
+        outs(%y : memref<?x256x7x7xf32, 1>)
+        {mode = 0, output_height = 7, output_width = 7, sampling_ratio = 2,
+         spatial_scale = 6.250000e-02 : f32, half_pixel = 1}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$rois,
+    Hip_TensorOrMemRef:$batch_indices,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$mode,
+    I64Attr:$output_height,
+    I64Attr:$output_width,
+    I64Attr:$sampling_ratio,
+    F32Attr:$spatial_scale,
+    I64Attr:$half_pixel
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $input `,` $rois `,` $batch_indices `:`
+        type($input) `,` type($rois) `,` type($batch_indices)
+    `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+  let hasVerifier = 1;
+}
+
 // hip.readback_dim : materialize a kernel-computed runtime extent as a host
 // `index`. It synchronizes the stream so the producing kernel has finished,
 // then reads back a single device-resident integer `scalar`.
