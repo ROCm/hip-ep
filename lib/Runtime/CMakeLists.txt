@@ -4,7 +4,7 @@
 ##
 
 # HipDnnEpRuntime - Runtime library for ONNX HIP DNN Execution Provider
-# Provides HIP/hipBLASLt wrappers called by generated LLVM IR
+# Provides HIP runtime wrappers called by generated LLVM IR
 #
 # This implements a two-stage compilation:
 # Stage 1 (Build Time): runtime.cpp → bitcode → embedded in library
@@ -181,9 +181,8 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
         list(APPEND COMPILE_FLAGS "-fPIC")
     endif()
 
-    # Propagate the vendor-BLAS opt-out into the bitcode compile so the
-    # hipBLASLt-backed wrappers (real/{hipblas,gemm}.cpp) compile their stub
-    # branch instead of the vendor-backed one.
+    # Propagate the vendor-BLAS opt-out for the library-handle lifecycle and
+    # error-returning vendor symbol shims. Dense GEMM always uses hip_gemm.
     if(HIPDNN_EP_DISABLE_VENDOR_BLAS)
         list(APPEND COMPILE_FLAGS "-DHIPDNN_EP_DISABLE_VENDOR_BLAS")
     endif()
@@ -236,6 +235,8 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
 
         list(APPEND IMPL_DEPS
             ${CMAKE_CURRENT_SOURCE_DIR}/real/runtime_types.h
+            ${CMAKE_CURRENT_SOURCE_DIR}/real/dense_gemm.h
+            ${CMAKE_CURRENT_SOURCE_DIR}/real/attention_gemm.h
             ${CMAKE_CURRENT_SOURCE_DIR}/real/cache_utils.h
             ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/hip/autotune/gqa/gqa_autotune.h
             ${CMAKE_CURRENT_SOURCE_DIR}/real/zp_unpack_cache.h
