@@ -367,7 +367,8 @@ extern "C" int hip_gqa_flash_decode(
     int B, int H, int G, int d, int skv, int max_seq, int max_splits,
     float scale, const void* seqlens_k, int local_window_size,
     const void* head_sink, int use_smooth_softmax,
-    int kv_dtype, const void* k_scale, const void* v_scale);
+    int kv_dtype, const void* k_scale, const void* v_scale,
+    const void* key_bias, int key_bias_stride);
 
 #ifdef HIPDNN_LUT_LINKED_EXTERNALLY
 // Lookup-only sibling: dispatches an explicit config instead of autotuning.
@@ -379,7 +380,8 @@ extern "C" int hip_gqa_flash_decode_configured(
     float scale, const void* seqlens_k, int local_window_size,
     const void* head_sink, int use_smooth_softmax,
     int kv_dtype, const void* k_scale, const void* v_scale,
-    int use_wmma, int splits, int bkv);
+    int use_wmma, int splits, int bkv, const void* key_bias,
+    int key_bias_stride);
 #endif
 
 static constexpr int MAX_SPLITS = 64;
@@ -397,13 +399,32 @@ static constexpr int MAX_SPLITS = 64;
 struct Case {
   const char* name;
   int B, H, G, D, max_seq, total;  // total = effective KV length (seqlens_k+1)
+  int pad = 0;               // > 0: key_bias marks batch b's first b*pad keys
+                             // as left padding
+  float pad_value = -INFINITY;  // bias of a padded key
 };
 
 // results.csv shape: the parameters that tell any two cases apart.
 static std::string case_shape(const Case& c) {
-  return "B" + std::to_string(c.B) + "_H" + std::to_string(c.H) + "_G" +
-         std::to_string(c.G) + "_D" + std::to_string(c.D) + "_len" +
-         std::to_string(c.total);
+  std::string s = "B" + std::to_string(c.B) + "_H" + std::to_string(c.H) +
+                  "_G" + std::to_string(c.G) + "_D" + std::to_string(c.D) +
+                  "_len" + std::to_string(c.total);
+  if (c.pad > 0) {
+    s += "_pad" + std::to_string(c.pad);
+    s += std::isinf(c.pad_value) ? "_ninf" : "_m3e38";
+  }
+  return s;
+}
+
+// key_bias rows [B, max_seq]: 0 for a real key, pad_value for padding. Empty
+// when the case has no padding.
+static std::vector<float> make_key_bias(const Case& c) {
+  if (c.pad <= 0) return {};
+  std::vector<float> kb((size_t)c.B * c.max_seq, 0.0f);
+  for (int b = 0; b < c.B; ++b)
+    for (int kv = 0; kv < b * c.pad && kv < c.max_seq; ++kv)
+      kb[(size_t)b * c.max_seq + kv] = c.pad_value;
+  return kb;
 }
 
 // ---- CPU fp32 reference over dequantized int8 cache -----------------------
@@ -415,9 +436,13 @@ static void cpu_reference_i8(const Case& c,
                              const std::vector<float>& kscale,   // [G,D]
                              const std::vector<float>& vscale,
                              const std::vector<int>& seqlens,    // [B]
+                             const std::vector<float>& kb,  // [B,max_seq] or empty
                              float scale, std::vector<float>& O) {
   const int B = c.B, H = c.H, G = c.G, D = c.D, max_seq = c.max_seq;
   const int hpg = H / G;
+  auto bias = [&](int b, int kv) {
+    return kb.empty() ? 0.0f : kb[(size_t)b * max_seq + kv];
+  };
   O.assign((size_t)B * H * D, 0.0f);
   for (int b = 0; b < B; ++b) {
     int raw = seqlens[b] + 1;
@@ -432,7 +457,7 @@ static void cpu_reference_i8(const Case& c,
         const int8_t* k = &K_i8[(((size_t)b * G + g) * max_seq + kv) * D];
         float dot = 0.0f;
         for (int e = 0; e < D; ++e) dot += q[e] * ((float)k[e] * ks[e]);
-        float s = dot * scale;
+        float s = dot * scale + bias(b, kv);
         if (s > m) m = s;
       }
       if (!std::isfinite(m)) continue;
@@ -443,7 +468,7 @@ static void cpu_reference_i8(const Case& c,
         const int8_t* v = &V_i8[(((size_t)b * G + g) * max_seq + kv) * D];
         float dot = 0.0f;
         for (int e = 0; e < D; ++e) dot += q[e] * ((float)k[e] * ks[e]);
-        float p = std::exp(dot * scale - m);
+        float p = std::exp(dot * scale + bias(b, kv) - m);
         l += p;
         for (int e = 0; e < D; ++e) acc[e] += p * ((float)v[e] * vs[e]);
       }
@@ -460,9 +485,13 @@ static void cpu_reference_fp16(const Case& c,
                                const std::vector<float>& K,   // [B,G,max_seq,D]
                                const std::vector<float>& V,
                                const std::vector<int>& seqlens,
+                               const std::vector<float>& kb,
                                float scale, std::vector<float>& O) {
   const int B = c.B, H = c.H, G = c.G, D = c.D, max_seq = c.max_seq;
   const int hpg = H / G;
+  auto bias = [&](int b, int kv) {
+    return kb.empty() ? 0.0f : kb[(size_t)b * max_seq + kv];
+  };
   O.assign((size_t)B * H * D, 0.0f);
   for (int b = 0; b < B; ++b) {
     int raw = seqlens[b] + 1;
@@ -475,7 +504,7 @@ static void cpu_reference_fp16(const Case& c,
         const float* k = &K[(((size_t)b * G + g) * max_seq + kv) * D];
         float dot = 0.0f;
         for (int e = 0; e < D; ++e) dot += q[e] * k[e];
-        float s = dot * scale;
+        float s = dot * scale + bias(b, kv);
         if (s > m) m = s;
       }
       if (!std::isfinite(m)) continue;
@@ -486,7 +515,7 @@ static void cpu_reference_fp16(const Case& c,
         const float* v = &V[(((size_t)b * G + g) * max_seq + kv) * D];
         float dot = 0.0f;
         for (int e = 0; e < D; ++e) dot += q[e] * k[e];
-        float p = std::exp(dot * scale - m);
+        float p = std::exp(dot * scale + bias(b, kv) - m);
         l += p;
         for (int e = 0; e < D; ++e) acc[e] += p * v[e];
       }
@@ -569,9 +598,10 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
   quant(Vv, vscale, V_i8);
 
   // CPU references.
+  const std::vector<float> Kb = make_key_bias(c);
   std::vector<float> ref_i8, ref_fp16;
-  cpu_reference_i8(c, Q, K_i8, V_i8, kscale, vscale, Seq, scale, ref_i8);
-  cpu_reference_fp16(c, Q, K, Vv, Seq, scale, ref_fp16);
+  cpu_reference_i8(c, Q, K_i8, V_i8, kscale, vscale, Seq, Kb, scale, ref_i8);
+  cpu_reference_fp16(c, Q, K, Vv, Seq, Kb, scale, ref_fp16);
 
   // Device buffers.
   auto to_half = [](const std::vector<float>& f) {
@@ -604,6 +634,13 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
   HIP_CHECK(hipMemcpy(dKsc, kscale.data(), kscale.size() * sizeof(float), hipMemcpyHostToDevice));
   HIP_CHECK(hipMemcpy(dVsc, vscale.data(), vscale.size() * sizeof(float), hipMemcpyHostToDevice));
   HIP_CHECK(hipMemcpy(dSeq, Seq.data(), Seq.size() * sizeof(int), hipMemcpyHostToDevice));
+  __half* dKb = nullptr;
+  if (!Kb.empty()) {
+    const auto hKb = to_half(Kb);
+    HIP_CHECK(hipMalloc(&dKb, hKb.size() * sizeof(__half)));
+    HIP_CHECK(hipMemcpy(dKb, hKb.data(), hKb.size() * sizeof(__half),
+                        hipMemcpyHostToDevice));
+  }
 
   // Dispatch the int8 kernel the way real/gqa.cpp does: in lookup mode resolve
   // the config from the table in custom_kernels_<arch>.dll and launch it
@@ -637,11 +674,12 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
           nullptr, dQ, k8, v8, dO8, dPart, B, H, G, D, c.total, kv_rows,
           MAX_SPLITS, scale, dSeq, 0, nullptr, 0, HIP_KV_DTYPE_INT8, dKsc,
           dVsc, selected_config.use_wmma ? 1 : 0, selected_config.splits,
-          selected_config.bkv);
+          selected_config.bkv, dKb, max_seq);
 #endif
     return hip_gqa_flash_decode(nullptr, dQ, k8, v8, dO8, dPart, B, H, G, D,
                                 c.total, kv_rows, MAX_SPLITS, scale, dSeq, 0,
-                                nullptr, 0, HIP_KV_DTYPE_INT8, dKsc, dVsc);
+                                nullptr, 0, HIP_KV_DTYPE_INT8, dKsc, dVsc,
+                                dKb, max_seq);
   };
 
   // Warmup + correctness fetch for the int8 kernel (kv_dtype = INT8). Every
@@ -667,7 +705,7 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
         HIP_CHECK((hipError_t)hip_gqa_flash_decode(
             nullptr, dQ, dKh, dVh, dO16, dPart, B, H, G, D, c.total, max_seq,
             MAX_SPLITS, scale, dSeq, 0, nullptr, 0, HIP_KV_DTYPE_FP16, nullptr,
-            nullptr));
+            nullptr, dKb, max_seq));
         HIP_CHECK(hipDeviceSynchronize());
       });
 
@@ -711,7 +749,7 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
           hip_gqa_flash_decode(nullptr, dQ, kv16.k(i), kv16.v(i), dO16, dPart,
                                B, H, G, D, c.total, kv16.rows(), MAX_SPLITS,
                                scale, dSeq, 0, nullptr, 0, HIP_KV_DTYPE_FP16,
-                               nullptr, nullptr);
+                               nullptr, nullptr, dKb, max_seq);
         });
       });
 
@@ -746,6 +784,7 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
   hipFree(dQ); hipFree(dKh); hipFree(dVh); hipFree(dK8); hipFree(dV8);
   hipFree(dKsc); hipFree(dVsc); hipFree(dO16); hipFree(dO8);
   hipFree(dSeq); hipFree(dPart);
+  if (dKb) hipFree(dKb);
   return r;
 }
 
@@ -990,9 +1029,24 @@ int main(int argc, char** argv) {
       for (size_t li = 0; li < n_lens; ++li)
         full_cases.push_back({s.name, 1, s.H, s.G, s.D, lens[li], lens[li]});
     }
-    printf("coverage=%d -> running %zu typical length(s) x 13 categorical "
+    // Key-padding bias, B=2 with batch 1 left-padded by a quarter of the
+    // keys, so its leading splits see only masked keys.
+    const Shape pad_shapes[] = {
+        {"pad-llama-3.1-8b", 32, 8, 128},
+        {"pad-gpt-oss-20b",  64, 8,  64},
+        {"pad-gqa4-h32-d96", 32, 8,  96},
+    };
+    for (const auto& s : pad_shapes)
+      for (size_t li = 0; li < n_lens; ++li)
+        full_cases.push_back({s.name, 2, s.H, s.G, s.D, lens[li], lens[li],
+                              lens[li] / 4, -INFINITY});
+    for (size_t li = 0; li < n_lens; ++li)
+      full_cases.push_back({"pad-llama-3.1-8b-3e38", 2, 32, 8, 128, lens[li],
+                            lens[li], lens[li] / 4, -3.4e38f});
+    printf("coverage=%d -> running %zu typical length(s) x %zu categorical "
            "case(s) = %zu gqa_decode_i8 cases\n",
-           coverage_tier, n_lens, full_cases.size());
+           coverage_tier, n_lens, full_cases.size() / n_lens,
+           full_cases.size());
 
     for (const Case& c : full_cases) results.push_back(run_case(c, iters, seed));
     for (const auto& r : results) if (!r.pass) ++fails;

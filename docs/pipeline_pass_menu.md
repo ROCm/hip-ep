@@ -133,12 +133,14 @@ the selected perfConfig string are printed only with `--verbose`.
 | `simplify-onnx` | module | Pre-lowering ONNX cleanups (`CastLike`→`Cast`, drop dead type-donor args). |
 | `hip-add-context-arg` | module | Inject the `!hip.context` argument into functions. |
 | `onnx-loop-outline` | module | Outline `onnx.Loop` bodies into separate `func.func` ops. |
+| `onnx-scan-outline` | module | Outline supported forward, axis-0 `onnx.Scan` bodies and materialize their state and stacked outputs. |
 | `onnx-if-outline` | module | Outline `onnx.If` branches before ONNX-to-HIP conversion. |
 | `hip-infer-loop-body-shapes` | module | Rank-establish unranked tensors inside outlined loop bodies. |
 | `outline-onnx-to-hipdnn` | module | Outline subgraphs targeted at hipDNN graph compilation. |
-| `convert-onnx-to-hip` | module | Pattern-match ONNX ops by name → HIP dialect; lower both constant sweeps to policy-neutral `hip.constant`; legalize GatherBlockQuantized (INT4 packing, unsigned, quantize_axis). |
+| `convert-onnx-to-hip` | module | Pattern-match ONNX ops by name → HIP dialect; lower both constant sweeps to policy-neutral `hip.constant`; legalize GatherBlockQuantized (INT4 packing, unsigned, quantize_axis). Pre-lowering folds run first on ONNX IR, among them the `onnx.Attention` mask fold (sliding window and key-padding bias, `AttentionWindowFold.cpp`) and the sigmoid + correction-bias QMoE routing fold (`QMoEConversion.cpp`). |
 | `hip-fold-batchnorm` | func.func | Fold an inference `hip.batch_norm` with constant parameters into the filter and bias of the `hip.conv` producing it, directly or through a `hip.add` of two convs (the shift goes into one bias). Every intermediate result must have the batch norm as its only consumer. Reads inline and file-backed constants only; a batch norm over memory-address-backed weights is left in place. |
 | `hip-externalize-constants` | module | Validate explicit serialization order, append unordered carriers deterministically, plan/serialize, then replace `hip.constant` using the existing inline/full/streaming/hybrid metadata contract. Direct threshold default: 0. |
+| `hip-fold-constant-extracts` | func.func | Resolve constant-index `tensor.extract` of vectors assembled with `tensor.insert_slice` (ONNX shape vectors) to the `from_elements` operand or integer constant element they read. |
 | `hip-infer-shapes` | module | Refine `?` dims on HIP DPS result types via `ReifyRankedShapedTypeOpInterface`. |
 | `hip-fusion-transform` | module | HIP-to-HIP rewriting at unrestricted arity (one op → many, many → one, or subgraph → subgraph). The patterns live in `lib/Dialect/Transforms/fusion_pattern/` — PDLL files compiled into the library, plus native C++ for rewrites whose shape depends on the matched op's rank — and share one `RewritePatternSet`. |
 | `hip-split-duplicate-dps-inits` | func.func | De-alias DPS init operands that CSE merged onto one `tensor.empty`, so an op that reads back its own outputs (e.g. `hip.gqa` present K/V) does not share a buffer (pre-bufferize). |
@@ -163,11 +165,12 @@ the selected perfConfig string are printed only with `--verbose`.
 
 Anchored on `func.func`, so the textual form needs `func.func(...)`. These run
 against HIP **tensor** IR (before bufferization) and are reached through
-`rocmlir-pipeline`, not the default ONNX→HIP→LLVM flow.
+`rocmlir-pipeline`. `hip-decompose-conv-transpose` also runs in the default
+ONNX-to-HIP tail; the other two do not.
 
 | Name | Anchor | One-liner |
 |---|---|---|
-| `hip-decompose-conv-transpose` | func.func | Rewrite `hip.conv_transpose` into one stride-1 `hip.conv` per stride residue (MIOpen backward-data v4r1), reassembled with `tensor.insert_slice`. Reads the filter from an inline or file-backed `hip.constant`. Leaves unsupported cases (grouped, dilated, dynamic, non-constant, memory-address-backed or non-f16/bf16/f32 weights, stride > kernel, > 64 residues) for the MIOpen path. |
+| `hip-decompose-conv-transpose` | func.func | Rewrite `hip.conv_transpose` into one stride-1 `hip.conv` per stride residue (MIOpen backward-data v4r1), reassembled with `tensor.insert_slice`. Reads the filter from an inline or file-backed `hip.constant`. Rank-3 inputs expand to a unit-height rank-4 conv so dynamic batch and width stay legal. Leaves unsupported cases (grouped, dilated, rank-4 dynamic, non-constant, memory-address-backed or non-f16/bf16/f32 weights, stride > kernel, > 64 residues) for the MIOpen path. Also runs in the ONNX-to-HIP tail, before shape inference. |
 | `hip-fuse-rocmlir` | func.func | Outline rocMLIR-eligible op groups into `rock.kernel` funcs around a gemm/convolution/attention anchor. |
 | `convert-hip-to-tosa` | func.func | Lower the outlined kernel bodies from HIP ops to TOSA. |
 
@@ -233,14 +236,19 @@ ONNX → HIP  (buildOnnxToHipPipeline)
   «slot: AfterSimplifyOnnx»
   hip-add-context-arg
   onnx-loop-outline
+  onnx-scan-outline
   onnx-if-outline
   hip-infer-loop-body-shapes
-  «slot: AfterOnnxLoopOutline»
+  «slot: AfterOnnxLoopOutline»  (after Loop / Scan / If outlining)
   [outline-onnx-to-hipdnn + compile-hipdnn-graphs]   (BUILD_HIPDNN_GRAPH=ON only)
   convert-onnx-to-hip
   func.func(hip-fold-batchnorm)      (shared with the rocMLIR head, so it runs
                                       before any conv rewrite or kernel outlining)
   «slot: AfterConvertOnnxToHip»  (supported hip.constant producer boundary)
+  func.func(hip-decompose-conv-transpose)  (rank-3 -> rank-4 hip.conv before
+                                           the MIOpen lowering; rocmlir-pipeline
+                                           runs the same pass in its own head)
+  func.func(hip-fold-constant-extracts)
   hip-infer-shapes
   hip-fusion-transform               (must precede externalization: its patterns
                                       read hip.constant payloads)
@@ -257,9 +265,9 @@ ONNX → HIP  (buildOnnxToHipPipeline)
   lower-affine
   cse ; canonicalize
   func.func(convert-linalg-to-loops)
+  func.func(hip-materialize-host-scalars)
   func.func(hip-optimize-memrefs)
   func.func(hip-promote-strided-operands)
-  func.func(hip-materialize-host-scalars)
   func.func(hip-resolve-memref-dims)
   func.func(cse)
   func.func(canonicalize)

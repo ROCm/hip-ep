@@ -6,12 +6,15 @@
  * q/k, gated_delta update rule, fp32 V-major state.
  */
 
+#include "hip_arch_compat.h"
 #include "hip_custom_kernels.h"
 
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
+#include <type_traits>
 
 namespace {
 
@@ -178,6 +181,436 @@ __global__ void __launch_bounds__(kBlockSize) gatedDeltaNetRecurrentKernel(
   }
 }
 
+typedef float gdnFloat8 __attribute__((ext_vector_type(8)));
+#if HIPDNN_HAS_WMMA
+typedef _Float16 gdnHalfFrag
+    __attribute__((ext_vector_type(HIPDNN_WMMA_FRAG_ELEMS)));
+#endif
+typedef _Float16 gdnHalf4 __attribute__((ext_vector_type(4)));
+
+constexpr int kChunk = 32;
+constexpr int kSliceV = 32;
+constexpr int kChunkDk = 128;
+constexpr int kWt = 16;
+constexpr int kRawStride = kChunkDk + 8;
+constexpr int kTileStride = kChunk + 4;
+// Shorter sequences run faster on the recurrent kernel.
+constexpr int kChunkedMinSeqLen = 16;
+
+__device__ __forceinline__ int gdnAccRow(int pr, int e) {
+#if HIPDNN_HAS_WMMA
+  return hipdnn_wmma_acc_row(pr, e);
+#else
+  return e * 2 + pr;
+#endif
+}
+
+// acc += A B on one 16x16x16 tile; a(m, kk) and b(kk, n) are in tile
+// coordinates. A split operand enters as fp16 hi + lo (the lo * lo term is
+// dropped), which keeps about 22 bits of its fp32 mantissa.
+template <bool kSplitA, bool kSplitB, typename FA, typename FB>
+__device__ __forceinline__ void gdnMma(gdnFloat8 &acc, int lane, FA a, FB b) {
+  const int ln = lane % kWt;
+  const int pr = lane / kWt;
+#if HIPDNN_HAS_WMMA
+  const int kOff = hipdnn_wmma_k_off(pr);
+  gdnHalfFrag aHi;
+  gdnHalfFrag aLo;
+  gdnHalfFrag bHi;
+  gdnHalfFrag bLo;
+#pragma unroll
+  for (int e = 0; e < HIPDNN_WMMA_FRAG_ELEMS; ++e) {
+    const float av = a(ln, kOff + e);
+    const float bv = b(kOff + e, ln);
+    aHi[e] = static_cast<_Float16>(av);
+    bHi[e] = static_cast<_Float16>(bv);
+    if constexpr (kSplitA) {
+      aLo[e] = static_cast<_Float16>(av - static_cast<float>(aHi[e]));
+    }
+    if constexpr (kSplitB) {
+      bLo[e] = static_cast<_Float16>(bv - static_cast<float>(bHi[e]));
+    }
+  }
+  acc = HIPDNN_WMMA_F32_16X16X16_F16(aHi, bHi, acc);
+  if constexpr (kSplitB) {
+    acc = HIPDNN_WMMA_F32_16X16X16_F16(aHi, bLo, acc);
+  }
+  if constexpr (kSplitA) {
+    acc = HIPDNN_WMMA_F32_16X16X16_F16(aLo, bHi, acc);
+  }
+#else
+  (void)acc;
+  (void)ln;
+  (void)pr;
+  (void)a;
+  (void)b;
+  __builtin_trap();
+#endif
+}
+
+// Chunked (WY) form of the same recurrence, one block per (batch, value head,
+// kSliceV-row slice of the state). Per chunk of kChunk tokens, with G the
+// in-chunk cumulative log decay and S0 the chunk-start state [dv, dk]:
+//   A = strictLower(beta_i e^{G_i-G_j} k_i.k_j),  T = (I + A)^-1
+//   U = T (beta v - beta e^G (S0 k))               (the per-token deltas)
+//   O = scale (e^G (S0 q) + lower(e^{G_i-G_j} q_i.k_j) U)
+//   S = e^{G_last} S0 + sum_j e^{G_last-G_j} u_j k_j^T
+// Products run on the matrix cores with fp32 accumulation. q and k enter as
+// their raw fp16 inputs (the L2 norms are applied in fp32 afterwards); fp32
+// operands are split into fp16 hi + lo, so they must stay inside the fp16
+// range. |T_ij| <= 1 (T_ij is -beta_i k_j^T (a product of contractions) k_i)
+// and |P_ij| <= 1; the state, R and U are bounded by the magnitudes of
+// initial_state and v. The state stays in fp32 accumulators for the whole
+// sequence. Each block reads its own state slice before writing it, so
+// initial_state may alias final_state.
+__global__ void __launch_bounds__(kBlockSize) gatedDeltaNetChunkedKernel(
+    const __half *__restrict__ qkv, const float *__restrict__ decay,
+    const float *__restrict__ beta, const float *initialState,
+    const float *__restrict__ aLog, const float *__restrict__ dtBias,
+    __half *__restrict__ output, float *finalState, int seqLen,
+    int numHeadsQk, int numHeadsV, int headSizeV, float scale) {
+  constexpr int DK = kChunkDk;
+  constexpr int kWaves = kBlockSize / kLanes;
+  constexpr int kTokensPerWave = kChunk / kWaves;
+  constexpr int kStateTiles = (kSliceV / kWt) * (DK / kWt) / kWaves;
+  const int slices = headSizeV / kSliceV;
+  const int slice = static_cast<int>(blockIdx.x) % slices;
+  const int hv = (static_cast<int>(blockIdx.x) / slices) % numHeadsV;
+  const int b = static_cast<int>(blockIdx.x) / (slices * numHeadsV);
+  const int hq = hv * numHeadsQk / numHeadsV;
+  const int tid = static_cast<int>(threadIdx.x);
+  const int lane = tid % kLanes;
+  const int wave = tid / kLanes;
+  const int ln = lane % kWt;
+  const int pr = lane / kWt;
+  const int side = wave / 4;
+  const int ti = (wave % 4) / 2;
+  const int tc = (wave % 4) % 2;
+
+  __shared__ __align__(16) _Float16 kRaw[kChunk][kRawStride];
+  __shared__ __align__(16) _Float16 qRaw[kChunk][kRawStride];
+  __shared__ __align__(16) _Float16 sHi[kSliceV][kRawStride];
+  __shared__ __align__(16) _Float16 sLo[kSliceV][kRawStride];
+  __shared__ __align__(16) float aTri[kChunk][kTileStride];
+  __shared__ __align__(16) float pTri[kChunk][kTileStride];
+  __shared__ __align__(16) float rT[kSliceV][kTileStride];
+  __shared__ __align__(16) float uT[kSliceV][kTileStride];
+  __shared__ float kNorm[kChunk];
+  __shared__ float qNorm[kChunk];
+  __shared__ float wLast[kChunk];
+
+  const int64_t packed = static_cast<int64_t>(2) * numHeadsQk * DK +
+                         static_cast<int64_t>(numHeadsV) * headSizeV;
+  const int64_t vOffset = static_cast<int64_t>(2) * numHeadsQk * DK +
+                          static_cast<int64_t>(hv) * headSizeV +
+                          slice * kSliceV;
+  const float headDecay = -expf(aLog[hv]);
+  const float headBias = dtBias[hv];
+  const int64_t stateBase =
+      ((static_cast<int64_t>(b) * numHeadsV + hv) * headSizeV +
+       slice * kSliceV) *
+      DK;
+
+  gdnFloat8 sAcc[kStateTiles];
+  auto storeStateCopy = [&](int q) {
+#pragma unroll
+    for (int e = 0; e < 8; ++e) {
+      const int v = (wave / 4) * kWt + gdnAccRow(pr, e);
+      const int k = ((wave % 4) * kStateTiles + q) * kWt + ln;
+      const _Float16 hi = static_cast<_Float16>(sAcc[q][e]);
+      sHi[v][k] = hi;
+      sLo[v][k] = static_cast<_Float16>(sAcc[q][e] - static_cast<float>(hi));
+    }
+  };
+#pragma unroll
+  for (int q = 0; q < kStateTiles; ++q) {
+#pragma unroll
+    for (int e = 0; e < 8; ++e) {
+      const int v = (wave / 4) * kWt + gdnAccRow(pr, e);
+      const int k = ((wave % 4) * kStateTiles + q) * kWt + ln;
+      sAcc[q][e] = initialState[stateBase + static_cast<int64_t>(v) * DK + k];
+    }
+    storeStateCopy(q);
+  }
+
+  gdnHalf4 pq[kTokensPerWave];
+  gdnHalf4 pk[kTokensPerWave];
+  float pDecay;
+  float pBeta;
+  float pv[8];
+  auto prefetch = [&](int t0) {
+    const int n = min(kChunk, seqLen - t0);
+#pragma unroll
+    for (int j = 0; j < kTokensPerWave; ++j) {
+      const int c = wave + j * kWaves;
+      pq[j] = gdnHalf4{};
+      pk[j] = gdnHalf4{};
+      if (c < n) {
+        const int64_t tok = static_cast<int64_t>(b) * seqLen + t0 + c;
+        const __half *rowPtr = qkv + tok * packed;
+        pq[j] = *reinterpret_cast<const gdnHalf4 *>(
+            rowPtr + static_cast<int64_t>(hq) * DK + lane * 4);
+        pk[j] = *reinterpret_cast<const gdnHalf4 *>(
+            rowPtr + static_cast<int64_t>(numHeadsQk + hq) * DK + lane * 4);
+      }
+    }
+    // Unconditional loads from a clamped row, masked only when consumed: a
+    // per-lane guard here would make each load wait for the previous one.
+    const int64_t gateTok =
+        static_cast<int64_t>(b) * seqLen + t0 + min(lane, n - 1);
+    pDecay = decay[gateTok * numHeadsV + hv];
+    pBeta = beta[gateTok * numHeadsV + hv];
+    if (side == 0) {
+#pragma unroll
+      for (int e = 0; e < 8; ++e) {
+        const int i = ti * kWt + gdnAccRow(pr, e);
+        const int64_t tok =
+            static_cast<int64_t>(b) * seqLen + t0 + min(i, n - 1);
+        pv[e] = __half2float(qkv[tok * packed + vOffset + tc * kWt + ln]);
+      }
+    }
+  };
+  prefetch(0);
+
+  for (int t0 = 0; t0 < seqLen; t0 += kChunk) {
+    const int n = min(kChunk, seqLen - t0);
+
+#pragma unroll
+    for (int j = 0; j < kTokensPerWave; ++j) {
+      const int c = wave + j * kWaves;
+      const gdnHalf4 qh = pq[j];
+      const gdnHalf4 kh = pk[j];
+      float qq = 0.0f;
+      float kk = 0.0f;
+#pragma unroll
+      for (int e = 0; e < 4; ++e) {
+        qq += static_cast<float>(qh[e]) * static_cast<float>(qh[e]);
+        kk += static_cast<float>(kh[e]) * static_cast<float>(kh[e]);
+      }
+      qq = groupSum<kLanes>(qq);
+      kk = groupSum<kLanes>(kk);
+      *reinterpret_cast<gdnHalf4 *>(&qRaw[c][lane * 4]) = qh;
+      *reinterpret_cast<gdnHalf4 *>(&kRaw[c][lane * 4]) = kh;
+      if (lane == 0) {
+        qNorm[c] = c < n ? rsqrtf(qq + 1e-12f) : 0.0f;
+        kNorm[c] = c < n ? rsqrtf(kk + 1e-12f) : 0.0f;
+      }
+    }
+    const bool laneValid = lane < n;
+    const float gTok =
+        laneValid ? headDecay * softplus(pDecay + headBias) : 0.0f;
+    const float betaTok = laneValid ? 1.0f / (1.0f + expf(-pBeta)) : 0.0f;
+    float vReg[8];
+#pragma unroll
+    for (int e = 0; e < 8; ++e) {
+      const int i = ti * kWt + gdnAccRow(pr, e);
+      vReg[e] = side == 0 && i < n ? pv[e] : 0.0f;
+    }
+    __syncthreads();
+    if (t0 + kChunk < seqLen) {
+      prefetch(t0 + kChunk);
+    }
+
+    float gCum = gTok;
+#pragma unroll
+    for (int off = 1; off < kLanes; off <<= 1) {
+      const float y = __shfl_up(gCum, off, kLanes);
+      if (lane >= off) {
+        gCum += y;
+      }
+    }
+    const float gLast = __shfl(gCum, kChunk - 1, kLanes);
+    if (wave == 0) {
+      wLast[lane] = __expf(gLast - gCum) * kNorm[lane];
+    }
+
+    _Float16(*lhs)[kRawStride] = side == 0 ? kRaw : qRaw;
+    {
+      gdnFloat8 acc = {};
+      if (ti >= tc) {
+        for (int k0 = 0; k0 < DK; k0 += kWt) {
+          gdnMma<false, false>(
+              acc, lane,
+              [&](int m, int kk) {
+                return static_cast<float>(lhs[ti * kWt + m][k0 + kk]);
+              },
+              [&](int kk, int nn) {
+                return static_cast<float>(kRaw[tc * kWt + nn][k0 + kk]);
+              });
+        }
+      }
+      const int j = tc * kWt + ln;
+      const float gj = __shfl(gCum, j, kLanes);
+#pragma unroll
+      for (int e = 0; e < 8; ++e) {
+        const int i = ti * kWt + gdnAccRow(pr, e);
+        const float gi = __shfl(gCum, i, kLanes);
+        const float bi = __shfl(betaTok, i, kLanes);
+        if (side == 0) {
+          aTri[i][j] = j < i ? bi * __expf(gi - gj) * kNorm[i] * kNorm[j] *
+                                   acc[e]
+                             : 0.0f;
+        } else {
+          pTri[i][j] =
+              j <= i ? __expf(gi - gj) * qNorm[i] * kNorm[j] * acc[e] : 0.0f;
+        }
+      }
+    }
+    gdnFloat8 oAcc = {};
+    {
+      gdnFloat8 acc = {};
+      for (int k0 = 0; k0 < DK; k0 += kWt) {
+        auto aOp = [&](int m, int kk) {
+          return static_cast<float>(lhs[ti * kWt + m][k0 + kk]);
+        };
+        gdnMma<false, false>(acc, lane, aOp, [&](int kk, int nn) {
+          return static_cast<float>(sHi[tc * kWt + nn][k0 + kk]);
+        });
+        gdnMma<false, false>(acc, lane, aOp, [&](int kk, int nn) {
+          return static_cast<float>(sLo[tc * kWt + nn][k0 + kk]);
+        });
+      }
+#pragma unroll
+      for (int e = 0; e < 8; ++e) {
+        const int i = ti * kWt + gdnAccRow(pr, e);
+        const float eg = __expf(__shfl(gCum, i, kLanes));
+        const float bi = __shfl(betaTok, i, kLanes);
+        if (side == 0) {
+          rT[tc * kWt + ln][i] = bi * (vReg[e] - eg * kNorm[i] * acc[e]);
+        } else {
+          oAcc[e] = eg * qNorm[i] * acc[e];
+        }
+      }
+    }
+    __syncthreads();
+
+    if (wave == 0) {
+      float tcol[kChunk];
+#pragma unroll
+      for (int i = 0; i < kChunk; ++i) {
+        float acc = i == lane ? 1.0f : 0.0f;
+#pragma unroll
+        for (int j = 0; j < i; ++j) {
+          acc -= aTri[i][j] * tcol[j];
+        }
+        tcol[i] = acc;
+      }
+#pragma unroll
+      for (int i = 0; i < kChunk; ++i) {
+        aTri[i][lane] = tcol[i];
+      }
+    }
+    __syncthreads();
+
+    if (side == 0) {
+      gdnFloat8 acc = {};
+      for (int tj = 0; tj <= ti; ++tj) {
+        gdnMma<true, true>(
+            acc, lane,
+            [&](int m, int kk) { return aTri[ti * kWt + m][tj * kWt + kk]; },
+            [&](int kk, int nn) { return rT[tc * kWt + nn][tj * kWt + kk]; });
+      }
+#pragma unroll
+      for (int e = 0; e < 8; ++e) {
+        uT[tc * kWt + ln][ti * kWt + gdnAccRow(pr, e)] = acc[e];
+      }
+    }
+    __syncthreads();
+
+    if (side == 1) {
+      for (int tj = 0; tj <= ti; ++tj) {
+        gdnMma<true, true>(
+            oAcc, lane,
+            [&](int m, int kk) { return pTri[ti * kWt + m][tj * kWt + kk]; },
+            [&](int kk, int nn) { return uT[tc * kWt + nn][tj * kWt + kk]; });
+      }
+#pragma unroll
+      for (int e = 0; e < 8; ++e) {
+        const int i = ti * kWt + gdnAccRow(pr, e);
+        if (i < n) {
+          const int64_t tok = static_cast<int64_t>(b) * seqLen + t0 + i;
+          output[(tok * numHeadsV + hv) * headSizeV + slice * kSliceV +
+                 tc * kWt + ln] = __float2half(scale * oAcc[e]);
+        }
+      }
+    }
+
+    const float eLast = __expf(gLast);
+#pragma unroll
+    for (int q = 0; q < kStateTiles; ++q) {
+      sAcc[q] *= eLast;
+      const int kBase = ((wave % 4) * kStateTiles + q) * kWt;
+      for (int jt = 0; jt < kChunk / kWt; ++jt) {
+        gdnMma<true, false>(
+            sAcc[q], lane,
+            [&](int m, int kk) {
+              const int j = jt * kWt + kk;
+              return uT[(wave / 4) * kWt + m][j] * wLast[j];
+            },
+            [&](int kk, int nn) {
+              return static_cast<float>(kRaw[jt * kWt + kk][kBase + nn]);
+            });
+      }
+      storeStateCopy(q);
+    }
+    __syncthreads();
+  }
+
+#pragma unroll
+  for (int q = 0; q < kStateTiles; ++q) {
+#pragma unroll
+    for (int e = 0; e < 8; ++e) {
+      const int v = (wave / 4) * kWt + gdnAccRow(pr, e);
+      const int k = ((wave % 4) * kStateTiles + q) * kWt + ln;
+      finalState[stateBase + static_cast<int64_t>(v) * DK + k] = sAcc[q][e];
+    }
+  }
+}
+
+// The chunked kernel is verified on the gfx11 WMMA encoding only; gfx117x
+// (gfx12-style WMMA) and devices without WMMA keep the recurrent kernel.
+// gcnArchName may carry feature suffixes ("gfx1151:xnack-").
+bool chunkedDevice() {
+  constexpr int kMaxCachedDevices = 16;
+  // 0 == not probed yet, 1 == no, 2 == yes.
+  static int cached[kMaxCachedDevices] = {};
+  auto probe = [](int d) {
+    hipDeviceProp_t p;
+    if (hipGetDeviceProperties(&p, d) != hipSuccess) {
+      return false;
+    }
+    return std::strncmp(p.gcnArchName, "gfx11", 5) == 0 &&
+           std::strncmp(p.gcnArchName, "gfx117", 6) != 0;
+  };
+  int dev = 0;
+  if (hipGetDevice(&dev) != hipSuccess || dev < 0) {
+    return false;
+  }
+  if (dev >= kMaxCachedDevices) {
+    return probe(dev);
+  }
+  if (cached[dev] == 0) {
+    cached[dev] = probe(dev) ? 2 : 1;
+  }
+  return cached[dev] == 2;
+}
+
+hipError_t launchChunked(hipStream_t stream, const void *qkv,
+                         const float *decay, const float *beta,
+                         const float *initialState, const float *aLog,
+                         const float *dtBias, void *output, float *finalState,
+                         int batch, int seqLen, int numHeadsQk, int numHeadsV,
+                         int headSizeV, float scale) {
+  const dim3 grid(
+      static_cast<unsigned>(batch * numHeadsV * (headSizeV / kSliceV)));
+  hipLaunchKernelGGL(gatedDeltaNetChunkedKernel, grid, dim3(kBlockSize), 0,
+                     stream, static_cast<const __half *>(qkv), decay, beta,
+                     initialState, aLog, dtBias, static_cast<__half *>(output),
+                     finalState, seqLen, numHeadsQk, numHeadsV, headSizeV,
+                     scale);
+  return hipGetLastError();
+}
+
 template <typename T, int DK>
 hipError_t launchRecurrent(hipStream_t stream, const void *qkv,
                            const float *decay, const float *beta,
@@ -189,6 +622,7 @@ hipError_t launchRecurrent(hipStream_t stream, const void *qkv,
   constexpr int kRowsPerBlock = kBlockSize / kTpr;
   const int rowGroups = (headSizeV + kRowsPerBlock - 1) / kRowsPerBlock;
   const dim3 grid(static_cast<unsigned>(batch * numHeadsV * rowGroups));
+  (void)hipGetLastError();
   hipLaunchKernelGGL((gatedDeltaNetRecurrentKernel<T, DK>), grid,
                      dim3(kBlockSize), 0, stream, static_cast<const T *>(qkv),
                      decay, beta, initialState, aLog, dtBias,
@@ -217,6 +651,14 @@ hipError_t dispatchHeadSize(hipStream_t stream, int64_t headSizeQk,
                                   seqLen, numHeadsQk, numHeadsV, headSizeV,
                                   scale);
   case 128:
+    if constexpr (std::is_same<T, __half>::value) {
+      if (seqLen >= kChunkedMinSeqLen && headSizeV % kSliceV == 0 &&
+          chunkedDevice()) {
+        return launchChunked(stream, qkv, decay, beta, initialState, aLog,
+                             dtBias, output, finalState, batch, seqLen,
+                             numHeadsQk, numHeadsV, headSizeV, scale);
+      }
+    }
     return launchRecurrent<T, 128>(stream, qkv, decay, beta, initialState,
                                    aLog, dtBias, output, finalState, batch,
                                    seqLen, numHeadsQk, numHeadsV, headSizeV,

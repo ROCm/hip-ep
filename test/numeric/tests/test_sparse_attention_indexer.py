@@ -3,8 +3,7 @@
 # Licensed under the MIT License.
 #
 
-"""Tests for com.microsoft SparseAttentionIndexer (policy_mode=qsa, packed QK,
-no past_sequence_length).
+"""Tests for com.microsoft SparseAttentionIndexer (policy_mode=qsa, packed QK).
 
 ORT CPU has no SparseAttentionIndexer kernel, so the reference is a NumPy port
 of the ORT CUDA semantics. Scores are fp32 sums whose order differs between
@@ -18,7 +17,7 @@ must match exactly.
 import numpy as np
 import pytest
 from onnx import TensorProto as TP
-from onnx import helper
+from onnx import helper, numpy_helper
 
 from framework.onnx_utils import make_model_from_nodes
 
@@ -27,25 +26,30 @@ _D = 128
 _TIE_RTOL = 1e-5
 
 
-def _make_model(N, R, rank3, has_mask, dtype, ratio, budget, epsilon, scale):
+def _make_model(
+    N, R, rank3, has_mask, dtype, ratio, budget, epsilon, scale, shared=False
+):
     elem = TP.FLOAT16 if dtype == np.float16 else TP.FLOAT
     attrs = dict(policy_mode="qsa", compress_ratio=ratio, token_budget=budget)
     if epsilon is not None:
         attrs["epsilon"] = epsilon
     if scale is not None:
         attrs["scale"] = scale
+    node_inputs = [
+        "query",
+        "",
+        "query_norm_weight",
+        "key_norm_weight",
+        "cos_cache",
+        "sin_cache",
+        "mask" if has_mask else "",
+        "past_key",
+    ]
+    if shared:
+        node_inputs += ["", "", "", "", "past_sequence_length"]
     node = helper.make_node(
         "SparseAttentionIndexer",
-        [
-            "query",
-            "",
-            "query_norm_weight",
-            "key_norm_weight",
-            "cos_cache",
-            "sin_cache",
-            "mask" if has_mask else "",
-            "past_key",
-        ],
+        node_inputs,
         ["selected_indices", "present_key"],
         domain="com.microsoft",
         **attrs,
@@ -61,11 +65,17 @@ def _make_model(N, R, rank3, has_mask, dtype, ratio, budget, epsilon, scale):
     if has_mask:
         inputs.append(helper.make_tensor_value_info("mask", TP.INT64, ["B", "T"]))
     inputs.append(helper.make_tensor_value_info("past_key", elem, ["B", "P", _D]))
+    if shared:
+        inputs.append(
+            helper.make_tensor_value_info("past_sequence_length", TP.INT32, [1])
+        )
     outputs = [
         helper.make_tensor_value_info(
             "selected_indices", TP.INT32, ["B", "S", budget + ratio - 1]
         ),
-        helper.make_tensor_value_info("present_key", elem, ["B", "T", _D]),
+        helper.make_tensor_value_info(
+            "present_key", elem, ["B", "P" if shared else "T", _D]
+        ),
     ]
     model = make_model_from_nodes([node], inputs, outputs, **_OPSETS)
     model.ir_version = 10
@@ -322,6 +332,11 @@ def test_decode(model_runner, P):
     _run_case(model_runner, B=1, S=1, P=P, seed=P)
 
 
+def test_decode_long_context(model_runner):
+    """Few rows of at least 8192 blocks select on one 1024-thread block."""
+    _run_case(model_runner, B=2, S=3, P=33000, seed=12)
+
+
 def test_prefill_multi_chunk(model_runner):
     """Scores past a 128 MiB budget split the query rows into chunks of
     budget / (B * ((P + S) / ratio + N * D) * 4 bytes) rows."""
@@ -367,6 +382,18 @@ def test_rank3_cache_clamped_rows(model_runner):
     _run_case(model_runner, B=1, S=1, P=3000, seed=8, X=1024)
 
 
+@pytest.mark.parametrize("R", [8, 48, 128])
+def test_rotary_widths(model_runner, R):
+    """Covers each RoPE partner path in both kernel layouts.
+
+    - Halves 4 and 64 swap partners between lanes; half 24 goes through LDS.
+    - S = 5 runs the separate pooled and score kernels; S = 1 runs the fused
+      pooled-score kernel.
+    """
+    _run_case(model_runner, B=1, S=5, P=900, seed=30 + R, R=R)
+    _run_case(model_runner, B=1, S=1, P=2100, seed=31 + R, R=R)
+
+
 def test_f32_small_config(model_runner):
     _run_case(
         model_runner,
@@ -406,6 +433,236 @@ def test_exact_ties_keep_block_order(model_runner, S):
     query[:, :, N * _D :] = -rng.uniform(0.1, 1, (B, S, _D)).astype(dt)
     past = -rng.uniform(0.1, 1, (B, P, _D)).astype(dt)
     _run_feeds(model_runner, query, qw, kw, cos, sin, None, past, budget=64, exact=True)
+
+
+def _make_gathered_rotary_model(N, R, rows, budget, masks, M, picks):
+    """Returns an indexer model that builds its MRoPE rotary tables:
+
+    cache = Concat(w, w)
+    w     = Where(m2, g2, Where(m1, g1, g0))
+    g_k   = Gather(base, Gather(rotary_position_ids, picks[k]))
+
+    rotary_position_ids is [M, B, X].
+    """
+    elem = TP.FLOAT16
+    nodes = [
+        helper.make_node(
+            "Constant", [], [f"k{k}"], value=numpy_helper.from_array(np.int64(pick))
+        )
+        for k, pick in enumerate(picks)
+    ]
+    nodes += [
+        helper.make_node("Gather", ["rotary_position_ids", f"k{k}"], [f"pos{k}"])
+        for k in range(3)
+    ]
+    for kind in ("cos", "sin"):
+        nodes += [
+            helper.make_node("Gather", [f"{kind}_base", f"pos{k}"], [f"{kind}{k}"])
+            for k in range(3)
+        ]
+        nodes.append(
+            helper.make_node("Where", ["m1", f"{kind}1", f"{kind}0"], [f"{kind}_w1"])
+        )
+        nodes.append(
+            helper.make_node("Where", ["m2", f"{kind}2", f"{kind}_w1"], [f"{kind}_w"])
+        )
+        nodes.append(
+            helper.make_node(
+                "Concat", [f"{kind}_w", f"{kind}_w"], [f"{kind}_cache"], axis=-1
+            )
+        )
+    nodes.append(
+        helper.make_node(
+            "SparseAttentionIndexer",
+            ["query", "", "query_norm_weight", "key_norm_weight"]
+            + ["cos_cache", "sin_cache", "", "past_key"],
+            ["selected_indices", "present_key"],
+            domain="com.microsoft",
+            policy_mode="qsa",
+            compress_ratio=4,
+            token_budget=budget,
+        )
+    )
+    inputs = [
+        helper.make_tensor_value_info("query", elem, ["B", "S", (N + 1) * _D]),
+        helper.make_tensor_value_info("query_norm_weight", elem, [_D]),
+        helper.make_tensor_value_info("key_norm_weight", elem, [_D]),
+        helper.make_tensor_value_info("cos_base", elem, [rows, R // 2]),
+        helper.make_tensor_value_info("sin_base", elem, [rows, R // 2]),
+        helper.make_tensor_value_info("rotary_position_ids", TP.INT64, [M, "B", "X"]),
+        helper.make_tensor_value_info("past_key", elem, ["B", "P", _D]),
+    ]
+    outputs = [
+        helper.make_tensor_value_info(
+            "selected_indices", TP.INT32, ["B", "S", budget + 3]
+        ),
+        helper.make_tensor_value_info("present_key", elem, ["B", "T", _D]),
+    ]
+    inits = [numpy_helper.from_array(m, f"m{i}") for i, m in enumerate(masks, 1)]
+    model = make_model_from_nodes(nodes, inputs, outputs, inits, **_OPSETS)
+    model.ir_version = 10
+    return model
+
+
+@pytest.mark.parametrize("M, picks", [(3, (0, 1, 2)), (6, (0, 4, 5))])
+@pytest.mark.parametrize("S", [1, 64])
+def test_rotary_fold_matches_tables(model_runner, S, M, picks):
+    """The folded graph must match the indexer fed materialized tables bit for bit.
+
+    - The ids cover three distinct sections, per-batch offsets, negative
+      positions and a history X longer than the context.
+    - M = 3 reads the packed section map; M = 6 reads the per-channel one.
+    """
+    B, P, N, R, rows, budget = 2, 1000, 4, 64, 2048, 2048
+    X = P + S + 100
+    dt = np.float16
+    rng = np.random.default_rng(50 + S + M)
+    freq = np.arange(R // 2)
+    masks = (freq % 3 == 1, freq % 3 == 2)
+    ids = rng.integers(-rows, rows, (M, B, X))
+    ids[picks[0]] = np.arange(X) + rng.integers(0, 64, (B, 1))
+    ang = np.arange(rows)[:, None] / (10000.0 ** (freq / (R // 2)))
+    cos_base, sin_base = np.cos(ang).astype(dt), np.sin(ang).astype(dt)
+
+    def table(base):
+        g0, g1, g2 = (base[ids[pick]] for pick in picks)
+        w = np.where(masks[1], g2, np.where(masks[0], g1, g0))
+        return np.concatenate([w, w], axis=-1)
+
+    cos, sin = table(cos_base), table(sin_base)
+    query = rng.uniform(-1, 1, (B, S, (N + 1) * _D)).astype(dt)
+    qw = rng.uniform(0.5, 1.5, _D).astype(dt)
+    kw = rng.uniform(0.5, 1.5, _D).astype(dt)
+    past = rng.uniform(-1, 1, (B, P, _D)).astype(dt)
+
+    folded = model_runner.backend.run(
+        _persist(
+            model_runner,
+            _make_gathered_rotary_model(N, R, rows, budget, masks, M, picks),
+        ),
+        [query, qw, kw, cos_base, sin_base, ids, past],
+    )
+    tabled = _make_model(N, R, True, False, dt, 4, budget, None, None)
+    tabled = model_runner.backend.run(
+        _persist(model_runner, tabled), [query, qw, kw, cos, sin, past]
+    )
+    for got, want in zip(folded, tabled):
+        np.testing.assert_array_equal(got, want)
+
+    expected, present, row_info = _sai_reference(
+        query, qw, kw, cos, sin, None, past, 4, budget, 1e-6, 1 / np.sqrt(_D)
+    )
+    np.testing.assert_array_equal(folded[1], present)
+    _check_selected(folded[0], expected, row_info, 4, budget)
+
+
+@pytest.mark.parametrize("S", [1, 64])
+def test_counts_fold(model_runner, S):
+    """The folded counts equal the number of valid entries in each selected row.
+
+    The history is shorter than the budget, so each row has its own count.
+    """
+    B, P, N, R, budget = 2, 100, 4, 64, 2048
+    dt = np.float16
+    rng = np.random.default_rng(70 + S)
+    query = rng.uniform(-1, 1, (B, S, (N + 1) * _D)).astype(dt)
+    qw = rng.uniform(0.5, 1.5, _D).astype(dt)
+    kw = rng.uniform(0.5, 1.5, _D).astype(dt)
+    cos, sin = _rope_tables(rng, P + S, R, dt, B)
+    past = rng.uniform(-1, 1, (B, P, _D)).astype(dt)
+
+    model = _make_model(N, R, True, False, dt, 4, budget, None, None)
+    constants = {"zero": np.int32(0), "one": np.int32(1), "axes": np.array([-1])}
+    model.graph.node.extend(
+        [
+            helper.make_node(
+                "Constant", [], [name], value=numpy_helper.from_array(value)
+            )
+            for name, value in constants.items()
+        ]
+        + [
+            helper.make_node("GreaterOrEqual", ["selected_indices", "zero"], ["ge"]),
+            helper.make_node("Where", ["ge", "one", "zero"], ["valid"]),
+            helper.make_node(
+                "ReduceSum", ["valid", "axes"], ["selected_counts"], keepdims=0
+            ),
+        ]
+    )
+    model.graph.output.append(
+        helper.make_tensor_value_info("selected_counts", TP.INT32, ["B", "S"])
+    )
+    sel, present, counts = model_runner.backend.run(
+        _persist(model_runner, model), [query, qw, kw, cos, sin, past]
+    )
+
+    expected, want_present, row_info = _sai_reference(
+        query, qw, kw, cos, sin, None, past, 4, budget, 1e-6, 1 / np.sqrt(_D)
+    )
+    np.testing.assert_array_equal(present, want_present)
+    _check_selected(sel, expected, row_info, 4, budget)
+    np.testing.assert_array_equal(counts, (expected >= 0).sum(-1, dtype=np.int32))
+
+
+@pytest.mark.parametrize("bind_shared", [True, False])
+@pytest.mark.parametrize("has_mask", [False, True])
+def test_past_sequence_length(model_runner, bind_shared, has_mask):
+    """past_key / present_key are [B, C, D] caches holding past_sequence_length
+    valid rows. With bind_shared both are bound to one device buffer and the
+    rows past the valid ones must stay untouched."""
+    import onnxruntime as ort
+
+    backend = model_runner.backend
+    if not hasattr(backend, "create_session"):
+        pytest.skip("backend does not expose an ORT session for IO binding")
+    B, N, R, C, L = 2, 4, 64, 640, 300
+    dt = np.float16
+    rng = np.random.default_rng(40 + 2 * bind_shared + has_mask)
+    model = _make_model(N, R, True, has_mask, dt, 4, 64, 1e-6, None, shared=True)
+    sess = backend.create_session(_persist(model_runner, model))
+    qw = rng.uniform(0.5, 1.5, _D).astype(dt)
+    kw = rng.uniform(0.5, 1.5, _D).astype(dt)
+    cos, sin = _rope_tables(rng, C, R, dt, B)
+    cache = np.full((B, C, _D), np.nan, dt)
+    cache[:, :L] = rng.uniform(-1, 1, (B, L, _D)).astype(dt)
+    cache_dev = ort.OrtValue.ortvalue_from_numpy(
+        cache, device_type="gpu", vendor_id=0x1002
+    )
+
+    for S in [1, 5, 1]:
+        query = rng.uniform(-1, 1, (B, S, (N + 1) * _D)).astype(dt)
+        mask = None
+        if has_mask:
+            mask = np.ones((B, L + S), np.int64)
+            mask[1, :23] = 0
+        io = sess.io_binding()
+        names = ["query", "query_norm_weight", "key_norm_weight", "cos_cache"]
+        names += ["sin_cache", "past_sequence_length"]
+        feeds = [query, qw, kw, cos, sin, np.array([L], np.int32)]
+        if has_mask:
+            names.append("mask")
+            feeds.append(mask)
+        for name, arr in zip(names, feeds):
+            io.bind_cpu_input(name, arr)
+        io.bind_output("selected_indices")
+        if bind_shared:
+            io.bind_ortvalue_input("past_key", cache_dev)
+            io.bind_ortvalue_output("present_key", cache_dev)
+        else:
+            io.bind_cpu_input("past_key", cache)
+            io.bind_output("present_key")
+        sess.run_with_iobinding(io)
+        outputs = io.copy_outputs_to_cpu()
+
+        expected, present, row_info = _sai_reference(
+            query, qw, kw, cos, sin, mask, cache[:, :L], 4, 64, 1e-6, 1 / np.sqrt(_D)
+        )
+        _check_selected(outputs[0], expected, row_info, 4, 64)
+        cache[:, : L + S] = present
+        actual = cache_dev.numpy() if bind_shared else outputs[1]
+        np.testing.assert_array_equal(actual[:, : L + S], present)
+        if bind_shared:
+            np.testing.assert_array_equal(actual, cache)
+        L += S
 
 
 def _persist(model_runner, model):

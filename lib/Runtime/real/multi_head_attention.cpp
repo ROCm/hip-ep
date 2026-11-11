@@ -330,11 +330,15 @@ extern "C" int wrap_multi_head_attention(
   OP_PROFILE(
       "multi_head_attention",
       [&] {
+        // The rank-3 lowering passes head_size 0; name the size derived below.
+        const int64_t h = head_size > 0   ? head_size
+                          : num_heads > 0 ? query_hidden / num_heads
+                                          : 0;
         char b[80];
         snprintf(b, sizeof(b), "b=%lld,sq=%lld,skv=%lld,n=%lld,h=%lld%s",
                  (long long)batch_size, (long long)seq_len_q,
-                 (long long)seq_len_kv, (long long)num_heads,
-                 (long long)head_size, unidirectional ? ",causal" : "");
+                 (long long)seq_len_kv, (long long)num_heads, (long long)h,
+                 unidirectional ? ",causal" : "");
         return std::string(b);
       },
       state);
@@ -512,6 +516,7 @@ extern "C" int wrap_multi_head_attention(
     void *d_Vbnsh = fa + sz_kv;
 
     // Transpose K/V from BSND [B,Skv,N,H] to BNSD [B,N,Skv,H] (fp16).
+    OP_ROCTX_MARK("hip_ep.op.multi_head_attention.prep.transpose");
     if (hip_gqa_transpose_mid_dims(stream, key, d_Kbnsh, static_cast<int>(B),
                                    static_cast<int>(Skv), static_cast<int>(N),
                                    static_cast<int>(H), 2) != 0 ||
@@ -526,6 +531,7 @@ extern "C" int wrap_multi_head_attention(
 
     // Q is BSND [B,Sq,N,H] == the kernel's expected [B,sq,N,d]; O written in
     // place (BSND). K/V cache is the just-transposed BNSD with max_seq = Skv.
+    OP_ROCTX_MARK("hip_ep.op.multi_head_attention.attn.flash_prefill");
     int rc = hip_mha_flash_prefill(
         stream, query, d_Kbnsh, d_Vbnsh, output, static_cast<int>(B),
         static_cast<int>(N), static_cast<int>(Sq), static_cast<int>(Skv),
@@ -637,6 +643,8 @@ extern "C" int wrap_multi_head_attention(
   // hip_gqa_transpose_mid_dims swaps the middle two dims: input is treated
   // as [batch_size, dim1, dim2, D]. For Q with dim1=Sq, dim2=N this produces
   // [B, N, Sq, H]; same shape with Skv for K and V.
+  if (need_q_trans || need_kv_trans)
+    OP_ROCTX_MARK("hip_ep.op.multi_head_attention.prep.transpose");
   if (need_q_trans) {
     // MHA path is fp16-only; element_size_bytes=2.
     HIP_CHECK(hip_gqa_transpose_mid_dims(
@@ -684,6 +692,7 @@ extern "C" int wrap_multi_head_attention(
     float scoreAlpha = scale;
     float beta = 0.0f;
     hipblasLtMatmulAlgo_t sAlgo = scoreState->algo;
+    OP_ROCTX_MARK("hip_ep.op.multi_head_attention.attn.qk_gemm");
     HIPBLAS_CHECK(hipblasLtMatmul(
         ltHandle, scoreState->desc, &scoreAlpha, d_Kbnsh, scoreState->layA,
         d_Qbnsh, scoreState->layB, &beta, d_S_f32, scoreState->layC, d_S_f32,
@@ -693,6 +702,7 @@ extern "C" int wrap_multi_head_attention(
   // ---- Step 5: Optional causal mask (fp32) ------------------------------
   // S has logical shape [B*N, Sq, Skv]; head_stride = Sq*Skv.
   if (unidirectional == 1) {
+    OP_ROCTX_MARK("hip_ep.op.multi_head_attention.attn.mask");
     HIP_CHECK(hip_gqa_causal_mask_f32(
         stream, d_S_f32, static_cast<int>(B * N), static_cast<int>(Skv),
         static_cast<int>(Sq), static_cast<int>(Sq * Skv),
@@ -701,6 +711,7 @@ extern "C" int wrap_multi_head_attention(
 
   // ---- Step 6: Softmax (fp32 -> fp16) -----------------------------------
   // total_head_queries = B*N*Sq (one block per (head, query row)).
+  OP_ROCTX_MARK("hip_ep.op.multi_head_attention.attn.softmax");
   HIP_CHECK(hip_gqa_softmax_f32_to_f16(
       stream, d_S_f32, d_P_f16, static_cast<int>(B * N * Sq),
       static_cast<int>(Skv), static_cast<int>(Sq),
@@ -740,6 +751,7 @@ extern "C" int wrap_multi_head_attention(
     float valAlpha = 1.0f;
     float beta = 0.0f;
     hipblasLtMatmulAlgo_t vAlgo = valueState->algo;
+    OP_ROCTX_MARK("hip_ep.op.multi_head_attention.attn.pv_gemm");
     HIPBLAS_CHECK(hipblasLtMatmul(
         ltHandle, valueState->desc, &valAlpha, d_Vbnsh, valueState->layA,
         d_P_f16, valueState->layB, &beta, d_O_bnsh, valueState->layC, d_O_bnsh,
@@ -748,6 +760,7 @@ extern "C" int wrap_multi_head_attention(
 
   // ---- Step 8: Transpose O from BNSH [B,N,Sq,H] back to BSHD [B,Sq,N,H]
   if (need_o_trans) {
+    OP_ROCTX_MARK("hip_ep.op.multi_head_attention.out.transpose");
     HIP_CHECK(hip_gqa_transpose_mid_dims(
         stream, d_O_bnsh, output, static_cast<int>(B), static_cast<int>(N),
         static_cast<int>(Sq), static_cast<int>(H), /*element_size_bytes=*/2));

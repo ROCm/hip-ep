@@ -353,6 +353,56 @@ def Hip_LoopOp : Hip_Op<"loop",
   let hasVerifier = 1;
 }
 
+def Hip_ScanOp : Hip_Op<"scan",
+    [AttrSizedOperandSegments,
+     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+     DeclareOpInterfaceMethods<DestinationStyleOpInterface,
+                               ["getDpsInitsMutable"]>,
+     DeclareOpInterfaceMethods<InferTypeOpInterface,
+                               ["inferReturnTypes"]>,
+     DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "Outlined-body ONNX Scan";
+  let description = [{
+    Executes an outlined Scan body once for every slice of the scan inputs.
+    The first `$num_state_variables` init operands are loop-carried state
+    buffers; the remaining inits are the stacked scan-output buffers.
+    After bufferization, `$state_scratch` contains one caller-owned temporary
+    per state variable. These temporaries keep delayed state writeback from
+    aliasing either the state inputs or the caller's other pooled buffers.
+
+    This initial implementation accepts forward scans on axis zero. The
+    outlining pass validates the ONNX axis/direction attributes before
+    creating this op.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Variadic<Hip_TensorOrMemRef>:$scan_inputs,
+    Variadic<AnyType>:$captures,
+    Variadic<Hip_TensorOrMemRef>:$state_scratch,
+    Variadic<Hip_TensorOrMemRef>:$inits,
+    FlatSymbolRefAttr:$body_func,
+    I32Attr:$num_state_variables,
+    I32Attr:$num_scan_inputs,
+    I32Attr:$num_scan_outputs
+  );
+
+  let results = (outs Variadic<AnyRankedTensor>:$outputs);
+
+  let assemblyFormat = [{
+    `(` $ctx `)`
+    `scan_inputs` `(` $scan_inputs `:` type($scan_inputs) `)`
+    ( `captures` `(` $captures^ `:` type($captures) `)` )?
+    ( `state_scratch` `(` $state_scratch^ `:` type($state_scratch) `)` )?
+    `outs` `(` $inits `:` type($inits) `)`
+    ( `->` `(` type($outputs)^ `)` )?
+    `body` $body_func
+    attr-dict
+  }];
+
+  let hasVerifier = 1;
+}
+
 def Hip_IfOp : Hip_Op<"if",
     [AttrSizedOperandSegments,
      DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
@@ -986,6 +1036,16 @@ def Hip_QMoEOp : Hip_DpsOp_WithInfer<"qmoe", "Output", [AttrSizedOperandSegments
       fc1/fc2/fc3_zero_points: per-block zero points (optional)
       router_weights: alternative aggregation weights (optional, ONNX v1.25+, takes precedence over router_probs)
 
+    Routing (`routing_type`):
+      "softmax" (default): experts are the top-k of softmax(router_probs);
+        weights are those probabilities (or router_weights when present),
+        renormalized over k when normalize_routing_weights=1.
+      "sigmoid_bias": router_probs holds fp32 router logits. With
+        s = sigmoid(router_probs), experts are the top-k of
+        s + correction_bias (ties to the lower index), and the weights are
+        s / sum_k(s) * routed_scaling_factor (no sum when
+        normalize_routing_weights=0). router_weights must be absent.
+
     Uses destination-passing style: output buffer is provided as argument.
 
     Example:
@@ -1019,6 +1079,7 @@ def Hip_QMoEOp : Hip_DpsOp_WithInfer<"qmoe", "Output", [AttrSizedOperandSegments
     Optional<Hip_TensorOrMemRef>:$fc2_zero_points,        // fc2 dequant zero points
     Optional<Hip_TensorOrMemRef>:$fc3_zero_points,        // fc3 dequant zero points
     Optional<Hip_TensorOrMemRef>:$router_weights,         // [num_tokens, num_experts] alternative routing weights (ONNX v1.25+)
+    Optional<Hip_TensorOrMemRef>:$correction_bias,        // [num_experts] fp32, sigmoid_bias routing only
     Hip_TensorOrMemRef:$output,                 // DPS init [batch, seq, hidden]
     I64Attr:$expert_weight_bits,
     I64Attr:$k,
@@ -1029,8 +1090,11 @@ def Hip_QMoEOp : Hip_DpsOp_WithInfer<"qmoe", "Output", [AttrSizedOperandSegments
     F32Attr:$activation_alpha,
     F32Attr:$activation_beta,
     F32Attr:$swiglu_limit,
-    StrAttr:$activation_type
+    StrAttr:$activation_type,
+    DefaultValuedStrAttr<StrAttr, "softmax">:$routing_type,
+    DefaultValuedAttr<F32Attr, "1.0f">:$routed_scaling_factor
   );
+  let hasVerifier = 1;
 
   let assemblyFormat = [{
     `(` $handle `)` `ins` `(`
@@ -1050,6 +1114,7 @@ def Hip_QMoEOp : Hip_DpsOp_WithInfer<"qmoe", "Output", [AttrSizedOperandSegments
     (`fc2_zero_points` `(` $fc2_zero_points^ `:` type($fc2_zero_points) `)`)?
     (`fc3_zero_points` `(` $fc3_zero_points^ `:` type($fc3_zero_points) `)`)?
     (`router_weights` `(` $router_weights^ `:` type($router_weights) `)`)?
+    (`correction_bias` `(` $correction_bias^ `:` type($correction_bias) `)`)?
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
@@ -2898,7 +2963,8 @@ def Hip_SwigluOp : Hip_DpsOp_AutoReify<"swiglu"> {
 
     The operands and output must have identical shapes; this operation does
     not perform broadcasting. The fused runtime kernel supports f16, f32,
-    bf16, and f64.
+    bf16, and f64. With promote_activation, f16 inputs and output use f32
+    sigmoid and multiply intermediates; only the final result rounds to f16.
 
     Example:
     ```mlir
@@ -2912,7 +2978,8 @@ def Hip_SwigluOp : Hip_DpsOp_AutoReify<"swiglu"> {
     Hip_ContextType:$ctx,
     Hip_TensorOrMemRef:$gate,
     Hip_TensorOrMemRef:$up,
-    Hip_TensorOrMemRef:$output
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<BoolAttr, "false">:$promote_activation
   );
 
   let assemblyFormat = [{
@@ -4127,6 +4194,12 @@ def Hip_GqaOp : Hip_DpsOp_AutoReify<"gqa", [AttrSizedOperandSegments, OpStateOpI
     Optional<Hip_TensorOrMemRef>:$k_scale,        // Broadcastable to present_key shape
     Optional<Hip_TensorOrMemRef>:$v_scale,        // Broadcastable to present_value shape
 
+    // HIP extension (not in the MS spec): an additive fp16 bias per key,
+    // [batch, total_seq_len], added to every query row's scores on top of the
+    // causal and window masks. It carries a key-padding mask in a form the
+    // fused flash kernels apply directly, which a full attention_bias is not.
+    Optional<Hip_TensorOrMemRef>:$key_bias,
+
     // === DPS-style output buffers ===
     Hip_TensorOrMemRef:$output,        // 3D (batch, seq_len, hidden_size)
     Hip_TensorOrMemRef:$present_key,   // 4D BNSH format
@@ -4156,7 +4229,13 @@ def Hip_GqaOp : Hip_DpsOp_AutoReify<"gqa", [AttrSizedOperandSegments, OpStateOpI
     // Whisper / bidirectional-attention enabler: when true, the causal mask
     // step in the runtime is skipped. Default false preserves all existing
     // Llama / gpt-oss callers' behaviour.
-    DefaultValuedAttr<BoolAttr, "false">:$no_causal
+    DefaultValuedAttr<BoolAttr, "false">:$no_causal,
+
+    // HIP extension: every seqlens_k entry is total_seq_len - 1. A converter
+    // that broadcasts one host-computed length to [batch] on the device sets
+    // it, so HIP-to-LLVM can still forward the host-written total_seq_len and
+    // the runtime skips its seqlens_k readback.
+    UnitAttr:$uniform_seqlens_k
   );
 
   let assemblyFormat = [{
@@ -4189,6 +4268,7 @@ def Hip_GqaOp : Hip_DpsOp_AutoReify<"gqa", [AttrSizedOperandSegments, OpStateOpI
         ( `,` type($k_scale)^ )?
         ( `,` type($v_scale)^ )?
     `)`
+    ( `key_bias` `(` $key_bias^ `:` type($key_bias) `)` )?
     `outs` `(`
         $output `,` $present_key `,` $present_value
         ( `,` $output_qk^ )?
@@ -4649,45 +4729,75 @@ def Hip_GatedDeltaNetOp : Hip_DpsOp_AutoReify<"gated_delta_net"> {
   let hasVerifier = 1;
 }
 
-def Hip_DynamicSparseAttentionOp : Hip_DpsOp_AutoReify<"dynamic_sparse_attention"> {
+def Hip_DynamicSparseAttentionOp : Hip_DpsOp_AutoReify<"dynamic_sparse_attention",
+    [AttrSizedOperandSegments]> {
   let summary = "Attention over per-row selected KV positions "
                 "(com.microsoft DynamicSparseAttention)";
   let description = [{
     com.microsoft DynamicSparseAttention restricted to
     attention_mode = selected_only, selected_kv_source = main, is_causal = 1,
-    separate Q/K/V, a past cache, and no rotary, q/k norm, local window or
-    head sink.
+    a past cache, and no ORT rotary or q/k norm inputs, local window or head
+    sink.
 
     Shapes, with N = num_heads, kvN = kv_num_heads, D = head size:
       query                   [B, S, N*D]          f16
-      key, value              [B, S, kvN*D]        f16
+                              [B, S, (N+2*kvN)*D]  packed, without key/value
+      key, value (optional)   [B, S, kvN*D]        f16
       past_key, past_value    [B, kvN, Cap, D]     f16
       selected_indices        [B*S, K]             i32
       selected_counts         [B*S]                i32
       seqlens_k               [B]                  i32
+      gate (optional)         [B, S, N*D]          f16
+      q/k_norm_weight (opt.)  [D]                  f16
+      position_ids (opt.)     [3, B, S]            i64
+      cos/sin_cache (opt.)    [Y, R/2]             f16
       output                  [B, S, N*D]          f16
       present_key/value       [B, kvN, Cap, D]     f16
 
-    D = query width / N must be 128 or 256 and N / kvN at most 16; scale must
-    be finite and non-negative. Dynamic dims, including the cache head dim,
-    are checked against these shapes at run time. present starts as past (they
-    may share a buffer). With T = seqlens_k[b] + 1, token s of batch b is
-    written to cache position T - S + s when that lies in [0, Cap). Row
-    (b, s) attends from position T - S + s if S <= T <= Cap and has no
-    candidates otherwise. Its candidates are the first
+    key and value are both given, or both absent with query holding each
+    token's q, k and v heads in that order. D must be 128 or 256 and N / kvN
+    at most 16; scale must be finite and non-negative. Dynamic dims, including
+    the cache head dim, are checked against these shapes at run time. present
+    starts as past (they may share a buffer). With T = seqlens_k[b] + 1, token
+    s of batch b is written to cache position T - S + s when that lies in
+    [0, Cap). Row (b, s) attends from position T - S + s if S <= T <= Cap and
+    has no candidates otherwise. Its candidates are the first
     clamp(selected_counts, 0, K) entries of selected_indices, keeping only
     0 <= idx <= T - S + s; duplicates count each time. Head h uses KV head
     h / (N / kvN). Logits are scale * q.k in fp32 and an empty candidate set
     gives a zero output.
 
+    The prologue operands q_norm_weight, k_norm_weight, position_ids,
+    cos_cache and sin_cache come together with norm_epsilon, mrope_section
+    (three entries, R = 2 * their sum <= D) and mrope_layout (0 or 1). Each
+    query and key head (including the keys written to present_key) is then
+    first RMS-normalized, x * rsqrt(mean(x^2) + norm_epsilon) * weight in fp32
+    rounded to f16, and its first R channels rotated by split-half MRoPE,
+    rounded to f16: the result of a SimplifiedLayerNormalization over each
+    head followed by MRotaryEmbedding (interleaved = 0). Frequency j < R / 2
+    reads its position from row 0, 1 or 2 of position_ids, the MRoPE section
+    that mrope_section and mrope_layout give it; a position outside [0, Y)
+    leaves the pair unrotated.
+
+    With gate, output = attention * Sigmoid(gate), rounded to f16 after the
+    attention, after the sigmoid and after the product.
+
+    past_sequence_length (optional, i32 [1]) pairs the op with a pair_format
+    hip.sparse_attention_indexer of that past length P, whose selection it
+    reads: row (b, s) with P + s + 1 <= K is dense, and its c-th candidate
+    is position c (for c below its count) instead of a selected_indices
+    entry, which the indexer left unwritten there. The other filters are
+    unchanged.
+
     Example:
     ```mlir
-    hip.dynamic_sparse_attention(%ctx)
-        ins(%q, %k, %v, %past_k, %past_v, %idx, %cnt, %seqlens :
-            memref<1x1x6144xf16, 1>, memref<1x1x512xf16, 1>,
-            memref<1x1x512xf16, 1>, memref<1x2x4096x256xf16, 1>,
-            memref<1x2x4096x256xf16, 1>, memref<1x2051xi32, 1>,
-            memref<1xi32, 1>, memref<1xi32, 1>)
+    hip.dynamic_sparse_attention(%ctx) ins(%q : memref<1x1x6144xf16, 1>)
+        kv(%k, %v : memref<1x1x512xf16, 1>, memref<1x1x512xf16, 1>)
+        cache(%past_k, %past_v : memref<1x2x4096x256xf16, 1>,
+              memref<1x2x4096x256xf16, 1>)
+        select(%idx, %cnt, %seqlens : memref<1x2051xi32, 1>,
+               memref<1xi32, 1>, memref<1xi32, 1>)
+        gate(%g : memref<1x1x6144xf16, 1>)
         outs(%out, %present_k, %present_v : memref<1x1x6144xf16, 1>,
              memref<1x2x4096x256xf16, 1>, memref<1x2x4096x256xf16, 1>)
         {num_heads = 24 : i64, kv_num_heads = 2 : i64, scale = 6.250000e-02 : f32}
@@ -4697,29 +4807,45 @@ def Hip_DynamicSparseAttentionOp : Hip_DpsOp_AutoReify<"dynamic_sparse_attention
   let arguments = (ins
     Hip_ContextType:$ctx,
     Hip_TensorOrMemRef:$query,
-    Hip_TensorOrMemRef:$key,
-    Hip_TensorOrMemRef:$value,
+    Optional<Hip_TensorOrMemRef>:$key,
+    Optional<Hip_TensorOrMemRef>:$value,
     Hip_TensorOrMemRef:$past_key,
     Hip_TensorOrMemRef:$past_value,
     Hip_TensorOrMemRef:$selected_indices,
     Hip_TensorOrMemRef:$selected_counts,
     Hip_TensorOrMemRef:$seqlens_k,
+    Optional<Hip_TensorOrMemRef>:$gate,
+    Optional<Hip_TensorOrMemRef>:$q_norm_weight,
+    Optional<Hip_TensorOrMemRef>:$k_norm_weight,
+    Optional<Hip_TensorOrMemRef>:$position_ids,
+    Optional<Hip_TensorOrMemRef>:$cos_cache,
+    Optional<Hip_TensorOrMemRef>:$sin_cache,
+    Optional<Hip_TensorOrMemRef>:$past_sequence_length,
     Hip_TensorOrMemRef:$output,
     Hip_TensorOrMemRef:$present_key,
     Hip_TensorOrMemRef:$present_value,
     I64Attr:$num_heads,
     I64Attr:$kv_num_heads,
-    F32Attr:$scale
+    F32Attr:$scale,
+    OptionalAttr<F32Attr>:$norm_epsilon,
+    OptionalAttr<DenseI64ArrayAttr>:$mrope_section,
+    OptionalAttr<I64Attr>:$mrope_layout
   );
 
   let assemblyFormat = [{
-    `(` $ctx `)` `ins` `(`
-        $query `,` $key `,` $value `,` $past_key `,` $past_value `,`
-        $selected_indices `,` $selected_counts `,` $seqlens_k
-        `:` type($query) `,` type($key) `,` type($value) `,`
-        type($past_key) `,` type($past_value) `,` type($selected_indices) `,`
-        type($selected_counts) `,` type($seqlens_k)
-    `)`
+    `(` $ctx `)` `ins` `(` $query `:` type($query) `)`
+    (`kv` `(` $key^ `,` $value `:` type($key) `,` type($value) `)`)?
+    `cache` `(` $past_key `,` $past_value `:` type($past_key) `,`
+        type($past_value) `)`
+    `select` `(` $selected_indices `,` $selected_counts `,` $seqlens_k `:`
+        type($selected_indices) `,` type($selected_counts) `,`
+        type($seqlens_k) `)`
+    (`gate` `(` $gate^ `:` type($gate) `)`)?
+    (`prologue` `(` $q_norm_weight^ `,` $k_norm_weight `,` $position_ids `,`
+        $cos_cache `,` $sin_cache `:` type($q_norm_weight) `,`
+        type($k_norm_weight) `,` type($position_ids) `,` type($cos_cache) `,`
+        type($sin_cache) `)`)?
+    (`pair` `(` $past_sequence_length^ `:` type($past_sequence_length) `)`)?
     `outs` `(` $output `,` $present_key `,` $present_value `:`
               type($output) `,` type($present_key) `,` type($present_value) `)`
     attr-dict (`:` type($result_tensors)^)?
@@ -4728,13 +4854,14 @@ def Hip_DynamicSparseAttentionOp : Hip_DpsOp_AutoReify<"dynamic_sparse_attention
   let hasVerifier = 1;
 }
 
-def Hip_SparseAttentionIndexerOp : Hip_DpsOp_AutoReify<"sparse_attention_indexer"> {
+def Hip_SparseAttentionIndexerOp : Hip_DpsOp_AutoReify<"sparse_attention_indexer",
+    [AttrSizedOperandSegments]> {
   let summary = "Query-aware selection of KV token blocks "
                 "(com.microsoft SparseAttentionIndexer, policy_mode = qsa)";
   let description = [{
     com.microsoft SparseAttentionIndexer restricted to policy_mode = qsa with
-    packed QK (no separate key) and no past_sequence_length, so present_key
-    is past_key with the new keys appended.
+    packed QK (no separate key). present_key holds the P valid past_key rows
+    with the new keys appended.
 
     Shapes, with N query heads (at most 8), D = 128, R the rotary width
     (even, <= D),
@@ -4742,11 +4869,18 @@ def Hip_SparseAttentionIndexerOp : Hip_DpsOp_AutoReify<"sparse_attention_indexer
     K = token_budget / r (at most 512):
       query               [B, S, (N + 1) * D]   f16 or f32; key = last D
       query/key_norm_weight [D]
-      cos/sin_cache       [X, R] or [B, X, R]
+      cos/sin_cache       [X, R] or [B, X, R]; [Y, R / 2] with
+                          rotary_position_ids
       mask (optional)     [B, T]                i64, nonzero = visible
       past_key            [B, P, D]
+      past_sequence_length (optional) [1]       i32
+      rotary_position_ids (optional) [M, B, X]  i64
       selected_indices    [B, S, K * r + r - 1] i32
       present_key         [B, T, D]
+      selected_counts (optional) [B, S]         i32
+    With past_sequence_length, P is its value and past_key / present_key
+    are both [B, C, D] with T <= C. They may alias, in which case only rows
+    P .. T - 1 of present_key are written.
     The last dims of past_key, present_key and selected_indices must be
     static, epsilon finite and non-negative. Dynamic dims are checked against
     these shapes at run time.
@@ -4761,6 +4895,24 @@ def Hip_SparseAttentionIndexerOp : Hip_DpsOp_AutoReify<"sparse_attention_indexer
     scale * sum_h max(0, q_h . k_j) in fp32. The top min(K, blocks) blocks,
     ordered by score descending then block index ascending, emit their r
     token indices; the remaining visible tail follows and -1 fills the rest.
+    selected_counts, when given, receives the number of non-negative entries
+    of each selected_indices row.
+
+    With rotary_position_ids [M, B, X] (i64), cos/sin_cache are base tables
+    [Y, R / 2] and rotary_sections (R / 2 entries in [0, M)) gives the MRoPE
+    section of each frequency, the row of the ids that holds its positions:
+    channel d of row t in batch b uses base row
+    ids[rotary_sections[d mod R / 2], b, t], wrapped once if negative and
+    clamped to [0, Y - 1]. This is the [B, X, R] MRoPE table a
+    Gather/Where/Concat subgraph would otherwise materialize, read only at the
+    rows the indexer rotates.
+
+    pair_format, which needs past_sequence_length and selected_counts and no
+    mask, marks a selection read only by hip.dynamic_sparse_attention ops
+    paired through the same past_sequence_length. Row (b, s) with
+    P + s + 1 <= K * r + r - 1 selects every position; its selected_indices
+    row is left unwritten (its count is still written). The other rows list
+    their top blocks by ascending block index rather than by score.
 
     Example:
     ```mlir
@@ -4785,12 +4937,17 @@ def Hip_SparseAttentionIndexerOp : Hip_DpsOp_AutoReify<"sparse_attention_indexer
     Hip_TensorOrMemRef:$sin_cache,
     Hip_TensorOrMemRef:$past_key,
     Optional<Hip_TensorOrMemRef>:$mask,
+    Optional<Hip_TensorOrMemRef>:$past_sequence_length,
+    Optional<Hip_TensorOrMemRef>:$rotary_position_ids,
     Hip_TensorOrMemRef:$selected_indices,
     Hip_TensorOrMemRef:$present_key,
+    Optional<Hip_TensorOrMemRef>:$selected_counts,
     I64Attr:$compress_ratio,
     I64Attr:$token_budget,
     F32Attr:$epsilon,
-    F32Attr:$scale
+    F32Attr:$scale,
+    OptionalAttr<DenseI32ArrayAttr>:$rotary_sections,
+    UnitAttr:$pair_format
   );
 
   let assemblyFormat = [{
@@ -4802,8 +4959,13 @@ def Hip_SparseAttentionIndexerOp : Hip_DpsOp_AutoReify<"sparse_attention_indexer
         type($past_key)
     `)`
     (`mask` `(` $mask^ `:` type($mask) `)`)?
+    (`past_sequence_length` `(` $past_sequence_length^ `:`
+        type($past_sequence_length) `)`)?
+    (`rotary_position_ids` `(` $rotary_position_ids^ `:`
+        type($rotary_position_ids) `)`)?
     `outs` `(` $selected_indices `,` $present_key `:`
               type($selected_indices) `,` type($present_key) `)`
+    (`counts` `(` $selected_counts^ `:` type($selected_counts) `)`)?
     attr-dict (`:` type($result_tensors)^)?
   }];
 
@@ -5429,6 +5591,60 @@ def Hip_NonZeroOp : Hip_DpsOp_AutoReify<"nonzero"> {
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
     `outs` `(` $y `,` $count `:` type($y) `,` type($count) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_NonMaxSuppressionOp : Hip_DpsOp_AutoReify<"non_max_suppression"> {
+  let summary = "Greedy box selection (ONNX NonMaxSuppression)";
+  let description = [{
+    Implements ONNX NonMaxSuppression (opset 11+). `boxes` is `[B, S, 4]`
+    f32, `scores` is `[B, C, S]` f32. The three scalar operands are the
+    ONNX `max_output_boxes_per_class` (i64), `iou_threshold` (f32) and
+    `score_threshold` (f32); `has_score_threshold` is false when the ONNX
+    node omitted the last one, in which case its operand is ignored.
+
+    For every (batch, class) the op keeps boxes in descending score order
+    whose IoU with each already kept box is at most `iou_threshold`, up to
+    `max_output_boxes_per_class`. `selected` is `[N, 3]` i64 of
+    `(batch, class, box)` triples. N is data-dependent: the destination is
+    over-allocated to `B * C * S` rows and the true count is written to the
+    device i32 scalar `count`, which the converter reads back with
+    `hip.readback_dim` to slice `selected` to `[N, 3]`.
+
+    `center_point_box` is 0 for `[y1, x1, y2, x2]` corners and 1 for
+    `[x_center, y_center, width, height]`.
+
+    Example:
+    ```mlir
+    hip.non_max_suppression(%ctx)
+        ins(%boxes, %scores, %max, %iou, %score :
+            memref<1x?x4xf32, 1>, memref<1x1x?xf32, 1>, memref<i64, 1>,
+            memref<f32, 1>, memref<f32, 1>)
+        outs(%selected, %count : memref<?x3xi64, 1>, memref<i32, 1>)
+        {center_point_box = 0 : i64, has_score_threshold = true}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$boxes,
+    Hip_TensorOrMemRef:$scores,
+    Hip_TensorOrMemRef:$max_output_boxes_per_class,
+    Hip_TensorOrMemRef:$iou_threshold,
+    Hip_TensorOrMemRef:$score_threshold,
+    Hip_TensorOrMemRef:$selected,
+    Hip_TensorOrMemRef:$count,
+    I64Attr:$center_point_box,
+    BoolAttr:$has_score_threshold
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $boxes `,` $scores `,` $max_output_boxes_per_class
+    `,` $iou_threshold `,` $score_threshold `:` type($boxes) `,`
+    type($scores) `,` type($max_output_boxes_per_class) `,`
+    type($iou_threshold) `,` type($score_threshold) `)`
+    `outs` `(` $selected `,` $count `:` type($selected) `,` type($count) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
 }

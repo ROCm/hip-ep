@@ -38,6 +38,7 @@ namespace hipdnn_ep {
 namespace matmul_nbits_autotune {
 Result resolve(const Request&, WmmaValidator, GemvValidator, void*) { return {}; }
 Stats stats() { return {}; }
+bool extendedConfigsMeasured() { return false; }
 }  // namespace matmul_nbits_autotune
 }  // namespace hipdnn_ep
 #else

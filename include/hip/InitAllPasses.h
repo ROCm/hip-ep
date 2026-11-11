@@ -8,6 +8,7 @@
 #include <mutex>
 
 #include "hip/Compiler/PluginRegistry.h"
+#include "hip/Conversion/HipToLLVM/Passes.h"
 #include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Conversion/Passes.h"
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
@@ -82,6 +83,7 @@ public:
 enum class OnnxDialectKind { Stub, Modeled };
 
 inline void registerConvertToLLVMInterfaces(mlir::DialectRegistry &registry) {
+  mlir::hip::registerRuntimeAccessOpInterfaceExternalModels(registry);
   mlir::hipsr::registerConvertHipsrToLLVMInterface(registry);
   mlir::registerConvertFuncToLLVMInterface(registry);
   mlir::registerConvertMemRefToLLVMInterface(registry);
@@ -211,6 +213,9 @@ inline void registerAllPasses() {
     registerConversionPasses();
     mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
       return mlir::hip::createOnnxLoopOutlinePass();
+    });
+    mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
+      return mlir::hip::createOnnxScanOutlinePass();
     });
     mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
       return mlir::hip::createOnnxIfOutlinePass();
