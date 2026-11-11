@@ -226,12 +226,57 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
 
   // === Create DPS init tensors ===
 
+  mlir::Value totalCapacity;
   auto createPresentInit = [&](unsigned idx, mlir::RankedTensorType &type,
                                mlir::Value past,
                                mlir::Value kv) -> mlir::Value {
     auto kvType =
         kv ? mlir::dyn_cast<mlir::RankedTensorType>(kv.getType()) : nullptr;
     bool dropped = mlir::isa<mlir::NoneType>(op->getResult(idx).getType());
+    if (!dropped && type.getRank() == 4 && type.isDynamicDim(2)) {
+      // A shared cache retains its past buffer capacity. A growing cache
+      // must also fit total_seq_len, which includes this call's new tokens.
+      if (!totalCapacity)
+        totalCapacity =
+            mlir::hip::ReadbackDimOp::create(
+                rewriter, loc, rewriter.getIndexType(), context, totalSeqLen)
+                .getResult();
+      mlir::Value capacity = totalCapacity;
+      if (past) {
+        mlir::Value pastCapacity =
+            mlir::tensor::DimOp::create(rewriter, loc, past, int64_t{2});
+        capacity = mlir::arith::MaxSIOp::create(rewriter, loc, pastCapacity,
+                                                totalCapacity);
+      }
+      llvm::SmallVector<mlir::Value> dynSizes;
+      for (int64_t dimIdx : llvm::seq<int64_t>(type.getRank())) {
+        if (!type.isDynamicDim(dimIdx))
+          continue;
+        if (dimIdx == 2)
+          dynSizes.push_back(capacity);
+        else if (past)
+          dynSizes.push_back(
+              mlir::tensor::DimOp::create(rewriter, loc, past, dimIdx));
+        else if (dimIdx == 0)
+          dynSizes.push_back(
+              mlir::tensor::DimOp::create(rewriter, loc, query, int64_t{0}));
+        else if (dimIdx == 1)
+          dynSizes.push_back(mlir::arith::ConstantIndexOp::create(
+              rewriter, loc, kvNumHeadsAttr.getInt()));
+        else {
+          mlir::Value hidden =
+              mlir::tensor::DimOp::create(rewriter, loc, query, int64_t{2});
+          int64_t divisor =
+              numHeadsAttr.getInt() + (key ? 0 : 2 * kvNumHeadsAttr.getInt());
+          mlir::Value heads =
+              mlir::arith::ConstantIndexOp::create(rewriter, loc, divisor);
+          dynSizes.push_back(
+              mlir::arith::DivSIOp::create(rewriter, loc, hidden, heads));
+        }
+      }
+      return mlir::tensor::EmptyOp::create(rewriter, loc, type.getShape(),
+                                           type.getElementType(), dynSizes);
+    }
     if (!dropped || !kvType || kvType.getRank() != 3 || type.getRank() != 4 ||
         kvType.getDimSize(1) > 0)
       return createEmptyTensor(rewriter, loc, type,

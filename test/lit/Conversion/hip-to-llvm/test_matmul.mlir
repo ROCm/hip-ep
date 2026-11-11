@@ -95,3 +95,50 @@ module {
 // CHECK-NOT: llvm.select
 // CHECK: %[[STRIDE:.*]] = llvm.mlir.constant(0 : i64) : i64
 // CHECK: llvm.call @wrap_matmul_i32(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %[[STRIDE]]) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64) -> i32
+
+// CHECK-LABEL: llvm.func @matmul_bf16
+// CHECK: llvm.mlir.constant(-2 : i64)
+// CHECK: llvm.call @wrap_hipblasLtMatmul
+func.func @matmul_bf16(%ctx: !hip.context, %a: memref<19x37xbf16, 1>, %b: memref<37x21xbf16, 1>, %y: memref<19x21xbf16, 1>) {
+  hip.matmul(%ctx) ins(%a, %b : memref<19x37xbf16, 1>, memref<37x21xbf16, 1>) outs(%y : memref<19x21xbf16, 1>)
+  return
+}
+// CHECK-LABEL: llvm.func @matmul_partial_broadcast
+// CHECK: llvm.alloca
+// CHECK: llvm.store
+// CHECK: llvm.call @wrap_matmul_broadcast
+func.func @matmul_partial_broadcast(%ctx: !hip.context, %a: memref<2x3x19x37xf16, 1>, %b: memref<1x3x37x21xf16, 1>, %y: memref<2x3x19x21xf16, 1>) {
+  hip.matmul(%ctx) ins(%a, %b : memref<2x3x19x37xf16, 1>, memref<1x3x37x21xf16, 1>) outs(%y : memref<2x3x19x21xf16, 1>)
+  return
+}
+// CHECK-LABEL: llvm.func @matmul_cross_broadcast
+// CHECK: llvm.alloca
+// CHECK: llvm.store
+// CHECK: llvm.call @wrap_matmul_broadcast
+func.func @matmul_cross_broadcast(%ctx: !hip.context, %a: memref<2x1x19x37xf16, 1>, %b: memref<1x3x37x21xf16, 1>, %y: memref<2x3x19x21xf16, 1>) {
+  hip.matmul(%ctx) ins(%a, %b : memref<2x1x19x37xf16, 1>, memref<1x3x37x21xf16, 1>) outs(%y : memref<2x3x19x21xf16, 1>)
+  return
+}
+// CHECK-LABEL: llvm.func @matmul_unbatched_a
+// CHECK: llvm.alloca
+// CHECK: llvm.store
+// CHECK: llvm.call @wrap_matmul_broadcast
+func.func @matmul_unbatched_a(%ctx: !hip.context, %a: memref<19x37xf16, 1>, %b: memref<3x37x21xf16, 1>, %y: memref<3x19x21xf16, 1>) {
+  hip.matmul(%ctx) ins(%a, %b : memref<19x37xf16, 1>, memref<3x37x21xf16, 1>) outs(%y : memref<3x19x21xf16, 1>)
+  return
+}
+
+// CHECK-LABEL: llvm.func @matmul_vector_a_bf16
+// CHECK: llvm.mlir.constant(-2 : i64)
+// CHECK: llvm.call @wrap_matmul_broadcast
+func.func @matmul_vector_a_bf16(%ctx: !hip.context, %a: memref<37xbf16, 1>, %b: memref<3x37x21xbf16, 1>, %y: memref<3x21xbf16, 1>) {
+  hip.matmul(%ctx) ins(%a, %b : memref<37xbf16, 1>, memref<3x37x21xbf16, 1>) outs(%y : memref<3x21xbf16, 1>)
+  return
+}
+
+// CHECK-LABEL: llvm.func @matmul_vector_b
+// CHECK: llvm.call @wrap_hipblasLtMatmul
+func.func @matmul_vector_b(%ctx: !hip.context, %a: memref<2x19x37xf32, 1>, %b: memref<37xf32, 1>, %y: memref<2x19xf32, 1>) {
+  hip.matmul(%ctx) ins(%a, %b : memref<2x19x37xf32, 1>, memref<37xf32, 1>) outs(%y : memref<2x19xf32, 1>)
+  return
+}

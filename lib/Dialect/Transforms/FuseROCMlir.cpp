@@ -305,8 +305,9 @@ public:
     MLIRContext *ctx = &getContext();
     RewritePatternSet patterns(ctx);
     int counter = 0;
-    patterns.add<FuseAnchorPointwise<MatmulOp>, FuseAnchorPointwise<ConvOp>,
-                 FuseAnchorPointwise<GemmOp>>(ctx, &counter);
+    // Dense MatMul/Gemm must reach hip_gemm's LUT/resolver at runtime. A
+    // statically outlined rocMLIR kernel would bypass that single entry.
+    patterns.add<FuseAnchorPointwise<ConvOp>>(ctx, &counter);
 
     if (failed(applyPatternsGreedily(funcOp, std::move(patterns))))
       signalPassFailure();
