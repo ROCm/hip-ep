@@ -119,6 +119,18 @@ public:
         outputType.getDimSize(2) != valueHidden)
       return rewriter.notifyMatchFailure(op, "output shape mismatch");
 
+    // hip_mha_flash_prefill is the f16 non-causal prefill path: query sequence
+    // longer than one, and a head dim that still fits after rounding up to a
+    // multiple of 16 (the kernel rejects a padded dim above 256). Wave32 takes
+    // that kernel and never writes the score matrix; wave64 keeps the runtime
+    // score GEMM. This pass cannot see the device, so decomposing those shapes
+    // would drop the flash path. Decode and a wider head stay eligible.
+    int64_t paddedHeadDim = ((headDim + 15) / 16) * 16;
+    if (elementType.isF16() && seqQ > 1 && headDimV == headDim &&
+        paddedHeadDim <= 256)
+      return rewriter.notifyMatchFailure(
+          op, "f16 prefill stays on the runtime flash path");
+
     Location loc = op.getLoc();
     Value ctx = op.getCtx();
     SmallVector<ReassociationIndices> splitLast{{0}, {1}, {2, 3}};
