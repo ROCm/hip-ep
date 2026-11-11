@@ -34,7 +34,9 @@ module {
 // CHECK: %[[ONE:.*]] = llvm.mlir.constant(1.000000e+00 : f32) : f32
 // CHECK: %[[SCRATCH:.*]] = llvm.call @hipdnn_ep_get_host_scratch_base(
 // CHECK: llvm.insertvalue %[[SCRATCH]]
-// CHECK: llvm.store %[[ONE]], %{{.*}} : f32, !llvm.ptr
-// CHECK-NEXT: %[[FILL:.*]] = llvm.extractvalue
+// CHECK: %[[DESC:.*]] = llvm.insertvalue %{{.*}}[2] : !llvm.struct<(ptr, ptr, i64)>
+// CHECK: %[[PTR:.*]] = llvm.extractvalue %[[DESC]][1] : !llvm.struct<(ptr, ptr, i64)>
+// CHECK: llvm.store %[[ONE]], %[[PTR]] : f32, !llvm.ptr
+// CHECK: %[[FILL:.*]] = llvm.extractvalue %[[DESC]][1] : !llvm.struct<(ptr, ptr, i64)>
 // CHECK: llvm.call @wrap_trilu(%{{.*}}, %[[FILL]],
 // CHECK: llvm.func @inference_cleanup
