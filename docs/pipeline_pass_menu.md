@@ -142,6 +142,7 @@ the selected perfConfig string are printed only with `--verbose`.
 | `hip-externalize-constants` | module | Validate explicit serialization order, append unordered carriers deterministically, plan/serialize, then replace `hip.constant` using the existing inline/full/streaming/hybrid metadata contract. Direct threshold default: 0. |
 | `hip-fold-constant-extracts` | func.func | Resolve constant-index `tensor.extract` of vectors assembled with `tensor.insert_slice` (ONNX shape vectors) to the `from_elements` operand or integer constant element they read. |
 | `hip-infer-shapes` | module | Refine `?` dims on HIP DPS result types via `ReifyRankedShapedTypeOpInterface`. |
+| `hip-resolve-if-result-dims` | module | Replace each `hip.if_result_dim` placeholder left by `onnx-if-outline` with host size arithmetic on the `hip.if` captures, selected between the then and else branches. Must precede `hip-externalize-constants`, which moves the shape constants it reads out of the IR. |
 | `hip-fusion-transform` | module | HIP-to-HIP rewriting at unrestricted arity (one op → many, many → one, or subgraph → subgraph). The patterns live in `lib/Dialect/Transforms/fusion_pattern/` — PDLL files compiled into the library, plus native C++ for rewrites whose shape depends on the matched op's rank — and share one `RewritePatternSet`. |
 | `hip-split-duplicate-dps-inits` | func.func | De-alias DPS init operands that CSE merged onto one `tensor.empty`, so an op that reads back its own outputs (e.g. `hip.gqa` present K/V) does not share a buffer (pre-bufferize). |
 | `hip-resolve-tensor-dims` | func.func | Fold `tensor.dim` of reshape chains into root-dim arithmetic (pre-bufferize). |
@@ -150,7 +151,7 @@ the selected perfConfig string are printed only with `--verbose`.
 | `hip-fix-loop-accumulator-offset` | func.func | Rewrite frozen Concat-accumulator offsets in loop bodies to iter-driven offsets. |
 | `hip-optimize-memrefs` | func.func | HIP-specific buffer reuse / subview folding. |
 | `hip-promote-strided-operands` | func.func | Materialize identity-layout temporaries for non-identity-layout DPS-input memrefs. |
-| `hip-materialize-host-scalars` | func.func | Redirect tiny host-fed scalar allocs to runtime-owned host-mapped scratch (away from the GPU pool). |
+| `hip-materialize-host-scalars` | module | Redirect tiny host-fed scalar allocs, and tiny inline constant globals read by HIP ops, to runtime-owned host-mapped scratch (away from the GPU pool). Module-level because every function shares the one scratch buffer. |
 | `hip-resolve-memref-dims` | func.func | Fold post-bufferization `memref.dim` through view/reshape chains before pool planning. |
 | `hip-hoist-alloc-size-arith` | func.func | Hoist pure size producers before the earliest allocation their dependencies permit (PoolAllocs precondition). |
 | `hip-pool-allocs` | func.func | Pack allocations into one or more grow-on-demand GPU pools; stamp pool-planning module attributes. |
@@ -166,29 +167,42 @@ the selected perfConfig string are printed only with `--verbose`.
 Anchored on `func.func`, so the textual form needs `func.func(...)`. These run
 against HIP **tensor** IR (before bufferization) and are reached through
 `rocmlir-pipeline`. `hip-decompose-conv-transpose` also runs in the default
-ONNX-to-HIP tail; the other two do not.
+ONNX-to-HIP tail; the others do not. The fusion design is in
+[docs/design/rocmlir-fusion.md](design/rocmlir-fusion.md).
 
 | Name | Anchor | One-liner |
 |---|---|---|
-| `hip-decompose-conv-transpose` | func.func | Rewrite `hip.conv_transpose` into one stride-1 `hip.conv` per stride residue (MIOpen backward-data v4r1), reassembled with `tensor.insert_slice`. Reads the filter from an inline or file-backed `hip.constant`. Rank-3 inputs expand to a unit-height rank-4 conv so dynamic batch and width stay legal. Leaves unsupported cases (grouped, dilated, rank-4 dynamic, non-constant, memory-address-backed or non-f16/bf16/f32 weights, stride > kernel, > 64 residues) for the MIOpen path. Also runs in the ONNX-to-HIP tail, before shape inference. |
-| `hip-fuse-rocmlir` | func.func | Outline rocMLIR-eligible op groups into `rock.kernel` funcs around a gemm/convolution/attention anchor. |
+| `hip-decompose-conv-transpose` | func.func | Rewrite `hip.conv_transpose` into stride-1 `hip.conv`s, one per stride residue (MIOpen backward-data v4r1). Residues with equal tap counts, or unequal ones whose zero-padded filters cost at most twice the real taps, stack on the output-channel axis into one convolution with the constant bias tiled into it; its result is interleaved by an expand, a transpose (DepthToSpace) and a collapse, then cropped. Other residues are one convolution each, with the bias, reassembled with `tensor.insert_slice`. Reads the filter from an inline or file-backed `hip.constant`. Rank-3 inputs expand to a unit-height rank-4 conv so dynamic batch and width stay legal. Leaves unsupported cases (grouped, dilated, rank-4 dynamic, non-constant, memory-address-backed or non-f16/bf16/f32 weights, stride > kernel, > 64 residues) for the MIOpen path. Also runs in the ONNX-to-HIP tail, before shape inference. |
+| `hip-hoist-pointwise-over-views` | func.func | Move a pointwise op whose other inputs are constant scalars above a chain of single-use element-move views over a single-use conv, matmul or gemm result, so the anchor fusion takes it into the epilogue. The anchor result may have at most 50% more elements than the op's input. |
+| `hip-rocmlir-prepare-quant` | func.func | Sink each per-tensor `hip.quantize_linear` back through element-move ops to its dequantizes, split each QLinearConv / QLinearMatMul with ui8 weights or a non-zero weight zero point into integer ops on `w - offset` and over the shifted zero point, then rebias each ui8 tree that reaches an integer anchor to i8. |
+| `hip-fuse-rocmlir-elementwise` | func.func | Group the pointwise ops, transposes, static reshapes and per-tensor quantizes and dequantizes into `hip.rocmlir_elementwise` modules that an anchor can take whole. |
+| `hip-fuse-rocmlir-anchor` | func.func | Plan an epilogue and a prologue of modules for each conv, matmul and gemm anchor, and outline each plan into a `rock.kernel` function (stamped with `rock.arch` from the `arch` option when set) behind `hip.rocmlir`. A module that no plan takes and that saves a launch becomes a `rock.elementwise` kernel when `standalone-elementwise` is on (the default; `HIPDNN_EP_ROCMLIR_NO_STANDALONE_ELEMENTWISE=1` turns it off in the EP), after its boundary transposes that move the innermost dimension are peeled into HIP transposes and the slice chains of its inputs are copied into it; the other modules are inlined. Decomposes the QLinear ops and dequantized convs that become integer anchors, then merges gemm-elementwise-gemm pairs. |
+| `hip-inline-rocmlir-elementwise` | func.func | Put the body of each `hip.rocmlir_elementwise` back in its block. For tests and replays. |
+| `hip-rocmlir-fusion-report` | module | Append one JSON line for each kernel and host function to the `report` file. |
 | `convert-hip-to-tosa` | func.func | Lower the outlined kernel bodies from HIP ops to TOSA. |
 
-Order matters: `hip-decompose-conv-transpose` must run **before**
-`hip-fuse-rocmlir`, because rocMLIR has no transposed-convolution anchor and
-would otherwise refuse to outline the op at all. The registered pipeline runs
+Order matters: `hip-decompose-conv-transpose` must run **before** the fusion,
+because rocMLIR has no transposed-convolution anchor and would otherwise refuse
+to outline the op at all. `hip-hoist-pointwise-over-views` then moves the
+activation after the interleave and crop onto the convolution's result.
+`hip-rocmlir-prepare-quant` fixes the quantize trees
+before the elementwise pass groups them, and the anchor pass plans its kernels
+on those modules. The registered pipeline runs
 
 ```
 func.func(hip-decompose-conv-transpose)
-func.func(hip-fuse-rocmlir)
+func.func(hip-hoist-pointwise-over-views)
+func.func(hip-rocmlir-prepare-quant)
+func.func(hip-fuse-rocmlir-elementwise)
+func.func(hip-fuse-rocmlir-anchor)
 duplicate-function-elimination
 func.func(convert-hip-to-tosa)
 canonicalize
 ```
 
 The decomposition emits its residues already folded — the sub-filters are
-computed at pass time — so it needs no canonicalize of its own before the fuse
-pass, and none runs there.
+computed at pass time — so it needs no canonicalize of its own before the fusion
+passes, and none runs there.
 
 > The `hipsr-*` family and `convert-onnx-to-hipsr` are registered but not yet
 > tabulated here.
@@ -197,7 +211,7 @@ pass, and none runs there.
 
 | Name | Anchor | One-liner |
 |---|---|---|
-| `canonicalize` | any | Standard canonicalization. |
+| `canonicalize` | any | Standard canonicalization. The `hip.cast` patterns also fold an exact float widening, a chain of single-use element-move ops and the narrowing back into the chain on the narrow type (see [docs/design/element-move-interface.md](design/element-move-interface.md)). |
 | `cse` | any | Common-subexpression elimination. |
 | `one-shot-bufferize` | module | Tensor → memref bufferization (function boundaries, identity layout); `HIPDNN_EP_BUFFERIZE_COPY_BEFORE_WRITE=1` enables the huge-graph copy-before-write escape hatch. |
 | `buffer-deallocation-pipeline` | module | Ownership-based buffer deallocation; available to custom pipelines and characterization tests, but omitted from the built-in pipeline. |
@@ -250,6 +264,8 @@ ONNX → HIP  (buildOnnxToHipPipeline)
                                            runs the same pass in its own head)
   func.func(hip-fold-constant-extracts)
   hip-infer-shapes
+  hip-resolve-if-result-dims         (must precede externalization: it reads
+                                      the shape constants the branches use)
   hip-fusion-transform               (must precede externalization: its patterns
                                       read hip.constant payloads)
   hip-externalize-constants
@@ -265,7 +281,7 @@ ONNX → HIP  (buildOnnxToHipPipeline)
   lower-affine
   cse ; canonicalize
   func.func(convert-linalg-to-loops)
-  func.func(hip-materialize-host-scalars)
+  hip-materialize-host-scalars
   func.func(hip-optimize-memrefs)
   func.func(hip-promote-strided-operands)
   func.func(hip-resolve-memref-dims)

@@ -9,7 +9,9 @@
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/MathExtras.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/OpDefinition.h"
@@ -114,6 +116,56 @@ LogicalResult AllocOutputOp::verify() {
     return emitOpError("expected ")
            << memrefTy.getNumDynamicDims() << " dynamic size operand(s), got "
            << getDynamicSizes().size();
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// RocMlirElementwiseOp
+//===----------------------------------------------------------------------===//
+
+// rock.blockwise_load and rock.blockwise_store take integers of at most 32
+// bits, so a wider integer tensor cannot cross a kernel boundary.
+static bool isRocMlirKernelIOType(RankedTensorType type) {
+  auto intType = dyn_cast<IntegerType>(type.getElementType());
+  return type.hasStaticShape() && (!intType || intType.getWidth() <= 32);
+}
+
+LogicalResult RocMlirElementwiseOp::verify() {
+  Block &body = getBody().front();
+  if (body.getNumArguments() != getInputs().size() + 1 ||
+      !isa<ContextType>(body.getArgument(0).getType()))
+    return emitOpError("expects a !hip.context block argument followed by "
+                       "one block argument per input");
+  for (auto [input, arg] :
+       llvm::zip(getInputs(), body.getArguments().drop_front())) {
+    if (input.getType() != arg.getType())
+      return emitOpError("block argument type ")
+             << arg.getType() << " does not match input type "
+             << input.getType();
+    if (!isRocMlirKernelIOType(cast<RankedTensorType>(input.getType())))
+      return emitOpError("input type ")
+             << input.getType()
+             << " is not static or has an integer wider than 32 bits";
+  }
+  for (Type type : getResultTypes()) {
+    auto tensorType = cast<RankedTensorType>(type);
+    if (!isRocMlirKernelIOType(tensorType) || tensorType.getRank() == 0)
+      return emitOpError("result type ")
+             << type
+             << " is rank 0, not static, or has an integer wider than 32 bits";
+  }
+  auto yield = cast<YieldOp>(body.getTerminator());
+  if (yield.getValues().getTypes() != getResultTypes())
+    return emitOpError("yields types that do not match the results");
+  for (Operation &op : body.without_terminator()) {
+    StringRef dialect = op.getDialect() ? op.getDialect()->getNamespace() : "";
+    bool allowed = op.getNumRegions() == 0 &&
+                   (dialect == HipDialect::getDialectNamespace() ||
+                    isa<tensor::EmptyOp, tensor::ExpandShapeOp,
+                        tensor::CollapseShapeOp, arith::ConstantOp>(op));
+    if (!allowed)
+      return op.emitOpError("is not allowed in a hip.rocmlir_elementwise body");
+  }
   return success();
 }
 
@@ -674,11 +726,40 @@ static void printSingleInitDpsOp(OpAsmPrinter &p, Operation *op, Value ctx,
 }
 
 //===------------
-// RocMlirOp: ins(variadic) outs(output)
+// RocMlirOp: ins(variadic) outs(variadic)
 //===------------
 
 MutableOperandRange RocMlirOp::getDpsInitsMutable() {
-  return getOutputMutable();
+  return getOutputsMutable();
+}
+
+LogicalResult RocMlirOp::verify() {
+  if (getOutputs().empty())
+    return emitOpError("requires at least one outs operand");
+  ArrayRef<int64_t> prefill = getPrefill();
+  if (prefill.size() % 3 != 0)
+    return emitOpError("prefill holds (index, bytes, pattern) triples");
+  int64_t numArgs = getInputs().size() + getOutputs().size();
+  for (size_t i = 0; i < prefill.size(); i += 3) {
+    if (prefill[i] < 0 || prefill[i] >= numArgs)
+      return emitOpError("prefill argument index ")
+             << prefill[i] << " is out of range";
+    if (prefill[i + 1] != 1 && prefill[i + 1] != 2 && prefill[i + 1] != 4)
+      return emitOpError("prefill element size must be 1, 2 or 4 bytes");
+  }
+  if (!isa<RankedTensorType>(getOutputs().front().getType())) {
+    if (getNumResults() != 0)
+      return emitOpError("on memrefs has no results");
+    return success();
+  }
+  if (getNumResults() != getOutputs().size())
+    return emitOpError("requires one result per outs operand");
+  for (auto [result, init] : llvm::zip(getResults(), getOutputs()))
+    if (result.getType() != init.getType())
+      return emitOpError("result type ")
+             << result.getType() << " differs from its outs type "
+             << init.getType();
+  return success();
 }
 
 void RocMlirOp::getEffects(
@@ -773,14 +854,14 @@ static bool isEightBitInt(Type type) {
   return integer && integer.getWidth() == 8;
 }
 
-static LogicalResult verifyPositivePair(QLinearConvOp op, ArrayAttr attr,
+static LogicalResult verifyPositivePair(Operation *op, ArrayAttr attr,
                                         StringRef name) {
   if (attr.size() != 2)
-    return op.emitOpError() << name << " must have 2 entries";
+    return op->emitOpError() << name << " must have 2 entries";
   for (Attribute entry : attr) {
     auto intAttr = dyn_cast<IntegerAttr>(entry);
     if (!intAttr || intAttr.getInt() <= 0)
-      return op.emitOpError() << name << " entries must be positive";
+      return op->emitOpError() << name << " entries must be positive";
   }
   return success();
 }
@@ -844,6 +925,49 @@ LogicalResult QLinearConvOp::verify() {
     if (!isa<IntegerAttr>(entry))
       return emitOpError("pads entries must be integers");
   }
+  if (getGroup() < 1)
+    return emitOpError("group must be positive");
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// QuantConvOp: i8 x i8 -> i32 grouped 2D convolution
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange QuantConvOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void QuantConvOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult QuantConvOp::verify() {
+  auto inputType = dyn_cast<ShapedType>(getInput().getType());
+  auto weightsType = dyn_cast<ShapedType>(getWeights().getType());
+  auto outputType = dyn_cast<ShapedType>(getOutput().getType());
+  if (!inputType || !weightsType || !outputType || !inputType.hasRank() ||
+      !weightsType.hasRank() || !outputType.hasRank() ||
+      inputType.getRank() != 4 || weightsType.getRank() != 4 ||
+      outputType.getRank() != 4)
+    return emitOpError("input, weights, and output must be rank 4");
+  if (!isEightBitInt(inputType.getElementType()))
+    return emitOpError("input must be i8 or ui8");
+  if (!weightsType.getElementType().isSignlessInteger(8))
+    return emitOpError("weights must be i8");
+  if (!outputType.getElementType().isSignlessInteger(32))
+    return emitOpError("output must be i32");
+  if (failed(verifyPositivePair(*this, getKernelShape(), "kernel_shape")) ||
+      failed(verifyPositivePair(*this, getStrides(), "strides")) ||
+      failed(verifyPositivePair(*this, getDilations(), "dilations")))
+    return failure();
+  if (getPads().size() != 4 || llvm::any_of(getPads(), [](Attribute entry) {
+        auto intAttr = dyn_cast<IntegerAttr>(entry);
+        return !intAttr || intAttr.getInt() < 0;
+      }))
+    return emitOpError("pads must have 4 non-negative entries");
   if (getGroup() < 1)
     return emitOpError("group must be positive");
   return success();
@@ -931,6 +1055,37 @@ LogicalResult QLinearMatMulOp::verify() {
       failed(verifyQuantParam(*this, getYScale(), getYZeroPoint(),
                               yType.getElementType(), "y", /*axisExtent=*/1)))
     return failure();
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// QuantMatmulOp: i8 x i8 -> i32 rank-2 matrix product
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange QuantMatmulOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void QuantMatmulOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult QuantMatmulOp::verify() {
+  auto aType = dyn_cast<ShapedType>(getA().getType());
+  auto bType = dyn_cast<ShapedType>(getB().getType());
+  auto outputType = dyn_cast<ShapedType>(getOutput().getType());
+  if (!aType || !bType || !outputType || !aType.hasRank() || !bType.hasRank() ||
+      !outputType.hasRank() || aType.getRank() != 2 || bType.getRank() != 2 ||
+      outputType.getRank() != 2)
+    return emitOpError("a, b, and output must be rank 2");
+  if (!isEightBitInt(aType.getElementType()))
+    return emitOpError("a must be i8 or ui8");
+  if (!bType.getElementType().isSignlessInteger(8))
+    return emitOpError("b must be i8");
+  if (!outputType.getElementType().isSignlessInteger(32))
+    return emitOpError("output must be i32");
   return success();
 }
 
@@ -2448,6 +2603,22 @@ void ResizeOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
+LogicalResult ResizeOp::verify() {
+  if (getRuntimeScales().empty())
+    return success();
+  // Runtime scales are indexed by window axis, so the launch split cannot be
+  // replanned from compile-time scales during lowering.
+  if (getScalesAttr())
+    return emitOpError("runtime_scales and scales are mutually exclusive");
+  auto spatialAttr = (*this)->getAttrOfType<IntegerAttr>("spatial_rank");
+  if (!spatialAttr || !(*this)->hasAttr("prefix_count"))
+    return emitOpError("runtime_scales requires prefix_count and spatial_rank");
+  if (static_cast<int64_t>(getRuntimeScales().size()) != spatialAttr.getInt())
+    return emitOpError("expected one runtime scale per window axis (")
+           << spatialAttr.getInt() << "), got " << getRuntimeScales().size();
+  return success();
+}
+
 //===----------------------------------------------------------------------===//
 // GridSampleOp: ins(input, grid), outs(output)
 //===----------------------------------------------------------------------===//
@@ -2497,6 +2668,76 @@ LogicalResult GridSampleOp::verify() {
   int64_t align = getAlignCorners();
   if (align != 0 && align != 1)
     return emitOpError("align_corners must be 0 or 1, got ") << align;
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// RoiAlignOp: ins(input, rois, batch_indices), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange RoiAlignOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void RoiAlignOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult RoiAlignOp::verify() {
+  SmallVector<Value> dataOperands{getInput(), getRois(), getBatchIndices(),
+                                  getOutput()};
+  if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/1)))
+    return failure();
+
+  auto inputShape = detail::getShapeOf(getInput());
+  auto roisShape = detail::getShapeOf(getRois());
+  auto indicesShape = detail::getShapeOf(getBatchIndices());
+  auto outputShape = detail::getShapeOf(getOutput());
+  if (inputShape.size() != 4)
+    return emitOpError("expected 4-D input (N, C, H, W)");
+  if (roisShape.size() != 2 ||
+      (!ShapedType::isDynamic(roisShape[1]) && roisShape[1] != 4))
+    return emitOpError("expected rois of shape (num_rois, 4)");
+  if (indicesShape.size() != 1)
+    return emitOpError("expected 1-D batch_indices (num_rois)");
+  if (outputShape.size() != 4)
+    return emitOpError(
+        "expected 4-D output (num_rois, C, output_height, output_width)");
+
+  Type elemTy = getElementTypeOrSelf(getInput().getType());
+  if (getElementTypeOrSelf(getRois().getType()) != elemTy ||
+      getElementTypeOrSelf(getOutput().getType()) != elemTy)
+    return emitOpError("input, rois and output must share an element type");
+  if (!getElementTypeOrSelf(getBatchIndices().getType()).isInteger(64))
+    return emitOpError("batch_indices must be i64");
+
+  int64_t mode = getMode();
+  if (mode != 0 && mode != 1)
+    return emitOpError("mode must be 0 (avg) or 1 (max), got ") << mode;
+  if (getOutputHeight() < 1 || getOutputWidth() < 1)
+    return emitOpError("output_height and output_width must be >= 1");
+  if (getSamplingRatio() < 0)
+    return emitOpError("sampling_ratio must be >= 0");
+  int64_t halfPixel = getHalfPixel();
+  if (halfPixel != 0 && halfPixel != 1)
+    return emitOpError("half_pixel must be 0 or 1, got ") << halfPixel;
+
+  auto checkDim = [&](int64_t outDim, int64_t expected,
+                      StringRef what) -> LogicalResult {
+    if (ShapedType::isDynamic(outDim) || ShapedType::isDynamic(expected) ||
+        outDim == expected)
+      return success();
+    return emitOpError("output ")
+           << what << " " << outDim << " does not match expected " << expected;
+  };
+  if (failed(checkDim(outputShape[0], roisShape[0], "num_rois")) ||
+      failed(checkDim(outputShape[0], indicesShape[0], "num_rois")) ||
+      failed(checkDim(outputShape[1], inputShape[1], "channels")) ||
+      failed(checkDim(outputShape[2], getOutputHeight(), "height")) ||
+      failed(checkDim(outputShape[3], getOutputWidth(), "width")))
+    return failure();
   return success();
 }
 

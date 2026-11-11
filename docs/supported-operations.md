@@ -12,7 +12,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 
 | Operation | Backend or lowering |
 |---|---|
-| Conv | Custom HIP kernel. Rank-3 (NCL) is rewritten to a unit-height 2D conv; rank-4 (NCHW) and rank-5 (NCDHW) lower directly |
+| Conv | Custom HIP kernel. Rank-3 (NCL) is rewritten to a unit-height 2D conv; rank-4 (NCHW) and rank-5 (NCDHW) lower directly. With `HIPDNN_EP_ROCMLIR=1`, a 2D conv of a per-tensor dequantized 8-bit input and dequantized i8 weights with a zero weight zero point runs as a rocMLIR i8 conv scaled by `x_scale * w_scale`, with the bias, activation, and quantize after it in the same kernel |
 | NhwcConv (`com.microsoft`) | Rank-4 NHWC activations and `[M, kH, kW, C/group]` weights are transposed into `hip.conv` and the result is transposed back. Static weights are permuted while lowering |
 | ConvTranspose | Custom HIP kernel |
 | MatMul | hipBLASLt |
@@ -23,7 +23,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Add | Custom HIP kernel |
 | ImageScaler | Decomposed to `hip.mul`, or `hip.add` then `hip.mul` when the per-channel bias is non-zero. NCHW only; bias broadcasts as `1xCx1x1`. |
 | Sum | Decomposed to Add. Variadic elementwise sum with NumPy broadcast; same rank and dtype limits as Add |
-| Softmax | Custom HIP kernel |
+| Softmax | Custom HIP kernel. Last axis only; a missing `axis` is accepted for rank <= 2. f16/bf16/f32 |
 | Sigmoid | Custom HIP kernel |
 | Tanh | Custom HIP kernel |
 | Softplus | Custom HIP kernel (f32/f16) |
@@ -89,9 +89,10 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Compress | Custom HIP kernel; a dynamic selected extent is scanned and read back before allocation |
 | OneHot | Custom HIP kernel |
 | LayerNormalization | Custom HIP kernel |
-| InstanceNormalization | Custom HIP kernel |
+| InstanceNormalization | Custom HIP kernel. Rows of 16K elements or more use the GroupNorm split reduction with one channel per group |
 | BatchNormalization | Custom HIP kernel; inference only (`training_mode` stays on ONNX) |
-| GroupNorm (`com.microsoft`) | Custom HIP kernel; optional SiLU, NCHW or NHWC |
+| GroupNorm (`com.microsoft`) | Custom HIP kernel; optional SiLU, NCHW or NHWC; f16, bf16, f32 and f64. Groups of 16K elements or more (`HIPDNN_EP_GROUPNORM_SPLIT_SIZE` overrides the threshold) use a split reduction over the runtime workspace, sized from the device's unit count and threads per unit; the result is deterministic |
+| GroupNormalization | Same kernel as GroupNorm, NCHW, for the opset-21 per-channel scale and bias. The opset-18 per-group form is not supported |
 | SkipLayerNormalization (`com.microsoft`) | Decomposed to Add + LayerNormalization, including the optional input bias |
 | EmbedLayerNormalization (`com.microsoft`) | Decomposed to Gather + Add + LayerNormalization. f16/f32 tables, i32 indices. A missing position-id input uses `0 .. sequence-1` when the sequence length is static. `mask_index` is the count of ones along the sequence; with no mask it is zeros |
 | RMSNormalization | Custom HIP kernel |
@@ -116,19 +117,19 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | MatMulBnb4 (`com.microsoft`) | HIP dequant of FP4 (`quant_type` 0) or NF4 (`quant_type` 1) into `[N, K]`, then `hip.matmul` with `transB = 1`. The first packed value is the high nibble. Static shapes pull that dequant into the rocMLIR matmul kernel. A dynamic activation leaves the dequant on HIP and the GEMM on hipBLASLt. Block size 16, 32, 64, 128, or 256. `transB` must be 1 and `training_mode` must be 0 |
 | QMoE (`com.microsoft`) | Custom HIP kernel. FP16 activations with 2-bit or 4-bit expert weights in the schema `[E, N, K/pack]` layout. Block size must be a power of two and at least 32. SwiGLU intermediates beyond the fp16 range do not overflow, as in the CPU reference: decode keeps them in fp32, and prefill stores such a row divided by a power of two, which is exact except for elements pushed into fp16 subnormals. The fc2 bias of a scaled row is added after the rescale. Sigmoid + correction-bias routing built outside the op (`TopK` over `Sigmoid(logits) + bias`, renormalized and scaled weights, two `ScatterElements` into the dense router inputs) is folded into the op and routed on the device from the fp32 logits |
 | GatherBlockQuantized (`com.microsoft`) | Custom HIP kernel |
-| QuantizeLinear | Custom HIP kernel |
+| QuantizeLinear | Custom HIP kernel. With rocMLIR, a per-tensor or per-axis saturating quantize after a convolution becomes the conv kernel's epilogue, so the kernel writes the integer type |
 | DynamicQuantizeLinear | Decomposed to single-axis ReduceMin/ReduceMax, scale and zero-point math, and `hip.quantize_linear` with axis 0. A zero input range selects scale 1 |
-| DequantizeLinear | Custom HIP kernel |
+| DequantizeLinear | Custom HIP kernel. With rocMLIR, a per-tensor or per-axis dequantize of a conv activation becomes the conv kernel's prologue, so the kernel reads the integer type |
 | ConvInteger | Decomposed to Cast, Sub, and `hip.conv`, then Cast back to i32 when `65025 * (C/group) * product(kernel_shape)` fits in the f32 mantissa. A longer reduction accumulates in i32 and is not rewritten to `hip.gemm`. Rank-3 NCL and rank-4 NCHW with a static or dynamic batch; channels, spatial dimensions, and weights must be static. Rank-3 is expanded to the shared 2D path. Scalar or per-output-channel weight zero point |
 | MatMulInteger | Decomposed to Cast, Sub, and `hip.matmul`, then Cast back to i32 when `65025 * K` fits in the f32 mantissa. A longer K accumulates in i32. Rank 2–4. A static rank-2 B may be shared across dynamic batch and sequence dimensions, including a dynamic M. B's K and N stay static. An uninferred K on A still lowers and accumulates in i32. A per-row zero point requires a static M. A size-1 batch on A is expanded to the result batch. A rank-2 B stays one shared matrix, and an i32 `hip.matmul` passes batch stride 0 for it. Scalar or per-row / per-column zero point |
-| QLinearConv | Custom HIP kernel. 8-bit grouped NCHW, optional int32 bias. `NOTSET` uses the pads attribute. `VALID`, `SAME_UPPER`, and `SAME_LOWER` are resolved to explicit pads. Separate from the W4A16 `hip.qconv` fusion |
+| QLinearConv | Custom HIP kernel. 8-bit grouped NCHW, optional int32 bias. `NOTSET` uses the pads attribute. `VALID`, `SAME_UPPER`, and `SAME_LOWER` are resolved to explicit pads. Separate from the W4A16 `hip.qconv` fusion. With `HIPDNN_EP_ROCMLIR=1`, constant parameters move it to a rocMLIR i8 conv with a fused requantize; ui8 weights or a non-zero weight zero point add a second i8 conv over the zero point |
 | QLinearAdd (`com.microsoft`) | Decomposed to DequantizeLinear + Add + QuantizeLinear; per-tensor scales fuse to `hip.qadd` |
 | QLinearMul (`com.microsoft`) | Decomposed to DequantizeLinear + Mul + QuantizeLinear; per-tensor scales fuse to `hip.qmul` |
 | QLinearConcat (`com.microsoft`) | Decomposed to DequantizeLinear + Concat + QuantizeLinear |
 | QLinearGlobalAveragePool (`com.microsoft`) | Decomposed to DequantizeLinear + GlobalAveragePool + QuantizeLinear. `channels_last` is transposed around the pool |
 | QLinearAveragePool (`com.microsoft`) | Decomposed to DequantizeLinear + AveragePool + QuantizeLinear. `channels_last` is transposed around the pool. Rank 3–5, int8 or uint8. Omitted strides are 1. `y_zero_point` may be omitted |
 | QLinearLeakyRelu (`com.microsoft`) | Decomposed to DequantizeLinear + LeakyRelu + QuantizeLinear. int8 or uint8. `alpha` defaults to 0.01. `Y_zero_point` may be omitted |
-| QLinearMatMul | Custom HIP kernel. Rank-2 8-bit. A and Y scales and zero points are per-tensor. B's scale and zero point are per-tensor or one value per column. Separate from the `hip.qmatmul` QDQ fusion |
+| QLinearMatMul | Custom HIP kernel. Rank-2 8-bit. A and Y scales and zero points are per-tensor. B's scale and zero point are per-tensor or one value per column. Separate from the `hip.qmatmul` QDQ fusion. With `HIPDNN_EP_ROCMLIR=1`, constant parameters move it to a rocMLIR i8 matmul with a fused requantize; ui8 B or a non-zero B zero point add a second i8 matmul over the zero point |
 | LinearAttention (`com.microsoft`) | Custom HIP kernel |
 | GatedDeltaNet (`com.microsoft`) | Custom HIP kernel. Packed QKV, `gate_activation=qwen`, `beta_activation=sigmoid`, `qk_l2_norm=1`, f16/f32; no `cu_seqlens` or state capture |
 | CausalConvWithState (`com.microsoft`) | Custom HIP kernel |
@@ -143,9 +144,10 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | MaxPool | Custom HIP kernel (f16/bf16/f32/f64, and i8/ui8) |
 | AveragePool | Custom HIP kernel |
 | LpPool | Custom HIP kernel |
-| Resize | Custom HIP kernel. nearest and linear on f16/bf16/f32/f64 and on int8/uint8. Integer linear interpolates the stored codes and truncates toward zero. A dynamic extent comes from a constant `scales` vector, or from a `sizes` vector read back to a host index when `scales` is absent |
+| Resize | Custom HIP kernel. nearest and linear on f16/bf16/f32/f64 and on int8/uint8. Integer linear interpolates the stored codes and truncates toward zero. A dynamic extent comes from a constant `scales` vector, or from a `sizes` vector read back to a host index when `scales` is absent. Window scales known only at run time are read back to the host once each; they size the output and are passed to the kernel, which samples with them. The copied N/C prefix scales must be constant 1 |
 | Upsample | Lowered through Resize (`asymmetric`, nearest `floor`). Schema 9 passes `scales` as an input; opset 7–8 stores them as an f32 attribute |
 | GridSample | Custom HIP kernel |
+| RoiAlign | Custom HIP kernel. avg and max modes, `half_pixel` and `output_half_pixel` (opset 10 has no attribute and uses `output_half_pixel`), f16/bf16/f32/f64. An out-of-range batch index yields zeros rather than an error. The number of regions and every input extent may be dynamic |
 | GlobalAveragePool | Custom HIP kernel |
 | GlobalMaxPool | Custom HIP kernel |
 | GlobalLpPool | Custom HIP kernel |
@@ -180,4 +182,4 @@ These operations are handled through standard MLIR transformations and generally
 
 ## Fusion and preprocessing
 
-The frontend also recognizes or simplifies selected patterns before operation conversion, including approximate/FastGelu chains, Erf-based Gelu chains, supported Pow forms, LpNormalization decompositions, CastLike simplification, and model-exporter cleanup patterns.
+The frontend also recognizes or simplifies selected patterns before operation conversion, including approximate/FastGelu chains, Erf-based Gelu chains, the exported GroupNorm decomposition (Reshape to `[0, G, -1]`, InstanceNormalization with unit scale and zero bias, Reshape back, per-channel Mul/Add and an optional SiLU, fused into one GroupNorm; the unit scale and zero bias must be inline constants, so an initializer above the ORT bridge copy threshold keeps the unfused form), supported Pow forms, LpNormalization decompositions, CastLike simplification, and model-exporter cleanup patterns.

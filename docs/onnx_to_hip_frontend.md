@@ -66,9 +66,10 @@ existing `--convert-hip-to-llvm` pipeline.
 | ONNX / ORT Contrib | HIP | Backend |
 |---|---|---|
 | `LayerNormalization` | `hip.layer_norm` | custom HIP kernel |
-| `InstanceNormalization` | `hip.instance_norm` | custom HIP kernel |
+| `InstanceNormalization` | `hip.instance_norm` | `instance_norm_kernel.hip`; long rows use `group_norm_kernel.hip` |
 | `BatchNormalization` | `hip.batch_norm` | custom HIP kernel; inference only |
 | `GroupNorm` (`com.microsoft`) | `hip.group_norm` | `group_norm_kernel.hip` |
+| `GroupNormalization` (opset 21) | `hip.group_norm` | `group_norm_kernel.hip`; NCHW, per-channel scale and bias only |
 | `RMSNormalization` | `hip.rms_norm` | `rms_norm_kernel.hip` |
 | `SimplifiedLayerNormalization` | `hip.rms_norm` | `rms_norm_kernel.hip` |
 | `GridSample` | `hip.grid_sample` | custom HIP kernel |
@@ -113,7 +114,10 @@ packed `__half2` path for fp16 rows of even width.
 `b` of shape `[K, N]`, with per-tensor f32 scales and zero points. `hip.qmatmul`
 is a different op, the DequantizeLinear + MatMul + QuantizeLinear fusion, and
 does not accept `QLinearMatMul`. Rank other than 2, f16 or bf16 scales, and
-per-row or per-column quantization, stay `onnx.QLinearMatMul`.
+per-row or per-column quantization, stay `onnx.QLinearMatMul`. With
+`HIPDNN_EP_ROCMLIR=1`, `hip-fuse-rocmlir-anchor` moves a `hip.qlinear_matmul`
+with constant parameters to a rocMLIR kernel, in the same form as
+`QLinearConv` below.
 
 `QLinearConv` is the native ONNX op: 8-bit activations and weights, grouped 2D
 windows, and an optional int32 bias. Input and output quantization is
@@ -122,6 +126,11 @@ keeps the `pads` attribute. `VALID` uses no padding. `SAME_UPPER` and
 `SAME_LOWER` split the pad budget, with the extra pad at the end or the
 beginning, and the kernel receives those explicit pads. `hip.qconv` is a
 different op, the W4A16 1x1 QDQ fusion, and does not accept `QLinearConv`.
+With `HIPDNN_EP_ROCMLIR=1`, `hip-fuse-rocmlir-anchor` moves a `hip.qlinear_conv`
+with constant parameters to a rocMLIR kernel; ui8 weights or a non-zero weight
+zero point add a second integer conv (see `docs/design/rocmlir-fusion.md`). Initializers above the ORT bridge clone
+threshold are not inline constants, so large weights need
+`XLNX_ABI_2_0_CLONE_EXTERNAL_DATA_THRESHOLD` raised for this route.
 
 QuantizeLinear and DequantizeLinear storage is int8/uint8/int16/uint16 plus
 int4/uint4. DequantizeLinear additionally accepts int32, which is where a QDQ
@@ -152,7 +161,7 @@ runtime coverage.
 
 | ONNX | HIP | Backend |
 |---|---|---|
-| `Softmax` | `hip.miopen.softmax` | `hip_miopen_softmax`, custom HIP kernel |
+| `Softmax` | `hip.miopen.softmax` | `hip_miopen_softmax`, custom HIP kernel. Last axis only (normalized `axis == rank-1`); a missing `axis` is accepted for rank <= 2 only, where the opset defaults agree. f16/bf16/f32 |
 
 ### Element-wise Tensor Ops
 

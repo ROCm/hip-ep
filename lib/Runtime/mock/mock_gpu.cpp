@@ -486,6 +486,19 @@ int wrap_matmul_i32(RuntimeState *state, const void *A, const void *B,
 // RocMLIR dispatch (hip.rocmlir). Empty for now: the generated IR builds the
 // kernargs buffer and passes the embedded GPU binary + launch geometry, but
 // this wrapper does not yet load the module or launch the kernel.
+int wrap_rocmlir_prefill(RuntimeState *state, void *buffer, int64_t count,
+                         int64_t element_bytes, uint64_t pattern) {
+  (void)buffer;
+  (void)pattern;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_rocmlir_prefill\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_rocmlir_prefill(count=%lld, element_bytes=%lld)\n",
+             (long long)count, (long long)element_bytes);
+  return 0;
+}
+
 int wrap_rocmlir(RuntimeState *state, const char *kernel_binary,
                  char *func_name, int64_t block_size, int64_t grid_size,
                  void *kernargs, size_t size) {
@@ -1412,6 +1425,31 @@ int wrap_grid_sample(RuntimeState *state, void *input, void *grid, void *output,
              (long long)padding_mode, (long long)align_corners);
   (void)input;
   (void)grid;
+  (void)output;
+  return 0;
+}
+
+int wrap_roi_align(RuntimeState *state, void *input, void *rois,
+                   void *batch_indices, void *output, int64_t data_type,
+                   int64_t n, int64_t c, int64_t in_h, int64_t in_w,
+                   int64_t num_rois, int64_t out_h, int64_t out_w,
+                   int64_t sampling_ratio, float spatial_scale,
+                   int64_t half_pixel, int64_t mode) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_roi_align\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_roi_align(dtype=%s(%lld), N=%lld, C=%lld, "
+             "in=%lldx%lld, rois=%lld, out=%lldx%lld, sampling_ratio=%lld, "
+             "spatial_scale=%f, half_pixel=%lld, mode=%lld)\n",
+             hipdnn_ep_datatype_name(data_type), (long long)data_type,
+             (long long)n, (long long)c, (long long)in_h, (long long)in_w,
+             (long long)num_rois, (long long)out_h, (long long)out_w,
+             (long long)sampling_ratio, (double)spatial_scale,
+             (long long)half_pixel, (long long)mode);
+  (void)input;
+  (void)rois;
+  (void)batch_indices;
   (void)output;
   return 0;
 }

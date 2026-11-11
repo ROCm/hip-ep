@@ -884,6 +884,14 @@ int wrap_rocmlir(RuntimeState *state, const char *kernel_binary,
                  char *func_name, int64_t block_size, int64_t grid_size,
                  void *kernargs, size_t size);
 
+// Fills `count` elements of `element_bytes` (1, 2 or 4) at `buffer` with the
+// low bits of `pattern`, on the state's stream. The generated IR calls it
+// before wrap_rocmlir for each kernel argument that rocMLIR marks
+// `rock.prefill`, such as the output of a split-K kernel, which the kernel
+// accumulates into.
+int wrap_rocmlir_prefill(RuntimeState *state, void *buffer, int64_t count,
+                         int64_t element_bytes, uint64_t pattern);
+
 // GroupQueryAttention operation wrapper (Full MS spec)
 // Called by generated IR for onnx.Custom(GroupQueryAttention) lowering
 // GQA runtime wrapper following the complete Microsoft ONNX Runtime
@@ -1506,6 +1514,18 @@ int wrap_grid_sample(RuntimeState *state, void *input, void *grid, void *output,
                      int64_t data_type, int64_t n, int64_t c, int64_t in_h,
                      int64_t in_w, int64_t out_h, int64_t out_w, int64_t mode,
                      int64_t padding_mode, int64_t align_corners);
+
+// RoiAlign (4-D NCHW). rois is (num_rois, 4) as (x1, y1, x2, y2) in the same
+// element type as input; batch_indices is (num_rois) int64. Output is
+// (num_rois, C, out_h, out_w). sampling_ratio: 0 = adaptive. half_pixel: 1 =
+// "half_pixel", 0 = "output_half_pixel". mode: 0=avg, 1=max. data_type:
+// HIPDNN_EP_DATATYPE_* (FLOAT/HALF/BFLOAT16/DOUBLE).
+int wrap_roi_align(RuntimeState *state, void *input, void *rois,
+                   void *batch_indices, void *output, int64_t data_type,
+                   int64_t n, int64_t c, int64_t in_h, int64_t in_w,
+                   int64_t num_rois, int64_t out_h, int64_t out_w,
+                   int64_t sampling_ratio, float spatial_scale,
+                   int64_t half_pixel, int64_t mode);
 
 // Global pool wrapper (uses custom HIP kernel).
 // Treats the data as a flat [outer, reduce_size] matrix and writes one
@@ -2180,6 +2200,11 @@ int wrap_sigmoid(RuntimeState *state, void *input, void *output,
                  int64_t num_elements, int64_t data_type);
 int wrap_tanh(RuntimeState *state, void *input, void *output,
               int64_t num_elements, int64_t data_type);
+
+// Row-wise softmax over a contiguous [rows, cols] buffer (last axis).
+// data_type: HIPDNN_EP_DATATYPE_* (supports FLOAT, HALF, BFLOAT16)
+int hip_miopen_softmax(RuntimeState *state, const void *input, void *output,
+                       int64_t rows, int64_t cols, int64_t data_type);
 
 int wrap_log(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);

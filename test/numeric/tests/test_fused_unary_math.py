@@ -7,7 +7,7 @@
 
 The tests in test_unary_math.py build a bare `Atan` or `Round` graph, which
 leaves the op on the runtime's own kernel (lib/Runtime/real/{atan,round}.cpp).
-An op that follows a MatMul takes a different route entirely: FuseROCMlir
+An op that follows a MatMul takes a different route entirely: the rocMLIR fusion
 outlines the pair into a `rock.kernel` function, hip-to-tosa rewrites the op
 into TOSA inside it, and rocMLIR compiles the result. So the two paths run
 different arithmetic for the same graph, and the standalone tests say nothing
@@ -48,7 +48,7 @@ TAN_3PI_8 = math.tan(3 * math.pi / 8)
 def _make_fused_unary_model(op_type: str, dtype, rows: int, width: int):
     """MatMul against an identity weight, then `op_type`.
 
-    The MatMul is the fusion anchor -- FuseROCMlir outlines an anchor plus the
+    The MatMul is the fusion anchor -- the rocMLIR fusion outlines an anchor plus the
     pointwise op behind it, and both Atan and Round are on its pointwise list.
     The identity weight keeps the product exact, so the value reaching the
     unary op is the input value unchanged.

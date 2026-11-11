@@ -120,6 +120,46 @@ inferReduceResultType(mlir::Operation *op, mlir::Value data,
   return mlir::RankedTensorType::get(outShape, inputType.getElementType());
 }
 
+/// Create the tensor.empty init of a reduction. With keepdims=0 the result
+/// dims do not line up with \p data, so dynamic sizes are taken from the
+/// input dim each result dim maps to once \p reducedAxes (normalized, as from
+/// getConstantReducedAxesAttr) are dropped. Null \p reducedAxes falls back to
+/// positional alignment.
+inline mlir::Value
+createReduceInitTensor(mlir::OpBuilder &builder, mlir::Location loc,
+                       mlir::RankedTensorType resultType, mlir::Value data,
+                       mlir::DenseI64ArrayAttr reducedAxes, int64_t keepdims) {
+  auto dataType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
+  if (!reducedAxes || !dataType)
+    return createEmptyTensor(builder, loc, resultType, data);
+  llvm::SmallVector<int64_t> outToIn;
+  for (int64_t i : llvm::seq<int64_t>(dataType.getRank())) {
+    bool reduced = llvm::is_contained(reducedAxes.asArrayRef(), i);
+    if (keepdims)
+      outToIn.push_back(reduced ? -1 : i);
+    else if (!reduced)
+      outToIn.push_back(i);
+  }
+  if (static_cast<int64_t>(outToIn.size()) != resultType.getRank())
+    return createEmptyTensor(builder, loc, resultType, data);
+  llvm::SmallVector<mlir::Value> dynSizes;
+  for (int64_t i : llvm::seq<int64_t>(resultType.getRank())) {
+    if (!resultType.isDynamicDim(i))
+      continue;
+    int64_t inIdx = outToIn[i];
+    if (inIdx < 0)
+      dynSizes.push_back(mlir::arith::ConstantIndexOp::create(builder, loc, 1));
+    else if (dataType.isDynamicDim(inIdx))
+      dynSizes.push_back(
+          mlir::tensor::DimOp::create(builder, loc, data, inIdx));
+    else
+      dynSizes.push_back(mlir::arith::ConstantIndexOp::create(
+          builder, loc, dataType.getDimSize(inIdx)));
+  }
+  return mlir::tensor::EmptyOp::create(builder, loc, resultType.getShape(),
+                                       resultType.getElementType(), dynSizes);
+}
+
 /// `reduced_axes` for a hip.reduce_* whose `axes` is a compile-time constant:
 /// normalized, sorted and unique. Empty axes mean every axis, or none under
 /// noop_with_empty_axes. Null when `data` is unranked or `axes` is not
@@ -603,6 +643,8 @@ void populateUpsampleConversionPatterns(RewritePatternSet &patterns,
                                         MLIRContext *ctx);
 void populateGridSampleConversionPatterns(RewritePatternSet &patterns,
                                           MLIRContext *ctx);
+void populateRoiAlignConversionPatterns(RewritePatternSet &patterns,
+                                        MLIRContext *ctx);
 void populateGlobalPoolConversionPatterns(RewritePatternSet &patterns,
                                           MLIRContext *ctx);
 void populateFlattenConversionPatterns(RewritePatternSet &patterns,
@@ -828,6 +870,13 @@ void populatePowDecompositionPatterns(RewritePatternSet &patterns,
 void populateErfGeluFusionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 
+/// Pre-lowering pattern set: fuse Reshape(x, [0, G, -1]) ->
+/// InstanceNormalization(1, 0) -> Reshape(_, Shape(x)) -> [Mul gamma] ->
+/// [Add beta] -> [x * Sigmoid(x)] into com.microsoft GroupNorm (NCHW).
+/// See GroupNormDecompositionFusion.cpp.
+void populateGroupNormDecompositionFusionPatterns(RewritePatternSet &patterns,
+                                                  MLIRContext *ctx);
+
 /// Pre-lowering pattern set: decompose vision/projector ops that have no
 /// direct MorphiZen converter into supported primitives —
 /// AveragePool(kernel==stride) → Reshape/Transpose/ReduceMean, Pow(x, c) →
@@ -859,6 +908,11 @@ void populateHardSigmoidConversionPatterns(RewritePatternSet &patterns,
 void populateLpNormalizationConversionPatterns(RewritePatternSet &patterns,
                                                MLIRContext *ctx);
 
+/// Fold a primitive LayerNorm chain (ReduceMean / Sub / Pow / ReduceMean /
+/// Add / Sqrt / Div / Mul / Add) over the last axis into
+/// onnx.LayerNormalization. See LayerNormFusion.cpp.
+void populateLayerNormFusionPatterns(RewritePatternSet &patterns,
+                                     MLIRContext *ctx);
 } // namespace hip
 } // namespace mlir
 
