@@ -86,3 +86,30 @@ func.func @expand_logits(%ctx: !hip.context, %n: index) -> memref<1x?x92xf16> {
       : memref<?x92xf16> into memref<1x?x92xf16>
   return %ret : memref<1x?x92xf16>
 }
+
+// Same-rank channel split. The buffer is {90,160,16,4} and the graph output
+// is {1,90,160,64}. A unit dim was dropped and 64 was split into 16x4, so the
+// rank is unchanged and abi_groups does not apply. The callback must still
+// report the returned shape: ORT checks it against the model output.
+// STAMP-LABEL: func.func @same_rank_channel_split
+// STAMP:       hip.alloc_output
+// STAMP-SAME:    hipdnn.abi_shape = array<i64: 1, 90, 160, 64>
+// STAMP-NOT:     hipdnn.abi_groups
+//
+// DECOMP-LABEL: llvm.func @same_rank_channel_split
+// DECOMP:       llvm.alloca %{{.*}} x !llvm.array<4 x i64>
+// DECOMP:       llvm.mlir.constant(1 : i64)
+// DECOMP:       llvm.mlir.constant(90 : i64)
+// DECOMP:       llvm.mlir.constant(160 : i64)
+// DECOMP:       llvm.mlir.constant(64 : i64)
+// DECOMP:       %[[RANK4:.*]] = llvm.mlir.constant(4 : i64)
+// DECOMP:       llvm.call @hipdnn_ep_alloc_output(%{{.*}}, %{{.*}}, %{{.*}}, %[[RANK4]], %{{.*}}) : (!llvm.ptr, i64, !llvm.ptr, i64, i64) -> !llvm.ptr
+func.func @same_rank_channel_split(%ctx: !hip.context) -> memref<1x90x160x64xf16> {
+  %out = memref.alloc() : memref<90x160x16x4xf16>
+  %flat = memref.collapse_shape %out [[0, 1, 2, 3]]
+      : memref<90x160x16x4xf16> into memref<921600xf16>
+  %ret = memref.expand_shape %flat [[0, 1, 2, 3]]
+      output_shape [1, 90, 160, 64]
+      : memref<921600xf16> into memref<1x90x160x64xf16>
+  return %ret : memref<1x90x160x64xf16>
+}

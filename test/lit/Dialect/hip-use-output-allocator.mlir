@@ -478,3 +478,24 @@ func.func @reshape_rank_increase(%ctx: !hip.context, %n: index,
       : (memref<?x4xf32>, memref<3xi64>) -> memref<?x?x4xf32>
   return %ret : memref<?x?x4xf32>
 }
+
+// --- Same-rank reshape. The compute buffer is the channel split and the
+//     returned graph shape is the restored ONNX rank. Rank does not change, so
+//     there are no abi_groups; the static returned shape is the callback
+//     shape. 1*90*160*64 == 90*160*16*4. ---
+// CHECK-LABEL: func.func @same_rank_channel_split
+// CHECK-SAME:    (%[[CTX:.*]]: !hip.context)
+// CHECK-NOT:     memref.alloc
+// CHECK:         %[[OUT:.*]] = hip.alloc_output(%[[CTX]]) {hipdnn.abi_shape = array<i64: 1, 90, 160, 64>, out_idx = 0 : i64} : memref<90x160x16x4xf16>
+// CHECK:         memref.collapse_shape %[[OUT]]
+// CHECK:         memref.expand_shape
+// CHECK:         return
+func.func @same_rank_channel_split(%ctx: !hip.context) -> memref<1x90x160x64xf16> {
+  %out = memref.alloc() : memref<90x160x16x4xf16>
+  %flat = memref.collapse_shape %out [[0, 1, 2, 3]]
+      : memref<90x160x16x4xf16> into memref<921600xf16>
+  %ret = memref.expand_shape %flat [[0, 1, 2, 3]]
+      output_shape [1, 90, 160, 64]
+      : memref<921600xf16> into memref<1x90x160x64xf16>
+  return %ret : memref<1x90x160x64xf16>
+}

@@ -53,6 +53,9 @@ namespace hip {
 ///                        collapse vs expand semantics above (entries sum to
 ///                        internal rank for collapse, external rank for
 ///                        expand).
+/// A fully static `kAbiShapeAttrName` with no groups is itself the callback
+/// shape. That covers a same-rank reassociation, where the rank does not
+/// change so groups do not apply.
 inline constexpr ::llvm::StringLiteral kAbiShapeAttrName = "hipdnn.abi_shape";
 inline constexpr ::llvm::StringLiteral kAbiGroupsAttrName = "hipdnn.abi_groups";
 

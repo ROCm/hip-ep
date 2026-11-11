@@ -21,7 +21,10 @@
 //     or expand_shape), stamps `hipdnn.abi_shape` / `hipdnn.abi_groups` so the
 //     HIP->LLVM lowering issues the output-allocator callback at the returned
 //     graph rank rather than the internal compute rank (see
-//     stampAbiReshapeAttrs).
+//     stampAbiReshapeAttrs). A same-rank reshape that only reassociates dims
+//     (a unit dim dropped and another dim split, so `{1,90,160,64}` is stored
+//     as `{90,160,16,4}`) stamps `hipdnn.abi_shape` alone; the callback then
+//     reports the returned shape.
 //
 // How outputs are found. Rather than listing every view op by hand, the pass
 // asks `BufferViewFlowAnalysis` one question per alloc: does any value derived
@@ -175,6 +178,56 @@ static void stampAbiReshapeAttrs(AllocOutputOp allocOutput, Value retVal,
                        builder.getDenseI64ArrayAttr(extType.getShape()));
   allocOutput->setAttr(kAbiGroupsAttrName,
                        builder.getDenseI64ArrayAttr(groups));
+}
+
+// A same-rank ONNX Reshape bufferizes as collapse-all then expand-all, so the
+// returned memref and the compute buffer have the same rank and the same
+// number of elements but different shapes. stampAbiReshapeAttrs only records
+// a single rank-changing view. The element order is unchanged (collapse and
+// expand reassociate dims; they do not transpose), so the callback can report
+// the returned shape directly. No groups: every dim is static.
+static void stampStaticReassociationAbiShape(AllocOutputOp allocOutput,
+                                             Value retVal, OpBuilder &builder) {
+  if (allocOutput->hasAttr(kAbiShapeAttrName))
+    return;
+  auto rootType = dyn_cast<MemRefType>(allocOutput.getType());
+  auto extType = dyn_cast<MemRefType>(retVal.getType());
+  if (!rootType || !extType || !rootType.hasStaticShape() ||
+      !extType.hasStaticShape())
+    return;
+  if (rootType.getShape() == extType.getShape())
+    return;
+  if (rootType.getNumElements() == 0 ||
+      rootType.getNumElements() != extType.getNumElements())
+    return;
+
+  Value cur = retVal;
+  bool sawReshape = false;
+  while (cur != allocOutput.getResult()) {
+    Operation *def = cur.getDefiningOp();
+    if (!def)
+      return;
+    Value src;
+    if (auto collapse = dyn_cast<memref::CollapseShapeOp>(def))
+      src = collapse.getSrc();
+    else if (auto expand = dyn_cast<memref::ExpandShapeOp>(def))
+      src = expand.getSrc();
+    else if (auto reshape = dyn_cast<memref::ReshapeOp>(def))
+      src = reshape.getSource();
+    else if (auto castOp = dyn_cast<memref::CastOp>(def))
+      src = castOp.getSource();
+    else
+      return;
+    if (isa<memref::CollapseShapeOp, memref::ExpandShapeOp, memref::ReshapeOp>(
+            def))
+      sawReshape = true;
+    cur = src;
+  }
+  if (!sawReshape)
+    return;
+
+  allocOutput->setAttr(kAbiShapeAttrName,
+                       builder.getDenseI64ArrayAttr(extType.getShape()));
 }
 
 /// Return the single rank-increasing expand_shape in the view chain from
@@ -451,12 +504,14 @@ struct UseOutputAllocatorPass
       allocOp.getResult().replaceAllUsesWith(replacement);
 
       // After RAUW the returned value's view chain is rooted at allocOutput.
-      // Record the returned graph shape when it is a rank-reduced collapse of
-      // the internal compute buffer, so the lowering issues the
-      // output-allocator callback at the returned graph rank (see
-      // stampAbiReshapeAttrs).
-      if (allocOutput && retVal)
+      // Record the returned graph shape when it differs from the compute
+      // buffer, so the lowering issues the output-allocator callback at the
+      // ONNX shape (see stampAbiReshapeAttrs). A same-rank reassociation has
+      // no groups; stampStaticReassociationAbiShape records the shape alone.
+      if (allocOutput && retVal) {
         stampAbiReshapeAttrs(allocOutput, retVal, builder);
+        stampStaticReassociationAbiShape(allocOutput, retVal, builder);
+      }
 
       allocOp.erase();
     }
