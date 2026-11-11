@@ -466,6 +466,29 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
   return 0;
 }
 
+int wrap_matmul_broadcast(RuntimeState *state, int op_state_slot, const void *A,
+                          const void *B, void *output, int64_t M, int64_t N,
+                          int64_t K, int64_t elem_kind, int64_t transA,
+                          int64_t transB, int64_t a_batch_rank,
+                          const int64_t *a_batch_dims, int64_t b_batch_rank,
+                          const int64_t *b_batch_dims) {
+  (void)op_state_slot;
+  (void)A;
+  (void)B;
+  (void)output;
+  (void)a_batch_dims;
+  (void)b_batch_dims;
+  if (!state)
+    return -1;
+  MOCK_PRINT("[MOCK] wrap_matmul_broadcast(M=%lld, N=%lld, K=%lld, "
+             "elem_kind=%lld, transA=%lld, transB=%lld, a_rank=%lld, "
+             "b_rank=%lld)\n",
+             (long long)M, (long long)N, (long long)K, (long long)elem_kind,
+             (long long)transA, (long long)transB, (long long)a_batch_rank,
+             (long long)b_batch_rank);
+  return 0;
+}
+
 int wrap_matmul_i32(RuntimeState *state, const void *A, const void *B,
                     void *output, int64_t M, int64_t N, int64_t K,
                     int64_t batch_count, int64_t b_batch_stride) {
