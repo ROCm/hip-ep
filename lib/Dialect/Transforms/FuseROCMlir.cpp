@@ -30,15 +30,22 @@ namespace mlir::hip {
 
 namespace {
 
+// An inline hip.constant has a dense value ConstantConverter can turn into
+// tosa.const. File- and memory-backed carriers are Pure and operand-free too,
+// but they name a byte range nothing has read, so they stay kernel arguments.
+static bool isInlineDenseConstant(Value v) {
+  auto constant = v.getDefiningOp<ConstantOp>();
+  return constant && constant.getValueAttr();
+}
+
 // Rank-0 inline hip.constant used by fused pointwise ops (Relu zero, Clip
-// bounds, residual Mul scale). File- and memory-backed carriers have no dense
-// attr for in-kernel tosa.const and stay kernel arguments.
+// bounds, residual Mul scale). A rank-0 buffer argument has no index for
+// rock.transforms_to_ptr, so only the inline form is cloned.
 static bool isInlineScalarConstant(Value v) {
   auto type = dyn_cast<RankedTensorType>(v.getType());
   if (!type || type.getRank() != 0)
     return false;
-  auto constant = v.getDefiningOp<ConstantOp>();
-  return constant && constant.getValueAttr();
+  return isInlineDenseConstant(v);
 }
 
 // The kernel ABI rocMLIR expects for a scalar: MIGraphX gives one the shape
@@ -170,9 +177,10 @@ public:
     // MatMulNBits reaches this anchor already split into unpack_int4 and a
     // blocked dequantize_linear feeding hip.matmul {transB = 1}. Both belong
     // in the rock kernel: HipToTosa turns them into a nibble extract, a block
-    // broadcast, and tosa.matmul. A constant zero point, the default 8, has
-    // no operands and is cloned by the walk below. A caller-supplied zero
-    // point is a kernel argument, as are the packed bytes and the scales.
+    // broadcast, and tosa.matmul. An inline dense zero point, including the
+    // synthesized default 8, is cloned by the walk below. A file- or
+    // memory-backed zero point has no dense value to lower, so it is a kernel
+    // argument, as are the packed bytes and the scales.
     SmallVector<Value> nbitsWeights;
     for (Value operand : operands) {
       auto dequant = operand.getDefiningOp<DequantizeLinearOp>();
@@ -193,8 +201,7 @@ public:
       operands.insert(unpack.getPacked());
       operands.insert(dequant.getScale());
       if (Value zp = dequant.getZeroPoint()) {
-        Operation *zpOp = zp.getDefiningOp();
-        if (!zpOp || zpOp->getNumOperands() != 0 || !isMemoryEffectFree(zpOp))
+        if (!isInlineDenseConstant(zp))
           operands.insert(zp);
       }
     }

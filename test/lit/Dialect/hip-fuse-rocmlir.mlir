@@ -362,3 +362,71 @@ func.func @main_graph(%ctx: !hip.context, %a: tensor<1x2x4x3xf32>,
       outs(%whereInit : tensor<1x2x4x5xf32>) : tensor<1x2x4x5xf32>
   return %result : tensor<1x2x4x5xf32>
 }
+
+// -----
+
+// A file-backed zero point is Pure and operand-free, but it has no dense
+// value for HIP-to-TOSA. It stays a kernel argument instead of being cloned
+// into the rock kernel.
+
+// CHECK-LABEL: func.func @rocMlir
+// CHECK-SAME: (%[[A:.*]]: tensor<2x16xf16>, %[[PACKED:.*]]: tensor<2x8xui8>, %[[SCALES:.*]]: tensor<2x1xf16>, %[[ZP:.*]]: tensor<2x1xf16>)
+// CHECK-NOT: hip.constant
+// CHECK: hip.unpack_int4
+// CHECK: hip.dequantize_linear
+// CHECK: hip.matmul
+// CHECK-SAME: transB = 1
+// CHECK-NOT: hip.constant
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK: hip.constant
+// CHECK-SAME: location = "zp.bin"
+// CHECK: hip.rocmlir
+// CHECK-NOT: hip.matmul_nbits
+// CHECK-NOT: hip.unpack_int4
+func.func @main_graph(%ctx: !hip.context, %a: tensor<2x16xf16>,
+                      %b: tensor<2x1x8xui8>, %scales: tensor<2x1xf16>)
+    -> tensor<2x2xf16> {
+  %zp = hip.constant {location = "zp.bin", offset = 0 : i64, size = 4 : i64}
+      : tensor<2x1xf16>
+  %e = tensor.empty() : tensor<2x2xf16>
+  %r = hip.matmul_nbits(%ctx) ins(%a, %b, %scales :
+        tensor<2x16xf16>, tensor<2x1x8xui8>, tensor<2x1xf16>)
+        zero_points(%zp : tensor<2x1xf16>)
+        outs(%e : tensor<2x2xf16>)
+        {K = 16 : i64, N = 2 : i64, bits = 4 : i64, block_size = 16 : i64,
+         accuracy_level = 0 : i64, zp_elem_size = 2 : i64} : tensor<2x2xf16>
+  return %r : tensor<2x2xf16>
+}
+
+// -----
+
+// A memory-backed zero point is the same kind of carrier: no dense value,
+// so the outlined kernel receives it as an argument.
+
+// CHECK-LABEL: func.func @rocMlir
+// CHECK-SAME: (%[[A:.*]]: tensor<2x16xf16>, %[[PACKED:.*]]: tensor<2x8xui8>, %[[SCALES:.*]]: tensor<2x1xf16>, %[[ZP:.*]]: tensor<2x1xf16>)
+// CHECK-NOT: hip.constant
+// CHECK: hip.unpack_int4
+// CHECK: hip.dequantize_linear
+// CHECK-NOT: memory_address
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK: hip.constant
+// CHECK-SAME: memory_address = 4096
+// CHECK: hip.rocmlir
+// CHECK-NOT: hip.matmul_nbits
+func.func @main_graph(%ctx: !hip.context, %a: tensor<2x16xf16>,
+                      %b: tensor<2x1x8xui8>, %scales: tensor<2x1xf16>)
+    -> tensor<2x2xf16> {
+  %zp = hip.constant {memory_address = 4096 : i64, size = 4 : i64}
+      : tensor<2x1xf16>
+  %e = tensor.empty() : tensor<2x2xf16>
+  %r = hip.matmul_nbits(%ctx) ins(%a, %b, %scales :
+        tensor<2x16xf16>, tensor<2x1x8xui8>, tensor<2x1xf16>)
+        zero_points(%zp : tensor<2x1xf16>)
+        outs(%e : tensor<2x2xf16>)
+        {K = 16 : i64, N = 2 : i64, bits = 4 : i64, block_size = 16 : i64,
+         accuracy_level = 0 : i64, zp_elem_size = 2 : i64} : tensor<2x2xf16>
+  return %r : tensor<2x2xf16>
+}
