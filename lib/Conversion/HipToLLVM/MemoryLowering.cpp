@@ -333,9 +333,8 @@ struct AllocOutputOpLowering : public ConvertOpToLLVMPattern<AllocOutputOp> {
     bool reportedStaticAbiShape = false;
     bool abiShapeIsStatic =
         abiShapeAttr &&
-        llvm::none_of(abiShapeAttr.asArrayRef(), [](int64_t dim) {
-          return ShapedType::isDynamic(dim);
-        });
+        llvm::none_of(abiShapeAttr.asArrayRef(),
+                      [](int64_t dim) { return ShapedType::isDynamic(dim); });
     if (abiShapeIsStatic) {
       ArrayRef<int64_t> abiShape = abiShapeAttr.asArrayRef();
       callbackRank = static_cast<int64_t>(abiShape.size());
