@@ -21,6 +21,7 @@
 #include <mlir/Interfaces/SideEffectInterfaces.h>
 #include <mlir/Support/LLVM.h>
 #include <mlir/Transforms/GreedyPatternRewriteDriver.h>
+#include <type_traits>
 
 namespace mlir::hip {
 #define GEN_PASS_DEF_FUSEROCMLIRPASS
@@ -80,6 +81,20 @@ static Type getRocMlirKernelArgumentType(Value operand,
   return type;
 }
 
+// A dense matmul has a hip_gemm runtime route; a matmul whose weight comes
+// from a decomposed MatMulNBits (unpack_int4 -> dequantize_linear) or from
+// hip.dequant_bnb4 does not, and rocMLIR fuses its dequantization.
+static bool hasDequantizedWeight(MatmulOp op) {
+  auto inputs = op.getDpsInputs();
+  if (inputs.size() < 3)
+    return false;
+  Value weight = inputs[2];
+  if (weight.getDefiningOp<DequantBnb4Op>())
+    return true;
+  auto dequant = weight.getDefiningOp<DequantizeLinearOp>();
+  return dequant && dequant.getInput().getDefiningOp<UnpackInt4Op>();
+}
+
 template <typename AnchorOp>
 class FuseAnchorPointwise : public OpRewritePattern<AnchorOp> {
 public:
@@ -93,6 +108,12 @@ public:
     Operation *prevOp = nullptr;
     SetVector<Value> operands;
     SetVector<Operation *> ops;
+
+    if constexpr (std::is_same_v<AnchorOp, MatmulOp>) {
+      if (!hasDequantizedWeight(anchorOp))
+        return rewriter.notifyMatchFailure(
+            anchorOp, "dense matmul stays on the hip_gemm runtime route");
+    }
 
     // An i32 matmul or convolution has an exact HIP kernel. Outlining it
     // asks rocMLIR to compile a non-quantized integer tosa op, which this
@@ -477,10 +498,13 @@ public:
     MLIRContext *ctx = &getContext();
     RewritePatternSet patterns(ctx);
     int counter = 0;
-    // Benefit 2 so the split lands before the matmul anchor is outlined.
+    // Dense MatMul/Gemm must reach hip_gemm's LUT/resolver at runtime, so
+    // only a matmul over a dequantized weight is outlined (see
+    // hasDequantizedWeight). Benefit 2 so the split lands before the matmul
+    // anchor is outlined.
     patterns.add<DecomposeMatMulNBits>(ctx);
-    patterns.add<FuseAnchorPointwise<MatmulOp>, FuseAnchorPointwise<ConvOp>,
-                 FuseAnchorPointwise<GemmOp>>(ctx, &counter);
+    patterns.add<FuseAnchorPointwise<MatmulOp>, FuseAnchorPointwise<ConvOp>>(
+        ctx, &counter);
 
     if (failed(applyPatternsGreedily(funcOp, std::move(patterns))))
       signalPassFailure();
