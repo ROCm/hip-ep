@@ -11,7 +11,7 @@
 // as flash attention on wave32. The pass cannot see the device and leaves it.
 // CHECK-LABEL: func.func @main_graph
 // CHECK: hip.multi_head_attention
-// CHECK-NOT: hip.matmul
+// DECOMPOSE-NOT: hip.matmul
 func.func @main_graph(%ctx: !hip.context, %q: tensor<1x4x16xf16>,
                       %k: tensor<1x4x16xf16>, %v: tensor<1x4x16xf16>)
     -> tensor<1x4x16xf16> {
@@ -26,8 +26,9 @@ func.func @main_graph(%ctx: !hip.context, %q: tensor<1x4x16xf16>,
 // -----
 
 // Decode is not the flash prefill path, so f16 query sequence 1 still splits
-// and each matmul is outlined around the softmax.
-// CHECK-LABEL: func.func @decode
+// and each matmul is outlined around the softmax. hip-fuse-rocmlir only
+// outlines func.func @main_graph, so this case uses that name.
+// CHECK-LABEL: func.func @main_graph({{.*}}tensor<1x1x16xf16>, {{.*}}tensor<1x4x16xf16>
 // DECOMPOSE-NOT: hip.multi_head_attention
 // DECOMPOSE: hip.matmul
 // DECOMPOSE: hip.mul
@@ -37,7 +38,7 @@ func.func @main_graph(%ctx: !hip.context, %q: tensor<1x4x16xf16>,
 // FUSE: hip.miopen.softmax
 // FUSE: hip.rocmlir
 // FUSE-NOT: hip.multi_head_attention
-func.func @decode(%ctx: !hip.context, %q: tensor<1x1x16xf16>,
+func.func @main_graph(%ctx: !hip.context, %q: tensor<1x1x16xf16>,
                   %k: tensor<1x4x16xf16>, %v: tensor<1x4x16xf16>)
     -> tensor<1x1x16xf16> {
   %empty = tensor.empty() : tensor<1x1x16xf16>
@@ -88,8 +89,9 @@ func.func @default_scale(%ctx: !hip.context, %q: tensor<1x1x16xf16>,
 
 // -----
 
-// f32 is not the flash kernel, so a short prefill still splits.
-// CHECK-LABEL: func.func @f32
+// f32 is not the flash kernel, so a short prefill still splits. Named
+// main_graph so hip-fuse-rocmlir outlines the two matmuls.
+// CHECK-LABEL: func.func @main_graph({{.*}}tensor<1x4x16xf32>
 // DECOMPOSE-NOT: hip.multi_head_attention
 // DECOMPOSE: hip.matmul
 // DECOMPOSE: hip.mul
@@ -99,7 +101,7 @@ func.func @default_scale(%ctx: !hip.context, %q: tensor<1x1x16xf16>,
 // FUSE: hip.miopen.softmax
 // FUSE: hip.rocmlir
 // FUSE-NOT: hip.multi_head_attention
-func.func @f32(%ctx: !hip.context, %q: tensor<1x4x16xf32>,
+func.func @main_graph(%ctx: !hip.context, %q: tensor<1x4x16xf32>,
                %k: tensor<1x4x16xf32>, %v: tensor<1x4x16xf32>)
     -> tensor<1x4x16xf32> {
   %empty = tensor.empty() : tensor<1x4x16xf32>
@@ -113,14 +115,14 @@ func.func @f32(%ctx: !hip.context, %q: tensor<1x4x16xf32>,
 // -----
 
 // Padded head dim 272 is above the flash kernel's limit, so this f16 prefill
-// still splits.
-// CHECK-LABEL: func.func @wide_head
+// still splits. Named main_graph so hip-fuse-rocmlir outlines it.
+// CHECK-LABEL: func.func @main_graph({{.*}}tensor<1x2x272xf16>
 // DECOMPOSE-NOT: hip.multi_head_attention
 // DECOMPOSE: hip.matmul
 // DECOMPOSE: hip.miopen.softmax
 // FUSE: hip.rocmlir
 // FUSE-NOT: hip.multi_head_attention
-func.func @wide_head(%ctx: !hip.context, %q: tensor<1x2x272xf16>,
+func.func @main_graph(%ctx: !hip.context, %q: tensor<1x2x272xf16>,
                      %k: tensor<1x2x272xf16>, %v: tensor<1x2x272xf16>)
     -> tensor<1x2x272xf16> {
   %empty = tensor.empty() : tensor<1x2x272xf16>
