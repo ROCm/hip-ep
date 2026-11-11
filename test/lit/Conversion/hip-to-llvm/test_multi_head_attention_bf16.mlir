@@ -3,7 +3,7 @@
 
 // The runtime wrapper takes an element size in bytes. bf16 is 2 bytes, so
 // lowering it would call the f16 kernels. Conversion must fail instead.
-// RUN: hip-mlir-opt --convert-hip-to-llvm --verify-diagnostics %s
+// RUN: not hip-mlir-opt --convert-hip-to-llvm %s 2>&1 | FileCheck %s
 
 module {
   func.func @bf16(%ctx: !hip.context,
@@ -11,7 +11,6 @@ module {
                   %key: memref<1x4x16xbf16, 1>,
                   %value: memref<1x4x16xbf16, 1>,
                   %output: memref<1x4x16xbf16, 1>) {
-    // expected-error @+1 {{failed to legalize operation 'hip.multi_head_attention'}}
     hip.multi_head_attention(%ctx)
         ins(%query, %key, %value :
             memref<1x4x16xbf16, 1>, memref<1x4x16xbf16, 1>,
@@ -24,3 +23,6 @@ module {
     return
   }
 }
+
+// Either form MLIR prints: the op name before "failed to legalize", or inside it.
+// CHECK: {{failed to legalize operation 'hip\.multi_head_attention'|'hip\.multi_head_attention' op failed to legalize}}
