@@ -34,6 +34,12 @@ static const Leaf kLeaves[] = {
     {"gqa/ring", "Xfp16_Wfp16_Yfp16",
      "hipdnn-kernel-ut-gqa-ring-xfp16-wfp16-yfp16.exe"},
 #endif
+    {"gemm", "Xfp16_Wfp16_Yfp16",
+     "hipdnn-kernel-ut-gemm-xfp16-wfp16-yfp16.exe"},
+    {"gemm", "Xbf16_Wbf16_Ybf16",
+     "hipdnn-kernel-ut-gemm-xbf16-wbf16-ybf16.exe"},
+    {"gemm", "Xfp32_Wfp32_Yfp32",
+     "hipdnn-kernel-ut-gemm-xfp32-wfp32-yfp32.exe"},
     {"matmul_nbits", "Xfp16_Wu2_Yfp16",
      "hipdnn-kernel-ut-matmul-nbits-xfp16-wu2-yfp16.exe"},
     {"matmul_nbits", "Xfp16_Wu3_Yfp16",

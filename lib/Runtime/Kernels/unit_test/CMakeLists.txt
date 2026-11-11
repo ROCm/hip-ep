@@ -65,6 +65,9 @@ function(add_kernel_package_ut arch executable_name source_file)
     list(APPEND ut_options -DHIPDNN_LUT_LINKED_EXTERNALLY=1)
     list(APPEND ut_includes ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/hip/autotune/gqa)
   endif()
+  if(source_file MATCHES "^gemm/")
+    list(APPEND ut_includes ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/hip/autotune/gemm)
+  endif()
 
   set(target ${executable_name}-${arch})
   # hipcc custom commands do not inherit the C++ compiler's header dependency
@@ -114,6 +117,15 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
       hipdnn-kernel-ut-gqa-ring-xfp16-wfp16-yfp16
       gqa/ring/Xfp16_Wfp16_Yfp16/test_gqa_ring.cpp)
   endif()
+add_kernel_package_ut(${_arch}
+  hipdnn-kernel-ut-gemm-xfp16-wfp16-yfp16
+  gemm/Xfp16_Wfp16_Yfp16/test_gemm.cpp)
+add_kernel_package_ut(${_arch}
+  hipdnn-kernel-ut-gemm-xbf16-wbf16-ybf16
+  gemm/Xbf16_Wbf16_Ybf16/test_gemm.cpp)
+add_kernel_package_ut(${_arch}
+  hipdnn-kernel-ut-gemm-xfp32-wfp32-yfp32
+  gemm/Xfp32_Wfp32_Yfp32/test_gemm.cpp)
   add_kernel_package_ut(${_arch}
     hipdnn-kernel-ut-matmul-nbits-xfp16-wu2-yfp16
     matmul_nbits/Xfp16_Wu2_Yfp16/test_matmul_nbits_u2.cpp)

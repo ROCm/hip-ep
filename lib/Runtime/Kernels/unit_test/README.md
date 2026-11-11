@@ -2,7 +2,7 @@
 
 This folder contains the source for standalone HIP kernel unit tests.
 
-MatMulNBits, GQA decode/prefill and ragged W4 MatMul use the shared
+GEMM, MatMulNBits, GQA decode/prefill and ragged W4 MatMul use the shared
 [adaptive timing policy](common/README.md). `--timing standard` (default)
 adapts launch counts to at least one second of GPU time and ten complete calls;
 `--timing confirm` raises the goal to ten seconds for formal performance

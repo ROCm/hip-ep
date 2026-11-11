@@ -999,7 +999,7 @@ HIP_KERNEL_API int hip_mrope_forward(
  * split) take element_size_bytes (2 = fp16, 4 = fp32) and dispatch to the
  * matching typed kernel -- this fp32-enables the decomposed GQA pipeline used
  * by the Whisper no_causal path. The fused / flash decode kernels remain FP16
- * only (Llama / gpt-oss). The orchestration (hipBLASLt GEMMs, workspace, temp
+ * only (Llama / gpt-oss). The orchestration (custom GEMMs, workspace, temp
  * buffers) lives in the runtime wrapper (real/gqa.cpp).
  */
 
@@ -2779,7 +2779,7 @@ HIP_KERNEL_API void hip_matmul_nbits_convert_scale_fp32_to_fp16(
 
 /* Dequantize a full packed int4 weight matrix into row-major fp16 [N, K].
  * Used by the CDNA/wave64 prefill fast path (no WMMA): dequantize B once
- * (weights are constant) then run a hipBLASLt fp16 GEMM. scales_fp16 and
+ * (weights are constant) then run custom fp16 GEMM. scales_fp16 and
  * zeros_fp16 are fp16 [N, ceil(K/group_size)]; zeros_fp16 may be null (ONNX
  * 4-bit default zero-point 8). */
 HIP_KERNEL_API void hip_matmul_nbits_dequant_b_fp16(
@@ -4213,6 +4213,29 @@ HIP_KERNEL_API int hip_gemv_f16_kn(void* stream, const void* a, const void* B,
  */
 HIP_KERNEL_API int hip_gemm_wmma_fp16(void* stream, const void* A, const void* B,
                        void* C, int M, int K, int N);
+
+/* =========================================================================
+ * ONNX Gemm (custom kernel, wrap_gemm ABI)
+ * =========================================================================
+ *
+ * Y = alpha * op(A) * op(B) + beta * C
+ *
+ * All matrices are row-major (ONNX). op(A) is [M,K] (transA=0 => A is [M,K]
+ * with lda=K; transA=1 => A is [K,M] with lda=M). op(B) is [K,N] (transB=0 =>
+ * B is [K,N] ldb=N; transB=1 => B is [N,K] ldb=K). C is [cDim0, cDim1] and
+ * unidirectional-broadcastable to [M,N]; pass C=NULL / beta=0 when absent.
+ *
+ * type_code matches HipToLLVM GemmOpLowering:
+ *   0 = float16, 1 = float32, 2 = float64, 3 = bfloat16
+ *
+ * Returns 0 on success. Returns -1 for an unsupported request; callers
+ * propagate errors without retrying vendor GEMM. Wave64 devices use the
+ * existing custom tiled-FMA resolver. Other non-zero values are HIP errors.
+ */
+HIP_KERNEL_API int hip_gemm(void *stream, const void *A, const void *B,
+                            const void *C, void *Y, int M, int N, int K,
+                            float alpha, float beta, int transA, int transB,
+                            int type_code, int cDim0, int cDim1);
 
 #ifdef __cplusplus
 }
