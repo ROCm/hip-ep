@@ -115,6 +115,7 @@ def _make_matmul_nbits_model(
     accuracy_level: int = 4,
     seed: int = 42,
     fp32: bool = False,
+    zero_points: np.ndarray | None = None,
 ):
     """Build a MatMulNBits ONNX model with random quantized weights.
 
@@ -135,6 +136,11 @@ def _make_matmul_nbits_model(
     activations with fp32 scales). Regression coverage for the bug where the
     HIP EP always read `scales` as raw fp16 regardless of its actual dtype,
     producing NaN/Inf logits for fp32-scale models.
+
+    ``zero_points``: optional f16 per-block zero points, shape
+    ``[N, ceil(K / block_size)]``. Omitted means the op's default of 8.
+    A uint8 nibble-packed zero point is a different path and is not
+    accepted here.
     """
     if bits not in (4, 8):
         raise ValueError(f"bits must be 4 or 8, got {bits}")
@@ -179,10 +185,20 @@ def _make_matmul_nbits_model(
         numpy_helper.from_array(q_weight, name=weight_name),
         numpy_helper.from_array(scales, name="weight_scales"),
     ]
+    node_inputs = ["X", weight_name, "weight_scales"]
+    if zero_points is not None:
+        if zero_points.shape != (N, n_blocks) or zero_points.dtype != np.float16:
+            raise ValueError(
+                "zero_points must be f16 with shape [N, ceil(K / block_size)]"
+            )
+        initializers.append(
+            numpy_helper.from_array(zero_points, name="weight_zero_points")
+        )
+        node_inputs.append("weight_zero_points")
 
     node = helper.make_node(
         "MatMulNBits",
-        ["X", weight_name, "weight_scales"],
+        node_inputs,
         ["Y"],
         domain="com.microsoft",
         K=K,
@@ -219,6 +235,38 @@ class TestMatMulNBits:
         x = rng.uniform(-1, 1, [1, 4, K]).astype(np.float16)
 
         actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=1e-2, rtol=1e-2)
+
+    @pytest.mark.parametrize("explicit_zp", [False, True])
+    def test_matmul_nbits_rocmlir_fused(self, model_runner, monkeypatch, explicit_zp):
+        """Static bits=4 MatMulNBits with the rocMLIR pipeline forced on.
+
+        FileCheck covers the outlined IR only. This executes that path,
+        including the omitted zero point (inline 8) and an explicit f16
+        zero point, one value per block. Packed uint8 zero points stay on
+        the custom kernel and are not part of this case.
+        """
+        monkeypatch.setenv("HIPDNN_EP_ROCMLIR", "1")
+        K, N, block_size = 32, 16, 32
+        n_blocks = K // block_size
+        zp = None
+        if explicit_zp:
+            zp = np.random.default_rng(7).integers(0, 16, [N, n_blocks]).astype(
+                np.float16
+            )
+        model = _make_matmul_nbits_model(
+            1,
+            1,
+            K,
+            N,
+            scale_range=(-0.05, 0.05),
+            block_size=block_size,
+            seed=7,
+            zero_points=zp,
+        )
+        x = np.random.default_rng(99).uniform(-1, 1, [1, 1, K]).astype(np.float16)
+        actual, expected = model_runner.run_sample(model, [x])
+        assert np.isfinite(actual[0]).all()
         compare_outputs(actual, expected, atol=1e-2, rtol=1e-2)
 
     @pytest.mark.parametrize("seq_len", [1, 8, 64])
