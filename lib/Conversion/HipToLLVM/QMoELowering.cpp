@@ -66,6 +66,8 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
         extractOptionalMemRefPtr(adaptor.getFc3ZeroPoints(), rewriter, loc);
     Value routerWeightsPtr =
         extractOptionalMemRefPtr(adaptor.getRouterWeights(), rewriter, loc);
+    Value correctionBiasPtr =
+        extractOptionalMemRefPtr(adaptor.getCorrectionBias(), rewriter, loc);
     Value outputPtr =
         extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
@@ -126,8 +128,13 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
     Value swigluLimitVal = createF32Const(op.getSwigluLimit().convertToFloat());
     Value normalizeVal = createI64Const(op.getNormalizeRoutingWeights());
     Value elemSizeVal = createI64Const(elemSize);
+    Value routedScaleVal =
+        createF32Const(op.getRoutedScalingFactor().convertToFloat());
+    Value routingTypeVal = createI64Const(op.getRoutingType() == "sigmoid_bias"
+                                              ? kQMoERoutingSigmoidBias
+                                              : kQMoERoutingSoftmax);
 
-    SmallVector<Type, 31> paramTypes = {
+    SmallVector<Type, 34> paramTypes = {
         ptrType, // state
         ptrType, // input
         ptrType, // router_probs
@@ -158,7 +165,10 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
         f32Type, // activation_beta
         f32Type, // swiglu_limit
         i64Type, // normalize_routing_weights
-        i64Type  // elem_size
+        i64Type, // elem_size
+        ptrType, // correction_bias (nullable)
+        i64Type, // routing_type
+        f32Type  // routed_scaling_factor
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
@@ -167,7 +177,7 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
       return failure();
     }
 
-    SmallVector<Value, 31> args = {statePtr,
+    SmallVector<Value, 34> args = {statePtr,
                                    inputPtr,
                                    routerPtr,
                                    routerWeightsPtr,
@@ -197,7 +207,10 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
                                    activationBetaVal,
                                    swigluLimitVal,
                                    normalizeVal,
-                                   elemSizeVal};
+                                   elemSizeVal,
+                                   correctionBiasPtr,
+                                   routingTypeVal,
+                                   routedScaleVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);

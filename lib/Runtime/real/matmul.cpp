@@ -495,6 +495,7 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
       reinterpret_cast<uintptr_t>(B) % 16 == 0) {
     RUNTIME_DEBUG_LOG("[REAL] wrap_hipblasLtMatmul: GEMV N=%lld K=%lld\n",
                       (long long)N, (long long)K);
+    OP_ROCTX_MARK("hip_ep.op.matmul.run.gemv");
     return hip_gemv_f16_kn(stream, A, B, output, K, N) == 0 ? 0 : -1;
   }
 
@@ -547,9 +548,13 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
   // runtime bitcode.)
   if (!cached->tuned.load(std::memory_order_acquire)) {
     std::lock_guard<std::mutex> tuneGuard(cached->tune_mu);
-    if (!cached->tuned.load(std::memory_order_relaxed))
+    if (!cached->tuned.load(std::memory_order_relaxed)) {
+      // The candidates' timed runs are launched inside this op's range; the
+      // mark keeps them apart from the op's own GEMM (run.hipblaslt below).
+      OP_ROCTX_MARK("hip_ep.op.matmul.select.benchmark");
       autotuneMatmul(handle, stream, cached, B, A, output, ws_ptr, ws_size,
                      key);
+    }
   }
 
   float alpha = 1.0f;
@@ -564,6 +569,7 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
   void *call_ws_ptr = cached->use_default_algo ? nullptr : ws_ptr;
   size_t call_ws_size = cached->use_default_algo ? 0 : ws_size;
 
+  OP_ROCTX_MARK("hip_ep.op.matmul.run.hipblaslt");
   hipblasStatus_t st =
       hipblasLtMatmul(handle, cached->desc, &alpha, B,
                       cached->layA,    // "A" = B (row->col trick)

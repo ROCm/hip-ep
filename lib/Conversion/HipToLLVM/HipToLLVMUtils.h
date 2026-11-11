@@ -187,9 +187,11 @@ inline constexpr const char *kWrapLess = "wrap_less";
 inline constexpr const char *kWrapGatherND = "wrap_gather_nd";
 inline constexpr const char *kWrapSign = "wrap_sign";
 inline constexpr const char *kWrapMod = "wrap_mod";
-inline constexpr const char *kWrapSlice = "wrap_slice";
+inline constexpr const char *kWrapSlice = "wrap_slice_typed";
 inline constexpr const char *kWrapScatterND = "wrap_scatter_nd";
 inline constexpr const char *kWrapNonZero = "wrap_nonzero";
+inline constexpr const char *kWrapNonMaxSuppression =
+    "wrap_non_max_suppression";
 inline constexpr const char *kWrapSize = "wrap_size";
 inline constexpr const char *kWrapQElementwise = "wrap_qelementwise";
 inline constexpr const char *kWrapQMatMul = "wrap_qmatmul";
@@ -224,6 +226,11 @@ inline constexpr int64_t kQMoEAmdRoutingSigmoid = 0;
 // hip.qmoe / wrap_qmoe relu2 activation. Must match
 // HIPDNN_EP_QMOE_ACTIVATION_RELU2 in lib/Runtime/hipdnn_ep_runtime.h.
 inline constexpr int64_t kQMoEActivationRelu2 = 5;
+
+// hip.qmoe / wrap_qmoe routing_type. Must match HIPDNN_EP_QMOE_ROUTING_* in
+// lib/Runtime/hipdnn_ep_runtime.h.
+inline constexpr int64_t kQMoERoutingSoftmax = 0;
+inline constexpr int64_t kQMoERoutingSigmoidBias = 1;
 
 // Window-pool reduction mode constants (hip.pool / wrap_pool).
 // Values must match HIPDNN_EP_POOL_* in lib/Runtime/hipdnn_ep_runtime.h
@@ -584,6 +591,8 @@ void populateScatterNDLoweringPatterns(const LLVMTypeConverter &converter,
                                        RewritePatternSet &patterns);
 void populateNonZeroLoweringPatterns(const LLVMTypeConverter &converter,
                                      RewritePatternSet &patterns);
+void populateNonMaxSuppressionLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns);
 // Generic data-dependent-shape readback primitive (hip.readback_dim). Not tied
 // to any single operator; any op that computes a runtime extent into a device
 // i32 scalar can be sliced/sized via this.
@@ -598,6 +607,8 @@ void populateReadbackScalarLoweringPatterns(
 void populateSizeLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateLoopLoweringPatterns(const LLVMTypeConverter &converter,
+                                  RewritePatternSet &patterns);
+void populateScanLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateIfLoweringPatterns(const LLVMTypeConverter &converter,
                                 RewritePatternSet &patterns);

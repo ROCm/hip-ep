@@ -25,6 +25,11 @@ int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
         return std::string(b);
       },
       state);
+  // Empty tensors intentionally have no backing allocation. A zero-element
+  // gather launches no work and must accept their null pointers.
+  if (output_num_elements == 0)
+    return 0;
+
   if (!state || !data || !indices || !output) {
     RUNTIME_DEBUG_LOG("[REAL] wrap_gather: null argument\n");
     return -1;

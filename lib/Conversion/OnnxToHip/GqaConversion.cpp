@@ -361,7 +361,8 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
   // past_value(0|1),
   //            seqlens_k(1), total_seq_len(1), cos_cache(0|1), sin_cache(0|1),
   //            position_ids(0|1), attention_bias(0|1), head_sink(0|1),
-  //            k_scale(0|1), v_scale(0|1), output(1), present_key(1),
+  //            k_scale(0|1), v_scale(0|1), key_bias(0), output(1),
+  //            present_key(1),
   //            present_value(1), output_qk(0|1)]
   llvm::SmallVector<int32_t> segmentSizes;
   segmentSizes.push_back(1); // ctx
@@ -379,6 +380,7 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
   segmentSizes.push_back(headSink ? 1 : 0);
   segmentSizes.push_back(kScale ? 1 : 0);
   segmentSizes.push_back(vScale ? 1 : 0);
+  segmentSizes.push_back(0);                    // key_bias
   segmentSizes.push_back(1);                    // output
   segmentSizes.push_back(1);                    // present_key
   segmentSizes.push_back(1);                    // present_value
