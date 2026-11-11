@@ -142,7 +142,7 @@ module {
 // CHECK-NOT: tensor.dim
 // CHECK: %[[Z0:.*]] = arith.constant 0 : index
 // CHECK: %[[Z1:.*]] = arith.constant 0 : index
-// CHECK: tensor.empty(%[[Z0]], %[[Z1]]) : tensor<?x?xf32>
+// CHECK: tensor.empty(%[[Z0]], %[[Z1]]) {hipdnn.zero_trip_placeholder_dims = array<i64: 1>} : tensor<?x?xf32>
 // CHECK: scf.while
 // CHECK: scf.if
 

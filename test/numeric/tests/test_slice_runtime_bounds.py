@@ -24,12 +24,13 @@ _I64 = TensorProto.INT64
 _BOOL = TensorProto.BOOL
 
 
-def _loop_prefix_mean_model(trip: int):
-    """Scan row i is the mean of the first i+1 rows of ``x[8,4]``.
+def _loop_prefix_model(trip: int, *, offset: int = 1):
+    """Scan row i is the mean of the first i+offset rows of ``x[8,4]``.
 
     ``x`` is a loop-carried value declared without a shape in the body, as in
     a TF export, so ORT cannot type the Slice and the importer leaves its
-    result unranked.
+    result unranked. With ``offset=0`` the first iteration's slice is empty,
+    and ORT gives 0 for its mean.
     """
     x = helper.make_tensor_value_info("x", _F32, [8, 4])
     body_inputs = [
@@ -38,7 +39,7 @@ def _loop_prefix_mean_model(trip: int):
         helper.make_tensor_value_info("x_in", _F32, None),
     ]
     body_initializers = [
-        numpy_helper.from_array(np.array(1, dtype=np.int64), "one"),
+        numpy_helper.from_array(np.array(offset, dtype=np.int64), "one"),
         numpy_helper.from_array(np.array([1], dtype=np.int64), "vec1"),
         numpy_helper.from_array(np.array([0], dtype=np.int64), "zero_vec"),
     ]
@@ -81,7 +82,14 @@ def _loop_prefix_mean_model(trip: int):
 
 class TestSliceRuntimeBounds:
     def test_loop_body_prefix(self, model_runner):
-        model = _loop_prefix_mean_model(3)
+        model = _loop_prefix_model(3)
+        x = np.arange(1, 33, dtype=np.float32).reshape(8, 4)
+        actual, expected = model_runner.run_sample(model, [x])
+        assert actual[1].shape == (3, 4)
+        compare_outputs(actual, expected, atol=1e-5, rtol=1e-5)
+
+    def test_loop_body_empty_prefix(self, model_runner):
+        model = _loop_prefix_model(3, offset=0)
         x = np.arange(1, 33, dtype=np.float32).reshape(8, 4)
         actual, expected = model_runner.run_sample(model, [x])
         assert actual[1].shape == (3, 4)

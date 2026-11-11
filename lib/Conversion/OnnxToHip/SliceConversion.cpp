@@ -406,8 +406,9 @@ struct SliceDecompose : public mlir::RewritePattern {
         axesVec.assign(attr.asArrayRef().begin(), attr.asArrayRef().end());
       }
     }
+    // ONNX: omitted axes are the leading len(starts) axes, not every axis.
     if (axesVec.empty())
-      for (int64_t i : llvm::seq<int64_t>(rank))
+      for (int64_t i : llvm::seq<int64_t>(startsVec.size()))
         axesVec.push_back(i);
 
     llvm::SmallVector<int64_t> stepsVec;
@@ -624,9 +625,19 @@ struct SliceToHip : public mlir::RewritePattern {
     if (axes)
       haveAxes = mlir::succeeded(
           extractSliceParamVector(op, "hipdnn.slice_axes", axes, axesVec));
-    if (haveAxes && axesVec.empty())
-      for (int64_t i : llvm::seq<int64_t>(dataType.getRank()))
-        axesVec.push_back(i);
+    // ONNX: omitted axes are the leading len(starts) axes, not every axis, so
+    // the default needs a static starts length.
+    if (haveAxes && axesVec.empty()) {
+      auto startsType =
+          mlir::dyn_cast<mlir::RankedTensorType>(starts.getType());
+      if (startsType && startsType.getRank() == 1 &&
+          !startsType.isDynamicDim(0) &&
+          startsType.getDimSize(0) <= dataType.getRank())
+        for (int64_t i : llvm::seq<int64_t>(startsType.getDimSize(0)))
+          axesVec.push_back(i);
+      else
+        haveAxes = false;
+    }
     if (steps && haveAxes)
       haveAxes = mlir::succeeded(
           extractSliceParamVector(op, "hipdnn.slice_steps", steps, stepsVec));
@@ -638,7 +649,8 @@ struct SliceToHip : public mlir::RewritePattern {
     // An unranked result gets its shape here, so the over-sized fallback below
     // would not just cost performance: it would be the only shape consumers
     // see, with a zero-filled tail. Every sliced axis needs an exact extent,
-    // read back from the device when host arithmetic cannot resolve it.
+    // read back from the device when host arithmetic cannot resolve it. The
+    // one exception is the `Slice(x, k, k, axis)` accumulator seed below.
     bool exactExtent =
         !mlir::isa<mlir::RankedTensorType>(op->getResult(0).getType());
     if (exactExtent) {
@@ -648,13 +660,16 @@ struct SliceToHip : public mlir::RewritePattern {
       if (llvm::any_of(stepsVec, [](int64_t s) { return s <= 0; }))
         return rewriter.notifyMatchFailure(
             op, "unranked result needs positive steps");
-      auto isBoundVector = [](mlir::Value v) {
+      int64_t numAxes = axesVec.size();
+      auto isBoundVector = [numAxes](mlir::Value v) {
         auto t = mlir::dyn_cast<mlir::RankedTensorType>(v.getType());
-        return t && t.getRank() == 1 && t.getElementType().isSignlessInteger();
+        return t && t.getRank() == 1 && t.getDimSize(0) == numAxes &&
+               t.getElementType().isSignlessInteger();
       };
       if (!isBoundVector(starts) || !isBoundVector(ends))
         return rewriter.notifyMatchFailure(
-            op, "unranked result needs 1-D integer starts and ends");
+            op, "unranked result needs integer starts and ends with one "
+                "entry per axis");
     }
     auto boundToHost = [&](mlir::Value bound, int64_t k) -> mlir::Value {
       mlir::Value host = resolveHostIndex(rewriter, loc, bound, k, 0);
@@ -686,10 +701,19 @@ struct SliceToHip : public mlir::RewritePattern {
     // it is available. If a model does land here, revisit it -- the cost is
     // lower than it looks. Hence the debug line below: the fallback is a known
     // performance cliff, and it should be findable without an RGP capture.
+    //
+    // An unranked result separates the two: the init keeps the capacity (a
+    // zero length still allocates the data dim, so a loop accumulator never
+    // gets a zero-pitch buffer), and an extract_slice of the exact lengths is
+    // the shape consumers see.
     llvm::SmallVector<mlir::Value> dynSizes;
+    llvm::SmallVector<mlir::OpFoldResult> exactSizes;
+    bool needsExactView = false;
     for (int64_t i = 0; i < resultType.getRank(); ++i) {
-      if (!resultType.isDynamicDim(i))
+      if (!resultType.isDynamicDim(i)) {
+        exactSizes.push_back(rewriter.getIndexAttr(resultType.getDimSize(i)));
         continue;
+      }
       if (i >= dataType.getRank())
         return rewriter.notifyMatchFailure(
             op, "result rank exceeds data rank — invalid Slice");
@@ -701,7 +725,7 @@ struct SliceToHip : public mlir::RewritePattern {
                                                      dataType.getDimSize(i))
                     .getResult();
 
-      mlir::Value extent;
+      mlir::Value extent, exact;
       // An axis `axes` does not name is not sliced at all, so the data dim is
       // its exact extent rather than a fallback. Only an axis this op really
       // slices can land on the upper bound, so only that is worth reporting --
@@ -720,20 +744,17 @@ struct SliceToHip : public mlir::RewritePattern {
           // One `Value` for both bounds is `Slice(x, k, k, axis)` spelled the
           // way exporters emit it, so the length is zero without resolving
           // anything. Take the data dim directly rather than emitting the
-          // arithmetic and the select that would fold back to it.
+          // arithmetic and the select that would fold back to it. This holds
+          // for an unranked result too: the seed must keep full capacity.
           if (starts == ends) {
-            if (exactExtent)
-              extent = mlir::arith::ConstantIndexOp::create(rewriter, loc, 0);
-            else
-              emptyAccumulatorSeed = true;
+            emptyAccumulatorSeed = true;
             break;
           }
           mlir::Value s = boundToHost(starts, k);
           mlir::Value e = boundToHost(ends, k);
           if (s && e) {
-            extent = buildSliceExtent(rewriter, loc, dim, s, e, stepsVec[k]);
-            if (!exactExtent)
-              extent = buildAllocCapacity(rewriter, loc, dim, extent);
+            exact = buildSliceExtent(rewriter, loc, dim, s, e, stepsVec[k]);
+            extent = buildAllocCapacity(rewriter, loc, dim, exact);
           }
           break;
         }
@@ -746,6 +767,8 @@ struct SliceToHip : public mlir::RewritePattern {
                       "bound rather than the slice length -- "
                    << *op << "\n");
       dynSizes.push_back(extent ? extent : dim);
+      exactSizes.push_back(exact ? exact : (extent ? extent : dim));
+      needsExactView |= exactExtent && exact;
     }
     mlir::Value init =
         mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
@@ -753,7 +776,17 @@ struct SliceToHip : public mlir::RewritePattern {
 
     auto hipOp = mlir::hip::SliceOp::create(rewriter, loc, context, data,
                                             starts, ends, axes, steps, init);
-    rewriter.replaceOp(op, hipOp->getResult(0));
+    mlir::Value result = hipOp->getResult(0);
+    if (needsExactView) {
+      int64_t rank = resultType.getRank();
+      llvm::SmallVector<mlir::OpFoldResult> offsets(rank,
+                                                    rewriter.getIndexAttr(0));
+      llvm::SmallVector<mlir::OpFoldResult> strides(rank,
+                                                    rewriter.getIndexAttr(1));
+      result = mlir::tensor::ExtractSliceOp::create(
+          rewriter, loc, resultType, result, offsets, exactSizes, strides);
+    }
+    rewriter.replaceOp(op, result);
     return mlir::success();
   }
 };

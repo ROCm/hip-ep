@@ -531,8 +531,9 @@ module {
   }
 
   // Test 23: a TF `tf.slice(begin, size)` export left the result unranked.
-  // The ends are runtime values and there is no axes operand, so every axis
-  // may be sliced. Slice keeps the data rank, so the result is lowered as
+  // The ends are runtime values and there is no axes operand, so the leading
+  // three axes -- all of them -- are sliced. Slice keeps the data rank, so the
+  // result is lowered as
   // tensor<?x?x?xf32> and the Reshape that consumes it converts too. The
   // inferred extents are the only shape consumers see, so each runtime end is
   // read back for the exact length rather than using the data dim.
@@ -543,7 +544,8 @@ module {
     // CHECK-NOT: onnx.Slice
     // CHECK-COUNT-3: hip.readback_scalar
     // CHECK: tensor.empty(%{{.*}}, %{{.*}}, %{{.*}}) : tensor<?x?x?xf32>
-    // CHECK: hip.slice{{.*}} : tensor<?x?x?xf32>
+    // CHECK: %[[S:.*]] = hip.slice{{.*}} : tensor<?x?x?xf32>
+    // CHECK: tensor.extract_slice %[[S]][0, 0, 0] [%{{.*}}, %{{.*}}, %{{.*}}] [1, 1, 1] : tensor<?x?x?xf32> to tensor<?x?x?xf32>
     // CHECK-NOT: onnx.Reshape
     %begin = arith.constant dense<0> : tensor<3xi32>
     %shape = arith.constant dense<[-1, 1, 4]> : tensor<3xi64>
@@ -574,5 +576,51 @@ module {
     %r = "onnx.Reshape"(%s, %shape)
         : (tensor<*xf32>, tensor<1xi64>) -> tensor<12xf32>
     return %r : tensor<12xf32>
+  }
+
+  // Test 25: an unranked result with no axes operand and one bound for a
+  // rank-2 input. Omitted axes are the leading len(starts) axes, so only axis
+  // 0 is sliced: one end is read back, and axis 1 keeps its data dim. The
+  // init is sized by capacity, so a zero length still allocates the data dim,
+  // and an extract_slice of the exact length is the result.
+  func.func @test_slice_unranked_default_axes(%input: tensor<?x4xf32>,
+                                              %ends: tensor<1xi64>)
+      -> tensor<?x4xf32> {
+    // CHECK-LABEL: func.func @test_slice_unranked_default_axes
+    // CHECK-NOT: onnx.Slice
+    // CHECK: %[[DIM:.*]] = tensor.dim %{{.*}}, %{{.*}} : tensor<?x4xf32>
+    // CHECK-COUNT-1: hip.readback_scalar
+    // CHECK-NOT: hip.readback_scalar
+    // CHECK: %[[EMPTY:.*]] = arith.cmpi eq, %[[LEN:.*]], %{{.*}} : index
+    // CHECK: %[[CAP:.*]] = arith.select %[[EMPTY]], %[[DIM]], %[[LEN]] : index
+    // CHECK: tensor.empty(%[[CAP]]) : tensor<?x4xf32>
+    // CHECK: %[[S:.*]] = hip.slice{{.*}} : tensor<?x4xf32>
+    // CHECK: tensor.extract_slice %[[S]][0, 0] [%[[LEN]], 4] [1, 1] : tensor<?x4xf32> to tensor<?x4xf32>
+    %starts = arith.constant dense<[0]> : tensor<1xi64>
+    %s = "onnx.Slice"(%input, %starts, %ends)
+        : (tensor<?x4xf32>, tensor<1xi64>, tensor<1xi64>) -> tensor<*xf32>
+    %r = "onnx.Identity"(%s) : (tensor<*xf32>) -> tensor<?x4xf32>
+    return %r : tensor<?x4xf32>
+  }
+
+  // Test 26: an unranked `Slice(x, k, k, axis)` is the empty seed of a loop
+  // accumulator. Like the ranked case, its init keeps the data dim as capacity
+  // for FixLoopAccumulatorOffset rather than a zero extent, and no bound is
+  // read back.
+  func.func @test_slice_unranked_empty_seed(%input: tensor<?x4xf32>,
+                                            %k: tensor<1xi64>)
+      -> tensor<?x4xf32> {
+    // CHECK-LABEL: func.func @test_slice_unranked_empty_seed
+    // CHECK-NOT: hip.readback_scalar
+    // CHECK: %[[DIM:.*]] = tensor.dim %{{.*}}, %{{.*}} : tensor<?x4xf32>
+    // CHECK-NOT: hip.readback_scalar
+    // CHECK: tensor.empty(%[[DIM]]) : tensor<?x4xf32>
+    // CHECK: hip.slice{{.*}} : tensor<?x4xf32>
+    %axes = arith.constant dense<[0]> : tensor<1xi64>
+    %s = "onnx.Slice"(%input, %k, %k, %axes)
+        : (tensor<?x4xf32>, tensor<1xi64>, tensor<1xi64>,
+           tensor<1xi64>) -> tensor<*xf32>
+    %r = "onnx.Identity"(%s) : (tensor<*xf32>) -> tensor<?x4xf32>
+    return %r : tensor<?x4xf32>
   }
 }

@@ -308,11 +308,19 @@ static FailureOr<Value> outerScanExtent(OpBuilder &builder, Location loc,
 /// `[0, 0]`. An extent computed inside the body (a padded NMS box list, for
 /// example) is not known yet. The seed uses 0 for that dimension. The first
 /// executed iteration replaces the seed, so the placeholder is only the
-/// zero-trip result.
+/// zero-trip result. ORT's CPU Loop does the same: a zero-trip scan keeps a
+/// static per-iteration dim and gives 0 for one it cannot know, so a consumer
+/// sees the shape the reference runtime produces. The placeholder dims are
+/// recorded in `hipdnn.zero_trip_placeholder_dims` on the seed.
+///
+/// ONNX requires a scan output to keep one shape across iterations, and the
+/// accumulator relies on that: a body whose extent changes between iterations
+/// (a data-dependent Pad, say) is invalid ONNX, and nothing here detects it.
 static Value emptyScanAcc(OpBuilder &builder, Location loc,
                           RankedTensorType accTy, Value perIter, Block &body,
                           ValueRange carriedInits) {
   SmallVector<Value> dynamicSizes;
+  SmallVector<int64_t> placeholderDims;
   for (auto [dimIdx, dim] : llvm::enumerate(accTy.getShape())) {
     if (!ShapedType::isDynamic(dim))
       continue;
@@ -324,13 +332,17 @@ static Value emptyScanAcc(OpBuilder &builder, Location loc,
     FailureOr<Value> extent =
         outerScanExtent(builder, loc, perIter, static_cast<int64_t>(dimIdx) - 1,
                         body, carriedInits);
-    Value extentVal =
-        succeeded(extent)
-            ? *extent
-            : arith::ConstantIndexOp::create(builder, loc, 0).getResult();
-    dynamicSizes.push_back(extentVal);
+    if (failed(extent)) {
+      placeholderDims.push_back(static_cast<int64_t>(dimIdx));
+      extent = arith::ConstantIndexOp::create(builder, loc, 0).getResult();
+    }
+    dynamicSizes.push_back(*extent);
   }
-  return tensor::EmptyOp::create(builder, loc, accTy, dynamicSizes).getResult();
+  auto seed = tensor::EmptyOp::create(builder, loc, accTy, dynamicSizes);
+  if (!placeholderDims.empty())
+    seed->setAttr("hipdnn.zero_trip_placeholder_dims",
+                  builder.getDenseI64ArrayAttr(placeholderDims));
+  return seed.getResult();
 }
 
 /// Unsqueeze `perIter` on axis 0 so it can be concatenated onto `accTy`.
