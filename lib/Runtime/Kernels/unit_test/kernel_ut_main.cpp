@@ -34,6 +34,12 @@ static const Leaf kLeaves[] = {
     {"gqa/ring", "Xfp16_Wfp16_Yfp16",
      "hipdnn-kernel-ut-gqa-ring-xfp16-wfp16-yfp16.exe"},
 #endif
+    {"gemm", "Xfp16_Wfp16_Yfp16",
+     "hipdnn-kernel-ut-gemm-xfp16-wfp16-yfp16.exe"},
+    {"gemm", "Xbf16_Wbf16_Ybf16",
+     "hipdnn-kernel-ut-gemm-xbf16-wbf16-ybf16.exe"},
+    {"gemm", "Xfp32_Wfp32_Yfp32",
+     "hipdnn-kernel-ut-gemm-xfp32-wfp32-yfp32.exe"},
     {"matmul_nbits", "Xfp16_Wu2_Yfp16",
      "hipdnn-kernel-ut-matmul-nbits-xfp16-wu2-yfp16.exe"},
     {"matmul_nbits", "Xfp16_Wu3_Yfp16",
@@ -203,17 +209,22 @@ static bool runLeaf(const fs::path& executable, const fs::path& working_dir,
 int main(int argc, char** argv) {
   std::string arch;
   std::string mode = "lookup";
+  const char* timing_env = std::getenv("HIPDNN_UT_TIMING");
+  std::string timing = timing_env && timing_env[0] ? timing_env : "standard";
   int coverage = 3;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--arch") == 0 && i + 1 < argc)
       arch = argv[++i];
     else if (std::strcmp(argv[i], "--mode") == 0 && i + 1 < argc)
       mode = argv[++i];
+    else if (std::strcmp(argv[i], "--timing") == 0 && i + 1 < argc)
+      timing = argv[++i];
     else if (std::strcmp(argv[i], "--coverage") == 0 && i + 1 < argc)
       coverage = std::atoi(argv[++i]);
     else if (std::strcmp(argv[i], "--help") == 0) {
       std::printf("Usage: hipdnn-kernel-ut.exe [--arch gfxNNNN] "
-                  "[--mode lookup|autotune] [--coverage 1|2|3]\n");
+                  "[--mode lookup|autotune] [--coverage 1|2|3] "
+                  "[--timing screen|standard|confirm]\n");
       return 0;
     } else {
       std::fprintf(stderr, "unrecognized argument: %s\n", argv[i]);
@@ -221,6 +232,11 @@ int main(int argc, char** argv) {
     }
   }
 
+  if (timing != "screen" && timing != "standard" && timing != "confirm") {
+    std::fprintf(stderr, "--timing must be screen, standard or confirm\n");
+    return 2;
+  }
+  if (!setEnvironment("HIPDNN_UT_TIMING", timing)) return 1;
   if (mode != "lookup" && mode != "autotune") {
     std::fprintf(stderr, "--mode must be lookup or autotune, got %s\n",
                  mode.c_str());

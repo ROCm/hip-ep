@@ -29,6 +29,7 @@ OFFLOAD  ?= --offload-arch=gfx11-generic
 HIP_SDK  ?=
 MODE     ?= lookup
 COVERAGE ?= 3
+TIMING   ?= standard
 
 ifeq ($(HIP_SDK),)
     $(error pass HIP_SDK=<HIP SDK root>)
@@ -36,6 +37,7 @@ endif
 
 # Keep in sync with unit_test/CMakeLists.txt and kernel_ut_main.cpp.
 LEAVES := cast/Xany_Yany_bf16 \
+	gemm/Xfp16_Wfp16_Yfp16 gemm/Xbf16_Wbf16_Ybf16 gemm/Xfp32_Wfp32_Yfp32 \
 	gather_block_quantized/Xi64_Wfp8_Yfp16 \
 	gather_block_quantized/Xi64_Wu4_Yfp16 gather_block_quantized/Xi64_Wu8_Yfp16 \
 	gqa/decode/Xfp16_Wfp16_Yfp16 gqa/decode/Xfp16_Wi8_Yfp16 \
@@ -72,7 +74,7 @@ CLEAN_LEAVES := $(addprefix clean/,$(LEAVES))
 .PHONY: test build clean $(LEAVES) $(CLEAN_LEAVES)
 
 test: build
-	$(call RUN_UT,--mode $(MODE) --coverage $(COVERAGE))
+	$(call RUN_UT,--mode $(MODE) --coverage $(COVERAGE) --timing $(TIMING))
 
 build: $(LEAVES) $(PKG)/hipdnn-kernel-ut.exe
 

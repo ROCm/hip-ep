@@ -26,6 +26,7 @@
 // ============================================================
 
 #include <hip/hip_runtime.h>
+#include "../../../common/hip_adaptive_timing.h"
 #include <hip/hip_fp16.h>
 
 #include <algorithm>
@@ -85,6 +86,7 @@ class CsvWriter {
   }
   ~CsvWriter() { if (f_) std::fclose(f_); }
   void write(const CsvRow& r) {
+    timing::emitCsvBinding(r.shape, r.config, r.verdict, r.rel_l2, r.time_ms);
     if (!f_) return;
     std::fprintf(f_, "%s,%s,%s,%s,%s,%s,%.6f,%.6e,%s\n",
                  env_or("HIPDNN_RESULTS_OP", "unknown"),
@@ -302,43 +304,15 @@ inline int* holdReleaseFlag() {
   return flag;
 }
 
-// Mean milliseconds per launch over `iters` back-to-back launches on `stream`,
-// launch(c) reading copy c. Untimed launches over the rotation go first, until
-// kColdSettleBytes have been read.
+// The shared UT policy selects the actual call count from a device pilot.
+// launch(c) invokes the complete op with operand copy c.
 template <class Launch>
-double rotatedMeanMs(hipStream_t stream, int iters, const ColdKvCopies& copies,
-                     Launch&& launch) {
-  const int n = copies.count();
-  int turn = 0;
-  if (n > 1) {
-    const size_t settle = std::min<size_t>(
-        n, (kColdSettleBytes + copies.bytes() - 1) / copies.bytes());
-    for (size_t i = 0; i < settle; ++i) launch(turn++ % n);
-  }
-  // Drained, so the hold below holds the timed launches rather than being
-  // released while earlier launches are still queued ahead of it.
-  (void)hipStreamSynchronize(stream);
-  volatile int* release = holdReleaseFlag();
-  void* release_dev = nullptr;
-  if (release &&
-      hipHostGetDevicePointer(&release_dev, const_cast<int*>(release), 0) ==
-          hipSuccess) {
-    *release = 0;
-    holdStreamKernel<<<1, 1, 0, stream>>>(static_cast<const int*>(release_dev));
-  }
-  hipEvent_t start, stop;
-  (void)hipEventCreate(&start);
-  (void)hipEventCreate(&stop);
-  (void)hipEventRecord(start, stream);
-  for (int i = 0; i < iters; ++i) launch(turn++ % n);
-  (void)hipEventRecord(stop, stream);
-  if (release) *release = 1;
-  (void)hipEventSynchronize(stop);
-  float ms = 0.0f;
-  (void)hipEventElapsedTime(&ms, start, stop);
-  (void)hipEventDestroy(start);
-  (void)hipEventDestroy(stop);
-  return iters > 0 ? ms / iters : 0.0;
+double rotatedMeanMs(hipStream_t stream, int /*legacy_iters*/, const ColdKvCopies& copies,
+                     Launch&& launch, const char* complete_entry = nullptr) {
+  return timing::adaptiveRotatedMeanMs(
+      stream, copies, launch, holdReleaseFlag(),
+      [&](const int* flag) { holdStreamKernel<<<1, 1, 0, stream>>>(flag); },
+      warmTiming(), kColdSettleBytes, "gqa_prefill_xfp16_wfp16_yfp16", complete_entry);
 }
 }  // namespace hipdnn_ep_test
 
@@ -566,6 +540,7 @@ static std::string case_shape(const Case& c) {
 }
 
 static bool run_case(const Case& c, int iters) {
+  hipdnn_ep_test::timing::CaseScope timing_case("gqa/prefill/Xfp16_Wfp16_Yfp16", case_shape(c), "hip_gqa_flash_prefill");
   const int B = c.B, H = c.H, G = c.G, D = c.D, sq = c.sq;
   const int past_len = c.past;
   const int skv = past_len + sq;   // total_seq
@@ -760,8 +735,9 @@ static bool run_case(const Case& c, int iters) {
         for (int i = 0; i < 10; ++i) launch(kv.k(0), kv.v(0), kv.rows());
         HIP_CHECK(hipDeviceSynchronize());
         ms = hipdnn_ep_test::rotatedMeanMs(nullptr, iters, kv, [&](int i) {
-          launch(kv.k(i), kv.v(i), kv.rows());
-        });
+          return launch(kv.k(i), kv.v(i), kv.rows());
+        }, use_lookup ? "hip_gqa_flash_prefill_v3_configured"
+                      : "hip_gqa_flash_prefill");
       });
 
   const bool pass = err < 2e-3;
@@ -808,6 +784,7 @@ static bool run_case(const Case& c, int iters) {
 }
 
 int main(int argc, char** argv) {
+  hipdnn_ep_test::timing::printTimingMode();
   const int coverage_tier = hipdnn_ep_test::resolveCoverageTier(argc, argv);
 
   int iters = 100;

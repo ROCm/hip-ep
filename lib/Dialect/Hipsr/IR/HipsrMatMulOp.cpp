@@ -204,7 +204,51 @@ struct MatMulLowering : ConvertOpToLLVMPattern<MatMulOp> {
       }
     }
 
-    int64_t elementSize = aType.getElementType().getIntOrFloatBitWidth() / 8;
+    int64_t elementSize =
+        aType.getElementType().isBF16()
+            ? -2
+            : static_cast<int64_t>(
+                  aType.getElementType().getIntOrFloatBitWidth() / 8);
+    if (!isa<FloatType>(aType.getElementType()))
+      return op.emitError("custom MatMul requires a floating dtype");
+    const int64_t aBatchRank = std::max<int64_t>(aRank - 2, 0);
+    const int64_t bBatchRank = std::max<int64_t>(bRank - 2, 0);
+    const int64_t batchRank = std::max(aBatchRank, bBatchRank);
+    bool bBroadcast = true, identicalBatches = true;
+    for (int64_t axis = 0; axis < batchRank; ++axis) {
+      const int64_t ai = axis - (batchRank - aBatchRank);
+      const int64_t bi = axis - (batchRank - bBatchRank);
+      const int64_t ad = ai < 0 ? 1 : aType.getDimSize(ai);
+      const int64_t bd = bi < 0 ? 1 : bType.getDimSize(bi);
+      bBroadcast &= bd == 1;
+      identicalBatches &=
+          ad != ShapedType::kDynamic && bd != ShapedType::kDynamic && ad == bd;
+    }
+    const bool generalBroadcast = !bBroadcast && !identicalBatches;
+    if (generalBroadcast) {
+      auto emitBatchDims = [&](MemRefDescriptor &desc, int64_t rank) -> Value {
+        SmallVector<Value> dimensions;
+        for (int64_t i = 0; i < rank; ++i)
+          dimensions.push_back(desc.size(rewriter, loc, i));
+        return emitHostI64Array(dimensions, rewriter, loc);
+      };
+      using BroadcastCall =
+          RuntimeFunc<i32, hostPtr, slotIndex, devicePtr, devicePtr, devicePtr,
+                      i64, i64, i64, i64, i64, i64, i64, hostPtr, i64, hostPtr>;
+      auto function = BroadcastCall::lookupOrCreateFn(rewriter, loc, module,
+                                                      "wrap_matmul_broadcast");
+      if (failed(function))
+        return failure();
+      if (failed(function->call(
+              adaptor.getCtx(), SlotIndex{op.getOperation()}, adaptor.getA(),
+              adaptor.getB(), adaptor.getInit(), m, n, k, elementSize,
+              static_cast<int64_t>(0), static_cast<int64_t>(0), aBatchRank,
+              emitBatchDims(aDesc, aBatchRank), bBatchRank,
+              emitBatchDims(bDesc, bBatchRank))))
+        return failure();
+      rewriter.eraseOp(op);
+      return success();
+    }
     using MatMulCall =
         RuntimeFunc<i32, hostPtr, slotIndex, devicePtr, devicePtr, devicePtr,
                     i64, i64, i64, i64, i64, i64, i64, i64>;

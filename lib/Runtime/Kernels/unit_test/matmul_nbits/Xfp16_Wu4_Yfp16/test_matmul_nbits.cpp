@@ -4,8 +4,8 @@
  *
  * custom_kernels MatMulNBits bits=4 (uint4, nibble-packed) Verification.
  *
- * Unit-test model: this file is entirely self-contained (no unit_test/common/,
- * no python, no on-disk data) -- inputs, the uint4 packing, and the
+ * Unit-test model: inputs and the CPU reference are generated in-process
+ * (no python or on-disk data; timing uses unit_test/common/) -- inputs, the uint4 packing, and the
  * dequant+matmul CPU reference are all generated in-process. The case set is
  * every categorical situation this op supports (group_size in {32,64,128},
  * zero-points on/off) crossed with a comprehensive list of
@@ -29,6 +29,7 @@
  * C:        FP16 row-major [M, N]
  */
 #include <hip/hip_runtime.h>
+#include "../../common/hip_adaptive_timing.h"
 #include <hip/hip_fp16.h>
 #include "hip_custom_kernels.h"
 
@@ -116,6 +117,7 @@ class CsvWriter {
   }
   ~CsvWriter() { if (f_) std::fclose(f_); }
   void write(const CsvRow& r) {
+    timing::emitCsvBinding(r.shape, r.config, r.verdict, r.rel_l2, r.time_ms);
     if (!f_) return;
     std::fprintf(f_, "%s,%s,%s,%s,%s,%s,%.6f,%.6e,%s\n",
                  env_or("HIPDNN_RESULTS_OP", "unknown"),
@@ -248,43 +250,15 @@ inline int* holdReleaseFlag() {
   return flag;
 }
 
-// Mean milliseconds per launch over `iters` back-to-back launches on `stream`,
-// launch(c) reading copy c. Untimed launches over the rotation go first, until
-// kColdSettleBytes have been read.
+// The shared UT policy selects the actual call count from a device pilot.
+// launch(c) invokes the complete op with operand copy c.
 template <class Launch>
-double rotatedMeanMs(hipStream_t stream, int iters, const ColdCopies& copies,
+double rotatedMeanMs(hipStream_t stream, int /*legacy_iters*/, const ColdCopies& copies,
                      Launch&& launch) {
-  const int n = copies.count();
-  int turn = 0;
-  if (n > 1) {
-    const size_t settle = std::min<size_t>(
-        n, (kColdSettleBytes + copies.bytes() - 1) / copies.bytes());
-    for (size_t i = 0; i < settle; ++i) launch(turn++ % n);
-  }
-  // Drained, so the hold below holds the timed launches rather than being
-  // released while earlier launches are still queued ahead of it.
-  (void)hipStreamSynchronize(stream);
-  volatile int* release = holdReleaseFlag();
-  void* release_dev = nullptr;
-  if (release &&
-      hipHostGetDevicePointer(&release_dev, const_cast<int*>(release), 0) ==
-          hipSuccess) {
-    *release = 0;
-    holdStreamKernel<<<1, 1, 0, stream>>>(static_cast<const int*>(release_dev));
-  }
-  hipEvent_t start, stop;
-  (void)hipEventCreate(&start);
-  (void)hipEventCreate(&stop);
-  (void)hipEventRecord(start, stream);
-  for (int i = 0; i < iters; ++i) launch(turn++ % n);
-  (void)hipEventRecord(stop, stream);
-  if (release) *release = 1;
-  (void)hipEventSynchronize(stop);
-  float ms = 0.0f;
-  (void)hipEventElapsedTime(&ms, start, stop);
-  (void)hipEventDestroy(start);
-  (void)hipEventDestroy(stop);
-  return iters > 0 ? ms / iters : 0.0;
+  return timing::adaptiveRotatedMeanMs(
+      stream, copies, launch, holdReleaseFlag(),
+      [&](const int* flag) { holdStreamKernel<<<1, 1, 0, stream>>>(flag); },
+      warmTiming(), kColdSettleBytes, "matmul_nbits_fp16_wu4");
 }
 }  // namespace hipdnn_ep_test
 
@@ -629,6 +603,10 @@ static std::vector<Case> buildCases(int tier) {
 }
 
 static bool runOne(const Case& c, int idx) {
+  char timing_shape[96];
+  std::snprintf(timing_shape, sizeof(timing_shape), "M%d_N%d_K%d_gs%d%s",
+                c.M, c.N, c.K, c.gs, c.zero ? "" : "_noz");
+  hipdnn_ep_test::timing::CaseScope timing_case("matmul_nbits/Xfp16_Wu4_Yfp16", timing_shape, "hip_matmul_nbits");
   CaseData d;
   genCase(c.M, c.K, c.N, c.gs, c.zero, c.fp32, /*seed=*/1000u + idx, d);
 
@@ -682,7 +660,7 @@ static bool runOne(const Case& c, int idx) {
          {dS, d.scales.size() * sizeof(__half)},
          {dZ, c.zero ? d.zeros.size() * sizeof(__half) : 0}});
     avg_ms = hipdnn_ep_test::rotatedMeanMs(stream, kIters, weights, [&](int i) {
-      hip_matmul_nbits(stream, dA, weights.part(i, 0), weights.part(i, 1),
+      return hip_matmul_nbits(stream, dA, weights.part(i, 0), weights.part(i, 1),
                        c.zero ? weights.part(i, 2) : nullptr, nullptr, dC, c.M,
                        c.N, c.K, /*batch_count=*/1, /*bits=*/4, c.gs,
                        static_cast<int>(elem), /*zp_elem_size=*/2, nullptr,
@@ -878,6 +856,7 @@ static int runCustom(int M, int N, int K, int gs, bool zero) {
 }
 
 int main(int argc, char* argv[]) {
+  hipdnn_ep_test::timing::printTimingMode();
   std::printf("custom_kernels MatMulNBits bits=4 (nibble-packed) Verification\n");
   std::printf("===============================================================\n");
 

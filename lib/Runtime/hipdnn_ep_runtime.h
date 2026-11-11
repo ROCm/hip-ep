@@ -306,7 +306,7 @@ HIPDNN_EP_RT_EXPORT int hipdnn_ep_roctx_enabled(void);
 // operator range. No-op when ROCTx is off or the library has no roctxMarkA.
 HIPDNN_EP_RT_EXPORT void hipdnn_ep_roctx_mark(const char *name);
 
-// Get hipBLASLt handle from state (for GEMM operations)
+// Get the retained session hipBLASLt handle for ABI compatibility.
 // Returns: hipblasLtHandle_t cast to void* (NULL on error)
 // Ownership: Caller does NOT own handle (destroyed in cleanup)
 void *hipdnn_ep_state_get_hipblas_handle(RuntimeState *state);
@@ -812,12 +812,11 @@ int wrap_conv_transpose(
     int64_t data_type);       // HIPDNN_EP_DATATYPE_* element type
 
 //===----------------------------------------------------------------------===//
-// Library Operations (hipBLAS)
+// Dense matrix operations
 //===----------------------------------------------------------------------===//
 
-// hipBLASLt GEMM operation wrapper
-// Called by generated IR for matrix multiplication operations
-int wrap_hipblasLtGemm(void *handle, // hipBLASLt handle
+// Historical column-major fp32 ABI, now dispatched to custom hip_gemm.
+int wrap_hipblasLtGemm(void *handle, // Reserved; ignored by custom GEMM
                        void *stream, // HIP stream
                        int64_t m, int64_t n, int64_t k,
                        const void *alpha, // Scalar alpha
@@ -832,14 +831,14 @@ int wrap_hipblasLtGemm(void *handle, // hipBLASLt handle
 // A: [batch_count x M x K], B: [K x N] (broadcast) or [batch_count x K x N]
 // output: [batch_count x M x N]
 //
-// `b_batch_stride` is hipBLASLt's STRIDED_BATCH_OFFSET on layA when
-// `batch_count > 1`: the per-batch advance in elements through B. It MUST be:
+// The historical symbol now calls custom hip_gemm. `b_batch_stride` is the
+// per-batch advance through B, in elements, when batch_count > 1. It MUST be:
 //   * 0   when B is a broadcast weight — one matrix reused across all
 //         batches. Includes both rank-2 `[K, N]` and rank-N
 //         `[1, ..., 1, K, N]` (any leading-dim product == 1).
 //   * K*N when B is per-batch — leading-dim product > 1, so the buffer
 //         actually holds multiple `[K, N]` matrices laid out contiguously.
-// Mis-setting this to K*N for a broadcast B causes hipBLASLt to step K*N
+// Mis-setting this to K*N for a broadcast B causes the wrapper to step K*N
 // elements past the end of the weight buffer on every batch beyond the
 // first, reading uninitialised memory into the GEMM and producing wrong
 // (often NaN) outputs for batch > 0. For batch_count == 1 the value is
@@ -847,7 +846,7 @@ int wrap_hipblasLtGemm(void *handle, // hipBLASLt handle
 // at compile time when B's leading dims are static, else at runtime.
 int wrap_hipblasLtMatmul(
     RuntimeState *state,
-    int op_state_slot,      // per-instance op-state slot (shared algo table)
+    int op_state_slot,      // Retained per-instance slot ABI
     const void *A,          // Matrix A GPU pointer
     const void *B,          // Matrix B GPU pointer
     void *output,           // Output GPU pointer
@@ -855,10 +854,20 @@ int wrap_hipblasLtMatmul(
     int64_t N,              // Columns of B
     int64_t K,              // Columns of A / Rows of B
     int64_t batch_count,    // Number of batches
-    int64_t elem_size,      // Element size in bytes (2=f16, 4=f32)
+    int64_t elem_size,      // Element kind: 2=f16, 4=f32, 8=f64, -2=bf16
     int64_t b_batch_stride, // 0 = broadcast (any rank); K*N = per-batch
     int64_t transA,         // 1 = swap A's last two dims before multiply
     int64_t transB);        // 1 = swap B's last two dims before multiply
+
+// General ONNX MatMul leading-axis broadcast. Dimension arrays live on the
+// host; each stored matrix is contiguous. The host map supports every rank
+// representable by the compiler and checked 64-bit extents.
+int wrap_matmul_broadcast(RuntimeState *state, int op_state_slot, const void *A,
+                          const void *B, void *output, int64_t M, int64_t N,
+                          int64_t K, int64_t elem_kind, int64_t transA,
+                          int64_t transB, int64_t a_batch_rank,
+                          const int64_t *a_batch_dims, int64_t b_batch_rank,
+                          const int64_t *b_batch_dims);
 
 // Int32 matmul. hipBLASLt has no int32 GEMM, and feeding i32 bits to the f32
 // entry point reads them as floats. Neither operand is transposed. The kernel
@@ -1932,7 +1941,7 @@ int wrap_causal_conv_with_state(
     int64_t state_channels_last);
 
 //==============================================================================
-// ONNX Gemm via hipBLASLt
+// ONNX Gemm via custom hip_gemm
 //==============================================================================
 // Y = alpha * op(A) * op(B) + beta * C
 // op(A) shape: [M, K], op(B) shape: [K, N], C optional broadcastable to [M, N]
@@ -2051,7 +2060,7 @@ int wrap_sparse_attention_indexer(
     int64_t id_rows, void *selected_counts, int64_t pair_format);
 
 //==============================================================================
-// ONNX Gemm via hipBLASLt
+// ONNX Gemm via custom hip_gemm
 //==============================================================================
 // Y = alpha * op(A) * op(B) + beta * C
 // op(A) shape: [M, K], op(B) shape: [K, N], C optional broadcastable to [M, N]

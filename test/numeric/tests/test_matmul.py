@@ -41,6 +41,103 @@ def _make_matmul_model(input_shape: list[int], weight_shape: list[int]):
 
 
 class TestMatMul:
+    @pytest.mark.parametrize("dynamic", [False, True])
+    def test_bf16_cross_axis_broadcast(self, model_runner, dynamic):
+        """BF16's two-byte ABI remains distinct from fp16 across batch axes."""
+        rng = np.random.default_rng(520)
+        a_shape, b_shape = [2, 1, 19, 37], [1, 3, 37, 21]
+        a = rng.uniform(-0.25, 0.25, a_shape).astype(np.float32)
+        b = rng.uniform(-0.25, 0.25, b_shape).astype(np.float32)
+        a_dims = ["a", 1, 19, 37] if dynamic else a_shape
+        b_dims = [1, "b", 37, 21] if dynamic else b_shape
+        y_dims = ["a", "b", 19, 21] if dynamic else [2, 3, 19, 21]
+        inputs = [
+            helper.make_tensor_value_info("A", TensorProto.FLOAT, a_dims),
+            helper.make_tensor_value_info("B", TensorProto.FLOAT, b_dims),
+        ]
+        outputs = [helper.make_tensor_value_info("Y", TensorProto.FLOAT, y_dims)]
+        casts = [
+            helper.make_node("Cast", ["A"], ["aq"], to=TensorProto.BFLOAT16),
+            helper.make_node("Cast", ["B"], ["bq"], to=TensorProto.BFLOAT16),
+        ]
+        model = make_model_from_nodes(
+            casts
+            + [
+                helper.make_node("MatMul", ["aq", "bq"], ["yq"]),
+                helper.make_node("Cast", ["yq"], ["Y"], to=TensorProto.FLOAT),
+            ],
+            inputs,
+            outputs,
+        )
+        # The CPU lacks a BF16 MatMul implementation. Exact operand widening,
+        # fp32 multiplication and BF16 output rounding provide its reference.
+        reference = make_model_from_nodes(
+            casts
+            + [
+                helper.make_node("Cast", ["aq"], ["af"], to=TensorProto.FLOAT),
+                helper.make_node("Cast", ["bq"], ["bf"], to=TensorProto.FLOAT),
+                helper.make_node("MatMul", ["af", "bf"], ["yf"]),
+                helper.make_node("Cast", ["yf"], ["yq"], to=TensorProto.BFLOAT16),
+                helper.make_node("Cast", ["yq"], ["Y"], to=TensorProto.FLOAT),
+            ],
+            inputs,
+            outputs,
+        )
+        actual, expected = model_runner.run_sample(
+            model, [a, b], reference="cpu", reference_model=reference
+        )
+        compare_outputs(actual, expected, atol=1e-2, rtol=2e-2)
+
+    @pytest.mark.parametrize("dtype", [np.float16, np.float32])
+    @pytest.mark.parametrize(
+        "a_shape,b_shape",
+        [
+            ([19, 37], [37, 21]),
+            ([2, 19, 37], [37, 21]),
+            ([2, 19, 37], [2, 37, 21]),
+            ([2, 3, 19, 37], [1, 3, 37, 21]),
+            ([2, 1, 19, 37], [1, 3, 37, 21]),
+            ([19, 37], [3, 37, 21]),
+            ([37], [3, 37, 21]),
+            ([2, 19, 37], [37]),
+            ([2, 1] + [1] * 9 + [19, 37], [1, 3] + [1] * 9 + [37, 21]),
+        ],
+    )
+    def test_dense_batch_broadcast(self, model_runner, dtype, a_shape, b_shape):
+        """Each batch uses the right source matrix, including cross-axis reuse."""
+        rng = np.random.default_rng(517)
+        a = rng.uniform(-0.25, 0.25, a_shape).astype(dtype)
+        b = rng.uniform(-0.25, 0.25, b_shape).astype(dtype)
+        output_shape = list(np.matmul(a, b).shape)
+        elem_type = TensorProto.FLOAT16 if dtype == np.float16 else TensorProto.FLOAT
+        model = make_model_from_nodes(
+            [helper.make_node("MatMul", ["A", "B"], ["Y"])],
+            [
+                helper.make_tensor_value_info("A", elem_type, a_shape),
+                helper.make_tensor_value_info("B", elem_type, b_shape),
+            ],
+            [helper.make_tensor_value_info("Y", elem_type, output_shape)],
+        )
+        actual, expected = model_runner.run_sample(model, [a, b], reference="cpu")
+        compare_outputs(actual, expected, atol=1e-3 if dtype == np.float16 else 1e-5)
+
+    @pytest.mark.parametrize("b_batch", [1, 2])
+    def test_dynamic_batch_broadcast(self, model_runner, b_batch):
+        """Runtime leading dimensions distinguish shared from per-batch B."""
+        rng = np.random.default_rng(518)
+        a = rng.uniform(-0.25, 0.25, [2, 19, 37]).astype(np.float32)
+        b = rng.uniform(-0.25, 0.25, [b_batch, 37, 21]).astype(np.float32)
+        model = make_model_from_nodes(
+            [helper.make_node("MatMul", ["A", "B"], ["Y"])],
+            [
+                helper.make_tensor_value_info("A", TensorProto.FLOAT, ["a", 19, 37]),
+                helper.make_tensor_value_info("B", TensorProto.FLOAT, ["b", 37, 21]),
+            ],
+            [helper.make_tensor_value_info("Y", TensorProto.FLOAT, ["out", 19, 21])],
+        )
+        actual, expected = model_runner.run_sample(model, [a, b], reference="cpu")
+        compare_outputs(actual, expected, atol=1e-5)
+
     @pytest.mark.parametrize(
         "input_shape,weight_shape",
         [

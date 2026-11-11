@@ -4,8 +4,8 @@
  */
 
 //===----------------------------------------------------------------------===//
-// GQA runtime wrapper (self-contained: optimized fused fast path + legacy
-// decomposed hipBLASLt fallback).
+// GQA runtime wrapper (self-contained: optimized fused fast path +
+// decomposed custom-GEMM path).
 //
 // The generated IR calls `wrap_group_query_attention_host_length`, or
 // `wrap_group_query_attention_ring_f16` for proven FP16 Ring candidates.
@@ -28,8 +28,8 @@
 //
 //   * Everything else the fused kernels do not implement (fp32, no_causal /
 //     bidirectional, additive attention bias, other head_dim, untemplated
-//     decode geometry) -> the feature-complete legacy decomposed hipBLASLt
-//     pipeline gqa_forward_hipblaslt below. This is a verbatim port of the
+//     decode geometry) -> the feature-complete decomposed custom-GEMM
+//     pipeline gqa_forward_decomposed below. It retains the layouts of the
 //     proven gqa_back.cpp strategy (the read-only backup stays out of the
 //     build); it keeps hip_gqa_fused_decode for decode geometries the v2
 //     kernels do not template.
@@ -54,6 +54,7 @@
 #include "../op_profile.h"
 #include "../op_state.h"
 #include "../runtime_state_internal.h"
+#include "attention_gemm.h"
 #include "cache_utils.h"
 #include "error_check_macros.h"
 #include "gqa_autotune.h"
@@ -76,11 +77,10 @@
 #include <vector>
 
 #define HIP_CHECK(cmd) HIP_CHECK_GOTO(cmd, cleanup)
-#define HIPBLAS_CHECK(cmd) HIPBLAS_CHECK_GOTO(cmd, cleanup)
 
 //===----------------------------------------------------------------------===//
 // Legacy fast-path decode kernel (folded into gqa_kernel.hip as a legacy_*
-// device kernel) backs the decomposed hipBLASLt fallback below. Its entry
+// device kernel) backs the decomposed custom-GEMM fallback below. Its entry
 // hip_gqa_fused_decode is declared (and HIP_KERNEL_API exported) in
 // hip_custom_kernels.h, so the EP resolves it out of custom_kernels_<arch> at
 // JIT link / native import.
@@ -249,6 +249,61 @@ static int64_t window_copy_lo(int64_t past_len, int64_t window) {
   return lo > 0 ? lo / kWindowCopyAlign * kWindowCopyAlign : 0;
 }
 
+// Separate present buffers expose valid past rows outside the attention's
+// sliding-window read range. Keep those rows in the observable cache output.
+static int preserve_kv_cache_range(hipStream_t stream, const void *past_key,
+                                   const void *past_value, void *present_key,
+                                   void *present_value, int B, int G, int d,
+                                   int past_buf_seq, int present_seq, int first,
+                                   int last, int cache_elem_sz) {
+  if (first >= last || !past_key || !past_value ||
+      (past_key == present_key && past_value == present_value))
+    return 0;
+  const size_t row_bytes = static_cast<size_t>(d) * cache_elem_sz;
+  const size_t offset = static_cast<size_t>(first) * row_bytes;
+  const size_t width = static_cast<size_t>(last - first) * row_bytes;
+  const size_t src_pitch = static_cast<size_t>(past_buf_seq) * row_bytes;
+  const size_t dst_pitch = static_cast<size_t>(present_seq) * row_bytes;
+  const size_t rows = static_cast<size_t>(B) * G;
+  if (hipMemcpy2DAsync(static_cast<char *>(present_key) + offset, dst_pitch,
+                       static_cast<const char *>(past_key) + offset, src_pitch,
+                       width, rows, hipMemcpyDeviceToDevice,
+                       stream) != hipSuccess)
+    return -1;
+  if (hipMemcpy2DAsync(static_cast<char *>(present_value) + offset, dst_pitch,
+                       static_cast<const char *>(past_value) + offset,
+                       src_pitch, width, rows, hipMemcpyDeviceToDevice,
+                       stream) != hipSuccess)
+    return -1;
+  return 0;
+}
+
+// A separate present output has zero padding beyond its valid sequence. Past
+// cache capacity can contain arbitrary bytes there; they are not valid tokens.
+// In-place caches retain their unused capacity and only append new tokens.
+static int zero_separate_kv_cache_padding(
+    hipStream_t stream, const void *past_key, const void *past_value,
+    void *present_key, void *present_value, int B, int G, int d,
+    int present_seq, int valid_seq, int cache_elem_sz) {
+  if (valid_seq >= present_seq ||
+      (past_key == present_key && past_value == present_value))
+    return 0;
+  if (valid_seq < 0)
+    return -1;
+  const size_t row_bytes = static_cast<size_t>(d) * cache_elem_sz;
+  const size_t offset = static_cast<size_t>(valid_seq) * row_bytes;
+  const size_t width = static_cast<size_t>(present_seq - valid_seq) * row_bytes;
+  const size_t pitch = static_cast<size_t>(present_seq) * row_bytes;
+  const size_t rows = static_cast<size_t>(B) * G;
+  if (hipMemset2DAsync(static_cast<char *>(present_key) + offset, pitch, 0,
+                       width, rows, stream) != hipSuccess)
+    return -1;
+  if (hipMemset2DAsync(static_cast<char *>(present_value) + offset, pitch, 0,
+                       width, rows, stream) != hipSuccess)
+    return -1;
+  return 0;
+}
+
 //===----------------------------------------------------------------------===//
 // KV cache update: concat past+new, append new tokens in place, or (no_causal)
 // the bidirectional copy/append branch used by the decomposed pipeline.
@@ -269,12 +324,11 @@ static int64_t window_copy_lo(int64_t past_len, int64_t window) {
 // rather than in a separate helper or at each call site.
 //
 // copy_lo bounds the separate-buffer concat from below: past positions
-// [0, copy_lo) are not copied into present and are left whatever the allocator
-// held. A sliding-window call passes window_copy_lo() below, which no read of
-// this call or any later one goes beneath; everyone else passes 0. It is
-// required rather than defaulted so that a new call site has to say which it
-// is. The append branches ignore it: they only ever write the new tokens, and
-// an in-place cache has no prefix to copy in the first place.
+// [0, copy_lo) are outside the attention read range. Preserve those valid rows
+// and zero the padding after past_len + sq in a distinct present output.
+// A sliding-window call passes window_copy_lo(); everyone else passes 0. The
+// append branches write only new tokens, so an in-place cache already retains
+// all the other rows.
 static int update_kv_cache(hipStream_t stream, const void *past_key,
                            const void *past_value, const void *new_key,
                            const void *new_value, void *present_key,
@@ -345,6 +399,15 @@ static int update_kv_cache(hipStream_t stream, const void *past_key,
   const bool quantized = (kv_format != KvCacheFormat::Fp16);
   const void *k_sc = quantized ? k_scale : nullptr;
   const void *v_sc = quantized ? v_scale : nullptr;
+  const int cache_elem_sz = quantized ? 1 : elem_sz;
+  if (preserve_kv_cache_range(stream, past_key, past_value, present_key,
+                              present_value, B, G, d, past_buf_seq, present_seq,
+                              0, std::min(copy_lo, past_len),
+                              cache_elem_sz) != 0 ||
+      zero_separate_kv_cache_padding(stream, past_key, past_value, present_key,
+                                     present_value, B, G, d, present_seq,
+                                     past_len + sq, cache_elem_sz) != 0)
+    return -1;
   if (past_key && past_len > 0 && past_key != present_key) {
     // Separate-buffer concat: needs host-side past_len for stride computation.
     OP_ROCTX_MARK("hip_ep.op.gqa.kv.concat");
@@ -530,6 +593,23 @@ static int gqa_forward_fused(
       int32_t seqlens_k_val = 0;
       if (seqlens_k_pre != kSeqlensKNotRead) {
         seqlens_k_val = seqlens_k_pre;
+      } else if (B > 1) {
+        std::vector<int32_t> seqlens_k_host(B);
+        if (hipMemcpyAsync(seqlens_k_host.data(), seqlens_k_ptr,
+                           B * sizeof(int32_t), hipMemcpyDeviceToHost,
+                           stream) != hipSuccess ||
+            hipStreamSynchronize(stream) != hipSuccess)
+          return -1;
+        seqlens_k_val = seqlens_k_host[0];
+        for (int64_t b = 1; b < B; ++b) {
+          if (seqlens_k_host[b] != seqlens_k_val) {
+            fprintf(stderr,
+                    "gqa_forward_fused (decode): separate caches require "
+                    "equal seqlens_k (batch %lld has %d, batch 0 has %d)\n",
+                    (long long)b, seqlens_k_host[b], seqlens_k_val);
+            return -1;
+          }
+        }
       } else {
         if (hipMemcpyAsync(&seqlens_k_val, seqlens_k_ptr, sizeof(int32_t),
                            hipMemcpyDeviceToHost, stream) != hipSuccess)
@@ -654,11 +734,19 @@ static int gqa_forward_fused(
         aligned16(past_key) && aligned16(past_value) && aligned16(kSrc) &&
         aligned16(vSrc) && aligned16(present_key) && aligned16(present_value);
 
+    if (fused_copy &&
+        zero_separate_kv_cache_padding(
+            stream, past_key, past_value, present_key, present_value,
+            static_cast<int>(B), static_cast<int>(G), static_cast<int>(d),
+            static_cast<int>(present_seq), static_cast<int>(past_len + sq),
+            static_cast<int>(elem_sz)) != 0)
+      return -1;
+
     // Append the new token to the KV cache. Quantized cache:
     // quantize-and-append with the static per-channel scale; fp16 cache: plain
     // append. update_kv_cache dispatches on kv_format internally. On a
-    // sliding-window layer the prefix below the window is never read again,
-    // so it is not copied.
+    // sliding-window layer the concat only copies its read range; the
+    // valid prefix is preserved and the unused separate-output tail is zeroed.
     if (!fused_copy &&
         update_kv_cache(
             stream, past_key, past_value, kSrc, vSrc, present_key,
@@ -997,13 +1085,13 @@ static int gqa_forward_fused(
 }
 
 //===----------------------------------------------------------------------===//
-// Legacy decomposed hipBLASLt pipeline (verbatim port of gqa_back.cpp's
-// strategy). Reached from wrap_group_query_attention for every case the
-// optimized fused path does not implement. The read-only backup gqa_back.cpp
-// stays out of the build; this is the production copy.
+// Decomposed custom-GEMM pipeline keeps the layouts from gqa_back.cpp. Reached
+// from wrap_group_query_attention for every case the optimized fused path does
+// not implement. The read-only backup gqa_back.cpp stays out of the build; this
+// is the production copy.
 //===----------------------------------------------------------------------===//
 
-// Env-var gate for the group-batched "no-expand" hipBLASLt GQA pipeline.
+// Env-var gate for the group-batched "no-expand" custom-GEMM GQA pipeline.
 // When HIPDNN_EP_GQA_NO_EXPAND=1 (default) the Score and Value GEMMs read
 // K and V directly from the BNSD [B, G, skv, d] present cache using
 // strided-batched mode with batch = B*G and per-operand batch strides:
@@ -1052,7 +1140,7 @@ static bool gqa_no_expand_prefill_enabled() {
 
 // Byte budget for the pair of score matrices the decomposed prefill holds. Once
 // the pair would exceed this, the prefill is tiled over query rows instead (see
-// the chunking comment in gqa_forward_hipblaslt). Set
+// the chunking comment in gqa_forward_decomposed). Set
 // HIPDNN_EP_GQA_SCORE_BUDGET_MB=0 to restore the untiled single-shot behaviour
 // for A/B testing.
 //
@@ -1084,7 +1172,7 @@ static constexpr int64_t kScoreChunkAlign = 128;
 
 // Chunk height for a windowed prefill, where chunking is worth doing for the
 // key narrowing rather than to fit a byte budget (see the window clause in
-// gqa_forward_hipblaslt).
+// gqa_forward_decomposed).
 //
 // One alignment quantum, which is where a sweep puts the optimum. TTFT against
 // the unchunked path, averaged over two reversed arm orders, every arm sharing
@@ -1119,11 +1207,11 @@ static constexpr int64_t kScoreChunkAlign = 128;
 // there.
 static constexpr int64_t kWindowChunkRows = kScoreChunkAlign;
 
-// Env-var gate to force decode through the decomposed hipBLASLt pipeline
+// Env-var gate to force decode through the decomposed custom-GEMM pipeline
 // instead of the fused custom kernel hip_gqa_fused_decode. Default off
 // (fused path is preferred). Set HIPDNN_EP_GQA_DISABLE_FUSED_DECODE=1 to
 // A/B against decomposed at sq==1 -- useful for measuring whether the custom
-// fused kernel is actually faster than hipBLASLt's auto-tuned GEMMs at decode
+// fused kernel is actually faster than the decomposed custom GEMMs at decode
 // shapes.
 static bool gqa_fused_decode_disabled() {
   static const bool disabled = [] {
@@ -1134,13 +1222,14 @@ static bool gqa_fused_decode_disabled() {
 }
 
 // Smart-dispatch threshold for the legacy GQA decode (sq == 1). When total_seq
-// exceeds this value, dispatch routes through the decomposed hipBLASLt pipeline
-// instead of the fused custom kernel hip_gqa_fused_decode. The fused kernel
-// uses a serial-over-time scheme with cross-wave reductions on the critical
-// path of every iteration, so it loses to the GEMM-based decomposed path on
-// long sequences (measured ~12x slower at total_seq~=2048 on Strix Halo). When
-// flash_decode is eligible we keep the fused branch active even at long
-// total_seq -- flash_decode is exactly what this threshold was working around.
+// exceeds this value, dispatch routes through the decomposed custom-GEMM
+// pipeline instead of the fused custom kernel hip_gqa_fused_decode. The fused
+// kernel uses a serial-over-time scheme with cross-wave reductions on the
+// critical path of every iteration, so it loses to the GEMM-based decomposed
+// path on long sequences (measured ~12x slower at total_seq~=2048 on Strix
+// Halo). When flash_decode is eligible we keep the fused branch active even at
+// long total_seq -- flash_decode is exactly what this threshold was working
+// around.
 //
 // Default 256 is a starter value pending a full threshold sweep. Set
 // HIPDNN_EP_GQA_FUSED_DECODE_MAX_T=N to override (or a very large value like
@@ -1160,31 +1249,8 @@ static int gqa_fused_decode_max_t() {
   return max_t;
 }
 
-//===----------------------------------------------------------------------===//
-// hipBLASLt layout helper
-//===----------------------------------------------------------------------===//
-static hipblasStatus_t setLayoutBatch(hipblasLtMatrixLayout_t layout,
-                                      int32_t batchCount, int64_t stride) {
-  hipblasStatus_t status;
-  status = hipblasLtMatrixLayoutSetAttribute(
-      layout, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batchCount,
-      sizeof(batchCount));
-  if (status != HIPBLAS_STATUS_SUCCESS)
-    return status;
-  status = hipblasLtMatrixLayoutSetAttribute(
-      layout, HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &stride,
-      sizeof(stride));
-  return status;
-}
-
-//===----------------------------------------------------------------------===//
-// GQA GEMM descriptor cache
-//===----------------------------------------------------------------------===//
-//
-// hipBLASLt descriptors and heuristic-selected algorithms are created once per
-// unique (m, n, k, batch, transA, ...) shape and reused for the process
-// lifetime. This avoids repeated descriptor creation and heuristic queries on
-// every GQA inference call in the decomposed (prefill) path.
+// Host geometry plans for the decomposed custom-GEMM path. Resolve every
+// chunk before deriving shared-workspace pointers; plans own no GPU resources.
 struct GqaGemmKey {
   int64_t m, n, k, batch;
   // true = Score GEMM (K^T * Q); false = Value GEMM (V * S)
@@ -1225,27 +1291,14 @@ struct GqaGemmKeyHash {
   }
 };
 
-/// Cached hipBLASLt state for a single GEMM shape.
-/// Ownership: descriptors are created in queryOrCreateGemmState() and live for
-/// the process lifetime (destroyed together when the owning op-state slot is
-/// torn down, in GqaGemmCache's destructor).
-struct GqaGemmCacheEntry {
-  hipblasLtMatmulDesc_t desc;                     // matmul operation descriptor
-  hipblasLtMatrixLayout_t layA, layB, layC, layD; // matrix layouts
-  hipblasLtMatmulAlgo_t algo; // heuristic-selected algorithm
-  size_t workspace_size;      // workspace bytes required by algo
-};
+using GqaGemmCacheEntry = hipdnn_ep::dense_gemm::ColumnMajorBatch;
 
 struct GqaGemmCache {
   std::unordered_map<GqaGemmKey, GqaGemmCacheEntry, GqaGemmKeyHash> entries;
-  // Destroys every cached hipBLASLt descriptor/layout entry. Defined
-  // out-of-line below. Runs when the owning op-state slot is torn down
-  // (GqaState's deleter).
-  ~GqaGemmCache();
 };
 
 // Per-instance GQA op-state (see op-state-slots-design.md): owns this
-// instance's per-GEMM-shape hipBLASLt descriptor/algorithm cache. Replaces the
+// instance's per-GEMM-shape host GEMM geometry cache. Replaces the
 // former shared RuntimeState::gqa_gemm_cache, so concurrent sessions (and
 // distinct GQA layers) no longer share one descriptor map.
 struct GqaState : OpStateT<GqaState> {
@@ -1262,130 +1315,35 @@ static GqaGemmCache *get_gemm_cache(RuntimeState *state, int op_state_slot) {
 }
 
 static const GqaGemmCacheEntry *queryOrCreateGemmState(RuntimeState *state,
-                                                       hipblasLtHandle_t handle,
                                                        const GqaGemmKey &key,
                                                        int op_state_slot) {
-  assert(handle && "queryOrCreateGemmState: null handle");
   auto *cache = get_gemm_cache(state, op_state_slot);
   if (!cache) {
-    fprintf(stderr, "queryOrCreateGemmState: no GqaState at slot %d\n",
-            op_state_slot);
+    fprintf(stderr, "GQA: no GqaState at slot %d\n", op_state_slot);
     return nullptr;
   }
   auto it = cache->entries.find(key);
   if (it != cache->entries.end())
     return &it->second;
-
-  int64_t m = key.m, n = key.n, k = key.k;
-  int32_t batch = static_cast<int32_t>(key.batch);
-
-  GqaGemmCacheEntry entry = {};
-
-  hipblasLtMatmulPreference_t pref = nullptr;
-  hipblasStatus_t st;
-
-#define GQA_CACHE_CHECK(call)                                                  \
-  do {                                                                         \
-    st = (call);                                                               \
-    if (st != HIPBLAS_STATUS_SUCCESS)                                          \
-      goto cache_fail;                                                         \
-  } while (0)
-
-  GQA_CACHE_CHECK(
-      hipblasLtMatmulDescCreate(&entry.desc, HIPBLAS_COMPUTE_32F, HIP_R_32F));
-  {
-    hipblasOperation_t opA = key.transA ? HIPBLAS_OP_T : HIPBLAS_OP_N;
-    hipblasOperation_t opN = HIPBLAS_OP_N;
-    GQA_CACHE_CHECK(hipblasLtMatmulDescSetAttribute(
-        entry.desc, HIPBLASLT_MATMUL_DESC_TRANSA, &opA, sizeof(opA)));
-    GQA_CACHE_CHECK(hipblasLtMatmulDescSetAttribute(
-        entry.desc, HIPBLASLT_MATMUL_DESC_TRANSB, &opN, sizeof(opN)));
+  GqaGemmCacheEntry entry;
+  if (!entry.initialize(key.m, key.n, key.k, key.batch, key.transA,
+                        key.inputFp32 ? 1 : 0, key.outputFp32 ? 1 : 0,
+                        key.strideA, key.strideB, key.strideC)) {
+    fprintf(stderr, "GQA: unsupported custom GEMM shape/strides\n");
+    return nullptr;
   }
-
-  {
-    int64_t strideA = key.strideA != 0 ? key.strideA : m * k;
-    int64_t strideB = key.strideB != 0 ? key.strideB : n * k;
-    int64_t strideC = key.strideC != 0 ? key.strideC : n * m;
-
-    // Input operand element type: HIP_R_16F (fp16 GQA) or HIP_R_32F (fp32
-    // GQA, e.g. Whisper no_causal). Compute is HIPBLAS_COMPUTE_32F either way.
-    hipDataType inType = key.inputFp32 ? HIP_R_32F : HIP_R_16F;
-    int64_t a_rows = key.transA ? k : m;
-    int64_t a_cols = key.transA ? m : k;
-    GQA_CACHE_CHECK(hipblasLtMatrixLayoutCreate(&entry.layA, inType, a_rows,
-                                                a_cols, a_rows));
-    GQA_CACHE_CHECK(setLayoutBatch(entry.layA, batch, strideA));
-
-    GQA_CACHE_CHECK(hipblasLtMatrixLayoutCreate(&entry.layB, inType, k, n, k));
-    GQA_CACHE_CHECK(setLayoutBatch(entry.layB, batch, strideB));
-
-    hipDataType outType = key.outputFp32 ? HIP_R_32F : HIP_R_16F;
-    GQA_CACHE_CHECK(hipblasLtMatrixLayoutCreate(&entry.layC, outType, m, n, m));
-    GQA_CACHE_CHECK(setLayoutBatch(entry.layC, batch, strideC));
-    GQA_CACHE_CHECK(hipblasLtMatrixLayoutCreate(&entry.layD, outType, m, n, m));
-    GQA_CACHE_CHECK(setLayoutBatch(entry.layD, batch, strideC));
-  }
-
-  GQA_CACHE_CHECK(hipblasLtMatmulPreferenceCreate(&pref));
-  {
-    const size_t max_ws = kMaxWorkspaceBytes;
-    GQA_CACHE_CHECK(hipblasLtMatmulPreferenceSetAttribute(
-        pref, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &max_ws,
-        sizeof(max_ws)));
-  }
-
-  {
-    hipblasLtMatmulHeuristicResult_t heur;
-    int returned = 0;
-    GQA_CACHE_CHECK(hipblasLtMatmulAlgoGetHeuristic(
-        handle, entry.desc, entry.layA, entry.layB, entry.layC, entry.layD,
-        pref, 1, &heur, &returned));
-    hipblasLtMatmulPreferenceDestroy(pref);
-    pref = nullptr;
-
-    if (returned == 0) {
-      fprintf(stderr,
-              "GQA: no algorithm found for GEMM m=%lld n=%lld k=%lld "
-              "batch=%lld\n",
-              (long long)m, (long long)n, (long long)k, (long long)key.batch);
-      goto cache_fail;
-    }
-
-    entry.algo = heur.algo;
-    entry.workspace_size = heur.workspaceSize;
-  }
-
-#undef GQA_CACHE_CHECK
-  goto cache_done;
-
-cache_fail:
-  if (pref)
-    hipblasLtMatmulPreferenceDestroy(pref);
-  if (entry.layD)
-    hipblasLtMatrixLayoutDestroy(entry.layD);
-  if (entry.layC)
-    hipblasLtMatrixLayoutDestroy(entry.layC);
-  if (entry.layB)
-    hipblasLtMatrixLayoutDestroy(entry.layB);
-  if (entry.layA)
-    hipblasLtMatrixLayoutDestroy(entry.layA);
-  if (entry.desc)
-    hipblasLtMatmulDescDestroy(entry.desc);
-  return nullptr;
-
-cache_done:
-  auto [ins, _] = cache->entries.emplace(key, entry);
-  return &ins->second;
+  auto [inserted, unused] = cache->entries.emplace(key, entry);
+  return &inserted->second;
 }
 
 //===----------------------------------------------------------------------===//
-// 12-step hipBLASLt GQA pipeline (Step 0 + Steps 1-11; fp16 + fp32)
+// 12-step custom-GEMM GQA pipeline (Step 0 + Steps 1-11; fp16 + fp32)
 //===----------------------------------------------------------------------===//
-static int gqa_forward_hipblaslt(
-    RuntimeState *state, hipStream_t stream, hipblasLtHandle_t ltHandle,
-    const void *query, const void *key, const void *value, const void *past_key,
-    const void *past_value, const void *seqlens_k_ptr, const void *cos_cache,
-    const void *sin_cache, void *head_sink, bool use_smooth_softmax,
+static int gqa_forward_decomposed(
+    RuntimeState *state, hipStream_t stream, const void *query, const void *key,
+    const void *value, const void *past_key, const void *past_value,
+    const void *seqlens_k_ptr, const void *cos_cache, const void *sin_cache,
+    void *head_sink, bool use_smooth_softmax,
     // onnx.Attention external additive mask [B,H,S,T] (broadcastable on the
     // batch / head dims); null for plain GQA.
     const void *attention_bias, int64_t attn_bias_batch,
@@ -1491,12 +1449,12 @@ static int gqa_forward_hipblaslt(
   // gpt-oss (elem_size==2).
   // The fp32 GQA path (Whisper decoder self-attn, elem_size==4) must NOT reach
   // them: feeding fp32 buffers to a __half kernel reinterprets the bytes and
-  // produces garbage. The decomposed hipBLASLt pipeline below IS fp32-capable,
-  // so route fp32 decode there. This is the decode-side analogue of the
-  // no_causal exemption (prefill sq>1 fp32 already used decomposed).
+  // produces garbage. The decomposed custom-GEMM pipeline below IS
+  // fp32-capable, so route fp32 decode there. This is the decode-side analogue
+  // of the no_causal exemption (prefill sq>1 fp32 already used decomposed).
   bool fused_fp16 = (element_size_bytes == 2);
   // no_causal (Whisper encoder / cross-attn) always takes the decomposed
-  // hipBLASLt path. hip_gqa_fused_decode is decode-only (sq==1) and reads
+  // custom-GEMM path. hip_gqa_fused_decode is decode-only (sq==1) and reads
   // seqlens_k with the +1 PAST-token convention, plus assumes the KV cache
   // is appended in BSHD->BNSD layout from `sq` new tokens. Neither holds for
   // bidirectional no-past attention where `key` is the full Skv-length KV
@@ -1520,9 +1478,9 @@ static int gqa_forward_hipblaslt(
   // kernel so they can read the actual sequence length on-device, eliminating
   // the D2H copy + hipStreamSynchronize stall entirely for the decode hot path.
   //
-  // All prefill (sq > 1) goes through the decomposed hipBLASLt path below where
-  // auto-tuned GEMMs outperform fixed WMMA tiling and all ORT GQA features
-  // (sliding window, smooth softmax, head sink) are supported.
+  // All prefill (sq > 1) goes through the decomposed custom-GEMM path below
+  // where auto-tuned GEMMs outperform fixed WMMA tiling and all ORT GQA
+  // features (sliding window, smooth softmax, head sink) are supported.
   //===--------------------------------------------------------------------===//
   if (fused_predicate) {
     const void *qSrc = query;
@@ -1565,7 +1523,7 @@ static int gqa_forward_hipblaslt(
         if (total_seq < 1 || past_len_check < 0 || total_seq > present_seq ||
             past_len_check > past_buf_seq) {
           fprintf(stderr,
-                  "gqa_forward_hipblaslt (fused decode): invalid "
+                  "gqa_forward_decomposed (fused decode): invalid "
                   "seqlens_k[0]+1=%lld (sq=%lld, past_len=%lld, "
                   "present_seq=%lld, past_buf_seq=%lld)\n",
                   (long long)total_seq, (long long)sq,
@@ -1662,14 +1620,14 @@ static int gqa_forward_hipblaslt(
     // feed an unsupported feature to the __half-only kernel.
     if (local_window_size > 0) {
       fprintf(stderr,
-              "gqa_forward_hipblaslt: BUG -- hip_gqa_fused_decode cannot "
+              "gqa_forward_decomposed: BUG -- hip_gqa_fused_decode cannot "
               "handle local_window_size=%lld\n",
               (long long)local_window_size);
       return -1;
     }
     if (head_sink != nullptr || use_smooth_softmax) {
       fprintf(stderr,
-              "gqa_forward_hipblaslt: BUG -- hip_gqa_fused_decode cannot "
+              "gqa_forward_decomposed: BUG -- hip_gqa_fused_decode cannot "
               "handle head_sink=%p smooth=%d\n",
               head_sink, static_cast<int>(use_smooth_softmax));
       return -1;
@@ -1690,12 +1648,12 @@ static int gqa_forward_hipblaslt(
   }
 
   //===--------------------------------------------------------------------===//
-  // Decomposed hipBLASLt pipeline (all prefill sq > 1, unsupported d, or
+  // Decomposed custom-GEMM pipeline (all prefill sq > 1, unsupported d, or
   // features requiring sliding window / smooth softmax / head sink / fp32)
   //===--------------------------------------------------------------------===//
 
-  // D2H readback of seqlens_k is required here because hipBLASLt descriptor
-  // creation and workspace sizing are host-side APIs that need total_seq. For
+  // D2H readback of seqlens_k is required here because custom GEMM views
+  // and workspace sizing need the host-side total_seq. For
   // B == 1 the value was already read (and cached unless
   // HIPDNN_EP_GQA_CACHE_SEQLENS=0) by the pre-dispatch helper above; we just
   // consume seqlens_k_pre. The B > 1 branch keeps the legacy per-call read
@@ -1733,7 +1691,7 @@ static int gqa_forward_hipblaslt(
       for (int64_t b = 1; b < B; ++b) {
         if (seqlens_k_host[b] != seqlens_k_val) {
           fprintf(stderr,
-                  "gqa_forward_hipblaslt: per-batch seqlens_k not yet "
+                  "gqa_forward_decomposed: per-batch seqlens_k not yet "
                   "supported (batch %lld has %d, batch 0 has %d)\n",
                   (long long)b, seqlens_k_host[b], seqlens_k_val);
           return -1;
@@ -1752,16 +1710,18 @@ static int gqa_forward_hipblaslt(
           hipMemcpyAsync(&seqlens_k_val, seqlens_k_ptr, sizeof(int32_t),
                          hipMemcpyDeviceToHost, stream);
       if (cp != hipSuccess) {
-        fprintf(stderr,
-                "gqa_forward_hipblaslt: could not read seqlens_k from %p: %s\n",
-                seqlens_k_ptr, hipGetErrorString(cp));
+        fprintf(
+            stderr,
+            "gqa_forward_decomposed: could not read seqlens_k from %p: %s\n",
+            seqlens_k_ptr, hipGetErrorString(cp));
         return -1;
       }
       hipError_t sy = hipStreamSynchronize(stream);
       if (sy != hipSuccess) {
-        fprintf(stderr,
-                "gqa_forward_hipblaslt: sync after seqlens_k read failed: %s\n",
-                hipGetErrorString(sy));
+        fprintf(
+            stderr,
+            "gqa_forward_decomposed: sync after seqlens_k read failed: %s\n",
+            hipGetErrorString(sy));
         return -1;
       }
     }
@@ -1778,7 +1738,7 @@ static int gqa_forward_hipblaslt(
       if (total_seq < 1 || past_len < 0 || total_seq > present_seq ||
           past_len > past_buf_seq) {
         fprintf(stderr,
-                "gqa_forward_hipblaslt: invalid seqlens_k[0]+1=%lld "
+                "gqa_forward_decomposed: invalid seqlens_k[0]+1=%lld "
                 "(sq=%lld, past_len=%lld, present_seq=%lld, "
                 "past_buf_seq=%lld)\n",
                 (long long)total_seq, (long long)sq, (long long)past_len,
@@ -1791,7 +1751,7 @@ static int gqa_forward_hipblaslt(
     past_len = 0;
   if (reuse_past_kv && out_present_seq != 0 && out_present_seq < total_seq) {
     fprintf(stderr,
-            "gqa_forward_hipblaslt: present holds %lld tokens but the reused "
+            "gqa_forward_decomposed: present holds %lld tokens but the reused "
             "past KV prefix is total_seq=%lld\n",
             (long long)out_present_seq, (long long)total_seq);
     return -1;
@@ -1802,7 +1762,7 @@ static int gqa_forward_hipblaslt(
   bool packed_qkv = (key == nullptr && value == nullptr) && !reuse_past_kv;
 
   //===--------------------------------------------------------------------===//
-  // Unified hipBLASLt GQA pipeline (shared by expand and no-expand paths).
+  // Unified custom-GEMM GQA pipeline (shared by expand and no-expand paths).
   //
   // Two orthogonal knobs control the layout choices for the two GEMMs:
   //
@@ -1855,7 +1815,7 @@ static int gqa_forward_hipblaslt(
   //
   // The KV cache is BNSD [B, G, present_seq, d] with d fastest, so a run of key
   // positions is contiguous at + kv_lo * d and the batch stride stays
-  // present_seq * d whatever the offset. The A pointer is a hipblasLtMatmul
+  // present_seq * d whatever the offset. The A pointer is a custom-GEMM
   // call argument rather than part of the descriptor, so the offset costs
   // nothing.
   //
@@ -2029,7 +1989,7 @@ static int gqa_forward_hipblaslt(
   //
   // Mathematically equivalent is not bitwise identical, though, and it is worth
   // being precise about which one this is. Chunking changes the score GEMM's n
-  // from sq to sq_chunk, so hipBLASLt's heuristic can select a different kernel
+  // from sq to sq_chunk, so the custom resolver can select a different kernel
   // and a different tile accumulates in a different order. Measured on
   // gemma-4-12b at 2283 tokens: the same build run twice is byte-identical, and
   // chunked against unchunked agrees for ~45 greedy tokens before a near-tie
@@ -2155,7 +2115,7 @@ static int gqa_forward_hipblaslt(
     // here, and both mean the prefill silently reverts to scoring every key.
     if (mask_chunk_hi.empty())
       fprintf(stderr,
-              "gqa_forward_hipblaslt: mask key-extent recovery failed; "
+              "gqa_forward_decomposed: mask key-extent recovery failed; "
               "scoring the full key range for sq=%lld total_seq=%lld\n",
               (long long)sq, (long long)total_seq);
   }
@@ -2183,10 +2143,10 @@ static int gqa_forward_hipblaslt(
   // only while the chunk reads the whole op-level range; once it reads a
   // sub-range
   // the dense default is short and every head after the first is mis-strided,
-  // silently, with no shape for hipBLASLt to reject. Keeping the 0 in the
-  // un-narrowed case is deliberate rather than tidy: it leaves the cache key
-  // bit-identical to what it was, so a shape that narrows nothing reuses
-  // exactly the descriptor it used before.
+  // silently, with no shape for the GEMM adapter to reject. Keeping the 0 in
+  // the un-narrowed case is deliberate rather than tidy: it leaves the cache
+  // key bit-identical to what it was, so a shape that narrows nothing reuses
+  // exactly the matrix view it used before.
   auto makeKeys = [&](int64_t n_rows, int64_t kv_ext, GqaGemmKey *score,
                       GqaGemmKey *value) {
     const int64_t strideA = (kv_ext != kv_span) ? kv_span * d : 0;
@@ -2228,7 +2188,7 @@ static int gqa_forward_hipblaslt(
   // sq_chunk 640 and a 1024 window the 26 chunks collapse to four descriptors:
   // the two leading partial ones, the interior extent, and the ragged tail.
   // queryOrCreateGemmState is keyed on shape, so the duplicates cost a hash
-  // lookup and nothing else -- no extra hipblasLtMatmulAlgoGetHeuristic calls.
+  // lookup; config selection stays in the custom GEMM resolver.
   //===--------------------------------------------------------------------===//
   struct GqaChunkPlan {
     int64_t q0;     // first query row of the chunk
@@ -2294,8 +2254,7 @@ static int gqa_forward_hipblaslt(
     // kv_span tokens are read, keeping the descriptor stable across token
     // steps. Under window narrowing kv_span also stops changing per token once
     // the context passes the window, so the descriptor cache stops missing on
-    // every token and the per-token hipblasLtMatmulAlgoGetHeuristic calls
-    // collapse to one entry per shape.
+    // every token and host planning collapses to one entry per shape.
     const GqaGemmKey scoreKey = {/*m=*/kv_span,
                                  /*n=*/HPG * sq,
                                  /*k=*/d,
@@ -2320,11 +2279,11 @@ static int gqa_forward_hipblaslt(
                                  /*strideB=*/HPG * sq * kv_span,
                                  /*strideC=*/HPG * sq * d};
     const GqaGemmCacheEntry *sSt =
-        queryOrCreateGemmState(state, ltHandle, scoreKey, op_state_slot);
+        queryOrCreateGemmState(state, scoreKey, op_state_slot);
     if (!sSt)
       return -1;
     const GqaGemmCacheEntry *vSt =
-        queryOrCreateGemmState(state, ltHandle, valueKey, op_state_slot);
+        queryOrCreateGemmState(state, valueKey, op_state_slot);
     if (!vSt)
       return -1;
     chunks.push_back({0, sq, 0, kv_span, sSt, vSt});
@@ -2338,11 +2297,11 @@ static int gqa_forward_hipblaslt(
       GqaGemmKey sKey, vKey;
       makeKeys(c, ext, &sKey, &vKey);
       const GqaGemmCacheEntry *sSt =
-          queryOrCreateGemmState(state, ltHandle, sKey, op_state_slot);
+          queryOrCreateGemmState(state, sKey, op_state_slot);
       if (!sSt)
         return -1;
       const GqaGemmCacheEntry *vSt =
-          queryOrCreateGemmState(state, ltHandle, vKey, op_state_slot);
+          queryOrCreateGemmState(state, vKey, op_state_slot);
       if (!vSt)
         return -1;
       chunks.push_back({q0, c, lo - kv_lo, ext, sSt, vSt});
@@ -2618,7 +2577,7 @@ static int gqa_forward_hipblaslt(
     // window narrowed the range.
     //
     // elem_sz is the cache's element size as well as the GEMM's: unlike
-    // update_kv_cache, gqa_forward_hipblaslt takes no separate kv_format, so
+    // update_kv_cache, gqa_forward_decomposed takes no separate kv_format, so
     // the two cannot differ here. A quantized KV cache would have to pass its
     // own element size for this offset to stay correct.
     const size_t kv_byte_off = static_cast<size_t>(kv_lo) * d * elem_sz;
@@ -2631,7 +2590,6 @@ static int gqa_forward_hipblaslt(
                        : static_cast<const char *>(d_Vexp));
     void *valueCBase = need_transpose ? d_O : output;
     float scoreAlpha = scale;
-    float beta = 0.0f;
     float valAlpha = 1.0f;
 
     for (const GqaChunkPlan &cp : chunks) {
@@ -2668,12 +2626,9 @@ static int gqa_forward_hipblaslt(
       // A = K: no-expand reads present_key directly, expand reads d_Kexp.
       // B = Q: need_transpose reads d_Qtrans (BNSD), else qSrc
       // (BSHD==BNSD@sq=1).
-      hipblasLtMatmulAlgo_t sAlgo = sSt->algo;
       OP_ROCTX_MARK("hip_ep.op.gqa.attn.qk_gemm");
-      HIPBLAS_CHECK(hipblasLtMatmul(
-          ltHandle, sSt->desc, &scoreAlpha, scoreAc, sSt->layA, scoreB,
-          sSt->layB, &beta, d_S_f32, sSt->layC, d_S_f32, sSt->layD, &sAlgo,
-          gemm_ws_ptr, gemm_ws_bytes, stream));
+      HIP_CHECK(sSt->run(stream, scoreAc, scoreB, d_S_f32, scoreAlpha,
+                         gemm_ws_ptr, gemm_ws_bytes));
 
       // ---- Step 8b: external attention bias (onnx.Attention attn_mask) ----
       // Folded into the softmax's own score read below rather than added by a
@@ -2766,12 +2721,9 @@ static int gqa_forward_hipblaslt(
       // A = V: no-expand reads present_value directly, expand reads d_Vexp.
       // C = O: need_transpose writes d_O (BNSD, transposed below); at sq==1 the
       //        GEMM writes straight to output (BSHD==BNSD).
-      hipblasLtMatmulAlgo_t vAlgo = vSt->algo;
       OP_ROCTX_MARK("hip_ep.op.gqa.attn.pv_gemm");
-      HIPBLAS_CHECK(hipblasLtMatmul(
-          ltHandle, vSt->desc, &valAlpha, valueAc, vSt->layA, d_S_fp16,
-          vSt->layB, &beta, valueC, vSt->layC, valueC, vSt->layD, &vAlgo,
-          gemm_ws_ptr, gemm_ws_bytes, stream));
+      HIP_CHECK(vSt->run(stream, valueAc, d_S_fp16, valueC, valAlpha,
+                         gemm_ws_ptr, gemm_ws_bytes));
     }
 
     // ---- Step 11: O Transpose BNSD [B,H,sq,d] -> BSHD [B,sq,H,d] ----
@@ -2803,7 +2755,7 @@ static int gqa_forward_hipblaslt(
       score_elems += cp.c * cp.kv_ext;
     }
     RUNTIME_DEBUG_LOG(
-        "[REAL] GQA hipBLASLt: B=%lld sq=%lld sq_chunk=%lld total_seq=%lld "
+        "[REAL] GQA custom GEMM: B=%lld sq=%lld sq_chunk=%lld total_seq=%lld "
         "kv_lo=%lld kv_span=%lld chunks=%zu kv_ext=[%lld,%lld] "
         "score_elems=%lld/%lld H=%lld G=%lld d=%lld no_expand=%d "
         "transpose=%d kv_inplace=%d past_len=%lld past_buf_seq=%lld "
@@ -2822,25 +2774,10 @@ cleanup:
 }
 
 //===----------------------------------------------------------------------===//
-// Op-state slot. Owns the per-instance hipBLASLt GEMM descriptor cache that the
-// decomposed pipeline (gqa_forward_hipblaslt) needs. The fused fast path holds
+// Op-state slot. Owns the per-instance host GEMM geometry cache that the
+// decomposed pipeline (gqa_forward_decomposed) needs. The fused fast path holds
 // no per-instance state and ignores op_state_slot.
 //===----------------------------------------------------------------------===//
-GqaGemmCache::~GqaGemmCache() {
-  for (auto &[k, e] : entries) {
-    if (e.layD)
-      hipblasLtMatrixLayoutDestroy(e.layD);
-    if (e.layC)
-      hipblasLtMatrixLayoutDestroy(e.layC);
-    if (e.layB)
-      hipblasLtMatrixLayoutDestroy(e.layB);
-    if (e.layA)
-      hipblasLtMatrixLayoutDestroy(e.layA);
-    if (e.desc)
-      hipblasLtMatmulDescDestroy(e.desc);
-  }
-}
-
 extern "C" int8_t hipdnn_ep_op_state_construct_gqa(RuntimeState *state,
                                                    int32_t slot) {
   hipdnn_ep_op_state_set(state, slot, GqaState::create().release());
@@ -3116,7 +3053,7 @@ int wrap_group_query_attention_host_length(
   }
   // attention_bias (onnx.Attention external mask) is intentionally NOT rejected
   // here: the legacy decomposed pipeline applies it (Step 8b in
-  // gqa_forward_hipblaslt), and fused_supported below excludes it so masked
+  // gqa_forward_decomposed), and fused_supported below excludes it so masked
   // attention is routed to that path rather than the lean fused kernels.
   // Resolve the KV-cache storage format from the ONNX quant attributes. The
   // classifier is the single place that decides which quantized caches are
@@ -3166,6 +3103,12 @@ int wrap_group_query_attention_host_length(
                     "present_key/present_value KV cache\n");
     return -1;
   }
+  if ((past_key == present_key) != (past_value == present_value) ||
+      (past_key && past_key == present_key && past_buf_seq != seq_len_kv)) {
+    fprintf(stderr, "wrap_group_query_attention: inconsistent cache aliases "
+                    "or in-place cache capacity\n");
+    return -1;
+  }
 
   hipStream_t stream =
       static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
@@ -3190,7 +3133,7 @@ int wrap_group_query_attention_host_length(
   // {1,2,3,4,5,6,8,16}, plus 9 at d=128). Decode supports sink/window for every
   // templated geometry; prefill v3 supports sinks at head_dim 64 or 96 and
   // windows at head_dim 64, 96 or 128. Everything else uses the
-  // feature-complete decomposed hipBLASLt fallback.
+  // feature-complete decomposed custom-GEMM fallback.
   //===------------------------------------------------------------------===//
 
   const bool is_decode = (seq_len_q == 1);
@@ -3206,7 +3149,7 @@ int wrap_group_query_attention_host_length(
                                         head_dim == 128 || head_dim == 256);
   // attention_bias (onnx.Attention external mask) is only applied by the legacy
   // decomposed pipeline (Step 8b); the lean fused path would silently drop it,
-  // so exclude it here to route masked attention to gqa_forward_hipblaslt
+  // so exclude it here to route masked attention to gqa_forward_decomposed
   // below.
   //
   // Smooth softmax is active when a sink is supplied OR the attribute is
@@ -3227,11 +3170,11 @@ int wrap_group_query_attention_host_length(
   const bool key_bias_ok = key_bias == nullptr || is_decode || head_dim == 128;
   // The whole fused path (gqa_forward_fused, including the sink and windowed
   // prefill kernels above) is built on the RDNA-only WMMA intrinsics, which
-  // trap on CDNA (wave64, e.g. MI350). Route wave64 to the decomposed hipBLASLt
-  // pipeline below (MFMA GEMMs + wave-portable scalar kernels), which is
-  // feature-complete and correct on both wave sizes. RDNA is unaffected.
-  // Only the decomposed pipeline implements reuse_past_kv, so it bypasses
-  // fused below.
+  // trap on CDNA (wave64, e.g. MI350). Route wave64 to the decomposed
+  // custom-GEMM pipeline below (tiled-FMA GEMMs + wave-portable scalar
+  // kernels), which is feature-complete and correct on both wave sizes. RDNA is
+  // unaffected. Only the decomposed pipeline implements reuse_past_kv, so it
+  // bypasses fused below.
   if (reuse_past_kv && kv_quantized) {
     fprintf(stderr, "wrap_group_query_attention: a zero-length key/value over "
                     "a quantized KV cache is not supported\n");
@@ -3307,12 +3250,6 @@ int wrap_group_query_attention_host_length(
   }
 
   if (!fused_supported) {
-    hipblasLtHandle_t ltHandle = static_cast<hipblasLtHandle_t>(
-        hipdnn_ep_state_get_hipblas_handle(state));
-    if (!ltHandle) {
-      fprintf(stderr, "wrap_group_query_attention: null hipblas handle\n");
-      return -1;
-    }
     RUNTIME_DEBUG_LOG(
         "[REAL] wrap_group_query_attention: routing to legacy decomposed "
         "pipeline "
@@ -3327,9 +3264,9 @@ int wrap_group_query_attention_host_length(
     // The decomposed pipeline takes a per-key bias as a one-row additive mask:
     // its biased softmax broadcasts a bias whose query extent is 1.
     const bool kb = key_bias != nullptr;
-    int lrc = gqa_forward_hipblaslt(
-        state, stream, ltHandle, query, key, value, past_key, past_value,
-        seqlens_k, cos_cache, sin_cache, head_sink, has_smooth_softmax,
+    int lrc = gqa_forward_decomposed(
+        state, stream, query, key, value, past_key, past_value, seqlens_k,
+        cos_cache, sin_cache, head_sink, has_smooth_softmax,
         kb ? key_bias : attention_bias, kb ? key_bias_batch : attn_bias_batch,
         kb ? 1 : attn_bias_num_heads, output, present_key, present_value,
         batch_size, seq_len_q, seq_len_kv, past_buf_seq, num_heads,

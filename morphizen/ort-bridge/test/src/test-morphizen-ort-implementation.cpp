@@ -783,25 +783,17 @@ void MorphizenOrtApiTest::Test11_AttributeProtoOperations() {
     wrapped_api_->tensor_proto_delete(tensor_proto_a);
   }
   {
-    // An ONNX element type that `onnxElementTypeToMlirElementType` does not yet
-    // map (here BFLOAT16, which falls back to F32) must fail loudly in
-    // create_tensor rather than silently produce a corrupted DenseElementsAttr:
-    // the dense byte-size guard catches the F32 default (4B/elem) vs the real
-    // bf16 raw_data width (2B/elem) and LOG(FATAL)s with a fix hint. This death
-    // test locks in that enforcement point.
+    // BF16 maps to a two-byte MLIR type, so raw BF16 tensor attributes must
+    // survive the same byte-size guard used for other inline constants.
     std::vector<int64_t> bf16_shape = {2, 3};
-    std::vector<int16_t> bf16_data = {0x3c00, 0x4000, 0x4200,
-                                      0x4400, 0x4500, 0x4600};
+    std::vector<int16_t> bf16_data = {0x3f00, 0x3f80, 0x4000,
+                                      0x4040, 0x4080, 0x40a0};
     auto *bf16_proto =
         wrapped_api_->tensor_proto_new_bf16("value", bf16_shape, bf16_data);
     ASSERT_TRUE(bf16_proto != nullptr);
-    EXPECT_DEATH(
-        {
-          auto *attr =
-              wrapped_api_->attr_proto_new_tensor("value", *bf16_proto);
-          (void)attr;
-        },
-        "create_tensor: ONNX element type");
+    auto *attr = wrapped_api_->attr_proto_new_tensor("value", *bf16_proto);
+    ASSERT_TRUE(attr != nullptr);
+    wrapped_api_->attr_proto_delete(attr);
     wrapped_api_->tensor_proto_delete(bf16_proto);
   }
 }
