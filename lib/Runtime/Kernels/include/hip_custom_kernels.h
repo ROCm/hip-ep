@@ -1866,6 +1866,43 @@ HIP_KERNEL_API int hip_grid_sample(
     int hip_dtype);
 
 /* =========================================================================
+ * RoiAlign (ONNX 4-D NCHW)
+ * =========================================================================
+ *
+ * Pools each region of input (N, C, H, W) into (out_h, out_w) bins by
+ * bilinear sampling. rois is (num_rois, 4) as (x1, y1, x2, y2) in the input
+ * element type; batch_indices is (num_rois) int64. Output is
+ * (num_rois, C, out_h, out_w). Regions whose batch index is out of range
+ * produce zeros.
+ *
+ *  sampling_ratio: samples per bin per axis; 0 = ceil(roi_extent / out)
+ *  half_pixel:     1 = shift corners by -0.5 ("half_pixel"),
+ *                  0 = no shift, extents clamped to >= 1
+ *                      ("output_half_pixel")
+ *  mode:           0 = avg, 1 = max (ONNX Runtime semantics: max over
+ *                  samples of the largest weighted bilinear tap)
+ *
+ * Supported hip_dtypes: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
+ * HIP_DTYPE_BFLOAT16, HIP_DTYPE_FLOAT64.
+ * Returns: 0 on success, non-zero on failure.
+ */
+HIP_KERNEL_API int hip_roi_align(
+    void* stream,
+    const void* input,
+    const void* rois,
+    const void* batch_indices,
+    void* output,
+    int64_t n, int64_t c,
+    int64_t in_h, int64_t in_w,
+    int64_t num_rois,
+    int64_t out_h, int64_t out_w,
+    int sampling_ratio,
+    float spatial_scale,
+    int half_pixel,
+    int mode,
+    int hip_dtype);
+
+/* =========================================================================
  * Global pool (avg / max / lp)
  * =========================================================================
  *
@@ -2691,6 +2728,10 @@ HIP_KERNEL_API int hip_matmul_nbits_grouped_wmma(
  *   A / output         : fp16 rows packed back-to-back in expert order; expert
  *                        e's rows start at expert_row_offsets[e] (int32,
  *                        device). A is [rows, K], output [rows, N].
+ *   a_row_ids          : nullptr, or int32 [rows] (device): grouped row r then
+ *                        reads row a_row_ids[r] of A, so the expert rows are
+ *                        gathered from A (e.g. the token rows of a MoE input)
+ *                        without staging them.
  *   B, scales          : expert-major MatMulNBits layout
  *                        ([E, N, ceil(K/2)] packed, fp16 [E, N, ceil(K/bs)])
  *   zero_points        : nullptr for symmetric (zp = 8); with zp_packed_u4 != 0
@@ -2699,7 +2740,7 @@ HIP_KERNEL_API int hip_matmul_nbits_grouped_wmma(
  *                        bit-identical results.
  *   bias               : fp16 [E, N] or nullptr
  *   row_tiles          : int32 [max_row_tiles][3] = (expert, row0, rows) with
- *                        rows <= tile_rows (hip_qmoe_build_row_tiles)
+ *                        rows <= tile_rows (hip_qmoe_build_row_tile_classes)
  *   num_row_tiles      : int32 device scalar, valid entries of row_tiles
  *   max_row_tiles      : host-side upper bound on *num_row_tiles (grid size)
  *   tile_rows          : tile height the list was built with; cfg < 0 picks
@@ -2710,8 +2751,8 @@ HIP_KERNEL_API int hip_matmul_nbits_grouped_wmma(
  * (default configs: K <= 9216 for tile_rows <= 32, K <= 5120 above); returns
  * -1 otherwise. */
 HIP_KERNEL_API int hip_matmul_nbits_wmma_smallm_grouped(
-    void* stream, int cfg,
-    const void* A, const void* B, const void* scales, const void* zero_points,
+    void* stream, int cfg, const void* A, const void* a_row_ids,
+    const void* B, const void* scales, const void* zero_points,
     int zp_packed_u4, const void* bias, const void* expert_row_offsets,
     const void* row_tiles, const void* num_row_tiles, void* output,
     int64_t max_row_tiles, int64_t tile_rows, int64_t N, int64_t K,
@@ -2723,6 +2764,29 @@ HIP_KERNEL_API int hip_matmul_nbits_wmma_smallm_grouped(
 HIP_KERNEL_API int hip_matmul_nbits_wmma_smallm_grouped_supported(
     int cfg, int64_t tile_rows, int64_t N, int64_t K, int64_t bits,
     int64_t block_size, int64_t element_size_bytes);
+
+/* Row tile height of hip_matmul_nbits_wmma_tiled_grouped. */
+#define HIP_MATMUL_NBITS_TILED_GROUPED_ROWS 128
+
+/* Same contract as hip_matmul_nbits_wmma_smallm_grouped, for tall row tiles of
+ * symmetric (zp = 8) weights: each tile slot runs the LDS-staged MatMulNBits
+ * WMMA tile, which reads an expert's weights once per
+ * HIP_MATMUL_NBITS_TILED_GROUPED_ROWS rows at full Matrix Core rate. Use it
+ * for experts with many rows; the direct-B kernel wins below that.
+ *   row_tiles : built with HIP_MATMUL_NBITS_TILED_GROUPED_ROWS-row tiles
+ * Requires wave32 WMMA, bits == 4, fp16, K % 32 == 0 and a power-of-two
+ * block_size >= 32; returns -1 otherwise. */
+HIP_KERNEL_API int hip_matmul_nbits_wmma_tiled_grouped(
+    void* stream, const void* A, const void* a_row_ids, const void* B,
+    const void* scales, const void* bias, const void* expert_row_offsets,
+    const void* row_tiles, const void* num_row_tiles, void* output,
+    int64_t max_row_tiles, int64_t N,
+    int64_t K, int64_t bits, int64_t block_size, int64_t element_size_bytes);
+
+/* 1 when hip_matmul_nbits_wmma_tiled_grouped accepts this shape, else 0. */
+HIP_KERNEL_API int hip_matmul_nbits_wmma_tiled_grouped_supported(
+    int64_t N, int64_t K, int64_t bits, int64_t block_size,
+    int64_t element_size_bytes);
 
 /* W4A8 integer-dot-product (dp4a) GEMV for a single decode row (M==1).
  * Dynamically quantizes the fp16 activation row to per-group int8 (into
@@ -3201,18 +3265,25 @@ HIP_KERNEL_API int hip_qmoe_bucket_tokens_ragged(
     int64_t row_group_size,
     int64_t element_size_bytes);
 
-/* Row tiles for hip_matmul_nbits_wmma_smallm_grouped, built on the device from
- * the bucketed expert counts. Experts with 0 < count <= split_rows are cut into
- * tiles of rows_small rows (tiles_small), larger ones into tiles of rows_big
- * (tiles_big). Each tile is int32 (expert, row0, rows), in ascending expert
- * order; num_small / num_big are int32 device scalars receiving the counts.
- * Capacity the caller must provide: tiles_small holds at most
- * sum over small experts of ceil(count / rows_small), tiles_big
- * total_rows / rows_big + (number of experts above split_rows). */
-HIP_KERNEL_API int hip_qmoe_build_row_tiles(
+#define HIP_QMOE_MAX_ROW_TILE_CLASSES 4
+
+/* Row tiles for the grouped expert GEMMs (hip_matmul_nbits_wmma_smallm_grouped,
+ * hip_matmul_nbits_wmma_tiled_grouped), built in one launch on the device from
+ * the bucketed expert counts. Class c (c < num_classes <=
+ * HIP_QMOE_MAX_ROW_TILE_CLASSES) takes every expert with
+ * lo[c] < count <= hi[c] (hi[c] < 0: no upper bound) and cuts it into tiles of
+ * rows[c] rows. Classes may overlap, so the same experts can be tiled at two
+ * heights for two GEMMs. lo, hi and rows are host arrays. tiles[c] is a device
+ * int32 list receiving (expert, row0, rows) per tile in ascending expert order;
+ * num_tiles is a device int32 [num_classes] receiving each list's length.
+ * Capacity of tiles[c]: one tile per expert when hi[c] is set and
+ * hi[c] <= rows[c], else total_rows / rows[c] plus the number of experts in
+ * the class. Returns -1 when (num_classes + 1) * num_experts int32 exceed the
+ * 64 KB of LDS the counts are staged in. */
+HIP_KERNEL_API int hip_qmoe_build_row_tile_classes(
     void* stream, const void* expert_counts, int64_t num_experts,
-    int64_t split_rows, int64_t rows_small, int64_t rows_big, void* tiles_small,
-    void* num_small, void* tiles_big, void* num_big);
+    int64_t num_classes, const int64_t* lo, const int64_t* hi,
+    const int64_t* rows, void* const* tiles, void* num_tiles);
 
 /* One-launch ragged quantized MatMulNBits over every row group/expert.
  * input_row_ids may be null for already-sorted input rows; otherwise it maps

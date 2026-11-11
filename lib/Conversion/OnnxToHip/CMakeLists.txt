@@ -123,6 +123,7 @@ add_library(OnnxToHip STATIC
   QLinearMatMulConversion.cpp
   UpsampleConversion.cpp
   GridSampleConversion.cpp
+  RoiAlignConversion.cpp
   GlobalPoolConversion.cpp
   FlattenConversion.cpp
   DepthToSpaceConversion.cpp

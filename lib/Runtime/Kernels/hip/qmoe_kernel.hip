@@ -1144,71 +1144,101 @@ extern "C" int hip_qmoe_bucket_tokens_ragged(
 }
 
 // ---------------------------------------------------------------------------
-// Device-side row tiles for the grouped expert GEMM. Experts with
-// 0 < count <= split_rows get tiles of rows_small rows, larger ones tiles of
-// rows_big, each as (expert, row0, rows) in ascending expert order. Counts are
-// staged in LDS so the serial scan on thread 0 never waits on global memory.
+// Device-side row tiles for the grouped expert GEMMs. Class c takes the
+// experts with lo[c] < count <= hi[c] (hi[c] < 0: no upper bound) and cuts
+// each into tiles of rows[c] rows, written as (expert, row0, rows) in
+// ascending expert order. Classes may overlap, so one launch can tile the
+// same experts at two heights for two GEMMs. Counts are staged in LDS, and
+// thread c runs class c's serial scan so the classes scan concurrently.
 // ---------------------------------------------------------------------------
+static constexpr int kMaxRowTileClasses = HIP_QMOE_MAX_ROW_TILE_CLASSES;
+
+struct RowTileClasses {
+  int n;
+  int lo[kMaxRowTileClasses];
+  int hi[kMaxRowTileClasses];
+  int rows[kMaxRowTileClasses];
+  int32_t* tiles[kMaxRowTileClasses];
+  int32_t* num[kMaxRowTileClasses];
+};
+
+__device__ __forceinline__ bool row_tile_class_has(const RowTileClasses& rc,
+                                                   int cls, int count) {
+  return count > rc.lo[cls] && (rc.hi[cls] < 0 || count <= rc.hi[cls]);
+}
+
 __global__ void qmoe_build_row_tiles_kernel(
-    const int32_t* __restrict__ expert_counts, int num_experts, int split_rows,
-    int rows_small, int rows_big, int32_t* __restrict__ tiles_small,
-    int32_t* __restrict__ num_small, int32_t* __restrict__ tiles_big,
-    int32_t* __restrict__ num_big) {
-  extern __shared__ int32_t tile_base[];  // [2][num_experts]
+    const int32_t* __restrict__ expert_counts, int num_experts,
+    RowTileClasses rc) {
+  extern __shared__ int32_t tile_base[];  // [rc.n][num_experts], then counts
+  int32_t* counts = tile_base + rc.n * num_experts;
   for (int e = threadIdx.x; e < num_experts; e += blockDim.x) {
     const int c = expert_counts[e];
-    tile_base[e] = (c > 0 && c <= split_rows) ? (c + rows_small - 1) / rows_small : 0;
-    tile_base[num_experts + e] = c > split_rows ? (c + rows_big - 1) / rows_big : 0;
+    counts[e] = c;
+    for (int cls = 0; cls < rc.n; cls++)
+      tile_base[cls * num_experts + e] =
+          row_tile_class_has(rc, cls, c) ? (c + rc.rows[cls] - 1) / rc.rows[cls]
+                                         : 0;
   }
   __syncthreads();
-  if (threadIdx.x == 0) {
-    int s = 0, b = 0;
+  if (static_cast<int>(threadIdx.x) < rc.n) {
+    int32_t* base = tile_base + threadIdx.x * num_experts;
+    int total = 0;
     for (int e = 0; e < num_experts; e++) {
-      const int ns = tile_base[e], nb = tile_base[num_experts + e];
-      tile_base[e] = s;
-      tile_base[num_experts + e] = b;
-      s += ns;
-      b += nb;
+      const int nt = base[e];
+      base[e] = total;
+      total += nt;
     }
-    *num_small = s;
-    *num_big = b;
+    *rc.num[threadIdx.x] = total;
   }
   __syncthreads();
   for (int e = threadIdx.x; e < num_experts; e += blockDim.x) {
-    const int c = expert_counts[e];
-    if (c <= 0) continue;
-    const bool small = c <= split_rows;
-    const int rows = small ? rows_small : rows_big;
-    int32_t* out = (small ? tiles_small : tiles_big) +
-                   3 * tile_base[(small ? 0 : num_experts) + e];
-    for (int r0 = 0; r0 < c; r0 += rows, out += 3) {
-      out[0] = e;
-      out[1] = r0;
-      out[2] = min(rows, c - r0);
+    const int c = counts[e];
+    for (int cls = 0; cls < rc.n; cls++) {
+      if (!row_tile_class_has(rc, cls, c)) continue;
+      const int rows = rc.rows[cls];
+      int32_t* out = rc.tiles[cls] + 3 * tile_base[cls * num_experts + e];
+      for (int r0 = 0; r0 < c; r0 += rows, out += 3) {
+        out[0] = e;
+        out[1] = r0;
+        out[2] = min(rows, c - r0);
+      }
     }
   }
 }
 
-extern "C" int hip_qmoe_build_row_tiles(
+extern "C" int hip_qmoe_build_row_tile_classes(
     void* stream, const void* expert_counts, int64_t num_experts,
-    int64_t split_rows, int64_t rows_small, int64_t rows_big, void* tiles_small,
-    void* num_small, void* tiles_big, void* num_big) {
-  if (num_experts <= 0 || split_rows < 0 || rows_small <= 0 || rows_big <= 0)
+    int64_t num_classes, const int64_t* lo, const int64_t* hi,
+    const int64_t* rows, void* const* tiles, void* num_tiles) {
+  if (num_experts <= 0 || num_classes <= 0 ||
+      num_classes > kMaxRowTileClasses || !lo || !hi || !rows || !tiles ||
+      !num_tiles)
     return -1;
+  RowTileClasses rc{};
+  rc.n = static_cast<int>(num_classes);
+  for (int c = 0; c < rc.n; c++) {
+    if (lo[c] < 0 || rows[c] <= 0 || (hi[c] >= 0 && hi[c] <= lo[c]) ||
+        !tiles[c])
+      return -1;
+    rc.lo[c] = static_cast<int>(lo[c]);
+    rc.hi[c] = static_cast<int>(hi[c]);
+    rc.rows[c] = static_cast<int>(rows[c]);
+    rc.tiles[c] = static_cast<int32_t*>(tiles[c]);
+    rc.num[c] = static_cast<int32_t*>(num_tiles) + c;
+  }
   hipStream_t s = static_cast<hipStream_t>(stream);
-  const size_t shmem = 2 * static_cast<size_t>(num_experts) * sizeof(int32_t);
+  const size_t shmem =
+      (num_classes + 1) * static_cast<size_t>(num_experts) * sizeof(int32_t);
+  if (shmem > 65536) return -1;
   (void)hipGetLastError();
   hipLaunchKernelGGL(qmoe_build_row_tiles_kernel, dim3(1), dim3(kBlock), shmem,
                      s, static_cast<const int32_t*>(expert_counts),
-                     static_cast<int>(num_experts), static_cast<int>(split_rows),
-                     static_cast<int>(rows_small), static_cast<int>(rows_big),
-                     static_cast<int32_t*>(tiles_small),
-                     static_cast<int32_t*>(num_small),
-                     static_cast<int32_t*>(tiles_big),
-                     static_cast<int32_t*>(num_big));
+                     static_cast<int>(num_experts), rc);
   hipError_t err = hipGetLastError();
   if (err != hipSuccess)
-    fprintf(stderr, "[custom_kernels] hip_qmoe_build_row_tiles failed: %s\n",
+    fprintf(stderr,
+            "[custom_kernels] hip_qmoe_build_row_tile_classes failed: %s\n",
             hipGetErrorString(err));
   return static_cast<int>(err);
 }

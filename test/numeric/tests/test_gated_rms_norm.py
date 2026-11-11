@@ -50,6 +50,10 @@ def _make_model(model_shape, group, dtype, activation):
         # Qwen3.8 GatedDeltaNet output norm: 48 heads x 128.
         (["batch", "seq", 6144], [1, 1, 6144], 128, np.float16, "sigmoid"),
         (["batch", "seq", 6144], [2, 17, 6144], 128, np.float16, "sigmoid"),
+        # Prefill-sized 128-wide groups take the wave-per-row kernel; 4101 rows
+        # leave the last eight-row block partly filled.
+        (["batch", "seq", 6144], [1, 128, 6144], 128, np.float16, "silu"),
+        ([4101, 128], [4101, 128], 128, np.float32, "sigmoid"),
         ([3, 5, 512], [3, 5, 512], 128, np.float16, "silu"),
         ([3, 5, 512], [3, 5, 512], 512, np.float32, "swish"),
         ([4, 300], [4, 300], 100, np.float32, "sigmoid"),
