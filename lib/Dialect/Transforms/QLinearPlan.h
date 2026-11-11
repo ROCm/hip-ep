@@ -71,7 +71,8 @@ struct AsymmetricQLinearPlan {
 /// The plan of a hip.qlinear_conv that rocMLIR can run as hip.quant_conv and a
 /// requantize epilogue, or nullopt when the conv keeps its HIP kernel.
 /// A channel whose requantize multiplier is below 2^-33 always writes the
-/// output zero point; its multiplier and bias are 0.
+/// output zero point; its multiplier and bias are 0. The plans below and this
+/// one are nullopt when every channel is dead (see getDeadQLinearOutput).
 std::optional<QLinearPlan> planQLinearConv(QLinearConvOp op);
 
 /// The plan of a hip.qlinear_conv with ui8 weights or a non-zero weight zero
@@ -95,6 +96,12 @@ std::optional<DequantizedConvPlan> planDequantizedConv(ConvOp op);
 
 /// True when one of the plans above accepts `op`.
 bool isPlannedQLinear(Operation *op);
+
+/// The output of a hip.qlinear_conv or hip.qlinear_matmul whose requantize
+/// multiplier is below 2^-33 on every channel or column: every element is the
+/// output zero point, for any input and bias. A splat in the static result
+/// type, or null for any other op.
+DenseElementsAttr getDeadQLinearOutput(Operation *op);
 
 Value emitTensorEmpty(RewriterBase &rewriter, Location loc,
                       RankedTensorType type);
