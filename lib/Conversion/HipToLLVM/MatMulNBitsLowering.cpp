@@ -66,7 +66,15 @@ struct MatMulNBitsOpLowering : public ConvertOpToLLVMPattern<MatMulNBitsOp> {
     Value zpElemSizeVal = createI64Const(op.getZpElemSize());
     Value scaleElemSizeVal = createI64Const(op.getScaleElemSize());
 
-    SmallVector<Type, 18> paramTypes = {
+    // Activation-sharing group from --hip-share-matmul-nbits-activation:
+    // (group << 1) | leader, 0 when the op shares its input with no sibling.
+    int64_t actShare = 0;
+    if (auto group = op->getAttrOfType<IntegerAttr>("hip.act_quant_group"))
+      actShare =
+          (group.getInt() << 1) | (op->hasAttr("hip.act_quant_leader") ? 1 : 0);
+    Value actShareVal = createI64Const(actShare);
+
+    SmallVector<Type, 19> paramTypes = {
         ptrType, // state
         i32Type, // op_state_slot
         ptrType, // A
@@ -84,7 +92,8 @@ struct MatMulNBitsOpLowering : public ConvertOpToLLVMPattern<MatMulNBitsOp> {
         i64Type, // block_size
         i64Type, // elem_size
         i64Type, // zp_elem_size
-        i64Type  // scale_elem_size
+        i64Type, // scale_elem_size
+        i64Type  // act_share
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
@@ -93,7 +102,7 @@ struct MatMulNBitsOpLowering : public ConvertOpToLLVMPattern<MatMulNBitsOp> {
       return failure();
     }
 
-    SmallVector<Value, 18> args = {statePtr,
+    SmallVector<Value, 19> args = {statePtr,
                                    getOpStateSlotValue(op, rewriter, loc),
                                    APtr,
                                    BPtr,
@@ -110,7 +119,8 @@ struct MatMulNBitsOpLowering : public ConvertOpToLLVMPattern<MatMulNBitsOp> {
                                    blockSize,
                                    elemSizeVal,
                                    zpElemSizeVal,
-                                   scaleElemSizeVal};
+                                   scaleElemSizeVal,
+                                   actShareVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);

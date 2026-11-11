@@ -1808,6 +1808,73 @@ def Hip_HyperConnectionPostMixNormOp : Hip_DpsOp_AutoReify<
   let hasVerifier = 1;
 }
 
+def Hip_HyperConnectionMixerOp : Hip_DpsOp_AutoReify<
+    "hyper_connection_mixer", [OpStateOpInterface]> {
+  let summary = "Hyper-connection pre-mix with its gate projection";
+  let description = [{
+    The mixing path from a hyper-connection projection to the next pre-mix
+    stream reduction. `proj` is (..., act_width + branches): the leading
+    `act_width` columns feed the pre-mix gate projection, the trailing
+    `branches` columns are an injection gate passed through. In element-type
+    arithmetic, rounding after each step as the separate ops do:
+
+      act    = swish(proj[..., :act_width] * act_scale, swish_alpha)
+      mix    = MatMulNBits(act, weight, scales)   (4-bit, zero point 8)
+      output = pre_mix(streams, mix)              (feature gate, sigmoid)
+      gate   = proj[..., act_width:]
+
+    `outputs` is [output, gate, act, mix]. `act` and `mix` are scratch with
+    unspecified contents: the runtime computes `output` and `gate` in one
+    fused kernel when there are few rows (decode), and through the separate
+    kernels, using `act` and `mix`, otherwise. The fused path accumulates
+    the projection in FP32 from the unquantized activation, so it can differ
+    from the separate kernels by rounding.
+
+    `streams` is flattened (..., branches * hidden). `weight` is
+    (branches * hidden, act_width / block_size, block_size / 2) uint8 and
+    `scales` (branches * hidden, act_width / block_size). f16 only.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$streams,
+    Hip_TensorOrMemRef:$proj,
+    Hip_TensorOrMemRef:$weight,
+    Hip_TensorOrMemRef:$scales,
+    Variadic<Hip_TensorOrMemRef>:$outputs,
+    I64Attr:$branches,
+    I64Attr:$hidden,
+    I64Attr:$act_width,
+    I64Attr:$block_size,
+    F32Attr:$act_scale,
+    F32Attr:$swish_alpha,
+    F32Attr:$reduction_scale
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $streams `,` $proj `,` $weight `,` $scales `:` type($streams) `,`
+        type($proj) `,` type($weight) `,` type($scales)
+    `)`
+    `outs` `(` $outputs `:` type($outputs) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+  let hasVerifier = 1;
+
+  // OpStateOpInterface: the separate-kernel path runs the gate projection
+  // through wrap_matmul_nbits, which keys its per-instance caches on this
+  // op's slot exactly as a hip.matmul_nbits would.
+  let extraClassDeclaration = [{
+    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
+                                      ::mlir::Location loc,
+                                      ::mlir::Value statePtr, int32_t slot) {
+      return ::mlir::hip::emitOpStateConstruct(
+          builder, loc, statePtr, slot,
+          "hipdnn_ep_op_state_construct_matmul_nbits", {});
+    }
+  }];
+}
+
 def Hip_SkipRmsNormOp :
     Hip_DpsOp_AutoReify<"skip_rms_norm", [AttrSizedOperandSegments]> {
   let summary = "Fused skip + RMS normalization (com.microsoft.SkipSimplifiedLayerNormalization)";

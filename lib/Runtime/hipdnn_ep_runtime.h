@@ -408,12 +408,42 @@ int hipdnn_ep_state_ensure_qsigmoid_scratch(RuntimeState *state,
 // (hip_matmul_nbits_dp4a). One contiguous device buffer holding the quantized
 // activation row (int8) plus the per-group activation scales (float). Lazily
 // grown via hipdnn_ep_state_ensure_matmul_dp4a_scratch (same policy as
-// conv_scratch: never shrinks, freed in hipdnn_ep_state_cleanup). Single buffer
-// reused across all matmul_nbits calls in the session -- safe because the
-// stream is serialised. See runtime_state_internal.h for design rationale.
+// conv_scratch: never shrinks, freed in hipdnn_ep_state_cleanup). Shared by
+// all matmul_nbits calls in the session -- safe because the stream is
+// serialised. See runtime_state_internal.h for design rationale.
 void *hipdnn_ep_state_get_matmul_dp4a_scratch(RuntimeState *state);
 int hipdnn_ep_state_ensure_matmul_dp4a_scratch(RuntimeState *state,
                                                size_t needed_size);
+
+// Which quantized activation each slot of the dp4a scratch currently holds.
+// The scratch is split into HIPDNN_EP_DP4A_ACT_SLOTS equal slots: slot 0 for
+// ops without an activation-sharing group, the others keyed by group so two
+// interleaved groups do not evict each other. A slot is valid only while its
+// tag matches (group, A, M, K, block_size) exactly; growing the scratch clears
+// every tag.
+#define HIPDNN_EP_DP4A_ACT_SLOTS 4
+typedef struct HipdnnDp4aActTag {
+  int64_t group; // 0 = slot holds nothing reusable
+  const void *a;
+  int64_t m;
+  int64_t k;
+  int64_t block_size;
+} HipdnnDp4aActTag;
+HipdnnDp4aActTag *hipdnn_ep_state_get_matmul_dp4a_tags(RuntimeState *state);
+size_t hipdnn_ep_state_get_matmul_dp4a_scratch_size(RuntimeState *state);
+
+// Lets a producer op write its output's int8 copy straight into the slot of
+// activation-sharing group `group`, whose MatMulNBits consumers then skip
+// their own quantize. reserve always invalidates the slot (the producer leads
+// the group) and returns 1 with a_qb / a_scale set only when a consumer of
+// this geometry would take the dp4a path. After the producer's kernel wrote
+// the slot successfully, publish tags it with the fp16 output `a`.
+int hipdnn_ep_dp4a_act_reserve(RuntimeState *state, int64_t group, int64_t m,
+                               int64_t k, int64_t block_size, void **a_qb,
+                               void **a_scale);
+void hipdnn_ep_dp4a_act_publish(RuntimeState *state, int64_t group,
+                                const void *a, int64_t m, int64_t k,
+                                int64_t block_size);
 
 // Per-session scratch for the linear-attention chunk-parallel gated_delta
 // prefill (hip_linear_attention_prefill_chunked). Lazily grown via
@@ -1625,13 +1655,15 @@ int wrap_engram_gate(RuntimeState *state, void *key, void *query, void *value,
                      float epsilon);
 // com.microsoft HyperConnectionPreMix. streams hold rows * branches * hidden
 // elements. feature_gate 0 is a per-branch gate, 1 is per (branch, hidden).
-int wrap_hyper_connection_pre_mix(RuntimeState *state, void *streams,
-                                  void *pre_mix, void *output,
-                                  int64_t stream_num_elements, int64_t branches,
-                                  int64_t hidden, int64_t feature_gate,
-                                  int64_t gate_sigmoid,
-                                  int64_t element_size_bytes,
-                                  float reduction_scale);
+// act_quant_group > 0 also writes the output's int8 copy for that
+// activation-sharing group (hipdnn_ep_dp4a_act_reserve) at
+// act_quant_block_size.
+int wrap_hyper_connection_pre_mix(
+    RuntimeState *state, void *streams, void *pre_mix, void *output,
+    int64_t stream_num_elements, int64_t branches, int64_t hidden,
+    int64_t feature_gate, int64_t gate_sigmoid, int64_t element_size_bytes,
+    float reduction_scale, int64_t act_quant_group,
+    int64_t act_quant_block_size);
 
 // com.microsoft HyperConnectionPostMix. stream_mix may be null (identity).
 int wrap_hyper_connection_post_mix(RuntimeState *state, void *streams,
@@ -1644,13 +1676,29 @@ int wrap_hyper_connection_post_mix(RuntimeState *state, void *streams,
 
 // PostMix fused with the following branchwise RMSNorm. stream_mix may be
 // null. feature_gate and gate_activation match the HIP op. residual and
-// normed are both written.
+// normed are both written. act_quant_group as for pre-mix, over normed
+// flattened to [rows, branches * hidden].
 int wrap_hyper_connection_post_mix_norm(
     RuntimeState *state, void *streams, void *block_output, void *gate,
     void *stream_mix, void *norm_scale, void *residual, void *normed,
     int64_t stream_num_elements, int64_t branches, int64_t hidden,
     int64_t feature_gate, int64_t gate_activation, int64_t element_size_bytes,
-    float epsilon);
+    float epsilon, int64_t act_quant_group, int64_t act_quant_block_size);
+
+// hip.hyper_connection_mixer (f16): proj [.., act_width + branches] splits
+// into the Swish-scaled activation and the gate; the activation's 4-bit
+// MatMulNBits (branches * hidden outputs) drives a feature-sigmoid pre_mix of
+// streams. Few-row calls run one fused kernel; otherwise act and mix are the
+// intermediates of the separate act, MatMulNBits and pre_mix kernels.
+// matmul_m / matmul_batch are the MatMulNBits M and batch over act.
+int wrap_hyper_connection_mixer(
+    RuntimeState *state, int op_state_slot, void *streams, void *proj,
+    void *weight, void *scales, void *output, void *gate, void *act, void *mix,
+    int64_t stream_num_elements, int64_t proj_num_elements, int64_t matmul_m,
+    int64_t matmul_batch, int64_t branches, int64_t hidden, int64_t act_width,
+    int64_t block_size, float act_scale, float swish_alpha,
+    float reduction_scale, int64_t act_quant_group,
+    int64_t act_quant_block_size);
 
 // SkipSimplifiedLayerNormalization operation wrapper (Full MS spec)
 // Computes: input_skip_bias_sum = input + skip [+ bias]
@@ -1696,7 +1744,9 @@ int wrap_matmul_nbits(
     int64_t block_size,      // quantization block size
     int64_t elem_size,       // element size in bytes
     int64_t zp_elem_size,    // zero_points element size: 1=uint8 packed, 2=fp16
-    int64_t scale_elem_size); // scales element size in bytes: 2=fp16, 4=fp32
+    int64_t scale_elem_size, // scales element size in bytes: 2=fp16, 4=fp32
+    int64_t act_share);      // (group << 1) | leader from
+                             // --hip-share-matmul-nbits-activation; 0 = none
 
 // Bitsandbytes FP4/NF4 weight dequant. Writes row-major [N, K] f32.
 // quant_type 0 is FP4 and 1 is NF4. Even indices read the high nibble.

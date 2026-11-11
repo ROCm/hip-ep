@@ -544,6 +544,7 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->qsigmoid_scratch_size = 0;
   state->matmul_dp4a_scratch = nullptr;
   state->matmul_dp4a_scratch_size = 0;
+  memset(state->matmul_dp4a_tags, 0, sizeof(state->matmul_dp4a_tags));
   state->la_scratch = nullptr;
   state->la_scratch_size = 0;
   state->gqa_fp32_adapter_scratch = nullptr;
@@ -2123,6 +2124,14 @@ void *hipdnn_ep_state_get_matmul_dp4a_scratch(RuntimeState *state) {
   return state ? state->matmul_dp4a_scratch : nullptr;
 }
 
+HipdnnDp4aActTag *hipdnn_ep_state_get_matmul_dp4a_tags(RuntimeState *state) {
+  return state ? state->matmul_dp4a_tags : nullptr;
+}
+
+size_t hipdnn_ep_state_get_matmul_dp4a_scratch_size(RuntimeState *state) {
+  return state ? state->matmul_dp4a_scratch_size : 0;
+}
+
 int hipdnn_ep_state_ensure_matmul_dp4a_scratch(RuntimeState *state,
                                                size_t needed_size) {
   if (!state)
@@ -2141,6 +2150,7 @@ int hipdnn_ep_state_ensure_matmul_dp4a_scratch(RuntimeState *state,
       alloc_size = grown;
   }
 
+  memset(state->matmul_dp4a_tags, 0, sizeof(state->matmul_dp4a_tags));
   if (state->matmul_dp4a_scratch) {
     // Drain any in-flight dp4a gemv that may still be reading the old buffer
     // before we free it. Growth is rare (only when a larger K is first seen).

@@ -80,6 +80,7 @@ existing `--convert-hip-to-llvm` pipeline.
 | `HyperConnectionPreMix` (`com.microsoft`) | `hip.hyper_connection_pre_mix` | `hyper_connection_kernel.hip` |
 | `HyperConnectionPostMix` (`com.microsoft`) | `hip.hyper_connection_post_mix` | `hyper_connection_kernel.hip` |
 | `HyperConnectionPostMix` + `BranchwiseRMSNorm` | `hip.hyper_connection_post_mix_norm` | `hyper_connection_kernel.hip` |
+| Pre-mix gate path (projection column split, scalar `Mul`, `Swish`, 4-bit `MatMulNBits`, `HyperConnectionPreMix`) | `hip.hyper_connection_mixer` (formed by `hip-fusion-transform`) | `hyper_connection_kernel.hip`; one fused kernel for up to 8 rows, otherwise the separate act, MatMulNBits and pre-mix kernels |
 | LpNorm+Mul pattern (fused) | `hip.rms_norm` | `rms_norm_kernel.hip` |
 
 `SkipSimplifiedLayerNormalization` fuses Add + RMSNorm into one kernel:

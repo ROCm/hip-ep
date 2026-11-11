@@ -38,12 +38,13 @@ module {
   // CHECK-LABEL: llvm.func @test_matmul_nbits_basic
   // CHECK: llvm.call @wrap_matmul_nbits({{.*}}) :
   // CHECK-SAME: (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
-  // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64) -> i32
-  // Verify 17 parameters:
+  // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+  // Verify 19 parameters:
   // - 1 i32: op_state_slot (2nd arg; per-instance MatmulNbitsState; threaded by
   //          --assign-op-state-slots, replaces shared RuntimeState::zp_unpack_cache)
   // - 8 pointers: state, A, B, scales, zero_points(null), g_idx(null), bias(null), output
-  // - 8 i64: M=128, N=5120, K=2880, batch_count=1, bits=4, block_size=32, elem_size=2, zp_elem_size=0
+  // - 10 i64: M=128, N=5120, K=2880, batch_count=1, bits=4, block_size=32,
+  //   elem_size=2, zp_elem_size=0, scale_elem_size=2, act_share=0 (no group)
 
   // ===== Test 2: MatMulNBits with zero_points =====
 
@@ -91,4 +92,37 @@ module {
   // CHECK-SAME: (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
   // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64) -> i32
   // M=128, batch_count=1 (2D: no batch dims)
+
+  // ===== Test 4: activation-sharing group =====
+  // act_share = (group << 1) | leader: group 3 leader -> 7, follower -> 6.
+
+  func.func @test_matmul_nbits_act_share(%ctx: !hip.context,
+                                          %A: memref<1x2880xf16, 1>,
+                                          %B: memref<5120x90x16xui8, 1>,
+                                          %scales: memref<5120x90xf16, 1>,
+                                          %out0: memref<1x5120xf16, 1>,
+                                          %out1: memref<1x5120xf16, 1>) {
+    hip.matmul_nbits(%ctx) ins(%A, %B, %scales :
+        memref<1x2880xf16, 1>, memref<5120x90x16xui8, 1>,
+        memref<5120x90xf16, 1>)
+        outs(%out0 : memref<1x5120xf16, 1>)
+        {K = 2880 : i64, N = 5120 : i64, bits = 4 : i64,
+         block_size = 32 : i64, accuracy_level = 4 : i64,
+         zp_elem_size = 0 : i64, hip.act_quant_group = 3 : i64,
+         hip.act_quant_leader}
+    hip.matmul_nbits(%ctx) ins(%A, %B, %scales :
+        memref<1x2880xf16, 1>, memref<5120x90x16xui8, 1>,
+        memref<5120x90xf16, 1>)
+        outs(%out1 : memref<1x5120xf16, 1>)
+        {K = 2880 : i64, N = 5120 : i64, bits = 4 : i64,
+         block_size = 32 : i64, accuracy_level = 4 : i64,
+         zp_elem_size = 0 : i64, hip.act_quant_group = 3 : i64}
+    return
+  }
+
+  // CHECK-LABEL: llvm.func @test_matmul_nbits_act_share
+  // CHECK: %[[LEAD:.*]] = llvm.mlir.constant(7 : i64) : i64
+  // CHECK: llvm.call @wrap_matmul_nbits({{.*}}, %[[LEAD]]) :
+  // CHECK: %[[FOLLOW:.*]] = llvm.mlir.constant(6 : i64) : i64
+  // CHECK: llvm.call @wrap_matmul_nbits({{.*}}, %[[FOLLOW]]) :
 }

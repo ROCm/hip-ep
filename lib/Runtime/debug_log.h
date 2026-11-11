@@ -31,6 +31,23 @@ inline bool hipdnn_ep_matmul_dp4a_enabled() {
   return enabled;
 }
 
+// Let MatMulNBits ops grouped by --hip-share-matmul-nbits-activation reuse
+// the dp4a activation their group leader quantized. Default on;
+// HIPDNN_EP_MATMUL_DP4A_SHARE=0 quantizes in every op again for A/B.
+inline bool hipdnn_ep_matmul_dp4a_share_enabled() {
+  static const bool enabled =
+      hipdnn_ep::env_enabled_default_on("HIPDNN_EP_MATMUL_DP4A_SHARE");
+  return enabled;
+}
+
+// hip.hyper_connection_mixer runs few-row (decode) calls as one fused kernel.
+// 0 keeps every call on the separate kernels, the A/B control.
+inline bool hipdnn_ep_hc_mixer_fused_enabled() {
+  static const bool enabled =
+      hipdnn_ep::env_enabled_default_on("HIPDNN_EP_HC_MIXER_FUSED");
+  return enabled;
+}
+
 // Widest token burst wrap_qmoe serves by iterating the one-token fused kernel
 // (three launches per token, no host sync, one expert set read per token)
 // instead of the grouped path (one pass over the union of experts in padded

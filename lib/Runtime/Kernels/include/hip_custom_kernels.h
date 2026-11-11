@@ -2406,6 +2406,12 @@ HIP_KERNEL_API int hip_engram_gate(
  * multiplies by reduction_scale. Post-mix adds post_mix * block_output;
  * stream_mix null keeps the original stream. Pre-mix and post-mix use FP32
  * math and one rounding. hip_dtype: FLOAT16 or FLOAT32.
+ *
+ * q_act / q_scale (nullable): also write the output in the int8 activation
+ * layout of hip_matmul_nbits_dp4a (bit-exact with its quantize kernel) for a
+ * consumer with block size q_block, a power of two in [32, 256] dividing
+ * hidden. Pre-mix quantizes its [rows, hidden] output; post-mix-norm the
+ * flattened [rows, branches * hidden] normed output.
  */
 HIP_KERNEL_API int hip_hyper_connection_pre_mix(
     void* stream,
@@ -2418,6 +2424,9 @@ HIP_KERNEL_API int hip_hyper_connection_pre_mix(
     int feature_gate,
     int gate_sigmoid,
     float reduction_scale,
+    void* q_act,
+    void* q_scale,
+    int64_t q_block,
     int hip_dtype);
 
 HIP_KERNEL_API int hip_hyper_connection_post_mix(
@@ -2449,7 +2458,60 @@ HIP_KERNEL_API int hip_hyper_connection_post_mix_norm(
     int feature_gate,
     int gate_activation,
     float epsilon,
+    void* q_act,
+    void* q_scale,
+    int64_t q_block,
     int hip_dtype);
+
+/* hip.hyper_connection_mixer, f16 only. proj is [rows, act_width + branches];
+ * streams [rows, branches * hidden]; weight / scales are a 4-bit
+ * MatMulNBits (branches * hidden) x act_width projection with no zero points.
+ *
+ * _act: act = round(swish(round(proj[:, :act_width] * act_scale))) and
+ * gate = proj[:, act_width:], bit-exact with hip.mul + hip.swish + a copy.
+ *
+ * _decode: output = pre_mix(streams, MatMulNBits(act)) with feature sigmoid
+ * gates, and gate as above, in one launch. The projection accumulates in
+ * FP32 from the unquantized activation. Only valid when _decode_ok holds.
+ * q_act / q_scale (nullable) also write output's int8 dp4a activation copy;
+ * q_block must be 32. */
+HIP_KERNEL_API int hip_hyper_connection_mixer_act(
+    void* stream,
+    const void* proj,
+    void* act,
+    void* gate,
+    int64_t rows,
+    int64_t act_width,
+    int64_t branches,
+    float act_scale,
+    float swish_alpha);
+
+HIP_KERNEL_API int hip_hyper_connection_mixer_decode_ok(
+    int64_t rows,
+    int64_t branches,
+    int64_t hidden,
+    int64_t act_width,
+    int64_t block_size);
+
+HIP_KERNEL_API int hip_hyper_connection_mixer_decode(
+    void* stream,
+    const void* streams,
+    const void* proj,
+    const void* weight,
+    const void* scales,
+    void* output,
+    void* gate,
+    int64_t rows,
+    int64_t branches,
+    int64_t hidden,
+    int64_t act_width,
+    int64_t block_size,
+    float act_scale,
+    float swish_alpha,
+    float reduction_scale,
+    void* q_act,
+    void* q_scale,
+    int64_t q_block);
 
 /* =========================================================================
  * Skip RMS Normalization (com.microsoft SkipSimplifiedLayerNormalization)
@@ -2810,6 +2872,16 @@ HIP_KERNEL_API int hip_matmul_nbits_dp4a(
     const void* bias, void* out,
     int64_t M, int64_t N, int64_t K, int64_t block_size,
     void* a_qb_scratch, void* a_scale_scratch);
+
+/* The GEMV half of hip_matmul_nbits_dp4a: reads an activation that an earlier
+ * hip_matmul_nbits_dp4a call (same M, K and block_size) quantized into
+ * a_qb/a_scale, so sibling projections of one input quantize it once. */
+HIP_KERNEL_API int hip_matmul_nbits_dp4a_prequantized(
+    void* stream,
+    const void* B, const void* scales, const void* zp_u8,
+    const void* bias, void* out,
+    int64_t M, int64_t N, int64_t K, int64_t block_size,
+    const void* a_qb, const void* a_scale);
 
 /* Stand-alone launchers for the zero_points unpack/convert kernels, used by
  * the asym matmul_nbits cache in lib/Runtime/real/matmul_nbits.cpp.

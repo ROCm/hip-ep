@@ -27,6 +27,27 @@
 
 #include <cstdio>
 
+namespace {
+// Claims the int8 copy of an activation-sharing producer's output. Always
+// reserves (which invalidates the group's slot) so consumers never reuse a
+// stale copy; the kernels only write fp16 outputs in block sizes that tile
+// one hidden row.
+bool hc_act_quant_reserve(RuntimeState *state, int64_t group, int64_t rows,
+                          int64_t k, int64_t hidden, int64_t block_size,
+                          int hip_dtype, void **q_act, void **q_scale) {
+  const bool ok = hipdnn_ep_dp4a_act_reserve(state, group, rows, k, block_size,
+                                             q_act, q_scale) != 0 &&
+                  hip_dtype == HIP_DTYPE_FLOAT16 && block_size >= 32 &&
+                  block_size <= 256 && (block_size & (block_size - 1)) == 0 &&
+                  hidden % block_size == 0;
+  if (!ok) {
+    *q_act = nullptr;
+    *q_scale = nullptr;
+  }
+  return ok;
+}
+} // namespace
+
 int wrap_rms_norm(RuntimeState *state, void *input, void *scale, void *output,
                   int64_t input_num_elements, int64_t scale_num_elements,
                   int64_t norm_num_elements, int64_t element_size_bytes,
@@ -225,13 +246,12 @@ int wrap_engram_gate(RuntimeState *state, void *key, void *query, void *value,
                          rows, hc, hidden, epsilon, hip_dtype);
 }
 
-int wrap_hyper_connection_pre_mix(RuntimeState *state, void *streams,
-                                  void *pre_mix, void *output,
-                                  int64_t stream_num_elements, int64_t branches,
-                                  int64_t hidden, int64_t feature_gate,
-                                  int64_t gate_sigmoid,
-                                  int64_t element_size_bytes,
-                                  float reduction_scale) {
+int wrap_hyper_connection_pre_mix(
+    RuntimeState *state, void *streams, void *pre_mix, void *output,
+    int64_t stream_num_elements, int64_t branches, int64_t hidden,
+    int64_t feature_gate, int64_t gate_sigmoid, int64_t element_size_bytes,
+    float reduction_scale, int64_t act_quant_group,
+    int64_t act_quant_block_size) {
   OP_PROFILE(
       "hyper_connection",
       [&] {
@@ -267,11 +287,21 @@ int wrap_hyper_connection_pre_mix(RuntimeState *state, void *streams,
             (long long)element_size_bytes);
     return -1;
   }
-  return hip_hyper_connection_pre_mix(
-      hipdnn_ep_state_get_stream(state), streams, pre_mix, output,
-      stream_num_elements / span, branches, hidden,
-      static_cast<int>(feature_gate), static_cast<int>(gate_sigmoid),
-      reduction_scale, hip_dtype);
+  const int64_t rows = stream_num_elements / span;
+  void *q_act = nullptr;
+  void *q_scale = nullptr;
+  const bool quant =
+      hc_act_quant_reserve(state, act_quant_group, rows, hidden, hidden,
+                           act_quant_block_size, hip_dtype, &q_act, &q_scale);
+  int rc = hip_hyper_connection_pre_mix(
+      hipdnn_ep_state_get_stream(state), streams, pre_mix, output, rows,
+      branches, hidden, static_cast<int>(feature_gate),
+      static_cast<int>(gate_sigmoid), reduction_scale, q_act, q_scale,
+      act_quant_block_size, hip_dtype);
+  if (rc == 0 && quant)
+    hipdnn_ep_dp4a_act_publish(state, act_quant_group, output, rows, hidden,
+                               act_quant_block_size);
+  return rc;
 }
 
 int wrap_hyper_connection_post_mix(RuntimeState *state, void *streams,
@@ -327,7 +357,7 @@ int wrap_hyper_connection_post_mix_norm(
     void *stream_mix, void *norm_scale, void *residual, void *normed,
     int64_t stream_num_elements, int64_t branches, int64_t hidden,
     int64_t feature_gate, int64_t gate_activation, int64_t element_size_bytes,
-    float epsilon) {
+    float epsilon, int64_t act_quant_group, int64_t act_quant_block_size) {
   OP_PROFILE(
       "hyper_connection",
       [&] {
@@ -365,9 +395,104 @@ int wrap_hyper_connection_post_mix_norm(
             (long long)element_size_bytes);
     return -1;
   }
-  return hip_hyper_connection_post_mix_norm(
+  const int64_t rows = stream_num_elements / span;
+  void *q_act = nullptr;
+  void *q_scale = nullptr;
+  const bool quant =
+      hc_act_quant_reserve(state, act_quant_group, rows, span, hidden,
+                           act_quant_block_size, hip_dtype, &q_act, &q_scale);
+  int rc = hip_hyper_connection_post_mix_norm(
       hipdnn_ep_state_get_stream(state), streams, block_output, gate,
-      stream_mix, norm_scale, residual, normed, stream_num_elements / span,
-      branches, hidden, static_cast<int>(feature_gate),
-      static_cast<int>(gate_activation), epsilon, hip_dtype);
+      stream_mix, norm_scale, residual, normed, rows, branches, hidden,
+      static_cast<int>(feature_gate), static_cast<int>(gate_activation),
+      epsilon, q_act, q_scale, act_quant_block_size, hip_dtype);
+  if (rc == 0 && quant)
+    hipdnn_ep_dp4a_act_publish(state, act_quant_group, normed, rows, span,
+                               act_quant_block_size);
+  return rc;
+}
+
+int wrap_hyper_connection_mixer(
+    RuntimeState *state, int op_state_slot, void *streams, void *proj,
+    void *weight, void *scales, void *output, void *gate, void *act, void *mix,
+    int64_t stream_num_elements, int64_t proj_num_elements, int64_t matmul_m,
+    int64_t matmul_batch, int64_t branches, int64_t hidden, int64_t act_width,
+    int64_t block_size, float act_scale, float swish_alpha,
+    float reduction_scale, int64_t act_quant_group,
+    int64_t act_quant_block_size) {
+  const int64_t span = branches * hidden;
+  OP_PROFILE(
+      "hyper_connection",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "mixer %lldx%lld k=%lld", (long long)branches,
+                 (long long)hidden, (long long)act_width);
+        return std::string(b);
+      },
+      state);
+  if (!state || !streams || !proj || !weight || !scales || !output || !gate ||
+      !act || !mix) {
+    fprintf(stderr, "Invalid arguments to wrap_hyper_connection_mixer\n");
+    return -1;
+  }
+  const int64_t width = act_width + branches;
+  if (branches <= 0 || hidden <= 0 || act_width <= 0 || block_size <= 0 ||
+      stream_num_elements % span != 0 ||
+      proj_num_elements != stream_num_elements / span * width) {
+    fprintf(stderr,
+            "wrap_hyper_connection_mixer: streams=%lld proj=%lld "
+            "branches=%lld hidden=%lld act_width=%lld\n",
+            (long long)stream_num_elements, (long long)proj_num_elements,
+            (long long)branches, (long long)hidden, (long long)act_width);
+    return -1;
+  }
+  const int64_t rows = stream_num_elements / span;
+  void *stream = hipdnn_ep_state_get_stream(state);
+
+  void *q_act = nullptr;
+  void *q_scale = nullptr;
+  // The fused kernel writes the int8 copy in 32-wide groups only.
+  bool quant = hc_act_quant_reserve(state, act_quant_group, rows, hidden,
+                                    hidden, act_quant_block_size,
+                                    HIP_DTYPE_FLOAT16, &q_act, &q_scale);
+  if (hipdnn_ep_hc_mixer_fused_enabled() &&
+      hip_hyper_connection_mixer_decode_ok(rows, branches, hidden, act_width,
+                                           block_size)) {
+    if (act_quant_block_size != 32) {
+      quant = false;
+      q_act = nullptr;
+      q_scale = nullptr;
+    }
+    int rc = hip_hyper_connection_mixer_decode(
+        stream, streams, proj, weight, scales, output, gate, rows, branches,
+        hidden, act_width, block_size, act_scale, swish_alpha, reduction_scale,
+        q_act, q_scale, act_quant_block_size);
+    if (rc == 0 && quant)
+      hipdnn_ep_dp4a_act_publish(state, act_quant_group, output, rows, hidden,
+                                 act_quant_block_size);
+    return rc;
+  }
+
+  // Separate kernels, bit-exact with the unfused hip.mul, hip.swish,
+  // hip.matmul_nbits and hip.hyper_connection_pre_mix sequence.
+  int rc =
+      hip_hyper_connection_mixer_act(stream, proj, act, gate, rows, act_width,
+                                     branches, act_scale, swish_alpha);
+  if (rc != 0)
+    return rc;
+  rc = wrap_matmul_nbits(state, op_state_slot, act, weight, scales, nullptr,
+                         nullptr, nullptr, mix, matmul_m, span, act_width,
+                         matmul_batch, /*bits=*/4, block_size,
+                         /*elem_size=*/2, /*zp_elem_size=*/0,
+                         /*scale_elem_size=*/2, /*act_share=*/0);
+  if (rc != 0)
+    return rc;
+  rc = hip_hyper_connection_pre_mix(
+      stream, streams, mix, output, rows, branches, hidden,
+      /*feature_gate=*/1, /*gate_sigmoid=*/1, reduction_scale, q_act, q_scale,
+      act_quant_block_size, HIP_DTYPE_FLOAT16);
+  if (rc == 0 && quant)
+    hipdnn_ep_dp4a_act_publish(state, act_quant_group, output, rows, hidden,
+                               act_quant_block_size);
+  return rc;
 }

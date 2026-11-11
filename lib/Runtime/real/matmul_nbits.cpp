@@ -568,7 +568,82 @@ cleanup:
   return result;
 }
 
+// Slot 0 serves untagged calls; share groups rotate over the rest, so a group
+// only loses its quantization if three later groups start before its last
+// member runs.
+int dp4a_act_slot_index(int64_t group) {
+  return group > 0 ? 1 + static_cast<int>((group - 1) %
+                                          (HIPDNN_EP_DP4A_ACT_SLOTS - 1))
+                   : 0;
+}
+
+// Points a_qb / a_scale at `slot` of the dp4a scratch for an M x K activation
+// quantized in block_size groups. Per slot: a_qb at offset 0 (M*K bytes);
+// a_scale after a 64-byte-rounded gap so its float reads stay naturally
+// aligned. Slots are 256-byte aligned off the over-aligned hipMalloc base, and
+// their stride only changes when the scratch grows, which drops every tag.
+bool dp4a_act_slot(RuntimeState *state, int slot, int64_t M, int64_t K,
+                   int64_t block_size, void **a_qb, void **a_scale) {
+  const size_t k_blocks =
+      static_cast<size_t>((K + block_size - 1) / block_size);
+  const size_t a_qb_bytes = static_cast<size_t>(M) * static_cast<size_t>(K);
+  const size_t scale_off = (a_qb_bytes + 63) & ~static_cast<size_t>(63);
+  const size_t need =
+      scale_off + static_cast<size_t>(M) * k_blocks * sizeof(float);
+  const size_t slot_need = (need + 255) & ~static_cast<size_t>(255);
+  if (hipdnn_ep_state_ensure_matmul_dp4a_scratch(
+          state, slot_need * HIPDNN_EP_DP4A_ACT_SLOTS) != 0)
+    return false;
+  char *base =
+      static_cast<char *>(hipdnn_ep_state_get_matmul_dp4a_scratch(state));
+  if (!base)
+    return false;
+  const size_t slot_stride =
+      (hipdnn_ep_state_get_matmul_dp4a_scratch_size(state) /
+       HIPDNN_EP_DP4A_ACT_SLOTS) &
+      ~static_cast<size_t>(255);
+  char *p = base + static_cast<size_t>(slot) * slot_stride;
+  *a_qb = p;
+  *a_scale = p + scale_off;
+  return true;
+}
+
 } // namespace
+
+int hipdnn_ep_dp4a_act_reserve(RuntimeState *state, int64_t group, int64_t m,
+                               int64_t k, int64_t block_size, void **a_qb,
+                               void **a_scale) {
+  *a_qb = nullptr;
+  *a_scale = nullptr;
+  HipdnnDp4aActTag *tags = hipdnn_ep_state_get_matmul_dp4a_tags(state);
+  if (group <= 0 || !tags)
+    return 0;
+  const int slot = dp4a_act_slot_index(group);
+  tags[slot].group = 0;
+  // Mirrors the consumer's dp4a eligibility; a consumer that ends up on
+  // another path never reads the slot, so over-approximating only costs the
+  // producer's int8 stores.
+  if (!hipdnn_ep_matmul_dp4a_share_enabled() ||
+      !hipdnn_ep_matmul_dp4a_enabled() || m < 1 ||
+      m > hipdnn_ep_matmul_dp4a_max_m() || k % 32 != 0 || block_size <= 0)
+    return 0;
+  if (!dp4a_act_slot(state, slot, m, k, block_size, a_qb, a_scale)) {
+    *a_qb = nullptr;
+    *a_scale = nullptr;
+    return 0;
+  }
+  return 1;
+}
+
+void hipdnn_ep_dp4a_act_publish(RuntimeState *state, int64_t group,
+                                const void *a, int64_t m, int64_t k,
+                                int64_t block_size) {
+  HipdnnDp4aActTag *tags = hipdnn_ep_state_get_matmul_dp4a_tags(state);
+  if (group <= 0 || !tags)
+    return;
+  tags[dp4a_act_slot_index(group)] =
+      HipdnnDp4aActTag{group, a, m, k, block_size};
+}
 
 int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
                       const void *B, const void *scales,
@@ -576,7 +651,8 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
                       const void *bias, void *output, int64_t M, int64_t N,
                       int64_t K, int64_t batch_count, int64_t bits,
                       int64_t block_size, int64_t elem_size,
-                      int64_t zp_elem_size, int64_t scale_elem_size) {
+                      int64_t zp_elem_size, int64_t scale_elem_size,
+                      int64_t act_share) {
   OP_PROFILE(
       "matmul_nbits",
       [&] {
@@ -705,6 +781,21 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
 
   int result = 0;
 
+  // Activation sharing (--hip-share-matmul-nbits-activation). The leader runs
+  // first in program order, so dropping its slot's tag up front means a
+  // follower can only ever match a quantization made in this inference, from
+  // this exact input, whichever path the leader itself takes. A group whose
+  // input comes from an int8-writing producer has that producer as leader
+  // (hipdnn_ep_dp4a_act_reserve).
+  if (!hipdnn_ep_matmul_dp4a_share_enabled())
+    act_share = 0;
+  const int64_t share_group = act_share >> 1;
+  const bool share_leader = (act_share & 1) != 0;
+  HipdnnDp4aActTag *dp4a_tags = hipdnn_ep_state_get_matmul_dp4a_tags(state);
+  const int dp4a_slot = dp4a_act_slot_index(share_group);
+  if (share_leader && dp4a_tags)
+    dp4a_tags[dp4a_slot].group = 0;
+
   // Opt-in W4A8 dp4a fast path for narrow GEMV. Eligibility:
   //   - HIPDNN_EP_MATMUL_DP4A=1
   //   - 1 <= M <= HIPDNN_EP_MATMUL_DP4A_MAX_M && batch_count==1
@@ -729,31 +820,31 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
       M <= hipdnn_ep_matmul_dp4a_max_m() && batch_count == 1 && bits == 4 &&
       block_size > 0 && (K % 32 == 0) && elem_size == 2 &&
       (!zero_points || (zp_elem_size == 1 && pre_zp_u8))) {
-    const size_t k_blocks =
-        static_cast<size_t>((K + block_size - 1) / block_size);
-    // a_qb at offset 0 (M*K bytes, hipMalloc base is over-aligned); a_scale
-    // after a 64-byte-rounded gap so its float reads stay naturally aligned.
-    const size_t a_qb_bytes = static_cast<size_t>(M) * static_cast<size_t>(K);
-    const size_t scale_off = (a_qb_bytes + 63) & ~static_cast<size_t>(63);
-    const size_t need =
-        scale_off + static_cast<size_t>(M) * k_blocks * sizeof(float);
-    if (hipdnn_ep_state_ensure_matmul_dp4a_scratch(state, need) == 0) {
-      char *base =
-          static_cast<char *>(hipdnn_ep_state_get_matmul_dp4a_scratch(state));
-      if (base) {
-        void *a_qb = base;
-        void *a_scale = base + scale_off;
-        int rc =
-            hip_matmul_nbits_dp4a(stream, A, B, scales, pre_zp_u8, bias, output,
-                                  M, N, K, block_size, a_qb, a_scale);
-        if (rc == 0) {
-          result = 0;
-          goto cleanup;
-        }
-        // Non-zero rc (e.g. unsupported geometry): fall through to fp path.
-        RUNTIME_DEBUG_LOG(
-            "[REAL] matmul_nbits dp4a rc=%d, falling back to fp GEMV\n", rc);
+    void *a_qb = nullptr;
+    void *a_scale = nullptr;
+    if (dp4a_tags &&
+        dp4a_act_slot(state, dp4a_slot, M, K, block_size, &a_qb, &a_scale)) {
+      HipdnnDp4aActTag &tag = dp4a_tags[dp4a_slot];
+      const bool reuse = share_group > 0 && tag.group == share_group &&
+                         tag.a == A && tag.m == M && tag.k == K &&
+                         tag.block_size == block_size;
+      int rc = reuse ? hip_matmul_nbits_dp4a_prequantized(
+                           stream, B, scales, pre_zp_u8, bias, output, M, N, K,
+                           block_size, a_qb, a_scale)
+                     : hip_matmul_nbits_dp4a(stream, A, B, scales, pre_zp_u8,
+                                             bias, output, M, N, K, block_size,
+                                             a_qb, a_scale);
+      if (rc == 0 && !reuse)
+        tag = HipdnnDp4aActTag{share_group, A, M, K, block_size};
+      else if (rc != 0)
+        tag.group = 0;
+      if (rc == 0) {
+        result = 0;
+        goto cleanup;
       }
+      // Non-zero rc (e.g. unsupported geometry): fall through to fp path.
+      RUNTIME_DEBUG_LOG(
+          "[REAL] matmul_nbits dp4a rc=%d, falling back to fp GEMV\n", rc);
     }
   }
 

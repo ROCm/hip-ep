@@ -214,6 +214,12 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   // reports the much less actionable "op was not bufferized".
   pm.addPass(createVerifyNoConstantCarriersPass());
 
+  // Tag MatMulNBits ops that read one activation so the runtime quantizes it
+  // once per group. The key must be a tensor value: after pooling, CSE merges
+  // identical pool views, so one memref value can stand for several tensors
+  // that only share an address.
+  pm.addPass(mlir::hip::createShareMatMulNBitsActivationPass());
+
   // 2. Bufferize tensor IR to memref IR
   //
   // Use IdentityLayoutMap for function boundaries: all EP inputs/outputs come

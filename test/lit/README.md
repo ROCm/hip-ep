@@ -22,7 +22,8 @@ test/lit/
 │   ├── AssignOpStateSlots/   # Op-state slot assignment
 │   ├── GenerateInterface/    # C-ABI wrapper generation
 │   ├── GenerateOpStateInit/  # Op-state init function generation
-│   └── HipFusionTransform/   # HIP op fusion
+│   ├── HipFusionTransform/   # HIP op fusion
+│   └── ShareMatMulNBitsActivation/ # MatMulNBits activation-sharing groups
 ├── Pipeline/            # Multi-pass pipeline tests
 ├── Plugin/              # Compiler plugin tests
 ├── e2e/                 # Models also compiled and run by the E2E suite
@@ -189,6 +190,8 @@ Test MLIR transformation passes that optimize or augment IR.
 - **GenerateInterface/**: C-ABI wrapper generation for ONNX Runtime
   integration.
 - **HipFusionTransform/**: HIP op fusion.
+- **ShareMatMulNBitsActivation/**: grouping of `hip.matmul_nbits` ops that
+  share one quantized activation, including producer-led groups.
 
 ### Pipeline and Plugin Tests (`Pipeline/`, `Plugin/`)
 

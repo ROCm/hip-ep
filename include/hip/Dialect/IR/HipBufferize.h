@@ -207,6 +207,8 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
         HipDstBufferizableModel<HyperConnectionPostMixOp>>(*ctx);
     HyperConnectionPostMixNormOp::attachInterface<
         HipDstBufferizableModel<HyperConnectionPostMixNormOp>>(*ctx);
+    HyperConnectionMixerOp::attachInterface<
+        HipDstBufferizableModel<HyperConnectionMixerOp>>(*ctx);
     MinOp::attachInterface<HipDstBufferizableModel<MinOp>>(*ctx);
     MaxOp::attachInterface<HipDstBufferizableModel<MaxOp>>(*ctx);
     AbsOp::attachInterface<HipDstBufferizableModel<AbsOp>>(*ctx);

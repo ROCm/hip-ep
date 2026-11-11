@@ -3055,6 +3055,26 @@ static int getOrTuneDp4aMConfig(
     return best;
 }
 
+static void launchDp4aGemv(
+    hipStream_t stream, const int8_t* a_qb, const float* a_sc,
+    const uint8_t* Bp, const __half* sc, const uint8_t* zp, const __half* bi,
+    __half* outp, int64_t M, int64_t N, int64_t K, int64_t block_size)
+{
+    // M == 1 keeps the single-row launcher and its own tune cache, which has
+    // more history behind it.
+    if (M == 1) {
+        int cfg = getOrTuneDp4aConfig(stream, a_qb, a_sc, Bp, sc, zp, bi, outp,
+                                      N, K, block_size);
+        launchDp4aConfig(cfg, stream, a_qb, a_sc, Bp, sc, zp, bi, outp,
+                         N, K, block_size);
+    } else {
+        int cfg = getOrTuneDp4aMConfig(stream, a_qb, a_sc, Bp, sc, zp, bi, outp,
+                                       M, N, K, block_size);
+        launchDp4aMConfig(cfg, stream, a_qb, a_sc, Bp, sc, zp, bi, outp,
+                          M, N, K, block_size);
+    }
+}
+
 // Public entry: W4A8 dp4a GEMV for M rows (M == 1 is the decode path).
 //   A          : fp16 activations [M, K] (row-major, batch==1)
 //   B          : packed int4 weights [N, K/2]
@@ -3075,14 +3095,9 @@ extern "C" int hip_matmul_nbits_dp4a(
     if (M < 1) return hipErrorInvalidValue;
     hipStream_t stream = static_cast<hipStream_t>(stream_v);
 
-    const __half*  Ah   = static_cast<const __half*>(A);
-    const uint8_t* Bp   = static_cast<const uint8_t*>(B);
-    const __half*  sc   = static_cast<const __half*>(scales);
-    const uint8_t* zp   = static_cast<const uint8_t*>(zp_u8);
-    const __half*  bi   = static_cast<const __half*>(bias);
-    __half*        outp = static_cast<__half*>(out);
-    int8_t*        a_qb = static_cast<int8_t*>(a_qb_scratch);
-    float*         a_sc = static_cast<float*>(a_scale_scratch);
+    const __half* Ah   = static_cast<const __half*>(A);
+    int8_t*       a_qb = static_cast<int8_t*>(a_qb_scratch);
+    float*        a_sc = static_cast<float*>(a_scale_scratch);
 
     const int64_t k_blocks = (K + block_size - 1) / block_size;
 
@@ -3095,19 +3110,35 @@ extern "C" int hip_matmul_nbits_dp4a(
                        dim3(128), 0,
                        stream, Ah, a_qb, a_sc, K, block_size, k_blocks);
 
-    // Step 2: dp4a GEMV (autotuned config). M == 1 keeps the single-row
-    // launcher and its own tune cache, which has more history behind it.
-    if (M == 1) {
-        int cfg = getOrTuneDp4aConfig(stream, a_qb, a_sc, Bp, sc, zp, bi, outp,
-                                      N, K, block_size);
-        launchDp4aConfig(cfg, stream, a_qb, a_sc, Bp, sc, zp, bi, outp,
-                         N, K, block_size);
-    } else {
-        int cfg = getOrTuneDp4aMConfig(stream, a_qb, a_sc, Bp, sc, zp, bi, outp,
-                                       M, N, K, block_size);
-        launchDp4aMConfig(cfg, stream, a_qb, a_sc, Bp, sc, zp, bi, outp,
-                          M, N, K, block_size);
-    }
+    // Step 2: dp4a GEMV (autotuned config).
+    launchDp4aGemv(stream, a_qb, a_sc, static_cast<const uint8_t*>(B),
+                   static_cast<const __half*>(scales),
+                   static_cast<const uint8_t*>(zp_u8),
+                   static_cast<const __half*>(bias), static_cast<__half*>(out),
+                   M, N, K, block_size);
+    return hipGetLastError();
+}
+
+// Same GEMV over an activation an earlier hip_matmul_nbits_dp4a call already
+// quantized into a_qb/a_scale with the same M, K and block_size.
+extern "C" int hip_matmul_nbits_dp4a_prequantized(
+    void* stream_v,
+    const void* B, const void* scales, const void* zp_u8,
+    const void* bias, void* out,
+    int64_t M, int64_t N, int64_t K, int64_t block_size,
+    const void* a_qb, const void* a_scale)
+{
+    if (K % 32 != 0) return hipErrorInvalidValue;
+    if (M < 1) return hipErrorInvalidValue;
+    (void)hipGetLastError();
+    launchDp4aGemv(static_cast<hipStream_t>(stream_v),
+                   static_cast<const int8_t*>(a_qb),
+                   static_cast<const float*>(a_scale),
+                   static_cast<const uint8_t*>(B),
+                   static_cast<const __half*>(scales),
+                   static_cast<const uint8_t*>(zp_u8),
+                   static_cast<const __half*>(bias), static_cast<__half*>(out),
+                   M, N, K, block_size);
     return hipGetLastError();
 }
 

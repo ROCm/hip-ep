@@ -1795,6 +1795,88 @@ LogicalResult HyperConnectionPostMixNormOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// HyperConnectionMixerOp:
+//   ins(streams, proj, weight, scales) outs(output, gate, act, mix)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange HyperConnectionMixerOp::getDpsInitsMutable() {
+  return getOutputsMutable();
+}
+
+void HyperConnectionMixerOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult HyperConnectionMixerOp::verify() {
+  if (getOutputs().size() != 4)
+    return emitOpError("expected output, gate, act and mix outputs");
+  SmallVector<Value> dataOperands{getStreams(), getProj(), getWeight(),
+                                  getScales()};
+  llvm::append_range(dataOperands, getOutputs());
+  if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/4)))
+    return failure();
+  const int64_t branches = getBranches();
+  const int64_t hidden = getHidden();
+  const int64_t actWidth = getActWidth();
+  const int64_t blockSize = getBlockSize();
+  if (branches <= 0 || hidden <= 0 || actWidth <= 0)
+    return emitOpError("branches, hidden and act_width must be positive");
+  if (blockSize < 16 || (blockSize & (blockSize - 1)) != 0 ||
+      actWidth % blockSize != 0)
+    return emitOpError("block_size must be a power of two >= 16 dividing "
+                       "act_width");
+
+  auto streams = dyn_cast<ShapedType>(getStreams().getType());
+  if (!streams || !streams.hasRank() || streams.getRank() < 1 ||
+      !streams.getElementType().isF16())
+    return emitOpError("expected ranked f16 streams");
+  const int64_t rank = streams.getRank();
+  // Each trailing width must match; leading dims are the rows.
+  auto checkTrailing = [&](Value value, int64_t width,
+                           StringRef what) -> LogicalResult {
+    auto type = dyn_cast<ShapedType>(value.getType());
+    if (!type || !type.hasRank() || type.getRank() != rank ||
+        type.getElementType() != streams.getElementType())
+      return emitOpError() << what << " must be f16 with the streams rank";
+    for (int64_t i : llvm::seq<int64_t>(0, rank - 1)) {
+      int64_t a = type.getDimSize(i);
+      int64_t b = streams.getDimSize(i);
+      if (!ShapedType::isDynamic(a) && !ShapedType::isDynamic(b) && a != b)
+        return emitOpError() << what << " leading dims must match streams";
+    }
+    int64_t last = type.getDimSize(rank - 1);
+    if (!ShapedType::isDynamic(last) && last != width)
+      return emitOpError() << what << " must end in " << width;
+    return success();
+  };
+  if (failed(checkTrailing(getStreams(), branches * hidden, "streams")) ||
+      failed(checkTrailing(getProj(), actWidth + branches, "proj")) ||
+      failed(checkTrailing(getOutputs()[0], hidden, "output")) ||
+      failed(checkTrailing(getOutputs()[1], branches, "gate")) ||
+      failed(checkTrailing(getOutputs()[2], actWidth, "act")) ||
+      failed(checkTrailing(getOutputs()[3], branches * hidden, "mix")))
+    return failure();
+
+  auto weight = dyn_cast<ShapedType>(getWeight().getType());
+  auto scales = dyn_cast<ShapedType>(getScales().getType());
+  const int64_t n = branches * hidden;
+  const int64_t kBlocks = actWidth / blockSize;
+  if (!weight || !weight.hasStaticShape() ||
+      weight.getShape() != ArrayRef<int64_t>{n, kBlocks, blockSize / 2} ||
+      !weight.getElementType().isInteger(8))
+    return emitOpError("weight must be (branches * hidden, act_width / "
+                       "block_size, block_size / 2) 8-bit");
+  if (!scales || !scales.hasStaticShape() ||
+      scales.getShape() != ArrayRef<int64_t>{n, kBlocks} ||
+      !scales.getElementType().isF16())
+    return emitOpError("scales must be f16 (branches * hidden, act_width / "
+                       "block_size)");
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // RopeOp: ins(input, [position_ids], cos_cache, sin_cache), outs(output)
 //===----------------------------------------------------------------------===//
 
