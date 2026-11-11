@@ -10,6 +10,7 @@
 #include "hip/Dialect/IR/HipDialect.h"
 
 #include <llvm/ADT/DenseSet.h>
+#include <llvm/ADT/STLExtras.h>
 #include <llvm/ADT/SetVector.h>
 #include <mlir/Dialect/Tensor/IR/Tensor.h>
 
@@ -17,15 +18,29 @@
 
 namespace mlir::hip {
 
+// A cast is fused only when every float it touches is f16, bf16, or f32.
+// An f64 cast stays a HIP cast, so f64 pointwise ops after it are not pulled
+// into the rocMLIR kernel either. rocMLIR's blockwise load rejects f64.
+inline bool isRocMlirCastEndpoint(Type type) {
+  auto shaped = dyn_cast<ShapedType>(type);
+  Type element = shaped ? shaped.getElementType() : type;
+  if (!isa<FloatType>(element))
+    return true;
+  return element.isF16() || element.isBF16() || element.isF32();
+}
+
 // Elementwise ops HipToTosa lowers to TOSA elementwise ops, which rocMLIR
 // fuses into the anchor's epilogue or prologue.
 inline bool isFusablePointwise(Operation *op) {
+  if (auto cast = dyn_cast_if_present<CastOp>(op))
+    return llvm::all_of(cast->getOperandTypes(), isRocMlirCastEndpoint) &&
+           llvm::all_of(cast->getResultTypes(), isRocMlirCastEndpoint);
   return isa_and_present<MulOp, AddOp, MinOp, MaxOp, SiluOp, SigmoidOp, TanhOp,
                          SoftplusOp, GeluOp, BiasGeluOp, FastGeluOp,
                          LeakyReluOp, ReciprocalOp, SqrtOp, DivOp, EqualOp,
                          AndOp, OrOp, NotOp, CosOp, ErfOp, SinOp, CeilOp,
                          RoundOp, AtanOp, FloorOp, ExpOp, LogOp, AbsOp, NegOp,
-                         SubOp, CastOp, LessOp, SignOp, ModOp, WhereOp>(op);
+                         SubOp, LessOp, SignOp, ModOp, WhereOp>(op);
 }
 
 // View ops that rocMLIR folds into rock.transform maps instead of running as a
