@@ -136,9 +136,10 @@ int wrap_gated_delta_net_conv_norm(
   const int64_t state_bytes = conv_state_num_elements * 2;
   const auto *past = static_cast<const char *>(conv_state);
   const auto *present = static_cast<const char *>(conv_state_out);
-  const bool state_aliases =
-      past < present + state_bytes && present < past + state_bytes;
-  if (hipdnn_ep_gdn_conv_norm_fused_enabled() && !state_aliases &&
+  // The fused kernel handles an in-place conv state, not a partial overlap.
+  const bool state_overlaps = past != present && past < present + state_bytes &&
+                              present < past + state_bytes;
+  if (hipdnn_ep_gdn_conv_norm_fused_enabled() && !state_overlaps &&
       hip_gated_delta_net_conv_norm_ok(batch, seq_len, kernel_size,
                                        num_heads_qk, num_heads_v, head_size_qk,
                                        head_size_v)) {

@@ -715,12 +715,14 @@ constexpr int kFusedHead = 128;
 // kernels round, and accumulates in their order (the decode conv kernel for
 // one token, the channels-last prefill kernel otherwise), so the output is
 // the same bit for bit. The q/k carry state is read by several blocks and
-// written by one, so present_conv must not alias past_conv.
+// written by one, so with present_conv aliasing past_conv (deferQkState) the
+// kernel leaves it to gatedDeltaNetConvQkStateKernel; each v channel is read
+// and written by the same thread, so its carry is safe in place.
 template <int K>
 __global__ void __launch_bounds__(kBlockSize) gatedDeltaNetConvNormKernel(
     const __half *__restrict__ proj, int64_t projStride,
     const __half *__restrict__ convWeight, const __half *__restrict__ convBias,
-    const __half *__restrict__ pastConv, __half *__restrict__ presentConv,
+    const __half *pastConv, __half *presentConv, bool deferQkState,
     const __half *__restrict__ gates, int64_t gateStride, int decayColumn,
     int betaColumn, int zColumn, const float *initialState, float *finalState,
     const float *__restrict__ aLog, const float *__restrict__ dtBias,
@@ -780,7 +782,7 @@ __global__ void __launch_bounds__(kBlockSize) gatedDeltaNetConvNormKernel(
       if (kState > 0)
         win[kState - 1] = x;
     }
-    if (seg == 2 || ownsQk) {
+    if (seg == 2 || (ownsQk && !deferQkState)) {
 #pragma unroll
       for (int j = 0; j < kState; ++j)
         presentConv[plane * kState + j] = __float2half(win[j]);
@@ -846,6 +848,39 @@ __global__ void __launch_bounds__(kBlockSize) gatedDeltaNetConvNormKernel(
       yRow[h] = __float2half(v[i] * invRms * g * act);
     }
   }
+}
+
+// In-place q/k carry update after gatedDeltaNetConvNormKernel ran with
+// deferQkState: each (batch, q/k channel) keeps its last K - 1 inputs. The
+// carry holds fp16 values, so this matches the fused kernel's own update.
+template <int K>
+__global__ void gatedDeltaNetConvQkStateKernel(const __half *__restrict__ proj,
+                                               int64_t projStride,
+                                               __half *__restrict__ conv,
+                                               int batch, int seqLen,
+                                               int qkChannels,
+                                               int convChannels) {
+  constexpr int kState = K - 1;
+  const int64_t i =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (i >= static_cast<int64_t>(batch) * qkChannels)
+    return;
+  const int64_t b = i / qkChannels;
+  const int64_t c = i - b * qkChannels;
+  __half *carry = conv + (b * convChannels + c) * kState;
+  __half win[kState];
+#pragma unroll
+  for (int j = 0; j < kState; ++j)
+    win[j] = carry[j];
+  for (int t = 0; t < seqLen; ++t) {
+#pragma unroll
+    for (int j = 0; j + 1 < kState; ++j)
+      win[j] = win[j + 1];
+    win[kState - 1] = proj[(b * seqLen + t) * projStride + c];
+  }
+#pragma unroll
+  for (int j = 0; j < kState; ++j)
+    carry[j] = win[j];
 }
 
 // Separate path: decay and beta columns of the gate projection as
@@ -954,21 +989,38 @@ extern "C" int hip_gated_delta_net_conv_norm(
                                         kFusedHead))
     return hipErrorInvalidValue;
   const dim3 grid(static_cast<unsigned>(batch * num_heads_v));
+  // ONNX Runtime GenAI binds the past and present caches to one buffer.
+  const bool inPlace = past_conv == present_conv;
+  const int64_t qkChannels = 2 * num_heads_qk * kFusedHead;
+  const int64_t convChannels = qkChannels + num_heads_v * kFusedHead;
+  const int64_t qkThreads = batch * qkChannels;
+  if (inPlace && (qkThreads + kBlockSize - 1) / kBlockSize > 0x7fffffff)
+    return hipErrorInvalidValue;
   auto launch = [&](auto kConst) {
     constexpr int Kc = decltype(kConst)::value;
+    hipStream_t s = static_cast<hipStream_t>(stream);
     hipLaunchKernelGGL(
-        (gatedDeltaNetConvNormKernel<Kc>), grid, dim3(kBlockSize), 0,
-        static_cast<hipStream_t>(stream), static_cast<const __half *>(proj),
-        proj_stride, static_cast<const __half *>(conv_weight),
+        (gatedDeltaNetConvNormKernel<Kc>), grid, dim3(kBlockSize), 0, s,
+        static_cast<const __half *>(proj), proj_stride,
+        static_cast<const __half *>(conv_weight),
         static_cast<const __half *>(conv_bias),
         static_cast<const __half *>(past_conv),
-        static_cast<__half *>(present_conv),
+        static_cast<__half *>(present_conv), inPlace,
         static_cast<const __half *>(gates), gate_stride,
         static_cast<int>(decay_column), static_cast<int>(beta_column),
         static_cast<int>(z_column), initial_state, final_state, a_log, dt_bias,
         static_cast<const __half *>(norm_weight), static_cast<__half *>(output),
         static_cast<int>(seq_len), static_cast<int>(num_heads_qk),
         static_cast<int>(num_heads_v), scale, epsilon);
+    if (inPlace && hipPeekAtLastError() == hipSuccess)
+      hipLaunchKernelGGL(
+          (gatedDeltaNetConvQkStateKernel<Kc>),
+          dim3(static_cast<unsigned>((qkThreads + kBlockSize - 1) /
+                                     kBlockSize)),
+          dim3(kBlockSize), 0, s, static_cast<const __half *>(proj),
+          proj_stride, static_cast<__half *>(present_conv),
+          static_cast<int>(batch), static_cast<int>(seq_len),
+          static_cast<int>(qkChannels), static_cast<int>(convChannels));
   };
   (void)hipGetLastError();
   switch (kernel_size) {

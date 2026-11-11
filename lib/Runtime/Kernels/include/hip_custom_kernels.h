@@ -3996,7 +3996,9 @@ HIP_KERNEL_API int hip_gated_delta_net(
 // proj[:, z_column:]. proj rows are proj_stride apart and gates rows (decay
 // and beta columns) gate_stride apart; C = (2*Hqk + Hv) * 128. Bit-exact with
 // the separate conv, cast, recurrent and norm kernels. Only valid when
-// _conv_norm_ok holds; present_conv must not alias past_conv.
+// _conv_norm_ok holds. present_conv may equal past_conv (one extra launch
+// then updates the q/k carry) but must not partially overlap it;
+// initial_state may alias final_state.
 HIP_KERNEL_API int hip_gated_delta_net_conv_norm_ok(
     int64_t batch,
     int64_t seq_len,
