@@ -86,17 +86,18 @@ public:
         valueType.getRank() != 3 || outputType.getRank() != 3)
       return rewriter.notifyMatchFailure(op, "expected rank-3 Q, K, and V");
 
-    // HipToTosa lowers a float matmul or softmax only for f16, bf16, and f32.
-    // An outlined kernel that fails that conversion aborts the module, so f64
-    // and float8 stay hip.multi_head_attention.
+    // HipToTosa lowers a float matmul only for f16, bf16, and f32, and an
+    // outlined kernel that fails that conversion aborts the module. Softmax
+    // is narrower: hip_softmax_row_2d reads and writes __half, and the bf16
+    // path reuses that kernel with elem_size_bytes == 2, so the scores would
+    // be interpreted as f16. f64, float8, and bf16 stay on the runtime op.
     Type elementType = queryType.getElementType();
-    if ((!elementType.isF16() && !elementType.isBF16() &&
-         !elementType.isF32()) ||
+    if ((!elementType.isF16() && !elementType.isF32()) ||
         keyType.getElementType() != elementType ||
         valueType.getElementType() != elementType ||
         outputType.getElementType() != elementType)
       return rewriter.notifyMatchFailure(
-          op, "expected f16, bf16, or f32 on Q, K, V, and the output");
+          op, "expected f16 or f32 on Q, K, V, and the output");
 
     int64_t numHeads = op.getNumHeads();
     int64_t batch = queryType.getDimSize(0);
