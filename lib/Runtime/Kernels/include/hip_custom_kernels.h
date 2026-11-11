@@ -2463,56 +2463,6 @@ HIP_KERNEL_API int hip_hyper_connection_post_mix_norm(
     int64_t q_block,
     int hip_dtype);
 
-/* hip.hyper_connection_mixer, f16 only. proj is [rows, act_width + branches];
- * streams [rows, branches * hidden]; weight / scales are a 4-bit
- * MatMulNBits (branches * hidden) x act_width projection with no zero points.
- *
- * _act: act = round(swish(round(proj[:, :act_width] * act_scale))) and
- * gate = proj[:, act_width:], bit-exact with hip.mul + hip.swish + a copy.
- *
- * _decode: output = pre_mix(streams, MatMulNBits(act)) with feature sigmoid
- * gates, and gate as above, in one launch. The projection accumulates in
- * FP32 from the unquantized activation. Only valid when _decode_ok holds.
- * q_act / q_scale (nullable) also write output's int8 dp4a activation copy;
- * q_block must be 32. */
-HIP_KERNEL_API int hip_hyper_connection_mixer_act(
-    void* stream,
-    const void* proj,
-    void* act,
-    void* gate,
-    int64_t rows,
-    int64_t act_width,
-    int64_t branches,
-    float act_scale,
-    float swish_alpha);
-
-HIP_KERNEL_API int hip_hyper_connection_mixer_decode_ok(
-    int64_t rows,
-    int64_t branches,
-    int64_t hidden,
-    int64_t act_width,
-    int64_t block_size);
-
-HIP_KERNEL_API int hip_hyper_connection_mixer_decode(
-    void* stream,
-    const void* streams,
-    const void* proj,
-    const void* weight,
-    const void* scales,
-    void* output,
-    void* gate,
-    int64_t rows,
-    int64_t branches,
-    int64_t hidden,
-    int64_t act_width,
-    int64_t block_size,
-    float act_scale,
-    float swish_alpha,
-    float reduction_scale,
-    void* q_act,
-    void* q_scale,
-    int64_t q_block);
-
 /* =========================================================================
  * Skip RMS Normalization (com.microsoft SkipSimplifiedLayerNormalization)
  * =========================================================================

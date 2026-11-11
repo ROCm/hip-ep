@@ -191,32 +191,4 @@ module {
          accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x64xf16>
     return %0, %1 : tensor<1x64xf16>, tensor<1x64xf16>
   }
-
-  // A mixer writes the int8 copy of its pre-mix output (#0) only.
-  // CHECK-LABEL: func.func @mixer_producer
-  func.func @mixer_producer(%ctx: !hip.context, %X: tensor<1x512xf16>,
-                            %P: tensor<1x66xf16>, %WB: tensor<512x2x16xui8>,
-                            %WS: tensor<512x2xf16>, %Y: tensor<1x256xf16>,
-                            %GI: tensor<1x2xf16>, %A: tensor<1x64xf16>,
-                            %M: tensor<1x512xf16>, %B: tensor<64x8x16xui8>,
-                            %S: tensor<64x8xf16>, %E: tensor<1x64xf16>)
-      -> tensor<1x64xf16> {
-    // CHECK: hip.hyper_connection_mixer({{.*}}hip.act_quant_block_size = 32 : i64, hip.act_quant_group = 7 : i64
-    %r:4 = hip.hyper_connection_mixer(%ctx) ins(%X, %P, %WB, %WS :
-        tensor<1x512xf16>, tensor<1x66xf16>, tensor<512x2x16xui8>,
-        tensor<512x2xf16>)
-        outs(%Y, %GI, %A, %M : tensor<1x256xf16>, tensor<1x2xf16>,
-             tensor<1x64xf16>, tensor<1x512xf16>)
-        {act_scale = 2.500000e-01 : f32, act_width = 64 : i64,
-         block_size = 32 : i64, branches = 2 : i64, hidden = 256 : i64,
-         reduction_scale = 5.000000e-01 : f32, swish_alpha = 1.000000e+00 : f32}
-        : tensor<1x256xf16>, tensor<1x2xf16>, tensor<1x64xf16>,
-          tensor<1x512xf16>
-    // CHECK: hip.matmul_nbits({{.*}}block_size = 32 : i64, hip.act_quant_group = 7 : i64, zp_elem_size
-    %0 = hip.matmul_nbits(%ctx) ins(%r#0, %B, %S : tensor<1x256xf16>,
-        tensor<64x8x16xui8>, tensor<64x8xf16>) outs(%E : tensor<1x64xf16>)
-        {K = 256 : i64, N = 64 : i64, bits = 4 : i64, block_size = 32 : i64,
-         accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x64xf16>
-    return %0 : tensor<1x64xf16>
-  }
 }

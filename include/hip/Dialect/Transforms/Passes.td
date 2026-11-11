@@ -129,9 +129,8 @@ def ShareMatMulNBitsActivationPass
     both to `wrap_matmul_nbits`, whose integer-dot path then quantizes the
     activation in the leader only and lets the followers reuse it.
 
-    When `A` is the output of `hip.hyper_connection_pre_mix` or
-    `hip.hyper_connection_mixer`, or the normed result of a flattened
-    `hip.hyper_connection_post_mix_norm` in the same
+    When `A` is the output of `hip.hyper_connection_pre_mix` or the normed
+    result of a flattened `hip.hyper_connection_post_mix_norm` in the same
     block, and every consumer quantizes with one block size, the producer
     leads the group instead (even for a single consumer): it gets
     `hip.act_quant_group` and `hip.act_quant_block_size` and writes the int8

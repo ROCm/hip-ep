@@ -30,7 +30,6 @@
 
 #include "hip/Dialect/IR/HipDialect.h"
 
-#include "hyper_connection_mixer.hpp"
 #include "linear_attention_group_fold.hpp"
 #include "patch_embed_conv_to_gemm.hpp"
 #include "swiglu_fusion.hpp"
@@ -865,9 +864,6 @@ constexpr unsigned kSwigluFusionBenefit = 2;
 /// The only pattern rooted at `hip.linear_attention`.
 constexpr unsigned kLinearAttentionGroupFoldBenefit = 1;
 
-/// The only pattern rooted at `hip.hyper_connection_pre_mix`.
-constexpr unsigned kHyperConnectionMixerBenefit = 1;
-
 /// apply this directory's patterns to every function body in module, failure
 /// means the embedded PDLL patterns will not parse or the driver failed
 ///
@@ -885,8 +881,6 @@ inline mlir::LogicalResult run(mlir::ModuleOp module,
                               mlir::PatternBenefit(kSwigluFusionBenefit));
   populateLinearAttentionGroupFoldPattern(
       patterns, mlir::PatternBenefit(kLinearAttentionGroupFoldBenefit));
-  populateHyperConnectionMixerPattern(
-      patterns, mlir::PatternBenefit(kHyperConnectionMixerBenefit));
 
   // pdl patterns here
   if (pdlBuffer.getBufferSize() != 0) {

@@ -19,9 +19,9 @@
 // of a group in one block reading one SSA value, which is the grouping key.
 //
 // When the activation comes from a producer that can write the int8 copy in
-// its own epilogue (the output of hyper-connection pre-mix or mixer, or the
-// normed output of post-mix-norm), the producer leads the group instead, even
-// for a single consumer, and gets
+// its own epilogue (hyper-connection pre-mix, or the normed output of
+// post-mix-norm), the producer leads the group instead, even for a single
+// consumer, and gets
 //
 //   hip.act_quant_group      = the group id
 //   hip.act_quant_block_size = i64 block size every consumer quantizes with
@@ -69,11 +69,6 @@ std::optional<int64_t> producerActivationWidth(Value input, Block *block) {
     return std::nullopt;
   if (auto pre = dyn_cast<HyperConnectionPreMixOp>(def))
     return pre.getHidden();
-  if (auto mixer = dyn_cast<HyperConnectionMixerOp>(def)) {
-    if (input != mixer->getResult(0))
-      return std::nullopt;
-    return mixer.getHidden();
-  }
   if (auto post = dyn_cast<HyperConnectionPostMixNormOp>(def)) {
     if (input != post->getResult(1))
       return std::nullopt;

@@ -1834,41 +1834,6 @@ int wrap_hyper_connection_post_mix_norm(
   return 0;
 }
 
-int wrap_hyper_connection_mixer(
-    RuntimeState *state, int op_state_slot, void *streams, void *proj,
-    void *weight, void *scales, void *output, void *gate, void *act, void *mix,
-    int64_t stream_num_elements, int64_t proj_num_elements, int64_t matmul_m,
-    int64_t matmul_batch, int64_t branches, int64_t hidden, int64_t act_width,
-    int64_t block_size, float act_scale, float swish_alpha,
-    float reduction_scale, int64_t act_quant_group,
-    int64_t act_quant_block_size) {
-  (void)op_state_slot;
-  (void)streams;
-  (void)proj;
-  (void)weight;
-  (void)scales;
-  (void)output;
-  (void)gate;
-  (void)act;
-  (void)mix;
-  (void)matmul_m;
-  (void)matmul_batch;
-  (void)act_quant_group;
-  (void)act_quant_block_size;
-  if (!state) {
-    fprintf(stderr, "Invalid state in wrap_hyper_connection_mixer\n");
-    return -1;
-  }
-  MOCK_PRINT("[MOCK] wrap_hyper_connection_mixer(streams=%lld, proj=%lld, "
-             "branches=%lld, hidden=%lld, act_width=%lld, block_size=%lld, "
-             "act_scale=%f, swish_alpha=%f, reduction_scale=%f)\n",
-             (long long)stream_num_elements, (long long)proj_num_elements,
-             (long long)branches, (long long)hidden, (long long)act_width,
-             (long long)block_size, (double)act_scale, (double)swish_alpha,
-             (double)reduction_scale);
-  return 0;
-}
-
 int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
                                     void *skip, void *gamma, void *bias,
                                     void *output, void *input_skip_bias_sum,

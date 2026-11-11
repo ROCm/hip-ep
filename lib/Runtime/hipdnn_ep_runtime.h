@@ -1685,21 +1685,6 @@ int wrap_hyper_connection_post_mix_norm(
     int64_t feature_gate, int64_t gate_activation, int64_t element_size_bytes,
     float epsilon, int64_t act_quant_group, int64_t act_quant_block_size);
 
-// hip.hyper_connection_mixer (f16): proj [.., act_width + branches] splits
-// into the Swish-scaled activation and the gate; the activation's 4-bit
-// MatMulNBits (branches * hidden outputs) drives a feature-sigmoid pre_mix of
-// streams. Few-row calls run one fused kernel; otherwise act and mix are the
-// intermediates of the separate act, MatMulNBits and pre_mix kernels.
-// matmul_m / matmul_batch are the MatMulNBits M and batch over act.
-int wrap_hyper_connection_mixer(
-    RuntimeState *state, int op_state_slot, void *streams, void *proj,
-    void *weight, void *scales, void *output, void *gate, void *act, void *mix,
-    int64_t stream_num_elements, int64_t proj_num_elements, int64_t matmul_m,
-    int64_t matmul_batch, int64_t branches, int64_t hidden, int64_t act_width,
-    int64_t block_size, float act_scale, float swish_alpha,
-    float reduction_scale, int64_t act_quant_group,
-    int64_t act_quant_block_size);
-
 // SkipSimplifiedLayerNormalization operation wrapper (Full MS spec)
 // Computes: input_skip_bias_sum = input + skip [+ bias]
 //           output = RMSNorm(input_skip_bias_sum) * gamma
