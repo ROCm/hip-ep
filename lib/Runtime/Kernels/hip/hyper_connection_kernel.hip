@@ -61,6 +61,64 @@ __global__ void hip_hc_pre_mix_kernel(const T *__restrict__ streams,
   hc_store(output + i, sum * reduction_scale);
 }
 
+template <typename T> struct alignas(16) HcVec {
+  static constexpr int kN = 16 / sizeof(T);
+  T v[kN];
+};
+
+// hip_hc_pre_mix_kernel over one 16-byte chunk of hidden per thread. Every
+// output element is computed exactly as the scalar kernel computes it; only
+// the loads are wider and the row/column split is done once per chunk.
+template <typename T>
+__global__ void hip_hc_pre_mix_vec_kernel(const T *__restrict__ streams,
+                                          const T *__restrict__ gate,
+                                          T *__restrict__ output, int64_t rows,
+                                          int64_t branches, int64_t hidden,
+                                          int feature_gate, int gate_sigmoid,
+                                          float reduction_scale) {
+  constexpr int kN = HcVec<T>::kN;
+  int64_t chunks = hidden / kN;
+  int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (i >= rows * chunks)
+    return;
+  int64_t row = i / chunks;
+  int64_t h0 = (i - row * chunks) * kN;
+  float sum[kN];
+#pragma unroll
+  for (int k = 0; k < kN; ++k)
+    sum[k] = 0.f;
+  for (int64_t c = 0; c < branches; ++c) {
+    int64_t x_index = (row * branches + c) * hidden + h0;
+    HcVec<T> x = *reinterpret_cast<const HcVec<T> *>(streams + x_index);
+    if (feature_gate) {
+      HcVec<T> gv = *reinterpret_cast<const HcVec<T> *>(gate + x_index);
+#pragma unroll
+      for (int k = 0; k < kN; ++k) {
+        float g = hc_load(&gv.v[k]);
+        if (gate_sigmoid)
+          g = hc_sigmoid<T>(g);
+        sum[k] += hc_load(&x.v[k]) * g;
+      }
+    } else {
+      float g = hc_load(gate + row * branches + c);
+      if (gate_sigmoid)
+        g = hc_sigmoid<T>(g);
+#pragma unroll
+      for (int k = 0; k < kN; ++k)
+        sum[k] += hc_load(&x.v[k]) * g;
+    }
+  }
+  HcVec<T> out;
+#pragma unroll
+  for (int k = 0; k < kN; ++k)
+    hc_store(&out.v[k], sum[k] * reduction_scale);
+  *reinterpret_cast<HcVec<T> *>(output + row * hidden + h0) = out;
+}
+
+inline bool hc_aligned16(const void *p) {
+  return (reinterpret_cast<uintptr_t>(p) & 15u) == 0;
+}
+
 template <typename T>
 __global__ void hip_hc_post_mix_kernel(const T *__restrict__ streams,
                                        const T *__restrict__ block_output,
@@ -109,6 +167,25 @@ int launch_pre(hipStream_t stream, const void *streams, const void *gate,
                void *output, int64_t rows, int64_t branches, int64_t hidden,
                int feature_gate, int gate_sigmoid, float reduction_scale) {
   dim3 grid;
+  // The chunked kernel launches 1/kN as many threads, which leaves a few-row
+  // (decode) call on too few workgroups to hide its load latency; it pays off
+  // once the scalar grid would be large.
+  constexpr int kN = HcVec<T>::kN;
+  constexpr int64_t kMinVecThreads = 4096;
+  if (hidden % kN == 0 && rows * (hidden / kN) >= kMinVecThreads &&
+      hc_aligned16(streams) && hc_aligned16(output) &&
+      (!feature_gate || hc_aligned16(gate))) {
+    int threads = launch_count(rows * (hidden / kN), grid);
+    if (threads < 0)
+      return -1;
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_hc_pre_mix_vec_kernel<T>), grid,
+                       dim3(threads), 0, stream,
+                       static_cast<const T *>(streams),
+                       static_cast<const T *>(gate), static_cast<T *>(output),
+                       rows, branches, hidden, feature_gate, gate_sigmoid,
+                       reduction_scale);
+    return 0;
+  }
   int threads = launch_count(rows * hidden, grid);
   if (threads < 0)
     return -1;
