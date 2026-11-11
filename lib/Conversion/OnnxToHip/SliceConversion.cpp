@@ -341,6 +341,10 @@ static mlir::Value buildAllocCapacity(mlir::OpBuilder &b, mlir::Location loc,
 /// `tf.slice(begin, size)` export inside a loop body. Slice never changes the
 /// rank. An axis it does not slice keeps the data dim, and a sliced axis is
 /// dynamic. When \p axes is null every axis may be sliced.
+///
+/// Nothing downstream checks an inferred dynamic extent against the slice, so
+/// a caller must give each sliced axis its exact length: SliceDecompose takes
+/// the static sizes it computed, and SliceToHip reads unresolved bounds back.
 static mlir::RankedTensorType
 inferSliceResultType(mlir::Operation *op, mlir::RankedTensorType dataType,
                      const llvm::SmallVectorImpl<int64_t> *axes) {
@@ -525,6 +529,18 @@ struct SliceDecompose : public mlir::RewritePattern {
       strides[axis] = rewriter.getIndexAttr(step);
     }
 
+    // An unranked result has no declared shape to match, so it takes the sizes
+    // computed above. Keeping the inferred dynamic dims would declare `?` for
+    // a static extract_slice size, which fails verification.
+    if (!mlir::isa<mlir::RankedTensorType>(op->getResult(0).getType())) {
+      llvm::SmallVector<int64_t> shape;
+      for (mlir::OpFoldResult size : sizes) {
+        std::optional<int64_t> c = mlir::getConstantIntValue(size);
+        shape.push_back(c ? *c : mlir::ShapedType::kDynamic);
+      }
+      outType = mlir::RankedTensorType::get(shape, outType.getElementType());
+    }
+
     // Sanity check (only meaningful for static output dims): computed
     // sizes must match the IR-inferred output type. If they diverge we
     // have an unsupported corner case and should fall through to the
@@ -619,6 +635,37 @@ struct SliceToHip : public mlir::RewritePattern {
     if (stepsVec.size() != axesVec.size())
       haveAxes = false;
 
+    // An unranked result gets its shape here, so the over-sized fallback below
+    // would not just cost performance: it would be the only shape consumers
+    // see, with a zero-filled tail. Every sliced axis needs an exact extent,
+    // read back from the device when host arithmetic cannot resolve it.
+    bool exactExtent =
+        !mlir::isa<mlir::RankedTensorType>(op->getResult(0).getType());
+    if (exactExtent) {
+      if (!haveAxes)
+        return rewriter.notifyMatchFailure(
+            op, "unranked result needs constant axes and steps");
+      if (llvm::any_of(stepsVec, [](int64_t s) { return s <= 0; }))
+        return rewriter.notifyMatchFailure(
+            op, "unranked result needs positive steps");
+      auto isBoundVector = [](mlir::Value v) {
+        auto t = mlir::dyn_cast<mlir::RankedTensorType>(v.getType());
+        return t && t.getRank() == 1 && t.getElementType().isSignlessInteger();
+      };
+      if (!isBoundVector(starts) || !isBoundVector(ends))
+        return rewriter.notifyMatchFailure(
+            op, "unranked result needs 1-D integer starts and ends");
+    }
+    auto boundToHost = [&](mlir::Value bound, int64_t k) -> mlir::Value {
+      mlir::Value host = resolveHostIndex(rewriter, loc, bound, k, 0);
+      if (host || !exactExtent)
+        return host;
+      mlir::Value raw =
+          readbackShapeEntryToHost(rewriter, loc, context, bound, k);
+      return mlir::arith::IndexCastOp::create(rewriter, loc,
+                                              rewriter.getIndexType(), raw);
+    };
+
     mlir::RankedTensorType resultType =
         inferSliceResultType(op, dataType, haveAxes ? &axesVec : nullptr);
 
@@ -675,15 +722,19 @@ struct SliceToHip : public mlir::RewritePattern {
           // anything. Take the data dim directly rather than emitting the
           // arithmetic and the select that would fold back to it.
           if (starts == ends) {
-            emptyAccumulatorSeed = true;
+            if (exactExtent)
+              extent = mlir::arith::ConstantIndexOp::create(rewriter, loc, 0);
+            else
+              emptyAccumulatorSeed = true;
             break;
           }
-          mlir::Value s = resolveHostIndex(rewriter, loc, starts, k, 0);
-          mlir::Value e = resolveHostIndex(rewriter, loc, ends, k, 0);
-          if (s && e)
-            extent = buildAllocCapacity(
-                rewriter, loc, dim,
-                buildSliceExtent(rewriter, loc, dim, s, e, stepsVec[k]));
+          mlir::Value s = boundToHost(starts, k);
+          mlir::Value e = boundToHost(ends, k);
+          if (s && e) {
+            extent = buildSliceExtent(rewriter, loc, dim, s, e, stepsVec[k]);
+            if (!exactExtent)
+              extent = buildAllocCapacity(rewriter, loc, dim, extent);
+          }
           break;
         }
       }
