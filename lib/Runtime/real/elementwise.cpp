@@ -138,35 +138,20 @@ int wrap_elementwise(RuntimeState *state, int op_state_slot, void *lhs,
     }
     if (out_empty)
       return 0;
+    int64_t elem_size = hipdnn_ep_datatype_size(data_type);
+    if (elem_size <= 0) {
+      fprintf(stderr, "[elementwise-empty] unsupported dtype %lld\n",
+              (long long)data_type);
+      return -1;
+    }
+    size_t bytes = static_cast<size_t>(out_n) * out_c * out_h * out_w *
+                   static_cast<size_t>(elem_size);
     // Pick the non-empty operand whose shape matches OUT.
     bool lhs_matches_out = !lhs_empty && lhs_n == out_n && lhs_c == out_c &&
                            lhs_h == out_h && lhs_w == out_w;
     bool rhs_matches_out = !rhs_empty && rhs_n == out_n && rhs_c == out_c &&
                            rhs_h == out_h && rhs_w == out_w;
     if (lhs_matches_out || rhs_matches_out) {
-      size_t elem_size = 0;
-      switch (data_type) {
-      case HIPDNN_EP_DATATYPE_HALF:
-        elem_size = 2;
-        break;
-      case HIPDNN_EP_DATATYPE_FLOAT:
-        elem_size = 4;
-        break;
-      case HIPDNN_EP_DATATYPE_INT32:
-        elem_size = 4;
-        break;
-      case HIPDNN_EP_DATATYPE_INT64:
-        elem_size = 8;
-        break;
-      default:
-        fprintf(
-            stderr,
-            "[elementwise-empty] unsupported dtype %lld for identity-copy\n",
-            (long long)data_type);
-        return -1;
-      }
-      size_t bytes =
-          static_cast<size_t>(out_n) * out_c * out_h * out_w * elem_size;
       void *src = lhs_matches_out ? lhs : rhs;
       hipStream_t stream =
           static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
@@ -186,9 +171,6 @@ int wrap_elementwise(RuntimeState *state, int op_state_slot, void *lhs,
                     "zero-filling output as a safe default\n");
     hipStream_t stream =
         static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
-    size_t elem_size = (data_type == HIPDNN_EP_DATATYPE_HALF) ? 2 : 4;
-    size_t bytes =
-        static_cast<size_t>(out_n) * out_c * out_h * out_w * elem_size;
     hipError_t err = hipMemsetAsync(output, 0, bytes, stream);
     if (err != hipSuccess)
       return -1;
