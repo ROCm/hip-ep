@@ -67,6 +67,10 @@ add_library(OnnxToHip STATIC
   GatedDeltaNetConversion.cpp
   DynamicSparseAttentionConversion.cpp
   SparseAttentionIndexerConversion.cpp
+  IndexerRotaryFold.cpp
+  IndexerCountsFold.cpp
+  DsaPrologueFold.cpp
+  QsaPairFold.cpp
   RangeConversion.cpp
   FastGeluFusion.cpp
   ErfGeluFusion.cpp
