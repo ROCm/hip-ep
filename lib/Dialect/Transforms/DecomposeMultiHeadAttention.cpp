@@ -87,10 +87,10 @@ public:
       return rewriter.notifyMatchFailure(op, "expected rank-3 Q, K, and V");
 
     // HipToTosa lowers a float matmul only for f16, bf16, and f32, and an
-    // outlined kernel that fails that conversion aborts the module. Softmax
-    // is narrower: hip_softmax_row_2d reads and writes __half, and the bf16
-    // path reuses that kernel with elem_size_bytes == 2, so the scores would
-    // be interpreted as f16. f64, float8, and bf16 stay on the runtime op.
+    // outlined kernel that fails that conversion aborts the module. f64 and
+    // float8 stay on the runtime op. bf16 is not rewritten and is rejected
+    // after this pattern: wrap_multi_head_attention only receives a byte
+    // size, so a bf16 buffer would be read as f16.
     Type elementType = queryType.getElementType();
     if ((!elementType.isF16() && !elementType.isF32()) ||
         keyType.getElementType() != elementType ||
@@ -194,13 +194,40 @@ public:
   }
 };
 
+static bool isBf16(Type type) {
+  if (auto shaped = dyn_cast<ShapedType>(type))
+    return shaped.getElementType().isBF16();
+  return type.isBF16();
+}
+
+// The runtime kernel accepts any 2-byte element and dispatches the fp16
+// path. Leaving a bf16 op in place is that miscompile, so the rocMLIR
+// pipeline reports it instead of falling back.
+static bool rejectBf16Attention(Operation *root) {
+  bool rejected = false;
+  root->walk([&](MultiHeadAttentionOp op) {
+    bool bf16 = false;
+    for (Value v : op->getOperands())
+      bf16 = bf16 || isBf16(v.getType());
+    for (Value v : op->getResults())
+      bf16 = bf16 || isBf16(v.getType());
+    if (!bf16)
+      return;
+    op.emitOpError("bf16 is not supported; the runtime kernel would "
+                   "reinterpret it as f16");
+    rejected = true;
+  });
+  return rejected;
+}
+
 struct DecomposeMultiHeadAttentionPass
     : public impl::DecomposeMultiHeadAttentionPassBase<
           DecomposeMultiHeadAttentionPass> {
   void runOnOperation() override {
     RewritePatternSet patterns(&getContext());
     patterns.add<DecomposeMultiHeadAttention>(&getContext());
-    if (failed(applyPatternsGreedily(getOperation(), std::move(patterns))))
+    if (failed(applyPatternsGreedily(getOperation(), std::move(patterns))) ||
+        rejectBf16Attention(getOperation()))
       signalPassFailure();
   }
 };
