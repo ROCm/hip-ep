@@ -166,8 +166,8 @@ ConvTransposeToHip::matchAndRewrite(mlir::Operation *op,
       continue;
     }
     const int64_t addend = outputPadding[s] +
-                           dilations[s] * (kernelShape[s] - 1) + 1 -
-                           pads[s] - pads[numSpatial + s] - strides[s];
+                           dilations[s] * (kernelShape[s] - 1) + 1 - pads[s] -
+                           pads[numSpatial + s] - strides[s];
     mlir::Value addendC =
         mlir::arith::ConstantIndexOp::create(rewriter, loc, addend);
     dynSizes.push_back(
