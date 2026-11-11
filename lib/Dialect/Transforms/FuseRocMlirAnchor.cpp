@@ -144,6 +144,22 @@ std::optional<Decomposition> getAnchorKind(Operation *op, bool int4Weights) {
                : std::nullopt;
   if (!isAnchorOp(op))
     return std::nullopt;
+  // Dense MatMul/Gemm keep their custom hip_gemm runtime dispatch. Quantized
+  // weights still use the owning rocMLIR dequantization/fusion path.
+  Value weight;
+  if (auto matmul = dyn_cast<MatmulOp>(op))
+    weight = matmul.getB();
+  else if (auto gemm = dyn_cast<GemmOp>(op))
+    weight = gemm.getInputB();
+  if (weight) {
+    auto dequant = weight.getDefiningOp<DequantizeLinearOp>();
+    bool quantized =
+        weight.getDefiningOp<DequantBnb4Op>() ||
+        (dequant && (dequant.getPackedInt4() ||
+                     dequant.getInput().getDefiningOp<UnpackInt4Op>()));
+    if (!quantized)
+      return std::nullopt;
+  }
   if (auto conv = dyn_cast<ConvOp>(op); conv && planDequantizedConv(conv))
     return Decomposition::DequantizedConv;
   auto dps = cast<DestinationStyleOpInterface>(op);

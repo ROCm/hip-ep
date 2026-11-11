@@ -1538,6 +1538,21 @@ func.func @main_graph(%ctx: !hip.context, %a: tensor<?x16xf16>,
 
 // -----
 
+// Dense MatMul remains a runtime operation even when all shapes are static.
+// CHECK-LABEL: func.func @main_graph
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.matmul
+// CHECK-NOT: hip.rocmlir
+func.func @main_graph(%ctx: !hip.context, %a: tensor<19x37xf16>,
+                      %b: tensor<37x21xf16>) -> tensor<19x21xf16> {
+  %e = tensor.empty() : tensor<19x21xf16>
+  %y = hip.matmul(%ctx) ins(%a, %b : tensor<19x37xf16>, tensor<37x21xf16>)
+      outs(%e : tensor<19x21xf16>) : tensor<19x21xf16>
+  return %y : tensor<19x21xf16>
+}
+
+// -----
+
 // A single-use hip.dequant_bnb4 stays in main_graph. Absorbing it makes
 // HipToTosa emit a tosa.gather of the codebook, which rocMLIR rejects. The
 // outlined matmul reads the dequantized f32 weight. transB swaps the [N, K]
@@ -1566,6 +1581,24 @@ func.func @main_graph(%ctx: !hip.context, %a: tensor<2x8xf32>,
       outs(%e : tensor<2x4xf32>)
       {transA = 0 : i64, transB = 1 : i64} : tensor<2x4xf32>
   return %c : tensor<2x4xf32>
+}
+
+// -----
+
+// Gemm keeps its runtime bias/transpose/alpha/beta contract with static shapes.
+// CHECK-LABEL: func.func @main_graph
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.gemm
+// CHECK-NOT: hip.rocmlir
+func.func @main_graph(%ctx: !hip.context, %a: tensor<37x19xf16>,
+                      %b: tensor<21x37xf16>, %c: tensor<21xf16>)
+    -> tensor<19x21xf16> {
+  %e = tensor.empty() : tensor<19x21xf16>
+  %y = hip.gemm(%ctx) ins(%a, %b, %c : tensor<37x19xf16>,
+      tensor<21x37xf16>, tensor<21xf16>) outs(%e : tensor<19x21xf16>)
+      {alpha = 7.500000e-01 : f32, beta = 2.500000e-01 : f32,
+       transA = 1 : i64, transB = 1 : i64} : tensor<19x21xf16>
+  return %y : tensor<19x21xf16>
 }
 
 // -----
