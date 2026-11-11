@@ -14,6 +14,8 @@
 // 4. sum_axes_attribute       — opset-13 attribute axes [0, 2], chain.
 // 5. l2_not_decomposed        — ReduceL2 is not separable: one op keeps
 //    reduced_axes [1, 3] (rejected later by the lowering, not guessed).
+// 6. unknown_attribute        — an attribute the converters do not read is
+//    rejected, not dropped; import metadata is accepted.
 // ============================================================================
 
 // RUN: hip-mlir-opt %s --hip-add-context-arg --convert-onnx-to-hip | FileCheck %s
@@ -89,4 +91,20 @@ module {
   // CHECK-LABEL: func.func @l2_not_decomposed
   // CHECK: hip.reduce_l2({{.*}}) outs(%{{.*}} : tensor<2x4xf16>) {keepdims = 0 : i64, reduced_axes = array<i64: 1, 3>}
   // CHECK-NOT: hip.reduce_l2
+
+  func.func @unknown_attribute(%x: tensor<4x8xf16>) -> (tensor<4xf16>, tensor<4xf16>, tensor<4xf16>) {
+    %axes = "onnx.Constant"() {value = dense<[1]> : tensor<1xi64>} : () -> tensor<1xi64>
+    %m = "onnx.ReduceMean"(%x, %axes) {keepdims = 0 : si64, future_attr = 1 : si64}
+      : (tensor<4x8xf16>, tensor<1xi64>) -> tensor<4xf16>
+    %l = "onnx.ReduceL2"(%x, %axes) {keepdims = 0 : si64, future_attr = 1 : si64}
+      : (tensor<4x8xf16>, tensor<1xi64>) -> tensor<4xf16>
+    %s = "onnx.ReduceSum"(%x, %axes) {keepdims = 0 : si64, onnx_node_name = "n", node.outputs = ["y"]}
+      : (tensor<4x8xf16>, tensor<1xi64>) -> tensor<4xf16>
+    return %m, %l, %s : tensor<4xf16>, tensor<4xf16>, tensor<4xf16>
+  }
+
+  // CHECK-LABEL: func.func @unknown_attribute
+  // CHECK-DAG: "onnx.ReduceMean"({{.*}}future_attr
+  // CHECK-DAG: "onnx.ReduceL2"({{.*}}future_attr
+  // CHECK-DAG: hip.reduce_sum
 }
