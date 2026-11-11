@@ -177,6 +177,25 @@ def OptimizeMemRefsPass : Pass<"hip-optimize-memrefs", "mlir::func::FuncOp"> {
   ];
 }
 
+def HoistPointwiseOverViewsPass
+    : Pass<"hip-hoist-pointwise-over-views", "mlir::func::FuncOp"> {
+  let summary = "Move pointwise ops above the views that follow an anchor";
+  let description = [{
+    A pointwise op that HIP-to-TOSA converts, whose other inputs are constant
+    scalars, maps each element of its one tensor input on its own, so it
+    commutes with ops that only move elements. When that input is a chain of
+    single-use element-move ops (reshapes, transposes, slices) over the
+    single-use result of a gemm or convolution anchor, the op is rebuilt on
+    the anchor's result and the chain is replayed after it. The anchor fusion
+    then takes the op into the kernel's epilogue instead of running it as a
+    kernel of its own behind a view it cannot absorb, such as the crop after
+    a decomposed ConvTranspose. The op then also computes the elements that
+    the chain drops, so the anchor's result may have at most 50% more
+    elements than the op's input.
+  }];
+  let dependentDialects = ["mlir::tensor::TensorDialect"];
+}
+
 def RocMlirPrepareQuantPass
     : Pass<"hip-rocmlir-prepare-quant", "mlir::func::FuncOp"> {
   let summary = "Prepare the quantize trees of main_graph for rocMLIR kernels";
@@ -346,8 +365,16 @@ def DecomposeConvTransposePass
     The per-residue tap selection, spatial flip, and channel swap apply only
     to the filter, so they are constant-folded into fresh `hip.constant`s
     rather than emitted as ops -- TOSA has no strided slice to lower a tap
-    stride to. Reassembly is one strided `tensor.insert_slice` per residue,
-    which bufferizes to a `memref.subview` plus a copy.
+    stride to. When every residue shares a kernel shape and padding, their
+    filters are stacked on the output-channel axis into one convolution whose
+    result is viewed as [N, S0, S1, M, Ht0, Ht1] and transposed to
+    [N, M, Ht0, S0, Ht1, S1] (DepthToSpace); the anchor fusion folds that
+    transpose into the convolution's store. Residues whose tap counts differ
+    are zero-padded to the largest count when the padded filters cost at most
+    twice the real taps, and then take the same path. A constant bias is tiled
+    once per residue into the wide convolution. The other residues stay on one
+    convolution each, with the bias, and one strided `tensor.insert_slice`
+    each, which bufferizes to a `memref.subview` plus a copy.
 
     Rank-4 inputs must be statically shaped. A rank-3 input is expanded to
     rank 4 with a unit height so dynamic batch and width stay legal; the
