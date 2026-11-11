@@ -41,7 +41,7 @@ the bias. The grouping then puts the bias add and the ops after it in a
 module, and the matmul becomes an anchor that can take that module as its
 epilogue. Any other `hip.matmul_nbits` keeps the custom kernel.
 
-The pass then prepares the quantize trees for integer kernels. It runs three
+The pass then prepares the quantize trees for integer kernels. It runs four
 rewrites in this order, because the first fixes the final shape of each tree
 and the last plans the integer anchors on that shape.
 
@@ -56,7 +56,16 @@ and the last plans the integer anchors on that shape.
    kernel then takes into its epilogue. Any other leaf leaves the tree
    unchanged, and no quantize-dequantize pair is removed (see
    [element-move-interface.md](element-move-interface.md)).
-2. Each `hip.qlinear_conv` and `hip.qlinear_matmul` with ui8 weights or a
+2. Each `hip.qlinear_conv` and `hip.qlinear_matmul` with a static result and
+   inline scalar scales whose requantize multiplier is below 2^-33 on every
+   channel or column becomes a constant of the output zero point. Every i32
+   accumulator then scales to at most 0.25 and rounds to 0, so the
+   rewrite is exact for any input and bias. No integer plan takes such an op:
+   its integer op, scaled by 0, would fold away and leave a rocMLIR kernel
+   with no conv or matmul, which rocMLIR rejects. The producers that only
+   the op read are erased as well, because the anchor fusion would outline a
+   dead conv into a kernel with no result.
+3. Each `hip.qlinear_conv` and `hip.qlinear_matmul` with ui8 weights or a
    non-zero weight zero point, static shapes and inline constant parameters,
    weights and bias becomes integer ops. rocMLIR takes only i8 weights and has
    no zero-point operand, so the weights become `w' = w - offset` and the
@@ -75,7 +84,7 @@ and the last plans the integer anchors on that shape.
    is declined when an i32 sum could overflow. Each integer op becomes a
    rocMLIR kernel, and the subtraction and the requantize join the epilogue
    of one of them.
-3. Each connected ui8 tree that reaches an integer anchor becomes i8, and
+4. Each connected ui8 tree that reaches an integer anchor becomes i8, and
    every zero point in it drops by 128. The producers of the tree are
    per-tensor quantizes with an inline scalar zero point and the results of
    the QLinear convs and matmuls that become integer anchors. Its interior is

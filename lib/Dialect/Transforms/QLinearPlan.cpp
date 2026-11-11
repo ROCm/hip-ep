@@ -49,7 +49,10 @@ static constexpr float kDeadChannelMultiplier = 0x1p-33f;
 // in f32 and in ORT CPU's order, one entry per channel. With `dead`, a
 // channel below kDeadChannelMultiplier gets 0 and is marked, so that its
 // output is the zero point for any accumulator and its zero-point correction
-// can be dropped. Nullopt when a multiplier is not finite.
+// can be dropped. Nullopt when a multiplier is not finite, and with `dead`
+// also when every channel is dead: the op's output is then a constant
+// (getDeadQLinearOutput), and an integer op scaled by 0 would fold away and
+// leave a rocMLIR kernel with no conv or matmul.
 static std::optional<SmallVector<float>>
 getRequantMultipliers(DenseElementsAttr inputScale,
                       ArrayRef<float> weightScales,
@@ -72,6 +75,8 @@ getRequantMultipliers(DenseElementsAttr inputScale,
         m = 0.0f;
         isDead = true;
       }
+    if (!llvm::is_contained(*dead, false))
+      return std::nullopt;
   }
   return multipliers;
 }
@@ -701,6 +706,59 @@ bool isPlannedQLinear(Operation *op) {
   if (auto conv = dyn_cast<ConvOp>(op))
     return planDequantizedConv(conv).has_value();
   return false;
+}
+
+DenseElementsAttr getDeadQLinearOutput(Operation *op) {
+  Value inputScale, weightScale, outputScale, outputZp, output;
+  int64_t channels;
+  if (auto conv = dyn_cast<QLinearConvOp>(op)) {
+    auto weightType = dyn_cast<RankedTensorType>(conv.getWeights().getType());
+    if (!weightType || weightType.isDynamicDim(0))
+      return {};
+    channels = weightType.getDimSize(0);
+    inputScale = conv.getInputScale();
+    weightScale = conv.getWeightScale();
+    outputScale = conv.getOutputScale();
+    outputZp = conv.getOutputZeroPoint();
+    output = conv.getOutput();
+  } else if (auto matmul = dyn_cast<QLinearMatMulOp>(op)) {
+    auto bType = dyn_cast<RankedTensorType>(matmul.getB().getType());
+    if (!bType || bType.getRank() < 2 ||
+        bType.isDynamicDim(bType.getRank() - 1))
+      return {};
+    channels = bType.getDimSize(bType.getRank() - 1);
+    inputScale = matmul.getAScale();
+    weightScale = matmul.getBScale();
+    outputScale = matmul.getYScale();
+    outputZp = matmul.getYZeroPoint();
+    output = matmul.getOutput();
+  } else {
+    return {};
+  }
+  auto resultType = dyn_cast<RankedTensorType>(output.getType());
+  if (op->getNumResults() != 1 || !resultType || !resultType.hasStaticShape())
+    return {};
+  DenseElementsAttr xScale = getInlineDense(inputScale);
+  DenseElementsAttr wScale = getInlineDense(weightScale);
+  DenseElementsAttr yScale = getInlineDense(outputScale);
+  DenseElementsAttr yZp = getInlineDense(outputZp);
+  if (!xScale || !wScale || !yScale || !yZp ||
+      !xScale.getElementType().isF32() || !wScale.getElementType().isF32() ||
+      !yScale.getElementType().isF32() || xScale.getNumElements() != 1 ||
+      yScale.getNumElements() != 1 || yZp.getNumElements() != 1 ||
+      yZp.getElementType() != resultType.getElementType())
+    return {};
+  SmallVector<float> weightScales = llvm::to_vector(wScale.getValues<float>());
+  if (weightScales.size() != 1 &&
+      static_cast<int64_t>(weightScales.size()) != channels)
+    return {};
+  std::optional<SmallVector<float>> multipliers = getRequantMultipliers(
+      xScale, weightScales, yScale, channels, /*dead=*/nullptr);
+  if (!multipliers || !llvm::all_of(*multipliers, [](float m) {
+        return std::fabs(m) < kDeadChannelMultiplier;
+      }))
+    return {};
+  return DenseElementsAttr::get(resultType, *yZp.getValues<APInt>().begin());
 }
 
 // The epilogue that both QLinear rewrites share: add the corrected bias, cast

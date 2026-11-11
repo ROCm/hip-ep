@@ -11,9 +11,11 @@
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
+#include <llvm/ADT/DenseSet.h>
 #include <mlir/Dialect/Func/IR/FuncOps.h>
 #include <mlir/Dialect/Tensor/IR/Tensor.h>
 #include <mlir/IR/PatternMatch.h>
+#include <mlir/Interfaces/SideEffectInterfaces.h>
 
 namespace mlir::hip {
 
@@ -38,6 +40,52 @@ Value emitAsymmetricAccumulator(RewriterBase &rewriter, Location loc, Value ctx,
   return SubOp::create(rewriter, loc, TypeRange{accType}, ctx, acc, windowSums,
                        emitTensorEmpty(rewriter, loc, accType))
       .getResult(0);
+}
+
+// Erases the producers of `values` that no op reads, and theirs in turn, and
+// adds them to `erased`.
+void eraseDeadProducers(RewriterBase &rewriter, ValueRange values,
+                        DenseSet<Operation *> &erased) {
+  SmallVector<Operation *> worklist;
+  for (Value value : values)
+    if (Operation *def = value.getDefiningOp())
+      worklist.push_back(def);
+  while (!worklist.empty()) {
+    Operation *op = worklist.pop_back_val();
+    if (erased.contains(op) || !isOpTriviallyDead(op))
+      continue;
+    for (Value operand : op->getOperands())
+      if (Operation *def = operand.getDefiningOp())
+        worklist.push_back(def);
+    erased.insert(op);
+    rewriter.eraseOp(op);
+  }
+}
+
+// Replaces each QLinear conv and matmul whose every channel writes the output
+// zero point with that constant. No plan takes such an op, so without this
+// it would keep its HIP kernel. The producers that only it read are erased:
+// the anchor fusion would outline a dead conv into a kernel with no result,
+// which rocMLIR folds to nothing and cannot compile.
+void foldDeadQLinear(func::FuncOp funcOp) {
+  IRRewriter rewriter(funcOp.getContext());
+  SmallVector<Operation *> candidates;
+  funcOp.walk([&](Operation *op) {
+    if (isa<QLinearConvOp, QLinearMatMulOp>(op))
+      candidates.push_back(op);
+  });
+  DenseSet<Operation *> erased;
+  for (Operation *op : candidates) {
+    if (erased.contains(op))
+      continue;
+    DenseElementsAttr output = getDeadQLinearOutput(op);
+    if (!output)
+      continue;
+    SmallVector<Value> inputs(op->getOperands());
+    rewriter.setInsertionPoint(op);
+    rewriter.replaceOp(op, emitConstant(rewriter, op->getLoc(), output));
+    eraseDeadProducers(rewriter, inputs, erased);
+  }
 }
 
 // Rewrites each QLinear conv and matmul whose weights rocMLIR cannot take as
@@ -110,6 +158,7 @@ struct RocMlirPrepareQuantPass
       return;
     decomposeMatMulNBits(funcOp);
     sinkQuantizeThroughElementMoves(funcOp);
+    foldDeadQLinear(funcOp);
     splitAsymmetricQLinear(funcOp);
     rebiasUnsignedQuantizedTrees(funcOp, isPlannedQLinear);
   }
