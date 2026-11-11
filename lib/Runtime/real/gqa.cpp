@@ -496,16 +496,16 @@ static int gqa_forward_fused(
     const void *key_bias = nullptr, int64_t key_bias_batch = 0,
     int64_t key_bias_len = 0,
     // Zero-length key/value over a past cache another layer fills (KV
-    // sharing): attend over the past in place, with nothing to append. Decode
-    // only, and the caller keeps any present that would need a copy on the
-    // decomposed path.
+    // sharing): attend over the past in place, with nothing to append. The
+    // caller keeps any present that would need a copy on the decomposed path.
     bool reuse_past_kv = false) {
   // One row per batch entry, or one row shared by all of them.
   const int key_bias_stride =
       key_bias && key_bias_batch > 1 ? static_cast<int>(key_bias_len) : 0;
   if (reuse_past_kv) {
-    if (sq != 1 || !past_key || !past_value) {
-      fprintf(stderr, "gqa_forward_fused: a reused past KV is decode only\n");
+    if (!past_key || !past_value) {
+      fprintf(stderr, "gqa_forward_fused: a reused past KV needs past_key "
+                      "and past_value\n");
       return -1;
     }
     present_key = const_cast<void *>(past_key);
@@ -884,7 +884,9 @@ static int gqa_forward_fused(
                      static_cast<int>(past_len), nullptr,
                      static_cast<int>(elem_sz)) != 0)
       return -1;
-    if (hip_gqa_rope(stream, kSrc, d_Kroped, cos_cache, sin_cache,
+    // A reused past KV brings no new keys; the layer that filled it roped them.
+    if (!reuse_past_kv &&
+        hip_gqa_rope(stream, kSrc, d_Kroped, cos_cache, sin_cache,
                      static_cast<int>(B), static_cast<int>(sq),
                      static_cast<int>(G), static_cast<int>(d), half_rot,
                      static_cast<int>(past_len), nullptr,
@@ -894,7 +896,7 @@ static int gqa_forward_fused(
     kSrc = d_Kroped; // V is never RoPE'd.
   }
 
-  if (present_key && present_value) {
+  if (present_key && present_value && !reuse_past_kv) {
     // Quantized cache: quantize-and-append/concat; fp16: plain. update_kv_cache
     // dispatches on kv_format internally. The windowed v6x prefill starts at
     // the tile holding past_len - window + 1, which window_copy_lo covers.
@@ -942,10 +944,10 @@ static int gqa_forward_fused(
     attn_max_seq = static_cast<int>(total_seq);
   }
 
-  // d64, d96 and d128 run v6x, d256 runs v8x (d256 prefill never has a window
-  // or a sink here). hip_gqa_flash_prefill_v2 applies the same split when
+  // d64, d96 and d128 run v6x, d256 and d512 run v8x (no sink here, and a
+  // window only at d256). hip_gqa_flash_prefill_v2 applies the same split when
   // tuning online.
-  const bool v8x_prefill = d == 256;
+  const bool v8x_prefill = d == 256 || d == 512;
   const char *fused_prefill_kernel = v8x_prefill ? "v8x" : "v6x";
   int fp_rc;
   OP_ROCTX_MARK("hip_ep.op.gqa.attn.flash_prefill");
@@ -3216,13 +3218,14 @@ int wrap_group_query_attention_host_length(
   const bool decode_geometry_ok =
       !is_decode || flash_decode_geometry_ok(num_heads, kv_num_heads, head_dim);
   // head_dim gate: the fused WMMA prefill (v6x/v8x) and the scalar
-  // flash-decode kernels both cover d in {64,96,128,256} now (d=96 for
-  // Phi-3-mini, d=256 for Qwen3-family 16:4). For decode,
-  // flash_decode_geometry_ok already validates d; for prefill we clamp to the
-  // templated set here.
-  const bool head_dim_ok = is_decode ? true
-                                     : (head_dim == 64 || head_dim == 96 ||
-                                        head_dim == 128 || head_dim == 256);
+  // flash-decode kernels both cover d in {64,96,128,256,512} now (d=96 for
+  // Phi-3-mini, d=256 for Qwen3-family 16:4, d=512 for Gemma-4's global
+  // layers). For decode, flash_decode_geometry_ok already validates d; for
+  // prefill we clamp to the templated set here.
+  const bool head_dim_ok =
+      is_decode ? true
+                : (head_dim == 64 || head_dim == 96 || head_dim == 128 ||
+                   head_dim == 256 || head_dim == 512);
   // attention_bias (onnx.Attention external mask) is only applied by the legacy
   // decomposed pipeline (Step 8b); the lean fused path would silently drop it,
   // so exclude it here to route masked attention to gqa_forward_hipblaslt
@@ -3238,9 +3241,11 @@ int wrap_group_query_attention_host_length(
   const bool sink_ok =
       !has_smooth_softmax || is_decode || head_dim == 64 || head_dim == 96;
   // Decode handles the window itself (kv_lo clamp), so it is allowed for any
-  // supported geometry; prefill implements it at D64, D96 and D128.
+  // supported geometry; prefill implements it at D64, D96, D128 (v6x) and
+  // D256 (v8x).
   const bool window_ok = is_decode || local_window_size <= 0 ||
-                         head_dim == 64 || head_dim == 96 || head_dim == 128;
+                         head_dim == 64 || head_dim == 96 || head_dim == 128 ||
+                         head_dim == 256;
   // The per-key bias is applied by every decode kernel and by v6x prefill,
   // which builds it at D128 only.
   const bool key_bias_ok = key_bias == nullptr || is_decode || head_dim == 128;
@@ -3249,9 +3254,9 @@ int wrap_group_query_attention_host_length(
   // trap on CDNA (wave64, e.g. MI350). Route wave64 to the decomposed hipBLASLt
   // pipeline below (MFMA GEMMs + wave-portable scalar kernels), which is
   // feature-complete and correct on both wave sizes. RDNA is unaffected.
-  // The fused path serves reuse_past_kv at decode when there is no separate
-  // present to fill (absent, empty, or the past buffer itself); the
-  // decomposed pipeline implements every other reuse.
+  // The fused path serves reuse_past_kv when there is no separate present to
+  // fill (absent, empty, or the past buffer itself); the decomposed pipeline
+  // implements every other reuse.
   if (reuse_past_kv && kv_quantized) {
     fprintf(stderr, "wrap_group_query_attention: a zero-length key/value over "
                     "a quantized KV cache is not supported\n");
@@ -3260,7 +3265,7 @@ int wrap_group_query_attention_host_length(
   const bool present_needs_fill =
       seq_len_kv > 0 && ((present_key && present_key != past_key) ||
                          (present_value && present_value != past_value));
-  const bool reuse_fused_ok = is_decode && !present_needs_fill;
+  const bool reuse_fused_ok = !present_needs_fill;
   const bool fused_geometry =
       (!reuse_past_kv || reuse_fused_ok) && no_causal == 0 && window_ok &&
       sink_ok && key_bias_ok && head_dim_ok && decode_geometry_ok &&

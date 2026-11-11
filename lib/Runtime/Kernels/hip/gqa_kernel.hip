@@ -4444,7 +4444,7 @@ gqa_flash_prefill_v6x_kernel(
 // softmax itself and keeps P^T in registers for O^T = V^T P^T over its own D
 // rows. K and V tiles are staged once per block for all HB heads.
 // ---------------------------------------------------------------------
-template <int BKV, int ND, int HB, int D = 256>
+template <int BKV, int ND, int HB, int D = 256, bool HAS_WINDOW = false>
 __global__ void __launch_bounds__(32 * ND * HB)
 gqa_flash_prefill_v8x_kernel(
     const _Float16* __restrict__ Q,       // [B, sq, Hq, D]
@@ -4454,7 +4454,8 @@ gqa_flash_prefill_v8x_kernel(
     int B_count, int Hq, int G, int sq, int skv, int max_seq, int past_len,
     float scale,
     const _Float16* __restrict__ head_sink,  // [num_heads] or null
-    int num_heads, int smooth_softmax)
+    int num_heads, int smooth_softmax,
+    int local_window_size)                   // read only with HAS_WINDOW
 {
     constexpr int NW        = ND * HB;
     constexpr int kWmmaTile = 16;
@@ -4468,14 +4469,22 @@ gqa_flash_prefill_v8x_kernel(
     constexpr int kAcc      = 8;
     constexpr float kLog2e  = 1.4426950408889634f;
 
-    // Same dispatch order as v6x without a window: the heads of one KV group
-    // adjacent, one KV group at a time, Q tiles last-first.
+    // Same dispatch order as v6x: the heads of one KV group adjacent; without a
+    // window one KV group at a time over all Q tiles, with one all heads of a
+    // Q tile together (a block then touches only a few KV tiles); Q tiles
+    // last-first.
     const int num_q_tiles = (sq + ROWS - 1) / ROWS;
     const int nqb   = num_q_tiles * B_count;
     const int cpg   = (Hq / G) / HB;
     const int bid   = static_cast<int>(blockIdx.x);
-    const int qb    = (bid / cpg) % nqb;
-    const int chunk = (bid / (cpg * nqb)) * cpg + bid % cpg;
+    int qb, chunk;
+    if constexpr (HAS_WINDOW) {
+        qb = bid / (G * cpg);
+        chunk = bid % (G * cpg);
+    } else {
+        qb = (bid / cpg) % nqb;
+        chunk = (bid / (cpg * nqb)) * cpg + bid % cpg;
+    }
     const int wave_id    = __builtin_amdgcn_readfirstlane(threadIdx.x / 32);
     const int g          = wave_id % ND;
     const int hb         = wave_id / ND;
@@ -4517,6 +4526,13 @@ gqa_flash_prefill_v8x_kernel(
     const int kv_max    = (skv - 1 < past_len + q_start + ROWS - 1)
                               ? (skv - 1) : (past_len + q_start + ROWS - 1);
     const int num_tiles = kv_max / BKV + 1;
+    // With a window the walk starts at the tile holding the first row's
+    // lowest visible key.
+    int t_start = 0;
+    if constexpr (HAS_WINDOW) {
+        const int kv_lo = past_len + q_start - local_window_size + 1;
+        t_start = kv_lo > 0 ? kv_lo / BKV : 0;
+    }
 
     // K/V staging (KvStage) as in v6x (kGqaSplitKv: the next tile's K in
     // flight through the scores, its V through the softmax and the value
@@ -4580,17 +4596,17 @@ gqa_flash_prefill_v8x_kernel(
     const _Float16* K_frag_base = &K_lds[wmma_lane * K_STR + dt0 * 16];
     const _Float16* V_frag_base = &V_lds[(dt0 * 16 + wmma_lane) * VT_STR];
     Chunks pf, pv;
-    load_k(pf, 0);
-    load_v(pv, 0);
-    commit_k(pf, 0);
-    commit_v(pv, 0);
+    load_k(pf, t_start * BKV);
+    load_v(pv, t_start * BKV);
+    commit_k(pf, t_start * BKV);
+    commit_v(pv, t_start * BKV);
     __syncthreads();
-    if (num_tiles > 1) {
-        load_k(pf, BKV);
-        if constexpr (!kGqaSplitKv) load_v(pv, BKV);
+    if (t_start + 1 < num_tiles) {
+        load_k(pf, (t_start + 1) * BKV);
+        if constexpr (!kGqaSplitKv) load_v(pv, (t_start + 1) * BKV);
     }
 
-    for (int t = 0; t < num_tiles; ++t) {
+    for (int t = t_start; t < num_tiles; ++t) {
         const int kv0 = t * BKV;
 
         float8_t S_reg[S_TILES_J];
@@ -4637,18 +4653,24 @@ gqa_flash_prefill_v8x_kernel(
             }
         }
 
-        const bool need_mask = (kv0 + BKV > skv) || (kv0 + BKV - 1 > past_len + q_start);
+        bool need_mask = (kv0 + BKV > skv) || (kv0 + BKV - 1 > past_len + q_start);
+        if constexpr (HAS_WINDOW)
+            need_mask = need_mask || (kv0 < past_len + q_start + ROWS - local_window_size);
         if (need_mask) {
+            const int kv_lo = HAS_WINDOW ? abs_q - local_window_size + 1 : 0;
             #pragma unroll
             for (int sj = 0; sj < S_TILES_J; ++sj)
                 #pragma unroll
                 for (int e = 0; e < kAcc; ++e) {
                     const int kv_pos = kv0 + sj * 16 + hipdnn_wmma_acc_row(pair, e);
-                    if (kv_pos >= skv || kv_pos > abs_q) S_reg[sj][e] = -INFINITY;
+                    if (kv_pos >= skv || kv_pos > abs_q || kv_pos < kv_lo)
+                        S_reg[sj][e] = -INFINITY;
                 }
         }
 
-        // Softmax and P^T packing as in v6x.
+        // Softmax and P^T packing as in v6x. With a window a row can have no
+        // visible key yet in its first tiles (it starts below the block's
+        // first row's window): it keeps m = -inf and adds nothing.
         const float c = scale * kLog2e;
         half16_t Pb[S_TILES_J];
         float rmax = -INFINITY;
@@ -4658,14 +4680,17 @@ gqa_flash_prefill_v8x_kernel(
             for (int e = 0; e < kAcc; ++e) rmax = fmaxf(rmax, S_reg[sj][e]);
         rmax = fmaxf(rmax, v6_swap_halves(rmax));
         const float m_new = fmaxf(m_reg, rmax * c);
-        const float corr  = __builtin_amdgcn_exp2f(m_reg - m_new);
+        bool empty = false;
+        if constexpr (HAS_WINDOW) empty = (m_new == -INFINITY);
+        const float corr  = empty ? 1.0f : __builtin_amdgcn_exp2f(m_reg - m_new);
         float rsum = 0.0f;
         #pragma unroll
         for (int sj = 0; sj < S_TILES_J; ++sj) {
             _Float16 own[kAcc];
             #pragma unroll
             for (int e = 0; e < kAcc; ++e) {
-                const float p = __builtin_amdgcn_exp2f(fmaf(S_reg[sj][e], c, -m_new));
+                const float p = empty ? 0.0f
+                                      : __builtin_amdgcn_exp2f(fmaf(S_reg[sj][e], c, -m_new));
                 rsum += p;
                 own[e] = static_cast<_Float16>(p);
             }
@@ -4917,27 +4942,41 @@ static inline void dispatchPrefillV6x(
 // KV group per block, bkv keys per staged K/V tile.
 struct PrefillV8xCfg { int nd; int hb; int bkv; };
 
-static inline size_t prefillV8xSmemBytes(const PrefillV8xCfg& c) {
-    return (size_t)256 * (c.bkv + 8) * sizeof(_Float16) +
-           (size_t)c.bkv * (256 + 8) * sizeof(_Float16) +
+static inline size_t prefillV8xSmemBytes(const PrefillV8xCfg& c, int d) {
+    return (size_t)d * (c.bkv + 8) * sizeof(_Float16) +
+           (size_t)c.bkv * (d + 8) * sizeof(_Float16) +
            (c.nd > 1 ? (size_t)c.hb * c.nd * c.bkv * 16 * sizeof(float) : 0);
 }
 
-// The v8x configs built for a shape: (nd, hb) in (2,1) (2,2) (2,3) (2,4) (4,1)
-// (4,2) with hb dividing the group, BKV 16/32. nd=2 hb=1 runs any group.
+// The v8x configs built for a shape, hb dividing the group and the LDS within
+// 64 KB. d256: (nd, hb) in (2,1) (2,2) (2,3) (2,4) (4,1) (4,2), BKV 16/32; nd=2
+// hb=1 runs any group. d512 splits the head dim twice as finely, so each wave
+// holds the same 8 or 4 tiles of Q and O as at d256: (4,1) (4,2) (4,4) (8,1),
+// and only BKV=16 fits.
 static inline int prefillV8xCandidates(int d, int Hq, int G, PrefillV8xCfg* out) {
-    if (d != 256 || G <= 0 || Hq % G != 0) return 0;
-    static const int kLayouts[][2] = {{2, 1}, {2, 2}, {2, 3}, {2, 4}, {4, 1}, {4, 2}};
+    if ((d != 256 && d != 512) || G <= 0 || Hq % G != 0) return 0;
+    static const int kLayouts256[][2] = {{2, 1}, {2, 2}, {2, 3}, {2, 4}, {4, 1}, {4, 2}};
+    static const int kLayouts512[][2] = {{4, 1}, {4, 2}, {4, 4}, {8, 1}};
     const int hpg = Hq / G;
     int n = 0;
-    for (const auto& lay : kLayouts)
+    auto add = [&](int nd, int hb) {
         for (int bkv : {16, 32}) {
-            const PrefillV8xCfg c{lay[0], lay[1], bkv};
-            if (hpg % c.hb == 0 && prefillV8xSmemBytes(c) <= 65536) out[n++] = c;
+            const PrefillV8xCfg c{nd, hb, bkv};
+            if (hpg % c.hb == 0 && prefillV8xSmemBytes(c, d) <= 65536) out[n++] = c;
         }
+    };
+    if (d == 256)
+        for (const auto& lay : kLayouts256) add(lay[0], lay[1]);
+    else
+        for (const auto& lay : kLayouts512) add(lay[0], lay[1]);
     return n;
 }
 static constexpr int kPrefillV8xMaxCandidates = 12;
+
+// The sliding window is built into the d256 instances only.
+static inline bool prefillV8xWindowBuilt(int d, int local_window_size) {
+    return local_window_size <= 0 || d == 256;
+}
 
 static inline bool prefillV8xBuilt(int d, int Hq, int G, const PrefillV8xCfg& c) {
     PrefillV8xCfg cands[kPrefillV8xMaxCandidates];
@@ -4950,38 +4989,51 @@ static inline bool prefillV8xBuilt(int d, int Hq, int G, const PrefillV8xCfg& c)
 
 // Callers pass a config prefillV8xBuilt accepts for this shape.
 static inline void dispatchPrefillV8x(
-    const PrefillV8xCfg& cfg, hipStream_t stream,
+    const PrefillV8xCfg& cfg, int d, hipStream_t stream,
     const _Float16* Q, const _Float16* Kcache, const _Float16* Vcache,
     _Float16* O, int B, int Hq, int G, int sq, int skv, int max_seq,
     int past_len, float scale,
-    const _Float16* head_sink, int num_heads, int smooth_softmax)
+    const _Float16* head_sink, int num_heads, int smooth_softmax,
+    int local_window_size)
 {
     static const bool s_log_cfg = gqa_autotune_log_enabled() || custom_kernels_debug_enabled();
     if (s_log_cfg)
         fprintf(stderr,
-                "[gqa-cfg] prefill v8x B=%d H=%d G=%d d=256 sq=%d skv=%d -> "
+                "[gqa-cfg] prefill v8x B=%d H=%d G=%d d=%d sq=%d skv=%d window=%d -> "
                 "nd=%d hb=%d bkv=%d\n",
-                B, Hq, G, sq, skv, cfg.nd, cfg.hb, cfg.bkv);
+                B, Hq, G, d, sq, skv, local_window_size, cfg.nd, cfg.hb, cfg.bkv);
     const int num_q_tiles = (sq + 15) / 16;
     dim3 grid((Hq / cfg.hb) * num_q_tiles * B);
-    const size_t smem = prefillV8xSmemBytes(cfg);
+    const size_t smem = prefillV8xSmemBytes(cfg, d);
     const int layout = cfg.nd * 10 + cfg.hb;
-    #define LAUNCH_V8X(BKV_, ND_, HB_)                                          \
-        gqa_flash_prefill_v8x_kernel<BKV_, ND_, HB_>                            \
+    #define LAUNCH_V8X(BKV_, ND_, HB_, D_, HW_)                                 \
+        gqa_flash_prefill_v8x_kernel<BKV_, ND_, HB_, D_, HW_>                   \
             <<<grid, 32 * ND_ * HB_, smem, stream>>>(                           \
                 Q, Kcache, Vcache, O, B, Hq, G, sq, skv, max_seq, past_len,     \
-                scale, head_sink, num_heads, smooth_softmax)
-    #define V8X_LAYOUT(BKV_)                                                    \
+                scale, head_sink, num_heads, smooth_softmax, local_window_size)
+    #define V8X_LAYOUT(BKV_, HW_)                                               \
         do {                                                                    \
-            if      (layout == 22) LAUNCH_V8X(BKV_, 2, 2);                      \
-            else if (layout == 23) LAUNCH_V8X(BKV_, 2, 3);                      \
-            else if (layout == 24) LAUNCH_V8X(BKV_, 2, 4);                      \
-            else if (layout == 41) LAUNCH_V8X(BKV_, 4, 1);                      \
-            else if (layout == 42) LAUNCH_V8X(BKV_, 4, 2);                      \
-            else                   LAUNCH_V8X(BKV_, 2, 1);                      \
+            if      (layout == 22) LAUNCH_V8X(BKV_, 2, 2, 256, HW_);            \
+            else if (layout == 23) LAUNCH_V8X(BKV_, 2, 3, 256, HW_);            \
+            else if (layout == 24) LAUNCH_V8X(BKV_, 2, 4, 256, HW_);            \
+            else if (layout == 41) LAUNCH_V8X(BKV_, 4, 1, 256, HW_);            \
+            else if (layout == 42) LAUNCH_V8X(BKV_, 4, 2, 256, HW_);            \
+            else                   LAUNCH_V8X(BKV_, 2, 1, 256, HW_);            \
         } while (0)
-    if (cfg.bkv == 32) V8X_LAYOUT(32);
-    else               V8X_LAYOUT(16);
+    // Only d256 builds a windowed instance (prefillV8xWindowBuilt).
+    const bool window = local_window_size > 0;
+    if (d == 512) {
+        if      (layout == 42) LAUNCH_V8X(16, 4, 2, 512, false);
+        else if (layout == 44) LAUNCH_V8X(16, 4, 4, 512, false);
+        else if (layout == 81) LAUNCH_V8X(16, 8, 1, 512, false);
+        else                   LAUNCH_V8X(16, 4, 1, 512, false);
+    } else if (cfg.bkv == 32) {
+        if (window) V8X_LAYOUT(32, true);
+        else        V8X_LAYOUT(32, false);
+    } else {
+        if (window) V8X_LAYOUT(16, true);
+        else        V8X_LAYOUT(16, false);
+    }
     #undef V8X_LAYOUT
     #undef LAUNCH_V8X
 }
@@ -5075,7 +5127,7 @@ static std::string prefillTuneKey(int d, int sq, int skv, int Hq, int G, int win
            (has_key_bias ? "_kb" : "");
 }
 
-// Self-tuning launch: v6x at d64 / d96 / d128, v8x at d256 (no window).
+// Self-tuning launch: v6x at d64 / d96 / d128, v8x at d256 and d512 (no window).
 // Returns -1 for a shape neither kernel is built for, so the caller can fall
 // back.
 static int prefillTunedRun(
@@ -5089,8 +5141,8 @@ static int prefillTunedRun(
     if (key_bias != nullptr && d != 128) return -1;
     const std::string key =
         prefillTuneKey(d, sq, skv, Hq, G, local_window_size, key_bias != nullptr);
-    if (d == 256) {
-        if (local_window_size > 0 || key_bias != nullptr) return -1;
+    if (d == 256 || d == 512) {
+        if (!prefillV8xWindowBuilt(d, local_window_size) || key_bias != nullptr) return -1;
         PrefillV8xCfg cands[kPrefillV8xMaxCandidates];
         const int nc = prefillV8xCandidates(d, Hq, G, cands);
         if (nc == 0) return -1;
@@ -5104,17 +5156,18 @@ static int prefillTunedRun(
                 const int best = tunePrefillCandidates(
                     stream, nc,
                     [&](int i) {
-                        dispatchPrefillV8x(cands[i], stream, Q, Kcache, Vcache, O, B, Hq,
-                                           G, sq, skv, max_seq, past_len, scale,
-                                           nullptr, Hq, 0);
+                        dispatchPrefillV8x(cands[i], d, stream, Q, Kcache, Vcache, O, B,
+                                           Hq, G, sq, skv, max_seq, past_len, scale,
+                                           nullptr, Hq, 0, local_window_size);
                     },
                     [&](int i) { return prefillV8xName(cands[i]); }, d, sq, skv);
                 cfg = cands[best];
                 g_v8x_cfg_cache[key] = cfg;
             }
         }
-        dispatchPrefillV8x(cfg, stream, Q, Kcache, Vcache, O, B, Hq, G, sq, skv,
-                           max_seq, past_len, scale, head_sink, num_heads, smooth_softmax);
+        dispatchPrefillV8x(cfg, d, stream, Q, Kcache, Vcache, O, B, Hq, G, sq, skv,
+                           max_seq, past_len, scale, head_sink, num_heads, smooth_softmax,
+                           local_window_size);
         return 0;
     }
     PrefillV6xCfg cands[kPrefillV6xMaxCandidates];
@@ -5149,16 +5202,17 @@ static int prefillTunedRun(
 
 
 // Unified fused flash-prefill entry, tuned online on first use per shape: v6x
-// at d64, d96 and d128, v8x at d256. The runtime only has to call this one
-// symbol for any eligible (fp16, causal, GQA) prefill and gets the right
-// kernel. Returns -1 for unsupported head dims so the caller can fall back.
+// at d64, d96 and d128, v8x at d256 and d512. The runtime only has to call
+// this one symbol for any eligible (fp16, causal, GQA) prefill and gets the
+// right kernel. Returns -1 for unsupported head dims so the caller can fall
+// back.
 extern "C" int hip_gqa_flash_prefill_v2(
     void* stream_ptr,
     const void* Q, const void* Kcache, const void* Vcache, void* O,
     int B, int Hq, int G, int sq, int skv, int d, int max_seq, int past_len,
     float scale)
 {
-    if (d != 64 && d != 96 && d != 128 && d != 256) return -1;
+    if (d != 64 && d != 96 && d != 128 && d != 256 && d != 512) return -1;
     return prefillTunedRun(static_cast<hipStream_t>(stream_ptr),
                            static_cast<const _Float16*>(Q),
                            static_cast<const _Float16*>(Kcache),
@@ -5173,8 +5227,8 @@ extern "C" int hip_gqa_flash_prefill_v2(
 // headers that redeclare it keep linking unchanged.
 //
 // Attention sinks are implemented for d == 64 and d == 96, sliding-window
-// attention for d == 64, 96 and 128, and the per-key bias for d == 128 (all
-// by v6x).
+// attention for d == 64, 96, 128 (v6x) and 256 (v8x), and the per-key bias for
+// d == 128 (v6x).
 // Unsupported feature/head combinations return -1 rather than silently
 // dropping the requested feature. key_bias is an fp16 row per batch entry,
 // key_bias_stride elements apart (0 shares one row), added to every query's
@@ -5190,9 +5244,9 @@ extern "C" int hip_gqa_flash_prefill(
     const bool wants_sink   = (head_sink != nullptr) || (smooth_softmax != 0);
     const bool wants_window = local_window_size > 0;
     if (wants_sink && d != 64 && d != 96) return -1;
-    if (wants_window && d != 64 && d != 96 && d != 128) return -1;
+    if (wants_window && d != 64 && d != 96 && d != 128 && d != 256) return -1;
     if (key_bias != nullptr && d != 128) return -1;
-    if (d != 64 && d != 96 && d != 128 && d != 256) return -1;
+    if (d != 64 && d != 96 && d != 128 && d != 256 && d != 512) return -1;
     (void)hipGetLastError();
     if (prefillTunedRun(static_cast<hipStream_t>(stream_ptr),
                         static_cast<const _Float16*>(Q),
@@ -5223,7 +5277,7 @@ extern "C" int hip_gqa_flash_prefill_v3_configured(
     const bool wants_sink = head_sink != nullptr || smooth_softmax != 0;
     const bool wants_window = local_window_size > 0;
     if (wants_sink && d != 64 && d != 96) return -1;
-    if (wants_window && d != 64 && d != 96 && d != 128) return -1;
+    if (wants_window && d != 64 && d != 96 && d != 128 && d != 256) return -1;
     if (key_bias != nullptr && d != 128) return -1;
 
     hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
@@ -5246,14 +5300,15 @@ extern "C" int hip_gqa_flash_prefill_v3_configured(
                            static_cast<const _Float16*>(key_bias), key_bias_stride);
         return hipGetLastError();
     }
-    if (d == 256) {
+    if (d == 256 || d == 512) {
         const PrefillV8xCfg cfg{nd, hb, bkv};
-        if (!prefillV8xBuilt(d, Hq, G, cfg)) return -1;
+        if (!prefillV8xBuilt(d, Hq, G, cfg) || !prefillV8xWindowBuilt(d, local_window_size))
+            return -1;
         (void)hipGetLastError();
-        dispatchPrefillV8x(cfg, stream, Q_ptr, K_ptr, V_ptr, O_ptr, B, Hq, G, sq, skv,
+        dispatchPrefillV8x(cfg, d, stream, Q_ptr, K_ptr, V_ptr, O_ptr, B, Hq, G, sq, skv,
                            max_seq, past_len, scale,
                            static_cast<const _Float16*>(head_sink), num_heads,
-                           smooth_softmax);
+                           smooth_softmax, local_window_size);
         return hipGetLastError();
     }
     return -1;
