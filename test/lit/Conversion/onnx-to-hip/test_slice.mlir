@@ -603,50 +603,25 @@ module {
     return %r : tensor<?x4xf32>
   }
 
-  // Test 26: an unranked `Slice(x, k, k, axis)` that does not seed a loop.
-  // The length is zero, and that is the shape consumers see. Same-SSA bounds
-  // are not enough to treat it as an accumulator.
-  func.func @test_slice_unranked_empty(%input: tensor<?x4xf32>,
-                                       %k: tensor<1xi64>) -> tensor<?x4xf32> {
+  // Test 26: an unranked `Slice(x, k, k, axis)`. One SSA value for both bounds
+  // makes the sliced axis empty at compile time, so the result is a bare
+  // tensor.empty with a zero extent there and the data dim elsewhere: no
+  // hip.slice, no readback. An unranked result is never a loop seed, because
+  // hip.loop requires a ranked v_init.
+  func.func @test_slice_unranked_empty(%input: tensor<?x?xf32>,
+                                       %k: tensor<1xi64>) -> tensor<?x?xf32> {
     // CHECK-LABEL: func.func @test_slice_unranked_empty
     // CHECK-NOT: hip.readback_scalar
+    // CHECK-NOT: hip.slice
     // CHECK: %[[Z:.*]] = arith.constant 0 : index
-    // CHECK: tensor.empty(%[[Z]]) : tensor<?x4xf32>
-    // CHECK: %[[S:.*]] = hip.slice{{.*}} : tensor<?x4xf32>
-    // CHECK: tensor.extract_slice %[[S]][0, 0] [%[[Z]], 4] [1, 1] : tensor<?x4xf32> to tensor<?x4xf32>
-    %axes = arith.constant dense<[0]> : tensor<1xi64>
+    // CHECK: %[[D0:.*]] = tensor.dim %{{.*}}, %[[Z]] : tensor<?x?xf32>
+    // CHECK: tensor.empty(%[[D0]], %[[Z]]) : tensor<?x?xf32>
+    // CHECK-NOT: hip.slice
+    %axes = arith.constant dense<[1]> : tensor<1xi64>
     %s = "onnx.Slice"(%input, %k, %k, %axes)
-        : (tensor<?x4xf32>, tensor<1xi64>, tensor<1xi64>,
+        : (tensor<?x?xf32>, tensor<1xi64>, tensor<1xi64>,
            tensor<1xi64>) -> tensor<*xf32>
-    %r = "onnx.Identity"(%s) : (tensor<*xf32>) -> tensor<?x4xf32>
-    return %r : tensor<?x4xf32>
-  }
-
-  // Test 27: the same slice seeding a Loop. The carried value is the
-  // allocation FixLoopAccumulatorOffset appends into, so it keeps the data
-  // dim and is not wrapped in a zero-length view.
-  func.func @test_slice_unranked_empty_seed(%input: tensor<?x4xf32>,
-                                            %k: tensor<1xi64>)
-      -> tensor<?x4xf32> {
-    // CHECK-LABEL: func.func @test_slice_unranked_empty_seed
-    // CHECK-NOT: hip.readback_scalar
-    // CHECK: %[[DIM:.*]] = tensor.dim %{{.*}}, %{{.*}} : tensor<?x4xf32>
-    // CHECK: tensor.empty(%[[DIM]]) : tensor<?x4xf32>
-    // CHECK: hip.slice{{.*}} : tensor<?x4xf32>
-    // CHECK-NOT: tensor.extract_slice
-    // CHECK: onnx.Loop
-    %axes = arith.constant dense<[0]> : tensor<1xi64>
-    %trip = arith.constant dense<2> : tensor<i64>
-    %cond = arith.constant dense<true> : tensor<i1>
-    %s = "onnx.Slice"(%input, %k, %k, %axes)
-        : (tensor<?x4xf32>, tensor<1xi64>, tensor<1xi64>,
-           tensor<1xi64>) -> tensor<*xf32>
-    %r = "onnx.Loop"(%trip, %cond, %s) ({
-    ^bb0(%iter: tensor<i64>, %cond_in: tensor<i1>, %acc: tensor<*xf32>):
-      %cond_out = "onnx.Identity"(%cond_in) : (tensor<i1>) -> tensor<i1>
-      %acc_out = "onnx.Identity"(%acc) : (tensor<*xf32>) -> tensor<*xf32>
-      "onnx.Yield"(%cond_out, %acc_out) : (tensor<i1>, tensor<*xf32>) -> ()
-    }) : (tensor<i64>, tensor<i1>, tensor<*xf32>) -> tensor<?x4xf32>
-    return %r : tensor<?x4xf32>
+    %r = "onnx.Identity"(%s) : (tensor<*xf32>) -> tensor<?x?xf32>
+    return %r : tensor<?x?xf32>
   }
 }

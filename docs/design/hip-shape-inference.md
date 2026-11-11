@@ -121,9 +121,10 @@ An unranked result has no declared shape, so the destination size would be the o
 
 - axes and steps must be constant, steps must be positive, and starts and ends must be integer vectors with one entry per axis;
 - a bound that host arithmetic cannot resolve is read back from the device;
-- a runtime length that can be zero still allocates the data dimension, and a `tensor.extract_slice` of the exact length is the value consumers see.
+- a runtime length that can be zero still allocates the data dimension, and a `tensor.extract_slice` of the exact length is the value consumers see;
+- `Slice(x, k, k, axis)`, with one SSA value for both bounds, is empty at compile time and lowers to a bare `tensor.empty` with no `hip.slice`.
 
-A loop-carried seed is the exception. When the unranked result is a `hip.loop` `v_init` or an `onnx.Loop` carried input, there is no zero-length view: that value is the buffer the accumulator appends into, so it keeps the data dimension. Any other unranked `Slice(x, k, k, axis)` returns the empty view. Same-SSA bounds alone do not make a slice a seed.
+An unranked result is never the accumulator seed that needs capacity: `hip.loop` requires a ranked `v_init`, and loop outlining runs before ONNX-to-HIP conversion. A scan loop lowers to `scf.while` in the parent function, where an exact empty seed is correct.
 
 Shared declarations live in `HipShapeUtils.h`; common implementation lives in
 `HipShapeUtils.cpp`, with focused category translation units introduced by the
