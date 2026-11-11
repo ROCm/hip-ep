@@ -6,6 +6,7 @@
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
+#include <llvm/ADT/STLExtras.h>
 #include <llvm/ADT/SmallVectorExtras.h>
 #include <llvm/Support/Debug.h>
 #include <mlir/Analysis/TopologicalSortUtils.h>
@@ -61,6 +62,25 @@ static Type promoteRankZero(Type type) {
                                tensorType.getEncoding());
 }
 
+// rocMLIR's blockwise load rejects f64. An f64 value keeps its op on the HIP
+// kernel, and a dot in f64 stays on the HIP gemm, which hipBLAS runs as
+// HIP_R_64F.
+static bool isF64Type(Type type) {
+  auto shaped = dyn_cast<ShapedType>(type);
+  Type element = shaped ? shaped.getElementType() : type;
+  return element.isF64();
+}
+
+// A cast is fused into a rocMLIR kernel only when every float it touches is
+// f16, bf16, or f32. Otherwise it stays a HIP cast outside the kernel.
+static bool isRocMlirCastEndpoint(Type type) {
+  auto shaped = dyn_cast<ShapedType>(type);
+  Type element = shaped ? shaped.getElementType() : type;
+  if (!isa<FloatType>(element))
+    return true;
+  return element.isF16() || element.isBF16() || element.isF32();
+}
+
 /// rocMLIR's arithmetic uses signless integers. ONNX BOOL is ui8 in the
 /// importer, but a Where condition is a one-byte 0/1 mask, so the outlined
 /// kernel can safely view that argument as i8. The dispatch continues to pass
@@ -103,6 +123,16 @@ public:
         return rewriter.notifyMatchFailure(
             anchorOp, "i32 anchor stays on the HIP kernel");
     }
+
+    // An f64 dot stays on the HIP gemm; rocMLIR's blockwise load rejects f64.
+    for (Type type : anchorOp->getOperandTypes())
+      if (isF64Type(type))
+        return rewriter.notifyMatchFailure(anchorOp,
+                                           "f64 anchor stays on the HIP gemm");
+    for (Type type : anchorOp->getResultTypes())
+      if (isF64Type(type))
+        return rewriter.notifyMatchFailure(anchorOp,
+                                           "f64 anchor stays on the HIP gemm");
 
     // Fail on dynamic shapes
     for (Value operand : anchorOp->getOperands()) {
@@ -322,12 +352,15 @@ public:
   }
 
   bool isaPointwiseOp(Operation *op) const {
+    if (auto cast = dyn_cast_if_present<CastOp>(op))
+      return llvm::all_of(cast->getOperandTypes(), isRocMlirCastEndpoint) &&
+             llvm::all_of(cast->getResultTypes(), isRocMlirCastEndpoint);
     return isa_and_present<MulOp, AddOp, MinOp, MaxOp, SiluOp, SigmoidOp,
                            TanhOp, SoftplusOp, GeluOp, BiasGeluOp, FastGeluOp,
                            LeakyReluOp, ReciprocalOp, SqrtOp, DivOp, EqualOp,
                            AndOp, OrOp, NotOp, CosOp, ErfOp, SinOp, CeilOp,
                            RoundOp, AtanOp, FloorOp, ExpOp, LogOp, AbsOp, NegOp,
-                           SubOp, CastOp, LessOp, SignOp, ModOp, WhereOp>(op);
+                           SubOp, LessOp, SignOp, ModOp, WhereOp>(op);
   }
 
 private:
