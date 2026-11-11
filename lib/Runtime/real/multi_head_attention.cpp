@@ -7,7 +7,7 @@
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
 #include "../op_state.h"
-#include "cache_utils.h"
+#include "attention_gemm.h"
 #include "error_check_macros.h"
 #include "hip_arch_compat.h"
 #include "hip_custom_kernels.h"
@@ -22,7 +22,6 @@
 #include <unordered_map>
 
 #define HIP_CHECK(cmd) HIP_CHECK_GOTO(cmd, cleanup)
-#define HIPBLAS_CHECK(cmd) HIPBLAS_CHECK_GOTO(cmd, cleanup)
 
 //===----------------------------------------------------------------------===//
 // com.microsoft.MultiHeadAttention runtime
@@ -36,7 +35,7 @@
 //   value : [B, S_kv, N * H]   fp16
 //   output: [B, S_q,  N * H]   fp16
 //
-// Algorithm (decomposed hipBLASLt pipeline, same shape as GQA's decomposed
+// Algorithm (decomposed custom-GEMM pipeline, same shape as GQA's decomposed
 // path but simpler because N_q == N_kv so no KV-expansion step is needed):
 //
 //   1. Q transpose [B, S_q,  N, H] -> [B, N, S_q,  H]   (skipped when S_q==1)
@@ -48,11 +47,9 @@
 //   7. Value GEMM: O_BNSH = P_f16 @ V          (fp16, batched B*N)
 //   8. O transpose [B, N, S_q, H] -> [B, S_q, N, H]    (skipped when S_q==1)
 //
-// All hipBLASLt descriptors and heuristic-selected algorithms are cached in
-// a per-session unordered_map keyed on (m, n, k, batch, strides, transA,
-// outputFp32). The matmul workspace and the transpose / score / softmax /
-// output scratch all share the per-session growable device buffer obtained
-// via hipdnn_ep_state_(ensure|get)_workspace.
+// Score inputs are cast exactly to fp32 before custom hip_gemm, preserving
+// fp32 scores for softmax. Value uses fp16 hip_gemm. Scratch shares the session
+// workspace and is sized before deriving Q/K/V/Y pointers.
 //
 // Unsupported features (any of which currently return -1 with an error log):
 //   * Packed QKV (rank-5 query [B, S, N, 3, H] or rank-3 [B, S, 3*N*H])
@@ -71,227 +68,8 @@
 // log instead of silently producing wrong numbers.
 
 namespace {
-
-//===----------------------------------------------------------------------===//
-// MHA hipBLASLt GEMM descriptor cache (per RuntimeState session)
-//===----------------------------------------------------------------------===//
-
-struct MhaGemmKey {
-  int64_t m;
-  int64_t n;
-  int64_t k;
-  int64_t batch;
-  int64_t strideA;
-  int64_t strideB;
-  int64_t strideC;
-  bool transA;
-  bool outputFp32;
-
-  bool operator==(const MhaGemmKey &o) const {
-    return m == o.m && n == o.n && k == o.k && batch == o.batch &&
-           strideA == o.strideA && strideB == o.strideB &&
-           strideC == o.strideC && transA == o.transA &&
-           outputFp32 == o.outputFp32;
-  }
-};
-
-struct MhaGemmKeyHash {
-  template <typename T> static void hash_combine_val(size_t &h, const T &v) {
-    h ^= std::hash<T>{}(v) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
-  }
-  size_t operator()(const MhaGemmKey &k) const noexcept {
-    size_t h = 0;
-    hash_combine_val(h, k.m);
-    hash_combine_val(h, k.n);
-    hash_combine_val(h, k.k);
-    hash_combine_val(h, k.batch);
-    hash_combine_val(h, k.strideA);
-    hash_combine_val(h, k.strideB);
-    hash_combine_val(h, k.strideC);
-    hash_combine_val(h, (int)k.transA);
-    hash_combine_val(h, (int)k.outputFp32);
-    return h;
-  }
-};
-
-struct MhaGemmCacheEntry {
-  hipblasLtMatmulDesc_t desc;
-  hipblasLtMatrixLayout_t layA;
-  hipblasLtMatrixLayout_t layB;
-  hipblasLtMatrixLayout_t layC;
-  hipblasLtMatrixLayout_t layD;
-  hipblasLtMatmulAlgo_t algo;
-  size_t workspace_size;
-};
-
-struct MhaGemmCache {
-  std::unordered_map<MhaGemmKey, MhaGemmCacheEntry, MhaGemmKeyHash> entries;
-  // Destroys every cached hipBLASLt descriptor/layout entry. Defined
-  // out-of-line below. Runs when the owning op-state slot is torn down
-  // (MhaState's deletor).
-  ~MhaGemmCache();
-};
-
-// Per-instance MultiHeadAttention op-state (see op-state-slots-design.md):
-// owns this instance's per-GEMM-shape hipBLASLt descriptor/algorithm cache.
-// Replaces the former shared RuntimeState::mha_gemm_cache, so concurrent
-// sessions (and distinct MHA layers) no longer share one descriptor map.
-struct MhaState : OpStateT<MhaState> {
-  MhaGemmCache cache;
-};
-
-// Resolve this MHA instance's descriptor cache from its op-state slot. Returns
-// nullptr when the slot is unconstructed (init failure) — callers propagate the
-// error rather than lazily allocating, since the slot is built at session init.
-MhaGemmCache *get_mha_gemm_cache(RuntimeState *state, int op_state_slot) {
-  MhaState *ms = MhaState::get_op_state(state, op_state_slot);
-  return ms ? &ms->cache : nullptr;
-}
-
-//===----------------------------------------------------------------------===//
-// hipBLASLt layout helper (same convention as GQA's setLayoutBatch)
-//===----------------------------------------------------------------------===//
-
-hipblasStatus_t setLayoutBatch(hipblasLtMatrixLayout_t layout,
-                               int32_t batchCount, int64_t stride) {
-  hipblasStatus_t status;
-  status = hipblasLtMatrixLayoutSetAttribute(
-      layout, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batchCount,
-      sizeof(batchCount));
-  if (status != HIPBLAS_STATUS_SUCCESS)
-    return status;
-  status = hipblasLtMatrixLayoutSetAttribute(
-      layout, HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &stride,
-      sizeof(stride));
-  return status;
-}
-
-//===----------------------------------------------------------------------===//
-// Build / look up a hipBLASLt GEMM descriptor for a particular shape
-//===----------------------------------------------------------------------===//
-
-const MhaGemmCacheEntry *queryOrCreateMhaGemm(RuntimeState *state,
-                                              hipblasLtHandle_t handle,
-                                              const MhaGemmKey &key,
-                                              int op_state_slot) {
-  assert(handle && "queryOrCreateMhaGemm: null handle");
-  auto *cache = get_mha_gemm_cache(state, op_state_slot);
-  if (!cache) {
-    fprintf(stderr, "queryOrCreateMhaGemm: no MhaState at slot %d\n",
-            op_state_slot);
-    return nullptr;
-  }
-  auto it = cache->entries.find(key);
-  if (it != cache->entries.end())
-    return &it->second;
-
-  int64_t m = key.m, n = key.n, k = key.k;
-  int32_t batch = static_cast<int32_t>(key.batch);
-
-  MhaGemmCacheEntry entry = {};
-
-  hipblasLtMatmulPreference_t pref = nullptr;
-  hipblasStatus_t st_status;
-
-#define MHA_CACHE_CHECK(call)                                                  \
-  do {                                                                         \
-    st_status = (call);                                                        \
-    if (st_status != HIPBLAS_STATUS_SUCCESS)                                   \
-      goto cache_fail;                                                         \
-  } while (0)
-
-  MHA_CACHE_CHECK(
-      hipblasLtMatmulDescCreate(&entry.desc, HIPBLAS_COMPUTE_32F, HIP_R_32F));
-  {
-    hipblasOperation_t opA = key.transA ? HIPBLAS_OP_T : HIPBLAS_OP_N;
-    hipblasOperation_t opN = HIPBLAS_OP_N;
-    MHA_CACHE_CHECK(hipblasLtMatmulDescSetAttribute(
-        entry.desc, HIPBLASLT_MATMUL_DESC_TRANSA, &opA, sizeof(opA)));
-    MHA_CACHE_CHECK(hipblasLtMatmulDescSetAttribute(
-        entry.desc, HIPBLASLT_MATMUL_DESC_TRANSB, &opN, sizeof(opN)));
-  }
-  {
-    int64_t a_rows = key.transA ? k : m;
-    int64_t a_cols = key.transA ? m : k;
-    MHA_CACHE_CHECK(hipblasLtMatrixLayoutCreate(&entry.layA, HIP_R_16F, a_rows,
-                                                a_cols, a_rows));
-    MHA_CACHE_CHECK(setLayoutBatch(entry.layA, batch, key.strideA));
-
-    MHA_CACHE_CHECK(
-        hipblasLtMatrixLayoutCreate(&entry.layB, HIP_R_16F, k, n, k));
-    MHA_CACHE_CHECK(setLayoutBatch(entry.layB, batch, key.strideB));
-
-    hipDataType outType = key.outputFp32 ? HIP_R_32F : HIP_R_16F;
-    MHA_CACHE_CHECK(hipblasLtMatrixLayoutCreate(&entry.layC, outType, m, n, m));
-    MHA_CACHE_CHECK(setLayoutBatch(entry.layC, batch, key.strideC));
-    MHA_CACHE_CHECK(hipblasLtMatrixLayoutCreate(&entry.layD, outType, m, n, m));
-    MHA_CACHE_CHECK(setLayoutBatch(entry.layD, batch, key.strideC));
-  }
-  MHA_CACHE_CHECK(hipblasLtMatmulPreferenceCreate(&pref));
-  {
-    const size_t max_ws = kMaxWorkspaceBytes;
-    MHA_CACHE_CHECK(hipblasLtMatmulPreferenceSetAttribute(
-        pref, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &max_ws,
-        sizeof(max_ws)));
-  }
-  {
-    hipblasLtMatmulHeuristicResult_t heur;
-    int returned = 0;
-    MHA_CACHE_CHECK(hipblasLtMatmulAlgoGetHeuristic(
-        handle, entry.desc, entry.layA, entry.layB, entry.layC, entry.layD,
-        pref, 1, &heur, &returned));
-    hipblasLtMatmulPreferenceDestroy(pref);
-    pref = nullptr;
-    if (returned == 0) {
-      fprintf(stderr,
-              "MHA: no hipBLASLt algorithm found for GEMM m=%lld n=%lld "
-              "k=%lld batch=%lld transA=%d outputFp32=%d\n",
-              (long long)m, (long long)n, (long long)k, (long long)batch,
-              (int)key.transA, (int)key.outputFp32);
-      goto cache_fail;
-    }
-    entry.algo = heur.algo;
-    entry.workspace_size = heur.workspaceSize;
-  }
-#undef MHA_CACHE_CHECK
-  goto cache_done;
-
-cache_fail:
-  if (pref)
-    hipblasLtMatmulPreferenceDestroy(pref);
-  if (entry.layD)
-    hipblasLtMatrixLayoutDestroy(entry.layD);
-  if (entry.layC)
-    hipblasLtMatrixLayoutDestroy(entry.layC);
-  if (entry.layB)
-    hipblasLtMatrixLayoutDestroy(entry.layB);
-  if (entry.layA)
-    hipblasLtMatrixLayoutDestroy(entry.layA);
-  if (entry.desc)
-    hipblasLtMatmulDescDestroy(entry.desc);
-  return nullptr;
-
-cache_done:
-  auto [ins, _] = cache->entries.emplace(key, entry);
-  return &ins->second;
-}
-
-MhaGemmCache::~MhaGemmCache() {
-  for (auto &kv : entries) {
-    auto &e = kv.second;
-    if (e.layD)
-      hipblasLtMatrixLayoutDestroy(e.layD);
-    if (e.layC)
-      hipblasLtMatrixLayoutDestroy(e.layC);
-    if (e.layB)
-      hipblasLtMatrixLayoutDestroy(e.layB);
-    if (e.layA)
-      hipblasLtMatrixLayoutDestroy(e.layA);
-    if (e.desc)
-      hipblasLtMatmulDescDestroy(e.desc);
-  }
-}
-
+// Retain the per-op constructor ABI; custom GEMM resolves configs in its DLL.
+struct MhaState : OpStateT<MhaState> {};
 } // namespace
 
 //===----------------------------------------------------------------------===//
@@ -299,7 +77,7 @@ MhaGemmCache::~MhaGemmCache() {
 //===----------------------------------------------------------------------===//
 
 // Construct this MHA instance's op-state slot (see op-state-slots-design.md).
-// No compile-time params: the descriptor cache fills lazily per GEMM shape. The
+// No compile-time params: config selection lives in the custom kernel DLL. The
 // construct fn stores the state into op_states[slot] itself.
 extern "C" int8_t
 hipdnn_ep_op_state_construct_multi_head_attention(RuntimeState *state,
@@ -315,7 +93,7 @@ hipdnn_ep_op_state_construct_multi_head_attention(RuntimeState *state,
 
 extern "C" int wrap_multi_head_attention(
     RuntimeState *state,
-    // Per-instance op-state slot (MhaState: this layer's GEMM descriptor cache)
+    // Per-instance op-state slot (MhaState: constructor ABI compatibility)
     int op_state_slot, void *query, void *key, void *value, void *bias,
     void *key_padding_mask, void *attention_bias, void *past_key,
     void *past_value, void *past_sequence_length, void *cache_indirection,
@@ -324,6 +102,7 @@ extern "C" int wrap_multi_head_attention(
     int64_t unidirectional, int64_t batch_size, int64_t seq_len_q,
     int64_t seq_len_kv, int64_t query_hidden, int64_t v_hidden,
     int64_t head_size, int64_t query_rank, int64_t element_size_bytes) {
+  (void)op_state_slot;
   (void)mask_filter_value; // currently unused (causal mask uses the -inf/-65504
                            // sentinel from hip_gqa_causal_mask_f32)
 
@@ -469,13 +248,6 @@ extern "C" int wrap_multi_head_attention(
     fprintf(stderr, "[multi_head_attention] ERROR: failed to get HIP stream\n");
     return -1;
   }
-  hipblasLtHandle_t ltHandle = reinterpret_cast<hipblasLtHandle_t>(
-      hipdnn_ep_state_get_hipblas_handle(state));
-  if (!ltHandle) {
-    fprintf(stderr,
-            "[multi_head_attention] ERROR: failed to get hipBLASLt handle\n");
-    return -1;
-  }
 
   // ---- Fused flash-attention prefill fast path -------------------------
   // Non-causal self-attention prefill (the Qwen VLM vision encoder: B=1,
@@ -552,6 +324,15 @@ extern "C" int wrap_multi_head_attention(
     return 0;
   }
 
+  hipdnn_ep::dense_gemm::ColumnMajorBatch scorePlan, valuePlan;
+  int64_t headBatches;
+  if (!hipdnn_ep::dense_gemm::multiply(B, N, headBatches) ||
+      !scorePlan.initialize(Skv, Sq, H, headBatches, true, 0, 1, 0, 0, 0) ||
+      !valuePlan.initialize(H, Sq, Skv, headBatches, false, 0, 0, 0, 0, 0)) {
+    fprintf(stderr, "MHA: unsupported custom GEMM dimensions/strides\n");
+    return -1;
+  }
+
   // ---- Scratch layout (all backed by the shared workspace buffer) ----
   // 64-byte aligned sub-buffers in a single contiguous allocation:
   //   [ Q_BNSH (fp16, B*N*Sq *H)        -- skipped when S_q==1
@@ -560,7 +341,7 @@ extern "C" int wrap_multi_head_attention(
   //   | S_f32  (fp32, B*N*Sq *Skv)
   //   | P_f16  (fp16, B*N*Sq *Skv)
   //   | O_BNSH (fp16, B*N*Sq *H)        -- skipped when S_q==1
-  //   | gemm_workspace (kMaxWorkspaceBytes from hipBLASLt heuristic)
+  //   | gemm_workspace (one batch of fp32 score-input scratch)
   //   ]
   // When a transpose is skipped, the source memref is BSHD [B,1,N,H] which is
   // bit-identical to BNSH [B,N,1,H] (different logical reshape, same memory
@@ -576,7 +357,7 @@ extern "C" int wrap_multi_head_attention(
   const size_t sz_s_f32 = align_up(B * N * Sq * Skv * 4);
   const size_t sz_p_f16 = align_up(B * N * Sq * Skv * 2);
   const size_t sz_o_bnsh = need_o_trans ? align_up(B * N * Sq * H * 2) : 0;
-  const size_t sz_gemm_ws = align_up(kMaxWorkspaceBytes);
+  const size_t sz_gemm_ws = align_up(scorePlan.workspace_size);
   const size_t total_ws = sz_q_bnsh + sz_k_bnsh + sz_v_bnsh + sz_s_f32 +
                           sz_p_f16 + sz_o_bnsh + sz_gemm_ws;
 
@@ -667,36 +448,9 @@ extern "C" int wrap_multi_head_attention(
   //   per-batch (b*N + n) strides: A=Skv*H, B=Sq*H, C=Skv*Sq
   // Produces fp32 S of shape [B*N, Sq, Skv] with row-stride Skv per query.
   {
-    MhaGemmKey scoreKey = {};
-    scoreKey.m = Skv;
-    scoreKey.n = Sq;
-    scoreKey.k = H;
-    scoreKey.batch = B * N;
-    scoreKey.transA = true;
-    scoreKey.outputFp32 = true;
-    scoreKey.strideA = Skv * H;
-    scoreKey.strideB = Sq * H;
-    scoreKey.strideC = Skv * Sq;
-
-    const MhaGemmCacheEntry *scoreState =
-        queryOrCreateMhaGemm(state, ltHandle, scoreKey, op_state_slot);
-    if (!scoreState) {
-      fprintf(stderr,
-              "[multi_head_attention] ERROR: failed to build Score GEMM "
-              "state for B*N=%lld Skv=%lld Sq=%lld H=%lld\n",
-              (long long)(B * N), (long long)Skv, (long long)Sq, (long long)H);
-      result = -1;
-      goto cleanup;
-    }
-
-    float scoreAlpha = scale;
-    float beta = 0.0f;
-    hipblasLtMatmulAlgo_t sAlgo = scoreState->algo;
     OP_ROCTX_MARK("hip_ep.op.multi_head_attention.attn.qk_gemm");
-    HIPBLAS_CHECK(hipblasLtMatmul(
-        ltHandle, scoreState->desc, &scoreAlpha, d_Kbnsh, scoreState->layA,
-        d_Qbnsh, scoreState->layB, &beta, d_S_f32, scoreState->layC, d_S_f32,
-        scoreState->layD, &sAlgo, gemm_ws, gemm_ws_bytes, stream));
+    HIP_CHECK(scorePlan.run(stream, d_Kbnsh, d_Qbnsh, d_S_f32, scale, gemm_ws,
+                            gemm_ws_bytes));
   }
 
   // ---- Step 5: Optional causal mask (fp32) ------------------------------
@@ -726,36 +480,9 @@ extern "C" int wrap_multi_head_attention(
   //   per-batch (b*N + n) strides: A=Skv*H, B=Sq*Skv, C=Sq*H
   // Produces fp16 O of shape [B*N, Sq, H] (BNSH layout).
   {
-    MhaGemmKey valueKey = {};
-    valueKey.m = H;
-    valueKey.n = Sq;
-    valueKey.k = Skv;
-    valueKey.batch = B * N;
-    valueKey.transA = false;
-    valueKey.outputFp32 = false;
-    valueKey.strideA = Skv * H;
-    valueKey.strideB = Sq * Skv;
-    valueKey.strideC = Sq * H;
-
-    const MhaGemmCacheEntry *valueState =
-        queryOrCreateMhaGemm(state, ltHandle, valueKey, op_state_slot);
-    if (!valueState) {
-      fprintf(stderr,
-              "[multi_head_attention] ERROR: failed to build Value GEMM "
-              "state for B*N=%lld Sq=%lld Skv=%lld H=%lld\n",
-              (long long)(B * N), (long long)Sq, (long long)Skv, (long long)H);
-      result = -1;
-      goto cleanup;
-    }
-
-    float valAlpha = 1.0f;
-    float beta = 0.0f;
-    hipblasLtMatmulAlgo_t vAlgo = valueState->algo;
     OP_ROCTX_MARK("hip_ep.op.multi_head_attention.attn.pv_gemm");
-    HIPBLAS_CHECK(hipblasLtMatmul(
-        ltHandle, valueState->desc, &valAlpha, d_Vbnsh, valueState->layA,
-        d_P_f16, valueState->layB, &beta, d_O_bnsh, valueState->layC, d_O_bnsh,
-        valueState->layD, &vAlgo, gemm_ws, gemm_ws_bytes, stream));
+    HIP_CHECK(valuePlan.run(stream, d_Vbnsh, d_P_f16, d_O_bnsh, 1.0f, gemm_ws,
+                            gemm_ws_bytes));
   }
 
   // ---- Step 8: Transpose O from BNSH [B,N,Sq,H] back to BSHD [B,Sq,N,H]
