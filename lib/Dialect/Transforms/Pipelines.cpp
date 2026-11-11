@@ -549,10 +549,15 @@ void mlir::hip::buildRocMlirPipeline(
     OpPassManager &pm, const mlir::hip::RocMlirPipelineOptions &options) {
   // rocMLIR has no transposed-convolution anchor, so split conv_transpose into
   // plain convolutions before anything tries to outline a kernel around it.
-  pm.addPass(mlir::hip::createDecomposeConvTransposePass());
-  pm.addPass(mlir::hip::createDecomposeMultiHeadAttentionPass());
+  // The pipeline is registered on builtin.module and these passes are anchored
+  // on func.func. Nest them here, the same way the compiler driver does.
+  // hip-mlir-opt's implicit nesting would paper over addPass, but the default
+  // PassManager rejects that anchor mismatch.
+  pm.addNestedPass<func::FuncOp>(mlir::hip::createDecomposeConvTransposePass());
+  pm.addNestedPass<func::FuncOp>(
+      mlir::hip::createDecomposeMultiHeadAttentionPass());
   addRocMlirFusionPasses(pm, FuseRocMlirAnchorPassOptions());
-  pm.addPass(mlir::hip::createConvertHipToTosaPass());
+  pm.addNestedPass<func::FuncOp>(mlir::hip::createConvertHipToTosaPass());
   pm.addPass(mlir::createCanonicalizerPass());
 }
 

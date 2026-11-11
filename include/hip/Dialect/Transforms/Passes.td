@@ -324,9 +324,10 @@ def DecomposeMultiHeadAttentionPass
 
     hip-fuse-rocmlir then outlines each matmul. The softmax stays between
     them, because it is not a pointwise epilogue. The element type must be
-    f16, bf16, or f32, which is what HIP-to-TOSA can lower. Packed QKV, bias,
-    masks, past key or value, causal masking, dynamic shapes, and any other
-    float type stay as hip.multi_head_attention and use the runtime kernel.
+    f16 or f32. bf16 matmul would lower, but the runtime softmax kernel reads
+    the scores as f16, so bf16 stays on hip.multi_head_attention. Packed QKV,
+    bias, masks, past key or value, causal masking, dynamic shapes, and any
+    other float type stay on that runtime kernel too.
   }];
   let dependentDialects = [
     "mlir::hip::HipDialect",
