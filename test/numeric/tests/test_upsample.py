@@ -324,3 +324,131 @@ class TestResizeRowKernel:
         actual, reference = model_runner.run_sample(model, [x])
         atol = 0 if mode == "nearest" else 1
         compare_outputs(actual, reference, atol=atol, rtol=0)
+
+
+# The innermost axis keeps its extent and scale 1, so the kernel copies or
+# blends whole vectors of it: the channels of a channels-last tensor, or a
+# W that only an outer axis resamples.
+class TestResizePassthrough:
+    # C = 3 and 6 are not a multiple of the f32 vector, so they fall back to
+    # narrower or scalar accesses; 4, 8 and 64 tile 16-byte vectors.
+    @pytest.mark.parametrize("channels", [3, 4, 6, 8, 64])
+    @pytest.mark.parametrize(
+        "scales,coord",
+        [
+            ([1.0, 2.0, 2.0, 1.0], "half_pixel"),
+            ([1.0, 2.0, 2.0, 1.0], "align_corners"),
+            ([1.0, 1.5, 0.5, 1.0], "asymmetric"),
+            ([1.0, 3.0, 2.5, 1.0], "pytorch_half_pixel"),
+        ],
+    )
+    def test_nhwc_linear_f32(self, model_runner, channels, scales, coord):
+        shape = [2, 6, 8, channels]
+        model = _make_resize_scales_model(shape, scales, np.float32, "linear", coord)
+        rng = np.random.default_rng(501)
+        x = rng.uniform(-2.0, 2.0, shape).astype(np.float32)
+        actual, reference = model_runner.run_sample(model, [x])
+        compare_outputs(actual, reference, atol=1e-5, rtol=1e-5)
+
+    @pytest.mark.parametrize("channels", [3, 8, 64])
+    @pytest.mark.parametrize(
+        "scales,coord,nearest_mode",
+        [
+            ([1.0, 2.0, 2.0, 1.0], "asymmetric", "floor"),
+            ([1.0, 2.0, 3.0, 1.0], "half_pixel", "round_prefer_floor"),
+            ([1.0, 0.5, 0.5, 1.0], "half_pixel", "round_prefer_ceil"),
+            ([1.0, 2.0, 2.0, 1.0], "align_corners", "ceil"),
+        ],
+    )
+    def test_nhwc_nearest_f32(
+        self, model_runner, channels, scales, coord, nearest_mode
+    ):
+        shape = [1, 8, 6, channels]
+        model = _make_resize_scales_model(
+            shape, scales, np.float32, "nearest", coord, nearest_mode=nearest_mode
+        )
+        rng = np.random.default_rng(502)
+        x = rng.uniform(-2.0, 2.0, shape).astype(np.float32)
+        actual, reference = model_runner.run_sample(model, [x])
+        compare_outputs(actual, reference, atol=0)
+
+    # 6, 8 and 32 f16 channels use 4-, 16- and 16-byte accesses.
+    @pytest.mark.parametrize("channels", [6, 8, 32])
+    @pytest.mark.parametrize("mode", ["nearest", "linear"])
+    def test_nhwc_f16(self, model_runner, channels, mode):
+        shape = [1, 6, 7, channels]
+        scales = [1.0, 2.0, 2.0, 1.0]
+        model = _make_resize_scales_model(shape, scales, np.float16, mode, "half_pixel")
+        rng = np.random.default_rng(503)
+        x = rng.uniform(-2.0, 2.0, shape).astype(np.float16)
+        actual, reference = model_runner.run_sample(model, [x])
+        atol = 0 if mode == "nearest" else 1e-2
+        compare_outputs(actual, reference, atol=atol, rtol=atol)
+
+    @pytest.mark.parametrize("channels", [5, 16, 32])
+    @pytest.mark.parametrize("dtype", [np.int8, np.uint8])
+    @pytest.mark.parametrize("mode", ["nearest", "linear"])
+    def test_nhwc_8bit(self, model_runner, channels, dtype, mode):
+        shape = [1, 6, 7, channels]
+        scales = [1.0, 2.0, 2.0, 1.0]
+        if mode == "nearest":
+            model = _make_resize_scales_model(
+                shape, scales, dtype, "nearest", "asymmetric", nearest_mode="floor"
+            )
+        else:
+            model = _make_resize_scales_model(
+                shape, scales, dtype, "linear", "half_pixel"
+            )
+        rng = np.random.default_rng(504)
+        info = np.iinfo(dtype)
+        x = rng.integers(info.min, info.max + 1, shape).astype(dtype)
+        actual, reference = model_runner.run_sample(model, [x])
+        atol = 0 if mode == "nearest" else 1
+        compare_outputs(actual, reference, atol=atol, rtol=0)
+
+    # Only the outer axes resample and the innermost one passes through, in
+    # two-axis windows and a rank-5 three-axis window.
+    @pytest.mark.parametrize(
+        "shape,scales",
+        [
+            ([1, 3, 8, 16], [1.0, 1.0, 2.0, 1.0]),
+            ([1, 3, 9, 12], [1.0, 1.0, 0.5, 1.0]),
+            ([2, 7, 20], [1.0, 2.0, 1.0]),
+            ([1, 2, 4, 6, 8], [1.0, 1.0, 2.0, 2.0, 1.0]),
+            ([1, 2, 5, 4, 12], [1.0, 1.0, 0.5, 1.5, 1.0]),
+        ],
+    )
+    @pytest.mark.parametrize("mode", ["nearest", "linear"])
+    def test_outer_axis_only(self, model_runner, shape, scales, mode):
+        model = _make_resize_scales_model(shape, scales, np.float32, mode, "half_pixel")
+        rng = np.random.default_rng(505)
+        x = rng.uniform(-2.0, 2.0, shape).astype(np.float32)
+        actual, reference = model_runner.run_sample(model, [x])
+        atol = 0 if mode == "nearest" else 1e-5
+        compare_outputs(actual, reference, atol=atol, rtol=atol)
+
+    # floor(extent * 1.05) keeps the innermost extent, but its coordinates are
+    # still scaled, so these must not take the pass-through kernels. The CPU
+    # reference supports 4-D linear only with the outer two scales at 1.
+    @pytest.mark.parametrize(
+        "shape,scales,mode",
+        [
+            ([1, 6, 8, 8], [1.0, 2.0, 2.0, 1.05], "nearest"),
+            ([1, 6, 8, 16], [1.0, 2.0, 2.0, 1.05], "nearest"),
+            ([1, 3, 8, 16], [1.0, 1.0, 2.0, 1.05], "nearest"),
+            ([1, 3, 8, 16], [1.0, 1.0, 2.0, 1.05], "linear"),
+            ([1, 2, 6, 8], [1.0, 1.0, 1.5, 1.05], "linear"),
+        ],
+    )
+    @pytest.mark.parametrize("coord", ["half_pixel", "asymmetric"])
+    def test_equal_extent_scaled_inner_axis(
+        self, model_runner, shape, scales, mode, coord
+    ):
+        model = _make_resize_scales_model(shape, scales, np.float32, mode, coord)
+        rng = np.random.default_rng(506)
+        x = rng.uniform(-2.0, 2.0, shape).astype(np.float32)
+        actual, reference = model_runner.run_sample(model, [x])
+        assert actual[0].shape == reference[0].shape
+        assert actual[0].shape[-1] == shape[-1]
+        atol = 0 if mode == "nearest" else 1e-5
+        compare_outputs(actual, reference, atol=atol, rtol=atol)
