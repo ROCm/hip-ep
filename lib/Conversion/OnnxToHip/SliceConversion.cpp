@@ -336,6 +336,33 @@ static mlir::Value buildAllocCapacity(mlir::OpBuilder &b, mlir::Location loc,
   return mlir::arith::SelectOp::create(b, loc, isEmpty, dim, len);
 }
 
+/// Result type of an ONNX Slice. The importer leaves it unranked
+/// (`tensor<*xT>`) when it could not infer the shape, as in a TF
+/// `tf.slice(begin, size)` export inside a loop body. Slice never changes the
+/// rank. An axis it does not slice keeps the data dim, and a sliced axis is
+/// dynamic. When \p axes is null every axis may be sliced.
+static mlir::RankedTensorType
+inferSliceResultType(mlir::Operation *op, mlir::RankedTensorType dataType,
+                     const llvm::SmallVectorImpl<int64_t> *axes) {
+  if (auto ranked =
+          mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType()))
+    return ranked;
+  int64_t rank = dataType.getRank();
+  llvm::SmallVector<int64_t> shape(rank, mlir::ShapedType::kDynamic);
+  if (axes) {
+    llvm::SmallVector<bool> sliced(rank, false);
+    for (int64_t a : *axes) {
+      int64_t axis = a < 0 ? a + rank : a;
+      if (axis >= 0 && axis < rank)
+        sliced[axis] = true;
+    }
+    for (int64_t i = 0; i < rank; ++i)
+      if (!sliced[i])
+        shape[i] = dataType.getDimSize(i);
+  }
+  return mlir::RankedTensorType::get(shape, dataType.getElementType());
+}
+
 struct SliceDecompose : public mlir::RewritePattern {
   SliceDecompose(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Slice", /*benefit=*/2, ctx) {}
@@ -349,10 +376,8 @@ struct SliceDecompose : public mlir::RewritePattern {
 
     mlir::Value data = op->getOperand(0);
     auto dataType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
-    auto outType =
-        mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
-    if (!dataType || !outType)
-      return rewriter.notifyMatchFailure(op, "expected ranked tensor types");
+    if (!dataType)
+      return rewriter.notifyMatchFailure(op, "expected ranked data");
 
     int64_t rank = dataType.getRank();
 
@@ -396,6 +421,9 @@ struct SliceDecompose : public mlir::RewritePattern {
     }
     if (stepsVec.empty())
       stepsVec.assign(axesVec.size(), 1);
+
+    mlir::RankedTensorType outType =
+        inferSliceResultType(op, dataType, &axesVec);
 
     if (axesVec.size() != startsVec.size() ||
         axesVec.size() != endsVec.size() || axesVec.size() != stepsVec.size())
@@ -568,12 +596,9 @@ struct SliceToHip : public mlir::RewritePattern {
                             ? normaliseOptional(op->getOperand(4))
                             : mlir::Value();
 
-    auto resultType =
-        mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
-    if (!resultType)
-      return rewriter.notifyMatchFailure(op, "result must be ranked tensor");
-
-    auto dataType = mlir::cast<mlir::RankedTensorType>(data.getType());
+    auto dataType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
+    if (!dataType)
+      return rewriter.notifyMatchFailure(op, "data must be ranked tensor");
 
     // Which axes are sliced, and with what step. Both must be known to compute
     // an extent; a non-constant axes/steps operand leaves every dim on the
@@ -593,6 +618,9 @@ struct SliceToHip : public mlir::RewritePattern {
       stepsVec.assign(axesVec.size(), 1);
     if (stepsVec.size() != axesVec.size())
       haveAxes = false;
+
+    mlir::RankedTensorType resultType =
+        inferSliceResultType(op, dataType, haveAxes ? &axesVec : nullptr);
 
     // Compute each dynamic output dim from the slice bounds where possible;
     // see the file header for why the data dim is not an acceptable substitute.

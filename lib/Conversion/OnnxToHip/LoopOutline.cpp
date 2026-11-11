@@ -266,9 +266,19 @@ static Value scanShapeSource(Value v, Block &body) {
 
 /// Extent of inner scan dimension `innerDim` (0 is the first dim of the
 /// per-iteration tensor). The leading scan dimension is not handled here.
+/// A static extent is taken from the per-iteration type even when that value
+/// is computed inside the body. A dynamic extent must come from a value that
+/// exists before the loop.
 static FailureOr<Value> outerScanExtent(OpBuilder &builder, Location loc,
                                         Value perIter, int64_t innerDim,
                                         Block &body, ValueRange carriedInits) {
+  if (auto perTy = dyn_cast<RankedTensorType>(perIter.getType())) {
+    if (innerDim >= 0 && innerDim < perTy.getRank() &&
+        !perTy.isDynamicDim(innerDim))
+      return arith::ConstantIndexOp::create(builder, loc,
+                                            perTy.getDimSize(innerDim))
+          .getResult();
+  }
   Value src = scanShapeSource(perIter, body);
   if (!src)
     return failure();
@@ -293,11 +303,15 @@ static FailureOr<Value> outerScanExtent(OpBuilder &builder, Location loc,
 }
 
 /// Zero-trip seed. Only the leading dimension is 0. Any other dynamic
-/// dimension takes the per-iteration extent, so a body that yields
-/// `tensor<4xf32>` seeds `[0, 4]` rather than `[0, 0]`.
-static FailureOr<Value> emptyScanAcc(OpBuilder &builder, Location loc,
-                                     RankedTensorType accTy, Value perIter,
-                                     Block &body, ValueRange carriedInits) {
+/// dimension takes the per-iteration extent when that extent is known before
+/// the loop, so a body that yields `tensor<4xf32>` seeds `[0, 4]` rather than
+/// `[0, 0]`. An extent computed inside the body (a padded NMS box list, for
+/// example) is not known yet. The seed uses 0 for that dimension. The first
+/// executed iteration replaces the seed, so the placeholder is only the
+/// zero-trip result.
+static Value emptyScanAcc(OpBuilder &builder, Location loc,
+                          RankedTensorType accTy, Value perIter, Block &body,
+                          ValueRange carriedInits) {
   SmallVector<Value> dynamicSizes;
   for (auto [dimIdx, dim] : llvm::enumerate(accTy.getShape())) {
     if (!ShapedType::isDynamic(dim))
@@ -310,9 +324,11 @@ static FailureOr<Value> emptyScanAcc(OpBuilder &builder, Location loc,
     FailureOr<Value> extent =
         outerScanExtent(builder, loc, perIter, static_cast<int64_t>(dimIdx) - 1,
                         body, carriedInits);
-    if (failed(extent))
-      return failure();
-    dynamicSizes.push_back(*extent);
+    Value extentVal =
+        succeeded(extent)
+            ? *extent
+            : arith::ConstantIndexOp::create(builder, loc, 0).getResult();
+    dynamicSizes.push_back(extentVal);
   }
   return tensor::EmptyOp::create(builder, loc, accTy, dynamicSizes).getResult();
 }
@@ -429,12 +445,9 @@ static LogicalResult lowerScanLoop(Operation *loopOp, Block &bodyBlock,
     if (perTy && perTy.getElementType() != accTy.getElementType())
       return loopOp->emitOpError(
           "onnx.Loop scan element type does not match its result");
-    FailureOr<Value> seed =
+    Value seed =
         emptyScanAcc(builder, loc, accTy, perIter, bodyBlock, vInitTensors);
-    if (failed(seed))
-      return loopOp->emitOpError(
-          "scan seed inner extent is not known before the loop");
-    scans.push_back({1 + numLoopCarried + s, resultIdx, accTy, *seed});
+    scans.push_back({1 + numLoopCarried + s, resultIdx, accTy, seed});
   }
 
   Value falseI1 =

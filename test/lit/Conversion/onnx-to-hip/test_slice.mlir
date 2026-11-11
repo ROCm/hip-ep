@@ -529,4 +529,25 @@ module {
            tensor<1xi64>) -> tensor<?x?xf32>
     return %r : tensor<?x?xf32>
   }
+
+  // Test 23: a TF `tf.slice(begin, size)` export left the result unranked.
+  // The ends are runtime values and there is no axes operand, so every axis
+  // may be sliced. Slice keeps the data rank, so the result is lowered as
+  // tensor<?x?x?xf32> and the Reshape that consumes it converts too.
+  func.func @test_slice_unranked_result(%input: tensor<?x1x4xf32>,
+                                        %ends: tensor<3xi32>)
+      -> tensor<?x1x4xf32> {
+    // CHECK-LABEL: func.func @test_slice_unranked_result
+    // CHECK-NOT: onnx.Slice
+    // CHECK: tensor.empty(%{{.*}}, %{{.*}}, %{{.*}}) : tensor<?x?x?xf32>
+    // CHECK: hip.slice{{.*}} : tensor<?x?x?xf32>
+    // CHECK-NOT: onnx.Reshape
+    %begin = arith.constant dense<0> : tensor<3xi32>
+    %shape = arith.constant dense<[-1, 1, 4]> : tensor<3xi64>
+    %s = "onnx.Slice"(%input, %begin, %ends)
+        : (tensor<?x1x4xf32>, tensor<3xi32>, tensor<3xi32>) -> tensor<*xf32>
+    %r = "onnx.Reshape"(%s, %shape)
+        : (tensor<*xf32>, tensor<3xi64>) -> tensor<?x1x4xf32>
+    return %r : tensor<?x1x4xf32>
+  }
 }
