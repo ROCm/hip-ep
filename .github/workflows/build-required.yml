@@ -5,10 +5,20 @@
 name: Build required
 
 # Tells the compile workflows whether this diff can change build output.
-# Documentation and the Jekyll site cannot, so callers skip compile jobs.
-# The check still completes: skipping the workflow with a path filter would
-# leave a required status check pending. Manual runs, new refs, mixed
-# diffs, and any compare the API cannot fully return all build.
+# pull_request and merge_group set run=false only when every path is under
+# docs/, under site/, or a Markdown file. Callers then skip compile jobs.
+# The caller workflow still runs: a path filter on the workflow itself
+# would leave a required status check pending, and a skipped reusable
+# caller does not report its inner job name.
+#
+# push and workflow_dispatch always set run=true. A successful Windows
+# Build on main or a release branch is what later runs download for the
+# perf baseline, the DLL size gate, and release packages. Skipping that
+# push would be a green run with no artifacts. The compare API only
+# accepts a three-dot spec, so this workflow does not try to classify a
+# push.
+#
+# Mixed diffs and any compare the API cannot fully return still build.
 on:
   workflow_call:
     outputs:
@@ -35,8 +45,6 @@ jobs:
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
           MQ_BASE: ${{ github.event.merge_group.base_sha }}
           MQ_HEAD: ${{ github.event.merge_group.head_sha }}
-          PUSH_BEFORE: ${{ github.event.before }}
-          PUSH_AFTER: ${{ github.sha }}
         run: |
           set -euo pipefail
           build() { echo "run=true" >> "$GITHUB_OUTPUT"; }
@@ -48,19 +56,17 @@ jobs:
               build
               exit 0
               ;;
-            # Three-dot: changes the PR or merge group introduced. Two-dot
-            # on a push: the tree delta, so a force-push that drops a
-            # source file still builds.
+            # A push to main or a release branch must upload artifacts even
+            # when the diff is documentation. Later GPU runs and releases
+            # read those artifacts from the latest successful run.
+            push)
+              echo "push: building"
+              build
+              exit 0
+              ;;
+            # Three-dot: changes this pull request or merge group introduced.
             pull_request) spec="${PR_BASE}...${PR_HEAD}" ;;
             merge_group)  spec="${MQ_BASE}...${MQ_HEAD}" ;;
-            push)
-              if [ "$PUSH_BEFORE" = "0000000000000000000000000000000000000000" ]; then
-                echo "new ref: building"
-                build
-                exit 0
-              fi
-              spec="${PUSH_BEFORE}..${PUSH_AFTER}"
-              ;;
             *)
               echo "unhandled event $EVENT: building"
               build

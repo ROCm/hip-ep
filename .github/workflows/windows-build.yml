@@ -40,9 +40,19 @@ jobs:
       llvm_cache_key: ${{ needs.prebuild.outputs.llvm_cache_key }}
       ort_cache_key: ${{ needs.prebuild.outputs.ort_cache_key }}
 
+  # The required check is the inner name gpu_test / test. Skipping this
+  # caller leaves that name unreported. A documentation-only diff still
+  # runs the callee, which records success without the GPU suites.
   gpu_test:
-    needs: build_real
+    needs: [build_required, build_real]
+    if: >-
+      always() &&
+      (needs.build_real.result == 'success' ||
+       (needs.build_required.result == 'success' &&
+        needs.build_required.outputs.run == 'false'))
     uses: ./.github/workflows/windows-gpu-test.yml
+    with:
+      docs_only: ${{ needs.build_required.outputs.run == 'false' }}
     # A callee's GITHUB_TOKEN is capped by the caller job, and the GPU job
     # posts perf / L2 results as PR comments.
     permissions:

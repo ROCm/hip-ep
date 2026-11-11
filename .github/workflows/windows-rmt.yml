@@ -6,10 +6,11 @@ name: Windows RMT Build
 
 # Optional rocMLIR package. Kept as its own workflow so its long LLVM and
 # hip-ep build does not keep the Windows Build run in progress. This workflow
-# runs the same deps prebuild first. Documentation and Jekyll-site diffs skip
-# that prebuild. The deps jobs share per-commit concurrency groups with
-# Windows Build and do not cancel an in-progress deps job, so a cold cache is
-# built once per commit and this build restores it afterwards.
+# runs the same deps prebuild first. A documentation or Jekyll diff on a
+# pull request skips that prebuild. Pushes always build it. The deps jobs
+# share per-commit concurrency groups with Windows Build and do not cancel
+# an in-progress deps job, so a cold cache is built once per commit and
+# this build restores it afterwards.
 # ORT, amdgpu and OGA fall back to the artifacts this run's prebuild uploaded.
 # Not part of the merge queue.
 on:

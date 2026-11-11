@@ -47,9 +47,9 @@ jobs:
   build-linux:
     needs: build_required
     if: needs.build_required.outputs.run == 'true'
-    # No draft-PR gate: cache priming needs every code push, including
-    # drafts. build-required.yml skips this job when the diff is only
-    # documentation or the Jekyll site; those diffs do not move the caches.
+    # No draft-PR gate: cache priming needs every code change, including
+    # drafts. build-required.yml skips this job for a documentation or
+    # Jekyll diff on a pull request or merge group. Pushes always build.
     runs-on: ubuntu-latest
     steps:
       # MorphiZen is vendored in-tree as a git subtree under morphizen,
