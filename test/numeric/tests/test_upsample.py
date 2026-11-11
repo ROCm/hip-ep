@@ -360,7 +360,9 @@ class TestResizePassthrough:
             ([1.0, 2.0, 2.0, 1.0], "align_corners", "ceil"),
         ],
     )
-    def test_nhwc_nearest_f32(self, model_runner, channels, scales, coord, nearest_mode):
+    def test_nhwc_nearest_f32(
+        self, model_runner, channels, scales, coord, nearest_mode
+    ):
         shape = [1, 8, 6, channels]
         model = _make_resize_scales_model(
             shape, scales, np.float32, "nearest", coord, nearest_mode=nearest_mode
@@ -404,14 +406,16 @@ class TestResizePassthrough:
         atol = 0 if mode == "nearest" else 1
         compare_outputs(actual, reference, atol=atol, rtol=0)
 
-    # A two-axis window: only the outer axis resamples, the inner one passes
-    # through.
+    # Only the outer axes resample and the innermost one passes through, in
+    # two-axis windows and a rank-5 three-axis window.
     @pytest.mark.parametrize(
         "shape,scales",
         [
             ([1, 3, 8, 16], [1.0, 1.0, 2.0, 1.0]),
             ([1, 3, 9, 12], [1.0, 1.0, 0.5, 1.0]),
             ([2, 7, 20], [1.0, 2.0, 1.0]),
+            ([1, 2, 4, 6, 8], [1.0, 1.0, 2.0, 2.0, 1.0]),
+            ([1, 2, 5, 4, 12], [1.0, 1.0, 0.5, 1.5, 1.0]),
         ],
     )
     @pytest.mark.parametrize("mode", ["nearest", "linear"])
@@ -420,5 +424,31 @@ class TestResizePassthrough:
         rng = np.random.default_rng(505)
         x = rng.uniform(-2.0, 2.0, shape).astype(np.float32)
         actual, reference = model_runner.run_sample(model, [x])
+        atol = 0 if mode == "nearest" else 1e-5
+        compare_outputs(actual, reference, atol=atol, rtol=atol)
+
+    # floor(extent * 1.05) keeps the innermost extent, but its coordinates are
+    # still scaled, so these must not take the pass-through kernels. The CPU
+    # reference supports 4-D linear only with the outer two scales at 1.
+    @pytest.mark.parametrize(
+        "shape,scales,mode",
+        [
+            ([1, 6, 8, 8], [1.0, 2.0, 2.0, 1.05], "nearest"),
+            ([1, 6, 8, 16], [1.0, 2.0, 2.0, 1.05], "nearest"),
+            ([1, 3, 8, 16], [1.0, 1.0, 2.0, 1.05], "nearest"),
+            ([1, 3, 8, 16], [1.0, 1.0, 2.0, 1.05], "linear"),
+            ([1, 2, 6, 8], [1.0, 1.0, 1.5, 1.05], "linear"),
+        ],
+    )
+    @pytest.mark.parametrize("coord", ["half_pixel", "asymmetric"])
+    def test_equal_extent_scaled_inner_axis(
+        self, model_runner, shape, scales, mode, coord
+    ):
+        model = _make_resize_scales_model(shape, scales, np.float32, mode, coord)
+        rng = np.random.default_rng(506)
+        x = rng.uniform(-2.0, 2.0, shape).astype(np.float32)
+        actual, reference = model_runner.run_sample(model, [x])
+        assert actual[0].shape == reference[0].shape
+        assert actual[0].shape[-1] == shape[-1]
         atol = 0 if mode == "nearest" else 1e-5
         compare_outputs(actual, reference, atol=atol, rtol=atol)
