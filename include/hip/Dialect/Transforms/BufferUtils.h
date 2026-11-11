@@ -39,8 +39,15 @@ inline bool isContiguousRowMajor(ArrayRef<int64_t> shape,
   return true;
 }
 
+/// Bytes one element of \p type occupies in memory. The element bit width is
+/// rounded up to whole bytes, so a sub-byte element such as i1 occupies one
+/// byte. Runtime kernels store one byte per i1 element (Less/And/Not/Where
+/// masks); sizing an allocation from its total bit count instead would pack
+/// i1 eight-per-byte and let such a write spill into the next live buffer.
+int64_t getElementByteSize(MemRefType type);
+
 /// Byte size for a fully-static memref type; returns 0 when any dim is dynamic.
-/// Uses llvm::divideCeil to correctly handle sub-byte element types (e.g. i1).
+/// Computed from getElementByteSize, so i1 memrefs get one byte per element.
 int64_t getStaticByteSize(MemRefType type);
 
 /// Emit arith ops for: llvm::alignTo(value, alignment).

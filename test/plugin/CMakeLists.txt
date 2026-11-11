@@ -50,6 +50,11 @@ if("sample" IN_LIST HIPDNN_EP_COMPILER_PLUGINS)
 else()
   target_compile_definitions(test_static_plugins PRIVATE HIP_EP_EXPECT_SAMPLE=0)
 endif()
+if(HIPDNN_EP_COMPILER_PLUGINS STREQUAL "")
+  target_compile_definitions(test_static_plugins PRIVATE HIP_EP_EXPECT_NO_PLUGINS=1)
+else()
+  target_compile_definitions(test_static_plugins PRIVATE HIP_EP_EXPECT_NO_PLUGINS=0)
+endif()
 
 set_target_properties(test_static_plugins PROPERTIES FOLDER "mlir/Test/Plugin")
 

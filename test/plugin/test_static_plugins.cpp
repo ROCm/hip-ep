@@ -12,6 +12,8 @@
 //     library + search path, bitcode buffer (empty => degraded no-clang build,
 //     skipped), and dialect registration (loaded here via loadAllDialects).
 //   * 0 (no plugins): dispatch is a clean no-op; the registry stays empty.
+//     HIP_EP_EXPECT_NO_PLUGINS=0 means other plugins are selected, so the
+//     registry is not required to be empty.
 // Either way dispatch must be safe + idempotent. Plain main() (no GTest).
 
 #include "hip/Compiler/PluginRegistry.h"
@@ -47,6 +49,9 @@
 
 #ifndef HIP_EP_EXPECT_SAMPLE
 #define HIP_EP_EXPECT_SAMPLE 0
+#endif
+#ifndef HIP_EP_EXPECT_NO_PLUGINS
+#define HIP_EP_EXPECT_NO_PLUGINS 1
 #endif
 
 extern "C" void
@@ -212,6 +217,7 @@ int main() {
           "(convert-hip-to-llvm guard admits it)");
   }
 #else
+#if HIP_EP_EXPECT_NO_PLUGINS
   llvm::outs() << "Mode: NO plugins selected (dispatch must be a no-op)\n";
 
   check(slotPasses.empty(), "no plugin slot requests recorded");
@@ -220,6 +226,11 @@ int main() {
   check(libPaths.empty(), "no plugin library paths recorded");
   check(bitcode.empty(), "no plugin bitcode recorded");
   check(dialectRegs.empty(), "no plugin dialect registrations recorded");
+#else
+  // Out-of-tree plugins own whatever they register, so the dispatched
+  // registry contents are not asserted here.
+  llvm::outs() << "Mode: sample NOT selected; other plugins selected\n";
+#endif
 
   // The authoritative default build deliberately selects no production
   // plugins, but still links the real sample archive into this focused test.

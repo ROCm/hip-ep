@@ -143,7 +143,16 @@ extern "C" hipError_t hipGetLastError() { return hipSuccess; }
 extern "C" hipError_t hipMalloc(void **ptr, size_t size) {
   *ptr = malloc(size);
   MOCK_PRINT("[MOCK] hipMalloc(%zu bytes) -> %p\n", size, *ptr);
-  return *ptr ? hipSuccess : -1;
+  return *ptr ? hipSuccess : hipErrorOutOfMemory;
+}
+
+// The mock has no device memory, so managed memory is plain host memory.
+extern "C" hipError_t hipMallocManaged(void **ptr, size_t size,
+                                       unsigned int flags) {
+  (void)flags;
+  *ptr = malloc(size);
+  MOCK_PRINT("[MOCK] hipMallocManaged(%zu bytes) -> %p\n", size, *ptr);
+  return *ptr ? hipSuccess : hipErrorOutOfMemory;
 }
 
 extern "C" hipError_t hipFree(void *ptr) {

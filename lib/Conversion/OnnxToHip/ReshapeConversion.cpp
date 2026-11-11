@@ -1349,6 +1349,11 @@ struct SplitToStdTensor : public mlir::RewritePattern {
     // Generate extract_slice for each output
     llvm::SmallVector<mlir::Value> replacements;
     mlir::OpFoldResult currentOffset = rewriter.getIndexAttr(0);
+    // An unused Split output is imported as `none` (CvT keeps only the class
+    // token and drops the patch tokens). That result is not a tensor, but it
+    // still occupies a split-length slot. Emitting the earlier slices and then
+    // rejecting the `none` result makes the greedy driver abort the pass.
+    mlir::Value droppedResult;
 
     // IMPORTANT: Use the actual slice size (which may differ from
     // splitLengths[i] when output type has static dimension). This ensures

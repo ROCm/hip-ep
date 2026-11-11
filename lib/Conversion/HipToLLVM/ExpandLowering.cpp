@@ -9,13 +9,12 @@ namespace mlir {
 namespace hip {
 
 // wrap_expand only copies elements, so a type without a runtime identifier
-// (i1, ui32, ui64, ...) is passed as the integer type of the same width.
+// (ui32, ui64, ...) is passed as the integer type of the same width.
 static int64_t getExpandDataType(Type elemType) {
   int64_t dataType = getHipdnnDataType(elemType);
   if (dataType != HIPDNN_EP_DATATYPE_UNSUPPORTED || !elemType.isIntOrFloat())
     return dataType;
   switch (elemType.getIntOrFloatBitWidth()) {
-  case 1:
   case 8:
     return HIPDNN_EP_DATATYPE_INT8;
   case 16:

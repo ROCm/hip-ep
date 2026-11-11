@@ -124,8 +124,18 @@ const std::string &node_get_output_name(const Node &node) {
 }
 
 const std::string &node_get_first_output_name(const Node &node) {
-  const NodeArg &output = node_get_first_output_node_arg(node);
-  return node_arg_get_name(output);
+  // An unused optional output is a null slot. TopK often leaves Values
+  // unused and keeps Indices. Name the node by the first output that exists.
+  auto outputs = node_get_output_node_args(node);
+  CHECK_GE(outputs.size(), 1u)
+      << "at least 1 output needed: node=" << node_as_string(node);
+  for (const NodeArg *arg : outputs) {
+    if (arg != nullptr && node_arg_exists(*arg))
+      return node_arg_get_name(*arg);
+  }
+  LOG(FATAL) << "node has no existing output: " << node_as_string(node);
+  static const std::string empty;
+  return empty;
 }
 
 bool node_is_op(const Node &node, const std::string &op_type1,

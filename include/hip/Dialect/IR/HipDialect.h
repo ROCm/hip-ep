@@ -34,6 +34,12 @@
 
 namespace mlir {
 namespace hip {
+/// Highest tensor rank the binary elementwise ops (hip.add / mul / min / max
+/// ...) lower in HipToLLVM: their runtime ABI passes shapes as four dims.
+/// Producers that emit these ops gate on it so a higher rank stays unconverted
+/// instead of failing late in lowering.
+inline constexpr int64_t kMaxElementwiseRank = 4;
+
 /// Discardable attribute names stamped on `hip.alloc_output` by
 /// `hip-use-output-allocator` and consumed by `AllocOutputOpLowering`. They
 /// describe the ONNX / func.return ("ABI") output shape when it differs from

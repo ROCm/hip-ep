@@ -134,6 +134,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | CausalConvWithState (`com.microsoft`) | Custom HIP kernel |
 | NGramHashMapping (`com.microsoft`) | Custom HIP kernel. int32/int64 |
 | Relu | Decomposed to Max |
+| HardSwish | Decomposed to HardSigmoid and Mul. f16 and f32 only, rank <= 4; bf16, f64, and higher ranks are left to another EP. Not fused: five elementwise launches |
 | LeakyRelu | Custom HIP kernel |
 | PRelu | Custom HIP kernel. Slope broadcasts onto X; f16/bf16/f32/f64 |
 | LRN | Custom HIP kernel. Channel window, rank >= 2, f16/bf16/f32/f64 |

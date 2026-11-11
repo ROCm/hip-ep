@@ -27,6 +27,10 @@
 
 #include "OnnxToHipUtils.h"
 
+#include "mlir/IR/BuiltinAttributes.h"
+
+#include "llvm/ADT/APFloat.h"
+
 namespace mlir {
 namespace hip {
 namespace {

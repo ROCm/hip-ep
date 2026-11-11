@@ -30,6 +30,12 @@
 //   Result for attention: 8 allocs -> 4 allocs (50% reduction).
 //
 // Compatibility rules:
+//   - An alloc with a direct host `memref.store` or `memref.load` is left
+//     alone. Overlaying it on a dead device buffer (or offering it as a
+//     slot) makes that host access target device memory. `hip-materialize-
+//     host-scalars` then cannot see the alloc and redirect it to host-mapped
+//     scratch, so a scalar such as a LayerNorm epsilon is dropped and the
+//     kernel reads the pool's zero fill.
 //   - Static shapes: any alloc whose byte-size fits inside an earlier slot
 //     (same element type and memory space).  A memref.reinterpret_cast is
 //     inserted when the shapes differ.
@@ -176,6 +182,14 @@ void OptimizeMemRefsPass::runOnOperation() {
 
     Value result = allocOp.getResult();
     if (result.use_empty())
+      continue;
+    // Host-written scalars must stay a dedicated alloc so the following
+    // hip-materialize-host-scalars pass can move them to host-mapped scratch.
+    // Reusing one onto a device slot rewrites the store as a write of that
+    // slot's first element.
+    if (llvm::any_of(result.getUsers(), [](Operation *user) {
+          return isa<memref::StoreOp, memref::LoadOp>(user);
+        }))
       continue;
 
     unsigned lastUse = findLastAliasedUseIndex(result, aliasAnalysis, block,

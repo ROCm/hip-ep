@@ -71,4 +71,22 @@ module {
 
     return
   }
+
+  // Test 4: i1 mask -> i64. i1 has no runtime dtype slot and is stored as a
+  // 1-byte 0/1 value, so the call uses UINT8 (7) as the source dtype.
+  func.func @cast_i1_to_i64(
+      %ctx: !hip.context,
+      %input: memref<8xi1, 1>,
+      %output: memref<8xi64, 1>) {
+    // CHECK-LABEL: llvm.func @cast_i1_to_i64
+
+    hip.cast(%ctx) ins(%input : memref<8xi1, 1>)
+                   outs(%output : memref<8xi64, 1>) {to = 7 : i64}
+
+    // CHECK-DAG: llvm.mlir.constant(7 : i64) : i64
+    // CHECK-DAG: llvm.mlir.constant(4 : i64) : i64
+    // CHECK: llvm.call @wrap_cast({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
+
+    return
+  }
 }

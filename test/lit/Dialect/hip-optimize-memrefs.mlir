@@ -187,6 +187,23 @@ func.func @no_allocs(
   return
 }
 
+// A dead device buffer must not absorb an alloc the host stores into.
+// The scalar would become a reinterpret of the device buffer, and the store
+// would write device memory the host cannot update.
+// CHECK-LABEL: func.func @no_reuse_host_store
+// CHECK:         memref.alloc(){{.*}}: memref<4xf32>
+// CHECK:         memref.alloc(){{.*}}: memref<f32>
+// CHECK:         memref.store
+// CHECK-NOT:     memref.reinterpret_cast
+func.func @no_reuse_host_store(%ctx: !hip.context, %in: memref<4xf32>,
+                               %eps: f32) -> memref<f32> {
+  %big = memref.alloc() : memref<4xf32>
+  hip.miopen.softmax(%ctx) ins(%in : memref<4xf32>) outs(%big : memref<4xf32>)
+  %scalar = memref.alloc() : memref<f32>
+  memref.store %eps, %scalar[] : memref<f32>
+  return %scalar : memref<f32>
+}
+
 // alloc0 (memref<64xf32>) and alloc1 (memref<64xf16>) have different element
 // types.  canReuse requires matching element types, so reuse is blocked even
 // though alloc0 is dead and the byte-sizes would fit (256 bytes >= 128 bytes).
