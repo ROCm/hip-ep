@@ -71,8 +71,8 @@ def _loop_same_bounds_model():
     """``Slice(x_in, b, b, axes=[0])``: one runtime value for both bounds.
 
     The slice is empty at compile time, so it lowers to a bare tensor.empty
-    with no hip.slice. ONNX leaves the mean of an empty set undefined: ORT
-    CPU gives 0, so only the scan shape is compared.
+    with no hip.slice. A mean over the empty axis is undefined in ONNX, so
+    the row reduces axis 1 instead: one mean per kept row, which is none.
     """
     initializers = [
         numpy_helper.from_array(np.array([1], dtype=np.int64), "vec1"),
@@ -81,9 +81,9 @@ def _loop_same_bounds_model():
     nodes = [
         helper.make_node("Reshape", ["iter", "vec1"], ["bound"]),
         helper.make_node("Slice", ["x_in", "bound", "bound", "axis0"], ["empty"]),
-        helper.make_node("ReduceMean", ["empty"], ["row"], axes=[0], keepdims=0),
+        helper.make_node("ReduceMean", ["empty"], ["row"], axes=[1], keepdims=0),
     ]
-    return _loop_model(nodes, initializers, [4])
+    return _loop_model(nodes, initializers, [None])
 
 
 def _loop_strided_tail_model():
@@ -152,7 +152,8 @@ class TestSliceRuntimeBounds:
         model = _loop_same_bounds_model()
         x = np.arange(1, 33, dtype=np.float32).reshape(8, 4)
         actual, expected = model_runner.run_sample(model, [x])
-        assert actual[1].shape == expected[1].shape == (3, 4)
+        # The scan holds no elements, which compare_outputs cannot reduce.
+        assert actual[1].shape == expected[1].shape == (3, 0)
         compare_outputs(actual[:1], expected[:1], atol=1e-5, rtol=1e-5)
 
     def test_loop_body_strided_tail(self, model_runner):
