@@ -54,17 +54,18 @@ namespace {
 // `ends - starts` is host arithmetic over `onnx.Shape` entries, so the true
 // extent is computable without any device readback.
 //
-// The one extent that must NOT shrink is zero. The extent here is also the
-// allocation, and one consumer depends on that allocation being the upper
-// bound: FixLoopAccumulatorOffset.cpp rewrites a growing-Concat accumulator in
-// an outlined `hip.loop` body and, as its header states, "assumes ... v_init is
-// pre-sized to full capacity (the canonical `Slice(x, k, k, axis) -> Loop`
-// pattern)". `Slice(x, k, k, axis)` is the ONNX empty-tensor idiom used to seed
-// such an accumulator; its exact extent is 0, and a zero-capacity init leaves
-// the loop appending chunks into nothing -- on Qwen3.6-VL's windowed attention
+// The one extent that must NOT shrink is zero, and only when this result is
+// the allocation a loop appends into. FixLoopAccumulatorOffset.cpp rewrites a
+// growing-Concat accumulator in an outlined `hip.loop` body and, as its header
+// states, "assumes ... v_init is pre-sized to full capacity (the canonical
+// `Slice(x, k, k, axis) -> Loop` pattern)". A zero-capacity init leaves the
+// loop appending chunks into nothing -- on Qwen3.6-VL's windowed attention
 // that surfaced as `memrefCopy(rank-2 strided) failed: invalid pitch argument`,
-// because the append subview's destination pitch was 0. So an extent that
-// evaluates to zero falls back to the data dim; see buildAllocCapacity.
+// because the append subview's destination pitch was 0. A ranked result is
+// that allocation, so a zero length falls back to the data dim; see
+// buildAllocCapacity. An unranked result is not: consumers have no other
+// shape, so `Slice(x, k, k, axis)` returns a zero-length view unless the
+// value is a `hip.loop` v_init or an `onnx.Loop` carried input.
 
 /// Return the dense-elements attribute backing \p value if it can be
 /// determined at compile time. Recognizes arith constants, inspectable
@@ -586,6 +587,35 @@ struct SliceDecompose : public mlir::RewritePattern {
   }
 };
 
+/// True when \p v, or one Identity or cast of it, is a loop-carried initial
+/// value. That value is the buffer FixLoopAccumulatorOffset appends into, so
+/// it keeps the data dimension. `onnx.Loop` operands are `(M, cond,
+/// v_init...)`. After outlining, the same value is a `hip.loop` v_init.
+static bool usedAsLoopCarriedInit(mlir::Value v) {
+  auto feeds = [](mlir::Value cur) {
+    for (mlir::OpOperand &use : cur.getUses()) {
+      mlir::Operation *user = use.getOwner();
+      if (user->getName().getStringRef() == "onnx.Loop" &&
+          use.getOperandNumber() >= 2)
+        return true;
+      if (auto loop = mlir::dyn_cast<mlir::hip::LoopOp>(user))
+        if (llvm::is_contained(loop.getVInit(), cur))
+          return true;
+    }
+    return false;
+  };
+  if (feeds(v))
+    return true;
+  for (mlir::OpOperand &use : v.getUses()) {
+    mlir::Operation *user = use.getOwner();
+    bool transparent = user->getName().getStringRef() == "onnx.Identity" ||
+                       mlir::isa<mlir::tensor::CastOp>(user);
+    if (transparent && user->getNumResults() == 1 && feeds(user->getResult(0)))
+      return true;
+  }
+  return false;
+}
+
 struct SliceToHip : public mlir::RewritePattern {
   SliceToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Slice", /*benefit=*/1, ctx) {}
@@ -649,8 +679,9 @@ struct SliceToHip : public mlir::RewritePattern {
     // An unranked result gets its shape here, so the over-sized fallback below
     // would not just cost performance: it would be the only shape consumers
     // see, with a zero-filled tail. Every sliced axis needs an exact extent,
-    // read back from the device when host arithmetic cannot resolve it. The
-    // one exception is the `Slice(x, k, k, axis)` accumulator seed below.
+    // read back from the device when host arithmetic cannot resolve it.
+    // `Slice(x, k, k, axis)` is exact too, unless this result is a
+    // loop-carried init: then the value itself is the capacity buffer.
     bool exactExtent =
         !mlir::isa<mlir::RankedTensorType>(op->getResult(0).getType());
     if (exactExtent) {
@@ -702,10 +733,13 @@ struct SliceToHip : public mlir::RewritePattern {
     // lower than it looks. Hence the debug line below: the fallback is a known
     // performance cliff, and it should be findable without an RGP capture.
     //
-    // An unranked result separates the two: the init keeps the capacity (a
-    // zero length still allocates the data dim, so a loop accumulator never
-    // gets a zero-pitch buffer), and an extract_slice of the exact lengths is
-    // the shape consumers see.
+    // An unranked result separates capacity from the reported shape. A runtime
+    // length that can be zero still allocates the data dim, and an
+    // extract_slice of the exact length is what consumers see. A loop-carried
+    // `Slice(x, k, k, axis)` has no such view: the loop carries this value and
+    // appends into it.
+    bool accumulatorSeed =
+        exactExtent && usedAsLoopCarriedInit(op->getResult(0));
     llvm::SmallVector<mlir::Value> dynSizes;
     llvm::SmallVector<mlir::OpFoldResult> exactSizes;
     bool needsExactView = false;
@@ -717,13 +751,6 @@ struct SliceToHip : public mlir::RewritePattern {
       if (i >= dataType.getRank())
         return rewriter.notifyMatchFailure(
             op, "result rank exceeds data rank — invalid Slice");
-
-      mlir::Value dim =
-          dataType.isDynamicDim(i)
-              ? mlir::tensor::DimOp::create(rewriter, loc, data, i).getResult()
-              : mlir::arith::ConstantIndexOp::create(rewriter, loc,
-                                                     dataType.getDimSize(i))
-                    .getResult();
 
       mlir::Value extent, exact;
       // An axis `axes` does not name is not sliced at all, so the data dim is
@@ -743,13 +770,23 @@ struct SliceToHip : public mlir::RewritePattern {
             break;
           // One `Value` for both bounds is `Slice(x, k, k, axis)` spelled the
           // way exporters emit it, so the length is zero without resolving
-          // anything. Take the data dim directly rather than emitting the
-          // arithmetic and the select that would fold back to it. This holds
-          // for an unranked result too: the seed must keep full capacity.
+          // anything. A ranked result, and an unranked result that seeds a
+          // loop, keep the data dim. Any other unranked result reports 0.
           if (starts == ends) {
-            emptyAccumulatorSeed = true;
+            if (!exactExtent || accumulatorSeed)
+              emptyAccumulatorSeed = true;
+            else
+              exact = mlir::arith::ConstantIndexOp::create(rewriter, loc, 0)
+                          .getResult();
             break;
           }
+          mlir::Value dim =
+              dataType.isDynamicDim(i)
+                  ? mlir::tensor::DimOp::create(rewriter, loc, data, i)
+                        .getResult()
+                  : mlir::arith::ConstantIndexOp::create(rewriter, loc,
+                                                         dataType.getDimSize(i))
+                        .getResult();
           mlir::Value s = boundToHost(starts, k);
           mlir::Value e = boundToHost(ends, k);
           if (s && e) {
@@ -759,6 +796,22 @@ struct SliceToHip : public mlir::RewritePattern {
           break;
         }
       }
+      // The compile-time empty slice is its own extent. buildAllocCapacity
+      // would turn that 0 back into the data dim.
+      if (exact && !extent)
+        extent = exact;
+      mlir::Value fallback;
+      auto dataDim = [&]() -> mlir::Value {
+        if (fallback)
+          return fallback;
+        fallback = dataType.isDynamicDim(i)
+                       ? mlir::tensor::DimOp::create(rewriter, loc, data, i)
+                             .getResult()
+                       : mlir::arith::ConstantIndexOp::create(
+                             rewriter, loc, dataType.getDimSize(i))
+                             .getResult();
+        return fallback;
+      };
       if (!extent && axisIsSliced && !emptyAccumulatorSeed)
         LLVM_DEBUG(llvm::dbgs()
                    << "[" DEBUG_TYPE "] slice extent for dim " << i
@@ -766,8 +819,8 @@ struct SliceToHip : public mlir::RewritePattern {
                       "(or a non-positive step), so consumers see an upper "
                       "bound rather than the slice length -- "
                    << *op << "\n");
-      dynSizes.push_back(extent ? extent : dim);
-      exactSizes.push_back(exact ? exact : (extent ? extent : dim));
+      dynSizes.push_back(extent ? extent : dataDim());
+      exactSizes.push_back(exact ? exact : (extent ? extent : dataDim()));
       needsExactView |= exactExtent && exact;
     }
     mlir::Value init =
