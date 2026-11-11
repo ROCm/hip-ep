@@ -28,7 +28,10 @@ struct Policy {
   double soft_limit_ms = 20000.0;
   uint32_t min_calls_per_group = 2;
   uint32_t max_calls_per_batch = 64;
+  // Invalid batches are discarded. A cell fails only when they exceed
+  // max(invalid_retries, invalid_fraction * attempted batches).
   uint32_t invalid_retries = 2;
+  double invalid_fraction = 0.01;
 
   static Policy screen() {
     Policy p;
@@ -59,7 +62,8 @@ struct Policy {
     if (!(target_ms > 0.0) || !std::isfinite(target_ms) ||
         !std::isfinite(soft_limit_ms) || soft_limit_ms < target_ms ||
         min_calls_per_group < 2 || max_calls_per_batch == 0 ||
-        invalid_retries > 2)
+        invalid_retries > 2 || !(invalid_fraction >= 0.0) ||
+        !(invalid_fraction < 1.0))
       throw std::invalid_argument("invalid UT timing policy");
   }
 };
@@ -98,21 +102,26 @@ inline uint32_t nextCalls(double remaining_ms, double per_call_ms,
 
 // runner(N) returns GPU milliseconds for N COMPLETE calls. No per-iteration
 // host polling is required. N is frozen during each call to runner. Exceptions
-// (including HIP API errors) propagate; invalid durations get bounded retries.
+// (including HIP API errors) propagate. Invalid durations are discarded and
+// repeated; only an invalid share above the policy allowance fails the cell.
 template <class Runner>
 Result measure(const Policy& policy, Runner&& runner) {
   policy.validate();
   Result result;
+  uint64_t attempted = 0;
   auto validBatch = [&](uint32_t& count) {
     for (;;) {
       result.largest_batch_calls = std::max(result.largest_batch_calls, count);
       const double ms = runner(count);
+      ++attempted;
       if (ms > 0.0 && std::isfinite(ms)) return ms;
       ++result.invalid_batches;
       result.invalid_calls += count;
-      // Retries are shared by the entire cell, including its bounded pilot.
-      if (result.invalid_batches > policy.invalid_retries)
-        throw std::runtime_error("UT timing: invalid event durations after bounded retries");
+      // The allowance is shared by the entire cell, including its pilot.
+      const double allowed = std::max(double(policy.invalid_retries),
+                                      std::ceil(policy.invalid_fraction * double(attempted)));
+      if (double(result.invalid_batches) > allowed)
+        throw std::runtime_error("UT timing: invalid event durations above the allowed share");
       count = std::max(uint32_t(1), count / 2);
     }
   };

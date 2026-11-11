@@ -50,9 +50,14 @@ more calls, a slower device fewer, based on its own pilot and subsequent batches
 
 20,000 ms (`confirm`) / 2,000 ms (`standard`) / 200 ms (`screen`) are soft cumulative thresholds. A very
 large call can overshoot, and ten complete calls take precedence. Never truncate
-a running call or report a projected iteration as completed. Invalid, zero,
-negative or nonfinite durations get at most two retries shared across the entire cell (including the pilot),
-reducing the batch count. HIP errors fail the measurement. Spread and soft-limit overshoot are
+a running call or report a projected iteration as completed. A batch with an
+invalid, zero, negative or nonfinite duration is discarded and repeated with half
+the calls; it never enters a group. The cell fails only when its invalid batches,
+pilot included, exceed max(2, 1% of the batches attempted so far)
+(`invalid_retry_limit`, `invalid_batch_fraction`), so a sporadic driver timing
+glitch in a long `confirm` measurement no longer aborts the leaf, while a timer
+that is invalid for a large share of batches still fails. HIP errors fail the
+measurement. Spread and soft-limit overshoot are
 reported, not thermal/clock rejection gates. No fixed steady-clock percentage
 is required by this timer.
 

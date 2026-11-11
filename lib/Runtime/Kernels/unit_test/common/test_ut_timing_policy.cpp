@@ -68,6 +68,15 @@ int main() {
   } catch (const std::runtime_error&) { failed = true; }
   assert(failed && attempts == 3);
 
+  // Sporadic invalid batches in a long measurement are discarded: one in
+  // every 997 attempts stays far below the 1% allowance.
+  attempts = 0;
+  auto sporadic = measure(Policy{}, [&](uint32_t n) {
+    return (++attempts % 997 == 0) ? 0.0 : 0.01 * n;
+  });
+  assert(sporadic.invalid_batches > 2 && sporadic.elapsed_ms >= 10000.0);
+  assert(std::abs(sporadic.mean_ms / 0.01 - 1.0) < 1e-10);
+
   // Invalid retries cannot reset at every new batch. Valid slow samples stay.
   attempts = 0;
   try {

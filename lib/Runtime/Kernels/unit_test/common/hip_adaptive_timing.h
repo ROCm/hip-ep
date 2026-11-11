@@ -212,6 +212,7 @@ double adaptiveRotatedMeanMs(hipStream_t stream, const Copies& copies,
               "\"rotation_bytes\":%llu,\"requested_warm\":%s,"
               "\"target_ms\":%.17g,\"soft_limit_ms\":%.17g,"
               "\"min_calls_per_group\":%u,\"invalid_retry_limit\":%u,"
+              "\"invalid_batch_fraction\":%.17g,"
               "\"events_per_batch\":2,\"batch_call_cap\":%u,"
               "\"largest_batch_calls\":%u,\"pilot_ms\":%.17g,"
               "\"pilot_calls\":%llu,\"pilot_batches\":%llu,\"prep_calls\":%llu,"
@@ -234,7 +235,8 @@ double adaptiveRotatedMeanMs(hipStream_t stream, const Copies& copies,
               copies_count, static_cast<unsigned long long>(copies.bytes()),
               static_cast<unsigned long long>(copies.bytes()) * copies_count,
               requested_warm ? "true" : "false", policy.target_ms, policy.soft_limit_ms,
-              policy.min_calls_per_group, policy.invalid_retries, policy.max_calls_per_batch,
+              policy.min_calls_per_group, policy.invalid_retries, policy.invalid_fraction,
+              policy.max_calls_per_batch,
               result.largest_batch_calls, result.pilot_ms,
               static_cast<unsigned long long>(result.pilot_calls),
               static_cast<unsigned long long>(result.pilot_batches),
