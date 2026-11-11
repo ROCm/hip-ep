@@ -536,7 +536,7 @@ def HoistAllocSizeArithPass
 }
 
 def MaterializeHostScalarsPass
-    : Pass<"hip-materialize-host-scalars", "mlir::func::FuncOp"> {
+    : Pass<"hip-materialize-host-scalars", "mlir::ModuleOp"> {
   let summary = "Redirect small host-accessed memref.alloc ops to a host-mapped "
                 "scratch buffer";
   let description = [{
@@ -544,6 +544,10 @@ def MaterializeHostScalarsPass
     scratch instead of the device pool. Follow aliases to find host loads
     and stores. Integer and index buffers qualify. Float buffers also need
     a HIP consumer. Reject unknown users.
+
+    Tiny inline constant globals read by HIP ops get a scratch region too,
+    filled by host stores of the initial value. Mutable globals and globals
+    with `hip.external_data` are left alone.
 
     A small copy-filled integer shape buffer can also qualify when it has
     an explicit scalar readback. Require bounded contiguous aliases, scalar
@@ -553,7 +557,9 @@ def MaterializeHostScalarsPass
 
     Replace each allocation with a separate aligned `memref.view` of one
     `hip.get_host_scratch` buffer. Keep payload accesses in their original
-    order. HIP-to-LLVM checks redundant readbacks separately.
+    order. HIP-to-LLVM checks redundant readbacks separately. Every function
+    shares that buffer, so slots are laid out across the module (disjoint per
+    function) and every function requests the module total.
 
     Run after linalg-to-loops and before `hip-optimize-memrefs`. Buffer reuse
     can otherwise merge a host-written buffer into an allocation above the
