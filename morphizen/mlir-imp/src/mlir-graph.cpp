@@ -1185,6 +1185,46 @@ void MLIRGraph::save(const std::string &filename,
   MY_LOG(1) << "Successfully saved MLIR graph to: " << filename;
 }
 
+// Copies the ORT bridge's "dim_params_map" metadata ("name:p0,p1;name2:...")
+// onto the function arguments as onnx.dim_params. A tensor name may itself
+// contain ':', so each entry splits at its last one. An entry whose axis count
+// differs from the argument's rank is skipped rather than guessed at.
+static void annotate_input_dim_params(mlir::func::FuncOp f,
+                                      const MLIRModel &model) {
+  const std::string encoded = model.get_metadata_prop("dim_params_map");
+  if (encoded.empty())
+    return;
+  std::unordered_map<std::string, llvm::SmallVector<llvm::StringRef>> params;
+  llvm::SmallVector<llvm::StringRef> entries;
+  llvm::StringRef(encoded).split(entries, ';');
+  for (llvm::StringRef entry : entries) {
+    auto [name, dims] = entry.rsplit(':');
+    if (name.empty() || name.size() == entry.size())
+      continue;
+    llvm::SmallVector<llvm::StringRef> axes;
+    dims.split(axes, ',');
+    params[name.str()] = std::move(axes);
+  }
+
+  auto *context = f.getContext();
+  for (unsigned i = 0; i < f.getNumArguments(); ++i) {
+    auto name = f.getArgAttrOfType<mlir::StringAttr>(i, attr_names::ONNX_NAME);
+    auto type =
+        mlir::dyn_cast<mlir::RankedTensorType>(f.getArgument(i).getType());
+    if (!name || !type)
+      continue;
+    auto it = params.find(name.str());
+    if (it == params.end() ||
+        static_cast<int64_t>(it->second.size()) != type.getRank())
+      continue;
+    llvm::SmallVector<mlir::Attribute> axes;
+    for (llvm::StringRef axis : it->second)
+      axes.push_back(mlir::StringAttr::get(context, axis));
+    f.setArgAttr(i, attr_names::ONNX_DIM_PARAMS,
+                 mlir::ArrayAttr::get(context, axes));
+  }
+}
+
 std::string MLIRGraph::save_string() const {
   CHECK(!is_subgraph())
       << "save_string is top-level only "
@@ -1198,6 +1238,7 @@ std::string MLIRGraph::save_string() const {
         << "Cannot serialize graph: function is not contained in a module";
     return "";
   }
+  annotate_input_dim_params(func(), model_);
 
   std::vector<
       std::pair<mlir::Operation *, llvm::SmallVector<mlir::NamedAttribute>>>

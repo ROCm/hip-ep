@@ -29,11 +29,13 @@
 // tensor<?x?x14336xf16> matches tensor<?x?x14336xf16> when one side is
 // [4, S, 14336] and the other is [1, S, 14336], and hip.mul would
 // broadcast. Each dynamic axis must trace to the same extent. A block
-// argument is its own extent. hip.matmul and hip.qmatmul contribute batch
-// and M from the activation (N from the weight); hip.matmul_nbits
-// contributes every axis but the last from the activation and the last
-// from its N attribute. That is the same source choice as
-// reifyMatmulLikeShape and MatMulNBitsOp::reifyResultShapes.
+// argument is its own extent; an axis of a function argument that
+// onnx.dim_params names is also the extent of every other argument axis
+// with that name, as ONNX defines it. hip.matmul and hip.qmatmul
+// contribute batch and M from the activation (N from the weight);
+// hip.matmul_nbits contributes every axis but the last from the
+// activation and the last from its N attribute. That is the same source
+// choice as reifyMatmulLikeShape and MatMulNBitsOp::reifyResultShapes.
 //
 //===----------------------------------------------------------------------===//
 
@@ -42,6 +44,7 @@
 #include "hip/Dialect/IR/HipDialect.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -49,6 +52,7 @@
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/Sequence.h"
 #include "llvm/ADT/SmallPtrSet.h"
 
@@ -83,13 +87,36 @@ struct Extent {
   int64_t staticSize = 0;
   mlir::Value value;
   int64_t dim = 0;
+  // Set, with dim -1, for a named axis of a function argument.
+  mlir::StringAttr dimParam;
 
   bool operator==(const Extent &other) const {
     if (isStatic || other.isStatic)
       return isStatic && other.isStatic && staticSize == other.staticSize;
+    if (dimParam || other.dimParam)
+      return dimParam == other.dimParam;
     return value == other.value && dim == other.dim;
   }
 };
+
+// The onnx.dim_params name of an entry-block argument's axis, if it has one.
+std::optional<Extent> namedArgumentExtent(mlir::Value value, int64_t dim) {
+  auto arg = mlir::dyn_cast<mlir::BlockArgument>(value);
+  if (!arg)
+    return std::nullopt;
+  auto func =
+      mlir::dyn_cast_or_null<mlir::func::FuncOp>(arg.getOwner()->getParentOp());
+  if (!func || arg.getOwner() != &func.getBody().front())
+    return std::nullopt;
+  auto names = func.getArgAttrOfType<mlir::ArrayAttr>(arg.getArgNumber(),
+                                                      "onnx.dim_params");
+  if (!names || dim < 0 || dim >= static_cast<int64_t>(names.size()))
+    return std::nullopt;
+  auto name = mlir::dyn_cast<mlir::StringAttr>(names[dim]);
+  if (!name || name.empty())
+    return std::nullopt;
+  return Extent{false, 0, {}, -1, name};
+}
 
 // Follow one matmul-like result axis to the operand axis that supplies it.
 // A static result is returned directly. std::nullopt means this op does not
@@ -163,87 +190,96 @@ std::optional<Extent> stepProjection(mlir::Operation *op, int64_t outDim) {
   return std::nullopt;
 }
 
-// Follow casts, projections and explicit destination extents through the
-// gated-normalization graph. Keep the walk bounded; unsupported or cyclic
-// provenance must decline rather than assume equal dynamic dimensions.
-constexpr int kMaxExtentHops = 32;
+// The extent an axis resolves to once casts, projections, destination-tied
+// inits, singleton collapses and the declared sizes of expand_shape,
+// rank-preserving extract_slice and tensor.empty are followed to their end.
+// Two axes with one root have one runtime size. An axis whose provenance is
+// not understood is its own root and proves nothing beyond itself. Roots are
+// cached for the query, so the residual chain of a deep model is walked once
+// however many selects lead back into it, and two branches that meet at a
+// shared input anywhere above them get the same root.
+class ExtentRoots {
+public:
+  Extent of(mlir::Value value, int64_t dim);
 
-// A declared size is either a constant, an existing tensor dimension, or an
-// identical scalar SSA value. No arithmetic equivalence is assumed.
-std::optional<Extent> shapeSizeExtent(mlir::OpFoldResult size) {
+private:
+  std::optional<Extent> declaredSize(mlir::OpFoldResult size);
+  std::optional<Extent> resolve(mlir::OpFoldResult size);
+
+  llvm::DenseMap<std::pair<mlir::Value, int64_t>, Extent> roots;
+};
+
+// A declared size is a constant, a tensor dimension still to be followed, a
+// select whose arms resolve to one root, or an opaque scalar. No arithmetic
+// equivalence is assumed.
+std::optional<Extent> ExtentRoots::declaredSize(mlir::OpFoldResult size) {
   if (auto constant = mlir::getConstantIntValue(size))
     return Extent{true, *constant, {}, 0};
   auto value = mlir::dyn_cast<mlir::Value>(size);
   if (!value)
     return std::nullopt;
-  for (int hop = 0; hop < kMaxExtentHops; ++hop) {
-    if (auto cast = value.getDefiningOp<mlir::arith::IndexCastOp>()) {
-      // Only peel the 64-bit index/integer bridge used by shape reification.
-      // A narrower integer can truncate an extent and is not equivalent.
-      auto integer = mlir::dyn_cast<mlir::IntegerType>(
-          cast.getIn().getType().isIndex() ? cast.getType()
-                                           : cast.getIn().getType());
-      if (integer && integer.getWidth() == 64) {
-        value = cast.getIn();
-        continue;
-      }
-    }
-    if (auto query = value.getDefiningOp<mlir::tensor::DimOp>())
-      if (auto index = query.getConstantIndex())
-        return Extent{false, 0, query.getSource(), *index};
-    return Extent{false, 0, value, -1};
+  while (auto cast = value.getDefiningOp<mlir::arith::IndexCastOp>()) {
+    // Only peel the 64-bit index/integer bridge used by shape reification.
+    // A narrower integer can truncate an extent and is not equivalent.
+    auto integer = mlir::dyn_cast<mlir::IntegerType>(
+        cast.getIn().getType().isIndex() ? cast.getType()
+                                         : cast.getIn().getType());
+    if (!integer || integer.getWidth() != 64)
+      break;
+    value = cast.getIn();
   }
-  return std::nullopt;
+  if (auto query = value.getDefiningOp<mlir::tensor::DimOp>())
+    if (auto index = query.getConstantIndex())
+      return Extent{false, 0, query.getSource(), *index};
+  // A select of two extents with one root is that extent whatever the
+  // condition. This is how an elementwise op sizes its destination when its
+  // operands could broadcast: select(lhs == 1, rhs, lhs) per axis.
+  if (auto select = value.getDefiningOp<mlir::arith::SelectOp>()) {
+    std::optional<Extent> lhs = resolve(select.getTrueValue());
+    std::optional<Extent> rhs = resolve(select.getFalseValue());
+    if (lhs && rhs && *lhs == *rhs)
+      return lhs;
+  }
+  return Extent{false, 0, value, -1};
 }
 
-// Bounds the nesting of select arms traced by selectExtent.
-constexpr int kMaxSelectDepth = 4;
-
-llvm::SmallVector<Extent> traceExtents(mlir::Value value, int64_t dim,
-                                       int selectDepth = 0);
-
-// A select of two extents proven equal is that extent whatever the
-// condition. This is how an elementwise op sizes its destination when its
-// operands could broadcast: select(lhs == 1, rhs, lhs) per axis.
-std::optional<Extent> selectExtent(mlir::Value value, int selectDepth) {
-  auto select = value.getDefiningOp<mlir::arith::SelectOp>();
-  if (!select || selectDepth >= kMaxSelectDepth)
-    return std::nullopt;
-  std::optional<Extent> lhs = shapeSizeExtent(select.getTrueValue());
-  std::optional<Extent> rhs = shapeSizeExtent(select.getFalseValue());
-  if (!lhs || !rhs)
-    return std::nullopt;
-  auto expand = [&](const Extent &e) {
-    if (e.isStatic || e.dim < 0)
-      return llvm::SmallVector<Extent>{e};
-    return traceExtents(e.value, e.dim, selectDepth + 1);
-  };
-  for (const Extent &l : expand(*lhs))
-    for (const Extent &r : expand(*rhs))
-      if (l == r)
-        return l;
-  return std::nullopt;
+std::optional<Extent> ExtentRoots::resolve(mlir::OpFoldResult size) {
+  std::optional<Extent> declared = declaredSize(size);
+  if (!declared || declared->isStatic || declared->dim < 0)
+    return declared;
+  return of(declared->value, declared->dim);
 }
 
-// Keep every proven anchor, so two branches can meet at a local shared input
-// without having to reach the beginning of an arbitrarily deep residual graph.
-llvm::SmallVector<Extent> traceExtents(mlir::Value value, int64_t dim,
-                                       int selectDepth) {
-  llvm::SmallVector<Extent> extents;
+Extent ExtentRoots::of(mlir::Value value, int64_t dim) {
+  llvm::SmallVector<std::pair<mlir::Value, int64_t>> path;
   mlir::Value current = value;
   int64_t axis = dim;
-  for (int hop = 0; hop < kMaxExtentHops; ++hop) {
-    auto type = mlir::dyn_cast<mlir::RankedTensorType>(current.getType());
-    if (!type || axis < 0 || axis >= type.getRank())
-      break;
-    if (!type.isDynamicDim(static_cast<unsigned>(axis))) {
-      extents.push_back(Extent{true, type.getDimSize(axis), {}, 0});
+  Extent root;
+  while (true) {
+    Extent self{false, 0, current, axis};
+    // An axis already on the path is its own root if the walk returns to it.
+    auto [cached, inserted] =
+        roots.try_emplace(std::make_pair(current, axis), self);
+    if (!inserted) {
+      root = cached->second;
       break;
     }
-    extents.push_back(Extent{false, 0, current, axis});
-    mlir::Operation *def = current.getDefiningOp();
-    if (!def)
+    path.push_back(std::make_pair(current, axis));
+
+    auto type = mlir::dyn_cast<mlir::RankedTensorType>(current.getType());
+    if (!type || axis < 0 || axis >= type.getRank()) {
+      root = self;
       break;
+    }
+    if (!type.isDynamicDim(static_cast<unsigned>(axis))) {
+      root = Extent{true, type.getDimSize(axis), {}, 0};
+      break;
+    }
+    mlir::Operation *def = current.getDefiningOp();
+    if (!def) {
+      root = namedArgumentExtent(current, axis).value_or(self);
+      break;
+    }
     if (auto cast = mlir::dyn_cast<mlir::tensor::CastOp>(def)) {
       current = cast.getSource();
       continue;
@@ -254,7 +290,7 @@ llvm::SmallVector<Extent> traceExtents(mlir::Value value, int64_t dim,
     }
     if (std::optional<Extent> stepped = stepProjection(def, axis)) {
       if (stepped->isStatic) {
-        extents.push_back(*stepped);
+        root = *stepped;
         break;
       }
       current = stepped->value;
@@ -271,43 +307,44 @@ llvm::SmallVector<Extent> traceExtents(mlir::Value value, int64_t dim,
       auto groups = collapse.getReassociationIndices();
       // A singleton reassociation preserves this axis. Merged dynamic axes
       // require a product proof and are deliberately left unsupported.
-      if (groups[axis].size() != 1)
+      if (groups[axis].size() != 1) {
+        root = self;
         break;
+      }
       current = collapse.getSrc();
       axis = groups[axis].front();
       continue;
     }
-    std::optional<Extent> sizeExtent;
+    std::optional<Extent> sized;
     if (auto expand = mlir::dyn_cast<mlir::tensor::ExpandShapeOp>(def)) {
-      sizeExtent = shapeSizeExtent(expand.getMixedOutputShape()[axis]);
+      sized = declaredSize(expand.getMixedOutputShape()[axis]);
     } else if (auto slice = mlir::dyn_cast<mlir::tensor::ExtractSliceOp>(def)) {
       auto sourceType =
           mlir::dyn_cast<mlir::RankedTensorType>(slice.getSource().getType());
       // Restrict to rank-preserving slices; their explicit sizes describe
       // each output axis directly, independently of offsets and data values.
-      if (!sourceType || sourceType.getRank() != type.getRank())
-        break;
-      sizeExtent = shapeSizeExtent(slice.getMixedSizes()[axis]);
+      if (sourceType && sourceType.getRank() == type.getRank())
+        sized = declaredSize(slice.getMixedSizes()[axis]);
     } else if (auto empty = mlir::dyn_cast<mlir::tensor::EmptyOp>(def)) {
       unsigned dynamicIndex = 0;
       for (int64_t i = 0; i < axis; ++i)
         dynamicIndex += type.isDynamicDim(i);
-      sizeExtent = shapeSizeExtent(empty.getDynamicSizes()[dynamicIndex]);
+      sized = declaredSize(empty.getDynamicSizes()[dynamicIndex]);
     }
-    if (!sizeExtent)
-      break;
-    if (!sizeExtent->isStatic && sizeExtent->dim == -1)
-      if (std::optional<Extent> common =
-              selectExtent(sizeExtent->value, selectDepth))
-        sizeExtent = common;
-    if (sizeExtent->isStatic || sizeExtent->dim == -1) {
-      extents.push_back(*sizeExtent);
+    if (!sized) {
+      root = self;
       break;
     }
-    current = sizeExtent->value;
-    axis = sizeExtent->dim;
+    if (sized->isStatic || sized->dim < 0) {
+      root = *sized;
+      break;
+    }
+    current = sized->value;
+    axis = sized->dim;
   }
-  return extents;
+  for (const auto &key : path)
+    roots[key] = root;
+  return root;
 }
 
 // True when each dynamic axis has a common, proven runtime extent. Static
@@ -318,16 +355,11 @@ bool sameRuntimeShape(mlir::Value lhs, mlir::Value rhs) {
   auto rhsType = mlir::dyn_cast<mlir::RankedTensorType>(rhs.getType());
   if (!lhsType || lhsType != rhsType)
     return false;
+  ExtentRoots roots;
   for (int64_t dim : llvm::seq<int64_t>(0, lhsType.getRank())) {
     if (!lhsType.isDynamicDim(static_cast<unsigned>(dim)))
       continue;
-    auto left = traceExtents(lhs, dim);
-    auto right = traceExtents(rhs, dim);
-    bool equal = false;
-    for (const auto &l : left)
-      for (const auto &r : right)
-        equal |= l == r;
-    if (!equal)
+    if (!(roots.of(lhs, dim) == roots.of(rhs, dim)))
       return false;
   }
   return true;

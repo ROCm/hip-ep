@@ -83,6 +83,22 @@ constexpr const char *ONNX_NODE_NAME = "onnx_node_name";
 //===--------------------------------------===//
 constexpr const char *ONNX_NAME = "onnx.name";
 
+//===--------------------------------------===//
+// The "onnx.dim_params" attribute
+// Attached to top-level function arguments: the ONNX dim_param of each axis of
+// the graph input, "" where the axis has none. ONNX gives every axis that
+// shares a name within a graph the same size, which lets shape analysis equate
+// dynamic axes of different inputs.
+// Example:
+// %arg1: tensor<?x?x2560xf16> {onnx.dim_params = ["batch", "sequence_len", ""],
+//                              onnx.name = "inputs_embeds"}
+//
+// Implementation:
+//   - Taken from the "dim_params_map" model metadata the ORT bridge records,
+//     and set by MLIRGraph::save_string before the module is serialized.
+//===--------------------------------------===//
+constexpr const char *ONNX_DIM_PARAMS = "onnx.dim_params";
+
 } // namespace attr_names
 
 namespace onnx_mlir {

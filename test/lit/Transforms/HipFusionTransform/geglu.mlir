@@ -149,3 +149,57 @@ func.func @geglu_blocked_dynamic_broadcast(%ctx: !hip.context,
        outs(%e1 : tensor<?x256xf16>) -> tensor<?x256xf16>
   return %y : tensor<?x256xf16>
 }
+
+// -----
+
+// Gate and up are different arguments, but onnx.dim_params gives their
+// dynamic axes the same names, and ONNX defines axes with one name in a
+// graph to have one size. Gemma's per-layer input is gated this way.
+// CHECK-LABEL: func.func @geglu_named_dims
+// CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[GATE:[^:]*]]: tensor<?x?x256xf16> {{.*}}, %[[UP:[^:]*]]: tensor<?x?x256xf16>
+// CHECK-NOT: hip.gelu
+// CHECK: hip.geglu(%[[CTX]]) ins(%[[GATE]], %[[UP]] :
+func.func @geglu_named_dims(
+    %ctx: !hip.context,
+    %gate: tensor<?x?x256xf16> {onnx.dim_params = ["batch", "seq", ""]},
+    %up: tensor<?x?x256xf16> {onnx.dim_params = ["batch", "seq", ""]})
+    -> tensor<?x?x256xf16> {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %d0 = tensor.dim %gate, %c0 : tensor<?x?x256xf16>
+  %d1 = tensor.dim %gate, %c1 : tensor<?x?x256xf16>
+  %e0 = tensor.empty(%d0, %d1) : tensor<?x?x256xf16>
+  %g = hip.gelu(%ctx) ins(%gate : tensor<?x?x256xf16>)
+       outs(%e0 : tensor<?x?x256xf16>) {approximate = "tanh"}
+       : tensor<?x?x256xf16>
+  %e1 = tensor.empty(%d0, %d1) : tensor<?x?x256xf16>
+  %y = hip.mul(%ctx) ins(%g, %up : tensor<?x?x256xf16>, tensor<?x?x256xf16>)
+       outs(%e1 : tensor<?x?x256xf16>) -> tensor<?x?x256xf16>
+  return %y : tensor<?x?x256xf16>
+}
+
+// -----
+
+// One axis name differs, so that axis may still broadcast.
+// CHECK-LABEL: func.func @geglu_blocked_differently_named_dims
+// CHECK-NOT: hip.geglu
+// CHECK: hip.gelu
+// CHECK: hip.mul
+func.func @geglu_blocked_differently_named_dims(
+    %ctx: !hip.context,
+    %gate: tensor<?x?x256xf16> {onnx.dim_params = ["batch", "seq", ""]},
+    %up: tensor<?x?x256xf16> {onnx.dim_params = ["batch", "past_seq", ""]})
+    -> tensor<?x?x256xf16> {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %d0 = tensor.dim %gate, %c0 : tensor<?x?x256xf16>
+  %d1 = tensor.dim %gate, %c1 : tensor<?x?x256xf16>
+  %e0 = tensor.empty(%d0, %d1) : tensor<?x?x256xf16>
+  %g = hip.gelu(%ctx) ins(%gate : tensor<?x?x256xf16>)
+       outs(%e0 : tensor<?x?x256xf16>) {approximate = "tanh"}
+       : tensor<?x?x256xf16>
+  %e1 = tensor.empty(%d0, %d1) : tensor<?x?x256xf16>
+  %y = hip.mul(%ctx) ins(%g, %up : tensor<?x?x256xf16>, tensor<?x?x256xf16>)
+       outs(%e1 : tensor<?x?x256xf16>) -> tensor<?x?x256xf16>
+  return %y : tensor<?x?x256xf16>
+}
