@@ -201,8 +201,10 @@ static void stampStaticReassociationAbiShape(AllocOutputOp allocOutput,
     return;
   if (rootType.getShape() == extType.getShape())
     return;
-  if (rootType.getNumElements() == 0 ||
-      rootType.getNumElements() != extType.getNumElements())
+  // A zero-element output is still a shape. memref<0x90x16x4xf16> and
+  // memref<1x0x16x64xf16> both hold nothing, and ORT still checks the
+  // returned shape against the model.
+  if (rootType.getNumElements() != extType.getNumElements())
     return;
 
   Value cur = retVal;

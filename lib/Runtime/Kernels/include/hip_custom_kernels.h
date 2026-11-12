@@ -1468,6 +1468,8 @@ HIP_KERNEL_API int hip_gqa_flash_decode_fused_copy(
  *   FLOAT16 -> INT64, INT32, UINT8; INT64/INT32/UINT8 -> FLOAT16, FLOAT32
  *   BFLOAT16 <-> FLOAT32, FLOAT16, FLOAT64, INT64, INT32, INT16, INT8, UINT8
  *   FLOAT64 <-> FLOAT32, FLOAT16 (through fp32, same as the bf16 casts)
+ *   FLOAT64 <-> INT64, INT32, INT16, INT8, UINT8 (direct static_cast; f64 to
+ *   integer truncates toward zero)
  * bf16 conversions go through fp32: fp32 -> bf16 rounds to nearest even
  * (same as PyTorch and ONNX), bf16 -> fp32 is exact, float -> integer
  * truncates toward zero.

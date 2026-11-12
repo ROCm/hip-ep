@@ -499,3 +499,20 @@ func.func @same_rank_channel_split(%ctx: !hip.context) -> memref<1x90x160x64xf16
       : memref<921600xf16> into memref<1x90x160x64xf16>
   return %ret : memref<1x90x160x64xf16>
 }
+
+// --- Same-rank reshape of a zero-extent buffer. Both shapes hold nothing,
+//     and ORT still checks the returned shape. ---
+// CHECK-LABEL: func.func @same_rank_zero_extent
+// CHECK-SAME:    (%[[CTX:.*]]: !hip.context)
+// CHECK:         %[[OUT:.*]] = hip.alloc_output(%[[CTX]]) {hipdnn.abi_shape = array<i64: 1, 0, 16, 64>, out_idx = 0 : i64} : memref<0x90x16x4xf16>
+// CHECK-NOT:     hipdnn.abi_groups
+// CHECK:         return
+func.func @same_rank_zero_extent(%ctx: !hip.context) -> memref<1x0x16x64xf16> {
+  %out = memref.alloc() : memref<0x90x16x4xf16>
+  %flat = memref.collapse_shape %out [[0, 1, 2, 3]]
+      : memref<0x90x16x4xf16> into memref<0xf16>
+  %ret = memref.expand_shape %flat [[0, 1, 2, 3]]
+      output_shape [1, 0, 16, 64]
+      : memref<0xf16> into memref<1x0x16x64xf16>
+  return %ret : memref<1x0x16x64xf16>
+}

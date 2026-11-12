@@ -14,6 +14,8 @@
 
 #include "llvm/ADT/STLExtras.h"
 
+#include <limits>
+
 namespace mlir {
 namespace hip {
 namespace {
@@ -335,7 +337,27 @@ struct AllocOutputOpLowering : public ConvertOpToLLVMPattern<AllocOutputOp> {
         abiShapeAttr &&
         llvm::none_of(abiShapeAttr.asArrayRef(),
                       [](int64_t dim) { return ShapedType::isDynamic(dim); });
+    // A fully static abi_shape is the callback shape only when it describes
+    // the same elements as the internal buffer and no groups are rewriting
+    // the rank. A stale shape such as [1, 2] on memref<4x4xf32> would ask
+    // the allocator for 2 elements while the compute writes 16. Groups mean
+    // a rank change, which the path below already checks.
+    int64_t abiElems = 1;
+    bool abiElemsOk = abiShapeIsStatic;
     if (abiShapeIsStatic) {
+      for (int64_t dim : abiShapeAttr.asArrayRef()) {
+        if (dim < 0 ||
+            (dim > 0 && abiElems > std::numeric_limits<int64_t>::max() / dim)) {
+          abiElemsOk = false;
+          break;
+        }
+        abiElems *= dim;
+      }
+    }
+    bool useStaticAbiShape = abiShapeIsStatic && !abiGroupsAttr &&
+                             memRefType.hasStaticShape() && abiElemsOk &&
+                             abiElems == memRefType.getNumElements();
+    if (useStaticAbiShape) {
       ArrayRef<int64_t> abiShape = abiShapeAttr.asArrayRef();
       callbackRank = static_cast<int64_t>(abiShape.size());
       for (int64_t dim : abiShape)
