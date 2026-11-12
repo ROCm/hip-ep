@@ -15,6 +15,12 @@ The cases cover the three shapes of that split against the ORT CPU reference:
 
 A trailing LeakyRelu checks the pointwise op that moves above the interleave
 into the convolution's epilogue.
+
+The "add" bias is the exporters' form of a bias: a bias-free ConvTranspose,
+then Add(Reshape([1,1,1,M] -> [1,M,1,1])), folded into the convolution's bias.
+Like the filter, the fold reads only constants at or below the importer's
+inline threshold; run with `XLNX_ABI_2_0_CLONE_EXTERNAL_DATA_THRESHOLD`
+raised to exercise it, otherwise the same graphs check the unfolded path.
 """
 
 import numpy as np
@@ -46,10 +52,13 @@ def _make_conv_transpose_model(
     bias: str,
     leaky: bool,
     seed: int = 7,
+    next_conv: bool = False,
 ):
     """Build a ConvTranspose model with a weight initializer.
 
-    bias: "none", "const" (initializer), or "input" (second graph input).
+    bias: "none", "const" (initializer), "input" (second graph input), or
+    "add" (a bias-free ConvTranspose, then Add of a reshaped initializer).
+    next_conv: follow with a 3x3 convolution, out_c -> out_c, same size.
     """
     rank = len(spatial)
     elem = _TYPES[dtype]
@@ -69,20 +78,43 @@ def _make_conv_transpose_model(
         inputs.append(helper.make_tensor_value_info("bias", elem, [out_c]))
         node_inputs.append("bias")
 
-    conv_out = "convt" if leaky else "output"
     nodes = [
         helper.make_node(
             "ConvTranspose",
             node_inputs,
-            [conv_out],
+            ["convt"],
             kernel_shape=[k] * rank,
             strides=[s] * rank,
             pads=[p] * (2 * rank),
             output_padding=[out_pad] * rank,
         )
     ]
+    if bias == "add":
+        b = rng.uniform(-0.5, 0.5, [1] * (rank + 1) + [out_c]).astype(dtype)
+        shape = np.array([1, out_c] + [1] * rank, dtype=np.int64)
+        inits.append(numpy_helper.from_array(b, name="bias_nhwc"))
+        inits.append(numpy_helper.from_array(shape, name="bias_shape"))
+        nodes.append(
+            helper.make_node("Reshape", ["bias_nhwc", "bias_shape"], ["bias_nchw"])
+        )
+        nodes.append(helper.make_node("Add", ["convt", "bias_nchw"], ["biased"]))
     if leaky:
-        nodes.append(helper.make_node("LeakyRelu", [conv_out], ["output"], alpha=0.2))
+        nodes.append(
+            helper.make_node("LeakyRelu", [nodes[-1].output[0]], ["act"], alpha=0.2)
+        )
+    if next_conv:
+        w2 = rng.uniform(-0.2, 0.2, [out_c, out_c] + [3] * rank).astype(dtype)
+        inits.append(numpy_helper.from_array(w2, name="next_weight"))
+        nodes.append(
+            helper.make_node(
+                "Conv",
+                [nodes[-1].output[0], "next_weight"],
+                ["next"],
+                kernel_shape=[3] * rank,
+                pads=[1] * (2 * rank),
+            )
+        )
+    nodes[-1].output[0] = "output"
     return make_model_from_nodes(nodes, inputs, [out], initializers=inits)
 
 
@@ -115,6 +147,43 @@ class TestConvTranspose:
         feeds = [rng.uniform(-1.0, 1.0, [1, in_c, *spatial]).astype(dtype)]
         if bias == "input":
             feeds.append(rng.uniform(-0.5, 0.5, [out_c]).astype(dtype))
+
+        actual, expected = model_runner.run_sample(model, feeds)
+        tol = 1e-2 if dtype == np.float16 else 1e-4
+        compare_outputs(actual, expected, atol=tol, rtol=tol, cos_threshold=0.999)
+
+    @pytest.mark.parametrize("dtype", [np.float16, np.float32])
+    @pytest.mark.parametrize(
+        "in_c,out_c,k,s,p,spatial,leaky,next_conv",
+        [
+            # The upsampling block of the gnet models: ConvTranspose,
+            # Add(Reshape(bias)), LeakyRelu, 3x3 Conv.
+            (8, 16, 4, 2, 1, [8, 8], True, True),
+            (16, 8, 4, 2, 1, [8, 8], False, False),
+            # Zero-padded phases, and phases over the padding limit.
+            (4, 8, 3, 2, 1, [7, 7], True, True),
+            (4, 8, 5, 4, 0, [6, 6], True, False),
+        ],
+    )
+    def test_conv_transpose_bias_add(
+        self, model_runner, dtype, in_c, out_c, k, s, p, spatial, leaky, next_conv
+    ):
+        out_pad = 1 if (k, s) == (3, 2) else 0
+        model = _make_conv_transpose_model(
+            in_c,
+            out_c,
+            k,
+            s,
+            p,
+            out_pad,
+            spatial,
+            dtype,
+            "add",
+            leaky,
+            next_conv=next_conv,
+        )
+        rng = np.random.default_rng(123)
+        feeds = [rng.uniform(-1.0, 1.0, [1, in_c, *spatial]).astype(dtype)]
 
         actual, expected = model_runner.run_sample(model, feeds)
         tol = 1e-2 if dtype == np.float16 else 1e-4

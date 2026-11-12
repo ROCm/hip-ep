@@ -360,7 +360,11 @@ def DecomposeConvTransposePass
     transpose into the convolution's store. Residues whose tap counts differ
     are zero-padded to the largest count when the padded filters cost at most
     twice the real taps, and then take the same path. A constant bias is tiled
-    once per residue into the wide convolution. The other residues stay on one
+    once per residue into the wide convolution. A single-use `hip.add` of a
+    per-channel constant after the op (`Add(y, Reshape(b))`, the exporters'
+    form of a bias) folds into that bias the same way, so an activation
+    behind it can reach the convolution's epilogue instead of becoming a
+    prologue of the next convolution. The other residues stay on one
     convolution each, with the bias, and one strided `tensor.insert_slice`
     each, which bufferizes to a `memref.subview` plus a copy.
 
