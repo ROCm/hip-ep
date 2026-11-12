@@ -79,6 +79,12 @@ struct DimInfo {
 /// residue convolutions; only a run-time bias on the wide convolution, which
 /// cannot be repeated per residue here, stays an add after the crop.
 ///
+/// Exporters often write the bias as a separate add of a per-channel constant
+/// after a bias-free op (`Add(y, Reshape(b : [1,1,1,M] -> [1,M,1,1]))`). When
+/// that add is the result's only user it folds into the bias the same way;
+/// left after the crop, it and any activation behind it would become a
+/// prologue of the next convolution, recomputed for every filter tap.
+///
 /// Taking a 1-D slice of the unequal-tap case, with a 3-tap filter [w0 w1 w2]
 /// over a 4-long input, before:
 ///
@@ -126,6 +132,64 @@ SmallVector<int64_t> getI64Values(ArrayAttr attr) {
 int64_t flatIndex(ArrayRef<int64_t> shape, int64_t a, int64_t b, int64_t c,
                   int64_t d) {
   return ((a * shape[1] + b) * shape[2] + c) * shape[3] + d;
+}
+
+/// One value per channel (axis 1) of `resultType`, when `value` is a
+/// `hip.constant` -- possibly behind reshapes and transposes -- that an
+/// elementwise op broadcasts that way: right-aligned against `resultType`,
+/// every dimension is 1 except the channel axis, which is M or 1. A rank-1
+/// [M] operand broadcasts along the last axis instead, so it does not match.
+FailureOr<SmallVector<APFloat>>
+readPerChannelConstant(Value value, RankedTensorType resultType) {
+  auto type = dyn_cast<RankedTensorType>(value.getType());
+  if (!type || !type.hasStaticShape() ||
+      type.getElementType() != resultType.getElementType() ||
+      type.getRank() > resultType.getRank())
+    return failure();
+  const int64_t channels = resultType.getDimSize(1);
+  const int64_t lead = resultType.getRank() - type.getRank();
+  for (int64_t i : llvm::seq<int64_t>(type.getRank())) {
+    const int64_t size = type.getDimSize(i);
+    if (size != 1 && !(i + lead == 1 && size == channels))
+      return failure();
+  }
+
+  // Reshapes keep the row-major order of the values, and so does a transpose
+  // with at most one input dimension larger than one.
+  Value source = value;
+  while (Operation *def = source.getDefiningOp()) {
+    if (auto expand = dyn_cast<tensor::ExpandShapeOp>(def)) {
+      source = expand.getSrc();
+    } else if (auto collapse = dyn_cast<tensor::CollapseShapeOp>(def)) {
+      source = collapse.getSrc();
+    } else if (auto reshape = dyn_cast<tensor::ReshapeOp>(def)) {
+      source = reshape.getSource();
+    } else if (auto cast = dyn_cast<tensor::CastOp>(def)) {
+      source = cast.getSource();
+    } else if (auto transpose = dyn_cast<TransposeOp>(def)) {
+      auto inputType =
+          dyn_cast<RankedTensorType>(transpose.getInput().getType());
+      if (!inputType || llvm::count_if(inputType.getShape(), [](int64_t size) {
+                          return size != 1;
+                        }) > 1)
+        return failure();
+      source = transpose.getInput();
+    } else {
+      break;
+    }
+  }
+  auto constant = source.getDefiningOp<ConstantOp>();
+  auto sourceType = dyn_cast<RankedTensorType>(source.getType());
+  if (!constant || !sourceType)
+    return failure();
+  FailureOr<DenseElementsAttr> data = readConstantData(constant, sourceType);
+  if (failed(data) || data->getNumElements() != type.getNumElements())
+    return failure();
+  SmallVector<APFloat> values(data->getValues<APFloat>().begin(),
+                              data->getValues<APFloat>().end());
+  if (values.size() == 1)
+    values.assign(channels, values.front());
+  return values;
 }
 
 /// Decompose a 1-D transposed convolution through the same 2-D hip.conv path
@@ -423,6 +487,37 @@ DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
           op, "expected a static 1-D bias of matching type and length M");
   }
 
+  // A per-channel constant added to the result joins the bias (see the note
+  // above the pattern). The op's own bias has to be readable too, to sum them.
+  AddOp channelAdd;
+  SmallVector<APFloat> foldedBias;
+  if (Value out = op.getResult(0); out.hasOneUse()) {
+    auto add = dyn_cast<AddOp>(*out.user_begin());
+    if (add && add->getNumResults() == 1 &&
+        add->getResult(0).getType() == resultType) {
+      Value other = add.getLhs() == out ? add.getRhs() : add.getLhs();
+      FailureOr<SmallVector<APFloat>> added =
+          readPerChannelConstant(other, resultType);
+      if (succeeded(added) && !bias) {
+        channelAdd = add;
+        foldedBias = std::move(*added);
+      } else if (succeeded(added)) {
+        auto biasConst = bias.getDefiningOp<ConstantOp>();
+        FailureOr<DenseElementsAttr> own =
+            biasConst ? readConstantData(biasConst,
+                                         cast<RankedTensorType>(bias.getType()))
+                      : FailureOr<DenseElementsAttr>(failure());
+        if (succeeded(own)) {
+          channelAdd = add;
+          foldedBias.assign(own->getValues<APFloat>().begin(),
+                            own->getValues<APFloat>().end());
+          for (auto [sum, extra] : llvm::zip_equal(foldedBias, *added))
+            sum.add(extra, APFloat::rmNearestTiesToEven);
+        }
+      }
+    }
+  }
+
   SmallVector<DimInfo, 2> dims;
   for (int64_t d : llvm::seq<int64_t>(2)) {
     DimInfo di;
@@ -466,6 +561,12 @@ DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
 
   Location loc = op.getLoc();
   Value ctx = op.getCtx();
+  if (channelAdd) {
+    auto biasType = RankedTensorType::get({outChannels}, elementType);
+    bias = ConstantOp::create(rewriter, loc, biasType,
+                              DenseElementsAttr::get(biasType, foldedBias))
+               .getResult();
+  }
   SmallVector<APFloat> weightValues(weightAttr.getValues<APFloat>().begin(),
                                     weightAttr.getValues<APFloat>().end());
 
@@ -720,6 +821,11 @@ DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
                  .getResult(0);
   }
 
+  if (channelAdd) {
+    rewriter.replaceOp(channelAdd, result);
+    rewriter.eraseOp(op);
+    return success();
+  }
   rewriter.replaceOp(op, result);
   return success();
 }
