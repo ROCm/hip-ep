@@ -57,7 +57,7 @@ std::string read_env(const char *name) {
 #define HIPDNN_EP_CORELIB_FUNCTIONS(X)                                         \
   X(ryzenai_corelib_get_version)                                               \
   X(ryzenai_corelib_cleanup)                                                   \
-  X(ryzenai_corelib_npu_usable)                                                \
+  X(ryzenai_corelib_has_feature)                                               \
   X(ryzenai_corelib_get_last_error_message)                                    \
   X(ryzenai_corelib_object_release)                                            \
   X(ryzenai_corelib_create_model_from_path)                                    \
@@ -473,9 +473,9 @@ std::shared_ptr<ModelSession> create_model_session(const std::string &arch,
     *why = "corelib is not loadable (see the [corelib] line above)";
     return nullptr;
   }
-  if (!api->ryzenai_corelib_npu_usable()) {
-    *why = "no NPU corelib can use here (ryzenai_corelib_npu_usable() is "
-           "false)";
+  if (!api->ryzenai_corelib_has_feature(ryzenai_corelib_feature_npu_aiem)) {
+    *why = "no NPU corelib can use here (ryzenai_corelib_feature_npu_aiem is "
+           "not available)";
     return nullptr;
   }
   // Discovery leans on the vocabulary check to turn away a model that takes
