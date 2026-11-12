@@ -4,7 +4,8 @@
 // RUN: hip-mlir-opt --split-input-file --hip-decompose-multi-head-attention %s \
 // RUN:   | FileCheck %s --check-prefixes=CHECK,DECOMPOSE
 // RUN: hip-mlir-opt --split-input-file --hip-decompose-multi-head-attention \
-// RUN:   --hip-fuse-rocmlir %s | hip-mlir-opt --split-input-file \
+// RUN:   --hip-fuse-rocmlir-elementwise --hip-fuse-rocmlir-anchor %s \
+// RUN:   | hip-mlir-opt --split-input-file \
 // RUN:   | FileCheck %s --check-prefixes=CHECK,FUSE
 
 // f16 prefill, head dim 8. Padded head dim is 16, so the runtime may run this
@@ -26,8 +27,8 @@ func.func @main_graph(%ctx: !hip.context, %q: tensor<1x4x16xf16>,
 // -----
 
 // Decode is not the flash prefill path, so f16 query sequence 1 still splits
-// and each matmul is outlined around the softmax. hip-fuse-rocmlir only
-// outlines func.func @main_graph, so this case uses that name.
+// and each matmul is outlined around the softmax. hip-fuse-rocmlir-anchor
+// only outlines func.func @main_graph, so this case uses that name.
 // CHECK-LABEL: func.func @main_graph({{.*}}tensor<1x1x16xf16>, {{.*}}tensor<1x4x16xf16>
 // DECOMPOSE-NOT: hip.multi_head_attention
 // DECOMPOSE: hip.matmul
@@ -90,7 +91,7 @@ func.func @default_scale(%ctx: !hip.context, %q: tensor<1x1x16xf16>,
 // -----
 
 // f32 is not the flash kernel, so a short prefill still splits. Named
-// main_graph so hip-fuse-rocmlir outlines the two matmuls.
+// main_graph so hip-fuse-rocmlir-anchor outlines the two matmuls.
 // CHECK-LABEL: func.func @main_graph({{.*}}tensor<1x4x16xf32>
 // DECOMPOSE-NOT: hip.multi_head_attention
 // DECOMPOSE: hip.matmul
@@ -115,7 +116,7 @@ func.func @main_graph(%ctx: !hip.context, %q: tensor<1x4x16xf32>,
 // -----
 
 // Padded head dim 272 is above the flash kernel's limit, so this f16 prefill
-// still splits. Named main_graph so hip-fuse-rocmlir outlines it.
+// still splits. Named main_graph so hip-fuse-rocmlir-anchor outlines it.
 // CHECK-LABEL: func.func @main_graph({{.*}}tensor<1x2x272xf16>
 // DECOMPOSE-NOT: hip.multi_head_attention
 // DECOMPOSE: hip.matmul
