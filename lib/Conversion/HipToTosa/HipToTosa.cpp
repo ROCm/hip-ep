@@ -90,6 +90,29 @@ static Value reshapeTo(Value input, ArrayRef<int64_t> shape,
                                  type.clone(shape), input, shapeConst);
 }
 
+// Rank 0 counts: every dimension it has is 1. tensor<1xf32> and tensor<f32>
+// are the same one value spelled at different ranks.
+static bool isUnitTensor(RankedTensorType type) {
+  return type && type.hasStaticShape() &&
+         llvm::all_of(type.getShape(), [](int64_t dim) { return dim == 1; });
+}
+
+// Quantized scales arrive as tensor<1xf32> into a rank-0 tensor<f32>.
+// EqualizeRanks only prepends 1s onto the shorter operand, so it cannot
+// squeeze the vector down to the scalar result. A unit tensor with the same
+// element count is that scalar, and tosa.reshape spells it at the result rank.
+static Value reshapeUnitToResult(Value operand, RankedTensorType resultType,
+                                 ConversionPatternRewriter &rewriter) {
+  auto type = dyn_cast<RankedTensorType>(operand.getType());
+  if (!isUnitTensor(type) || !isUnitTensor(resultType))
+    return operand;
+  if (type.getElementType() != resultType.getElementType() ||
+      type.getShape() == resultType.getShape() ||
+      type.getNumElements() != resultType.getNumElements())
+    return operand;
+  return reshapeTo(operand, resultType.getShape(), rewriter);
+}
+
 static Value transposeTo(Value input, ArrayRef<int64_t> shape,
                          ArrayRef<int32_t> permutation,
                          ConversionPatternRewriter &rewriter, Location loc) {
@@ -846,8 +869,10 @@ struct BinaryConverter final : public OpConversionPattern<HipOpTy> {
     // while TOSA requires both operands to already carry the result's rank and
     // broadcasts size-1 dimensions only. EqualizeRanks reshapes the shorter
     // operand by prepending 1s; the TOSA op then broadcasts those dimensions.
-    Value lhs = adaptor.getLhs();
-    Value rhs = adaptor.getRhs();
+    // A unit tensor written at the result's rank is squeezed first, because
+    // EqualizeRanks cannot drop a size-1 dimension.
+    Value lhs = reshapeUnitToResult(adaptor.getLhs(), resultType, rewriter);
+    Value rhs = reshapeUnitToResult(adaptor.getRhs(), resultType, rewriter);
     if (failed(tosa::EqualizeRanks(rewriter, op.getLoc(), lhs, rhs)))
       return rewriter.notifyMatchFailure(op, "operand ranks not equalizable");
     // Re-check after equalization so a dimension that still cannot broadcast is
@@ -4001,7 +4026,7 @@ struct AtanConverter final : public OpConversionPattern<AtanOp> {
     auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
     if (!resultType || !resultType.hasStaticShape())
       return rewriter.notifyMatchFailure(op, "expected a static ranked tensor");
-    Value x = adaptor.getX();
+    Value x = reshapeUnitToResult(adaptor.getX(), resultType, rewriter);
     if (x.getType() != resultType)
       return rewriter.notifyMatchFailure(
           op, "operand and result types must match exactly");
