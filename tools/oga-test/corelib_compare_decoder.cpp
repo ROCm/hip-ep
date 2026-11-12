@@ -252,7 +252,12 @@ Result run_config(Ort::Env &env, const std::string &model,
         continue;
       auto shape = values[i].GetTensorTypeAndShapeInfo().GetShape();
       r.vocab = shape.back();
-      r.steps.push_back(to_floats(values[i]));
+      // CoreLib computes only the last row's logits; the rest are zeros.
+      // Compare only the last position — the one generation uses to pick the
+      // next token — so the prefill and decode steps are judged the same way.
+      auto all = to_floats(values[i]);
+      r.steps.push_back(std::vector<float>(
+          all.end() - r.vocab, all.end()));
     }
   }
   std::printf("[%s] done\n", label.c_str());
