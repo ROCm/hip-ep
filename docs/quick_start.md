@@ -193,7 +193,7 @@ installed in step 1; omit it and ORT is auto-downloaded. The hipgpu EP, HIP
 tools and LIT tests are built and installed into `../local/`.
 
 Optional: to let whole models run on the NPU through RyzenAI CoreLib, set
-`RYZENAICORELIB_ROOT` to a CoreLib 0.66 or later install tree (the folder
+`RYZENAICORELIB_ROOT` to a CoreLib 0.90.1 or later install tree (the folder
 holding `include/ryzenai/corelib/base.h`) before building. Without it a stub is
 built and every model compiles for the GPU. See
 [ryzenai-corelib-model.md](design/ryzenai-corelib-model.md).
