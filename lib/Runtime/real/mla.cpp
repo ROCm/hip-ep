@@ -25,6 +25,7 @@
 #include "../op_profile.h"
 #include "../op_state.h"
 #include "../runtime_state_internal.h"
+#include "cache_utils.h"
 #include "gqa_fused.h"
 #include "hip_custom_kernels.h"
 
@@ -33,10 +34,10 @@
 
 #include <array>
 #include <cstdio>
-#include <map>
 #include <mutex>
 #include <string>
 #include <tuple>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -61,13 +62,34 @@ struct GemmEntry {
 
 using GemmKey = std::array<int64_t, 11>;
 
+// Hashed and compared element by element: std::map's lexicographic
+// std::less on an int64 array lowers on MSVC to the vectorized
+// __std_mismatch_8 helper, which the Windows LLVM_IR JIT cannot resolve.
+struct GemmKeyHash {
+  size_t operator()(const GemmKey &k) const {
+    size_t h = 0;
+    for (int64_t v : k)
+      hash_combine_val(h, v);
+    return h;
+  }
+};
+
+struct GemmKeyEq {
+  bool operator()(const GemmKey &a, const GemmKey &b) const {
+    for (size_t i = 0; i < a.size(); ++i)
+      if (a[i] != b[i])
+        return false;
+    return true;
+  }
+};
+
 struct MlaState : OpStateT<MlaState> {
   std::mutex mu;
   const void *k_src = nullptr, *v_src = nullptr;
   void *k_deq = nullptr, *v_deq = nullptr; // fp16 [H * n, L]
   void *identity = nullptr;                // fp16 [R, R]
   WeightView wk, wv;
-  std::map<GemmKey, GemmEntry> gemms;
+  std::unordered_map<GemmKey, GemmEntry, GemmKeyHash, GemmKeyEq> gemms;
 
   ~MlaState() {
     for (auto &[key, e] : gemms) {
