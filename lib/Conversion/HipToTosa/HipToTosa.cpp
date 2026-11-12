@@ -3741,7 +3741,7 @@ struct RoundConverter final : public OpConversionPattern<RoundOp> {
     auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
     if (!resultType || !resultType.hasStaticShape())
       return rewriter.notifyMatchFailure(op, "expected a static ranked tensor");
-    Value x = adaptor.getX();
+    Value x = reshapeUnitToResult(adaptor.getX(), resultType, rewriter);
     if (x.getType() != resultType)
       return rewriter.notifyMatchFailure(
           op, "operand and result types must match exactly");
@@ -4026,7 +4026,7 @@ struct AtanConverter final : public OpConversionPattern<AtanOp> {
     auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
     if (!resultType || !resultType.hasStaticShape())
       return rewriter.notifyMatchFailure(op, "expected a static ranked tensor");
-    Value x = reshapeUnitToResult(adaptor.getX(), resultType, rewriter);
+    Value x = adaptor.getX();
     if (x.getType() != resultType)
       return rewriter.notifyMatchFailure(
           op, "operand and result types must match exactly");
