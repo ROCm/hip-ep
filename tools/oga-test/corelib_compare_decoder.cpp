@@ -182,7 +182,7 @@ Result run_config(Ort::Env &env, const std::string &model,
       throw std::runtime_error("no hipgpu EP device");
     so.AppendExecutionProvider_V2(env, devices,
                                   std::unordered_map<std::string, std::string>{
-                                      {"use_ryzenai_corelib", corelib}});
+                                      {"use_ryzenai_corelib_model", corelib}});
     so.AddConfigEntry("session.disable_cpu_ep_fallback", "1");
   }
   std::printf("[%s] creating session ...\n", label.c_str());

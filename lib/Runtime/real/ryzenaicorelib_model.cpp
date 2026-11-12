@@ -182,6 +182,7 @@ const CorelibApi *load_corelib() {
 #undef HIPDNN_EP_CORELIB_RESOLVE
     api.dir = library_dir(
         lib, reinterpret_cast<void *>(api.ryzenai_corelib_get_version));
+    std::atexit([]() { api.ryzenai_corelib_cleanup(); });
     return &api;
   }();
   return loaded;
@@ -232,9 +233,9 @@ std::vector<std::string> model_names(const CorelibApi &api) {
 }
 
 // ryzenai_corelib_cleanup must run before process exit rather than at DLL
-// unload under the loader lock, so the last session to go calls it.
-std::mutex g_sessions_mu;
-int g_live_sessions = 0;
+// unload under the loader lock. Register it once via atexit when CoreLib is
+// first loaded so it fires at process exit regardless of session count, and
+// sequential sessions in the same process do not prematurely clean up.
 
 } // namespace
 
@@ -254,9 +255,6 @@ public:
       api_->ryzenai_corelib_object_release(session_);
     if (model_)
       api_->ryzenai_corelib_object_release(model_);
-    std::lock_guard<std::mutex> lock(g_sessions_mu);
-    if (--g_live_sessions == 0)
-      api_->ryzenai_corelib_cleanup();
   }
 
   // One `forward` input: its name and the types it accepts.
@@ -293,11 +291,6 @@ try_model(const CorelibApi &api, const std::string &arch,
       ryzenai_corelib_status_success) {
     *why = api.ryzenai_corelib_get_last_error_message();
     return nullptr;
-  }
-  // Counted from here: the destructor releases the model and may clean up.
-  {
-    std::lock_guard<std::mutex> lock(g_sessions_mu);
-    ++g_live_sessions;
   }
   auto s = std::make_shared<ModelSession>();
   s->api_ = &api;
