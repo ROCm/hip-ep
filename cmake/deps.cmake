@@ -36,10 +36,8 @@ endif()
 #     tablegen DEPENDS and propagate rock/Triton INTERFACE include dirs so
 #     out-of-tree consumers (hip-rocmlir-compiler) build without a downstream
 #     tablegen collector or include-dir export.
-#   - rocmlirTriton-static-triton-libs.patch: build Triton libraries as STATIC
-#     archives when TRITON_BUILD_STATIC_LIBS is set. Linux otherwise makes them
-#     OBJECT libraries that CMake archives into every static consumer, so
-#     --whole-archive of libHipCInterface.a links each Triton pass twice.
+#   The static-Triton-library patch is not in this series: pin fc54715 no
+#   longer vendors external/triton, so there is no add_triton_object to retarget.
 #   - rocmlirTriton-amdgpu-component.patch: put AMDGPU back into the normal
 #     LLVM_TARGETS_TO_BUILD variable that Triton's component mapper reads.
 #     set(CACHE FORCE) does not override that variable (CMP0126), and a nested
@@ -61,7 +59,6 @@ endif()
 set(_rocmlirtriton_patches
     "${CMAKE_CURRENT_LIST_DIR}/rocmlirTriton-use-external-LLVM.patch"
     "${CMAKE_CURRENT_LIST_DIR}/rocmlirTriton-fix-header-dependencies.patch"
-    "${CMAKE_CURRENT_LIST_DIR}/rocmlirTriton-static-triton-libs.patch"
     "${CMAKE_CURRENT_LIST_DIR}/rocmlirTriton-amdgpu-component.patch")
 set(_rocmlirtriton_patches_abs "")
 foreach(_p IN LISTS _rocmlirtriton_patches)
@@ -498,9 +495,6 @@ if(ENABLE_ROCMLIRTRITON)
     add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Wno-error>)
   endif()
 
-  # See rocmlirTriton-static-triton-libs.patch. Must be set before Triton
-  # defines add_triton_object. The patch builds those libraries as PIC static
-  # archives so they can be linked into hipgpu.so exactly once.
   set(TRITON_BUILD_STATIC_LIBS ON)
   # Normal variable, not only the cache. CMP0126 keeps a same-named normal
   # variable (the one find_package(LLVM) already set) shadowing the cache, so
