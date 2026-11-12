@@ -13,11 +13,11 @@ See the [HIP EP website](https://rocm.github.io/hip-ep/) for documentation and b
 ## What's new
 
 ### Mid-November 2026
-- **[v0.5.3](https://github.com/ROCm/hip-ep/releases/tag/v0.5.3) released** — ONNX Runtime 1.31 and OGA 0.19.0, faster gpt-oss and Gemma 4 decode, and faster MoE prefill. The table below compares `main` at [`9ee5e5b`](https://github.com/ROCm/hip-ep/commit/9ee5e5b) (2026-11-11) with [`d3df783`](https://github.com/ROCm/hip-ep/commit/d3df783) (2026-10-28).
+- **[v0.5.3](https://github.com/ROCm/hip-ep/releases/tag/v0.5.3) released** — ONNX Runtime 1.31 and OGA 0.19.0, faster gpt-oss and Gemma 4 decode, and faster MoE prefill. The table below shows the latest `main` ([`9ee5e5b`](https://github.com/ROCm/hip-ep/commit/9ee5e5b)).
 - **Large-model speedups at 16K** since October: Laguna-S-2.1 1.91× TTFT and 2.76× decode, Nemotron-3-Super-120B 1.76× TTFT, Qwen3.8-Flash-Next 1.31× TTFT and 1.54× decode.
 - **New model support:** Step-3.5-Flash.
 
-| Model (Strix Halo) | Input (tokens) | TTFT (s) | Decode TPS | Speedup vs `d3df783` (TTFT / TPS) |
+| Model (Strix Halo) | Input (tokens) | TTFT (s) | Decode TPS | Speedup vs [Oct](https://github.com/ROCm/hip-ep/commit/d3df783) (TTFT / TPS) |
 |---|---|--:|--:|--:|
 | Qwen3.8-Flash-Next | 16K text + 1.8K image | 28.62 | 30.74 | 1.31× / 1.54× |
 | Qwen3.5-122B-A10B | 16K text + 1.8K image | 39.30 | 22.02 | 1.13× / 1.05× |
