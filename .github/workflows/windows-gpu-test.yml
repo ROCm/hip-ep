@@ -7,8 +7,19 @@ name: Windows GPU Test
 # Runs the perf / smoke / OGA / L2 suites on the self-hosted AMD GPU box
 # against the gpu-test-package and hip-python-package artifacts of the same
 # run.
+#
+# docs_only still runs this job, on a hosted runner, and skips the suites.
+# The required check is gpu_test / test. A skipped caller never reports
+# that inner name, so a documentation diff has to record success here.
 on:
   workflow_call:
+    inputs:
+      docs_only:
+        description: >-
+          Record success without the GPU suites. Set when the diff cannot
+          change the build output.
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -16,13 +27,14 @@ permissions:
 
 jobs:
   test:
-    runs-on: StrixHalo
+    runs-on: ${{ inputs.docs_only && 'ubuntu-latest' || 'StrixHalo' }}
     # Never cancel an in-progress GPU run: queue newer runs of the same ref
     # behind it instead of killing the long-running perf / OGA / L2 suites.
     # The self-hosted StrixHalo runner already serializes physically, so
-    # this group only adds explicit logical queueing for clarity.
+    # this group only adds explicit logical queueing for clarity. A
+    # documentation run uses its own group so it does not wait on that queue.
     concurrency:
-      group: gpu-test-${{ github.ref }}
+      group: ${{ inputs.docs_only && format('gpu-test-docs-{0}', github.run_id) || format('gpu-test-{0}', github.ref) }}
       cancel-in-progress: false
 
     permissions:
@@ -34,7 +46,15 @@ jobs:
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
 
     steps:
+      - name: Documentation-only diff
+        if: ${{ inputs.docs_only }}
+        shell: bash
+        run: |
+          echo "Documentation and site changes only."
+          echo "gpu_test / test succeeded without the GPU suites."
+
       - name: Clean workspace
+        if: ${{ !inputs.docs_only && success() }}
         shell: cmd
         run: |
           taskkill /f /im hip-onnx-runner.exe >nul 2>&1 || ver >nul
@@ -53,18 +73,21 @@ jobs:
           if exist perf-gate rd /s /q perf-gate
 
       - name: Download GPU test package
+        if: ${{ !inputs.docs_only && success() }}
         uses: actions/download-artifact@v4
         with:
           name: gpu-test-package
           path: gpu-test-package
 
       - name: Download Python wheel package
+        if: ${{ !inputs.docs_only && success() }}
         uses: actions/download-artifact@v4
         with:
           name: hip-python-package
           path: wheelpkg
 
       - name: Run onnxruntime_perf_test (GPU)
+        if: ${{ !inputs.docs_only && success() }}
         shell: cmd
         run: |
           set PATH=%CD%\gpu-test-package\bin;%PATH%
@@ -108,7 +131,7 @@ jobs:
       # windows-build-real.yml). Otherwise the step skips.
       # ----------------------------------------------------------------------
       - name: Run native-artifact smoke test (GPU)
-        if: always()
+        if: ${{ !inputs.docs_only && always() }}
         shell: cmd
         run: |
           set THEROCK_DIST=%CD%\gpu-test-package
@@ -158,7 +181,7 @@ jobs:
       # without native artifacts, and nothing else drives profile=hip.
       # ----------------------------------------------------------------------
       - name: Run AMD GPU umbrella bitcode smoke test (GPU)
-        if: always()
+        if: ${{ !inputs.docs_only && always() }}
         shell: cmd
         run: |
           set PATH=%CD%\gpu-test-package\bin;%PATH%
@@ -197,7 +220,7 @@ jobs:
       # package contains native-artifacts.enabled; otherwise the step skips.
       # ----------------------------------------------------------------------
       - name: Run AMD GPU umbrella native smoke test (GPU)
-        if: always()
+        if: ${{ !inputs.docs_only && always() }}
         shell: cmd
         run: |
           set THEROCK_DIST=%CD%\gpu-test-package
@@ -241,7 +264,7 @@ jobs:
       # import to keep runner disk usage bounded.
       # ----------------------------------------------------------------------
       - name: Run EPContext export/import perf test (GPU)
-        if: always()
+        if: ${{ !inputs.docs_only && always() }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
@@ -310,7 +333,7 @@ jobs:
           exit $failed
 
       - name: Run OGA benchmark
-        if: always()
+        if: ${{ !inputs.docs_only && always() }}
         timeout-minutes: 30
         shell: pwsh
         run: |
@@ -397,13 +420,13 @@ jobs:
           exit $failed
 
       - name: Setup Python 3.14 (wheel smoke)
-        if: always()
+        if: ${{ !inputs.docs_only && always() }}
         uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
         with:
           python-version: "3.14"
 
       - name: Run OGA wheel smoke (Python)
-        if: always()
+        if: ${{ !inputs.docs_only && always() }}
         timeout-minutes: 40
         shell: pwsh
         run: |
@@ -438,7 +461,7 @@ jobs:
           exit $LASTEXITCODE
 
       - name: Run VLM benchmark (Python + C++ bin)
-        if: always()
+        if: ${{ !inputs.docs_only && always() }}
         timeout-minutes: 40
         shell: pwsh
         run: |
@@ -499,7 +522,7 @@ jobs:
       # in l2-test-models/. Skipped gracefully when directory does not exist.
       # -----------------------------------------------------------------------
       - name: Run L2 accuracy tests
-        if: always()
+        if: ${{ !inputs.docs_only && always() }}
         timeout-minutes: 10
         shell: cmd
         run: |
@@ -549,7 +572,7 @@ jobs:
           exit /b !FAILED!
 
       - name: Publish L2 results
-        if: always()
+        if: ${{ !inputs.docs_only && always() }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -629,7 +652,7 @@ jobs:
           }
 
       - name: Download main perf baseline
-        if: always()
+        if: ${{ !inputs.docs_only && always() }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -700,7 +723,7 @@ jobs:
       #   - PR trigger  → post/update a PR comment via gh CLI (github-actions[bot])
       #   - other trigger → write to GITHUB_STEP_SUMMARY only
       - name: Publish perf results
-        if: always()
+        if: ${{ !inputs.docs_only && always() }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -999,7 +1022,7 @@ jobs:
           }
 
       - name: Upload perf results
-        if: always()
+        if: ${{ !inputs.docs_only && always() }}
         uses: actions/upload-artifact@v4
         with:
           name: gpu-perf-results
@@ -1007,7 +1030,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Check DLL sizes vs main
-        if: always()
+        if: ${{ !inputs.docs_only && always() }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1185,7 +1208,7 @@ jobs:
           }
 
       - name: Check TTFT / TPS vs main
-        if: always()
+        if: ${{ !inputs.docs_only && always() }}
         shell: pwsh
         run: |
           $eventName = "${{ github.event_name }}"
