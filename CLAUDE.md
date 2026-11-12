@@ -101,6 +101,8 @@ pre-commit run --all-files
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for PR, formatting, AI-disclosure, and commit-trailer requirements.
 
+On a pull request, Linux Build, Linux RMT, Windows Build, and Windows RMT skip their compile jobs when every changed path is under `docs/`, under `site/`, or a Markdown file. The required check `gpu_test / test` still reports success. Pushes to `main` and release branches always compile.
+
 ## Architecture references
 
 - Pass order and plugin slots: [docs/pipeline_pass_menu.md](docs/pipeline_pass_menu.md)

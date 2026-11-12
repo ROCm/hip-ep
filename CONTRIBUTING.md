@@ -86,6 +86,8 @@ The [pull-request template](.github/pull_request_template.md) asks for:
 
 Keep the description proportional to the change. A small documentation or mechanical fix may need only a Summary and Test plan. A compiler/runtime design change usually benefits from all sections. Write the title and description so they remain useful in the project history after the PR is merged.
 
+A pull request skips the Linux, Linux RMT, Windows, and Windows RMT compile jobs when every changed path is under `docs/`, under `site/`, or a Markdown file. Those workflows still finish green. The required check `gpu_test / test` is reported success without the GPU suites, because that diff cannot change build output. A push to `main` or a release branch always builds, including a documentation push, so later runs and releases can still download the Windows Build artifacts. Any other path, including a workflow file, still compiles.
+
 Compiler changes may include a concise before/after IR walkthrough. Performance-sensitive changes should state the hardware, workload, build configuration, and measurement method.
 
 PR descriptions may be prepared with tooling, but the contributor must review them for accuracy and own every claim.
