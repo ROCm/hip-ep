@@ -55,9 +55,7 @@ class TestTensorScatter:
         past = rng.standard_normal(cache_shape).astype(dtype)
         update = rng.standard_normal(update_shape).astype(dtype)
         write_indices = np.array([0, 13], np.int64)
-        actual, expected = model_runner.run_sample(
-            model, [past, update, write_indices]
-        )
+        actual, expected = model_runner.run_sample(model, [past, update, write_indices])
         compare_outputs(actual, expected, atol=0)
 
     def test_axis1_rank3(self, model_runner):
@@ -68,9 +66,7 @@ class TestTensorScatter:
         past = rng.standard_normal(cache_shape).astype(np.float32)
         update = rng.standard_normal(update_shape).astype(np.float32)
         write_indices = np.array([7, 2], np.int64)
-        actual, expected = model_runner.run_sample(
-            model, [past, update, write_indices]
-        )
+        actual, expected = model_runner.run_sample(model, [past, update, write_indices])
         compare_outputs(actual, expected, atol=0)
 
     def test_circular_wraps(self, model_runner):
@@ -83,9 +79,7 @@ class TestTensorScatter:
         past = rng.standard_normal(cache_shape).astype(np.float16)
         update = rng.standard_normal(update_shape).astype(np.float16)
         write_indices = np.array([6], np.int64)
-        actual, expected = model_runner.run_sample(
-            model, [past, update, write_indices]
-        )
+        actual, expected = model_runner.run_sample(model, [past, update, write_indices])
         compare_outputs(actual, expected, atol=0)
 
     def test_no_write_indices(self, model_runner):

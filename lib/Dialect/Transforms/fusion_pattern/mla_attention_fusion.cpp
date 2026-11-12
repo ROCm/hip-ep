@@ -19,11 +19,11 @@
 //     %kr4  = tensor.expand_shape %kr [[0], [1], [2, 3]]     : [B, T, 1, R]
 //     %krh  = hip.expand ins(%kr4, [1, 1, H, 1])             : [B, T, H, R]
 //     %k0   = tensor.insert_slice %kn4 into %empty[0, 0, 0, 0]
-//     %k4   = tensor.insert_slice %krh into %k0[0, 0, 0, dn] : [B, T, H, dn + R]
-//     %v    = hip.matmul ins(%c, %W_v) | hip.matmul_nbits ins(%c, %W_v, %s_v)
-//     %v4   = tensor.expand_shape %v [[0], [1], [2, 3]]      : [B, T, H, dv]
-//     %k, %vt = hip.transpose %k4, %v4 {perm = [0, 2, 1, 3]}
-//     %y    = hip.kv_attention ins(%q, %k, %vt) [kv_seqlen(%len)]
+//     %k4   = tensor.insert_slice %krh into %k0[0, 0, 0, dn] : [B, T, H, dn +
+//     R] %v    = hip.matmul ins(%c, %W_v) | hip.matmul_nbits ins(%c, %W_v,
+//     %s_v) %v4   = tensor.expand_shape %v [[0], [1], [2, 3]]      : [B, T, H,
+//     dv] %k, %vt = hip.transpose %k4, %v4 {perm = [0, 2, 1, 3]} %y    =
+//     hip.kv_attention ins(%q, %k, %vt) [kv_seqlen(%len)]
 //                {num_heads = kv_num_heads = H}
 //
 //   After:
@@ -199,8 +199,8 @@ std::optional<Projection> matchProjection(Value out, Value c, int64_t lat,
   }
 
   auto nbits = out.getDefiningOp<mlir::hip::MatMulNBitsOp>();
-  if (!nbits || nbits.getA() != c || nbits.getZeroPoints() ||
-      nbits.getGIdx() || nbits.getBias())
+  if (!nbits || nbits.getA() != c || nbits.getZeroPoints() || nbits.getGIdx() ||
+      nbits.getBias())
     return std::nullopt;
   const auto block = static_cast<int64_t>(nbits.getBlockSize());
   if (static_cast<int64_t>(nbits.getK()) != lat ||

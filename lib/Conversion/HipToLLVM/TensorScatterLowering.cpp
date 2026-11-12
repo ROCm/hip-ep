@@ -43,20 +43,19 @@ struct TensorScatterOpLowering
                           int64_t hi) -> Value {
       Value product = i64Const(1);
       for (int64_t d = lo; d < hi; ++d)
-        product = LLVM::MulOp::create(
-            rewriter, loc, product,
-            getMemRefDimSize(type, d, desc, rewriter, loc));
+        product =
+            LLVM::MulOp::create(rewriter, loc, product,
+                                getMemRefDimSize(type, d, desc, rewriter, loc));
       return product;
     };
 
     const int64_t axis = op.getAxis();
     const int64_t rank = pastType.getRank();
     Value nullPtr = LLVM::ZeroOp::create(rewriter, loc, ptrType);
-    Value writeIndices =
-        adaptor.getWriteIndices()
-            ? extractContiguousMemRefPtr(adaptor.getWriteIndices(), rewriter,
-                                         loc)
-            : nullPtr;
+    Value writeIndices = adaptor.getWriteIndices()
+                             ? extractContiguousMemRefPtr(
+                                   adaptor.getWriteIndices(), rewriter, loc)
+                             : nullPtr;
 
     SmallVector<Value> args = {
         adaptor.getCtx(),

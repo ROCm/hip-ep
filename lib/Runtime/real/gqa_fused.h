@@ -21,8 +21,8 @@ int gqa_fused_attend_past(RuntimeState *state, hipStream_t stream,
                           const void *query, const void *past_key,
                           const void *past_value, const void *seqlens_k,
                           void *output, int64_t B, int64_t sq,
-                          int64_t past_buf_seq, int64_t H, int64_t G,
-                          int64_t d, float scale);
+                          int64_t past_buf_seq, int64_t H, int64_t G, int64_t d,
+                          float scale);
 
 // int32 seqlens_k (kv_seqlen[b] - 1) from int64 kv_seqlen [B], written to the
 // state-wide buffer so every layer passes the same pointer (the per-Compute

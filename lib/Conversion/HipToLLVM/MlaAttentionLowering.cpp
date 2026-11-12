@@ -63,9 +63,9 @@ struct MlaAttentionOpLowering : public ConvertOpToLLVMPattern<MlaAttentionOp> {
         i64Const(op.getQkNopeDim()),
         i64Const(op.getQkRopeDim()),
         i64Const(op.getVDim()),
-        LLVM::ConstantOp::create(rewriter, loc, f32Type,
-                                 rewriter.getF32FloatAttr(
-                                     op.getScale().convertToFloat())),
+        LLVM::ConstantOp::create(
+            rewriter, loc, f32Type,
+            rewriter.getF32FloatAttr(op.getScale().convertToFloat())),
         i64Const(op.getBlockSize()),
         batch,
         seqLenQ,

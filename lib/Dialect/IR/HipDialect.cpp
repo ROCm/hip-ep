@@ -3874,8 +3874,7 @@ LogicalResult MlaAttentionOp::verify() {
       return false;
     if (!quantized)
       return t.getRank() == 2 && t.getDimSize(0) == lat &&
-             t.getDimSize(1) == heads * n &&
-             t.getElementType().isF16();
+             t.getDimSize(1) == heads * n && t.getElementType().isF16();
     return t.getRank() == 3 && t.getDimSize(0) == heads * n &&
            t.getDimSize(1) == lat / block && t.getDimSize(2) == block / 2 &&
            t.getElementType().isInteger(8);

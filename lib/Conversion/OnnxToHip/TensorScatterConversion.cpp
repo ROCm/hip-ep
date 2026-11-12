@@ -62,9 +62,8 @@ struct TensorScatterToHip : public RewritePattern {
     for (int64_t i = 0; i < rank; ++i)
       if (resultType.isDynamicDim(i))
         dynSizes.push_back(tensor::DimOp::create(rewriter, loc, past, i));
-    Value init =
-        tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
-                                resultType.getElementType(), dynSizes);
+    Value init = tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
+                                         resultType.getElementType(), dynSizes);
 
     auto hipOp = TensorScatterOp::create(
         rewriter, loc, *ctxOrFailure, past, update, writeIndices, init,

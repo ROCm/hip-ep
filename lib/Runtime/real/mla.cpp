@@ -138,14 +138,14 @@ bool build_gemm(hipblasLtHandle_t handle, const GemmKey &k, int32_t batch,
       hipblasLtMatmulDescCreate(&e.desc, HIPBLAS_COMPUTE_32F, HIP_R_32F) ==
           HIPBLAS_STATUS_SUCCESS &&
       hipblasLtMatmulDescSetAttribute(e.desc, HIPBLASLT_MATMUL_DESC_TRANSA,
-                                      &opA, sizeof(opA)) ==
-          HIPBLAS_STATUS_SUCCESS &&
+                                      &opA,
+                                      sizeof(opA)) == HIPBLAS_STATUS_SUCCESS &&
       hipblasLtMatmulDescSetAttribute(e.desc, HIPBLASLT_MATMUL_DESC_TRANSB,
-                                      &opB, sizeof(opB)) ==
-          HIPBLAS_STATUS_SUCCESS &&
+                                      &opB,
+                                      sizeof(opB)) == HIPBLAS_STATUS_SUCCESS &&
       hipblasLtMatrixLayoutCreate(&e.a, HIP_R_16F, trans_b ? K : N,
-                                  trans_b ? N : K, ldb) ==
-          HIPBLAS_STATUS_SUCCESS &&
+                                  trans_b ? N : K,
+                                  ldb) == HIPBLAS_STATUS_SUCCESS &&
       hipblasLtMatrixLayoutCreate(&e.b, HIP_R_16F, K, M, lda) ==
           HIPBLAS_STATUS_SUCCESS &&
       hipblasLtMatrixLayoutCreate(&e.c, HIP_R_16F, N, M, ldc) ==
@@ -154,13 +154,12 @@ bool build_gemm(hipblasLtHandle_t handle, const GemmKey &k, int32_t batch,
     ok = set_batch(e.a, batch, sB) == HIPBLAS_STATUS_SUCCESS &&
          set_batch(e.b, batch, sA) == HIPBLAS_STATUS_SUCCESS &&
          set_batch(e.c, batch, sC) == HIPBLAS_STATUS_SUCCESS;
-  ok = ok &&
-       hipblasLtMatmulPreferenceCreate(&pref) == HIPBLAS_STATUS_SUCCESS &&
+  ok = ok && hipblasLtMatmulPreferenceCreate(&pref) == HIPBLAS_STATUS_SUCCESS &&
        hipblasLtMatmulPreferenceSetAttribute(
            pref, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &max_ws,
            sizeof(max_ws)) == HIPBLAS_STATUS_SUCCESS &&
-       hipblasLtMatmulAlgoGetHeuristic(handle, e.desc, e.a, e.b, e.c, e.c,
-                                       pref, 1, &heur,
+       hipblasLtMatmulAlgoGetHeuristic(handle, e.desc, e.a, e.b, e.c, e.c, pref,
+                                       1, &heur,
                                        &found) == HIPBLAS_STATUS_SUCCESS &&
        found > 0;
   if (pref)
@@ -225,8 +224,7 @@ int gemm(RuntimeState *state, MlaState *ms, hipStream_t stream, int64_t M,
     char *c = static_cast<char *>(C) + 2 * i * sC;
     hipblasLtMatmulAlgo_t algo = e.algo;
     if (hipblasLtMatmul(handle, e.desc, &one, b, e.a, a, e.b, &zero, c, e.c, c,
-                        e.c, &algo, ws, e.ws,
-                        stream) != HIPBLAS_STATUS_SUCCESS)
+                        e.c, &algo, ws, e.ws, stream) != HIPBLAS_STATUS_SUCCESS)
       return -1;
   }
   return 0;
@@ -253,8 +251,7 @@ int ensure_scratch(RuntimeState *state, size_t bytes) {
   const size_t size = (bytes + kGrain - 1) / kGrain * kGrain;
   if (hipdnn_ep_state_device_alloc(state, &state->mla_scratch, size) !=
       hipSuccess) {
-    fprintf(stderr, "mla_attention: scratch alloc of %zu bytes failed\n",
-            size);
+    fprintf(stderr, "mla_attention: scratch alloc of %zu bytes failed\n", size);
     return -1;
   }
   state->mla_scratch_size = size;
@@ -295,18 +292,16 @@ int prepare_weights(MlaState *ms, hipStream_t stream, const void *k_b,
   if (ms->k_src == k_b && ms->v_src == v_b)
     return 0;
   if (block > 0) {
-    for (auto [src, sc, dst, n] :
-         {std::make_tuple(k_b, k_s, &ms->k_deq, dn),
-          std::make_tuple(v_b, v_s, &ms->v_deq, dv)}) {
+    for (auto [src, sc, dst, n] : {std::make_tuple(k_b, k_s, &ms->k_deq, dn),
+                                   std::make_tuple(v_b, v_s, &ms->v_deq, dv)}) {
       if (*dst)
         hipFree(*dst);
       *dst = nullptr;
       if (hipMalloc(dst, static_cast<size_t>(H * n * L) * 2) != hipSuccess)
         return -1;
-      hip_matmul_nbits_dequant_b_fp16(stream, src, sc, nullptr, *dst,
-                                      static_cast<int>(H * n),
-                                      static_cast<int>(L),
-                                      static_cast<int>(block));
+      hip_matmul_nbits_dequant_b_fp16(
+          stream, src, sc, nullptr, *dst, static_cast<int>(H * n),
+          static_cast<int>(L), static_cast<int>(block));
     }
     ms->wk = {ms->k_deq, L, dn * L, true};
     ms->wv = {ms->v_deq, L, dv * L, true};
@@ -372,8 +367,8 @@ int wrap_mla_attention(RuntimeState *state, int op_state_slot, void *query,
   if (!stream)
     return -1;
   std::lock_guard<std::mutex> lock(ms->mu);
-  if (prepare_weights(ms, stream, k_b, v_b, k_b_scales, v_b_scales, H, L, dn,
-                      R, dv, block_size) != 0) {
+  if (prepare_weights(ms, stream, k_b, v_b, k_b_scales, v_b_scales, H, L, dn, R,
+                      dv, block_size) != 0) {
     fprintf(stderr, "wrap_mla_attention: weight preparation failed\n");
     return -1;
   }
@@ -448,6 +443,6 @@ int wrap_mla_attention(RuntimeState *state, int op_state_slot, void *query,
   RUNTIME_DEBUG_LOG("[REAL] mla_attention prefill: B=%lld S=%lld T=%lld "
                     "Tv=%lld\n",
                     (long long)B, (long long)S, (long long)T, (long long)Tv);
-  return gqa_fused_attend_past(state, stream, query, K, V, nullptr, output,
-                               B, S, Tv, H, H, dq, scale);
+  return gqa_fused_attend_past(state, stream, query, K, V, nullptr, output, B,
+                               S, Tv, H, H, dq, scale);
 }

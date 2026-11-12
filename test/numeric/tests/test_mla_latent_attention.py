@@ -65,9 +65,7 @@ def _make_model(rng, dense):
         w = (rng.standard_normal((n, LAT)) * 0.06).astype(np.float32)
         packed, scales, deq = _quantize_int4(w)
         if dense:
-            inits.append(
-                numpy_helper.from_array(deq.T.astype(np.float16).copy(), name)
-            )
+            inits.append(numpy_helper.from_array(deq.T.astype(np.float16).copy(), name))
             projections.append(helper.make_node("MatMul", ["c", name], [out]))
         else:
             inits.append(numpy_helper.from_array(packed, name))
@@ -149,10 +147,15 @@ class TestMlaLatentAttention:
     @pytest.mark.parametrize("dense", [False, True], ids=["int4", "fp16"])
     @pytest.mark.parametrize(
         "past,seq,rows",
-        [(0, 256, 256), (0, 256, 512), (384, 128, 640), (100, 37, 200),
-         (511, 1, 700), (2047, 1, 2200)],
-        ids=["prefill_full", "prefill", "chunk", "chunk_odd", "decode",
-             "decode_long"],
+        [
+            (0, 256, 256),
+            (0, 256, 512),
+            (384, 128, 640),
+            (100, 37, 200),
+            (511, 1, 700),
+            (2047, 1, 2200),
+        ],
+        ids=["prefill_full", "prefill", "chunk", "chunk_odd", "decode", "decode_long"],
     )
     def test_latent_attention(self, model_runner, dense, past, seq, rows):
         """Rows past the valid prefix hold noise the attention must not read."""

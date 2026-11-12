@@ -50,9 +50,7 @@ def _make_model(d, bnsh):
         helper.make_tensor_value_info("attention_mask", TensorProto.INT64, [1, "T"]),
     ]
     outputs = [helper.make_tensor_value_info("o", f16, q_shape)]
-    model = make_model_from_nodes(
-        nodes, inputs, outputs, initializers=inits, opset=24
-    )
+    model = make_model_from_nodes(nodes, inputs, outputs, initializers=inits, opset=24)
     # Opset 24 needs IR 11; newer onnx packages stamp a version ORT may not
     # load yet.
     model.ir_version = 11
@@ -64,8 +62,7 @@ class TestAttentionNonpad:
     @pytest.mark.parametrize("d", [64, 128])
     @pytest.mark.parametrize(
         "past,seq,rows",
-        [(0, 128, 128), (0, 128, 256), (100, 37, 200), (511, 1, 700),
-         (2047, 1, 2200)],
+        [(0, 128, 128), (0, 128, 256), (100, 37, 200), (511, 1, 700), (2047, 1, 2200)],
         ids=["prefill_full", "prefill", "chunk", "decode", "decode_long"],
     )
     def test_nonpad_attention(self, model_runner, bnsh, d, past, seq, rows):
@@ -78,7 +75,7 @@ class TestAttentionNonpad:
         kv = []
         for _ in range(2):
             x = rng.standard_normal((1, G, rows, d))
-            x[:, :, past + seq:] *= 8
+            x[:, :, past + seq :] *= 8
             if not bnsh:
                 x = x.transpose(0, 2, 1, 3).reshape(1, rows, G * d)
             kv.append(x.astype(np.float16))

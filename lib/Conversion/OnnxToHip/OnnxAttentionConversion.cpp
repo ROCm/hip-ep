@@ -157,10 +157,10 @@ mlir::LogicalResult lowerNonpadAttention(
                                : mlir::FailureOr<mlir::Value>(v);
     if (t.isDynamicDim(2) || t.getDimSize(2) % kvNumHeads != 0)
       return mlir::failure();
-    auto bnsh = mlir::RankedTensorType::get(
-        {t.getDimSize(0), kvNumHeads, t.getDimSize(1),
-         t.getDimSize(2) / kvNumHeads},
-        t.getElementType());
+    auto bnsh = mlir::RankedTensorType::get({t.getDimSize(0), kvNumHeads,
+                                             t.getDimSize(1),
+                                             t.getDimSize(2) / kvNumHeads},
+                                            t.getElementType());
     return bshdToBnsd(v, bnsh);
   };
   mlir::FailureOr<mlir::Value> key = toBnsh(op->getOperand(1));
@@ -223,9 +223,9 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
     return v && !mlir::isa<mlir::NoneType>(v.getType());
   };
 
-  mlir::Value nonpadKvSeqlen =
-      numOps == 7 && isLive(op->getOperand(6)) ? op->getOperand(6)
-                                               : mlir::Value();
+  mlir::Value nonpadKvSeqlen = numOps == 7 && isLive(op->getOperand(6))
+                                   ? op->getOperand(6)
+                                   : mlir::Value();
 
   mlir::Value query = op->getOperand(0);
   mlir::Value key = op->getOperand(1);

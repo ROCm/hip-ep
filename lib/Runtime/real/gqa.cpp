@@ -3396,11 +3396,11 @@ int gqa_fused_attend_past(RuntimeState *state, hipStream_t stream,
                           const void *query, const void *past_key,
                           const void *past_value, const void *seqlens_k,
                           void *output, int64_t B, int64_t sq,
-                          int64_t past_buf_seq, int64_t H, int64_t G,
-                          int64_t d, float scale) {
-  const bool geometry_ok =
-      sq == 1 ? flash_decode_geometry_ok(H, G, d)
-              : (d == 64 || d == 96 || d == 128 || d == 256);
+                          int64_t past_buf_seq, int64_t H, int64_t G, int64_t d,
+                          float scale) {
+  const bool geometry_ok = sq == 1
+                               ? flash_decode_geometry_ok(H, G, d)
+                               : (d == 64 || d == 96 || d == 128 || d == 256);
   if (!geometry_ok || hipdnn_device_is_wave64() || sq > past_buf_seq) {
     fprintf(stderr,
             "gqa_fused_attend_past: no fused kernel for sq=%lld cache=%lld "
