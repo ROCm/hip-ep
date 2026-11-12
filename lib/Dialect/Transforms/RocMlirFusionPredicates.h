@@ -35,12 +35,11 @@ inline bool isFusablePointwise(Operation *op) {
   if (auto cast = dyn_cast_if_present<CastOp>(op))
     return llvm::all_of(cast->getOperandTypes(), isRocMlirCastEndpoint) &&
            llvm::all_of(cast->getResultTypes(), isRocMlirCastEndpoint);
-  return isa_and_present<MulOp, AddOp, MinOp, MaxOp, SiluOp, SigmoidOp, TanhOp,
-                         SoftplusOp, GeluOp, BiasGeluOp, FastGeluOp,
-                         LeakyReluOp, ReciprocalOp, SqrtOp, DivOp, EqualOp,
-                         AndOp, OrOp, NotOp, CosOp, ErfOp, SinOp, CeilOp,
-                         RoundOp, AtanOp, FloorOp, ExpOp, LogOp, AbsOp, NegOp,
-                         SubOp, LessOp, SignOp, ModOp, WhereOp>(op);
+  return isa_and_present<
+      MulOp, AddOp, MinOp, MaxOp, SiluOp, SigmoidOp, TanhOp, SoftplusOp, GeluOp,
+      BiasGeluOp, FastGeluOp, LeakyReluOp, ReciprocalOp, SqrtOp, DivOp, EqualOp,
+      AndOp, OrOp, NotOp, CosOp, ErfOp, SinOp, CeilOp, RoundOp, AtanOp, FloorOp,
+      ExpOp, LogOp, AbsOp, NegOp, SubOp, LessOp, SignOp, ModOp, WhereOp>(op);
 }
 
 // View ops that rocMLIR folds into rock.transform maps instead of running as a
