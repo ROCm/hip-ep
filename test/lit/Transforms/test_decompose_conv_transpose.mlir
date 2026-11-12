@@ -26,6 +26,16 @@
 // 17. unequal_residues      - padding would cost > 2x taps: per-residue convs,
 //                             run-time bias on each of them, no add
 // 18. runtime_bias_equal    - run-time bias on the wide conv stays one add
+// 19. add_reshaped_bias     - Add(y, Reshape([1,1,1,M] -> [1,M,1,1])) folds
+//                             into the wide conv's bias; the add is gone
+// 20. add_and_own_bias      - the added constant sums with the op's own bias
+// 21. add_scalar            - a scalar added to every channel folds too
+// 22. add_transposed_bias   - a transposed [1,1,1,M] constant folds
+// 23. add_unequal_residues  - the folded bias goes onto every residue conv
+// 24. add_rank1_no_fold     - rank-1 [M] broadcasts on W, not on channels
+// 25. add_full_size_no_fold - a constant with values per pixel is not a bias
+// 26. add_runtime_no_fold   - a run-time operand stays an add
+// 27. add_two_users_no_fold - the bias-free result has another reader
 //
 // Cases 1-5 use a splat filter and so only pin structure. Cases 6, 7 and 15
 // use distinct per-tap values, which is what actually catches a wrong tap
@@ -522,4 +532,276 @@ module {
   // CHECK: tensor.expand_shape {{.*}} into tensor<1x2x1x1xf32>
   // CHECK: hip.add
   // CHECK-NOT: hip.add
+
+  // --------------------------------------------------------------------------
+  // 19. The exporter's form of a bias: a bias-free ConvTranspose, then an add
+  //     of a [1,1,1,M] constant reshaped to [1,M,1,1]. The add folds into the
+  //     wide convolution's bias like case 8, and the activation behind it
+  //     now follows the crop directly.
+  // --------------------------------------------------------------------------
+  func.func @add_reshaped_bias(%ctx: !hip.context, %x: tensor<1x1x4x4xf32>)
+      -> tensor<1x2x8x8xf32> {
+    %w = hip.constant {value = dense<1.000000e-02> : tensor<1x2x2x2xf32>}
+        : tensor<1x2x2x2xf32>
+    %c = hip.constant {value = dense<[[[[3.0, 4.0]]]]> : tensor<1x1x1x2xf32>}
+        : tensor<1x1x1x2xf32>
+    %flat = tensor.collapse_shape %c [[0, 1, 2, 3]]
+        : tensor<1x1x1x2xf32> into tensor<2xf32>
+    %cb = tensor.expand_shape %flat [[0, 1, 2, 3]] output_shape [1, 2, 1, 1]
+        : tensor<2xf32> into tensor<1x2x1x1xf32>
+    %init = tensor.empty() : tensor<1x2x8x8xf32>
+    %y = hip.conv_transpose(%ctx) ins(%x, %w : tensor<1x1x4x4xf32>,
+                                               tensor<1x2x2x2xf32>)
+        outs(%init : tensor<1x2x8x8xf32>)
+        {kernel_shape = [2, 2], strides = [2, 2], pads = [0, 0, 0, 0],
+         dilations = [1, 1], output_padding = [0, 0], group = 1 : i64}
+        : tensor<1x2x8x8xf32>
+    %ae = tensor.empty() : tensor<1x2x8x8xf32>
+    %a = hip.add(%ctx) ins(%y, %cb : tensor<1x2x8x8xf32>, tensor<1x2x1x1xf32>)
+        outs(%ae : tensor<1x2x8x8xf32>) -> tensor<1x2x8x8xf32>
+    %le = tensor.empty() : tensor<1x2x8x8xf32>
+    %l = hip.leaky_relu(%ctx) ins(%a : tensor<1x2x8x8xf32>)
+        outs(%le : tensor<1x2x8x8xf32>) {alpha = 1.000000e-01 : f64}
+        : tensor<1x2x8x8xf32>
+    return %l : tensor<1x2x8x8xf32>
+  }
+
+  // CHECK-LABEL: func.func @add_reshaped_bias
+  // CHECK-NOT: hip.conv_transpose
+  // CHECK: hip.constant {value = dense<[3.000000e+00, 4.000000e+00, 3.000000e+00, 4.000000e+00, 3.000000e+00, 4.000000e+00, 3.000000e+00, 4.000000e+00]> : tensor<8xf32>}
+  // CHECK: hip.conv({{.*}} tensor<8x1x1x1xf32>, tensor<8xf32>)
+  // With no padding the interleave is the whole result, so no crop follows.
+  // CHECK: %[[GRID:.*]] = tensor.collapse_shape
+  // CHECK-NOT: hip.add
+  // CHECK: hip.leaky_relu({{.*}}) ins(%[[GRID]] : tensor<1x2x8x8xf32>)
+  // CHECK: return
+
+  // --------------------------------------------------------------------------
+  // 20. With a bias of its own, the added constant is summed into it.
+  // --------------------------------------------------------------------------
+  func.func @add_and_own_bias(%ctx: !hip.context, %x: tensor<1x1x4x4xf32>)
+      -> tensor<1x2x8x8xf32> {
+    %w = hip.constant {value = dense<1.000000e-02> : tensor<1x2x2x2xf32>}
+        : tensor<1x2x2x2xf32>
+    %b = hip.constant {value = dense<[1.0, 2.0]> : tensor<2xf32>}
+        : tensor<2xf32>
+    %c = hip.constant {value = dense<[[[[10.0]], [[20.0]]]]> : tensor<1x2x1x1xf32>}
+        : tensor<1x2x1x1xf32>
+    %init = tensor.empty() : tensor<1x2x8x8xf32>
+    %y = hip.conv_transpose(%ctx) ins(%x, %w, %b : tensor<1x1x4x4xf32>,
+                                                   tensor<1x2x2x2xf32>,
+                                                   tensor<2xf32>)
+        outs(%init : tensor<1x2x8x8xf32>)
+        {kernel_shape = [2, 2], strides = [2, 2], pads = [0, 0, 0, 0],
+         dilations = [1, 1], output_padding = [0, 0], group = 1 : i64}
+        : tensor<1x2x8x8xf32>
+    %ae = tensor.empty() : tensor<1x2x8x8xf32>
+    %a = hip.add(%ctx) ins(%c, %y : tensor<1x2x1x1xf32>, tensor<1x2x8x8xf32>)
+        outs(%ae : tensor<1x2x8x8xf32>) -> tensor<1x2x8x8xf32>
+    return %a : tensor<1x2x8x8xf32>
+  }
+
+  // CHECK-LABEL: func.func @add_and_own_bias
+  // CHECK: hip.constant {value = dense<[1.100000e+01, 2.200000e+01, 1.100000e+01, 2.200000e+01, 1.100000e+01, 2.200000e+01, 1.100000e+01, 2.200000e+01]> : tensor<8xf32>}
+  // CHECK: hip.conv({{.*}} tensor<8x1x1x1xf32>, tensor<8xf32>)
+  // CHECK-NOT: hip.add
+  // CHECK: return
+
+  // --------------------------------------------------------------------------
+  // 21. A scalar broadcasts to every channel, so it folds as a uniform bias.
+  // --------------------------------------------------------------------------
+  func.func @add_scalar(%ctx: !hip.context, %x: tensor<1x1x4x4xf32>)
+      -> tensor<1x2x8x8xf32> {
+    %w = hip.constant {value = dense<1.000000e-02> : tensor<1x2x2x2xf32>}
+        : tensor<1x2x2x2xf32>
+    %c = hip.constant {value = dense<5.0> : tensor<f32>} : tensor<f32>
+    %init = tensor.empty() : tensor<1x2x8x8xf32>
+    %y = hip.conv_transpose(%ctx) ins(%x, %w : tensor<1x1x4x4xf32>,
+                                               tensor<1x2x2x2xf32>)
+        outs(%init : tensor<1x2x8x8xf32>)
+        {kernel_shape = [2, 2], strides = [2, 2], pads = [0, 0, 0, 0],
+         dilations = [1, 1], output_padding = [0, 0], group = 1 : i64}
+        : tensor<1x2x8x8xf32>
+    %ae = tensor.empty() : tensor<1x2x8x8xf32>
+    %a = hip.add(%ctx) ins(%y, %c : tensor<1x2x8x8xf32>, tensor<f32>)
+        outs(%ae : tensor<1x2x8x8xf32>) -> tensor<1x2x8x8xf32>
+    return %a : tensor<1x2x8x8xf32>
+  }
+
+  // CHECK-LABEL: func.func @add_scalar
+  // CHECK: hip.constant {value = dense<5.000000e+00> : tensor<8xf32>}
+  // CHECK: hip.conv({{.*}} tensor<8x1x1x1xf32>, tensor<8xf32>)
+  // CHECK-NOT: hip.add
+  // CHECK: return
+
+  // --------------------------------------------------------------------------
+  // 22. A transpose that only moves unit dimensions keeps the value order.
+  // --------------------------------------------------------------------------
+  func.func @add_transposed_bias(%ctx: !hip.context, %x: tensor<1x1x4x4xf32>)
+      -> tensor<1x2x8x8xf32> {
+    %w = hip.constant {value = dense<1.000000e-02> : tensor<1x2x2x2xf32>}
+        : tensor<1x2x2x2xf32>
+    %c = hip.constant {value = dense<[[[[3.0, 4.0]]]]> : tensor<1x1x1x2xf32>}
+        : tensor<1x1x1x2xf32>
+    %te = tensor.empty() : tensor<1x2x1x1xf32>
+    %ct = hip.transpose(%ctx) ins(%c : tensor<1x1x1x2xf32>)
+        outs(%te : tensor<1x2x1x1xf32>) {perm = [0, 3, 1, 2]}
+        : tensor<1x2x1x1xf32>
+    %init = tensor.empty() : tensor<1x2x8x8xf32>
+    %y = hip.conv_transpose(%ctx) ins(%x, %w : tensor<1x1x4x4xf32>,
+                                               tensor<1x2x2x2xf32>)
+        outs(%init : tensor<1x2x8x8xf32>)
+        {kernel_shape = [2, 2], strides = [2, 2], pads = [0, 0, 0, 0],
+         dilations = [1, 1], output_padding = [0, 0], group = 1 : i64}
+        : tensor<1x2x8x8xf32>
+    %ae = tensor.empty() : tensor<1x2x8x8xf32>
+    %a = hip.add(%ctx) ins(%y, %ct : tensor<1x2x8x8xf32>, tensor<1x2x1x1xf32>)
+        outs(%ae : tensor<1x2x8x8xf32>) -> tensor<1x2x8x8xf32>
+    return %a : tensor<1x2x8x8xf32>
+  }
+
+  // CHECK-LABEL: func.func @add_transposed_bias
+  // CHECK: hip.constant {value = dense<[3.000000e+00, 4.000000e+00, 3.000000e+00, 4.000000e+00, 3.000000e+00, 4.000000e+00, 3.000000e+00, 4.000000e+00]> : tensor<8xf32>}
+  // CHECK: hip.conv({{.*}} tensor<8x1x1x1xf32>, tensor<8xf32>)
+  // CHECK-NOT: hip.add
+  // CHECK: return
+
+  // --------------------------------------------------------------------------
+  // 23. On the unequal-residue path (case 17) the folded bias goes onto each
+  //     residue convolution.
+  // --------------------------------------------------------------------------
+  func.func @add_unequal_residues(%ctx: !hip.context, %x: tensor<1x2x4x4xf32>)
+      -> tensor<1x3x17x17xf32> {
+    %w = hip.constant {value = dense<1.000000e-02> : tensor<2x3x5x5xf32>}
+        : tensor<2x3x5x5xf32>
+    %c = hip.constant
+        {value = dense<[[[[1.0]], [[2.0]], [[3.0]]]]> : tensor<1x3x1x1xf32>}
+        : tensor<1x3x1x1xf32>
+    %init = tensor.empty() : tensor<1x3x17x17xf32>
+    %y = hip.conv_transpose(%ctx) ins(%x, %w : tensor<1x2x4x4xf32>,
+                                               tensor<2x3x5x5xf32>)
+        outs(%init : tensor<1x3x17x17xf32>)
+        {kernel_shape = [5, 5], strides = [4, 4], pads = [0, 0, 0, 0],
+         dilations = [1, 1], output_padding = [0, 0], group = 1 : i64}
+        : tensor<1x3x17x17xf32>
+    %ae = tensor.empty() : tensor<1x3x17x17xf32>
+    %a = hip.add(%ctx) ins(%y, %c : tensor<1x3x17x17xf32>, tensor<1x3x1x1xf32>)
+        outs(%ae : tensor<1x3x17x17xf32>) -> tensor<1x3x17x17xf32>
+    return %a : tensor<1x3x17x17xf32>
+  }
+
+  // CHECK-LABEL: func.func @add_unequal_residues
+  // CHECK: hip.constant {value = dense<[1.000000e+00, 2.000000e+00, 3.000000e+00]> : tensor<3xf32>}
+  // CHECK: hip.conv({{.*}} tensor<3x2x2x2xf32>, tensor<3xf32>)
+  // CHECK-COUNT-16: tensor.insert_slice
+  // CHECK-NOT: hip.add
+  // CHECK: return
+
+  // --------------------------------------------------------------------------
+  // 24. A rank-1 [M] operand right-aligns onto the width, not the channels:
+  //     here W == M == 2, so the add is legal but is not a bias.
+  // --------------------------------------------------------------------------
+  func.func @add_rank1_no_fold(%ctx: !hip.context, %x: tensor<1x1x1x1xf32>)
+      -> tensor<1x2x2x2xf32> {
+    %w = hip.constant {value = dense<1.000000e-02> : tensor<1x2x2x2xf32>}
+        : tensor<1x2x2x2xf32>
+    %c = hip.constant {value = dense<[3.0, 4.0]> : tensor<2xf32>}
+        : tensor<2xf32>
+    %init = tensor.empty() : tensor<1x2x2x2xf32>
+    %y = hip.conv_transpose(%ctx) ins(%x, %w : tensor<1x1x1x1xf32>,
+                                               tensor<1x2x2x2xf32>)
+        outs(%init : tensor<1x2x2x2xf32>)
+        {kernel_shape = [2, 2], strides = [2, 2], pads = [0, 0, 0, 0],
+         dilations = [1, 1], output_padding = [0, 0], group = 1 : i64}
+        : tensor<1x2x2x2xf32>
+    %ae = tensor.empty() : tensor<1x2x2x2xf32>
+    %a = hip.add(%ctx) ins(%y, %c : tensor<1x2x2x2xf32>, tensor<2xf32>)
+        outs(%ae : tensor<1x2x2x2xf32>) -> tensor<1x2x2x2xf32>
+    return %a : tensor<1x2x2x2xf32>
+  }
+
+  // CHECK-LABEL: func.func @add_rank1_no_fold
+  // CHECK: hip.conv({{.*}} tensor<8x1x1x1xf32>)
+  // CHECK: hip.add
+  // CHECK: return
+
+  // --------------------------------------------------------------------------
+  // 25. A constant with a value per pixel is not a per-channel bias.
+  // --------------------------------------------------------------------------
+  func.func @add_full_size_no_fold(%ctx: !hip.context, %x: tensor<1x1x4x4xf32>)
+      -> tensor<1x2x8x8xf32> {
+    %w = hip.constant {value = dense<1.000000e-02> : tensor<1x2x2x2xf32>}
+        : tensor<1x2x2x2xf32>
+    %c = hip.constant {value = dense<1.0> : tensor<1x2x8x8xf32>}
+        : tensor<1x2x8x8xf32>
+    %init = tensor.empty() : tensor<1x2x8x8xf32>
+    %y = hip.conv_transpose(%ctx) ins(%x, %w : tensor<1x1x4x4xf32>,
+                                               tensor<1x2x2x2xf32>)
+        outs(%init : tensor<1x2x8x8xf32>)
+        {kernel_shape = [2, 2], strides = [2, 2], pads = [0, 0, 0, 0],
+         dilations = [1, 1], output_padding = [0, 0], group = 1 : i64}
+        : tensor<1x2x8x8xf32>
+    %ae = tensor.empty() : tensor<1x2x8x8xf32>
+    %a = hip.add(%ctx) ins(%y, %c : tensor<1x2x8x8xf32>, tensor<1x2x8x8xf32>)
+        outs(%ae : tensor<1x2x8x8xf32>) -> tensor<1x2x8x8xf32>
+    return %a : tensor<1x2x8x8xf32>
+  }
+
+  // CHECK-LABEL: func.func @add_full_size_no_fold
+  // CHECK: hip.conv({{.*}} tensor<8x1x1x1xf32>)
+  // CHECK: hip.add
+  // CHECK: return
+
+  // --------------------------------------------------------------------------
+  // 26. A run-time operand has no values to fold.
+  // --------------------------------------------------------------------------
+  func.func @add_runtime_no_fold(%ctx: !hip.context, %x: tensor<1x1x4x4xf32>,
+                                 %c: tensor<1x2x1x1xf32>)
+      -> tensor<1x2x8x8xf32> {
+    %w = hip.constant {value = dense<1.000000e-02> : tensor<1x2x2x2xf32>}
+        : tensor<1x2x2x2xf32>
+    %init = tensor.empty() : tensor<1x2x8x8xf32>
+    %y = hip.conv_transpose(%ctx) ins(%x, %w : tensor<1x1x4x4xf32>,
+                                               tensor<1x2x2x2xf32>)
+        outs(%init : tensor<1x2x8x8xf32>)
+        {kernel_shape = [2, 2], strides = [2, 2], pads = [0, 0, 0, 0],
+         dilations = [1, 1], output_padding = [0, 0], group = 1 : i64}
+        : tensor<1x2x8x8xf32>
+    %ae = tensor.empty() : tensor<1x2x8x8xf32>
+    %a = hip.add(%ctx) ins(%y, %c : tensor<1x2x8x8xf32>, tensor<1x2x1x1xf32>)
+        outs(%ae : tensor<1x2x8x8xf32>) -> tensor<1x2x8x8xf32>
+    return %a : tensor<1x2x8x8xf32>
+  }
+
+  // CHECK-LABEL: func.func @add_runtime_no_fold
+  // CHECK: hip.conv({{.*}} tensor<8x1x1x1xf32>)
+  // CHECK: hip.add
+  // CHECK: return
+
+  // --------------------------------------------------------------------------
+  // 27. Another reader needs the result without the bias.
+  // --------------------------------------------------------------------------
+  func.func @add_two_users_no_fold(%ctx: !hip.context, %x: tensor<1x1x4x4xf32>)
+      -> (tensor<1x2x8x8xf32>, tensor<1x2x8x8xf32>) {
+    %w = hip.constant {value = dense<1.000000e-02> : tensor<1x2x2x2xf32>}
+        : tensor<1x2x2x2xf32>
+    %c = hip.constant {value = dense<[[[[3.0]], [[4.0]]]]> : tensor<1x2x1x1xf32>}
+        : tensor<1x2x1x1xf32>
+    %init = tensor.empty() : tensor<1x2x8x8xf32>
+    %y = hip.conv_transpose(%ctx) ins(%x, %w : tensor<1x1x4x4xf32>,
+                                               tensor<1x2x2x2xf32>)
+        outs(%init : tensor<1x2x8x8xf32>)
+        {kernel_shape = [2, 2], strides = [2, 2], pads = [0, 0, 0, 0],
+         dilations = [1, 1], output_padding = [0, 0], group = 1 : i64}
+        : tensor<1x2x8x8xf32>
+    %ae = tensor.empty() : tensor<1x2x8x8xf32>
+    %a = hip.add(%ctx) ins(%y, %c : tensor<1x2x8x8xf32>, tensor<1x2x1x1xf32>)
+        outs(%ae : tensor<1x2x8x8xf32>) -> tensor<1x2x8x8xf32>
+    return %a, %y : tensor<1x2x8x8xf32>, tensor<1x2x8x8xf32>
+  }
+
+  // CHECK-LABEL: func.func @add_two_users_no_fold
+  // CHECK: hip.conv({{.*}} tensor<8x1x1x1xf32>)
+  // CHECK: hip.add
+  // CHECK: return
 }
