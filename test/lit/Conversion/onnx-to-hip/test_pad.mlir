@@ -276,7 +276,7 @@ module {
   // CHECK-LABEL: func.func @transpose_of_pad
   // CHECK: %[[T:.*]] = hip.transpose({{.*}}) ins({{.*}} : tensor<1x4x6x3xf32>) outs({{.*}} : tensor<1x3x4x6xf32>) {perm = [0, 3, 1, 2]}
   // CHECK: %[[P:.*]] = hip.constant {{.*}}dense<[0, 0, 2, 2, 0, 0, 2, 2]> : tensor<8xi64>
-  // CHECK: hip.pad({{.*}}) ins(%[[T]], %[[P]] : tensor<1x3x4x6xf32>, tensor<8xi64>) outs({{.*}} : tensor<1x3x8x10xf32>) {mode = "reflect"}
+  // CHECK: hip.pad({{.*}}) ins(%[[T]], %[[P]] : tensor<1x3x4x6xf32>, tensor<8xi64>) outs({{.*}} : tensor<1x3x8x10xf32>) {mode = "reflect"
 
   // The padded tensor has a second user, so the Transpose stays below the Pad.
   func.func @transpose_of_shared_pad(%data: tensor<1x4x6x3xf32>) -> (tensor<1x3x8x10xf32>, tensor<1x8x10x3xf32>) {
