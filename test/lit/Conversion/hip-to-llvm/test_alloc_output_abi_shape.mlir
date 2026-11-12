@@ -118,10 +118,14 @@ func.func @same_rank_channel_split(%ctx: !hip.context) -> memref<1x90x160x64xf16
 // A static abi_shape that does not describe the same elements as the
 // internal buffer is ignored. [1, 2] on memref<4x4xf32> would ask the
 // allocator for 2 elements while the compute writes 16, so the callback
-// keeps the internal rank.
+// keeps the internal dims 4, 4 and rank 2.
 // DECOMP-LABEL: llvm.func @stale_static_abi_shape
-// DECOMP-NOT: llvm.mlir.constant(2 : i64)
-// DECOMP: llvm.call @hipdnn_ep_alloc_output
+// DECOMP: %[[D0:.*]] = llvm.mlir.constant(4 : index)
+// DECOMP: %[[D1:.*]] = llvm.mlir.constant(4 : index)
+// DECOMP: llvm.store %[[D0]]
+// DECOMP: llvm.store %[[D1]]
+// DECOMP: %[[RANK:.*]] = llvm.mlir.constant(2 : i64)
+// DECOMP: llvm.call @hipdnn_ep_alloc_output(%{{.*}}, %{{.*}}, %{{.*}}, %[[RANK]], %{{.*}})
 func.func @stale_static_abi_shape(%ctx: !hip.context) -> memref<4x4xf32> {
   %out = hip.alloc_output(%ctx) {hipdnn.abi_shape = array<i64: 1, 2>,
                                  out_idx = 0 : i64} : memref<4x4xf32>
