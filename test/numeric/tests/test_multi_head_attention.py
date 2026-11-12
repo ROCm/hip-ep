@@ -177,6 +177,21 @@ class TestMultiHeadAttention:
         actual, expected = model_runner.run_sample(model, [q, k, v])
         compare_outputs(actual, expected, atol=1e-2, rtol=1e-2, cos_threshold=0.999)
 
+    @pytest.mark.parametrize("head_dim", [160, 200])
+    def test_flash_prefill_head_dim_without_tile(self, model_runner, head_dim):
+        """Padded head dims up to 256 that have no flash tile of their own.
+
+        160 is the 16x16 / 8x8 level of the SD1.5 UNet, and 200 pads to 208;
+        both run the flash prefill on its widest instantiation.
+        """
+        batch, seq, num_heads = 2, 64, 2
+        model = _make_mha_model(batch, seq, seq, num_heads, head_dim)
+
+        q, k, v = _qkv_inputs(batch, seq, seq, num_heads, head_dim)
+
+        actual, expected = model_runner.run_sample(model, [q, k, v])
+        compare_outputs(actual, expected, atol=1e-2, rtol=1e-2, cos_threshold=0.999)
+
     def test_self_attention_llama_shape(self, model_runner):
         """Self-attention at the Llama-style shape used in the LIT e2e test.
 

@@ -386,6 +386,10 @@ extern "C" int hip_mha_flash_prefill(void *stream, const void *Q,
   case 128: return launch_mha_prefill<128>(s, q, k, v, o, B, N, sq, skv, d, max_seq, scale);
   case 256: return launch_mha_prefill<256>(s, q, k, v, o, B, N, sq, skv, d, max_seq, scale);
   default:
+    // Every column past d loads as zero and is not stored, so a padded head
+    // dim without its own instantiation runs on the widest one.
+    if (d_pad <= 256)
+      return launch_mha_prefill<256>(s, q, k, v, o, B, N, sq, skv, d, max_seq, scale);
     fprintf(stderr, "[hip_mha_flash_prefill] unsupported head dim d=%d (d_pad=%d)\n",
             d, d_pad);
     return -1;
