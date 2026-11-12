@@ -16,9 +16,10 @@
 // table — std::getenv / _dupenv_s cannot see env vars set by the host process.
 // Read the real process environment via the Win32 API instead. Mirrors the
 // pattern in lib/Runtime/debug_log.h.
-extern "C"
-    __declspec(dllimport) unsigned long __stdcall GetEnvironmentVariableA(
-        const char *, char *, unsigned long);
+extern "C" __declspec(
+    dllimport) unsigned long __stdcall GetEnvironmentVariableA(const char *,
+                                                               char *,
+                                                               unsigned long);
 extern "C" __declspec(dllimport) unsigned long __stdcall GetLastError(void);
 extern "C" __declspec(dllimport) void __stdcall SetLastError(unsigned long);
 #endif

@@ -967,8 +967,9 @@ bool RocMlirAutotuner::Impl::autotuneKernel(ModuleOp module,
   // then checks this compile's winner cache, then the selected tuning space.
   // A known winner is compiled in the second pool. A problem already queued
   // waits for that pool
-  // once the search has been benchmarked. A tile that fails to compile is skipped
-  // and the next nearest row is tried. When none remain, the search runs.
+  // once the search has been benchmarked. A tile that fails to compile is
+  // skipped and the next nearest row is tried. When none remain, the search
+  // runs.
   llvm::SmallString<2048> problem;
   std::string cacheKey;
   if (succeeded(rock::getTuningProblemStr(module, problem))) {
