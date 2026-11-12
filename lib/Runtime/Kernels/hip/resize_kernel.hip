@@ -20,8 +20,8 @@
 // The caller packs a rank-r window as (O_1, O_2, O_3) with the unused
 // trailing axes size 1. The host moves those unused axes to the front, so the
 // output is row-major over (N, C, D, H, W) with W the innermost resized axis.
-// Each thread writes VEC consecutive outputs of one W row: it maps the row's
-// D and H coordinates once, and only the W coordinate per output. The host
+// Each thread writes VEC consecutive outputs of one or more W rows: it maps
+// its VEC W coordinates once and each row's D and H coordinates once. The host
 // picks the widest store of 16, 8, 4 or 2 bytes whose VEC divides the row
 // length and whose width divides the output alignment, else VEC = 1. Nearest
 // (mode=0) copies the selected sample; linear (mode=1) blends W, then H, then
@@ -202,25 +202,30 @@ __global__ void resize_nearest_rows_kernel(const T* __restrict__ input,
                                            T* __restrict__ output, RowShape s,
                                            int coord_transform,
                                            int nearest_mode) {
-  for (int64_t row = first_row(); row < s.rows; row += row_stride()) {
-    int nc, od, oh;
-    decode_row(s, static_cast<int>(row), nc, od, oh);
-    int id = nearest_index(od, s.out_d, s.in_d, coord_transform, nearest_mode,
-                           s.s_d);
-    int ih = nearest_index(oh, s.out_h, s.in_h, coord_transform, nearest_mode,
-                           s.s_h);
-    const T* src =
-        input +
-        ((static_cast<int64_t>(nc) * s.in_d + id) * s.in_h + ih) * s.in_w;
-    T* dst = output + static_cast<int64_t>(row) * s.out_w;
-
-    for (int64_t lane = first_lane(); lane < s.lanes; lane += lane_stride()) {
-      int w0 = static_cast<int>(lane) * VEC;
+  // The W samples depend only on the lane, so a thread maps them once and
+  // reuses them for each of its rows.
+  for (int64_t lane = first_lane(); lane < s.lanes; lane += lane_stride()) {
+    int w0 = static_cast<int>(lane) * VEC;
+    int iw[VEC];
+#pragma unroll
+    for (int k = 0; k < VEC; ++k)
+      iw[k] = nearest_index(w0 + k, s.out_w, s.in_w, coord_transform,
+                            nearest_mode, s.s_w);
+    for (int64_t row = first_row(); row < s.rows; row += row_stride()) {
+      int nc, od, oh;
+      decode_row(s, static_cast<int>(row), nc, od, oh);
+      int id = nearest_index(od, s.out_d, s.in_d, coord_transform,
+                             nearest_mode, s.s_d);
+      int ih = nearest_index(oh, s.out_h, s.in_h, coord_transform,
+                             nearest_mode, s.s_h);
+      const T* src =
+          input +
+          ((static_cast<int64_t>(nc) * s.in_d + id) * s.in_h + ih) * s.in_w;
+      T* dst = output + static_cast<int64_t>(row) * s.out_w;
       VecOf<T, VEC> out;
 #pragma unroll
       for (int k = 0; k < VEC; ++k)
-        out.v[k] = src[nearest_index(w0 + k, s.out_w, s.in_w,
-                                     coord_transform, nearest_mode, s.s_w)];
+        out.v[k] = src[iw[k]];
       *reinterpret_cast<VecOf<T, VEC>*>(dst + w0) = out;
     }
   }
@@ -242,32 +247,40 @@ __global__ void resize_linear_rows_kernel(const T* __restrict__ input,
                                           int spatial_rank,
                                           int coord_transform) {
   const int64_t plane = static_cast<int64_t>(s.in_h) * s.in_w;
-  for (int64_t row = first_row(); row < s.rows; row += row_stride()) {
-    int nc, od, oh;
-    decode_row(s, static_cast<int>(row), nc, od, oh);
-    LinearTap td = {0, 0, 0.0f};
-    LinearTap th = {0, 0, 0.0f};
-    if (spatial_rank >= 3)
-      td = linear_tap(od, s.out_d, s.in_d, coord_transform, s.s_d);
-    if (spatial_rank >= 2)
-      th = linear_tap(oh, s.out_h, s.in_h, coord_transform, s.s_h);
+  // The W taps depend only on the lane, so a thread computes them once and
+  // reuses them for each of its rows.
+  for (int64_t lane = first_lane(); lane < s.lanes; lane += lane_stride()) {
+    int w0 = static_cast<int>(lane) * VEC;
+    LinearTap tws[VEC];
+#pragma unroll
+    for (int k = 0; k < VEC; ++k)
+      tws[k] = linear_tap(w0 + k, s.out_w, s.in_w, coord_transform, s.s_w);
+    for (int64_t row = first_row(); row < s.rows; row += row_stride()) {
+      int nc, od, oh;
+      decode_row(s, static_cast<int>(row), nc, od, oh);
+      LinearTap td = {0, 0, 0.0f};
+      LinearTap th = {0, 0, 0.0f};
+      if (spatial_rank >= 3)
+        td = linear_tap(od, s.out_d, s.in_d, coord_transform, s.s_d);
+      if (spatial_rank >= 2)
+        th = linear_tap(oh, s.out_h, s.in_h, coord_transform, s.s_h);
 
-    const T* base = input + static_cast<int64_t>(nc) * s.in_d * plane;
-    const T* r00 = base + td.lo * plane + static_cast<int64_t>(th.lo) * s.in_w;
-    const T* r01 = base + td.lo * plane + static_cast<int64_t>(th.hi) * s.in_w;
-    const T* r10 = base + td.hi * plane + static_cast<int64_t>(th.lo) * s.in_w;
-    const T* r11 = base + td.hi * plane + static_cast<int64_t>(th.hi) * s.in_w;
+      const T* base = input + static_cast<int64_t>(nc) * s.in_d * plane;
+      const T* r00 =
+          base + td.lo * plane + static_cast<int64_t>(th.lo) * s.in_w;
+      const T* r01 =
+          base + td.lo * plane + static_cast<int64_t>(th.hi) * s.in_w;
+      const T* r10 =
+          base + td.hi * plane + static_cast<int64_t>(th.lo) * s.in_w;
+      const T* r11 =
+          base + td.hi * plane + static_cast<int64_t>(th.hi) * s.in_w;
 
-    T* dst = output + static_cast<int64_t>(row) * s.out_w;
-
-    for (int64_t lane = first_lane(); lane < s.lanes; lane += lane_stride()) {
-      int w0 = static_cast<int>(lane) * VEC;
+      T* dst = output + static_cast<int64_t>(row) * s.out_w;
       VecOf<T, VEC> out;
 #pragma unroll
       for (int k = 0; k < VEC; ++k) {
 #pragma clang fp contract(off)
-        LinearTap tw =
-            linear_tap(w0 + k, s.out_w, s.in_w, coord_transform, s.s_w);
+        const LinearTap& tw = tws[k];
         float v = lerp_w(r00, tw);
         if (spatial_rank >= 2) {
           v = v * (1.0f - th.t) + lerp_w(r01, tw) * th.t;
@@ -401,12 +414,26 @@ static bool make_row_shape(int spatial_rank, int64_t N, int64_t C,
 // when a row needs fewer lanes. Short rows (a channels-last pixel) pack rows
 // below wave width, so adjacent rows, which are adjacent in memory, share a
 // wave instead of leaving its threads idle.
-static void row_launch_config(const RowShape& s, dim3& grid, dim3& block) {
+//
+// The resampling kernels reuse a lane's W taps across its rows, so when there
+// are rows to spare each thread takes up to kRowsPerThread of them while the
+// launch keeps at least kMinRowBlocks blocks to fill the GPU.
+constexpr unsigned kRowsPerThread = 4;
+constexpr unsigned kMinRowBlocks = 512;
+
+static void row_launch_config(const RowShape& s, bool share_taps, dim3& grid,
+                              dim3& block) {
   unsigned bx = 1;
   while (bx < static_cast<unsigned>(s.lanes) && bx < 256)
     bx *= 2;
   unsigned by = 256 / bx;
   unsigned row_blocks = (static_cast<unsigned>(s.rows) + by - 1) / by;
+  if (share_taps) {
+    unsigned shared = (row_blocks + kRowsPerThread - 1) / kRowsPerThread;
+    row_blocks = shared > kMinRowBlocks ? shared
+                 : row_blocks > kMinRowBlocks ? kMinRowBlocks
+                                              : row_blocks;
+  }
   unsigned lane_blocks = (static_cast<unsigned>(s.lanes) + bx - 1) / bx;
   block = dim3(bx, by);
   grid = dim3(row_blocks < HIP_RESIZE_MAX_GRID ? row_blocks
@@ -488,7 +515,7 @@ static int launch_rows(hipStream_t stream, const void* input, void* output,
     return -1;
   }
   dim3 grid, block;
-  row_launch_config(s, grid, block);
+  row_launch_config(s, !passthrough, grid, block);
 
   (void)hipGetLastError();
   if (passthrough)
