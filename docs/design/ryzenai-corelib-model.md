@@ -23,7 +23,7 @@ deploying").
 |---|---|---|
 | `use_ryzenai_corelib_model` = `1`/`true` | EP provider option | Try the model-level path |
 | `HIPEP_USE_RYZENAI_CORELIB_MODEL` = `1`/`true` | Environment, read at compile time | Same, when the provider option is unset |
-| `RYZENAICORELIB_ROOT` | Environment, build and run time | CoreLib install tree (or repository root; `install/` is searched). Build: locates `include/ryzenai/corelib/base.h` (CoreLib 0.66 or later). Run: loads `bin/ryzenai_corelib.dll` (`lib/libryzenai_corelib.so` on Linux), else the default library search path |
+| `RYZENAICORELIB_ROOT` | Environment, build and run time | CoreLib install tree (or repository root; `install/` is searched). Build: locates `include/ryzenai/corelib/base.h` (CoreLib 0.90.1 or later). Run: loads `bin/ryzenai_corelib.dll` (`lib/libryzenai_corelib.so` on Linux), else the default library search path |
 | `RYZENAICORELIB_REPORT` = `1` | Environment, run time | At session end, print `[corelib] model report: ...` with the prefills, decodes and rows run on the NPU |
 | `RYZENAICORELIB_MODELS` | Environment, compile time | Comma-separated CoreLib model names to try instead of the model libraries found beside CoreLib, for a CoreLib whose models are built in |
 
@@ -34,14 +34,14 @@ In an onnxruntime-genai `genai_config.json` the option goes in the EP's
 ## Hardware
 
 hip-ep uses CoreLib's models where `ryzenai_corelib_npu_usable()` is true. With
-CoreLib 0.66 that is an AIE4 (AIEM) NPU with XRT 2.26.0 or later; it is false
-on AIE2/AIE2P parts (Phoenix, Strix, Krackan), where hip-ep compiles the model
-for the GPU. A CoreLib that runs its models on more NPUs needs no hip-ep
-change.
+CoreLib 0.66 and 0.90.1 that is an AIE4 (AIEM) NPU with XRT 2.26.0 or later;
+it is false on AIE2/AIE2P parts (Phoenix, Strix, Krackan), where hip-ep
+compiles the model for the GPU. A CoreLib that runs its models on more NPUs
+needs no hip-ep change.
 
 ## Building and deploying
 
-`RYZENAICORELIB_ROOT` names a CoreLib 0.66 or later install tree at build
+`RYZENAICORELIB_ROOT` names a CoreLib 0.90.1 or later install tree at build
 time; only its headers are used. The configure step prints
 `-- RyzenAI CoreLib <version>: <include dir>`; without CoreLib (or in mock
 builds) it builds a stub that refuses every model, and warns when
@@ -80,10 +80,10 @@ the path before building any MLIR when:
   (CoreLib's test model reads any file, so this is what turns it away), and
   every input its `forward` requires (`ryzenai_corelib_model_get_method`) is a
   graph input, but for `position`, which the op derives. The first that fits
-  is used. `model.type` is only an ordering hint: every CoreLib 0.66 model
-  refused the Qwen3 and Llama exports it was not exported for, cleanly and
-  with a reason, so the hint changes no outcome; it keeps the matching model
-  ahead of the others, which saves loading attempts.
+  is used. `model.type` is only an ordering hint: every CoreLib 0.66 and
+  0.90.1 model refused the Qwen3 and Llama exports it was not exported for,
+  cleanly and with a reason, so the hint changes no outcome; it keeps the
+  matching model ahead of the others, which saves loading attempts.
 
 On success the whole graph is fused under the `CORELIBMODEL` domain, with the
 parameter `{arch, path, max_sequence_length}`, and no MLIR is compiled. The
@@ -151,11 +151,13 @@ does not pass `use_ryzenai_corelib_model` through to hip-ep, set
 ## Supported models
 
 Whatever CoreLib's models read from ONNX; its `docs/models.md` lists each
-one's files. With CoreLib 0.66 those are `qwen3` (onnxruntime-genai
+one's files. With CoreLib 0.66 those were `qwen3` (onnxruntime-genai
 `model.onnx` of Qwen3 0.6B to 8B, MatMulNBits block 128 throughout),
 `phi4mini` (`model.onnx`), and `gemma4` and `qwen36`, whose exports run the
 embedding as a separate model, so the decoder hip-ep sees takes
-`inputs_embeds`. Its other models read GGUF only and do not apply.
+`inputs_embeds`. CoreLib 0.90.1 ships a larger set of models; consult its
+`docs/models.md` for the current list. Models that read GGUF only do not apply
+regardless of version.
 
 | Model | Run through hip-ep |
 |---|---|
@@ -165,7 +167,7 @@ embedding as a separate model, so the decoder hip-ep sees takes
 
 ## Measured
 
-AIE4 machine (gfx1170 GPU), CoreLib 0.66; ONNX Runtime 1.31, onnxruntime-genai 0.19 and the AMD
+AIE4 machine (gfx1170 GPU), CoreLib 0.90.1 (originally measured with 0.66; results were the same); ONNX Runtime 1.31, onnxruntime-genai 0.19 and the AMD
 GPU umbrella EP as in [quick_start.md](../quick_start.md); `model_benchmark -l
 128 -g 128 -r 3 -w 1` (128-token prompt, 128 tokens generated, 3 iterations
 after 1 warmup):
@@ -196,5 +198,5 @@ For each model the CoreLib session's report counted 639 forwards on the NPU: 4 p
 - Only models CoreLib reads from ONNX, with the inputs and outputs named as
   onnxruntime-genai names them; methods other than `forward` (images through
   `encode_image`, drafting) are not used.
-- Only where CoreLib's models run (AIE4 with CoreLib 0.66); elsewhere the model
-  compiles for the GPU.
+- Only where CoreLib's models run (AIE4 with CoreLib 0.90.1 or later);
+  elsewhere the model compiles for the GPU.
