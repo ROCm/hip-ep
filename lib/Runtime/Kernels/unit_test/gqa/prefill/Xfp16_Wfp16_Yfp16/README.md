@@ -2,8 +2,9 @@
 
 Standalone `hipcc`-only test for the fused FA-2 WMMA prefill kernels
 (`sq > 1`; the runtime selects v6x at head_dim 64/96/128 and v8x at 256). No CMake, no EP build.
-Entirely self-contained: inputs and the CPU fp32 reference are generated
-in-process, no python, no data files, no `unit_test/common/`.
+Inputs and the CPU fp32 reference are generated in-process, with no python or
+data files. Timing uses the owning `unit_test/common/hip_adaptive_timing.h`
+and its named `TIMING=screen|standard|confirm` presets.
 
 ```
 make test        OFFLOAD=--offload-arch=%GFX% HIP_SDK=%HIP_SDK% [COVERAGE=1|2|3]
@@ -16,6 +17,20 @@ make clean
 | `test` | Runs the exe with no single-shape flags, which hits the built-in `cases[]` matrix in `test_gqa_prefill.cpp`'s `main()` (real models + sink/window variants -- see "Shape coverage" below). |
 | `test_custom` | One shape from `B=`, `H=`, `G=`, `D=`, `SQ=`, `PAST=`, `WINDOW=` (in-process rng). |
 | `clean` | Removes `out/`. |
+
+`test_custom` also accepts `MAX_SEQ=<cache capacity>`, `SCALE=<model scale>`
+and `ND=<waves> HB=<head block> BKV=<KV tile>` for a configured v8x entry.
+The equivalent executable flags are `--max-seq`, `--scale`, `--nd`, `--hb`
+and `--bkv`. Capacity must hold `PAST+SQ`; scale must be finite and non-negative
+(zero is explicit). With no capacity/scale flags, the built-in cases retain
+their compact cache and `1/sqrt(D)` reference convention. Model qualification
+must supply the sourced production values when those conventions differ.
+
+Q/O are BSHD and K/V are BNSD with plane stride `MAX_SEQ*D`. Cold timing
+rotates attended row spans through slots in fixed-capacity banks, preserving
+that plane stride on every call. `GQA_LAYOUT` and `GQA_KV_ROTATION` disclose
+capacity, scale, copies and allocation. The shared timer chooses call counts;
+the legacy `ITERS` flag does not select native sampling counts.
 
 ## Shape coverage (3 tiers)
 
