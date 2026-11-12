@@ -108,10 +108,74 @@ ConvTransposeToHip::matchAndRewrite(mlir::Operation *op,
   if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("group"))
     group = attr.getValue().getSExtValue();
 
-  // Output spatial dims are determined by the ONNX shape inference and live in
-  // resultType. Dynamic dims (typically only the batch dim N) align
-  // positionally with the input, so derive them from the input tensor.
-  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
+  llvm::StringRef autoPad = "NOTSET";
+  if (auto attr = op->getAttrOfType<mlir::StringAttr>("auto_pad"))
+    autoPad = attr.getValue();
+  llvm::SmallVector<int64_t> outputShape;
+  if (auto attr = op->getAttrOfType<mlir::ArrayAttr>("output_shape"))
+    for (auto a : attr)
+      outputShape.push_back(
+          mlir::cast<mlir::IntegerAttr>(a).getValue().getSExtValue());
+
+  if (static_cast<int64_t>(kernelShape.size()) != numSpatial ||
+      static_cast<int64_t>(strides.size()) != numSpatial ||
+      static_cast<int64_t>(dilations.size()) != numSpatial ||
+      static_cast<int64_t>(outputPadding.size()) != numSpatial ||
+      static_cast<int64_t>(pads.size()) != numSpatial * 2)
+    return rewriter.notifyMatchFailure(op, "conv_transpose attribute arity");
+
+  // A dynamic spatial extent is not the input's: the result is the
+  // input grown by the stride and kernel, so a tensor.dim of the input would
+  // size the init too small and the kernel, which takes its output extent from
+  // the init, would compute only a corner of the result. Per ONNX it is
+  //   stride * (in - 1) + output_padding + dilation * (kernel - 1) + 1 - pads
+  // (in * stride for auto_pad SAME_*, or output_shape when that is given).
+  llvm::SmallVector<mlir::Value> dynSizes;
+  for (int64_t dimIdx : llvm::seq<int64_t>(resultType.getRank())) {
+    if (!resultType.isDynamicDim(dimIdx))
+      continue;
+    if (dimIdx == 0) {
+      dynSizes.push_back(
+          mlir::tensor::DimOp::create(rewriter, loc, input, /*index=*/0));
+      continue;
+    }
+    if (dimIdx == 1) {
+      // Output channels are the weight's M/group times group.
+      mlir::Value perGroup =
+          mlir::tensor::DimOp::create(rewriter, loc, weights, /*index=*/1);
+      mlir::Value groupC =
+          mlir::arith::ConstantIndexOp::create(rewriter, loc, group);
+      dynSizes.push_back(
+          mlir::arith::MulIOp::create(rewriter, loc, perGroup, groupC));
+      continue;
+    }
+    const int64_t s = dimIdx - 2;
+    if (static_cast<int64_t>(outputShape.size()) == numSpatial) {
+      dynSizes.push_back(
+          mlir::arith::ConstantIndexOp::create(rewriter, loc, outputShape[s]));
+      continue;
+    }
+    mlir::Value inExtent =
+        mlir::tensor::DimOp::create(rewriter, loc, input, dimIdx);
+    mlir::Value strideC =
+        mlir::arith::ConstantIndexOp::create(rewriter, loc, strides[s]);
+    mlir::Value scaled =
+        mlir::arith::MulIOp::create(rewriter, loc, inExtent, strideC);
+    if (autoPad == "SAME_UPPER" || autoPad == "SAME_LOWER") {
+      dynSizes.push_back(scaled);
+      continue;
+    }
+    const int64_t addend = outputPadding[s] +
+                           dilations[s] * (kernelShape[s] - 1) + 1 - pads[s] -
+                           pads[numSpatial + s] - strides[s];
+    mlir::Value addendC =
+        mlir::arith::ConstantIndexOp::create(rewriter, loc, addend);
+    dynSizes.push_back(
+        mlir::arith::AddIOp::create(rewriter, loc, scaled, addendC));
+  }
+  mlir::Value init =
+      mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
+                                    resultType.getElementType(), dynSizes);
 
   auto kernelShapeAttr = rewriter.getI64ArrayAttr(kernelShape);
   auto stridesAttr = rewriter.getI64ArrayAttr(strides);

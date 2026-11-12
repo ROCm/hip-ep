@@ -932,6 +932,38 @@ def Hip_MatMulNBitsOp : Hip_DpsOp_WithInfer<"matmul_nbits", "Output", [AttrSized
   }];
 }
 
+// ONNX MatMulNBits nibble order: low nibble is the first value, high nibble
+// the second. The last dimension doubles and every other dimension stays.
+// Bitsandbytes packing is the opposite order and is not this op.
+def Hip_UnpackInt4Op : Hip_DpsOp_AutoReifyInfer<"unpack_int4"> {
+  let summary = "Unpack low-nibble-first int4 bytes along the last dimension";
+  let description = [{
+    Each byte of `$packed` holds two unsigned 4-bit values, low nibble first.
+    `[..., K/2]` becomes `[..., K]`. The values are zero-extended into the
+    result element type, which is `ui8`.
+
+    Example:
+    ```mlir
+    hip.unpack_int4(%ctx) ins(%packed : tensor<4x8xui8>)
+        outs(%unpacked : tensor<4x16xui8>) : tensor<4x16xui8>
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$packed,
+    Hip_TensorOrMemRef:$output
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $packed `:` type($packed) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  let hasVerifier = 1;
+}
+
 // Bitsandbytes FP4/NF4 weight dequant. Output is row-major [N, K], the layout
 // ONNX Runtime writes before a transposed GEMM. The first of each packed pair
 // lives in the high nibble. This is not MXFP block-scaled matmul.
@@ -5727,6 +5759,9 @@ def Hip_ResizeOp : Hip_DpsOp_AutoReify<"resize"> {
     ONNX `scales` order) overrides that ratio: when floor(in_dim * scale)
     rounds, e.g. 3 * 1.5 -> 4, ONNX samples with the supplied scale and the
     extent ratio would shift every coordinate.  align_corners ignores it.
+    `runtime_scales` (one f64 per window axis, read on the host at run time)
+    does the same for a scales vector that does not fold; it requires the
+    saved `prefix_count` / `spatial_rank` launch and excludes `scales`.
     A dynamic window extent is filled in at conversion from a
     compile-time constant `scales` vector (scale 1 copies the input dim;
     any other scale is floor(input_dim * scale)).  When `scales` is absent, a
@@ -5749,6 +5784,7 @@ def Hip_ResizeOp : Hip_DpsOp_AutoReify<"resize"> {
   let arguments = (ins
     Hip_ContextType:$ctx,
     Hip_TensorOrMemRef:$input,
+    Variadic<F64>:$runtime_scales,
     Hip_TensorOrMemRef:$output,
     I64Attr:$mode,
     I64Attr:$coord_transform,
@@ -5758,9 +5794,11 @@ def Hip_ResizeOp : Hip_DpsOp_AutoReify<"resize"> {
 
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    (`scales` `(` $runtime_scales^ `:` type($runtime_scales) `)`)?
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+  let hasVerifier = 1;
 }
 
 def Hip_GridSampleOp : Hip_DpsOp_AutoReifyInfer<"grid_sample"> {
