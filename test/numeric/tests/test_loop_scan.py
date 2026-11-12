@@ -114,6 +114,47 @@ def _scan_model(trip: int, *, early: bool = False, second: bool = False):
     )
 
 
+def _body_sized_scan_model(trip: int):
+    """Scan whose row length is computed in the body: Concat(x_in, x_in).
+
+    ``x_in`` is loop-carried without a declared shape, so the row length is
+    not known before the loop. For a zero-trip loop ORT gives such a scan
+    shape (0, 0); a static row length would be kept instead.
+    """
+    body = helper.make_graph(
+        [
+            helper.make_node("Identity", ["cond_in"], ["cond_out"]),
+            helper.make_node("Identity", ["x_in"], ["x_out"]),
+            helper.make_node("Concat", ["x_in", "x_in"], ["chunk"], axis=0),
+        ],
+        "body",
+        [
+            helper.make_tensor_value_info("iter", _I64, []),
+            helper.make_tensor_value_info("cond_in", _BOOL, []),
+            helper.make_tensor_value_info("x_in", _F32, None),
+        ],
+        [
+            helper.make_tensor_value_info("cond_out", _BOOL, []),
+            helper.make_tensor_value_info("x_out", _F32, None),
+            helper.make_tensor_value_info("chunk", _F32, [None]),
+        ],
+    )
+    trip_init = numpy_helper.from_array(np.array(trip, dtype=np.int64), "trip")
+    cond_init = numpy_helper.from_array(np.array(True), "cond")
+    node = helper.make_node(
+        "Loop", ["trip", "cond", "x"], ["x_final", "scan"], body=body
+    )
+    return make_model_from_nodes(
+        [node],
+        [helper.make_tensor_value_info("x", _F32, [4])],
+        [
+            helper.make_tensor_value_info("x_final", _F32, [4]),
+            helper.make_tensor_value_info("scan", _F32, [None, None]),
+        ],
+        initializers=[trip_init, cond_init],
+    )
+
+
 class TestLoopScan:
     def test_full_trip(self, model_runner):
         model = _scan_model(3)
@@ -144,3 +185,17 @@ class TestLoopScan:
         _compare_scans(actual, expected)
         assert actual[2].shape == (3, 4)
         assert actual[3].shape == (3, 4)
+
+    def test_zero_trip_body_sized(self, model_runner):
+        model = _body_sized_scan_model(0)
+        x = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
+        actual, expected = model_runner.run_sample(model, [x])
+        _compare_scans(actual, expected)
+        assert actual[1].shape == (0, 0)
+
+    def test_full_trip_body_sized(self, model_runner):
+        model = _body_sized_scan_model(2)
+        x = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
+        actual, expected = model_runner.run_sample(model, [x])
+        _compare_scans(actual, expected)
+        assert actual[1].shape == (2, 8)
