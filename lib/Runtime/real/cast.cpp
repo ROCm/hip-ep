@@ -21,6 +21,8 @@ static int hipdnn_to_hip_dtype(int64_t hipdnn_type) {
     return HIP_DTYPE_FLOAT16;
   case HIPDNN_EP_DATATYPE_BFLOAT16:
     return HIP_DTYPE_BFLOAT16;
+  case HIPDNN_EP_DATATYPE_DOUBLE:
+    return HIP_DTYPE_FLOAT64;
   case HIPDNN_EP_DATATYPE_INT32:
     return HIP_DTYPE_INT32;
   case HIPDNN_EP_DATATYPE_INT64:

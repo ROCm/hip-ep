@@ -63,8 +63,7 @@ static Type promoteRankZero(Type type) {
 }
 
 // rocMLIR's blockwise load rejects f64. An f64 value keeps its op on the HIP
-// kernel, and a dot in f64 stays on the HIP gemm, which hipBLAS runs as
-// HIP_R_64F.
+// kernel. An f64 hip.matmul and hip.gemm stay on hipBLASLt as HIP_R_64F.
 static bool isF64Type(Type type) {
   auto shaped = dyn_cast<ShapedType>(type);
   Type element = shaped ? shaped.getElementType() : type;
@@ -124,15 +123,15 @@ public:
             anchorOp, "i32 anchor stays on the HIP kernel");
     }
 
-    // An f64 dot stays on the HIP gemm; rocMLIR's blockwise load rejects f64.
+    // An f64 dot stays on hipBLASLt; rocMLIR's blockwise load rejects f64.
     for (Type type : anchorOp->getOperandTypes())
       if (isF64Type(type))
-        return rewriter.notifyMatchFailure(anchorOp,
-                                           "f64 anchor stays on the HIP gemm");
+        return rewriter.notifyMatchFailure(
+            anchorOp, "f64 anchor stays on the HIP runtime");
     for (Type type : anchorOp->getResultTypes())
       if (isF64Type(type))
-        return rewriter.notifyMatchFailure(anchorOp,
-                                           "f64 anchor stays on the HIP gemm");
+        return rewriter.notifyMatchFailure(
+            anchorOp, "f64 anchor stays on the HIP runtime");
 
     // Fail on dynamic shapes
     for (Value operand : anchorOp->getOperands()) {

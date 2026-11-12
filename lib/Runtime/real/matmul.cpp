@@ -151,7 +151,18 @@ static MatmulCacheEntry *queryOrCreateMatmul(MatmulAlgoTable &table,
   if (it != table.map.end())
     return it->second.get();
 
-  hipDataType dt = (key.elem_size == 2) ? HIP_R_16F : HIP_R_32F;
+  // f16 and f32 accumulate in f32. f64 matches wrap_gemm: HIP_R_64F data
+  // and HIPBLAS_COMPUTE_64F, with a double scale.
+  hipDataType dt = HIP_R_32F;
+  hipblasComputeType_t compute = HIPBLAS_COMPUTE_32F;
+  hipDataType scale = HIP_R_32F;
+  if (key.elem_size == 2) {
+    dt = HIP_R_16F;
+  } else if (key.elem_size == 8) {
+    dt = HIP_R_64F;
+    compute = HIPBLAS_COMPUTE_64F;
+    scale = HIP_R_64F;
+  }
   int64_t M = key.M, N = key.N, K = key.K;
   int64_t transA = key.transA;
   int64_t transB = key.transB;
@@ -172,8 +183,7 @@ static MatmulCacheEntry *queryOrCreateMatmul(MatmulAlgoTable &table,
       goto cache_fail;                                                         \
   } while (0)
 
-  MATMUL_CACHE_CHECK(
-      hipblasLtMatmulDescCreate(&entry.desc, HIPBLAS_COMPUTE_32F, HIP_R_32F));
+  MATMUL_CACHE_CHECK(hipblasLtMatmulDescCreate(&entry.desc, compute, scale));
 
   {
     hipblasOperation_t opA = transB ? HIPBLAS_OP_T : HIPBLAS_OP_N;
@@ -355,7 +365,12 @@ static void autotuneMatmul(hipblasLtHandle_t handle, hipStream_t stream,
                            MatmulCacheEntry *entry, const void *blas_A,
                            const void *blas_B, void *blas_C, void *ws_ptr,
                            size_t ws_size, const MatmulCacheKey &key) {
-  float alpha = 1.0f, beta = 0.0f;
+  float alpha_f = 1.0f, beta_f = 0.0f;
+  double alpha_d = 1.0, beta_d = 0.0;
+  const void *alpha = key.elem_size == 8 ? static_cast<const void *>(&alpha_d)
+                                         : static_cast<const void *>(&alpha_f);
+  const void *beta = key.elem_size == 8 ? static_cast<const void *>(&beta_d)
+                                        : static_cast<const void *>(&beta_f);
   hipEvent_t ev_start = nullptr, ev_stop = nullptr;
   if (hipEventCreate(&ev_start) != hipSuccess ||
       hipEventCreate(&ev_stop) != hipSuccess) {
@@ -378,8 +393,8 @@ static void autotuneMatmul(hipblasLtHandle_t handle, hipStream_t stream,
 
     // Warm-up
     hipblasStatus_t st =
-        hipblasLtMatmul(handle, entry->desc, &alpha, blas_A, entry->layA,
-                        blas_B, entry->layB, &beta, blas_C, entry->layC, blas_C,
+        hipblasLtMatmul(handle, entry->desc, alpha, blas_A, entry->layA, blas_B,
+                        entry->layB, beta, blas_C, entry->layC, blas_C,
                         entry->layC, &cand.algo, ws_ptr, ws_size, stream);
     if (st != HIPBLAS_STATUS_SUCCESS)
       continue;
@@ -387,8 +402,8 @@ static void autotuneMatmul(hipblasLtHandle_t handle, hipStream_t stream,
     // Timed iterations
     hipEventRecord(ev_start, stream);
     for (int t = 0; t < AUTOTUNE_TIMING_ITERS; t++) {
-      hipblasLtMatmul(handle, entry->desc, &alpha, blas_A, entry->layA, blas_B,
-                      entry->layB, &beta, blas_C, entry->layC, blas_C,
+      hipblasLtMatmul(handle, entry->desc, alpha, blas_A, entry->layA, blas_B,
+                      entry->layB, beta, blas_C, entry->layC, blas_C,
                       entry->layC, &cand.algo, ws_ptr, ws_size, stream);
     }
     hipEventRecord(ev_stop, stream);
@@ -446,7 +461,8 @@ static void autotuneMatmul(hipblasLtHandle_t handle, hipStream_t stream,
 //   B_ptr = A (column-major view is A^T: K rows, M cols, ld = K)
 //   C_ptr = output (column-major view is C^T: N rows, M cols, ld = N)
 //
-// Both fp16 and fp32 use HIPBLAS_COMPUTE_32F for accumulation precision.
+// fp16 and fp32 use HIPBLAS_COMPUTE_32F. fp64 uses HIPBLAS_COMPUTE_64F
+// and a double alpha/beta, the same contract as wrap_gemm.
 //===----------------------------------------------------------------------===//
 
 int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
@@ -478,7 +494,7 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
     return -1;
   }
 
-  if (elem_size != 2 && elem_size != 4) {
+  if (elem_size != 2 && elem_size != 4 && elem_size != 8) {
     fprintf(stderr, "wrap_hipblasLtMatmul: unsupported elem_size %lld\n",
             (long long)elem_size);
     return -1;
@@ -499,7 +515,9 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
     return hip_gemv_f16_kn(stream, A, B, output, K, N) == 0 ? 0 : -1;
   }
 
-  const char *type_name = (elem_size == 2) ? "f16" : "f32";
+  const char *type_name = elem_size == 2   ? "f16"
+                          : elem_size == 8 ? "f64"
+                                           : "f32";
   RUNTIME_DEBUG_LOG("[REAL] wrap_hipblasLtMatmul: M=%lld, N=%lld, K=%lld, "
                     "batch=%lld, b_batch_stride=%lld, transA=%lld, "
                     "transB=%lld, elem_size=%lld (%s), total_bytes=%lld\n",
@@ -557,8 +575,14 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
     }
   }
 
-  float alpha = 1.0f;
-  float beta = 0.0f;
+  float alpha_f = 1.0f;
+  float beta_f = 0.0f;
+  double alpha_d = 1.0;
+  double beta_d = 0.0;
+  const void *alpha = elem_size == 8 ? static_cast<const void *>(&alpha_d)
+                                     : static_cast<const void *>(&alpha_f);
+  const void *beta = elem_size == 8 ? static_cast<const void *>(&beta_d)
+                                    : static_cast<const void *>(&beta_f);
 
   // For shapes the heuristic could not satisfy (use_default_algo), pass
   // algo=nullptr and zero workspace to let hipBLASLt use its internal default.
@@ -571,10 +595,10 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
 
   OP_ROCTX_MARK("hip_ep.op.matmul.run.hipblaslt");
   hipblasStatus_t st =
-      hipblasLtMatmul(handle, cached->desc, &alpha, B,
+      hipblasLtMatmul(handle, cached->desc, alpha, B,
                       cached->layA,    // "A" = B (row->col trick)
                       A, cached->layB, // "B" = A (row->col trick)
-                      &beta, output, cached->layC, output, cached->layC,
+                      beta, output, cached->layC, output, cached->layC,
                       algo_ptr, call_ws_ptr, call_ws_size, stream);
 
   if (st != HIPBLAS_STATUS_SUCCESS) {

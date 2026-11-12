@@ -97,11 +97,12 @@ func.func @expand_logits(%ctx: !hip.context, %n: index) -> memref<1x?x92xf16> {
 // STAMP-NOT:     hipdnn.abi_groups
 //
 // DECOMP-LABEL: llvm.func @same_rank_channel_split
-// DECOMP:       llvm.alloca %{{.*}} x !llvm.array<4 x i64>
+// The static abi_shape branch materializes 1, 90, 160, 64 before the alloca.
 // DECOMP:       llvm.mlir.constant(1 : i64)
 // DECOMP:       llvm.mlir.constant(90 : i64)
 // DECOMP:       llvm.mlir.constant(160 : i64)
 // DECOMP:       llvm.mlir.constant(64 : i64)
+// DECOMP:       llvm.alloca %{{.*}} x !llvm.array<4 x i64>
 // DECOMP:       %[[RANK4:.*]] = llvm.mlir.constant(4 : i64)
 // DECOMP:       llvm.call @hipdnn_ep_alloc_output(%{{.*}}, %{{.*}}, %{{.*}}, %[[RANK4]], %{{.*}}) : (!llvm.ptr, i64, !llvm.ptr, i64, i64) -> !llvm.ptr
 func.func @same_rank_channel_split(%ctx: !hip.context) -> memref<1x90x160x64xf16> {

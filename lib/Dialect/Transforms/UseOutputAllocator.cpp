@@ -195,6 +195,10 @@ static void stampStaticReassociationAbiShape(AllocOutputOp allocOutput,
   if (!rootType || !extType || !rootType.hasStaticShape() ||
       !extType.hasStaticShape())
     return;
+  // Rank-changing views stay with stampAbiReshapeAttrs. Stamping the returned
+  // rank here would disagree with hipdnn.output_shapes and fail lowering.
+  if (rootType.getRank() != extType.getRank())
+    return;
   if (rootType.getShape() == extType.getShape())
     return;
   if (rootType.getNumElements() == 0 ||

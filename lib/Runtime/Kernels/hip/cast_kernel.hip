@@ -304,6 +304,32 @@ static int launch_cast_bf16(hipStream_t stream, const void* input,
   return -1;
 }
 
+// f64 <-> f16/f32. bf16 <-> f64 stays on launch_cast_bf16. Both go through
+// fp32, so f64 -> f16 rounds the same way as f64 -> f32 -> f16.
+static int launch_cast_f64(hipStream_t stream, const void* input,
+                           void* output, int64_t num_elements,
+                           int input_dtype, int output_dtype,
+                           int grid_size, int block_size) {
+  auto isF16OrF32 = [](int dtype) {
+    return dtype == HIP_DTYPE_FLOAT16 || dtype == HIP_DTYPE_FLOAT32;
+  };
+  if (input_dtype == HIP_DTYPE_FLOAT64 && isF16OrF32(output_dtype)) {
+    return dispatch_dtype(output_dtype, [&](auto dst) {
+      using Dst = typename decltype(dst)::type;
+      return launch_cast_via_float<double, Dst>(
+          stream, input, output, num_elements, grid_size, block_size);
+    });
+  }
+  if (output_dtype == HIP_DTYPE_FLOAT64 && isF16OrF32(input_dtype)) {
+    return dispatch_dtype(input_dtype, [&](auto src) {
+      using Src = typename decltype(src)::type;
+      return launch_cast_via_float<Src, double>(
+          stream, input, output, num_elements, grid_size, block_size);
+    });
+  }
+  return -1;
+}
+
 extern "C" int hip_cast(
     void* stream,
     const void* input,
@@ -462,6 +488,10 @@ extern "C" int hip_cast(
                        dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
                        static_cast<const int16_t*>(input),
                        static_cast<uint8_t*>(output), num_elements);
+  } else if (launch_cast_f64(hip_stream, input, output, num_elements,
+                             input_dtype, output_dtype, grid_size,
+                             kBlockSize) == 0) {
+    // f64 <-> {f32, f16} launched.
   } else if (launch_cast_bf16(hip_stream, input, output, num_elements,
                               input_dtype, output_dtype, grid_size,
                               kBlockSize) == 0) {
