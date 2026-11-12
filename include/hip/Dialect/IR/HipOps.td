@@ -932,6 +932,38 @@ def Hip_MatMulNBitsOp : Hip_DpsOp_WithInfer<"matmul_nbits", "Output", [AttrSized
   }];
 }
 
+// ONNX MatMulNBits nibble order: low nibble is the first value, high nibble
+// the second. The last dimension doubles and every other dimension stays.
+// Bitsandbytes packing is the opposite order and is not this op.
+def Hip_UnpackInt4Op : Hip_DpsOp_AutoReifyInfer<"unpack_int4"> {
+  let summary = "Unpack low-nibble-first int4 bytes along the last dimension";
+  let description = [{
+    Each byte of `$packed` holds two unsigned 4-bit values, low nibble first.
+    `[..., K/2]` becomes `[..., K]`. The values are zero-extended into the
+    result element type, which is `ui8`.
+
+    Example:
+    ```mlir
+    hip.unpack_int4(%ctx) ins(%packed : tensor<4x8xui8>)
+        outs(%unpacked : tensor<4x16xui8>) : tensor<4x16xui8>
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$packed,
+    Hip_TensorOrMemRef:$output
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $packed `:` type($packed) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  let hasVerifier = 1;
+}
+
 // Bitsandbytes FP4/NF4 weight dequant. Output is row-major [N, K], the layout
 // ONNX Runtime writes before a transposed GEMM. The first of each packed pair
 // lives in the high nibble. This is not MXFP block-scaled matmul.
@@ -5727,6 +5759,9 @@ def Hip_ResizeOp : Hip_DpsOp_AutoReify<"resize"> {
     ONNX `scales` order) overrides that ratio: when floor(in_dim * scale)
     rounds, e.g. 3 * 1.5 -> 4, ONNX samples with the supplied scale and the
     extent ratio would shift every coordinate.  align_corners ignores it.
+    `runtime_scales` (one f64 per window axis, read on the host at run time)
+    does the same for a scales vector that does not fold; it requires the
+    saved `prefix_count` / `spatial_rank` launch and excludes `scales`.
     A dynamic window extent is filled in at conversion from a
     compile-time constant `scales` vector (scale 1 copies the input dim;
     any other scale is floor(input_dim * scale)).  When `scales` is absent, a
@@ -5749,6 +5784,7 @@ def Hip_ResizeOp : Hip_DpsOp_AutoReify<"resize"> {
   let arguments = (ins
     Hip_ContextType:$ctx,
     Hip_TensorOrMemRef:$input,
+    Variadic<F64>:$runtime_scales,
     Hip_TensorOrMemRef:$output,
     I64Attr:$mode,
     I64Attr:$coord_transform,
@@ -5758,9 +5794,11 @@ def Hip_ResizeOp : Hip_DpsOp_AutoReify<"resize"> {
 
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    (`scales` `(` $runtime_scales^ `:` type($runtime_scales) `)`)?
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+  let hasVerifier = 1;
 }
 
 def Hip_GridSampleOp : Hip_DpsOp_AutoReifyInfer<"grid_sample"> {
@@ -5800,6 +5838,62 @@ def Hip_GridSampleOp : Hip_DpsOp_AutoReifyInfer<"grid_sample"> {
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(`
         $input `,` $grid `:` type($input) `,` type($grid)
+    `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+  let hasVerifier = 1;
+}
+
+def Hip_RoiAlignOp : Hip_DpsOp_AutoReifyInfer<"roi_align"> {
+  let summary = "Region-of-interest align (ONNX RoiAlign)";
+  let description = [{
+    Pools each region of interest of a 4-D input `X` of shape (N, C, H, W)
+    into a fixed (output_height, output_width) grid by averaging (or taking
+    the max of) bilinearly interpolated samples.
+
+    `rois` is (num_rois, 4) holding (x1, y1, x2, y2) in input-image
+    coordinates; `spatial_scale` maps them onto `X`. `batch_indices` is
+    (num_rois) i64 selecting the batch image of each region. Output `Y` is
+    (num_rois, C, output_height, output_width); num_rois may be dynamic.
+
+    Attribute encoding (decoded at ONNX->HIP conversion):
+      * mode: 0 = avg, 1 = max
+      * half_pixel: 1 = "half_pixel" (shift region corners by -0.5),
+                    0 = "output_half_pixel" (no shift; regions narrower
+                    than one pixel are widened to one)
+      * sampling_ratio: samples per bin along each axis; 0 = adaptive,
+        ceil(region_extent / output_extent)
+
+    Example:
+    ```mlir
+    hip.roi_align(%ctx)
+        ins(%x, %rois, %idx : memref<1x256x32x32xf32, 1>, memref<?x4xf32, 1>,
+                              memref<?xi64, 1>)
+        outs(%y : memref<?x256x7x7xf32, 1>)
+        {mode = 0, output_height = 7, output_width = 7, sampling_ratio = 2,
+         spatial_scale = 6.250000e-02 : f32, half_pixel = 1}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$rois,
+    Hip_TensorOrMemRef:$batch_indices,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$mode,
+    I64Attr:$output_height,
+    I64Attr:$output_width,
+    I64Attr:$sampling_ratio,
+    F32Attr:$spatial_scale,
+    I64Attr:$half_pixel
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $input `,` $rois `,` $batch_indices `:`
+        type($input) `,` type($rois) `,` type($batch_indices)
     `)`
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?

@@ -69,4 +69,18 @@ module {
 
     return %output : tensor<?x?xf32>
   }
+
+  // A ranked result over unranked indices (e.g. from NonZero) has no index
+  // rank to size the output with, so the Gather is left for the CPU.
+  // CHECK-LABEL: func.func @test_gather_unranked_indices
+  func.func @test_gather_unranked_indices(%data: tensor<8x4xf32>,
+                                          %indices: tensor<*xi64>)
+      -> tensor<?x4xf32> {
+    %output = "onnx.Gather"(%data, %indices) {axis = 0 : si64}
+        : (tensor<8x4xf32>, tensor<*xi64>) -> tensor<?x4xf32>
+    // CHECK: onnx.Gather
+    // CHECK-NOT: hip.gather
+    // CHECK: return
+    return %output : tensor<?x4xf32>
+  }
 }
