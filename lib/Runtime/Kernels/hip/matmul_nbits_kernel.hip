@@ -1361,6 +1361,49 @@ __global__ void matmul_nbits_quant_act_i8_kernel(
     }
 }
 
+// The same quantization for block_size 32: one 32-lane segment per group,
+// eight groups per 256-thread block. The one-block-per-group form above
+// leaves 96 of its 128 threads idle at block_size 32 and pays two barriers
+// per group; this one reduces with segment shuffles only. max|A| does not
+// depend on the reduction order, so the output is identical. Larger groups
+// keep the kernel above: packing them into segments cuts the block count
+// that a short row needs for parallelism.
+constexpr int kQuantSegThreads = 256;
+constexpr int kQuantSegGroups = kQuantSegThreads / 32;
+
+__global__ void __launch_bounds__(kQuantSegThreads)
+matmul_nbits_quant_act_i8_bs32_kernel(
+    const __half* __restrict__ A_all,
+    int8_t*       __restrict__ a_qb_all,
+    float*        __restrict__ a_scale_all,
+    int64_t K, int64_t k_blocks)
+{
+    const int64_t row = blockIdx.y;
+    const int64_t grp = static_cast<int64_t>(blockIdx.x) * kQuantSegGroups +
+                        threadIdx.x / 32;
+    // Uniform across the segment, and the shuffles below never leave it.
+    if (grp >= k_blocks) return;
+    const int64_t k = grp * 32 + (threadIdx.x & 31);
+    const float   a = static_cast<float>(A_all[row * K + k]);
+
+    float gmax = fabsf(a);
+    for (int off = 16; off > 0; off >>= 1)
+        gmax = fmaxf(gmax, __shfl_xor(gmax, off, 32));
+
+    const float scale     = (gmax > 0.0f) ? (gmax * (1.0f / 127.0f)) : 1.0f;
+    const float inv_scale = (gmax > 0.0f) ? (127.0f / gmax) : 0.0f;
+    if ((threadIdx.x & 31) == 0)
+        a_scale_all[row * k_blocks + grp] = scale;
+
+    int q = __float2int_rn(a * inv_scale);
+    q = max(-127, min(127, q));
+    const int64_t c = k >> 3;
+    const int     p = static_cast<int>(k & 7);
+    const int64_t byte_off =
+        (p & 1) ? (c * 8 + 4 + (p >> 1)) : (c * 8 + (p >> 1));
+    a_qb_all[row * K + byte_off] = static_cast<int8_t>(q);
+}
+
 // dp4a GEMV: mirrors matmul_nbits_gemv_kernel's main uint4 phase, but the
 // per-element dequant/FMA chain is replaced by two sudot4 per 8 nibbles.
 // Row-major only; requires K % 32 == 0. Reads the per-group int8 activation
@@ -3102,13 +3145,23 @@ extern "C" int hip_matmul_nbits_dp4a(
     const int64_t k_blocks = (K + block_size - 1) / block_size;
 
     // Step 1: dynamic per-group int8 quantization of the activations.
-    // One block per (K-group, row), fixed 128 threads (bs in {32,64,128,256}).
     (void)hipGetLastError();
-    hipLaunchKernelGGL(HIP_KERNEL_NAME(matmul_nbits_quant_act_i8_kernel<128>),
-                       dim3(static_cast<unsigned>(k_blocks),
-                            static_cast<unsigned>(M)),
-                       dim3(128), 0,
-                       stream, Ah, a_qb, a_sc, K, block_size, k_blocks);
+    if (block_size == 32) {
+        hipLaunchKernelGGL(
+            matmul_nbits_quant_act_i8_bs32_kernel,
+            dim3(static_cast<unsigned>((k_blocks + kQuantSegGroups - 1) /
+                                       kQuantSegGroups),
+                 static_cast<unsigned>(M)),
+            dim3(kQuantSegThreads), 0,
+            stream, Ah, a_qb, a_sc, K, k_blocks);
+    } else {
+        // One block per (K-group, row), fixed 128 threads.
+        hipLaunchKernelGGL(
+            HIP_KERNEL_NAME(matmul_nbits_quant_act_i8_kernel<128>),
+            dim3(static_cast<unsigned>(k_blocks), static_cast<unsigned>(M)),
+            dim3(128), 0,
+            stream, Ah, a_qb, a_sc, K, block_size, k_blocks);
+    }
 
     // Step 2: dp4a GEMV (autotuned config).
     launchDp4aGemv(stream, a_qb, a_sc, static_cast<const uint8_t*>(B),

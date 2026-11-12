@@ -47,10 +47,33 @@ struct HcQuantOut {
   float *scale = nullptr; // [rows, K / block]
   int64_t k = 0;          // row length of the quantized activation
   int block = 0;          // power of two in [32, kHcBlock]
+  int shift = 0;          // log2(block)
 };
 
 constexpr int kHcBlock = 256;
 constexpr int kHcSegments = kHcBlock / 32;
+
+// Writes column `col` of the int8 row given its group's max |a|.
+__device__ inline void hc_quant_write(const HcQuantOut &q, int64_t row,
+                                      int64_t col, float a, float m) {
+  const float scale = (m > 0.0f) ? (m * (1.0f / 127.0f)) : 1.0f;
+  const float inv_scale = (m > 0.0f) ? (127.0f / m) : 0.0f;
+  if ((col & (q.block - 1)) == 0)
+    q.scale[row * (q.k >> q.shift) + (col >> q.shift)] = scale;
+  int v = __float2int_rn(a * inv_scale);
+  v = max(-127, min(127, v));
+  const int64_t c = col >> 3;
+  const int p = static_cast<int>(col & 7);
+  const int64_t byte = (p & 1) ? (c * 8 + 4 + (p >> 1)) : (c * 8 + (p >> 1));
+  q.qb[row * q.k + byte] = static_cast<int8_t>(v);
+}
+
+__device__ inline float hc_segment_absmax(float a, bool valid) {
+  float m = valid ? fabsf(a) : 0.f;
+  for (int off = 16; off > 0; off >>= 1)
+    m = fmaxf(m, __shfl_xor(m, off, 32));
+  return m;
+}
 
 // Every thread of the block calls this the same number of times. Each run of
 // `q.block` consecutive threads must hold one quantization group: the caller
@@ -58,9 +81,7 @@ constexpr int kHcSegments = kHcBlock / 32;
 // line up with 32-lane segments on wave32 and wave64 alike.
 __device__ void hc_quant_store(const HcQuantOut &q, int64_t row, int64_t col,
                                float a, bool valid, float *s_seg) {
-  float m = valid ? fabsf(a) : 0.f;
-  for (int off = 16; off > 0; off >>= 1)
-    m = fmaxf(m, __shfl_xor(m, off, 32));
+  float m = hc_segment_absmax(a, valid);
   if (q.block > 32) {
     const int seg = static_cast<int>(threadIdx.x) / 32;
     const int segs = q.block / 32;
@@ -73,18 +94,8 @@ __device__ void hc_quant_store(const HcQuantOut &q, int64_t row, int64_t col,
       m = fmaxf(m, s_seg[first + i]);
     __syncthreads();
   }
-  if (!valid)
-    return;
-  const float scale = (m > 0.0f) ? (m * (1.0f / 127.0f)) : 1.0f;
-  const float inv_scale = (m > 0.0f) ? (127.0f / m) : 0.0f;
-  if (col % q.block == 0)
-    q.scale[row * (q.k / q.block) + col / q.block] = scale;
-  int v = __float2int_rn(a * inv_scale);
-  v = max(-127, min(127, v));
-  const int64_t c = col >> 3;
-  const int p = static_cast<int>(col & 7);
-  const int64_t byte = (p & 1) ? (c * 8 + 4 + (p >> 1)) : (c * 8 + (p >> 1));
-  q.qb[row * q.k + byte] = static_cast<int8_t>(v);
+  if (valid)
+    hc_quant_write(q, row, col, a, m);
 }
 
 template <typename T>
@@ -364,6 +375,171 @@ __global__ void hip_hc_post_mix_norm_kernel(
   }
 }
 
+// hip_hc_post_mix_norm_kernel for hidden <= 256 * J: the same thread-to-column
+// map (h = threadIdx.x + 256 * j), accumulation order and rounding, so the
+// outputs are identical, but each thread issues all of its loads before the
+// first use and keeps y in registers instead of re-reading the residual row.
+// A few-row call runs one block per (row, branch), so the serialized
+// load-use chains of the strided loops are what it waits on.
+constexpr int kHcNormThreads = 256;
+
+template <typename T, int J, bool kMix>
+__global__ void __launch_bounds__(kHcNormThreads) hip_hc_post_mix_norm_reg_kernel(
+    const T *__restrict__ streams, const T *__restrict__ block_output,
+    const T *__restrict__ gate, const T *__restrict__ stream_mix,
+    const T *__restrict__ scale, T *__restrict__ residual, T *__restrict__ normed,
+    int64_t rows, int64_t branches, int64_t hidden, int feature_gate,
+    int gate_activation, float epsilon, HcQuantOut q) {
+  const int64_t branch_row = static_cast<int64_t>(blockIdx.x);
+  const int64_t row = branch_row / branches;
+  const int64_t c = branch_row - row * branches;
+  const int tid = static_cast<int>(threadIdx.x);
+  const int width = static_cast<int>(hidden);
+  const T *block_row = block_output + row * hidden;
+  const T *scale_row = scale + c * hidden;
+  T *residual_row = residual + branch_row * hidden;
+  T *normed_row = normed + branch_row * hidden;
+
+  // Loads first, outside any data-dependent branch, so every load of a thread
+  // is in flight before the first one is used.
+  float base[J], g[J], b[J];
+  const float gate_raw = feature_gate ? 0.f : hc_load(gate + row * branches + c);
+  if constexpr (!kMix) {
+    const T *stream_row = streams + branch_row * hidden;
+#pragma unroll
+    for (int j = 0; j < J; ++j) {
+      const int h = tid + kHcNormThreads * j;
+      base[j] = h < width ? hc_load(stream_row + h) : 0.f;
+    }
+  } else {
+#pragma unroll
+    for (int j = 0; j < J; ++j) {
+      const int h = tid + kHcNormThreads * j;
+      base[j] = 0.f;
+      if (h >= width)
+        continue;
+      for (int64_t source = 0; source < branches; ++source) {
+        int64_t mix_index = (row * branches + source) * branches + c;
+        int64_t x_index = (row * branches + source) * hidden + h;
+        base[j] += hc_load(stream_mix + mix_index) * hc_load(streams + x_index);
+      }
+    }
+  }
+#pragma unroll
+  for (int j = 0; j < J; ++j) {
+    const int h = tid + kHcNormThreads * j;
+    b[j] = h < width ? hc_load(block_row + h) : 0.f;
+  }
+  if (feature_gate) {
+    const T *gate_row = gate + branch_row * hidden;
+#pragma unroll
+    for (int j = 0; j < J; ++j) {
+      const int h = tid + kHcNormThreads * j;
+      g[j] = h < width ? hc_gate<T>(hc_load(gate_row + h), gate_activation)
+                       : 0.f;
+    }
+  } else {
+    const float branch_gate = hc_gate<T>(gate_raw, gate_activation);
+#pragma unroll
+    for (int j = 0; j < J; ++j)
+      g[j] = branch_gate;
+  }
+
+  float y[J];
+  float local_sumsq = 0.f;
+#pragma unroll
+  for (int j = 0; j < J; ++j) {
+    const int h = tid + kHcNormThreads * j;
+    y[j] = 0.f;
+    if (h < width) {
+      y[j] = hc_round<T>(base[j] + g[j] * b[j]);
+      hc_store(residual_row + h, y[j]);
+      local_sumsq += y[j] * y[j];
+    }
+  }
+
+  __shared__ float s_reduce[kHcNormThreads];
+  __shared__ float s_inv_rms;
+  s_reduce[tid] = local_sumsq;
+  __syncthreads();
+  for (int stride = kHcNormThreads / 2; stride > 0; stride >>= 1) {
+    if (tid < stride)
+      s_reduce[tid] += s_reduce[tid + stride];
+    __syncthreads();
+  }
+  if (tid == 0)
+    s_inv_rms = rsqrtf(s_reduce[0] / static_cast<float>(hidden) + epsilon);
+  __syncthreads();
+  const float inv_rms = s_inv_rms;
+
+  float sv[J];
+#pragma unroll
+  for (int j = 0; j < J; ++j) {
+    const int h = tid + kHcNormThreads * j;
+    sv[j] = h < width ? hc_load(scale_row + h) : 0.f;
+  }
+  if (!q.qb) {
+#pragma unroll
+    for (int j = 0; j < J; ++j) {
+      const int h = tid + kHcNormThreads * j;
+      if (h < width)
+        hc_store(normed_row + h, y[j] * inv_rms * sv[j]);
+    }
+    return;
+  }
+  // A 32-wide group is one 32-lane segment, so it needs no barrier; keeping
+  // the barrier path out of this loop lets the stores of all J columns
+  // overlap.
+  if (q.block == 32) {
+#pragma unroll
+    for (int j = 0; j < J; ++j) {
+      const int h = tid + kHcNormThreads * j;
+      const bool valid = h < width;
+      float v = 0.f;
+      if (valid) {
+        v = hc_round<T>(y[j] * inv_rms * sv[j]);
+        hc_store(normed_row + h, v);
+      }
+      const float m = hc_segment_absmax(v, valid);
+      if (valid)
+        hc_quant_write(q, row, c * hidden + h, v, m);
+    }
+    return;
+  }
+  __shared__ float s_seg[kHcSegments];
+#pragma unroll
+  for (int j = 0; j < J; ++j) {
+    const int h = tid + kHcNormThreads * j;
+    const bool valid = h < width;
+    float v = 0.f;
+    if (valid) {
+      v = hc_round<T>(y[j] * inv_rms * sv[j]);
+      hc_store(normed_row + h, v);
+    }
+    hc_quant_store(q, row, c * hidden + h, v, valid, s_seg);
+  }
+}
+
+template <typename T, int J>
+void launch_post_norm_reg(hipStream_t stream, dim3 grid, const void *streams,
+                          const void *block_output, const void *gate,
+                          const void *stream_mix, const void *scale,
+                          void *residual, void *normed, int64_t rows,
+                          int64_t branches, int64_t hidden, int feature_gate,
+                          int gate_activation, float epsilon,
+                          const HcQuantOut &q) {
+  auto kernel = stream_mix ? hip_hc_post_mix_norm_reg_kernel<T, J, true>
+                           : hip_hc_post_mix_norm_reg_kernel<T, J, false>;
+  hipLaunchKernelGGL(kernel, grid, dim3(kHcNormThreads), 0, stream,
+                     static_cast<const T *>(streams),
+                     static_cast<const T *>(block_output),
+                     static_cast<const T *>(gate),
+                     static_cast<const T *>(stream_mix),
+                     static_cast<const T *>(scale), static_cast<T *>(residual),
+                     static_cast<T *>(normed), rows, branches, hidden,
+                     feature_gate, gate_activation, epsilon, q);
+}
+
 template <typename T>
 int launch_post_norm(hipStream_t stream, const void *streams,
                      const void *block_output, const void *gate,
@@ -376,8 +552,22 @@ int launch_post_norm(hipStream_t stream, const void *streams,
     return 0;
   if (blocks > 0x7fffffff)
     return -1;
+  const dim3 grid(static_cast<unsigned>(blocks));
+  const int64_t per_thread = (hidden + kHcNormThreads - 1) / kHcNormThreads;
+  auto reg = per_thread <= 4    ? launch_post_norm_reg<T, 4>
+             : per_thread <= 8  ? launch_post_norm_reg<T, 8>
+             : per_thread <= 10 ? launch_post_norm_reg<T, 10>
+             : per_thread <= 12 ? launch_post_norm_reg<T, 12>
+             : per_thread <= 16 ? launch_post_norm_reg<T, 16>
+                                : nullptr;
+  if (reg) {
+    reg(stream, grid, streams, block_output, gate, stream_mix, scale, residual,
+        normed, rows, branches, hidden, feature_gate, gate_activation, epsilon,
+        q);
+    return 0;
+  }
   hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_hc_post_mix_norm_kernel<T>),
-                     dim3(static_cast<unsigned>(blocks)), dim3(256), 0, stream,
+                     grid, dim3(kHcNormThreads), 0, stream,
                      static_cast<const T *>(streams),
                      static_cast<const T *>(block_output),
                      static_cast<const T *>(gate),
@@ -411,7 +601,8 @@ extern "C" int hip_hyper_connection_pre_mix(
     if (!hc_quant_ok(q_act, q_scale, q_block, hidden))
       return hipErrorInvalidValue;
     q = HcQuantOut{static_cast<int8_t *>(q_act), static_cast<float *>(q_scale),
-                   hidden, static_cast<int>(q_block)};
+                   hidden, static_cast<int>(q_block),
+                   __builtin_ctzll(static_cast<unsigned long long>(q_block))};
   }
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
   (void)hipGetLastError();
@@ -493,7 +684,8 @@ extern "C" int hip_hyper_connection_post_mix_norm(
     if (!hc_quant_ok(q_act, q_scale, q_block, hidden))
       return hipErrorInvalidValue;
     q = HcQuantOut{static_cast<int8_t *>(q_act), static_cast<float *>(q_scale),
-                   branches * hidden, static_cast<int>(q_block)};
+                   branches * hidden, static_cast<int>(q_block),
+                   __builtin_ctzll(static_cast<unsigned long long>(q_block))};
   }
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
   (void)hipGetLastError();
