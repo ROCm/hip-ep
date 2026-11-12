@@ -573,13 +573,16 @@ mha_flash_bsnd_kernel(const _Float16 *__restrict__ Q,
   // writes land on one V^T row. Chunks past d or skv are zero. Up to
   // kPrefetchMaxD the next tile is loaded into registers while this one is
   // computed, so the global latency is behind the WMMAs rather than in front
-  // of a barrier; the wider heads have no registers to spare for it (d160
-  // with the prefetch spilled 81 VGPRs).
+  // of a barrier. d128 has registers for only one of the next K and V
+  // (kSplitKv below); d160 has none to spare (with the prefetch it spilled 81
+  // VGPRs) and loads each tile in front of its barrier.
   constexpr int kPrefetchMaxD = 96;
   constexpr bool kPrefetch = D_PAD <= kPrefetchMaxD;
+  constexpr bool kSplitKv = !kPrefetch && D_PAD <= 128;
   constexpr int kStage = BKV * kChunks;
   constexpr int kPerThr = (kStage + kThreads - 1) / kThreads;
-  mha_half8_t kReg[kPerThr], vReg[kPerThr];
+  typedef mha_half8_t Chunks[kPerThr];
+  Chunks kReg, vReg;
   auto loadTile = [&](int kv0) {
     const int keys = min(BKV, skv - kv0);
 #pragma unroll
@@ -616,20 +619,93 @@ mha_flash_bsnd_kernel(const _Float16 *__restrict__ Q,
     }
   };
 
+  // kSplitKv, the staging of the GQA v6x prefill: the next tile's K is in
+  // flight during the score GEMM and goes into K_lds once every wave is past
+  // this tile's K; its V is in flight during the softmax and the value GEMM.
+  // One set of registers (inFlight) carries the two in turn.
+  // At d128 a pass of the block's threads covers whole K rows and the whole
+  // key range of its V^T rows, so chunk r keeps the head-dim chunk of the
+  // thread's first K chunk and the key of its first V chunk: every address
+  // is a per-lane offset computed once plus a constant per chunk, on a
+  // uniform tile base. Indexed per chunk as in loadTile, the compiler hoists
+  // a row index per chunk out of the KV loop and rebuilds each address with
+  // two 64-bit multiplies, and with 64-key tiles the hoisted indices spill.
+  constexpr int kRowStep = kThreads / kChunks; // K rows per pass
+  constexpr int kVColStep = kThreads / BKV;    // V head-dim chunks per pass
+  static_assert(!kSplitKv || (kThreads % kChunks == 0 && kThreads % BKV == 0 &&
+                              kStage % kThreads == 0),
+                "split staging covers whole K rows and V^T key ranges");
+  const int kRow0 = tid / kChunks, kCol = tid % kChunks;
+  const int vKey = tid % BKV, vCol0 = tid / BKV;
+  const unsigned kLaneOff =
+      static_cast<unsigned>(kRow0 * rowStride) + static_cast<unsigned>(kCol * 8);
+  const unsigned vLaneOff =
+      static_cast<unsigned>(vKey * rowStride) + static_cast<unsigned>(vCol0 * 8);
+  const int kLdsLane = kRow0 * K_STR + kCol * 8;
+  // V^T row dd = vCol0 * 8 + r * kVColStep * 8 + e has the parity of e.
+  const int vtEven = vCol0 * 8 * VT_STR + mhaVtPos(vKey, 0);
+  const int vtOdd = vCol0 * 8 * VT_STR + mhaVtPos(vKey, 1);
+  auto splitLoadK = [&](Chunks &dst, int kv0) {
+    const int keys = min(BKV, skv - kv0);
+    const _Float16 *tile = kBase + static_cast<size_t>(kv0) * rowStride;
+#pragma unroll
+    for (int r = 0; r < kPerThr; ++r) {
+      const _Float16 *rows = tile + static_cast<size_t>(r * kRowStep) * rowStride;
+      dst[r] = mha_half8_t{};
+      if (kRow0 + r * kRowStep < keys && kCol * 8 < d)
+        dst[r] = *reinterpret_cast<const mha_half8_t *>(rows + kLaneOff);
+    }
+  };
+  auto splitLoadV = [&](Chunks &dst, int kv0) {
+    const int keys = min(BKV, skv - kv0);
+    const _Float16 *tile = vBase + static_cast<size_t>(kv0) * rowStride;
+#pragma unroll
+    for (int r = 0; r < kPerThr; ++r) {
+      dst[r] = mha_half8_t{};
+      if (vKey < keys && (vCol0 + r * kVColStep) * 8 < d)
+        dst[r] = *reinterpret_cast<const mha_half8_t *>(tile + vLaneOff +
+                                                        r * kVColStep * 8);
+    }
+  };
+  auto splitStoreK = [&](const Chunks &src) {
+#pragma unroll
+    for (int r = 0; r < kPerThr; ++r)
+      *reinterpret_cast<mha_half8_t *>(&K_lds[kLdsLane + r * kRowStep * K_STR]) =
+          src[r];
+  };
+  auto splitStoreV = [&](const Chunks &src) {
+#pragma unroll
+    for (int r = 0; r < kPerThr; ++r)
+#pragma unroll
+      for (int e = 0; e < 8; ++e)
+        Vt_lds[((e & 1) ? vtOdd : vtEven) + (r * kVColStep * 8 + e) * VT_STR] =
+            src[r][e];
+  };
+
   if (kPrefetch) {
     loadTile(0);
     storeTile();
     __syncthreads();
   }
+  Chunks &inFlight = kReg;
+  if (kSplitKv) {
+    splitLoadK(inFlight, 0);
+    splitLoadV(vReg, 0);
+    splitStoreK(inFlight);
+    splitStoreV(vReg);
+    __syncthreads();
+    if (BKV < skv)
+      splitLoadK(inFlight, BKV);
+  }
   for (int kv0 = 0; kv0 < skv; kv0 += BKV) {
     const int keys = min(BKV, skv - kv0);
     const bool hasNext = kv0 + BKV < skv;
-    if (!kPrefetch) {
+    if (!kPrefetch && !kSplitKv) {
       __syncthreads(); // every wave is done with the previous tile
       loadTile(kv0);
       storeTile();
       __syncthreads();
-    } else if (hasNext) {
+    } else if (kPrefetch && hasNext) {
       loadTile(kv0 + BKV);
     }
 
@@ -648,6 +724,15 @@ mha_flash_bsnd_kernel(const _Float16 *__restrict__ Q,
           S[f % S_TILES] = HIPDNN_WMMA_F32_16X16X16_F16(kf, Qf[f / S_TILES],
                                                         S[f % S_TILES]);
         });
+    if (kSplitKv) {
+      // Every wave is past this tile's K: the next K goes in, and the next V
+      // is fetched while this tile finishes.
+      __syncthreads();
+      if (hasNext) {
+        splitStoreK(inFlight);
+        splitLoadV(inFlight, kv0 + BKV);
+      }
+    }
     if (keys < BKV) {
 #pragma unroll
       for (int sj = 0; sj < S_TILES; ++sj)
@@ -717,7 +802,14 @@ mha_flash_bsnd_kernel(const _Float16 *__restrict__ Q,
     l = l * corr + rsum;
     m = mNew;
 
-    if (kPrefetch && hasNext) {
+    if (kSplitKv) {
+      __syncthreads(); // every wave is done reading this tile's V^T
+      if (hasNext) {
+        splitStoreV(inFlight);
+        if (kv0 + 2 * BKV < skv)
+          splitLoadK(inFlight, kv0 + 2 * BKV);
+      }
+    } else if (kPrefetch && hasNext) {
       __syncthreads(); // every wave is done reading this tile
       storeTile();
       __syncthreads();
@@ -727,8 +819,15 @@ mha_flash_bsnd_kernel(const _Float16 *__restrict__ Q,
   if (!qValid)
     return;
   const float invL = 1.0f / fmaxf(l, 1e-20f);
+  // The query is rebuilt from the uniform tile base and the lane id instead
+  // of being held across the KV loop: at d128 with 64-key tiles the loop
+  // needs every VGPR, and q (or col, whose lane-id read would be merged with
+  // this one) was spilled around it.
+  const int qOut =
+      __builtin_amdgcn_readfirstlane((blockIdx.x * NW + wave) * kTile) +
+      static_cast<int>(__lane_id() % kTile);
   _Float16 *oRow =
-      O + (static_cast<size_t>(batch) * sq + q) * rowStride + head * d;
+      O + (static_cast<size_t>(batch) * sq + qOut) * rowStride + head * d;
 #pragma unroll
   for (int tj = 0; tj < D_TILES; ++tj)
 #pragma unroll
@@ -795,6 +894,14 @@ extern "C" int hip_mha_flash_prefill_bsnd(void *stream, const void *Q,
                      : launchMhaBsnd<64, 4, 64>(s, q, k, v, o, B, N, sq, skv, d, scale);
   if (d_pad <= 80) return launchMhaBsnd<80, 4, 32>(s, q, k, v, o, B, N, sq, skv, d, scale);
   if (d_pad <= 96) return launchMhaBsnd<96, 4, 32>(s, q, k, v, o, B, N, sq, skv, d, scale);
-  if (d_pad <= 128) return launchMhaBsnd<128, 4, 32>(s, q, k, v, o, B, N, sq, skv, d, scale);
+  // d128: a long query range takes 8-wave blocks with 64-key tiles, which
+  // halve the K/V staging per query and the barriers per key (24 heads at
+  // 2304 and 4608 queries and keys: 1.12-1.18x the 4-wave 32-key tile on
+  // gfx1150). Their 128-row blocks waste too much of the last row tile on a
+  // short range (0.85-0.97x at 1536 queries, 0.7x at 300), so below 2048
+  // queries d128 keeps 4 waves.
+  if (d_pad <= 128)
+    return sq >= 2048 ? launchMhaBsnd<128, 8, 64>(s, q, k, v, o, B, N, sq, skv, d, scale)
+                      : launchMhaBsnd<128, 4, 32>(s, q, k, v, o, B, N, sq, skv, d, scale);
   return launchMhaBsnd<160, 8, 32>(s, q, k, v, o, B, N, sq, skv, d, scale);
 }

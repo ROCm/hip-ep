@@ -193,3 +193,29 @@ class TestMultiHeadAttention:
         # Slightly more forgiving thresholds at hidden=4096 because the
         # softmax + Value-GEMM accumulation stretches fp16 precision.
         compare_outputs(actual, expected, atol=2e-2, rtol=2e-2, cos_threshold=0.998)
+
+    @pytest.mark.parametrize(
+        "seq, num_heads",
+        [
+            (300, 4),  # 4-wave blocks, 32-key tiles, partial last row/key tile
+            (2304, 4),  # 8-wave blocks, 64-key tiles, whole tiles
+            (2100, 2),  # 8-wave blocks with a partial last row and key tile
+        ],
+    )
+    def test_self_attention_head_dim_128(self, model_runner, seq, num_heads):
+        """Non-causal head-dim-128 self-attention on the in-place flash kernel.
+
+        At head dim 128 the kernel prefetches the next K and V tile one after
+        the other, and from 2048 queries on it switches to 8-wave blocks with
+        64-key tiles (the joint attention of a diffusion transformer over
+        thousands of tokens). An input range of 2 keeps the softmax far from
+        uniform over the long key range, so a dropped or misplaced key tile
+        moves the output.
+        """
+        batch, head_dim = 1, 128
+        model = _make_mha_model(batch, seq, seq, num_heads, head_dim)
+
+        q, k, v = _qkv_inputs(batch, seq, seq, num_heads, head_dim, scale=2.0)
+
+        actual, expected = model_runner.run_sample(model, [q, k, v])
+        compare_outputs(actual, expected, atol=2e-2, rtol=2e-2, cos_threshold=0.998)
