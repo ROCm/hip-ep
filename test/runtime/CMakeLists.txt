@@ -122,7 +122,6 @@ file(WRITE ${_mn_test_lut_cpp}
 
 add_executable(test-matmul-nbits-autotune
     test_matmul_nbits_autotune.cpp
-    ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/hip/autotune/matmul_nbits/matmul_nbits_autotune.cpp
     ${_mn_test_lut_cpp}
 )
 target_compile_features(test-matmul-nbits-autotune PRIVATE cxx_std_17)

@@ -32,7 +32,8 @@ namespace {
 
 namespace fbs = hipdnn_ep::matmul_nbits_autotune::fbs;
 
-constexpr uint32_t kSchemaVersion = 4;
+constexpr uint32_t kSchemaVersion = 5;
+constexpr uint32_t kLegacySchemaVersion = 4;
 // Bump when the config tables or the meaning of a stored geometry changes.
 // A table stamped with an older ABI is rejected outright rather than allowed to
 // pick configs that no longer mean what they meant when they were measured.
@@ -112,16 +113,25 @@ struct Point {
   uint16_t config;
 };
 
+struct MInterval {
+  uint32_t m_lo, m_hi, n, k;
+  uint16_t config;
+};
+
 struct Table {
   std::vector<Answer> pool;
+  std::vector<bool> invalid_config_metadata;
   std::unordered_map<uint32_t, std::vector<Point>> groups;
   std::unordered_map<uint32_t, uint16_t> fallbacks;
+  std::unordered_map<uint32_t, std::vector<MInterval>> intervals;
   float wm = 1.0f, wn = 1.0f, wk = 1.0f;
   bool extended_configs = false;   // some config names an extended entry
   bool loaded = false;
   uint32_t points = 0;
   uint32_t invalid_points = 0;
   uint32_t invalid_extended_configs = 0;
+  uint32_t interval_count = 0;
+  uint32_t invalid_intervals = 0;
   std::atomic<uint32_t> rejected{0};
 };
 
@@ -174,7 +184,10 @@ bool pointConsistent(const fbs::MatmulNbitsTunePoint& p, fbs::MatmulNbitsConfigK
 }
 
 bool compatible(const fbs::MatmulNbitsAutotuneLut* lut) {
-  if (lut->schema_version() != kSchemaVersion) {
+  if ((lut->schema_version() != kSchemaVersion &&
+       lut->schema_version() != kLegacySchemaVersion) ||
+      (lut->schema_version() == kLegacySchemaVersion && lut->m_intervals() &&
+       lut->m_intervals()->size() != 0)) {
     if (logOn())
       fprintf(stderr, "[matmul-lut] schema %u != %u, ignoring table\n",
               lut->schema_version(), kSchemaVersion);
@@ -225,7 +238,8 @@ void loadBuffer(Table& t, const unsigned char* data, size_t size) {
   // is never what a fit meant to express; treat the table as unusable rather
   // than quietly matching across it.
   if (!(lut->weight_m() > 0.0f) || !(lut->weight_n() > 0.0f) ||
-      !(lut->weight_k() > 0.0f)) {
+      !(lut->weight_k() > 0.0f) || !std::isfinite(lut->weight_m()) ||
+      !std::isfinite(lut->weight_n()) || !std::isfinite(lut->weight_k())) {
     if (logOn()) fprintf(stderr, "[matmul-lut] non-positive metric weight\n");
     return;
   }
@@ -254,12 +268,14 @@ void loadBuffer(Table& t, const unsigned char* data, size_t size) {
     t.pool.push_back(a);
   }
 
+  t.invalid_config_metadata.assign(t.pool.size(), false);
   if (lut->extended_configs()) {
     for (const fbs::MatmulNbitsExtendedConfig* e : *lut->extended_configs()) {
       const unsigned idx = e->config();
       if (idx >= t.pool.size() || t.pool[idx].kind != fbs::MatmulNbitsConfigKind::Wmma ||
           t.pool[idx].wmma.ext) {
         ++t.invalid_extended_configs;
+        if (idx < t.pool.size()) t.invalid_config_metadata[idx] = true;
         continue;
       }
       t.pool[idx].wmma.ext = true;
@@ -292,6 +308,52 @@ void loadBuffer(Table& t, const unsigned char* data, size_t size) {
     ++t.points;
   }
 
+  // Validate range keys independently. Malformed or overlapping ranges cannot
+  // override old points. The ordinary point/fallback table remains available.
+  if (lut->m_intervals()) {
+    for (const auto* r : *lut->m_intervals()) {
+      const unsigned idx = r->config();
+      const bool prefill = r->phase() == fbs::MatmulNbitsPhase::Prefill;
+      const bool valid = idx < t.pool.size() && !t.invalid_config_metadata[idx] &&
+          r->m_lo() < r->m_hi() &&
+          r->n() > 0 && r->k() > 0 &&
+          r->phase() >= fbs::MatmulNbitsPhase::Prefill &&
+          r->phase() <= fbs::MatmulNbitsPhase::MAX &&
+          r->bits() > fbs::MatmulNbitsBits::Any &&
+          r->bits() <= fbs::MatmulNbitsBits::MAX &&
+          r->group_size() > fbs::MatmulNbitsGroupSize::Any &&
+          r->group_size() <= fbs::MatmulNbitsGroupSize::MAX &&
+          r->zero_point() > fbs::MatmulNbitsZeroPoint::Any &&
+          r->zero_point() <= fbs::MatmulNbitsZeroPoint::MAX &&
+          (prefill ? (r->row_stride() == fbs::MatmulNbitsRowStride::Arrival ||
+                      r->row_stride() == fbs::MatmulNbitsRowStride::Padded)
+                   : r->row_stride() == fbs::MatmulNbitsRowStride::Any) &&
+          t.pool[idx].kind == (prefill ? fbs::MatmulNbitsConfigKind::Wmma
+                                      : fbs::MatmulNbitsConfigKind::Gemv);
+      if (!valid) { ++t.invalid_intervals; continue; }
+      t.intervals[groupKey(r->phase(), r->bits(), r->group_size(),
+                           r->zero_point(), r->row_stride())]
+          .push_back({r->m_lo(), r->m_hi(), r->n(), r->k(),
+                      static_cast<uint16_t>(idx)});
+    }
+    for (auto& group : t.intervals) {
+      auto& ranges = group.second;
+      std::vector<bool> bad(ranges.size(), false);
+      for (size_t i = 0; i < ranges.size(); ++i)
+        for (size_t j = i + 1; j < ranges.size(); ++j)
+          if (ranges[i].n == ranges[j].n && ranges[i].k == ranges[j].k &&
+              (std::max)(ranges[i].m_lo, ranges[j].m_lo) <
+                  (std::min)(ranges[i].m_hi, ranges[j].m_hi))
+            bad[i] = bad[j] = true;
+      std::vector<MInterval> usable;
+      for (size_t i = 0; i < ranges.size(); ++i) {
+        if (bad[i]) ++t.invalid_intervals;
+        else { usable.push_back(ranges[i]); ++t.interval_count; }
+      }
+      ranges.swap(usable);
+    }
+  }
+
   if (lut->fallbacks()) {
     for (const fbs::MatmulNbitsFallback* f : *lut->fallbacks()) {
       const unsigned idx = f->config();
@@ -308,6 +370,9 @@ void loadBuffer(Table& t, const unsigned char* data, size_t size) {
   }
 
   t.loaded = true;
+  if (logOn())
+    fprintf(stderr, "[matmul-lut] intervals %u (%u rejected)\n",
+            t.interval_count, t.invalid_intervals);
   if (logOn())
     fprintf(stderr,
             "[matmul-lut] loaded %u points in %zu groups (%u rejected), "
@@ -397,6 +462,30 @@ Result resolve(const Request& request, WmmaValidator wmma_valid,
     case 0:   stride = fbs::MatmulNbitsRowStride::Arrival; break;
     case 128: stride = fbs::MatmulNbitsRowStride::Padded; break;
     default:  classified = false; break;
+    }
+  }
+
+  if (classified && request.m > 0) {
+    const auto it = t.intervals.find(groupKey(phase, bits, gs, zp, stride));
+    if (it != t.intervals.end()) {
+      for (const auto& r : it->second) {
+        if (r.n != static_cast<uint32_t>(request.n) ||
+            r.k != static_cast<uint32_t>(request.k) ||
+            static_cast<uint32_t>(request.m) <= r.m_lo ||
+            static_cast<uint32_t>(request.m) > r.m_hi) continue;
+        if (accept(t.pool[r.config], wmma_valid, gemv_valid, ctx, result)) {
+          result.source = Source::Interval;
+          if (logOn())
+            fprintf(stderr, "[matmul-lut] interval phase=%d M=%d N=%d K=%d "
+                            "gs=%d zp=%d -> (%u,%u] cfg=%u\n",
+                    static_cast<int>(phase), request.m, request.n, request.k,
+                    request.group_size, static_cast<int>(request.has_zp),
+                    r.m_lo, r.m_hi, r.config);
+          return result;
+        }
+        t.rejected.fetch_add(1, std::memory_order_relaxed);
+        break;
+      }
     }
   }
 
@@ -500,6 +589,8 @@ Stats stats() {
   s.points = t.points;
   s.invalid_points = t.invalid_points;
   s.rejected_answers = t.rejected.load(std::memory_order_relaxed);
+  s.intervals = t.interval_count;
+  s.invalid_intervals = t.invalid_intervals;
   return s;
 }
 
