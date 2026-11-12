@@ -83,4 +83,24 @@ module {
     // CHECK: llvm.call @wrap_pad({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64, i64, i64) -> i32
     return
   }
+
+  // Compile-time pads: the begin pads go in a host stack array and the call
+  // takes no device pads/axes/cval pointers.
+  func.func @pad_static_lower_pads(
+      %ctx: !hip.context,
+      %data: memref<3x4xf32, 1>,
+      %pads: memref<4xi64, 1>,
+      %out: memref<5x6xf32, 1>) {
+    // CHECK-LABEL: llvm.func @pad_static_lower_pads
+
+    hip.pad(%ctx) ins(%data, %pads : memref<3x4xf32, 1>, memref<4xi64, 1>)
+                  outs(%out : memref<5x6xf32, 1>)
+                  {mode = "reflect", static_lower_pads = array<i64: 1, 2>}
+
+    // CHECK-NOT: @wrap_pad(
+    // CHECK: %[[TWO:.*]] = llvm.mlir.constant(2 : i64) : i64
+    // CHECK-NEXT: llvm.store %[[TWO]]
+    // CHECK: llvm.call @wrap_pad_static({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
+    return
+  }
 }

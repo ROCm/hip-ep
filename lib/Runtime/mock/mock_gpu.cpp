@@ -2909,6 +2909,21 @@ int wrap_pad(RuntimeState *state, void *data, void *pads, void *constant_value,
   return 0;
 }
 
+int wrap_pad_static(RuntimeState *state, void *data, void *output,
+                    const int64_t *data_shape, const int64_t *output_shape,
+                    const int64_t *lower_pads, int64_t rank, int64_t data_type,
+                    int64_t mode_id) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_pad_static\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_pad_static(rank=%lld, data_type=%s(%lld), "
+             "mode=%lld)\n",
+             (long long)rank, hipdnn_ep_datatype_name(data_type),
+             (long long)data_type, (long long)mode_id);
+  return 0;
+}
+
 int wrap_tile(RuntimeState *state, void *input, void *repeats, void *output,
               const int64_t *input_shape, int64_t input_rank,
               const int64_t *output_shape, int64_t output_rank,

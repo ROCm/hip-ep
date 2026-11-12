@@ -175,6 +175,7 @@ inline constexpr const char *kWrapLog = "wrap_log";
 inline constexpr const char *kWrapDiv = "wrap_div";
 inline constexpr const char *kWrapCumSum = "wrap_cumsum";
 inline constexpr const char *kWrapPad = "wrap_pad";
+inline constexpr const char *kWrapPadStatic = "wrap_pad_static";
 inline constexpr const char *kWrapTile = "wrap_tile";
 inline constexpr const char *kWrapExpand = "wrap_expand";
 inline constexpr const char *kWrapReduceProd = "wrap_reduce_prod";

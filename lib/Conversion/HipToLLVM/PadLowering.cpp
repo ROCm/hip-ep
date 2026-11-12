@@ -17,6 +17,11 @@ namespace {
 //               pads_num_elements, axes_num_elements,
 //               data_type, mode_id)
 //
+// With `static_lower_pads` the call is instead
+//   wrap_pad_static(state, data_ptr, out_ptr, data_shape_ptr,
+//                   output_shape_ptr, lower_pads_ptr, rank, data_type, mode_id)
+// with the pads in a host stack array, so the runtime never syncs the stream.
+//
 // `mode_id` encodes the string attribute as a small enum:
 //   0 = constant, 1 = reflect, 2 = edge, 3 = wrap.
 struct PadOpLowering : public ConvertOpToLLVMPattern<PadOp> {
@@ -85,6 +90,44 @@ struct PadOpLowering : public ConvertOpToLLVMPattern<PadOp> {
 
     Value dataShape = emitShapeArray(dataType, adaptor.getData());
     Value outShape = emitShapeArray(outputType, adaptor.getOutput());
+    Value dataTypeVal = createI64Const(hipDtype);
+    Value modeIdVal = createI64Const(modeIdFromString(op.getMode()));
+
+    if (auto lowerPads = op.getStaticLowerPadsAttr()) {
+      if (static_cast<int64_t>(lowerPads.size()) != dataType.getRank())
+        return rewriter.notifyMatchFailure(op, "static_lower_pads rank");
+      auto arrType = LLVM::LLVMArrayType::get(i64Type, lowerPads.size());
+      Value arr =
+          LLVM::AllocaOp::create(rewriter, loc, ptrType, arrType, one, 8);
+      for (auto [i, v] : llvm::enumerate(lowerPads.asArrayRef())) {
+        Value idx = LLVM::ConstantOp::create(
+            rewriter, loc, i32Type,
+            rewriter.getI32IntegerAttr(static_cast<int32_t>(i)));
+        Value elemPtr =
+            LLVM::GEPOp::create(rewriter, loc, ptrType, i64Type, arr, idx);
+        LLVM::StoreOp::create(rewriter, loc, createI64Const(v), elemPtr);
+      }
+      SmallVector<Type, 9> staticTypes = {ptrType, ptrType, ptrType,
+                                          ptrType, ptrType, ptrType,
+                                          i64Type, i64Type, i64Type};
+      FailureOr<LLVM::LLVMFuncOp> staticFn = LLVM::lookupOrCreateFn(
+          rewriter, module, kWrapPadStatic, staticTypes, i32Type);
+      if (failed(staticFn))
+        return failure();
+      SmallVector<Value, 9> staticArgs = {statePtr,
+                                          dataPtr,
+                                          outPtr,
+                                          dataShape,
+                                          outShape,
+                                          arr,
+                                          createI64Const(dataType.getRank()),
+                                          dataTypeVal,
+                                          modeIdVal};
+      LLVM::CallOp::create(rewriter, loc, *staticFn, staticArgs);
+      rewriter.eraseOp(op);
+      return success();
+    }
+
     Value padsNum =
         computeNumElements(padsType, adaptor.getPads(), rewriter, loc);
     Value axesNum;
@@ -97,8 +140,6 @@ struct PadOpLowering : public ConvertOpToLLVMPattern<PadOp> {
 
     Value dataRank = createI64Const(dataType.getRank());
     Value outRank = createI64Const(outputType.getRank());
-    Value dataTypeVal = createI64Const(hipDtype);
-    Value modeIdVal = createI64Const(modeIdFromString(op.getMode()));
 
     SmallVector<Type, 14> paramTypes = {
         ptrType, ptrType, ptrType, ptrType, ptrType, ptrType, // state + 5 ptrs
