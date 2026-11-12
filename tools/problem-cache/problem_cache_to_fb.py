@@ -261,8 +261,7 @@ def main(argv: list[str] | None = None) -> int:
         incoming_arch = str(incoming.get("gpu_arch") or "")
         if existing_arch != incoming_arch:
             raise SystemExit(
-                f"refusing to merge gpu_arch {incoming_arch!r} into "
-                f"{existing_arch!r}"
+                f"refusing to merge gpu_arch {incoming_arch!r} into {existing_arch!r}"
             )
         header = existing
         rows, added, replaced = merge_rows(points_of(existing), rows)
