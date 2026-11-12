@@ -4,16 +4,18 @@
  *
  * Standalone unit test for hip_cast with bf16 on one side of the cast.
  *
- * Covers bf16 <-> {f32, f16, f64, i64, i32, i16, i8, u8} (16 pairs) and the
- * three "unsupported" exits of the bf16 dispatch. Every output is compared
- * bit-exactly with a CPU reference computed in this file with plain integer
- * bit operations; it does not use the HIP conversion intrinsics the kernel
- * uses.
+ * Covers bf16 <-> {f32, f16, f64, i64, i32, i16, i8, u8} (16 pairs), the
+ * direct f64 -> i8 cast, and the conversions the dispatch still rejects.
+ * Every output is compared bit-exactly with a CPU reference computed in this
+ * file with plain integer bit operations; it does not use the HIP conversion
+ * intrinsics the kernel uses.
  *
  * Reference semantics (same as the kernel and PyTorch): every bf16 cast goes
  * through fp32. fp32 -> bf16 and fp32 -> fp16 round to nearest even, so f64
  * and i64 sources round twice (first to fp32). float -> integer truncates
- * toward zero. A NaN result matches any NaN (payloads may differ).
+ * toward zero. A NaN result matches any NaN (payloads may differ). f64 -> i8
+ * is a direct static_cast of the double, so an integer wider than the fp32
+ * mantissa is not rounded through fp32 first.
  *
  * Each case runs twice with two different fill bytes in the output buffer,
  * which has guard elements on both sides: an element the kernel did not write
@@ -231,11 +233,34 @@ void store_from_float(int dtype, std::vector<uint8_t>& out, int64_t i,
   }
 }
 
+// f64 -> integer truncates the double toward zero. Routing it through fp32
+// would change every value the fp32 mantissa cannot hold.
+bool is_direct_f64_to_int(int src, int dst) {
+  return src == kF64 && (dst == kI64 || dst == kI32 || dst == kI16 ||
+                         dst == kI8 || dst == kU8);
+}
+
+void store_direct_from_f64(int dst, std::vector<uint8_t>& out, int64_t i,
+                           double value) {
+  switch (dst) {
+  case kI64: put<int64_t>(out, i, static_cast<int64_t>(value)); break;
+  case kI32: put<int32_t>(out, i, static_cast<int32_t>(value)); break;
+  case kI16: put<int16_t>(out, i, static_cast<int16_t>(value)); break;
+  case kI8: put<int8_t>(out, i, static_cast<int8_t>(value)); break;
+  case kU8: put<uint8_t>(out, i, static_cast<uint8_t>(value)); break;
+  default: std::abort();
+  }
+}
+
 std::vector<uint8_t> reference(int src, int dst, const std::vector<uint8_t>& in,
                                int64_t n) {
   std::vector<uint8_t> out(static_cast<size_t>(n * dtype_size(dst)));
   for (int64_t i = 0; i < n; ++i) {
-    store_from_float(dst, out, i, load_as_float(src, in, i));
+    if (is_direct_f64_to_int(src, dst)) {
+      store_direct_from_f64(dst, out, i, get<double>(in, i));
+    } else {
+      store_from_float(dst, out, i, load_as_float(src, in, i));
+    }
   }
   return out;
 }
@@ -445,11 +470,42 @@ std::vector<uint8_t> make_bf16_in_range(int64_t n, int dst, Rng& rng) {
   return v;
 }
 
+// f64 -> integer is a direct static_cast. Stay inside the destination so
+// the truncation result is representable; an out-of-range cast is undefined.
+std::vector<uint8_t> make_f64_in_range(int64_t n, int dst, Rng& rng) {
+  const bool is_signed = dst != kU8;
+  const int bits = dtype_size(dst) * 8;
+  const double lowest = is_signed ? -std::ldexp(1.0, bits - 1) : 0.0;
+  const double limit = is_signed ? std::ldexp(1.0, bits - 1)
+                                 : std::ldexp(1.0, bits);
+  const double specials_signed[] = {
+      0.0, -0.0, 1.0, -1.0, 1.9, -1.9, 0.5, -0.5, lowest, limit - 1.0,
+  };
+  const double specials_unsigned[] = {0.0, 1.0, 1.9, 0.5, limit - 1.0};
+  const double* specials = is_signed ? specials_signed : specials_unsigned;
+  const int64_t ns = is_signed ? 10 : 5;
+  std::vector<uint8_t> v(static_cast<size_t>(n * 8));
+  for (int64_t i = 0; i < n; ++i) {
+    if (i < ns) {
+      put<double>(v, i, specials[i]);
+      continue;
+    }
+    const uint64_t r = rng.next();
+    const double unit = static_cast<double>(r >> 11) * 0x1p-53;
+    put<double>(v, i, lowest + unit * (limit - lowest));
+  }
+  return v;
+}
+
 std::vector<uint8_t> make_input(int src, int dst, int64_t n, uint64_t seed) {
   Rng rng(seed);
   switch (src) {
   case kF32: return make_f32(n, rng);
-  case kF64: return make_f64(n, rng);
+  case kF64:
+    if (is_direct_f64_to_int(src, dst)) {
+      return make_f64_in_range(n, dst, rng);
+    }
+    return make_f64(n, rng);
   case kI64: return make_i64(n, rng);
   case kI32: return make_i32(n, rng);
   case kF16:
@@ -726,22 +782,30 @@ int main(int argc, char** argv) {
     pairs.push_back({other, kBF16});
   }
 
-  // The three -1 exits of launch_cast_bf16: unsupported output dtype,
-  // unsupported input dtype, and neither side bf16.
+  // f64 -> i8 is launch_cast_direct<double, int8_t>. The reference
+  // static_casts the double; it does not round through fp32.
+  const std::pair<int, int> direct[] = {{kF64, kI8}};
+
+  // Still rejected: bf16 <-> u16, and f64 -> u16 (u16 is not an f64
+  // integer endpoint, and neither side is bf16).
   const std::pair<int, int> unsupported[] = {
-      {kBF16, kU16}, {kU16, kBF16}, {kF64, kI8}};
+      {kBF16, kU16}, {kU16, kBF16}, {kF64, kU16}};
 
   int size_count = 0;
   for (const Size& size : kSizes) {
     size_count += size.min_coverage <= coverage ? 1 : 0;
   }
+  const int direct_pairs =
+      static_cast<int>(sizeof(direct) / sizeof(direct[0]));
   const int edge_cases =
       static_cast<int>(sizeof(unsupported) / sizeof(unsupported[0]));
-  const int cases = static_cast<int>(pairs.size()) * size_count + edge_cases;
+  const int cases = (static_cast<int>(pairs.size()) + direct_pairs) *
+                        size_count +
+                    edge_cases;
   std::cout << "cast coverage=" << coverage << " -> running " << size_count
             << " size(s) x " << pairs.size() << " dtype pair(s) + "
-            << edge_cases << " unsupported case(s) = " << cases
-            << " cast cases\n";
+            << direct_pairs << " direct f64 pair(s) + " << edge_cases
+            << " unsupported case(s) = " << cases << " cast cases\n";
 
   hipStream_t stream = nullptr;
   HIP_CHECK(hipStreamCreate(&stream));
@@ -754,6 +818,18 @@ int main(int argc, char** argv) {
       const uint64_t seed = (static_cast<uint64_t>(p) << 32) ^
                             static_cast<uint64_t>(size.n);
       all_pass = run_cast_case(pairs[p].first, pairs[p].second, size.n, seed,
+                               stream) &&
+                 all_pass;
+    }
+  }
+  for (size_t p = 0; p < sizeof(direct) / sizeof(direct[0]); ++p) {
+    for (const Size& size : kSizes) {
+      if (size.min_coverage > coverage) {
+        continue;
+      }
+      const uint64_t seed = (static_cast<uint64_t>(pairs.size() + p) << 32) ^
+                            static_cast<uint64_t>(size.n);
+      all_pass = run_cast_case(direct[p].first, direct[p].second, size.n, seed,
                                stream) &&
                  all_pass;
     }
