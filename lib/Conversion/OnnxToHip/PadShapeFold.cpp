@@ -4,9 +4,10 @@
  */
 //===- PadShapeFold.cpp - Pre-lowering Pad normalization ----------------===//
 //
-// Two pre-lowering patterns for `onnx.Pad`: one rewrites the opset<11
-// attribute-carrying form into the operand form (PadLegacyAttrsToOperands,
-// documented at its definition), the other stamps compile-time pad amounts as
+// Pre-lowering patterns for `onnx.Pad`: one rewrites the opset<11
+// attribute-carrying form into the operand form (PadLegacyAttrsToOperands),
+// one moves a consuming Transpose above the Pad (TransposeOfPadSwap), both
+// documented at their definitions, and one stamps compile-time pad amounts as
 // attributes, described below.
 //
 // Sibling pre-lowering fold to GatherShapeFold / ReshapeShapeFold. Captures
@@ -76,6 +77,9 @@ STATISTIC(NumPadConstStamps,
 STATISTIC(NumPadLegacyRewrites,
           "Number of attribute-carrying (opset<11) onnx.Pad ops rewritten to "
           "the operand form");
+
+STATISTIC(NumTransposeOfPadSwaps,
+          "Number of onnx.Transpose ops moved above the onnx.Pad feeding them");
 
 namespace mlir {
 namespace hip {
@@ -295,11 +299,135 @@ struct PadStampConstShape : public mlir::RewritePattern {
   }
 };
 
+/// Move a Transpose above the Pad that feeds it, permuting the pad amounts:
+///
+///   Before:
+///     %p = onnx.Pad(%x, %pads) {mode}            // pads over x's axes
+///     %t = onnx.Transpose(%p) {perm}
+///   After:
+///     %xt = onnx.Transpose(%x) {perm}
+///     %t  = onnx.Pad(%xt, %pads') {mode}         // pads'[i] = pads[perm[i]]
+///
+/// Every Pad mode treats each axis independently, so the two commute. With
+/// non-negative pads the transpose then moves fewer elements, and it sits
+/// directly on the Pad's producer, where elementwise fusion can absorb it
+/// instead of running a standalone transpose kernel on the padded tensor.
+struct TransposeOfPadSwap : public mlir::RewritePattern {
+  TransposeOfPadSwap(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Transpose", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override {
+    if (op->getNumOperands() != 1 || op->getNumResults() != 1)
+      return rewriter.notifyMatchFailure(op, "transpose.arity");
+    mlir::Operation *pad = op->getOperand(0).getDefiningOp();
+    if (!pad || pad->getName().getStringRef() != "onnx.Pad" ||
+        !pad->getResult(0).hasOneUse())
+      return rewriter.notifyMatchFailure(op, "transpose.not_single_use_pad");
+    // The legacy single-operand form is rewritten to the operand form first.
+    if (pad->getNumOperands() < 2 || pad->getNumOperands() > 4)
+      return rewriter.notifyMatchFailure(op, "pad.arity");
+    if (pad->getNumOperands() == 4 &&
+        !mlir::isa<mlir::NoneType>(pad->getOperand(3).getType()))
+      return rewriter.notifyMatchFailure(op, "pad.has_axes");
+
+    mlir::Value data = pad->getOperand(0);
+    auto dataType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
+    auto resultType =
+        mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+    if (!dataType || !resultType || dataType.getRank() == 0 ||
+        resultType.getRank() != dataType.getRank())
+      return rewriter.notifyMatchFailure(op, "transpose.unranked");
+    int64_t rank = dataType.getRank();
+
+    llvm::SmallVector<int64_t> perm;
+    if (auto permAttr = op->getAttrOfType<mlir::ArrayAttr>("perm")) {
+      for (mlir::Attribute entry : permAttr) {
+        auto intAttr = mlir::dyn_cast<mlir::IntegerAttr>(entry);
+        if (!intAttr)
+          return rewriter.notifyMatchFailure(op, "transpose.perm_not_ints");
+        perm.push_back(intAttr.getValue().getSExtValue());
+      }
+    } else {
+      for (int64_t i = rank - 1; i >= 0; --i)
+        perm.push_back(i);
+    }
+    if (static_cast<int64_t>(perm.size()) != rank)
+      return rewriter.notifyMatchFailure(op, "transpose.perm_rank");
+    llvm::SmallVector<bool> seen(rank, false);
+    for (int64_t p : perm) {
+      if (p < 0 || p >= rank || seen[p])
+        return rewriter.notifyMatchFailure(op, "transpose.perm_invalid");
+      seen[p] = true;
+    }
+
+    auto pads = getInlineIntVector(pad->getOperand(1));
+    if (!pads || static_cast<int64_t>(pads->size()) != 2 * rank)
+      return rewriter.notifyMatchFailure(op, "pad.pads_not_inline_const");
+    if (llvm::any_of(*pads, [](int64_t v) { return v < 0; }))
+      return rewriter.notifyMatchFailure(op, "pad.negative_pads");
+
+    llvm::SmallVector<int64_t> newPads(2 * rank);
+    llvm::SmallVector<int64_t> transposedShape(rank);
+    for (int64_t i = 0; i < rank; ++i) {
+      newPads[i] = (*pads)[perm[i]];
+      newPads[i + rank] = (*pads)[perm[i] + rank];
+      transposedShape[i] = dataType.getDimSize(perm[i]);
+    }
+
+    mlir::Location loc = op->getLoc();
+    mlir::OperationState transposeState(loc, "onnx.Transpose");
+    transposeState.addOperands(data);
+    transposeState.addAttributes(op->getAttrs());
+    transposeState.addTypes(mlir::RankedTensorType::get(
+        transposedShape, dataType.getElementType(), dataType.getEncoding()));
+    mlir::Value transposed = rewriter.create(transposeState)->getResult(0);
+
+    auto padsTensorType =
+        mlir::RankedTensorType::get({2 * rank}, rewriter.getI64Type());
+    mlir::OperationState padsState(loc, "onnx.Constant");
+    padsState.addTypes(padsTensorType);
+    padsState.addAttribute(
+        "value", mlir::DenseElementsAttr::get(
+                     padsTensorType, llvm::ArrayRef<int64_t>(newPads)));
+    mlir::Value newPadsValue = rewriter.create(padsState)->getResult(0);
+
+    llvm::SmallVector<mlir::Value> padOperands{transposed, newPadsValue};
+    if (pad->getNumOperands() > 2)
+      padOperands.push_back(pad->getOperand(2));
+    if (pad->getNumOperands() > 3)
+      padOperands.push_back(pad->getOperand(3));
+    // The stamped amounts describe the old axis order, so they are dropped
+    // and PadStampConstShape re-derives them from the new constant.
+    llvm::SmallVector<mlir::NamedAttribute> padAttrs;
+    for (mlir::NamedAttribute attr : pad->getAttrs())
+      if (attr.getName() != "hipdnn.pad_amounts" &&
+          attr.getName() != "hipdnn.pad_axes")
+        padAttrs.push_back(attr);
+    mlir::OperationState padState(pad->getLoc(), "onnx.Pad");
+    padState.addOperands(padOperands);
+    padState.addAttributes(padAttrs);
+    padState.addTypes(resultType);
+    mlir::Operation *newPad = rewriter.create(padState);
+
+    rewriter.replaceOp(op, newPad->getResults());
+    rewriter.eraseOp(pad);
+    LLVM_DEBUG(llvm::dbgs()
+               << "[" DEBUG_TYPE << "] moved Transpose above a rank-" << rank
+               << " Pad\n");
+    ++NumTransposeOfPadSwaps;
+    return mlir::success();
+  }
+};
+
 } // namespace
 
 void populatePadShapeFoldPatterns(mlir::RewritePatternSet &patterns,
                                   mlir::MLIRContext *ctx) {
-  patterns.add<PadLegacyAttrsToOperands, PadStampConstShape>(ctx);
+  patterns
+      .add<PadLegacyAttrsToOperands, PadStampConstShape, TransposeOfPadSwap>(
+          ctx);
 }
 
 } // namespace hip

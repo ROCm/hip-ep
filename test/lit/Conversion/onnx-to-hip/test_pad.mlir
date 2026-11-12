@@ -264,4 +264,28 @@ module {
   // CHECK-NOT: onnx.Constant
   // CHECK: onnx.Pad
   // CHECK-NOT: hip.pad
+
+  // A Transpose consuming a single-use Pad moves above it with the pad
+  // amounts permuted, so it transposes the smaller unpadded tensor.
+  func.func @transpose_of_pad(%data: tensor<1x4x6x3xf32>) -> tensor<1x3x8x10xf32> {
+    %r = "onnx.Pad"(%data) {mode = "reflect", pads = [0, 2, 2, 0, 0, 2, 2, 0]} : (tensor<1x4x6x3xf32>) -> tensor<1x8x10x3xf32>
+    %t = "onnx.Transpose"(%r) {perm = [0, 3, 1, 2]} : (tensor<1x8x10x3xf32>) -> tensor<1x3x8x10xf32>
+    return %t : tensor<1x3x8x10xf32>
+  }
+
+  // CHECK-LABEL: func.func @transpose_of_pad
+  // CHECK: %[[T:.*]] = hip.transpose({{.*}}) ins({{.*}} : tensor<1x4x6x3xf32>) outs({{.*}} : tensor<1x3x4x6xf32>) {perm = [0, 3, 1, 2]}
+  // CHECK: %[[P:.*]] = hip.constant {{.*}}dense<[0, 0, 2, 2, 0, 0, 2, 2]> : tensor<8xi64>
+  // CHECK: hip.pad({{.*}}) ins(%[[T]], %[[P]] : tensor<1x3x4x6xf32>, tensor<8xi64>) outs({{.*}} : tensor<1x3x8x10xf32>) {mode = "reflect"}
+
+  // The padded tensor has a second user, so the Transpose stays below the Pad.
+  func.func @transpose_of_shared_pad(%data: tensor<1x4x6x3xf32>) -> (tensor<1x3x8x10xf32>, tensor<1x8x10x3xf32>) {
+    %r = "onnx.Pad"(%data) {mode = "reflect", pads = [0, 2, 2, 0, 0, 2, 2, 0]} : (tensor<1x4x6x3xf32>) -> tensor<1x8x10x3xf32>
+    %t = "onnx.Transpose"(%r) {perm = [0, 3, 1, 2]} : (tensor<1x8x10x3xf32>) -> tensor<1x3x8x10xf32>
+    return %t, %r : tensor<1x3x8x10xf32>, tensor<1x8x10x3xf32>
+  }
+
+  // CHECK-LABEL: func.func @transpose_of_shared_pad
+  // CHECK: hip.pad({{.*}}) ins({{.*}} : tensor<1x4x6x3xf32>, tensor<8xi64>)
+  // CHECK: hip.transpose({{.*}}) ins({{.*}} : tensor<1x8x10x3xf32>)
 }
