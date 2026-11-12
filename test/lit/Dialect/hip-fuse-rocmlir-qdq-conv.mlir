@@ -13,7 +13,7 @@
 // u8 input with zero point 128, so the rebias needs no correction. The bias
 // dequantizes to [2, -4] * 0.125, and the scale is 0.5 * 0.25.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: %[[X:[^:]*]]: tensor<1x2x4x4xui8>, %[[W:[^:]*]]: tensor<2x2x3x3xi8>, %[[B:[^:]*]]: tensor<1x2x1x1xf32>)
 // CHECK-SAME: -> tensor<1x2x4x4xui8>
 // CHECK: %[[ACC:.*]] = hip.quant_conv(%{{.*}}) ins(%[[X]], %[[W]] :
@@ -80,7 +80,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x2x4x4xui8>)
 // output reads both unit weights, so the correction is -3 * 2 per channel, and
 // the scale is 0.5 * [0.25, 0.5]. The conv has no bias.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: %[[Z:[^:]*]]: tensor<1x2x1x1xi32>, %[[M:[^:]*]]: tensor<1x2x1x1xf32>)
 // CHECK: %[[ACC:.*]] = hip.quant_conv
 // CHECK: %[[A:.*]] = hip.add(%{{.*}}) ins(%[[ACC]], %[[Z]] :
@@ -127,7 +127,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x2x4x4xi8>)
 // Weight scales along axis 1 are not per output channel, so the conv stays a
 // float conv of the dequantized operands.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-NOT: hip.quant_conv
 // CHECK: hip.conv
 

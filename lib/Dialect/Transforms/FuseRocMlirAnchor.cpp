@@ -472,7 +472,8 @@ RocMlirOp outline(const KernelParts &parts, bool elementwise,
             operands, [&](Value v) { return getKernelArgumentType(v, ops); }),
         resultTypes);
     kernel = func::FuncOp::create(
-        rewriter, loc, "rocMlir" + std::to_string(counter++), funcType);
+        rewriter, loc,
+        rocMlirKernelName(parentModule, ops.getArrayRef(), counter), funcType);
     kernel->setAttr("rock.kernel", rewriter.getUnitAttr());
     if (elementwise)
       kernel->setAttr("rock.elementwise", rewriter.getUnitAttr());
@@ -875,8 +876,8 @@ public:
         inlineRocMlirElementwise(module, rewriter);
       }
 
-    // The last anchor outlines first, so the kernels keep the names and the
-    // order that the greedy fusion gave them.
+    // The last anchor outlines first. Two kernels with the same ops therefore
+    // take their suffixes in that order: the later kernel is _0.
     int counter = 0;
     for (KernelPlan &plan : llvm::reverse(plans))
       if (failed(outlinePlan(plan, rewriter, counter)))
