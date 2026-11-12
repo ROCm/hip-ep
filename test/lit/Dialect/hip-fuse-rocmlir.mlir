@@ -365,6 +365,38 @@ func.func @main_graph(%ctx: !hip.context, %a: tensor<1x2x4x3xf32>,
 
 // -----
 
+// A single-use hip.dequant_bnb4 stays in main_graph. Absorbing it makes
+// HipToTosa emit a tosa.gather of the codebook, which rocMLIR rejects. The
+// outlined matmul reads the dequantized f32 weight. transB swaps the [N, K]
+// dequant result into the matmul's [K, N] weight.
+
+// CHECK-LABEL: func.func @rocMlir
+// CHECK: hip.matmul
+// CHECK-SAME: tensor<2x8xf32>, tensor<4x8xf32>
+// CHECK-NOT: hip.dequant_bnb4
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK: hip.dequant_bnb4
+// CHECK: hip.rocmlir
+// CHECK-SAME: tensor<2x8xf32>, tensor<4x8xf32>
+// CHECK-NOT: tensor<16xui8>
+func.func @main_graph(%ctx: !hip.context, %a: tensor<2x8xf32>,
+                      %packed: tensor<16xui8>, %absmax: tensor<2xf32>)
+    -> tensor<2x4xf32> {
+  %weight = tensor.empty() : tensor<4x8xf32>
+  %w = hip.dequant_bnb4(%ctx) ins(%packed, %absmax :
+      tensor<16xui8>, tensor<2xf32>) outs(%weight : tensor<4x8xf32>)
+      {K = 8 : i64, N = 4 : i64, block_size = 16 : i64, quant_type = 1 : i64}
+      : tensor<4x8xf32>
+  %e = tensor.empty() : tensor<2x4xf32>
+  %c = hip.matmul(%ctx) ins(%a, %w : tensor<2x8xf32>, tensor<4x8xf32>)
+      outs(%e : tensor<2x4xf32>)
+      {transA = 0 : i64, transB = 1 : i64} : tensor<2x4xf32>
+  return %c : tensor<2x4xf32>
+}
+
+// -----
+
 // A file-backed zero point is Pure and operand-free, but it has no dense
 // value for HIP-to-TOSA. It stays a kernel argument instead of being cloned
 // into the rock kernel.
