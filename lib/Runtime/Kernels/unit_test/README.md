@@ -11,10 +11,8 @@ performance numbers; `--timing screen` (100 calls / 0.1 s) is the short
 LUT-ranking mode. Correctness checks are identical in all three. Policy, actual iterations, runtime identity
 and dispersion are emitted as `UT_TIMING` JSON records.
 
-The separate [native LUT ranking prototype](common/README.md#native-lut-ranking-ut-rank-v2)
-adds common-default sorting, ambiguity confirmation and explicit default fallback.
-Both gfx1151 qualification attempts failed; its private table import is development
-evidence and the prototype remains unpublished. It retains the accepted v3 presets.
+The same leaves refresh LUT tables; see
+[Refreshing a LUT with the UT leaves](#refreshing-a-lut-with-the-ut-leaves).
 
 There are two ways to build and run them:
 
@@ -277,12 +275,65 @@ unit_test/
 ```
 
 `unit_test/` holds one directory per op and nothing else besides the four
-files above. The offline autotune LUT sweep tools (not UTs) live under
-`hip/autotune/<op>/tools/` next to each op's real resolver — e.g.
-`hip/autotune/gqa/tools/`, `hip/autotune/matmul_nbits/tools/`. Kernel
+files above. LUT refreshes run through these leaves (see below); the older
+offline sweep tools under `hip/autotune/<op>/tools/` remain only to reproduce
+historical logs. Kernel
 compile-time guards, which run no kernel and need no GPU (e.g.
 `LdsBarrierArchGate`), live in the repository's `test/kernel_guards/` with
 the other GPU-free CTest suites.
+
+## Refreshing a LUT with the UT leaves
+
+LUT tables are refreshed with these leaves rather than a separate sweep
+harness, so a table and the unit tests are measured by the same timer. The eight
+MatMulNBits leaves and four GQA decode/prefill leaves support it; other ops keep
+their previous tools until they are migrated.
+
+A refresh does not choose a timing preset. For each shape the ranking mode:
+
+1. checks every candidate config, always including the no-LUT default, against
+   the leaf's CPU reference;
+2. measures every candidate once with `screen`;
+3. measures the candidates within 5% of the fastest (at most four) plus the
+   default, interleaved, at `standard` goals;
+4. repeats that round at `confirm` goals only when the decision is close or
+   unclear: a winner near the 2% entry line, a winner and runner-up that
+   overlap, a nonconverged finalist, or a shape marked `priority=1`;
+5. stores the winner only when it is not the default and its median ratio to
+   the default is below 0.98; otherwise the default-equivalent entry stays.
+
+Near-tied finalists can swap between runs; that costs little and is expected.
+Rules, the `UT_RANK` record and gfx1151 results are in
+[common/README.md](common/README.md#native-lut-ranking-ut-rank-v3).
+
+To refresh `<op>` (`matmul_nbits` or `gqa`):
+
+1. Write a seed CSV with the header `leaf,shape,priority,config` and one
+   `default` row per shape to refresh, using the leaf's shape strings.
+2. In each leaf directory, build the ranking variant:
+   `make build RANK=1 BUILD_DIR=out_rank HIP_SDK=<sdk>`. On Windows, add
+   `ADLX_INCLUDE=<ADLX SDK Include directory>` to record GPU clocks.
+3. From `hip/autotune/<op>/`:
+
+   ```sh
+   python scripts/update_lut.py rank-catalog    --candidates seed.csv --leaf-root <checkout>/lib/Runtime/Kernels/unit_test --out catalog.log
+   python scripts/update_lut.py rank-candidates --candidates seed.csv --catalog catalog.log --out candidates.csv
+   python scripts/update_lut.py rank-measure    --candidates candidates.csv --leaf-root <checkout>/lib/Runtime/Kernels/unit_test --out rank.log
+   python scripts/update_lut.py rank-build      --rank-log rank.log --base lut/gfx1151.json --out <private>/candidate.json <op options>
+   python scripts/update_lut.py compile         --out <private>/candidate.json --fb-out <private>/candidate.fb --flatc <flatc>
+   ```
+
+   `rank-catalog` lists each shape's legal configs on the CPU, `rank-candidates`
+   expands the seed into candidate rows, `rank-measure` runs the ranking leaves
+   one GPU process at a time (pass `--launcher-json` for a lease wrapper), and
+   `rank-build` validates the `UT_RANK` records and writes a private table that
+   keeps every unrelated point. `<op options>` is `--activation fp16|fp32` for
+   MatMulNBits and `--prefill-kv fp16|int8` for GQA prefill.
+4. Review the private table, then install it into `hip/autotune/<op>/lut/` as a
+   separate change.
+
+Each op's details are in [hip/autotune/matmul_nbits/README.md](../hip/autotune/matmul_nbits/README.md#refresh-through-native-ut-ranking)
+and [hip/autotune/gqa/README.md](../hip/autotune/gqa/README.md#refresh-through-native-ut-ranking).
 
 ## Adding an op or dtype leaf
 
