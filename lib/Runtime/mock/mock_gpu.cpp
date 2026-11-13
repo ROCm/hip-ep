@@ -3039,6 +3039,26 @@ int wrap_slice_typed(RuntimeState *state, void *data, void *starts, void *ends,
   return 0;
 }
 
+int wrap_slice_static(RuntimeState *state, void *data, void *output,
+                      const int64_t *data_shape, const int64_t *output_shape,
+                      const int64_t *starts, const int64_t *steps, int64_t rank,
+                      int64_t data_type) {
+  (void)data;
+  (void)output;
+  (void)data_shape;
+  (void)output_shape;
+  (void)starts;
+  (void)steps;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_slice_static\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_slice_static(rank=%lld, data_type=%s(%lld))\n",
+             (long long)rank, hipdnn_ep_datatype_name(data_type),
+             (long long)data_type);
+  return 0;
+}
+
 int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
                void *axes, void *steps, void *output, const int64_t *data_shape,
                int64_t data_rank, const int64_t *output_shape,

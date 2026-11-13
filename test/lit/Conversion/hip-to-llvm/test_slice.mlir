@@ -54,6 +54,25 @@ module {
         outs(%output : memref<2x3xf32, 1>)
     return
   }
+
+  // Resolved compile-time parameters: the per-axis starts and steps go in
+  // host stack arrays and the index tensors are never read.
+  func.func @test_slice_static(%ctx: !hip.context,
+                               %data: memref<4x6xf32, 1>,
+                               %starts: memref<1xi64, 1>,
+                               %ends: memref<1xi64, 1>,
+                               %axes: memref<1xi64, 1>,
+                               %steps: memref<1xi64, 1>,
+                               %output: memref<4x6xf32, 1>) {
+    hip.slice(%ctx)
+        ins(%data, %starts, %ends :
+            memref<4x6xf32, 1>, memref<1xi64, 1>, memref<1xi64, 1>)
+        axes(%axes : memref<1xi64, 1>)
+        steps(%steps : memref<1xi64, 1>)
+        outs(%output : memref<4x6xf32, 1>)
+        {static_starts = array<i64: 0, 5>, static_steps = array<i64: 1, -1>}
+    return
+  }
 }
 
 // Each variant emits the same 16-parameter wrap_slice_typed signature
@@ -74,3 +93,11 @@ module {
 // CHECK: %[[DATA_TYPE:.*]] = llvm.mlir.constant(0 : i64) : i64
 // CHECK-NEXT: %[[INDEX_TYPE:.*]] = llvm.mlir.constant(3 : i64) : i64
 // CHECK: llvm.call @wrap_slice_typed({{.*}}, %[[DATA_TYPE]], %[[INDEX_TYPE]]) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64, i64, i64, i64) -> i32
+
+// CHECK-LABEL: llvm.func @test_slice_static
+// CHECK-NOT: @wrap_slice_typed
+// CHECK: %[[FIVE:.*]] = llvm.mlir.constant(5 : i64) : i64
+// CHECK-NEXT: llvm.store %[[FIVE]]
+// CHECK: %[[NEG:.*]] = llvm.mlir.constant(-1 : i64) : i64
+// CHECK-NEXT: llvm.store %[[NEG]]
+// CHECK: llvm.call @wrap_slice_static({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64) -> i32

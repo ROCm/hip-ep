@@ -587,6 +587,58 @@ struct SliceDecompose : public mlir::RewritePattern {
   }
 };
 
+/// Per-data-axis start and step of a Slice whose parameters are compile-time
+/// constants over a static input, resolved with the ONNX negative-index and
+/// clamping rules that `wrap_slice` applies at run time. Returns std::nullopt
+/// unless every resolved extent equals the static result shape, so a result
+/// that is over-allocated (the `Slice(x, k, k, axis)` accumulator seed) keeps
+/// the runtime path.
+static std::optional<
+    std::pair<llvm::SmallVector<int64_t>, llvm::SmallVector<int64_t>>>
+resolveStaticSlice(mlir::RankedTensorType dataType,
+                   mlir::RankedTensorType resultType,
+                   llvm::ArrayRef<int64_t> startsVec,
+                   llvm::ArrayRef<int64_t> endsVec,
+                   llvm::ArrayRef<int64_t> axesVec,
+                   llvm::ArrayRef<int64_t> stepsVec) {
+  if (!dataType.hasStaticShape() || !resultType.hasStaticShape() ||
+      dataType.getRank() != resultType.getRank())
+    return std::nullopt;
+  const size_t k = axesVec.size();
+  if (startsVec.size() != k || endsVec.size() != k || stepsVec.size() != k)
+    return std::nullopt;
+  const int64_t rank = dataType.getRank();
+  llvm::SmallVector<int64_t> starts(rank, 0), steps(rank, 1);
+  llvm::SmallVector<int64_t> extents(dataType.getShape());
+  llvm::SmallSet<int64_t, 8> seen;
+  for (size_t i = 0; i < k; ++i) {
+    int64_t axis = axesVec[i] < 0 ? axesVec[i] + rank : axesVec[i];
+    if (axis < 0 || axis >= rank || !seen.insert(axis).second)
+      return std::nullopt;
+    const int64_t dim = dataType.getDimSize(axis);
+    const int64_t step = stepsVec[i];
+    if (step == 0)
+      return std::nullopt;
+    int64_t start = startsVec[i] < 0 ? startsVec[i] + dim : startsVec[i];
+    int64_t end = endsVec[i] < 0 ? endsVec[i] + dim : endsVec[i];
+    if (step > 0) {
+      start = std::clamp<int64_t>(start, 0, dim);
+      end = std::clamp<int64_t>(end, 0, dim);
+    } else {
+      start = std::clamp<int64_t>(start, 0, dim - 1);
+      end = std::clamp<int64_t>(end, -1, dim - 1);
+    }
+    const int64_t extent = step > 0 ? (end - start + step - 1) / step
+                                    : (end - start + step + 1) / step;
+    starts[axis] = start;
+    steps[axis] = step;
+    extents[axis] = std::max<int64_t>(extent, 0);
+  }
+  if (llvm::ArrayRef<int64_t>(extents) != resultType.getShape())
+    return std::nullopt;
+  return std::make_pair(std::move(starts), std::move(steps));
+}
+
 struct SliceToHip : public mlir::RewritePattern {
   SliceToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Slice", /*benefit=*/1, ctx) {}
@@ -800,8 +852,23 @@ struct SliceToHip : public mlir::RewritePattern {
         mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
                                       resultType.getElementType(), dynSizes);
 
-    auto hipOp = mlir::hip::SliceOp::create(rewriter, loc, context, data,
-                                            starts, ends, axes, steps, init);
+    auto hipOp = mlir::hip::SliceOp::create(
+        rewriter, loc, context, data, starts, ends, axes, steps, init,
+        /*static_starts=*/nullptr, /*static_steps=*/nullptr);
+    llvm::SmallVector<int64_t> startsVec, endsVec;
+    if (haveAxes &&
+        mlir::succeeded(extractSliceParamVector(op, "hipdnn.slice_starts",
+                                                starts, startsVec)) &&
+        mlir::succeeded(
+            extractSliceParamVector(op, "hipdnn.slice_ends", ends, endsVec))) {
+      if (auto resolved = resolveStaticSlice(dataType, resultType, startsVec,
+                                             endsVec, axesVec, stepsVec)) {
+        hipOp.setStaticStartsAttr(
+            rewriter.getDenseI64ArrayAttr(resolved->first));
+        hipOp.setStaticStepsAttr(
+            rewriter.getDenseI64ArrayAttr(resolved->second));
+      }
+    }
     mlir::Value result = hipOp->getResult(0);
     if (needsExactView) {
       int64_t rank = resultType.getRank();
