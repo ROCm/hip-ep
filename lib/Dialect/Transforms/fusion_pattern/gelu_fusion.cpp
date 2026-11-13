@@ -4,9 +4,17 @@
  */
 //===- gelu_fusion.cpp - elementwise GELU chains to hip.gelu --------------===//
 //
-// A frontend that cannot keep GELU as one op emits it as primitive HIP ops.
-// The match lives here, not in a frontend conversion, so every frontend (ONNX,
-// Torch, ...) gets the fused kernel and none repeats the match.
+// Some frontends, such as torch-mlir, may not be able to emit GELU as a
+// singular op. This leads to the op being decomposed into multiple primitive
+// HIP ops. Fuse them back together, so that the op can be described as a
+// singular hip.gelu. The match lives here, not in a frontend conversion, so
+// every frontend gets the fused kernel and none repeats the match.
+//
+// The ONNX-level FastGeluFusion and ErfGeluFusion match the same formulas
+// before lowering, on ONNX ops. This pattern is the frontend-neutral
+// counterpart, so it covers what they cannot see (Torch, and ONNX chains that
+// lowering produced). Both stay until a frontend-neutral match is proven to
+// cover every ONNX export they handle.
 //
 // Tanh form:
 //   Before:
@@ -47,6 +55,8 @@
 
 #include "gelu_fusion.hpp"
 
+#include "fusion_utils.hpp"
+
 #include "hip/Dialect/IR/HipDialect.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -69,8 +79,7 @@ namespace hip {
 namespace fusion_transform {
 namespace {
 
-// Same tolerance rationale as the ONNX GELU matchers: an f16 round trip moves
-// sqrt(2/pi) and 0.044715 in the fourth digit.
+// An f16 round trip moves sqrt(2/pi) and 0.044715 in the fourth digit.
 constexpr double kConstantTolerance = 1e-3;
 constexpr double kHalf = 0.5;
 constexpr double kOne = 1.0;
@@ -82,51 +91,8 @@ bool nearlyEqual(double a, double b) {
   return std::abs(a - b) <= kConstantTolerance * std::abs(b);
 }
 
-std::optional<double> floatValue(mlir::DenseElementsAttr attr) {
-  if (!attr || attr.getNumElements() != 1 ||
-      !mlir::isa<mlir::FloatType>(attr.getElementType()))
-    return std::nullopt;
-  llvm::APFloat value = *attr.getValues<llvm::APFloat>().begin();
-  bool lostInfo = false;
-  value.convert(llvm::APFloat::IEEEdouble(), llvm::APFloat::rmNearestTiesToEven,
-                &lostInfo);
-  return value.convertToDouble();
-}
-
-/// The value of a scalar constant operand, looking through the wrappers the
-/// frontends add. std::nullopt when `value` is not a single float constant.
-std::optional<double> scalarConstant(mlir::Value value) {
-  mlir::Operation *def = value.getDefiningOp();
-  if (!def)
-    return std::nullopt;
-  if (auto constant = mlir::dyn_cast<mlir::hip::ConstantOp>(def))
-    return floatValue(mlir::dyn_cast_or_null<mlir::DenseElementsAttr>(
-        constant.getValueAttr()));
-  if (auto constant = mlir::dyn_cast<mlir::arith::ConstantOp>(def)) {
-    if (auto scalar = mlir::dyn_cast<mlir::FloatAttr>(constant.getValue())) {
-      llvm::APFloat v = scalar.getValue();
-      bool lostInfo = false;
-      v.convert(llvm::APFloat::IEEEdouble(), llvm::APFloat::rmNearestTiesToEven,
-                &lostInfo);
-      return v.convertToDouble();
-    }
-    return floatValue(
-        mlir::dyn_cast<mlir::DenseElementsAttr>(constant.getValue()));
-  }
-  if (auto splat = mlir::dyn_cast<mlir::tensor::SplatOp>(def))
-    return scalarConstant(splat.getInput());
-  if (auto cast = mlir::dyn_cast<mlir::hip::CastOp>(def))
-    return scalarConstant(cast.getInput());
-  // The Torch frontend splats arith.truncf of an f64 constant.
-  if (auto trunc = mlir::dyn_cast<mlir::arith::TruncFOp>(def))
-    return scalarConstant(trunc.getIn());
-  if (auto ext = mlir::dyn_cast<mlir::arith::ExtFOp>(def))
-    return scalarConstant(ext.getIn());
-  return std::nullopt;
-}
-
 bool isScalar(mlir::Value value, double expected) {
-  std::optional<double> v = scalarConstant(value);
+  std::optional<double> v = getScalarFloatConstant(value);
   return v && nearlyEqual(*v, expected);
 }
 
@@ -141,28 +107,12 @@ mlir::Value otherThanConstant(BinaryOp op, double expected) {
   return lhsConst ? op.getRhs() : op.getLhs();
 }
 
-/// True when `value` has exactly one value use, by `consumer`. A tensor.dim
-/// reads only the type and does not count.
-bool onlyUsedBy(mlir::Value value, mlir::Operation *consumer) {
-  mlir::Operation *seen = nullptr;
-  for (mlir::OpOperand &use : value.getUses()) {
-    if (mlir::isa<mlir::tensor::DimOp>(use.getOwner()))
-      continue;
-    if (seen && seen != use.getOwner())
-      return false;
-    if (seen == use.getOwner())
-      return false; // the consumer reads it twice
-    seen = use.getOwner();
-  }
-  return seen == consumer;
-}
-
 /// The op that defines `value` when it is an `OpTy` whose only value use is
 /// `consumer`.
 template <typename OpTy>
 OpTy singleUseDef(mlir::Value value, mlir::Operation *consumer) {
   auto op = value.getDefiningOp<OpTy>();
-  return op && onlyUsedBy(value, consumer) ? op : OpTy();
+  return op && hasSingleValueUse(value, consumer) ? op : OpTy();
 }
 
 struct Chain {
@@ -307,6 +257,7 @@ struct GeluFusion : public mlir::OpRewritePattern<mlir::hip::MulOp> {
     for (mlir::Operation *op : chain.ops) {
       // The HIP context is operand 0 of every HIP op.
       if (op->getOperand(0) != root.getCtx() ||
+          !mlir::isa<mlir::hip::ContextType>(op->getOperand(0).getType()) ||
           op->getResult(0).getType() != xType)
         return rewriter.notifyMatchFailure(
             root, "GELU ops must share a context and the type of x");
@@ -314,11 +265,14 @@ struct GeluFusion : public mlir::OpRewritePattern<mlir::hip::MulOp> {
 
     // Initial values that exist only to feed the erased ops.
     llvm::SmallVector<mlir::Operation *> initDefs;
-    for (mlir::Operation *op : chain.ops)
-      for (mlir::Value init :
-           mlir::cast<mlir::DestinationStyleOpInterface>(op).getDpsInits())
+    for (mlir::Operation *op : chain.ops) {
+      auto dps = mlir::dyn_cast<mlir::DestinationStyleOpInterface>(op);
+      if (!dps)
+        return rewriter.notifyMatchFailure(op, "GELU op is not DPS");
+      for (mlir::Value init : dps.getDpsInits())
         if (mlir::Operation *def = init.getDefiningOp())
           initDefs.push_back(def);
+    }
 
     for (mlir::Operation *op : chain.ops)
       rewriter.replaceUsesWithIf(

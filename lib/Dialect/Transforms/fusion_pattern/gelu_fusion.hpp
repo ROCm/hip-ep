@@ -14,8 +14,6 @@
 // kernel from this one match. The pattern declines unless each intermediate
 // has a single value use, every tensor has the type of x (no broadcasting),
 // and the scalar constants match the formula.
-//
-// Before/After IR: gelu_fusion.cpp.
 //===----------------------------------------------------------------------===//
 #pragma once
 
