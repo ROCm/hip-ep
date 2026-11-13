@@ -16,6 +16,7 @@
 // stream, resolved in bulk after the per-inference stream sync -- one fenceless
 // record per op, no per-op start/stop pair and no per-op stream sync.
 
+#include "chrome_trace.h"
 #include "debug_log.h"
 #include "hipdnn_ep_runtime.h"
 #include "runtime_types.h"
@@ -33,7 +34,8 @@ void op_profile_resolve_and_print(OpProfileState *ps);
 void op_profile_add_pending(OpProfileState *ps, const std::string &name,
                             const std::string &shape, int markerIndex,
                             double cpuMs, int64_t bytes = 0,
-                            double cpuStartUs = 0.0);
+                            double cpuStartUs = 0.0,
+                            const OpCallCapture *capture = nullptr);
 // Add H2D/Compute/D2H pipeline spans (ms) for the most recently resolved
 // inference to the chrome trace's dedicated tracks. No-op unless tracing is on.
 void op_profile_add_io_spans(OpProfileState *ps, double h2dMs, int64_t h2dBytes,
@@ -139,13 +141,17 @@ struct OpProfileScope {
   int markerIndex;
   hipStream_t stream;
   int64_t bytes;
+  std::optional<OpCallCapture> capture;
   double cpuTsUs = 0.0; // op start, absolute us on the shared trace axis
   std::chrono::steady_clock::time_point cpuStart;
 
   OpProfileScope(OpProfileState *p, std::string n, std::string sh,
-                 hipStream_t s, int mkIdx, int64_t b = 0)
+                 hipStream_t s, int mkIdx, int64_t b = 0,
+                 const OpCallCapture *actualCall = nullptr)
       : ps(p), name(std::move(n)), shape(std::move(sh)), markerIndex(mkIdx),
-        stream(s), bytes(b) {
+        stream(s), bytes(b),
+        capture(actualCall ? std::optional<OpCallCapture>(*actualCall)
+                           : std::nullopt) {
     cpuStart = std::chrono::steady_clock::now();
     cpuTsUs = op_profile_us_since_epoch(cpuStart);
     // The epoch is recorded by the macro before this op's kernels are enqueued;
@@ -161,7 +167,8 @@ struct OpProfileScope {
                     std::chrono::steady_clock::now() - cpuStart)
                     .count();
     if (ps)
-      op_profile_add_pending(ps, name, shape, markerIndex, ms, bytes, cpuTsUs);
+      op_profile_add_pending(ps, name, shape, markerIndex, ms, bytes, cpuTsUs,
+                             capture ? &*capture : nullptr);
   }
 
   OpProfileScope(const OpProfileScope &) = delete;

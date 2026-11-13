@@ -36,6 +36,7 @@ struct OpProfileState {
     double cpuMs;
     int64_t bytes;
     double cpuStartUs; // op start, absolute us on the shared trace axis
+    std::optional<OpCallCapture> capture;
   };
 
   // Low-distortion timing: a single fenceless marker event per op plus one
@@ -129,10 +130,13 @@ hipEvent_t op_profile_get_marker_event(OpProfileState *ps, int index) {
 
 void op_profile_add_pending(OpProfileState *ps, const std::string &name,
                             const std::string &shape, int markerIndex,
-                            double cpuMs, int64_t bytes, double cpuStartUs) {
+                            double cpuMs, int64_t bytes, double cpuStartUs,
+                            const OpCallCapture *capture) {
   if (!ps)
     return;
-  ps->pending.push_back({name, shape, markerIndex, cpuMs, bytes, cpuStartUs});
+  ps->pending.push_back(
+      {name, shape, markerIndex, cpuMs, bytes, cpuStartUs,
+       capture ? std::optional<OpCallCapture>(*capture) : std::nullopt});
 }
 
 void op_profile_add_io_spans(OpProfileState *ps, double h2dMs, int64_t h2dBytes,
@@ -212,7 +216,8 @@ void op_profile_resolve_and_print(OpProfileState *ps) {
                          ? ps->gpuEpochAbsUs + gpuStartMs * 1000.0
                          : ev.cpuStartUs;
       ps->trace.addOp(ev.name, ev.shape, gTsUs, gpuMs * 1000.0, ev.cpuStartUs,
-                      ev.cpuMs * 1000.0, ev.bytes);
+                      ev.cpuMs * 1000.0, ev.bytes,
+                      ev.capture ? &*ev.capture : nullptr);
     }
     auto &op = ps->profile[ev.name];
     if (op.name.empty())
