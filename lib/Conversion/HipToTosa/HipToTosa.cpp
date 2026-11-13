@@ -2560,8 +2560,16 @@ struct CastConverter final : public OpConversionPattern<CastOp> {
     auto inputType = dyn_cast<RankedTensorType>(adaptor.getInput().getType());
     if (!inputType || !inputType.hasStaticShape())
       return rewriter.notifyMatchFailure(op, "expected static ranked input");
-    if (inputType.getShape() != resultType.getShape())
-      return rewriter.notifyMatchFailure(op, "cast cannot change the shape");
+    // Cast keeps the shape. A length-1 tensor and a scalar are the same value
+    // at two ranks (a quantized zero point arrives as tensor<1xui8> into
+    // tensor<f32>), so reshape to the result shape and change only the type.
+    Value input = adaptor.getInput();
+    if (inputType.getShape() != resultType.getShape()) {
+      if (!isUnitTensor(inputType) || !isUnitTensor(resultType) ||
+          inputType.getNumElements() != resultType.getNumElements())
+        return rewriter.notifyMatchFailure(op, "cast cannot change the shape");
+      input = reshapeTo(input, resultType.getShape(), rewriter);
+    }
 
     Type inElem = inputType.getElementType();
     Type outElem = resultType.getElementType();
@@ -2569,8 +2577,7 @@ struct CastConverter final : public OpConversionPattern<CastOp> {
         !isa<FloatType, IntegerType>(outElem))
       return rewriter.notifyMatchFailure(op, "unsupported cast element type");
 
-    rewriter.replaceOp(
-        op, emitTosaCast(rewriter, op.getLoc(), adaptor.getInput(), outElem));
+    rewriter.replaceOp(op, emitTosaCast(rewriter, op.getLoc(), input, outElem));
     return success();
   }
 };

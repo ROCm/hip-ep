@@ -216,6 +216,21 @@ func.func @cast_ui8_to_f32(%ctx: !hip.context, %x: tensor<4xui8>,
   return %r : tensor<4xf32>
 }
 
+// A length-1 uint8 and a scalar f32 are the same value at two ranks. Reshape
+// onto the result shape, then the unsigned cast. This is the zero point of a
+// quantized model.
+// CHECK-LABEL: func.func @cast_ui8_unit_to_scalar_f32
+// CHECK: tosa.reshape %arg1
+// CHECK: tosa.custom {{.*}}operator_name = "unsigned_cast"
+// CHECK-NOT: hip.cast
+func.func @cast_ui8_unit_to_scalar_f32(%ctx: !hip.context, %x: tensor<1xui8>,
+                                       %init: tensor<f32>) -> tensor<f32>
+    attributes {rock.kernel} {
+  %r = hip.cast(%ctx) ins(%x : tensor<1xui8>)
+                      outs(%init : tensor<f32>) {to = 1 : i64} : tensor<f32>
+  return %r : tensor<f32>
+}
+
 // CHECK-LABEL: func.func @cast_outlined_kernel
 // CHECK: tosa.cast
 // CHECK-NOT: hip.cast
@@ -308,4 +323,17 @@ func.func @cast_dynamic_shape(%ctx: !hip.context, %x: tensor<?x8xf32>,
                       outs(%init : tensor<?x8xf16>) {to = 10 : i64}
                       : tensor<?x8xf16>
   return %r : tensor<?x8xf16>
+}
+
+// -----
+
+// A unit reshape is only for one element. A longer vector still cannot change
+// shape through hip.cast.
+func.func @cast_shape_mismatch(%ctx: !hip.context, %x: tensor<2xui8>,
+                               %init: tensor<f32>) -> tensor<f32>
+    attributes {rock.kernel} {
+  // expected-error @+1 {{failed to legalize operation 'hip.cast'}}
+  %r = hip.cast(%ctx) ins(%x : tensor<2xui8>)
+                      outs(%init : tensor<f32>) {to = 1 : i64} : tensor<f32>
+  return %r : tensor<f32>
 }
