@@ -39,6 +39,8 @@
 
 #include "swiglu_fusion.hpp"
 
+#include "fusion_utils.hpp"
+
 #include "hip/Dialect/IR/HipDialect.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -55,20 +57,6 @@
 namespace hip {
 namespace fusion_transform {
 namespace {
-
-// True when every use is either `consumer` or a tensor.dim. tensor.dim only
-// reads the type, which this pattern requires to match the gate.
-bool hasSingleValueUse(mlir::Value value, mlir::Operation *consumer) {
-  mlir::Operation *seen = nullptr;
-  for (mlir::OpOperand &use : value.getUses()) {
-    if (mlir::isa<mlir::tensor::DimOp>(use.getOwner()))
-      continue;
-    if (seen)
-      return false;
-    seen = use.getOwner();
-  }
-  return seen == consumer;
-}
 
 void retargetShapeQueries(mlir::PatternRewriter &rewriter, mlir::Value from,
                           mlir::Value to) {
