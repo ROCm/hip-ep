@@ -181,13 +181,16 @@ def RocMlirPrepareQuantPass
     : Pass<"hip-rocmlir-prepare-quant", "mlir::func::FuncOp"> {
   let summary = "Prepare the quantize trees of main_graph for rocMLIR kernels";
   let description = [{
-    Moves each per-tensor quantize backward through the element-move ops that
-    feed it, so those ops run on 8- or 16-bit values, and then rebiases each unsigned
-    8-bit tree that ends in a planned integer anchor to signed 8-bit. The
-    order matters: the sinking fixes the final shape of each tree, and the
-    rebias then plans the QLinear and dequantized convolutions on i8 inputs.
-    Only main_graph is changed.
+    First splits each static 4-bit hip.matmul_nbits into hip.unpack_int4, a
+    blocked dequantize and a transposed hip.matmul, so the fusion treats it
+    as a matmul anchor. Then moves each per-tensor quantize backward through
+    the element-move ops that feed it, so those ops run on 8- or 16-bit
+    values, and then rebiases each unsigned 8-bit tree that ends in a planned
+    integer anchor to signed 8-bit. The order matters: the sinking fixes the
+    final shape of each tree, and the rebias then plans the QLinear and
+    dequantized convolutions on i8 inputs. Only main_graph is changed.
   }];
+  let dependentDialects = ["mlir::tensor::TensorDialect"];
 }
 
 def FuseRocMlirElementwisePass
