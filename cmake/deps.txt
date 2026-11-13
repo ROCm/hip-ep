@@ -18,7 +18,7 @@ onnxruntime;https://github.com/microsoft/onnxruntime/releases/download;1.31.0
 llvm_project;https://github.com/ROCm/llvm-project.git;rmt-core-2026-10-19
 ## rocmlirTriton pin. Used only when ENABLE_ROCMLIRTRITON=ON, and only for the
 ## Rock/Triton sources. LLVM still comes from llvm_project above.
-rocmlirtriton;https://github.com/ROCm/rocmlirTriton.git;fc54715a1babd18bd8cef5bd9b2e372b6089dfa0
+rocmlirtriton;https://github.com/ROCm/rocmlirTriton.git;32481957048683dc12a1a75f8a502599c0bb844b
 protobuf;https://github.com/protocolbuffers/protobuf.git;v34.0
 flatbuffers;https://github.com/google/flatbuffers.git;v25.12.19
 ##
