@@ -358,8 +358,15 @@ int main(int argc, char **argv) {
   pm.addNestedPass<mlir::func::FuncOp>(
       mlir::hip::createDecomposeConvTransposePass());
   pm.addPass(mlir::createCanonicalizerPass());
-  mlir::hip::addRocMlirFusionPasses(pm,
-                                    mlir::hip::FuseRocMlirAnchorPassOptions());
+  // The same arch and gemm accelerated types as CompilerDriver, so an offline
+  // compile forms the same kernels (gemm-elementwise-gemm needs the types).
+  const std::string arch = mlir::hip::resolveRocMlirArch();
+  mlir::hip::FuseRocMlirAnchorPassOptions fuseOpts;
+  fuseOpts.arch = arch;
+  std::vector<std::string> accelTypes =
+      mlir::hip::getRocMlirGemmAccelTypes(*module->getContext(), arch);
+  fuseOpts.gemmGemmAccelTypes.assign(accelTypes.begin(), accelTypes.end());
+  mlir::hip::addRocMlirFusionPasses(pm, fuseOpts);
 
   if (mlir::failed(pm.run(*module))) {
     llvm::errs() << "error: "
@@ -387,8 +394,6 @@ int main(int argc, char **argv) {
     }
     dumpModule(*tosaModule, "tosa", dumpTosaPath);
   }
-
-  const std::string arch = mlir::hip::resolveRocMlirArch();
 
   // --dump-high-level: write the rock MLIR (text) and stop, so nothing is
   // embedded. A single kernel writes <output> verbatim so existing tuning
