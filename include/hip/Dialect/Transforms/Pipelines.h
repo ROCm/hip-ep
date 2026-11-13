@@ -188,6 +188,11 @@ struct RocMlirFusionPipelineOptions
       *this, "int4-weights",
       llvm::cl::desc("Take packed-int4 weight dequantizes into the kernel"),
       llvm::cl::init(false)};
+  Option<bool> attention{
+      *this, "attention",
+      llvm::cl::desc("Merge gemm -> softmax -> gemm into one attention "
+                     "kernel"),
+      llvm::cl::init(true)};
   Option<std::string> report{
       *this, "report",
       llvm::cl::desc("Append the fusion report records to this file"),

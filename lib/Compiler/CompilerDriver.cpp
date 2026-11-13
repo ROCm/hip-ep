@@ -117,7 +117,8 @@ void dumpPreFusionIR(mlir::ModuleOp module,
      << llvm::join(fuseOpts.gemmGemmAccelTypes, ",")
      << " standalone-elementwise="
      << (fuseOpts.standaloneElementwise ? "true" : "false")
-     << " int4-weights=" << (fuseOpts.int4Weights ? "true" : "false") << "\n";
+     << " int4-weights=" << (fuseOpts.int4Weights ? "true" : "false")
+     << " attention=" << (fuseOpts.attention ? "true" : "false") << "\n";
   module->print(os);
 }
 #endif
@@ -486,6 +487,9 @@ bool CompilerDriver::runMLIRPasses(
       // i4 filter; the default perfConfig is one of them for f32.
       mlir::hip::AutotuneSpace int4Space;
       fuseOpts.int4Weights = mlir::hip::rocMlirAutotuneFromEnv(int4Space);
+      // HIPDNN_EP_ROCMLIR_NO_ATTENTION=1 keeps attention as two gemm kernels
+      // and a softmax, to compare the two paths.
+      fuseOpts.attention = !hip_env_is_on("HIPDNN_EP_ROCMLIR_NO_ATTENTION");
       if (mlir::failed(headPm.run(module))) {
         error_message = "ONNX->HIP passes before the rocMLIR fusion failed";
         return false;
