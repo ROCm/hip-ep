@@ -421,6 +421,47 @@ int wrap_slice_typed(RuntimeState *state, void *data, void *starts, void *ends,
                    static_cast<int>(data_rank), hip_dtype);
 }
 
+int wrap_slice_static(RuntimeState *state, void *data, void *output,
+                      const int64_t *data_shape, const int64_t *output_shape,
+                      const int64_t *starts, const int64_t *steps, int64_t rank,
+                      int64_t data_type) {
+  OP_PROFILE(
+      "slice",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "r%lld:%s:static", (long long)rank,
+                 hipdnn_ep_datatype_name(data_type));
+        return std::string(b);
+      },
+      state);
+
+  if (!state || !data_shape || !output_shape || !starts || !steps ||
+      rank <= 0 || rank > kSliceRuntimeMaxRank) {
+    fprintf(stderr, "[REAL] wrap_slice_static: invalid arguments\n");
+    return -1;
+  }
+  int64_t out_num_elements = 1;
+  for (int64_t d = 0; d < rank; ++d)
+    out_num_elements *= output_shape[d];
+  if (out_num_elements == 0)
+    return 0;
+  if (!data || !output) {
+    RUNTIME_DEBUG_LOG("[REAL] wrap_slice_static: null data/output pointer\n");
+    return -1;
+  }
+  int hip_dtype = slice_hipdnn_to_hip_dtype(data_type);
+  if (hip_dtype < 0) {
+    fprintf(stderr,
+            "[REAL] wrap_slice_static: unsupported data_type=%s(%lld) "
+            "(supported: f16, f32, i32, i64)\n",
+            hipdnn_ep_datatype_name(data_type), (long long)data_type);
+    return -1;
+  }
+  return hip_slice(hipdnn_ep_state_get_stream(state), data, output, data_shape,
+                   output_shape, output_shape, starts, steps,
+                   static_cast<int>(rank), hip_dtype);
+}
+
 int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
                void *axes, void *steps, void *output, const int64_t *data_shape,
                int64_t data_rank, const int64_t *output_shape,

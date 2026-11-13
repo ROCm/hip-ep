@@ -2320,6 +2320,13 @@ int wrap_slice_typed(RuntimeState *state, void *data, void *starts, void *ends,
                      int64_t starts_num_elements, int64_t axes_num_elements,
                      int64_t steps_num_elements, int64_t data_type,
                      int64_t index_type);
+// Slice with compile-time parameters: `starts` and `steps` are host arrays of
+// length `rank` holding the resolved start and step of every axis, and
+// `output_shape` is exact. Never reads device memory or syncs the stream.
+int wrap_slice_static(RuntimeState *state, void *data, void *output,
+                      const int64_t *data_shape, const int64_t *output_shape,
+                      const int64_t *starts, const int64_t *steps, int64_t rank,
+                      int64_t data_type);
 
 // ScatterND: output = copy(data), then output[indices[i]] (reduction)
 // updates[i].

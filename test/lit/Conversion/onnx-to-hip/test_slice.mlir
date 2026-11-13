@@ -83,8 +83,28 @@ module {
     // CHECK-NOT: onnx.Slice
     // CHECK: tensor.empty() : tensor<3xf32>
     // CHECK: hip.slice({{.*}}) ins({{.*}}, {{.*}}, {{.*}} : tensor<6xf32>, tensor<1xi64>, tensor<1xi64>)
+    // CHECK-NOT: static_starts
 
     return %r : tensor<3xf32>
+  }
+
+  // Test 4b: a constant flip over a static input resolves at compile time,
+  // so the per-axis start and step are recorded on hip.slice and the runtime
+  // never reads the index tensors. The end sentinel clamps to -1.
+  func.func @test_slice_native_static_flip(%input: tensor<4x6xf32>) -> tensor<4x6xf32> {
+    // CHECK-LABEL: func.func @test_slice_native_static_flip
+    %starts = arith.constant dense<[-1]> : tensor<1xi64>
+    %ends   = arith.constant dense<[-9223372036854775807]> : tensor<1xi64>
+    %axes   = arith.constant dense<[1]> : tensor<1xi64>
+    %steps  = arith.constant dense<[-1]> : tensor<1xi64>
+    %r = "onnx.Slice"(%input, %starts, %ends, %axes, %steps)
+        : (tensor<4x6xf32>, tensor<1xi64>, tensor<1xi64>,
+           tensor<1xi64>, tensor<1xi64>) -> tensor<4x6xf32>
+
+    // CHECK: hip.slice({{.*}}) ins({{.*}} : tensor<4x6xf32>, tensor<1xi64>, tensor<1xi64>)
+    // CHECK-SAME: {static_starts = array<i64: 0, 5>, static_steps = array<i64: 1, -1>}
+
+    return %r : tensor<4x6xf32>
   }
 
   // Test 5: non-constant starts (block argument) also falls back to the

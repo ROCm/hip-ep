@@ -5326,6 +5326,14 @@ def Hip_SliceOp : Hip_DpsOp_WithInfer<"slice", "Output", [AttrSizedOperandSegmen
     runtime call. This op exists only to give the fallback path a stable
     DPS-shaped representation to bufferize and lower from.
 
+    `static_starts` and `static_steps`, when present, hold the resolved
+    start and step of every data axis (length = data rank; an axis that is not
+    sliced has start 0 and step 1), computed at compile time from constant
+    `starts`/`ends`/`axes`/`steps` over static extents. The output shape is
+    then exact, and the lowering passes them from host memory instead of
+    having the runtime read the index tensors back and synchronize the stream.
+    The usual case is a constant negative-step slice (a flip).
+
     Uses destination-passing style: output buffer is provided as argument.
 
     Example:
@@ -5346,7 +5354,9 @@ def Hip_SliceOp : Hip_DpsOp_WithInfer<"slice", "Output", [AttrSizedOperandSegmen
     Hip_TensorOrMemRef:$ends,
     Optional<Hip_TensorOrMemRef>:$axes,
     Optional<Hip_TensorOrMemRef>:$steps,
-    Hip_TensorOrMemRef:$output
+    Hip_TensorOrMemRef:$output,
+    OptionalAttr<DenseI64ArrayAttr>:$static_starts,
+    OptionalAttr<DenseI64ArrayAttr>:$static_steps
   );
 
   let assemblyFormat = [{
