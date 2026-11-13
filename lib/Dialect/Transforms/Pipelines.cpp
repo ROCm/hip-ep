@@ -144,6 +144,11 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   // 1b*. HIP-to-HIP pattern rewriting, Such as Q/DQ fusion
   pm.addPass(mlir::hip::createHipFusionTransformPass());
 
+  // Fold the hip.batch_norm ops that hip-fusion-transform recovered from
+  // elementwise chains. It must precede externalization, which turns the
+  // inline and file-backed parameters it reads into memory-backed ones.
+  pm.addNestedPass<func::FuncOp>(mlir::hip::createFoldBatchNormPass());
+
   // Apply constant storage policy only after HIP shape inference has consumed
   // every inspectable dense carrier payload. This keeps compile-time shape
   // values visible through conversion and reification while still replacing

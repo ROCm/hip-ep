@@ -1,0 +1,105 @@
+//===- BatchNormFusion.pdll -----------------------------------------------===//
+//
+// HIP-to-HIP fusion of an elementwise inference batch normalization into
+// hip.batch_norm.
+//
+// Not compilable on its own: it must be included by a pattern set that
+// declares the native helpers used below.
+//
+// The chain computes, per channel c of the input,
+//
+//   y = (x - mean[c]) * (1 / sqrt(variance[c] + epsilon)) * scale[c] + bias[c]
+//
+// which is the definition of hip.batch_norm. The per-channel vectors reach the
+// elementwise ops through a tensor.expand_shape view that broadcasts them
+// along dimension 1. Recovering hip.batch_norm lets hip-fold-batchnorm fold
+// the normalization into a producing convolution.
+//
+// Before:
+//   %ve = hip.add(%ctx) ins(%variance, %eps : tensor<64xf32>, tensor<f32>) ...
+//   %sd = hip.sqrt(%ctx) ins(%ve : tensor<64xf32>) ...
+//   %is = hip.reciprocal(%ctx) ins(%sd : tensor<64xf32>) ...
+//   %mv = tensor.expand_shape %mean [[0, 1, 2]] output_shape [64, 1, 1] ...
+//   %iv = tensor.expand_shape %is [[0, 1, 2]] output_shape [64, 1, 1] ...
+//   %sv = tensor.expand_shape %scale [[0, 1, 2]] output_shape [64, 1, 1] ...
+//   %bv = tensor.expand_shape %bias [[0, 1, 2]] output_shape [64, 1, 1] ...
+//   %c = hip.sub(%ctx) ins(%x, %mv : tensor<1x64x8x8xf32>, tensor<64x1x1xf32>)
+//   %n = hip.mul(%ctx) ins(%c, %iv : tensor<1x64x8x8xf32>, tensor<64x1x1xf32>)
+//   %s = hip.mul(%ctx) ins(%n, %sv : tensor<1x64x8x8xf32>, tensor<64x1x1xf32>)
+//   %y = hip.add(%ctx) ins(%s, %bv : tensor<1x64x8x8xf32>, tensor<64x1x1xf32>)
+// After:
+//   %y = hip.batch_norm(%ctx)
+//            ins(%x, %scale, %bias, %mean, %variance : tensor<1x64x8x8xf32>,
+//                tensor<64xf32>, tensor<64xf32>, tensor<64xf32>,
+//                tensor<64xf32>) ... {epsilon = 1.000000e-05 : f32}
+//===----------------------------------------------------------------------===//
+
+Pattern HipBatchNorm with benefit(10) {
+  // Every elementwise result keeps the input's type, so no operand broadcasts
+  // the input itself. The four per-channel vectors share one 1-D type, and
+  // their four views share one broadcast type.
+  let data_type: Type;
+  let vector_type: Type;
+  let view_type: Type;
+
+  let variance_plus_epsilon = op<hip.add>(ctx: Value,
+                                          variance: Value<vector_type>,
+                                          epsilon: Value,
+                                          variance_plus_epsilon_init: Value)
+      -> (vector_type);
+  let standard_deviation = op<hip.sqrt>(ctx, variance_plus_epsilon.0,
+                                        standard_deviation_init: Value)
+      -> (vector_type);
+  let inverse_standard_deviation =
+      op<hip.reciprocal>(ctx, standard_deviation.0,
+                         inverse_standard_deviation_init: Value)
+      -> (vector_type);
+
+  // The trailing ValueRange holds the dynamic output sizes of a view, which a
+  // static per-channel view does not have.
+  let mean_view = op<tensor.expand_shape>(mean: Value<vector_type>,
+                                          mean_view_sizes: ValueRange)
+      -> (view_type);
+  let inverse_standard_deviation_view =
+      op<tensor.expand_shape>(inverse_standard_deviation.0,
+                              inverse_standard_deviation_view_sizes: ValueRange)
+      -> (view_type);
+  let scale_view = op<tensor.expand_shape>(scale: Value<vector_type>,
+                                           scale_view_sizes: ValueRange)
+      -> (view_type);
+  let bias_view = op<tensor.expand_shape>(bias: Value<vector_type>,
+                                          bias_view_sizes: ValueRange)
+      -> (view_type);
+
+  let centered = op<hip.sub>(ctx, input: Value<data_type>, mean_view.0,
+                             centered_init: Value)
+      -> (data_type);
+  let normalized = op<hip.mul>(ctx, centered.0,
+                               inverse_standard_deviation_view.0,
+                               normalized_init: Value)
+      -> (data_type);
+  let scaled = op<hip.mul>(ctx, normalized.0, scale_view.0,
+                           scaled_init: Value)
+      -> (data_type);
+  let shifted = op<hip.add>(ctx, scaled.0, bias_view.0, shifted_init: Value)
+      -> (data_type);
+
+  IsHipChannelBroadcast(vector_type, view_type, data_type);
+  IsHipFloatScalar(epsilon);
+  CanBuildInit(data_type, shifted_init);
+  // hip.batch_norm produces only the final result, so another consumer of an
+  // intermediate would keep the elementwise chain alive beside it.
+  HasSingleUseResult(centered);
+  HasSingleUseResult(normalized);
+  HasSingleUseResult(scaled);
+
+  rewrite shifted with {
+    let epsilon_attr = ExtractHipFloatScalar(epsilon);
+    let init = BuildInit(data_type, shifted_init);
+    let batch_norm = op<hip.batch_norm>(ctx, input, scale, bias, mean,
+                                        variance, init) {
+      epsilon = epsilon_attr
+    } -> (data_type);
+    replace shifted with batch_norm;
+  };
+}
