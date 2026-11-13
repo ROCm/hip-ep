@@ -881,6 +881,13 @@ HIP_KERNEL_API int hip_swiglu_promoted(void *stream, const void *gate,
                                       const void *up, void *output,
                                       int64_t num_elements, int hip_dtype);
 
+/* hip_geglu: output[r, j] = input[r, j] * gelu(input[r, half_cols + j]) with
+ * the exact (erf) GELU, over a contiguous [rows, 2 * half_cols] input and a
+ * [rows, half_cols] output. f16 / f32 storage, f32 math. Returns 0 on
+ * success, non-zero hipError_t (or -1 for an unsupported dtype) on failure. */
+HIP_KERNEL_API int hip_geglu(void *stream, const void *input, void *output,
+                             int64_t rows, int64_t half_cols, int hip_dtype);
+
 /* =========================================================================
  * Softplus activation
  * =========================================================================
@@ -1335,6 +1342,17 @@ HIP_KERNEL_API int hip_gqa_flash_prefill_v3_configured(
 HIP_KERNEL_API int hip_mha_flash_prefill(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
     void* O, int B, int N, int sq, int skv, int d, int max_seq, float scale);
+
+/* hip_mha_flash_prefill_bsnd: the same non-causal attention with Q, K, V and
+ * O all in the projections' [B, S, N, d] layout, so neither K nor V is
+ * transposed first and no workspace is used. Transposed-score FA-2 (S^T = K
+ * Q^T) with fp32 O accumulation; K and V^T staged in LDS per block. fp16,
+ * d <= 160 and a multiple of 8, all four pointers 16-byte aligned. Returns 1
+ * without launching when those do not hold, 0 on success, -1 on a launch
+ * failure. */
+HIP_KERNEL_API int hip_mha_flash_prefill_bsnd(
+    void* stream, const void* Q, const void* K, const void* V, void* O,
+    int B, int N, int sq, int skv, int d, float scale);
 
 /* FA-2 split-K GQA decode (sq == 1, d in {64, 96, 128, 256},
  * HPG=H/G in {1,2,3,4,5,6,8,16}, and HPG=9 at d == 128):
@@ -4197,6 +4215,41 @@ HIP_KERNEL_API int hip_conv(
     const void* weights,
     const void* bias,         /* nullable */
     void* output,
+    int hip_dtype,
+    int spatial_rank,
+    int64_t N, int64_t Cin, int64_t Cout,
+    int64_t in_d0, int64_t in_d1, int64_t in_d2,
+    int64_t out_d0, int64_t out_d1, int64_t out_d2,
+    int64_t k0, int64_t k1, int64_t k2,
+    int64_t s0, int64_t s1, int64_t s2,
+    int64_t p0, int64_t p1, int64_t p2,
+    int64_t dil0, int64_t dil1, int64_t dil2,
+    int64_t group);
+
+/* Scratch hip_conv_ws can use for this shape: nonzero for the fp16 shapes with
+ * a small output plane and a long contraction, which split the contraction
+ * across blocks and sum fp32 partials. Same geometry arguments as hip_conv. */
+HIP_KERNEL_API size_t hip_conv_workspace_bytes(
+    int hip_dtype, int spatial_rank,
+    int64_t N, int64_t Cin, int64_t Cout,
+    int64_t in_d0, int64_t in_d1, int64_t in_d2,
+    int64_t out_d0, int64_t out_d1, int64_t out_d2,
+    int64_t k0, int64_t k1, int64_t k2,
+    int64_t s0, int64_t s1, int64_t s2,
+    int64_t p0, int64_t p1, int64_t p2,
+    int64_t dil0, int64_t dil1, int64_t dil2,
+    int64_t group);
+
+/* hip_conv with a device workspace of `workspace_bytes` (may be null / 0, in
+ * which case it is exactly hip_conv). */
+HIP_KERNEL_API int hip_conv_ws(
+    void* stream,
+    const void* input,
+    const void* weights,
+    const void* bias,         /* nullable */
+    void* output,
+    void* workspace,          /* nullable */
+    size_t workspace_bytes,
     int hip_dtype,
     int spatial_rank,
     int64_t N, int64_t Cin, int64_t Cout,

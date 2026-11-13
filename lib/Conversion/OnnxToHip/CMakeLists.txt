@@ -57,6 +57,7 @@ add_library(OnnxToHip STATIC
   SliceShapeFold.cpp
   PackBroadcastTo4D.cpp
   AttentionWindowFold.cpp
+  DecomposedAttentionFusion.cpp
   ShapeConversion.cpp
   ReshapeConversion.cpp
   CausalConvWithStateConversion.cpp
@@ -74,6 +75,8 @@ add_library(OnnxToHip STATIC
   RangeConversion.cpp
   FastGeluFusion.cpp
   ErfGeluFusion.cpp
+  GegluFusion.cpp
+  GroupNormFusion.cpp
   ProjectorOpsRewrites.cpp
   LpNormalizationConversion.cpp
   EqualConversion.cpp

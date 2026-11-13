@@ -1630,6 +1630,19 @@ int wrap_swiglu(RuntimeState *state, void *gate, void *up, void *output,
   return 0;
 }
 
+int wrap_geglu(RuntimeState *state, void *input, void *output, int64_t rows,
+               int64_t half_cols, int64_t data_type) {
+  if (!state || !input || !output) {
+    fprintf(stderr, "Invalid argument in wrap_geglu\n");
+    return -1;
+  }
+  MOCK_PRINT(
+      "[MOCK] wrap_geglu(rows=%lld, half_cols=%lld, data_type=%s(%lld))\n",
+      (long long)rows, (long long)half_cols, hipdnn_ep_datatype_name(data_type),
+      (long long)data_type);
+  return 0;
+}
+
 // Mock impl of the runtime symbol referenced by the hip.miopen.softmax
 // lowering. Signature must match lib/Runtime/real/activation.cpp.
 extern "C" int hip_miopen_softmax(RuntimeState *state, const void *input,

@@ -699,6 +699,15 @@ void populatePackBroadcastTo4DPatterns(RewritePatternSet &patterns,
 void populateAttentionWindowFoldPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
 
+/// Pre-lowering pattern set: rewrite primitive scaled-dot-product attention
+/// (Transpose / scalar scale / MatMul / Softmax / MatMul / Transpose over
+/// BSNH projections) into `com.microsoft.MultiHeadAttention`, whose runtime
+/// runs a flash kernel instead of materialising the scores. Must run while
+/// the chain is still generic ONNX, before `convertComputeOps` lowers its
+/// members one by one. See DecomposedAttentionFusion.cpp.
+void populateDecomposedAttentionFusionPatterns(RewritePatternSet &patterns,
+                                               MLIRContext *ctx);
+
 /// Pre-lowering pattern set: fold a sigmoid + correction-bias router built
 /// outside a com.microsoft QMoE (TopK, GatherElements, ReduceSum and two
 /// ScatterElements feeding router_probs / router_weights) into
@@ -829,6 +838,22 @@ void populatePowDecompositionPatterns(RewritePatternSet &patterns,
 /// See ErfGeluFusion.cpp.
 void populateErfGeluFusionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
+
+/// Pre-lowering pattern set: fold the GEGLU chain (two last-axis Slices of one
+/// projection, the exact-GELU primitives or onnx.Gelu on the gate half, and
+/// the gating Mul) into `hip.geglu`, which reads the projection once instead
+/// of copying both halves out and making five elementwise passes. Must run
+/// while the slice bounds and GELU literals are still `onnx.Constant`. See
+/// GegluFusion.cpp.
+void populateGegluFusionPatterns(RewritePatternSet &patterns, MLIRContext *ctx);
+
+/// Pre-lowering pattern set: rewrite the InstanceNormalization spelling of an
+/// NCHW GroupNorm (Reshape / InstanceNormalization / Reshape / per-channel Mul
+/// and Add, optionally followed by SiLU) into `com.microsoft.GroupNorm` with
+/// channels_last = 0. Must run while the constants are still `onnx.Constant`.
+/// See GroupNormFusion.cpp.
+void populateGroupNormFusionPatterns(RewritePatternSet &patterns,
+                                     MLIRContext *ctx);
 
 /// Pre-lowering pattern set: decompose vision/projector ops that have no
 /// direct MorphiZen converter into supported primitives —
