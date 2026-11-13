@@ -4,6 +4,7 @@
  */
 
 #include "hip/Dialect/IR/HipDialect.h"
+#include "hip/matmul_nbits_weight_layout.h"
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
@@ -170,7 +171,8 @@ LogicalResult ConstantOp::verify() {
   bool hasMemoryAddress = getMemoryAddressAttr() != nullptr;
   bool hasSize = getSizeAttr() != nullptr;
   if (hasValue) {
-    if (hasLocation || hasOffset || hasMemoryAddress || hasSize)
+    if (hasLocation || hasOffset || hasMemoryAddress || hasSize ||
+        getRowBytesAttr() || getWeightLayoutAttr())
       return emitOpError("inline source must contain only `value`");
     auto denseValue = dyn_cast<DenseElementsAttr>(getValueAttr());
     if (!denseValue)
@@ -207,9 +209,41 @@ LogicalResult ConstantOp::verify() {
   // bytes (two values per byte); accept that half-size external source.
   int64_t packedBytes = (numElements + 1) / 2;
   bool isPacked4Bit = elementBits == 8 && size == packedBytes;
-  if (size != expectedBytes && !isPacked4Bit)
+  if (IntegerAttr rowBytesAttr = getRowBytesAttr()) {
+    // Row-padded: `size` is the dense source, the result the padded storage.
+    int64_t rowBytes = rowBytesAttr.getInt();
+    if (resultType.getRank() != 2 || elementBits != 8)
+      return emitOpError("`row_bytes` requires a rank-2 8-bit result");
+    int64_t rows = resultType.getDimSize(0);
+    int64_t pitch = resultType.getDimSize(1);
+    if (rowBytes <= 0 || rowBytes > pitch)
+      return emitOpError("`row_bytes` ")
+             << rowBytes << " must be in [1, " << pitch << "]";
+    if (size != rows * rowBytes)
+      return emitOpError("external source byte size ")
+             << size << " does not match " << rows << " rows of " << rowBytes
+             << " bytes";
+    if (IntegerAttr layoutAttr = getWeightLayoutAttr()) {
+      int64_t layout = layoutAttr.getInt();
+      if (!::hip::isValidMatmulNBitsWeightLayout(layout) || layout == 0)
+        return emitOpError("`weight_layout` ")
+               << layout << " is not a known non-Rows weight layout";
+      if (rowBytes != pitch)
+        return emitOpError("`weight_layout` requires `row_bytes` equal to the "
+                           "row pitch (no row pad)");
+      if (!::hip::matmulNBitsWeightLayoutFits(
+              static_cast<::hip::MatmulNBitsWeightLayout>(layout), rows,
+              rowBytes))
+        return emitOpError("`weight_layout` ")
+               << layout << " is not defined for " << rows << " rows of "
+               << rowBytes << " bytes";
+    }
+  } else if (getWeightLayoutAttr()) {
+    return emitOpError("`weight_layout` requires `row_bytes`");
+  } else if (size != expectedBytes && !isPacked4Bit) {
     return emitOpError("external source byte size ")
            << size << " does not match result byte size " << expectedBytes;
+  }
 
   if (hasMemoryAddress) {
     if (getMemoryAddressAttr().getInt() == 0)

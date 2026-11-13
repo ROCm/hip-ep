@@ -46,7 +46,11 @@ enum MatmulNbitsPhase : ubyte {
   Any = 0,
   Prefill = 1,      // WMMA tiles, kWmmaConfigs
   Decode = 2,       // fp16 GEMV reduction, kGemvConfigs
-  DecodeDp4a = 3    // W4A8 integer-dot GEMV, kGemvConfigs
+  DecodeDp4a = 3,   // W4A8 integer-dot GEMV, kGemvConfigs
+  // The block-reading dp4a GEMV for a weight stored in 16-row blocks,
+  // kDp4aBlocksConfigs: a Gemv config whose tile_n packs the 16-row groups per
+  // workgroup (bits 0-3) and the K blocks per step (bits 4-7).
+  DecodeDp4aBlocks = 4
 }
 
 // Reserved beyond B4: the i8/u3/u2 GEMV kernels already share kGemvConfigs and
@@ -84,7 +88,10 @@ enum MatmulNbitsZeroPoint : ubyte {
 enum MatmulNbitsRowStride : ubyte {
   Any = 0,
   Arrival = 1,     // num_groups_k * (block_size/2) bytes per row
-  Padded = 2       // arrival + 128 B (the per-call repack, a 128 B row pad)
+  Padded = 2,      // arrival + 128 B (the per-call repack, a 128 B row pad)
+  Padded256 = 3,   // arrival + 256 B (a weight padded at load by 256 B)
+  XorLines = 4,    // dense rows whose 128-byte lines are XOR-swizzled per row
+  Blocks = 5       // 512-byte blocks of 16 rows x 32 bytes
 }
 
 // ---------------------------------------------------------------------------
@@ -187,6 +194,29 @@ struct MatmulNbitsMInterval {
   n: uint32;
 }
 
+// Byte order an int4 weight is stored in at load: hip::MatmulNBitsWeightLayout
+// (include/hip/matmul_nbits_weight_layout.h).
+enum MatmulNbitsWeightLayout : ubyte {
+  Rows = 0,      // rows K/2 + pad_bytes apart
+  XorLines = 1,  // dense rows, 128-byte lines XOR-swizzled per row
+  Blocks = 2     // 512-byte blocks of 16 rows x 32 bytes
+}
+
+// How hip-pad-matmul-nbits-weights stores one int4 weight shape at load: rows
+// with a K/2 + pad_bytes pitch (Rows), or the dense rows in another byte order
+// (pad_bytes 0). Measured per shape: the layout with the lowest prefill plus
+// decode time, the one with less memory when they tie. Rows with pad 0 keeps
+// the arrival stride. A shape without an entry is not changed at load; where
+// its stride aliases, the runtime repacks it per call.
+struct MatmulNbitsRowPad {
+  group_size: MatmulNbitsGroupSize;
+  zero_point: MatmulNbitsZeroPoint;
+  layout: MatmulNbitsWeightLayout;
+  pad_bytes: uint16;       // multiple of 16: B is loaded in 16-byte vectors
+  n: uint32;
+  k: uint32;
+}
+
 table MatmulNbitsAutotuneLut {
   schema_version: uint32 = 4;
   gpu_arch: string;         // must equal the running device, e.g. "gfx1151"
@@ -213,11 +243,12 @@ table MatmulNbitsAutotuneLut {
   configs: [MatmulNbitsTuneConfig];
   points: [MatmulNbitsTunePoint];
   fallbacks: [MatmulNbitsFallback];
-  // Appended, so a table without it loads as before: no config names an
-  // extended entry.
+  // Appended, so a table without them loads as before: no config names an
+  // extended entry, and no weight is padded at load.
   extended_configs: [MatmulNbitsExtendedConfig];
   // Version 5 writers append ranges; keep the v4 default for old omitted fields.
   m_intervals: [MatmulNbitsMInterval];
+  row_pads: [MatmulNbitsRowPad];
 }
 
 root_type MatmulNbitsAutotuneLut;

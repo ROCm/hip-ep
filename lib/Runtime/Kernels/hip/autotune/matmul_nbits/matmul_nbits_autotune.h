@@ -7,6 +7,8 @@
 
 #include <cstdint>
 
+#include "matmul_nbits_row_pad_abi.h"
+
 /* MatMulNBits offline autotune lookup.
  *
  * Sits between the in-process tune map and the runtime sweep:
@@ -47,7 +49,7 @@ enum class Source : uint8_t {
 /* Which kernel is being configured. Decode and DecodeDp4a both index
  * kGemvConfigs but rank it differently, so they are separate keys -- mirroring
  * the separate tune caches the two already keep at runtime. */
-enum class Phase : uint8_t { Prefill = 1, Decode = 2, DecodeDp4a = 3 };
+enum class Phase : uint8_t { Prefill = 1, Decode = 2, DecodeDp4a = 3, DecodeDp4aBlocks = 4 };
 
 /* One MatMulNBits invocation, in the terms the kernel dispatch already has. */
 struct Request {
@@ -61,6 +63,11 @@ struct Request {
   /* Bytes between B rows, 0 for the arrival layout. Prefill only: the padded
    * layout has a different winner, so it must not share a row. */
   int b_row_bytes = 0;
+  /* B's byte order (hip::MatmulNBitsWeightLayout): 1 XOR lines, 2 16-row
+   * blocks. Prefill only, a row category of its own; a group size and zero
+   * point with no rows there is answered from the arrival rows, through the
+   * caller's validator. */
+  int layout = 0;
 };
 
 /* Tile geometry for the WMMA prefill path, as stored in the row. The caller
@@ -116,6 +123,13 @@ using GemvValidator = bool (*)(void* ctx, const GemvAnswer&);
 
 Result resolve(const Request& request, WmmaValidator wmma_valid,
                GemvValidator gemv_valid, void* ctx);
+
+/* The row pads of the table for `arch` (NULL or "": this device), as
+ * hip_matmul_nbits_u4_row_pads exports it (matmul_nbits_row_pad_abi.h): the
+ * first min(count, capacity) entries are copied and the entry count is
+ * returned; -1 when no embedded table was measured on `arch`. A weight no
+ * entry names stays dense and the runtime repacks it per call. */
+int rowPads(const char* arch, HipMatmulNBitsRowPad* entries, int32_t capacity);
 
 /* Whether the table names an extended WMMA entry, i.e. the device was measured
  * with them. Only then does the runtime sweep time them too. */

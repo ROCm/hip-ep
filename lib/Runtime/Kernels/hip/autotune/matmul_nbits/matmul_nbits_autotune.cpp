@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -80,20 +81,39 @@ fbs::MatmulNbitsGroupSize groupSizeClass(int gs) {
   }
 }
 
+int groupSizeValue(fbs::MatmulNbitsGroupSize gs) {
+  switch (gs) {
+  case fbs::MatmulNbitsGroupSize::G16: return 16;
+  case fbs::MatmulNbitsGroupSize::G32: return 32;
+  case fbs::MatmulNbitsGroupSize::G64: return 64;
+  case fbs::MatmulNbitsGroupSize::G128: return 128;
+  case fbs::MatmulNbitsGroupSize::G256: return 256;
+  case fbs::MatmulNbitsGroupSize::G512: return 512;
+  default: return 0;
+  }
+}
+
 /* The exact-match part of the key. Points sharing one of these are mutually
  * comparable by distance; points across two of them are not. */
+// Every enum value must fit its field below, or two groups share a key.
+static_assert(static_cast<uint32_t>(fbs::MatmulNbitsPhase::MAX) <= 0x7u, "phase field");
+static_assert(static_cast<uint32_t>(fbs::MatmulNbitsBits::MAX) <= 0x7u, "bits field");
+static_assert(static_cast<uint32_t>(fbs::MatmulNbitsGroupSize::MAX) <= 0x7u, "group size field");
+static_assert(static_cast<uint32_t>(fbs::MatmulNbitsZeroPoint::MAX) <= 0x3u, "zero point field");
+static_assert(static_cast<uint32_t>(fbs::MatmulNbitsRowStride::MAX) <= 0x7u, "row stride field");
+
 uint32_t groupKey(fbs::MatmulNbitsPhase phase, fbs::MatmulNbitsBits bits, fbs::MatmulNbitsGroupSize gs,
                   fbs::MatmulNbitsZeroPoint zp, fbs::MatmulNbitsRowStride stride) {
-  return (static_cast<uint32_t>(phase) & 0x3u) |
-         ((static_cast<uint32_t>(bits) & 0x7u) << 2) |
-         ((static_cast<uint32_t>(gs) & 0x7u) << 5) |
-         ((static_cast<uint32_t>(zp) & 0x3u) << 8) |
-         ((static_cast<uint32_t>(stride) & 0x3u) << 10);
+  return (static_cast<uint32_t>(phase) & 0x7u) |
+         ((static_cast<uint32_t>(bits) & 0x7u) << 3) |
+         ((static_cast<uint32_t>(gs) & 0x7u) << 6) |
+         ((static_cast<uint32_t>(zp) & 0x3u) << 9) |
+         ((static_cast<uint32_t>(stride) & 0x7u) << 11);
 }
 
 uint32_t fallbackKey(fbs::MatmulNbitsPhase phase, fbs::MatmulNbitsBits bits) {
-  return (static_cast<uint32_t>(phase) & 0x3u) |
-         ((static_cast<uint32_t>(bits) & 0x7u) << 2);
+  return (static_cast<uint32_t>(phase) & 0x7u) |
+         ((static_cast<uint32_t>(bits) & 0x7u) << 3);
 }
 
 // ---------------------------------------------------------------------------
@@ -125,6 +145,7 @@ struct Table {
   std::unordered_map<uint32_t, uint16_t> fallbacks;
   std::unordered_map<uint32_t, std::vector<MInterval>> intervals;
   float wm = 1.0f, wn = 1.0f, wk = 1.0f;
+  std::vector<HipMatmulNBitsRowPad> row_pads;
   bool extended_configs = false;   // some config names an extended entry
   bool loaded = false;
   uint32_t points = 0;
@@ -132,6 +153,7 @@ struct Table {
   uint32_t invalid_extended_configs = 0;
   uint32_t interval_count = 0;
   uint32_t invalid_intervals = 0;
+  uint32_t invalid_row_pads = 0;
   std::atomic<uint32_t> rejected{0};
 };
 
@@ -178,12 +200,14 @@ bool pointConsistent(const fbs::MatmulNbitsTunePoint& p, fbs::MatmulNbitsConfigK
   const bool prefill = p.phase() == fbs::MatmulNbitsPhase::Prefill;
   if (prefill != (p.row_stride() != fbs::MatmulNbitsRowStride::Any)) return false;
   if (p.row_stride() > fbs::MatmulNbitsRowStride::MAX) return false;
+  if (p.phase() > fbs::MatmulNbitsPhase::MAX) return false;
 
   // The referenced config has to match the path it will be handed to.
   return kind == (prefill ? fbs::MatmulNbitsConfigKind::Wmma : fbs::MatmulNbitsConfigKind::Gemv);
 }
 
-bool compatible(const fbs::MatmulNbitsAutotuneLut* lut) {
+// `arch` is the device (or compile target) the table must have been measured on.
+bool compatible(const fbs::MatmulNbitsAutotuneLut* lut, const std::string& arch) {
   if ((lut->schema_version() != kSchemaVersion &&
        lut->schema_version() != kLegacySchemaVersion) ||
       (lut->schema_version() == kLegacySchemaVersion && lut->m_intervals() &&
@@ -199,18 +223,18 @@ bool compatible(const fbs::MatmulNbitsAutotuneLut* lut) {
     return false;
   }
   if (lut->gpu_arch() && !lut->gpu_arch()->str().empty()) {
-    const std::string actual = currentGpuArch();
-    if (actual.empty() || actual != lut->gpu_arch()->str()) {
+    if (arch.empty() || arch != lut->gpu_arch()->str()) {
       if (logOn())
-        fprintf(stderr, "[matmul-lut] arch \"%s\" != device \"%s\", ignoring\n",
-                lut->gpu_arch()->c_str(), actual.c_str());
+        fprintf(stderr, "[matmul-lut] arch \"%s\" != \"%s\", ignoring\n",
+                lut->gpu_arch()->c_str(), arch.c_str());
       return false;
     }
   }
   return true;
 }
 
-void loadBuffer(Table& t, const unsigned char* data, size_t size) {
+void loadBuffer(Table& t, const unsigned char* data, size_t size,
+                const std::string& arch) {
   // No table embedded for this arch (the size-0 stub cmake emits). Logged, not
   // silent, so HIPDNN_MATMUL_LUT_LOG=1 distinguishes "no table in this build"
   // from "log not wired": every shape will fall through to the runtime sweep.
@@ -226,7 +250,7 @@ void loadBuffer(Table& t, const unsigned char* data, size_t size) {
     return;
   }
   const fbs::MatmulNbitsAutotuneLut* lut = fbs::GetMatmulNbitsAutotuneLut(data);
-  if (!lut || !lut->points() || !lut->configs() || !compatible(lut)) {
+  if (!lut || !lut->points() || !lut->configs() || !compatible(lut, arch)) {
     if (logOn())
       fprintf(stderr, "[matmul-lut] table present (%zu bytes) but unusable "
                       "(malformed or incompatible); shapes will autotune\n",
@@ -369,6 +393,48 @@ void loadBuffer(Table& t, const unsigned char* data, size_t size) {
     }
   }
 
+  uint32_t row_pads = 0;
+  if (lut->row_pads()) {
+    for (const fbs::MatmulNbitsRowPad* r : *lut->row_pads()) {
+      const int gs = groupSizeValue(r->group_size());
+      const bool known_zp = r->zero_point() == fbs::MatmulNbitsZeroPoint::Symmetric ||
+                            r->zero_point() == fbs::MatmulNbitsZeroPoint::Asymmetric;
+      const auto layout = static_cast<int32_t>(r->layout());
+      // A padded row must stay a multiple of the 16-byte B loads.
+      if (gs == 0 || !known_zp || r->n() == 0 || r->k() == 0 ||
+          r->n() > INT32_MAX || r->k() > INT32_MAX || r->pad_bytes() % 16 != 0 ||
+          (r->pad_bytes() != 0 && (r->k() / 2 + r->pad_bytes()) % 16 != 0) ||
+          layout < 0 || layout > 2 ||
+          // XorLines (1) and Blocks (2): dense rows, no pad; Blocks needs whole
+          // 16-row groups and 64-value pieces
+          // (include/hip/matmul_nbits_weight_layout.h).
+          (layout != 0 && (r->pad_bytes() != 0 || r->k() % 64 != 0)) ||
+          (layout == 2 && r->n() % 16 != 0)) {
+        ++t.invalid_row_pads;
+        continue;
+      }
+      HipMatmulNBitsRowPad e;
+      e.n = static_cast<int32_t>(r->n());
+      e.k = static_cast<int32_t>(r->k());
+      e.block_size = gs;
+      e.zero_points = r->zero_point() == fbs::MatmulNbitsZeroPoint::Asymmetric ? 1 : 0;
+      e.pad_bytes = r->pad_bytes();
+      e.layout = layout;
+      // One pad per weight shape: a repeated key keeps the first entry, the
+      // same one update_lut.py would have refused to write.
+      const bool dup = std::any_of(t.row_pads.begin(), t.row_pads.end(), [&](const auto& o) {
+        return o.n == e.n && o.k == e.k && o.block_size == e.block_size &&
+               o.zero_points == e.zero_points;
+      });
+      if (dup) {
+        ++t.invalid_row_pads;
+        continue;
+      }
+      t.row_pads.push_back(e);
+      ++row_pads;
+    }
+  }
+
   t.loaded = true;
   if (logOn())
     fprintf(stderr, "[matmul-lut] intervals %u (%u rejected)\n",
@@ -376,11 +442,11 @@ void loadBuffer(Table& t, const unsigned char* data, size_t size) {
   if (logOn())
     fprintf(stderr,
             "[matmul-lut] loaded %u points in %zu groups (%u rejected), "
-            "extended configs %s (%u rejected), weights m=%.2f n=%.2f k=%.2f, "
-            "for %s\n",
+            "extended configs %s (%u rejected), %u row pads (%u rejected), "
+            "weights m=%.2f n=%.2f k=%.2f, for %s\n",
             t.points, t.groups.size(), t.invalid_points,
-            t.extended_configs ? "yes" : "no", t.invalid_extended_configs, t.wm,
-            t.wn, t.wk,
+            t.extended_configs ? "yes" : "no", t.invalid_extended_configs,
+            row_pads, t.invalid_row_pads, t.wm, t.wn, t.wk,
             lut->gpu_arch() ? lut->gpu_arch()->c_str() : "?");
 }
 
@@ -402,11 +468,16 @@ namespace hipdnn_ep {
 namespace matmul_nbits_autotune {
 namespace {
 
+// The first embedded blob measured on `arch` (see the registry note above).
+void loadFor(Table& t, const std::string& arch) {
+  for (size_t i = 0; i < kMatmulNbitsLutBlobCount && !t.loaded; ++i)
+    loadBuffer(t, kMatmulNbitsLutBlobs[i], kMatmulNbitsLutBlobSizes[i], arch);
+}
+
 Table& table() {
   static const std::unique_ptr<Table> t = [] {
     auto fresh = std::make_unique<Table>();
-    for (size_t i = 0; i < kMatmulNbitsLutBlobCount && !fresh->loaded; ++i)
-      loadBuffer(*fresh, kMatmulNbitsLutBlobs[i], kMatmulNbitsLutBlobSizes[i]);
+    loadFor(*fresh, currentGpuArch());
     return fresh;
   }();
   return *t;
@@ -440,6 +511,7 @@ Result resolve(const Request& request, WmmaValidator wmma_valid,
   case Phase::Prefill:    phase = fbs::MatmulNbitsPhase::Prefill; break;
   case Phase::Decode:     phase = fbs::MatmulNbitsPhase::Decode; break;
   case Phase::DecodeDp4a: phase = fbs::MatmulNbitsPhase::DecodeDp4a; break;
+  case Phase::DecodeDp4aBlocks: phase = fbs::MatmulNbitsPhase::DecodeDp4aBlocks; break;
   }
   const fbs::MatmulNbitsBits bits = bitsClass(request.bits);
   if (bits == fbs::MatmulNbitsBits::Any) return result;
@@ -451,7 +523,13 @@ Result resolve(const Request& request, WmmaValidator wmma_valid,
       request.has_zp ? fbs::MatmulNbitsZeroPoint::Asymmetric : fbs::MatmulNbitsZeroPoint::Symmetric;
   fbs::MatmulNbitsRowStride stride = fbs::MatmulNbitsRowStride::Any;
   bool classified = true;
-  if (prefill && request.b_row_bytes == 0) {
+  if (prefill && request.layout == 1) {
+    stride = fbs::MatmulNbitsRowStride::XorLines;
+  } else if (prefill && request.layout == 2) {
+    stride = fbs::MatmulNbitsRowStride::Blocks;
+  } else if (prefill && request.layout != 0) {
+    classified = false;
+  } else if (prefill && request.b_row_bytes == 0) {
     stride = fbs::MatmulNbitsRowStride::Arrival;
   } else if (prefill) {
     const int arrival = request.group_size > 0
@@ -461,6 +539,7 @@ Result resolve(const Request& request, WmmaValidator wmma_valid,
     switch (request.b_row_bytes - arrival) {
     case 0:   stride = fbs::MatmulNbitsRowStride::Arrival; break;
     case 128: stride = fbs::MatmulNbitsRowStride::Padded; break;
+    case 256: stride = fbs::MatmulNbitsRowStride::Padded256; break;
     default:  classified = false; break;
     }
   }
@@ -493,8 +572,12 @@ Result resolve(const Request& request, WmmaValidator wmma_valid,
   const float qn = std::log2(static_cast<float>(request.n));
   const float qk = std::log2(static_cast<float>(request.k));
 
-  const auto git = classified ? t.groups.find(groupKey(phase, bits, gs, zp, stride))
-                              : t.groups.end();
+  auto git = classified ? t.groups.find(groupKey(phase, bits, gs, zp, stride))
+                        : t.groups.end();
+  // A byte order with no rows for this group size and zero point is answered
+  // from the arrival rows; the validator keeps only configs that read it.
+  if (git == t.groups.end() && prefill && classified && request.layout != 0)
+    git = t.groups.find(groupKey(phase, bits, gs, zp, fbs::MatmulNbitsRowStride::Arrival));
   if (git != t.groups.end()) {
     const std::vector<Point>& pts = git->second;
 
@@ -576,6 +659,30 @@ Result resolve(const Request& request, WmmaValidator wmma_valid,
             static_cast<int>(phase), request.m, request.n, request.k,
             request.group_size, static_cast<int>(request.has_zp));
   return result;
+}
+
+int rowPads(const char* arch, HipMatmulNBitsRowPad* entries, int32_t capacity) {
+  // An explicit arch is a compile target, which need not be this device; its
+  // table is loaded on the side, once per arch, and kept for the process.
+  static std::mutex mu;
+  static std::unordered_map<std::string, std::unique_ptr<Table>> by_arch;
+  const Table* t = nullptr;
+  if (!arch || !*arch) {
+    t = &table();
+  } else {
+    std::lock_guard<std::mutex> lock(mu);
+    std::unique_ptr<Table>& slot = by_arch[arch];
+    if (!slot) {
+      slot = std::make_unique<Table>();
+      loadFor(*slot, arch);
+    }
+    t = slot.get();
+  }
+  if (!t->loaded) return -1;
+  const int32_t count = static_cast<int32_t>(t->row_pads.size());
+  for (int32_t i = 0; i < count && i < capacity && entries; ++i)
+    entries[i] = t->row_pads[i];
+  return count;
 }
 
 bool extendedConfigsMeasured() {

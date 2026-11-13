@@ -113,7 +113,7 @@ __global__ void matmul_nbits_kernel(
     const __half* __restrict__ bias,
     __half* __restrict__ output,
     int64_t M, int64_t N, int64_t K,
-    int64_t block_size) {
+    int64_t block_size, int64_t b_row_pitch) {
   int64_t n = static_cast<int64_t>(blockIdx.x) * kBlockDim + threadIdx.x;
   int64_t m = static_cast<int64_t>(blockIdx.y) * kBlockDim + threadIdx.y;
   int64_t batch = blockIdx.z;
@@ -132,7 +132,8 @@ __global__ void matmul_nbits_kernel(
   // every row n>0 by the padding delta and corrupts the output. When
   // K % block_size == 0 this equals K/2 (backward compatible). Verified
   // against the CPU reference for K=4304, block_size=32 (down_proj).
-  const int64_t b_row_bytes = k_blocks * blob_size;
+  // A nonzero b_row_pitch is a row-padded weight (see hip_matmul_nbits_ex).
+  const int64_t b_row_bytes = b_row_pitch ? b_row_pitch : k_blocks * blob_size;
   const uint8_t* b_row = B + n * b_row_bytes;
   const __half* s_row = scales + n * k_blocks;
 
@@ -723,7 +724,7 @@ void matmul_nbits_gemv_kernel(
     const __half* __restrict__ bias,
     __half* __restrict__ output,
     int64_t M, int64_t N, int64_t K,
-    int64_t block_size)
+    int64_t block_size, int64_t b_row_pitch)
 {
     const int64_t n_base = static_cast<int64_t>(blockIdx.x) * TILE_N;
     const int64_t m0     = static_cast<int64_t>(blockIdx.y) * TILE_M;
@@ -763,8 +764,10 @@ void matmul_nbits_gemv_kernel(
     // multiple of block_size the last block is padded, so the true row is
     // k_blocks*(block_size/2) bytes, which exceeds K/2. Using K/2 misaligns
     // every row n>0 by the padding delta and corrupts the output. When
-    // K % block_size == 0 this equals K/2 (backward compatible).
-    const int64_t b_row_stride = k_blocks * (block_size / 2);
+    // K % block_size == 0 this equals K/2 (backward compatible). A nonzero
+    // b_row_pitch is a row-padded weight (see hip_matmul_nbits_ex).
+    const int64_t b_row_stride =
+        b_row_pitch ? b_row_pitch : k_blocks * (block_size / 2);
 
     // Per-column addressing. At TILE_M == 1 it is held in registers exactly as
     // it always was; at TILE_M > 1 it is recomputed from the tile base instead.
@@ -1387,7 +1390,13 @@ __global__ void matmul_nbits_quant_act_i8_kernel(
 #define DP4A_WAVES_MIN(TM) 1
 #define DP4A_WAVES_MAX(TM) ((TM) > 1 ? 4 : 16)
 
-template <int BLOCK_SIZE, int TILE_N, int TILE_M = 1>
+// LAYOUT is the weight's byte order (hip::MatmulNBitsWeightLayout,
+// include/hip/matmul_nbits_weight_layout.h): 0 = rows b_row_stride apart;
+// 1 = dense rows whose 128-byte lines are XOR-swizzled per row; 2 = 512-byte
+// blocks of 16 rows x 32 bytes, [N/16][K/64][16][32]. At M = 1 the blocked
+// layout is read by matmul_nbits_gemv_dp4a_blocks_kernel instead, which reads
+// whole blocks.
+template <int BLOCK_SIZE, int TILE_N, int TILE_M = 1, int LAYOUT = 0>
 __global__
 __attribute__((amdgpu_waves_per_eu(DP4A_WAVES_MIN(TILE_M),
                                    DP4A_WAVES_MAX(TILE_M))))
@@ -1399,12 +1408,14 @@ void matmul_nbits_gemv_dp4a_kernel(
     const uint8_t* __restrict__ zp,
     const __half*  __restrict__ bias,
     __half*        __restrict__ output,
-    int64_t M, int64_t N, int64_t K, int64_t block_size)
+    int64_t M, int64_t N, int64_t K, int64_t block_size,
+    int64_t b_row_pitch)
 {
     const int64_t n_base = static_cast<int64_t>(blockIdx.x) * TILE_N;
     const int64_t m0     = static_cast<int64_t>(blockIdx.y) * TILE_M;
     const int     tid    = threadIdx.x;
     const int64_t k_blocks = (K + block_size - 1) / block_size;
+    const int64_t b_row_stride = b_row_pitch ? b_row_pitch : K / 2;
     const int     bs_shift =
         __builtin_ctzll(static_cast<unsigned long long>(block_size));
     const bool has_zp = (zp != nullptr);
@@ -1426,7 +1437,10 @@ void matmul_nbits_gemv_dp4a_kernel(
             int64_t n  = n_base + tn;
             int64_t sn = (n < N) ? n : 0;
             n_idx[tn]  = sn;
-            b_base_arr[tn] = B + sn * (K / 2);
+            if constexpr (LAYOUT == 2)
+                b_base_arr[tn] = B + (sn >> 4) * (b_row_stride * 16) + (sn & 15) * 32;
+            else
+                b_base_arr[tn] = B + sn * b_row_stride;
             s_rows[tn] = scales + sn * k_blocks;
         }
     }
@@ -1436,7 +1450,9 @@ void matmul_nbits_gemv_dp4a_kernel(
     };
     auto b_ptr = [&](int tn) __attribute__((always_inline)) -> const uint8_t* {
         if constexpr (TILE_M == 1) return b_base_arr[tn];
-        else return B + col_idx(tn) * (K / 2);
+        else if constexpr (LAYOUT == 2)
+            return B + (col_idx(tn) >> 4) * (b_row_stride * 16) + (col_idx(tn) & 15) * 32;
+        else return B + col_idx(tn) * b_row_stride;
     };
     auto s_ptr = [&](int tn) __attribute__((always_inline)) -> const __half* {
         if constexpr (TILE_M == 1) return s_rows[tn];
@@ -1485,7 +1501,26 @@ void matmul_nbits_gemv_dp4a_kernel(
 
 #pragma unroll
         for (int tn = 0; tn < TILE_N; tn++) {
-            uint4 b = *reinterpret_cast<const uint4*>(&b_ptr(tn)[idx * 16]);
+            uint4 b;
+            if constexpr (LAYOUT == 0) {
+                b = *reinterpret_cast<const uint4*>(&b_ptr(tn)[idx * 16]);
+            } else if constexpr (LAYOUT == 2) {
+                // Chunk idx of the row: 32-byte piece idx / 2 of its block,
+                // half idx % 2.
+                b = *reinterpret_cast<const uint4*>(
+                    &b_ptr(tn)[((idx >> 1) << 9) | ((idx & 1) << 4)]);
+            } else {
+                // Line l of row n at l ^ f(n), f(n) = (n / R) % P: P the largest
+                // power of two dividing the line count, R = 64 / gcd(lines, 64).
+                const uint32_t rb = static_cast<uint32_t>(b_row_stride);
+                const uint32_t L = (rb & 127u) ? 0u : rb >> 7;
+                const uint32_t P = L & (0u - L);
+                const uint32_t rs = P ? 6u - __builtin_ctz(P < 64u ? P : 64u) : 0u;
+                const uint32_t n = static_cast<uint32_t>(col_idx(tn));
+                const uint32_t fx = P ? ((n >> rs) & (P - 1u)) << 7 : 0u;
+                b = *reinterpret_cast<const uint4*>(
+                    &b_ptr(tn)[(static_cast<uint32_t>(idx) * 16u) ^ fx]);
+            }
             const unsigned comp[4] = {b.x, b.y, b.z, b.w};
             int dot[TILE_M];
 #pragma unroll
@@ -1582,6 +1617,156 @@ void matmul_nbits_gemv_dp4a_kernel(
     }
 }
 
+// The M = 1 dp4a GEMV for the blocked weight layout (512-byte blocks of 16 rows
+// x 32 bytes, [N/16][K/64][16][32]) that reads whole blocks. Lane l covers row l / 2 of a 16-row group and the
+// 32 k values l % 2 of a 64-k block, so one 16-byte load per lane is one whole
+// block, 4 whole lines. A wave walks the K blocks of RG row groups at once (the
+// activations are loaded once for all of them), KU blocks per step; lane
+// pairs, then the waves, reduce at the end. wave32 only: the caller rejects
+// wave64 devices.
+template <int BLOCK_SIZE, int RG, int KU>
+__global__
+__attribute__((amdgpu_waves_per_eu(1, 16)))
+void matmul_nbits_gemv_dp4a_blocks_kernel(
+    const int8_t*  __restrict__ a_qb,
+    const float*   __restrict__ a_scale,
+    const uint8_t* __restrict__ B,
+    const __half*  __restrict__ scales,
+    const uint8_t* __restrict__ zp,
+    const __half*  __restrict__ bias,
+    __half*        __restrict__ output,
+    int64_t N, int64_t K, int64_t block_size)
+{
+#if HIPDNN_WAVE_SIZE == 32
+    constexpr int NUM_WARPS = BLOCK_SIZE / 32;
+    const int tid  = threadIdx.x;
+    const int lane = tid & 31;
+    const int warp = tid >> 5;
+    const int r    = lane >> 1;
+    const int h    = lane & 1;
+    const int kbn  = static_cast<int>(K >> 6);
+    const int64_t k_blocks = (K + block_size - 1) / block_size;
+    const int bs_shift =
+        __builtin_ctzll(static_cast<unsigned long long>(block_size));
+    const int64_t groups = N >> 4;
+    const int64_t g0 = static_cast<int64_t>(blockIdx.x) * RG;
+    const bool has_zp = (zp != nullptr);
+    const uint8_t* b_grp[RG];
+    const __half*  s_row[RG];
+    int64_t        n_row[RG];
+#pragma unroll
+    for (int g = 0; g < RG; g++) {
+        const int64_t gg = (g0 + g < groups) ? g0 + g : groups - 1;
+        n_row[g] = gg * 16 + r;
+        b_grp[g] = B + gg * kbn * 512 + lane * 16;
+        s_row[g] = scales + n_row[g] * k_blocks;
+    }
+
+    float partial[RG];
+#pragma unroll
+    for (int g = 0; g < RG; g++) partial[g] = 0.0f;
+
+    // KU blocks per step: all their loads (weights, activations, scales, zero
+    // points) are issued before any is used, so a wave keeps KU x (RG + 2)
+    // 16-byte loads in flight; a scale or zero point loaded after the first
+    // use would cost one more round trip per block. A block past the end
+    // reloads the step's first block and is skipped (kb is wave-uniform).
+    for (int kb0 = warp; kb0 < kbn; kb0 += NUM_WARPS * KU) {
+        uint4  bv[KU][RG];
+        int4   av[KU][2];
+        float  a_sc[KU];
+        __half sw[KU][RG];
+        int    zw[KU][RG];
+        bool   live[KU];
+#pragma unroll
+        for (int u = 0; u < KU; u++) {
+            const int kb = kb0 + u * NUM_WARPS;
+            live[u] = (u == 0) || kb < kbn;
+            const int kbc = live[u] ? kb : kb0;
+            const int idx = kbc * 2 + h;
+            const int grp = (idx * 32) >> bs_shift;
+            const int8_t* aq = a_qb + static_cast<int64_t>(idx) * 32;
+            av[u][0] = *reinterpret_cast<const int4*>(aq);
+            av[u][1] = *reinterpret_cast<const int4*>(aq + 16);
+            a_sc[u] = a_scale[grp];
+#pragma unroll
+            for (int g = 0; g < RG; g++) {
+                bv[u][g] = *reinterpret_cast<const uint4*>(
+                    b_grp[g] + static_cast<int64_t>(kbc) * 512);
+                sw[u][g] = s_row[g][grp];
+                // Loaded unconditionally and replaced by 8 when absent: a load
+                // under a branch makes the compiler wait for every load in
+                // flight at the join. Without zero points it rereads the
+                // scale's own bytes, so it touches no other cache line.
+                const uint8_t* zaddr =
+                    has_zp ? zp + n_row[g] * k_blocks + grp
+                           : reinterpret_cast<const uint8_t*>(&s_row[g][grp]);
+                const int z = *zaddr;
+                zw[u][g] = has_zp ? z : 8;
+            }
+        }
+#pragma unroll
+        for (int u = 0; u < KU; u++) {
+            if (!live[u]) continue;
+            // a_lo[j] / a_hi[j]: activation bytes 8j..8j+3 / 8j+4..8j+7.
+            const int a_lo[4] = {av[u][0].x, av[u][0].z, av[u][1].x, av[u][1].z};
+            const int a_hi[4] = {av[u][0].y, av[u][0].w, av[u][1].y, av[u][1].w};
+            int a_sum_q = 0;
+#pragma unroll
+            for (int j = 0; j < 4; j++) {
+                a_sum_q = hipdnn_sudot4(a_lo[j], 0x01010101, a_sum_q);
+                a_sum_q = hipdnn_sudot4(a_hi[j], 0x01010101, a_sum_q);
+            }
+#pragma unroll
+            for (int g = 0; g < RG; g++) {
+                const unsigned comp[4] = {bv[u][g].x, bv[u][g].y, bv[u][g].z,
+                                          bv[u][g].w};
+                int dot = 0;
+#pragma unroll
+                for (int j = 0; j < 4; j++) {
+                    const int lo_w = static_cast<int>(comp[j] & 0x0F0F0F0Fu);
+                    const int hi_w = static_cast<int>((comp[j] >> 4) & 0x0F0F0F0Fu);
+                    dot = hipdnn_sudot4(a_lo[j], lo_w, dot);
+                    dot = hipdnn_sudot4(a_hi[j], hi_w, dot);
+                }
+                partial[g] += a_sc[u] * static_cast<float>(sw[u][g]) *
+                              static_cast<float>(dot - a_sum_q * zw[u][g]);
+            }
+        }
+    }
+
+#pragma unroll
+    for (int g = 0; g < RG; g++) partial[g] += __shfl_xor(partial[g], 1);
+
+    auto store = [&](int g, int row, float val) __attribute__((always_inline)) {
+        if (g0 + g >= groups) return;
+        const int64_t n = (g0 + g) * 16 + row;
+        if (bias) val += static_cast<float>(bias[n]);
+        output[n] = static_cast<__half>(val);
+    };
+    if constexpr (NUM_WARPS == 1) {
+        if (h == 0) {
+#pragma unroll
+            for (int g = 0; g < RG; g++) store(g, r, partial[g]);
+        }
+    } else {
+        __shared__ float warp_sums[NUM_WARPS * RG * 16];
+        if (h == 0) {
+#pragma unroll
+            for (int g = 0; g < RG; g++)
+                warp_sums[(warp * RG + g) * 16 + r] = partial[g];
+        }
+        __syncthreads();
+        if (tid < RG * 16) {
+            float v = 0.0f;
+#pragma unroll
+            for (int w = 0; w < NUM_WARPS; w++) v += warp_sums[w * RG * 16 + tid];
+            store(tid >> 4, tid & 15, v);
+        }
+    }
+#endif
+}
+
 /* -----------------------------------------------------------------------
  * GEMV Autotune: config table, dispatch, benchmark, cache
  * ----------------------------------------------------------------------- */
@@ -1644,7 +1829,7 @@ static void launchGemvConfig(
     const __half* bi, __half* out,
     int64_t M, int64_t N, int64_t K,
     int64_t batch, int64_t bs,
-    bool col_major = false)
+    bool col_major = false, int64_t b_row_pitch = 0)
 {
     auto& c = kGemvConfigs[config_id];
     // M == 1 without zero points: col-major and row-major A are the same single
@@ -1667,11 +1852,13 @@ static void launchGemvConfig(
         if (col_major) \
             hipLaunchKernelGGL( \
                 HIP_KERNEL_NAME(matmul_nbits_gemv_kernel<BS, TN, true>), \
-                grid, block, 0, stream, A, B, sc, zp, bi, out, M, N, K, bs); \
+                grid, block, 0, stream, A, B, sc, zp, bi, out, M, N, K, bs, \
+                b_row_pitch); \
         else \
             hipLaunchKernelGGL( \
                 HIP_KERNEL_NAME(matmul_nbits_gemv_kernel<BS, TN, false>), \
-                grid, block, 0, stream, A, B, sc, zp, bi, out, M, N, K, bs); \
+                grid, block, 0, stream, A, B, sc, zp, bi, out, M, N, K, bs, \
+                b_row_pitch); \
         break
 
     switch (config_id) {
@@ -1838,7 +2025,7 @@ static int tuneGemvConfig(
     const __half* bi, __half* out,
     int64_t M, int64_t N, int64_t K,
     int64_t batch, int64_t bs,
-    bool col_major = false)
+    bool col_major = false, int64_t b_row_pitch = 0)
 {
     float best_ms = 1e30f;
     int   best_id = 8;
@@ -1854,14 +2041,14 @@ static int tuneGemvConfig(
 
     settleClock(ev0, ev1, stream, [&]{
         launchGemvConfig(best_id, stream, A, B, sc, zp, bi, out,
-                         M, N, K, batch, bs, col_major);
+                         M, N, K, batch, bs, col_major, b_row_pitch);
     });
 
     for (int cid = 0; cid < kNumGemvConfigs; cid++) {
         float cfg_best_ms = timeConfigPeak(ev0, ev1, stream, WARMUP, ITERS,
                                             kFloorIters, 0.1f, evict, [&]{
             launchGemvConfig(cid, stream, A, B, sc, zp, bi, out,
-                             M, N, K, batch, bs, col_major);
+                             M, N, K, batch, bs, col_major, b_row_pitch);
         });
 
         MATMUL_NBITS_AUTOTUNE_LOG(
@@ -2033,7 +2220,8 @@ static std::unordered_map<std::string, int> gemv_cache;
 static std::mutex gemv_tune_mutex;
 
 static std::string gemvCacheKey(int64_t M, int64_t N, int64_t K, int64_t bs,
-                                bool col_major, bool has_zp) {
+                                bool col_major, bool has_zp,
+                                int64_t b_row_pitch = 0) {
     // has_zp must be in the key: the asym path executes one extra read_zp +
     // fp32 mul per K-tile per N-tile, so its optimal (threads, tile_n) can
     // differ from the sym tune. Without it, a process that loads both sym and
@@ -2041,7 +2229,8 @@ static std::string gemvCacheKey(int64_t M, int64_t N, int64_t K, int64_t bs,
     // them. (WMMA path's autotune key already includes has_zp — keep parity.)
     return std::to_string(M) + "_" + std::to_string(N) + "_" +
            std::to_string(K) + "_" + std::to_string(bs) + "_" +
-           (col_major ? "1" : "0") + "_" + (has_zp ? "1" : "0");
+           (col_major ? "1" : "0") + "_" + (has_zp ? "1" : "0") +
+           (b_row_pitch ? "_s" + std::to_string(b_row_pitch) : std::string());
 }
 
 static int getOrTuneGemvConfig(
@@ -2051,13 +2240,13 @@ static int getOrTuneGemvConfig(
     const __half* bi, __half* out,
     int64_t M, int64_t N, int64_t K,
     int64_t batch, int64_t bs,
-    bool col_major = false)
+    bool col_major = false, int64_t b_row_pitch = 0)
 {
     // M=1: col_major and row_major layouts are identical (single row) —
     // reuse the row_major autotune result to avoid a redundant tuning pass.
     bool effective_col_major = (M == 1) ? false : col_major;
     std::string key = gemvCacheKey(M, N, K, bs, effective_col_major,
-                                   /*has_zp=*/zp != nullptr);
+                                   /*has_zp=*/zp != nullptr, b_row_pitch);
 
     std::lock_guard<std::mutex> lock(gemv_tune_mutex);
 
@@ -2076,7 +2265,7 @@ static int getOrTuneGemvConfig(
     }
 
     int best = tuneGemvConfig(stream, A, B, sc, zp, bi, out,
-                               M, N, K, batch, bs, col_major);
+                               M, N, K, batch, bs, col_major, b_row_pitch);
     gemv_cache[key] = best;
 
     MATMUL_NBITS_AUTOTUNE_LOG(
@@ -2413,7 +2602,7 @@ static void launchGemvMConfig(
     const __half* sc, const uint8_t* zp,
     const __half* bi, __half* out,
     int64_t M, int64_t N, int64_t K,
-    int64_t batch, int64_t bs)
+    int64_t batch, int64_t bs, int64_t b_row_pitch = 0)
 {
     auto& c = kGemvMConfigs[config_id];
     dim3 grid(static_cast<unsigned>((N + c.tile_n - 1) / c.tile_n),
@@ -2432,7 +2621,8 @@ static void launchGemvMConfig(
     case ID:                                                                   \
         hipLaunchKernelGGL(                                                    \
             HIP_KERNEL_NAME(matmul_nbits_gemv_kernel<BS, TN, true, TM>),        \
-            grid, block, 0, stream, A, B, sc, zp, bi, out, M, N, K, bs);        \
+            grid, block, 0, stream, A, B, sc, zp, bi, out, M, N, K, bs,         \
+            b_row_pitch);                                                      \
         break
 
 #define GEMV_M_BLOCK(BASE, BS)                                                  \
@@ -2463,7 +2653,7 @@ static int tuneGemvMConfig(
     const __half* sc, const uint8_t* zp,
     const __half* bi, __half* out,
     int64_t M, int64_t N, int64_t K,
-    int64_t batch, int64_t bs)
+    int64_t batch, int64_t bs, int64_t b_row_pitch = 0)
 {
     const GemvMCandidates cand =
         gemvMCandidates(kGemvMConfigs, kNumGemvMConfigs, M, N);
@@ -2486,7 +2676,7 @@ static int tuneGemvMConfig(
 
     settleClock(ev0, ev1, stream, [&]{
         launchGemvMConfig(cand.ids[0], stream, A, B, sc, zp, bi, out,
-                          M, N, K, batch, bs);
+                          M, N, K, batch, bs, b_row_pitch);
     });
 
     float best_ms = 1e30f;
@@ -2496,7 +2686,7 @@ static int tuneGemvMConfig(
         float cfg_best_ms = timeConfigPeak(ev0, ev1, stream, WARMUP, ITERS,
                                            kFloorIters, 0.1f, nullptr, [&]{
             launchGemvMConfig(cid, stream, A, B, sc, zp, bi, out,
-                              M, N, K, batch, bs);
+                              M, N, K, batch, bs, b_row_pitch);
         });
 
         CUSTOM_KERNELS_DEBUG_LOG(
@@ -2554,7 +2744,7 @@ static int getOrTuneGemvMConfig(
     const __half* sc, const uint8_t* zp,
     const __half* bi, __half* out,
     int64_t M, int64_t N, int64_t K,
-    int64_t batch, int64_t bs)
+    int64_t batch, int64_t bs, int64_t b_row_pitch = 0)
 {
     const int forced = gemvMConfigOverride();
     if (forced >= 0 && forced < kNumGemvMConfigs &&
@@ -2578,7 +2768,8 @@ static int getOrTuneGemvMConfig(
 
     std::string key = std::to_string(M) + "_" + std::to_string(N) + "_" +
                       std::to_string(K) + "_" + std::to_string(bs) + "_" +
-                      (zp != nullptr ? "1" : "0");
+                      (zp != nullptr ? "1" : "0") + "_" +
+                      std::to_string(b_row_pitch);
 
     std::lock_guard<std::mutex> lock(gemv_m_tune_mutex);
 
@@ -2587,7 +2778,7 @@ static int getOrTuneGemvMConfig(
         return it->second;
 
     int best = tuneGemvMConfig(stream, A, B, sc, zp, bi, out,
-                               M, N, K, batch, bs);
+                               M, N, K, batch, bs, b_row_pitch);
     gemv_m_cache[key] = best;
 
     return best;
@@ -2606,18 +2797,25 @@ static void launchDp4aConfig(
     const int8_t* a_qb, const float* a_scale,
     const uint8_t* B, const __half* sc, const uint8_t* zp,
     const __half* bi, __half* out,
-    int64_t N, int64_t K, int64_t bs)
+    int64_t N, int64_t K, int64_t bs, int64_t b_row_pitch = 0, int layout = 0)
 {
     auto& c = kGemvConfigs[config_id];
     dim3 grid(static_cast<unsigned>((N + c.tile_n - 1) / c.tile_n), 1u, 1u);
     dim3 block(c.threads);
 
+    // layout 1 (XOR lines); the blocked layout runs the block-reading kernel.
 #define DP4A_CASE(ID, BS, TN) \
     case ID: \
-        hipLaunchKernelGGL( \
-            HIP_KERNEL_NAME(matmul_nbits_gemv_dp4a_kernel<BS, TN, 1>), \
-            grid, block, 0, stream, a_qb, a_scale, B, sc, zp, bi, out, \
-            1, N, K, bs); \
+        if (layout == 1) \
+            hipLaunchKernelGGL( \
+                HIP_KERNEL_NAME(matmul_nbits_gemv_dp4a_kernel<BS, TN, 1, 1>), \
+                grid, block, 0, stream, a_qb, a_scale, B, sc, zp, bi, out, \
+                1, N, K, bs, b_row_pitch); \
+        else \
+            hipLaunchKernelGGL( \
+                HIP_KERNEL_NAME(matmul_nbits_gemv_dp4a_kernel<BS, TN, 1>), \
+                grid, block, 0, stream, a_qb, a_scale, B, sc, zp, bi, out, \
+                1, N, K, bs, b_row_pitch); \
         break
 
     switch (config_id) {
@@ -2780,7 +2978,7 @@ static int tuneDp4aConfig(
     const int8_t* a_qb, const float* a_scale,
     const uint8_t* B, const __half* sc, const uint8_t* zp,
     const __half* bi, __half* out,
-    int64_t N, int64_t K, int64_t bs)
+    int64_t N, int64_t K, int64_t bs, int64_t b_row_pitch = 0, int layout = 0)
 {
     hipEvent_t ev0, ev1;
     hipEventCreate(&ev0);
@@ -2790,14 +2988,15 @@ static int tuneDp4aConfig(
     const auto t_start = std::chrono::steady_clock::now();
 
     const int64_t k_blocks = (K + bs - 1) / bs;
+    const int64_t b_row = b_row_pitch ? b_row_pitch : k_blocks * (bs / 2);
     const GemvWeightRotation rot(
-        stream, B, (size_t)N * k_blocks * (bs / 2),
+        stream, B, (size_t)N * b_row,
         sc, (size_t)N * k_blocks * sizeof(__half),
         zp, zp ? (size_t)N * k_blocks : 0);
 
     settleClock(ev0, ev1, stream, [&]{
         launchDp4aConfig(best_id, stream, a_qb, a_scale, B, sc, zp, bi, out,
-                         N, K, bs);
+                         N, K, bs, b_row_pitch, layout);
     });
 
     for (int cid = 0; cid < kNumGemvConfigs; cid++) {
@@ -2806,7 +3005,7 @@ static int tuneDp4aConfig(
             const uint8_t* Bi; const __half* sci; const uint8_t* zpi;
             rot.get(i, Bi, sci, zpi);
             launchDp4aConfig(cid, stream, a_qb, a_scale, Bi, sci, zpi, bi, out,
-                             N, K, bs);
+                             N, K, bs, b_row_pitch, layout);
         });
 
         MATMUL_NBITS_AUTOTUNE_LOG(
@@ -2861,13 +3060,14 @@ static int getOrTuneDp4aConfig(
     const int8_t* a_qb, const float* a_scale,
     const uint8_t* B, const __half* sc, const uint8_t* zp,
     const __half* bi, __half* out,
-    int64_t N, int64_t K, int64_t bs)
+    int64_t N, int64_t K, int64_t bs, int64_t b_row_pitch = 0, int layout = 0)
 {
     const int forced = dp4aConfigOverride();
     if (forced >= 0) return forced;
 
     std::string key = std::to_string(N) + "_" + std::to_string(K) + "_" +
-                      std::to_string(bs) + "_" + (zp ? "1" : "0");
+                      std::to_string(bs) + "_" + (zp ? "1" : "0") + "_" +
+                      std::to_string(b_row_pitch) + "_l" + std::to_string(layout);
 
     std::lock_guard<std::mutex> lock(dp4a_tune_mutex);
     auto it = dp4a_cache.find(key);
@@ -2885,8 +3085,170 @@ static int getOrTuneDp4aConfig(
     }
 
     int best = tuneDp4aConfig(stream, a_qb, a_scale, B, sc, zp, bi, out,
-                              N, K, bs);
+                              N, K, bs, b_row_pitch, layout);
     dp4a_cache[key] = best;
+    return best;
+}
+
+// Configs of matmul_nbits_gemv_dp4a_blocks_kernel: threads x 16-row groups per
+// workgroup x K blocks per step. Tuned online on cold rotated weights, as the
+// dp4a GEMV is; the table has no rows for it.
+struct Dp4aBlocksConfig {
+    int threads;
+    int rg;
+    int ku;
+};
+
+#define DP4A_BLOCKS_KU3(BS, RG) {BS, RG, 1}, {BS, RG, 2}, {BS, RG, 4}
+static constexpr Dp4aBlocksConfig kDp4aBlocksConfigs[] = {
+    DP4A_BLOCKS_KU3(32, 1),   DP4A_BLOCKS_KU3(32, 2),   DP4A_BLOCKS_KU3(32, 4),
+    DP4A_BLOCKS_KU3(64, 1),   DP4A_BLOCKS_KU3(64, 2),   DP4A_BLOCKS_KU3(64, 4),
+    DP4A_BLOCKS_KU3(128, 1),  DP4A_BLOCKS_KU3(128, 2),  DP4A_BLOCKS_KU3(128, 4),
+    DP4A_BLOCKS_KU3(256, 1),  DP4A_BLOCKS_KU3(256, 2),  DP4A_BLOCKS_KU3(256, 4),
+    DP4A_BLOCKS_KU3(512, 1),  DP4A_BLOCKS_KU3(512, 2),  DP4A_BLOCKS_KU3(512, 4),
+    DP4A_BLOCKS_KU3(1024, 1), DP4A_BLOCKS_KU3(1024, 2), DP4A_BLOCKS_KU3(1024, 4),
+};
+#undef DP4A_BLOCKS_KU3
+static constexpr int kNumDp4aBlocksConfigs =
+    static_cast<int>(sizeof(kDp4aBlocksConfigs) / sizeof(kDp4aBlocksConfigs[0]));
+
+static void launchDp4aBlocksConfig(
+    int config_id, hipStream_t stream,
+    const int8_t* a_qb, const float* a_scale,
+    const uint8_t* B, const __half* sc, const uint8_t* zp,
+    const __half* bi, __half* out,
+    int64_t N, int64_t K, int64_t bs)
+{
+    const auto& c = kDp4aBlocksConfigs[config_id];
+    const int64_t groups = N / 16;
+    dim3 grid(static_cast<unsigned>((groups + c.rg - 1) / c.rg), 1u, 1u);
+    dim3 block(c.threads);
+    // The (BS, RG, KU) at every case ID below MUST match kDp4aBlocksConfigs[ID].
+#define DP4A_BLOCKS_CASE(ID, BS, RG, KU)                                           \
+    case ID:                                                                    \
+        hipLaunchKernelGGL(                                                     \
+            HIP_KERNEL_NAME(matmul_nbits_gemv_dp4a_blocks_kernel<BS, RG, KU>),     \
+            grid, block, 0, stream, a_qb, a_scale, B, sc, zp, bi, out, N, K,    \
+            bs);                                                                \
+        break
+#define DP4A_BLOCKS_CASES(BASE, BS, RG)                                            \
+    DP4A_BLOCKS_CASE(BASE, BS, RG, 1); DP4A_BLOCKS_CASE(BASE + 1, BS, RG, 2);         \
+    DP4A_BLOCKS_CASE(BASE + 2, BS, RG, 4)
+    switch (config_id) {
+        DP4A_BLOCKS_CASES( 0,   32, 1); DP4A_BLOCKS_CASES( 3,   32, 2); DP4A_BLOCKS_CASES( 6,   32, 4);
+        DP4A_BLOCKS_CASES( 9,   64, 1); DP4A_BLOCKS_CASES(12,   64, 2); DP4A_BLOCKS_CASES(15,   64, 4);
+        DP4A_BLOCKS_CASES(18,  128, 1); DP4A_BLOCKS_CASES(21,  128, 2); DP4A_BLOCKS_CASES(24,  128, 4);
+        DP4A_BLOCKS_CASES(27,  256, 1); DP4A_BLOCKS_CASES(30,  256, 2); DP4A_BLOCKS_CASES(33,  256, 4);
+        DP4A_BLOCKS_CASES(36,  512, 1); DP4A_BLOCKS_CASES(39,  512, 2); DP4A_BLOCKS_CASES(42,  512, 4);
+        DP4A_BLOCKS_CASES(45, 1024, 1); DP4A_BLOCKS_CASES(48, 1024, 2); DP4A_BLOCKS_CASES(51, 1024, 4);
+        default: break;
+    }
+#undef DP4A_BLOCKS_CASES
+#undef DP4A_BLOCKS_CASE
+}
+
+static int tuneDp4aBlocksConfig(
+    hipStream_t stream,
+    const int8_t* a_qb, const float* a_scale,
+    const uint8_t* B, const __half* sc, const uint8_t* zp,
+    const __half* bi, __half* out,
+    int64_t N, int64_t K, int64_t bs)
+{
+    hipEvent_t ev0, ev1;
+    hipEventCreate(&ev0);
+    hipEventCreate(&ev1);
+    float best_ms = 1e30f;
+    int   best_id = 18;
+    const int64_t k_blocks = (K + bs - 1) / bs;
+    const GemvWeightRotation rot(
+        stream, B, (size_t)N * (K / 2),
+        sc, (size_t)N * k_blocks * sizeof(__half),
+        zp, zp ? (size_t)N * k_blocks : 0);
+
+    settleClock(ev0, ev1, stream, [&]{
+        launchDp4aBlocksConfig(best_id, stream, a_qb, a_scale, B, sc, zp, bi, out,
+                            N, K, bs);
+    });
+    for (int cid = 0; cid < kNumDp4aBlocksConfigs; cid++) {
+        const float ms = timeConfigRotated(ev0, ev1, stream, rot.copies(),
+                                           [&](int i) {
+            const uint8_t* Bi; const __half* sci; const uint8_t* zpi;
+            rot.get(i, Bi, sci, zpi);
+            launchDp4aBlocksConfig(cid, stream, a_qb, a_scale, Bi, sci, zpi, bi,
+                                out, N, K, bs);
+        });
+        MATMUL_NBITS_AUTOTUNE_LOG(
+            "[custom_kernels]   dp4a-blocks config[%2d] threads=%4d rg=%d ku=%d : %.5f ms\n",
+            cid, kDp4aBlocksConfigs[cid].threads, kDp4aBlocksConfigs[cid].rg,
+            kDp4aBlocksConfigs[cid].ku, ms);
+        if (ms < best_ms) { best_ms = ms; best_id = cid; }
+    }
+    hipEventDestroy(ev0);
+    hipEventDestroy(ev1);
+    MATMUL_NBITS_AUTOTUNE_LOG(
+        "[custom_kernels] GEMV-dp4a-blocks autotune: N=%lld K=%lld bs=%lld zp=%s -> "
+        "config[%d] threads=%d rg=%d ku=%d (%.5f ms/iter)\n",
+        (long long)N, (long long)K, (long long)bs, zp ? "yes" : "no", best_id,
+        kDp4aBlocksConfigs[best_id].threads, kDp4aBlocksConfigs[best_id].rg,
+        kDp4aBlocksConfigs[best_id].ku, best_ms);
+    return best_id;
+}
+
+static std::unordered_map<std::string, int> dp4a_blocks_cache;
+
+// A DecodeDp4aBlocks table answer: threads, and tile_n packing the 16-row groups
+// per workgroup (bits 0-3) and the K blocks per step (bits 4-7).
+static int dp4aBlocksConfigFromGeometry(const matmul_lut::GemvAnswer& g) {
+    for (int cid = 0; cid < kNumDp4aBlocksConfigs; cid++)
+        if (kDp4aBlocksConfigs[cid].threads == g.threads &&
+            kDp4aBlocksConfigs[cid].rg == (g.tile_n & 15) &&
+            kDp4aBlocksConfigs[cid].ku == (g.tile_n >> 4))
+            return cid;
+    return -1;
+}
+
+static int getOrTuneDp4aBlocksConfig(
+    hipStream_t stream,
+    const int8_t* a_qb, const float* a_scale,
+    const uint8_t* B, const __half* sc, const uint8_t* zp,
+    const __half* bi, __half* out,
+    int64_t N, int64_t K, int64_t bs)
+{
+    const std::string key = std::to_string(N) + "_" + std::to_string(K) + "_" +
+                            std::to_string(bs) + "_" + (zp ? "1" : "0");
+    std::lock_guard<std::mutex> lock(dp4a_tune_mutex);
+    auto it = dp4a_blocks_cache.find(key);
+    if (it != dp4a_blocks_cache.end()) return it->second;
+    if (matmulNbitsLutLookupEnabled()) {
+        matmul_lut::Request req;
+        req.phase = matmul_lut::Phase::DecodeDp4aBlocks;
+        req.bits = 4;
+        req.m = 1;
+        req.n = static_cast<int>(N);
+        req.k = static_cast<int>(K);
+        req.group_size = static_cast<int>(bs);
+        req.has_zp = zp != nullptr;
+        const matmul_lut::Result r = matmul_lut::resolve(
+            req, nullptr,
+            [](void*, const matmul_lut::GemvAnswer& g) {
+                return dp4aBlocksConfigFromGeometry(g) >= 0;
+            },
+            nullptr);
+        const int cid = r.source == matmul_lut::Source::None
+                            ? -1 : dp4aBlocksConfigFromGeometry(r.gemv);
+        if (cid >= 0) {
+            MATMUL_NBITS_AUTOTUNE_LOG(
+                "[custom_kernels] LUT hit (src=%d d=%.3f) dp4a-blocks N=%lld K=%lld "
+                "gs=%lld -> config[%d]\n",
+                static_cast<int>(r.source), r.distance, (long long)N, (long long)K,
+                (long long)bs, cid);
+            dp4a_blocks_cache[key] = cid;
+            return cid;
+        }
+    }
+    const int best = tuneDp4aBlocksConfig(stream, a_qb, a_scale, B, sc, zp, bi,
+                                       out, N, K, bs);
+    dp4a_blocks_cache[key] = best;
     return best;
 }
 
@@ -2926,7 +3288,8 @@ static void launchDp4aMConfig(
     const int8_t* a_qb, const float* a_scale,
     const uint8_t* B, const __half* sc, const uint8_t* zp,
     const __half* bi, __half* out,
-    int64_t M, int64_t N, int64_t K, int64_t bs)
+    int64_t M, int64_t N, int64_t K, int64_t bs, int64_t b_row_pitch = 0,
+    int layout = 0)
 {
     auto& c = kGemvMDp4aConfigs[config_id];
     dim3 grid(static_cast<unsigned>((N + c.tile_n - 1) / c.tile_n),
@@ -2937,10 +3300,21 @@ static void launchDp4aMConfig(
     // kGemvMDp4aConfigs[ID]; see launchGemvConfigI8 for what drift costs.
 #define DP4A_M_CASE(ID, BS, TN, TM)                                            \
     case ID:                                                                   \
-        hipLaunchKernelGGL(                                                    \
-            HIP_KERNEL_NAME(matmul_nbits_gemv_dp4a_kernel<BS, TN, TM>),        \
-            grid, block, 0, stream, a_qb, a_scale, B, sc, zp, bi, out,         \
-            M, N, K, bs);                                                      \
+        if (layout == 1)                                                       \
+            hipLaunchKernelGGL(                                                \
+                HIP_KERNEL_NAME(matmul_nbits_gemv_dp4a_kernel<BS, TN, TM, 1>), \
+                grid, block, 0, stream, a_qb, a_scale, B, sc, zp, bi, out,     \
+                M, N, K, bs, b_row_pitch);                                     \
+        else if (layout == 2)                                                  \
+            hipLaunchKernelGGL(                                                \
+                HIP_KERNEL_NAME(matmul_nbits_gemv_dp4a_kernel<BS, TN, TM, 2>), \
+                grid, block, 0, stream, a_qb, a_scale, B, sc, zp, bi, out,     \
+                M, N, K, bs, b_row_pitch);                                     \
+        else                                                                   \
+            hipLaunchKernelGGL(                                                \
+                HIP_KERNEL_NAME(matmul_nbits_gemv_dp4a_kernel<BS, TN, TM>),    \
+                grid, block, 0, stream, a_qb, a_scale, B, sc, zp, bi, out,     \
+                M, N, K, bs, b_row_pitch);                                     \
         break
 
 #define DP4A_M_BLOCK(BASE, BS)                                                 \
@@ -2972,7 +3346,8 @@ static int tuneDp4aMConfig(
     const int8_t* a_qb, const float* a_scale,
     const uint8_t* B, const __half* sc, const uint8_t* zp,
     const __half* bi, __half* out,
-    int64_t M, int64_t N, int64_t K, int64_t bs)
+    int64_t M, int64_t N, int64_t K, int64_t bs, int64_t b_row_pitch = 0,
+    int layout = 0)
 {
     const GemvMCandidates cand =
         gemvMCandidates(kGemvMDp4aConfigs, kNumGemvMDp4aConfigs, M, N);
@@ -2990,7 +3365,7 @@ static int tuneDp4aMConfig(
 
     settleClock(ev0, ev1, stream, [&]{
         launchDp4aMConfig(cand.ids[0], stream, a_qb, a_scale, B, sc, zp, bi,
-                          out, M, N, K, bs);
+                          out, M, N, K, bs, b_row_pitch, layout);
     });
 
     float best_ms = 1e30f;
@@ -3000,7 +3375,7 @@ static int tuneDp4aMConfig(
         float cfg_best_ms = timeConfigPeak(ev0, ev1, stream, WARMUP, ITERS,
                                            kFloorIters, 0.1f, nullptr, [&]{
             launchDp4aMConfig(cid, stream, a_qb, a_scale, B, sc, zp, bi, out,
-                              M, N, K, bs);
+                              M, N, K, bs, b_row_pitch, layout);
         });
 
         CUSTOM_KERNELS_DEBUG_LOG(
@@ -3030,7 +3405,8 @@ static int getOrTuneDp4aMConfig(
     const int8_t* a_qb, const float* a_scale,
     const uint8_t* B, const __half* sc, const uint8_t* zp,
     const __half* bi, __half* out,
-    int64_t M, int64_t N, int64_t K, int64_t bs)
+    int64_t M, int64_t N, int64_t K, int64_t bs, int64_t b_row_pitch = 0,
+    int layout = 0)
 {
     // Lookup mode answers from the heuristic and never sweeps; see
     // getOrTuneGemvMConfig for why this table cannot come from the offline LUT.
@@ -3042,7 +3418,8 @@ static int getOrTuneDp4aMConfig(
 
     std::string key = std::to_string(M) + "_" + std::to_string(N) + "_" +
                       std::to_string(K) + "_" + std::to_string(bs) + "_" +
-                      (zp ? "1" : "0");
+                      (zp ? "1" : "0") + "_" + std::to_string(b_row_pitch) +
+                      "_l" + std::to_string(layout);
 
     std::lock_guard<std::mutex> lock(dp4a_m_tune_mutex);
     auto it = dp4a_m_cache.find(key);
@@ -3050,7 +3427,7 @@ static int getOrTuneDp4aMConfig(
         return it->second;
 
     int best = tuneDp4aMConfig(stream, a_qb, a_scale, B, sc, zp, bi, out,
-                               M, N, K, bs);
+                               M, N, K, bs, b_row_pitch, layout);
     dp4a_m_cache[key] = best;
     return best;
 }
@@ -3064,15 +3441,30 @@ static int getOrTuneDp4aMConfig(
 //   a_qb_scratch/a_scale_scratch : per-session scratch, caller-sized to
 //       >= M*K bytes and >= M*k_blocks floats respectively.
 // Returns hip status (hipSuccess on success). K must be a multiple of 32.
-extern "C" int hip_matmul_nbits_dp4a(
+// hip_matmul_nbits_dp4a_ex for a weight in a byte order
+// (hip::MatmulNBitsWeightLayout): b_layout 0 reads rows b_row_bytes apart
+// (0: the arrival stride); 1 (XOR lines) and 2 (16-row blocks) read dense rows,
+// b_row_bytes 0 or K/2. Blocks need N % 16 == 0, K % 64 == 0 and wave32.
+extern "C" int hip_matmul_nbits_dp4a_layout(
     void* stream_v,
     const void* A, const void* B, const void* scales, const void* zp_u8,
     const void* bias, void* out,
     int64_t M, int64_t N, int64_t K, int64_t block_size,
-    void* a_qb_scratch, void* a_scale_scratch)
+    void* a_qb_scratch, void* a_scale_scratch, int64_t b_row_bytes,
+    int64_t b_layout)
 {
     if (K % 32 != 0) return hipErrorInvalidValue;
+    if (b_row_bytes != 0 && b_row_bytes < K / 2) return hipErrorInvalidValue;
     if (M < 1) return hipErrorInvalidValue;
+    if (b_layout < 0 || b_layout > 2) return hipErrorInvalidValue;
+    if (b_layout != 0) {
+        if (b_row_bytes != 0 && b_row_bytes != K / 2) return hipErrorInvalidValue;
+        if (K % 64 != 0) return hipErrorInvalidValue;
+        b_row_bytes = 0;
+    }
+    if (b_layout == 2 && (N % 16 != 0 || hipdnn_device_is_wave64()))
+        return hipErrorInvalidValue;
+    const int layout = static_cast<int>(b_layout);
     hipStream_t stream = static_cast<hipStream_t>(stream_v);
 
     const __half*  Ah   = static_cast<const __half*>(A);
@@ -3096,19 +3488,50 @@ extern "C" int hip_matmul_nbits_dp4a(
                        stream, Ah, a_qb, a_sc, K, block_size, k_blocks);
 
     // Step 2: dp4a GEMV (autotuned config). M == 1 keeps the single-row
-    // launcher and its own tune cache, which has more history behind it.
-    if (M == 1) {
+    // launcher and its own tune cache, which has more history behind it; on
+    // the blocked layout it is the block-reading kernel.
+    if (M == 1 && layout == 2) {
+        int cfg = getOrTuneDp4aBlocksConfig(stream, a_qb, a_sc, Bp, sc, zp, bi,
+                                            outp, N, K, block_size);
+        launchDp4aBlocksConfig(cfg, stream, a_qb, a_sc, Bp, sc, zp, bi, outp,
+                               N, K, block_size);
+    } else if (M == 1) {
         int cfg = getOrTuneDp4aConfig(stream, a_qb, a_sc, Bp, sc, zp, bi, outp,
-                                      N, K, block_size);
+                                      N, K, block_size, b_row_bytes, layout);
         launchDp4aConfig(cfg, stream, a_qb, a_sc, Bp, sc, zp, bi, outp,
-                         N, K, block_size);
+                         N, K, block_size, b_row_bytes, layout);
     } else {
         int cfg = getOrTuneDp4aMConfig(stream, a_qb, a_sc, Bp, sc, zp, bi, outp,
-                                       M, N, K, block_size);
+                                       M, N, K, block_size, b_row_bytes, layout);
         launchDp4aMConfig(cfg, stream, a_qb, a_sc, Bp, sc, zp, bi, outp,
-                          M, N, K, block_size);
+                          M, N, K, block_size, b_row_bytes, layout);
     }
     return hipGetLastError();
+}
+
+extern "C" int hip_matmul_nbits_dp4a_ex(
+    void* stream_v,
+    const void* A, const void* B, const void* scales, const void* zp_u8,
+    const void* bias, void* out,
+    int64_t M, int64_t N, int64_t K, int64_t block_size,
+    void* a_qb_scratch, void* a_scale_scratch, int64_t b_row_bytes)
+{
+    return hip_matmul_nbits_dp4a_layout(stream_v, A, B, scales, zp_u8, bias,
+                                        out, M, N, K, block_size, a_qb_scratch,
+                                        a_scale_scratch, b_row_bytes,
+                                        /*b_layout=*/0);
+}
+
+extern "C" int hip_matmul_nbits_dp4a(
+    void* stream,
+    const void* A, const void* B, const void* scales, const void* zp_u8,
+    const void* bias, void* out,
+    int64_t M, int64_t N, int64_t K, int64_t block_size,
+    void* a_qb_scratch, void* a_scale_scratch)
+{
+    return hip_matmul_nbits_dp4a_ex(stream, A, B, scales, zp_u8, bias, out, M,
+                                    N, K, block_size, a_qb_scratch,
+                                    a_scale_scratch, /*b_row_bytes=*/0);
 }
 
 /* -----------------------------------------------------------------------
@@ -4370,7 +4793,7 @@ __global__ void dequant_u4_to_fp16(
     const _Float16* __restrict__ scales,
     const _Float16* __restrict__ zeros,
     _Float16* __restrict__ B_fp16,
-    int N, int K, int group_size, int num_groups_k)
+    int N, int K, int group_size, int num_groups_k, int b_row_pitch)
 {
     int n   = static_cast<int>(blockIdx.y);
     int k8  = (static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x) * 8;
@@ -4383,9 +4806,12 @@ __global__ void dequant_u4_to_fp16(
     // Row stride is num_groups_k * (group_size/2) bytes (ONNX MatMulNBits
     // padding: the last group is padded to a full group_size even when
     // K % group_size != 0), not a plain K/2 -- see GemmFp16U4Impl's
-    // b_src_u4 comment. The intra-row offset (k8/2) is unaffected.
+    // b_src_u4 comment. The intra-row offset (k8/2) is unaffected. A nonzero
+    // b_row_pitch is a row-padded weight (see hip_matmul_nbits_ex).
+    const size_t row = b_row_pitch ? static_cast<size_t>(b_row_pitch)
+                                   : static_cast<size_t>(num_groups_k) * (group_size / 2);
     uint32_t four = *reinterpret_cast<const uint32_t*>(
-        &B_packed[n * (num_groups_k * (group_size / 2)) + k8 / 2]);
+        &B_packed[static_cast<size_t>(n) * row + k8 / 2]);
 
     _Float16 bv[8];
     bv[0] = (static_cast<_Float16>(static_cast<int>((four      ) & 0xF)) - zp) * scale;
@@ -4462,11 +4888,14 @@ void MatMulNBitsWMMA_ZP(
 
 // GemmFp16U4ImplX entries. VARIANT packs the pipeline options of
 // matmul_nbits_wmma_core_x.h in bits 0-6 (see WmmaConfig::variant); bit 7
-// selects the CU-mode build of the same kernel.
+// selects the CU-mode build of the same kernel; bits 8-9 are B's byte order
+// (hip::MatmulNBitsWeightLayout), set by launchWmmaExt from the call, not by
+// the config table.
 #define WMMAX_VARIANT_ARGS(V) \
     ((V) & 1) ? 2 : 1, ((V) >> 1) & 1, ((V) >> 2) & 1, ((V) >> 3) & 3, \
     ((V) >> 5) & 1, ((V) >> 6) & 1
 constexpr int kWmmaVariantCuMode = 128;
+constexpr int kWmmaVariantLayoutShift = 8;
 
 // CU mode is a per-kernel property (the descriptor's workgroup_processor_mode):
 // the workgroup's waves share one CU and its half of the LDS instead of
@@ -4486,7 +4915,8 @@ constexpr int kWmmaVariantCuMode = 128;
         int swizzle_n, int b_row_bytes)                                         \
     {                                                                           \
         GemmFp16U4ImplX<BM_T, BN_T, WT_M, WT_N, USE_ZEROS, BC, BK_T,            \
-                        WMMAX_VARIANT_ARGS(VARIANT)>(                           \
+                        WMMAX_VARIANT_ARGS(VARIANT), /*GROUPED_P=*/false,       \
+                        ((VARIANT) >> 8) & 3>(                                  \
             M, N, K, A, lda, B_packed, scales, zeros, group_size, num_groups_k, \
             C, ldc, swizzle_n, b_row_bytes);                                    \
     }
@@ -5422,10 +5852,15 @@ static int dequantMaxGridY() {
 // BK vs K, dequant grid.y). Validators must use this so resolve walks outwards
 // instead of handing production an unlaunchable winner.
 static bool wmmaConfigLaunchable(const WmmaConfig& c, int /*M*/, int N, int K,
-                                 int gs, int b_row_bytes) {
+                                 int gs, int b_row_bytes, int layout = 0) {
     if (!wmmaConfigSupported(c, N, K, gs)) return false;
     // Separate dequant has no stride argument; padded B must stay fused.
     if (b_row_bytes != 0 && !c.fused) return false;
+    // Only GemmFp16U4ImplX reads a byte order other than rows: the extended
+    // entries with a nonzero variant (variant 0 runs the shipped core).
+    if (layout != 0 && (!c.ext || c.variant == 0 || K % 64 != 0 ||
+                        (layout == 2 && N % 16 != 0)))
+        return false;
     if (!c.fused && N > dequantMaxGridY()) return false;
     return true;
 }
@@ -5452,6 +5887,7 @@ struct MatmulNbitsWmmaLutCtx {
     int k;
     int gs;
     int b_row_bytes;
+    int layout;
 };
 
 static int wmmaConfigFromGeometry(const matmul_lut::WmmaAnswer& g,
@@ -5464,7 +5900,7 @@ static int wmmaConfigFromGeometry(const matmul_lut::WmmaAnswer& g,
         if (wmmaBk(c) != g.bk) continue;
         if (c.ext != g.ext || c.variant != g.variant) continue;
         if (!wmmaConfigLaunchable(c, ctx.m, ctx.n, ctx.k, ctx.gs,
-                                  ctx.b_row_bytes))
+                                  ctx.b_row_bytes, ctx.layout))
             return -1;
         return cid;
     }
@@ -5478,7 +5914,7 @@ static bool matmulNbitsWmmaValidator(void* ctx, const matmul_lut::WmmaAnswer& g)
 
 // Returns a kWmmaConfigs index from the LUT, or -1 on a miss.
 static int matmulNbitsLutWmmaConfig(int M, int N, int K, int gs, bool has_zp,
-                           int b_row_bytes) {
+                           int b_row_bytes, int layout = 0) {
     if (!matmulNbitsLutLookupEnabled()) return -1;   // online mode: sweep, skip the LUT
     matmul_lut::Request req;
     req.phase = matmul_lut::Phase::Prefill;
@@ -5489,7 +5925,8 @@ static int matmulNbitsLutWmmaConfig(int M, int N, int K, int gs, bool has_zp,
     req.group_size = gs;
     req.has_zp = has_zp;
     req.b_row_bytes = b_row_bytes;
-    MatmulNbitsWmmaLutCtx ctx{M, N, K, gs, b_row_bytes};
+    req.layout = layout;
+    MatmulNbitsWmmaLutCtx ctx{M, N, K, gs, b_row_bytes, layout};
     const matmul_lut::Result r =
         matmul_lut::resolve(req, matmulNbitsWmmaValidator, nullptr, &ctx);
     if (r.source == matmul_lut::Source::None) return -1;
@@ -5497,9 +5934,9 @@ static int matmulNbitsLutWmmaConfig(int M, int N, int K, int gs, bool has_zp,
     if (cid >= 0)
         MATMUL_NBITS_AUTOTUNE_LOG(
             "[custom_kernels] LUT hit (src=%d d=%.3f) M=%d N=%d K=%d gs=%d "
-            "stride=%d -> config[%d]\n",
+            "stride=%d layout=%d -> config[%d]\n",
             static_cast<int>(r.source), r.distance, M, N, K, gs, b_row_bytes,
-            cid);
+            layout, cid);
     return cid;
 }
 
@@ -5514,7 +5951,7 @@ static void launchDequant(
     dim3 dq_grid(static_cast<unsigned>(k_groups), static_cast<unsigned>(N));
     dim3 dq_block(DQ_THR);
     hipLaunchKernelGGL(dequant_u4_to_fp16, dq_grid, dq_block, 0, stream,
-                       B_packed, scales, zeros, B_fp16, N, K, gs, ngk);
+                       B_packed, scales, zeros, B_fp16, N, K, gs, ngk, 0);
 }
 
 template <int BM, int BN, int WM, int WN, int BK, int VAR>
@@ -5522,7 +5959,8 @@ static void launchWmmaExt(
     hipStream_t stream, int M, int N, int K,
     const _Float16* A, int lda, const unsigned char* B,
     const _Float16* scales, const _Float16* zeros, int gs, int ngk,
-    _Float16* C, int ldc, bool has_zp, int swizzle_n, int b_row_bytes)
+    _Float16* C, int ldc, bool has_zp, int swizzle_n, int b_row_bytes,
+    int layout = 0)
 {
     const bool bc = (M % BM != 0) || (N % BN != 0);
     dim3 grid(static_cast<unsigned>((N + BN - 1) / BN),
@@ -5537,16 +5975,26 @@ static void launchWmmaExt(
         else if (has_zp)   WMMA_EXT_LAUNCH((MatMulNBitsWMMA_ZP<BM, BN, WM, WN, 1, false, BK>));
         else if (bc)       WMMA_EXT_LAUNCH((MatMulNBitsWMMA_NoZP<BM, BN, WM, WN, 1, true, BK>));
         else               WMMA_EXT_LAUNCH((MatMulNBitsWMMA_NoZP<BM, BN, WM, WN, 1, false, BK>));
-    } else if constexpr ((VAR & kWmmaVariantCuMode) != 0) {
-        if (has_zp && bc)  WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_ZP_CU<BM, BN, WM, WN, true, BK, VAR>));
-        else if (has_zp)   WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_ZP_CU<BM, BN, WM, WN, false, BK, VAR>));
-        else if (bc)       WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_NoZP_CU<BM, BN, WM, WN, true, BK, VAR>));
-        else               WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_NoZP_CU<BM, BN, WM, WN, false, BK, VAR>));
     } else {
-        if (has_zp && bc)  WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_ZP<BM, BN, WM, WN, true, BK, VAR>));
-        else if (has_zp)   WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_ZP<BM, BN, WM, WN, false, BK, VAR>));
-        else if (bc)       WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_NoZP<BM, BN, WM, WN, true, BK, VAR>));
-        else               WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_NoZP<BM, BN, WM, WN, false, BK, VAR>));
+        // B's byte order is bits 8-9 of the instantiated variant.
+#define WMMA_EXT_X(ZPK, NZK, V)                                                \
+        {                                                                      \
+            if (has_zp && bc)  WMMA_EXT_LAUNCH((ZPK<BM, BN, WM, WN, true, BK, V>));  \
+            else if (has_zp)   WMMA_EXT_LAUNCH((ZPK<BM, BN, WM, WN, false, BK, V>)); \
+            else if (bc)       WMMA_EXT_LAUNCH((NZK<BM, BN, WM, WN, true, BK, V>));  \
+            else               WMMA_EXT_LAUNCH((NZK<BM, BN, WM, WN, false, BK, V>)); \
+        }
+#define WMMA_EXT_X_LAYOUTS(ZPK, NZK)                                           \
+        if (layout == 1)      WMMA_EXT_X(ZPK, NZK, VAR | (1 << kWmmaVariantLayoutShift)) \
+        else if (layout == 2) WMMA_EXT_X(ZPK, NZK, VAR | (2 << kWmmaVariantLayoutShift)) \
+        else                  WMMA_EXT_X(ZPK, NZK, VAR)
+        if constexpr ((VAR & kWmmaVariantCuMode) != 0) {
+            WMMA_EXT_X_LAYOUTS(MatMulNBitsWMMAX_ZP_CU, MatMulNBitsWMMAX_NoZP_CU)
+        } else {
+            WMMA_EXT_X_LAYOUTS(MatMulNBitsWMMAX_ZP, MatMulNBitsWMMAX_NoZP)
+        }
+#undef WMMA_EXT_X_LAYOUTS
+#undef WMMA_EXT_X
     }
 #undef WMMA_EXT_LAUNCH
 }
@@ -5559,13 +6007,16 @@ static void launchWmmaConfig(
     const _Float16* scales, const _Float16* zeros,
     int gs, int ngk,
     _Float16* C, int ldc, bool has_zp,
-    _Float16* B_fp16_buf = nullptr, int b_row_bytes = 0)
+    _Float16* B_fp16_buf = nullptr, int b_row_bytes = 0, int layout = 0)
 {
     if (!wmmaConfigSupported(kWmmaConfigs[config_id], N, K, gs))
         config_id = wmmaFallbackConfig(N, K, gs);
 
     auto& c = kWmmaConfigs[config_id];
     bool need_bc = (M % c.bm != 0) || (N % c.bn != 0);
+    // A byte order other than rows is read only by the extended core; callers
+    // pick a config through wmmaConfigLaunchable, so this never launches.
+    if (layout != 0 && (!wmmaConfigIsExt(c) || c.variant == 0)) return;
 
     if (wmmaConfigIsExt(c)) {
 #define WMMA_EXT_CASE(BM, BN, WM, WN, BK, VAR, SW)                             \
@@ -5573,7 +6024,7 @@ static void launchWmmaConfig(
             wmmaBk(c) == BK && c.variant == VAR) {                           \
             launchWmmaExt<BM, BN, WM, WN, BK, VAR>(                          \
                 stream, M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc,  \
-                has_zp, c.swizzle_n, b_row_bytes);                           \
+                has_zp, c.swizzle_n, b_row_bytes, layout);                   \
             return;                                                          \
         }
         WMMA_EXT_CONFIGS(WMMA_EXT_CASE)
@@ -5978,7 +6429,7 @@ static int tuneWmmaConfig(
     const unsigned char* B,
     const _Float16* scales, const _Float16* zeros,
     int gs, int ngk,
-    _Float16* C, int ldc, bool has_zp, int b_row_bytes = 0)
+    _Float16* C, int ldc, bool has_zp, int b_row_bytes = 0, int layout = 0)
 {
     hipEvent_t ev0, ev1;
     hipEventCreate(&ev0);
@@ -6002,7 +6453,7 @@ static int tuneWmmaConfig(
                         g_wmma_sweep_extended.load(std::memory_order_relaxed);
     auto candidate = [&](int cid) {
         const WmmaConfig& cfg = kWmmaConfigs[cid];
-        return wmmaConfigLaunchable(cfg, M, N, K, gs, b_row_bytes) &&
+        return wmmaConfigLaunchable(cfg, M, N, K, gs, b_row_bytes, layout) &&
                !(cfg.ext && !ext_ok);
     };
 
@@ -6019,7 +6470,7 @@ static int tuneWmmaConfig(
         settleClock(ev0, ev1, stream, [&]{
             launchWmmaConfig(settle_id, stream, M, N, K, A, lda, B,
                              scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf,
-                             b_row_bytes);
+                             b_row_bytes, layout);
         });
 
     for (int cid = 0; cid < kNumWmmaConfigs; cid++) {
@@ -6029,7 +6480,7 @@ static int tuneWmmaConfig(
                                             kFloorIters, 0.1f, nullptr, [&]{
             launchWmmaConfig(cid, stream, M, N, K, A, lda, B,
                              scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf,
-                             b_row_bytes);
+                             b_row_bytes, layout);
         });
 
         // Drain sticky launch errors per candidate. A losing config that fails
@@ -6062,6 +6513,8 @@ static int tuneWmmaConfig(
 
     hipEventDestroy(ev0);
     hipEventDestroy(ev1);
+    // No config can read this byte order at this shape.
+    if (layout != 0 && settle_id < 0) return -1;
 
     // The full tile geometry is logged, not just the config index, so an
     // offline consumer can record what won without depending on this table's
@@ -6090,11 +6543,12 @@ static std::mutex wmma_tune_mutex;
  * N=5120 K=4096, cfg11 -> cfg3). Appended only when padding is in use, so
  * entries written by earlier builds for the arrival stride still hit. */
 static std::string wmmaCacheKey(int M, int N, int K, int gs, bool has_zp,
-                                int b_row_bytes = 0) {
+                                int b_row_bytes = 0, int layout = 0) {
     std::string key = std::to_string(M) + "_" + std::to_string(N) + "_" +
                       std::to_string(K) + "_" + std::to_string(gs) + "_" +
                       (has_zp ? "1" : "0");
     if (b_row_bytes != 0) key += "_p" + std::to_string(b_row_bytes);
+    if (layout != 0) key += "_l" + std::to_string(layout);
     return key;
 }
 
@@ -6133,16 +6587,18 @@ static int getOrTuneWmmaConfig(
     const unsigned char* B,
     const _Float16* scales, const _Float16* zeros,
     int gs, int ngk,
-    _Float16* C, int ldc, bool has_zp, int b_row_bytes = 0)
+    _Float16* C, int ldc, bool has_zp, int b_row_bytes = 0, int layout = 0)
 {
     const int forced = forcedWmmaConfig();
     // A forced config at a padded stride must still read B directly; the
     // dequant pass behind a !fused config has no stride argument.
     if (forced >= 0 && wmmaConfigApplies(kWmmaConfigs[forced], N, gs) &&
-        (b_row_bytes == 0 || kWmmaConfigs[forced].fused))
+        (b_row_bytes == 0 || kWmmaConfigs[forced].fused) &&
+        (layout == 0 ||
+         wmmaConfigLaunchable(kWmmaConfigs[forced], M, N, K, gs, b_row_bytes, layout)))
         return forced;
 
-    std::string key = wmmaCacheKey(M, N, K, gs, has_zp, b_row_bytes);
+    std::string key = wmmaCacheKey(M, N, K, gs, has_zp, b_row_bytes, layout);
 
     std::lock_guard<std::mutex> lock(wmma_tune_mutex);
 
@@ -6153,15 +6609,17 @@ static int getOrTuneWmmaConfig(
     // Map miss: the offline table before the sweep. The stride is part of the
     // LUT key for the same reason it is part of the cache key -- a padded
     // buffer has a different winner.
-    const int lut = matmulNbitsLutWmmaConfig(M, N, K, gs, has_zp, b_row_bytes);
+    const int lut =
+        matmulNbitsLutWmmaConfig(M, N, K, gs, has_zp, b_row_bytes, layout);
     if (lut >= 0) {
         wmma_cache[key] = lut;
         return lut;
     }
 
+    // -1 with a byte order no config reads at this shape.
     int best = tuneWmmaConfig(stream, M, N, K, A, lda, B,
                                scales, zeros, gs, ngk, C, ldc, has_zp,
-                               b_row_bytes);
+                               b_row_bytes, layout);
     wmma_cache[key] = best;
 
     MATMUL_NBITS_AUTOTUNE_LOG(
@@ -6372,6 +6830,83 @@ __global__ void u4_prepack_padrow_kernel(
         for (int i = 0; i < bytes; i++) out[i] = in[i];
 }
 
+/* A weight stored in a byte order other than rows (hip::MatmulNBitsWeightLayout:
+ * 1 = XOR-swizzled 128-byte lines, 2 = 512-byte blocks of 16 rows), copied
+ * back to dense rows of K/2 bytes: one 16-byte chunk per thread, dense row n,
+ * chunk c read from where the layout stored it. The int4 paths that do not
+ * read the layout directly run on this copy. */
+__global__ void u4_unlayout_kernel(
+    const unsigned char* __restrict__ src,
+    unsigned char* __restrict__ dst,
+    int N, int row_bytes, int layout)
+{
+    const int chunk = static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const int n = static_cast<int>(blockIdx.y);
+    const int chunks = row_bytes / 16;
+    if (n >= N || chunk >= chunks) return;
+    const uint32_t b = static_cast<uint32_t>(chunk) * 16u;
+    size_t from;
+    if (layout == 2) {
+        from = static_cast<size_t>(n >> 4) * (static_cast<size_t>(row_bytes) * 16) +
+               static_cast<size_t>(b >> 5) * 512 + static_cast<size_t>(n & 15) * 32 +
+               (b & 31u);
+    } else {
+        const uint32_t rb = static_cast<uint32_t>(row_bytes);
+        const uint32_t L = (rb & 127u) ? 0u : rb >> 7;
+        const uint32_t P = L & (0u - L);
+        const uint32_t rs = P ? 6u - __builtin_ctz(P < 64u ? P : 64u) : 0u;
+        const uint32_t fx = P ? ((static_cast<uint32_t>(n) >> rs) & (P - 1u)) << 7 : 0u;
+        from = static_cast<size_t>(n) * row_bytes + (b ^ fx);
+    }
+    *reinterpret_cast<u32x4*>(dst + static_cast<size_t>(n) * row_bytes + b) =
+        *reinterpret_cast<const u32x4*>(src + from);
+}
+
+extern "C" int hip_matmul_nbits_u4_unlayout(
+    void* stream, const void* B, void* dst, int N, int K, int layout)
+{
+    if (N <= 0 || K <= 0 || K % 64 != 0 || layout < 1 || layout > 2 ||
+        (layout == 2 && N % 16 != 0))
+        return hipErrorInvalidValue;
+    const int row_bytes = K / 2;
+    constexpr int BLK = 256;
+    const int chunks = row_bytes / 16;
+    dim3 grid(static_cast<unsigned>((chunks + BLK - 1) / BLK),
+              static_cast<unsigned>(N));
+    (void)hipGetLastError();
+    hipLaunchKernelGGL(u4_unlayout_kernel, grid, dim3(BLK), 0,
+                       static_cast<hipStream_t>(stream),
+                       static_cast<const unsigned char*>(B),
+                       static_cast<unsigned char*>(dst), N, row_bytes, layout);
+    return static_cast<int>(hipGetLastError());
+}
+
+static unsigned char* g_unlayout_buf = nullptr;
+static size_t         g_unlayout_bytes = 0;
+static std::mutex     g_unlayout_mutex;
+
+/* The dense copy of B in one shared scratch, grown to the largest weight seen
+ * and reused by every later call on the stream; nullptr on failure. */
+extern "C" const void* hip_matmul_nbits_u4_unlayout_scratch(
+    void* stream, const void* B, int N, int K, int layout)
+{
+    const size_t need = static_cast<size_t>(N) * static_cast<size_t>(K / 2);
+    std::lock_guard<std::mutex> lock(g_unlayout_mutex);
+    if (!g_unlayout_buf || g_unlayout_bytes < need) {
+        if (g_unlayout_buf) (void)hipFree(g_unlayout_buf);
+        g_unlayout_buf = nullptr;
+        g_unlayout_bytes = 0;
+        if (hipMalloc(&g_unlayout_buf, need) != hipSuccess) {
+            g_unlayout_buf = nullptr;
+            return nullptr;
+        }
+        g_unlayout_bytes = need;
+    }
+    if (hip_matmul_nbits_u4_unlayout(stream, B, g_unlayout_buf, N, K, layout) != 0)
+        return nullptr;
+    return g_unlayout_buf;
+}
+
 // One cache line. Enough to take the stride off a power of two, and the
 // smallest amount that does: the pathology is the line-granular set index.
 static constexpr int kU4PadRowBytes = 128;
@@ -6379,6 +6914,12 @@ static constexpr int kU4PadRowBytes = 128;
 // Row-padded B keeps the arrival layout, so its size is just the padded rows.
 extern "C" size_t hip_matmul_nbits_u4_padrow_bytes(int N, int K) {
     return static_cast<size_t>(N) * ((K / 2) + kU4PadRowBytes);
+}
+
+extern "C" int hip_matmul_nbits_u4_row_pads(const char* arch,
+                                            HipMatmulNBitsRowPad* entries,
+                                            int32_t capacity) {
+    return matmul_lut::rowPads(arch, entries, capacity);
 }
 
 /* Callers are gated on group_size dividing K (see the host wrapper), so the
@@ -6406,6 +6947,39 @@ extern "C" int hip_matmul_nbits_u4_prepack_padrow(
  * launches and into the cache key, the winner is chosen for the layout that
  * will actually be used. Returns -1 when no fused config can serve the shape,
  * which lets the caller fall back to the arrival-layout path. */
+extern "C" int hip_matmul_nbits_u4_wmma_layout(
+    void* stream, int cfg, int M, int N, int K, int group_size,
+    const void* A, int lda, const void* B, const void* scales,
+    const void* zeros, void* C, int ldc, int b_row_bytes, int layout)
+{
+    const int ngk = (K + group_size - 1) / group_size;
+    const bool has_zp = (zeros != nullptr);
+    auto s  = static_cast<hipStream_t>(stream);
+    auto ap = static_cast<const _Float16*>(A);
+    auto bp = static_cast<const unsigned char*>(B);
+    auto sp = static_cast<const _Float16*>(scales);
+    auto zp = static_cast<const _Float16*>(zeros);
+    auto cp = static_cast<_Float16*>(C);
+
+    int id = cfg;
+    if (id < 0 || id >= kNumWmmaConfigs ||
+        !wmmaConfigLaunchable(kWmmaConfigs[id], M, N, K, group_size,
+                              b_row_bytes, layout))
+        id = getOrTuneWmmaConfig(s, M, N, K, ap, lda, bp, sp, zp, group_size,
+                                 ngk, cp, ldc, has_zp, b_row_bytes, layout);
+    // Only fused configs read B directly, and only the extended core reads a
+    // byte order other than rows; -1 asks the caller for another path.
+    if (id < 0 || !kWmmaConfigs[id].fused ||
+        !wmmaConfigLaunchable(kWmmaConfigs[id], M, N, K, group_size,
+                              b_row_bytes, layout))
+        return -1;
+
+    (void)hipGetLastError();
+    launchWmmaConfig(id, s, M, N, K, ap, lda, bp, sp, zp, group_size, ngk, cp,
+                     ldc, has_zp, nullptr, b_row_bytes, layout);
+    return static_cast<int>(hipGetLastError());
+}
+
 extern "C" int hip_matmul_nbits_u4_wmma_stride(
     void* stream, int cfg, int M, int N, int K, int group_size,
     const void* A, int lda, const void* B, const void* scales,
@@ -6469,6 +7043,16 @@ extern "C" int hip_matmul_nbits_u4_wmma_run_config(
     const void* A, int lda, const void* B, const void* scales,
     const void* zeros, void* C, int ldc, int b_row_bytes)
 {
+    return hip_matmul_nbits_u4_wmma_run_config_layout(
+        stream, cfg, M, N, K, group_size, A, lda, B, scales, zeros, C, ldc,
+        b_row_bytes, /*layout=*/0);
+}
+
+extern "C" int hip_matmul_nbits_u4_wmma_run_config_layout(
+    void* stream, int cfg, int M, int N, int K, int group_size,
+    const void* A, int lda, const void* B, const void* scales,
+    const void* zeros, void* C, int ldc, int b_row_bytes, int layout)
+{
     if (cfg < 0 || cfg >= kNumWmmaConfigs || group_size <= 0) return -2;
     // Forced launches serve the extended-entry test and offline measurement,
     // both gfx1151 only. Elsewhere, including devices whose WMMA kernels
@@ -6476,6 +7060,8 @@ extern "C" int hip_matmul_nbits_u4_wmma_run_config(
     if (!wmmaExtDevice()) return -2;
     const WmmaConfig& c = kWmmaConfigs[cfg];
     if (!c.fused || !wmmaConfigSupported(c, N, K, group_size)) return -2;
+    if (!wmmaConfigLaunchable(c, M, N, K, group_size, b_row_bytes, layout))
+        return -2;
     (void)hipGetLastError();
     launchWmmaConfig(cfg, static_cast<hipStream_t>(stream), M, N, K,
                      static_cast<const _Float16*>(A), lda,
@@ -6483,7 +7069,7 @@ extern "C" int hip_matmul_nbits_u4_wmma_run_config(
                      static_cast<const _Float16*>(scales),
                      static_cast<const _Float16*>(zeros), group_size,
                      (K + group_size - 1) / group_size, static_cast<_Float16*>(C),
-                     ldc, zeros != nullptr, nullptr, b_row_bytes);
+                     ldc, zeros != nullptr, nullptr, b_row_bytes, layout);
     return static_cast<int>(hipGetLastError());
 }
 
@@ -6500,7 +7086,8 @@ extern "C" int hip_matmul_nbits_u4_wmma_run_config(
 // layer it ever sees, then is reused (overwritten) by every later layer, so the
 // footprint does not scale with layer count and never grows during a run.
 //   N, K here are the weight's out/in dims (independent of prompt length).
-//   Padrow-eligible = fused int4 prefill with M>=16, K%32==0, gs|K, shouldPadRow(K).
+//   Padrow-eligible = fused int4 prefill with M>=16, K%32==0, gs|K,
+//   hip::matmulNBitsRowStrideAliases(K).
 // Worked peaks (one loaded model at a time):
 //   * Generation (lm_head runs at M=1, excluded): ~6 MB (small) up to ~115 MB
 //     (DeepSeek-70B, N=28672 K=8192). Most 7-14B models are 15-70 MB.
@@ -8709,9 +9296,10 @@ extern "C" void hip_matmul_nbits_convert_zp_fp16(
 // which lacks WMMA and instead dequantizes B once (weights are constant) and
 // calls a hipBLASLt fp16 GEMM. scales/zeros are fp16 [N, num_groups_k]; when
 // zeros_fp16 is null the ONNX 4-bit default zero-point (8) is used.
-extern "C" void hip_matmul_nbits_dequant_b_fp16(
+extern "C" void hip_matmul_nbits_dequant_b_fp16_ex(
     void* stream, const void* B_packed, const void* scales_fp16,
-    const void* zeros_fp16, void* B_fp16_out, int N, int K, int group_size)
+    const void* zeros_fp16, void* B_fp16_out, int N, int K, int group_size,
+    int b_row_bytes)
 {
     int num_groups_k = (K + group_size - 1) / group_size;
     int threads_along_k = (K + 7) / 8;   // each thread emits 8 contiguous nibbles
@@ -8725,7 +9313,16 @@ extern "C" void hip_matmul_nbits_dequant_b_fp16(
                        static_cast<const _Float16*>(scales_fp16),
                        static_cast<const _Float16*>(zeros_fp16),
                        static_cast<_Float16*>(B_fp16_out),
-                       N, K, group_size, num_groups_k);
+                       N, K, group_size, num_groups_k, b_row_bytes);
+}
+
+extern "C" void hip_matmul_nbits_dequant_b_fp16(
+    void* stream, const void* B_packed, const void* scales_fp16,
+    const void* zeros_fp16, void* B_fp16_out, int N, int K, int group_size)
+{
+    hip_matmul_nbits_dequant_b_fp16_ex(stream, B_packed, scales_fp16,
+                                       zeros_fp16, B_fp16_out, N, K,
+                                       group_size, /*b_row_bytes=*/0);
 }
 
 /* -----------------------------------------------------------------------
@@ -8836,7 +9433,7 @@ static _Float16* ensureFp32CastCBuffer(size_t elems) {
     return g_fp32cast_c_buf;
 }
 
-extern "C" int hip_matmul_nbits(
+extern "C" int hip_matmul_nbits_ex(
     void* stream,
     const void* A,
     const void* B,
@@ -8851,7 +9448,21 @@ extern "C" int hip_matmul_nbits(
     int64_t element_size_bytes,
     int64_t zp_elem_size,
     const void* pre_unpacked_zp_u8,
-    const void* pre_unpacked_zp_fp16) {
+    const void* pre_unpacked_zp_fp16,
+    int64_t b_row_bytes,
+    int64_t b_layout) {
+  // A row-padded weight is only produced for bits=4 with whole quant groups,
+  // so every int4 path below can take the pitch as-is.
+  if (b_row_bytes != 0 &&
+      (bits != 4 || block_size <= 0 || K % block_size != 0 ||
+       b_row_bytes < K / 2)) {
+    fprintf(stderr,
+            "[custom_kernels] hip_matmul_nbits: b_row_bytes=%lld needs bits=4, "
+            "block_size | K and b_row_bytes >= K/2 (bits=%lld K=%lld bs=%lld)\n",
+            (long long)b_row_bytes, (long long)bits, (long long)K,
+            (long long)block_size);
+    return -1;
+  }
   if (bits != 2 && bits != 3 && bits != 4 && bits != 8) {
     fprintf(stderr,
             "[custom_kernels] hip_matmul_nbits: only bits=2, bits=3, bits=4 "
@@ -8861,6 +9472,33 @@ extern "C" int hip_matmul_nbits(
   }
 
   if (M <= 0 || N <= 0 || K <= 0 || batch_count <= 0) return 0;
+
+  // A byte order other than rows (hip::MatmulNBitsWeightLayout) is read
+  // directly only by the int4 WMMA prefill path (GemmFp16U4ImplX); every other
+  // case runs on a dense copy of B in a shared scratch.
+  if (b_layout != 0) {
+    if (b_layout < 0 || b_layout > 2 || bits != 4 || K % 64 != 0 ||
+        (b_layout == 2 && N % 16 != 0) ||
+        (b_row_bytes != 0 && b_row_bytes != K / 2)) {
+      fprintf(stderr,
+              "[custom_kernels] hip_matmul_nbits: unsupported b_layout=%lld "
+              "(bits=%lld N=%lld K=%lld b_row_bytes=%lld)\n",
+              (long long)b_layout, (long long)bits, (long long)N, (long long)K,
+              (long long)b_row_bytes);
+      return -1;
+    }
+    b_row_bytes = 0;
+    const bool wmma_reads = batch_count == 1 && M >= wmmaMinM() &&
+                            (element_size_bytes == 2 || element_size_bytes == 4) &&
+                            hipdnn_device_has_wmma() && !hipdnn_device_is_wave64();
+    if (!wmma_reads) {
+      B = hip_matmul_nbits_u4_unlayout_scratch(stream, B, static_cast<int>(N),
+                                               static_cast<int>(K),
+                                               static_cast<int>(b_layout));
+      if (!B) return -1;
+      b_layout = 0;
+    }
+  }
 
   // All bits widths (2/3/4/8) route fp32 A/C through the shared fp16 cast
   // scratch: cast A to fp16, run the unchanged fp16 compute path, cast the
@@ -8881,11 +9519,11 @@ extern "C" int hip_matmul_nbits(
 
     launchCastFp32ToFp16(cast_stream, static_cast<const float*>(A), a_fp16, a_elems);
 
-    int rc = hip_matmul_nbits(
+    int rc = hip_matmul_nbits_ex(
         stream, a_fp16, B, scales, zero_points, bias, c_fp16,
         M, N, K, batch_count, bits, block_size,
         /*element_size_bytes=*/2, zp_elem_size,
-        pre_unpacked_zp_u8, pre_unpacked_zp_fp16);
+        pre_unpacked_zp_u8, pre_unpacked_zp_fp16, b_row_bytes, b_layout);
     if (rc != 0) return rc;
 
     launchCastFp16ToFp32(cast_stream, c_fp16, static_cast<float*>(output), c_elems);
@@ -9494,7 +10132,7 @@ extern "C" int hip_matmul_nbits(
    * so B needs nothing. K%32==0 shapes never enter here and are byte-for-byte
    * unaffected. Verified against the CPU reference for K=4304. */
   if ((batch_count == 1) && (K % 32 != 0) && M >= kWmmaMinM &&
-      !hipdnn_device_is_wave64()) {
+      !hipdnn_device_is_wave64() && b_row_bytes == 0) {
     int iM = static_cast<int>(M);
     int iN = static_cast<int>(N);
     int iK = static_cast<int>(K);
@@ -9584,15 +10222,31 @@ extern "C" int hip_matmul_nbits(
     auto* out_ptr = static_cast<_Float16*>(output);
 
     bool has_zp = (z_ptr != nullptr);
+    const int b_pitch = static_cast<int>(b_row_bytes);
+    int layout = static_cast<int>(b_layout);
     int wmma_cfg = getOrTuneWmmaConfig(
         hip_stream, iM, iN, iK, a_ptr, lda, b_ptr,
-        s_ptr, z_ptr, gs, ngk, out_ptr, ldc, has_zp);
+        s_ptr, z_ptr, gs, ngk, out_ptr, ldc, has_zp, b_pitch, layout);
+    if (wmma_cfg < 0) {
+      // No config reads this byte order at this shape: the dense copy.
+      b_ptr = static_cast<const unsigned char*>(hip_matmul_nbits_u4_unlayout_scratch(
+          hip_stream, b_ptr, iN, iK, layout));
+      if (!b_ptr) return -1;
+      layout = 0;
+      wmma_cfg = getOrTuneWmmaConfig(hip_stream, iM, iN, iK, a_ptr, lda, b_ptr,
+                                     s_ptr, z_ptr, gs, ngk, out_ptr, ldc,
+                                     has_zp, b_pitch);
+    }
 
+    // A padded B is only readable by the fused configs, which is all the
+    // tuner and the LUT offer at a nonzero pitch.
     _Float16* dq_buf = kWmmaConfigs[wmma_cfg].fused
                            ? nullptr : ensureDqBuffer(iN, iK);
+    if (b_pitch != 0 && dq_buf) return -1;
     launchWmmaConfig(wmma_cfg, hip_stream,
                      iM, iN, iK, a_ptr, lda, b_ptr,
-                     s_ptr, z_ptr, gs, ngk, out_ptr, ldc, has_zp, dq_buf);
+                     s_ptr, z_ptr, gs, ngk, out_ptr, ldc, has_zp, dq_buf,
+                     b_pitch, layout);
 
     hipError_t err = hipGetLastError();
     if (err != hipSuccess) {
@@ -9666,9 +10320,10 @@ extern "C" int hip_matmul_nbits(
     const auto* bi_h = static_cast<const __half*>(bias);
 
     int cfg_id = getOrTuneGemvMConfig(hip_stream, a_col, b_u, s_h, z_u, bi_h,
-                                      o_col, M, N, K, 1, block_size);
+                                      o_col, M, N, K, 1, block_size,
+                                      b_row_bytes);
     launchGemvMConfig(cfg_id, hip_stream, a_col, b_u, s_h, z_u, bi_h, o_col,
-                      M, N, K, 1, block_size);
+                      M, N, K, 1, block_size, b_row_bytes);
 
     hipError_t err = hipGetLastError();
     if (err != hipSuccess) {
@@ -9720,11 +10375,11 @@ extern "C" int hip_matmul_nbits(
 
     int config_id = getOrTuneGemvConfig(
         hip_stream, a_col, b_u, s_h, z_u, b_h, o_col,
-        M, N, K, 1, block_size, /*col_major=*/true);
+        M, N, K, 1, block_size, /*col_major=*/true, b_row_bytes);
 
     launchGemvConfig(config_id, hip_stream,
                      a_col, b_u, s_h, z_u, b_h, o_col,
-                     M, N, K, 1, block_size, /*col_major=*/true);
+                     M, N, K, 1, block_size, /*col_major=*/true, b_row_bytes);
 
     hipError_t err = hipGetLastError();
     if (err != hipSuccess) {
@@ -9777,7 +10432,10 @@ extern "C" int hip_matmul_nbits(
     };
 
     bool use_wmma;
-    if (tier_is_tuned) {
+    // Only WMMA reads a byte order other than rows (the GEMV tier cannot).
+    if (b_layout != 0) {
+      use_wmma = true;
+    } else if (tier_is_tuned) {
       use_wmma = preferWmmaTier(
           hip_stream, static_cast<int>(M), static_cast<int>(N),
           static_cast<int>(K), static_cast<int>(block_size),
@@ -9826,11 +10484,12 @@ extern "C" int hip_matmul_nbits(
 
     int config_id = getOrTuneGemvConfig(
         hip_stream, a_h, b_u, s_h, z_u, b_h, o_h,
-        M, N, K, batch_count, block_size);
+        M, N, K, batch_count, block_size, /*col_major=*/false, b_row_bytes);
 
     launchGemvConfig(config_id, hip_stream,
                      a_h, b_u, s_h, z_u, b_h, o_h,
-                     M, N, K, batch_count, block_size);
+                     M, N, K, batch_count, block_size, /*col_major=*/false,
+                     b_row_bytes);
 
     hipError_t err = hipGetLastError();
     if (err != hipSuccess) {
@@ -9862,7 +10521,7 @@ extern "C" int hip_matmul_nbits(
       static_cast<const __half*>(scales),
       static_cast<const uint8_t*>(zp_for_u8_paths),
       static_cast<const __half*>(bias), static_cast<__half*>(output),
-      M, N, K, block_size);
+      M, N, K, block_size, b_row_bytes);
 
   hipError_t err = hipGetLastError();
   if (err != hipSuccess) {
@@ -9871,4 +10530,17 @@ extern "C" int hip_matmul_nbits(
             hipGetErrorString(err));
   }
   return static_cast<int>(err);
+}
+
+extern "C" int hip_matmul_nbits(
+    void* stream, const void* A, const void* B, const void* scales,
+    const void* zero_points, const void* bias, void* output,
+    int64_t M, int64_t N, int64_t K, int64_t batch_count, int64_t bits,
+    int64_t block_size, int64_t element_size_bytes, int64_t zp_elem_size,
+    const void* pre_unpacked_zp_u8, const void* pre_unpacked_zp_fp16) {
+  return hip_matmul_nbits_ex(stream, A, B, scales, zero_points, bias, output,
+                             M, N, K, batch_count, bits, block_size,
+                             element_size_bytes, zp_elem_size,
+                             pre_unpacked_zp_u8, pre_unpacked_zp_fp16,
+                             /*b_row_bytes=*/0, /*b_layout=*/0);
 }

@@ -5867,6 +5867,12 @@ struct MatMulNBitsConverter final
       return rewriter.notifyMatchFailure(op, "g_idx is not supported");
     if (op.getBits() != 4)
       return rewriter.notifyMatchFailure(op, "only bits=4 is supported");
+    // K/2 is the dense layout, kept on purpose by hip-pad-matmul-nbits-weights.
+    if (op.getBRowBytes() != 0 && op.getBRowBytes() != op.getK() / 2)
+      return rewriter.notifyMatchFailure(op, "row-padded B is not supported");
+    if (op.getBLayout() != 0)
+      return rewriter.notifyMatchFailure(
+          op, "B in a non-row weight layout is not supported");
 
     int64_t k = op.getK();
     int64_t n = op.getN();

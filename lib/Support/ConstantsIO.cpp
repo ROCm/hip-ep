@@ -4,6 +4,8 @@
  */
 
 #include "hip/Support/ConstantsIO.h"
+
+#include "hip/matmul_nbits_weight_layout.h"
 #include "morphizen-foundation/file_io.hpp"
 
 #include <algorithm>
@@ -113,6 +115,76 @@ static bool writeFileRef(FileHandleCache &cache, morphizen::FileWriter *writer,
   return true;
 }
 
+// Writes `rows` dense rows of `rowBytes` from `src` (or, when `src` is null,
+// from `file_path` at `file_offset`), each followed by `rowPitch - rowBytes`
+// zero bytes, or, with a weight layout (rowPitch == rowBytes), rearranged into
+// it. Rows pass through a buffer of at most 1 MB of whole rows (whole row
+// groups for a layout), so host memory stays bounded by one buffer, not by the
+// constant.
+static bool writeRows(FileHandleCache &cache, morphizen::FileWriter *writer,
+                      const char *src, const std::string &file_path,
+                      int64_t file_offset, int64_t rows, int64_t rowBytes,
+                      int64_t rowPitch, ::hip::MatmulNBitsWeightLayout layout) {
+  static constexpr int64_t kReadChunk = 1024 * 1024;
+  const bool rearrange = layout != ::hip::MatmulNBitsWeightLayout::Rows;
+  const int64_t step =
+      static_cast<int64_t>(::hip::matmulNBitsWeightLayoutRowStep(layout));
+  std::FILE *f = nullptr;
+  std::vector<char> buf;
+  std::vector<uint8_t> scratch;
+  int64_t chunkRows = rows;
+  if (rearrange) {
+    chunkRows = std::max<int64_t>(step, std::min(rows, kReadChunk / rowBytes) /
+                                            step * step);
+    buf.resize(static_cast<size_t>(chunkRows * rowBytes));
+    scratch.resize(static_cast<size_t>(step * rowBytes));
+  }
+  if (!src) {
+    f = cache.get(file_path);
+    if (!f)
+      return false;
+#ifdef _WIN32
+    if (_fseeki64(f, file_offset, SEEK_SET) != 0)
+      return false;
+#else
+    if (std::fseek(f, static_cast<long>(file_offset), SEEK_SET) != 0)
+      return false;
+#endif
+    if (!rearrange) {
+      chunkRows = std::max<int64_t>(1, std::min(rows, kReadChunk / rowBytes));
+      buf.resize(static_cast<size_t>(chunkRows * rowBytes));
+    }
+  }
+  int64_t pos = 0;
+  for (int64_t r = 0; r < rows; r += chunkRows) {
+    const int64_t n = std::min(chunkRows, rows - r);
+    const char *rowsData = src && !rearrange ? src + r * rowBytes : buf.data();
+    const size_t want = static_cast<size_t>(n * rowBytes);
+    if (!src) {
+      if (std::fread(buf.data(), 1, want, f) != want)
+        return false;
+    } else if (rearrange) {
+      std::memcpy(buf.data(), src + r * rowBytes, want);
+    }
+    if (rearrange) {
+      ::hip::applyMatmulNBitsWeightLayout(
+          reinterpret_cast<uint8_t *>(buf.data()), static_cast<uint64_t>(r),
+          static_cast<uint64_t>(n), static_cast<uint64_t>(rowBytes), layout,
+          scratch.data());
+      writer->fwrite(buf.data(), want);
+      pos += static_cast<int64_t>(want);
+      continue;
+    }
+    for (int64_t i = 0; i < n; ++i) {
+      writer->fwrite(rowsData + i * rowBytes, static_cast<size_t>(rowBytes));
+      pos += rowBytes;
+      if (!writePaddingTo(writer, pos, pos + rowPitch - rowBytes))
+        return false;
+    }
+  }
+  return true;
+}
+
 bool writeConstantsBinToFileSystem(morphizen::FileSystem *fs,
                                    const std::string &filename,
                                    const std::vector<ConstantEntry> &entries,
@@ -129,7 +201,26 @@ bool writeConstantsBinToFileSystem(morphizen::FileSystem *fs,
   for (const auto &e : entries) {
     if (!writePaddingTo(writer.get(), pos, e.offset))
       return false;
-    if (!e.file_path.empty()) {
+    if (!::hip::isValidMatmulNBitsWeightLayout(e.weight_layout))
+      return false;
+    const auto layout =
+        static_cast<::hip::MatmulNBitsWeightLayout>(e.weight_layout);
+    if (layout != ::hip::MatmulNBitsWeightLayout::Rows &&
+        (e.row_pitch == 0 || e.row_pitch != e.row_bytes ||
+         !::hip::matmulNBitsWeightLayoutFits(layout, e.size / e.row_pitch,
+                                             e.row_bytes)))
+      return false;
+    if (e.row_pitch != 0) {
+      if (e.row_bytes <= 0 || e.row_pitch < e.row_bytes ||
+          e.size % e.row_pitch != 0 || (e.file_path.empty() && !e.data))
+        return false;
+      if (!writeRows(fileCache, writer.get(),
+                     e.file_path.empty() ? static_cast<const char *>(e.data)
+                                         : nullptr,
+                     e.file_path, e.file_offset, e.size / e.row_pitch,
+                     e.row_bytes, e.row_pitch, layout))
+        return false;
+    } else if (!e.file_path.empty()) {
       if (!writeFileRef(fileCache, writer.get(), e.file_path, e.file_offset,
                         e.size))
         return false;

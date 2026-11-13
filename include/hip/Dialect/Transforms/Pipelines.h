@@ -64,6 +64,11 @@ struct OnnxToHipPipelineOptions
       llvm::cl::desc("Skip writing constant data to constants.bin (metadata "
                      "only). Used for ORT EP live-compile path."),
       llvm::cl::init(false)};
+  ListOption<std::string> matmulNBitsRowPads{
+      *this, "matmul-nbits-row-pads",
+      llvm::cl::desc("Per-weight int4 MatMulNBits row pads, "
+                     "N:K:block_size:zero_points=pad_bytes (see "
+                     "hip-pad-matmul-nbits-weights)")};
 };
 
 /// Pipeline options for the HIP-to-LLVM lowering pipeline.
