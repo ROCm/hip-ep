@@ -77,7 +77,7 @@ static void loadFixture(const fbs::MatmulNbitsAutotuneLutT &doc) {
   auto &t = mna::table();
   t.~Table();
   new (&t) mna::Table();
-  mna::loadBuffer(t, b.GetBufferPointer(), b.GetSize());
+  mna::loadBuffer(t, b.GetBufferPointer(), b.GetSize(), "gfx1151");
 }
 
 static void intervalChecks() {
