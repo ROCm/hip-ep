@@ -55,6 +55,19 @@
 #include <memory>
 #include <sstream>
 
+#if defined(ENABLE_ROCMLIRTRITON) && defined(HIPDNN_EP_LINK_HIP_HOST) &&       \
+    defined(HIPDNN_HIP_RUNTIME_LIB)
+// File scope on purpose. The same declarations inside the anonymous namespace
+// below stay members of that namespace, so the link looks for
+// hip::compiler::(anonymous namespace)::kRocmlirProblemCache* and misses the
+// extern "C" definitions in rocmlir_problem_cache_data.cpp.
+extern "C" {
+const unsigned char *const kRocmlirProblemCacheBlobs[];
+const size_t kRocmlirProblemCacheBlobSizes[];
+const size_t kRocmlirProblemCacheBlobCount;
+}
+#endif
+
 namespace hip::compiler {
 
 namespace {
@@ -98,10 +111,6 @@ namespace {
 // is not part of this string: the provider never reads it.
 #if defined(ENABLE_ROCMLIRTRITON) && defined(HIPDNN_EP_LINK_HIP_HOST) &&       \
     defined(HIPDNN_HIP_RUNTIME_LIB)
-extern "C" const unsigned char *const kRocmlirProblemCacheBlobs[];
-extern "C" const size_t kRocmlirProblemCacheBlobSizes[];
-extern "C" const size_t kRocmlirProblemCacheBlobCount;
-
 std::string shippedProblemCacheFingerprint() {
   uint64_t hash = 14695981039346656037ull;
   for (size_t blob = 0; blob < kRocmlirProblemCacheBlobCount; ++blob) {
