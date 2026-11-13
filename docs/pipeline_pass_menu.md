@@ -252,6 +252,8 @@ ONNX → HIP  (buildOnnxToHipPipeline)
   hip-infer-shapes
   hip-fusion-transform               (must precede externalization: its patterns
                                       read hip.constant payloads)
+  func.func(hip-fold-batchnorm)      (folds the batch norms recovered above;
+                                      must precede externalization)
   hip-externalize-constants
   canonicalize ; cse
   func.func(hip-split-duplicate-dps-inits)
