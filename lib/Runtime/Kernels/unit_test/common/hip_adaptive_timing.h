@@ -199,8 +199,12 @@ double adaptiveRotatedMeanMs(hipStream_t stream, const Copies& copies,
   const uint64_t record_id = rememberResult(result.mean_ms);
   const double wall_ms = std::chrono::duration<double, std::milli>(
       std::chrono::steady_clock::now() - wall_start).count();
-  // Spread is diagnostic, not a thermal/clock rejection rule. Every valid
-  // batch contributes, including slow batches. The soft limit never drops data.
+  // Spread only decides whether the first round may end the measurement; it
+  // never rejects data. Every valid batch contributes, including slow batches.
+  // The soft limit never drops data.
+  char max_spread[32] = "null";
+  if (std::isfinite(policy.max_spread))
+    std::snprintf(max_spread, sizeof(max_spread), "%.17g", policy.max_spread);
   std::printf("UT_TIMING {\"policy\":\"%s\",\"preset\":\"%s\","
               "\"record_id\":%llu,\"leaf\":%s,\"shape\":%s,\"op_entry\":%s,"
               "\"evidence_binding\":%s,\"host\":%s,\"device_name\":%s,"
@@ -210,8 +214,9 @@ double adaptiveRotatedMeanMs(hipStream_t stream, const Copies& copies,
               "\"device\":%d,\"arch\":\"%s\",\"runtime\":%d,\"driver\":%d,"
               "\"cache\":\"%s\",\"copies\":%d,\"bytes_per_copy\":%llu,"
               "\"rotation_bytes\":%llu,\"requested_warm\":%s,"
-              "\"target_ms\":%.17g,\"soft_limit_ms\":%.17g,"
-              "\"min_calls_per_group\":%u,\"invalid_retry_limit\":%u,"
+              "\"target_ms\":%.17g,\"soft_limit_ms\":%.17g,\"warmup_ms\":%.17g,"
+              "\"min_calls_per_group\":%u,\"call_goal\":%llu,\"floor_ms\":%.17g,"
+              "\"max_spread\":%s,\"invalid_retry_limit\":%u,"
               "\"invalid_batch_fraction\":%.17g,"
               "\"events_per_batch\":2,\"batch_call_cap\":%u,"
               "\"largest_batch_calls\":%u,\"pilot_ms\":%.17g,"
@@ -221,7 +226,8 @@ double adaptiveRotatedMeanMs(hipStream_t stream, const Copies& copies,
               "\"batches\":%llu,\"gpu_ms\":%.17g,\"wall_ms\":%.17g,"
               "\"median_ms\":%.17g,\"spread_fraction\":%.17g,"
               "\"invalid_batches\":%llu,\"invalid_calls\":%llu,"
-              "\"soft_limit_exceeded\":%s,\"group_means_ms\":[",
+              "\"soft_limit_exceeded\":%s,\"early_stop\":%s,\"converged\":%s,"
+              "\"group_means_ms\":[",
               kPolicyVersion, policy.name(), static_cast<unsigned long long>(record_id),
               jsonString(currentCase.leaf).c_str(), jsonString(currentCase.shape).c_str(),
               jsonString(currentCase.op_entry).c_str(),
@@ -235,7 +241,9 @@ double adaptiveRotatedMeanMs(hipStream_t stream, const Copies& copies,
               copies_count, static_cast<unsigned long long>(copies.bytes()),
               static_cast<unsigned long long>(copies.bytes()) * copies_count,
               requested_warm ? "true" : "false", policy.target_ms, policy.soft_limit_ms,
-              policy.min_calls_per_group, policy.invalid_retries, policy.invalid_fraction,
+              policy.warmup_ms,
+              policy.min_calls_per_group, static_cast<unsigned long long>(policy.call_goal),
+              policy.floor_ms, max_spread, policy.invalid_retries, policy.invalid_fraction,
               policy.max_calls_per_batch,
               result.largest_batch_calls, result.pilot_ms,
               static_cast<unsigned long long>(result.pilot_calls),
@@ -247,7 +255,9 @@ double adaptiveRotatedMeanMs(hipStream_t stream, const Copies& copies,
               result.mean_ms, result.spread_fraction,
               static_cast<unsigned long long>(result.invalid_batches),
               static_cast<unsigned long long>(result.invalid_calls),
-              result.exceeded_soft_limit ? "true" : "false");
+              result.exceeded_soft_limit ? "true" : "false",
+              result.early_stop ? "true" : "false",
+              result.converged ? "true" : "false");
   for (size_t i = 0; i < kGroups; ++i)
     std::printf("%s%.17g", i ? "," : "", result.groups[i].meanMs());
   std::printf("],\"group_calls\":[");

@@ -1,6 +1,6 @@
 # Adaptive UT timing
 
-`ut_timing_policy.h` owns policy `ut-adaptive-v2`.
+`ut_timing_policy.h` owns policy `ut-adaptive-v3`.
 `hip_adaptive_timing.h` applies it to the existing complete-op UT callback.
 MatMulNBits, GQA decode/prefill and ragged W4 MatMul use this implementation.
 Operators with other timing implementations are not qualified by this change.
@@ -12,21 +12,43 @@ sampling, not shapes, correctness checks, dispatch or config selection. Legacy
 leaf `--iters` arguments no longer select the measured launch count; actual
 counts are in `UT_TIMING` records.
 
-The default `standard` mode accumulates at least 1,000 ms of valid GPU time per
-measurement (2,000 ms soft) and is meant for routine and CI runs. The formal
-`confirm` mode accumulates at least 10,000 ms; request it explicitly for priority
-shapes, boundaries, suspect regressions and published performance evidence.
-`screen` normally accumulates at least 100 ms for LUT config ranking.
-Each uses five groups and at least two complete calls per group (ten total), so
-calls of 100 ms or more cost the same ten calls in every mode.
-The duration target is shared across the five groups, not multiplied by five.
+Excluded warm-up batches first run until the preset's warm-up GPU time (at least
+one complete call); they also estimate the call cost. Each measurement then uses
+five groups. A first round fills every group until it
+reaches its share of the call goal (once it also has its share of the GPU-time
+floor) or its share of the GPU-time goal, whichever comes first, with at least
+one complete call per group. The measurement ends there when the spread of the
+five group means, (max - min) / median, is within the preset's limit. Otherwise
+every group continues, keeping its first-round batches, until it holds its share
+of the GPU-time goal and at least two complete calls (ten in total).
+
+| Preset | Warm-up | Call goal | GPU-time floor | GPU-time goal (soft) | Spread limit |
+|---|---:|---:|---:|---:|---:|
+| `screen` | 5 ms | 100 | 1 ms | 100 ms (200 ms) | none |
+| `standard` (default) | 10 ms | 1,000 | 10 ms | 1,000 ms (2,000 ms) | 3% |
+| `confirm` | 25 ms | 10,000 | 100 ms | 10,000 ms (20,000 ms) | 1% |
+
+Short calls therefore stop at the call goal, mid-size calls at the GPU-time
+goal, and calls longer than a group's share of the goal after five calls when
+those agree, or after ten when they do not. A noisy short call keeps the full
+GPU-time goal. A measurement whose spread still exceeds the limit at the full goal
+is kept and reported with `converged: false`; consumers decide whether to rerun
+or confirm it. `standard` is meant for routine and CI runs. Request `confirm`
+explicitly for priority shapes, boundaries, suspect regressions and published
+performance evidence. `screen` is for LUT config ranking.
+On gfx1151 (12 MatMulNBits/GQA leaves, 2026-11-12) `standard` read about 2%
+faster than `confirm` for 0.05-1 ms calls, consistent with shorter
+measurements running at higher boost clocks; calls below 0.05 ms agreed within
+1%. Use `confirm` when the absolute number matters.
+The goals are shared across the five groups, not multiplied by five.
 Each group's result is total valid GPU time divided by actual complete calls;
 the reported result is the median of the five group means. Every valid batch,
 including slow ones, contributes. No per-iteration sorting or trimming occurs.
 
-An excluded one-call pilot estimates the selected device/config/shape's cost.
-Between batches the UT selects `ceil(remaining_group_ms / last_ms_per_call)`,
-also satisfying the minimum remaining calls, capped by the device profile per event pair.
+The excluded warm-up estimates the selected device/config/shape's cost.
+Between batches the UT predicts, from the last batch's time per call, the calls
+needed to reach the group's nearer remaining goal, also satisfying the minimum
+remaining calls, capped by the device profile per event pair.
 There is no total iteration cap. Every batch freezes its count, records exactly
 one GPU start and stop event around back-to-back complete calls, waits for stop,
 and consumes that duration before reusing the events. The original operand
@@ -49,7 +71,7 @@ No architecture-specific iteration table is needed: a faster device receives
 more calls, a slower device fewer, based on its own pilot and subsequent batches.
 
 20,000 ms (`confirm`) / 2,000 ms (`standard`) / 200 ms (`screen`) are soft cumulative thresholds. A very
-large call can overshoot, and ten complete calls take precedence. Never truncate
+large call can overshoot, and the minimum complete calls take precedence. Never truncate
 a running call or report a projected iteration as completed. A batch with an
 invalid, zero, negative or nonfinite duration is discarded and repeated with half
 the calls; it never enters a group. The cell fails only when its invalid batches,
@@ -57,14 +79,18 @@ pilot included, exceed max(2, 1% of the batches attempted so far)
 (`invalid_retry_limit`, `invalid_batch_fraction`), so a sporadic driver timing
 glitch in a long `confirm` measurement no longer aborts the leaf, while a timer
 that is invalid for a large share of batches still fails. HIP errors fail the
-measurement. Spread and soft-limit overshoot are
-reported, not thermal/clock rejection gates. No fixed steady-clock percentage
+measurement. Spread decides only whether the first round may end the
+measurement; neither spread nor soft-limit overshoot rejects data or acts as a
+thermal/clock gate. No fixed steady-clock percentage
 is required by this timer.
 
 Each measurement prints a JSON `UT_TIMING` line: policy/preset, runtime device
 and architecture, HIP runtime/driver versions, operand-copy count/size, batch
-cap, pilot, valid calls/batches/GPU time, wall time, invalid attempts, five group
-means and spread. An operand-rotation record with one copy is not proof of cold
+cap, warm-up, call goal, GPU-time floor, spread limit (`null` when none), warm-up
+(`pilot_*`), valid
+calls/batches/GPU time, wall time, invalid attempts, five group means, spread and
+whether the first round ended the measurement (`early_stop`) and whether the
+final spread is within the limit (`converged`). An operand-rotation record with one copy is not proof of cold
 caches; retain the leaf's allocation-fallback warning. Comparisons additionally
 bind source/build, shape, actual route/config, cache mode and device identity.
 Do not compare different devices or call a `screen` result a formal confirmation.
