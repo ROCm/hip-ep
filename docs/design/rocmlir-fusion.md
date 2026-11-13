@@ -154,7 +154,12 @@ non-scalar input joins only while this reload count, times the number of
 full-size inputs that the prologue loads, is 9 or less. Thus a 1x1 conv or a
 narrow matmul takes a residual add, but a 5x5 conv or a wide gemm leaves the
 module as its own kernel, which computes it once. A module with one input
-always joins. The activation operands are the conv input and the matmul and gemm A
+joins, except that a dequantize or a quantize, in a one-input module or alone
+on the input, joins only while the reload count is 9 or less: past that, the
+kernel redoes the conversion on every reload, which costs more than one
+separate pass. The outline step applies the same limit when it absorbs single
+input ops. A wide 1x1 conv of a dequantized uint16 activation (8192 output
+columns, about 64 reloads) thus keeps the dequantize outside. The activation operands are the conv input and the matmul and gemm A
 and B operands, not the conv filter or the gemm C operand. For a conv of
 dequantizes they are the integer input and weights. The search continues
 through the input views and the producer modules of each module input.

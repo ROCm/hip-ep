@@ -116,6 +116,16 @@ int64_t estimateActivationReloads(Operation *anchor) {
   return std::max<int64_t>(reloads, 1);
 }
 
+// The most full-size prologue loads, times the anchor's activation reloads,
+// that a prologue may cost before a separate kernel computing it once wins.
+constexpr int64_t kMaxPrologueLoads = 9;
+
+bool holdsQdq(RocMlirElementwiseOp module) {
+  return llvm::any_of(module.getBody().front(), [](Operation &op) {
+    return isa<DequantizeLinearOp, QuantizeLinearOp>(op);
+  });
+}
+
 // One kernel: an anchor and the modules it takes.
 struct KernelPlan {
   Operation *anchor;
@@ -131,9 +141,13 @@ struct KernelPlan {
 // stays one op here, and is inlined only in the outlined kernel.
 class KernelRegion {
 public:
+  // keepQdqOut: the anchor reloads its activations more than
+  // kMaxPrologueLoads times, so a lone quantize or dequantize on an input
+  // stays outside, as planPrologue keeps a QDQ module outside.
   KernelRegion(Operation *anchor, const SetVector<Operation *> &prologue,
-               const DenseSet<Operation *> &claimed)
-      : anchor(anchor), prologue(prologue), claimed(claimed) {}
+               const DenseSet<Operation *> &claimed, bool keepQdqOut)
+      : anchor(anchor), prologue(prologue), claimed(claimed),
+        keepQdqOut(keepQdqOut) {}
 
   Operation *getEnd() const { return end; }
   ArrayRef<Value> getResults() const { return results; }
@@ -160,6 +174,7 @@ private:
   const SetVector<Operation *> &prologue;
   // The ops that some plan takes; only this plan's prologue may be absorbed.
   const DenseSet<Operation *> &claimed;
+  bool keepQdqOut;
   Operation *end = nullptr;
   SmallVector<Value> results;
   Value context;
@@ -276,9 +291,11 @@ void KernelRegion::absorbInputProducers(
     for (Value input : *dataInputs)
       if (!isInlineScalarConstant(input))
         inputs.push_back(input);
-    bool absorb =
-        prologue.contains(producer) || allowsInputView(producer) ||
-        (allowPointwise && isFusablePrologue(producer) && inputs.size() == 1);
+    bool lonePrologueOp =
+        allowPointwise && isFusablePrologue(producer) && inputs.size() == 1 &&
+        !(keepQdqOut && isa<DequantizeLinearOp, QuantizeLinearOp>(producer));
+    bool absorb = prologue.contains(producer) || allowsInputView(producer) ||
+                  lonePrologueOp;
     if (!absorb || !llvm::all_of(inputs, isStaticTensor) ||
         !llvm::all_of(inputs, isKernelIOValue))
       continue;
@@ -713,8 +730,11 @@ private:
   // repeats those loads and that computation on every reload of the operand,
   // so a module with several inputs joins only while the full-size loads
   // times the reloads stay small; else a separate kernel computes it once.
+  // A single-input module that dequantizes or quantizes joins under the same
+  // reload limit: past it, the anchor redoes the conversion on every reload
+  // of a wide gemm, which costs more than one separate pass over the operand.
+  // KernelRegion applies the limit to a lone quantize or dequantize too.
   void planPrologue(KernelPlan &plan) {
-    constexpr int64_t kMaxPrologueLoads = 9;
     int64_t reloads = estimateActivationReloads(plan.anchor);
     DenseSet<Operation *> readers = {plan.anchor};
     for (auto [root, allowPointwise] :
@@ -751,6 +771,8 @@ private:
             if ((fullLoads + moduleLoads - 1) * reloads > kMaxPrologueLoads)
               continue;
             fullLoads += moduleLoads - 1;
+          } else if (reloads > kMaxPrologueLoads && holdsQdq(module)) {
+            continue;
           }
           taken.insert(module);
           plan.prologue.insert(module);
@@ -916,8 +938,10 @@ private:
   // outline; they are then inlined back with the other leftovers.
   LogicalResult outlinePlan(KernelPlan &plan, IRRewriter &rewriter,
                             int &counter) {
+    bool keepQdqOut =
+        estimateActivationReloads(plan.anchor) > kMaxPrologueLoads;
     auto check = [&](const SetVector<Operation *> &prologue) {
-      KernelRegion trial(plan.anchor, prologue, *claimed);
+      KernelRegion trial(plan.anchor, prologue, *claimed, keepQdqOut);
       trial.setChain(getChain(plan.anchor, plan.epilogue));
       SmallVector<Operation *> moved;
       const char *reason = trial.complete(getInputRoots(plan.anchor), moved);
@@ -943,7 +967,7 @@ private:
       chain = decompose(plan, rewriter);
       llvm::append_range(chain, plan.epilogue);
     }
-    KernelRegion region(chain.front(), plan.prologue, *claimed);
+    KernelRegion region(chain.front(), plan.prologue, *claimed, keepQdqOut);
     region.setChain(chain);
     SmallVector<Operation *> moved;
     if (const char *reason =
