@@ -51,7 +51,7 @@ func.func @main_graph(%ctx: !hip.context, %a: tensor<1x4x4x4xui8>,
 // That input keeps q(dq(b)), and the requantize joins the conv kernel, which
 // then returns u8 with the concat's scale.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-DAG: %[[S:.*]] = hip.constant {value = dense<5.000000e-01> : tensor<f32>}
 // CHECK-DAG: %[[S2:.*]] = hip.constant {value = dense<2.500000e-01> : tensor<f32>}
 // CHECK: hip.quant_conv
@@ -280,14 +280,14 @@ func.func @main_graph(%ctx: !hip.context, %a: tensor<1x4x4x4xui8>)
 
 // The float transpose result has a second reader, so the quantize stays.
 
-// CHECK-LABEL: func.func @rocMlir0
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: attributes {rock.elementwise, rock.kernel}
 // CHECK: hip.dequantize_linear
 // CHECK: %[[T:.*]] = hip.transpose(%{{.*}}) ins(%{{.*}} : tensor<1x4x4x8xf32>)
 // CHECK: %[[Y:.*]] = hip.quantize_linear(%{{.*}}) ins(%[[T]],
 // CHECK: return %[[T]], %[[Y]]
 // CHECK-LABEL: func.func @main_graph
-// CHECK: %[[K:.*]]:2 = hip.rocmlir({{.*}}) @rocMlir0
+// CHECK: %[[K:.*]]:2 = hip.rocmlir({{.*}}) @mlir_{{[a-z0-9_]+}}
 // CHECK: return %[[K]]#1, %[[K]]#0
 
 func.func @main_graph(%ctx: !hip.context, %a: tensor<1x4x4x8xui8>)
@@ -313,7 +313,7 @@ func.func @main_graph(%ctx: !hip.context, %a: tensor<1x4x4x8xui8>)
 
 // A per-axis quantize does not commute with a transpose of its axis.
 
-// CHECK-LABEL: func.func @rocMlir0
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: attributes {rock.elementwise, rock.kernel}
 // CHECK: hip.dequantize_linear
 // CHECK: hip.transpose(%{{.*}}) ins(%{{.*}} : tensor<1x4x4x8xf32>)
@@ -346,14 +346,14 @@ func.func @main_graph(%ctx: !hip.context, %a: tensor<1x4x4x8xui8>)
 // An i8 dequantize under a u8 quantize does not fold: the transpose runs on
 // u8 after a requantize of the i8 input.
 
-// CHECK-LABEL: func.func @rocMlir0
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: (%[[A:[^:]*]]: tensor<1x4x4x8xi8>)
 // CHECK-SAME: attributes {rock.elementwise, rock.kernel}
 // CHECK: %[[D:.*]] = hip.dequantize_linear(%{{.*}}) ins(%[[A]],
 // CHECK: %[[Q:.*]] = hip.quantize_linear(%{{.*}}) ins(%[[D]], {{.*}} : tensor<1x4x4x8xui8>
 // CHECK: return %[[Q]]
 // CHECK-LABEL: func.func @main_graph
-// CHECK: %[[K:.*]] = hip.rocmlir({{.*}}) @rocMlir0
+// CHECK: %[[K:.*]] = hip.rocmlir({{.*}}) @mlir_{{[a-z0-9_]+}}
 // CHECK: %[[T:.*]] = hip.transpose(%{{.*}}) ins(%[[K]] : tensor<1x4x4x8xui8>)
 // CHECK: return %[[T]] : tensor<1x8x4x4xui8>
 

@@ -11,7 +11,7 @@
 // A chain with no anchor is one kernel. Its inline scalar constant is cloned
 // into the kernel, not passed as an argument.
 
-// CHECK-LABEL: func.func @rocMlir0
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: (%[[X:.*]]: tensor<4x8xf16>, %[[Y:.*]]: tensor<4x8xf16>) -> tensor<4x8xf16>
 // CHECK-SAME: attributes {rock.elementwise, rock.kernel}
 // CHECK: %[[ZERO:.*]] = hip.constant
@@ -21,7 +21,7 @@
 // CHECK: return %[[N]]
 // CHECK-LABEL: func.func @main_graph
 // CHECK-NOT: hip.add
-// CHECK: %[[K:.*]] = hip.rocmlir({{.*}}) @rocMlir0
+// CHECK: %[[K:.*]] = hip.rocmlir({{.*}}) @mlir_{{[a-z0-9_]+}}
 // CHECK: return %[[K]]
 
 func.func @main_graph(%ctx: !hip.context, %x: tensor<4x8xf16>,
@@ -60,17 +60,17 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<4x8xf16>)
 // A group that the conv cannot take as its prologue, because the graph also
 // returns its result, becomes its own kernel after the conv kernel.
 
-// CHECK-LABEL: func.func @rocMlir1
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: attributes {rock.elementwise, rock.kernel}
 // CHECK: %[[N:.*]] = hip.neg
 // CHECK: %[[S:.*]] = hip.sigmoid({{.*}}) ins(%[[N]] :
 // CHECK: return %[[S]]
-// CHECK-LABEL: func.func @rocMlir0
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: attributes {rock.kernel}
 // CHECK: hip.conv
 // CHECK-LABEL: func.func @main_graph
-// CHECK: %[[P:.*]] = hip.rocmlir({{.*}}) @rocMlir1
-// CHECK: %[[C:.*]] = hip.rocmlir({{.*}}) @rocMlir0 ins(%[[P]],
+// CHECK: %[[P:.*]] = hip.rocmlir({{.*}}) @mlir_{{[a-z0-9_]+}}
+// CHECK: %[[C:.*]] = hip.rocmlir({{.*}}) @mlir_{{[a-z0-9_]+}} ins(%[[P]],
 // CHECK: return %[[C]], %[[P]]
 
 func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf16>,

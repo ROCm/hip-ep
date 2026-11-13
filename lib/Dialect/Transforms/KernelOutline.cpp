@@ -9,6 +9,11 @@
 
 #include "hip/Conversion/HipToTosa/HipToTosaLegality.h"
 
+#include <mlir/Dialect/Arith/IR/Arith.h>
+#include <mlir/Dialect/Func/IR/FuncOps.h>
+#include <mlir/Dialect/Tensor/IR/Tensor.h>
+#include <mlir/Dialect/UB/IR/UBOps.h>
+#include <mlir/IR/SymbolTable.h>
 #include <mlir/IR/TypeUtilities.h>
 #include <mlir/Interfaces/DestinationStyleOpInterface.h>
 #include <mlir/Interfaces/SideEffectInterfaces.h>
@@ -163,6 +168,43 @@ std::optional<SmallVector<Value>> getDataInputs(Operation *producer,
                                   : SmallVector<Value>(producer->getOperands());
   llvm::erase(inputs, context);
   return inputs;
+}
+
+// The outlined symbol names the computation, in clone order. tensor.empty,
+// reshapes, and constants are bookkeeping the kernel clones around that
+// computation, so they are not part of the name.
+static bool isRocMlirKernelNameOp(Operation *op) {
+  return !isa<tensor::EmptyOp, tensor::ExpandShapeOp, tensor::CollapseShapeOp,
+              arith::ConstantOp, ub::PoisonOp, ConstantOp, func::ReturnOp>(op);
+}
+
+static void collectRocMlirKernelNameOps(Operation *op,
+                                        SmallVectorImpl<Operation *> &named) {
+  if (auto elementwise = dyn_cast<RocMlirElementwiseOp>(op)) {
+    for (Operation &inner : elementwise.getBody().front().without_terminator())
+      collectRocMlirKernelNameOps(&inner, named);
+    return;
+  }
+  if (isRocMlirKernelNameOp(op))
+    named.push_back(op);
+}
+
+std::string rocMlirKernelName(ModuleOp module, ArrayRef<Operation *> ops,
+                              int &counter) {
+  SmallVector<Operation *> named;
+  for (Operation *op : ops)
+    collectRocMlirKernelNameOps(op, named);
+  std::string name;
+  do {
+    name = "mlir";
+    for (Operation *op : named) {
+      name.push_back('_');
+      name += op->getName().stripDialect().str();
+    }
+    name.push_back('_');
+    name += std::to_string(counter++);
+  } while (SymbolTable::lookupSymbolIn(module, name));
+  return name;
 }
 
 } // namespace mlir::hip

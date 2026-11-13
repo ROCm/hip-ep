@@ -4,6 +4,7 @@
  */
 
 #include "GemmGemm.h"
+#include "KernelOutline.h"
 #include "RocMlirFusionPredicates.h"
 
 #include "hip/Dialect/IR/HipDialect.h"
@@ -151,11 +152,10 @@ static bool feedsGemmA(BlockArgument arg, Operation *anchor) {
 // pair to one rock.gemm_elementwise_gemm. Convolutions stay out.
 //
 // Before:
-//   %h = hip.rocmlir @rocMlir0 ins(%x, %w0) outs(%e0)   // matmul -> sigmoid
-//   %y = hip.rocmlir @rocMlir1 ins(%h, %w1) outs(%e1)   // matmul
+//   %h = hip.rocmlir @mlir_matmul_sigmoid_0 ins(%x, %w0) outs(%e0)
+//   %y = hip.rocmlir @mlir_matmul_1 ins(%h, %w1) outs(%e1)
 // After:
-//   %y = hip.rocmlir @rocMlir2 ins(%x, %w0, %w1) outs(%e1)
-//   // @rocMlir2: matmul -> sigmoid -> matmul
+//   %y = hip.rocmlir @mlir_matmul_sigmoid_matmul_2 ins(%x, %w0, %w1) outs(%e1)
 static bool fuseGemmGemmPair(RocMlirOp second, int &counter,
                              ArrayRef<std::string> accelTypes) {
   auto module = second->getParentOfType<ModuleOp>();
@@ -217,8 +217,13 @@ static bool fuseGemmGemmPair(RocMlirOp second, int &counter,
            llvm::enumerate(secondKernel.getArgumentTypes()))
         if (argIndex != index)
           argTypes.push_back(type);
+      SmallVector<Operation *> fusedOps;
+      for (func::FuncOp kernel : {firstKernel, secondKernel})
+        for (Operation &op : kernel.getBody().front())
+          fusedOps.push_back(&op);
       merged = func::FuncOp::create(
-          builder, secondKernel.getLoc(), "rocMlir" + std::to_string(counter++),
+          builder, secondKernel.getLoc(),
+          rocMlirKernelName(module, fusedOps, counter),
           builder.getFunctionType(argTypes,
                                   secondKernel.getFunctionType().getResults()));
       merged->setAttrs(secondKernel->getDiscardableAttrDictionary());

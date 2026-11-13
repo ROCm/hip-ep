@@ -11,7 +11,7 @@
 // A prologue module that only the conv reads and an epilogue module that
 // keeps the conv's shape both go into the conv kernel.
 
-// CHECK-LABEL: func.func @rocMlir0
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: attributes {rock.kernel}
 // CHECK: %[[N:.*]] = hip.neg
 // CHECK: %[[C:.*]] = hip.conv({{.*}}) ins(%[[N]],
@@ -20,7 +20,7 @@
 // CHECK: return %[[M]]
 // CHECK-LABEL: func.func @main_graph
 // CHECK-NOT: hip.rocmlir_elementwise
-// CHECK: %[[K:.*]] = hip.rocmlir({{.*}}) @rocMlir0
+// CHECK: %[[K:.*]] = hip.rocmlir({{.*}}) @mlir_{{[a-z0-9_]+}}
 // CHECK-NOT: hip.neg
 // CHECK: return %[[K]]
 
@@ -49,12 +49,12 @@ func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf16>,
 
 // A lone transpose that reads the matmul is the kernel's epilogue.
 
-// CHECK-LABEL: func.func @rocMlir0
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK: %[[MM:.*]] = hip.matmul
 // CHECK: %[[T:.*]] = hip.transpose({{.*}}) ins(%[[MM]] :
 // CHECK: return %[[T]]
 // CHECK-LABEL: func.func @main_graph
-// CHECK: %[[K:.*]] = hip.rocmlir({{.*}}) @rocMlir0 {{.*}} : tensor<8x4xf16>
+// CHECK: %[[K:.*]] = hip.rocmlir({{.*}}) @mlir_{{[a-z0-9_]+}} {{.*}} : tensor<8x4xf16>
 // CHECK-NOT: hip.transpose
 // CHECK: return %[[K]]
 
@@ -73,14 +73,14 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<4x16xf16>,
 
 // A module with no anchor that saves a launch becomes an elementwise kernel.
 
-// CHECK-LABEL: func.func @rocMlir0
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: attributes {rock.elementwise, rock.kernel}
 // CHECK: %[[A:.*]] = hip.add
 // CHECK: %[[M:.*]] = hip.mul({{.*}}) ins(%[[A]], %[[A]] :
 // CHECK: return %[[M]]
 // CHECK-LABEL: func.func @main_graph
 // CHECK-NOT: hip.add
-// CHECK: %[[K:.*]] = hip.rocmlir({{.*}}) @rocMlir0
+// CHECK: %[[K:.*]] = hip.rocmlir({{.*}}) @mlir_{{[a-z0-9_]+}}
 // CHECK: return %[[K]]
 
 func.func @main_graph(%ctx: !hip.context, %x: tensor<4x16xf16>,
@@ -99,18 +99,18 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<4x16xf16>,
 // An epilogue module that broadcasts the conv result to a larger shape stays
 // outside the conv kernel and becomes an elementwise kernel of its own.
 
-// CHECK-LABEL: func.func @rocMlir1
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: attributes {rock.elementwise, rock.kernel}
 // CHECK: %[[A:.*]] = hip.add
 // CHECK: %[[M:.*]] = hip.mul({{.*}}) ins(%[[A]], %[[A]] :
 // CHECK: return %[[M]]
-// CHECK-LABEL: func.func @rocMlir0
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK: %[[C:.*]] = hip.conv
 // CHECK-NEXT: return %[[C]]
 // CHECK-LABEL: func.func @main_graph
 // CHECK-NOT: hip.rocmlir_elementwise
-// CHECK: %[[K:.*]] = hip.rocmlir({{.*}}) @rocMlir0
-// CHECK: %[[E:.*]] = hip.rocmlir({{.*}}) @rocMlir1 ins(%[[K]],
+// CHECK: %[[K:.*]] = hip.rocmlir({{.*}}) @mlir_{{[a-z0-9_]+}}
+// CHECK: %[[E:.*]] = hip.rocmlir({{.*}}) @mlir_{{[a-z0-9_]+}} ins(%[[K]],
 // CHECK: return %[[E]]
 
 func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf16>,
@@ -136,14 +136,14 @@ func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf16>,
 // A module with two inputs is a prologue too: the 1x1 conv kernel loads both
 // inputs and computes the add and the max on the fly.
 
-// CHECK-LABEL: func.func @rocMlir0
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: attributes {rock.kernel}
 // CHECK: %[[A:.*]] = hip.add
 // CHECK: %[[MX:.*]] = hip.max({{.*}}) ins(%[[A]],
 // CHECK: hip.conv({{.*}}) ins(%[[MX]],
 // CHECK-LABEL: func.func @main_graph
 // CHECK-NOT: hip.add
-// CHECK: hip.rocmlir({{.*}}) @rocMlir0 ins(%arg1, %arg2, %arg3, %arg4 :
+// CHECK: hip.rocmlir({{.*}}) @mlir_{{[a-z0-9_]+}} ins(%arg1, %arg2, %arg3, %arg4 :
 // CHECK-NOT: hip.rocmlir
 
 func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf16>,
@@ -170,17 +170,17 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf16>,
 // A 3x3 conv loads each input element nine times, so the two-input module
 // stays its own kernel and computes the add and the max once.
 
-// CHECK-LABEL: func.func @rocMlir1
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: rock.elementwise
 // CHECK: hip.add
 // CHECK: hip.max
-// CHECK-LABEL: func.func @rocMlir0
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: attributes {rock.kernel}
 // CHECK-NOT: hip.add
 // CHECK: hip.conv
 // CHECK-LABEL: func.func @main_graph
-// CHECK: %[[M:.*]] = hip.rocmlir({{.*}}) @rocMlir1 ins(%arg1, %arg2 :
-// CHECK: hip.rocmlir({{.*}}) @rocMlir0 ins(%[[M]], %arg3, %arg4 :
+// CHECK: %[[M:.*]] = hip.rocmlir({{.*}}) @mlir_{{[a-z0-9_]+}} ins(%arg1, %arg2 :
+// CHECK: hip.rocmlir({{.*}}) @mlir_{{[a-z0-9_]+}} ins(%[[M]], %arg3, %arg4 :
 
 func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf16>,
                       %r: tensor<1x8x4x4xf16>, %w: tensor<16x8x3x3xf16>,
@@ -205,7 +205,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf16>,
 
 // A reshape without an init leads to a transpose: both are the epilogue.
 
-// CHECK-LABEL: func.func @rocMlir0
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK: %[[MM:.*]] = hip.matmul
 // CHECK: %[[V:.*]] = tensor.expand_shape %[[MM]]
 // CHECK: %[[T:.*]] = hip.transpose({{.*}}) ins(%[[V]] :
@@ -231,7 +231,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<4x16xf16>,
 
 // A reshape without an init leads to a module: both are the epilogue.
 
-// CHECK-LABEL: func.func @rocMlir0
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK: %[[C:.*]] = hip.conv
 // CHECK: %[[CC:.*]] = tensor.collapse_shape %[[C]]
 // CHECK: %[[RC:.*]] = tensor.collapse_shape %arg3

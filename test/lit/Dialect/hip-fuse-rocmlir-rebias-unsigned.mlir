@@ -15,11 +15,11 @@
 // A quantize that feeds a dequantized conv. The kernel reads i8, so its TOSA
 // has no unsigned widen and shift before the conv.
 
-// TOSA-LABEL: func.func @rocMlir0
+// TOSA-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // TOSA-NOT: unsigned_cast
 // TOSA: tosa.conv2d
 
-// CHECK-LABEL: func.func @rocMlir0
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: %{{[^:]*}}: tensor<1x2x4x4xi8>, %{{[^:]*}}: tensor<2x2x3x3xi8>
 // CHECK: hip.quant_conv(%{{.*}}) ins(%{{.*}}, %{{.*}} : tensor<1x2x4x4xi8>, tensor<2x2x3x3xi8>)
 
@@ -27,7 +27,7 @@
 // CHECK-DAG: %[[E:.*]] = tensor.empty() : tensor<1x2x4x4xi8>
 // CHECK-DAG: %[[Z:.*]] = hip.constant {value = dense<-125> : tensor<i8>}
 // CHECK: %[[Q:.*]] = hip.quantize_linear(%{{.*}}) ins(%{{.*}}, %{{.*}} : tensor<1x2x4x4xf32>, tensor<f32>) zero_point(%[[Z]] : tensor<i8>) outs(%[[E]] : tensor<1x2x4x4xi8>)
-// CHECK: hip.rocmlir(%{{.*}}) @rocMlir0 ins(%[[Q]], {{.*}} : tensor<1x2x4x4xi8>,
+// CHECK: hip.rocmlir(%{{.*}}) @mlir_{{[a-z0-9_]+}} ins(%[[Q]], {{.*}} : tensor<1x2x4x4xi8>,
 // CHECK-NOT: ui8
 func.func @main_graph(%ctx: !hip.context, %x: tensor<1x2x4x4xf32>)
     -> tensor<1x2x4x4xf32> {
@@ -62,7 +62,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x2x4x4xf32>)
 // Two quantizes concatenated, then a dequantized conv: the empty destination
 // and both inserts become i8.
 
-// CHECK-LABEL: func.func @rocMlir0
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: %{{[^:]*}}: tensor<1x2x4x4xi8>
 
 // CHECK-LABEL: func.func @main_graph
@@ -71,7 +71,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x2x4x4xf32>)
 // CHECK: %[[E:.*]] = tensor.empty() : tensor<1x2x4x4xi8>
 // CHECK: %[[C0:.*]] = tensor.insert_slice %[[QA]] into %[[E]]
 // CHECK: %[[C1:.*]] = tensor.insert_slice %[[QB]] into %[[C0]]{{.*}} : tensor<1x1x4x4xi8> into tensor<1x2x4x4xi8>
-// CHECK: hip.rocmlir(%{{.*}}) @rocMlir0 ins(%[[C1]],
+// CHECK: hip.rocmlir(%{{.*}}) @mlir_{{[a-z0-9_]+}} ins(%[[C1]],
 // CHECK-NOT: ui8
 func.func @main_graph(%ctx: !hip.context, %a: tensor<1x1x4x4xf32>,
                       %b: tensor<1x1x4x4xf32>) -> tensor<1x2x4x4xf32> {
@@ -115,14 +115,14 @@ func.func @main_graph(%ctx: !hip.context, %a: tensor<1x1x4x4xf32>,
 
 // A nearest resize and a transpose between the quantize and the conv.
 
-// CHECK-LABEL: func.func @rocMlir0
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: %{{[^:]*}}: tensor<1x2x4x4xi8>
 
 // CHECK-LABEL: func.func @main_graph
 // CHECK: %[[Q:.*]] = hip.quantize_linear{{.*}} zero_point(%{{.*}} : tensor<i8>) {{.*}} : tensor<1x2x2x2xi8>
 // CHECK: %[[R:.*]] = hip.resize(%{{.*}}) ins(%[[Q]] : tensor<1x2x2x2xi8>) outs(%{{.*}} : tensor<1x2x4x4xi8>)
 // CHECK: %[[T:.*]] = hip.transpose(%{{.*}}) ins(%[[R]] : tensor<1x2x4x4xi8>) outs(%{{.*}} : tensor<1x2x4x4xi8>)
-// CHECK: hip.rocmlir(%{{.*}}) @rocMlir0 ins(%[[T]],
+// CHECK: hip.rocmlir(%{{.*}}) @mlir_{{[a-z0-9_]+}} ins(%[[T]],
 // CHECK-NOT: ui8
 func.func @main_graph(%ctx: !hip.context, %x: tensor<1x2x2x2xf32>)
     -> tensor<1x2x4x4xf32> {
@@ -168,7 +168,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x2x2x2xf32>)
 // The second conv's correction is 5 - (130 - 128) * 18 = -31 at an interior
 // output, the same as for the ui8 input.
 
-// CHECK-LABEL: func.func @rocMlir1
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: -> tensor<1x2x4x4xi8>
 // CHECK: hip.constant {value = dense<-125> : tensor<i8>}
 // CHECK: hip.quantize_linear{{.*}} : tensor<1x2x4x4xi8>
@@ -176,15 +176,15 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x2x2x2xf32>)
 // CHECK: hip.constant {value = dense<2> : tensor<i8>}
 // CHECK: return %{{.*}} : tensor<1x2x4x4xi8>
 
-// CHECK-LABEL: func.func @rocMlir0
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: %{{[^:]*}}: tensor<1x2x4x4xi8>, {{.*}} -> tensor<1x2x4x4xui8>
 // CHECK: hip.constant {value = dense<3> : tensor<ui8>}
 // CHECK: return %{{.*}} : tensor<1x2x4x4xui8>
 
 // CHECK-LABEL: func.func @main_graph
-// CHECK: %[[Y1:.*]] = hip.rocmlir(%{{.*}}) @rocMlir1 {{.*}} : tensor<1x2x4x4xi8>
+// CHECK: %[[Y1:.*]] = hip.rocmlir(%{{.*}}) @mlir_{{[a-z0-9_]+}} {{.*}} : tensor<1x2x4x4xi8>
 // CHECK: hip.constant {value = dense<{{\[\[\[\[}}-11, -19, -19, -11], [-19, -31, -31, -19]
-// CHECK: hip.rocmlir(%{{.*}}) @rocMlir0 ins(%[[Y1]], {{.*}} : tensor<1x2x4x4xui8>
+// CHECK: hip.rocmlir(%{{.*}}) @mlir_{{[a-z0-9_]+}} ins(%[[Y1]], {{.*}} : tensor<1x2x4x4xui8>
 func.func @main_graph(%ctx: !hip.context, %x: tensor<1x2x4x4xf32>)
     -> tensor<1x2x4x4xui8> {
   %s = hip.constant {value = dense<0.5> : tensor<f32>} : tensor<f32>
@@ -220,7 +220,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x2x4x4xf32>)
 
 // Declined: the ui8 data is a function argument.
 
-// CHECK-LABEL: func.func @rocMlir0
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: %{{[^:]*}}: tensor<1x2x4x4xui8>
 // CHECK-LABEL: func.func @main_graph
 // CHECK-NOT: 4x4xi8>
@@ -251,7 +251,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x2x4x4xui8>)
 
 // Declined: the quantize is also a graph output.
 
-// CHECK-LABEL: func.func @rocMlir0
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: %{{[^:]*}}: tensor<1x2x4x4xui8>
 // CHECK-LABEL: func.func @main_graph
 // CHECK: hip.quantize_linear{{.*}} zero_point(%{{.*}} : tensor<ui8>) {{.*}} : tensor<1x2x4x4xui8>
@@ -288,7 +288,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x2x4x4xf32>)
 
 // Declined: a hip.qadd also reads the quantized data.
 
-// CHECK-LABEL: func.func @rocMlir0
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: %{{[^:]*}}: tensor<1x2x4x4xui8>
 // CHECK-LABEL: func.func @main_graph
 // CHECK: hip.quantize_linear{{.*}} : tensor<1x2x4x4xui8>
@@ -331,7 +331,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x2x4x4xf32>)
 
 // Declined: the quantize has a per-channel zero point.
 
-// CHECK-LABEL: func.func @rocMlir0
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: %{{[^:]*}}: tensor<1x2x4x4xui8>
 // CHECK-LABEL: func.func @main_graph
 // CHECK: hip.quantize_linear{{.*}} zero_point(%{{.*}} : tensor<2xui8>) {{.*}} : tensor<1x2x4x4xui8>

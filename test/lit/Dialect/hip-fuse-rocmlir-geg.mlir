@@ -18,7 +18,7 @@
 // A column-vector intermediate (n == 1) passes the gate: one kernel runs
 // matmul -> sigmoid -> matmul, and the dispatch reads x and both weights.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: (%[[X:.*]]: tensor<512x64xf16>, %[[W0:.*]]: tensor<64x1xf16>, %[[W1:.*]]: tensor<1x32xf16>) -> tensor<512x32xf16>
 // CHECK-SAME: rock.arch = "gfx1151"
 // CHECK: %[[M0:.*]] = hip.matmul({{.*}}) ins(%[[X]], %[[W0]]
@@ -114,7 +114,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<512x64xf16>,
 // A reshape that only regroups the rows (batch and m) may sit between the
 // gemms, as in a 2-D gemm whose result feeds a batched matmul.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK: hip.matmul
 // CHECK: tensor.expand_shape
 // CHECK: hip.matmul

@@ -14,7 +14,7 @@
 
 // A bare `tensor.empty` init is cloned into the kernel, as it always was.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: (%[[IN:.*]]: tensor<1x8x4x4xf16>, %[[W:.*]]: tensor<16x8x3x3xf16>, %[[B:.*]]: tensor<16xf16>)
 // CHECK: %[[CTX:.*]] = ub.poison : !hip.context
 // CHECK: %[[E:.*]] = tensor.empty() : tensor<1x16x4x4xf16>
@@ -28,7 +28,7 @@ func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf16>,
     -> tensor<1x16x4x4xf16> {
   %e = tensor.empty() : tensor<1x16x4x4xf16>
   // CHECK: %[[EMPTY:.*]] = tensor.empty() : tensor<1x16x4x4xf16>
-  // CHECK: hip.rocmlir(%{{.*}}) @rocMlir{{[0-9]+}} ins({{.*}} : tensor<1x8x4x4xf16>, tensor<16x8x3x3xf16>, tensor<16xf16>) outs(%[[EMPTY]] : tensor<1x16x4x4xf16>)
+  // CHECK: hip.rocmlir(%{{.*}}) @mlir_{{[a-z0-9_]+}} ins({{.*}} : tensor<1x8x4x4xf16>, tensor<16x8x3x3xf16>, tensor<16xf16>) outs(%[[EMPTY]] : tensor<1x16x4x4xf16>)
   %c = hip.conv(%ctx) ins(%in, %w, %b : tensor<1x8x4x4xf16>,
                                         tensor<16x8x3x3xf16>, tensor<16xf16>)
       outs(%e : tensor<1x16x4x4xf16>)
@@ -48,7 +48,7 @@ func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf16>,
 // reads it. The operand reshapes are absorbed too, so the kernel reads the
 // rank-3 tensors as main_graph holds them.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: (%[[IN:.*]]: tensor<1x8x4xf16>, %[[W:.*]]: tensor<16x8x3xf16>, %[[B:.*]]: tensor<16xf16>)
 // CHECK: %[[CTX:.*]] = ub.poison : !hip.context
 // CHECK-DAG: %[[IN4:.*]] = tensor.expand_shape %[[IN]]
@@ -85,7 +85,7 @@ func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4xf16>,
 // An init that is a block argument has no producer to clone at all, so it goes
 // straight to the argument list.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: (%[[IN:.*]]: tensor<1x8x4x4xf16>, %[[W:.*]]: tensor<16x8x3x3xf16>, %[[B:.*]]: tensor<16xf16>, %[[KBUF:.*]]: tensor<1x16x4x4xf16>)
 // CHECK: %[[CTX:.*]] = ub.poison : !hip.context
 // CHECK: %[[C:.*]] = hip.conv(%[[CTX]]) ins(%[[IN]], %[[W]], %[[B]] :
@@ -96,7 +96,7 @@ func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4xf16>,
 func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf16>,
                       %w: tensor<16x8x3x3xf16>, %b: tensor<16xf16>,
                       %buf: tensor<1x16x4x4xf16>) -> tensor<1x16x4x4xf16> {
-  // CHECK: hip.rocmlir(%{{.*}}) @rocMlir{{[0-9]+}} ins({{.*}}, %[[BUF]] : tensor<1x8x4x4xf16>, tensor<16x8x3x3xf16>, tensor<16xf16>, tensor<1x16x4x4xf16>) outs(%[[BUF]] : tensor<1x16x4x4xf16>)
+  // CHECK: hip.rocmlir(%{{.*}}) @mlir_{{[a-z0-9_]+}} ins({{.*}}, %[[BUF]] : tensor<1x8x4x4xf16>, tensor<16x8x3x3xf16>, tensor<16xf16>, tensor<1x16x4x4xf16>) outs(%[[BUF]] : tensor<1x16x4x4xf16>)
   %c = hip.conv(%ctx) ins(%in, %w, %b : tensor<1x8x4x4xf16>,
                                         tensor<16x8x3x3xf16>, tensor<16xf16>)
       outs(%buf : tensor<1x16x4x4xf16>)
@@ -112,7 +112,7 @@ func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf16>,
 // it is passed in as an extra argument instead. The destination still reaches
 // the kernel, and the buffer keeps the identity the caller gave it.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: (%[[IN:.*]]: tensor<1x8x4xf16>, %[[W:.*]]: tensor<16x8x3xf16>, %[[B:.*]]: tensor<16xf16>, %[[KBUF:.*]]: tensor<1x16x4xf16>)
 // CHECK: %[[CTX:.*]] = ub.poison : !hip.context
 // CHECK-NOT: tensor.empty
@@ -134,7 +134,7 @@ func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4xf16>,
   %e4 = tensor.expand_shape %buf [[0], [1], [2, 3]]
       output_shape [1, 16, 1, 4] : tensor<1x16x4xf16> into tensor<1x16x1x4xf16>
   // The buffer is handed to the kernel alongside the data operands.
-  // CHECK: hip.rocmlir(%{{.*}}) @rocMlir{{[0-9]+}} ins({{.*}}, %[[BUF]] : tensor<1x8x4xf16>, tensor<16x8x3xf16>, tensor<16xf16>, tensor<1x16x4xf16>)
+  // CHECK: hip.rocmlir(%{{.*}}) @mlir_{{[a-z0-9_]+}} ins({{.*}}, %[[BUF]] : tensor<1x8x4xf16>, tensor<16x8x3xf16>, tensor<16xf16>, tensor<1x16x4xf16>)
   %c = hip.conv(%ctx) ins(%in4, %w4, %b : tensor<1x8x1x4xf16>,
                                           tensor<16x8x1x3xf16>, tensor<16xf16>)
       outs(%e4 : tensor<1x16x1x4xf16>)
@@ -152,7 +152,7 @@ func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4xf16>,
 // a scalar has none. The Relu zero is an inline `hip.constant`, so it is
 // cloned into the kernel and lowers to a `tosa.const` there.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: (%[[IN:.*]]: tensor<1x8x4x4xf16>, %[[W:.*]]: tensor<16x8x3x3xf16>, %[[B:.*]]: tensor<16xf16>)
 // CHECK: %[[ZERO:.*]] = hip.constant
 // CHECK-SAME: value = dense<0.000000e+00> : tensor<f16>
@@ -185,7 +185,7 @@ func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf16>,
 // Clip lower to. A residual block scales its sum by a splat before adding it
 // back, which reaches the pass as `hip.mul` against a rank-0 constant.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: (%[[IN:.*]]: tensor<1x8x4x4xf16>, %[[W:.*]]: tensor<16x8x3x3xf16>, %[[B:.*]]: tensor<16xf16>)
 // CHECK: %[[SCALE:.*]] = hip.constant
 // CHECK-SAME: value = dense<1.999510e-01> : tensor<f16>
@@ -218,7 +218,7 @@ func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf16>,
 // boundary as tensor<1xT>. A rank-0 argument reaches rock.transforms_to_ptr
 // with no coordinate to linearize; tensor<1xT> carries the single index 0.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: tensor<16xf16>, %[[KBOUND:.*]]: tensor<1xf16>)
 // CHECK: hip.max
 // CHECK-SAME: %[[KBOUND]]
@@ -252,7 +252,7 @@ func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf16>,
 // Where condition becomes signless i8 in the private rocMLIR kernel ABI, so
 // its byte storage can feed rocMLIR arithmetic without a conversion op.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: {{.*}}tensor<1x2x4x3xf32>{{.*}}tensor<1x1x3x5xf32>{{.*}}tensor<1x1x4x5xi8>
 // CHECK: hip.where
 // CHECK-SAME: tensor<1x1x4x5xi8>
@@ -284,7 +284,7 @@ func.func @main_graph(%ctx: !hip.context, %a: tensor<1x2x4x3xf32>,
 // activation and filter directly and main_graph keeps no hip.transpose. Each
 // absorbed view's input takes the argument slot of the value it replaced.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: (%[[X:[a-z0-9]+]]: tensor<1x4x4x8xf16>, %[[W:[a-z0-9]+]]: tensor<16x3x3x8xf16>, %{{[a-z0-9]+}}: tensor<16xf16>, %[[R:[a-z0-9]+]]: tensor<1x16x4x4xf16>) -> tensor<1x4x4x16xf16>
 // CHECK-DAG: hip.transpose({{.*}}) ins(%[[X]] : tensor<1x4x4x8xf16>)
 // CHECK-DAG: hip.transpose({{.*}}) ins(%[[W]] : tensor<16x3x3x8xf16>)
@@ -334,7 +334,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x4x4x8xf16>,
 // A unary op on the activation is a prologue of the kernel when nothing else
 // reads it: the kernel takes the f32 tensor and casts as it loads.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: (%[[X:[a-z0-9]+]]: tensor<1x4x4x8xf32>,
 // CHECK: hip.cast({{.*}}) ins(%[[X]] : tensor<1x4x4x8xf32>)
 // CHECK: hip.transpose
@@ -367,14 +367,14 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x4x4x8xf32>,
 // rocMLIR cannot load an i64 tensor, so a cast from i64 stays outside and the
 // kernel takes its f32 result.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: (%{{[a-z0-9]+}}: tensor<4x8xf32>, %{{[a-z0-9]+}}: tensor<8x16xf32>)
 // CHECK-NOT: hip.cast
 // CHECK: hip.matmul
 
 // CHECK-LABEL: func.func @main_graph
 // CHECK: %[[CAST:.*]] = hip.cast({{.*}}) ins(%{{.*}} : tensor<4x8xi64>)
-// CHECK: hip.rocmlir({{.*}}) @rocMlir{{[0-9]*}} ins(%[[CAST]],
+// CHECK: hip.rocmlir({{.*}}) @mlir_{{[a-z0-9_]+}} ins(%[[CAST]],
 func.func @main_graph(%ctx: !hip.context, %x: tensor<4x8xi64>,
                       %w: tensor<8x16xf32>) -> tensor<4x16xf32> {
   %fe = tensor.empty() : tensor<4x8xf32>
@@ -390,7 +390,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<4x8xi64>,
 
 // Nor can it store one: a cast to i64 ends the forward chain.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: -> tensor<4x16xf32>
 // CHECK-NOT: hip.cast
 
@@ -429,19 +429,19 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<4x8xi64>,
 // reader, so absorbing it saves nothing. It stays outside the conv kernel, and
 // with the cast that feeds it becomes an elementwise kernel.
 
-// CHECK-LABEL: func.func @rocMlir1
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: attributes {rock.elementwise, rock.kernel}
 // CHECK: %[[CAST:.*]] = hip.cast
 // CHECK: hip.transpose({{.*}}) ins(%[[CAST]]
-// CHECK-LABEL: func.func @rocMlir0
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: (%{{[a-z0-9]+}}: tensor<1x8x4x4xf16>,
 // CHECK-NOT: hip.cast
 // CHECK-NOT: hip.transpose
 // CHECK: hip.conv
 
 // CHECK-LABEL: func.func @main_graph
-// CHECK: %[[T:.*]] = hip.rocmlir({{.*}}) @rocMlir1
-// CHECK: %[[K:.*]] = hip.rocmlir({{.*}}) @rocMlir0 ins(%[[T]], {{.*}} :
+// CHECK: %[[T:.*]] = hip.rocmlir({{.*}}) @mlir_{{[a-z0-9_]+}}
+// CHECK: %[[K:.*]] = hip.rocmlir({{.*}}) @mlir_{{[a-z0-9_]+}} ins(%[[T]], {{.*}} :
 // CHECK: return %[[K]], %[[T]]
 func.func @main_graph(%ctx: !hip.context, %x: tensor<1x4x4x8xf32>,
                       %w: tensor<16x8x3x3xf16>, %b: tensor<16xf16>)
@@ -466,7 +466,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x4x4x8xf32>,
 // The filter never takes a pointwise prologue: the cast would rerun in every
 // workgroup that loads the filter. It stays a separate op.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: tensor<16x8x3x3xf16>
 // CHECK-NOT: hip.cast
 
@@ -493,7 +493,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf16>,
 // A matmul takes the transposes on both sides, as a convolution does: the
 // kernel reads the untransposed A and writes the transposed result.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: (%[[A:.*]]: tensor<16x8xf16>, %{{.*}}: tensor<16x32xf16>) -> tensor<32x8xf16>
 // CHECK: %[[AT:.*]] = hip.transpose({{.*}}) ins(%[[A]]
 // CHECK: %[[M:.*]] = hip.matmul({{.*}}) ins(%[[AT]],
@@ -523,7 +523,7 @@ func.func @main_graph(%ctx: !hip.context, %a: tensor<16x8xf16>,
 // A pointwise op that broadcasts the anchor result ends the chain: rocMLIR
 // cannot map the wider output back to the GEMM tile.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: -> tensor<1x32xf16>
 // CHECK: hip.matmul
 // CHECK-NOT: hip.add
@@ -549,7 +549,7 @@ func.func @main_graph(%ctx: !hip.context, %a: tensor<1x16xf16>,
 // A group split folded back into channels is a reshape on the activation. The
 // kernel reads the grouped tensor and collapses it as it loads.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: (%[[XG:[a-z0-9]+]]: tensor<1x2x4x4x4xf16>,
 // CHECK: tensor.collapse_shape %[[XG]]
 // CHECK: hip.conv
@@ -576,7 +576,7 @@ func.func @main_graph(%ctx: !hip.context, %xg: tensor<1x2x4x4x4xf16>,
 // A Split into a conv is a unit-stride channel slice of the activation. The
 // kernel takes the whole tensor and reads only its half.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: (%[[XW:[a-z0-9]+]]: tensor<1x16x4x4xf16>,
 // CHECK: tensor.extract_slice %[[XW]][0, 8, 0, 0] [1, 8, 4, 4] [1, 1, 1, 1]
 // CHECK: hip.conv
@@ -602,7 +602,7 @@ func.func @main_graph(%ctx: !hip.context, %xw: tensor<1x16x4x4xf16>,
 
 // HipToTosa has no lowering for a strided slice, so it stays in main_graph.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: (%{{[a-z0-9]+}}: tensor<1x8x4x4xf16>,
 // CHECK-NOT: tensor.extract_slice
 
@@ -628,7 +628,7 @@ func.func @main_graph(%ctx: !hip.context, %xw: tensor<1x16x4x4xf16>,
 // A filter stored flat is reshaped in the kernel. Views are free on the
 // filter, unlike a pointwise prologue.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: (%{{[a-z0-9]+}}: tensor<1x8x4x4xf16>, %[[WF:[a-z0-9]+]]: tensor<16x72xf16>,
 // CHECK: tensor.expand_shape %[[WF]]
 // CHECK: hip.conv
@@ -656,7 +656,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf16>,
 // compact form. The constant target shape is cloned with the expand, so it is
 // not a kernel argument.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: tensor<16xf16>, %[[S:[a-z0-9]+]]: tensor<1x16x1x1xf16>) -> tensor<1x16x4x4xf16>
 // CHECK-DAG: %[[SHAPE:.*]] = arith.constant dense<[1, 16, 4, 4]> : tensor<4xi64>
 // CHECK-DAG: hip.conv
@@ -690,7 +690,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf16>,
 // A target shape computed at run time cannot be cloned into the kernel, so the
 // broadcast stays in main_graph and the kernel reads its full result.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: tensor<16xf16>, %{{[a-z0-9]+}}: tensor<1x16x4x4xf16>) -> tensor<1x16x4x4xf16>
 // CHECK-NOT: hip.expand
 
@@ -721,7 +721,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf16>,
 // Views stack on an epilogue operand as on the anchor's: a flat NHWC residual
 // is expanded and transposed inside the kernel.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: tensor<16xf16>, %[[RF:[a-z0-9]+]]: tensor<1x16x16xf16>) -> tensor<1x16x4x4xf16>
 // CHECK: hip.conv
 // CHECK: %[[RH:.*]] = tensor.expand_shape %[[RF]]
@@ -759,14 +759,14 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf16>,
 // other conv's transposed output, and returns both values. The other conv
 // writes its own transposed result, so no transpose stays outside.
 
-// CHECK-LABEL: func.func @rocMlir
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-LABEL: func.func @main_graph
 // CHECK-NOT: hip.transpose
 // CHECK: %[[K1:.*]] = hip.rocmlir
 // CHECK-SAME: outs({{.*}} : tensor<1x4x4x16xf16>)
 // CHECK-NOT: hip.transpose
-// CHECK: %[[K2:[0-9]+]]{{(:2)?}} = hip.rocmlir({{.*}}) @rocMlir{{[0-9]+}} ins({{.*}}, %[[K1]] :
+// CHECK: %[[K2:[0-9]+]]{{(:2)?}} = hip.rocmlir({{.*}}) @mlir_{{[a-z0-9_]+}} ins({{.*}}, %[[K1]] :
 // CHECK: return %[[K2]]#1, %[[K2]]#0
 func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf16>,
                       %x2: tensor<1x8x4x4xf16>, %w: tensor<16x8x3x3xf16>,
@@ -802,7 +802,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf16>,
 // to 2-D is collapsed back before its residual add, and the add joins the
 // kernel.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: %[[R:[a-z0-9]+]]: tensor<1x16x4xf16>) -> tensor<1x16x4xf16>
 // CHECK: %[[C:.*]] = hip.conv
 // CHECK: %[[V:.*]] = tensor.collapse_shape %[[C]]
@@ -834,7 +834,7 @@ func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x1x4xf16>,
 // Views stack on the way out as on the way in: the NCHW result is transposed
 // to NHWC and flattened to a token sequence before the add.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: -> tensor<1x16x16xf16>
 // CHECK: hip.conv
 // CHECK: hip.transpose
@@ -870,7 +870,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf16>,
 // rocMLIR cannot invert a broadcast of the conv result, so the forward chain
 // stops before it and the kernel holds only the conv.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: -> tensor<1x16x1x1xf16>
 // CHECK-NOT: hip.expand
 // CHECK-NOT: hip.add
@@ -903,7 +903,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x1x1xf16>,
 // A slice of the conv result would make the kernel compute channels it then
 // drops, so the slice and its reader stay outside.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: -> tensor<1x16x4x4xf16>
 // CHECK-NOT: tensor.extract_slice
 // CHECK-NOT: hip.add
@@ -936,7 +936,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf16>,
 // the kernel reads and writes ui8. The rank-0 scale and zero point are
 // inline constants cloned into the kernel.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: (%[[XQ:[a-z0-9]+]]: tensor<1x8x4x4xui8>, %{{.*}}: tensor<16x8x3x3xf32>, %{{.*}}: tensor<16xf32>) -> tensor<1x16x4x4xui8>
 // CHECK: hip.dequantize_linear({{.*}}) ins(%[[XQ]]
 // CHECK: hip.conv
@@ -982,12 +982,12 @@ func.func @main_graph(%ctx: !hip.context, %xq: tensor<1x8x4x4xui8>,
 // the kernel that reads it. A quantize that wraps (saturate = 0) has no TOSA
 // lowering and is not taken either.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: -> tensor<1x16x4x4xui8>
 // CHECK: hip.quantize_linear
 // CHECK-NOT: hip.dequantize_linear
 // CHECK: return
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: -> tensor<1x16x4x4xf32>
 // CHECK-NOT: hip.quantize_linear
 
@@ -1035,7 +1035,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf32>,
 // A quantize with a second reader keeps running, so the conv's kernel takes
 // only its own dequantize and reads the ui8 tensor the quantize writes.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: (%[[XQ:[a-z0-9]+]]: tensor<1x8x4x4xui8>,
 // CHECK-NOT: hip.quantize_linear
 // CHECK: hip.dequantize_linear({{.*}}) ins(%[[XQ]]
@@ -1043,7 +1043,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf32>,
 
 // CHECK-LABEL: func.func @main_graph
 // CHECK: %[[Q:.*]] = hip.quantize_linear
-// CHECK: hip.rocmlir({{.*}}) @rocMlir{{[0-9]+}} ins(%[[Q]],
+// CHECK: hip.rocmlir({{.*}}) @mlir_{{[a-z0-9_]+}} ins(%[[Q]],
 // CHECK: return {{.*}}, %[[Q]]
 func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf32>,
                       %w: tensor<16x8x3x3xf32>, %b: tensor<16xf32>)
@@ -1074,7 +1074,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf32>,
 // kernel returns the conv result as well, and the outside reader, which sat
 // between the conv and the epilogue, moves below the dispatch.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: -> (tensor<1x16x4x4xf16>, tensor<1x16x4x4xf16>)
 // CHECK: %[[C:.*]] = hip.conv
 // CHECK: %[[S:.*]] = hip.sigmoid({{.*}}) ins(%[[C]]
@@ -1083,7 +1083,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf32>,
 // CHECK-LABEL: func.func @main_graph
 // CHECK-DAG: %[[EC:.*]] = tensor.empty() : tensor<1x16x4x4xf16>
 // CHECK-DAG: %[[ES:.*]] = tensor.empty() : tensor<1x16x4x4xf16>
-// CHECK: %[[R:.*]]:2 = hip.rocmlir({{.*}}) @rocMlir{{[0-9]+}} ins({{.*}}) outs(%[[EC]], %[[ES]] : tensor<1x16x4x4xf16>, tensor<1x16x4x4xf16>)
+// CHECK: %[[R:.*]]:2 = hip.rocmlir({{.*}}) @mlir_{{[a-z0-9_]+}} ins({{.*}}) outs(%[[EC]], %[[ES]] : tensor<1x16x4x4xf16>, tensor<1x16x4x4xf16>)
 // CHECK: %[[N:.*]] = hip.isnan({{.*}}) ins(%[[R]]#0
 // CHECK: return %[[R]]#1, %[[N]]
 func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf16>,
@@ -1110,7 +1110,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf16>,
 // output and also feeds the activation. The kernel returns both, in chain
 // order.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: (%{{.*}}: tensor<1x8x4x4xf16>, %{{.*}}: tensor<16x8x3x3xf16>, %{{.*}}: tensor<16xf16>, %[[RES:.*]]: tensor<1x16x4x4xf16>) -> (tensor<1x16x4x4xf16>, tensor<1x16x4x4xf16>)
 // CHECK: %[[C:.*]] = hip.conv
 // CHECK: %[[A:.*]] = hip.add({{.*}}) ins(%[[C]], %[[RES]]
@@ -1145,7 +1145,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf16>,
 // kernel read its own output, so the add stays outside and the kernel holds
 // the conv alone.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: -> tensor<1x16x4x4xf16>
 // CHECK-NOT: hip.add
 // CHECK: return
@@ -1178,7 +1178,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf16>,
 // SiLU written out as x * sigmoid(x): the conv result has two readers, both
 // in the kernel, so nothing escapes and the kernel has one result.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: -> tensor<1x16x4x4xf16>
 // CHECK: %[[C:.*]] = hip.conv
 // CHECK: %[[S:.*]] = hip.sigmoid({{.*}}) ins(%[[C]]
@@ -1186,7 +1186,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf16>,
 // CHECK: return %[[M]] :
 
 // CHECK-LABEL: func.func @main_graph
-// CHECK: %[[R:.*]] = hip.rocmlir({{.*}}) @rocMlir{{[0-9]+}} ins({{.*}}) outs(%{{.*}} : tensor<1x16x4x4xf16>)
+// CHECK: %[[R:.*]] = hip.rocmlir({{.*}}) @mlir_{{[a-z0-9_]+}} ins({{.*}}) outs(%{{.*}} : tensor<1x16x4x4xf16>)
 // CHECK-NEXT: return %[[R]]
 func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf16>,
                       %w: tensor<16x8x3x3xf16>, %b: tensor<16xf16>)
@@ -1213,12 +1213,12 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf16>,
 // as a prologue on every load. The claim holds whichever conv the driver
 // outlines first.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: tensor<16x8x3x3xf16>
 // CHECK: hip.conv
 // CHECK: hip.max
 // CHECK: return
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: tensor<16x16x1x1xf16>
 // CHECK: hip.conv
 // CHECK-NOT: hip.max
@@ -1254,7 +1254,7 @@ func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf16>,
 // An erf GELU behind a reshape reads the reshaped matmul result twice. Both
 // readers join the chain, so the reshape and the whole GELU go in the kernel.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK: hip.matmul
 // CHECK: tensor.expand_shape
 // CHECK: hip.mul
@@ -1296,7 +1296,7 @@ func.func @main_graph(%ctx: !hip.context, %a: tensor<8x16xf16>,
 // A reshape that is also a graph output has no init to be a kernel result
 // from, so it ends the chain and its readers stay outside.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK: hip.matmul
 // CHECK-NOT: hip.erf
 // CHECK: return
@@ -1318,4 +1318,62 @@ func.func @main_graph(%ctx: !hip.context, %a: tensor<8x16xf16>,
   %erf = hip.erf(%ctx) ins(%v : tensor<1x8x32xf16>)
       outs(%ee : tensor<1x8x32xf16>) : tensor<1x8x32xf16>
   return %v, %erf : tensor<1x8x32xf16>, tensor<1x8x32xf16>
+}
+
+// -----
+
+// Two chains with the same ops share this module, so the suffixes are _0 and
+// _1. The later kernel is outlined first and takes _0.
+
+// CHECK-DAG: func.func @mlir_conv_0
+// CHECK-DAG: func.func @mlir_conv_1
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK-DAG: hip.rocmlir(%{{.*}}) @mlir_conv_0
+// CHECK-DAG: hip.rocmlir(%{{.*}}) @mlir_conv_1
+func.func @main_graph(%ctx: !hip.context, %in0: tensor<1x8x4x4xf16>,
+                      %w0: tensor<16x8x3x3xf16>, %b0: tensor<16xf16>,
+                      %in1: tensor<1x8x4x4xf16>, %w1: tensor<16x8x3x3xf16>,
+                      %b1: tensor<16xf16>)
+    -> (tensor<1x16x4x4xf16>, tensor<1x16x4x4xf16>) {
+  %e0 = tensor.empty() : tensor<1x16x4x4xf16>
+  %c0 = hip.conv(%ctx) ins(%in0, %w0, %b0 : tensor<1x8x4x4xf16>,
+                                         tensor<16x8x3x3xf16>, tensor<16xf16>)
+      outs(%e0 : tensor<1x16x4x4xf16>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [3, 3],
+       pads = [1, 1, 1, 1], strides = [1, 1]} : tensor<1x16x4x4xf16>
+  %e1 = tensor.empty() : tensor<1x16x4x4xf16>
+  %c1 = hip.conv(%ctx) ins(%in1, %w1, %b1 : tensor<1x8x4x4xf16>,
+                                         tensor<16x8x3x3xf16>, tensor<16xf16>)
+      outs(%e1 : tensor<1x16x4x4xf16>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [3, 3],
+       pads = [1, 1, 1, 1], strides = [1, 1]} : tensor<1x16x4x4xf16>
+  return %c0, %c1 : tensor<1x16x4x4xf16>, tensor<1x16x4x4xf16>
+}
+
+// -----
+
+// The suffix also skips a symbol the input already has. A fresh counter would
+// pick mlir_conv_0 again and the module verifier would reject it.
+
+func.func @mlir_conv_0() {
+  return
+}
+
+// CHECK-DAG: func.func @mlir_conv_0
+// CHECK-DAG: func.func @mlir_conv_1
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK: hip.rocmlir(%{{.*}}) @mlir_conv_1
+// CHECK-NOT: hip.rocmlir(%{{.*}}) @mlir_conv_0
+func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf16>,
+                      %w: tensor<16x8x3x3xf16>, %b: tensor<16xf16>)
+    -> tensor<1x16x4x4xf16> {
+  %e = tensor.empty() : tensor<1x16x4x4xf16>
+  %c = hip.conv(%ctx) ins(%in, %w, %b : tensor<1x8x4x4xf16>,
+                                        tensor<16x8x3x3xf16>, tensor<16xf16>)
+      outs(%e : tensor<1x16x4x4xf16>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [3, 3],
+       pads = [1, 1, 1, 1], strides = [1, 1]} : tensor<1x16x4x4xf16>
+  return %c : tensor<1x16x4x4xf16>
 }

@@ -16,7 +16,7 @@
 // The add is a * 0.25 / 0.5 + (0 - 0.5 * 128 + 3 * 1 / 0.5) = a * 0.5 - 58.
 // The mul is (y - 128) * t * (0.25 * 0.125 / 0.0625) + 10.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: -> tensor<1x2x4x4xui8>
 // CHECK: %[[Y:.*]] = hip.quantize_linear
 // CHECK: %[[YF:.*]] = hip.cast(%{{.*}}) ins(%[[Y]] : {{.*}}) {to = 1 : i64}
@@ -131,7 +131,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x2x4x4xui8>)
 // rB = 0.125 / 0.5, the sum is a * 0.5 + (r * 0.25 + (3 - (0.5 * 128 +
 // 0.25 * 4))) = a * 0.5 + (r * 0.25 - 62).
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: %[[R:[^:]*]]: tensor<1x2x4x4xui8>) -> tensor<1x2x4x4xui8>
 // CHECK: %[[Y:.*]] = hip.quantize_linear
 // CHECK: %[[YF:.*]] = hip.cast(%{{.*}}) ins(%[[Y]] :
@@ -192,7 +192,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x2x4x4xui8>,
 // A dequantize whose f32 value leaves the graph stays outside: the kernel
 // would otherwise write four bytes for each one it reads.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: -> tensor<1x2x4x4xui8>
 // CHECK-NOT: hip.dequantize_linear
 // CHECK: return
@@ -230,21 +230,21 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x2x4x4xui8>)
 // output than its GEMM, so the mul and its dequantizes stay outside. The plane
 // dequantize, the mul and the quantize become an elementwise kernel.
 
-// CHECK-LABEL: func.func @rocMlir1
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: attributes {rock.elementwise, rock.kernel}
 // CHECK: hip.dequantize_linear
 // CHECK: hip.mul
 // CHECK: hip.quantize_linear
 
-// CHECK-LABEL: func.func @rocMlir0
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: -> tensor<1x2x1x1xui8>
 // CHECK-NOT: hip.dequantize_linear
 // CHECK: return
 
 // CHECK-LABEL: func.func @main_graph
-// CHECK: hip.rocmlir({{.*}}) @rocMlir0
+// CHECK: hip.rocmlir({{.*}}) @mlir_{{[a-z0-9_]+}}
 // CHECK: hip.dequantize_linear
-// CHECK: hip.rocmlir({{.*}}) @rocMlir1
+// CHECK: hip.rocmlir({{.*}}) @mlir_{{[a-z0-9_]+}}
 func.func @main_graph(%ctx: !hip.context, %x: tensor<1x2x1x1xui8>,
                       %plane: tensor<1x2x4x4xui8>) -> tensor<1x2x4x4xui8> {
   %xs = hip.constant {value = dense<0.5> : tensor<f32>} : tensor<f32>

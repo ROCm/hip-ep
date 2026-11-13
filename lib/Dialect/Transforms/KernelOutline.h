@@ -8,10 +8,13 @@
 
 #include "hip/Dialect/IR/HipDialect.h"
 
+#include <llvm/ADT/ArrayRef.h>
 #include <llvm/ADT/SetVector.h>
+#include <mlir/IR/BuiltinOps.h>
 #include <mlir/IR/PatternMatch.h>
 
 #include <optional>
+#include <string>
 #include <utility>
 
 namespace mlir::hip {
@@ -64,6 +67,14 @@ void collectConstantScalarExpr(Value v, SetVector<Operation *> &ops);
 /// whose shape is computed at run time.
 std::optional<SmallVector<Value>> getDataInputs(Operation *producer,
                                                 Value context);
+
+/// Symbol for one outlined rocMLIR kernel: `mlir_<ops>_<n>`. `ops` is the
+/// clone-order list. A `hip.rocmlir_elementwise` contributes its body ops, and
+/// bookkeeping (empty, reshape, constants, poison, return) is left out.
+/// `counter` ends one past the suffix that was used. A suffix already present
+/// in `module` is skipped, so two copies of the same chain stay unique.
+std::string rocMlirKernelName(ModuleOp module, ArrayRef<Operation *> ops,
+                              int &counter);
 
 } // namespace mlir::hip
 
