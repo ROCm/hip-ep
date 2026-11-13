@@ -8,6 +8,7 @@
 // 2. Dynamic batch and spatial extents, f32
 // 3. Schema-18 per-group scale/bias (length G != C) stays unconverted
 // 4. num_groups == C: both schema readings agree, so it converts
+// 5. Dynamic C stays unconverted: nothing proves scale and bias have C values
 
 // RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
 
@@ -71,4 +72,16 @@ module {
   // CHECK-NOT: onnx.GroupNormalization
   // CHECK: hip.group_norm
   // CHECK-SAME: groups = 8
+
+  func.func @group_normalization_dynamic_channels(%X: tensor<1x?x4x4xf32>,
+                                                  %scale: tensor<32xf32>,
+                                                  %bias: tensor<32xf32>) -> tensor<1x?x4x4xf32> {
+    %Y = "onnx.GroupNormalization"(%X, %scale, %bias) {num_groups = 8 : si64}
+        : (tensor<1x?x4x4xf32>, tensor<32xf32>, tensor<32xf32>) -> tensor<1x?x4x4xf32>
+    return %Y : tensor<1x?x4x4xf32>
+  }
+
+  // CHECK-LABEL: func.func @group_normalization_dynamic_channels
+  // CHECK: onnx.GroupNormalization
+  // CHECK-NOT: hip.group_norm
 }

@@ -92,7 +92,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | InstanceNormalization | Custom HIP kernel. Rows of 16K elements or more use the GroupNorm split reduction with one channel per group |
 | BatchNormalization | Custom HIP kernel; inference only (`training_mode` stays on ONNX) |
 | GroupNorm (`com.microsoft`) | Custom HIP kernel; optional SiLU, NCHW or NHWC; f16, bf16, f32 and f64. Groups of 16K elements or more (`HIPDNN_EP_GROUPNORM_SPLIT_SIZE` overrides the threshold) use a split reduction over the runtime workspace, sized from the device's unit count and threads per unit; the result is deterministic |
-| GroupNormalization | Same kernel as GroupNorm, NCHW, for the opset-21 per-channel scale and bias. The opset-18 per-group form is not supported |
+| GroupNormalization | Same kernel as GroupNorm, NCHW, for the opset-21 per-channel scale and bias. The channel dimension must be static. The opset-18 per-group form is not supported |
 | SkipLayerNormalization (`com.microsoft`) | Decomposed to Add + LayerNormalization, including the optional input bias |
 | EmbedLayerNormalization (`com.microsoft`) | Decomposed to Gather + Add + LayerNormalization. f16/f32 tables, i32 indices. A missing position-id input uses `0 .. sequence-1` when the sequence length is static. `mask_index` is the count of ones along the sequence; with no mask it is zeros |
 | RMSNormalization | Custom HIP kernel |
