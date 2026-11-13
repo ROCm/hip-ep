@@ -395,3 +395,406 @@ extern "C" int hip_mha_flash_prefill(void *stream, const void *Q,
     return -1;
   }
 }
+
+//===----------------------------------------------------------------------===//
+// BSND flash prefill: Q, K, V and O all in the projections' [B, S, N, d]
+// layout, so nothing is transposed on the way in or out.
+//
+// The transposed-score formulation of gqa_kernel.hip's v6x prefill, reduced
+// to what MHA needs (non-causal, no window, sink or key bias, one 16-query
+// tile per wave). The scores are computed as S^T = K Q^T by swapping the
+// WMMA operands, so in the accumulator layout a lane owns one query and holds
+// keys along its registers:
+//   * the row max and row sum reduce in registers plus one exchange with the
+//     other half-wave, instead of a four-step shuffle per row;
+//   * m, l and the rescale factor are one value per lane;
+//   * P^T is the B operand of O^T = V^T P^T straight from registers, so P
+//     never goes through LDS. On the gfx11 encoding a lane holds only the 8
+//     keys of its parity; the WMMA computes each half-wave's accumulator rows
+//     from that half's own B lanes, so each half puts its own 8 keys first and
+//     V^T is staged with the matching per-row key order (see mhaVtPos).
+// K and V^T are staged in LDS once per block and shared by its waves. O is
+// accumulated in fp32 across key tiles.
+//
+// Head dims that are not a multiple of 16 run on the next multiple, the tail
+// staged as zeros. d must be a multiple of 8 and the four base pointers 16-byte
+// aligned, so every global access is a whole 16-byte chunk; the entry point
+// declines anything else and the caller keeps the transposing path.
+//===----------------------------------------------------------------------===//
+
+namespace {
+
+typedef _Float16 mha_frag_t
+    __attribute__((ext_vector_type(HIPDNN_WMMA_FRAG_ELEMS), aligned(16)));
+typedef _Float16 mha_half8_t __attribute__((ext_vector_type(8), aligned(16)));
+
+// Exchanges a value with lane ^ 16 on the VALU; __shfl_xor goes through
+// ds_bpermute. On gfx11 / gfx11.5 the tied "old" operand is copied by inline
+// asm: a compiler-made copy can be dual-issued with an unrelated move into a
+// VOPD pair that loses the interlock on its source (LLVM #220348), and the
+// swap then exchanges a stale value (see v6_swap_halves in gqa_kernel.hip).
+__device__ __forceinline__ int mha_swap_halves(int x) {
+#if HIPDNN_HAS_WMMA && HIPDNN_WMMA_FRAG_ELEMS != 8
+  int old;
+  asm("v_mov_b32 %0, %1" : "=v"(old) : "v"(x));
+  return __builtin_amdgcn_permlanex16(old, x, 0x76543210u, 0xfedcba98u, false,
+                                      false);
+#elif HIPDNN_HAS_WMMA
+  return __builtin_amdgcn_permlanex16(x, x, 0x76543210u, 0xfedcba98u, false,
+                                      false);
+#else
+  return __shfl_xor(x, 16);
+#endif
+}
+
+__device__ __forceinline__ float mha_swap_halves(float x) {
+  return __builtin_bit_cast(float, mha_swap_halves(__builtin_bit_cast(int, x)));
+}
+
+// Position of key `key` (within the tile) in V^T row `dd`. On gfx11 each
+// 16-key block of a row holds the 8 keys of the row's parity first, which is
+// the order the half-wave computing that row puts P^T in.
+__device__ __forceinline__ int mhaVtPos(int key, int dd) {
+#if HIPDNN_WMMA_FRAG_ELEMS != 8
+  return (key & ~15) + ((key & 15) >> 1) + (((key ^ dd) & 1) << 3);
+#else
+  (void)dd;
+  return key;
+#endif
+}
+
+// A WMMA operand read from a 16-byte-aligned address (half16_t asks for the
+// vector's natural 32).
+__device__ __forceinline__ half16_t mhaFragAt(const _Float16 *p) {
+  return *reinterpret_cast<const mha_frag_t *>(p);
+}
+
+// Feeds NF WMMA operands to use(f, frag) in order with at most RING LDS reads
+// in flight. Left alone, the scheduler issues every fragment read of a GEMM
+// step first -- 12 or more fragments of 8 VGPRs -- which put the d48 tile at
+// 256 VGPRs with a spill; the sched_barrier keeps the next reads below the
+// WMMA that frees their slot. As v6_frag_stream in gqa_kernel.hip.
+template <int NF, int RING, typename Load, typename Use>
+__device__ __forceinline__ void mhaFragStream(Load &&load, Use &&use) {
+  constexpr int R = RING < NF ? RING : NF;
+  typedef int dw_t __attribute__((ext_vector_type(sizeof(half16_t) / 4)));
+  dw_t ring[R];
+#pragma unroll
+  for (int f = 0; f < R; ++f) ring[f] = __builtin_bit_cast(dw_t, load(f));
+#pragma unroll
+  for (int f = 0; f < NF; ++f) {
+    dw_t x = ring[f % R];
+    if (f + R < NF) ring[f % R] = __builtin_bit_cast(dw_t, load(f + R));
+    asm("" : "+v"(x));
+    use(f, __builtin_bit_cast(half16_t, x));
+#if HIPDNN_HAS_WMMA
+    __builtin_amdgcn_sched_barrier(0);
+#endif
+  }
+}
+
+// Fragment reads in flight: the 8-half fragments of the gfx12-style encoding
+// leave room for one more.
+constexpr int kMhaFragRing = HIPDNN_WMMA_FRAG_ELEMS == 8 ? 3 : 2;
+
+// This lane's fragment of the 16 consecutive elements of `row` at `base`,
+// zero past `d` (a multiple of 8, so a fragment is whole, half or empty).
+__device__ __forceinline__ half16_t mhaLoadFrag(const _Float16 *row, int base,
+                                                int k_off, int d) {
+  const int start = base + k_off;
+  if (start + HIPDNN_WMMA_FRAG_ELEMS <= d)
+    return mhaFragAt(row + start);
+  half16_t r{};
+  if (start + 8 <= d) {
+    const mha_half8_t lo = *reinterpret_cast<const mha_half8_t *>(row + start);
+#pragma unroll
+    for (int i = 0; i < 8; ++i) r[i] = lo[i];
+  }
+  return r;
+}
+
+template <int D_PAD, int NW, int BKV>
+__global__ void __launch_bounds__(NW * 32)
+mha_flash_bsnd_kernel(const _Float16 *__restrict__ Q,
+                      const _Float16 *__restrict__ K,
+                      const _Float16 *__restrict__ V,
+                      _Float16 *__restrict__ O, int N, int sq, int skv, int d,
+                      float scale_log2) {
+  constexpr int kTile = 16;
+  constexpr int D_TILES = D_PAD / kTile;
+  constexpr int S_TILES = BKV / kTile;
+  constexpr int kChunks = D_PAD / 8;     // 16-byte chunks per staged row
+  constexpr int K_STR = D_PAD + 8;       // halves; rows stay 16-byte aligned
+  constexpr int VT_STR = BKV + 8;
+  constexpr int kThreads = NW * 32;
+  constexpr int kAcc = 8;
+  static_assert(BKV % kTile == 0 && D_PAD % kTile == 0, "whole WMMA tiles");
+
+  __shared__ __align__(16) _Float16 K_lds[BKV * K_STR];
+  __shared__ __align__(16) _Float16 Vt_lds[D_PAD * VT_STR];
+
+  const int head = blockIdx.y;
+  const int batch = blockIdx.z;
+  const int tid = threadIdx.x;
+  const int wave = __builtin_amdgcn_readfirstlane(tid / 32);
+  const int lane = tid % 32;
+  const int col = lane % kTile;
+  const int pair = lane / kTile;
+  const int k_off = hipdnn_wmma_k_off(pair);
+
+  const size_t rowStride = static_cast<size_t>(N) * d; // one sequence position
+  const _Float16 *kBase =
+      K + static_cast<size_t>(batch) * skv * rowStride + head * d;
+  const _Float16 *vBase =
+      V + static_cast<size_t>(batch) * skv * rowStride + head * d;
+
+  const int q = (blockIdx.x * NW + wave) * kTile + col;
+  const bool qValid = q < sq;
+  const _Float16 *qRow =
+      Q + (static_cast<size_t>(batch) * sq + (qValid ? q : 0)) * rowStride +
+      head * d;
+
+  // Q^T as the B operand of S^T = K Q^T: column = this lane's query.
+  half16_t Qf[D_TILES];
+#pragma unroll
+  for (int tk = 0; tk < D_TILES; ++tk)
+    Qf[tk] = qValid ? mhaLoadFrag(qRow, tk * kTile, k_off, d) : half16_t{};
+
+  // O^T: this lane's column is its query, element e is head-dim row
+  // tj * 16 + acc_row(pair, e).
+  float8_t Oacc[D_TILES];
+#pragma unroll
+  for (int tj = 0; tj < D_TILES; ++tj) Oacc[tj] = float8_t{};
+  float m = -INFINITY, l = 0.0f;
+
+  // K/V staging. Chunk r of a thread is i = tid + r * kThreads. K is staged
+  // row-major (chunk i is row i / kChunks); V transposed, with consecutive
+  // lanes on consecutive keys of one head-dim chunk so that their scalar
+  // writes land on one V^T row. Chunks past d or skv are zero. Up to
+  // kPrefetchMaxD the next tile is loaded into registers while this one is
+  // computed, so the global latency is behind the WMMAs rather than in front
+  // of a barrier; the wider heads have no registers to spare for it (d160
+  // with the prefetch spilled 81 VGPRs).
+  constexpr int kPrefetchMaxD = 96;
+  constexpr bool kPrefetch = D_PAD <= kPrefetchMaxD;
+  constexpr int kStage = BKV * kChunks;
+  constexpr int kPerThr = (kStage + kThreads - 1) / kThreads;
+  mha_half8_t kReg[kPerThr], vReg[kPerThr];
+  auto loadTile = [&](int kv0) {
+    const int keys = min(BKV, skv - kv0);
+#pragma unroll
+    for (int r = 0; r < kPerThr; ++r) {
+      const int i = tid + r * kThreads;
+      kReg[r] = mha_half8_t{};
+      vReg[r] = mha_half8_t{};
+      if (kStage % kThreads == 0 || i < kStage) {
+        const int kr = i / kChunks, kc = i % kChunks;
+        if (kr < keys && kc * 8 < d)
+          kReg[r] = *reinterpret_cast<const mha_half8_t *>(
+              kBase + static_cast<size_t>(kv0 + kr) * rowStride + kc * 8);
+        const int vr = i % BKV, vc = i / BKV;
+        if (vr < keys && vc * 8 < d)
+          vReg[r] = *reinterpret_cast<const mha_half8_t *>(
+              vBase + static_cast<size_t>(kv0 + vr) * rowStride + vc * 8);
+      }
+    }
+  };
+  auto storeTile = [&]() {
+#pragma unroll
+    for (int r = 0; r < kPerThr; ++r) {
+      const int i = tid + r * kThreads;
+      if (kStage % kThreads == 0 || i < kStage) {
+        const int kr = i / kChunks, kc = i % kChunks;
+        *reinterpret_cast<mha_half8_t *>(&K_lds[kr * K_STR + kc * 8]) = kReg[r];
+        const int vr = i % BKV, vc = i / BKV;
+#pragma unroll
+        for (int e = 0; e < 8; ++e) {
+          const int dd = vc * 8 + e;
+          Vt_lds[dd * VT_STR + mhaVtPos(vr, dd)] = vReg[r][e];
+        }
+      }
+    }
+  };
+
+  if (kPrefetch) {
+    loadTile(0);
+    storeTile();
+    __syncthreads();
+  }
+  for (int kv0 = 0; kv0 < skv; kv0 += BKV) {
+    const int keys = min(BKV, skv - kv0);
+    const bool hasNext = kv0 + BKV < skv;
+    if (!kPrefetch) {
+      __syncthreads(); // every wave is done with the previous tile
+      loadTile(kv0);
+      storeTile();
+      __syncthreads();
+    } else if (hasNext) {
+      loadTile(kv0 + BKV);
+    }
+
+    // S^T sub-tiles: rows are keys kv0 + sj*16 + acc_row(pair, e). Head-dim
+    // tile outer, key block inner, so consecutive WMMAs accumulate into
+    // different S tiles.
+    float8_t S[S_TILES];
+#pragma unroll
+    for (int sj = 0; sj < S_TILES; ++sj) S[sj] = float8_t{};
+    mhaFragStream<S_TILES * D_TILES, kMhaFragRing>(
+        [&](int f) {
+          return mhaFragAt(&K_lds[((f % S_TILES) * kTile + col) * K_STR +
+                                  (f / S_TILES) * kTile + k_off]);
+        },
+        [&](int f, const half16_t &kf) {
+          S[f % S_TILES] = HIPDNN_WMMA_F32_16X16X16_F16(kf, Qf[f / S_TILES],
+                                                        S[f % S_TILES]);
+        });
+    if (keys < BKV) {
+#pragma unroll
+      for (int sj = 0; sj < S_TILES; ++sj)
+#pragma unroll
+        for (int e = 0; e < kAcc; ++e)
+          if (sj * kTile + hipdnn_wmma_acc_row(pair, e) >= keys)
+            S[sj][e] = -INFINITY;
+    }
+
+    // Online softmax. Scores stay unscaled and m is kept in scaled log2
+    // units: the scale is positive, so the max commutes with it.
+    float rmax = -INFINITY;
+#pragma unroll
+    for (int sj = 0; sj < S_TILES; ++sj)
+#pragma unroll
+      for (int e = 0; e < kAcc; ++e) rmax = fmaxf(rmax, S[sj][e]);
+    rmax = fmaxf(rmax, mha_swap_halves(rmax));
+    const float mNew = fmaxf(m, rmax * scale_log2);
+    // Every exponent is <= 0, so the raw v_exp_f32 needs no range fixup.
+    const float corr = __builtin_amdgcn_exp2f(m - mNew);
+
+#pragma unroll
+    for (int tj = 0; tj < D_TILES; ++tj)
+#pragma unroll
+      for (int e = 0; e < kAcc; ++e) Oacc[tj][e] *= corr;
+
+    // O^T += V^T P^T, one key block at a time: its P^T fragment is built
+    // right before the WMMAs that read it, so only one is live. A is V^T row
+    // tj*16 + col over the block.
+    typedef int int8v_t __attribute__((ext_vector_type(8)));
+    typedef _Float16 half2v_t __attribute__((ext_vector_type(2)));
+    float rsum = 0.0f;
+#pragma unroll
+    for (int sj = 0; sj < S_TILES; ++sj) {
+      _Float16 own[kAcc];
+#pragma unroll
+      for (int e = 0; e < kAcc; ++e) {
+        const float p = __builtin_amdgcn_exp2f(fmaf(S[sj][e], scale_log2, -mNew));
+        rsum += p;
+        own[e] = static_cast<_Float16>(p);
+      }
+      half16_t pf;
+#if HIPDNN_WMMA_FRAG_ELEMS == 8
+#pragma unroll
+      for (int e = 0; e < kAcc; ++e) pf[e] = own[e];
+#else
+      // This half-wave's own 8 keys first, the other parity from lane ^ 16.
+      int8v_t pk;
+#pragma unroll
+      for (int j = 0; j < kAcc / 2; ++j)
+        pk[j] = __builtin_bit_cast(int, half2v_t{own[2 * j], own[2 * j + 1]});
+#pragma unroll
+      for (int j = 0; j < kAcc / 2; ++j)
+        pk[kAcc / 2 + j] = mha_swap_halves(pk[j]);
+      pf = __builtin_bit_cast(half16_t, pk);
+#endif
+      mhaFragStream<D_TILES, kMhaFragRing>(
+          [&](int tj) {
+            return mhaFragAt(
+                &Vt_lds[(tj * kTile + col) * VT_STR + sj * kTile + k_off]);
+          },
+          [&](int tj, const half16_t &vf) {
+            Oacc[tj] = HIPDNN_WMMA_F32_16X16X16_F16(vf, pf, Oacc[tj]);
+          });
+    }
+    rsum += mha_swap_halves(rsum);
+    l = l * corr + rsum;
+    m = mNew;
+
+    if (kPrefetch && hasNext) {
+      __syncthreads(); // every wave is done reading this tile
+      storeTile();
+      __syncthreads();
+    }
+  }
+
+  if (!qValid)
+    return;
+  const float invL = 1.0f / fmaxf(l, 1e-20f);
+  _Float16 *oRow =
+      O + (static_cast<size_t>(batch) * sq + q) * rowStride + head * d;
+#pragma unroll
+  for (int tj = 0; tj < D_TILES; ++tj)
+#pragma unroll
+    for (int e = 0; e < kAcc; ++e) {
+      const int dd = tj * kTile + hipdnn_wmma_acc_row(pair, e);
+      if (dd < d)
+        oRow[dd] = static_cast<_Float16>(Oacc[tj][e] * invL);
+    }
+}
+
+template <int D_PAD, int NW, int BKV>
+int launchMhaBsnd(hipStream_t stream, const _Float16 *q, const _Float16 *k,
+                  const _Float16 *v, _Float16 *o, int B, int N, int sq, int skv,
+                  int d, float scale) {
+  constexpr float kLog2eF = 1.4426950408889634f;
+  const dim3 grid((sq + NW * 16 - 1) / (NW * 16), N, B);
+  (void)hipGetLastError();
+  mha_flash_bsnd_kernel<D_PAD, NW, BKV><<<grid, NW * 32, 0, stream>>>(
+      q, k, v, o, N, sq, skv, d, scale * kLog2eF);
+  return hipGetLastError() == hipSuccess ? 0 : -1;
+}
+
+} // namespace
+
+// Q [B,sq,N,d], K/V [B,skv,N,d], O [B,sq,N,d]; fp16. Returns 1 without
+// launching when the shape or alignment is outside what the kernel takes (the
+// caller then transposes K/V for hip_mha_flash_prefill), 0 on success and -1
+// on a launch failure.
+extern "C" int hip_mha_flash_prefill_bsnd(void *stream, const void *Q,
+                                          const void *K, const void *V, void *O,
+                                          int B, int N, int sq, int skv, int d,
+                                          float scale) {
+  auto aligned16 = [](const void *p) {
+    return (reinterpret_cast<uintptr_t>(p) & 15u) == 0;
+  };
+  // Past d = 160 the tile does not fit a wave's 256 VGPRs (it spilled 160-340
+  // bytes per lane); those heads keep the transposing path.
+  if (B <= 0 || N <= 0 || sq <= 0 || skv <= 0 || d <= 0 || d % 8 != 0 ||
+      d > 160 || !aligned16(Q) || !aligned16(K) || !aligned16(V) ||
+      !aligned16(O))
+    return 1;
+  hipStream_t s = reinterpret_cast<hipStream_t>(stream);
+  const _Float16 *q = reinterpret_cast<const _Float16 *>(Q);
+  const _Float16 *k = reinterpret_cast<const _Float16 *>(K);
+  const _Float16 *v = reinterpret_cast<const _Float16 *>(V);
+  _Float16 *o = reinterpret_cast<_Float16 *>(O);
+  const int d_pad = ((d + 15) / 16) * 16;
+  // 64-key tiles amortise the per-tile barriers best (d48, 4096 keys: 5.5 ms
+  // against 6.6 ms with 32-key tiles on gfx1150). A short key range wastes
+  // most of its last 64-key tile, though (77 keys: 0.39 -> 0.32 ms with 32),
+  // and from d80 on the 64-key tile no longer fits in registers.
+  const bool shortKeys = skv <= 128;
+  if (d_pad <= 16)
+    return shortKeys ? launchMhaBsnd<16, 4, 32>(s, q, k, v, o, B, N, sq, skv, d, scale)
+                     : launchMhaBsnd<16, 4, 64>(s, q, k, v, o, B, N, sq, skv, d, scale);
+  if (d_pad <= 32)
+    return shortKeys ? launchMhaBsnd<32, 4, 32>(s, q, k, v, o, B, N, sq, skv, d, scale)
+                     : launchMhaBsnd<32, 4, 64>(s, q, k, v, o, B, N, sq, skv, d, scale);
+  if (d_pad <= 48)
+    return shortKeys ? launchMhaBsnd<48, 4, 32>(s, q, k, v, o, B, N, sq, skv, d, scale)
+                     : launchMhaBsnd<48, 4, 64>(s, q, k, v, o, B, N, sq, skv, d, scale);
+  if (d_pad <= 64)
+    return shortKeys ? launchMhaBsnd<64, 4, 32>(s, q, k, v, o, B, N, sq, skv, d, scale)
+                     : launchMhaBsnd<64, 4, 64>(s, q, k, v, o, B, N, sq, skv, d, scale);
+  if (d_pad <= 80) return launchMhaBsnd<80, 4, 32>(s, q, k, v, o, B, N, sq, skv, d, scale);
+  if (d_pad <= 96) return launchMhaBsnd<96, 4, 32>(s, q, k, v, o, B, N, sq, skv, d, scale);
+  if (d_pad <= 128) return launchMhaBsnd<128, 4, 32>(s, q, k, v, o, B, N, sq, skv, d, scale);
+  return launchMhaBsnd<160, 8, 32>(s, q, k, v, o, B, N, sq, skv, d, scale);
+}
