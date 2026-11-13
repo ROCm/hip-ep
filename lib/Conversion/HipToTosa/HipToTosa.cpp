@@ -2570,10 +2570,13 @@ LogicalResult reshapeQdqParam(ConversionPatternRewriter &rewriter, Location loc,
     return success();
   }
 
-  // A per-tensor parameter ignores the axis, which can then be out of range.
+  // A per-tensor parameter, a scalar or a length-1 vector, ignores the axis,
+  // which can then be out of range (rank-1 data keeps the default axis = 1).
+  bool perTensor = paramType.getRank() == 0 ||
+                   (paramType.getRank() == 1 && paramType.getDimSize(0) == 1);
   if (axis < 0)
     axis += rank;
-  if (paramType.getRank() == 1 && (axis < 0 || axis >= rank))
+  if (!perTensor && paramType.getRank() == 1 && (axis < 0 || axis >= rank))
     return rewriter.notifyMatchFailure(op, "qdq axis out of range");
 
   if (paramType.getRank() == rank) {
@@ -2584,18 +2587,16 @@ LogicalResult reshapeQdqParam(ConversionPatternRewriter &rewriter, Location loc,
     return success();
   }
 
+  if (paramType.getRank() > 1)
+    return rewriter.notifyMatchFailure(op, "unsupported qdq param rank");
+  // A per-tensor parameter takes the all-ones shape of the data rank.
   SmallVector<int64_t> targetShape(rank, 1);
-  if (paramType.getRank() == 0) {
-    // per-tensor scalar: all-ones shape of the data rank
-  } else if (paramType.getRank() == 1) {
+  if (!perTensor) {
     int64_t n = paramType.getDimSize(0);
-    int64_t axisExtent = dataType.getDimSize(axis);
-    if (n != 1 && n != axisExtent)
+    if (n != dataType.getDimSize(axis))
       return rewriter.notifyMatchFailure(
           op, "1-d qdq param length must match the quantized axis");
     targetShape[axis] = n;
-  } else {
-    return rewriter.notifyMatchFailure(op, "unsupported qdq param rank");
   }
 
   auto newType = RankedTensorType::get(targetShape, paramType.getElementType());
@@ -8862,7 +8863,7 @@ bool isTosaLowerableQdq(Operation *op) {
     axis = dq.getAxis();
     blockSize = dq.getBlockSize();
   } else if (auto q = dyn_cast_if_present<QuantizeLinearOp>(op)) {
-    if (q.getSaturate() == 0)
+    if (q.getSaturate() == 0 || q.getPackedInt4())
       return false;
     input = q.getInput();
     scale = q.getScale();
@@ -8896,11 +8897,12 @@ bool isTosaLowerableQdq(Operation *op) {
     auto type = dyn_cast<RankedTensorType>(param.getType());
     if (!type || !type.hasStaticShape())
       return false;
-    if (type.getRank() == 0)
+    // A scalar or a length-1 vector is per-tensor and ignores the axis, as in
+    // reshapeQdqParam.
+    if (type.getRank() == 0 || (type.getRank() == 1 && type.getDimSize(0) == 1))
       return true;
     return rank > 0 && type.getRank() == 1 && axis >= 0 && axis < rank &&
-           (type.getDimSize(0) == 1 ||
-            type.getDimSize(0) == inputType.getDimSize(axis));
+           type.getDimSize(0) == inputType.getDimSize(axis);
   };
   return isScalarOrPerAxis(scale) &&
          (!zeroPoint || isScalarOrPerAxis(zeroPoint));

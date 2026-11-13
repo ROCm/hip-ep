@@ -133,6 +133,23 @@ func.func @dequantize_rank0_scale1(%ctx: !hip.context, %x: tensor<i8>,
   return %r : tensor<f32>
 }
 
+// Rank-1 data with a length-1 vector scale is per-tensor, so the default
+// axis = 1, out of range for rank 1, is ignored.
+// CHECK-LABEL: func.func @dequantize_rank1_scale1_default_axis
+// CHECK: tosa.mul
+// CHECK-NOT: hip.dequantize_linear
+func.func @dequantize_rank1_scale1_default_axis(%ctx: !hip.context,
+                                               %x: tensor<8xi8>,
+                                               %scale: tensor<1xf32>,
+                                               %init: tensor<8xf32>)
+    -> tensor<8xf32> attributes {rock.kernel} {
+  %r = hip.dequantize_linear(%ctx)
+         ins(%x, %scale : tensor<8xi8>, tensor<1xf32>)
+         outs(%init : tensor<8xf32>)
+         {axis = 1 : i64, block_size = 0 : i64} : tensor<8xf32>
+  return %r : tensor<8xf32>
+}
+
 // A ui8 dequantize reaches rocMLIR as i8 bytes. The zero point keeps its bit
 // pattern (128 reads back as -128 signless), and unsigned_cast widens it as
 // unsigned.
