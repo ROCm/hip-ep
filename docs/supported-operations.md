@@ -23,7 +23,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Add | Custom HIP kernel |
 | ImageScaler | Decomposed to `hip.mul`, or `hip.add` then `hip.mul` when the per-channel bias is non-zero. NCHW only; bias broadcasts as `1xCx1x1`. |
 | Sum | Decomposed to Add. Variadic elementwise sum with NumPy broadcast; same rank and dtype limits as Add |
-| Softmax | Custom HIP kernel. Last axis only; a missing `axis` is accepted for rank <= 2. f16/bf16/f32 |
+| Softmax | Custom HIP kernel. Last axis only; a missing `axis` is accepted for rank 2. f16/f32; the kernel also takes bf16, but the MorphiZen importer maps ONNX BFLOAT16 to f32 today |
 | Sigmoid | Custom HIP kernel |
 | Tanh | Custom HIP kernel |
 | Softplus | Custom HIP kernel (f32/f16) |
