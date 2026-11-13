@@ -112,3 +112,113 @@ unbound comparison timings are not the leaf result. An evidence-binding token
 supplied by a consumer binds immutable source, SDK/compiler and executable
 identities to that invocation. Untimed batch scratch preparation (ragged queue
 heads) is bounded and included in wall accounting, not in GPU group totals.
+
+
+## Native LUT ranking (`ut-rank-v3`)
+
+LUT refreshes rank candidates with the UT leaves themselves, so tables and
+tests share one timer and its v3 presets. Decision loss is the chosen entry's
+time divided by the best time in an independent sequential `confirm` of the
+final three candidates plus the default. On gfx1151 (2026-11-13; 32 MatMulNBits
+and 25 GQA shapes) it was p50/p95/max 1.000/1.025/1.061 for MatMulNBits and
+1.000/1.014/1.017 for GQA. These figures replay the recorded measurements with
+the v3 decision rule below, which was revised after those results, so they are
+not an independent qualification. A single `screen` pass per candidate scored
+p95/max 1.049/1.082 (MatMulNBits) and 1.027/1.066 (GQA) on an earlier sample.
+Near-tied finalists can swap between runs at little cost. The largest loss is a
+shape whose ranking stages both measured the default fastest while the
+sequential reference found a config 5.7% faster. Group interleaving still
+leaves repeatable schedule differences for a few candidates. ADLX on this APU
+exposes no manual clock, power or preset tuning, so clocks cannot be pinned.
+
+Build the eight MatMulNBits or four GQA leaves with their existing Makefiles:
+`make build RANK=1 BUILD_DIR=out_rank HIP_SDK=<sdk>`. This standalone variant
+uses the unchanged production kernel TU and an empty LUT. It exposes the
+existing configuration descriptors to the UT; ordinary builds keep their usual
+behavior. MatMulNBits candidates enter `hip_matmul_nbits`, including casts,
+zero-point conversion, repacking, dequantization and GEMM. GQA uses the existing
+configured APIs; INT8 prefill times both KV dequantization launches and attention
+in each complete call. It excludes KV append and rotary work outside that entry.
+
+Supply `HIPDNN_UT_RANK=<csv>` with the exact header:
+
+```csv
+leaf,shape,priority,config
+matmul_nbits/Xfp16_Wu4_Yfp16,M16_N2048_K2560_gs128,0,default
+matmul_nbits/Xfp16_Wu4_Yfp16,M16_N2048_K2560_gs128,0,id=12
+```
+
+Repeated leaf/shape rows form one candidate set. `default` is mandatory and is
+captured from the actual no-LUT final selection, then placed at index zero.
+Final launches are deduplicated before correctness checks or timing. Config IDs
+come from `HIPDNN_UT_RANK_CATALOG=1`, not from a separate sweep driver. Supported
+shape strings are the native leaves' strings: MatMulNBits `M_N_K_gs` with an
+optional `_noz`; GQA `B_H_G_D_len` for decode or `B_H_G_D_sq` for prefill. FP16
+GQA also accepts its native window/sink/smooth fields. FP16 prefill requires
+`_past<length>`, including `_past0`; INT8 prefill has no past suffix. Ranking
+currently excludes padding cases. M-blocked MatMulNBits has no `tile_m` in the
+existing LUT schema and therefore participates as a default singleton.
+
+Every candidate must pass the owning leaf's CPU reference first. Screen all
+candidates with the unchanged v3 preset. Keep at most four candidates within 5%
+of the fastest, plus default. Standard and confirm use the same batch runner
+as an ordinary UT measurement. Group interleaving measures contiguous batches
+for each candidate within common balanced groups, rotating each group's first
+candidate. Event batches retain the current profile's call cap. If a candidate
+needs full-duration continuation, all continue and retain valid earlier batches.
+The v3 warmup, call/time goals, floors, spread and invalid retry limits are unchanged.
+
+Sort every candidate by the median of its five group ratios to the same default.
+Pairwise ratios are diagnostics and never serve as the sorting comparator.
+Confirm once for priority, a nondefault entry boundary (score 0.97..0.99 or
+range crossing 0.98), winner/runner-up range crossing 1, or either competitor
+being nonconverged. A default singleton requires no confirm.
+
+The order between the winner and the runner-up is unresolved when their
+range crosses 1 or their pairwise median contradicts the scalar order; the
+record then reports `decision_status: winner_unresolved`. That status is
+diagnostic only. Insert the ranked winner whenever it is nondefault and its
+median ratio to the default is below 0.98; otherwise keep the default.
+`selected` and `insert_nondefault` state the resulting LUT choice. One slow
+group among five cannot veto an otherwise clear win, and a near-tied runner-up
+costs little. Nonconvergence prompts confirm. Ratio ranges describe five
+groups and are not confidence intervals. `ut-rank-v2` records, which fell back
+to the default whenever the order was unresolved, are still validated under
+their original rule.
+
+A measurement whose invalid event durations exceed the timer allowance is
+repeated once. A nondefault screen candidate that fails again is dropped and
+listed in that phase's `excluded`; the default must measure.
+
+`UT_RANK` includes candidate CPU results and final geometry; screen, standard
+and optional confirm groups and ratios versus default/best; winner/runner-up;
+entry decision, tie/obvious/converged flags, confirm trigger, per-phase GPU/pilot
+and wall costs, and optional frequency. Existing `UT_TIMING` and
+`UT_TIMING_BINDING` records remain available for full environment/build binding.
+
+`HIPDNN_UT_RANK_REFERENCE=1` measures supplied candidates independently and
+sequentially with confirm. Its winner uses absolute median times because its
+groups do not share a drift history. The tooling freezes a MatMulNBits default
+with `default;id=<original ID>`; it does not let a second runtime tune redefine
+the reference default. Its index-matched group ratios are diagnostic because
+sequential groups do not share a drift history; the decision uses absolute
+median times. This mode validates ranking, not routine LUT refresh.
+
+On Windows, `ADLX_INCLUDE=<GPUOpen ADLX v1.5 Include directory>` enables optional
+System32 ADLX loading. Measurements run without SDK headers or driver support.
+Clock, temperature and power queries occur after completed event intervals,
+at most every 250 ms, excluding warmup. Frequency includes average/minimum/peak,
+reference MHz/basis (SDK range, or observed peak when unavailable) and a below-75% diagnostic; unavailable fields are null and
+`frequency_status` explains why. Short measurements may obtain only one sample;
+driver telemetry cadence and the diagnostic do not establish clock causality.
+During ranking, telemetry covers the whole phase and is shared by that phase's
+candidate UT_TIMING records; it is not a per-candidate clock measurement.
+`HIPDNN_UT_ADLX=0` disables observation for an overhead comparison. No clocks or
+driver settings are changed.
+
+Ranking leaves may reuse a previously compiled adapter for the same op with
+`RANK_KERNEL_OBJ=<object>`. The caller must prove matching source/include
+closure, compiler/SDK, ISA and kernel flags. Other builds compile their own TU.
+GPU lease wrappers belong around each native process; CPU candidate generation,
+JSON/FB writing, analysis and file transfer do not retain GPU ownership.
+Catalog enumeration is a CPU metadata phase and does not require a GPU lease.

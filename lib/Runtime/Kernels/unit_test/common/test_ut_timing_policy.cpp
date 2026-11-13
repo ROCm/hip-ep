@@ -5,6 +5,9 @@
 #include "ut_timing_policy.h"
 #include "ut_timing_device_profiles.h"
 #include "ut_timing_context.h"
+#include "ut_rank.h"
+#include "ut_rank_input.h"
+#include "ut_gpu_frequency.h"
 
 #include <cassert>
 #include <iostream>
@@ -179,6 +182,184 @@ int main() {
   invalid = Policy::standard();
   invalid.warmup_ms = -1.0;
   try { invalid.validate(); assert(false); } catch (const std::invalid_argument&) {}
+
+  // Balanced candidate rounds preserve paired ratios through a common 10%
+  // clock drop. Absolute group spread is diagnostic; it cannot change order.
+  for (bool inject_drift : {false, true}) {
+    size_t batches = 0;
+    const std::array<double, 3> costs{{0.01, 0.0092, 0.00925}};
+    auto ranked = measureInterleaved(Policy::standard(), costs.size(),
+        [&](size_t candidate, uint32_t n) {
+          const double drift_factor = inject_drift && batches / costs.size() >= 20 ? 1.1 : 1.0;
+          ++batches;
+          return costs[candidate] * drift_factor * n;
+        });
+    for (const auto& result : ranked) checkTotals(result);
+    for (size_t group = 0; group < kGroups; ++group)
+      for (size_t candidate = 1; candidate < costs.size(); ++candidate)
+        assert(ranked[candidate].groups[group].calls == ranked[0].groups[group].calls);
+    const auto decision = decideRank(ranked, 0);
+    assert(decision.winner == 1 && decision.runner_up == 2);
+    assert(decision.insert_nondefault && decision.nondefault_tie);
+    assert(decision.needs_confirm == decision.winner_nonconverged);
+    assert(std::abs(decision.versus_default.median - 0.92) < 1e-10);
+  }
+  for (double ratio : {0.975, 0.98, 0.985}) {
+    auto ranked = measureInterleaved(Policy::standard(), 2,
+        [&](size_t candidate, uint32_t n) { return 0.01 * n * (candidate ? ratio : 1.0); });
+    const auto decision = decideRank(ranked, 0);
+    assert(decision.needs_confirm && decision.insert_nondefault == (ratio < 0.98));
+  }
+  auto equal = measureInterleaved(Policy::standard(), 2,
+      [](size_t, uint32_t n) { return 0.01 * n; });
+  const auto equal_decision = decideRank(equal, 0);
+  assert(equal_decision.winner == 0 && !equal_decision.insert_nondefault);
+  assert(equal_decision.needs_confirm && !equal_decision.obvious && equal_decision.uncertain);
+  assert(decideRank(equal, 0, true).needs_confirm);
+  auto singleton = measureInterleaved(Policy::standard(), 1,
+      [](size_t, uint32_t n) { return 0.01 * n; });
+  const auto single_decision = decideRank(singleton, 0, true);
+  assert(single_decision.winner == 0 && !single_decision.needs_confirm);
+  assert(finalists(singleton, 0) == std::vector<size_t>{0});
+
+  // Winner uncertainty is distinct from ordinary absolute group spread.
+  auto fixture = [](std::initializer_list<std::array<double, kGroups>> costs) {
+    std::vector<Result> out;
+    for (const auto& c : costs) {
+      Result r;
+      for (size_t g = 0; g < kGroups; ++g) r.groups[g] = Group{c[g], 1, 1};
+      summarize(r, Policy::standard()); out.push_back(r);
+    }
+    return out;
+  };
+  auto overlap = fixture({{{1,1,1,1,1}}, {{.90,.91,.92,.93,.94}}, {{.91,.90,.93,.92,.95}}});
+  auto ambiguous = decideRank(overlap, 0);
+  assert(ambiguous.winner == 1 && ambiguous.winner_overlap && ambiguous.needs_confirm);
+  assert(ambiguous.uncertain && ambiguous.selected == 1 && ambiguous.insert_nondefault);
+  // One slow group cannot veto a winner whose median clearly beats the default.
+  auto one_slow_group = fixture({{{1,1,1,1,1}}, {{.911,1.005,.982,.927,.938}}});
+  auto veto = decideRank(one_slow_group, 0);
+  assert(veto.entry_boundary && veto.needs_confirm);
+  assert(veto.selected == 1 && veto.insert_nondefault);
+  // A non-default winner that is not >2% faster keeps the default.
+  auto marginal = decideRank(fixture({{{1,1,1,1,1}}, {{.97,.99,.985,.99,.98}}}), 0);
+  assert(marginal.winner == 1 && !marginal.insert_nondefault && marginal.selected == 0);
+  auto separated = fixture({{{1,1.1,1.2,1.3,1.4}}, {{.8,.88,.96,1.04,1.12}}, {{.9,.99,1.08,1.17,1.26}}});
+  auto spread_only = decideRank(separated, 0);
+  assert(spread_only.winner_nonconverged && spread_only.needs_confirm);
+  assert(!spread_only.uncertain && spread_only.selected == 1 && spread_only.insert_nondefault);
+
+  // Grouped ranking retains five groups and identical complete-call blocks,
+  // while a candidate executes consecutive capped batches within each block.
+  for (bool inject_invalid : {false, true}) {
+    size_t calls_to_runner = 0, previous_candidate = 99, consecutive = 0, longest = 0;
+    bool started = false, invalid_used = false;
+    auto grouped_rank = measureInterleaved(Policy::standard(), 3,
+        [&](size_t candidate, uint32_t n) {
+          ++calls_to_runner; assert(n <= 64);
+          if (started) {
+            consecutive = candidate == previous_candidate ? consecutive + 1 : 1;
+            previous_candidate = candidate; longest = std::max(longest, consecutive);
+            if (inject_invalid && !invalid_used && candidate == 1) { invalid_used = true; return 0.0; }
+          }
+          return n * (candidate == 1 ? .009 : .01);
+        }, [&] { started = true; }, true);
+    assert(calls_to_runner > 10 && longest >= 3);
+    for (const auto& r : grouped_rank) { checkTotals(r); assert(r.largest_batch_calls <= 64); }
+    for (size_t g = 0; g < kGroups; ++g)
+      assert(grouped_rank[0].groups[g].calls == grouped_rank[1].groups[g].calls &&
+             grouped_rank[1].groups[g].calls == grouped_rank[2].groups[g].calls);
+    assert(grouped_rank[1].invalid_batches == (inject_invalid ? 1u : 0u));
+    assert(decideRank(grouped_rank, 0).winner == 1);
+  }
+
+  // A nontransitive pairwise triangle must never drive the sort comparator.
+  auto triangle = fixture({{{1,1,1,1,1}}, {{.7,1.1,.8,1.1,1.2}}, {{.8,1.1,.9,1.2,.9}}});
+  assert(pairedRatio(triangle[1], triangle[2]).median < 1.0);
+  assert(pairedRatio(triangle[2], triangle[0]).median < 1.0);
+  assert(pairedRatio(triangle[0], triangle[1]).median < 1.0);
+  const auto triangle_decision = decideRank(triangle, 0);
+  assert(triangle_decision.winner == 2); // same-default scores 1, 1.1, .9
+  for (int repeat = 0; repeat < 10; ++repeat)
+    assert(decideRank(triangle, 0).winner == triangle_decision.winner);
+
+  // A noisy candidate forces balanced continuation of every candidate, while
+  // valid slow groups remain in the result and a nonconverged cell is kept.
+  size_t noise_batches = 0;
+  auto noisy_rank = measureInterleaved(Policy::standard(), 3,
+      [&](size_t candidate, uint32_t n) {
+        const size_t round = noise_batches++ / 3;
+        return n * (candidate == 2 && round % 2 ? 1800.0 : 1500.0);
+      });
+  assert(!noisy_rank[0].early_stop && !noisy_rank[1].early_stop);
+  assert(noisy_rank[0].calls >= 10 && noisy_rank[2].calls >= 10);
+  assert(noisy_rank[0].calls == noisy_rank[2].calls);
+
+  size_t invalid_batches = 0;
+  auto recovered_rank = measureInterleaved(Policy::screen(), 2,
+      [&](size_t candidate, uint32_t n) {
+        if (candidate == 1 && ++invalid_batches <= 2) return 0.0;
+        return double(n) * (candidate ? 0.9 : 1.0);
+      });
+  assert(recovered_rank[1].invalid_batches == 2 && recovered_rank[0].invalid_batches == 0);
+  assert(decideRank(recovered_rank, 0).winner == 1);
+  try {
+    (void)measureInterleaved(Policy::screen(), 2,
+        [](size_t candidate, uint32_t n) { return candidate ? 0.0 : double(n); });
+    assert(false);
+  } catch (const InvalidTimingShare&) {}
+  try { (void)finalists({}, 0); assert(false); } catch (const std::invalid_argument&) {}
+  try { (void)decideRank(singleton, 1); assert(false); } catch (const std::invalid_argument&) {}
+  std::vector<Result> many(7, singleton.front());
+  for (size_t i = 0; i < many.size(); ++i) many[i].mean_ms = 0.01 * (1.0 + 0.001 * i);
+  many[6].mean_ms = 0.02;  // default still participates outside the screen band
+  assert(finalists(many, 6) == (std::vector<size_t>{0, 1, 2, 3, 6}));
+
+  // Sequential references compare absolute medians: their unmatched group
+  // indices do not share a drift history and must not be ranked by pair ratios.
+  std::vector<Result> sequential(3);
+  const double sequential_costs[3][5] = {{1, 1, 100, 100, 100},
+                                        {1, 1, 80, 110, 110},
+                                        {.98, .98, 95, 95, 95}};
+  for (size_t candidate = 0; candidate < sequential.size(); ++candidate) {
+    for (size_t group = 0; group < kGroups; ++group) {
+      sequential[candidate].groups[group].calls = 1;
+      sequential[candidate].groups[group].elapsed_ms = sequential_costs[candidate][group];
+    }
+    summarize(sequential[candidate], Policy::standard());
+  }
+  assert(decideRank(sequential, 0).winner == 2);
+  const auto absolute = decideRank(sequential, 0, false, true);
+  assert(absolute.winner == 1 && absolute.insert_nondefault);
+  assert(std::abs(absolute.versus_default.median - .8) < 1e-10);
+  bool measurement_started = false;
+  size_t pilot_batches = 0, observed_batches = 0;
+  (void)measureInterleaved(Policy::screen(), 2, [&](size_t, uint32_t n) {
+    if (measurement_started) ++observed_batches; else ++pilot_batches;
+    return n * .01;
+  }, [&] { measurement_started = true; });
+  assert(pilot_batches >= 2 && observed_batches >= 10);
+  assert(rankConfigInt("default;id=12", "id") == 12);
+
+  assert(rankCsvFields("leaf,shape,1,\"wmma=0;splits=8\"\r") ==
+         (std::vector<std::string>{"leaf", "shape", "1", "wmma=0;splits=8"}));
+  assert(rankConfigInt("wmma=0;splits=8;bkv=16", "splits") == 8);
+  assert(rankShapeFields("B1_H32_G8_D128_len4096_win128_sink").at("sink") == 1);
+  try { (void)rankConfigInt("id=3x", "id"); assert(false); } catch (const std::invalid_argument&) {}
+  try { (void)rankConfigInt("id=3;id=4", "id"); assert(false); } catch (const std::invalid_argument&) {}
+  try { (void)rankShapeFields("B1_B2"); assert(false); } catch (const std::invalid_argument&) {}
+#ifndef _WIN32
+  GpuFrequency frequency;
+  frequency.sample(); assert(frequency.json() == "null");
+#endif
+  {
+    CaseScope scope("test/rank", "shape", "complete_entry");
+    RankOptions options;
+    options.configs = {"default", "fast"};
+    RankPhase phase;
+    phase.name = "standard"; phase.candidates = {0, 1}; phase.results = equal;
+    printRank(options, {0.0, 0.0}, {phase}, equal_decision, false, 1.0);
+  }
 
   // Binding selects the CSV's returned result, including when it is not last.
   {

@@ -11,6 +11,11 @@ performance numbers; `--timing screen` (100 calls / 0.1 s) is the short
 LUT-ranking mode. Correctness checks are identical in all three. Policy, actual iterations, runtime identity
 and dispersion are emitted as `UT_TIMING` JSON records.
 
+The separate [native LUT ranking prototype](common/README.md#native-lut-ranking-ut-rank-v2)
+adds common-default sorting, ambiguity confirmation and explicit default fallback.
+Both gfx1151 qualification attempts failed; its private table import is development
+evidence and the prototype remains unpublished. It retains the accepted v3 presets.
+
 There are two ways to build and run them:
 
 - **Standalone development**: `make test` in this directory (see "Uniform make

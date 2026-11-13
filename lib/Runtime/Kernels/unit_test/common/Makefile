@@ -9,6 +9,6 @@ TARGET ?= out/test_ut_timing_policy
 test: $(TARGET)
 	./$(TARGET)
 
-$(TARGET): test_ut_timing_policy.cpp ut_timing_policy.h ut_timing_device_profiles.h ut_timing_context.h
+$(TARGET): test_ut_timing_policy.cpp ut_timing_policy.h ut_timing_device_profiles.h ut_timing_context.h ut_rank.h ut_rank_input.h ut_gpu_frequency.h
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) test_ut_timing_policy.cpp -o $@
