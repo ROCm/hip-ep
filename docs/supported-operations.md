@@ -31,6 +31,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Swish | Custom HIP kernel; `com.microsoft` QuickGelu is this formula with alpha default 1.702 |
 | ScaledSiLU (`com.microsoft`) | Decomposed to Mul + Swish (alpha 1). f16/f32 |
 | GatedAdd (`com.microsoft`) | Decomposed to Mul + Add. f16/f32, rank 1-4 |
+| Elementwise BatchNormalization (`hip.sub`, `hip.mul`, `hip.mul`, `hip.add`) | Fused by `hip-fusion-transform` into `hip.batch_norm` |
 | SwiGLU (`hip.sigmoid` followed by two `hip.mul`) | Fused by `hip-fusion-transform` into one custom HIP kernel when the tensors are identical f16/f32/bf16/f64, each dynamic axis traces to the same runtime extent, and the intermediates have no other value uses |
 | BiasGelu (`com.microsoft`) | Custom HIP kernel |
 | FastGelu (`com.microsoft`) | Custom HIP kernel |

@@ -63,6 +63,12 @@ Constraint IsHipQdqIdentityRoundTrip(dq: Op, q: Op);
 Constraint CanRequantizeLayoutOp(layout: Op, resultType: Type);
 Rewrite CreateRequantizedLayoutOp(dq: Op, layout: Op, q: Op) -> Value;
 
+// Per-channel normalization parameters.
+Constraint IsHipChannelBroadcast(vectorType: Type, viewType: Type,
+                                 dataType: Type);
+Constraint IsHipFloatScalar(val: Value);
+Rewrite ExtractHipFloatScalar(val: Value) -> Attr;
+
 #include "QAddFusion.pdll"
 #include "QMulFusion.pdll"
 #include "QMatMulFusion.pdll"
@@ -71,3 +77,4 @@ Rewrite CreateRequantizedLayoutOp(dq: Op, layout: Op, q: Op) -> Value;
 #include "QSigmoidFusion.pdll"
 #include "QLpNormalizationFusion.pdll"
 #include "QdqRoundTrip.pdll"
+#include "BatchNormFusion.pdll"

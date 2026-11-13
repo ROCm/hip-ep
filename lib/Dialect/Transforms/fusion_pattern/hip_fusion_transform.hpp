@@ -34,14 +34,17 @@
 #include "patch_embed_conv_to_gemm.hpp"
 #include "swiglu_fusion.hpp"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/PDL/IR/PDL.h"
 #include "mlir/Dialect/PDL/IR/PDLOps.h"
 #include "mlir/Dialect/PDLInterp/IR/PDLInterp.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Utils/ReshapeOpsUtils.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/Matchers.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "mlir/Parser/Parser.h"
@@ -88,6 +91,74 @@ inline std::optional<float> tryHipSplatScale(mlir::Value value) {
     return std::nullopt;
   return static_cast<float>(
       payload.getSplatValue<mlir::FloatAttr>().getValueAsDouble());
+}
+
+/// return the single float that every element of value holds, or nullopt
+/// when it is not known at compile time
+///
+/// Accepted sources: a splat constant, a tensor.splat of a constant, and
+/// either of those through arith.truncf or arith.extf.
+inline std::optional<double> tryHipFloatScalar(mlir::Value value) {
+  if (!value)
+    return std::nullopt;
+  mlir::Operation *op = value.getDefiningOp();
+  if (auto splat = mlir::dyn_cast_or_null<mlir::tensor::SplatOp>(op))
+    return tryHipFloatScalar(splat.getInput());
+  if (mlir::isa_and_nonnull<mlir::arith::TruncFOp, mlir::arith::ExtFOp>(op)) {
+    // Only the default rounding (to nearest, ties to even) is reproduced
+    // below; any other rounding mode returns nullopt, so the value is treated
+    // as unknown. TODO: map arith::RoundingMode to APFloat's rounding if a
+    // frontend emits one; none has been seen so far.
+    if (auto trunc = mlir::dyn_cast<mlir::arith::TruncFOp>(op);
+        trunc && trunc.getRoundingmodeAttr())
+      return std::nullopt;
+    std::optional<double> input = tryHipFloatScalar(op->getOperand(0));
+    if (!input)
+      return std::nullopt;
+    // The cast's result is the value the graph computes with, so it is rounded
+    // to the cast's element type here as well.
+    llvm::APFloat converted(*input);
+    bool losesInfo = false;
+    converted.convert(
+        mlir::cast<mlir::FloatType>(mlir::getElementTypeOrSelf(value))
+            .getFloatSemantics(),
+        llvm::APFloat::rmNearestTiesToEven, &losesInfo);
+    return converted.convertToDouble();
+  }
+  if (std::optional<float> scale = tryHipSplatScale(value))
+    return *scale;
+  mlir::Attribute attr;
+  if (!mlir::matchPattern(value, mlir::m_Constant(&attr)))
+    return std::nullopt;
+  if (auto floatAttr = mlir::dyn_cast<mlir::FloatAttr>(attr))
+    return floatAttr.getValueAsDouble();
+  if (auto dense = mlir::dyn_cast<mlir::DenseFPElementsAttr>(attr);
+      dense && dense.isSplat())
+    return dense.getSplatValue<llvm::APFloat>().convertToDouble();
+  return std::nullopt;
+}
+
+/// vector is the 1-D per-channel type of data, laid out as (N, C, ...), and
+/// view broadcasts such a vector along data's dimension 1
+inline bool isHipChannelBroadcastType(mlir::RankedTensorType vector,
+                                      mlir::RankedTensorType view,
+                                      mlir::RankedTensorType data) {
+  if (!vector || !view || !data || data.getRank() < 2 ||
+      vector.getRank() != 1 || !vector.hasStaticShape() ||
+      !view.hasStaticShape() || view.getRank() > data.getRank() ||
+      vector.getElementType() != data.getElementType())
+    return false;
+  const int64_t channels = vector.getDimSize(0);
+  if (data.getDimSize(1) != channels)
+    return false;
+  // Broadcasting aligns trailing dimensions, so view's dimension
+  // `channelDim` is the one that lines up with data's dimension 1.
+  const int64_t channelDim = 1 - (data.getRank() - view.getRank());
+  if (channelDim < 0)
+    return false;
+  return llvm::all_of(llvm::seq<int64_t>(view.getRank()), [&](int64_t dim) {
+    return view.getDimSize(dim) == (dim == channelDim ? channels : 1);
+  });
 }
 
 inline mlir::Value getQdqZeroPoint(mlir::Operation *op) {
@@ -225,6 +296,30 @@ isHipSplatScale(mlir::PatternRewriter &, mlir::PDLResultList &,
     return mlir::failure();
   return mlir::success(
       tryHipSplatScale(args[0].dyn_cast<mlir::Value>()).has_value());
+}
+
+inline mlir::LogicalResult
+isHipFloatScalar(mlir::PatternRewriter &, mlir::PDLResultList &,
+                 llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 1)
+    return mlir::failure();
+  return mlir::success(
+      tryHipFloatScalar(args[0].dyn_cast<mlir::Value>()).has_value());
+}
+
+/// arguments are (vector type, view type, data type), see
+/// isHipChannelBroadcastType
+inline mlir::LogicalResult
+isHipChannelBroadcast(mlir::PatternRewriter &, mlir::PDLResultList &,
+                      llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 3)
+    return mlir::failure();
+  auto rankedType = [](const mlir::PDLValue &arg) {
+    return mlir::dyn_cast_or_null<mlir::RankedTensorType>(
+        arg.dyn_cast<mlir::Type>());
+  };
+  return mlir::success(isHipChannelBroadcastType(
+      rankedType(args[0]), rankedType(args[1]), rankedType(args[2])));
 }
 
 inline mlir::LogicalResult
@@ -778,6 +873,20 @@ extractHipSplatScale(mlir::PatternRewriter &rewriter,
 }
 
 inline mlir::LogicalResult
+extractHipFloatScalar(mlir::PatternRewriter &rewriter,
+                      mlir::PDLResultList &results,
+                      llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 1)
+    return mlir::failure();
+  std::optional<double> value =
+      tryHipFloatScalar(args[0].dyn_cast<mlir::Value>());
+  if (!value)
+    return mlir::failure();
+  results.push_back(rewriter.getF32FloatAttr(static_cast<float>(*value)));
+  return mlir::success();
+}
+
+inline mlir::LogicalResult
 extractHipQdqZeropoint(mlir::PatternRewriter &rewriter,
                        mlir::PDLResultList &results,
                        llvm::ArrayRef<mlir::PDLValue> args) {
@@ -842,6 +951,11 @@ inline void registerNativeHelpers(mlir::PDLPatternModule &pdlPatterns) {
                                          canRequantizeLayoutOp);
   pdlPatterns.registerRewriteFunction("CreateRequantizedLayoutOp",
                                       createRequantizedLayoutOp);
+  pdlPatterns.registerConstraintFunction("IsHipChannelBroadcast",
+                                         isHipChannelBroadcast);
+  pdlPatterns.registerConstraintFunction("IsHipFloatScalar", isHipFloatScalar);
+  pdlPatterns.registerRewriteFunction("ExtractHipFloatScalar",
+                                      extractHipFloatScalar);
 }
 
 /// Benefit of the native patterns added alongside the PDLL ones.
@@ -864,6 +978,12 @@ constexpr unsigned kSwigluFusionBenefit = 2;
 /// The only pattern rooted at `hip.linear_attention`.
 constexpr unsigned kLinearAttentionGroupFoldBenefit = 1;
 
+/// The only pattern rooted at `tensor.expand_shape`. Composing a chain of
+/// expand_shape views into one leaves a single view between a tensor and its
+/// broadcast form, however many unsqueezes produced it, so a pattern that
+/// matches through a view needs to match only one.
+constexpr unsigned kExpandShapeCompositionBenefit = 1;
+
 /// apply this directory's patterns to every function body in module, failure
 /// means the embedded PDLL patterns will not parse or the driver failed
 ///
@@ -881,6 +1001,9 @@ inline mlir::LogicalResult run(mlir::ModuleOp module,
                               mlir::PatternBenefit(kSwigluFusionBenefit));
   populateLinearAttentionGroupFoldPattern(
       patterns, mlir::PatternBenefit(kLinearAttentionGroupFoldBenefit));
+  patterns.add<mlir::ComposeReassociativeReshapeOps<
+      mlir::tensor::ExpandShapeOp, mlir::ReshapeOpKind::kExpand>>(
+      ctx, mlir::PatternBenefit(kExpandShapeCompositionBenefit));
 
   // pdl patterns here
   if (pdlBuffer.getBufferSize() != 0) {
