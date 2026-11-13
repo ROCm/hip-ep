@@ -78,7 +78,9 @@ compiled with default perfConfigs (`gfx1151`), and the arch with an
 `+autotune=<space>` suffix when `HIPDNN_EP_ROCMLIR_AUTOTUNE` selected
 benchmarked ones (`gfx1151+autotune=quick`). The perfConfig a kernel was tuned
 to is baked into its code object, so a tuned and an untuned artifact are not
-interchangeable even on the same GPU.
+interchangeable even on the same GPU. `HIPDNN_EP_ROCMLIR_NO_STANDALONE_ELEMENTWISE`
+adds a `+no-standalone-ew` suffix, because it changes which ops run as rocMLIR
+kernels (`gfx1151+autotune=quick+no-standalone-ew`).
 
 The model cache / EPContext identity is derived from the graph alone, so the EP
 refuses to load an artifact whose recorded value differs from the current one;
