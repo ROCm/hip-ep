@@ -94,6 +94,9 @@ The perfConfig a kernel was tuned to is baked into its code object, so a tuned
 and an untuned artifact are not interchangeable even on the same GPU. Two
 provider artifacts whose shipped LUT bytes differ are not interchangeable
 either: the `+lut=` fingerprint makes the load check fail.
+`HIPDNN_EP_ROCMLIR_NO_STANDALONE_ELEMENTWISE` adds a `+no-standalone-ew` suffix
+after those, because it changes which ops run as rocMLIR kernels
+(`gfx1151+autotune=quick+lut=0123456789abcdef+no-standalone-ew`).
 
 The model cache / EPContext identity is derived from the graph alone, so the EP
 refuses to load an artifact whose recorded value differs from the current one;
