@@ -23,8 +23,9 @@ struct SoftmaxToHip : public mlir::RewritePattern {
 // `axis` of rank-1 means exactly that under both the opset < 13 rule (flatten
 // from `axis`) and the opset >= 13 rule (one axis), so it is the only value
 // accepted. A missing `axis` defaults to 1 before opset 13 and to -1 from it;
-// the two agree only for rank <= 2, and the op carries no opset, so a missing
-// `axis` on a higher rank is rejected rather than guessed.
+// the two agree only for rank 2 (for rank 1, the old default flattens to
+// [N, 1] and gives all ones), and the op carries no opset, so a missing `axis`
+// on any other rank is rejected rather than guessed.
 //
 // Before: %y = "onnx.Softmax"(%x) {axis = 2 : si64}
 //              : (tensor<2x8x64xf16>) -> tensor<2x8x64xf16>
@@ -44,7 +45,7 @@ SoftmaxToHip::matchAndRewrite(mlir::Operation *op,
       axis += rank;
     if (axis != rank - 1)
       return rewriter.notifyMatchFailure(op, "softmax.axis_not_last");
-  } else if (rank > 2) {
+  } else if (rank != 2) {
     return rewriter.notifyMatchFailure(op, "softmax.default_axis_ambiguous");
   }
   mlir::Type elemType = inputType.getElementType();
