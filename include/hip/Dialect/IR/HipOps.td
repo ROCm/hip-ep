@@ -625,7 +625,8 @@ def Hip_RocMlirOp : Hip_DpsOp_AutoReify<"rocmlir", [AttrSizedOperandSegments]> {
     `ins` and then of `outs`, in operand order.
 
     `prefill` lists the kernel arguments to fill before every launch, as
-    (argument index, bytes per element, element bit pattern) triples. A
+    (argument index, bytes per element, element bit pattern) triples. The
+    bytes per element must equal the width of the argument's element type. A
     split-K kernel adds its partial sums into its output with atomics, so
     rocMLIR asks for that output to start at 0.
   }];
