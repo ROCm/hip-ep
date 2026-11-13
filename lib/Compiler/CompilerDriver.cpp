@@ -195,6 +195,11 @@ std::string rocMlirArtifactTarget() {
       if (!lut.empty())
         target += "+lut=" + lut;
     }
+    // The same holds for the kernel plan: without standalone elementwise
+    // kernels the leftover modules run as HIP ops, a different artifact.
+    if (!target.empty() &&
+        hip_env_is_on("HIPDNN_EP_ROCMLIR_NO_STANDALONE_ELEMENTWISE"))
+      target += "+no-standalone-ew";
     return target;
   }
 #endif
