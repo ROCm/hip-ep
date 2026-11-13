@@ -297,6 +297,14 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   pm.addPass(createCSEPass());
   pm.addPass(createCanonicalizerPass());
 
+  // 5.0. Drop the memref.copy that bufferized concat inserts in front of a
+  //      rocMLIR kernel or hip.resize, when the destination slot is one
+  //      packed span of the concat buffer. Chained concats become a prefix
+  //      view of the outer buffer. Must run before hip-optimize-memrefs so
+  //      the private output alloc is erased instead of being pooled, and
+  //      before hip-promote-strided-operands, which does not rewrite inits.
+  pm.addNestedPass<func::FuncOp>(mlir::hip::createForwardConcatSlotsPass());
+
   // 5a. Convert any memref-level `linalg.*` (today only the rank-0
   //     `linalg.fill` that `ConstantOfShapeAsScalar` emits for a
   //     `ConstantOfShape -> Where` fill-value buffer) to `scf` loops +

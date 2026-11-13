@@ -369,6 +369,29 @@ def FoldBatchNormPass
   }];
 }
 
+def ForwardConcatSlotsPass : Pass<"hip-forward-concat-slots", "mlir::func::FuncOp"> {
+  let summary = "Write rocMLIR and resize results into a contiguous concat slot";
+  let description = [{
+    A bufferized concat is one `memref.copy` per input into a `memref.subview`
+    of the concat buffer. When that input is the destination of `hip.rocmlir`
+    or `hip.resize` and the slot is a packed row-major span (batch-1 channel
+    concat, or any concat whose slice has no gaps), retarget the op at the
+    slot and erase the copy and its private alloc.
+
+    A concat buffer whose only uses are those slot writes plus one copy of the
+    whole buffer into a packed prefix of another buffer is replaced by that
+    prefix, so a chain of concats does not copy the growing tensor.
+
+    The slot memref keeps the parent's strides. Both launches address it with
+    `alignedPtr + offset` and then store densely, which matches a packed slot
+    and is wrong for a strided one, so a slot that fails the packed check is
+    left on `memref.copy`.
+  }];
+  let dependentDialects = [
+    "mlir::memref::MemRefDialect"
+  ];
+}
+
 def PromoteStridedHipOperandsPass
     : Pass<"hip-promote-strided-operands", "mlir::func::FuncOp"> {
   let summary = "Materialize identity-layout temporaries for DPS-input memrefs "
