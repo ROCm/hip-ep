@@ -8,7 +8,14 @@ set(PROTO_FILES
 set(PROTO_SRCS "")
 set(PROTO_HDRS "")
 set(Protobuf_USE_STATIC_LIBS ON)
-find_package(Protobuf CONFIG REQUIRED)
+# cmake/deps.cmake (included from the top-level CMakeLists, which runs before
+# this add_subdirectory) already resolves protobuf::libprotobuf -- via a real
+# find_package() if one is installed, else by building it from source via
+# FetchContent. Only fall back to find_package() here if that target doesn't
+# already exist, mirroring deps.cmake's own guard.
+if(NOT TARGET protobuf::libprotobuf)
+  find_package(Protobuf CONFIG REQUIRED)
+endif()
 if (NOT EXISTS ${CMAKE_CURRENT_BINARY_DIR}/relu_dq_proto)
   file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/relu_dq_proto)
 endif()

@@ -10,23 +10,33 @@ The provider integrates with ONNX Runtime through the MorphiZen pass framework. 
 
 See the [HIP EP website](https://rocm.github.io/hip-ep/) for documentation and benchmarks.
 
-## What's new — October 2026
+## What's new
+
+### Mid-November 2026
+- **[v0.5.3](https://github.com/ROCm/hip-ep/releases/tag/v0.5.3) released** — ONNX Runtime 1.31 and OGA 0.19.0, faster gpt-oss and Gemma 4 decode, and faster MoE prefill. The table below shows the latest `main` ([`9ee5e5b`](https://github.com/ROCm/hip-ep/commit/9ee5e5b)).
+- **Large-model speedups at 16K** since October: Laguna-S-2.1 1.91× TTFT and 2.76× decode, Nemotron-3-Super-120B 1.76× TTFT, Qwen3.8-Flash-Next 1.31× TTFT and 1.54× decode.
+- **New model support:** Step-3.5-Flash.
+
+| Model (Strix Halo) | Input (tokens) | TTFT (s) | Decode TPS | Speedup vs [Oct](https://github.com/ROCm/hip-ep/commit/d3df783) (TTFT / TPS) |
+|---|---|--:|--:|--:|
+| Qwen3.8-Flash-Next | 16K text + 1.8K image | 28.62 | 30.74 | 1.31× / 1.54× |
+| Qwen3.5-122B-A10B | 16K text + 1.8K image | 39.30 | 22.02 | 1.13× / 1.05× |
+| Nemotron-3-Super-120B-A12B | 16K text | 46.92 | 21.09 | 1.76× / 1.03× |
+| Nemotron-3.5-Lightning-30B-A3B | 16K text | 9.37 | 68.65 | 1.62× / 1.09× |
+| Laguna-S-2.1 (118B) | 16K text | 21.10 | 26.21 | 1.91× / 2.76× |
+| Laguna-XS-2.1 | 16K text | 7.86 | 48.47 | 2.71× / 3.14× |
+| Gemma 4 26B-A4B | 16K text + 0.25K image | 13.61 | 41.56 | 1.23× / 1.16× |
+| Mistral-Small-4-119B-2603 | 16K text + 2.4K image | 26.10 | 11.81 | — |
+| Qwen3.8-27B | 16K text + 1.8K image | 40.80 | 13.90 | — |
+| Step-3.5-Flash | 16K text | 240.64 | 13.80 | New |
+
+### October 2026
 - **Faster** — 1.85× prefill and 1.13× decode at 16K context vs v0.3, averaged across the 15 models we track.
 - **Speculative decoding** — EAGLE4, DFLASH2, and MTP, delivering up to 2.3× the decode TPS on Qwen3.8-27B.
 - **Broad model support**
   - **New models:** Qwen3.8-Flash-Next, Qwen3.8-27B, Qwen3.5-122B-A10B, Nemotron-3-Super-120B, Mistral-Small-4-119B, Laguna-S-2.1, Gemma 4.
   - Agile PyTorch-to-OGA flow brings up a new model in under a day.
   - Released models are listed in [models.json](docs/models.json).
-
-| New model (Strix Halo) | Input (tokens) | TTFT (s) | Decode TPS |
-|---|---|--:|--:|
-| Qwen3.8-Flash-Next | 16K text + 1.8K image | 37.60 | 19.93 |
-| Qwen3.5-122B-A10B | 16K text + 1.8K image | 44.55 | 21.05 |
-| Nemotron-3-Super-120B-A12B | 16K text | 82.39 | 20.44 |
-| Mistral-Small-4-119B-2603 | 16K text + 2.4K image | 27.47 | 11.67 |
-| Laguna-S-2.1 (118B) | 16K text | 40.36 | 9.51 |
-| Gemma 4 26B-A4B | 16K text + 0.25K image | 16.76 | 35.85 |
-| Qwen3.8-27B | 16K text + 1.8K image | 42.24 | 13.17 |
 
 ## Key features
 
