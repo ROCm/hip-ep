@@ -30,6 +30,8 @@
 // ============================================================
 
 #include <hip/hip_runtime.h>
+#include "../../../common/hip_adaptive_timing.h"
+#include "../../../common/ut_gqa_rank_input.h"
 #include <hip/hip_fp16.h>
 
 #include <algorithm>
@@ -88,6 +90,7 @@ class CsvWriter {
   }
   ~CsvWriter() { if (f_) std::fclose(f_); }
   void write(const CsvRow& r) {
+    timing::emitCsvBinding(r.shape, r.config, r.verdict, r.rel_l2, r.time_ms);
     if (!f_) return;
     std::fprintf(f_, "%s,%s,%s,%s,%s,%s,%.6f,%.6e,%s\n",
                  env_or("HIPDNN_RESULTS_OP", "gqa"),
@@ -305,43 +308,16 @@ inline int* holdReleaseFlag() {
   return flag;
 }
 
-// Mean milliseconds per launch over `iters` back-to-back launches on `stream`,
-// launch(c) reading copy c. Untimed launches over the rotation go first, until
-// kColdSettleBytes have been read.
+// The shared UT policy selects the actual call count from a device pilot.
+// launch(c) invokes the complete op with operand copy c.
 template <class Launch>
-double rotatedMeanMs(hipStream_t stream, int iters, const ColdKvCopies& copies,
-                     Launch&& launch) {
-  const int n = copies.count();
-  int turn = 0;
-  if (n > 1) {
-    const size_t settle = std::min<size_t>(
-        n, (kColdSettleBytes + copies.bytes() - 1) / copies.bytes());
-    for (size_t i = 0; i < settle; ++i) launch(turn++ % n);
-  }
-  // Drained, so the hold below holds the timed launches rather than being
-  // released while earlier launches are still queued ahead of it.
-  (void)hipStreamSynchronize(stream);
-  volatile int* release = holdReleaseFlag();
-  void* release_dev = nullptr;
-  if (release &&
-      hipHostGetDevicePointer(&release_dev, const_cast<int*>(release), 0) ==
-          hipSuccess) {
-    *release = 0;
-    holdStreamKernel<<<1, 1, 0, stream>>>(static_cast<const int*>(release_dev));
-  }
-  hipEvent_t start, stop;
-  (void)hipEventCreate(&start);
-  (void)hipEventCreate(&stop);
-  (void)hipEventRecord(start, stream);
-  for (int i = 0; i < iters; ++i) launch(turn++ % n);
-  (void)hipEventRecord(stop, stream);
-  if (release) *release = 1;
-  (void)hipEventSynchronize(stop);
-  float ms = 0.0f;
-  (void)hipEventElapsedTime(&ms, start, stop);
-  (void)hipEventDestroy(start);
-  (void)hipEventDestroy(stop);
-  return iters > 0 ? ms / iters : 0.0;
+double rotatedMeanMs(hipStream_t stream, int /*legacy_iters*/, const ColdKvCopies& copies,
+                     Launch&& launch, const char* complete_entry = nullptr,
+                     const timing::RankOptions* ranking = nullptr) {
+  return timing::adaptiveRotatedMeanMs(
+      stream, copies, launch, holdReleaseFlag(),
+      [&](const int* flag) { holdStreamKernel<<<1, 1, 0, stream>>>(flag); },
+      warmTiming(), kColdSettleBytes, "gqa_prefill_xfp16_wi8_yfp16", complete_entry, timing::NoPreparation{}, ranking);
 }
 }  // namespace hipdnn_ep_test
 
@@ -562,7 +538,17 @@ struct Result {
   bool pass;
 };
 
-static Result run_case(const Case& c, int iters, unsigned seed) {
+static Result run_case(const Case& c, int iters, unsigned seed, const hipdnn_ep_test::timing::RankRow* rank_row = nullptr) {
+  hipdnn_ep_test::timing::CaseScope timing_case("gqa/prefill/Xfp16_Wi8_Yfp16", case_shape(c), "hip_gqa_flash_prefill");
+  const UtGqaShape rank_shape{c.B, c.H, c.G, c.D, c.sq, c.sq, 0, 1, 64};
+  if (rank_row && std::getenv("HIPDNN_UT_RANK_CATALOG")) {
+#ifdef HIPDNN_UT_RANK_GQA_ADAPTER
+    hipdnn_ep_test::timing::printGqaCatalog(rank_shape);
+    Result result{}; result.c = c; result.pass = true; return result;
+#else
+    throw std::runtime_error("UT rank: GQA catalog requires standalone RANK=1 build");
+#endif
+  }
   const int B = c.B, H = c.H, G = c.G, D = c.D, sq = c.sq;
   const int max_seq = sq, past_len = 0, skv = sq;
   const float scale = 1.0f / std::sqrt((float)D);
@@ -672,6 +658,43 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
                                     kv_rows, past_len, scale);
   };
 
+  if (rank_row) {
+#ifndef HIPDNN_UT_RANK_GQA_ADAPTER
+    throw std::runtime_error("UT rank: GQA requires standalone RANK=1 build");
+#else
+    const hipdnn_ep_test::ColdKvCopies rank_kv(dK8, dV8, B * G, max_seq,
+        static_cast<size_t>(D), 0, skv);
+    UtGqaConfig selected;
+    auto choose = [&](const UtGqaConfig& config) { selected = config; };
+    auto rank_launch = [&](const void* k, const void* v, int rows) -> int {
+      int rc = hip_gqa_dequant_kv_i8_to_fp16(nullptr, k, dKf16, dKsc, B, sq, G, D, rows, max_seq);
+      if (rc) return rc;
+      rc = hip_gqa_dequant_kv_i8_to_fp16(nullptr, v, dVf16, dVsc, B, sq, G, D, rows, max_seq);
+      if (rc) return rc;
+      return hip_gqa_flash_prefill_v3_configured(nullptr, dQ, dKf16, dVf16, dO8,
+        B, H, G, sq, skv, D, max_seq, past_len, scale, -1, nullptr, H, 0,
+        selected.hb, selected.qw, selected.mt, selected.bkv, selected.nd, dKb, kb_stride);
+    };
+    auto validate = [&]() {
+      if (rank_launch(dK8, dV8, max_seq)) throw std::runtime_error("UT rank: GQA candidate launch failed");
+      HIP_CHECK(hipDeviceSynchronize());
+      std::vector<__half> raw(qn);
+      HIP_CHECK(hipMemcpy(raw.data(), dO8, raw.size() * sizeof(__half), hipMemcpyDeviceToHost));
+      std::vector<float> output(raw.size());
+      for (size_t i = 0; i < raw.size(); ++i) output[i] = __half2float(raw[i]);
+      const double error = rel_l2(output, ref_i8);
+      if (!(error < 2e-2)) throw std::runtime_error("UT rank: GQA candidate CPU reference FAIL");
+      return error;
+    };
+    const auto options = hipdnn_ep_test::timing::gqaRankOptions(rank_shape, *rank_row, choose, validate);
+    hipdnn_ep_test::rotatedMeanMs(nullptr, 0, rank_kv, [&](int i) {
+      return rank_launch(rank_kv.k(i), rank_kv.v(i), rank_kv.rows());
+    }, "dequant_KV+hip_gqa_flash_prefill_v3_configured", &options);
+    hipFree(dQ); hipFree(dKbshd); hipFree(dVbshd); hipFree(dK8); hipFree(dV8); hipFree(dKf16); hipFree(dVf16); hipFree(dKbnsd); hipFree(dVbnsd); hipFree(dKsc); hipFree(dVsc); hipFree(dO8); hipFree(dO16); hipFree(dKb);
+    Result result{}; result.c = c; result.pass = true; return result;
+#endif
+  }
+
   // Step 2+3: dequant once -> fp16 prefill (the runtime int8 prefill path).
   // The prefill is dispatched the way real/gqa.cpp does: in lookup mode resolve
   // the config from the table in custom_kernels_<arch>.dll and launch it
@@ -699,21 +722,22 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
     hip_gqa_autotune_destroy(policy);
   }
 #endif
-  auto run_int8_path = [&](const void* k8, const void* v8, int kv_rows) {
-    hip_gqa_dequant_kv_i8_to_fp16(nullptr, k8, dKf16, dKsc, B, sq, G, D, kv_rows, max_seq);
-    hip_gqa_dequant_kv_i8_to_fp16(nullptr, v8, dVf16, dVsc, B, sq, G, D, kv_rows, max_seq);
+  auto run_int8_path = [&](const void* k8, const void* v8, int kv_rows) -> int {
+    int status = hip_gqa_dequant_kv_i8_to_fp16(nullptr, k8, dKf16, dKsc, B, sq, G, D, kv_rows, max_seq);
+    if (status) return status;
+    status = hip_gqa_dequant_kv_i8_to_fp16(nullptr, v8, dVf16, dVsc, B, sq, G, D, kv_rows, max_seq);
+    if (status) return status;
 #ifdef HIPDNN_LUT_LINKED_EXTERNALLY
     if (!lookup_config.empty()) {
-      hip_gqa_flash_prefill_v3_configured(
+      return hip_gqa_flash_prefill_v3_configured(
           nullptr, dQ, dKf16, dVf16, dO8, B, H, G, sq, skv, D, max_seq,
           past_len, scale, /*local_window_size=*/-1, /*head_sink=*/nullptr, H,
           /*smooth_softmax=*/0, selected_config.hb, selected_config.qw,
           selected_config.mt, selected_config.bkv, selected_config.nd,
           dKb, kb_stride);
-      return;
     }
 #endif
-    prefill(dKf16, dVf16, dO8, max_seq);
+    return prefill(dKf16, dVf16, dO8, max_seq);
   };
   // Every launch in this function runs inside a capture window: the op's
   // [gqa-cfg] diagnostic latches its enable flag on the first read, so it has
@@ -731,7 +755,7 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
 
   // fp16 baseline prefill.
   auto run_fp16 = [&](const void* k, const void* v, int kv_rows) {
-    prefill(k, v, dO16, kv_rows);
+    return prefill(k, v, dO16, kv_rows);
   };
   hipdnn_ep_test::captureLogLines(
       "HIPDNN_GQA_AUTOTUNE_LOG", "_cfg_capture.tmp", [&]() {
@@ -748,10 +772,10 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
       dKbnsd, dVbnsd, B * G, max_seq, static_cast<size_t>(D) * sizeof(__half),
       0, skv);
   auto bench = [&](const hipdnn_ep_test::ColdKvCopies& kv,
-                   auto&& fn) -> double {
+                   auto&& fn, const char* complete_entry) -> double {
     for (int w = 0; w < 5; ++w) fn(0);
     HIP_CHECK(hipDeviceSynchronize());
-    return hipdnn_ep_test::rotatedMeanMs(nullptr, iters, kv, fn);
+    return hipdnn_ep_test::rotatedMeanMs(nullptr, iters, kv, fn, complete_entry);
   };
   // The op names the config it dispatched in its own [gqa-cfg] diagnostic;
   // capture it so results.csv records what ran instead of a placeholder. The
@@ -764,8 +788,11 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
         "HIPDNN_GQA_AUTOTUNE_LOG", "_cfg_capture.tmp",
         [&]() {
           ms_int8 = bench(kv8, [&](int i) {
-            run_int8_path(kv8.k(i), kv8.v(i), kv8.rows());
-          });
+            return run_int8_path(kv8.k(i), kv8.v(i), kv8.rows());
+          }, lookup_config.empty()
+                 ? (dKb ? "dequant_KV+hip_gqa_flash_prefill"
+                        : "dequant_KV+hip_gqa_flash_prefill_v2")
+                 : "dequant_KV+hip_gqa_flash_prefill_v3_configured");
         });
     for (const std::string& line : lines) {
       const size_t knobs = line.find("-> ");
@@ -779,14 +806,15 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
                                   "_cfg_capture.tmp",
                                   [&]() {
                                     ms_fp16 = bench(kv16, [&](int i) {
-                                      run_fp16(kv16.k(i), kv16.v(i),
-                                               kv16.rows());
-                                    });
+                                      return run_fp16(kv16.k(i), kv16.v(i),
+                                                      kv16.rows());
+                                    }, dKb ? "hip_gqa_flash_prefill" : "hip_gqa_flash_prefill_v2");
                                   });
   double ms_deq = bench(kv8, [&](int i) {
-    hip_gqa_dequant_kv_i8_to_fp16(nullptr, kv8.k(i), dKf16, dKsc, B, sq, G, D, kv8.rows(), max_seq);
-    hip_gqa_dequant_kv_i8_to_fp16(nullptr, kv8.v(i), dVf16, dVsc, B, sq, G, D, kv8.rows(), max_seq);
-  });
+    const int status = hip_gqa_dequant_kv_i8_to_fp16(nullptr, kv8.k(i), dKf16, dKsc, B, sq, G, D, kv8.rows(), max_seq);
+    if (status) return status;
+    return hip_gqa_dequant_kv_i8_to_fp16(nullptr, kv8.v(i), dVf16, dVsc, B, sq, G, D, kv8.rows(), max_seq);
+  }, "hip_gqa_dequant_kv_i8_to_fp16(K,V)");
 
   // Compare the query rows that have a real key: row i of batch b sees keys
   // 0..i, of which the first b*pad are padding.
@@ -887,12 +915,32 @@ static void write_markdown(const char* path, const char* dev, int cus,
   fprintf(f, "- Contrast the earlier per-fragment int8 prefill kernel (~0.6x, i.e. "
              "~1.6x slower): dequantizing once instead of per fragment recovers the "
              "full fp16 throughput.\n");
-  fprintf(f, "\n_Reproduce:_ `test_gqa_prefill_i8.exe --all --iters 200 --md <this file>`\n");
+  fprintf(f, "\n_Reproduce:_ `test_gqa_prefill_i8.exe --all --md <this file>`\n");
   fclose(f);
   printf("\n[markdown] wrote %s\n", path);
 }
 
 int main(int argc, char** argv) {
+  if (hipdnn_ep_test::timing::rankRequested()) {
+    try {
+      const auto rows = hipdnn_ep_test::timing::readRankRows("gqa/prefill/Xfp16_Wi8_Yfp16");
+      for (size_t i = 0; i < rows.size(); ++i) {
+        const auto fields = hipdnn_ep_test::timing::rankShapeFields(rows[i].shape);
+        auto value = [&](const char* name, int fallback = 0) {
+          const auto it = fields.find(name); return it == fields.end() ? fallback : it->second;
+        };
+        Case c{"rank", value("B"), value("H"), value("G"), value("D"), value("sq"), 0};
+        if (c.B <= 0 || c.H <= 0 || c.G <= 0 || c.H % c.G || c.D <= 0 ||
+            case_shape(c) != rows[i].shape)
+          throw std::invalid_argument("UT rank: malformed or unsupported GQA shape");
+        if (!run_case(c, 0, 1234u + static_cast<unsigned>(i), &rows[i]).pass) return 1;
+      }
+      HIP_CHECK(hipDeviceSynchronize()); return 0;
+    } catch (const std::exception& error) {
+      std::fprintf(stderr, "UT rank: %s\n", error.what()); return 1;
+    }
+  }
+  hipdnn_ep_test::timing::printTimingMode();
   setvbuf(stdout, nullptr, _IONBF, 0);
   int iters = 200; unsigned seed = 1234; bool all = false; const char* md = nullptr;
   Case single = {"custom", 1, 40, 10, 128, 2048}; bool have_single = false;
@@ -911,7 +959,7 @@ int main(int argc, char** argv) {
 
   int dev = 0; HIP_CHECK(hipGetDevice(&dev));
   hipDeviceProp_t prop; HIP_CHECK(hipGetDeviceProperties(&prop, dev));
-  printf("Device: %s (%d CUs)  iters=%d\n\n", prop.name, prop.multiProcessorCount, iters);
+  printf("Device: %s (%d CUs)  legacy_iters=%d (ignored; adaptive UT_TIMING counts)\n\n", prop.name, prop.multiProcessorCount, iters);
 
   std::vector<Result> results; int fails = 0;
   if (all || !have_single) {

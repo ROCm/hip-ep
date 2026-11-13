@@ -25,7 +25,10 @@
 // Pure prefill: past_len = 0, total_seq = sq. Self-contained random inputs.
 // ============================================================
 
+#include "../../../common/ut_gpu_execution_scope.h"
 #include <hip/hip_runtime.h>
+#include "../../../common/hip_adaptive_timing.h"
+#include "../../../common/ut_gqa_rank_input.h"
 #include <hip/hip_fp16.h>
 
 #include <algorithm>
@@ -85,6 +88,7 @@ class CsvWriter {
   }
   ~CsvWriter() { if (f_) std::fclose(f_); }
   void write(const CsvRow& r) {
+    timing::emitCsvBinding(r.shape, r.config, r.verdict, r.rel_l2, r.time_ms);
     if (!f_) return;
     std::fprintf(f_, "%s,%s,%s,%s,%s,%s,%.6f,%.6e,%s\n",
                  env_or("HIPDNN_RESULTS_OP", "unknown"),
@@ -302,43 +306,16 @@ inline int* holdReleaseFlag() {
   return flag;
 }
 
-// Mean milliseconds per launch over `iters` back-to-back launches on `stream`,
-// launch(c) reading copy c. Untimed launches over the rotation go first, until
-// kColdSettleBytes have been read.
+// The shared UT policy selects the actual call count from a device pilot.
+// launch(c) invokes the complete op with operand copy c.
 template <class Launch>
-double rotatedMeanMs(hipStream_t stream, int iters, const ColdKvCopies& copies,
-                     Launch&& launch) {
-  const int n = copies.count();
-  int turn = 0;
-  if (n > 1) {
-    const size_t settle = std::min<size_t>(
-        n, (kColdSettleBytes + copies.bytes() - 1) / copies.bytes());
-    for (size_t i = 0; i < settle; ++i) launch(turn++ % n);
-  }
-  // Drained, so the hold below holds the timed launches rather than being
-  // released while earlier launches are still queued ahead of it.
-  (void)hipStreamSynchronize(stream);
-  volatile int* release = holdReleaseFlag();
-  void* release_dev = nullptr;
-  if (release &&
-      hipHostGetDevicePointer(&release_dev, const_cast<int*>(release), 0) ==
-          hipSuccess) {
-    *release = 0;
-    holdStreamKernel<<<1, 1, 0, stream>>>(static_cast<const int*>(release_dev));
-  }
-  hipEvent_t start, stop;
-  (void)hipEventCreate(&start);
-  (void)hipEventCreate(&stop);
-  (void)hipEventRecord(start, stream);
-  for (int i = 0; i < iters; ++i) launch(turn++ % n);
-  (void)hipEventRecord(stop, stream);
-  if (release) *release = 1;
-  (void)hipEventSynchronize(stop);
-  float ms = 0.0f;
-  (void)hipEventElapsedTime(&ms, start, stop);
-  (void)hipEventDestroy(start);
-  (void)hipEventDestroy(stop);
-  return iters > 0 ? ms / iters : 0.0;
+double rotatedMeanMs(hipStream_t stream, int /*legacy_iters*/, const ColdKvCopies& copies,
+                     Launch&& launch, const char* complete_entry = nullptr,
+                     const timing::RankOptions* ranking = nullptr) {
+  return timing::adaptiveRotatedMeanMs(
+      stream, copies, launch, holdReleaseFlag(),
+      [&](const int* flag) { holdStreamKernel<<<1, 1, 0, stream>>>(flag); },
+      warmTiming(), kColdSettleBytes, "gqa_prefill_xfp16_wfp16_yfp16", complete_entry, timing::NoPreparation{}, ranking);
 }
 }  // namespace hipdnn_ep_test
 
@@ -565,7 +542,17 @@ static std::string case_shape(const Case& c) {
   return s;
 }
 
-static bool run_case(const Case& c, int iters) {
+static bool run_case(const Case& c, int iters, const hipdnn_ep_test::timing::RankRow* rank_row = nullptr) {
+  hipdnn_ep_test::timing::CaseScope timing_case("gqa/prefill/Xfp16_Wfp16_Yfp16", case_shape(c), "hip_gqa_flash_prefill");
+  const UtGqaShape rank_shape{c.B, c.H, c.G, c.D, c.sq, c.sq + c.past, c.window, 0, 64};
+  if (rank_row && std::getenv("HIPDNN_UT_RANK_CATALOG")) {
+#ifdef HIPDNN_UT_RANK_GQA_ADAPTER
+    hipdnn_ep_test::timing::printGqaCatalog(rank_shape);
+    return true;
+#else
+    throw std::runtime_error("UT rank: GQA catalog requires standalone RANK=1 build");
+#endif
+  }
   const int B = c.B, H = c.H, G = c.G, D = c.D, sq = c.sq;
   const int past_len = c.past;
   const int skv = past_len + sq;   // total_seq
@@ -602,6 +589,7 @@ static bool run_case(const Case& c, int iters) {
   for (size_t i = 0; i < kn; ++i) { Kh[i] = __float2half(Kf[i]); Vh[i] = __float2half(Vf[i]); }
 
   __half *dQ, *dK, *dV, *dO, *dSink;
+  hipdnn_ep_test::GpuExecutionScope gpu_execution([] { HIP_CHECK(hipDeviceSynchronize()); });
   HIP_CHECK(hipMalloc(&dQ, qn * sizeof(__half)));
   HIP_CHECK(hipMalloc(&dK, kn * sizeof(__half)));
   HIP_CHECK(hipMalloc(&dV, kn * sizeof(__half)));
@@ -645,6 +633,39 @@ static bool run_case(const Case& c, int iters) {
                        : (c.sink_mode == kSinkSmooth)  ? "smooth"
                        : (c.sink_mode == kSinkBoth)    ? "both"
                                                        : "-";
+  if (rank_row) {
+#ifndef HIPDNN_UT_RANK_GQA_ADAPTER
+    throw std::runtime_error("UT rank: GQA requires standalone RANK=1 build");
+#else
+    const hipdnn_ep_test::ColdKvCopies rank_kv(dK, dV, B * G, max_seq,
+        static_cast<size_t>(D) * sizeof(__half), c.window > 0 ? std::max(0, past_len - c.window) : 0, skv);
+    UtGqaConfig selected;
+    auto choose = [&](const UtGqaConfig& config) { selected = config; };
+    auto rank_launch = [&](const void* k, const void* v, int rows) -> int {
+      return hip_gqa_flash_prefill_v3_configured(nullptr, dQ, k, v, dO, B, H, G,
+        sq, skv, D, rows, past_len, scale, window_arg, sink_arg, H, smooth_arg,
+        selected.hb, selected.qw, selected.mt, selected.bkv, selected.nd, dKb, kb_stride);
+    };
+    auto validate = [&]() {
+      if (rank_launch(dK, dV, max_seq)) throw std::runtime_error("UT rank: GQA candidate launch failed");
+      HIP_CHECK(hipDeviceSynchronize());
+      std::vector<__half> raw(qn);
+      HIP_CHECK(hipMemcpy(raw.data(), dO, raw.size() * sizeof(__half), hipMemcpyDeviceToHost));
+      std::vector<float> output(raw.size());
+      for (size_t i = 0; i < raw.size(); ++i) output[i] = __half2float(raw[i]);
+      const double error = rel_l2(output, Oref);
+      if (!(error < 2e-3)) throw std::runtime_error("UT rank: GQA candidate CPU reference FAIL");
+      return error;
+    };
+    const auto options = hipdnn_ep_test::timing::gqaRankOptions(rank_shape, *rank_row, choose, validate);
+    hipdnn_ep_test::rotatedMeanMs(nullptr, 0, rank_kv, [&](int i) {
+      return rank_launch(rank_kv.k(i), rank_kv.v(i), rank_kv.rows());
+    }, "hip_gqa_flash_prefill_v3_configured", &options);
+    hipFree(dQ); hipFree(dK); hipFree(dV); hipFree(dO); hipFree(dSink); hipFree(dKb);
+    return true;
+#endif
+  }
+
   bool use_lookup = false;
 #ifdef HIPDNN_LUT_LINKED_EXTERNALLY
   hipdnn_ep::GqaPrefillResult lut_res{};
@@ -760,8 +781,9 @@ static bool run_case(const Case& c, int iters) {
         for (int i = 0; i < 10; ++i) launch(kv.k(0), kv.v(0), kv.rows());
         HIP_CHECK(hipDeviceSynchronize());
         ms = hipdnn_ep_test::rotatedMeanMs(nullptr, iters, kv, [&](int i) {
-          launch(kv.k(i), kv.v(i), kv.rows());
-        });
+          return launch(kv.k(i), kv.v(i), kv.rows());
+        }, use_lookup ? "hip_gqa_flash_prefill_v3_configured"
+                      : "hip_gqa_flash_prefill");
       });
 
   const bool pass = err < 2e-3;
@@ -808,6 +830,26 @@ static bool run_case(const Case& c, int iters) {
 }
 
 int main(int argc, char** argv) {
+  if (hipdnn_ep_test::timing::rankRequested()) {
+    try {
+      const auto rows = hipdnn_ep_test::timing::readRankRows("gqa/prefill/Xfp16_Wfp16_Yfp16");
+      for (size_t i = 0; i < rows.size(); ++i) {
+        const auto fields = hipdnn_ep_test::timing::rankShapeFields(rows[i].shape);
+        auto value = [&](const char* name, int fallback = 0) {
+          const auto it = fields.find(name); return it == fields.end() ? fallback : it->second;
+        };
+        Case c{"rank", value("B"), value("H"), value("G"), value("D"), value("sq"), value("past"), value("sink") + 2 * value("smooth"), false, value("win"), 0};
+        if (c.B <= 0 || c.H <= 0 || c.G <= 0 || c.H % c.G || c.D <= 0 ||
+            case_shape(c) != rows[i].shape)
+          throw std::invalid_argument("UT rank: malformed or unsupported GQA shape");
+        if (!run_case(c, 0, &rows[i])) return 1;
+      }
+      HIP_CHECK(hipDeviceSynchronize()); return 0;
+    } catch (const std::exception& error) {
+      std::fprintf(stderr, "UT rank: %s\n", error.what()); return 1;
+    }
+  }
+  hipdnn_ep_test::timing::printTimingMode();
   const int coverage_tier = hipdnn_ep_test::resolveCoverageTier(argc, argv);
 
   int iters = 100;

@@ -29,6 +29,7 @@ OFFLOAD  ?= --offload-arch=gfx11-generic
 HIP_SDK  ?=
 MODE     ?= lookup
 COVERAGE ?= 3
+TIMING   ?= standard
 
 ifeq ($(HIP_SDK),)
     $(error pass HIP_SDK=<HIP SDK root>)
@@ -72,7 +73,7 @@ CLEAN_LEAVES := $(addprefix clean/,$(LEAVES))
 .PHONY: test build clean $(LEAVES) $(CLEAN_LEAVES)
 
 test: build
-	$(call RUN_UT,--mode $(MODE) --coverage $(COVERAGE))
+	$(call RUN_UT,--mode $(MODE) --coverage $(COVERAGE) --timing $(TIMING))
 
 build: $(LEAVES) $(PKG)/hipdnn-kernel-ut.exe
 

@@ -913,10 +913,29 @@ def cmd_compile(args) -> int:
     return 0
 
 
+def cmd_rank_build(args):
+    doc = json.loads(Path(args.base or args.from_lut).read_text(encoding="utf-8"))
+    check_table(doc)
+    records = ut_rank_tools.evidence(args.rank_log)
+    if any(not r["leaf"].startswith("matmul_nbits/X" + args.activation + "_") for r in records):
+        raise ValueError("activation dtype absent from schema; select one evidence dtype")
+    summary = ut_lut_from_table.update_points(args.op, doc, records)
+    check_table(doc)
+    output = ut_rank_tools.private_path(args.out, LUT_DIR)
+    output.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    output.with_suffix(".rank-report.json").write_text(json.dumps(summary, indent=2) + "\n")
+    print("rank table:", output, "updated:", summary["updated"], "skipped:", len(summary["skipped"]))
+
+
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "unit_test/common"))
+import ut_rank_tools
+import ut_lut_from_table
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("command",
-                    choices=["measure", "fit", "build", "compile", "all"])
+                    choices=["measure", "fit", "build", "compile", "all", "rank-catalog", "rank-candidates", "rank-measure", "rank-build", "rank-reference-candidates", "rank-seed", "rank-report"])
     ap.add_argument("--arch", default="gfx1151")
     ap.add_argument("--sweep", default="matmul_nbits_sweep.exe",
                     help="path to the built matmul_nbits_autotune_sweep binary")
@@ -966,7 +985,11 @@ def main() -> int:
                          "it serves only unmeasured group sizes, so check those "
                          "in-model first")
     ap.add_argument("--verbose", action="store_true")
+    ut_rank_tools.add_arguments(ap)
+    ut_lut_from_table.add_arguments(ap)
+    ap.add_argument("--activation", choices=["fp16", "fp32"], default="fp16")
     args = ap.parse_args()
+    args.op = "matmul_nbits"
     # One set of paths for every step, so `all --out X` compiles X.
     canonical = LUT_DIR / f"{args.arch}.json"
     args.json_out = Path(args.out) if args.out else canonical
@@ -981,6 +1004,9 @@ def main() -> int:
 
 
 def run(args) -> int:
+    if args.command.startswith("rank-"):
+        ut_rank_tools.dispatch(args, LUT_DIR, cmd_rank_build)
+        return 0
     if args.command in ("measure", "all"):
         rc = cmd_measure(args)
         if rc:

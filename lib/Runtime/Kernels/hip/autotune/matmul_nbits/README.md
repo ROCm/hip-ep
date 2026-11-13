@@ -194,3 +194,74 @@ cached selection — to stderr. Unlike `HIPDNN_MATMUL_LUT_LOG` (which only cover
 the offline-table lookup that `online` mode skips), this shows what the sweep
 actually picked, so an `online` run can be diffed against the shipped table.
 `HIPDNN_EP_DEBUG=1` still enables these lines too (plus everything else).
+
+
+## Refresh through native UT ranking
+
+Use the existing UT leaves with `RANK=1`, following
+[the common ranking contract](../../../unit_test/common/README.md#native-lut-ranking-ut-rank-v3).
+New refreshes use the UT timer and `UT_RANK` evidence; the common README
+reports the gfx1151 decision loss. The previous sweep commands remain only for
+reproducing historical logs. These commands write private outputs; installing
+a refreshed table is a separate, reviewed step.
+
+Start from the existing JSON table. From this operator's autotune directory:
+
+```sh
+python scripts/update_lut.py rank-seed --from-lut lut/gfx1151.json --activation fp16 --out /private/candidates.csv
+python scripts/update_lut.py rank-measure --candidates /private/candidates.csv --leaf-root /checkout/lib/Runtime/Kernels/unit_test --out /private/rank.log
+python scripts/update_lut.py rank-report --rank-log /private/rank.log --from-lut lut/gfx1151.json --activation fp16 --out /private/report.csv --md /private/report.md
+python scripts/update_lut.py rank-build --rank-log /private/rank.log --base lut/gfx1151.json --activation fp16 --out /private/candidate.json
+python scripts/update_lut.py compile --out /private/candidate.json --fb-out /private/candidate.fb --flatc /tools/flatc
+```
+
+`rank-seed` writes default + old config geometry per selected point. The native
+leaf resolves the no-LUT default and deduplicates equal final launches.
+`.seed.json` retains the original keys, and `.skipped.json` explains every
+unsupported, filtered or unsampled point. FB input is unsupported. Options:
+`--sample 20 --seed 111313`, `--leaf <names>`, `--dtype <types>`,
+`--rank-phase decode|prefill|both`, `--priority`, and `--keys <file>` (one JSON
+key array from `.seed.json` per line). The policy shown above must also be used
+at the report and import steps because the table omits that input dimension.
+
+Optional catalog expansion: run `rank-catalog --candidates /private/candidates.csv
+--leaf-root /checkout/lib/Runtime/Kernels/unit_test --out /private/catalog.log`,
+then repeat `rank-seed ... --with-catalog --catalog /private/catalog.log`.
+Default + old is the usual comparison; all legal configs are appended only
+when requested. Hand-written `leaf,shape,priority,config` CSVs remain useful
+for new shapes; expand them with `rank-catalog` then `rank-candidates`.
+
+Reports use the native final winner/default ratio and the latest shared phase
+for ratios involving old config, named in `old_ratio_phase`. An unavailable
+comparison is explicit. `changed` describes the effective table selection;
+`winner_unresolved` is diagnostic. GPU phase and pilot totals are distinct;
+rank wall excludes native CPU reference and launcher/resource waits.
+`python3 ../../../unit_test/common/test_ut_lut_from_table.py` checks full JSON
+roundtrip, skipped/filtered/sampled inputs, native default dedup and reports.
+
+Pass `--launcher-json '["python", "/private/lease_exec.py"]'` to `rank-measure`
+when the host uses a lease wrapper. Catalog enumeration is CPU metadata and
+does not require a GPU execution lease. The wrapper runs one native process
+at a time, waits through its actual exit and releases its own lease after GPU
+drain. Set the SDK runtime PATH as for the leaf Makefile. The tool adds no timer
+or numeric sampling controls; its log retains complete native stdout/stderr and
+nonzero leaf exits stop the command.
+
+For validation, `rank-reference-candidates --catalog <log> --rank-log <log>
+--out <csv>` selects the final top three plus the frozen default. Then use
+`rank-measure --reference` for independent sequential confirm. Routine refresh
+imports accepted ranking evidence once instead of repeating every candidate.
+
+`rank-build` requires an explicit private output outside `lut/`, preserves base
+weights/config indices/fallbacks and unrelated points, and replaces only measured
+keys. A winner that does not beat the default by >2% stores its
+default-equivalent answer;
+deleting its point could otherwise select a nearby nondefault point. Duplicate
+or malformed evidence, CPU failures and inconsistent groups are rejected.
+
+The schema does not contain activation dtype. Choose one evidence policy with
+`--activation fp16|fp32`; mixed evidence is rejected. All B2/B3/B4/B8 leaves are
+supported. M-blocked GEMV and naive singleton routes are reported as skipped
+because their final geometry cannot be represented by this schema. W4 extended
+config entries reuse the existing writer/checker. Arrival row stride and native
+zero-point semantics are retained; these leaves do not qualify DP4A/padrow routes.

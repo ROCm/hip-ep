@@ -737,8 +737,8 @@ def run_build(args):
 
 
 def run_compile(args):
-    lut_json = LUT_DIR / ('gfx' + args.arch + '.json')
-    lut_fb = LUT_DIR / ('gfx' + args.arch + '.fb')
+    lut_json = ut_rank_tools.private_path(args.out, LUT_DIR) if args.out else LUT_DIR / ('gfx' + args.arch + '.json')
+    lut_fb = ut_rank_tools.private_path(args.fb_out or str(lut_json.with_suffix('.fb')), LUT_DIR) if args.out else LUT_DIR / ('gfx' + args.arch + '.fb')
     with open(lut_json) as f:
         doc = json.load(f)
     print('[compile] schema_version={} configs={} points={}'.format(
@@ -761,11 +761,28 @@ def run_compile(args):
 # CLI
 # ---------------------------------------------------------------------------
 
+def run_rank_build(args):
+    doc = json.loads(Path(args.base or args.from_lut).read_text(encoding="utf-8"))
+    records = ut_rank_tools.evidence(args.rank_log)
+    if any(not r["leaf"].startswith("gqa/") or ("/prefill/" in r["leaf"] and ("_Wi8_" in r["leaf"]) != (args.prefill_kv == "int8")) for r in records):
+        raise ValueError("select one prefill KV input policy for its Fp16 lookup keys")
+    summary = ut_lut_from_table.update_points(args.op, doc, records)
+    output = ut_rank_tools.private_path(args.out, LUT_DIR)
+    output.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    output.with_suffix(".rank-report.json").write_text(json.dumps(summary, indent=2) + "\n")
+    print("rank table:", output, "updated:", summary["updated"], "skipped:", len(summary["skipped"]))
+
+
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "unit_test/common"))
+import ut_rank_tools
+import ut_lut_from_table
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('command',
-                    choices=['plan', 'measure', 'build', 'compile', 'all'])
+                    choices=['plan', 'measure', 'build', 'compile', 'all', 'rank-catalog', 'rank-candidates', 'rank-measure', 'rank-build', 'rank-reference-candidates', 'rank-seed', 'rank-report'])
     ap.add_argument('--arch', default='1151', help='GPU arch suffix (default: 1151)')
     ap.add_argument('--data', default=str(HERE / 'data'),
                     help='Directory of *_best.csv (default: scripts/data/)')
@@ -800,7 +817,16 @@ def main():
                     help='build: add the measured (phase, head_dim) groups to '
                          'the current lut/gfx<arch>.json instead of replacing '
                          'the table')
+    ut_rank_tools.add_arguments(ap)
+    ut_lut_from_table.add_arguments(ap)
+    ap.add_argument("--out", help="explicit private JSON/log/CSV path")
+    ap.add_argument("--fb-out", help="explicit private FlatBuffer output")
+    ap.add_argument("--prefill-kv", choices=["fp16", "int8"], default="fp16")
     args = ap.parse_args()
+    args.op = "gqa"
+    if args.command.startswith("rank-"):
+        ut_rank_tools.dispatch(args, LUT_DIR, run_rank_build)
+        return
 
     cmds = ['measure', 'build', 'compile'] if args.command == 'all' else [args.command]
     for cmd in cmds:
