@@ -63,3 +63,33 @@ func.func @disallowed_op(%ctx: !hip.context, %x: tensor<4xf16>)
   return %r : tensor<4xf16>
 }
 func.func private @f(tensor<4xf16>) -> tensor<4xf16>
+
+// -----
+
+// A static unit-stride slice of a module input is the view that the anchor
+// pass folds into the kernel's loads.
+func.func @static_slice(%ctx: !hip.context, %x: tensor<8xf16>)
+    -> tensor<4xf16> {
+  %r = hip.rocmlir_elementwise(%ctx) ins(%x : tensor<8xf16>) -> tensor<4xf16> {
+  ^bb0(%c: !hip.context, %a: tensor<8xf16>):
+    %s = tensor.extract_slice %a[2] [4] [1] : tensor<8xf16> to tensor<4xf16>
+    %e = tensor.empty() : tensor<4xf16>
+    %n = hip.neg(%c) ins(%s : tensor<4xf16>) outs(%e : tensor<4xf16>)
+        : tensor<4xf16>
+    hip.yield %n : tensor<4xf16>
+  }
+  return %r : tensor<4xf16>
+}
+
+// -----
+
+func.func @strided_slice(%ctx: !hip.context, %x: tensor<8xf16>)
+    -> tensor<4xf16> {
+  %r = hip.rocmlir_elementwise(%ctx) ins(%x : tensor<8xf16>) -> tensor<4xf16> {
+  ^bb0(%c: !hip.context, %a: tensor<8xf16>):
+    // expected-error @+1 {{is not allowed in a hip.rocmlir_elementwise body}}
+    %s = tensor.extract_slice %a[0] [4] [2] : tensor<8xf16> to tensor<4xf16>
+    hip.yield %s : tensor<4xf16>
+  }
+  return %r : tensor<4xf16>
+}
