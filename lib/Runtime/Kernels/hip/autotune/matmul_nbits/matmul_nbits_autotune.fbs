@@ -171,6 +171,22 @@ struct MatmulNbitsExtendedConfig {
   variant: ubyte;
 }
 
+// Optional literal-K/N override. The lower M endpoint is exclusive and the
+// upper endpoint is inclusive. Overlapping ranges for the same full key are
+// malformed; a runtime-illegal config falls through to ordinary point lookup.
+struct MatmulNbitsMInterval {
+  phase: MatmulNbitsPhase;
+  bits: MatmulNbitsBits;
+  group_size: MatmulNbitsGroupSize;
+  zero_point: MatmulNbitsZeroPoint;
+  row_stride: MatmulNbitsRowStride;
+  config: ubyte;
+  m_lo: uint16;
+  m_hi: uint16;
+  k: uint16;
+  n: uint32;
+}
+
 table MatmulNbitsAutotuneLut {
   schema_version: uint32 = 4;
   gpu_arch: string;         // must equal the running device, e.g. "gfx1151"
@@ -200,6 +216,8 @@ table MatmulNbitsAutotuneLut {
   // Appended, so a table without it loads as before: no config names an
   // extended entry.
   extended_configs: [MatmulNbitsExtendedConfig];
+  // Version 5 writers append ranges; keep the v4 default for old omitted fields.
+  m_intervals: [MatmulNbitsMInterval];
 }
 
 root_type MatmulNbitsAutotuneLut;

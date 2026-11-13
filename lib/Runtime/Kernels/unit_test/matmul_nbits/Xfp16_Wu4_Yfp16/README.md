@@ -3,7 +3,9 @@
 Standalone `hipcc`-only test for `hip_matmul_nbits()` (bits=4, nibble-packed).
 No CMake, no EP build. Entirely self-contained: inputs (uint4 packing,
 scales, zero-points) and the CPU fp32 dequant+matmul reference are all
-generated in-process, no python, no data files, no `unit_test/common/`.
+generated in-process. Timing uses the owning shared
+[`unit_test/common`](../../common/README.md) adaptive timer; inputs and the
+CPU reference remain in this leaf.
 
 Activations (`A`) and the output (`C`) are fp16; `matmul_nbits/Xfp32_Wu4_Yfp32` is
 the same test with fp32 activations.
@@ -13,6 +15,14 @@ make test        OFFLOAD=--offload-arch=%GFX% HIP_SDK=%HIP_SDK% [COVERAGE=1|2|3]
 make test_custom OFFLOAD=... HIP_SDK=... SIZE=128x2880x5120 GS=128 [NO_ZEROS=1]
 make clean
 ```
+
+Use `TIMING=screen` for config ranking and `TIMING=confirm` for selected
+performance confirmations. The default is `standard`. These named presets
+change sampling; they keep the selected production entry and CPU check.
+The result is the median of five group means, each valid GPU total divided by
+complete calls. `UT_TIMING` and `UT_TIMING_BINDING` record the actual preset,
+shape, config, source, CPU verdict and returned time. See the shared timer
+README for accumulation requirements and invalid-event handling.
 
 | Target | Meaning |
 |---|---|
@@ -62,3 +72,52 @@ via a one-line C23 `#embed` (see `unit_test/README.md` "`MODE=lookup`") -- no
 `embed_lut.py`, no generated `.cpp`. Both modes append to `out/results.csv`.
 
 CI passes `OFFLOAD`/`HIP_SDK` explicitly; there is no personal default.
+
+## Explicit production entries and a supplied table
+
+The direct executable accepts `MxKxN`, `--group-size`, and `--no-zeros`.
+Additional entry flags distinguish the production layouts:
+
+| Entry | Direct flags and supported scope |
+|---|---|
+| Arrival FP16/W4 | No additional entry flag; ordinary `hip_matmul_nbits`. |
+| Padded FP16/W4 | `--b-row-bytes <pitch>`; `M >= 2`, `K % group_size == 0`, pitch `K/2 + 128`. The measured entry is `hip_matmul_nbits_u4_wmma_padrow`. |
+| Decode DP4A | `--dp4a --no-zeros`; `M == 1`, `K % 32 == 0`, no padded stride. The complete `hip_matmul_nbits_dp4a` entry includes activation quantization and the integer GEMV. |
+
+`make test_custom` exposes the ordinary entry. Run the built executable
+directly for the two additional entry flags. For example, in Windows `cmd`:
+
+```bat
+set "HIPDNN_UT_TIMING=screen"
+set "HIPDNN_MATMUL_AUTOTUNE_MODE=lookup"
+<build-dir>\test_direct.exe 68x320x10240 --group-size 32 --no-zeros
+<build-dir>\test_direct.exe 68x6144x2560 --group-size 32 --no-zeros --b-row-bytes 3200
+<build-dir>\test_direct.exe 1x640x2560 --group-size 32 --no-zeros --dp4a
+```
+
+`--list-configs` prints the actual WMMA and GEMV geometry inventory.
+For a legal explicit pin, set `HIPDNN_MATMUL_NBITS_WMMA_CFG` for WMMA or
+`HIPDNN_EP_MATMUL_DP4A_CFG` for DP4A in that child process. Remove both pins
+when qualifying the actual LUT lookup. Runtime config IDs come from this
+inventory; they are independent of the table's config-pool indices.
+
+Build the same owning leaf with an explicit final FB using the existing
+Makefile override:
+
+```bat
+make build HIP_SDK=<sdk> OFFLOAD=--offload-arch=gfx11-generic MODE=lookup LUT_ARCH=gfx1151 BUILD_DIR=<private-build-dir> LUT_FB=<final-gfx1151.fb> FLATC=<flatc.exe> FLATBUFFERS_INC=<flatbuffers-include>
+```
+
+The kernel compiles at `-O2`; test and reader host code use the Makefile's
+`-O3` settings. `LUT_FB` selects the bytes embedded by the existing `#embed`
+path. A v5 table containing M intervals requires the matching interval-aware
+reader/schema from the source patch; the reader also accepts the old v4 table.
+Check the `[MODE=... -> lookup]` build output and the actual lookup source
+(`exact`, `nearest`, `interval`, or `fallback`) in each CPU binding.
+An unexpected fallback or online tune is an unresolved LUT selection.
+
+Retain the source/build/FB hashes, logs and exact executable with the runtime
+DLLs used for qualification. Put both qualified DLLs beside a copied executable
+so its runtime selection is reproduced. A rebuilt executable needs complete
+code/input/entry retention evidence or fresh ranking; an unchanged kernel ISA
+alone does not qualify old measurements for a new table build.
