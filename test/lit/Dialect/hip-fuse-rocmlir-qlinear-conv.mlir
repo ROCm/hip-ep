@@ -15,7 +15,7 @@
 // corner, so its bias is 5 + 125 * 12 = 1505 and 5 + 125 * 6 = 755. The
 // multipliers 0.5 * [0.5, 0.25] / 0.125 = [2, 1] stay per channel.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: (%[[X:.*]]: tensor<1x2x4x4xui8>, %[[W:.*]]: tensor<2x2x3x3xi8>, %[[B:.*]]: tensor<1x2x4x4xi32>, %[[M:.*]]: tensor<1x2x1x1xf32>) -> tensor<1x2x4x4xui8>
 // CHECK: %[[ACC:.*]] = hip.quant_conv(%{{.*}}) ins(%[[X]], %[[W]] :
 // CHECK-SAME: pads = [1, 1, 1, 1]
@@ -30,7 +30,7 @@
 // CHECK-LABEL: func.func @main_graph
 // CHECK: hip.constant {value = dense<{{\[\[\[\[}}755, 1005, 1005, 630], [1005, 1505, 1505, 1005], [1005, 1505, 1505, 1005], [630, 1005, 1005, 755]], {{\[\[}}370, 370, 370, 370], [370, 245, 245, 245], [370, 245, 245, 245], [370, 245, 245, 245]]]]> : tensor<1x2x4x4xi32>}
 // CHECK: hip.constant {value = dense<{{\[\[\[\[}}2.000000e+00]], {{\[\[}}1.000000e+00]]]]> : tensor<1x2x1x1xf32>}
-// CHECK: hip.rocmlir(%{{.*}}) @rocMlir
+// CHECK: hip.rocmlir(%{{.*}}) @mlir_{{[a-z0-9_]+}}
 // CHECK-NOT: hip.qlinear_conv
 func.func @main_graph(%ctx: !hip.context, %x: tensor<1x2x4x4xui8>)
     -> tensor<1x2x4x4xui8> {
@@ -62,7 +62,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x2x4x4xui8>)
 // per-channel bias, B + 128 * sum(w) = [10 + 384, 20 - 128]. A per-tensor
 // multiplier is one scalar and moves into the kernel.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: (%[[X:.*]]: tensor<1x2x3x3xui8>, %[[W:.*]]: tensor<2x2x1x1xi8>, %[[B:.*]]: tensor<1x2x1x1xi32>) -> tensor<1x2x3x3xui8>
 // CHECK: hip.quant_conv
 // CHECK: hip.add(%{{.*}}) ins(%{{.*}}, %[[B]] :
@@ -98,7 +98,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x2x3x3xui8>)
 
 // An i8 input with zero point 0 and no bias needs no correction at all.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: (%{{.*}}: tensor<1x2x3x3xi8>, %{{.*}}: tensor<2x2x1x1xi8>) -> tensor<1x2x3x3xi8>
 // CHECK: hip.quant_conv
 // CHECK-NOT: hip.add
@@ -128,7 +128,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x2x3x3xi8>)
 // A QuantizeLinear that feeds the conv joins the kernel as its prologue, so
 // the kernel reads the f32 activation directly.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: (%{{.*}}: tensor<1x2x3x3xf32>,
 // CHECK: hip.quantize_linear
 // CHECK: hip.quant_conv
@@ -295,11 +295,11 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x2x3x3xui8>)
 // The i32 accumulator of hip.quant_conv is its init, so the quantized conv
 // is outlined. A conv with i32 inputs keeps its HIP kernel.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK: hip.quant_conv
 
 // CHECK-LABEL: func.func @main_graph
-// CHECK: hip.rocmlir(%{{.*}}) @rocMlir
+// CHECK: hip.rocmlir(%{{.*}}) @mlir_{{[a-z0-9_]+}}
 // CHECK: hip.conv(%{{.*}}) ins(%{{.*}}, %{{.*}} : tensor<1x2x3x3xi32>, tensor<2x2x1x1xi32>)
 // CHECK-NOT: hip.rocmlir
 func.func @main_graph(%ctx: !hip.context, %x: tensor<1x2x3x3xui8>,
