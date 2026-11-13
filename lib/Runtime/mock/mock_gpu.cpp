@@ -2912,7 +2912,8 @@ int wrap_pad(RuntimeState *state, void *data, void *pads, void *constant_value,
 int wrap_pad_static(RuntimeState *state, void *data, void *output,
                     const int64_t *data_shape, const int64_t *output_shape,
                     const int64_t *lower_pads, int64_t rank, int64_t data_type,
-                    int64_t mode_id) {
+                    int64_t mode_id, const void *constant_value) {
+  (void)constant_value;
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_pad_static\n");
     return -1;

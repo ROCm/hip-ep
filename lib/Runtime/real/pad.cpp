@@ -212,7 +212,7 @@ int wrap_pad(RuntimeState *state, void *data, void *pads, void *constant_value,
 int wrap_pad_static(RuntimeState *state, void *data, void *output,
                     const int64_t *data_shape, const int64_t *output_shape,
                     const int64_t *lower_pads, int64_t rank, int64_t data_type,
-                    int64_t mode_id) {
+                    int64_t mode_id, const void *constant_value) {
   OP_PROFILE(
       "pad",
       [&] {
@@ -252,5 +252,6 @@ int wrap_pad_static(RuntimeState *state, void *data, void *output,
   }
   return hip_pad(hipdnn_ep_state_get_stream(state), data, output, data_shape,
                  output_shape, lower_pads, static_cast<int>(rank), hip_dtype,
-                 static_cast<int>(mode_id), nullptr);
+                 static_cast<int>(mode_id),
+                 mode_id == 0 ? constant_value : nullptr);
 }

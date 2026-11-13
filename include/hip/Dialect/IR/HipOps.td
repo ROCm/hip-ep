@@ -5087,6 +5087,10 @@ def Hip_PadOp : Hip_DpsOp_WithInfer<"pad", "Output", [AttrSizedOperandSegments]>
     device-to-host copy and stream synchronization per call. It is only set
     when no runtime `constant_value` read is needed either.
 
+    `static_constant_value`, when present alongside `static_lower_pads`, is
+    the compile-time fill value of a constant-mode pad, typed as the data
+    element. The lowering passes it from host memory as well.
+
     Uses destination-passing style: output buffer is provided as argument.
 
     Example:
@@ -5106,7 +5110,8 @@ def Hip_PadOp : Hip_DpsOp_WithInfer<"pad", "Output", [AttrSizedOperandSegments]>
     Optional<Hip_TensorOrMemRef>:$axes,
     Hip_TensorOrMemRef:$output,
     DefaultValuedAttr<StrAttr, "\"constant\"">:$mode,
-    OptionalAttr<DenseI64ArrayAttr>:$static_lower_pads
+    OptionalAttr<DenseI64ArrayAttr>:$static_lower_pads,
+    OptionalAttr<AnyAttr>:$static_constant_value
   );
 
   let assemblyFormat = [{

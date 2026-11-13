@@ -19,8 +19,10 @@ namespace {
 //
 // With `static_lower_pads` the call is instead
 //   wrap_pad_static(state, data_ptr, out_ptr, data_shape_ptr,
-//                   output_shape_ptr, lower_pads_ptr, rank, data_type, mode_id)
-// with the pads in a host stack array, so the runtime never syncs the stream.
+//                   output_shape_ptr, lower_pads_ptr, rank, data_type, mode_id,
+//                   constant_value_ptr (or null))
+// with the pads, and `static_constant_value` when present, in host stack
+// memory, so the runtime never syncs the stream.
 //
 // `mode_id` encodes the string attribute as a small enum:
 //   0 = constant, 1 = reflect, 2 = edge, 3 = wrap.
@@ -107,22 +109,33 @@ struct PadOpLowering : public ConvertOpToLLVMPattern<PadOp> {
             LLVM::GEPOp::create(rewriter, loc, ptrType, i64Type, arr, idx);
         LLVM::StoreOp::create(rewriter, loc, createI64Const(v), elemPtr);
       }
-      SmallVector<Type, 9> staticTypes = {ptrType, ptrType, ptrType,
-                                          ptrType, ptrType, ptrType,
-                                          i64Type, i64Type, i64Type};
+      Value staticCvalPtr = LLVM::ZeroOp::create(rewriter, loc, ptrType);
+      if (auto attr = op.getStaticConstantValueAttr()) {
+        auto cval = dyn_cast<TypedAttr>(attr);
+        if (!cval || cval.getType() != dataType.getElementType())
+          return rewriter.notifyMatchFailure(op, "static_constant_value type");
+        Value v = LLVM::ConstantOp::create(rewriter, loc, cval.getType(), cval);
+        staticCvalPtr = LLVM::AllocaOp::create(rewriter, loc, ptrType,
+                                               cval.getType(), one, 8);
+        LLVM::StoreOp::create(rewriter, loc, v, staticCvalPtr);
+      }
+      SmallVector<Type, 10> staticTypes = {ptrType, ptrType, ptrType, ptrType,
+                                           ptrType, ptrType, i64Type, i64Type,
+                                           i64Type, ptrType};
       FailureOr<LLVM::LLVMFuncOp> staticFn = LLVM::lookupOrCreateFn(
           rewriter, module, kWrapPadStatic, staticTypes, i32Type);
       if (failed(staticFn))
         return failure();
-      SmallVector<Value, 9> staticArgs = {statePtr,
-                                          dataPtr,
-                                          outPtr,
-                                          dataShape,
-                                          outShape,
-                                          arr,
-                                          createI64Const(dataType.getRank()),
-                                          dataTypeVal,
-                                          modeIdVal};
+      SmallVector<Value, 10> staticArgs = {statePtr,
+                                           dataPtr,
+                                           outPtr,
+                                           dataShape,
+                                           outShape,
+                                           arr,
+                                           createI64Const(dataType.getRank()),
+                                           dataTypeVal,
+                                           modeIdVal,
+                                           staticCvalPtr};
       LLVM::CallOp::create(rewriter, loc, *staticFn, staticArgs);
       rewriter.eraseOp(op);
       return success();

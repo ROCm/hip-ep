@@ -160,12 +160,10 @@ module {
     return %r : tensor<5x6xf32>
   }
 
-  // A constant-mode cval is still read on the device, so the pads are not
-  // recorded for the host-only path.
+  // A compile-time cval is recorded with the pads, so the pad stays on the
+  // host-only path.
   // CHECK-LABEL: func.func @pad_legacy_value
-  // CHECK: hip.pad({{.*}}) ins({{.*}}, {{.*}} : tensor<3x4xf32>, tensor<4xi64>) cval({{.*}} : tensor<f32>) outs({{.*}} : tensor<5x6xf32>)
-  // CHECK-NOT: static_lower_pads
-  // CHECK: return
+  // CHECK: hip.pad({{.*}}) ins({{.*}}, {{.*}} : tensor<3x4xf32>, tensor<4xi64>) cval({{.*}} : tensor<f32>) outs({{.*}} : tensor<5x6xf32>) {static_constant_value = 2.500000e+00 : f32, static_lower_pads = array<i64: 1, 1>}
 
   // A zero fill is the default on both schemas, so it needs no cval operand.
   func.func @pad_legacy_zero_value(%data: tensor<3x4xf32>) -> tensor<5x6xf32> {

@@ -240,6 +240,17 @@ getStaticLowerPads(mlir::Value data, mlir::Value pads, mlir::Value axes,
   return lower;
 }
 
+/// The fill value of a constant-mode pad when `constant_value` is a
+/// compile-time scalar of the data element type, else null.
+static mlir::TypedAttr getStaticConstantValue(mlir::Value constantValue,
+                                              mlir::Type elemType) {
+  auto dense = getCompileTimeConstantTensor(constantValue);
+  if (!dense || dense.getNumElements() != 1 ||
+      dense.getElementType() != elemType)
+    return nullptr;
+  return mlir::dyn_cast<mlir::TypedAttr>(*dense.value_begin<mlir::Attribute>());
+}
+
 /// onnx.Pad -> hip.pad
 ///
 /// ONNX layout: Pad(data, pads, [constant_value], [axes]) {mode}.
@@ -356,12 +367,25 @@ struct PadToHip : public mlir::RewritePattern {
 
     mlir::SmallVector<mlir::NamedAttribute> attrs;
     attrs.push_back(rewriter.getNamedAttr("mode", modeAttr));
+    const bool readsConstantValue =
+        constantValue && modeAttr.getValue() == "constant";
+    mlir::TypedAttr staticConstantValue =
+        readsConstantValue
+            ? getStaticConstantValue(
+                  constantValue,
+                  mlir::cast<mlir::RankedTensorType>(data.getType())
+                      .getElementType())
+            : nullptr;
     if (auto lowerPads = getStaticLowerPads(
             data, pads, axes, padsAttr, hasPadsAttr, axesAttr, hasAxesAttr,
-            /*needsConstantValue=*/constantValue &&
-                modeAttr.getValue() == "constant"))
+            /*needsConstantValue=*/readsConstantValue &&
+                !staticConstantValue)) {
       attrs.push_back(rewriter.getNamedAttr(
           "static_lower_pads", rewriter.getDenseI64ArrayAttr(*lowerPads)));
+      if (staticConstantValue)
+        attrs.push_back(rewriter.getNamedAttr("static_constant_value",
+                                              staticConstantValue));
+    }
 
     mlir::OperationState state(loc, "hip.pad");
     state.addOperands(operands);

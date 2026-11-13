@@ -2231,11 +2231,12 @@ int wrap_pad(RuntimeState *state, void *data, void *pads, void *constant_value,
 
 // Pad with compile-time pads: `lower_pads` is a host array holding the begin
 // pad of every axis (length `rank`). Never reads device memory or syncs the
-// stream. Modes as in wrap_pad; constant mode always fills with zero.
+// stream. Modes as in wrap_pad. `constant_value` is a host pointer to the fill
+// value (one element of `data_type`) for constant mode, or null for zero.
 int wrap_pad_static(RuntimeState *state, void *data, void *output,
                     const int64_t *data_shape, const int64_t *output_shape,
                     const int64_t *lower_pads, int64_t rank, int64_t data_type,
-                    int64_t mode_id);
+                    int64_t mode_id, const void *constant_value);
 
 // Tile operation wrapper.
 // repeats: int64 1-D tensor of length `data_rank`.
