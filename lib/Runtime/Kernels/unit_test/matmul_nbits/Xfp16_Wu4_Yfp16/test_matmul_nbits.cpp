@@ -28,6 +28,7 @@
  *           (optional; default zero point is 8 when absent)
  * C:        FP16 row-major [M, N]
  */
+#include "../../common/ut_gpu_execution_scope.h"
 #include <hip/hip_runtime.h>
 #include "../../common/hip_adaptive_timing.h"
 #include "../../common/ut_matmul_nbits_rank_input.h"
@@ -624,6 +625,7 @@ static bool runOne(const Case& c, int idx, const hipdnn_ep_test::timing::RankRow
   const size_t countC = static_cast<size_t>(c.M) * c.N;
   const size_t elem = c.fp32 ? 4 : 2;
 
+  hipdnn_ep_test::GpuExecutionScope gpu_execution([] { HIP_CHECK(hipDeviceSynchronize()); });
   void *dA = nullptr, *dC = nullptr;
   __half* dS = nullptr;
   __half* dZ = nullptr;

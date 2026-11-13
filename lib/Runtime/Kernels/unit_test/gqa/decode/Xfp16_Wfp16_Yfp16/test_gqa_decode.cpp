@@ -35,6 +35,7 @@
 // Self-contained: random inputs generated in-process, no data files.
 // ============================================================
 
+#include "../../../common/ut_gpu_execution_scope.h"
 #include <hip/hip_runtime.h>
 #include "../../../common/hip_adaptive_timing.h"
 #include "../../../common/ut_gqa_rank_input.h"
@@ -735,6 +736,7 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose, const
   __half *dQ, *dK, *dV, *dO, *dSink;
   float* dPart;
   int* dSeq;
+  hipdnn_ep_test::GpuExecutionScope gpu_execution([] { HIP_CHECK(hipDeviceSynchronize()); });
   HIP_CHECK(hipMalloc(&dQ, hQ.size() * sizeof(__half)));
   HIP_CHECK(hipMalloc(&dK, hK.size() * sizeof(__half)));
   HIP_CHECK(hipMalloc(&dV, hV.size() * sizeof(__half)));

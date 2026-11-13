@@ -213,7 +213,11 @@ def add_arguments(ap):
 
 
 def dispatch(args, installed, build):
-    if args.command == 'rank-candidates':
+    if args.command in ('rank-seed', 'rank-report'):
+        import ut_lut_from_table
+        action = ut_lut_from_table.seed if args.command == 'rank-seed' else ut_lut_from_table.report
+        action(args, installed)
+    elif args.command == 'rank-candidates':
         candidates(args, installed)
     elif args.command == 'rank-reference-candidates':
         reference_candidates(args, installed)

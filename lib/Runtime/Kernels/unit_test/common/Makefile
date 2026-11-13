@@ -8,6 +8,7 @@ TARGET ?= out/test_ut_timing_policy
 .PHONY: test
 test: $(TARGET)
 	./$(TARGET)
+	python3 test_ut_lut_from_table.py
 
 $(TARGET): test_ut_timing_policy.cpp ut_timing_policy.h ut_timing_device_profiles.h ut_timing_context.h ut_rank.h ut_rank_input.h ut_gpu_frequency.h
 	@mkdir -p $(dir $@)

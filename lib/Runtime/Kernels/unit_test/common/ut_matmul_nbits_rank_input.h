@@ -21,6 +21,22 @@ inline std::string nbitsConfigString(const UtNbitsConfig& config) {
   return text;
 }
 #ifdef HIPDNN_UT_RANK_NBITS_ADAPTER
+inline UtNbitsConfig nbitsRequestedConfig(const UtNbitsShape& shape, const std::string& request) {
+  UtNbitsConfig candidate;
+  if (request.rfind("id=", 0) == 0) {
+    if (!hipdnn_ut_nbits_config(&shape, rankConfigInt(request, "id"), &candidate)) return candidate;
+  } else {
+    // Resolve geometry against the unchanged production descriptors. IDs are
+    // local to the build; table config indices are never native config IDs.
+    const int count = hipdnn_ut_nbits_config_count(&shape);
+    for (int id = 0; id < count; ++id) {
+      if (!hipdnn_ut_nbits_config(&shape, id, &candidate) && nbitsConfigString(candidate) == request)
+        return candidate;
+    }
+  }
+  throw std::invalid_argument("UT rank: requested config is not a legal final launch");
+}
+
 inline void printNbitsCatalog(const UtNbitsShape& shape) {
   std::printf("UT_CANDIDATES {\"leaf\":%s,\"shape\":%s,\"configs\":[",
               jsonString(currentCase.leaf).c_str(), jsonString(currentCase.shape).c_str());
@@ -64,9 +80,7 @@ RankOptions nbitsRankOptions(const UtNbitsShape& shape, const RankRow& row, Vali
   bool default_requested = false;
   for (const auto& request : row.configs) {
     if (request == "default" || request.rfind("default;", 0) == 0) { default_requested = true; continue; }
-    UtNbitsConfig candidate;
-    if (hipdnn_ut_nbits_config(&shape, rankConfigInt(request, "id"), &candidate))
-      throw std::invalid_argument("UT rank: requested config is not a legal final launch");
+    const UtNbitsConfig candidate = nbitsRequestedConfig(shape, request);
     const auto identity = nbitsConfigString(candidate);
     if (seen.insert(identity).second) { configs.push_back(candidate); options.configs.push_back(identity); }
   }

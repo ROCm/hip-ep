@@ -205,17 +205,39 @@ reports the gfx1151 decision loss. The previous sweep commands remain only for
 reproducing historical logs. These commands write private outputs; installing
 a refreshed table is a separate, reviewed step.
 
-Prepare a seed CSV with `leaf,shape,priority,config` and one `default` row per
-shape. Config IDs are enumerated by the current production TU. From this
-operator's autotune directory:
+Start from the existing JSON table. From this operator's autotune directory:
 
 ```sh
-python scripts/update_lut.py rank-catalog --candidates /private/seed.csv --leaf-root /checkout/lib/Runtime/Kernels/unit_test --out /private/catalog.log
-python scripts/update_lut.py rank-candidates --candidates /private/seed.csv --catalog /private/catalog.log --out /private/candidates.csv
+python scripts/update_lut.py rank-seed --from-lut lut/gfx1151.json --activation fp16 --out /private/candidates.csv
 python scripts/update_lut.py rank-measure --candidates /private/candidates.csv --leaf-root /checkout/lib/Runtime/Kernels/unit_test --out /private/rank.log
+python scripts/update_lut.py rank-report --rank-log /private/rank.log --from-lut lut/gfx1151.json --activation fp16 --out /private/report.csv --md /private/report.md
 python scripts/update_lut.py rank-build --rank-log /private/rank.log --base lut/gfx1151.json --activation fp16 --out /private/candidate.json
 python scripts/update_lut.py compile --out /private/candidate.json --fb-out /private/candidate.fb --flatc /tools/flatc
 ```
+
+`rank-seed` writes default + old config geometry per selected point. The native
+leaf resolves the no-LUT default and deduplicates equal final launches.
+`.seed.json` retains the original keys, and `.skipped.json` explains every
+unsupported, filtered or unsampled point. FB input is unsupported. Options:
+`--sample 20 --seed 111313`, `--leaf <names>`, `--dtype <types>`,
+`--rank-phase decode|prefill|both`, `--priority`, and `--keys <file>` (one JSON
+key array from `.seed.json` per line). The policy shown above must also be used
+at the report and import steps because the table omits that input dimension.
+
+Optional catalog expansion: run `rank-catalog --candidates /private/candidates.csv
+--leaf-root /checkout/lib/Runtime/Kernels/unit_test --out /private/catalog.log`,
+then repeat `rank-seed ... --with-catalog --catalog /private/catalog.log`.
+Default + old is the usual comparison; all legal configs are appended only
+when requested. Hand-written `leaf,shape,priority,config` CSVs remain useful
+for new shapes; expand them with `rank-catalog` then `rank-candidates`.
+
+Reports use the native final winner/default ratio and the latest shared phase
+for ratios involving old config, named in `old_ratio_phase`. An unavailable
+comparison is explicit. `changed` describes the effective table selection;
+`winner_unresolved` is diagnostic. GPU phase and pilot totals are distinct;
+rank wall excludes native CPU reference and launcher/resource waits.
+`python3 ../../../unit_test/common/test_ut_lut_from_table.py` checks full JSON
+roundtrip, skipped/filtered/sampled inputs, native default dedup and reports.
 
 Pass `--launcher-json '["python", "/private/lease_exec.py"]'` to `rank-measure`
 when the host uses a lease wrapper. Catalog enumeration is CPU metadata and

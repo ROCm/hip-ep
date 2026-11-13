@@ -222,3 +222,36 @@ closure, compiler/SDK, ISA and kernel flags. Other builds compile their own TU.
 GPU lease wrappers belong around each native process; CPU candidate generation,
 JSON/FB writing, analysis and file transfer do not retain GPU ownership.
 Catalog enumeration is a CPU metadata phase and does not require a GPU lease.
+
+### Existing JSON table inputs and reports
+
+Each operator's `update_lut.py rank-seed --from-lut <table.json> --out <csv>`
+converts table points to default + old geometry candidates. JSON is the only
+input format. Optional leaf/dtype/phase/key filters and seeded sampling run
+before ranking. Unsupported, filtered and unsampled keys appear in the
+skipped JSON; seed metadata binds selected keys to leaf/shape/config.
+`--with-catalog --catalog <log>` appends all legal configs only when requested.
+
+`rank-report --rank-log <log> --from-lut <table.json> --out <csv> [--md <md>]`
+validates native evidence and exports point identities, old/default/winner/
+selected configs, paired group ratios, changes, retests, exclusions and GPU/
+wall costs. Ratios involving an old candidate no longer in the final phase
+use the latest shared phase, explicitly named, or are unavailable. The native
+winner/default decision always comes from the final phase. Headers, weights,
+fallbacks, config indices, point order and unrelated fields survive rank-build.
+
+`make test` includes `test_ut_lut_from_table.py` (host-only, Python and C++
+compiler): every representable point in both gfx1151 JSONs is seeded, backed by
+synthetic validated old-config-winner evidence, and imported with full parsed
+JSON equality. It also checks filtering/sampling/skips, report decisions,
+geometry resolution and default deduplication.
+
+The FP16 W4 MatMulNBits and FP16 KV GQA decode/prefill leaves support an
+optional launcher handshake, `HIPDNN_UT_GPU_ADMISSION=<private-prefix>`.
+After CPU input/reference preparation, case N writes `<prefix>.N.request`
+and waits for `.grant` before device allocation/work. After device cleanup
+and synchronization it writes `.done`, then waits for `.released` before
+CPU preparation of the next case. The launcher owns host admission and its
+execution lease, waits through the actual worker exit, and reconciles a failed
+worker before releasing. Without this variable, ordinary leaf execution is
+unchanged. This handshake runs outside the timer and adds no sampling controls.

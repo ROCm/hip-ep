@@ -25,6 +25,7 @@
 // Pure prefill: past_len = 0, total_seq = sq. Self-contained random inputs.
 // ============================================================
 
+#include "../../../common/ut_gpu_execution_scope.h"
 #include <hip/hip_runtime.h>
 #include "../../../common/hip_adaptive_timing.h"
 #include "../../../common/ut_gqa_rank_input.h"
@@ -588,6 +589,7 @@ static bool run_case(const Case& c, int iters, const hipdnn_ep_test::timing::Ran
   for (size_t i = 0; i < kn; ++i) { Kh[i] = __float2half(Kf[i]); Vh[i] = __float2half(Vf[i]); }
 
   __half *dQ, *dK, *dV, *dO, *dSink;
+  hipdnn_ep_test::GpuExecutionScope gpu_execution([] { HIP_CHECK(hipDeviceSynchronize()); });
   HIP_CHECK(hipMalloc(&dQ, qn * sizeof(__half)));
   HIP_CHECK(hipMalloc(&dK, kn * sizeof(__half)));
   HIP_CHECK(hipMalloc(&dV, kn * sizeof(__half)));

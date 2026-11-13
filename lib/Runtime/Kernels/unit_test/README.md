@@ -306,31 +306,57 @@ Near-tied finalists can swap between runs; that costs little and is expected.
 Rules, the `UT_RANK` record and gfx1151 results are in
 [common/README.md](common/README.md#native-lut-ranking-ut-rank-v3).
 
-To refresh `<op>` (`matmul_nbits` or `gqa`):
+To refresh `<op>` (`matmul_nbits` or `gqa`) from its existing JSON table:
 
-1. Write a seed CSV with the header `leaf,shape,priority,config` and one
-   `default` row per shape to refresh, using the leaf's shape strings.
-2. In each leaf directory, build the ranking variant:
-   `make build RANK=1 BUILD_DIR=out_rank HIP_SDK=<sdk>`. On Windows, add
-   `ADLX_INCLUDE=<ADLX SDK Include directory>` to record GPU clocks.
-3. From `hip/autotune/<op>/`:
+1. From `hip/autotune/<op>/`, generate default + old-table candidates:
 
    ```sh
-   python scripts/update_lut.py rank-catalog    --candidates seed.csv --leaf-root <checkout>/lib/Runtime/Kernels/unit_test --out catalog.log
-   python scripts/update_lut.py rank-candidates --candidates seed.csv --catalog catalog.log --out candidates.csv
-   python scripts/update_lut.py rank-measure    --candidates candidates.csv --leaf-root <checkout>/lib/Runtime/Kernels/unit_test --out rank.log
-   python scripts/update_lut.py rank-build      --rank-log rank.log --base lut/gfx1151.json --out <private>/candidate.json <op options>
-   python scripts/update_lut.py compile         --out <private>/candidate.json --fb-out <private>/candidate.fb --flatc <flatc>
+   python scripts/update_lut.py rank-seed --from-lut lut/gfx1151.json --out <private>/candidates.csv
    ```
 
-   `rank-catalog` lists each shape's legal configs on the CPU, `rank-candidates`
-   expands the seed into candidate rows, `rank-measure` runs the ranking leaves
-   one GPU process at a time (pass `--launcher-json` for a lease wrapper), and
-   `rank-build` validates the `UT_RANK` records and writes a private table that
-   keeps every unrelated point. `<op options>` is `--activation fp16|fp32` for
-   MatMulNBits and `--prefill-kv fp16|int8` for GQA prefill.
-4. Review the private table, then install it into `hip/autotune/<op>/lut/` as a
-   separate change.
+   The command writes the candidate CSV, `.seed.json` identities and a
+   `.skipped.json` list with reasons. Only JSON input is supported; FB is
+   compiled from JSON. `--sample 20 --seed 111313` selects reproducible points;
+   `--leaf`, `--dtype`, `--rank-phase decode|prefill`, and `--keys` filter them.
+   Choose `--activation fp16|fp32` for MatMulNBits or
+   `--prefill-kv fp16|int8` for GQA prefill at both seed and import/report steps.
+   These dimensions are absent from the respective schema keys.
+2. Build each selected leaf with
+   `make build RANK=1 BUILD_DIR=out_rank HIP_SDK=<sdk>`. On Windows, add
+   `ADLX_INCLUDE=<ADLX SDK Include directory>` for GPU clock diagnostics.
+3. Run the leaves, inspect the point report, and build a private table:
+
+   ```sh
+   python scripts/update_lut.py rank-measure --candidates <private>/candidates.csv --leaf-root <checkout>/lib/Runtime/Kernels/unit_test --out <private>/rank.log
+   python scripts/update_lut.py rank-report --rank-log <private>/rank.log --from-lut lut/gfx1151.json --out <private>/report.csv --md <private>/report.md <op options>
+   python scripts/update_lut.py rank-build --rank-log <private>/rank.log --base lut/gfx1151.json --out <private>/candidate.json <op options>
+   python scripts/update_lut.py compile --out <private>/candidate.json --fb-out <private>/candidate.fb --flatc <flatc>
+   ```
+
+   `<op options>` is `--activation fp16|fp32` for MatMulNBits and
+   `--prefill-kv fp16|int8` for GQA prefill. `rank-measure` runs one native
+   process at a time and accepts `--launcher-json` for the host's execution
+   lease wrapper. `rank-report` validates `UT_RANK` and reports the old/default/
+   winner ratios, effective selection changes, retests, exclusions and costs.
+   `rank-build` preserves weights, fallback/config indices, point order and
+   unrelated fields; unchanged selections retain their exact original index.
+4. Review the private JSON/FB before a separately authorized installation.
+
+The old table geometry is resolved against the leaf's current production
+launch descriptors; its config index is never used as a native ID. The leaf
+resolves its actual no-LUT default and deduplicates old=default before measuring.
+To include all legal configs, run `rank-catalog --candidates <private>/candidates.csv`
+with the same `--leaf-root` and `--out <private>/catalog.log`, then repeat
+`rank-seed ... --with-catalog --catalog <private>/catalog.log`. Catalog expansion
+is optional; ordinary existing-table refresh compares only default and old.
+
+For shapes absent from the old table, a hand-written CSV with
+`leaf,shape,priority,config` and one `default` row per shape remains supported.
+Use `rank-catalog` and `rank-candidates --candidates <seed.csv> --catalog <catalog.log>`
+to expand it. The host contract tests run through `make -C common test`, or
+`python3 common/test_ut_lut_from_table.py`: both existing gfx1151 tables are
+reconstructed from synthetic old-config winners with full parsed JSON equality,
+including skipped points, weights, fallback/config indices and array order.
 
 Each op's details are in [hip/autotune/matmul_nbits/README.md](../hip/autotune/matmul_nbits/README.md#refresh-through-native-ut-ranking)
 and [hip/autotune/gqa/README.md](../hip/autotune/gqa/README.md#refresh-through-native-ut-ranking).

@@ -16,9 +16,33 @@ inline std::string gqaConfigString(const UtGqaConfig& config) {
   return text;
 }
 #ifdef HIPDNN_UT_RANK_GQA_ADAPTER
+inline UtGqaConfig gqaRequestedConfig(const UtGqaShape& shape, const std::string& request) {
+  UtGqaConfig candidate;
+  if (request.rfind("id=", 0) == 0) {
+    if (!hipdnn_ut_gqa_config(&shape, rankConfigInt(request, "id"), &candidate)) return candidate;
+  } else {
+    const int count = hipdnn_ut_gqa_config_count(&shape);
+    for (int id = 0; id < count; ++id) {
+      if (hipdnn_ut_gqa_config(&shape, id, &candidate)) continue;
+      if (shape.sq == 1) {
+        // LUT splits are exact integers, including counts between online
+        // catalog ladder values. The configured entry supports these counts.
+        const int splits = rankConfigInt(request, "splits");
+        if (splits < 1 || splits > 64 || splits > shape.max_splits) continue;
+        candidate.splits = splits;
+      }
+      if (gqaConfigString(candidate) == request) return candidate;
+    }
+  }
+  throw std::invalid_argument("UT rank: invalid GQA candidate geometry");
+}
+
 inline void printGqaCatalog(const UtGqaShape& shape) {
-  std::printf("UT_CANDIDATES {\"leaf\":%s,\"shape\":%s,\"configs\":[",
-              jsonString(currentCase.leaf).c_str(), jsonString(currentCase.shape).c_str());
+  UtGqaConfig baseline;
+  if (hipdnn_ut_gqa_config(&shape, 0, &baseline)) throw std::runtime_error("UT rank: no GQA default");
+  std::printf("UT_CANDIDATES {\"leaf\":%s,\"shape\":%s,\"default\":%s,\"configs\":[",
+              jsonString(currentCase.leaf).c_str(), jsonString(currentCase.shape).c_str(),
+              jsonString(gqaConfigString(baseline)).c_str());
   const int count = hipdnn_ut_gqa_config_count(&shape);
   for (int id = 1; id < count; ++id) {
     UtGqaConfig config;
@@ -47,9 +71,7 @@ RankOptions gqaRankOptions(const UtGqaShape& shape, const RankRow& row, Select s
   bool default_requested = false;
   for (const auto& request : row.configs) {
     if (request == "default") { default_requested = true; continue; }
-    UtGqaConfig candidate;
-    if (hipdnn_ut_gqa_config(&shape, rankConfigInt(request, "id"), &candidate))
-      throw std::invalid_argument("UT rank: invalid GQA candidate");
+    const UtGqaConfig candidate = gqaRequestedConfig(shape, request);
     const auto identity = gqaConfigString(candidate);
     if (seen.insert(identity).second) { configs.push_back(candidate); options.configs.push_back(identity); }
   }
