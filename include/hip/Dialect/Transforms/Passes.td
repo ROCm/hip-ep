@@ -182,7 +182,7 @@ def RocMlirPrepareQuantPass
   let summary = "Prepare the quantize trees of main_graph for rocMLIR kernels";
   let description = [{
     Moves each per-tensor quantize backward through the element-move ops that
-    feed it, so those ops run on 8-bit values, and then rebiases each unsigned
+    feed it, so those ops run on 8- or 16-bit values, and then rebiases each unsigned
     8-bit tree that ends in a planned integer anchor to signed 8-bit. The
     order matters: the sinking fixes the final shape of each tree, and the
     rebias then plans the QLinear and dequantized convolutions on i8 inputs.

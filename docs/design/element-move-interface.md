@@ -7,7 +7,7 @@ Licensed under the MIT License.
 `ElementMoveOpInterface` (`include/hip/Dialect/IR/HipElementMoveInterface.td`)
 marks ops whose result elements are copies of elements of some operands, or
 are selected among them by comparison, with no arithmetic. The rocMLIR fusion
-uses it to run those ops on 8-bit values in quantized graphs.
+uses it to run those ops on 8- or 16-bit values in quantized graphs.
 
 ## Why a quantize commutes with these ops
 
@@ -20,8 +20,10 @@ Q(f(x1, x2, ...)) = f(Q(x1), Q(x2), ...)
 Q(DQ(a))          = a     when DQ has the same (s, z, T)
 ```
 
-The second rule is exact on 8-bit values: the round trip error is far below
-half a unit.
+The second rule is exact on 8- and 16-bit values: `|a - z|` stays below 2^16,
+f32 holds every such integer, and the round trip error through the f32 scale
+is far below half a unit. A 32-bit type would break that bound, so the rewrite
+takes only 8- and 16-bit types.
 
 ## The rewrite
 
@@ -33,10 +35,11 @@ block size 0 and saturation on:
 
 1. It walks back through the ops that implement the interface. Each interior
    op must return `movesElements() == true`, have one result and one reader,
-   and have a static shape.
+   and have a static shape. A 16-bit tree does not pass a `hip.resize`, whose
+   runtime kernel has no 16-bit integer form.
 2. Each branch must end at a leaf:
    - a per-tensor dequantize with inline parameters. With the same scale bits,
-     zero point value and integer type, the leaf becomes its 8-bit input.
+     zero point value and integer type, the leaf becomes its integer input.
      Otherwise it becomes `Q(DQ(a))` with the quantize's parameters, and the
      producing integer kernel takes that requantize into its epilogue;
    - a `tensor.empty`, which becomes an empty tensor of type `T`.
@@ -87,8 +90,10 @@ ui8. Otherwise every value becomes i8 and every zero point in the set drops by
   result. Shapes, indices and offsets stay as they are.
 - `cloneWithElementType()` builds the same op on the given moved values, with
   the given result element type. A HIP DPS op writes into a new empty init.
-- The 8-bit form must lower both inside a rocMLIR kernel (HipToTosa) and on
-  the HIP runtime, because the rebuilt op can stay outside a kernel.
+- The integer form must lower both inside a rocMLIR kernel (HipToTosa) and on
+  the HIP runtime, because the rebuilt op can stay outside a kernel. An op
+  whose runtime kernel lacks a 16-bit form must be kept out of 16-bit trees in
+  `SinkQuantize.cpp`, as `hip.resize` is.
 
 ## Ops that implement it
 
@@ -97,8 +102,8 @@ ui8. Otherwise every value becomes i8 and every zero point in the set drops by
 | `tensor.insert_slice` | source, destination | External model |
 | `tensor.extract_slice` | source | External model |
 | `tensor.expand_shape`, `tensor.collapse_shape` | source | External models |
-| `hip.transpose` | input | |
-| `hip.resize` | input | Nearest mode only; the runtime kernel takes i8 and ui8 for nearest |
+| `hip.transpose` | input | The runtime kernel moves 1-, 2-, 4- and 8-byte elements |
+| `hip.resize` | input | Nearest mode only; the runtime kernel takes i8 and ui8 for nearest, so 8-bit trees only |
 
 The tensor external models are registered by
 `registerElementMoveExternalModels`, which `hip-rocmlir-prepare-quant` adds to its

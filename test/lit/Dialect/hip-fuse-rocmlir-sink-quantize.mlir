@@ -4,7 +4,8 @@
 // A per-tensor quantize moves back through ops that only move elements
 // (insert_slice, transpose, nearest resize), down to the dequantizes and the
 // empty destinations. A dequantize with the quantize's scale, zero point and
-// type folds to its 8-bit input; any other dequantize is requantized alone.
+// type folds to its 8- or 16-bit input; any other dequantize is requantized
+// alone.
 
 // RUN: hip-mlir-opt --split-input-file --hip-rocmlir-prepare-quant \
 // RUN:   --hip-fuse-rocmlir-elementwise --hip-fuse-rocmlir-anchor %s \
@@ -375,4 +376,68 @@ func.func @main_graph(%ctx: !hip.context, %a: tensor<1x4x4x8xi8>)
          {axis = 1 : i64, block_size = 0 : i64, precision = 0 : i64,
           saturate = 1 : i64} : tensor<1x8x4x4xui8>
   return %y : tensor<1x8x4x4xui8>
+}
+
+// -----
+
+// The same transpose on ui16 values: q(dq(a)) returns a for 16-bit types too,
+// so the transpose runs on ui16 and no quantize or dequantize remains.
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK-SAME: %[[A:[^:]*]]: tensor<1x4x4x8xui16>)
+// CHECK-NOT: hip.dequantize_linear
+// CHECK: %[[E:.*]] = tensor.empty() : tensor<1x8x4x4xui16>
+// CHECK: %[[T:.*]] = hip.transpose(%{{.*}}) ins(%[[A]] : tensor<1x4x4x8xui16>) outs(%[[E]] : tensor<1x8x4x4xui16>)
+// CHECK-NOT: hip.quantize_linear
+// CHECK: return %[[T]] : tensor<1x8x4x4xui16>
+
+func.func @main_graph(%ctx: !hip.context, %a: tensor<1x4x4x8xui16>)
+    -> tensor<1x8x4x4xui16> {
+  %s = hip.constant {value = dense<3.0517578125E-5> : tensor<f32>} : tensor<f32>
+  %z = hip.constant {value = dense<32768> : tensor<ui16>} : tensor<ui16>
+  %ae = tensor.empty() : tensor<1x4x4x8xf32>
+  %da = hip.dequantize_linear(%ctx) ins(%a, %s : tensor<1x4x4x8xui16>, tensor<f32>)
+          zero_point(%z : tensor<ui16>) outs(%ae : tensor<1x4x4x8xf32>)
+          {axis = 1 : i64, block_size = 0 : i64} : tensor<1x4x4x8xf32>
+  %te = tensor.empty() : tensor<1x8x4x4xf32>
+  %t = hip.transpose(%ctx) ins(%da : tensor<1x4x4x8xf32>)
+                           outs(%te : tensor<1x8x4x4xf32>)
+       {perm = [0, 3, 1, 2]} : tensor<1x8x4x4xf32>
+  %ye = tensor.empty() : tensor<1x8x4x4xui16>
+  %y = hip.quantize_linear(%ctx) ins(%t, %s : tensor<1x8x4x4xf32>, tensor<f32>)
+         zero_point(%z : tensor<ui16>) outs(%ye : tensor<1x8x4x4xui16>)
+         {axis = 1 : i64, block_size = 0 : i64, precision = 0 : i64,
+          saturate = 1 : i64} : tensor<1x8x4x4xui16>
+  return %y : tensor<1x8x4x4xui16>
+}
+
+// -----
+
+// The runtime resize has no 16-bit integer kernel, so a ui16 tree keeps its
+// nearest resize in f32 with the quantize after it.
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK: hip.dequantize_linear
+// CHECK: hip.resize(%{{.*}}) ins(%{{.*}} : tensor<1x2x4x4xf32>)
+// CHECK: hip.quantize_linear
+
+func.func @main_graph(%ctx: !hip.context, %a: tensor<1x2x4x4xui16>)
+    -> tensor<1x2x8x8xui16> {
+  %s = hip.constant {value = dense<3.0517578125E-5> : tensor<f32>} : tensor<f32>
+  %z = hip.constant {value = dense<32768> : tensor<ui16>} : tensor<ui16>
+  %ae = tensor.empty() : tensor<1x2x4x4xf32>
+  %da = hip.dequantize_linear(%ctx) ins(%a, %s : tensor<1x2x4x4xui16>, tensor<f32>)
+          zero_point(%z : tensor<ui16>) outs(%ae : tensor<1x2x4x4xf32>)
+          {axis = 1 : i64, block_size = 0 : i64} : tensor<1x2x4x4xf32>
+  %re = tensor.empty() : tensor<1x2x8x8xf32>
+  %r = hip.resize(%ctx) ins(%da : tensor<1x2x4x4xf32>)
+                        outs(%re : tensor<1x2x8x8xf32>)
+       {mode = 0 : i64, coord_transform = 1 : i64, nearest_mode = 0 : i64}
+       : tensor<1x2x8x8xf32>
+  %ye = tensor.empty() : tensor<1x2x8x8xui16>
+  %y = hip.quantize_linear(%ctx) ins(%r, %s : tensor<1x2x8x8xf32>, tensor<f32>)
+         zero_point(%z : tensor<ui16>) outs(%ye : tensor<1x2x8x8xui16>)
+         {axis = 1 : i64, block_size = 0 : i64, precision = 0 : i64,
+          saturate = 1 : i64} : tensor<1x2x8x8xui16>
+  return %y : tensor<1x2x8x8xui16>
 }

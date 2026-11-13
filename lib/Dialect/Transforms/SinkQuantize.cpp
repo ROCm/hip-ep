@@ -42,11 +42,14 @@ DenseElementsAttr getScalarAttr(Value value) {
   return attr;
 }
 
+// 8- and 16-bit types only: q(dq(a)) returns a exactly while |a - zp| < 2^16,
+// because f32 holds every such integer and the round trip through the f32
+// scale stays far below half a unit; a 32-bit type would break that bound.
 std::optional<QuantParams> getParams(Value scale, Value zeroPoint, Type type) {
   auto intType = dyn_cast<IntegerType>(type);
   DenseElementsAttr scaleAttr = getScalarAttr(scale);
-  if (!intType || intType.getWidth() != 8 || !scaleAttr ||
-      !scaleAttr.getElementType().isF32())
+  if (!intType || (intType.getWidth() != 8 && intType.getWidth() != 16) ||
+      !scaleAttr || !scaleAttr.getElementType().isF32())
     return std::nullopt;
   int64_t zp = 0;
   if (zeroPoint) {
@@ -60,7 +63,7 @@ std::optional<QuantParams> getParams(Value scale, Value zeroPoint, Type type) {
   return QuantParams{*scaleAttr.getValues<APFloat>().begin(), zp, type};
 }
 
-// A per-tensor dequantize of an 8-bit tensor with inline parameters.
+// A per-tensor dequantize of an 8- or 16-bit tensor with inline parameters.
 DequantizeLinearOp matchDequantize(Value value,
                                    std::optional<QuantParams> &params) {
   auto dq = value.getDefiningOp<DequantizeLinearOp>();
@@ -94,15 +97,18 @@ ElementMoveOpInterface getInterior(Value value) {
 }
 
 // Checks the tree under `value` and records its interior ops, leaves first.
-bool planTree(Value value, SmallVectorImpl<Operation *> &interior) {
+// The runtime resize has 8-bit integer kernels but no 16-bit ones, so a 16-bit
+// tree keeps its resize in float.
+bool planTree(Value value, SmallVectorImpl<Operation *> &interior,
+              bool allowResize) {
   std::optional<QuantParams> params;
   if (matchDequantize(value, params) || isStaticEmpty(value))
     return true;
   ElementMoveOpInterface op = getInterior(value);
-  if (!op)
+  if (!op || (!allowResize && isa<ResizeOp>(op.getOperation())))
     return false;
   for (OpOperand *operand : op.getMovedOperands())
-    if (!planTree(operand->get(), interior))
+    if (!planTree(operand->get(), interior, allowResize))
       return false;
   interior.push_back(op);
   return true;
@@ -113,7 +119,7 @@ public:
   Emitter(RewriterBase &rewriter, QuantizeLinearOp q, QuantParams outParams)
       : rewriter(rewriter), q(q), outParams(outParams) {}
 
-  // The 8-bit value that equals q(value). planTree accepted `value`.
+  // The quantized value that equals q(value). planTree accepted `value`.
   Value emit(Value value) {
     if (Value mapped = mapping.lookupOrNull(value))
       return mapped;
@@ -186,7 +192,8 @@ bool sinkQuantize(RewriterBase &rewriter, QuantizeLinearOp q) {
   if (!outParams || !getInterior(q.getInput()))
     return false;
   SmallVector<Operation *> interior;
-  if (!planTree(q.getInput(), interior))
+  bool allowResize = cast<IntegerType>(outParams->type).getWidth() == 8;
+  if (!planTree(q.getInput(), interior, allowResize))
     return false;
 
   SetVector<Operation *> leaves;
