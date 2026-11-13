@@ -53,6 +53,7 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Pass/Pass.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/MathExtras.h"
@@ -175,6 +176,14 @@ struct PadMatMulNBitsWeightsPass
     const int64_t pad = placement->pad;
     const ::hip::MatmulNBitsWeightLayout layout = placement->layout;
     const bool rows = layout == ::hip::MatmulNBitsWeightLayout::Rows;
+    // Only the bias-free WMMA prefill and the dp4a decode (no or uint8 zero
+    // points) read a byte order directly; any other user would copy the weight
+    // back to dense rows on every call, which is slower than leaving it dense.
+    if (!rows && llvm::any_of(users, [](MatMulNBitsOp mm) {
+          return mm.getBias() ||
+                 (mm.getZeroPoints() && mm.getZpElemSize() != 1);
+        }))
+      return;
     if (rows && pad == 0) {
       for (MatMulNBitsOp mm : users)
         mm.setBRowBytes(k / 2);

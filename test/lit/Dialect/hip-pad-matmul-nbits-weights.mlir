@@ -30,6 +30,7 @@
 // RUN: %python -c "import sys; open(sys.argv[1], 'wb').write(bytes((i * 7 + 1) % 251 for i in range(32768)))" %t/w16.bin
 // RUN: hip-mlir-opt --hip-pad-matmul-nbits-weights='row-pads=16:4096:128:0=blocks' %t/layout.mlir | FileCheck %s --check-prefix=BLOCKS
 // RUN: hip-mlir-opt --hip-pad-matmul-nbits-weights='row-pads=16:4096:128:0=xor' %t/layout.mlir | FileCheck %s --check-prefix=XOR
+// RUN: hip-mlir-opt --hip-pad-matmul-nbits-weights='row-pads=16:4096:128:0=blocks,16:4096:128:1=blocks' %t/layout_dense.mlir | FileCheck %s --check-prefix=LAYDENSE
 // RUN: hip-mlir-opt --hip-pad-matmul-nbits-weights='row-pads=2:4096:128:0=blocks' %t/pad.mlir | FileCheck %s --check-prefix=NOTABLE
 // RUN: not hip-mlir-opt --hip-pad-matmul-nbits-weights='row-pads=16:4096:128:0=tiles' %t/layout.mlir 2>&1 | FileCheck %s --check-prefix=BADLAYOUT
 // RUN: cd %t && hip-mlir-opt --hip-pad-matmul-nbits-weights='row-pads=16:4096:128:0=blocks' --hip-externalize-constants='externalize-min-num-elements=1 externalize-output-dir=%t/blkstream skip-constant-data=true' layout.mlir | FileCheck %s --check-prefix=BLKSTREAM
@@ -168,5 +169,42 @@ func.func @layout(%ctx: !hip.context, %a: tensor<1x4096xf16>,
       outs(%e : tensor<1x16xf16>)
       {K = 4096 : i64, N = 16 : i64, bits = 4 : i64, block_size = 128 : i64,
        accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x16xf16>
+  return %y : tensor<1x16xf16>
+}
+
+//--- layout_dense.mlir
+// A biased weight and one with fp16 zero points keep the dense rows.
+// LAYDENSE-LABEL: func.func @layout_bias
+// LAYDENSE-NOT:     weight_layout
+// LAYDENSE-NOT:     b_layout
+// LAYDENSE-LABEL: func.func @layout_fp16_zp
+// LAYDENSE-NOT:     weight_layout
+// LAYDENSE-NOT:     b_layout
+func.func @layout_bias(%ctx: !hip.context, %a: tensor<1x4096xf16>,
+                       %s: tensor<16x32xf16>, %bias: tensor<16xf16>)
+    -> tensor<1x16xf16> {
+  %w = hip.constant {location = "w16.bin", offset = 0 : i64, size = 32768 : i64}
+      : tensor<16x32x64xui8>
+  %e = tensor.empty() : tensor<1x16xf16>
+  %y = hip.matmul_nbits(%ctx) ins(%a, %w, %s :
+      tensor<1x4096xf16>, tensor<16x32x64xui8>, tensor<16x32xf16>)
+      bias(%bias : tensor<16xf16>)
+      outs(%e : tensor<1x16xf16>)
+      {K = 4096 : i64, N = 16 : i64, bits = 4 : i64, block_size = 128 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x16xf16>
+  return %y : tensor<1x16xf16>
+}
+func.func @layout_fp16_zp(%ctx: !hip.context, %a: tensor<1x4096xf16>,
+                          %s: tensor<16x32xf16>, %zp: tensor<16x32xf16>)
+    -> tensor<1x16xf16> {
+  %w = hip.constant {location = "w16.bin", offset = 0 : i64, size = 32768 : i64}
+      : tensor<16x32x64xui8>
+  %e = tensor.empty() : tensor<1x16xf16>
+  %y = hip.matmul_nbits(%ctx) ins(%a, %w, %s :
+      tensor<1x4096xf16>, tensor<16x32x64xui8>, tensor<16x32xf16>)
+      zero_points(%zp : tensor<16x32xf16>)
+      outs(%e : tensor<1x16xf16>)
+      {K = 4096 : i64, N = 16 : i64, bits = 4 : i64, block_size = 128 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 2 : i64} : tensor<1x16xf16>
   return %y : tensor<1x16xf16>
 }

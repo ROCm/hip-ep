@@ -199,7 +199,8 @@ A table may opt its device into storing int4 weights row-padded at load
   keeps that weight dense with no repack), or `layout` `XorLines` / `Blocks`
   with pad 0, the dense rows in that byte order
   (`include/hip/matmul_nbits_weight_layout.h`; K % 64 == 0, and N % 16 == 0
-  for `Blocks`).
+  for `Blocks`). A byte order is applied only to a weight without bias whose
+  zero points are absent or uint8, the users that read it directly.
 - Only listed weights are padded. An unlisted weight stays dense; where its
   stride aliases (`hip::matmulNBitsRowStrideAliases` in
   `include/hip/matmul_nbits_row_alias.h`, shared by the compiler, the runtime
