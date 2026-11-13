@@ -37,6 +37,7 @@
  */
 #include <hip/hip_runtime.h>
 #include "../../common/hip_adaptive_timing.h"
+#include "../../common/ut_matmul_nbits_rank_input.h"
 #include <hip/hip_fp16.h>
 #include "hip_custom_kernels.h"
 
@@ -248,11 +249,11 @@ inline int* holdReleaseFlag() {
 // launch(c) invokes the complete op with operand copy c.
 template <class Launch>
 double rotatedMeanMs(hipStream_t stream, int /*legacy_iters*/, const ColdCopies& copies,
-                     Launch&& launch) {
+                     Launch&& launch, const timing::RankOptions* ranking = nullptr) {
   return timing::adaptiveRotatedMeanMs(
       stream, copies, launch, holdReleaseFlag(),
       [&](const int* flag) { holdStreamKernel<<<1, 1, 0, stream>>>(flag); },
-      warmTiming(), kColdSettleBytes, "matmul_nbits_fp32_wu2");
+      warmTiming(), kColdSettleBytes, "matmul_nbits_fp32_wu2", nullptr, timing::NoPreparation{}, ranking);
 }
 }  // namespace hipdnn_ep_test
 
@@ -588,11 +589,20 @@ static std::vector<Case> buildCases(int tier) {
   return out;
 }
 
-static bool runOne(const Case& c, int idx) {
+static bool runOne(const Case& c, int idx, const hipdnn_ep_test::timing::RankRow* rank_row = nullptr) {
   char timing_shape[96];
   std::snprintf(timing_shape, sizeof(timing_shape), "M%d_N%d_K%d_gs%d%s",
                 c.M, c.N, c.K, c.gs, c.zero ? "" : "_noz");
   hipdnn_ep_test::timing::CaseScope timing_case("matmul_nbits/Xfp32_Wu2_Yfp32", timing_shape, "hip_matmul_nbits");
+  const UtNbitsShape rank_shape{c.M, c.N, c.K, 2, c.gs, c.zero ? 1 : 0, 1};
+  if (rank_row && std::getenv("HIPDNN_UT_RANK_CATALOG")) {
+#ifdef HIPDNN_UT_RANK_NBITS_ADAPTER
+    hipdnn_ep_test::timing::printNbitsCatalog(rank_shape);
+    return true;
+#else
+    throw std::runtime_error("UT rank: MatMulNBits catalog requires standalone RANK=1 build");
+#endif
+  }
   CaseData d;
   genCase(c.M, c.K, c.N, c.gs, c.zero, c.fp32, /*seed=*/1000u + idx, d);
 
@@ -635,6 +645,46 @@ static bool runOne(const Case& c, int idx) {
     for (int w = 0; w < 3; ++w) status = launch();
     HIP_CHECK(hipStreamSynchronize(stream));
   });
+
+  if (rank_row) {
+#ifndef HIPDNN_UT_RANK_NBITS_ADAPTER
+    throw std::runtime_error("UT rank: MatMulNBits requires standalone RANK=1 build");
+#else
+    if (status != 0) throw std::runtime_error("UT rank: no-LUT default launch failed");
+    const hipdnn_ep_test::ColdCopies weights(
+        {{dB, d.Bpacked.size()}, {dS, d.scales.size() * sizeof(__half)},
+         {dZ, c.zero ? d.zeros.size() * sizeof(d.zeros[0]) : 0}});
+    auto validate = [&]() {
+      HIP_CHECK(hipMemset(dC, 0, countC * elem));
+      if (launch() != 0) throw std::runtime_error("UT rank: candidate launch failed");
+      HIP_CHECK(hipStreamSynchronize(stream));
+      std::vector<uint8_t> raw(countC * elem);
+      HIP_CHECK(hipMemcpy(raw.data(), dC, raw.size(), hipMemcpyDeviceToHost));
+      double ssd = 0.0, ssr = 0.0;
+      for (size_t i = 0; i < countC; ++i) {
+        const float g = c.fp32 ? reinterpret_cast<const float*>(raw.data())[i]
+                              : half_to_float(reinterpret_cast<const __half*>(raw.data())[i]);
+        const float r = c.fp32 ? d.Cref32[i] : half_to_float(d.Cref16[i]);
+        const float diff = std::fabs(g - r);
+        if (!(diff <= std::fabs(r) * 0.05f + 0.1f))
+          throw std::runtime_error("UT rank: candidate CPU reference FAIL");
+        ssd += double(diff) * diff; ssr += double(r) * r;
+      }
+      return ssr > 0.0 ? std::sqrt(ssd / ssr) : std::sqrt(ssd);
+    };
+    const auto options = hipdnn_ep_test::timing::nbitsRankOptions(rank_shape, *rank_row, validate);
+    hipdnn_ep_test::rotatedMeanMs(stream, 0, weights, [&](int i) {
+      return hip_matmul_nbits(stream, dA, weights.part(i, 0), weights.part(i, 1),
+                       c.zero ? weights.part(i, 2) : nullptr, nullptr, dC, c.M,
+                       c.N, c.K, /*batch_count=*/1, /*bits=*/2, c.gs,
+                       static_cast<int>(elem), /*zp_elem_size=*/1, nullptr,
+                       nullptr);
+    }, &options);
+    hipFree(dA); hipFree(dB); hipFree(dS); if (dZ) hipFree(dZ); hipFree(dC);
+    HIP_CHECK(hipStreamDestroy(stream));
+    return true;
+#endif
+  }
 
   double avg_ms = 0.0;
   if (status == 0) {
@@ -723,6 +773,24 @@ static int runCustom(int M, int N, int K, int gs, bool zero) {
 }
 
 int main(int argc, char* argv[]) {
+  if (hipdnn_ep_test::timing::rankRequested()) {
+    try {
+      const auto rows = hipdnn_ep_test::timing::readRankRows("matmul_nbits/Xfp32_Wu2_Yfp32");
+      for (size_t i = 0; i < rows.size(); ++i) {
+        int m = 0, n = 0, k = 0, gs = 0, end = 0;
+        if (std::sscanf(rows[i].shape.c_str(), "M%d_N%d_K%d_gs%d%n", &m, &n, &k, &gs, &end) != 4 ||
+            m <= 0 || n <= 0 || k <= 0 || gs <= 0 ||
+            (rows[i].shape.substr(end) != "" && rows[i].shape.substr(end) != "_noz"))
+          throw std::invalid_argument("UT rank: malformed MatMulNBits shape");
+        if (!sweep::runOne({m, k, n, gs, rows[i].shape.substr(end).empty(), sweep::kFp32},
+                           static_cast<int>(i), &rows[i])) return 1;
+      }
+      HIP_CHECK(hipDeviceSynchronize());
+      return 0;
+    } catch (const std::exception& error) {
+      std::fprintf(stderr, "UT rank: %s\n", error.what()); return 1;
+    }
+  }
   hipdnn_ep_test::timing::printTimingMode();
   std::printf("custom_kernels MatMulNBits bits=2 (uint2, 4-per-byte packed) Verification, fp32 activations\n");
   std::printf("===========================================================================================\n");

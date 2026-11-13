@@ -737,8 +737,8 @@ def run_build(args):
 
 
 def run_compile(args):
-    lut_json = LUT_DIR / ('gfx' + args.arch + '.json')
-    lut_fb = LUT_DIR / ('gfx' + args.arch + '.fb')
+    lut_json = ut_rank_tools.private_path(args.out, LUT_DIR) if args.out else LUT_DIR / ('gfx' + args.arch + '.json')
+    lut_fb = ut_rank_tools.private_path(args.fb_out or str(lut_json.with_suffix('.fb')), LUT_DIR) if args.out else LUT_DIR / ('gfx' + args.arch + '.fb')
     with open(lut_json) as f:
         doc = json.load(f)
     print('[compile] schema_version={} configs={} points={}'.format(
@@ -761,11 +761,60 @@ def run_compile(args):
 # CLI
 # ---------------------------------------------------------------------------
 
+def run_rank_build(args):
+    doc = json.loads(Path(args.base).read_text(encoding="utf-8"))
+    pool, points = doc["configs"], doc["points"]
+    keys = set()
+    for record in ut_rank_tools.evidence(args.rank_log):
+        leaf = record["leaf"]
+        if not leaf.startswith("gqa/"):
+            raise ValueError("unexpected op leaf")
+        dims = ut_rank_tools.fields(record["shape"])
+        decode = "/decode/" in leaf
+        int8 = "_Wi8_" in leaf
+        # Production prefill dequantizes KV before lookup; its schema key is
+        # Fp16 even for INT8 input. Explicitly choose one complete-call policy.
+        if not decode and int8 != (args.prefill_kv == "int8"):
+            raise ValueError("prefill lookup key omits original KV dtype; choose one evidence policy")
+        chosen = record["winner"] if record["insert_nondefault"] else 0
+        knobs = {k: int(v) for k, v in ut_rank_tools.knobs(record["candidates"][chosen]["config"]).items()}
+        config = dict(kind="Decode" if decode else "Prefill", use_wmma=knobs["wmma"],
+                      **{k: knobs[k] for k in ("bkv", "hb", "qw", "mt", "nd")})
+        if config not in pool:
+            pool.append(config)
+        d = dims["D"]
+        point = dict(phase="Decode" if decode else "PrefillV8x" if d == 256 else "PrefillV6x",
+                     head_dim="D" + str(d), kv_dtype="Int8" if decode and int8 else "Fp16",
+                     config=pool.index(config), splits=knobs["splits"],
+                     num_heads=dims["H"], kv_num_heads=dims["G"], batch=dims["B"],
+                     seq_q=1 if decode else dims["sq"],
+                     seq_kv=dims["len"] if decode else dims["sq"] + dims.get("past", 0))
+        if dims.get("win", 0):
+            point["seq_kv"] = min(point["seq_kv"], dims["win"])
+        key_fields = ("phase", "head_dim", "kv_dtype", "num_heads", "kv_num_heads", "batch", "seq_q", "seq_kv")
+        key = tuple(point[k] for k in key_fields)
+        if key in keys:
+            raise ValueError("ambiguous duplicate table key " + str(key))
+        keys.add(key)
+        points = [p for p in points if tuple(p[k] for k in key_fields) != key]
+        points.append(point)
+    if len(pool) > 256:
+        raise ValueError("config index exceeds ubyte")
+    doc["points"] = points
+    output = ut_rank_tools.private_path(args.out, LUT_DIR)
+    output.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    print("rank table:", output, "updated:", len(keys))
+
+
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "unit_test/common"))
+import ut_rank_tools
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('command',
-                    choices=['plan', 'measure', 'build', 'compile', 'all'])
+                    choices=['plan', 'measure', 'build', 'compile', 'all', 'rank-catalog', 'rank-candidates', 'rank-measure', 'rank-build', 'rank-reference-candidates'])
     ap.add_argument('--arch', default='1151', help='GPU arch suffix (default: 1151)')
     ap.add_argument('--data', default=str(HERE / 'data'),
                     help='Directory of *_best.csv (default: scripts/data/)')
@@ -800,7 +849,15 @@ def main():
                     help='build: add the measured (phase, head_dim) groups to '
                          'the current lut/gfx<arch>.json instead of replacing '
                          'the table')
+    ut_rank_tools.add_arguments(ap)
+    ap.add_argument("--out", help="explicit private JSON/log/CSV path")
+    ap.add_argument("--fb-out", help="explicit private FlatBuffer output")
+    ap.add_argument("--prefill-kv", choices=["fp16", "int8"], default="fp16")
     args = ap.parse_args()
+    args.op = "gqa"
+    if args.command.startswith("rank-"):
+        ut_rank_tools.dispatch(args, LUT_DIR, run_rank_build)
+        return
 
     cmds = ['measure', 'build', 'compile'] if args.command == 'all' else [args.command]
     for cmd in cmds:

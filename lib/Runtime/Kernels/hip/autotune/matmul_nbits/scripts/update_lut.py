@@ -913,10 +913,56 @@ def cmd_compile(args) -> int:
     return 0
 
 
+def cmd_rank_build(args):
+    base = json.loads(Path(args.base).read_text(encoding="utf-8"))
+    check_table(base)
+    pool = with_extended(base["configs"], base.get("extended_configs"))
+    points = list(base["points"])
+    keys = set()
+    skipped = []
+    for record in ut_rank_tools.evidence(args.rank_log):
+        leaf = record["leaf"]
+        if not leaf.startswith("matmul_nbits/X" + args.activation + "_"):
+            raise LutError("activation dtype absent from schema; select one evidence dtype")
+        dims = ut_rank_tools.fields(record["shape"])
+        chosen = record["winner"] if record["insert_nondefault"] else 0
+        cfg = ut_rank_tools.knobs(record["candidates"][chosen]["config"])
+        if cfg["route"] not in ("wmma", "gemv"):
+            skipped.append({"leaf": leaf, "shape": record["shape"], "reason": "route has no schema representation"})
+            continue
+        answer = {k: int(v) for k, v in cfg.items() if k != "route"}
+        answer["kind"] = "Wmma" if cfg["route"] == "wmma" else "Gemv"
+        config = config_entry(answer_key(answer))
+        if config not in pool:
+            pool.append(config)
+        phase = "Prefill" if cfg["route"] == "wmma" else "Decode"
+        point = dict(phase=phase, bits="B" + leaf.split("_W")[1].lstrip("ui").split("_")[0],
+                     group_size=GROUP_SIZES.get(dims["gs"], "Any"),
+                     zero_point="Asymmetric" if not dims.get("noz", 0) else "Symmetric",
+                     row_stride="Arrival" if phase == "Prefill" else "Any",
+                     m=dims["M"], n=dims["N"], k=dims["K"], config=pool.index(config))
+        key_fields = ("phase", "bits", "group_size", "zero_point", "row_stride", "m", "n", "k")
+        key = tuple(point[k] for k in key_fields)
+        if key in keys:
+            raise LutError("ambiguous duplicate table key " + str(key))
+        keys.add(key)
+        points = [p for p in points if tuple(p[k] for k in key_fields) != key]
+        points.append(point)
+    output = ut_rank_tools.private_path(args.out, LUT_DIR)
+    header = {k: v for k, v in base.items() if k not in ("configs", "extended_configs", "points", "fallbacks")}
+    write_lut_json(output, header, pool, base["fallbacks"], points)
+    output.with_suffix(".rank-report.json").write_text(json.dumps({"updated": len(keys), "skipped": skipped}, indent=2) + "\n")
+    print("rank table:", output, "updated:", len(keys), "skipped:", len(skipped))
+
+
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "unit_test/common"))
+import ut_rank_tools
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("command",
-                    choices=["measure", "fit", "build", "compile", "all"])
+                    choices=["measure", "fit", "build", "compile", "all", "rank-catalog", "rank-candidates", "rank-measure", "rank-build", "rank-reference-candidates"])
     ap.add_argument("--arch", default="gfx1151")
     ap.add_argument("--sweep", default="matmul_nbits_sweep.exe",
                     help="path to the built matmul_nbits_autotune_sweep binary")
@@ -966,7 +1012,10 @@ def main() -> int:
                          "it serves only unmeasured group sizes, so check those "
                          "in-model first")
     ap.add_argument("--verbose", action="store_true")
+    ut_rank_tools.add_arguments(ap)
+    ap.add_argument("--activation", choices=["fp16", "fp32"], default="fp16")
     args = ap.parse_args()
+    args.op = "matmul_nbits"
     # One set of paths for every step, so `all --out X` compiles X.
     canonical = LUT_DIR / f"{args.arch}.json"
     args.json_out = Path(args.out) if args.out else canonical
@@ -981,6 +1030,9 @@ def main() -> int:
 
 
 def run(args) -> int:
+    if args.command.startswith("rank-"):
+        ut_rank_tools.dispatch(args, LUT_DIR, cmd_rank_build)
+        return 0
     if args.command in ("measure", "all"):
         rc = cmd_measure(args)
         if rc:

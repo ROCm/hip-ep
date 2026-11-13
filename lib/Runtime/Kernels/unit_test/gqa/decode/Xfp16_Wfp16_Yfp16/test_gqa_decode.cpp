@@ -37,6 +37,7 @@
 
 #include <hip/hip_runtime.h>
 #include "../../../common/hip_adaptive_timing.h"
+#include "../../../common/ut_gqa_rank_input.h"
 #include <hip/hip_fp16.h>
 
 #include <algorithm>
@@ -316,11 +317,12 @@ inline int* holdReleaseFlag() {
 // launch(c) invokes the complete op with operand copy c.
 template <class Launch>
 double rotatedMeanMs(hipStream_t stream, int /*legacy_iters*/, const ColdKvCopies& copies,
-                     Launch&& launch, const char* complete_entry = nullptr) {
+                     Launch&& launch, const char* complete_entry = nullptr,
+                     const timing::RankOptions* ranking = nullptr) {
   return timing::adaptiveRotatedMeanMs(
       stream, copies, launch, holdReleaseFlag(),
       [&](const int* flag) { holdStreamKernel<<<1, 1, 0, stream>>>(flag); },
-      warmTiming(), kColdSettleBytes, "gqa_decode_xfp16_wfp16_yfp16", complete_entry);
+      warmTiming(), kColdSettleBytes, "gqa_decode_xfp16_wfp16_yfp16", complete_entry, timing::NoPreparation{}, ranking);
 }
 }  // namespace hipdnn_ep_test
 
@@ -694,8 +696,17 @@ static double run_fused(const Case& c, float scale,
   }, "hip_gqa_fused_decode");
 }
 
-static int run_case(const Case& c, int iters, unsigned seed, bool verbose) {
+static int run_case(const Case& c, int iters, unsigned seed, bool verbose, const hipdnn_ep_test::timing::RankRow* rank_row = nullptr) {
   hipdnn_ep_test::timing::CaseScope timing_case("gqa/decode/Xfp16_Wfp16_Yfp16", case_shape(c), "hip_gqa_flash_decode");
+  const UtGqaShape rank_shape{c.B, c.H, c.G, c.D, 1, c.total, c.window, 0, MAX_SPLITS};
+  if (rank_row && std::getenv("HIPDNN_UT_RANK_CATALOG")) {
+#ifdef HIPDNN_UT_RANK_GQA_ADAPTER
+    hipdnn_ep_test::timing::printGqaCatalog(rank_shape);
+    return 0;
+#else
+    throw std::runtime_error("UT rank: GQA catalog requires standalone RANK=1 build");
+#endif
+  }
   const int B = c.B, H = c.H, G = c.G, D = c.D, max_seq = c.max_seq;
   if (H % G != 0) { printf("[skip] %s: H%%G!=0\n", c.name); return 0; }
   const float scale = 1.0f / std::sqrt((float)D);
@@ -752,6 +763,38 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose) {
   const hipdnn_ep_test::ColdKvCopies kv(
       dK, dV, B * G, max_seq, static_cast<size_t>(D) * sizeof(__half),
       c.window > 0 ? std::max(0, c.total - c.window) : 0, c.total);
+
+  if (rank_row) {
+#ifndef HIPDNN_UT_RANK_GQA_ADAPTER
+    throw std::runtime_error("UT rank: GQA requires standalone RANK=1 build");
+#else
+    UtGqaConfig selected;
+    auto choose = [&](const UtGqaConfig& config) { selected = config; };
+    auto rank_launch = [&](const void* k, const void* v, int rows) -> int {
+      return hip_gqa_flash_decode_configured(nullptr, dQ, k, v, dO, dPart,
+        B, H, G, D, c.total, rows, MAX_SPLITS, scale, dSeq, c.window,
+        c.sink ? dSink : nullptr, c.smooth, HIP_KV_DTYPE_FP16, nullptr, nullptr,
+        selected.wmma, selected.splits, selected.bkv, dKb, max_seq);
+    };
+    auto validate = [&]() {
+      if (rank_launch(dK, dV, max_seq)) throw std::runtime_error("UT rank: GQA candidate launch failed");
+      HIP_CHECK(hipDeviceSynchronize());
+      std::vector<__half> raw(static_cast<size_t>(B) * H * D);
+      HIP_CHECK(hipMemcpy(raw.data(), dO, raw.size() * sizeof(__half), hipMemcpyDeviceToHost));
+      std::vector<float> output(raw.size());
+      for (size_t i = 0; i < raw.size(); ++i) output[i] = __half2float(raw[i]);
+      const double error = rel_l2(output, ref);
+      if (!(error < 2e-2)) throw std::runtime_error("UT rank: GQA candidate CPU reference FAIL");
+      return error;
+    };
+    const auto options = hipdnn_ep_test::timing::gqaRankOptions(rank_shape, *rank_row, choose, validate);
+    hipdnn_ep_test::rotatedMeanMs(nullptr, 0, kv, [&](int i) {
+      return rank_launch(kv.k(i), kv.v(i), kv.rows());
+    }, "hip_gqa_flash_decode_configured", &options);
+    hipFree(dQ); hipFree(dK); hipFree(dV); hipFree(dO); hipFree(dSink); hipFree(dSeq); hipFree(dPart); hipFree(dKb);
+    return 0;
+#endif
+  }
 
   // ours = autotuned (impl + dynamic split-K); ori = production baseline
   // (default impl @ 8 splits). scalar8/wmma8 give per-impl correctness coverage.
@@ -937,6 +980,25 @@ static void emit_markdown(int iters, const char* dev, int cus) {
 }
 
 int main(int argc, char** argv) {
+  if (hipdnn_ep_test::timing::rankRequested()) {
+    try {
+      const auto rows = hipdnn_ep_test::timing::readRankRows("gqa/decode/Xfp16_Wfp16_Yfp16");
+      for (size_t i = 0; i < rows.size(); ++i) {
+        const auto fields = hipdnn_ep_test::timing::rankShapeFields(rows[i].shape);
+        auto value = [&](const char* name, int fallback = 0) {
+          const auto it = fields.find(name); return it == fields.end() ? fallback : it->second;
+        };
+        Case c{"rank", value("B"), value("H"), value("G"), value("D"), value("len"), value("len"), value("win"), value("sink"), value("smooth"), 0};
+        if (c.B <= 0 || c.H <= 0 || c.G <= 0 || c.H % c.G || c.D <= 0 ||
+            case_shape(c) != rows[i].shape)
+          throw std::invalid_argument("UT rank: malformed or unsupported GQA shape");
+        if (run_case(c, 0, 1234u + static_cast<unsigned>(i), false, &rows[i])) return 1;
+      }
+      HIP_CHECK(hipDeviceSynchronize()); return 0;
+    } catch (const std::exception& error) {
+      std::fprintf(stderr, "UT rank: %s\n", error.what()); return 1;
+    }
+  }
   hipdnn_ep_test::timing::printTimingMode();
   int iters = 200;
   unsigned seed = 1234;

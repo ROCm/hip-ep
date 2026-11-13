@@ -36,6 +36,10 @@ endif
 OFFLOAD  ?= --offload-arch=gfx11-generic
 HIP_SDK  ?= $(HIP_PATH)
 MODE     ?= lookup
+RANK     ?= 0
+ifeq ($(RANK),1)
+    override MODE := autotune
+endif
 COVERAGE ?= 3
 
 ifeq ($(HIP_SDK),)
@@ -163,9 +167,36 @@ else
     LUT_HEADER_DEP      :=
 endif
 
+# Ranking links the existing resolver with a private empty payload and the
+# production candidate catalog. No installed LUT is embedded or modified.
+ifeq ($(RANK),1)
+    KERNEL_MODE := lookup
+    KERNEL_HIP := ../../../common/gqa_rank_adapter.hip
+    TEST_DEFINES := -DHIPDNN_UT_RANK_GQA_ADAPTER=1
+    LUT_EXTRA_INCLUDES := -I$(AUTOTUNE_DIR) -I$(GEN_DIR) -I$(FLATBUFFERS_INC)
+    LUT_OBJS := $(AUTOTUNE_OBJ)
+endif
+ifneq ($(ADLX_INCLUDE),)
+    INCLUDES += -I$(ADLX_INCLUDE)
+endif
+
+# Explicit same-source/flags adapter reuse for standalone ranking only.
+RANK_KERNEL_OBJ ?=
+ifneq ($(RANK_KERNEL_OBJ),)
+    ifneq ($(RANK),1)
+        $(error RANK_KERNEL_OBJ requires RANK=1)
+    endif
+    KERNEL_OBJ := $(RANK_KERNEL_OBJ)
+    ifeq ($(wildcard $(RANK_KERNEL_OBJ)),)
+        $(error RANK_KERNEL_OBJ must name an existing matching object)
+    endif
+endif
+
 $(TARGET): FORCE mode_info $(LUT_OBJS) $(LUT_HEADER_DEP) | $(BUILD_DIR)
 	$(HIPCC) -c $(CXXFLAGS) $(OFFLOAD) $(TEST_DEFINES) $(INCLUDES) $(LUT_EXTRA_INCLUDES) -x hip test_gqa_prefill_i8.cpp -o $(TEST_OBJ)
+ifeq ($(RANK_KERNEL_OBJ),)
 	$(HIPCC) -c $(KERNEL_FLAGS) $(OFFLOAD) $(INCLUDES) $(KERNEL_HIP) -o $(KERNEL_OBJ)
+endif
 	$(HIPCC) $(OFFLOAD) $(TEST_OBJ) $(KERNEL_OBJ) $(LUT_OBJS) -o $(TARGET)
 
 mode_info:

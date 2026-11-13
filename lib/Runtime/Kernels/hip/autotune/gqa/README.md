@@ -211,3 +211,51 @@ fallbacks are runnable. It compiles the same `gqa_autotune.cpp` that ships in
 | `HIPDNN_GQA_AUTOTUNE_MODE=lookup\|online` | `lookup` (default) resolves from the table; `online` bypasses it and benchmarks on the GPU (the pre-table path, kept for A/B). Read once per session in `hip_gqa_autotune_create()`. Mirrors matmul_nbits' `HIPDNN_MATMUL_AUTOTUNE_MODE`. |
 | `HIPDNN_GQA_LUT_LOG=1` | logs the table load (`loaded N points ...`) and each shape's resolution — `exact`/`nearest` (with the distance), or `fallback`/`heuristic` — so a run's coverage is visible from this one switch. Each distinct line is printed once per process (resolve runs per token, so this dedup keeps a served model from flooding). Mirrors `HIPDNN_MATMUL_LUT_LOG`. Verification only — do not benchmark with it on. |
 | `HIPDNN_GQA_AUTOTUNE_LOG=1` | in `gqa_kernel.hip`, logs the config the kernel actually launched (in both `lookup` and `online` modes), so an `online` run can be diffed against the shipped table. Mirrors `HIPDNN_MATMUL_AUTOTUNE_LOG`: setting it alone prints **only** these autotune lines (not the rest of the debug firehose), while `HIPDNN_EP_DEBUG=1` also pulls them in as part of the full `[custom_kernels]` output. |
+
+
+## Refresh through native UT ranking
+
+Use the existing UT leaves with `RANK=1`, following
+[the common ranking contract](../../../unit_test/common/README.md#native-lut-ranking-ut-rank-v3).
+New refreshes use the UT timer and `UT_RANK` evidence; the common README
+reports the gfx1151 decision loss. The previous sweep commands remain only for
+reproducing historical logs. These commands write private outputs; installing
+a refreshed table is a separate, reviewed step.
+
+Prepare a seed CSV with `leaf,shape,priority,config` and one `default` row per
+shape. Config IDs are enumerated by the current production TU. From this
+operator's autotune directory:
+
+```sh
+python scripts/update_lut.py rank-catalog --candidates /private/seed.csv --leaf-root /checkout/lib/Runtime/Kernels/unit_test --out /private/catalog.log
+python scripts/update_lut.py rank-candidates --candidates /private/seed.csv --catalog /private/catalog.log --out /private/candidates.csv
+python scripts/update_lut.py rank-measure --candidates /private/candidates.csv --leaf-root /checkout/lib/Runtime/Kernels/unit_test --out /private/rank.log
+python scripts/update_lut.py rank-build --rank-log /private/rank.log --base lut/gfx1151.json --prefill-kv fp16 --out /private/candidate.json
+python scripts/update_lut.py compile --out /private/candidate.json --fb-out /private/candidate.fb --flatc /tools/flatc
+```
+
+Pass `--launcher-json '["python", "/private/lease_exec.py"]'` to `rank-measure`
+when the host uses a lease wrapper. Catalog enumeration is CPU metadata and
+does not require a GPU execution lease. The wrapper runs one native process
+at a time, waits through its actual exit and releases its own lease after GPU
+drain. Set the SDK runtime PATH as for the leaf Makefile. The tool adds no timer
+or numeric sampling controls; its log retains complete native stdout/stderr and
+nonzero leaf exits stop the command.
+
+For validation, `rank-reference-candidates --catalog <log> --rank-log <log>
+--out <csv>` selects the final top three plus the frozen default. Then use
+`rank-measure --reference` for independent sequential confirm. Routine refresh
+imports accepted ranking evidence once instead of repeating every candidate.
+
+`rank-build` requires an explicit private output outside `lut/`, preserves base
+weights/config indices/fallbacks and unrelated points, and replaces only measured
+keys. A winner that does not beat the default by >2% stores its
+default-equivalent answer;
+deleting its point could otherwise select a nearby nondefault point. Duplicate
+or malformed evidence, CPU failures and inconsistent groups are rejected.
+
+Decode retains `kv_dtype=Fp16|Int8`. Production prefill dequantizes first and
+looks up an Fp16 key, including INT8 input; choose exactly one complete-call
+prefill policy with `--prefill-kv fp16|int8`. Mixing those records at one schema
+key is rejected. Native past/window fields map to effective KV length; sink and
+smooth affect the measured entry but are not separate schema categories.

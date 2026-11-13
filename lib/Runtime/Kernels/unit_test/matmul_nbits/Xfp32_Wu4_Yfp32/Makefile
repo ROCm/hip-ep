@@ -37,6 +37,10 @@ endif
 OFFLOAD  ?= --offload-arch=gfx11-generic
 HIP_SDK  ?= $(HIP_PATH)
 MODE     ?= lookup
+RANK     ?= 0
+ifeq ($(RANK),1)
+    override MODE := autotune
+endif
 COVERAGE ?= 3
 
 ifeq ($(HIP_SDK),)
@@ -94,6 +98,17 @@ FLATBUFFERS_INC ?=
 KERNEL_FLAGS := -O2 -std=c++17 -x hip -ffp-contract=fast
 CXXFLAGS     := -O3 -std=c++17 -Wno-c23-extensions
 INCLUDES     := -I$(INCLUDE_DIR)
+
+# Standalone ranking controls compile the production source verbatim through
+# a UT-only host adapter. Ordinary builds and production DLLs are unchanged.
+ifeq ($(RANK),1)
+    KERNEL_MODE := lookup
+    KERNEL_HIP := ../../common/matmul_nbits_rank_adapter.hip
+    INCLUDES += -DHIPDNN_UT_RANK_NBITS_ADAPTER=1
+endif
+ifneq ($(ADLX_INCLUDE),)
+    INCLUDES += -I$(ADLX_INCLUDE)
+endif
 
 # ---- Test parameters (test_custom) ----
 
@@ -178,9 +193,25 @@ else
     LUT_HEADER_DEP      :=
 endif
 
+# Optional object reuse for standalone rank builds. The caller must bind the
+# object to the same production TU, headers, ISA and KERNEL_FLAGS in its build
+# evidence. Normal builds always compile their own kernel.
+RANK_KERNEL_OBJ ?=
+ifneq ($(RANK_KERNEL_OBJ),)
+    ifneq ($(RANK),1)
+        $(error RANK_KERNEL_OBJ requires RANK=1)
+    endif
+    DIRECT_KERNEL_OBJ := $(RANK_KERNEL_OBJ)
+    ifeq ($(wildcard $(RANK_KERNEL_OBJ)),)
+        $(error RANK_KERNEL_OBJ must name an existing matching object)
+    endif
+endif
+
 direct: FORCE mode_info $(LUT_OBJS) $(LUT_HEADER_DEP) | $(BUILD_DIR)
 	$(HIPCC) -c $(CXXFLAGS) $(OFFLOAD) $(TEST_DEFINES) $(INCLUDES) -I$(AUTOTUNE_DIR) $(LUT_EXTRA_INCLUDES) -x hip test_matmul_nbits.cpp -o $(DIRECT_TEST_OBJ)
+ifeq ($(RANK_KERNEL_OBJ),)
 	$(HIPCC) -c $(KERNEL_FLAGS) $(OFFLOAD) $(INCLUDES) $(KERNEL_HIP) -o $(DIRECT_KERNEL_OBJ)
+endif
 	$(HIPCC) $(OFFLOAD) $(DIRECT_TEST_OBJ) $(DIRECT_KERNEL_OBJ) $(LUT_OBJS) -o $(TARGET_DIRECT)
 
 mode_info:
