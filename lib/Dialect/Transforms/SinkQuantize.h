@@ -12,9 +12,9 @@ namespace mlir::hip {
 
 /// Moves each per-tensor quantize backward through the ElementMoveOpInterface
 /// ops that feed it, down to per-tensor dequantizes and empty tensors, so the
-/// moved ops run on 8-bit values. A dequantize with the quantize's scale,
-/// zero point and type folds to its input; any other dequantize is
-/// requantized on its own.
+/// moved ops run on 8- or 16-bit values. A dequantize with the quantize's
+/// scale, zero point and type folds to its input; any other dequantize is
+/// requantized on its own. A 16-bit tree does not move through a resize.
 void sinkQuantizeThroughElementMoves(func::FuncOp funcOp);
 
 } // namespace mlir::hip

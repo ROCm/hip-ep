@@ -7,9 +7,9 @@
 nearest Resize) of DequantizeLinear outputs.
 
 With HIPDNN_EP_ROCMLIR=1 the quantize moves back through those ops, so they
-run on the 8-bit values. A dequantize with the quantize's scale and zero point
-folds away; any other input is requantized alone. Each output equals ORT CPU
-except where a requantized value rounds at a half.
+run on the 8- or 16-bit values. A dequantize with the quantize's scale and zero
+point folds away; any other input is requantized alone. Each output equals ORT
+CPU except where a requantized value rounds at a half.
 """
 
 from __future__ import annotations
@@ -81,6 +81,37 @@ def _qdq_unary(op_nodes, in_shape, out_shape, inits=()):
     )
 
 
+def _u16(shape):
+    return _RNG.integers(0, 65536, size=shape, dtype=np.uint16)
+
+
+def _u16_info(name, shape):
+    return helper.make_tensor_value_info(name, TensorProto.UINT16, shape)
+
+
+def _qdq_u16(op_nodes, inputs, out_shape):
+    """DQ of each uint16 input ("a" -> "af", "b" -> "bf") -> op_nodes (writing
+    "f") -> Q, one scale and zero point. uint16 QDQ needs opset 21."""
+    nodes = [
+        *(
+            helper.make_node("DequantizeLinear", [name, "s", "z"], [name + "f"])
+            for name, _ in inputs
+        ),
+        *op_nodes,
+        helper.make_node("QuantizeLinear", ["f", "s", "z"], ["y"]),
+    ]
+    return make_model_from_nodes(
+        nodes,
+        [_u16_info(name, shape) for name, shape in inputs],
+        [_u16_info("y", out_shape)],
+        initializers=[
+            _scalar("s", 3.0517578125e-05, np.float32),
+            _scalar("z", 32768, np.uint16),
+        ],
+        opset=21,
+    )
+
+
 def _nearest_resize(src, dst):
     return helper.make_node("Resize", [src, "", "scales"], [dst], mode="nearest")
 
@@ -138,6 +169,28 @@ class TestSinkQuantize:
             _SHAPE,
         )
         actual, expected = model_runner.run_sample(model, [_u8(nhwc)])
+        compare_outputs(actual, expected, atol=0, rtol=0)
+
+    def test_u16_transpose(self, model_runner):
+        """A uint16 dequantize, transpose and quantize with one scale and zero
+        point becomes a uint16 transpose, bit-exact."""
+        nhwc = [_SHAPE[0], *_SHAPE[2:], _SHAPE[1]]
+        model = _qdq_u16(
+            [helper.make_node("Transpose", ["af"], ["f"], perm=[0, 3, 1, 2])],
+            [("a", nhwc)],
+            _SHAPE,
+        )
+        actual, expected = model_runner.run_sample(model, [_u16(nhwc)])
+        compare_outputs(actual, expected, atol=0, rtol=0)
+
+    def test_u16_concat(self, model_runner):
+        out = [_SHAPE[0], 2 * _SHAPE[1], *_SHAPE[2:]]
+        model = _qdq_u16(
+            [helper.make_node("Concat", ["af", "bf"], ["f"], axis=1)],
+            [("a", _SHAPE), ("b", _SHAPE)],
+            out,
+        )
+        actual, expected = model_runner.run_sample(model, [_u16(_SHAPE), _u16(_SHAPE)])
         compare_outputs(actual, expected, atol=0, rtol=0)
 
     def test_resize_nearest(self, model_runner):
