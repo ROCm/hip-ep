@@ -15,6 +15,7 @@
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
+#include "mlir/IR/Matchers.h"
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/SymbolTable.h"
 
@@ -105,6 +106,30 @@ void AllocOutputOp::getEffects(
   //       second reason to avoid Allocate here.)
   effects.emplace_back(MemoryEffects::Write::get(),
                        SideEffects::DefaultResource::get());
+}
+
+Value PackedViewOp::getViewSource() { return getSource(); }
+
+LogicalResult PackedViewOp::verify() {
+  auto sourceType = dyn_cast<MemRefType>(getSource().getType());
+  auto resultType = dyn_cast<MemRefType>(getResult().getType());
+  if (!sourceType || !resultType)
+    return emitOpError("requires ranked memref source and result");
+  if (!sourceType.getLayout().isIdentity() || !resultType.getLayout().isIdentity())
+    return emitOpError("requires identity layout on the source and the result");
+  if (sourceType.getElementType() != resultType.getElementType() ||
+      sourceType.getMemorySpace() != resultType.getMemorySpace())
+    return emitOpError("source and result element type and memory space must match");
+  if (sourceType.hasStaticShape() && resultType.hasStaticShape()) {
+    if (auto offset = getConstantIntValue(getElementOffset())) {
+      int64_t end = *offset + resultType.getNumElements();
+      if (*offset < 0 || end > sourceType.getNumElements())
+        return emitOpError("span [")
+               << *offset << ", " << end << ") is outside the source's "
+               << sourceType.getNumElements() << " elements";
+    }
+  }
+  return success();
 }
 
 LogicalResult AllocOutputOp::verify() {

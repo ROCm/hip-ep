@@ -297,12 +297,12 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   pm.addPass(createCSEPass());
   pm.addPass(createCanonicalizerPass());
 
-  // 5.0. Drop the memref.copy that bufferized concat inserts in front of a
-  //      rocMLIR kernel or hip.resize, when the destination slot is one
-  //      packed span of the concat buffer. Chained concats become a prefix
-  //      view of the outer buffer. Must run before hip-optimize-memrefs so
-  //      the private output alloc is erased instead of being pooled, and
-  //      before hip-promote-strided-operands, which does not rewrite inits.
+  // 5.0. Drop the memref.copy that bufferized concat inserts for a packed
+  //      slot. The producer and every other reader of that buffer are
+  //      retargeted at an identity hip.packed_view of the slot, so a skip connection
+  //      reads the concat buffer. Chained concats become a prefix view of
+  //      the outer buffer. Must run before hip-optimize-memrefs so the
+  //      private output alloc is erased instead of being pooled.
   pm.addNestedPass<func::FuncOp>(mlir::hip::createForwardConcatSlotsPass());
 
   // 5a. Convert any memref-level `linalg.*` (today only the rank-0

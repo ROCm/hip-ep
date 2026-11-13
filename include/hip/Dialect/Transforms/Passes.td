@@ -370,24 +370,27 @@ def FoldBatchNormPass
 }
 
 def ForwardConcatSlotsPass : Pass<"hip-forward-concat-slots", "mlir::func::FuncOp"> {
-  let summary = "Write rocMLIR and resize results into a contiguous concat slot";
+  let summary = "Write a packed concat slot in place and share it with its readers";
   let description = [{
     A bufferized concat is one `memref.copy` per input into a `memref.subview`
-    of the concat buffer. When that input is the destination of `hip.rocmlir`
-    or `hip.resize` and the slot is a packed row-major span (batch-1 channel
-    concat, or any concat whose slice has no gaps), retarget the op at the
-    slot and erase the copy and its private alloc.
+    of the concat buffer. When the slot is a packed row-major span (batch-1
+    channel     concat, or any concat whose slice has no gaps) and the source is
+    a private alloc that something writes, the pass builds an identity
+    `hip.packed_view` of that span, retargets the writer and every other reader
+    at it, and erases the copy and the private alloc. A skip connection then
+    reads the concat buffer instead of keeping its own copy. A buffer copied
+    into two concats is aliased into the first one; the second copy stays.
 
     A concat buffer whose only uses are those slot writes plus one copy of the
     whole buffer into a packed prefix of another buffer is replaced by that
     prefix, so a chain of concats does not copy the growing tensor.
 
-    The slot memref keeps the parent's strides. Both launches address it with
-    `alignedPtr + offset` and then store densely, which matches a packed slot
-    and is wrong for a strided one, so a slot that fails the packed check is
-    left on `memref.copy`.
+    A strided slot (batch greater than 1 on a middle axis, or a concat of
+    rows) is left on `memref.copy`: a dense store from the slot pointer would
+    write the wrong addresses.
   }];
   let dependentDialects = [
+    "mlir::arith::ArithDialect",
     "mlir::memref::MemRefDialect"
   ];
 }
