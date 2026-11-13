@@ -239,9 +239,9 @@ def FuseRocMlirAnchorPass
     module, read from the kernel, is also an epilogue op, and so is a chain
     of single-use reshapes that leads to such a view or to a module. Then each
     anchor takes, as a prologue of an activation operand, a module that only
-    the anchor reads. A module with several inputs joins only while the
-    anchor reloads its operand few times, because the kernel recomputes the
-    module on every reload.
+    the anchor reads. A module with several inputs, or one input and a
+    dequantize or quantize, joins only while the anchor reloads its operand
+    few times, because the kernel recomputes the module on every reload.
     Every module that no anchor takes is inlined back before the outline, so
     a kernel can still absorb its views and unary ops one by one. A
     QLinearConv, a QLinearMatMul and a convolution of dequantizes become

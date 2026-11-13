@@ -259,3 +259,102 @@ func.func @main_graph(%ctx: !hip.context, %r: tensor<1x16x4x4xf16>,
       outs(%ae : tensor<1x16x16xf16>) -> tensor<1x16x16xf16>
   return %a : tensor<1x16x16xf16>
 }
+
+// -----
+
+// A 1x1 conv with 8192 output channels reloads its input about 64 times, so a
+// dequantize prologue would convert each input element 64 times: the module
+// stays outside the kernel and converts once.
+
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
+// CHECK-SAME: attributes {rock.kernel}
+// CHECK-NOT: hip.dequantize_linear
+// CHECK: hip.conv
+// CHECK-LABEL: func.func @main_graph
+// CHECK: %[[D:.*]] = hip.dequantize_linear
+// CHECK: hip.rocmlir({{.*}}) @mlir_{{[a-z0-9_]+}} ins(%[[D]],
+
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xui16>,
+                      %w: tensor<8192x8x1x1xf32>, %b: tensor<8192xf32>)
+    -> tensor<1x8192x4x4xf32> {
+  %s = hip.constant {value = dense<5.000000e-01> : tensor<f32>} : tensor<f32>
+  %z = hip.constant {value = dense<32768> : tensor<ui16>} : tensor<ui16>
+  %de = tensor.empty() : tensor<1x8x4x4xf32>
+  %d = hip.dequantize_linear(%ctx) ins(%x, %s : tensor<1x8x4x4xui16>,
+                                                tensor<f32>)
+      zero_point(%z : tensor<ui16>) outs(%de : tensor<1x8x4x4xf32>)
+      {axis = 1 : i64, block_size = 0 : i64} : tensor<1x8x4x4xf32>
+  %e = tensor.empty() : tensor<1x8192x4x4xf32>
+  %c = hip.conv(%ctx) ins(%d, %w, %b : tensor<1x8x4x4xf32>,
+                                      tensor<8192x8x1x1xf32>, tensor<8192xf32>)
+      outs(%e : tensor<1x8192x4x4xf32>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [1, 1],
+       pads = [0, 0, 0, 0], strides = [1, 1]} : tensor<1x8192x4x4xf32>
+  return %c : tensor<1x8192x4x4xf32>
+}
+
+// -----
+
+// With 16 output channels the conv loads its input once, so the same
+// dequantize runs as the conv's prologue.
+
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
+// CHECK-SAME: attributes {rock.kernel}
+// CHECK: %[[D:.*]] = hip.dequantize_linear
+// CHECK: hip.conv({{.*}}) ins(%[[D]],
+// CHECK-LABEL: func.func @main_graph
+// CHECK-NOT: hip.dequantize_linear
+// CHECK: hip.rocmlir
+
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xui16>,
+                      %w: tensor<16x8x1x1xf32>, %b: tensor<16xf32>)
+    -> tensor<1x16x4x4xf32> {
+  %s = hip.constant {value = dense<5.000000e-01> : tensor<f32>} : tensor<f32>
+  %z = hip.constant {value = dense<32768> : tensor<ui16>} : tensor<ui16>
+  %de = tensor.empty() : tensor<1x8x4x4xf32>
+  %d = hip.dequantize_linear(%ctx) ins(%x, %s : tensor<1x8x4x4xui16>,
+                                                tensor<f32>)
+      zero_point(%z : tensor<ui16>) outs(%de : tensor<1x8x4x4xf32>)
+      {axis = 1 : i64, block_size = 0 : i64} : tensor<1x8x4x4xf32>
+  %e = tensor.empty() : tensor<1x16x4x4xf32>
+  %c = hip.conv(%ctx) ins(%d, %w, %b : tensor<1x8x4x4xf32>,
+                                      tensor<16x8x1x1xf32>, tensor<16xf32>)
+      outs(%e : tensor<1x16x4x4xf32>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [1, 1],
+       pads = [0, 0, 0, 0], strides = [1, 1]} : tensor<1x16x4x4xf32>
+  return %c : tensor<1x16x4x4xf32>
+}
+
+// -----
+
+// HipToTosa cannot lower a packed_int4 quantize, so it stays a HIP op after
+// the conv kernel instead of joining its epilogue.
+
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
+// CHECK-SAME: attributes {rock.kernel}
+// CHECK-NOT: hip.quantize_linear
+// CHECK: hip.conv
+// CHECK-LABEL: func.func @main_graph
+// CHECK: %[[K:.*]] = hip.rocmlir({{.*}}) @mlir_{{[a-z0-9_]+}}
+// CHECK: hip.quantize_linear({{.*}}) ins(%[[K]],
+// CHECK-SAME: packed_int4
+
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf32>,
+                      %w: tensor<16x8x1x1xf32>, %b: tensor<16xf32>)
+    -> tensor<1x16x4x4xi8> {
+  %s = hip.constant {value = dense<5.000000e-01> : tensor<f32>} : tensor<f32>
+  %z = hip.constant {value = dense<0> : tensor<i8>} : tensor<i8>
+  %e = tensor.empty() : tensor<1x16x4x4xf32>
+  %c = hip.conv(%ctx) ins(%x, %w, %b : tensor<1x8x4x4xf32>,
+                                      tensor<16x8x1x1xf32>, tensor<16xf32>)
+      outs(%e : tensor<1x16x4x4xf32>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [1, 1],
+       pads = [0, 0, 0, 0], strides = [1, 1]} : tensor<1x16x4x4xf32>
+  %qe = tensor.empty() : tensor<1x16x4x4xi8>
+  %q = hip.quantize_linear(%ctx) ins(%c, %s : tensor<1x16x4x4xf32>,
+                                              tensor<f32>)
+      zero_point(%z : tensor<i8>) outs(%qe : tensor<1x16x4x4xi8>)
+      {axis = 1 : i64, block_size = 0 : i64, packed_int4, precision = 0 : i64,
+       saturate = 1 : i64} : tensor<1x16x4x4xi8>
+  return %q : tensor<1x16x4x4xi8>
+}
