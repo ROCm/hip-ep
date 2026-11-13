@@ -300,6 +300,28 @@ class TestMatMulNBits:
         assert np.isfinite(actual[0]).all(), "GPU EP produced NaN/Inf logits"
         compare_outputs(actual, expected, atol=2e-2, rtol=1e-2, cos_threshold=0.999)
 
+    @pytest.mark.parametrize("seq_len", [1, 3])
+    @pytest.mark.parametrize("K,block_size", [(320, 128), (2880, 128), (1056, 64)])
+    def test_matmul_nbits_block_size_not_dividing_k(
+        self, model_runner, seq_len, K, block_size
+    ):
+        """K a multiple of 32 but not of block_size, on the dp4a decode path.
+
+        Each weight row holds ceil(K / block_size) whole blocks, so it is
+        longer than K / 2 bytes. 1 and 3 rows cover the single-row and the
+        row-blocked dp4a kernels. N is odd so the last column tile is partial.
+        """
+        N = 203
+        model = _make_matmul_nbits_model(
+            1, seq_len, K, N, scale_range=(-0.01, 0.01), block_size=block_size
+        )
+
+        rng = np.random.default_rng(99)
+        x = rng.uniform(-1, 1, [1, seq_len, K]).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=5e-2, rtol=1e-2, cos_threshold=0.999)
+
     @pytest.mark.parametrize("seq_len", SEQ_LENS)
     def test_matmul_nbits_qkv_gpt_oss_shape(self, model_runner, seq_len):
         """QKV fused projection: [1, S, 2880] -> [1, S, 5120].
