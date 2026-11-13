@@ -154,6 +154,20 @@ static mlir::Value normaliseOptional(mlir::Value v) {
 /// pathological walk.
 static constexpr int kHostIndexMaxDepth = 8;
 
+/// \p x (an `index`) as an element of the integer type \p elemTy holds it:
+/// truncated to that width, then sign-extended back. Shape arithmetic is
+/// rebuilt at index width, but the graph evaluates it at the element width,
+/// so an i32 `n * n + 3` wraps there and must wrap here too.
+static mlir::Value wrapToElementWidth(mlir::OpBuilder &b, mlir::Location loc,
+                                      mlir::Value x, mlir::Type elemTy) {
+  unsigned width = elemTy.getIntOrFloatBitWidth();
+  if (width >= 64)
+    return x;
+  mlir::Value narrow =
+      mlir::arith::IndexCastOp::create(b, loc, b.getIntegerType(width), x);
+  return mlir::arith::IndexCastOp::create(b, loc, b.getIndexType(), narrow);
+}
+
 /// Resolve element \p idx of an integer shape tensor \p v to a host `index`
 /// SSA value, materializing `arith` ops as needed. Returns a null Value when
 /// the element is not host-computable.
@@ -200,9 +214,11 @@ static mlir::Value resolveHostIndex(mlir::OpBuilder &b, mlir::Location loc,
       return {};
     mlir::Value elem = fromElems.getElements()[idx];
     // ShapeToTensorDims index_casts every tensor.dim to i64 to pack it; take
-    // the index back rather than casting a second time.
+    // the index back rather than casting a second time. A narrower cast
+    // truncates, so it stays.
     if (auto cast = elem.getDefiningOp<mlir::arith::IndexCastOp>())
-      if (cast.getIn().getType().isIndex())
+      if (cast.getIn().getType().isIndex() &&
+          vType.getElementType().getIntOrFloatBitWidth() >= 64)
         return cast.getIn();
     return mlir::arith::IndexCastOp::create(b, loc, b.getIndexType(), elem);
   }
@@ -277,8 +293,11 @@ static mlir::Value resolveHostIndex(mlir::OpBuilder &b, mlir::Location loc,
     if (!x) {
       return {};
     }
-    return mlir::arith::SubIOp::create(
-        b, loc, mlir::arith::ConstantIndexOp::create(b, loc, 0), x);
+    return wrapToElementWidth(
+        b, loc,
+        mlir::arith::SubIOp::create(
+            b, loc, mlir::arith::ConstantIndexOp::create(b, loc, 0), x),
+        vType.getElementType());
   }
 
   // Binary shape arithmetic. hip elementwise ops are DPS, so their operands are
@@ -307,10 +326,13 @@ static mlir::Value resolveHostIndex(mlir::OpBuilder &b, mlir::Location loc,
   bool isSub = isHip ? mlir::isa<mlir::hip::SubOp>(def) : opName == "onnx.Sub";
   bool isAdd = isHip ? mlir::isa<mlir::hip::AddOp>(def) : opName == "onnx.Add";
   bool isDiv = isHip ? mlir::isa<mlir::hip::DivOp>(def) : opName == "onnx.Div";
+  mlir::Type elemTy = vType.getElementType();
   if (isSub)
-    return mlir::arith::SubIOp::create(b, loc, l, r);
+    return wrapToElementWidth(b, loc, mlir::arith::SubIOp::create(b, loc, l, r),
+                              elemTy);
   if (isAdd)
-    return mlir::arith::AddIOp::create(b, loc, l, r);
+    return wrapToElementWidth(b, loc, mlir::arith::AddIOp::create(b, loc, l, r),
+                              elemTy);
   if (isDiv) {
     // ONNX integer Div truncates toward zero, matching arith.divsi. A divisor
     // that is not a non-zero compile-time constant could fault on the host,
@@ -318,9 +340,11 @@ static mlir::Value resolveHostIndex(mlir::OpBuilder &b, mlir::Location loc,
     std::optional<int64_t> divisor = mlir::getConstantIntValue(r);
     if (!divisor || *divisor == 0)
       return {};
-    return mlir::arith::DivSIOp::create(b, loc, l, r);
+    return wrapToElementWidth(
+        b, loc, mlir::arith::DivSIOp::create(b, loc, l, r), elemTy);
   }
-  return mlir::arith::MulIOp::create(b, loc, l, r);
+  return wrapToElementWidth(b, loc, mlir::arith::MulIOp::create(b, loc, l, r),
+                            elemTy);
 }
 
 /// Emit the number of elements ONNX Slice produces on one axis, given runtime

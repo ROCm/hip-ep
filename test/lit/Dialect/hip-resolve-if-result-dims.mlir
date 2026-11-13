@@ -416,6 +416,63 @@ module {
 
 // -----
 
+// Gather(Shape(x), [trunci(1 + -1)]): the index is scalar arith packed with
+// from_elements. The resolver clones that arith without folding it, so the
+// index must be evaluated before the Gather can pick element 0.
+module {
+  func.func @computed_gather_index(%ctx: !hip.context, %c: i1,
+                                   %x: tensor<?x?xf32>) -> tensor<?x8x64xf32> {
+    %d0 = hip.if_result_dim(%c) captures(%x : tensor<?x?xf32>)
+        then @computed_then else @computed_else {result_index = 0 : i32, dim = 0 : i64}
+    %init = tensor.empty(%d0) : tensor<?x8x64xf32>
+    %r = hip.if(%ctx, %c) outs(%init : tensor<?x8x64xf32>)
+        captures(%x : tensor<?x?xf32>) -> (tensor<?x8x64xf32>)
+        then @computed_then else @computed_else {num_outputs = 1 : i32}
+    return %r : tensor<?x8x64xf32>
+  }
+
+  func.func private @computed_then(%ctx: !hip.context, %x: tensor<?x?xf32>)
+      -> tensor<?x8x64xf32> {
+    %c0 = arith.constant 0 : index
+    %n = tensor.dim %x, %c0 : tensor<?x?xf32>
+    %n64 = arith.index_cast %n : index to i64
+    %c8 = arith.constant 8 : i64
+    %c64 = arith.constant 64 : i64
+    %shape = tensor.from_elements %n64, %c8, %c64 : tensor<3xi64>
+    %one = arith.constant 1 : i64
+    %minus_one = arith.constant -1 : i64
+    %k64 = arith.addi %one, %minus_one : i64
+    %k = arith.trunci %k64 : i64 to i32
+    %idx = tensor.from_elements %k : tensor<1xi32>
+    %rows_init = tensor.empty() : tensor<1xi64>
+    %rows = hip.gather(%ctx) ins(%shape, %idx : tensor<3xi64>, tensor<1xi32>)
+        outs(%rows_init : tensor<1xi64>) {axis = 0 : i64} : tensor<1xi64>
+    %base = arith.constant dense<[1, 8, 64]> : tensor<3xi64>
+    %target = tensor.insert_slice %rows into %base[0] [1] [1]
+        : tensor<1xi64> into tensor<3xi64>
+    %y = tensor.reshape %x(%target)
+        : (tensor<?x?xf32>, tensor<3xi64>) -> tensor<?x8x64xf32>
+    return %y : tensor<?x8x64xf32>
+  }
+
+  func.func private @computed_else(%ctx: !hip.context, %x: tensor<?x?xf32>)
+      -> tensor<?x8x64xf32> {
+    %shape = arith.constant dense<[4, 8, 64]> : tensor<3xi64>
+    %y = tensor.reshape %x(%shape)
+        : (tensor<?x?xf32>, tensor<3xi64>) -> tensor<?x8x64xf32>
+    return %y : tensor<?x8x64xf32>
+  }
+}
+
+// CHECK-LABEL: func.func @computed_gather_index(
+// CHECK-SAME: %{{.*}}: !hip.context, %[[COND:.*]]: i1, %[[X:.*]]: tensor<?x?xf32>)
+// CHECK: %[[N:.*]] = tensor.dim %[[X]], %{{.*}} : tensor<?x?xf32>
+// CHECK: %[[SIZE:.*]] = arith.select %[[COND]], %[[N]], %{{.*}} : index
+// CHECK: tensor.empty(%[[SIZE]]) : tensor<?x8x64xf32>
+// CHECK-NOT: hip.if_result_dim
+
+// -----
+
 // A bool shape predicate packed with from_elements is 0/1, like a dense bool
 // constant: comparing it with dense<true> must see true == true, so the
 // predicate is zero-extended (index_castui), not sign-extended to -1.

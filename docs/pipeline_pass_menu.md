@@ -151,7 +151,7 @@ the selected perfConfig string are printed only with `--verbose`.
 | `hip-fix-loop-accumulator-offset` | func.func | Rewrite frozen Concat-accumulator offsets in loop bodies to iter-driven offsets. |
 | `hip-optimize-memrefs` | func.func | HIP-specific buffer reuse / subview folding. |
 | `hip-promote-strided-operands` | func.func | Materialize identity-layout temporaries for non-identity-layout DPS-input memrefs. |
-| `hip-materialize-host-scalars` | func.func | Redirect tiny host-fed scalar allocs to runtime-owned host-mapped scratch (away from the GPU pool). |
+| `hip-materialize-host-scalars` | module | Redirect tiny host-fed scalar allocs to runtime-owned host-mapped scratch (away from the GPU pool). Every function shares the one scratch buffer, so its slots are laid out across the module. |
 | `hip-resolve-memref-dims` | func.func | Fold post-bufferization `memref.dim` through view/reshape chains before pool planning. |
 | `hip-hoist-alloc-size-arith` | func.func | Hoist pure size producers before the earliest allocation their dependencies permit (PoolAllocs precondition). |
 | `hip-pool-allocs` | func.func | Pack allocations into one or more grow-on-demand GPU pools; stamp pool-planning module attributes. |
@@ -268,7 +268,7 @@ ONNX → HIP  (buildOnnxToHipPipeline)
   lower-affine
   cse ; canonicalize
   func.func(convert-linalg-to-loops)
-  func.func(hip-materialize-host-scalars)
+  hip-materialize-host-scalars
   func.func(hip-optimize-memrefs)
   func.func(hip-promote-strided-operands)
   func.func(hip-resolve-memref-dims)

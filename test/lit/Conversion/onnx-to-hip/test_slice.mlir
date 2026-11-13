@@ -710,4 +710,42 @@ module {
     // CHECK: hip.slice
     return %r : tensor<?x?xf32>
   }
+
+  // Test 29: an i32 bound `Unsqueeze(n * n + 3)` wraps at 32 bits in the
+  // graph (n = 65536 gives an end of 3), so the host rebuild truncates to i32
+  // and sign-extends after each arithmetic step rather than computing at
+  // index width.
+  func.func @test_slice_native_i32_bound_wraps(
+      %ctx: !hip.context, %table: tensor<448x512xf32>,
+      %ids: tensor<?x?xi64>) -> tensor<?x?xf32> {
+    // CHECK-LABEL: func.func @test_slice_native_i32_bound_wraps
+    %c1 = arith.constant 1 : index
+    %zero = arith.constant dense<0> : tensor<1xi32>
+    %one = arith.constant dense<1> : tensor<1xi32>
+    %three = arith.constant dense<3> : tensor<i32>
+    %ids_dim = tensor.dim %ids, %c1 : tensor<?x?xi64>
+    %ids_i32 = arith.index_cast %ids_dim : index to i32
+    %n = tensor.from_elements %ids_i32 : tensor<i32>
+    %mul_init = tensor.empty() : tensor<i32>
+    %sq = hip.mul(%ctx) ins(%n, %n : tensor<i32>, tensor<i32>)
+        outs(%mul_init : tensor<i32>) -> tensor<i32>
+    %add_init = tensor.empty() : tensor<i32>
+    %end = hip.add(%ctx) ins(%sq, %three : tensor<i32>, tensor<i32>)
+        outs(%add_init : tensor<i32>) -> tensor<i32>
+    %ends = tensor.expand_shape %end [] output_shape [1]
+        : tensor<i32> into tensor<1xi32>
+    %r = "onnx.Slice"(%table, %zero, %ends, %zero, %one)
+        : (tensor<448x512xf32>, tensor<1xi32>, tensor<1xi32>, tensor<1xi32>,
+           tensor<1xi32>) -> tensor<?x?xf32>
+
+    // CHECK: arith.index_cast %{{.*}} : i32 to index
+    // CHECK: %[[SQ:.*]] = arith.muli %{{.*}}, %{{.*}} : index
+    // CHECK: %[[SQ32:.*]] = arith.index_cast %[[SQ]] : index to i32
+    // CHECK: %[[SQW:.*]] = arith.index_cast %[[SQ32]] : i32 to index
+    // CHECK: %[[END:.*]] = arith.addi %[[SQW]], %{{.*}} : index
+    // CHECK: %[[END32:.*]] = arith.index_cast %[[END]] : index to i32
+    // CHECK: arith.index_cast %[[END32]] : i32 to index
+    // CHECK: hip.slice
+    return %r : tensor<?x?xf32>
+  }
 }

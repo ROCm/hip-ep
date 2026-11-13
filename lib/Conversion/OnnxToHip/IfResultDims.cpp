@@ -41,6 +41,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/IRMapping.h"
+#include "mlir/IR/Matchers.h"
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "mlir/Interfaces/InferTypeOpInterface.h"
@@ -314,6 +315,35 @@ private:
     return b.createOrFold<arith::IndexCastOp>(loc, b.getIndexType(), narrow);
   }
 
+  /// The integer `v` folds to. Rebuilt scalars are cloned without folding, so
+  /// a constant can arrive as arith on constants (a cast chain, a
+  /// `from_elements` of `trunci(addi(...))`); each op's own folder evaluates
+  /// it at the op's width.
+  std::optional<APInt> foldedConstant(Value v, unsigned depth) {
+    APInt c;
+    if (matchPattern(v, m_ConstantInt(&c)))
+      return c;
+    Operation *def = v.getDefiningOp();
+    if (!def || depth > kMaxDepth || def->getNumResults() != 1 ||
+        !isa<arith::ArithDialect>(def->getDialect()))
+      return std::nullopt;
+    SmallVector<Attribute> operands;
+    for (Value operand : def->getOperands()) {
+      std::optional<APInt> o = foldedConstant(operand, depth + 1);
+      if (!o || !operand.getType().isIntOrIndex())
+        return std::nullopt;
+      operands.push_back(IntegerAttr::get(operand.getType(), *o));
+    }
+    SmallVector<OpFoldResult> folded;
+    if (failed(def->fold(operands, folded)) || folded.size() != 1)
+      return std::nullopt;
+    if (auto value = dyn_cast<Value>(folded[0]))
+      return foldedConstant(value, depth + 1);
+    if (auto attr = dyn_cast<IntegerAttr>(cast<Attribute>(folded[0])))
+      return attr.getValue();
+    return std::nullopt;
+  }
+
   /// `index` value `v` as the integer or index type `ty`.
   FailureOr<Value> castIndex(Value v, Type ty) {
     if (v.getType() == ty)
@@ -572,11 +602,13 @@ private:
       FailureOr<Value> k = operandElement(ins[1]);
       if (failed(k))
         return failure();
-      std::optional<int64_t> kc = getConstantIntValue(*k);
-      if (!kc)
+      std::optional<APInt> kc = foldedConstant(*k, depth + 1);
+      if (!kc || kc->getSignificantBits() > 64)
         return failure();
       int64_t n = dataTy.getDimSize(0);
-      int64_t at = *kc < 0 ? *kc + n : *kc;
+      int64_t at = kc->getSExtValue();
+      if (at < 0)
+        at += n;
       return element(ins[0], at, depth + 1);
     }
     return failure();
@@ -592,6 +624,13 @@ private:
 
 static FailureOr<Value> resolveBranchDim(OpBuilder &b, IfResultDimOp op,
                                          func::FuncOp branch) {
+  // hip.if_result_dim does not verify that its branch symbols are defined.
+  if (branch.isExternal()) {
+    op.emitOpError("cannot size If output ")
+        << op.getResultIndex() << ": branch " << branch.getName()
+        << " is a declaration without a body";
+    return failure();
+  }
   auto ret = dyn_cast<func::ReturnOp>(branch.getBody().front().getTerminator());
   unsigned resultIdx = op.getResultIndex();
   if (!ret || resultIdx >= ret.getNumOperands())
