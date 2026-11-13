@@ -106,15 +106,15 @@ static Value nearestRepeatInput(Value value, ConvOp conv) {
   if (!grew)
     return {};
 
+  // The runtime samples with the attribute scale, not out/in. A near-integer
+  // value such as 2.0000004 for an 8 -> 16 resize still grows by 2, but
+  // floor(o / scale) disagrees with the repeat view's o / 2, so reject it.
   if (ArrayAttr scales = resize.getScalesAttr()) {
     if (static_cast<int64_t>(scales.size()) != inType.getRank())
       return {};
     for (auto [attr, ratio] : llvm::zip(scales.getValue(), ratios)) {
       double scale = cast<FloatAttr>(attr).getValueAsDouble();
-      double delta = scale - static_cast<double>(ratio);
-      if (delta < 0)
-        delta = -delta;
-      if (delta > 1e-6)
+      if (scale != static_cast<double>(ratio))
         return {};
     }
   }
@@ -439,13 +439,27 @@ public:
         SymbolRefAttr::get(newFunc), context, dispatchOperands,
         endOp.getDpsInits().front());
 
+    Operation *replaced = endOp.getOperation();
     rewriter.replaceOp(endOp, rocMlirOp);
-    if (absorbedResize) {
+    // Ops cloned into the kernel still sit in main_graph. A pointwise
+    // epilogue leaves the original convolution with no users, and that
+    // convolution is the only reader of an absorbed resize. Drop trivially
+    // dead intermediates first so the resize cleanup below sees use_empty
+    // instead of erasing a live SSA producer.
+    for (Operation *op : llvm::reverse(ops)) {
+      if (op == replaced)
+        continue;
+      if (isOpTriviallyDead(op))
+        rewriter.eraseOp(op);
+    }
+    if (absorbedResize && absorbedResize->use_empty()) {
       Value init = absorbedResize.getOutput();
       rewriter.eraseOp(absorbedResize);
-      if (Operation *initOp = init.getDefiningOp();
-          initOp && initOp->use_empty())
-        rewriter.eraseOp(initOp);
+      // Only a tensor.empty destination is safe to drop. A side-effecting
+      // producer of the outs() buffer must stay even when its result is unused.
+      if (auto empty = dyn_cast_or_null<tensor::EmptyOp>(init.getDefiningOp());
+          empty && empty->use_empty())
+        rewriter.eraseOp(empty);
     }
     return success();
   }
