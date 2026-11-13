@@ -865,10 +865,14 @@ extern "C" int hip_group_norm(void *stream, const void *input,
     return -1;
   }
 
+  // The NHWC apply kernels also load scale and bias vec elements at a time, so
+  // they need the same alignment as X and Y (a null pointer counts as aligned).
   auto aligned = [&](int vec) {
     uintptr_t mask = static_cast<uintptr_t>(vec) * elemSize - 1;
     return ((reinterpret_cast<uintptr_t>(input) |
-             reinterpret_cast<uintptr_t>(output)) &
+             reinterpret_cast<uintptr_t>(output) |
+             reinterpret_cast<uintptr_t>(scale) |
+             reinterpret_cast<uintptr_t>(bias)) &
             mask) == 0;
   };
   Plan plan;

@@ -1692,14 +1692,13 @@ mlir::LogicalResult GroupNormalizationToHip::matchAndRewrite(
     return rewriter.notifyMatchFailure(
         op, "GroupNormalization requires a ranked result of X's element type");
 
-  // Per-channel affine (schema 21) is required: lengths must equal C.
+  // Per-channel affine (schema 21) is required: lengths must equal C. With a
+  // dynamic C nothing proves that, and the kernel would read past scale and
+  // bias when the runtime C is larger, so a dynamic C is rejected.
   auto isChannelLength = [&](mlir::RankedTensorType type) {
-    if (type.isDynamicDim(0))
+    if (type.isDynamicDim(0) || inputType.isDynamicDim(1))
       return false;
-    int64_t length = type.getDimSize(0);
-    if (!inputType.isDynamicDim(1))
-      return length == inputType.getDimSize(1);
-    return length != groups;
+    return type.getDimSize(0) == inputType.getDimSize(1);
   };
   if (!isChannelLength(scaleType) || !isChannelLength(biasType))
     return rewriter.notifyMatchFailure(
