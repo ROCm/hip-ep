@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <map>
 
 #ifdef _WIN32
 #include <process.h> // _getpid
@@ -100,8 +101,11 @@ ChromeTrace::ChromeTrace() {
 
 void ChromeTrace::addOp(const std::string &name, const std::string &shape,
                         double gpuTsUs, double gpuDurUs, double cpuTsUs,
-                        double cpuDurUs, int64_t bytes) {
-  ops_.push_back({name, shape, gpuTsUs, gpuDurUs, cpuTsUs, cpuDurUs, bytes});
+                        double cpuDurUs, int64_t bytes,
+                        const OpCallCapture *capture) {
+  ops_.push_back(
+      {name, shape, gpuTsUs, gpuDurUs, cpuTsUs, cpuDurUs, bytes,
+       capture ? std::optional<OpCallCapture>(*capture) : std::nullopt});
 }
 
 void ChromeTrace::addIoSpans(double epochAbsUs, double h2dMs, int64_t h2dBytes,
@@ -129,7 +133,58 @@ void ChromeTrace::write(const std::string &basePath,
   FILE *f = fopen(path.c_str(), "w");
   if (!f)
     return;
-  fputs("{\"displayTimeUnit\":\"ns\",\"traceEvents\":[\n", f);
+  fputs("{\"displayTimeUnit\":\"ns\"", f);
+  std::map<std::string, CallCaptureJson> cases, graphs, windows;
+  std::vector<std::string> conflicts;
+  std::optional<bool> exampleOnly;
+  auto addDescriptor = [&](auto &dictionary, const std::string &identity,
+                           const CallCaptureJson &descriptor) {
+    auto found = dictionary.find(identity);
+    if (found != dictionary.end() &&
+        found->second.text() != descriptor.text()) {
+      conflicts.push_back(identity);
+    } else {
+      dictionary.emplace(identity, descriptor);
+    }
+  };
+  for (const auto &event : ops_) {
+    if (!event.capture)
+      continue;
+    const auto &capture = *event.capture;
+    if (exampleOnly && *exampleOnly != capture.exampleOnly)
+      conflicts.push_back("example_provenance_conflict");
+    else
+      exampleOnly = capture.exampleOnly;
+    addDescriptor(cases, capture.caseId, capture.descriptor);
+    addDescriptor(graphs, capture.graphId, capture.graph);
+    addDescriptor(windows, capture.windowId, capture.window);
+  }
+  if (!cases.empty()) {
+    fprintf(f, ",\"schema\":\"hip-ep-call-trace-1\",\"example_only\":%s",
+            *exampleOnly ? "true" : "false");
+    auto writeDescriptors = [&](const char *name, const char *identityField,
+                                const auto &dictionary) {
+      fprintf(f, ",\"%s\":[", name);
+      bool first = true;
+      for (const auto &item : dictionary) {
+        if (!first)
+          fputc(',', f);
+        first = false;
+        const auto value = item.second.withIdentity(identityField, item.first);
+        fputs(value.text().c_str(), f);
+      }
+      fputc(']', f);
+    };
+    writeDescriptors("cases", "case_id", cases);
+    writeDescriptors("graphs", "id", graphs);
+    writeDescriptors("windows", "window_id", windows);
+    std::vector<CallCaptureJson> errors;
+    for (const auto &identity : conflicts)
+      errors.emplace_back(identity);
+    fprintf(f, ",\"capture_identity_conflicts\":%s",
+            CallCaptureJson::array(errors).text().c_str());
+  }
+  fputs(",\"traceEvents\":[\n", f);
   fprintf(f,
           "{\"name\":\"process_name\",\"ph\":\"M\",\"pid\":0,\"tid\":0,"
           "\"args\":{\"name\":\"hipdnn-ep session %s\"}},\n",
@@ -166,9 +221,20 @@ void ChromeTrace::write(const std::string &basePath,
     fprintf(f,
             ",\n{\"name\":\"%s\",\"cat\":\"gpu\",\"ph\":\"X\",\"pid\":0,"
             "\"tid\":1,\"ts\":%.3f,\"dur\":%.3f,\"args\":{\"shape\":\"%s\","
-            "\"bytes\":%lld,\"GB/s\":%.1f,\"%%peak\":%.1f}}",
+            "\"bytes\":%lld,\"GB/s\":%.1f,\"%%peak\":%.1f",
             name.c_str(), e.tsUs, e.durUs, shape.c_str(), (long long)e.bytes,
             gbps, rooflineGbps > 0 ? 100.0 * gbps / rooflineGbps : 0.0);
+    if (e.capture) {
+      const auto &capture = *e.capture;
+      fprintf(f,
+              ",\"record_kind\":\"op_call\",\"stage\":\"%s\","
+              "\"call_id\":\"%s\",\"case_id\":\"%s\",\"window_id\":\"%s\"",
+              json_escape(capture.stage).c_str(),
+              json_escape(capture.callId).c_str(),
+              json_escape(capture.caseId).c_str(),
+              json_escape(capture.windowId).c_str());
+    }
+    fputs("}}", f);
     // CPU span (host-side wrapper time: launch overhead + setup)
     fprintf(f,
             ",\n{\"name\":\"%s\",\"cat\":\"cpu\",\"ph\":\"X\",\"pid\":0,"
