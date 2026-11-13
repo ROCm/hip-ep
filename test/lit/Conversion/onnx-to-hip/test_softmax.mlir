@@ -8,9 +8,10 @@
 //
 // Assertions:
 // - an explicit last axis (positive or negative) converts, for f16/bf16/f32
-// - a missing axis converts on rank <= 2, where the opset < 13 default (1)
-//   and the opset >= 13 default (-1) agree
-// - a missing axis on rank > 2 and a non-last axis stay as onnx.Softmax
+// - a missing axis converts on rank 2, where the opset < 13 default (1) and
+//   the opset >= 13 default (-1) agree
+// - a missing axis on rank 1 or rank > 2 and a non-last axis stay as
+//   onnx.Softmax
 // ============================================================================
 
 // RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
@@ -63,5 +64,15 @@ module {
   func.func @axis_default_rank3(%x: tensor<2x8x64xf32>) -> tensor<2x8x64xf32> {
     %y = "onnx.Softmax"(%x) : (tensor<2x8x64xf32>) -> tensor<2x8x64xf32>
     return %y : tensor<2x8x64xf32>
+  }
+
+  // Before opset 11 the default axis 1 on rank-1 data flattens to [N, 1], a
+  // softmax over one element; from opset 13 it is the only axis.
+  // CHECK-LABEL: func.func @axis_default_rank1
+  // CHECK: "onnx.Softmax"
+  // CHECK-NOT: hip.miopen.softmax
+  func.func @axis_default_rank1(%x: tensor<64xf32>) -> tensor<64xf32> {
+    %y = "onnx.Softmax"(%x) : (tensor<64xf32>) -> tensor<64xf32>
+    return %y : tensor<64xf32>
   }
 }
