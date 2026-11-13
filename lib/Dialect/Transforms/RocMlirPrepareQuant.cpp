@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 
+#include "DecomposeMatMulNBits.h"
 #include "QLinearPlan.h"
 #include "RebiasUnsignedQuantize.h"
 #include "SinkQuantize.h"
@@ -11,6 +12,7 @@
 #include "hip/Dialect/Transforms/Passes.h"
 
 #include <mlir/Dialect/Func/IR/FuncOps.h>
+#include <mlir/Dialect/Tensor/IR/Tensor.h>
 
 namespace mlir::hip {
 
@@ -31,6 +33,7 @@ struct RocMlirPrepareQuantPass
     func::FuncOp funcOp = getOperation();
     if (funcOp.getSymName() != "main_graph")
       return;
+    decomposeMatMulNBits(funcOp);
     sinkQuantizeThroughElementMoves(funcOp);
     rebiasUnsignedQuantizedTrees(funcOp, isPlannedQLinear);
   }

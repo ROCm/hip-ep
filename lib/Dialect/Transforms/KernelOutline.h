@@ -19,9 +19,14 @@
 
 namespace mlir::hip {
 
+/// An inline hip.constant has a dense value that HIP-to-TOSA turns into
+/// tosa.const. File- and memory-backed carriers are Pure and operand-free too,
+/// but they name a byte range nothing has read, so they stay kernel arguments.
+bool isInlineDenseConstant(Value v);
+
 /// Rank-0 inline hip.constant used by fused pointwise ops (Relu zero, Clip
-/// bounds, residual Mul scale). File- and memory-backed carriers have no dense
-/// attr for in-kernel tosa.const and stay kernel arguments.
+/// bounds, residual Mul scale). A rank-0 buffer argument has no index for
+/// rock.transforms_to_ptr, so only the inline form is cloned.
 bool isInlineScalarConstant(Value v);
 
 /// The kernel ABI rocMLIR expects for a scalar: tensor<1xT> for a rank-0

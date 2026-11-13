@@ -164,7 +164,7 @@ public:
 private:
   bool takeContext();
   void cloneInlineScalars();
-  void absorbDequantBnb4();
+  void absorbInt4Weights();
   void absorbInputProducers(ArrayRef<std::pair<Value, bool>> roots);
   void absorbOperandFreeProducers();
   void collectRemainingOperands();
@@ -241,21 +241,38 @@ void KernelRegion::cloneInlineScalars() {
   operands = std::move(kernelOperands);
 }
 
-// A bitsandbytes dequant that feeds only this anchor belongs in the same rock
-// kernel. HipToTosa turns it into a nibble lookup and a multiply.
-void KernelRegion::absorbDequantBnb4() {
-  SmallVector<Value> dequantResults;
+// A split MatMulNBits reaches its matmul anchor as unpack_int4 and a blocked
+// dequantize_linear feeding hip.matmul {transB = 1}. Both belong in the rock
+// kernel: HipToTosa turns them into a nibble extract, a block broadcast, and
+// tosa.matmul. An inline dense zero point, including the synthesized default
+// 8, is cloned with the operand-free producers. A file- or memory-backed zero
+// point has no dense value to lower, so it is a kernel argument, as are the
+// packed bytes and the scales.
+//
+// hip.dequant_bnb4 stays outside the kernel. Absorbing it makes HipToTosa
+// emit a tosa.gather of the codebook over every weight element, which rocMLIR
+// marks illegal. The matmul reads the dequantized weight.
+void KernelRegion::absorbInt4Weights() {
+  SmallVector<Value> weights;
   for (Value operand : operands) {
-    auto dequant = operand.getDefiningOp<DequantBnb4Op>();
-    if (dequant && dequant->hasOneUse())
-      dequantResults.push_back(operand);
+    auto dequant = operand.getDefiningOp<DequantizeLinearOp>();
+    if (!dequant || !dequant->hasOneUse() || dequant.getPackedInt4() ||
+        dequant.getBlockSize() == 0)
+      continue;
+    auto unpack = dequant.getInput().getDefiningOp<UnpackInt4Op>();
+    if (unpack && unpack->hasOneUse())
+      weights.push_back(operand);
   }
-  for (Value value : dequantResults) {
-    auto dequant = value.getDefiningOp<DequantBnb4Op>();
+  for (Value value : weights) {
+    auto dequant = value.getDefiningOp<DequantizeLinearOp>();
+    auto unpack = dequant.getInput().getDefiningOp<UnpackInt4Op>();
     ops.insert(dequant);
+    ops.insert(unpack);
     operands.remove(value);
-    operands.insert(dequant.getPacked());
-    operands.insert(dequant.getAbsmax());
+    operands.insert(unpack.getPacked());
+    operands.insert(dequant.getScale());
+    if (Value zp = dequant.getZeroPoint(); zp && !isInlineDenseConstant(zp))
+      operands.insert(zp);
   }
 }
 
@@ -409,7 +426,7 @@ const char *KernelRegion::complete(ArrayRef<std::pair<Value, bool>> roots,
   if (!takeContext())
     return "first operand not hip.context";
   cloneInlineScalars();
-  absorbDequantBnb4();
+  absorbInt4Weights();
   absorbInputProducers(roots);
   absorbOperandFreeProducers();
   collectRemainingOperands();

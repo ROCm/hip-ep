@@ -34,7 +34,14 @@ A module is one unit: an anchor takes a whole module or none of it.
 
 ## hip-rocmlir-prepare-quant
 
-The pass prepares the quantize trees for integer kernels. It runs two
+The pass first splits each static 4-bit `hip.matmul_nbits` (f16 or f32, no
+`g_idx`, no packed zero points) into `hip.unpack_int4`, a blocked
+`hip.dequantize_linear` and `hip.matmul {transB = 1}`, plus a `hip.add` for
+the bias. The grouping then puts the bias add and the ops after it in a
+module, and the matmul becomes an anchor that can take that module as its
+epilogue. Any other `hip.matmul_nbits` keeps the custom kernel.
+
+The pass then prepares the quantize trees for integer kernels. It runs two
 rewrites in this order, because the first fixes the final shape of each tree
 and the second plans the integer anchors on that shape.
 
@@ -159,10 +166,11 @@ on the input, joins only while the reload count is 9 or less: past that, the
 kernel redoes the conversion on every reload, which costs more than one
 separate pass. The outline step applies the same limit when it absorbs single
 input ops. A wide 1x1 conv of a dequantized uint16 activation (8192 output
-columns, about 64 reloads) thus keeps the dequantize outside. The activation operands are the conv input and the matmul and gemm A
-and B operands, not the conv filter or the gemm C operand. For a conv of
-dequantizes they are the integer input and weights. The search continues
-through the input views and the producer modules of each module input.
+columns, about 64 reloads) thus keeps the dequantize outside. The activation
+operands are the conv input and the matmul and gemm A and B operands, not the
+conv filter or the gemm C operand. For a conv of dequantizes they are the
+integer input and weights. The search continues through the input views and
+the producer modules of each module input.
 
 A module that no plan takes and that is a valid elementwise kernel (see
 [Elementwise kernels](#elementwise-kernels)) stays whole. Every other module
@@ -189,6 +197,14 @@ reader would keep running, so it saves nothing. An absorbed producer's inputs
 take its argument slot, so the kernel signature keeps the operand order of the
 anchor. View absorption uses the legality of HIP-to-TOSA
 (`HipToTosaLegality.h`), so an absorbed view always lowers.
+
+The weight of a split `hip.matmul_nbits` goes in too: a single-use blocked
+dequantize of a single-use `hip.unpack_int4`. The packed bytes, the scales
+and a file- or memory-backed zero point are kernel arguments; an inline zero
+point, such as the default 8, is cloned. HIP-to-TOSA then types the packed
+argument as `i4` at the unpacked shape, with the same bytes, and rocMLIR
+extracts the nibbles. A `hip.dequant_bnb4` stays outside, because its
+codebook lookup lowers to a `tosa.gather` that rocMLIR rejects.
 
 A rank-0 kernel operand is reshaped to rank 1 at the dispatch, and all such
 reshapes in `main_graph` share one shape constant.

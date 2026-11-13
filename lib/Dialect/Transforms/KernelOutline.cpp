@@ -20,12 +20,16 @@
 
 namespace mlir::hip {
 
+bool isInlineDenseConstant(Value v) {
+  auto constant = v.getDefiningOp<ConstantOp>();
+  return constant && constant.getValueAttr();
+}
+
 bool isInlineScalarConstant(Value v) {
   auto type = dyn_cast<RankedTensorType>(v.getType());
   if (!type || type.getRank() != 0)
     return false;
-  auto constant = v.getDefiningOp<ConstantOp>();
-  return constant && constant.getValueAttr();
+  return isInlineDenseConstant(v);
 }
 
 // MIGraphX gives a scalar the shape {1}, and rock-flatten-tosa-func-args
