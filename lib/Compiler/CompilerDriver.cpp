@@ -57,15 +57,13 @@
 
 #if defined(ENABLE_ROCMLIRTRITON) && defined(HIPDNN_EP_LINK_HIP_HOST) &&       \
     defined(HIPDNN_HIP_RUNTIME_LIB)
-// File scope on purpose. The same declarations inside the anonymous namespace
-// below stay members of that namespace, so the link looks for
-// hip::compiler::(anonymous namespace)::kRocmlirProblemCache* and misses the
-// extern "C" definitions in rocmlir_problem_cache_data.cpp.
-extern "C" {
-const unsigned char *const kRocmlirProblemCacheBlobs[];
-const size_t kRocmlirProblemCacheBlobSizes[];
-const size_t kRocmlirProblemCacheBlobCount;
-}
+// File scope, and each declaration is extern. Inside extern "C" { }, a const
+// object is still a definition, so GCC rejects the missing initializer and
+// the unknown array bound. Inside the anonymous namespace below, extern "C"
+// stays a member of that namespace and misses the generated blob.
+extern "C" const unsigned char *const kRocmlirProblemCacheBlobs[];
+extern "C" const size_t kRocmlirProblemCacheBlobSizes[];
+extern "C" const size_t kRocmlirProblemCacheBlobCount;
 #endif
 
 namespace hip::compiler {
