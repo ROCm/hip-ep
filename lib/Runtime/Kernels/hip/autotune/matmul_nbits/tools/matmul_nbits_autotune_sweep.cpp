@@ -14,6 +14,12 @@
  * run starts with an empty in-process tune map (the tuners no longer persist to
  * an on-disk cache), so every shape is measured fresh.
  *
+ * --layouts xor,blocks also sweeps each shape with its weight stored in that
+ * byte order (hip::MatmulNBitsWeightLayout): prefill_xor / prefill_blocks for
+ * prefill M and, for blocks, dp4a_blocks for the block-reading decode GEMV.
+ * --layouts-only skips the rows paths, for a supplementary sweep (--tag) next
+ * to a main one.
+ *
  * Shape list is CSV with a header, columns K,N,block_size,has_zp (extra columns
  * ignored) -- i.e. what extract_shapes.py emits.
  *
@@ -23,6 +29,9 @@
  * and linked with tools/empty_lut_data.cpp, so the shapes it measures do not hit
  * the shipped table.
  */
+#include "hip/matmul_nbits_row_alias.h"
+#include "hip/matmul_nbits_weight_layout.h"
+
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
@@ -51,6 +60,16 @@ extern "C" int hip_matmul_nbits_u4_wmma_stride(
     void* stream, int cfg, int M, int N, int K, int group_size,
     const void* A, int lda, const void* B, const void* scales,
     const void* zeros, void* C, int ldc, int b_row_bytes);
+extern "C" int hip_matmul_nbits_u4_wmma_layout(
+    void* stream, int cfg, int M, int N, int K, int group_size,
+    const void* A, int lda, const void* B, const void* scales,
+    const void* zeros, void* C, int ldc, int b_row_bytes, int layout);
+extern "C" int hip_matmul_nbits_dp4a_layout(
+    void* stream_v, const void* A, const void* B, const void* scales,
+    const void* zp_u8, const void* bias, void* out,
+    int64_t M, int64_t N, int64_t K, int64_t block_size,
+    void* a_qb_scratch, void* a_scale_scratch, int64_t b_row_bytes,
+    int64_t b_layout);
 extern "C" void hip_matmul_nbits_u4_wmma_sweep_extended(int enable);
 extern "C" int hip_matmul_nbits_dp4a(
     void* stream_v, const void* A, const void* B, const void* scales,
@@ -75,16 +94,6 @@ static uint16_t F2H(float f) {
   return o;
 }
 
-// Mirrors shouldPadRow() in lib/Runtime/real/matmul_nbits.cpp. Only shapes the
-// production gate would actually route through the padded layout are swept for
-// it; measuring the rest would fill the table with rows nothing can reach.
-static bool shouldPadRow(long long K) {
-  const long long stride = K / 2;
-  if (stride % 128 != 0) return false;
-  long long a = stride / 128, b = 64;
-  while (b) { long long t = b; b = a % b; a = t; }
-  return a >= 8;
-}
 
 struct Shape {
   int k = 0, n = 0, gs = 0;
@@ -146,7 +155,7 @@ static std::vector<Shape> loadShapes(const char* path) {
 // sweep measures tuning and not hipMalloc.
 struct Buffers {
   uint16_t *a = nullptr, *sc = nullptr, *zpf = nullptr, *out = nullptr;
-  uint8_t *b = nullptr, *zpu = nullptr, *bpad = nullptr;
+  uint8_t *b = nullptr, *zpu = nullptr, *bpad = nullptr, *blay = nullptr;
   void *qb = nullptr, *qs = nullptr;
   size_t a_n = 0, sc_n = 0, out_n = 0, b_n = 0, bpad_n = 0, qb_n = 0, qs_n = 0;
 
@@ -166,6 +175,11 @@ int main(int argc, char** argv) {
   // Also time the extended WMMA entries (WMMA_EXT_CONFIGS). Only for a device
   // whose table is meant to name them.
   bool extended = false;
+  // Weight byte orders (hip::MatmulNBitsWeightLayout) to sweep as well: the
+  // weight stored in that order, prefill (prefill_xor / prefill_blocks) and,
+  // for blocks, the block-reading decode GEMV at M = 1 (dp4a_blocks).
+  bool lay_xor = false, lay_blocks = false;
+  bool layouts_only = false;   // skip the rows paths a main sweep already has
   int limit = 0;
   /* Skip (M, N) pairs whose C alone would exceed this. Sized to pass every real
    * prefill shape below big_n at the full M ladder -- the widest is N=32768 x
@@ -205,11 +219,24 @@ int main(int argc, char** argv) {
     else if (a == "--no-dp4a") do_dp4a = false;
     else if (a == "--no-padrow") do_padrow = false;
     else if (a == "--extended") extended = true;
+    else if (a == "--layouts-only") layouts_only = true;
+    else if (a == "--layouts" && i + 1 < argc) {
+      std::stringstream ss(argv[++i]);
+      std::string tok;
+      while (std::getline(ss, tok, ',')) {
+        if (tok == "xor") lay_xor = true;
+        else if (tok == "blocks") lay_blocks = true;
+        else {
+          std::fprintf(stderr, "--layouts takes xor and/or blocks, got '%s'\n", tok.c_str());
+          return 1;
+        }
+      }
+    }
     else {
       std::fprintf(stderr,
                    "usage: %s --shapes shapes.csv [--m 1,8,128] [--limit N]\n"
                    "          [--no-prefill] [--no-decode] [--no-dp4a] [--no-padrow]\n"
-                   "          [--extended]\n",
+                   "          [--extended] [--layouts xor,blocks] [--layouts-only]\n",
                    argv[0]);
       return 1;
     }
@@ -225,6 +252,15 @@ int main(int argc, char** argv) {
   if (limit > 0 && static_cast<int>(shapes.size()) > limit)
     shapes.resize(limit);
 
+  if (layouts_only && !(lay_xor || lay_blocks)) {
+    std::fprintf(stderr, "--layouts-only needs --layouts\n");
+    return 1;
+  }
+  if ((lay_xor || lay_blocks) && !extended) {
+    // Only extended WMMA entries read a byte order other than rows.
+    std::fprintf(stderr, "--layouts needs --extended\n");
+    return 1;
+  }
   hip_matmul_nbits_u4_wmma_sweep_extended(extended ? 1 : 0);
   std::fprintf(stderr, "#SWEEP arch=%s shapes=%zu extended=%d\n",
                props.gcnArchName, shapes.size(), extended ? 1 : 0);
@@ -294,10 +330,27 @@ int main(int argc, char** argv) {
     const void* zp_f = s.zp ? (const void*)buf.zpf : nullptr;
     const void* zp_u = s.zp ? (const void*)buf.zpu : nullptr;
 
+    // The same weight in each requested byte order (dense rows of K/2 bytes;
+    // K % 64 == 0, and N % 16 == 0 for blocks).
+    const bool lay_ok = (s.k % 64 == 0) && (s.k % s.gs == 0);
+    const bool want_xor = lay_xor && lay_ok;
+    const bool want_blocks = lay_blocks && lay_ok && (s.n % 16 == 0);
+    auto uploadLayout = [&](hip::MatmulNBitsWeightLayout layout) {
+      static size_t lay_have = 0;
+      buf.grow((void**)&buf.blay, &lay_have, b_bytes);
+      std::vector<uint8_t> stored(h_b);
+      std::vector<uint8_t> scratch(
+          static_cast<size_t>(hip::matmulNBitsWeightLayoutRowStep(layout)) * (s.k / 2));
+      hip::applyMatmulNBitsWeightLayout(stored.data(), 0, static_cast<uint64_t>(s.n),
+                                        static_cast<uint64_t>(s.k / 2), layout,
+                                        scratch.data());
+      HIP_OK(hipMemcpy(buf.blay, stored.data(), b_bytes, hipMemcpyHostToDevice));
+    };
+
     for (int m : ms) {
       // The marker is what update_lut.py keys the following autotune lines to.
       if (m == 1) {
-        if (do_decode) {
+        if (do_decode && !layouts_only) {
           std::fprintf(stderr, "#SHAPE path=decode M=1 N=%d K=%d gs=%d zp=%d\n",
                        s.n, s.k, s.gs, int(s.zp));
           hip_matmul_nbits(nullptr, buf.a, buf.b, buf.sc, zp_f, nullptr,
@@ -309,15 +362,27 @@ int main(int argc, char** argv) {
           static size_t qb_have = 0, qs_have = 0;
           buf.grow(&buf.qb, &qb_have, static_cast<size_t>(s.k));
           buf.grow(&buf.qs, &qs_have, static_cast<size_t>(ngk) * sizeof(float));
-          std::fprintf(stderr, "#SHAPE path=dp4a M=1 N=%d K=%d gs=%d zp=%d\n",
-                       s.n, s.k, s.gs, int(s.zp));
-          hip_matmul_nbits_dp4a(nullptr, buf.a, buf.b, buf.sc, zp_u, nullptr,
-                                buf.out, 1, s.n, s.k, s.gs, buf.qb, buf.qs);
-          HIP_OK(hipDeviceSynchronize());
+          if (!layouts_only) {
+            std::fprintf(stderr, "#SHAPE path=dp4a M=1 N=%d K=%d gs=%d zp=%d\n",
+                         s.n, s.k, s.gs, int(s.zp));
+            hip_matmul_nbits_dp4a(nullptr, buf.a, buf.b, buf.sc, zp_u, nullptr,
+                                  buf.out, 1, s.n, s.k, s.gs, buf.qb, buf.qs);
+            HIP_OK(hipDeviceSynchronize());
+          }
+          if (want_blocks) {
+            uploadLayout(hip::MatmulNBitsWeightLayout::Blocks);
+            std::fprintf(stderr,
+                         "#SHAPE path=dp4a_blocks M=1 N=%d K=%d gs=%d zp=%d\n",
+                         s.n, s.k, s.gs, int(s.zp));
+            hip_matmul_nbits_dp4a_layout(nullptr, buf.a, buf.blay, buf.sc, zp_u,
+                                         nullptr, buf.out, 1, s.n, s.k, s.gs,
+                                         buf.qb, buf.qs, 0, 2);
+            HIP_OK(hipDeviceSynchronize());
+          }
         }
         continue;
       }
-      if (!do_prefill) continue;
+      if (!do_prefill || layouts_only) continue;
 
       // Marker prints k_pad: for K%32!=0 the dispatch pads to k_pad and the
       // WMMA tuner (and the runtime LUT query) key on the padded K. For k32
@@ -328,7 +393,10 @@ int main(int argc, char** argv) {
                        m, s.n, s.k, 1, 4, s.gs, 2, 2, nullptr, nullptr);
       HIP_OK(hipDeviceSynchronize());
 
-      if (do_padrow && shouldPadRow(s.k) && (s.k % s.gs == 0)) {
+      // Only shapes the production gate routes through the padded layout are
+      // swept for it; the rest would fill the table with unreachable rows.
+      if (do_padrow && hip::matmulNBitsRowStrideAliases(s.k) &&
+          (s.k % s.gs == 0)) {
         static size_t pad_have = 0;
         const size_t need = hip_matmul_nbits_u4_padrow_bytes(s.n, s.k);
         buf.grow((void**)&buf.bpad, &pad_have, need);
@@ -342,6 +410,24 @@ int main(int argc, char** argv) {
           hip_matmul_nbits_u4_wmma_stride(nullptr, -1, m, s.n, s.k, s.gs, buf.a,
                                           s.k, buf.bpad, buf.sc, zp_f, buf.out,
                                           s.n, s.k / 2 + 128);
+          HIP_OK(hipDeviceSynchronize());
+        }
+      }
+    }
+    // Prefill on the byte orders, after the rows sweep of this shape so its
+    // device buffer holds one layout at a time.
+    if (do_prefill) {
+      for (int layout = 1; layout <= 2; ++layout) {
+        if (layout == 1 ? !want_xor : !want_blocks) continue;
+        uploadLayout(static_cast<hip::MatmulNBitsWeightLayout>(layout));
+        for (int m : ms) {
+          if (m == 1) continue;
+          std::fprintf(stderr, "#SHAPE path=%s M=%d N=%d K=%d gs=%d zp=%d\n",
+                       layout == 1 ? "prefill_xor" : "prefill_blocks", m, s.n,
+                       s.k, s.gs, int(s.zp));
+          hip_matmul_nbits_u4_wmma_layout(nullptr, -1, m, s.n, s.k, s.gs, buf.a,
+                                          s.k, buf.blay, buf.sc, zp_f, buf.out,
+                                          s.n, 0, layout);
           HIP_OK(hipDeviceSynchronize());
         }
       }

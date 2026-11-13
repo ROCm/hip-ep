@@ -89,8 +89,8 @@ static std::string detectedArch() {
 // kernel-tests/<arch> is named after the HIP_ARCHITECTURES entry, like
 // custom_kernels_<arch>.dll, so the directory is picked by the rule the EP uses
 // to pick the DLL (LlvmIrJit.cpp): the device ISA first, then its generic
-// target. Mirrors genericTargetFor() in
-// backend-mlir-compiler/custom-op-mlir/src/LlvmIrJit.cpp; keep them in sync.
+// target. Mirrors hip::genericTargetFor() in
+// include/hip/Support/GenericTarget.h; keep them in sync.
 struct GenericTarget {
   const char* generic;
   const char* members[8];

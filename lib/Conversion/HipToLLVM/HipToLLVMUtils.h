@@ -131,7 +131,7 @@ inline constexpr const char *kWrapGQARingF16 =
     "wrap_group_query_attention_ring_f16";
 inline constexpr const char *kWrapMultiHeadAttention =
     "wrap_multi_head_attention";
-inline constexpr const char *kWrapMatMulNBits = "wrap_matmul_nbits";
+inline constexpr const char *kWrapMatMulNBitsEx = "wrap_matmul_nbits_ex";
 inline constexpr const char *kWrapDequantBnb4 = "wrap_dequant_bnb4";
 inline constexpr const char *kWrapQMoE = "wrap_qmoe";
 inline constexpr const char *kWrapQMoEAmd = "wrap_qmoe_amd";

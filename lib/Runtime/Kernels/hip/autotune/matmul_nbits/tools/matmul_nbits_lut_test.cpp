@@ -205,6 +205,32 @@ int main() {
                 b.gemv.threads, b.gemv.tile_n, ok ? "OK" : "FAIL");
   }
 
+  std::printf("\n-- weight byte orders --\n");
+  // A layout's own rows answer it, and a shape with none is answered from the
+  // arrival rows, so a measured arrival shape never drops to the fallback.
+  {
+    Request r = prefill(128, 14336, 4096, 128, true);
+    r.layout = 1;
+    expectAtLeast("prefill XOR lines, measured shape", r, Source::Nearest);
+    r.layout = 2;
+    expectAtLeast("prefill 16-row blocks, measured shape", r, Source::Nearest);
+    r.layout = 3;
+    expectExactly("prefill unknown layout skips every point", r,
+                  Source::Fallback);
+  }
+  {
+    // Block-reading decode answers pack (row groups, K blocks per step) into
+    // tile_n; both are at least 1, which no other phase's tile_n encodes.
+    const Result got =
+        run(decode(Phase::DecodeDp4aBlocks, 14336, 4096, 128, true));
+    const bool ok = got.source == Source::None ||
+                    ((got.gemv.tile_n & 15) >= 1 && (got.gemv.tile_n >> 4) >= 1);
+    if (!ok) ++failures;
+    std::printf("  %-52s src=%-8s tile_n=%d %s\n",
+                "dp4a-blocks answers are packed (rg, ku)", name(got.source),
+                got.gemv.tile_n, ok ? "OK" : "FAIL");
+  }
+
   std::printf("\n-- a validator that rejects everything yields None --\n");
   // The point of storing geometry rather than a config index: an answer the
   // live config table cannot serve must make the search move outwards, and if

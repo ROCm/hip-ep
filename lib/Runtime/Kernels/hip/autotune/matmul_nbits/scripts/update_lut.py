@@ -49,14 +49,25 @@ KERNEL_ABI = "matmul_nbits-v1"
 GROUP_SIZES = {16: "G16", 32: "G32", 64: "G64", 128: "G128", 256: "G256",
                512: "G512"}
 # prefill_padrow is measured at arrival + `pad=` bytes (128 when the sweep log
-# predates the field); a pad without a row-stride category is skipped.
+# predates the field); each pad is its own row-stride category.
+# prefill_xor / prefill_blocks are measured with the weight stored in that byte
+# order (hip::MatmulNBitsWeightLayout), each its own row-stride category;
+# dp4a_blocks is the block-reading decode GEMV, whose Gemv answer packs the row
+# groups and K blocks per step into tile_n (rg + 16 * ku).
 PATH_TO_PHASE = {"prefill": "Prefill", "prefill_padrow": "Prefill",
-                 "decode": "Decode", "dp4a": "DecodeDp4a"}
+                 "prefill_padrow256": "Prefill",
+                 "prefill_xor": "Prefill", "prefill_blocks": "Prefill",
+                 "decode": "Decode", "dp4a": "DecodeDp4a",
+                 "dp4a_blocks": "DecodeDp4aBlocks"}
 PATH_TO_STRIDE = {"prefill": "Arrival", "prefill_padrow": "Padded",
-                  "decode": "Any", "dp4a": "Any"}
+                  "prefill_padrow256": "Padded256",
+                  "prefill_xor": "XorLines", "prefill_blocks": "Blocks",
+                  "decode": "Any", "dp4a": "Any", "dp4a_blocks": "Any"}
 PATH_TO_KIND = {"prefill": "Wmma", "prefill_padrow": "Wmma",
-                "decode": "Gemv", "dp4a": "Gemv"}
-PADROW_PATH = {128: "prefill_padrow"}
+                "prefill_padrow256": "Wmma",
+                "prefill_xor": "Wmma", "prefill_blocks": "Wmma",
+                "decode": "Gemv", "dp4a": "Gemv", "dp4a_blocks": "Gemv"}
+PADROW_PATH = {128: "prefill_padrow", 256: "prefill_padrow256"}
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +131,12 @@ WMMA_TIME_RE = re.compile(
 GEMV_TIME_RE = re.compile(
     r"^\[custom_kernels\]\s+(?:dp4a )?config\[\s*\d+\] "
     r"threads=\s*(\d+) tile_n=(\d+) : ([\d.]+) ms")
+BLOCKS_WIN_RE = re.compile(
+    r"GEMV-dp4a-blocks autotune:.*-> config\[(\d+)\] "
+    r"threads=(\d+) rg=(\d+) ku=(\d+)")
+BLOCKS_TIME_RE = re.compile(
+    r"^\[custom_kernels\]\s+dp4a-blocks config\[\s*\d+\] "
+    r"threads=\s*(\d+) rg=(\d+) ku=(\d+) : ([\d.]+) ms")
 
 
 def answer_key(ans: dict):
@@ -199,6 +216,20 @@ def parse_log(path: Path):
                            int(w.group(8)), 1 if w.group(2) == "fused" else 0,
                            int(w.group(9) or 0), int(w.group(10) or 0))
                     yield cur, key, times
+                    cur, times = None, {}
+                continue
+
+            if cur[0] == "dp4a_blocks":
+                t = BLOCKS_TIME_RE.match(line)
+                if t:
+                    times[("Gemv", int(t.group(1)),
+                           int(t.group(2)) + 16 * int(t.group(3)))] = \
+                        float(t.group(4))
+                    continue
+                g = BLOCKS_WIN_RE.search(line)
+                if g:
+                    yield cur, ("Gemv", int(g.group(2)),
+                                int(g.group(3)) + 16 * int(g.group(4))), times
                     cur, times = None, {}
                 continue
 
@@ -561,13 +592,19 @@ def _geomean_slowdown(ans, pts):
     return math.exp(sum(logs) / len(logs)) if logs else float("inf")
 
 
+# Table fields that are not part of a build or merge result but carried over
+# from the existing table: measured separately from the tile winners.
+CARRIED = ("row_pads",)
+
+
 class LutError(ValueError):
     """A table the loader would read differently from what was meant."""
 
 
 KERNEL_SRC = ROOT.parent.parent / "matmul_nbits_kernel.hip"
-PHASES = ("Prefill", "Decode", "DecodeDp4a")
-STRIDES = ("Arrival", "Padded")
+PHASES = ("Prefill", "Decode", "DecodeDp4a", "DecodeDp4aBlocks")
+STRIDES = ("Arrival", "Padded", "Padded256", "XorLines", "Blocks")
+WEIGHT_LAYOUTS = ("Rows", "XorLines", "Blocks")
 ZERO_POINTS = ("Symmetric", "Asymmetric")
 
 
@@ -665,6 +702,28 @@ def check_table(t: dict) -> None:
                  e.get("variant"), c["swizzle"])
         if entry not in compiled:
             errors.append(f"extended_configs: no WMMA_EXT_CONFIGS entry {entry}")
+    keys = set()
+    for r in t.get("row_pads", []):
+        key = (r.get("n"), r.get("k"), r.get("group_size"), r.get("zero_point"))
+        if r.get("group_size") not in GROUP_SIZES.values() or \
+                r.get("zero_point") not in ZERO_POINTS or \
+                not r.get("n") or not r.get("k") or r.get("pad_bytes", 1) % 16 or \
+                (r["pad_bytes"] and (r["k"] // 2 + r["pad_bytes"]) % 16):
+            errors.append(f"row_pads: invalid entry {r} (pad and K/2 + pad must "
+                          f"be multiples of 16)")
+        layout = r.get("layout")
+        if layout not in WEIGHT_LAYOUTS:
+            errors.append(f"row_pads: entry {r} needs a layout in {WEIGHT_LAYOUTS}")
+        elif layout != "Rows" and (r.get("pad_bytes") or (r.get("k") or 1) % 64 or
+                                   (layout == "Blocks" and (r.get("n") or 1) % 16)):
+            errors.append(f"row_pads: entry {r}: a {layout} weight takes no pad "
+                          f"(and Blocks needs N % 16 == 0 and K % 64 == 0)")
+        if key in keys:
+            errors.append(f"row_pads: weight {key} listed twice")
+        keys.add(key)
+    if "default_row_pad" in t:
+        errors.append("default_row_pad is not supported: list every weight padded "
+                      "at load in row_pads")
     if errors:
         raise LutError("\n".join(errors))
 
@@ -708,7 +767,8 @@ def apply_m_intervals(args, doc, pool):
     doc["schema_version"] = SCHEMA_VERSION
 
 
-def write_lut_json(out: Path, doc: dict, configs, fallbacks, points) -> None:
+def write_lut_json(out: Path, doc: dict, configs, fallbacks, points,
+                   carried=None) -> None:
     # One entry per line: compact enough to keep the file reviewable and to make
     # a regeneration diff readable, without the 20x blowup of indent=1.
     plain, extended = [], []
@@ -718,7 +778,8 @@ def write_lut_json(out: Path, doc: dict, configs, fallbacks, points) -> None:
             extended.append({"config": i, "variant": c.pop("variant")})
         c.pop("variant", None)
         plain.append(c)
-    check_table({**doc, "configs": plain, "fallbacks": fallbacks,
+    carried = carried or {}
+    check_table({**doc, **carried, "configs": plain, "fallbacks": fallbacks,
                  "points": points, "extended_configs": extended})
     with open(out, "w", encoding="utf-8") as f:
         f.write("{\n")
@@ -736,7 +797,19 @@ def write_lut_json(out: Path, doc: dict, configs, fallbacks, points) -> None:
             f.write("\n ],\n \"extended_configs\": [\n")
             f.write(",\n".join("  " + json.dumps(e, sort_keys=True)
                                for e in extended))
+        if carried.get("row_pads"):
+            f.write("\n ],\n \"row_pads\": [\n")
+            f.write(",\n".join("  " + json.dumps(r, sort_keys=True)
+                               for r in carried["row_pads"]))
         f.write("\n ]\n}\n")
+
+
+def existing_carried(path: Path) -> dict:
+    """The CARRIED fields of the table at `path` (see lut/README.md)."""
+    if not path.exists():
+        return {}
+    old = json.loads(path.read_text(encoding="utf-8"))
+    return {k: old[k] for k in CARRIED if k in old}
 
 
 def cmd_merge(args) -> int:
@@ -821,6 +894,11 @@ def cmd_merge(args) -> int:
                     fb_rows.append((r, new_fb))
                     continue
         fb_rows.append((r, None))
+    if new_fb is not None and not any(r["phase"] == phase
+                                      for r in old["fallbacks"]):
+        # A phase the table had no rows for: without a fallback its unmeasured
+        # keys would tune online in-model.
+        fb_rows.append(({"phase": phase, "bits": "B4", "config": -1}, new_fb))
 
     # Existing pool indices and row order are kept and new configs appended, so
     # the json diff is just the changed rows. A config no row uses any more
@@ -844,10 +922,12 @@ def cmd_merge(args) -> int:
     fallback_rows = [resolved(r, a) for r, a in fb_rows]
     point_rows = [resolved(r, a) for r, a in rows]
     doc = {k: v for k, v in old.items()
-           if k not in ("configs", "fallbacks", "points", "extended_configs")}
+           if k not in ("configs", "fallbacks", "points", "extended_configs")
+           + CARRIED}
     out = args.json_out
     apply_m_intervals(args, doc, new_pool)
-    write_lut_json(out, doc, new_pool, fallback_rows, point_rows)
+    write_lut_json(out, doc, new_pool, fallback_rows, point_rows,
+                   {k: old[k] for k in CARRIED if k in old})
     print(f"[merge] {len(changes)} {phase} rows changed, {kept_ties} kept as "
           f"within {args.min_gain:.0%}, {len(point_rows)} points total -> {out}")
 
@@ -961,7 +1041,8 @@ def cmd_build(args) -> int:
             del doc["m_intervals"]
     apply_m_intervals(args, doc, pool)
     LUT_DIR.mkdir(parents=True, exist_ok=True)
-    write_lut_json(out, doc, pool, fallback_rows, point_rows)
+    write_lut_json(out, doc, pool, fallback_rows, point_rows,
+                   existing_carried(args.carry_from))
 
     groups = len({(r["phase"], r["group_size"], r["zero_point"],
                    r["row_stride"]) for r in point_rows})
@@ -1026,6 +1107,9 @@ def main() -> int:
     ap.add_argument("--fb-out", default=None,
                     help="FlatBuffer that compile writes (default lut/<arch>.fb "
                          "for the default JSON, else the JSON's path with .fb)")
+    ap.add_argument("--carry-from", default=None,
+                    help="build: table whose carried fields (row pads) the new "
+                         "table keeps (default lut/<arch>.json)")
     ap.add_argument("--flatc", default="flatc")
     ap.add_argument("--rocm-version", type=int, default=70100)
     ap.add_argument("--model-key", default="oga_models bits=4")
@@ -1045,7 +1129,7 @@ def main() -> int:
                     help="build: keep the current table and replace only the "
                          "--phase rows the readings beat by --min-gain")
     ap.add_argument("--phase", default="DecodeDp4a",
-                    choices=["Prefill", "Decode", "DecodeDp4a"],
+                    choices=list(PHASES),
                     help="build --merge-existing: the phase to update")
     ap.add_argument("--min-gain", type=float, default=0.03,
                     help="build --merge-existing: required speedup of the new "
@@ -1068,6 +1152,7 @@ def main() -> int:
     args.fb_out = (Path(args.fb_out) if args.fb_out
                    else LUT_DIR / f"{args.arch}.fb" if args.json_out == canonical
                    else args.json_out.with_suffix(".fb"))
+    args.carry_from = Path(args.carry_from) if args.carry_from else canonical
     try:
         return run(args)
     except LutError as e:

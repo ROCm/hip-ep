@@ -22,6 +22,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "matmul_nbits_row_pad_abi.h"
+
 // Exports each launcher from the per-arch kernel shared library
 // (custom_kernels_<arch>.{dll,so}), which the model artifact resolves at load
 // (JIT dlopen, or native import). Pre-dual-format the kernels were linked into
@@ -2672,6 +2674,35 @@ HIP_KERNEL_API int hip_matmul_nbits(
     const void* pre_unpacked_zp_u8,
     const void* pre_unpacked_zp_fp16);
 
+/* hip_matmul_nbits with an explicit weight row pitch. b_row_bytes == 0 is the
+ * arrival layout (identical to hip_matmul_nbits). A nonzero value reads a
+ * bits=4 B whose rows were padded to b_row_bytes (>= K/2) at load, so the
+ * aliasing-prone strides need no per-call repack; it requires bits == 4 and
+ * block_size | K, and every int4 path (WMMA, GEMV, M-blocked GEMV, naive)
+ * honours it. b_layout is B's byte order (hip::MatmulNBitsWeightLayout,
+ * include/hip/matmul_nbits_weight_layout.h): 0 rows; 1 XOR-swizzled lines and
+ * 2 16-row blocks (dense, K % 64 == 0, N % 16 == 0 for blocks), read directly
+ * by the int4 WMMA prefill through the extended entries and through a dense
+ * copy on every other path. Returns -1 for an unsupported combination. */
+HIP_KERNEL_API int hip_matmul_nbits_ex(
+    void* stream,
+    const void* A,
+    const void* B,
+    const void* scales,
+    const void* zero_points,
+    const void* bias,
+    void* output,
+    int64_t M, int64_t N, int64_t K,
+    int64_t batch_count,
+    int64_t bits,
+    int64_t block_size,
+    int64_t element_size_bytes,
+    int64_t zp_elem_size,
+    const void* pre_unpacked_zp_u8,
+    const void* pre_unpacked_zp_fp16,
+    int64_t b_row_bytes,
+    int64_t b_layout);
+
 // Bitsandbytes FP4/NF4 dequant. Writes row-major [N, K] f32.
 // quant_type 0 is FP4 and 1 is NF4. Even indices read the high nibble.
 HIP_KERNEL_API int hip_dequant_bnb4(
@@ -2811,6 +2842,27 @@ HIP_KERNEL_API int hip_matmul_nbits_dp4a(
     int64_t M, int64_t N, int64_t K, int64_t block_size,
     void* a_qb_scratch, void* a_scale_scratch);
 
+/* hip_matmul_nbits_dp4a against a B with row pitch b_row_bytes (0 = K/2). */
+HIP_KERNEL_API int hip_matmul_nbits_dp4a_ex(
+    void* stream,
+    const void* A, const void* B, const void* scales, const void* zp_u8,
+    const void* bias, void* out,
+    int64_t M, int64_t N, int64_t K, int64_t block_size,
+    void* a_qb_scratch, void* a_scale_scratch, int64_t b_row_bytes);
+
+/* hip_matmul_nbits_dp4a_ex against a B stored in the byte order b_layout (a
+ * hip::MatmulNBitsWeightLayout, include/hip/matmul_nbits_weight_layout.h):
+ * 0 = rows b_row_bytes apart; 1 = XOR-swizzled 128-byte lines and 2 = 512-byte
+ * blocks of 16 rows, both dense (b_row_bytes 0 or K/2) and K % 64 == 0; blocks
+ * also need N % 16 == 0 and a wave32 device. */
+HIP_KERNEL_API int hip_matmul_nbits_dp4a_layout(
+    void* stream,
+    const void* A, const void* B, const void* scales, const void* zp_u8,
+    const void* bias, void* out,
+    int64_t M, int64_t N, int64_t K, int64_t block_size,
+    void* a_qb_scratch, void* a_scale_scratch, int64_t b_row_bytes,
+    int64_t b_layout);
+
 /* Stand-alone launchers for the zero_points unpack/convert kernels, used by
  * the asym matmul_nbits cache in lib/Runtime/real/matmul_nbits.cpp.
  *
@@ -2850,6 +2902,13 @@ HIP_KERNEL_API void hip_matmul_nbits_dequant_b_fp16(
     void* stream, const void* B_packed, const void* scales_fp16,
     const void* zeros_fp16, void* B_fp16_out, int N, int K, int group_size);
 
+/* hip_matmul_nbits_dequant_b_fp16 against a B with row pitch b_row_bytes
+ * (0 = the arrival stride). */
+HIP_KERNEL_API void hip_matmul_nbits_dequant_b_fp16_ex(
+    void* stream, const void* B_packed, const void* scales_fp16,
+    const void* zeros_fp16, void* B_fp16_out, int N, int K, int group_size,
+    int b_row_bytes);
+
 /* -------------------------------------------------------------------------
  * int4 row-stride padding and stride-aware WMMA dispatch.
  *
@@ -2866,8 +2925,30 @@ HIP_KERNEL_API void hip_matmul_nbits_dequant_b_fp16(
  *   pass has no stride argument) and keys the cache with the stride, so the
  *   winner reflects the layout actually in use. Returns -1 when no fused
  *   config is eligible, leaving the caller to use the arrival-layout path.
+ *
+ * hip_matmul_nbits_u4_row_pads: the autotune table's row-pad policy for an
+ *   arch (NULL: the running device), read by the compiler for
+ *   hip-pad-matmul-nbits-weights; see HipMatmulNBitsRowPadsFn in
+ *   matmul_nbits_row_pad_abi.h. A weight the table does not list (every
+ *   weight, when the arch has no table) stays dense, and the runtime repacks
+ *   it per call as before when its stride aliases.
  * ------------------------------------------------------------------------- */
 HIP_KERNEL_API size_t hip_matmul_nbits_u4_padrow_bytes(int N, int K);
+
+HIP_KERNEL_API int hip_matmul_nbits_u4_row_pads(const char* arch,
+                                                HipMatmulNBitsRowPad* entries,
+                                                int32_t capacity);
+
+/* hip_matmul_nbits_u4_unlayout: copy a B stored in byte order `layout` (1 XOR
+ *   lines, 2 16-row blocks; K % 64 == 0, N % 16 == 0 for blocks) into dst as
+ *   dense rows of K/2 bytes. hip_matmul_nbits_u4_unlayout_scratch does it into a
+ *   shared scratch (grown to the largest weight, reused by the next call) and
+ *   returns it, or nullptr on failure. For the int4 paths that do not read the
+ *   layout directly. */
+HIP_KERNEL_API int hip_matmul_nbits_u4_unlayout(
+    void* stream, const void* B, void* dst, int N, int K, int layout);
+HIP_KERNEL_API const void* hip_matmul_nbits_u4_unlayout_scratch(
+    void* stream, const void* B, int N, int K, int layout);
 
 HIP_KERNEL_API int hip_matmul_nbits_u4_prepack_padrow(
     void* stream, const void* B, void* dst, int N, int K);
@@ -2876,6 +2957,15 @@ HIP_KERNEL_API int hip_matmul_nbits_u4_wmma_stride(
     void* stream, int cfg, int M, int N, int K, int group_size,
     const void* A, int lda, const void* B, const void* scales,
     const void* zeros, void* C, int ldc, int b_row_bytes);
+
+/* hip_matmul_nbits_u4_wmma_stride for a B stored in byte order `layout`
+ * (0 rows; 1 XOR lines; 2 16-row blocks). Only the extended entries with a
+ * nonzero variant read layouts 1 and 2; returns -1 when no config serves the
+ * shape in that layout. */
+HIP_KERNEL_API int hip_matmul_nbits_u4_wmma_layout(
+    void* stream, int cfg, int M, int N, int K, int group_size,
+    const void* A, int lda, const void* B, const void* scales,
+    const void* zeros, void* C, int ldc, int b_row_bytes, int layout);
 
 /* The WMMA config table (kWmmaConfigs) as forced-config tests and offline
  * measurements see it. hip_matmul_nbits_u4_wmma_config_desc fills `out` for
@@ -2907,6 +2997,13 @@ HIP_KERNEL_API int hip_matmul_nbits_u4_wmma_run_config(
     void* stream, int cfg, int M, int N, int K, int group_size,
     const void* A, int lda, const void* B, const void* scales,
     const void* zeros, void* C, int ldc, int b_row_bytes);
+
+/* hip_matmul_nbits_u4_wmma_run_config with B in byte order `layout`; -2 also
+ * when the config does not read that layout. */
+HIP_KERNEL_API int hip_matmul_nbits_u4_wmma_run_config_layout(
+    void* stream, int cfg, int M, int N, int K, int group_size,
+    const void* A, int lda, const void* B, const void* scales,
+    const void* zeros, void* C, int ldc, int b_row_bytes, int layout);
 
 /* hip_matmul_nbits_u4_wmma_padrow: fused int4 WMMA prefill against a row-padded
  *   B, repacking B into a single shared scratch on each call. Bounds padded-B

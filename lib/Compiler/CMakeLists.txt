@@ -8,6 +8,7 @@ message(STATUS "Building Compiler Library")
 # Create compiler library
 add_library(LibHipCompiler STATIC
   CompilerDriver.cpp
+  MatmulNBitsRowPads.cpp
   PluginRegistry.cpp
   # Static compiler-plugin dispatch. Includes the CMake-generated
   # ${CMAKE_BINARY_DIR}/include/hip/Compiler/StaticLinkedPlugins.inc (see
@@ -214,6 +215,12 @@ llvm_map_components_to_libnames(compiler_llvm_libs
 )
 
 target_link_libraries(LibHipCompiler PUBLIC ${compiler_llvm_libs})
+
+# MatmulNBitsRowPads.cpp reads the custom kernels' row-pad export through its
+# plain-C ABI header (matmul_nbits_row_pad_abi.h).
+target_include_directories(LibHipCompiler PRIVATE
+  ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/include
+)
 
 target_include_directories(LibHipCompiler PUBLIC
   ${CMAKE_BINARY_DIR}/lib

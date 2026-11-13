@@ -505,6 +505,17 @@ def Hip_ConstantOp : Hip_Op<"constant", [Pure]> {
     the producer-owned storage is live. Textual pass invocation rejects them
     before any address is dereferenced.
 
+    `row_bytes` (external sources only) marks a row-padded layout: the source
+    holds `size / row_bytes` dense rows of `row_bytes` bytes, and the stored
+    constant places each at the pitch of the rank-2 8-bit result's inner
+    dimension, zero-filling the rest. Set by `hip-pad-matmul-nbits-weights`.
+
+    `weight_layout` (with `row_bytes` equal to the result's inner dimension, no
+    pad) stores the dense rows in another byte order, a
+    `hip::MatmulNBitsWeightLayout` other than Rows
+    (`include/hip/matmul_nbits_weight_layout.h`): 1 = XOR-swizzled 128-byte
+    lines, 2 = 512-byte blocks of 16 rows. Set by `hip-pad-matmul-nbits-weights`.
+
     This op deliberately has no fold method. Generic canonicalization may
     reason about its purity, but only `hip-externalize-constants` may choose
     between inline and external storage.
@@ -518,7 +529,9 @@ def Hip_ConstantOp : Hip_Op<"constant", [Pure]> {
     OptionalAttr<I64Attr>:$size,
     OptionalAttr<StrAttr>:$symbol_name_hint,
     OptionalAttr<StrAttr>:$source_name,
-    OptionalAttr<I64Attr>:$serialization_order
+    OptionalAttr<I64Attr>:$serialization_order,
+    OptionalAttr<I64Attr>:$row_bytes,
+    OptionalAttr<I64Attr>:$weight_layout
   );
   let results = (outs AnyRankedTensor:$result);
 
@@ -539,7 +552,8 @@ def Hip_ConstantOp : Hip_Op<"constant", [Pure]> {
       build($_builder, $_state, result, value, /*location=*/nullptr,
             /*offset=*/nullptr, /*memory_address=*/nullptr, /*size=*/nullptr,
             /*symbol_name_hint=*/nullptr, /*source_name=*/nullptr,
-            /*serialization_order=*/nullptr);
+            /*serialization_order=*/nullptr,
+            /*row_bytes=*/nullptr, /*weight_layout=*/nullptr);
     }]>,
     OpBuilder<(ins "::mlir::RankedTensorType":$result,
                    "::mlir::StringAttr":$location,
@@ -547,7 +561,8 @@ def Hip_ConstantOp : Hip_Op<"constant", [Pure]> {
                    "::mlir::IntegerAttr":$size), [{
       build($_builder, $_state, result, /*value=*/nullptr, location, offset,
             /*memory_address=*/nullptr, size, /*symbol_name_hint=*/nullptr,
-            /*source_name=*/nullptr, /*serialization_order=*/nullptr);
+            /*source_name=*/nullptr, /*serialization_order=*/nullptr,
+            /*row_bytes=*/nullptr, /*weight_layout=*/nullptr);
     }]>,
     OpBuilder<(ins "::mlir::RankedTensorType":$result,
                    "::mlir::IntegerAttr":$memory_address,
@@ -555,7 +570,8 @@ def Hip_ConstantOp : Hip_Op<"constant", [Pure]> {
       build($_builder, $_state, result, /*value=*/nullptr,
             /*location=*/nullptr, /*offset=*/nullptr, memory_address, size,
             /*symbol_name_hint=*/nullptr, /*source_name=*/nullptr,
-            /*serialization_order=*/nullptr);
+            /*serialization_order=*/nullptr,
+            /*row_bytes=*/nullptr, /*weight_layout=*/nullptr);
     }]>
   ];
 
@@ -904,7 +920,16 @@ def Hip_MatMulNBitsOp : Hip_DpsOp_WithInfer<"matmul_nbits", "Output", [AttrSized
     I64Attr:$block_size,
     I64Attr:$accuracy_level,
     I64Attr:$zp_elem_size,  // zero_points element size: 1=uint8 packed, 2=fp16
-    DefaultValuedAttr<I64Attr, "2">:$scale_elem_size // scales element size in bytes: 2=fp16, 4=fp32
+    DefaultValuedAttr<I64Attr, "2">:$scale_elem_size, // scales element size in bytes: 2=fp16, 4=fp32
+    // Byte pitch of B's rows as laid out by hip-pad-matmul-nbits-weights:
+    // above K/2 the weight is stored row-padded; K/2 keeps it dense on purpose
+    // (the runtime does not repack it). 0: dense, not laid out by the
+    // compiler; the runtime may repack an aliasing weight per call.
+    DefaultValuedAttr<I64Attr, "0">:$b_row_bytes,
+    // Byte order of B as laid out by hip-pad-matmul-nbits-weights, a
+    // hip::MatmulNBitsWeightLayout: 0 = rows at b_row_bytes; 1 = XOR-swizzled
+    // lines and 2 = 16-row blocks, both with b_row_bytes = K/2.
+    DefaultValuedAttr<I64Attr, "0">:$b_layout
   );
 
   let assemblyFormat = [{
