@@ -37,10 +37,30 @@ table ConstantInfo {
   source: ConstantSource;
   // Read from its FileRefSource on demand; no GPU copy is allocated.
   disk_resident: bool = false;
+  // Row-padded constant: the source holds size / row_pitch dense rows of
+  // row_bytes bytes, which the per-entry upload places row_pitch bytes apart
+  // (size is the padded footprint in the blob). 0 = dense, copied as-is.
+  row_bytes: int64 = 0;
+  row_pitch: int64 = 0;
+  // A hip::MatmulNBitsWeightLayout (include/hip/matmul_nbits_weight_layout.h)
+  // other than Rows: the source holds size / row_bytes dense rows of row_bytes
+  // (row_pitch == row_bytes), which the upload rearranges into that byte order.
+  weight_layout: int32 = 0;
+}
+
+// HipModelMetaInfo.version. RowPadded adds row-padded constants, whose
+// ConstantInfo.size is the padded footprint rather than the source byte count;
+// WeightLayout adds ConstantInfo.weight_layout. The writer uses the lowest
+// version its constants need, and a runtime rejects a version above the MAX it
+// was built with.
+enum ModelMetaVersion : int32 {
+  Dense = 1,
+  RowPadded = 2,
+  WeightLayout = 3,
 }
 
 table HipModelMetaInfo {
-  version: int32 = 1;
+  version: int32 = 1;  // a ModelMetaVersion
   constants_filename: string;
   constants: [ConstantInfo];
   input_count: int64;

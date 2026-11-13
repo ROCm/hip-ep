@@ -46,6 +46,38 @@ target_include_directories(test-transient-arena PRIVATE
 add_test(NAME TransientArenaUnitTest COMMAND test-transient-arena)
 set_target_properties(test-transient-arena PROPERTIES FOLDER "runtime-tests")
 
+# The pre-b_row_bytes wrap_matmul_nbits signature must keep reaching
+# wrap_matmul_nbits_ex with the arrival layout. Built natively against the mock
+# runtime, which prints each call.
+add_executable(test-matmul-nbits-abi
+    test_matmul_nbits_abi.cpp
+    ${CMAKE_SOURCE_DIR}/lib/Runtime/mock/mock_gpu.cpp
+)
+target_compile_features(test-matmul-nbits-abi PRIVATE cxx_std_17)
+target_include_directories(test-matmul-nbits-abi PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/lib/Runtime
+    ${CMAKE_SOURCE_DIR}/lib/Runtime/mock
+)
+target_compile_definitions(test-matmul-nbits-abi PRIVATE HIPDNN_EP_RT_NO_EXPORT)
+add_test(NAME MatMulNBitsAbiUnitTest COMMAND test-matmul-nbits-abi)
+set_tests_properties(MatMulNBitsAbiUnitTest PROPERTIES
+    PASS_REGULAR_EXPRESSION "wrap_matmul_nbits_ex\\(M=1, N=64, K=64, [^\n]*b_row_bytes=0, b_layout=0\\)"
+    FAIL_REGULAR_EXPRESSION "rc=[^0]")
+set_target_properties(test-matmul-nbits-abi PROPERTIES FOLDER "runtime-tests")
+
+# Checks applied to every ConstantInfo before upload, the row expansion of
+# row-padded constants and the weight-layout rearrangement
+# (lib/Runtime/constant_layout.h, header-only).
+add_executable(test-constant-layout test_constant_layout.cpp)
+target_compile_features(test-constant-layout PRIVATE cxx_std_17)
+target_include_directories(test-constant-layout PRIVATE
+    ${CMAKE_SOURCE_DIR}/lib/Runtime
+    ${CMAKE_SOURCE_DIR}/include
+)
+add_test(NAME ConstantLayoutUnitTest COMMAND test-constant-layout)
+set_target_properties(test-constant-layout PROPERTIES FOLDER "runtime-tests")
+
 # GQA offline autotune tests are GPU-free: they link the real embedded table
 # (lut/gfx1151.fb) and drive the same resolver that ships in
 # custom_kernels_<arch>, through the exported extern "C" shims. The resolver's

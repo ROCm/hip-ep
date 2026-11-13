@@ -139,6 +139,7 @@ the selected perfConfig string are printed only with `--verbose`.
 | `outline-onnx-to-hipdnn` | module | Outline subgraphs targeted at hipDNN graph compilation. |
 | `convert-onnx-to-hip` | module | Pattern-match ONNX ops by name → HIP dialect; lower both constant sweeps to policy-neutral `hip.constant`; legalize GatherBlockQuantized (INT4 packing, unsigned, quantize_axis). Pre-lowering folds run first on ONNX IR, among them the `onnx.Attention` mask fold (sliding window and key-padding bias, `AttentionWindowFold.cpp`) and the sigmoid + correction-bias QMoE routing fold (`QMoEConversion.cpp`). |
 | `hip-fold-batchnorm` | func.func | Fold an inference `hip.batch_norm` with constant parameters into the filter and bias of the `hip.conv` producing it, directly or through a `hip.add` of two convs (the shift goes into one bias). Every intermediate result must have the batch norm as its only consumer. Reads inline and file-backed constants only; a batch norm over memory-address-backed weights is left in place. |
+| `hip-pad-matmul-nbits-weights` | module | Retype int4 `hip.matmul_nbits` weight carriers to `[N, K/2 + pad]` (`row_bytes = K/2`) and set the users' `b_row_bytes`, or to `[N, K/2]` in another byte order (`weight_layout`; the users' `b_layout`: XOR-swizzled lines or 16-row blocks), so the runtime reads them without a per-call repack. Only weights listed in the device's row-pad table (`row-pads`, filled by the compiler driver from the device's autotune table) are padded, each to its listed pad; an unlisted weight stays dense and keeps the runtime's per-call repack, and a device without a table pads nothing. A listed pad of 0 keeps the weight dense with `b_row_bytes = K/2` (no runtime repack). `HIPDNN_EP_PAD_MATMUL_NBITS_WEIGHTS=0` skips it. |
 | `hip-externalize-constants` | module | Validate explicit serialization order, append unordered carriers deterministically, plan/serialize, then replace `hip.constant` using the existing inline/full/streaming/hybrid metadata contract. Direct threshold default: 0. |
 | `hip-fold-constant-extracts` | func.func | Resolve constant-index `tensor.extract` of vectors assembled with `tensor.insert_slice` (ONNX shape vectors) to the `from_elements` operand or integer constant element they read. |
 | `hip-infer-shapes` | module | Refine `?` dims on HIP DPS result types via `ReifyRankedShapedTypeOpInterface`. |
@@ -252,6 +253,8 @@ ONNX → HIP  (buildOnnxToHipPipeline)
   hip-infer-shapes
   hip-fusion-transform               (must precede externalization: its patterns
                                       read hip.constant payloads)
+  hip-pad-matmul-nbits-weights       (after every weight rewrite, before
+                                      externalization stores the bytes)
   hip-externalize-constants
   canonicalize ; cse
   func.func(hip-split-duplicate-dps-inits)

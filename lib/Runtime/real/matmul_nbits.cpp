@@ -8,6 +8,7 @@
 #include "../op_state.h"
 #include "../runtime_state_internal.h"
 #include "error_check_macros.h"
+#include "hip/matmul_nbits_row_alias.h"
 #include "hip_arch_compat.h"
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
@@ -261,44 +262,12 @@ extern "C" int8_t hipdnn_ep_op_state_construct_matmul_nbits(RuntimeState *state,
 
 namespace {
 
-// True when the arrival row stride K/2 falls in a cache-aliasing regime.
-//
-// Rows a tile reads in one K-step sit stride_lines = (K/2)/128 cache lines
-// apart, which reaches only 64 / gcd(stride_lines, 64) of the 64 sets. When
-// that GCD is large -- many factors of two in K/2 -- the rows collide and evict
-// each other even though the working set fits in cache. Requiring the stride to
-// be a whole number of lines makes stride_lines exact, and a GCD of at least 8
-// means at most 8 reachable sets, which is where the measured 30-89% slowdowns
-// start.
-//
-// Fires for K=4096 (stride 2048, 16 lines, gcd 16) and K=8192 (gcd 32). Does
-// not for K=2880 (stride 1440, not a whole number of lines) or K=3584 (14
-// lines, gcd 2).
-//
-// Note for the caller: the two conditions together imply K % 2048 == 0, which
-// is why the padrow repack may assume the arrival stride is exactly K/2 for
-// any power-of-two group_size up to 2048. The gate below still checks that
-// explicitly rather than leaning on the implication.
-static bool shouldPadRow(int64_t K) {
-  const int64_t stride = K / 2;
-  if (stride % 128 != 0)
-    return false;
-  const int64_t stride_lines = stride / 128;
-  int64_t a = stride_lines, b = 64;
-  while (b) {
-    int64_t t = b;
-    b = a % b;
-    a = t;
-  }
-  return a >= 8;
-}
-
 // Returns the cached row-major fp16 [N,K] dequant of `B`, dequantizing on the
 // first use for this weight pointer. Returns nullptr on hipMalloc failure.
 const void *get_or_dequant_b_fp16(MatmulNbitsState *mst, void *stream,
                                   const void *B, const void *scales_fp16,
                                   const void *zeros_fp16, int N, int K,
-                                  int group_size) {
+                                  int group_size, int b_row_bytes) {
   const size_t bytes =
       static_cast<size_t>(N) * static_cast<size_t>(K) * sizeof(__fp16);
 
@@ -313,8 +282,8 @@ const void *get_or_dequant_b_fp16(MatmulNbitsState *mst, void *stream,
             bytes);
     return nullptr;
   }
-  hip_matmul_nbits_dequant_b_fp16(stream, B, scales_fp16, zeros_fp16, dst, N, K,
-                                  group_size);
+  hip_matmul_nbits_dequant_b_fp16_ex(stream, B, scales_fp16, zeros_fp16, dst, N,
+                                     K, group_size, b_row_bytes);
 
   if (it != mst->b_fp16.end()) {
     hipFree(it->second.first);
@@ -577,6 +546,21 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
                       int64_t K, int64_t batch_count, int64_t bits,
                       int64_t block_size, int64_t elem_size,
                       int64_t zp_elem_size, int64_t scale_elem_size) {
+  return wrap_matmul_nbits_ex(state, op_state_slot, A, B, scales, zero_points,
+                              g_idx, bias, output, M, N, K, batch_count, bits,
+                              block_size, elem_size, zp_elem_size,
+                              scale_elem_size, /*b_row_bytes=*/0,
+                              /*b_layout=*/0);
+}
+
+int wrap_matmul_nbits_ex(RuntimeState *state, int op_state_slot, const void *A,
+                         const void *B, const void *scales,
+                         const void *zero_points, const void *g_idx,
+                         const void *bias, void *output, int64_t M, int64_t N,
+                         int64_t K, int64_t batch_count, int64_t bits,
+                         int64_t block_size, int64_t elem_size,
+                         int64_t zp_elem_size, int64_t scale_elem_size,
+                         int64_t b_row_bytes, int64_t b_layout) {
   OP_PROFILE(
       "matmul_nbits",
       [&] {
@@ -610,6 +594,38 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
     fprintf(stderr, "wrap_matmul_nbits: g_idx not supported\n");
     return -1;
   }
+
+  // The compiler lays out a weight's rows only for bits=4 with whole quant
+  // groups (hip-pad-matmul-nbits-weights); anything else is a malformed module.
+  // Every kernel API takes the pitch as int.
+  if (b_row_bytes != 0 &&
+      (bits != 4 || block_size <= 0 || K % block_size != 0 ||
+       b_row_bytes < K / 2 || b_row_bytes > INT32_MAX)) {
+    fprintf(stderr,
+            "wrap_matmul_nbits: unsupported b_row_bytes=%lld (bits=%lld "
+            "K=%lld block_size=%lld)\n",
+            (long long)b_row_bytes, (long long)bits, (long long)K,
+            (long long)block_size);
+    return -1;
+  }
+  // A weight in a byte order other than rows (hip::MatmulNBitsWeightLayout)
+  // is laid out by the compiler for bits=4, dense rows, K % 64 == 0.
+  if (b_layout != 0 && (b_layout < 0 || b_layout > 2 || bits != 4 ||
+                        K % 64 != 0 || (b_layout == 2 && N % 16 != 0) ||
+                        (b_row_bytes != 0 && b_row_bytes != K / 2))) {
+    fprintf(stderr,
+            "wrap_matmul_nbits: unsupported b_layout=%lld (bits=%lld N=%lld "
+            "K=%lld b_row_bytes=%lld)\n",
+            (long long)b_layout, (long long)bits, (long long)N, (long long)K,
+            (long long)b_row_bytes);
+    return -1;
+  }
+  // b_row_bytes == K/2 is a weight the compiler kept dense on purpose (its
+  // table measured it no slower dense): no per-call repack below, and the
+  // kernels get the dense layout (0).
+  const bool laid_out_by_compiler = b_row_bytes != 0;
+  if (b_row_bytes == K / 2)
+    b_row_bytes = 0;
 
   // ONNX MatMulNBits allows `scales` to be fp16 or fp32 independent of the
   // packed-weight dtype (this lm_head-style model uses fp32 activations +
@@ -743,9 +759,9 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
       if (base) {
         void *a_qb = base;
         void *a_scale = base + scale_off;
-        int rc =
-            hip_matmul_nbits_dp4a(stream, A, B, scales, pre_zp_u8, bias, output,
-                                  M, N, K, block_size, a_qb, a_scale);
+        int rc = hip_matmul_nbits_dp4a_layout(
+            stream, A, B, scales, pre_zp_u8, bias, output, M, N, K, block_size,
+            a_qb, a_scale, b_row_bytes, b_layout);
         if (rc == 0) {
           result = 0;
           goto cleanup;
@@ -755,6 +771,22 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
             "[REAL] matmul_nbits dp4a rc=%d, falling back to fp GEMV\n", rc);
       }
     }
+  }
+
+  // The wave64 path below dequantizes rows. A weight in another byte order
+  // runs it on a dense copy in a shared scratch; on every other device
+  // hip_matmul_nbits_ex takes the byte order (its WMMA prefill reads it, its
+  // other paths make the same dense copy).
+  if (b_layout != 0 && hipdnn_device_is_wave64()) {
+    B = hip_matmul_nbits_u4_unlayout_scratch(stream, B, static_cast<int>(N),
+                                             static_cast<int>(K),
+                                             static_cast<int>(b_layout));
+    if (!B) {
+      fprintf(stderr, "wrap_matmul_nbits: no dense copy of the B layout\n");
+      return -1;
+    }
+    b_layout = 0;
+    b_row_bytes = 0;
   }
 
   // CDNA/wave64 prefill fast path: dequantize B -> fp16 once and run a
@@ -780,7 +812,8 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
       if (mst) {
         const void *b_fp16 = get_or_dequant_b_fp16(
             mst, stream, B, scales, zeros_fp16, static_cast<int>(N),
-            static_cast<int>(K), static_cast<int>(block_size));
+            static_cast<int>(K), static_cast<int>(block_size),
+            static_cast<int>(b_row_bytes));
         if (b_fp16) {
           result = matmul_nbits_prefill_hipblaslt(mst, state, A, b_fp16, bias,
                                                   output, M, N, K);
@@ -793,13 +826,14 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
   }
 
   // RDNA int4 WMMA prefill against a row-padded B, for the K values where the
-  // arrival stride aliases into a handful of cache sets (see shouldPadRow).
+  // arrival stride aliases into a handful of cache sets
+  // (see hip::matmulNBitsRowStrideAliases).
   // Worth 11-16% there and nothing elsewhere, hence the shape gate.
   //
   // block_size dividing K is required, not incidental: the repack copies rows
   // at a K/2 source stride, while the arrival layout is num_groups_k *
   // (block_size/2) bytes per row. The two agree only when the last quant group
-  // is full. shouldPadRow already implies K % 2048 == 0, so this excludes
+  // is full. The alias test already implies K % 2048 == 0, so this excludes
   // nothing in practice, but it keeps the assumption checked rather than
   // inferred.
   //
@@ -811,10 +845,13 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
   // through unpadded.
   //
   // Decode (M=1) and bias shapes never enter: the M>=16 and !bias gates stop
-  // them. wave64 (CDNA) has already taken the hipBLASLt path above.
-  if (!hipdnn_device_is_wave64() && bits == 4 && batch_count == 1 &&
-      (K % 32 == 0) && M >= 16 && elem_size == 2 && block_size > 0 &&
-      (K % block_size == 0) && !bias && shouldPadRow(K)) {
+  // them. wave64 (CDNA) has already taken the hipBLASLt path above. A weight
+  // the compiler laid out (padded, or kept dense on purpose) needs no repack
+  // and goes straight to the dispatch below.
+  if (!laid_out_by_compiler && !hipdnn_device_is_wave64() && bits == 4 &&
+      batch_count == 1 && (K % 32 == 0) && M >= 16 && elem_size == 2 &&
+      block_size > 0 && (K % block_size == 0) && !bias &&
+      hip::matmulNBitsRowStrideAliases(K)) {
     const void *zeros_fp16 = nullptr;
     bool zeros_ok = true;
     if (zero_points) {
@@ -839,9 +876,10 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
     }
   }
 
-  HIP_CHECK(hip_matmul_nbits(stream, A, B, scales, zero_points, bias, output, M,
-                             N, K, batch_count, bits, block_size, elem_size,
-                             zp_elem_size, pre_zp_u8, pre_zp_fp16));
+  HIP_CHECK(hip_matmul_nbits_ex(stream, A, B, scales, zero_points, bias, output,
+                                M, N, K, batch_count, bits, block_size,
+                                elem_size, zp_elem_size, pre_zp_u8, pre_zp_fp16,
+                                b_row_bytes, b_layout));
 
 cleanup:
   return result;

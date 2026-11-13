@@ -172,11 +172,13 @@ Dynamic dimensions are encoded as `-1`.
 
 | Field | Type | Purpose |
 |-------|------|---------|
-| `version` | `int32` | Schema version |
+| `version` | `int32` | `ModelMetaVersion`, the lowest that describes every constant: 1 (`Dense`); 2 (`RowPadded`) when some constant has `row_pitch != 0`, because that changes what `size` means; 3 (`WeightLayout`) when some constant has a `weight_layout`. The runtime verifies the FlatBuffer, rejects a version outside the range it was built with, and checks every constant (non-negative `offset` and `size` without overflow; `row_bytes` and `row_pitch` both zero or `0 < row_bytes <= row_pitch` with `size % row_pitch == 0`; a known `weight_layout`, with `row_pitch == row_bytes` and a row count it is defined for) before allocating; `hipdnn_ep_state_init_with_fs` returns 12 otherwise |
 | `constants_filename` | `string` | Name of the constants file to open via `fs` |
-| `constants[i].size` | `int64` | Byte size of constant `i` |
+| `constants[i].size` | `int64` | Byte size of constant `i` (its footprint in the GPU blob) |
 | `constants[i].offset` | `int64` | Byte offset of constant `i` in the constants file |
 | `constants[i].disk_resident` | `bool` | Constant `i` is read on demand from its `FileRefSource`; it has no GPU copy |
+| `constants[i].row_bytes`, `.row_pitch` | `int64` | Streaming only, 0 when dense: the source holds `size / row_pitch` dense rows of `row_bytes`, which the per-entry upload places `row_pitch` apart (row-padded int4 MatMulNBits weights, see [constant-handling-design.md](constant-handling-design.md#row-padded-constants)) |
+| `constants[i].weight_layout` | `int32` | Streaming only, 0 (rows) otherwise: a `hip::MatmulNBitsWeightLayout` (`include/hip/matmul_nbits_weight_layout.h`) the per-entry upload rearranges the dense rows into (1 XOR-swizzled lines, 2 16-row blocks) |
 | `input_count` | `int64` | Number of model inputs the graph reads. An unread function argument is omitted |
 | `output_count` | `int64` | Number of model outputs |
 | `inputs[i].shape` | `[int64]` | Tensor dimensions of input `i`; `-1` = dynamic |
@@ -208,6 +210,16 @@ Pool planning is the canonical example:
 The generated LLVM IR plus `RuntimeState` therefore carry pool behavior. See
 [pool-allocs-memory-planning.md](pool-allocs-memory-planning.md) for the
 attribute, lowering, and grow-on-demand runtime contract.
+
+The runtime functions those calls name are an ABI between artifacts and
+runtimes of different builds: the model cache identity comes from the graph,
+so a cached artifact can be loaded by a newer runtime. A runtime function
+therefore keeps its signature once generated code calls it; a new argument
+goes into a new symbol that new lowering calls, and the old symbol forwards
+with the value that reproduces its old behavior. For example,
+`wrap_matmul_nbits` forwards to `wrap_matmul_nbits_ex` with
+`b_row_bytes = 0` and `b_layout = 0` (the arrival layout), and
+`hip.matmul_nbits` lowers to `wrap_matmul_nbits_ex`.
 
 ### Disk-resident constants
 
