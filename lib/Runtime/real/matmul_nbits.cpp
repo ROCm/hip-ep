@@ -709,8 +709,8 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
   //   - HIPDNN_EP_MATMUL_DP4A=1
   //   - 1 <= M <= HIPDNN_EP_MATMUL_DP4A_MAX_M && batch_count==1
   //   - bits==4, K%32==0, block_size>0, elem_size==2 (fp16 activation)
-  //   - symmetric (no zero_points) OR asym with pre_zp_u8 already unpacked
-  //   above
+  //   - symmetric (no zero_points) OR asym with uint8 zero_points, which the
+  //     kernel reads in their packed form
   // The kernel dynamically quantizes the activation rows into per-session
   // scratch (a_qb: M*K int8 bytes, a_scale: M*ceil(K/block_size) floats) sized
   // once and grown on demand, then runs an integer-dot GEMV. Quantizing once
@@ -728,7 +728,7 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
   if (hipdnn_ep_matmul_dp4a_enabled() && M >= 1 &&
       M <= hipdnn_ep_matmul_dp4a_max_m() && batch_count == 1 && bits == 4 &&
       block_size > 0 && (K % 32 == 0) && elem_size == 2 &&
-      (!zero_points || (zp_elem_size == 1 && pre_zp_u8))) {
+      (!zero_points || zp_elem_size == 1)) {
     const size_t k_blocks =
         static_cast<size_t>((K + block_size - 1) / block_size);
     // a_qb at offset 0 (M*K bytes, hipMalloc base is over-aligned); a_scale
@@ -744,8 +744,8 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
         void *a_qb = base;
         void *a_scale = base + scale_off;
         int rc =
-            hip_matmul_nbits_dp4a(stream, A, B, scales, pre_zp_u8, bias, output,
-                                  M, N, K, block_size, a_qb, a_scale);
+            hip_matmul_nbits_dp4a(stream, A, B, scales, zero_points, bias,
+                                  output, M, N, K, block_size, a_qb, a_scale);
         if (rc == 0) {
           result = 0;
           goto cleanup;

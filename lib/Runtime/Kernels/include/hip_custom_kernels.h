@@ -2828,8 +2828,9 @@ HIP_KERNEL_API int hip_matmul_nbits_wmma_tiled_grouped_supported(
  *   A          : fp16 activations [M, K]  (batch==1, row-major)
  *   B          : packed int4 weights  [N, K/2]
  *   scales     : fp16 [N, ceil(K/block_size)]
- *   zp_u8      : pre-unpacked uint8 zero points [N, ceil(K/block_size)] or
- *                nullptr for the symmetric (default zp=8) path
+ *   zp_packed  : the MatMulNBits zero_points input as packed, two 4-bit
+ *                groups per byte [N, ceil(ceil(K/block_size)/2)], or nullptr
+ *                for the symmetric (default zp=8) path
  *   out        : fp16 [M, N]
  *   a_qb_scratch    : >= M*K bytes (int8), caller/session-owned
  *   a_scale_scratch : >= M*ceil(K/block_size) floats, caller/session-owned
@@ -2837,7 +2838,7 @@ HIP_KERNEL_API int hip_matmul_nbits_wmma_tiled_grouped_supported(
  */
 HIP_KERNEL_API int hip_matmul_nbits_dp4a(
     void* stream,
-    const void* A, const void* B, const void* scales, const void* zp_u8,
+    const void* A, const void* B, const void* scales, const void* zp_packed,
     const void* bias, void* out,
     int64_t M, int64_t N, int64_t K, int64_t block_size,
     void* a_qb_scratch, void* a_scale_scratch);
