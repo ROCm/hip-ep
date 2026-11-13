@@ -25,6 +25,11 @@ The NHWC <-> NCHW cases cover image layout conversions with a narrow
 channel axis (e.g. an RGB input), which canonicalise to a 2-D transpose
 with one side of at most 16 and take the narrow-side kernels; C=17 pins
 the first width that stays on the square-tile kernel.
+
+The general-permutation cases cover permutations that do not reduce to a
+2-D transpose (depth-to-space, space-to-depth, an outer-axis swap and a
+three-axis reversal), in both of the unit kernel's directions and with a
+ragged last block.
 """
 
 import numpy as np
@@ -105,6 +110,39 @@ class TestTranspose:
         else:
             shape, perm = [batch, channels, height, width], [0, 2, 3, 1]
         rng = np.random.default_rng(47 + channels)
+        x = rng.uniform(-1, 1, shape).astype(dtype)
+
+        model = _make_transpose_model(shape, perm, dtype)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0)
+
+    # ------------------------------------------------------------------
+    # General permutations (no 2-D reduction)
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize("dtype", [np.float32, np.float16], ids=["fp32", "fp16"])
+    @pytest.mark.parametrize(
+        "shape, perm",
+        [
+            ([1, 3, 96, 2, 112, 2], [0, 1, 3, 5, 2, 4]),
+            ([1, 12, 24, 8, 28, 8], [0, 1, 3, 5, 2, 4]),
+            ([1, 48, 2, 56, 2, 3], [0, 5, 2, 4, 1, 3]),
+            ([1, 192, 100, 51], [2, 0, 1, 3]),
+            ([1, 12, 8, 64, 64], [0, 3, 4, 2, 1]),
+            ([7, 300, 5, 13], [2, 1, 3, 0]),
+        ],
+        ids=[
+            "depth_to_space",
+            "space_to_depth",
+            "depth_to_space_channels_last",
+            "outer_axis_swap",
+            "three_axis_reversal",
+            "ragged",
+        ],
+    )
+    def test_transpose_general(self, model_runner, shape, perm, dtype):
+        """Permutations that canonicalise to rank 3+ without a 2-D swap."""
+        rng = np.random.default_rng(53 + len(shape))
         x = rng.uniform(-1, 1, shape).astype(dtype)
 
         model = _make_transpose_model(shape, perm, dtype)

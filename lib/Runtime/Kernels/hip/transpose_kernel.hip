@@ -239,6 +239,186 @@ hipError_t launchSmallC(hipStream_t stream, const void* input, void* output,
     return hipGetLastError();
 }
 
+// Any other permutation, generalising the narrow-side kernels above. Take the
+// side whose innermost axis keeps the axes after it (in that side's order) as
+// a block of C "channels", and call every position of the remaining axes a
+// "unit". On that side each unit is C contiguous elements and consecutive
+// units are contiguous, so a block's run of U units is one contiguous run. On
+// the other side the unit's innermost axis has stride 1, so for a fixed
+// channel consecutive units are contiguous within each row. Staging the run
+// through LDS makes both global accesses coalesced:
+//
+//   input-contiguous:  the output's innermost axis q, with the input axes
+//                      after q as channels (e.g. [192,100,51] by [1,0,2],
+//                      C = 1; depth-to-space [3,576,2,672,2] by
+//                      [0,2,4,1,3], C = 2);
+//   output-contiguous: the input's innermost axis, with the output axes
+//                      after it as channels (e.g. [12,8,65536] by [2,1,0],
+//                      C = 96).
+//
+// The strided side's offset of every unit and every channel is decoded once
+// per block into LDS, so the copy loops are shifts and masks. Offsets are
+// 32-bit; the caller checks the element count.
+static constexpr int kUnitThreads = 256;
+static constexpr int kUnitMaxPerBlock = 2048;
+static constexpr int kUnitMinPerBlock = 32;
+static constexpr size_t kUnitLdsBudget = 32 * 1024;
+
+struct UnitMeta {
+    uint32_t units;
+    uint32_t n;  // extent of the unit's innermost axis
+    TDiv rn;
+    int nb;      // outer unit axes, outermost first
+    uint32_t bdim[kTransposeMaxRank];
+    TDiv rb[kTransposeMaxRank];
+    int32_t bstride[kTransposeMaxRank];  // stride on the strided side
+    int nc;      // channel axes, outermost first
+    uint32_t cdim[kTransposeMaxRank];
+    TDiv rc[kTransposeMaxRank];
+    int32_t cstride[kTransposeMaxRank];
+    int C;
+    int U;       // units per block, a power of two
+    int logU;
+};
+
+__device__ __forceinline__ int unitDecode(uint32_t x, int k, const uint32_t* dim,
+                                          const TDiv* rd, const int32_t* st) {
+    int off = 0;
+    for (int i = k - 1; i >= 0; --i) {
+        const uint32_t q = tFastDiv(x, rd[i]);
+        off += static_cast<int>(x - q * dim[i]) * st[i];
+        x = q;
+    }
+    return off;
+}
+
+__host__ __device__ __forceinline__ size_t unitTileBytes(int U, int C, int elem) {
+    const size_t b = static_cast<size_t>(smallCSkew(U * C - 1) + 1) * elem;
+    return (b + 7) & ~static_cast<size_t>(7);
+}
+
+static size_t unitLdsBytes(int U, int C, int elem) {
+    return unitTileBytes(U, C, elem) + static_cast<size_t>(U + C) * sizeof(int);
+}
+
+template <typename T, bool kInContig>
+__global__ void __launch_bounds__(kUnitThreads)
+transpose_units_kernel(const T* __restrict__ src, T* __restrict__ dst,
+                       UnitMeta m) {
+    extern __shared__ uint64_t unit_lds[];
+    T* tile = reinterpret_cast<T*>(unit_lds);
+    int* uoff = reinterpret_cast<int*>(reinterpret_cast<char*>(unit_lds) +
+                                       unitTileBytes(m.U, m.C, sizeof(T)));
+    int* coff = uoff + m.U;
+    const uint32_t u0 = blockIdx.x * static_cast<uint32_t>(m.U);
+    const int nu = static_cast<int>(min(static_cast<uint32_t>(m.U), m.units - u0));
+    for (int t = threadIdx.x; t < nu; t += kUnitThreads) {
+        const uint32_t u = u0 + t;
+        const uint32_t b = tFastDiv(u, m.rn);
+        uoff[t] = unitDecode(b, m.nb, m.bdim, m.rb, m.bstride) +
+                  static_cast<int>(u - b * m.n);
+    }
+    for (int ch = threadIdx.x; ch < m.C; ch += kUnitThreads)
+        coff[ch] = unitDecode(ch, m.nc, m.cdim, m.rc, m.cstride);
+    const int total = m.U * m.C;
+    const int mask = m.U - 1;
+    if (kInContig) {
+        const T* s = src + static_cast<size_t>(u0) * m.C;
+        for (int i = threadIdx.x; i < nu * m.C; i += kUnitThreads)
+            tile[smallCSkew(i)] = s[i];
+        __syncthreads();
+        for (int j = threadIdx.x; j < total; j += kUnitThreads) {
+            const int uu = j & mask;
+            const int ch = j >> m.logU;
+            if (uu < nu) dst[uoff[uu] + coff[ch]] = tile[smallCSkew(uu * m.C + ch)];
+        }
+    } else {
+        __syncthreads();
+        for (int j = threadIdx.x; j < total; j += kUnitThreads) {
+            const int uu = j & mask;
+            const int ch = j >> m.logU;
+            if (uu < nu) tile[smallCSkew(uu * m.C + ch)] = src[uoff[uu] + coff[ch]];
+        }
+        __syncthreads();
+        T* d = dst + static_cast<size_t>(u0) * m.C;
+        for (int i = threadIdx.x; i < nu * m.C; i += kUnitThreads)
+            d[i] = tile[smallCSkew(i)];
+    }
+}
+
+// Plans the unit kernel for a canonical shape/permutation (output axis i is
+// input axis perm[i]). Returns false when C is too large for a block of at
+// least kUnitMinPerBlock units to fit the LDS budget.
+static bool planUnits(const int64_t* shape, const int* perm, int rank, int elem,
+                      bool in_contig, UnitMeta& m, size_t& lds) {
+    int64_t in_stride[kTransposeMaxRank], out_stride[kTransposeMaxRank];
+    int out_pos[kTransposeMaxRank];
+    in_stride[rank - 1] = 1;
+    for (int i = rank - 2; i >= 0; --i) in_stride[i] = in_stride[i + 1] * shape[i + 1];
+    out_stride[rank - 1] = 1;
+    for (int i = rank - 2; i >= 0; --i)
+        out_stride[i] = out_stride[i + 1] * shape[perm[i + 1]];
+    for (int i = 0; i < rank; ++i) out_pos[perm[i]] = i;
+
+    // Axes of the contiguous side, in that side's order, and each one's
+    // stride on the other side.
+    int64_t dim[kTransposeMaxRank], other[kTransposeMaxRank];
+    int pix = 0;
+    for (int i = 0; i < rank; ++i) {
+        const int a = in_contig ? i : perm[i];
+        dim[i] = shape[a];
+        other[i] = in_contig ? out_stride[out_pos[a]] : in_stride[a];
+        if (other[i] == 1) pix = i;
+    }
+    int64_t C = 1;
+    for (int i = pix + 1; i < rank; ++i) C *= dim[i];
+    int U = kUnitMaxPerBlock;
+    while (U > kUnitMinPerBlock && unitLdsBytes(U, static_cast<int>(C), elem) > kUnitLdsBudget)
+        U /= 2;
+    if (C > kUnitLdsBudget || unitLdsBytes(U, static_cast<int>(C), elem) > kUnitLdsBudget)
+        return false;
+
+    m = UnitMeta{};
+    int64_t units = 1;
+    for (int i = 0; i <= pix; ++i) units *= dim[i];
+    m.units = static_cast<uint32_t>(units);
+    m.n = static_cast<uint32_t>(dim[pix]);
+    m.rn = makeTDiv(dim[pix]);
+    m.nb = pix;
+    for (int i = 0; i < pix; ++i) {
+        m.bdim[i] = static_cast<uint32_t>(dim[i]);
+        m.rb[i] = makeTDiv(dim[i]);
+        m.bstride[i] = static_cast<int32_t>(other[i]);
+    }
+    m.nc = rank - 1 - pix;
+    for (int i = 0; i < m.nc; ++i) {
+        m.cdim[i] = static_cast<uint32_t>(dim[pix + 1 + i]);
+        m.rc[i] = makeTDiv(dim[pix + 1 + i]);
+        m.cstride[i] = static_cast<int32_t>(other[pix + 1 + i]);
+    }
+    m.C = static_cast<int>(C);
+    m.U = U;
+    while ((1 << m.logU) < U) ++m.logU;
+    lds = unitLdsBytes(U, m.C, elem);
+    return true;
+}
+
+template <typename T>
+hipError_t launchUnits(hipStream_t stream, const void* input, void* output,
+                       const UnitMeta& m, size_t lds, bool in_contig) {
+    const dim3 grid((m.units + m.U - 1) / m.U);
+    const T* in = static_cast<const T*>(input);
+    T* out = static_cast<T*>(output);
+    (void)hipGetLastError();
+    if (in_contig)
+        hipLaunchKernelGGL((transpose_units_kernel<T, true>), grid, dim3(kUnitThreads),
+                           lds, stream, in, out, m);
+    else
+        hipLaunchKernelGGL((transpose_units_kernel<T, false>), grid, dim3(kUnitThreads),
+                           lds, stream, in, out, m);
+    return hipGetLastError();
+}
+
 }  // namespace
 
 // Fast path for a batched last-two-dim transpose of 1/2/4/8-byte elements.
@@ -457,6 +637,41 @@ extern "C" int hip_transpose(void* stream,
         if (rc < 0) return rc;
         // rc == 1: declined (batch over the gridDim.z cap, or an element width
         // it does not handle). Fall through to the generic gather.
+    }
+
+    if (num_elements < (1LL << 31) &&
+        (element_size_bytes == 1 || element_size_bytes == 2 ||
+         element_size_bytes == 4 || element_size_bytes == 8)) {
+        UnitMeta in_plan, out_plan;
+        size_t in_lds = 0, out_lds = 0;
+        const bool in_ok = planUnits(cShape, cPerm, cRank, element_size_bytes,
+                                     /*in_contig=*/true, in_plan, in_lds);
+        const bool out_ok = planUnits(cShape, cPerm, cRank, element_size_bytes,
+                                      /*in_contig=*/false, out_plan, out_lds);
+        if (in_ok || out_ok) {
+            const bool use_in = in_ok && (!out_ok || in_plan.C <= out_plan.C);
+            const UnitMeta& m = use_in ? in_plan : out_plan;
+            const size_t lds = use_in ? in_lds : out_lds;
+            hipError_t err = hipErrorInvalidValue;
+            switch (element_size_bytes) {
+                case 1:
+                    err = launchUnits<uint8_t>(hip_stream, input, output, m, lds, use_in);
+                    break;
+                case 2:
+                    err = launchUnits<uint16_t>(hip_stream, input, output, m, lds, use_in);
+                    break;
+                case 4:
+                    err = launchUnits<uint32_t>(hip_stream, input, output, m, lds, use_in);
+                    break;
+                case 8:
+                    err = launchUnits<uint64_t>(hip_stream, input, output, m, lds, use_in);
+                    break;
+            }
+            if (err != hipSuccess)
+                fprintf(stderr, "[custom_kernels] hip_transpose unit launch failed: %s\n",
+                        hipGetErrorString(err));
+            return static_cast<int>(err);
+        }
     }
 
     TransposeMeta meta{};
