@@ -37,7 +37,44 @@ namespace mlir::hip {
 
 namespace {
 
-enum class Decomposition { None, QLinearConv, QLinearMatMul, DequantizedConv };
+enum class Decomposition {
+  None,
+  QLinearConv,
+  QLinearMatMul,
+  DequantizedConv,
+  Reduce
+};
+
+// A standalone rocMLIR reduce is a sum over the last axis. hip.reduce_mean
+// lowers to a scale by 1/N in front of that sum, so it is the same kernel.
+// keepdims=0 inserts a reshape after the sum, which the reduce pipeline
+// rejects, so that form stays a HIP op.
+template <typename ReduceOp> bool isLastAxisFloatReduce(ReduceOp reduce) {
+  auto dataType = dyn_cast<RankedTensorType>(reduce.getData().getType());
+  if (!dataType || !dataType.hasStaticShape() || dataType.getRank() < 1)
+    return false;
+  Type elementType = dataType.getElementType();
+  if (!elementType.isF16() && !elementType.isF32())
+    return false;
+  if (reduce.getKeepdims() != 1)
+    return false;
+  std::optional<ArrayRef<int64_t>> axes = reduce.getReducedAxes();
+  if (!axes || axes->size() != 1)
+    return false;
+  int64_t axis = (*axes)[0];
+  int64_t rank = dataType.getRank();
+  if (axis < 0)
+    axis += rank;
+  return axis == rank - 1;
+}
+
+bool isLastAxisFloatReduce(Operation *op) {
+  if (auto sum = dyn_cast<ReduceSumOp>(op))
+    return isLastAxisFloatReduce(sum);
+  if (auto mean = dyn_cast<ReduceMeanOp>(op))
+    return isLastAxisFloatReduce(mean);
+  return false;
+}
 
 void sortByBlockOrder(SmallVectorImpl<Operation *> &ops) {
   llvm::sort(ops,
@@ -50,6 +87,8 @@ void sortByBlockOrder(SmallVectorImpl<Operation *> &ops) {
 // establish. The i32 accumulator of a quantized anchor is its init, not an
 // input.
 std::optional<Decomposition> getAnchorKind(Operation *op) {
+  if (isLastAxisFloatReduce(op))
+    return Decomposition::Reduce;
   if (auto conv = dyn_cast<QLinearConvOp>(op))
     return conv->getNumResults() == 1 && planQLinearConv(conv)
                ? std::optional(Decomposition::QLinearConv)
@@ -212,6 +251,17 @@ bool KernelRegion::takeContext() {
 // ABI. Clone only inline constants, and for a quantized anchor the dequantizes
 // and reciprocals of them its epilogue reads: a dynamic Clip bound remains an
 // argument.
+// The axes of a reduce are a compile-time constant, often tensor<1xi64>. An
+// i64 kernel argument is rejected, so the constant is cloned into the body.
+bool isReduceAxesConstant(Operation *anchor, Value operand) {
+  if (!isa<ReduceSumOp, ReduceMeanOp>(anchor))
+    return false;
+  Operation *def = operand.getDefiningOp();
+  if (!def || !def->hasOneUse())
+    return false;
+  return isa<arith::ConstantOp>(def) || isa<ConstantOp>(def);
+}
+
 void KernelRegion::cloneInlineScalars() {
   SetVector<Value> kernelOperands;
   bool quantized = isQuantizedAnchor(anchor);
@@ -219,6 +269,10 @@ void KernelRegion::cloneInlineScalars() {
     if (isInlineScalarConstant(operand) ||
         (quantized && isConstantScalarExpr(operand))) {
       collectConstantScalarExpr(operand, ops);
+      continue;
+    }
+    if (isReduceAxesConstant(anchor, operand)) {
+      ops.insert(operand.getDefiningOp());
       continue;
     }
     kernelOperands.insert(operand);
@@ -448,9 +502,11 @@ struct KernelParts {
   ArrayRef<Operation *> moved;
 };
 
+enum class RocMlirOutline { Anchor, Elementwise, Reduce };
+
 // `rankOneShape` is the shape operand of every rank-0 promotion in the block,
 // made once by the first kernel that needs it.
-RocMlirOp outline(const KernelParts &parts, bool elementwise,
+RocMlirOp outline(const KernelParts &parts, RocMlirOutline kind,
                   RewriterBase &rewriter, int &counter, StringRef arch,
                   Value &rankOneShape) {
   Operation *end = parts.end;
@@ -475,8 +531,10 @@ RocMlirOp outline(const KernelParts &parts, bool elementwise,
         rewriter, loc,
         rocMlirKernelName(parentModule, ops.getArrayRef(), counter), funcType);
     kernel->setAttr("rock.kernel", rewriter.getUnitAttr());
-    if (elementwise)
+    if (kind == RocMlirOutline::Elementwise)
       kernel->setAttr("rock.elementwise", rewriter.getUnitAttr());
+    else if (kind == RocMlirOutline::Reduce)
+      kernel->setAttr("rock.reduce", rewriter.getUnitAttr());
     if (!arch.empty())
       kernel->setAttr("rock.arch", rewriter.getStringAttr(arch));
     Block *body = kernel.addEntryBlock();
@@ -670,6 +728,10 @@ private:
   // to the next. A quantized anchor continues through the modules that read
   // the modules it took, past each quantize and dequantize.
   void planEpilogue(KernelPlan &plan) {
+    // A reduce kernel stores the sum. A pointwise module that reads it is a
+    // later elementwise kernel, not an epilogue.
+    if (plan.kind == Decomposition::Reduce)
+      return;
     SetVector<Operation *> kernel;
     kernel.insert(plan.anchor);
     bool throughModules = isQuantizedAnchor(plan.anchor);
@@ -937,7 +999,8 @@ private:
     }
 
     SmallVector<Operation *> chain;
-    if (plan.kind == Decomposition::None) {
+    if (plan.kind == Decomposition::None ||
+        plan.kind == Decomposition::Reduce) {
       chain = getChain(plan.anchor, plan.epilogue);
     } else {
       chain = decompose(plan, rewriter);
@@ -951,7 +1014,9 @@ private:
       return chain.front()->emitOpError("cannot be outlined: ") << reason;
     outline({region.getEnd(), region.getContext(), region.getOperands(),
              region.getOps(), region.getResults(), moved},
-            /*elementwise=*/false, rewriter, counter, arch, rankOneShape);
+            plan.kind == Decomposition::Reduce ? RocMlirOutline::Reduce
+                                               : RocMlirOutline::Anchor,
+            rewriter, counter, arch, rankOneShape);
     return success();
   }
 
@@ -1002,7 +1067,7 @@ private:
     ops.insert(module);
     SmallVector<Value> results(module.getResults());
     outline({module, module.getCtx(), operands, ops, results, {}},
-            /*elementwise=*/true, rewriter, counter, arch, rankOneShape);
+            RocMlirOutline::Elementwise, rewriter, counter, arch, rankOneShape);
   }
 
   const DenseSet<Operation *> *claimed = nullptr;
