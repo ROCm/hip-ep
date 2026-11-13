@@ -54,12 +54,18 @@ bool isExactFloatWidening(Type from, Type to) {
   return false;
 }
 
-// A tensor-form cast with a static shape, or null.
+// A tensor-form cast with a static shape that it keeps, or null. hip.cast may
+// also reshape a one-element tensor (tensor<1xT> to tensor<U>), and folding
+// such a cast would replace its result with a value of another shape.
 CastOp getTensorCast(Operation *op) {
   auto castOp = dyn_cast_if_present<CastOp>(op);
-  if (!castOp || castOp->getNumResults() != 1 ||
-      !isStaticTensor(castOp.getInput().getType()) ||
-      !isStaticTensor(castOp->getResult(0).getType()))
+  if (!castOp || castOp->getNumResults() != 1)
+    return {};
+  Type inputType = castOp.getInput().getType();
+  Type resultType = castOp->getResult(0).getType();
+  if (!isStaticTensor(inputType) || !isStaticTensor(resultType) ||
+      cast<ShapedType>(inputType).getShape() !=
+          cast<ShapedType>(resultType).getShape())
     return {};
   return castOp;
 }

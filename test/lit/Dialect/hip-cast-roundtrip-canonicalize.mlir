@@ -174,3 +174,22 @@ func.func @dynamic_dims(%ctx: !hip.context, %x: tensor<?x8xf16>)
       outs(%ye : tensor<8x?xf16>) {to = 10 : i64} : tensor<8x?xf16>
   return %y : tensor<8x?xf16>
 }
+
+// An outer cast that also reshapes a one-element tensor stays: folding it
+// would replace a tensor<f16> with the chain's tensor<1x1xf16>.
+// CHECK-LABEL: func.func @shape_changing_outer
+// CHECK: hip.cast
+// CHECK: tensor.expand_shape
+// CHECK: hip.cast{{.*}}tensor<1x1xf32>{{.*}}tensor<f16>
+func.func @shape_changing_outer(%ctx: !hip.context, %x: tensor<1xf16>)
+    -> tensor<f16> {
+  %we = tensor.empty() : tensor<1xf32>
+  %w = hip.cast(%ctx) ins(%x : tensor<1xf16>)
+      outs(%we : tensor<1xf32>) {to = 1 : i64} : tensor<1xf32>
+  %e = tensor.expand_shape %w [[0, 1]] output_shape [1, 1]
+      : tensor<1xf32> into tensor<1x1xf32>
+  %ye = tensor.empty() : tensor<f16>
+  %y = hip.cast(%ctx) ins(%e : tensor<1x1xf32>)
+      outs(%ye : tensor<f16>) {to = 10 : i64} : tensor<f16>
+  return %y : tensor<f16>
+}
