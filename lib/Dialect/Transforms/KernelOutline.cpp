@@ -112,6 +112,10 @@ SmallVector<std::pair<Value, bool>> getInputRoots(Operation *anchor) {
   } else if (auto matmul = dyn_cast<QLinearMatMulOp>(anchor)) {
     roots.push_back({matmul.getA(), true});
     roots.push_back({matmul.getB(), false});
+  } else if (auto sum = dyn_cast<ReduceSumOp>(anchor)) {
+    roots.push_back({sum.getData(), true});
+  } else if (auto mean = dyn_cast<ReduceMeanOp>(anchor)) {
+    roots.push_back({mean.getData(), true});
   }
   return roots;
 }

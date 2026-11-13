@@ -136,6 +136,11 @@ bool runRocMlirHighLevelPipeline(ModuleOp kernelModule);
 // instead of buildKernelPipeline, and it has no tuning space or perf_config.
 bool isRocMlirElementwiseKernelModule(ModuleOp kernelModule);
 
+// Whether `kernelModule` holds a standalone reduce kernel: a `rock.kernel`
+// func the rocMLIR fusion also marked `rock.reduce`. rocMLIR lowers it through
+// buildReducePipeline. Like an elementwise kernel, it has no gemm tuning space.
+bool isRocMlirReduceKernelModule(ModuleOp kernelModule);
+
 // Whether an elementwise `kernelModule` (in rock form) still has an arith or
 // math op. Lowering can fold the whole kernel away -- an identity cast, or
 // hip.max(%x, %x) -- and the elementwise pipeline then has nothing to compile.

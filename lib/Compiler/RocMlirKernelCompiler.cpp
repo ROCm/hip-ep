@@ -103,17 +103,29 @@ int64_t perfConfigField(StringRef perf, StringRef name, int64_t fallback) {
 // perfConfig, read straight out of the string rather than re-defaulted
 // (perfConfig field `numWaves` is the backend's `numWarps`); a missing field
 // falls back to the rock default and kKnobDefault (-1) leaves a bool knob at
-// its arch default. An elementwise kernel has no perfConfig, so it gets the
-// defaults throughout.
+// its arch default. An elementwise or reduce kernel has no perfConfig, so it
+// gets the defaults throughout.
+enum class RocMlirBackendKind { Kernel, Elementwise, Reduce };
+
+RocMlirBackendKind rocMlirBackendKind(ModuleOp kernelModule) {
+  if (isRocMlirReduceKernelModule(kernelModule))
+    return RocMlirBackendKind::Reduce;
+  if (isRocMlirElementwiseKernelModule(kernelModule))
+    return RocMlirBackendKind::Elementwise;
+  return RocMlirBackendKind::Kernel;
+}
+
 bool buildBackendPipelineFor(OpPassManager &pm, StringRef arch,
-                             StringRef perfConfig, bool elementwise) {
+                             StringRef perfConfig, RocMlirBackendKind kind) {
   RocmDeviceName devName;
   if (arch.empty() || failed(devName.parse(arch)))
     return false;
 
   rock::KernelOptions kOpts;
-  if (elementwise)
+  if (kind == RocMlirBackendKind::Elementwise)
     rock::buildElementwisePipeline(pm, kOpts);
+  else if (kind == RocMlirBackendKind::Reduce)
+    rock::buildReducePipeline(pm, kOpts);
   else
     rock::buildKernelPipeline(pm, kOpts);
 
@@ -331,6 +343,12 @@ bool isRocMlirElementwiseKernelModule(ModuleOp kernelModule) {
   });
 }
 
+bool isRocMlirReduceKernelModule(ModuleOp kernelModule) {
+  return llvm::any_of(kernelModule.getOps<func::FuncOp>(), [](func::FuncOp f) {
+    return f->hasAttr("rock.kernel") && f->hasAttr("rock.reduce");
+  });
+}
+
 bool hasRocMlirComputation(ModuleOp kernelModule) {
   bool elementwise = isRocMlirElementwiseKernelModule(kernelModule);
   WalkResult found = kernelModule.walk([&](Operation *op) {
@@ -481,9 +499,8 @@ bool compileRocMlirBackend(ModuleOp kernelModule, StringRef arch,
                            StringRef perfConfig, CompiledKernel &out) {
   PassManager pm(kernelModule.getContext());
   pm.setNesting(PassManager::Nesting::Implicit);
-  if (!buildBackendPipelineFor(
-          pm, arch, perfConfig,
-          isRocMlirElementwiseKernelModule(kernelModule)) ||
+  if (!buildBackendPipelineFor(pm, arch, perfConfig,
+                               rocMlirBackendKind(kernelModule)) ||
       failed(pm.run(kernelModule)))
     return false;
   return extractCompiledKernel(kernelModule, out);
@@ -499,12 +516,15 @@ bool runRocMlirHighLevelPipeline(ModuleOp kernelModule) {
 bool compileRocMlirDefaultPerfConfig(ModuleOp kernelModule, StringRef arch,
                                      CompiledKernel &out) {
   // Only an elementwise kernel can fold away to nothing rocMLIR can compile.
-  // A conv or gemm keeps the tuning-space path below.
+  // A reduce kernel has no gemm tuning space either: rocmlir records its tile
+  // on rock.reduce_params. A conv or gemm keeps the tuning-space path below.
   if (isRocMlirElementwiseKernelModule(kernelModule)) {
     if (!hasRocMlirComputation(kernelModule))
       return false;
     return compileRocMlirBackend(kernelModule, arch, /*perfConfig=*/"", out);
   }
+  if (isRocMlirReduceKernelModule(kernelModule))
+    return compileRocMlirBackend(kernelModule, arch, /*perfConfig=*/"", out);
 
   // Affix a perfConfig to the gemm op (the `perf_config` string attr). Take
   // the first entry enumerated from the tuning search space; autotuning
@@ -554,11 +574,13 @@ compileAndEmbedRocMlirKernels(ModuleOp module,
   if (kernelNames.empty())
     return success();
 
-  // Pristine HIP bodies of elementwise kernels. A conv or gemm that rocMLIR
-  // cannot compile still fails the module. An elementwise kernel can fold
-  // away (hip.max(%x, %x)) or fail in the backend (an i64 chain:
-  // rock.blockwise_load/store stop at 32-bit integers); that kernel runs as
-  // its hip ops. With `strictElementwise`, only a kernel that folds away does.
+  // Pristine HIP bodies of elementwise and reduce kernels. A conv or gemm that
+  // rocMLIR cannot compile still fails the module. An elementwise kernel can
+  // fold away (hip.max(%x, %x)) or fail in the backend (an i64 chain:
+  // rock.blockwise_load/store stop at 32-bit integers); a reduce kernel can
+  // fail the same way when the body is not a last-axis sum. Those kernels run
+  // as their hip ops. With `strictElementwise`, only a kernel that folds away
+  // does.
   OwningOpRef<ModuleOp> hipKernels = ModuleOp::create(module.getLoc());
   for (auto func : module.getOps<func::FuncOp>())
     if (func->hasAttr("rock.kernel"))
@@ -568,7 +590,9 @@ compileAndEmbedRocMlirKernels(ModuleOp module,
     return func && func->hasAttr("rock.elementwise");
   };
   auto canFallBack = [&](StringRef name) {
-    return !options.strictElementwise && elementwiseKernel(name);
+    auto func = hipKernels->lookupSymbol<func::FuncOp>(name);
+    bool reducible = func && func->hasAttr("rock.reduce");
+    return !options.strictElementwise && (elementwiseKernel(name) || reducible);
   };
   llvm::StringSet<> onHipPath;
   auto runOnHipPath = [&](StringRef name, StringRef reason) {
