@@ -67,17 +67,16 @@ void addPluginPassesForSlot(OpPassManager &pm,
 ///   - resolve-memref-dims folds `memref.dim` through view chains to the root
 ///     buffer.
 ///   - CSE removes repeated size queries exposed by late allocation rewrites.
-///   - hoist-alloc-size-arith moves pure size computations above the first used
-///     allocation.
+///   - canonicalize folds identities exposed by CSE, such as select(c, d, d).
+///   - hoist-alloc-size-arith moves pure size computations before the earliest
+///     allocation their dependencies allow.
 /// Omitting these steps preserves correctness but may split allocations into
 /// more dominance domains and increase peak memory. Run these after view
 /// creation and immediately before pooling.
 void addPoolAllocsShapePreconditionPasses(OpPassManager &pm) {
   pm.addNestedPass<func::FuncOp>(mlir::hip::createResolveMemRefDimsPass());
-  // Allocation and view rewrites run after the pipeline's earlier CSE and may
-  // leave repeated memref.dim queries on the same source. Deduplicate them
-  // before hoisting so equivalent sizes do not open separate pool domains.
   pm.addNestedPass<func::FuncOp>(mlir::createCSEPass());
+  pm.addNestedPass<func::FuncOp>(mlir::createCanonicalizerPass());
   pm.addNestedPass<func::FuncOp>(mlir::hip::createHoistAllocSizeArithPass());
 }
 
@@ -114,6 +113,19 @@ std::unique_ptr<Pass> createVerifyNoConstantCarriersPass() {
 void mlir::hip::buildOnnxToHipPipelineTail(
     OpPassManager &pm, const mlir::hip::OnnxToHipPipelineOptions &options,
     morphizen::FileSystem *fs) {
+  // hip.conv_transpose only has a rank-4 MIOpen lowering. Decompose supported
+  // rank-3 transposed convolutions while they are still tensor ops so the
+  // regular HIP-to-LLVM pipeline can lower their rank-4 hip.conv residues.
+  // The rocMLIR path runs the same pass in its separate pre-fusion head.
+  pm.addNestedPass<func::FuncOp>(mlir::hip::createDecomposeConvTransposePass());
+
+  // 1a*. Resolve constant-index `tensor.extract` of assembled constant
+  //      vectors (ONNX shape vectors) to the scalar they read, so 1b sees
+  //      them as constants and no host readback is left for them. Reads
+  //      inline `hip.constant` payloads, so it must precede
+  //      `hip-externalize-constants`.
+  pm.addNestedPass<func::FuncOp>(mlir::hip::createFoldConstantExtractsPass());
+
   // 1b. Refine `?` (kDynamic) dims on HIP DPS op result types using each
   //     op's `ReifyRankedShapedTypeOpInterface` impl. Placed here so the
   //     refinements propagate through bufferize and into pool / alloc
@@ -215,6 +227,14 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   bufferizeOpts.bufferizeFunctionBoundaries = true;
   bufferizeOpts.functionBoundaryTypeConversion =
       bufferization::LayoutMapOption::IdentityLayoutMap;
+  // onnx.Loop scan outputs lower to scf.while and yield a new tensor each
+  // iteration (concat along the iteration axis). One-Shot otherwise requires
+  // every scf.condition / scf.yield tensor to be the same buffer as the
+  // matching iter arg, and it pairs those operands by index with the *before*
+  // block. After canonicalization the before block still carries the i1 trip
+  // condition while the after block does not, so that pairing does not hold.
+  // No scf.for exists yet at this point (linalg-to-loops runs later).
+  bufferizeOpts.allowReturnAllocsFromLoops = true;
   // Opt-in: skip One-Shot's RaW-conflict analysis (super-linear in op count;
   // the sole hotspot on very large single-function graphs) by copying before
   // every write instead of proving in-place safety. Gated because those extra
@@ -269,7 +289,11 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   pm.addNestedPass<func::FuncOp>(
       mlir::hip::createFixLoopAccumulatorOffsetPass());
 
-  // 5. Clean up after bufferization
+  // 5. Normalize size arithmetic before buffer reuse compares dynamic extents.
+  // Lower affine products so canonicalization can fold identities such as
+  // (s * 16) / 16 -> s. Pool planning cannot recover reuse decisions made with
+  // distinct size SSA values by OptimizeMemRefs.
+  pm.addPass(createLowerAffinePass());
   pm.addPass(createCSEPass());
   pm.addPass(createCanonicalizerPass());
 
@@ -281,7 +305,7 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   //     translation.
   //
   //     Placement is load-bearing: it MUST run BEFORE MaterializeHostScalars
-  //     (6b).  The rank-0 fill bufferizes to `memref.alloc + linalg.fill`;
+  //     (5b).  The rank-0 fill bufferizes to `memref.alloc + linalg.fill`;
   //     only AFTER this pass does it become `memref.alloc + memref.store`,
   //     which is the shape MaterializeHostScalars recognises as a tiny
   //     host-fed scalar and redirects to host-mapped scratch.  If this ran
@@ -292,12 +316,20 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   //     device memory.  No-op on graphs that emit no linalg ops.
   pm.addNestedPass<func::FuncOp>(createConvertLinalgToLoopsPass());
 
-  // 6. HIP-specific buffer optimizations
+  // 5b. Assign host-accessible storage before buffer reuse. Otherwise, reuse
+  // can merge a tiny host-written shape buffer into a larger allocation that
+  // exceeds the host-scalar pass's size limit. Pooling would then place the
+  // host store in device memory. Later layout promotion creates copy-only
+  // temporaries; it does not introduce host loads or stores. Module-level:
+  // every function shares the one scratch buffer, so slots are laid out
+  // across the module.
+  pm.addPass(mlir::hip::createMaterializeHostScalarsPass());
+
+  // 6. Reuse compatible buffers after host-scalar placement.
   pm.addNestedPass<func::FuncOp>(mlir::hip::createOptimizeMemRefsPass());
 
   // The remaining pre-pooling passes have two distinct roles:
-  //   - Correctness/ABI passes that must introduce or redirect allocations
-  //     before pooling (6a and 6b).
+  //   - Correctness/ABI preparation before pooling (6a).
   //   - Shape preconditions used only to improve pool quality (grouped in 6c).
 
   // 6a. Correctness/ABI: materialize identity-layout temporaries for
@@ -308,15 +340,6 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   //     per-inference allocations.
   pm.addNestedPass<func::FuncOp>(
       mlir::hip::createPromoteStridedHipOperandsPass());
-
-  // 6b. Correctness/ABI: redirect tiny host-fed memref.alloc ops (bufferized
-  //     `tensor.from_elements` shape arithmetic) from the GPU pool to
-  //     runtime-owned host-mapped scratch. Must run after 6a so its candidate
-  //     analysis sees the final allocation set, and before pooling so
-  //     host-written buffers never become views into device memory. See
-  //     MaterializeHostScalars.cpp; pipeline-static-shape-lockdown.mlir locks
-  //     down this ordering.
-  pm.addNestedPass<func::FuncOp>(mlir::hip::createMaterializeHostScalarsPass());
 
   // 6c. Pool quality: normalize dynamic allocation sizes after all view and
   //     allocation rewrites, immediately before hip-pool-allocs.
@@ -347,9 +370,9 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   pm.addPass(createCanonicalizerPass());
 }
 
-void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
-                                       const OnnxToHipPipelineOptions &options,
-                                       morphizen::FileSystem *fs) {
+void mlir::hip::buildOnnxToHipPipelineHead(OpPassManager &pm,
+                                           hipdnnHandle_t handle,
+                                           CompiledGraphMap output_graphs) {
   // Pre-lowering ONNX-dialect simplifications (currently: CastLike -> Cast
   // + drop dead type-donor function arguments). Pure ONNX dialect; runs
   // BEFORE hip-add-context-arg so it operates in the original ONNX
@@ -389,6 +412,7 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
   // every Python perf test under `test/python/` on a Loop-heavy
   // model end-to-end, then delete this TODO.
   pm.addPass(createOnnxLoopOutlinePass());
+  pm.addPass(createOnnxScanOutlinePass());
   pm.addPass(createOnnxIfOutlinePass());
 
   // Rank-establish unranked tensors inside outlined loop bodies (e.g. a
@@ -398,12 +422,26 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
   // func signature and later bufferization.
   pm.addPass(createInferLoopBodyShapesPass());
 
-  // Plugin slot: AfterOnnxLoopOutline. Operate on outlined ONNX loop
+  // Plugin slot: AfterOnnxLoopOutline. Operate on outlined ONNX control-flow
   // bodies before the main lowering runs.
   addPluginPassesForSlot(pm,
                          ::hip::compiler::PipelineSlot::AfterOnnxLoopOutline);
 
+  // hipDNN graph compilation, when a handle was supplied: supported ONNX ops
+  // become hipDNN graphs at pass time and the rest fall through to
+  // ConvertOnnxToHip below.
+  if (handle) {
+    pm.addPass(createOutlineOnnxToHipDNNPass());
+    pm.addPass(createCompileHipDNNGraphsPass(handle, std::move(output_graphs)));
+  }
+
   pm.addPass(createConvertOnnxToHipPass());
+
+  // Fold constant-parameter BatchNorm into the producing convolutions while
+  // the conv -> add -> batch_norm chain is still as converted: this head is
+  // shared with the rocMLIR flow, so it runs before any conv rewrite or kernel
+  // outlining there.
+  pm.addNestedPass<func::FuncOp>(createFoldBatchNormPass());
 
   // Plugin slot: AfterConvertOnnxToHip. The most common slot for
   // vendor lowerings of `onnx.Custom` ops or vendor-specific hip.*
@@ -411,7 +449,12 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
   // hip.constant carriers.
   addPluginPassesForSlot(pm,
                          ::hip::compiler::PipelineSlot::AfterConvertOnnxToHip);
+}
 
+void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
+                                       const OnnxToHipPipelineOptions &options,
+                                       morphizen::FileSystem *fs) {
+  buildOnnxToHipPipelineHead(pm);
   buildOnnxToHipPipelineTail(pm, options, fs);
 }
 
@@ -420,27 +463,7 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
                                        morphizen::FileSystem *fs,
                                        hipdnnHandle_t handle,
                                        CompiledGraphMap output_graphs) {
-  // See sibling overload for rationale.
-  pm.addPass(createSimplifyOnnxPass());
-  addPluginPassesForSlot(pm, ::hip::compiler::PipelineSlot::AfterSimplifyOnnx);
-
-  pm.addPass(createHipAddContextArgPass());
-  pm.addPass(createOnnxLoopOutlinePass());
-  pm.addPass(createOnnxIfOutlinePass());
-  pm.addPass(createInferLoopBodyShapesPass());
-  addPluginPassesForSlot(pm,
-                         ::hip::compiler::PipelineSlot::AfterOnnxLoopOutline);
-
-  if (handle) {
-    pm.addPass(createOutlineOnnxToHipDNNPass());
-    pm.addPass(createCompileHipDNNGraphsPass(handle, std::move(output_graphs)));
-  }
-
-  pm.addPass(createConvertOnnxToHipPass());
-
-  addPluginPassesForSlot(pm,
-                         ::hip::compiler::PipelineSlot::AfterConvertOnnxToHip);
-
+  buildOnnxToHipPipelineHead(pm, handle, std::move(output_graphs));
   buildOnnxToHipPipelineTail(pm, options, fs);
 }
 
@@ -526,6 +549,9 @@ void mlir::hip::buildHipdnnPipeline(OpPassManager &pm,
 
 void mlir::hip::buildRocMlirPipeline(
     OpPassManager &pm, const mlir::hip::RocMlirPipelineOptions &options) {
+  // rocMLIR has no transposed-convolution anchor, so split conv_transpose into
+  // plain convolutions before anything tries to outline a kernel around it.
+  pm.addPass(mlir::hip::createDecomposeConvTransposePass());
   pm.addPass(mlir::hip::createFuseROCMlirPass());
   pm.addPass(func::createDuplicateFunctionEliminationPass());
   pm.addPass(mlir::hip::createConvertHipToTosaPass());

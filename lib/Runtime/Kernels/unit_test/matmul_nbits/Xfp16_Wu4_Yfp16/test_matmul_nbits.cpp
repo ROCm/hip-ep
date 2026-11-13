@@ -1,0 +1,976 @@
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ *
+ * custom_kernels MatMulNBits bits=4 (uint4, nibble-packed) Verification.
+ *
+ * Unit-test model: inputs and the CPU reference are generated in-process
+ * (no python or on-disk data; timing uses unit_test/common/) -- inputs, the uint4 packing, and the
+ * dequant+matmul CPU reference are all generated in-process. The case set is
+ * every categorical situation this op supports (group_size in {32,64,128},
+ * zero-points on/off) crossed with a comprehensive list of
+ * typical (M,K,N) shapes -- M in {1,16,64,128,512} (decode/GEMV through
+ * several prefill points) round-robined across 4 representative real-model
+ * (K,N) layer families (FFN gate/up-proj, attn-proj, FFN down-proj, o-proj) --
+ * NOT the full M/K/N shape space, and not a blind M x KN cross (which would
+ * multiply by the 6-way categorical cross below and blow the tier3 time
+ * budget; see kShapes4's comment). COVERAGE=1|2|3 (default 3) only thins how
+ * many typical shapes run; every tier still touches every
+ * group_size/zero-points value. The CPU reference is multithreaded
+ * (see genCase() below) so the wider shape set stays inside budget.
+ *
+ * A:        FP16 row-major [M, K]
+ * B_packed: uint4 packed [N, K/2]-ish (see kernel_ut spec below), each byte
+ *           = 2 values (low nibble first), row padded to
+ *           num_groups_k * (group_size/2) bytes (ONNX MatMulNBits convention)
+ * scales:   FP16 [N, num_groups_k], per-column per-group
+ * zeros:    FP16 [N, num_groups_k], per-column per-group zero point
+ *           (optional; default zero point is 8 when absent)
+ * C:        FP16 row-major [M, N]
+ */
+#include <hip/hip_runtime.h>
+#include "../../common/hip_adaptive_timing.h"
+#ifdef HIPDNN_UT_GPU_PHASE_HEADER
+#include HIPDNN_UT_GPU_PHASE_HEADER
+#elif !defined(HIPDNN_UT_GPU_PHASE_LINKED)
+namespace hipdnn_ep_test {
+struct GpuPhase { void begin() {} void finish(bool = false) {} void timingBegin() {} void timingEnd() {} };
+}
+#endif
+
+#include <hip/hip_fp16.h>
+#include "hip_custom_kernels.h"
+
+#ifndef HIPDNN_KERNEL_UT_LINKS_SHARED_KERNELS
+#include "matmul_nbits_autotune.h"
+
+#ifndef HIPDNN_LUT_LINKED_EXTERNALLY
+// MODE=autotune, and MODE=lookup on a chip with no table: no FlatBuffers LUT is
+// linked. Empty resolve() lets the kernel link and fall back to its runtime
+// sweep, and extendedConfigsMeasured() is false, as on a device whose table
+// names no extended entry, so that sweep times the original entries. MODE=lookup
+// links the real matmul_nbits_autotune.cpp resolver instead (see Makefile),
+// which defines these symbols, so this stub must not also define them.
+namespace hipdnn_ep {
+namespace matmul_nbits_autotune {
+Result resolve(const Request&, WmmaValidator, GemvValidator, void*) { return {}; }
+Stats stats() { return {}; }
+bool extendedConfigsMeasured() { return false; }
+}  // namespace matmul_nbits_autotune
+}  // namespace hipdnn_ep
+#else
+// One-line C23 #embed of the real LUT .fb -- HIPDNN_LUT_FB is defined by a
+// tiny Makefile-generated header (a plain #define, not a data file) so the
+// path never has to survive hipcc's Windows -D quoting (which mangles
+// embedded quote characters).
+#include "lut_fb_path.h"
+static const unsigned char kLutBlob0[] = {
+#embed HIPDNN_LUT_FB
+};
+extern "C" const unsigned char* const kMatmulNbitsLutBlobs[1]   = { kLutBlob0 };
+extern "C" const size_t               kMatmulNbitsLutBlobSizes[1] = { sizeof(kLutBlob0) };
+extern "C" const size_t               kMatmulNbitsLutBlobCount    = 1;
+#endif  // HIPDNN_LUT_LINKED_EXTERNALLY
+#endif  // HIPDNN_KERNEL_UT_LINKS_SHARED_KERNELS
+
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
+#include <map>
+#include <random>
+#include <string>
+#include <thread>
+#include <tuple>
+#include <vector>
+
+// ---- Tiny inline coverage-tier resolver + CSV writer (replaces
+// unit_test/common/coverage.h + csv_writer.h) ----
+namespace hipdnn_ep_test {
+inline int resolveCoverageTier(int argc, char** argv, int default_tier = 3) {
+  int tier = default_tier;
+  if (const char* env = std::getenv("HIPDNN_UT_COVERAGE")) tier = std::atoi(env);
+  for (int i = 1; i < argc; ++i)
+    if (std::strcmp(argv[i], "--coverage") == 0 && i + 1 < argc)
+      tier = std::atoi(argv[++i]);
+  return tier < 1 ? 1 : (tier > 3 ? 3 : tier);
+}
+
+struct CsvRow {
+  std::string shape, config;
+  double time_ms = 0.0;
+  double rel_l2 = 0.0;
+  std::string verdict;
+};
+class CsvWriter {
+ public:
+  CsvWriter() {
+    const char* path = std::getenv("HIPDNN_RESULTS_CSV");
+    if (!path || !path[0]) return;
+    path_ = path;
+    bool need_header = true;
+    if (FILE* probe = std::fopen(path_.c_str(), "rb")) {
+      std::fseek(probe, 0, SEEK_END);
+      need_header = std::ftell(probe) == 0;
+      std::fclose(probe);
+    }
+    f_ = std::fopen(path_.c_str(), "a");
+    if (f_ && need_header) {
+      std::fprintf(f_, "op,leaf,arch,mode,shape,config,time_ms,relL2,verdict\n");
+      std::fflush(f_);
+    }
+  }
+  ~CsvWriter() { if (f_) std::fclose(f_); }
+  void write(const CsvRow& r) {
+    timing::emitCsvBinding(r.shape, r.config, r.verdict, r.rel_l2, r.time_ms);
+    if (!f_) return;
+    std::fprintf(f_, "%s,%s,%s,%s,%s,%s,%.6f,%.6e,%s\n",
+                 env_or("HIPDNN_RESULTS_OP", "unknown"),
+                 env_or("HIPDNN_RESULTS_LEAF", "unknown"),
+                 env_or("HIPDNN_RESULTS_ARCH", "unknown"),
+                 env_or("HIPDNN_RESULTS_MODE", "unknown"), r.shape.c_str(),
+                 r.config.c_str(), r.time_ms, r.rel_l2, r.verdict.c_str());
+    std::fflush(f_);
+  }
+ private:
+  static const char* env_or(const char* name, const char* dflt) {
+    const char* v = std::getenv(name);
+    return (v && v[0]) ? v : dflt;
+  }
+  std::string path_;
+  FILE* f_ = nullptr;
+};
+}  // namespace hipdnn_ep_test
+
+// ---- Cold-cache timing ----
+// In a model, a kernel's weights are read once per step and the rest of the
+// model streams through the GPU caches before they are read again, so every
+// launch reads them from DRAM. Back-to-back launches on one buffer find them in
+// L2 / the Infinity Cache instead, and flushing the caches between launches
+// does not restore DRAM reads either: a read-only flush leaves the reused lines
+// resident, and a write flush leaves dirty lines for the timed launch to write
+// back. So the timed launches rotate over copies of the weights, back to back,
+// the way consecutive layers read their own: each copy is read again only after
+// kColdRotationBytes of other copies. HIPDNN_KERNEL_UT_WARM=1 times one copy
+// back to back instead.
+namespace hipdnn_ep_test {
+// Several times the largest last-level cache among the targets (96 MB on
+// gfx1100).
+constexpr size_t kColdRotationBytes = size_t(256) << 20;
+// Untimed reads before the timed launches, so that the copies' initial fill
+// has left the caches.
+constexpr size_t kColdSettleBytes = size_t(128) << 20;
+// Bounds the copies of operands of a few KB, whose launches are bound by
+// latency rather than DRAM bandwidth; that many copies still keep each one out
+// of L2 between its reads.
+constexpr int kColdMaxCopies = 4096;
+
+inline bool warmTiming() {
+  const char* v = std::getenv("HIPDNN_KERNEL_UT_WARM");
+  return v && v[0] == '1';
+}
+
+// Copies of the buffers one launch reads. Copy 0 is the buffers themselves;
+// the others share one allocation.
+class ColdCopies {
+ public:
+  struct Part {
+    const void* src;
+    size_t bytes;
+  };
+
+  explicit ColdCopies(std::initializer_list<Part> parts) : parts_(parts) {
+    size_t stride = 0;
+    for (const Part& p : parts_) {
+      offsets_.push_back(stride);
+      stride += (p.bytes + 255) & ~size_t(255);
+      bytes_ += p.bytes;
+    }
+    if (warmTiming() || bytes_ == 0) return;
+    count_ = 1 + static_cast<int>(std::min<size_t>(
+                     kColdMaxCopies - 1,
+                     (kColdRotationBytes + bytes_ - 1) / bytes_));
+    stride_ = stride;
+    if (hipMalloc(&slab_, stride_ * (count_ - 1)) != hipSuccess) {
+      std::fprintf(stderr, "cold-cache copies do not fit; timing on warm caches\n");
+      slab_ = nullptr;
+      count_ = 1;
+      return;
+    }
+    // Copy 1 from the buffers, then double the run of filled copies.
+    for (size_t i = 0; i < parts_.size(); ++i)
+      if (parts_[i].bytes)
+        (void)hipMemcpy(part(1, i), parts_[i].src, parts_[i].bytes,
+                        hipMemcpyDeviceToDevice);
+    for (int filled = 1; filled < count_ - 1;) {
+      const int more = std::min(filled, count_ - 1 - filled);
+      (void)hipMemcpy(static_cast<char*>(slab_) + stride_ * filled, slab_,
+                      stride_ * more, hipMemcpyDeviceToDevice);
+      filled += more;
+    }
+  }
+  ~ColdCopies() {
+    if (slab_) (void)hipFree(slab_);
+  }
+  ColdCopies(const ColdCopies&) = delete;
+  ColdCopies& operator=(const ColdCopies&) = delete;
+
+  int count() const { return count_; }
+  size_t bytes() const { return bytes_; }
+  // Part `i` of copy `c`.
+  void* part(int c, size_t i) const {
+    if (c == 0 || parts_[i].bytes == 0) return const_cast<void*>(parts_[i].src);
+    return static_cast<char*>(slab_) + stride_ * (c - 1) + offsets_[i];
+  }
+
+ private:
+  std::vector<Part> parts_;
+  std::vector<size_t> offsets_;
+  size_t bytes_ = 0;
+  size_t stride_ = 0;
+  int count_ = 1;
+  void* slab_ = nullptr;
+};
+
+// Holds the stream until the host sets *release, so that every timed launch is
+// queued before the first one runs and the reading is the GPU's time rather
+// than the host's submission rate. Gives up after about 0.25 s in case the
+// queue cannot take all the launches.
+__global__ void holdStreamKernel(const volatile int* release) {
+  for (int spin = 0; spin < (1 << 16) && *release == 0; ++spin)
+    __builtin_amdgcn_s_sleep(127);
+}
+
+// Host-mapped release flag for holdStreamKernel, or null if it is unavailable.
+// Coherent, so the spinning kernel sees the host's write without a flush.
+inline int* holdReleaseFlag() {
+  static int* flag = [] {
+    void* p = nullptr;
+    return hipHostMalloc(&p, sizeof(int),
+                         hipHostMallocMapped | hipHostMallocCoherent) ==
+                   hipSuccess
+               ? static_cast<int*>(p)
+               : nullptr;
+  }();
+  return flag;
+}
+
+// The shared UT policy selects the actual call count from a device pilot.
+// launch(c) invokes the complete op with operand copy c.
+template <class Launch>
+double rotatedMeanMs(hipStream_t stream, int /*legacy_iters*/, const ColdCopies& copies,
+                     Launch&& launch) {
+  return timing::adaptiveRotatedMeanMs(
+      stream, copies, launch, holdReleaseFlag(),
+      [&](const int* flag) { holdStreamKernel<<<1, 1, 0, stream>>>(flag); },
+      warmTiming(), kColdSettleBytes, "matmul_nbits_fp16_wu4");
+}
+}  // namespace hipdnn_ep_test
+
+// `name` in this executable's directory. The capture file must not follow the
+// working directory: started anywhere but the leaf directory, a relative
+// "out/..." names a folder that is not there, freopen() fails and leaves
+// stderr closed, and the next diagnostic ends the process with 0xC0000409
+// before it prints anything.
+static std::string beside_exe(const char* name) {
+  char* exe = nullptr;
+  if (_get_pgmptr(&exe) != 0 || !exe) return name;
+  const std::string path(exe);
+  const size_t slash = path.find_last_of("\\/");
+  return slash == std::string::npos ? name : path.substr(0, slash + 1) + name;
+}
+
+// Runs `fn` and returns the stderr lines it produced. The kernels log from
+// custom_kernels_<arch>.dll, which links its own static CRT: its stderr is the
+// handle this process started with, so freopen() here would not move it.
+// hipdnn-kernel-ut.exe starts each leaf with stderr on the file named in
+// HIPDNN_KERNEL_UT_STDERR, and this reads back what `fn` appended. Started any
+// other way, the leaf falls back to freopen(), which captures the kernels only
+// when they are linked into this executable (the local make build).
+template <typename Fn>
+static std::vector<std::string> capture_stderr(Fn&& fn) {
+  static const std::string capture = beside_exe("_config_capture.tmp");
+  const char* const kCapture = capture.c_str();
+  const char* leaf_stderr = std::getenv("HIPDNN_KERNEL_UT_STDERR");
+  const bool redirect = !leaf_stderr || !leaf_stderr[0];
+  const char* path = redirect ? kCapture : leaf_stderr;
+  std::streamoff start = 0;
+  std::fflush(stderr);
+  if (redirect) {
+    if (!std::freopen(kCapture, "w", stderr)) {
+      std::freopen("CON", "w", stderr);  // the failed freopen closed it
+      fn();
+      return {};
+    }
+  } else {
+    std::ifstream log(path, std::ios::binary | std::ios::ate);
+    if (log) start = log.tellg();
+  }
+  fn();
+  std::fflush(stderr);
+  if (redirect) std::freopen("CON", "w", stderr);
+
+  std::vector<std::string> lines;
+  {
+    // Scoped so the stream is closed before the remove below; Windows refuses
+    // to delete a file that is still open.
+    std::ifstream log(path, std::ios::binary);
+    log.seekg(start);
+    for (std::string line; std::getline(log, line);) {
+      if (!line.empty() && line.back() == '\r') line.pop_back();
+      lines.push_back(line);
+    }
+  }
+  if (redirect) std::remove(kCapture);
+  return lines;
+}
+
+// Reports which config the op actually ran, read back from its own
+// HIPDNN_MATMUL_LUT_LOG / HIPDNN_MATMUL_AUTOTUNE_LOG output rather than guessed
+// from the mode. The op logs a selection only on the first encounter with a
+// tune key, so a later case sharing that key reuses the earlier selection
+// silently -- hence the memo, which keeps every row attributable to a real
+// config.
+template <typename Fn>
+static std::string capture_selected_config(const char* tune_key, Fn&& launch) {
+  static std::map<std::string, std::string> selected_by_key;
+  _putenv_s("HIPDNN_MATMUL_AUTOTUNE_LOG", "1");
+  _putenv_s("HIPDNN_MATMUL_LUT_LOG", "1");
+
+  std::string lut, tuned;
+  for (const std::string& line : capture_stderr(launch)) {
+    if (line.find("LUT hit") != std::string::npos) {
+      // The op prints the table's Source as a number; name it the way
+      // matmul_nbits_autotune.h does.
+      static const char* const kSources[] = {"none", "exact", "nearest",
+                                             "fallback", "interval"};
+      int src = -1;
+      double distance = 0.0;
+      const size_t tier = line.find("(src=");
+      if (tier != std::string::npos)
+        std::sscanf(line.c_str() + tier, "(src=%d d=%lf)", &src, &distance);
+      char source[48];
+      std::snprintf(source, sizeof(source), " (%s d=%.3f)",
+                    src >= 0 && src < 5 ? kSources[src] : "unknown", distance);
+      lut = "lookup:" + line.substr(line.find("config[")) + source;
+    } else if (line.find("best config[") != std::string::npos) {
+      tuned = "autotune:" + line.substr(line.find("best config["));
+      // Drop the tuner's own "(x ms/iter)": it is a peak sample taken under
+      // the clock state of the sweep, not this row's time_ms, and showing
+      // both invites reading them as the same measurement.
+      const size_t timing = tuned.rfind(" (");
+      if (timing != std::string::npos &&
+          tuned.find("ms/iter", timing) != std::string::npos)
+        tuned.erase(timing);
+    }
+  }
+
+  std::string selected = !lut.empty() ? lut : tuned;
+  if (selected.empty()) {
+    auto it = selected_by_key.find(tune_key);
+    // Nothing logged and nothing remembered: the op printed no diagnostic for
+    // this config, a gap to fix rather than a result.
+    if (it == selected_by_key.end()) return "unlogged";
+    selected = it->second;
+  } else {
+    selected_by_key[tune_key] = selected;
+  }
+  std::replace(selected.begin(), selected.end(), ',', ';');
+  return selected;
+}
+
+static float half_to_float(__half h) {
+  uint16_t bits;
+  std::memcpy(&bits, &h, sizeof(bits));
+  uint32_t sign = (bits >> 15) & 1;
+  uint32_t exp = (bits >> 10) & 0x1F;
+  uint32_t mant = bits & 0x3FF;
+  uint32_t f;
+  if (exp == 0) {
+    if (mant == 0) f = sign << 31;
+    else {
+      exp = 1;
+      while (!(mant & 0x400)) { mant <<= 1; exp--; }
+      mant &= 0x3FF;
+      f = (sign << 31) | ((exp + 127 - 15) << 23) | (mant << 13);
+    }
+  } else if (exp == 31) f = (sign << 31) | (0xFFu << 23) | (mant << 13);
+  else f = (sign << 31) | ((exp + 127 - 15) << 23) | (mant << 13);
+  float result;
+  std::memcpy(&result, &f, sizeof(result));
+  return result;
+}
+
+static __half float_to_half(float x) {
+  uint32_t f;
+  std::memcpy(&f, &x, 4);
+  uint32_t s = (f >> 31) & 1;
+  int e = (int)((f >> 23) & 0xff) - 127 + 15;
+  uint32_t m = f & 0x7fffff;
+  uint16_t bits;
+  if (e <= 0) bits = (uint16_t)(s << 15);
+  else if (e >= 31) bits = (uint16_t)((s << 15) | 0x7c00);
+  else bits = (uint16_t)((s << 15) | (e << 10) | (m >> 13));
+  __half h;
+  std::memcpy(&h, &bits, 2);
+  return h;
+}
+
+#define HIP_CHECK(call)                                                     \
+    do {                                                                    \
+        hipError_t err = (call);                                            \
+        if (err != hipSuccess) {                                            \
+            std::fprintf(stderr, "HIP error at %s:%d code=%d \"%s\"\n",     \
+                         __FILE__, __LINE__, err, hipGetErrorString(err));   \
+            std::exit(1);                                                   \
+        }                                                                   \
+    } while (0)
+
+// ============================================================
+// In-process data generation + CPU fp32 reference (no python, no disk I/O).
+// Mirrors the uint4 nibble-packing + dequant convention this repo's
+// gen_data.py generators used: B is randint(0,16) per element, packed
+// low-nibble-first into num_groups_k*(group_size/2) bytes/row (the ONNX
+// MatMulNBits blob layout -- the last group is padded to a full group_size
+// even when K % group_size != 0); scales are uniform(0.01,0.05); zeros (when
+// present) are integers in [7,9] cast to fp16; dequant is
+// (B - zp) * scale, default zp = 8 when zeros are absent.
+// ============================================================
+struct CaseData {
+  std::vector<__half> A16;
+  std::vector<float> A32;
+  std::vector<uint8_t> Bpacked;
+  std::vector<__half> scales;
+  std::vector<__half> zeros;
+  std::vector<__half> Cref16;
+  std::vector<float> Cref32;
+};
+
+static void genCase(int M, int K, int N, int gs, bool zero, bool fp32,
+                    unsigned seed, CaseData& out) {
+  const int num_groups_k = (K + gs - 1) / gs;
+  const int row_bytes = num_groups_k * (gs / 2);
+
+  std::mt19937 rng(seed);
+  std::uniform_real_distribution<float> adist(-0.5f, 0.5f);
+  std::uniform_int_distribution<int> bdist(0, 15);
+  std::uniform_real_distribution<float> sdist(0.01f, 0.05f);
+  std::uniform_int_distribution<int> zdist(7, 9);
+
+  std::vector<float> A(static_cast<size_t>(M) * K);
+  for (auto& v : A) v = adist(rng);
+
+  std::vector<uint8_t> Bq(static_cast<size_t>(N) * K);
+  for (auto& v : Bq) v = static_cast<uint8_t>(bdist(rng));
+
+  std::vector<float> scalesF(static_cast<size_t>(N) * num_groups_k);
+  for (auto& v : scalesF) v = sdist(rng);
+
+  std::vector<float> zerosF;
+  if (zero) {
+    zerosF.resize(static_cast<size_t>(N) * num_groups_k);
+    for (auto& v : zerosF) v = static_cast<float>(zdist(rng));
+  }
+
+  out.Bpacked.assign(static_cast<size_t>(N) * row_bytes, 0);
+  for (int n = 0; n < N; ++n) {
+    const uint8_t* row = &Bq[static_cast<size_t>(n) * K];
+    uint8_t* prow = &out.Bpacked[static_cast<size_t>(n) * row_bytes];
+    for (int k2 = 0; k2 < K / 2; ++k2)
+      prow[k2] = static_cast<uint8_t>(row[2 * k2] | (row[2 * k2 + 1] << 4));
+  }
+
+  out.scales.resize(scalesF.size());
+  for (size_t i = 0; i < scalesF.size(); ++i) out.scales[i] = float_to_half(scalesF[i]);
+  if (zero) {
+    out.zeros.resize(zerosF.size());
+    for (size_t i = 0; i < zerosF.size(); ++i) out.zeros[i] = float_to_half(zerosF[i]);
+  }
+
+  // fp32 reference: C[m,n] = sum_k A[m,k] * (Bq[n,k] - zp) * scale. Threaded
+  // over N (each output column is independent, no cross-column state) so the
+  // wider M/K/N shapes in the coverage sweep (buildCases() below) stay
+  // inside the shared ~30 min tier3 budget across all UT leaves -- see
+  // unit_test/README.md "Shape coverage".
+  std::vector<float> Cref(static_cast<size_t>(M) * N, 0.0f);
+  auto refColumns = [&](int n0, int n1) {
+    for (int n = n0; n < n1; ++n) {
+      const uint8_t* row = &Bq[static_cast<size_t>(n) * K];
+      const float* srow = &scalesF[static_cast<size_t>(n) * num_groups_k];
+      const float* zrow = zero ? &zerosF[static_cast<size_t>(n) * num_groups_k] : nullptr;
+      for (int m = 0; m < M; ++m) {
+        const float* arow = &A[static_cast<size_t>(m) * K];
+        float acc = 0.0f;
+        for (int k = 0; k < K; ++k) {
+          const int g = k / gs;
+          const float zp = zero ? zrow[g] : 8.0f;
+          acc += arow[k] * (static_cast<float>(row[k]) - zp) * srow[g];
+        }
+        Cref[static_cast<size_t>(m) * N + n] = acc;
+      }
+    }
+  };
+  {
+    const unsigned hw = std::thread::hardware_concurrency();
+    const unsigned nthreads = std::min<unsigned>(hw ? hw : 4u,
+                                                  N > 0 ? static_cast<unsigned>(N) : 1u);
+    if (nthreads <= 1 || N < 64) {
+      refColumns(0, N);
+    } else {
+      std::vector<std::thread> pool;
+      const int chunk = (N + static_cast<int>(nthreads) - 1) / static_cast<int>(nthreads);
+      for (unsigned t = 0; t < nthreads; ++t) {
+        const int n0 = static_cast<int>(t) * chunk;
+        const int n1 = std::min(N, n0 + chunk);
+        if (n0 >= n1) break;
+        pool.emplace_back(refColumns, n0, n1);
+      }
+      for (auto& th : pool) th.join();
+    }
+  }
+
+  if (fp32) {
+    out.A32.resize(A.size());
+    for (size_t i = 0; i < A.size(); ++i) out.A32[i] = A[i];
+    out.Cref32 = std::move(Cref);
+  } else {
+    out.A16.resize(A.size());
+    for (size_t i = 0; i < A.size(); ++i) out.A16[i] = float_to_half(A[i]);
+    out.Cref16.resize(Cref.size());
+    for (size_t i = 0; i < Cref.size(); ++i) out.Cref16[i] = float_to_half(Cref[i]);
+  }
+}
+
+// ============================================================
+// Categorical situations (group_size x zero-points) -- ALWAYS run in full,
+// every tier -- crossed with a comprehensive typical-shape list. Every shape
+// below is ALSO crossed with the full 6-way group_size x zero-points set in
+// buildCases(), so the shape list size directly multiplies total
+// CPU-reference cost by 6 -- see genCase() above, which is
+// O(M*K*N) per case (now multithreaded over N so this stays affordable).
+// ============================================================
+namespace sweep {
+
+struct Shape { int M, K, N; };
+// tier3: M in {1,16,64,128,512} (decode through several prefill points)
+// round-robined -- not a full M x KN cross -- across 4 representative
+// real-model (K,N) layer families: FFN gate/up-proj, attn-proj (K=2880
+// exercises the group_size zero-padding path: not a multiple of 64/128), FFN
+// down-proj, and a square o-proj/attn-combine shape. M=1 (decode, cheap)
+// touches all 4 families; M=16/128 touch gate/up-proj + attn-proj; M=64/512
+// touch down-proj + o-proj -- every M value and every (K,N) family appears at
+// least once without paying for the full M x KN cross (5x4=20 shapes would
+// multiply the already-6x categorical cross to 120 cases/leaf).
+static const Shape kShapes4[] = {
+    {1,   4096,  11008},  // decode, FFN gate/up-proj (K=hidden, N=intermediate)
+    {1,   2880,  5120},   // decode, attn-proj (group_size zero-padding path)
+    {1,   11008, 4096},   // decode, FFN down-proj (K=intermediate, N=hidden)
+    {1,   4096,  4096},   // decode, o-proj / square attn-proj
+    {16,  4096,  11008},  // prefill, gate/up-proj
+    {16,  2880,  5120},   // prefill, attn-proj
+    {64,  11008, 4096},   // prefill, down-proj
+    {64,  4096,  4096},   // prefill, o-proj
+    {128, 4096,  11008},  // prefill, gate/up-proj
+    {128, 2880,  5120},   // prefill, attn-proj
+    {512, 11008, 4096},   // prefill, down-proj
+    {512, 4096,  4096},   // prefill, o-proj
+};
+// tier2 (~65%): all 4 M=1 (decode) families + one mid-M point for each of
+// M=16/64/128/512, still touching every (K,N) family at least once.
+static const Shape kShapes3[] = {
+    kShapes4[0], kShapes4[1], kShapes4[2], kShapes4[3],
+    kShapes4[5], kShapes4[6], kShapes4[9], kShapes4[11],
+};
+// tier1: M=1 (smallest family) + one M>1 point -- "1 decode + 1 prefill".
+static const Shape kShapes2[] = {kShapes4[1], kShapes4[6]};
+
+static const int kGsArray[] = {32, 64, 128};
+static const bool kZeroArray[] = {true, false};
+// The leaf's activation and output dtype: X and Y in its name.
+static constexpr bool kFp32 = false;
+
+struct Case {
+  int M, K, N, gs;
+  bool zero, fp32;
+  int b_row_bytes = 0;
+  bool dp4a = false;
+};
+
+static std::vector<Case> buildCases(int tier) {
+  const Shape* shapes = tier == 1 ? kShapes2 : tier == 2 ? kShapes3 : kShapes4;
+  const size_t n_shapes = tier == 1 ? sizeof(kShapes2) / sizeof(kShapes2[0])
+                        : tier == 2 ? sizeof(kShapes3) / sizeof(kShapes3[0])
+                                    : sizeof(kShapes4) / sizeof(kShapes4[0]);
+  std::vector<Case> out;
+  for (int gs : kGsArray)
+    for (bool zero : kZeroArray)
+      for (size_t si = 0; si < n_shapes; ++si)
+        out.push_back({shapes[si].M, shapes[si].K, shapes[si].N, gs, zero, kFp32});
+  return out;
+}
+
+static bool runOne(const Case& c, int idx) {
+  char timing_shape[96];
+  std::snprintf(timing_shape, sizeof(timing_shape), "M%d_N%d_K%d_gs%d%s",
+                c.M, c.N, c.K, c.gs, c.zero ? "" : "_noz");
+  if (c.b_row_bytes) {
+    const size_t used = std::strlen(timing_shape);
+    std::snprintf(timing_shape + used, sizeof(timing_shape) - used, "_p%d", c.b_row_bytes);
+  }
+  if (c.dp4a) std::strcat(timing_shape, "_dp4a");
+  const char* entry = c.dp4a ? "hip_matmul_nbits_dp4a" :
+      (c.b_row_bytes ? "hip_matmul_nbits_u4_wmma_padrow" : "hip_matmul_nbits");
+  hipdnn_ep_test::timing::CaseScope timing_case("matmul_nbits/Xfp16_Wu4_Yfp16", timing_shape, entry);
+  if (c.dp4a && (c.fp32 || c.M != 1 || c.K % 32 || c.zero || c.b_row_bytes)) {
+    std::fprintf(stderr, "unsupported DP4A request\n");
+    return false;
+  }
+  if (c.b_row_bytes && (c.fp32 || c.M < 2 || c.K % c.gs || c.b_row_bytes != c.K / 2 + 128)) {
+    std::fprintf(stderr, "unsupported padded-row request\n");
+    return false;
+  }
+  std::string pinned_config;
+  const char* pin = std::getenv(c.dp4a ? "HIPDNN_EP_MATMUL_DP4A_CFG" : "HIPDNN_MATMUL_NBITS_WMMA_CFG");
+  if (pin && *pin) {
+    const int cfg = std::atoi(pin);
+    if (!c.dp4a) {
+      HipMatmulNBitsWmmaConfigDesc dsc{};
+      if (hip_matmul_nbits_u4_wmma_config_desc(cfg, &dsc) != 0 ||
+          dsc.bk <= 0 || c.K % dsc.bk ||
+          (!dsc.ext && dsc.bn < 64 && c.N > 2 * dsc.bn) ||
+          c.gs % (dsc.bn * dsc.bk / ((dsc.bm / (16 * dsc.wt_m)) * (dsc.bn / (16 * dsc.wt_n)) * 32)) ||
+          (dsc.ext && !hip_matmul_nbits_u4_wmma_ext_device()) ||
+          (c.b_row_bytes && !dsc.fused)) {
+        std::fprintf(stderr, "illegal pinned WMMA config %d\n", cfg);
+        return false;
+      } else {
+        char desc[180];
+        std::snprintf(desc, sizeof(desc), "pin_config%d_bm%d_bn%d_sw%d_wt%dx%d_bk%d_fused%d_ext%d_var%d",
+                      cfg, dsc.bm, dsc.bn, dsc.swizzle_n, dsc.wt_m, dsc.wt_n,
+                      dsc.bk, dsc.fused, dsc.ext, dsc.variant);
+        pinned_config = desc;
+      }
+    } else {
+      pinned_config = "dp4a_pin_config" + std::to_string(cfg);
+    }
+  }
+  CaseData d;
+  genCase(c.M, c.K, c.N, c.gs, c.zero, c.fp32, /*seed=*/1000u + idx, d);
+
+  const size_t countA = static_cast<size_t>(c.M) * c.K;
+  const size_t countC = static_cast<size_t>(c.M) * c.N;
+  const size_t elem = c.fp32 ? 4 : 2;
+
+  hipdnn_ep_test::GpuPhase gpu_phase;
+  gpu_phase.begin();
+  void *dA = nullptr, *dC = nullptr;
+  __half* dS = nullptr;
+  __half* dZ = nullptr;
+  uint8_t* dB = nullptr;
+  HIP_CHECK(hipMalloc(&dA, countA * elem));
+  HIP_CHECK(hipMalloc(&dB, d.Bpacked.size()));
+  HIP_CHECK(hipMalloc(&dS, d.scales.size() * sizeof(__half)));
+  if (c.zero) HIP_CHECK(hipMalloc(&dZ, d.zeros.size() * sizeof(__half)));
+  HIP_CHECK(hipMalloc(&dC, countC * elem));
+  HIP_CHECK(hipMemcpy(dA, c.fp32 ? (void*)d.A32.data() : (void*)d.A16.data(),
+                      countA * elem, hipMemcpyHostToDevice));
+  HIP_CHECK(hipMemcpy(dB, d.Bpacked.data(), d.Bpacked.size(), hipMemcpyHostToDevice));
+  HIP_CHECK(hipMemcpy(dS, d.scales.data(), d.scales.size() * sizeof(__half), hipMemcpyHostToDevice));
+  if (c.zero) HIP_CHECK(hipMemcpy(dZ, d.zeros.data(), d.zeros.size() * sizeof(__half), hipMemcpyHostToDevice));
+  HIP_CHECK(hipMemset(dC, 0, countC * elem));
+
+  hipStream_t stream;
+  HIP_CHECK(hipStreamCreate(&stream));
+  void* dp4a_scratch = nullptr;
+  const size_t scale_offset = (static_cast<size_t>(c.M) * c.K + 63) & ~size_t(63);
+  if (c.dp4a)
+    HIP_CHECK(hipMalloc(&dp4a_scratch, scale_offset + static_cast<size_t>(c.M) * ((c.K + c.gs - 1) / c.gs) * sizeof(float)));
+  auto invoke = [&](const void* b, const void* scales, const void* zeros) {
+    if (c.dp4a)
+      return hip_matmul_nbits_dp4a(stream, dA, b, scales, nullptr, nullptr, dC,
+                                  c.M, c.N, c.K, c.gs, dp4a_scratch,
+                                  static_cast<char*>(dp4a_scratch) + scale_offset);
+    if (c.b_row_bytes)
+      return hip_matmul_nbits_u4_wmma_padrow(stream, -1, c.M, c.N, c.K, c.gs,
+                                           dA, c.K, b, scales, zeros, dC, c.N);
+    return hip_matmul_nbits(stream, dA, b, scales, zeros, nullptr, dC,
+                            c.M, c.N, c.K, 1, 4, c.gs,
+                            static_cast<int>(elem), 2, nullptr, nullptr);
+  };
+  auto launch = [&]() {
+    return invoke(dB, dS, c.zero ? dZ : nullptr);
+  };
+  /* The complete padded entry includes its per-call repack. */
+
+
+  // 3 calls: first triggers this shape's autotune search / LUT resolve
+  // (cached after), the rest are correctness-check warmup.
+  int status = 0;
+  char tune_key[64];
+  std::snprintf(tune_key, sizeof(tune_key), "%dx%dx%d_gs%d_%s", c.M, c.N, c.K,
+                c.gs, c.zero ? "z" : "noz");
+  if (c.b_row_bytes) {
+    const size_t used = std::strlen(tune_key);
+    std::snprintf(tune_key + used, sizeof(tune_key) - used, "_p%d", c.b_row_bytes);
+  }
+  std::string selected_config = capture_selected_config(tune_key, [&] {
+    for (int w = 0; w < 3; ++w) status = launch();
+    HIP_CHECK(hipStreamSynchronize(stream));
+  });
+
+  if (!pinned_config.empty()) selected_config = pinned_config;
+  double avg_ms = 0.0;
+  if (status == 0) {
+    constexpr int kIters = 20;
+    // The weight side is what a model streams from DRAM; the activation and
+    // the output stay single, as they do in a model.
+    const hipdnn_ep_test::ColdCopies weights(
+        {{dB, d.Bpacked.size()},
+         {dS, d.scales.size() * sizeof(__half)},
+         {dZ, c.zero ? d.zeros.size() * sizeof(__half) : 0}});
+    gpu_phase.timingBegin();
+    avg_ms = hipdnn_ep_test::rotatedMeanMs(stream, kIters, weights, [&](int i) {
+      return invoke(weights.part(i, 0), weights.part(i, 1),
+                    c.zero ? weights.part(i, 2) : nullptr);
+    });
+    gpu_phase.timingEnd();
+  }
+
+  std::vector<uint8_t> raw(countC * elem);
+  if (status == 0)
+    HIP_CHECK(hipMemcpy(raw.data(), dC, countC * elem, hipMemcpyDeviceToHost));
+  hipFree(dA); hipFree(dB); hipFree(dS); hipFree(dZ); hipFree(dC);
+  if (dp4a_scratch) HIP_CHECK(hipFree(dp4a_scratch));
+  HIP_CHECK(hipStreamDestroy(stream));
+  gpu_phase.finish(true);
+  bool pass = (status == 0);
+  double rel_l2 = 0.0;
+  if (status == 0) {
+    double ssd = 0.0, ssr = 0.0;
+    int errors = 0;
+    for (size_t i = 0; i < countC; ++i) {
+      const float gpu_val = c.fp32 ? reinterpret_cast<float*>(raw.data())[i]
+                                    : half_to_float(reinterpret_cast<__half*>(raw.data())[i]);
+      const float ref_val = c.fp32 ? d.Cref32[i] : half_to_float(d.Cref16[i]);
+      const float diff = std::fabs(gpu_val - ref_val);
+      const float tol = std::fabs(ref_val) * 0.05f + 0.1f;
+      if (!(diff <= tol) || !std::isfinite(gpu_val)) ++errors;
+      ssd += (double)diff * diff;
+      ssr += (double)ref_val * ref_val;
+    }
+    rel_l2 = ssr > 0.0 ? std::sqrt(ssd / ssr) : std::sqrt(ssd);
+    pass = (errors == 0) && std::isfinite(rel_l2);
+  }
+
+  std::printf("  M=%d N=%d K=%d gs=%d zero=%d dtype=%s  status=%d  %.4f ms  relL2=%.3e  %s\n",
+              c.M, c.N, c.K, c.gs, c.zero, c.fp32 ? "fp32" : "fp16", status,
+              avg_ms, rel_l2, pass ? "PASS" : "*** FAIL ***");
+
+  {
+    using namespace hipdnn_ep_test;
+    CsvWriter csv;
+    char shape_buf[96];
+    std::snprintf(shape_buf, sizeof(shape_buf), "M%d_N%d_K%d_gs%d%s", c.M, c.N,
+                 c.K, c.gs, c.zero ? "" : "_noz");
+    CsvRow row;
+    row.shape = timing_shape;
+    row.config = selected_config;
+    row.time_ms = avg_ms;
+    row.rel_l2 = rel_l2;
+    row.verdict = pass ? "PASS" : "FAIL";
+    csv.write(row);
+  }
+
+
+  return pass;
+}
+
+static int run(int coverage_tier) {
+  std::vector<Case> cases = buildCases(coverage_tier);
+  std::printf("coverage=%d -> running %zu matmul_nbits cases (3 group_size x "
+             "2 zero-points x typical shapes)\n",
+             coverage_tier, cases.size());
+  int fail = 0;
+  for (size_t i = 0; i < cases.size(); ++i)
+    if (!runOne(cases[i], static_cast<int>(i))) ++fail;
+  std::printf("\nCoverage sweep done: %zu cases, %d failed\n", cases.size(), fail);
+  std::printf("%s\n", fail == 0 ? "ALL PASS" : "SOME FAILED");
+  return fail == 0 ? 0 : 1;
+}
+
+}  // namespace sweep
+
+// ============================================================
+// Forced extended entries. Every WMMA_EXT_CONFIGS entry is run by index
+// through hip_matmul_nbits_u4_wmma_run_config, which refuses a config that
+// does not serve the shape instead of substituting another, so a pass here
+// means that entry's kernel produced the result. Each runs on a tile-exact and
+// a ragged M x N, group sizes 32 and 128, with and without zero points, at the
+// arrival pitch and with 128- and 256-byte row pads, against the CPU
+// reference. The LUT may stop selecting an entry; this keeps all of them
+// checked. An entry that serves none of the cases fails.
+// ============================================================
+namespace forced {
+
+static int run() {
+  const int count = hip_matmul_nbits_u4_wmma_config_count();
+  constexpr int K = 512;
+  const int pads[] = {0, 128, 256};
+  hipStream_t stream;
+  HIP_CHECK(hipStreamCreate(&stream));
+  // Entries with the same tile share their shapes, and the CPU reference is
+  // the expensive part, so each (M, N, group size, zero points) is generated
+  // once and reused by every entry that runs it.
+  std::map<std::tuple<int, int, int, bool>, CaseData> cases;
+  int entries = 0, fail = 0;
+  std::string never_ran;
+  for (int cfg = 0; cfg < count; ++cfg) {
+    HipMatmulNBitsWmmaConfigDesc t{};
+    if (hip_matmul_nbits_u4_wmma_config_desc(cfg, &t) != 0 || !t.ext) continue;
+    ++entries;
+    int ran = 0;
+    const int shapes[2][2] = {{2 * t.bm, 2 * t.bn}, {2 * t.bm - 5, 2 * t.bn - 16}};
+    for (const auto& mn : shapes) {
+      const int M = mn[0], N = mn[1];
+      for (int gs : {32, 128}) {
+        for (bool zero : {true, false}) {
+          auto it = cases.find(std::make_tuple(M, N, gs, zero));
+          if (it == cases.end()) {
+            it = cases.emplace(std::make_tuple(M, N, gs, zero), CaseData{}).first;
+            genCase(M, K, N, gs, zero, /*fp32=*/false,
+                    /*seed=*/7000u + static_cast<unsigned>(cases.size()), it->second);
+          }
+          const CaseData& d = it->second;
+          const int row_bytes = K / 2;
+          void *dA = nullptr, *dB = nullptr, *dS = nullptr, *dZ = nullptr, *dC = nullptr;
+          HIP_CHECK(hipMalloc(&dA, d.A16.size() * sizeof(__half)));
+          HIP_CHECK(hipMalloc(&dS, d.scales.size() * sizeof(__half)));
+          HIP_CHECK(hipMalloc(&dB, static_cast<size_t>(N) * (row_bytes + 256)));
+          HIP_CHECK(hipMalloc(&dC, static_cast<size_t>(M) * N * sizeof(__half)));
+          if (zero) HIP_CHECK(hipMalloc(&dZ, d.zeros.size() * sizeof(__half)));
+          HIP_CHECK(hipMemcpy(dA, d.A16.data(), d.A16.size() * sizeof(__half),
+                              hipMemcpyHostToDevice));
+          HIP_CHECK(hipMemcpy(dS, d.scales.data(), d.scales.size() * sizeof(__half),
+                              hipMemcpyHostToDevice));
+          if (zero)
+            HIP_CHECK(hipMemcpy(dZ, d.zeros.data(), d.zeros.size() * sizeof(__half),
+                                hipMemcpyHostToDevice));
+          for (int pad : pads) {
+            const int pitch = row_bytes + pad;
+            std::vector<uint8_t> b(static_cast<size_t>(N) * pitch, 0xAB);
+            for (int n = 0; n < N; ++n)
+              std::memcpy(&b[static_cast<size_t>(n) * pitch],
+                          &d.Bpacked[static_cast<size_t>(n) * row_bytes], row_bytes);
+            HIP_CHECK(hipMemcpy(dB, b.data(), b.size(), hipMemcpyHostToDevice));
+            // 0xFFFF is an fp16 NaN: an output the kernel never writes fails.
+            HIP_CHECK(hipMemset(dC, 0xFF, static_cast<size_t>(M) * N * sizeof(__half)));
+            const int rc = hip_matmul_nbits_u4_wmma_run_config(
+                stream, cfg, M, N, K, gs, dA, K, dB, dS, zero ? dZ : nullptr, dC, N,
+                pad ? pitch : 0);
+            if (rc == -2) continue;  // this entry does not serve the shape
+            HIP_CHECK(hipStreamSynchronize(stream));
+            int errors = 0;
+            double ssd = 0.0, ssr = 0.0;
+            std::vector<__half> out(static_cast<size_t>(M) * N);
+            if (rc == 0) {
+              HIP_CHECK(hipMemcpy(out.data(), dC, out.size() * sizeof(__half),
+                                  hipMemcpyDeviceToHost));
+              for (size_t i = 0; i < out.size(); ++i) {
+                const float g = half_to_float(out[i]);
+                const float r = half_to_float(d.Cref16[i]);
+                const float diff = std::fabs(g - r);
+                if (!(diff <= std::fabs(r) * 0.05f + 0.1f)) ++errors;
+                ssd += static_cast<double>(diff) * diff;
+                ssr += static_cast<double>(r) * r;
+              }
+            }
+            const bool pass = rc == 0 && errors == 0;
+            ++ran;
+            if (!pass) ++fail;
+            std::printf("  forced cfg[%d] %dx%d WT%dx%d BK%d var=%d  M=%d N=%d K=%d gs=%d "
+                        "zero=%d pad=%d  rc=%d  relL2=%.3e  %s\n",
+                        cfg, t.bm, t.bn, t.wt_m, t.wt_n, t.bk, t.variant, M, N, K, gs,
+                        zero, pad, rc, ssr > 0.0 ? std::sqrt(ssd / ssr) : std::sqrt(ssd),
+                        pass ? "PASS" : "*** FAIL ***");
+          }
+          hipFree(dA);
+          hipFree(dB);
+          hipFree(dS);
+          if (dZ) hipFree(dZ);
+          hipFree(dC);
+        }
+      }
+    }
+    if (ran == 0) {
+      ++fail;
+      never_ran += " " + std::to_string(cfg);
+    }
+  }
+  HIP_CHECK(hipStreamDestroy(stream));
+  std::printf("\nForced extended entries: %d entries, %zu reference cases, %d failed%s%s\n",
+              entries, cases.size(), fail, never_ran.empty() ? "" : "; served no case:",
+              never_ran.c_str());
+  return entries > 0 && fail == 0 ? 0 : 1;
+}
+
+}  // namespace forced
+
+// ============================================================
+// Single-shape convenience path (make test_custom): in-process rng, no data
+// files. SIZE=MxKxN GS=<group_size> [NO_ZEROS=1].
+// ============================================================
+static int runCustom(int M, int N, int K, int gs, bool zero, int b_row_bytes, bool dp4a) {
+  return sweep::runOne({M, K, N, gs, zero, sweep::kFp32, b_row_bytes, dp4a}, /*idx=*/0) ? 0 : 1;
+}
+
+int main(int argc, char* argv[]) {
+  if (argc == 2 && std::strcmp(argv[1], "--list-configs") == 0) {
+    for (int cfg = 0; cfg < hip_matmul_nbits_u4_wmma_config_count(); ++cfg) {
+      HipMatmulNBitsWmmaConfigDesc d{};
+      if (hip_matmul_nbits_u4_wmma_config_desc(cfg, &d) != 0) return 2;
+      std::printf("WMMA_CONFIG {\"config\":%d,\"bm\":%d,\"bn\":%d,\"swizzle\":%d,\"wt_m\":%d,\"wt_n\":%d,\"bk\":%d,\"fused\":%d,\"ext\":%d,\"variant\":%d}\n",
+                  cfg, d.bm, d.bn, d.swizzle_n, d.wt_m, d.wt_n, d.bk,
+                  d.fused, d.ext, d.variant);
+    }
+    return 0;
+  }
+  hipdnn_ep_test::timing::printTimingMode();
+  std::printf("custom_kernels MatMulNBits bits=4 (nibble-packed) Verification\n");
+  std::printf("===============================================================\n");
+
+  hipDeviceProp_t prop;
+  HIP_CHECK(hipGetDeviceProperties(&prop, 0));
+  std::printf("GPU: %s (arch: %s)\n", prop.name, prop.gcnArchName);
+
+  int M = 0, N = 0, K = 0;
+  int gs = 128, b_row_bytes = 0;
+  bool no_zeros = false;
+  bool dp4a = false;
+  bool have_custom = false;
+  for (int i = 1; i < argc; ++i) {
+    std::string a = argv[i];
+    if (a == "--no-zeros") no_zeros = true;
+    else if (a == "--dp4a") dp4a = true;
+    else if (a == "--b-row-bytes" && i + 1 < argc) b_row_bytes = std::atoi(argv[++i]);
+    else if (a == "--group-size" && i + 1 < argc) gs = std::atoi(argv[++i]);
+    else if (sscanf(argv[i], "%dx%dx%d", &M, &K, &N) == 3) have_custom = true;
+  }
+
+  if (have_custom)
+    return runCustom(M, N, K, gs, !no_zeros, b_row_bytes, dp4a);
+
+  const int tier = hipdnn_ep_test::resolveCoverageTier(argc, argv);
+  const int sweep_rc = sweep::run(tier);
+  // The extended entries run on gfx1151 only; elsewhere only the sweep above
+  // applies.
+  int forced_rc = 0;
+  if (!hip_matmul_nbits_u4_wmma_ext_device())
+    std::printf("SKIP: extended WMMA entries run on gfx1151 only, not %s\n",
+                prop.gcnArchName);
+  else
+    forced_rc = forced::run();
+  return sweep_rc != 0 || forced_rc != 0 ? 1 : 0;
+}

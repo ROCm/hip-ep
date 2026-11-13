@@ -7,6 +7,7 @@ EXPORTS
     profiler_collect
     morphizen_get_version
     morphizen_ep_on_run_start
+    morphizen_ep_on_run_end
     morphizen_ep_set_ep_dynamic_options
     morphizen_get_build_info
     morphizen_get_execution_provider_deletor

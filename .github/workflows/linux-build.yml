@@ -21,28 +21,35 @@ concurrency:
 
 env:
   # Pins (kept in lockstep with cmake/deps.txt).
-  # LLVM/MLIR/LLD are built from source at this upstream release tag; bumping it
-  # only invalidates the llvm-install cache.
-  LLVM_TAG: llvmorg-22.1.0
-  ONNXRUNTIME_VERSION: "1.27.0"
+  # LLVM/MLIR/LLD are cloned from deps.txt llvm_project. The hash column is a
+  # branch name, so the llvm-install cache key is that branch's current tip.
+  # rocmlirTriton's vendored external/llvm-project is not built.
+  ONNXRUNTIME_VERSION: "1.31.0"
   # Space-separated microsoft/onnxruntime PR numbers `git apply`-ed on top of
   # the pinned tag during the from-source build (an empty list applies nothing;
   # ORT is still built from source either way). Part of the ort-install cache
   # key. Remove a PR once its fix lands in the pinned ONNX Runtime release.
   ONNXRUNTIME_PR_PATCHES: ""
-  OGA_VERSION: "0.14.0"
+  OGA_VERSION: "0.19.0"
   # Space-separated microsoft/onnxruntime-genai PR numbers fetched from
-  # pull/<n>.patch and `git apply` on top of v<OGA_VERSION>. Part of the OGA
-  # cache key. Remove a PR once it lands in the pinned OGA release.
-  OGA_PR_PATCHES: "2194"
+  # pull/<n>.diff and applied on top of v<OGA_VERSION>. Part of the OGA cache
+  # key. Remove a PR once it lands in the pinned OGA release.
+  OGA_PR_PATCHES: "2875"
   # The GPU arch the artifact targets. CI runners have no GPU, so it is passed
   # explicitly (build.py auto-detects from /sys on a real GPU host).
   HIP_ARCHITECTURES: gfx11-generic
   SCCACHE_CACHE_SIZE: "200M"
 
 jobs:
+  build_required:
+    uses: ./.github/workflows/build-required.yml
+
   build-linux:
-    # No draft-PR gate: the cache-priming strategy needs every PR push.
+    needs: build_required
+    if: needs.build_required.outputs.run == 'true'
+    # No draft-PR gate: cache priming needs every code change, including
+    # drafts. build-required.yml skips this job for a documentation or
+    # Jekyll diff on a pull request or merge group. Pushes always build.
     runs-on: ubuntu-latest
     steps:
       # MorphiZen is vendored in-tree as a git subtree under morphizen,
@@ -80,6 +87,8 @@ jobs:
 
       # ubuntu-latest ships ~14 GB usable SSD; the from-source LLVM build + ORT
       # need much more. Reclaim ~30 GB by pruning preinstalled toolchains.
+      # Keep swap. Deleting it makes the rmt-core LLVM link OOM the runner,
+      # which GitHub reports as "lost communication" and drops the log.
       - name: Free disk space
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
         with:
@@ -89,7 +98,7 @@ jobs:
           dotnet: true
           haskell: true
           large-packages: false
-          swap-storage: true
+          swap-storage: false
 
       # Pin the Python the whole job uses (ORT/OGA wheels are built against it).
       - name: Setup Python 3.14
@@ -132,26 +141,49 @@ jobs:
 
       # -----------------------------------------------------------------------
       # LLVM/MLIR/LLD/Clang from source -> llvm-install (cached). Caching is a CI
-      # concern, so the prefix build lives here (not in build.py). Recipe
-      # matches cmake/deps.cmake's from-source fallback: clang;mlir;lld, X86 only,
-      # RTTI on, zlib/zstd off, INSTALL_UTILS on.
+      # concern, so the prefix build lives here (not in build.py). Source is
+      # deps.txt llvm_project (a branch; the cache key is its current tip).
+      # Recipe matches cmake/deps.cmake's from-source fallback: clang;mlir;lld,
+      # X86 only, RTTI on, zlib/zstd off, INSTALL_UTILS on. The install holds
+      # only LLVM_DISTRIBUTION_COMPONENTS, which also scopes the exported CMake
+      # targets so find_package does not expect the omitted tools.
       # -----------------------------------------------------------------------
+      - name: Resolve LLVM branch tip
+        id: llvm
+        run: |
+          set -euo pipefail
+          LINE=$(grep -E '^llvm_project;' cmake/deps.txt)
+          LLVM_URL=$(echo "$LINE" | cut -d';' -f2)
+          LLVM_REF=$(echo "$LINE" | cut -d';' -f3)
+          LLVM_COMMIT=$(git ls-remote "$LLVM_URL" "refs/heads/$LLVM_REF" | awk '{print $1}')
+          if [ -z "$LLVM_COMMIT" ]; then
+            echo "ERROR: no tip for $LLVM_URL refs/heads/$LLVM_REF" >&2
+            exit 1
+          fi
+          echo "url=$LLVM_URL" >> "$GITHUB_OUTPUT"
+          echo "ref=$LLVM_REF" >> "$GITHUB_OUTPUT"
+          echo "commit=$LLVM_COMMIT" >> "$GITHUB_OUTPUT"
+
       - name: Cache LLVM install prefix
         id: cache-llvm
         uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/llvm-install
-          # Keyed only on the LLVM tag: a protobuf/ORT bump must not evict the
-          # multi-hour LLVM cache.
-          key: linux-llvm-${{ env.LLVM_TAG }}
+          # Keyed on the resolved branch tip: a protobuf/ORT bump must not
+          # evict the multi-hour LLVM cache, and a moved tip must.
+          key: linux-llvm-dist-${{ steps.llvm.outputs.commit }}
 
       - name: Build LLVM/MLIR/LLD from source
         if: steps.cache-llvm.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
+          # Shallow clone of the branch tip. The cmake project lives at llvm/.
           SRC="${{ runner.workspace }}/llvm-project"
-          git clone --depth 1 --branch "${{ env.LLVM_TAG }}" \
-            https://github.com/llvm/llvm-project.git "$SRC"
+          git init "$SRC"
+          git -C "$SRC" remote add origin "${{ steps.llvm.outputs.url }}"
+          git -C "$SRC" fetch --depth 1 origin "${{ steps.llvm.outputs.commit }}"
+          git -C "$SRC" checkout FETCH_HEAD
+          rm -rf "$SRC/.git"
           cmake -G Ninja -S "$SRC/llvm" -B "${{ runner.workspace }}/build-llvm" \
             -DCMAKE_BUILD_TYPE=Release \
             -DLLVM_ENABLE_PROJECTS="clang;mlir;lld" \
@@ -165,12 +197,17 @@ jobs:
             -DLLVM_INCLUDE_BENCHMARKS=OFF \
             -DLLVM_BUILD_TOOLS=ON \
             -DLLVM_INSTALL_UTILS=ON \
+            -DLLVM_PARALLEL_LINK_JOBS=4 \
+            -DLLVM_TOOL_LTO_BUILD=OFF \
+            -DLLVM_TOOL_REMARKS_SHLIB_BUILD=OFF \
+            -DLLVM_DISTRIBUTION_COMPONENTS="clang;clang-resource-headers;llvm-link;llvm-config;llvm-tblgen;mlir-tblgen;mlir-pdll;mlir-linalg-ods-yaml-gen;mlir-opt;lld;FileCheck;not;count;split-file;llvm-headers;llvm-libraries;cmake-exports;mlir-headers;mlir-libraries;mlir-cmake-exports;lld-headers;lld-libraries;lld-cmake-exports" \
             -DCMAKE_CXX_VISIBILITY_PRESET=hidden \
             -DCMAKE_C_VISIBILITY_PRESET=hidden \
             -DCMAKE_VISIBILITY_INLINES_HIDDEN=ON \
             -DCMAKE_C_COMPILER_LAUNCHER=sccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
-          cmake --build "${{ runner.workspace }}/build-llvm" --target install
+          cmake --build "${{ runner.workspace }}/build-llvm" --target install-distribution
+          du -sh "${{ runner.workspace }}"/llvm-install/{bin,include,lib}
           rm -rf "$SRC" "${{ runner.workspace }}/build-llvm"
 
       # -----------------------------------------------------------------------
@@ -288,6 +325,16 @@ jobs:
             --hip_arch "${{ env.HIP_ARCHITECTURES }}" \
             --cmake_prefix_path "${{ runner.workspace }}/llvm-install;${{ runner.workspace }}/ort-install"
 
+      # Require DF_1_NODELETE and the plugin entry points. No GPU: constructors
+      # must not touch a device.
+      - name: Check libhipgpu.so ELF contract
+        run: |
+          set -euo pipefail
+          BUILD="${{ runner.workspace }}/build/$(basename "$PWD")"
+          THEROCK="$BUILD/_therock"
+          export LD_LIBRARY_PATH="${THEROCK}/lib:${LD_LIBRARY_PATH:-}"
+          ctest --test-dir "$BUILD" -C Release -R '^HipGpuElfContract$' --output-on-failure
+
       # -----------------------------------------------------------------------
       # OGA (onnxruntime-genai) for model_benchmark: a dedicated step using the
       # ort-install prefix as ORT_HOME. Kept out of
@@ -299,7 +346,7 @@ jobs:
         uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/oga-artifacts
-          key: linux-oga-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-am-whl-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
+          key: linux-oga-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
 
       # Checkout + build are skipped on an OGA cache hit (step-level gate); the
       # install-copy below always runs so the
@@ -312,16 +359,11 @@ jobs:
           ref: v${{ env.OGA_VERSION }}
           submodules: recursive
           path: onnxruntime-genai
-          fetch-depth: 1
+          # Full history: `git apply --3way` below resolves each hunk against the
+          # blob the PR was prepared from, which lives at the PR's merge base.
+          fetch-depth: 0
           show-progress: false
 
-      # Fetch and apply microsoft/onnxruntime-genai PR patches listed in
-      # OGA_PR_PATCHES (env). pull/<n>.patch is a multi-commit mbox; `git am`
-      # replays each commit in order, so a PR that adds -> modifies -> renames
-      # the same path within its own series (e.g. #2194: morphizen_ep/* ->
-      # amdgpu/*) applies cleanly. `git apply` pre-checks every hunk against the
-      # base tree at once and self-conflicts on such a series. The OGA cache key
-      # includes the PR list, so editing it forces a rebuild.
       - name: Apply OGA PR patches
         if: steps.cache-oga.outputs.cache-hit != 'true'
         working-directory: onnxruntime-genai
@@ -334,23 +376,30 @@ jobs:
             echo "OGA_PR_PATCHES is empty; nothing to apply"
             exit 0
           fi
-          # pull/<n>.patch is a format-patch series; apply with `git am` so that
-          # intra-series file renames (morphizen_ep -> amdgpu) replay against the
-          # correct intermediate tree. `git apply` flattens the series and chokes
-          # on the rename whose pre-image only exists after an earlier commit.
-          # git am needs a committer identity on a bare runner.
-          git config user.email "ci@onnx-hipdnn-ep.local"
-          git config user.name "onnx-hipdnn-ep CI"
+          # pull/<n>.diff is the PR's net diff against its merge base. Replaying
+          # pull/<n>.patch with `git am` drops the conflict resolution of any
+          # "merge main" commit in the PR.
+          # --3way is required, not an optimization: a PR branched off main
+          # carries context lines that main has since edited but the pinned tag
+          # has not, and a plain apply rejects those hunks. The merge keeps the
+          # tag's version of every line the PR did not touch, so unrelated main
+          # commits stay out; a hunk needing code absent from the tag conflicts
+          # and fails the step. Tests are excluded because OGA does not build
+          # them and their fixtures do conflict; OGA's own CI workflows are
+          # excluded because the build does not use them and some no longer
+          # exist at the pinned tag. Markdown is excluded because the build
+          # does not read it and doc edits across the listed PRs conflict.
           for pr in $prs; do
-            url="https://github.com/microsoft/onnxruntime-genai/pull/${pr}.patch"
+            url="https://github.com/microsoft/onnxruntime-genai/pull/${pr}.diff"
             echo "Fetching $url"
-            # github.com throttles raw .patch fetches with HTTP 429; retry with
+            # github.com throttles raw .diff fetches with HTTP 429; retry with
             # backoff (--retry-all-errors covers 429/5xx) to ride out the limit.
             curl -fsSL --retry 6 --retry-delay 10 --retry-all-errors \
-              "$url" -o "/tmp/oga-pr-${pr}.patch"
+              "$url" -o "/tmp/oga-pr-${pr}.diff"
             echo "Applying PR #${pr}"
-            git am --3way --whitespace=nowarn "/tmp/oga-pr-${pr}.patch" \
-              || { git am --abort; echo "PR #${pr} failed to apply"; exit 1; }
+            git apply --whitespace=nowarn --3way --exclude='test/*' \
+              --exclude='.github/*' --exclude='*.md' "/tmp/oga-pr-${pr}.diff" \
+              || { echo "PR #${pr} failed to apply"; exit 1; }
           done
 
       - name: Build OGA
@@ -370,16 +419,20 @@ jobs:
           fi
           cp -a "$ORT_PREFIX"/lib/libonnxruntime.so* "$ORT_HOME/lib/" 2>/dev/null || true
           cp -a "$ORT_PREFIX"/lib/libonnxruntime_providers_shared.so* "$ORT_HOME/lib/" 2>/dev/null || true
-          # Build the OGA python wheel too: it pairs with the ORT python wheel
-          # (built above with --build_wheel) so the pair is pip-installable.
+          # ENABLE_TESTS=OFF is not redundant with --skip_tests: build.py only
+          # turns the option off for mobile targets, so on desktop --skip_tests
+          # skips *running* the tests while still building them. This job needs
+          # only the shared library, model_benchmark and the wheel.
           python3 onnxruntime-genai/build.py \
             --config Release \
             --cmake_generator Ninja \
+            --no_telemetry \
             --ort_home "$ORT_HOME" \
             --skip_tests --skip_examples \
             --parallel \
             --build_dir "${{ runner.workspace }}/build-oga" \
             --cmake_extra_defines \
+              ENABLE_TESTS=OFF \
               CMAKE_C_COMPILER_LAUNCHER=sccache \
               CMAKE_CXX_COMPILER_LAUNCHER=sccache
           mkdir -p "$ART"
@@ -578,7 +631,7 @@ jobs:
         with:
           name: linux-gpu-test-package
           path: staging/
-          retention-days: ${{ (github.ref == 'refs/heads/main' || contains(github.ref, 'release')) && 14 || 3 }}
+          retention-days: ${{ (github.ref == 'refs/heads/main' || contains(github.ref, 'release')) && 90 || 3 }}
 
       - name: Save sccache directory
         if: always() && github.ref_name == 'main'

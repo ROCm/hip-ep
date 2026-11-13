@@ -6,17 +6,28 @@
 ## version. cmake/deps.cmake derives the per-OS archive basename
 ## (onnxruntime-win-x64-<ver>.zip / onnxruntime-linux-x64-<ver>.tgz). Resolved
 ## find_package-first; this is the download-only fallback.
-onnxruntime;https://github.com/microsoft/onnxruntime/releases/download;1.27.0
+onnxruntime;https://github.com/microsoft/onnxruntime/releases/download;1.31.0
 ##
 ## Source-built deps (hash = git tag/commit). Resolved find_package-first;
 ## these are the from-source fallbacks when no prefix is found.
-llvm;https://github.com/llvm/llvm-project.git;llvmorg-22.1.0
+##
+## LLVM/MLIR/LLD from-source fallback. find_package still wins when a prefix
+## exists. Both ENABLE_ROCMLIRTRITON settings clone this repo; rocmlirTriton's
+## vendored external/llvm-project is not built. The hash column is a branch
+## name, so the checkout follows that branch's tip rather than a frozen commit.
+llvm_project;https://github.com/ROCm/llvm-project.git;rmt-core-2026-10-19
+## rocmlirTriton pin. Used only when ENABLE_ROCMLIRTRITON=ON, and only for the
+## Rock/Triton sources. LLVM still comes from llvm_project above.
+rocmlirtriton;https://github.com/ROCm/rocmlirTriton.git;fc54715a1babd18bd8cef5bd9b2e372b6089dfa0
 protobuf;https://github.com/protocolbuffers/protobuf.git;v34.0
 flatbuffers;https://github.com/google/flatbuffers.git;v25.12.19
 ##
 ## Crash-backtrace helper (always FetchContent; no find_package path).
 cpptrace;https://github.com/jeremy-rifkin/cpptrace.git;v0.8.3
 ##
-therock_windows;https://github.com/ROCm/hip-ep/releases/download/v0.3.0;rocm-dist-windows-gfx115x-gfx1170-7.16.0-hipblaslt-gfx1170-trimmed
-therock_linux;https://repo.amd.com/rocm/tarball;therock-dist-linux-gfx1151-7.11.0
-migraphx_windows;https://github.com/ROCm/hip-ep/releases/download/v0.3.0;migraphx-sdk-windows-1217ce1d
+therock_windows;https://github.com/ROCm/hip-ep/releases/download/v0.5.2;rocm-dist-windows-gfx115x-gfx117x-7.16.0-hipblaslt-gfx117x-trimmed
+## Linux 10.1 (HIP 7.16) carries the tuned gfx1151 hipBLASLt tables
+## (https://github.com/ROCm/rocm-libraries/pull/7581), and keeps the 7.13 zstd symbol isolation
+## (https://github.com/ROCm/TheRock/pull/4251).
+therock_linux;https://stable.repo.amd.com/rocm/core/tarball;therock-dist-linux-gfx1151-10.1.0
+migraphx_windows;https://github.com/ROCm/hip-ep/releases/download/v0.5.1;migraphx-sdk-windows-7bb0654e

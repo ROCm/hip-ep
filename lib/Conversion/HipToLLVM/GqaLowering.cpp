@@ -13,17 +13,63 @@ namespace {
 // total_seq_len,
 //         output, present_key, present_value) {attributes...}
 struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
-  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+  GqaOpLowering(const LLVMTypeConverter &converter,
+                const DenseMap<Operation *, Value> &hostScalars)
+      : ConvertOpToLLVMPattern<GqaOp>(converter), hostLengths(hostScalars) {}
+
+  const DenseMap<Operation *, Value> &hostLengths;
 
   LogicalResult
   matchAndRewrite(GqaOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    const char *callee = kWrapGQAHostLength;
+#if HIP_EP_RING_ENABLED != 0
+    // Prove the element types before lowering erases them. A two-byte element
+    // size alone cannot distinguish FP16 from BF16. Ineligible calls retain
+    // the original GQA entry point and its existing behavior.
+    auto isF16 = [](Value value) {
+      return value &&
+             cast<MemRefType>(value.getType()).getElementType().isF16();
+    };
+    bool ringTypes = true;
+    for (Value value :
+         {op.getQuery(), op.getKey(), op.getValue(), op.getOutput(),
+          op.getPresentKey(), op.getPresentValue()})
+      ringTypes &= isF16(value);
+    for (Value value : {op.getPastKey(), op.getPastValue()})
+      ringTypes &= !value || isF16(value);
+    if (ringTypes && op.getSoftcap().isZero() && op.getNumHeads() == 24 &&
+        op.getKvNumHeads() == 4 && op.getKQuantType() == "NONE" &&
+        op.getVQuantType() == "NONE" && !op.getDoRotary() &&
+        !op.getNoCausal() && op.getLocalWindowSizeAttr().getInt() <= 0 &&
+        op.getSmoothSoftmaxAttr().getInt() <= 0 && !op.getQkOutput() &&
+        !op.getHeadSink() && !op.getAttentionBias() && !op.getKeyBias() &&
+        !op.getPositionIds() && !op.getOutputQk())
+      callee = kWrapGQARingF16;
+#endif
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type ptrType = getPtrType();
     Type i32Type = rewriter.getI32Type();
     Type i64Type = rewriter.getI64Type();
     Type f32Type = rewriter.getF32Type();
+
+    Value hostLength;
+    if (Value original = hostLengths.lookup(op)) {
+      hostLength = rewriter.getRemappedValue(original);
+      if (!hostLength)
+        return rewriter.notifyMatchFailure(op, "cannot convert host length");
+      // HostScalarAnalysis forwards total_seq_len for a uniform seqlens_k.
+      if (op.getUniformSeqlensK())
+        hostLength = LLVM::SubOp::create(
+            rewriter, loc, hostLength,
+            LLVM::ConstantOp::create(rewriter, loc, i32Type,
+                                     rewriter.getI32IntegerAttr(1)));
+    }
+    Value hasHostLength = LLVM::ConstantOp::create(
+        rewriter, loc, i32Type, rewriter.getI32IntegerAttr(hostLength ? 1 : 0));
+    if (!hostLength)
+      hostLength = hasHostLength;
 
     auto createI64Const = [&](int64_t value) -> Value {
       return LLVM::ConstantOp::create(rewriter, loc, i64Type,
@@ -105,7 +151,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     Value kQuantType = createI64Const(quantTypeToEnum(op.getKQuantType()));
     Value vQuantType = createI64Const(quantTypeToEnum(op.getVQuantType()));
 
-    // no_causal: emit as i32 (matches wrap_group_query_attention signature).
+    // no_causal: emit as i32 (matches the runtime signature).
     Value noCausal = LLVM::ConstantOp::create(
         rewriter, loc, i32Type,
         rewriter.getI32IntegerAttr(op.getNoCausal() ? 1 : 0));
@@ -191,9 +237,16 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     // coincide only at G == 1, so the shapes alone cannot distinguish them.
     // Absent key means packed QKV, which is always BSHD.
     Value kvBnsdVal = createI64Const(0);
+    // seq_len_new_kv: tokens carried by key/value. A KV-sharing layer passes a
+    // zero-length key/value next to a past cache produced by another layer,
+    // and the runtime must then attend over the past without appending.
+    Value seqLenNewKVVal = seqLenQVal;
     if (op.getKey()) {
       auto keyMemRefType = cast<MemRefType>(op.getKey().getType());
       kvBnsdVal = createI64Const(keyMemRefType.getRank() == 4 ? 1 : 0);
+      unsigned keySeqDim = (keyMemRefType.getRank() == 4) ? 2 : 1;
+      seqLenNewKVVal = getMemRefDimSize(keyMemRefType, keySeqDim,
+                                        adaptor.getKey(), rewriter, loc);
     }
 
     Value elemSizeVal = createI64Const(elementSizeBytes);
@@ -211,8 +264,23 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
       }
     }
 
-    // Function signature matches wrap_group_query_attention() in gqa.cpp
-    SmallVector<Type, 42> paramTypes = {
+    // key_bias [B or 1, T]: one fp16 row per batch entry, applied by the fused
+    // kernels per key. The runtime checks T against the KV length it scores.
+    Value keyBiasPtr = nullPtr;
+    Value keyBiasBatchVal = createI64Const(0);
+    Value keyBiasLenVal = createI64Const(0);
+    if (op.getKeyBias()) {
+      auto kbType = cast<MemRefType>(op.getKeyBias().getType());
+      keyBiasPtr =
+          extractContiguousMemRefPtr(adaptor.getKeyBias(), rewriter, loc);
+      keyBiasBatchVal =
+          getMemRefDimSize(kbType, 0, adaptor.getKeyBias(), rewriter, loc);
+      keyBiasLenVal =
+          getMemRefDimSize(kbType, 1, adaptor.getKeyBias(), rewriter, loc);
+    }
+
+    // Both runtime entry points accept the optional host length and key_bias.
+    SmallVector<Type, 48> paramTypes = {
         ptrType, // state
         i32Type, // op_state_slot
         // Inputs (14 pointers - some may be nullptr)
@@ -235,7 +303,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         ptrType, // present_key
         ptrType, // present_value
         ptrType, // output_qk
-        // Attributes (12 values)
+        // Attributes (13 values)
         i64Type, // num_heads
         i64Type, // kv_num_heads
         f32Type, // scale
@@ -249,7 +317,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         i64Type, // v_quant_type
         i64Type, // kv_cache_bit_width
         i32Type, // no_causal
-        // Shape info (6 values)
+        // Shape info (10 values)
         i64Type, // batch_size
         i64Type, // seq_len_q
         i64Type, // seq_len_kv
@@ -258,15 +326,22 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         i64Type, // element_size_bytes
         i64Type, // attn_bias_batch
         i64Type, // attn_bias_num_heads
-        i64Type  // kv_bnsd
+        i64Type, // kv_bnsd
+        i64Type, // seq_len_new_kv
+        i32Type, // has_host_length
+        i32Type, // host_length_value
+        // Key bias (3 values)
+        ptrType, // key_bias
+        i64Type, // key_bias_batch
+        i64Type  // key_bias_len
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp =
-        LLVM::lookupOrCreateFn(rewriter, module, kWrapGQA, paramTypes, i32Type);
+        LLVM::lookupOrCreateFn(rewriter, module, callee, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 42> args = {
+    SmallVector<Value, 45> args = {
         statePtr,
         // Per-instance op-state slot (threaded by --assign-op-state-slots)
         getOpStateSlotValue(op, rewriter, loc),
@@ -280,9 +355,12 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         numHeads, kvNumHeads, scale, doRotary, rotaryInterleaved, softcap,
         localWindowSize, smoothSoftmax, qkOutput, kQuantType, vQuantType,
         kvCacheBitWidth, noCausal,
-        // Shape info (9 values)
+        // Shape info (10 values)
         batchSizeVal, seqLenQVal, seqLenKVVal, pastBufSeqVal, headDimVal,
-        elemSizeVal, attnBiasBatchVal, attnBiasNumHeadsVal, kvBnsdVal};
+        elemSizeVal, attnBiasBatchVal, attnBiasNumHeadsVal, kvBnsdVal,
+        seqLenNewKVVal, hasHostLength, hostLength,
+        // Key bias (3 values)
+        keyBiasPtr, keyBiasBatchVal, keyBiasLenVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 
@@ -293,9 +371,10 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
 
 } // namespace
 
-void populateGqaLoweringPatterns(const LLVMTypeConverter &converter,
-                                 RewritePatternSet &patterns) {
-  patterns.add<GqaOpLowering>(converter);
+void populateGqaLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns,
+    const DenseMap<Operation *, Value> &hostScalars) {
+  patterns.add<GqaOpLowering>(converter, hostScalars);
 }
 
 } // namespace hip

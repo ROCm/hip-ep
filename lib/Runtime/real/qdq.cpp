@@ -81,7 +81,16 @@ int prepare_qdq(const char *name, RuntimeState *state, const void *input,
   int axis_n = static_cast<int>(axis);
   if (axis_n < 0)
     axis_n += static_cast<int>(input_rank);
-  if (scale_rank > 0 && (axis_n < 0 || axis_n >= input_rank)) {
+  // A scalar scale -- rank 0, or the 1-element rank-1 spelling -- is
+  // per-tensor, and ONNX ignores axis for it. QDQ exporters routinely leave
+  // the schema default of 1 on a rank-1 bias, where it names no dimension, so
+  // demanding a valid axis there rejects a conforming graph. Only require one
+  // when the scale actually indexes along the axis, which is what the kernel's
+  // own granularity check already does.
+  bool axis_is_indexed =
+      block_size > 0 ||
+      (scale_rank > 0 && !(scale_rank == 1 && scale_shape[0] == 1));
+  if (axis_is_indexed && (axis_n < 0 || axis_n >= input_rank)) {
     fprintf(stderr,
             "[REAL] %s: axis out of range (input_rank=%lld axis=%lld)\n", name,
             (long long)input_rank, (long long)axis);
@@ -146,8 +155,11 @@ int prepare_qdq(const char *name, RuntimeState *state, const void *input,
 // arrives as an 8-bit dtype carrying just the signedness. Every other value
 // has to agree with the dtype, so reject the disagreement here rather than
 // hand the kernel a stride neither side agreed on.
+// \p allow_32 is set only by the dequantize side, where ONNX admits an int32
+// input carrying a quantized conv/gemm bias. QuantizeLinear has no int32
+// output in the spec, so the quantize side keeps the width out.
 int check_quant_bits(const char *name, int64_t bits, int hip_dtype,
-                     int64_t hipdnn_dtype) {
+                     int64_t hipdnn_dtype, bool allow_32) {
   if (bits == 4) {
     if (hip_dtype != HIP_DTYPE_INT8 && hip_dtype != HIP_DTYPE_UINT8) {
       fprintf(stderr,
@@ -158,11 +170,11 @@ int check_quant_bits(const char *name, int64_t bits, int hip_dtype,
     }
     return 0;
   }
-  if (bits != 8 && bits != 16) {
+  if (bits != 8 && bits != 16 && !(allow_32 && bits == 32)) {
     fprintf(stderr,
             "[REAL] %s: unsupported quantized bit width %lld; expected 4, 8, "
-            "or 16\n",
-            name, (long long)bits);
+            "%s\n",
+            name, (long long)bits, allow_32 ? "16, or 32" : "or 16");
     return -1;
   }
   return 0;
@@ -197,7 +209,7 @@ wrap_quantize_linear(RuntimeState *state, const void *input, const void *scale,
     return rc < 0 ? rc : 0;
 
   if (check_quant_bits("wrap_quantize_linear", output_bits, p.out_dtype,
-                       output_dtype) != 0)
+                       output_dtype, /*allow_32=*/false) != 0)
     return -1;
 
   RUNTIME_DEBUG_LOG(
@@ -248,7 +260,7 @@ extern "C" int wrap_dequantize_linear(
     return rc < 0 ? rc : 0;
 
   if (check_quant_bits("wrap_dequantize_linear", input_bits, p.in_dtype,
-                       input_dtype) != 0)
+                       input_dtype, /*allow_32=*/true) != 0)
     return -1;
 
   RUNTIME_DEBUG_LOG(

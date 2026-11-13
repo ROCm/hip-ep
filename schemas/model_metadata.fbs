@@ -35,6 +35,8 @@ table ConstantInfo {
   size:   int64;
   offset: int64;
   source: ConstantSource;
+  // Read from its FileRefSource on demand; no GPU copy is allocated.
+  disk_resident: bool = false;
 }
 
 table HipModelMetaInfo {

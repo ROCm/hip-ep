@@ -5,6 +5,12 @@
 
 add_executable(hip-rocmlir-compiler hip-rocmlir-compiler.cpp)
 
+# Same reason as LibHipCompiler: this target includes InitRocMLIRDialects.h,
+# whose Triton headers require C++20.
+set_target_properties(hip-rocmlir-compiler PROPERTIES
+  CXX_STANDARD 20
+  CXX_STANDARD_REQUIRED YES)
+
 add_dependencies(hip-rocmlir-compiler
   HipDialectIncGen
   HipsrDialectIncGen
@@ -14,10 +20,14 @@ add_dependencies(hip-rocmlir-compiler
   HipPassesIncGen
 )
 
-# The rocMLIR high-level pipeline is invoked at runtime through
-# librockCompiler.so via dlopen/dlsym (it embeds its own LLVM/MLIR copy, so it
-# must not be link-time coupled). Hence only libdl is needed for the .so hand-
-# off; everything else is this executable's own MLIR for the head passes.
+# rocMLIR (rocmlirTriton) is built in-tree against the same LLVM/MLIR as this
+# executable (ENABLE_ROCMLIRTRITON), so its pipeline/tuning libraries are
+# called in-process -- no dlopen, no serialized-IR hand-off.
+#
+# hip_link_rocmlir_closure adds the Triton objects once and appends the
+# non-object archives after LibHipCompiler. The includes are applied directly
+# because this executable includes rocMLIR headers (mlir/Dialect/Rock/*).
+hip_rocmlir_apply_includes(hip-rocmlir-compiler)
 target_link_libraries(hip-rocmlir-compiler PRIVATE
   HipSupport
   LibHipCompiler
@@ -32,9 +42,25 @@ target_link_libraries(hip-rocmlir-compiler PRIVATE
   MLIRPass
   MLIRTransforms
   MLIRFuncTransforms
-  ${CMAKE_DL_LIBS}
+  # LLVM/MLIR come from ${llvm_libs} -- no bundled second copy.
   ${llvm_libs}
 )
+# After LibHipCompiler so the GNU ld rescan group is the last link item.
+hip_link_rocmlir_closure(hip-rocmlir-compiler)
+
+# Follows what LibHipCompiler actually built, not BUILD_MOCK_RUNTIME: the
+# benchmarking code lives there now and stubs itself out when the build does not
+# allow HIP host APIs, so a tool flag derived from the mock setting alone would
+# offer tuning that cannot run. No hip::host link either -- nothing here
+# references a HIP symbol since the autotuner moved, which is why this binary no
+# longer carries a HIP import at all.
+if(HIPDNN_EP_ROCMLIR_AUTOTUNE_AVAILABLE)
+  target_compile_definitions(hip-rocmlir-compiler
+    PRIVATE HIP_ROCMLIR_AUTOTUNE=1)
+else()
+  target_compile_definitions(hip-rocmlir-compiler
+    PRIVATE HIP_ROCMLIR_AUTOTUNE=0)
+endif()
 
 target_include_directories(hip-rocmlir-compiler PRIVATE
   ${CMAKE_SOURCE_DIR}/include

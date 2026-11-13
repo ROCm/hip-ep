@@ -3,9 +3,9 @@
 # Licensed under the MIT License.
 #
 
-"""Tests for unary elementwise ops: Neg, Sign, Cos, Sin, Not.
+"""Tests for unary elementwise ops: Neg, Sign, Cos, Sin, Not, IsNaN.
 
-These five ops are added by the qwen-vision-kernels PR. They share the same
+These ops share the same
 host-side shape: one input, one output, identical shape, no broadcasting.
 The runtime dispatches each to its own HIP elementwise kernel.
 
@@ -17,6 +17,7 @@ lib/Runtime/real/<op>.cpp):
     Cos   : f16, f32           (trig kernels are float-only)
     Sin   : f16, f32           (trig kernels are float-only)
     Not   : bool only          (treated as 1-byte stream)
+    IsNaN : f16, f32, f64      (bool output, one byte per element)
 
 All tests cover a small shape (smoke) plus a llama-3.1-8B-style
 [1, S, 4096] shape for S in {1, 128}, which is the dominant tensor
@@ -198,5 +199,40 @@ class TestNot:
         model = _make_unary_model("Not", np.bool_, shape)
         rng = np.random.default_rng(110)
         x = rng.integers(0, 2, shape, dtype=np.bool_)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0)
+
+
+# ---------------------------------------------------------------------------
+# IsNaN : y = isnan(x)  (float input, bool output)
+# ---------------------------------------------------------------------------
+def _make_isnan_model(dtype: np.dtype, shape: list[int]):
+    X = helper.make_tensor_value_info("X", np_to_onnx_type(dtype), list(shape))
+    Y = helper.make_tensor_value_info("Y", np_to_onnx_type(np.bool_), list(shape))
+    node = helper.make_node("IsNaN", ["X"], ["Y"])
+    return make_model_from_nodes([node], [X], [Y])
+
+
+class TestIsNaN:
+    @pytest.mark.parametrize("dtype", [np.float16, np.float32, np.float64])
+    def test_isnan(self, model_runner, dtype):
+        shape = [4, 8]
+        model = _make_isnan_model(dtype, shape)
+        rng = np.random.default_rng(111)
+        x = rng.uniform(-3.0, 3.0, shape).astype(dtype)
+        flat = x.ravel()
+        flat[0] = np.nan
+        flat[1] = np.inf
+        flat[2] = -np.inf
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0)
+
+    def test_isnan_decoder_shape(self, model_runner):
+        """f16 [24, 20, 1, 1], the Distil decoder self-attention mask."""
+        shape = [24, 20, 1, 1]
+        model = _make_isnan_model(np.float16, shape)
+        rng = np.random.default_rng(112)
+        x = rng.uniform(-1.0, 1.0, shape).astype(np.float16)
+        x[0, 0, 0, 0] = np.nan
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=0)

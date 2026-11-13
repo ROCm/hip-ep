@@ -25,12 +25,17 @@ add_library(HipDialectTransforms STATIC
   # Native C++ rewrites driven by hip-fusion-transform alongside the PDLL
   # ones. Each is a .hpp/.cpp pair so that HipFusionTransform.cpp, which
   # instantiates the driver, only ever sees their populate declarations.
+  fusion_pattern/linear_attention_group_fold.cpp
   fusion_pattern/patch_embed_conv_to_gemm.cpp
+  fusion_pattern/swiglu_fusion.cpp
   AddHipContextArg.cpp
   AssignOpStateSlots.cpp
   BufferUtils.cpp
+  DecomposeConvTranspose.cpp
   ExternalizeConstants.cpp
   FixLoopAccumulatorOffset.cpp
+  FoldBatchNorm.cpp
+  FoldConstantExtracts.cpp
   FuseROCMlir.cpp
   GenerateInterface.cpp
   GenerateOpStateInit.cpp
@@ -80,6 +85,7 @@ target_link_libraries(HipDialectTransforms PUBLIC
   MLIRFuncDialect
   MLIRMemRefDialect
   MLIRArithDialect
+  MLIRSCFDialect
   MLIRAffineDialect
   MLIRLLVMDialect
   MLIRBufferizationDialect

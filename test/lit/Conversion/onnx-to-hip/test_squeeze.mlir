@@ -81,6 +81,55 @@ module {
     %result = "onnx.Squeeze"(%data, %axes) : (tensor<1x1xf16>, tensor<2xi64>) -> tensor<f16>
     return %result : tensor<f16>
   }
+
+  // A dynamic axis is not a static 1, so collapse_shape cannot drop it.
+  // Slice that axis to 1 first, then collapse.
+  func.func @test_squeeze_dynamic_axis(%data: tensor<?x?x?x?xf32>) -> tensor<?x?x?xf32> {
+    %result = "onnx.Squeeze"(%data) {axes = [0]} : (tensor<?x?x?x?xf32>) -> tensor<?x?x?xf32>
+    return %result : tensor<?x?x?xf32>
+  }
+
+  // Negative axes are normalized before the dynamic slice. Axis -1 is the
+  // last dimension.
+  func.func @test_squeeze_dynamic_negative(%data: tensor<?x?x?x?xf32>) -> tensor<?x?x?xf32> {
+    %result = "onnx.Squeeze"(%data) {axes = [-1]} : (tensor<?x?x?x?xf32>) -> tensor<?x?x?xf32>
+    return %result : tensor<?x?x?xf32>
+  }
+
+  // Two axes, one written negative. Both are sliced to 1, then collapsed.
+  func.func @test_squeeze_dynamic_multiple(%data: tensor<?x?x?x?xf32>) -> tensor<?x?xf32> {
+    %result = "onnx.Squeeze"(%data) {axes = [-4, 2]} : (tensor<?x?x?x?xf32>) -> tensor<?x?xf32>
+    return %result : tensor<?x?xf32>
+  }
+
+  // A repeated axis is rejected. The op stays, and the dynamic dims are
+  // not sliced.
+  func.func @test_squeeze_duplicate_axis(%data: tensor<?x?x?x?xf32>) -> tensor<?x?x?xf32> {
+    %result = "onnx.Squeeze"(%data) {axes = [0, 0]} : (tensor<?x?x?x?xf32>) -> tensor<?x?x?xf32>
+    return %result : tensor<?x?x?xf32>
+  }
+
+  // The same drop, with the axes list as an operand. The pipeline rewrites
+  // that constant to hip.constant before Squeeze is converted.
+  func.func @test_squeeze_dynamic_axis_operand(%data: tensor<?x?x?x?xf32>) -> tensor<?x?x?xf32> {
+    %axes = "onnx.Constant"() {value = dense<[0]> : tensor<1xi64>} : () -> tensor<1xi64>
+    %result = "onnx.Squeeze"(%data, %axes) : (tensor<?x?x?x?xf32>, tensor<1xi64>) -> tensor<?x?x?xf32>
+    return %result : tensor<?x?x?xf32>
+  }
+
+  // A kept axis whose static extent disagrees with the result is rejected
+  // before any tensor.dim or extract_slice is created. Axis 0 is dynamic, so
+  // a check that creates the dim query for axis 1 first would leak that op.
+  func.func @test_squeeze_kept_extent_mismatch(%data: tensor<?x?x2xf32>) -> tensor<?x3xf32> {
+    %result = "onnx.Squeeze"(%data) {axes = [0]} : (tensor<?x?x2xf32>) -> tensor<?x3xf32>
+    return %result : tensor<?x3xf32>
+  }
+
+  // Kept axes are dynamic in the input but static in the inferred result.
+  func.func @test_squeeze_static_result(%data: tensor<?x1x?x?xf32>) -> tensor<3x300x300xf32> {
+    %result = "onnx.Squeeze"(%data) {axes = [1]} : (tensor<?x1x?x?xf32>) -> tensor<3x300x300xf32>
+    return %result : tensor<3x300x300xf32>
+  }
 }
 
 // CHECK-LABEL: func.func @test_squeeze_front
@@ -126,3 +175,47 @@ module {
 // CHECK: %[[SLICE:.*]] = tensor.extract_slice %[[DATA]][0, 0] [1, 1] [1, 1] : tensor<1x1xf16> to tensor<1x1xf16>
 // CHECK: %[[RESULT:.*]] = tensor.collapse_shape %[[SLICE]] [] : tensor<1x1xf16> into tensor<f16>
 // CHECK: return %[[RESULT]] : tensor<f16>
+
+// CHECK-LABEL: func.func @test_squeeze_dynamic_axis
+// CHECK-SAME: %[[CTX:.*]]: !hip.context, %[[DATA:.*]]: tensor<?x?x?x?xf32>)
+// CHECK-NOT: onnx.Squeeze
+// CHECK: %[[SLICE:.*]] = tensor.extract_slice %[[DATA]][0, 0, 0, 0] [1, %{{[^]]*}}, %{{[^]]*}}, %{{[^]]*}}] [1, 1, 1, 1] : tensor<?x?x?x?xf32> to tensor<1x?x?x?xf32>
+// CHECK: %[[RESULT:.*]] = tensor.collapse_shape %[[SLICE]] {{\[\[}}0, 1], [2], [3]] : tensor<1x?x?x?xf32> into tensor<?x?x?xf32>
+// CHECK: return %[[RESULT]] : tensor<?x?x?xf32>
+
+// CHECK-LABEL: func.func @test_squeeze_dynamic_negative
+// CHECK-SAME: %[[CTX:.*]]: !hip.context, %[[DATA:.*]]: tensor<?x?x?x?xf32>)
+// CHECK-NOT: onnx.Squeeze
+// CHECK: %[[SLICE:.*]] = tensor.extract_slice %[[DATA]][0, 0, 0, 0] [%{{[^]]*}}, %{{[^]]*}}, %{{[^]]*}}, 1] [1, 1, 1, 1] : tensor<?x?x?x?xf32> to tensor<?x?x?x1xf32>
+// CHECK: %[[RESULT:.*]] = tensor.collapse_shape %[[SLICE]] {{\[\[}}0], [1], [2, 3]] : tensor<?x?x?x1xf32> into tensor<?x?x?xf32>
+// CHECK: return %[[RESULT]] : tensor<?x?x?xf32>
+
+// CHECK-LABEL: func.func @test_squeeze_dynamic_multiple
+// CHECK-SAME: %[[CTX:.*]]: !hip.context, %[[DATA:.*]]: tensor<?x?x?x?xf32>)
+// CHECK-NOT: onnx.Squeeze
+// CHECK: %[[SLICE:.*]] = tensor.extract_slice %[[DATA]][0, 0, 0, 0] [1, %{{[^]]*}}, 1, %{{[^]]*}}] [1, 1, 1, 1] : tensor<?x?x?x?xf32> to tensor<1x?x1x?xf32>
+// CHECK: %[[RESULT:.*]] = tensor.collapse_shape %[[SLICE]] {{\[\[}}0, 1], [2, 3]] : tensor<1x?x1x?xf32> into tensor<?x?xf32>
+// CHECK: return %[[RESULT]] : tensor<?x?xf32>
+
+// CHECK-LABEL: func.func @test_squeeze_duplicate_axis
+// CHECK: onnx.Squeeze
+// CHECK-NOT: tensor.collapse_shape
+
+// CHECK-LABEL: func.func @test_squeeze_dynamic_axis_operand
+// CHECK-SAME: %[[CTX:.*]]: !hip.context, %[[DATA:.*]]: tensor<?x?x?x?xf32>)
+// CHECK-NOT: onnx.Squeeze
+// CHECK: %[[SLICE:.*]] = tensor.extract_slice %[[DATA]][0, 0, 0, 0] [1, %{{[^]]*}}, %{{[^]]*}}, %{{[^]]*}}] [1, 1, 1, 1] : tensor<?x?x?x?xf32> to tensor<1x?x?x?xf32>
+// CHECK: %[[RESULT:.*]] = tensor.collapse_shape %[[SLICE]] {{\[\[}}0, 1], [2], [3]] : tensor<1x?x?x?xf32> into tensor<?x?x?xf32>
+// CHECK: return %[[RESULT]] : tensor<?x?x?xf32>
+
+// CHECK-LABEL: func.func @test_squeeze_kept_extent_mismatch
+// CHECK-NOT: tensor.dim
+// CHECK-NOT: tensor.extract_slice
+// CHECK-NOT: tensor.collapse_shape
+// CHECK: onnx.Squeeze
+
+// CHECK-LABEL: func.func @test_squeeze_static_result
+// CHECK-SAME: %[[CTX:.*]]: !hip.context, %[[DATA:.*]]: tensor<?x1x?x?xf32>)
+// CHECK: %[[SLICE:.*]] = tensor.extract_slice %[[DATA]][0, 0, 0, 0] [3, 1, 300, 300] [1, 1, 1, 1] : tensor<?x1x?x?xf32> to tensor<3x1x300x300xf32>
+// CHECK: %[[RESULT:.*]] = tensor.collapse_shape %[[SLICE]] {{\[\[}}0], [1, 2], [3]] : tensor<3x1x300x300xf32> into tensor<3x300x300xf32>
+// CHECK: return %[[RESULT]] : tensor<3x300x300xf32>

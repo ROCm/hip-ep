@@ -1,0 +1,40 @@
+{%- comment -%}
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+Licensed under the MIT License.
+{%- endcomment -%}
+<footer class="site-footer">
+  <div class="site-footer__inner">
+    <div class="site-footer__brand">
+      <p class="brand"><span class="brand__org">{% include amd-mark.html %}</span><span class="brand__mark">HIP</span><span class="brand__name">EP</span></p>
+      <p class="site-footer__tagline">{{ site.tagline }}</p>
+    </div>
+
+    <nav class="site-footer__cols" aria-label="Footer navigation">
+      <div class="site-footer__col">
+        <p class="site-footer__heading">Documentation</p>
+        {%- comment -%}
+          Derived from docs_nav so the footer cannot drift out of sync with the
+          sidebar, or link to a section that has not shipped yet. A section
+          without its own landing URL falls back to its first child.
+        {%- endcomment -%}
+        {% for entry in site.docs_nav %}
+        {%- assign target = entry.url | default: entry.children[0].url -%}
+        {% if target %}<a href="{{ target | relative_url }}">{{ entry.label }}</a>{% endif %}
+        {% endfor %}
+      </div>
+      <div class="site-footer__col">
+        <p class="site-footer__heading">Project</p>
+        <a href="{{ site.repo_url }}" target="_blank" rel="noopener">GitHub</a>
+        <a href="{{ site.repo_url }}/releases" target="_blank" rel="noopener">Releases</a>
+        <a href="{{ site.repo_url }}/issues" target="_blank" rel="noopener">Issues</a>
+        <a href="{{ site.repo_url }}/blob/main/CONTRIBUTING.md" target="_blank" rel="noopener">Contributing</a>
+      </div>
+    </nav>
+  </div>
+
+  <div class="site-footer__legal">
+    <p>Copyright &copy; 2026 Advanced Micro Devices, Inc. All rights reserved.</p>
+    <p>Licensed under the <a href="{{ site.repo_url }}/blob/main/LICENSE" target="_blank"
+        rel="noopener">MIT License</a>.</p>
+  </div>
+</footer>

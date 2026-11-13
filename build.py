@@ -10,7 +10,7 @@ update_submodules, --config/--cmake_generator/--cmake_extra_defines/
 --skip_submodule_sync conventions) but deliberately plain: it ensures
 submodules, sets up the platform compiler environment, picks the GPU arch, runs
 the cmake configure/build/install for this project's artifacts -- the MorphiZen
-EP shared library (libonnxruntime_morphizen_ep.so / .dll) plus the HIP MLIR
+EP shared library (libhipgpu.so / hipgpu.dll) plus the HIP MLIR
 tools -- and (on Linux) bundles the runtime .so into a self-contained install/.
 
 All C++ dependency *acquisition* is delegated to cmake/deps.cmake: LLVM/MLIR/LLD
@@ -124,9 +124,21 @@ def update_submodules():
 
 
 def default_generator():
-    # Like ONNX Runtime: on Windows default to the Visual Studio generator so
-    # CMake locates MSVC itself (no vcvarsall sourcing); Ninja elsewhere.
-    return "Visual Studio 17 2022" if IS_WINDOWS else "Ninja"
+    # Ninja everywhere it is available, which on Windows means any developer
+    # shell: VS ships ninja.exe and the Windows CI jobs already pass
+    # `--cmake_generator Ninja`, so this makes the default the configuration
+    # that is actually exercised. It also matters for the in-tree LLVM build
+    # (ENABLE_ROCMLIRTRITON), where cmake/deps.cmake consumes single-config
+    # build-tree paths such as ${CMAKE_BINARY_DIR}/lib/cmake/mlir that a
+    # multi-config generator does not produce.
+    #
+    # Outside a developer shell there is no ninja, so fall back to the Visual
+    # Studio generator, which locates MSVC itself. Pinned to 2022 (VS 17)
+    # rather than probed: that is the toolset CI builds with, and the dependency
+    # set is not yet green on VS 18. Pass --cmake_generator to override.
+    if IS_WINDOWS and not have_tool("ninja"):
+        return "Visual Studio 17 2022"
+    return "Ninja"
 
 
 def check_toolchain(generator):
@@ -140,7 +152,7 @@ def check_toolchain(generator):
         # the caller having loaded the MSVC environment (run from an "x64 Native
         # Tools Command Prompt for VS"), exactly as ONNX Runtime's build expects.
         if generator == "Ninja" and not have_tool("cl"):
-            log.warning(
+            raise BuildError(
                 "cl.exe not on PATH; for the Ninja generator on Windows run from "
                 "an 'x64 Native Tools Command Prompt for VS' (or pass "
                 "--cmake_generator 'Visual Studio 17 2022')."
@@ -229,6 +241,15 @@ def detect_hip_arch():
 
 # ---------------------------------------------------------------------------
 # Configure / build / install (deps resolved by cmake/deps.cmake)
+#
+# The Windows host compiler is MSVC cl.exe, which is what this project's own
+# sources are written for (morphizen/cmake/compile_options.msvc.cmake tunes
+# /W4 /WX for it). CMake picks it up from the environment, so there is nothing
+# to provision: name no CMAKE_*_COMPILER and either let the Visual Studio
+# generator locate it or run Ninja from a developer shell. rocMLIR used to
+# block this -- it FATAL_ERRORed on cl.exe right after project() -- until
+# ROCm/rocmlirTriton#538 added the ROCMLIR_ALLOW_MSVC opt-out that
+# cmake/deps.cmake now sets.
 # ---------------------------------------------------------------------------
 
 
@@ -270,6 +291,18 @@ def generate_build_tree(args, build_dir, prefix_paths, hip_arch, mock):
     run_subprocess(cmd)
 
 
+def _cmake_cache_flag(build_dir, name):
+    """True when CMakeCache.txt records name:BOOL=ON (or name:STRING=ON)."""
+    cache = Path(build_dir) / "CMakeCache.txt"
+    if not cache.exists():
+        return False
+    prefix = f"{name}:"
+    for line in cache.read_text(errors="ignore").splitlines():
+        if line.startswith(prefix) and line.rstrip().endswith("=ON"):
+            return True
+    return False
+
+
 def _llvm_built_from_source(build_dir):
     """True when cmake/deps.cmake built LLVM in-tree (embedded sub-build)."""
     cache = Path(build_dir) / "CMakeCache.txt"
@@ -300,7 +333,13 @@ def build_targets(args, build_dir):
     # (We cannot pull lld into the CMake graph via add_dependencies -- that
     # corrupts LLVM's install(EXPORT); see cmake/deps.cmake.) clang itself is
     # already built as a dependency of lib/Runtime's bitcode step.
-    if _llvm_built_from_source(build_dir) and not IS_WINDOWS:
+    # ld.lld is only required by the opt-in native artifact link
+    # (clang++ -fuse-ld=lld). The default LLVM IR path does not use it.
+    if (
+        _llvm_built_from_source(build_dir)
+        and not IS_WINDOWS
+        and _cmake_cache_flag(build_dir, "HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS")
+    ):
         step("Build in-tree lld (runtime device-link toolchain)")
         run_subprocess(
             [
@@ -322,7 +361,8 @@ def build_targets(args, build_dir):
 def run_tests(args, build_dir):
     """Run the GPU-free test suites (no device needed, so they run on the build
     machine in every CI job): the MLIR LIT pass-verification suite plus the
-    compiler-plugin registrar and output-allocator ctest unit tests."""
+    compiler-plugin registrar, output-allocator, runtime-lowering contract and
+    MatMulNBits LUT ctest unit tests."""
     step("Test (check-hip-mlir-lit)")
     run_subprocess(
         [
@@ -347,7 +387,8 @@ def run_tests(args, build_dir):
             "-C",
             args.config,
             "-R",
-            "StaticPlugins|OutputAllocator|LdsBarrierArchGate",
+            "StaticPlugins|OutputAllocator|LdsBarrierArchGate|AdaptiveBenchmark"
+            "|RuntimeLoweringContractsUnit|MatMulNBitsAutotune",
             "--output-on-failure",
         ]
     )

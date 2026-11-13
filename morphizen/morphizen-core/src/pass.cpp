@@ -550,9 +550,12 @@ IPass_try_fuse(const Graph &graph, const std::string &name,
     }
     if (is_body) {
       body_nodes.push_back(island.ptr());
-      // insert island's initalizers input args
+      // Producerless inputs are initializers. An absent optional ONNX
+      // operand is stored as {node=nullptr, node_arg=nullptr}; naming it
+      // aborts in node_arg_get_name ("node_arg doesn't exist!").
       for (auto input : node_inputs_1) {
-        if (input.node == nullptr) {
+        if (input.node == nullptr && input.node_arg != nullptr &&
+            node_arg_exists(*input.node_arg)) {
           constant_initializers.insert(node_arg_get_name(*input.node_arg));
         }
       }

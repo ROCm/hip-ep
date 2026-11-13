@@ -474,6 +474,427 @@ __global__ void linear_attention_decode_kernel_par(
     }
 }
 
+// Fixed decode geometry; the original parallel kernel remains available.
+template <typename T>
+__global__ void linear_attention_decode_state_cache_kernel(
+    const T* __restrict__ query,
+    const T* __restrict__ key,
+    const T* __restrict__ value,
+    const T* __restrict__ decay,
+    const T* __restrict__ beta_in,
+    T* __restrict__ state,
+    T* __restrict__ output,
+    int seq_len,
+    int Hq_arg, int Hkv_arg, int n_k_arg, int dk_arg, int dv_arg,
+    float scale, int update_rule_arg,
+    int decay_per_key_dim_arg, int beta_per_head_arg)
+{
+    constexpr int MAX_Q_HEADS = 1;
+    constexpr int Hq = 16, Hkv = 48, n_k = 16, dk = 128, dv = 128;
+    constexpr int update_rule = LA_RULE_GATED_DELTA;
+    constexpr int decay_per_key_dim = 0, beta_per_head = 1;
+
+    const int bg = blockIdx.x;
+    const int b  = bg / Hkv;
+    const int g  = bg % Hkv;
+    const int tid = threadIdx.x;
+    const int nthreads = blockDim.x;
+
+    constexpr int G = 4; // dk-split factor (block == G*dv)
+    const int j  = tid % dv;               // output column owned by this thread
+    const int p  = tid / dv;               // dk-partition index in [0, G)
+    const int islice = dk / G;
+    const int i0 = p * islice;
+    const int i1 = i0 + islice;
+
+    const int Hout = Hq >= Hkv ? Hq : Hkv;
+    const bool inverse_gqa = (Hq < Hkv);
+    const int num_q_heads  = inverse_gqa ? 1 : (Hq / Hkv);
+    const int h_q_load_base = inverse_gqa ? (g * Hq / Hkv) : (g * num_q_heads);
+    const int h_out_base    = inverse_gqa ? g : (g * num_q_heads);
+    const int h_k = g * n_k / Hkv;
+
+    const int64_t q_batch_stride   = (int64_t)seq_len * Hq   * dk;
+    const int64_t k_batch_stride   = (int64_t)seq_len * n_k  * dk;
+    const int64_t v_batch_stride   = (int64_t)seq_len * Hkv  * dv;
+    const int64_t out_batch_stride = (int64_t)seq_len * Hout * dv;
+    const int64_t decay_batch_stride = decay_per_key_dim
+        ? (int64_t)seq_len * Hkv * dk : (int64_t)seq_len * Hkv;
+    const int64_t beta_batch_stride = beta_per_head
+        ? (int64_t)seq_len * Hkv : (int64_t)seq_len;
+    const int64_t state_batch_stride = (int64_t)Hkv * dk * dv;
+
+    extern __shared__ float smem[];
+    float* k_smem   = smem;
+    float* v_smem   = smem + dk;
+    float* aux_smem = smem + dk + dv;
+    float* sk_smem  = smem + 2 * dk + dv;
+    float* q_smem   = smem + 2 * dk + 2 * dv;
+    float* sk_part  = q_smem + num_q_heads * dk;   // [G*dv] partial sk
+    float* out_part = sk_part + G * dv;            // [G*dv*num_q_heads] partial out
+
+    const T* k_ptr = key   + b * k_batch_stride + (int64_t)h_k * dk;
+    const T* v_ptr = value + b * v_batch_stride + (int64_t)g   * dv;
+    T* S = state + b * state_batch_stride + (int64_t)g * dk * dv;
+
+    for (int t = tid; t < dk; t += nthreads) k_smem[t] = to_float(k_ptr[t]);
+    for (int t = tid; t < dv; t += nthreads) v_smem[t] = to_float(v_ptr[t]);
+
+    const bool has_decay =
+        (update_rule == LA_RULE_GATED || update_rule == LA_RULE_GATED_DELTA) &&
+        decay != nullptr;
+    if (has_decay) {
+        if (decay_per_key_dim) {
+            const T* d_ptr = decay + b * decay_batch_stride + (int64_t)g * dk;
+            for (int t = tid; t < dk; t += nthreads)
+                aux_smem[t] = expf(to_float(d_ptr[t]));
+        } else {
+            const float gv = expf(to_float(decay[b * decay_batch_stride + g]));
+            for (int t = tid; t < dk; t += nthreads) aux_smem[t] = gv;
+        }
+    }
+
+    float beta_val = 0.0f;
+    if (beta_in &&
+        (update_rule == LA_RULE_DELTA || update_rule == LA_RULE_GATED_DELTA)) {
+        const int64_t beta_idx = beta_per_head
+            ? b * beta_batch_stride + g : b * beta_batch_stride;
+        beta_val = to_float(beta_in[beta_idx]);
+    }
+
+    for (int hl = 0; hl < num_q_heads; hl++) {
+        const int h_q = h_q_load_base + (inverse_gqa ? 0 : hl);
+        const T* q_ptr_h = query + b * q_batch_stride + (int64_t)h_q * dk;
+        for (int t = tid; t < dk; t += nthreads)
+            q_smem[hl * dk + t] = to_float(q_ptr_h[t]);
+    }
+    __syncthreads();
+
+    // The recurrent-state shard is consumed twice; retain it across the
+    // projection reduction so the update/readout does not reload global state.
+    float old_state[dk / G];
+#pragma unroll
+    for (int offset = 0; offset < dk / G; offset++)
+        old_state[offset] = to_float(S[(i0 + offset) * dv + j]);
+
+    const bool needs_sk =
+        (update_rule == LA_RULE_DELTA || update_rule == LA_RULE_GATED_DELTA);
+    if (needs_sk) {
+        float part = 0.0f;
+#pragma unroll
+        for (int i = i0; i < i1; i++)
+            part += (has_decay ? aux_smem[i] : 1.0f) *
+                    old_state[i - i0] * k_smem[i];
+        sk_part[p * dv + j] = part;
+        __syncthreads();
+        if (p == 0) {
+            float s = 0.0f;
+            for (int q = 0; q < G; q++) s += sk_part[q * dv + j];
+            sk_smem[j] = s;
+        }
+        __syncthreads();
+    }
+
+    const float v_j  = v_smem[j];
+    const float sk_j = needs_sk ? sk_smem[j] : 0.0f;
+
+    float sums[MAX_Q_HEADS];
+#pragma unroll
+    for (int hl = 0; hl < MAX_Q_HEADS; hl++) sums[hl] = 0.0f;
+
+#pragma unroll
+    for (int i = i0; i < i1; i++) {
+        const float s_old   = old_state[i - i0];
+        const float k_i     = k_smem[i];
+        const float decay_i = has_decay ? aux_smem[i] : 1.0f;
+        float s_new;
+        switch (update_rule) {
+        case LA_RULE_LINEAR:      s_new = s_old + k_i * v_j; break;
+        case LA_RULE_GATED:       s_new = decay_i * s_old + k_i * v_j; break;
+        case LA_RULE_DELTA:       s_new = s_old + beta_val * k_i * (v_j - sk_j); break;
+        case LA_RULE_GATED_DELTA: s_new = decay_i * s_old + beta_val * k_i * (v_j - sk_j); break;
+        default:                  s_new = s_old;
+        }
+        // Preserve fp32 rounding before the fp16 state conversion. Without
+        // this register barrier the backend contracts FMA+cast to fp16 FMA.
+        asm volatile("" : "+v"(s_new));
+        S[i * dv + j] = from_float<T>(s_new);
+#pragma unroll
+        for (int hl = 0; hl < MAX_Q_HEADS; hl++)
+            if (hl < num_q_heads) sums[hl] += q_smem[hl * dk + i] * s_new;
+    }
+
+    for (int hl = 0; hl < num_q_heads; hl++)
+        out_part[(p * dv + j) * num_q_heads + hl] = sums[hl];
+    __syncthreads();
+    if (p == 0) {
+        for (int hl = 0; hl < num_q_heads; hl++) {
+            float s = 0.0f;
+            for (int q = 0; q < G; q++)
+                s += out_part[(q * dv + j) * num_q_heads + hl];
+            const int h_out = h_out_base + (inverse_gqa ? 0 : hl);
+            T* out_ptr = output + b * out_batch_stride + (int64_t)h_out * dv + j;
+            *out_ptr = from_float<T>(scale * s);
+        }
+    }
+}
+
+//===----------------------------------------------------------------------===//
+// Column-split, register-resident variant (decode and short bursts).
+//
+// Every S column j evolves independently under all four rules (sk[j], v[j]
+// and the readout only touch column j), so a (batch, kv_head) state is split
+// across blockIdx.y into LA_COLS-wide column tiles: 4x the blocks of the
+// per-head kernels for dv=128, enough to cover every CU on gfx1151. Inside a
+// tile, G = dk/ISLICE threads share a column and each keeps its ISLICE rows of
+// S in registers, so S is read once and written once per launch instead of
+// read twice (sk pass + update pass) and written once.
+//
+// n_tok > 1 runs that many consecutive time steps in one launch with S held
+// in fp32 registers between them (rounded once at the end, like the CPU
+// kernel's fp32 recurrence). Pointers are at time step 0; per-token strides
+// are the packed [B, T, H*D] row sizes and seq_len is the batch stride.
+//===----------------------------------------------------------------------===//
+static constexpr int LA_COLS = 32;
+
+template <typename T, int ISLICE>
+__global__ void linear_attention_decode_kernel_cols(
+    const T* __restrict__ query,
+    const T* __restrict__ key,
+    const T* __restrict__ value,
+    const T* __restrict__ decay,
+    const T* __restrict__ beta_in,
+    const T* state_in,   // may alias state; null = zero initial state
+    T* state,
+    T* __restrict__ output,
+    int seq_len, int n_tok,
+    int Hq, int Hkv, int n_k, int dk, int dv,
+    float scale, int update_rule,
+    int decay_per_key_dim, int beta_per_head)
+{
+    constexpr int MAX_Q_HEADS = 16;
+    const int bg  = blockIdx.x;
+    const int b   = bg / Hkv;
+    const int g   = bg % Hkv;
+    const int tid = threadIdx.x;
+    const int nthreads = blockDim.x;
+    const int G   = nthreads / LA_COLS;
+    const int jl  = tid % LA_COLS;
+    const int p   = tid / LA_COLS;
+    const int j   = blockIdx.y * LA_COLS + jl;
+    const int i0  = p * ISLICE;
+
+    const int Hout = Hq >= Hkv ? Hq : Hkv;
+    const bool inverse_gqa = (Hq < Hkv);
+    const int num_q_heads  = inverse_gqa ? 1 : (Hq / Hkv);
+    const int h_q_load_base = inverse_gqa ? (g * Hq / Hkv) : (g * num_q_heads);
+    const int h_out_base    = inverse_gqa ? g : (g * num_q_heads);
+    const int h_k = g * n_k / Hkv;
+
+    const int64_t q_tok   = (int64_t)Hq * dk;
+    const int64_t k_tok   = (int64_t)n_k * dk;
+    const int64_t v_tok   = (int64_t)Hkv * dv;
+    const int64_t o_tok   = (int64_t)Hout * dv;
+    const int64_t d_tok   = decay_per_key_dim ? (int64_t)Hkv * dk : (int64_t)Hkv;
+    const int64_t b_tok   = beta_per_head ? (int64_t)Hkv : 1;
+    const int64_t T64     = seq_len;
+
+    const bool has_decay =
+        (update_rule == LA_RULE_GATED || update_rule == LA_RULE_GATED_DELTA) &&
+        decay != nullptr;
+    const bool needs_sk =
+        (update_rule == LA_RULE_DELTA || update_rule == LA_RULE_GATED_DELTA);
+
+    // Every token's operands are staged in LDS up front so the serial
+    // per-token loop below only touches LDS and registers.
+    extern __shared__ float smem[];
+    float* k_all    = smem;                                // [n_tok*dk]
+    float* aux_all  = k_all + n_tok * dk;                  // [n_tok*dk]
+    float* q_all    = aux_all + n_tok * dk;                // [n_tok*Nq*dk]
+    float* v_all    = q_all + n_tok * num_q_heads * dk;    // [n_tok*COLS]
+    float* beta_all = v_all + n_tok * LA_COLS;             // [n_tok]
+    float* sk_part  = beta_all + n_tok;                    // [G*COLS]
+    float* out_part = sk_part + G * LA_COLS;               // [G*COLS*Nq]
+
+    for (int x = tid; x < n_tok * dk; x += nthreads) {
+        const int t = x / dk, i = x % dk;
+        k_all[x] = to_float(key[b * T64 * k_tok + t * k_tok + (int64_t)h_k * dk + i]);
+        float a = 1.0f;
+        if (has_decay) {
+            const T* d_ptr = decay + b * T64 * d_tok + t * d_tok;
+            a = expf(to_float(decay_per_key_dim ? d_ptr[(int64_t)g * dk + i] : d_ptr[g]));
+        }
+        aux_all[x] = a;
+        for (int hl = 0; hl < num_q_heads; hl++) {
+            const int h_q = h_q_load_base + (inverse_gqa ? 0 : hl);
+            q_all[(t * num_q_heads + hl) * dk + i] =
+                to_float(query[b * T64 * q_tok + t * q_tok + (int64_t)h_q * dk + i]);
+        }
+    }
+    for (int x = tid; x < n_tok * LA_COLS; x += nthreads) {
+        const int t = x / LA_COLS, c = x % LA_COLS;
+        v_all[x] = to_float(value[b * T64 * v_tok + t * v_tok + (int64_t)g * dv +
+                                  blockIdx.y * LA_COLS + c]);
+    }
+    for (int t = tid; t < n_tok; t += nthreads)
+        beta_all[t] = (beta_in && needs_sk)
+            ? to_float(beta_in[b * T64 * b_tok + t * b_tok + (beta_per_head ? g : 0)])
+            : 0.0f;
+
+    const int64_t s_off = (int64_t)b * Hkv * dk * dv + (int64_t)g * dk * dv;
+    float s[ISLICE];
+#pragma unroll
+    for (int r = 0; r < ISLICE; r++)
+        s[r] = state_in ? to_float(state_in[s_off + (int64_t)(i0 + r) * dv + j]) : 0.0f;
+    __syncthreads();
+
+    // Two barriers per token: sk_part is re-written only after every thread
+    // has passed this token's second barrier, and out_part only after the
+    // p == 0 readers have reached the next token's first one.
+    for (int t = 0; t < n_tok; t++) {
+        const float* k_smem   = k_all + t * dk;
+        const float* aux_smem = aux_all + t * dk;
+        const float* q_smem   = q_all + t * num_q_heads * dk;
+        const float v_j       = v_all[t * LA_COLS + jl];
+        const float beta_val  = beta_all[t];
+
+        float sk_j = 0.0f;
+        if (needs_sk) {
+            float part = 0.0f;
+#pragma unroll
+            for (int r = 0; r < ISLICE; r++)
+                part += aux_smem[i0 + r] * s[r] * k_smem[i0 + r];
+            sk_part[p * LA_COLS + jl] = part;
+        }
+        __syncthreads();
+        if (needs_sk)
+            for (int q = 0; q < G; q++) sk_j += sk_part[q * LA_COLS + jl];
+
+        float sums[MAX_Q_HEADS];
+#pragma unroll
+        for (int hl = 0; hl < MAX_Q_HEADS; hl++) sums[hl] = 0.0f;
+#pragma unroll
+        for (int r = 0; r < ISLICE; r++) {
+            const int i = i0 + r;
+            const float k_i = k_smem[i];
+            const float decay_i = aux_smem[i];
+            float s_new;
+            switch (update_rule) {
+            case LA_RULE_LINEAR:      s_new = s[r] + k_i * v_j; break;
+            case LA_RULE_GATED:       s_new = decay_i * s[r] + k_i * v_j; break;
+            case LA_RULE_DELTA:       s_new = s[r] + beta_val * k_i * (v_j - sk_j); break;
+            case LA_RULE_GATED_DELTA: s_new = decay_i * s[r] + beta_val * k_i * (v_j - sk_j); break;
+            default:                  s_new = s[r];
+            }
+            s[r] = s_new;
+#pragma unroll
+            for (int hl = 0; hl < MAX_Q_HEADS; hl++)
+                if (hl < num_q_heads) sums[hl] += q_smem[hl * dk + i] * s_new;
+        }
+        for (int hl = 0; hl < num_q_heads; hl++)
+            out_part[(p * LA_COLS + jl) * num_q_heads + hl] = sums[hl];
+        __syncthreads();
+        if (p == 0) {
+            for (int hl = 0; hl < num_q_heads; hl++) {
+                float acc = 0.0f;
+                for (int q = 0; q < G; q++) acc += out_part[(q * LA_COLS + jl) * num_q_heads + hl];
+                const int h_out = h_out_base + (inverse_gqa ? 0 : hl);
+                output[b * T64 * o_tok + t * o_tok + (int64_t)h_out * dv + j] = from_float<T>(scale * acc);
+            }
+        }
+    }
+
+#pragma unroll
+    for (int r = 0; r < ISLICE; r++)
+        state[s_off + (int64_t)(i0 + r) * dv + j] = from_float<T>(s[r]);
+}
+
+// Launch the column-split kernel for n_tok steps starting at the pointers'
+// time step. Returns 1 when the shape does not fit (caller falls back).
+template <typename T>
+static int launch_la_cols(hipStream_t s, const void* q, const void* k, const void* v,
+                          const void* d, const void* be, const void* sin, void* st, void* o,
+                          int B, int seq_len, int n_tok, int Hq, int Hkv, int Nk,
+                          int dk, int dv, float scale, int rule, int dpk, int bph) {
+    static const int islice = [] {
+        const char* e = std::getenv("HIPDNN_EP_LA_COLS_ISLICE");
+        const int v = e ? atoi(e) : 16;
+        return (v == 8 || v == 16 || v == 32) ? v : 16;
+    }();
+    if (dv % LA_COLS != 0 || dk % islice != 0) return 1;
+    const int G = dk / islice;
+    if (G * LA_COLS > 1024) return 1;
+    const int nq = (Hq >= Hkv) ? Hq / Hkv : 1;
+    if (nq > 16) return 1;
+    const size_t smem = static_cast<size_t>(n_tok * (2 * dk + nq * dk + LA_COLS + 1) +
+                                            G * LA_COLS * (1 + nq)) * sizeof(float);
+    if (smem > 48 * 1024) return 1;
+    dim3 grid(static_cast<unsigned>(B * Hkv), static_cast<unsigned>(dv / LA_COLS));
+    dim3 block(static_cast<unsigned>(G * LA_COLS));
+#define LA_COLS_LAUNCH(IS)                                                                   \
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(linear_attention_decode_kernel_cols<T, IS>), grid,     \
+                       block, smem, s, static_cast<const T*>(q), static_cast<const T*>(k),    \
+                       static_cast<const T*>(v), static_cast<const T*>(d),                    \
+                       static_cast<const T*>(be), static_cast<const T*>(sin),                 \
+                       static_cast<T*>(st), static_cast<T*>(o),                               \
+                       seq_len, n_tok, Hq, Hkv, Nk, dk, dv, scale, rule, dpk, bph)
+    (void)hipGetLastError();
+    if (islice == 8) LA_COLS_LAUNCH(8);
+    else if (islice == 32) LA_COLS_LAUNCH(32);
+    else LA_COLS_LAUNCH(16);
+#undef LA_COLS_LAUNCH
+    const hipError_t err = hipGetLastError();
+    if (err != hipSuccess) {
+        fprintf(stderr,
+                "[custom_kernels] linear_attention_decode_kernel_cols launch failed: %s\n",
+                hipGetErrorString(err));
+        return -1;
+    }
+    return 0;
+}
+
+static int la_cols_dispatch(void* stream, const void* q, const void* k, const void* v,
+                            const void* d, const void* be, const void* sin, void* st,
+                            void* o, int64_t B, int64_t seq_len, int64_t n_tok, int64_t Hq,
+                            int64_t Hkv, int64_t Nk, int64_t dk, int64_t dv, float scale,
+                            int64_t rule, int64_t dpk, int64_t bph, int64_t type) {
+    hipStream_t s = static_cast<hipStream_t>(stream);
+    const int a[] = {static_cast<int>(B), static_cast<int>(seq_len), static_cast<int>(n_tok),
+                     static_cast<int>(Hq), static_cast<int>(Hkv), static_cast<int>(Nk),
+                     static_cast<int>(dk), static_cast<int>(dv)};
+    const int r = static_cast<int>(rule), dp = dpk ? 1 : 0, bp = bph ? 1 : 0;
+    if (type == 0)
+        return launch_la_cols<float>(s, q, k, v, d, be, sin, st, o, a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], scale, r, dp, bp);
+    if (type == 1)
+        return launch_la_cols<__half>(s, q, k, v, d, be, sin, st, o, a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], scale, r, dp, bp);
+    if (type == 2)
+        return launch_la_cols<__hip_bfloat16>(s, q, k, v, d, be, sin, st, o, a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], scale, r, dp, bp);
+    return 1;
+}
+
+static bool la_cols_enabled() {
+    static const bool on = [] {
+        const char* e = std::getenv("HIPDNN_EP_LA_COLS");
+        return !(e && e[0] == '0');
+    }();
+    return on;
+}
+
+extern "C" int hip_linear_attention_burst(
+    void* stream, const void* query, const void* key, const void* value,
+    const void* decay, const void* beta, const void* past_state, void* state,
+    void* output, int64_t B, int64_t seq_len, int64_t Hq, int64_t Hkv, int64_t Nk,
+    int64_t dk, int64_t dv, float scale, int64_t update_rule,
+    int64_t decay_per_key_dim, int64_t beta_per_head, int64_t type)
+{
+    if (!la_cols_enabled() || B <= 0 || seq_len <= 0 || Hq <= 0 || Hkv <= 0 || Nk <= 0 ||
+        Hkv % Nk != 0 || (Hq >= Hkv ? Hq % Hkv : Hkv % Hq) != 0)
+        return 1;
+    return la_cols_dispatch(stream, query, key, value, decay, beta, past_state, state,
+                            output, B, seq_len, seq_len, Hq, Hkv, Nk, dk, dv, scale,
+                            update_rule, decay_per_key_dim, beta_per_head, type);
+}
+
 //===----------------------------------------------------------------------===//
 // Host-side launcher
 //===----------------------------------------------------------------------===//
@@ -573,6 +994,15 @@ extern "C" int hip_linear_attention_decode(
         return -1;
     }
 
+    if (la_cols_enabled()) {
+        const int rc = la_cols_dispatch(stream, query, key, value, decay, beta, state,
+                                        state, output, B, seq_len, /*n_tok=*/1, Hq, Hkv, Nk, dk,
+                                        dv, scale, update_rule, decay_per_key_dim,
+                                        beta_per_head, type);
+        if (rc <= 0)
+            return rc;
+    }
+
     // smem layout: k_smem[dk] | v_smem[dv] | aux_smem[dk] | sk_smem[dv] |
     //              q_smem[num_q_heads * dk]
     size_t smem_bytes =
@@ -601,6 +1031,18 @@ extern "C" int hip_linear_attention_decode(
         smem_bytes += static_cast<size_t>(la_par_G * dv_i +
                           la_par_G * dv_i * num_q_heads) * sizeof(float);
     }
+
+    static const bool keep_state = [] {
+        const char* value = std::getenv("HIPDNN_EP_LA_KEEP_STATE");
+        return !value || atoi(value) != 0;
+    }();
+    const bool use_state_cache = keep_state && use_par && la_par_G == 4 &&
+        B == 1 && seq_len == 1 && Hq == 16 && Hkv == 48 && Nk == 16 &&
+        dk == 128 && dv == 128 && type == 1 && update_rule == LA_RULE_GATED_DELTA &&
+        !decay_per_key_dim && beta_per_head && decay && beta;
+    if (use_state_cache)
+        CUSTOM_KERNELS_DEBUG_LOG(
+            "[custom_kernels] linear_attention_state_cache: G=4 dk=dv=128\n");
 
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] hip_linear_attention_decode: B=%lld seq_len=%lld "
@@ -633,8 +1075,9 @@ extern "C" int hip_linear_attention_decode(
             decay_per_key_dim_i, beta_per_head_i);
     } else if (type == 1) {
         hipLaunchKernelGGL(
-            use_par ? linear_attention_decode_kernel_par<__half>
-                    : linear_attention_decode_kernel<__half>,
+            use_state_cache ? linear_attention_decode_state_cache_kernel<__half>
+                : (use_par ? linear_attention_decode_kernel_par<__half>
+                           : linear_attention_decode_kernel<__half>),
             dim3(grid), dim3(block), smem_bytes, hip_stream,
             static_cast<const __half*>(query),
             static_cast<const __half*>(key),
@@ -719,6 +1162,7 @@ extern "C" int hip_linear_attention_decode(
 // beta=1, T=0, W=0 special case of the affine chunk formulation below:
 // Uloc=V and no triangular solve is required.
 static constexpr int LA_CHUNK         = 16;   // tokens per chunk
+static constexpr int LA_PF3_TPT       = 4;    // gated pass-3 tokens per thread
 
 //===----------------------------------------------------------------------===//
 // Chunk-parallel gated_delta prefill (breaks the seq_len/LA_CHUNK-deep serial
@@ -1267,6 +1711,13 @@ __global__ void __launch_bounds__(256) la_pf_pass3_wmma(
 // Gated (not gated_delta) fp32 scan/output. The WMMA path downcasts S/Q/K
 // to fp16 each chunk; gated keeps the affine recurrence in fp32 and skips
 // the W GEMMs.
+//
+// Scan: one thread per key row i, holding that row of the state for the
+// block's dvs value columns in registers. Its key column is read straight
+// from global memory, so only U goes through LDS and a block is a few waves,
+// which lets every (head, split) block be resident at once.
+static constexpr int LA_SCAN_F32_MAX_DVS = 32;
+
 template <typename T>
 __global__ void la_pf_scan_f32(
     const T* __restrict__ key,
@@ -1276,77 +1727,104 @@ __global__ void la_pf_scan_f32(
     float* __restrict__ S0_g,
     float* __restrict__ carry_g,
     T* __restrict__ state,
-    int seq_len, int Hkv, int n_k, int dk, int dv,
+    int seq_len, int Hkv, int n_k, int dk, int dv, int nsplit,
     int nchunks_win, int chunk_begin, int is_first, int is_last)
 {
-    const int split = blockIdx.x % LA_SCAN_NSPLIT;
-    const int bg = blockIdx.x / LA_SCAN_NSPLIT;
+    const int split = blockIdx.x % nsplit;
+    const int bg = blockIdx.x / nsplit;
     const int b  = bg / Hkv;
     const int g  = bg % Hkv;
-    const int dvs = dv / LA_SCAN_NSPLIT;
+    const int dvs = dv / nsplit;
     const int j0  = split * dvs;
-    const int tid = threadIdx.x;
-    const int nthreads = blockDim.x;
+    const int i   = threadIdx.x;
+    const bool active = i < dk;
+    // S0 rows are 16-byte aligned (the scratch arena is 256-byte aligned).
+    const bool vec4 = (dv % 4 == 0) && (dvs % 4 == 0);
     const int h_k = g * n_k / Hkv;
     const int64_t k_bs = (int64_t)seq_len * n_k * dk;
     const int64_t state_bs = (int64_t)Hkv * dk * dv;
     T* Sout = state + b * state_bs + (int64_t)g * dk * dv;
     float* carry = carry_g + (int64_t)bg * dk * dv;
 
-    extern __shared__ float smem[];
-    float* Ssm  = smem;                               // [dvs, dk]
-    float* Ubuf = Ssm + dvs * dk;                     // [C, dvs]
-    float* Kbuf = Ubuf + LA_CHUNK * dvs;              // [C, dk]
+    extern __shared__ float Ubuf[];                   // [C, dvs]
 
-    for (int idx = tid; idx < dk * dvs; idx += nthreads) {
-        const int i = idx / dvs, jj = idx % dvs;
-        const int64_t gi = (int64_t)i * dv + j0 + jj;
-        Ssm[jj * dk + i] = is_first ? to_float(Sout[gi]) : carry[gi];
+    float S[LA_SCAN_F32_MAX_DVS];
+#pragma unroll
+    for (int jj = 0; jj < LA_SCAN_F32_MAX_DVS; jj++) {
+        S[jj] = 0.f;
+        if (active && jj < dvs) {
+            const int64_t gi = (int64_t)i * dv + j0 + jj;
+            S[jj] = is_first ? to_float(Sout[gi]) : carry[gi];
+        }
     }
-    __syncthreads();
 
     for (int cw = 0; cw < nchunks_win; cw++) {
         const int64_t base = ((int64_t)(b * Hkv + g) * nchunks_win + cw);
         const int c0   = (chunk_begin + cw) * LA_CHUNK;
         const int Ceff = min(LA_CHUNK, seq_len - c0);
-        for (int idx = tid; idx < dvs * dk; idx += nthreads) {
-            const int jj = idx / dk, i = idx % dk;
-            S0_g[base * (dk * dv) + (int64_t)(j0 + jj) * dk + i] =
-                Ssm[jj * dk + i];
+        if (active) {
+            float* s0 = S0_g + base * (dk * dv) + (int64_t)i * dv + j0;
+            if (vec4) {
+#pragma unroll
+                for (int jj = 0; jj < LA_SCAN_F32_MAX_DVS; jj += 4) {
+                    if (jj < dvs) {
+                        *reinterpret_cast<float4*>(s0 + jj) =
+                            make_float4(S[jj], S[jj + 1], S[jj + 2], S[jj + 3]);
+                    }
+                }
+            } else {
+#pragma unroll
+                for (int jj = 0; jj < LA_SCAN_F32_MAX_DVS; jj++) {
+                    if (jj < dvs) {
+                        s0[jj] = S[jj];
+                    }
+                }
+            }
         }
-        for (int idx = tid; idx < LA_CHUNK * dvs; idx += nthreads) {
+        // The previous chunk's update has finished reading Ubuf.
+        __syncthreads();
+        for (int idx = threadIdx.x; idx < LA_CHUNK * dvs; idx += blockDim.x) {
             const int t = idx / dvs, jj = idx % dvs;
-            Ubuf[t * dvs + jj] =
-                (t < Ceff) ? Uloc_g[base * (LA_CHUNK * dv) +
-                                    (int64_t)t * dv + j0 + jj]
-                           : 0.f;
+            Ubuf[idx] = (t < Ceff) ? Uloc_g[base * (LA_CHUNK * dv) +
+                                            (int64_t)t * dv + j0 + jj]
+                                   : 0.f;
         }
-        for (int idx = tid; idx < LA_CHUNK * dk; idx += nthreads) {
-            const int t = idx / dk, i = idx % dk;
-            const float rl = rlast_g[base * LA_CHUNK + t];
-            Kbuf[t * dk + i] = (t < Ceff)
-                ? rl * to_float(key[b * k_bs + (int64_t)(c0 + t) * n_k * dk +
-                                    (int64_t)h_k * dk + i])
+        // Padded tokens (t >= Ceff) contribute zero through both kc and U.
+        float kc[LA_CHUNK];
+#pragma unroll
+        for (int t = 0; t < LA_CHUNK; t++) {
+            kc[t] = (active && t < Ceff)
+                ? rlast_g[base * LA_CHUNK + t] *
+                      to_float(key[b * k_bs + (int64_t)(c0 + t) * n_k * dk +
+                                   (int64_t)h_k * dk + i])
                 : 0.f;
         }
         const float a_last = alast_g[base];
         __syncthreads();
-        for (int idx = tid; idx < dvs * dk; idx += nthreads) {
-            const int jj = idx / dk, i = idx % dk;
-            float acc = a_last * Ssm[jj * dk + i];
-            for (int t = 0; t < Ceff; t++)
-                acc += Kbuf[t * dk + i] * Ubuf[t * dvs + jj];
-            Ssm[jj * dk + i] = acc;
+#pragma unroll
+        for (int jj = 0; jj < LA_SCAN_F32_MAX_DVS; jj++) {
+            if (jj < dvs) {
+                float acc = a_last * S[jj];
+#pragma unroll
+                for (int t = 0; t < LA_CHUNK; t++) {
+                    acc += kc[t] * Ubuf[t * dvs + jj];
+                }
+                S[jj] = acc;
+            }
         }
-        __syncthreads();
     }
-    for (int idx = tid; idx < dk * dvs; idx += nthreads) {
-        const int i = idx / dvs, jj = idx % dvs;
-        const int64_t gi = (int64_t)i * dv + j0 + jj;
-        if (is_last)
-            Sout[gi] = from_float<T>(Ssm[jj * dk + i]);
-        else
-            carry[gi] = Ssm[jj * dk + i];
+    if (active) {
+#pragma unroll
+        for (int jj = 0; jj < LA_SCAN_F32_MAX_DVS; jj++) {
+            if (jj < dvs) {
+                const int64_t gi = (int64_t)i * dv + j0 + jj;
+                if (is_last) {
+                    Sout[gi] = from_float<T>(S[jj]);
+                } else {
+                    carry[gi] = S[jj];
+                }
+            }
+        }
     }
 }
 
@@ -1384,15 +1862,20 @@ __global__ void la_pf_pass3_f32(
     const float* S0 = S0_g + base * (dk * dv);
     const float* Ul = Uloc_g + base * (LA_CHUNK * dv);
 
+    // Ksm rows are padded by one float so the Pm loop, where lanes walk the
+    // key row s, does not hit one LDS bank.
+    const int kst = dk + 1;
     extern __shared__ float smem[];
     float* Qsm  = smem;                               // C*dk
-    float* Ksm  = Qsm + LA_CHUNK * dk;                // C*dk
-    float* Pm   = Ksm + LA_CHUNK * dk;                // C*C
+    float* Ksm  = Qsm + LA_CHUNK * dk;                // C*(dk+1)
+    float* Pm   = Ksm + LA_CHUNK * kst;               // C*C
     float* Asm  = Pm + LA_CHUNK * LA_CHUNK;
     float* clog = Asm + LA_CHUNK;
 
     for (int idx = tid; idx < LA_CHUNK * dk; idx += nthreads) {
         Qsm[idx] = 0.f;
+    }
+    for (int idx = tid; idx < LA_CHUNK * kst; idx += nthreads) {
         Ksm[idx] = 0.f;
     }
     __syncthreads();
@@ -1401,7 +1884,7 @@ __global__ void la_pf_pass3_f32(
         Qsm[t * dk + i] = to_float(
             query[b * q_bs + (int64_t)(c0 + t) * Hq * dk +
                   (int64_t)h_q * dk + i]);
-        Ksm[t * dk + i] = to_float(
+        Ksm[t * kst + i] = to_float(
             key[b * k_bs + (int64_t)(c0 + t) * n_k * dk +
                 (int64_t)h_k * dk + i]);
     }
@@ -1422,22 +1905,62 @@ __global__ void la_pf_pass3_f32(
             continue;
         }
         const float* qr = Qsm + t * dk;
-        const float* kr = Ksm + s * dk;
+        const float* kr = Ksm + s * kst;
         float qk = 0.f;
         for (int i = 0; i < dk; i++)
             qk += qr[i] * kr[i];
         Pm[t * Ceff + s] = expf(clog[t] - clog[s]) * qk;
     }
     __syncthreads();
+    // la_pf_scan_f32 writes each chunk's S0 as [dk][dv], so lanes that walk j
+    // read one contiguous S0 row per i. Each thread covers LA_PF3_TPT
+    // consecutive tokens of one column so every S0 and U value it loads is
+    // reused that many times.
+    if ((LA_CHUNK / LA_PF3_TPT) * dv <= nthreads) {
+        const int j  = tid % dv;
+        const int t0 = (tid / dv) * LA_PF3_TPT;
+        if (t0 < Ceff) {
+            const float* sc = S0 + j;
+            float qs[LA_PF3_TPT] = {};
+            for (int i = 0; i < dk; i++) {
+                const float sv = sc[(int64_t)i * dv];
+#pragma unroll
+                for (int m = 0; m < LA_PF3_TPT; m++) {
+                    qs[m] += Qsm[(t0 + m) * dk + i] * sv;
+                }
+            }
+            float u[LA_CHUNK];
+#pragma unroll
+            for (int s = 0; s < LA_CHUNK; s++) {
+                u[s] = (s < Ceff) ? Ul[s * dv + j] : 0.f;
+            }
+#pragma unroll
+            for (int m = 0; m < LA_PF3_TPT; m++) {
+                const int t = t0 + m;
+                if (t >= Ceff) {
+                    break;
+                }
+                float intra = 0.f;
+#pragma unroll
+                for (int s = 0; s < LA_CHUNK; s++) {
+                    if (s <= t) {
+                        intra += Pm[t * Ceff + s] * u[s];
+                    }
+                }
+                output[b * out_bs + (int64_t)(c0 + t) * Hout * dv +
+                       (int64_t)h_out * dv + j] =
+                    from_float<T>(scale * (Asm[t] * qs[m] + intra));
+            }
+        }
+        return;
+    }
     for (int idx = tid; idx < Ceff * dv; idx += nthreads) {
         const int t = idx / dv, j = idx % dv;
         const float* qr = Qsm + t * dk;
-        // la_pf_scan_f32 writes each chunk's S0 as [dv][dk], so row j is
-        // contiguous over i.
-        const float* sr = S0 + (int64_t)j * dk;
+        const float* sc = S0 + j;
         float qs = 0.f;
         for (int i = 0; i < dk; i++)
-            qs += qr[i] * sr[i];
+            qs += qr[i] * sc[(int64_t)i * dv];
         float intra = 0.f;
         for (int s = 0; s <= t; s++)
             intra += Pm[t * Ceff + s] * Ul[s * dv + j];
@@ -1569,18 +2092,31 @@ static int la_launch_parallel(
     // all fp16 now that the scan runs on the matrix cores, which leaves it
     // smaller than the 18,432 B the scalar version needed. The dv-split
     // shrinks everything except the dv-independent A buffer.
-    if (dv % LA_SCAN_NSPLIT != 0) return 1;
-    const int dvs = dv / LA_SCAN_NSPLIT;
     const bool gated_f32 = GATED_ONLY;
+    // The fp32 scan holds dvs <= LA_SCAN_F32_MAX_DVS state columns per thread
+    // and one thread per key row, so it splits dv into the fewest equal parts
+    // that fit.
+    int f32_nsplit = (dv + LA_SCAN_F32_MAX_DVS - 1) / LA_SCAN_F32_MAX_DVS;
+    while (dv % f32_nsplit != 0) {
+        f32_nsplit++;
+    }
+    if (gated_f32 && dk > 1024) {
+        return 1;
+    }
+    if (!gated_f32 && dv % LA_SCAN_NSPLIT != 0) {
+        return 1;
+    }
+    const int dvs = gated_f32 ? dv / f32_nsplit : dv / LA_SCAN_NSPLIT;
     if (!gated_f32 && (dvs % LA_WT || dk % LA_WT || LA_CHUNK % LA_WT)) return 1;
     const size_t s2 = gated_f32
-        ? (size_t)(dvs * dk + LA_CHUNK * dvs + LA_CHUNK * dk) * sizeof(float)
+        ? (size_t)(LA_CHUNK * dvs) * sizeof(float)
         : (size_t)(dvs * (dk + LA_SST_PAD) +
                    (LA_CHUNK * dk > dk * (LA_CHUNK + LA_KT_PAD)
                         ? LA_CHUNK * dk : dk * (LA_CHUNK + LA_KT_PAD)) +
                    dvs * LA_CHUNK) * sizeof(__half);
     const size_t s3 = gated_f32
-        ? (size_t)(2 * LA_CHUNK * dk + LA_CHUNK * LA_CHUNK + 2 * LA_CHUNK) *
+        ? (size_t)(2 * LA_CHUNK * dk + LA_CHUNK + LA_CHUNK * LA_CHUNK +
+                   2 * LA_CHUNK) *
               sizeof(float)
         : (size_t)(2 * LA_CHUNK * dv + LA_CHUNK * LA_CHUNK +
                    2 * LA_CHUNK) * sizeof(float) +
@@ -1611,9 +2147,11 @@ static int la_launch_parallel(
             seq_len, Hkv, Nk, dk, dv, beta_per_head, win, cbeg);
         if (gated_f32) {
             hipLaunchKernelGGL(la_pf_scan_f32<T>,
-                dim3((unsigned)(B * Hkv * LA_SCAN_NSPLIT)), dim3(scan_block),
+                dim3((unsigned)(B * Hkv * f32_nsplit)),
+                dim3((unsigned)((dk + 31) / 32 * 32)),
                 s2, s, k, Uloc_g, rlast_g, alast_g, S0_f, carry_f, state,
-                seq_len, Hkv, Nk, dk, dv, win, cbeg, is_first, is_last);
+                seq_len, Hkv, Nk, dk, dv, f32_nsplit, win, cbeg, is_first,
+                is_last);
             hipLaunchKernelGGL(la_pf_pass3_f32<T>, dim3((unsigned)ncb),
                 dim3(256), s3, s, q, k, dec, Uloc_g, S0_f, out, seq_len, Hq,
                 Hkv, Nk, dk, dv, scale, win, cbeg);

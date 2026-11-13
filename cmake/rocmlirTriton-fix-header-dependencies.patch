@@ -1,0 +1,85 @@
+diff --git a/cmake/triton.cmake b/cmake/triton.cmake
+index 9c9795c..60b7c9d 100644
+--- a/cmake/triton.cmake
++++ b/cmake/triton.cmake
+@@ -555,11 +555,35 @@ macro(_rocmlir_stub_library_depends)
+   _rocmlir_stub_external_depends(${_rsld_DEPENDS} mlir-headers mlir-generic-headers)
+ endmacro(_rocmlir_stub_library_depends)
+ 
++# Re-export the library's own include directories on its INTERFACE so a consumer
++# that links the built (imported) target -- in particular an out-of-tree user
++# such as hip-ep -- picks up the dialect/conversion headers (e.g.
++# <rock/rock.h>, <TritonRockToTriton/Passes.h>) transitively. add_mlir_library
++# puts those directories on the PRIVATE include path only, which is enough for
++# the in-tree build but is dropped when the target is imported, so the consumer
++# fails to find the headers. BUILD_INTERFACE keeps the build-tree path off the
++# installed interface. The obj.<name> object library (which the shared aggregate
++# links) carries the same PRIVATE includes, so propagate from it too.
++function(_rocmlir_propagate_public_includes name)
++  foreach(_t ${name} obj.${name})
++    if(NOT TARGET ${_t})
++      continue()
++    endif()
++    get_target_property(_incs ${_t} INCLUDE_DIRECTORIES)
++    if(_incs)
++      foreach(_inc ${_incs})
++        target_include_directories(${_t} INTERFACE "$<BUILD_INTERFACE:${_inc}>")
++      endforeach()
++    endif()
++  endforeach()
++endfunction(_rocmlir_propagate_public_includes)
++
+ function(add_rocmlir_dialect_library name)
+   set_property(GLOBAL APPEND PROPERTY ROCMLIR_DIALECT_LIBS ${name})
+   set_property(GLOBAL APPEND PROPERTY MLIR_DIALECT_LIBS ${name})
+   _rocmlir_stub_library_depends(${ARGN})
+   add_mlir_library(${ARGV} DEPENDS mlir-headers)
++  _rocmlir_propagate_public_includes(${name})
+ endfunction(add_rocmlir_dialect_library)
+ 
+ function(add_rocmlir_conversion_library name)
+@@ -567,6 +591,7 @@ function(add_rocmlir_conversion_library name)
+   set_property(GLOBAL APPEND PROPERTY MLIR_CONVERSION_LIBS ${name})
+   _rocmlir_stub_library_depends(${ARGN})
+   add_mlir_library(${ARGV} DEPENDS mlir-headers)
++  _rocmlir_propagate_public_includes(${name})
+ endfunction(add_rocmlir_conversion_library)
+ 
+ function(add_rocmlir_test_library name)
+@@ -617,8 +642,17 @@ endfunction(add_rocmlir_triton_library)
+ # add_mlir_library). Marked SYSTEM so our strict warnings (-Wshadow, -Wundef,
+ # ...) don't fire inside Triton headers.
+ function(rocmlir_add_triton_includes target)
+-  target_include_directories(${target} SYSTEM PRIVATE ${TRITON_INCLUDE_DIRS})
+-  if(TARGET obj.${target})
+-    target_include_directories(obj.${target} SYSTEM PRIVATE ${TRITON_INCLUDE_DIRS})
+-  endif()
++  foreach(_t ${target} obj.${target})
++    if(NOT TARGET ${_t})
++      continue()
++    endif()
++    target_include_directories(${_t} SYSTEM PRIVATE ${TRITON_INCLUDE_DIRS})
++    # Also publish on the INTERFACE (build tree only) so an out-of-tree
++    # consumer that links the imported target -- e.g. hip-ep's
++    # RockToTritonTranslate -- transitively sees the Triton headers
++    # (<triton/Dialect/Triton/IR/Dialect.h>) that the public Rock headers pull
++    # in. PRIVATE alone is dropped on import.
++    target_include_directories(${_t} SYSTEM INTERFACE
++      "$<BUILD_INTERFACE:${TRITON_INCLUDE_DIRS}>")
++  endforeach()
+ endfunction(rocmlir_add_triton_includes)
+diff --git a/mlir/lib/Dialect/Rock/Pipelines/CMakeLists.txt b/mlir/lib/Dialect/Rock/Pipelines/CMakeLists.txt
+index 16ff81d..6252fee 100644
+--- a/mlir/lib/Dialect/Rock/Pipelines/CMakeLists.txt
++++ b/mlir/lib/Dialect/Rock/Pipelines/CMakeLists.txt
+@@ -1,6 +1,10 @@
+ add_rocmlir_dialect_library(MLIRRockPipeline
+   Pipelines.cpp
+ 
++  DEPENDS
++  MLIRMIGraphXIncGen
++  MLIRMIGraphXTypeIncGen
++
+   LINK_LIBS PUBLIC
+   MLIRAMDGPUTransforms
+   MLIRCpuTransforms

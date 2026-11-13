@@ -184,25 +184,97 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
         op, "GroupQueryAttention expects 3-4 results");
 
   auto outputType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  auto presentKeyType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(1).getType());
-  auto presentValueType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(2).getType());
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  if (!outputType)
+    return rewriter.notifyMatchFailure(op, "output must be a ranked tensor");
+
+  auto getPresentType = [&](unsigned idx,
+                            mlir::Value past) -> mlir::RankedTensorType {
+    mlir::Type type = op->getResult(idx).getType();
+    if (auto ranked = mlir::dyn_cast<mlir::RankedTensorType>(type))
+      return ranked;
+    if (!mlir::isa<mlir::NoneType>(type) || !past)
+      return nullptr;
+    return mlir::dyn_cast<mlir::RankedTensorType>(past.getType());
+  };
+  auto presentKeyType = getPresentType(1, pastKey);
+  auto presentValueType = getPresentType(2, pastValue);
+  if (!presentKeyType || !presentValueType)
+    return rewriter.notifyMatchFailure(
+        op, "present outputs must be ranked tensors, or NoneType with a "
+            "ranked past input");
+
+  // staticZeroNewKv means shared kv cache for multiple queries
+  auto keyType =
+      key ? mlir::dyn_cast<mlir::RankedTensorType>(key.getType()) : nullptr;
+  bool staticZeroNewKv =
+      keyType && keyType.getRank() == 3 && keyType.getDimSize(1) == 0;
+  if (staticZeroNewKv && pastKey &&
+      (kQuantTypeAttr.getValue() != "NONE" ||
+       vQuantTypeAttr.getValue() != "NONE"))
+    return rewriter.notifyMatchFailure(
+        op, "zero-length key/value over a quantized KV cache");
 
   mlir::RankedTensorType outputQkType = nullptr;
-  if (numResults == 4)
+  if (numResults == 4) {
     outputQkType =
-        mlir::cast<mlir::RankedTensorType>(op->getResult(3).getType());
+        mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(3).getType());
+    if (!outputQkType)
+      return rewriter.notifyMatchFailure(op,
+                                         "output_qk must be a ranked tensor");
+  }
 
   // === Create DPS init tensors ===
 
+  auto createPresentInit = [&](unsigned idx, mlir::RankedTensorType &type,
+                               mlir::Value past,
+                               mlir::Value kv) -> mlir::Value {
+    auto kvType =
+        kv ? mlir::dyn_cast<mlir::RankedTensorType>(kv.getType()) : nullptr;
+    bool dropped = mlir::isa<mlir::NoneType>(op->getResult(idx).getType());
+    if (!dropped || !kvType || kvType.getRank() != 3 || type.getRank() != 4 ||
+        kvType.getDimSize(1) > 0)
+      return createEmptyTensor(rewriter, loc, type,
+                               past ? past : (kv ? kv : query));
+
+    llvm::SmallVector<int64_t> shape(type.getShape());
+    mlir::Value seqLen;
+    if (kvType.getDimSize(1) == 0) {
+      shape[2] = 0;
+    } else {
+      shape[2] = mlir::ShapedType::kDynamic;
+      mlir::Value zero = mlir::arith::ConstantIndexOp::create(rewriter, loc, 0);
+      mlir::Value kvLen =
+          mlir::tensor::DimOp::create(rewriter, loc, kv, int64_t{1});
+      mlir::Value pastLen =
+          mlir::tensor::DimOp::create(rewriter, loc, past, int64_t{2});
+      mlir::Value isZero = mlir::arith::CmpIOp::create(
+          rewriter, loc, mlir::arith::CmpIPredicate::eq, kvLen, zero);
+      seqLen =
+          mlir::arith::SelectOp::create(rewriter, loc, isZero, zero, pastLen);
+    }
+    type = mlir::RankedTensorType::get(shape, type.getElementType(),
+                                       type.getEncoding());
+
+    llvm::SmallVector<mlir::Value> dynSizes;
+    for (int64_t dimIdx : llvm::seq<int64_t>(type.getRank())) {
+      if (!type.isDynamicDim(dimIdx))
+        continue;
+      if (dimIdx == 2)
+        dynSizes.push_back(seqLen);
+      else
+        dynSizes.push_back(
+            mlir::tensor::DimOp::create(rewriter, loc, past, dimIdx));
+    }
+    return mlir::tensor::EmptyOp::create(rewriter, loc, type.getShape(),
+                                         type.getElementType(), dynSizes);
+  };
+
   mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, query);
-  mlir::Value presentKeyInit = createEmptyTensor(
-      rewriter, loc, presentKeyType, pastKey ? pastKey : (key ? key : query));
+  mlir::Value presentKeyInit =
+      createPresentInit(1, presentKeyType, pastKey, key);
   mlir::Value presentValueInit =
-      createEmptyTensor(rewriter, loc, presentValueType,
-                        pastValue ? pastValue : (value ? value : query));
+      createPresentInit(2, presentValueType, pastValue, value);
 
   mlir::Value outputQkInit = nullptr;
   if (outputQkType)
@@ -289,7 +361,8 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
   // past_value(0|1),
   //            seqlens_k(1), total_seq_len(1), cos_cache(0|1), sin_cache(0|1),
   //            position_ids(0|1), attention_bias(0|1), head_sink(0|1),
-  //            k_scale(0|1), v_scale(0|1), output(1), present_key(1),
+  //            k_scale(0|1), v_scale(0|1), key_bias(0), output(1),
+  //            present_key(1),
   //            present_value(1), output_qk(0|1)]
   llvm::SmallVector<int32_t> segmentSizes;
   segmentSizes.push_back(1); // ctx
@@ -307,6 +380,7 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
   segmentSizes.push_back(headSink ? 1 : 0);
   segmentSizes.push_back(kScale ? 1 : 0);
   segmentSizes.push_back(vScale ? 1 : 0);
+  segmentSizes.push_back(0);                    // key_bias
   segmentSizes.push_back(1);                    // output
   segmentSizes.push_back(1);                    // present_key
   segmentSizes.push_back(1);                    // present_value

@@ -104,10 +104,9 @@ static void simplifyCastLike(mlir::func::FuncOp funcOp) {
 
 // Drop function arguments that were live BEFORE the simplifiers ran and are
 // now use-empty (i.e. their last use was eliminated by one of the rewrites
-// above). Arguments that were already dead in the input IR are deliberately
-// preserved -- generateModuleMetadata's "captures the original signature"
-// contract (asserted by test/lit/Pipeline/module-metadata.mlir) requires
-// that.
+// above). Arguments that were already dead in the input IR are left here.
+// convert-onnx-to-hip drops unread @main_graph arguments when it records the
+// runtime input list, which is the list the EP actually passes.
 //
 // Because this pass runs BEFORE hip-add-context-arg, no `!hip.context`
 // argument is ever present here -- the dead-arg sweep doesn't need a

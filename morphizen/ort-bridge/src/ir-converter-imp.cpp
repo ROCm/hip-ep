@@ -13,6 +13,7 @@
 #include <morphizen/graph.hpp>
 #include <morphizen/morphizen-ort-api-ext.hpp>
 #include <morphizen/node_attr.hpp>
+#include <string_view>
 #include <unordered_set>
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_IR_CONVERTER, "0")
 DEF_ENV_PARAM_2(MORPHIZEN_DEBUG_IR_CONVERTER_OUTPUT_FILE,
@@ -142,14 +143,29 @@ OrtStatus *IRConverterImp::convert_graph(morphizen::Graph &graph) const {
 
 OrtStatus *IRConverterImp::convert_graph_inputs(morphizen::Graph &graph) const {
   MY_LOG(2) << "Converting graph inputs to ONNX format";
-  // Get inputs from the ORT graph
+  // An initializer whose name is also a graph input is imported below as a
+  // constant. Binding it as a function argument first makes
+  // add_constant_initialized_tensor reject the name as already in use.
+  // IR version 3 lists every initializer this way. From IR version 4 the
+  // initializer is only the default of an overridable input, but exporters
+  // routinely list all weights as inputs, so they stay constants too and a
+  // runtime override of such an input is ignored.
+  std::unordered_set<std::string> initializer_names;
+  for (const OrtValueInfo *initializer : graph_.initializers()) {
+    initializer_names.emplace(Ort::ConstValueInfo(initializer).GetName());
+  }
   auto inputs = graph_.inputs();
   auto new_inputs = std::vector<morphizen::NodeArg *>();
   new_inputs.reserve(inputs.size());
+  size_t num_skipped = 0;
   for (const OrtValueInfo *input : inputs) {
-    // Create ValueInfo wrapper for the input
-    auto value_info =
-        Ort::ConstValueInfo(input); // Create ONNX ValueInfoProto for the input
+    auto value_info = Ort::ConstValueInfo(input);
+    if (initializer_names.count(value_info.GetName()) != 0) {
+      MY_LOG(3) << "Skipping initializer listed as graph input: "
+                << value_info.GetName();
+      ++num_skipped;
+      continue;
+    }
     morphizen::NodeArg *node_arg = nullptr;
     throw_if_error(convert_value_info_proto(value_info, graph, &node_arg));
     CHECK(node_arg != nullptr);
@@ -157,86 +173,11 @@ OrtStatus *IRConverterImp::convert_graph_inputs(morphizen::Graph &graph) const {
     MY_LOG(3) << "Added input: " << value_info.GetName();
   }
   morphizen_cxx::GraphRef(graph).set_inputs(new_inputs);
-  MY_LOG(2) << "Converted " << inputs.size() << " inputs";
+  LOG_IF(WARNING, num_skipped != 0 && graph_.ir_version() >= 4)
+      << num_skipped << " initializers are also listed as graph inputs; "
+      << "hip-ep treats them as constants and ignores runtime overrides";
+  MY_LOG(2) << "Converted " << new_inputs.size() << " inputs";
   return nullptr;
-}
-
-std::vector<morphizen::NodeArg *>
-IRConverterImp::guess_missing_output(std::vector<morphizen::NodeArg *> outputs,
-                                     morphizen::Graph &graph) const {
-
-  auto nodes = graph_.nodes();
-
-  // ORT's Graph::Resolve propagates transitively-captured outer-scope
-  // values up to the outermost region-bearing node's implicit_input_defs,
-  // with stable OrtValueInfo* identity matching outer producers' outputs.
-  // So walking top-level nodes' GetInputs() + GetImplicitInputs() gives
-  // the complete consumed set -- no need to descend into body subgraphs.
-  std::unordered_set<const OrtValueInfo *> consumed;
-  for (auto &node : nodes) {
-    Ort::ConstNode wrap(node);
-    for (auto in : wrap.GetInputs()) {
-      if (in) {
-        consumed.insert(in);
-      }
-    }
-    for (auto in : wrap.GetImplicitInputs()) {
-      if (in) {
-        consumed.insert(in);
-      }
-    }
-  }
-  auto output_is_consumed = [&](const OrtValueInfo *vi) -> bool {
-    return consumed.count(vi) > 0;
-  };
-
-  // guess output: add dangling node outputs that are not consumed by any
-  // other node (explicitly or implicitly via a body) and are not already
-  // in the output list. Skip optional intermediates from multi-output
-  // ops where at least one sibling result IS consumed.
-  for (auto &node : nodes) {
-    std::vector<const OrtValueInfo *> node_outputs = {};
-    size_t num_of_outputs = 0;
-    throw_if_error(ort_api.Node_GetNumOutputs(node, &num_of_outputs));
-    node_outputs.resize(num_of_outputs);
-    throw_if_error(
-        ort_api.Node_GetOutputs(node, node_outputs.data(), num_of_outputs));
-
-    bool any_sibling_consumed = false;
-    if (num_of_outputs > 1) {
-      for (auto sibling : node_outputs) {
-        if (sibling != nullptr && output_is_consumed(sibling)) {
-          any_sibling_consumed = true;
-          break;
-        }
-      }
-    }
-
-    for (auto output : node_outputs) {
-      if (output != nullptr) { // output == nullptr mean optional argument.
-        if (!output_is_consumed(output)) {
-          if (any_sibling_consumed) {
-            auto vi = Ort::ConstValueInfo(output);
-            MY_LOG(3) << "Skipping optional intermediate output: "
-                      << vi.GetName();
-            continue;
-          }
-          // Create ValueInfo wrapper for the output
-          auto value_info = Ort::ConstValueInfo(output);
-          morphizen::NodeArg *node_arg = nullptr;
-          throw_if_error(
-              convert_value_info_proto(value_info, graph, &node_arg));
-          CHECK(node_arg != nullptr);
-          if (std::find(outputs.begin(), outputs.end(), node_arg) ==
-              outputs.end()) {
-            outputs.push_back(node_arg);
-            MY_LOG(3) << "Added output: " << value_info.GetName();
-          }
-        }
-      }
-    }
-  }
-  return outputs;
 }
 
 OrtStatus *
@@ -256,9 +197,6 @@ IRConverterImp::convert_graph_outputs(morphizen::Graph &graph) const {
     new_outputs.push_back(node_arg);
     MY_LOG(3) << "Added output: " << value_info.GetName();
   }
-  // guess output
-  new_outputs = guess_missing_output(new_outputs, graph);
-
   morphizen_cxx::GraphRef(graph).set_outputs(new_outputs);
   MY_LOG(2) << "Converted " << outputs.size() << " outputs";
   return nullptr;
@@ -707,6 +645,9 @@ OrtStatus *IRConverterImp::convert_graph_nodes(morphizen::Graph &graph) const {
     }
 
     morphizen::NodeAttributesBuilder attrs_builder;
+    // GRAPH attributes are also exposed by Node_GetSubgraphs. Track names
+    // already imported so a body is attached once.
+    std::unordered_set<std::string> graph_attr_names;
 
     std::vector<const OrtOpAttr *> api_node_attributes;
     size_t num_of_attributes = 0;
@@ -715,11 +656,14 @@ OrtStatus *IRConverterImp::convert_graph_nodes(morphizen::Graph &graph) const {
     throw_if_error(ort_api.Node_GetAttributes(node, api_node_attributes.data(),
                                               api_node_attributes.size()));
 
+    bool has_coordinate_transformation_mode = false;
     for (const OrtOpAttr *attr : api_node_attributes) {
       const char *attr_name = nullptr;
       OrtOpAttrType attr_type = OrtOpAttrType::ORT_OP_ATTR_UNDEFINED;
       throw_if_error(ort_api.OpAttr_GetName(attr, &attr_name));
       throw_if_error(ort_api.OpAttr_GetType(attr, &attr_type));
+      if (std::string_view(attr_name) == "coordinate_transformation_mode")
+        has_coordinate_transformation_mode = true;
       MY_LOG(3) << "Processing attribute: " << attr_name
                 << " with type: " << static_cast<int>(attr_type);
       switch (attr_type) {
@@ -757,6 +701,7 @@ OrtStatus *IRConverterImp::convert_graph_nodes(morphizen::Graph &graph) const {
         break;
       }
       case OrtOpAttrType::ORT_OP_ATTR_GRAPH: {
+        graph_attr_names.insert(attr_name);
         attrs_builder.add(attr_name,
                           make_subgraph_attribute(graph, *node, attr_name));
         break;
@@ -798,6 +743,35 @@ OrtStatus *IRConverterImp::convert_graph_nodes(morphizen::Graph &graph) const {
             "Unsupported attribute type encountered during conversion");
       }
       }
+    }
+
+    // RoiAlign-10 has no coordinate_transformation_mode and samples like
+    // output_half_pixel; opset 16 added the attribute with a half_pixel
+    // default. Attributes do not carry the opset, so record the older
+    // behaviour explicitly.
+    if (!has_coordinate_transformation_mode &&
+        std::string_view(op_type) == "RoiAlign" &&
+        (domain == nullptr || domain[0] == '\0' ||
+         std::string_view(domain) == "ai.onnx")) {
+      int since_version = 0;
+      throw_if_error(ort_api.Node_GetSinceVersion(node, &since_version));
+      if (since_version < 16)
+        attrs_builder.add("coordinate_transformation_mode",
+                          std::string("output_half_pixel"));
+    }
+
+    // Node_GetAttributes does not always surface subgraph attributes.
+    // Loop / If / Scan bodies are available from Node_GetSubgraphs, which
+    // is the API ORT documents for reading them. Without this, onnx.Loop
+    // is emitted with zero regions and onnx-loop-outline rejects it.
+    auto subgraphs = Ort::ConstNode(node).GetSubgraphs();
+    for (const auto &sub : subgraphs) {
+      if (!graph_attr_names.insert(sub.attr_name).second)
+        continue;
+      MY_LOG(3) << "Importing subgraph attribute " << sub.attr_name
+                << " from Node_GetSubgraphs";
+      attrs_builder.add(sub.attr_name,
+                        make_subgraph_attribute(graph, *node, sub.attr_name));
     }
 
     auto node_attributes = attrs_builder.build();

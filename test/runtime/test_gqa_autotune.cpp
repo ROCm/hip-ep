@@ -53,8 +53,8 @@ static GqaDecodeResult decode(void *p, int H, int G, int d, int skv,
 }
 
 static GqaPrefillResult prefill(void *p, GqaPrefillVariant v, int H, int G,
-                                int d, int sq, int skv) {
-  GqaPrefillRequest req{v, /*batch=*/1, H, G, d, sq, skv, /*window=*/0};
+                                int d, int sq, int skv, int window = 0) {
+  GqaPrefillRequest req{v, /*batch=*/1, H, G, d, sq, skv, window};
   GqaPrefillResult out;
   hip_gqa_autotune_resolve_prefill(p, &req, &out);
   return out;
@@ -140,19 +140,49 @@ int main() {
   // prefill config always carries a positive KV tile height.
   {
     GqaPrefillResult r =
-        prefill(policy, GqaPrefillVariant::V7, 32, 8, 128, 512, 8192);
+        prefill(policy, GqaPrefillVariant::V6x, 32, 8, 128, 512, 8192);
     CHECK(r.source != GqaTuneSource::Heuristic,
           "measured prefill shape fell to the heuristic");
     CHECK(r.config.bkv > 0, "prefill config has no bkv");
   }
 
+  // Prefill points are measured without a window. A windowed request must
+  // still resolve to a config the windowed kernel is built for: a v6x block
+  // of at most 4 waves.
+  {
+    GqaPrefillResult r =
+        prefill(policy, GqaPrefillVariant::V6x, 64, 8, 64, 2048, 2048, 128);
+    CHECK(r.config.hb * r.config.qw >= 1 && r.config.hb * r.config.qw <= 4,
+          "windowed prefill config has no windowed instance");
+  }
+
+  // head_dim 96 (Phi-3-mini, 32:32) has its own class, so it resolves from its
+  // own rows rather than the heuristic, and its answers are ones the D=96
+  // kernels accept: scalar decode (no D=96 WMMA path) and an MT=1 v6x
+  // prefill (MT=2 is not instantiated at D=96).
+  {
+    GqaDecodeResult r = decode(policy, 32, 32, 96, 4096);
+    CHECK(r.source != GqaTuneSource::Heuristic,
+          "measured d96 decode shape fell to the heuristic");
+    CHECK(runnableDecode(r) && !r.config.use_wmma,
+          "d96 decode config not runnable by the scalar kernel");
+    GqaPrefillResult p =
+        prefill(policy, GqaPrefillVariant::V6x, 32, 32, 96, 1024, 1024);
+    CHECK(p.source != GqaTuneSource::Heuristic,
+          "measured d96 prefill shape fell to the heuristic");
+    CHECK(p.config.hb > 0 && p.config.qw > 0 && p.config.mt == 1 &&
+              p.config.bkv > 0,
+          "d96 prefill config is not a D=96 v6x config");
+  }
+
   // The explicit heuristic recovery path (used after the kernel rejects a
   // resolved config) always yields a config.
   {
-    GqaPrefillRequest req{GqaPrefillVariant::V8, 1, 16, 4, 256, 1024, 4096, 0};
+    GqaPrefillRequest req{GqaPrefillVariant::V8x, 1, 16, 4, 256, 1024, 4096, 0};
     GqaPrefillConfig cfg;
     hip_gqa_autotune_fallback_prefill(&req, &cfg);
-    CHECK(cfg.bkv > 0, "fallback prefill config has no bkv");
+    CHECK(cfg.bkv > 0 && cfg.nd > 0 && cfg.hb > 0,
+          "fallback prefill config is not a v8x config");
   }
 
   hip_gqa_autotune_destroy(policy);

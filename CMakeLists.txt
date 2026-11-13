@@ -23,16 +23,28 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 project(
   onnx-hipdnn-ep
-  VERSION 0.4.0
+  VERSION 0.5.3
   LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Compile the experimental implementation; runtime dispatch remains opt-in.
+option(HIP_EP_ENABLE_RING_ATTENTION "Build Ring attention (runtime opt-in)" ON)
+if(DEFINED HIP_EP_GQA_IMPL)
+  message(FATAL_ERROR "HIP_EP_GQA_IMPL was replaced by HIP_EP_ENABLE_RING_ATTENTION=ON/OFF")
+endif()
+if(HIP_EP_ENABLE_RING_ATTENTION)
+  set(HIP_EP_RING_ENABLED 1)
+else()
+  set(HIP_EP_RING_ENABLED 0)
+endif()
+
 if(WIN32)
   if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR CMAKE_C_COMPILER_ID STREQUAL "Clang" )
     add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:-fms-extensions;-fms-compatibility;-fdelayed-template-parsing>")
+    add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:/EHsc>")
   endif()
 
   option(USE_BINSKIM_COMPLIANT_COMPILE_FLAGS "Prepare HIP EP for BinSkim Binary Analyzer" ON)
@@ -96,7 +108,25 @@ option(BUILD_MOCK_RUNTIME "Build mock runtime (no GPU required)" ON)
 option(HIPDNN_EP_DISABLE_VENDOR_BLAS
   "Build the real runtime without hipBLASLt (stub the vendor op wrappers)" OFF)
 option(BUILD_HIP_UNIT_TESTS "Build and register LIT and E2E tests with CTest" ON)
+# Standalone kernel unit-test executables (lib/Runtime/Kernels/unit_test)
+# for the packaging CI. Windows real-runtime builds only; OFF skips them.
+option(BUILD_HIP_KERNEL_UNIT_TESTS
+  "Build the standalone GPU kernel unit-test executables (Windows, real runtime)" ON)
 option(BUILD_PYTHON_WHEEL "Configure the 'wheel' target that packages the EP as a Python wheel" OFF)
+# Native .dll/.so artifacts (DLLLinker + in-process lld on Windows). Off by
+# default so hipgpu does not carry the native linker. artifact_format=NATIVE
+# throws at runtime unless this is ON. Declared before deps.cmake so a
+# from-source LLVM build can omit the lld project.
+option(HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS
+  "Build the opt-in native .dll/.so artifact path (lld). When OFF, artifact_format=NATIVE throws."
+  OFF)
+
+# Build rocMLIR/Triton (rocmlirTriton) in-tree as a subdirectory, reusing the
+# same LLVM/MLIR this project already resolves (see cmake/deps.cmake). When ON,
+# the in-tree LLVM is built as a superset (adds the AMDGPU target and matching
+# assertions) and rocmlirTriton is added with add_subdirectory; its own CMake
+# detects the already-defined MLIRSupport target and skips rebuilding LLVM.
+option(ENABLE_ROCMLIRTRITON "Build rocmlirTriton (rocMLIR/Triton) in-tree, reusing this project's LLVM" OFF)
 
 # Compiler plugins are linked STATICALLY into the host at configure time (see
 # cmake/HipEpPlugins.cmake and docs/design/plugin-interface.md). Select which
@@ -123,6 +153,14 @@ if(HIPDNN_EP_LOAD_KERNEL_DLLS AND NOT HIPDNN_EP_LINK_HIP_HOST)
   message(FATAL_ERROR
     "HIPDNN_EP_LOAD_KERNEL_DLLS=ON requires HIPDNN_EP_LINK_HIP_HOST=ON "
     "(LlvmIrJit::detectCustomKernelArch needs hipGetDeviceProperties).")
+endif()
+
+if(HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS)
+  message(STATUS "Native artifacts: ON")
+  add_compile_definitions(HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS=1)
+else()
+  message(STATUS "Native artifacts: OFF")
+  add_compile_definitions(HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS=0)
 endif()
 
 # FlatBuffers schemas (HipSchemas). Added here rather than with the other
@@ -197,6 +235,12 @@ add_subdirectory(lib)
 # (tools/hip-test links morphizen-custom-op-mlir).
 add_subdirectory(backend-mlir-compiler)
 
+# Test-only pass registrations used by hip-mlir-opt LIT coverage.
+# Define the library before configuring tools so the target is linked by name.
+if(BUILD_HIP_UNIT_TESTS)
+  add_subdirectory(test/lib/Dialect/Hip)
+endif()
+
 # Executable targets
 add_subdirectory(tools)
 
@@ -232,7 +276,7 @@ if(BUILD_HIP_UNIT_TESTS)
   add_subdirectory(test/unit)
 
   # Kernel compile-time guards (GPU-free; device-kernel arch-gating invariants).
-  add_subdirectory(lib/Runtime/Kernels/test/lds_barrier_arch_gate)
+  add_subdirectory(test/kernel_guards/lds_barrier_arch_gate)
 endif()
 
 # Out-of-tree plugin dirs (HIPDNN_EP_COMPILER_PLUGIN_PATHS): add each so it can
@@ -254,6 +298,32 @@ foreach(_host_exe hip-test hip-compiler hip-mlir-opt hip-onnx-runner hip-inspect
   if(TARGET ${_host_exe})
     hipdnn_ep_harden_comgr_safe(${_host_exe})
   endif()
+endforeach()
+
+# hip-config-amd.cmake appends `clang-cl -print-libgcc-file-name`'s answer to
+# hip::host/device without checking the file exists, so a prefix built without
+# compiler-rt leaves every consumer depending on a library ninja cannot make.
+# Drop only absent clang_rt paths, and do it after every add_subdirectory, since
+# hip-config re-appends on each find_package(hip).
+foreach(_hip_target hip::host hip::device)
+  if(NOT TARGET ${_hip_target})
+    continue()
+  endif()
+  get_target_property(_hip_link_libs ${_hip_target} INTERFACE_LINK_LIBRARIES)
+  if(NOT _hip_link_libs)
+    continue()
+  endif()
+  set(_hip_kept_libs "")
+  foreach(_hip_lib IN LISTS _hip_link_libs)
+    if(_hip_lib MATCHES "clang_rt" AND NOT EXISTS "${_hip_lib}")
+      message(STATUS "[onnx-hipdnn-ep] ${_hip_target}: dropping absent compiler-rt "
+                     "builtins ${_hip_lib}")
+    else()
+      list(APPEND _hip_kept_libs "${_hip_lib}")
+    endif()
+  endforeach()
+  set_property(TARGET ${_hip_target}
+    PROPERTY INTERFACE_LINK_LIBRARIES "${_hip_kept_libs}")
 endforeach()
 
 # Public C API headers (compiler_api.h, compiler_types.h, ...).

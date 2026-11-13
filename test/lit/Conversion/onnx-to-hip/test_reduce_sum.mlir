@@ -68,4 +68,13 @@ module {
   // CHECK: %[[INIT:.*]] = tensor.empty(%{{.*}}, %{{.*}}) : tensor<?x?xf32>
   // CHECK: hip.reduce_sum(%[[CTX]]) ins(%[[DATA]], %[[AXES]] : tensor<?x?x512xf32>, tensor<i64>) outs(%[[INIT]] : tensor<?x?xf32>) {keepdims = 0 : i64}
   // CHECK-NOT: hip.alloc
+
+  func.func @reduce_sum_constant_axes(%data: tensor<?x4x4xf16>) -> tensor<?x4xf16> {
+    %axes = "onnx.Constant"() {value = dense<[-2]> : tensor<1xi64>} : () -> tensor<1xi64>
+    %output = "onnx.ReduceSum"(%data, %axes) {keepdims = 0 : si64, noop_with_empty_axes = 0 : si64} : (tensor<?x4x4xf16>, tensor<1xi64>) -> tensor<?x4xf16>
+    return %output : tensor<?x4xf16>
+  }
+
+  // CHECK-LABEL: func.func @reduce_sum_constant_axes
+  // CHECK: hip.reduce_sum({{.*}}) {keepdims = 0 : i64, reduced_axes = array<i64: 1>}
 }

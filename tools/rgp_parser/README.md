@@ -160,6 +160,16 @@ The base may include a directory (`out/sample`); any extension is ignored.
 Everything below is derived from the SQTT stream + kernel names; nothing is
 fabricated when data is missing.
 
+**Per-SE clocks**: each shader engine (one `SqttData` chunk each) stamps its
+records with its own shader-clock counter, and the engines' counters drift apart
+by a different amount in every capture. Each SE also records (shader clock,
+100 MHz realtime) pairs, so SE*n*'s wave times are mapped to SE0's shader clock
+through realtime using SE*n*'s own pairs, and each SE's waves are assigned to
+launches using that SE's own launch records. Dispatches, events and RGP markers
+are broadcast into every SE's stream and are read from SE0 only. Set
+`RGP_PARSER_PER_SE_CLOCK=0` to use SE0's clock for every SE (the old behaviour,
+for A/B comparisons).
+
 **Bound class** (per dispatch): `overhead` (tiny kernel dominated by its idle
 gap) · `latency/low-occupancy` (low theoretical occupancy) · `memory-bound` /
 `compute-bound` (**only** with SPM samples in-window) · `compute-or-memory

@@ -37,6 +37,15 @@ add_test(NAME OutputAllocatorUnitTest COMMAND test-output-allocator)
 
 set_target_properties(test-output-allocator PROPERTIES FOLDER "runtime-tests")
 
+# Header-only offset allocator behind the session transient arena.
+add_executable(test-transient-arena test_transient_arena.cpp)
+target_compile_features(test-transient-arena PRIVATE cxx_std_17)
+target_include_directories(test-transient-arena PRIVATE
+    ${CMAKE_SOURCE_DIR}/lib/Runtime
+)
+add_test(NAME TransientArenaUnitTest COMMAND test-transient-arena)
+set_target_properties(test-transient-arena PROPERTIES FOLDER "runtime-tests")
+
 # GQA offline autotune tests are GPU-free: they link the real embedded table
 # (lut/gfx1151.fb) and drive the same resolver that ships in
 # custom_kernels_<arch>, through the exported extern "C" shims. The resolver's
@@ -79,3 +88,52 @@ add_test(NAME GqaAutotuneUnitTest COMMAND test-gqa-autotune)
 set_tests_properties(GqaAutotuneUnitTest PROPERTIES
     ENVIRONMENT "HIPDNN_EP_GQA_ARCH=gfx1151")
 set_target_properties(test-gqa-autotune PROPERTIES FOLDER "runtime-tests")
+
+# ELF-only. Require DF_1_NODELETE and the two plugin entry points.
+# See test_hipgpu_elf_contract.cpp.
+if(UNIX AND NOT APPLE AND TARGET ${morphizen_CORE_DYNAMIC_UNIQUE_ID})
+  add_executable(test-hipgpu-elf-contract test_hipgpu_elf_contract.cpp)
+  target_compile_features(test-hipgpu-elf-contract PRIVATE cxx_std_17)
+  target_link_libraries(test-hipgpu-elf-contract PRIVATE ${CMAKE_DL_LIBS})
+  add_test(NAME HipGpuElfContract
+    COMMAND test-hipgpu-elf-contract $<TARGET_FILE:${morphizen_CORE_DYNAMIC_UNIQUE_ID}>)
+  set_tests_properties(HipGpuElfContract PROPERTIES TIMEOUT 60)
+  set_target_properties(test-hipgpu-elf-contract PROPERTIES FOLDER "runtime-tests")
+endif()
+
+# MatMulNBits LUT row-stride invariants on the real embedded table
+# (lut/gfx1151.fb, embedded as above), resolver built GPU-free: the arch comes
+# from HIPDNN_EP_MATMUL_NBITS_ARCH instead of the device.
+set(_mn_test_lut_fb
+    ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/hip/autotune/matmul_nbits/lut/gfx1151.fb)
+set(_mn_test_lut_cpp ${CMAKE_CURRENT_BINARY_DIR}/matmul_nbits_lut_data_test.cpp)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_mn_test_lut_fb})
+file(READ ${_mn_test_lut_fb} _mn_test_hex HEX)
+string(LENGTH "${_mn_test_hex}" _mn_test_len)
+math(EXPR _mn_test_n "${_mn_test_len} / 2")
+string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," _mn_test_body "${_mn_test_hex}")
+file(WRITE ${_mn_test_lut_cpp}
+"// Auto-generated from gfx1151.fb by test/runtime/CMakeLists.txt; do not edit, do not commit.\n"
+"#include <cstddef>\n"
+"static const unsigned char _blob[] = {${_mn_test_body}};\n"
+"extern \"C\" const unsigned char* const kMatmulNbitsLutBlobs[] = { _blob };\n"
+"extern \"C\" const size_t kMatmulNbitsLutBlobSizes[] = { ${_mn_test_n} };\n"
+"extern \"C\" const size_t kMatmulNbitsLutBlobCount = 1;\n")
+
+add_executable(test-matmul-nbits-autotune
+    test_matmul_nbits_autotune.cpp
+    ${_mn_test_lut_cpp}
+)
+target_compile_features(test-matmul-nbits-autotune PRIVATE cxx_std_17)
+target_compile_definitions(test-matmul-nbits-autotune PRIVATE
+    HIPDNN_EP_MATMUL_NBITS_AUTOTUNE_GPU_FREE=1
+)
+target_include_directories(test-matmul-nbits-autotune PRIVATE
+    ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/hip/autotune/matmul_nbits
+    ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/include
+)
+target_link_libraries(test-matmul-nbits-autotune PRIVATE HipSchemasLib)
+add_test(NAME MatMulNBitsAutotuneUnitTest COMMAND test-matmul-nbits-autotune)
+set_tests_properties(MatMulNBitsAutotuneUnitTest PROPERTIES
+    ENVIRONMENT "HIPDNN_EP_MATMUL_NBITS_ARCH=gfx1151")
+set_target_properties(test-matmul-nbits-autotune PROPERTIES FOLDER "runtime-tests")

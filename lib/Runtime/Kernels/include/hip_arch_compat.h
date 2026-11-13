@@ -84,12 +84,61 @@
  * encoding. The accumulator is always 8 elements/lane in both encodings. */
 #define HIPDNN_WMMA_FRAG_ELEMS (HIPDNN_WMMA_GFX12 ? 8 : 16)
 
+/* Wave32 VGPRs per SIMD on the arch this device pass compiles for: 1536 on
+ * gfx1100, gfx1101 and gfx1151, 1024 on the other gfx11 parts, on gfx1170, and
+ * on gfx11-generic, which must fit its smallest member. amdgpu_waves_per_eu(N)
+ * is a budget of HIPDNN_VGPRS_PER_SIMD / N registers, so a register tile sized
+ * for one file can spill on the other. Unlisted archs get 1024, the smaller
+ * budget. */
+#if defined(__gfx1100__) || defined(__gfx1101__) || defined(__gfx1151__)
+#  define HIPDNN_VGPRS_PER_SIMD 1536
+#else
+#  define HIPDNN_VGPRS_PER_SIMD 1024
+#endif
+
+/* The occupancy that gives a kernel R VGPRs on this target. A wave count
+ * worked out for gfx1151's file grants a third fewer registers on the
+ * gfx11-generic binary gfx1150 / 1151 / 1152 run, so a kernel that needs R
+ * registers asks for amdgpu_waves_per_eu(HIPDNN_WAVES_FOR_VGPRS(R)) instead.
+ * The 1024 fallback for unlisted archs can only make the request more
+ * generous (fewer waves, more registers), never cause a spill. */
+#define HIPDNN_WAVES_FOR_VGPRS(R) (HIPDNN_VGPRS_PER_SIMD / (R))
+
 #if HIPDNN_WMMA_GFX12
 #  define HIPDNN_WMMA_F32_16X16X16_F16(a, b, c)                               \
      __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12((a), (b), (c))
 #else
 #  define HIPDNN_WMMA_F32_16X16X16_F16(a, b, c)                               \
      __builtin_amdgcn_wmma_f32_16x16x16_f16_w32((a), (b), (c))
+#endif
+
+/* LDS-only workgroup barrier.
+ *
+ * __syncthreads() is a full workgroup fence: on RDNA it emits s_waitcnt for both
+ * counters, s_barrier, AND buffer_gl0_inv, because a workgroup can span the two
+ * CUs of a WGP and global-memory coherence between them requires invalidating
+ * the per-CU L0. A loop that only ever synchronizes shared memory -- its global
+ * loads private to the thread that issues them, its global stores never read
+ * back by the workgroup -- pays for the store drain and the L0 flush on every
+ * step, and loses any L0 hits the next step's loads might have had.
+ *
+ * The "memory" clobber is what keeps the compiler from moving LDS accesses
+ * across the barrier; without it the raw s_barrier intrinsic is IntrNoMem and
+ * reordering is legal.
+ *
+ * The standalone s_barrier instruction is provided by the gfx9, gfx10 and
+ * gfx11 families. gfx12 replaced it with the s_barrier_signal/s_barrier_wait
+ * pair, and later architectures likewise lack it, so the inline asm fails to
+ * assemble there. Emit the asm only on the families that provide it and let
+ * every other target -- current or future -- fall back to __syncthreads(),
+ * which is always correct (a strictly stronger full-workgroup fence); it only
+ * reintroduces the redundant drain and L0 flush the raw asm skips. */
+#if defined(__HIP_DEVICE_COMPILE__) && defined(__AMDGCN__) &&                   \
+    (defined(__GFX9__) || defined(__GFX10__) || defined(__GFX11__))
+#define HIPDNN_LDS_BARRIER()                                                    \
+    __asm__ __volatile__("s_waitcnt lgkmcnt(0)\n\ts_barrier" ::: "memory")
+#else
+#define HIPDNN_LDS_BARRIER() __syncthreads()
 #endif
 
 #if defined(__HIPCC__)

@@ -87,6 +87,39 @@ module {
          unsigned_quant_storage}
     return
   }
+
+  // ===== Test 5: f8E4M3FN data with bits = 8 =====
+
+  func.func @test_gbq_float8(%ctx: !hip.context,
+                              %data: memref<1024x160xf8E4M3FN, 1>,
+                              %indices: memref<4x16xi64, 1>,
+                              %scales: memref<1x1xf16, 1>,
+                              %output: memref<4x16x160xf16, 1>) {
+    hip.gather_block_quantized(%ctx)
+        ins(%data, %indices, %scales :
+            memref<1024x160xf8E4M3FN, 1>, memref<4x16xi64, 1>,
+            memref<1x1xf16, 1>)
+        outs(%output : memref<4x16x160xf16, 1>)
+        {bits = 8 : i64, block_size = 160 : i64,
+         gather_axis = 0 : i64, quantize_axis = 1 : i64}
+    return
+  }
+
+  func.func @test_gbq_disk_resident(%ctx: !hip.context,
+                                     %indices: memref<8xi64, 1>,
+                                     %scales: memref<2048x12xf16, 1>,
+                                     %output: memref<8x96xf16, 1>) {
+    %c3 = arith.constant 3 : i64
+    %data = hip.get_constant(%ctx, %c3) {hip.disk_resident}
+        : memref<2048x96xui8, 1>
+    hip.gather_block_quantized(%ctx)
+        ins(%data, %indices, %scales :
+            memref<2048x96xui8, 1>, memref<8xi64, 1>, memref<2048x12xf16, 1>)
+        outs(%output : memref<8x96xf16, 1>)
+        {bits = 4 : i64, block_size = 16 : i64,
+         gather_axis = 0 : i64, quantize_axis = 1 : i64}
+    return
+  }
 }
 
 // CHECK-LABEL: llvm.func @test_gbq_static_with_zp
@@ -108,3 +141,15 @@ module {
 // CHECK-DAG: llvm.mlir.constant(7 : i64) : i64
 // CHECK-NOT: llvm.mlir.constant(5 : i64) : i64
 // CHECK: llvm.call @wrap_gather_block_quantized
+
+// CHECK-LABEL: llvm.func @test_gbq_float8
+// data_dtype must be HIPDNN_EP_DATATYPE_FLOAT8E4M3FN (10), not UINT8 (7).
+// CHECK-DAG: llvm.mlir.constant(10 : i64) : i64
+// CHECK-NOT: llvm.mlir.constant(7 : i64) : i64
+// CHECK: llvm.call @wrap_gather_block_quantized
+
+// CHECK-LABEL: llvm.func @test_gbq_disk_resident
+// CHECK: llvm.call @hipdnn_ep_constant_get
+// CHECK: %[[IDX:.*]] = llvm.mlir.constant(3 : i64) : i64
+// CHECK-NOT: llvm.call @wrap_gather_block_quantized(
+// CHECK: llvm.call @wrap_gather_block_quantized_from_file(%arg0, %[[IDX]], {{.*}}) : (!llvm.ptr, i64, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64) -> i32

@@ -1,4 +1,5 @@
 // RUN: hip-mlir-opt %s --hipdnn-pipeline | FileCheck %s
+// RUN: hip-mlir-opt %s --onnx-to-hip-pipeline --verify-each | FileCheck %s --check-prefix=POOLED
 // RUN: hip-mlir-opt %s --onnx-to-hip-pipeline --dump-pass-pipeline -o /dev/null 2>&1 | FileCheck %s --check-prefix=DEFAULT-BUFFERIZE
 // RUN: env HIPDNN_EP_BUFFERIZE_COPY_BEFORE_WRITE=1 hip-mlir-opt %s --onnx-to-hip-pipeline --dump-pass-pipeline -o /dev/null 2>&1 | FileCheck %s --check-prefix=COPY-BEFORE-WRITE
 
@@ -27,6 +28,18 @@
 // The huge-graph escape hatch is opt-in: default retains One-Shot analysis;
 // setting the process environment enables copy-before-write.
 // DEFAULT-BUFFERIZE: one-shot-bufferize{{.*}}copy-before-write=false
+// DEFAULT-BUFFERIZE-NOT: hip-optimize-memrefs
+// DEFAULT-BUFFERIZE: lower-affine
+// DEFAULT-BUFFERIZE: cse
+// DEFAULT-BUFFERIZE: canonicalize
+// DEFAULT-BUFFERIZE: hip-optimize-memrefs
+// DEFAULT-BUFFERIZE: hip-resolve-memref-dims
+// DEFAULT-BUFFERIZE: cse
+// DEFAULT-BUFFERIZE-NOT: hip-hoist-alloc-size-arith
+// DEFAULT-BUFFERIZE-NOT: hip-pool-allocs
+// DEFAULT-BUFFERIZE: canonicalize
+// DEFAULT-BUFFERIZE: hip-hoist-alloc-size-arith
+// DEFAULT-BUFFERIZE: hip-pool-allocs
 // COPY-BEFORE-WRITE: one-shot-bufferize{{.*}}copy-before-write=true
 // Production pipeline schedule: ownership-based deallocation must not return.
 // PIPELINE-LABEL: Pass Manager with

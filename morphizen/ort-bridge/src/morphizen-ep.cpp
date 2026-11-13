@@ -7,6 +7,7 @@
 #include "./morphizen-deps.hpp"
 #include "./ort-api-version.hpp"
 #include "./ort-graph-wrapper.hpp"
+#include "./roctx-range.hpp"
 #include "glog/logging.h"
 #include "morphizen-utils/morphizen-utils.hpp"
 #include "morphizen/morphizen-ort-api-ext.hpp"
@@ -14,6 +15,7 @@
 #include "morphizen/onnxruntime_morphizen_ep.hpp"
 #include <algorithm>
 #include <cctype>
+#include <filesystem>
 #include <google/protobuf/util/json_util.h>
 #include <set>
 
@@ -35,6 +37,34 @@ DEF_ENV_PARAM(MORPHIZEN_DEBUG_MORPHIZEN_EP, "0")
 DEF_ENV_PARAM(XLNX_ABI_2_0_CLONE_EXTERNAL_DATA_THRESHOLD, "127")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_MORPHIZEN_EP) >= n)
 namespace morphizen {
+
+namespace {
+// Set for the duration of one Session::Run() on the calling thread, so that
+// PassContext::get_run_option() can reach that run's OrtRunOptions.
+struct RunConfigLookup {
+  const OrtApi *api = nullptr;
+  const OrtRunOptions *run_options = nullptr;
+};
+thread_local RunConfigLookup g_run_config_lookup;
+
+DllSafe<std::string> get_run_config_entry(const void *state,
+                                          const char *entry_name) {
+  const auto *lookup = static_cast<const RunConfigLookup *>(state);
+  // Both fields are checked rather than just run_options: OnRunStart assigns
+  // them together, but nothing enforces that, and getting it wrong would be a
+  // null dereference inside the host process.
+  if (lookup == nullptr || lookup->api == nullptr ||
+      lookup->run_options == nullptr) {
+    return DllSafe<std::string>();
+  }
+  const char *value =
+      lookup->api->GetRunConfigEntry(lookup->run_options, entry_name);
+  if (value == nullptr) {
+    return DllSafe<std::string>();
+  }
+  return DllSafe<std::string>(std::string(value));
+}
+} // namespace
 
 /**
  * @brief Get supported nodes from graph viewer based on execution provider
@@ -89,6 +119,8 @@ MorphiZenEP::MorphiZenEP(ApiPtrs apis, const std::string &name,
   OrtEp::ReleaseNodeComputeInfos = ReleaseNodeComputeInfosImpl;
   OrtEp::GetCompiledModelCompatibilityInfo =
       GetCompiledModelCompatibilityInfoImpl;
+  OrtEp::OnRunStart = OnRunStartImpl;
+  OrtEp::OnRunEnd = OnRunEndImpl;
   ir_converter = morphizen::IRConverter::to_onnx_model;
 }
 MorphiZenEP::~MorphiZenEP() {}
@@ -297,6 +329,29 @@ const char *ORT_API_CALL MorphiZenEP::GetCompiledModelCompatibilityInfoImpl(
       (*self->execution_providers_).get(), graph);
 }
 
+OrtStatus *ORT_API_CALL MorphiZenEP::OnRunStartImpl(
+    OrtEp *this_ptr, const OrtRunOptions *run_options) noexcept {
+  MorphiZenEP *self = static_cast<MorphiZenEP *>(this_ptr);
+  if (!self->execution_providers_) {
+    return nullptr;
+  }
+  g_run_config_lookup = {&self->ort_api, run_options};
+  morphizen_ep_on_run_start(**self->execution_providers_, &g_run_config_lookup,
+                            &get_run_config_entry);
+  return nullptr;
+}
+
+OrtStatus *ORT_API_CALL MorphiZenEP::OnRunEndImpl(
+    OrtEp * /*this_ptr*/, const OrtRunOptions * /*unused*/,
+    bool /*sync_stream*/) noexcept {
+  // The OrtRunOptions does not outlive this call, so drop it before any later
+  // get_run_option() on this thread can dereference it. sync_stream is moot
+  // here because MorphiZenEpFactory::IsStreamAwareImpl() reports no stream.
+  morphizen_ep_on_run_end();
+  g_run_config_lookup = {};
+  return nullptr;
+}
+
 OrtStatus *
 MorphiZenEP::GetCapability(OrtGraphWrapper &graph_viewer,
                            OrtEpGraphSupportInfo &graph_support_info) {
@@ -458,6 +513,44 @@ void MorphiZenEP::update_input_output_argument_indice(
   update_argument_indice(meta_def.outputs(),
                          meta_def.mutable_output_argument_indice(), outputs);
 }
+// Names a compiled subgraph after the model file it came from, so a trace can
+// tell a VLM's vision encoder from its embedding and decoder sessions:
+// "vision.onnx" -> "hip_ep.graph.vision sub=0", "vision_encoder/model.onnx" ->
+// "hip_ep.graph.vision_encoder sub=0". The index separates the subgraphs of one
+// model when nodes outside them run on another EP. The model name is reduced to
+// [a-z0-9_], the path segment charset of ktrace's ROCTx naming convention.
+static std::string subgraph_roctx_label(const OrtApi &ort_api,
+                                        const OrtGraph *graph, size_t index) {
+  std::string model = "subgraph";
+  try {
+    const ORTCHAR_T *model_path = nullptr;
+    OrtStatus *status = ort_api.Graph_GetModelPath(graph, &model_path);
+    if (status != nullptr) {
+      ort_api.ReleaseStatus(status);
+    } else if (model_path != nullptr && model_path[0] != 0) {
+      // u8string() is std::string in C++17 and std::u8string in C++20.
+      auto utf8 = [](const std::filesystem::path &p) {
+        auto s = p.u8string();
+        return std::string(s.begin(), s.end());
+      };
+      std::filesystem::path path(model_path);
+      std::string stem = utf8(path.stem());
+      if (stem == "model" && path.has_parent_path())
+        stem = utf8(path.parent_path().filename());
+      if (!stem.empty())
+        model = stem;
+    }
+  } catch (...) {
+  }
+  for (char &c : model) {
+    if (c >= 'A' && c <= 'Z')
+      c = static_cast<char>(c - 'A' + 'a');
+    else if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'))
+      c = '_';
+  }
+  return "hip_ep.graph." + model + " sub=" + std::to_string(index);
+}
+
 OrtStatus *MorphiZenEP::Compile(const OrtGraph **graphs,
                                 const OrtNode **fused_nodes, size_t count,
                                 OrtNodeComputeInfo **node_compute_infos,
@@ -484,6 +577,10 @@ OrtStatus *MorphiZenEP::Compile(const OrtGraph **graphs,
       MY_LOG(1) << "Failed to compile subgraph for execution provider at index "
                 << index << ": " << ort_api.GetErrorMessage(status);
       return status;
+    }
+    if (roctx::enabled()) {
+      static_cast<MorphiZenEP_ComputeInfo *>(node_compute_infos[index])
+          ->roctx_label = subgraph_roctx_label(ort_api, graphs[index], index);
     }
   }
   return nullptr;
@@ -547,7 +644,7 @@ OrtStatus *MorphiZenEP::CompileSubgraph(const morphizen::ExecutionProvider &ep,
         [](OrtNodeComputeInfo *this_ptr, void *compute_state,
            OrtKernelContext *kernel_context) -> OrtStatus * {
       auto self = static_cast<MorphiZenEP_ComputeInfo *>(this_ptr);
-      (void)self;
+      roctx::Range range(self->roctx_label);
       static_cast<morphizen::CustomOp *>(compute_state)
           ->Compute(&Ort::GetApi(), kernel_context);
       return nullptr;

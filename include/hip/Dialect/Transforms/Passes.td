@@ -142,6 +142,8 @@ def GenerateOpStateInitPass
 
 def ConvertHipToLLVMPass : Pass<"convert-hip-to-llvm", "mlir::ModuleOp"> {
   let summary = "Convert HIP dialect to LLVM dialect";
+  let options = [Option<"reportHostScalars", "report-host-scalars", "bool",
+                        "false", "Report host-scalar forwarding or rejection">];
   let description = [{
     Lowers HIP dialect operations to LLVM dialect by converting each HIP op
     into calls to the HIP runtime C API (hipCreateHandle, hipblasltMatmul,
@@ -177,6 +179,8 @@ def OptimizeMemRefsPass : Pass<"hip-optimize-memrefs", "mlir::func::FuncOp"> {
 
 def FuseROCMlirPass : Pass<"hip-fuse-rocmlir", "mlir::func::FuncOp"> {
   let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::tensor::TensorDialect",
     "mlir::ub::UBDialect"
   ];
 }
@@ -203,6 +207,59 @@ def ConvertHipToTosaPass : Pass<"convert-hip-to-tosa", "mlir::func::FuncOp"> {
   let dependentDialects = [
     "mlir::tosa::TosaDialect"
   ];
+}
+
+def DecomposeConvTransposePass
+    : Pass<"hip-decompose-conv-transpose", "mlir::func::FuncOp"> {
+  let summary = "Rewrite hip.conv_transpose into stride-1 hip.conv residues";
+  let description = [{
+    Splits a transposed convolution into `stride` dense stride-1 forward
+    convolutions plus a strided reassembly, following MIOpen's implicit-gemm
+    backward-data v4r1 decomposition.
+
+    rocMLIR anchors kernel outlining on gemm / convolution / attention, so a
+    `hip.conv_transpose` reaching `convert-hip-to-tosa` leaves the outlined
+    region without an anchor and the backend rejects it. Emitting plain
+    `hip.conv` ops instead lets the existing `hip-fuse-rocmlir` and
+    `convert-hip-to-tosa` machinery claim the kernel unchanged, with no new
+    anchor op and no new TOSA op.
+
+    The per-residue tap selection, spatial flip, and channel swap apply only
+    to the filter, so they are constant-folded into fresh `hip.constant`s
+    rather than emitted as ops -- TOSA has no strided slice to lower a tap
+    stride to. Reassembly is one strided `tensor.insert_slice` per residue,
+    which bufferizes to a `memref.subview` plus a copy.
+
+    Rank-4 inputs must be statically shaped. A rank-3 input is expanded to
+    rank 4 with a unit height so dynamic batch and width stay legal; the
+    filter and residue geometry stay static. Grouped, dilated, and
+    `stride > kernel` cases, and filters that are not readable at compile
+    time, are left for the MIOpen path.
+  }];
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::tensor::TensorDialect"
+  ];
+}
+
+def FoldBatchNormPass
+    : Pass<"hip-fold-batchnorm", "mlir::func::FuncOp"> {
+  let summary = "Fold constant-parameter hip.batch_norm into hip.conv weights";
+  let description = [{
+    Inference BatchNorm with constant parameters is the per-channel affine map
+    `y = s * x + t`, `s = scale / sqrt(var + eps)`, `t = B - mean * s`. When
+    its input is a `hip.conv`, or a `hip.add` of two `hip.conv`s, the scale is
+    multiplied into each filter per output channel and the shift is added to
+    one conv's bias (any existing biases are scaled by `s`). The batch norm
+    disappears, so a following pointwise op fuses straight into the conv.
+
+    Every intermediate result must have the batch norm as its only consumer,
+    and the filters, biases, and batch-norm parameters must be readable at
+    compile time. The rewritten filters are emitted as new inline
+    `hip.constant`s; the originals are left for their other users, if any.
+    Inline and file-backed carriers are read; memory-address carriers are
+    not, so a batch norm over memory-backed weights is left in place.
+  }];
 }
 
 def PromoteStridedHipOperandsPass
@@ -296,119 +353,30 @@ def PoolAllocsPass : Pass<"hip-pool-allocs", "mlir::func::FuncOp"> {
 
 def HoistAllocSizeArithPass
     : Pass<"hip-hoist-alloc-size-arith", "mlir::func::FuncOp"> {
-  let summary = "Hoist pure size arithmetic feeding memref.alloc dynamic "
-                "operands above the earliest used memref.alloc in the entry "
-                "block";
+  let summary = "Hoist pure allocation-size producers to dependency-safe "
+                "allocation anchors";
   let description = [{
-    Hoists pure producers of `memref.alloc` dynamic operands to a
-    point above the earliest used `memref.alloc` in the function's single entry
-    block. After this pass, every hoistable dynamic-size value dominates every
-    allocation that `--hip-pool-allocs` may absorb, allowing pool-size
-    arithmetic and `hip.get_pool` to share one insertion point.
+    Moves pure producers of used entry-block `memref.alloc` dynamic sizes
+    before the earliest allocation allowed by their operands. A late read or
+    non-speculatable operation stays in place, but its pure consumers can move
+    before later allocations. This lets PoolAllocs reuse storage within a
+    dominance domain even when not all sizes are available at function entry.
 
-    Algorithm
-    ---------
-    Single-entry-block functions only (PoolAllocs already enforces this);
-    multi-block functions are skipped.  Only entry-block allocs are
-    considered — allocs nested inside region-carrying ops are untouched.
+    The backward slice stops at allocations, region-bearing operations, and
+    operations that are not `mlir::isPure`. Purity includes speculatability:
+    division with an unknown divisor cannot move. Regions are excluded because
+    they may capture values absent from the parent operation's operands.
 
-    1. Collect every used entry-block `memref.alloc`, and identify those with
-       dynamic operands.
-    2. Pick `earliestAlloc` = the earliest used allocation in the block (per
-       `Operation::isBeforeInBlock`).
-    3. For each dynamic alloc, walk SSA backward from each of its dynamic
-       operands.  An op is hoistable when:
-         - it is in the entry block,
-         - it is below `earliestAlloc` (otherwise it already dominates),
-         - it is not a `memref.alloc` / `memref.alloca`,
-         - it has no regions and satisfies `mlir::isPure(op)`,
-         - and every transitive operand is itself hoistable (or already
-           dominates `earliestAlloc`).
-    4. Topologically sorted (operands before uses), each hoistable op is
-       moved to immediately before `earliestAlloc`.  Forward iteration of
-       insertion order is operands-first, so each `moveBefore` pushes
-       prior moves up by one slot — final layout has the deepest operands
-       at the top of the hoist region.
+    Producers are planned once in original block order, propagating the first
+    permissible allocation anchor through their operands. Applying the plan
+    afterward avoids repeated block-order recomputation. Moving only across an
+    allocation preserves idempotence. Multi-block functions and nested
+    allocations are skipped, matching the scope of PoolAllocs.
 
-    Why "pure" is the right predicate
-    ---------------------------------
-    `mlir::isPure` requires both speculatability and freedom from memory
-    effects, matching upstream MLIR's LICM. Conditionally-speculatable ops
-    (`arith.divsi`, `arith.divui`) move only when their interface proves
-    speculation safe. Region-bearing operations are rejected because their
-    regions may capture values not listed as parent-op operands.
-
-    Pipeline placement
-    ------------------
-    Wired into `buildOnnxToHipPipelineTail` between
-    `--hip-materialize-host-scalars` and `--hip-pool-allocs`.  Running
-    after host-scalar materialisation means rewrites that turn an alloc
-    into a `memref.view` over host scratch are visible (we will not try
-    to hoist their producers).  Running before pool-allocs means
-    pool-allocs sees IR where every dynamic alloc's operand chain has
-    already been pulled above the earliest used alloc when safe.
-
-    Why a separate pass (vs. an internal phase of pool-allocs)
-    ----------------------------------------------------------
-    `--hip-pool-allocs` deliberately does not move ops or fold shape
-    queries internally; it only places `hip.get_pool` + pool-size
-    arithmetic at a single dominator point.  Keeping the hoist as a
-    standalone, separately-named pass — composed via the pipeline rather
-    than embedded in pool-allocs — keeps each pass single-purpose and is
-    idiomatic with MLIR convention (`--loop-invariant-code-motion`,
-    `--canonicalize`, IREE's `--iree-stream-emplace-transients`, etc.
-    are all standalone composable passes).
-
-    Caveat — does NOT pre-canonicalize
-    ----------------------------------
-    The pass moves existing ops; it does not duplicate, fold, or
-    simplify.  If an input IR has e.g. `arith.muli %x, %c0` (which would
-    fold to zero), this pass leaves it alone.  Canonicalisation runs
-    separately and earlier in the pipeline.
-
-    Idempotent: a second invocation finds no ops below `earliestAlloc`
-    that need moving, so it is a no-op.
-
-    Example IR (canonical case after bufferisation)
-    ------------------------------------------------------------
-
-    Before — `%6` and `%7` are pure but live below `%alloc`,
-    blocking single-block dominator-emit:
-
-    ```mlir
-    %dim   = memref.dim %arg, %c0 : memref<?x?xi64>
-    %dim_0 = memref.dim %arg, %c1 : memref<?x?xi64>
-    %alloc = memref.alloc(%dim, %dim_0) : memref<?x?xui8>
-    // ... unrelated ops ...
-    %6 = arith.muli %dim, %dim_0      : index
-    %7 = arith.muli %6,   %c4096      : index
-    %alloc_6 = memref.alloc(%7) : memref<3x?xi64>
-    ```
-
-    After — `%6` and `%7` hoisted to just before `%alloc`; original locations
-    now live above the earliest used alloc:
-
-    ```mlir
-    %dim   = memref.dim %arg, %c0 : memref<?x?xi64>
-    %dim_0 = memref.dim %arg, %c1 : memref<?x?xi64>
-    %6 = arith.muli %dim, %dim_0      : index
-    %7 = arith.muli %6,   %c4096      : index
-    %alloc = memref.alloc(%dim, %dim_0) : memref<?x?xui8>
-    // ... unrelated ops ...
-    %alloc_6 = memref.alloc(%7) : memref<3x?xi64>
-    ```
-
-    Non-goals
-    ---------
-      - Multi-block functions: `--hip-pool-allocs` does not pool them
-        either, so they are silently skipped.  Allocs nested in
-        region-carrying ops within a single entry block are also left
-        untouched (only entry-block allocs are considered).
-      - Op duplication / cloning: an op with multiple uses is moved
-        once; hoisting follows existing SSA edges.  Cross-region cloning
-        à la IREE's `computeSizeSliceInRegion` is unnecessary for
-        single-block IR.
-      - Static-only allocs: no dynamic operands → nothing to hoist.
+    Run after host-scalar materialization, dimension resolution, CSE, and
+    canonicalization, and before `hip-pool-allocs`. This pass only moves existing
+    operations; it does not fold shapes, duplicate computation, or move reads.
+    PoolAllocs remains responsible for placing pool acquisitions and storage.
   }];
   let dependentDialects = [
     "mlir::arith::ArithDialect",
@@ -417,36 +385,35 @@ def HoistAllocSizeArithPass
 }
 
 def MaterializeHostScalarsPass
-    : Pass<"hip-materialize-host-scalars", "mlir::func::FuncOp"> {
-  let summary = "Redirect tiny host-fed memref.alloc ops to a host-mapped "
+    : Pass<"hip-materialize-host-scalars", "mlir::ModuleOp"> {
+  let summary = "Redirect small host-accessed memref.alloc ops to a host-mapped "
                 "scratch buffer";
   let description = [{
-    Walks `memref.alloc` ops in the function and redirects ones that look
-    like host-fed scalar staging buffers — small static-shape, integer-or-
-    index memrefs (up to 16 elements) that have at least one host I/O user
-    (memref.store / load) — away from the GPU pool.  They are replaced with
-    `memref.view` ops over a single per-function
-    `hip.get_host_scratch(%ctx, %total_size)` buffer
-    (hipHostMalloc(hipHostMallocMapped), host-writable AND GPU-readable at
-    the same VA on UMA targets).
+    Place small static buffers (up to 16 elements) in runtime-owned mapped
+    scratch instead of the device pool. Follow aliases to find host loads
+    and stores. Integer and index buffers qualify. Float buffers also need
+    a HIP consumer. Reject unknown users.
 
-    Hip-dialect users are explicitly accepted (the implementation classifies
-    `hip.*` ops as legal users alongside memref.store/load/dim/dealloc).
-    The canonical
-    `tensor.from_elements -> reduce_sum + sub + cast -> seqlens_k` GQA
-    pattern produces an alloc with a host store followed by `hip.cast`
-    reading it; rejecting it left the host store crashing inside the GPU
-    pool, so the pass intentionally allows it.
+    Tiny inline constant globals read by HIP ops get a scratch region too,
+    filled by host stores of the initial value. Mutable globals and globals
+    with `hip.external_data` are left alone.
 
-    Why: on some targets the GPU pool is real device memory; the bufferized
-    `tensor.from_elements` lowering emits `memref.alloc + memref.store`
-    which, once absorbed by `hip-pool-allocs`, becomes a host store into
-    device memory and SEGVs.  (Other targets silently worked because hipMalloc
-    returned UMA-mapped host memory there, masking the bug.)  This pass runs
-    BEFORE `hip-pool-allocs` so candidates never enter the GPU pool.
+    A small copy-filled integer shape buffer can also qualify when it has
+    an explicit scalar readback. Require bounded contiguous aliases, scalar
+    copies, and read-only consumers whose backend lowerings accept mapped
+    inputs. Keep the copies and readback.
+    Do not move general kernel destinations under this rule.
 
-    Pipeline placement is load-bearing — see Pipelines.cpp for the exact
-    ordering and the static-shape lockdown LIT under `test/lit/Pipeline/`.
+    Replace each allocation with a separate aligned `memref.view` of one
+    `hip.get_host_scratch` buffer. Keep payload accesses in their original
+    order. HIP-to-LLVM checks redundant readbacks separately. Every function
+    shares that buffer, so slots are laid out across the module (disjoint per
+    function) and every function requests the module total.
+
+    Run after linalg-to-loops and before `hip-optimize-memrefs`. Buffer reuse
+    can otherwise merge a host-written buffer into an allocation above the
+    size limit. Pooling would then put its host store in device memory.
+    See Pipelines.cpp and `test/lit/Pipeline/nonzero-host-shape-buffer.mlir`.
   }];
   let dependentDialects = [
     "mlir::hip::HipDialect",
@@ -637,6 +604,39 @@ def UseOutputAllocatorPass
   let dependentDialects = [
     "mlir::hip::HipDialect",
     "mlir::memref::MemRefDialect"
+  ];
+}
+
+def FoldConstantExtractsPass
+    : Pass<"hip-fold-constant-extracts", "mlir::func::FuncOp"> {
+  let summary = "Resolve constant-index `tensor.extract` of assembled "
+                "constant vectors to the scalar they read";
+  let description = [{
+    Resolves a `tensor.extract` whose indices are constants through a chain
+    of static-offset, unit-stride `tensor.insert_slice` ops to the element
+    it reads: an operand of a `tensor.from_elements`, an element of an
+    inline integer `hip.constant`, or an element of any other integer
+    constant. Other producers, non-constant indices, and dynamic or strided
+    slices keep the extract.
+
+    The canonical case is an ONNX shape vector such as
+    `ConstantOfShape(Concat(Shape(q)[0:1], [0, 512]))`: upstream folds stop
+    at the `insert_slice` and `hip.constant` has no folder, so without this
+    pass each element reaches runtime as a device-to-host copy plus a
+    stream sync.
+
+    Only the resolved extracts are rewritten, and only the producers they
+    leave without uses are erased. Everything else, including code that was
+    already dead, is left as is, so functions without a resolvable extract
+    are unchanged.
+
+    Pipeline placement: immediately before `--hip-infer-shapes`, whose
+    reify walk then sees these scalars as constants, and before
+    `--hip-externalize-constants`, which may replace the inline
+    `hip.constant` payloads read here. Idempotent.
+  }];
+  let dependentDialects = [
+    "mlir::arith::ArithDialect"
   ];
 }
 
@@ -832,6 +832,13 @@ def ExternalizeConstantsPass
     `memref.global` +
     `bufferization.to_tensor` bridge consumed by
     `hip-resolve-extern-constants`.
+
+    With `skip-constant-data`, a file-backed carrier of at least 1.6e9
+    logical elements (4-bit `hip.gather_block_quantized` data counts two per
+    byte) whose every use is the `data` operand of an axis-0 `hip.gather` or
+    `hip.gather_block_quantized` gets a `disk_resident` unit entry in its
+    `hip.external_data`, takes no range in the GPU constants layout, and is
+    recorded with source kind `DiskFile`.
 
     This pass preserves full-sidecar, streaming, and hybrid skip-data behavior.
     It must run after all constant producers and shape inference, and before

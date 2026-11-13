@@ -5,7 +5,15 @@
 cmake_minimum_required(VERSION 3.29)
 
 # Find dependencies
-find_package(onnxruntime REQUIRED)
+# cmake/deps.cmake (included from the top-level CMakeLists, which runs before
+# this add_subdirectory) already resolves onnxruntime::onnxruntime -- via a
+# real find_package() if one is installed, else by synthesizing an IMPORTED
+# target from the pinned release tarball. That synthesized target is not
+# itself find_package()-discoverable, so only fall back to find_package()
+# here if the target doesn't already exist, mirroring deps.cmake's own guard.
+if(NOT TARGET onnxruntime::onnxruntime)
+  find_package(onnxruntime REQUIRED)
+endif()
 find_package(GTest REQUIRED)
 
 # Executable

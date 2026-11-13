@@ -229,16 +229,19 @@ inline llvm::Error installPlatformSymbolShims(llvm::orc::LLJIT & /*jit*/) {
 
 #endif // _WIN32
 
-// The runtime's current-session-stream accessors are defined in host-native
-// code (lib/Runtime/tls_stream.cpp), not in runtime.bc, so the JIT'd runtime
-// references them as externals. Register them as absolute symbols pointing at
-// the host functions: this guarantees resolution (no reliance on export-table
-// / process-generator quirks) and the reference here forces tls_stream.o into
-// the host image (EP DLL / hip-test / hip-inspect) so the addresses are valid.
+// Runtime facilities that require host-native state or dynamic loading are
+// defined outside runtime.bc (lib/Runtime/tls_stream.cpp and roctx_shim.cpp).
+// Register them as absolute symbols: this guarantees resolution without
+// export-table/process-generator quirks, and the references force their archive
+// objects into the host image (EP DLL / hip-test / hip-inspect).
 extern "C" void *hipdnn_ep_get_current_stream(void);
 extern "C" void hipdnn_ep_set_current_stream(void *stream);
+extern "C" int hipdnn_ep_roctx_range_push(const char *name);
+extern "C" void hipdnn_ep_roctx_range_pop(void);
+extern "C" int hipdnn_ep_roctx_enabled(void);
+extern "C" void hipdnn_ep_roctx_mark(const char *name);
 
-llvm::Error installRuntimeStreamShims(llvm::orc::LLJIT &jit) {
+llvm::Error installRuntimeNativeShims(llvm::orc::LLJIT &jit) {
   llvm::orc::SymbolMap syms;
   auto add = [&](llvm::StringRef name, void *addr) {
     syms[jit.getExecutionSession().intern(name)] = llvm::orc::ExecutorSymbolDef(
@@ -249,6 +252,13 @@ llvm::Error installRuntimeStreamShims(llvm::orc::LLJIT &jit) {
       reinterpret_cast<void *>(&hipdnn_ep_get_current_stream));
   add("hipdnn_ep_set_current_stream",
       reinterpret_cast<void *>(&hipdnn_ep_set_current_stream));
+  add("hipdnn_ep_roctx_range_push",
+      reinterpret_cast<void *>(&hipdnn_ep_roctx_range_push));
+  add("hipdnn_ep_roctx_range_pop",
+      reinterpret_cast<void *>(&hipdnn_ep_roctx_range_pop));
+  add("hipdnn_ep_roctx_enabled",
+      reinterpret_cast<void *>(&hipdnn_ep_roctx_enabled));
+  add("hipdnn_ep_roctx_mark", reinterpret_cast<void *>(&hipdnn_ep_roctx_mark));
   return jit.getMainJITDylib().define(
       llvm::orc::absoluteSymbols(std::move(syms)));
 }
@@ -373,6 +383,7 @@ std::string genericTargetFor(llvm::StringRef arch) {
       .Cases({"gfx1100", "gfx1101", "gfx1102", "gfx1103", "gfx1150", "gfx1151",
               "gfx1152", "gfx1153"},
              "gfx11-generic")
+      .Cases({"gfx1170", "gfx1171", "gfx1172"}, "gfx11-7-generic")
       .Cases({"gfx1200", "gfx1201"}, "gfx12-generic")
       .Default("");
 }
@@ -462,19 +473,6 @@ bool installSearchGenerators(llvm::orc::LLJIT &jit) {
       LOG(WARNING) << "LlvmIrJit: Load(" << tried
                    << ") failed: " << last_load_error
                    << "; models needing it will fail at lookup.";
-    }
-  }
-
-#ifdef _WIN32
-  const char *const kHipdnnBackend = "hipdnn_backend.dll";
-#else
-  const char *const kHipdnnBackend = "libhipdnn_backend.so";
-#endif
-  if (!loadFirst({kHipdnnBackend})) {
-    if (hipdnn_ep::env_enabled("HIPDNN_EP_DEBUG")) {
-      LOG(INFO) << "LlvmIrJit: Load(" << kHipdnnBackend
-                << ") failed: " << last_load_error
-                << "; hipDNN graph models will fail at lookup.";
     }
   }
 
@@ -659,8 +657,8 @@ LlvmIrJit::create(const std::vector<uint8_t> &bitcode,
   }
   installAtexitShims(*jit);
 
-  if (auto err = installRuntimeStreamShims(*jit)) {
-    LOG(ERROR) << "LlvmIrJit::create: runtime stream shims failed: "
+  if (auto err = installRuntimeNativeShims(*jit)) {
+    LOG(ERROR) << "LlvmIrJit::create: runtime native shims failed: "
                << llvm::toString(std::move(err));
     return nullptr;
   }

@@ -323,8 +323,8 @@ func.func @refine_gemm_2d_from_inputs(%ctx: !hip.context,
 // -----
 
 // Same-shape unary ops (silu, sigmoid, softplus, gelu, reciprocal, sqrt,
-// not, cos, sin, neg, cast, sign, cumsum, scatter_nd) opt INTO the
-// shared `HipDpsOp` default reify (`autoReify=1`), which lifts each
+// not, cos, sin, neg, cast, sign, cumsum, scatter_nd) select the shared
+// `HipDpsOp` default-reify family, which lifts each
 // output dim from the DPS `outs` operand's runtime shape. The DPS
 // contract pins `result.type == outs.type`, so the consumer-side pass
 // has signal to refine only when `outs` carries static dims that the
@@ -575,7 +575,7 @@ func.func @refine_reduce_mean_keepdims_constant_axes(%ctx: !hip.context,
 // -----
 
 // `hip.pad` (along with tile, expand, slice, range) uses the shared
-// `Hip_DpsOp` auto-emit reify (`autoReify=1`) — the default walks
+// default-reify family — the generated dispatcher walks
 // `getDpsInits()` and lifts each output dim from the DPS `outs`
 // operand's runtime shape via `tensor::getMixedSizes`. Static dims
 // become `IndexAttr` (which the pass can use to tighten); dynamic

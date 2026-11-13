@@ -54,7 +54,17 @@ exported symbols:
 
 The Windows `.def` and ELF version script export exactly those names. MorphiZen
 C++ APIs, generated protobuf classes, and the statically-linked compiler stay
-internal to the DSO; ORT never links `hipgpu.lib`.
+internal to the DSO; ORT never links `hipgpu.lib`. On ELF the DSO is also linked
+with `-z nodelete`, so `dlclose` does not unmap it. ORT's plugin registration
+probes `GetProvider`, closes the library when that symbol is absent, and opens
+it again for `CreateEpFactories`. The version script's `local: *` removes the
+`STB_GNU_UNIQUE` exports that previously kept the mapping alive across that
+close. Unmapping here drops `libamd_comgr.so` while the process's `libLLVM`
+stays loaded, and the second open registers `spirv-expand-step` again.
+`HipGpuElfContract` (`test/runtime/test_hipgpu_elf_contract.cpp`) checks
+that `libhipgpu.so` carries `DF_1_NODELETE` and that the two plugin entry
+points resolve. The comgr loader marks `libamd_comgr.so` `NODELETE` itself, so
+a `dlopen`/`dlclose` cycle cannot reconstruct the `spirv-expand-step` abort.
 
 The two contracts specific to this project are described below.
 
@@ -179,6 +189,11 @@ the runtime copies **every** entry onto `RuntimeState`; later lookups therefore
 do not depend on the EP table remaining live. `config` may be null, which is
 how callers without an ORT session (for example the `hip-test` tool) invoke the
 artifact.
+
+Runtime-read provider options include `gqa_autotune_mode`,
+`matmul_autotune_mode`, and `transient_arena_mb` (session transient arena size
+in MiB, `0` disables it; overrides `HIPDNN_EP_TRANSIENT_ARENA_MB`; see
+[pool-allocs-memory-planning.md](pool-allocs-memory-planning.md#session-transient-arena)).
 
 `hipdnn_ep_runtime_begin_compute` is called by the EP at the top of every
 `Compute()` (before input marshaling) to invalidate per-`Compute()` runtime

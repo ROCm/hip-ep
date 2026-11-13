@@ -1,0 +1,93 @@
+{%- comment -%}
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+Licensed under the MIT License.
+
+Brand on the left, everything else on the right. The dropdown opens on hover
+and on :focus-within in CSS, so it is fully usable with JavaScript off -- the
+script only adds click-to-toggle and the aria-expanded bookkeeping.
+
+Icons are inlined rather than pulled from an icon font: the site loads no
+third-party CSS, and inline paths take `currentColor`, so they flip with the
+theme for free.
+{%- endcomment -%}
+<header class="site-header">
+  <div class="site-header__inner">
+    <a class="brand" href="{{ '/' | relative_url }}">
+      <span class="brand__org">{% include amd-mark.html %}</span>
+      <span class="brand__mark">HIP</span>
+      <span class="brand__name">EP</span>
+    </a>
+
+    <nav class="site-nav" aria-label="Main navigation">
+      {% for link in site.nav_links %}
+      {% if link.children %}
+      <div class="site-nav__group" data-nav-dropdown>
+        <button class="site-nav__link site-nav__trigger" type="button"
+          data-nav-dropdown-toggle aria-haspopup="true" aria-expanded="false">
+          {{ link.label }}
+          <svg class="site-nav__chevron" viewBox="0 0 12 12" aria-hidden="true" focusable="false">
+            <path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor"
+              stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+        <div class="site-nav__menu" data-nav-dropdown-menu>
+          {% for child in link.children %}
+          <a class="site-nav__menu-link" href="{{ child.url | relative_url }}">{{ child.label }}</a>
+          {% endfor %}
+        </div>
+      </div>
+      {% else %}
+      <a class="site-nav__link" href="{{ link.url | relative_url }}">{{ link.label }}</a>
+      {% endif %}
+      {% endfor %}
+    </nav>
+
+    <div class="site-header__actions">
+      {% for link in site.cta_links %}
+      <a class="site-header__icon" href="{{ link.url }}" target="_blank" rel="noopener"
+        aria-label="{{ link.label }}" title="{{ link.label }}">
+        {% if link.icon == "github" %}
+        <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+          <path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/>
+        </svg>
+        {% elsif link.icon == "download" %}
+        <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+          <path fill="currentColor" d="M7.47 10.78a.75.75 0 0 0 1.06 0l3.75-3.75a.75.75 0 0 0-1.06-1.06L8.75 8.44V1.75a.75.75 0 0 0-1.5 0v6.69L4.78 5.97a.75.75 0 0 0-1.06 1.06l3.75 3.75ZM3.75 13a.75.75 0 0 0 0 1.5h8.5a.75.75 0 0 0 0-1.5h-8.5Z"/>
+        </svg>
+        {% endif %}
+      </a>
+      {% endfor %}
+
+      <button class="theme-toggle" type="button" data-theme-toggle
+        aria-label="Toggle light and dark theme" title="Toggle theme">
+        <span class="theme-toggle__icon theme-toggle__icon--dark" aria-hidden="true">&#9789;</span>
+        <span class="theme-toggle__icon theme-toggle__icon--light" aria-hidden="true">&#9788;</span>
+      </button>
+
+      <button class="nav-toggle" type="button" data-nav-toggle aria-expanded="false"
+        aria-label="Toggle navigation menu">
+        <span></span><span></span><span></span>
+      </button>
+    </div>
+  </div>
+
+  {%- comment -%}
+    The mobile panel flattens the dropdown: on a phone a nested menu is two taps
+    and a mis-tap, and the list is short enough to show whole.
+  {%- endcomment -%}
+  <div class="site-nav-mobile" data-nav-mobile hidden>
+    {% for link in site.nav_links %}
+    {% if link.children %}
+    <p class="site-nav-mobile__heading">{{ link.label }}</p>
+    {% for child in link.children %}
+    <a class="site-nav-mobile__link" href="{{ child.url | relative_url }}">{{ child.label }}</a>
+    {% endfor %}
+    {% else %}
+    <a class="site-nav-mobile__link" href="{{ link.url | relative_url }}">{{ link.label }}</a>
+    {% endif %}
+    {% endfor %}
+    {% for link in site.cta_links %}
+    <a class="site-nav-mobile__link" href="{{ link.url }}" target="_blank" rel="noopener">{{ link.label }}</a>
+    {% endfor %}
+  </div>
+</header>

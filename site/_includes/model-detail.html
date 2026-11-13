@@ -1,0 +1,69 @@
+{%- comment -%}
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+Licensed under the MIT License.
+
+One model's entry on a family page, emitted as Markdown rather than HTML so
+that kramdown renders it with the same heading and list styling as the prose
+around it -- and so the h2 lands in the "On this page" rail, which is built
+from the rendered headings.
+
+Parameters:
+  m     -- an entry from _data/models.yml
+  kind  -- "Language model" or "Vision-language model". Passed in rather than
+           derived, because the tier a model sits in is a property of the data
+           file's structure and not of any field on the model itself.
+
+Only fields that exist are printed. The obvious two that do not exist yet are
+the model's context length and a copy-paste run command; neither has a source
+in this repository, and an entry invented to fill the shape of the card would
+be worse than a card with one fewer line. Add the field to models.yml first.
+{%- endcomment -%}
+{%- assign m = include.m -%}
+{%- assign snap = site.data.benchmarks.snapshot -%}
+{%- assign b = site.data.benchmarks.lm | where: "id", m.id | first -%}
+{%- comment -%}
+Index 1 of `prompt_lengths` is the 2048-token column, the length the whole
+matrix is characterised at. Same column the showcase cards quote, on purpose:
+two pages quoting different prompt lengths for the same model read as two
+different measurements.
+{%- endcomment -%}
+{%- assign col = 1 -%}
+{%- comment -%}
+No closing whitespace dash on the line below, deliberately: it is what puts a
+blank line in front of the heading. Without it this card's first line runs
+straight onto the previous card's last list item, and kramdown swallows the
+heading into that list as a lazy continuation line.
+{%- endcomment -%}
+{%- assign quoted_len = site.data.benchmarks.prompt_lengths[col] %}
+
+## {{ m.name }}
+{% if m.tagline %}
+{{ m.tagline | strip }}
+{% endif %}
+- **Kind:** {{ include.kind }}
+- **Task:** {{ m.task }}
+- **Parameters:** {{ m.params }}
+- **Architecture:** {{ m.arch }}
+- **Quantization:** {{ m.precision }}
+{%- if m.hf %}
+- **Base model:** [{{ m.hf }}](https://huggingface.co/{{ m.hf }})
+{%- endif %}
+{% comment -%}
+No leading whitespace dash on the tag above: it is holding the newline that
+ends the previous bullet. Strip it and the two list items merge into one.
+
+`status: New this release` in models.yml is relative to the snapshot, and a
+page that outlives the snapshot should not still be saying "this release". It
+is spelled out as an absolute version here, the same way the showcase card
+does it.
+{%- endcomment -%}
+- **Validation status:** {% if m.status == 'Validated' %}{{ m.status }}{% else %}New in {{ snap.release }}{% endif %}
+{%- comment -%}
+Withheld rather than zeroed. On the copy of this site that carries placeholder
+numbers, printing "0.00 tokens/s" here would read as a measurement; the line
+simply does not appear, and the benchmarks page explains why in one place
+instead of sixteen.
+{%- endcomment -%}
+{%- unless snap.placeholder %}{% if b %}
+- **Measured in {{ snap.release }}:** {{ b.tps[col] }} tokens/s, {{ b.ttft[col] }} s to first token, at a {{ quoted_len }}-token prompt — [all three lengths]({{ '/docs/benchmarks/' | relative_url }})
+{%- endif %}{% endunless %}

@@ -8,6 +8,7 @@
 #include "morphizen/custom_op.h" // in onnxruntime/core/providers/morphizen/include
 #include "morphizen/morphizen-ort-api-ext.hpp"
 #include <map>
+#include <string>
 
 namespace onnxruntime {
 struct OrtGraphWrapper;
@@ -37,6 +38,13 @@ public:
       size_t num_node_compute_infos) noexcept;
   static const char *ORT_API_CALL GetCompiledModelCompatibilityInfoImpl(
       OrtEp *this_ptr, const OrtGraph *graph) noexcept;
+
+  static OrtStatus *ORT_API_CALL
+  OnRunStartImpl(OrtEp *this_ptr, const OrtRunOptions *run_options) noexcept;
+
+  static OrtStatus *ORT_API_CALL OnRunEndImpl(OrtEp *this_ptr,
+                                              const OrtRunOptions *run_options,
+                                              bool sync_stream) noexcept;
 
 private:
   OrtStatus *GetCapability(OrtGraphWrapper &graph_wrapper,
@@ -108,5 +116,8 @@ private:
 struct MorphiZenEP_ComputeInfo : public OrtNodeComputeInfo {
   morphizen::ExecutionProvider *morphizen_ep =
       nullptr; // Pointer to the MorphiZenEP instance
+  // "hip_ep.graph.<model> sub=<subgraph>" ROCTx range around each Compute;
+  // empty when ROCTx is off.
+  std::string roctx_label;
 };
 } // namespace morphizen

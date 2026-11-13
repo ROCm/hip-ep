@@ -167,6 +167,9 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
     # NOTE: -I and path are separate list items to handle paths with spaces
     # (e.g., "C:/Program Files/..."). Clang supports "-I" "<path>" as two args.
     set(COMPILE_FLAGS "")
+    if(HIP_EP_RING_ENABLED)
+        list(APPEND COMPILE_FLAGS "-DHIP_EP_RING_ENABLED=${HIP_EP_RING_ENABLED}")
+    endif()
 
     # PIC is required when this bitcode is later linked into the per-model
     # shared library on Linux (ELF .so). Without -fPIC the IR omits dso_local
@@ -268,6 +271,7 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
                 ${CMAKE_SOURCE_DIR}/include/hip/datatype_abi.h
                 ${CMAKE_SOURCE_DIR}/include/hip/init_config_abi.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/runtime_state_internal.h
+                ${CMAKE_CURRENT_SOURCE_DIR}/transient_arena.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/op_state.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/op_profile.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/chrome_trace.h
@@ -308,10 +312,13 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/matmul.cpp runtime_matmul.bc)
     compile_to_bitcode(real/rocmlir.cpp runtime_rocmlir.bc)
     compile_to_bitcode(real/activation.cpp runtime_activation.bc)
+    compile_to_bitcode(real/trilu.cpp runtime_trilu.bc)
     compile_to_bitcode(real/bias_gelu.cpp runtime_bias_gelu.bc)
     compile_to_bitcode(real/fast_gelu.cpp runtime_fast_gelu.bc)
     compile_to_bitcode(real/layer_normalization.cpp runtime_layer_normalization.bc)
     compile_to_bitcode(real/instance_normalization.cpp runtime_instance_normalization.bc)
+    compile_to_bitcode(real/batch_normalization.cpp runtime_batch_normalization.bc)
+    compile_to_bitcode(real/group_norm.cpp runtime_group_norm.bc)
     compile_to_bitcode(real/simplified_layer_norm.cpp runtime_simplified_layer_norm.bc)
     compile_to_bitcode(real/skip_simplified_layer_norm.cpp runtime_skip_simplified_layer_norm.bc)
     compile_to_bitcode(real/rotary_embedding.cpp runtime_rotary_embedding.bc)
@@ -321,15 +328,19 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/gather.cpp runtime_gather.bc)
     compile_to_bitcode(real/gather_elements.cpp runtime_gather_elements.bc)
     compile_to_bitcode(real/top_k.cpp runtime_top_k.bc)
+    compile_to_bitcode(real/random_normal_like.cpp runtime_random_normal_like.bc)
+    compile_to_bitcode(real/arg_max.cpp runtime_arg_max.bc)
     compile_to_bitcode(real/scatter_elements.cpp runtime_scatter_elements.bc)
     compile_to_bitcode(real/compress.cpp runtime_compress.bc)
     compile_to_bitcode(real/one_hot.cpp runtime_one_hot.bc)
+    compile_to_bitcode(real/ngram_hash_mapping.cpp runtime_ngram_hash_mapping.bc)
     compile_to_bitcode(real/reduce_sum.cpp runtime_reduce_sum.bc)
     compile_to_bitcode(real/reduce_mean.cpp runtime_reduce_mean.bc)
     compile_to_bitcode(real/reduce_l2.cpp runtime_reduce_l2.bc)
     compile_to_bitcode(real/reduce_max.cpp runtime_reduce_max.bc)
     compile_to_bitcode(real/reduce_min.cpp runtime_reduce_min.bc)
     compile_to_bitcode(real/matmul_nbits.cpp runtime_matmul_nbits.bc)
+    compile_to_bitcode(real/dequant_bnb4.cpp runtime_dequant_bnb4.bc)
     compile_to_bitcode(real/qmoe.cpp runtime_qmoe.bc)
     compile_to_bitcode(real/qmoe_amd.cpp runtime_qmoe_amd.bc)
     compile_to_bitcode(real/gather_block_quantized.cpp runtime_gather_block_quantized.bc)
@@ -343,10 +354,16 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/and.cpp runtime_and.bc)
     compile_to_bitcode(real/div.cpp runtime_div.bc)
     compile_to_bitcode(real/linear_attention.cpp runtime_linear_attention.bc)
+    compile_to_bitcode(real/gated_delta_net.cpp runtime_gated_delta_net.bc)
+    compile_to_bitcode(real/dynamic_sparse_attention.cpp
+                       runtime_dynamic_sparse_attention.bc)
+    compile_to_bitcode(real/sparse_attention_indexer.cpp
+                       runtime_sparse_attention_indexer.bc)
     compile_to_bitcode(real/transpose.cpp runtime_transpose.bc)
     compile_to_bitcode(real/abs.cpp runtime_abs.bc)
     compile_to_bitcode(real/neg.cpp runtime_neg.bc)
     compile_to_bitcode(real/not.cpp runtime_not.bc)
+    compile_to_bitcode(real/isnan.cpp runtime_isnan.bc)
     compile_to_bitcode(real/cos.cpp runtime_cos.bc)
     compile_to_bitcode(real/erf.cpp runtime_erf.bc)
     compile_to_bitcode(real/sin.cpp runtime_sin.bc)
@@ -371,17 +388,21 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/scatter_nd.cpp runtime_scatter_nd.bc)
     compile_to_bitcode(real/multi_head_attention.cpp runtime_multi_head_attention.bc)
     compile_to_bitcode(real/nonzero.cpp runtime_nonzero.bc)
+    compile_to_bitcode(real/non_max_suppression.cpp runtime_non_max_suppression.bc)
     compile_to_bitcode(real/size.cpp runtime_size.bc)
     compile_to_bitcode(real/pool.cpp runtime_pool.bc)
     compile_to_bitcode(real/conv.cpp runtime_conv.bc)
     compile_to_bitcode(real/conv_transpose.cpp runtime_conv_transpose.bc)
     compile_to_bitcode(real/resize.cpp runtime_resize.bc)
     compile_to_bitcode(real/grid_sample.cpp runtime_grid_sample.bc)
+    compile_to_bitcode(real/roi_align.cpp runtime_roi_align.bc)
     compile_to_bitcode(real/global_pool.cpp runtime_global_pool.bc)
     compile_to_bitcode(real/qelementwise.cpp runtime_qelementwise.bc)
     compile_to_bitcode(real/qmatmul.cpp runtime_qmatmul.bc)
     compile_to_bitcode(real/qgemm.cpp runtime_qgemm.bc)
     compile_to_bitcode(real/qconv.cpp runtime_qconv.bc)
+    compile_to_bitcode(real/qlinear_conv.cpp runtime_qlinear_conv.bc)
+    compile_to_bitcode(real/qlinear_matmul.cpp runtime_qlinear_matmul.bc)
     compile_to_bitcode(real/qlpnormalization.cpp runtime_qlpnormalization.bc)
     compile_to_bitcode(real/qsigmoid.cpp runtime_qsigmoid.bc)
 
@@ -402,10 +423,13 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_matmul.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_rocmlir.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_activation.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_trilu.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_bias_gelu.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_fast_gelu.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_layer_normalization.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_instance_normalization.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_batch_normalization.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_group_norm.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_simplified_layer_norm.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_skip_simplified_layer_norm.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_rotary_embedding.bc
@@ -415,15 +439,19 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_gather.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_gather_elements.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_top_k.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_random_normal_like.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_arg_max.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_scatter_elements.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_compress.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_one_hot.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_ngram_hash_mapping.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_reduce_sum.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_reduce_mean.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_reduce_l2.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_reduce_max.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_reduce_min.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_matmul_nbits.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_dequant_bnb4.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qmoe.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qmoe_amd.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_causal_conv_with_state.bc
@@ -435,10 +463,14 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_and.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_div.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_linear_attention.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_gated_delta_net.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_dynamic_sparse_attention.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_sparse_attention_indexer.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_transpose.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_abs.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_neg.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_not.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_isnan.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_cos.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_erf.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_sin.bc
@@ -463,12 +495,14 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_scatter_nd.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_multi_head_attention.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_nonzero.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_non_max_suppression.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_size.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_pool.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_conv.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_conv_transpose.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_resize.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_grid_sample.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_roi_align.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_global_pool.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_gather_block_quantized.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qdq.bc
@@ -476,6 +510,8 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qmatmul.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qgemm.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qconv.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_qlinear_conv.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_qlinear_matmul.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qlpnormalization.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qsigmoid.bc
     )
@@ -541,7 +577,7 @@ set(RUNTIME_BC_PATH ${CMAKE_CURRENT_BINARY_DIR}/runtime.bc PARENT_SCOPE)
 add_custom_target(RuntimeBitcode DEPENDS HipRuntime)
 
 # ============================================================================
-# STEP 6: Native current-stream accessor (NOT bitcode)
+# STEP 6: Native runtime shims (NOT bitcode)
 # ============================================================================
 # The per-thread session-stream slot is compiled natively here, deliberately
 # kept out of runtime.bc. A thread_local inside runtime.bc would force the JIT
@@ -550,19 +586,27 @@ add_custom_target(RuntimeBitcode DEPENDS HipRuntime)
 # external functions: the host (EP DLL / hip-test / hip-inspect) defines them
 # (see LlvmIrJit absolute-symbol registration), and native model DLLs link
 # their own copy of this lib (CompilerDriver::discoverLibraries).
-add_library(hipdnn-ep-tls STATIC tls_stream.cpp)
+#
+# The optional ROCTx bridge follows the same dual-path contract: runtime.bc
+# calls exported shim functions, while this native library dynamically resolves
+# ROCTx only when requested. Keeping both shims in one archive means the
+# existing JIT host and native-model link paths need no additional library.
+add_library(hipdnn-ep-tls STATIC tls_stream.cpp roctx_shim.cpp)
 set_target_properties(hipdnn-ep-tls PROPERTIES POSITION_INDEPENDENT_CODE ON)
-target_include_directories(hipdnn-ep-tls PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(hipdnn-ep-tls PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/include)
 # Linked into hipgpu.dll; do not dllexport. ORT only looks up the plugin EP
 # entry points. JIT resolves these by address; native model DLLs link their
 # own copy of this lib.
 target_compile_definitions(hipdnn-ep-tls PRIVATE HIPDNN_EP_RT_NO_EXPORT)
 
-# Install the import/static lib so NATIVE model DLLs can link it on a deploy
+# Install the static shim lib so NATIVE model DLLs can link it on a deploy
 # host that only has the packaged tree (no build dir). CompilerDriver bakes the
 # build-tree path into HIPDNN_EP_TLS_LIB_DIR, which does not exist on the GPU
 # test machine; staging hipdnn-ep-tls.lib into install/lib (then onto LIB) lets
-# lld-link resolve it there. Bitcode (default) does not need it.
+# lld-link resolve it there. The bitcode path resolves the same shim functions
+# from the JIT host through LlvmIrJit's absolute-symbol table.
 install(TARGETS hipdnn-ep-tls ARCHIVE DESTINATION lib)
 
 # ============================================================================

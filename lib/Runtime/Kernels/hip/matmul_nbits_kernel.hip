@@ -75,6 +75,8 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -285,7 +287,7 @@ __global__ void matmul_nbits_kernel_i8(
 // Shared by the int8 GEMV below and the int4 GEMV in section 1b, which have the
 // same accumulator tile and the same reason to want it in registers.
 #define GEMV_WAVES_MIN(TM) ((TM) > 1 ? 1 : 9)
-#define GEMV_WAVES_MAX(TM) ((TM) > 1 ? 4 : 9)
+#define GEMV_WAVES_MAX(TM) ((TM) > 1 ? 16 : 9)
 
 template <int BLOCK_SIZE, int TILE_N, int TILE_M = 1>
 __global__
@@ -671,10 +673,48 @@ void matmul_nbits_gemv_kernel_i8(
 // GEMV_WAVES_MIN/MAX are defined next to the int8 GEMV in section 1a-gemv;
 // both kernels hold the same partial[TILE_M][TILE_N] accumulator and want the
 // same register budget for it.
+//
+// Except TILE_N = 16 at TILE_M = 1. Its ~166 registers are what "9 waves"
+// means on gfx1151's 1536-entry file only; on the 1024-entry file of the
+// gfx11-generic product binary 9 waves is 112, and the tile spilled 184 B
+// (row-major) / 208 B (col-major) per lane under ROCm 7.14 and 192 / 204 B
+// under 7.16. Asking for the registers gives 6 waves there and still 9 on
+// gfx1151.
+#define GEMV4_WAVES_MIN(TN, TM)                                                \
+  ((TM) == 1 && (TN) > 8 ? HIPDNN_WAVES_FOR_VGPRS(168) : GEMV_WAVES_MIN(TM))
+#define GEMV4_WAVES_MAX(TN, TM)                                                \
+  ((TM) == 1 && (TN) > 8 ? HIPDNN_WAVES_FOR_VGPRS(168) : GEMV_WAVES_MAX(TM))
+
+// On a 1536-VGPR target (a gfx1151 build) TILE_N = 16 at TILE_M = 1 keeps the
+// col-major code it had before #1240: the single A index in read_a below,
+// and M == 1 without zero points stays on the col-major kernel (see
+// launchGemvConfig). The tile uses 168 of the 170 registers its 9 waves leave
+// there. The per-group A row pointer adds two spilled registers, and storing
+// a just-loaded register to scratch puts an s_waitcnt vmcnt(0) into the K loop,
+// so the 16 B columns are no longer consumed as they arrive; the row-major
+// kernel waits for all its loads at once as well. On gfx1151 both were 8-13%
+// slower than the old code at the LUT's 64-thread TILE_N = 16 decode points
+// (K 5120 x N 17408 / 17920 and the transposed shapes, DRAM-bound). On the
+// 1024-VGPR file of the product binary the row-major kernel is the faster one
+// at TILE_N = 16 (col-major 4-62% slower) and the new A index is what removed
+// the per-element 64-bit multiplies, so nothing changes there.
+#define GEMV4_KEEP_COL_TN16(TN, TM)                                            \
+  ((TM) == 1 && (TN) > 8 && HIPDNN_VGPRS_PER_SIMD >= 1536)
+
+// The M-blocked TILE_M = 8, TILE_N = 2 tile, the lookup-mode pick for
+// M = 5..7, keeps the single A index on a 1536-VGPR target as well. There the
+// per-group row pointer lets the compiler take it from 167 VGPRs (9 waves) to
+// 107 (12 waves), and at M = 6 it ran 0.78-1.31x the original's time on
+// gfx1151 depending on the shape (1.24x and 1.31x on the Llama-3.1 FFN with
+// zero points). On the 1024-VGPR file the old index spilled the tile (584
+// B/lane with the current SDK), so the product binary keeps the new one.
+#define GEMV4_KEEP_OLD_A_TM8(TN, TM)                                           \
+  ((TM) == 8 && (TN) == 2 && HIPDNN_VGPRS_PER_SIMD >= 1536)
+
 template <int BLOCK_SIZE, int TILE_N, bool COL_MAJOR = false, int TILE_M = 1>
-__global__
-__attribute__((amdgpu_waves_per_eu(GEMV_WAVES_MIN(TILE_M),
-                                   GEMV_WAVES_MAX(TILE_M))))
+__global__ __launch_bounds__(BLOCK_SIZE)
+__attribute__((amdgpu_waves_per_eu(GEMV4_WAVES_MIN(TILE_N, TILE_M),
+                                   GEMV4_WAVES_MAX(TILE_N, TILE_M))))
 void matmul_nbits_gemv_kernel(
     const __half* __restrict__ A,
     const uint8_t* __restrict__ B,
@@ -787,9 +827,27 @@ void matmul_nbits_gemv_kernel(
             return static_cast<float>(zp[nidx * k_blocks + grp]);
     };
 
-    // Helper: read A element for row `tm` of this block at K-offset
-    auto read_a = [&](int tm, int64_t k_off) __attribute__((always_inline)) -> float {
-        return static_cast<float>(a_base[tm * a_mstep + k_off * a_stride]);
+    // Helper: read A element for row `tm` of this block at K position
+    // k_lane + k_const: k_lane is the thread's position, k_const the
+    // compile-time offset inside the unrolled group. The row pointer is built
+    // from k_lane alone and shared by the whole group; only k_const * a_stride
+    // is added per element, which is a constant (row-major) or a uniform value
+    // (col-major, stride M). Written as one index (k_lane + k_const) * a_stride
+    // the compiler has to prove the 32-bit sum cannot wrap to split it back:
+    // ROCm 7.14 did, 7.16 does not, and emits a sign extension, two
+    // v_mul_lo_u32, a v_mad_u64_u32 and a 64-bit shift per element. At
+    // TILE_M > 1 the extra live values also pushed the tile into scratch
+    // (100-584 bytes per lane, 2-4x slower).
+    auto read_a = [&](int tm, int k_lane, int k_const) __attribute__((always_inline)) -> float {
+        if constexpr (COL_MAJOR && (GEMV4_KEEP_COL_TN16(TILE_N, TILE_M) ||
+                                    GEMV4_KEEP_OLD_A_TM8(TILE_N, TILE_M))) {
+            return static_cast<float>(
+                a_base[tm * a_mstep + static_cast<int64_t>(k_lane + k_const) * a_stride]);
+        } else {
+            const __half* row = a_base + tm * a_mstep +
+                                static_cast<int64_t>(k_lane) * a_stride;
+            return static_cast<float>(row[static_cast<int64_t>(k_const) * a_stride]);
+        }
     };
 
     // ---- Phase 1: 32-nibble (128-bit) vectorized main loop ----
@@ -834,7 +892,7 @@ void matmul_nbits_gemv_kernel(
             float a_sum = 0.0f;
 #pragma unroll
             for (int i = 0; i < 32; i++) {
-                a_vals[i] = read_a(0, k32 + i);
+                a_vals[i] = read_a(0, k32, i);
                 a_sum += a_vals[i];
             }
             const float a_sum_x_default_zp = a_sum * 8.0f;
@@ -911,7 +969,7 @@ void matmul_nbits_gemv_kernel(
                     float a8[8];
 #pragma unroll
                     for (int i = 0; i < 8; i++) {
-                        a8[i] = read_a(tm_r, k32 + q * 8 + i);
+                        a8[i] = read_a(tm_r, k32, q * 8 + i);
                         a_sum += a8[i];
                     }
 #pragma unroll
@@ -966,7 +1024,7 @@ void matmul_nbits_gemv_kernel(
                 float a_sum = 0.0f;
 #pragma unroll
                 for (int i = 0; i < 16; i++) {
-                    a_vals[i] = read_a(0, k16 + i);
+                    a_vals[i] = read_a(0, k16, i);
                     a_sum += a_vals[i];
                 }
                 const float a_sum_x_default_zp = a_sum * 8.0f;
@@ -1009,7 +1067,7 @@ void matmul_nbits_gemv_kernel(
                         float a8[8];
 #pragma unroll
                         for (int i = 0; i < 8; i++) {
-                            a8[i] = read_a(tm_r, k16 + q * 8 + i);
+                            a8[i] = read_a(tm_r, k16, q * 8 + i);
                             a_sum += a8[i];
                         }
 #pragma unroll
@@ -1065,7 +1123,7 @@ void matmul_nbits_gemv_kernel(
                 float a_sum = 0.0f;
 #pragma unroll
                 for (int i = 0; i < 8; i++) {
-                    a_vals[i] = read_a(tm_r, k8 + i);
+                    a_vals[i] = read_a(tm_r, k8, i);
                     a_sum += a_vals[i];
                 }
                 const float a_sum_x_default_zp = a_sum * 8.0f;
@@ -1108,7 +1166,7 @@ void matmul_nbits_gemv_kernel(
 #pragma unroll
                 for (int tm = 0; tm < TILE_M; tm++) {
                     const int tm_r = (TILE_M == 1 || tm < rows) ? tm : 0;
-                    partial[tm][tn] += read_a(tm_r, k) * (qval - zv) * sv;
+                    partial[tm][tn] += read_a(tm_r, k, 0) * (qval - zv) * sv;
                 }
             }
         }
@@ -1561,6 +1619,24 @@ static constexpr GemvConfig kGemvConfigs[] = {
 static constexpr int kNumGemvConfigs =
     static_cast<int>(sizeof(kGemvConfigs) / sizeof(kGemvConfigs[0]));
 
+// VGPRs per SIMD of the code object this process runs, which is not always the
+// device's: a gfx1151 runs the gfx11-generic code object (1024) unless the
+// build has a gfx1151 one (1536). Read once from the device.
+__device__ int g_gemv_vgprs_per_simd = HIPDNN_VGPRS_PER_SIMD;
+
+static int gemvCodeObjectVgprsPerSimd()
+{
+    static const int v = [] {
+        int x = 1024;
+        if (hipMemcpyFromSymbol(&x, HIP_SYMBOL(g_gemv_vgprs_per_simd), sizeof(x)) != hipSuccess) {
+            (void)hipGetLastError();
+            x = 1024;
+        }
+        return x;
+    }();
+    return v;
+}
+
 static void launchGemvConfig(
     int config_id, hipStream_t stream,
     const __half* A, const uint8_t* B,
@@ -1571,6 +1647,16 @@ static void launchGemvConfig(
     bool col_major = false)
 {
     auto& c = kGemvConfigs[config_id];
+    // M == 1 without zero points: col-major and row-major A are the same single
+    // row, and the row-major instantiation computes the identical result with a
+    // compile-time A stride. The col-major one indexes A with the runtime stride
+    // M (see read_a), which ROCm 7.16 compiles to a 64-bit multiply per element:
+    // +30% instructions in the decode loop, 1.2x slower on average, up to 1.9x.
+    // A gfx1151 build keeps the col-major kernel at TILE_N = 16 (see
+    // GEMV4_KEEP_COL_TN16).
+    if (col_major && M == 1 && zp == nullptr && batch == 1 &&
+        !(c.tile_n > 8 && gemvCodeObjectVgprsPerSimd() >= 1536))
+        col_major = false;
     dim3 grid(static_cast<unsigned>((N + c.tile_n - 1) / c.tile_n),
               static_cast<unsigned>(M),
               static_cast<unsigned>(col_major ? 1 : batch));
@@ -1690,6 +1776,11 @@ static void settleClock(hipEvent_t ev0, hipEvent_t ev1, hipStream_t stream,
 // comparable to the signal at that scale, so a small-iters min alone is not
 // trustworthy there. A reading <= 0 is not a real duration (Windows HIP event
 // timer noise at sub-0.1ms scale can yield this); it must never win the min.
+// Nor can a positive reading far below the config's own median: the same timer
+// now and then reports an 80 us GEMM as 10 us (beyond any chip's peak), and the
+// min would give that config the point every time. A sample under half the
+// median of the config's samples is such a glitch and is left out; a real peak
+// (boost clock, warm cache) stays within 2x of the median.
 // `evict`, when not null, streams the eviction buffer before each timed
 // launch; that is recorded ahead of ev0, so it stays out of the reading.
 template <typename LaunchFn>
@@ -1698,10 +1789,32 @@ static float timeConfigPeak(hipEvent_t ev0, hipEvent_t ev1, hipStream_t stream,
                             void* evict, LaunchFn&& launch) {
     for (int w = 0; w < warmup; w++) launch();
 
+    constexpr int kMaxSamples = 32;
+    float samples[kMaxSamples];
+    int kept = 0;
+    const int cap = floor_iters < kMaxSamples ? floor_iters : kMaxSamples;
+
+    // Smallest sample that is not implausibly far below the median of the
+    // samples taken so far (1e30 while there is none).
+    auto robustPeak = [&]() {
+        if (kept == 0) return 1e30f;
+        float lo = 1e30f;
+        for (int i = 0; i < kept; i++) lo = samples[i] < lo ? samples[i] : lo;
+        if (kept < 3) return lo;
+        float sorted[kMaxSamples];
+        for (int i = 0; i < kept; i++) sorted[i] = samples[i];
+        std::sort(sorted, sorted + kept);
+        const float median = sorted[kept / 2];
+        float best = 1e30f;
+        for (int i = 0; i < kept; i++)
+            if (samples[i] >= 0.5f * median && samples[i] < best) best = samples[i];
+        return best;
+    };
+
     float best = 1e30f;
     int iter_count = 0;
     while (iter_count < iters ||
-           (best < floor_ms && iter_count < floor_iters)) {
+           (best < floor_ms && iter_count < cap)) {
         gemvEvict(evict, stream);
         hipEventRecord(ev0, stream);
         launch();
@@ -1709,7 +1822,10 @@ static float timeConfigPeak(hipEvent_t ev0, hipEvent_t ev1, hipStream_t stream,
         hipEventSynchronize(ev1);
         float ms = 0.0f;
         hipEventElapsedTime(&ms, ev0, ev1);
-        if (ms > 0.0f && ms < best) best = ms;
+        if (ms > 0.0f && kept < kMaxSamples) {
+            samples[kept++] = ms;
+            best = robustPeak();
+        }
         iter_count++;
     }
     return best;
@@ -2527,6 +2643,138 @@ static void launchDp4aConfig(
 #undef DP4A_CASE
 }
 
+// ---------------------------------------------------------------------------
+// Cold, burst-timed probing for the M=1 dp4a GEMV autotune.
+//
+// Two things made the old min-of-5 single-launch probe rank this kernel wrong.
+//
+// The weight was warm: every B up to 32 MB sits in the Infinity Cache after the
+// first launch, and a decode step never sees it that way (see the cold-probing
+// note above tuneGemvConfig). The memset eviction used there is no cure for
+// this kernel: it leaves the cache full of dirty lines whose write-back competes
+// with the timed kernel's reads, inflating readings 1.2-2.3x by a config-
+// dependent amount. On Llama-3.1-8B it picked configs 10-67% slower in-model.
+// What a decode step actually sees is a cache full of *clean* lines of other
+// weights, which is what rotating over copies of B reproduces.
+//
+// And a single event-bracketed launch of a 10-40 us kernel is mostly event and
+// launch jitter; the min over a handful of them selects for that jitter (and
+// for the sub-physical readings the GQA tuner guards against). Bursts of ~0.5 ms
+// of back-to-back launches amortize it, and the median of several bursts
+// rejects outliers either way.
+//
+// Measured against in-model kernel durations of the five Llama-3.1-8B shapes
+// over 10 sweeps: warm probing picked 64x1 for gate/up (7% slower in-model),
+// this probe's picks are within 1% of the in-model best for every shape, and
+// its run-to-run spread is ~1% versus ~2-3%. The K/V projection's shipped row,
+// 32x2, ran 1.78x slower than 128x1 in-model (0.6 ms per token).
+// HIPDNN_EP_MATMUL_TUNE_COLD=0 drops the rotation (one copy, warm) as the A/B
+// control; the burst estimator stays.
+// ---------------------------------------------------------------------------
+
+// The rotation set's total footprint, well past gfx1151's 32 MB cache so that a
+// copy is evicted long before the cycle comes back to it.
+static constexpr size_t kGemvRotationBytes = 192u << 20;
+// A weight this large evicts itself between consecutive launches; no copies.
+static constexpr size_t kGemvRotationSelfColdBytes = 64u << 20;
+
+// Device copies of a GEMV's weight-side operands (B, scales, zero points),
+// laid out back to back in one allocation. With one copy (warm probing, a
+// weight that is already cold, or a failed allocation) the caller's own
+// buffers are used.
+class GemvWeightRotation {
+public:
+    GemvWeightRotation(hipStream_t stream,
+                       const uint8_t* B, size_t b_bytes,
+                       const __half* sc, size_t sc_bytes,
+                       const uint8_t* zp, size_t zp_bytes)
+        : B_(B), sc_(sc), zp_(zp),
+          sc_off_(align(b_bytes)), zp_off_(align(sc_off_ + sc_bytes)),
+          slot_(align(zp_off_ + zp_bytes)) {
+        if (!gemvTuneColdEnabled() || slot_ >= kGemvRotationSelfColdBytes)
+            return;
+        int want = (int)((kGemvRotationBytes + slot_ - 1) / slot_);
+        while (want > 1 && hipMalloc(&buf_, want * slot_) != hipSuccess) {
+            buf_ = nullptr;
+            want /= 2;
+        }
+        if (!buf_) return;
+        copies_ = want;
+        hipMemcpyAsync(buf_, B, b_bytes, hipMemcpyDeviceToDevice, stream);
+        hipMemcpyAsync(buf_ + sc_off_, sc, sc_bytes, hipMemcpyDeviceToDevice, stream);
+        if (zp) hipMemcpyAsync(buf_ + zp_off_, zp, zp_bytes,
+                               hipMemcpyDeviceToDevice, stream);
+        for (int have = 1; have < copies_; have *= 2) {
+            const int n = std::min(have, copies_ - have);
+            hipMemcpyAsync(buf_ + have * slot_, buf_, n * slot_,
+                           hipMemcpyDeviceToDevice, stream);
+        }
+        hipStreamSynchronize(stream);
+    }
+    ~GemvWeightRotation() { if (buf_) (void)hipFree(buf_); }
+    GemvWeightRotation(const GemvWeightRotation&) = delete;
+    GemvWeightRotation& operator=(const GemvWeightRotation&) = delete;
+
+    int copies() const { return copies_; }
+
+    void get(int i, const uint8_t*& B, const __half*& sc, const uint8_t*& zp) const {
+        if (!buf_) { B = B_; sc = sc_; zp = zp_; return; }
+        const uint8_t* p = buf_ + (size_t)(i % copies_) * slot_;
+        B  = p;
+        sc = reinterpret_cast<const __half*>(p + sc_off_);
+        zp = zp_ ? p + zp_off_ : nullptr;
+    }
+
+private:
+    static size_t align(size_t n) { return (n + 255) & ~size_t(255); }
+    const uint8_t* B_;
+    const __half* sc_;
+    const uint8_t* zp_;
+    size_t sc_off_, zp_off_, slot_;
+    uint8_t* buf_ = nullptr;
+    int copies_ = 1;
+};
+
+// Per-launch time of `launch(i)` (i = rotation index): a 3-launch probe sizes
+// the bursts to ~kBurstMs, then the median over kBursts per-launch averages.
+// Readings below half the probe are timer glitches, not durations.
+template <typename LaunchFn>
+static float timeConfigRotated(hipEvent_t ev0, hipEvent_t ev1, hipStream_t stream,
+                               int copies, LaunchFn&& launch) {
+    constexpr float kBurstMs = 0.5f;
+    constexpr int kBursts = 5;
+    constexpr int kProbe = 3;
+    constexpr int kMaxIters = 256;
+    int idx = 0;
+    for (int w = 0; w < std::min(copies, 4); w++) launch(idx++);
+
+    hipEventRecord(ev0, stream);
+    for (int i = 0; i < kProbe; i++) launch(idx++);
+    hipEventRecord(ev1, stream);
+    hipEventSynchronize(ev1);
+    float probe = 0.0f;
+    hipEventElapsedTime(&probe, ev0, ev1);
+    probe /= kProbe;
+    const int iters = probe > 0.0f
+        ? std::max(1, std::min(kMaxIters, (int)(kBurstMs / probe))) : 16;
+
+    float s[kBursts];
+    int n = 0;
+    for (int b = 0; b < kBursts; b++) {
+        hipEventRecord(ev0, stream);
+        for (int i = 0; i < iters; i++) launch(idx++);
+        hipEventRecord(ev1, stream);
+        hipEventSynchronize(ev1);
+        float ms = 0.0f;
+        hipEventElapsedTime(&ms, ev0, ev1);
+        ms /= iters;
+        if (ms > probe * 0.5f) s[n++] = ms;
+    }
+    if (n == 0) return probe;
+    std::sort(s, s + n);
+    return s[n / 2];
+}
+
 static int tuneDp4aConfig(
     hipStream_t stream,
     const int8_t* a_qb, const float* a_scale,
@@ -2539,9 +2787,13 @@ static int tuneDp4aConfig(
     hipEventCreate(&ev1);
     float best_ms = 1e30f;
     int   best_id = 9;  // 128x1 default
-    constexpr int WARMUP = 3;
-    constexpr int ITERS  = 5;
-    constexpr int kFloorIters = 15;  // extra iters for sub-0.1ms configs
+    const auto t_start = std::chrono::steady_clock::now();
+
+    const int64_t k_blocks = (K + bs - 1) / bs;
+    const GemvWeightRotation rot(
+        stream, B, (size_t)N * k_blocks * (bs / 2),
+        sc, (size_t)N * k_blocks * sizeof(__half),
+        zp, zp ? (size_t)N * k_blocks : 0);
 
     settleClock(ev0, ev1, stream, [&]{
         launchDp4aConfig(best_id, stream, a_qb, a_scale, B, sc, zp, bi, out,
@@ -2549,14 +2801,16 @@ static int tuneDp4aConfig(
     });
 
     for (int cid = 0; cid < kNumGemvConfigs; cid++) {
-        float cfg_best_ms = timeConfigPeak(ev0, ev1, stream, WARMUP, ITERS,
-                                            kFloorIters, 0.1f, nullptr, [&]{
-            launchDp4aConfig(cid, stream, a_qb, a_scale, B, sc, zp, bi, out,
+        float cfg_best_ms = timeConfigRotated(ev0, ev1, stream, rot.copies(),
+                                              [&](int i) {
+            const uint8_t* Bi; const __half* sci; const uint8_t* zpi;
+            rot.get(i, Bi, sci, zpi);
+            launchDp4aConfig(cid, stream, a_qb, a_scale, Bi, sci, zpi, bi, out,
                              N, K, bs);
         });
 
         MATMUL_NBITS_AUTOTUNE_LOG(
-            "[custom_kernels]   dp4a config[%2d] threads=%3d tile_n=%d : %.4f ms\n",
+            "[custom_kernels]   dp4a config[%2d] threads=%3d tile_n=%d : %.5f ms\n",
             cid, kGemvConfigs[cid].threads, kGemvConfigs[cid].tile_n,
             cfg_best_ms);
 
@@ -2567,16 +2821,40 @@ static int tuneDp4aConfig(
 
     MATMUL_NBITS_AUTOTUNE_LOG(
         "[custom_kernels] GEMV-dp4a autotune: N=%lld K=%lld bs=%lld zp=%s -> "
-        "best config[%d] threads=%d tile_n=%d (%.4f ms/iter)\n",
+        "best config[%d] threads=%d tile_n=%d (%.5f ms/iter; %d weight copies, "
+        "tuned in %.0f ms)\n",
         (long long)N, (long long)K, (long long)bs, zp ? "yes" : "no",
         best_id, kGemvConfigs[best_id].threads,
-        kGemvConfigs[best_id].tile_n, best_ms);
+        kGemvConfigs[best_id].tile_n, best_ms, rot.copies(),
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - t_start).count());
 
     return best_id;
 }
 
 static std::unordered_map<std::string, int> dp4a_cache;
 static std::mutex dp4a_tune_mutex;
+
+// HIPDNN_EP_MATMUL_DP4A_CFG=<id> pins the single-row dp4a config (an index into
+// kGemvConfigs) for every shape, bypassing LUT and autotune, so a candidate's
+// in-model duration can be measured; HIPDNN_EP_MATMUL_SMALLM_CFG is the M>1 analog.
+static int dp4aConfigOverride() {
+    static const int cfg = [] {
+#ifdef _WIN32
+        char buf[16];
+        unsigned long n = GetEnvironmentVariableA(
+            "HIPDNN_EP_MATMUL_DP4A_CFG", buf, sizeof(buf));
+        if (n == 0 || n >= sizeof(buf)) return -1;
+        const int v = atoi(buf);
+#else
+        const char* s = getenv("HIPDNN_EP_MATMUL_DP4A_CFG");
+        if (!s) return -1;
+        const int v = atoi(s);
+#endif
+        return (v >= 0 && v < kNumGemvConfigs) ? v : -1;
+    }();
+    return cfg;
+}
 
 static int getOrTuneDp4aConfig(
     hipStream_t stream,
@@ -2585,6 +2863,9 @@ static int getOrTuneDp4aConfig(
     const __half* bi, __half* out,
     int64_t N, int64_t K, int64_t bs)
 {
+    const int forced = dp4aConfigOverride();
+    if (forced >= 0) return forced;
+
     std::string key = std::to_string(N) + "_" + std::to_string(K) + "_" +
                       std::to_string(bs) + "_" + (zp ? "1" : "0");
 
@@ -3306,8 +3587,12 @@ __global__ void matmul_nbits_kernel_u3(
  * on RDNA3, per that kernel's notes).
  * ======================================================================= */
 
+// __launch_bounds__: without it the compiler assumes a 1024-thread block and
+// caps every instantiation at 128 VGPRs, whatever BLOCK_SIZE the launch uses.
+// TILE_N = 16 needs a little more: 56 B/lane of scratch under ROCm 7.14, 68
+// under 7.16 (u2: 0 -> 12).
 template <int BLOCK_SIZE, int TILE_N>
-__global__ void matmul_nbits_gemv_kernel_u3(
+__global__ __launch_bounds__(BLOCK_SIZE) void matmul_nbits_gemv_kernel_u3(
     const __half* __restrict__ A,
     const uint8_t* __restrict__ B,
     const __half* __restrict__ scales,
@@ -3364,7 +3649,6 @@ __global__ void matmul_nbits_gemv_kernel_u3(
         }
 
         const int grp = k32 >> bs_shift;
-        const float a_sum_x_default_zp = a_sum * 4.0f;  // 2^(bits-1)
 
         uint3 b_pk[TILE_N];
         float sv[TILE_N];
@@ -3373,6 +3657,21 @@ __global__ void matmul_nbits_gemv_kernel_u3(
             b_pk[tn] = *reinterpret_cast<const uint3*>(
                             &b_base_arr[tn][idx * 12]);
             sv[tn]   = static_cast<float>(s_rows[tn][grp]);
+        }
+        // The zero points load next to B and the scales, all under one
+        // uniform branch, so their latency hides behind the dot products.
+        // Tested per column after each dot product, every column got its own
+        // branch holding one load and a full wait, and ROCm 7.16 turns each
+        // of those branches into more scalar code than 7.14 did.
+        float zv[TILE_N];
+        if (has_zp) {
+#pragma unroll
+            for (int tn = 0; tn < TILE_N; tn++)
+                zv[tn] = static_cast<float>(zp[n_idx[tn] * k_blocks + grp]);
+        } else {
+#pragma unroll
+            for (int tn = 0; tn < TILE_N; tn++)
+                zv[tn] = 4.0f;  // 2^(bits-1)
         }
 
 #pragma unroll
@@ -3393,13 +3692,7 @@ __global__ void matmul_nbits_gemv_kernel_u3(
                 }
                 dot = __fmaf_rn(a_vals[i], static_cast<float>(qv), dot);
             }
-
-            if (has_zp) {
-                float zv = static_cast<float>(zp[n_idx[tn] * k_blocks + grp]);
-                partial[tn] += (dot - a_sum * zv) * sv[tn];
-            } else {
-                partial[tn] += (dot - a_sum_x_default_zp) * sv[tn];
-            }
+            partial[tn] += (dot - a_sum * zv[tn]) * sv[tn];
         }
     }
 
@@ -3719,8 +4012,9 @@ __global__ void matmul_nbits_kernel_u2(
  * loop, which had to special-case lanes 10 and 21).
  * ======================================================================= */
 
+// See matmul_nbits_gemv_kernel_u3 for the __launch_bounds__.
 template <int BLOCK_SIZE, int TILE_N, typename ZPT = uint8_t>
-__global__ void matmul_nbits_gemv_kernel_u2(
+__global__ __launch_bounds__(BLOCK_SIZE) void matmul_nbits_gemv_kernel_u2(
     const __half* __restrict__ A,
     const uint8_t* __restrict__ B,
     const __half* __restrict__ scales,
@@ -3777,7 +4071,6 @@ __global__ void matmul_nbits_gemv_kernel_u2(
         }
 
         const int grp = k32 >> bs_shift;
-        const float a_sum_x_default_zp = a_sum * 2.0f;  // 2^(bits-1)
 
         uint2 b_pk[TILE_N];
         float sv[TILE_N];
@@ -3786,6 +4079,17 @@ __global__ void matmul_nbits_gemv_kernel_u2(
             b_pk[tn] = *reinterpret_cast<const uint2*>(
                             &b_base_arr[tn][idx * 8]);
             sv[tn]   = static_cast<float>(s_rows[tn][grp]);
+        }
+        // See matmul_nbits_gemv_kernel_u3 for why the zero points load here.
+        float zv[TILE_N];
+        if (has_zp) {
+#pragma unroll
+            for (int tn = 0; tn < TILE_N; tn++)
+                zv[tn] = static_cast<float>(zp[n_idx[tn] * k_blocks + grp]);
+        } else {
+#pragma unroll
+            for (int tn = 0; tn < TILE_N; tn++)
+                zv[tn] = 2.0f;  // 2^(bits-1)
         }
 
 #pragma unroll
@@ -3801,13 +4105,7 @@ __global__ void matmul_nbits_gemv_kernel_u2(
                 uint32_t qv = (lo >> bitOff) & 0x3u;
                 dot = __fmaf_rn(a_vals[i], static_cast<float>(qv), dot);
             }
-
-            if (has_zp) {
-                float zv = static_cast<float>(zp[n_idx[tn] * k_blocks + grp]);
-                partial[tn] += (dot - a_sum * zv) * sv[tn];
-            } else {
-                partial[tn] += (dot - a_sum_x_default_zp) * sv[tn];
-            }
+            partial[tn] += (dot - a_sum * zv[tn]) * sv[tn];
         }
     }
 
@@ -4108,517 +4406,8 @@ __global__ void dequant_u4_to_fp16(
  * Section 2b: WMMA kernel (supports both fused dequant and fp16 B)
  * ======================================================================= */
 
-// half16 holds one WMMA A/B fragment; its vector width matches
-// HIPDNN_WMMA_FRAG_ELEMS (16 on gfx11, 8 on the gfx12-style encoding
-// gfx1170/gfx12xx use -- see hip_arch_compat.h). The name is kept for
-// continuity even though the width is arch-dependent.
-typedef _Float16 half16 __attribute__((ext_vector_type(HIPDNN_WMMA_FRAG_ELEMS)));
-typedef float    float8 __attribute__((ext_vector_type(8)));
-
-// Explicit 8- and 16-byte vectors for the shared-memory staging. Writing the
-// loads and stores through these instead of a loop over uint32_t is what makes
-// the compiler emit global_load_dwordx4 / ds_read_b128 / ds_write_b128 rather
-// than a sequence of narrower accesses.
-typedef uint32_t u32x2 __attribute__((ext_vector_type(2)));
-typedef uint32_t u32x4 __attribute__((ext_vector_type(4)));
-typedef _Float16 half2v __attribute__((ext_vector_type(2)));
-
-// Where neither WMMA builtin is available (non-RDNA3/3.5/4 arch), trap
-// instead so this file still compiles and a WMMA launch on an unsupported
-// arch aborts loudly rather than returning garbage.
-#if !HIPDNN_HAS_WMMA
-static __device__ __forceinline__ float8
-hipdnn_wmma_f32_16x16x16_f16_unavailable(half16, half16, float8 c) {
-  __builtin_trap();
-  return c;
-}
-#undef HIPDNN_WMMA_F32_16X16X16_F16
-#define HIPDNN_WMMA_F32_16X16X16_F16(a, b, c)                                  \
-  hipdnn_wmma_f32_16x16x16_f16_unavailable((a), (b), (c))
-#endif
-
-#define WMMA_TILE 16
-
-/* LDS-only workgroup barrier.
- *
- * __syncthreads() is a full workgroup fence: on RDNA it emits s_waitcnt for both
- * counters, s_barrier, AND buffer_gl0_inv, because a workgroup can span the two
- * CUs of a WGP and global-memory coherence between them requires invalidating
- * the per-CU L0. The GEMM K-loop only ever synchronizes shared memory -- the
- * global loads are private to the thread that issues them -- so the L0 flush is
- * pure overhead, once per K-step, and it also throws away any L0 hits the next
- * tile's loads might have had.
- *
- * The "memory" clobber is what keeps the compiler from moving LDS accesses
- * across the barrier; without it the raw s_barrier intrinsic is IntrNoMem and
- * reordering is legal.
- *
- * The standalone s_barrier instruction is provided by the gfx9, gfx10 and
- * gfx11 families. gfx12 replaced it with the s_barrier_signal/s_barrier_wait
- * pair, and later architectures likewise lack it, so the inline asm fails to
- * assemble there. Emit the asm only on the families that provide it and let
- * every other target -- current or future -- fall back to __syncthreads(),
- * which is always correct (a strictly stronger full-workgroup fence); it only
- * reintroduces the redundant per-K-step L0 flush the raw asm skips. */
-#if defined(__HIP_DEVICE_COMPILE__) && defined(__AMDGCN__) &&                   \
-    (defined(__GFX9__) || defined(__GFX10__) || defined(__GFX11__))
-#define HIPDNN_LDS_BARRIER()                                                    \
-    __asm__ __volatile__("s_waitcnt lgkmcnt(0)\n\ts_barrier" ::: "memory")
-#else
-#define HIPDNN_LDS_BARRIER() __syncthreads()
-#endif
-
-/* BK_IN decouples the K-step from the warp-tile shape.
- *
- * BK_T used to be forced to BM_T/(WT_M*WT_N), which is the value that makes each
- * thread stage exactly 8 B-nibbles per K-step. That coupling is what kept WT_N
- * at 2: a wider warp tile shrank BK_T below the 16 a WMMA step needs. Letting a
- * thread stage 16 or 32 nibbles instead frees the two to be chosen
- * independently, and WT_N=4 is worth having -- a K-step then issues WT_M*WT_N=8
- * WMMA per (WT_M+WT_N)=6 fragment loads instead of 4 per 4, so the LDS reads per
- * Matrix Core op drop by a quarter. */
-template <int BM_T, int BN_T, int WT_M, int WT_N, bool USE_ZEROS,
-          bool BOUNDS_CHECK = false, bool FUSED_DQ = true,
-          int BK_IN = BM_T / (WT_M * WT_N)>
-__device__ __forceinline__
-void GemmFp16U4Impl(
-    int M, int N, int K,
-    const _Float16* __restrict__ A, int lda,
-    const void* __restrict__ B_data,
-    const _Float16* __restrict__ scales,
-    const _Float16* __restrict__ zeros,
-    int group_size, int num_groups_k,
-    _Float16* __restrict__ C, int ldc,
-    int swizzle_n = 4,
-    /* Bytes between B rows. 0 derives the arrival stride,
-     * num_groups_k * (group_size/2); a larger value reads a buffer whose rows
-     * were padded to break cache-set aliasing.
-     *
-     * Runtime rather than a template parameter so one set of instantiations
-     * serves both layouts and the autotuner stays free to pick any tile for a
-     * padded buffer. As a template parameter it would multiply the
-     * instantiation count of every tile shape. */
-    int b_row_bytes = 0)
-{
-    constexpr int WM_L   = BM_T / (WT_M * 16);
-    constexpr int WN_L   = BN_T / (WT_N * 16);
-    constexpr int THR_L  = WM_L * WN_L * 32;
-    constexpr int BK_T   = BK_IN;
-
-    /* The LDS row stride is padded to a multiple of 8 halfs (16 B), not to the
-     * 2 halfs that would be enough to break bank conflicts.
-     *
-     * With a 4-byte-aligned stride the WMMA fragment reads are not provably
-     * 16-byte aligned, so the compiler cannot use ds_read_b128 and falls back to
-     * two ds_load_2addr_b32 per 8 dwords. That doubles the LDS instruction count
-     * and, because the b64 form only carries 8-bit element offsets, forces a
-     * v_add_nc_u32 per address once the tile is bigger than ~1 KB: 32 LDS reads
-     * plus 22 address adds per K-step in the 128x256 tile, against 16 reads and
-     * no adds after this change (the b128 form has a 16-bit byte offset).
-     *
-     * BK_T+8 stays conflict-free for every BK_T the config table uses: the dword
-     * row stride is then 12, 20 or 36, and 8 consecutive lanes reading 4 dwords
-     * each cover 32 distinct banks in all three cases. */
-    constexpr int PAD_K   = 8;
-    constexpr int K_STR   = BK_T + PAD_K;
-    constexpr int K_STEPS = BK_T / WMMA_TILE;
-
-    /* A staging: one thread moves A_CH *contiguous* halfs of a single row, so
-     * the tile costs one global load and one LDS store per chunk. The previous
-     * scheme moved two halfs from each of two rows, which is the same bytes in
-     * four instructions instead of one. */
-    constexpr int A_HPT = (BM_T * BK_T) / THR_L;
-    constexpr int A_CH  = (A_HPT >= 8) ? 8 : 4;
-    constexpr int A_NCH = A_HPT / A_CH;
-    constexpr int A_ROW_SPLIT = BK_T / A_CH;
-
-    /* B staging: B_NPT nibbles (B_U32 packed words) per thread, all contiguous
-     * in k, so B_TPR threads cover one B row. */
-    constexpr int B_NPT = (BN_T * BK_T) / THR_L;
-    constexpr int B_U32 = B_NPT / 8;
-    constexpr int B_TPR = BK_T / B_NPT;
-
-    static_assert(A_NCH >= 1, "A_NCH must be >= 1");
-    static_assert(A_HPT % A_CH == 0, "A_HPT must be a multiple of A_CH");
-    static_assert(BK_T % A_CH == 0, "BK_T must be a multiple of A_CH");
-    static_assert(BK_T % WMMA_TILE == 0, "BK_T must be a multiple of 16");
-    static_assert((K_STR * 2) % 16 == 0, "LDS row stride must be 16B aligned");
-    static_assert(B_NPT >= 8 && B_NPT % 8 == 0, "B_NPT must be a multiple of 8");
-    static_assert(B_U32 <= 4, "B_NPT must not exceed 32 nibbles per thread");
-    static_assert(B_TPR * B_NPT == BK_T, "B_TPR must tile BK_T exactly");
-    static_assert(THR_L == BN_T * B_TPR, "B staging must use every thread once");
-
-    __shared__ __align__(16) _Float16 smA[2][BM_T][K_STR];
-    __shared__ __align__(16) _Float16 smB[2][BN_T][K_STR];
-
-    const int tid  = threadIdx.x;
-    const int wid  = tid / 32;
-    const int lid  = tid % 32;
-    const int lane = lid % 16;
-    const int sub  = lid / 16;
-    const int wrow = wid / WN_L;
-    const int wcol = wid % WN_L;
-
-    // Block-to-tile mapping with column swizzle for L2 locality.
-    // Splits the grid into a "main" region of (n_tiles/sw)*sw cols where full
-    // sw-wide groups apply, and a "tail" region of (n_tiles%sw) leftover cols
-    // that uses plain row-major. The previous implementation fell back to
-    // row-major only when bx >= n_tiles, which produced both collisions AND
-    // missing tiles when n_tiles % sw != 0, leaving those tiles with stale
-    // output data from prior kernel launches.
-    const int n_tiles  = gridDim.x;
-    const int m_tiles  = gridDim.y;
-    int by, bx;
-    if (swizzle_n <= 1) {
-        // Direct mapping is used by ragged grouped WMMA: its launcher can
-        // then reject blockIdx.y tiles beyond each expert's row count before
-        // entering the expensive K loop.
-        by = static_cast<int>(blockIdx.y);
-        bx = static_cast<int>(blockIdx.x);
-    } else {
-        const int block_id = blockIdx.y * n_tiles + blockIdx.x;
-        const int sw          = (n_tiles >= swizzle_n) ? swizzle_n : n_tiles;
-        const int main_cols   = (n_tiles / sw) * sw;
-        const int main_blocks = main_cols * m_tiles;
-        if (block_id < main_blocks) {
-            const int super = block_id / (sw * m_tiles);
-            const int rem   = block_id % (sw * m_tiles);
-            by = rem / sw;
-            bx = super * sw + rem % sw;
-        } else {
-            const int tail_id   = block_id - main_blocks;
-            const int tail_cols = n_tiles - main_cols;
-            by = tail_id / tail_cols;
-            bx = main_cols + (tail_id % tail_cols);
-        }
-    }
-    const int row0 = by * BM_T;
-    const int col0 = bx * BN_T;
-
-    constexpr int B_COL_SHIFT = __builtin_ctz(B_TPR);
-    const int b_col       = tid >> B_COL_SHIFT;
-    const int b_k8        = (tid & (B_TPR - 1)) * B_NPT;
-    const int b_n_g_raw   = col0 + b_col;
-    const bool b_valid    = BOUNDS_CHECK ? (b_n_g_raw < N) : true;
-    const int b_n_g       = (BOUNDS_CHECK && !b_valid) ? 0 : b_n_g_raw;
-
-    /* Running source pointers.
-     *
-     * The K-loop used to rebuild every address from (row, t, k), which the
-     * compiler turns into a sign-extend / shift / 64-bit add chain: ~10 VALU ops
-     * per K-step for A alone. Advancing a pointer by one K-step is two.
-     *
-     * B_packed rows are padded to num_groups_k * (group_size/2) bytes (ONNX
-     * MatMulNBits blob layout -- the last group is padded to a full group_size
-     * even when K % group_size != 0), NOT a plain K/2 bytes/row; see the
-     * row-stride comment on matmul_nbits_gemv_kernel's b_base_arr. Within a row
-     * the nibbles are still packed compactly from k=0 (only the tail beyond K is
-     * padding), so the intra-row byte offset (b_k8 >> 1) and the per-K-step
-     * advance below are unaffected -- only the per-row stride changes.  */
-    [[maybe_unused]] const unsigned char* b_src_u4 = nullptr;
-    [[maybe_unused]] const _Float16*      b_src_fp = nullptr;
-    [[maybe_unused]] const _Float16*      s_src    = nullptr;
-    [[maybe_unused]] const _Float16*      z_src    = nullptr;
-    if constexpr (FUSED_DQ) {
-        // 0 means the arrival layout, whose stride carries the ONNX group
-        // padding described above; a repacked buffer passes its own.
-        const int row_bytes =
-            b_row_bytes ? b_row_bytes : (num_groups_k * (group_size >> 1));
-        b_src_u4 = static_cast<const unsigned char*>(B_data) +
-                   (static_cast<size_t>(b_n_g) * row_bytes + (b_k8 >> 1));
-        s_src = scales + static_cast<size_t>(b_n_g) * num_groups_k;
-        if constexpr (USE_ZEROS)
-            z_src = zeros + static_cast<size_t>(b_n_g) * num_groups_k;
-    } else {
-        b_src_fp = static_cast<const _Float16*>(B_data) +
-                   (static_cast<size_t>(b_n_g) * K + b_k8);
-    }
-
-    int              a_row[A_NCH];
-    int              a_koff[A_NCH];
-    const _Float16*  a_src[A_NCH];
-#pragma unroll
-    for (int c = 0; c < A_NCH; c++) {
-        const int idx = tid + c * THR_L;
-        a_row[c]      = idx / A_ROW_SPLIT;
-        a_koff[c]     = (idx % A_ROW_SPLIT) * A_CH;
-        a_src[c] = A + static_cast<size_t>(row0 + a_row[c]) * lda + a_koff[c];
-    }
-
-    float8 acc[WT_M][WT_N];
-#pragma unroll
-    for(int i = 0; i < WT_M; i++)
-#pragma unroll
-        for(int j = 0; j < WT_N; j++)
-#pragma unroll
-            for(int e = 0; e < 8; e++)
-                acc[i][j][e] = 0.0f;
-
-    /* --- Register-prefetch pipeline: split load from dequant+store ---
-     *
-     * issueLoads(t): fire off global memory reads into registers (non-blocking).
-     * storeToShared(buf): dequant B in registers, write A & B to smem.
-     *
-     * The K-loop interleaves: issueLoads → computeWMMA → storeToShared → sync
-     * so that global loads overlap with Matrix Core WMMA execution.
-     */
-
-    uint32_t pf_a[A_NCH][A_CH / 2];
-    [[maybe_unused]] uint32_t pf_b4[B_U32] = {};
-    [[maybe_unused]] u32x4    pf_bfp[B_U32] = {};
-
-    /* Quant-group state.
-     *
-     * grp_k_end is the first k beyond the group whose scale/zero is currently
-     * held in s_pk / bias_pk. k advances monotonically, so the group index is
-     * carried across K-steps rather than recomputed: `(t + b_k8) / group_size`
-     * with a runtime group_size expands into a ~13-instruction division
-     * sequence on every K-step.
-     *
-     * s_pk and bias_pk hold the group constants pre-broadcast into both halves
-     * of a 32-bit register so the dequant can use v_pk_* packed math directly. */
-    [[maybe_unused]] int      grp_cur   = 0;
-    [[maybe_unused]] int      grp_k_end = 0;
-    [[maybe_unused]] uint32_t s_pk      = 0;
-    [[maybe_unused]] uint32_t bias_pk   = 0;
-
-    // fp16 1024.0. OR-ing a 4-bit value into the mantissa of 1024.0 yields
-    // exactly 1024+q, which is the integer-to-fp16 conversion without any
-    // v_cvt: see the dequant in storeToShared.
-    constexpr uint32_t kMagicPk = 0x64006400u;
-
-    auto loadGroupConstants = [&](int grp) __attribute__((always_inline))
-    {
-        const _Float16 s16 = s_src[grp];
-        // Subtracting (1024 + zp) from (1024 + q) is exact in fp16 -- both
-        // operands and the result are exactly representable -- so the magic-bias
-        // conversion loses no accuracy. Folding it into the scale instead
-        // (fma(1024+q, s, -(1024+zp)*s)) would not: the fp16 constant
-        // -(1024+zp)*s carries a rounding error of half an ULP at magnitude
-        // ~1024*s, which is a few percent of the (q-zp)*s result.
-        _Float16 zp = (_Float16)8;
-        if constexpr (USE_ZEROS) zp = z_src[grp];
-        const _Float16 bias = -((_Float16)1024 + zp);
-        const uint16_t s_bits = __builtin_bit_cast(uint16_t, s16);
-        const uint16_t b_bits = __builtin_bit_cast(uint16_t, bias);
-        s_pk    = (uint32_t(s_bits) << 16) | s_bits;
-        bias_pk = (uint32_t(b_bits) << 16) | b_bits;
-    };
-
-    if constexpr (FUSED_DQ) {
-        if (b_valid) {
-            grp_cur   = b_k8 / group_size;
-            grp_k_end = (grp_cur + 1) * group_size;
-            loadGroupConstants(grp_cur);
-        }
-    }
-
-    auto issueLoads = [&](int k_abs) __attribute__((always_inline))
-    {
-#pragma unroll
-        for(int c = 0; c < A_NCH; c++)
-        {
-            const bool ok = BOUNDS_CHECK ? (row0 + a_row[c] < M) : true;
-            if (ok) {
-                if constexpr (A_CH == 8)
-                    *reinterpret_cast<u32x4*>(pf_a[c]) =
-                        *reinterpret_cast<const u32x4*>(a_src[c]);
-                else
-                    *reinterpret_cast<u32x2*>(pf_a[c]) =
-                        *reinterpret_cast<const u32x2*>(a_src[c]);
-            } else {
-#pragma unroll
-                for (int e = 0; e < A_CH / 2; e++) pf_a[c][e] = 0;
-            }
-            a_src[c] += BK_T;
-        }
-
-        if (b_valid) {
-            if constexpr (FUSED_DQ) {
-                if constexpr (B_U32 == 1)
-                    pf_b4[0] = *reinterpret_cast<const uint32_t*>(b_src_u4);
-                else if constexpr (B_U32 == 2)
-                    *reinterpret_cast<u32x2*>(pf_b4) =
-                        *reinterpret_cast<const u32x2*>(b_src_u4);
-                else
-                    *reinterpret_cast<u32x4*>(pf_b4) =
-                        *reinterpret_cast<const u32x4*>(b_src_u4);
-                b_src_u4 += BK_T >> 1;
-                // This thread's B_NPT nibbles are contiguous in k starting at a
-                // multiple of B_NPT, and group_size is a power of two >= 16 >=
-                // B_NPT for every config that sets B_NPT > 8, so they share one
-                // quant group. The loop form (rather than a single compare)
-                // covers BK_T > group_size, where one K-step spans several
-                // groups: the 128x32 WT2x1 tile has BK_T=64 and would otherwise
-                // decode the upper half with a stale scale.
-                if (__builtin_expect(k_abs >= grp_k_end, 0)) {
-                    do {
-                        grp_cur++;
-                        grp_k_end += group_size;
-                    } while (k_abs >= grp_k_end);
-                    loadGroupConstants(grp_cur);
-                }
-            } else {
-#pragma unroll
-                for (int w = 0; w < B_U32; w++)
-                    pf_bfp[w] = reinterpret_cast<const u32x4*>(b_src_fp)[w];
-                b_src_fp += BK_T;
-            }
-        }
-    };
-
-    auto storeToShared = [&](int buf) __attribute__((always_inline))
-    {
-        if (b_valid) {
-            if constexpr (FUSED_DQ) {
-                /* uint4 -> fp16 without a single v_cvt.
-                 *
-                 * OR-ing a nibble into the mantissa of fp16 1024.0 gives exactly
-                 * 1024+q, and v_perm_b32 places two nibbles into the low bytes
-                 * of the two 16-bit lanes in one instruction. Per 8 weights that
-                 * is 3 mask ops + 4 perms + 4 ORs + 4 pk_add + 4 pk_mul, against
-                 * 8 extracts + 8 v_cvt_f32_ubyte0 + 8 v_cvt_f16_f32 + 4 packs +
-                 * 4 pk_fma for the arithmetic conversion the compiler generates
-                 * from static_cast<_Float16>(unsigned). */
-                const half2v bias2 = __builtin_bit_cast(half2v, bias_pk);
-                const half2v scale2 = __builtin_bit_cast(half2v, s_pk);
-#pragma unroll
-                for (int w = 0; w < B_U32; w++) {
-                    const uint32_t packed = pf_b4[w];
-                    const uint32_t lo = packed & 0x0F0F0F0Fu;         // q0 q2 q4 q6
-                    const uint32_t hi = (packed >> 4) & 0x0F0F0F0Fu;  // q1 q3 q5 q7
-                    u32x4 raw;
-                    // Selector byte i picks byte i of {hi, lo} for output byte i:
-                    // 0..3 are lo's bytes, 4..7 are hi's, 0x0C is a literal zero.
-                    raw[0] = __builtin_amdgcn_perm(hi, lo, 0x0C040C00u);
-                    raw[1] = __builtin_amdgcn_perm(hi, lo, 0x0C050C01u);
-                    raw[2] = __builtin_amdgcn_perm(hi, lo, 0x0C060C02u);
-                    raw[3] = __builtin_amdgcn_perm(hi, lo, 0x0C070C03u);
-                    u32x4 out;
-#pragma unroll
-                    for (int i = 0; i < 4; i++) {
-                        const half2v q =
-                            __builtin_bit_cast(half2v, raw[i] | kMagicPk);
-                        out[i] = __builtin_bit_cast(uint32_t, (q + bias2) * scale2);
-                    }
-                    reinterpret_cast<u32x4*>(&smB[buf][b_col][b_k8])[w] = out;
-                }
-            } else {
-#pragma unroll
-                for (int w = 0; w < B_U32; w++)
-                    reinterpret_cast<u32x4*>(&smB[buf][b_col][b_k8])[w] = pf_bfp[w];
-            }
-        } else {
-            const u32x4 zero4 = {0, 0, 0, 0};
-#pragma unroll
-            for (int w = 0; w < B_U32; w++)
-                reinterpret_cast<u32x4*>(&smB[buf][b_col][b_k8])[w] = zero4;
-        }
-
-#pragma unroll
-        for(int c = 0; c < A_NCH; c++)
-        {
-            _Float16* dst = &smA[buf][a_row[c]][a_koff[c]];
-            if constexpr (A_CH == 8)
-                *reinterpret_cast<u32x4*>(dst) = *reinterpret_cast<const u32x4*>(pf_a[c]);
-            else
-                *reinterpret_cast<u32x2*>(dst) = *reinterpret_cast<const u32x2*>(pf_a[c]);
-        }
-    };
-
-    // ks_begin/ks_end let the caller run the K-step's WMMA in two pieces and put
-    // the shared-memory store for the *next* tile between them.
-    auto computeWMMA = [&](int buf, int ks_begin, int ks_end)
-        __attribute__((always_inline))
-    {
-#pragma unroll
-        for(int ks = ks_begin; ks < ks_end; ks++)
-        {
-            // 16-byte vector reads: a half16 fragment is two ds_read_b128, which
-            // the padded row stride above makes legal.
-            half16 b_frag[WT_N];
-            const int k_off = hipdnn_wmma_k_off(sub);
-#pragma unroll
-            for(int wn = 0; wn < WT_N; wn++)
-            {
-                int noff            = (wcol * WT_N + wn) * WMMA_TILE;
-                u32x4* dst          = reinterpret_cast<u32x4*>(&b_frag[wn]);
-                const u32x4* src    = reinterpret_cast<const u32x4*>(
-                    &smB[buf][noff + lane][ks * WMMA_TILE + k_off]);
-#pragma unroll
-                for(int i = 0; i < HIPDNN_WMMA_FRAG_ELEMS / 8; i++)
-                    dst[i] = src[i];
-            }
-#pragma unroll
-            for(int wm = 0; wm < WT_M; wm++)
-            {
-                int moff            = (wrow * WT_M + wm) * WMMA_TILE;
-                half16 a_frag;
-                u32x4* dst          = reinterpret_cast<u32x4*>(&a_frag);
-                const u32x4* src    = reinterpret_cast<const u32x4*>(
-                    &smA[buf][moff + lane][ks * WMMA_TILE + k_off]);
-#pragma unroll
-                for(int i = 0; i < HIPDNN_WMMA_FRAG_ELEMS / 8; i++)
-                    dst[i] = src[i];
-
-#pragma unroll
-                for(int wn = 0; wn < WT_N; wn++)
-                    acc[wm][wn] = HIPDNN_WMMA_F32_16X16X16_F16(
-                        a_frag, b_frag[wn], acc[wm][wn]);
-            }
-        }
-    };
-
-    // issueLoads takes this thread's absolute k, which is what the quant-group
-    // tracking keys on; the source pointers advance themselves.
-    issueLoads(b_k8);
-    storeToShared(0);
-    HIPDNN_LDS_BARRIER();
-
-    /* The store stays after the whole WMMA sequence.
-     *
-     * Splitting the sequence and dequantizing the next tile in the middle looks
-     * like it should hide the dequant behind Matrix Core work, and it was tried:
-     * it costs 3-38% depending on the tile, because the WT_N fragments have to
-     * stay live across the store and the extra pressure spills into worse
-     * scheduling. The compiler already interleaves the tail of the WMMA sequence
-     * with the dequant on its own. */
-    int buf = 0;
-    for(int t = BK_T; t < K; t += BK_T)
-    {
-        int nxt = 1 - buf;
-        issueLoads(t + b_k8);
-        computeWMMA(buf, 0, K_STEPS);
-        storeToShared(nxt);
-        HIPDNN_LDS_BARRIER();
-        buf = nxt;
-    }
-    computeWMMA(buf, 0, K_STEPS);
-
-#pragma unroll
-    for(int wm = 0; wm < WT_M; wm++)
-    {
-        int mbase = row0 + (wrow * WT_M + wm) * WMMA_TILE;
-#pragma unroll
-        for(int wn = 0; wn < WT_N; wn++)
-        {
-            int nbase = col0 + (wcol * WT_N + wn) * WMMA_TILE;
-#pragma unroll
-            for(int e = 0; e < 8; e++)
-            {
-                int r = hipdnn_wmma_acc_row(sub, e);
-                if constexpr (BOUNDS_CHECK) {
-                    if (mbase + r < M && nbase + lane < N)
-                        C[(mbase + r) * ldc + nbase + lane] =
-                            (_Float16)acc[wm][wn][e];
-                } else {
-                    C[(mbase + r) * ldc + nbase + lane] =
-                        (_Float16)acc[wm][wn][e];
-                }
-            }
-        }
-    }
-}
+#include "matmul_nbits_wmma_core.h"
+#include "matmul_nbits_wmma_core_x.h"
 
 /* WMMA kernel entry points with per-variant GPU attributes */
 
@@ -4670,6 +4459,50 @@ void MatMulNBitsWMMA_ZP(
         M, N, K, A, lda, B_packed, scales, zeros,
         group_size, num_groups_k, C, ldc, swizzle_n, b_row_bytes);
 }
+
+// GemmFp16U4ImplX entries. VARIANT packs the pipeline options of
+// matmul_nbits_wmma_core_x.h in bits 0-6 (see WmmaConfig::variant); bit 7
+// selects the CU-mode build of the same kernel.
+#define WMMAX_VARIANT_ARGS(V) \
+    ((V) & 1) ? 2 : 1, ((V) >> 1) & 1, ((V) >> 2) & 1, ((V) >> 3) & 3, \
+    ((V) >> 5) & 1, ((V) >> 6) & 1
+constexpr int kWmmaVariantCuMode = 128;
+
+// CU mode is a per-kernel property (the descriptor's workgroup_processor_mode):
+// the workgroup's waves share one CU and its half of the LDS instead of
+// spreading over the WGP. It changes the kernel attributes only, so each
+// entry point is defined once per mode from the same body. waves_per_eu is 1,
+// as in the measurements: on gfx11 every value up to 6 allows 256 VGPRs.
+#define MATMUL_NBITS_WMMAX_KERNEL(NAME, USE_ZEROS, MODE_ATTR)                    \
+    template <int BM_T, int BN_T, int WT_M, int WT_N, bool BC, int BK_T,        \
+              int VARIANT>                                                      \
+    __global__ __attribute__((amdgpu_flat_work_group_size(                      \
+        GEMM_WG_SZ(BM_T, BN_T, WT_M, WT_N), GEMM_WG_SZ(BM_T, BN_T, WT_M, WT_N)))) \
+    __attribute__((amdgpu_waves_per_eu(1))) MODE_ATTR void NAME(               \
+        int M, int N, int K, const _Float16* __restrict__ A, int lda,           \
+        const unsigned char* __restrict__ B_packed,                             \
+        const _Float16* __restrict__ scales, const _Float16* __restrict__ zeros, \
+        int group_size, int num_groups_k, _Float16* __restrict__ C, int ldc,    \
+        int swizzle_n, int b_row_bytes)                                         \
+    {                                                                           \
+        GemmFp16U4ImplX<BM_T, BN_T, WT_M, WT_N, USE_ZEROS, BC, BK_T,            \
+                        WMMAX_VARIANT_ARGS(VARIANT)>(                           \
+            M, N, K, A, lda, B_packed, scales, zeros, group_size, num_groups_k, \
+            C, ldc, swizzle_n, b_row_bytes);                                    \
+    }
+// A device-code attribute: the host pass only sees the launch stub.
+#if defined(__HIP_DEVICE_COMPILE__)
+#define MATMUL_NBITS_CU_MODE __attribute__((target("cumode")))
+#else
+#define MATMUL_NBITS_CU_MODE
+#endif
+MATMUL_NBITS_WMMAX_KERNEL(MatMulNBitsWMMAX_NoZP, false, )
+MATMUL_NBITS_WMMAX_KERNEL(MatMulNBitsWMMAX_ZP, true, )
+MATMUL_NBITS_WMMAX_KERNEL(MatMulNBitsWMMAX_NoZP_CU, false, MATMUL_NBITS_CU_MODE)
+MATMUL_NBITS_WMMAX_KERNEL(MatMulNBitsWMMAX_ZP_CU, true, MATMUL_NBITS_CU_MODE)
+#undef MATMUL_NBITS_CU_MODE
+#undef MATMUL_NBITS_WMMAX_KERNEL
+#undef WMMAX_VARIANT_ARGS
 
 // Specialized ragged-batch WMMA entry for QMoE prefill. Each z slice is one
 // expert whose A/C rows begin at expert_row_offsets[e], while expert_counts
@@ -4813,6 +4646,537 @@ extern "C" int hip_matmul_nbits_grouped_wmma(
   return static_cast<int>(err);
 }
 
+/* -----------------------------------------------------------------------
+ * Section 2b-smallm: direct-B WMMA for a few rows (MoE expert slices)
+ *
+ * WHY: GemmFp16U4Impl stages B through LDS one K-step at a time. Its smallest
+ * tile (64x64, BK_T=16) moves 4 bytes of packed weight per thread per step and
+ * then waits on a barrier, so a whole 90-workgroup gpt-oss expert GEMM keeps
+ * only ~46 KB of weight in flight. Measured on gfx1151 (N=5760/2880, K=2880,
+ * block 32, zp + bias, 128 distinct experts so nothing is cache-resident):
+ * 237-330 us per expert (fc1+fc2) at M=4..64, i.e. 44-60 GB/s of weight, and
+ * M barely matters because the cost is the weight stream. Batching experts
+ * into one launch (MatMulNBitsWMMA_Grouped_NoZP) or spreading them over
+ * streams did not change it; the per-step latency is inside the kernel.
+ *
+ * This kernel has no LDS staging and no K-loop barrier. Each wave owns a run
+ * of CPW 32-wide K chunks; CPW is a template constant so every load and wait
+ * is scheduled statically (a runtime-bounded ring measured ~20% slower). The
+ * workgroup has ceil(nchunk / CPW) waves whose partial sums are reduced
+ * through LDS once at the end. A lane loads its B column's packed nibbles
+ * straight from global memory in WMMA fragment order (16 bytes per chunk)
+ * with DB chunks in flight -- DB == CPW issues the wave's whole run up front
+ * -- and dequantizes in registers with the same magic-bias fp16 math as
+ * GemmFp16U4Impl, so B values are bit-identical. A comes from global/L2 with
+ * DA chunks in flight. Same shapes: 108-112 us per expert at M=2..16
+ * (~130 GB/s), 133-136 us at M=24..32, 179-194 us at M=48..64.
+ *
+ * Rows past M are loaded as zero and never stored. Requirements: K % 32 == 0,
+ * power-of-two group_size >= 32, zero points packed uint4 (MatMulNBits
+ * layout), fp16, or none (symmetric 8), wave32 WMMA, at most 16 waves
+ * (K <= 16 * CPW * 32).
+ * ----------------------------------------------------------------------- */
+
+struct SmallMWmmaConfig {
+    int tm, tn, cpw, db, da;
+};
+
+// tm x 16 rows and tn x 16 columns per workgroup, CPW chunks of 32 k per wave,
+// DB / DA chunks of B / A in flight per wave. The first three are the defaults
+// for M <= 16, M <= 32 and larger; configs 3 and 4 (CPW 10) and the last two
+// (CPW 16) replace the first two at the K values listed in
+// smallMWmmaDefaultConfig; config 5 is an alternative for sweeps.
+static constexpr SmallMWmmaConfig kSmallMWmmaConfigs[] = {
+    {1, 1, 18, 18, 2}, {2, 1, 18, 18, 1}, {4, 1, 10, 10, 1},
+    {1, 1, 10, 10, 2}, {2, 1, 10, 10, 1}, {4, 1, 6, 6, 1},
+    {1, 1, 16, 16, 2}, {2, 1, 16, 16, 1},
+};
+static constexpr int kNumSmallMWmmaConfigs =
+    static_cast<int>(sizeof(kSmallMWmmaConfigs) / sizeof(kSmallMWmmaConfigs[0]));
+
+// Eight packed nibbles (k..k+7 of one B column) -> four half2 words holding
+// (q - zp) * s in k order. Same instruction sequence and rounding as the
+// storeToShared dequant in GemmFp16U4Impl.
+__device__ __forceinline__ void smallmDequant8(uint32_t packed, uint32_t bias_pk,
+                                               uint32_t s_pk, uint32_t* out) {
+    constexpr uint32_t kMagicPk = 0x64006400u;
+    const half2v bias2 = __builtin_bit_cast(half2v, bias_pk);
+    const half2v scale2 = __builtin_bit_cast(half2v, s_pk);
+    const uint32_t lo = packed & 0x0F0F0F0Fu;
+    const uint32_t hi = (packed >> 4) & 0x0F0F0F0Fu;
+    uint32_t raw[4];
+    raw[0] = __builtin_amdgcn_perm(hi, lo, 0x0C040C00u);
+    raw[1] = __builtin_amdgcn_perm(hi, lo, 0x0C050C01u);
+    raw[2] = __builtin_amdgcn_perm(hi, lo, 0x0C060C02u);
+    raw[3] = __builtin_amdgcn_perm(hi, lo, 0x0C070C03u);
+#pragma unroll
+    for (int i = 0; i < 4; i++) {
+        const half2v q = __builtin_bit_cast(half2v, raw[i] | kMagicPk);
+        out[i] = __builtin_bit_cast(uint32_t, (q + bias2) * scale2);
+    }
+}
+
+// One workgroup computes rows [row0, row0 + TM*16) x columns
+// [col0, col0 + TN*16) of C = A * dequant(B)^T (+ bias). FULL means every wave
+// owns exactly CPW chunks (nchunk % CPW == 0); otherwise the last wave's run
+// is shorter and its loads are guarded. red is the dynamic LDS reduction
+// buffer, [waves][TM*TN][8][32] floats. zp_mode: 0 none (symmetric 8),
+// kSmallMZpFp16 fp16 [N][zp_stride], kSmallMZpU4 MatMulNBits packed nibbles
+// [N][zp_stride bytes]; a 4-bit integer converts to fp16 exactly, so both give
+// the same B values. GATHER reads A through a_row_ids: row m reads A row
+// a_row_ids[m]. It is a template parameter because a runtime test around the
+// id load made the compiler wait for all prologue loads before the A loads,
+// slowing the kernels that do not gather.
+constexpr int kSmallMZpFp16 = 1;
+constexpr int kSmallMZpU4 = 2;
+
+template <int TM, int TN, int CPW, int DB, int DA, bool FULL, bool GATHER = false>
+__device__ __forceinline__ void SmallMWmmaImpl(
+    float* red, int M, int N, int K, int row0, int col0,
+    const _Float16* __restrict__ A, int lda,
+    const unsigned char* __restrict__ B, int b_row_bytes,
+    const _Float16* __restrict__ scales,
+    const void* __restrict__ zeros, int zp_mode, int zp_stride,
+    const _Float16* __restrict__ bias,
+    int group_shift, int num_groups_k,
+    _Float16* __restrict__ C, int ldc,
+    const int32_t* __restrict__ a_row_ids = nullptr)
+{
+    // Fragment words: a gfx11 lane holds the whole 16-wide K step (8 dwords of
+    // fp16), a gfx12-style lane half of it (4 dwords).
+    constexpr int FRAG_U32 = HIPDNN_WMMA_FRAG_ELEMS / 2;
+    constexpr int T = TM * TN;
+
+    const int lid  = threadIdx.x & 31;
+    const int wid  = threadIdx.x >> 5;
+    const int lane = lid & 15;
+    const int k_off = hipdnn_wmma_k_off(lid >> 4);
+    const int c0 = wid * CPW;
+    const int cnt = FULL ? CPW : min(CPW, (K >> 5) - c0);
+
+    // Source A rows, before the scale loads: waiting for a load also waits
+    // for every load issued before it, so ids loaded after the scales would
+    // hold the A prefetch behind all of them.
+    int a_src[TM];
+#pragma unroll
+    for (int tm = 0; tm < TM; tm++) {
+        const int m = row0 + tm * 16 + lane;
+        a_src[tm] = m < M ? (GATHER ? a_row_ids[m] : m) : 0;
+    }
+
+    // Scales and zero points for this wave's CPW chunks, loaded up front. The
+    // zero-point mode is tested once around all of its loads: tested per chunk
+    // (if (ok && zp_mode == ...) inside the j loop), the current compiler kept a uniform
+    // branch per chunk and waited for each chunk's scale load inside it (one
+    // s_waitcnt vmcnt(0) per chunk, 55 -> 79 waits at CPW=18), so the
+    // prologue's loads ran one at a time: 3-8% on the gpt-oss expert layers.
+    const unsigned char* b_col[TN];
+    size_t ns[TN];
+    int grp[CPW];
+#pragma unroll
+    for (int j = 0; j < CPW; j++)
+        grp[j] = (FULL || j < cnt) ? (c0 + j) >> group_shift : 0;
+    _Float16 rs[CPW][TN], rz[CPW][TN];
+#pragma unroll
+    for (int tn = 0; tn < TN; tn++) {
+        const int n = col0 + tn * 16 + lane;
+        ns[tn] = static_cast<size_t>(n < N ? n : 0);
+        b_col[tn] = B + ns[tn] * b_row_bytes + c0 * 16;
+        const _Float16* s_col = scales + ns[tn] * num_groups_k;
+#pragma unroll
+        for (int j = 0; j < CPW; j++) {
+            const _Float16 s = s_col[grp[j]];
+            rs[j][tn] = (FULL || j < cnt) ? s : (_Float16)0;
+            rz[j][tn] = 8;
+        }
+    }
+    if (zp_mode == kSmallMZpU4) {
+#pragma unroll
+        for (int tn = 0; tn < TN; tn++) {
+            const uint8_t* z4 = static_cast<const uint8_t*>(zeros) + ns[tn] * zp_stride;
+#pragma unroll
+            for (int j = 0; j < CPW; j++) {
+                const uint8_t b = z4[grp[j] >> 1];
+                rz[j][tn] = static_cast<_Float16>((grp[j] & 1) ? (b >> 4) : (b & 0xF));
+            }
+        }
+    } else if (zp_mode == kSmallMZpFp16) {
+#pragma unroll
+        for (int tn = 0; tn < TN; tn++) {
+            const _Float16* z16 = static_cast<const _Float16*>(zeros) + ns[tn] * zp_stride;
+#pragma unroll
+            for (int j = 0; j < CPW; j++) rz[j][tn] = z16[grp[j]];
+        }
+    }
+    const _Float16* a_row[TM];
+    bool a_ok[TM];
+#pragma unroll
+    for (int tm = 0; tm < TM; tm++) {
+        a_ok[tm] = row0 + tm * 16 + lane < M;
+        a_row[tm] = A + static_cast<size_t>(a_src[tm]) * lda + c0 * 32 + k_off;
+    }
+
+    u32x4    rb[DB][TN];
+    uint32_t ra[DA][TM][2][FRAG_U32];
+
+    auto issueB = [&](int slot, int j) __attribute__((always_inline)) {
+#pragma unroll
+        for (int tn = 0; tn < TN; tn++) {
+            u32x4 v = {0, 0, 0, 0};
+            if (FULL || j < cnt) v = *reinterpret_cast<const u32x4*>(b_col[tn] + j * 16);
+            rb[slot][tn] = v;
+        }
+    };
+    auto issueA = [&](int slot, int j) __attribute__((always_inline)) {
+#pragma unroll
+        for (int tm = 0; tm < TM; tm++)
+#pragma unroll
+            for (int ks = 0; ks < 2; ks++)
+#pragma unroll
+                for (int w = 0; w < FRAG_U32; w += 4) {
+                    u32x4 v = {0, 0, 0, 0};
+                    if (a_ok[tm] && (FULL || j < cnt))
+                        v = *reinterpret_cast<const u32x4*>(a_row[tm] + j * 32 + ks * 16 + w * 2);
+                    ra[slot][tm][ks][w + 0] = v[0];
+                    ra[slot][tm][ks][w + 1] = v[1];
+                    ra[slot][tm][ks][w + 2] = v[2];
+                    ra[slot][tm][ks][w + 3] = v[3];
+                }
+    };
+
+    float8 acc[TM][TN];
+#pragma unroll
+    for (int tm = 0; tm < TM; tm++)
+#pragma unroll
+        for (int tn = 0; tn < TN; tn++)
+#pragma unroll
+            for (int e = 0; e < 8; e++) acc[tm][tn][e] = 0.0f;
+
+    constexpr int PRO = DB > DA ? DB : DA;
+#pragma unroll
+    for (int j = 0; j < PRO && j < CPW; j++) {
+        if (j < DB) issueB(j, j);
+        if (j < DA) issueA(j, j);
+    }
+
+#pragma unroll
+    for (int j = 0; j < CPW; j++) {
+        const int sb = j % DB, sa = j % DA;
+#pragma unroll
+        for (int tn = 0; tn < TN; tn++) {
+            const _Float16 bias16 = -((_Float16)1024 + rz[j][tn]);
+            const uint16_t s_bits = __builtin_bit_cast(uint16_t, rs[j][tn]);
+            const uint16_t b_bits = __builtin_bit_cast(uint16_t, bias16);
+            const uint32_t s_pk = (uint32_t(s_bits) << 16) | s_bits;
+            const uint32_t b_pk = (uint32_t(b_bits) << 16) | b_bits;
+#pragma unroll
+            for (int ks = 0; ks < 2; ks++) {
+                // Packed words covering this lane's k range of step ks.
+                uint32_t bw[FRAG_U32];
+#pragma unroll
+                for (int w = 0; w < FRAG_U32 / 4; w++)
+                    smallmDequant8(rb[sb][tn][(ks * 16 + k_off) / 8 + w], b_pk, s_pk,
+                                   &bw[w * 4]);
+                half16 b_frag = __builtin_bit_cast(half16, bw);
+#pragma unroll
+                for (int tm = 0; tm < TM; tm++) {
+                    half16 a_frag = __builtin_bit_cast(half16, ra[sa][tm][ks]);
+                    acc[tm][tn] = HIPDNN_WMMA_F32_16X16X16_F16(a_frag, b_frag, acc[tm][tn]);
+                }
+            }
+        }
+        if (j + DB < CPW) issueB(sb, j + DB);
+        if (j + DA < CPW) issueA(sa, j + DA);
+    }
+
+#pragma unroll
+    for (int t = 0; t < T; t++)
+#pragma unroll
+        for (int e = 0; e < 8; e++)
+            red[((wid * T + t) * 8 + e) * 32 + lid] = acc[t / TN][t % TN][e];
+    __syncthreads();
+
+    const int waves = static_cast<int>(blockDim.x) >> 5;
+    for (int idx = threadIdx.x; idx < T * 256; idx += blockDim.x) {
+        const int l32 = idx & 31;
+        const int e = (idx >> 5) & 7;
+        const int t = idx >> 8;
+        float v = 0.0f;
+        for (int w = 0; w < waves; w++) v += red[((w * T + t) * 8 + e) * 32 + l32];
+        const int row = row0 + (t / TN) * 16 + hipdnn_wmma_acc_row(l32 >> 4, e);
+        const int col = col0 + (t % TN) * 16 + (l32 & 15);
+        if (row < M && col < N) {
+            if (bias) v += static_cast<float>(bias[col]);
+            C[static_cast<size_t>(row) * ldc + col] = static_cast<_Float16>(v);
+        }
+    }
+}
+
+// Ragged expert batch over a device-built row-tile list: blockIdx.y is a tile
+// slot holding (expert, row0, rows) with rows <= TM*16, blockIdx.x the column
+// tile. The expert's rows start at expert_row_offsets[expert] in C, and in A
+// too unless GATHER: then grouped row r reads A row a_row_ids[r].
+// B, scales, zeros and bias are expert-major. Slots at or past *num_row_tiles
+// exit before touching memory, so grid.y only needs a host-side upper bound.
+// Column-fastest order keeps concurrently running workgroups on contiguous
+// weights of one expert; slot-fastest (every expert at once) measured 25-35%
+// slower on real gpt-oss routing.
+template <int TM, int TN, int CPW, int DB, int DA, bool FULL, bool GATHER>
+__global__ __launch_bounds__(512)
+void MatMulNBitsWMMA_SmallM_Grouped(
+    int N, int K,
+    const _Float16* __restrict__ A,
+    const int32_t* __restrict__ a_row_ids,
+    const unsigned char* __restrict__ B, int b_row_bytes,
+    const _Float16* __restrict__ scales,
+    const void* __restrict__ zeros, int zp_mode, int zp_stride,
+    const _Float16* __restrict__ bias,
+    const int32_t* __restrict__ expert_row_offsets,
+    const int32_t* __restrict__ row_tiles,
+    const int32_t* __restrict__ num_row_tiles,
+    int group_shift, int num_groups_k,
+    _Float16* __restrict__ C)
+{
+    extern __shared__ float smallm_red[];
+    const int slot = static_cast<int>(blockIdx.y);
+    if (slot >= *num_row_tiles) return;
+    const int expert = row_tiles[3 * slot];
+    const int row0 = row_tiles[3 * slot + 1];
+    const int rows = row_tiles[3 * slot + 2];
+    const size_t off = static_cast<size_t>(expert_row_offsets[expert]);
+    const size_t e_rows = static_cast<size_t>(expert) * N;
+    const size_t zp_elem = zp_mode == kSmallMZpFp16 ? sizeof(_Float16) : 1;
+    SmallMWmmaImpl<TM, TN, CPW, DB, DA, FULL, GATHER>(
+        smallm_red, row0 + rows, N, K, row0,
+        static_cast<int>(blockIdx.x) * TN * 16, GATHER ? A : A + off * K, K,
+        B + e_rows * b_row_bytes, b_row_bytes,
+        scales + e_rows * num_groups_k,
+        zp_mode ? static_cast<const char*>(zeros) + e_rows * zp_stride * zp_elem
+                : nullptr,
+        zp_mode, zp_stride, bias ? bias + e_rows : nullptr, group_shift,
+        num_groups_k, C + off * N, N, GATHER ? a_row_ids + off : nullptr);
+}
+
+// Config chosen by tile height when the caller passes cfg < 0. Picked from a
+// sweep on gfx1151 with the gpt-oss expert shapes (fc1 N=5760 / fc2 N=2880,
+// K=2880, block 32). The CPW 16 variants are used only at the K values where
+// they were measured faster than CPW 18 (gfx1151, grouped expert GEMMs at
+// block 128, 16- and 32-row tiles: 9-14% at K=512, 1024, 2048 and 3072). At
+// the Qwen3.8-Flash-Next expert shapes (block 32, 512 experts, top 10) CPW 16
+// at K=2560 and CPW 10 at K=640 make a 512-token QMoE prefill 25% faster on
+// gfx1151. Every other K keeps the CPW 18 default.
+static int smallMWmmaDefaultConfig(int64_t M, int64_t K) {
+    const bool cpw16 =
+        K == 512 || K == 1024 || K == 2048 || K == 2560 || K == 3072;
+    const bool cpw10 = K == 640;
+    if (M <= 16) return cpw16 ? 6 : cpw10 ? 3 : 0;
+    if (M <= 32) return cpw16 ? 7 : cpw10 ? 4 : 1;
+    return 2;
+}
+
+// Launch geometry; false when the shape or config cannot run this kernel.
+struct SmallMWmmaLaunch {
+    SmallMWmmaConfig c;
+    int waves, group_shift, ngk, b_row_bytes, zp_mode, zp_stride;
+    bool full;
+    size_t lds_bytes;
+};
+
+static bool smallMWmmaPlan(int cfg, int64_t N, int64_t K, int64_t bits,
+                           int64_t block_size, int64_t element_size_bytes,
+                           const void* zero_points, int zp_packed_u4,
+                           SmallMWmmaLaunch* p) {
+    if (hipdnn_device_is_wave64() || bits != 4 || element_size_bytes != 2 ||
+        N <= 0 || K <= 0 || (K % 32) != 0 || block_size < 32 ||
+        (block_size & (block_size - 1)) != 0)
+        return false;
+    if (cfg < 0 || cfg >= kNumSmallMWmmaConfigs) return false;
+    p->c = kSmallMWmmaConfigs[cfg];
+    const int nchunk = static_cast<int>(K / 32);
+    p->waves = (nchunk + p->c.cpw - 1) / p->c.cpw;
+    p->full = (nchunk % p->c.cpw) == 0;
+    p->lds_bytes = static_cast<size_t>(p->waves) * p->c.tm * p->c.tn * 256 * sizeof(float);
+    if (p->waves > 16 || p->lds_bytes > 64 * 1024) return false;
+    p->group_shift = 0;
+    while ((32LL << p->group_shift) < block_size) p->group_shift++;
+    p->ngk = static_cast<int>((K + block_size - 1) / block_size);
+    p->b_row_bytes = static_cast<int>((K + 1) / 2);
+    p->zp_mode = !zero_points ? 0 : zp_packed_u4 ? kSmallMZpU4 : kSmallMZpFp16;
+    p->zp_stride = zp_packed_u4 ? (p->ngk + 1) / 2 : p->ngk;
+    return true;
+}
+
+extern "C" int hip_matmul_nbits_wmma_smallm_grouped_supported(
+    int cfg, int64_t tile_rows, int64_t N, int64_t K, int64_t bits,
+    int64_t block_size, int64_t element_size_bytes) {
+  if (tile_rows <= 0) return 0;
+  if (cfg < 0) cfg = smallMWmmaDefaultConfig(tile_rows, K);
+  SmallMWmmaLaunch p;
+  if (!smallMWmmaPlan(cfg, N, K, bits, block_size, element_size_bytes,
+                      nullptr, 0, &p))
+    return 0;
+  return tile_rows <= p.c.tm * 16 ? 1 : 0;
+}
+
+#define SMALLM_WMMA_CASES(X)                                                  \
+    X(0, 1, 1, 18, 18, 2) X(1, 2, 1, 18, 18, 1) X(2, 4, 1, 10, 10, 1)         \
+    X(3, 1, 1, 10, 10, 2) X(4, 2, 1, 10, 10, 1) X(5, 4, 1, 6, 6, 1)          \
+    X(6, 1, 1, 16, 16, 2) X(7, 2, 1, 16, 16, 1)
+
+extern "C" int hip_matmul_nbits_wmma_smallm_grouped(
+    void* stream, int cfg, const void* A, const void* a_row_ids,
+    const void* B, const void* scales, const void* zero_points,
+    int zp_packed_u4, const void* bias, const void* expert_row_offsets,
+    const void* row_tiles, const void* num_row_tiles, void* output,
+    int64_t max_row_tiles, int64_t tile_rows, int64_t N, int64_t K,
+    int64_t bits, int64_t block_size, int64_t element_size_bytes) {
+  if (max_row_tiles <= 0 || N <= 0 || K <= 0) return 0;
+  if (tile_rows <= 0) return -1;
+  if (cfg < 0) cfg = smallMWmmaDefaultConfig(tile_rows, K);
+  SmallMWmmaLaunch p;
+  if (!smallMWmmaPlan(cfg, N, K, bits, block_size, element_size_bytes,
+                      zero_points, zp_packed_u4, &p))
+    return -1;
+  if (tile_rows > p.c.tm * 16) return -1;
+
+  hipStream_t s = static_cast<hipStream_t>(stream);
+  dim3 grid(static_cast<unsigned>((N + p.c.tn * 16 - 1) / (p.c.tn * 16)),
+            static_cast<unsigned>(max_row_tiles));
+  dim3 block(static_cast<unsigned>(p.waves * 32));
+
+#define SMALLM_GROUPED_LAUNCH_ONE(TM, TN, CPW, DB, DA, FULL, GATHER)            \
+  hipLaunchKernelGGL(                                                         \
+      HIP_KERNEL_NAME(                                                        \
+          MatMulNBitsWMMA_SmallM_Grouped<TM, TN, CPW, DB, DA, FULL, GATHER>), \
+      grid, block, p.lds_bytes, s, static_cast<int>(N), static_cast<int>(K),  \
+      static_cast<const _Float16*>(A),                                        \
+      static_cast<const int32_t*>(a_row_ids),                                 \
+      static_cast<const unsigned char*>(B), p.b_row_bytes,                    \
+      static_cast<const _Float16*>(scales), zero_points, p.zp_mode,           \
+      p.zp_stride, static_cast<const _Float16*>(bias),                        \
+      static_cast<const int32_t*>(expert_row_offsets),                        \
+      static_cast<const int32_t*>(row_tiles),                                 \
+      static_cast<const int32_t*>(num_row_tiles), p.group_shift, p.ngk,       \
+      static_cast<_Float16*>(output))
+#define SMALLM_GROUPED_LAUNCH(ID, TM, TN, CPW, DB, DA)                         \
+  case ID:                                                                    \
+    if (p.full && a_row_ids)                                                  \
+      SMALLM_GROUPED_LAUNCH_ONE(TM, TN, CPW, DB, DA, true, true);             \
+    else if (p.full)                                                          \
+      SMALLM_GROUPED_LAUNCH_ONE(TM, TN, CPW, DB, DA, true, false);            \
+    else if (a_row_ids)                                                       \
+      SMALLM_GROUPED_LAUNCH_ONE(TM, TN, CPW, DB, DA, false, true);            \
+    else                                                                      \
+      SMALLM_GROUPED_LAUNCH_ONE(TM, TN, CPW, DB, DA, false, false);           \
+    break;
+  (void)hipGetLastError();
+  switch (cfg) { SMALLM_WMMA_CASES(SMALLM_GROUPED_LAUNCH) }
+#undef SMALLM_GROUPED_LAUNCH
+#undef SMALLM_GROUPED_LAUNCH_ONE
+
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess)
+    fprintf(stderr,
+            "[custom_kernels] hip_matmul_nbits_wmma_smallm_grouped failed: %s\n",
+            hipGetErrorString(err));
+  return static_cast<int>(err);
+}
+
+#undef SMALLM_WMMA_CASES
+
+// Tall row tiles over the same device-built tile list: one workgroup computes
+// a whole (expert, row0, rows) slot x BN columns with the LDS-staged core, so
+// an expert's weights are read once per BM rows instead of once per 16-64.
+// Column-fastest order, as in the direct-B kernel, keeps the running
+// workgroups on one expert's weights. The tile is the 4x4-warp-tile,
+// two-deep-prefetch entry of the dense table (128 threads); C, and A or
+// a_row_ids, are offset to the slot's first row, so the core sees a single
+// row tile.
+static constexpr int kTiledGroupedBm = HIP_MATMUL_NBITS_TILED_GROUPED_ROWS;
+static constexpr int kTiledGroupedBn = 128;
+
+__global__
+__attribute__((amdgpu_flat_work_group_size(
+    GEMM_WG_SZ(kTiledGroupedBm, kTiledGroupedBn, 4, 4),
+    GEMM_WG_SZ(kTiledGroupedBm, kTiledGroupedBn, 4, 4))))
+__attribute__((amdgpu_waves_per_eu(1)))
+void MatMulNBitsWMMA_Tiled_Grouped(
+    int N, int K,
+    const _Float16* __restrict__ A,
+    const int32_t* __restrict__ a_row_ids,
+    const unsigned char* __restrict__ B, int b_row_bytes,
+    const _Float16* __restrict__ scales,
+    const _Float16* __restrict__ bias,
+    const int32_t* __restrict__ expert_row_offsets,
+    const int32_t* __restrict__ row_tiles,
+    const int32_t* __restrict__ num_row_tiles,
+    int group_size, int num_groups_k,
+    _Float16* __restrict__ C)
+{
+    const int slot = static_cast<int>(blockIdx.y);
+    if (slot >= *num_row_tiles) return;
+    const int expert = row_tiles[3 * slot];
+    const int rows = row_tiles[3 * slot + 2];
+    const size_t row0 = static_cast<size_t>(expert_row_offsets[expert]) +
+                        static_cast<size_t>(row_tiles[3 * slot + 1]);
+    const size_t e_cols = static_cast<size_t>(expert) * N;
+    GemmFp16U4ImplX<kTiledGroupedBm, kTiledGroupedBn, 4, 4, /*USE_ZEROS=*/false,
+                    /*BOUNDS_CHECK=*/true, /*BK_IN=*/32, /*PGR_P=*/2,
+                    /*ADDR_P=*/0, /*PIPE_P=*/0, /*SCHED_P=*/0, /*EPI_P=*/0,
+                    /*XOR_P=*/0, /*GROUPED_P=*/true>(
+        rows, N, K, a_row_ids ? A : A + row0 * K, K, B + e_cols * b_row_bytes,
+        scales + e_cols * num_groups_k, nullptr, group_size, num_groups_k,
+        C + row0 * N, N, /*swizzle_n=*/1, b_row_bytes, /*fixed_row_tile=*/0,
+        bias ? bias + e_cols : nullptr, a_row_ids ? a_row_ids + row0 : nullptr);
+}
+
+extern "C" int hip_matmul_nbits_wmma_tiled_grouped_supported(
+    int64_t N, int64_t K, int64_t bits, int64_t block_size,
+    int64_t element_size_bytes) {
+  return !hipdnn_device_is_wave64() && bits == 4 && element_size_bytes == 2 &&
+                 N > 0 && K > 0 && (K % 32) == 0 && block_size >= 32 &&
+                 (block_size & (block_size - 1)) == 0
+             ? 1
+             : 0;
+}
+
+extern "C" int hip_matmul_nbits_wmma_tiled_grouped(
+    void* stream, const void* A, const void* a_row_ids, const void* B,
+    const void* scales, const void* bias, const void* expert_row_offsets,
+    const void* row_tiles,
+    const void* num_row_tiles, void* output, int64_t max_row_tiles, int64_t N,
+    int64_t K, int64_t bits, int64_t block_size, int64_t element_size_bytes) {
+  if (max_row_tiles <= 0 || N <= 0 || K <= 0) return 0;
+  if (!hip_matmul_nbits_wmma_tiled_grouped_supported(N, K, bits, block_size,
+                                                     element_size_bytes))
+    return -1;
+
+  const int ngk = static_cast<int>((K + block_size - 1) / block_size);
+  const int b_row_bytes = static_cast<int>((K + 1) / 2);
+  const dim3 grid(static_cast<unsigned>((N + kTiledGroupedBn - 1) / kTiledGroupedBn),
+                  static_cast<unsigned>(max_row_tiles));
+  (void)hipGetLastError();
+  hipLaunchKernelGGL(
+      MatMulNBitsWMMA_Tiled_Grouped, grid,
+      dim3(GEMM_WG_SZ(kTiledGroupedBm, kTiledGroupedBn, 4, 4)), 0,
+      static_cast<hipStream_t>(stream), static_cast<int>(N),
+      static_cast<int>(K), static_cast<const _Float16*>(A),
+      static_cast<const int32_t*>(a_row_ids),
+      static_cast<const unsigned char*>(B), b_row_bytes,
+      static_cast<const _Float16*>(scales), static_cast<const _Float16*>(bias),
+      static_cast<const int32_t*>(expert_row_offsets),
+      static_cast<const int32_t*>(row_tiles),
+      static_cast<const int32_t*>(num_row_tiles), static_cast<int>(block_size),
+      ngk, static_cast<_Float16*>(output));
+
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess)
+    fprintf(stderr,
+            "[custom_kernels] hip_matmul_nbits_wmma_tiled_grouped failed: %s\n",
+            hipGetErrorString(err));
+  return static_cast<int>(err);
+}
+
 /* fp16 GEMM kernel entry (for pre-dequantized B, FUSED_DQ=false) */
 
 template <int BM_T = 128, int BN_T = 128, int WT_M = 2, int WT_N = 2,
@@ -4855,7 +5219,84 @@ struct WmmaConfig {
     // 0 means the default bm/(wt_m*wt_n). WT2x4 needs it set explicitly: the
     // default would be 16, and a K-step of 16 doubles the barrier count.
     int  bk = 0;
+    // Extended entry (WMMA_EXT_CONFIGS): selected only through the LUT, or by
+    // the sweep on a device whose LUT names extended configs.
+    bool ext = false;
+    // Pipeline options of GemmFp16U4ImplX, bitwise: 1 two-deep global
+    // prefetch, 2 uniform base + 32-bit offsets, 4 store-first, 8/16/24
+    // sched_group_barrier mode 1/2/3, 32 staged epilogue, 64 XOR LDS swizzle,
+    // 128 CU mode. 0 on an extended entry runs the shipped core.
+    int  variant = 0;
 };
+
+static constexpr bool wmmaConfigIsExt(const WmmaConfig& c) { return c.ext; }
+
+// The extended entries were measured and verified on gfx1151 only, so only a
+// gfx1151 device runs them; every other device keeps the original entries.
+// gcnArchName may carry feature suffixes ("gfx1151:xnack-"). Cached per device
+// ordinal like hipdnn_device_wave_size().
+static bool wmmaExtDevice() {
+    constexpr int kMaxCachedDevices = 16;
+    // 0 == not probed yet, 1 == no, 2 == yes.
+    static int cached[kMaxCachedDevices] = {};
+
+    auto probe = [](int d) {
+        hipDeviceProp_t p;
+        if (hipGetDeviceProperties(&p, d) != hipSuccess) return false;
+        return std::strncmp(p.gcnArchName, "gfx1151", 7) == 0 &&
+               (p.gcnArchName[7] == '\0' || p.gcnArchName[7] == ':');
+    };
+
+    int dev = 0;
+    if (hipGetDevice(&dev) != hipSuccess || dev < 0) return false;
+    if (dev >= kMaxCachedDevices) return probe(dev);
+    if (cached[dev] == 0) cached[dev] = probe(dev) ? 2 : 1;
+    return cached[dev] == 2;
+}
+
+// Extended fused int4 entries: (bm, bn, wt_m, wt_n, bk, variant, swizzle).
+// Measured prefill winners, reachable only through a LUT that names them; see
+// "Extended WMMA entries" in docs/design/custom_kernel_design.md. (geometry,
+// swizzle, variant) must be unique among them so the LUT can name each one
+// (checked below). The swizzle is a launch argument, so entries that differ
+// only in it share one set of kernels.
+#define WMMA_EXT_CONFIGS(X)                     \
+    X( 32,  32, 1, 2, 64,   0,  4)              \
+    X(128,  64, 2, 4, 64,   3,  4)              \
+    X(128, 128, 2, 4, 32, 116,  4)              \
+    X(128, 128, 2, 4, 64, 124,  4)              \
+    X(128, 128, 2, 4, 64, 100,  4)              \
+    X(128, 128, 4, 4, 32,   1,  4)              \
+    X(128, 128, 4, 4, 32,   3,  4)              \
+    X(128, 128, 2, 4, 64,  67,  4)              \
+    X(128, 256, 2, 4, 32,  92,  4)              \
+    X( 64,  64, 2, 2, 32, 129,  4)              \
+    X(128, 128, 4, 4, 32, 102,  4)              \
+    X(128,  64, 2, 4, 64, 131,  4)              \
+    X(128, 128, 4, 4, 32,  92,  4)              \
+    X(128, 128, 2, 4, 64, 193,  4)              \
+    X(128, 128, 4, 4, 32, 100,  4)              \
+    X(128, 128, 2, 4, 64,  94,  4)              \
+    X(128, 256, 2, 4, 32, 126,  4)              \
+    X(128, 128, 2, 4, 64,  97,  4)              \
+    X(128, 256, 2, 4, 32, 124,  4)              \
+    X(128, 128, 4, 4, 32,  35,  4)              \
+    X(128, 128, 4, 4, 32,  60,  4)              \
+    X(128, 128, 2, 4, 64,  92,  4)              \
+    X( 64,  64, 2, 2, 32,   1,  4)              \
+    X(128,  64, 2, 4, 64,   6,  4)              \
+    X(128, 128, 4, 4, 32,  65,  4)              \
+    X(128, 128, 2, 4, 32,  33,  4)              \
+    X(128, 256, 2, 4, 32,  94,  4)              \
+    X(128, 128, 4, 4, 32,  33,  4)              \
+    X(128, 128, 2, 4, 64,  67, 16)              \
+    X(128,  64, 2, 4, 64, 131,  8)              \
+    X(128, 128, 2, 4, 64,  94,  8)              \
+    X(128, 128, 4, 4, 32, 100,  1)              \
+    X(128, 128, 4, 4, 32, 196, 16)              \
+    X(128, 128, 4, 4, 32,   3,  1)              \
+    X(128, 128, 2, 4, 64, 225,  1)              \
+    X(128,  64, 2, 4, 64,   3,  1)
 
 static constexpr WmmaConfig kWmmaConfigs[] = {
     // --- fused dequant + GEMM ---
@@ -4900,9 +5341,29 @@ static constexpr WmmaConfig kWmmaConfigs[] = {
     // --- WT_M=2, WT_N=1 separate dequant (BN=32 — for small N) ---
     { 64,  32,  4, false, 2, 1}, { 64,  32,  8, false, 2, 1},
     {128,  32,  4, false, 2, 1}, {128,  32,  8, false, 2, 1},
+    // --- extended fused entries; appended so existing indices keep their
+    //     meaning for HIPDNN_MATMUL_NBITS_WMMA_CFG and profiling scripts ---
+#define WMMA_EXT_ENTRY(BM, BN, WM, WN, BK, VAR, SW) \
+    {BM, BN, SW, true, WM, WN, BK, true, VAR},
+    WMMA_EXT_CONFIGS(WMMA_EXT_ENTRY)
+#undef WMMA_EXT_ENTRY
 };
 static constexpr int kNumWmmaConfigs =
     static_cast<int>(sizeof(kWmmaConfigs) / sizeof(kWmmaConfigs[0]));
+
+static constexpr bool wmmaExtConfigsUnique() {
+    for (int i = 0; i < kNumWmmaConfigs; i++)
+        for (int j = i + 1; j < kNumWmmaConfigs; j++) {
+            const WmmaConfig& a = kWmmaConfigs[i];
+            const WmmaConfig& b = kWmmaConfigs[j];
+            if (a.ext && b.ext && a.bm == b.bm && a.bn == b.bn &&
+                a.swizzle_n == b.swizzle_n && a.wt_m == b.wt_m &&
+                a.wt_n == b.wt_n && a.bk == b.bk && a.variant == b.variant)
+                return false;
+        }
+    return true;
+}
+static_assert(wmmaExtConfigsUnique(), "two extended WMMA entries share a LUT name");
 
 static constexpr int wmmaThreads(const WmmaConfig& c) {
     return (c.bm / (16 * c.wt_m)) * (c.bn / (16 * c.wt_n)) * 32;
@@ -4917,7 +5378,12 @@ static constexpr int wmmaBNibblesPerThread(const WmmaConfig& c) {
     return c.bn * wmmaBk(c) / wmmaThreads(c);
 }
 static bool wmmaConfigApplies(const WmmaConfig& c, int N, int gs) {
-    if (c.bn < 64 && N > 2 * c.bn) return false;
+    // Every path to a launch passes here: LUT answers, sweep candidates,
+    // HIPDNN_MATMUL_NBITS_WMMA_CFG and an explicit config index.
+    if (wmmaConfigIsExt(c) && !wmmaExtDevice()) return false;
+    // The narrow-tile policy predates the extended entries; those were measured
+    // at wide N and only reach a shape through the LUT or the sweep timing.
+    if (!wmmaConfigIsExt(c) && c.bn < 64 && N > 2 * c.bn) return false;
     return gs % wmmaBNibblesPerThread(c) == 0;
 }
 
@@ -4938,6 +5404,32 @@ static bool wmmaConfigSupported(const WmmaConfig& c, int N, int K, int gs) {
     return K % wmmaBk(c) == 0;
 }
 
+// launchDequant uses grid.y = N. HIP caps maxGridSize[1] (65536 on gfx1201);
+// a !fused config that won at a smaller donor N is unlaunchable for lm_head
+// (N=128256). Cached once so LUT validation and the online tuner share it.
+static int dequantMaxGridY() {
+    static const int y = [] {
+        hipDeviceProp_t p{};
+        if (hipGetDeviceProperties(&p, 0) != hipSuccess || p.maxGridSize[1] <= 0)
+            return 65536;
+        return p.maxGridSize[1];
+    }();
+    return y;
+}
+
+// Query-shape launchability for LUT nearest and the online sweep. A config that
+// is legal at a nearby measured point can still be illegal here (padded stride,
+// BK vs K, dequant grid.y). Validators must use this so resolve walks outwards
+// instead of handing production an unlaunchable winner.
+static bool wmmaConfigLaunchable(const WmmaConfig& c, int /*M*/, int N, int K,
+                                 int gs, int b_row_bytes) {
+    if (!wmmaConfigSupported(c, N, K, gs)) return false;
+    // Separate dequant has no stride argument; padded B must stay fused.
+    if (b_row_bytes != 0 && !c.fused) return false;
+    if (!c.fused && N > dequantMaxGridY()) return false;
+    return true;
+}
+
 // Config to fall back on when the requested one cannot serve the shape.
 // Config 9 ({128, 64, sw=4, fused}, BK = 32) is the historical default and is
 // supported for every K the dispatcher lets through; the scan is there so this
@@ -4952,20 +5444,28 @@ static int wmmaFallbackConfig(int N, int K, int gs) {
 /* WMMA half of the LUT bridge; see the GEMV half above kGemvConfigs for the
  * cache-then-LUT-then-sweep ordering this serves. */
 
-// wmmaConfigApplies needs the shape, so the validator carries it through ctx.
+// Full query shape so the validator can reject configs that only work at a
+// nearby donor point (see wmmaConfigLaunchable).
 struct MatmulNbitsWmmaLutCtx {
+    int m;
     int n;
+    int k;
     int gs;
+    int b_row_bytes;
 };
 
-static int wmmaConfigFromGeometry(const matmul_lut::WmmaAnswer& g, int N, int gs) {
+static int wmmaConfigFromGeometry(const matmul_lut::WmmaAnswer& g,
+                                  const MatmulNbitsWmmaLutCtx& ctx) {
     for (int cid = 0; cid < kNumWmmaConfigs; cid++) {
         const WmmaConfig& c = kWmmaConfigs[cid];
         if (c.bm != g.bm || c.bn != g.bn || c.swizzle_n != g.swizzle_n ||
             c.wt_m != g.wt_m || c.wt_n != g.wt_n || c.fused != g.fused)
             continue;
         if (wmmaBk(c) != g.bk) continue;
-        if (!wmmaConfigApplies(c, N, gs)) continue;
+        if (c.ext != g.ext || c.variant != g.variant) continue;
+        if (!wmmaConfigLaunchable(c, ctx.m, ctx.n, ctx.k, ctx.gs,
+                                  ctx.b_row_bytes))
+            return -1;
         return cid;
     }
     return -1;
@@ -4973,7 +5473,7 @@ static int wmmaConfigFromGeometry(const matmul_lut::WmmaAnswer& g, int N, int gs
 
 static bool matmulNbitsWmmaValidator(void* ctx, const matmul_lut::WmmaAnswer& g) {
     const auto* c = static_cast<const MatmulNbitsWmmaLutCtx*>(ctx);
-    return wmmaConfigFromGeometry(g, c->n, c->gs) >= 0;
+    return wmmaConfigFromGeometry(g, *c) >= 0;
 }
 
 // Returns a kWmmaConfigs index from the LUT, or -1 on a miss.
@@ -4989,18 +5489,11 @@ static int matmulNbitsLutWmmaConfig(int M, int N, int K, int gs, bool has_zp,
     req.group_size = gs;
     req.has_zp = has_zp;
     req.b_row_bytes = b_row_bytes;
-    MatmulNbitsWmmaLutCtx ctx{N, gs};
+    MatmulNbitsWmmaLutCtx ctx{M, N, K, gs, b_row_bytes};
     const matmul_lut::Result r =
         matmul_lut::resolve(req, matmulNbitsWmmaValidator, nullptr, &ctx);
     if (r.source == matmul_lut::Source::None) return -1;
-    const int cid = wmmaConfigFromGeometry(r.wmma, N, gs);
-    // A padded stride can only be served by a fused config; the dequant pass
-    // behind a !fused one has no stride argument.
-    if (cid >= 0 && b_row_bytes != 0 && !kWmmaConfigs[cid].fused) return -1;
-    // The geometry match above does not see K, so a table row can name a config
-    // whose BK does not divide it. Reject here rather than let the launch fall
-    // back, which would cache a config that is replaced on every call.
-    if (cid >= 0 && K % wmmaBk(kWmmaConfigs[cid]) != 0) return -1;
+    const int cid = wmmaConfigFromGeometry(r.wmma, ctx);
     if (cid >= 0)
         MATMUL_NBITS_AUTOTUNE_LOG(
             "[custom_kernels] LUT hit (src=%d d=%.3f) M=%d N=%d K=%d gs=%d "
@@ -5024,6 +5517,40 @@ static void launchDequant(
                        B_packed, scales, zeros, B_fp16, N, K, gs, ngk);
 }
 
+template <int BM, int BN, int WM, int WN, int BK, int VAR>
+static void launchWmmaExt(
+    hipStream_t stream, int M, int N, int K,
+    const _Float16* A, int lda, const unsigned char* B,
+    const _Float16* scales, const _Float16* zeros, int gs, int ngk,
+    _Float16* C, int ldc, bool has_zp, int swizzle_n, int b_row_bytes)
+{
+    const bool bc = (M % BM != 0) || (N % BN != 0);
+    dim3 grid(static_cast<unsigned>((N + BN - 1) / BN),
+              static_cast<unsigned>((M + BM - 1) / BM));
+    dim3 block(GEMM_WG_SZ(BM, BN, WM, WN));
+#define WMMA_EXT_LAUNCH(KERNEL)                                                \
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(KERNEL), grid, block, 0, stream, M, N, \
+                       K, A, lda, B, scales, zeros, gs, ngk, C, ldc,           \
+                       swizzle_n, b_row_bytes)
+    if constexpr (VAR == 0) {
+        if (has_zp && bc)  WMMA_EXT_LAUNCH((MatMulNBitsWMMA_ZP<BM, BN, WM, WN, 1, true, BK>));
+        else if (has_zp)   WMMA_EXT_LAUNCH((MatMulNBitsWMMA_ZP<BM, BN, WM, WN, 1, false, BK>));
+        else if (bc)       WMMA_EXT_LAUNCH((MatMulNBitsWMMA_NoZP<BM, BN, WM, WN, 1, true, BK>));
+        else               WMMA_EXT_LAUNCH((MatMulNBitsWMMA_NoZP<BM, BN, WM, WN, 1, false, BK>));
+    } else if constexpr ((VAR & kWmmaVariantCuMode) != 0) {
+        if (has_zp && bc)  WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_ZP_CU<BM, BN, WM, WN, true, BK, VAR>));
+        else if (has_zp)   WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_ZP_CU<BM, BN, WM, WN, false, BK, VAR>));
+        else if (bc)       WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_NoZP_CU<BM, BN, WM, WN, true, BK, VAR>));
+        else               WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_NoZP_CU<BM, BN, WM, WN, false, BK, VAR>));
+    } else {
+        if (has_zp && bc)  WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_ZP<BM, BN, WM, WN, true, BK, VAR>));
+        else if (has_zp)   WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_ZP<BM, BN, WM, WN, false, BK, VAR>));
+        else if (bc)       WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_NoZP<BM, BN, WM, WN, true, BK, VAR>));
+        else               WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_NoZP<BM, BN, WM, WN, false, BK, VAR>));
+    }
+#undef WMMA_EXT_LAUNCH
+}
+
 static void launchWmmaConfig(
     int config_id, hipStream_t stream,
     int M, int N, int K,
@@ -5039,6 +5566,20 @@ static void launchWmmaConfig(
 
     auto& c = kWmmaConfigs[config_id];
     bool need_bc = (M % c.bm != 0) || (N % c.bn != 0);
+
+    if (wmmaConfigIsExt(c)) {
+#define WMMA_EXT_CASE(BM, BN, WM, WN, BK, VAR, SW)                             \
+        if (c.bm == BM && c.bn == BN && c.wt_m == WM && c.wt_n == WN &&      \
+            wmmaBk(c) == BK && c.variant == VAR) {                           \
+            launchWmmaExt<BM, BN, WM, WN, BK, VAR>(                          \
+                stream, M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc,  \
+                has_zp, c.swizzle_n, b_row_bytes);                           \
+            return;                                                          \
+        }
+        WMMA_EXT_CONFIGS(WMMA_EXT_CASE)
+#undef WMMA_EXT_CASE
+        return;
+    }
 
     if (!c.fused) {
         launchDequant(stream, B, scales, zeros, B_fp16_buf, N, K, gs, ngk);
@@ -5217,7 +5758,7 @@ static void launchWmmaConfig(
     if (need_bc) WMMA_LAUNCH_WT21(BM_V, BN_V, true); \
     else         WMMA_LAUNCH_WT21(BM_V, BN_V, false)
 
-#define WMMA_LAUNCH_WT24(BM_V, BN_V, BK_V, BC_V) do { \
+#define WMMA_LAUNCH_WT24(BM_V, BN_V, BK_V, WAVES_V, BC_V) do { \
     constexpr int WM_ = BM_V / (2 * 16); \
     constexpr int WN_ = BN_V / (4 * 16); \
     constexpr int THR_ = WM_ * WN_ * 32; \
@@ -5226,22 +5767,22 @@ static void launchWmmaConfig(
     dim3 block_(THR_); \
     if (has_zp) { \
         hipLaunchKernelGGL( \
-            HIP_KERNEL_NAME(MatMulNBitsWMMA_ZP<BM_V, BN_V, 2, 4, 8, BC_V, BK_V>), \
+            HIP_KERNEL_NAME(MatMulNBitsWMMA_ZP<BM_V, BN_V, 2, 4, WAVES_V, BC_V, BK_V>), \
             grid_, block_, 0, stream, \
             M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
             b_row_bytes); \
     } else { \
         hipLaunchKernelGGL( \
-            HIP_KERNEL_NAME(MatMulNBitsWMMA_NoZP<BM_V, BN_V, 2, 4, 8, BC_V, BK_V>), \
+            HIP_KERNEL_NAME(MatMulNBitsWMMA_NoZP<BM_V, BN_V, 2, 4, WAVES_V, BC_V, BK_V>), \
             grid_, block_, 0, stream, \
             M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
             b_row_bytes); \
     } \
 } while(0)
 
-#define WMMA_TILE_CASE_WT24(BM_V, BN_V, BK_V) \
-    if (need_bc) WMMA_LAUNCH_WT24(BM_V, BN_V, BK_V, true); \
-    else         WMMA_LAUNCH_WT24(BM_V, BN_V, BK_V, false)
+#define WMMA_TILE_CASE_WT24(BM_V, BN_V, BK_V, WAVES_V) \
+    if (need_bc) WMMA_LAUNCH_WT24(BM_V, BN_V, BK_V, WAVES_V, true); \
+    else         WMMA_LAUNCH_WT24(BM_V, BN_V, BK_V, WAVES_V, false)
 
 #define WMMA_LAUNCH_WT44(BM_V, BN_V, BK_V, BC_V) do { \
     constexpr int WM_ = BM_V / (4 * 16); \
@@ -5276,10 +5817,20 @@ static void launchWmmaConfig(
     const int c_bk = wmmaBk(c);
     if      (c.wt_m == 4 && c.wt_n == 4 && c.bm == 128 && c.bn == 128 && c_bk == 32)
                                               WMMA_TILE_CASE_WT44(128, 128, 32);
+    // The 256-thread 128x128 WT2x4 tile asks for 6 waves: its 40 KB of LDS
+    // allows no more than 6 per SIMD anyway, and 6 is a 160-VGPR budget on a
+    // 1024-VGPR target. With the nominal 8 the compiler fell back to the LDS
+    // limit and took 161 VGPRs under ROCm 7.16 (160 under 7.14), which on the
+    // 1024-VGPR hardware (gfx1150 / gfx1152) is one SIMD wave and one
+    // workgroup per WGP less: 1.07-1.25x slower on their LUT points. It fits
+    // 160 with no scratch (156-160 VGPRs, both compilers) since the epilogue
+    // builds one C row pointer per tile; before that, 7.16 spilled 36 B/lane
+    // here. The 512-thread 128x256 tile stays at 8 (see its comment in
+    // matmul_nbits_wmma_core.h).
     else if (c.wt_m == 2 && c.wt_n == 4 && c.bm == 128 && c.bn == 128 && c_bk == 32)
-                                              WMMA_TILE_CASE_WT24(128, 128, 32);
+                                              WMMA_TILE_CASE_WT24(128, 128, 32, 6);
     else if (c.wt_m == 2 && c.wt_n == 4 && c.bm == 128 && c.bn == 256 && c_bk == 32)
-                                              WMMA_TILE_CASE_WT24(128, 256, 32);
+                                              WMMA_TILE_CASE_WT24(128, 256, 32, 8);
     else if (c.wt_m == 4 && c.bm == 256 && c.bn == 128)
                                               WMMA_TILE_CASE_WT4(256, 128);
     else if (c.wt_n == 1 && c.bm == 128 && c.bn == 32)
@@ -5409,6 +5960,10 @@ static _Float16* ensureOutColBuffer(int M, int N) {
     return g_out_col_buf;
 }
 
+// Set by the offline sweep driver (hip_matmul_nbits_u4_wmma_sweep_extended)
+// to measure the extended entries on a device whose table does not name them.
+static std::atomic<bool> g_wmma_sweep_extended{false};
+
 /* b_row_bytes = 0 means the arrival stride, num_groups_k * (group_size/2).
  *
  * A non-zero stride has to be measured with rather than assumed away: a
@@ -5431,54 +5986,76 @@ static int tuneWmmaConfig(
 
     _Float16* dq_buf = ensureDqBuffer(N, K);
 
-    // Separate-dequant configs read B only through launchDequant, which has no
-    // stride argument, so at a padded stride they would decode the padding as
-    // weights. Measuring them here would let the tuner crown a config the
-    // padded path cannot serve.
-    const bool fused_only = (b_row_bytes != 0);
-
     float best_ms = 1e30f;
     int   best_id = wmmaFallbackConfig(N, K, gs);
-    constexpr int WARMUP = 1;
+    constexpr int WARMUP = 2;
     constexpr int ITERS  = 5;
+    constexpr int kFloorIters = 15;  // extra iters for sub-0.1ms configs
 
-    /* Single in-order pass, keeping each config's batch time. Deliberately the
-     * original, minimal measurement: the kernel tuner is on the runtime dispatch
-     * path, so it stays simple and fast. Any more careful measurement (clock
-     * settling, multi-pass, structural tie-breaks) belongs in the offline LUT
-     * sweep, not here -- see autotune/matmul_nbits. */
+    // Same predicate as the LUT validator: skip a tile that cannot launch at
+    // this query (BK vs K, padded stride, dequant grid.y). Measuring it would
+    // crown a winner the production path cannot serve. Extended entries are
+    // timed only on a device whose LUT names them, i.e. one they were measured
+    // on, or when the sweep driver measures them; elsewhere the runtime sweep
+    // keeps the original table.
+    const bool ext_ok = matmul_lut::extendedConfigsMeasured() ||
+                        g_wmma_sweep_extended.load(std::memory_order_relaxed);
+    auto candidate = [&](int cid) {
+        const WmmaConfig& cfg = kWmmaConfigs[cid];
+        return wmmaConfigLaunchable(cfg, M, N, K, gs, b_row_bytes) &&
+               !(cfg.ext && !ext_ok);
+    };
+
+    /* The offline LUT sweep ranks configs by the timings logged here, so this
+     * is the measurement the tables are only as good as. Same standard as the
+     * GEMV and u3 / u2 WMMA tuners: settle the clock once, then give every
+     * config the peak (min) of ITERS isolated launches at that clock. A
+     * back-to-back average with one warmup launch timed the early configs
+     * boosted and the late ones throttled. */
+    int settle_id = -1;
+    for (int cid = 0; cid < kNumWmmaConfigs && settle_id < 0; cid++)
+        if (candidate(cid)) settle_id = cid;
+    if (settle_id >= 0)
+        settleClock(ev0, ev1, stream, [&]{
+            launchWmmaConfig(settle_id, stream, M, N, K, A, lda, B,
+                             scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf,
+                             b_row_bytes);
+        });
+
     for (int cid = 0; cid < kNumWmmaConfigs; cid++) {
-        auto& cfg = kWmmaConfigs[cid];
-        if (!wmmaConfigSupported(cfg, N, K, gs)) continue;
-        if (fused_only && !cfg.fused) continue;
+        if (!candidate(cid)) continue;
 
-        for (int w = 0; w < WARMUP; w++)
+        const float cfg_ms = timeConfigPeak(ev0, ev1, stream, WARMUP, ITERS,
+                                            kFloorIters, 0.1f, nullptr, [&]{
             launchWmmaConfig(cid, stream, M, N, K, A, lda, B,
                              scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf,
                              b_row_bytes);
+        });
 
-        hipEventRecord(ev0, stream);
-        for (int i = 0; i < ITERS; i++)
-            launchWmmaConfig(cid, stream, M, N, K, A, lda, B,
-                             scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf,
-                             b_row_bytes);
-        hipEventRecord(ev1, stream);
-        hipEventSynchronize(ev1);
-
-        float ms = 0.0f;
-        hipEventElapsedTime(&ms, ev0, ev1);
+        // Drain sticky launch errors per candidate. A losing config that fails
+        // to launch (e.g. invalid block/shared-mem on this shape) would
+        // otherwise leave hipGetLastError set; the production launch of the
+        // winner then looks like it failed even when it succeeded (lm_head
+        // N=128256 on gfx1201). Skip the failed candidate so it cannot win.
+        hipError_t launch_err = hipGetLastError();
+        if (launch_err != hipSuccess) {
+            MATMUL_NBITS_AUTOTUNE_LOG(
+                "[custom_kernels]   wmma config[%2d] SKIP launch failed: %s\n",
+                cid, hipGetErrorString(launch_err));
+            continue;
+        }
 
         MATMUL_NBITS_AUTOTUNE_LOG(
             "[custom_kernels]   wmma config[%2d] %s bm=%3d bn=%3d sw=%d "
-            "wt=%dx%d bk=%2d : %.4f ms\n",
+            "wt=%dx%d bk=%2d ext=%d var=%d : %.4f ms\n",
             cid, kWmmaConfigs[cid].fused ? "fused " : "dq+gem",
             kWmmaConfigs[cid].bm, kWmmaConfigs[cid].bn,
             kWmmaConfigs[cid].swizzle_n, kWmmaConfigs[cid].wt_m,
             kWmmaConfigs[cid].wt_n, wmmaBk(kWmmaConfigs[cid]),
-            ms / ITERS);
+            kWmmaConfigs[cid].ext ? 1 : 0, kWmmaConfigs[cid].variant, cfg_ms);
 
-        if (ms < best_ms) {
-            best_ms = ms;
+        if (cfg_ms < best_ms) {
+            best_ms = cfg_ms;
             best_id = cid;
         }
     }
@@ -5491,13 +6068,15 @@ static int tuneWmmaConfig(
     // ordering -- indices shift whenever the table is edited.
     MATMUL_NBITS_AUTOTUNE_LOG(
         "[custom_kernels] WMMA autotune: M=%d N=%d K=%d gs=%d zp=%s -> "
-        "best config[%d] %s bm=%d bn=%d sw=%d wt=%dx%d bk=%d (%.4f ms/iter)\n",
+        "best config[%d] %s bm=%d bn=%d sw=%d wt=%dx%d bk=%d ext=%d var=%d "
+        "(%.4f ms/iter)\n",
         M, N, K, gs, has_zp ? "yes" : "no",
         best_id, kWmmaConfigs[best_id].fused ? "fused" : "dq+gemm",
         kWmmaConfigs[best_id].bm, kWmmaConfigs[best_id].bn,
         kWmmaConfigs[best_id].swizzle_n, kWmmaConfigs[best_id].wt_m,
         kWmmaConfigs[best_id].wt_n, wmmaBk(kWmmaConfigs[best_id]),
-        best_ms / ITERS);
+        kWmmaConfigs[best_id].ext ? 1 : 0, kWmmaConfigs[best_id].variant,
+        best_ms);
 
     return best_id;
 }
@@ -5853,6 +6432,58 @@ extern "C" int hip_matmul_nbits_u4_wmma_stride(
 
     launchWmmaConfig(id, s, M, N, K, ap, lda, bp, sp, zp, group_size, ngk, cp,
                      ldc, has_zp, nullptr, b_row_bytes);
+    return static_cast<int>(hipGetLastError());
+}
+
+extern "C" int hip_matmul_nbits_u4_wmma_config_count() {
+    return kNumWmmaConfigs;
+}
+
+extern "C" int hip_matmul_nbits_u4_wmma_config_desc(
+    int cfg, HipMatmulNBitsWmmaConfigDesc* out)
+{
+    if (cfg < 0 || cfg >= kNumWmmaConfigs || !out) return -1;
+    const WmmaConfig& c = kWmmaConfigs[cfg];
+    out->bm = c.bm;
+    out->bn = c.bn;
+    out->wt_m = c.wt_m;
+    out->wt_n = c.wt_n;
+    out->bk = wmmaBk(c);
+    out->swizzle_n = c.swizzle_n;
+    out->fused = c.fused ? 1 : 0;
+    out->ext = c.ext ? 1 : 0;
+    out->variant = c.variant;
+    return 0;
+}
+
+extern "C" int hip_matmul_nbits_u4_wmma_ext_device() {
+    return wmmaExtDevice() ? 1 : 0;
+}
+
+extern "C" void hip_matmul_nbits_u4_wmma_sweep_extended(int enable) {
+    g_wmma_sweep_extended.store(enable != 0, std::memory_order_relaxed);
+}
+
+extern "C" int hip_matmul_nbits_u4_wmma_run_config(
+    void* stream, int cfg, int M, int N, int K, int group_size,
+    const void* A, int lda, const void* B, const void* scales,
+    const void* zeros, void* C, int ldc, int b_row_bytes)
+{
+    if (cfg < 0 || cfg >= kNumWmmaConfigs || group_size <= 0) return -2;
+    // Forced launches serve the extended-entry test and offline measurement,
+    // both gfx1151 only. Elsewhere, including devices whose WMMA kernels
+    // compile to a trap (CDNA, gfx10), it launches nothing.
+    if (!wmmaExtDevice()) return -2;
+    const WmmaConfig& c = kWmmaConfigs[cfg];
+    if (!c.fused || !wmmaConfigSupported(c, N, K, group_size)) return -2;
+    (void)hipGetLastError();
+    launchWmmaConfig(cfg, static_cast<hipStream_t>(stream), M, N, K,
+                     static_cast<const _Float16*>(A), lda,
+                     static_cast<const unsigned char*>(B),
+                     static_cast<const _Float16*>(scales),
+                     static_cast<const _Float16*>(zeros), group_size,
+                     (K + group_size - 1) / group_size, static_cast<_Float16*>(C),
+                     ldc, zeros != nullptr, nullptr, b_row_bytes);
     return static_cast<int>(hipGetLastError());
 }
 
@@ -6239,16 +6870,18 @@ void GemmFp16I8Impl(
 #pragma unroll
         for (int wn = 0; wn < WT_N; wn++) {
             int nbase = col0 + (wcol * WT_N + wn) * WMMA_TILE;
+            // Row pointer once per tile: see the epilogue of GemmFp16U4Impl.
+            const int r0 = hipdnn_wmma_acc_row(sub, 0);
+            _Float16* crow = C + static_cast<int64_t>(mbase + r0) * ldc + nbase + lane;
 #pragma unroll
             for (int e = 0; e < 8; e++) {
                 int r = hipdnn_wmma_acc_row(sub, e);
+                _Float16* cp = crow + static_cast<int64_t>(r - r0) * ldc;
                 if constexpr (BOUNDS_CHECK) {
                     if (mbase + r < M && nbase + lane < N)
-                        C[(mbase + r) * ldc + nbase + lane] =
-                            (_Float16)acc[wm][wn][e];
+                        *cp = (_Float16)acc[wm][wn][e];
                 } else {
-                    C[(mbase + r) * ldc + nbase + lane] =
-                        (_Float16)acc[wm][wn][e];
+                    *cp = (_Float16)acc[wm][wn][e];
                 }
             }
         }
@@ -6390,34 +7023,49 @@ static int tuneWmmaConfigI8(
 
     float best_ms = 1e30f;
     int   best_id = 12; // 128x128 sw=2: a safe default for typical N>=64
-    constexpr int WARMUP = 1;
+    constexpr int WARMUP = 2;
     constexpr int ITERS  = 5;
+    constexpr int kFloorIters = 15;  // extra iters for sub-0.1ms configs
+
+    // Skip large BN tiles when N is too small to benefit.
+    auto candidate = [&](int cid) { return kWmmaI8Configs[cid].bn <= N * 2; };
+
+    // Settle the clock once, then peak-of-ITERS per config at that clock; see
+    // tuneWmmaConfig for why the offline sweep needs this.
+    int settle_id = -1;
+    for (int cid = 0; cid < kNumWmmaI8Configs && settle_id < 0; cid++)
+        if (candidate(cid)) settle_id = cid;
+    if (settle_id >= 0)
+        settleClock(ev0, ev1, stream, [&]{
+            launchWmmaConfigI8(settle_id, stream, M, N, K, A, lda, B,
+                               scales, zeros, gs, ngk, C, ldc, has_zp);
+        });
 
     for (int cid = 0; cid < kNumWmmaI8Configs; cid++) {
         auto& cfg = kWmmaI8Configs[cid];
-        // Skip large BN tiles when N is too small to benefit.
-        if (cfg.bn > N * 2) continue;
+        if (!candidate(cid)) continue;
 
-        for (int w = 0; w < WARMUP; w++)
+        const float cfg_ms = timeConfigPeak(ev0, ev1, stream, WARMUP, ITERS,
+                                            kFloorIters, 0.1f, nullptr, [&]{
             launchWmmaConfigI8(cid, stream, M, N, K, A, lda, B,
                                scales, zeros, gs, ngk, C, ldc, has_zp);
+        });
 
-        hipEventRecord(ev0, stream);
-        for (int i = 0; i < ITERS; i++)
-            launchWmmaConfigI8(cid, stream, M, N, K, A, lda, B,
-                               scales, zeros, gs, ngk, C, ldc, has_zp);
-        hipEventRecord(ev1, stream);
-        hipEventSynchronize(ev1);
-
-        float ms = 0.0f;
-        hipEventElapsedTime(&ms, ev0, ev1);
+        // See tuneWmmaConfig: drain sticky launch errors per candidate.
+        hipError_t launch_err = hipGetLastError();
+        if (launch_err != hipSuccess) {
+            MATMUL_NBITS_AUTOTUNE_LOG(
+                "[custom_kernels]   wmma-i8 config[%2d] SKIP launch failed: %s\n",
+                cid, hipGetErrorString(launch_err));
+            continue;
+        }
 
         MATMUL_NBITS_AUTOTUNE_LOG(
             "[custom_kernels]   wmma-i8 config[%2d] bm=%3d bn=%3d sw=%d : %.4f ms\n",
-            cid, cfg.bm, cfg.bn, cfg.swizzle_n, ms / ITERS);
+            cid, cfg.bm, cfg.bn, cfg.swizzle_n, cfg_ms);
 
-        if (ms < best_ms) {
-            best_ms = ms;
+        if (cfg_ms < best_ms) {
+            best_ms = cfg_ms;
             best_id = cid;
         }
     }
@@ -6430,7 +7078,7 @@ static int tuneWmmaConfigI8(
         "best config[%d] bm=%d bn=%d sw=%d (%.4f ms/iter)\n",
         M, N, K, gs, has_zp ? "yes" : "no",
         best_id, kWmmaI8Configs[best_id].bm, kWmmaI8Configs[best_id].bn,
-        kWmmaI8Configs[best_id].swizzle_n, best_ms / ITERS);
+        kWmmaI8Configs[best_id].swizzle_n, best_ms);
 
     return best_id;
 }
@@ -6766,16 +7414,18 @@ void GemmFp16U3Impl(
 #pragma unroll
         for (int wn = 0; wn < WT_N; wn++) {
             int nbase = col0 + (wcol * WT_N + wn) * WMMA_TILE;
+            // Row pointer once per tile: see the epilogue of GemmFp16U4Impl.
+            const int r0 = hipdnn_wmma_acc_row(sub, 0);
+            _Float16* crow = C + static_cast<int64_t>(mbase + r0) * ldc + nbase + lane;
 #pragma unroll
             for (int e = 0; e < 8; e++) {
                 int r = hipdnn_wmma_acc_row(sub, e);
+                _Float16* cp = crow + static_cast<int64_t>(r - r0) * ldc;
                 if constexpr (BOUNDS_CHECK) {
                     if (mbase + r < M && nbase + lane < N)
-                        C[(mbase + r) * ldc + nbase + lane] =
-                            (_Float16)acc[wm][wn][e];
+                        *cp = (_Float16)acc[wm][wn][e];
                 } else {
-                    C[(mbase + r) * ldc + nbase + lane] =
-                        (_Float16)acc[wm][wn][e];
+                    *cp = (_Float16)acc[wm][wn][e];
                 }
             }
         }
@@ -7126,6 +7776,15 @@ static int tuneWmmaConfigU3(
         hipEventRecord(ev1, stream);
         hipEventSynchronize(ev1);
 
+        // See tuneWmmaConfig: drain sticky launch errors per candidate.
+        hipError_t launch_err = hipGetLastError();
+        if (launch_err != hipSuccess) {
+            MATMUL_NBITS_AUTOTUNE_LOG(
+                "[custom_kernels]   wmma-u3 config[%2d] SKIP launch failed: %s\n",
+                cid, hipGetErrorString(launch_err));
+            continue;
+        }
+
         float ms = 0.0f;
         hipEventElapsedTime(&ms, ev0, ev1);
 
@@ -7445,16 +8104,18 @@ void GemmFp16U2Impl(
 #pragma unroll
         for (int wn = 0; wn < WT_N; wn++) {
             int nbase = col0 + (wcol * WT_N + wn) * WMMA_TILE;
+            // Row pointer once per tile: see the epilogue of GemmFp16U4Impl.
+            const int r0 = hipdnn_wmma_acc_row(sub, 0);
+            _Float16* crow = C + static_cast<int64_t>(mbase + r0) * ldc + nbase + lane;
 #pragma unroll
             for (int e = 0; e < 8; e++) {
                 int r = hipdnn_wmma_acc_row(sub, e);
+                _Float16* cp = crow + static_cast<int64_t>(r - r0) * ldc;
                 if constexpr (BOUNDS_CHECK) {
                     if (mbase + r < M && nbase + lane < N)
-                        C[(mbase + r) * ldc + nbase + lane] =
-                            (_Float16)acc[wm][wn][e];
+                        *cp = (_Float16)acc[wm][wn][e];
                 } else {
-                    C[(mbase + r) * ldc + nbase + lane] =
-                        (_Float16)acc[wm][wn][e];
+                    *cp = (_Float16)acc[wm][wn][e];
                 }
             }
         }
@@ -7775,6 +8436,15 @@ static int tuneWmmaConfigU2(
                                scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf);
         hipEventRecord(ev1, stream);
         hipEventSynchronize(ev1);
+
+        // See tuneWmmaConfig: drain sticky launch errors per candidate.
+        hipError_t launch_err = hipGetLastError();
+        if (launch_err != hipSuccess) {
+            MATMUL_NBITS_AUTOTUNE_LOG(
+                "[custom_kernels]   wmma-u2 config[%2d] SKIP launch failed: %s\n",
+                cid, hipGetErrorString(launch_err));
+            continue;
+        }
 
         float ms = 0.0f;
         hipEventElapsedTime(&ms, ev0, ev1);

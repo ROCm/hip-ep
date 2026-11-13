@@ -203,6 +203,7 @@ def ConvertShapeToExtentPass
   let dependentDialects = [
     "::mlir::hipsr::HipsrDialect",
     "::mlir::arith::ArithDialect",
+    "::mlir::cf::ControlFlowDialect",
     "::mlir::scf::SCFDialect",
     "::mlir::shape::ShapeDialect",
     "::mlir::tensor::TensorDialect"

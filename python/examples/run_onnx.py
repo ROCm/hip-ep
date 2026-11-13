@@ -42,6 +42,18 @@ def _setup_env():
     return pkg
 
 
+_PROMPT_FLAGS = {"--use_random_tokens", "--use_prompt_set"}
+
+
+def _benchmark_argv(argv):
+    # benchmark_e2e.py's default sampled prompt can outgrow max_length.
+    is_e2e = os.path.basename(argv[0]) == "benchmark_e2e.py"
+    if is_e2e and not _PROMPT_FLAGS & set(argv):
+        print("run_onnx: adding --use_random_tokens", file=sys.stderr)
+        return [*argv, "--use_random_tokens"]
+    return argv
+
+
 def _random_input(spec):
     dtype = _NP_DTYPE.get(spec.type, np.float32)
     shape = [d if isinstance(d, int) and d > 0 else 1 for d in spec.shape]
@@ -79,7 +91,7 @@ def _run_onnx(model_path, pkg):
 def main():
     if len(sys.argv) >= 3 and sys.argv[1] == "--benchmark":
         _setup_env()
-        return subprocess.call([sys.executable, *sys.argv[2:]])
+        return subprocess.call([sys.executable, *_benchmark_argv(sys.argv[2:])])
 
     if len(sys.argv) != 2:
         print(f"usage: python {os.path.basename(__file__)} model.onnx", file=sys.stderr)

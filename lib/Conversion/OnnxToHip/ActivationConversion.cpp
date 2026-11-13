@@ -172,12 +172,59 @@ GeluToHip::matchAndRewrite(mlir::Operation *op,
   return mlir::success();
 }
 
+/// onnx.Custom(com.microsoft.Gelu) -> hip.gelu with approximate="none".
+/// The contrib op has no approximate attribute; it is the erf formula.
+struct MicrosoftGeluToHip : public mlir::RewritePattern {
+  MicrosoftGeluToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override;
+};
+
+mlir::LogicalResult
+MicrosoftGeluToHip::matchAndRewrite(mlir::Operation *op,
+                                    mlir::PatternRewriter &rewriter) const {
+  auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
+  if (!funcNameAttr || funcNameAttr.getValue() != "Gelu")
+    return rewriter.notifyMatchFailure(op, "not a Gelu operation");
+
+  auto domainAttr = op->getAttrOfType<mlir::StringAttr>("domain_name");
+  if (!domainAttr || domainAttr.getValue() != "com.microsoft")
+    return rewriter.notifyMatchFailure(op,
+                                       "domain must be com.microsoft for Gelu");
+
+  if (op->getNumOperands() != 1 || op->getNumResults() != 1)
+    return rewriter.notifyMatchFailure(
+        op, "com.microsoft Gelu expects 1 input and 1 result");
+
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return rewriter.notifyMatchFailure(op, "missing context argument");
+  mlir::Value context = *ctxOrFailure;
+
+  mlir::Location loc = op->getLoc();
+  mlir::Value input = op->getOperand(0);
+  auto resultType =
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  if (!resultType)
+    return rewriter.notifyMatchFailure(
+        op, "com.microsoft Gelu expects ranked output");
+
+  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
+  auto hipOp = mlir::hip::GeluOp::create(rewriter, loc, context, input, init,
+                                         rewriter.getStringAttr("none"));
+  rewriter.replaceOp(op, hipOp->getResult(0));
+  return mlir::success();
+}
+
 } // namespace
 
 void populateActivationConversionPatterns(RewritePatternSet &patterns,
                                           MLIRContext *ctx) {
-  patterns.add<SoftmaxToHip, SigmoidToHip, TanhToHip, SoftplusToHip, GeluToHip>(
-      ctx);
+  patterns.add<SoftmaxToHip, SigmoidToHip, TanhToHip, SoftplusToHip, GeluToHip,
+               MicrosoftGeluToHip>(ctx);
 }
 
 } // namespace hip

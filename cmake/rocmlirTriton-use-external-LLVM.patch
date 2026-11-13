@@ -1,0 +1,214 @@
+diff --git a/cmake/triton.cmake b/cmake/triton.cmake
+index 8849f7a..9c9795c 100644
+--- a/cmake/triton.cmake
++++ b/cmake/triton.cmake
+@@ -24,18 +24,15 @@ set(ROCMLIR_TRITON_GIT_REPOSITORY "https://github.com/ROCm/triton"
+ set(ROCMLIR_TRITON_GIT_BRANCH "rmt-2026-10-19"
+     CACHE STRING "Git branch/tag/commit for the Triton sources")
+ 
+-message(STATUS "Fetching LLVM/MLIR: ${ROCMLIR_LLVM_GIT_REPOSITORY}@${ROCMLIR_LLVM_GIT_BRANCH}")
+ message(STATUS "Fetching Triton:    ${ROCMLIR_TRITON_GIT_REPOSITORY}@${ROCMLIR_TRITON_GIT_BRANCH}")
+ 
+-FetchContent_Declare(
+-  rocmlir_llvm_project
+-  URL "${ROCMLIR_LLVM_GIT_REPOSITORY}/archive/refs/heads/${ROCMLIR_LLVM_GIT_BRANCH}.tar.gz"
+-  # GIT_REPOSITORY "${ROCMLIR_LLVM_GIT_REPOSITORY}"
+-  # GIT_TAG "${ROCMLIR_LLVM_GIT_BRANCH}"
+-  # GIT_SHALLOW TRUE
+-  # GIT_PROGRESS TRUE
+-  # Download only: no CMakeLists.txt here, so MakeAvailable skips add_subdirectory.
+-  SOURCE_SUBDIR do-not-auto-add)
++# hip-ep (and any parent that already defined MLIRSupport) supplies LLVM.
++# Skip the llvm-project archive in that case; Triton is still required.
++if(TARGET MLIRSupport)
++  set(ROCMLIR_EXTERNAL_LLVM ON)
++else()
++  set(ROCMLIR_EXTERNAL_LLVM OFF)
++endif()
+ 
+ FetchContent_Declare(
+   rocmlir_triton
+@@ -47,21 +44,48 @@ FetchContent_Declare(
+   # Download only: no CMakeLists.txt here, so MakeAvailable skips add_subdirectory.
+   SOURCE_SUBDIR do-not-auto-add)
+ 
+-FetchContent_MakeAvailable(rocmlir_llvm_project rocmlir_triton)
++if(ROCMLIR_EXTERNAL_LLVM)
++  message(STATUS "External LLVM/MLIR already provided; skipping rocmlir_llvm_project download")
++  FetchContent_MakeAvailable(rocmlir_triton)
++  # Parent from-source builds expose the llvm-project checkout. An installed
++  # prefix has headers on LLVM_INCLUDE_DIRS and no source tree to point at.
++  if(DEFINED llvm-project_SOURCE_DIR)
++    set(ROCMLIR_LLVM_PROJECT_DIR "${llvm-project_SOURCE_DIR}")
++  elseif(LLVM_EXTERNAL_SRC_DIR)
++    set(ROCMLIR_LLVM_PROJECT_DIR "${LLVM_EXTERNAL_SRC_DIR}")
++  else()
++    set(ROCMLIR_LLVM_PROJECT_DIR "")
++  endif()
++else()
++  message(STATUS "Fetching LLVM/MLIR: ${ROCMLIR_LLVM_GIT_REPOSITORY}@${ROCMLIR_LLVM_GIT_BRANCH}")
++  FetchContent_Declare(
++    rocmlir_llvm_project
++    URL "${ROCMLIR_LLVM_GIT_REPOSITORY}/archive/refs/heads/${ROCMLIR_LLVM_GIT_BRANCH}.tar.gz"
++    # GIT_REPOSITORY "${ROCMLIR_LLVM_GIT_REPOSITORY}"
++    # GIT_TAG "${ROCMLIR_LLVM_GIT_BRANCH}"
++    # GIT_SHALLOW TRUE
++    # GIT_PROGRESS TRUE
++    # Download only: no CMakeLists.txt here, so MakeAvailable skips add_subdirectory.
++    SOURCE_SUBDIR do-not-auto-add)
++  FetchContent_MakeAvailable(rocmlir_llvm_project rocmlir_triton)
++  set(ROCMLIR_LLVM_PROJECT_DIR "${rocmlir_llvm_project_SOURCE_DIR}")
++endif()
+ 
+ #===----------------------------------------------------------------------===//
+ # Paths for building rocmlirTriton
+ #===----------------------------------------------------------------------===//
+ 
+-set(ROCMLIR_LLVM_PROJECT_DIR "${rocmlir_llvm_project_SOURCE_DIR}")
+ set(TRITON_PROJECT_DIR "${rocmlir_triton_SOURCE_DIR}")
+ set(TRITON_BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/external/triton")
+ 
+ # Keep the *_EXTERNAL_SRC_DIR variables (set in the top-level CMakeLists before
+ # this file is included) pointing at the fetched sources so downstream CMake
+ # (e.g. mlir/lib/Translation/TritonToHsaco, mlir/CMakeLists.txt gtest lookup)
+-# finds lld/third-party headers.
+-set(LLVM_EXTERNAL_SRC_DIR "${ROCMLIR_LLVM_PROJECT_DIR}")
++# finds lld/third-party headers. An installed LLVM prefix leaves this unset
++# when there is no source tree.
++if(ROCMLIR_LLVM_PROJECT_DIR)
++  set(LLVM_EXTERNAL_SRC_DIR "${ROCMLIR_LLVM_PROJECT_DIR}")
++endif()
+ set(TRITON_EXTERNAL_SRC_DIR "${TRITON_PROJECT_DIR}")
+ 
+ #===----------------------------------------------------------------------===//
+@@ -76,6 +100,49 @@ set(TRITON_EXTERNAL_SRC_DIR "${TRITON_PROJECT_DIR}")
+ # code keep working unchanged.
+ #===----------------------------------------------------------------------===//
+ 
++# When embedded in a larger build (e.g. hip-ep) that has already provided
++# LLVM/MLIR, the MLIRSupport target already exists. In that case we must NOT
++# add_subdirectory the fetched LLVM tree again (it would redefine every
++# LLVM/MLIR target) nor rebuild LLVM. Instead we consume the discovery
++# variables the parent already populated. The standalone build (no external
++# LLVM) keeps the original in-tree flow unchanged.
++if(TARGET MLIRSupport)
++  set(ROCMLIR_EXTERNAL_LLVM ON)
++else()
++  set(ROCMLIR_EXTERNAL_LLVM OFF)
++endif()
++
++if(ROCMLIR_EXTERNAL_LLVM)
++  message(STATUS "Using externally-provided LLVM/MLIR (MLIRSupport target already defined); "
++    "skipping in-tree llvm-project build")
++
++  # The parent build is expected to have set the standard discovery variables
++  # (LLVM_DIR, MLIR_DIR, MLIR_CMAKE_DIR, LLVM_CMAKE_DIR, LLD_DIR,
++  # LLVM_TOOLS_BINARY_DIR, LLVM_LIBRARY_DIR, LLVM_INCLUDE_DIRS,
++  # MLIR_INCLUDE_DIRS). These are exactly what the in-tree branch fabricates by
++  # hand below, so everything downstream (add_subdirectory(mlir) and Triton's
++  # own find_package(MLIR CONFIG PATHS ${MLIR_DIR})) works unchanged.
++  if(NOT DEFINED MLIR_CMAKE_DIR AND DEFINED MLIR_DIR)
++    set(MLIR_CMAKE_DIR "${MLIR_DIR}")
++  endif()
++  if(NOT DEFINED LLVM_CMAKE_DIR AND DEFINED LLVM_DIR)
++    set(LLVM_CMAKE_DIR "${LLVM_DIR}")
++  endif()
++  list(APPEND CMAKE_MODULE_PATH "${MLIR_CMAKE_DIR}")
++  list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
++  # Triton's find_package(MLIR) does not pass NO_DEFAULT_PATH, so ensure the
++  # build-tree/install MLIR package dir is on the search path.
++  list(APPEND CMAKE_PREFIX_PATH "${MLIR_CMAKE_DIR}")
++
++  message(STATUS "MLIR_DIR: ${MLIR_DIR}")
++  message(STATUS "LLD_DIR: ${LLD_DIR}")
++  message(STATUS "MLIR_INCLUDE_DIRS: ${MLIR_INCLUDE_DIRS}")
++  message(STATUS "LLVM_INCLUDE_DIRS: ${LLVM_INCLUDE_DIRS}")
++
++  # The in-tree branch sets this before the Triton assertions block below.
++  string(TOUPPER "${CMAKE_BUILD_TYPE}" rocmlir_uppercase_build_type)
++else()
++
+ if(NOT EXISTS "${ROCMLIR_LLVM_PROJECT_DIR}/llvm/CMakeLists.txt")
+   message(FATAL_ERROR
+     "${ROCMLIR_LLVM_PROJECT_DIR}/llvm/CMakeLists.txt is missing.\n"
+@@ -216,6 +283,8 @@ message(STATUS "LLD_DIR: ${LLD_DIR}")
+ message(STATUS "MLIR_INCLUDE_DIRS: ${MLIR_INCLUDE_DIRS}")
+ message(STATUS "LLVM_INCLUDE_DIRS: ${LLVM_INCLUDE_DIRS}")
+ 
++endif() # ROCMLIR_EXTERNAL_LLVM
++
+ #===----------------------------------------------------------------------===//
+ # ROCm Configuration
+ #
+@@ -452,25 +521,63 @@ endif()
+ # Helper Functions for rocMLIR Libraries
+ #===----------------------------------------------------------------------===//
+ 
++# When rocMLIR is built against an externally provided LLVM/MLIR
++# (ROCMLIR_EXTERNAL_LLVM), the upstream MLIR TableGen and header-aggregate
++# targets its libraries list in DEPENDS -- e.g. MLIRConversionPassIncGen, and
++# the mlir-headers / mlir-generic-headers aggregates that this file and
++# add_mlir_library add automatically -- are not defined in this build: their
++# generated headers already exist in the installed include tree, so the
++# ordering dependency is a no-op. Without the target, add_dependencies() aborts
++# at generate time with "dependency target ... does not exist". Create an empty
++# stand-in for any such missing DEPENDS entry so the (unneeded) ordering edge
++# resolves. rocMLIR's own *IncGen are always already defined (include/ is
++# processed before lib/) and are left untouched; the in-tree build, where every
++# upstream target also exists, is unaffected because of the NOT TARGET guard.
++function(_rocmlir_stub_external_depends)
++  if(NOT ROCMLIR_EXTERNAL_LLVM)
++    return()
++  endif()
++  foreach(dep ${ARGN})
++    if(NOT TARGET ${dep})
++      add_custom_target(${dep})
++    endif()
++  endforeach()
++endfunction(_rocmlir_stub_external_depends)
++
++# Parse the DEPENDS out of an add_rocmlir_*_library call and stub any that are
++# missing, together with the mlir-headers / mlir-generic-headers aggregates the
++# helpers and add_mlir_library attach unconditionally. The keyword set matches
++# what add_mlir_library accepts so DEPENDS is bounded correctly.
++macro(_rocmlir_stub_library_depends)
++  cmake_parse_arguments(_rsld "SHARED;DISABLE_INSTALL;EXCLUDE_FROM_LIBMLIR" ""
++    "DEPENDS;LINK_LIBS;LINK_COMPONENTS;ADDITIONAL_HEADER_DIRS;ADDITIONAL_HEADERS"
++    ${ARGN})
++  _rocmlir_stub_external_depends(${_rsld_DEPENDS} mlir-headers mlir-generic-headers)
++endmacro(_rocmlir_stub_library_depends)
++
+ function(add_rocmlir_dialect_library name)
+   set_property(GLOBAL APPEND PROPERTY ROCMLIR_DIALECT_LIBS ${name})
+   set_property(GLOBAL APPEND PROPERTY MLIR_DIALECT_LIBS ${name})
++  _rocmlir_stub_library_depends(${ARGN})
+   add_mlir_library(${ARGV} DEPENDS mlir-headers)
+ endfunction(add_rocmlir_dialect_library)
+ 
+ function(add_rocmlir_conversion_library name)
+   set_property(GLOBAL APPEND PROPERTY ROCMLIR_CONVERSION_LIBS ${name})
+   set_property(GLOBAL APPEND PROPERTY MLIR_CONVERSION_LIBS ${name})
++  _rocmlir_stub_library_depends(${ARGN})
+   add_mlir_library(${ARGV} DEPENDS mlir-headers)
+ endfunction(add_rocmlir_conversion_library)
+ 
+ function(add_rocmlir_test_library name)
+   set_property(GLOBAL APPEND PROPERTY ROCMLIR_TEST_LIBS ${name})
++  _rocmlir_stub_library_depends(${ARGN})
+   add_mlir_library(${ARGV} DEPENDS mlir-headers)
+ endfunction(add_rocmlir_test_library)
+ 
+ function(add_rocmlir_public_c_api_library name)
+   set_property(GLOBAL APPEND PROPERTY ROCMLIR_PUBLIC_C_API_LIBS ${name})
++  _rocmlir_stub_library_depends(${ARGN})
+   add_mlir_library(${name}
+     ${ARGN}
+     EXCLUDE_FROM_LIBMLIR
+@@ -501,6 +608,7 @@ endfunction()
+ # Helper function for Rock-to-Triton libraries
+ function(add_rocmlir_triton_library name)
+   set_property(GLOBAL APPEND PROPERTY ROCMLIR_TRITON_LIBS ${name})
++  _rocmlir_stub_library_depends(${ARGN})
+   add_mlir_library(${ARGV} DEPENDS mlir-headers)
+ endfunction(add_rocmlir_triton_library)
+ 
