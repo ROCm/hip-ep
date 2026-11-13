@@ -1340,6 +1340,17 @@ HIP_KERNEL_API int hip_mha_flash_prefill(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
     void* O, int B, int N, int sq, int skv, int d, int max_seq, float scale);
 
+/* hip_mha_flash_prefill_bsnd: the same non-causal attention with Q, K, V and
+ * O all in the projections' [B, S, N, d] layout, so neither K nor V is
+ * transposed first and no workspace is used. Transposed-score FA-2 (S^T = K
+ * Q^T) with fp32 O accumulation; K and V^T staged in LDS per block. fp16,
+ * d <= 160 and a multiple of 8, all four pointers 16-byte aligned. Returns 1
+ * without launching when those do not hold, 0 on success, -1 on a launch
+ * failure. */
+HIP_KERNEL_API int hip_mha_flash_prefill_bsnd(
+    void* stream, const void* Q, const void* K, const void* V, void* O,
+    int B, int N, int sq, int skv, int d, float scale);
+
 /* FA-2 split-K GQA decode (sq == 1, d in {64, 96, 128, 256},
  * HPG=H/G in {1,2,3,4,5,6,8,16}, and HPG=9 at d == 128):
  * GQA-aware kernel that loads K/V tiles into LDS once and reuses them
