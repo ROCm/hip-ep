@@ -272,6 +272,183 @@ __global__ void pool_wide_kernel(const T* __restrict__ input,
   output[tid] = from_float<T>(result);
 }
 
+// Small 2-D windows (2x2, 3x3): with a handful of taps per output, pool_kernel
+// is bound by its per-output index decode and window-loop overhead rather than
+// by memory. A thread here produces V adjacent outputs of one row with the
+// window size fixed at compile time and 32-bit index math. Average and Max
+// only, no argmax indices; same semantics as pool_kernel.
+constexpr int kSmallBlock = 256;
+
+struct SmallShape {
+  int H, W, OH, OW;
+  int s, p0, p1;
+  int groups;  // N * C * OH * ceil(OW / V)
+  int owg;     // ceil(OW / V)
+};
+
+template <typename T, int K, int V>
+__global__ void __launch_bounds__(kSmallBlock)
+pool_small_kernel(const T* __restrict__ input, T* __restrict__ output, int mode,
+                  int count_include_pad, SmallShape s) {
+  const int g = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (g >= s.groups) return;
+  const int og = g % s.owg;
+  const int t = g / s.owg;
+  const int oh = t % s.OH;
+  const int nc = t / s.OH;
+  const int ow0 = og * V;
+  const T* base = input + static_cast<size_t>(nc) * s.H * s.W;
+  const int ih0 = oh * s.s - s.p0;
+  const int iw0 = ow0 * s.s - s.p1;
+
+  float best[V], sum[V];
+  int count[V];
+#pragma unroll
+  for (int v = 0; v < V; ++v) {
+    best[v] = -FLT_MAX;
+    sum[v] = 0.0f;
+    count[v] = 0;
+  }
+#pragma unroll
+  for (int r = 0; r < K; ++r) {
+    const int ih = ih0 + r;
+    if (static_cast<unsigned>(ih) >= static_cast<unsigned>(s.H)) continue;
+    const T* row = base + ih * s.W;
+#pragma unroll
+    for (int v = 0; v < V; ++v) {
+#pragma unroll
+      for (int c = 0; c < K; ++c) {
+        const int iw = iw0 + v * s.s + c;
+        const bool ok = static_cast<unsigned>(iw) < static_cast<unsigned>(s.W);
+        const float x = to_float<T>(row[ok ? iw : 0]);
+        best[v] = ok ? fmaxf(best[v], x) : best[v];
+        sum[v] += ok ? x : 0.0f;
+        count[v] += ok ? 1 : 0;
+      }
+    }
+  }
+  T* o = output + (static_cast<size_t>(nc) * s.OH + oh) * s.OW + ow0;
+#pragma unroll
+  for (int v = 0; v < V; ++v) {
+    float result;
+    if (mode == kPoolMax) {
+      result = best[v];
+    } else {
+      const int divisor = count_include_pad ? K * K : count[v];
+      result = divisor > 0 ? sum[v] / static_cast<float>(divisor) : 0.0f;
+    }
+    if (ow0 + v < s.OW) o[v] = from_float<T>(result);
+  }
+}
+
+// 2x2 stride-2 windows that tile the input exactly (no padding, OW == W / 2,
+// OH <= H / 2): each input row segment of a thread's outputs is one aligned
+// 16-byte load and its V = 8 / sizeof(T) outputs one 8-byte store. The host
+// checks the row pitches keep every access aligned.
+template <typename T>
+__global__ void __launch_bounds__(kSmallBlock)
+pool_2x2_vec_kernel(const T* __restrict__ input, T* __restrict__ output,
+                    int mode, SmallShape s) {
+  constexpr int V = 8 / sizeof(T);
+  const int g = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (g >= s.groups) return;
+  const int og = g % s.owg;
+  const int t = g / s.owg;
+  const int oh = t % s.OH;
+  const int nc = t / s.OH;
+  const int ow0 = og * V;
+  const T* r0 = input + (static_cast<size_t>(nc) * s.H + 2 * oh) * s.W + 2 * ow0;
+  alignas(16) T a[2 * V];
+  alignas(16) T b[2 * V];
+  *reinterpret_cast<uint4*>(a) = *reinterpret_cast<const uint4*>(r0);
+  *reinterpret_cast<uint4*>(b) = *reinterpret_cast<const uint4*>(r0 + s.W);
+  alignas(8) T res[V];
+#pragma unroll
+  for (int v = 0; v < V; ++v) {
+    const float x0 = to_float<T>(a[2 * v]), x1 = to_float<T>(a[2 * v + 1]);
+    const float x2 = to_float<T>(b[2 * v]), x3 = to_float<T>(b[2 * v + 1]);
+    const float r = mode == kPoolMax ? fmaxf(fmaxf(x0, x1), fmaxf(x2, x3))
+                                     : (x0 + x1 + x2 + x3) * 0.25f;
+    res[v] = from_float<T>(r);
+  }
+  *reinterpret_cast<uint2*>(output + (static_cast<size_t>(nc) * s.OH + oh) * s.OW +
+                            ow0) = *reinterpret_cast<const uint2*>(res);
+}
+
+template <typename T, int K, int V>
+static hipError_t launchSmall(hipStream_t stream, const void* input,
+                              void* output, int mode, int count_include_pad,
+                              SmallShape s, bool vec) {
+  s.owg = (s.OW + V - 1) / V;
+  const int64_t groups = static_cast<int64_t>(s.groups) * s.owg;
+  s.groups = static_cast<int>(groups);
+  const dim3 grid(static_cast<unsigned>((groups + kSmallBlock - 1) / kSmallBlock));
+  (void)hipGetLastError();
+  if (vec)
+    hipLaunchKernelGGL(pool_2x2_vec_kernel<T>, grid, dim3(kSmallBlock), 0,
+                       stream, static_cast<const T*>(input),
+                       static_cast<T*>(output), mode, s);
+  else
+    hipLaunchKernelGGL((pool_small_kernel<T, K, V>), grid, dim3(kSmallBlock),
+                       0, stream, static_cast<const T*>(input),
+                       static_cast<T*>(output), mode, count_include_pad, s);
+  return hipGetLastError();
+}
+
+// Returns true and sets *err when a small-window kernel handled the pool.
+template <typename T>
+static bool trySmallPool(hipStream_t stream, const void* input, void* output,
+                         void* indices, int mode, int count_include_pad,
+                         int64_t N, int64_t C, int64_t in0, int64_t in1,
+                         int64_t in2, int64_t out0, int64_t out1, int64_t out2,
+                         int64_t k0, int64_t k1, int64_t k2, int64_t s0,
+                         int64_t s1, int64_t p0, int64_t p1, int64_t p2,
+                         int64_t d0, int64_t d1, hipError_t* err) {
+  if constexpr (sizeof(T) > 4) {
+    return false;
+  } else {
+    if (indices || (mode != kPoolAverage && mode != kPoolMax)) return false;
+    if (in2 != 1 || out2 != 1 || k2 != 1 || p2 != 0 || d0 != 1 || d1 != 1)
+      return false;
+    if (k0 != k1 || (k0 != 2 && k0 != 3) || s0 != s1 || s0 < 1) return false;
+    if (p0 < 0 || p1 < 0 || p0 >= k0 || p1 >= k1) return false;
+    const int64_t planes = N * C;
+    if (planes * in0 * in1 > INT32_MAX || planes * out0 * out1 > INT32_MAX ||
+        out0 * s0 + k0 > INT32_MAX || out1 * s1 + k1 > INT32_MAX)
+      return false;
+    SmallShape s{};
+    s.H = static_cast<int>(in0);
+    s.W = static_cast<int>(in1);
+    s.OH = static_cast<int>(out0);
+    s.OW = static_cast<int>(out1);
+    s.s = static_cast<int>(s0);
+    s.p0 = static_cast<int>(p0);
+    s.p1 = static_cast<int>(p1);
+    s.groups = static_cast<int>(planes * out0);
+    constexpr int kVecOut = 8 / sizeof(T);
+    const bool vec = k0 == 2 && s0 == 2 && p0 == 0 && p1 == 0 &&
+                     2 * out1 == in1 && 2 * out0 <= in0 &&
+                     out1 % kVecOut == 0 &&
+                     (in1 * sizeof(T)) % 16 == 0 &&
+                     (out1 * sizeof(T)) % 8 == 0 &&
+                     reinterpret_cast<uintptr_t>(input) % 16 == 0 &&
+                     reinterpret_cast<uintptr_t>(output) % 8 == 0;
+    if (vec)
+      *err = launchSmall<T, 2, kVecOut>(stream, input, output, mode,
+                                        count_include_pad, s, true);
+    else if (k0 == 2)
+      *err = launchSmall<T, 2, 2>(stream, input, output, mode,
+                                  count_include_pad, s, false);
+    else if (s0 == 1)
+      *err = launchSmall<T, 3, 4>(stream, input, output, mode,
+                                  count_include_pad, s, false);
+    else
+      *err = launchSmall<T, 3, 2>(stream, input, output, mode,
+                                  count_include_pad, s, false);
+    return true;
+  }
+}
+
 template <typename T>
 static int launch(hipStream_t stream, const void* input, void* output,
                   void* indices, int mode, int count_include_pad, int p,
@@ -286,6 +463,16 @@ static int launch(hipStream_t stream, const void* input, void* output,
   int64_t total = N * C * out0 * out1 * out2;
   if (total <= 0) return 0;
   int block = 256;
+
+  hipError_t small_err = hipSuccess;
+  if (trySmallPool<T>(stream, input, output, indices, mode, count_include_pad,
+                      N, C, in0, in1, in2, out0, out1, out2, k0, k1, k2, s0,
+                      s1, p0, p1, p2, d0, d1, &small_err)) {
+    if (small_err != hipSuccess)
+      fprintf(stderr, "[custom_kernels] hip_pool small launch failed: %s\n",
+              hipGetErrorString(small_err));
+    return static_cast<int>(small_err);
+  }
 
   auto fits = [](std::initializer_list<int64_t> vals) {
     for (int64_t v : vals)
