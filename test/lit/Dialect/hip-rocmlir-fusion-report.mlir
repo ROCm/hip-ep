@@ -11,7 +11,7 @@
 // RUN: FileCheck %s --input-file=%t.jsonl
 
 // CHECK: {"kind":"host","name":"main_graph","ops":{"func.return":1,"hip.rocmlir":2,"tensor.empty":2}}
-// CHECK-NEXT: {"anchor":"hip.conv","hash":"[[HASH:[0-9a-f]+]]","inputs":["tensor<1x8x4x4xf16>","tensor<16x8x3x3xf16>","tensor<16xf16>"],"kind":"kernel","name":"[[KERNEL:rocMlir[0-9]+]]","ops":{"hip.conv":1,"tensor.empty":1,"ub.poison":1},"outputs":["tensor<1x16x4x4xf16>"]}
+// CHECK-NEXT: {"anchor":"hip.conv","hash":"[[HASH:[0-9a-f]+]]","inputs":["tensor<1x8x4x4xf16>","tensor<16x8x3x3xf16>","tensor<16xf16>"],"kind":"kernel","name":"[[KERNEL:mlir_[a-z0-9_]+]]","ops":{"hip.conv":1,"tensor.empty":1,"ub.poison":1},"outputs":["tensor<1x16x4x4xf16>"]}
 // CHECK-NEXT: {"anchor":"hip.conv","hash":"[[HASH]]",{{.*}}"name":"[[KERNEL]]",
 // CHECK-NOT: kind
 
