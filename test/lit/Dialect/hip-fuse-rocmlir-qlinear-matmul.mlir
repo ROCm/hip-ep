@@ -14,7 +14,7 @@
 // 125 * [6, 4, 7]. The multipliers 0.5 * [0.5, 0.25, 0.125] / 0.125 stay per
 // column.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: (%[[A:.*]]: tensor<4x8xui8>, %[[B:.*]]: tensor<8x3xi8>, %[[BIAS:.*]]: tensor<1x3xi32>, %[[M:.*]]: tensor<1x3xf32>) -> tensor<4x3xui8>
 // CHECK: %[[ACC:.*]] = hip.quant_matmul(%{{.*}}) ins(%[[A]], %[[B]] : tensor<4x8xui8>, tensor<8x3xi8>)
 // CHECK: %[[ADD:.*]] = hip.add(%{{.*}}) ins(%[[ACC]], %[[BIAS]] :
@@ -27,7 +27,7 @@
 // CHECK-LABEL: func.func @main_graph
 // CHECK: hip.constant {value = dense<{{\[\[}}750, 500, 875]]> : tensor<1x3xi32>}
 // CHECK: hip.constant {value = dense<{{\[\[}}2.000000e+00, 1.000000e+00, 5.000000e-01]]> : tensor<1x3xf32>}
-// CHECK: hip.rocmlir(%{{.*}}) @rocMlir
+// CHECK: hip.rocmlir(%{{.*}}) @mlir_{{[a-z0-9_]+}}
 // CHECK-NOT: hip.qlinear_matmul
 func.func @main_graph(%ctx: !hip.context, %a: tensor<4x8xui8>)
     -> tensor<4x3xui8> {
@@ -53,7 +53,7 @@ func.func @main_graph(%ctx: !hip.context, %a: tensor<4x8xui8>)
 // An i8 a with zero point 0 needs no correction, so B may be a graph input.
 // A per-tensor multiplier is one scalar and moves into the kernel.
 
-// CHECK-LABEL: func.func @rocMlir
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: (%{{.*}}: tensor<4x8xi8>, %{{.*}}: tensor<8x3xi8>) -> tensor<4x3xi8>
 // CHECK: hip.quant_matmul
 // CHECK-NOT: hip.add
