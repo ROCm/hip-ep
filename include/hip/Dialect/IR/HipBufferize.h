@@ -115,6 +115,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     MatmulOp::attachInterface<HipDstBufferizableModel<MatmulOp>>(*ctx);
     RocMlirOp::attachInterface<HipDstBufferizableModel<RocMlirOp>>(*ctx);
     RmsNormOp::attachInterface<HipDstBufferizableModel<RmsNormOp>>(*ctx);
+    RmsNormAddOp::attachInterface<HipDstBufferizableModel<RmsNormAddOp>>(*ctx);
     SkipRmsNormOp::attachInterface<HipDstBufferizableModel<SkipRmsNormOp>>(
         *ctx);
     RopeOp::attachInterface<HipDstBufferizableModel<RopeOp>>(*ctx);
@@ -152,6 +153,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     SwishOp::attachInterface<HipDstBufferizableModel<SwishOp>>(*ctx);
     PowOp::attachInterface<HipDstBufferizableModel<PowOp>>(*ctx);
     SwigluOp::attachInterface<HipDstBufferizableModel<SwigluOp>>(*ctx);
+    GegluOp::attachInterface<HipDstBufferizableModel<GegluOp>>(*ctx);
     ResizeOp::attachInterface<HipDstBufferizableModel<ResizeOp>>(*ctx);
     GridSampleOp::attachInterface<HipDstBufferizableModel<GridSampleOp>>(*ctx);
     RoiAlignOp::attachInterface<HipDstBufferizableModel<RoiAlignOp>>(*ctx);

@@ -1718,6 +1718,23 @@ int wrap_rms_norm(RuntimeState *state, void *input, void *scale, void *output,
   return 0;
 }
 
+int wrap_rms_norm_add(RuntimeState *state, void *input, void *scale,
+                      void *residual, void *output, int64_t input_num_elements,
+                      int64_t scale_num_elements, int64_t norm_num_elements,
+                      int64_t element_size_bytes, float epsilon) {
+  if (!state || !input || !scale || !residual || !output) {
+    fprintf(stderr, "Invalid arguments to wrap_rms_norm_add\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_rms_norm_add(input_num_elements=%lld, "
+             "scale_num_elements=%lld, norm_num_elements=%lld, "
+             "element_size=%lld, epsilon=%f)\n",
+             (long long)input_num_elements, (long long)scale_num_elements,
+             (long long)norm_num_elements, (long long)element_size_bytes,
+             (double)epsilon);
+  return 0;
+}
+
 int wrap_gated_rms_norm(RuntimeState *state, void *input, void *scale,
                         void *gate, void *output, int64_t input_num_elements,
                         int64_t norm_size, int64_t element_size_bytes,
@@ -3202,5 +3219,16 @@ int wrap_swiglu_promoted(RuntimeState *state, void *gate, void *up,
     return -1;
   MOCK_PRINT("[MOCK] wrap_swiglu_promoted(num_elements=%lld)\n",
              (long long)num_elements);
+  return 0;
+}
+
+int wrap_geglu(RuntimeState *state, void *gate, void *up, void *output,
+               int64_t num_elements, int64_t data_type, int64_t approximate) {
+  if (!state || !gate || !up || !output)
+    return -1;
+  MOCK_PRINT("[MOCK] wrap_geglu(num_elements=%lld, data_type=%s(%lld), "
+             "approximate=%lld)\n",
+             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
+             (long long)data_type, (long long)approximate);
   return 0;
 }

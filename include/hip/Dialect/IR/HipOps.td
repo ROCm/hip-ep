@@ -1359,6 +1359,49 @@ def Hip_RmsNormOp : Hip_DpsOp_WithInfer<"rms_norm", "Output"> {
   let hasVerifier = 1;
 }
 
+def Hip_RmsNormAddOp : Hip_DpsOp_AutoReify<"rms_norm_add"> {
+  let summary = "RMS normalization followed by a residual add";
+  let description = [{
+    Computes hip.rms_norm of `input` and adds `residual`, as a post-norm
+    residual connection does:
+
+      output = residual + input / sqrt(mean(input^2) + epsilon) * scale
+
+    The normalized value is rounded to the element type before the add, as
+    the hip.rms_norm and hip.add pair it replaces does. `input`, `residual`
+    and `output` have one type; there is no broadcasting. `axis` and
+    `epsilon` are hip.rms_norm's.
+
+    Example:
+    ```mlir
+    hip.rms_norm_add(%ctx)
+        ins(%input, %scale, %residual : memref<1x1x2560xf16, 1>,
+            memref<2560xf16, 1>, memref<1x1x2560xf16, 1>)
+        outs(%output : memref<1x1x2560xf16, 1>)
+        {axis = -1 : i64, epsilon = 9.99999997E-7 : f32}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$scale,
+    Hip_TensorOrMemRef:$residual,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$axis,
+    F32Attr:$epsilon
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `,` $scale `,` $residual `:` type($input) `,`
+    type($scale) `,` type($residual) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  let hasVerifier = 1;
+}
+
 def Hip_LayerNormOp : Hip_DpsOp_AutoReify<"layer_norm", [AttrSizedOperandSegments]> {
   let summary = "Standard layer normalization (ONNX LayerNormalization opset 17)";
   let description = [{
@@ -2980,6 +3023,43 @@ def Hip_SwigluOp : Hip_DpsOp_AutoReify<"swiglu"> {
     Hip_TensorOrMemRef:$up,
     Hip_TensorOrMemRef:$output,
     DefaultValuedAttr<BoolAttr, "false">:$promote_activation
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $gate `,` $up `:` type($gate) `,` type($up) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_GegluOp : Hip_DpsOp_AutoReify<"geglu"> {
+  let summary = "Fused GeGLU activation";
+  let description = [{
+    Applies the gated activation element-wise:
+
+      output = gelu(gate) * up
+
+    where gelu takes the same `approximate` modes as hip.gelu: "none" (erf)
+    or "tanh". The operands and output must have identical shapes; this
+    operation does not perform broadcasting. The fused runtime kernel supports
+    f16, f32, bf16, and f64, and rounds gelu(gate) to the element type before
+    the multiply, as the hip.gelu and hip.mul pair it replaces does.
+
+    Example:
+    ```mlir
+    hip.geglu(%ctx) ins(%gate, %up : memref<3x4xf16, 1>,
+                                     memref<3x4xf16, 1>)
+                      outs(%output : memref<3x4xf16, 1>)
+                      {approximate = "tanh"}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$gate,
+    Hip_TensorOrMemRef:$up,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<StrAttr, "\"none\"">:$approximate
   );
 
   let assemblyFormat = [{

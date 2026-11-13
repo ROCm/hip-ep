@@ -288,3 +288,40 @@ class TestSwiGluFusion:
 
         actual, expected = model_runner.run_sample(model, [gate, up])
         compare_outputs(actual, expected, atol=atol, rtol=rtol)
+
+
+class TestGeGluFusion:
+    """Gemma export pattern: Gelu(gate) * up, fused into hip.geglu."""
+
+    @pytest.mark.parametrize(
+        "dtype,shape,approximate,atol,rtol",
+        [
+            (np.float16, [2, 17], "tanh", 3e-3, 3e-3),
+            (np.float16, [1, 1, INTERMEDIATE], "tanh", 3e-3, 3e-3),
+            (np.float32, [2, 17], "none", 1e-5, 1e-5),
+            (np.float32, [2, 16], "tanh", 1e-5, 1e-5),
+        ],
+    )
+    def test_geglu_export_pattern(
+        self, model_runner, dtype, shape, approximate, atol, rtol
+    ):
+        tp = np_to_onnx_type(dtype)
+        gate_info = helper.make_tensor_value_info("gate", tp, shape)
+        up_info = helper.make_tensor_value_info("up", tp, shape)
+        output_info = helper.make_tensor_value_info("output", tp, shape)
+        nodes = [
+            helper.make_node("Gelu", ["gate"], ["activated"], approximate=approximate),
+            helper.make_node("Mul", ["activated", "up"], ["output"]),
+        ]
+        model = make_model_from_nodes(
+            nodes, [gate_info, up_info], [output_info], opset=20
+        )
+        # ONNX 1.19+ emits IR v14, while the current ORT release accepts v13.
+        model.ir_version = min(model.ir_version, 13)
+
+        rng = np.random.default_rng(37)
+        gate = rng.uniform(-6, 6, shape).astype(dtype)
+        up = rng.uniform(-3, 3, shape).astype(dtype)
+
+        actual, expected = model_runner.run_sample(model, [gate, up])
+        compare_outputs(actual, expected, atol=atol, rtol=rtol)

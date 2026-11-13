@@ -27,6 +27,86 @@
 
 #include <cstdio>
 
+namespace {
+
+// Validation and dispatch shared by wrap_rms_norm and wrap_rms_norm_add.
+// `residual` is null for a plain norm.
+int rms_norm_launch(RuntimeState *state, const char *who, void *input,
+                    void *scale, void *residual, void *output,
+                    int64_t input_num_elements, int64_t scale_num_elements,
+                    int64_t norm_num_elements, int64_t element_size_bytes,
+                    float epsilon) {
+  if (!state || !input || !scale || !output) {
+    fprintf(stderr, "Invalid arguments to %s\n", who);
+    return -1;
+  }
+  if (scale_num_elements <= 0 || norm_num_elements <= 0) {
+    fprintf(stderr, "%s: scale_num_elements=%lld norm_num_elements=%lld\n", who,
+            (long long)scale_num_elements, (long long)norm_num_elements);
+    return -1;
+  }
+
+  // ONNX reduces over the axes `axis` selects and only then multiplies by
+  // scale, so scale may span whole rows instead of widening the reduction.
+  // Row tiling covers every scale whose shape is a suffix of the input's; a
+  // scale carrying an interior broadcast dim (e.g. [G, 1] against [N, G, D])
+  // cannot be expressed that way, so refuse it rather than pair rows with the
+  // wrong gains.
+  if (scale_num_elements % norm_num_elements != 0) {
+    fprintf(stderr,
+            "%s: scale_num_elements=%lld is not a multiple of the "
+            "normalized width %lld; a scale that broadcasts along the reduced "
+            "axes is unsupported\n",
+            who, (long long)scale_num_elements, (long long)norm_num_elements);
+    return -1;
+  }
+
+  // ONNX only broadcasts Scale onto X, never the reverse. For that
+  // unidirectional broadcast, |X| must be a multiple of |Scale|. Together
+  // with the check above this also implies |X| is a multiple of the
+  // normalized width, so the integer row split below does not truncate.
+  if (input_num_elements % scale_num_elements != 0) {
+    fprintf(stderr,
+            "%s: input_num_elements=%lld is not a multiple of "
+            "scale_num_elements=%lld; Scale is not unidirectional-"
+            "broadcastable onto X under row-tiled packing\n",
+            who, (long long)input_num_elements, (long long)scale_num_elements);
+    return -1;
+  }
+
+  int hip_dtype;
+  if (element_size_bytes == 2)
+    hip_dtype = HIP_DTYPE_FLOAT16;
+  else if (element_size_bytes == 4)
+    hip_dtype = HIP_DTYPE_FLOAT32;
+  else {
+    fprintf(stderr,
+            "%s: unsupported element_size %lld "
+            "(supported: 2=fp16, 4=fp32)\n",
+            who, (long long)element_size_bytes);
+    return -1;
+  }
+
+  const int64_t norm_size = norm_num_elements;
+  const int64_t num_rows = input_num_elements / norm_size;
+  const int64_t scale_rows = scale_num_elements / norm_size;
+
+  RUNTIME_DEBUG_LOG("[REAL] %s: num_rows=%lld, norm_size=%lld, "
+                    "scale_rows=%lld, data_type=%s, epsilon=%e, "
+                    "total_bytes=%lld, residual=%s\n",
+                    who, (long long)num_rows, (long long)norm_size,
+                    (long long)scale_rows,
+                    (element_size_bytes == 2) ? "f16" : "f32", (double)epsilon,
+                    (long long)(input_num_elements * element_size_bytes),
+                    residual ? "yes" : "no");
+
+  return hip_rms_norm_add(hipdnn_ep_state_get_stream(state), input, scale,
+                          residual, output, num_rows, norm_size, scale_rows,
+                          epsilon, hip_dtype);
+}
+
+} // namespace
+
 int wrap_rms_norm(RuntimeState *state, void *input, void *scale, void *output,
                   int64_t input_num_elements, int64_t scale_num_elements,
                   int64_t norm_num_elements, int64_t element_size_bytes,
@@ -49,75 +129,35 @@ int wrap_rms_norm(RuntimeState *state, void *input, void *scale, void *output,
   // kernel always accumulates in FP32, which is what stash_type = 1 asks for.
   (void)axis;
   (void)stash_type;
-
-  if (!state || !input || !scale || !output) {
-    fprintf(stderr, "Invalid arguments to wrap_rms_norm\n");
-    return -1;
-  }
-  if (scale_num_elements <= 0 || norm_num_elements <= 0) {
-    fprintf(stderr,
-            "wrap_rms_norm: scale_num_elements=%lld norm_num_elements=%lld\n",
-            (long long)scale_num_elements, (long long)norm_num_elements);
-    return -1;
-  }
-
-  // ONNX reduces over the axes `axis` selects and only then multiplies by
-  // scale, so scale may span whole rows instead of widening the reduction.
-  // Row tiling covers every scale whose shape is a suffix of the input's; a
-  // scale carrying an interior broadcast dim (e.g. [G, 1] against [N, G, D])
-  // cannot be expressed that way, so refuse it rather than pair rows with the
-  // wrong gains.
-  if (scale_num_elements % norm_num_elements != 0) {
-    fprintf(stderr,
-            "wrap_rms_norm: scale_num_elements=%lld is not a multiple of the "
-            "normalized width %lld; a scale that broadcasts along the reduced "
-            "axes is unsupported\n",
-            (long long)scale_num_elements, (long long)norm_num_elements);
-    return -1;
-  }
-
-  // ONNX only broadcasts Scale onto X, never the reverse. For that
-  // unidirectional broadcast, |X| must be a multiple of |Scale|. Together
-  // with the check above this also implies |X| is a multiple of the
-  // normalized width, so the integer row split below does not truncate.
-  if (input_num_elements % scale_num_elements != 0) {
-    fprintf(stderr,
-            "wrap_rms_norm: input_num_elements=%lld is not a multiple of "
-            "scale_num_elements=%lld; Scale is not unidirectional-"
-            "broadcastable onto X under row-tiled packing\n",
-            (long long)input_num_elements, (long long)scale_num_elements);
-    return -1;
-  }
-
-  int hip_dtype;
-  if (element_size_bytes == 2)
-    hip_dtype = HIP_DTYPE_FLOAT16;
-  else if (element_size_bytes == 4)
-    hip_dtype = HIP_DTYPE_FLOAT32;
-  else {
-    fprintf(stderr,
-            "wrap_rms_norm: unsupported element_size %lld "
-            "(supported: 2=fp16, 4=fp32)\n",
-            (long long)element_size_bytes);
-    return -1;
-  }
-
-  const int64_t norm_size = norm_num_elements;
-  const int64_t num_rows = input_num_elements / norm_size;
-  const int64_t scale_rows = scale_num_elements / norm_size;
-
-  RUNTIME_DEBUG_LOG("[REAL] wrap_rms_norm: num_rows=%lld, norm_size=%lld, "
-                    "scale_rows=%lld, data_type=%s, epsilon=%e, "
-                    "total_bytes=%lld\n",
-                    (long long)num_rows, (long long)norm_size,
-                    (long long)scale_rows,
-                    (element_size_bytes == 2) ? "f16" : "f32", (double)epsilon,
-                    (long long)(input_num_elements * element_size_bytes));
-
-  return hip_rms_norm(hipdnn_ep_state_get_stream(state), input, scale, output,
-                      num_rows, norm_size, scale_rows, epsilon, hip_dtype);
+  return rms_norm_launch(state, "wrap_rms_norm", input, scale, nullptr, output,
+                         input_num_elements, scale_num_elements,
+                         norm_num_elements, element_size_bytes, epsilon);
 }
 
+int wrap_rms_norm_add(RuntimeState *state, void *input, void *scale,
+                      void *residual, void *output, int64_t input_num_elements,
+                      int64_t scale_num_elements, int64_t norm_num_elements,
+                      int64_t element_size_bytes, float epsilon) {
+  OP_PROFILE(
+      "rms_norm_add",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "%lldx%lld",
+                 (long long)(norm_num_elements > 0
+                                 ? input_num_elements / norm_num_elements
+                                 : 0),
+                 (long long)norm_num_elements);
+        return std::string(b);
+      },
+      state);
+  if (!residual) {
+    fprintf(stderr, "Invalid arguments to wrap_rms_norm_add\n");
+    return -1;
+  }
+  return rms_norm_launch(state, "wrap_rms_norm_add", input, scale, residual,
+                         output, input_num_elements, scale_num_elements,
+                         norm_num_elements, element_size_bytes, epsilon);
+}
 int wrap_gated_rms_norm(RuntimeState *state, void *input, void *scale,
                         void *gate, void *output, int64_t input_num_elements,
                         int64_t norm_size, int64_t element_size_bytes,

@@ -878,8 +878,23 @@ HIP_KERNEL_API int hip_swiglu(void *stream, const void *gate, const void *up,
 
 // Half input/output, with FP32 activation intermediates.
 HIP_KERNEL_API int hip_swiglu_promoted(void *stream, const void *gate,
-                                      const void *up, void *output,
-                                      int64_t num_elements, int hip_dtype);
+                                       const void *up, void *output,
+                                       int64_t num_elements, int hip_dtype);
+
+/* =========================================================================
+ * Fused GeGLU Activation
+ * =========================================================================
+ *
+ * Applies output = gelu(gate) * up element-wise, with gelu computed as
+ * hip_elementwise_gelu does (approximate: 0 = erf, 1 = tanh) and rounded to
+ * the data type before the multiply. Supports HIP_DTYPE_FLOAT16,
+ * HIP_DTYPE_FLOAT32, HIP_DTYPE_BFLOAT16, and HIP_DTYPE_FLOAT64.
+ *
+ * Returns: 0 on success (hipSuccess), non-zero hipError_t on failure.
+ */
+HIP_KERNEL_API int hip_geglu(void *stream, const void *gate, const void *up,
+                             void *output, int64_t num_elements, int hip_dtype,
+                             int64_t approximate);
 
 /* =========================================================================
  * Softplus activation
@@ -2350,6 +2365,22 @@ HIP_KERNEL_API int hip_rms_norm(
     float epsilon,
     int hip_dtype);
 
+/* hip_rms_norm followed by a residual add: output = residual + y, where y is
+ * the normalized row rounded to `hip_dtype`. `residual` has the input's shape
+ * and may be null, which is hip_rms_norm. The result equals the norm followed
+ * by a separate elementwise add. */
+HIP_KERNEL_API int hip_rms_norm_add(
+    void* stream,
+    const void* input,
+    const void* scale,
+    const void* residual,
+    void* output,
+    int64_t outer,
+    int64_t norm_size,
+    int64_t scale_rows,
+    float epsilon,
+    int hip_dtype);
+
 /* =========================================================================
  * Gated RMS Normalization (com.microsoft GatedRMSNorm)
  * =========================================================================
@@ -2797,8 +2828,9 @@ HIP_KERNEL_API int hip_matmul_nbits_wmma_tiled_grouped_supported(
  *   A          : fp16 activations [M, K]  (batch==1, row-major)
  *   B          : packed int4 weights  [N, K/2]
  *   scales     : fp16 [N, ceil(K/block_size)]
- *   zp_u8      : pre-unpacked uint8 zero points [N, ceil(K/block_size)] or
- *                nullptr for the symmetric (default zp=8) path
+ *   zp_packed  : the MatMulNBits zero_points input as packed, two 4-bit
+ *                groups per byte [N, ceil(ceil(K/block_size)/2)], or nullptr
+ *                for the symmetric (default zp=8) path
  *   out        : fp16 [M, N]
  *   a_qb_scratch    : >= M*K bytes (int8), caller/session-owned
  *   a_scale_scratch : >= M*ceil(K/block_size) floats, caller/session-owned
@@ -2806,7 +2838,7 @@ HIP_KERNEL_API int hip_matmul_nbits_wmma_tiled_grouped_supported(
  */
 HIP_KERNEL_API int hip_matmul_nbits_dp4a(
     void* stream,
-    const void* A, const void* B, const void* scales, const void* zp_u8,
+    const void* A, const void* B, const void* scales, const void* zp_packed,
     const void* bias, void* out,
     int64_t M, int64_t N, int64_t K, int64_t block_size,
     void* a_qb_scratch, void* a_scale_scratch);

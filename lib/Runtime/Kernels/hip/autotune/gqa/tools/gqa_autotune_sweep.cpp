@@ -459,8 +459,8 @@ std::vector<Result> sweepPrefill(const Shape &s, bool verify, double target_ms,
     r.hb = c.hb;
     r.bkv = c.bkv;
     measure(r, [&]() {
-      dispatchPrefillV8x(c, nullptr, Q, K, V, O, B, H, G, sq, skv, max_seq,
-                         past_len, scale, sink, H, smooth);
+      dispatchPrefillV8x(c, d, nullptr, Q, K, V, O, B, H, G, sq, skv, max_seq,
+                         past_len, scale, sink, H, smooth, window);
     });
   }
 
@@ -474,8 +474,8 @@ std::vector<Result> sweepPrefill(const Shape &s, bool verify, double target_ms,
       const int best = tunePrefillCandidates(
           nullptr, n8,
           [&](int i) {
-            dispatchPrefillV8x(v8x[i], nullptr, Q, K, V, O, B, H, G, sq, skv,
-                               max_seq, past_len, scale, nullptr, H, 0);
+            dispatchPrefillV8x(v8x[i], d, nullptr, Q, K, V, O, B, H, G, sq, skv,
+                               max_seq, past_len, scale, nullptr, H, 0, window);
           },
           [&](int i) { return v8xLabel(v8x[i]); }, d, sq, skv);
       buf = v8xLabel(v8x[best]);

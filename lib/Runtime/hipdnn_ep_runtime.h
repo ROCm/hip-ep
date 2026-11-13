@@ -1454,6 +1454,12 @@ int wrap_swiglu(RuntimeState *state, void *gate, void *up, void *output,
 int wrap_swiglu_promoted(RuntimeState *state, void *gate, void *up,
                          void *output, int64_t num_elements, int64_t data_type);
 
+// Fused GeGLU wrapper: output = gelu(gate) * up, with gelu rounded to the
+// data type before the multiply. All buffers have identical shape and type.
+// approximate: 0 = exact (erf), 1 = tanh approximation (as wrap_gelu).
+int wrap_geglu(RuntimeState *state, void *gate, void *up, void *output,
+               int64_t num_elements, int64_t data_type, int64_t approximate);
+
 // Window-pool wrapper (uses custom HIP kernel).
 // Generic ONNX MaxPool / AveragePool / LpPool over (N, C, D_1[, D_2[, D_3]])
 // input with row-major output layout.  `pool_mode` (HIPDNN_EP_POOL_*) selects
@@ -1574,6 +1580,16 @@ int wrap_rms_norm(RuntimeState *state, void *input, void *scale, void *output,
                   int64_t input_num_elements, int64_t scale_num_elements,
                   int64_t norm_num_elements, int64_t element_size_bytes,
                   int64_t axis, float epsilon, int64_t stash_type);
+
+// RMS norm followed by a residual add (hip.rms_norm_add):
+//   output = residual + rms_norm(input) * scale
+// with the normalized value rounded to the element type before the add.
+// `residual` and `output` have the input's shape; the other arguments are
+// as for wrap_rms_norm.
+int wrap_rms_norm_add(RuntimeState *state, void *input, void *scale,
+                      void *residual, void *output, int64_t input_num_elements,
+                      int64_t scale_num_elements, int64_t norm_num_elements,
+                      int64_t element_size_bytes, float epsilon);
 
 // LayerNormalization operation wrapper (standard ONNX opset 17+)
 // bias, mean, inv_std may be nullptr when optional inputs/outputs are absent

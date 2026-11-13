@@ -66,6 +66,7 @@ inline constexpr const char *kWrapHipblasltMatmul = "wrap_hipblasLtMatmul";
 inline constexpr const char *kWrapMatmulI32 = "wrap_matmul_i32";
 inline constexpr const char *kWrapRocMlir = "wrap_rocmlir";
 inline constexpr const char *kWrapRmsNorm = "wrap_rms_norm";
+inline constexpr const char *kWrapRmsNormAdd = "wrap_rms_norm_add";
 inline constexpr const char *kWrapSkipSimplifiedLayerNorm =
     "wrap_skip_simplified_layer_norm";
 inline constexpr const char *kWrapSkipSimplifiedLayerNormMixed =
@@ -111,6 +112,7 @@ inline constexpr const char *kWrapSwish = "wrap_swish";   // hip.swish
 inline constexpr const char *kWrapPow = "wrap_pow";       // hip.pow
 inline constexpr const char *kWrapSwiglu = "wrap_swiglu"; // hip.swiglu
 inline constexpr const char *kWrapSwigluPromoted = "wrap_swiglu_promoted";
+inline constexpr const char *kWrapGeglu = "wrap_geglu";       // hip.geglu
 inline constexpr const char *kWrapSoftplus = "wrap_softplus"; // hip.softplus
 inline constexpr const char *kWrapElementwiseSub = "wrap_elementwise_sub";
 inline constexpr const char *kWrapRotaryEmbedding = "wrap_rotary_embedding";

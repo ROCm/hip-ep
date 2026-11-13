@@ -392,10 +392,10 @@ static void* gqa_policy() {
   return p;
 }
 
-// Mirrors real/gqa.cpp: v8x at d256, v6x otherwise.
+// Mirrors real/gqa.cpp: v8x at d256 and d512, v6x otherwise.
 static hipdnn_ep::GqaPrefillVariant prefill_variant(int d) {
-  return d == 256 ? hipdnn_ep::GqaPrefillVariant::V8x
-                  : hipdnn_ep::GqaPrefillVariant::V6x;
+  return d == 256 || d == 512 ? hipdnn_ep::GqaPrefillVariant::V8x
+                              : hipdnn_ep::GqaPrefillVariant::V6x;
 }
 #endif
 
@@ -810,7 +810,7 @@ static bool run_case(const Case& c, int iters) {
   const bool pass = err < 2e-3;
   printf("%-16s B%d H%d G%d(hpg%d) D%-3d sq=%-5d past=%-5d %-6s w=%-5d | relL2=%.2e  latency=%.4f ms  %s (%s)\n",
          c.name, B, H, G, H / G, D, sq, past_len, sink_tag, c.window, err, ms,
-         pass ? "PASS" : "FAIL", D == 256 ? "v8x" : "v6x");
+         pass ? "PASS" : "FAIL", D == 256 || D == 512 ? "v8x" : "v6x");
 
   {
     using namespace hipdnn_ep_test;
@@ -978,8 +978,8 @@ int main(int argc, char** argv) {
       // Qwen3 16:4 (group of 4) and a group of 2 (Gemma-3).
       {"qwen3-16:4",   1, 16, 4, 256, 1000, 0,    kSinkNone,    false, 0},
       {"gemma3-d256",  1,  8, 4, 256, 1000, 0,    kSinkNone,    false, 0},
-      // There is no windowed d256 instance, so a d256 window still declines.
-      {"qwen3.6-win",  1, 16, 2, 256, 512,  0,    kSinkNone,    true,  128},
+      // v8x builds the window at d256.
+      {"qwen3.6-win",  1, 16, 2, 256, 512,  0,    kSinkNone,    false, 128},
       {"llama-3.1-8b", 1, 32, 8, 128, 1000, 0,    kSinkNone,    false, 0},
       {"llama-3.1-8b", 1, 32, 8, 128, 512,  8192, kSinkNone,    false, 0},
       // d == 128 groups not divisible by 4 split the block into Q subtiles.
@@ -1047,6 +1047,21 @@ int main(int argc, char** argv) {
       {"lpad-inf",       2, 48,  8, 128, 1000, 0,    kSinkNone,   false, 0,   250, -INFINITY, true},
       {"lpad-inf-win",   2, 72,  8, 128, 1000, 0,    kSinkNone,   false, 128, 250, -INFINITY, true},
       {"lpad-3e38-past", 2, 48,  8, 128, 777,  200,  kSinkNone,   false, 0,   300, -3.4e38f,  true},
+      // ---- head_dim 512 (v8x, four or eight waves per head): Gemma-4's
+      // global layers are a group of 4; a group of 1 (MHA) leaves one head
+      // per block; there is no windowed d512 instance.
+      {"gemma4-d512",    1,  8,  2, 512, 1000, 0,    kSinkNone,   false, 0},
+      {"gemma4-d512",    1,  8,  2, 512, 512,  1500, kSinkNone,   false, 0},
+      {"gemma4-d512",    2,  8,  2, 512, 333,  0,    kSinkNone,   false, 0},
+      {"mha-d512",       1,  4,  4, 512, 600,  0,    kSinkNone,   false, 0},
+      {"gemma4-d512-win", 1, 8,  2, 512, 512,  0,    kSinkNone,   true,  128},
+      // ---- d256 sliding window (v8x): Gemma-4's local layers (window 512),
+      // a window starting mid-tile over a past, one wider than the sequence,
+      // and a window of 1.
+      {"gemma4-d256-win", 1,  8,  2, 256, 1000, 0,    kSinkNone,   false, 512},
+      {"gemma4-d256-win", 1,  8,  2, 256, 777,  1500, kSinkNone,   false, 300},
+      {"gemma4-d256-win", 2,  8,  2, 256, 600,  0,    kSinkNone,   false, 4096},
+      {"gemma4-d256-win", 1,  8,  2, 256, 333,  0,    kSinkNone,   false, 1},
   };
   const size_t kNumCases = sizeof(cases) / sizeof(cases[0]);
 
@@ -1061,7 +1076,8 @@ int main(int argc, char** argv) {
   // with and without a window, right- and -inf left-padded.
   static const size_t kTier1[] = {0,  3,  7,  9,  11, 13, 15, 17, 18, 23,
                                   24, 25, 29, 30, 40, 43, 44, 47, 50, 55,
-                                  56, 64, 66, 69, 73, 74, 76, 78, 82, 83};
+                                  56, 64, 66, 69, 73, 74, 76, 78, 82, 83,
+                                  85, 86, 88, 89, 90, 91, 92, 93};
   // tier2 (~65% by case count, but includes ALL the cheap sq=128 additions
   // since they cost almost nothing -- see kTier2 vs tier3 wall time in
   // RESULT.md) still excludes the 2 new expensive sq=8192 rows (kept
@@ -1075,7 +1091,8 @@ int main(int argc, char** argv) {
                                   47, 48, 49, 50, 51, 52, 53, 54, 55, 56,
                                   57, 58, 59, 60, 61, 62, 63, 64, 65, 66,
                                   67, 68, 69, 70, 71, 72, 73, 74, 75, 76,
-                                  77, 78, 79, 80, 81, 82, 83, 84};
+                                  77, 78, 79, 80, 81, 82, 83, 84, 85, 86,
+                                  87, 88, 89, 90, 91, 92, 93};
   const size_t* idxs = coverage_tier == 1 ? kTier1
                      : coverage_tier == 2 ? kTier2
                                           : nullptr;
