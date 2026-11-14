@@ -61,6 +61,118 @@ static Type promoteRankZero(Type type) {
                                tensorType.getEncoding());
 }
 
+// A static integer nearest upsample is a repeated read of the input: with
+// asymmetric coordinates and floor rounding, output o copies input o / scale.
+// round_prefer_floor matches that repeat only for scales 1 and 2, because a
+// larger scale rounds some samples in the block to the next input pixel.
+// Returns the resize input when `value` is that upsample and its only user is
+// this convolution's input. The view is rebuilt inside the outlined kernel so
+// rocMLIR folds it into the convolution instead of launching hip.resize.
+static Value nearestRepeatInput(Value value, ConvOp conv) {
+  auto resize = value.getDefiningOp<ResizeOp>();
+  if (!resize || !resize->hasOneUse() || conv.getInput() != value)
+    return {};
+  if (!resize.getRuntimeScales().empty())
+    return {};
+  if (resize.getMode() != 0 || resize.getCoordTransform() != 1)
+    return {};
+  int64_t nearest = resize.getNearestMode();
+  if (nearest != 0 && nearest != 2)
+    return {};
+
+  auto inType = dyn_cast<RankedTensorType>(resize.getInput().getType());
+  auto outType = dyn_cast<RankedTensorType>(value.getType());
+  if (!inType || !outType || !inType.hasStaticShape() ||
+      !outType.hasStaticShape() || inType.getRank() != outType.getRank())
+    return {};
+  // rocMLIR convolution is 2D or 3D.
+  if (inType.getRank() != 4 && inType.getRank() != 5)
+    return {};
+
+  bool grew = false;
+  SmallVector<int64_t> ratios;
+  ratios.reserve(inType.getRank());
+  for (auto [inDim, outDim] :
+       llvm::zip(inType.getShape(), outType.getShape())) {
+    if (inDim <= 0 || outDim < inDim || outDim % inDim != 0)
+      return {};
+    int64_t ratio = outDim / inDim;
+    if (ratio > 1)
+      grew = true;
+    if (nearest == 0 && ratio > 2)
+      return {};
+    ratios.push_back(ratio);
+  }
+  if (!grew)
+    return {};
+
+  // The runtime samples with the attribute scale, not out/in. A near-integer
+  // value such as 2.0000004 for an 8 -> 16 resize still grows by 2, but
+  // floor(o / scale) disagrees with the repeat view's o / 2, so reject it.
+  if (ArrayAttr scales = resize.getScalesAttr()) {
+    if (static_cast<int64_t>(scales.size()) != inType.getRank())
+      return {};
+    for (auto [attr, ratio] : llvm::zip(scales.getValue(), ratios)) {
+      double scale = cast<FloatAttr>(attr).getValueAsDouble();
+      if (scale != static_cast<double>(ratio))
+        return {};
+    }
+  }
+  return resize.getInput();
+}
+
+// [N, C, H, W] -> [N, C, H, 1, W, 1] -> broadcast the new axes to the integer
+// scale -> [N, C, H*scale, W*scale]. Axes with scale 1 are left unchanged.
+static Value buildNearestRepeatView(PatternRewriter &rewriter, Location loc,
+                                    Value context, Value input,
+                                    Type resultType) {
+  auto inType = cast<RankedTensorType>(input.getType());
+  auto outType = cast<RankedTensorType>(resultType);
+  ArrayRef<int64_t> inShape = inType.getShape();
+  ArrayRef<int64_t> outShape = outType.getShape();
+
+  SmallVector<int64_t> splitShape;
+  SmallVector<int64_t> broadcastShape;
+  SmallVector<ReassociationIndices> reassoc;
+  int64_t axis = 0;
+  for (int64_t i = 0, rank = inType.getRank(); i < rank; ++i) {
+    int64_t scale = outShape[i] / inShape[i];
+    ReassociationIndices group;
+    group.push_back(axis++);
+    splitShape.push_back(inShape[i]);
+    broadcastShape.push_back(inShape[i]);
+    if (scale > 1) {
+      group.push_back(axis++);
+      splitShape.push_back(1);
+      broadcastShape.push_back(scale);
+    }
+    reassoc.push_back(std::move(group));
+  }
+
+  Type elemType = inType.getElementType();
+  auto splitType = RankedTensorType::get(splitShape, elemType);
+  SmallVector<OpFoldResult> splitFolds;
+  for (int64_t dim : splitShape)
+    splitFolds.push_back(rewriter.getIndexAttr(dim));
+  Value split = tensor::ExpandShapeOp::create(rewriter, loc, splitType, input,
+                                              reassoc, splitFolds);
+
+  if (splitShape == broadcastShape)
+    return tensor::CollapseShapeOp::create(rewriter, loc, outType, split,
+                                           reassoc);
+
+  auto shapeType = RankedTensorType::get(
+      {static_cast<int64_t>(broadcastShape.size())}, rewriter.getI64Type());
+  Value shape = arith::ConstantOp::create(
+      rewriter, loc, shapeType,
+      DenseIntElementsAttr::get(shapeType, broadcastShape));
+  Value init = tensor::EmptyOp::create(rewriter, loc, broadcastShape, elemType);
+  Value expanded = ExpandOp::create(rewriter, loc, context, split, shape, init)
+                       ->getResult(0);
+  return tensor::CollapseShapeOp::create(rewriter, loc, outType, expanded,
+                                         reassoc);
+}
+
 /// rocMLIR's arithmetic uses signless integers. ONNX BOOL is ui8 in the
 /// importer, but a Where condition is a one-byte 0/1 mask, so the outlined
 /// kernel can safely view that argument as i8. The dispatch continues to pass
@@ -230,6 +342,23 @@ public:
         if (operand != context && !ops.contains(operand.getDefiningOp()))
           operands.insert(operand);
 
+    // A nearest integer upsample in front of this convolution is a view of
+    // the smaller tensor. Pass that tensor in and rebuild the view inside the
+    // kernel; leaving hip.resize outside would still write the expanded copy.
+    ResizeOp absorbedResize;
+    if (auto conv = dyn_cast<ConvOp>(anchorOp.getOperation())) {
+      Value input = conv.getInput();
+      if (Value root = nearestRepeatInput(input, conv)) {
+        SmallVector<Value> ordered(operands.begin(), operands.end());
+        for (Value &operand : ordered)
+          if (operand == input)
+            operand = root;
+        operands.clear();
+        operands.insert_range(ordered);
+        absorbedResize = input.getDefiningOp<ResizeOp>();
+      }
+    }
+
     // Cloning follows this order, so a producer absorbed above has to come
     // before the op that reads it.
     ops = topologicalSort(ops);
@@ -262,6 +391,14 @@ public:
       // Map other operands
       for (auto [idx, operand] : llvm::enumerate(operands)) {
         mapping.map(operand, funcBlock->getArgument(idx));
+      }
+
+      if (absorbedResize) {
+        Value viewed = buildNearestRepeatView(
+            rewriter, absorbedResize.getLoc(), mapping.lookup(context),
+            mapping.lookup(absorbedResize.getInput()),
+            absorbedResize.getResult(0).getType());
+        mapping.map(absorbedResize.getResult(0), viewed);
       }
 
       for (auto *op : ops) {
@@ -302,7 +439,28 @@ public:
         SymbolRefAttr::get(newFunc), context, dispatchOperands,
         endOp.getDpsInits().front());
 
+    Operation *replaced = endOp.getOperation();
     rewriter.replaceOp(endOp, rocMlirOp);
+    // Ops cloned into the kernel still sit in main_graph. A pointwise
+    // epilogue leaves the original convolution with no users, and that
+    // convolution is the only reader of an absorbed resize. Drop trivially
+    // dead intermediates first so the resize cleanup below sees use_empty
+    // instead of erasing a live SSA producer.
+    for (Operation *op : llvm::reverse(ops)) {
+      if (op == replaced)
+        continue;
+      if (isOpTriviallyDead(op))
+        rewriter.eraseOp(op);
+    }
+    if (absorbedResize && absorbedResize->use_empty()) {
+      Value init = absorbedResize.getOutput();
+      rewriter.eraseOp(absorbedResize);
+      // Only a tensor.empty destination is safe to drop. A side-effecting
+      // producer of the outs() buffer must stay even when its result is unused.
+      if (auto empty = dyn_cast_or_null<tensor::EmptyOp>(init.getDefiningOp());
+          empty && empty->use_empty())
+        rewriter.eraseOp(empty);
+    }
     return success();
   }
 
