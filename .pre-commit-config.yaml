@@ -5,6 +5,9 @@
 
 # See https://pre-commit.com for more information
 # See https://pre-commit.com/hooks.html for more hooks
+# Third-party headers (AMD COMGR, ROCTx) and licenses vendored by
+# hip-ktrace stay byte-identical to upstream, so no hook may rewrite them.
+exclude: ^tools/hip-ktrace/src/external/
 repos:
 -   repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
