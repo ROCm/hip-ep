@@ -433,7 +433,9 @@ HIP_KERNEL_API int hip_qlinear_matmul(
  * (lib/Runtime/Kernels/hip/elementwise_unary_kernel.hip).
  *
  * Supported hip_dtype (per op, may differ):
- *   Neg/Sign  : FLOAT16, INT32, INT64 (+ FLOAT32 for free)
+ *   Neg       : FLOAT16, BFLOAT16, INT32, INT64 (+ FLOAT32 for free);
+ *               bf16 flips the sign bit (exact, NaN payload kept)
+ *   Sign      : FLOAT16, INT32, INT64 (+ FLOAT32 for free)
  *   Cos/Sin   : FLOAT16, FLOAT32
  *   Not       : bool (i.e. 1-byte; pass element_size_bytes is unused -- the
  *               kernel reads/writes 1 byte unconditionally and ignores
@@ -548,8 +550,8 @@ HIP_KERNEL_API int hip_isnan(
  *
  * Mul / Add / Min / Max are reached from wrap_elementwise: the
  * int16/int32/int64 path lands in this file's flat kernels (after
- * hip_expand materialises any broadcast), while the float16/float32 path
- * uses the native broadcasting kernel below instead.
+ * hip_expand materialises any broadcast), while the float16/bfloat16/float32
+ * path uses the native broadcasting kernel below instead.
  *
  * Div / Mod / Equal / Less were added for the Qwen3.5 vision path. Equal and
  * Less write bool (1 byte); their hip_dtype refers to the input element type.
@@ -621,7 +623,9 @@ HIP_KERNEL_API int hip_elementwise_mod(
  *
  *   op: 0 = add, 1 = mul, 2 = min, 3 = max
  *
- * Supported hip_dtype: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16.
+ * Supported hip_dtype: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
+ * HIP_DTYPE_BFLOAT16. f16/bf16 are computed in float and rounded to nearest
+ * even on store.
  * Returns: 0 on success, -1 on unsupported dtype / launch error, -2 when the
  * output volume exceeds the 32-bit index range (caller should fall back).
  */
@@ -2000,6 +2004,10 @@ HIP_KERNEL_API int hip_reduce_prod(
  *
  * Both kernels are bounded to kTileMaxRank = 8 input/output dimensions
  * (matches ORT's TArray<int64, 8> default).
+ *
+ * hip_expand dtypes: FLOAT16, BFLOAT16, FLOAT32, INT8, UINT8, INT16, UINT16,
+ * INT32, INT64. Pure copy, so UINT8 and UINT16 reuse the INT8 and INT16
+ * instantiations.
  */
 HIP_KERNEL_API int hip_tile(
     void* stream,

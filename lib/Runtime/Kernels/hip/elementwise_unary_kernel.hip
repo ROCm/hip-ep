@@ -66,7 +66,7 @@ __global__ void elementwise_abs_f32_kernel(const float *__restrict__ input,
 
 // =====================================================================
 // Neg: y = -x
-// ORT: UNARY_OP_NAME_EXPR(Neg, -a) over CSILHFD (we cover f16/i32/i64).
+// ORT: UNARY_OP_NAME_EXPR(Neg, -a) over CSILHFD (we cover f16/bf16/i32/i64).
 // =====================================================================
 
 template <typename T>
@@ -92,6 +92,22 @@ __global__ void elementwise_neg_kernel<__half>(const __half *__restrict__ input,
   if (idx < num_elements) {
     float x = __half2float(input[idx]);
     output[idx] = __float2half(-x);
+  }
+}
+
+// BF16 specialization: flip the sign bit. Exact for every non-NaN value
+// (incl. +/-0 and +/-inf); NaN stays NaN.
+template <>
+__global__ void
+elementwise_neg_kernel<__hip_bfloat16>(const __hip_bfloat16 *__restrict__ input,
+                                       __hip_bfloat16 *__restrict__ output,
+                                       int64_t num_elements) {
+  int64_t idx =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    __hip_bfloat16_raw r = input[idx];
+    r.x ^= 0x8000u;
+    output[idx] = r;
   }
 }
 
@@ -1183,6 +1199,15 @@ extern "C" int hip_elementwise_neg(void *stream, const void *input,
                        dim3(kBlockSize), 0, hip_stream,
                        static_cast<const __half *>(input),
                        static_cast<__half *>(output), num_elements);
+    break;
+  case HIP_DTYPE_BFLOAT16:
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] hip_elementwise_neg: bf16, num=%lld\n",
+        (long long)num_elements);
+    hipLaunchKernelGGL(elementwise_neg_kernel<__hip_bfloat16>, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const __hip_bfloat16 *>(input),
+                       static_cast<__hip_bfloat16 *>(output), num_elements);
     break;
   case HIP_DTYPE_INT32:
     CUSTOM_KERNELS_DEBUG_LOG(

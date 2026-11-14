@@ -19,6 +19,7 @@
 #include "hip_custom_kernels.h"
 #include "debug_log.h"
 
+#include <hip/hip_bf16.h>
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 #include <cstdint>
@@ -133,6 +134,14 @@ extern "C" int hip_expand(void *stream, const void *input, void *output,
                        dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
                        static_cast<const __half *>(input),
                        static_cast<__half *>(output), aligned_in_shape,
+                       output_shape, aligned_in_strides, output_rank,
+                       num_output_elements);
+    break;
+  case HIP_DTYPE_BFLOAT16:
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_expand_kernel<__hip_bfloat16>),
+                       dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const __hip_bfloat16 *>(input),
+                       static_cast<__hip_bfloat16 *>(output), aligned_in_shape,
                        output_shape, aligned_in_strides, output_rank,
                        num_output_elements);
     break;
