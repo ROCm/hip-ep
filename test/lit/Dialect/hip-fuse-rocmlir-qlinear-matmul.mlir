@@ -80,11 +80,13 @@ func.func @main_graph(%ctx: !hip.context, %a: tensor<4x8xi8>,
 
 // -----
 
-// A non-zero B zero point has no rocMLIR form.
+// A non-zero B zero point adds a second integer matmul over the zero point,
+// so the op becomes two rocMLIR kernels (values pinned in
+// hip-rocmlir-split-asymmetric-qlinear.mlir).
 
 // CHECK-LABEL: func.func @main_graph
-// CHECK-NOT: hip.rocmlir
-// CHECK: hip.qlinear_matmul
+// CHECK-COUNT-2: hip.rocmlir(
+// CHECK-NOT: hip.qlinear_matmul
 func.func @main_graph(%ctx: !hip.context, %a: tensor<4x8xi8>)
     -> tensor<4x3xi8> {
   %as = hip.constant {value = dense<0.5> : tensor<f32>} : tensor<f32>
