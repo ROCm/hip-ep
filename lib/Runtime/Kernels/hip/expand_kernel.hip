@@ -19,6 +19,7 @@
 #include "hip_custom_kernels.h"
 #include "debug_log.h"
 
+#include <hip/hip_bf16.h>
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 #include <cstdint>
@@ -136,6 +137,14 @@ extern "C" int hip_expand(void *stream, const void *input, void *output,
                        output_shape, aligned_in_strides, output_rank,
                        num_output_elements);
     break;
+  case HIP_DTYPE_BFLOAT16:
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_expand_kernel<__hip_bfloat16>),
+                       dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const __hip_bfloat16 *>(input),
+                       static_cast<__hip_bfloat16 *>(output), aligned_in_shape,
+                       output_shape, aligned_in_strides, output_rank,
+                       num_output_elements);
+    break;
   case HIP_DTYPE_FLOAT32:
     hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_expand_kernel<float>),
                        dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
@@ -172,12 +181,11 @@ extern "C" int hip_expand(void *stream, const void *input, void *output,
                        output_shape, aligned_in_strides, output_rank,
                        num_output_elements);
     break;
-  // 2-byte payloads. uint16 and bf16 reuse the int16 instantiation: the
-  // kernel only copies elements and never does arithmetic, so the copy is
-  // bit-exact. wrap_equal materialises a partial broadcast through this entry.
+  // 2-byte integer payloads. uint16 reuses the int16 instantiation: the
+  // kernel only copies elements and never does arithmetic. wrap_equal
+  // materialises a partial broadcast through this entry.
   case HIP_DTYPE_INT16:
   case HIP_DTYPE_UINT16:
-  case HIP_DTYPE_BFLOAT16:
     hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_expand_kernel<int16_t>),
                        dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
                        static_cast<const int16_t *>(input),

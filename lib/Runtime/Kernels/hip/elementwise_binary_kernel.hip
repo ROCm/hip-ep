@@ -954,7 +954,6 @@ template <> __device__ __forceinline__ __half ew_cast<__half>(float v) {
   return __float2half(v);
 }
 
-// bf16: same pattern as f16 (compute in float, round to nearest even).
 __device__ __forceinline__ float ew_load(const __hip_bfloat16 *p, uint32_t i) {
   return __bfloat162float(p[i]);
 }
@@ -1282,7 +1281,7 @@ extern "C" int hip_elementwise_binary_bcast(void *stream, const void *lhs,
 
   (void)hipGetLastError();
 
-  // 16 bytes per thread: 8 halves / bf16s or 4 floats.
+  // 16 bytes per thread: 8 f16/bf16 or 4 f32.
   Bcast4DFastMeta fast{};
   const int vec = (hip_dtype == HIP_DTYPE_FLOAT16)    ? 8
                   : (hip_dtype == HIP_DTYPE_BFLOAT16) ? 8

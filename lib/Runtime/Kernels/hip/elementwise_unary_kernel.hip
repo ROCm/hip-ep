@@ -66,7 +66,7 @@ __global__ void elementwise_abs_f32_kernel(const float *__restrict__ input,
 
 // =====================================================================
 // Neg: y = -x
-// ORT: UNARY_OP_NAME_EXPR(Neg, -a) over CSILHFD (we cover f16/i32/i64).
+// ORT: UNARY_OP_NAME_EXPR(Neg, -a) over CSILHFD (we cover f16/bf16/i32/i64).
 // =====================================================================
 
 template <typename T>

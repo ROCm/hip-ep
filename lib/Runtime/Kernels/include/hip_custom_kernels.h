@@ -2020,7 +2020,8 @@ HIP_KERNEL_API int hip_reduce_prod(
  * (matches ORT's TArray<int64, 8> default).
  *
  * hip_expand dtypes: FLOAT16, BFLOAT16, FLOAT32, INT8, UINT8, INT16, UINT16,
- * INT32, INT64. Pure copy, so 1- and 2-byte types share one instantiation.
+ * INT32, INT64. Pure copy, so UINT8 and UINT16 reuse the INT8 and INT16
+ * instantiations.
  */
 HIP_KERNEL_API int hip_tile(
     void* stream,
