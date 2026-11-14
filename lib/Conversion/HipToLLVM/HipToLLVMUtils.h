@@ -260,7 +260,9 @@ inline int64_t getHipdnnDataType(Type elemType) {
     return HIPDNN_EP_DATATYPE_INT32;
   if (elemType.isInteger(64))
     return HIPDNN_EP_DATATYPE_INT64;
-  if (elemType.isUnsignedInteger(8))
+  // A bool shares the unsigned-byte slot. The runtime stores one byte per
+  // element and reads a mask as 0 or 1, so i1 and ui8 have the same layout.
+  if (elemType.isUnsignedInteger(8) || elemType.isInteger(1))
     return HIPDNN_EP_DATATYPE_UINT8;
   if (elemType.isSignedInteger(8) || elemType.isSignlessInteger(8))
     return HIPDNN_EP_DATATYPE_INT8;
