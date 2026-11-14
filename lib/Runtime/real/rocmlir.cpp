@@ -71,6 +71,43 @@ const LoadedKernel *getOrLoadKernel(const char *kernel_binary,
 
 } // namespace
 
+int wrap_rocmlir_prefill(RuntimeState *state, void *buffer, int64_t count,
+                         int64_t element_bytes, uint64_t pattern) {
+  if (!state || !buffer || count < 0) {
+    fprintf(stderr, "Invalid arguments in wrap_rocmlir_prefill\n");
+    return -1;
+  }
+  hipStream_t stream =
+      static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
+  auto *device = static_cast<hipDeviceptr_t>(buffer);
+  size_t n = static_cast<size_t>(count);
+  (void)hipGetLastError();
+  hipError_t err;
+  switch (element_bytes) {
+  case 1:
+    err = hipMemsetD8Async(device, static_cast<unsigned char>(pattern), n,
+                           stream);
+    break;
+  case 2:
+    err = hipMemsetD16Async(device, static_cast<unsigned short>(pattern), n,
+                            stream);
+    break;
+  case 4:
+    err = hipMemsetD32Async(device, static_cast<int>(pattern), n, stream);
+    break;
+  default:
+    fprintf(stderr, "wrap_rocmlir_prefill: unsupported element size %lld\n",
+            (long long)element_bytes);
+    return -1;
+  }
+  if (err != hipSuccess) {
+    fprintf(stderr, "wrap_rocmlir_prefill: hipMemsetD%lldAsync failed: %s\n",
+            (long long)(element_bytes * 8), hipGetErrorString(err));
+    return -1;
+  }
+  return 0;
+}
+
 int wrap_rocmlir(RuntimeState *state, const char *kernel_binary,
                  char *func_name, int64_t block_size, int64_t grid_size,
                  void *kernargs, size_t size) {
