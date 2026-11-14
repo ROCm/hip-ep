@@ -366,6 +366,9 @@ int main(int argc, char **argv) {
   std::vector<std::string> accelTypes =
       mlir::hip::getRocMlirGemmAccelTypes(*module->getContext(), arch);
   fuseOpts.gemmGemmAccelTypes.assign(accelTypes.begin(), accelTypes.end());
+  // As in CompilerDriver: an i4 filter compiles only under some perfConfigs,
+  // which autotuning finds.
+  fuseOpts.int4Weights = autotuneEnabled && HIP_ROCMLIR_AUTOTUNE;
   mlir::hip::addRocMlirFusionPasses(pm, fuseOpts);
 
   if (mlir::failed(pm.run(*module))) {

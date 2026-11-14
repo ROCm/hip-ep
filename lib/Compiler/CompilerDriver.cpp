@@ -113,7 +113,8 @@ void dumpPreFusionIR(mlir::ModuleOp module,
   }
   os << "// hip-rocmlir-fusion: arch=" << fuseOpts.arch
      << " gemm-gemm-accel-types="
-     << llvm::join(fuseOpts.gemmGemmAccelTypes, ",") << "\n";
+     << llvm::join(fuseOpts.gemmGemmAccelTypes, ",")
+     << " int4-weights=" << (fuseOpts.int4Weights ? "true" : "false") << "\n";
   module->print(os);
 }
 #endif
@@ -468,6 +469,10 @@ bool CompilerDriver::runMLIRPasses(
       std::vector<std::string> accelTypes = mlir::hip::getRocMlirGemmAccelTypes(
           *module.getContext(), fuseOpts.arch);
       fuseOpts.gemmGemmAccelTypes.assign(accelTypes.begin(), accelTypes.end());
+      // Autotuning skips the perfConfigs under which rocMLIR cannot pack an
+      // i4 filter; the default perfConfig is one of them for f32.
+      mlir::hip::AutotuneSpace int4Space;
+      fuseOpts.int4Weights = mlir::hip::rocMlirAutotuneFromEnv(int4Space);
       if (mlir::failed(headPm.run(module))) {
         error_message = "ONNX->HIP passes before the rocMLIR fusion failed";
         return false;
