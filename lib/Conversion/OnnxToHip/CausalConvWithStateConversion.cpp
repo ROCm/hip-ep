@@ -9,6 +9,35 @@ namespace mlir {
 namespace hip {
 namespace {
 
+/// The type of present_state. An unused optional output is imported as
+/// `none`, but the runtime still writes the state, so the type is taken from
+/// past_state (the two always match) or derived from the rank-3 input and a
+/// static (C, 1, K) weight. Returns null when none of these applies.
+mlir::RankedTensorType
+getPresentStateType(mlir::Operation *op, mlir::RankedTensorType inputType,
+                    mlir::Value weight, mlir::Value pastState,
+                    bool channelsLast, int64_t dilation) {
+  mlir::Type type = op->getResult(1).getType();
+  if (!mlir::isa<mlir::NoneType>(type))
+    return mlir::dyn_cast<mlir::RankedTensorType>(type);
+  if (pastState)
+    return mlir::dyn_cast<mlir::RankedTensorType>(pastState.getType());
+  auto weightType = mlir::dyn_cast<mlir::RankedTensorType>(weight.getType());
+  if (inputType.getRank() != 3 || !weightType || weightType.getRank() != 3 ||
+      !weightType.hasStaticShape() || weightType.getDimSize(1) != 1)
+    return nullptr;
+  int64_t batch = inputType.getDimSize(0);
+  int64_t channels = weightType.getDimSize(0);
+  int64_t inputChannels = inputType.getDimSize(channelsLast ? 2 : 1);
+  if (!mlir::ShapedType::isDynamic(inputChannels) && inputChannels != channels)
+    return nullptr;
+  int64_t stateLen = (weightType.getDimSize(2) - 1) * dilation;
+  llvm::SmallVector<int64_t> shape =
+      channelsLast ? llvm::SmallVector<int64_t>{batch, stateLen, channels}
+                   : llvm::SmallVector<int64_t>{batch, channels, stateLen};
+  return mlir::RankedTensorType::get(shape, inputType.getElementType());
+}
+
 /// com.microsoft.CausalConvWithState -> hip.causal_conv_with_state
 struct CausalConvWithStateToHip : public mlir::RewritePattern {
   CausalConvWithStateToHip(mlir::MLIRContext *ctx)
@@ -108,9 +137,18 @@ mlir::LogicalResult CausalConvWithStateToHip::matchAndRewrite(
         op, "CausalConvWithState expects exactly 2 results");
 
   auto outputType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  auto presentStateType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(1).getType());
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  if (!outputType)
+    return rewriter.notifyMatchFailure(op, "output must be ranked");
+  bool stateUnused = mlir::isa<mlir::NoneType>(op->getResult(1).getType());
+  if (stateUnused && !op->getResult(1).use_empty())
+    return rewriter.notifyMatchFailure(op, "none present_state has uses");
+  auto presentStateType = getPresentStateType(op, inputType, weight, pastState,
+                                              channelsLast, dilation);
+  if (!presentStateType)
+    return rewriter.notifyMatchFailure(
+        op, "present_state type is unknown (needs a ranked present_state, a "
+            "ranked past_state, or a static (C, 1, K) weight)");
 
   if (channelsLast) {
     auto weightType = mlir::dyn_cast<mlir::RankedTensorType>(weight.getType());
@@ -192,7 +230,12 @@ mlir::LogicalResult CausalConvWithStateToHip::matchAndRewrite(
                      rewriter.getDenseI32ArrayAttr(segmentSizes));
 
   auto hipOp = rewriter.create(state);
-  rewriter.replaceOp(op, hipOp->getResults());
+  if (stateUnused) {
+    rewriter.replaceAllUsesWith(op->getResult(0), hipOp->getResult(0));
+    rewriter.eraseOp(op);
+  } else {
+    rewriter.replaceOp(op, hipOp->getResults());
+  }
   return mlir::success();
 }
 
