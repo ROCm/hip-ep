@@ -183,10 +183,11 @@ __global__ void cast_f16_to_i32_kernel(
   }
 }
 
-// Generic integer<->integer cast (used for the uint8 paths that the per-pair
-// kernels above don't cover). static_cast handles narrowing/widening per C++
-// rules; the kernels above stay as-is so existing FP paths keep their bespoke
-// __float2half / __half2float intrinsics.
+// Generic static_cast. Integer pairs use it directly, and so does f64 <->
+// integer: routing those through fp32 would drop every integer wider than
+// 24 bits. Float -> integer truncates toward zero. The kernels above stay
+// as-is so existing FP paths keep their __float2half / __half2float
+// intrinsics.
 template <typename Src, typename Dst>
 __global__ void cast_int_to_int_kernel(
     const Src* __restrict__ input,
@@ -270,6 +271,17 @@ __global__ void cast_f16_to_ui8_kernel(
 }
 
 template <typename Src, typename Dst>
+static int launch_cast_direct(hipStream_t stream, const void* input,
+                              void* output, int64_t num_elements,
+                              int grid_size, int block_size) {
+  hipLaunchKernelGGL(HIP_KERNEL_NAME(cast_int_to_int_kernel<Src, Dst>),
+                     dim3(grid_size), dim3(block_size), 0, stream,
+                     static_cast<const Src*>(input),
+                     static_cast<Dst*>(output), num_elements);
+  return 0;
+}
+
+template <typename Src, typename Dst>
 static int launch_cast_via_float(hipStream_t stream, const void* input,
                                  void* output, int64_t num_elements,
                                  int grid_size, int block_size) {
@@ -298,6 +310,53 @@ static int launch_cast_bf16(hipStream_t stream, const void* input,
     return dispatch_dtype(input_dtype, [&](auto src) {
       using Src = typename decltype(src)::type;
       return launch_cast_via_float<Src, __hip_bfloat16>(
+          stream, input, output, num_elements, grid_size, block_size);
+    });
+  }
+  return -1;
+}
+
+// f64 <-> f16/f32 goes through fp32, so f64 -> f16 rounds the same way as
+// f64 -> f32 -> f16. f64 <-> integer is a direct static_cast: routing i64
+// through fp32 would drop every integer wider than 24 bits. bf16 <-> f64
+// stays on launch_cast_bf16.
+static int launch_cast_f64(hipStream_t stream, const void* input,
+                           void* output, int64_t num_elements,
+                           int input_dtype, int output_dtype,
+                           int grid_size, int block_size) {
+  auto isF16OrF32 = [](int dtype) {
+    return dtype == HIP_DTYPE_FLOAT16 || dtype == HIP_DTYPE_FLOAT32;
+  };
+  auto isInt = [](int dtype) {
+    return dtype == HIP_DTYPE_INT64 || dtype == HIP_DTYPE_INT32 ||
+           dtype == HIP_DTYPE_INT16 || dtype == HIP_DTYPE_INT8 ||
+           dtype == HIP_DTYPE_UINT8;
+  };
+  if (input_dtype == HIP_DTYPE_FLOAT64 && isF16OrF32(output_dtype)) {
+    return dispatch_dtype(output_dtype, [&](auto dst) {
+      using Dst = typename decltype(dst)::type;
+      return launch_cast_via_float<double, Dst>(
+          stream, input, output, num_elements, grid_size, block_size);
+    });
+  }
+  if (output_dtype == HIP_DTYPE_FLOAT64 && isF16OrF32(input_dtype)) {
+    return dispatch_dtype(input_dtype, [&](auto src) {
+      using Src = typename decltype(src)::type;
+      return launch_cast_via_float<Src, double>(
+          stream, input, output, num_elements, grid_size, block_size);
+    });
+  }
+  if (input_dtype == HIP_DTYPE_FLOAT64 && isInt(output_dtype)) {
+    return dispatch_dtype(output_dtype, [&](auto dst) {
+      using Dst = typename decltype(dst)::type;
+      return launch_cast_direct<double, Dst>(
+          stream, input, output, num_elements, grid_size, block_size);
+    });
+  }
+  if (output_dtype == HIP_DTYPE_FLOAT64 && isInt(input_dtype)) {
+    return dispatch_dtype(input_dtype, [&](auto src) {
+      using Src = typename decltype(src)::type;
+      return launch_cast_direct<Src, double>(
           stream, input, output, num_elements, grid_size, block_size);
     });
   }
@@ -462,6 +521,10 @@ extern "C" int hip_cast(
                        dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
                        static_cast<const int16_t*>(input),
                        static_cast<uint8_t*>(output), num_elements);
+  } else if (launch_cast_f64(hip_stream, input, output, num_elements,
+                             input_dtype, output_dtype, grid_size,
+                             kBlockSize) == 0) {
+    // f64 <-> {f32, f16} launched.
   } else if (launch_cast_bf16(hip_stream, input, output, num_elements,
                               input_dtype, output_dtype, grid_size,
                               kBlockSize) == 0) {

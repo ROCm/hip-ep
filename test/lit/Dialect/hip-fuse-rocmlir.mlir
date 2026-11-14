@@ -462,3 +462,64 @@ func.func @main_graph(%ctx: !hip.context, %a: tensor<2x16xf16>,
          accuracy_level = 0 : i64, zp_elem_size = 2 : i64} : tensor<2x2xf16>
   return %r : tensor<2x2xf16>
 }
+
+// -----
+
+// rocMLIR's blockwise load rejects f64. An f64 anchor and an f64 cast stay
+// in main_graph; fusing either would pull f64 into the outlined kernel.
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK: hip.matmul
+// CHECK-NOT: hip.rocmlir
+// CHECK: return
+func.func @main_graph(%ctx: !hip.context, %a: tensor<2x3xf64>,
+                      %b: tensor<3x4xf64>) -> tensor<2x4xf64> {
+  %e = tensor.empty() : tensor<2x4xf64>
+  %c = hip.matmul(%ctx) ins(%a, %b : tensor<2x3xf64>, tensor<3x4xf64>)
+      outs(%e : tensor<2x4xf64>)
+      {transA = 0 : i64, transB = 0 : i64} : tensor<2x4xf64>
+  return %c : tensor<2x4xf64>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK: hip.gemm
+// CHECK-NOT: hip.rocmlir
+// CHECK: return
+func.func @main_graph(%ctx: !hip.context, %a: tensor<2x3xf64>,
+                      %b: tensor<3x4xf64>,
+                      %c: tensor<4xf64>) -> tensor<2x4xf64> {
+  %e = tensor.empty() : tensor<2x4xf64>
+  %g = hip.gemm(%ctx) ins(%a, %b, %c :
+      tensor<2x3xf64>, tensor<3x4xf64>, tensor<4xf64>)
+      outs(%e : tensor<2x4xf64>)
+      {alpha = 1.000000e+00 : f32, beta = 1.000000e+00 : f32,
+       transA = 0 : i64, transB = 0 : i64} : tensor<2x4xf64>
+  return %g : tensor<2x4xf64>
+}
+
+// -----
+
+// An f32 matmul followed by an f64 cast. The matmul is outlined. The cast
+// stays in main_graph, because an f64 result is not a rocMLIR endpoint.
+
+// CHECK-LABEL: func.func @rocMlir
+// CHECK: hip.matmul
+// CHECK-NOT: hip.cast
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK: hip.rocmlir
+// CHECK: hip.cast
+// CHECK-SAME: tensor<2x4xf64>
+func.func @main_graph(%ctx: !hip.context, %a: tensor<2x3xf32>,
+                      %b: tensor<3x4xf32>) -> tensor<2x4xf64> {
+  %e = tensor.empty() : tensor<2x4xf32>
+  %c = hip.matmul(%ctx) ins(%a, %b : tensor<2x3xf32>, tensor<3x4xf32>)
+      outs(%e : tensor<2x4xf32>)
+      {transA = 0 : i64, transB = 0 : i64} : tensor<2x4xf32>
+  %castInit = tensor.empty() : tensor<2x4xf64>
+  %cast = hip.cast(%ctx) ins(%c : tensor<2x4xf32>)
+      outs(%castInit : tensor<2x4xf64>) {to = 11 : i64} : tensor<2x4xf64>
+  return %cast : tensor<2x4xf64>
+}
