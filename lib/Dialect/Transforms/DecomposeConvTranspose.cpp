@@ -57,12 +57,35 @@ struct DimInfo {
 /// reverse ops -- TOSA has no strided slice to lower a `step` to -- the
 /// sub-filters are computed here and materialized as new `hip.constant`s.
 ///
-/// Reassembly is a strided `tensor.insert_slice` per residue, which
-/// bufferizes to a `memref.subview` + `memref.copy`. When every residue is
-/// non-empty (stride <= kernel) the residues tile the grid exactly, so the
-/// destination needs no zero-fill.
+/// When every residue has the same kernel and the same padding (the filter
+/// length is a multiple of the stride, as in a 4x4 filter at stride 2), the
+/// residue filters are stacked along the output channels into one wide
+/// convolution, and its result is reassembled as a DepthToSpace: reshape the
+/// channels to `[strideH, strideW, M]`, `hip.transpose` so each length sits
+/// next to its stride, then reshape to `[N, M, Ht*strideH, Wt*strideW]`.
+/// The rocMLIR anchor fusion folds that transpose into the convolution's
+/// store. Emitting per-residue convolutions joined by a concat instead leaves
+/// the concat to bufferize into one strided copy per residue. Residues with
+/// fewer taps are padded with zero taps to the same kernel when that at most
+/// doubles the multiply-adds (a 3x3 filter at stride 2), so they take the
+/// same path. A single residue (stride 1) has nothing to interleave and is
+/// copied onto the grid with one `tensor.insert_slice`.
 ///
-/// Taking a 1-D slice of the 2x2-stride case, with a 3-tap filter [w0 w1 w2]
+/// Otherwise the convolutions cannot share one weight, so reassembly stays a
+/// strided `tensor.insert_slice` per residue, which bufferizes to a
+/// `memref.subview` + `memref.copy`. When every residue is non-empty
+/// (stride <= kernel) the residues tile the grid exactly, so the destination
+/// needs no zero-fill. For the same reason a bias becomes the bias of the
+/// residue convolutions; only a run-time bias on the wide convolution, which
+/// cannot be repeated per residue here, stays an add after the crop.
+///
+/// Exporters often write the bias as a separate add of a per-channel constant
+/// after a bias-free op (`Add(y, Reshape(b : [1,1,1,M] -> [1,M,1,1]))`). When
+/// that add is the result's only user it folds into the bias the same way;
+/// left after the crop, it and any activation behind it would become a
+/// prologue of the next convolution, recomputed for every filter tap.
+///
+/// Taking a 1-D slice of the unequal-tap case, with a 3-tap filter [w0 w1 w2]
 /// over a 4-long input, before:
 ///
 ///   hip.conv_transpose ins(%x : tensor<1x1x4xf32>, %w : tensor<1x1x3xf32>)
@@ -109,6 +132,64 @@ SmallVector<int64_t> getI64Values(ArrayAttr attr) {
 int64_t flatIndex(ArrayRef<int64_t> shape, int64_t a, int64_t b, int64_t c,
                   int64_t d) {
   return ((a * shape[1] + b) * shape[2] + c) * shape[3] + d;
+}
+
+/// One value per channel (axis 1) of `resultType`, when `value` is a
+/// `hip.constant` -- possibly behind reshapes and transposes -- that an
+/// elementwise op broadcasts that way: right-aligned against `resultType`,
+/// every dimension is 1 except the channel axis, which is M or 1. A rank-1
+/// [M] operand broadcasts along the last axis instead, so it does not match.
+FailureOr<SmallVector<APFloat>>
+readPerChannelConstant(Value value, RankedTensorType resultType) {
+  auto type = dyn_cast<RankedTensorType>(value.getType());
+  if (!type || !type.hasStaticShape() ||
+      type.getElementType() != resultType.getElementType() ||
+      type.getRank() > resultType.getRank())
+    return failure();
+  const int64_t channels = resultType.getDimSize(1);
+  const int64_t lead = resultType.getRank() - type.getRank();
+  for (int64_t i : llvm::seq<int64_t>(type.getRank())) {
+    const int64_t size = type.getDimSize(i);
+    if (size != 1 && !(i + lead == 1 && size == channels))
+      return failure();
+  }
+
+  // Reshapes keep the row-major order of the values, and so does a transpose
+  // with at most one input dimension larger than one.
+  Value source = value;
+  while (Operation *def = source.getDefiningOp()) {
+    if (auto expand = dyn_cast<tensor::ExpandShapeOp>(def)) {
+      source = expand.getSrc();
+    } else if (auto collapse = dyn_cast<tensor::CollapseShapeOp>(def)) {
+      source = collapse.getSrc();
+    } else if (auto reshape = dyn_cast<tensor::ReshapeOp>(def)) {
+      source = reshape.getSource();
+    } else if (auto cast = dyn_cast<tensor::CastOp>(def)) {
+      source = cast.getSource();
+    } else if (auto transpose = dyn_cast<TransposeOp>(def)) {
+      auto inputType =
+          dyn_cast<RankedTensorType>(transpose.getInput().getType());
+      if (!inputType || llvm::count_if(inputType.getShape(), [](int64_t size) {
+                          return size != 1;
+                        }) > 1)
+        return failure();
+      source = transpose.getInput();
+    } else {
+      break;
+    }
+  }
+  auto constant = source.getDefiningOp<ConstantOp>();
+  auto sourceType = dyn_cast<RankedTensorType>(source.getType());
+  if (!constant || !sourceType)
+    return failure();
+  FailureOr<DenseElementsAttr> data = readConstantData(constant, sourceType);
+  if (failed(data) || data->getNumElements() != type.getNumElements())
+    return failure();
+  SmallVector<APFloat> values(data->getValues<APFloat>().begin(),
+                              data->getValues<APFloat>().end());
+  if (values.size() == 1)
+    values.assign(channels, values.front());
+  return values;
 }
 
 /// Decompose a 1-D transposed convolution through the same 2-D hip.conv path
@@ -406,6 +487,37 @@ DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
           op, "expected a static 1-D bias of matching type and length M");
   }
 
+  // A per-channel constant added to the result joins the bias (see the note
+  // above the pattern). The op's own bias has to be readable too, to sum them.
+  AddOp channelAdd;
+  SmallVector<APFloat> foldedBias;
+  if (Value out = op.getResult(0); out.hasOneUse()) {
+    auto add = dyn_cast<AddOp>(*out.user_begin());
+    if (add && add->getNumResults() == 1 &&
+        add->getResult(0).getType() == resultType) {
+      Value other = add.getLhs() == out ? add.getRhs() : add.getLhs();
+      FailureOr<SmallVector<APFloat>> added =
+          readPerChannelConstant(other, resultType);
+      if (succeeded(added) && !bias) {
+        channelAdd = add;
+        foldedBias = std::move(*added);
+      } else if (succeeded(added)) {
+        auto biasConst = bias.getDefiningOp<ConstantOp>();
+        FailureOr<DenseElementsAttr> own =
+            biasConst ? readConstantData(biasConst,
+                                         cast<RankedTensorType>(bias.getType()))
+                      : FailureOr<DenseElementsAttr>(failure());
+        if (succeeded(own)) {
+          channelAdd = add;
+          foldedBias.assign(own->getValues<APFloat>().begin(),
+                            own->getValues<APFloat>().end());
+          for (auto [sum, extra] : llvm::zip_equal(foldedBias, *added))
+            sum.add(extra, APFloat::rmNearestTiesToEven);
+        }
+      }
+    }
+  }
+
   SmallVector<DimInfo, 2> dims;
   for (int64_t d : llvm::seq<int64_t>(2)) {
     DimInfo di;
@@ -449,75 +561,219 @@ DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
 
   Location loc = op.getLoc();
   Value ctx = op.getCtx();
+  if (channelAdd) {
+    auto biasType = RankedTensorType::get({outChannels}, elementType);
+    bias = ConstantOp::create(rewriter, loc, biasType,
+                              DenseElementsAttr::get(biasType, foldedBias))
+               .getResult();
+  }
   SmallVector<APFloat> weightValues(weightAttr.getValues<APFloat>().begin(),
                                     weightAttr.getValues<APFloat>().end());
-
-  auto fullType =
-      resultType.clone({numBatch, outChannels, dims[0].full, dims[1].full});
-  Value scattered =
-      tensor::EmptyOp::create(rewriter, loc, fullType.getShape(), elementType)
-          .getResult();
 
   const APFloat zero =
       APFloat::getZero(cast<FloatType>(elementType).getFloatSemantics());
 
+  struct Residue {
+    Value partial;
+    int64_t it0;
+    int64_t it1;
+    int64_t taps0;
+    int64_t taps1;
+    int64_t padBegin0;
+    int64_t padBegin1;
+    int64_t padEnd0;
+    int64_t padEnd1;
+  };
+  SmallVector<Residue> residues;
+  residues.reserve(dims[0].stride * dims[1].stride);
+
+  // Taps kept by residue `it` along dim `d`.
+  auto residueTaps = [&](int64_t d, int64_t it) {
+    return (dims[d].kernel - it + dims[d].stride - 1) / dims[d].stride;
+  };
+  // A residue with fewer than `ydot` taps can be widened to `ydot` with zero
+  // taps in front: its leading pad grows by the same amount, so every output
+  // reads the same inputs, and all residues then share one wide convolution.
+  // The zero taps cost multiply-adds, so pad only while they at most double
+  // the real ones (a 3x3 filter at stride 2 needs 16 taps for 9).
+  constexpr int64_t kMaxPaddedTapRatio = 2;
+  int64_t realTaps = 0;
+  for (int64_t it0 : llvm::seq<int64_t>(dims[0].stride))
+    for (int64_t it1 : llvm::seq<int64_t>(dims[1].stride))
+      realTaps += residueTaps(0, it0) * residueTaps(1, it1);
+  const bool padResidues =
+      dims[0].stride * dims[1].stride * dims[0].ydot * dims[1].ydot <=
+      kMaxPaddedTapRatio * realTaps;
+
   for (int64_t it0 : llvm::seq<int64_t>(dims[0].stride)) {
     for (int64_t it1 : llvm::seq<int64_t>(dims[1].stride)) {
-      // Taps kept by this residue along each dim.
-      const int64_t taps0 =
-          (dims[0].kernel - it0 + dims[0].stride - 1) / dims[0].stride;
-      const int64_t taps1 =
-          (dims[1].kernel - it1 + dims[1].stride - 1) / dims[1].stride;
+      const int64_t taps0 = padResidues ? dims[0].ydot : residueTaps(0, it0);
+      const int64_t taps1 = padResidues ? dims[1].ydot : residueTaps(1, it1);
+      const int64_t padBegin0 = taps0 - 1;
+      const int64_t padBegin1 = taps1 - 1;
+      const int64_t padEnd0 = dims[0].trailingPad();
+      const int64_t padEnd1 = dims[1].trailingPad();
+      residues.push_back({Value(), it0, it1, taps0, taps1, padBegin0, padBegin1,
+                          padEnd0, padEnd1});
+    }
+  }
 
-      SmallVector<int64_t, 4> subShape{outChannels, inChannels, taps0, taps1};
-      SmallVector<APFloat> subValues(outChannels * inChannels * taps0 * taps1,
-                                     zero);
-      for (int64_t m : llvm::seq<int64_t>(outChannels))
-        for (int64_t c : llvm::seq<int64_t>(inChannels))
-          for (int64_t a : llvm::seq<int64_t>(taps0))
-            for (int64_t b : llvm::seq<int64_t>(taps1)) {
-              // Reversed tap order: position a holds tap (taps0 - 1 - a).
-              const int64_t y0 = it0 + (taps0 - 1 - a) * dims[0].stride;
-              const int64_t y1 = it1 + (taps1 - 1 - b) * dims[1].stride;
-              subValues[flatIndex(subShape, m, c, a, b)] =
-                  weightValues[flatIndex(weightShape, c, m, y0, y1)];
-            }
+  // Writes residue `r`'s filter, [M, C, taps0, taps1] row-major, into
+  // `values`: taps {it, it + stride, ...} reversed, input/output channels
+  // swapped relative to the ConvTranspose weight. Positions of a padded
+  // residue that fall past the filter keep the zero `values` starts with.
+  auto fillSubWeight = [&](const Residue &r, MutableArrayRef<APFloat> values) {
+    SmallVector<int64_t, 4> subShape{outChannels, inChannels, r.taps0, r.taps1};
+    for (int64_t m : llvm::seq<int64_t>(outChannels))
+      for (int64_t c : llvm::seq<int64_t>(inChannels))
+        for (int64_t a : llvm::seq<int64_t>(r.taps0))
+          for (int64_t b : llvm::seq<int64_t>(r.taps1)) {
+            // Reversed tap order: position a holds tap (taps0 - 1 - a).
+            const int64_t y0 = r.it0 + (r.taps0 - 1 - a) * dims[0].stride;
+            const int64_t y1 = r.it1 + (r.taps1 - 1 - b) * dims[1].stride;
+            if (y0 >= dims[0].kernel || y1 >= dims[1].kernel)
+              continue;
+            values[flatIndex(subShape, m, c, a, b)] =
+                weightValues[flatIndex(weightShape, c, m, y0, y1)];
+          }
+  };
 
-      auto subWeightType = RankedTensorType::get(subShape, elementType);
-      Value subWeight =
-          ConstantOp::create(rewriter, loc, subWeightType,
-                             DenseElementsAttr::get(subWeightType, subValues))
-              .getResult();
+  // A stride-1 convolution with `r`'s taps and pads producing `channels`
+  // output channels on the [Ht0, Ht1] residue grid.
+  auto emitResidueConv = [&](const Residue &r, int64_t channels,
+                             ArrayRef<APFloat> values,
+                             Value convBias) -> Value {
+    auto weightTy = RankedTensorType::get(
+        {channels, inChannels, r.taps0, r.taps1}, elementType);
+    Value weight = ConstantOp::create(rewriter, loc, weightTy,
+                                      DenseElementsAttr::get(weightTy, values))
+                       .getResult();
+    auto outTy =
+        resultType.clone({numBatch, channels, dims[0].htilda, dims[1].htilda});
+    Value init =
+        tensor::EmptyOp::create(rewriter, loc, outTy.getShape(), elementType)
+            .getResult();
+    SmallVector<Value> operands{ctx, op.getInput(), weight};
+    if (convBias)
+      operands.push_back(convBias);
+    operands.push_back(init);
+    return ConvOp::create(
+               rewriter, loc, TypeRange{outTy}, operands,
+               ArrayRef<NamedAttribute>{
+                   rewriter.getNamedAttr(
+                       "kernel_shape",
+                       rewriter.getI64ArrayAttr({r.taps0, r.taps1})),
+                   rewriter.getNamedAttr("strides",
+                                         rewriter.getI64ArrayAttr({1, 1})),
+                   rewriter.getNamedAttr("pads", rewriter.getI64ArrayAttr(
+                                                     {r.padBegin0, r.padBegin1,
+                                                      r.padEnd0, r.padEnd1})),
+                   rewriter.getNamedAttr("dilations",
+                                         rewriter.getI64ArrayAttr({1, 1})),
+                   rewriter.getNamedAttr("group",
+                                         rewriter.getI64IntegerAttr(1))})
+        .getResult(0);
+  };
 
-      auto partialType = resultType.clone(
-          {numBatch, outChannels, dims[0].htilda, dims[1].htilda});
-      Value partialInit =
-          tensor::EmptyOp::create(rewriter, loc, partialType.getShape(),
-                                  elementType)
-              .getResult();
-      Value partial =
-          ConvOp::create(
-              rewriter, loc, TypeRange{partialType},
-              ValueRange{ctx, op.getInput(), subWeight, partialInit},
-              ArrayRef<NamedAttribute>{
-                  rewriter.getNamedAttr(
-                      "kernel_shape", rewriter.getI64ArrayAttr({taps0, taps1})),
-                  rewriter.getNamedAttr("strides",
-                                        rewriter.getI64ArrayAttr({1, 1})),
-                  rewriter.getNamedAttr(
-                      "pads", rewriter.getI64ArrayAttr(
-                                  {taps0 - 1, taps1 - 1, dims[0].trailingPad(),
-                                   dims[1].trailingPad()})),
-                  rewriter.getNamedAttr("dilations",
-                                        rewriter.getI64ArrayAttr({1, 1})),
-                  rewriter.getNamedAttr("group",
-                                        rewriter.getI64IntegerAttr(1))})
-              .getResult(0);
+  const Residue &first = residues.front();
+  const bool equalResidues =
+      residues.size() > 1 &&
+      llvm::all_of(residues, [&](const Residue &residue) {
+        return residue.taps0 == first.taps0 && residue.taps1 == first.taps1 &&
+               residue.padBegin0 == first.padBegin0 &&
+               residue.padBegin1 == first.padBegin1 &&
+               residue.padEnd0 == first.padEnd0 &&
+               residue.padEnd1 == first.padEnd1;
+      });
 
+  // The residues tile the grid, so every output element, the zero slack
+  // included, comes from exactly one residue convolution, and the bias can
+  // be that convolution's bias. There it stays in the kernel epilogue
+  // instead of costing an add after the crop.
+  bool biasFolded = false;
+
+  Value scattered;
+  if (equalResidues) {
+    // One convolution for all residues. Its output channel is
+    // (it0 * strideW + it1) * M + m, so viewing it as [N, S0, S1, M, Ht0, Ht1]
+    // and moving each stride next to its length is a DepthToSpace (DCR) --
+    // one transpose, no concat.
+    const int64_t ht0 = dims[0].htilda;
+    const int64_t ht1 = dims[1].htilda;
+    const int64_t stride0 = dims[0].stride;
+    const int64_t stride1 = dims[1].stride;
+    const int64_t numResidues = static_cast<int64_t>(residues.size());
+    const int64_t perResidue =
+        outChannels * inChannels * first.taps0 * first.taps1;
+    SmallVector<APFloat> wideValues(numResidues * perResidue, zero);
+    for (int64_t i : llvm::seq<int64_t>(numResidues))
+      fillSubWeight(residues[i], MutableArrayRef<APFloat>(wideValues)
+                                     .slice(i * perResidue, perResidue));
+    // The wide bias repeats the bias once per residue, so it must be readable
+    // here; a bias computed at run time stays an add after the crop.
+    Value wideBias;
+    if (bias)
+      if (auto biasConst = bias.getDefiningOp<ConstantOp>()) {
+        auto biasType = cast<RankedTensorType>(bias.getType());
+        FailureOr<DenseElementsAttr> biasData =
+            readConstantData(biasConst, biasType);
+        if (succeeded(biasData)) {
+          SmallVector<APFloat> tiled;
+          tiled.reserve(numResidues * outChannels);
+          for (int64_t i = 0; i < numResidues; ++i)
+            tiled.append(biasData->getValues<APFloat>().begin(),
+                         biasData->getValues<APFloat>().end());
+          auto wideBiasType =
+              RankedTensorType::get({numResidues * outChannels}, elementType);
+          wideBias =
+              ConstantOp::create(rewriter, loc, wideBiasType,
+                                 DenseElementsAttr::get(wideBiasType, tiled))
+                  .getResult();
+          biasFolded = true;
+        }
+      }
+    Value wide =
+        emitResidueConv(first, numResidues * outChannels, wideValues, wideBias);
+
+    auto splitType = RankedTensorType::get(
+        {numBatch, stride0, stride1, outChannels, ht0, ht1}, elementType);
+    SmallVector<ReassociationIndices> splitReassoc{{0}, {1, 2, 3}, {4}, {5}};
+    Value split = tensor::ExpandShapeOp::create(rewriter, loc, splitType, wide,
+                                                splitReassoc)
+                      .getResult();
+    auto transposedType = RankedTensorType::get(
+        {numBatch, outChannels, ht0, stride0, ht1, stride1}, elementType);
+    Value transposeInit =
+        tensor::EmptyOp::create(rewriter, loc, transposedType.getShape(),
+                                elementType)
+            .getResult();
+    // [N, S0, S1, M, Ht0, Ht1] -> [N, M, Ht0, S0, Ht1, S1].
+    Value transposed =
+        TransposeOp::create(rewriter, loc, ctx, split, transposeInit,
+                            rewriter.getI64ArrayAttr({0, 3, 4, 1, 5, 2}))
+            .getResult(0);
+    auto gridType =
+        resultType.clone({numBatch, outChannels, dims[0].full, dims[1].full});
+    SmallVector<ReassociationIndices> collapseReassoc{{0}, {1}, {2, 3}, {4, 5}};
+    scattered = tensor::CollapseShapeOp::create(rewriter, loc, gridType,
+                                                transposed, collapseReassoc)
+                    .getResult();
+  } else {
+    auto fullType =
+        resultType.clone({numBatch, outChannels, dims[0].full, dims[1].full});
+    scattered =
+        tensor::EmptyOp::create(rewriter, loc, fullType.getShape(), elementType)
+            .getResult();
+    for (Residue &residue : residues) {
+      SmallVector<APFloat> subValues(
+          outChannels * inChannels * residue.taps0 * residue.taps1, zero);
+      fillSubWeight(residue, subValues);
+      residue.partial = emitResidueConv(residue, outChannels, subValues, bias);
       // Residue itilda lands on output positions {itilda + k * stride}.
-      SmallVector<OpFoldResult> offsets{
-          rewriter.getIndexAttr(0), rewriter.getIndexAttr(0),
-          rewriter.getIndexAttr(it0), rewriter.getIndexAttr(it1)};
+      SmallVector<OpFoldResult> offsets{rewriter.getIndexAttr(0),
+                                        rewriter.getIndexAttr(0),
+                                        rewriter.getIndexAttr(residue.it0),
+                                        rewriter.getIndexAttr(residue.it1)};
       SmallVector<OpFoldResult> sizes{rewriter.getIndexAttr(numBatch),
                                       rewriter.getIndexAttr(outChannels),
                                       rewriter.getIndexAttr(dims[0].htilda),
@@ -526,11 +782,12 @@ DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
           rewriter.getIndexAttr(1), rewriter.getIndexAttr(1),
           rewriter.getIndexAttr(dims[0].stride),
           rewriter.getIndexAttr(dims[1].stride)};
-      scattered =
-          tensor::InsertSliceOp::create(rewriter, loc, partial, scattered,
-                                        offsets, sizes, insertStrides)
-              .getResult();
+      scattered = tensor::InsertSliceOp::create(rewriter, loc, residue.partial,
+                                                scattered, offsets, sizes,
+                                                insertStrides)
+                      .getResult();
     }
+    biasFolded = true;
   }
 
   // Crop the padding region (and any residue slack) down to the result.
@@ -547,12 +804,7 @@ DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
                                      cropOffsets, cropSizes, cropStrides)
           .getResult();
 
-  // One broadcast add on the final shape. The residues tile the grid, so each
-  // output element belongs to exactly one of them and passing the bias to every
-  // residue convolution would be equally correct -- and would fuse into the
-  // convolution epilogue instead of costing a separate dispatch. Kept separate
-  // here so the bias does not depend on the residue tiling.
-  if (bias) {
+  if (bias && !biasFolded) {
     auto biasType = cast<RankedTensorType>(bias.getType());
     // Broadcast against [N, M, H, W] rather than the trailing axis.
     auto shapedBiasType =
@@ -569,6 +821,11 @@ DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
                  .getResult(0);
   }
 
+  if (channelAdd) {
+    rewriter.replaceOp(channelAdd, result);
+    rewriter.eraseOp(op);
+    return success();
+  }
   rewriter.replaceOp(op, result);
   return success();
 }
