@@ -614,6 +614,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
       for (int round = 0; round < kMaxRounds; ++round) {
         mlir::RewritePatternSet preLoweringPatterns(ctx);
         populateGatherShapeFoldPatterns(preLoweringPatterns, ctx);
+        populateAttentionSubgraphFoldPatterns(preLoweringPatterns, ctx);
         populateTransposeMatMulFoldPatterns(preLoweringPatterns, ctx);
         populateSkipNormCastFoldPatterns(preLoweringPatterns, ctx);
         populateGatherBlockQuantizedPreparePatterns(preLoweringPatterns, ctx);

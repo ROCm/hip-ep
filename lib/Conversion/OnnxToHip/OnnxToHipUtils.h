@@ -636,6 +636,12 @@ void populateCustomQdqCanonicalizationPatterns(RewritePatternSet &patterns,
 void populateTransposeMatMulFoldPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
 
+/// Pre-lowering pattern set: fold unmasked self-attention written with
+/// primitive ops (Reshape/Transpose/MatMul/Softmax) into
+/// com.microsoft.MultiHeadAttention. See AttentionSubgraphFold.cpp.
+void populateAttentionSubgraphFoldPatterns(RewritePatternSet &patterns,
+                                           MLIRContext *ctx);
+
 /// Pre-lowering pattern set: fold the f16->f32 Casts on skip/gamma and the
 /// f32->f16 Cast on the output of an fp32 SkipSimplifiedLayerNormalization
 /// into the norm itself (mixed-dtype hip.skip_rms_norm). See
