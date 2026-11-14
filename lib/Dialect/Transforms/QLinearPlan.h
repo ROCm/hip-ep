@@ -52,9 +52,39 @@ struct DequantizedConvPlan {
   DenseElementsAttr bias;
 };
 
+// A QLinear op with ui8 weights or a non-zero weight zero point. rocMLIR takes
+// i8 weights and has no zero-point operand, so the weights become w - offset
+// (128 for ui8, 0 for i8) and the zero point zw' = zw - offset; both fit i8,
+// and w - zw does not change. With zw' != 0 the sum also needs zw' times the
+// window sums of the input, which a second integer conv or matmul over
+// `zeroPointFilter` computes.
+struct AsymmetricQLinearPlan {
+  // i8, the weights' shape.
+  DenseElementsAttr weights;
+  // i8, the weights' shape, zw' along the output channel or column. Null
+  // when every zw' is 0.
+  DenseElementsAttr zeroPointFilter;
+  // The bias also holds the constant terms of the weight zero point.
+  QLinearPlan requantize;
+};
+
 /// The plan of a hip.qlinear_conv that rocMLIR can run as hip.quant_conv and a
 /// requantize epilogue, or nullopt when the conv keeps its HIP kernel.
+/// A channel whose requantize multiplier is below 2^-33 always writes the
+/// output zero point; its multiplier and bias are 0. The plans below and this
+/// one are nullopt when every channel is dead (see getDeadQLinearOutput).
 std::optional<QLinearPlan> planQLinearConv(QLinearConvOp op);
+
+/// The plan of a hip.qlinear_conv with ui8 weights or a non-zero weight zero
+/// point, with static shapes and inline constants; nullopt otherwise, and
+/// when an i32 sum could overflow.
+std::optional<AsymmetricQLinearPlan>
+planAsymmetricQLinearConv(QLinearConvOp op);
+
+/// As planAsymmetricQLinearConv, for a hip.qlinear_matmul with ui8 B or
+/// non-zero B zero points.
+std::optional<AsymmetricQLinearPlan>
+planAsymmetricQLinearMatMul(QLinearMatMulOp op);
 
 /// The plan of a hip.qlinear_matmul as hip.quant_matmul and a requantize
 /// epilogue, or nullopt when the matmul keeps its HIP kernel.
@@ -66,6 +96,12 @@ std::optional<DequantizedConvPlan> planDequantizedConv(ConvOp op);
 
 /// True when one of the plans above accepts `op`.
 bool isPlannedQLinear(Operation *op);
+
+/// The output of a hip.qlinear_conv or hip.qlinear_matmul whose requantize
+/// multiplier is below 2^-33 on every channel or column: every element is the
+/// output zero point, for any input and bias. A splat in the static result
+/// type, or null for any other op.
+DenseElementsAttr getDeadQLinearOutput(Operation *op);
 
 Value emitTensorEmpty(RewriterBase &rewriter, Location loc,
                       RankedTensorType type);

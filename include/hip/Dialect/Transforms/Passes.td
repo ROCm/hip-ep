@@ -204,10 +204,18 @@ def RocMlirPrepareQuantPass
     blocked dequantize and a transposed hip.matmul, so the fusion treats it
     as a matmul anchor. Then moves each per-tensor quantize backward through
     the element-move ops that feed it, so those ops run on 8- or 16-bit
-    values, and then rebiases each unsigned 8-bit tree that ends in a planned
-    integer anchor to signed 8-bit. The order matters: the sinking fixes the
-    final shape of each tree, and the rebias then plans the QLinear and
-    dequantized convolutions on i8 inputs. Only main_graph is changed.
+    values. Then replaces each QLinearConv and QLinearMatMul whose requantize
+    multiplier is below 2^-33 on every channel with a constant of its output
+    zero point, and rewrites each QLinearConv and QLinearMatMul with ui8
+    weights or a non-zero weight zero point into hip.quant_conv /
+    hip.quant_matmul on i8 weights w - offset, a second integer op over a
+    filter of the shifted weight zero points zw' (the zw' * window-sum term of
+    the zero-point correction), their difference, and the requantize
+    epilogue; the constant correction terms go into the i32 bias. Last,
+    rebiases each unsigned 8-bit tree that ends in a planned integer anchor
+    to signed 8-bit. The order matters: the sinking fixes the final shape of
+    each tree, and the rebias then plans the QLinear and dequantized
+    convolutions on i8 inputs. Only main_graph is changed.
   }];
   let dependentDialects = ["mlir::tensor::TensorDialect"];
 }
