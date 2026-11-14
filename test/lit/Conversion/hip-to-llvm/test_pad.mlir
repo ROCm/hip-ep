@@ -83,4 +83,49 @@ module {
     // CHECK: llvm.call @wrap_pad({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64, i64, i64) -> i32
     return
   }
+
+  // Compile-time pads: the begin pads go in a host stack array and the call
+  // takes no device pads/axes/cval pointers.
+  func.func @pad_static_lower_pads(
+      %ctx: !hip.context,
+      %data: memref<3x4xf32, 1>,
+      %pads: memref<4xi64, 1>,
+      %out: memref<5x6xf32, 1>) {
+    // CHECK-LABEL: llvm.func @pad_static_lower_pads
+
+    hip.pad(%ctx) ins(%data, %pads : memref<3x4xf32, 1>, memref<4xi64, 1>)
+                  outs(%out : memref<5x6xf32, 1>)
+                  {mode = "reflect", static_lower_pads = array<i64: 1, 2>}
+
+    // CHECK-NOT: @wrap_pad(
+    // CHECK: %[[TWO:.*]] = llvm.mlir.constant(2 : i64) : i64
+    // CHECK-NEXT: llvm.store %[[TWO]]
+    // CHECK: %[[NOCV:.*]] = llvm.mlir.zero : !llvm.ptr
+    // CHECK: llvm.call @wrap_pad_static({{.*}}, %[[NOCV]]) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, !llvm.ptr) -> i32
+    return
+  }
+
+  // A compile-time fill value goes in a host stack slot of the data element
+  // type, so the device cval is never read.
+  func.func @pad_static_constant_value(
+      %ctx: !hip.context,
+      %data: memref<3x4xf16, 1>,
+      %pads: memref<4xi64, 1>,
+      %cval: memref<f16, 1>,
+      %out: memref<5x6xf16, 1>) {
+    // CHECK-LABEL: llvm.func @pad_static_constant_value
+
+    hip.pad(%ctx) ins(%data, %pads : memref<3x4xf16, 1>, memref<4xi64, 1>)
+                  cval(%cval : memref<f16, 1>)
+                  outs(%out : memref<5x6xf16, 1>)
+                  {mode = "constant", static_lower_pads = array<i64: 1, 1>,
+                   static_constant_value = 1.500000e+00 : f16}
+
+    // CHECK-NOT: @wrap_pad(
+    // CHECK: %[[CV:.*]] = llvm.mlir.constant(1.500000e+00 : f16) : f16
+    // CHECK: %[[SLOT:.*]] = llvm.alloca {{.*}} x f16
+    // CHECK: llvm.store %[[CV]], %[[SLOT]] : f16, !llvm.ptr
+    // CHECK: llvm.call @wrap_pad_static({{.*}}, %[[SLOT]]) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, !llvm.ptr) -> i32
+    return
+  }
 }

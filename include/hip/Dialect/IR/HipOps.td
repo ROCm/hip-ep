@@ -5081,6 +5081,16 @@ def Hip_PadOp : Hip_DpsOp_WithInfer<"pad", "Output", [AttrSizedOperandSegments]>
     The `mode` attribute is one of `"constant"`, `"reflect"`, `"edge"`,
     `"wrap"`.
 
+    `static_lower_pads`, when present, holds the compile-time begin pad of
+    every data axis (length = data rank). The lowering then passes the pads
+    from host memory and never reads `pads`/`axes`, which avoids a
+    device-to-host copy and stream synchronization per call. It is only set
+    when no runtime `constant_value` read is needed either.
+
+    `static_constant_value`, when present alongside `static_lower_pads`, is
+    the compile-time fill value of a constant-mode pad, typed as the data
+    element. The lowering passes it from host memory as well.
+
     Uses destination-passing style: output buffer is provided as argument.
 
     Example:
@@ -5099,7 +5109,9 @@ def Hip_PadOp : Hip_DpsOp_WithInfer<"pad", "Output", [AttrSizedOperandSegments]>
     Optional<Hip_TensorOrMemRef>:$constant_value,
     Optional<Hip_TensorOrMemRef>:$axes,
     Hip_TensorOrMemRef:$output,
-    DefaultValuedAttr<StrAttr, "\"constant\"">:$mode
+    DefaultValuedAttr<StrAttr, "\"constant\"">:$mode,
+    OptionalAttr<DenseI64ArrayAttr>:$static_lower_pads,
+    OptionalAttr<AnyAttr>:$static_constant_value
   );
 
   let assemblyFormat = [{

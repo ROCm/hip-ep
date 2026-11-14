@@ -9,6 +9,8 @@
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/DenseMap.h"
 
+#include <optional>
+
 namespace mlir {
 namespace hip {
 namespace {
@@ -196,6 +198,59 @@ static mlir::FailureOr<mlir::Value> buildPadOutputInit(
       .getResult();
 }
 
+/// Per-axis begin pads (length = data rank) when `pads` and `axes` are
+/// compile-time constants, so the runtime can skip reading them back from the
+/// device. Returns std::nullopt when any value is only known at runtime,
+/// including a `constant_value` the kernel would still have to read.
+static std::optional<llvm::SmallVector<int64_t>>
+getStaticLowerPads(mlir::Value data, mlir::Value pads, mlir::Value axes,
+                   llvm::ArrayRef<int64_t> padsAttr, bool hasPadsAttr,
+                   llvm::ArrayRef<int64_t> axesAttr, bool hasAxesAttr,
+                   bool needsConstantValue) {
+  if (needsConstantValue)
+    return std::nullopt;
+  int64_t rank = mlir::cast<mlir::RankedTensorType>(data.getType()).getRank();
+  if (rank == 0)
+    return std::nullopt;
+
+  llvm::SmallVector<int64_t> axesVec;
+  if (hasAxesAttr)
+    axesVec.assign(axesAttr.begin(), axesAttr.end());
+  else if (axes && mlir::failed(extractIntVector(axes, axesVec)))
+    return std::nullopt;
+  if (axesVec.empty())
+    for (int64_t i = 0; i < rank; ++i)
+      axesVec.push_back(i);
+
+  llvm::SmallVector<int64_t> padsVec;
+  if (hasPadsAttr)
+    padsVec.assign(padsAttr.begin(), padsAttr.end());
+  else if (mlir::failed(extractIntVector(pads, padsVec)))
+    return std::nullopt;
+  if (padsVec.size() != 2 * axesVec.size())
+    return std::nullopt;
+
+  llvm::SmallVector<int64_t> lower(rank, 0);
+  for (auto [slot, axis] : llvm::enumerate(axesVec)) {
+    int64_t a = axis < 0 ? axis + rank : axis;
+    if (a < 0 || a >= rank)
+      return std::nullopt;
+    lower[a] = padsVec[slot];
+  }
+  return lower;
+}
+
+/// The fill value of a constant-mode pad when `constant_value` is a
+/// compile-time scalar of the data element type, else null.
+static mlir::TypedAttr getStaticConstantValue(mlir::Value constantValue,
+                                              mlir::Type elemType) {
+  auto dense = getCompileTimeConstantTensor(constantValue);
+  if (!dense || dense.getNumElements() != 1 ||
+      dense.getElementType() != elemType)
+    return nullptr;
+  return mlir::dyn_cast<mlir::TypedAttr>(*dense.value_begin<mlir::Attribute>());
+}
+
 /// onnx.Pad -> hip.pad
 ///
 /// ONNX layout: Pad(data, pads, [constant_value], [axes]) {mode}.
@@ -312,6 +367,25 @@ struct PadToHip : public mlir::RewritePattern {
 
     mlir::SmallVector<mlir::NamedAttribute> attrs;
     attrs.push_back(rewriter.getNamedAttr("mode", modeAttr));
+    const bool readsConstantValue =
+        constantValue && modeAttr.getValue() == "constant";
+    mlir::TypedAttr staticConstantValue =
+        readsConstantValue
+            ? getStaticConstantValue(
+                  constantValue,
+                  mlir::cast<mlir::RankedTensorType>(data.getType())
+                      .getElementType())
+            : nullptr;
+    if (auto lowerPads = getStaticLowerPads(
+            data, pads, axes, padsAttr, hasPadsAttr, axesAttr, hasAxesAttr,
+            /*needsConstantValue=*/readsConstantValue &&
+                !staticConstantValue)) {
+      attrs.push_back(rewriter.getNamedAttr(
+          "static_lower_pads", rewriter.getDenseI64ArrayAttr(*lowerPads)));
+      if (staticConstantValue)
+        attrs.push_back(rewriter.getNamedAttr("static_constant_value",
+                                              staticConstantValue));
+    }
 
     mlir::OperationState state(loc, "hip.pad");
     state.addOperands(operands);
