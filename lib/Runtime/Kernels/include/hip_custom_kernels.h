@@ -1079,13 +1079,20 @@ HIP_KERNEL_API int hip_gqa_dequant_kv_i8_to_fp16(
  * out[d+half] = in[d+half]*cos + in[d]*sin
  * seqlens_k: optional device pointer [B] int32. When non-null, past_len is
  * derived from seqlens_k[b]+1-seq_len and the host past_len is ignored.
+ * position_ids: optional device pointer [B, seq_len] int64. When non-null,
+ * token (b, s) rotates by cache row position_ids[b, s] and both past_len and
+ * seqlens_k are ignored.
+ * max_position: rows of cos_cache/sin_cache; must be positive. Every
+ * position, from either source, is clamped into [0, max_position) as
+ * RotaryEmbedding does, so the caches are never read out of bounds.
  * element_size_bytes: 2 = fp16, 4 = fp32. */
 HIP_KERNEL_API int hip_gqa_rope(
     void* stream, const void* input, void* output,
     const void* cos_cache, const void* sin_cache,
     int batch_size, int seq_len, int num_heads,
     int head_dim, int half_rot, int past_len,
-    const void* seqlens_k, int element_size_bytes);
+    const void* seqlens_k, const void* position_ids, int max_position,
+    int element_size_bytes);
 
 /* Transpose middle two dims of 4D tensor:
  * [B, dim1, dim2, D] -> [B, dim2, dim1, D]

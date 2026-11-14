@@ -9,6 +9,8 @@
 // Verifies the SINGLE production decode kernel (hip_gqa_flash_decode) for
 // correctness against a CPU fp32 reference (incl. seqlens_k / sliding-window /
 // head-sink / smooth-softmax), then reports a three-column latency comparison.
+// It first checks that the in-attention RoPE clamps positions to the cos/sin
+// rows.
 //
 // IMPORTANT: all three columns run on the CURRENT v2 kernel, toggled by env.
 // They measure the value of v2's per-shape autotune RELATIVE TO fixed configs
@@ -413,6 +415,16 @@ extern "C" int hip_gqa_fused_decode(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
     void* O, int B, int H, int G, int d, int skv, int max_seq,
     float scale, const void* seqlens_k);
+
+// In-attention RoPE that rotates the decode token's Q/K before the cache
+// append (declared in hip_custom_kernels.h).
+extern "C" int hip_gqa_rope(
+    void* stream, const void* input, void* output,
+    const void* cos_cache, const void* sin_cache,
+    int batch_size, int seq_len, int num_heads,
+    int head_dim, int half_rot, int past_len,
+    const void* seqlens_k, const void* position_ids, int max_position,
+    int element_size_bytes);
 
 // Partials workspace capacity in splits. Must be >= the launcher's autotune
 // ceiling (kFlashDecodeMaxSplits=64 in gqa_kernel.hip) so the autotuned path
@@ -961,6 +973,84 @@ static void emit_markdown(int iters, const char* dev, int cus) {
   }
 }
 
+// RoPE must clamp every position into the cos/sin rows, as RotaryEmbedding
+// does, whether it comes from position_ids (including values that only fit in
+// int64) or from seqlens_k. Each row is random, so a wrong row shows up as an
+// O(1) error.
+static int run_rope_clamp() {
+  const int B = 2, S = 4, H = 2, D = 8, half = D / 2, rows = 6;
+  const int64_t pos_ids[B * S] = {0, 5, 6, 1000, -3, 3000000000LL,
+                                  (1LL << 32) + 2, 4};
+  const int seqlens[B] = {S - 1, 9};  // past_len 0 and 6
+  std::mt19937 rng(7);
+  std::uniform_real_distribution<float> U(-1.0f, 1.0f);
+  std::vector<__half> hX((size_t)B * S * H * D), hCos((size_t)rows * half),
+      hSin((size_t)rows * half);
+  for (auto& v : hX) v = __float2half(U(rng));
+  for (auto& v : hCos) v = __float2half(U(rng));
+  for (auto& v : hSin) v = __float2half(U(rng));
+
+  void *dX, *dY, *dCos, *dSin, *dPos, *dSeq;
+  const size_t x_bytes = hX.size() * sizeof(__half);
+  const size_t c_bytes = hCos.size() * sizeof(__half);
+  HIP_CHECK(hipMalloc(&dX, x_bytes));
+  HIP_CHECK(hipMalloc(&dY, x_bytes));
+  HIP_CHECK(hipMalloc(&dCos, c_bytes));
+  HIP_CHECK(hipMalloc(&dSin, c_bytes));
+  HIP_CHECK(hipMalloc(&dPos, sizeof(pos_ids)));
+  HIP_CHECK(hipMalloc(&dSeq, sizeof(seqlens)));
+  HIP_CHECK(hipMemcpy(dX, hX.data(), x_bytes, hipMemcpyHostToDevice));
+  HIP_CHECK(hipMemcpy(dCos, hCos.data(), c_bytes, hipMemcpyHostToDevice));
+  HIP_CHECK(hipMemcpy(dSin, hSin.data(), c_bytes, hipMemcpyHostToDevice));
+  HIP_CHECK(hipMemcpy(dPos, pos_ids, sizeof(pos_ids), hipMemcpyHostToDevice));
+  HIP_CHECK(hipMemcpy(dSeq, seqlens, sizeof(seqlens), hipMemcpyHostToDevice));
+
+  auto check = [&](const char* what, const void* pos, const void* seq) {
+    HIP_CHECK(hipMemset(dY, 0, x_bytes));
+    const int rc = hip_gqa_rope(nullptr, dX, dY, dCos, dSin, B, S, H, D, half,
+                                0, seq, pos, rows, 2);
+    HIP_CHECK(hipDeviceSynchronize());
+    std::vector<__half> hY(hX.size());
+    HIP_CHECK(hipMemcpy(hY.data(), dY, x_bytes, hipMemcpyDeviceToHost));
+    float err = 0.0f;
+    for (int b = 0; b < B; ++b)
+      for (int s = 0; s < S; ++s) {
+        const int64_t raw =
+            pos ? pos_ids[b * S + s] : (int64_t)(seqlens[b] + 1 - S) + s;
+        const int r = (int)std::min<int64_t>(std::max<int64_t>(raw, 0), rows - 1);
+        for (int h = 0; h < H; ++h)
+          for (int d = 0; d < half; ++d) {
+            const size_t base = ((size_t)(b * S + s) * H + h) * D;
+            const float x1 = __half2float(hX[base + d]);
+            const float x2 = __half2float(hX[base + d + half]);
+            const float c = __half2float(hCos[r * half + d]);
+            const float sn = __half2float(hSin[r * half + d]);
+            err = std::max(err, std::fabs(__half2float(hY[base + d]) -
+                                          (x1 * c - x2 * sn)));
+            err = std::max(err, std::fabs(__half2float(hY[base + d + half]) -
+                                          (x2 * c + x1 * sn)));
+          }
+      }
+    const bool ok = rc == 0 && err < 2e-3f;
+    if (!g_md || !ok)
+      printf("rope clamp (%s): rc=%d max_abs=%.2e %s\n", what, rc, err,
+             ok ? "PASS" : "FAIL");
+    return ok ? 0 : 1;
+  };
+  int fails = check("position_ids", dPos, nullptr);
+  fails += check("seqlens_k", nullptr, dSeq);
+  const bool rejected = hip_gqa_rope(nullptr, dX, dY, dCos, dSin, B, S, H, D,
+                                     half, 0, nullptr, dPos, 0, 2) != 0;
+  if (!g_md || !rejected)
+    printf("rope clamp (max_position=0 rejected): %s\n",
+           rejected ? "PASS" : "FAIL");
+  fails += rejected ? 0 : 1;
+
+  hipFree(dX); hipFree(dY); hipFree(dCos); hipFree(dSin);
+  hipFree(dPos); hipFree(dSeq);
+  return fails;
+}
+
 int main(int argc, char** argv) {
   int iters = 200;
   unsigned seed = 1234;
@@ -999,7 +1089,7 @@ int main(int argc, char** argv) {
     printf("Device: %s (%d CUs)  iters=%d  max_splits=%d (PR438 baseline=%d)\n\n",
            prop.name, prop.multiProcessorCount, iters, MAX_SPLITS, BASELINE_SPLITS);
 
-  int fails = 0;
+  int fails = run_rope_clamp();
   if (all || !have_single) {
     // B=1 single-stream decode. Categorical situations -- real models, a
     // geometry sweep over MHA (HpG==1) and GQA (HpG in {2,4,5,8,16}) x
