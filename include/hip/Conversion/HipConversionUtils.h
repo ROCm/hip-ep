@@ -24,6 +24,16 @@ FailureOr<Value> createBroadcastEmptyTensor(OpBuilder &builder, Location loc,
                                             RankedTensorType resultType,
                                             ValueRange operands);
 
+/// Build the tensor.empty destination of a reduction over constant axes.
+/// Extents follow reifyReductionWithKeepdims, so the destination agrees with
+/// the result-shape reification: with keepdims=0 a dynamic result extent is
+/// taken from the data dim it survives from, not from the same position.
+/// Reject invalid axes and conflicts with resultType, leaving the IR
+/// unchanged.
+FailureOr<Value> createReductionEmptyTensor(
+    OpBuilder &builder, Location loc, RankedTensorType resultType, Value data,
+    llvm::ArrayRef<int64_t> axes, int64_t keepdims, int64_t noopWithEmptyAxes);
+
 /// Return !hip.context from function argument 0.
 FailureOr<Value> getContextArg(Operation *op, PatternRewriter &rewriter);
 
