@@ -136,6 +136,14 @@ kernel when these conditions are true:
 - After a quantized anchor, no kernel result is a float value that a
   dequantize widened. Every result is an integer value or a value from before
   the first dequantize.
+- A float `hip.matmul` or `hip.gemm` with at most 64 output columns and a
+  reduction at least 16 times as deep has too few output tiles to fill the
+  GPU without split-K. rocMLIR offers split-K only for a linear epilogue with
+  an f32 or f16 result, so such an anchor takes only adds, subtracts,
+  negates, float-to-float casts, and multiplies or divides that read the
+  kernel value once. A quantize after a low-rank projection (N = 32,
+  K = 2048) thus stays outside, and the matmul keeps its split-K
+  configurations.
 
 A transpose or a static reshape outside any module that reads the kernel is
 also an epilogue op. So is a chain of single-use reshapes without an init

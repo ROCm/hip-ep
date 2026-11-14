@@ -358,3 +358,84 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf32>,
        saturate = 1 : i64} : tensor<1x16x4x4xi8>
   return %q : tensor<1x16x4x4xi8>
 }
+
+// -----
+
+// A matmul with 32 output columns and a 2048-deep reduction relies on
+// split-K, which rocMLIR drops for a quantize epilogue. The quantize stays a
+// HIP op after the kernel.
+
+// CHECK-LABEL: func.func @mlir_matmul_{{[0-9]+}}
+// CHECK-NOT: hip.quantize_linear
+// CHECK: hip.matmul
+// CHECK-NOT: hip.quantize_linear
+// CHECK: return
+// CHECK-LABEL: func.func @main_graph
+// CHECK: %[[K:.*]] = hip.rocmlir({{.*}}) @mlir_matmul_{{[0-9]+}}
+// CHECK: hip.quantize_linear({{.*}}) ins(%[[K]],
+
+func.func @main_graph(%ctx: !hip.context, %a: tensor<1x2048xf32>,
+                      %b: tensor<2048x32xf32>) -> tensor<1x32xi8> {
+  %s = hip.constant {value = dense<5.000000e-01> : tensor<f32>} : tensor<f32>
+  %z = hip.constant {value = dense<0> : tensor<i8>} : tensor<i8>
+  %e = tensor.empty() : tensor<1x32xf32>
+  %m = hip.matmul(%ctx) ins(%a, %b : tensor<1x2048xf32>, tensor<2048x32xf32>)
+      outs(%e : tensor<1x32xf32>) : tensor<1x32xf32>
+  %qe = tensor.empty() : tensor<1x32xi8>
+  %q = hip.quantize_linear(%ctx) ins(%m, %s : tensor<1x32xf32>, tensor<f32>)
+      zero_point(%z : tensor<i8>) outs(%qe : tensor<1x32xi8>)
+      {axis = 1 : i64, block_size = 0 : i64, precision = 0 : i64,
+       saturate = 1 : i64} : tensor<1x32xi8>
+  return %q : tensor<1x32xi8>
+}
+
+// -----
+
+// The same matmul with a 64-deep reduction does not need split-K, so the
+// quantize joins its epilogue.
+
+// CHECK-LABEL: func.func @mlir_matmul_quantize_linear_{{[0-9]+}}
+// CHECK: hip.matmul
+// CHECK: hip.quantize_linear
+// CHECK-LABEL: func.func @main_graph
+// CHECK: hip.rocmlir
+// CHECK-NOT: hip.quantize_linear
+
+func.func @main_graph(%ctx: !hip.context, %a: tensor<1x64xf32>,
+                      %b: tensor<64x32xf32>) -> tensor<1x32xi8> {
+  %s = hip.constant {value = dense<5.000000e-01> : tensor<f32>} : tensor<f32>
+  %z = hip.constant {value = dense<0> : tensor<i8>} : tensor<i8>
+  %e = tensor.empty() : tensor<1x32xf32>
+  %m = hip.matmul(%ctx) ins(%a, %b : tensor<1x64xf32>, tensor<64x32xf32>)
+      outs(%e : tensor<1x32xf32>) : tensor<1x32xf32>
+  %qe = tensor.empty() : tensor<1x32xi8>
+  %q = hip.quantize_linear(%ctx) ins(%m, %s : tensor<1x32xf32>, tensor<f32>)
+      zero_point(%z : tensor<i8>) outs(%qe : tensor<1x32xi8>)
+      {axis = 1 : i64, block_size = 0 : i64, precision = 0 : i64,
+       saturate = 1 : i64} : tensor<1x32xi8>
+  return %q : tensor<1x32xi8>
+}
+
+// -----
+
+// An add is linear, so split-K keeps it: the narrow, deep matmul still takes
+// its bias add.
+
+// CHECK-LABEL: func.func @mlir_matmul_add_{{[0-9]+}}
+// CHECK: hip.matmul
+// CHECK: hip.add
+// CHECK-LABEL: func.func @main_graph
+// CHECK: hip.rocmlir
+// CHECK-NOT: hip.add
+
+func.func @main_graph(%ctx: !hip.context, %a: tensor<1x2048xf32>,
+                      %b: tensor<2048x32xf32>, %bias: tensor<1x32xf32>)
+    -> tensor<1x32xf32> {
+  %e = tensor.empty() : tensor<1x32xf32>
+  %m = hip.matmul(%ctx) ins(%a, %b : tensor<1x2048xf32>, tensor<2048x32xf32>)
+      outs(%e : tensor<1x32xf32>) : tensor<1x32xf32>
+  %ae = tensor.empty() : tensor<1x32xf32>
+  %r = hip.add(%ctx) ins(%m, %bias : tensor<1x32xf32>, tensor<1x32xf32>)
+      outs(%ae : tensor<1x32xf32>) -> tensor<1x32xf32>
+  return %r : tensor<1x32xf32>
+}
