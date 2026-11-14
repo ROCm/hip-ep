@@ -1077,6 +1077,8 @@ HIP_KERNEL_API int hip_gqa_dequant_kv_i8_to_fp16(
 /* Internal GQA RoPE (half-rotated):
  * out[d] = in[d]*cos - in[d+half]*sin
  * out[d+half] = in[d+half]*cos + in[d]*sin
+ * for d < half_rot, with cos/sin rows of width half_rot. When
+ * 2*half_rot < head_dim the remaining dims are copied unrotated.
  * seqlens_k: optional device pointer [B] int32. When non-null, past_len is
  * derived from seqlens_k[b]+1-seq_len and the host past_len is ignored.
  * element_size_bytes: 2 = fp16, 4 = fp32. */

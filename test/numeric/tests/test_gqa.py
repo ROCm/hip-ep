@@ -328,6 +328,173 @@ def _make_gqa_packed_rotary_model(
     )
 
 
+ROTARY_CACHE_SIZE = 256
+ROTARY_MAX_POS = 4096
+
+
+def _make_gqa_rotary_fixed_cache_model(
+    seq_len, num_heads, kv_num_heads, head_dim, rotary_dim, packed, elem_type
+):
+    """Build a GQA model with in-op rotary over a fixed-size KV cache.
+
+    cos/sin are [max_pos, rotary_dim / 2] initializers, so rotary_dim below
+    head_dim is a partial rotary: dims [rotary_dim, head_dim) pass through.
+    past/present share the [1, kv_num_heads, cache, head_dim] buffer shape,
+    total_seq is the cache size and seqlens_k marks the valid length.
+    """
+    dtype = np.float32 if elem_type == TensorProto.FLOAT else np.float16
+    q_hidden = num_heads * head_dim
+    kv_hidden = kv_num_heads * head_dim
+    cache = [1, kv_num_heads, ROTARY_CACHE_SIZE, head_dim]
+    vi = helper.make_tensor_value_info
+
+    if packed:
+        inputs = [vi("qkv", elem_type, [1, seq_len, q_hidden + 2 * kv_hidden])]
+        qkv_names = ["qkv", "", ""]
+    else:
+        inputs = [
+            vi("query", elem_type, [1, seq_len, q_hidden]),
+            vi("key", elem_type, [1, seq_len, kv_hidden]),
+            vi("value", elem_type, [1, seq_len, kv_hidden]),
+        ]
+        qkv_names = ["query", "key", "value"]
+    inputs += [
+        vi("past_key", elem_type, cache),
+        vi("past_value", elem_type, cache),
+        vi("seqlens_k", TensorProto.INT32, [1]),
+        vi("total_seq", TensorProto.INT32, []),
+    ]
+    outputs = [
+        vi("output", elem_type, [1, seq_len, q_hidden]),
+        vi("present_key", elem_type, cache),
+        vi("present_value", elem_type, cache),
+    ]
+
+    half = rotary_dim // 2
+    inv_freq = 10000.0 ** (-np.arange(half) * 2.0 / rotary_dim)
+    theta = np.arange(ROTARY_MAX_POS)[:, None] * inv_freq[None, :]
+    initializers = [
+        numpy_helper.from_array(np.cos(theta).astype(dtype), name="cos_cache"),
+        numpy_helper.from_array(np.sin(theta).astype(dtype), name="sin_cache"),
+    ]
+
+    node = helper.make_node(
+        "GroupQueryAttention",
+        qkv_names
+        + [
+            "past_key",
+            "past_value",
+            "seqlens_k",
+            "total_seq",
+            "cos_cache",
+            "sin_cache",
+        ],
+        ["output", "present_key", "present_value"],
+        domain="com.microsoft",
+        num_heads=num_heads,
+        kv_num_heads=kv_num_heads,
+        scale=float(1.0 / np.sqrt(head_dim)),
+        do_rotary=1,
+        rotary_interleaved=0,
+    )
+    model = make_model_from_nodes(
+        [node],
+        inputs,
+        outputs,
+        initializers=initializers,
+        extra_opsets=[helper.make_opsetid("com.microsoft", 1)],
+    )
+    model.ir_version = 8
+    return model
+
+
+class TestGroupQueryAttentionRotary:
+    """In-op RoPE, full (rotary_dim == head_dim) and partial (rotary_dim <
+    head_dim). The geometries select the runtime path that applies RoPE:
+
+      * d=256 / d=128, sq=1      -> fused flash decode
+      * d=256 / d=128, sq>1      -> fused prefill
+      * d=80 (not a fused head)  -> decomposed hipBLASLt pipeline
+      * d=128, 7 heads per group -> hipBLASLt pipeline's fused-decode branch
+      * fp32 inputs              -> decomposed hipBLASLt pipeline (fp32)
+    """
+
+    @pytest.mark.parametrize("rotary", ["partial", "full"])
+    @pytest.mark.parametrize(
+        "seq_len,past,num_heads,kv_num_heads,head_dim,partial_dim,packed,elem_type",
+        [
+            (1, 63, 8, 2, 256, 64, False, TensorProto.FLOAT16),
+            (37, 20, 8, 2, 256, 64, False, TensorProto.FLOAT16),
+            (1, 63, 8, 2, 128, 32, False, TensorProto.FLOAT16),
+            (37, 20, 8, 2, 128, 32, False, TensorProto.FLOAT16),
+            (1, 63, 4, 2, 80, 32, False, TensorProto.FLOAT16),
+            (37, 20, 4, 2, 80, 32, False, TensorProto.FLOAT16),
+            (1, 63, 14, 2, 128, 32, False, TensorProto.FLOAT16),
+            (1, 63, 8, 2, 256, 64, True, TensorProto.FLOAT16),
+            (37, 20, 8, 2, 256, 64, True, TensorProto.FLOAT16),
+            (1, 63, 8, 2, 128, 32, False, TensorProto.FLOAT),
+            (37, 20, 8, 2, 128, 32, False, TensorProto.FLOAT),
+        ],
+        ids=[
+            "fused_decode_d256",
+            "fused_prefill_d256",
+            "fused_decode_d128",
+            "fused_prefill_d128",
+            "hipblaslt_decode_d80",
+            "hipblaslt_prefill_d80",
+            "hipblaslt_fused_decode_d128",
+            "packed_decode_d256",
+            "packed_prefill_d256",
+            "fp32_decode_d128",
+            "fp32_prefill_d128",
+        ],
+    )
+    def test_gqa_rotary(
+        self,
+        model_runner,
+        rotary,
+        seq_len,
+        past,
+        num_heads,
+        kv_num_heads,
+        head_dim,
+        partial_dim,
+        packed,
+        elem_type,
+    ):
+        rotary_dim = partial_dim if rotary == "partial" else head_dim
+        model = _make_gqa_rotary_fixed_cache_model(
+            seq_len, num_heads, kv_num_heads, head_dim, rotary_dim, packed, elem_type
+        )
+        dtype = np.float32 if elem_type == TensorProto.FLOAT else np.float16
+        rng = np.random.default_rng(7)
+        q_hidden = num_heads * head_dim
+        kv_hidden = kv_num_heads * head_dim
+        if packed:
+            qkv = [rng.uniform(-2, 2, [1, seq_len, q_hidden + 2 * kv_hidden])]
+        else:
+            qkv = [
+                rng.uniform(-2, 2, [1, seq_len, q_hidden]),
+                rng.uniform(-2, 2, [1, seq_len, kv_hidden]),
+                rng.uniform(-2, 2, [1, seq_len, kv_hidden]),
+            ]
+        cache = [1, kv_num_heads, ROTARY_CACHE_SIZE, head_dim]
+        inputs = [a.astype(dtype) for a in qkv] + [
+            rng.uniform(-1, 1, cache).astype(dtype),
+            rng.uniform(-1, 1, cache).astype(dtype),
+            np.array([past + seq_len - 1], dtype=np.int32),
+            np.array(ROTARY_CACHE_SIZE, dtype=np.int32),
+        ]
+        actual, expected = model_runner.run_sample(model, inputs)
+        # Cache slots past the valid length are not defined by the op.
+        valid = past + seq_len
+        actual = [actual[0]] + [a[:, :, :valid] for a in actual[1:]]
+        expected = [expected[0]] + [e[:, :, :valid] for e in expected[1:]]
+        # Partial rotary computed as full rotary reads cos/sin past their
+        # width and rotates the pass-through dims: cosine falls to ~0.5-0.93.
+        compare_outputs(actual, expected, atol=1e-2, rtol=1e-2, cos_threshold=0.9999)
+
+
 class TestGroupQueryAttention:
     @pytest.mark.parametrize(
         "seq_len,hidden,kv_hidden,num_heads,kv_num_heads",

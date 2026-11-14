@@ -131,6 +131,15 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     Value scale = createF32Const(op.getScale().convertToFloat());
     Value doRotary = createI64Const(op.getDoRotary());
     Value rotaryInterleaved = createI64Const(op.getRotaryInterleaved());
+    // rotary_dim is twice the cos_cache width ([max_pos, rotary_dim / 2]), or
+    // 0 without cos/sin. It can be below head_dim (partial rotary).
+    Value rotaryDim = createI64Const(0);
+    if (op.getCosCache()) {
+      auto cosType = cast<MemRefType>(op.getCosCache().getType());
+      Value width = getMemRefDimSize(cosType, cosType.getRank() - 1,
+                                     adaptor.getCosCache(), rewriter, loc);
+      rotaryDim = LLVM::MulOp::create(rewriter, loc, width, createI64Const(2));
+    }
     Value softcap = createF32Const(op.getSoftcap().convertToFloat());
     Value localWindowSize = createI64Const(op.getLocalWindowSize());
     Value smoothSoftmax = createI64Const(op.getSmoothSoftmax());
@@ -303,12 +312,13 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         ptrType, // present_key
         ptrType, // present_value
         ptrType, // output_qk
-        // Attributes (13 values)
+        // Attributes (14 values)
         i64Type, // num_heads
         i64Type, // kv_num_heads
         f32Type, // scale
         i64Type, // do_rotary
         i64Type, // rotary_interleaved
+        i64Type, // rotary_dim
         f32Type, // softcap
         i64Type, // local_window_size
         i64Type, // smooth_softmax
@@ -351,10 +361,10 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         attentionBiasPtr, headSinkPtr, kScalePtr, vScalePtr,
         // Outputs (4 pointers)
         outputPtr, presentKeyPtr, presentValuePtr, outputQkPtr,
-        // Attributes (13 values)
-        numHeads, kvNumHeads, scale, doRotary, rotaryInterleaved, softcap,
-        localWindowSize, smoothSoftmax, qkOutput, kQuantType, vQuantType,
-        kvCacheBitWidth, noCausal,
+        // Attributes (14 values)
+        numHeads, kvNumHeads, scale, doRotary, rotaryInterleaved, rotaryDim,
+        softcap, localWindowSize, smoothSoftmax, qkOutput, kQuantType,
+        vQuantType, kvCacheBitWidth, noCausal,
         // Shape info (10 values)
         batchSizeVal, seqLenQVal, seqLenKVVal, pastBufSeqVal, headDimVal,
         elemSizeVal, attnBiasBatchVal, attnBiasNumHeadsVal, kvBnsdVal,

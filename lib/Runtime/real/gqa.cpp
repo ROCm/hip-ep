@@ -485,7 +485,7 @@ static int gqa_forward_fused(
     const void *past_value, const void *seqlens_k_ptr, const void *cos_cache,
     const void *sin_cache, void *output, void *present_key, void *present_value,
     int64_t B, int64_t sq, int64_t skv, int64_t past_buf_seq, int64_t H,
-    int64_t G, int64_t d, float scale, int64_t do_rotary,
+    int64_t G, int64_t d, float scale, int64_t do_rotary, int64_t rotary_dim,
     const void *k_scale = nullptr, const void *v_scale = nullptr,
     KvCacheFormat kv_format = KvCacheFormat::Fp16,
     const void *head_sink = nullptr, bool use_smooth_softmax = false,
@@ -612,7 +612,7 @@ static int gqa_forward_fused(
       char *ws = static_cast<char *>(hipdnn_ep_state_get_workspace(state));
       void *d_Qroped = ws + off_rope;
       void *d_Kroped = ws + off_rope + Q_full_bytes;
-      int half_rot = static_cast<int>(d / 2);
+      int half_rot = static_cast<int>(rotary_dim / 2);
       OP_ROCTX_MARK("hip_ep.op.gqa.prep.rope");
       if (hip_gqa_rope(stream, qSrc, d_Qroped, cos_cache, sin_cache,
                        static_cast<int>(B), static_cast<int>(sq),
@@ -857,7 +857,7 @@ static int gqa_forward_fused(
     char *ws = static_cast<char *>(hipdnn_ep_state_get_workspace(state));
     void *d_Qroped = ws + off_rope;
     void *d_Kroped = ws + off_rope + Q_full_bytes;
-    int half_rot = static_cast<int>(d / 2);
+    int half_rot = static_cast<int>(rotary_dim / 2);
     OP_ROCTX_MARK("hip_ep.op.gqa.prep.rope");
     if (hip_gqa_rope(stream, qSrc, d_Qroped, cos_cache, sin_cache,
                      static_cast<int>(B), static_cast<int>(sq),
@@ -1392,8 +1392,8 @@ static int gqa_forward_hipblaslt(
     int64_t attn_bias_num_heads, void *output, void *present_key,
     void *present_value, int64_t B, int64_t sq, int64_t skv,
     int64_t past_buf_seq, int64_t H, int64_t G, int64_t d, float scale,
-    int64_t do_rotary, int64_t local_window_size, bool no_causal,
-    int64_t element_size_bytes, int op_state_slot, bool kv_bnsd,
+    int64_t do_rotary, int64_t rotary_dim, int64_t local_window_size,
+    bool no_causal, int64_t element_size_bytes, int op_state_slot, bool kv_bnsd,
     bool reuse_past_kv = false,
     std::optional<int32_t> host_length = std::nullopt,
     // The bias's own query extent, row stride and element size; 0 means sq,
@@ -1626,7 +1626,7 @@ static int gqa_forward_hipblaslt(
       void *d_Qroped = ws + off_rope;
       void *d_Kroped = ws + off_rope + Q_full_bytes;
 
-      int half_rot = static_cast<int>(d / 2);
+      int half_rot = static_cast<int>(rotary_dim / 2);
       OP_ROCTX_MARK("hip_ep.op.gqa.prep.rope");
       if (hip_gqa_rope(stream, qSrc, d_Qroped, cos_cache, sin_cache,
                        static_cast<int>(B), static_cast<int>(sq),
@@ -2483,7 +2483,7 @@ static int gqa_forward_hipblaslt(
     // ---- Steps 1-2: RoPE (optional) ----
     // Reads qSrc/kSrc so packed-QKV split output feeds RoPE; V is never RoPE'd.
     if (need_rope) {
-      int half_rot = static_cast<int>(d / 2);
+      int half_rot = static_cast<int>(rotary_dim / 2);
       void *d_Qroped = ws + off_Qroped;
       void *d_Kroped = ws + off_Kroped;
 
@@ -2972,9 +2972,10 @@ static int gqa_forward_fused_from_fp32(
     void *cos_cache, void *sin_cache, void *output, void *present_key,
     void *present_value, int64_t B, int64_t sq, int64_t skv,
     int64_t past_buf_seq, int64_t H, int64_t G, int64_t d, float scale,
-    int64_t do_rotary, const void *k_scale, const void *v_scale,
-    KvCacheFormat kv_format, const void *head_sink, bool use_smooth_softmax,
-    int local_window_size, std::optional<int32_t> host_length) {
+    int64_t do_rotary, int64_t rotary_dim, const void *k_scale,
+    const void *v_scale, KvCacheFormat kv_format, const void *head_sink,
+    bool use_smooth_softmax, int local_window_size,
+    std::optional<int32_t> host_length) {
   const bool packed_qkv = (!key && !value);
   const bool need_rope = do_rotary && cos_cache && sin_cache;
 
@@ -2995,7 +2996,7 @@ static int gqa_forward_fused_from_fp32(
       packed_qkv ? (B * sq * (H + 2 * G) * d) : (B * sq * H * d);
   const int64_t kv_elems = packed_qkv ? 0 : (B * sq * G * d);
   const int64_t out_elems = B * sq * H * d;
-  const int64_t half_rot = d / 2;
+  const int64_t half_rot = rotary_dim / 2;
   const int64_t rope_elems = need_rope ? ((past_len + sq) * half_rot) : 0;
 
   const size_t q_bytes = static_cast<size_t>(q_elems) * 2;
@@ -3039,7 +3040,7 @@ static int gqa_forward_fused_from_fp32(
       state, stream, q16, k16, v16, past_key, past_value, seqlens_k,
       cos16 ? cos16 : cos_cache, sin16 ? sin16 : sin_cache, out16, present_key,
       present_value, B, sq, skv, past_buf_seq, H, G, d, scale, do_rotary,
-      k_scale, v_scale, kv_format, head_sink, use_smooth_softmax,
+      rotary_dim, k_scale, v_scale, kv_format, head_sink, use_smooth_softmax,
       local_window_size, host_length);
   if (rc != 0)
     return rc;
@@ -3061,11 +3062,12 @@ int wrap_group_query_attention_host_length(
     void *attention_bias, void *head_sink, void *k_scale, void *v_scale,
     // Outputs
     void *output, void *present_key, void *present_value, void *output_qk,
-    // Attributes (13)
+    // Attributes (14)
     int64_t num_heads, int64_t kv_num_heads, float scale, int64_t do_rotary,
-    int64_t rotary_interleaved, float softcap, int64_t local_window_size,
-    int64_t smooth_softmax, int64_t qk_output, int64_t k_quant_type,
-    int64_t v_quant_type, int64_t kv_cache_bit_width, int32_t no_causal,
+    int64_t rotary_interleaved, int64_t rotary_dim, float softcap,
+    int64_t local_window_size, int64_t smooth_softmax, int64_t qk_output,
+    int64_t k_quant_type, int64_t v_quant_type, int64_t kv_cache_bit_width,
+    int32_t no_causal,
     // Shape values (6)
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
@@ -3112,6 +3114,21 @@ int wrap_group_query_attention_host_length(
   //===------------------------------------------------------------------===//
   if (position_ids != nullptr) {
     fprintf(stderr, "wrap_group_query_attention: position_ids not supported\n");
+    return -1;
+  }
+  // rotary_dim is twice the cos/sin cache width. Dims [rotary_dim, head_dim)
+  // pass through unrotated (partial rotary). The RoPE kernel implements the
+  // half-rotated pairing only.
+  if (do_rotary &&
+      (!cos_cache || !sin_cache || rotary_dim <= 0 || rotary_dim % 2 != 0 ||
+       rotary_dim > head_dim || rotary_interleaved != 0)) {
+    fprintf(stderr,
+            "wrap_group_query_attention: invalid rotary (cos=%d sin=%d "
+            "rotary_dim=%lld head_dim=%lld interleaved=%lld); need cos/sin, an "
+            "even rotary_dim in (0, head_dim] and rotary_interleaved=0\n",
+            static_cast<int>(cos_cache != nullptr),
+            static_cast<int>(sin_cache != nullptr), (long long)rotary_dim,
+            (long long)head_dim, (long long)rotary_interleaved);
     return -1;
   }
   // attention_bias (onnx.Attention external mask) is intentionally NOT rejected
@@ -3180,7 +3197,6 @@ int wrap_group_query_attention_host_length(
     scale = 1.0f / sqrtf(static_cast<float>(head_dim));
 
   (void)total_seq_len;      // runtime derives total_seq from seqlens_k
-  (void)rotary_interleaved; // interleaved layout handled inside hip_gqa_rope
   (void)softcap;            // softcap not applied on either path
   (void)kv_cache_bit_width; // validated above for the int8 KV path
 
@@ -3296,7 +3312,7 @@ int wrap_group_query_attention_host_length(
         state, stream, query, key, value, past_key, past_value, seqlens_k,
         cos_cache, sin_cache, output, present_key, present_value, batch_size,
         seq_len_q, seq_len_kv, past_buf_seq, num_heads, kv_num_heads, head_dim,
-        scale, do_rotary, k_scale, v_scale, kv_format, head_sink,
+        scale, do_rotary, rotary_dim, k_scale, v_scale, kv_format, head_sink,
         has_smooth_softmax, static_cast<int>(local_window_size), host_length);
     if (arc != 0)
       fprintf(stderr,
@@ -3333,7 +3349,7 @@ int wrap_group_query_attention_host_length(
         kb ? key_bias : attention_bias, kb ? key_bias_batch : attn_bias_batch,
         kb ? 1 : attn_bias_num_heads, output, present_key, present_value,
         batch_size, seq_len_q, seq_len_kv, past_buf_seq, num_heads,
-        kv_num_heads, head_dim, scale, do_rotary, local_window_size,
+        kv_num_heads, head_dim, scale, do_rotary, rotary_dim, local_window_size,
         no_causal != 0, element_size_bytes, op_state_slot, kv_bnsd != 0,
         reuse_past_kv, host_length,
         /*attn_bias_sq=*/kb ? 1 : 0, /*attn_bias_total=*/kb ? key_bias_len : 0,
@@ -3358,7 +3374,7 @@ int wrap_group_query_attention_host_length(
       state, stream, query, key, value, past_key, past_value, seqlens_k,
       cos_cache, sin_cache, output, present_key, present_value, batch_size,
       seq_len_q, seq_len_kv, past_buf_seq, num_heads, kv_num_heads, head_dim,
-      scale, do_rotary, k_scale, v_scale, kv_format, head_sink,
+      scale, do_rotary, rotary_dim, k_scale, v_scale, kv_format, head_sink,
       has_smooth_softmax, static_cast<int>(local_window_size), host_length,
       key_bias, key_bias_batch, key_bias_len);
   if (rc != 0)
@@ -3382,11 +3398,12 @@ int wrap_group_query_attention_ring_f16(
     void *attention_bias, void *head_sink, void *k_scale, void *v_scale,
     // Outputs
     void *output, void *present_key, void *present_value, void *output_qk,
-    // Attributes (13)
+    // Attributes (14)
     int64_t num_heads, int64_t kv_num_heads, float scale, int64_t do_rotary,
-    int64_t rotary_interleaved, float softcap, int64_t local_window_size,
-    int64_t smooth_softmax, int64_t qk_output, int64_t k_quant_type,
-    int64_t v_quant_type, int64_t kv_cache_bit_width, int32_t no_causal,
+    int64_t rotary_interleaved, int64_t rotary_dim, float softcap,
+    int64_t local_window_size, int64_t smooth_softmax, int64_t qk_output,
+    int64_t k_quant_type, int64_t v_quant_type, int64_t kv_cache_bit_width,
+    int32_t no_causal,
     // Shape values (6)
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
@@ -3429,9 +3446,10 @@ int wrap_group_query_attention_ring_f16(
       total_seq_len, cos_cache, sin_cache, position_ids, attention_bias,
       head_sink, k_scale, v_scale, output, present_key, present_value,
       output_qk, num_heads, kv_num_heads, scale, do_rotary, rotary_interleaved,
-      softcap, local_window_size, smooth_softmax, qk_output, k_quant_type,
-      v_quant_type, kv_cache_bit_width, no_causal, batch_size, seq_len_q,
-      seq_len_kv, past_buf_seq, head_dim, element_size_bytes, attn_bias_batch,
-      attn_bias_num_heads, kv_bnsd, seq_len_new_kv, has_host_length,
-      host_length_value, key_bias, key_bias_batch, key_bias_len);
+      rotary_dim, softcap, local_window_size, smooth_softmax, qk_output,
+      k_quant_type, v_quant_type, kv_cache_bit_width, no_causal, batch_size,
+      seq_len_q, seq_len_kv, past_buf_seq, head_dim, element_size_bytes,
+      attn_bias_batch, attn_bias_num_heads, kv_bnsd, seq_len_new_kv,
+      has_host_length, host_length_value, key_bias, key_bias_batch,
+      key_bias_len);
 }

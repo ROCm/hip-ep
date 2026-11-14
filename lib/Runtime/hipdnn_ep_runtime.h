@@ -903,9 +903,12 @@ int wrap_group_query_attention_host_length(
     void *attention_bias, void *head_sink, void *k_scale, void *v_scale,
     // Outputs
     void *output, void *present_key, void *present_value, void *output_qk,
-    // Attributes (13)
+    // Attributes (14)
     int64_t num_heads, int64_t kv_num_heads, float scale, int64_t do_rotary,
-    int64_t rotary_interleaved, float softcap, int64_t local_window_size,
+    int64_t rotary_interleaved,
+    // Rotated width: twice the cos/sin cache width, 0 without cos/sin. Dims
+    // [rotary_dim, head_dim) pass through unrotated (partial rotary).
+    int64_t rotary_dim, float softcap, int64_t local_window_size,
     int64_t smooth_softmax, int64_t qk_output, int64_t k_quant_type,
     int64_t v_quant_type, int64_t kv_cache_bit_width,
     // Whisper bidirectional-attention flag: when non-zero, the causal mask
@@ -949,11 +952,12 @@ int wrap_group_query_attention_ring_f16(
     void *attention_bias, void *head_sink, void *k_scale, void *v_scale,
     // Outputs
     void *output, void *present_key, void *present_value, void *output_qk,
-    // Attributes (13)
+    // Attributes (14)
     int64_t num_heads, int64_t kv_num_heads, float scale, int64_t do_rotary,
-    int64_t rotary_interleaved, float softcap, int64_t local_window_size,
-    int64_t smooth_softmax, int64_t qk_output, int64_t k_quant_type,
-    int64_t v_quant_type, int64_t kv_cache_bit_width, int32_t no_causal,
+    int64_t rotary_interleaved, int64_t rotary_dim, float softcap,
+    int64_t local_window_size, int64_t smooth_softmax, int64_t qk_output,
+    int64_t k_quant_type, int64_t v_quant_type, int64_t kv_cache_bit_width,
+    int32_t no_causal,
     // Shape values (6)
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
