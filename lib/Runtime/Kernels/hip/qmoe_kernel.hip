@@ -2764,11 +2764,11 @@ extern "C" int hip_qmoe_decode_fused_dp4a(
     }
   }
 
-  // Single-token decode runs fixed configs: FC1 (128, 4) and the fused
+  // Single-token calls run fixed configs: FC1 (128, 4) and the fused
   // FC2 + reduce kernel (128, 2, 32), the fastest or tied for fastest
-  // in-model on the shapes measured. It does not use the online tuner, which
-  // times one call per sample and in-model locked FC1/FC2 configs that were
-  // 6-45% slower in steady state. Bursts keep the online tuner.
+  // in-model on the shapes measured. They skip the online tuner, which times
+  // one call per sample and in-model locked FC1/FC2 configs that were slower
+  // in steady state. Multi-token calls keep the online tuner.
   const bool single = (T == 1);
 
   // FC1 + SwiGLU (dp4a). N=fusion_inter, K=hidden.
