@@ -1160,9 +1160,10 @@ int wrap_arg_max(RuntimeState *state, void *data, void *indices, int64_t axis,
 int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
                void *indices, int64_t axis, int64_t largest, int64_t sorted,
                int64_t rank, const int64_t *x_shape, int64_t num_elements,
-               int64_t data_type) {
+               int64_t data_type, int64_t k_static) {
   (void)x;
   (void)k;
+  (void)k_static;
   (void)values;
   (void)indices;
   (void)x_shape;
