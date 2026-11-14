@@ -484,19 +484,23 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
     return -1;
   }
 
-  // One row against a narrow row-major B (an MoE router: N=128, K=2880): one
-  // GEMV launch. A hipBLASLt call costs 5-12 us of host time on gfx1151,
-  // about as much as the whole GEMV here. Within these bounds the GEMV is also
-  // faster on the GPU; from N=1024 hipBLASLt's kernels match it, and K above
-  // 8192 is unmeasured. With M=1 the activation is K contiguous elements
-  // whatever transA says.
-  if (elem_size == 2 && M == 1 && batch_count == 1 && !transB && N > 0 &&
-      N <= 512 && K > 0 && K <= 8192 && N % 8 == 0 &&
+  // One row against a narrow row-major B (an MoE router: fp16 N=128, K=2880;
+  // fp32 N=256, K=2048): one GEMV launch. A hipBLASLt call costs 5-12 us of
+  // host time on gfx1151, about as much as the whole GEMV here. Within these
+  // bounds the GEMV is also faster on the GPU; from N=1024 hipBLASLt's kernels
+  // match it, and K above 8192 is unmeasured. With M=1 the activation is K
+  // contiguous elements whatever transA says.
+  if (M == 1 && batch_count == 1 && !transB && N > 0 && N <= 512 && K > 0 &&
+      K <= 8192 && N % (16 / elem_size) == 0 &&
       reinterpret_cast<uintptr_t>(B) % 16 == 0) {
-    RUNTIME_DEBUG_LOG("[REAL] wrap_hipblasLtMatmul: GEMV N=%lld K=%lld\n",
-                      (long long)N, (long long)K);
+    RUNTIME_DEBUG_LOG("[REAL] wrap_hipblasLtMatmul: GEMV N=%lld K=%lld %s\n",
+                      (long long)N, (long long)K,
+                      elem_size == 2 ? "f16" : "f32");
     OP_ROCTX_MARK("hip_ep.op.matmul.run.gemv");
-    return hip_gemv_f16_kn(stream, A, B, output, K, N) == 0 ? 0 : -1;
+    const int rc = elem_size == 2
+                       ? hip_gemv_f16_kn(stream, A, B, output, K, N)
+                       : hip_gemv_f32_kn(stream, A, B, output, K, N);
+    return rc == 0 ? 0 : -1;
   }
 
   const char *type_name = (elem_size == 2) ? "f16" : "f32";
