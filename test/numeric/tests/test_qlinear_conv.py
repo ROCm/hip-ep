@@ -14,6 +14,7 @@ requantizes exactly.
 from __future__ import annotations
 
 import numpy as np
+import pytest
 from onnx import TensorProto, helper, numpy_helper
 
 from framework.comparator import compare_outputs
@@ -194,3 +195,361 @@ class TestQLinearConv:
         assert int(got[0, 0, 0, 1]) == 39
         assert int(got[0, 0, 1, 0]) == 66
         assert int(got[0, 0, 1, 1]) == 50
+
+
+_NP_TO_ONNX = {np.uint8: TensorProto.UINT8, np.int8: TensorProto.INT8}
+
+
+def _random_q(rng, dtype, shape):
+    info = np.iinfo(dtype)
+    return rng.integers(info.min, info.max + 1, size=shape, dtype=dtype)
+
+
+def _make_requant_conv(
+    rng,
+    x_shape: list[int],
+    w_shape: list[int],
+    *,
+    x_dtype=np.uint8,
+    y_dtype=np.uint8,
+    x_zp: int,
+    y_zp: int,
+    x_scale: float = 0.0173,
+    y_scale: float = 0.0912,
+    group: int = 1,
+    stride: int = 1,
+    pad: int = 1,
+):
+    """A QLinearConv with non-dyadic, per-channel scales and a bias.
+
+    Weights stay within +-63: the CPU reference's AVX2 u8 x s8 kernel sums
+    pairs of products in int16, which saturates for larger weights.
+    """
+    cout = w_shape[0]
+    out_shape = [
+        x_shape[0],
+        cout,
+        _out_dim(x_shape[2], pad, w_shape[2], stride),
+        _out_dim(x_shape[3], pad, w_shape[3], stride),
+    ]
+    x_info = helper.make_tensor_value_info("x", _NP_TO_ONNX[x_dtype], x_shape)
+    y_info = helper.make_tensor_value_info("y", _NP_TO_ONNX[y_dtype], out_shape)
+    node = helper.make_node(
+        "QLinearConv",
+        [
+            "x",
+            "x_scale",
+            "x_zero_point",
+            "w",
+            "w_scale",
+            "w_zero_point",
+            "y_scale",
+            "y_zero_point",
+            "B",
+        ],
+        ["y"],
+        kernel_shape=[w_shape[2], w_shape[3]],
+        strides=[stride, stride],
+        pads=[pad, pad, pad, pad],
+        dilations=[1, 1],
+        group=group,
+    )
+    w = rng.integers(-63, 64, size=w_shape, dtype=np.int8)
+    w_scale = rng.uniform(0.002, 0.02, size=(cout,)).astype(np.float32)
+    b = rng.integers(-2000, 2001, size=(cout,), dtype=np.int32)
+    inits = [
+        numpy_helper.from_array(np.array(x_scale, dtype=np.float32), "x_scale"),
+        numpy_helper.from_array(np.array(x_zp, dtype=x_dtype), "x_zero_point"),
+        numpy_helper.from_array(w, "w"),
+        numpy_helper.from_array(w_scale, "w_scale"),
+        numpy_helper.from_array(np.zeros((cout,), dtype=np.int8), "w_zero_point"),
+        numpy_helper.from_array(np.array(y_scale, dtype=np.float32), "y_scale"),
+        numpy_helper.from_array(np.array(y_zp, dtype=y_dtype), "y_zero_point"),
+        numpy_helper.from_array(b, "B"),
+    ]
+    model = make_model_from_nodes(
+        [node], [x_info], [y_info], initializers=inits, opset=12
+    )
+    return model, _random_q(rng, x_dtype, x_shape)
+
+
+class TestQLinearConvRequantize:
+    """Full-range activations and zero points with an f32 requantize.
+
+    These graphs meet the rocMLIR route's conditions: constant parameters, a
+    zero weight zero point, and per-tensor activation parameters. With
+    HIPDNN_EP_ROCMLIR=1 they run as one rocMLIR kernel, where a u8 input is
+    rebiased to x - 128 and a constant term corrects the zero point. A padded
+    border reads fewer taps, so its correction differs from the interior.
+    Weights above the ORT bridge clone threshold (127 bytes by default) are
+    not inline constants; raise XLNX_ABI_2_0_CLONE_EXTERNAL_DATA_THRESHOLD so
+    that every case here takes the rocMLIR route.
+    """
+
+    @pytest.mark.parametrize("x_zp", [0, 115, 255])
+    def test_u8_zero_point_padded(self, model_runner, x_zp):
+        rng = np.random.default_rng(100 + x_zp)
+        model, x = _make_requant_conv(
+            rng, [1, 3, 7, 7], [4, 3, 3, 3], x_zp=x_zp, y_zp=128
+        )
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0, rtol=0)
+
+    @pytest.mark.parametrize(
+        "pad,stride", [(0, 1), (2, 1), (1, 2), (2, 2)], ids=lambda v: str(v)
+    )
+    def test_pad_stride(self, model_runner, pad, stride):
+        rng = np.random.default_rng(200 + 10 * pad + stride)
+        model, x = _make_requant_conv(
+            rng,
+            [1, 4, 9, 9],
+            [6, 4, 3, 3],
+            x_zp=77,
+            y_zp=100,
+            pad=pad,
+            stride=stride,
+        )
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0, rtol=0)
+
+    @pytest.mark.parametrize("group", [2, 8], ids=["grouped", "depthwise"])
+    def test_groups(self, model_runner, group):
+        rng = np.random.default_rng(300 + group)
+        model, x = _make_requant_conv(
+            rng, [1, 8, 6, 6], [8, 8 // group, 3, 3], x_zp=200, y_zp=60, group=group
+        )
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0, rtol=0)
+
+    def test_i8_input_and_output(self, model_runner):
+        rng = np.random.default_rng(400)
+        model, x = _make_requant_conv(
+            rng,
+            [1, 3, 7, 7],
+            [4, 3, 3, 3],
+            x_dtype=np.int8,
+            y_dtype=np.int8,
+            x_zp=-20,
+            y_zp=5,
+        )
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0, rtol=0)
+
+    @pytest.mark.parametrize("y_dtype", [np.uint8, np.int8], ids=["u8", "i8"])
+    def test_saturation(self, model_runner, y_dtype):
+        # A small output scale pushes most results past both ends of the range.
+        # The CPU reference needs the input and output types to match.
+        rng = np.random.default_rng(500)
+        model, x = _make_requant_conv(
+            rng,
+            [1, 3, 7, 7],
+            [4, 3, 3, 3],
+            x_dtype=y_dtype,
+            y_dtype=y_dtype,
+            x_zp=128 if y_dtype == np.uint8 else 0,
+            y_zp=0,
+            y_scale=0.004,
+        )
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0, rtol=0)
+        got = np.asarray(actual[0])
+        info = np.iinfo(y_dtype)
+        if y_dtype == np.int8:
+            assert (got == info.min).any() and (got == info.max).any()
+        else:
+            assert (got == info.max).any() and (got == 0).any()
+
+
+def _make_asymmetric_conv(
+    rng,
+    x_shape: list[int],
+    w_shape: list[int],
+    *,
+    w_dtype,
+    w_zps: list[int],
+    x_zp: int,
+    group: int = 1,
+    stride: int = 1,
+    pad: int = 1,
+):
+    """A QLinearConv whose weights have a non-zero zero point.
+
+    w - w_zero_point stays within +-63, for the same CPU-reference reason as
+    _make_requant_conv. One zero point is per-tensor; several are per channel.
+    The weight scale has the zero point's length, as the HIP frontend needs.
+    """
+    cout = w_shape[0]
+    out_shape = [
+        x_shape[0],
+        cout,
+        _out_dim(x_shape[2], pad, w_shape[2], stride),
+        _out_dim(x_shape[3], pad, w_shape[3], stride),
+    ]
+    zp = np.array(w_zps, dtype=np.int64).reshape([-1] + [1] * 3)
+    w = (rng.integers(-63, 64, size=w_shape) + zp).astype(w_dtype)
+    w_zp = np.array(w_zps if len(w_zps) > 1 else w_zps[0], dtype=w_dtype)
+    x_info = helper.make_tensor_value_info("x", TensorProto.UINT8, x_shape)
+    y_info = helper.make_tensor_value_info("y", TensorProto.UINT8, out_shape)
+    node = helper.make_node(
+        "QLinearConv",
+        [
+            "x",
+            "x_scale",
+            "x_zero_point",
+            "w",
+            "w_scale",
+            "w_zero_point",
+            "y_scale",
+            "y_zero_point",
+            "B",
+        ],
+        ["y"],
+        kernel_shape=[w_shape[2], w_shape[3]],
+        strides=[stride, stride],
+        pads=[pad, pad, pad, pad],
+        dilations=[1, 1],
+        group=group,
+    )
+    inits = [
+        numpy_helper.from_array(np.array(0.0173, dtype=np.float32), "x_scale"),
+        numpy_helper.from_array(np.array(x_zp, dtype=np.uint8), "x_zero_point"),
+        numpy_helper.from_array(w, "w"),
+        numpy_helper.from_array(
+            rng.uniform(0.002, 0.02, size=(cout,)).astype(np.float32)
+            if len(w_zps) > 1
+            else np.array(0.0137, dtype=np.float32),
+            "w_scale",
+        ),
+        numpy_helper.from_array(w_zp, "w_zero_point"),
+        numpy_helper.from_array(np.array(0.0912, dtype=np.float32), "y_scale"),
+        numpy_helper.from_array(np.array(128, dtype=np.uint8), "y_zero_point"),
+        numpy_helper.from_array(
+            rng.integers(-2000, 2001, size=(cout,), dtype=np.int32), "B"
+        ),
+    ]
+    model = make_model_from_nodes(
+        [node], [x_info], [y_info], initializers=inits, opset=12
+    )
+    return model, _random_q(rng, np.uint8, x_shape)
+
+
+class TestQLinearConvAsymmetricWeights:
+    """u8 weights and non-zero weight zero points.
+
+    The CPU reference takes a per-channel weight zero point only when every
+    channel has the same value, so the per-channel cases repeat one value.
+    With HIPDNN_EP_ROCMLIR=1 these split into an integer conv on w - offset
+    and a second integer conv over the shifted zero points, which subtracts
+    zw' times the input window sums; the constant terms go into the bias.
+    """
+
+    @pytest.mark.parametrize(
+        "w_dtype,w_zps",
+        [
+            (np.uint8, [128]),
+            (np.uint8, [131]),
+            (np.uint8, [140, 140, 140, 140]),
+            (np.int8, [-7]),
+            (np.int8, [12, 12, 12, 12]),
+        ],
+        ids=["u8-zp128", "u8-tensor", "u8-channel", "i8-tensor", "i8-channel"],
+    )
+    @pytest.mark.parametrize("x_zp", [0, 115])
+    def test_zero_points(self, model_runner, w_dtype, w_zps, x_zp):
+        rng = np.random.default_rng(600 + x_zp + w_zps[0])
+        model, x = _make_asymmetric_conv(
+            rng, [1, 3, 7, 7], [4, 3, 3, 3], w_dtype=w_dtype, w_zps=w_zps, x_zp=x_zp
+        )
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0, rtol=0)
+
+    @pytest.mark.parametrize(
+        "pad,stride", [(0, 1), (2, 1), (1, 2)], ids=lambda v: str(v)
+    )
+    def test_pad_stride(self, model_runner, pad, stride):
+        rng = np.random.default_rng(700 + 10 * pad + stride)
+        model, x = _make_asymmetric_conv(
+            rng,
+            [1, 4, 9, 9],
+            [6, 4, 3, 3],
+            w_dtype=np.uint8,
+            w_zps=[140],
+            x_zp=77,
+            pad=pad,
+            stride=stride,
+        )
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0, rtol=0)
+
+    @pytest.mark.parametrize("group", [2, 8], ids=["grouped", "depthwise"])
+    def test_groups(self, model_runner, group):
+        rng = np.random.default_rng(800 + group)
+        model, x = _make_asymmetric_conv(
+            rng,
+            [1, 8, 6, 6],
+            [8, 8 // group, 3, 3],
+            w_dtype=np.uint8,
+            w_zps=[120],
+            x_zp=200,
+            group=group,
+        )
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0, rtol=0)
+
+
+def test_dead_channel_saturated_bias(model_runner):
+    """A channel with an INT32_MIN bias and a 1e-15 weight scale.
+
+    Its zero-point correction leaves the i32 range, but its requantize
+    multiplier is so small that every accumulator rounds to the output zero
+    point, which the rocMLIR route then writes directly.
+    """
+    rng = np.random.default_rng(900)
+    model, x = _make_requant_conv(rng, [1, 3, 7, 7], [4, 3, 3, 3], x_zp=0, y_zp=128)
+    inits = {t.name: t for t in model.graph.initializer}
+    w = numpy_helper.to_array(inits["w"]).copy()
+    w[0] = -np.abs(w[0])
+    w_scale = numpy_helper.to_array(inits["w_scale"]).copy()
+    w_scale[0] = 1e-15
+    b = numpy_helper.to_array(inits["B"]).copy()
+    b[0] = np.iinfo(np.int32).min
+    for name, value in (("w", w), ("w_scale", w_scale), ("B", b)):
+        inits[name].CopyFrom(numpy_helper.from_array(value, name))
+    actual, expected = model_runner.run_sample(model, [x])
+    compare_outputs(actual, expected, atol=0, rtol=0)
+    assert (np.asarray(actual[0])[0, 0] == 128).all()
+
+
+def test_repeated_runs(model_runner):
+    """One session runs four different inputs in a row.
+
+    The window-sum conv of the zero-point correction has no epilogue, so the
+    tuner may give it a split-K config, which accumulates into its output.
+    That output must be filled before every launch, or each run adds onto
+    the previous one while the first run still looks right.
+    """
+    import onnxruntime as ort
+
+    backend = model_runner.backend
+    if not hasattr(backend, "create_session"):
+        pytest.skip("backend does not expose an ORT session")
+    rng = np.random.default_rng(1100)
+    x_shape = [1, 512, 26, 26]
+    model, _ = _make_asymmetric_conv(
+        rng,
+        x_shape,
+        [1024, 512, 3, 3],
+        w_dtype=np.uint8,
+        w_zps=[95],
+        x_zp=27,
+        stride=2,
+    )
+    path = model_runner._next_subdir() / "model.onnx"
+    path.write_bytes(model.SerializeToString())
+    sess = backend.create_session(str(path))
+    reference = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+    for seed in range(4):
+        x = _random_q(np.random.default_rng(1200 + seed), np.uint8, x_shape)
+        compare_outputs(
+            sess.run(None, {"x": x}), reference.run(None, {"x": x}), atol=0, rtol=0
+        )

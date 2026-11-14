@@ -1185,13 +1185,12 @@ HIP_KERNEL_API int hip_gqa_softmax_inplace(
  * input over its output before running an in-place kernel. */
 HIP_KERNEL_API int hip_softmax_row_2d(void* stream, const void* input, void* output, int rows, int cols);
 
-/* fp32 variant of the above — for models where Softmax input is fp32.
- * Qwen VLM vision encoder attention scores are fp32; using the fp16 kernel
- * there misinterprets the data and produces completely wrong outputs.
- * Called by hip_miopen_softmax when elem_size_bytes == 4. */
+/* fp32 and bf16 variants of the above, with the same contract. All three
+ * compute in fp32; hip_miopen_softmax selects one from its data_type. */
 HIP_KERNEL_API int hip_softmax_row_2d_fp32(void* stream, const void* input, void* output, int rows, int cols);
+HIP_KERNEL_API int hip_softmax_row_2d_bf16(void* stream, const void* input, void* output, int rows, int cols);
 
-/* Single-buffer forms of the two above, for callers that softmax a buffer
+/* Single-buffer forms of the fp16 and fp32 kernels, for callers that softmax a buffer
  * in place. Equivalent to passing `data` as both source and destination. */
 HIP_KERNEL_API int hip_softmax_row_2d_inplace(void* stream, void* data, int rows, int cols);
 HIP_KERNEL_API int hip_softmax_row_2d_inplace_fp32(void* stream, void* data, int rows, int cols);
@@ -1807,7 +1806,9 @@ HIP_KERNEL_API int hip_pool(
  * HIP_DTYPE_UINT8 for every mode. Integer linear interpolates the stored
  * codes in float and truncates toward zero on the store. Nearest copies
  * one sample.
- * Returns: 0 on success, non-zero on failure.
+ * Linear rounds each product and sum to f32 (no FMA contraction).
+ * Returns: 0 on success, non-zero on failure, including an extent or an
+ * output row count (N * C * all output axes but the last) above INT32_MAX.
  */
 HIP_KERNEL_API int hip_resize(
     void* stream,
@@ -2309,7 +2310,21 @@ HIP_KERNEL_API int hip_batch_norm(
  * Mean/var over each (N, group). channels_last 0 is NCHW, 1 is NHWC.
  * activation 1 applies SiLU after the affine transform.
  * `hip_dtype`: FLOAT16, BFLOAT16, FLOAT32, or FLOAT64.
+ *
+ * Large groups use a split reduction whose partials live in `workspace`
+ * (device memory, 256-byte aligned). Query the size with
+ * hip_group_norm_workspace_bytes for the current device. A null or smaller
+ * workspace is valid: the kernel shrinks the split or uses a slower
+ * one-block-per-group path.
  */
+HIP_KERNEL_API size_t hip_group_norm_workspace_bytes(
+    int64_t n,
+    int64_t c,
+    int64_t spatial,
+    int64_t groups,
+    int channels_last,
+    int hip_dtype);
+
 HIP_KERNEL_API int hip_group_norm(
     void* stream,
     const void* input,
@@ -2323,6 +2338,8 @@ HIP_KERNEL_API int hip_group_norm(
     int channels_last,
     int activation,
     float epsilon,
+    void* workspace,
+    size_t workspace_bytes,
     int hip_dtype);
 
 /* =========================================================================

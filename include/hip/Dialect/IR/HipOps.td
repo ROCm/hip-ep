@@ -9,6 +9,7 @@
 include "hip/Dialect/IR/HipDialect.td"
 include "hip/Dialect/IR/HipDpsOpInterface.td"
 include "hip/Dialect/IR/HipOpStateInterface.td"
+include "hip/Dialect/IR/HipElementMoveInterface.td"
 include "hip/Dialect/IR/HipTypes.td"
 include "mlir/Interfaces/DestinationStyleOpInterface.td"
 include "mlir/Interfaces/InferTypeOpInterface.td"
@@ -615,24 +616,39 @@ def Hip_HipblasltGraphOp : Hip_Op<"hipblaslt.graph", [SingleBlock, NoTerminator]
   let assemblyFormat = "$body attr-dict";
 }
 
-def Hip_RocMlirOp : Hip_DpsOp_AutoReify<"rocmlir"> {
+def Hip_RocMlirOp : Hip_DpsOp_AutoReify<"rocmlir", [AttrSizedOperandSegments]> {
   let summary = "RocMlir backend dispatch";
+  let description = [{
+    Launches one outlined rocMLIR kernel. The kernel returns one tensor per
+    `outs` operand, in order; a kernel with more than one result also writes
+    values that are read outside it, such as the anchor that feeds both its
+    epilogue and a residual. The compiled kernel takes the data pointers of
+    `ins` and then of `outs`, in operand order.
+
+    `prefill` lists the kernel arguments to fill before every launch, as
+    (argument index, bytes per element, element bit pattern) triples. The
+    bytes per element must equal the width of the argument's element type. A
+    split-K kernel adds its partial sums into its output with atomics, so
+    rocMLIR asks for that output to start at 0.
+  }];
   let arguments = (ins
     FlatSymbolRefAttr:$kernel,
     Hip_ContextType:$ctx,
     Variadic<Hip_TensorOrMemRef>:$inputs,
-    Hip_TensorOrMemRef:$output,
+    Variadic<Hip_TensorOrMemRef>:$outputs,
     DefaultValuedAttr<StrAttr, "\"\"">:$kernel_binary,
     DefaultValuedAttr<I64Attr, "0">:$grid_size,
-    DefaultValuedAttr<I64Attr, "0">:$block_size
+    DefaultValuedAttr<I64Attr, "0">:$block_size,
+    DefaultValuedAttr<DenseI64ArrayAttr, "{}">:$prefill
   );
 
   let assemblyFormat = [{
     `(` $ctx `)` $kernel `ins` `(` $inputs `:`
     type($inputs) `)`
-    `outs` `(` $output `:` type($output) `)`
+    `outs` `(` $outputs `:` type($outputs) `)`
     attr-dict (`:` type($result_tensors)^ )?
   }];
+  let hasVerifier = 1;
 }
 
 // ===== MIOpen DNN Operations =================================================
@@ -2250,7 +2266,8 @@ def Hip_MiopenSoftmaxOp : Hip_DpsOp_AutoReifyInfer<"miopen.softmax"> {
 
 // ===== Custom HIP kernel ops (no library equivalent) =========================
 
-def Hip_TransposeOp : Hip_DpsOp_WithInfer<"transpose"> {
+def Hip_TransposeOp : Hip_DpsOp_WithInfer<"transpose", "Output",
+    [DeclareOpInterfaceMethods<ElementMoveOpInterface>]> {
   let summary = "N-D transpose with arbitrary permutation (ONNX Transpose)";
   let description = [{
     Permutes the dimensions of the input tensor according to the `perm`
@@ -3723,6 +3740,10 @@ def Hip_CastOp : Hip_DpsOp_AutoReifyInfer<"cast"> {
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+
+  // Folds a widening and narrowing cast pair around ops that only move
+  // elements. See lib/Dialect/IR/HipCastCanonicalize.cpp.
+  let hasCanonicalizer = 1;
 }
 
 def Hip_ReduceSumOp : Hip_DpsOp_Reduction<"reduce_sum"> {
@@ -4298,11 +4319,12 @@ def Hip_GqaOp : Hip_DpsOp_AutoReify<"gqa", [AttrSizedOperandSegments, OpStateOpI
 // ===== hipDNN Graph Outlining + Execution ====================================
 
 def Hip_YieldOp : Hip_Op<"yield", [Pure, Terminator,
-    HasParent<"HipDNNGraphOutlineOp">]> {
-  let summary = "Yield results from a hipDNN graph outline region";
+    ParentOneOf<["HipDNNGraphOutlineOp", "RocMlirElementwiseOp"]>]> {
+  let summary = "Yield results from an outline region";
   let description = [{
-    Terminates the body of a `hip.hipdnn_graph_outline` operation, forwarding
-    the computed results back to the parent op.
+    Terminates the body of a `hip.hipdnn_graph_outline` or
+    `hip.rocmlir_elementwise` operation, forwarding the computed results back
+    to the parent op.
 
     Example:
     ```mlir
@@ -4357,6 +4379,50 @@ def Hip_HipDNNGraphOutlineOp : Hip_Op<"hipdnn_graph_outline", [
     `ins` `(` $inputs `:` type($inputs) `)` `->` type($results)
     $body attr-dict
   }];
+}
+
+def Hip_RocMlirElementwiseOp : Hip_Op<"rocmlir_elementwise", [
+    SingleBlockImplicitTerminator<"YieldOp">,
+    IsolatedFromAbove,
+    RecursiveMemoryEffects
+]> {
+  let summary = "A group of pointwise ops for one rocMLIR kernel";
+  let description = [{
+    Groups pointwise ops, transposes, static reshapes and quantize ops of
+    main_graph that hip-fuse-rocmlir-elementwise selected for one rocMLIR
+    kernel. hip-fuse-rocmlir-anchor then takes the group into the epilogue
+    or prologue of an anchor kernel, or inlines it back. No op of this kind
+    survives the rocMLIR fusion.
+
+    The block arguments are the context, then the inputs. The body holds
+    the grouped ops and the tensor.empty inits they write. Every input and
+    result has a static shape and no integer wider than 32 bits; a result
+    is never rank 0.
+
+    Example:
+    ```mlir
+    %r = hip.rocmlir_elementwise(%ctx)
+        ins(%x, %b : tensor<1x64x56x56xf16>, tensor<1x64x1x1xf16>)
+        -> tensor<1x64x56x56xf16> {
+    ^bb0(%c: !hip.context, %a0: tensor<1x64x56x56xf16>,
+         %a1: tensor<1x64x1x1xf16>):
+      %e = tensor.empty() : tensor<1x64x56x56xf16>
+      %s = hip.add(%c) ins(%a0, %a1 : tensor<1x64x56x56xf16>,
+                                     tensor<1x64x1x1xf16>)
+          outs(%e : tensor<1x64x56x56xf16>) -> tensor<1x64x56x56xf16>
+      hip.yield %s : tensor<1x64x56x56xf16>
+    }
+    ```
+  }];
+
+  let arguments = (ins Hip_ContextType:$ctx, Variadic<AnyRankedTensor>:$inputs);
+  let results = (outs Variadic<AnyRankedTensor>:$results);
+  let regions = (region SizedRegion<1>:$body);
+  let assemblyFormat = [{
+    `(` $ctx `)` (`ins` `(` $inputs^ `:` type($inputs) `)`)? `->`
+    type($results) $body attr-dict
+  }];
+  let hasVerifier = 1;
 }
 
 // ===== hipDNN Graph Execution ================================================
@@ -5728,7 +5794,8 @@ def Hip_PoolOp : Hip_DpsOp_AutoReify<"pool"> {
   }];
 }
 
-def Hip_ResizeOp : Hip_DpsOp_AutoReify<"resize"> {
+def Hip_ResizeOp : Hip_DpsOp_AutoReify<"resize",
+    [DeclareOpInterfaceMethods<ElementMoveOpInterface>]> {
   let summary = "Spatial resize / interpolation (ONNX Resize)";
   let description = [{
     Implements a subset of ONNX Resize that covers the common image / volume
@@ -6438,6 +6505,45 @@ def Hip_QLinearConvOp : Hip_DpsOp_AutoReifyInfer<"qlinear_conv"> {
   }];
 }
 
+// The integer core of hip.qlinear_conv, as MIGraphX's quant_convolution.
+def Hip_QuantConvOp : Hip_DpsOp_AutoReifyInfer<"quant_conv"> {
+  let summary = "8-bit grouped 2D convolution with an i32 result";
+  let description = [{
+    Computes the integer convolution
+
+      acc = conv(x - offset, w)
+
+    with exact i32 accumulation. `offset` is 128 for a ui8 input and 0 for an
+    i8 input, so `x - offset` is always an i8 value. Padding contributes 0
+    to the sum. The weights are i8.
+
+    The op has no zero points, scales, or bias. hip-fuse-rocmlir-anchor creates
+    it inside a rocMLIR kernel, together with the constant zero-point correction
+    and the f32 scale epilogue. The op has no lowering outside a rocMLIR kernel.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$weights,
+    Hip_TensorOrMemRef:$output,
+    I64ArrayAttr:$kernel_shape,
+    I64ArrayAttr:$strides,
+    I64ArrayAttr:$pads,
+    I64ArrayAttr:$dilations,
+    I64Attr:$group
+  );
+
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `,` $weights `:`
+        type($input) `,` type($weights) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 // Native onnx.QLinearMatMul. Distinct from hip.qmatmul, which fuses
 // DequantizeLinear + MatMul + QuantizeLinear.
 def Hip_QLinearMatMulOp : Hip_DpsOp_AutoReifyInfer<"qlinear_matmul"> {
@@ -6479,6 +6585,40 @@ def Hip_QLinearMatMulOp : Hip_DpsOp_AutoReifyInfer<"qlinear_matmul"> {
         type($a) `,` type($a_scale) `,` type($a_zero_point) `,`
         type($b) `,` type($b_scale) `,` type($b_zero_point) `,`
         type($y_scale) `,` type($y_zero_point) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+// The integer core of hip.qlinear_matmul, as MIGraphX's quant_dot.
+def Hip_QuantMatmulOp : Hip_DpsOp_AutoReifyInfer<"quant_matmul"> {
+  let summary = "8-bit rank-2 matrix product with an i32 result";
+  let description = [{
+    Computes the integer matrix product
+
+      acc = matmul(a - offset, b)
+
+    with exact i32 accumulation. `a` is [M, K], `b` is [K, N], and `acc` is
+    [M, N]. `offset` is 128 for a ui8 `a` and 0 for an i8 `a`, so
+    `a - offset` is always an i8 value. `b` is i8.
+
+    The op has no zero points or scales. hip-fuse-rocmlir-anchor creates it
+    inside a rocMLIR kernel, together with the constant zero-point correction
+    and the requantize epilogue. The op has no lowering outside a rocMLIR
+    kernel.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$a,
+    Hip_TensorOrMemRef:$b,
+    Hip_TensorOrMemRef:$output
+  );
+
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $a `,` $b `:` type($a) `,` type($b) `)`
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];

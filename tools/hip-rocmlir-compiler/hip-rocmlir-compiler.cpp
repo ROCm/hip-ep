@@ -7,7 +7,7 @@
 // the HIP dialect) through the ONNX->HIP head passes and the rocmlir hip->tosa
 // conversion, then run rocMLIR's high-level + backend pipelines on the fused
 // GEMM to produce a GPU binary. HIP-dialect input skips the ONNX->HIP head
-// passes and enters at fuse-rocmlir.
+// passes and enters at the rocMLIR fusion.
 //
 // rocMLIR (rocmlirTriton) is now built in-tree against the SAME LLVM/MLIR as
 // this executable (ENABLE_ROCMLIRTRITON), so its dialects/types share one
@@ -18,9 +18,9 @@
 // ModuleOp -- no serialization, no dlopen, no C-API.
 //
 // The high-level pipeline only rewrites functions marked `rock.kernel` (set by
-// fuse-rocmlir) and asserts on non-kernel funcs, so we still hand it a module
-// containing ONLY the `rock.kernel` funcs (main_graph and its hip.* ops are
-// dropped from the clone we compile).
+// the rocMLIR fusion) and asserts on non-kernel funcs, so we still hand it a
+// module containing ONLY the `rock.kernel` funcs (main_graph and its hip.* ops
+// are dropped from the clone we compile).
 
 #include "hip/Compiler/RocMlirAutotune.h"
 #include "hip/Compiler/RocMlirKernelCompiler.h"
@@ -30,6 +30,7 @@
 #include "hip/InitAllPasses.h"
 #include "hip/Support/DiskFileSystem.h"
 #include "hip/Target/LLVM/LLVMBackend.h"
+#include "hip/debug_log.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Func/Transforms/Passes.h"
@@ -264,7 +265,7 @@ int main(int argc, char **argv) {
         << "                       selected perfConfig.\n"
         << "  --dump-hip <file>    Write the hip MLIR after the ONNX->HIP head "
            "passes\n"
-        << "                       and fuse-rocmlir, then keep going.\n"
+        << "                       and the rocMLIR fusion, then keep going.\n"
         << "  --dump-tosa <file>   Write the TOSA MLIR handed to the rocMLIR "
            "pipeline,\n"
         << "                       then keep going.\n"
@@ -323,8 +324,8 @@ int main(int argc, char **argv) {
   // Detect the input dialect: an `onnx`-dialect module still needs the
   // ONNX->HIP head passes, whereas a module already lowered to the `hip`
   // dialect (e.g. a `--dump-hip` companion or hand-written hip.mlir) skips
-  // straight to fuse-rocmlir. Any op in the `onnx` namespace marks the input as
-  // ONNX; otherwise it is treated as hip.
+  // straight to the rocMLIR fusion. Any op in the `onnx` namespace marks the
+  // input as ONNX; otherwise it is treated as hip.
   bool isOnnxInput = false;
   module->walk([&](mlir::Operation *op) {
     if (op->getName().getDialectNamespace() == "onnx") {
@@ -335,12 +336,12 @@ int main(int argc, char **argv) {
   });
 
   // Stage 1: (ONNX input only) ONNX->HIP head passes, then -- for both input
-  // dialects -- fuse-rocmlir + duplicate-function-elimination. The ONNX head
-  // mirrors buildOnnxToHipPipeline (simplify-onnx, hip-add-context-arg, loop/if
-  // outline, infer-loop-body-shapes, convert-onnx-to-hip; plain path, no hipdnn
-  // handle). fuse-rocmlir outlines the fused GEMM into a `rock.kernel` func and
-  // creates the `hip.rocmlir` dispatch. `module` is LEFT in this hip form: it
-  // is the artifact we mutate at the end.
+  // dialects -- the rocMLIR fusion + duplicate-function-elimination. The ONNX
+  // head mirrors buildOnnxToHipPipeline (simplify-onnx, hip-add-context-arg,
+  // loop/if outline, infer-loop-body-shapes, convert-onnx-to-hip; plain path,
+  // no hipdnn handle). The rocMLIR fusion outlines the fused GEMM into a
+  // `rock.kernel` func and creates the `hip.rocmlir` dispatch. `module` is LEFT
+  // in this hip form: it is the artifact we mutate at the end.
   llvm::errs() << "[hip-rocmlir-compiler] input dialect: "
                << (isOnnxInput ? "onnx" : "hip") << "\n";
   mlir::PassManager pm(module->getContext());
@@ -354,16 +355,26 @@ int main(int argc, char **argv) {
     pm.addPass(mlir::hip::createConvertOnnxToHipPass());
   }
   // rocMLIR has no transposed-convolution anchor, so split conv_transpose into
-  // plain convolutions before fuse-rocmlir outlines a kernel around it.
+  // plain convolutions before the rocMLIR fusion outlines a kernel around it.
   pm.addNestedPass<mlir::func::FuncOp>(
       mlir::hip::createDecomposeConvTransposePass());
   pm.addPass(mlir::createCanonicalizerPass());
-  pm.addNestedPass<mlir::func::FuncOp>(mlir::hip::createFuseROCMlirPass());
-  pm.addPass(mlir::func::createDuplicateFunctionEliminationPass());
+  // The same arch and gemm accelerated types as CompilerDriver, so an offline
+  // compile forms the same kernels (gemm-elementwise-gemm needs the types).
+  const std::string arch = mlir::hip::resolveRocMlirArch();
+  mlir::hip::FuseRocMlirAnchorPassOptions fuseOpts;
+  fuseOpts.arch = arch;
+  std::vector<std::string> accelTypes =
+      mlir::hip::getRocMlirGemmAccelTypes(*module->getContext(), arch);
+  fuseOpts.gemmGemmAccelTypes.assign(accelTypes.begin(), accelTypes.end());
+  fuseOpts.standaloneElementwise =
+      !hip_env_is_on("HIPDNN_EP_ROCMLIR_NO_STANDALONE_ELEMENTWISE");
+  mlir::hip::addRocMlirFusionPasses(pm, fuseOpts);
 
   if (mlir::failed(pm.run(*module))) {
     llvm::errs() << "error: "
-                 << (isOnnxInput ? "ONNX->HIP + fuse-rocmlir" : "fuse-rocmlir")
+                 << (isOnnxInput ? "ONNX->HIP + the rocMLIR fusion"
+                                 : "the rocMLIR fusion")
                  << " passes failed\n";
     return 1;
   }
@@ -386,8 +397,6 @@ int main(int argc, char **argv) {
     }
     dumpModule(*tosaModule, "tosa", dumpTosaPath);
   }
-
-  const std::string arch = mlir::hip::resolveRocMlirArch();
 
   // --dump-high-level: write the rock MLIR (text) and stop, so nothing is
   // embedded. A single kernel writes <output> verbatim so existing tuning

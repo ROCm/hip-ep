@@ -17,21 +17,27 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/Dominance.h"
+#include "mlir/IR/IRMapping.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/Passes.h"
 
 // rocMLIR (rocmlirTriton) C++ API -- linked in-tree, same LLVM/MLIR as us.
+#include "mlir/Dialect/Rock/IR/AmdArchDb.h"
 #include "mlir/Dialect/Rock/IR/Rock.h"
 #include "mlir/Dialect/Rock/IR/RockTuningParamAttrInterface.h"
 #include "mlir/Dialect/Rock/Pipelines/Pipelines.h"
 #include "mlir/Dialect/Rock/Tuning/RockTuning.h"
 #include "mlir/Dialect/Rock/utility/KnobUtils.h"
 #include "mlir/Dialect/Rock/utility/RocmDeviceName.h"
+#include "mlir/Dialect/Rock/utility/loweringUtils.h"
 #include "mlir/InitRocMLIRDialects.h"
 
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringMap.h"
+#include "llvm/ADT/StringSet.h"
 
 #ifdef HIPDNN_EP_LINK_HIP_HOST
 // Headers only -- see loadHipGetDeviceProperties below for why the HIP runtime
@@ -97,15 +103,19 @@ int64_t perfConfigField(StringRef perf, StringRef name, int64_t fallback) {
 // perfConfig, read straight out of the string rather than re-defaulted
 // (perfConfig field `numWaves` is the backend's `numWarps`); a missing field
 // falls back to the rock default and kKnobDefault (-1) leaves a bool knob at
-// its arch default.
+// its arch default. An elementwise kernel has no perfConfig, so it gets the
+// defaults throughout.
 bool buildBackendPipelineFor(OpPassManager &pm, StringRef arch,
-                             StringRef perfConfig) {
+                             StringRef perfConfig, bool elementwise) {
   RocmDeviceName devName;
   if (arch.empty() || failed(devName.parse(arch)))
     return false;
 
   rock::KernelOptions kOpts;
-  rock::buildKernelPipeline(pm, kOpts);
+  if (elementwise)
+    rock::buildElementwisePipeline(pm, kOpts);
+  else
+    rock::buildKernelPipeline(pm, kOpts);
 
   rock::TritonOptions tOpts;
   tOpts.arch = devName.getChip().str();
@@ -141,10 +151,37 @@ bool buildBackendPipelineFor(OpPassManager &pm, StringRef arch,
   return true;
 }
 
+// One `rock.prefill` entry, {index, value}. The value has the buffer's
+// element type, and the fill repeats its bit pattern. Nullopt for a value or
+// a width that the fill cannot write.
+static std::optional<KernelPrefill> parsePrefill(Attribute entry) {
+  auto dict = dyn_cast<DictionaryAttr>(entry);
+  if (!dict)
+    return std::nullopt;
+  auto index = dyn_cast_if_present<IntegerAttr>(dict.get("index"));
+  Attribute value = dict.get("value");
+  APInt bits;
+  if (auto integer = dyn_cast_if_present<IntegerAttr>(value))
+    bits = integer.getValue();
+  else if (auto real = dyn_cast_if_present<FloatAttr>(value))
+    bits = real.getValue().bitcastToAPInt();
+  else
+    return std::nullopt;
+  unsigned width = bits.getBitWidth();
+  if (!index || (width != 8 && width != 16 && width != 32))
+    return std::nullopt;
+  KernelPrefill prefill;
+  prefill.argIndex = index.getInt();
+  prefill.elementBytes = width / 8;
+  prefill.pattern = bits.getZExtValue();
+  return prefill;
+}
+
 // Walk the compiled module for the single gpu.binary object and pull out its
-// ELF blob plus the {block, grid} launch geometry.
+// ELF blob, the {block, grid} launch geometry and the arguments to pre-fill.
 bool extractCompiledKernel(ModuleOp mod, CompiledKernel &out) {
   unsigned count = 0;
+  bool unsupportedPrefill = false;
   mod.walk([&](gpu::BinaryOp binary) {
     auto object = llvm::cast<gpu::ObjectAttr>(binary.getObjects()[0]);
     StringRef blob = object.getObject().getValue();
@@ -158,10 +195,23 @@ bool extractCompiledKernel(ModuleOp mod, CompiledKernel &out) {
         continue;
       out.blockSize = block.getInt();
       out.gridSize = grid.getInt();
+      out.prefills.clear();
+      if (auto prefills =
+              kernel.getAttr<ArrayAttr>(rock::PrefillAttr::getMnemonic())) {
+        for (Attribute entry : prefills) {
+          if (std::optional<KernelPrefill> prefill = parsePrefill(entry))
+            out.prefills.push_back(*prefill);
+          else
+            unsupportedPrefill = true;
+        }
+      }
       ++count;
     }
   });
-  return count == 1 && !out.binary.empty();
+  if (unsupportedPrefill)
+    llvm::errs() << "error: rocMLIR kernel needs a pre-fill that is not a "
+                    "1-, 2- or 4-byte integer or float value\n";
+  return count == 1 && !out.binary.empty() && !unsupportedPrefill;
 }
 
 #if defined(HIPDNN_EP_LINK_HIP_HOST) && defined(HIPDNN_HIP_RUNTIME_LIB)
@@ -201,7 +251,97 @@ HipGetDevicePropsFn loadHipGetDeviceProperties() {
 }
 #endif
 
+// Put the hip ops `hipKernel` was outlined from back in place of each of its
+// dispatches in `module`, so they run on the HIP path instead.
+void inlineRocMlirKernel(ModuleOp module, func::FuncOp hipKernel) {
+  SmallVector<RocMlirOp> dispatches;
+  module.walk([&](RocMlirOp op) {
+    if (op.getKernel() == hipKernel.getSymName())
+      dispatches.push_back(op);
+  });
+  // Fusion clones a hip.constant into the kernel and leaves the original in
+  // the graph when something else still reads it. The clone keeps
+  // serialization_order. Putting that clone back beside the original makes
+  // hip-externalize-constants reject the module. Reuse a carrier only when it
+  // is already in this function and dominates the dispatch; a value from
+  // another function, or one that does not dominate, is not a legal SSA use.
+  // An order that is already claimed but cannot be reused is stripped so two
+  // fallback kernels do not collide.
+  llvm::DenseMap<int64_t, Value> constantByOrder;
+  module.walk([&](ConstantOp op) {
+    if (IntegerAttr order = op.getSerializationOrderAttr())
+      constantByOrder.try_emplace(order.getInt(), op.getResult());
+  });
+  Block &body = hipKernel.getBody().front();
+  for (RocMlirOp dispatch : dispatches) {
+    OpBuilder builder(dispatch);
+    func::FuncOp parent = dispatch->getParentOfType<func::FuncOp>();
+    DominanceInfo dominance(parent);
+    IRMapping mapping;
+    mapping.map(body.getArguments(), dispatch.getInputs());
+    auto reusableCarrier = [&](ConstantOp constant) -> Value {
+      IntegerAttr order = constant.getSerializationOrderAttr();
+      if (!order)
+        return {};
+      auto existing = constantByOrder.find(order.getInt());
+      if (existing == constantByOrder.end() ||
+          existing->second.getType() != constant.getResult().getType())
+        return {};
+      Operation *def = existing->second.getDefiningOp();
+      if (!def || def->getParentOfType<func::FuncOp>() != parent ||
+          !dominance.properlyDominates(def, dispatch))
+        return {};
+      return existing->second;
+    };
+    for (Operation &op : body.without_terminator()) {
+      // The kernel has a poison where main_graph has the hip.context.
+      if (op.getNumResults() == 1 &&
+          isa<ContextType>(op.getResult(0).getType())) {
+        mapping.map(op.getResult(0), dispatch.getCtx());
+        continue;
+      }
+      if (auto constant = dyn_cast<ConstantOp>(&op)) {
+        if (Value carrier = reusableCarrier(constant)) {
+          mapping.map(constant.getResult(), carrier);
+          continue;
+        }
+      }
+      Operation *cloned = builder.clone(op, mapping);
+      if (auto constant = dyn_cast<ConstantOp>(cloned)) {
+        if (IntegerAttr order = constant.getSerializationOrderAttr()) {
+          if (!constantByOrder.try_emplace(order.getInt(), constant.getResult())
+                   .second)
+            constant.removeSerializationOrderAttr();
+        }
+      }
+    }
+    auto ret = cast<func::ReturnOp>(body.getTerminator());
+    SmallVector<Value> results = llvm::map_to_vector(
+        ret.getOperands(), [&](Value v) { return mapping.lookup(v); });
+    dispatch->replaceAllUsesWith(results);
+    dispatch->erase();
+  }
+}
+
 } // namespace
+
+bool isRocMlirElementwiseKernelModule(ModuleOp kernelModule) {
+  return llvm::any_of(kernelModule.getOps<func::FuncOp>(), [](func::FuncOp f) {
+    return f->hasAttr("rock.kernel") && f->hasAttr("rock.elementwise");
+  });
+}
+
+bool hasRocMlirComputation(ModuleOp kernelModule) {
+  bool elementwise = isRocMlirElementwiseKernelModule(kernelModule);
+  WalkResult found = kernelModule.walk([&](Operation *op) {
+    bool gemm =
+        isa<rock::RockGemmWrapperInterface, rock::RockGemmGemmWrapperInterface>(
+            op);
+    bool computes = gemm || (elementwise && rock::isFusionOp(op));
+    return computes ? WalkResult::interrupt() : WalkResult::advance();
+  });
+  return found.wasInterrupted();
+}
 
 std::string resolveRocMlirArch() {
   // hip_get_env, not std::getenv: this runs inside the static-CRT EP DLL when
@@ -239,6 +379,30 @@ std::string resolveRocMlirArch() {
 #endif
 }
 
+std::vector<std::string> getRocMlirGemmAccelTypes(MLIRContext &context,
+                                                  StringRef arch) {
+  Builder b(&context);
+  Type candidates[] = {b.getF32Type(),
+                       b.getF16Type(),
+                       b.getBF16Type(),
+                       b.getI8Type(),
+                       b.getType<Float8E4M3FNType>(),
+                       b.getType<Float8E5M2Type>(),
+                       b.getType<Float8E4M3FNUZType>(),
+                       b.getType<Float8E5M2FNUZType>()};
+  std::vector<std::string> accelerated;
+  for (Type type : candidates) {
+    if (rock::getMatrixAccelKind(arch, type, type) ==
+        rock::MatrixAccelKind::None)
+      continue;
+    std::string name;
+    llvm::raw_string_ostream os(name);
+    type.print(os);
+    accelerated.push_back(std::move(name));
+  }
+  return accelerated;
+}
+
 void registerRocMlirDialects(MLIRContext &context) {
   DialectRegistry rockRegistry;
   registerRocMLIRDialects(rockRegistry);
@@ -265,14 +429,15 @@ OwningOpRef<ModuleOp> takeRocMlirKernelsAsTosaModule(ModuleOp module,
   // from here on -- its body ships as an embedded binary and the symbol goes
   // away -- so there is nothing to preserve, and an outlined kernel is
   // IsolatedFromAbove, so no enclosing SSA value or module attribute has to
-  // travel with it (rock.arch rides on the func, put there by fuse-rocmlir).
+  // travel with it (rock.arch rides on the func, put there by the rocMLIR
+  // fusion).
   for (auto func : llvm::make_early_inc_range(module.getOps<func::FuncOp>())) {
     if (!func->hasAttr("rock.kernel"))
       continue;
-    // fuse-rocmlir stamps a fixed rock.arch, and the rock tuning passes read
-    // it from the func. Point it at the arch we are actually compiling for,
-    // or the tuning parameters get chosen for a different chip than the
-    // backend emits code for.
+    // The rock tuning passes read rock.arch from the func, and the rocMLIR
+    // fusion leaves it unset when it ran without an arch option. Point it at
+    // the arch we are actually compiling for, or the tuning parameters get
+    // chosen for a different chip than the backend emits code for.
     if (!arch.empty())
       func->setAttr("rock.arch", builder.getStringAttr(arch));
     func->remove();
@@ -316,7 +481,9 @@ bool compileRocMlirBackend(ModuleOp kernelModule, StringRef arch,
                            StringRef perfConfig, CompiledKernel &out) {
   PassManager pm(kernelModule.getContext());
   pm.setNesting(PassManager::Nesting::Implicit);
-  if (!buildBackendPipelineFor(pm, arch, perfConfig) ||
+  if (!buildBackendPipelineFor(
+          pm, arch, perfConfig,
+          isRocMlirElementwiseKernelModule(kernelModule)) ||
       failed(pm.run(kernelModule)))
     return false;
   return extractCompiledKernel(kernelModule, out);
@@ -331,6 +498,14 @@ bool runRocMlirHighLevelPipeline(ModuleOp kernelModule) {
 
 bool compileRocMlirDefaultPerfConfig(ModuleOp kernelModule, StringRef arch,
                                      CompiledKernel &out) {
+  // Only an elementwise kernel can fold away to nothing rocMLIR can compile.
+  // A conv or gemm keeps the tuning-space path below.
+  if (isRocMlirElementwiseKernelModule(kernelModule)) {
+    if (!hasRocMlirComputation(kernelModule))
+      return false;
+    return compileRocMlirBackend(kernelModule, arch, /*perfConfig=*/"", out);
+  }
+
   // Affix a perfConfig to the gemm op (the `perf_config` string attr). Take
   // the first entry enumerated from the tuning search space; autotuning
   // callers substitute their own compileOne instead, which is why this is not
@@ -379,6 +554,35 @@ compileAndEmbedRocMlirKernels(ModuleOp module,
   if (kernelNames.empty())
     return success();
 
+  // Pristine HIP bodies of elementwise kernels. A conv or gemm that rocMLIR
+  // cannot compile still fails the module. An elementwise kernel can fold
+  // away (hip.max(%x, %x)) or fail in the backend (an i64 chain:
+  // rock.blockwise_load/store stop at 32-bit integers); that kernel runs as
+  // its hip ops. With `strictElementwise`, only a kernel that folds away does.
+  OwningOpRef<ModuleOp> hipKernels = ModuleOp::create(module.getLoc());
+  for (auto func : module.getOps<func::FuncOp>())
+    if (func->hasAttr("rock.kernel"))
+      hipKernels->push_back(func.clone());
+  auto elementwiseKernel = [&](StringRef name) {
+    auto func = hipKernels->lookupSymbol<func::FuncOp>(name);
+    return func && func->hasAttr("rock.elementwise");
+  };
+  auto canFallBack = [&](StringRef name) {
+    return !options.strictElementwise && elementwiseKernel(name);
+  };
+  llvm::StringSet<> onHipPath;
+  auto runOnHipPath = [&](StringRef name, StringRef reason) {
+    inlineRocMlirKernel(module, hipKernels->lookupSymbol<func::FuncOp>(name));
+    onHipPath.insert(name);
+    if (options.onHipPath)
+      options.onHipPath(name, reason);
+  };
+  auto fallBack = [&](StringRef name, StringRef stage) {
+    llvm::errs() << "warning: rocMLIR " << stage << " failed for kernel '"
+                 << name << "'; running its hip ops instead\n";
+    runOnHipPath(name, stage);
+  };
+
   // Lift the kernels out of `module` and convert them all to tosa in one go.
   // This used to clone the whole module for the conversion and then clone it
   // again per kernel, so a graph with N kernels made N+1 deep copies of the
@@ -397,6 +601,8 @@ compileAndEmbedRocMlirKernels(ModuleOp module,
   // and nothing copied.
   llvm::StringMap<CompiledKernel> compiledByKernel;
   for (auto [index, name] : llvm::enumerate(kernelNames)) {
+    if (onHipPath.contains(name))
+      continue;
     if (options.log && kernelNames.size() > 1)
       *options.log << options.logPrefix << " compiling kernel '" << name
                    << "' (" << (index + 1) << " of " << kernelNames.size()
@@ -410,22 +616,52 @@ compileAndEmbedRocMlirKernels(ModuleOp module,
     // points a custom compileOne uses (createTunableParamSpace, tuningSetStr)
     // only see anything once the kernel is in rock form. Handing the callback
     // raw tosa instead gave --autotune an empty search space.
-    if (!runRocMlirHighLevelPipeline(*single))
-      return module.emitError()
-             << "rocMLIR high-level pipeline failed for kernel '" << name
-             << "'";
+    if (!runRocMlirHighLevelPipeline(*single)) {
+      if (!canFallBack(name))
+        return module.emitError()
+               << "rocMLIR high-level pipeline failed for kernel '" << name
+               << "'";
+      fallBack(name, "high-level pipeline");
+      continue;
+    }
 
-    CompiledKernel &out = compiledByKernel[name];
+    if (elementwiseKernel(name) && !hasRocMlirComputation(*single)) {
+      if (options.log)
+        *options.log << options.logPrefix << " kernel '" << name
+                     << "' has no computation left after lowering; running "
+                        "its hip ops instead\n";
+      runOnHipPath(name, "folded");
+      continue;
+    }
+
+    CompiledKernel out;
     bool ok = options.compileOne
                   ? options.compileOne(*single, name, out)
                   : compileRocMlirDefaultPerfConfig(*single, options.arch, out);
-    if (!ok)
-      return module.emitError()
-             << "rocMLIR failed to compile kernel '" << name << "'";
+    if (!ok) {
+      if (!canFallBack(name))
+        return module.emitError()
+               << "rocMLIR failed to compile kernel '" << name << "'";
+      fallBack(name, "compile");
+      continue;
+    }
+    compiledByKernel[name] = std::move(out);
   }
 
+  // A deferred compile that fails leaves its kernel without a binary.
   if (options.finishCompiles && !options.finishCompiles(compiledByKernel))
     return module.emitError() << "rocMLIR deferred kernel compiles failed";
+  for (const std::string &name : kernelNames) {
+    if (onHipPath.contains(name))
+      continue;
+    auto it = compiledByKernel.find(name);
+    if (it == compiledByKernel.end() || it->second.binary.empty()) {
+      if (!canFallBack(name))
+        return module.emitError() << "rocMLIR deferred kernel compiles failed";
+      compiledByKernel.erase(name);
+      fallBack(name, "deferred compile");
+    }
+  }
 
   // Stamp the compiled artifact onto each `hip.rocmlir` dispatch
   // (kernel_binary + grid_size + block_size). The kernel funcs themselves are
@@ -449,6 +685,11 @@ compileAndEmbedRocMlirKernels(ModuleOp module,
         context, StringRef(kernel.binary.data(), kernel.binary.size())));
     op.setGridSizeAttr(IntegerAttr::get(i64, kernel.gridSize));
     op.setBlockSizeAttr(IntegerAttr::get(i64, kernel.blockSize));
+    SmallVector<int64_t> prefill;
+    for (const KernelPrefill &entry : kernel.prefills)
+      llvm::append_values(prefill, entry.argIndex, entry.elementBytes,
+                          static_cast<int64_t>(entry.pattern));
+    op.setPrefill(prefill);
     totalBytes += kernel.binary.size();
     return WalkResult::advance();
   });
@@ -457,6 +698,8 @@ compileAndEmbedRocMlirKernels(ModuleOp module,
 
   if (options.log) {
     for (const std::string &name : kernelNames) {
+      if (onHipPath.contains(name))
+        continue;
       const CompiledKernel &kernel = compiledByKernel[name];
       *options.log << options.logPrefix << "   " << name << ": "
                    << kernel.binary.size()
@@ -465,7 +708,8 @@ compileAndEmbedRocMlirKernels(ModuleOp module,
     }
     *options.log << options.logPrefix << " embedded " << totalBytes
                  << "-byte binary; deleted " << kernelNames.size()
-                 << " kernel func(s)\n";
+                 << " kernel func(s), " << onHipPath.size()
+                 << " of them back on the hip path\n";
   }
   return success();
 }
