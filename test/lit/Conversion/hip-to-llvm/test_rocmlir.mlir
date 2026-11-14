@@ -61,4 +61,36 @@ module {
          prefill = array<i64: 2, 4, 0>}
     return
   }
+
+  // The fill writes the element width and bit pattern from the attribute: 24
+  // f16 elements of 1.0 (0x3C00), and 32 i8 elements of 0xFF.
+  // CHECK-LABEL: llvm.func @rocmlir_prefill_f16
+  func.func @rocmlir_prefill_f16(%ctx: !hip.context, %x: memref<8xi8, 1>,
+                                 %y: memref<3x8xf16, 1>) {
+    // CHECK: llvm.alloca
+    // CHECK: %[[COUNT:.*]] = llvm.mlir.constant(24 : i64) : i64
+    // CHECK-NEXT: %[[BYTES:.*]] = llvm.mlir.constant(2 : i64) : i64
+    // CHECK-NEXT: %[[ONE:.*]] = llvm.mlir.constant(15360 : i64) : i64
+    // CHECK-NEXT: llvm.call @wrap_rocmlir_prefill(%{{.*}}, %{{.*}}, %[[COUNT]], %[[BYTES]], %[[ONE]])
+    hip.rocmlir(%ctx) @rocMlir1 ins(%x : memref<8xi8, 1>)
+        outs(%y : memref<3x8xf16, 1>)
+        {block_size = 64 : i64, grid_size = 1 : i64, kernel_binary = "ELF",
+         prefill = array<i64: 1, 2, 15360>}
+    return
+  }
+
+  // CHECK-LABEL: llvm.func @rocmlir_prefill_i8
+  func.func @rocmlir_prefill_i8(%ctx: !hip.context, %x: memref<8xf32, 1>,
+                                %y: memref<32xi8, 1>) {
+    // CHECK: llvm.alloca
+    // CHECK: %[[COUNT:.*]] = llvm.mlir.constant(32 : i64) : i64
+    // CHECK-NEXT: %[[BYTES:.*]] = llvm.mlir.constant(1 : i64) : i64
+    // CHECK-NEXT: %[[FF:.*]] = llvm.mlir.constant(255 : i64) : i64
+    // CHECK-NEXT: llvm.call @wrap_rocmlir_prefill(%{{.*}}, %{{.*}}, %[[COUNT]], %[[BYTES]], %[[FF]])
+    hip.rocmlir(%ctx) @rocMlir1 ins(%x : memref<8xf32, 1>)
+        outs(%y : memref<32xi8, 1>)
+        {block_size = 64 : i64, grid_size = 1 : i64, kernel_binary = "ELF",
+         prefill = array<i64: 1, 1, 255>}
+    return
+  }
 }

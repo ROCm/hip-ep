@@ -47,6 +47,18 @@ struct RocMlirOpLowering : public ConvertOpToLLVMPattern<RocMlirOp> {
   LogicalResult
   matchAndRewrite(RocMlirOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    // Check before any IR is created: a pattern that fails must leave the IR
+    // unchanged.
+    ArrayRef<int64_t> prefill = op.getPrefill();
+    SmallVector<Type> operandTypes(op.getInputs().getTypes());
+    llvm::append_range(operandTypes, op.getOutputs().getTypes());
+    for (size_t i = 0; i < prefill.size(); i += 3) {
+      auto type = dyn_cast<MemRefType>(operandTypes[prefill[i]]);
+      if (!type || !type.hasStaticShape())
+        return rewriter.notifyMatchFailure(
+            op, "a pre-filled rocMLIR argument needs a static memref");
+    }
+
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     MLIRContext *ctx = rewriter.getContext();
@@ -102,10 +114,7 @@ struct RocMlirOpLowering : public ConvertOpToLLVMPattern<RocMlirOp> {
     // wrap_rocmlir_prefill(state, buffer, count, element_bytes, pattern) for
     // each argument the kernel needs filled before it runs, on the same
     // stream, so the fill completes before the launch.
-    ArrayRef<int64_t> prefill = op.getPrefill();
     if (!prefill.empty()) {
-      SmallVector<Type> operandTypes(op.getInputs().getTypes());
-      llvm::append_range(operandTypes, op.getOutputs().getTypes());
       SmallVector<Type, 5> fillParams = {ptrType, ptrType, i64Type, i64Type,
                                          i64Type};
       FailureOr<LLVM::LLVMFuncOp> fillFn = LLVM::lookupOrCreateFn(
@@ -113,10 +122,7 @@ struct RocMlirOpLowering : public ConvertOpToLLVMPattern<RocMlirOp> {
       if (failed(fillFn))
         return failure();
       for (size_t i = 0; i < prefill.size(); i += 3) {
-        auto type = dyn_cast<MemRefType>(operandTypes[prefill[i]]);
-        if (!type || !type.hasStaticShape())
-          return rewriter.notifyMatchFailure(
-              op, "a pre-filled rocMLIR argument needs a static memref");
+        auto type = cast<MemRefType>(operandTypes[prefill[i]]);
         SmallVector<Value, 5> fillArgs = {
             statePtr, argPtrs[prefill[i]], i64Const(type.getNumElements()),
             i64Const(prefill[i + 1]), i64Const(prefill[i + 2])};

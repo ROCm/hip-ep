@@ -681,6 +681,24 @@ MutableOperandRange RocMlirOp::getDpsInitsMutable() {
   return getOutputsMutable();
 }
 
+// A row-major buffer that starts at its base pointer: the form whose
+// alignedPtr and element count cover exactly the buffer.
+static bool isContiguousAtBase(MemRefType type) {
+  if (type.getLayout().isIdentity())
+    return true;
+  SmallVector<int64_t> strides;
+  int64_t offset;
+  if (failed(type.getStridesAndOffset(strides, offset)) || offset != 0)
+    return false;
+  int64_t expected = 1;
+  for (int64_t dim = type.getRank() - 1; dim >= 0; --dim) {
+    if (type.getDimSize(dim) != 1 && strides[dim] != expected)
+      return false;
+    expected *= type.getDimSize(dim);
+  }
+  return true;
+}
+
 LogicalResult RocMlirOp::verify() {
   if (getOutputs().empty())
     return emitOpError("requires at least one outs operand");
@@ -700,25 +718,46 @@ LogicalResult RocMlirOp::verify() {
   ArrayRef<int64_t> prefill = getPrefill();
   if (prefill.size() % 3 != 0)
     return emitOpError("prefill holds (index, bytes, pattern) triples");
-  int64_t numArgs = getInputs().size() + getOutputs().size();
+  int64_t numInputs = getInputs().size();
+  int64_t numArgs = numInputs + getOutputs().size();
+  llvm::SmallDenseSet<int64_t> filled;
   for (size_t i = 0; i < prefill.size(); i += 3) {
-    if (prefill[i] < 0 || prefill[i] >= numArgs)
+    int64_t index = prefill[i];
+    if (index < 0 || index >= numArgs)
       return emitOpError("prefill argument index ")
-             << prefill[i] << " is out of range";
+             << index << " is out of range";
+    // rocMLIR pre-fills only the output that its kernel accumulates into
+    // atomically. A fill of an input, or of an output that is also an input,
+    // would wipe data that the kernel reads, before every launch.
+    if (index < numInputs)
+      return emitOpError("prefill argument index ")
+             << index << " names an input; only an outs operand is pre-filled";
+    Value arg = getOutputs()[index - numInputs];
+    if (llvm::is_contained(getInputs(), arg))
+      return emitOpError("pre-filled argument ")
+             << index << " is also an input";
+    if (!filled.insert(index).second)
+      return emitOpError("prefill argument index ")
+             << index << " is listed twice";
     if (prefill[i + 1] != 1 && prefill[i + 1] != 2 && prefill[i + 1] != 4)
       return emitOpError("prefill element size must be 1, 2 or 4 bytes");
-    // The lowering fills getNumElements() elements of this width, so a width
-    // other than the buffer's writes past it or leaves part of it unfilled.
-    int64_t index = prefill[i];
-    int64_t numInputs = getInputs().size();
-    Type type = index < numInputs ? getInputs()[index].getType()
-                                  : getOutputs()[index - numInputs].getType();
-    Type element = cast<ShapedType>(type).getElementType();
+    // The lowering fills getNumElements() elements of this width from the
+    // buffer's base pointer, so the width must match the element type, the
+    // count must be static, and the buffer must start at its base.
+    auto shaped = cast<ShapedType>(arg.getType());
+    Type element = shaped.getElementType();
     if (!element.isIntOrFloat() ||
         element.getIntOrFloatBitWidth() != 8 * prefill[i + 1])
       return emitOpError("prefill element size ")
              << prefill[i + 1] << " does not match the element type " << element
              << " of argument " << index;
+    if (!shaped.hasStaticShape())
+      return emitOpError("pre-filled argument ")
+             << index << " needs a static shape";
+    if (auto memref = dyn_cast<MemRefType>(arg.getType());
+        memref && !isContiguousAtBase(memref))
+      return emitOpError("pre-filled argument ")
+             << index << " needs a contiguous layout with no offset";
   }
   if (!tensorOuts) {
     if (getNumResults() != 0)

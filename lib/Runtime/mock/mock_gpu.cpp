@@ -483,9 +483,7 @@ int wrap_matmul_i32(RuntimeState *state, const void *A, const void *B,
   return 0;
 }
 
-// RocMLIR dispatch (hip.rocmlir). Empty for now: the generated IR builds the
-// kernargs buffer and passes the embedded GPU binary + launch geometry, but
-// this wrapper does not yet load the module or launch the kernel.
+// Pre-fill for a hip.rocmlir argument. The mock has no device buffer to fill.
 int wrap_rocmlir_prefill(RuntimeState *state, void *buffer, int64_t count,
                          int64_t element_bytes, uint64_t pattern) {
   (void)buffer;
@@ -499,6 +497,9 @@ int wrap_rocmlir_prefill(RuntimeState *state, void *buffer, int64_t count,
   return 0;
 }
 
+// RocMLIR dispatch (hip.rocmlir). Empty for now: the generated IR builds the
+// kernargs buffer and passes the embedded GPU binary + launch geometry, but
+// this wrapper does not yet load the module or launch the kernel.
 int wrap_rocmlir(RuntimeState *state, const char *kernel_binary,
                  char *func_name, int64_t block_size, int64_t grid_size,
                  void *kernargs, size_t size) {

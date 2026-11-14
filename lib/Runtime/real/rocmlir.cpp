@@ -73,9 +73,17 @@ const LoadedKernel *getOrLoadKernel(const char *kernel_binary,
 
 int wrap_rocmlir_prefill(RuntimeState *state, void *buffer, int64_t count,
                          int64_t element_bytes, uint64_t pattern) {
+  // The generated code drops this status, so a failure must also land in the
+  // device error flag that inference_compute reads after the stream sync.
+  // Otherwise a missed fill or launch leaves stale outputs that look valid.
+  auto finish = [&](int status) {
+    if (status != 0)
+      hipdnn_ep_state_set_error_flag(state, status);
+    return status;
+  };
   if (!state || !buffer || count < 0) {
     fprintf(stderr, "Invalid arguments in wrap_rocmlir_prefill\n");
-    return -1;
+    return finish(-1);
   }
   hipStream_t stream =
       static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
@@ -93,17 +101,18 @@ int wrap_rocmlir_prefill(RuntimeState *state, void *buffer, int64_t count,
                             stream);
     break;
   case 4:
-    err = hipMemsetD32Async(device, static_cast<int>(pattern), n, stream);
+    err = hipMemsetD32Async(
+        device, static_cast<int>(static_cast<uint32_t>(pattern)), n, stream);
     break;
   default:
     fprintf(stderr, "wrap_rocmlir_prefill: unsupported element size %lld\n",
             (long long)element_bytes);
-    return -1;
+    return finish(-1);
   }
   if (err != hipSuccess) {
     fprintf(stderr, "wrap_rocmlir_prefill: hipMemsetD%lldAsync failed: %s\n",
             (long long)(element_bytes * 8), hipGetErrorString(err));
-    return -1;
+    return finish(-1);
   }
   return 0;
 }
@@ -111,9 +120,17 @@ int wrap_rocmlir_prefill(RuntimeState *state, void *buffer, int64_t count,
 int wrap_rocmlir(RuntimeState *state, const char *kernel_binary,
                  char *func_name, int64_t block_size, int64_t grid_size,
                  void *kernargs, size_t size) {
+  // The generated code drops this status, so a failure must also land in the
+  // device error flag that inference_compute reads after the stream sync.
+  // Otherwise a missed fill or launch leaves stale outputs that look valid.
+  auto finish = [&](int status) {
+    if (status != 0)
+      hipdnn_ep_state_set_error_flag(state, status);
+    return status;
+  };
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_rocmlir\n");
-    return -1;
+    return finish(-1);
   }
 
   OP_PROFILE(
@@ -134,7 +151,7 @@ int wrap_rocmlir(RuntimeState *state, const char *kernel_binary,
 
   const LoadedKernel *kernel = getOrLoadKernel(kernel_binary, func_name);
   if (!kernel)
-    return -1;
+    return finish(-1);
 
   hipStream_t stream =
       static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
@@ -154,13 +171,13 @@ int wrap_rocmlir(RuntimeState *state, const char *kernel_binary,
   if (err != hipSuccess) {
     fprintf(stderr, "wrap_rocmlir: hipModuleLaunchKernel failed: %s\n",
             hipGetErrorString(err));
-    return -1;
+    return finish(-1);
   }
   hipError_t launchErr = hipGetLastError();
   if (launchErr != hipSuccess) {
     fprintf(stderr, "wrap_rocmlir: kernel launch error: %s\n",
             hipGetErrorString(launchErr));
-    return -1;
+    return finish(-1);
   }
   return 0;
 }

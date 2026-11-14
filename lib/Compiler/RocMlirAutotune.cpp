@@ -688,8 +688,9 @@ bool RocMlirAutotuner::Impl::launch(hipFunction_t function,
           device, static_cast<unsigned short>(prefill.pattern), count,
           buffers.getStream());
     else if (prefill.elementBytes == 4)
-      status = fns.hipMemsetD32Async(device, static_cast<int>(prefill.pattern),
-                                     count, buffers.getStream());
+      status = fns.hipMemsetD32Async(
+          device, static_cast<int>(static_cast<uint32_t>(prefill.pattern)),
+          count, buffers.getStream());
     if (!reportError(status, "hipMemsetD*Async(prefill)"))
       return false;
   }

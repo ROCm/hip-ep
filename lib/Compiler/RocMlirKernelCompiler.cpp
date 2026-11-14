@@ -190,18 +190,22 @@ bool extractCompiledKernel(ModuleOp mod, CompiledKernel &out) {
       if (auto prefills =
               kernel.getAttr<ArrayAttr>(rock::PrefillAttr::getMnemonic())) {
         for (Attribute entry : prefills) {
-          if (std::optional<KernelPrefill> prefill = parsePrefill(entry))
+          if (std::optional<KernelPrefill> prefill = parsePrefill(entry)) {
             out.prefills.push_back(*prefill);
-          else
-            unsupportedPrefill = true;
+            continue;
+          }
+          llvm::errs() << "error: rocMLIR kernel '"
+                       << kernel.getName().getValue()
+                       << "' needs a pre-fill that the runtime cannot write: "
+                       << entry
+                       << " (expected an integer index and a 1-, 2- or "
+                          "4-byte integer or float value)\n";
+          unsupportedPrefill = true;
         }
       }
       ++count;
     }
   });
-  if (unsupportedPrefill)
-    llvm::errs() << "error: rocMLIR kernel needs a pre-fill that is not a "
-                    "1-, 2- or 4-byte integer or float value\n";
   return count == 1 && !out.binary.empty() && !unsupportedPrefill;
 }
 
