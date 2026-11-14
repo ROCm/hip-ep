@@ -86,3 +86,25 @@ func.func @expand_logits(%ctx: !hip.context, %n: index) -> memref<1x?x92xf16> {
       : memref<?x92xf16> into memref<1x?x92xf16>
   return %ret : memref<1x?x92xf16>
 }
+
+// State-style same-rank reshape: a static [1, 4, 8, 8] buffer returned as
+// [1, 1, 1, 256], which takes a collapse and an expand. abi_groups is empty;
+// the callback gets the returned rank-4 shape as constants.
+// STAMP-LABEL: func.func @static_reshape_chain
+// STAMP:       hip.alloc_output
+// STAMP-SAME:    hipdnn.abi_groups = array<i64>
+// STAMP-SAME:    hipdnn.abi_shape = array<i64: 1, 1, 1, 256>
+//
+// DECOMP-LABEL: llvm.func @static_reshape_chain
+// DECOMP:       llvm.mlir.constant(256 : i64) : i64
+// DECOMP:       llvm.alloca %{{.*}} x !llvm.array<4 x i64>
+// DECOMP:       %[[RANK4:.*]] = llvm.mlir.constant(4 : i64) : i64
+// DECOMP:       llvm.call @hipdnn_ep_alloc_output(%{{.*}}, %{{.*}}, %{{.*}}, %[[RANK4]], %{{.*}}) : (!llvm.ptr, i64, !llvm.ptr, i64, i64) -> !llvm.ptr
+func.func @static_reshape_chain(%ctx: !hip.context) -> memref<1x1x1x256xf32> {
+  %out = memref.alloc() : memref<1x4x8x8xf32>
+  %flat = memref.collapse_shape %out [[0, 1, 2, 3]]
+      : memref<1x4x8x8xf32> into memref<256xf32>
+  %ret = memref.expand_shape %flat [[0, 1, 2, 3]] output_shape [1, 1, 1, 256]
+      : memref<256xf32> into memref<1x1x1x256xf32>
+  return %ret : memref<1x1x1x256xf32>
+}

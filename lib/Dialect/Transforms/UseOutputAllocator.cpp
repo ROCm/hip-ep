@@ -95,6 +95,11 @@ namespace {
 // Expand (internal rank < return rank, e.g. DETR logits): abi_groups[i] = #
 // external dims expanded from internal dim i (sum = external rank, len =
 // internal rank).
+//
+// Static (any chain of collapse_shape / expand_shape between two fully static
+// shapes, e.g. a [1, H, K, V] state returned as [1, 1, 1, H*K*V], which no
+// single reassociation spans): abi_shape is the returned shape and abi_groups
+// is empty; every external dim is a constant.
 static void stampAbiReshapeAttrs(AllocOutputOp allocOutput, Value retVal,
                                  OpBuilder &builder) {
   Value root = allocOutput.getResult();
@@ -104,22 +109,21 @@ static void stampAbiReshapeAttrs(AllocOutputOp allocOutput, Value retVal,
 
   memref::CollapseShapeOp collapse;
   memref::ExpandShapeOp expand;
+  int64_t reshapes = 0;
   Value cur = retVal;
   while (cur != root) {
     Operation *def = cur.getDefiningOp();
     if (!def)
       return;
     if (auto c = dyn_cast<memref::CollapseShapeOp>(def)) {
-      if (collapse || expand)
-        return;
       collapse = c;
+      ++reshapes;
       cur = c.getSrc();
       continue;
     }
     if (auto e = dyn_cast<memref::ExpandShapeOp>(def)) {
-      if (collapse || expand)
-        return;
       expand = e;
+      ++reshapes;
       cur = e.getSrc();
       continue;
     }
@@ -129,10 +133,19 @@ static void stampAbiReshapeAttrs(AllocOutputOp allocOutput, Value retVal,
     }
     return;
   }
-  if (!collapse && !expand)
+  if (reshapes == 0)
     return;
 
   auto extType = cast<MemRefType>(retVal.getType());
+  if (reshapes > 1) {
+    if (!rootType.hasStaticShape() || !extType.hasStaticShape() ||
+        rootType.getShape() == extType.getShape())
+      return;
+    allocOutput->setAttr(kAbiShapeAttrName,
+                         builder.getDenseI64ArrayAttr(extType.getShape()));
+    allocOutput->setAttr(kAbiGroupsAttrName, builder.getDenseI64ArrayAttr({}));
+    return;
+  }
   if (extType.getRank() == rootType.getRank())
     return;
 
