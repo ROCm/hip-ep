@@ -96,6 +96,19 @@ struct AutotuneOptions {
   // `log` because the per-candidate lines are one per config per kernel --
   // useful when tuning by hand, far too much for a normal compile.
   bool verbose = false;
+  // External rocMLIR LUT FlatBuffer (.fb). hip-rocmlir-compiler sets this
+  // from --problem-cache or HIP_ROCMLIR_PROBLEM_CACHE. When set, the shipped
+  // tools/problem-cache/lut/<gpu_arch>.fb is not consulted. The in-process
+  // Execution Provider leaves this empty and uses the shipped table. An
+  // identical problem string is compiled as stored. A miss takes the nearest
+  // legal tile of the same kernel kind (conv, gemm, attention, or
+  // gemm-elementwise-gemm). A tile that fails to compile is skipped for the
+  // next nearest row.
+  std::string problemCachePath;
+  // Where to write this compile's winners. Empty skips the dump. The autotuner
+  // does not write the file itself; hip-rocmlir-compiler calls
+  // dumpProblemCache when this is set.
+  std::string problemCacheDumpPath;
 };
 
 // Wall times accumulated by one autotuner. perfConfig compiles for the whole
@@ -132,14 +145,27 @@ public:
 
   const AutotunePhaseTimes &phaseTimes() const;
 
+  // LUT JSON (configs, points, fallbacks), same document shape as the
+  // MatMulNBits and GQA tables. problem_cache_to_fb.py compiles it to a .fb.
+  // False when the device cannot be queried or the file cannot be written.
+  bool dumpProblemCache(StringRef path) const;
+
 private:
   struct Impl;
   std::unique_ptr<Impl> impl;
 };
 
-// Reads HIPDNN_EP_ROCMLIR_AUTOTUNE. Recognizes "quick", "full", "exhaustive",
-// and "off"/"0"/"" for disabled; returns false when disabled or unparseable,
-// leaving \p out alone.
+// HIP_ROCMLIR_SKIP_BENCHMARKING, shared by hip-rocmlir-compiler and the ONNX
+// Runtime provider. Unset or "0" means benchmark. A present empty string
+// skips, and so does any other value. The search then keeps rocMLIR's
+// default perfConfig.
+bool rocMlirSkipBenchmarking();
+
+// Reads HIPDNN_EP_ROCMLIR_AUTOTUNE for the search space only. Unset or empty
+// selects quick. "quick", "full", and "exhaustive" are the only accepted
+// values. Anything else warns and selects quick. Skipping the search is
+// rocMlirSkipBenchmarking(), not a value of this variable. Returns false,
+// leaving \p out alone, only when that skip flag is set.
 //
 // Env-only on purpose for now. The custom-kernel autotuners also accept a
 // provider option, but those are read in the Runtime, which already has the

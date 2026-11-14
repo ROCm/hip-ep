@@ -20,11 +20,15 @@ extern "C" __declspec(
     dllimport) unsigned long __stdcall GetEnvironmentVariableA(const char *,
                                                                char *,
                                                                unsigned long);
+extern "C" __declspec(dllimport) unsigned long __stdcall GetLastError(void);
+extern "C" __declspec(dllimport) void __stdcall SetLastError(unsigned long);
 #endif
 
 // Read an environment variable in a way that works from /MT DLLs on Windows.
-// Returns empty string when unset. Use this instead of std::getenv anywhere
-// the compiler library may end up linked into the EP DLL.
+// Returns an empty string both when the variable is unset and when it is set
+// to an empty string. Use hip_env_lookup when those must be told apart. Use
+// this instead of std::getenv anywhere the compiler library may end up linked
+// into the EP DLL.
 inline std::string hip_get_env(const char *name) {
 #ifdef _WIN32
   char buf[1024];
@@ -43,6 +47,48 @@ inline std::string hip_get_env(const char *name) {
 #else
   const char *v = std::getenv(name);
   return v ? std::string(v) : std::string();
+#endif
+}
+
+// True when \p name is present in the process environment, including when its
+// value is empty. False when it is unset, and \p value is then empty.
+// hip_get_env cannot answer this: it returns "" for both. On Windows an empty
+// value makes GetEnvironmentVariableA return 0 and leave the last-error code
+// unchanged, while a missing name returns 0 with ERROR_ENVVAR_NOT_FOUND.
+// Last-error is cleared first so a stale code is not read as "not found".
+inline bool hip_env_lookup(const char *name, std::string &value) {
+#ifdef _WIN32
+  // winerror.h ERROR_ENVVAR_NOT_FOUND. Declared numerically so this header
+  // does not include windows.h.
+  constexpr unsigned long kErrorEnvVarNotFound = 203;
+  SetLastError(0);
+  char buf[1024];
+  unsigned long n = GetEnvironmentVariableA(name, buf, sizeof(buf));
+  if (n == 0) {
+    value.clear();
+    return GetLastError() != kErrorEnvVarNotFound;
+  }
+  if (n < sizeof(buf)) {
+    value.assign(buf, n);
+    return true;
+  }
+  value.assign(n, '\0');
+  SetLastError(0);
+  unsigned long n2 = GetEnvironmentVariableA(name, value.data(), n);
+  if (n2 == 0) {
+    value.clear();
+    return GetLastError() != kErrorEnvVarNotFound;
+  }
+  value.resize(n2);
+  return true;
+#else
+  const char *v = std::getenv(name);
+  if (!v) {
+    value.clear();
+    return false;
+  }
+  value.assign(v);
+  return true;
 #endif
 }
 

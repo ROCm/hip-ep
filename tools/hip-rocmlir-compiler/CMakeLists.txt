@@ -3,7 +3,9 @@
 # ** Licensed under the MIT License.
 ##
 
-add_executable(hip-rocmlir-compiler hip-rocmlir-compiler.cpp)
+add_executable(hip-rocmlir-compiler
+  hip-rocmlir-compiler.cpp
+)
 
 # Same reason as LibHipCompiler: this target includes InitRocMLIRDialects.h,
 # whose Triton headers require C++20.
@@ -30,6 +32,7 @@ add_dependencies(hip-rocmlir-compiler
 hip_rocmlir_apply_includes(hip-rocmlir-compiler)
 target_link_libraries(hip-rocmlir-compiler PRIVATE
   HipSupport
+  HipSchemasLib
   LibHipCompiler
   HipDialectIR
   HipsrDialectIR
