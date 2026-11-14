@@ -373,3 +373,25 @@ func.func @topk_host_k(%ctx: !hip.context, %n: i64, %data: memref<4xf32>,
     outs(%values, %indices : memref<1xf32>, memref<1xi64>) {axis = 0 : i64}
   return %r : i64
 }
+
+// -----
+
+// SwiGLU only launches a kernel on the context stream, so it does not stop
+// forwarding a host-written value.
+// CHECK-LABEL: llvm.func @swiglu_between(
+// CHECK: llvm.store %arg1,
+// CHECK: llvm.call @wrap_swiglu
+// CHECK-NOT: llvm.call @hipdnn_ep_readback
+// CHECK: llvm.return %arg1 : i32
+func.func @swiglu_between(%ctx: !hip.context, %n: i32, %gate: memref<8xf16>,
+                          %up: memref<8xf16>, %out: memref<8xf16>) -> i32 {
+  %c0 = arith.constant 0 : index
+  %size = arith.constant 64 : index
+  %scratch = hip.get_host_scratch(%ctx, %size) : memref<?xi8>
+  %a = memref.view %scratch[%c0][] : memref<?xi8> to memref<1xi32>
+  memref.store %n, %a[%c0] : memref<1xi32>
+  hip.swiglu(%ctx) ins(%gate, %up : memref<8xf16>, memref<8xf16>)
+    outs(%out : memref<8xf16>)
+  %r = hip.readback_scalar(%ctx, %a : memref<1xi32>) -> i32
+  return %r : i32
+}
