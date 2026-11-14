@@ -185,6 +185,21 @@ class TestOnnxAttentionKeyPadding:
             left=True,
         )
 
+    @pytest.mark.parametrize("q_heads", [2, 8, 10], ids=["hpg1", "hpg4", "hpg5"])
+    def test_decode_ring_geometry(self, model_runner, q_heads):
+        """Decode at the head_dim 128 geometries of the register-ring decode
+        kernel, which takes no key bias, so a biased decode must avoid it."""
+        _run(
+            model_runner,
+            batch=2,
+            seq=1,
+            past=255,
+            q_heads=q_heads,
+            window=0,
+            pad=70,
+            left=True,
+        )
+
     @pytest.mark.parametrize(
         "q_heads",
         [
