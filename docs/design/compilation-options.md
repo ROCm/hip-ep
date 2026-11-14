@@ -64,9 +64,33 @@ hip-compiler --constants-file weights.bin --constants-dir ./out -O 2 model.mlir 
 | `-O <level>` | `opt_level` |
 | `-v / --verbose` | `verbose` |
 | `--mode {LLVM_IR,NATIVE}` | `output_mode` |
+| `--mode HIP_IR` | CLI-only; see [HIP IR output](#hip-ir-output) |
 
 `--constants-dir` is CLI-only — it sets the `DiskFileSystem` root directory and
 is never embedded in compilation options or the bitcode metadata.
+
+### HIP IR output
+
+`--mode HIP_IR` (`CompilerDriver::setHipIrOutput`) writes the module, at `-o`,
+at the point where the source has become the HIP dialect: after the ONNX head
+(`buildOnnxToHipPipelineHead`), before `buildOnnxToHipPipelineTail`
+(bufferization on). Nothing after that point is run, translated or written. It
+is tensor-form HIP IR -- `hip.*` ops -- for a tool whose product is the HIP IR,
+compiled to an artifact elsewhere, or to look at and edit what a model lowers
+to.
+
+The written module names `"hip"` in `hip.compiler.source_pipeline`. The driver
+takes such a module as input and skips the head, running only the tail, so
+
+```sh
+hip-compiler model.mlir --mode HIP_IR -o model.hip.mlir
+hip-compiler model.hip.mlir -o model.bc
+```
+
+compiles to the same artifact as `hip-compiler model.mlir -o model.bc` (with the
+same plugins loaded, when the IR holds their ops), in any output mode. HIP IR
+output is supported by the built-in pipeline only, not with a
+`HIPDNN_EP_PIPELINE` override, HIPSR or rocMLIR.
 
 ### From `hip-mlir-opt` pipeline
 
