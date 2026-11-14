@@ -133,6 +133,7 @@ mha_flash_prefill_kernel(
   constexpr int D_TILES = D_PAD / kWmmaTile;  // padded head-dim tiles
   constexpr int P_STR = BKV + 2;              // P_lds row stride (bank pad)
   constexpr int KV_STR = D_PAD + 2;           // V_lds row stride (bank pad)
+  constexpr int B_STR = BKV + 8;              // B_lds row stride (16 B aligned)
 
   const int num_q_tiles = (sq + ROWS - 1) / ROWS;
   const int q_tile_idx = __builtin_amdgcn_readfirstlane(blockIdx.x % num_q_tiles);
@@ -157,6 +158,10 @@ mha_flash_prefill_kernel(
   _Float16 *V_lds = reinterpret_cast<_Float16 *>(smem_mha);
   _Float16 *P_lds =
       reinterpret_cast<_Float16 *>(smem_mha + (size_t)BKV * KV_STR * sizeof(_Float16));
+  // The bias tile is staged block-wide with 16 B loads: read element by element
+  // straight from global, its scattered 2 B loads made the kernel ~5x slower.
+  _Float16 *B_lds = reinterpret_cast<_Float16 *>(
+      smem_mha + ((size_t)BKV * KV_STR + (size_t)ROWS * P_STR) * sizeof(_Float16));
 
   // KV base for this (batch, head): Kcache/Vcache are BNSD.
   const size_t kv_base =
@@ -209,6 +214,31 @@ mha_flash_prefill_kernel(
           &V_lds[kv_local * KV_STR + dt * kWmmaTile]) = vv;
     }
 
+    if constexpr (HAS_BIAS) {
+      // A bias broadcast over query rows (a key mask) stages a single row.
+      constexpr int CHUNKS = BKV / 8;
+      const int rows = bias_sq == 0 ? 1 : ROWS;
+      for (int i = tid; i < rows * CHUNKS; i += NW * 32) {
+        const int r = i / CHUNKS;
+        const int c = (i % CHUNKS) * 8;
+        const int q_pos = q_start + r;
+        const int kv_pos = kv0 + c;
+        half8_t bv{};
+        if (q_pos < sq) {
+          const _Float16 *src = bias_bh + q_pos * bias_sq + kv_pos;
+          if (kv_pos + 8 <= skv &&
+              (reinterpret_cast<uintptr_t>(src) & 15) == 0) {
+            bv = *reinterpret_cast<const half8_t *>(src);
+          } else {
+#pragma unroll
+            for (int e = 0; e < 8; ++e)
+              bv[e] = kv_pos + e < skv ? src[e] : (_Float16)0.0f;
+          }
+        }
+        *reinterpret_cast<half8_t *>(&B_lds[r * B_STR + c]) = bv;
+      }
+    }
+
     // ---- score GEMM: K streamed from global, reused across MT M-tiles ----
     float8_t S_reg[MT][S_TILES_J];
 #pragma unroll
@@ -231,6 +261,8 @@ mha_flash_prefill_kernel(
               Q_reg[mt][tk], k_frag, S_reg[mt][sj]);
       }
     }
+    if constexpr (HAS_BIAS)
+      __syncthreads();  // B_lds staged
 #pragma unroll
     for (int mt = 0; mt < MT; ++mt)
 #pragma unroll
@@ -239,12 +271,12 @@ mha_flash_prefill_kernel(
         for (int e = 0; e < 8; ++e) {
           S_reg[mt][sj][e] *= scale * kLog2e;
           if constexpr (HAS_BIAS) {
-            const int q_pos =
-                row_base + mt * kWmmaTile + hipdnn_wmma_acc_row(pair, e);
-            const int kv_pos = kv0 + sj * kWmmaTile + wmma_lane;
-            if (q_pos < sq && kv_pos < skv)
-              S_reg[mt][sj][e] +=
-                  (float)bias_bh[q_pos * bias_sq + kv_pos] * kLog2e;
+            const int r =
+                bias_sq == 0
+                    ? 0
+                    : pbase + mt * kWmmaTile + hipdnn_wmma_acc_row(pair, e);
+            S_reg[mt][sj][e] +=
+                (float)B_lds[r * B_STR + sj * kWmmaTile + wmma_lane] * kLog2e;
           }
         }
 
@@ -352,10 +384,15 @@ mha_flash_prefill_kernel(
       }
 }
 
-static inline size_t mha_prefill_smem_bytes(int nw, int bkv, int d_pad, int mt) {
+static inline size_t mha_prefill_smem_bytes(int nw, int bkv, int d_pad, int mt,
+                                            bool has_bias) {
+  const size_t rows = (size_t)(nw * mt * 16);
   const size_t v_lds = (size_t)bkv * (d_pad + 2) * sizeof(_Float16);
-  const size_t p_lds = (size_t)(nw * mt * 16) * (bkv + 2) * sizeof(_Float16);
-  return v_lds + p_lds;
+  const size_t p_lds = rows * (bkv + 2) * sizeof(_Float16);
+  // B_lds follows P_lds and takes 16 B stores; with 16-row tiles and even
+  // strides both V_lds and P_lds are whole multiples of 16 B.
+  const size_t b_lds = has_bias ? rows * (bkv + 8) * sizeof(_Float16) : 0;
+  return v_lds + p_lds + b_lds;
 }
 
 // Default launch config (correctness-first; autotune can be layered later).
@@ -378,7 +415,8 @@ static inline int launch_mha_prefill(hipStream_t stream, const _Float16 *Q,
   const int rows = kMhaNW * kMhaMT * 16;
   const int num_q_tiles = (sq + rows - 1) / rows;
   dim3 grid(num_q_tiles * B, N);
-  const size_t smem = mha_prefill_smem_bytes(kMhaNW, kMhaBKV, D_PAD, kMhaMT);
+  const size_t smem =
+      mha_prefill_smem_bytes(kMhaNW, kMhaBKV, D_PAD, kMhaMT, HAS_BIAS);
   (void)hipGetLastError();
   mha_flash_prefill_kernel<kMhaNW, kMhaBKV, D_PAD, kMhaMT, HAS_BIAS>
       <<<grid, kMhaNW * 32, smem, stream>>>(Q, K, V, O, N, sq, skv, d, max_seq,
