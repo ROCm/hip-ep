@@ -73,7 +73,8 @@ module {
     hip.expand(%ctx) ins(%x, %shape : memref<1xi1, 1>, memref<1xi64, 1>)
                      outs(%y : memref<?xi1, 1>)
 
-    // CHECK: %[[DT:.*]] = llvm.mlir.constant(5 : i64) : i64
+    // i1 shares the UINT8 identifier; wrap_expand copies by element size.
+    // CHECK: %[[DT:.*]] = llvm.mlir.constant(7 : i64) : i64
     // CHECK: llvm.call @wrap_expand(%{{.*}}, %[[DT]]) :
     return
   }
