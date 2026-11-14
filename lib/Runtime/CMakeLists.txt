@@ -610,6 +610,54 @@ target_compile_definitions(hipdnn-ep-tls PRIVATE HIPDNN_EP_RT_NO_EXPORT)
 install(TARGETS hipdnn-ep-tls ARCHIVE DESTINATION lib)
 
 # ============================================================================
+# STEP 6b: RyzenAI CoreLib whole models (NOT bitcode)
+# ============================================================================
+# A whole decoder model handed to CoreLib's model API (corelib_model.h) by the
+# level-1 pass and run by its CORELIBMODEL custom op. corelib itself is loaded
+# at runtime, so only its headers are needed here (RYZENAICORELIB_ROOT).
+# Without them, or in mock builds, a stub refuses every model and graphs
+# compile as usual. See docs/design/ryzenai-corelib-model.md.
+list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
+if(NOT BUILD_MOCK_RUNTIME)
+    find_package(RyzenAICorelib 0.66 QUIET)
+endif()
+if(RyzenAICorelib_FOUND)
+    message(STATUS "RyzenAI CoreLib ${RyzenAICorelib_VERSION}: "
+                   "${RyzenAICorelib_INCLUDE_DIR}")
+    add_library(hipdnn-ep-corelib STATIC real/ryzenaicorelib_model.cpp
+        corelib_model_registry.cpp)
+    target_include_directories(hipdnn-ep-corelib PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${RyzenAICorelib_INCLUDE_DIR})
+    if(NOT WIN32)
+        target_link_libraries(hipdnn-ep-corelib PRIVATE ${CMAKE_DL_LIBS})
+    endif()
+else()
+    # A root that is set but unusable (typically an older CoreLib) would
+    # otherwise build the stub silently.
+    if(NOT BUILD_MOCK_RUNTIME AND (RYZENAICORELIB_ROOT OR
+                                   DEFINED ENV{RYZENAICORELIB_ROOT}))
+        if(RYZENAICORELIB_ROOT)
+            set(_corelib_root "${RYZENAICORELIB_ROOT}")
+        else()
+            set(_corelib_root "$ENV{RYZENAICORELIB_ROOT}")
+        endif()
+        message(WARNING
+            "RYZENAICORELIB_ROOT is '${_corelib_root}', but no RyzenAI CoreLib "
+            "0.66 or later is there: include/ryzenai/corelib/base.h is missing "
+            "or too old. Building the stub, so no model is handed to CoreLib.")
+    else()
+        message(STATUS "RyzenAI CoreLib not found (set RYZENAICORELIB_ROOT); "
+                       "no model is handed to CoreLib")
+    endif()
+    add_library(hipdnn-ep-corelib STATIC mock/ryzenaicorelib_model_stub.cpp
+        corelib_model_registry.cpp)
+    target_include_directories(hipdnn-ep-corelib PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR})
+endif()
+set_target_properties(hipdnn-ep-corelib PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# ============================================================================
 # STEP 7: Shared embedded runtime.bc (single source of truth)
 # ============================================================================
 # Both consumers need runtime.bc embedded as bytes:

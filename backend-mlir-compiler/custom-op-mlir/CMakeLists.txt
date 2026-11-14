@@ -66,6 +66,7 @@ set(LIB_NAME morphizen-custom-op-mlir)
 add_library(${LIB_NAME} STATIC
   src/plugin_registration.cpp
   src/MlirCustomOp.cpp
+  src/CorelibModelCustomOp.cpp
   src/InferenceState.cpp
   src/LlvmIrJit.cpp
   src/LoadedArtifact.cpp
@@ -98,6 +99,7 @@ target_link_libraries(${LIB_NAME} PRIVATE
 # Native current-stream accessor: LlvmIrJit registers hipdnn_ep_get/set_current_
 # stream as absolute JIT symbols, so the host must define them. The reference in
 # LlvmIrJit.cpp also pulls this object into the EP DLL / hip-test / hip-inspect.
+target_link_libraries(${LIB_NAME} PRIVATE hipdnn-ep-corelib) # CORELIBMODEL op
 if(TARGET hipdnn-ep-tls)
   target_link_libraries(${LIB_NAME} PRIVATE hipdnn-ep-tls)
 endif()
@@ -115,6 +117,7 @@ target_include_directories(${LIB_NAME} PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${CMAKE_CURRENT_BINARY_DIR}/..  # For generated protobuf headers (metadata.pb.h)
   ${CMAKE_SOURCE_DIR}/include     # Shared project headers (timing.h, etc.)
+  ${CMAKE_SOURCE_DIR}/lib/Runtime # corelib_model.h
   ${LLVM_INCLUDE_DIRS}            # LLVM ORC headers consumed by LlvmIrJit.cpp
 )
 
