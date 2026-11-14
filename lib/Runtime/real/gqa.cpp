@@ -175,6 +175,48 @@ static int32_t read_seqlens_k_for_dispatch(hipStream_t stream,
   return seqlens_k_val;
 }
 
+static bool ensure_seqlens_k_pinned(RuntimeState *state) {
+  if (state->seqlens_k_pinned)
+    return true;
+  void *p = nullptr;
+  if (hipHostMalloc(&p, sizeof(int32_t), hipHostMallocDefault) != hipSuccess)
+    return false;
+  state->seqlens_k_pinned = static_cast<int32_t *>(p);
+  return true;
+}
+
+// Length for picking the decode launch config when the kernels read the exact
+// length from seqlens_k on the device (in-place KV cache), so only the config,
+// never the result, depends on it. A readback here drained the stream once per
+// token; instead the first call of each Compute enqueues an async copy into
+// pinned memory and returns the previous Compute's copy + 1. Returns
+// kSeqlensKNotRead until a copy or a prefill length is available.
+static int32_t estimate_decode_seqlens_k(hipStream_t stream,
+                                         const void *seqlens_k_ptr, int64_t B,
+                                         RuntimeState *state,
+                                         std::optional<int32_t> host_length) {
+  if (host_length)
+    return *host_length;
+  if (!seqlens_k_ptr || B != 1 || !state)
+    return kSeqlensKNotRead;
+  if (state->seqlens_k_cached_valid &&
+      state->seqlens_k_cached_ptr == seqlens_k_ptr)
+    return state->seqlens_k_cached_val;
+  if (!state->seqlens_k_copy_issued) {
+    state->seqlens_k_copy_issued = true;
+    state->seqlens_k_estimate = kSeqlensKNotRead;
+    if (!ensure_seqlens_k_pinned(state))
+      return kSeqlensKNotRead;
+    // The previous Compute ended with a stream synchronize, so its copy landed.
+    if (state->seqlens_k_pinned_valid && *state->seqlens_k_pinned >= 0)
+      state->seqlens_k_estimate = *state->seqlens_k_pinned + 1;
+    state->seqlens_k_pinned_valid =
+        hipMemcpyAsync(state->seqlens_k_pinned, seqlens_k_ptr, sizeof(int32_t),
+                       hipMemcpyDeviceToHost, stream) == hipSuccess;
+  }
+  return state->seqlens_k_estimate;
+}
+
 // FA-2 split-K decode workspace capacity, in splits (matches gqa_kernel.hip).
 static constexpr int kFlashDecodeMaxSplits = 64;
 
@@ -506,9 +548,18 @@ static int gqa_forward_fused(
   const bool need_rope = do_rotary && cos_cache && sin_cache;
   const bool packed_qkv = (!key && !value);
 
-  // B==1 pre-read (cached per Compute) feeds host past_len where needed.
+  // B==1 pre-read (cached per Compute) feeds host past_len where needed. A
+  // decode step into an in-place cache needs the length only to pick its
+  // launch config (the kernels read seqlens_k on the device), so it takes an
+  // estimate that does not wait on the stream.
+  const bool in_place_decode =
+      sq == 1 && !(seqlens_k_ptr && past_key && past_key != present_key);
   const int32_t seqlens_k_pre =
-      read_seqlens_k_for_dispatch(stream, seqlens_k_ptr, B, state, host_length);
+      in_place_decode
+          ? estimate_decode_seqlens_k(stream, seqlens_k_ptr, B, state,
+                                      host_length)
+          : read_seqlens_k_for_dispatch(stream, seqlens_k_ptr, B, state,
+                                        host_length);
 
   const size_t Q_full_bytes = static_cast<size_t>(B) * sq * H * d * elem_sz;
   const size_t K_full_bytes = static_cast<size_t>(B) * sq * G * d * elem_sz;
@@ -811,6 +862,11 @@ static int gqa_forward_fused(
   }
   if (past_len < 0)
     past_len = 0;
+  // Seed the next decode step's estimate; no async copy is in flight here.
+  if (B == 1 && state && ensure_seqlens_k_pinned(state)) {
+    *state->seqlens_k_pinned = static_cast<int32_t>(total_seq - 1);
+    state->seqlens_k_pinned_valid = true;
+  }
 
   const void *qSrc = query;
   const void *kSrc = key;
