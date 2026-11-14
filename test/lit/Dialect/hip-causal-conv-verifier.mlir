@@ -38,9 +38,8 @@ func.func @state_len_mismatch(%ctx: !hip.context,
     %output: memref<1x8x64xf16, 1>, %present: memref<1x3x64xf16, 1>) {
   // expected-error @+1 {{state dim 1 must be (kernel_size - 1) * dilation = 6, got 3}}
   hip.causal_conv_with_state(%ctx)
-      ins(%input, %weight, %past :
-          memref<1x8x64xf16, 1>, memref<64x1x4xf16, 1>,
-          memref<1x3x64xf16, 1>)
+      ins(%input, %weight : memref<1x8x64xf16, 1>, memref<64x1x4xf16, 1>)
+      past_state(%past : memref<1x3x64xf16, 1>)
       outs(%output, %present :
            memref<1x8x64xf16, 1>, memref<1x3x64xf16, 1>)
       {activation = "silu", ndim = 1 : i64, channels_last = true,

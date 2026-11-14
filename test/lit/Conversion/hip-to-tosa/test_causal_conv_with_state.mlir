@@ -32,9 +32,9 @@ func.func @causal_conv_with_past(
     %y_init: tensor<1x4x8xf32>, %s_init: tensor<1x4x3xf32>)
     -> (tensor<1x4x8xf32>, tensor<1x4x3xf32>) attributes {rock.kernel} {
   %y, %s = hip.causal_conv_with_state(%ctx)
-      ins(%input, %weight, %bias, %past :
-          tensor<1x4x8xf32>, tensor<4x1x4xf32>, tensor<4xf32>,
-          tensor<1x4x3xf32>)
+      ins(%input, %weight : tensor<1x4x8xf32>, tensor<4x1x4xf32>)
+      bias(%bias : tensor<4xf32>)
+      past_state(%past : tensor<1x4x3xf32>)
       outs(%y_init, %s_init : tensor<1x4x8xf32>, tensor<1x4x3xf32>)
       {activation = "none", ndim = 1 : i64}
       : tensor<1x4x8xf32>, tensor<1x4x3xf32>
@@ -71,9 +71,9 @@ func.func @causal_conv_silu(
     %y_init: tensor<1x4x8xf16>, %s_init: tensor<1x4x3xf16>)
     -> (tensor<1x4x8xf16>, tensor<1x4x3xf16>) attributes {rock.kernel} {
   %y, %s = hip.causal_conv_with_state(%ctx)
-      ins(%input, %weight, %bias, %past :
-          tensor<1x4x8xf16>, tensor<4x1x4xf16>, tensor<4xf16>,
-          tensor<1x4x3xf16>)
+      ins(%input, %weight : tensor<1x4x8xf16>, tensor<4x1x4xf16>)
+      bias(%bias : tensor<4xf16>)
+      past_state(%past : tensor<1x4x3xf16>)
       outs(%y_init, %s_init : tensor<1x4x8xf16>, tensor<1x4x3xf16>)
       {activation = "silu"}
       : tensor<1x4x8xf16>, tensor<1x4x3xf16>
@@ -93,9 +93,9 @@ func.func @causal_conv_channels_last(
     %y_init: tensor<1x8x4xf32>, %s_init: tensor<1x4x3xf32>)
     -> (tensor<1x8x4xf32>, tensor<1x4x3xf32>) attributes {rock.kernel} {
   %y, %s = hip.causal_conv_with_state(%ctx)
-      ins(%input, %weight, %bias, %past :
-          tensor<1x8x4xf32>, tensor<4x1x4xf32>, tensor<4xf32>,
-          tensor<1x4x3xf32>)
+      ins(%input, %weight : tensor<1x8x4xf32>, tensor<4x1x4xf32>)
+      bias(%bias : tensor<4xf32>)
+      past_state(%past : tensor<1x4x3xf32>)
       outs(%y_init, %s_init : tensor<1x8x4xf32>, tensor<1x4x3xf32>)
       {channels_last = true}
       : tensor<1x8x4xf32>, tensor<1x4x3xf32>
@@ -115,9 +115,9 @@ func.func @causal_conv_outlined(
   %y_init = tensor.empty() : tensor<1x4x8xf32>
   %s_init = tensor.empty() : tensor<1x4x3xf32>
   %y, %s = hip.causal_conv_with_state(%ctx)
-      ins(%input, %weight, %bias, %past :
-          tensor<1x4x8xf32>, tensor<4x1x4xf32>, tensor<4xf32>,
-          tensor<1x4x3xf32>)
+      ins(%input, %weight : tensor<1x4x8xf32>, tensor<4x1x4xf32>)
+      bias(%bias : tensor<4xf32>)
+      past_state(%past : tensor<1x4x3xf32>)
       outs(%y_init, %s_init : tensor<1x4x8xf32>, tensor<1x4x3xf32>)
       : tensor<1x4x8xf32>, tensor<1x4x3xf32>
   return %y, %s : tensor<1x4x8xf32>, tensor<1x4x3xf32>
