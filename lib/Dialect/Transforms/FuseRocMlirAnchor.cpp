@@ -13,6 +13,7 @@
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
+#include <llvm/ADT/STLExtras.h>
 #include <llvm/ADT/SmallVectorExtras.h>
 #include <llvm/Support/Debug.h>
 #include <mlir/Analysis/TopologicalSortUtils.h>
@@ -59,6 +60,16 @@ std::optional<Decomposition> getAnchorKind(Operation *op) {
                ? std::optional(Decomposition::QLinearMatMul)
                : std::nullopt;
   if (!isAnchorOp(op))
+    return std::nullopt;
+  // An f64 dot stays on hipBLASLt as HIP_R_64F. rocMLIR's blockwise load
+  // rejects f64.
+  auto elementIsF64 = [](Type type) {
+    auto shaped = dyn_cast<ShapedType>(type);
+    Type element = shaped ? shaped.getElementType() : type;
+    return element.isF64();
+  };
+  if (llvm::any_of(op->getOperandTypes(), elementIsF64) ||
+      llvm::any_of(op->getResultTypes(), elementIsF64))
     return std::nullopt;
   if (auto conv = dyn_cast<ConvOp>(op); conv && planDequantizedConv(conv))
     return Decomposition::DequantizedConv;

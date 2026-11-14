@@ -47,27 +47,22 @@ def _make_mha_model(
     head_dim: int,
     scale: float = 0.0,
     unidirectional: int = 0,
+    fp32: bool = False,
 ):
-    """Build a self-/cross-attention MHA ONNX model (Q_K_V_BSNH fp16).
+    """Build a self-/cross-attention MHA ONNX model (Q_K_V_BSNH).
 
     Cross-attention is exercised when ``seq_q != seq_kv``. ``scale=0.0`` keeps
     the runtime default (``1/sqrt(head_dim)``) -- matches GQA's convention
-    and the LIT e2e test.
+    and the LIT e2e test. ``fp32=True`` selects float tensors. The runtime
+    kernel accepts fp16 only; float runs through the rocMLIR decomposition.
     """
     hidden = num_heads * head_dim
+    dtype = TensorProto.FLOAT if fp32 else TensorProto.FLOAT16
 
-    query = helper.make_tensor_value_info(
-        "query", TensorProto.FLOAT16, [batch, seq_q, hidden]
-    )
-    key = helper.make_tensor_value_info(
-        "key", TensorProto.FLOAT16, [batch, seq_kv, hidden]
-    )
-    value = helper.make_tensor_value_info(
-        "value", TensorProto.FLOAT16, [batch, seq_kv, hidden]
-    )
-    output = helper.make_tensor_value_info(
-        "output", TensorProto.FLOAT16, [batch, seq_q, hidden]
-    )
+    query = helper.make_tensor_value_info("query", dtype, [batch, seq_q, hidden])
+    key = helper.make_tensor_value_info("key", dtype, [batch, seq_kv, hidden])
+    value = helper.make_tensor_value_info("value", dtype, [batch, seq_kv, hidden])
+    output = helper.make_tensor_value_info("output", dtype, [batch, seq_q, hidden])
 
     # Effective scale forwarded to the runtime: 0.0 means "auto-compute
     # 1/sqrt(head_dim) at runtime" (matches the GQA convention and the
@@ -93,7 +88,9 @@ def _make_mha_model(
     )
 
 
-def _qkv_inputs(batch, seq_q, seq_kv, num_heads, head_dim, seed=42, scale=1.0):
+def _qkv_inputs(
+    batch, seq_q, seq_kv, num_heads, head_dim, seed=42, scale=1.0, fp32=False
+):
     """Sample Q/K/V tensors with a small, reproducible range.
 
     A modest range (`scale` ~ 1.0) keeps softmax inside fp16's safe band and
@@ -101,9 +98,10 @@ def _qkv_inputs(batch, seq_q, seq_kv, num_heads, head_dim, seed=42, scale=1.0):
     """
     rng = np.random.default_rng(seed)
     hidden = num_heads * head_dim
-    q = rng.uniform(-scale, scale, [batch, seq_q, hidden]).astype(np.float16)
-    k = rng.uniform(-scale, scale, [batch, seq_kv, hidden]).astype(np.float16)
-    v = rng.uniform(-scale, scale, [batch, seq_kv, hidden]).astype(np.float16)
+    dtype = np.float32 if fp32 else np.float16
+    q = rng.uniform(-scale, scale, [batch, seq_q, hidden]).astype(dtype)
+    k = rng.uniform(-scale, scale, [batch, seq_kv, hidden]).astype(dtype)
+    v = rng.uniform(-scale, scale, [batch, seq_kv, hidden]).astype(dtype)
     return q, k, v
 
 
@@ -193,3 +191,37 @@ class TestMultiHeadAttention:
         # Slightly more forgiving thresholds at hidden=4096 because the
         # softmax + Value-GEMM accumulation stretches fp16 precision.
         compare_outputs(actual, expected, atol=2e-2, rtol=2e-2, cos_threshold=0.998)
+
+    @pytest.mark.parametrize(
+        "fp32,seq_q,seq_kv",
+        [
+            # f16 decode. Query sequence 1 is not the flash prefill path.
+            (False, 1, 4),
+            # f32 prefill. The runtime MultiHeadAttention kernel is fp16-only,
+            # so this executes only after the rocMLIR decomposition.
+            (True, 4, 4),
+        ],
+    )
+    def test_mha_rocmlir_decomposed(
+        self, model_runner, monkeypatch, fp32, seq_q, seq_kv
+    ):
+        """Static attention with the rocMLIR pipeline forced on.
+
+        FileCheck covers the split. This runs it: f16 query sequence 1, and
+        an f32 self-attention. An f16 prefill with a small head dim stays on
+        the runtime flash path and is covered by the other tests.
+        """
+        monkeypatch.setenv("HIPDNN_EP_ROCMLIR", "1")
+        batch, num_heads, head_dim = 1, 2, 8
+        model = _make_mha_model(
+            batch,
+            seq_q,
+            seq_kv,
+            num_heads,
+            head_dim,
+            fp32=fp32,
+        )
+        q, k, v = _qkv_inputs(batch, seq_q, seq_kv, num_heads, head_dim, fp32=fp32)
+        actual, expected = model_runner.run_sample(model, [q, k, v])
+        assert np.isfinite(actual[0]).all()
+        compare_outputs(actual, expected, atol=1e-2, rtol=1e-2, cos_threshold=0.999)

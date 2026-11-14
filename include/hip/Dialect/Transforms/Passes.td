@@ -313,6 +313,31 @@ def ConvertHipToTosaPass : Pass<"convert-hip-to-tosa", "mlir::func::FuncOp"> {
   ];
 }
 
+def DecomposeMultiHeadAttentionPass
+    : Pass<"hip-decompose-multi-head-attention", "mlir::func::FuncOp"> {
+  let summary = "Rewrite static hip.multi_head_attention into two matmuls and a softmax";
+  let description = [{
+    Replaces a statically shaped hip.multi_head_attention that has separate
+    query, key, and value tensors with the graph MIGraphX builds at parse
+    time: reshape and transpose into [batch, heads, seq, dim], a query-key
+    hip.matmul, a scale hip.mul, hip.miopen.softmax, and a value hip.matmul.
+
+    hip-fuse-rocmlir then outlines each matmul. The softmax stays between
+    them, because it is not a pointwise epilogue. The element type must be
+    f16 or f32. bf16 is an error in this pass: the runtime kernel receives
+    only a byte size and would read bf16 as f16. An f16
+    prefill (query sequence longer than one, value head dim matching query,
+    padded head dim at most 256) stays on hip.multi_head_attention: wave32
+    runs it as flash attention and this pass cannot see the device. Packed
+    QKV, bias, masks, past key or value, causal masking, dynamic shapes, and
+    any other float type stay on that runtime kernel too.
+  }];
+  let dependentDialects = [
+    "mlir::hip::HipDialect",
+    "mlir::tensor::TensorDialect"
+  ];
+}
+
 def DecomposeConvTransposePass
     : Pass<"hip-decompose-conv-transpose", "mlir::func::FuncOp"> {
   let summary = "Rewrite hip.conv_transpose into stride-1 hip.conv residues";
