@@ -190,7 +190,8 @@ Result run_config(Ort::Env &env, const std::string &model,
   Ort::Session session(env, std::wstring(model.begin(), model.end()).c_str(),
                        so);
   Ort::AllocatorWithDefaultOptions alloc;
-  auto cpu_mem = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+  auto cpu_mem =
+      Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
 
   std::vector<std::string> in_names, out_names;
   for (size_t i = 0; i < session.GetInputCount(); ++i)
@@ -209,9 +210,9 @@ Result run_config(Ort::Env &env, const std::string &model,
     std::string present = in_names[i];
     present.replace(present.find("past_key_values"),
                     std::strlen("past_key_values"), "present");
-    kv.emplace(present, make_input(in_names[i], session.GetInputTypeInfo(i),
-                                   {0, prompt_len}, capacity, tokens,
-                                   kv_storage));
+    kv.emplace(present,
+               make_input(in_names[i], session.GetInputTypeInfo(i),
+                          {0, prompt_len}, capacity, tokens, kv_storage));
   }
 
   Result r;
@@ -256,8 +257,7 @@ Result run_config(Ort::Env &env, const std::string &model,
       // Compare only the last position — the one generation uses to pick the
       // next token — so the prefill and decode steps are judged the same way.
       auto all = to_floats(values[i]);
-      r.steps.push_back(std::vector<float>(
-          all.end() - r.vocab, all.end()));
+      r.steps.push_back(std::vector<float>(all.end() - r.vocab, all.end()));
     }
   }
   std::printf("[%s] done\n", label.c_str());
@@ -348,20 +348,20 @@ int main(int argc, char **argv) {
         kEpName, std::wstring(ep_lib.begin(), ep_lib.end()));
 
     std::vector<Result> results;
-    results.push_back(
-        run_config(env, model, "GPU", "0", false, tokens, prompt_len, capacity));
-    results.push_back(
-        run_config(env, model, "NPU", "1", false, tokens, prompt_len, capacity));
+    results.push_back(run_config(env, model, "GPU", "0", false, tokens,
+                                 prompt_len, capacity));
+    results.push_back(run_config(env, model, "NPU", "1", false, tokens,
+                                 prompt_len, capacity));
     if (with_cpu)
-      results.push_back(
-          run_config(env, model, "CPU", "0", true, tokens, prompt_len, capacity));
+      results.push_back(run_config(env, model, "CPU", "0", true, tokens,
+                                   prompt_len, capacity));
 
     const char *step_names[2] = {"prefill", "decode"};
     bool pass = true;
     std::printf("\nprompt %lld tokens, vocab %lld; thresholds: cosine >= "
                 "%.4f per step, top-1 >= %.0f%% over all positions\n",
-                (long long)prompt_len, (long long)results[0].vocab,
-                min_cosine, min_top1 * 100);
+                (long long)prompt_len, (long long)results[0].vocab, min_cosine,
+                min_top1 * 100);
     std::printf("%-12s %-8s %10s %12s %12s %10s %10s\n", "compare", "step",
                 "cosine", "max|diff|", "max|ref|", "top-1", "worst gap");
     // Top-1 is judged over every position together: one decode position alone
