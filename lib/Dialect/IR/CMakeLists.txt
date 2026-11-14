@@ -4,6 +4,7 @@
 ##
 
 add_library(HipDialectIR STATIC
+  HipCastCanonicalize.cpp
   HipCausalConvCanonicalize.cpp
   HipConstantData.cpp
   HipDialect.cpp
