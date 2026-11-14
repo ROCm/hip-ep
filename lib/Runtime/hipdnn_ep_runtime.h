@@ -1454,6 +1454,14 @@ int wrap_swiglu(RuntimeState *state, void *gate, void *up, void *output,
 int wrap_swiglu_promoted(RuntimeState *state, void *gate, void *up,
                          void *output, int64_t num_elements, int64_t data_type);
 
+// Clamped SwiGLU (hip.swiglu with activation_alpha / activation_beta /
+// swiglu_limit): g = min(gate, limit), u = clamp(up, -limit, limit),
+// output = g / (1 + exp(-alpha * g)) * (u + beta), in FP32. limit may be
+// +inf. FLOAT, HALF and BFLOAT16.
+int wrap_swiglu_clamped(RuntimeState *state, void *gate, void *up, void *output,
+                        int64_t num_elements, int64_t data_type, float alpha,
+                        float beta, float limit);
+
 // Window-pool wrapper (uses custom HIP kernel).
 // Generic ONNX MaxPool / AveragePool / LpPool over (N, C, D_1[, D_2[, D_3]])
 // input with row-major output layout.  `pool_mode` (HIPDNN_EP_POOL_*) selects

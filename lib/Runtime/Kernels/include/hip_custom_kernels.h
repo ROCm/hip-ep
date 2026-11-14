@@ -885,6 +885,15 @@ HIP_KERNEL_API int hip_swiglu_promoted(void *stream, const void *gate,
                                       const void *up, void *output,
                                       int64_t num_elements, int hip_dtype);
 
+// Clamped SwiGLU, computed in FP32 and rounded once:
+//   g = min(gate, limit), u = clamp(up, -limit, limit),
+//   output = g / (1 + exp(-alpha * g)) * (u + beta).
+// limit may be +inf. HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16, HIP_DTYPE_BFLOAT16.
+HIP_KERNEL_API int hip_swiglu_clamped(void *stream, const void *gate,
+                                      const void *up, void *output,
+                                      int64_t num_elements, int hip_dtype,
+                                      float alpha, float beta, float limit);
+
 /* =========================================================================
  * Softplus activation
  * =========================================================================

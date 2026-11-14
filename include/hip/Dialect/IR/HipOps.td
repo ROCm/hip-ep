@@ -2966,11 +2966,29 @@ def Hip_SwigluOp : Hip_DpsOp_AutoReify<"swiglu"> {
     bf16, and f64. With promote_activation, f16 inputs and output use f32
     sigmoid and multiply intermediates; only the final result rounds to f16.
 
+    `activation_alpha`, `activation_beta` and `swiglu_limit` select the
+    clamped form `hip.qmoe` applies between its projections (GPT-OSS's
+    SwiGLU), element-wise:
+
+      g = min(gate, swiglu_limit)
+      u = clamp(up, -swiglu_limit, swiglu_limit)
+      output = g / (1 + exp(-activation_alpha * g)) * (u + activation_beta)
+
+    `swiglu_limit` 0 (the default) clamps nothing. With the defaults (alpha
+    1, beta 0, limit 0) the op is the plain SwiGLU above. The clamped form
+    computes in f32 and rounds once, for f16, bf16 and f32; it does not
+    combine with promote_activation.
+
     Example:
     ```mlir
     hip.swiglu(%ctx) ins(%gate, %up : memref<3x4xf16, 1>,
                                       memref<3x4xf16, 1>)
                        outs(%output : memref<3x4xf16, 1>)
+    hip.swiglu(%ctx) ins(%gate, %up : memref<3x4xf32, 1>,
+                                      memref<3x4xf32, 1>)
+                       outs(%output : memref<3x4xf32, 1>)
+                       {activation_alpha = 1.702 : f32,
+                        activation_beta = 1.0 : f32, swiglu_limit = 7.0 : f32}
     ```
   }];
 
@@ -2979,8 +2997,34 @@ def Hip_SwigluOp : Hip_DpsOp_AutoReify<"swiglu"> {
     Hip_TensorOrMemRef:$gate,
     Hip_TensorOrMemRef:$up,
     Hip_TensorOrMemRef:$output,
-    DefaultValuedAttr<BoolAttr, "false">:$promote_activation
+    DefaultValuedAttr<BoolAttr, "false">:$promote_activation,
+    DefaultValuedAttr<F32Attr, "1.0f">:$activation_alpha,
+    DefaultValuedAttr<F32Attr, "0.0f">:$activation_beta,
+    DefaultValuedAttr<F32Attr, "0.0f">:$swiglu_limit
   );
+
+  // Plain SwiGLU, the clamped form's attributes at their defaults.
+  let builders = [
+    OpBuilder<(ins "::mlir::TypeRange":$result_tensors, "::mlir::Value":$ctx,
+                   "::mlir::Value":$gate, "::mlir::Value":$up,
+                   "::mlir::Value":$output,
+                   CArg<"bool", "false">:$promote_activation), [{
+      build($_builder, $_state, result_tensors, ctx, gate, up, output,
+            promote_activation, ::llvm::APFloat(1.0f), ::llvm::APFloat(0.0f),
+            ::llvm::APFloat(0.0f));
+    }]>
+  ];
+
+  let extraClassDeclaration = [{
+    /// True when the clamped form's attributes differ from plain SwiGLU's.
+    bool isClamped() {
+      return getActivationAlpha().convertToFloat() != 1.0f ||
+             getActivationBeta().convertToFloat() != 0.0f ||
+             getSwigluLimit().convertToFloat() != 0.0f;
+    }
+  }];
+
+  let hasVerifier = 1;
 
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(` $gate `,` $up `:` type($gate) `,` type($up) `)`
