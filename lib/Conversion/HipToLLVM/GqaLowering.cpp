@@ -264,6 +264,30 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
       }
     }
 
+    // Dynamic or packed cache widths need a separate ABI: the logical head
+    // dimension from Q cannot describe their physical allocation.
+    bool widthABI = queryType.isDynamicDim(2);
+    int64_t logicalWidth =
+        widthABI ? -1 : queryType.getDimSize(2) / headDimDivisor;
+    for (Value cache : {op.getPastKey(), op.getPastValue(), op.getPresentKey(),
+                        op.getPresentValue()}) {
+      if (!cache)
+        continue;
+      auto type = cast<MemRefType>(cache.getType());
+      if (type.getRank() == 4 &&
+          (type.isDynamicDim(3) || type.getDimSize(3) != logicalWidth))
+        widthABI = true;
+    }
+    auto cacheWidth = [&](Value original, Value converted) -> Value {
+      if (!original)
+        return createI64Const(0);
+      auto type = cast<MemRefType>(original.getType());
+      // v1 requires BNSD caches. Other ranks cannot accidentally pass width=66.
+      return type.getRank() == 4
+                 ? getMemRefDimSize(type, 3, converted, rewriter, loc)
+                 : createI64Const(0);
+    };
+
     // key_bias [B or 1, T]: one fp16 row per batch entry, applied by the fused
     // kernels per key. The runtime checks T against the KV length it scores.
     Value keyBiasPtr = nullPtr;
@@ -279,8 +303,8 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
           getMemRefDimSize(kbType, 1, adaptor.getKeyBias(), rewriter, loc);
     }
 
-    // Both runtime entry points accept the optional host length and key_bias.
-    SmallVector<Type, 48> paramTypes = {
+    // Dense arguments plus the packed-width and FP16 contract.
+    SmallVector<Type, 53> paramTypes = {
         ptrType, // state
         i32Type, // op_state_slot
         // Inputs (14 pointers - some may be nullptr)
@@ -336,12 +360,23 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         i64Type  // key_bias_len
     };
 
-    FailureOr<LLVM::LLVMFuncOp> funcOp =
-        LLVM::lookupOrCreateFn(rewriter, module, callee, paramTypes, i32Type);
+    bool fp16Tensors = true;
+    for (Value value : {op.getQuery(), op.getKey(), op.getValue(),
+                        op.getOutput(), op.getPastKey(), op.getPastValue(),
+                        op.getPresentKey(), op.getPresentValue()})
+      fp16Tensors &=
+          !value || cast<MemRefType>(value.getType()).getElementType().isF16();
+    if (widthABI) {
+      paramTypes.append(4, i64Type);
+      paramTypes.push_back(i32Type);
+    }
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, widthABI ? "wrap_group_query_attention_v5" : callee,
+        paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 45> args = {
+    SmallVector<Value, 53> args = {
         statePtr,
         // Per-instance op-state slot (threaded by --assign-op-state-slots)
         getOpStateSlotValue(op, rewriter, loc),
@@ -362,6 +397,16 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         // Key bias (3 values)
         keyBiasPtr, keyBiasBatchVal, keyBiasLenVal};
 
+    if (widthABI) {
+      args.push_back(cacheWidth(op.getPastKey(), adaptor.getPastKey()));
+      args.push_back(cacheWidth(op.getPastValue(), adaptor.getPastValue()));
+      args.push_back(cacheWidth(op.getPresentKey(), adaptor.getPresentKey()));
+      args.push_back(
+          cacheWidth(op.getPresentValue(), adaptor.getPresentValue()));
+      args.push_back(LLVM::ConstantOp::create(
+          rewriter, loc, i32Type,
+          rewriter.getI32IntegerAttr(fp16Tensors ? 1 : 0)));
+    }
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 
     rewriter.eraseOp(op);

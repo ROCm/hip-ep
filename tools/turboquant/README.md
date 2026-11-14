@@ -1,0 +1,357 @@
+<!--
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+Licensed under the MIT License.
+-->
+# TurboQuant setup and validation
+
+This is an experimental, explicit-opt-in MSE-only QR codec for the Qwen
+24-query-head / 4-KV-head / dimension-256 geometry. Read
+[`turboquant-kv-cache.md`](../../docs/design/turboquant-kv-cache.md) and the
+[known limitations](../../docs/design/turboquant-kv-cache.md#validation-and-known-limitations) before use.
+The strict encoder gate and some full-model comparisons currently fail; this
+is not a production-quality accuracy claim.
+
+## Enable TurboQuant on the tested Windows setup
+
+This walkthrough covers Radeon 8060S (`gfx1151`), batch one, Qwen3.8-27B with
+24 query heads, four KV heads, head dimension 256, FP16 activations/cache carrier,
+and external RoPE. INT4 **weights** alone do not enable compressed KV. The
+dependency stack follows HIP-EP main: **GenAI 0.19.0 + PR #2875 and ORT
+1.31.0**, as pinned in [Windows dependencies](../../.github/workflows/windows-deps.yml)
+and [`cmake/deps.txt`](../../cmake/deps.txt). The local qualification uses Python
+3.13, NumPy 2.4.3, ONNX 1.19.1 and TheRock 7.15.26333. The Python `onnx` package
+is intentionally unpinned in HIP-EP; it is separate from the ORT SDK/runtime.
+For the recorded three-configuration timing and memory campaign, use the
+[performance report](../../docs/design/turboquant-current-performance.md) and
+[manual performance command](../../test/long_context/README.md#performance-only-campaign-windows).
+The refreshed campaign uses GenAI 0.19.0 / ORT 1.31.0 and the same installed
+HIP-EP/kernel DLLs for all three modes: kernels through 256K, single-turn model
+runs through 64K, and eight 4K appends, without warm-up. The previous GenAI 0.17
+measurements remain in Git history. Accuracy and judge findings are separate.
+
+Older performance tables used ORT 1.30 and are not current-main measurements.
+Other configurations need separate validation. See the
+[Windows build prerequisites](../../docs/quick_start.md) for MSVC, Ninja, SDK and
+dependency setup. This walkthrough is not a new Linux qualification.
+
+### 1. Select source, environment and paths
+
+Use the upstream `users/rajeevp/turboquant-kv4` branch. Ring PR #1366 is
+already merged into main; this branch adds the packed cache implementation. Work in an isolated directory so existing benchmark
+installations remain unchanged. The commands below are **PowerShell** commands
+run from an x64 MSVC developer environment with CMake and Ninja on `PATH`.
+Choose an already prepared Python environment with the matching ORT/GenAI and
+ROCm packages. The Windows test scripts expect `_rocm_sdk_core` and
+`_rocm_sdk_devel` under that interpreter's base `Lib/site-packages` directory.
+
+```powershell
+$WorkRoot = 'C:/work/hip-ep-turboquant' # Change to your workspace; source is <work>/hip-ep.
+$Repo = "$WorkRoot/hip-ep"
+$Python = "$WorkRoot/venv/Scripts/python.exe"
+$HipBuild = "$WorkRoot/build/turboquant"
+$HipInstall = "$WorkRoot/install/turboquant"
+$OrtSdk = "$WorkRoot/deps/onnxruntime-sdk/onnxruntime-win-x64-1.31.0"
+$BasePython = & $Python -c 'import sys; print(sys.base_prefix)'
+$RocmDevel = "$BasePython/Lib/site-packages/_rocm_sdk_devel"
+$RocmCore = "$BasePython/Lib/site-packages/_rocm_sdk_core"
+Set-Location $Repo
+$env:OMP_NUM_THREADS = "2"
+$env:OPENBLAS_NUM_THREADS = "2"
+& $Python -c 'import numpy, torch, onnxruntime, onnxruntime_genai; print(numpy.__version__, numpy.__file__); print(torch.__version__, onnxruntime.__version__, onnxruntime.__file__, onnxruntime_genai.__version__)'
+```
+
+Use the compatible PyTorch already supplied with the ROCm environment; the codec
+generator only uses its CPU operations. Do not upgrade a working ROCm/ORT/GenAI
+stack merely to run this command. Stop on a failed command before continuing.
+
+Use the established Ring Python dependency paths, including its NumPy/OpenBLAS
+build, instead of inheriting a different Conda NumPy or upgrading dependencies.
+Verify imported paths as well as versions. Required setup packages include
+SciPy, pytest, ONNX and psutil. Do not use `KMP_DUPLICATE_LIB_OK` to bypass an
+OpenMP conflict. HIP-EP builds against the ORT 1.31 SDK and uses the 1.31 runtime.
+Build GenAI against that same SDK and build its matching Python wheel as in
+step 3. Do not reuse a GenAI 0.17 binding with the 0.19 core DLL.
+
+### 2. Build Ring-KV plus TurboQuant and generate the codec
+
+```powershell
+& $Python build.py --hip_arch gfx1151 --config Release --cmake_generator Ninja `
+  --build_dir $HipBuild --install_dir $HipInstall --therock_dist $RocmDevel `
+  --cmake_extra_defines HIP_EP_ENABLE_RING_ATTENTION=ON `
+  --cmake_extra_defines HIP_EP_ENABLE_TURBOQUANT=ON `
+  --cmake_extra_defines ENABLE_ROCMLIRTRITON=OFF `
+  --cmake_extra_defines "FETCHCONTENT_SOURCE_DIR_ONNXRUNTIME=$OrtSdk" `
+  --cmake_extra_defines HIP_EP_GENERATE_TQ_CODEC=ON `
+  --cmake_extra_defines "Python3_EXECUTABLE=$Python" `
+  --cmake_extra_defines "HIP_EP_TQ_CODEC_DIR=$WorkRoot/reference/codec"
+```
+
+`build.py` configures, builds, installs and runs its default checks. Supply any
+local dependency prefixes as described in the Windows quick start. The codec
+target produces `reference/codec/{codec.bin,constants.npz,manifest.json}` and
+installs `codec.bin`/`manifest.json` under
+`$HipInstall/share/hip-ep/turboquant`. Generation does **not** enable quantization
+by itself; step 4 supplies the runtime options. Both build options default to ON.
+Ordinary inference still uses upstream GQA. Set `HIPDNN_EP_USE_RING_ATTENTION=1`
+before process startup for dense Ring; packed-cache options explicitly select
+Ring prefill plus TurboQuant decode/append.
+
+After updating from the earlier v3/v4 packed-width builds, regenerate
+compiled model/session artifacts with this build. The v5 packed-cache ABI now
+includes main's optional host sequence length and per-key bias arguments; old compiled artifacts are not
+binary compatible. Codec files and the packed row format are unchanged.
+
+With `HIP_EP_ENABLE_RING_ATTENTION=OFF`, TurboQuant append is unavailable.
+In that build, and in architecture slices where Ring is disabled, `hip_tq4_prefill_workspace` returns zero and `hip_tq4_prefill` returns
+`hipErrorNotSupported` without accessing GPU memory. These exports must remain
+linkable even when `ring_gqa.hip` is omitted. To check such a library (with the
+ROCm runtime on the loader path), run:
+
+```powershell
+& $Python "$Repo/tools/turboquant/check_unavailable_append.py" --library "$HipInstall/bin/custom_kernels_gfx11-generic.dll" --dll-dir "$RocmCore/bin"
+```
+
+Use a library built with Ring unavailable for this check, not the enabled
+`gfx1151` library produced above.
+
+For an already configured build, the exact CMake-only generation commands and
+hash checks are in [Generate codec assets](#generate-codec-assets-during-build-or-test-setup).
+
+### 3. Build the same GenAI stack as HIP-EP main
+
+GenAI 0.19 already admits AMDGPU continuous decoding and calls
+`RunGeneratedToken()` before a new prompt append. No TurboQuant companion patch
+is needed. Use main's existing PR #2875, which updates ONNX Runtime Extensions;
+it is not a TurboQuant lifecycle patch. Keep the revision/patch set aligned with
+the dependency workflow if main changes.
+
+From the prepared x64 MSVC developer shell, with NuGet, CMake and Ninja on
+`PATH`, use a fresh source/build/package directory:
+
+```powershell
+$GenaiSource = "$WorkRoot/deps/genai-0.19-ci-src"
+$GenaiBuild = "$WorkRoot/build/genai019-ci131"
+$GenaiPackageRoot = "$WorkRoot/install/genai019_ci131"
+git clone --branch v0.19.0 https://github.com/microsoft/onnxruntime-genai.git $GenaiSource
+$Patch = "$WorkRoot/deps/oga-pr-2875.diff"
+Invoke-WebRequest https://github.com/microsoft/onnxruntime-genai/pull/2875.diff -OutFile $Patch
+git -C $GenaiSource apply --whitespace=nowarn --3way `
+  --exclude='test/*' --exclude='.github/*' --exclude='*.md' $Patch
+Get-FileHash $Patch -Algorithm SHA256
+if (!(Test-Path "$OrtSdk/include/dml_provider_factory.h")) {
+  Invoke-WebRequest 'https://raw.githubusercontent.com/microsoft/onnxruntime/v1.31.0/include/onnxruntime/core/providers/dml/dml_provider_factory.h' `
+    -OutFile "$OrtSdk/include/dml_provider_factory.h"
+}
+& $Python -m pip install requests wheel setuptools packaging
+& $Python "$GenaiSource/build.py" --config Release --cmake_generator Ninja `
+  --use_dml --no_telemetry --ort_home $OrtSdk --skip_tests --skip_examples `
+  --parallel --build_dir $GenaiBuild --cmake_extra_defines ENABLE_TESTS=OFF `
+  "PYTHON_EXECUTABLE=$Python" "Python_EXECUTABLE=$Python"
+$Wheels = @(Get-ChildItem "$GenaiBuild/Release/wheel" -Filter 'onnxruntime_genai_directml-0.19.0-*.whl')
+if ($Wheels.Count -ne 1) { throw 'Expected exactly one matching GenAI wheel' }
+& $Python -m pip install --no-deps --target $GenaiPackageRoot $Wheels[0].FullName
+$env:PYTHONPATH = $GenaiPackageRoot
+& $Python -c 'import onnxruntime as ort, onnxruntime_genai as og; print(ort.__version__, ort.__file__); print(og.__version__, og.__file__)'
+```
+
+Use ORT 1.31.0 for **both** the SDK supplied to the GenAI/HIP-EP builds and the
+runtime loaded by Python. Keep the existing NumPy/ONNX/ROCm environment; `--no-deps`
+prevents the GenAI install from replacing it. The DirectML build option matches
+HIP-EP's Windows dependency workflow; the model still explicitly selects AMDGPU.
+The workflow's source-built SDK contains `dml_provider_factory.h`; the official
+CPU SDK archive may omit it. The command above adds the unchanged header from
+the same ORT release. Use an isolated SDK copy if another build shares yours.
+Local AMDGPU qualification uses the existing ORT 1.31 CPU runtime plus the EP
+plugin; it does not qualify DirectML inference or reproduce every CI build flag.
+The wheel builds the core DLL and Python extension together. Do not copy the
+new DLL into an old package. Verify the imported path is `genai019_ci131` and
+the versions are GenAI 0.19.0 / ORT 1.31.0 before running the integration check.
+Record source commit, applied diff hash, build flags and actual loaded DLLs.
+These checks do not replace GenAI's upstream C++ suite (`ENABLE_TESTS=OFF`).
+
+### 4. Configure the model and runtime
+
+Use a separate copy of the model configuration and preserve the model's other
+keys, graph paths and token metadata. Merge these settings into
+`genai_config.json` (replace the example absolute paths with your installed files):
+
+```json
+{
+  "model": {
+    "decoder": {
+      "session_options": {
+        "session.disable_cpu_ep_fallback": "1",
+        "provider_options": [{"AMDGPU": {
+          "profile": "hip",
+          "config_file": "C:/work/hip-ep-turboquant/install/turboquant/bin/morphizen_config.json",
+          "kvCacheQuantizationBits": "4",
+          "kv_cache_codec": "tq4_mse_qr_v1",
+          "kv_cache_codec_file": "C:/work/hip-ep-turboquant/install/turboquant/share/hip-ep/turboquant/codec.bin"
+        }}]
+      }
+    },
+    "embedding": {
+      "session_options": {
+        "provider_options": [{"AMDGPU": {
+          "profile": "hip",
+          "config_file": "C:/work/hip-ep-turboquant/install/turboquant/bin/morphizen_config.json"
+        }}]
+      }
+    }
+  },
+  "search": {"past_present_share_buffer": true}
+}
+```
+
+All three decoder KV options are required together. Keep the cache carrier FP16
+and shared past/present buffers; GenAI allocates width 66 for the packed 256-wide
+KV rows. Do not convert model weights, rewrite the production ONNX graph or
+manually allocate a second dense history. For the multi-turn test below, the
+harness writes this configuration itself, using the generated work-directory
+codec and capacity 4608. Ordinary applications must choose a capacity that fits
+their history, prompt and requested output within the documented limits.
+
+Set the runtime environment in the same PowerShell session before launching:
+
+```powershell
+$env:AMDGPU_EP_PATH = "$HipInstall/bin/hipgpu.dll"
+$env:THEROCK_DIST = $RocmDevel
+$env:PATH = "$HipInstall/bin;$RocmCore/bin;$RocmDevel/bin;$RocmDevel/lib/llvm/bin;$env:PATH"
+$env:HIPDNN_EP_STRICT = '1'
+$env:OMP_NUM_THREADS = '2'
+$env:OPENBLAS_NUM_THREADS = '2'
+$env:TQ_WORK_ROOT = $WorkRoot
+$env:TQ_INTEGRATION_INSTALL = $HipInstall
+$env:TQ_INTEGRATION_RESULTS = "$WorkRoot/results/integration"
+$env:TQ_APPEND_RESULTS = "$WorkRoot/results/append"
+$env:TQ_MULTITURN_DENSE_CONTROL = '0'
+```
+
+These are process-local settings. Keep the codec fixed for the lifetime of any
+packed cache. To return to dense FP16 KV, start a new generator/cache and remove
+all three KV options; leaving the codec options with quantization disabled is
+rejected. Rewind, beams and batch expansion are outside the qualified scope.
+
+### 5. Check enablement and then run the model
+
+```powershell
+& $Python -m pytest tools/turboquant/test_reference.py tools/turboquant/test_generate_codec.py -q
+& $Python tools/turboquant/check_genai_windows.py
+```
+
+The second command needs no downloaded model: it generates a small ONNX graph
+and checks packed cache allocation, repeated append/decode, unchanged old rows,
+and invalid-codec rejection. Inspect `results/integration/receipt.json` and
+`run.log`; the receipt must report `status: passed`.
+
+For full-model checks, continue with the [manual test guide](../../test/long_context/README.md).
+
+## Generate codec assets during build or test setup
+
+Only generator source is checked in. `generate_codec.py` creates `codec.bin`,
+`constants.npz` and `manifest.json` on CPU using the standalone shared QR seed-42
+rotation and 16-centroid Gaussian Lloyd-Max recipe (source revision
+`a6218a9b99ecabd3028da670fb0f85bb1114e552`). Install NumPy, SciPy and PyTorch
+in the selected Python environment; no GPU or model weights are required.
+
+For an existing HIP-EP CMake build, configure with
+`-DHIP_EP_GENERATE_TQ_CODEC=ON -DPython3_EXECUTABLE=/path/to/python`, then run:
+
+```console
+cmake --build <build-dir> --target turboquant-codec
+cmake --install <build-dir> --component turboquant-codec
+```
+
+When enabled, the normal build also generates the assets. They default to
+`<build-dir>/turboquant`; `HIP_EP_TQ_CODEC_DIR` can select another output directory.
+Installation puts the runtime `codec.bin` and its manifest under
+`<install-prefix>/share/hip-ep/turboquant`. Set `kv_cache_codec_file` to that
+installed file. `constants.npz` stays in the build tree for tests. The option
+defaults to OFF, so normal HIP-EP builds gain no Torch/SciPy/NumPy dependency.
+
+For the GPU checks' external work layout, generate directly into its codec
+directory (or set `HIP_EP_TQ_CODEC_DIR` to that same absolute path):
+
+```console
+python tools/turboquant/generate_codec.py --output-dir <work>/reference/codec
+python -m pytest tools/turboquant/test_reference.py tools/turboquant/test_generate_codec.py -q
+```
+
+The manifest records the seed, package versions, generator hash and output hashes.
+The generator refuses to replace different existing constants; use a new output
+directory for a new codec. The current Windows environment reproduces the
+historically measured runtime codec SHA-256 exactly:
+`a2a312f645ba0a7970bda404fb4f1e1f15a01c2dd18c257b6a4c83397e806a3c`.
+Pass `--expected-sha256 <hash>` to enforce an archived codec before writing files.
+QR results can differ across platforms/library versions: preserve and compare
+codec hashes when reproducing measurements, and never mix an existing packed
+cache with another codec. Historical benchmark receipts retain their original
+hashes; a new codec needs its own numerical validation.
+
+`write_codec.py <constants.npz> <codec.bin>` remains available to serialize
+already-exported constants without regenerating them. The older standalone
+`fixtures.npz` is a local diagnostic artifact; the current tests generate their
+input tensors and do not need it.
+
+## Tests and measurements
+
+Use the same installed build for all three paths. The commands below serve
+separate purposes; the long model campaign runs only when explicitly invoked.
+
+| Command / file | Purpose |
+| --- | --- |
+| `python -m pytest tools/turboquant/test_reference.py tools/turboquant/test_generate_codec.py -q` | CPU codec mathematics, packing and generated-asset provenance. |
+| `check_hip.py` | Strict GPU encoder bytes, decode oracle, bounds and allocation guards. The known centroid-boundary failure remains a failure. |
+| `check_hip_extended.py` | Guarded decode checks through 64K and paired Ring comparisons. Add `--long` for 128K, 128K+128 and 256K. |
+| `check_append.py` | Mixed packed-history/FP16-tail attention against FP64, chunk boundaries and unchanged old cache rows. |
+| `check_genai_windows.py` | Small generated-model integration, repeated append/decode and invalid-codec rejection. |
+| `check_unavailable_append.py` | Export/admission checks for a build without the Ring append implementation; see step 2. |
+| [Manual model tests](../../test/long_context/README.md) | One runner for matched-history and free-running conversations, optional BF16 reference and blinded judge packets. |
+| [Performance campaign](../../test/long_context/README.md#performance-only-campaign-windows) | One runner for kernel, single-turn model and eight-turn timing/memory tables. |
+
+For direct HIP checks set `TQ_WORK_ROOT` to the work directory,
+`TQ_TEST_LIBRARY` and `TQ_RING_LIBRARY` to the installed custom-kernel library,
+and `TQ_HIP_RUNTIME` to the HIP runtime. Initialize the SDK DLL search directories
+on Windows. `hip_test_utils.py` supplies shared ctypes bindings and guarded
+allocations; `reference.py` supplies the independent CPU oracle.
+
+`check_append.py` compares new packed bytes with the frozen encoder selected by
+`TQ_ENCODER_BASELINE_LIBRARY`. Its default is `<work>/install/turboquant`.
+Select an independently preserved library explicitly when validating a new
+encoder. `TQ_APPEND_RESULTS` selects the result directory. Passing that regression
+does not imply strict CPU/GPU encoder byte parity.
+
+For the full model use `amd/Qwen3.8-27B_gpuep_1.0_gpu_128`, revision
+`9b37cf56a001720ba7ce98ff80ea651b02e5931b`, in `<work>/models/qwen-original`.
+Verify the downloaded model files and retain their hashes; runners hard-link
+weights into fresh case directories on the same volume. Keep generated models,
+codec files, logits, answers and receipts outside Git.
+
+### Troubleshooting
+
+| Symptom | Check |
+| --- | --- |
+| AMDGPU continuous decoding rejected | Imported GenAI 0.19 package/core and the dependency setup in step 3. |
+| Missing/invalid codec | All three decoder options, absolute codec path and manifest/hash. |
+| Unsupported geometry/device | gfx1151, Ring build, batch one, H24/G4/D256, FP16 and shared buffers. |
+| Wrong DLL or missing dependency | `AMDGPU_EP_PATH`, SDK DLL search directories and receipt library hashes. |
+| Strict encoder failure at 4K | Preserve the recorded discrepancy; do not weaken the assertion. |
+
+## External dependencies
+
+TurboQuant needs **no additional OGA or ONNX Runtime source patch**, ONNX schema
+change, cache allocator change, weight conversion or production graph rewrite
+on the HIP-EP main dependency stack. Keep main's OGA PR #2875 patch; no workflow
+changes are needed for this feature.
+
+| GenAI 0.19 code | Existing support used by TurboQuant |
+| --- | --- |
+| [`src/generator/generators.cpp`](https://github.com/microsoft/onnxruntime-genai/blob/v0.19.0/src/generator/generators.cpp) | AMDGPU continuous decoding; both `AppendTokens` overloads flush a pending selected token through `RunGeneratedToken()` before starting the next turn. |
+| [`src/models/io/quantized_kv_cache.cpp`](https://github.com/microsoft/onnxruntime-genai/blob/v0.19.0/src/models/io/quantized_kv_cache.cpp) | Four-bit cache allocation: D256 becomes 66 FP16 carrier elements / 132 bytes per row. |
+| [`src/ep/amdgpu/interface.cpp`](https://github.com/microsoft/onnxruntime-genai/blob/v0.19.0/src/ep/amdgpu/interface.cpp) | Reads AMDGPU `kvCacheQuantizationBits` for cache allocation. |
+
+The old GenAI 0.17 companion patches are obsolete on this stack and have been
+removed. Do not port their decoding-strategy override to 0.19: pending-token
+handling now belongs to `Generator::AppendTokens` itself. Application
+`genai_config.json`, DLL search paths, downloaded SDKs, environments and generated
+codec/model artifacts remain setup inputs, not external source patches.
