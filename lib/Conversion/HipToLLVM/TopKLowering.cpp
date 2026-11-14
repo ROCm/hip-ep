@@ -34,7 +34,9 @@ static Value buildShapeArray(MemRefType type, Value memref, Location loc,
 
 // hip.top_k(ctx, x, k, values, indices, axis, largest, sorted)
 //   -> wrap_top_k(state, x, k, values, indices, axis, largest, sorted, rank,
-//                 x_shape_ptr, num_elements, data_type)
+//                 x_shape_ptr, num_elements, data_type, k_static)
+// The outputs' axis extent is K, so a static extent lets the runtime skip the
+// synchronous read of `k`.
 struct TopKOpLowering : public ConvertOpToLLVMPattern<TopKOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -81,19 +83,26 @@ struct TopKOpLowering : public ConvertOpToLLVMPattern<TopKOp> {
     Value dataTypeVal =
         createI64Const(getHipdnnDataType(xType.getElementType()));
 
-    SmallVector<Type, 12> paramTypes = {
+    auto valuesType = cast<MemRefType>(op.getValues().getType());
+    Value kStaticVal = createI64Const(
+        valuesType.isDynamicDim(axisAttr) ? -1
+                                          : valuesType.getDimSize(axisAttr));
+
+    SmallVector<Type, 13> paramTypes = {
         ptrType, ptrType, ptrType, ptrType, ptrType, // state, x, k, values, idx
         i64Type, i64Type, i64Type,                   // axis, largest, sorted
-        i64Type, ptrType, i64Type, i64Type};         // rank, shape, num, dtype
+        i64Type, ptrType, i64Type, i64Type,          // rank, shape, num, dtype
+        i64Type};                                    // k_static
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapTopK, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value> args = {statePtr,   xPtr,      kPtr,        valuesPtr,
-                               indicesPtr, axisVal,   largestVal,  sortedVal,
-                               rankVal,    xShapeArr, numElements, dataTypeVal};
+    SmallVector<Value> args = {
+        statePtr,   xPtr,      kPtr,        valuesPtr,   indicesPtr,
+        axisVal,    largestVal, sortedVal,  rankVal,     xShapeArr,
+        numElements, dataTypeVal, kStaticVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);

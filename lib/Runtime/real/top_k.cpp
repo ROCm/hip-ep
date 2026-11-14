@@ -189,7 +189,7 @@ int host_top_k(hipStream_t stream, const void *x, void *values, void *indices,
 int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
                void *indices, int64_t axis, int64_t largest, int64_t sorted,
                int64_t rank, const int64_t *x_shape, int64_t num_elements,
-               int64_t data_type) {
+               int64_t data_type, int64_t k_static) {
   OP_PROFILE(
       "top_k",
       [&] {
@@ -220,19 +220,22 @@ int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
     return finish(-1);
   }
 
-  int64_t k_val = 0;
+  int64_t k_val = k_static;
   void *stream = hipdnn_ep_state_get_stream(state);
-  hipError_t err = hipMemcpy(&k_val, k, sizeof(int64_t), hipMemcpyDeviceToHost);
-  if (err != hipSuccess) {
-    fprintf(stderr, "[REAL] wrap_top_k: failed to read K: %s\n",
-            hipGetErrorString(err));
-    return finish(-1);
-  }
-  err = hipStreamSynchronize(static_cast<hipStream_t>(stream));
-  if (err != hipSuccess) {
-    fprintf(stderr, "[REAL] wrap_top_k: stream sync failed: %s\n",
-            hipGetErrorString(err));
-    return finish(-1);
+  if (k_val < 0) {
+    hipError_t err =
+        hipMemcpy(&k_val, k, sizeof(int64_t), hipMemcpyDeviceToHost);
+    if (err != hipSuccess) {
+      fprintf(stderr, "[REAL] wrap_top_k: failed to read K: %s\n",
+              hipGetErrorString(err));
+      return finish(-1);
+    }
+    err = hipStreamSynchronize(static_cast<hipStream_t>(stream));
+    if (err != hipSuccess) {
+      fprintf(stderr, "[REAL] wrap_top_k: stream sync failed: %s\n",
+              hipGetErrorString(err));
+      return finish(-1);
+    }
   }
 
   auto run_on_host = [&] {
