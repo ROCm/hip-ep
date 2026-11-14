@@ -56,7 +56,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Erf | Custom HIP kernel |
 | Sin | Custom HIP kernel |
 | Atan | Custom HIP kernel |
-| Div | Custom HIP kernel |
+| Div | Custom HIP kernel. f16, bf16, f32, i32, i64 |
 | Mod | Custom HIP kernel |
 | Sign | Custom HIP kernel |
 | Where | Custom HIP kernel |
