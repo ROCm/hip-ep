@@ -32,6 +32,7 @@
 #include <llvm/ADT/STLExtras.h>
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/ADT/StringRef.h>
+#include <llvm/ADT/TypeSwitch.h>
 
 #include <algorithm>
 #include <cmath>
@@ -1561,7 +1562,7 @@ struct SqrtConverter final : public OpConversionPattern<SqrtOp> {
 // TOSA has no silu/swish. Both expand to the ONNX definition:
 //   silu(x)        = x * sigmoid(x)
 //   swish(x,alpha) = x * sigmoid(alpha * x)
-// with alpha default 1, which is silu. hip.silu is already a FuseROCMlir
+// with alpha default 1, which is silu. hip.silu is already a rocMLIR fusion
 // pointwise consumer; hip.swish is not, so the swish pattern still needs
 // rock.kernel on the test function.
 //
@@ -2040,8 +2041,8 @@ struct WhereConverter final : public OpConversionPattern<WhereOp> {
           op, "condition is not a tosa-broadcastable tensor");
     if (condType.getElementType().isUnsignedInteger(8) ||
         condType.getElementType().isSignlessInteger(8)) {
-      // ONNX BOOL arrives from MorphiZen as ui8. FuseROCMlir rewrites only
-      // Where-condition kernel arguments to signless i8, preserving the
+      // ONNX BOOL arrives from MorphiZen as ui8. The rocMLIR fusion rewrites
+      // only Where-condition kernel arguments to signless i8, preserving the
       // one-byte 0/1 storage while making rocMLIR arithmetic legal. Convert
       // either representation to TOSA's i1 predicate by comparing with zero
       // and inverting the result. A narrowing cast would not mean "nonzero".
@@ -2775,7 +2776,11 @@ struct CastConverter final : public OpConversionPattern<CastOp> {
     auto inputType = dyn_cast<RankedTensorType>(adaptor.getInput().getType());
     if (!inputType || !inputType.hasStaticShape())
       return rewriter.notifyMatchFailure(op, "expected static ranked input");
-    if (inputType.getShape() != resultType.getShape())
+    // A quantized zero point arrives as tensor<1xT> and is cast to the scalar
+    // tensor<f32>: the same one value at another rank, so it is reshaped first.
+    bool unitRankChange = isUnitTensor(inputType) && isUnitTensor(resultType) &&
+                          inputType.getShape() != resultType.getShape();
+    if (inputType.getShape() != resultType.getShape() && !unitRankChange)
       return rewriter.notifyMatchFailure(op, "cast cannot change the shape");
 
     Type inElem = inputType.getElementType();
@@ -2784,8 +2789,10 @@ struct CastConverter final : public OpConversionPattern<CastOp> {
         !isa<FloatType, IntegerType>(outElem))
       return rewriter.notifyMatchFailure(op, "unsupported cast element type");
 
-    rewriter.replaceOp(
-        op, emitTosaCast(rewriter, op.getLoc(), adaptor.getInput(), outElem));
+    Value input = adaptor.getInput();
+    if (unitRankChange)
+      input = reshapeTo(input, resultType.getShape(), rewriter);
+    rewriter.replaceOp(op, emitTosaCast(rewriter, op.getLoc(), input, outElem));
     return success();
   }
 };
@@ -8748,13 +8755,13 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         });
     conversion.addDynamicallyLegalOp<tensor::SplatOp>(
         [](tensor::SplatOp op) { return !isTosaExpressibleSplat(op); });
-    // Neither op is a FuseROCMlir anchor or a pointwise op, so neither reaches
-    // this pass from buildRocMlirPipeline today -- only from a hand-written
-    // rock.kernel. Declining therefore leaves the op in place rather than
-    // failing the pass, which keeps the unsupported configurations testable.
-    // If either becomes a fusion anchor this has to turn into a hard failure
-    // like hip.div's: a hip op surviving inside a rock.kernel fails in rocMLIR,
-    // it does not fall back to the HIP kernel.
+    // Neither op is a rocMLIR fusion anchor or a pointwise op, so neither
+    // reaches this pass from buildRocMlirPipeline today -- only from a
+    // hand-written rock.kernel. Declining therefore leaves the op in place
+    // rather than failing the pass, which keeps the unsupported configurations
+    // testable. If either becomes a fusion anchor this has to turn into a hard
+    // failure like hip.div's: a hip op surviving inside a rock.kernel fails in
+    // rocMLIR, it does not fall back to the HIP kernel.
     conversion.addDynamicallyLegalOp<GatherBlockQuantizedOp>(
         [](GatherBlockQuantizedOp op) {
           return !isTosaExpressibleGatherBlockQuantized(op);
@@ -8850,7 +8857,7 @@ bool isTosaLowerableSlice(tensor::ExtractSliceOp op) {
 bool isTosaLowerableExpand(ExpandOp op) { return isTosaExpressibleExpand(op); }
 
 // A subset of what matchQdqCommon and the two converters accept: the
-// per-tensor and per-axis forms, which are all hip-fuse-rocmlir needs.
+// per-tensor and per-axis forms, which are all the rocMLIR fusion needs.
 bool isTosaLowerableQdq(Operation *op) {
   Value input, scale, zeroPoint;
   int64_t axis, blockSize;
@@ -8914,6 +8921,98 @@ int64_t getSignedRebiasOffset(Type elementType) {
     return 0;
   assert(intType.getWidth() < 64 && "offset must fit in int64_t");
   return int64_t{1} << (intType.getWidth() - 1);
+}
+
+bool isTosaExpressiblePointwiseOp(Operation *op) {
+  auto expressible = [](Type type) {
+    auto tensorType = dyn_cast<TensorType>(type);
+    if (!tensorType)
+      return true;
+    Type elementType = tensorType.getElementType();
+    return isTosaExpressibleFloat(elementType) ||
+           isTosaExpressibleInt(elementType);
+  };
+  if (!llvm::all_of(op->getOperandTypes(), expressible) ||
+      !llvm::all_of(op->getResultTypes(), expressible))
+    return false;
+  if (auto equal = dyn_cast<EqualOp>(op))
+    return isTosaExpressibleCompare(equal);
+  if (auto less = dyn_cast<LessOp>(op))
+    return isTosaExpressibleCompare(less);
+  if (auto andOp = dyn_cast<AndOp>(op))
+    return isTosaExpressibleLogical(op, {andOp.getLhs(), andOp.getRhs()});
+  if (auto orOp = dyn_cast<OrOp>(op))
+    return isTosaExpressibleLogical(op, {orOp.getLhs(), orOp.getRhs()});
+  if (auto notOp = dyn_cast<NotOp>(op))
+    return isTosaExpressibleLogical(op, {notOp.getX()});
+  if (auto sign = dyn_cast<SignOp>(op))
+    return isTosaExpressibleSign(sign);
+
+  if (op->getNumResults() != 1)
+    return false;
+  auto resultType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
+  if (!resultType || !resultType.hasStaticShape())
+    return false;
+  Type elementType = resultType.getElementType();
+  bool isFloat = isa<FloatType>(elementType);
+  auto broadcasts = [&](Value operand) {
+    return isBroadcastableOperandOf(operand, elementType, resultType);
+  };
+  auto sameType = [&](Value operand) {
+    return operand.getType() == resultType;
+  };
+  auto staticRankedInput = [](Value input) {
+    auto inputType = dyn_cast<RankedTensorType>(input.getType());
+    return inputType && inputType.hasStaticShape() ? inputType
+                                                   : RankedTensorType();
+  };
+
+  return TypeSwitch<Operation *, bool>(op)
+      .Case<AddOp, SubOp, MinOp, MaxOp, MulOp>([&](auto binary) {
+        return broadcasts(binary.getLhs()) && broadcasts(binary.getRhs());
+      })
+      .Case([&](DivOp div) {
+        return isTosaExpressibleDivType(elementType) &&
+               broadcasts(div.getLhs()) && broadcasts(div.getRhs());
+      })
+      .Case([&](ModOp mod) {
+        return isTosaExpressibleModType(elementType) && mod.getFmod() == 0 &&
+               broadcasts(mod.getLhs()) && broadcasts(mod.getRhs());
+      })
+      .Case<AbsOp, NegOp>([&](auto unary) { return sameType(unary.getX()); })
+      .Case<CeilOp, FloorOp, ExpOp, LogOp, SinOp, CosOp, TanhOp, ErfOp,
+            SigmoidOp, ReciprocalOp, SqrtOp, SoftplusOp, RoundOp, AtanOp>(
+          [&](auto unary) { return isFloat && sameType(unary.getX()); })
+      .Case<SiluOp, LeakyReluOp>(
+          [&](auto unary) { return isFloat && sameType(unary.getInput()); })
+      .Case([&](GeluOp gelu) {
+        StringRef approximate = gelu.getApproximate();
+        return isFloat && sameType(gelu.getInput()) &&
+               (approximate == "none" || approximate == "tanh");
+      })
+      .Case([&](BiasGeluOp gelu) {
+        return isFloat && sameType(gelu.getData()) &&
+               broadcasts(gelu.getBias());
+      })
+      .Case([&](FastGeluOp gelu) {
+        Value bias = gelu.getBias();
+        return isFloat && sameType(gelu.getInput()) &&
+               (!bias || broadcasts(bias));
+      })
+      .Case([&](WhereOp where) {
+        Type i1 = IntegerType::get(op->getContext(), 1);
+        return isBroadcastableOperandOf(where.getCondition(), i1, resultType) &&
+               broadcasts(where.getX()) && broadcasts(where.getY());
+      })
+      .Case([&](CastOp cast) {
+        RankedTensorType inputType = staticRankedInput(cast.getInput());
+        return inputType && inputType.getShape() == resultType.getShape();
+      })
+      .Case([&](TransposeOp transpose) {
+        RankedTensorType inputType = staticRankedInput(transpose.getInput());
+        return inputType && inputType.getRank() >= 1;
+      })
+      .Default(false);
 }
 
 } // namespace mlir::hip
