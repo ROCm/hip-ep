@@ -151,6 +151,21 @@ struct MultiHeadAttentionOpLowering
     Value elemSizeVal = createI64Const(elementSizeBytes);
     Value queryRankVal = createI64Const(queryRank);
 
+    // attention_bias dims, left-padded with 1 to [batch, heads, sq, skv].
+    SmallVector<Value, 4> biasDims(4, createI64Const(0));
+    if (op.getAttentionBias()) {
+      auto biasType = cast<MemRefType>(op.getAttentionBias().getType());
+      int64_t rank = biasType.getRank();
+      if (rank < 1 || rank > 4)
+        return rewriter.notifyMatchFailure(op, "attention_bias rank not 1-4");
+      for (int64_t i = 0; i < 4; ++i)
+        biasDims[i] = i < 4 - rank
+                          ? createI64Const(1)
+                          : getMemRefDimSize(biasType, i - (4 - rank),
+                                             adaptor.getAttentionBias(),
+                                             rewriter, loc);
+    }
+
     // === Build call ===
     // wrap_multi_head_attention signature (declared in hipdnn_ep_runtime.h).
     SmallVector<Type> paramTypes = {
@@ -185,8 +200,9 @@ struct MultiHeadAttentionOpLowering
         i64Type, // v_hidden
         i64Type, // head_size
         i64Type, // query_rank
-        i64Type  // element_size_bytes
-    };
+        i64Type, // element_size_bytes
+        // attention_bias dims (4)
+        i64Type, i64Type, i64Type, i64Type};
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapMultiHeadAttention, paramTypes, i32Type);
@@ -208,7 +224,10 @@ struct MultiHeadAttentionOpLowering
                                numHeads, maskFilterValue, scale, unidirectional,
                                // Shape info (7)
                                batchSize, seqLenQ, seqLenKV, queryHidden,
-                               vHidden, headSize, queryRankVal, elemSizeVal};
+                               vHidden, headSize, queryRankVal, elemSizeVal,
+                               // attention_bias dims (4)
+                               biasDims[0], biasDims[1], biasDims[2],
+                               biasDims[3]};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 

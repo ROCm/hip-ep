@@ -998,7 +998,11 @@ int wrap_multi_head_attention(
     //              query_rank, element_size_bytes)
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t query_hidden, int64_t v_hidden, int64_t head_size,
-    int64_t query_rank, int64_t element_size_bytes);
+    int64_t query_rank, int64_t element_size_bytes,
+    // attention_bias dims left-padded to rank 4 [batch, heads, seq_q, seq_kv]
+    // (1 broadcasts that axis); all 0 when there is no attention_bias.
+    int64_t attn_bias_batch, int64_t attn_bias_heads, int64_t attn_bias_rows,
+    int64_t attn_bias_cols);
 
 // Generic element-wise tensor operation wrapper with per-operand 4D shapes.
 // Computes output = op(lhs, rhs) element-wise via the custom HIP kernels

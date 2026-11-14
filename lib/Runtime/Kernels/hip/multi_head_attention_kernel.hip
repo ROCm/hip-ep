@@ -114,7 +114,10 @@ __device__ __forceinline__ half16_t mha_load_frag(const _Float16 *row, int dt,
 // register-resident; an explicit occupancy target stops the backend from buying
 // extra waves with scratch traffic. The bound tracks register demand, which
 // grows with the D_PAD / kWmmaTile tile count.
-template <int NW, int BKV, int D_PAD, int MT>
+// HAS_BIAS adds bias[b, h, q, k] (element strides bias_sb / bias_sn / bias_sq,
+// unit stride over keys, zero strides broadcast) to the scaled scores. A -inf
+// bias masks a key; a row whose keys are all masked so far keeps m = -inf.
+template <int NW, int BKV, int D_PAD, int MT, bool HAS_BIAS>
 __global__ void __launch_bounds__(NW * 32)
 __attribute__((amdgpu_waves_per_eu(D_PAD <= 32 ? 9 : (D_PAD <= 48 ? 7 : 6))))
 mha_flash_prefill_kernel(
@@ -122,7 +125,9 @@ mha_flash_prefill_kernel(
     const _Float16 *__restrict__ Kcache,  // [B, N, max_seq, d]
     const _Float16 *__restrict__ Vcache,  // [B, N, max_seq, d]
     _Float16 *__restrict__ O,             // [B, sq, N, d]
-    int N, int sq, int skv, int d, int max_seq, float scale) {
+    int N, int sq, int skv, int d, int max_seq, float scale,
+    const _Float16 *__restrict__ bias, long long bias_sb, long long bias_sn,
+    long long bias_sq) {
   constexpr int ROWS = NW * MT * kWmmaTile;   // query rows per block
   constexpr int S_TILES_J = BKV / kWmmaTile;  // key-tiles per KV block
   constexpr int D_TILES = D_PAD / kWmmaTile;  // padded head-dim tiles
@@ -156,6 +161,8 @@ mha_flash_prefill_kernel(
   // KV base for this (batch, head): Kcache/Vcache are BNSD.
   const size_t kv_base =
       ((size_t)batch * N + head) * (size_t)max_seq * (size_t)d;
+  const _Float16 *bias_bh =
+      HAS_BIAS ? bias + batch * bias_sb + head * bias_sn : nullptr;
 
   // ---- Q resident in registers: Q_reg[mt][tk], row = row_base+mt*16+wmma_lane
   half16_t Q_reg[MT][D_TILES];
@@ -229,7 +236,17 @@ mha_flash_prefill_kernel(
 #pragma unroll
       for (int sj = 0; sj < S_TILES_J; ++sj)
 #pragma unroll
-        for (int e = 0; e < 8; ++e) S_reg[mt][sj][e] *= scale * kLog2e;
+        for (int e = 0; e < 8; ++e) {
+          S_reg[mt][sj][e] *= scale * kLog2e;
+          if constexpr (HAS_BIAS) {
+            const int q_pos =
+                row_base + mt * kWmmaTile + hipdnn_wmma_acc_row(pair, e);
+            const int kv_pos = kv0 + sj * kWmmaTile + wmma_lane;
+            if (q_pos < sq && kv_pos < skv)
+              S_reg[mt][sj][e] +=
+                  (float)bias_bh[q_pos * bias_sq + kv_pos] * kLog2e;
+          }
+        }
 
     // ---- online softmax (per M-tile, intra-wave); fold corr into O_h ----
 #pragma unroll
@@ -251,14 +268,18 @@ mha_flash_prefill_kernel(
 
         const float m_old = m_reg[mt][e];
         const float m_new = fmaxf(m_old, rmax);
-        const float corr = exp2f(m_old - m_new);
+        // With a bias every key seen so far can be masked; exponentiating
+        // against m = -inf would give NaN, so such a row contributes zeros.
+        const float m_use =
+            (HAS_BIAS && m_new == -INFINITY) ? 0.0f : m_new;
+        const float corr = exp2f(m_old - m_use);
         corr_e[e] = corr;
 
         const int row = hipdnn_wmma_acc_row(pair, e);
         float rsum = 0.0f;
 #pragma unroll
         for (int sj = 0; sj < S_TILES_J; ++sj) {
-          const float p = exp2f(S_reg[mt][sj][e] - m_new);
+          const float p = exp2f(S_reg[mt][sj][e] - m_use);
           rsum += p;
           P_lds[(pbase + mt * kWmmaTile + row) * P_STR + sj * kWmmaTile +
                 wmma_lane] = static_cast<_Float16>(p);
@@ -343,20 +364,56 @@ constexpr int kMhaNW = 4;
 constexpr int kMhaBKV = 64;
 constexpr int kMhaMT = 1;
 
-template <int D_PAD>
+struct MhaBias {
+  const _Float16 *ptr = nullptr;
+  long long sb = 0, sn = 0, sq = 0;
+};
+
+template <int D_PAD, bool HAS_BIAS>
 static inline int launch_mha_prefill(hipStream_t stream, const _Float16 *Q,
                                      const _Float16 *K, const _Float16 *V,
                                      _Float16 *O, int B, int N, int sq, int skv,
-                                     int d, int max_seq, float scale) {
+                                     int d, int max_seq, float scale,
+                                     const MhaBias &bias) {
   const int rows = kMhaNW * kMhaMT * 16;
   const int num_q_tiles = (sq + rows - 1) / rows;
   dim3 grid(num_q_tiles * B, N);
   const size_t smem = mha_prefill_smem_bytes(kMhaNW, kMhaBKV, D_PAD, kMhaMT);
   (void)hipGetLastError();
-  mha_flash_prefill_kernel<kMhaNW, kMhaBKV, D_PAD, kMhaMT>
+  mha_flash_prefill_kernel<kMhaNW, kMhaBKV, D_PAD, kMhaMT, HAS_BIAS>
       <<<grid, kMhaNW * 32, smem, stream>>>(Q, K, V, O, N, sq, skv, d, max_seq,
-                                            scale);
+                                            scale, bias.ptr, bias.sb, bias.sn,
+                                            bias.sq);
   return (hipGetLastError() == hipSuccess) ? 0 : -1;
+}
+
+template <bool HAS_BIAS>
+static int dispatch_mha_prefill(void *stream, const void *Q, const void *Kcache,
+                                const void *Vcache, void *O, int B, int N,
+                                int sq, int skv, int d, int max_seq, float scale,
+                                const MhaBias &bias) {
+  hipStream_t s = reinterpret_cast<hipStream_t>(stream);
+  const _Float16 *q = reinterpret_cast<const _Float16 *>(Q);
+  const _Float16 *k = reinterpret_cast<const _Float16 *>(Kcache);
+  const _Float16 *v = reinterpret_cast<const _Float16 *>(Vcache);
+  _Float16 *o = reinterpret_cast<_Float16 *>(O);
+  const int d_pad = ((d + 15) / 16) * 16;
+
+  switch (d_pad) {
+  case 16:  return launch_mha_prefill<16, HAS_BIAS>(s, q, k, v, o, B, N, sq, skv, d, max_seq, scale, bias);
+  case 32:  return launch_mha_prefill<32, HAS_BIAS>(s, q, k, v, o, B, N, sq, skv, d, max_seq, scale, bias);
+  case 48:  return launch_mha_prefill<48, HAS_BIAS>(s, q, k, v, o, B, N, sq, skv, d, max_seq, scale, bias);
+  case 64:  return launch_mha_prefill<64, HAS_BIAS>(s, q, k, v, o, B, N, sq, skv, d, max_seq, scale, bias);
+  case 80:  return launch_mha_prefill<80, HAS_BIAS>(s, q, k, v, o, B, N, sq, skv, d, max_seq, scale, bias);
+  case 96:  return launch_mha_prefill<96, HAS_BIAS>(s, q, k, v, o, B, N, sq, skv, d, max_seq, scale, bias);
+  case 112: return launch_mha_prefill<112, HAS_BIAS>(s, q, k, v, o, B, N, sq, skv, d, max_seq, scale, bias);
+  case 128: return launch_mha_prefill<128, HAS_BIAS>(s, q, k, v, o, B, N, sq, skv, d, max_seq, scale, bias);
+  case 256: return launch_mha_prefill<256, HAS_BIAS>(s, q, k, v, o, B, N, sq, skv, d, max_seq, scale, bias);
+  default:
+    fprintf(stderr, "[hip_mha_flash_prefill] unsupported head dim d=%d (d_pad=%d)\n",
+            d, d_pad);
+    return -1;
+  }
 }
 
 }  // namespace
@@ -368,26 +425,19 @@ extern "C" int hip_mha_flash_prefill(void *stream, const void *Q,
                                      const void *Kcache, const void *Vcache,
                                      void *O, int B, int N, int sq, int skv,
                                      int d, int max_seq, float scale) {
-  hipStream_t s = reinterpret_cast<hipStream_t>(stream);
-  const _Float16 *q = reinterpret_cast<const _Float16 *>(Q);
-  const _Float16 *k = reinterpret_cast<const _Float16 *>(Kcache);
-  const _Float16 *v = reinterpret_cast<const _Float16 *>(Vcache);
-  _Float16 *o = reinterpret_cast<_Float16 *>(O);
-  const int d_pad = ((d + 15) / 16) * 16;
+  return dispatch_mha_prefill<false>(stream, Q, Kcache, Vcache, O, B, N, sq,
+                                     skv, d, max_seq, scale, MhaBias{});
+}
 
-  switch (d_pad) {
-  case 16:  return launch_mha_prefill<16>(s, q, k, v, o, B, N, sq, skv, d, max_seq, scale);
-  case 32:  return launch_mha_prefill<32>(s, q, k, v, o, B, N, sq, skv, d, max_seq, scale);
-  case 48:  return launch_mha_prefill<48>(s, q, k, v, o, B, N, sq, skv, d, max_seq, scale);
-  case 64:  return launch_mha_prefill<64>(s, q, k, v, o, B, N, sq, skv, d, max_seq, scale);
-  case 80:  return launch_mha_prefill<80>(s, q, k, v, o, B, N, sq, skv, d, max_seq, scale);
-  case 96:  return launch_mha_prefill<96>(s, q, k, v, o, B, N, sq, skv, d, max_seq, scale);
-  case 112: return launch_mha_prefill<112>(s, q, k, v, o, B, N, sq, skv, d, max_seq, scale);
-  case 128: return launch_mha_prefill<128>(s, q, k, v, o, B, N, sq, skv, d, max_seq, scale);
-  case 256: return launch_mha_prefill<256>(s, q, k, v, o, B, N, sq, skv, d, max_seq, scale);
-  default:
-    fprintf(stderr, "[hip_mha_flash_prefill] unsupported head dim d=%d (d_pad=%d)\n",
-            d, d_pad);
-    return -1;
-  }
+extern "C" int hip_mha_flash_prefill_bias(
+    void *stream, const void *Q, const void *Kcache, const void *Vcache,
+    void *O, int B, int N, int sq, int skv, int d, int max_seq, float scale,
+    const void *bias, long long bias_sb, long long bias_sn, long long bias_sq) {
+  MhaBias b;
+  b.ptr = reinterpret_cast<const _Float16 *>(bias);
+  b.sb = bias_sb;
+  b.sn = bias_sn;
+  b.sq = bias_sq;
+  return dispatch_mha_prefill<true>(stream, Q, Kcache, Vcache, O, B, N, sq,
+                                    skv, d, max_seq, scale, b);
 }

@@ -1340,6 +1340,15 @@ HIP_KERNEL_API int hip_mha_flash_prefill(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
     void* O, int B, int N, int sq, int skv, int d, int max_seq, float scale);
 
+/* hip_mha_flash_prefill_bias: hip_mha_flash_prefill plus an fp16 additive
+ * attention bias added to the scaled scores. Element (b, h, q, k) is read at
+ * b*bias_sb + h*bias_sn + q*bias_sq + k; a zero stride broadcasts that axis.
+ * -inf entries mask keys; a query row with every key masked outputs zeros. */
+HIP_KERNEL_API int hip_mha_flash_prefill_bias(
+    void* stream, const void* Q, const void* Kcache, const void* Vcache,
+    void* O, int B, int N, int sq, int skv, int d, int max_seq, float scale,
+    const void* bias, long long bias_sb, long long bias_sn, long long bias_sq);
+
 /* FA-2 split-K GQA decode (sq == 1, d in {64, 96, 128, 256},
  * HPG=H/G in {1,2,3,4,5,6,8,16}, and HPG=9 at d == 128):
  * GQA-aware kernel that loads K/V tiles into LDS once and reuses them

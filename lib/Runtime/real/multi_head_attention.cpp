@@ -323,7 +323,9 @@ extern "C" int wrap_multi_head_attention(
     int64_t num_heads, float mask_filter_value, float scale,
     int64_t unidirectional, int64_t batch_size, int64_t seq_len_q,
     int64_t seq_len_kv, int64_t query_hidden, int64_t v_hidden,
-    int64_t head_size, int64_t query_rank, int64_t element_size_bytes) {
+    int64_t head_size, int64_t query_rank, int64_t element_size_bytes,
+    int64_t attn_bias_batch, int64_t attn_bias_heads, int64_t attn_bias_rows,
+    int64_t attn_bias_cols) {
   (void)mask_filter_value; // currently unused (causal mask uses the -inf/-65504
                            // sentinel from hip_gqa_causal_mask_f32)
 
@@ -388,14 +390,13 @@ extern "C" int wrap_multi_head_attention(
             key, value);
     return -1;
   }
-  if (bias || key_padding_mask || attention_bias || past_key || past_value ||
+  if (bias || key_padding_mask || past_key || past_value ||
       past_sequence_length || cache_indirection) {
     fprintf(stderr,
             "[multi_head_attention] ERROR: bias / key_padding_mask / "
-            "attention_bias / past KV / cache_indirection are not yet "
-            "implemented (bias=%p mask=%p attn_bias=%p past_k=%p past_v=%p "
-            "past_seq=%p cache_ind=%p)\n",
-            bias, key_padding_mask, attention_bias, past_key, past_value,
+            "past KV / cache_indirection are not yet implemented (bias=%p "
+            "mask=%p past_k=%p past_v=%p past_seq=%p cache_ind=%p)\n",
+            bias, key_padding_mask, past_key, past_value,
             past_sequence_length, cache_indirection);
     return -1;
   }
@@ -490,8 +491,32 @@ extern "C" int wrap_multi_head_attention(
   // The kernel is built on the RDNA-only wave32 WMMA intrinsic, which compiles
   // to __builtin_trap() on CDNA (wave64, e.g. MI350) and aborts the HSA queue
   // on launch, so wave64 takes the decomposed path instead.
-  if (Sq > 1 && unidirectional != 1 && (((H + 15) / 16) * 16) <= 256 &&
-      !hipdnn_device_is_wave64()) {
+  const bool flash_eligible = Sq > 1 && unidirectional != 1 &&
+                              (((H + 15) / 16) * 16) <= 256 &&
+                              !hipdnn_device_is_wave64();
+  // attention_bias [Bb, Nb, Sqb, Skv] with Bb in {1, B}, Nb in {1, N},
+  // Sqb in {1, Sq}; only the flash path applies it.
+  long long bias_sb = 0, bias_sn = 0, bias_sq = 0;
+  if (attention_bias) {
+    auto fits = [](int64_t dim, int64_t full) { return dim == 1 || dim == full; };
+    if (!flash_eligible || !fits(attn_bias_batch, B) ||
+        !fits(attn_bias_heads, N) || !fits(attn_bias_rows, Sq) ||
+        attn_bias_cols != Skv) {
+      fprintf(stderr,
+              "[multi_head_attention] ERROR: unsupported attention_bias "
+              "[%lld,%lld,%lld,%lld] for B=%lld N=%lld Sq=%lld Skv=%lld "
+              "(flash path %s)\n",
+              (long long)attn_bias_batch, (long long)attn_bias_heads,
+              (long long)attn_bias_rows, (long long)attn_bias_cols,
+              (long long)B, (long long)N, (long long)Sq, (long long)Skv,
+              flash_eligible ? "eligible" : "not eligible");
+      return -1;
+    }
+    bias_sq = attn_bias_rows == 1 ? 0 : Skv;
+    bias_sn = attn_bias_heads == 1 ? 0 : attn_bias_rows * Skv;
+    bias_sb = attn_bias_batch == 1 ? 0 : attn_bias_heads * attn_bias_rows * Skv;
+  }
+  if (flash_eligible) {
     const size_t fa_align = 64;
     auto fa_align_up = [&](size_t v) {
       return (v + fa_align - 1) & ~(fa_align - 1);
@@ -532,10 +557,19 @@ extern "C" int wrap_multi_head_attention(
     // Q is BSND [B,Sq,N,H] == the kernel's expected [B,sq,N,d]; O written in
     // place (BSND). K/V cache is the just-transposed BNSD with max_seq = Skv.
     OP_ROCTX_MARK("hip_ep.op.multi_head_attention.attn.flash_prefill");
-    int rc = hip_mha_flash_prefill(
-        stream, query, d_Kbnsh, d_Vbnsh, output, static_cast<int>(B),
-        static_cast<int>(N), static_cast<int>(Sq), static_cast<int>(Skv),
-        static_cast<int>(H), static_cast<int>(Skv), scale);
+    int rc =
+        attention_bias
+            ? hip_mha_flash_prefill_bias(
+                  stream, query, d_Kbnsh, d_Vbnsh, output, static_cast<int>(B),
+                  static_cast<int>(N), static_cast<int>(Sq),
+                  static_cast<int>(Skv), static_cast<int>(H),
+                  static_cast<int>(Skv), scale, attention_bias, bias_sb,
+                  bias_sn, bias_sq)
+            : hip_mha_flash_prefill(
+                  stream, query, d_Kbnsh, d_Vbnsh, output, static_cast<int>(B),
+                  static_cast<int>(N), static_cast<int>(Sq),
+                  static_cast<int>(Skv), static_cast<int>(H),
+                  static_cast<int>(Skv), scale);
     if (rc != 0) {
       fprintf(stderr,
               "[multi_head_attention] ERROR: hip_mha_flash_prefill failed "
