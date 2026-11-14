@@ -1,0 +1,5 @@
+onnx>=1.16.0
+numpy>=1.24.0
+# bench_decode.py and eval_logits.py also need onnxruntime-genai (>= 0.18)
+# with onnxruntime 1.31:
+#   pip install onnxruntime-genai

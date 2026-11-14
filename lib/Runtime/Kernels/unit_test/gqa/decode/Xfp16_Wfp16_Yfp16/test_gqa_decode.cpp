@@ -25,8 +25,9 @@
 //
 // Coverage spans MHA (HpG==1) and GQA (HpG in {2,4,5,8,16}) x head_dim in
 // {64,96,128,256} x context length in {512..32768}, plus gpt-oss-20b
-// full/sliding (head_sink), Phi-3-mini full/sliding (d=96) and a
-// smooth-softmax variant. Pass --md to emit a Markdown table.
+// full/sliding (head_sink), Phi-3-mini full/sliding (d=96), a
+// smooth-softmax variant and absorbed multi-head latent attention (HpG 32 at
+// d=320, the wide kernel). Pass --md to emit a Markdown table.
 //
 // To benchmark one build against another, add --prod-only (times just the
 // autotuned config, so the fixed-config runs cannot disturb the clock state
@@ -1004,7 +1005,7 @@ int main(int argc, char** argv) {
     // B=1 single-stream decode. Categorical situations -- real models, a
     // geometry sweep over MHA (HpG==1) and GQA (HpG in {2,4,5,8,16}) x
     // head_dim in {64,96,128,256}, sliding-window/head-sink/smooth-softmax --
-    // are all 17 named rows below and run at EVERY tier. kLens is the
+    // are all 18 named rows below and run at EVERY tier. kLens is the
     // typical-context-length list (widened to also cover a short/interactive
     // decode length, not just medium/long); COVERAGE only thins that
     // (tier3=all 4, tier2=3, tier1=1), NOT the full {512..32768}
@@ -1073,6 +1074,9 @@ int main(int argc, char** argv) {
       full_cases.push_back({"GQA hpg8 D64 pad -inf",     2, 64, 8,  64, L, L,   0, 0, 0, L / 4, -INFINITY});
       full_cases.push_back({"GQA hpg4 D96 pad -inf",     2, 32, 8,  96, L, L,   0, 0, 0, L / 4, -INFINITY});
       full_cases.push_back({"GQA hpg4 D96 pad -3.4e38",  2, 32, 8,  96, L, L,   0, 0, 0, L / 4, -3.4e38f});
+      // ---- Absorbed latent attention (Mistral-Small-4): one KV head of
+      // 256 latent + 64 RoPE dims shared by 32 query heads ----
+      full_cases.push_back({"mistral-small-4 mla", 1, 32,  1, 320, L, L,   0, 0, 0});
     }
 
     printf("coverage=%d -> running %zu typical length(s) x %zu categorical "

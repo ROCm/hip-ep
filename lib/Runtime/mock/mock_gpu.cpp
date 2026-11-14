@@ -585,6 +585,49 @@ int wrap_group_query_attention_host_length(
   return 0;
 }
 
+int wrap_mla_attention(RuntimeState *state, int op_state_slot, void *query,
+                       void *cache, void *k_b, void *v_b, void *k_b_scales,
+                       void *v_b_scales, void *kv_seqlen, void *output,
+                       int64_t num_heads, int64_t kv_lora_rank,
+                       int64_t qk_nope_dim, int64_t qk_rope_dim, int64_t v_dim,
+                       float scale, int64_t block_size, int64_t batch,
+                       int64_t seq_len_q, int64_t cache_seq) {
+  if (!state || !query || !cache || !k_b || !v_b || !output) {
+    fprintf(stderr, "Invalid argument in wrap_mla_attention\n");
+    return -1;
+  }
+  (void)op_state_slot;
+  (void)k_b_scales;
+  (void)v_b_scales;
+  MOCK_PRINT("[MOCK] wrap_mla_attention(num_heads=%lld, kv_lora_rank=%lld, "
+             "qk_nope_dim=%lld, qk_rope_dim=%lld, v_dim=%lld, scale=%f, "
+             "block_size=%lld, batch=%lld, seq_q=%lld, cache_seq=%lld, "
+             "kv_seqlen=%p)\n",
+             (long long)num_heads, (long long)kv_lora_rank,
+             (long long)qk_nope_dim, (long long)qk_rope_dim, (long long)v_dim,
+             (double)scale, (long long)block_size, (long long)batch,
+             (long long)seq_len_q, (long long)cache_seq, kv_seqlen);
+  return 0;
+}
+
+int wrap_kv_attention(RuntimeState *state, void *query, void *key, void *value,
+                      void *kv_seqlen, void *output, int64_t num_heads,
+                      int64_t kv_num_heads, float scale, int64_t batch,
+                      int64_t seq_len_q, int64_t kv_rows, int64_t key_dim,
+                      int64_t value_dim) {
+  if (!state || !query || !key || !value || !output) {
+    fprintf(stderr, "Invalid argument in wrap_kv_attention\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_kv_attention(num_heads=%lld, kv_num_heads=%lld, "
+             "scale=%f, batch=%lld, seq_q=%lld, kv_rows=%lld, key_dim=%lld, "
+             "value_dim=%lld, kv_seqlen=%p)\n",
+             (long long)num_heads, (long long)kv_num_heads, (double)scale,
+             (long long)batch, (long long)seq_len_q, (long long)kv_rows,
+             (long long)key_dim, (long long)value_dim, kv_seqlen);
+  return 0;
+}
+
 int wrap_group_query_attention_ring_f16(
     RuntimeState *state, int op_state_slot,
     // Inputs 1-7 (core GQA)
@@ -3062,6 +3105,24 @@ int wrap_scatter_nd(RuntimeState *state, void *data, void *indices,
              (long long)updates_rank, (long long)output_rank,
              (long long)reduction_id, hipdnn_ep_datatype_name(data_type),
              (long long)data_type, count_ptr != nullptr);
+  return 0;
+}
+
+int wrap_tensor_scatter(RuntimeState *state, void *past, void *update,
+                        void *write_indices, void *output, int64_t elem_bytes,
+                        int64_t batch, int64_t outer, int64_t max_seq,
+                        int64_t seq, int64_t inner, int64_t circular) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_tensor_scatter\n");
+    return -1;
+  }
+  (void)update;
+  MOCK_PRINT("[MOCK] wrap_tensor_scatter(elem_bytes=%lld, batch=%lld, "
+             "outer=%lld, max_seq=%lld, seq=%lld, inner=%lld, circular=%lld, "
+             "in_place=%d, has_write_indices=%d)\n",
+             (long long)elem_bytes, (long long)batch, (long long)outer,
+             (long long)max_seq, (long long)seq, (long long)inner,
+             (long long)circular, past == output, write_indices != nullptr);
   return 0;
 }
 

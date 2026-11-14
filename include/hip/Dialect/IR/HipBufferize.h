@@ -138,6 +138,10 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     RangeOp::attachInterface<HipDstBufferizableModel<RangeOp>>(*ctx);
     SiluOp::attachInterface<HipDstBufferizableModel<SiluOp>>(*ctx);
     GqaOp::attachInterface<HipDstBufferizableModel<GqaOp>>(*ctx);
+    MlaAttentionOp::attachInterface<HipDstBufferizableModel<MlaAttentionOp>>(
+        *ctx);
+    KvAttentionOp::attachInterface<HipDstBufferizableModel<KvAttentionOp>>(
+        *ctx);
     CastOp::attachInterface<HipDstBufferizableModel<CastOp>>(*ctx);
     SigmoidOp::attachInterface<HipDstBufferizableModel<SigmoidOp>>(*ctx);
     TanhOp::attachInterface<HipDstBufferizableModel<TanhOp>>(*ctx);
@@ -237,6 +241,8 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     ModOp::attachInterface<HipDstBufferizableModel<ModOp>>(*ctx);
     SliceOp::attachInterface<HipDstBufferizableModel<SliceOp>>(*ctx);
     ScatterNDOp::attachInterface<HipDstBufferizableModel<ScatterNDOp>>(*ctx);
+    TensorScatterOp::attachInterface<HipDstBufferizableModel<TensorScatterOp>>(
+        *ctx);
     MultiHeadAttentionOp::attachInterface<
         HipDstBufferizableModel<MultiHeadAttentionOp>>(*ctx);
     NonZeroOp::attachInterface<HipDstBufferizableModel<NonZeroOp>>(*ctx);

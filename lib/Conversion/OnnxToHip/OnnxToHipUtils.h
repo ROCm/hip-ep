@@ -559,6 +559,8 @@ void populateSliceConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
 void populateScatterNDConversionPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
+void populateTensorScatterConversionPatterns(RewritePatternSet &patterns,
+                                             MLIRContext *ctx);
 void populateIdentityConversionPatterns(RewritePatternSet &patterns,
                                         MLIRContext *ctx);
 void populateOrConversionPatterns(RewritePatternSet &patterns,
@@ -829,7 +831,6 @@ void populatePowDecompositionPatterns(RewritePatternSet &patterns,
 /// See ErfGeluFusion.cpp.
 void populateErfGeluFusionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
-
 /// Pre-lowering pattern set: decompose vision/projector ops that have no
 /// direct MorphiZen converter into supported primitives —
 /// AveragePool(kernel==stride) → Reshape/Transpose/ReduceMean, Pow(x, c) →

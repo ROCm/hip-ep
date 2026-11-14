@@ -3867,6 +3867,129 @@ LogicalResult GqaOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// MlaAttentionOp: ins(query, cache, k_b, v_b, [k_b_scales, v_b_scales,
+//                     kv_seqlen])
+//                 outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange MlaAttentionOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void MlaAttentionOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult MlaAttentionOp::verify() {
+  const int64_t heads = getNumHeads();
+  const int64_t lat = getKvLoraRank();
+  const int64_t nope = getQkNopeDim();
+  const int64_t rope = getQkRopeDim();
+  const int64_t dv = getVDim();
+  const int64_t block = getBlockSize();
+  if (heads <= 0 || lat <= 0 || nope <= 0 || rope <= 0 || dv <= 0)
+    return emitOpError("num_heads and every head dim must be positive");
+  if (block < 0 || (block > 0 && lat % block != 0))
+    return emitOpError("block_size must be 0 or divide kv_lora_rank");
+
+  auto lastDimIs = [](Value v, int64_t rank, int64_t want) {
+    auto t = cast<ShapedType>(v.getType());
+    return t.getRank() == rank &&
+           (t.isDynamicDim(rank - 1) || t.getDimSize(rank - 1) == want);
+  };
+  if (!lastDimIs(getQuery(), 3, heads * (nope + rope)))
+    return emitOpError("query must be [B, S, num_heads * (qk_nope_dim + "
+                       "qk_rope_dim)]");
+  if (!lastDimIs(getCache(), 4, lat + rope))
+    return emitOpError("cache must be [B, 1, T, kv_lora_rank + qk_rope_dim]");
+  if (!lastDimIs(getOutput(), 3, heads * dv))
+    return emitOpError("output must be [B, S, num_heads * v_dim]");
+  if (Value lengths = getKvSeqlen()) {
+    auto t = cast<ShapedType>(lengths.getType());
+    if (t.getRank() != 1 || !t.getElementType().isInteger(64))
+      return emitOpError("kv_seqlen must be [B] int64");
+  }
+
+  const bool quantized = block > 0;
+  if (quantized != (getKBScales() != nullptr) ||
+      quantized != (getVBScales() != nullptr))
+    return emitOpError("k_b_scales and v_b_scales are required exactly when "
+                       "block_size > 0");
+  auto weightOk = [&](Value w, int64_t n) {
+    auto t = cast<ShapedType>(w.getType());
+    if (!t.hasStaticShape())
+      return false;
+    if (!quantized)
+      return t.getRank() == 2 && t.getDimSize(0) == lat &&
+             t.getDimSize(1) == heads * n && t.getElementType().isF16();
+    return t.getRank() == 3 && t.getDimSize(0) == heads * n &&
+           t.getDimSize(1) == lat / block && t.getDimSize(2) == block / 2 &&
+           t.getElementType().isInteger(8);
+  };
+  if (!weightOk(getKB(), nope) || !weightOk(getVB(), dv))
+    return emitOpError("k_b/v_b must be fp16 [kv_lora_rank, num_heads * dim] "
+                       "or int4-packed [num_heads * dim, kv_lora_rank / "
+                       "block_size, block_size / 2]");
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// KvAttentionOp: ins(query, key, value, [kv_seqlen]) outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange KvAttentionOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void KvAttentionOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult KvAttentionOp::verify() {
+  const int64_t heads = getNumHeads();
+  const int64_t kvHeads = getKvNumHeads();
+  if (heads <= 0 || kvHeads <= 0 || heads % kvHeads != 0)
+    return emitOpError("num_heads must be a positive multiple of "
+                       "kv_num_heads");
+
+  auto q = cast<ShapedType>(getQuery().getType());
+  auto k = cast<ShapedType>(getKey().getType());
+  auto v = cast<ShapedType>(getValue().getType());
+  auto out = cast<ShapedType>(getOutput().getType());
+  if (q.getRank() != 3 || out.getRank() != 3)
+    return emitOpError("query and output must be rank 3 [B, S, heads * dim]");
+  if (k.getRank() != 4 || v.getRank() != 4)
+    return emitOpError("key and value must be rank 4 [B, kv_num_heads, T, "
+                       "dim]");
+  if (k.isDynamicDim(3) || v.isDynamicDim(3))
+    return emitOpError("key and value head dims must be static");
+  const int64_t dk = k.getDimSize(3);
+  const int64_t dv = v.getDimSize(3);
+  auto dimIs = [](ShapedType t, int64_t dim, int64_t want) {
+    return t.isDynamicDim(dim) || t.getDimSize(dim) == want;
+  };
+  if (!dimIs(k, 1, kvHeads) || !dimIs(v, 1, kvHeads))
+    return emitOpError("key and value must have kv_num_heads heads");
+  if (!dimIs(q, 2, heads * dk))
+    return emitOpError("query must be [B, S, num_heads * dk]");
+  if (!dimIs(out, 2, heads * dv))
+    return emitOpError("output must be [B, S, num_heads * dv]");
+  if (!k.isDynamicDim(2) && !v.isDynamicDim(2) &&
+      k.getDimSize(2) != v.getDimSize(2))
+    return emitOpError("key and value must have the same number of rows");
+  if (Value lengths = getKvSeqlen()) {
+    auto t = cast<ShapedType>(lengths.getType());
+    if (t.getRank() != 1 || !t.getElementType().isInteger(64))
+      return emitOpError("kv_seqlen must be [B] int64");
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // HipDNNGraphOp: ins(variadic), outs(variadic)
 //===----------------------------------------------------------------------===//
 
@@ -4252,6 +4375,50 @@ void ScatterNDOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// TensorScatterOp: ins(past, update, [write_indices]), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange TensorScatterOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void TensorScatterOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult TensorScatterOp::verify() {
+  auto past = cast<ShapedType>(getPast().getType());
+  auto update = cast<ShapedType>(getUpdate().getType());
+  auto out = cast<ShapedType>(getOutput().getType());
+  const int64_t rank = past.getRank();
+  const int64_t axis = getAxis();
+  if (axis < 1 || axis >= rank)
+    return emitOpError("axis must be in [1, rank)");
+  if (update.getRank() != rank || out.getRank() != rank)
+    return emitOpError("past, update and output must have the same rank");
+  if (past.getElementType() != update.getElementType() ||
+      past.getElementType() != out.getElementType())
+    return emitOpError("past, update and output must share an element type");
+  for (int64_t d = 0; d < rank; ++d) {
+    auto compatible = [&](ShapedType t) {
+      return t.isDynamicDim(d) || past.isDynamicDim(d) ||
+             t.getDimSize(d) == past.getDimSize(d);
+    };
+    if (!compatible(out) || (d != axis && !compatible(update)))
+      return emitOpError("update and output must match past outside axis, "
+                         "output everywhere");
+  }
+  if (Value wi = getWriteIndices()) {
+    auto t = cast<ShapedType>(wi.getType());
+    if (t.getRank() != 1 || !t.getElementType().isInteger(64))
+      return emitOpError("write_indices must be [B] int64");
+  }
+  return success();
 }
 
 //===----------------------------------------------------------------------===//
