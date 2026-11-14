@@ -880,6 +880,247 @@ static bool la_cols_enabled() {
     return on;
 }
 
+//===----------------------------------------------------------------------===//
+// Single-step decode, 16-byte column tiles.
+//
+// With w_i = exp(g_i) under the gated rules (else 1) and u_j = beta*(v_j-sk_j)
+// under the delta rules (else v_j), one step is S'_ij = w_i*S_ij + k_i*u_j,
+// so the readout needs only the old state:
+//   out_j = scale * (sum_i w_i*q_i*S_ij + u_j * (q . k)).
+// sk_j and the readout come from one pass over S, leaving one cross-wave
+// reduction and one barrier per launch. Each thread owns RPT rows x 8 columns
+// of S and moves them as 16-byte vectors. One query head per state (Hq <= Hkv),
+// dk = 128, 2-byte types.
+//
+// 32 columns x 128 threads measured fastest on gfx1151 for Hkv 32/48/64
+// (15.2/21.7/27.7 us vs 33.8/52.2/61.9 us for the cols kernel; a plain 16-byte
+// in-place read+write of the same state takes 11.8/18.4/23.0 us).
+//===----------------------------------------------------------------------===//
+static constexpr int LA_DEC_THREADS = 128;
+static constexpr int LA_DEC_COLS = 32;
+static constexpr int LA_DEC_DK = 128;
+
+template <typename T, int COLS, int THREADS = LA_DEC_THREADS>
+__global__ void __launch_bounds__(THREADS)
+linear_attention_decode_vec_kernel(
+    const T* __restrict__ query,
+    const T* __restrict__ key,
+    const T* __restrict__ value,
+    const T* __restrict__ decay,
+    const T* __restrict__ beta_in,
+    const T* state_in,   // may alias state; null = zero initial state
+    T* state,
+    T* __restrict__ output,
+    int seq_len, int Hq, int Hkv, int n_k, int dv,
+    float scale, int update_rule,
+    int decay_per_key_dim, int beta_per_head)
+{
+    constexpr int DK   = LA_DEC_DK;
+    constexpr int VEC  = 16 / sizeof(T);
+    constexpr int CG   = COLS / VEC;
+    constexpr int RG   = THREADS / CG;
+    constexpr int RPT  = DK / RG;
+    constexpr int WAVE = HIPDNN_WAVE_SIZE;
+    constexpr int NW   = THREADS / WAVE;
+    static_assert(sizeof(T) == 2, "16-byte vectors of 2-byte elements");
+    static_assert(COLS % VEC == 0 && CG <= WAVE && DK % RG == 0 && RPT >= 1,
+                  "tile shape");
+
+    const int b    = blockIdx.x / Hkv;
+    const int g    = blockIdx.x % Hkv;
+    const int tid  = threadIdx.x;
+    const int cg   = tid % CG;
+    const int rg   = tid / CG;
+    const int lane = tid % WAVE;
+    const int wave = tid / WAVE;
+    const int j0   = blockIdx.y * COLS + cg * VEC;
+    const int i0   = rg * RPT;
+
+    const int h_q = Hq < Hkv ? g * Hq / Hkv : g;
+    const int h_k = g * n_k / Hkv;
+    const int64_t T64   = seq_len;
+    const int64_t d_tok = decay_per_key_dim ? (int64_t)Hkv * DK : (int64_t)Hkv;
+    const int64_t b_tok = beta_per_head ? (int64_t)Hkv : 1;
+    const bool has_decay =
+        (update_rule == LA_RULE_GATED || update_rule == LA_RULE_GATED_DELTA) &&
+        decay != nullptr;
+    const bool needs_sk =
+        (update_rule == LA_RULE_DELTA || update_rule == LA_RULE_GATED_DELTA);
+
+    const int64_t s_off = ((int64_t)b * Hkv + g) * DK * dv + (int64_t)i0 * dv + j0;
+    uint4 raw[RPT];
+    if (state_in) {
+#pragma unroll
+        for (int r = 0; r < RPT; r++)
+            raw[r] = *reinterpret_cast<const uint4*>(state_in + s_off + (int64_t)r * dv);
+    } else {
+#pragma unroll
+        for (int r = 0; r < RPT; r++)
+            raw[r] = make_uint4(0u, 0u, 0u, 0u);
+    }
+
+    const T* qp = query + b * T64 * Hq * DK + (int64_t)h_q * DK;
+    const T* kp = key + b * T64 * n_k * DK + (int64_t)h_k * DK;
+    const T* dp = has_decay ? decay + b * T64 * d_tok : nullptr;
+
+    float qk = 0.0f;
+    for (int i = lane; i < DK; i += WAVE)
+        qk += to_float(qp[i]) * to_float(kp[i]);
+#pragma unroll
+    for (int off = WAVE / 2; off > 0; off >>= 1)
+        qk += __shfl_xor(qk, off);
+
+    const float a_head = (has_decay && !decay_per_key_dim) ? expf(to_float(dp[g])) : 1.0f;
+    float w[RPT], kr[RPT], wq[RPT], wk[RPT];
+#pragma unroll
+    for (int r = 0; r < RPT; r++) {
+        const int i = i0 + r;
+        w[r]  = (has_decay && decay_per_key_dim)
+                    ? expf(to_float(dp[(int64_t)g * DK + i])) : a_head;
+        kr[r] = to_float(kp[i]);
+        wk[r] = w[r] * kr[r];
+        wq[r] = w[r] * to_float(qp[i]);
+    }
+
+    float sk[VEC], qs[VEC];
+#pragma unroll
+    for (int c = 0; c < VEC; c++) { sk[c] = 0.0f; qs[c] = 0.0f; }
+#pragma unroll
+    for (int r = 0; r < RPT; r++) {
+        const T* h = reinterpret_cast<const T*>(&raw[r]);
+#pragma unroll
+        for (int c = 0; c < VEC; c++) {
+            const float s = to_float(h[c]);
+            sk[c] += wk[r] * s;
+            qs[c] += wq[r] * s;
+        }
+    }
+#pragma unroll
+    for (int off = CG; off < WAVE; off <<= 1) {
+#pragma unroll
+        for (int c = 0; c < VEC; c++) {
+            sk[c] += __shfl_xor(sk[c], off);
+            qs[c] += __shfl_xor(qs[c], off);
+        }
+    }
+
+    __shared__ float red[NW][2][COLS];
+    if (lane < CG) {
+#pragma unroll
+        for (int c = 0; c < VEC; c++) {
+            red[wave][0][cg * VEC + c] = sk[c];
+            red[wave][1][cg * VEC + c] = qs[c];
+        }
+    }
+    __syncthreads();
+#pragma unroll
+    for (int c = 0; c < VEC; c++) {
+        float a0 = 0.0f, a1 = 0.0f;
+#pragma unroll
+        for (int x = 0; x < NW; x++) {
+            a0 += red[x][0][cg * VEC + c];
+            a1 += red[x][1][cg * VEC + c];
+        }
+        sk[c] = a0;
+        qs[c] = a1;
+    }
+
+    const float beta_val = (beta_in && needs_sk)
+        ? to_float(beta_in[b * T64 * b_tok + (beta_per_head ? g : 0)]) : 0.0f;
+    const T* vp = value + b * T64 * Hkv * dv + (int64_t)g * dv + j0;
+    float u[VEC];
+#pragma unroll
+    for (int c = 0; c < VEC; c++) {
+        const float v_c = to_float(vp[c]);
+        u[c] = needs_sk ? beta_val * (v_c - sk[c]) : v_c;
+    }
+
+#pragma unroll
+    for (int r = 0; r < RPT; r++) {
+        const T* h = reinterpret_cast<const T*>(&raw[r]);
+        alignas(16) T o[VEC];
+#pragma unroll
+        for (int c = 0; c < VEC; c++) {
+            float s_new = w[r] * to_float(h[c]) + kr[r] * u[c];
+            // Keep the fp32 result: without the barrier the backend contracts
+            // the FMA and the conversion into an fp16 FMA.
+            asm volatile("" : "+v"(s_new));
+            o[c] = from_float<T>(s_new);
+        }
+        *reinterpret_cast<uint4*>(state + s_off + (int64_t)r * dv) =
+            *reinterpret_cast<const uint4*>(o);
+    }
+
+    if (rg == 0) {
+        alignas(16) T o[VEC];
+#pragma unroll
+        for (int c = 0; c < VEC; c++)
+            o[c] = from_float<T>(scale * (qs[c] + u[c] * qk));
+        *reinterpret_cast<uint4*>(output + b * T64 * Hkv * dv + (int64_t)g * dv + j0) =
+            *reinterpret_cast<const uint4*>(o);
+    }
+}
+
+// Returns 1 when the shape is outside the kernel's contract (caller falls back).
+template <typename T, int COLS = LA_DEC_COLS, int THREADS = LA_DEC_THREADS>
+static int launch_la_decode_vec(hipStream_t s, const void* q, const void* k, const void* v,
+                                const void* d, const void* be, const void* sin, void* st,
+                                void* o, int64_t B, int64_t seq_len, int64_t Hq, int64_t Hkv,
+                                int64_t Nk, int64_t dk, int64_t dv, float scale,
+                                int64_t rule, int64_t dpk, int64_t bph) {
+    if (dk != LA_DEC_DK || Hq > Hkv || Hkv % Nk != 0 || Hkv % Hq != 0 || dv % COLS != 0 ||
+        rule < LA_RULE_LINEAR || rule > LA_RULE_GATED_DELTA ||
+        (reinterpret_cast<uintptr_t>(sin) | reinterpret_cast<uintptr_t>(st) |
+         reinterpret_cast<uintptr_t>(o)) % 16 != 0)
+        return 1;
+    dim3 grid(static_cast<unsigned>(B * Hkv), static_cast<unsigned>(dv / COLS));
+    (void)hipGetLastError();
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(linear_attention_decode_vec_kernel<T, COLS, THREADS>), grid,
+                       dim3(THREADS), 0, s, static_cast<const T*>(q),
+                       static_cast<const T*>(k), static_cast<const T*>(v),
+                       static_cast<const T*>(d), static_cast<const T*>(be),
+                       static_cast<const T*>(sin), static_cast<T*>(st),
+                       static_cast<T*>(o), static_cast<int>(seq_len),
+                       static_cast<int>(Hq), static_cast<int>(Hkv), static_cast<int>(Nk),
+                       static_cast<int>(dv), scale, static_cast<int>(rule),
+                       static_cast<int>(dpk), static_cast<int>(bph));
+    const hipError_t err = hipGetLastError();
+    if (err != hipSuccess) {
+        fprintf(stderr,
+                "[custom_kernels] linear_attention_decode_vec_kernel launch failed: %s\n",
+                hipGetErrorString(err));
+        return -1;
+    }
+    return 0;
+}
+
+static bool la_dec_vec_enabled() {
+    static const bool on = [] {
+        const char* e = std::getenv("HIPDNN_EP_LA_DEC_VEC");
+        return !(e && e[0] == '0');
+    }();
+    return on;
+}
+
+// One decode step through linear_attention_decode_vec_kernel. Returns 1 when
+// the step is not handled (disabled, fp32, or outside the kernel's contract).
+static int la_dec_vec_dispatch(void* stream, const void* q, const void* k, const void* v,
+                               const void* d, const void* be, const void* sin, void* st,
+                               void* o, int64_t B, int64_t seq_len, int64_t Hq, int64_t Hkv,
+                               int64_t Nk, int64_t dk, int64_t dv, float scale, int64_t rule,
+                               int64_t dpk, int64_t bph, int64_t type) {
+    if (!la_dec_vec_enabled() || B <= 0 || Hq <= 0 || Hkv <= 0 || Nk <= 0)
+        return 1;
+    hipStream_t s = static_cast<hipStream_t>(stream);
+    if (type == 1)
+        return launch_la_decode_vec<__half>(s, q, k, v, d, be, sin, st, o, B, seq_len, Hq,
+                                            Hkv, Nk, dk, dv, scale, rule, dpk, bph);
+    if (type == 2)
+        return launch_la_decode_vec<__hip_bfloat16>(s, q, k, v, d, be, sin, st, o, B, seq_len,
+                                                    Hq, Hkv, Nk, dk, dv, scale, rule, dpk, bph);
+    return 1;
+}
+
 extern "C" int hip_linear_attention_burst(
     void* stream, const void* query, const void* key, const void* value,
     const void* decay, const void* beta, const void* past_state, void* state,
@@ -887,6 +1128,14 @@ extern "C" int hip_linear_attention_burst(
     int64_t dk, int64_t dv, float scale, int64_t update_rule,
     int64_t decay_per_key_dim, int64_t beta_per_head, int64_t type)
 {
+    if (seq_len == 1) {
+        const int rc = la_dec_vec_dispatch(stream, query, key, value, decay, beta, past_state,
+                                           state, output, B, seq_len, Hq, Hkv, Nk, dk, dv,
+                                           scale, update_rule, decay_per_key_dim,
+                                           beta_per_head, type);
+        if (rc <= 0)
+            return rc;
+    }
     if (!la_cols_enabled() || B <= 0 || seq_len <= 0 || Hq <= 0 || Hkv <= 0 || Nk <= 0 ||
         Hkv % Nk != 0 || (Hq >= Hkv ? Hq % Hkv : Hkv % Hq) != 0)
         return 1;
@@ -994,6 +1243,13 @@ extern "C" int hip_linear_attention_decode(
         return -1;
     }
 
+    {
+        const int rc = la_dec_vec_dispatch(stream, query, key, value, decay, beta, state, state,
+                                           output, B, seq_len, Hq, Hkv, Nk, dk, dv, scale,
+                                           update_rule, decay_per_key_dim, beta_per_head, type);
+        if (rc <= 0)
+            return rc;
+    }
     if (la_cols_enabled()) {
         const int rc = la_cols_dispatch(stream, query, key, value, decay, beta, state,
                                         state, output, B, seq_len, /*n_tok=*/1, Hq, Hkv, Nk, dk,
