@@ -446,7 +446,7 @@ int wrap_hipblasLtGemm(void *handle, void *stream, int64_t m, int64_t n,
 
 int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
                          const void *B, void *output, int64_t M, int64_t N,
-                         int64_t K, int64_t batch_count, int64_t elem_size,
+                         int64_t K, int64_t batch_count, int64_t data_type,
                          int64_t b_batch_stride, int64_t transA,
                          int64_t transB) {
   (void)b_batch_stride;
@@ -459,9 +459,10 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
   }
 
   MOCK_PRINT("[MOCK] wrap_hipblasLtMatmul(M=%lld, N=%lld, K=%lld, "
-             "batch=%lld, elem_size=%lld, transA=%lld, transB=%lld)\n",
+             "batch=%lld, data_type=%s, transA=%lld, transB=%lld)\n",
              (long long)M, (long long)N, (long long)K, (long long)batch_count,
-             (long long)elem_size, (long long)transA, (long long)transB);
+             hipdnn_ep_datatype_name(data_type), (long long)transA,
+             (long long)transB);
 
   return 0;
 }

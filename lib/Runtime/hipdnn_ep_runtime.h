@@ -855,7 +855,7 @@ int wrap_hipblasLtMatmul(
     int64_t N,              // Columns of B
     int64_t K,              // Columns of A / Rows of B
     int64_t batch_count,    // Number of batches
-    int64_t elem_size,      // Element size in bytes (2=f16, 4=f32)
+    int64_t data_type,      // HIPDNN_EP_DATATYPE_FLOAT, HALF or BFLOAT16
     int64_t b_batch_stride, // 0 = broadcast (any rank); K*N = per-batch
     int64_t transA,         // 1 = swap A's last two dims before multiply
     int64_t transB);        // 1 = swap B's last two dims before multiply
