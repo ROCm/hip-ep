@@ -4336,6 +4336,11 @@ HIP_KERNEL_API int hip_conv_transpose(
 HIP_KERNEL_API int hip_gemv_f16_kn(void* stream, const void* a, const void* B,
                                    void* out, int64_t K, int64_t N);
 
+// fp32 variant of hip_gemv_f16_kn (fp32 MoE routers). N must be a multiple of
+// 4 and B 16-byte aligned; returns -1 otherwise.
+HIP_KERNEL_API int hip_gemv_f32_kn(void* stream, const void* a, const void* B,
+                                   void* out, int64_t K, int64_t N);
+
 /* =========================================================================
  * WMMA GEMM (Small-M Matrix Multiply via Wave Matrix Multiply-Accumulate)
  * =========================================================================
