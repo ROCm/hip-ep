@@ -201,6 +201,9 @@ struct RuntimeState {
   // launches after the previous dp4a gemv has consumed the quantized row).
   void *matmul_dp4a_scratch;
   size_t matmul_dp4a_scratch_size;
+  // Contents of each scratch slot, so sibling MatMulNBits ops tagged by
+  // --hip-share-matmul-nbits-activation quantize their shared input once.
+  HipdnnDp4aActTag matmul_dp4a_tags[HIPDNN_EP_DP4A_ACT_SLOTS];
 
   // Per-session scratch for the linear-attention chunk-parallel gated_delta
   // prefill (hip_linear_attention_prefill_chunked). One contiguous device

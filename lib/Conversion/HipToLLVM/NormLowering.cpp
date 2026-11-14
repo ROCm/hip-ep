@@ -745,6 +745,16 @@ struct EngramGateOpLowering : public ConvertOpToLLVMPattern<EngramGateOp> {
   }
 };
 
+// (group, block size) of the int8 activation copy a producer writes for its
+// MatMulNBits consumers (--hip-share-matmul-nbits-activation); 0 when untagged.
+std::pair<int64_t, int64_t> getActQuantTag(Operation *op) {
+  auto group = op->getAttrOfType<IntegerAttr>("hip.act_quant_group");
+  auto blockSize = op->getAttrOfType<IntegerAttr>("hip.act_quant_block_size");
+  if (!group || !blockSize)
+    return {0, 0};
+  return {group.getInt(), blockSize.getInt()};
+}
+
 // hip.hyper_connection_pre_mix -> wrap_hyper_connection_pre_mix
 struct HyperConnectionPreMixOpLowering
     : public ConvertOpToLLVMPattern<HyperConnectionPreMixOp> {
@@ -771,9 +781,11 @@ struct HyperConnectionPreMixOpLowering
     Value scale = LLVM::ConstantOp::create(rewriter, loc, f32Type,
                                            op.getReductionScaleAttr());
 
-    SmallVector<Type> paramTypes = {ptrType, ptrType, ptrType, ptrType,
-                                    i64Type, i64Type, i64Type, i64Type,
-                                    i64Type, i64Type, f32Type};
+    auto [actQuantGroup, actQuantBlockSize] = getActQuantTag(op);
+
+    SmallVector<Type> paramTypes = {ptrType, ptrType, ptrType, ptrType, i64Type,
+                                    i64Type, i64Type, i64Type, i64Type, i64Type,
+                                    f32Type, i64Type, i64Type};
     FailureOr<LLVM::LLVMFuncOp> funcOp =
         LLVM::lookupOrCreateFn(rewriter, module, kWrapHyperConnectionPreMix,
                                paramTypes, rewriter.getI32Type());
@@ -790,7 +802,9 @@ struct HyperConnectionPreMixOpLowering
         featureGate,
         gateSigmoid,
         elementSize,
-        scale};
+        scale,
+        i64Const(actQuantGroup),
+        i64Const(actQuantBlockSize)};
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
     return success();
@@ -861,9 +875,11 @@ struct HyperConnectionPostMixNormOpLowering
       return LLVM::ConstantOp::create(rewriter, loc, i64Type,
                                       rewriter.getI64IntegerAttr(v));
     };
-    SmallVector<Type> paramTypes = {
-        ptrType, ptrType, ptrType, ptrType, ptrType, ptrType, ptrType, ptrType,
-        i64Type, i64Type, i64Type, i64Type, i64Type, i64Type, f32Type};
+    auto [actQuantGroup, actQuantBlockSize] = getActQuantTag(op);
+    SmallVector<Type> paramTypes = {ptrType, ptrType, ptrType, ptrType, ptrType,
+                                    ptrType, ptrType, ptrType, i64Type, i64Type,
+                                    i64Type, i64Type, i64Type, i64Type, f32Type,
+                                    i64Type, i64Type};
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapHyperConnectionPostMixNorm, paramTypes,
         rewriter.getI32Type());
@@ -886,7 +902,9 @@ struct HyperConnectionPostMixNormOpLowering
         i64Const(op.getGateLayout() == "feature" ? 1 : 0),
         i64Const(op.getGateActivation()),
         i64Const(streamsType.getElementType().getIntOrFloatBitWidth() / 8),
-        epsilon};
+        epsilon,
+        i64Const(actQuantGroup),
+        i64Const(actQuantBlockSize)};
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
     return success();

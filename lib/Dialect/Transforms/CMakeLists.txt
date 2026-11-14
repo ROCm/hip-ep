@@ -54,6 +54,7 @@ add_library(HipDialectTransforms STATIC
   ResolveExternConstants.cpp
   ResolveMemRefDims.cpp
   ResolveTensorDims.cpp
+  ShareMatMulNBitsActivation.cpp
   SplitDuplicateDpsInits.cpp
   UseOutputAllocator.cpp
 )

@@ -4,7 +4,7 @@
 // RUN: hip-mlir-opt %s --convert-hip-to-llvm | FileCheck %s
 
 // CHECK-LABEL: llvm.func @pre_mix
-// CHECK: llvm.call @wrap_hyper_connection_pre_mix({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, f32) -> i32
+// CHECK: llvm.call @wrap_hyper_connection_pre_mix({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, f32, i64, i64) -> i32
 func.func @pre_mix(%ctx: !hip.context) {
   %x = memref.alloc() : memref<1x4x10240xf16, 1>
   %g = memref.alloc() : memref<1x4x10240xf16, 1>
@@ -14,6 +14,46 @@ func.func @pre_mix(%ctx: !hip.context) {
       outs(%y : memref<1x4x2560xf16, 1>)
       {branches = 4 : i64, flattened = 1 : i64, gate_layout = "feature",
        hidden = 2560 : i64, reduction_scale = 2.500000e-01 : f32}
+  return
+}
+
+// --hip-share-matmul-nbits-activation tags reach the runtime as the trailing
+// (group, block size) pair.
+// CHECK-LABEL: llvm.func @pre_mix_act_quant
+// CHECK-DAG: %[[GROUP:.*]] = llvm.mlir.constant(7 : i64) : i64
+// CHECK-DAG: %[[BS:.*]] = llvm.mlir.constant(128 : i64) : i64
+// CHECK: llvm.call @wrap_hyper_connection_pre_mix({{.*}}, %[[GROUP]], %[[BS]])
+func.func @pre_mix_act_quant(%ctx: !hip.context) {
+  %x = memref.alloc() : memref<1x4x10240xf16, 1>
+  %g = memref.alloc() : memref<1x4x10240xf16, 1>
+  %y = memref.alloc() : memref<1x4x2560xf16, 1>
+  hip.hyper_connection_pre_mix(%ctx)
+      ins(%x, %g : memref<1x4x10240xf16, 1>, memref<1x4x10240xf16, 1>)
+      outs(%y : memref<1x4x2560xf16, 1>)
+      {branches = 4 : i64, flattened = 1 : i64, gate_layout = "feature",
+       hidden = 2560 : i64, reduction_scale = 2.500000e-01 : f32,
+       hip.act_quant_group = 7 : i64, hip.act_quant_block_size = 128 : i64}
+  return
+}
+
+// CHECK-LABEL: llvm.func @post_mix_norm_act_quant
+// CHECK-DAG: %[[GROUP:.*]] = llvm.mlir.constant(9 : i64) : i64
+// CHECK-DAG: %[[BS:.*]] = llvm.mlir.constant(256 : i64) : i64
+// CHECK: llvm.call @wrap_hyper_connection_post_mix_norm({{.*}}, %[[GROUP]], %[[BS]]) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, f32, i64, i64) -> i32
+func.func @post_mix_norm_act_quant(%ctx: !hip.context) {
+  %x = memref.alloc() : memref<1x1x10240xf16, 1>
+  %b = memref.alloc() : memref<1x1x2560xf16, 1>
+  %g = memref.alloc() : memref<1x1x4xf16, 1>
+  %w = memref.alloc() : memref<10240xf16, 1>
+  %r = memref.alloc() : memref<1x1x10240xf16, 1>
+  %n = memref.alloc() : memref<1x1x10240xf16, 1>
+  hip.hyper_connection_post_mix_norm(%ctx)
+      ins(%x, %b, %g, %w : memref<1x1x10240xf16, 1>, memref<1x1x2560xf16, 1>,
+          memref<1x1x4xf16, 1>, memref<10240xf16, 1>)
+      outs(%r, %n : memref<1x1x10240xf16, 1>, memref<1x1x10240xf16, 1>)
+      {branches = 4 : i64, epsilon = 9.99999997E-7 : f32, flattened = 1 : i64,
+       gate_activation = 1 : i64, gate_layout = "branch", hidden = 2560 : i64,
+       hip.act_quant_group = 9 : i64, hip.act_quant_block_size = 256 : i64}
   return
 }
 

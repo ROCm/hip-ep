@@ -118,6 +118,35 @@ def AssignOpStateSlotsPass
   ];
 }
 
+def ShareMatMulNBitsActivationPass
+    : Pass<"hip-share-matmul-nbits-activation", "mlir::ModuleOp"> {
+  let summary = "Tag sibling MatMulNBits ops that can share one quantized activation";
+  let description = [{
+    Groups `hip.matmul_nbits` ops in the same block that read the same `A`
+    SSA value. Each member of a group of two or more gets
+    `hip.act_quant_group` (an i64 id unique in the module); the first member
+    in program order also gets `hip.act_quant_leader`. The lowering passes
+    both to `wrap_matmul_nbits`, whose integer-dot path then quantizes the
+    activation in the leader only and lets the followers reuse it.
+
+    When `A` is the output of `hip.hyper_connection_pre_mix` or the normed
+    result of a flattened `hip.hyper_connection_post_mix_norm` in the same
+    block, and every consumer quantizes with one block size, the producer
+    leads the group instead (even for a single consumer): it gets
+    `hip.act_quant_group` and `hip.act_quant_block_size` and writes the int8
+    copy in its own epilogue, so no consumer quantizes.
+
+    The leader always refreshes or invalidates the runtime's cached copy, so
+    a follower cannot reuse data from an earlier inference or from another op
+    that received the same buffer address. Runs on tensor IR right before
+    One-Shot Bufferize; after pooling a memref value can stand for several
+    tensors that share an address, so it is not a valid grouping key.
+  }];
+  let dependentDialects = [
+    "mlir::hip::HipDialect"
+  ];
+}
+
 def GenerateOpStateInitPass
     : Pass<"generate-op-state-init", "mlir::ModuleOp"> {
   let summary = "Emit @hipdnn_ep_op_states_init_fn from per-op generateOpStateInit";

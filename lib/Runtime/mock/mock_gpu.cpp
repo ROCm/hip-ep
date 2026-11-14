@@ -1756,14 +1756,15 @@ int wrap_engram_gate(RuntimeState *state, void *key, void *query, void *value,
   return 0;
 }
 
-int wrap_hyper_connection_pre_mix(RuntimeState *state, void *streams,
-                                  void *pre_mix, void *output,
-                                  int64_t stream_num_elements, int64_t branches,
-                                  int64_t hidden, int64_t feature_gate,
-                                  int64_t gate_sigmoid,
-                                  int64_t element_size_bytes,
-                                  float reduction_scale) {
+int wrap_hyper_connection_pre_mix(
+    RuntimeState *state, void *streams, void *pre_mix, void *output,
+    int64_t stream_num_elements, int64_t branches, int64_t hidden,
+    int64_t feature_gate, int64_t gate_sigmoid, int64_t element_size_bytes,
+    float reduction_scale, int64_t act_quant_group,
+    int64_t act_quant_block_size) {
   (void)gate_sigmoid;
+  (void)act_quant_group;
+  (void)act_quant_block_size;
   (void)streams;
   (void)pre_mix;
   (void)output;
@@ -1809,7 +1810,9 @@ int wrap_hyper_connection_post_mix_norm(
     void *stream_mix, void *norm_scale, void *residual, void *normed,
     int64_t stream_num_elements, int64_t branches, int64_t hidden,
     int64_t feature_gate, int64_t gate_activation, int64_t element_size_bytes,
-    float epsilon) {
+    float epsilon, int64_t act_quant_group, int64_t act_quant_block_size) {
+  (void)act_quant_group;
+  (void)act_quant_block_size;
   (void)streams;
   (void)block_output;
   (void)gate;
@@ -1882,9 +1885,11 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
                       const void *bias, void *output, int64_t M, int64_t N,
                       int64_t K, int64_t batch_count, int64_t bits,
                       int64_t block_size, int64_t elem_size,
-                      int64_t zp_elem_size, int64_t scale_elem_size) {
+                      int64_t zp_elem_size, int64_t scale_elem_size,
+                      int64_t act_share) {
   (void)op_state_slot;
   (void)scale_elem_size;
+  (void)act_share;
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_matmul_nbits\n");
     return -1;
