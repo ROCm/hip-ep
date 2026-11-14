@@ -20,6 +20,11 @@ boundaries.
 
 These tests pin both directions of both permutations at the model's
 exact dtype (fp16), plus a tiny generic 2-D / 3-D smoke pair.
+
+The NHWC <-> NCHW cases cover image layout conversions with a narrow
+channel axis (e.g. an RGB input), which canonicalise to a 2-D transpose
+with one side of at most 16 and take the narrow-side kernels; C=17 pins
+the first width that stays on the square-tile kernel.
 """
 
 import numpy as np
@@ -70,6 +75,39 @@ class TestTranspose:
         x = rng.uniform(-1, 1, shape).astype(np.float16)
 
         model = _make_transpose_model(shape, perm, np.float16)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0)
+
+    # ------------------------------------------------------------------
+    # NHWC <-> NCHW with a narrow channel axis
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize("dtype", [np.float32, np.float16], ids=["fp32", "fp16"])
+    @pytest.mark.parametrize(
+        "batch, height, width, channels",
+        [
+            (1, 768, 768, 3),
+            (2, 37, 41, 4),
+            (1, 15, 33, 16),
+            (1, 15, 33, 17),
+        ],
+        ids=["rgb_768", "batched_c4_ragged", "c16", "c17"],
+    )
+    @pytest.mark.parametrize(
+        "to_nchw", [True, False], ids=["nhwc_to_nchw", "nchw_to_nhwc"]
+    )
+    def test_transpose_narrow_channels(
+        self, model_runner, batch, height, width, channels, to_nchw, dtype
+    ):
+        """[N, H, W, C] <-> [N, C, H, W] for C <= 17."""
+        if to_nchw:
+            shape, perm = [batch, height, width, channels], [0, 3, 1, 2]
+        else:
+            shape, perm = [batch, channels, height, width], [0, 2, 3, 1]
+        rng = np.random.default_rng(47 + channels)
+        x = rng.uniform(-1, 1, shape).astype(dtype)
+
+        model = _make_transpose_model(shape, perm, dtype)
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=0)
 

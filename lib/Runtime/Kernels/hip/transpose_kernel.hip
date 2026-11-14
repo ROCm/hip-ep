@@ -153,6 +153,92 @@ __global__ void transpose_tiled_kernel(const T* __restrict__ src,
     }
 }
 
+// Batched 2-D transpose where one side is narrow: [n x c] <-> [c x n] with
+// c <= kSmallCMax, e.g. an NHWC <-> NCHW image with 3 channels, which
+// canonicalises to [H*W x 3]. A 32x32 tile leaves 29 of 32 lanes idle on the
+// narrow side; here a block instead stages kSmallCPix whole rows of the
+// interleaved [n x c] side, so that side is one contiguous run of
+// kSmallCPix*c elements and the planar side is c contiguous runs of
+// kSmallCPix elements. Both global accesses are fully coalesced and every
+// lane is busy.
+static constexpr int kSmallCMax = 16;
+static constexpr int kSmallCPix = 256;
+
+// One padding slot per 32 elements, so the stride-c LDS accesses of the planar
+// side do not all land on the same bank when c is even.
+__host__ __device__ __forceinline__ int smallCSkew(int i) {
+    return i + (i >> 5);
+}
+
+static size_t smallCLdsBytes(int c, int elem) {
+    const int n = kSmallCPix * c;
+    return static_cast<size_t>(smallCSkew(n - 1) + 1) * elem;
+}
+
+// src [batch][n][c] -> dst [batch][c][n].
+template <typename T>
+__global__ void __launch_bounds__(kSmallCPix)
+transpose_small_c_deinterleave(const T* __restrict__ src,
+                               T* __restrict__ dst, int n, int c) {
+    extern __shared__ uint64_t small_c_lds[];
+    T* tile = reinterpret_cast<T*>(small_c_lds);
+    const int64_t slice = static_cast<int64_t>(blockIdx.y) * n * c;
+    const int p0 = blockIdx.x * kSmallCPix;
+    const int np = min(kSmallCPix, n - p0);
+    const T* s = src + slice + static_cast<int64_t>(p0) * c;
+    for (int i = threadIdx.x; i < np * c; i += kSmallCPix)
+        tile[smallCSkew(i)] = s[i];
+    __syncthreads();
+    const int p = threadIdx.x;
+    if (p >= np) return;
+    T* d = dst + slice + p0 + p;
+    for (int ch = 0; ch < c; ++ch)
+        d[static_cast<int64_t>(ch) * n] = tile[smallCSkew(p * c + ch)];
+}
+
+// src [batch][c][n] -> dst [batch][n][c].
+template <typename T>
+__global__ void __launch_bounds__(kSmallCPix)
+transpose_small_c_interleave(const T* __restrict__ src,
+                             T* __restrict__ dst, int n, int c) {
+    extern __shared__ uint64_t small_c_lds[];
+    T* tile = reinterpret_cast<T*>(small_c_lds);
+    const int64_t slice = static_cast<int64_t>(blockIdx.y) * n * c;
+    const int p0 = blockIdx.x * kSmallCPix;
+    const int np = min(kSmallCPix, n - p0);
+    const int p = threadIdx.x;
+    if (p < np) {
+        const T* s = src + slice + p0 + p;
+        for (int ch = 0; ch < c; ++ch)
+            tile[smallCSkew(p * c + ch)] = s[static_cast<int64_t>(ch) * n];
+    }
+    __syncthreads();
+    T* d = dst + slice + static_cast<int64_t>(p0) * c;
+    for (int i = threadIdx.x; i < np * c; i += kSmallCPix)
+        d[i] = tile[smallCSkew(i)];
+}
+
+template <typename T>
+hipError_t launchSmallC(hipStream_t stream, const void* input, void* output,
+                        int64_t batch, int64_t rows, int64_t cols) {
+    const bool deinterleave = cols <= kSmallCMax;
+    const int n = static_cast<int>(deinterleave ? rows : cols);
+    const int c = static_cast<int>(deinterleave ? cols : rows);
+    dim3 grid(static_cast<unsigned>((n + kSmallCPix - 1) / kSmallCPix),
+              static_cast<unsigned>(batch));
+    const size_t lds = smallCLdsBytes(c, sizeof(T));
+    const T* in = static_cast<const T*>(input);
+    T* out = static_cast<T*>(output);
+    (void)hipGetLastError();
+    if (deinterleave)
+        hipLaunchKernelGGL(transpose_small_c_deinterleave<T>, grid,
+                           dim3(kSmallCPix), lds, stream, in, out, n, c);
+    else
+        hipLaunchKernelGGL(transpose_small_c_interleave<T>, grid,
+                           dim3(kSmallCPix), lds, stream, in, out, n, c);
+    return hipGetLastError();
+}
+
 }  // namespace
 
 // Fast path for a batched last-two-dim transpose of 1/2/4/8-byte elements.
@@ -174,12 +260,46 @@ extern "C" int hip_transpose_2d_tiled(void* stream, const void* input,
     if (batch > 65535)
         return 1; // decline: exceeds gridDim.z limit
 
+    hipStream_t hip_stream = static_cast<hipStream_t>(stream);
+    // The narrow-side kernels index a slice with int; n * c must fit.
+    if ((cols <= kSmallCMax || rows <= kSmallCMax) &&
+        rows * cols < (int64_t{1} << 31)) {
+        hipError_t err = hipErrorInvalidValue;
+        switch (element_size_bytes) {
+            case 1:
+                err = launchSmallC<uint8_t>(hip_stream, input, output, batch,
+                                            rows, cols);
+                break;
+            case 2:
+                err = launchSmallC<uint16_t>(hip_stream, input, output, batch,
+                                             rows, cols);
+                break;
+            case 4:
+                err = launchSmallC<uint32_t>(hip_stream, input, output, batch,
+                                             rows, cols);
+                break;
+            case 8:
+                err = launchSmallC<uint64_t>(hip_stream, input, output, batch,
+                                             rows, cols);
+                break;
+            default:
+                return 1; // decline: unsupported element width
+        }
+        if (err != hipSuccess) {
+            fprintf(stderr,
+                    "[custom_kernels] hip_transpose_2d_tiled small-c launch "
+                    "failed: %s\n",
+                    hipGetErrorString(err));
+            return static_cast<int>(err);
+        }
+        return 0;
+    }
+
     constexpr int TILE = 32;
     dim3 block(TILE, 8);
     dim3 grid(static_cast<unsigned>((cols + TILE - 1) / TILE),
               static_cast<unsigned>((rows + TILE - 1) / TILE),
               static_cast<unsigned>(batch));
-    hipStream_t hip_stream = static_cast<hipStream_t>(stream);
     const int r = static_cast<int>(rows);
     const int c = static_cast<int>(cols);
     switch (element_size_bytes) {
