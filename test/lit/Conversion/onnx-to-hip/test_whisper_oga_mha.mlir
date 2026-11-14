@@ -43,10 +43,13 @@ module {
     // CHECK: %[[P:.*]] = tensor.dim %{{.*}}, %c2
     // CHECK: %[[S:.*]] = tensor.dim %{{.*}}, %c1
     // CHECK: %[[T:.*]] = arith.addi %[[P]], %[[S]]
+    // seqlens_k broadcast on the device from one host-written element, not
+    // a host-written splat in the pool.
+    // CHECK: %[[SEQ:.*]] = hip.expand(%{{.*}}) ins(%{{.*}} : tensor<1xi32>
     // CHECK: tensor.empty(%{{.*}}, %[[T]]) : tensor<?x6x?x64xf16>
     // CHECK: tensor.empty(%{{.*}}, %[[T]]) : tensor<?x6x?x64xf16>
     // Positional operands: query, key, value, past_key, past_value, seqlens_k, total.
-    // CHECK: hip.gqa(%{{.*}}) ins(%{{[^,]+}}, %{{[^,]+}}, %{{[^,]+}}, %{{[^,]+}}, %{{[^,]+}}, %{{[^,]+}}, %{{[^,]+}} : {{.*}})
+    // CHECK: hip.gqa(%{{.*}}) ins(%{{[^,]+}}, %{{[^,]+}}, %{{[^,]+}}, %{{[^,]+}}, %{{[^,]+}}, %[[SEQ]], %{{[^,]+}} : {{.*}})
     // CHECK-SAME: {kv_num_heads = 6 : i64, num_heads = 6 : i64
     %o, %pk2, %pv2 = "onnx.Custom"(%q, %k, %v, %n, %n, %n, %pk, %pv)
          <{function_name = "MultiHeadAttention"}>
