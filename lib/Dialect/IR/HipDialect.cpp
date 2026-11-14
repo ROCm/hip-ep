@@ -157,12 +157,22 @@ LogicalResult RocMlirElementwiseOp::verify() {
   auto yield = cast<YieldOp>(body.getTerminator());
   if (yield.getValues().getTypes() != getResultTypes())
     return emitOpError("yields types that do not match the results");
+  // A static unit-stride slice is the input view that the anchor pass folds
+  // into the kernel's loads (absorbInputViews).
+  auto isStaticSlice = [](Operation &op) {
+    auto slice = dyn_cast<tensor::ExtractSliceOp>(op);
+    return slice && slice.getType().hasStaticShape() &&
+           llvm::none_of(slice.getStaticOffsets(), ShapedType::isDynamic) &&
+           llvm::all_of(slice.getStaticStrides(),
+                        [](int64_t stride) { return stride == 1; });
+  };
   for (Operation &op : body.without_terminator()) {
     StringRef dialect = op.getDialect() ? op.getDialect()->getNamespace() : "";
     bool allowed = op.getNumRegions() == 0 &&
                    (dialect == HipDialect::getDialectNamespace() ||
                     isa<tensor::EmptyOp, tensor::ExpandShapeOp,
-                        tensor::CollapseShapeOp, arith::ConstantOp>(op));
+                        tensor::CollapseShapeOp, arith::ConstantOp>(op) ||
+                    isStaticSlice(op));
     if (!allowed)
       return op.emitOpError("is not allowed in a hip.rocmlir_elementwise body");
   }

@@ -300,8 +300,13 @@ readersToMove(ArrayRef<Operation *> ops, const DenseSet<Operation *> &inModule,
   return moved;
 }
 
-void materialize(const Module &module, RewriterBase &rewriter) {
-  SmallVector<Operation *> ops(module.ops.begin(), module.ops.end());
+} // namespace
+
+RocMlirElementwiseOp groupIntoRocMlirElementwise(ArrayRef<Operation *> opList,
+                                                 RewriterBase &rewriter) {
+  SmallVector<Operation *> ops(opList);
+  if (ops.empty())
+    return {};
   llvm::sort(ops,
              [](Operation *a, Operation *b) { return a->isBeforeInBlock(b); });
   DenseSet<Operation *> inModule(ops.begin(), ops.end());
@@ -313,22 +318,23 @@ void materialize(const Module &module, RewriterBase &rewriter) {
     for (Value operand : op->getOperands()) {
       if (isa<ContextType>(operand.getType())) {
         if (context && context != operand)
-          return;
+          return {};
         context = operand;
       }
     }
     for (Value operand : getDataOperands(op))
       if (!inModule.contains(operand.getDefiningOp()))
         inputs.insert(operand);
-    if (module.readsOutside(op))
+    if (llvm::any_of(op->getUsers(),
+                     [&](Operation *user) { return !inModule.contains(user); }))
       results.push_back(op->getResult(0));
   }
   if (!context || results.empty())
-    return;
+    return {};
   std::optional<SmallVector<Operation *>> moved =
       readersToMove(ops, inModule, results);
   if (!moved)
-    return;
+    return {};
 
   Operation *last = ops.back();
   rewriter.setInsertionPointAfter(last);
@@ -381,6 +387,14 @@ void materialize(const Module &module, RewriterBase &rewriter) {
   for (Operation *empty : inits)
     if (empty->use_empty())
       rewriter.eraseOp(empty);
+  return group;
+}
+
+namespace {
+
+void materialize(const Module &module, RewriterBase &rewriter) {
+  groupIntoRocMlirElementwise(
+      SmallVector<Operation *>(module.ops.begin(), module.ops.end()), rewriter);
 }
 
 struct FuseRocMlirElementwisePass

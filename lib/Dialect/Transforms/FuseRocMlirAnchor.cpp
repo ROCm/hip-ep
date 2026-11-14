@@ -983,8 +983,16 @@ public:
         block.getOps<RocMlirElementwiseOp>());
     for (RocMlirElementwiseOp module : leftover) {
       if (outlinesAlone(module)) {
-        outlineElementwise(module, rewriter, counter);
-        continue;
+        module = peelBoundaryTransposes(module, rewriter);
+        if (!module)
+          continue;
+        module = absorbInputViews(module, rewriter);
+        if (!module)
+          continue;
+        if (outlinesAlone(module)) {
+          outlineElementwise(module, rewriter, counter);
+          continue;
+        }
       }
       rewriter.setInsertionPoint(module);
       inlineRocMlirElementwise(module, rewriter);
@@ -1059,10 +1067,13 @@ private:
   // cannot store a result that only transposes a kernel argument (through
   // reshapes) next to other results; such a module stays on the host.
   bool outlinesAlone(RocMlirElementwiseOp module) const {
+    if (!standaloneElementwise)
+      return false;
     Block &body = module.getBody().front();
     int launches = 0;
     for (Operation &op : body.without_terminator()) {
-      if (isa<tensor::EmptyOp>(op) || isTosaLowerableReshape(&op))
+      if (isa<tensor::EmptyOp>(op) || isTosaLowerableReshape(&op) ||
+          isLowerableSlice(&op))
         continue;
       if (!isTosaExpressiblePointwiseOp(&op) && !isTosaLowerableQdq(&op))
         return false;
@@ -1085,6 +1096,194 @@ private:
     auto yield = cast<YieldOp>(body.getTerminator());
     return yield.getValues().size() == 1 ||
            llvm::none_of(yield.getValues(), movesArgument);
+  }
+
+  // rocMLIR tiles an elementwise kernel over its flattened output, so a
+  // transpose that moves the innermost dimension makes one side of the kernel
+  // access memory with a stride. Such a transpose at the edge of a module
+  // runs as a HIP transpose instead, and the kernel keeps the layout that it
+  // computes in. A peeled result transpose (with the reshapes around it) is
+  // one that only the module results read; a peeled input transpose reads a
+  // module input through reshapes. Returns the module that remains, or null
+  // when its ops could not form one again and stay as HIP ops.
+  RocMlirElementwiseOp peelBoundaryTransposes(RocMlirElementwiseOp module,
+                                              IRRewriter &rewriter) {
+    Block &body = module.getBody().front();
+    Operation *yield = body.getTerminator();
+    DenseSet<Value> yielded(yield->operand_begin(), yield->operand_end());
+    // When the innermost dimension of the input or of the output is small,
+    // the tile still reads or writes a few contiguous streams, and the kernel
+    // beats a separate HIP transpose. The crossover goes with the element
+    // count, the same for f16, f32 and i8.
+    auto innermostAtLeast = [](Value value, int64_t elements) {
+      int64_t size = cast<ShapedType>(value.getType()).getShape().back();
+      return !ShapedType::isDynamic(size) && size >= elements;
+    };
+    auto movesInnermost = [&](TransposeOp transpose) {
+      ArrayAttr perm = transpose.getPerm();
+      int64_t last = static_cast<int64_t>(perm.size()) - 1;
+      if (last <= 0 || cast<IntegerAttr>(perm[last]).getInt() == last)
+        return false;
+      return innermostAtLeast(transpose.getInput(), peelMinInputElements) &&
+             innermostAtLeast(transpose->getResult(0), peelMinOutputElements);
+    };
+    auto storable = [&](Value value) {
+      auto type = dyn_cast<RankedTensorType>(value.getType());
+      if (!type || !type.hasStaticShape() || type.getRank() == 0)
+        return false;
+      if (auto intType = dyn_cast<IntegerType>(type.getElementType());
+          intType && intType.getWidth() > 32)
+        return false;
+      return yielded.contains(value) ||
+             isa_and_nonnull<DestinationStyleOpInterface>(
+                 value.getDefiningOp());
+    };
+
+    DenseSet<Operation *> peel;
+    for (TransposeOp transpose :
+         llvm::make_early_inc_range(body.getOps<TransposeOp>())) {
+      if (!movesInnermost(transpose))
+        continue;
+      // The reshapes between the transpose and what it reads.
+      SmallVector<Operation *> above;
+      Value source = transpose.getInput();
+      while (Operation *def = source.getDefiningOp()) {
+        if (!isTosaLowerableReshape(def))
+          break;
+        above.push_back(def);
+        source = def->getOperand(0);
+      }
+      bool readsInput = isa<BlockArgument>(source);
+
+      // The reshapes between the transpose and the yield, when only the yield
+      // reads the chain.
+      SmallVector<Operation *> below;
+      bool onlyYielded = true;
+      for (Operation *op = transpose;;) {
+        if (!op->use_empty() && llvm::all_of(op->getUsers(), [&](Operation *u) {
+              return u == yield;
+            }))
+          break;
+        if (!op->hasOneUse() ||
+            !isTosaLowerableReshape(*op->getUsers().begin())) {
+          onlyYielded = false;
+          break;
+        }
+        op = *op->getUsers().begin();
+        below.push_back(op);
+      }
+
+      bool peelsResult = onlyYielded && (readsInput || storable(source));
+      if (!peelsResult && !readsInput)
+        continue;
+      // A reshape that another module op also reads stays in the module, so
+      // the transpose gets its own copy of the reshapes it reads through.
+      if (llvm::any_of(above, [](Operation *op) { return !op->hasOneUse(); })) {
+        rewriter.setInsertionPoint(transpose);
+        Value copy = source;
+        SmallVector<Operation *> copies;
+        for (Operation *reshape : llvm::reverse(above)) {
+          IRMapping mapping;
+          mapping.map(reshape->getOperand(0), copy);
+          Operation *clone = rewriter.clone(*reshape, mapping);
+          copies.push_back(clone);
+          copy = clone->getResult(0);
+        }
+        rewriter.modifyOpInPlace(
+            transpose, [&] { transpose.getInputMutable().assign(copy); });
+        above = std::move(copies);
+      }
+      peel.insert(transpose);
+      peel.insert_range(above);
+      if (peelsResult)
+        peel.insert_range(below);
+    }
+    if (peel.empty())
+      return module;
+
+    SmallVector<Operation *> kept;
+    bool computes = false;
+    for (Operation &op : body.without_terminator()) {
+      if (isa<tensor::EmptyOp>(op) || peel.contains(&op))
+        continue;
+      kept.push_back(&op);
+      computes |= !isa<TransposeOp>(op) && !isTosaLowerableReshape(&op) &&
+                  !isLowerableSlice(&op);
+    }
+    if (!computes)
+      return module;
+
+    rewriter.setInsertionPoint(module);
+    inlineRocMlirElementwise(module, rewriter);
+    return groupIntoRocMlirElementwise(kept, rewriter);
+  }
+
+  static bool isLowerableSlice(Operation *op) {
+    auto slice = dyn_cast<tensor::ExtractSliceOp>(op);
+    return slice && isTosaLowerableSlice(slice);
+  }
+
+  // A slice that a module reads would run as a strided copy before the kernel.
+  // rocMLIR folds a static slice into the kernel's loads, so each module input
+  // that comes from a chain of such slices and static reshapes gets its own
+  // copy of that chain in the module, which then reads the chain's source.
+  // Another reader of the slice keeps the original. Returns the module that
+  // remains, or null when its ops could not form one again and stay as HIP
+  // ops.
+  RocMlirElementwiseOp absorbInputViews(RocMlirElementwiseOp module,
+                                        IRRewriter &rewriter) {
+    auto loadable = [](Value value) {
+      auto type = dyn_cast<RankedTensorType>(value.getType());
+      if (!type || !type.hasStaticShape() || type.getRank() == 0)
+        return false;
+      auto intType = dyn_cast<IntegerType>(type.getElementType());
+      return !intType || intType.getWidth() <= 32;
+    };
+    SmallVector<std::pair<Value, SmallVector<Operation *>>> chains;
+    for (Value input : module.getInputs()) {
+      SmallVector<Operation *> chain;
+      bool slices = false;
+      Value source = input;
+      while (Operation *def = source.getDefiningOp()) {
+        if (isLowerableSlice(def))
+          slices = true;
+        else if (!isTosaLowerableReshape(def))
+          break;
+        chain.push_back(def);
+        source = def->getOperand(0);
+      }
+      if (slices && loadable(source))
+        chains.push_back({input, std::move(chain)});
+    }
+    if (chains.empty())
+      return module;
+
+    Block &body = module.getBody().front();
+    SmallVector<Operation *> ops;
+    for (Operation &op : body.without_terminator())
+      if (!isa<tensor::EmptyOp>(op))
+        ops.push_back(&op);
+    DenseSet<Operation *> inBody(ops.begin(), ops.end());
+
+    rewriter.setInsertionPoint(module);
+    SmallVector<std::pair<Value, Value>> replacements;
+    for (auto &[input, chain] : chains) {
+      Value copy = chain.back()->getOperand(0);
+      for (Operation *view : llvm::reverse(chain)) {
+        IRMapping mapping;
+        mapping.map(view->getOperand(0), copy);
+        Operation *clone = rewriter.clone(*view, mapping);
+        ops.push_back(clone);
+        copy = clone->getResult(0);
+      }
+      replacements.push_back({input, copy});
+    }
+    inlineRocMlirElementwise(module, rewriter);
+    for (auto [input, copy] : replacements)
+      rewriter.replaceUsesWithIf(input, copy, [&](OpOperand &use) {
+        return inBody.contains(use.getOwner());
+      });
+    return groupIntoRocMlirElementwise(ops, rewriter);
   }
 
   void outlineElementwise(RocMlirElementwiseOp module, IRRewriter &rewriter,
