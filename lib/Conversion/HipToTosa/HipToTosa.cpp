@@ -6,6 +6,7 @@
 #include "hip/Conversion/HipToTosa/HipToTosaLegality.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
+#include "hip/debug_log.h"
 
 #include <llvm/ADT/STLFunctionalExtras.h>
 #include <llvm/ADT/Sequence.h>
@@ -1982,8 +1983,9 @@ struct SignConverter final : public OpConversionPattern<SignOp> {
   }
 };
 
-// rocMLIR's rock-tosa-to-elementwise lowers these tosa.custom names; a plain
-// tosa.cast float->int is illegal there.
+// rocMLIR's rock-tosa-to-elementwise lowers these tosa.custom names. A plain
+// tosa.cast float->int rounds to nearest even there; fp_to_int_cast truncates
+// toward zero, as ONNX Cast does.
 constexpr StringLiteral kRockCustomOpDomain = "rocmlir";
 constexpr StringLiteral kRockUnsignedCast = "unsigned_cast";
 constexpr StringLiteral kRockFpToIntCast = "fp_to_int_cast";
@@ -2754,8 +2756,9 @@ struct RangeConverter final : public OpConversionPattern<RangeOp> {
 };
 
 // hip.cast is 1-1 with tosa.cast when both endpoints are signed or float.
-// Float->int and any unsigned endpoint go through rocMLIR tosa.custom, because
-// rock-tosa-to-elementwise rejects tosa.cast float->int.
+// Float->int goes through rocMLIR's fp_to_int_cast, because ONNX Cast
+// truncates while tosa.cast rounds to nearest even; any unsigned endpoint goes
+// through unsigned_cast.
 //
 // ONNX CastLike shares this path: simplify-onnx rewrites it to a plain
 // onnx.Cast (the target dtype is carried by the result type, and the type
@@ -8578,7 +8581,12 @@ static bool isSignednessNeutral(Operation *op) {
 // ops (unsigned_cast, unsigned_div, unsigned_max) carry the unsigned meaning.
 // A ui8 kernel argument becomes i8 with the same bytes, so the caller's buffer
 // needs no change. A kernel with any other op on an unsigned value -- a
-// tosa.clamp or tosa.maximum, whose meaning would change -- is left as it is.
+// tosa.clamp or tosa.maximum, whose meaning would change -- is left as it is,
+// and rocMLIR then rejects the kernel; HIPDNN_EP_DEBUG names the op. The pass
+// does not fail, because it converts every kernel of the model at once, and
+// an elementwise kernel that rocMLIR rejects still runs as HIP ops. This is
+// not a remark: ui8 kernels are common in quantized models, so it would print
+// for every one of them.
 //
 // Before:
 //   func @k(%x: tensor<4xui8>) -> tensor<4xf32>
@@ -8598,8 +8606,14 @@ static void makeUnsignedIntegersSignless(func::FuncOp func) {
         llvm::none_of(op->getResultTypes(), isUnsignedTensor))
       return WalkResult::advance();
     hasUnsigned = true;
-    return isSignednessNeutral(op) ? WalkResult::advance()
-                                   : WalkResult::interrupt();
+    if (isSignednessNeutral(op))
+      return WalkResult::advance();
+    COMPILER_DEBUG_LOG("[hip-to-tosa] kernel '"
+                       << func.getSymName()
+                       << "' keeps its unsigned types: " << op->getName()
+                       << " depends on signedness, so rocMLIR rejects the "
+                          "kernel\n");
+    return WalkResult::interrupt();
   });
   if (!hasUnsigned || walk.wasInterrupted())
     return;
@@ -8656,11 +8670,11 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         LogOp, SinOp, CosOp, TanhOp, ErfOp, SigmoidOp, ReciprocalOp, SqrtOp,
         SoftplusOp, GeluOp, BiasGeluOp, FastGeluOp, SiluOp, SwishOp, WhereOp,
         LeakyReluOp, MiopenSoftmaxOp, ReduceSumOp, ReduceMeanOp, CastOp,
-        QuantizeLinearOp, DequantizeLinearOp, MatMulNBitsOp, UnpackInt4Op,
-        DequantBnb4Op, GatherOp, GatherElementsOp, GatherNDOp, GridSampleOp,
-        SizeOp, OneHotOp, RangeOp, RopeOp, GqaOp, MultiHeadAttentionOp, IfOp,
-        LoopOp, RoundOp, ModOp, AtanOp, RmsNormOp, LayerNormOp, InstanceNormOp,
-        SkipRmsNormOp>();
+        QuantizeLinearOp, DequantizeLinearOp, QuantConvOp, QuantMatmulOp,
+        MatMulNBitsOp, UnpackInt4Op, DequantBnb4Op, GatherOp, GatherElementsOp,
+        GatherNDOp, GridSampleOp, SizeOp, OneHotOp, RangeOp, RopeOp, GqaOp,
+        MultiHeadAttentionOp, IfOp, LoopOp, RoundOp, ModOp, AtanOp, RmsNormOp,
+        LayerNormOp, InstanceNormOp, SkipRmsNormOp>();
     // tosa.matmul (and other tosa ops) are not destination-passing, so
     // MatMulConverter drops each hip op's DPS `outs` operand. The
     // `tensor.empty` that fed it is then dead, but a full conversion still
