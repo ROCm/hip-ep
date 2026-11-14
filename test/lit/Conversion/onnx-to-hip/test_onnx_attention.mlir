@@ -69,10 +69,10 @@ module {
             tensor<1x8x128x128xf16>)
 
     // present KV seq = past_seq (127) + current_seq (1); seqlens_k = total - 1.
-    // CHECK: tensor.dim %{{.*}}, %c2
-    // CHECK: arith.addi
-    // CHECK: arith.subi
-    // CHECK: tensor.from_elements %{{.*}} : tensor<1xi32>
+    // Both extents are static, so seqlens_k is a hip.constant: a folded tensor
+    // constant would stay in host-only storage the device cannot read.
+    // CHECK-NOT: tensor.from_elements %{{.*}} : tensor<1xi32>
+    // CHECK: hip.constant {value = dense<127> : tensor<1xi32>} : tensor<1xi32>
     // CHECK: tensor.empty() : tensor<1x1x2048xf16>
     // CHECK: tensor.empty() : tensor<1x8x128x128xf16>
     // CHECK: hip.gqa(%[[CTX]])
@@ -257,6 +257,11 @@ module {
         : (tensor<2x10x1024xf16>, tensor<2x10x1024xf16>, tensor<2x10x1024xf16>)
         -> tensor<2x10x1024xf16>
 
+    // The KV length (10) is static, so seqlens_k is a device-placed
+    // hip.constant, and the batch broadcast reads that constant.
+    // CHECK-NOT: tensor.from_elements %{{.*}} : tensor<1xi32>
+    // CHECK: %[[S4:.*]] = hip.constant {value = dense<9> : tensor<1xi32>} : tensor<1xi32>
+    // CHECK: hip.expand(%[[CTX4]]) ins(%[[S4]], %{{.*}} : tensor<1xi32>, tensor<1xi64>) outs(%{{.*}} : tensor<2xi32>)
     // CHECK: hip.gqa(%[[CTX4]])
     // Attributes print alphabetically; no_causal = true is present (is_causal=0).
     // CHECK-SAME: {kv_num_heads = 16 : i64, no_causal = true, num_heads = 16 : i64
@@ -1497,5 +1502,77 @@ module {
 
     return %out#0, %out#1, %out#2
         : tensor<?x?x1536xf16>, tensor<?x2x?x128xf16>, tensor<?x2x?x128xf16>
+  }
+}
+
+// -----
+
+// Windowed encoder attention: no mask, no past, a static KV length of 4 per
+// window and a dynamic window count as the batch. seqlens_k is known at
+// compile time, so it is a hip.constant and the dynamic batch broadcast reads
+// it from device storage instead of a folded host constant.
+module {
+  func.func @main_graph(
+      %query: tensor<?x4x1152xf16>,
+      %key: tensor<?x4x1152xf16>,
+      %value: tensor<?x4x1152xf16>)
+      -> tensor<?x4x1152xf16> {
+
+    // CHECK-LABEL: func.func @main_graph
+    // CHECK-SAME: (%[[CTXW:[^:]+]]: !hip.context, %[[QW:[^:]+]]: tensor<?x4x1152xf16>,
+
+    %y = "onnx.Attention"(%query, %key, %value)
+        {q_num_heads = 16 : si64,
+         kv_num_heads = 16 : si64,
+         is_causal = 0 : si64}
+        : (tensor<?x4x1152xf16>, tensor<?x4x1152xf16>, tensor<?x4x1152xf16>)
+        -> tensor<?x4x1152xf16>
+
+    // CHECK-NOT: tensor.from_elements %{{.*}} : tensor<1xi32>
+    // CHECK: %[[SW:[^ ]+]] = hip.constant {value = dense<3> : tensor<1xi32>} : tensor<1xi32>
+    // CHECK: %[[BW:[^ ]+]] = tensor.dim %[[QW]], %c0
+    // CHECK: %[[EW:[^ ]+]] = tensor.empty(%[[BW]]) : tensor<?xi32>
+    // CHECK: hip.expand(%[[CTXW]]) ins(%[[SW]], %{{.*}} : tensor<1xi32>, tensor<1xi64>) outs(%[[EW]] : tensor<?xi32>)
+    // CHECK: hip.gqa(%[[CTXW]])
+    // CHECK-SAME: no_causal = true
+    // CHECK-NOT: onnx.Attention
+
+    return %y : tensor<?x4x1152xf16>
+  }
+}
+
+// -----
+
+// A static past and a static KV length also fix seqlens_k at compile time:
+// past (7) + current (1) - 1 = 7.
+module {
+  func.func @main_graph(
+      %query: tensor<?x1x1024xf16>,
+      %key: tensor<?x1x512xf16>,
+      %value: tensor<?x1x512xf16>,
+      %past_key: tensor<?x4x7x128xf16>,
+      %past_value: tensor<?x4x7x128xf16>)
+      -> (tensor<?x1x1024xf16>, tensor<?x4x8x128xf16>, tensor<?x4x8x128xf16>) {
+
+    // CHECK-LABEL: func.func @main_graph
+    // CHECK-SAME: (%[[CTXP:.*]]: !hip.context,
+
+    %none_mask = "onnx.NoValue"() {value} : () -> none
+    %out:3 = "onnx.Attention"(%query, %key, %value, %none_mask, %past_key,
+                              %past_value)
+        {q_num_heads = 8 : si64,
+         kv_num_heads = 4 : si64,
+         is_causal = 1 : si64}
+        : (tensor<?x1x1024xf16>, tensor<?x1x512xf16>, tensor<?x1x512xf16>,
+           none, tensor<?x4x7x128xf16>, tensor<?x4x7x128xf16>)
+        -> (tensor<?x1x1024xf16>, tensor<?x4x8x128xf16>, tensor<?x4x8x128xf16>)
+
+    // CHECK: %[[SP:.*]] = hip.constant {value = dense<7> : tensor<1xi32>} : tensor<1xi32>
+    // CHECK: hip.expand(%[[CTXP]]) ins(%[[SP]], %{{.*}} : tensor<1xi32>, tensor<1xi64>)
+    // CHECK: hip.gqa(%[[CTXP]])
+    // CHECK-NOT: onnx.Attention
+
+    return %out#0, %out#1, %out#2
+        : tensor<?x1x1024xf16>, tensor<?x4x8x128xf16>, tensor<?x4x8x128xf16>
   }
 }
