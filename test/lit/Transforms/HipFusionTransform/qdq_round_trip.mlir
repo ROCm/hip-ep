@@ -7,8 +7,9 @@
 // replaced by a fused op.
 //
 // The scale and zero point are one shared constant per case, because the two
-// ends agreeing is the whole precondition. The two negative cases at the end
-// are the same chains with one parameter perturbed.
+// ends agreeing is the whole precondition. The negative cases at the end are
+// the same chains with one parameter perturbed, or with a packed sub-byte
+// payload on one or both ends.
 //
 // Storage width is deliberately not part of the match, unlike the hip.q*
 // fusions: no new kernel is involved, only the layout op's existing lowering.
@@ -261,4 +262,73 @@ func.func @different_zp_stays_unfused(%ctx: !hip.context,
        saturate = 1 : i64} : tensor<2x3xui16>
 
   return %q : tensor<2x3xui16>
+}
+
+// -----
+
+// A packed payload shares each byte between values, so even with packing on
+// both ends the transpose would move whole bytes rather than the 4-bit fields
+// inside them. All three ops have to survive.
+// CHECK-LABEL: func.func @packed_transpose_stays_unfused
+// CHECK:         hip.dequantize_linear
+// CHECK:         hip.transpose
+// CHECK:         hip.quantize_linear
+func.func @packed_transpose_stays_unfused(%ctx: !hip.context,
+                                          %x: tensor<2x3xi8>) -> tensor<3x2xi8> {
+  %scale = hip.constant {value = dense<1.250000e-01> : tensor<f32>} : tensor<f32>
+  %zp = hip.constant {value = dense<0> : tensor<i8>} : tensor<i8>
+
+  %e0 = tensor.empty() : tensor<2x3xf32>
+  %dq = hip.dequantize_linear(%ctx)
+      ins(%x, %scale : tensor<2x3xi8>, tensor<f32>)
+      zero_point(%zp : tensor<i8>)
+      outs(%e0 : tensor<2x3xf32>)
+      {axis = 1 : i64, block_size = 0 : i64, packed_bits = 4 : i64}
+      : tensor<2x3xf32>
+
+  %e1 = tensor.empty() : tensor<3x2xf32>
+  %t = hip.transpose(%ctx) ins(%dq : tensor<2x3xf32>)
+      outs(%e1 : tensor<3x2xf32>) {perm = [1, 0]} : tensor<3x2xf32>
+
+  %e2 = tensor.empty() : tensor<3x2xi8>
+  %q = hip.quantize_linear(%ctx)
+      ins(%t, %scale : tensor<3x2xf32>, tensor<f32>)
+      zero_point(%zp : tensor<i8>)
+      outs(%e2 : tensor<3x2xi8>)
+      {axis = 1 : i64, block_size = 0 : i64, precision = 8 : i64,
+       saturate = 1 : i64, packed_bits = 4 : i64} : tensor<3x2xi8>
+
+  return %q : tensor<3x2xi8>
+}
+
+// -----
+
+// Packing on one end only: the dequantize reads two values per byte while the
+// quantize writes one, so the pair is not a no-op even with equal scale and
+// zero point.
+// CHECK-LABEL: func.func @packed_pair_stays_unfused
+// CHECK:         hip.dequantize_linear
+// CHECK:         hip.quantize_linear
+func.func @packed_pair_stays_unfused(%ctx: !hip.context,
+                                     %x: tensor<2x3xi8>) -> tensor<2x3xi8> {
+  %scale = hip.constant {value = dense<1.250000e-01> : tensor<f32>} : tensor<f32>
+  %zp = hip.constant {value = dense<0> : tensor<i8>} : tensor<i8>
+
+  %e0 = tensor.empty() : tensor<2x3xf32>
+  %dq = hip.dequantize_linear(%ctx)
+      ins(%x, %scale : tensor<2x3xi8>, tensor<f32>)
+      zero_point(%zp : tensor<i8>)
+      outs(%e0 : tensor<2x3xf32>)
+      {axis = 1 : i64, block_size = 0 : i64, packed_bits = 4 : i64}
+      : tensor<2x3xf32>
+
+  %e1 = tensor.empty() : tensor<2x3xi8>
+  %q = hip.quantize_linear(%ctx)
+      ins(%dq, %scale : tensor<2x3xf32>, tensor<f32>)
+      zero_point(%zp : tensor<i8>)
+      outs(%e1 : tensor<2x3xi8>)
+      {axis = 1 : i64, block_size = 0 : i64, precision = 8 : i64,
+       saturate = 1 : i64} : tensor<2x3xi8>
+
+  return %q : tensor<2x3xi8>
 }
