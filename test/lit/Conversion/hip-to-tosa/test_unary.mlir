@@ -216,6 +216,23 @@ func.func @cast_ui8_to_f32(%ctx: !hip.context, %x: tensor<4xui8>,
   return %r : tensor<4xf32>
 }
 
+// A one-element zero point cast to the scalar its reader expects: the unit
+// tensor is reshaped to rank 0, then cast.
+// CHECK-LABEL: func.func @cast_ui8_unit_to_f32_scalar
+// CHECK: %[[R:.*]] = tosa.reshape %arg1
+// CHECK-SAME: -> tensor<i8>
+// CHECK: tosa.custom %[[R]] {{.*}}operator_name = "unsigned_cast"
+// CHECK-SAME: -> tensor<f32>
+// CHECK-NOT: hip.cast
+func.func @cast_ui8_unit_to_f32_scalar(%ctx: !hip.context, %x: tensor<1xui8>,
+                                       %init: tensor<f32>) -> tensor<f32>
+    attributes {rock.kernel} {
+  %r = hip.cast(%ctx) ins(%x : tensor<1xui8>)
+                      outs(%init : tensor<f32>) {to = 1 : i64}
+                      : tensor<f32>
+  return %r : tensor<f32>
+}
+
 // CHECK-LABEL: func.func @cast_outlined_kernel
 // CHECK: tosa.cast
 // CHECK-NOT: hip.cast
@@ -308,4 +325,18 @@ func.func @cast_dynamic_shape(%ctx: !hip.context, %x: tensor<?x8xf32>,
                       outs(%init : tensor<?x8xf16>) {to = 10 : i64}
                       : tensor<?x8xf16>
   return %r : tensor<?x8xf16>
+}
+
+// -----
+
+// Only a one-element tensor may change rank; any other shape change is
+// rejected.
+func.func @cast_nonunit_shape_change(%ctx: !hip.context, %x: tensor<4xf32>,
+                                     %init: tensor<2x2xf16>)
+    -> tensor<2x2xf16> attributes {rock.kernel} {
+  // expected-error @+1 {{failed to legalize operation 'hip.cast'}}
+  %r = hip.cast(%ctx) ins(%x : tensor<4xf32>)
+                      outs(%init : tensor<2x2xf16>) {to = 10 : i64}
+                      : tensor<2x2xf16>
+  return %r : tensor<2x2xf16>
 }
