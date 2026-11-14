@@ -161,6 +161,18 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
   add_kernel_package_ut(${_arch}
     hipdnn-kernel-ut-cast-xany-yany-bf16
     cast/Xany_Yany_bf16/test_cast.cpp)
+  add_kernel_package_ut(${_arch}
+    hipdnn-kernel-ut-group-norm-xfp16-wfp16-yfp16
+    group_norm/Xfp16_Wfp16_Yfp16/test_group_norm.cpp)
+  add_kernel_package_ut(${_arch}
+    hipdnn-kernel-ut-group-norm-xbf16-wbf16-ybf16
+    group_norm/Xbf16_Wbf16_Ybf16/test_group_norm.cpp)
+  add_kernel_package_ut(${_arch}
+    hipdnn-kernel-ut-group-norm-xfp32-wfp32-yfp32
+    group_norm/Xfp32_Wfp32_Yfp32/test_group_norm.cpp)
+  add_kernel_package_ut(${_arch}
+    hipdnn-kernel-ut-group-norm-xfp64-wfp64-yfp64
+    group_norm/Xfp64_Wfp64_Yfp64/test_group_norm.cpp)
 endforeach()
 
 # One package-facing entry point finds the live GPU arch, invokes every leaf
