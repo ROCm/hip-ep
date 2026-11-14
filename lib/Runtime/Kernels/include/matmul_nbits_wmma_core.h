@@ -48,35 +48,6 @@ hipdnn_wmma_f32_16x16x16_f16_unavailable(half16, half16, float8 c) {
 
 #define WMMA_TILE 16
 
-/* LDS-only workgroup barrier.
- *
- * __syncthreads() is a full workgroup fence: on RDNA it emits s_waitcnt for both
- * counters, s_barrier, AND buffer_gl0_inv, because a workgroup can span the two
- * CUs of a WGP and global-memory coherence between them requires invalidating
- * the per-CU L0. The GEMM K-loop only ever synchronizes shared memory -- the
- * global loads are private to the thread that issues them -- so the L0 flush is
- * pure overhead, once per K-step, and it also throws away any L0 hits the next
- * tile's loads might have had.
- *
- * The "memory" clobber is what keeps the compiler from moving LDS accesses
- * across the barrier; without it the raw s_barrier intrinsic is IntrNoMem and
- * reordering is legal.
- *
- * The standalone s_barrier instruction is provided by the gfx9, gfx10 and
- * gfx11 families. gfx12 replaced it with the s_barrier_signal/s_barrier_wait
- * pair, and later architectures likewise lack it, so the inline asm fails to
- * assemble there. Emit the asm only on the families that provide it and let
- * every other target -- current or future -- fall back to __syncthreads(),
- * which is always correct (a strictly stronger full-workgroup fence); it only
- * reintroduces the redundant per-K-step L0 flush the raw asm skips. */
-#if defined(__HIP_DEVICE_COMPILE__) && defined(__AMDGCN__) &&                   \
-    (defined(__GFX9__) || defined(__GFX10__) || defined(__GFX11__))
-#define HIPDNN_LDS_BARRIER()                                                    \
-    __asm__ __volatile__("s_waitcnt lgkmcnt(0)\n\ts_barrier" ::: "memory")
-#else
-#define HIPDNN_LDS_BARRIER() __syncthreads()
-#endif
-
 /* BK_IN decouples the K-step from the warp-tile shape.
  *
  * BK_T used to be forced to BM_T/(WT_M*WT_N), which is the value that makes each

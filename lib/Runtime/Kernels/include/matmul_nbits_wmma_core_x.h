@@ -15,6 +15,9 @@
  *           2 LDS reads + global loads, 3 dequant VALU only
  *   EPI_P   1 = stage C through LDS and write 16-byte rows
  *   XOR_P   1 = XOR-swizzle 16-byte LDS chunks instead of padding rows
+ *   GROUPED_P 1 = grouped launcher contract instead: one pinned row tile, an
+ *           optional output bias and optional gathered A rows. A separate
+ *           instantiation, so the dense entries' code does not change.
  * Device-only implementation; no public ABI.
  */
 
@@ -36,7 +39,8 @@
  * Matrix Core op drop by a quarter. */
 template <int BM_T, int BN_T, int WT_M, int WT_N, bool USE_ZEROS,
           bool BOUNDS_CHECK, int BK_IN, int PGR_P = 1, int ADDR_P = 0,
-          int PIPE_P = 0, int SCHED_P = 0, int EPI_P = 0, int XOR_P = 0>
+          int PIPE_P = 0, int SCHED_P = 0, int EPI_P = 0, int XOR_P = 0,
+          bool GROUPED_P = false>
 __device__ __forceinline__
 void GemmFp16U4ImplX(
     int M, int N, int K,
@@ -55,7 +59,18 @@ void GemmFp16U4ImplX(
      * serves both layouts and the autotuner stays free to pick any tile for a
      * padded buffer. As a template parameter it would multiply the
      * instantiation count of every tile shape. */
-    int b_row_bytes = 0)
+    int b_row_bytes = 0,
+    /* GROUPED_P only. The row tile, used instead of blockIdx.y by a grouped
+     * launcher whose grid y indexes a tile list and whose A/C already point
+     * at the tile's first row. Needs swizzle_n <= 1. */
+    int fixed_row_tile = 0,
+    /* GROUPED_P only. Optional fp16 [N] bias added in fp32 before the output
+     * conversion. */
+    const _Float16* __restrict__ output_bias = nullptr,
+    /* GROUPED_P only. Optional source row per A row: row r reads A row
+     * a_row_ids[r], so a caller can gather rows without staging them. Needs
+     * ADDR_P = 0. */
+    const int32_t* __restrict__ a_row_ids = nullptr)
 {
     constexpr int WM_L   = BM_T / (WT_M * 16);
     constexpr int WN_L   = BN_T / (WT_N * 16);
@@ -212,7 +227,7 @@ void GemmFp16U4ImplX(
             // Direct mapping is used by ragged grouped WMMA: its launcher can
             // then reject blockIdx.y tiles beyond each expert's row count before
             // entering the expensive K loop.
-            by = static_cast<int>(blockIdx.y);
+            by = GROUPED_P ? fixed_row_tile : static_cast<int>(blockIdx.y);
             bx = static_cast<int>(blockIdx.x);
         } else {
             const int block_id = blockIdx.y * n_tiles + blockIdx.x;
@@ -289,7 +304,8 @@ void GemmFp16U4ImplX(
         a_koff[c]     = (idx % A_ROW_SPLIT) * A_CH;
         const int logical_row = row0 + a_row[c];
         a_valid[c] = logical_row < M;
-        const int source_row = a_valid[c] ? logical_row : 0;
+        int source_row = a_valid[c] ? logical_row : 0;
+        if (GROUPED_P && a_row_ids) source_row = a_row_ids[source_row];
         a_src[c] = A + static_cast<size_t>(source_row) * lda + a_koff[c];
     }
 
@@ -766,7 +782,10 @@ void GemmFp16U4ImplX(
                     for (int e = 0; e < 8; e++) {
                         const int r = (wrow * WT_M + wm) * WMMA_TILE + hipdnn_wmma_acc_row(sub, e);
                         const int cc = (wcol * WT_N + wn) * WMMA_TILE + lane;
-                        smC[r * C_STR + cc] = (_Float16)acc[wm][wn][e];
+                        float value = acc[wm][wn][e];
+                        if (GROUPED_P && output_bias)
+                            value += static_cast<float>(output_bias[col0 + cc]);
+                        smC[r * C_STR + cc] = (_Float16)value;
                     }
             HIPDNN_LDS_BARRIER();
 #pragma unroll
@@ -802,8 +821,12 @@ void GemmFp16U4ImplX(
             {
                 int r = hipdnn_wmma_acc_row(sub, e);
                 _Float16* cp = crow + static_cast<int64_t>(r - r0) * ldc;
-                if (!BOUNDS_CHECK || (mbase + r < M && nbase + lane < N))
-                    *cp = (_Float16)acc[wm][wn][e];
+                if (!BOUNDS_CHECK || (mbase + r < M && nbase + lane < N)) {
+                    float value = acc[wm][wn][e];
+                    if (GROUPED_P && output_bias)
+                        value += static_cast<float>(output_bias[nbase + lane]);
+                    *cp = (_Float16)value;
+                }
             }
         }
     }
