@@ -441,3 +441,34 @@ func.func @main_graph(%ctx: !hip.context, %a: tensor<1x2x4x4xui16>)
           saturate = 1 : i64} : tensor<1x2x8x8xui16>
   return %y : tensor<1x2x8x8xui16>
 }
+
+// -----
+
+// A zero scale maps every value to one float, so q(dq(a)) is not a: the
+// quantize stays.
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK: hip.dequantize_linear
+// CHECK: hip.resize(%{{.*}}) ins(%{{.*}} : tensor<1x2x4x4xf32>)
+// CHECK: hip.quantize_linear
+
+func.func @main_graph(%ctx: !hip.context, %a: tensor<1x2x4x4xui8>)
+    -> tensor<1x2x8x8xui8> {
+  %s = hip.constant {value = dense<0.0> : tensor<f32>} : tensor<f32>
+  %z = hip.constant {value = dense<128> : tensor<ui8>} : tensor<ui8>
+  %ae = tensor.empty() : tensor<1x2x4x4xf32>
+  %da = hip.dequantize_linear(%ctx) ins(%a, %s : tensor<1x2x4x4xui8>, tensor<f32>)
+          zero_point(%z : tensor<ui8>) outs(%ae : tensor<1x2x4x4xf32>)
+          {axis = 1 : i64, block_size = 0 : i64} : tensor<1x2x4x4xf32>
+  %re = tensor.empty() : tensor<1x2x8x8xf32>
+  %r = hip.resize(%ctx) ins(%da : tensor<1x2x4x4xf32>)
+                        outs(%re : tensor<1x2x8x8xf32>)
+       {mode = 0 : i64, coord_transform = 1 : i64, nearest_mode = 0 : i64}
+       : tensor<1x2x8x8xf32>
+  %ye = tensor.empty() : tensor<1x2x8x8xui8>
+  %y = hip.quantize_linear(%ctx) ins(%r, %s : tensor<1x2x8x8xf32>, tensor<f32>)
+         zero_point(%z : tensor<ui8>) outs(%ye : tensor<1x2x8x8xui8>)
+         {axis = 1 : i64, block_size = 0 : i64, precision = 0 : i64,
+          saturate = 1 : i64} : tensor<1x2x8x8xui8>
+  return %y : tensor<1x2x8x8xui8>
+}

@@ -51,6 +51,11 @@ std::optional<QuantParams> getParams(Value scale, Value zeroPoint, Type type) {
   if (!intType || (intType.getWidth() != 8 && intType.getWidth() != 16) ||
       !scaleAttr || !scaleAttr.getElementType().isF32())
     return std::nullopt;
+  // A zero, subnormal or non-finite scale breaks the round trip: dq maps every
+  // value to one float, or q divides by zero.
+  APFloat scaleValue = *scaleAttr.getValues<APFloat>().begin();
+  if (!scaleValue.isNormal())
+    return std::nullopt;
   int64_t zp = 0;
   if (zeroPoint) {
     DenseElementsAttr zpAttr = getScalarAttr(zeroPoint);
@@ -60,7 +65,7 @@ std::optional<QuantParams> getParams(Value scale, Value zeroPoint, Type type) {
     zp = zpAttr.getElementType().isUnsignedInteger() ? v.getZExtValue()
                                                      : v.getSExtValue();
   }
-  return QuantParams{*scaleAttr.getValues<APFloat>().begin(), zp, type};
+  return QuantParams{scaleValue, zp, type};
 }
 
 // A per-tensor dequantize of an 8- or 16-bit tensor with inline parameters.

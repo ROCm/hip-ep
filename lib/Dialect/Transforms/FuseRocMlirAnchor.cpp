@@ -991,10 +991,11 @@ public:
     }
     eraseDeadOps(block, rewriter);
 
-    // hip.quant_conv and hip.quant_matmul have no lowering outside a rocMLIR
-    // kernel.
+    // hip.quant_conv, hip.quant_matmul and hip.unpack_int4 have no lowering
+    // outside a rocMLIR kernel.
     WalkResult remaining = funcOp.walk([](Operation *op) {
-      if (!isa<QuantConvOp, QuantMatmulOp, RocMlirElementwiseOp>(op))
+      if (!isa<QuantConvOp, QuantMatmulOp, UnpackInt4Op, RocMlirElementwiseOp>(
+              op))
         return WalkResult::advance();
       op->emitOpError("was not outlined into a rocMLIR kernel");
       return WalkResult::interrupt();
@@ -1046,7 +1047,10 @@ private:
     SmallVector<Operation *> moved;
     if (const char *reason =
             region.complete(getInputRoots(chain.front()), moved))
-      return chain.front()->emitOpError("cannot be outlined: ") << reason;
+      return chain.front()->emitOpError(
+                 "internal error: the plan passed the outline check, but "
+                 "its kernel cannot be outlined: ")
+             << reason;
     outline({region.getEnd(), region.getContext(), region.getOperands(),
              region.getOps(), region.getResults(), moved},
             /*elementwise=*/false, rewriter, counter, arch, rankOneShape);

@@ -53,8 +53,10 @@ bool isStaticTensor(Value v) {
 static constexpr unsigned kMaxKernelIntegerWidth = 32;
 
 bool isKernelIOType(Type type) {
-  auto intType = dyn_cast<IntegerType>(getElementTypeOrSelf(type));
-  return !intType || intType.getWidth() <= kMaxKernelIntegerWidth;
+  Type element = getElementTypeOrSelf(type);
+  if (auto intType = dyn_cast<IntegerType>(element))
+    return intType.getWidth() <= kMaxKernelIntegerWidth;
+  return element.isF16() || element.isBF16() || element.isF32();
 }
 
 bool isKernelIOValue(Value v) { return isKernelIOType(v.getType()); }

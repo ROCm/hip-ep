@@ -387,3 +387,41 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x2x4x4xf32>)
           {axis = 1 : i64, block_size = 0 : i64} : tensor<1x2x4x4xf32>
   return %dx : tensor<1x2x4x4xf32>
 }
+
+// -----
+
+// A quantize with no zero point has zero point 0, so it takes an i8 zero
+// point of -128.
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK-DAG: %[[Z:.*]] = hip.constant {value = dense<-128> : tensor<i8>}
+// CHECK: %[[Q:.*]] = hip.quantize_linear(%{{.*}}) ins(%{{.*}}, %{{.*}} : tensor<1x2x4x4xf32>, tensor<f32>) zero_point(%[[Z]] : tensor<i8>) outs(%{{.*}} : tensor<1x2x4x4xi8>)
+// CHECK: hip.rocmlir(%{{.*}}) @mlir_{{[a-z0-9_]+}} ins(%[[Q]], {{.*}} : tensor<1x2x4x4xi8>,
+// CHECK-NOT: ui8
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x2x4x4xf32>)
+    -> tensor<1x2x4x4xf32> {
+  %s = hip.constant {value = dense<0.5> : tensor<f32>} : tensor<f32>
+  %z = hip.constant {value = dense<0> : tensor<ui8>} : tensor<ui8>
+  %qe = tensor.empty() : tensor<1x2x4x4xui8>
+  %q = hip.quantize_linear(%ctx) ins(%x, %s : tensor<1x2x4x4xf32>, tensor<f32>)
+         outs(%qe : tensor<1x2x4x4xui8>)
+         {axis = 1 : i64, block_size = 0 : i64, precision = 0 : i64,
+          saturate = 1 : i64} : tensor<1x2x4x4xui8>
+  %xe = tensor.empty() : tensor<1x2x4x4xf32>
+  %dx = hip.dequantize_linear(%ctx) ins(%q, %s : tensor<1x2x4x4xui8>, tensor<f32>)
+          zero_point(%z : tensor<ui8>) outs(%xe : tensor<1x2x4x4xf32>)
+          {axis = 1 : i64, block_size = 0 : i64} : tensor<1x2x4x4xf32>
+  %w = hip.constant {value = dense<1> : tensor<2x2x3x3xi8>} : tensor<2x2x3x3xi8>
+  %ws = hip.constant {value = dense<0.25> : tensor<f32>} : tensor<f32>
+  %wz = hip.constant {value = dense<0> : tensor<i8>} : tensor<i8>
+  %we = tensor.empty() : tensor<2x2x3x3xf32>
+  %dw = hip.dequantize_linear(%ctx) ins(%w, %ws : tensor<2x2x3x3xi8>, tensor<f32>)
+          zero_point(%wz : tensor<i8>) outs(%we : tensor<2x2x3x3xf32>)
+          {axis = 1 : i64, block_size = 0 : i64} : tensor<2x2x3x3xf32>
+  %ce = tensor.empty() : tensor<1x2x4x4xf32>
+  %c = hip.conv(%ctx) ins(%dx, %dw : tensor<1x2x4x4xf32>, tensor<2x2x3x3xf32>)
+      outs(%ce : tensor<1x2x4x4xf32>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [3, 3],
+       pads = [1, 1, 1, 1], strides = [1, 1]} : tensor<1x2x4x4xf32>
+  return %c : tensor<1x2x4x4xf32>
+}

@@ -36,7 +36,9 @@ Type promoteRankZero(Type type);
 bool isStaticTensor(Value v);
 
 /// rock.blockwise_load and rock.blockwise_store take integers of at most 32
-/// bits, so a wider integer tensor cannot be a kernel argument or result.
+/// bits, so a wider integer tensor cannot be a kernel argument or result. Of
+/// the float types, only f16, bf16 and f32 are kernel arguments; an index or
+/// f64 tensor is not.
 bool isKernelIOType(Type type);
 bool isKernelIOValue(Value v);
 

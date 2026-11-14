@@ -280,3 +280,54 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x2x1x1xui8>,
           saturate = 1 : i64} : tensor<1x2x4x4xui8>
   return %o : tensor<1x2x4x4xui8>
 }
+
+// -----
+
+// A zero output scale has no QLinearAdd form (its ratios divide by zero), so
+// the add stays a float add of the two dequantizes.
+
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
+// CHECK-NOT: 0x7F800000
+// CHECK: %[[DA:.*]] = hip.dequantize_linear
+// CHECK-NOT: 0x7F800000
+// CHECK: hip.add(%{{.*}}) ins(%[[DA]],
+// CHECK-NOT: 0x7F800000
+// CHECK-LABEL: func.func @main_graph
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x2x4x4xui8>,
+                      %r: tensor<1x2x4x4xui8>) -> tensor<1x2x4x4xui8> {
+  %xs = hip.constant {value = dense<0.5> : tensor<f32>} : tensor<f32>
+  %xz = hip.constant {value = dense<0> : tensor<ui8>} : tensor<ui8>
+  %w = hip.constant {value = dense<1> : tensor<2x2x1x1xi8>} : tensor<2x2x1x1xi8>
+  %ws = hip.constant {value = dense<0.25> : tensor<f32>} : tensor<f32>
+  %wz = hip.constant {value = dense<0> : tensor<i8>} : tensor<i8>
+  %ys = hip.constant {value = dense<0.25> : tensor<f32>} : tensor<f32>
+  %yz = hip.constant {value = dense<128> : tensor<ui8>} : tensor<ui8>
+  %ye = tensor.empty() : tensor<1x2x4x4xui8>
+  %y = hip.qlinear_conv(%ctx) ins(%x, %xs, %xz, %w, %ws, %wz, %ys, %yz :
+         tensor<1x2x4x4xui8>, tensor<f32>, tensor<ui8>, tensor<2x2x1x1xi8>,
+         tensor<f32>, tensor<i8>, tensor<f32>, tensor<ui8>)
+         outs(%ye : tensor<1x2x4x4xui8>)
+         {dilations = [1, 1], group = 1 : i64, kernel_shape = [1, 1],
+          pads = [0, 0, 0, 0], strides = [1, 1]} : tensor<1x2x4x4xui8>
+  %fe0 = tensor.empty() : tensor<1x2x4x4xf32>
+  %da = hip.dequantize_linear(%ctx) ins(%y, %ys : tensor<1x2x4x4xui8>, tensor<f32>)
+          zero_point(%yz : tensor<ui8>) outs(%fe0 : tensor<1x2x4x4xf32>)
+          {axis = 1 : i64, block_size = 0 : i64} : tensor<1x2x4x4xf32>
+  %rs = hip.constant {value = dense<0.125> : tensor<f32>} : tensor<f32>
+  %rz = hip.constant {value = dense<4> : tensor<ui8>} : tensor<ui8>
+  %fe1 = tensor.empty() : tensor<1x2x4x4xf32>
+  %db = hip.dequantize_linear(%ctx) ins(%r, %rs : tensor<1x2x4x4xui8>, tensor<f32>)
+          zero_point(%rz : tensor<ui8>) outs(%fe1 : tensor<1x2x4x4xf32>)
+          {axis = 1 : i64, block_size = 0 : i64} : tensor<1x2x4x4xf32>
+  %ae = tensor.empty() : tensor<1x2x4x4xf32>
+  %a = hip.add(%ctx) ins(%da, %db : tensor<1x2x4x4xf32>, tensor<1x2x4x4xf32>)
+         outs(%ae : tensor<1x2x4x4xf32>) -> tensor<1x2x4x4xf32>
+  %os = hip.constant {value = dense<0.0> : tensor<f32>} : tensor<f32>
+  %oz = hip.constant {value = dense<3> : tensor<ui8>} : tensor<ui8>
+  %oe = tensor.empty() : tensor<1x2x4x4xui8>
+  %o = hip.quantize_linear(%ctx) ins(%a, %os : tensor<1x2x4x4xf32>, tensor<f32>)
+         zero_point(%oz : tensor<ui8>) outs(%oe : tensor<1x2x4x4xui8>)
+         {axis = 1 : i64, block_size = 0 : i64, precision = 0 : i64,
+          saturate = 1 : i64} : tensor<1x2x4x4xui8>
+  return %o : tensor<1x2x4x4xui8>
+}

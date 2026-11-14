@@ -108,6 +108,13 @@ static std::optional<QuantizedBinary> matchQuantizedBinary(QuantizeLinearOp q) {
   std::optional<int32_t> outZeroPoint = getZeroPoint(q.getZeroPoint());
   if (!lhs || !rhs || !outScale || !outZeroPoint)
     return std::nullopt;
+  // The emitted forms divide by the output scale and fold the scale ratios
+  // into constants, so each scale and ratio must be a normal, finite value.
+  if (!std::isnormal(lhs->scale) || !std::isnormal(rhs->scale) ||
+      !std::isnormal(*outScale) || !std::isfinite(lhs->scale / *outScale) ||
+      !std::isfinite(rhs->scale / *outScale) ||
+      !std::isfinite(lhs->scale * rhs->scale / *outScale))
+    return std::nullopt;
   // QLinearAdd and QLinearMul take one 8-bit type for A, B, and C.
   Type outElement = getElementTypeOrSelf(q.getResult(0).getType());
   if (getElementTypeOrSelf(lhs->data.getType()) != outElement ||

@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 
+#include "KernelOutline.h"
 #include "QLinearPlan.h"
 #include "RocMlirElementwise.h"
 #include "RocMlirFusionPredicates.h"
@@ -43,12 +44,9 @@ namespace {
 
 enum class Role { Compute, View, Dequantize, Quantize };
 
-bool isKernelIOValue(Value value) {
+bool isStaticKernelIOValue(Value value) {
   auto type = dyn_cast<RankedTensorType>(value.getType());
-  if (!type || !type.hasStaticShape())
-    return false;
-  auto intType = dyn_cast<IntegerType>(type.getElementType());
-  return !intType || intType.getWidth() <= 32;
+  return type && type.hasStaticShape() && isKernelIOType(type);
 }
 
 // The operands an op reads as data: not the context and not a DPS init.
@@ -136,7 +134,7 @@ public:
       if (assigned.contains(&op))
         continue;
       std::optional<Role> role = getRole(&op);
-      if (!role || !llvm::all_of(getDataOperands(&op), isKernelIOValue))
+      if (!role || !llvm::all_of(getDataOperands(&op), isStaticKernelIOValue))
         continue;
       Module module;
       module.insert(&op);
@@ -201,7 +199,7 @@ private:
         continue;
       }
       // R6: what the kernel loads.
-      if (!isKernelIOValue(operand))
+      if (!isStaticKernelIOValue(operand))
         return false;
       // R8: the module would read its own result through outside ops.
       if (dependsOnChain(operand, module.earliest, module.ops))
@@ -219,7 +217,7 @@ private:
         }))
       return false;
     return llvm::all_of(getDataOperands(op), [&](Value operand) {
-      return isKernelIOValue(operand) &&
+      return isStaticKernelIOValue(operand) &&
              !dependsOnChain(operand, module.earliest, module.ops);
     });
   }
@@ -236,7 +234,8 @@ private:
           continue;
         auto type = cast<RankedTensorType>(op->getResult(0).getType());
         bool storable = isa<DestinationStyleOpInterface>(op) &&
-                        isKernelIOValue(op->getResult(0)) && type.getRank() > 0;
+                        isStaticKernelIOValue(op->getResult(0)) &&
+                        type.getRank() > 0;
         if (storable)
           continue;
         dropWithReaders(module, op);

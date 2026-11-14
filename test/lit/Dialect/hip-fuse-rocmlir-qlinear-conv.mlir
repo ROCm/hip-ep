@@ -326,3 +326,32 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x2x3x3xui8>,
           pads = [0, 0, 0, 0], strides = [1, 1]} : tensor<1x2x3x3xi32>
   return %y, %c : tensor<1x2x3x3xui8>, tensor<1x2x3x3xi32>
 }
+
+// -----
+
+// With padding, the correction differs by output position, so it takes one
+// i32 per channel and position: 4 * 1026 * 1026 entries, past the 2^22 cap.
+// The conv keeps its HIP kernel.
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.qlinear_conv
+// CHECK-NOT: hip.rocmlir
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x1x1026x1026xui8>)
+    -> tensor<1x4x1026x1026xui8> {
+  %xs = hip.constant {value = dense<0.5> : tensor<f32>} : tensor<f32>
+  %xz = hip.constant {value = dense<0> : tensor<ui8>} : tensor<ui8>
+  %w = hip.constant {value = dense<1> : tensor<4x1x3x3xi8>} : tensor<4x1x3x3xi8>
+  %ws = hip.constant {value = dense<0.25> : tensor<f32>} : tensor<f32>
+  %wz = hip.constant {value = dense<0> : tensor<i8>} : tensor<i8>
+  %ys = hip.constant {value = dense<0.0625> : tensor<f32>} : tensor<f32>
+  %yz = hip.constant {value = dense<0> : tensor<ui8>} : tensor<ui8>
+  %e = tensor.empty() : tensor<1x4x1026x1026xui8>
+  %y = hip.qlinear_conv(%ctx) ins(%x, %xs, %xz, %w, %ws, %wz, %ys, %yz :
+         tensor<1x1x1026x1026xui8>, tensor<f32>, tensor<ui8>,
+         tensor<4x1x3x3xi8>, tensor<f32>, tensor<i8>, tensor<f32>, tensor<ui8>)
+         outs(%e : tensor<1x4x1026x1026xui8>)
+         {dilations = [1, 1], group = 1 : i64, kernel_shape = [3, 3],
+          pads = [1, 1, 1, 1], strides = [1, 1]} : tensor<1x4x1026x1026xui8>
+  return %y : tensor<1x4x1026x1026xui8>
+}
