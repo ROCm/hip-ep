@@ -5,6 +5,7 @@
 
 import argparse
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -22,9 +23,11 @@ CRT_LIBS = [
     "user32.lib",
 ]
 
+# (name patterns, required). TheRock builds name these with or without a
+# "lib" prefix; tensilelite-host is split out of hipBLASLt only in some builds.
 ROCM_DLL_GROUPS = [
-    ["hipblaslt.dll", "libhipblaslt.dll"],
-    ["tensilelite-host.dll"],
+    (["hipblaslt.dll", "libhipblaslt.dll"], True),
+    (["tensilelite-host.dll", "libtensilelite-host.dll"], False),
 ]
 
 HIPBLASLT_DATA = ("hipblaslt", "library")
@@ -59,11 +62,30 @@ _GENERIC_MEMBERS = {
 }
 
 
+def _flat_arch(name):
+    """The ISA a flat-layout Tensile file is for, or None if arch-neutral."""
+    m = re.search(r"gfx[0-9a-f]+", name)
+    return m.group(0) if m else None
+
+
+def _tensile_archs_present(library):
+    """ISAs with Tensile data: per-ISA subdirectories, or (older TheRock
+    builds) files kept flat in library/ with the ISA in each name."""
+    if not library.is_dir():
+        return set()
+    present = {p.name for p in library.iterdir() if p.is_dir()}
+    for p in library.iterdir():
+        if p.is_file() and (arch := _flat_arch(p.name)):
+            present.add(arch)
+    return present
+
+
 def _resolve_tensile_archs(library, requested):
-    if (library / requested).is_dir():
+    present = _tensile_archs_present(library)
+    if requested in present:
         return [requested]
     members = _GENERIC_MEMBERS.get(requested, ())
-    return [a for a in members if (library / a).is_dir()]
+    return [a for a in members if a in present]
 
 
 def _find_in_lib_env(name: str):
@@ -101,9 +123,12 @@ def _copy_rocm_runtime(dist: Path, archs: list, dest: Path) -> int:
         print(f"ERROR: --rocm-dist has no bin/: {dist}", file=sys.stderr)
         return 1
 
-    for group in ROCM_DLL_GROUPS:
+    for group, required in ROCM_DLL_GROUPS:
         hits = sorted({p for pat in group for p in bin_dir.glob(pat) if p.is_file()})
         if not hits:
+            if not required:
+                print(f"  not in this ROCm dist (optional): {' / '.join(group)}")
+                continue
             print(
                 f"ERROR: no ROCm runtime library matching {' / '.join(group)} "
                 f"in {bin_dir}",
@@ -119,9 +144,7 @@ def _copy_rocm_runtime(dist: Path, archs: list, dest: Path) -> int:
     for arch in archs:
         resolved = _resolve_tensile_archs(library, arch)
         if not resolved:
-            available = []
-            if library.is_dir():
-                available = sorted(p.name for p in library.iterdir() if p.is_dir())
+            available = sorted(_tensile_archs_present(library))
             hint = f" (available: {', '.join(available)})" if available else ""
             print(
                 f"ERROR: hipBLASLt Tensile data for {arch} not found: "
@@ -133,15 +156,29 @@ def _copy_rocm_runtime(dist: Path, archs: list, dest: Path) -> int:
             print(f"  hipBLASLt Tensile arch {arch} -> {', '.join(resolved)}")
         tensile_archs += [a for a in resolved if a not in tensile_archs]
 
+    dst_library = dest.joinpath(*HIPBLASLT_DATA)
+    flat_neutral_copied = False
     for tensile_arch in tensile_archs:
         src_data = library / tensile_arch
-        dst_data = dest.joinpath(*HIPBLASLT_DATA, tensile_arch)
-        shutil.copytree(src_data, dst_data)
-        count = sum(1 for p in dst_data.rglob("*") if p.is_file())
+        if src_data.is_dir():
+            dst_data = dst_library / tensile_arch
+            shutil.copytree(src_data, dst_data)
+            count = sum(1 for p in dst_data.rglob("*") if p.is_file())
+            where = f"{'/'.join(HIPBLASLT_DATA)}/{tensile_arch}"
+        else:
+            # Flat layout: hipBLASLt reads it from library/ itself, together
+            # with the arch-neutral mapping and extension files.
+            dst_library.mkdir(parents=True, exist_ok=True)
+            count = 0
+            for p in library.iterdir():
+                arch = _flat_arch(p.name) if p.is_file() else ""
+                if arch == tensile_arch or (arch is None and not flat_neutral_copied):
+                    shutil.copy2(p, dst_library / p.name)
+                    count += 1
+            flat_neutral_copied = True
+            where = f"{'/'.join(HIPBLASLT_DATA)} ({tensile_arch}, flat)"
         print(
-            f"  packaged hipBLASLt Tensile data: "
-            f"{'/'.join(HIPBLASLT_DATA)}/{tensile_arch} "
-            f"({count} files) <- {src_data}"
+            f"  packaged hipBLASLt Tensile data: {where} ({count} files) <- {library}"
         )
     return 0
 

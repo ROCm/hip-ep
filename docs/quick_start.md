@@ -586,6 +586,23 @@ configure command.
 **Solution:** Use exactly `-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded` and
 `-DCMAKE_BUILD_TYPE=Release`. Do not mix Debug and Release configurations.
 
+### EP needs `libcrypto-3-x64.dll` on another machine
+
+**Symptom:** Configure warns `Only a DLL OpenSSL was found`, or another machine
+reports that `hipgpu.dll` depends on a missing `libcrypto-3-x64.dll`.
+
+**Cause:** OpenSSL is optional and used only for EPContext encryption (the
+`encryption_key` provider option). `HIPEP_OPENSSL_STATIC` (default ON on
+Windows) prefers a static OpenSSL; when only a DLL one is found (for example a
+conda env's), the EP links it, and the build copies the DLL into `bin/` beside
+`hipgpu.dll` and into the install tree and wheel. Copy it along with the EP.
+
+**Solution:** For a self-contained EP, point the build at a static OpenSSL with
+`--cmake_extra_defines OPENSSL_ROOT_DIR=<prefix>`, or drop OpenSSL with
+`--cmake_extra_defines HIPEP_WITH_OPENSSL=OFF` if encryption is not needed. Both
+need a fresh build tree or deleting the cached `LIB_EAY_*`, `SSL_EAY_*` and
+`OPENSSL_INCLUDE_DIR` entries, since CMake keeps a library it already found.
+
 ### LIT tests not running (ctest reports instant pass)
 
 **Symptom:** `MorphizenMLIRLitTests` completes in under 1 second and reports

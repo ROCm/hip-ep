@@ -227,6 +227,15 @@ morphizen-foundation is built as part of the MorphiZen project.
 - **Required:** glog, Microsoft.GSL
 - **Optional:** zlib (for mem_binary compression), OpenSSL (for encryption)
 
+**OpenSSL options:**
+- `HIPEP_WITH_OPENSSL` (default ON): link OpenSSL when found; OFF builds
+  without encryption support.
+- `HIPEP_OPENSSL_STATIC` (default ON on Windows, OFF elsewhere): prefer a
+  static OpenSSL so the EP DLL has no OpenSSL runtime dependency. When only a
+  DLL OpenSSL is found, configure warns, the EP links it, and the DLL is copied
+  beside the EP in `bin/`, installed with it, and packaged into the wheel.
+  `OPENSSL_ROOT_DIR` selects which OpenSSL is used.
+
 **Build:**
 ```bash
 cmake -S . -B ../../build/$(basename $PWD) -DCMAKE_BUILD_TYPE=Debug

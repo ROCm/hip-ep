@@ -40,6 +40,10 @@ endif()
 # registration.
 set(_dll_args "--dll" "$<TARGET_FILE:${_ep_target}>")
 set(_wheel_deps ${_ep_target})
+# Set by morphizen-foundation when only a DLL OpenSSL was linked.
+if(HIPEP_OPENSSL_RUNTIME_DLL)
+  list(APPEND _dll_args "--dll" "${HIPEP_OPENSSL_RUNTIME_DLL}")
+endif()
 
 if(NOT THEROCK_DIST)
   message(FATAL_ERROR
