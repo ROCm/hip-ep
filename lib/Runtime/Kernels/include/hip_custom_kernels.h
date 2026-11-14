@@ -1349,6 +1349,15 @@ HIP_KERNEL_API int hip_mha_flash_prefill_bias(
     void* O, int B, int N, int sq, int skv, int d, int max_seq, float scale,
     const void* bias, long long bias_sb, long long bias_sn, long long bias_sq);
 
+/* hip_mha_flash_prefill_segments: block-diagonal attention from int32 segment
+ * ids instead of an S x S bias. For batch b the sq query segments start at
+ * segments + b*seg_batch_stride and the skv key segments follow them; a key
+ * is attended only when its segment equals the query's. */
+HIP_KERNEL_API int hip_mha_flash_prefill_segments(
+    void* stream, const void* Q, const void* Kcache, const void* Vcache,
+    void* O, int B, int N, int sq, int skv, int d, int max_seq, float scale,
+    const void* segments, long long seg_batch_stride);
+
 /* FA-2 split-K GQA decode (sq == 1, d in {64, 96, 128, 256},
  * HPG=H/G in {1,2,3,4,5,6,8,16}, and HPG=9 at d == 128):
  * GQA-aware kernel that loads K/V tiles into LDS once and reuses them

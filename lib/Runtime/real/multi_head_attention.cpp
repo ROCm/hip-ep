@@ -325,7 +325,7 @@ extern "C" int wrap_multi_head_attention(
     int64_t seq_len_kv, int64_t query_hidden, int64_t v_hidden,
     int64_t head_size, int64_t query_rank, int64_t element_size_bytes,
     int64_t attn_bias_batch, int64_t attn_bias_heads, int64_t attn_bias_rows,
-    int64_t attn_bias_cols) {
+    int64_t attn_bias_cols, int64_t attn_bias_kind) {
   (void)mask_filter_value; // currently unused (causal mask uses the -inf/-65504
                            // sentinel from hip_gqa_causal_mask_f32)
 
@@ -494,14 +494,21 @@ extern "C" int wrap_multi_head_attention(
   const bool flash_eligible = Sq > 1 && unidirectional != 1 &&
                               (((H + 15) / 16) * 16) <= 256 &&
                               !hipdnn_device_is_wave64();
-  // attention_bias [Bb, Nb, Sqb, Skv] with Bb in {1, B}, Nb in {1, N},
-  // Sqb in {1, Sq}; only the flash path applies it.
+  // attention_bias, applied only by the flash path:
+  //   fp16 additive [Bb, Nb, Sqb, Skv], Bb in {1, B}, Nb in {1, N},
+  //   Sqb in {1, Sq};
+  //   int32 segment ids [Bb, 1, 2, S] for self-attention (Sq == Skv == S).
   long long bias_sb = 0, bias_sn = 0, bias_sq = 0;
+  const bool segments = attention_bias && attn_bias_kind == 1;
   if (attention_bias) {
     auto fits = [](int64_t dim, int64_t full) { return dim == 1 || dim == full; };
-    if (!flash_eligible || !fits(attn_bias_batch, B) ||
-        !fits(attn_bias_heads, N) || !fits(attn_bias_rows, Sq) ||
-        attn_bias_cols != Skv) {
+    const bool ok =
+        segments
+            ? Sq == Skv && fits(attn_bias_batch, B) && attn_bias_heads == 1 &&
+                  attn_bias_rows == 2 && attn_bias_cols == Skv
+            : fits(attn_bias_batch, B) && fits(attn_bias_heads, N) &&
+                  fits(attn_bias_rows, Sq) && attn_bias_cols == Skv;
+    if (!flash_eligible || !ok) {
       fprintf(stderr,
               "[multi_head_attention] ERROR: unsupported attention_bias "
               "[%lld,%lld,%lld,%lld] for B=%lld N=%lld Sq=%lld Skv=%lld "
@@ -558,7 +565,13 @@ extern "C" int wrap_multi_head_attention(
     // place (BSND). K/V cache is the just-transposed BNSD with max_seq = Skv.
     OP_ROCTX_MARK("hip_ep.op.multi_head_attention.attn.flash_prefill");
     int rc =
-        attention_bias
+        segments
+            ? hip_mha_flash_prefill_segments(
+                  stream, query, d_Kbnsh, d_Vbnsh, output, static_cast<int>(B),
+                  static_cast<int>(N), static_cast<int>(Sq),
+                  static_cast<int>(Skv), static_cast<int>(H),
+                  static_cast<int>(Skv), scale, attention_bias, bias_sb)
+        : attention_bias
             ? hip_mha_flash_prefill_bias(
                   stream, query, d_Kbnsh, d_Vbnsh, output, static_cast<int>(B),
                   static_cast<int>(N), static_cast<int>(Sq),

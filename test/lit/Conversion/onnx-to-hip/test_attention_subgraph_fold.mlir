@@ -118,6 +118,39 @@ module {
   // CHECK-NOT: softmax
   // CHECK: return
 
+  // Block-diagonal mask from segment ids (the Qwen-style ViT export): the
+  // ids reach the MHA as an int32 [2, S] attention_bias, no S x S bias.
+  func.func @segment_masked_attention(%q: tensor<8x2x4xf16>, %k: tensor<8x2x4xf16>,
+                                      %v: tensor<8x2x4xf16>, %seg: tensor<8xi64>)
+      -> tensor<8x8xf16> {
+    %merge = "onnx.Constant"() {value = dense<[-1, 8]> : tensor<2xi64>} : () -> tensor<2xi64>
+    %ninf = "onnx.Constant"() {value = dense<0xFC00> : tensor<f16>} : () -> tensor<f16>
+    %ax1 = "onnx.Constant"() {value = dense<[1]> : tensor<1xi64>} : () -> tensor<1xi64>
+    %ax0 = "onnx.Constant"() {value = dense<[0]> : tensor<1xi64>} : () -> tensor<1xi64>
+    %rows = "onnx.Unsqueeze"(%seg, %ax1) : (tensor<8xi64>, tensor<1xi64>) -> tensor<8x1xi64>
+    %cols = "onnx.Unsqueeze"(%seg, %ax0) : (tensor<8xi64>, tensor<1xi64>) -> tensor<1x8xi64>
+    %keep = "onnx.Equal"(%rows, %cols) : (tensor<8x1xi64>, tensor<1x8xi64>) -> tensor<8x8xi1>
+    %qt = "onnx.Transpose"(%q) {perm = [1, 0, 2]} : (tensor<8x2x4xf16>) -> tensor<2x8x4xf16>
+    %kt = "onnx.Transpose"(%k) {perm = [1, 2, 0]} : (tensor<8x2x4xf16>) -> tensor<2x4x8xf16>
+    %vt = "onnx.Transpose"(%v) {perm = [1, 0, 2]} : (tensor<8x2x4xf16>) -> tensor<2x8x4xf16>
+    %scores = "onnx.MatMul"(%qt, %kt) : (tensor<2x8x4xf16>, tensor<2x4x8xf16>) -> tensor<2x8x8xf16>
+    %masked = "onnx.Where"(%keep, %scores, %ninf) : (tensor<8x8xi1>, tensor<2x8x8xf16>, tensor<f16>) -> tensor<2x8x8xf16>
+    %probs = "onnx.Softmax"(%masked) {axis = -1 : si64} : (tensor<2x8x8xf16>) -> tensor<2x8x8xf16>
+    %ctx = "onnx.MatMul"(%probs, %vt) : (tensor<2x8x8xf16>, tensor<2x8x4xf16>) -> tensor<2x8x4xf16>
+    %ot = "onnx.Transpose"(%ctx) {perm = [1, 0, 2]} : (tensor<2x8x4xf16>) -> tensor<8x2x4xf16>
+    %out = "onnx.Reshape"(%ot, %merge) : (tensor<8x2x4xf16>, tensor<2xi64>) -> tensor<8x8xf16>
+    return %out : tensor<8x8xf16>
+  }
+
+  // CHECK-LABEL: func.func @segment_masked_attention
+  // CHECK-NOT: softmax
+  // CHECK-NOT: hip.where
+  // CHECK: hip.multi_head_attention
+  // CHECK-SAME: tensor<2x8xi32>
+  // CHECK-SAME: num_heads = 2
+  // CHECK-NOT: softmax
+  // CHECK: return
+
   // A Where that fills with 0 instead of a large negative value is not a key
   // mask, so the subgraph stays as it is.
   func.func @where_not_a_mask(%q: tensor<8x2x4xf16>, %k: tensor<8x2x4xf16>,

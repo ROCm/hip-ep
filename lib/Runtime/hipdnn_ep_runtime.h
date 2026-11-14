@@ -1001,8 +1001,11 @@ int wrap_multi_head_attention(
     int64_t query_rank, int64_t element_size_bytes,
     // attention_bias dims left-padded to rank 4 [batch, heads, seq_q, seq_kv]
     // (1 broadcasts that axis); all 0 when there is no attention_bias.
+    // attn_bias_kind 0: fp16 additive bias. 1: int32 segment ids [batch, 1, 2,
+    // seq] (query row, then key row); keys outside the query's segment are
+    // masked.
     int64_t attn_bias_batch, int64_t attn_bias_heads, int64_t attn_bias_rows,
-    int64_t attn_bias_cols);
+    int64_t attn_bias_cols, int64_t attn_bias_kind);
 
 // Generic element-wise tensor operation wrapper with per-operand 4D shapes.
 // Computes output = op(lhs, rhs) element-wise via the custom HIP kernels

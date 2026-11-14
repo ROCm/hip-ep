@@ -28,7 +28,9 @@
 // num_heads = N and scale = sq * sk * sc. An X produced by a Reshape of such a
 // tensor is used directly; otherwise a Reshape is inserted. An additive bias
 // becomes attention_bias; Where(cond, s, -big) becomes the attention_bias
-// Where(cond, 0, -big). Only fp16 is matched, which is what the runtime MHA
+// Where(cond, 0, -big), or, when cond compares integer segment ids
+// (Equal(Unsqueeze(q, [1]), Unsqueeze(k, [0]))), an int32 [2, S] attention_bias
+// holding those ids. Only fp16 is matched, which is what the runtime MHA
 // implements.
 //
 //===----------------------------------------------------------------------===//
@@ -280,6 +282,63 @@ static mlir::Value maskBias(mlir::PatternRewriter &rewriter, mlir::Value cond,
   return rewriter.create(where)->getResult(0);
 }
 
+// cond = Equal(Unsqueeze(q, [1]), Unsqueeze(k, [0])) over integer segment ids
+// q, k of shape [S]: a block-diagonal mask keeping the keys in the query's
+// segment. Returns (q, k).
+static std::optional<std::pair<mlir::Value, mlir::Value>>
+matchSegments(mlir::Value cond) {
+  mlir::Operation *equal = defOf(cond, "onnx.Equal");
+  if (!equal)
+    return std::nullopt;
+  auto unsqueezed = [](mlir::Value v, int64_t axis) -> mlir::Value {
+    mlir::Operation *u = defOf(v, "onnx.Unsqueeze");
+    if (!u || u->getNumOperands() != 2)
+      return {};
+    mlir::DenseElementsAttr axes = constantDense(u->getOperand(1));
+    auto type = mlir::dyn_cast<mlir::RankedTensorType>(u->getOperand(0).getType());
+    if (!axes || axes.getNumElements() != 1 || !type || type.getRank() != 1 ||
+        !mlir::isa<mlir::IntegerType>(type.getElementType()))
+      return {};
+    int64_t a = (*axes.getValues<mlir::APInt>().begin()).getSExtValue();
+    return (a < 0 ? a + 2 : a) == axis ? u->getOperand(0) : mlir::Value();
+  };
+  for (unsigned swap : {0u, 1u}) {
+    mlir::Value q = unsqueezed(equal->getOperand(swap), 1);
+    mlir::Value k = unsqueezed(equal->getOperand(1 - swap), 0);
+    if (q && k)
+      return std::make_pair(q, k);
+  }
+  return std::nullopt;
+}
+
+// [2, S] int32: the query segment ids, then the key segment ids.
+static mlir::Value packSegments(mlir::PatternRewriter &rewriter,
+                                mlir::Location loc, mlir::Value q,
+                                mlir::Value k) {
+  mlir::Value axis0 = createI64Constant(rewriter, loc, {0});
+  SmallVector<mlir::Value, 2> rows;
+  for (mlir::Value ids : {q, k}) {
+    auto type = mlir::cast<mlir::RankedTensorType>(ids.getType());
+    mlir::OperationState cast(loc, "onnx.Cast");
+    cast.addOperands(ids);
+    cast.addTypes(mlir::RankedTensorType::get(type.getShape(), rewriter.getI32Type()));
+    mlir::Value ids32 = rewriter.create(cast)->getResult(0);
+    mlir::OperationState unsqueeze(loc, "onnx.Unsqueeze");
+    unsqueeze.addOperands({ids32, axis0});
+    unsqueeze.addTypes(mlir::RankedTensorType::get({1, type.getDimSize(0)},
+                                                   rewriter.getI32Type()));
+    rows.push_back(rewriter.create(unsqueeze)->getResult(0));
+  }
+  auto qType = mlir::cast<mlir::RankedTensorType>(q.getType());
+  mlir::OperationState concat(loc, "onnx.Concat");
+  concat.addOperands(rows);
+  concat.addAttribute("axis", rewriter.getIntegerAttr(
+                                  rewriter.getIntegerType(64, /*isSigned=*/true), 0));
+  concat.addTypes(mlir::RankedTensorType::get({2, qType.getDimSize(0)},
+                                              rewriter.getI32Type()));
+  return rewriter.create(concat)->getResult(0);
+}
+
 // Erases `op` when unused, then its ONNX / constant producers that become
 // unused, e.g. the Shape -> Gather -> Concat chain feeding a Reshape.
 static void eraseIfDead(mlir::PatternRewriter &rewriter, mlir::Operation *op) {
@@ -381,8 +440,14 @@ struct FoldAttentionSubgraph : public mlir::RewritePattern {
     mlir::Value qIn = toMhaInput(rewriter, loc, *q, batched);
     mlir::Value kIn = toMhaInput(rewriter, loc, *k, batched);
     mlir::Value vIn = toMhaInput(rewriter, loc, *v, batched);
-    if (cond)
-      bias = maskBias(rewriter, cond, maskValue);
+    if (cond) {
+      // A segment-id mask travels as [2, S] int32 ids, which the flash kernel
+      // compares per element, instead of an S x S fp16 bias it has to read.
+      if (auto segments = matchSegments(cond))
+        bias = packSegments(rewriter, loc, segments->first, segments->second);
+      else
+        bias = maskBias(rewriter, cond, maskValue);
+    }
 
     mlir::OperationState state(loc, "onnx.Custom");
     state.addOperands({qIn, kIn, vIn});

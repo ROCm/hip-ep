@@ -151,10 +151,15 @@ struct MultiHeadAttentionOpLowering
     Value elemSizeVal = createI64Const(elementSizeBytes);
     Value queryRankVal = createI64Const(queryRank);
 
-    // attention_bias dims, left-padded with 1 to [batch, heads, sq, skv].
+    // attention_bias dims, left-padded with 1 to [batch, heads, sq, skv], and
+    // its kind: an integer bias carries segment ids rather than additive
+    // scores.
     SmallVector<Value, 4> biasDims(4, createI64Const(0));
+    Value biasKind = createI64Const(0);
     if (op.getAttentionBias()) {
       auto biasType = cast<MemRefType>(op.getAttentionBias().getType());
+      biasKind = createI64Const(
+          isa<IntegerType>(biasType.getElementType()) ? 1 : 0);
       int64_t rank = biasType.getRank();
       if (rank < 1 || rank > 4)
         return rewriter.notifyMatchFailure(op, "attention_bias rank not 1-4");
@@ -201,8 +206,8 @@ struct MultiHeadAttentionOpLowering
         i64Type, // head_size
         i64Type, // query_rank
         i64Type, // element_size_bytes
-        // attention_bias dims (4)
-        i64Type, i64Type, i64Type, i64Type};
+        // attention_bias dims (4), attention_bias kind
+        i64Type, i64Type, i64Type, i64Type, i64Type};
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapMultiHeadAttention, paramTypes, i32Type);
@@ -225,9 +230,9 @@ struct MultiHeadAttentionOpLowering
                                // Shape info (7)
                                batchSize, seqLenQ, seqLenKV, queryHidden,
                                vHidden, headSize, queryRankVal, elemSizeVal,
-                               // attention_bias dims (4)
+                               // attention_bias dims (4), kind
                                biasDims[0], biasDims[1], biasDims[2],
-                               biasDims[3]};
+                               biasDims[3], biasKind};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 
