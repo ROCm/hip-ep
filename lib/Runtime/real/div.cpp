@@ -123,6 +123,55 @@ int wrap_div(RuntimeState *state, void *lhs, void *rhs, void *output,
         hipdnn_ep_datatype_name(data_type));
   }
 
-  return hip_elementwise_div(stream, lhs_use, rhs_use, output, out_vol,
-                             hip_dtype);
+  int rc =
+      hip_elementwise_div(stream, lhs_use, rhs_use, output, out_vol, hip_dtype);
+  if (rc == 0 && _opProf && op_profile_call_capture_enabled(_opProf->ps)) {
+    using Json = CallCaptureJson;
+    const char *dtype = data_type == HIPDNN_EP_DATATYPE_HALF    ? "float16"
+                        : data_type == HIPDNN_EP_DATATYPE_INT32 ? "int32"
+                        : data_type == HIPDNN_EP_DATATYPE_INT64 ? "int64"
+                                                                : "float32";
+    auto tensor = [dtype](int slot, const char *role,
+                          std::initializer_list<int64_t> shape) {
+      return Json::object(
+          {{"slot", slot},
+           {"role", role},
+           {"present", true},
+           {"dtype", dtype},
+           {"shape", Json::dimensions(shape)},
+           {"layout", Json::object({{"contiguous", true},
+                                    {"view", "production_abi_view"},
+                                    {"order", "row_major_4d"}})}});
+    };
+    const int64_t workspace_bytes =
+        out_vol * hipdnn_ep_datatype_size(data_type) *
+        ((!lhs_eq_out ? 1 : 0) + (!rhs_eq_out ? 1 : 0));
+    _opProf->capture = op_profile_capture_call(
+        _opProf->ps,
+        Json::object(
+            {{"op_type", "Div"},
+             {"execution",
+              Json::object(
+                  {{"backend", "HIP-EP"},
+                   {"entry", "wrap_div"},
+                   {"variant", lhs_eq_out && rhs_eq_out
+                                   ? "same_shape_flat_binary"
+                                   : "broadcast_expand_flat_binary"},
+                   {"config",
+                    Json::object({{"hip_dtype", hip_dtype},
+                                  {"kernel_entry", "hip_elementwise_div"},
+                                  {"lhs_expanded", !lhs_eq_out},
+                                  {"rhs_expanded", !rhs_eq_out}})}})},
+             {"inputs",
+              Json::array({tensor(0, "lhs", {lhs_n, lhs_c, lhs_h, lhs_w}),
+                           tensor(1, "rhs", {rhs_n, rhs_c, rhs_h, rhs_w})})},
+             {"outputs",
+              Json::array({tensor(0, "output", {out_n, out_c, out_h, out_w})})},
+             {"attributes", Json::object({})},
+             {"parameters",
+              Json::object({{"data_type", data_type},
+                            {"num_elements", out_vol},
+                            {"workspace_bytes", workspace_bytes}})}}));
+  }
+  return rc;
 }
