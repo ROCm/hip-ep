@@ -59,6 +59,12 @@ void op_profile_add_cpu(OpProfileState *ps, const std::string &name,
 void op_profile_add_cpu_total(OpProfileState *ps, const std::string &name,
                               double cpuStartUs, double cpuMs);
 bool op_profile_is_active(OpProfileState *ps);
+// Complete metadata needs actual loaded-session/window and provenance binding.
+// These internal helpers add no markers, device reads or synchronization.
+bool op_profile_call_capture_enabled(OpProfileState *ps);
+std::optional<OpCallCapture>
+op_profile_capture_call(OpProfileState *ps,
+                        const CallCaptureJson &actualDescriptor);
 
 // Absolute microseconds on the shared steady_clock axis. A plain time
 // conversion tied to no session: the trace axis is process-global, so all

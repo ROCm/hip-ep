@@ -316,6 +316,50 @@ int wrap_elementwise(RuntimeState *state, int op_state_slot, void *lhs,
     int rc = hip_elementwise_binary_bcast(stream, lhs, rhs, output, lhs_shape4,
                                           rhs_shape4, out_shape4, bcast_op,
                                           hip_dtype);
+    if (rc == 0 && data_type == HIPDNN_EP_DATATYPE_FLOAT && _opProf &&
+        op_profile_call_capture_enabled(_opProf->ps)) {
+      using Json = CallCaptureJson;
+      auto tensor = [](int slot, const char *role, int64_t n, int64_t c,
+                       int64_t h, int64_t w) {
+        return Json::object(
+            {{"slot", slot},
+             {"role", role},
+             {"present", true},
+             {"dtype", "float32"},
+             {"shape", Json::dimensions({n, c, h, w})},
+             {"layout", Json::object({{"contiguous", true},
+                                      {"view", "production_abi_view"},
+                                      {"order", "row_major_4d"}})}});
+      };
+      const char *operation = tensor_op == HIPDNN_EP_TENSOR_OP_ADD   ? "Add"
+                              : tensor_op == HIPDNN_EP_TENSOR_OP_MUL ? "Mul"
+                              : tensor_op == HIPDNN_EP_TENSOR_OP_MIN ? "Min"
+                                                                     : "Max";
+      _opProf->capture = op_profile_capture_call(
+          _opProf->ps,
+          Json::object(
+              {{"op_type", operation},
+               {"execution",
+                Json::object(
+                    {{"backend", "HIP-EP"},
+                     {"entry", "wrap_elementwise"},
+                     {"variant", "float_binary_broadcast"},
+                     {"config",
+                      Json::object({{"bcast_op", bcast_op},
+                                    {"hip_dtype", hip_dtype},
+                                    {"kernel_entry",
+                                     "hip_elementwise_binary_bcast"}})}})},
+               {"inputs",
+                Json::array({tensor(0, "lhs", lhs_n, lhs_c, lhs_h, lhs_w),
+                             tensor(1, "rhs", rhs_n, rhs_c, rhs_h, rhs_w)})},
+               {"outputs",
+                Json::array({tensor(0, "output", out_n, out_c, out_h, out_w)})},
+               {"attributes", Json::object({})},
+               {"parameters",
+                Json::object({{"data_type", data_type},
+                              {"tensor_op", tensor_op},
+                              {"op_state_slot", op_state_slot}})}}));
+    }
     // rc == -2: output volume exceeds the kernel's 32-bit index range; no
     // fallback exists, so this falls through to the unsupported-combination
     // error below. Any other rc is terminal.

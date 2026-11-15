@@ -61,6 +61,12 @@ struct OpProfileState {
   // when tracing is off (just an empty vector pair + a session tag).
   ChromeTrace trace;
   std::string captureSessionId, captureGraphId;
+  std::string captureSha256, captureArtifactKind;
+  std::string captureRun, captureWindow, captureWorkload, captureRequest;
+  std::string capturePhase, captureStage;
+  bool captureWindowBound = false;
+  std::optional<bool> captureExampleOnly;
+  uint64_t callSequence = 0;
   uint64_t invocationSequence = 0;
   std::optional<CallCaptureJson> executionContext;
 };
@@ -89,6 +95,8 @@ void op_profile_bind_loaded_session(OpProfileState *ps, const char *sha256,
       "graph-" + std::string(artifactKind) + "-" + sha256;
   ps->captureSessionId = sessionId;
   ps->captureGraphId = graphId;
+  ps->captureSha256 = sha256;
+  ps->captureArtifactKind = artifactKind;
   ps->trace.setSessionCapture(
       sessionId, Json::object({{"schema", "hip-ep-loaded-session-1"},
                                {"session_id", sessionId},
@@ -122,6 +130,8 @@ void op_profile_reset(OpProfileState *ps) {
   ps->active = true;
   ps->gpuEpochAbsUs = 0.0;
   ps->executionContext.reset();
+  ps->captureWindowBound = false;
+  ps->captureExampleOnly.reset();
   if (!ps->captureSessionId.empty()) {
     using Json = CallCaptureJson;
     const auto run = hipdnn_ep::env_string("HIPDNN_EP_CAPTURE_RUN_ID");
@@ -145,6 +155,17 @@ void op_profile_reset(OpProfileState *ps) {
     }
     if (stage != "warmup" && stage != "measured" && stage != "diagnostic")
       missing.emplace_back("stage");
+    ps->captureRun = run;
+    ps->captureWindow = window;
+    ps->captureWorkload = workload;
+    ps->captureRequest = request;
+    ps->capturePhase = phase;
+    ps->captureStage = stage;
+    ps->captureWindowBound = missing.empty();
+    const auto example =
+        hipdnn_ep::env_string("HIPDNN_EP_CAPTURE_EXAMPLE_ONLY");
+    if (example == "0" || example == "1")
+      ps->captureExampleOnly = example == "1";
     ps->executionContext = Json::object(
         {{"schema", "hip-ep-execution-context-1"},
          {"status", missing.empty() ? "bound" : "unbound"},
@@ -163,6 +184,49 @@ void op_profile_reset(OpProfileState *ps) {
 }
 
 bool op_profile_is_active(OpProfileState *ps) { return ps && ps->active; }
+
+bool op_profile_call_capture_enabled(OpProfileState *ps) {
+  return ps && ps->active && !ps->captureSessionId.empty() &&
+         ps->executionContext.has_value() && ps->captureWindowBound &&
+         ps->captureExampleOnly.has_value();
+}
+
+std::optional<OpCallCapture>
+op_profile_capture_call(OpProfileState *ps,
+                        const CallCaptureJson &actualDescriptor) {
+  if (!op_profile_call_capture_enabled(ps))
+    return std::nullopt;
+  using Json = CallCaptureJson;
+  OpCallCapture capture;
+  capture.exampleOnly = *ps->captureExampleOnly;
+  capture.descriptor =
+      actualDescriptor.withIdentity("graph_id", ps->captureGraphId);
+  uint64_t identity = UINT64_C(14695981039346656037);
+  for (const unsigned char value : capture.descriptor.text()) {
+    identity ^= value;
+    identity *= UINT64_C(1099511628211);
+  }
+  char hash[17];
+  snprintf(hash, sizeof(hash), "%016llx", (unsigned long long)identity);
+  capture.caseId = "case-fnv1a64-" + std::string(hash);
+  capture.callId =
+      ps->captureSessionId + "-call-" + std::to_string(++ps->callSequence);
+  capture.graphId = ps->captureGraphId;
+  capture.graph = Json::object({{"name", ps->captureGraphId},
+                                {"sha256", ps->captureSha256},
+                                {"artifact_kind", ps->captureArtifactKind}});
+  capture.windowId = ps->captureWindow + ":" + ps->captureSessionId;
+  capture.stage = ps->captureStage;
+  capture.window = Json::object({{"graph_id", ps->captureGraphId},
+                                 {"execution_window_id", ps->captureWindow},
+                                 {"session_id", ps->captureSessionId},
+                                 {"run_id", ps->captureRun},
+                                 {"workload_id", ps->captureWorkload},
+                                 {"request_id", ps->captureRequest},
+                                 {"phase", ps->capturePhase},
+                                 {"stage", ps->captureStage}});
+  return capture;
+}
 
 // Markers are fenceless (hipEventDisableSystemFence). Their
 // elapsed time is read only after the per-inference stream sync, so the default
@@ -310,6 +374,8 @@ void op_profile_resolve_and_print(OpProfileState *ps) {
   }
   ps->pending.clear();
   ps->executionContext.reset();
+  ps->captureWindowBound = false;
+  ps->captureExampleOnly.reset();
 
   // The trace file is written once, in op_profile_destroy (ChromeTrace::write
   // rewrites the whole file, so a per-inference write would be O(N^2); the JSON
