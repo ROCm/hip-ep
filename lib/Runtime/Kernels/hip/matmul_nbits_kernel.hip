@@ -1456,8 +1456,20 @@ void matmul_nbits_gemv_dp4a_kernel(
         for (int tn = 0; tn < TILE_N; tn++)
             partial[tm][tn] = 0.0f;
 
+    // A pass of the loop reads BLOCK_SIZE * 16 bytes of every row. When the
+    // row stride is a multiple of 4 KB, single-row blocks that all read the
+    // same pass hit a few memory channels (N=4096 K=8192 at 64 threads:
+    // 155 GB/s, against 218 GB/s at K=8320), so there block b starts
+    // (b mod kRot) passes in, which covers the 4 KB period. Other strides keep
+    // the in-order walk, which the shift slows (N=8192 K=4096: 213 -> 185 GB/s,
+    // N=4096 K=14336: 240 -> 220 GB/s).
+    constexpr int kRot = BLOCK_SIZE >= 256 ? 1 : 256 / BLOCK_SIZE;
     const int num_u128 = static_cast<int>(K / 32);
-    for (int idx = tid; idx < num_u128; idx += BLOCK_SIZE) {
+    const int shift = (TILE_M == 1 && K % 8192 == 0)
+                          ? static_cast<int>(blockIdx.x & (kRot - 1)) * BLOCK_SIZE
+                          : 0;
+    for (int i = tid; i < num_u128; i += BLOCK_SIZE) {
+        const int idx = i + shift < num_u128 ? i + shift : i + shift - num_u128;
         const int k32 = idx * 32;
         const int grp = k32 >> bs_shift;
 
