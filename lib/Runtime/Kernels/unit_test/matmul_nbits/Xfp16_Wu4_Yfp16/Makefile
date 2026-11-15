@@ -43,6 +43,9 @@ ifeq ($(HIP_SDK),)
     $(error pass HIP_SDK=<HIP SDK root>)
 endif
 
+# Named UT preset; numeric sampling belongs to common/hip_adaptive_timing.h.
+TIMING ?= standard
+
 # ---- Paths ----
 
 HIPCC        := $(HIP_SDK)/bin/hipcc.exe
@@ -90,6 +93,10 @@ FLATBUFFERS_INC ?=
 
 KERNEL_FLAGS := -O2 -std=c++17 -x hip -ffp-contract=fast
 CXXFLAGS     := -O3 -std=c++17 -Wno-c23-extensions
+GPU_PHASE_HEADER ?=
+ifneq ($(GPU_PHASE_HEADER),)
+    CXXFLAGS += -include $(GPU_PHASE_HEADER) -DHIPDNN_UT_GPU_PHASE_LINKED=1
+endif
 INCLUDES     := -I$(INCLUDE_DIR)
 
 # ---- Test parameters (test_custom) ----
@@ -108,13 +115,13 @@ endif
 
 ifeq ($(DETECTED_OS),Windows)
     HIP_SDK_WIN := $(subst /,\,$(HIP_SDK))
-    RUN_CMD     = set "PATH=$(HIP_SDK_WIN)\bin;%PATH%" && set "HIPDNN_MATMUL_AUTOTUNE_MODE=$(KERNEL_MODE)" && set "HIPDNN_RESULTS_CSV=$(subst /,\,$(RESULTS_CSV))" && set "HIPDNN_RESULTS_OP=matmul_nbits" && set "HIPDNN_RESULTS_LEAF=Xfp16_Wu4_Yfp16" && set "HIPDNN_RESULTS_ARCH=$(ARCH)" && set "HIPDNN_RESULTS_MODE=$(MODE_RESOLVED)" && $(subst /,\,.\$(1))
+    RUN_CMD     = set "PATH=$(HIP_SDK_WIN)\bin;%PATH%" && set "HIPDNN_UT_TIMING=$(TIMING)" && set "HIPDNN_MATMUL_AUTOTUNE_MODE=$(KERNEL_MODE)" && set "HIPDNN_RESULTS_CSV=$(subst /,\,$(RESULTS_CSV))" && set "HIPDNN_RESULTS_OP=matmul_nbits" && set "HIPDNN_RESULTS_LEAF=Xfp16_Wu4_Yfp16" && set "HIPDNN_RESULTS_ARCH=$(ARCH)" && set "HIPDNN_RESULTS_MODE=$(MODE_RESOLVED)" && $(subst /,\,.\$(1))
     define DO_CLEAN
 	if exist $(BUILD_DIR) rmdir /s /q $(BUILD_DIR)
     endef
 else
     HIP_SDK_WIN := $(shell wslpath -w "$(HIP_SDK)")
-    RUN_CMD     = cmd.exe /c "set PATH=$(HIP_SDK_WIN)\bin;%PATH% && set HIPDNN_MATMUL_AUTOTUNE_MODE=$(KERNEL_MODE) && set HIPDNN_RESULTS_CSV=$(RESULTS_CSV) && set HIPDNN_RESULTS_OP=matmul_nbits && set HIPDNN_RESULTS_LEAF=Xfp16_Wu4_Yfp16 && set HIPDNN_RESULTS_ARCH=$(ARCH) && set HIPDNN_RESULTS_MODE=$(MODE_RESOLVED) && %CD%\$(1)"
+    RUN_CMD     = cmd.exe /c "set PATH=$(HIP_SDK_WIN)\bin;%PATH% && set HIPDNN_UT_TIMING=$(TIMING) && set HIPDNN_MATMUL_AUTOTUNE_MODE=$(KERNEL_MODE) && set HIPDNN_RESULTS_CSV=$(RESULTS_CSV) && set HIPDNN_RESULTS_OP=matmul_nbits && set HIPDNN_RESULTS_LEAF=Xfp16_Wu4_Yfp16 && set HIPDNN_RESULTS_ARCH=$(ARCH) && set HIPDNN_RESULTS_MODE=$(MODE_RESOLVED) && %CD%\$(1)"
     define DO_CLEAN
 	rm -rf $(BUILD_DIR)
     endef
