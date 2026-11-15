@@ -175,6 +175,42 @@ static int32_t read_seqlens_k_for_dispatch(hipStream_t stream,
   return seqlens_k_val;
 }
 
+// Call-local observations reuse values already resolved by execution. Missing
+// device-only lengths stay unknown; this object adds no reads or markers.
+struct GqaCallObservation {
+  const char *route = "unobserved";
+  const char *length_source = "device_only_not_observed";
+  std::optional<int64_t> total_seq;
+  std::optional<int64_t> past_len;
+  CallCaptureJson selected_config;
+};
+
+static void observe_gqa_lengths(GqaCallObservation *observation, int64_t total,
+                                int64_t past, const char *source) {
+  if (!observation)
+    return;
+  observation->total_seq = total;
+  observation->past_len = past;
+  observation->length_source = source;
+}
+
+static void observe_gqa_decode_lengths(GqaCallObservation *observation,
+                                       int64_t batch, const void *seqlens,
+                                       int32_t already_read, int64_t fallback,
+                                       int64_t capacity, int64_t sq) {
+  if (!observation)
+    return;
+  // Kernel length is clamp(seqlens[b]+1,0,capacity). A first-entry read
+  // cannot qualify a whole multi-batch decode. No-pointer lengths are uniform.
+  if (seqlens && (batch != 1 || already_read == kSeqlensKNotRead))
+    return;
+  int64_t raw = seqlens ? int64_t(already_read) + 1 : fallback;
+  int64_t total = raw > 0 ? (raw < capacity ? raw : capacity) : 0;
+  observe_gqa_lengths(observation, total, total - sq,
+                      seqlens ? "existing_dispatch_read_kernel_clamp"
+                              : "kernel_no_seqlens_fallback");
+}
+
 // FA-2 split-K decode workspace capacity, in splits (matches gqa_kernel.hip).
 static constexpr int kFlashDecodeMaxSplits = 64;
 
@@ -493,7 +529,7 @@ static int gqa_forward_fused(
     std::optional<int32_t> host_length = std::nullopt,
     // [key_bias_batch, key_bias_len] fp16 per-key additive bias, or null.
     const void *key_bias = nullptr, int64_t key_bias_batch = 0,
-    int64_t key_bias_len = 0) {
+    int64_t key_bias_len = 0, GqaCallObservation *observation = nullptr) {
   // One row per batch entry, or one row shared by all of them.
   const int key_bias_stride =
       key_bias && key_bias_batch > 1 ? static_cast<int>(key_bias_len) : 0;
@@ -683,6 +719,10 @@ static int gqa_forward_fused(
       const int kv_dtype = kv_dtype_abi(kv_format);
       int drc;
       OP_ROCTX_MARK("hip_ep.op.gqa.attn.flash_decode");
+      if (observation)
+        observation->route = fused_copy    ? "flash_decode_fused_copy"
+                             : online_tune ? "flash_decode_online"
+                                           : "flash_decode_configured";
       if (fused_copy) {
         drc = hip_gqa_flash_decode_fused_copy(
             stream, qSrc, past_key, past_value, kSrc, vSrc, present_key,
@@ -737,6 +777,12 @@ static int gqa_forward_fused(
             kv_quantized ? k_scale : nullptr, kv_quantized ? v_scale : nullptr,
             selected.config.use_wmma ? 1 : 0, selected.config.splits,
             selected.config.bkv, key_bias, key_bias_stride);
+        if (observation)
+          observation->selected_config = CallCaptureJson::object(
+              {{"source", hipdnn_ep::gqa_tune_source_name(selected.source)},
+               {"use_wmma", selected.config.use_wmma != 0},
+               {"splits", selected.config.splits},
+               {"bkv", selected.config.bkv}});
         RUNTIME_DEBUG_LOG(
             "[REAL] GQA decode config source=%s impl=%s splits=%d bkv=%d "
             "effective_skv=%d\n",
@@ -746,6 +792,12 @@ static int gqa_forward_fused(
       }
       if (drc != 0)
         return -1;
+      if (fused_copy)
+        observe_gqa_lengths(observation, past_len + sq, past_len,
+                            "validated_host_fused_copy");
+      else
+        observe_gqa_decode_lengths(observation, B, seqlens_k_ptr, seqlens_k_pre,
+                                   present_seq, present_seq, sq);
       RUNTIME_DEBUG_LOG(
           "[REAL] flash GQA decode (%s): B=%lld skv=%lld H=%lld G=%lld "
           "d=%lld max_splits=%d window=%lld sink=%d smooth=%d\n",
@@ -811,6 +863,11 @@ static int gqa_forward_fused(
   }
   if (past_len < 0)
     past_len = 0;
+
+  observe_gqa_lengths(observation, total_seq, past_len,
+                      "validated_host_prefill");
+  if (observation)
+    observation->route = "flash_prefill_online";
 
   const void *qSrc = query;
   const void *kSrc = key;
@@ -975,6 +1032,17 @@ static int gqa_forward_fused(
       hip_gqa_autotune_fallback_prefill(&request, &heuristic);
       selected = {heuristic, hipdnn_ep::GqaTuneSource::Heuristic, 0.0f};
       fp_rc = launch_configured(selected.config);
+    }
+    if (observation) {
+      observation->route = v8x_prefill ? "flash_prefill_v8x_configured"
+                                       : "flash_prefill_v6x_configured";
+      observation->selected_config = CallCaptureJson::object(
+          {{"source", hipdnn_ep::gqa_tune_source_name(selected.source)},
+           {"hb", selected.config.hb},
+           {"qw", selected.config.qw},
+           {"mt", selected.config.mt},
+           {"bkv", selected.config.bkv},
+           {"nd", selected.config.nd}});
     }
     RUNTIME_DEBUG_LOG("[REAL] GQA prefill config source=%s %s "
                       "hb=%d qw=%d mt=%d bkv=%d nd=%d\n",
@@ -1400,7 +1468,7 @@ static int gqa_forward_hipblaslt(
     // total_seq and element_size_bytes. A query extent of 1 is a per-key row
     // that every query row shares (hip.gqa's key_bias).
     int64_t attn_bias_sq = 0, int64_t attn_bias_total = 0,
-    int64_t attn_bias_elem = 0) {
+    int64_t attn_bias_elem = 0, GqaCallObservation *observation = nullptr) {
 
   void *const out_present_key = present_key;
   void *const out_present_value = present_value;
@@ -1682,6 +1750,10 @@ static int gqa_forward_hipblaslt(
             static_cast<int>(d), static_cast<int>(skv),
             static_cast<int>(present_seq), scale, seqlens_k_ptr) != 0)
       return -1;
+    if (observation)
+      observation->route = "legacy_fused_decode";
+    observe_gqa_decode_lengths(observation, B, seqlens_k_ptr, seqlens_k_pre,
+                               skv, present_seq, sq);
     RUNTIME_DEBUG_LOG("[REAL] fused GQA decode (legacy fallback): B=%lld "
                       "sq=%lld skv=%lld H=%lld G=%lld d=%lld\n",
                       (long long)B, (long long)sq, (long long)skv, (long long)H,
@@ -1796,6 +1868,12 @@ static int gqa_forward_hipblaslt(
             (long long)out_present_seq, (long long)total_seq);
     return -1;
   }
+
+  observe_gqa_lengths(observation, total_seq, past_len,
+                      bidirectional_no_past ? "bidirectional_no_past_extent"
+                                            : "validated_host_decomposed");
+  if (observation)
+    observation->route = "hipblaslt_decomposed";
 
   // A zero-length key/value may arrive as null pointers; that is not packed
   // QKV.
@@ -2974,7 +3052,8 @@ static int gqa_forward_fused_from_fp32(
     int64_t past_buf_seq, int64_t H, int64_t G, int64_t d, float scale,
     int64_t do_rotary, const void *k_scale, const void *v_scale,
     KvCacheFormat kv_format, const void *head_sink, bool use_smooth_softmax,
-    int local_window_size, std::optional<int32_t> host_length) {
+    int local_window_size, std::optional<int32_t> host_length,
+    GqaCallObservation *observation = nullptr) {
   const bool packed_qkv = (!key && !value);
   const bool need_rope = do_rotary && cos_cache && sin_cache;
 
@@ -3040,7 +3119,7 @@ static int gqa_forward_fused_from_fp32(
       cos16 ? cos16 : cos_cache, sin16 ? sin16 : sin_cache, out16, present_key,
       present_value, B, sq, skv, past_buf_seq, H, G, d, scale, do_rotary,
       k_scale, v_scale, kv_format, head_sink, use_smooth_softmax,
-      local_window_size, host_length);
+      local_window_size, host_length, nullptr, 0, 0, observation);
   if (rc != 0)
     return rc;
   return gqa_cast_f16_to_f32(stream, out16, output, out_elems);
@@ -3174,6 +3253,7 @@ int wrap_group_query_attention_host_length(
     return -1;
   }
 
+  const float requested_scale = scale;
   // ORT uses scale == 0.0 as sentinel for "auto-compute 1/sqrt(head_size)"
   // (gqa_attention_base.h: scale_ == 0.0f ? 1/sqrt(head_size) : scale_).
   if (scale == 0.0f && head_dim > 0)
@@ -3285,6 +3365,176 @@ int wrap_group_query_attention_host_length(
     return -1;
   }
 
+  GqaCallObservation observed;
+  GqaCallObservation *observation =
+      _opProf && op_profile_call_capture_enabled(_opProf->ps) ? &observed
+                                                              : nullptr;
+  auto attach_capture = [&](int result, bool fp32_adapter = false) {
+    if (result != 0 || !observation || batch_size <= 0 || seq_len_q <= 0)
+      return;
+    using Json = CallCaptureJson;
+    const char *dtype = element_size_bytes == 2   ? "float16"
+                        : element_size_bytes == 4 ? "float32"
+                                                  : nullptr;
+    const char *cache_dtype = kv_quantized ? "int8" : dtype;
+    const bool packed = !key && !value && !reuse_past_kv;
+    auto tensor = [](int slot, const char *role, const void *pointer,
+                     const char *type, const Json &shape, const char *order) {
+      return Json::object(
+          {{"slot", slot},
+           {"role", role},
+           {"present", pointer != nullptr},
+           {"dtype", pointer ? type : nullptr},
+           {"shape", pointer ? shape : Json(nullptr)},
+           {"layout", pointer ? Json::object({{"contiguous", true},
+                                              {"view", "production_abi_view"},
+                                              {"order", order}})
+                              : Json(nullptr)}});
+    };
+    Json kv_shape = kv_bnsd ? Json::dimensions({batch_size, kv_num_heads,
+                                                seq_len_new_kv, head_dim})
+                            : Json::dimensions({batch_size, seq_len_new_kv,
+                                                kv_num_heads * head_dim});
+    Json past_shape =
+        Json::dimensions({batch_size, kv_num_heads, past_buf_seq, head_dim});
+    Json present_shape =
+        Json::dimensions({batch_size, kv_num_heads, seq_len_kv, head_dim});
+    Json lengths;
+    if (observed.total_seq && *observed.total_seq >= seq_len_q &&
+        observed.past_len && *observed.past_len >= 0)
+      lengths = Json::dimensions(
+          std::vector<int64_t>(batch_size, *observed.total_seq));
+    const bool need_rope = do_rotary && cos_cache && sin_cache;
+    _opProf->capture = op_profile_capture_call(
+        _opProf->ps,
+        Json::object(
+            {{"op_type", "GroupQueryAttention"},
+             {"execution",
+              Json::object(
+                  {{"backend", "HIP-EP"},
+                   {"entry", "wrap_group_query_attention_host_length"},
+                   {"variant",
+                    fp32_adapter ? std::string("fp32_to_fp16_") + observed.route
+                                 : std::string(observed.route)},
+                   {"config",
+                    Json::object(
+                        {{"selected", observed.selected_config},
+                         {"internal_config_missing",
+                          observed.selected_config.text() == "null"
+                              ? "not_exposed_at_selected_entry"
+                              : nullptr},
+                         {"attention_dtype", fp32_adapter ? "float16" : dtype},
+                         {"kv_format_abi", kv_dtype_abi(kv_format)}})}})},
+             {"inputs",
+              Json::array(
+                  {tensor(0, "query", query, dtype,
+                          Json::dimensions(
+                              {batch_size, seq_len_q,
+                               (packed ? num_heads + 2 * kv_num_heads
+                                       : num_heads) *
+                                   head_dim}),
+                          "BSH"),
+                   tensor(1, "key", key, dtype, kv_shape,
+                          kv_bnsd ? "BNSD" : "BSH"),
+                   tensor(2, "value", value, dtype, kv_shape,
+                          kv_bnsd ? "BNSD" : "BSH"),
+                   tensor(3, "past_key", past_key, cache_dtype, past_shape,
+                          "BNSD"),
+                   tensor(4, "past_value", past_value, cache_dtype, past_shape,
+                          "BNSD"),
+                   tensor(5, "seqlens_k", seqlens_k, "int32",
+                          Json::dimensions({batch_size}), "flat"),
+                   tensor(6, "total_seq_len", total_seq_len, "int32",
+                          Json::dimensions({}), "scalar"),
+                   tensor(7, "cos_cache", cos_cache, dtype, nullptr,
+                          "unknown_extent"),
+                   tensor(8, "sin_cache", sin_cache, dtype, nullptr,
+                          "unknown_extent"),
+                   tensor(9, "position_ids", position_ids, nullptr, nullptr,
+                          "unsupported"),
+                   tensor(10, "attention_bias", attention_bias, nullptr,
+                          nullptr, "unknown_extent"),
+                   tensor(11, "head_sink", head_sink, nullptr, nullptr,
+                          "unknown_extent"),
+                   tensor(12, "k_scale", k_scale, "float32", nullptr,
+                          "unknown_extent"),
+                   tensor(13, "v_scale", v_scale, "float32", nullptr,
+                          "unknown_extent"),
+                   tensor(14, "key_bias", key_bias, "float16",
+                          Json::dimensions({key_bias_batch, key_bias_len}),
+                          "row_major")})},
+             {"outputs",
+              Json::array({tensor(0, "output", output, dtype,
+                                  Json::dimensions({batch_size, seq_len_q,
+                                                    num_heads * head_dim}),
+                                  "BSH"),
+                           tensor(1, "present_key", present_key, cache_dtype,
+                                  present_shape, "BNSD"),
+                           tensor(2, "present_value", present_value,
+                                  cache_dtype, present_shape, "BNSD"),
+                           tensor(3, "output_qk", output_qk, nullptr, nullptr,
+                                  "unsupported")})},
+             {"attributes",
+              Json::object({{"num_heads", num_heads},
+                            {"kv_num_heads", kv_num_heads},
+                            {"scale", scale},
+                            {"do_rotary", do_rotary},
+                            {"rotary_interleaved", rotary_interleaved},
+                            {"softcap", softcap},
+                            {"local_window_size", local_window_size},
+                            {"smooth_softmax", smooth_softmax},
+                            {"qk_output", qk_output},
+                            {"k_quant_type", k_quant_type},
+                            {"v_quant_type", v_quant_type},
+                            {"kv_cache_bit_width", kv_cache_bit_width},
+                            {"causal", no_causal == 0}})},
+             {"parameters",
+              Json::object(
+                  {{"batch_size", batch_size},
+                   {"seq_len_q", seq_len_q},
+                   {"seq_len_kv", seq_len_kv},
+                   {"past_buf_seq", past_buf_seq},
+                   {"head_dim", head_dim},
+                   {"element_size_bytes", element_size_bytes},
+                   {"seq_len_new_kv", seq_len_new_kv},
+                   {"kv_bnsd", kv_bnsd},
+                   {"requested_scale", requested_scale},
+                   {"packed_qkv", packed},
+                   {"reuse_past_kv", reuse_past_kv},
+                   {"has_host_length", has_host_length != 0},
+                   {"host_length_value",
+                    has_host_length ? Json(host_length_value) : Json(nullptr)},
+                   {"effective_total_seq", observed.total_seq
+                                               ? Json(*observed.total_seq)
+                                               : Json(nullptr)},
+                   {"effective_past_len", observed.past_len
+                                              ? Json(*observed.past_len)
+                                              : Json(nullptr)},
+                   {"length_source", observed.length_source},
+                   {"past_key_alias_present_key",
+                    past_key && past_key == present_key},
+                   {"past_value_alias_present_value",
+                    past_value && past_value == present_value},
+                   {"need_rope", need_rope},
+                   {"effective_smooth_softmax", has_smooth_softmax},
+                   {"softcap_applied", false},
+                   {"rotary_interleaved_applied", false},
+                   {"attn_bias_batch", attn_bias_batch},
+                   {"attn_bias_num_heads", attn_bias_num_heads},
+                   {"key_bias_batch", key_bias_batch},
+                   {"key_bias_len", key_bias_len},
+                   {"gqa_operands",
+                    lengths.text() == "null"
+                        ? Json(nullptr)
+                        : Json::object({{"valid_kv_lengths", lengths},
+                                        {"causal", no_causal == 0},
+                                        {"kv_access", nullptr}})},
+                   {"traffic_missing", "selected_route_traffic_not_qualified"},
+                   {"optional_extent_missing",
+                    "rope_bias_sink_scale_extents_not_exposed_at_wrapper_"
+                    "abi"}})}}));
+  };
+
   if (fp32_int8_fused) {
     RUNTIME_DEBUG_LOG(
         "[REAL] wrap_group_query_attention: fp32->fp16 adapter onto fused "
@@ -3297,12 +3547,14 @@ int wrap_group_query_attention_host_length(
         cos_cache, sin_cache, output, present_key, present_value, batch_size,
         seq_len_q, seq_len_kv, past_buf_seq, num_heads, kv_num_heads, head_dim,
         scale, do_rotary, k_scale, v_scale, kv_format, head_sink,
-        has_smooth_softmax, static_cast<int>(local_window_size), host_length);
+        has_smooth_softmax, static_cast<int>(local_window_size), host_length,
+        observation);
     if (arc != 0)
       fprintf(stderr,
               "wrap_group_query_attention: fp32 adapter / gqa_forward_fused "
               "failed (rc=%d)\n",
               arc);
+    attach_capture(arc, true);
     return arc;
   }
 
@@ -3337,12 +3589,13 @@ int wrap_group_query_attention_host_length(
         no_causal != 0, element_size_bytes, op_state_slot, kv_bnsd != 0,
         reuse_past_kv, host_length,
         /*attn_bias_sq=*/kb ? 1 : 0, /*attn_bias_total=*/kb ? key_bias_len : 0,
-        /*attn_bias_elem=*/kb ? 2 : 0);
+        /*attn_bias_elem=*/kb ? 2 : 0, observation);
     if (lrc != 0)
       fprintf(stderr,
               "wrap_group_query_attention: legacy decomposed pipeline failed "
               "(rc=%d)\n",
               lrc);
+    attach_capture(lrc);
     return lrc;
   }
 
@@ -3360,12 +3613,13 @@ int wrap_group_query_attention_host_length(
       seq_len_q, seq_len_kv, past_buf_seq, num_heads, kv_num_heads, head_dim,
       scale, do_rotary, k_scale, v_scale, kv_format, head_sink,
       has_smooth_softmax, static_cast<int>(local_window_size), host_length,
-      key_bias, key_bias_batch, key_bias_len);
+      key_bias, key_bias_batch, key_bias_len, observation);
   if (rc != 0)
     fprintf(stderr,
             "wrap_group_query_attention: gqa_forward_fused failed "
             "(rc=%d)\n",
             rc);
+  attach_capture(rc);
   return rc;
 }
 
