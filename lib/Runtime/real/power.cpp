@@ -99,13 +99,62 @@ int wrap_power(RuntimeState *state, void *input, void *output,
     return -1;
   }
 
+  auto capturedResult = [&](int rc, const char *op, const char *kernel) {
+    if (rc == 0 && num_elements > 0 && _opProf &&
+        op_profile_call_capture_enabled(_opProf->ps)) {
+      using Json = CallCaptureJson;
+      const char *dtype = data_type == HIPDNN_EP_DATATYPE_HALF ? "float16"
+                          : data_type == HIPDNN_EP_DATATYPE_BFLOAT16
+                              ? "bfloat16"
+                              : "float32";
+      auto tensor = [dtype, num_elements](const char *role) {
+        return Json::object(
+            {{"slot", 0},
+             {"role", role},
+             {"present", true},
+             {"dtype", dtype},
+             {"shape", Json::dimensions({num_elements})},
+             {"layout", Json::object({{"contiguous", true},
+                                      {"view", "production_abi_view"},
+                                      {"order", "flat"}})}});
+      };
+      _opProf->capture = op_profile_capture_call(
+          _opProf->ps,
+          Json::object(
+              {{"op_type", op},
+               {"execution",
+                Json::object(
+                    {{"backend", "HIP-EP"},
+                     {"entry", "wrap_power"},
+                     {"variant", "flat_unary_power"},
+                     {"config",
+                      Json::object({{"hip_dtype",
+                                     hipdnn_ep_to_hip_dtype_elementwise_unary(
+                                         data_type)},
+                                    {"kernel_entry", kernel}})}})},
+               {"inputs", Json::array({tensor("input")})},
+               {"outputs", Json::array({tensor("output")})},
+               {"attributes", Json::object({})},
+               {"parameters", Json::object({{"data_type", data_type},
+                                            {"num_elements", num_elements},
+                                            {"alpha", alpha},
+                                            {"beta", beta},
+                                            {"gamma", gamma}})}}));
+    }
+    return rc;
+  };
+
   // hip.reciprocal lowers to wrap_power(…, 0, 1, -1).
   if (alpha == 0.0 && beta == 1.0 && gamma == -1.0)
-    return launchReciprocalHip(state, input, output, num_elements, data_type);
+    return capturedResult(
+        launchReciprocalHip(state, input, output, num_elements, data_type),
+        "Reciprocal", "hip_elementwise_reciprocal");
 
   // hip.sqrt lowers to wrap_power(…, 0, 1, 0.5).
   if (alpha == 0.0 && beta == 1.0 && gamma == 0.5)
-    return launchSqrtHip(state, input, output, num_elements, data_type);
+    return capturedResult(
+        launchSqrtHip(state, input, output, num_elements, data_type), "Sqrt",
+        "hip_elementwise_sqrt");
 
   fprintf(stderr,
           "wrap_power: unsupported (alpha=%.2f, beta=%.2f, gamma=%.2f)\n",
