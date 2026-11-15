@@ -316,16 +316,19 @@ int wrap_elementwise(RuntimeState *state, int op_state_slot, void *lhs,
     int rc = hip_elementwise_binary_bcast(stream, lhs, rhs, output, lhs_shape4,
                                           rhs_shape4, out_shape4, bcast_op,
                                           hip_dtype);
-    if (rc == 0 && data_type == HIPDNN_EP_DATATYPE_FLOAT && _opProf &&
-        op_profile_call_capture_enabled(_opProf->ps)) {
+    if (rc == 0 && _opProf && op_profile_call_capture_enabled(_opProf->ps)) {
       using Json = CallCaptureJson;
-      auto tensor = [](int slot, const char *role, int64_t n, int64_t c,
-                       int64_t h, int64_t w) {
+      const char *dtype = data_type == HIPDNN_EP_DATATYPE_HALF ? "float16"
+                          : data_type == HIPDNN_EP_DATATYPE_BFLOAT16
+                              ? "bfloat16"
+                              : "float32";
+      auto tensor = [dtype](int slot, const char *role, int64_t n, int64_t c,
+                            int64_t h, int64_t w) {
         return Json::object(
             {{"slot", slot},
              {"role", role},
              {"present", true},
-             {"dtype", "float32"},
+             {"dtype", dtype},
              {"shape", Json::dimensions({n, c, h, w})},
              {"layout", Json::object({{"contiguous", true},
                                       {"view", "production_abi_view"},
