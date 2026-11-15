@@ -216,9 +216,62 @@ int wrap_gated_rms_norm(RuntimeState *state, void *input, void *scale,
                     (long long)activation,
                     (element_size_bytes == 2) ? "f16" : "f32", (double)epsilon);
 
-  return hip_gated_rms_norm(hipdnn_ep_state_get_stream(state), input, scale,
-                            gate, output, num_rows, norm_size,
-                            static_cast<int>(activation), epsilon, hip_dtype);
+  int rc = hip_gated_rms_norm(hipdnn_ep_state_get_stream(state), input, scale,
+                              gate, output, num_rows, norm_size,
+                              static_cast<int>(activation), epsilon, hip_dtype);
+  if (rc == 0 && num_rows > 0 && _opProf &&
+      op_profile_call_capture_enabled(_opProf->ps)) {
+    using Json = CallCaptureJson;
+    const char *dtype = element_size_bytes == 2 ? "float16" : "float32";
+    auto tensor = [dtype, norm_size, num_rows](int slot, const char *role,
+                                               bool scaleVector = false) {
+      return Json::object(
+          {{"slot", slot},
+           {"role", role},
+           {"present", true},
+           {"dtype", dtype},
+           {"shape", scaleVector ? Json::dimensions({norm_size})
+                                 : Json::dimensions({num_rows, norm_size})},
+           {"layout",
+            Json::object({{"contiguous", true},
+                          {"view", "production_abi_view"},
+                          {"order", scaleVector ? "flat" : "row_major"}})}});
+    };
+    _opProf->capture = op_profile_capture_call(
+        _opProf->ps,
+        Json::object(
+            {{"op_type", "GatedRMSNorm"},
+             {"execution",
+              Json::object(
+                  {{"backend", "HIP-EP"},
+                   {"entry", "wrap_gated_rms_norm"},
+                   {"variant", "row_tiled_gated_rms"},
+                   {"config",
+                    Json::object({{"hip_dtype", hip_dtype},
+                                  {"kernel_entry", "hip_gated_rms_norm"},
+                                  {"accumulation_dtype", "float32"},
+                                  {"internal_config", nullptr},
+                                  {"internal_config_missing",
+                                   "not_exposed_at_wrapper_abi"}})}})},
+             {"inputs",
+              Json::array({tensor(0, "input"), tensor(1, "scale", true),
+                           tensor(2, "gate")})},
+             {"outputs", Json::array({tensor(0, "output")})},
+             {"attributes",
+              Json::object(
+                  {{"activation",
+                    static_cast<int>(activation) == 1 ? "silu" : "sigmoid"},
+                   {"epsilon", epsilon}})},
+             {"parameters",
+              Json::object({{"input_num_elements", input_num_elements},
+                            {"norm_size", norm_size},
+                            {"element_size_bytes", element_size_bytes},
+                            {"num_rows", num_rows},
+                            {"activation", activation},
+                            {"epsilon", epsilon},
+                            {"original_logical_rank", nullptr}})}}));
+  }
+  return rc;
 }
 
 int wrap_engram_gate(RuntimeState *state, void *key, void *query, void *value,
