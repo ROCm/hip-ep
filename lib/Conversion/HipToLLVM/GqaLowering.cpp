@@ -250,6 +250,10 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     }
 
     Value elemSizeVal = createI64Const(elementSizeBytes);
+    // fp16 and bf16 share a two-byte element size; the runtime needs the type
+    // itself to pick the hipBLASLt types and the softmax output dtype.
+    Value dataTypeVal =
+        createI64Const(getHipdnnDataType(queryType.getElementType()));
 
     // attention_bias broadcast extents: ONNX masks are often [B,1,S,T].
     Value attnBiasBatchVal = createI64Const(1);
@@ -333,7 +337,8 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         // Key bias (3 values)
         ptrType, // key_bias
         i64Type, // key_bias_batch
-        i64Type  // key_bias_len
+        i64Type, // key_bias_len
+        i64Type  // data_type (query element type, HIPDNN_EP_DATATYPE_*)
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp =
@@ -360,7 +365,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         elemSizeVal, attnBiasBatchVal, attnBiasNumHeadsVal, kvBnsdVal,
         seqLenNewKVVal, hasHostLength, hostLength,
         // Key bias (3 values)
-        keyBiasPtr, keyBiasBatchVal, keyBiasLenVal};
+        keyBiasPtr, keyBiasBatchVal, keyBiasLenVal, dataTypeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 

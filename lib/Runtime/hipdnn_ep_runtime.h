@@ -934,7 +934,12 @@ int wrap_group_query_attention_host_length(
     // hip.gqa key_bias: fp16 [key_bias_batch (1 or batch), key_bias_len] bias
     // per key, added to every query row's scores on top of the causal and
     // window masks; null when absent. key_bias_len must cover seq_len_kv.
-    void *key_bias, int64_t key_bias_batch, int64_t key_bias_len);
+    void *key_bias, int64_t key_bias_batch, int64_t key_bias_len,
+    // Query element type (HIPDNN_EP_DATATYPE_*): HALF, FLOAT or BFLOAT16.
+    // element_size_bytes cannot tell fp16 from bf16. bf16 runs only on the
+    // decomposed pipeline, without RoPE, a quantized cache, head_sink or
+    // key_bias.
+    int64_t data_type);
 
 // Compiler-selected entry for proven FP16 Ring candidates. Other shapes and
 // devices fall back to GQA with the same optional host-length contract.
@@ -959,7 +964,8 @@ int wrap_group_query_attention_ring_f16(
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
     int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
     int64_t seq_len_new_kv, int32_t has_host_length, int32_t host_length_value,
-    void *key_bias, int64_t key_bias_batch, int64_t key_bias_len);
+    void *key_bias, int64_t key_bias_batch, int64_t key_bias_len,
+    int64_t data_type);
 
 // MultiHeadAttention operation wrapper (com.microsoft.MultiHeadAttention v1).
 // Called by generated IR for onnx.Custom(MultiHeadAttention) lowering.
