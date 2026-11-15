@@ -60,6 +60,13 @@ inline bool hipdnn_ep_qmoe_burst_enabled() {
   return enabled;
 }
 
+// 2-bit QMoE experts on the W2A8 dp4a fused decode (needs the dp4a path on too).
+inline bool hipdnn_ep_qmoe_dp4a_u2_enabled() {
+  static const bool enabled =
+      hipdnn_ep::env_enabled_default_on("HIPDNN_EP_QMOE_DP4A_U2");
+  return enabled;
+}
+
 // Longest sequence wrap_linear_attention runs through the one-launch burst
 // kernel (decode included) instead of copy + per-step decode or the chunked
 // prefill scan. Clamped to [0, 64]; 0 disables.

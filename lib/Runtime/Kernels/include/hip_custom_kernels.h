@@ -3515,6 +3515,22 @@ HIP_KERNEL_API int hip_qmoe_decode_fused_dp4a(
     float swiglu_alpha, float swiglu_beta, float swiglu_limit,
     int64_t element_size_bytes, int64_t num_tokens);
 
+// W2A8 dp4a decode for 2-bit experts (fp16, packed 2-bit zero points or
+// none). Same buffers as hip_qmoe_decode_fused_dp4a plus a_sum_in
+// ([num_tokens, hidden/64] int32) and a_sum_mid ([num_tokens*k, inter/64]
+// int32). Returns -1 without launching unless block_size is a power of two in
+// [64, 512] dividing hidden and inter.
+HIP_KERNEL_API int hip_qmoe_decode_fused_dp4a_u2(
+    void* stream, const void* input, const void* expert_indices,
+    const void* expert_weights, const void* fc1_weights, const void* fc1_scales,
+    const void* fc1_zero_points, const void* fc1_bias, const void* fc2_weights,
+    const void* fc2_scales, const void* fc2_zero_points, const void* fc2_bias,
+    void* slot_buf, void* act_out, void* output, void* a_qb_in,
+    void* a_scale_in, void* a_sum_in, void* a_qb_mid, void* a_scale_mid,
+    void* a_sum_mid, int64_t hidden_size, int64_t inter_size, int64_t k,
+    int64_t block_size, float swiglu_alpha, float swiglu_beta,
+    float swiglu_limit, int64_t num_tokens);
+
 /* =========================================================================
  * com.amd QMoE Sub-Kernels (LatentMoE)
  * =========================================================================
