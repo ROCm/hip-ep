@@ -80,9 +80,67 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
                     (element_size_bytes == 2) ? "f16" : "f32", (double)epsilon,
                     bias ? "yes" : "no", input_skip_bias_sum ? "yes" : "no");
 
-  return hip_skip_rms_norm(hipdnn_ep_state_get_stream(state), input, skip,
-                           gamma, bias, output, input_skip_bias_sum, num_rows,
-                           hidden_dim, epsilon, hip_dtype);
+  int rc = hip_skip_rms_norm(hipdnn_ep_state_get_stream(state), input, skip,
+                             gamma, bias, output, input_skip_bias_sum, num_rows,
+                             hidden_dim, epsilon, hip_dtype);
+  if (rc == 0 && num_rows > 0 && input_num_elements % hidden_dim == 0 &&
+      _opProf && op_profile_call_capture_enabled(_opProf->ps)) {
+    using Json = CallCaptureJson;
+    const char *dtype = element_size_bytes == 2 ? "float16" : "float32";
+    auto tensor = [dtype, num_rows, hidden_dim](int slot, const char *role,
+                                                const void *pointer,
+                                                bool vector = false) {
+      return Json::object(
+          {{"slot", slot},
+           {"role", role},
+           {"present", pointer != nullptr},
+           {"dtype", pointer ? dtype : nullptr},
+           {"shape", pointer
+                         ? (vector ? Json::dimensions({hidden_dim})
+                                   : Json::dimensions({num_rows, hidden_dim}))
+                         : Json(nullptr)},
+           {"layout",
+            pointer ? Json::object({{"contiguous", true},
+                                    {"view", "production_abi_view"},
+                                    {"order", vector ? "flat" : "row_major"}})
+                    : Json(nullptr)}});
+    };
+    _opProf->capture = op_profile_capture_call(
+        _opProf->ps,
+        Json::object(
+            {{"op_type", "SkipSimplifiedLayerNormalization"},
+             {"execution",
+              Json::object(
+                  {{"backend", "HIP-EP"},
+                   {"entry", "wrap_skip_simplified_layer_norm"},
+                   {"variant", "fused_skip_rms"},
+                   {"config",
+                    Json::object({{"hip_dtype", hip_dtype},
+                                  {"kernel_entry", "hip_skip_rms_norm"},
+                                  {"accumulation_dtype", "float32"},
+                                  {"internal_config", nullptr},
+                                  {"internal_config_missing",
+                                   "not_exposed_at_wrapper_abi"}})}})},
+             {"inputs",
+              Json::array({tensor(0, "input", input), tensor(1, "skip", skip),
+                           tensor(2, "gamma", gamma, true),
+                           tensor(3, "bias", bias, true)})},
+             {"outputs", Json::array({tensor(0, "output", output),
+                                      tensor(1, "input_skip_bias_sum",
+                                             input_skip_bias_sum)})},
+             {"attributes", Json::object({{"epsilon", epsilon}})},
+             {"parameters",
+              Json::object({{"input_num_elements", input_num_elements},
+                            {"gamma_num_elements", gamma_num_elements},
+                            {"element_size_bytes", element_size_bytes},
+                            {"num_rows", num_rows},
+                            {"hidden_dim", hidden_dim},
+                            {"epsilon", epsilon},
+                            {"has_bias", bias != nullptr},
+                            {"has_sum_output", input_skip_bias_sum != nullptr},
+                            {"original_logical_rank", nullptr}})}}));
+  }
+  return rc;
 }
 
 static int floatDtypeForSize(int64_t element_size_bytes) {
