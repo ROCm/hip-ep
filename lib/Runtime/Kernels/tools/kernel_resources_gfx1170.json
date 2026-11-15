@@ -279,11 +279,16 @@
 "_ZN12_GLOBAL__N_117qgemm_gemv_kernelIthtLi32ELi8ELi8ELi32ELi64EEEvPKT_PKhPT1_PxxxxNS_12QGemmRequantEibbb":"kernel not changed by this PR: qgemm GEMV 1024-thread config, 128-VGPR hard cap; autotune candidate (rocm716 C1c / C4c); 280 B/lane under ROCm 7.16, 116 under 7.14 (origin/main); known 7.16 regression, see README",
 "_ZN12_GLOBAL__N_117qgemm_gemv_kernelIthtLi64ELi8ELi8ELi16ELi64EEEvPKT_PKhPT1_PxxxxNS_12QGemmRequantEibbb":"kernel not changed by this PR: qgemm GEMV 1024-thread config, 128-VGPR hard cap; autotune candidate (rocm716 C1c / C4c); 280 B/lane under ROCm 7.16, 104 under 7.14 (origin/main); known 7.16 regression, see README",
 "_ZN12_GLOBAL__N_124mha_flash_prefill_kernelILi4ELi64ELi256ELi1EEEvPKDF16_S2_S2_PDF16_iiiiif":"kernel not changed by this PR: MHA prefill tile at the register limit (pre-7.16); 324 B/lane under ROCm 7.16, 320 under 7.14 (origin/main); known 7.16 regression, see README",
-"_ZN12_GLOBAL__N_140qmoe_ragged_matmul_nbits_adaptive_kernelILNS_17RaggedQueuePolicyE0EEEvPKDF16_PKiS5_S5_PjPKhS3_S8_S3_PDF16_xxxxxii":"QMoE ragged-MM persistent tile; pre-7.16 (unchanged by 7.16); 936 B/lane under ROCm 7.16, 976 under 7.14 (origin/main)",
-"_ZN12_GLOBAL__N_140qmoe_ragged_matmul_nbits_adaptive_kernelILNS_17RaggedQueuePolicyE1EEEvPKDF16_PKiS5_S5_PjPKhS3_S8_S3_PDF16_xxxxxii":"QMoE ragged-MM persistent tile; pre-7.16 (unchanged by 7.16); 936 B/lane under ROCm 7.16, 976 under 7.14 (origin/main)",
-"_ZN12_GLOBAL__N_140qmoe_ragged_matmul_nbits_adaptive_kernelILNS_17RaggedQueuePolicyE2EEEvPKDF16_PKiS5_S5_PjPKhS3_S8_S3_PDF16_xxxxxii":"QMoE ragged-MM persistent tile; pre-7.16 (unchanged by 7.16); 936 B/lane under ROCm 7.16, 976 under 7.14 (origin/main)",
-"_ZN12_GLOBAL__N_140qmoe_ragged_matmul_nbits_adaptive_kernelILNS_17RaggedQueuePolicyE3EEEvPKDF16_PKiS5_S5_PjPKhS3_S8_S3_PDF16_xxxxxii":"QMoE ragged-MM persistent tile; pre-7.16 (unchanged by 7.16); 936 B/lane under ROCm 7.16, 976 under 7.14 (origin/main)",
-"_ZN12_GLOBAL__N_140qmoe_ragged_matmul_nbits_adaptive_kernelILNS_17RaggedQueuePolicyE4EEEvPKDF16_PKiS5_S5_PjPKhS3_S8_S3_PDF16_xxxxxii":"QMoE ragged-MM persistent tile; pre-7.16 (unchanged by 7.16); 928 B/lane under ROCm 7.16, 968 under 7.14 (origin/main)"
+"_ZN12_GLOBAL__N_140qmoe_ragged_matmul_nbits_adaptive_kernelILNS_17RaggedQueuePolicyE0ELi2EEEvPKDF16_PKiS5_S5_PjPKhS3_S8_S3_PDF16_xxxxxxii":"QMoE ragged-MM persistent tile, 2-bit weights: GEMV, WMMA16 and WMMA64 task paths share one kernel; 496 B/lane under ROCm 7.16",
+"_ZN12_GLOBAL__N_140qmoe_ragged_matmul_nbits_adaptive_kernelILNS_17RaggedQueuePolicyE0ELi4EEEvPKDF16_PKiS5_S5_PjPKhS3_S8_S3_PDF16_xxxxxxii":"QMoE ragged-MM persistent tile, 4-bit weights: GEMV, WMMA16 and WMMA64 task paths share one kernel; 700 B/lane under ROCm 7.16",
+"_ZN12_GLOBAL__N_140qmoe_ragged_matmul_nbits_adaptive_kernelILNS_17RaggedQueuePolicyE1ELi2EEEvPKDF16_PKiS5_S5_PjPKhS3_S8_S3_PDF16_xxxxxxii":"QMoE ragged-MM persistent tile, 2-bit weights: GEMV, WMMA16 and WMMA64 task paths share one kernel; 496 B/lane under ROCm 7.16",
+"_ZN12_GLOBAL__N_140qmoe_ragged_matmul_nbits_adaptive_kernelILNS_17RaggedQueuePolicyE1ELi4EEEvPKDF16_PKiS5_S5_PjPKhS3_S8_S3_PDF16_xxxxxxii":"QMoE ragged-MM persistent tile, 4-bit weights: GEMV, WMMA16 and WMMA64 task paths share one kernel; 700 B/lane under ROCm 7.16",
+"_ZN12_GLOBAL__N_140qmoe_ragged_matmul_nbits_adaptive_kernelILNS_17RaggedQueuePolicyE2ELi2EEEvPKDF16_PKiS5_S5_PjPKhS3_S8_S3_PDF16_xxxxxxii":"QMoE ragged-MM persistent tile, 2-bit weights: GEMV, WMMA16 and WMMA64 task paths share one kernel; 496 B/lane under ROCm 7.16",
+"_ZN12_GLOBAL__N_140qmoe_ragged_matmul_nbits_adaptive_kernelILNS_17RaggedQueuePolicyE2ELi4EEEvPKDF16_PKiS5_S5_PjPKhS3_S8_S3_PDF16_xxxxxxii":"QMoE ragged-MM persistent tile, 4-bit weights: GEMV, WMMA16 and WMMA64 task paths share one kernel; 700 B/lane under ROCm 7.16",
+"_ZN12_GLOBAL__N_140qmoe_ragged_matmul_nbits_adaptive_kernelILNS_17RaggedQueuePolicyE3ELi2EEEvPKDF16_PKiS5_S5_PjPKhS3_S8_S3_PDF16_xxxxxxii":"QMoE ragged-MM persistent tile, 2-bit weights: GEMV, WMMA16 and WMMA64 task paths share one kernel; 496 B/lane under ROCm 7.16",
+"_ZN12_GLOBAL__N_140qmoe_ragged_matmul_nbits_adaptive_kernelILNS_17RaggedQueuePolicyE3ELi4EEEvPKDF16_PKiS5_S5_PjPKhS3_S8_S3_PDF16_xxxxxxii":"QMoE ragged-MM persistent tile, 4-bit weights: GEMV, WMMA16 and WMMA64 task paths share one kernel; 700 B/lane under ROCm 7.16",
+"_ZN12_GLOBAL__N_140qmoe_ragged_matmul_nbits_adaptive_kernelILNS_17RaggedQueuePolicyE4ELi2EEEvPKDF16_PKiS5_S5_PjPKhS3_S8_S3_PDF16_xxxxxxii":"QMoE ragged-MM persistent tile, 2-bit weights: GEMV, WMMA16 and WMMA64 task paths share one kernel; 488 B/lane under ROCm 7.16",
+"_ZN12_GLOBAL__N_140qmoe_ragged_matmul_nbits_adaptive_kernelILNS_17RaggedQueuePolicyE4ELi4EEEvPKDF16_PKiS5_S5_PjPKhS3_S8_S3_PDF16_xxxxxxii":"QMoE ragged-MM persistent tile, 4-bit weights: GEMV, WMMA16 and WMMA64 task paths share one kernel; 692 B/lane under ROCm 7.16"
 },"kernels":{
 "batch_norm_kernel":{
 "_Z21hip_batch_norm_kernelI14__hip_bfloat16EvPKT_S3_S3_S3_S3_PS1_xxxf":[13,0,0,16,261,0,0],
@@ -2907,12 +2912,18 @@
 "_Z34qmoe_decode_fc2_reduce_dp4a_kernelILi128ELi2ELi32EEvPKaPKfPKiPK6__halfPKhS8_SA_S8_PS6_iiiii":[59,0,0,16,429,2,16]
 },
 "qmoe_ragged_mm_kernel":{
-"_ZN12_GLOBAL__N_131qmoe_reduce_sorted_pairs_kernelEPK6__halfPKiS4_S2_PS0_xxi":[17,0,0,16,292,0,0],
-"_ZN12_GLOBAL__N_140qmoe_ragged_matmul_nbits_adaptive_kernelILNS_17RaggedQueuePolicyE0EEEvPKDF16_PKiS5_S5_PjPKhS3_S8_S3_PDF16_xxxxxii":[256,936,233,3,8331,38,584],
-"_ZN12_GLOBAL__N_140qmoe_ragged_matmul_nbits_adaptive_kernelILNS_17RaggedQueuePolicyE1EEEvPKDF16_PKiS5_S5_PjPKhS3_S8_S3_PDF16_xxxxxii":[256,936,233,3,8336,38,584],
-"_ZN12_GLOBAL__N_140qmoe_ragged_matmul_nbits_adaptive_kernelILNS_17RaggedQueuePolicyE2EEEvPKDF16_PKiS5_S5_PjPKhS3_S8_S3_PDF16_xxxxxii":[256,936,233,3,8336,38,584],
-"_ZN12_GLOBAL__N_140qmoe_ragged_matmul_nbits_adaptive_kernelILNS_17RaggedQueuePolicyE3EEEvPKDF16_PKiS5_S5_PjPKhS3_S8_S3_PDF16_xxxxxii":[256,936,233,3,8329,38,584],
-"_ZN12_GLOBAL__N_140qmoe_ragged_matmul_nbits_adaptive_kernelILNS_17RaggedQueuePolicyE4EEEvPKDF16_PKiS5_S5_PjPKhS3_S8_S3_PDF16_xxxxxii":[256,928,231,3,8271,37,580]
+"_ZN12_GLOBAL__N_131qmoe_reduce_sorted_pairs_kernelILi1EEEvPK6__halfPKiS5_S3_PKfS3_PS1_xxi":[28,0,0,16,852,49,388],
+"_ZN12_GLOBAL__N_131qmoe_reduce_sorted_pairs_kernelILi8EEEvPK6__halfPKiS5_S3_PKfS3_PS1_xxi":[151,0,0,6,1377,49,388],
+"_ZN12_GLOBAL__N_140qmoe_ragged_matmul_nbits_adaptive_kernelILNS_17RaggedQueuePolicyE0ELi2EEEvPKDF16_PKiS5_S5_PjPKhS3_S8_S3_PDF16_xxxxxxii":[256,496,123,3,8197,38,584],
+"_ZN12_GLOBAL__N_140qmoe_ragged_matmul_nbits_adaptive_kernelILNS_17RaggedQueuePolicyE0ELi4EEEvPKDF16_PKiS5_S5_PjPKhS3_S8_S3_PDF16_xxxxxxii":[256,700,174,3,8144,38,584],
+"_ZN12_GLOBAL__N_140qmoe_ragged_matmul_nbits_adaptive_kernelILNS_17RaggedQueuePolicyE1ELi2EEEvPKDF16_PKiS5_S5_PjPKhS3_S8_S3_PDF16_xxxxxxii":[256,496,123,3,8202,38,584],
+"_ZN12_GLOBAL__N_140qmoe_ragged_matmul_nbits_adaptive_kernelILNS_17RaggedQueuePolicyE1ELi4EEEvPKDF16_PKiS5_S5_PjPKhS3_S8_S3_PDF16_xxxxxxii":[256,700,174,3,8160,38,584],
+"_ZN12_GLOBAL__N_140qmoe_ragged_matmul_nbits_adaptive_kernelILNS_17RaggedQueuePolicyE2ELi2EEEvPKDF16_PKiS5_S5_PjPKhS3_S8_S3_PDF16_xxxxxxii":[256,496,123,3,8202,38,584],
+"_ZN12_GLOBAL__N_140qmoe_ragged_matmul_nbits_adaptive_kernelILNS_17RaggedQueuePolicyE2ELi4EEEvPKDF16_PKiS5_S5_PjPKhS3_S8_S3_PDF16_xxxxxxii":[256,700,174,3,8160,38,584],
+"_ZN12_GLOBAL__N_140qmoe_ragged_matmul_nbits_adaptive_kernelILNS_17RaggedQueuePolicyE3ELi2EEEvPKDF16_PKiS5_S5_PjPKhS3_S8_S3_PDF16_xxxxxxii":[256,496,123,3,8210,38,584],
+"_ZN12_GLOBAL__N_140qmoe_ragged_matmul_nbits_adaptive_kernelILNS_17RaggedQueuePolicyE3ELi4EEEvPKDF16_PKiS5_S5_PjPKhS3_S8_S3_PDF16_xxxxxxii":[256,700,174,3,8153,38,584],
+"_ZN12_GLOBAL__N_140qmoe_ragged_matmul_nbits_adaptive_kernelILNS_17RaggedQueuePolicyE4ELi2EEEvPKDF16_PKiS5_S5_PjPKhS3_S8_S3_PDF16_xxxxxxii":[256,488,121,3,8140,37,580],
+"_ZN12_GLOBAL__N_140qmoe_ragged_matmul_nbits_adaptive_kernelILNS_17RaggedQueuePolicyE4ELi4EEEvPKDF16_PKiS5_S5_PjPKhS3_S8_S3_PDF16_xxxxxxii":[256,692,172,3,8087,37,580]
 },
 "random_normal_like_kernel":{
 "_ZN12_GLOBAL__N_124random_normal_f32_kernelI12hip_bfloat16EEvPT_xffy":[17,0,0,16,301,0,0],

@@ -40,6 +40,12 @@ constexpr int kMaxTopK = 32;
 static_assert(kMaxTopK <= 32, "qmoe_reduce_sorted_pairs_kernel tracks used "
                               "slots in a uint32_t mask");
 constexpr int kGemvTileN = 16;
+// 2-bit groups above this many rows take the WMMA16 tile: the GEMV decodes
+// the weights once per row, the tile once per group. Step-3.5-Flash experts
+// (fc1 2560x4096, fc2 4096x1280, block 64) on gfx1151, fc1+fc2 per layer:
+// 122 tokens (3.5 rows/expert) 22.0 ms at 7 rows, 15.8 ms at 2; 512 tokens
+// (14.2 rows/expert) 22.3 vs 21.6 ms.
+constexpr int kU2GemvMaxRows = 2;
 constexpr int64_t kTwoWindowMinRows = 512;
 
 constexpr int kGridBlockCandidates[] = {20, 40, 80, 160, 320, 640, 4096};
@@ -257,6 +263,7 @@ __host__ __device__ __forceinline__ uint32_t queue_chunk_size() {
   return 1;
 }
 
+template <int BITS>
 __device__ __forceinline__ void qmoe_wmma16_task(
     const _Float16* input, const int32_t* input_row_ids,
     const uint8_t* weights, const _Float16* scales,
@@ -268,7 +275,7 @@ __device__ __forceinline__ void qmoe_wmma16_task(
                  /*BOUNDS_CHECK=*/true, /*FUSED_DQ=*/true, kKTile,
                  /*ZEROS_U8=*/true, /*ADD_BIAS=*/true,
                  /*EXPLICIT_TILE=*/true, /*CHECK_K_TAIL=*/true,
-                 /*RUNTIME_OPTIONAL=*/true>(
+                 /*RUNTIME_OPTIONAL=*/true, BITS>(
       total_rows, N, K, input, K, weights, scales, zero_points, block_size,
       k_blocks, output, N, /*swizzle_n=*/1, weight_row_bytes, row_begin,
       n_begin, first_rows, input_row_ids, bias);
@@ -277,7 +284,7 @@ __device__ __forceinline__ void qmoe_wmma16_task(
                    /*USE_ZEROS=*/true, /*BOUNDS_CHECK=*/true,
                    /*FUSED_DQ=*/true, kKTile, /*ZEROS_U8=*/true,
                    /*ADD_BIAS=*/true, /*EXPLICIT_TILE=*/true,
-                   /*CHECK_K_TAIL=*/true, /*RUNTIME_OPTIONAL=*/true>(
+                   /*CHECK_K_TAIL=*/true, /*RUNTIME_OPTIONAL=*/true, BITS>(
         total_rows, N, K, input, K, weights, scales, zero_points, block_size,
         k_blocks, output, N, /*swizzle_n=*/1, weight_row_bytes,
         row_begin + kRowsPerGroup, n_begin, row_count - kRowsPerGroup,
@@ -285,6 +292,7 @@ __device__ __forceinline__ void qmoe_wmma16_task(
   }
 }
 
+template <int BITS>
 __device__ __forceinline__ void qmoe_wmma64_task(
     const _Float16* input, const int32_t* input_row_ids,
     const uint8_t* weights, const _Float16* scales,
@@ -295,7 +303,7 @@ __device__ __forceinline__ void qmoe_wmma64_task(
                  /*USE_ZEROS=*/true, /*BOUNDS_CHECK=*/true,
                  /*FUSED_DQ=*/true, kKTile, /*ZEROS_U8=*/true,
                  /*ADD_BIAS=*/true, /*EXPLICIT_TILE=*/true,
-                 /*CHECK_K_TAIL=*/true, /*RUNTIME_OPTIONAL=*/true>(
+                 /*CHECK_K_TAIL=*/true, /*RUNTIME_OPTIONAL=*/true, BITS>(
       total_rows, N, K, input, K, weights, scales, zero_points, block_size,
       k_blocks, output, N, /*swizzle_n=*/1, weight_row_bytes, row_begin,
       n_begin, row_count, input_row_ids, bias);
@@ -498,7 +506,8 @@ __device__ __forceinline__ void qmoe_gemv_task(
 // One persistent workgroup owns one descriptor x 64-column task. Small groups
 // use a wave-reduction GEMV; medium/large groups use the shared MatMulNBits
 // double-buffered WMMA core. Every task kind uses the same 128-thread block.
-template <RaggedQueuePolicy QueuePolicy>
+// BITS (2 or 4) is the packed weight width; `bits` carries the same value.
+template <RaggedQueuePolicy QueuePolicy, int BITS>
 __global__ __attribute__((amdgpu_flat_work_group_size(kThreadsPerBlock,
                                                        kThreadsPerBlock)))
 void qmoe_ragged_matmul_nbits_adaptive_kernel(
@@ -566,9 +575,7 @@ void qmoe_ragged_matmul_nbits_adaptive_kernel(
     const int row_begin = groups[group_id * 4 + 1];
     const int row_count = groups[group_id * 4 + 2];
     const int task_kind =
-        bits == 2 ? kTaskGemv
-                  : select_ragged_task_kind(row_count, gemv_max_rows,
-                                            wmma16_max_rows);
+        select_ragged_task_kind(row_count, gemv_max_rows, wmma16_max_rows);
     const int n_begin = n_tile * kColsPerBlock;
     const bool valid_expert = expert >= 0 && expert < num_experts;
 
@@ -589,16 +596,16 @@ void qmoe_ragged_matmul_nbits_adaptive_kernel(
                         expert_zeros, expert_bias, output, static_cast<int>(N),
                         static_cast<int>(K), static_cast<int>(block_size),
                         row_begin, row_count, n_begin, weight_row_bytes,
-                        k_blocks, static_cast<int>(bits));
+                        k_blocks, BITS);
       } else if (task_kind == kTaskWmma16) {
-        qmoe_wmma16_task(
+        qmoe_wmma16_task<BITS>(
             input, input_row_ids, expert_weights, expert_scales, expert_zeros,
             expert_bias, output, static_cast<int>(total_rows),
             static_cast<int>(N), static_cast<int>(K),
             static_cast<int>(block_size), row_begin, row_count, n_begin,
             weight_row_bytes, k_blocks);
       } else if (task_kind == kTaskWmma64) {
-        qmoe_wmma64_task(
+        qmoe_wmma64_task<BITS>(
             input, input_row_ids, expert_weights, expert_scales, expert_zeros,
             expert_bias, output, static_cast<int>(total_rows),
             static_cast<int>(N), static_cast<int>(K),
@@ -618,6 +625,7 @@ struct RaggedLaunchConfig {
   RaggedQueuePolicy queue_policy;
 };
 
+template <int BITS>
 hipError_t get_ragged_resident_blocks(RaggedQueuePolicy policy,
                                       int* resident_blocks_per_cu) {
   switch (policy) {
@@ -625,38 +633,39 @@ hipError_t get_ragged_resident_blocks(RaggedQueuePolicy policy,
       return hipOccupancyMaxActiveBlocksPerMultiprocessor(
           resident_blocks_per_cu,
           qmoe_ragged_matmul_nbits_adaptive_kernel<
-              RaggedQueuePolicy::kAtomic1>,
+              RaggedQueuePolicy::kAtomic1, BITS>,
           kThreadsPerBlock, /*dynamicSMemSize=*/0);
     case RaggedQueuePolicy::kChunk2:
       return hipOccupancyMaxActiveBlocksPerMultiprocessor(
           resident_blocks_per_cu,
           qmoe_ragged_matmul_nbits_adaptive_kernel<
-              RaggedQueuePolicy::kChunk2>,
+              RaggedQueuePolicy::kChunk2, BITS>,
           kThreadsPerBlock, /*dynamicSMemSize=*/0);
     case RaggedQueuePolicy::kChunk4:
       return hipOccupancyMaxActiveBlocksPerMultiprocessor(
           resident_blocks_per_cu,
           qmoe_ragged_matmul_nbits_adaptive_kernel<
-              RaggedQueuePolicy::kChunk4>,
+              RaggedQueuePolicy::kChunk4, BITS>,
           kThreadsPerBlock, /*dynamicSMemSize=*/0);
     case RaggedQueuePolicy::kChunk8:
       return hipOccupancyMaxActiveBlocksPerMultiprocessor(
           resident_blocks_per_cu,
           qmoe_ragged_matmul_nbits_adaptive_kernel<
-              RaggedQueuePolicy::kChunk8>,
+              RaggedQueuePolicy::kChunk8, BITS>,
           kThreadsPerBlock, /*dynamicSMemSize=*/0);
     case RaggedQueuePolicy::kGridStride:
       return hipOccupancyMaxActiveBlocksPerMultiprocessor(
           resident_blocks_per_cu,
           qmoe_ragged_matmul_nbits_adaptive_kernel<
-              RaggedQueuePolicy::kGridStride>,
+              RaggedQueuePolicy::kGridStride, BITS>,
           kThreadsPerBlock, /*dynamicSMemSize=*/0);
   }
   return hipErrorInvalidValue;
 }
 
 hipError_t get_ragged_launch_config(int64_t total_rows, int64_t N,
-                                    RaggedLaunchConfig* config) {
+                                    RaggedLaunchConfig* config,
+                                    int64_t bits = 4) {
   if (!config || total_rows <= 0 || N <= 0) {
     return hipErrorInvalidValue;
   }
@@ -679,7 +688,9 @@ hipError_t get_ragged_launch_config(int64_t total_rows, int64_t N,
 
   const RaggedQueuePolicy queue_policy = get_ragged_queue_policy();
   int resident_blocks_per_cu = 0;
-  err = get_ragged_resident_blocks(queue_policy, &resident_blocks_per_cu);
+  err = bits == 2
+            ? get_ragged_resident_blocks<2>(queue_policy, &resident_blocks_per_cu)
+            : get_ragged_resident_blocks<4>(queue_policy, &resident_blocks_per_cu);
   if (err != hipSuccess) {
     return err;
   }
@@ -719,7 +730,7 @@ hipError_t get_ragged_launch_config(int64_t total_rows, int64_t N,
   return hipSuccess;
 }
 
-template <RaggedQueuePolicy QueuePolicy>
+template <RaggedQueuePolicy QueuePolicy, int BITS>
 hipError_t launch_ragged_matmul_nbits(
     hipStream_t stream, const void* input, const void* input_row_ids,
     const void* row_groups, const void* row_group_count, void* queue_head,
@@ -728,7 +739,7 @@ hipError_t launch_ragged_matmul_nbits(
     int64_t N, int64_t K, int64_t bits, int64_t block_size, int grid_blocks,
     int gemv_max_rows, int wmma16_max_rows) {
   hipLaunchKernelGGL(
-      qmoe_ragged_matmul_nbits_adaptive_kernel<QueuePolicy>,
+      HIP_KERNEL_NAME(qmoe_ragged_matmul_nbits_adaptive_kernel<QueuePolicy, BITS>),
       dim3(grid_blocks), dim3(kThreadsPerBlock), 0, stream,
       static_cast<const _Float16 *>(input),
       static_cast<const int32_t *>(input_row_ids),
@@ -742,6 +753,31 @@ hipError_t launch_ragged_matmul_nbits(
       total_rows, num_experts, N, K, bits, block_size, gemv_max_rows,
       wmma16_max_rows);
   return hipGetLastError();
+}
+
+template <int BITS>
+hipError_t launch_ragged_by_policy(
+    RaggedQueuePolicy policy, hipStream_t stream, const void* input,
+    const void* input_row_ids, const void* row_groups,
+    const void* row_group_count, void* queue_head, const void* weights,
+    const void* scales, const void* zero_points_u8, const void* bias,
+    void* output, int64_t total_rows, int64_t num_experts, int64_t N,
+    int64_t K, int64_t block_size, int grid_blocks, int gemv_max_rows,
+    int wmma16_max_rows) {
+#define RAGGED_LAUNCH(P)                                                       \
+  return launch_ragged_matmul_nbits<RaggedQueuePolicy::P, BITS>(               \
+      stream, input, input_row_ids, row_groups, row_group_count, queue_head,   \
+      weights, scales, zero_points_u8, bias, output, total_rows, num_experts,  \
+      N, K, BITS, block_size, grid_blocks, gemv_max_rows, wmma16_max_rows)
+  switch (policy) {
+    case RaggedQueuePolicy::kAtomic1: RAGGED_LAUNCH(kAtomic1);
+    case RaggedQueuePolicy::kChunk2: RAGGED_LAUNCH(kChunk2);
+    case RaggedQueuePolicy::kChunk4: RAGGED_LAUNCH(kChunk4);
+    case RaggedQueuePolicy::kChunk8: RAGGED_LAUNCH(kChunk8);
+    case RaggedQueuePolicy::kGridStride: RAGGED_LAUNCH(kGridStride);
+  }
+#undef RAGGED_LAUNCH
+  return hipErrorInvalidValue;
 }
 
 constexpr int kReduceBlock = 128;
@@ -934,7 +970,7 @@ extern "C" int hip_qmoe_ragged_matmul_nbits(
   }
 
   RaggedLaunchConfig config{};
-  hipError_t err = get_ragged_launch_config(total_rows, N, &config);
+  hipError_t err = get_ragged_launch_config(total_rows, N, &config, bits);
   if (err != hipSuccess) {
     fprintf(stderr,
             "[custom_kernels] hip_qmoe_ragged_matmul_nbits launch config "
@@ -946,43 +982,20 @@ extern "C" int hip_qmoe_ragged_matmul_nbits(
   const RaggedTaskPolicyConfig& task_policy = input_row_ids
                                                    ? get_ragged_fc1_task_policy()
                                                    : get_ragged_fc2_task_policy();
-  switch (config.queue_policy) {
-    case RaggedQueuePolicy::kAtomic1:
-      err = launch_ragged_matmul_nbits<RaggedQueuePolicy::kAtomic1>(
-          hip_stream, input, input_row_ids, row_groups, row_group_count,
-          queue_head, weights, scales, zero_points_u8, bias, output, total_rows,
-          num_experts, N, K, bits, block_size, config.grid_blocks,
-          task_policy.gemv_max_rows, task_policy.wmma16_max_rows);
-      break;
-    case RaggedQueuePolicy::kChunk2:
-      err = launch_ragged_matmul_nbits<RaggedQueuePolicy::kChunk2>(
-          hip_stream, input, input_row_ids, row_groups, row_group_count,
-          queue_head, weights, scales, zero_points_u8, bias, output, total_rows,
-          num_experts, N, K, bits, block_size, config.grid_blocks,
-          task_policy.gemv_max_rows, task_policy.wmma16_max_rows);
-      break;
-    case RaggedQueuePolicy::kChunk4:
-      err = launch_ragged_matmul_nbits<RaggedQueuePolicy::kChunk4>(
-          hip_stream, input, input_row_ids, row_groups, row_group_count,
-          queue_head, weights, scales, zero_points_u8, bias, output, total_rows,
-          num_experts, N, K, bits, block_size, config.grid_blocks,
-          task_policy.gemv_max_rows, task_policy.wmma16_max_rows);
-      break;
-    case RaggedQueuePolicy::kChunk8:
-      err = launch_ragged_matmul_nbits<RaggedQueuePolicy::kChunk8>(
-          hip_stream, input, input_row_ids, row_groups, row_group_count,
-          queue_head, weights, scales, zero_points_u8, bias, output, total_rows,
-          num_experts, N, K, bits, block_size, config.grid_blocks,
-          task_policy.gemv_max_rows, task_policy.wmma16_max_rows);
-      break;
-    case RaggedQueuePolicy::kGridStride:
-      err = launch_ragged_matmul_nbits<RaggedQueuePolicy::kGridStride>(
-          hip_stream, input, input_row_ids, row_groups, row_group_count,
-          queue_head, weights, scales, zero_points_u8, bias, output, total_rows,
-          num_experts, N, K, bits, block_size, config.grid_blocks,
-          task_policy.gemv_max_rows, task_policy.wmma16_max_rows);
-      break;
-  }
+  err = bits == 2
+            ? launch_ragged_by_policy<2>(
+                  config.queue_policy, hip_stream, input, input_row_ids,
+                  row_groups, row_group_count, queue_head, weights, scales,
+                  zero_points_u8, bias, output, total_rows, num_experts, N, K,
+                  block_size, config.grid_blocks,
+                  std::min(task_policy.gemv_max_rows, kU2GemvMaxRows),
+                  task_policy.wmma16_max_rows)
+            : launch_ragged_by_policy<4>(
+                  config.queue_policy, hip_stream, input, input_row_ids,
+                  row_groups, row_group_count, queue_head, weights, scales,
+                  zero_points_u8, bias, output, total_rows, num_experts, N, K,
+                  block_size, config.grid_blocks, task_policy.gemv_max_rows,
+                  task_policy.wmma16_max_rows);
   if (err != hipSuccess) {
     fprintf(stderr,
             "[custom_kernels] hip_qmoe_ragged_matmul_nbits launch failed: "
