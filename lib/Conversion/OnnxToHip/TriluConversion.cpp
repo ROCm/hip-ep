@@ -82,8 +82,8 @@ struct TriluToHip : public mlir::RewritePattern {
         resultType.getElementType() != inputType.getElementType())
       return rewriter.notifyMatchFailure(op, "result type must match input");
 
-    // ConstantOfShape lowers to tensor.splat; take the splat path below once
-    // it has.
+    // ConstantOfShape lowers to hip.expand or tensor.splat; take the fill
+    // path below once it has.
     if (mlir::Operation *defOp = input.getDefiningOp())
       if (defOp->getName().getStringRef() == "onnx.ConstantOfShape")
         return rewriter.notifyMatchFailure(
@@ -91,11 +91,21 @@ struct TriluToHip : public mlir::RewritePattern {
 
     mlir::Location loc = op->getLoc();
     mlir::Value init;
-    // A dynamic tensor.splat bufferizes to host loops that store into device
-    // memory. Pass its scalar as a rank-0 tensor.empty + linalg.fill (a rank-0
-    // splat would fold to a host memref.global) and let the kernel broadcast.
+    // A filled input reaches the kernel as a rank-0 tensor.empty + linalg.fill
+    // (a rank-0 splat would fold to a host memref.global) that the kernel
+    // broadcasts. For hip.expand of such a fill, skip the full-size copy; for a
+    // tensor.splat, which would bufferize to host loops storing into device
+    // memory, build the fill from its scalar.
+    auto expand = input.getDefiningOp<mlir::hip::ExpandOp>();
+    mlir::Value expandSrc = expand ? expand.getInput() : mlir::Value();
     auto splat = input.getDefiningOp<mlir::tensor::SplatOp>();
-    if (splat && splat.getType() == resultType) {
+    if (expand && expand->getResult(0).getType() == resultType &&
+        mlir::cast<mlir::RankedTensorType>(expandSrc.getType()).getRank() ==
+            0 &&
+        expandSrc.getDefiningOp<mlir::linalg::FillOp>()) {
+      init = createEmptyTensor(rewriter, loc, resultType, expand.getOutput());
+      input = expandSrc;
+    } else if (splat && splat.getType() == resultType) {
       init = mlir::tensor::EmptyOp::create(rewriter, loc, resultType,
                                            splat.getDynamicSizes());
       auto scalarType =

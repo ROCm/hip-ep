@@ -106,11 +106,25 @@ Choose the smallest mechanism that matches the operation's semantics:
 | Permutation | `reifyTransposeByPerm` |
 | Gather/GatherND/GatherElements | Gather-specific helpers or thunks |
 | OneHot, Compress, TopK | Dedicated reification thunks |
-| Pad, Tile, Expand, Slice, Range | Fold-or-bail helpers with fallback to DPS-init shape |
+| Pad, Tile, Expand, Range | Fold-or-bail helpers with fallback to DPS-init shape |
+| Slice | Ranked results fold or fall back to the DPS-init shape. An unranked result gets a rank and an exact extent; see [Slice](#slice) |
 | MatMul/Gemm/MatMulNBits | Dedicated shape logic based on operand dimensions and attributes |
 | Attention or normalization with multiple destinations | One shape vector per DPS init unless an op supplies a dedicated thunk |
 | Convolution, pooling, or resize with converter-computed destinations | DPS-init shape, with semantic validity handled by conversion or verification |
 | Runtime-dependent count, such as NonZero or Compress | DPS-init shape; unresolved dimensions remain dynamic |
+
+### Slice
+
+`Slice` keeps the data rank. A ranked result uses the fold-or-bail path: constant positive steps become `tensor.extract_slice`, and any other `hip.slice` reports its DPS-init shape. A zero length on that path keeps the data dimension as capacity. The init is the allocation, and `FixLoopAccumulatorOffset` appends into a `Slice(x, k, k, axis)` seed on that assumption.
+
+An unranked result has no declared shape, so the destination size would be the only shape consumers see. `SliceToHip` gives it the data rank and an exact extent:
+
+- axes and steps must be constant, steps must be positive, and starts and ends must be integer vectors with one entry per axis;
+- a bound that host arithmetic cannot resolve is read back from the device;
+- a runtime length that can be zero still allocates the data dimension, and a `tensor.extract_slice` of the exact length is the value consumers see;
+- `Slice(x, k, k, axis)`, with one SSA value for both bounds, is empty at compile time and lowers to a bare `tensor.empty` with no `hip.slice`.
+
+An unranked result is never the accumulator seed that needs capacity: `hip.loop` requires a ranked `v_init`, and loop outlining runs before ONNX-to-HIP conversion. A scan loop lowers to `scf.while` in the parent function, where an exact empty seed is correct.
 
 Shared declarations live in `HipShapeUtils.h`; common implementation lives in
 `HipShapeUtils.cpp`, with focused category translation units introduced by the
@@ -265,6 +279,7 @@ simplify-onnx
 → onnx-if-outline
 → hip-infer-loop-body-shapes
 → convert-onnx-to-hip
+→ func.func(hip-fold-constant-extracts)
 → hip-infer-shapes
 → canonicalize
 → CSE
@@ -272,6 +287,8 @@ simplify-onnx
 → func.func(hip-resolve-tensor-dims)
 → one-shot-bufferize
 ```
+
+`--hip-fold-constant-extracts` resolves constant-index `tensor.extract` of vectors assembled with `tensor.insert_slice`, such as the ONNX shape vector `ConstantOfShape(Concat(Shape(q)[0:1], [0, 512]))`, to the `tensor.from_elements` operand or integer constant element it reads. Upstream folds stop at the `insert_slice` and `hip.constant` has no folder, so without it each element reaches runtime as a synchronized device-to-host copy. It runs before `--hip-infer-shapes` so reification sees these scalars as constants, and before `hip-externalize-constants` because it reads inline `hip.constant` payloads. It erases only the producers that the resolved extracts leave without uses, so functions without a resolvable extract are unchanged.
 
 `--hip-infer-shapes` runs before bufferization so static refinements affect destination construction, memref allocation sizes, and downstream pool planning.
 
@@ -316,6 +333,7 @@ Primary regression coverage:
 | File | Contract |
 |---|---|
 | `test/lit/Dialect/hip-infer-shapes.mlir` | Module-level static-dimension refinement and cast barriers |
+| `test/lit/Dialect/hip-fold-constant-extracts.mlir` | Constant-index extracts through `insert_slice` chains, and the slices and producers left unresolved |
 | `test/lit/Dialect/hip-infer-loop-body-shapes.mlir` | Pre-conversion rank establishment |
 | `test/lit/Dialect/hip-dps-op-interface.mlir` | Shared `HipDpsOpInterface` reification |
 | `test/lit/Dialect/hip-broadcast-reify-shapes.mlir` | Shared broadcast reification and rank-zero success |

@@ -13,7 +13,15 @@ project(
 find_package (glog CONFIG REQUIRED)
 # TODO: do we really need to depends on onnxruntime? it is only needed
 # at compile time.
-find_package (onnxruntime CONFIG REQUIRED)
+# cmake/deps.cmake (included from the top-level CMakeLists, which runs before
+# this add_subdirectory) already resolves onnxruntime::onnxruntime -- via a
+# real find_package() if one is installed, else by synthesizing an IMPORTED
+# target from the pinned release tarball. That synthesized target is not
+# itself find_package()-discoverable, so only fall back to find_package()
+# here if the target doesn't already exist, mirroring deps.cmake's own guard.
+if(NOT TARGET onnxruntime::onnxruntime)
+  find_package (onnxruntime CONFIG REQUIRED)
+endif()
 set(LIB_NAME morphizen-custom-op-relu-dq)
 add_library(${LIB_NAME} STATIC src/main.cpp src/custom_op.hpp src/custom_op.cpp)
 set_target_properties(${LIB_NAME} PROPERTIES FOLDER "relu-dq")

@@ -105,8 +105,9 @@ file `location`/`offset`/`size`, or a complete
 `memory_address`/`size`. The ONNX converter translates the ORT memory sentinel
 into the generic memory form; no ORT encoding enters the HIP dialect.
 
-After the `AfterConvertOnnxToHip` plugin slot, `hip-infer-shapes` consumes any
-inspectable carrier payload needed for compile-time shape refinement. The
+After the `AfterConvertOnnxToHip` plugin slot, `hip-fold-constant-extracts` and
+`hip-infer-shapes` consume any inspectable carrier payload needed for
+compile-time shape refinement. The
 standalone `hip-externalize-constants` pass then validates and plans all
 carriers, writes the artifacts, and commits the IR and metadata. Plugins may
 emit `hip.constant` at that slot and receive the same policy as in-tree
