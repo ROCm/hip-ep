@@ -114,8 +114,57 @@ int wrap_rms_norm(RuntimeState *state, void *input, void *scale, void *output,
                     (element_size_bytes == 2) ? "f16" : "f32", (double)epsilon,
                     (long long)(input_num_elements * element_size_bytes));
 
-  return hip_rms_norm(hipdnn_ep_state_get_stream(state), input, scale, output,
-                      num_rows, norm_size, scale_rows, epsilon, hip_dtype);
+  int rc = hip_rms_norm(hipdnn_ep_state_get_stream(state), input, scale, output,
+                        num_rows, norm_size, scale_rows, epsilon, hip_dtype);
+  if (rc == 0 && num_rows > 0 && _opProf &&
+      op_profile_call_capture_enabled(_opProf->ps)) {
+    using Json = CallCaptureJson;
+    const char *dtype = element_size_bytes == 2 ? "float16" : "float32";
+    auto tensor = [dtype, norm_size](int slot, const char *role, int64_t rows) {
+      return Json::object(
+          {{"slot", slot},
+           {"role", role},
+           {"present", true},
+           {"dtype", dtype},
+           {"shape", Json::dimensions({rows, norm_size})},
+           {"layout", Json::object({{"contiguous", true},
+                                    {"view", "production_abi_view"},
+                                    {"order", "row_major"}})}});
+    };
+    _opProf->capture = op_profile_capture_call(
+        _opProf->ps,
+        Json::object(
+            {{"op_type", "SimplifiedLayerNormalization"},
+             {"execution",
+              Json::object({{"backend", "HIP-EP"},
+                            {"entry", "wrap_rms_norm"},
+                            {"variant", "row_tiled_rms"},
+                            {"config",
+                             Json::object({{"hip_dtype", hip_dtype},
+                                           {"kernel_entry", "hip_rms_norm"},
+                                           {"accumulation_dtype", "float32"},
+                                           {"internal_config", nullptr},
+                                           {"internal_config_missing",
+                                            "not_exposed_at_wrapper_abi"}})}})},
+             {"inputs", Json::array({tensor(0, "input", num_rows),
+                                     tensor(1, "scale", scale_rows)})},
+             {"outputs", Json::array({tensor(0, "output", num_rows)})},
+             {"attributes", Json::object({{"axis", axis},
+                                          {"epsilon", epsilon},
+                                          {"stash_type", stash_type}})},
+             {"parameters",
+              Json::object({{"input_num_elements", input_num_elements},
+                            {"scale_num_elements", scale_num_elements},
+                            {"norm_num_elements", norm_num_elements},
+                            {"element_size_bytes", element_size_bytes},
+                            {"num_rows", num_rows},
+                            {"scale_rows", scale_rows},
+                            {"axis", axis},
+                            {"epsilon", epsilon},
+                            {"stash_type", stash_type},
+                            {"original_logical_rank", nullptr}})}}));
+  }
+  return rc;
 }
 
 int wrap_gated_rms_norm(RuntimeState *state, void *input, void *scale,
