@@ -57,11 +57,14 @@ hipdnn_wmma_f32_16x16x16_f16_unavailable(half16, half16, float8 c) {
  * independently, and WT_N=4 is worth having -- a K-step then issues WT_M*WT_N=8
  * WMMA per (WT_M+WT_N)=6 fragment loads instead of 4 per 4, so the LDS reads per
  * Matrix Core op drop by a quarter. */
+/* BITS = 2 reads 2-bit packed weights (four per byte, element i at bits 2i of
+ * its little-endian word); everything after the dequant is shared. */
 template <int BM_T, int BN_T, int WT_M, int WT_N, bool USE_ZEROS,
           bool BOUNDS_CHECK = false, bool FUSED_DQ = true,
           int BK_IN = BM_T / (WT_M * WT_N), bool ZEROS_U8 = false,
           bool ADD_BIAS = false, bool EXPLICIT_TILE = false,
-          bool CHECK_K_TAIL = false, bool RUNTIME_OPTIONAL = false>
+          bool CHECK_K_TAIL = false, bool RUNTIME_OPTIONAL = false,
+          int BITS = 4>
 __device__ __forceinline__
 void GemmFp16U4Impl(
     int M, int N, int K,
@@ -125,6 +128,12 @@ void GemmFp16U4Impl(
     constexpr int B_NPT = (BN_T * BK_T) / THR_L;
     constexpr int B_U32 = B_NPT / 8;
     constexpr int B_TPR = BK_T / B_NPT;
+    static_assert(BITS == 4 || BITS == 2, "4- or 2-bit packed weights");
+    /* Packed bytes and 32-bit words this thread loads per K-step; the
+     * dequantized tile is always B_NPT halfs (B_U32 16-byte vectors). */
+    constexpr int B_BYTES = B_NPT * BITS / 8;
+    constexpr int B_W     = (B_BYTES + 3) / 4;
+    constexpr int B_EPW   = 32 / BITS;
 
     static_assert(A_NCH >= 1, "A_NCH must be >= 1");
     static_assert(A_HPT % A_CH == 0, "A_HPT must be a multiple of A_CH");
@@ -219,9 +228,9 @@ void GemmFp16U4Impl(
         // 0 means the arrival layout, whose stride carries the ONNX group
         // padding described above; a repacked buffer passes its own.
         const int row_bytes =
-            b_row_bytes ? b_row_bytes : (num_groups_k * (group_size >> 1));
+            b_row_bytes ? b_row_bytes : (num_groups_k * (group_size * BITS / 8));
         b_src_u4 = static_cast<const unsigned char*>(B_data) +
-                   (static_cast<size_t>(b_n_g) * row_bytes + (b_k8 >> 1));
+                   (static_cast<size_t>(b_n_g) * row_bytes + (b_k8 * BITS / 8));
         s_src = scales + static_cast<size_t>(b_n_g) * num_groups_k;
         if constexpr (USE_ZEROS) {
             if constexpr (ZEROS_U8) {
@@ -287,7 +296,7 @@ void GemmFp16U4Impl(
      */
 
     uint32_t pf_a[A_NCH][A_CH / 2];
-    [[maybe_unused]] uint32_t pf_b4[B_U32] = {};
+    [[maybe_unused]] uint32_t pf_b4[B_W] = {};
     [[maybe_unused]] u32x4    pf_bfp[B_U32] = {};
 
     /* Quant-group state.
@@ -304,7 +313,7 @@ void GemmFp16U4Impl(
     [[maybe_unused]] int      grp_k_end = 0;
     [[maybe_unused]] uint32_t s_pk      = 0;
     [[maybe_unused]] uint32_t bias_pk   = 0;
-    [[maybe_unused]] uint32_t zp_u4     = 8;
+    [[maybe_unused]] uint32_t zp_u4     = BITS == 2 ? 2 : 8;
 
     // fp16 1024.0. OR-ing a 4-bit value into the mantissa of 1024.0 yields
     // exactly 1024+q, which is the integer-to-fp16 conversion without any
@@ -320,7 +329,7 @@ void GemmFp16U4Impl(
         // (fma(1024+q, s, -(1024+zp)*s)) would not: the fp16 constant
         // -(1024+zp)*s carries a rounding error of half an ULP at magnitude
         // ~1024*s, which is a few percent of the (q-zp)*s result.
-        _Float16 zp = (_Float16)8;
+        _Float16 zp = (_Float16)(BITS == 2 ? 2 : 8);
         if constexpr (USE_ZEROS) {
             if constexpr (ZEROS_U8) {
                 if constexpr (RUNTIME_OPTIONAL) {
@@ -388,15 +397,17 @@ void GemmFp16U4Impl(
 
         if (b_valid) {
             if constexpr (FUSED_DQ) {
-                if constexpr (B_U32 == 1)
+                if constexpr (B_BYTES == 2)
+                    pf_b4[0] = *reinterpret_cast<const uint16_t*>(b_src_u4);
+                else if constexpr (B_BYTES == 4)
                     pf_b4[0] = *reinterpret_cast<const uint32_t*>(b_src_u4);
-                else if constexpr (B_U32 == 2)
+                else if constexpr (B_BYTES == 8)
                     *reinterpret_cast<u32x2*>(pf_b4) =
                         *reinterpret_cast<const u32x2*>(b_src_u4);
                 else
                     *reinterpret_cast<u32x4*>(pf_b4) =
                         *reinterpret_cast<const u32x4*>(b_src_u4);
-                b_src_u4 += BK_T >> 1;
+                b_src_u4 += BK_T * BITS / 8;
                 // This thread's B_NPT nibbles are contiguous in k starting at a
                 // multiple of B_NPT, and group_size is a power of two >= 16 >=
                 // B_NPT for every config that sets B_NPT > 8, so they share one
@@ -413,14 +424,16 @@ void GemmFp16U4Impl(
                 }
                 if constexpr (CHECK_K_TAIL) {
                     if (__builtin_expect(k_abs + B_NPT > K, 0)) {
-                        const uint32_t zp_word = zp_u4 * 0x11111111u;
+                        // Elements past K decode to the zero point, i.e. 0.
+                        const uint32_t zp_word =
+                            zp_u4 * (BITS == 2 ? 0x55555555u : 0x11111111u);
 #pragma unroll
-                        for (int w = 0; w < B_U32; w++) {
-                            int valid = K - (k_abs + w * 8);
-                            valid = valid < 0 ? 0 : (valid > 8 ? 8 : valid);
+                        for (int w = 0; w < B_W; w++) {
+                            int valid = K - (k_abs + w * B_EPW);
+                            valid = valid < 0 ? 0 : (valid > B_EPW ? B_EPW : valid);
                             const uint32_t keep =
-                                valid == 8 ? 0xffffffffu :
-                                (valid == 0 ? 0u : ((1u << (valid * 4)) - 1u));
+                                valid == B_EPW ? 0xffffffffu :
+                                (valid == 0 ? 0u : ((1u << (valid * BITS)) - 1u));
                             pf_b4[w] = (pf_b4[w] & keep) |
                                         (zp_word & ~keep);
                         }
@@ -450,6 +463,37 @@ void GemmFp16U4Impl(
                  * from static_cast<_Float16>(unsigned). */
                 const half2v bias2 = __builtin_bit_cast(half2v, bias_pk);
                 const half2v scale2 = __builtin_bit_cast(half2v, s_pk);
+                if constexpr (BITS == 2) {
+                    /* Same magic-bias conversion. A word holds q0..q15;
+                     * masking its four 2-bit lanes of every byte gives
+                     * {q0,q4,q8,q12}, {q1,q5,..}, {q2,q6,..}, {q3,q7,..}, and
+                     * v_perm pairs them back into k order. */
+#pragma unroll
+                    for (int v = 0; v < B_U32; v++) {
+                        const uint32_t packed = pf_b4[v / 2];
+                        const uint32_t q0 = packed & 0x03030303u;
+                        const uint32_t q1 = (packed >> 2) & 0x03030303u;
+                        const uint32_t q2 = (packed >> 4) & 0x03030303u;
+                        const uint32_t q3 = (packed >> 6) & 0x03030303u;
+                        // Bytes 0-1 of the four lanes feed halfs 0-7, bytes 2-3
+                        // halfs 8-15; only the data selectors move (0x0C is a
+                        // literal zero, 0x0D and above a literal 0xFF).
+                        const uint32_t b = (v & 1) ? 0x00020002u : 0u;
+                        u32x4 raw;
+                        raw[0] = __builtin_amdgcn_perm(q1, q0, 0x0C040C00u + b);
+                        raw[1] = __builtin_amdgcn_perm(q3, q2, 0x0C040C00u + b);
+                        raw[2] = __builtin_amdgcn_perm(q1, q0, 0x0C050C01u + b);
+                        raw[3] = __builtin_amdgcn_perm(q3, q2, 0x0C050C01u + b);
+                        u32x4 out;
+#pragma unroll
+                        for (int i = 0; i < 4; i++) {
+                            const half2v q =
+                                __builtin_bit_cast(half2v, raw[i] | kMagicPk);
+                            out[i] = __builtin_bit_cast(uint32_t, (q + bias2) * scale2);
+                        }
+                        reinterpret_cast<u32x4*>(&smB[buf][b_col][b_k8])[v] = out;
+                    }
+                } else {
 #pragma unroll
                 for (int w = 0; w < B_U32; w++) {
                     const uint32_t packed = pf_b4[w];
@@ -470,6 +514,7 @@ void GemmFp16U4Impl(
                         out[i] = __builtin_bit_cast(uint32_t, (q + bias2) * scale2);
                     }
                     reinterpret_cast<u32x4*>(&smB[buf][b_col][b_k8])[w] = out;
+                }
                 }
             } else {
 #pragma unroll
