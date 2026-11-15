@@ -174,7 +174,8 @@ public:
   // Per-op spans: GPU track (epoch-anchored) + CPU track (wrapper wall time).
   void addOp(const std::string &name, const std::string &shape, double gpuTsUs,
              double gpuDurUs, double cpuTsUs, double cpuDurUs, int64_t bytes,
-             const OpCallCapture *capture = nullptr);
+             const OpCallCapture *capture = nullptr,
+             const CallCaptureJson *executionContext = nullptr);
 
   // One inference's pipeline phase spans, laid end-to-end from `epochAbsUs`.
   void addIoSpans(double epochAbsUs, double h2dMs, int64_t h2dBytes,
@@ -198,6 +199,7 @@ private:
     double cpuTsUs, cpuDurUs; // CPU track
     int64_t bytes;
     std::optional<OpCallCapture> capture;
+    std::optional<CallCaptureJson> executionContext;
   };
   struct IoSpan {
     std::string name;

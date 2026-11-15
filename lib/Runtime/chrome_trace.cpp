@@ -102,10 +102,13 @@ ChromeTrace::ChromeTrace() {
 void ChromeTrace::addOp(const std::string &name, const std::string &shape,
                         double gpuTsUs, double gpuDurUs, double cpuTsUs,
                         double cpuDurUs, int64_t bytes,
-                        const OpCallCapture *capture) {
+                        const OpCallCapture *capture,
+                        const CallCaptureJson *executionContext) {
   ops_.push_back(
       {name, shape, gpuTsUs, gpuDurUs, cpuTsUs, cpuDurUs, bytes,
-       capture ? std::optional<OpCallCapture>(*capture) : std::nullopt});
+       capture ? std::optional<OpCallCapture>(*capture) : std::nullopt,
+       executionContext ? std::optional<CallCaptureJson>(*executionContext)
+                        : std::nullopt});
 }
 
 void ChromeTrace::addIoSpans(double epochAbsUs, double h2dMs, int64_t h2dBytes,
@@ -226,6 +229,9 @@ void ChromeTrace::write(const std::string &basePath,
             "\"bytes\":%lld,\"GB/s\":%.1f,\"%%peak\":%.1f",
             name.c_str(), e.tsUs, e.durUs, shape.c_str(), (long long)e.bytes,
             gbps, rooflineGbps > 0 ? 100.0 * gbps / rooflineGbps : 0.0);
+    if (e.executionContext)
+      fprintf(f, ",\"execution_context\":%s",
+              e.executionContext->text().c_str());
     if (e.capture) {
       const auto &capture = *e.capture;
       fprintf(f,

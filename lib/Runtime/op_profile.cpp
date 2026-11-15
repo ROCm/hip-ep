@@ -37,6 +37,7 @@ struct OpProfileState {
     int64_t bytes;
     double cpuStartUs; // op start, absolute us on the shared trace axis
     std::optional<OpCallCapture> capture;
+    std::optional<CallCaptureJson> executionContext;
   };
 
   // Low-distortion timing: a single fenceless marker event per op plus one
@@ -59,6 +60,9 @@ struct OpProfileState {
   // Chrome-trace accumulator + writer (HIPDNN_EP_TRACE_FILE). Cheap to hold
   // when tracing is off (just an empty vector pair + a session tag).
   ChromeTrace trace;
+  std::string captureSessionId, captureGraphId;
+  uint64_t invocationSequence = 0;
+  std::optional<CallCaptureJson> executionContext;
 };
 
 OpProfileState *op_profile_create() { return new OpProfileState; }
@@ -83,6 +87,8 @@ void op_profile_bind_loaded_session(OpProfileState *ps, const char *sha256,
   using Json = CallCaptureJson;
   const std::string graphId =
       "graph-" + std::string(artifactKind) + "-" + sha256;
+  ps->captureSessionId = sessionId;
+  ps->captureGraphId = graphId;
   ps->trace.setSessionCapture(
       Json::object({{"schema", "hip-ep-loaded-session-1"},
                     {"session_id", sessionId},
@@ -115,6 +121,45 @@ void op_profile_reset(OpProfileState *ps) {
   ps->epochRecorded = false; // re-anchor the timeline at the next op
   ps->active = true;
   ps->gpuEpochAbsUs = 0.0;
+  ps->executionContext.reset();
+  if (!ps->captureSessionId.empty()) {
+    using Json = CallCaptureJson;
+    const auto run = hipdnn_ep::env_string("HIPDNN_EP_CAPTURE_RUN_ID");
+    const auto window = hipdnn_ep::env_string("HIPDNN_EP_CAPTURE_WINDOW_ID");
+    const auto workload =
+        hipdnn_ep::env_string("HIPDNN_EP_CAPTURE_WORKLOAD_ID");
+    const auto request = hipdnn_ep::env_string("HIPDNN_EP_CAPTURE_REQUEST_ID");
+    const auto phase = hipdnn_ep::env_string("HIPDNN_EP_CAPTURE_PHASE");
+    const auto stage = hipdnn_ep::env_string("HIPDNN_EP_CAPTURE_STAGE");
+    std::vector<Json> missing;
+    for (const auto &field :
+         {std::make_pair("run_id", run), std::make_pair("window_id", window),
+          std::make_pair("workload_id", workload),
+          std::make_pair("request_id", request),
+          std::make_pair("phase", phase)}) {
+      bool valid = !field.second.empty();
+      for (const unsigned char value : field.second)
+        valid = valid && value >= 32 && value < 127;
+      if (!valid)
+        missing.emplace_back(field.first);
+    }
+    if (stage != "warmup" && stage != "measured" && stage != "diagnostic")
+      missing.emplace_back("stage");
+    ps->executionContext = Json::object(
+        {{"schema", "hip-ep-execution-context-1"},
+         {"status", missing.empty() ? "bound" : "unbound"},
+         {"session_id", ps->captureSessionId},
+         {"graph_id", ps->captureGraphId},
+         {"invocation_id", ps->captureSessionId + "-invocation-" +
+                               std::to_string(++ps->invocationSequence)},
+         {"run_id", run},
+         {"window_id", window},
+         {"workload_id", workload},
+         {"request_id", request},
+         {"phase", phase},
+         {"stage", stage},
+         {"missing", Json::array(missing)}});
+  }
 }
 
 bool op_profile_is_active(OpProfileState *ps) { return ps && ps->active; }
@@ -164,7 +209,8 @@ void op_profile_add_pending(OpProfileState *ps, const std::string &name,
     return;
   ps->pending.push_back(
       {name, shape, markerIndex, cpuMs, bytes, cpuStartUs,
-       capture ? std::optional<OpCallCapture>(*capture) : std::nullopt});
+       capture ? std::optional<OpCallCapture>(*capture) : std::nullopt,
+       ps->executionContext});
 }
 
 void op_profile_add_io_spans(OpProfileState *ps, double h2dMs, int64_t h2dBytes,
@@ -245,7 +291,8 @@ void op_profile_resolve_and_print(OpProfileState *ps) {
                          : ev.cpuStartUs;
       ps->trace.addOp(ev.name, ev.shape, gTsUs, gpuMs * 1000.0, ev.cpuStartUs,
                       ev.cpuMs * 1000.0, ev.bytes,
-                      ev.capture ? &*ev.capture : nullptr);
+                      ev.capture ? &*ev.capture : nullptr,
+                      ev.executionContext ? &*ev.executionContext : nullptr);
     }
     auto &op = ps->profile[ev.name];
     if (op.name.empty())
@@ -262,6 +309,7 @@ void op_profile_resolve_and_print(OpProfileState *ps) {
     op.totalCount++;
   }
   ps->pending.clear();
+  ps->executionContext.reset();
 
   // The trace file is written once, in op_profile_destroy (ChromeTrace::write
   // rewrites the whole file, so a per-inference write would be O(N^2); the JSON
