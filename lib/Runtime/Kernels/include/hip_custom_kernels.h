@@ -433,7 +433,9 @@ HIP_KERNEL_API int hip_qlinear_matmul(
  * (lib/Runtime/Kernels/hip/elementwise_unary_kernel.hip).
  *
  * Supported hip_dtype (per op, may differ):
- *   Neg/Sign  : FLOAT16, INT32, INT64 (+ FLOAT32 for free)
+ *   Neg       : FLOAT16, BFLOAT16, INT32, INT64 (+ FLOAT32 for free);
+ *               bf16 flips the sign bit (exact, NaN payload kept)
+ *   Sign      : FLOAT16, INT32, INT64 (+ FLOAT32 for free)
  *   Cos/Sin   : FLOAT16, FLOAT32
  *   Not       : bool (i.e. 1-byte; pass element_size_bytes is unused -- the
  *               kernel reads/writes 1 byte unconditionally and ignores
@@ -548,8 +550,8 @@ HIP_KERNEL_API int hip_isnan(
  *
  * Mul / Add / Min / Max are reached from wrap_elementwise: the
  * int16/int32/int64 path lands in this file's flat kernels (after
- * hip_expand materialises any broadcast), while the float16/float32 path
- * uses the native broadcasting kernel below instead.
+ * hip_expand materialises any broadcast), while the float16/bfloat16/float32
+ * path uses the native broadcasting kernel below instead.
  *
  * Div / Mod / Equal / Less were added for the Qwen3.5 vision path. Equal and
  * Less write bool (1 byte); their hip_dtype refers to the input element type.
@@ -621,7 +623,9 @@ HIP_KERNEL_API int hip_elementwise_mod(
  *
  *   op: 0 = add, 1 = mul, 2 = min, 3 = max
  *
- * Supported hip_dtype: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16.
+ * Supported hip_dtype: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
+ * HIP_DTYPE_BFLOAT16. f16/bf16 are computed in float and rounded to nearest
+ * even on store.
  * Returns: 0 on success, -1 on unsupported dtype / launch error, -2 when the
  * output volume exceeds the 32-bit index range (caller should fall back).
  */
@@ -1429,6 +1433,23 @@ HIP_KERNEL_API int hip_gqa_flash_decode_configured(
     const void* key_bias,
     int key_bias_stride);
 
+// Flash decode (sq=1, fp16, scalar split-K) that also performs the
+// separate-buffer KV concat: reads past K/V [B, G, past_seq, d] plus the new
+// token [B, 1, G, d], writes present [B, G, present_seq, d] positions
+// [0, past_len], and attends over those past_len + 1 keys. Reads past once
+// instead of concat-then-decode reading it twice. B == 1, d 128, HpG
+// 4/5/6/8, no sliding window, 16-byte-aligned buffers; returns -1 otherwise.
+// partials and key_bias as for hip_gqa_flash_decode. splits <= 0 lets the
+// launcher size the split count for the copy; HIPDNN_GQA_DECODE_SPLITS
+// overrides either.
+HIP_KERNEL_API int hip_gqa_flash_decode_fused_copy(
+    void* stream, const void* Q, const void* past_k, const void* past_v,
+    const void* new_k, const void* new_v, void* present_k, void* present_v,
+    void* O, void* partials_workspace, int B, int H, int G, int d,
+    int past_len, int past_seq, int present_seq, int max_splits, int splits,
+    float scale, const void* head_sink, int use_smooth_softmax,
+    const void* key_bias, int key_bias_stride);
+
 /* =========================================================================
  * Cast (Element Type Conversion)
  * =========================================================================
@@ -1849,6 +1870,43 @@ HIP_KERNEL_API int hip_grid_sample(
     int hip_dtype);
 
 /* =========================================================================
+ * RoiAlign (ONNX 4-D NCHW)
+ * =========================================================================
+ *
+ * Pools each region of input (N, C, H, W) into (out_h, out_w) bins by
+ * bilinear sampling. rois is (num_rois, 4) as (x1, y1, x2, y2) in the input
+ * element type; batch_indices is (num_rois) int64. Output is
+ * (num_rois, C, out_h, out_w). Regions whose batch index is out of range
+ * produce zeros.
+ *
+ *  sampling_ratio: samples per bin per axis; 0 = ceil(roi_extent / out)
+ *  half_pixel:     1 = shift corners by -0.5 ("half_pixel"),
+ *                  0 = no shift, extents clamped to >= 1
+ *                      ("output_half_pixel")
+ *  mode:           0 = avg, 1 = max (ONNX Runtime semantics: max over
+ *                  samples of the largest weighted bilinear tap)
+ *
+ * Supported hip_dtypes: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
+ * HIP_DTYPE_BFLOAT16, HIP_DTYPE_FLOAT64.
+ * Returns: 0 on success, non-zero on failure.
+ */
+HIP_KERNEL_API int hip_roi_align(
+    void* stream,
+    const void* input,
+    const void* rois,
+    const void* batch_indices,
+    void* output,
+    int64_t n, int64_t c,
+    int64_t in_h, int64_t in_w,
+    int64_t num_rois,
+    int64_t out_h, int64_t out_w,
+    int sampling_ratio,
+    float spatial_scale,
+    int half_pixel,
+    int mode,
+    int hip_dtype);
+
+/* =========================================================================
  * Global pool (avg / max / lp)
  * =========================================================================
  *
@@ -1946,6 +2004,10 @@ HIP_KERNEL_API int hip_reduce_prod(
  *
  * Both kernels are bounded to kTileMaxRank = 8 input/output dimensions
  * (matches ORT's TArray<int64, 8> default).
+ *
+ * hip_expand dtypes: FLOAT16, BFLOAT16, FLOAT32, INT8, UINT8, INT16, UINT16,
+ * INT32, INT64. Pure copy, so UINT8 and UINT16 reuse the INT8 and INT16
+ * instantiations.
  */
 HIP_KERNEL_API int hip_tile(
     void* stream,
@@ -2676,6 +2738,10 @@ HIP_KERNEL_API int hip_matmul_nbits_grouped_wmma(
  *   A / output         : fp16 rows packed back-to-back in expert order; expert
  *                        e's rows start at expert_row_offsets[e] (int32,
  *                        device). A is [rows, K], output [rows, N].
+ *   a_row_ids          : nullptr, or int32 [rows] (device): grouped row r then
+ *                        reads row a_row_ids[r] of A, so the expert rows are
+ *                        gathered from A (e.g. the token rows of a MoE input)
+ *                        without staging them.
  *   B, scales          : expert-major MatMulNBits layout
  *                        ([E, N, ceil(K/2)] packed, fp16 [E, N, ceil(K/bs)])
  *   zero_points        : nullptr for symmetric (zp = 8); with zp_packed_u4 != 0
@@ -2684,7 +2750,7 @@ HIP_KERNEL_API int hip_matmul_nbits_grouped_wmma(
  *                        bit-identical results.
  *   bias               : fp16 [E, N] or nullptr
  *   row_tiles          : int32 [max_row_tiles][3] = (expert, row0, rows) with
- *                        rows <= tile_rows (hip_qmoe_build_row_tiles)
+ *                        rows <= tile_rows (hip_qmoe_build_row_tile_classes)
  *   num_row_tiles      : int32 device scalar, valid entries of row_tiles
  *   max_row_tiles      : host-side upper bound on *num_row_tiles (grid size)
  *   tile_rows          : tile height the list was built with; cfg < 0 picks
@@ -2695,8 +2761,8 @@ HIP_KERNEL_API int hip_matmul_nbits_grouped_wmma(
  * (default configs: K <= 9216 for tile_rows <= 32, K <= 5120 above); returns
  * -1 otherwise. */
 HIP_KERNEL_API int hip_matmul_nbits_wmma_smallm_grouped(
-    void* stream, int cfg,
-    const void* A, const void* B, const void* scales, const void* zero_points,
+    void* stream, int cfg, const void* A, const void* a_row_ids,
+    const void* B, const void* scales, const void* zero_points,
     int zp_packed_u4, const void* bias, const void* expert_row_offsets,
     const void* row_tiles, const void* num_row_tiles, void* output,
     int64_t max_row_tiles, int64_t tile_rows, int64_t N, int64_t K,
@@ -2708,6 +2774,29 @@ HIP_KERNEL_API int hip_matmul_nbits_wmma_smallm_grouped(
 HIP_KERNEL_API int hip_matmul_nbits_wmma_smallm_grouped_supported(
     int cfg, int64_t tile_rows, int64_t N, int64_t K, int64_t bits,
     int64_t block_size, int64_t element_size_bytes);
+
+/* Row tile height of hip_matmul_nbits_wmma_tiled_grouped. */
+#define HIP_MATMUL_NBITS_TILED_GROUPED_ROWS 128
+
+/* Same contract as hip_matmul_nbits_wmma_smallm_grouped, for tall row tiles of
+ * symmetric (zp = 8) weights: each tile slot runs the LDS-staged MatMulNBits
+ * WMMA tile, which reads an expert's weights once per
+ * HIP_MATMUL_NBITS_TILED_GROUPED_ROWS rows at full Matrix Core rate. Use it
+ * for experts with many rows; the direct-B kernel wins below that.
+ *   row_tiles : built with HIP_MATMUL_NBITS_TILED_GROUPED_ROWS-row tiles
+ * Requires wave32 WMMA, bits == 4, fp16, K % 32 == 0 and a power-of-two
+ * block_size >= 32; returns -1 otherwise. */
+HIP_KERNEL_API int hip_matmul_nbits_wmma_tiled_grouped(
+    void* stream, const void* A, const void* a_row_ids, const void* B,
+    const void* scales, const void* bias, const void* expert_row_offsets,
+    const void* row_tiles, const void* num_row_tiles, void* output,
+    int64_t max_row_tiles, int64_t N,
+    int64_t K, int64_t bits, int64_t block_size, int64_t element_size_bytes);
+
+/* 1 when hip_matmul_nbits_wmma_tiled_grouped accepts this shape, else 0. */
+HIP_KERNEL_API int hip_matmul_nbits_wmma_tiled_grouped_supported(
+    int64_t N, int64_t K, int64_t bits, int64_t block_size,
+    int64_t element_size_bytes);
 
 /* W4A8 integer-dot-product (dp4a) GEMV for a single decode row (M==1).
  * Dynamically quantizes the fp16 activation row to per-group int8 (into
@@ -3186,18 +3275,25 @@ HIP_KERNEL_API int hip_qmoe_bucket_tokens_ragged(
     int64_t row_group_size,
     int64_t element_size_bytes);
 
-/* Row tiles for hip_matmul_nbits_wmma_smallm_grouped, built on the device from
- * the bucketed expert counts. Experts with 0 < count <= split_rows are cut into
- * tiles of rows_small rows (tiles_small), larger ones into tiles of rows_big
- * (tiles_big). Each tile is int32 (expert, row0, rows), in ascending expert
- * order; num_small / num_big are int32 device scalars receiving the counts.
- * Capacity the caller must provide: tiles_small holds at most
- * sum over small experts of ceil(count / rows_small), tiles_big
- * total_rows / rows_big + (number of experts above split_rows). */
-HIP_KERNEL_API int hip_qmoe_build_row_tiles(
+#define HIP_QMOE_MAX_ROW_TILE_CLASSES 4
+
+/* Row tiles for the grouped expert GEMMs (hip_matmul_nbits_wmma_smallm_grouped,
+ * hip_matmul_nbits_wmma_tiled_grouped), built in one launch on the device from
+ * the bucketed expert counts. Class c (c < num_classes <=
+ * HIP_QMOE_MAX_ROW_TILE_CLASSES) takes every expert with
+ * lo[c] < count <= hi[c] (hi[c] < 0: no upper bound) and cuts it into tiles of
+ * rows[c] rows. Classes may overlap, so the same experts can be tiled at two
+ * heights for two GEMMs. lo, hi and rows are host arrays. tiles[c] is a device
+ * int32 list receiving (expert, row0, rows) per tile in ascending expert order;
+ * num_tiles is a device int32 [num_classes] receiving each list's length.
+ * Capacity of tiles[c]: one tile per expert when hi[c] is set and
+ * hi[c] <= rows[c], else total_rows / rows[c] plus the number of experts in
+ * the class. Returns -1 when (num_classes + 1) * num_experts int32 exceed the
+ * 64 KB of LDS the counts are staged in. */
+HIP_KERNEL_API int hip_qmoe_build_row_tile_classes(
     void* stream, const void* expert_counts, int64_t num_experts,
-    int64_t split_rows, int64_t rows_small, int64_t rows_big, void* tiles_small,
-    void* num_small, void* tiles_big, void* num_big);
+    int64_t num_classes, const int64_t* lo, const int64_t* hi,
+    const int64_t* rows, void* const* tiles, void* num_tiles);
 
 /* One-launch ragged quantized MatMulNBits over every row group/expert.
  * input_row_ids may be null for already-sorted input rows; otherwise it maps
@@ -3919,14 +4015,53 @@ HIP_KERNEL_API int hip_matmul_i32(
     int64_t batch,
     int64_t b_batch_stride);
 
+// Per-head prologue of hip_dynamic_sparse_attention: every query and key head
+// is RMS-normalized, rounded to fp16, and its first rotary_dim channels are
+// rotated by split-half MRoPE, rounded to fp16 again, exactly as an unfused
+// SimplifiedLayerNormalization then MRotaryEmbedding (interleaved = 0,
+// scale = 1) would. Frequency j < rotary_dim / 2 reads its position from row
+// 0 (T), 1 (H) or 2 (W) of position_ids, the MRoPE section that section and
+// layout give it (0: contiguous sections, 1: interleaved); a position outside
+// [0, rotary_rows) leaves the pair unrotated.
+typedef struct HipDsaPrologue {
+  const void* q_norm_weight;   // [D] fp16
+  const void* k_norm_weight;   // [D] fp16
+  const int64_t* position_ids; // [3, B, S]
+  const void* cos_cache;       // [rotary_rows, rotary_dim / 2] fp16
+  const void* sin_cache;       // [rotary_rows, rotary_dim / 2] fp16
+  int64_t rotary_rows;
+  int64_t rotary_dim;
+  int64_t section[3];
+  int64_t layout;
+  float epsilon;
+} HipDsaPrologue;
+
+// Pairing of hip_dynamic_sparse_attention with a pair_format
+// hip_sparse_attention_indexer of past length past_len that wrote
+// selected_indices. Rows s < clamp(max_selected - past_len, 0, S) of every
+// batch are dense: they take positions 0, 1, ... (their count of them) and
+// their selected_indices rows are never read. When enough rows are dense, the
+// attention runs them as one causal GQA prefill under gqa_policy (the
+// session's autotune policy, may be null) and only redoes a batch whose
+// seqlens_k disagrees with past_len.
+typedef struct HipDsaPair {
+  int64_t past_len;
+  void* gqa_policy;
+} HipDsaPair;
+
 // com.microsoft DynamicSparseAttention, attention_mode=selected_only over the
-// main cache, fp16, no rotary / qk-norm / sink.
-//   query            [B, S, N*D]
+// main cache, fp16, no sink.
+//   query            [B, S, N*D], or packed [B, S, (N + 2*kvN)*D] (q, k, v
+//                    per token) when key and value are both null
 //   key, value       [B, S, kvN*D]
 //   past_*, present_* [B, kvN, capacity, D]; past may alias present, otherwise
 //                    present is first filled from past
 //   selected_indices [B*S, max_selected] int32
 //   selected_counts  [B*S] int32, seqlens_k [B] int32
+//   gate             [B, S, N*D] or null: output = attention * Sigmoid(gate)
+//                    with the rounding of an unfused Sigmoid then Mul
+//   prologue         null, or the q/k norm and MRoPE above
+//   pair             null, or the pairing above
 //   output           [B, S, N*D]
 // D must be 128 or 256, N/kvN at most 16, all tensors 16-byte aligned.
 // workspace must hold hip_dynamic_sparse_attention_workspace_size() bytes.
@@ -3936,7 +4071,8 @@ HIP_KERNEL_API size_t hip_dynamic_sparse_attention_workspace_size(
     int64_t num_heads,
     int64_t kv_num_heads,
     int64_t head_size,
-    int64_t max_selected);
+    int64_t max_selected,
+    int has_prologue);
 
 HIP_KERNEL_API int hip_dynamic_sparse_attention(
     void* stream,
@@ -3948,6 +4084,8 @@ HIP_KERNEL_API int hip_dynamic_sparse_attention(
     const int32_t* selected_indices,
     const int32_t* selected_counts,
     const int32_t* seqlens_k,
+    const void* gate,
+    const HipDsaPrologue* prologue,
     void* output,
     void* present_key,
     void* present_value,
@@ -3960,13 +4098,15 @@ HIP_KERNEL_API int hip_dynamic_sparse_attention(
     int64_t head_size,
     int64_t capacity,
     int64_t max_selected,
-    float scale);
+    float scale,
+    const HipDsaPair* pair);
 
 // com.microsoft SparseAttentionIndexer, policy_mode=qsa, packed QK.
 // T = fp16 (element_size_bytes 2) or fp32 (4).
 //   query            [B, S, (N+1)*D] T; the last D channels are the key
 //   query/key_norm_weight [D] T
-//   cos/sin_cache    [X, R] (rotary_batched 0) or [B, X, R] (1) T
+//   cos/sin_cache    [X, R] (rotary_batched 0) or [B, X, R] (1) T, or with
+//                    rotary_position_ids [rotary_rows, R/2] T base tables
 //   mask             [B, P+S] int64 or null (all visible)
 //   past_key         [B, past_rows, D] T, P <= past_rows; may be null when
 //                    P == 0
@@ -3974,6 +4114,17 @@ HIP_KERNEL_API int hip_dynamic_sparse_attention(
 //   present_key      [B, present_rows, D] T, P+S <= present_rows; may alias
 //                    past_key when present_rows == past_rows, in which case
 //                    rows < P are not rewritten
+//   rotary_position_ids [id_sections, B, id_rows] int64 or null; frequency f
+//                    of row t reads base row
+//                    rotary_position_ids[rotary_sections[f], b, t]
+//   rotary_sections  host [R/2] bytes, each frequency's MRoPE section,
+//                    < id_sections (with ids only)
+//   selected_counts  [B, S] int32 or null; receives the number of valid
+//                    (non-negative) entries of each selected_indices row
+//   pair_format      0, or 1 (needs selected_counts and no mask): rows with
+//                    P + s + 1 <= token_budget + r - 1 select every position
+//                    and only get their count; the other rows list their
+//                    blocks by ascending index instead of by score
 // D must be 128, 1 <= N <= 8, R even in (0, D], token_budget / r <= 512.
 // workspace must hold hip_sparse_attention_indexer_workspace_size() bytes.
 HIP_KERNEL_API size_t hip_sparse_attention_indexer_workspace_size(
@@ -4011,7 +4162,13 @@ HIP_KERNEL_API int hip_sparse_attention_indexer(
     int64_t token_budget,
     int element_size_bytes,
     float epsilon,
-    float scale);
+    float scale,
+    const int64_t* rotary_position_ids,
+    const uint8_t* rotary_sections,
+    int64_t id_sections,
+    int64_t id_rows,
+    int32_t* selected_counts,
+    int pair_format);
 
 /* =========================================================================
  * Conv — general forward convolution (1D / 2D / 3D spatial)

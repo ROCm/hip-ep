@@ -45,7 +45,12 @@ module {
     // CHECK: %[[SR:.*]] = llvm.extractvalue %[[SIN]][3, 1]
     // CHECK: %[[EPS:.*]] = llvm.mlir.constant(9.99999997E-7 : f32) : f32
     // CHECK: %[[SCALE:.*]] = llvm.mlir.constant(0.0883883461 : f32) : f32
-    // CHECK: llvm.call @wrap_sparse_attention_indexer(%{{.*}}, %[[B]], %[[S]], %[[P]], %[[PR]], %[[N]], %[[D]], %[[R]], %[[X]], %[[BATCHED]], %[[RATIO]], %[[BUDGET]], %[[ELEM]], %[[PB]], %[[MB]], %[[ML]], %[[CB]], %[[SB]], %[[SR]], %[[EPS]], %[[SCALE]]) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32) -> i32
+    // CHECK: %[[NOIDS:.*]] = llvm.mlir.zero : !llvm.ptr
+    // CHECK-NEXT: %[[NOMAP:.*]] = llvm.mlir.zero : !llvm.ptr
+    // CHECK-NEXT: %[[ZERO:.*]] = llvm.mlir.constant(0 : i64) : i64
+    // CHECK-NEXT: %[[NOCOUNTS:.*]] = llvm.mlir.zero : !llvm.ptr
+    // CHECK-NEXT: %[[NOPAIR:.*]] = llvm.mlir.constant(0 : i64) : i64
+    // CHECK: llvm.call @wrap_sparse_attention_indexer(%{{.*}}, %[[B]], %[[S]], %[[P]], %[[PR]], %[[N]], %[[D]], %[[R]], %[[X]], %[[BATCHED]], %[[RATIO]], %[[BUDGET]], %[[ELEM]], %[[PB]], %[[MB]], %[[ML]], %[[CB]], %[[SB]], %[[SR]], %[[EPS]], %[[SCALE]], %[[NOIDS]], %[[NOMAP]], %[[ZERO]], %[[ZERO]], %[[ZERO]], %[[NOCOUNTS]], %[[NOPAIR]]) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32, !llvm.ptr, !llvm.ptr, i64, i64, i64, !llvm.ptr, i64) -> i32
     return
   }
 
@@ -82,7 +87,7 @@ module {
     // CHECK-NEXT: %[[CB:.*]] = llvm.mlir.constant(0 : i64) : i64
     // CHECK-NEXT: %[[SB:.*]] = llvm.mlir.constant(0 : i64) : i64
     // CHECK-NEXT: %[[SR:.*]] = llvm.mlir.constant(64 : i64) : i64
-    // CHECK: llvm.call @wrap_sparse_attention_indexer(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %[[NOMASK]], %[[NOPSL]], %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %[[PR]], %{{.*}}, %{{.*}}, %{{.*}}, %[[X]], %[[BATCHED]], %[[RATIO]], %[[BUDGET]], %[[ELEM]], %[[PB]], %[[MB]], %[[ML]], %[[CB]], %[[SB]], %[[SR]], %{{.*}}, %{{.*}})
+    // CHECK: llvm.call @wrap_sparse_attention_indexer(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %[[NOMASK]], %[[NOPSL]], %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %[[PR]], %{{.*}}, %{{.*}}, %{{.*}}, %[[X]], %[[BATCHED]], %[[RATIO]], %[[BUDGET]], %[[ELEM]], %[[PB]], %[[MB]], %[[ML]], %[[CB]], %[[SB]], %[[SR]], %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}})
     return
   }
 
