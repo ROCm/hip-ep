@@ -439,3 +439,76 @@ func.func @main_graph(%ctx: !hip.context, %a: tensor<1x2048xf32>,
       outs(%ae : tensor<1x32xf32>) -> tensor<1x32xf32>
   return %r : tensor<1x32xf32>
 }
+
+// -----
+
+// At the split-K limits (64 columns, 16 * 64 = 1024 deep) the matmul relies on
+// split-K. A relu (max with 0) is not linear in the accumulator, so applied to
+// each partial sum it would be wrong: it stays a HIP op after the kernel.
+
+// CHECK-LABEL: func.func @mlir_matmul_{{[0-9]+}}
+// CHECK-NOT: hip.max
+// CHECK: return
+// CHECK-LABEL: func.func @main_graph
+// CHECK: %[[K:.*]] = hip.rocmlir({{.*}}) @mlir_matmul_{{[0-9]+}}
+// CHECK: hip.max({{.*}}) ins(%[[K]],
+
+func.func @main_graph(%ctx: !hip.context, %a: tensor<1x1024xf32>,
+                      %b: tensor<1024x64xf32>) -> tensor<1x64xf32> {
+  %e = tensor.empty() : tensor<1x64xf32>
+  %m = hip.matmul(%ctx) ins(%a, %b : tensor<1x1024xf32>, tensor<1024x64xf32>)
+      outs(%e : tensor<1x64xf32>) : tensor<1x64xf32>
+  %zero = hip.constant {value = dense<0.000000e+00> : tensor<f32>} : tensor<f32>
+  %re = tensor.empty() : tensor<1x64xf32>
+  %r = hip.max(%ctx) ins(%m, %zero : tensor<1x64xf32>, tensor<f32>)
+      outs(%re : tensor<1x64xf32>) : tensor<1x64xf32>
+  return %r : tensor<1x64xf32>
+}
+
+// -----
+
+// With 65 columns the matmul does not rely on split-K, so the relu joins its
+// epilogue.
+
+// CHECK-LABEL: func.func @mlir_matmul_max_{{[0-9]+}}
+// CHECK: hip.matmul
+// CHECK: hip.max
+// CHECK-LABEL: func.func @main_graph
+// CHECK: hip.rocmlir
+// CHECK-NOT: hip.max
+
+func.func @main_graph(%ctx: !hip.context, %a: tensor<1x2048xf32>,
+                      %b: tensor<2048x65xf32>) -> tensor<1x65xf32> {
+  %e = tensor.empty() : tensor<1x65xf32>
+  %m = hip.matmul(%ctx) ins(%a, %b : tensor<1x2048xf32>, tensor<2048x65xf32>)
+      outs(%e : tensor<1x65xf32>) : tensor<1x65xf32>
+  %zero = hip.constant {value = dense<0.000000e+00> : tensor<f32>} : tensor<f32>
+  %re = tensor.empty() : tensor<1x65xf32>
+  %r = hip.max(%ctx) ins(%m, %zero : tensor<1x65xf32>, tensor<f32>)
+      outs(%re : tensor<1x65xf32>) : tensor<1x65xf32>
+  return %r : tensor<1x65xf32>
+}
+
+// -----
+
+// A residual add is linear: rocMLIR divides the residual by the split count,
+// so the sum of the splits adds it once. The split-K matmul takes it.
+
+// CHECK-LABEL: func.func @mlir_matmul_add_{{[0-9]+}}
+// CHECK: hip.matmul
+// CHECK: hip.add
+// CHECK-LABEL: func.func @main_graph
+// CHECK: hip.rocmlir
+// CHECK-NOT: hip.add
+
+func.func @main_graph(%ctx: !hip.context, %a: tensor<4x2048xf32>,
+                      %b: tensor<2048x32xf32>, %residual: tensor<4x32xf32>)
+    -> tensor<4x32xf32> {
+  %e = tensor.empty() : tensor<4x32xf32>
+  %m = hip.matmul(%ctx) ins(%a, %b : tensor<4x2048xf32>, tensor<2048x32xf32>)
+      outs(%e : tensor<4x32xf32>) : tensor<4x32xf32>
+  %ae = tensor.empty() : tensor<4x32xf32>
+  %r = hip.add(%ctx) ins(%residual, %m : tensor<4x32xf32>, tensor<4x32xf32>)
+      outs(%ae : tensor<4x32xf32>) -> tensor<4x32xf32>
+  return %r : tensor<4x32xf32>
+}

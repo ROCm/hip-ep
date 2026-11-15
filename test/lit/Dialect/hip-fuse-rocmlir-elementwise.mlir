@@ -338,3 +338,48 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x16x4x4xf32>)
       outs(%me : tensor<1x16x4x4xf32>) -> tensor<1x16x4x4xf32>
   return %m : tensor<1x16x4x4xf32>
 }
+
+// -----
+
+// Two modules where the second reads the first, with outside readers between
+// them. The transpose of %p is read outside through views, so it is a result
+// of the first module next to %q: one module, two result shapes. Those view
+// readers move below the first module, and the second module, which starts
+// at the broadcasting add, comes after both and reads %q and the views.
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK: %[[A:.*]]:2 = hip.rocmlir_elementwise(%{{.*}}) ins(%{{.*}} : tensor<1x1x16xf16>) -> tensor<1x16x1xf16>, tensor<1x1x16xf16>
+// CHECK: hip.add
+// CHECK: %[[T:.*]] = hip.transpose
+// CHECK: %[[Q:.*]] = hip.mul
+// CHECK: hip.yield %[[T]], %[[Q]]
+// CHECK: %[[V:.*]] = tensor.collapse_shape %[[A]]#0
+// CHECK: %[[W:.*]] = tensor.expand_shape %[[V]]
+// CHECK: %[[B:.*]] = hip.rocmlir_elementwise(%{{.*}}) ins(%[[A]]#1, %{{.*}}, %[[W]] :
+// CHECK: hip.add
+// CHECK: hip.sub
+// CHECK: return %[[B]]
+// ROUND-LABEL: func.func @main_graph
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x1x16xf16>,
+                      %z: tensor<1x2x16xf16>) -> tensor<1x2x16xf16> {
+  %pe = tensor.empty() : tensor<1x1x16xf16>
+  %p = hip.add(%ctx) ins(%x, %x : tensor<1x1x16xf16>, tensor<1x1x16xf16>)
+      outs(%pe : tensor<1x1x16xf16>) -> tensor<1x1x16xf16>
+  %oe = tensor.empty() : tensor<1x16x1xf16>
+  %o = hip.transpose(%ctx) ins(%p : tensor<1x1x16xf16>)
+      outs(%oe : tensor<1x16x1xf16>) {perm = [0, 2, 1]} : tensor<1x16x1xf16>
+  %ov = tensor.collapse_shape %o [[0], [1, 2]]
+      : tensor<1x16x1xf16> into tensor<1x16xf16>
+  %ow = tensor.expand_shape %ov [[0, 1], [2]] output_shape [1, 1, 16]
+      : tensor<1x16xf16> into tensor<1x1x16xf16>
+  %qe = tensor.empty() : tensor<1x1x16xf16>
+  %q = hip.mul(%ctx) ins(%p, %p : tensor<1x1x16xf16>, tensor<1x1x16xf16>)
+      outs(%qe : tensor<1x1x16xf16>) -> tensor<1x1x16xf16>
+  %se = tensor.empty() : tensor<1x2x16xf16>
+  %s = hip.add(%ctx) ins(%q, %z : tensor<1x1x16xf16>, tensor<1x2x16xf16>)
+      outs(%se : tensor<1x2x16xf16>) -> tensor<1x2x16xf16>
+  %te = tensor.empty() : tensor<1x2x16xf16>
+  %t = hip.sub(%ctx) ins(%s, %ow : tensor<1x2x16xf16>, tensor<1x1x16xf16>)
+      outs(%te : tensor<1x2x16xf16>) : tensor<1x2x16xf16>
+  return %t : tensor<1x2x16xf16>
+}

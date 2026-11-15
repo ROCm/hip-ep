@@ -208,6 +208,10 @@ static Value emitQLinearAdd(Emitter &emit, const QuantizedBinary &op,
 
 // ORT CPU's QLinearMul on x86, with an exact integer product:
 //   c = (a - zA) * (b - zB) * (sA * sB / sC) + zC
+// The product of two 8-bit values is exact in f32 for either operand order, so
+// unlike the add, a broadcast needs no particular order. The scale multiply
+// and the zC add are written separately, but rocMLIR may contract them into an
+// fma, so a result that rounds at a half may differ by one unit.
 static Value emitQLinearMul(Emitter &emit, const QuantizedBinary &op,
                             RankedTensorType resultType) {
   float scaleProduct = op.lhs.scale * op.rhs.scale;

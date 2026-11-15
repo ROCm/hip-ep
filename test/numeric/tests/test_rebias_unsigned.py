@@ -106,6 +106,38 @@ def _qdq_chain():
     )
 
 
+def _resize_chain():
+    """Q(x) -> conv1 -> nearest 2x Resize -> conv2.
+
+    The Resize reads a dequantize and feeds a quantize with the same scale and
+    zero point, so it moves the quantized values themselves and joins the tree
+    that reaches conv2: it runs on i8 after the rebias.
+    """
+    nodes = [helper.make_node("QuantizeLinear", ["x", "s", "z"], ["q0"])]
+    inits = list(_QDQ_INITS)
+    conv_nodes, conv_inits = _conv("c1", "q0", "y1", _C)
+    nodes += conv_nodes
+    inits += conv_inits
+    nodes += [
+        helper.make_node("DequantizeLinear", ["y1", "s", "z"], ["y1f"]),
+        helper.make_node("Resize", ["y1f", "", "scales"], ["r"], mode="nearest"),
+        helper.make_node("QuantizeLinear", ["r", "s", "z"], ["qr"]),
+    ]
+    inits.append(
+        numpy_helper.from_array(np.array([1, 1, 2, 2], dtype=np.float32), "scales")
+    )
+    conv_nodes, conv_inits = _conv("c2", "qr", "y", _C)
+    nodes += conv_nodes
+    inits += conv_inits
+    return make_model_from_nodes(
+        nodes,
+        [_f32_info("x", [1, _C, _H, _W])],
+        [_u8_info("y", [1, _C, 2 * _H, 2 * _W])],
+        initializers=inits,
+        opset=13,
+    )
+
+
 def _qlinear_chain(x_zp, mid_zp):
     """Q(x) -> QLinearConv -> QLinearConv, both with i8 weights."""
     nodes = [
@@ -156,6 +188,10 @@ def _input():
 class TestRebiasUnsigned:
     def test_qdq_chain(self, model_runner):
         actual, expected = model_runner.run_sample(_qdq_chain(), [_input()])
+        compare_outputs(actual, expected, atol=1, rtol=0)
+
+    def test_resize_chain(self, model_runner):
+        actual, expected = model_runner.run_sample(_resize_chain(), [_input()])
         compare_outputs(actual, expected, atol=1, rtol=0)
 
     @pytest.mark.parametrize(
