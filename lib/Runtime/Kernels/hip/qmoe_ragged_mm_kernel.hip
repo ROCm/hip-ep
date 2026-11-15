@@ -275,7 +275,8 @@ __device__ __forceinline__ void qmoe_wmma16_task(
                  /*BOUNDS_CHECK=*/true, /*FUSED_DQ=*/true, kKTile,
                  /*ZEROS_U8=*/true, /*ADD_BIAS=*/true,
                  /*EXPLICIT_TILE=*/true, /*CHECK_K_TAIL=*/true,
-                 /*RUNTIME_OPTIONAL=*/true, BITS>(
+                 /*RUNTIME_OPTIONAL=*/true, BITS,
+                 /*ZEROS_PACKED=*/BITS == 2>(
       total_rows, N, K, input, K, weights, scales, zero_points, block_size,
       k_blocks, output, N, /*swizzle_n=*/1, weight_row_bytes, row_begin,
       n_begin, first_rows, input_row_ids, bias);
@@ -284,7 +285,8 @@ __device__ __forceinline__ void qmoe_wmma16_task(
                    /*USE_ZEROS=*/true, /*BOUNDS_CHECK=*/true,
                    /*FUSED_DQ=*/true, kKTile, /*ZEROS_U8=*/true,
                    /*ADD_BIAS=*/true, /*EXPLICIT_TILE=*/true,
-                   /*CHECK_K_TAIL=*/true, /*RUNTIME_OPTIONAL=*/true, BITS>(
+                   /*CHECK_K_TAIL=*/true, /*RUNTIME_OPTIONAL=*/true, BITS,
+                   /*ZEROS_PACKED=*/BITS == 2>(
         total_rows, N, K, input, K, weights, scales, zero_points, block_size,
         k_blocks, output, N, /*swizzle_n=*/1, weight_row_bytes,
         row_begin + kRowsPerGroup, n_begin, row_count - kRowsPerGroup,
@@ -303,10 +305,27 @@ __device__ __forceinline__ void qmoe_wmma64_task(
                  /*USE_ZEROS=*/true, /*BOUNDS_CHECK=*/true,
                  /*FUSED_DQ=*/true, kKTile, /*ZEROS_U8=*/true,
                  /*ADD_BIAS=*/true, /*EXPLICIT_TILE=*/true,
-                 /*CHECK_K_TAIL=*/true, /*RUNTIME_OPTIONAL=*/true, BITS>(
+                 /*CHECK_K_TAIL=*/true, /*RUNTIME_OPTIONAL=*/true, BITS,
+                 /*ZEROS_PACKED=*/BITS == 2>(
       total_rows, N, K, input, K, weights, scales, zero_points, block_size,
       k_blocks, output, N, /*swizzle_n=*/1, weight_row_bytes, row_begin,
       n_begin, row_count, input_row_ids, bias);
+}
+
+// Zero point of row n, group `group`: 2-bit ones stay in the ONNX packing
+// (four per byte), 4-bit ones arrive unpacked to one byte per group.
+__device__ __forceinline__ float qmoe_zero_point(const uint8_t* zero_points,
+                                                 int n, int group,
+                                                 int k_blocks, int bits) {
+  if (!zero_points) return bits == 2 ? 2.0f : 8.0f;
+  if (bits == 2) {
+    const uint8_t packed =
+        zero_points[static_cast<size_t>(n) * ((k_blocks + 3) >> 2) +
+                    (group >> 2)];
+    return static_cast<float>((packed >> ((group & 3) * 2)) & 3u);
+  }
+  return static_cast<float>(
+      zero_points[static_cast<size_t>(n) * k_blocks + group]);
 }
 
 __device__ __forceinline__ void qmoe_gemv_task(
@@ -397,10 +416,8 @@ __device__ __forceinline__ void qmoe_gemv_task(
         }
         const int n = wave_n_begin + tn;
         const int safe_n = n < N ? n : 0;
-        const float zp = zero_points
-            ? static_cast<float>(zero_points[
-                  static_cast<size_t>(safe_n) * k_blocks + group])
-            : bits == 2 ? 2.0f : 8.0f;
+        const float zp =
+            qmoe_zero_point(zero_points, safe_n, group, k_blocks, bits);
         partial[tn] += (dot - a_sum * zp) * scale_values[tn];
       }
     }
@@ -446,10 +463,8 @@ __device__ __forceinline__ void qmoe_gemv_task(
         }
         const float scale = static_cast<float>(
             scales[static_cast<size_t>(safe_n) * k_blocks + group]);
-        const float zp = zero_points
-            ? static_cast<float>(zero_points[
-                  static_cast<size_t>(safe_n) * k_blocks + group])
-            : bits == 2 ? 2.0f : 8.0f;
+        const float zp =
+            qmoe_zero_point(zero_points, safe_n, group, k_blocks, bits);
         partial[tn] += (dot - a_sum * zp) * scale;
       }
     }
@@ -470,10 +485,8 @@ __device__ __forceinline__ void qmoe_gemv_task(
             (packed >> shift) & static_cast<uint8_t>((1u << bits) - 1u));
         const float scale = static_cast<float>(
             scales[static_cast<size_t>(safe_n) * k_blocks + group]);
-        const float zp = zero_points
-            ? static_cast<float>(zero_points[
-                  static_cast<size_t>(safe_n) * k_blocks + group])
-            : bits == 2 ? 2.0f : 8.0f;
+        const float zp =
+            qmoe_zero_point(zero_points, safe_n, group, k_blocks, bits);
         partial[tn] = __fmaf_rn(a, (q - zp) * scale, partial[tn]);
       }
     }
@@ -587,8 +600,15 @@ void qmoe_ragged_matmul_nbits_adaptive_kernel(
       const uint8_t* expert_weights =
           weights + expert_cols * weight_row_bytes;
       const _Float16* expert_scales = scales + expert_cols * k_blocks;
-      const uint8_t* expert_zeros =
-          zero_points ? zero_points + expert_cols * k_blocks : nullptr;
+      // 2-bit zero points stay in the ONNX packing, four per byte.
+      const uint8_t* expert_zeros;
+      if constexpr (BITS == 2)
+        expert_zeros = zero_points
+                           ? zero_points + expert_cols * ((k_blocks + 3) / 4)
+                           : nullptr;
+      else
+        expert_zeros =
+            zero_points ? zero_points + expert_cols * k_blocks : nullptr;
       const _Float16* expert_bias = bias ? bias + expert_cols : nullptr;
 
       if (task_kind == kTaskGemv) {
