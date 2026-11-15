@@ -6,12 +6,26 @@
 // CPU serialization fixture; timestamps, tensors and identities are synthetic.
 #include "../../lib/Runtime/chrome_trace.h"
 #include <limits>
+#include <new>
 #include <type_traits>
 
 int main(int argc, char **argv) {
   if (argc < 2 || argc > 3)
     return 2;
   using Json = CallCaptureJson;
+  if (argc == 3 && std::string(argv[2]) == "reuse-address") {
+    alignas(ChromeTrace) unsigned char storage[sizeof(ChromeTrace)];
+    for (int index = 0; index < 2; ++index) {
+      auto *trace = new (storage) ChromeTrace;
+      const auto identity = "synthetic-session-" + std::to_string(index);
+      trace->setSessionCapture(identity,
+                               Json::object({{"session_id", identity}}));
+      trace->addOp(identity, "opaque", 101 + index, 0.125, 100 + index, 1, 32);
+      trace->write(argv[1], 256);
+      trace->~ChromeTrace();
+    }
+    return 0;
+  }
   static_assert(!std::is_constructible<Json, const void *>::value,
                 "capture JSON must not export tensor addresses");
   Json input = Json::object({{"slot", 0},

@@ -90,11 +90,11 @@ void op_profile_bind_loaded_session(OpProfileState *ps, const char *sha256,
   ps->captureSessionId = sessionId;
   ps->captureGraphId = graphId;
   ps->trace.setSessionCapture(
-      Json::object({{"schema", "hip-ep-loaded-session-1"},
-                    {"session_id", sessionId},
-                    {"graph_id", graphId},
-                    {"artifact_sha256", sha256},
-                    {"artifact_kind", artifactKind}}));
+      sessionId, Json::object({{"schema", "hip-ep-loaded-session-1"},
+                               {"session_id", sessionId},
+                               {"graph_id", graphId},
+                               {"artifact_sha256", sha256},
+                               {"artifact_kind", artifactKind}}));
 }
 
 void op_profile_destroy(OpProfileState *ps) {

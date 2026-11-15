@@ -161,13 +161,14 @@ struct OpCallCapture {
 // for how events are timed), so concurrent sessions merge without re-basing.
 class ChromeTrace {
 public:
-  // Builds a globally-unique session token (pid + this) used for the file name
-  // and process label, so concurrent sessions never clobber each other -- no
-  // shared counter, which matters because the runtime is statically linked into
-  // each per-model NATIVE model.dll.
+  // Builds a token for concurrent live instances. Captured sessions also use
+  // the loader's process-wide identity: addresses can recur after destruction,
+  // and counters local to each NATIVE model.dll cannot distinguish reloads.
   ChromeTrace();
 
-  void setSessionCapture(const CallCaptureJson &capture) {
+  void setSessionCapture(const std::string &sessionId,
+                         const CallCaptureJson &capture) {
+    tag_ = "p" + std::to_string(currentProcessId_) + "_" + sessionId;
     sessionCapture_ = capture;
   }
 
@@ -213,6 +214,7 @@ private:
   };
 
   std::string tag_;
+  long currentProcessId_ = 0;
   std::optional<CallCaptureJson> sessionCapture_;
   std::vector<Op> ops_;
   std::vector<IoSpan> io_;

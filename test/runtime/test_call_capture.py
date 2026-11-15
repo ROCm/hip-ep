@@ -105,6 +105,26 @@ class CallCaptureTransportTests(unittest.TestCase):
             "example_provenance_conflict", value["capture_identity_conflicts"]
         )
 
+    def test_reloaded_capture_survives_reuse_of_the_same_address(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory) / "trace.json"
+            subprocess.run(
+                [str(self.executable), str(base), "reuse-address"], check=True
+            )
+            traces = list(base.parent.glob("trace.*.json"))
+            self.assertEqual(len(traces), 2)
+            documents = [json.loads(path.read_text()) for path in traces]
+            self.assertEqual(
+                {value["session_capture"]["session_id"] for value in documents},
+                {"synthetic-session-0", "synthetic-session-1"},
+            )
+            for value in documents:
+                gpu = [
+                    event for event in value["traceEvents"] if event.get("cat") == "gpu"
+                ]
+                self.assertEqual(len(gpu), 1)
+                self.assertEqual(gpu[0]["name"], value["session_capture"]["session_id"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -93,8 +93,9 @@ std::string insert_before_ext(const std::string &path,
 } // namespace
 
 ChromeTrace::ChromeTrace() {
+  currentProcessId_ = current_pid();
   char buf[64];
-  snprintf(buf, sizeof(buf), "p%lu_%llx", (unsigned long)current_pid(),
+  snprintf(buf, sizeof(buf), "p%lu_%llx", (unsigned long)currentProcessId_,
            (unsigned long long)(uintptr_t)this);
   tag_ = buf;
 }
