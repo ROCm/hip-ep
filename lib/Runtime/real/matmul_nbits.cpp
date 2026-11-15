@@ -570,13 +570,13 @@ cleanup:
 
 } // namespace
 
-int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
-                      const void *B, const void *scales,
-                      const void *zero_points, const void *g_idx,
-                      const void *bias, void *output, int64_t M, int64_t N,
-                      int64_t K, int64_t batch_count, int64_t bits,
-                      int64_t block_size, int64_t elem_size,
-                      int64_t zp_elem_size, int64_t scale_elem_size) {
+static int wrap_matmul_nbits_impl(
+    RuntimeState *state, int op_state_slot, const void *A, const void *B,
+    const void *scales, const void *zero_points, const void *g_idx,
+    const void *bias, void *output, int64_t M, int64_t N, int64_t K,
+    int64_t batch_count, int64_t bits, int64_t block_size, int64_t elem_size,
+    int64_t zp_elem_size, int64_t scale_elem_size, int64_t a_data_type,
+    int64_t output_data_type, int64_t bias_data_type, const char *entry) {
   OP_PROFILE(
       "matmul_nbits",
       [&] {
@@ -704,6 +704,8 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
   }
 
   int result = 0;
+  const char *route = "general";
+  const char *kernel_entry = "hip_matmul_nbits";
 
   // Opt-in W4A8 dp4a fast path for narrow GEMV. Eligibility:
   //   - HIPDNN_EP_MATMUL_DP4A=1
@@ -748,6 +750,8 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
                                   M, N, K, block_size, a_qb, a_scale);
         if (rc == 0) {
           result = 0;
+          route = "dp4a";
+          kernel_entry = "hip_matmul_nbits_dp4a";
           goto cleanup;
         }
         // Non-zero rc (e.g. unsupported geometry): fall through to fp path.
@@ -784,6 +788,8 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
         if (b_fp16) {
           result = matmul_nbits_prefill_hipblaslt(mst, state, A, b_fp16, bias,
                                                   output, M, N, K);
+          route = "wave64_dequant_hipblaslt";
+          kernel_entry = "matmul_nbits_prefill_hipblaslt";
           goto cleanup;
         }
       }
@@ -832,8 +838,11 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
           static_cast<int>(K), static_cast<int>(block_size), A,
           /*lda=*/static_cast<int>(K), B, scales, zeros_fp16, output,
           /*ldc=*/static_cast<int>(N));
-      if (rc == 0)
+      if (rc == 0) {
+        route = "row_padded_wmma";
+        kernel_entry = "hip_matmul_nbits_u4_wmma_padrow";
         goto cleanup;
+      }
       RUNTIME_DEBUG_LOG("[REAL] matmul_nbits padrow wmma rc=%d, falling back\n",
                         rc);
     }
@@ -844,5 +853,139 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
                              zp_elem_size, pre_zp_u8, pre_zp_fp16));
 
 cleanup:
+  if (result == 0 && M > 0 && N > 0 && K > 0 && batch_count > 0 &&
+      block_size > 0 && _opProf &&
+      op_profile_call_capture_enabled(_opProf->ps)) {
+    using Json = CallCaptureJson;
+    auto dtypeName = [](int64_t type) -> const char * {
+      switch (type) {
+      case HIPDNN_EP_DATATYPE_FLOAT:
+        return "float32";
+      case HIPDNN_EP_DATATYPE_HALF:
+        return "float16";
+      case HIPDNN_EP_DATATYPE_BFLOAT16:
+        return "bfloat16";
+      default:
+        return nullptr;
+      }
+    };
+    const int64_t groups = (K + block_size - 1) / block_size;
+    const int64_t weight_bytes = (block_size * bits + 7) / 8;
+    const int64_t zp_bytes = (groups * bits + 7) / 8;
+    auto tensor = [](int slot, const char *role, bool present,
+                     const char *dtype, const Json &shape, const char *order) {
+      return Json::object(
+          {{"slot", slot},
+           {"role", role},
+           {"present", present},
+           {"dtype", present ? Json(dtype) : Json(nullptr)},
+           {"shape", present ? shape : Json(nullptr)},
+           {"layout", Json::object({{"contiguous", true},
+                                    {"view", "production_abi_view"},
+                                    {"order", order}})}});
+    };
+    const char *zp_dtype = zp_elem_size == 1 ? "uint8" : "float16";
+    const bool fp32_cast = elem_size == 4;
+    _opProf->capture = op_profile_capture_call(
+        _opProf->ps,
+        Json::object(
+            {{"op_type", "MatMulNBits"},
+             {"execution",
+              Json::object(
+                  {{"backend", "HIP-EP"},
+                   {"entry", entry},
+                   {"variant", "block_quantized_wrapper"},
+                   {"config",
+                    Json::object(
+                        {{"route", route},
+                         {"kernel_entry", kernel_entry},
+                         {"internal_config", nullptr},
+                         {"internal_config_missing",
+                          "not_exposed_at_wrapper_abi"},
+                         {"compute_buffer_dtype", "float16"},
+                         {"scale_buffer_dtype", "float16"},
+                         {"scale_preparation",
+                          scale_elem_size == 4 ? "pointer_cached_fp32_to_fp16"
+                                               : "original_fp16"},
+                         {"pre_unpacked_zp_u8", pre_zp_u8 != nullptr},
+                         {"pre_converted_zp_fp16", pre_zp_fp16 != nullptr},
+                         {"zp_preparation", pre_zp_u8
+                                                ? "pointer_cached_packed_unpack"
+                                                : "original_input"},
+                         {"input_cast", fp32_cast ? "fp32_to_fp16" : "none"},
+                         {"output_cast", fp32_cast ? "fp16_to_fp32" : "none"},
+                         {"bias_buffer_dtype",
+                          bias ? Json("float16") : Json(nullptr)}})}})},
+             {"inputs",
+              Json::array(
+                  {tensor(0, "A", true, dtypeName(a_data_type),
+                          Json::dimensions({batch_count, M, K}),
+                          "collapsed_batch_row_major"),
+                   tensor(1, "B", true, "uint8",
+                          Json::dimensions({N, groups, weight_bytes}),
+                          "packed_quantized_rows"),
+                   tensor(2, "scales", true,
+                          scale_elem_size == 4 ? "float32" : "float16",
+                          Json::dimensions({N, groups}), "row_major"),
+                   tensor(3, "zero_points", zero_points != nullptr, zp_dtype,
+                          Json::dimensions(
+                              {N, zp_elem_size == 1 ? zp_bytes : groups}),
+                          zp_elem_size == 1 ? "packed_quantized_rows"
+                                            : "row_major"),
+                   tensor(4, "g_idx", false, nullptr, nullptr, "unavailable"),
+                   tensor(5, "bias", bias != nullptr, dtypeName(bias_data_type),
+                          Json::dimensions({N}), "flat")})},
+             {"outputs", Json::array({tensor(
+                             0, "output", true, dtypeName(output_data_type),
+                             Json::dimensions({batch_count, M, N}),
+                             "collapsed_batch_row_major")})},
+             {"attributes",
+              Json::object({{"bits", bits}, {"block_size", block_size}})},
+             {"parameters",
+              Json::object({{"M", M},
+                            {"N", N},
+                            {"K", K},
+                            {"batch_count", batch_count},
+                            {"bits", bits},
+                            {"block_size", block_size},
+                            {"elem_size", elem_size},
+                            {"zp_elem_size", zp_elem_size},
+                            {"scale_elem_size", scale_elem_size},
+                            {"a_data_type", a_data_type},
+                            {"output_data_type", output_data_type},
+                            {"bias_data_type", bias_data_type},
+                            {"original_logical_rank", nullptr}})}}));
+  }
   return result;
+}
+
+int wrap_matmul_nbits_typed(RuntimeState *state, int op_state_slot,
+                            const void *A, const void *B, const void *scales,
+                            const void *zero_points, const void *g_idx,
+                            const void *bias, void *output, int64_t M,
+                            int64_t N, int64_t K, int64_t batch_count,
+                            int64_t bits, int64_t block_size, int64_t elem_size,
+                            int64_t zp_elem_size, int64_t scale_elem_size,
+                            int64_t a_data_type, int64_t output_data_type,
+                            int64_t bias_data_type) {
+  return wrap_matmul_nbits_impl(state, op_state_slot, A, B, scales, zero_points,
+                                g_idx, bias, output, M, N, K, batch_count, bits,
+                                block_size, elem_size, zp_elem_size,
+                                scale_elem_size, a_data_type, output_data_type,
+                                bias_data_type, "wrap_matmul_nbits_typed");
+}
+
+int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
+                      const void *B, const void *scales,
+                      const void *zero_points, const void *g_idx,
+                      const void *bias, void *output, int64_t M, int64_t N,
+                      int64_t K, int64_t batch_count, int64_t bits,
+                      int64_t block_size, int64_t elem_size,
+                      int64_t zp_elem_size, int64_t scale_elem_size) {
+  return wrap_matmul_nbits_impl(
+      state, op_state_slot, A, B, scales, zero_points, g_idx, bias, output, M,
+      N, K, batch_count, bits, block_size, elem_size, zp_elem_size,
+      scale_elem_size, HIPDNN_EP_DATATYPE_UNSUPPORTED,
+      HIPDNN_EP_DATATYPE_UNSUPPORTED, HIPDNN_EP_DATATYPE_UNSUPPORTED,
+      "wrap_matmul_nbits");
 }

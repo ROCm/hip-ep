@@ -1901,6 +1901,24 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
   return 0;
 }
 
+int wrap_matmul_nbits_typed(RuntimeState *state, int op_state_slot,
+                            const void *A, const void *B, const void *scales,
+                            const void *zero_points, const void *g_idx,
+                            const void *bias, void *output, int64_t M,
+                            int64_t N, int64_t K, int64_t batch_count,
+                            int64_t bits, int64_t block_size, int64_t elem_size,
+                            int64_t zp_elem_size, int64_t scale_elem_size,
+                            int64_t a_data_type, int64_t output_data_type,
+                            int64_t bias_data_type) {
+  (void)a_data_type;
+  (void)output_data_type;
+  (void)bias_data_type;
+  return wrap_matmul_nbits(state, op_state_slot, A, B, scales, zero_points,
+                           g_idx, bias, output, M, N, K, batch_count, bits,
+                           block_size, elem_size, zp_elem_size,
+                           scale_elem_size);
+}
+
 int wrap_dequant_bnb4(RuntimeState *state, void *packed, void *absmax,
                       void *output, int64_t n, int64_t k, int64_t block_size,
                       int64_t quant_type) {

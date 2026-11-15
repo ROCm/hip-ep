@@ -65,8 +65,18 @@ struct MatMulNBitsOpLowering : public ConvertOpToLLVMPattern<MatMulNBitsOp> {
     Value elemSizeVal = createI64Const(elemSize);
     Value zpElemSizeVal = createI64Const(op.getZpElemSize());
     Value scaleElemSizeVal = createI64Const(op.getScaleElemSize());
+    auto outputType = cast<MemRefType>(op.getOutput().getType());
+    int64_t biasDataType = HIPDNN_EP_DATATYPE_UNSUPPORTED;
+    if (op.getBias())
+      biasDataType = getHipdnnDataType(
+          cast<MemRefType>(op.getBias().getType()).getElementType());
+    Value aDataTypeVal =
+        createI64Const(getHipdnnDataType(AType.getElementType()));
+    Value outputDataTypeVal =
+        createI64Const(getHipdnnDataType(outputType.getElementType()));
+    Value biasDataTypeVal = createI64Const(biasDataType);
 
-    SmallVector<Type, 18> paramTypes = {
+    SmallVector<Type, 21> paramTypes = {
         ptrType, // state
         i32Type, // op_state_slot
         ptrType, // A
@@ -84,16 +94,19 @@ struct MatMulNBitsOpLowering : public ConvertOpToLLVMPattern<MatMulNBitsOp> {
         i64Type, // block_size
         i64Type, // elem_size
         i64Type, // zp_elem_size
-        i64Type  // scale_elem_size
+        i64Type, // scale_elem_size
+        i64Type, // actual A data type
+        i64Type, // actual output data type
+        i64Type  // actual bias data type (unsupported when absent)
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kWrapMatMulNBits, paramTypes, i32Type);
+        rewriter, module, kWrapMatMulNBitsTyped, paramTypes, i32Type);
     if (failed(funcOp)) {
       return failure();
     }
 
-    SmallVector<Value, 18> args = {statePtr,
+    SmallVector<Value, 21> args = {statePtr,
                                    getOpStateSlotValue(op, rewriter, loc),
                                    APtr,
                                    BPtr,
@@ -110,7 +123,10 @@ struct MatMulNBitsOpLowering : public ConvertOpToLLVMPattern<MatMulNBitsOp> {
                                    blockSize,
                                    elemSizeVal,
                                    zpElemSizeVal,
-                                   scaleElemSizeVal};
+                                   scaleElemSizeVal,
+                                   aDataTypeVal,
+                                   outputDataTypeVal,
+                                   biasDataTypeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);

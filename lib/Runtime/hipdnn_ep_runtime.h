@@ -1698,6 +1698,18 @@ int wrap_matmul_nbits(
     int64_t zp_elem_size,    // zero_points element size: 1=uint8 packed, 2=fp16
     int64_t scale_elem_size); // scales element size in bytes: 2=fp16, 4=fp32
 
+// Diagnostic type-bearing entry. The three type identifiers come from actual
+// MLIR operands/results; they do not change the legacy element-size dispatch.
+int wrap_matmul_nbits_typed(RuntimeState *state, int op_state_slot,
+                            const void *A, const void *B, const void *scales,
+                            const void *zero_points, const void *g_idx,
+                            const void *bias, void *output, int64_t M,
+                            int64_t N, int64_t K, int64_t batch_count,
+                            int64_t bits, int64_t block_size, int64_t elem_size,
+                            int64_t zp_elem_size, int64_t scale_elem_size,
+                            int64_t a_data_type, int64_t output_data_type,
+                            int64_t bias_data_type);
+
 // Bitsandbytes FP4/NF4 weight dequant. Writes row-major [N, K] f32.
 // quant_type 0 is FP4 and 1 is NF4. Even indices read the high nibble.
 int wrap_dequant_bnb4(RuntimeState *state, void *packed, void *absmax,
