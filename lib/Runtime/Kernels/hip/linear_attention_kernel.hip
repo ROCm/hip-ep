@@ -1162,6 +1162,7 @@ extern "C" int hip_linear_attention_decode(
 // beta=1, T=0, W=0 special case of the affine chunk formulation below:
 // Uloc=V and no triangular solve is required.
 static constexpr int LA_CHUNK         = 16;   // tokens per chunk
+static constexpr int LA_PF3_TPT       = 4;    // gated pass-3 tokens per thread
 
 //===----------------------------------------------------------------------===//
 // Chunk-parallel gated_delta prefill (breaks the seq_len/LA_CHUNK-deep serial
@@ -1710,6 +1711,13 @@ __global__ void __launch_bounds__(256) la_pf_pass3_wmma(
 // Gated (not gated_delta) fp32 scan/output. The WMMA path downcasts S/Q/K
 // to fp16 each chunk; gated keeps the affine recurrence in fp32 and skips
 // the W GEMMs.
+//
+// Scan: one thread per key row i, holding that row of the state for the
+// block's dvs value columns in registers. Its key column is read straight
+// from global memory, so only U goes through LDS and a block is a few waves,
+// which lets every (head, split) block be resident at once.
+static constexpr int LA_SCAN_F32_MAX_DVS = 32;
+
 template <typename T>
 __global__ void la_pf_scan_f32(
     const T* __restrict__ key,
@@ -1719,77 +1727,104 @@ __global__ void la_pf_scan_f32(
     float* __restrict__ S0_g,
     float* __restrict__ carry_g,
     T* __restrict__ state,
-    int seq_len, int Hkv, int n_k, int dk, int dv,
+    int seq_len, int Hkv, int n_k, int dk, int dv, int nsplit,
     int nchunks_win, int chunk_begin, int is_first, int is_last)
 {
-    const int split = blockIdx.x % LA_SCAN_NSPLIT;
-    const int bg = blockIdx.x / LA_SCAN_NSPLIT;
+    const int split = blockIdx.x % nsplit;
+    const int bg = blockIdx.x / nsplit;
     const int b  = bg / Hkv;
     const int g  = bg % Hkv;
-    const int dvs = dv / LA_SCAN_NSPLIT;
+    const int dvs = dv / nsplit;
     const int j0  = split * dvs;
-    const int tid = threadIdx.x;
-    const int nthreads = blockDim.x;
+    const int i   = threadIdx.x;
+    const bool active = i < dk;
+    // S0 rows are 16-byte aligned (the scratch arena is 256-byte aligned).
+    const bool vec4 = (dv % 4 == 0) && (dvs % 4 == 0);
     const int h_k = g * n_k / Hkv;
     const int64_t k_bs = (int64_t)seq_len * n_k * dk;
     const int64_t state_bs = (int64_t)Hkv * dk * dv;
     T* Sout = state + b * state_bs + (int64_t)g * dk * dv;
     float* carry = carry_g + (int64_t)bg * dk * dv;
 
-    extern __shared__ float smem[];
-    float* Ssm  = smem;                               // [dvs, dk]
-    float* Ubuf = Ssm + dvs * dk;                     // [C, dvs]
-    float* Kbuf = Ubuf + LA_CHUNK * dvs;              // [C, dk]
+    extern __shared__ float Ubuf[];                   // [C, dvs]
 
-    for (int idx = tid; idx < dk * dvs; idx += nthreads) {
-        const int i = idx / dvs, jj = idx % dvs;
-        const int64_t gi = (int64_t)i * dv + j0 + jj;
-        Ssm[jj * dk + i] = is_first ? to_float(Sout[gi]) : carry[gi];
+    float S[LA_SCAN_F32_MAX_DVS];
+#pragma unroll
+    for (int jj = 0; jj < LA_SCAN_F32_MAX_DVS; jj++) {
+        S[jj] = 0.f;
+        if (active && jj < dvs) {
+            const int64_t gi = (int64_t)i * dv + j0 + jj;
+            S[jj] = is_first ? to_float(Sout[gi]) : carry[gi];
+        }
     }
-    __syncthreads();
 
     for (int cw = 0; cw < nchunks_win; cw++) {
         const int64_t base = ((int64_t)(b * Hkv + g) * nchunks_win + cw);
         const int c0   = (chunk_begin + cw) * LA_CHUNK;
         const int Ceff = min(LA_CHUNK, seq_len - c0);
-        for (int idx = tid; idx < dvs * dk; idx += nthreads) {
-            const int jj = idx / dk, i = idx % dk;
-            S0_g[base * (dk * dv) + (int64_t)(j0 + jj) * dk + i] =
-                Ssm[jj * dk + i];
+        if (active) {
+            float* s0 = S0_g + base * (dk * dv) + (int64_t)i * dv + j0;
+            if (vec4) {
+#pragma unroll
+                for (int jj = 0; jj < LA_SCAN_F32_MAX_DVS; jj += 4) {
+                    if (jj < dvs) {
+                        *reinterpret_cast<float4*>(s0 + jj) =
+                            make_float4(S[jj], S[jj + 1], S[jj + 2], S[jj + 3]);
+                    }
+                }
+            } else {
+#pragma unroll
+                for (int jj = 0; jj < LA_SCAN_F32_MAX_DVS; jj++) {
+                    if (jj < dvs) {
+                        s0[jj] = S[jj];
+                    }
+                }
+            }
         }
-        for (int idx = tid; idx < LA_CHUNK * dvs; idx += nthreads) {
+        // The previous chunk's update has finished reading Ubuf.
+        __syncthreads();
+        for (int idx = threadIdx.x; idx < LA_CHUNK * dvs; idx += blockDim.x) {
             const int t = idx / dvs, jj = idx % dvs;
-            Ubuf[t * dvs + jj] =
-                (t < Ceff) ? Uloc_g[base * (LA_CHUNK * dv) +
-                                    (int64_t)t * dv + j0 + jj]
-                           : 0.f;
+            Ubuf[idx] = (t < Ceff) ? Uloc_g[base * (LA_CHUNK * dv) +
+                                            (int64_t)t * dv + j0 + jj]
+                                   : 0.f;
         }
-        for (int idx = tid; idx < LA_CHUNK * dk; idx += nthreads) {
-            const int t = idx / dk, i = idx % dk;
-            const float rl = rlast_g[base * LA_CHUNK + t];
-            Kbuf[t * dk + i] = (t < Ceff)
-                ? rl * to_float(key[b * k_bs + (int64_t)(c0 + t) * n_k * dk +
-                                    (int64_t)h_k * dk + i])
+        // Padded tokens (t >= Ceff) contribute zero through both kc and U.
+        float kc[LA_CHUNK];
+#pragma unroll
+        for (int t = 0; t < LA_CHUNK; t++) {
+            kc[t] = (active && t < Ceff)
+                ? rlast_g[base * LA_CHUNK + t] *
+                      to_float(key[b * k_bs + (int64_t)(c0 + t) * n_k * dk +
+                                   (int64_t)h_k * dk + i])
                 : 0.f;
         }
         const float a_last = alast_g[base];
         __syncthreads();
-        for (int idx = tid; idx < dvs * dk; idx += nthreads) {
-            const int jj = idx / dk, i = idx % dk;
-            float acc = a_last * Ssm[jj * dk + i];
-            for (int t = 0; t < Ceff; t++)
-                acc += Kbuf[t * dk + i] * Ubuf[t * dvs + jj];
-            Ssm[jj * dk + i] = acc;
+#pragma unroll
+        for (int jj = 0; jj < LA_SCAN_F32_MAX_DVS; jj++) {
+            if (jj < dvs) {
+                float acc = a_last * S[jj];
+#pragma unroll
+                for (int t = 0; t < LA_CHUNK; t++) {
+                    acc += kc[t] * Ubuf[t * dvs + jj];
+                }
+                S[jj] = acc;
+            }
         }
-        __syncthreads();
     }
-    for (int idx = tid; idx < dk * dvs; idx += nthreads) {
-        const int i = idx / dvs, jj = idx % dvs;
-        const int64_t gi = (int64_t)i * dv + j0 + jj;
-        if (is_last)
-            Sout[gi] = from_float<T>(Ssm[jj * dk + i]);
-        else
-            carry[gi] = Ssm[jj * dk + i];
+    if (active) {
+#pragma unroll
+        for (int jj = 0; jj < LA_SCAN_F32_MAX_DVS; jj++) {
+            if (jj < dvs) {
+                const int64_t gi = (int64_t)i * dv + j0 + jj;
+                if (is_last) {
+                    Sout[gi] = from_float<T>(S[jj]);
+                } else {
+                    carry[gi] = S[jj];
+                }
+            }
+        }
     }
 }
 
@@ -1827,15 +1862,20 @@ __global__ void la_pf_pass3_f32(
     const float* S0 = S0_g + base * (dk * dv);
     const float* Ul = Uloc_g + base * (LA_CHUNK * dv);
 
+    // Ksm rows are padded by one float so the Pm loop, where lanes walk the
+    // key row s, does not hit one LDS bank.
+    const int kst = dk + 1;
     extern __shared__ float smem[];
     float* Qsm  = smem;                               // C*dk
-    float* Ksm  = Qsm + LA_CHUNK * dk;                // C*dk
-    float* Pm   = Ksm + LA_CHUNK * dk;                // C*C
+    float* Ksm  = Qsm + LA_CHUNK * dk;                // C*(dk+1)
+    float* Pm   = Ksm + LA_CHUNK * kst;               // C*C
     float* Asm  = Pm + LA_CHUNK * LA_CHUNK;
     float* clog = Asm + LA_CHUNK;
 
     for (int idx = tid; idx < LA_CHUNK * dk; idx += nthreads) {
         Qsm[idx] = 0.f;
+    }
+    for (int idx = tid; idx < LA_CHUNK * kst; idx += nthreads) {
         Ksm[idx] = 0.f;
     }
     __syncthreads();
@@ -1844,7 +1884,7 @@ __global__ void la_pf_pass3_f32(
         Qsm[t * dk + i] = to_float(
             query[b * q_bs + (int64_t)(c0 + t) * Hq * dk +
                   (int64_t)h_q * dk + i]);
-        Ksm[t * dk + i] = to_float(
+        Ksm[t * kst + i] = to_float(
             key[b * k_bs + (int64_t)(c0 + t) * n_k * dk +
                 (int64_t)h_k * dk + i]);
     }
@@ -1865,22 +1905,62 @@ __global__ void la_pf_pass3_f32(
             continue;
         }
         const float* qr = Qsm + t * dk;
-        const float* kr = Ksm + s * dk;
+        const float* kr = Ksm + s * kst;
         float qk = 0.f;
         for (int i = 0; i < dk; i++)
             qk += qr[i] * kr[i];
         Pm[t * Ceff + s] = expf(clog[t] - clog[s]) * qk;
     }
     __syncthreads();
+    // la_pf_scan_f32 writes each chunk's S0 as [dk][dv], so lanes that walk j
+    // read one contiguous S0 row per i. Each thread covers LA_PF3_TPT
+    // consecutive tokens of one column so every S0 and U value it loads is
+    // reused that many times.
+    if ((LA_CHUNK / LA_PF3_TPT) * dv <= nthreads) {
+        const int j  = tid % dv;
+        const int t0 = (tid / dv) * LA_PF3_TPT;
+        if (t0 < Ceff) {
+            const float* sc = S0 + j;
+            float qs[LA_PF3_TPT] = {};
+            for (int i = 0; i < dk; i++) {
+                const float sv = sc[(int64_t)i * dv];
+#pragma unroll
+                for (int m = 0; m < LA_PF3_TPT; m++) {
+                    qs[m] += Qsm[(t0 + m) * dk + i] * sv;
+                }
+            }
+            float u[LA_CHUNK];
+#pragma unroll
+            for (int s = 0; s < LA_CHUNK; s++) {
+                u[s] = (s < Ceff) ? Ul[s * dv + j] : 0.f;
+            }
+#pragma unroll
+            for (int m = 0; m < LA_PF3_TPT; m++) {
+                const int t = t0 + m;
+                if (t >= Ceff) {
+                    break;
+                }
+                float intra = 0.f;
+#pragma unroll
+                for (int s = 0; s < LA_CHUNK; s++) {
+                    if (s <= t) {
+                        intra += Pm[t * Ceff + s] * u[s];
+                    }
+                }
+                output[b * out_bs + (int64_t)(c0 + t) * Hout * dv +
+                       (int64_t)h_out * dv + j] =
+                    from_float<T>(scale * (Asm[t] * qs[m] + intra));
+            }
+        }
+        return;
+    }
     for (int idx = tid; idx < Ceff * dv; idx += nthreads) {
         const int t = idx / dv, j = idx % dv;
         const float* qr = Qsm + t * dk;
-        // la_pf_scan_f32 writes each chunk's S0 as [dv][dk], so row j is
-        // contiguous over i.
-        const float* sr = S0 + (int64_t)j * dk;
+        const float* sc = S0 + j;
         float qs = 0.f;
         for (int i = 0; i < dk; i++)
-            qs += qr[i] * sr[i];
+            qs += qr[i] * sc[(int64_t)i * dv];
         float intra = 0.f;
         for (int s = 0; s <= t; s++)
             intra += Pm[t * Ceff + s] * Ul[s * dv + j];
@@ -2012,18 +2092,31 @@ static int la_launch_parallel(
     // all fp16 now that the scan runs on the matrix cores, which leaves it
     // smaller than the 18,432 B the scalar version needed. The dv-split
     // shrinks everything except the dv-independent A buffer.
-    if (dv % LA_SCAN_NSPLIT != 0) return 1;
-    const int dvs = dv / LA_SCAN_NSPLIT;
     const bool gated_f32 = GATED_ONLY;
+    // The fp32 scan holds dvs <= LA_SCAN_F32_MAX_DVS state columns per thread
+    // and one thread per key row, so it splits dv into the fewest equal parts
+    // that fit.
+    int f32_nsplit = (dv + LA_SCAN_F32_MAX_DVS - 1) / LA_SCAN_F32_MAX_DVS;
+    while (dv % f32_nsplit != 0) {
+        f32_nsplit++;
+    }
+    if (gated_f32 && dk > 1024) {
+        return 1;
+    }
+    if (!gated_f32 && dv % LA_SCAN_NSPLIT != 0) {
+        return 1;
+    }
+    const int dvs = gated_f32 ? dv / f32_nsplit : dv / LA_SCAN_NSPLIT;
     if (!gated_f32 && (dvs % LA_WT || dk % LA_WT || LA_CHUNK % LA_WT)) return 1;
     const size_t s2 = gated_f32
-        ? (size_t)(dvs * dk + LA_CHUNK * dvs + LA_CHUNK * dk) * sizeof(float)
+        ? (size_t)(LA_CHUNK * dvs) * sizeof(float)
         : (size_t)(dvs * (dk + LA_SST_PAD) +
                    (LA_CHUNK * dk > dk * (LA_CHUNK + LA_KT_PAD)
                         ? LA_CHUNK * dk : dk * (LA_CHUNK + LA_KT_PAD)) +
                    dvs * LA_CHUNK) * sizeof(__half);
     const size_t s3 = gated_f32
-        ? (size_t)(2 * LA_CHUNK * dk + LA_CHUNK * LA_CHUNK + 2 * LA_CHUNK) *
+        ? (size_t)(2 * LA_CHUNK * dk + LA_CHUNK + LA_CHUNK * LA_CHUNK +
+                   2 * LA_CHUNK) *
               sizeof(float)
         : (size_t)(2 * LA_CHUNK * dv + LA_CHUNK * LA_CHUNK +
                    2 * LA_CHUNK) * sizeof(float) +
@@ -2054,9 +2147,11 @@ static int la_launch_parallel(
             seq_len, Hkv, Nk, dk, dv, beta_per_head, win, cbeg);
         if (gated_f32) {
             hipLaunchKernelGGL(la_pf_scan_f32<T>,
-                dim3((unsigned)(B * Hkv * LA_SCAN_NSPLIT)), dim3(scan_block),
+                dim3((unsigned)(B * Hkv * f32_nsplit)),
+                dim3((unsigned)((dk + 31) / 32 * 32)),
                 s2, s, k, Uloc_g, rlast_g, alast_g, S0_f, carry_f, state,
-                seq_len, Hkv, Nk, dk, dv, win, cbeg, is_first, is_last);
+                seq_len, Hkv, Nk, dk, dv, f32_nsplit, win, cbeg, is_first,
+                is_last);
             hipLaunchKernelGGL(la_pf_pass3_f32<T>, dim3((unsigned)ncb),
                 dim3(256), s3, s, q, k, dec, Uloc_g, S0_f, out, seq_len, Hq,
                 Hkv, Nk, dk, dv, scale, win, cbeg);

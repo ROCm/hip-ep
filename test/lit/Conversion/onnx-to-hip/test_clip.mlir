@@ -126,4 +126,19 @@ module {
   // CHECK: tensor.collapse_shape {{.*}} {{\[\[}}0], [1], [2], [3, 4]] : tensor<4x1x6x2500x1xf32> into tensor<4x1x6x2500xf32>
   // CHECK: hip.max
   // CHECK: tensor.expand_shape {{.*}} {{\[\[}}0], [1], [2], [3, 4]] output_shape [4, 1, 6, 2500, 1] : tensor<4x1x6x2500xf32> into tensor<4x1x6x2500x1xf32>
+
+  // Unranked result: the min/max chain takes the input's shape, and a cast
+  // restores `tensor<*xf32>` for the existing users.
+  func.func @clip_unranked_result(%x: tensor<2x3xf32>, %lo: tensor<f32>,
+                                  %hi: tensor<f32>) -> tensor<*xf32> {
+    %y = "onnx.Clip"(%x, %lo, %hi) : (tensor<2x3xf32>, tensor<f32>, tensor<f32>) -> tensor<*xf32>
+    return %y : tensor<*xf32>
+  }
+
+  // CHECK-LABEL: func.func @clip_unranked_result
+  // CHECK-NOT: onnx.Clip
+  // CHECK: hip.max
+  // CHECK: hip.min
+  // CHECK: %[[C:.*]] = tensor.cast %{{.*}} : tensor<2x3xf32> to tensor<*xf32>
+  // CHECK: return %[[C]] : tensor<*xf32>
 }

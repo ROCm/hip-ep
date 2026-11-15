@@ -67,6 +67,10 @@ if(NOT BUILD_MOCK_RUNTIME)
   endif()
 endif()
 
+# LibHipCompiler's rocMLIR calls are in this process. The closure adds the
+# Triton objects once and the rock rescan group.
+hip_link_rocmlir_closure(hip-test)
+
 target_include_directories(hip-test
   BEFORE PRIVATE
   ${CMAKE_SOURCE_DIR}/include   # For hip/Support/DiskFileSystem.h (must precede local/include)
