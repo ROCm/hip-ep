@@ -67,6 +67,7 @@ protected:
   void Test09_NodeArgOperations();
   void Test10_NodeAttributesOperations();
   void Test11_AttributeProtoOperations();
+  void TestTensorAttributeElementTypes();
   void Test12_TensorProtoOperations();
   void Test13_ExtendedApiOperations();
   void Test14_GraphTensorOperations();
@@ -782,27 +783,42 @@ void MorphizenOrtApiTest::Test11_AttributeProtoOperations() {
     wrapped_api_->tensor_proto_delete(tensor_proto_b);
     wrapped_api_->tensor_proto_delete(tensor_proto_a);
   }
+  TestTensorAttributeElementTypes();
+}
+
+void MorphizenOrtApiTest::TestTensorAttributeElementTypes() {
   {
-    // An ONNX element type that `onnxElementTypeToMlirElementType` does not yet
-    // map (here BFLOAT16, which falls back to F32) must fail loudly in
-    // create_tensor rather than silently produce a corrupted DenseElementsAttr:
-    // the dense byte-size guard catches the F32 default (4B/elem) vs the real
-    // bf16 raw_data width (2B/elem) and LOG(FATAL)s with a fix hint. This death
-    // test locks in that enforcement point.
+    // BF16 graph I/O and inline attributes share the element-type mapping.
+    // Attribute creation also checks that the mapped width matches raw bytes.
     std::vector<int64_t> bf16_shape = {2, 3};
-    std::vector<int16_t> bf16_data = {0x3c00, 0x4000, 0x4200,
-                                      0x4400, 0x4500, 0x4600};
+    std::vector<int16_t> bf16_data = {0x3f80, 0x4000, 0x4040,
+                                      0x4080, 0x40a0, 0x40c0};
     auto *bf16_proto =
         wrapped_api_->tensor_proto_new_bf16("value", bf16_shape, bf16_data);
     ASSERT_TRUE(bf16_proto != nullptr);
+    EXPECT_EQ(wrapped_api_->tensor_proto_data_type(*bf16_proto), 16);
+    auto *attr = wrapped_api_->attr_proto_new_tensor("value", *bf16_proto);
+    ASSERT_TRUE(attr != nullptr);
+    EXPECT_EQ(wrapped_api_->attr_proto_get_name(*attr), "value");
+    EXPECT_EQ(wrapped_api_->attr_proto_get_type(*attr),
+              ONNX_NAMESPACE::AttributeProto_AttributeType_TENSOR);
+    wrapped_api_->attr_proto_delete(attr);
+    wrapped_api_->tensor_proto_delete(bf16_proto);
+  }
+  {
+    // UINT64 is still unmapped. Its 8-byte raw elements must be rejected by
+    // the dense byte-size guard rather than represented as 4-byte F32.
+    std::vector<int64_t> shape = {2, 3};
+    std::vector<uint64_t> data = {1, 2, 3, 4, 5, 6};
+    auto *proto = wrapped_api_->tensor_proto_new_u64("value", shape, data);
+    ASSERT_TRUE(proto != nullptr);
     EXPECT_DEATH(
         {
-          auto *attr =
-              wrapped_api_->attr_proto_new_tensor("value", *bf16_proto);
+          auto *attr = wrapped_api_->attr_proto_new_tensor("value", *proto);
           (void)attr;
         },
         "create_tensor: ONNX element type");
-    wrapped_api_->tensor_proto_delete(bf16_proto);
+    wrapped_api_->tensor_proto_delete(proto);
   }
 }
 
@@ -2545,6 +2561,12 @@ void MorphizenOrtApiTest::Test07_create_simple_conv_relu_model() {
 // ============================================================================
 // Main Test Entry Point - Runs All Tests Sequentially
 // ============================================================================
+
+TEST_F(MorphizenOrtApiTest, TensorAttributeElementTypes) {
+  if (backend_ != morphizen::kMLIRBackend)
+    GTEST_SKIP() << "The unsupported-width guard belongs to the MLIR backend";
+  ASSERT_NO_FATAL_FAILURE(TestTensorAttributeElementTypes());
+}
 
 TEST_F(MorphizenOrtApiTest, TestAll) {
 #ifdef MORPHIZEN_ENABLE_MLIR_BACKEND
