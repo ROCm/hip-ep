@@ -118,6 +118,68 @@ int wrap_cast(RuntimeState *state, void *input, void *output,
       (long long)src_data_type, hipdnn_ep_datatype_name(dst_data_type),
       (long long)dst_data_type);
 
-  return hip_cast(stream, input, output, num_elements, src_hip_dtype,
-                  dst_hip_dtype);
+  int rc = hip_cast(stream, input, output, num_elements, src_hip_dtype,
+                    dst_hip_dtype);
+  if (rc == 0 && num_elements > 0 && _opProf &&
+      op_profile_call_capture_enabled(_opProf->ps)) {
+    using Json = CallCaptureJson;
+    auto dtypeName = [](int dtype) -> const char * {
+      switch (dtype) {
+      case HIP_DTYPE_FLOAT32:
+        return "float32";
+      case HIP_DTYPE_FLOAT16:
+        return "float16";
+      case HIP_DTYPE_BFLOAT16:
+        return "bfloat16";
+      case HIP_DTYPE_INT64:
+        return "int64";
+      case HIP_DTYPE_INT32:
+        return "int32";
+      case HIP_DTYPE_INT16:
+        return "int16";
+      case HIP_DTYPE_INT8:
+        return "int8";
+      case HIP_DTYPE_UINT8:
+        return "uint8";
+      default:
+        return nullptr;
+      }
+    };
+    auto tensor = [num_elements](const char *role, const char *dtype) {
+      return Json::object(
+          {{"slot", 0},
+           {"role", role},
+           {"present", true},
+           {"dtype", dtype},
+           {"shape", Json::dimensions({num_elements})},
+           {"layout", Json::object({{"contiguous", true},
+                                    {"view", "production_abi_view"},
+                                    {"order", "flat"}})}});
+    };
+    const char *src_dtype = dtypeName(src_hip_dtype);
+    const char *dst_dtype = dtypeName(dst_hip_dtype);
+    if (src_dtype && dst_dtype) {
+      _opProf->capture = op_profile_capture_call(
+          _opProf->ps,
+          Json::object(
+              {{"op_type", "Cast"},
+               {"execution",
+                Json::object(
+                    {{"backend", "HIP-EP"},
+                     {"entry", "wrap_cast"},
+                     {"variant", "flat_dtype_cast"},
+                     {"config",
+                      Json::object({{"input_hip_dtype", src_hip_dtype},
+                                    {"output_hip_dtype", dst_hip_dtype},
+                                    {"kernel_entry", "hip_cast"}})}})},
+               {"inputs", Json::array({tensor("input", src_dtype)})},
+               {"outputs", Json::array({tensor("output", dst_dtype)})},
+               {"attributes", Json::object({})},
+               {"parameters",
+                Json::object({{"num_elements", num_elements},
+                              {"src_data_type", src_data_type},
+                              {"dst_data_type", dst_data_type}})}}));
+    }
+  }
+  return rc;
 }
