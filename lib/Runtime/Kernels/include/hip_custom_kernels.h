@@ -2889,6 +2889,19 @@ HIP_KERNEL_API int hip_matmul_nbits_dp4a(
     int64_t M, int64_t N, int64_t K, int64_t block_size,
     void* a_qb_scratch, void* a_scale_scratch);
 
+/* W8A8 sibling of hip_matmul_nbits_dp4a for 8-bit weights and one row:
+ *   A : fp16 [K];  B : uint8 [N, K];  scales : fp16 [N, ceil(K/block_size)]
+ *   zp_u8 : uint8 [N, ceil(K/block_size)] or nullptr (default zp=128)
+ *   a_qb_scratch : >= K bytes, 16-byte aligned; a_scale_scratch : >= ceil(K/block_size) floats
+ * Returns hipErrorInvalidValue unless K%32 == 0, block_size is a power of two
+ * >= 32 and B is 16-byte aligned. */
+HIP_KERNEL_API int hip_matmul_nbits_dp4a_u8(
+    void* stream,
+    const void* A, const void* B, const void* scales, const void* zp_u8,
+    const void* bias, void* out,
+    int64_t N, int64_t K, int64_t block_size,
+    void* a_qb_scratch, void* a_scale_scratch);
+
 /* Stand-alone launchers for the zero_points unpack/convert kernels, used by
  * the asym matmul_nbits cache in lib/Runtime/real/matmul_nbits.cpp.
  *

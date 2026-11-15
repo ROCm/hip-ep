@@ -1299,7 +1299,9 @@ void matmul_nbits_gemv_kernel(
 // >= 32), so no chunk straddles a group. Rows are quantized independently --
 // each gets its own per-group scale -- because they are different tokens and a
 // shared scale would let one row's outliers cost every other row precision.
-template <int BLOCK_SIZE>
+// LINEAR writes the int8 row in k order, for the 8-bit-weight kernel, which
+// has no nibble pairs to line up with.
+template <int BLOCK_SIZE, bool LINEAR = false>
 __global__ void matmul_nbits_quant_act_i8_kernel(
     const __half* __restrict__ A_all,
     int8_t*       __restrict__ a_qb_all,
@@ -1353,11 +1355,15 @@ __global__ void matmul_nbits_quant_act_i8_kernel(
     for (int64_t k = g0 + tid; k < g1; k += BLOCK_SIZE) {
         int q = __float2int_rn(static_cast<float>(A[k]) * inv_scale);
         q = max(-127, min(127, q));
-        const int64_t c = k >> 3;
-        const int     p = static_cast<int>(k & 7);
-        const int64_t byte_off =
-            (p & 1) ? (c * 8 + 4 + (p >> 1)) : (c * 8 + (p >> 1));
-        a_qb[byte_off] = static_cast<int8_t>(q);
+        if constexpr (LINEAR) {
+            a_qb[k] = static_cast<int8_t>(q);
+        } else {
+            const int64_t c = k >> 3;
+            const int     p = static_cast<int>(k & 7);
+            const int64_t byte_off =
+                (p & 1) ? (c * 8 + 4 + (p >> 1)) : (c * 8 + (p >> 1));
+            a_qb[byte_off] = static_cast<int8_t>(q);
+        }
     }
 }
 
@@ -3109,6 +3115,163 @@ extern "C" int hip_matmul_nbits_dp4a(
                           M, N, K, block_size);
     }
     return hipGetLastError();
+}
+
+/* -----------------------------------------------------------------------
+ * W8A8 dp4a GEMV (bits=8, M=1)
+ *
+ * B is [N, K] bytes. The activation row is quantized once per call in k order
+ * (matmul_nbits_quant_act_i8_kernel<128, true>), so a 32-wide K step is eight
+ * sudot4 against two 16-byte weight loads per column, with no nibble split.
+ * ----------------------------------------------------------------------- */
+template <int BLOCK_SIZE, int TILE_N>
+__global__ void __launch_bounds__(BLOCK_SIZE)
+matmul_nbits_gemv_dp4a_u8_kernel(
+    const int8_t*  __restrict__ a_qb,
+    const float*   __restrict__ a_scale,
+    const uint8_t* __restrict__ B,
+    const __half*  __restrict__ scales,
+    const uint8_t* __restrict__ zp,
+    const __half*  __restrict__ bias,
+    __half*        __restrict__ output,
+    int64_t N, int64_t K, int64_t block_size)
+{
+    const int64_t n_base   = static_cast<int64_t>(blockIdx.x) * TILE_N;
+    const int     tid      = threadIdx.x;
+    const int64_t k_blocks = (K + block_size - 1) / block_size;
+    const int     bs_shift =
+        __builtin_ctzll(static_cast<unsigned long long>(block_size));
+
+    const uint8_t* b_rows[TILE_N];
+    int64_t        n_idx[TILE_N];
+#pragma unroll
+    for (int tn = 0; tn < TILE_N; tn++) {
+        n_idx[tn]  = (n_base + tn < N) ? n_base + tn : 0;
+        b_rows[tn] = B + n_idx[tn] * K;
+    }
+
+    float partial[TILE_N];
+#pragma unroll
+    for (int tn = 0; tn < TILE_N; tn++) partial[tn] = 0.0f;
+
+    const int num_k32 = static_cast<int>(K / 32);
+    for (int idx = tid; idx < num_k32; idx += BLOCK_SIZE) {
+        const int k32 = idx * 32;
+        const int grp = k32 >> bs_shift;
+        const int4 a0 = reinterpret_cast<const int4*>(a_qb + k32)[0];
+        const int4 a1 = reinterpret_cast<const int4*>(a_qb + k32)[1];
+        const int  a[8] = {a0.x, a0.y, a0.z, a0.w, a1.x, a1.y, a1.z, a1.w};
+        int a_sum_q = 0;
+#pragma unroll
+        for (int j = 0; j < 8; j++)
+            a_sum_q = hipdnn_sudot4(a[j], 0x01010101, a_sum_q);
+        const float a_sc = a_scale[grp];
+
+#pragma unroll
+        for (int tn = 0; tn < TILE_N; tn++) {
+            const uint4 w0 = reinterpret_cast<const uint4*>(b_rows[tn] + k32)[0];
+            const uint4 w1 = reinterpret_cast<const uint4*>(b_rows[tn] + k32)[1];
+            const int w[8] = {static_cast<int>(w0.x), static_cast<int>(w0.y),
+                              static_cast<int>(w0.z), static_cast<int>(w0.w),
+                              static_cast<int>(w1.x), static_cast<int>(w1.y),
+                              static_cast<int>(w1.z), static_cast<int>(w1.w)};
+            int dot = 0;
+#pragma unroll
+            for (int j = 0; j < 8; j++)
+                dot = hipdnn_sudot4(a[j], w[j], dot);
+            const float sv = static_cast<float>(scales[n_idx[tn] * k_blocks + grp]);
+            // ONNX MatMulNBits default zp for bits=8 is 2^(bits-1).
+            const int zv = zp ? static_cast<int>(zp[n_idx[tn] * k_blocks + grp]) : 128;
+            partial[tn] += a_sc * sv * static_cast<float>(dot - a_sum_q * zv);
+        }
+    }
+
+    constexpr int WARP_SIZE = HIPDNN_WAVE_SIZE;
+    constexpr int NUM_WARPS = (BLOCK_SIZE + WARP_SIZE - 1) / WARP_SIZE;
+    constexpr int RED_W     = BLOCK_SIZE < WARP_SIZE ? BLOCK_SIZE : WARP_SIZE;
+#pragma unroll
+    for (int tn = 0; tn < TILE_N; tn++)
+        for (int offset = RED_W >> 1; offset > 0; offset >>= 1)
+            partial[tn] += __shfl_down(partial[tn], offset);
+
+    __shared__ float warp_sums[TILE_N][NUM_WARPS];
+    if (tid % WARP_SIZE == 0) {
+#pragma unroll
+        for (int tn = 0; tn < TILE_N; tn++)
+            warp_sums[tn][tid / WARP_SIZE] = partial[tn];
+    }
+    __syncthreads();
+    if (tid < TILE_N && n_base + tid < N) {
+        float v = 0.0f;
+#pragma unroll
+        for (int w = 0; w < NUM_WARPS; w++) v += warp_sums[tid][w];
+        if (bias) v += static_cast<float>(bias[n_base + tid]);
+        output[n_base + tid] = static_cast<__half>(v);
+    }
+}
+
+// Fixed per-shape choice rather than an online sweep, so every process runs the
+// same kernels. gfx1151, cold weights, Step-3.5-Flash's shapes (block 128):
+//   N=12288 K=4096 256x2 212 us (fp-activation GEMV 239 us at its tuned config)
+//   N=4096 K=12288 256x1 212 us (226 us), N=8192 K=4096 256x2 142 us (149 us)
+//   N=4096 K=1280  128x4 24.6 us (25.7 us), N=1280 K=4096 128x2 24.6 us
+//   N=96   K=4096  128x2 3.3 us (6.4 us)
+// The online sweep of the fp-activation GEMV also picks differently from run
+// to run: in the model it took 43 us for N=1280 K=4096.
+static hipError_t launchDp4aU8(hipStream_t s, const int8_t* a_qb,
+                               const float* a_sc, const uint8_t* B,
+                               const __half* sc, const uint8_t* zp,
+                               const __half* bi, __half* out,
+                               int64_t N, int64_t K, int64_t bs)
+{
+#define DP4A_U8_LAUNCH(BS, TN)                                                 \
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(matmul_nbits_gemv_dp4a_u8_kernel<BS, TN>), \
+                       dim3(static_cast<unsigned>((N + (TN) - 1) / (TN))),    \
+                       dim3(BS), 0, s, a_qb, a_sc, B, sc, zp, bi, out, N, K, bs)
+    if (K >= 8192)
+        DP4A_U8_LAUNCH(256, 1);
+    else if (K < 2048)
+        DP4A_U8_LAUNCH(128, 4);
+    else if (N >= 2048)
+        DP4A_U8_LAUNCH(256, 2);
+    else
+        DP4A_U8_LAUNCH(128, 2);
+#undef DP4A_U8_LAUNCH
+    return hipGetLastError();
+}
+
+// Public entry: W8A8 dp4a GEMV for one row.
+//   A      : fp16 activations [K]
+//   B      : uint8 weights [N, K]
+//   scales : fp16 [N, k_blocks];  zp_u8 : uint8 [N, k_blocks] or nullptr
+//   a_qb_scratch / a_scale_scratch : >= K bytes and >= k_blocks floats
+// K must be a multiple of 32 and block_size a power of two >= 32.
+extern "C" int hip_matmul_nbits_dp4a_u8(
+    void* stream_v,
+    const void* A, const void* B, const void* scales, const void* zp_u8,
+    const void* bias, void* out,
+    int64_t N, int64_t K, int64_t block_size,
+    void* a_qb_scratch, void* a_scale_scratch)
+{
+    if (N < 1 || K % 32 != 0 || block_size < 32 ||
+        (block_size & (block_size - 1)) != 0 ||
+        (reinterpret_cast<uintptr_t>(B) | reinterpret_cast<uintptr_t>(a_qb_scratch)) % 16 != 0)
+        return hipErrorInvalidValue;
+    hipStream_t stream = static_cast<hipStream_t>(stream_v);
+    int8_t* a_qb = static_cast<int8_t*>(a_qb_scratch);
+    float*  a_sc = static_cast<float*>(a_scale_scratch);
+    const int64_t k_blocks = (K + block_size - 1) / block_size;
+
+    (void)hipGetLastError();
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(matmul_nbits_quant_act_i8_kernel<128, true>),
+                       dim3(static_cast<unsigned>(k_blocks), 1u), dim3(128), 0,
+                       stream, static_cast<const __half*>(A), a_qb, a_sc, K,
+                       block_size, k_blocks);
+    return launchDp4aU8(stream, a_qb, a_sc, static_cast<const uint8_t*>(B),
+                        static_cast<const __half*>(scales),
+                        static_cast<const uint8_t*>(zp_u8),
+                        static_cast<const __half*>(bias),
+                        static_cast<__half*>(out), N, K, block_size);
 }
 
 /* -----------------------------------------------------------------------
