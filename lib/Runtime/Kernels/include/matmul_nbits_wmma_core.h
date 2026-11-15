@@ -227,10 +227,12 @@ void GemmFp16U4Impl(
     if constexpr (FUSED_DQ) {
         // 0 means the arrival layout, whose stride carries the ONNX group
         // padding described above; a repacked buffer passes its own.
+        // Shifts, not "/ 8": a signed division adds a rounding fix-up the
+        // 4-bit kernels never had.
         const int row_bytes =
-            b_row_bytes ? b_row_bytes : (num_groups_k * (group_size * BITS / 8));
+            b_row_bytes ? b_row_bytes : (num_groups_k * ((group_size * BITS) >> 3));
         b_src_u4 = static_cast<const unsigned char*>(B_data) +
-                   (static_cast<size_t>(b_n_g) * row_bytes + (b_k8 * BITS / 8));
+                   (static_cast<size_t>(b_n_g) * row_bytes + ((b_k8 * BITS) >> 3));
         s_src = scales + static_cast<size_t>(b_n_g) * num_groups_k;
         if constexpr (USE_ZEROS) {
             if constexpr (ZEROS_U8) {
