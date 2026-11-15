@@ -241,6 +241,11 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
       align_up_64(num_tokens * k * inter_size * sizeof(int8_t));
   size_t sz_a_scale_mid =
       align_up_64(num_tokens * k * k_blocks_fc2 * sizeof(float));
+  // W2A8 decode: int8 sums per 64-element chunk of the same activations.
+  size_t sz_a_sum_in =
+      align_up_64(num_tokens * (hidden_size / 64) * sizeof(int32_t));
+  size_t sz_a_sum_mid =
+      align_up_64(num_tokens * k * (inter_size / 64) * sizeof(int32_t));
   // Grouped prefill only: the row-tile lists (3 int32 per tile) and their
   // device-side lengths.
   size_t tile_list_off[HIP_QMOE_MAX_ROW_TILE_CLASSES] = {};
@@ -270,7 +275,9 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   size_t off_a_scale_in = off_a_qb_in + sz_a_qb_in;
   size_t off_a_qb_mid = off_a_scale_in + sz_a_scale_in;
   size_t off_a_scale_mid = off_a_qb_mid + sz_a_qb_mid;
-  size_t off_tile_lists = off_a_scale_mid + sz_a_scale_mid;
+  size_t off_a_sum_in = off_a_scale_mid + sz_a_scale_mid;
+  size_t off_a_sum_mid = off_a_sum_in + sz_a_sum_in;
+  size_t off_tile_lists = off_a_sum_mid + sz_a_sum_mid;
   size_t off_num_tiles = off_tile_lists + sz_tile_lists;
   size_t off_row_scale = off_num_tiles + sz_num_tiles;
   size_t total_scratch = off_row_scale + sz_row_scale;
@@ -308,6 +315,8 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   void *d_a_scale_in = scratch_base + off_a_scale_in;
   void *d_a_qb_mid = scratch_base + off_a_qb_mid;
   void *d_a_scale_mid = scratch_base + off_a_scale_mid;
+  void *d_a_sum_in = scratch_base + off_a_sum_in;
+  void *d_a_sum_mid = scratch_base + off_a_sum_mid;
   void *d_tile_lists[HIP_QMOE_MAX_ROW_TILE_CLASSES] = {};
   for (int c = 0; c < num_tile_classes; c++)
     d_tile_lists[c] = scratch_base + off_tile_lists + tile_list_off[c];
@@ -348,6 +357,24 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   // into that token's output row -- and iterations are serialized on the
   // stream, so the k-slot buffers are reused across iterations.
   if (num_tokens <= hipdnn_ep_qmoe_fused_max_tokens() && swiglu) {
+    // 2-bit experts: W2A8 dp4a, the whole burst in one set of launches.
+    const bool dp4a_u2 = expert_weight_bits == 2 &&
+                         hipdnn_ep_matmul_dp4a_enabled() &&
+                         hipdnn_ep_qmoe_dp4a_u2_enabled() && elem_size == 2 &&
+                         block_size >= 64 && block_size <= 512 &&
+                         hidden_size % block_size == 0 &&
+                         inter_size % block_size == 0;
+    if (dp4a_u2) {
+      OP_ROCTX_MARK("hip_ep.op.qmoe.decode.dp4a_u2");
+      HIP_CHECK(hip_qmoe_decode_fused_dp4a_u2(
+          stream, input, d_expert_indices, d_expert_weights, fc1_weights,
+          fc1_scales, fc1_zero_points, fc1_bias, fc2_weights, fc2_scales,
+          fc2_zero_points, fc2_bias, d_fc2_buf, d_act_buf, output, d_a_qb_in,
+          d_a_scale_in, d_a_sum_in, d_a_qb_mid, d_a_scale_mid, d_a_sum_mid,
+          hidden_size, inter_size, k, block_size, activation_alpha,
+          activation_beta, swiglu_limit, num_tokens));
+      return 0;
+    }
     // W4A8 dp4a decode variant (env-gated). Requires fp16 and 32-aligned
     // block_size / hidden / inter (all true for the MoE targets: block_size
     // 32, hidden/inter multiples of 32). Quantizes the shared input + the k

@@ -2834,6 +2834,8 @@
 "_Z22qmoe_decode_fc2_kernelILi64ELi4EEvPK6__halfPKiS2_PKhS2_S6_S2_PS0_iiii":[75,0,0,12,1171,4,16],
 "_Z22qmoe_decode_fc2_kernelILi64ELi8EEvPK6__halfPKiS2_PKhS2_S6_S2_PS0_iiii":[108,0,0,9,2053,8,32],
 "_Z24qmoe_quant_act_i8_kernelILi128EEvPK6__halfPaPfiii":[7,0,0,16,182,2,20],
+"_Z24qmoe_quant_act_u2_kernelILi64E6__halfEvPKT0_PaPfPiiii":[10,0,0,16,240,2,12],
+"_Z24qmoe_quant_act_u2_kernelILi64EfEvPKT0_PaPfPiiii":[10,0,0,16,239,2,12],
 "_Z25qmoe_decode_reduce_kernelPK6__halfPS_ii":[13,0,0,16,105,0,0],
 "_Z27qmoe_build_row_tiles_kernelPKiiiiiPiS1_S1_S1_":[10,0,0,16,311,19,76],
 "_Z27qmoe_decode_fc1_dp4a_kernelILi128ELi16EEvPKaPKfPKiPKhPK6__halfS7_SA_PS8_iiiifffi":[128,16,3,8,2713,16,64],
@@ -2860,6 +2862,8 @@
 "_Z27qmoe_decode_fc2_dp4a_kernelILi64ELi16EEvPKaPKfPKiPK6__halfPKhS8_SA_S8_PS6_iiii":[128,80,3,8,2625,16,64],
 "_Z27qmoe_decode_fc2_dp4a_kernelILi64ELi4EEvPKaPKfPKiPK6__halfPKhS8_SA_S8_PS6_iiii":[49,0,0,16,729,4,16],
 "_Z27qmoe_decode_fc2_dp4a_kernelILi64ELi8EEvPKaPKfPKiPK6__halfPKhS8_SA_S8_PS6_iiii":[76,0,0,12,1285,8,32],
+"_Z30qmoe_decode_fc1_dp4a_u2_kernelILi16ELi4EEvPKaPKfPKiS5_PKhPK6__halfS7_SA_Pfiiiifffi":[156,0,0,6,767,0,0],
+"_Z30qmoe_decode_fc2_dp4a_u2_kernelILi4ELi4EEvPKaPKfPKiS5_PK6__halfPKhS8_SA_S8_Pfiiii":[141,0,0,7,671,0,0],
 "_Z34qmoe_decode_fc2_reduce_dp4a_kernelILi128ELi2ELi32EEvPKaPKfPKiPK6__halfPKhS8_SA_S8_PS6_iiiii":[59,0,0,16,429,2,16]
 },
 "qmoe_ragged_mm_kernel":{
