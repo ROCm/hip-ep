@@ -3366,7 +3366,9 @@ HIP_KERNEL_API int hip_qmoe_build_row_tile_classes(
 /* One-launch ragged quantized MatMulNBits over every row group/expert.
  * input_row_ids may be null for already-sorted input rows; otherwise it maps
  * each sorted output row to a source input row (FC1 fused gather).
- * zero_points_u8 is already unpacked [E,N,ceil(K/block_size)] or null.
+ * zero_points_u8 is null, or for bits=4 unpacked to one byte per group
+ * [E,N,ceil(K/block_size)], for bits=2 the ONNX packing (four per byte,
+ * [E,N,ceil(ceil(K/block_size)/4)]).
  * block_size must be a power of two and at least 32.
  */
 HIP_KERNEL_API int hip_qmoe_ragged_matmul_nbits(
