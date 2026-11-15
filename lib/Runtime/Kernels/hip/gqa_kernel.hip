@@ -1685,7 +1685,28 @@ using KvElem = std::conditional_t<FMT == KvDtype::kI8, int8_t, __half>;
 // kernel. Both paths emit the SAME [B, H, K_SPLITS, D+2] partials.
 // HAS_KB is compile-time because a runtime bias check inside the per-key
 // softmax loop slows the no-bias decode.
-template <int D, int HPG, KvDtype FMT = KvDtype::kF16, bool HAS_KB = false>
+//
+// COPY fuses the separate-buffer KV concat into the decode: each tile is
+// staged from `past` (positions < past_len, stride past_seq) or from the new
+// token (position past_len), and the staged vectors are also stored to
+// present (Kcache/Vcache geometry, stride max_seq). The splits partition
+// [0, past_len] with no gaps, so every present position is written exactly
+// once and past is read once instead of twice. The length is the host-known
+// past_len + 1, not seqlens_k. fp16 GQA only (needs the LDS staging), B==1,
+// no sliding window: a window would leave present below kv_lo unwritten.
+struct FlashDecodeCopyArgs {
+  const __half* past_k;  // [B, G, past_seq, D]
+  const __half* past_v;
+  const __half* new_k;   // [B, 1, G, D]
+  const __half* new_v;
+  __half* present_k;     // [B, G, max_seq, D]
+  __half* present_v;
+  int past_len;
+  int past_seq;
+};
+
+template <int D, int HPG, KvDtype FMT = KvDtype::kF16, bool HAS_KB = false,
+          bool COPY = false>
 __global__ void __launch_bounds__(HPG * WAVE_SIZE)
 gqa_flash_decode_kernel(
     const __half* __restrict__ Q_roped,    // [B, 1, H, D] (BSHD with sq=1)
@@ -1700,9 +1721,12 @@ gqa_flash_decode_kernel(
     int local_window_size,
     int K_SPLITS,  // runtime split-K count (was a template param)
     const __half* __restrict__ key_bias,  // [B, key_bias_stride] or null
-    int key_bias_stride) {
+    int key_bias_stride,
+    FlashDecodeCopyArgs cp) {
   constexpr bool KV_I8 = (FMT == KvDtype::kI8);
   using KVt = std::conditional_t<KV_I8, int8_t, __half>;
+  static_assert(!COPY || (!KV_I8 && HPG > 1),
+                "COPY needs the fp16 LDS-staged path");
   // Size the K+V LDS tile for block residency, since this kernel is bandwidth
   // bound and the split-K grid always supplies more blocks than fit. 2*BKV*D*2
   // bytes: D=128 -> BKV=32 (16KB), D=64 -> BKV=64 (16KB). At BKV=64,D=128 the
@@ -1746,7 +1770,8 @@ gqa_flash_decode_kernel(
   const int head_q    = head_kv * HPG + wave_id;
 
   // total_seq = seqlens_k[batch] + 1, clamped to [0, max_seq].
-  const int raw_skv = seqlens_k
+  const int raw_skv = COPY ? cp.past_len + 1
+      : seqlens_k
       ? __builtin_amdgcn_readfirstlane(seqlens_k[batch] + 1)
       : max_seq;
   const int eff_skv = (raw_skv > 0)
@@ -1900,6 +1925,31 @@ gqa_flash_decode_kernel(
           Ksv[i] = Kv[i];
           Vsv[i] = Vv[i];
         }
+      } else if constexpr (COPY) {
+        constexpr int kRowVec = D / 8;
+        const int total_vec = (tile_n * D) / 8;
+        const size_t past_base =
+            (size_t)(batch * G + head_kv) * cp.past_seq * D;
+        const size_t new_base = (size_t)(batch * G + head_kv) * D;
+        float4* Ksv = reinterpret_cast<float4*>(K_lds);
+        float4* Vsv = reinterpret_cast<float4*>(V_lds);
+        for (int i = tid; i < total_vec; i += THREADS) {
+          const int pos = tile_start + i / kRowVec;
+          const int c = i % kRowVec;
+          const size_t src =
+              pos < cp.past_len ? past_base + (size_t)pos * D : new_base;
+          const float4* Ks = reinterpret_cast<const float4*>(
+              (pos < cp.past_len ? cp.past_k : cp.new_k) + src);
+          const float4* Vs = reinterpret_cast<const float4*>(
+              (pos < cp.past_len ? cp.past_v : cp.new_v) + src);
+          const float4 kv = Ks[c];
+          const float4 vv = Vs[c];
+          Ksv[i] = kv;
+          Vsv[i] = vv;
+          const size_t dst = kv_base + (size_t)pos * D;
+          reinterpret_cast<float4*>(cp.present_k + dst)[c] = kv;
+          reinterpret_cast<float4*>(cp.present_v + dst)[c] = vv;
+        }
       } else {
         // Cooperative vectorized LDS load: one float4 moves 8 fp16 (D % 8 == 0,
         // tile base kv_base+tile_start*D is 16B-aligned since tile_start*D*2 is a
@@ -1916,7 +1966,12 @@ gqa_flash_decode_kernel(
           Vsv[i] = Vv[i];
         }
       }
-      __syncthreads();
+      // The copy shares tiles only through LDS and never reads back the
+      // present it writes, so its barriers need not drain the stores.
+      if constexpr (COPY)
+        HIPDNN_LDS_BARRIER();
+      else
+        __syncthreads();
       Kt = K_lds;
       Vt = V_lds;
     } else {
@@ -2023,7 +2078,10 @@ gqa_flash_decode_kernel(
       }
       m_acc = m_new;
     }
-    if constexpr (kStage) __syncthreads();
+    if constexpr (COPY)
+      HIPDNN_LDS_BARRIER();
+    else if constexpr (kStage)
+      __syncthreads();
   }
 
   // Write partial (m, l, O) for this wave's query head.
@@ -2789,6 +2847,28 @@ static inline bool flash_decode_wmma_supported(int d, int hpg) {
   return false;
 }
 
+// Reduce: one block per query head, block dim D. seqlens_k / sliding-window /
+// head_sink / smooth_softmax are all folded in here (not the partials).
+static inline void launchFlashDecodeReduce(hipStream_t stream, const float* hP,
+                                           __half* hO, int B, int H, int d,
+                                           const __half* hSink,
+                                           int use_smooth_softmax,
+                                           int splits) {
+  dim3 grid_reduce(B * H);
+  if (d == 256)
+    gqa_flash_decode_reduce_kernel<256><<<grid_reduce, 256, 0, stream>>>(
+        hP, hO, H, hSink, H, use_smooth_softmax, splits);
+  else if (d == 128)
+    gqa_flash_decode_reduce_kernel<128><<<grid_reduce, 128, 0, stream>>>(
+        hP, hO, H, hSink, H, use_smooth_softmax, splits);
+  else if (d == 96)
+    gqa_flash_decode_reduce_kernel<96><<<grid_reduce, 96, 0, stream>>>(
+        hP, hO, H, hSink, H, use_smooth_softmax, splits);
+  else
+    gqa_flash_decode_reduce_kernel<64><<<grid_reduce, 64, 0, stream>>>(
+        hP, hO, H, hSink, H, use_smooth_softmax, splits);
+}
+
 // Launch one (impl, splits, bkv) configuration: split-K decode + FA-2 reduce.
 // Both impls emit identical [B,H,splits,D+2] partials, so the reduce is shared.
 //
@@ -2857,7 +2937,7 @@ static inline void launchFlashDecodeConfig(
       gqa_flash_decode_kernel<D_, HPG_, FMT, KB_>                              \
           <<<grid_main, (HPG_) * WAVE_SIZE, 0, stream>>>(                      \
               hQ, hK, hV, kSc, vSc, hP, H, G, max_seq, scale, iSeq,            \
-              local_window_size, splits, kb, kb_stride)
+              local_window_size, splits, kb, kb_stride, FlashDecodeCopyArgs{})
     #define LAUNCH_SCALAR_D(D_, HPG_)                                          \
       do {                                                                     \
         if (kb) LAUNCH_SCALAR_D_KB(D_, HPG_, true);                            \
@@ -2906,21 +2986,8 @@ static inline void launchFlashDecodeConfig(
     #undef LAUNCH_SCALAR_D_KB
   }
 
-  // Reduce: one block per query head, block dim D. seqlens_k / sliding-window /
-  // head_sink / smooth_softmax are all folded in here (not the partials).
-  dim3 grid_reduce(B * H);
-  if (d == 256)
-    gqa_flash_decode_reduce_kernel<256><<<grid_reduce, 256, 0, stream>>>(
-        hP, hO, H, hSink, H, use_smooth_softmax, splits);
-  else if (d == 128)
-    gqa_flash_decode_reduce_kernel<128><<<grid_reduce, 128, 0, stream>>>(
-        hP, hO, H, hSink, H, use_smooth_softmax, splits);
-  else if (d == 96)
-    gqa_flash_decode_reduce_kernel<96><<<grid_reduce, 96, 0, stream>>>(
-        hP, hO, H, hSink, H, use_smooth_softmax, splits);
-  else
-    gqa_flash_decode_reduce_kernel<64><<<grid_reduce, 64, 0, stream>>>(
-        hP, hO, H, hSink, H, use_smooth_softmax, splits);
+  launchFlashDecodeReduce(stream, hP, hO, B, H, d, hSink, use_smooth_softmax,
+                          splits);
 }
 
 // Candidate split counts, clamped to [1, cap] and to the useful range for skv
@@ -3015,6 +3082,32 @@ static int flashDecodeDefaultSplits(bool use_wmma, int B, int H, int G, int skv,
   for (int i = 0; i < n; ++i)
     if (waves_per_split * split_set[i] >= target) return split_set[i];
   return split_set[n - 1];  // ascending; nothing reaches the target
+}
+
+// Split count of the fused-copy decode. That kernel streams past into present
+// as it attends, so it is bound by a read plus a write of the cache, and it
+// reaches that floor with about 4 blocks (B*G*splits) per reported
+// multiprocessor, 80 on a 20-WGP part. Measured on gfx1151 at HpG 4/5/6/8 and
+// G 2-32, that count is the best one or within 2% of it from 8K keys up and
+// within 5 us below that, while the decode table's counts for the same shapes
+// (32 or more at G=8) are 8-14% slower from 2K to 16K keys. Some counts just
+// past it are up to a third slower (16 at G=8, 32 at G=4, 8 at G=16), so it
+// is not rounded up to a power of two. Like the decode table's clamp, it keeps
+// at least 16 keys per split.
+static int flashDecodeFusedCopySplits(int B, int G, int kv_len, int cap) {
+  static const int target_blocks = [] {
+    int dev = 0;
+    hipDeviceProp_t prop{};
+    if (hipGetDevice(&dev) != hipSuccess ||
+        hipGetDeviceProperties(&prop, dev) != hipSuccess ||
+        prop.multiProcessorCount <= 0)
+      return 80;
+    return 4 * prop.multiProcessorCount;
+  }();
+  const int per_split = std::max(1, B * G);
+  int splits = (target_blocks + per_split / 2) / per_split;
+  splits = std::min(splits, (kv_len + 15) / 16);
+  return std::max(1, std::min(splits, cap));
 }
 
 // A taller WMMA tile pays for itself by halving the barriers per KV element,
@@ -3468,6 +3561,73 @@ extern "C" int hip_gqa_flash_decode_configured(
       max_seq, max_splits, scale, seqlens_k, local_window_size, head_sink,
       use_smooth_softmax, kv_dtype, k_scale, v_scale, use_wmma, splits, bkv,
       /*allow_autotune=*/false, key_bias, key_bias_stride);
+}
+
+extern "C" int hip_gqa_flash_decode_fused_copy(
+    void* stream_ptr, const void* Q, const void* past_k, const void* past_v,
+    const void* new_k, const void* new_v, void* present_k, void* present_v,
+    void* O, void* partials_workspace, int B, int H, int G, int d,
+    int past_len, int past_seq, int present_seq, int max_splits, int splits,
+    float scale, const void* head_sink, int use_smooth_softmax,
+    const void* key_bias, int key_bias_stride) {
+  const int hpg = (G > 0 && H % G == 0) ? H / G : 0;
+  const bool hpg_ok = hpg == 4 || hpg == 5 || hpg == 6 || hpg == 8;
+  int cap = max_splits < kFlashDecodeMaxSplits ? max_splits
+                                               : kFlashDecodeMaxSplits;
+  if (splits <= 0 && cap >= 1)
+    splits = flashDecodeFusedCopySplits(B, G, past_len + 1, cap);
+  if (const char* e = getenv("HIPDNN_GQA_DECODE_SPLITS")) {
+    const int v = atoi(e);
+    if (v >= 1) splits = v > cap ? cap : v;
+  }
+  auto aligned = [](const void* p) {
+    return (reinterpret_cast<uintptr_t>(p) & 15) == 0;
+  };
+  if (B != 1 || !hpg_ok || d != 128 || past_len < 1 ||
+      past_len > past_seq || past_len + 1 > present_seq || splits < 1 ||
+      splits > cap || !aligned(past_k) || !aligned(past_v) ||
+      !aligned(new_k) || !aligned(new_v) || !aligned(present_k) ||
+      !aligned(present_v)) {
+    fprintf(stderr,
+            "hip_gqa_flash_decode_fused_copy: unsupported B=%d H=%d G=%d d=%d "
+            "past_len=%d past_seq=%d present_seq=%d splits=%d\n",
+            B, H, G, d, past_len, past_seq, present_seq, splits);
+    return -1;
+  }
+  hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+  const __half* hQ = static_cast<const __half*>(Q);
+  float* hP = static_cast<float*>(partials_workspace);
+  const FlashDecodeCopyArgs cp{
+      static_cast<const __half*>(past_k), static_cast<const __half*>(past_v),
+      static_cast<const __half*>(new_k),  static_cast<const __half*>(new_v),
+      static_cast<__half*>(present_k),    static_cast<__half*>(present_v),
+      past_len, past_seq};
+  const __half* kb = static_cast<const __half*>(key_bias);
+  dim3 grid_main(B * G, splits);
+  (void)hipGetLastError();
+#define LAUNCH_COPY_KB(HPG_, KB_)                                              \
+  gqa_flash_decode_kernel<128, HPG_, KvDtype::kF16, KB_, true>                 \
+      <<<grid_main, (HPG_) * WAVE_SIZE, 0, stream>>>(                          \
+          hQ, nullptr, nullptr, nullptr, nullptr, hP, H, G, present_seq,       \
+          scale, nullptr, 0, splits, kb, key_bias_stride, cp)
+#define LAUNCH_COPY(HPG_)                                                      \
+  do {                                                                         \
+    if (kb) LAUNCH_COPY_KB(HPG_, true);                                        \
+    else LAUNCH_COPY_KB(HPG_, false);                                          \
+  } while (0)
+  switch (hpg) {
+    case 4: LAUNCH_COPY(4); break;
+    case 5: LAUNCH_COPY(5); break;
+    case 6: LAUNCH_COPY(6); break;
+    case 8: LAUNCH_COPY(8); break;
+    default: break;
+  }
+#undef LAUNCH_COPY
+#undef LAUNCH_COPY_KB
+  launchFlashDecodeReduce(stream, hP, static_cast<__half*>(O), B, H, d,
+                          static_cast<const __half*>(head_sink),
+                          use_smooth_softmax, splits);
+  return hipGetLastError();
 }
 
 //===----------------------------------------------------------------------===//

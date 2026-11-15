@@ -29,7 +29,8 @@ namespace {
 //   * nearest_mode in {round_prefer_floor, round_prefer_ceil, floor, ceil}
 //   * antialias = 0, exclude_outside = 0             (defaults)
 //   * keep_aspect_ratio_policy = "stretch"           (default)
-//   * roi must be absent: none, or a 0-element tensor (no tf_crop_and_resize)
+//   * roi is ignored: ONNX only reads it for tf_crop_and_resize, which is
+//     rejected below
 //   * rank in [3, 5], input and output ranks equal
 //   * matching float types, or matching int8/uint8. Nearest copies samples.
 //     Linear interpolates the stored integer codes and truncates toward zero.
@@ -50,6 +51,13 @@ namespace {
 // scale, which differs when floor rounds: [1,1,3] at scale 1.5 is length 4,
 // and 4/3 would map output 1 to 0.625 instead of 0.5. A constant `scales`
 // vector with any such axis is kept on hip.resize as `scales`.
+//
+// A `scales` vector computed at run time (exporters emit
+// `Concat([1, 1], Cast(shape * 2) / Cast(shape))` for FPN upsampling) folds
+// per element: the constant prefix stays compile-time and each runtime window
+// element is read with `hip.readback_scalar`. Copied prefix axes must be a
+// constant 1. Runtime scales are not kept on hip.resize, so the kernel samples
+// with out_dim / in_dim; that equals ONNX only when in_dim * scale is integral.
 //
 // When `scales` is absent, operand `sizes` supplies the output extents.  A
 // compile-time constant vector is written into the result type.  A runtime
@@ -78,9 +86,6 @@ namespace {
 //   %y = hip.resize(%ctx) ins(%x) outs(%init) {mode = ...}
 
 // none, or the 0-element tensor exporters use for an omitted optional.
-// ONNX only reads roi when coordinate_transformation_mode is
-// tf_crop_and_resize, which this conversion rejects, so an empty tensor
-// carries no crop.
 static bool isAbsent(mlir::Value v) {
   if (!v || mlir::isa<mlir::NoneType>(v.getType()))
     return true;
@@ -164,6 +169,107 @@ static bool foldScales(mlir::Value scales, int64_t rank,
     out.push_back(entry.convertToDouble());
   }
   return out.size() == static_cast<size_t>(rank);
+}
+
+/// Per-axis constant scales, with `std::nullopt` for an element only known at
+/// run time. Looks through one rank-1 `onnx.Concat` so a constant prefix
+/// beside computed window scales still folds. Empty when `scales` is not a
+/// static rank-1 float vector of `rank` elements.
+static llvm::SmallVector<std::optional<double>>
+foldScalesPerAxis(mlir::Value scales, int64_t rank) {
+  auto scalesType = mlir::dyn_cast<mlir::RankedTensorType>(scales.getType());
+  if (!scalesType || scalesType.getRank() != 1 ||
+      !scalesType.hasStaticShape() || scalesType.getNumElements() != rank ||
+      !mlir::isa<mlir::FloatType>(scalesType.getElementType()))
+    return {};
+  llvm::SmallVector<std::optional<double>> perAxis(rank);
+  llvm::SmallVector<double> whole;
+  if (foldScales(scales, rank, whole)) {
+    for (int64_t axis : llvm::seq<int64_t>(rank))
+      perAxis[axis] = whole[axis];
+    return perAxis;
+  }
+  mlir::Operation *def = scales.getDefiningOp();
+  if (!def || def->getName().getStringRef() != "onnx.Concat")
+    return perAxis;
+  if (auto axisAttr = def->getAttrOfType<mlir::IntegerAttr>("axis"))
+    if (axisAttr.getValue().getSExtValue() != 0 &&
+        axisAttr.getValue().getSExtValue() != -1)
+      return perAxis;
+  int64_t offset = 0;
+  for (mlir::Value piece : def->getOperands()) {
+    auto pieceType = mlir::dyn_cast<mlir::RankedTensorType>(piece.getType());
+    if (!pieceType || pieceType.getRank() != 1 || !pieceType.hasStaticShape())
+      return llvm::SmallVector<std::optional<double>>(rank);
+    int64_t count = pieceType.getNumElements();
+    if (offset + count > rank)
+      return llvm::SmallVector<std::optional<double>>(rank);
+    mlir::DenseElementsAttr dense = getCompileTimeConstantTensor(piece);
+    if (dense && mlir::isa<mlir::FloatType>(dense.getElementType())) {
+      int64_t axis = offset;
+      for (mlir::APFloat entry : dense.getValues<mlir::APFloat>())
+        perAxis[axis++] = entry.convertToDouble();
+    }
+    offset += count;
+  }
+  if (offset != rank)
+    return llvm::SmallVector<std::optional<double>>(rank);
+  return perAxis;
+}
+
+/// Synchronized host read of `scales[axis]`, widened to f64.
+static mlir::Value readHostScale(mlir::OpBuilder &b, mlir::Location loc,
+                                 mlir::Value context, mlir::Value scales,
+                                 int64_t axis) {
+  auto scalesType = mlir::cast<mlir::RankedTensorType>(scales.getType());
+  auto elemType = mlir::cast<mlir::FloatType>(scalesType.getElementType());
+  auto sliceType = mlir::RankedTensorType::get({1}, elemType);
+  mlir::SmallVector<mlir::OpFoldResult, 1> offsets{b.getIndexAttr(axis)};
+  mlir::SmallVector<mlir::OpFoldResult, 1> one{b.getIndexAttr(1)};
+  mlir::SmallVector<mlir::OpFoldResult, 1> strides{b.getIndexAttr(1)};
+  mlir::Value slice = mlir::tensor::ExtractSliceOp::create(
+      b, loc, sliceType, scales, offsets, one, strides);
+  mlir::Value raw =
+      mlir::hip::ReadbackScalarOp::create(b, loc, elemType, context, slice);
+  if (elemType.getWidth() < 64)
+    raw = mlir::arith::ExtFOp::create(b, loc, b.getF64Type(), raw);
+  return raw;
+}
+
+/// floor(input_dim * scale) as an index, for an f64 scale only known at run
+/// time. A NaN, non-positive, or overflowing product yields extent 0 (an empty
+/// output) instead of an undefined fptosi; the kernel ignores a scale <= 0.
+static mlir::Value floorScaledDimRuntime(mlir::OpBuilder &b, mlir::Location loc,
+                                         mlir::Value input,
+                                         mlir::RankedTensorType inputType,
+                                         int64_t axis, mlir::Value scale) {
+  mlir::Value dimF;
+  if (inputType.isDynamicDim(axis)) {
+    mlir::Value dim = mlir::tensor::DimOp::create(b, loc, input, axis);
+    mlir::Value dim64 =
+        mlir::arith::IndexCastOp::create(b, loc, b.getI64Type(), dim);
+    dimF = mlir::arith::SIToFPOp::create(b, loc, b.getF64Type(), dim64);
+  } else {
+    dimF = mlir::arith::ConstantOp::create(
+        b, loc, b.getF64Type(),
+        b.getF64FloatAttr(static_cast<double>(inputType.getDimSize(axis))));
+  }
+  mlir::Value prod = mlir::arith::MulFOp::create(b, loc, dimF, scale);
+  auto f64Const = [&](double v) -> mlir::Value {
+    return mlir::arith::ConstantOp::create(b, loc, b.getF64Type(),
+                                           b.getF64FloatAttr(v));
+  };
+  // Ordered predicates are false for NaN.
+  mlir::Value positive = mlir::arith::CmpFOp::create(
+      b, loc, mlir::arith::CmpFPredicate::OGT, prod, f64Const(0.0));
+  mlir::Value bounded = mlir::arith::CmpFOp::create(
+      b, loc, mlir::arith::CmpFPredicate::OLT, prod, f64Const(0x1p62));
+  mlir::Value valid = mlir::arith::AndIOp::create(b, loc, positive, bounded);
+  mlir::Value safeProd =
+      mlir::arith::SelectOp::create(b, loc, valid, prod, f64Const(0.0));
+  mlir::Value floored =
+      mlir::arith::FPToSIOp::create(b, loc, b.getI64Type(), safeProd);
+  return mlir::arith::IndexCastOp::create(b, loc, b.getIndexType(), floored);
 }
 
 /// floor(input_dim * scale) as an index. Static input dims fold here. A
@@ -321,14 +427,10 @@ struct ResizeToHip : public mlir::RewritePattern {
       return rewriter.notifyMatchFailure(op, "expected single output");
 
     // ONNX Resize accepts (X, roi?, scales?, sizes?) — between 1 and 4
-    // operands depending on what the exporter supplied.  We accept any
-    // count but require `roi` (operand 1) to be absent.
+    // operands depending on what the exporter supplied.
     auto operands = op->getOperands();
     if (operands.empty())
       return rewriter.notifyMatchFailure(op, "no input");
-    if (operands.size() >= 2 && !isAbsent(operands[1]))
-      return rewriter.notifyMatchFailure(
-          op, "Resize: roi (tf_crop_and_resize) not supported");
 
     auto ctxOrFailure = getContextArg(op, rewriter);
     if (mlir::failed(ctxOrFailure))
@@ -439,16 +541,16 @@ struct ResizeToHip : public mlir::RewritePattern {
     auto nearestAttr = rewriter.getI64IntegerAttr(nearestId);
     mlir::ArrayAttr scalesAttr;
 
-    auto emitResize = [&](mlir::RankedTensorType resultType,
-                          mlir::ValueRange dynSizes,
-                          const std::optional<HipResizeLaunch> &stamped)
-        -> mlir::LogicalResult {
+    auto emitResize =
+        [&](mlir::RankedTensorType resultType, mlir::ValueRange dynSizes,
+            const std::optional<HipResizeLaunch> &stamped,
+            mlir::ValueRange runtimeScales) -> mlir::LogicalResult {
       mlir::Value init =
           mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
                                         resultType.getElementType(), dynSizes);
       auto hipOp = mlir::hip::ResizeOp::create(
-          rewriter, loc, resultType, context, input, init, modeAttr, coordAttr,
-          nearestAttr, scalesAttr);
+          rewriter, loc, resultType, context, input, runtimeScales, init,
+          modeAttr, coordAttr, nearestAttr, scalesAttr);
       if (stamped) {
         hipOp->setAttr("prefix_count",
                        rewriter.getI64IntegerAttr(stamped->prefixCount));
@@ -463,17 +565,21 @@ struct ResizeToHip : public mlir::RewritePattern {
       return mlir::success();
     };
 
-    // A static window already has its extents in the result type, so scales
-    // may be a runtime value.  The kernel recovers scale = in_dim / out_dim,
-    // or uses the compile-time constant scales recorded below. A runtime
-    // scale is not readable here; static extents only come out of shape
-    // inference when the scales were constant.
+    // A static window already has its extents in the result type.  The
+    // kernel recovers scale = in_dim / out_dim, or uses the compile-time
+    // constant scales recorded below.  Scales that do not fold are read on the
+    // host further down, because ONNX samples with the supplied scale; a
+    // static window does so only when its prefix scales fold to 1, and
+    // align_corners does not read the scale.
     // A dynamic window extent is filled from a compile-time constant scale.
     bool scalesPath = false;
     llvm::SmallVector<mlir::Value> dynSizes;
     mlir::Value scales = operands.size() > 2 ? operands[2] : mlir::Value();
+    mlir::Value sizes = operands.size() > 3 ? operands[3] : mlir::Value();
     llvm::SmallVector<double> scaleVec;
     bool scalesFolded = foldScales(scales, rank, scaleVec);
+    bool runtimeScales = scales && !isAbsent(scales) && !scalesFolded &&
+                         (!sizes || isAbsent(sizes));
 
     // ONNX samples with the supplied scale. Record it when the extent ratio
     // the kernel would use differs; align_corners does not read the scale.
@@ -496,7 +602,21 @@ struct ResizeToHip : public mlir::RewritePattern {
       for (int64_t i : llvm::seq<int64_t>(launch->spatialRank))
         if (outputType.isDynamicDim(launch->prefixCount + i))
           windowDynamic = true;
-      if (!windowDynamic) {
+      // A static window reads its runtime scales on the host only when the
+      // copied prefix scales are provably 1. Otherwise the result type is
+      // trusted and the kernel samples with the extent ratio.
+      bool readScalesOnHost = false;
+      if (!windowDynamic && runtimeScales && coordId != 2) {
+        llvm::SmallVector<std::optional<double>> perAxis =
+            foldScalesPerAxis(scales, rank);
+        readScalesOnHost =
+            !perAxis.empty() &&
+            llvm::all_of(llvm::seq<int64_t>(launch->prefixCount),
+                         [&](int64_t axis) {
+                           return perAxis[axis] && *perAxis[axis] == 1.0;
+                         });
+      }
+      if (!windowDynamic && !readScalesOnHost) {
         for (int64_t i : llvm::seq<int64_t>(launch->prefixCount)) {
           if (outputType.isDynamicDim(i))
             dynSizes.push_back(
@@ -551,9 +671,88 @@ struct ResizeToHip : public mlir::RewritePattern {
       }
     }
     if (scalesPath)
-      return emitResize(outputType, dynSizes, std::nullopt);
+      return emitResize(outputType, dynSizes, std::nullopt, {});
 
-    mlir::Value sizes = operands.size() > 3 ? operands[3] : mlir::Value();
+    if (runtimeScales) {
+      llvm::SmallVector<std::optional<double>> perAxis =
+          foldScalesPerAxis(scales, rank);
+      if (perAxis.empty())
+        return rewriter.notifyMatchFailure(
+            op, "Resize: scales must be a static rank-1 float vector");
+      for (const std::optional<double> &scale : perAxis)
+        if (scale && (!(*scale > 0.0) || !std::isfinite(*scale)))
+          return rewriter.notifyMatchFailure(op, "Resize: non-positive scale");
+
+      llvm::SmallVector<int64_t> refinedShape;
+      for (int64_t axis : llvm::seq<int64_t>(rank)) {
+        const std::optional<double> &scale = perAxis[axis];
+        int64_t extent = mlir::ShapedType::kDynamic;
+        if (scale && !inputType.isDynamicDim(axis))
+          extent = static_cast<int64_t>(std::floor(
+              static_cast<double>(inputType.getDimSize(axis)) * *scale));
+        if (!outputType.isDynamicDim(axis)) {
+          if (extent != mlir::ShapedType::kDynamic &&
+              extent != outputType.getDimSize(axis))
+            return rewriter.notifyMatchFailure(
+                op, "Resize: scale disagrees with static output extent");
+          extent = outputType.getDimSize(axis);
+        }
+        refinedShape.push_back(extent);
+      }
+      auto refinedType = mlir::RankedTensorType::get(
+          refinedShape, outputType.getElementType());
+      std::optional<HipResizeLaunch> typeLaunch =
+          planHipResizeLaunch(inputType, refinedType);
+      std::optional<HipResizeLaunch> hostLaunch =
+          planHipResizeLaunch(inputType, refinedType, /*hostExtents=*/true);
+      const std::optional<HipResizeLaunch> &plan =
+          typeLaunch ? typeLaunch : hostLaunch;
+      if (!plan)
+        return rewriter.notifyMatchFailure(
+            op, "Resize: runtime scales do not fit a copied prefix of at most "
+                "2 axes and a trailing window of at most 3");
+      for (int64_t axis : llvm::seq<int64_t>(plan->prefixCount))
+        if (!perAxis[axis] || *perAxis[axis] != 1.0)
+          return rewriter.notifyMatchFailure(
+              op, "Resize: copied prefix scale must be a constant 1");
+
+      // ONNX samples with the supplied scale, which differs from the extent
+      // ratio whenever floor(in * scale) rounds. Every window axis passes
+      // its scale to the kernel, static output extents included.
+      llvm::SmallVector<mlir::Value> windowScales(plan->spatialRank);
+      for (int64_t i : llvm::seq<int64_t>(plan->spatialRank)) {
+        int64_t axis = plan->prefixCount + i;
+        if (const std::optional<double> &scale = perAxis[axis])
+          windowScales[i] = mlir::arith::ConstantOp::create(
+              rewriter, loc, rewriter.getF64Type(),
+              rewriter.getF64FloatAttr(*scale));
+        else
+          windowScales[i] = readHostScale(rewriter, loc, context, scales, axis);
+      }
+
+      llvm::SmallVector<mlir::Value> runtimeDynSizes;
+      for (int64_t axis : llvm::seq<int64_t>(rank)) {
+        if (!refinedType.isDynamicDim(axis))
+          continue;
+        const std::optional<double> &scale = perAxis[axis];
+        mlir::Value extent;
+        if (!scale)
+          extent =
+              floorScaledDimRuntime(rewriter, loc, input, inputType, axis,
+                                    windowScales[axis - plan->prefixCount]);
+        else if (*scale == 1.0)
+          extent = copyAxisExtent(rewriter, loc, input, inputType, axis);
+        else
+          extent =
+              floorScaledDim(rewriter, loc, input, inputType, axis, *scale);
+        if (!extent)
+          return rewriter.notifyMatchFailure(
+              op, "Resize: output extent is not host-computable");
+        runtimeDynSizes.push_back(extent);
+      }
+      return emitResize(refinedType, runtimeDynSizes, *plan, windowScales);
+    }
+
     std::optional<llvm::SmallVector<int64_t>> classified =
         classifyHostSizes(sizes, rank);
     if (!classified)
@@ -608,7 +807,7 @@ struct ResizeToHip : public mlir::RewritePattern {
       sizeDynSizes.push_back((*sizeIndexes)[axis]);
     // Every dynamic dim of refinedType has a host index in sizeDynSizes.
     return emitResize(refinedType, sizeDynSizes,
-                      typeLaunch ? std::nullopt : hostLaunch);
+                      typeLaunch ? std::nullopt : hostLaunch, {});
   }
 };
 

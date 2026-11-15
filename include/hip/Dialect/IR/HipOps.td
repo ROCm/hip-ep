@@ -932,6 +932,38 @@ def Hip_MatMulNBitsOp : Hip_DpsOp_WithInfer<"matmul_nbits", "Output", [AttrSized
   }];
 }
 
+// ONNX MatMulNBits nibble order: low nibble is the first value, high nibble
+// the second. The last dimension doubles and every other dimension stays.
+// Bitsandbytes packing is the opposite order and is not this op.
+def Hip_UnpackInt4Op : Hip_DpsOp_AutoReifyInfer<"unpack_int4"> {
+  let summary = "Unpack low-nibble-first int4 bytes along the last dimension";
+  let description = [{
+    Each byte of `$packed` holds two unsigned 4-bit values, low nibble first.
+    `[..., K/2]` becomes `[..., K]`. The values are zero-extended into the
+    result element type, which is `ui8`.
+
+    Example:
+    ```mlir
+    hip.unpack_int4(%ctx) ins(%packed : tensor<4x8xui8>)
+        outs(%unpacked : tensor<4x16xui8>) : tensor<4x16xui8>
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$packed,
+    Hip_TensorOrMemRef:$output
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $packed `:` type($packed) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  let hasVerifier = 1;
+}
+
 // Bitsandbytes FP4/NF4 weight dequant. Output is row-major [N, K], the layout
 // ONNX Runtime writes before a transposed GEMM. The first of each packed pair
 // lives in the high nibble. This is not MXFP block-scaled matmul.
@@ -4697,45 +4729,75 @@ def Hip_GatedDeltaNetOp : Hip_DpsOp_AutoReify<"gated_delta_net"> {
   let hasVerifier = 1;
 }
 
-def Hip_DynamicSparseAttentionOp : Hip_DpsOp_AutoReify<"dynamic_sparse_attention"> {
+def Hip_DynamicSparseAttentionOp : Hip_DpsOp_AutoReify<"dynamic_sparse_attention",
+    [AttrSizedOperandSegments]> {
   let summary = "Attention over per-row selected KV positions "
                 "(com.microsoft DynamicSparseAttention)";
   let description = [{
     com.microsoft DynamicSparseAttention restricted to
     attention_mode = selected_only, selected_kv_source = main, is_causal = 1,
-    separate Q/K/V, a past cache, and no rotary, q/k norm, local window or
-    head sink.
+    a past cache, and no ORT rotary or q/k norm inputs, local window or head
+    sink.
 
     Shapes, with N = num_heads, kvN = kv_num_heads, D = head size:
       query                   [B, S, N*D]          f16
-      key, value              [B, S, kvN*D]        f16
+                              [B, S, (N+2*kvN)*D]  packed, without key/value
+      key, value (optional)   [B, S, kvN*D]        f16
       past_key, past_value    [B, kvN, Cap, D]     f16
       selected_indices        [B*S, K]             i32
       selected_counts         [B*S]                i32
       seqlens_k               [B]                  i32
+      gate (optional)         [B, S, N*D]          f16
+      q/k_norm_weight (opt.)  [D]                  f16
+      position_ids (opt.)     [3, B, S]            i64
+      cos/sin_cache (opt.)    [Y, R/2]             f16
       output                  [B, S, N*D]          f16
       present_key/value       [B, kvN, Cap, D]     f16
 
-    D = query width / N must be 128 or 256 and N / kvN at most 16; scale must
-    be finite and non-negative. Dynamic dims, including the cache head dim,
-    are checked against these shapes at run time. present starts as past (they
-    may share a buffer). With T = seqlens_k[b] + 1, token s of batch b is
-    written to cache position T - S + s when that lies in [0, Cap). Row
-    (b, s) attends from position T - S + s if S <= T <= Cap and has no
-    candidates otherwise. Its candidates are the first
+    key and value are both given, or both absent with query holding each
+    token's q, k and v heads in that order. D must be 128 or 256 and N / kvN
+    at most 16; scale must be finite and non-negative. Dynamic dims, including
+    the cache head dim, are checked against these shapes at run time. present
+    starts as past (they may share a buffer). With T = seqlens_k[b] + 1, token
+    s of batch b is written to cache position T - S + s when that lies in
+    [0, Cap). Row (b, s) attends from position T - S + s if S <= T <= Cap and
+    has no candidates otherwise. Its candidates are the first
     clamp(selected_counts, 0, K) entries of selected_indices, keeping only
     0 <= idx <= T - S + s; duplicates count each time. Head h uses KV head
     h / (N / kvN). Logits are scale * q.k in fp32 and an empty candidate set
     gives a zero output.
 
+    The prologue operands q_norm_weight, k_norm_weight, position_ids,
+    cos_cache and sin_cache come together with norm_epsilon, mrope_section
+    (three entries, R = 2 * their sum <= D) and mrope_layout (0 or 1). Each
+    query and key head (including the keys written to present_key) is then
+    first RMS-normalized, x * rsqrt(mean(x^2) + norm_epsilon) * weight in fp32
+    rounded to f16, and its first R channels rotated by split-half MRoPE,
+    rounded to f16: the result of a SimplifiedLayerNormalization over each
+    head followed by MRotaryEmbedding (interleaved = 0). Frequency j < R / 2
+    reads its position from row 0, 1 or 2 of position_ids, the MRoPE section
+    that mrope_section and mrope_layout give it; a position outside [0, Y)
+    leaves the pair unrotated.
+
+    With gate, output = attention * Sigmoid(gate), rounded to f16 after the
+    attention, after the sigmoid and after the product.
+
+    past_sequence_length (optional, i32 [1]) pairs the op with a pair_format
+    hip.sparse_attention_indexer of that past length P, whose selection it
+    reads: row (b, s) with P + s + 1 <= K is dense, and its c-th candidate
+    is position c (for c below its count) instead of a selected_indices
+    entry, which the indexer left unwritten there. The other filters are
+    unchanged.
+
     Example:
     ```mlir
-    hip.dynamic_sparse_attention(%ctx)
-        ins(%q, %k, %v, %past_k, %past_v, %idx, %cnt, %seqlens :
-            memref<1x1x6144xf16, 1>, memref<1x1x512xf16, 1>,
-            memref<1x1x512xf16, 1>, memref<1x2x4096x256xf16, 1>,
-            memref<1x2x4096x256xf16, 1>, memref<1x2051xi32, 1>,
-            memref<1xi32, 1>, memref<1xi32, 1>)
+    hip.dynamic_sparse_attention(%ctx) ins(%q : memref<1x1x6144xf16, 1>)
+        kv(%k, %v : memref<1x1x512xf16, 1>, memref<1x1x512xf16, 1>)
+        cache(%past_k, %past_v : memref<1x2x4096x256xf16, 1>,
+              memref<1x2x4096x256xf16, 1>)
+        select(%idx, %cnt, %seqlens : memref<1x2051xi32, 1>,
+               memref<1xi32, 1>, memref<1xi32, 1>)
+        gate(%g : memref<1x1x6144xf16, 1>)
         outs(%out, %present_k, %present_v : memref<1x1x6144xf16, 1>,
              memref<1x2x4096x256xf16, 1>, memref<1x2x4096x256xf16, 1>)
         {num_heads = 24 : i64, kv_num_heads = 2 : i64, scale = 6.250000e-02 : f32}
@@ -4745,29 +4807,45 @@ def Hip_DynamicSparseAttentionOp : Hip_DpsOp_AutoReify<"dynamic_sparse_attention
   let arguments = (ins
     Hip_ContextType:$ctx,
     Hip_TensorOrMemRef:$query,
-    Hip_TensorOrMemRef:$key,
-    Hip_TensorOrMemRef:$value,
+    Optional<Hip_TensorOrMemRef>:$key,
+    Optional<Hip_TensorOrMemRef>:$value,
     Hip_TensorOrMemRef:$past_key,
     Hip_TensorOrMemRef:$past_value,
     Hip_TensorOrMemRef:$selected_indices,
     Hip_TensorOrMemRef:$selected_counts,
     Hip_TensorOrMemRef:$seqlens_k,
+    Optional<Hip_TensorOrMemRef>:$gate,
+    Optional<Hip_TensorOrMemRef>:$q_norm_weight,
+    Optional<Hip_TensorOrMemRef>:$k_norm_weight,
+    Optional<Hip_TensorOrMemRef>:$position_ids,
+    Optional<Hip_TensorOrMemRef>:$cos_cache,
+    Optional<Hip_TensorOrMemRef>:$sin_cache,
+    Optional<Hip_TensorOrMemRef>:$past_sequence_length,
     Hip_TensorOrMemRef:$output,
     Hip_TensorOrMemRef:$present_key,
     Hip_TensorOrMemRef:$present_value,
     I64Attr:$num_heads,
     I64Attr:$kv_num_heads,
-    F32Attr:$scale
+    F32Attr:$scale,
+    OptionalAttr<F32Attr>:$norm_epsilon,
+    OptionalAttr<DenseI64ArrayAttr>:$mrope_section,
+    OptionalAttr<I64Attr>:$mrope_layout
   );
 
   let assemblyFormat = [{
-    `(` $ctx `)` `ins` `(`
-        $query `,` $key `,` $value `,` $past_key `,` $past_value `,`
-        $selected_indices `,` $selected_counts `,` $seqlens_k
-        `:` type($query) `,` type($key) `,` type($value) `,`
-        type($past_key) `,` type($past_value) `,` type($selected_indices) `,`
-        type($selected_counts) `,` type($seqlens_k)
-    `)`
+    `(` $ctx `)` `ins` `(` $query `:` type($query) `)`
+    (`kv` `(` $key^ `,` $value `:` type($key) `,` type($value) `)`)?
+    `cache` `(` $past_key `,` $past_value `:` type($past_key) `,`
+        type($past_value) `)`
+    `select` `(` $selected_indices `,` $selected_counts `,` $seqlens_k `:`
+        type($selected_indices) `,` type($selected_counts) `,`
+        type($seqlens_k) `)`
+    (`gate` `(` $gate^ `:` type($gate) `)`)?
+    (`prologue` `(` $q_norm_weight^ `,` $k_norm_weight `,` $position_ids `,`
+        $cos_cache `,` $sin_cache `:` type($q_norm_weight) `,`
+        type($k_norm_weight) `,` type($position_ids) `,` type($cos_cache) `,`
+        type($sin_cache) `)`)?
+    (`pair` `(` $past_sequence_length^ `:` type($past_sequence_length) `)`)?
     `outs` `(` $output `,` $present_key `,` $present_value `:`
               type($output) `,` type($present_key) `,` type($present_value) `)`
     attr-dict (`:` type($result_tensors)^)?
@@ -4791,12 +4869,15 @@ def Hip_SparseAttentionIndexerOp : Hip_DpsOp_AutoReify<"sparse_attention_indexer
     K = token_budget / r (at most 512):
       query               [B, S, (N + 1) * D]   f16 or f32; key = last D
       query/key_norm_weight [D]
-      cos/sin_cache       [X, R] or [B, X, R]
+      cos/sin_cache       [X, R] or [B, X, R]; [Y, R / 2] with
+                          rotary_position_ids
       mask (optional)     [B, T]                i64, nonzero = visible
       past_key            [B, P, D]
       past_sequence_length (optional) [1]       i32
+      rotary_position_ids (optional) [M, B, X]  i64
       selected_indices    [B, S, K * r + r - 1] i32
       present_key         [B, T, D]
+      selected_counts (optional) [B, S]         i32
     With past_sequence_length, P is its value and past_key / present_key
     are both [B, C, D] with T <= C. They may alias, in which case only rows
     P .. T - 1 of present_key are written.
@@ -4814,6 +4895,24 @@ def Hip_SparseAttentionIndexerOp : Hip_DpsOp_AutoReify<"sparse_attention_indexer
     scale * sum_h max(0, q_h . k_j) in fp32. The top min(K, blocks) blocks,
     ordered by score descending then block index ascending, emit their r
     token indices; the remaining visible tail follows and -1 fills the rest.
+    selected_counts, when given, receives the number of non-negative entries
+    of each selected_indices row.
+
+    With rotary_position_ids [M, B, X] (i64), cos/sin_cache are base tables
+    [Y, R / 2] and rotary_sections (R / 2 entries in [0, M)) gives the MRoPE
+    section of each frequency, the row of the ids that holds its positions:
+    channel d of row t in batch b uses base row
+    ids[rotary_sections[d mod R / 2], b, t], wrapped once if negative and
+    clamped to [0, Y - 1]. This is the [B, X, R] MRoPE table a
+    Gather/Where/Concat subgraph would otherwise materialize, read only at the
+    rows the indexer rotates.
+
+    pair_format, which needs past_sequence_length and selected_counts and no
+    mask, marks a selection read only by hip.dynamic_sparse_attention ops
+    paired through the same past_sequence_length. Row (b, s) with
+    P + s + 1 <= K * r + r - 1 selects every position; its selected_indices
+    row is left unwritten (its count is still written). The other rows list
+    their top blocks by ascending block index rather than by score.
 
     Example:
     ```mlir
@@ -4839,12 +4938,16 @@ def Hip_SparseAttentionIndexerOp : Hip_DpsOp_AutoReify<"sparse_attention_indexer
     Hip_TensorOrMemRef:$past_key,
     Optional<Hip_TensorOrMemRef>:$mask,
     Optional<Hip_TensorOrMemRef>:$past_sequence_length,
+    Optional<Hip_TensorOrMemRef>:$rotary_position_ids,
     Hip_TensorOrMemRef:$selected_indices,
     Hip_TensorOrMemRef:$present_key,
+    Optional<Hip_TensorOrMemRef>:$selected_counts,
     I64Attr:$compress_ratio,
     I64Attr:$token_budget,
     F32Attr:$epsilon,
-    F32Attr:$scale
+    F32Attr:$scale,
+    OptionalAttr<DenseI32ArrayAttr>:$rotary_sections,
+    UnitAttr:$pair_format
   );
 
   let assemblyFormat = [{
@@ -4858,8 +4961,11 @@ def Hip_SparseAttentionIndexerOp : Hip_DpsOp_AutoReify<"sparse_attention_indexer
     (`mask` `(` $mask^ `:` type($mask) `)`)?
     (`past_sequence_length` `(` $past_sequence_length^ `:`
         type($past_sequence_length) `)`)?
+    (`rotary_position_ids` `(` $rotary_position_ids^ `:`
+        type($rotary_position_ids) `)`)?
     `outs` `(` $selected_indices `,` $present_key `:`
               type($selected_indices) `,` type($present_key) `)`
+    (`counts` `(` $selected_counts^ `:` type($selected_counts) `)`)?
     attr-dict (`:` type($result_tensors)^)?
   }];
 
@@ -5653,6 +5759,9 @@ def Hip_ResizeOp : Hip_DpsOp_AutoReify<"resize"> {
     ONNX `scales` order) overrides that ratio: when floor(in_dim * scale)
     rounds, e.g. 3 * 1.5 -> 4, ONNX samples with the supplied scale and the
     extent ratio would shift every coordinate.  align_corners ignores it.
+    `runtime_scales` (one f64 per window axis, read on the host at run time)
+    does the same for a scales vector that does not fold; it requires the
+    saved `prefix_count` / `spatial_rank` launch and excludes `scales`.
     A dynamic window extent is filled in at conversion from a
     compile-time constant `scales` vector (scale 1 copies the input dim;
     any other scale is floor(input_dim * scale)).  When `scales` is absent, a
@@ -5675,6 +5784,7 @@ def Hip_ResizeOp : Hip_DpsOp_AutoReify<"resize"> {
   let arguments = (ins
     Hip_ContextType:$ctx,
     Hip_TensorOrMemRef:$input,
+    Variadic<F64>:$runtime_scales,
     Hip_TensorOrMemRef:$output,
     I64Attr:$mode,
     I64Attr:$coord_transform,
@@ -5684,9 +5794,11 @@ def Hip_ResizeOp : Hip_DpsOp_AutoReify<"resize"> {
 
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    (`scales` `(` $runtime_scales^ `:` type($runtime_scales) `)`)?
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+  let hasVerifier = 1;
 }
 
 def Hip_GridSampleOp : Hip_DpsOp_AutoReifyInfer<"grid_sample"> {
@@ -5726,6 +5838,62 @@ def Hip_GridSampleOp : Hip_DpsOp_AutoReifyInfer<"grid_sample"> {
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(`
         $input `,` $grid `:` type($input) `,` type($grid)
+    `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+  let hasVerifier = 1;
+}
+
+def Hip_RoiAlignOp : Hip_DpsOp_AutoReifyInfer<"roi_align"> {
+  let summary = "Region-of-interest align (ONNX RoiAlign)";
+  let description = [{
+    Pools each region of interest of a 4-D input `X` of shape (N, C, H, W)
+    into a fixed (output_height, output_width) grid by averaging (or taking
+    the max of) bilinearly interpolated samples.
+
+    `rois` is (num_rois, 4) holding (x1, y1, x2, y2) in input-image
+    coordinates; `spatial_scale` maps them onto `X`. `batch_indices` is
+    (num_rois) i64 selecting the batch image of each region. Output `Y` is
+    (num_rois, C, output_height, output_width); num_rois may be dynamic.
+
+    Attribute encoding (decoded at ONNX->HIP conversion):
+      * mode: 0 = avg, 1 = max
+      * half_pixel: 1 = "half_pixel" (shift region corners by -0.5),
+                    0 = "output_half_pixel" (no shift; regions narrower
+                    than one pixel are widened to one)
+      * sampling_ratio: samples per bin along each axis; 0 = adaptive,
+        ceil(region_extent / output_extent)
+
+    Example:
+    ```mlir
+    hip.roi_align(%ctx)
+        ins(%x, %rois, %idx : memref<1x256x32x32xf32, 1>, memref<?x4xf32, 1>,
+                              memref<?xi64, 1>)
+        outs(%y : memref<?x256x7x7xf32, 1>)
+        {mode = 0, output_height = 7, output_width = 7, sampling_ratio = 2,
+         spatial_scale = 6.250000e-02 : f32, half_pixel = 1}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$rois,
+    Hip_TensorOrMemRef:$batch_indices,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$mode,
+    I64Attr:$output_height,
+    I64Attr:$output_width,
+    I64Attr:$sampling_ratio,
+    F32Attr:$spatial_scale,
+    I64Attr:$half_pixel
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $input `,` $rois `,` $batch_indices `:`
+        type($input) `,` type($rois) `,` type($batch_indices)
     `)`
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?

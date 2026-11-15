@@ -385,7 +385,7 @@ def HoistAllocSizeArithPass
 }
 
 def MaterializeHostScalarsPass
-    : Pass<"hip-materialize-host-scalars", "mlir::func::FuncOp"> {
+    : Pass<"hip-materialize-host-scalars", "mlir::ModuleOp"> {
   let summary = "Redirect small host-accessed memref.alloc ops to a host-mapped "
                 "scratch buffer";
   let description = [{
@@ -393,6 +393,10 @@ def MaterializeHostScalarsPass
     scratch instead of the device pool. Follow aliases to find host loads
     and stores. Integer and index buffers qualify. Float buffers also need
     a HIP consumer. Reject unknown users.
+
+    Tiny inline constant globals read by HIP ops get a scratch region too,
+    filled by host stores of the initial value. Mutable globals and globals
+    with `hip.external_data` are left alone.
 
     A small copy-filled integer shape buffer can also qualify when it has
     an explicit scalar readback. Require bounded contiguous aliases, scalar
@@ -402,7 +406,9 @@ def MaterializeHostScalarsPass
 
     Replace each allocation with a separate aligned `memref.view` of one
     `hip.get_host_scratch` buffer. Keep payload accesses in their original
-    order. HIP-to-LLVM checks redundant readbacks separately.
+    order. HIP-to-LLVM checks redundant readbacks separately. Every function
+    shares that buffer, so slots are laid out across the module (disjoint per
+    function) and every function requests the module total.
 
     Run after linalg-to-loops and before `hip-optimize-memrefs`. Buffer reuse
     can otherwise merge a host-written buffer into an allocation above the
@@ -598,6 +604,39 @@ def UseOutputAllocatorPass
   let dependentDialects = [
     "mlir::hip::HipDialect",
     "mlir::memref::MemRefDialect"
+  ];
+}
+
+def FoldConstantExtractsPass
+    : Pass<"hip-fold-constant-extracts", "mlir::func::FuncOp"> {
+  let summary = "Resolve constant-index `tensor.extract` of assembled "
+                "constant vectors to the scalar they read";
+  let description = [{
+    Resolves a `tensor.extract` whose indices are constants through a chain
+    of static-offset, unit-stride `tensor.insert_slice` ops to the element
+    it reads: an operand of a `tensor.from_elements`, an element of an
+    inline integer `hip.constant`, or an element of any other integer
+    constant. Other producers, non-constant indices, and dynamic or strided
+    slices keep the extract.
+
+    The canonical case is an ONNX shape vector such as
+    `ConstantOfShape(Concat(Shape(q)[0:1], [0, 512]))`: upstream folds stop
+    at the `insert_slice` and `hip.constant` has no folder, so without this
+    pass each element reaches runtime as a device-to-host copy plus a
+    stream sync.
+
+    Only the resolved extracts are rewritten, and only the producers they
+    leave without uses are erased. Everything else, including code that was
+    already dead, is left as is, so functions without a resolvable extract
+    are unchanged.
+
+    Pipeline placement: immediately before `--hip-infer-shapes`, whose
+    reify walk then sees these scalars as constants, and before
+    `--hip-externalize-constants`, which may replace the inline
+    `hip.constant` payloads read here. Idempotent.
+  }];
+  let dependentDialects = [
+    "mlir::arith::ArithDialect"
   ];
 }
 

@@ -28,8 +28,10 @@
 // EXTERNAL-NOT: hip.constant
 
 // INLINE-NOT: hip.constants_file
-// INLINE-NOT: memref.global
-// INLINE: arith.constant dense<3> : tensor<si8>
+// INLINE-NOT: hip.external_data
+// INLINE: memref.global "private" constant @hip_inline_constant : memref<si8> = dense<3>
+// INLINE: %[[G:.*]] = memref.get_global @hip_inline_constant : memref<si8>
+// INLINE: bufferization.to_tensor %[[G]] restrict : memref<si8> to tensor<si8>
 // INLINE-NOT: hip.constant
 
 // STALE: error: hip-externalize-constants found stale `hipdnn.constant_sizes` metadata
@@ -43,9 +45,11 @@
 // ORDER-DAG: memref.global "private" @hip_ext_constant_first_0
 // ORDER-DAG: memref.global "private" @hip_ext_constant_second_1
 // ORDER-DAG: memref.global "private" @hip_ext_constant_plugin_2
+// TYPED-DAG: memref.global "private" constant @[[S:hip_inline_constant[_0-9]*]] : memref<2xsi16> = dense<[-2, -32768]>
+// TYPED-DAG: memref.global "private" constant @[[U:hip_inline_constant[_0-9]*]] : memref<2xui16> = dense<[32768, 65535]>
 // TYPED-LABEL: func.func @typed_inline
-// TYPED: arith.constant dense<[-2, -32768]> : tensor<2xsi16>
-// TYPED: arith.constant dense<[32768, 65535]> : tensor<2xui16>
+// TYPED: memref.get_global @[[S]] : memref<2xsi16>
+// TYPED: memref.get_global @[[U]] : memref<2xui16>
 // TYPED: return {{.*}} : tensor<2xsi16>, tensor<2xui16>
 
 //--- valid.mlir
