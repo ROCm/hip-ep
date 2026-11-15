@@ -58,6 +58,41 @@ int wrap_sigmoid(RuntimeState *state, void *input, void *output,
                     "hip_elementwise_sigmoid\n",
                     (long long)num_elements,
                     hipdnn_ep_datatype_name(data_type));
-  return hip_elementwise_sigmoid(stream, input, output, num_elements,
-                                 hip_dtype);
+  int rc =
+      hip_elementwise_sigmoid(stream, input, output, num_elements, hip_dtype);
+  if (rc == 0 && _opProf && op_profile_call_capture_enabled(_opProf->ps)) {
+    using Json = CallCaptureJson;
+    const char *dtype = data_type == HIPDNN_EP_DATATYPE_HALF       ? "float16"
+                        : data_type == HIPDNN_EP_DATATYPE_BFLOAT16 ? "bfloat16"
+                                                                   : "float32";
+    auto tensor = [dtype, num_elements](const char *role) {
+      return Json::object(
+          {{"slot", 0},
+           {"role", role},
+           {"present", true},
+           {"dtype", dtype},
+           {"shape", Json::dimensions({num_elements})},
+           {"layout", Json::object({{"contiguous", true},
+                                    {"view", "production_abi_view"},
+                                    {"order", "flat"}})}});
+    };
+    _opProf->capture = op_profile_capture_call(
+        _opProf->ps,
+        Json::object(
+            {{"op_type", "Sigmoid"},
+             {"execution",
+              Json::object(
+                  {{"backend", "HIP-EP"},
+                   {"entry", "wrap_sigmoid"},
+                   {"variant", "flat_unary"},
+                   {"config", Json::object({{"hip_dtype", hip_dtype},
+                                            {"kernel_entry",
+                                             "hip_elementwise_sigmoid"}})}})},
+             {"inputs", Json::array({tensor("input")})},
+             {"outputs", Json::array({tensor("output")})},
+             {"attributes", Json::object({})},
+             {"parameters", Json::object({{"data_type", data_type},
+                                          {"num_elements", num_elements}})}}));
+  }
+  return rc;
 }

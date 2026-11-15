@@ -70,5 +70,42 @@ int wrap_neg(RuntimeState *state, void *input, void *output,
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_neg: num=%lld, data_type=%s -> hip_elementwise_neg\n",
       (long long)num_elements, hipdnn_ep_datatype_name(data_type));
-  return hip_elementwise_neg(stream, input, output, num_elements, hip_dtype);
+  int rc = hip_elementwise_neg(stream, input, output, num_elements, hip_dtype);
+  if (rc == 0 && _opProf && op_profile_call_capture_enabled(_opProf->ps)) {
+    using Json = CallCaptureJson;
+    const char *dtype = data_type == HIPDNN_EP_DATATYPE_HALF       ? "float16"
+                        : data_type == HIPDNN_EP_DATATYPE_BFLOAT16 ? "bfloat16"
+                        : data_type == HIPDNN_EP_DATATYPE_INT32    ? "int32"
+                        : data_type == HIPDNN_EP_DATATYPE_INT64    ? "int64"
+                                                                   : "float32";
+    auto tensor = [dtype, num_elements](const char *role) {
+      return Json::object(
+          {{"slot", 0},
+           {"role", role},
+           {"present", true},
+           {"dtype", dtype},
+           {"shape", Json::dimensions({num_elements})},
+           {"layout", Json::object({{"contiguous", true},
+                                    {"view", "production_abi_view"},
+                                    {"order", "flat"}})}});
+    };
+    _opProf->capture = op_profile_capture_call(
+        _opProf->ps,
+        Json::object(
+            {{"op_type", "Neg"},
+             {"execution",
+              Json::object(
+                  {{"backend", "HIP-EP"},
+                   {"entry", "wrap_neg"},
+                   {"variant", "flat_unary"},
+                   {"config",
+                    Json::object({{"hip_dtype", hip_dtype},
+                                  {"kernel_entry", "hip_elementwise_neg"}})}})},
+             {"inputs", Json::array({tensor("input")})},
+             {"outputs", Json::array({tensor("output")})},
+             {"attributes", Json::object({})},
+             {"parameters", Json::object({{"data_type", data_type},
+                                          {"num_elements", num_elements}})}}));
+  }
+  return rc;
 }
