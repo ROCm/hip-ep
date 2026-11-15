@@ -24,7 +24,8 @@ Categorical situations, each run at every size of the tier:
 
 Every index list starts with the first and the last position of each indexed
 dim, once as a positive and once as the equivalent negative index; the other
-rows are random, half of them negative.
+rows are random, half of them negative. In `batched` those edge rows all fall
+in batch 0; batch 1 gets random rows only.
 
 - Every element is written and nothing outside the output: each case runs
   twice with two different fill bytes and 64 guard bytes on each side.
