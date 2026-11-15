@@ -769,7 +769,8 @@ bool RocMlirAutotuner::Impl::pickWinner(
   const HipRuntime &fns = hipRuntime();
   std::vector<hipModule_t> modules(numConfigs, nullptr);
   std::vector<hipFunction_t> functions(numConfigs, nullptr);
-  auto unloadModules = llvm::make_scope_exit([&] {
+  // rmt-core dropped llvm::make_scope_exit; scope_exit runs the same cleanup.
+  llvm::scope_exit unloadModules([&] {
     for (hipModule_t hipModule : modules)
       if (hipModule)
         (void)fns.hipModuleUnload(hipModule);

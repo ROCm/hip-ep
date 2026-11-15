@@ -60,7 +60,15 @@ if(morphizen_ENABLE_ONNX_SCHEMA_SUPPORT)
 endif()
 
 set_target_properties(${TEST_EXE_NAME} PROPERTIES FOLDER morphizen/unit-tests)
-find_package(onnxruntime REQUIRED)
+# cmake/deps.cmake (included from the top-level and morphizen/ CMakeLists,
+# both of which run before this add_subdirectory) already resolves
+# onnxruntime::onnxruntime -- via a real find_package() if one is installed,
+# else by synthesizing an IMPORTED target from the pinned release tarball.
+# That synthesized target is not itself find_package()-discoverable, so only
+# fall back to find_package() here if the target doesn't already exist.
+if(NOT TARGET onnxruntime::onnxruntime)
+  find_package(onnxruntime REQUIRED)
+endif()
 target_link_libraries(${TEST_EXE_NAME}
     PRIVATE
     morphizen-core-static

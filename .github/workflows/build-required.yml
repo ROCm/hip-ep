@@ -1,0 +1,144 @@
+##
+## Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
+name: Build required
+
+# Tells the compile workflows whether this diff can change build output.
+# pull_request and merge_group set run=false only when every path is under
+# docs/, under site/, or a Markdown file. Callers then skip compile jobs.
+# The caller workflow still runs: a path filter on the workflow itself
+# would leave a required status check pending, and a skipped reusable
+# caller does not report its inner job name.
+#
+# push and workflow_dispatch always set run=true. A successful Windows
+# Build on main or a release branch is what later runs download for the
+# perf baseline, the DLL size gate, and release packages. Skipping that
+# push would be a green run with no artifacts. The compare API only
+# accepts a three-dot spec, so this workflow does not try to classify a
+# push.
+#
+# Mixed diffs and any compare the API cannot fully return still build.
+on:
+  workflow_call:
+    outputs:
+      run:
+        description: true when compile jobs must run
+        value: ${{ jobs.detect.outputs.run }}
+
+permissions:
+  contents: read
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.detect.outputs.run }}
+    steps:
+      - name: Detect compile inputs
+        id: detect
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          MQ_BASE: ${{ github.event.merge_group.base_sha }}
+          MQ_HEAD: ${{ github.event.merge_group.head_sha }}
+        run: |
+          set -euo pipefail
+          build() { echo "run=true" >> "$GITHUB_OUTPUT"; }
+          skip() { echo "run=false" >> "$GITHUB_OUTPUT"; }
+
+          case "$EVENT" in
+            workflow_dispatch)
+              echo "manual run: building"
+              build
+              exit 0
+              ;;
+            # A push to main or a release branch must upload artifacts even
+            # when the diff is documentation. Later GPU runs and releases
+            # read those artifacts from the latest successful run.
+            push)
+              echo "push: building"
+              build
+              exit 0
+              ;;
+            # Three-dot: changes this pull request or merge group introduced.
+            pull_request) spec="${PR_BASE}...${PR_HEAD}" ;;
+            merge_group)  spec="${MQ_BASE}...${MQ_HEAD}" ;;
+            *)
+              echo "unhandled event $EVENT: building"
+              build
+              exit 0
+              ;;
+          esac
+
+          if [ -z "$spec" ]; then
+            echo "::warning::missing diff endpoints; building"
+            build
+            exit 0
+          fi
+
+          # The files array stops at 300 entries and does not say that it
+          # was cut off, so a full page builds rather than risk a skip.
+          if ! json=$(gh api --header "Accept: application/vnd.github+json" \
+              "/repos/${GITHUB_REPOSITORY}/compare/${spec}"); then
+            echo "::warning::compare API failed; building"
+            build
+            exit 0
+          fi
+
+          if ! list=$(jq -r '
+            if (.files | type) != "array" then
+              "@invalid"
+            elif (.files | length) >= 300 then
+              "@truncated"
+            else
+              .files[] | .filename, (.previous_filename // empty)
+            end
+          ' <<< "$json"); then
+            echo "::warning::could not read compare payload; building"
+            build
+            exit 0
+          fi
+
+          # A rename reports the destination in filename. previous_filename
+          # keeps a move out of lib/ or a workflow from looking like a doc edit.
+          case "$list" in
+            @invalid)
+              echo "::warning::compare response has no file list; building"
+              build
+              exit 0
+              ;;
+            @truncated)
+              echo "compare returned at least 300 files; building"
+              build
+              exit 0
+              ;;
+          esac
+
+          if [ -z "$list" ]; then
+            echo "compare is empty; skipping compile"
+            skip
+            exit 0
+          fi
+
+          code=
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            case "$f" in
+              docs/*|site/*|*.md) ;;
+              *) code+="$f"$'\n' ;;
+            esac
+          done <<< "$list"
+
+          if [ -n "$code" ]; then
+            echo "Compile inputs:"
+            printf '%s' "$code"
+            build
+          else
+            echo "Documentation and site changes only; skipping compile"
+            printf '%s\n' "$list"
+            skip
+          fi
