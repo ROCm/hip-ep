@@ -1724,7 +1724,12 @@
 "_Z30MatMulNBitsWMMA_SmallM_GroupedILi4ELi1ELi6ELi6ELi1ELb1ELb1EEviiPKDF16_PKiPKhiS1_PKviiS1_S3_S3_S3_iiPDF16_":[143,0,0,7,1841,3,12],
 "_Z30matmul_nbits_add_bias_rowmajorPDF16_PKDF16_iii":[4,0,0,16,32,0,0],
 "_Z30unpack_zp_nibbles_to_u8_kernelPKhPhiii":[5,0,0,16,43,0,0],
-"_Z32matmul_nbits_quant_act_i8_kernelILi128EEvPK6__halfPaPfxxx":[12,0,0,16,204,2,20]
+"_Z32matmul_nbits_gemv_dp4a_u8_kernelILi128ELi2EEvPKaPKfPKhPK6__halfS5_S8_PS6_xxx":[38,0,0,16,446,2,16],
+"_Z32matmul_nbits_gemv_dp4a_u8_kernelILi128ELi4EEvPKaPKfPKhPK6__halfS5_S8_PS6_xxx":[60,0,0,16,562,2,16],
+"_Z32matmul_nbits_gemv_dp4a_u8_kernelILi256ELi1EEvPKaPKfPKhPK6__halfS5_S8_PS6_xxx":[25,0,0,16,372,2,32],
+"_Z32matmul_nbits_gemv_dp4a_u8_kernelILi256ELi2EEvPKaPKfPKhPK6__halfS5_S8_PS6_xxx":[38,0,0,16,455,4,32],
+"_Z32matmul_nbits_quant_act_i8_kernelILi128ELb0EEvPK6__halfPaPfxxx":[12,0,0,16,204,2,20],
+"_Z32matmul_nbits_quant_act_i8_kernelILi128ELb1EEvPK6__halfPaPfxxx":[11,0,0,16,190,2,20]
 },
 "multi_head_attention_kernel":{
 "_ZN12_GLOBAL__N_124mha_flash_prefill_kernelILi4ELi64ELi112ELi1EEEvPKDF16_S2_S2_PDF16_iiiiif":[160,112,171,6,9339,456,1024],
