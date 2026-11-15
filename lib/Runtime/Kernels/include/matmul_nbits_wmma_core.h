@@ -58,13 +58,16 @@ hipdnn_wmma_f32_16x16x16_f16_unavailable(half16, half16, float8 c) {
  * WMMA per (WT_M+WT_N)=6 fragment loads instead of 4 per 4, so the LDS reads per
  * Matrix Core op drop by a quarter. */
 /* BITS = 2 reads 2-bit packed weights (four per byte, element i at bits 2i of
- * its little-endian word); everything after the dequant is shared. */
+ * its little-endian word); everything after the dequant is shared.
+ * ZEROS_PACKED (with ZEROS_U8) reads the ONNX zero-point layout instead of one
+ * byte per group: BITS bits per group, rows of ceil(num_groups_k*BITS/8)
+ * bytes. */
 template <int BM_T, int BN_T, int WT_M, int WT_N, bool USE_ZEROS,
           bool BOUNDS_CHECK = false, bool FUSED_DQ = true,
           int BK_IN = BM_T / (WT_M * WT_N), bool ZEROS_U8 = false,
           bool ADD_BIAS = false, bool EXPLICIT_TILE = false,
           bool CHECK_K_TAIL = false, bool RUNTIME_OPTIONAL = false,
-          int BITS = 4>
+          int BITS = 4, bool ZEROS_PACKED = false>
 __device__ __forceinline__
 void GemmFp16U4Impl(
     int M, int N, int K,
@@ -235,7 +238,12 @@ void GemmFp16U4Impl(
                    (static_cast<size_t>(b_n_g) * row_bytes + ((b_k8 * BITS) >> 3));
         s_src = scales + static_cast<size_t>(b_n_g) * num_groups_k;
         if constexpr (USE_ZEROS) {
-            if constexpr (ZEROS_U8) {
+            if constexpr (ZEROS_U8 && ZEROS_PACKED) {
+                const int z_row_bytes = (num_groups_k * BITS + 7) >> 3;
+                if (!RUNTIME_OPTIONAL || zeros)
+                    z_src_u8 = static_cast<const uint8_t*>(zeros) +
+                               static_cast<size_t>(b_n_g) * z_row_bytes;
+            } else if constexpr (ZEROS_U8) {
                 if constexpr (RUNTIME_OPTIONAL) {
                     if (zeros)
                         z_src_u8 = static_cast<const uint8_t*>(zeros) +
@@ -333,7 +341,13 @@ void GemmFp16U4Impl(
         // ~1024*s, which is a few percent of the (q-zp)*s result.
         _Float16 zp = (_Float16)(BITS == 2 ? 2 : 8);
         if constexpr (USE_ZEROS) {
-            if constexpr (ZEROS_U8) {
+            if constexpr (ZEROS_U8 && ZEROS_PACKED) {
+                if (!RUNTIME_OPTIONAL || z_src_u8) {
+                    zp_u4 = (z_src_u8[(grp * BITS) >> 3] >> ((grp * BITS) & 7)) &
+                            ((1u << BITS) - 1u);
+                    zp = static_cast<_Float16>(zp_u4);
+                }
+            } else if constexpr (ZEROS_U8) {
                 if constexpr (RUNTIME_OPTIONAL) {
                     if (z_src_u8) {
                         zp_u4 = z_src_u8[grp];

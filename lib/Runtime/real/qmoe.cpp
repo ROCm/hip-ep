@@ -461,11 +461,14 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
                                 inter_size, elem_size);
     };
 
-    // The small-M kernel reads the packed zero points directly; only the
-    // ragged GEMM needs them unpacked.
-    const void *fc1_pre_zp_u8 = nullptr;
-    const void *fc2_pre_zp_u8 = nullptr;
-    if (!grouped && (fc1_zero_points || fc2_zero_points)) {
+    // The small-M kernel and the 2-bit ragged GEMM read the packed zero points
+    // directly; only the 4-bit ragged GEMM needs them unpacked.
+    const void *fc1_pre_zp_u8 =
+        expert_weight_bits == 2 ? fc1_zero_points : nullptr;
+    const void *fc2_pre_zp_u8 =
+        expert_weight_bits == 2 ? fc2_zero_points : nullptr;
+    if (!grouped && expert_weight_bits == 4 &&
+        (fc1_zero_points || fc2_zero_points)) {
       hipdnn_ep_real::ZpUnpackCache *zpc =
           hipdnn_ep_real::get_or_create_zp_cache(state);
       if (!zpc) {
@@ -473,30 +476,20 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
         return -1;
       }
       if (fc1_zero_points) {
-        fc1_pre_zp_u8 = expert_weight_bits == 2
-                            ? hipdnn_ep_real::lookup_or_unpack_zp_u8_2bit(
-                                  *zpc, stream, fc1_zero_points,
-                                  static_cast<int>(num_experts * fusion_inter),
-                                  static_cast<int>(k_blocks_fc1))
-                            : hipdnn_ep_real::lookup_or_unpack_zp_u8(
-                                  *zpc, stream, fc1_zero_points,
-                                  static_cast<int>(num_experts * fusion_inter),
-                                  static_cast<int>(k_blocks_fc1));
+        fc1_pre_zp_u8 = hipdnn_ep_real::lookup_or_unpack_zp_u8(
+            *zpc, stream, fc1_zero_points,
+            static_cast<int>(num_experts * fusion_inter),
+            static_cast<int>(k_blocks_fc1));
         if (!fc1_pre_zp_u8) {
           result = -1;
           goto cleanup;
         }
       }
       if (fc2_zero_points) {
-        fc2_pre_zp_u8 = expert_weight_bits == 2
-                            ? hipdnn_ep_real::lookup_or_unpack_zp_u8_2bit(
-                                  *zpc, stream, fc2_zero_points,
-                                  static_cast<int>(num_experts * hidden_size),
-                                  static_cast<int>(k_blocks_fc2))
-                            : hipdnn_ep_real::lookup_or_unpack_zp_u8(
-                                  *zpc, stream, fc2_zero_points,
-                                  static_cast<int>(num_experts * hidden_size),
-                                  static_cast<int>(k_blocks_fc2));
+        fc2_pre_zp_u8 = hipdnn_ep_real::lookup_or_unpack_zp_u8(
+            *zpc, stream, fc2_zero_points,
+            static_cast<int>(num_experts * hidden_size),
+            static_cast<int>(k_blocks_fc2));
         if (!fc2_pre_zp_u8) {
           result = -1;
           goto cleanup;
