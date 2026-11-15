@@ -63,6 +63,34 @@ struct OpProfileState {
 
 OpProfileState *op_profile_create() { return new OpProfileState; }
 
+void op_profile_bind_loaded_session(OpProfileState *ps, const char *sha256,
+                                    const char *artifactKind,
+                                    const char *sessionId) {
+  const char *enabled = std::getenv("HIPDNN_EP_CALL_CAPTURE");
+  if (!ps || !enabled || enabled[0] != '1' || enabled[1] != '\0' || !sha256 ||
+      !artifactKind || !sessionId || !*sessionId)
+    return;
+  size_t length = 0;
+  while (sha256[length]) {
+    const char value = sha256[length];
+    if (!((value >= '0' && value <= '9') || (value >= 'a' && value <= 'f')))
+      return;
+    ++length;
+  }
+  if (length != 64 || (std::string(artifactKind) != "llvm_ir" &&
+                       std::string(artifactKind) != "native"))
+    return;
+  using Json = CallCaptureJson;
+  const std::string graphId =
+      "graph-" + std::string(artifactKind) + "-" + sha256;
+  ps->trace.setSessionCapture(
+      Json::object({{"schema", "hip-ep-loaded-session-1"},
+                    {"session_id", sessionId},
+                    {"graph_id", graphId},
+                    {"artifact_sha256", sha256},
+                    {"artifact_kind", artifactKind}}));
+}
+
 void op_profile_destroy(OpProfileState *ps) {
   if (!ps)
     return;

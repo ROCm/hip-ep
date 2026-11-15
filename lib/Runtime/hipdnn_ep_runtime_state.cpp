@@ -393,6 +393,15 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
     }
   }
 
+  op_profile_bind_loaded_session(
+      static_cast<OpProfileState *>((*out_state)->op_profile),
+      hipdnn_ep_runtime_get_provider_option(*out_state,
+                                            "__hip_ep_capture_artifact_sha256"),
+      hipdnn_ep_runtime_get_provider_option(*out_state,
+                                            "__hip_ep_capture_artifact_kind"),
+      hipdnn_ep_runtime_get_provider_option(*out_state,
+                                            "__hip_ep_capture_session_id"));
+
 #if defined(HIPDNN_EP_REAL_RUNTIME)
   // The GQA autotune table is embedded in custom_kernels_<arch> now, so the
   // policy is created by an exported DLL shim and no longer needs a FileSystem.

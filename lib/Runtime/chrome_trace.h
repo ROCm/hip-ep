@@ -167,6 +167,10 @@ public:
   // each per-model NATIVE model.dll.
   ChromeTrace();
 
+  void setSessionCapture(const CallCaptureJson &capture) {
+    sessionCapture_ = capture;
+  }
+
   // Per-op spans: GPU track (epoch-anchored) + CPU track (wrapper wall time).
   void addOp(const std::string &name, const std::string &shape, double gpuTsUs,
              double gpuDurUs, double cpuTsUs, double cpuDurUs, int64_t bytes,
@@ -207,6 +211,7 @@ private:
   };
 
   std::string tag_;
+  std::optional<CallCaptureJson> sessionCapture_;
   std::vector<Op> ops_;
   std::vector<IoSpan> io_;
   std::vector<CpuTotal> cpuTotals_;

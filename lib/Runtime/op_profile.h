@@ -30,6 +30,11 @@ struct OpProfileState;
 OpProfileState *op_profile_create();
 void op_profile_destroy(OpProfileState *ps);
 void op_profile_reset(OpProfileState *ps);
+// Loader observations copied from the existing inference-init option adapter.
+// Missing observations never become a qualified graph/session identity.
+void op_profile_bind_loaded_session(OpProfileState *ps, const char *sha256,
+                                    const char *artifactKind,
+                                    const char *sessionId);
 void op_profile_resolve_and_print(OpProfileState *ps);
 void op_profile_add_pending(OpProfileState *ps, const std::string &name,
                             const std::string &shape, int markerIndex,

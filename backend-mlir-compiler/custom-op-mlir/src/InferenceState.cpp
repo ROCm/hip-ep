@@ -6,13 +6,22 @@
 
 #include "LoadedArtifact.h"
 #include "hip/artifact_abi.h"
+#include "hip/init_config_abi.h"
 #include "hip/timing.h"
 #include "morphizen/env_config.hpp"
 #include "morphizen/morphizen.hpp"
+#include "llvm/ADT/ArrayRef.h"
+#include "llvm/Support/SHA256.h"
+#include <atomic>
 #include <cstddef>
 #include <cstdlib>
 #include <glog/logging.h>
 #include <utility>
+#ifdef _WIN32
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
 
 // Environment parameters (global scope, before namespace)
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND, "0")
@@ -22,6 +31,65 @@ DEF_ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND, "0")
 namespace mlir_compilation::customop {
 
 namespace {
+// Diagnostic options remain borrowed only for inference_init. The runtime
+// copies them before this adapter and its strings leave scope.
+struct CaptureInitOptions {
+  std::vector<std::pair<std::string, std::string>> values;
+  hipdnn_ep_init_config config;
+
+  CaptureInitOptions(const hipdnn_ep_init_config *original,
+                     const std::vector<uint8_t> &bytes, ArtifactKind kind) {
+    if (original && original->provider_option_count &&
+        original->provider_option_at) {
+      const size_t count = original->provider_option_count(original->self);
+      values.reserve(count + 3);
+      for (size_t index = 0; index < count; ++index) {
+        const char *key = nullptr, *value = nullptr;
+        original->provider_option_at(original->self, index, &key, &value);
+        if (!key)
+          continue;
+        // These three fields describe loader observations, never user labels.
+        if (std::string(key) == "__hip_ep_capture_artifact_sha256" ||
+            std::string(key) == "__hip_ep_capture_artifact_kind" ||
+            std::string(key) == "__hip_ep_capture_session_id")
+          continue;
+        values.emplace_back(key, value ? value : "");
+      }
+    }
+    const auto digest = llvm::SHA256::hash(bytes);
+    static const char hex[] = "0123456789abcdef";
+    std::string sha;
+    sha.reserve(64);
+    for (const auto byte : digest) {
+      sha += hex[byte >> 4];
+      sha += hex[byte & 15];
+    }
+    static std::atomic<uint64_t> sequence{0};
+#ifdef _WIN32
+    const auto pid = _getpid();
+#else
+    const auto pid = getpid();
+#endif
+    values.emplace_back("__hip_ep_capture_artifact_sha256", std::move(sha));
+    values.emplace_back("__hip_ep_capture_artifact_kind",
+                        kind == ArtifactKind::LLVM_IR ? "llvm_ir" : "native");
+    values.emplace_back("__hip_ep_capture_session_id",
+                        "session-" + std::to_string(pid) + "-" +
+                            std::to_string(++sequence));
+    config = {
+        this,
+        [](void *self) -> size_t {
+          return static_cast<CaptureInitOptions *>(self)->values.size();
+        },
+        [](void *self, size_t index, const char **key, const char **value) {
+          const auto &item =
+              static_cast<CaptureInitOptions *>(self)->values.at(index);
+          *key = item.first.c_str();
+          *value = item.second.c_str();
+        }};
+  }
+};
+
 // Resolve inference_init from the loaded artifact, call it with the session's
 // init config, and return the opaque state. FATALs (like the rest of create())
 // on a missing symbol or non-zero return.
@@ -133,7 +201,14 @@ InferenceState::create(const std::vector<uint8_t> &artifact_bytes,
 
   // The inference_init lookup also triggers ORC's lazy codegen for the host
   // wrappers (LLVM IR), so this also covers first-symbol materialization.
-  void *state = runInit(*artifact, fs, config);
+  void *state = nullptr;
+  const char *capture = std::getenv("HIPDNN_EP_CALL_CAPTURE");
+  if (capture && std::string(capture) == "1") {
+    CaptureInitOptions options(config, artifact_bytes, kind);
+    state = runInit(*artifact, fs, &options.config);
+  } else {
+    state = runInit(*artifact, fs, config);
+  }
 
   TIMING_LOG("[Session] inference_init (lookup + lazy codegen): %.3fs\n",
              record_elapsed(t_prev));

@@ -134,6 +134,8 @@ void ChromeTrace::write(const std::string &basePath,
   if (!f)
     return;
   fputs("{\"displayTimeUnit\":\"ns\"", f);
+  if (sessionCapture_)
+    fprintf(f, ",\"session_capture\":%s", sessionCapture_->text().c_str());
   std::map<std::string, CallCaptureJson> cases, graphs, windows;
   std::vector<std::string> conflicts;
   std::optional<bool> exampleOnly;
