@@ -624,4 +624,128 @@ module {
     %r = "onnx.Identity"(%s) : (tensor<*xf32>) -> tensor<?x?xf32>
     return %r : tensor<?x?xf32>
   }
+
+  // Test 27: Whisper decoder_with_past's position-embedding slice,
+  // `embed_positions[past_len : past_len + len]`, with both bounds built as
+  // Unsqueeze of scalar `Gather(Shape(x), k)` arithmetic. The extent must come
+  // from the bounds: falling back to the 448-row table sized the embedding add
+  // at [B, 448, 512] and every decoder buffer after it, and the run faulted on
+  // the GPU.
+  func.func @test_slice_native_unsqueezed_gather_shape_extent(
+      %table: tensor<448x512xf32>, %past: tensor<?x8x?x64xf32>,
+      %ids: tensor<?x?xi64>) -> tensor<?x?xf32> {
+    // CHECK-LABEL: func.func @test_slice_native_unsqueezed_gather_shape_extent
+    %zero = "onnx.Constant"() {value = dense<0> : tensor<1xi64>} : () -> tensor<1xi64>
+    %one = "onnx.Constant"() {value = dense<1> : tensor<1xi64>} : () -> tensor<1xi64>
+    %k1 = "onnx.Constant"() {value = dense<1> : tensor<i64>} : () -> tensor<i64>
+    %k2 = "onnx.Constant"() {value = dense<2> : tensor<i64>} : () -> tensor<i64>
+    %past_shape = "onnx.Shape"(%past) : (tensor<?x8x?x64xf32>) -> tensor<4xi64>
+    %past_len = "onnx.Gather"(%past_shape, %k2) {axis = 0 : si64}
+        : (tensor<4xi64>, tensor<i64>) -> tensor<i64>
+    %starts = "onnx.Unsqueeze"(%past_len, %zero)
+        : (tensor<i64>, tensor<1xi64>) -> tensor<1xi64>
+    %ids_shape = "onnx.Shape"(%ids) : (tensor<?x?xi64>) -> tensor<2xi64>
+    %len = "onnx.Gather"(%ids_shape, %k1) {axis = 0 : si64}
+        : (tensor<2xi64>, tensor<i64>) -> tensor<i64>
+    %end = "onnx.Add"(%past_len, %len)
+        : (tensor<i64>, tensor<i64>) -> tensor<i64>
+    %ends = "onnx.Unsqueeze"(%end, %zero)
+        : (tensor<i64>, tensor<1xi64>) -> tensor<1xi64>
+    %r = "onnx.Slice"(%table, %starts, %ends, %zero, %one)
+        : (tensor<448x512xf32>, tensor<1xi64>, tensor<1xi64>, tensor<1xi64>,
+           tensor<1xi64>) -> tensor<?x?xf32>
+
+    // CHECK: %[[PAST:.*]] = tensor.dim %arg2, %{{.*}} : tensor<?x8x?x64xf32>
+    // CHECK: %[[LEN:.*]] = tensor.dim %arg3, %{{.*}} : tensor<?x?xi64>
+    // CHECK: arith.addi %[[PAST]], %[[LEN]] : index
+    // CHECK: %[[LO:.*]] = arith.minsi %{{.*}}, %{{.*}} : index
+    // CHECK: %[[HI:.*]] = arith.minsi %{{.*}}, %{{.*}} : index
+    // CHECK: %[[SPAN:.*]] = arith.subi %[[HI]], %[[LO]] : index
+    // CHECK: %[[EXT:.*]] = arith.maxsi %[[SPAN]], %{{.*}} : index
+    // CHECK: %[[EMPTY:.*]] = arith.cmpi eq, %[[EXT]], %{{.*}} : index
+    // CHECK: %[[CAP:.*]] = arith.select %[[EMPTY]], %{{.*}}, %[[EXT]] : index
+    // CHECK: tensor.empty(%[[CAP]], %{{.*}}) : tensor<?x?xf32>
+    // CHECK: hip.slice
+    return %r : tensor<?x?xf32>
+  }
+
+  // Test 28: test 27 in the post-conversion spelling: Unsqueeze already
+  // lowered to tensor.expand_shape, Gather(Shape) to from_elements, and the
+  // Add to a rank-0 hip.add.
+  func.func @test_slice_native_lowered_expand_shape_extent(
+      %ctx: !hip.context, %table: tensor<448x512xf32>,
+      %past: tensor<?x8x?x64xf32>, %ids: tensor<?x?xi64>) -> tensor<?x?xf32> {
+    // CHECK-LABEL: func.func @test_slice_native_lowered_expand_shape_extent
+    %c1 = arith.constant 1 : index
+    %c2 = arith.constant 2 : index
+    %zero = arith.constant dense<0> : tensor<1xi64>
+    %one = arith.constant dense<1> : tensor<1xi64>
+    %past_dim = tensor.dim %past, %c2 : tensor<?x8x?x64xf32>
+    %past_i64 = arith.index_cast %past_dim : index to i64
+    %past_len = tensor.from_elements %past_i64 : tensor<i64>
+    %starts = tensor.expand_shape %past_len [] output_shape [1]
+        : tensor<i64> into tensor<1xi64>
+    %ids_dim = tensor.dim %ids, %c1 : tensor<?x?xi64>
+    %ids_i64 = arith.index_cast %ids_dim : index to i64
+    %len = tensor.from_elements %ids_i64 : tensor<i64>
+    %add_init = tensor.empty() : tensor<i64>
+    %end = hip.add(%ctx) ins(%past_len, %len : tensor<i64>, tensor<i64>)
+        outs(%add_init : tensor<i64>) -> tensor<i64>
+    %ends = tensor.expand_shape %end [] output_shape [1]
+        : tensor<i64> into tensor<1xi64>
+    %r = "onnx.Slice"(%table, %starts, %ends, %zero, %one)
+        : (tensor<448x512xf32>, tensor<1xi64>, tensor<1xi64>, tensor<1xi64>,
+           tensor<1xi64>) -> tensor<?x?xf32>
+
+    // CHECK: %[[PAST:.*]] = tensor.dim %arg2, %{{.*}} : tensor<?x8x?x64xf32>
+    // CHECK: %[[LEN:.*]] = tensor.dim %arg3, %{{.*}} : tensor<?x?xi64>
+    // CHECK: arith.addi %[[PAST]], %[[LEN]] : index
+    // CHECK: %[[LO:.*]] = arith.minsi %{{.*}}, %{{.*}} : index
+    // CHECK: %[[HI:.*]] = arith.minsi %{{.*}}, %{{.*}} : index
+    // CHECK: %[[SPAN:.*]] = arith.subi %[[HI]], %[[LO]] : index
+    // CHECK: %[[EXT:.*]] = arith.maxsi %[[SPAN]], %{{.*}} : index
+    // CHECK: %[[EMPTY:.*]] = arith.cmpi eq, %[[EXT]], %{{.*}} : index
+    // CHECK: %[[CAP:.*]] = arith.select %[[EMPTY]], %{{.*}}, %[[EXT]] : index
+    // CHECK: tensor.empty(%[[CAP]], %{{.*}}) : tensor<?x?xf32>
+    // CHECK: hip.slice
+    return %r : tensor<?x?xf32>
+  }
+
+  // Test 29: an i32 bound `Unsqueeze(n * n + 3)` wraps at 32 bits in the
+  // graph (n = 65536 gives an end of 3), so the host rebuild truncates to i32
+  // and sign-extends after each arithmetic step rather than computing at
+  // index width.
+  func.func @test_slice_native_i32_bound_wraps(
+      %ctx: !hip.context, %table: tensor<448x512xf32>,
+      %ids: tensor<?x?xi64>) -> tensor<?x?xf32> {
+    // CHECK-LABEL: func.func @test_slice_native_i32_bound_wraps
+    %c1 = arith.constant 1 : index
+    %zero = arith.constant dense<0> : tensor<1xi32>
+    %one = arith.constant dense<1> : tensor<1xi32>
+    %three = arith.constant dense<3> : tensor<i32>
+    %ids_dim = tensor.dim %ids, %c1 : tensor<?x?xi64>
+    %ids_i32 = arith.index_cast %ids_dim : index to i32
+    %n = tensor.from_elements %ids_i32 : tensor<i32>
+    %mul_init = tensor.empty() : tensor<i32>
+    %sq = hip.mul(%ctx) ins(%n, %n : tensor<i32>, tensor<i32>)
+        outs(%mul_init : tensor<i32>) -> tensor<i32>
+    %add_init = tensor.empty() : tensor<i32>
+    %end = hip.add(%ctx) ins(%sq, %three : tensor<i32>, tensor<i32>)
+        outs(%add_init : tensor<i32>) -> tensor<i32>
+    %ends = tensor.expand_shape %end [] output_shape [1]
+        : tensor<i32> into tensor<1xi32>
+    %r = "onnx.Slice"(%table, %zero, %ends, %zero, %one)
+        : (tensor<448x512xf32>, tensor<1xi32>, tensor<1xi32>, tensor<1xi32>,
+           tensor<1xi32>) -> tensor<?x?xf32>
+
+    // CHECK: arith.index_cast %{{.*}} : i32 to index
+    // CHECK: %[[SQ:.*]] = arith.muli %{{.*}}, %{{.*}} : index
+    // CHECK: %[[SQ32:.*]] = arith.index_cast %[[SQ]] : index to i32
+    // CHECK: %[[SQW:.*]] = arith.index_cast %[[SQ32]] : i32 to index
+    // CHECK: %[[END:.*]] = arith.addi %[[SQW]], %{{.*}} : index
+    // CHECK: %[[END32:.*]] = arith.index_cast %[[END]] : index to i32
+    // CHECK: arith.index_cast %[[END32]] : i32 to index
+    // CHECK: hip.slice
+    return %r : tensor<?x?xf32>
+  }
 }
