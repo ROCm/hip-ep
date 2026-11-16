@@ -74,7 +74,7 @@ def check(doc):
             fail(f'{where} unknown gaps {sorted(gaps - GAPS)}')
         if not gaps <= LEGACY_GAPS.get(name, set()):
             fail(f'{where} gaps {sorted(gaps - LEGACY_GAPS.get(name, set()))} are not allowed; '
-                 'see README "Required capabilities in every leaf"')
+                 'see unit_test/GUIDELINES.md "Required capabilities in every leaf"')
         if ('custom_shape' in gaps) != (not params):
             fail(f'{where} custom params and custom_shape gap disagree')
         if ('shared_timer' in gaps) != (caps['timing'] != 'shared'):
