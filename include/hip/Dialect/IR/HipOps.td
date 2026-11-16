@@ -2121,10 +2121,30 @@ def Hip_MulOp : Hip_DpsOp_Broadcast<"mul", /*operandGetters=*/["Lhs", "Rhs"],
   let hasVerifier = 1;
 }
 
+def Hip_StorageCastOp : Hip_Op<"storage_cast", [Pure]> {
+  let summary = "View a tensor as quantized or as its storage integers";
+  let description = [{
+    Bit-preserving cast between a `!quant.uniform` tensor and its hip storage
+    tensor (`uiN` for unsigned, signless `iN` for signed storage). Shapes are
+    identical. `quant.scast` is not used because it rejects `uiN`.
+
+    ```mlir
+    %q = hip.storage_cast %x : tensor<8xui16>
+                            to tensor<8x!quant.uniform<u16:f32, 0.5:3>>
+    ```
+  }];
+
+  let arguments = (ins AnyRankedTensor:$input);
+  let results = (outs AnyRankedTensor:$result);
+  let assemblyFormat = "$input attr-dict `:` type($input) `to` type($result)";
+  let hasVerifier = 1;
+  let hasFolder = 1;
+}
+
 def Hip_AddOp : Hip_DpsOp_Broadcast<"add", /*operandGetters=*/["Lhs", "Rhs"],
                                     /*outsAccessor=*/"Output",
                                     /*traits=*/[OpStateOpInterface]> {
-  let summary = "Elementwise addition";
+  let summary = "Elementwise addition, float or quantized by type";
 
   // OpStateOpInterface: shared OpTensorState (see hip.mul).
   let extraClassDeclaration = [{
@@ -2141,6 +2161,23 @@ def Hip_AddOp : Hip_DpsOp_Broadcast<"add", /*operandGetters=*/["Lhs", "Rhs"],
 
     Uses destination-passing style: output buffer is provided as argument.
 
+    The element types decide the kernel. Float tensors run the float kernel.
+    `!quant.uniform` tensors (all three operands) mean the op dequantizes its
+    inputs and quantizes its output, i.e. the QDQ-integrated kernel:
+
+    ```mlir
+    hip.add(%ctx) ins(%a, %b : tensor<8x!quant.uniform<u16:f32, 0.5:3>>,
+                               tensor<8x!quant.uniform<u16:f32, 0.25:7>>)
+                  outs(%init : tensor<8x!quant.uniform<u16:f32, 1.0:0>>)
+                  -> tensor<8x!quant.uniform<u16:f32, 1.0:0>>
+    ```
+
+    Memrefs cannot hold quantized element types, so hip-legalize-quant-types
+    moves them into `quant_types` ([lhs, rhs, output] element types) and
+    retypes the tensors to their storage integers before bufferization. Every
+    add gets `quant_types`; a float add's entries are its float types
+    (`[f32, f32, f32]`), and lowering picks the kernel from them.
+
     Example:
     ```mlir
     hip.add(%ctx) ins(%lhs, %rhs : memref<1x128x32xf16, 1>,
@@ -2153,8 +2190,23 @@ def Hip_AddOp : Hip_DpsOp_Broadcast<"add", /*operandGetters=*/["Lhs", "Rhs"],
     Hip_ContextType:$ctx,
     Hip_TensorOrMemRef:$lhs,
     Hip_TensorOrMemRef:$rhs,
-    Hip_TensorOrMemRef:$output
+    Hip_TensorOrMemRef:$output,
+    OptionalAttr<TypeArrayAttr>:$quant_types
   );
+
+  // Float builders; `quant_types` is only set by hip-legalize-quant-types.
+  let builders = [
+    OpBuilder<(ins "::mlir::TypeRange":$result_tensors, "::mlir::Value":$ctx,
+                   "::mlir::Value":$lhs, "::mlir::Value":$rhs,
+                   "::mlir::Value":$output), [{
+      build($_builder, $_state, result_tensors, ctx, lhs, rhs, output,
+            ::mlir::ArrayAttr());
+    }]>,
+    OpBuilder<(ins "::mlir::Value":$ctx, "::mlir::Value":$lhs,
+                   "::mlir::Value":$rhs, "::mlir::Value":$output), [{
+      build($_builder, $_state, ctx, lhs, rhs, output, ::mlir::ArrayAttr());
+    }]>
+  ];
 
   // result_tensors inherited from Hip_DpsOp
   let hasCustomAssemblyFormat = 1;

@@ -18,6 +18,8 @@ def Hip_Dialect : Dialect {
   }];
   let cppNamespace = "::mlir::hip";
   let useDefaultTypePrinterParser = 1;
+  // Element types of quantized tensors are upstream `!quant.uniform`.
+  let dependentDialects = ["::mlir::quant::QuantDialect"];
 }
 
 #endif // HIP_DIALECT

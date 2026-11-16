@@ -12,6 +12,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/Quant/IR/Quant.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
@@ -19,6 +20,7 @@
 #include "mlir/IR/SymbolTable.h"
 
 #include "HipShapeUtilsInternal.h"
+#include "hip/Dialect/IR/HipQuantTypes.h"
 #include "hip/Dialect/IR/HipShapeUtils.h"
 
 #include <cmath>
@@ -2284,8 +2286,10 @@ void AddOp::getEffects(
 }
 
 LogicalResult AddOp::verify() {
-  return verifyDpsComputeOp(*this, {getLhs(), getRhs(), getOutput()},
-                            /*numInits=*/1);
+  if (failed(verifyDpsComputeOp(*this, {getLhs(), getRhs(), getOutput()},
+                                /*numInits=*/1)))
+    return failure();
+  return verifyQuantTypes(*this, {getLhs(), getRhs(), getOutput()});
 }
 
 ParseResult AddOp::parse(OpAsmParser &parser, OperationState &result) {

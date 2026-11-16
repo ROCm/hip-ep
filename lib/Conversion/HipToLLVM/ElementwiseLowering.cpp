@@ -5,6 +5,8 @@
 
 #include "HipToLLVMUtils.h"
 
+#include "hip/Dialect/IR/HipQuantTypes.h"
+
 namespace mlir {
 namespace hip {
 namespace {
@@ -95,6 +97,10 @@ struct ElementwiseOpLowering : public ConvertOpToLLVMPattern<OpTy> {
     Type ptrType = this->getPtrType();
     Type i32Type = rewriter.getI32Type();
     Type i64Type = rewriter.getI64Type();
+
+    // Quantized ops lower to wrap_qelementwise (QElementwiseLowering.cpp).
+    if (isQuantizedOp(op))
+      return rewriter.notifyMatchFailure(op, "quantized; not a float kernel");
 
     auto lhsType = cast<MemRefType>(op.getLhs().getType());
     auto rhsType = cast<MemRefType>(op.getRhs().getType());

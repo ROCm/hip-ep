@@ -48,6 +48,12 @@ Constraint IsHipPerAxisQuantizedWeight(dq: Op, rank: Attr, axis: Attr,
                                        packedInt4: Attr);
 Constraint IsHipPerChannelQuantizedWeight(dq: Op, consumer: Op);
 
+// Quant types: SupportsQuantTypes checks that every Q/DQ has a per-tensor
+// quant type and that a kernel exists for op with them; GetQuantTensorType
+// returns the Q/DQ's integer-side tensor type with that quant element type.
+Constraint SupportsQuantTypes(op: Op, lhs: Op, rhs: Op, out: Op);
+Rewrite GetQuantTensorType(qdq: Op) -> Type;
+
 // Compute-op geometry.
 Constraint IsHipFusableQConvGeometry(conv: Op);
 Constraint IsHipL2EquivalentRmsNorm(rms: Op);
@@ -63,7 +69,7 @@ Constraint IsHipQdqIdentityRoundTrip(dq: Op, q: Op);
 Constraint CanRequantizeLayoutOp(layout: Op, resultType: Type);
 Rewrite CreateRequantizedLayoutOp(dq: Op, layout: Op, q: Op) -> Value;
 
-#include "QAddFusion.pdll"
+#include "QdqToQuantTypes.pdll"
 #include "QMulFusion.pdll"
 #include "QMatMulFusion.pdll"
 #include "QGemmFusion.pdll"

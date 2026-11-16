@@ -203,6 +203,11 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   //     `ResolveTensorDims.cpp`.
   pm.addNestedPass<func::FuncOp>(mlir::hip::createResolveTensorDimsPass());
 
+  // 1d. Quantized element types cannot live in memrefs: record them in each
+  //     op's `quant_types` attribute (read by lowering to pick the kernel) and
+  //     retype the tensors to their storage integers.
+  pm.addNestedPass<func::FuncOp>(mlir::hip::createLegalizeQuantTypesPass());
+
   // Plugin slot: BeforeBufferization. Vendors often want to lower or
   // canonicalize hip.* ops before bufferization fixes the type system
   // to memrefs.

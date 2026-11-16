@@ -44,6 +44,7 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/MemRef/Transforms/AllocationOpInterfaceImpl.h"
 #include "mlir/Dialect/MemRef/Transforms/Passes.h"
+#include "mlir/Dialect/Quant/IR/Quant.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/SCF/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/Shape/IR/Shape.h"
@@ -114,6 +115,7 @@ registerAllDialects(mlir::DialectRegistry &registry,
   registry.insert<mlir::LLVM::LLVMDialect>();
   registry.insert<mlir::ub::UBDialect>();
   registry.insert<mlir::hip::HipDialect>();
+  registry.insert<mlir::quant::QuantDialect>();
   registry.insert<mlir::hipsr::HipsrDialect>();
 
   registerConvertToLLVMInterfaces(registry);

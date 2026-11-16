@@ -48,6 +48,7 @@ add_library(HipDialectTransforms STATIC
   InferLoopBodyShapesPass.cpp
   InferShapesPass.cpp
   KernelOutline.cpp
+  LegalizeQuantTypes.cpp
   LoopBodyToOutParams.cpp
   LowerAllocs.cpp
   MaterializeHostScalars.cpp

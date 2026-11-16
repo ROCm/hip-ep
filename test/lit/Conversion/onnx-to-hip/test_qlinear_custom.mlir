@@ -6,8 +6,8 @@
 // onnx.Custom. They
 // decompose into
 // DequantizeLinear + the float op + QuantizeLinear, and --hip-fusion-transform
-// then fuses per-tensor Add and Mul to hip.qadd / hip.qmul. Absent zero
-// points are onnx.NoValue and fuse as zp 0.
+// then folds per-tensor Add's Q/DQ into quant types and fuses Mul to hip.qmul.
+// Absent zero points are onnx.NoValue and fuse as zp 0.
 
 // RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip --hip-fusion-transform %s | FileCheck %s
 
@@ -28,13 +28,11 @@ module {
       domain_name = "com.microsoft", function_name = "QLinearAdd"
     } : (tensor<1x8xi8>, tensor<f32>, tensor<i8>, tensor<1x8xi8>, tensor<f32>, tensor<i8>, tensor<f32>, tensor<i8>) -> tensor<1x8xi8>
 
-    // CHECK: hip.qadd
-    // CHECK-SAME: lhs_scale = 1.000000e-01
-    // CHECK-SAME: lhs_zp = -5
-    // CHECK-SAME: output_scale = 2.000000e-01
-    // CHECK-SAME: output_zp = 7
-    // CHECK-SAME: rhs_scale = 5.000000e-02
-    // CHECK-SAME: rhs_zp = 3
+    // Scales are the exact f32 values of 0.1, 0.05 and 0.2.
+    // CHECK: %[[A:.*]] = hip.storage_cast %{{.*}} : tensor<1x8xi8> to tensor<1x8x!quant.uniform<i8:f32, 0.10000000149011612:-5>>
+    // CHECK: %[[B:.*]] = hip.storage_cast %{{.*}} : tensor<1x8xi8> to tensor<1x8x!quant.uniform<i8:f32, 0.05000000074505806:3>>
+    // CHECK: %[[C:.*]] = hip.add(%{{.*}}) ins(%[[A]], %[[B]] : {{.*}}) outs(%{{.*}} : tensor<1x8x!quant.uniform<i8:f32, 0.20000000298023224:7>>)
+    // CHECK: hip.storage_cast %[[C]] : {{.*}} to tensor<1x8xi8>
     // CHECK-NOT: onnx.Custom
     return %c : tensor<1x8xi8>
   }
@@ -50,10 +48,10 @@ module {
       domain_name = "com.microsoft", function_name = "QLinearAdd"
     } : (tensor<4xi8>, tensor<f32>, none, tensor<4xi8>, tensor<f32>, none, tensor<f32>, none) -> tensor<4xi8>
 
-    // CHECK: hip.qadd
-    // CHECK-SAME: lhs_zp = 0
-    // CHECK-SAME: output_zp = 0
-    // CHECK-SAME: rhs_zp = 0
+    // A zero point of 0 is omitted from the printed quant type.
+    // CHECK: hip.add
+    // CHECK-SAME: ins({{.*}} : tensor<4x!quant.uniform<i8:f32, 2.500000e-01>>, tensor<4x!quant.uniform<i8:f32, 5.000000e-01>>)
+    // CHECK-SAME: outs({{.*}} : tensor<4x!quant.uniform<i8:f32, 1.250000e-01>>)
     // CHECK-NOT: onnx.Custom
     return %c : tensor<4xi8>
   }

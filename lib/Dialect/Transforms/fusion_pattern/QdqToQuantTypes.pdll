@@ -1,0 +1,37 @@
+//===- QdqToQuantTypes.pdll -----------------------------------------------===//
+//
+// Fold the Q/DQ around a hip op into the op's element types. The result is the
+// same op as in a float model, only with `!quant.uniform` types, so later
+// fusions are written once for both. The types select the kernel at lowering.
+//
+// Included by HipFusionTransformPatterns.pdll, which declares the native
+// helpers used below. Not compilable on its own.
+//===----------------------------------------------------------------------===//
+
+Pattern HipAddQdqToQuantTypes with benefit(10) {
+  // dequantize x2 -> hip.add -> quantize. The trailing ValueRanges absorb the
+  // optional zero point and the init.
+  let dq_lhs = op<hip.dequantize_linear>(ctx: Value, lhs: Value, _: ValueRange);
+  let dq_rhs = op<hip.dequantize_linear>(ctx, rhs: Value, _: ValueRange);
+  let add = op<hip.add>(ctx, dq_lhs.0, dq_rhs.0, add_init: Value);
+  let q = op<hip.quantize_linear>(ctx, add.0, _: ValueRange)
+      -> (output_type: Type);
+
+  // Each Q/DQ has a per-tensor quant type and a kernel takes the combination.
+  SupportsQuantTypes(add, dq_lhs, dq_rhs, q);
+  // A second user of the float sum would keep the float add alive.
+  HasSingleUseResult(add);
+
+  rewrite q with {
+    let lhs_type = GetQuantTensorType(dq_lhs);
+    let rhs_type = GetQuantTensorType(dq_rhs);
+    let out_type = GetQuantTensorType(q);
+
+    let lhs_q = op<hip.storage_cast>(lhs) -> (lhs_type);
+    let rhs_q = op<hip.storage_cast>(rhs) -> (rhs_type);
+    let init = BuildInit(out_type, add_init);
+    let qadd = op<hip.add>(ctx, lhs_q, rhs_q, init) -> (out_type);
+    let out = op<hip.storage_cast>(qadd) -> (output_type);
+    replace q with out;
+  };
+}

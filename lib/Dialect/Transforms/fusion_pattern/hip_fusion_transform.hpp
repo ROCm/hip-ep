@@ -29,6 +29,7 @@
 #pragma once
 
 #include "hip/Dialect/IR/HipDialect.h"
+#include "hip/Dialect/IR/HipQuantTypes.h"
 
 #include "linear_attention_group_fold.hpp"
 #include "patch_embed_conv_to_gemm.hpp"
@@ -38,6 +39,7 @@
 #include "mlir/Dialect/PDL/IR/PDL.h"
 #include "mlir/Dialect/PDL/IR/PDLOps.h"
 #include "mlir/Dialect/PDLInterp/IR/PDLInterp.h"
+#include "mlir/Dialect/Quant/IR/QuantTypes.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -138,6 +140,50 @@ inline std::optional<int64_t> tryHipQdqZeropoint(mlir::Operation *op,
   llvm::APInt raw = payload.getSplatValue<llvm::APInt>();
   return intType.isUnsigned() ? static_cast<int64_t>(raw.getZExtValue())
                               : raw.getSExtValue();
+}
+
+/// per-tensor quant type of a Q/DQ: splat scale, readable zero point and hip
+/// storage integer; null if not representable
+inline mlir::quant::UniformQuantizedType
+getHipQdqQuantType(mlir::Operation *op) {
+  mlir::Value scale, floatSide;
+  if (auto q = mlir::dyn_cast_or_null<mlir::hip::QuantizeLinearOp>(op)) {
+    scale = q.getScale();
+    floatSide = q.getInput();
+  } else if (auto dq =
+                 mlir::dyn_cast_or_null<mlir::hip::DequantizeLinearOp>(op)) {
+    scale = dq.getScale();
+    floatSide = dq.getResult(0);
+  } else {
+    return {};
+  }
+  // packed_int4 storage is not one value per element.
+  if (op->hasAttr("packed_int4"))
+    return {};
+
+  auto intType = getQdqQuantizedElementType(op);
+  auto expressed = mlir::dyn_cast<mlir::FloatType>(
+      mlir::getElementTypeOrSelf(floatSide.getType()));
+  std::optional<float> scaleValue = tryHipSplatScale(scale);
+  std::optional<int64_t> zeroPoint = tryHipQdqZeropoint(op, 0);
+  if (!intType || intType.isSigned() || intType.getWidth() > 32 || !expressed ||
+      !scaleValue || !zeroPoint || !std::isfinite(*scaleValue) ||
+      *scaleValue <= 0.0f)
+    return {};
+
+  bool isSigned = !intType.isUnsigned();
+  unsigned width = intType.getWidth();
+  int64_t min =
+      mlir::quant::QuantizedType::getDefaultMinimumForInteger(isSigned, width);
+  int64_t max =
+      mlir::quant::QuantizedType::getDefaultMaximumForInteger(isSigned, width);
+  if (*zeroPoint < min || *zeroPoint > max)
+    return {};
+
+  return mlir::quant::UniformQuantizedType::get(
+      isSigned ? mlir::quant::QuantizationFlags::Signed : 0,
+      mlir::IntegerType::get(op->getContext(), width), expressed, *scaleValue,
+      *zeroPoint, min, max);
 }
 
 /// op's `name` attribute as a signed int64, absentValue when it is missing,
@@ -290,6 +336,24 @@ hasSameHipQdqElementType(mlir::PatternRewriter &, mlir::PDLResultList &,
   // and the output, so a mixed chain such as a uint16 activation plus an int8
   // constant would read the narrower operand at the wider width.
   return mlir::success();
+}
+
+/// every Q/DQ has a per-tensor quant type, and op has a kernel for them
+inline mlir::LogicalResult
+supportsQuantTypes(mlir::PatternRewriter &, mlir::PDLResultList &,
+                   llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() < 2)
+    return mlir::failure();
+  llvm::SmallVector<mlir::Type> types;
+  for (const mlir::PDLValue &arg : args.drop_front()) {
+    auto type = getHipQdqQuantType(arg.dyn_cast<mlir::Operation *>());
+    if (!type)
+      return mlir::failure();
+    types.push_back(type);
+  }
+  return mlir::success(mlir::hip::supportsQuantTypes(
+      args[0].dyn_cast<mlir::Operation *>(), llvm::ArrayRef(types).drop_back(),
+      types.back()));
 }
 
 /// rms computes an L2 normalization over the trailing axis
@@ -652,6 +716,22 @@ inline mlir::LogicalResult buildInit(mlir::PatternRewriter &rewriter,
   return mlir::success();
 }
 
+/// the integer-side tensor type of a Q/DQ with its quant element type
+inline mlir::LogicalResult
+getQuantTensorType(mlir::PatternRewriter &, mlir::PDLResultList &results,
+                   llvm::ArrayRef<mlir::PDLValue> args) {
+  // Guarded by SupportsQuantTypes, so the type exists.
+  auto *op = args[0].dyn_cast<mlir::Operation *>();
+  mlir::Value intSide =
+      mlir::isa<mlir::hip::QuantizeLinearOp>(op)
+          ? op->getResult(0)
+          : mlir::cast<mlir::hip::DequantizeLinearOp>(op).getInput();
+  results.push_back(
+      mlir::Type(mlir::cast<mlir::RankedTensorType>(intSide.getType())
+                     .clone(getHipQdqQuantType(op))));
+  return mlir::success();
+}
+
 /// a copy of layout reading dq's quantized input and producing q's result type
 inline mlir::LogicalResult
 createRequantizedLayoutOp(mlir::PatternRewriter &rewriter,
@@ -820,6 +900,9 @@ inline void registerNativeHelpers(mlir::PDLPatternModule &pdlPatterns) {
                                          isHipQdqUnsignedQuantized);
   pdlPatterns.registerConstraintFunction("HasSameHipQdqElementType",
                                          hasSameHipQdqElementType);
+  pdlPatterns.registerConstraintFunction("SupportsQuantTypes",
+                                         supportsQuantTypes);
+  pdlPatterns.registerRewriteFunction("GetQuantTensorType", getQuantTensorType);
   pdlPatterns.registerConstraintFunction("IsHipFusableQConvGeometry",
                                          isHipFusableQConvGeometry);
   pdlPatterns.registerConstraintFunction("IsHipPerAxisQuantizedWeight",

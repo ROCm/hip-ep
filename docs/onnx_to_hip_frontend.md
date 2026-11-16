@@ -101,7 +101,7 @@ packed `__half2` path for fp16 rows of even width.
 | `QuantizeLinear` | `hip.quantize_linear` | `qdq_kernel.hip` |
 | `DequantizeLinear` | `hip.dequantize_linear` | `qdq_kernel.hip` |
 | `QLinearConv` | `hip.qlinear_conv` | `qlinear_conv_kernel.hip` |
-| `QLinearAdd` (`com.microsoft`) | `hip.qadd` | decomposed, then QDQ fusion |
+| `QLinearAdd` (`com.microsoft`) | `hip.add` (quant types) | decomposed, then Q/DQ folded into types |
 | `QLinearMul` (`com.microsoft`) | `hip.qmul` | decomposed, then QDQ fusion |
 | `QLinearConcat` (`com.microsoft`) | DQ + Concat + Q | no fused kernel |
 | `QLinearGlobalAveragePool` (`com.microsoft`) | DQ + `hip.global_pool` + Q | `channels_last` transposed around the pool |
