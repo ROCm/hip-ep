@@ -367,8 +367,12 @@ pool_2x2_vec_kernel(const T* __restrict__ input, T* __restrict__ output,
   for (int v = 0; v < V; ++v) {
     const float x0 = to_float<T>(a[2 * v]), x1 = to_float<T>(a[2 * v + 1]);
     const float x2 = to_float<T>(b[2 * v]), x3 = to_float<T>(b[2 * v + 1]);
-    const float r = mode == kPoolMax ? fmaxf(fmaxf(x0, x1), fmaxf(x2, x3))
-                                     : (x0 + x1 + x2 + x3) * 0.25f;
+    // Max starts from -FLT_MAX like the other pool kernels, so an all-NaN or
+    // all -inf window gives the same value on every path.
+    const float r =
+        mode == kPoolMax
+            ? fmaxf(fmaxf(fmaxf(-FLT_MAX, x0), x1), fmaxf(x2, x3))
+            : (x0 + x1 + x2 + x3) * 0.25f;
     res[v] = from_float<T>(r);
   }
   *reinterpret_cast<uint2*>(output + (static_cast<size_t>(nc) * s.OH + oh) * s.OW +
@@ -482,7 +486,7 @@ static int launch(hipStream_t stream, const void* input, void* output,
   };
   if (!indices && k0 * k1 * k2 >= kWideMinWindow &&
       fits({total * kWideGroup + block, in0 * in1 * in2, N * C * in0 * in1 * in2,
-            k0 * k1 * k2, out0 * s0 + k0 * d0, out1 * s1 + k1 * d1,
+            k0 * k1 * k2 + kWideGroup, out0 * s0 + k0 * d0, out1 * s1 + k1 * d1,
             out2 * s2 + k2 * d2, p0, p1, p2})) {
     WideShape ws;
     ws.in0 = static_cast<int>(in0);

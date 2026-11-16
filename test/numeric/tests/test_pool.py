@@ -150,4 +150,22 @@ class TestPool:
             with_indices=True,
         )
         actual, expected = model_runner.run_sample(model, [x])
-        compare_outputs(actual, expected, atol=0)
+        compare_outputs(actual, expected, atol=0, rtol=0)
+
+    @pytest.mark.parametrize("dtype", [np.float32, np.float16], ids=["fp32", "fp16"])
+    def test_maxpool_2x2_vec_nonfinite_windows(self, model_runner, dtype):
+        """An all-NaN or all -inf window gives -FLT_MAX (cast to the data
+        type) on the vectorized 2x2 path, as on the other pool kernels."""
+        shape = [1, 2, 8, 16]
+        rng = np.random.default_rng(64)
+        x = rng.uniform(-3, 3, shape).astype(dtype)
+        x[0, 0, 0:2, 0:2] = np.nan
+        x[0, 0, 0:2, 2:4] = -np.inf
+        model = _make_pool_model(
+            "MaxPool", shape, dtype, dict(kernel_shape=[2, 2], strides=[2, 2])
+        )
+        actual, expected = model_runner.run_sample(model, [x])
+        expected = [expected[0].copy()]
+        floor = np.array(-np.finfo(np.float32).max, dtype=np.float32).astype(dtype)
+        expected[0][0, 0, 0, 0:2] = floor
+        np.testing.assert_array_equal(actual[0], expected[0])
