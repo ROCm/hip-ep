@@ -47,6 +47,8 @@ static std::optional<std::array<int64_t, 3>> getGemmDims(Operation *anchor) {
   bool transA = false, transB = false;
   if (auto matmul = dyn_cast<MatmulOp>(anchor)) {
     b = matmul.getB();
+    transA = matmul.getTransA() != 0;
+    transB = matmul.getTransB() != 0;
   } else {
     auto gemm = cast<GemmOp>(anchor);
     b = gemm.getInputB();

@@ -52,6 +52,40 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<512x64xf16>,
 
 // -----
 
+// The gate reads the matmul's transB: B stored as [n, k] = [1, 64] is still a
+// column-vector intermediate (n == 1), so the pair merges.
+
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
+// CHECK-SAME: tensor<1x64xf16>
+// CHECK: hip.matmul
+// CHECK-SAME: transB = 1
+// CHECK: hip.sigmoid
+// CHECK: hip.matmul
+// CHECK-LABEL: func.func @main_graph
+// CHECK: hip.rocmlir
+// CHECK-NOT: hip.rocmlir
+
+// NOGEG-LABEL: func.func @main_graph
+// NOGEG: hip.rocmlir
+// NOGEG: hip.rocmlir
+func.func @main_graph(%ctx: !hip.context, %x: tensor<512x64xf16>,
+                      %w0: tensor<1x64xf16>, %w1: tensor<1x32xf16>)
+    -> tensor<512x32xf16> {
+  %e0 = tensor.empty() : tensor<512x1xf16>
+  %m0 = hip.matmul(%ctx) ins(%x, %w0 : tensor<512x64xf16>, tensor<1x64xf16>)
+      outs(%e0 : tensor<512x1xf16>) {transA = 0 : i64, transB = 1 : i64}
+      : tensor<512x1xf16>
+  %se = tensor.empty() : tensor<512x1xf16>
+  %s = hip.sigmoid(%ctx) ins(%m0 : tensor<512x1xf16>)
+      outs(%se : tensor<512x1xf16>) : tensor<512x1xf16>
+  %e1 = tensor.empty() : tensor<512x32xf16>
+  %m1 = hip.matmul(%ctx) ins(%s, %w1 : tensor<512x1xf16>, tensor<1x32xf16>)
+      outs(%e1 : tensor<512x32xf16>) : tensor<512x32xf16>
+  return %m1 : tensor<512x32xf16>
+}
+
+// -----
+
 // A wide intermediate (n = 64) fails the gate: the m x n tile is cheap to
 // round-trip, so the kernels stay apart.
 
