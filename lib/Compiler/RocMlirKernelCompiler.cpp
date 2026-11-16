@@ -143,8 +143,8 @@ bool buildBackendPipelineFor(OpPassManager &pm, StringRef arch,
 }
 
 // One `rock.prefill` entry, {index, value}. The value has the buffer's
-// element type, and the fill repeats its bit pattern. Nullopt for a value or
-// a width that the fill cannot write.
+// element type, and the fill repeats its bit pattern. Nullopt for a negative
+// index, or a value or a width that the fill cannot write.
 static std::optional<KernelPrefill> parsePrefill(Attribute entry) {
   auto dict = dyn_cast<DictionaryAttr>(entry);
   if (!dict)
@@ -159,7 +159,8 @@ static std::optional<KernelPrefill> parsePrefill(Attribute entry) {
   else
     return std::nullopt;
   unsigned width = bits.getBitWidth();
-  if (!index || (width != 8 && width != 16 && width != 32))
+  if (!index || index.getInt() < 0 ||
+      (width != 8 && width != 16 && width != 32))
     return std::nullopt;
   KernelPrefill prefill;
   prefill.argIndex = index.getInt();

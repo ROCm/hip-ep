@@ -10,6 +10,7 @@
 #include "llvm/Support/MathExtras.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/OpDefinition.h"
@@ -681,6 +682,20 @@ MutableOperandRange RocMlirOp::getDpsInitsMutable() {
   return getOutputsMutable();
 }
 
+// The buffer that a memref reads, through the views that keep its bytes
+// (subview, cast, reinterpret_cast, expand_shape, collapse_shape). A
+// memref.view stops the walk: it is a pool slice, and PoolAllocs gives
+// buffers that are live at the same time disjoint byte ranges.
+static Value getViewedBuffer(Value value) {
+  while (Operation *def = value.getDefiningOp()) {
+    auto view = dyn_cast<ViewLikeOpInterface>(def);
+    if (!view || isa<memref::ViewOp>(def))
+      break;
+    value = view.getViewSource();
+  }
+  return value;
+}
+
 // A row-major buffer that starts at its base pointer: the form whose
 // alignedPtr and element count cover exactly the buffer.
 static bool isContiguousAtBase(MemRefType type) {
@@ -732,10 +747,15 @@ LogicalResult RocMlirOp::verify() {
     if (index < numInputs)
       return emitOpError("prefill argument index ")
              << index << " names an input; only an outs operand is pre-filled";
+    // A view of an input shares its bytes, so the fill would wipe them too.
     Value arg = getOutputs()[index - numInputs];
-    if (llvm::is_contained(getInputs(), arg))
+    Value buffer = isa<MemRefType>(arg.getType()) ? getViewedBuffer(arg) : arg;
+    if (llvm::any_of(getInputs(), [&](Value input) {
+          return input == arg || (isa<MemRefType>(input.getType()) &&
+                                  getViewedBuffer(input) == buffer);
+        }))
       return emitOpError("pre-filled argument ")
-             << index << " is also an input";
+             << index << " is also an input, or a view of one";
     if (!filled.insert(index).second)
       return emitOpError("prefill argument index ")
              << index << " is listed twice";

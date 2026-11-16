@@ -158,3 +158,50 @@ func.func @prefill_offset(%ctx: !hip.context, %x: memref<8xi8, 1>,
        prefill = array<i64: 1, 4, 0>}
   return
 }
+
+// -----
+
+// A cast or a zero-offset subview of an input shares the input's bytes, so
+// the fill would wipe them before the kernel reads them.
+func.func @prefill_output_casts_input(%ctx: !hip.context,
+                                      %y: memref<8xi32, 1>) {
+  %c = memref.cast %y : memref<8xi32, 1> to memref<8xi32, strided<[1]>, 1>
+  // expected-error @+1 {{pre-filled argument 1 is also an input, or a view of one}}
+  hip.rocmlir(%ctx) @rocMlir1 ins(%y : memref<8xi32, 1>)
+      outs(%c : memref<8xi32, strided<[1]>, 1>)
+      {block_size = 64 : i64, grid_size = 1 : i64, kernel_binary = "ELF",
+       prefill = array<i64: 1, 4, 0>}
+  return
+}
+
+// -----
+
+func.func @prefill_output_subviews_input(%ctx: !hip.context,
+                                         %y: memref<16xi32, 1>) {
+  %s = memref.subview %y[0] [8] [1]
+      : memref<16xi32, 1> to memref<8xi32, strided<[1]>, 1>
+  // expected-error @+1 {{pre-filled argument 1 is also an input, or a view of one}}
+  hip.rocmlir(%ctx) @rocMlir1 ins(%y : memref<16xi32, 1>)
+      outs(%s : memref<8xi32, strided<[1]>, 1>)
+      {block_size = 64 : i64, grid_size = 1 : i64, kernel_binary = "ELF",
+       prefill = array<i64: 1, 4, 0>}
+  return
+}
+
+// -----
+
+// Two slices of one pool are separate buffers: PoolAllocs keeps buffers that
+// are live at the same time apart.
+// CHECK-LABEL: func.func @prefill_pool_slices
+// CHECK: hip.rocmlir
+func.func @prefill_pool_slices(%ctx: !hip.context, %pool: memref<64xi8, 1>) {
+  %c0 = arith.constant 0 : index
+  %c32 = arith.constant 32 : index
+  %x = memref.view %pool[%c0][] : memref<64xi8, 1> to memref<8xi32, 1>
+  %y = memref.view %pool[%c32][] : memref<64xi8, 1> to memref<8xi32, 1>
+  hip.rocmlir(%ctx) @rocMlir1 ins(%x : memref<8xi32, 1>)
+      outs(%y : memref<8xi32, 1>)
+      {block_size = 64 : i64, grid_size = 1 : i64, kernel_binary = "ELF",
+       prefill = array<i64: 1, 4, 0>}
+  return
+}
