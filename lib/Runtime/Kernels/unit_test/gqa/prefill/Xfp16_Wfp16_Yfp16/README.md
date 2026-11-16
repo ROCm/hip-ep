@@ -113,3 +113,8 @@ production) and dispatch the resolved config through
 `out/results.csv`.
 
 CI passes `OFFLOAD`/`HIP_SDK` explicitly; there is no personal default.
+
+The v3/ranking merge preserves `--max-seq`, `--scale`, and `--nd/--hb/--bkv`
+from main. Cold KV rotation retains the original capacity/plane stride.
+Default compact-cache/default-scale shapes keep their existing JSON rank
+keys; explicit capacity/scale inputs add distinct shape suffixes.
