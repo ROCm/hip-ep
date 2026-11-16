@@ -715,3 +715,15 @@ overall `PASS`/`FAIL`.
 
 Each leaf inlines its own ~30-line `CsvWriter`/`CsvRow` (no shared header) —
 see the top of any `test_<op>.cpp`.
+
+## QMoE model-shape profiling
+
+`qmoe/Xfp16_Wu4_Yfp16` measures the actual production QMoE wrapper, including
+top-k routing, decode/grouped expert work, activation and reduction, for
+FP16/packed uint4 fused-SwiGLU softmax-routing signatures. It accepts one
+model shape via `make test_custom ARGS="--tokens 1 --hidden 128 --inter 128
+--experts 4 --topk 2 --block-size 32 --fc1-bias 0 --fc2-bias 0
+--zero-points 0 --normalize 1 --router-weights 0" TIMING=screen`.
+The existing `qmoe_ragged_mm` leaf remains a separate primitive test; its
+timing does not stand for an entire QMoE model node. See the full-wrapper
+leaf README for supported attributes, coverage tiers and timing presets.

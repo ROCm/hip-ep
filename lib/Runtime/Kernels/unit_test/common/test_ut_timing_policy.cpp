@@ -8,6 +8,7 @@
 #include "ut_rank.h"
 #include "ut_rank_input.h"
 #include "ut_gpu_frequency.h"
+#include "ut_case_input.h"
 
 #include <cassert>
 #include <iostream>
@@ -32,6 +33,31 @@ void checkTotals(const Result& r) {
 }  // namespace
 
 int main() {
+  {
+    using namespace hipdnn_ep_test::input;
+    int m = 0, k = 0, n = 0;
+    shape3("17x256x128", m, k, n);
+    assert(m == 17 && k == 256 && n == 128);
+    assert(integer("3", "coverage", 1, 3) == 3);
+    assert(boolean("0", "flag") == false);
+    assert(bytes({17, 256}, 2) == 8704);
+    for (const std::string bad : {"", "0", "-1", "1junk", "1.5", "999999999999999999999"}) {
+      bool rejected = false;
+      try { (void)integer(bad, "dimension"); }
+      catch (const std::invalid_argument&) { rejected = true; }
+      assert(rejected);
+    }
+    bool overflow = false;
+    try { (void)bytes({std::numeric_limits<uint64_t>::max(), 2}, 8); }
+    catch (const std::invalid_argument&) { overflow = true; }
+    assert(overflow);
+    for (const std::string bad : {"1x2", "1x2x3junk", "1x2x3x4", "1x0x2"}) {
+      bool rejected = false;
+      try { shape3(bad, m, k, n); }
+      catch (const std::invalid_argument&) { rejected = true; }
+      assert(rejected);
+    }
+  }
   assert(deviceProfile("gfx9999", 71626375, "matmul_nbits_fp16_wu4", false).batch_call_cap == 64);
   const char* shape = "M1_N2048_K2048_gs128";
   assert(deviceProfile("gfx1151", 71626375, "matmul_nbits_fp16_wu4", false, shape).batch_call_cap == 128);
