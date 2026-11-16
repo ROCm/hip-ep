@@ -9,6 +9,162 @@
 // multiply and add commutes. Chains that are not exactly GELU, or whose
 // temporaries have another user, stay as they are.
 
+// CHECK-LABEL: func.func @erf_cast_through_integer
+// CHECK-NOT: hip.gelu
+// CHECK: hip.erf
+// CHECK: return
+func.func @erf_cast_through_integer(%ctx: !hip.context, %x: tensor<4xf32>) -> tensor<4xf32> {
+  %half = hip.constant {value = dense<0.5> : tensor<f32>} : tensor<f32>
+  %one = hip.constant {value = dense<1.0> : tensor<f32>} : tensor<f32>
+  %kd = hip.constant {value = dense<1.4142135624> : tensor<f32>} : tensor<f32>
+  %ei = tensor.empty() : tensor<i32>
+  %i = hip.cast(%ctx) ins(%half : tensor<f32>) outs(%ei : tensor<i32>) {to = 6 : i64} : tensor<i32>
+  %ef = tensor.empty() : tensor<f32>
+  %half_cast = hip.cast(%ctx) ins(%i : tensor<i32>) outs(%ef : tensor<f32>) {to = 1 : i64} : tensor<f32>
+  %e_h = tensor.empty() : tensor<4xf32>
+  %h = hip.mul(%ctx) ins(%x, %half_cast : tensor<4xf32>, tensor<f32>) outs(%e_h : tensor<4xf32>) -> tensor<4xf32>
+  %e_d = tensor.empty() : tensor<4xf32>
+  %d = hip.div(%ctx) ins(%x, %kd : tensor<4xf32>, tensor<f32>) outs(%e_d : tensor<4xf32>) : tensor<4xf32>
+  %e_er = tensor.empty() : tensor<4xf32>
+  %er = hip.erf(%ctx) ins(%d : tensor<4xf32>) outs(%e_er : tensor<4xf32>) : tensor<4xf32>
+  %e_p = tensor.empty() : tensor<4xf32>
+  %p = hip.add(%ctx) ins(%er, %one : tensor<4xf32>, tensor<f32>) outs(%e_p : tensor<4xf32>) -> tensor<4xf32>
+  %e_y = tensor.empty() : tensor<4xf32>
+  %y = hip.mul(%ctx) ins(%h, %p : tensor<4xf32>, tensor<4xf32>) outs(%e_y : tensor<4xf32>) -> tensor<4xf32>
+  return %y : tensor<4xf32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @erf_cast_rounds_to_half
+// CHECK: hip.gelu
+func.func @erf_cast_rounds_to_half(%ctx: !hip.context, %x: tensor<4xf32>) -> tensor<4xf32> {
+  %half = hip.constant {value = dense<0.501> : tensor<f32>} : tensor<f32>
+  %one = hip.constant {value = dense<1.0> : tensor<f32>} : tensor<f32>
+  %kd = hip.constant {value = dense<1.4142135624> : tensor<f32>} : tensor<f32>
+  %eb = tensor.empty() : tensor<bf16>
+  %b = hip.cast(%ctx) ins(%half : tensor<f32>) outs(%eb : tensor<bf16>) {to = 16 : i64} : tensor<bf16>
+  %ef = tensor.empty() : tensor<f32>
+  %half_cast = hip.cast(%ctx) ins(%b : tensor<bf16>) outs(%ef : tensor<f32>) {to = 1 : i64} : tensor<f32>
+  %e_h = tensor.empty() : tensor<4xf32>
+  %h = hip.mul(%ctx) ins(%x, %half_cast : tensor<4xf32>, tensor<f32>) outs(%e_h : tensor<4xf32>) -> tensor<4xf32>
+  %e_d = tensor.empty() : tensor<4xf32>
+  %d = hip.div(%ctx) ins(%x, %kd : tensor<4xf32>, tensor<f32>) outs(%e_d : tensor<4xf32>) : tensor<4xf32>
+  %e_er = tensor.empty() : tensor<4xf32>
+  %er = hip.erf(%ctx) ins(%d : tensor<4xf32>) outs(%e_er : tensor<4xf32>) : tensor<4xf32>
+  %e_p = tensor.empty() : tensor<4xf32>
+  %p = hip.add(%ctx) ins(%er, %one : tensor<4xf32>, tensor<f32>) outs(%e_p : tensor<4xf32>) -> tensor<4xf32>
+  %e_y = tensor.empty() : tensor<4xf32>
+  %y = hip.mul(%ctx) ins(%h, %p : tensor<4xf32>, tensor<4xf32>) outs(%e_y : tensor<4xf32>) -> tensor<4xf32>
+  return %y : tensor<4xf32>
+}
+
+// -----
+
+// Explicit upward rounding changes a near-half coefficient to 0.50390625.
+// CHECK-LABEL: func.func @erf_truncf_upward
+// CHECK-NOT: hip.gelu
+// CHECK: hip.erf
+// CHECK: return
+func.func @erf_truncf_upward(%ctx: !hip.context, %x: tensor<4xf32>) -> tensor<4xf32> {
+  %half = hip.constant {value = dense<0.5001> : tensor<f32>} : tensor<f32>
+  %b = arith.truncf %half upward : tensor<f32> to tensor<bf16>
+  %half_cast = arith.extf %b : tensor<bf16> to tensor<f32>
+  %one = hip.constant {value = dense<1.0> : tensor<f32>} : tensor<f32>
+  %kd = hip.constant {value = dense<1.4142135624> : tensor<f32>} : tensor<f32>
+  %e_h = tensor.empty() : tensor<4xf32>
+  %h = hip.mul(%ctx) ins(%x, %half_cast : tensor<4xf32>, tensor<f32>) outs(%e_h : tensor<4xf32>) -> tensor<4xf32>
+  %e_d = tensor.empty() : tensor<4xf32>
+  %d = hip.div(%ctx) ins(%x, %kd : tensor<4xf32>, tensor<f32>) outs(%e_d : tensor<4xf32>) : tensor<4xf32>
+  %e_er = tensor.empty() : tensor<4xf32>
+  %er = hip.erf(%ctx) ins(%d : tensor<4xf32>) outs(%e_er : tensor<4xf32>) : tensor<4xf32>
+  %e_p = tensor.empty() : tensor<4xf32>
+  %p = hip.add(%ctx) ins(%er, %one : tensor<4xf32>, tensor<f32>) outs(%e_p : tensor<4xf32>) -> tensor<4xf32>
+  %e_y = tensor.empty() : tensor<4xf32>
+  %y = hip.mul(%ctx) ins(%h, %p : tensor<4xf32>, tensor<4xf32>) outs(%e_y : tensor<4xf32>) -> tensor<4xf32>
+  return %y : tensor<4xf32>
+}
+
+// -----
+
+// The splat is uniform but may broadcast x from length 1 to length 2.
+// CHECK-LABEL: func.func @erf_dynamic_splat
+// CHECK-NOT: hip.gelu
+// CHECK: hip.erf
+// CHECK: return
+func.func @erf_dynamic_splat(%ctx: !hip.context, %x: tensor<?xf32>, %n: index) -> tensor<?xf32> {
+  %c0 = arith.constant 0 : index
+  %nx = tensor.dim %x, %c0 : tensor<?xf32>
+  %half_s = arith.constant 0.5 : f32
+  %half = tensor.splat %half_s [%n] : tensor<?xf32>
+  %one = hip.constant {value = dense<1.0> : tensor<f32>} : tensor<f32>
+  %kd = hip.constant {value = dense<1.4142135624> : tensor<f32>} : tensor<f32>
+  %e_h = tensor.empty(%n) : tensor<?xf32>
+  %h = hip.mul(%ctx) ins(%x, %half : tensor<?xf32>, tensor<?xf32>) outs(%e_h : tensor<?xf32>) -> tensor<?xf32>
+  %e_d = tensor.empty(%nx) : tensor<?xf32>
+  %d = hip.div(%ctx) ins(%x, %kd : tensor<?xf32>, tensor<f32>) outs(%e_d : tensor<?xf32>) : tensor<?xf32>
+  %e_er = tensor.empty(%nx) : tensor<?xf32>
+  %er = hip.erf(%ctx) ins(%d : tensor<?xf32>) outs(%e_er : tensor<?xf32>) : tensor<?xf32>
+  %e_p = tensor.empty(%nx) : tensor<?xf32>
+  %p = hip.add(%ctx) ins(%er, %one : tensor<?xf32>, tensor<f32>) outs(%e_p : tensor<?xf32>) -> tensor<?xf32>
+  %e_y = tensor.empty(%n) : tensor<?xf32>
+  %y = hip.mul(%ctx) ins(%h, %p : tensor<?xf32>, tensor<?xf32>) outs(%e_y : tensor<?xf32>) -> tensor<?xf32>
+  return %y : tensor<?xf32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @erf_multi_element_splat
+// CHECK-NOT: hip.gelu
+// CHECK: hip.erf
+// CHECK: return
+func.func @erf_multi_element_splat(%ctx: !hip.context, %x: tensor<4xf32>) -> tensor<4xf32> {
+  %half_s = arith.constant 0.5 : f32
+  %half = tensor.splat %half_s : tensor<4xf32>
+  %one = hip.constant {value = dense<1.0> : tensor<f32>} : tensor<f32>
+  %kd = hip.constant {value = dense<1.4142135624> : tensor<f32>} : tensor<f32>
+  %e_h = tensor.empty() : tensor<4xf32>
+  %h = hip.mul(%ctx) ins(%x, %half : tensor<4xf32>, tensor<4xf32>) outs(%e_h : tensor<4xf32>) -> tensor<4xf32>
+  %e_d = tensor.empty() : tensor<4xf32>
+  %d = hip.div(%ctx) ins(%x, %kd : tensor<4xf32>, tensor<f32>) outs(%e_d : tensor<4xf32>) : tensor<4xf32>
+  %e_er = tensor.empty() : tensor<4xf32>
+  %er = hip.erf(%ctx) ins(%d : tensor<4xf32>) outs(%e_er : tensor<4xf32>) : tensor<4xf32>
+  %e_p = tensor.empty() : tensor<4xf32>
+  %p = hip.add(%ctx) ins(%er, %one : tensor<4xf32>, tensor<f32>) outs(%e_p : tensor<4xf32>) -> tensor<4xf32>
+  %e_y = tensor.empty() : tensor<4xf32>
+  %y = hip.mul(%ctx) ins(%h, %p : tensor<4xf32>, tensor<4xf32>) outs(%e_y : tensor<4xf32>) -> tensor<4xf32>
+  return %y : tensor<4xf32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @erf_dim_of_intermediate
+// CHECK-SAME: %[[CTX:.*]]: !hip.context, %[[X:.*]]: tensor<?xf32>
+// CHECK: %[[DIM:.*]] = tensor.dim %[[X]]
+// CHECK: tensor.empty(%[[DIM]])
+// CHECK: hip.gelu
+func.func @erf_dim_of_intermediate(%ctx: !hip.context, %x: tensor<?xf32>) -> tensor<?xf32> {
+  %c0 = arith.constant 0 : index
+  %nx = tensor.dim %x, %c0 : tensor<?xf32>
+  %half = hip.constant {value = dense<0.5> : tensor<f32>} : tensor<f32>
+  %one = hip.constant {value = dense<1.0> : tensor<f32>} : tensor<f32>
+  %kd = hip.constant {value = dense<1.4142135624> : tensor<f32>} : tensor<f32>
+  %e_h = tensor.empty(%nx) : tensor<?xf32>
+  %h = hip.mul(%ctx) ins(%x, %half : tensor<?xf32>, tensor<f32>) outs(%e_h : tensor<?xf32>) -> tensor<?xf32>
+  %nh = tensor.dim %h, %c0 : tensor<?xf32>
+  %e_d = tensor.empty(%nx) : tensor<?xf32>
+  %d = hip.div(%ctx) ins(%x, %kd : tensor<?xf32>, tensor<f32>) outs(%e_d : tensor<?xf32>) : tensor<?xf32>
+  %e_er = tensor.empty(%nx) : tensor<?xf32>
+  %er = hip.erf(%ctx) ins(%d : tensor<?xf32>) outs(%e_er : tensor<?xf32>) : tensor<?xf32>
+  %e_p = tensor.empty(%nx) : tensor<?xf32>
+  %p = hip.add(%ctx) ins(%er, %one : tensor<?xf32>, tensor<f32>) outs(%e_p : tensor<?xf32>) -> tensor<?xf32>
+  %e_y = tensor.empty(%nh) : tensor<?xf32>
+  %y = hip.mul(%ctx) ins(%h, %p : tensor<?xf32>, tensor<?xf32>) outs(%e_y : tensor<?xf32>) -> tensor<?xf32>
+  return %y : tensor<?xf32>
+}
+
+// -----
+
 // CHECK-LABEL: func.func @tanh_hip_const
 // CHECK-NOT: hip.tanh
 // CHECK-NOT: hip.mul
@@ -384,13 +540,13 @@ func.func @erf_arith_const(%ctx: !hip.context, %x: tensor<8x16xf32>) -> tensor<8
 // CHECK-NOT: approximate
 func.func @erf_splat_const(%ctx: !hip.context, %x: tensor<8x16xf32>) -> tensor<8x16xf32> {
   %half_s = arith.constant 0.5 : f32
-  %half = tensor.splat %half_s : tensor<f32>
+  %half = tensor.splat %half_s : tensor<1xf32>
   %one_s = arith.constant 1.0 : f32
   %one = tensor.splat %one_s : tensor<f32>
   %kd_s = arith.constant 1.4142135624 : f32
   %kd = tensor.splat %kd_s : tensor<f32>
   %e_h = tensor.empty() : tensor<8x16xf32>
-  %h = hip.mul(%ctx) ins(%x, %half : tensor<8x16xf32>, tensor<f32>) outs(%e_h : tensor<8x16xf32>) -> tensor<8x16xf32>
+  %h = hip.mul(%ctx) ins(%x, %half : tensor<8x16xf32>, tensor<1xf32>) outs(%e_h : tensor<8x16xf32>) -> tensor<8x16xf32>
   %e_d = tensor.empty() : tensor<8x16xf32>
   %d = hip.div(%ctx) ins(%x, %kd : tensor<8x16xf32>, tensor<f32>) outs(%e_d : tensor<8x16xf32>) : tensor<8x16xf32>
   %e_er = tensor.empty() : tensor<8x16xf32>

@@ -58,13 +58,6 @@ namespace hip {
 namespace fusion_transform {
 namespace {
 
-void retargetShapeQueries(mlir::PatternRewriter &rewriter, mlir::Value from,
-                          mlir::Value to) {
-  rewriter.replaceUsesWithIf(from, to, [](mlir::OpOperand &operand) {
-    return mlir::isa<mlir::tensor::DimOp>(operand.getOwner());
-  });
-}
-
 // One dynamic axis after projection producers have been followed.
 struct Extent {
   bool isStatic = false;

@@ -52,7 +52,6 @@
 
 #include "hip/Dialect/IR/HipDialect.h"
 
-#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -268,10 +267,7 @@ struct GeluFusion : public mlir::OpRewritePattern<mlir::hip::MulOp> {
     }
 
     for (mlir::Operation *op : chain.ops)
-      rewriter.replaceUsesWithIf(
-          op->getResult(0), x, [](mlir::OpOperand &operand) {
-            return mlir::isa<mlir::tensor::DimOp>(operand.getOwner());
-          });
+      retargetShapeQueries(rewriter, op->getResult(0), x);
     mlir::hip::GeluOp gelu = mlir::hip::GeluOp::create(
         rewriter, root.getLoc(), resultType, root.getCtx(), x, root.getOutput(),
         rewriter.getStringAttr(chain.approximate));
