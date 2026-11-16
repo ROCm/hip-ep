@@ -7,14 +7,7 @@
 // Some frontends, such as torch-mlir, may not be able to emit GELU as a
 // singular op. This leads to the op being decomposed into multiple primitive
 // HIP ops. Fuse them back together, so that the op can be described as a
-// singular hip.gelu. The match lives here, not in a frontend conversion, so
-// every frontend gets the fused kernel and none repeats the match.
-//
-// The ONNX-level FastGeluFusion and ErfGeluFusion match the same formulas
-// before lowering, on ONNX ops. This pattern is the frontend-neutral
-// counterpart, so it covers what they cannot see (Torch, and ONNX chains that
-// lowering produced). Both stay until a frontend-neutral match is proven to
-// cover every ONNX export they handle.
+// singular hip.gelu.
 //
 // Tanh form:
 //   Before:
