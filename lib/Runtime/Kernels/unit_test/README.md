@@ -411,9 +411,35 @@ set HIPDNN_GQA_AUTOTUNE_MODE=lookup
 kernel-tests\gfx11-generic\hipdnn-kernel-ut-gqa-prefill-xfp16-wfp16-yfp16.exe --b 1 --h 32 --g 8 --d 128 --sq 512 --past 1024 --max-seq 4096
 ```
 
-`make -C common test` runs `common/test_ut_interface.py`, which checks the
-file against `kLeaves`, `CMakeLists.txt`, each leaf's Makefile and driver.
-Change the file together with any leaf flag, Make variable or registration.
+### Required entry for every new leaf
+
+A new leaf is not complete without its `ut_interface.json` entry; it is the
+only place an external caller learns how to run the leaf. The entry has:
+
+- `leaf`, `package_executable` and `source`, matching `kLeaves` and
+  `CMakeLists.txt`.
+- `capabilities`: `coverage: true`, `timing: "shared"`, `mode` (`lookup`
+  for an op with a table, otherwise `label_only`) and `rank` (`true` for an op
+  with an offline LUT).
+- `suite.args` and `suite.coverage_default`.
+- `custom`: `selected_by` and one `params[]` item for every op input of a
+  single case, so a caller can reproduce any model shape without reading the
+  driver: `name`, `flag` (or `positional` with `format`), `make` (the
+  `make test_custom` variable, or `null` with a reason in `description`),
+  `type`, `choices` when restricted, `required`, `exe_default`,
+  `make_default` and `description`; plus `constraints`, `example_exe` and
+  `example_make`.
+- `diagnostic_flags` and the leaf's own `env` variables, if any.
+- `gaps: []`. Only leaves that predate this standard may list gaps, and only
+  those already frozen in `common/test_ut_interface.py`.
+
+The `kernel-ut-interface` pre-commit hook, which CI's pre-commit job runs on
+every pull request, and `make -C common test` run
+`common/test_ut_interface.py`. It fails when a registered leaf has no entry,
+an entry names a flag the driver does not parse or a Make variable or default
+the Makefile does not define, a capability disagrees with the source, or a
+leaf gains a gap. Change the file in the same commit as any leaf flag, Make
+variable or registration.
 
 ## Adding an op or dtype leaf
 
@@ -427,19 +453,21 @@ Update all of these together:
    provide every capability in
    [Required capabilities in every leaf](#required-capabilities-in-every-leaf).
 3. Add the leaf once to the `LEAVES` list in `unit_test/Makefile` for local
-   runs, once to `unit_test/CMakeLists.txt` for package install,
-   once to `kernel_ut_main.cpp`'s `kLeaves` for the controller and CSV report,
-   and once to `ut_interface.json` with its full parameter list.
-4. Add the new leaf to `kernel_ut_main.cpp` without declaring whether it has a
+   runs, once to `unit_test/CMakeLists.txt` for package install, and
+   once to `kernel_ut_main.cpp`'s `kLeaves` for the controller and CSV report.
+4. Add the leaf's entry to `ut_interface.json` (required), with every input of
+   its custom case, as described in
+   [Required entry for every new leaf](#required-entry-for-every-new-leaf).
+5. Add the new leaf to `kernel_ut_main.cpp` without declaring whether it has a
    table. The controller always passes the requested `lookup` mode; production
    code must match the actual dtype/bits, shape, and GPU architecture against
    the DLL's embedded table, then fall through to autotune on a miss.
-5. If the op supports lookup, add its resolver/schema and checked-in
+6. If the op supports lookup, add its resolver/schema and checked-in
    `lut/<arch>.fb` data to the production `custom_kernels_<arch>` build. Do
    not embed the FB in a test exe: `lookup` must consume the DLL's embedded
    table, exactly like model execution. A missing compatible table must fall
    through to autotune.
-6. Ensure the leaf writes one row per case to `HIPDNN_RESULTS_CSV` when set.
+7. Ensure the leaf writes one row per case to `HIPDNN_RESULTS_CSV` when set.
    The controller also writes one `shape=suite` row per leaf, including
    leaves without per-case rows.
 
@@ -459,7 +487,7 @@ GQA leaves as references.
 | Config identity | Every row's `config` names the configuration that actually ran, read back from the op's own diagnostics or resolver with its source prefix (`lookup:`, `autotune:`, `fixed:` or `declined`), never inferred from `MODE`. `unlogged` is a gap to fix. See [`out/results.csv`](#outresultscsv). |
 | Architectures | gfx1151 is the default validation chip. The leaf builds and runs with the default `OFFLOAD=--offload-arch=gfx11-generic` (gfx115x) and with `OFFLOAD=--offload-arch=gfx1170` or `gfx1171` (gfx11-7-generic); `LUT_ARCH` selects that chip's table. Do not hard-code a chip in the Makefile or driver; a case that supports only some chips checks the device and prints `SKIP` on the others. |
 | Results | One `HIPDNN_RESULTS_CSV` row per case when set, and registration in the controller (see the checklist above). |
-| Interface record | An entry in `ut_interface.json` with the package executable, capabilities, and every suite, custom and diagnostic flag with its Make variable, defaults and constraints. `common/test_ut_interface.py` checks it; leaves that predate this standard keep a frozen `gaps` list, and a new leaf has none. See [External invocation](#external-invocation-ut_interfacejson). |
+| Interface record (required) | An entry in `ut_interface.json` with the package executable, capabilities, and every suite, custom and diagnostic flag with its Make variable, defaults and constraints, and `gaps: []`. The `kernel-ut-interface` pre-commit hook checks it in CI. See [Required entry for every new leaf](#required-entry-for-every-new-leaf). |
 
 ## Required files in every leaf — EXACTLY these three, nothing else
 
@@ -467,7 +495,10 @@ GQA leaves as references.
 |---|---|
 | `Makefile` | `test` / `test_custom` / `clean` / `build` (`build` also copies the exe to `PKG_DIR/PKG_NAME` for the `unit_test/` aggregator) |
 | `test_<op>.cpp` | Driver. Entirely self-contained: generates its own inputs (seeded RNG) and computes its own CPU reference **in-process, in C++** — no python, no on-disk data. Shared code comes only from `unit_test/common/` (timer, result binding, ranking). Enumerates the op's categorical situations x typical shapes in C++ (see "Shape coverage" below). Inline empty `resolve()` if needed, guarded by `#ifndef HIPDNN_LUT_LINKED_EXTERNALLY` so `MODE=lookup`'s real resolver (which defines the same symbols) can link. No `autotune_stub.cpp`. |
-| `README.md` | Targets, `test_custom` parameters, `MODE`, `COVERAGE`, `TIMING`, supported `OFFLOAD` targets, and `RANK` when the op has a LUT |
+| `README.md` | Targets, `test_custom` parameters (the same ones as its `ut_interface.json` entry), `MODE`, `COVERAGE`, `TIMING`, supported `OFFLOAD` targets, and `RANK` when the op has a LUT |
+
+Outside its directory, every leaf also needs the registrations in the
+checklist above, including its `ut_interface.json` entry.
 
 No `gen_data.py`, no python in a leaf directory, no `shapes.csv`. Shared code
 lives only in `unit_test/common/` (adaptive timer, result binding, ranking and
