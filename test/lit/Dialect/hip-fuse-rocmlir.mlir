@@ -605,3 +605,73 @@ func.func @main_graph(%ctx: !hip.context, %in: tensor<1x4x8x8xf16>,
        pads = [1, 1, 1, 1], strides = [2, 2]} : tensor<1x8x8x8xf16>
   return %c : tensor<1x8x8x8xf16>
 }
+
+// -----
+
+// A 3D nearest upsample in front of a 3D convolution: each grown spatial axis
+// splits into (d, 1) and broadcasts, so the view is rank 8.
+
+// CHECK-LABEL: func.func @rocMlir
+// CHECK-SAME: (%[[IN:.*]]: tensor<1x4x4x8x8xf16>, %[[W:.*]]: tensor<8x4x3x3x3xf16>, %[[B:.*]]: tensor<8xf16>)
+// CHECK: tensor.expand_shape %[[IN]] {{\[\[}}0], [1], [2, 3], [4, 5], [6, 7]]
+// CHECK-SAME: tensor<1x4x4x1x8x1x8x1xf16>
+// CHECK: hip.expand
+// CHECK-SAME: tensor<1x4x4x2x8x2x8x2xf16>
+// CHECK: tensor.collapse_shape
+// CHECK-SAME: tensor<1x4x8x16x16xf16>
+// CHECK: hip.conv
+// CHECK-NOT: hip.resize
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK: hip.rocmlir
+// CHECK-SAME: tensor<1x4x4x8x8xf16>
+// CHECK-NOT: hip.resize
+// CHECK: return
+func.func @main_graph(%ctx: !hip.context, %in: tensor<1x4x4x8x8xf16>,
+                      %w: tensor<8x4x3x3x3xf16>, %b: tensor<8xf16>)
+    -> tensor<1x8x8x16x16xf16> {
+  %up = tensor.empty() : tensor<1x4x8x16x16xf16>
+  %r = hip.resize(%ctx) ins(%in : tensor<1x4x4x8x8xf16>)
+      outs(%up : tensor<1x4x8x16x16xf16>)
+      {mode = 0 : i64, coord_transform = 1 : i64, nearest_mode = 2 : i64}
+      : tensor<1x4x8x16x16xf16>
+  %e = tensor.empty() : tensor<1x8x8x16x16xf16>
+  %c = hip.conv(%ctx) ins(%r, %w, %b : tensor<1x4x8x16x16xf16>,
+                                      tensor<8x4x3x3x3xf16>, tensor<8xf16>)
+      outs(%e : tensor<1x8x8x16x16xf16>)
+      {dilations = [1, 1, 1], group = 1 : i64, kernel_shape = [3, 3, 3],
+       pads = [1, 1, 1, 1, 1, 1], strides = [1, 1, 1]}
+      : tensor<1x8x8x16x16xf16>
+  return %c : tensor<1x8x8x16x16xf16>
+}
+
+// -----
+
+// A nearest resize that grows C is not a spatial upsample, so it stays a
+// kernel and the convolution receives the materialized tensor.
+
+// CHECK-LABEL: func.func @rocMlir
+// CHECK-SAME: tensor<1x8x8x8xf16>
+// CHECK-NOT: tensor.expand_shape
+// CHECK: hip.conv
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK: hip.resize
+// CHECK: hip.rocmlir
+// CHECK-SAME: tensor<1x8x8x8xf16>
+func.func @main_graph(%ctx: !hip.context, %in: tensor<1x4x8x8xf16>,
+                      %w: tensor<8x8x3x3xf16>, %b: tensor<8xf16>)
+    -> tensor<1x8x8x8xf16> {
+  %up = tensor.empty() : tensor<1x8x8x8xf16>
+  %r = hip.resize(%ctx) ins(%in : tensor<1x4x8x8xf16>)
+      outs(%up : tensor<1x8x8x8xf16>)
+      {mode = 0 : i64, coord_transform = 1 : i64, nearest_mode = 2 : i64}
+      : tensor<1x8x8x8xf16>
+  %e = tensor.empty() : tensor<1x8x8x8xf16>
+  %c = hip.conv(%ctx) ins(%r, %w, %b : tensor<1x8x8x8xf16>,
+                                      tensor<8x8x3x3xf16>, tensor<8xf16>)
+      outs(%e : tensor<1x8x8x8xf16>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [3, 3],
+       pads = [1, 1, 1, 1], strides = [1, 1]} : tensor<1x8x8x8xf16>
+  return %c : tensor<1x8x8x8xf16>
+}

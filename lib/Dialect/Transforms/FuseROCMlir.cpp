@@ -92,11 +92,17 @@ static Value nearestRepeatInput(Value value, ConvOp conv) {
   bool grew = false;
   SmallVector<int64_t> ratios;
   ratios.reserve(inType.getRank());
-  for (auto [inDim, outDim] :
-       llvm::zip(inType.getShape(), outType.getShape())) {
+  for (auto [axis, dims] :
+       llvm::enumerate(llvm::zip(inType.getShape(), outType.getShape()))) {
+    auto [inDim, outDim] = dims;
     if (inDim <= 0 || outDim < inDim || outDim % inDim != 0)
       return {};
     int64_t ratio = outDim / inDim;
+    // Only spatial axes are absorbed. ResizeLayout rejects a resized N, and a
+    // resized C on a 5-D input, so a growth there must keep failing in
+    // hip.resize rather than start working through this view.
+    if (axis < 2 && ratio != 1)
+      return {};
     if (ratio > 1)
       grew = true;
     if (nearest == 0 && ratio > 2)
