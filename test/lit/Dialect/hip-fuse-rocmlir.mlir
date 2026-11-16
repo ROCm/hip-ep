@@ -478,6 +478,7 @@ func.func @main_graph(%ctx: !hip.context, %a: tensor<2x16xf16>,
 // CHECK-NOT: hip.resize
 
 // CHECK-LABEL: func.func @main_graph
+// CHECK-NOT: hip.resize
 // CHECK: hip.rocmlir
 // CHECK-SAME: tensor<1x4x8x8xf16>
 // CHECK-NOT: hip.resize
@@ -548,6 +549,7 @@ func.func @main_graph(%ctx: !hip.context, %in: tensor<1x4x8x8xf16>,
 // CHECK-NOT: hip.resize
 
 // CHECK-LABEL: func.func @main_graph
+// CHECK-NOT: hip.resize
 // CHECK: hip.rocmlir
 // CHECK-SAME: tensor<1x4x8x8xf16>
 // CHECK-NOT: hip.resize
@@ -623,6 +625,7 @@ func.func @main_graph(%ctx: !hip.context, %in: tensor<1x4x8x8xf16>,
 // CHECK-NOT: hip.resize
 
 // CHECK-LABEL: func.func @main_graph
+// CHECK-NOT: hip.resize
 // CHECK: hip.rocmlir
 // CHECK-SAME: tensor<1x4x4x8x8xf16>
 // CHECK-NOT: hip.resize
