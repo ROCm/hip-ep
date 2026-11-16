@@ -47,6 +47,7 @@ TIMING ?= standard
 HIPCC       := $(HIP_SDK)/bin/hipcc.exe
 INCLUDE_DIR := ../../../include
 KERNEL_HIP  := ../../../hip/qmoe_ragged_mm_kernel.hip
+MATMUL_HIP := ../../../hip/matmul_nbits_kernel.hip
 # Token bucketing and SwiGLU, which the pipeline case drives around the MatMul.
 ROUTING_HIP := ../../../hip/qmoe_kernel.hip
 
@@ -96,12 +97,14 @@ endif
 DIRECT_TEST_OBJ    := $(BUILD_DIR)/direct_test.obj
 DIRECT_KERNEL_OBJ  := $(BUILD_DIR)/direct_kernel.obj
 DIRECT_ROUTING_OBJ := $(BUILD_DIR)/direct_routing.obj
+DIRECT_MATMUL_OBJ := $(BUILD_DIR)/direct_matmul.obj
 
 direct: FORCE | $(BUILD_DIR)
 	$(HIPCC) -c $(CXXFLAGS) $(OFFLOAD) $(INCLUDES) -x hip test_qmoe_ragged_mm.cpp -o $(DIRECT_TEST_OBJ)
 	$(HIPCC) -c $(KERNEL_FLAGS) $(OFFLOAD) $(INCLUDES) $(KERNEL_HIP) -o $(DIRECT_KERNEL_OBJ)
 	$(HIPCC) -c $(KERNEL_FLAGS) $(OFFLOAD) $(INCLUDES) $(ROUTING_HIP) -o $(DIRECT_ROUTING_OBJ)
-	$(HIPCC) $(OFFLOAD) $(DIRECT_TEST_OBJ) $(DIRECT_KERNEL_OBJ) $(DIRECT_ROUTING_OBJ) -o $(TARGET_DIRECT)
+	$(HIPCC) -c $(KERNEL_FLAGS) $(OFFLOAD) $(INCLUDES) $(MATMUL_HIP) -o $(DIRECT_MATMUL_OBJ)
+	$(HIPCC) $(OFFLOAD) $(DIRECT_TEST_OBJ) $(DIRECT_KERNEL_OBJ) $(DIRECT_ROUTING_OBJ) $(DIRECT_MATMUL_OBJ) -o $(TARGET_DIRECT)
 
 # ============================================================
 # Run / test targets (uniform API)

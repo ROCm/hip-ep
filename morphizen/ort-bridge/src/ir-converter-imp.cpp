@@ -13,6 +13,7 @@
 #include <morphizen/graph.hpp>
 #include <morphizen/morphizen-ort-api-ext.hpp>
 #include <morphizen/node_attr.hpp>
+#include <string_view>
 #include <unordered_set>
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_IR_CONVERTER, "0")
 DEF_ENV_PARAM_2(MORPHIZEN_DEBUG_IR_CONVERTER_OUTPUT_FILE,
@@ -655,11 +656,14 @@ OrtStatus *IRConverterImp::convert_graph_nodes(morphizen::Graph &graph) const {
     throw_if_error(ort_api.Node_GetAttributes(node, api_node_attributes.data(),
                                               api_node_attributes.size()));
 
+    bool has_coordinate_transformation_mode = false;
     for (const OrtOpAttr *attr : api_node_attributes) {
       const char *attr_name = nullptr;
       OrtOpAttrType attr_type = OrtOpAttrType::ORT_OP_ATTR_UNDEFINED;
       throw_if_error(ort_api.OpAttr_GetName(attr, &attr_name));
       throw_if_error(ort_api.OpAttr_GetType(attr, &attr_type));
+      if (std::string_view(attr_name) == "coordinate_transformation_mode")
+        has_coordinate_transformation_mode = true;
       MY_LOG(3) << "Processing attribute: " << attr_name
                 << " with type: " << static_cast<int>(attr_type);
       switch (attr_type) {
@@ -739,6 +743,21 @@ OrtStatus *IRConverterImp::convert_graph_nodes(morphizen::Graph &graph) const {
             "Unsupported attribute type encountered during conversion");
       }
       }
+    }
+
+    // RoiAlign-10 has no coordinate_transformation_mode and samples like
+    // output_half_pixel; opset 16 added the attribute with a half_pixel
+    // default. Attributes do not carry the opset, so record the older
+    // behaviour explicitly.
+    if (!has_coordinate_transformation_mode &&
+        std::string_view(op_type) == "RoiAlign" &&
+        (domain == nullptr || domain[0] == '\0' ||
+         std::string_view(domain) == "ai.onnx")) {
+      int since_version = 0;
+      throw_if_error(ort_api.Node_GetSinceVersion(node, &since_version));
+      if (since_version < 16)
+        attrs_builder.add("coordinate_transformation_mode",
+                          std::string("output_half_pixel"));
     }
 
     // Node_GetAttributes does not always surface subgraph attributes.

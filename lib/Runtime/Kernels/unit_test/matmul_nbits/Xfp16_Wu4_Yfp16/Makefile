@@ -97,6 +97,10 @@ FLATBUFFERS_INC ?=
 
 KERNEL_FLAGS := -O2 -std=c++17 -x hip -ffp-contract=fast
 CXXFLAGS     := -O3 -std=c++17 -Wno-c23-extensions
+GPU_PHASE_HEADER ?=
+ifneq ($(GPU_PHASE_HEADER),)
+    CXXFLAGS += -include $(GPU_PHASE_HEADER) -DHIPDNN_UT_GPU_PHASE_LINKED=1
+endif
 INCLUDES     := -I$(INCLUDE_DIR)
 
 # Standalone ranking controls compile the production source verbatim through

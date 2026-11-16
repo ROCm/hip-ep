@@ -448,7 +448,7 @@ std::vector<Result> sweepPrefill(const Shape &s, bool verify, double target_ms,
     r.bkv = c.bkv;
     measure(r, [&]() {
       dispatchPrefillV6x(c, d, nullptr, Q, K, V, O, B, H, G, sq, skv, max_seq,
-                         past_len, scale, sink, H, smooth, window);
+                         past_len, scale, sink, H, smooth, window, nullptr, 0);
     });
   }
   for (int i = 0; i < n8; ++i) {
@@ -484,7 +484,8 @@ std::vector<Result> sweepPrefill(const Shape &s, bool verify, double target_ms,
           nullptr, n6,
           [&](int i) {
             dispatchPrefillV6x(v6x[i], d, nullptr, Q, K, V, O, B, H, G, sq, skv,
-                               max_seq, past_len, scale, nullptr, H, 0, window);
+                               max_seq, past_len, scale, nullptr, H, 0, window,
+                               nullptr, 0);
           },
           [&](int i) { return v6xLabel(v6x[i]); }, d, sq, skv);
       buf = v6xLabel(v6x[best]);
@@ -699,7 +700,8 @@ std::vector<Result> sweepDecode(const Shape &s, bool verify, double target_ms,
           const int i = turn++ % copies;
           launchFlashDecodeConfig<KvDtype::kF16>(
               cfg, nullptr, dQ, dK[i], dV[i], nullptr, nullptr, dO, dPart, B,
-              H, G, d, hpg, max_seq, scale, dSeq, window, sink, smooth);
+              H, G, d, hpg, max_seq, scale, dSeq, window, sink, smooth,
+              nullptr, 0);
         };
         // Each dispatch on its own, and each one reading the next cache in the
         // rotation. `rounds` is spent on samples instead: the median of 40-800
@@ -758,7 +760,7 @@ std::vector<Result> sweepDecode(const Shape &s, bool verify, double target_ms,
           launchFlashDecodeConfig<KvDtype::kF16>(
               candidate, nullptr, dQ, dK[0], dV[0], nullptr, nullptr, dO,
               dPart, B, H, G, d, hpg, max_seq, scale, dSeq, window, sink,
-              smooth);
+              smooth, nullptr, 0);
         });
     SWEEP_CHECK(hipDeviceSynchronize());
     online->decide_ms = std::chrono::duration<double, std::milli>(

@@ -86,6 +86,10 @@ FLATBUFFERS_INC ?=
 
 KERNEL_FLAGS := -O2 -std=c++17 -x hip -ffp-contract=fast
 CXXFLAGS     := -O3 -std=c++17 -Wno-c23-extensions
+GPU_PHASE_HEADER ?=
+ifneq ($(GPU_PHASE_HEADER),)
+    CXXFLAGS += -include $(GPU_PHASE_HEADER) -DHIPDNN_UT_GPU_PHASE_LINKED=1
+endif
 INCLUDES     := -I$(INCLUDE_DIR)
 
 # ---- Test parameters (test_custom) ----
@@ -98,6 +102,12 @@ D      ?= 128
 SQ     ?= 512
 PAST   ?= 0
 WINDOW ?= 0
+MAX_SEQ ?=
+SCALE   ?=
+ND      ?=
+HB      ?=
+BKV     ?=
+CASE_ARGS = $(if $(MAX_SEQ),--max-seq $(MAX_SEQ)) $(if $(SCALE),--scale $(SCALE)) $(if $(ND),--nd $(ND) --hb $(HB) --bkv $(BKV))
 
 # ---- OS-specific: run command + clean ----
 
@@ -246,7 +256,7 @@ test_custom: $(TARGET)
 ifeq ($(CSV_FRESH),1)
 	@$(RESET_RESULTS_CSV)
 endif
-	$(call RUN_CMD,$(TARGET)) --b $(B) --h $(H) --g $(G) --d $(D) --sq $(SQ) --past $(PAST) --window $(WINDOW) --iters $(ITERS)
+	$(call RUN_CMD,$(TARGET)) --b $(B) --h $(H) --g $(G) --d $(D) --sq $(SQ) --past $(PAST) --window $(WINDOW) --iters $(ITERS) $(CASE_ARGS)
 
 # Build only. The unit_test/ aggregator passes PKG_DIR and PKG_NAME to collect the
 # exe into its hipdnn-kernel-ut package layout.

@@ -27,7 +27,8 @@ class GpuExecutionScope {
   }
   GpuExecutionScope(const GpuExecutionScope&) = delete;
   GpuExecutionScope& operator=(const GpuExecutionScope&) = delete;
-  ~GpuExecutionScope() {
+  ~GpuExecutionScope() { finish(); }
+  void finish() {
     if (path_.empty()) return;
     // A synchronization error still requires the launcher to reconcile the
     // ended worker, rather than retaining or releasing a live GPU worker.
@@ -35,6 +36,7 @@ class GpuExecutionScope {
       synchronize_();
       signal(".done");
       wait(".released");
+      path_.clear();
     } catch (...) {
       std::terminate();
     }

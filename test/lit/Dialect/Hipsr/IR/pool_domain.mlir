@@ -120,7 +120,7 @@ func.func @entry_argument_type_mismatch(%in: tensor<3x4xf32>)
 // -----
 // The pool domain has one result, but the yield has no value.
 func.func @missing_yield_value() -> tensor<3x4xf32> {
-  // expected-error @+1 {{along control flow edge from Operation hipsr.pool_domain_yield to parent: region branch point has 0 operands, but region successor needs 1 inputs}}
+  // expected-error @+1 {{along control flow edge from Operation hipsr.pool_domain_yield to Operation hipsr.pool_domain: region branch point has 0 operands, but region successor needs 1 inputs}}
   %0 = hipsr.pool_domain() {
     // expected-note @+1 {{region branch point}}
     hipsr.pool_domain_yield
@@ -131,7 +131,7 @@ func.func @missing_yield_value() -> tensor<3x4xf32> {
 // -----
 // The yield has one value, but the pool domain has no result.
 func.func @extra_yield_value() {
-  // expected-error @+1 {{along control flow edge from Operation hipsr.pool_domain_yield to parent: region branch point has 1 operands, but region successor needs 0 inputs}}
+  // expected-error @+1 {{along control flow edge from Operation hipsr.pool_domain_yield to Operation hipsr.pool_domain: region branch point has 1 operands, but region successor needs 0 inputs}}
   hipsr.pool_domain() {
     %local = tensor.empty() : tensor<3x4xf32>
     // expected-note @+1 {{region branch point}}
@@ -143,7 +143,7 @@ func.func @extra_yield_value() {
 // -----
 // The yielded f32 value does not match the pool domain's i64 result.
 func.func @yield_type_mismatch() -> tensor<3x4xi64> {
-  // expected-error @+1 {{along control flow edge from Operation hipsr.pool_domain_yield to parent: successor operand type #0 'tensor<3x4xf32>' should match successor input type #0 'tensor<3x4xi64>'}}
+  // expected-error @+1 {{along control flow edge from Operation hipsr.pool_domain_yield to Operation hipsr.pool_domain: successor operand type #0 'tensor<3x4xf32>' should match successor input type #0 'tensor<3x4xi64>'}}
   %0 = hipsr.pool_domain() {
     %local = tensor.empty() : tensor<3x4xf32>
     // expected-note @+1 {{region branch point}}

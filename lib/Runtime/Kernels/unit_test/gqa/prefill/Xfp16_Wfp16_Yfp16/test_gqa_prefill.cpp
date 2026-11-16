@@ -26,9 +26,17 @@
 // ============================================================
 
 #include "../../../common/ut_gpu_execution_scope.h"
+#include "../../../common/ut_gqa_rank_input.h"
 #include <hip/hip_runtime.h>
 #include "../../../common/hip_adaptive_timing.h"
-#include "../../../common/ut_gqa_rank_input.h"
+#ifdef HIPDNN_UT_GPU_PHASE_HEADER
+#include HIPDNN_UT_GPU_PHASE_HEADER
+#elif !defined(HIPDNN_UT_GPU_PHASE_LINKED)
+namespace hipdnn_ep_test {
+struct GpuPhase { void begin() {} void finish(bool = false) {} void timingBegin() {} void timingEnd() {} };
+}
+#endif
+
 #include <hip/hip_fp16.h>
 
 #include <algorithm>
@@ -203,10 +211,11 @@ inline bool warmTiming() {
 
 // Copies of a K and a V cache laid out [planes, rows, row_bytes], of which a
 // launch reads rows [lo, hi) of every plane. Copy c keeps those rows
-// c * (hi - lo) rows further into each plane of a buffer whose plane stride is
-// rows(), so the copies cost what a launch reads rather than the whole cache
-// (a sliding window reads a small part of it). A launch on copy c passes k(c),
-// v(c) and rows() in place of the cache pointers and their max_seq.
+// farther into each plane of a bank with the ORIGINAL cache plane stride.
+// Slots hold the attended row span, including the existing tile margin; when
+// another slot cannot fit inside that capacity, a new bank holds it. A launch
+// on copy c passes k(c), v(c) and the original rows() as max_seq. Rotation must
+// not replace a model's cache capacity with the number of copied rows.
 class ColdKvCopies {
  public:
   ColdKvCopies(const void* k, const void* v, int planes, int rows,
@@ -219,8 +228,10 @@ class ColdKvCopies {
     const int n = 1 + static_cast<int>(std::min<size_t>(
                           kColdMaxCopies - 1,
                           (kColdRotationBytes + bytes_ - 1) / bytes_));
-    const int copy_rows = hi + (n - 1) * span_;
-    const size_t buf_bytes = static_cast<size_t>(planes) * copy_rows * row_bytes;
+    copies_per_bank_ = 1 + (rows - hi) / span_;
+    const int banks = (n + copies_per_bank_ - 1) / copies_per_bank_;
+    bank_bytes_ = static_cast<size_t>(planes) * rows * row_bytes;
+    const size_t buf_bytes = static_cast<size_t>(banks) * bank_bytes_;
     if (hipMalloc(&kbuf_, buf_bytes) != hipSuccess ||
         hipMalloc(&vbuf_, buf_bytes) != hipSuccess) {
       std::fprintf(stderr, "cold-cache copies do not fit; timing on warm caches\n");
@@ -229,28 +240,34 @@ class ColdKvCopies {
     }
     (void)hipMemset(kbuf_, 0, buf_bytes);
     (void)hipMemset(vbuf_, 0, buf_bytes);
-    // The copies sit back to back from row lo of every plane: copy 0 comes
-    // from the cache, then the run of filled copies doubles until all n are.
-    const size_t src_pitch = static_cast<size_t>(rows) * row_bytes;
-    const size_t dst_pitch = static_cast<size_t>(copy_rows) * row_bytes;
+    // Fill each bank from the original cache, then double the populated slots
+    // within it. Every 2D copy and every timed launch keeps that same pitch.
+    const size_t pitch = static_cast<size_t>(rows) * row_bytes;
     const size_t off = static_cast<size_t>(lo) * row_bytes;
     const size_t span_bytes = static_cast<size_t>(span_) * row_bytes;
-    (void)hipMemcpy2D(kbuf_ + off, dst_pitch, static_cast<const char*>(k) + off,
-                      src_pitch, span_bytes, planes, hipMemcpyDeviceToDevice);
-    (void)hipMemcpy2D(vbuf_ + off, dst_pitch, static_cast<const char*>(v) + off,
-                      src_pitch, span_bytes, planes, hipMemcpyDeviceToDevice);
-    for (int filled = 1; filled < n;) {
-      const int more = std::min(filled, n - filled);
-      (void)hipMemcpy2D(kbuf_ + off + filled * span_bytes, dst_pitch,
-                        kbuf_ + off, dst_pitch, more * span_bytes, planes,
-                        hipMemcpyDeviceToDevice);
-      (void)hipMemcpy2D(vbuf_ + off + filled * span_bytes, dst_pitch,
-                        vbuf_ + off, dst_pitch, more * span_bytes, planes,
-                        hipMemcpyDeviceToDevice);
-      filled += more;
+    for (int bank = 0; bank < banks; ++bank) {
+      const size_t base = static_cast<size_t>(bank) * bank_bytes_ + off;
+      const int slots = std::min(copies_per_bank_, n - bank * copies_per_bank_);
+      (void)hipMemcpy2D(kbuf_ + base, pitch, static_cast<const char*>(k) + off,
+                        pitch, span_bytes, planes, hipMemcpyDeviceToDevice);
+      (void)hipMemcpy2D(vbuf_ + base, pitch, static_cast<const char*>(v) + off,
+                        pitch, span_bytes, planes, hipMemcpyDeviceToDevice);
+      for (int filled = 1; filled < slots;) {
+        const int more = std::min(filled, slots - filled);
+        (void)hipMemcpy2D(kbuf_ + base + filled * span_bytes, pitch,
+                          kbuf_ + base, pitch, more * span_bytes, planes,
+                          hipMemcpyDeviceToDevice);
+        (void)hipMemcpy2D(vbuf_ + base + filled * span_bytes, pitch,
+                          vbuf_ + base, pitch, more * span_bytes, planes,
+                          hipMemcpyDeviceToDevice);
+        filled += more;
+      }
     }
     count_ = n;
-    rows_ = copy_rows;
+    std::printf("GQA_KV_ROTATION capacity=%d planes=%d span=%d copies=%d "
+                "copies_per_bank=%d banks=%d allocated_bytes=%zu\n",
+                rows_, planes, span_, count_, copies_per_bank_, banks,
+                2 * buf_bytes);
   }
   ~ColdKvCopies() { release(); }
   ColdKvCopies(const ColdKvCopies&) = delete;
@@ -264,7 +281,8 @@ class ColdKvCopies {
 
  private:
   size_t offset(int c) const {
-    return static_cast<size_t>(c) * span_ * row_bytes_;
+    return static_cast<size_t>(c / copies_per_bank_) * bank_bytes_ +
+           static_cast<size_t>(c % copies_per_bank_) * span_ * row_bytes_;
   }
   void release() {
     if (kbuf_) (void)hipFree(kbuf_);
@@ -278,6 +296,8 @@ class ColdKvCopies {
   size_t row_bytes_;
   int span_ = 0;
   size_t bytes_ = 0;
+  size_t bank_bytes_ = 0;
+  int copies_per_bank_ = 1;
   int count_ = 1;
   char* kbuf_ = nullptr;
   char* vbuf_ = nullptr;
@@ -356,9 +376,6 @@ extern "C" int hip_gqa_flash_prefill(
     int num_heads, int smooth_softmax, const void* key_bias,
     int key_bias_stride);
 
-#ifdef HIPDNN_LUT_LINKED_EXTERNALLY
-#include "gqa_autotune.h"
-
 extern "C" int hip_gqa_flash_prefill_v3_configured(
     void* stream_ptr,
     const void* Q, const void* Kcache, const void* Vcache, void* O,
@@ -367,6 +384,11 @@ extern "C" int hip_gqa_flash_prefill_v3_configured(
     int num_heads, int smooth_softmax,
     int hb, int qw, int mt, int bkv, int nd,
     const void* key_bias, int key_bias_stride);
+
+#ifdef HIPDNN_LUT_LINKED_EXTERNALLY
+#include "gqa_autotune.h"
+
+
 
 static void* gqa_policy() {
   static void* p = hip_gqa_autotune_create(nullptr);
@@ -429,6 +451,10 @@ struct Case {
   // key. Their output is unspecified (ONNX gives NaN), so only rows with a
   // real key are compared, and every output must be finite.
   bool left_pad = false;
+  int nd = 0, hb = 0, bkv = 0;
+  float scale = 0.0f;
+  bool has_scale = false;
+  int max_seq = 0;  // 0 keeps the existing compact-cache cases.
 };
 
 // key_bias rows [B, skv]: 0 for a real key, pad_value for padding. Empty when
@@ -539,6 +565,11 @@ static std::string case_shape(const Case& c) {
   if (c.pad > 0) s += (c.left_pad ? "_lpad" : "_pad") + std::to_string(c.pad);
   if (c.pad > 0 && std::isinf(c.pad_value)) s += "_ninf";
   else if (c.pad > 0 && c.pad_value < -65504.0f) s += "_m3e38";
+  if (c.max_seq > 0) s += "_cap" + std::to_string(c.max_seq);
+  char scale_buf[32];
+  std::snprintf(scale_buf, sizeof(scale_buf), "%.9g",
+                static_cast<double>(c.has_scale ? c.scale : 1.0f / std::sqrt(static_cast<float>(c.D))));
+  if (c.has_scale) s += "_scale" + std::string(scale_buf);
   return s;
 }
 
@@ -556,8 +587,16 @@ static bool run_case(const Case& c, int iters, const hipdnn_ep_test::timing::Ran
   const int B = c.B, H = c.H, G = c.G, D = c.D, sq = c.sq;
   const int past_len = c.past;
   const int skv = past_len + sq;   // total_seq
-  const int max_seq = skv;         // cache buffer holds exactly total_seq
-  const float scale = 1.0f / std::sqrt((float)D);
+  const int max_seq = c.max_seq > 0 ? c.max_seq : skv;
+  const float scale = c.has_scale ? c.scale : 1.0f / std::sqrt((float)D);
+  if (B <= 0 || H <= 0 || G <= 0 || H % G != 0 || D <= 0 || sq <= 0 ||
+      past_len < 0 || max_seq < skv || !std::isfinite(scale) || scale < 0.0f) {
+    std::fprintf(stderr, "invalid GQA dimensions, cache capacity or scale\n");
+    return false;
+  }
+  std::printf("GQA_LAYOUT B=%d H=%d G=%d D=%d sq=%d skv=%d capacity=%d "
+              "scale=%.9g q=BSHD kv=BNSD causal=1\n",
+              B, H, G, D, sq, skv, max_seq, static_cast<double>(scale));
 
   const size_t qn = (size_t)B * sq * H * D;
   const size_t kn = (size_t)B * G * max_seq * D;
@@ -590,6 +629,8 @@ static bool run_case(const Case& c, int iters, const hipdnn_ep_test::timing::Ran
 
   __half *dQ, *dK, *dV, *dO, *dSink;
   hipdnn_ep_test::GpuExecutionScope gpu_execution([] { HIP_CHECK(hipDeviceSynchronize()); });
+  hipdnn_ep_test::GpuPhase gpu_phase;
+  gpu_phase.begin();
   HIP_CHECK(hipMalloc(&dQ, qn * sizeof(__half)));
   HIP_CHECK(hipMalloc(&dK, kn * sizeof(__half)));
   HIP_CHECK(hipMalloc(&dV, kn * sizeof(__half)));
@@ -637,6 +678,7 @@ static bool run_case(const Case& c, int iters, const hipdnn_ep_test::timing::Ran
 #ifndef HIPDNN_UT_RANK_GQA_ADAPTER
     throw std::runtime_error("UT rank: GQA requires standalone RANK=1 build");
 #else
+    {
     const hipdnn_ep_test::ColdKvCopies rank_kv(dK, dV, B * G, max_seq,
         static_cast<size_t>(D) * sizeof(__half), c.window > 0 ? std::max(0, past_len - c.window) : 0, skv);
     UtGqaConfig selected;
@@ -661,7 +703,9 @@ static bool run_case(const Case& c, int iters, const hipdnn_ep_test::timing::Ran
     hipdnn_ep_test::rotatedMeanMs(nullptr, 0, rank_kv, [&](int i) {
       return rank_launch(rank_kv.k(i), rank_kv.v(i), rank_kv.rows());
     }, "hip_gqa_flash_prefill_v3_configured", &options);
+    }
     hipFree(dQ); hipFree(dK); hipFree(dV); hipFree(dO); hipFree(dSink); hipFree(dKb);
+    gpu_phase.finish(true);
     return true;
 #endif
   }
@@ -685,6 +729,12 @@ static bool run_case(const Case& c, int iters, const hipdnn_ep_test::timing::Ran
     hip_gqa_autotune_resolve_prefill(gqa_policy(), &lut_req, &lut_res);
   }
   auto launch = [&](const void* k, const void* v, int kv_rows) {
+    if (c.nd > 0) {
+      return hip_gqa_flash_prefill_v3_configured(
+          nullptr, dQ, k, v, dO, B, H, G, sq, skv, D, kv_rows, past_len,
+          scale, window_arg, sink_arg, H, smooth_arg, c.hb, 0, 0, c.bkv, c.nd,
+          dKb, kb_stride);
+    }
     if (use_lookup) {
       return hip_gqa_flash_prefill_v3_configured(
           nullptr, dQ, k, v, dO, B, H, G, sq, skv, D, kv_rows, past_len,
@@ -698,6 +748,12 @@ static bool run_case(const Case& c, int iters, const hipdnn_ep_test::timing::Ran
   };
 #else
   auto launch = [&](const void* k, const void* v, int kv_rows) {
+    if (c.nd > 0) {
+      return hip_gqa_flash_prefill_v3_configured(
+          nullptr, dQ, k, v, dO, B, H, G, sq, skv, D, kv_rows, past_len,
+          scale, window_arg, sink_arg, H, smooth_arg, c.hb, 0, 0, c.bkv, c.nd,
+          dKb, kb_stride);
+    }
     return hip_gqa_flash_prefill(nullptr, dQ, k, v, dO, B, H, G, sq, skv, D,
                                     kv_rows, past_len, scale, window_arg,
                                     sink_arg, H, smooth_arg, dKb, kb_stride);
@@ -741,12 +797,15 @@ static bool run_case(const Case& c, int iters, const hipdnn_ep_test::timing::Ran
     }
     hipFree(dQ); hipFree(dK); hipFree(dV); hipFree(dO); hipFree(dSink);
     if (dKb) hipFree(dKb);
+    gpu_phase.finish(true);
     return ok;
   }
   if (rc != 0) { fprintf(stderr, "%s: kernel returned %d\n", c.name, rc); return false; }
 
   std::vector<__half> Oh(qn);
   HIP_CHECK(hipMemcpy(Oh.data(), dO, qn * sizeof(__half), hipMemcpyDeviceToHost));
+  gpu_phase.finish();
+  gpu_execution.finish();
   std::vector<float> Oout(qn);
   for (size_t i = 0; i < qn; ++i) Oout[i] = __half2float(Oh[i]);
   bool finite = true;
@@ -772,20 +831,34 @@ static bool run_case(const Case& c, int iters, const hipdnn_ep_test::timing::Ran
 
   // The rows a launch reads: from the window's start below the first query
   // when there is a window, else every key.
+  double ms = 0.0;
+  hipdnn_ep_test::GpuExecutionScope gpu_timing([] { HIP_CHECK(hipDeviceSynchronize()); });
+  gpu_phase.begin();
+  {
   const hipdnn_ep_test::ColdKvCopies kv(
       dK, dV, B * G, max_seq, static_cast<size_t>(D) * sizeof(__half),
       c.window > 0 ? std::max(0, past_len - c.window) : 0, skv);
-  double ms = 0.0;
   hipdnn_ep_test::captureLogLines(
       "HIPDNN_GQA_AUTOTUNE_LOG", "_cfg_capture.tmp", [&]() {
         for (int i = 0; i < 10; ++i) launch(kv.k(0), kv.v(0), kv.rows());
         HIP_CHECK(hipDeviceSynchronize());
+        gpu_phase.timingBegin();
         ms = hipdnn_ep_test::rotatedMeanMs(nullptr, iters, kv, [&](int i) {
           return launch(kv.k(i), kv.v(i), kv.rows());
-        }, use_lookup ? "hip_gqa_flash_prefill_v3_configured"
+        }, (use_lookup || c.nd > 0) ? "hip_gqa_flash_prefill_v3_configured"
                       : "hip_gqa_flash_prefill");
+        gpu_phase.timingEnd();
       });
 
+  }
+  hipFree(dQ); hipFree(dK); hipFree(dV); hipFree(dO); hipFree(dSink);
+  if (dKb) hipFree(dKb);
+  gpu_phase.finish(true);
+  gpu_timing.finish();
+
+  if (c.nd > 0) {
+    launched_cfg = "pin:nd=" + std::to_string(c.nd) + " hb=" + std::to_string(c.hb) + " bkv=" + std::to_string(c.bkv);
+  }
   const bool pass = err < 2e-3;
   printf("%-16s B%d H%d G%d(hpg%d) D%-3d sq=%-5d past=%-5d %-6s w=%-5d | relL2=%.2e  latency=%.4f ms  %s (%s)\n",
          c.name, B, H, G, H / G, D, sq, past_len, sink_tag, c.window, err, ms,
@@ -797,7 +870,7 @@ static bool run_case(const Case& c, int iters, const hipdnn_ep_test::timing::Ran
 #ifdef HIPDNN_LUT_LINKED_EXTERNALLY
     CsvRow row;
     row.shape = case_shape(c);
-    if (use_lookup) {
+    if (use_lookup && c.nd == 0) {
       char config_buf[96];
       std::snprintf(config_buf, sizeof(config_buf),
                     "lookup:hb=%d qw=%d mt=%d bkv=%d nd=%d (%s)",
@@ -824,8 +897,6 @@ static bool run_case(const Case& c, int iters, const hipdnn_ep_test::timing::Ran
 #endif
   }
 
-  hipFree(dQ); hipFree(dK); hipFree(dV); hipFree(dO); hipFree(dSink);
-  if (dKb) hipFree(dKb);
   return pass;
 }
 
@@ -868,6 +939,23 @@ int main(int argc, char** argv) {
     else if (a == "--sq") { next(single.sq); have_single = true; }
     else if (a == "--past") { next(single.past); have_single = true; }
     else if (a == "--window") { next(single.window); have_single = true; }
+    else if (a == "--nd") { next(single.nd); have_single = true; }
+    else if (a == "--hb") { next(single.hb); have_single = true; }
+    else if (a == "--bkv") { next(single.bkv); have_single = true; }
+    else if (a == "--max-seq" && i + 1 < argc) {
+      next(single.max_seq);
+      if (single.max_seq <= 0) { std::fprintf(stderr, "--max-seq must be positive\n"); return 1; }
+      have_single = true;
+    }
+    else if (a == "--scale" && i + 1 < argc) {
+      char* end = nullptr;
+      single.scale = std::strtof(argv[++i], &end);
+      if (!end || end == argv[i] || *end || !std::isfinite(single.scale) || single.scale < 0.0f) {
+        std::fprintf(stderr, "--scale must be finite and non-negative\n"); return 1;
+      }
+      single.has_scale = true;
+      have_single = true;
+    }
     else if (a == "--pad") { next(single.pad); have_single = true; }
   }
 

@@ -33,6 +33,14 @@
 #include "../../common/hip_adaptive_timing.h"
 #include "../../common/ut_case_input.h"
 #include "../../common/ut_matmul_nbits_rank_input.h"
+#ifdef HIPDNN_UT_GPU_PHASE_HEADER
+#include HIPDNN_UT_GPU_PHASE_HEADER
+#elif !defined(HIPDNN_UT_GPU_PHASE_LINKED)
+namespace hipdnn_ep_test {
+struct GpuPhase { void begin() {} void finish(bool = false) {} void timingBegin() {} void timingEnd() {} };
+}
+#endif
+
 #include <hip/hip_fp16.h>
 #include "hip_custom_kernels.h"
 
@@ -341,7 +349,7 @@ static std::string capture_selected_config(const char* tune_key, Fn&& launch) {
       // The op prints the table's Source as a number; name it the way
       // matmul_nbits_autotune.h does.
       static const char* const kSources[] = {"none", "exact", "nearest",
-                                             "fallback"};
+                                             "fallback", "interval"};
       int src = -1;
       double distance = 0.0;
       const size_t tier = line.find("(src=");
@@ -349,7 +357,7 @@ static std::string capture_selected_config(const char* tune_key, Fn&& launch) {
         std::sscanf(line.c_str() + tier, "(src=%d d=%lf)", &src, &distance);
       char source[48];
       std::snprintf(source, sizeof(source), " (%s d=%.3f)",
-                    src >= 0 && src < 4 ? kSources[src] : "unknown", distance);
+                    src >= 0 && src < 5 ? kSources[src] : "unknown", distance);
       lut = "lookup:" + line.substr(line.find("config[")) + source;
     } else if (line.find("best config[") != std::string::npos) {
       tuned = "autotune:" + line.substr(line.find("best config["));
@@ -592,6 +600,7 @@ struct Case {
   bool zero, fp32;
   int route = 0;  // 0: nbits, 1: dp4a, 2: padrow
   bool zp_u8 = false;
+  int b_row_bytes = 0;  // legacy explicit padded-stride spelling
 };
 
 static std::vector<Case> buildCases(int tier) {
@@ -614,6 +623,7 @@ static bool runOne(const Case& c, int idx, const hipdnn_ep_test::timing::RankRow
   if (c.zero && c.zp_u8) std::strcat(timing_shape, "_zpu8");
   if (c.route == 1) std::strcat(timing_shape, "_dp4a");
   if (c.route == 2) std::strcat(timing_shape, "_padrow");
+  if (c.b_row_bytes) std::strcat(timing_shape, ("_p" + std::to_string(c.b_row_bytes)).c_str());
   const char* entry = c.route == 1 ? "hip_matmul_nbits_dp4a" :
       c.route == 2 ? "hip_matmul_nbits_u4_wmma_padrow" : "hip_matmul_nbits";
   hipdnn_ep_test::timing::CaseScope timing_case("matmul_nbits/Xfp16_Wu4_Yfp16", timing_shape, entry);
@@ -628,6 +638,33 @@ static bool runOne(const Case& c, int idx, const hipdnn_ep_test::timing::RankRow
   }
   if (rank_row && (c.route || c.zp_u8))
     throw std::invalid_argument("UT ranking does not represent custom route/zero-point inputs");
+  std::string pinned_config;
+  const char* pin = std::getenv((c.route == 1) ? "HIPDNN_EP_MATMUL_DP4A_CFG" : "HIPDNN_MATMUL_NBITS_WMMA_CFG");
+  if (pin && *pin) {
+    const int cfg = std::atoi(pin);
+    if (!(c.route == 1)) {
+      HipMatmulNBitsWmmaConfigDesc dsc{};
+      if (hip_matmul_nbits_u4_wmma_config_desc(cfg, &dsc) != 0 ||
+          dsc.bk <= 0 || c.K % dsc.bk ||
+          (!dsc.ext && dsc.bn < 64 && c.N > 2 * dsc.bn) ||
+          c.gs % (dsc.bn * dsc.bk / ((dsc.bm / (16 * dsc.wt_m)) * (dsc.bn / (16 * dsc.wt_n)) * 32)) ||
+          (dsc.ext && !hip_matmul_nbits_u4_wmma_ext_device()) ||
+          ((c.route == 2) && !dsc.fused)) {
+        std::fprintf(stderr, "illegal pinned WMMA config %d\n", cfg);
+        return false;
+      } else {
+        char desc[180];
+        std::snprintf(desc, sizeof(desc), "pin_config%d_bm%d_bn%d_sw%d_wt%dx%d_bk%d_fused%d_ext%d_var%d",
+                      cfg, dsc.bm, dsc.bn, dsc.swizzle_n, dsc.wt_m, dsc.wt_n,
+                      dsc.bk, dsc.fused, dsc.ext, dsc.variant);
+        pinned_config = desc;
+      }
+    } else {
+      pinned_config = "dp4a_pin_config" + std::to_string(cfg);
+    }
+  }
+  if (rank_row && !pinned_config.empty())
+    throw std::invalid_argument("UT ranking cannot run with an environment-pinned config");
   CaseData d;
   genCase(c.M, c.K, c.N, c.gs, c.zero, c.fp32, /*seed=*/1000u + idx, d);
 
@@ -636,6 +673,8 @@ static bool runOne(const Case& c, int idx, const hipdnn_ep_test::timing::RankRow
   const size_t elem = c.fp32 ? 4 : 2;
 
   hipdnn_ep_test::GpuExecutionScope gpu_execution([] { HIP_CHECK(hipDeviceSynchronize()); });
+  hipdnn_ep_test::GpuPhase gpu_phase;
+  gpu_phase.begin();
   void *dA = nullptr, *dC = nullptr;
   __half* dS = nullptr;
   __half* dZ = nullptr;
@@ -707,7 +746,7 @@ static bool runOne(const Case& c, int idx, const hipdnn_ep_test::timing::RankRow
   char tune_key[64];
   std::snprintf(tune_key, sizeof(tune_key), "%dx%dx%d_gs%d_%s", c.M, c.N, c.K,
                 c.gs, c.zero ? "z" : "noz");
-  const std::string selected_config = capture_selected_config(tune_key, [&] {
+  std::string selected_config = capture_selected_config(tune_key, [&] {
     for (int w = 0; w < 3; ++w) status = launch();
     HIP_CHECK(hipStreamSynchronize(stream));
   });
@@ -717,6 +756,7 @@ static bool runOne(const Case& c, int idx, const hipdnn_ep_test::timing::RankRow
     throw std::runtime_error("UT rank: MatMulNBits requires standalone RANK=1 build");
 #else
     if (status != 0) throw std::runtime_error("UT rank: no-LUT default launch failed");
+    {
     const hipdnn_ep_test::ColdCopies weights(
         {{dB, d.Bpacked.size()}, {dS, d.scales.size() * sizeof(__half)},
          {dZ, c.zero ? d.zeros.size() * sizeof(d.zeros[0]) : 0}});
@@ -746,12 +786,15 @@ static bool runOne(const Case& c, int idx, const hipdnn_ep_test::timing::RankRow
                        static_cast<int>(elem), /*zp_elem_size=*/2, nullptr,
                        nullptr);
     }, &options);
+    }
     hipFree(dA); hipFree(dB); hipFree(dS); if (dZ) hipFree(dZ); hipFree(dC);
     HIP_CHECK(hipStreamDestroy(stream));
+    gpu_phase.finish(true);
     return true;
 #endif
   }
 
+  if (!pinned_config.empty()) selected_config = pinned_config;
   double avg_ms = 0.0;
   if (status == 0) {
     constexpr int kIters = 20;
@@ -761,17 +804,30 @@ static bool runOne(const Case& c, int idx, const hipdnn_ep_test::timing::RankRow
         {{dB, d.Bpacked.size()},
          {dS, d.scales.size() * sizeof(__half)},
          {active_zeros, zero_bytes}});
+    gpu_phase.timingBegin();
     avg_ms = hipdnn_ep_test::rotatedMeanMs(stream, kIters, weights, [&](int i) {
       return invoke(weights.part(i, 0), weights.part(i, 1),
                     c.zero ? weights.part(i, 2) : nullptr);
     });
+    gpu_phase.timingEnd();
   }
 
+  std::vector<uint8_t> raw(countC * elem);
+  if (status == 0)
+    HIP_CHECK(hipMemcpy(raw.data(), dC, countC * elem, hipMemcpyDeviceToHost));
+  hipFree(dA);
+  hipFree(dB);
+  hipFree(dS);
+  if (dZ) hipFree(dZ);
+  if (zero_u8) HIP_CHECK(hipFree(zero_u8));
+  if (dp4a_scratch) HIP_CHECK(hipFree(dp4a_scratch));
+  hipFree(dC);
+  hipStreamDestroy(stream);
+  gpu_phase.finish(true);
+  gpu_execution.finish();
   bool pass = (status == 0);
   double rel_l2 = 0.0;
   if (status == 0) {
-    std::vector<uint8_t> raw(countC * elem);
-    HIP_CHECK(hipMemcpy(raw.data(), dC, countC * elem, hipMemcpyDeviceToHost));
     double ssd = 0.0, ssr = 0.0;
     int errors = 0;
     for (size_t i = 0; i < countC; ++i) {
@@ -780,12 +836,12 @@ static bool runOne(const Case& c, int idx, const hipdnn_ep_test::timing::RankRow
       const float ref_val = c.fp32 ? d.Cref32[i] : half_to_float(d.Cref16[i]);
       const float diff = std::fabs(gpu_val - ref_val);
       const float tol = std::fabs(ref_val) * 0.05f + 0.1f;
-      if (diff > tol) ++errors;
+      if (!(diff <= tol) || !std::isfinite(gpu_val)) ++errors;
       ssd += (double)diff * diff;
       ssr += (double)ref_val * ref_val;
     }
     rel_l2 = ssr > 0.0 ? std::sqrt(ssd / ssr) : std::sqrt(ssd);
-    pass = (errors == 0);
+    pass = (errors == 0) && std::isfinite(rel_l2);
   }
 
   std::printf("  M=%d N=%d K=%d gs=%d zero=%d dtype=%s  status=%d  %.4f ms  relL2=%.3e  %s\n",
@@ -807,14 +863,7 @@ static bool runOne(const Case& c, int idx, const hipdnn_ep_test::timing::RankRow
     csv.write(row);
   }
 
-  hipFree(dA);
-  hipFree(dB);
-  hipFree(dS);
-  if (dZ) hipFree(dZ);
-  if (zero_u8) HIP_CHECK(hipFree(zero_u8));
-  if (dp4a_scratch) HIP_CHECK(hipFree(dp4a_scratch));
-  hipFree(dC);
-  hipStreamDestroy(stream);
+
   return pass;
 }
 
@@ -957,6 +1006,16 @@ static int runCustom(const sweep::Case& c) {
 }
 
 static int runMain(int argc, char* argv[]) {
+  if (argc == 2 && std::strcmp(argv[1], "--list-configs") == 0) {
+    for (int cfg = 0; cfg < hip_matmul_nbits_u4_wmma_config_count(); ++cfg) {
+      HipMatmulNBitsWmmaConfigDesc d{};
+      if (hip_matmul_nbits_u4_wmma_config_desc(cfg, &d) != 0) return 2;
+      std::printf("WMMA_CONFIG {\"config\":%d,\"bm\":%d,\"bn\":%d,\"swizzle\":%d,\"wt_m\":%d,\"wt_n\":%d,\"bk\":%d,\"fused\":%d,\"ext\":%d,\"variant\":%d}\n",
+                  cfg, d.bm, d.bn, d.swizzle_n, d.wt_m, d.wt_n, d.bk,
+                  d.fused, d.ext, d.variant);
+    }
+    return 0;
+  }
   if (hipdnn_ep_test::timing::rankRequested()) {
     try {
       const auto rows = hipdnn_ep_test::timing::readRankRows("matmul_nbits/Xfp16_Wu4_Yfp16");
@@ -981,7 +1040,13 @@ static int runMain(int argc, char* argv[]) {
 
   using namespace hipdnn_ep_test::input;
   sweep::Case single{0, 0, 0, 128, true, sweep::kFp32};
-  bool have_custom = false, semantic_option = false;
+  bool have_custom = false, semantic_option = false, route_selected = false;
+  auto choose_route = [&](int route) {
+    if (route_selected && single.route != route)
+      throw std::invalid_argument("conflicting --route/--dp4a/--b-row-bytes options");
+    single.route = route;
+    route_selected = true;
+  };
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     if (a == "--help") {
@@ -990,6 +1055,8 @@ static int runMain(int argc, char* argv[]) {
     }
     if (a == "--coverage") { (void)integer(value(argc, argv, i), "coverage", 1, 3); continue; }
     if (a == "--no-zeros") { single.zero = false; semantic_option = true; }
+    else if (a == "--dp4a") { choose_route(1); semantic_option = true; }
+    else if (a == "--b-row-bytes") { single.b_row_bytes = static_cast<int>(integer(value(argc, argv, i), "b-row-bytes")); choose_route(2); semantic_option = true; }
     else if (a == "--group-size") { single.gs = static_cast<int>(integer(value(argc, argv, i), "group-size")); semantic_option = true; }
     else if (a == "--zp-type") {
       const auto v = value(argc, argv, i);
@@ -999,7 +1066,7 @@ static int runMain(int argc, char* argv[]) {
     } else if (a == "--route") {
       const auto v = value(argc, argv, i);
       if (v != "nbits" && v != "dp4a" && v != "padrow") throw std::invalid_argument("unknown --route");
-      single.route = v == "dp4a" ? 1 : v == "padrow" ? 2 : 0;
+      choose_route(v == "dp4a" ? 1 : v == "padrow" ? 2 : 0);
       semantic_option = true;
     } else if (!a.empty() && a[0] != '-') {
       if (have_custom) throw std::invalid_argument("only one MxKxN may be supplied");
@@ -1017,8 +1084,10 @@ static int runMain(int argc, char* argv[]) {
     (void)bytes({static_cast<uint64_t>(c.N), static_cast<uint64_t>(c.K)}, 1);
     if (c.route == 1 && (c.fp32 || c.M > 7 || c.K % 32 || c.K % c.gs || (c.zero && !c.zp_u8)))
       throw std::invalid_argument("dp4a requires fp16, M=1..7, 32-aligned K divisible by group-size and absent/u8 zero points");
-    if (c.route == 2 && (c.fp32 || c.M < 16 || c.K % 32 || c.K % c.gs))
-      throw std::invalid_argument("padrow requires fp16, M>=16 and 32-aligned K divisible by group-size");
+    if (c.b_row_bytes && (c.route != 2 || c.b_row_bytes != c.K / 2 + 128))
+      throw std::invalid_argument("--b-row-bytes must equal K/2+128 and select padrow");
+    if (c.route == 2 && (c.fp32 || c.M < 2 || c.K % 32 || c.K % c.gs))
+      throw std::invalid_argument("padrow requires fp16, M>=2 and 32-aligned K divisible by group-size");
   }
   hipDeviceProp_t prop;
   HIP_CHECK(hipGetDeviceProperties(&prop, 0));
