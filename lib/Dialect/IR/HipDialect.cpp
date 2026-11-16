@@ -674,11 +674,42 @@ static void printSingleInitDpsOp(OpAsmPrinter &p, Operation *op, Value ctx,
 }
 
 //===------------
-// RocMlirOp: ins(variadic) outs(output)
+// RocMlirOp: ins(variadic) outs(variadic)
 //===------------
 
 MutableOperandRange RocMlirOp::getDpsInitsMutable() {
-  return getOutputMutable();
+  return getOutputsMutable();
+}
+
+LogicalResult RocMlirOp::verify() {
+  if (getOutputs().empty())
+    return emitOpError("requires at least one outs operand");
+  bool tensorOuts = isa<RankedTensorType>(getOutputs().front().getType());
+  if (llvm::any_of(getOutputs(), [&](Value out) {
+        return isa<RankedTensorType>(out.getType()) != tensorOuts;
+      }))
+    return emitOpError("requires all outs operands to be tensors or all to be "
+                       "memrefs");
+  // The lowering reads every input through a contiguous memref pointer, so an
+  // input of the other mode must not survive bufferization.
+  if (llvm::any_of(getInputs(), [&](Value in) {
+        return isa<RankedTensorType>(in.getType()) != tensorOuts;
+      }))
+    return emitOpError("requires ins operands of the same kind as its outs "
+                       "(all tensors or all memrefs)");
+  if (!tensorOuts) {
+    if (getNumResults() != 0)
+      return emitOpError("on memrefs has no results");
+    return success();
+  }
+  if (getNumResults() != getOutputs().size())
+    return emitOpError("requires one result per outs operand");
+  for (auto [result, init] : llvm::zip(getResults(), getOutputs()))
+    if (result.getType() != init.getType())
+      return emitOpError("result type ")
+             << result.getType() << " differs from its outs type "
+             << init.getType();
+  return success();
 }
 
 void RocMlirOp::getEffects(
@@ -773,14 +804,25 @@ static bool isEightBitInt(Type type) {
   return integer && integer.getWidth() == 8;
 }
 
-static LogicalResult verifyPositivePair(QLinearConvOp op, ArrayAttr attr,
+// The activation types the integer anchors lower: rocMLIR takes signless i8,
+// and HipToTosa rebiases ui8 to it. A signed si8 has no lowering.
+static bool isAnchorByte(Type type) {
+  return type.isSignlessInteger(8) || type.isUnsignedInteger(8);
+}
+
+// Two extents agree when either is dynamic or both are equal.
+static bool extentsAgree(int64_t a, int64_t b) {
+  return ShapedType::isDynamic(a) || ShapedType::isDynamic(b) || a == b;
+}
+
+static LogicalResult verifyPositivePair(Operation *op, ArrayAttr attr,
                                         StringRef name) {
   if (attr.size() != 2)
-    return op.emitOpError() << name << " must have 2 entries";
+    return op->emitOpError() << name << " must have 2 entries";
   for (Attribute entry : attr) {
     auto intAttr = dyn_cast<IntegerAttr>(entry);
     if (!intAttr || intAttr.getInt() <= 0)
-      return op.emitOpError() << name << " entries must be positive";
+      return op->emitOpError() << name << " entries must be positive";
   }
   return success();
 }
@@ -846,6 +888,83 @@ LogicalResult QLinearConvOp::verify() {
   }
   if (getGroup() < 1)
     return emitOpError("group must be positive");
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// QuantConvOp: i8 x i8 -> i32 grouped 2D convolution
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange QuantConvOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void QuantConvOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult QuantConvOp::verify() {
+  if (failed(verifyDpsComputeOp(*this, {getInput(), getWeights(), getOutput()},
+                                /*numInits=*/1)))
+    return failure();
+  auto inputType = dyn_cast<ShapedType>(getInput().getType());
+  auto weightsType = dyn_cast<ShapedType>(getWeights().getType());
+  auto outputType = dyn_cast<ShapedType>(getOutput().getType());
+  if (!inputType || !weightsType || !outputType || !inputType.hasRank() ||
+      !weightsType.hasRank() || !outputType.hasRank() ||
+      inputType.getRank() != 4 || weightsType.getRank() != 4 ||
+      outputType.getRank() != 4)
+    return emitOpError("input, weights, and output must be rank 4");
+  if (!isAnchorByte(inputType.getElementType()))
+    return emitOpError("input must be i8 or ui8");
+  if (!weightsType.getElementType().isSignlessInteger(8))
+    return emitOpError("weights must be i8");
+  if (!outputType.getElementType().isSignlessInteger(32))
+    return emitOpError("output must be i32");
+  if (failed(verifyPositivePair(*this, getKernelShape(), "kernel_shape")) ||
+      failed(verifyPositivePair(*this, getStrides(), "strides")) ||
+      failed(verifyPositivePair(*this, getDilations(), "dilations")))
+    return failure();
+  if (getPads().size() != 4 || llvm::any_of(getPads(), [](Attribute entry) {
+        auto intAttr = dyn_cast<IntegerAttr>(entry);
+        return !intAttr || intAttr.getInt() < 0;
+      }))
+    return emitOpError("pads must have 4 non-negative entries");
+  int64_t group = getGroup();
+  if (group < 1)
+    return emitOpError("group must be positive");
+
+  // The rules of the HipToTosa lowering, for the extents that are static.
+  ArrayRef<int64_t> in = inputType.getShape();
+  ArrayRef<int64_t> w = weightsType.getShape();
+  ArrayRef<int64_t> out = outputType.getShape();
+  auto divides = [&](int64_t extent) {
+    return ShapedType::isDynamic(extent) || extent % group == 0;
+  };
+  if (!divides(in[1]) || !divides(out[1]))
+    return emitOpError("input and output channels must be divisible by group");
+  if (!ShapedType::isDynamic(in[1]) && !extentsAgree(w[1], in[1] / group))
+    return emitOpError("weight input channels must equal C / group");
+  if (!extentsAgree(in[0], out[0]) || !extentsAgree(w[0], out[1]))
+    return emitOpError("batch or output channels disagree");
+  for (int64_t dim : llvm::seq<int64_t>(2)) {
+    int64_t kernel = cast<IntegerAttr>(getKernelShape()[dim]).getInt();
+    if (!extentsAgree(w[dim + 2], kernel))
+      return emitOpError("kernel_shape disagrees with the weight tensor");
+    if (ShapedType::isDynamic(in[dim + 2]) ||
+        ShapedType::isDynamic(out[dim + 2]))
+      continue;
+    int64_t stride = cast<IntegerAttr>(getStrides()[dim]).getInt();
+    int64_t dilation = cast<IntegerAttr>(getDilations()[dim]).getInt();
+    int64_t span = in[dim + 2] - 1 +
+                   cast<IntegerAttr>(getPads()[dim]).getInt() +
+                   cast<IntegerAttr>(getPads()[dim + 2]).getInt() -
+                   (kernel - 1) * dilation;
+    if (span < 0 || span / stride + 1 != out[dim + 2])
+      return emitOpError("output shape disagrees with the convolution window");
+  }
   return success();
 }
 
@@ -931,6 +1050,45 @@ LogicalResult QLinearMatMulOp::verify() {
       failed(verifyQuantParam(*this, getYScale(), getYZeroPoint(),
                               yType.getElementType(), "y", /*axisExtent=*/1)))
     return failure();
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// QuantMatmulOp: i8 x i8 -> i32 rank-2 matrix product
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange QuantMatmulOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void QuantMatmulOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult QuantMatmulOp::verify() {
+  if (failed(verifyDpsComputeOp(*this, {getA(), getB(), getOutput()},
+                                /*numInits=*/1)))
+    return failure();
+  auto aType = dyn_cast<ShapedType>(getA().getType());
+  auto bType = dyn_cast<ShapedType>(getB().getType());
+  auto outputType = dyn_cast<ShapedType>(getOutput().getType());
+  if (!aType || !bType || !outputType || !aType.hasRank() || !bType.hasRank() ||
+      !outputType.hasRank() || aType.getRank() != 2 || bType.getRank() != 2 ||
+      outputType.getRank() != 2)
+    return emitOpError("a, b, and output must be rank 2");
+  if (!isAnchorByte(aType.getElementType()))
+    return emitOpError("a must be i8 or ui8");
+  if (!bType.getElementType().isSignlessInteger(8))
+    return emitOpError("b must be i8");
+  if (!outputType.getElementType().isSignlessInteger(32))
+    return emitOpError("output must be i32");
+  if (!extentsAgree(bType.getDimSize(0), aType.getDimSize(1)))
+    return emitOpError("b rows must equal a columns");
+  if (!extentsAgree(outputType.getDimSize(0), aType.getDimSize(0)) ||
+      !extentsAgree(outputType.getDimSize(1), bType.getDimSize(1)))
+    return emitOpError("output shape must be [M, N]");
   return success();
 }
 

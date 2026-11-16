@@ -31,6 +31,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace mlir {
 namespace hip {
@@ -70,6 +71,11 @@ struct RocMlirEmbedOptions {
 
 // ROCK_ARCH wins, else a default the rock backend can parse.
 std::string resolveRocMlirArch();
+
+// The gemm element types, printed as in IR (f16, bf16, ...), that `arch`
+// runs on matrix cores, for fuse-rocmlir's gemm-gemm-accel-types option.
+std::vector<std::string> getRocMlirGemmAccelTypes(MLIRContext &context,
+                                                  StringRef arch);
 
 // Register rock/migraphx/triton into `context` alongside the hip dialects, so
 // the rock pipelines run on our own ModuleOp with no serialization boundary.
