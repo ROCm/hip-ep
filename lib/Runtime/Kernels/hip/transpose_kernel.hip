@@ -224,7 +224,8 @@ hipError_t launchSmallC(hipStream_t stream, const void* input, void* output,
     const bool deinterleave = cols <= kSmallCMax;
     const int n = static_cast<int>(deinterleave ? rows : cols);
     const int c = static_cast<int>(deinterleave ? cols : rows);
-    dim3 grid(static_cast<unsigned>((n + kSmallCPix - 1) / kSmallCPix),
+    dim3 grid(static_cast<unsigned>(
+                  (static_cast<int64_t>(n) + kSmallCPix - 1) / kSmallCPix),
               static_cast<unsigned>(batch));
     const size_t lds = smallCLdsBytes(c, sizeof(T));
     const T* in = static_cast<const T*>(input);
