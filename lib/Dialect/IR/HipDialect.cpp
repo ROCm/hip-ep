@@ -690,6 +690,13 @@ LogicalResult RocMlirOp::verify() {
       }))
     return emitOpError("requires all outs operands to be tensors or all to be "
                        "memrefs");
+  // The lowering reads every input through a contiguous memref pointer, so an
+  // input of the other mode must not survive bufferization.
+  if (llvm::any_of(getInputs(), [&](Value in) {
+        return isa<RankedTensorType>(in.getType()) != tensorOuts;
+      }))
+    return emitOpError("requires ins operands of the same kind as its outs "
+                       "(all tensors or all memrefs)");
   if (!tensorOuts) {
     if (getNumResults() != 0)
       return emitOpError("on memrefs has no results");
@@ -899,6 +906,9 @@ void QuantConvOp::getEffects(
 }
 
 LogicalResult QuantConvOp::verify() {
+  if (failed(verifyDpsComputeOp(*this, {getInput(), getWeights(), getOutput()},
+                                /*numInits=*/1)))
+    return failure();
   auto inputType = dyn_cast<ShapedType>(getInput().getType());
   auto weightsType = dyn_cast<ShapedType>(getWeights().getType());
   auto outputType = dyn_cast<ShapedType>(getOutput().getType());
@@ -1058,6 +1068,9 @@ void QuantMatmulOp::getEffects(
 }
 
 LogicalResult QuantMatmulOp::verify() {
+  if (failed(verifyDpsComputeOp(*this, {getA(), getB(), getOutput()},
+                                /*numInits=*/1)))
+    return failure();
   auto aType = dyn_cast<ShapedType>(getA().getType());
   auto bType = dyn_cast<ShapedType>(getB().getType());
   auto outputType = dyn_cast<ShapedType>(getOutput().getType());
