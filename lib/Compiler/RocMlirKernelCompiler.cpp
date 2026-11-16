@@ -344,29 +344,18 @@ bool compileRocMlirDefaultPerfConfig(ModuleOp kernelModule, StringRef arch,
   if (!space || space->tuningRange.empty())
     return false;
 
-  struct CapturedDiagnostic {
-    Location loc;
-    DiagnosticSeverity severity;
-    std::string message;
-  };
   // A rejected config's diagnostics would read as a failed compile even when a
   // later config succeeds, so hold each attempt's back and replay only those of
-  // the attempt that decides the outcome.
-  SmallVector<CapturedDiagnostic> captured;
+  // the attempt that decides the outcome. Whole diagnostics are kept so the
+  // replay carries their notes (e.g. the failing op) and severity unchanged; a
+  // Diagnostic owns its strings, and everything else it refers to lives in the
+  // context.
+  MLIRContext *ctx = kernelModule.getContext();
+  SmallVector<Diagnostic> captured;
   auto replayCaptured = [&] {
-    for (const CapturedDiagnostic &diag : captured) {
-      switch (diag.severity) {
-      case DiagnosticSeverity::Error:
-        emitError(diag.loc) << diag.message;
-        break;
-      case DiagnosticSeverity::Warning:
-        emitWarning(diag.loc) << diag.message;
-        break;
-      default:
-        emitRemark(diag.loc) << diag.message;
-        break;
-      }
-    }
+    for (Diagnostic &diag : captured)
+      ctx->getDiagEngine().emit(std::move(diag));
+    captured.clear();
   };
 
   for (rock::RockTuningParamAttrInterface tuningAttr : space->tuningRange) {
@@ -376,23 +365,22 @@ bool compileRocMlirDefaultPerfConfig(ModuleOp kernelModule, StringRef arch,
     // The backend pipeline rewrites the module in place, so each attempt
     // needs an untouched copy of the rock-form kernel.
     OwningOpRef<ModuleOp> attempt = kernelModule.clone();
+    ModuleOp attemptOp = attempt.get();
     captured.clear();
     bool compiled;
     {
-      ScopedDiagnosticHandler capture(
-          kernelModule.getContext(), [&](Diagnostic &diag) {
-            captured.push_back(
-                {diag.getLocation(), diag.getSeverity(), diag.str()});
-            return success();
-          });
-      compiled = rock::tuningSetStr(*attempt, perfConfig) &&
-                 compileRocMlirBackend(*attempt, arch, perfConfig, out);
+      ScopedDiagnosticHandler capture(ctx, [&](Diagnostic &diag) {
+        captured.push_back(std::move(diag));
+        return success();
+      });
+      compiled = rock::tuningSetStr(attemptOp, perfConfig) &&
+                 compileRocMlirBackend(attemptOp, arch, perfConfig, out);
     }
     if (compiled) {
       replayCaptured();
       return true;
     }
-    if (!(*attempt)->hasAttr(rock::NotApplicableAttr::getMnemonic())) {
+    if (!attemptOp->hasAttr(rock::NotApplicableAttr::getMnemonic())) {
       replayCaptured();
       return false;
     }
