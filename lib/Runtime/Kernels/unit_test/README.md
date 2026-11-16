@@ -13,6 +13,9 @@ and dispersion are emitted as `UT_TIMING` JSON records.
 
 The same leaves refresh LUT tables; see
 [Refreshing a LUT with the UT leaves](#refreshing-a-lut-with-the-ut-leaves).
+Every input an external caller passes, to the controller or to one leaf, is
+listed in [`ut_interface.json`](ut_interface.json); see
+[External invocation](#external-invocation-ut_interfacejson).
 
 There are two ways to build and run them:
 
@@ -65,6 +68,7 @@ prefix gets one `kernel-tests/<arch>/`, named exactly like that entry's
 <install>/bin/
   hipdnn-kernel-ut.exe                          # suite controller (one)
   custom_kernels_<arch>.dll                     # installed already, one per arch
+  kernel-tests/ut_interface.json                # caller inputs, see "External invocation"
   kernel-tests/<arch>/
     hipdnn-kernel-ut-matmul-nbits-xfp16-wu2-yfp16.exe
     hipdnn-kernel-ut-matmul-nbits-xfp16-wu3-yfp16.exe
@@ -361,6 +365,56 @@ including skipped points, weights, fallback/config indices and array order.
 Each op's details are in [hip/autotune/matmul_nbits/README.md](../hip/autotune/matmul_nbits/README.md#refresh-through-native-ut-ranking)
 and [hip/autotune/gqa/README.md](../hip/autotune/gqa/README.md#refresh-through-native-ut-ranking).
 
+## External invocation (`ut_interface.json`)
+
+[`ut_interface.json`](ut_interface.json) lists every input an external caller
+(CI, an agent or a script) passes to run these tests. The package installs it
+as `bin/kernel-tests/ut_interface.json`.
+
+- `controller`: the `hipdnn-kernel-ut.exe` flags (`--arch`, `--mode`,
+  `--coverage`, `--timing`), the command and environment it gives each leaf,
+  its exit codes and outputs.
+- `common`: the Make and environment variables every leaf shares. `COVERAGE`
+  (`--coverage`, `HIPDNN_UT_COVERAGE`) selects the shape tier, `TIMING`
+  (`HIPDNN_UT_TIMING`) the timing preset, `MODE` with
+  `HIPDNN_<OP>_AUTOTUNE_MODE` the config source and `RANK` with
+  `HIPDNN_UT_RANK*` LUT ranking; `HIP_SDK`, `OFFLOAD`, `LUT_ARCH`, `FLATC` and
+  `FLATBUFFERS_INC` are build inputs.
+- `leaves[]`: one entry per registered leaf with its `package_executable`,
+  `source`, `capabilities` (`coverage`, `timing` = `shared` or `none`,
+  `mode` = `lookup` or `label_only`, `rank`), the `suite` arguments and
+  `custom`, the leaf's single-case interface:
+  - `selected_by`: what switches the executable from the suite to one case.
+  - `params[]`: every op input of that case. `flag` is the executable
+    argument (`positional` with a `format` when it has none), `make` the
+    `make test_custom` variable (`null` when only the executable accepts it;
+    `make_args` names a raw `ARGS=` instead), plus `type`, `choices`,
+    `required` and `description`. `exe_default` and `make_default` can differ:
+    an omitted flag takes `exe_default`, an omitted Make variable
+    `make_default`.
+  - `constraints`, `example_exe` and `example_make`.
+- `diagnostic_flags` and a leaf's own `env` do not change the op inputs.
+- `gaps`: required capabilities a leaf that predates this standard still
+  lacks (`custom_shape`, `coverage`, `shared_timer`, `results_csv`,
+  `make_api`, `arch_default`). `custom: null` means the leaf cannot run a
+  caller-chosen shape.
+
+A packaged leaf started on its own does not get the controller's DLL search
+path or environment (see "Run" above). Set the timing preset, and for a
+MatMulNBits, GQA or QMoE leaf `HIPDNN_KERNEL_UT_MODE` with the matching
+`HIPDNN_<OP>_AUTOTUNE_MODE`; `HIPDNN_RESULTS_CSV` adds its rows to a CSV:
+
+```bat
+set HIPDNN_UT_TIMING=confirm
+set HIPDNN_KERNEL_UT_MODE=lookup
+set HIPDNN_GQA_AUTOTUNE_MODE=lookup
+kernel-tests\gfx11-generic\hipdnn-kernel-ut-gqa-prefill-xfp16-wfp16-yfp16.exe --b 1 --h 32 --g 8 --d 128 --sq 512 --past 1024 --max-seq 4096
+```
+
+`make -C common test` runs `common/test_ut_interface.py`, which checks the
+file against `kLeaves`, `CMakeLists.txt`, each leaf's Makefile and driver.
+Change the file together with any leaf flag, Make variable or registration.
+
 ## Adding an op or dtype leaf
 
 Update all of these together:
@@ -373,8 +427,9 @@ Update all of these together:
    provide every capability in
    [Required capabilities in every leaf](#required-capabilities-in-every-leaf).
 3. Add the leaf once to the `LEAVES` list in `unit_test/Makefile` for local
-   runs, once to `unit_test/CMakeLists.txt` for package install, and
-   once to `kernel_ut_main.cpp`'s `kLeaves` for the controller and CSV report.
+   runs, once to `unit_test/CMakeLists.txt` for package install,
+   once to `kernel_ut_main.cpp`'s `kLeaves` for the controller and CSV report,
+   and once to `ut_interface.json` with its full parameter list.
 4. Add the new leaf to `kernel_ut_main.cpp` without declaring whether it has a
    table. The controller always passes the requested `lookup` mode; production
    code must match the actual dtype/bits, shape, and GPU architecture against
@@ -390,13 +445,13 @@ Update all of these together:
 
 ## Required capabilities in every leaf
 
-A new leaf is complete only when it has all of these. Use the MatMulNBits, GQA
-and GEMM leaves as references.
+A new leaf is complete only when it has all of these. Use the MatMulNBits and
+GQA leaves as references.
 
 | Capability | Requirement |
 |---|---|
 | Correctness | Generate inputs and a CPU reference in-process; compare every case and return non-zero on any failure. |
-| Custom shape | `make test_custom <op parameters>` runs exactly the user-given shape through the same correctness check and timer as the suite (for example `M= N= K= TA= TB=` for GEMM, `SIZE= GS=` for MatMulNBits). Provide defaults and document every parameter in the leaf README and the Makefile header. Passing only `ARGS="--coverage 1"` does not count. |
+| Custom shape | `make test_custom <op parameters>` runs exactly the user-given shape through the same correctness check and timer as the suite (for example `SIZE= GS=` for MatMulNBits, `B= H= G= D= SQ= PAST=` for GQA prefill). Provide defaults and document every parameter in the leaf README and the Makefile header. Passing only `ARGS="--coverage 1"` does not count. |
 | Coverage tiers | `--coverage 1\|2\|3` / `COVERAGE=1\|2\|3`, as described in [Shape coverage (3 tiers)](#shape-coverage-3-tiers). |
 | Timing precision | Time every case with the shared timer in `common/hip_adaptive_timing.h` (`timing::adaptiveRotatedMeanMs` inside a `timing::CaseScope`, and `timing::emitCsvBinding` for the CSV row), so it emits `UT_TIMING` / `UT_TIMING_BINDING` records. Accept `TIMING=screen\|standard\|confirm` (Makefile `TIMING ?= standard`, passed as `HIPDNN_UT_TIMING`) and the optional `ADLX_INCLUDE`. Do not add a private timer or a fixed iteration count. |
 | LUT refresh (ops with an offline LUT) | Build a ranking variant with `make build RANK=1` through a UT-only adapter (`common/<op>_rank_adapter.hip`) that compiles the production source unchanged and switches final launches in one process. Support `HIPDNN_UT_RANK=<csv>`, `HIPDNN_UT_RANK_CATALOG=1` and `HIPDNN_UT_RANK_REFERENCE=1`; check every candidate against the CPU reference before timing, with the no-LUT default as candidate zero. `hip/autotune/<op>/scripts/update_lut.py` provides `rank-catalog`, `rank-candidates`, `rank-seed --from-lut`, `rank-measure`, `rank-report`, `rank-build` and `rank-reference-candidates`, and the op's checked-in JSON table is added to the roundtrip in `common/test_ut_lut_from_table.py`. See [Refreshing a LUT with the UT leaves](#refreshing-a-lut-with-the-ut-leaves). |
@@ -404,6 +459,7 @@ and GEMM leaves as references.
 | Config identity | Every row's `config` names the configuration that actually ran, read back from the op's own diagnostics or resolver with its source prefix (`lookup:`, `autotune:`, `fixed:` or `declined`), never inferred from `MODE`. `unlogged` is a gap to fix. See [`out/results.csv`](#outresultscsv). |
 | Architectures | gfx1151 is the default validation chip. The leaf builds and runs with the default `OFFLOAD=--offload-arch=gfx11-generic` (gfx115x) and with `OFFLOAD=--offload-arch=gfx1170` or `gfx1171` (gfx11-7-generic); `LUT_ARCH` selects that chip's table. Do not hard-code a chip in the Makefile or driver; a case that supports only some chips checks the device and prints `SKIP` on the others. |
 | Results | One `HIPDNN_RESULTS_CSV` row per case when set, and registration in the controller (see the checklist above). |
+| Interface record | An entry in `ut_interface.json` with the package executable, capabilities, and every suite, custom and diagnostic flag with its Make variable, defaults and constraints. `common/test_ut_interface.py` checks it; leaves that predate this standard keep a frozen `gaps` list, and a new leaf has none. See [External invocation](#external-invocation-ut_interfacejson). |
 
 ## Required files in every leaf — EXACTLY these three, nothing else
 

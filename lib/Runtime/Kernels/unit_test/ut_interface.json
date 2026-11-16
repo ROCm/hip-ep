@@ -1,0 +1,445 @@
+{
+  "schema": "hipdnn-kernel-ut-interface/v1",
+  "description": "Inputs an external caller passes to run the kernel unit tests: the packaged controller, the options every leaf shares, and each leaf's custom-case parameters. unit_test/README.md \"External invocation\" explains the fields; common/test_ut_interface.py checks this file against kernel_ut_main.cpp, the leaf Makefiles and the leaf sources.",
+  "controller": {
+    "executable": "bin/hipdnn-kernel-ut.exe",
+    "args": [
+      {"flag": "--arch", "type": "string", "default": "detected from GPU 0", "description": "Selects bin/kernel-tests/<arch>/ with the EP's DLL rule: the ISA's own directory first, then its generic target's (gfx115x -> gfx11-generic)."},
+      {"flag": "--mode", "type": "enum", "choices": ["lookup", "autotune"], "default": "lookup", "description": "lookup resolves configs from the tables embedded in custom_kernels_<arch>.dll and falls through to autotune on a miss; autotune bypasses the tables."},
+      {"flag": "--coverage", "type": "enum", "choices": [1, 2, 3], "default": 3, "description": "Shape-coverage tier passed to every leaf as --coverage <N>."},
+      {"flag": "--timing", "type": "enum", "choices": ["screen", "standard", "confirm"], "default": "standard", "env": "HIPDNN_UT_TIMING", "description": "Timing preset passed to every leaf through HIPDNN_UT_TIMING. confirm is the formal measurement."}
+    ],
+    "leaf_command": "<bin>/kernel-tests/<arch>/<package_executable> --coverage <N>",
+    "leaf_environment": ["HIPDNN_UT_TIMING", "HIPDNN_RESULTS_CSV", "HIPDNN_RESULTS_ARCH", "HIPDNN_RESULTS_OP", "HIPDNN_RESULTS_LEAF", "HIPDNN_RESULTS_MODE", "HIPDNN_KERNEL_UT_MODE", "HIPDNN_MATMUL_AUTOTUNE_MODE", "HIPDNN_GQA_AUTOTUNE_MODE", "HIPDNN_KERNEL_UT_STDERR"],
+    "exit_codes": {"0": "Every leaf passed.", "1": "At least one leaf failed or could not be launched.", "2": "Bad argument, no GPU detected, or no packaged tests for that arch."},
+    "outputs": ["bin/out/results.csv (one row per case and one shape=suite row per leaf)", "bin/out/<executable stem>.stderr.log for a failed leaf"]
+  },
+  "common": {
+    "make": [
+      {"var": "HIP_SDK", "required": true, "default": "$(HIP_PATH)", "description": "HIP SDK root containing bin/hipcc.exe."},
+      {"var": "OFFLOAD", "default": "--offload-arch=gfx11-generic", "description": "Build target. gfx11-generic covers gfx115x; pass --offload-arch=gfx1170 or --offload-arch=gfx1171 for those chips. gfx1151 is the default validation chip."},
+      {"var": "LUT_ARCH", "default": "GPU of the build machine (amdgpu-arch) for a generic target", "description": "Chip whose table a MODE=lookup build embeds."},
+      {"var": "MODE", "default": "lookup", "choices": ["lookup", "autotune"], "description": "lookup links the real resolver and table and sets the kernel's own HIPDNN_<OP>_AUTOTUNE_MODE=lookup; autotune never reads a table. Ops without a table only label results.csv."},
+      {"var": "COVERAGE", "default": 3, "choices": [1, 2, 3], "description": "Shape-coverage tier for make test."},
+      {"var": "TIMING", "default": "standard", "choices": ["screen", "standard", "confirm"], "description": "Timing preset, exported as HIPDNN_UT_TIMING."},
+      {"var": "RANK", "default": 0, "choices": [0, 1], "description": "RANK=1 builds the UT ranking variant (ops with an offline LUT); it forces MODE=autotune."},
+      {"var": "BUILD_DIR", "default": "out", "description": "Build and results directory."},
+      {"var": "FLATC", "default": "flatc", "description": "flatc used by a MODE=lookup build."},
+      {"var": "FLATBUFFERS_INC", "default": "", "description": "flatbuffers include directory for a MODE=lookup build."},
+      {"var": "ADLX_INCLUDE", "default": "", "description": "Optional ADLX SDK include directory; enables GPU-clock telemetry in UT_TIMING."},
+      {"var": "CSV_FRESH", "default": 1, "description": "1 truncates <BUILD_DIR>/results.csv before test / test_custom."}
+    ],
+    "env": [
+      {"name": "HIPDNN_UT_TIMING", "values": ["screen", "standard", "confirm"], "default": "standard", "description": "Timing preset of the shared timer."},
+      {"name": "HIPDNN_UT_COVERAGE", "values": [1, 2, 3], "description": "Coverage tier when --coverage is absent."},
+      {"name": "HIPDNN_RESULTS_CSV", "description": "Append one row per case to this CSV; HIPDNN_RESULTS_OP / _LEAF / _ARCH / _MODE label the rows."},
+      {"name": "HIPDNN_MATMUL_AUTOTUNE_MODE", "values": ["lookup", "online"], "description": "The MatMulNBits kernel's own config source. A standalone run must set it together with HIPDNN_KERNEL_UT_MODE."},
+      {"name": "HIPDNN_GQA_AUTOTUNE_MODE", "values": ["lookup", "online"], "description": "The GQA kernel's own config source."},
+      {"name": "HIPDNN_KERNEL_UT_MODE", "values": ["lookup", "autotune"], "description": "Mode label read by the leaf."},
+      {"name": "HIPDNN_KERNEL_UT_WARM", "values": [1], "description": "Time one operand copy on warm caches instead of the cold operand rotation."},
+      {"name": "HIPDNN_KERNEL_UT_STDERR", "description": "Set by the controller: the leaf's stderr log, read back for config diagnostics."},
+      {"name": "HIPDNN_UT_EVIDENCE_BINDING", "description": "Opaque caller string copied into UT_TIMING records."},
+      {"name": "HIPDNN_UT_RANK", "description": "RANK=1 builds: candidate CSV (leaf,shape,priority,config) to rank."},
+      {"name": "HIPDNN_UT_RANK_CATALOG", "values": [1], "description": "RANK=1 builds: print the config catalog for the requested shapes."},
+      {"name": "HIPDNN_UT_RANK_REFERENCE", "values": [1], "description": "RANK=1 builds: sequential confirm reference of the supplied candidates."},
+      {"name": "HIPDNN_UT_GPU_ADMISSION", "description": "Optional per-case launcher handshake prefix (FP16 W4 MatMulNBits and FP16 KV GQA decode/prefill); see common/README.md."}
+    ],
+    "leaf_outputs": ["stdout UT_TIMING / UT_TIMING_BINDING JSON records", "stderr UT_TIMING_INVALID diagnostics", "exit code 0 only when every case passed"]
+  },
+  "leaves": [
+    {
+      "leaf": "gqa/ring/Xfp16_Wfp16_Yfp16",
+      "package_executable": "hipdnn-kernel-ut-gqa-ring-xfp16-wfp16-yfp16.exe",
+      "source": "test_gqa_ring.cpp",
+      "capabilities": {"coverage": true, "timing": "none", "mode": "label_only", "rank": false},
+      "suite": {"args": ["--coverage"], "coverage_default": "HIPDNN_UT_COVERAGE, else 1"},
+      "custom": null,
+      "devices": ["gfx1151"],
+      "gaps": ["custom_shape", "shared_timer", "make_api"]
+    },
+    {
+      "leaf": "matmul_nbits/Xfp16_Wu2_Yfp16",
+      "package_executable": "hipdnn-kernel-ut-matmul-nbits-xfp16-wu2-yfp16.exe",
+      "source": "test_matmul_nbits_u2.cpp",
+      "capabilities": {"coverage": true, "timing": "shared", "mode": "lookup", "rank": true},
+      "suite": {"args": ["--coverage"], "coverage_default": "HIPDNN_UT_COVERAGE, else 3"},
+      "custom": {
+        "selected_by": "a positional MxKxN argument",
+        "params": [
+          {"name": "shape", "positional": true, "format": "MxKxN", "make": "SIZE", "make_default": "128x2880x5120", "required": true, "description": "M activation rows, K reduction, N output columns."},
+          {"name": "group_size", "flag": "--group-size", "make": "GS", "type": "int", "exe_default": 128, "make_default": 128, "description": "Quantization block size along K."},
+          {"name": "no_zero_points", "flag": "--no-zeros", "make": "NO_ZEROS", "type": "bool", "exe_default": false, "make_default": "", "description": "Omit zero points (make: NO_ZEROS=1)."}
+        ],
+        "example_exe": "hipdnn-kernel-ut-matmul-nbits-xfp16-wu2-yfp16.exe 1x2880x5120 --group-size 32",
+        "example_make": "make test_custom HIP_SDK=<sdk> SIZE=1x2880x5120 GS=32"
+      },
+      "gaps": []
+    },
+    {
+      "leaf": "matmul_nbits/Xfp16_Wu3_Yfp16",
+      "package_executable": "hipdnn-kernel-ut-matmul-nbits-xfp16-wu3-yfp16.exe",
+      "source": "test_matmul_nbits_u3.cpp",
+      "capabilities": {"coverage": true, "timing": "shared", "mode": "lookup", "rank": true},
+      "suite": {"args": ["--coverage"], "coverage_default": "HIPDNN_UT_COVERAGE, else 3"},
+      "custom": {
+        "selected_by": "a positional MxKxN argument",
+        "params": [
+          {"name": "shape", "positional": true, "format": "MxKxN", "make": "SIZE", "make_default": "128x2880x5120", "required": true, "description": "M activation rows, K reduction, N output columns."},
+          {"name": "group_size", "flag": "--group-size", "make": "GS", "type": "int", "exe_default": 128, "make_default": 128, "description": "Quantization block size along K."},
+          {"name": "no_zero_points", "flag": "--no-zeros", "make": "NO_ZEROS", "type": "bool", "exe_default": false, "make_default": "", "description": "Omit zero points (make: NO_ZEROS=1)."}
+        ],
+        "example_exe": "hipdnn-kernel-ut-matmul-nbits-xfp16-wu3-yfp16.exe 1x2880x5120 --group-size 32",
+        "example_make": "make test_custom HIP_SDK=<sdk> SIZE=1x2880x5120 GS=32"
+      },
+      "gaps": []
+    },
+    {
+      "leaf": "matmul_nbits/Xfp16_Wu4_Yfp16",
+      "package_executable": "hipdnn-kernel-ut-matmul-nbits-xfp16-wu4-yfp16.exe",
+      "source": "test_matmul_nbits.cpp",
+      "capabilities": {"coverage": true, "timing": "shared", "mode": "lookup", "rank": true},
+      "suite": {"args": ["--coverage"], "coverage_default": "HIPDNN_UT_COVERAGE, else 3"},
+      "custom": {
+        "selected_by": "a positional MxKxN argument; the other single-case flags require it",
+        "params": [
+          {"name": "shape", "positional": true, "format": "MxKxN", "make": "SIZE", "make_default": "128x2880x5120", "required": true, "description": "M activation rows, K reduction, N output columns."},
+          {"name": "group_size", "flag": "--group-size", "make": "GS", "type": "int", "exe_default": 128, "make_default": 128, "description": "Quantization block size along K."},
+          {"name": "no_zero_points", "flag": "--no-zeros", "make": "NO_ZEROS", "type": "bool", "exe_default": false, "make_default": "", "description": "Omit zero points (make: NO_ZEROS=1)."},
+          {"name": "zero_point_type", "flag": "--zp-type", "make": null, "type": "enum", "choices": ["fp16", "u8"], "exe_default": "fp16", "description": "Zero-point storage type."},
+          {"name": "route", "flag": "--route", "make": null, "type": "enum", "choices": ["nbits", "dp4a", "padrow"], "exe_default": "nbits", "description": "Complete entry: hip_matmul_nbits, hip_matmul_nbits_dp4a or hip_matmul_nbits_u4_wmma_padrow."},
+          {"name": "dp4a", "flag": "--dp4a", "make": null, "type": "bool", "exe_default": false, "description": "Same as --route dp4a."},
+          {"name": "b_row_bytes", "flag": "--b-row-bytes", "make": null, "type": "int", "description": "Padded weight row pitch; must equal K/2+128 and selects padrow."}
+        ],
+        "constraints": ["K and group size are even", "dp4a: M=1..7, K%32==0, K%group_size==0, no zero points or u8 zero points", "padrow: M>=2, K%32==0, K%group_size==0"],
+        "example_exe": "hipdnn-kernel-ut-matmul-nbits-xfp16-wu4-yfp16.exe 1x640x2560 --group-size 32 --no-zeros --dp4a",
+        "example_make": "make test_custom HIP_SDK=<sdk> SIZE=128x2880x5120 GS=128"
+      },
+      "diagnostic_flags": [
+        {"flag": "--list-configs", "description": "Print the WMMA and GEMV config inventory."},
+        {"flag": "--help", "description": "Print usage."}
+      ],
+      "env": [
+        {"name": "HIPDNN_MATMUL_NBITS_WMMA_CFG", "description": "Pin a legal WMMA config ID (from --list-configs). Remove when qualifying the LUT lookup."},
+        {"name": "HIPDNN_EP_MATMUL_DP4A_CFG", "description": "Pin a legal DP4A config ID."}
+      ],
+      "devices_note": "The extended WMMA entries in the suite run on gfx1151 only and print SKIP elsewhere.",
+      "gaps": []
+    },
+    {
+      "leaf": "matmul_nbits/Xfp16_Wi8_Yfp16",
+      "package_executable": "hipdnn-kernel-ut-matmul-nbits-xfp16-wi8-yfp16.exe",
+      "source": "test_matmul_nbits_i8.cpp",
+      "capabilities": {"coverage": true, "timing": "shared", "mode": "lookup", "rank": true},
+      "suite": {"args": ["--coverage"], "coverage_default": "HIPDNN_UT_COVERAGE, else 3"},
+      "custom": {
+        "selected_by": "a positional MxKxN argument",
+        "params": [
+          {"name": "shape", "positional": true, "format": "MxKxN", "make": "SIZE", "make_default": "128x2880x5120", "required": true, "description": "M activation rows, K reduction, N output columns."},
+          {"name": "group_size", "flag": "--group-size", "make": "GS", "type": "int", "exe_default": 128, "make_default": 128, "description": "Quantization block size along K."},
+          {"name": "no_zero_points", "flag": "--no-zeros", "make": "NO_ZEROS", "type": "bool", "exe_default": false, "make_default": "", "description": "Omit zero points (make: NO_ZEROS=1)."}
+        ],
+        "example_exe": "hipdnn-kernel-ut-matmul-nbits-xfp16-wi8-yfp16.exe 1x2880x5120 --group-size 32",
+        "example_make": "make test_custom HIP_SDK=<sdk> SIZE=1x2880x5120 GS=32"
+      },
+      "gaps": []
+    },
+    {
+      "leaf": "matmul_nbits/Xfp32_Wu2_Yfp32",
+      "package_executable": "hipdnn-kernel-ut-matmul-nbits-xfp32-wu2-yfp32.exe",
+      "source": "test_matmul_nbits_u2.cpp",
+      "capabilities": {"coverage": true, "timing": "shared", "mode": "lookup", "rank": true},
+      "suite": {"args": ["--coverage"], "coverage_default": "HIPDNN_UT_COVERAGE, else 3"},
+      "custom": {
+        "selected_by": "a positional MxKxN argument",
+        "params": [
+          {"name": "shape", "positional": true, "format": "MxKxN", "make": "SIZE", "make_default": "128x2880x5120", "required": true, "description": "M activation rows, K reduction, N output columns."},
+          {"name": "group_size", "flag": "--group-size", "make": "GS", "type": "int", "exe_default": 128, "make_default": 128, "description": "Quantization block size along K."},
+          {"name": "no_zero_points", "flag": "--no-zeros", "make": "NO_ZEROS", "type": "bool", "exe_default": false, "make_default": "", "description": "Omit zero points (make: NO_ZEROS=1)."}
+        ],
+        "example_exe": "hipdnn-kernel-ut-matmul-nbits-xfp32-wu2-yfp32.exe 1x2880x5120 --group-size 32",
+        "example_make": "make test_custom HIP_SDK=<sdk> SIZE=1x2880x5120 GS=32"
+      },
+      "gaps": []
+    },
+    {
+      "leaf": "matmul_nbits/Xfp32_Wu3_Yfp32",
+      "package_executable": "hipdnn-kernel-ut-matmul-nbits-xfp32-wu3-yfp32.exe",
+      "source": "test_matmul_nbits_u3.cpp",
+      "capabilities": {"coverage": true, "timing": "shared", "mode": "lookup", "rank": true},
+      "suite": {"args": ["--coverage"], "coverage_default": "HIPDNN_UT_COVERAGE, else 3"},
+      "custom": {
+        "selected_by": "a positional MxKxN argument",
+        "params": [
+          {"name": "shape", "positional": true, "format": "MxKxN", "make": "SIZE", "make_default": "128x2880x5120", "required": true, "description": "M activation rows, K reduction, N output columns."},
+          {"name": "group_size", "flag": "--group-size", "make": "GS", "type": "int", "exe_default": 128, "make_default": 128, "description": "Quantization block size along K."},
+          {"name": "no_zero_points", "flag": "--no-zeros", "make": "NO_ZEROS", "type": "bool", "exe_default": false, "make_default": "", "description": "Omit zero points (make: NO_ZEROS=1)."}
+        ],
+        "example_exe": "hipdnn-kernel-ut-matmul-nbits-xfp32-wu3-yfp32.exe 1x2880x5120 --group-size 32",
+        "example_make": "make test_custom HIP_SDK=<sdk> SIZE=1x2880x5120 GS=32"
+      },
+      "gaps": []
+    },
+    {
+      "leaf": "matmul_nbits/Xfp32_Wu4_Yfp32",
+      "package_executable": "hipdnn-kernel-ut-matmul-nbits-xfp32-wu4-yfp32.exe",
+      "source": "test_matmul_nbits.cpp",
+      "capabilities": {"coverage": true, "timing": "shared", "mode": "lookup", "rank": true},
+      "suite": {"args": ["--coverage"], "coverage_default": "HIPDNN_UT_COVERAGE, else 3"},
+      "custom": {
+        "selected_by": "a positional MxKxN argument; the other single-case flags require it",
+        "params": [
+          {"name": "shape", "positional": true, "format": "MxKxN", "make": "SIZE", "make_default": "128x2880x5120", "required": true, "description": "M activation rows, K reduction, N output columns."},
+          {"name": "group_size", "flag": "--group-size", "make": "GS", "type": "int", "exe_default": 128, "make_default": 128, "description": "Quantization block size along K."},
+          {"name": "no_zero_points", "flag": "--no-zeros", "make": "NO_ZEROS", "type": "bool", "exe_default": false, "make_default": "", "description": "Omit zero points (make: NO_ZEROS=1)."},
+          {"name": "zero_point_type", "flag": "--zp-type", "make": null, "type": "enum", "choices": ["fp16", "u8"], "exe_default": "fp16", "description": "Zero-point storage type."},
+          {"name": "route", "flag": "--route", "make": null, "type": "enum", "choices": ["nbits"], "exe_default": "nbits", "description": "dp4a and padrow are FP16-only and are rejected here."}
+        ],
+        "constraints": ["K and group size are even"],
+        "example_exe": "hipdnn-kernel-ut-matmul-nbits-xfp32-wu4-yfp32.exe 1x2880x5120 --group-size 32",
+        "example_make": "make test_custom HIP_SDK=<sdk> SIZE=1x2880x5120 GS=32"
+      },
+      "diagnostic_flags": [
+        {"flag": "--help", "description": "Print usage."}
+      ],
+      "gaps": []
+    },
+    {
+      "leaf": "matmul_nbits/Xfp32_Wi8_Yfp32",
+      "package_executable": "hipdnn-kernel-ut-matmul-nbits-xfp32-wi8-yfp32.exe",
+      "source": "test_matmul_nbits_i8.cpp",
+      "capabilities": {"coverage": true, "timing": "shared", "mode": "lookup", "rank": true},
+      "suite": {"args": ["--coverage"], "coverage_default": "HIPDNN_UT_COVERAGE, else 3"},
+      "custom": {
+        "selected_by": "a positional MxKxN argument",
+        "params": [
+          {"name": "shape", "positional": true, "format": "MxKxN", "make": "SIZE", "make_default": "128x2880x5120", "required": true, "description": "M activation rows, K reduction, N output columns."},
+          {"name": "group_size", "flag": "--group-size", "make": "GS", "type": "int", "exe_default": 128, "make_default": 128, "description": "Quantization block size along K."},
+          {"name": "no_zero_points", "flag": "--no-zeros", "make": "NO_ZEROS", "type": "bool", "exe_default": false, "make_default": "", "description": "Omit zero points (make: NO_ZEROS=1)."}
+        ],
+        "example_exe": "hipdnn-kernel-ut-matmul-nbits-xfp32-wi8-yfp32.exe 1x2880x5120 --group-size 32",
+        "example_make": "make test_custom HIP_SDK=<sdk> SIZE=1x2880x5120 GS=32"
+      },
+      "gaps": []
+    },
+    {
+      "leaf": "gqa/decode/Xfp16_Wfp16_Yfp16",
+      "package_executable": "hipdnn-kernel-ut-gqa-decode-xfp16-wfp16-yfp16.exe",
+      "source": "test_gqa_decode.cpp",
+      "capabilities": {"coverage": true, "timing": "shared", "mode": "lookup", "rank": true},
+      "suite": {"args": ["--coverage"], "coverage_default": "HIPDNN_UT_COVERAGE, else 3"},
+      "custom": {
+        "selected_by": "any shape flag; --all still runs the suite",
+        "params": [
+          {"name": "batch", "flag": "--b", "make": "B", "type": "int", "exe_default": 1, "make_default": 1, "description": "Batch size."},
+          {"name": "num_heads", "flag": "--h", "make": "H", "type": "int", "exe_default": 64, "make_default": 32, "description": "Query heads."},
+          {"name": "kv_num_heads", "flag": "--g", "make": "G", "type": "int", "exe_default": 8, "make_default": 8, "description": "KV heads (groups); H must be a multiple of G."},
+          {"name": "head_dim", "flag": "--d", "make": "D", "type": "int", "exe_default": 64, "make_default": 128, "description": "Head dimension."},
+          {"name": "max_seq", "flag": "--max-seq", "make": "MAX_SEQ", "type": "int", "exe_default": 8192, "make_default": 4096, "description": "KV cache capacity."},
+          {"name": "total_seq", "flag": "--total", "make": "TOTAL", "type": "int", "exe_default": 8192, "make_default": 2048, "description": "Effective KV length (seqlens_k+1); at most max_seq."},
+          {"name": "window", "flag": "--window", "make": null, "type": "int", "exe_default": 0, "description": "Sliding window; <=0 is full attention."},
+          {"name": "head_sink", "flag": "--sink", "make": null, "type": "int", "exe_default": 0, "description": "1 adds a per-head sink."},
+          {"name": "smooth_softmax", "flag": "--smooth", "make": null, "type": "int", "exe_default": 0, "description": "1 uses smooth softmax (no explicit sink)."},
+          {"name": "pad", "flag": "--pad", "make": null, "type": "int", "exe_default": 0, "description": ">0: key_bias marks batch b's first b*pad keys as left padding."}
+        ],
+        "example_exe": "hipdnn-kernel-ut-gqa-decode-xfp16-wfp16-yfp16.exe --b 1 --h 64 --g 8 --d 64 --max-seq 4096 --total 2048 --window 128 --sink 1",
+        "example_make": "make test_custom HIP_SDK=<sdk> B=1 H=32 G=8 D=128 MAX_SEQ=4096 TOTAL=2048"
+      },
+      "diagnostic_flags": [
+        {"flag": "--all", "description": "Run the suite even when shape flags are given."},
+        {"flag": "--only", "description": "<substring>: run only suite cases whose name contains it."},
+        {"flag": "--md", "description": "Print a Markdown table instead of per-case text (implies --all)."},
+        {"flag": "--verbose", "description": "Per-case detail."},
+        {"flag": "--fused", "description": "Also time the oldest one-block-per-head decode."},
+        {"flag": "--prod-only", "description": "Time only the production-selected config."},
+        {"flag": "--seed", "description": "<int>: input RNG seed (default 1234)."},
+        {"flag": "--iters", "description": "Legacy; ignored by the shared timer."}
+      ],
+      "gaps": []
+    },
+    {
+      "leaf": "gqa/decode/Xfp16_Wi8_Yfp16",
+      "package_executable": "hipdnn-kernel-ut-gqa-decode-xfp16-wi8-yfp16.exe",
+      "source": "test_gqa_decode_i8.cpp",
+      "capabilities": {"coverage": true, "timing": "shared", "mode": "lookup", "rank": true},
+      "suite": {"args": ["--coverage"], "coverage_default": "HIPDNN_UT_COVERAGE, else 3"},
+      "custom": {
+        "selected_by": "any shape flag; --all still runs the suite",
+        "params": [
+          {"name": "batch", "flag": "--b", "make": "B", "type": "int", "exe_default": 1, "make_default": 1, "description": "Batch size."},
+          {"name": "num_heads", "flag": "--h", "make": "H", "type": "int", "exe_default": 40, "make_default": 32, "description": "Query heads."},
+          {"name": "kv_num_heads", "flag": "--g", "make": "G", "type": "int", "exe_default": 10, "make_default": 8, "description": "KV heads (groups); H must be a multiple of G."},
+          {"name": "head_dim", "flag": "--d", "make": "D", "type": "int", "exe_default": 128, "make_default": 128, "description": "Head dimension."},
+          {"name": "max_seq", "flag": "--max-seq", "make": "MAX_SEQ", "type": "int", "exe_default": 8192, "make_default": 4096, "description": "KV cache capacity."},
+          {"name": "total_seq", "flag": "--total", "make": "TOTAL", "type": "int", "exe_default": 8192, "make_default": 2048, "description": "Effective KV length; at most max_seq."}
+        ],
+        "example_exe": "hipdnn-kernel-ut-gqa-decode-xfp16-wi8-yfp16.exe --b 1 --h 32 --g 8 --d 128 --max-seq 4096 --total 2048",
+        "example_make": "make test_custom HIP_SDK=<sdk> B=1 H=32 G=8 D=128 MAX_SEQ=4096 TOTAL=2048"
+      },
+      "diagnostic_flags": [
+        {"flag": "--all", "description": "Run the suite even when shape flags are given."},
+        {"flag": "--md", "description": "<path>: also write a Markdown table."},
+        {"flag": "--seed", "description": "<int>: input RNG seed (default 1234)."},
+        {"flag": "--iters", "description": "Legacy; ignored by the shared timer."}
+      ],
+      "gaps": []
+    },
+    {
+      "leaf": "gqa/prefill/Xfp16_Wfp16_Yfp16",
+      "package_executable": "hipdnn-kernel-ut-gqa-prefill-xfp16-wfp16-yfp16.exe",
+      "source": "test_gqa_prefill.cpp",
+      "capabilities": {"coverage": true, "timing": "shared", "mode": "lookup", "rank": true},
+      "suite": {"args": ["--coverage"], "coverage_default": "HIPDNN_UT_COVERAGE, else 3"},
+      "custom": {
+        "selected_by": "any shape flag",
+        "params": [
+          {"name": "batch", "flag": "--b", "make": "B", "type": "int", "exe_default": 1, "make_default": 1, "description": "Batch size."},
+          {"name": "num_heads", "flag": "--h", "make": "H", "type": "int", "exe_default": 32, "make_default": 32, "description": "Query heads."},
+          {"name": "kv_num_heads", "flag": "--g", "make": "G", "type": "int", "exe_default": 8, "make_default": 8, "description": "KV heads (groups); H must be a multiple of G."},
+          {"name": "head_dim", "flag": "--d", "make": "D", "type": "int", "exe_default": 128, "make_default": 128, "description": "Head dimension."},
+          {"name": "seq_q", "flag": "--sq", "make": "SQ", "type": "int", "exe_default": 512, "make_default": 512, "description": "New query tokens."},
+          {"name": "past", "flag": "--past", "make": "PAST", "type": "int", "exe_default": 0, "make_default": 0, "description": "Past KV length; total = past + seq_q."},
+          {"name": "window", "flag": "--window", "make": "WINDOW", "type": "int", "exe_default": 0, "make_default": 0, "description": "Sliding window; <=0 is full attention."},
+          {"name": "max_seq", "flag": "--max-seq", "make": "MAX_SEQ", "type": "int", "description": "KV cache capacity; must hold past+seq_q. Unset keeps a compact cache."},
+          {"name": "scale", "flag": "--scale", "make": "SCALE", "type": "float", "description": "Model softmax scale, finite and >= 0. Unset uses 1/sqrt(D)."},
+          {"name": "nd", "flag": "--nd", "make": "ND", "type": "int", "description": "Configured v8x entry: waves. ND, HB and BKV are given together."},
+          {"name": "hb", "flag": "--hb", "make": "HB", "type": "int", "description": "Configured v8x entry: head block."},
+          {"name": "bkv", "flag": "--bkv", "make": "BKV", "type": "int", "description": "Configured v8x entry: KV tile."},
+          {"name": "pad", "flag": "--pad", "make": null, "type": "int", "exe_default": 0, "description": ">0: key_bias masks b*pad keys of batch b (right padding)."}
+        ],
+        "example_exe": "hipdnn-kernel-ut-gqa-prefill-xfp16-wfp16-yfp16.exe --b 1 --h 32 --g 8 --d 128 --sq 512 --past 1024 --max-seq 4096",
+        "example_make": "make test_custom HIP_SDK=<sdk> B=1 H=32 G=8 D=128 SQ=512 PAST=1024 MAX_SEQ=4096"
+      },
+      "diagnostic_flags": [
+        {"flag": "--iters", "description": "Legacy; ignored by the shared timer."}
+      ],
+      "gaps": []
+    },
+    {
+      "leaf": "gqa/prefill/Xfp16_Wi8_Yfp16",
+      "package_executable": "hipdnn-kernel-ut-gqa-prefill-xfp16-wi8-yfp16.exe",
+      "source": "test_gqa_prefill_i8.cpp",
+      "capabilities": {"coverage": true, "timing": "shared", "mode": "lookup", "rank": true},
+      "suite": {"args": ["--coverage"], "coverage_default": "HIPDNN_UT_COVERAGE, else 3"},
+      "custom": {
+        "selected_by": "any shape flag; --all still runs the suite",
+        "params": [
+          {"name": "num_heads", "flag": "--h", "make": "H", "type": "int", "exe_default": 40, "make_default": 32, "description": "Query heads. Batch is always 1."},
+          {"name": "kv_num_heads", "flag": "--g", "make": "G", "type": "int", "exe_default": 10, "make_default": 8, "description": "KV heads (groups); H must be a multiple of G."},
+          {"name": "head_dim", "flag": "--d", "make": "D", "type": "int", "exe_default": 128, "make_default": 128, "description": "Head dimension."},
+          {"name": "seq_q", "flag": "--sq", "make": "SQ", "type": "int", "exe_default": 2048, "make_default": 512, "description": "Prompt tokens (no past)."}
+        ],
+        "example_exe": "hipdnn-kernel-ut-gqa-prefill-xfp16-wi8-yfp16.exe --h 32 --g 8 --d 128 --sq 512",
+        "example_make": "make test_custom HIP_SDK=<sdk> H=32 G=8 D=128 SQ=512"
+      },
+      "diagnostic_flags": [
+        {"flag": "--all", "description": "Run the suite even when shape flags are given."},
+        {"flag": "--md", "description": "<path>: also write a Markdown table."},
+        {"flag": "--seed", "description": "<int>: input RNG seed (default 1234)."},
+        {"flag": "--iters", "description": "Legacy; ignored by the shared timer."}
+      ],
+      "gaps": []
+    },
+    {
+      "leaf": "qmoe/Xfp16_Wu4_Yfp16",
+      "package_executable": "hipdnn-kernel-ut-qmoe-xfp16-wu4-yfp16.exe",
+      "source": "test_qmoe.cpp",
+      "capabilities": {"coverage": true, "timing": "shared", "mode": "lookup", "rank": false},
+      "suite": {"args": ["--coverage"], "coverage_default": "HIPDNN_UT_COVERAGE, else 3"},
+      "custom": {
+        "selected_by": "any argument other than --iters and --coverage; the six geometry flags are then required",
+        "make_args": "ARGS",
+        "params": [
+          {"name": "tokens", "flag": "--tokens", "type": "int", "required": true, "description": "Tokens (M)."},
+          {"name": "hidden", "flag": "--hidden", "type": "int", "required": true, "description": "Hidden size; multiple of 32 and of block size, <= 16384."},
+          {"name": "inter", "flag": "--inter", "type": "int", "required": true, "description": "Expert intermediate size; multiple of 32 and of block size, <= 16384."},
+          {"name": "experts", "flag": "--experts", "type": "int", "required": true, "description": "Experts, 1..1024."},
+          {"name": "topk", "flag": "--topk", "type": "int", "required": true, "description": "Experts per token, 1..min(experts, 32)."},
+          {"name": "block_size", "flag": "--block-size", "type": "int", "required": true, "description": "Quantization block size, power of two in 32..1024."},
+          {"name": "fc1_bias", "flag": "--fc1-bias", "type": "int", "choices": [0, 1], "exe_default": 1, "description": "FC1 bias present."},
+          {"name": "fc2_bias", "flag": "--fc2-bias", "type": "int", "choices": [0, 1], "exe_default": 1, "description": "FC2 bias present."},
+          {"name": "zero_points", "flag": "--zero-points", "type": "int", "choices": [0, 1], "exe_default": 0, "description": "Packed uint4 zero points present."},
+          {"name": "normalize", "flag": "--normalize", "type": "int", "choices": [0, 1], "exe_default": 1, "description": "Normalize routing weights."},
+          {"name": "router_weights", "flag": "--router-weights", "type": "int", "choices": [0, 1], "exe_default": 0, "description": "External router weights."},
+          {"name": "routing_pattern", "flag": "--routing-pattern", "type": "enum", "choices": ["balanced", "skewed", "ties"], "exe_default": "balanced", "description": "Synthetic router logits."},
+          {"name": "alpha", "flag": "--alpha", "type": "float", "exe_default": 1.0, "description": "SwiGLU alpha, finite."},
+          {"name": "beta", "flag": "--beta", "type": "float", "exe_default": 0.0, "description": "SwiGLU beta, finite."},
+          {"name": "limit", "flag": "--limit", "type": "float", "exe_default": "inf", "description": "SwiGLU clamp, > 0."}
+        ],
+        "constraints": ["expert weights <= 8 GiB", "unknown, duplicate, incomplete or unsupported arguments exit 2"],
+        "example_exe": "hipdnn-kernel-ut-qmoe-xfp16-wu4-yfp16.exe --tokens 1 --hidden 3072 --inter 1024 --experts 256 --topk 8 --block-size 32",
+        "example_make": "make test_custom HIP_SDK=<sdk> ARGS=\"--tokens 1 --hidden 3072 --inter 1024 --experts 256 --topk 8 --block-size 32\""
+      },
+      "diagnostic_flags": [
+        {"flag": "--iters", "description": "Legacy (1..100000); ignored by the shared timer."}
+      ],
+      "env": [
+        {"name": "HIPDNN_UT_CAPTURE_ONLY", "description": "1: run one call of one explicit shape for a profiler capture, without timing."}
+      ],
+      "gaps": []
+    },
+    {
+      "leaf": "qmoe_ragged_mm/Xfp16_Wu4_Yfp16",
+      "package_executable": "hipdnn-kernel-ut-qmoe-ragged-mm-xfp16-wu4-yfp16.exe",
+      "source": "test_qmoe_ragged_mm.cpp",
+      "capabilities": {"coverage": true, "timing": "shared", "mode": "label_only", "rank": false},
+      "suite": {"args": ["--coverage"], "coverage_default": "3"},
+      "custom": null,
+      "diagnostic_flags": [
+        {"flag": "--launcher-grid-only", "description": "Run only the launcher-grid case."}
+      ],
+      "env": [
+        {"name": "HIPDNN_QMOE_RAGGED_FC1_TASK_POLICY", "description": "Production dispatch override, consumed as in the EP."},
+        {"name": "HIPDNN_QMOE_RAGGED_FC2_TASK_POLICY", "description": "Production dispatch override."},
+        {"name": "HIPDNN_QMOE_RAGGED_QUEUE_POLICY", "description": "Production dispatch override."},
+        {"name": "HIPDNN_QMOE_RAGGED_GRID_BLOCKS", "description": "Production dispatch override."},
+        {"name": "HIPDNN_QMOE_RAGGED_GRID_FACTOR", "description": "Production dispatch override."}
+      ],
+      "gaps": ["custom_shape"]
+    },
+    {
+      "leaf": "qmoe_ragged_mm/Xfp16_Wu2_Yfp16",
+      "package_executable": "hipdnn-kernel-ut-qmoe-ragged-mm-xfp16-wu2-yfp16.exe",
+      "source": "test_qmoe_ragged_mm_u2.cpp",
+      "capabilities": {"coverage": false, "timing": "none", "mode": "label_only", "rank": false},
+      "suite": {"args": [], "coverage_default": "ignored"},
+      "custom": null,
+      "gaps": ["custom_shape", "coverage", "shared_timer", "results_csv", "make_api"]
+    },
+    {
+      "leaf": "gather_block_quantized/Xi64_Wu4_Yfp16",
+      "package_executable": "hipdnn-kernel-ut-gather-block-quantized-xi64-wu4-yfp16.exe",
+      "source": "test_gather_block_quantized_u4.cpp",
+      "capabilities": {"coverage": true, "timing": "none", "mode": "label_only", "rank": false},
+      "suite": {"args": ["--coverage"], "coverage_default": "3"},
+      "custom": null,
+      "gaps": ["custom_shape", "shared_timer", "arch_default"]
+    },
+    {
+      "leaf": "gather_block_quantized/Xi64_Wu8_Yfp16",
+      "package_executable": "hipdnn-kernel-ut-gather-block-quantized-xi64-wu8-yfp16.exe",
+      "source": "test_gather_block_quantized_u8.cpp",
+      "capabilities": {"coverage": true, "timing": "none", "mode": "label_only", "rank": false},
+      "suite": {"args": ["--coverage"], "coverage_default": "3"},
+      "custom": null,
+      "gaps": ["custom_shape", "shared_timer", "arch_default"]
+    },
+    {
+      "leaf": "gather_block_quantized/Xi64_Wfp8_Yfp16",
+      "package_executable": "hipdnn-kernel-ut-gather-block-quantized-xi64-wfp8-yfp16.exe",
+      "source": "test_gather_block_quantized_fp8.cpp",
+      "capabilities": {"coverage": true, "timing": "none", "mode": "label_only", "rank": false},
+      "suite": {"args": ["--coverage"], "coverage_default": "3"},
+      "custom": null,
+      "gaps": ["custom_shape", "shared_timer", "arch_default"]
+    },
+    {
+      "leaf": "cast/Xany_Yany_bf16",
+      "package_executable": "hipdnn-kernel-ut-cast-xany-yany-bf16.exe",
+      "source": "test_cast.cpp",
+      "capabilities": {"coverage": true, "timing": "none", "mode": "label_only", "rank": false},
+      "suite": {"args": ["--coverage"], "coverage_default": "HIPDNN_UT_COVERAGE, else 3"},
+      "custom": null,
+      "gaps": ["custom_shape", "shared_timer", "arch_default"]
+    }
+  ]
+}
