@@ -255,3 +255,10 @@ CPU preparation of the next case. The launcher owns host admission and its
 execution lease, waits through the actual worker exit, and reconciles a failed
 worker before releasing. Without this variable, ordinary leaf execution is
 unchanged. This handshake runs outside the timer and adds no sampling controls.
+
+When a HIP event pair returns a nonpositive or nonfinite duration, the shared
+runner synchronizes and replaces that pair before the next policy-controlled
+batch. `UT_TIMING_INVALID` identifies the leaf, shape and batch. The invalid
+sample is still returned to the policy and counted against the same allowance;
+no sample, retry threshold, batch cap or timing preset is relaxed. Persistent
+invalid durations still fail the cell. HIP API errors continue to propagate.

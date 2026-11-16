@@ -1922,7 +1922,7 @@ bool parse_options(int argc, char** argv, Options* options) {
 
 } // namespace
 
-int main(int argc, char** argv) {
+static int runMain(int argc, char** argv) {
   hipdnn_ep_test::timing::printTimingMode();
   Options options;
   if (!parse_options(argc, argv, &options)) {
@@ -2026,4 +2026,13 @@ int main(int argc, char** argv) {
 
   std::cout << (all_pass ? "ALL PASS" : "SOME FAIL") << '\n';
   return all_pass ? 0 : 1;
+}
+
+int main(int argc, char** argv) {
+  try {
+    return runMain(argc, argv);
+  } catch (const std::exception& error) {
+    std::cerr << "qmoe_ragged_mm: " << error.what() << '\n';
+    return 1;
+  }
 }

@@ -90,6 +90,14 @@ class Events {
     (void)hipEventDestroy(stop);
     (void)hipEventDestroy(start);
   }
+  // Do not keep reusing an event pair after an invalid elapsed time.
+  // Allocate its replacement while the old handles are
+  // still live, so the runtime cannot immediately recycle the same pair.
+  void renew() {
+    Events replacement;
+    std::swap(start, replacement.start);
+    std::swap(stop, replacement.stop);
+  }
   Events(const Events&) = delete;
   Events& operator=(const Events&) = delete;
   hipEvent_t start{}, stop{};
@@ -204,6 +212,18 @@ double adaptiveRotatedMeanMs(hipStream_t stream, const Copies& copies,
       checkHip(hipEventSynchronize(events.stop), "wait stop");
       float ms = 0.0f;
       checkHip(hipEventElapsedTime(&ms, events.start, events.stop), "elapsed time");
+      if (!(ms > 0.0f) || !std::isfinite(ms)) {
+        // Return the invalid sample to the policy unchanged: it still counts
+        // against the existing invalid-batch allowance. Repair only the event
+        // resources before the policy decides whether another batch is legal.
+        std::fprintf(stderr,
+            "UT_TIMING_INVALID leaf=%s shape=%s batch_calls=%u elapsed_ms=%.9g action=renew_events\n",
+            currentCase.leaf.c_str(), currentCase.shape.c_str(), count,
+            static_cast<double>(ms));
+        std::fflush(stderr);
+        checkHip(hipStreamSynchronize(stream), "drain invalid timing batch");
+        events.renew();
+      }
       if (observe_frequency) frequency.sample();
       return static_cast<double>(ms);
     } catch (...) {
