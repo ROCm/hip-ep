@@ -1095,6 +1095,25 @@ struct BinaryConverter final : public OpConversionPattern<HipOpTy> {
         !isTosaCompatibleOperand(rhs, resultType))
       return rewriter.notifyMatchFailure(op, "operands not tosa-broadcastable");
 
+    // rocMLIR takes only signless integers, so an unsigned kernel is relabeled
+    // later, and tosa.maximum on the relabeled bytes would order 200 below
+    // 100. Compute an unsigned max or min in i32 instead: unsigned_cast widens
+    // each 8- or 16-bit value exactly, the i32 order matches the unsigned one,
+    // and the result is one of the inputs, so narrowing it back loses nothing.
+    if constexpr (std::is_same_v<HipOpTy, MaxOp> ||
+                  std::is_same_v<HipOpTy, MinOp>) {
+      Type element = resultType.getElementType();
+      if (element.isUnsignedInteger(8) || element.isUnsignedInteger(16)) {
+        Location loc = op.getLoc();
+        Type i32 = rewriter.getI32Type();
+        Value wide = TosaOpTy::create(rewriter, loc, resultType.clone(i32),
+                                      emitTosaCast(rewriter, loc, lhs, i32),
+                                      emitTosaCast(rewriter, loc, rhs, i32));
+        rewriter.replaceOp(op, emitTosaCast(rewriter, loc, wide, element));
+        return success();
+      }
+    }
+
     // tosa.mul is the one op in this set that is not two-operand; its shift
     // is excluded from its own same-rank verification, so equalizing the two
     // data operands above is still all that is required.
@@ -8581,7 +8600,7 @@ static bool isSignednessNeutral(Operation *op) {
 // ops (unsigned_cast, unsigned_div, unsigned_max) carry the unsigned meaning.
 // A ui8 kernel argument becomes i8 with the same bytes, so the caller's buffer
 // needs no change. A kernel with any other op on an unsigned value -- a
-// tosa.clamp or tosa.maximum, whose meaning would change -- is left as it is,
+// tosa.clamp or tosa.add, whose meaning would change -- is left as it is,
 // and rocMLIR then rejects the kernel; HIPDNN_EP_DEBUG names the op. The pass
 // does not fail, because it converts every kernel of the model at once, and
 // an elementwise kernel that rocMLIR rejects still runs as HIP ops. This is
@@ -8848,6 +8867,39 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
 };
 
 } // namespace
+
+bool isSignlessSafeUnderUnsigned(Operation *op) {
+  auto isUnsigned = [](Type type) {
+    return getElementTypeOrSelf(type).isUnsignedInteger();
+  };
+  if (llvm::none_of(op->getOperandTypes(), isUnsigned) &&
+      llvm::none_of(op->getResultTypes(), isUnsigned))
+    return true;
+  // These mirror the converters above: views lower to tosa reshape, slice,
+  // concat and transpose, and casts, quantizes, dequantizes and the quantized
+  // anchors read or write unsigned values through unsigned_cast. Keep the
+  // list in step with them; anything not listed counts as signedness
+  // dependent (for example hip.expand, which broadcasts with tosa.mul).
+  if (isa<MaxOp, MinOp>(op)) {
+    Type element = getElementTypeOrSelf(op->getResult(0).getType());
+    return element.isUnsignedInteger(8) || element.isUnsignedInteger(16);
+  }
+  // A ui8 Where condition is ONNX BOOL. The rocMLIR outline views it as i8,
+  // and WhereConverter tests it against zero, which does not depend on
+  // signedness.
+  if (auto where = dyn_cast<WhereOp>(op)) {
+    Value condition = where.getCondition();
+    return getElementTypeOrSelf(condition.getType()).isUnsignedInteger(8) &&
+           llvm::none_of(op->getResultTypes(), isUnsigned) &&
+           llvm::all_of(op->getOperands(), [&](Value operand) {
+             return operand == condition || !isUnsigned(operand.getType());
+           });
+  }
+  return isa<CastOp, QuantizeLinearOp, DequantizeLinearOp, QuantConvOp,
+             QuantMatmulOp, TransposeOp, ConstantOp, tensor::ExpandShapeOp,
+             tensor::CollapseShapeOp, tensor::ExtractSliceOp,
+             tensor::InsertSliceOp, tensor::EmptyOp, ub::PoisonOp>(op);
+}
 
 bool isTosaLowerableReshape(Operation *op) {
   if (auto expand = dyn_cast_if_present<tensor::ExpandShapeOp>(op))

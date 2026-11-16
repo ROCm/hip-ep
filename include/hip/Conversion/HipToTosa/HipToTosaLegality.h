@@ -34,6 +34,14 @@ bool isTosaLowerableExpand(ExpandOp op);
 // hip.dequantize_linear. False for any other op.
 bool isTosaLowerableQdq(Operation *op);
 
+// True when `op` touches no unsigned integer, or when its TOSA form keeps an
+// unsigned value's meaning after the kernel is relabeled to signless (views,
+// casts, quantize and dequantize, the quantized anchors, and an 8- or 16-bit
+// unsigned max or min). Any other op on an unsigned value stops the relabel,
+// and rocMLIR then rejects the kernel. A conv or gemm kernel has no HIP
+// fallback, so the fusion keeps such an op out of it.
+bool isSignlessSafeUnderUnsigned(Operation *op);
+
 // The offset that maps an unsigned integer onto the signed integer of the
 // same width, x - offset: 2^(width - 1). 0 for a signless or signed integer,
 // which the integer conv and matmul kernels take as is.

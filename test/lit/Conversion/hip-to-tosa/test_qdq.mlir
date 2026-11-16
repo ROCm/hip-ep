@@ -198,14 +198,14 @@ func.func @quantize_ui8_signless(%x: tensor<2x8xf32>, %scale: tensor<f32>)
 
 // An unsigned value that reaches an op whose meaning depends on signedness
 // keeps its type, so the kernel is not silently reinterpreted.
-// CHECK-LABEL: func.func @ui8_max_keeps_type
+// CHECK-LABEL: func.func @ui8_add_keeps_type
 // CHECK-SAME: tensor<2x8xui8>
-func.func @ui8_max_keeps_type(%a: tensor<2x8xui8>, %b: tensor<2x8xui8>)
+func.func @ui8_add_keeps_type(%a: tensor<2x8xui8>, %b: tensor<2x8xui8>)
     -> tensor<2x8xui8> attributes {rock.kernel} {
   %ctx = ub.poison : !hip.context
   %init = tensor.empty() : tensor<2x8xui8>
-  %r = hip.max(%ctx) ins(%a, %b : tensor<2x8xui8>, tensor<2x8xui8>)
-         outs(%init : tensor<2x8xui8>) : tensor<2x8xui8>
+  %r = hip.add(%ctx) ins(%a, %b : tensor<2x8xui8>, tensor<2x8xui8>)
+         outs(%init : tensor<2x8xui8>) -> tensor<2x8xui8>
   return %r : tensor<2x8xui8>
 }
 
