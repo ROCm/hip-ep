@@ -124,9 +124,11 @@ bool buildBackendPipelineFor(OpPassManager &pm, StringRef arch,
   rock::KernelOptions kOpts;
   if (kind == RocMlirBackendKind::Elementwise)
     rock::buildElementwisePipeline(pm, kOpts);
-  else if (kind == RocMlirBackendKind::Reduce)
+  else if (kind == RocMlirBackendKind::Reduce) {
+    // rock-lower-reduce-to-blockwise reads this to get the wave size.
+    kOpts.arch = devName.getChip().str();
     rock::buildReducePipeline(pm, kOpts);
-  else
+  } else
     rock::buildKernelPipeline(pm, kOpts);
 
   rock::TritonOptions tOpts;
