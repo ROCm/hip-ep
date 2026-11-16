@@ -503,3 +503,34 @@ func.func @main_graph(%ctx: !hip.context, %a: tensor<1x2x4x4xui8>)
           saturate = 1 : i64} : tensor<1x2x8x8xui8>
   return %y : tensor<1x2x8x8xui8>
 }
+
+// -----
+
+// The round trip is exact only for a dequantize into f32. Here the
+// dequantize writes f16 (ONNX output_dtype), which rounds a 16-bit value
+// first (4097 becomes 4096), so the quantize stays.
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK: hip.dequantize_linear
+// CHECK: hip.transpose(%{{.*}}) ins(%{{.*}} : tensor<1x2x4x4xf16>)
+// CHECK: hip.quantize_linear
+
+func.func @main_graph(%ctx: !hip.context, %a: tensor<1x2x4x4xui16>)
+    -> tensor<1x4x4x2xui16> {
+  %s = hip.constant {value = dense<1.0> : tensor<f32>} : tensor<f32>
+  %z = hip.constant {value = dense<0> : tensor<ui16>} : tensor<ui16>
+  %ae = tensor.empty() : tensor<1x2x4x4xf16>
+  %da = hip.dequantize_linear(%ctx) ins(%a, %s : tensor<1x2x4x4xui16>, tensor<f32>)
+          zero_point(%z : tensor<ui16>) outs(%ae : tensor<1x2x4x4xf16>)
+          {axis = 1 : i64, block_size = 0 : i64} : tensor<1x2x4x4xf16>
+  %te = tensor.empty() : tensor<1x4x4x2xf16>
+  %t = hip.transpose(%ctx) ins(%da : tensor<1x2x4x4xf16>)
+                           outs(%te : tensor<1x4x4x2xf16>)
+       {perm = [0, 2, 3, 1]} : tensor<1x4x4x2xf16>
+  %ye = tensor.empty() : tensor<1x4x4x2xui16>
+  %y = hip.quantize_linear(%ctx) ins(%t, %s : tensor<1x4x4x2xf16>, tensor<f32>)
+         zero_point(%z : tensor<ui16>) outs(%ye : tensor<1x4x4x2xui16>)
+         {axis = 1 : i64, block_size = 0 : i64, precision = 0 : i64,
+          saturate = 1 : i64} : tensor<1x4x4x2xui16>
+  return %y : tensor<1x4x4x2xui16>
+}

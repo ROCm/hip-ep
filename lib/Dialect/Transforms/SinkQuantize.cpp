@@ -11,6 +11,7 @@
 #include <mlir/IR/BuiltinAttributes.h>
 #include <mlir/IR/IRMapping.h>
 #include <mlir/IR/PatternMatch.h>
+#include <mlir/IR/TypeUtilities.h>
 
 #include <llvm/ADT/SetVector.h>
 
@@ -46,6 +47,8 @@ DenseElementsAttr getScalarAttr(Value value) {
 // 8- and 16-bit types only: q(dq(a)) returns a exactly while |a - zp| < 2^16,
 // because f32 holds every such integer and the round trip through the f32
 // scale stays far below half a unit; a 32-bit type would break that bound.
+// The bound needs the dequantized value in f32 too: an f16 or bf16 result
+// (ONNX output_dtype) rounds it first, so callers check that type.
 std::optional<QuantParams> getParams(Value scale, Value zeroPoint, Type type) {
   auto intType = dyn_cast<IntegerType>(type);
   DenseElementsAttr scaleAttr = getScalarAttr(scale);
@@ -82,7 +85,8 @@ DequantizeLinearOp matchDequantize(Value value,
       dq.getBlockSize() != 0)
     return {};
   auto dataType = dyn_cast<RankedTensorType>(dq.getInput().getType());
-  if (!dataType || !dataType.hasStaticShape())
+  if (!dataType || !dataType.hasStaticShape() ||
+      !getElementTypeOrSelf(dq.getResult(0).getType()).isF32())
     return {};
   params =
       getParams(dq.getScale(), dq.getZeroPoint(), dataType.getElementType());
@@ -196,7 +200,8 @@ bool sinkQuantize(RewriterBase &rewriter, QuantizeLinearOp q) {
       q.getBlockSize() != 0)
     return false;
   auto resultType = dyn_cast<RankedTensorType>(q.getResult(0).getType());
-  if (!resultType || !resultType.hasStaticShape())
+  if (!resultType || !resultType.hasStaticShape() ||
+      !getElementTypeOrSelf(q.getInput().getType()).isF32())
     return false;
   std::optional<QuantParams> outParams =
       getParams(q.getScale(), q.getZeroPoint(), resultType.getElementType());
