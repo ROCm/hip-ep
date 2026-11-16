@@ -9101,4 +9101,53 @@ bool isTosaExpressiblePointwiseOp(Operation *op) {
       .Default(false);
 }
 
+bool isTosaLowerableInKernel(Operation *op) {
+  if (isTosaExpressiblePointwiseOp(op))
+    return true;
+  // The forms below touch an unsigned or byte type, which
+  // isTosaExpressiblePointwiseOp refuses, but their converters lower them.
+  if (op->getNumResults() != 1)
+    return false;
+  auto resultType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
+  if (!resultType || !resultType.hasStaticShape())
+    return false;
+  Type element = resultType.getElementType();
+  auto broadcasts = [&](Value operand) {
+    return isBroadcastableOperandOf(operand, element, resultType);
+  };
+  bool narrowUnsigned =
+      element.isUnsignedInteger(8) || element.isUnsignedInteger(16);
+  // CastConverter: unsigned_cast carries an unsigned side.
+  if (auto cast = dyn_cast<CastOp>(op)) {
+    auto inputType = dyn_cast<RankedTensorType>(cast.getInput().getType());
+    return inputType && inputType.hasStaticShape() &&
+           inputType.getShape() == resultType.getShape() &&
+           isa<FloatType, IntegerType>(inputType.getElementType()) &&
+           isa<FloatType, IntegerType>(element);
+  }
+  // BinaryConverter computes an 8- or 16-bit unsigned max or min in i32.
+  if (auto max = dyn_cast<MaxOp>(op))
+    return narrowUnsigned && broadcasts(max.getLhs()) &&
+           broadcasts(max.getRhs());
+  if (auto min = dyn_cast<MinOp>(op))
+    return narrowUnsigned && broadcasts(min.getLhs()) &&
+           broadcasts(min.getRhs());
+  // ComparisonConverter compares ui8 and ui16 operands in i32.
+  if (auto equal = dyn_cast<EqualOp>(op))
+    return isTosaExpressibleCompare(equal);
+  if (auto less = dyn_cast<LessOp>(op))
+    return isTosaExpressibleCompare(less);
+  // WhereConverter turns a byte mask (ONNX BOOL as ui8, or the i8 view of a
+  // kernel argument) into an i1 predicate.
+  if (auto where = dyn_cast<WhereOp>(op)) {
+    Value condition = where.getCondition();
+    Type mask = getElementTypeOrSelf(condition.getType());
+    return (mask.isSignlessInteger(8) || mask.isUnsignedInteger(8)) &&
+           (isTosaExpressibleFloat(element) || isTosaExpressibleInt(element)) &&
+           isBroadcastableOperandOf(condition, mask, resultType) &&
+           broadcasts(where.getX()) && broadcasts(where.getY());
+  }
+  return false;
+}
+
 } // namespace mlir::hip

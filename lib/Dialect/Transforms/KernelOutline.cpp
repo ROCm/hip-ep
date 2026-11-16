@@ -64,7 +64,7 @@ bool isKernelIOType(Type type) {
 bool isKernelIOValue(Value v) { return isKernelIOType(v.getType()); }
 
 bool isFusablePrologue(Operation *op) {
-  return isFusablePointwise(op) || isTosaLowerableQdq(op);
+  return isTosaLowerableInKernel(op) || isTosaLowerableQdq(op);
 }
 
 // rocMLIR reads every kernel input through rock.transform maps, so a view on

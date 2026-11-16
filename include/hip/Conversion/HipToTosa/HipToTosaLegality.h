@@ -34,6 +34,13 @@ bool isTosaLowerableExpand(ExpandOp op);
 // hip.dequantize_linear. False for any other op.
 bool isTosaLowerableQdq(Operation *op);
 
+// A pointwise op that convert-hip-to-tosa lowers inside a rocMLIR kernel:
+// one that isTosaExpressiblePointwiseOp accepts, a cast to or from any
+// integer or float, an 8- or 16-bit unsigned max, min, equal or less, or a
+// Where on a byte mask. The rocMLIR fusion takes no other pointwise op; one
+// left as a hip op inside a conv or gemm kernel would fail its compile.
+bool isTosaLowerableInKernel(Operation *op);
+
 // True when `op` touches no unsigned integer, or when its TOSA form keeps an
 // unsigned value's meaning after the kernel is relabeled to signless (views,
 // casts, quantize and dequantize, the quantized anchors, a ui8 Where

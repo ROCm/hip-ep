@@ -42,8 +42,9 @@ bool isStaticTensor(Value v);
 bool isKernelIOType(Type type);
 bool isKernelIOValue(Value v);
 
-/// A dequantize on the way in lets the kernel read the narrow type, and a
-/// quantize feeding it folds the round trip into the load.
+/// A pointwise op that lowers inside the kernel (isTosaLowerableInKernel), or
+/// a QDQ op: a dequantize on the way in lets the kernel read the narrow type,
+/// and a quantize feeding it folds the round trip into the load.
 bool isFusablePrologue(Operation *op);
 
 /// A view that the kernel may absorb on one of its inputs.

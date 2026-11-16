@@ -99,9 +99,7 @@ std::optional<Role> getRole(Operation *op) {
       return std::nullopt;
     return isa<DequantizeLinearOp>(op) ? Role::Dequantize : Role::Quantize;
   }
-  // isFusablePointwise also admits ops that HipToTosa lowers only inside an
-  // anchor kernel, such as a Where on a ui8 mask.
-  if (isTosaExpressiblePointwiseOp(op) || isFusablePointwise(op))
+  if (isTosaLowerableInKernel(op))
     return Role::Compute;
   return std::nullopt;
 }
