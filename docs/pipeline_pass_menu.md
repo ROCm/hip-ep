@@ -1,3 +1,4 @@
+
 <!--
 Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 Licensed under the MIT License.
@@ -160,6 +161,7 @@ the selected perfConfig string are printed only with `--verbose`.
 | `hip-externalize-constants` | module | Validate explicit serialization order, append unordered carriers deterministically, plan/serialize, then replace `hip.constant` using the existing inline/full/streaming/hybrid metadata contract. Direct threshold default: 0. |
 | `hip-fold-constant-extracts` | func.func | Resolve constant-index `tensor.extract` of vectors assembled with `tensor.insert_slice` (ONNX shape vectors) to the `from_elements` operand or integer constant element they read. |
 | `hip-infer-shapes` | module | Refine `?` dims on HIP DPS result types via `ReifyRankedShapedTypeOpInterface`. |
+| `hip-resolve-if-result-dims` | module | Replace each `hip.if_result_dim` placeholder left by `onnx-if-outline` with host size arithmetic on the `hip.if` captures, selected between the then and else branches. Must precede `hip-externalize-constants`, which moves the shape constants it reads out of the IR. |
 | `hip-fusion-transform` | module | HIP-to-HIP rewriting at unrestricted arity (one op → many, many → one, or subgraph → subgraph). The patterns live in `lib/Dialect/Transforms/fusion_pattern/` — PDLL files compiled into the library, plus native C++ for rewrites whose shape depends on the matched op's rank — and share one `RewritePatternSet`. Includes the GELU fusion: collapses primitive `hip.mul`/`add`/`tanh`/`erf`/`div`/`pow` chains to one `hip.gelu` when the coefficients are statically known scalar or one-element floating-point constants, with supported casts evaluated. |
 | `hip-split-duplicate-dps-inits` | func.func | De-alias DPS init operands that CSE merged onto one `tensor.empty`, so an op that reads back its own outputs (e.g. `hip.gqa` present K/V) does not share a buffer (pre-bufferize). |
 | `hip-resolve-tensor-dims` | func.func | Fold `tensor.dim` of reshape chains into root-dim arithmetic (pre-bufferize). |
@@ -169,7 +171,7 @@ the selected perfConfig string are printed only with `--verbose`.
 | `hip-forward-concat-slots` | func.func | Retarget the writer and every reader of a private buffer at an identity view of its packed concat slot, and drop that input's `memref.copy`. A chained concat buffer becomes a prefix view of the outer buffer, and a dense block's concats share one buffer. A slot off a 16-byte boundary keeps its copy. Runs after `hip-materialize-host-scalars`. |
 | `hip-optimize-memrefs` | func.func | HIP-specific buffer reuse / subview folding. |
 | `hip-promote-strided-operands` | func.func | Materialize identity-layout temporaries for non-identity-layout DPS-input memrefs. |
-| `hip-materialize-host-scalars` | func.func | Redirect tiny host-fed scalar allocs to runtime-owned host-mapped scratch (away from the GPU pool). |
+| `hip-materialize-host-scalars` | module | Redirect tiny host-fed scalar allocs to runtime-owned host-mapped scratch (away from the GPU pool). Every function shares the one scratch buffer, so its slots are laid out across the module. |
 | `hip-resolve-memref-dims` | func.func | Fold post-bufferization `memref.dim` through view/reshape chains before pool planning. |
 | `hip-hoist-alloc-size-arith` | func.func | Hoist pure size producers before the earliest allocation their dependencies permit (PoolAllocs precondition). |
 | `hip-pool-allocs` | func.func | Pack allocations into one or more grow-on-demand GPU pools; stamp pool-planning module attributes. |
@@ -282,6 +284,8 @@ ONNX → HIP  (buildOnnxToHipPipeline)
                                            runs the same pass in its own head)
   func.func(hip-fold-constant-extracts)
   hip-infer-shapes
+  hip-resolve-if-result-dims         (must precede externalization: it reads
+                                      the shape constants the branches use)
   hip-fusion-transform               (must precede externalization: its patterns
                                       read hip.constant payloads)
   hip-externalize-constants
@@ -297,7 +301,7 @@ ONNX → HIP  (buildOnnxToHipPipeline)
   lower-affine
   cse ; canonicalize
   func.func(convert-linalg-to-loops)
-  func.func(hip-materialize-host-scalars)
+  hip-materialize-host-scalars
   func.func(hip-optimize-memrefs)
   func.func(hip-promote-strided-operands)
   func.func(hip-resolve-memref-dims)
