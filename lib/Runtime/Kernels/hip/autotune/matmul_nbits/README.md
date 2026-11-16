@@ -2,9 +2,9 @@
 
 Ships the winning kernel config for shapes we have measured, so the first call
 on a new shape does not have to pay for a runtime sweep. Modelled on the GQA
-LUT next door (`../gqa/`), with three match tiers instead of five — the
-MatMulNBits key space is much smaller, because `N` and `K` are model constants
-rather than runtime geometry.
+LUT next door (`../gqa/`). MatMulNBits matches categorical fields exactly and
+uses weighted log-space distance over the literal `M`, `N` and `K` dimensions.
+An optional M interval can override that lookup for one literal K/N key.
 
 Currently populated for **bits=4 on gfx1151**. The schema reserves the other
 bit widths; adding them is a table regeneration, not a schema change.
@@ -42,16 +42,22 @@ table, or when the table is rejected as incompatible.
 | `tools/matmul_nbits_autotune_sweep.cpp` | GPU sweep driver |
 | `tools/empty_lut_data.cpp` | zero-size payload, for builds that must not consult a table |
 
-## The three tiers
+## Lookup order
 
 Probed finest first; the first row that exists **and** whose geometry the live
 config table still accepts wins.
 
 | Tier | Key | Answers |
 |---|---|---|
-| **Exact** | phase, bits, `N`, `K`, group_size, zero-point, row-stride, M-bucket | measured MatMulNBits nodes in 20 shipped models, plus selected decode cells and full prefill ladders from the hand-added `Internal` inventory |
-| **Fuzzy** | same, but `N` and `K` collapsed to octave buckets | a model nobody measured whose layer dims land near a measured one |
-| **Fallback** | phase + bits only | guarantees a hit; the config that won most often for that phase |
+| **Interval** (optional) | phase, bits, group_size, zero-point, row-stride, literal `K` and `N`, and `(m_lo, m_hi]` | an explicitly qualified config for the covered M values |
+| **Exact / Nearest** | exact categorical fields; weighted log-space distance over literal `M`, `N`, `K` | the closest usable measured point; zero distance is an Exact hit |
+| **Fallback** | phase + bits only | the phase's usable last-resort config when no point can answer |
+
+There is no octave-bucket voting tier. The table stores the positive weights
+`weight_m`, `weight_n` and `weight_k`; the distance is
+`sqrt((wm*log2(M/Mp))^2 + (wn*log2(N/Np))^2 + (wk*log2(K/Kp))^2)`.
+If no interval, point or fallback passes the live legality callback, the answer
+is `Source::None` and the caller uses its existing runtime sweep.
 
 `phase` is not just prefill/decode. It is one of `Prefill` (WMMA tiles),
 `Decode` (fp16 GEMV) and `DecodeDp4a` (W4A8 integer-dot GEMV). The two decode
@@ -75,6 +81,100 @@ only for the default JSON, so a scratch build never overwrites the shipped
 table. Every step checks the table it writes or reads (`check_table`) and
 rejects one the loader would read differently, for example a config index out
 of range or an extended entry the kernel library does not compile.
+
+### Optional M intervals
+
+`m_intervals` is an optional root vector. Its full key is
+`phase, bits, group_size, zero_point, row_stride, k, n`; K and N must match
+literally. An interval matches only `m_lo < M <= m_hi` and runs before point
+lookup, including an old Exact point inside the interval. The in-process tune
+map still runs before the LUT. Missing intervals, unclassified row pitches and
+runtime-illegal interval configs fall through to the ordinary point/fallback
+lookup. Invalid or overlapping interval records are excluded by the loader;
+the builder rejects such data before writing it.
+
+Bounds satisfy `0 <= m_lo < m_hi <= 65535`. K is a positive uint16 and N is a
+positive uint32. Prefill uses `Arrival` or `Padded`; both decode phases use
+`Any` for row stride. Two intervals with the same full key may meet at an
+endpoint, such as `(61,64]` and `(64,68]`, but may not overlap.
+
+The import file is a JSON **list**, separate from the root LUT JSON. For
+example, the following illustrates the format; its bounds and config are not
+a measured selection:
+
+```json
+[
+  {
+    "phase": "Prefill",
+    "bits": "B4",
+    "group_size": "G128",
+    "zero_point": "Symmetric",
+    "row_stride": "Arrival",
+    "k": 2048,
+    "n": 2048,
+    "m_lo": 61,
+    "m_hi": 68,
+    "config": {
+      "kind": "Wmma",
+      "bm16": 8,
+      "bn16": 16,
+      "swizzle": 16,
+      "wt_m": 2,
+      "wt_n": 2,
+      "bk": 32,
+      "fused": 0,
+      "threads": 0,
+      "tile_n": 0,
+      "ext": 0,
+      "variant": 0
+    }
+  }
+]
+```
+
+Use the full config geometry when importing measured selections. `bm16` and
+`bn16` are the tile dimensions divided by 16; they are not LUT M coordinates.
+Gemv configs use `kind: "Gemv"`, `threads` and `tile_n`. `ext: 1` and `variant`
+identify a specific extended WMMA entry; the writer records them through the
+root `extended_configs` vector. An integer `config` is also accepted, but it
+indexes the existing LUT config pool, not `kWmmaConfigs` or `kGemvConfigs`.
+The builder reuses equal full geometries and appends new ones, preserving old
+indices and distinguishing extended variants. Importing the same full key and
+bounds replaces that interval explicitly; disjoint existing intervals remain.
+
+From this directory, import accepted intervals without consuming sweep logs or
+changing any old point records, fallbacks or fitted weights:
+
+```powershell
+python scripts/update_lut.py build --arch gfx1151 --merge-existing `
+    --intervals-only --m-intervals <accepted-intervals.json> `
+    --out <review-table.json>
+python scripts/update_lut.py compile --arch gfx1151 `
+    --out <review-table.json> --fb-out <review-table.fb> --flatc <flatc>
+```
+
+`--merge-existing` reads `lut/<arch>.json` as the input even when `--out`
+names a review file. `--intervals-only` requires both `--merge-existing` and
+`--m-intervals`. Omitting `--out` writes the selected architecture's canonical
+JSON; compile that same JSON to produce its FB. Other architecture files are
+not rewritten by this scoped import.
+
+Interval writers explicitly set `schema_version: 5`. The schema's field
+default remains 4 so old payloads that omitted the field still read as v4.
+The new reader accepts v4 without ranges and v5, and rejects v4 with nonempty
+ranges, unsupported versions, a wrong architecture or a wrong kernel ABI.
+Deliver v5 JSON/FB with the matching reader/schema patch and build; an old
+reader does not support this format. Empty/no-range data preserves ordinary
+lookup. `Source::Interval` is appended without renumbering the old sources.
+
+Accept a range only after checking every covered required integer M against
+the measured best legal config under the same CPU-checking entry, build,
+layout and timing protocol. Qualify overridden old Exact keys or narrow the
+range to exclude them; inspect tile/grid changes and both outside endpoints.
+Endpoint agreement alone does not qualify an interior. After compiling the
+real JSON/FB, check their semantic agreement, old-record preservation and
+actual final lookups, with CPU correctness and a separate
+`T_lookup / T_best <= 1.05` verdict for each required target.
 
 ## Why the row stores geometry, not a config index
 
@@ -194,3 +294,74 @@ cached selection — to stderr. Unlike `HIPDNN_MATMUL_LUT_LOG` (which only cover
 the offline-table lookup that `online` mode skips), this shows what the sweep
 actually picked, so an `online` run can be diffed against the shipped table.
 `HIPDNN_EP_DEBUG=1` still enables these lines too (plus everything else).
+
+
+## Refresh through native UT ranking
+
+Use the existing UT leaves with `RANK=1`, following
+[the common ranking contract](../../../unit_test/common/README.md#native-lut-ranking-ut-rank-v3).
+New refreshes use the UT timer and `UT_RANK` evidence; the common README
+reports the gfx1151 decision loss. The previous sweep commands remain only for
+reproducing historical logs. These commands write private outputs; installing
+a refreshed table is a separate, reviewed step.
+
+Start from the existing JSON table. From this operator's autotune directory:
+
+```sh
+python scripts/update_lut.py rank-seed --from-lut lut/gfx1151.json --activation fp16 --out /private/candidates.csv
+python scripts/update_lut.py rank-measure --candidates /private/candidates.csv --leaf-root /checkout/lib/Runtime/Kernels/unit_test --out /private/rank.log
+python scripts/update_lut.py rank-report --rank-log /private/rank.log --from-lut lut/gfx1151.json --activation fp16 --out /private/report.csv --md /private/report.md
+python scripts/update_lut.py rank-build --rank-log /private/rank.log --base lut/gfx1151.json --activation fp16 --out /private/candidate.json
+python scripts/update_lut.py compile --out /private/candidate.json --fb-out /private/candidate.fb --flatc /tools/flatc
+```
+
+`rank-seed` writes default + old config geometry per selected point. The native
+leaf resolves the no-LUT default and deduplicates equal final launches.
+`.seed.json` retains the original keys, and `.skipped.json` explains every
+unsupported, filtered or unsampled point. FB input is unsupported. Options:
+`--sample 20 --seed 111313`, `--leaf <names>`, `--dtype <types>`,
+`--rank-phase decode|prefill|both`, `--priority`, and `--keys <file>` (one JSON
+key array from `.seed.json` per line). The policy shown above must also be used
+at the report and import steps because the table omits that input dimension.
+
+Optional catalog expansion: run `rank-catalog --candidates /private/candidates.csv
+--leaf-root /checkout/lib/Runtime/Kernels/unit_test --out /private/catalog.log`,
+then repeat `rank-seed ... --with-catalog --catalog /private/catalog.log`.
+Default + old is the usual comparison; all legal configs are appended only
+when requested. Hand-written `leaf,shape,priority,config` CSVs remain useful
+for new shapes; expand them with `rank-catalog` then `rank-candidates`.
+
+Reports use the native final winner/default ratio and the latest shared phase
+for ratios involving old config, named in `old_ratio_phase`. An unavailable
+comparison is explicit. `changed` describes the effective table selection;
+`winner_unresolved` is diagnostic. GPU phase and pilot totals are distinct;
+rank wall excludes native CPU reference and launcher/resource waits.
+`python3 ../../../unit_test/common/test_ut_lut_from_table.py` checks full JSON
+roundtrip, skipped/filtered/sampled inputs, native default dedup and reports.
+
+Pass `--launcher-json '["python", "/private/lease_exec.py"]'` to `rank-measure`
+when the host uses a lease wrapper. Catalog enumeration is CPU metadata and
+does not require a GPU execution lease. The wrapper runs one native process
+at a time, waits through its actual exit and releases its own lease after GPU
+drain. Set the SDK runtime PATH as for the leaf Makefile. The tool adds no timer
+or numeric sampling controls; its log retains complete native stdout/stderr and
+nonzero leaf exits stop the command.
+
+For validation, `rank-reference-candidates --catalog <log> --rank-log <log>
+--out <csv>` selects the final top three plus the frozen default. Then use
+`rank-measure --reference` for independent sequential confirm. Routine refresh
+imports accepted ranking evidence once instead of repeating every candidate.
+
+`rank-build` requires an explicit private output outside `lut/`, preserves base
+weights/config indices/fallbacks and unrelated points, and replaces only measured
+keys. A winner that does not beat the default by >2% stores its
+default-equivalent answer;
+deleting its point could otherwise select a nearby nondefault point. Duplicate
+or malformed evidence, CPU failures and inconsistent groups are rejected.
+
+The schema does not contain activation dtype. Choose one evidence policy with
+`--activation fp16|fp32`; mixed evidence is rejected. All B2/B3/B4/B8 leaves are
+supported. M-blocked GEMV and naive singleton routes are reported as skipped
+because their final geometry cannot be represented by this schema. W4 extended
+config entries reuse the existing writer/checker. Arrival row stride and native
+zero-point semantics are retained; these leaves do not qualify DP4A/padrow routes.
