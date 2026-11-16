@@ -301,7 +301,7 @@ struct RuntimeState {
   // cache). Each Compute enqueues an async copy of seqlens_k into the pinned
   // seqlens_k_pinned; the next Compute, which starts after the previous one's
   // stream synchronize, uses that value + 1. No step waits on the stream.
-  int32_t *seqlens_k_pinned; // hipHostMalloc'd on first use, freed in cleanup
+  int32_t *seqlens_k_pinned;   // hipHostMalloc'd on first use, freed in cleanup
   bool seqlens_k_pinned_valid; // holds a completed copy or a host write
   bool seqlens_k_copy_issued;  // this Compute's copy is enqueued; reset with
                                // the cache above

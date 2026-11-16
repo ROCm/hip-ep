@@ -555,11 +555,10 @@ static int gqa_forward_fused(
   const bool in_place_decode =
       sq == 1 && !(seqlens_k_ptr && past_key && past_key != present_key);
   const int32_t seqlens_k_pre =
-      in_place_decode
-          ? estimate_decode_seqlens_k(stream, seqlens_k_ptr, B, state,
-                                      host_length)
-          : read_seqlens_k_for_dispatch(stream, seqlens_k_ptr, B, state,
-                                        host_length);
+      in_place_decode ? estimate_decode_seqlens_k(stream, seqlens_k_ptr, B,
+                                                  state, host_length)
+                      : read_seqlens_k_for_dispatch(stream, seqlens_k_ptr, B,
+                                                    state, host_length);
 
   const size_t Q_full_bytes = static_cast<size_t>(B) * sq * H * d * elem_sz;
   const size_t K_full_bytes = static_cast<size_t>(B) * sq * G * d * elem_sz;
