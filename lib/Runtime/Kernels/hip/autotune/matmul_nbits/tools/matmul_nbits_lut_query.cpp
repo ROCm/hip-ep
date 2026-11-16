@@ -35,6 +35,7 @@ static bool acceptGemv(void*, const GemvAnswer&) { return true; }
 
 static const char* name(Source s) {
   switch (s) {
+  case Source::Interval: return "Interval";
   case Source::Exact: return "Exact";
   case Source::Nearest: return "Nearest";
   case Source::Fallback: return "Fallback";
@@ -132,6 +133,8 @@ int main(int argc, char** argv) {
                         m, r.n, r.k, r.gs, r.zp, res.wmma.bm, res.wmma.bn,
                         res.wmma.swizzle_n, res.wmma.wt_m, res.wmma.wt_n,
                         res.wmma.bk, int(res.wmma.fused));
+          if (p == Phase::Prefill)
+            std::printf("variant ext=%d variant=%d\n", int(res.wmma.ext), res.wmma.variant);
           else
             std::printf("%s m=%d n=%d k=%d gs=%d zp=%d -> %d %d\n",
                         p == Phase::Decode ? "D" : "Q", m, r.n, r.k, r.gs,
@@ -167,7 +170,7 @@ int main(int argc, char** argv) {
   int sum = 0;
   for (const auto& kv : total) sum += kv.second;
   std::printf("%d queries: ", sum);
-  for (const char* t : {"Exact", "Nearest", "Fallback", "None"}) {
+  for (const char* t : {"Interval", "Exact", "Nearest", "Fallback", "None"}) {
     const int c = total.count(t) ? total[t] : 0;
     std::printf("%s=%d (%.1f%%) ", t, c, sum ? 100.0 * c / sum : 0.0);
   }
