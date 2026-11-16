@@ -84,8 +84,8 @@ struct TopKOpLowering : public ConvertOpToLLVMPattern<TopKOp> {
         createI64Const(getHipdnnDataType(xType.getElementType()));
 
     auto valuesType = cast<MemRefType>(op.getValues().getType());
-    Value kStaticVal = createI64Const(
-        valuesType.isDynamicDim(axisAttr) ? -1
+    Value kStaticVal = createI64Const(valuesType.isDynamicDim(axisAttr)
+                                          ? -1
                                           : valuesType.getDimSize(axisAttr));
 
     SmallVector<Type, 13> paramTypes = {
@@ -99,10 +99,10 @@ struct TopKOpLowering : public ConvertOpToLLVMPattern<TopKOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value> args = {
-        statePtr,   xPtr,      kPtr,        valuesPtr,   indicesPtr,
-        axisVal,    largestVal, sortedVal,  rankVal,     xShapeArr,
-        numElements, dataTypeVal, kStaticVal};
+    SmallVector<Value> args = {statePtr,   xPtr,      kPtr,        valuesPtr,
+                               indicesPtr, axisVal,   largestVal,  sortedVal,
+                               rankVal,    xShapeArr, numElements, dataTypeVal,
+                               kStaticVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
