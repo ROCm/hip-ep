@@ -617,7 +617,9 @@ resolveStaticSlice(mlir::RankedTensorType dataType,
       return std::nullopt;
     const int64_t dim = dataType.getDimSize(axis);
     const int64_t step = stepsVec[i];
-    if (step == 0)
+    // An empty sliced axis has no in-range start for a negative step; the
+    // runtime path handles empty inputs.
+    if (step == 0 || dim == 0)
       return std::nullopt;
     int64_t start = startsVec[i] < 0 ? startsVec[i] + dim : startsVec[i];
     int64_t end = endsVec[i] < 0 ? endsVec[i] + dim : endsVec[i];
