@@ -369,9 +369,9 @@ Update all of these together:
    implementation to `hip/<op>_kernel.hip`, and that HIP file to
    `lib/Runtime/Kernels/CMakeLists.txt`'s `_kernel_sources`.
 2. Add a leaf directory named from all tensor dtypes, containing exactly its
-   `Makefile`, self-contained `test_<op>.cpp`, and `README.md`. The test must
-   generate inputs and a CPU reference in-process, return non-zero on failure,
-   and support `--coverage 1|2|3`.
+   `Makefile`, self-contained `test_<op>.cpp`, and `README.md`. The leaf must
+   provide every capability in
+   [Required capabilities in every leaf](#required-capabilities-in-every-leaf).
 3. Add the leaf once to the `LEAVES` list in `unit_test/Makefile` for local
    runs, once to `unit_test/CMakeLists.txt` for package install, and
    once to `kernel_ut_main.cpp`'s `kLeaves` for the controller and CSV report.
@@ -388,18 +388,32 @@ Update all of these together:
    The controller also writes one `shape=suite` row per leaf, including
    leaves without per-case rows.
 
+## Required capabilities in every leaf
+
+A new leaf is complete only when it has all of these. Use the MatMulNBits, GQA
+and GEMM leaves as references.
+
+| Capability | Requirement |
+|---|---|
+| Correctness | Generate inputs and a CPU reference in-process; compare every case and return non-zero on any failure. |
+| Custom shape | `make test_custom <op parameters>` runs exactly the user-given shape through the same correctness check and timer as the suite (for example `M= N= K= TA= TB=` for GEMM, `SIZE= GS=` for MatMulNBits). Provide defaults and document every parameter in the leaf README and the Makefile header. Passing only `ARGS="--coverage 1"` does not count. |
+| Coverage tiers | `--coverage 1\|2\|3` / `COVERAGE=1\|2\|3`, as described in [Shape coverage (3 tiers)](#shape-coverage-3-tiers). |
+| Timing precision | Time every case with the shared timer in `common/hip_adaptive_timing.h` (`timing::adaptiveRotatedMeanMs` inside a `timing::CaseScope`, and `timing::emitCsvBinding` for the CSV row), so it emits `UT_TIMING` / `UT_TIMING_BINDING` records. Accept `TIMING=screen\|standard\|confirm` (Makefile `TIMING ?= standard`, passed as `HIPDNN_UT_TIMING`) and the optional `ADLX_INCLUDE`. Do not add a private timer or a fixed iteration count. |
+| LUT refresh (ops with an offline LUT) | Build a ranking variant with `make build RANK=1` through a UT-only adapter (`common/<op>_rank_adapter.hip`) that compiles the production source unchanged and switches final launches in one process. Support `HIPDNN_UT_RANK=<csv>`, `HIPDNN_UT_RANK_CATALOG=1` and `HIPDNN_UT_RANK_REFERENCE=1`; check every candidate against the CPU reference before timing, with the no-LUT default as candidate zero. `hip/autotune/<op>/scripts/update_lut.py` provides `rank-catalog`, `rank-candidates`, `rank-seed --from-lut`, `rank-measure`, `rank-report`, `rank-build` and `rank-reference-candidates`, and the op's checked-in JSON table is added to the roundtrip in `common/test_ut_lut_from_table.py`. See [Refreshing a LUT with the UT leaves](#refreshing-a-lut-with-the-ut-leaves). |
+| Results | One `HIPDNN_RESULTS_CSV` row per case when set, and registration in the controller (see the checklist above). |
+
 ## Required files in every leaf — EXACTLY these three, nothing else
 
 | File | Role |
 |---|---|
 | `Makefile` | `test` / `test_custom` / `clean` / `build` (`build` also copies the exe to `PKG_DIR/PKG_NAME` for the `unit_test/` aggregator) |
-| `test_<op>.cpp` | Driver. Entirely self-contained: generates its own inputs (seeded RNG) and computes its own CPU reference **in-process, in C++** — no python, no on-disk data, no `unit_test/common/`. Enumerates the op's categorical situations x typical shapes in C++ (see "Shape coverage" below). Inline empty `resolve()` if needed, guarded by `#ifndef HIPDNN_LUT_LINKED_EXTERNALLY` so `MODE=lookup`'s real resolver (which defines the same symbols) can link. No `autotune_stub.cpp`. |
-| `README.md` | Targets + `MODE` + `COVERAGE` |
+| `test_<op>.cpp` | Driver. Entirely self-contained: generates its own inputs (seeded RNG) and computes its own CPU reference **in-process, in C++** — no python, no on-disk data. Shared code comes only from `unit_test/common/` (timer, result binding, ranking). Enumerates the op's categorical situations x typical shapes in C++ (see "Shape coverage" below). Inline empty `resolve()` if needed, guarded by `#ifndef HIPDNN_LUT_LINKED_EXTERNALLY` so `MODE=lookup`'s real resolver (which defines the same symbols) can link. No `autotune_stub.cpp`. |
+| `README.md` | Targets, `test_custom` parameters, `MODE`, `COVERAGE`, `TIMING`, and `RANK` when the op has a LUT |
 
-No `gen_data.py`, no python anywhere under `unit_test/`, no `shapes.csv`, no
-`unit_test/common/` (there is nothing left to share — each leaf inlines its own
-~30-line coverage-tier resolver and, where it writes `out/results.csv`, its
-own tiny CSV writer; see "Shape coverage" and "`out/results.csv`" below).
+No `gen_data.py`, no python in a leaf directory, no `shapes.csv`. Shared code
+lives only in `unit_test/common/` (adaptive timer, result binding, ranking and
+the LUT tools' helpers); each leaf keeps its own coverage-tier resolver and CPU
+reference (see "Shape coverage" and "`out/results.csv`" below).
 
 Forbidden filenames in a leaf: `gen_data.py`, `gen_matmul_nbits*_data.py`,
 `gen_model_data*.py`, `bench_*.py`, `verify_*.py`, `zp_perf_compare.md`,
@@ -489,7 +503,7 @@ is the single source of truth for what "typical" means for that op.
 From `unit_test/`, the whole suite, run the way the CI runs it:
 
 ```
-make test  HIP_SDK=<sdk> [OFFLOAD=--offload-arch=<gfx>] [LUT_ARCH=<gfx>] [MODE=lookup|autotune] [COVERAGE=1|2|3]
+make test  HIP_SDK=<sdk> [OFFLOAD=--offload-arch=<gfx>] [LUT_ARCH=<gfx>] [MODE=lookup|autotune] [COVERAGE=1|2|3] [TIMING=screen|standard|confirm]
 make build ...   # build only
 make clean ...
 ```
