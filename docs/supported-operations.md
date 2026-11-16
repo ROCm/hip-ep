@@ -169,8 +169,8 @@ These operations are handled through standard MLIR transformations and generally
 | Unsqueeze | `tensor.expand_shape` | Inserts size-one axes |
 | Squeeze | `tensor.collapse_shape` | Removes size-one axes |
 | Split | `tensor.extract_slice` | Produces tensor slices that bufferize to views |
-| Slice | `tensor.extract_slice` or `hip.slice` | Constant positive-stride forms decompose to tensor slices; runtime indices or negative steps use the runtime path. The opset<10 form, with starts/ends/axes as attributes, is rewritten to the operand form first |
-| Concat | `tensor.empty` + `tensor.insert_slice` | Bufferizes to destination subviews and copies |
+| Slice | `tensor.extract_slice`, `hip.reverse`, or `hip.slice` | Constant forms decompose to tensor slices; a constant negative step on a static axis adds `hip.reverse` (one strided-copy launch, no parameter readback). Runtime indices, or a negative step on a dynamic axis, use the runtime path. The opset<10 form, with starts/ends/axes as attributes, is rewritten to the operand form first |
+| Concat | `hip.concat` or `tensor.empty` + `tensor.insert_slice` | A static concat with more than one row before the axis and at least 4096 output elements is one `hip.concat` launch. Other concats bufferize to destination subviews and copies |
 | Shape | `tensor.dim` + `tensor.from_elements` | Static shapes fold to constants; dynamic dimensions remain runtime SSA |
 | Constant | `arith.constant` or external constants file | Large values are externalized |
 | ConstantOfShape | `arith.constant` when foldable | Produces a splat constant for constant shape inputs |

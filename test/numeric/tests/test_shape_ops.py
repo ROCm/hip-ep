@@ -108,6 +108,38 @@ class TestConcat:
         actual, expected = model_runner.run_sample(model, feeds)
         compare_outputs(actual, expected, atol=0)
 
+    # Static concats with more than one row before the axis and >= 4096
+    # output elements lower to hip.concat: one launch reads every input.
+    @pytest.mark.parametrize(
+        "dtype,shapes,axis",
+        [
+            # Interleave: every input one element wide.
+            (np.float32, [[64, 64, 1], [64, 64, 1]], -1),
+            (np.int64, [[128, 40, 1], [128, 40, 1], [128, 40, 1]], 2),
+            # Uneven last-axis widths, 2-byte elements.
+            (np.float16, [[64, 8, 3], [64, 8, 5], [64, 8, 7]], -1),
+            # Rows of 16-byte multiples take the vector path.
+            (np.float32, [[16, 3, 64], [16, 5, 64]], 1),
+            (np.float32, [[64, 64, 4], [64, 64, 4]], -1),
+            # More inputs than one launch takes (16): later inputs go in a
+            # second launch writing its own column window.
+            (np.float32, [[256, 1]] * 20, 1),
+            # Concat along an interior axis of a rank-4 tensor.
+            (np.float32, [[8, 1, 192, 51], [8, 1, 192, 49]], 3),
+        ],
+    )
+    def test_concat_single_launch(self, model_runner, dtype, shapes, axis):
+        model = _make_concat_model(dtype, shapes, axis)
+        rng = np.random.default_rng(750 + len(shapes))
+        feeds = []
+        for i, s in enumerate(shapes):
+            if np.issubdtype(dtype, np.integer):
+                feeds.append(rng.integers(-100, 100, s, dtype=dtype))
+            else:
+                feeds.append(rng.uniform(-2.0, 2.0, s).astype(dtype))
+        actual, expected = model_runner.run_sample(model, feeds)
+        compare_outputs(actual, expected, atol=0)
+
 
 # ---------------------------------------------------------------------------
 # Tier-3 strided memref.copy kernel (hip_strided_copy)
@@ -538,9 +570,9 @@ class TestSlice:
     @pytest.mark.parametrize(
         "dtype,shape,starts,ends,axes,steps,out_shape",
         [
-            # Negative step: reverses elements along axis 0. The compile-time
-            # fold rejects negative steps -> goes through the runtime kernel
-            # even with constant indices.
+            # Negative step with constant indices: lowered at compile time to
+            # a positive-step view plus hip.reverse (one strided-copy launch,
+            # no parameter readback).
             #
             # Note on the negative-end sentinel:
             #   ONNX Slice spec normalises `end += dim` for any end < 0,
@@ -557,12 +589,18 @@ class TestSlice:
             # step=-2 walking 7,5,3,1 down to 0 exclusive (so 4 elements):
             #   start=7, end=-9=-(8+1) -> end=-1, step=-2 -> 4 elements.
             (np.int32, [8], [7], [-9], [0], [-2], [4]),
+            # Full flip of the last axis with the INT64 end sentinel.
+            (np.float32, [2, 4, 51], [-1], [-(2**63 - 1)], [2], [-1], [2, 4, 51]),
+            # step=-3 on a middle axis: indices 9, 6, 3, 0.
+            (np.int64, [3, 10, 5], [9], [-(2**63 - 1)], [1], [-3], [3, 4, 5]),
+            # Mixed: forward stride on one axis, reverse on another.
+            (np.float16, [6, 8], [0, 6], [6, 1], [0, 1], [2, -1], [3, 5]),
         ],
     )
     def test_slice_negative_step(
         self, model_runner, dtype, shape, starts, ends, axes, steps, out_shape
     ):
-        """Negative step ALWAYS goes through the runtime kernel."""
+        """Constant negative steps take the compile-time reverse path."""
         model, _ = _make_slice_model(
             dtype,
             shape,
@@ -578,6 +616,40 @@ class TestSlice:
             x = rng.integers(-50, 50, shape, dtype=dtype)
         else:
             x = rng.uniform(-2.0, 2.0, shape).astype(dtype)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0)
+
+    @pytest.mark.parametrize("dtype", [np.float32, np.float16])
+    def test_slice_flip_of_view_joined(self, model_runner, dtype):
+        """Flip of an interior slice, joined back onto the source.
+
+        The flip reads the [1:-1] view in place (strided input with an offset
+        and a negated stride), and the Concat is a single hip.concat.
+        """
+        tp = np_to_onnx_type(dtype)
+        shape = [8, 1, 192, 51]
+        X = helper.make_tensor_value_info("X", tp, shape)
+        Y = helper.make_tensor_value_info("Y", tp, [8, 1, 192, 100])
+
+        def i64(name, values):
+            return numpy_helper.from_array(np.array(values, dtype=np.int64), name)
+
+        inits = [
+            i64("s1", [1]),
+            i64("e1", [-1]),
+            i64("ax", [3]),
+            i64("st1", [1]),
+            i64("s2", [-1]),
+            i64("e2", [-(2**63 - 1)]),
+            i64("st2", [-1]),
+        ]
+        nodes = [
+            helper.make_node("Slice", ["X", "s1", "e1", "ax", "st1"], ["inner"]),
+            helper.make_node("Slice", ["inner", "s2", "e2", "ax", "st2"], ["flip"]),
+            helper.make_node("Concat", ["X", "flip"], ["Y"], axis=3),
+        ]
+        model = make_model_from_nodes(nodes, [X], [Y], initializers=inits)
+        x = np.random.default_rng(503).uniform(-2.0, 2.0, shape).astype(dtype)
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=0)
 

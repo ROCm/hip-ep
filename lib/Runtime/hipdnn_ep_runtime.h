@@ -740,6 +740,24 @@ int wrap_strided_copy(RuntimeState *state, void *dst_ptr, const void *src_ptr,
                       int64_t src_pitch_elems, int64_t dst_pitch_elems,
                       int64_t row_elems);
 
+/// N-D strided D2D copy in one kernel launch (element units). `sizes`,
+/// `src_strides` and `dst_strides` are host arrays of `rank` entries. Source
+/// strides may be negative: `src_ptr` then addresses the element with every
+/// index 0, which is how hip.reverse reads its input backwards. Backs
+/// hip.reverse.
+int wrap_strided_copy_nd(RuntimeState *state, void *dst_ptr,
+                         const void *src_ptr, int64_t elem_bytes, int64_t rank,
+                         const int64_t *sizes, const int64_t *src_strides,
+                         const int64_t *dst_strides);
+
+/// Concat of `num_inputs` contiguous device buffers in one kernel launch.
+/// The output and every input are viewed as [outer, width]: input i has row
+/// width `src_widths[i]` elements, and the output row is the inputs' rows side
+/// by side. `src_ptrs` and `src_widths` are host arrays. Backs hip.concat.
+int wrap_concat(RuntimeState *state, void *dst_ptr, int64_t num_inputs,
+                void *const *src_ptrs, const int64_t *src_widths, int64_t outer,
+                int64_t elem_bytes);
+
 /// Copies device memory to host memory on the state's stream. Backs
 /// hipsr.copy_d2h.
 ///

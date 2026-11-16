@@ -22,9 +22,11 @@ namespace {
 // Two patterns are registered (in benefit order):
 //
 //   * SliceDecompose (benefit=2) — when starts/ends/axes/steps are all
-//     compile-time constants AND every effective step is positive, the op
-//     is rewritten to a `tensor.extract_slice`, which bufferizes to a
-//     zero-copy `memref.subview`. This is the by-far most common case in
+//     compile-time constants, the op is rewritten to a `tensor.extract_slice`,
+//     which bufferizes to a zero-copy `memref.subview`. A negative step on a
+//     static axis becomes the positive-step view of the same elements plus a
+//     `hip.reverse`, one strided-copy launch with no host synchronization.
+//     The positive-step case is the by-far most common case in
 //     transformer models (slicing a fixed prefix off a static-shape KV / mask
 //     tensor) and avoids any runtime call. Dynamic input/output dims are
 //     supported as long as either the dim is NOT touched by `axes` (in
@@ -32,8 +34,9 @@ namespace {
 //     dim is static so the per-axis ONNX clamping rules can be evaluated
 //     at compile time.
 //
-//   * SliceToHip (benefit=1) — fallback for non-constant indices or negative
-//     steps. Produces a native `hip.slice` DPS op, executed by `wrap_slice` in
+//   * SliceToHip (benefit=1) — fallback for non-constant indices, or a
+//     negative step on a dynamic axis. Produces a native `hip.slice` DPS op,
+//     executed by `wrap_slice` in
 //     Runtime/real/slice.cpp since #284 (this comment claimed a throwing stub
 //     long after that landed). Worth knowing when reading the extent logic
 //     below: that runtime D2Hs starts/ends/axes/steps and synchronizes the
@@ -435,12 +438,12 @@ struct SliceDecompose : public mlir::RewritePattern {
         axesVec.size() != endsVec.size() || axesVec.size() != stepsVec.size())
       return rewriter.notifyMatchFailure(op, "starts/ends/axes/steps mismatch");
 
-    // tensor.extract_slice only supports positive strides; negative-step
-    // slices need a separate reverse pass and fall through to the native op.
+    // tensor.extract_slice only supports positive strides. A negative step
+    // selects the same elements as a positive-step view in reverse order, so
+    // it becomes that view followed by hip.reverse (see below).
     for (int64_t s : stepsVec)
-      if (s <= 0)
-        return rewriter.notifyMatchFailure(
-            op, "negative or zero step is not supported by extract_slice");
+      if (s == 0)
+        return rewriter.notifyMatchFailure(op, "zero step");
 
     mlir::Location loc = op->getLoc();
 
@@ -495,7 +498,18 @@ struct SliceDecompose : public mlir::RewritePattern {
     // is tensor.empty rather than extract_slice. This does not apply to the
     // hip.slice path: a runtime-zero extent there stays full capacity so a
     // loop accumulator can append into it.
+    //
+    // A negative step walks start, start + step, ... downwards. The same
+    // elements, lowest first, are the positive-step view starting at the last
+    // one with stride -step; reversing that view along the axis gives the
+    // slice. For data of length 6:
+    //
+    //   Slice(x, starts=[-1], ends=[-INT64_MAX], steps=[-2])  -> x[5], x[3],
+    //   x[1] view = extract_slice x[1] [3] [2]                     -> x[1],
+    //   x[3], x[5] hip.reverse(view) {axes = [0]}                        ->
+    //   x[5], x[3], x[1]
     bool noInBoundsView = false;
+    llvm::SmallVector<int64_t> reversedAxes;
     for (size_t k = 0; k < axesVec.size(); ++k) {
       int64_t axis = axesVec[k];
       if (axis < 0)
@@ -510,13 +524,29 @@ struct SliceDecompose : public mlir::RewritePattern {
         start += dim;
       if (end < 0)
         end += dim;
-      // Positive-step clamp per spec: start in [0, dim], end in [0, dim].
-      start = std::clamp<int64_t>(start, 0, dim);
-      end = std::clamp<int64_t>(end, 0, dim);
-      if (end < start)
-        end = start; // empty slice
-
-      int64_t size = (end - start + step - 1) / step;
+      int64_t size;
+      if (step > 0) {
+        // Positive-step clamp per spec: start in [0, dim], end in [0, dim].
+        start = std::clamp<int64_t>(start, 0, dim);
+        end = std::clamp<int64_t>(end, 0, dim);
+        if (end < start)
+          end = start; // empty slice
+        size = (end - start + step - 1) / step;
+      } else if (dim == 0) {
+        size = 0;
+        step = -step;
+      } else {
+        // Negative-step clamp per spec: start in [0, dim-1], end in [-1,
+        // dim-1].
+        start = std::clamp<int64_t>(start, 0, dim - 1);
+        end = std::clamp<int64_t>(end, -1, dim - 1);
+        step = -step;
+        size = start > end ? (start - end + step - 1) / step : 0;
+        if (size > 0)
+          start -= (size - 1) * step;
+        if (size > 1)
+          reversedAxes.push_back(axis);
+      }
       if (size < 0)
         size = 0;
       if (size == 0) {
@@ -577,12 +607,34 @@ struct SliceDecompose : public mlir::RewritePattern {
       return mlir::success();
     }
 
+    mlir::Value context;
+    if (!reversedAxes.empty()) {
+      auto ctxOrFailure = getContextArg(op, rewriter);
+      if (mlir::failed(ctxOrFailure))
+        return rewriter.notifyMatchFailure(op, "missing context argument");
+      context = *ctxOrFailure;
+    }
+
     mlir::OperationState state(
         loc, mlir::tensor::ExtractSliceOp::getOperationName());
     mlir::tensor::ExtractSliceOp::build(rewriter, state, outType, data, offsets,
                                         sizes, strides);
-    mlir::Operation *sliceOp = rewriter.create(state);
-    rewriter.replaceOp(op, sliceOp->getResult(0));
+    mlir::Value result = rewriter.create(state)->getResult(0);
+    if (!reversedAxes.empty()) {
+      llvm::SmallVector<mlir::Value> dynSizes;
+      for (int64_t i : llvm::seq<int64_t>(rank))
+        if (outType.isDynamicDim(i))
+          dynSizes.push_back(
+              mlir::tensor::DimOp::create(rewriter, loc, result, i));
+      mlir::Value init =
+          mlir::tensor::EmptyOp::create(rewriter, loc, outType.getShape(),
+                                        outType.getElementType(), dynSizes);
+      result =
+          mlir::hip::ReverseOp::create(rewriter, loc, context, result, init,
+                                       rewriter.getI64ArrayAttr(reversedAxes))
+              ->getResult(0);
+    }
+    rewriter.replaceOp(op, result);
     return mlir::success();
   }
 };

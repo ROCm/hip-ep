@@ -67,9 +67,64 @@ module {
     return %r : tensor<2x3xf32>
   }
 
-  // Test 4: negative step forces the native fallback (hip.slice).  The
-  // runtime is a stub today, but the conversion + bufferization pipeline
-  // must still produce valid IR.
+  // Test 4a: a constant flip is the positive-step view of the same elements
+  // plus hip.reverse: no hip.slice, so no parameter readback.
+  func.func @test_slice_constant_flip(%input: tensor<2x51xf32>) -> tensor<2x51xf32> {
+    // CHECK-LABEL: func.func @test_slice_constant_flip
+    %starts = arith.constant dense<[-1]> : tensor<1xi64>
+    %ends   = arith.constant dense<[-9223372036854775807]> : tensor<1xi64>
+    %axes   = arith.constant dense<[1]> : tensor<1xi64>
+    %steps  = arith.constant dense<[-1]> : tensor<1xi64>
+    %r = "onnx.Slice"(%input, %starts, %ends, %axes, %steps)
+        : (tensor<2x51xf32>, tensor<1xi64>, tensor<1xi64>,
+           tensor<1xi64>, tensor<1xi64>) -> tensor<2x51xf32>
+
+    // CHECK-NOT: hip.slice
+    // CHECK: %[[INIT:.*]] = tensor.empty() : tensor<2x51xf32>
+    // CHECK: hip.reverse(%{{.*}}) ins(%{{.*}} : tensor<2x51xf32>) outs(%[[INIT]] : tensor<2x51xf32>) {axes = [1]}
+
+    return %r : tensor<2x51xf32>
+  }
+
+  // Test 4b: step -2 from the end of a length-6 axis selects x[5], x[3], x[1]:
+  // the view x[1:6:2] reversed.
+  func.func @test_slice_constant_negative_stride(%input: tensor<6x4xf32>) -> tensor<3x4xf32> {
+    // CHECK-LABEL: func.func @test_slice_constant_negative_stride
+    %starts = arith.constant dense<[5]> : tensor<1xi64>
+    %ends   = arith.constant dense<[-9223372036854775807]> : tensor<1xi64>
+    %axes   = arith.constant dense<[0]> : tensor<1xi64>
+    %steps  = arith.constant dense<[-2]> : tensor<1xi64>
+    %r = "onnx.Slice"(%input, %starts, %ends, %axes, %steps)
+        : (tensor<6x4xf32>, tensor<1xi64>, tensor<1xi64>,
+           tensor<1xi64>, tensor<1xi64>) -> tensor<3x4xf32>
+
+    // CHECK-NOT: hip.slice
+    // CHECK: %[[VIEW:.*]] = tensor.extract_slice %{{.*}}[1, 0] [3, 4] [2, 1]
+    // CHECK: hip.reverse(%{{.*}}) ins(%[[VIEW]] : tensor<3x4xf32>) outs(%{{.*}} : tensor<3x4xf32>) {axes = [0]}
+
+    return %r : tensor<3x4xf32>
+  }
+
+  // Test 4c: a negative step that keeps one element needs no reverse.
+  func.func @test_slice_constant_negative_single(%input: tensor<6xf32>) -> tensor<1xf32> {
+    // CHECK-LABEL: func.func @test_slice_constant_negative_single
+    %starts = arith.constant dense<[4]> : tensor<1xi64>
+    %ends   = arith.constant dense<[3]> : tensor<1xi64>
+    %axes   = arith.constant dense<[0]> : tensor<1xi64>
+    %steps  = arith.constant dense<[-1]> : tensor<1xi64>
+    %r = "onnx.Slice"(%input, %starts, %ends, %axes, %steps)
+        : (tensor<6xf32>, tensor<1xi64>, tensor<1xi64>,
+           tensor<1xi64>, tensor<1xi64>) -> tensor<1xf32>
+
+    // CHECK-NOT: hip.slice
+    // CHECK-NOT: hip.reverse
+    // CHECK: tensor.extract_slice %{{.*}}[4] [1] [1]
+
+    return %r : tensor<1xf32>
+  }
+
+  // Test 4: a negative-step slice whose computed size disagrees with the
+  // declared result falls through to the native op (hip.slice).
   func.func @test_slice_native_negative_step(%input: tensor<6xf32>) -> tensor<3xf32> {
     // CHECK-LABEL: func.func @test_slice_native_negative_step
     %starts = arith.constant dense<[5]> : tensor<1xi64>
