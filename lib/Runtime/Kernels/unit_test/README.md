@@ -400,6 +400,9 @@ and GEMM leaves as references.
 | Coverage tiers | `--coverage 1\|2\|3` / `COVERAGE=1\|2\|3`, as described in [Shape coverage (3 tiers)](#shape-coverage-3-tiers). |
 | Timing precision | Time every case with the shared timer in `common/hip_adaptive_timing.h` (`timing::adaptiveRotatedMeanMs` inside a `timing::CaseScope`, and `timing::emitCsvBinding` for the CSV row), so it emits `UT_TIMING` / `UT_TIMING_BINDING` records. Accept `TIMING=screen\|standard\|confirm` (Makefile `TIMING ?= standard`, passed as `HIPDNN_UT_TIMING`) and the optional `ADLX_INCLUDE`. Do not add a private timer or a fixed iteration count. |
 | LUT refresh (ops with an offline LUT) | Build a ranking variant with `make build RANK=1` through a UT-only adapter (`common/<op>_rank_adapter.hip`) that compiles the production source unchanged and switches final launches in one process. Support `HIPDNN_UT_RANK=<csv>`, `HIPDNN_UT_RANK_CATALOG=1` and `HIPDNN_UT_RANK_REFERENCE=1`; check every candidate against the CPU reference before timing, with the no-LUT default as candidate zero. `hip/autotune/<op>/scripts/update_lut.py` provides `rank-catalog`, `rank-candidates`, `rank-seed --from-lut`, `rank-measure`, `rank-report`, `rank-build` and `rank-reference-candidates`, and the op's checked-in JSON table is added to the roundtrip in `common/test_ut_lut_from_table.py`. See [Refreshing a LUT with the UT leaves](#refreshing-a-lut-with-the-ut-leaves). |
+| Production mode | `MODE=lookup\|autotune` (Makefile `MODE ?= lookup`) sets both the linked resolver and the kernel's own `HIPDNN_<OP>_AUTOTUNE_MODE=lookup\|online`. `lookup` resolves from the table embedded in the production build and falls through to autotune on a miss; `autotune` never reads a table. A missing table is never a failure. See [`MODE=lookup`](#modelookup-default--real-lut-when-one-exists). |
+| Config identity | Every row's `config` names the configuration that actually ran, read back from the op's own diagnostics or resolver with its source prefix (`lookup:`, `autotune:`, `fixed:` or `declined`), never inferred from `MODE`. `unlogged` is a gap to fix. See [`out/results.csv`](#outresultscsv). |
+| Architectures | gfx1151 is the default validation chip. The leaf builds and runs with the default `OFFLOAD=--offload-arch=gfx11-generic` (gfx115x) and with `OFFLOAD=--offload-arch=gfx1170` or `gfx1171` (gfx11-7-generic); `LUT_ARCH` selects that chip's table. Do not hard-code a chip in the Makefile or driver; a case that supports only some chips checks the device and prints `SKIP` on the others. |
 | Results | One `HIPDNN_RESULTS_CSV` row per case when set, and registration in the controller (see the checklist above). |
 
 ## Required files in every leaf — EXACTLY these three, nothing else
@@ -408,7 +411,7 @@ and GEMM leaves as references.
 |---|---|
 | `Makefile` | `test` / `test_custom` / `clean` / `build` (`build` also copies the exe to `PKG_DIR/PKG_NAME` for the `unit_test/` aggregator) |
 | `test_<op>.cpp` | Driver. Entirely self-contained: generates its own inputs (seeded RNG) and computes its own CPU reference **in-process, in C++** — no python, no on-disk data. Shared code comes only from `unit_test/common/` (timer, result binding, ranking). Enumerates the op's categorical situations x typical shapes in C++ (see "Shape coverage" below). Inline empty `resolve()` if needed, guarded by `#ifndef HIPDNN_LUT_LINKED_EXTERNALLY` so `MODE=lookup`'s real resolver (which defines the same symbols) can link. No `autotune_stub.cpp`. |
-| `README.md` | Targets, `test_custom` parameters, `MODE`, `COVERAGE`, `TIMING`, and `RANK` when the op has a LUT |
+| `README.md` | Targets, `test_custom` parameters, `MODE`, `COVERAGE`, `TIMING`, supported `OFFLOAD` targets, and `RANK` when the op has a LUT |
 
 No `gen_data.py`, no python in a leaf directory, no `shapes.csv`. Shared code
 lives only in `unit_test/common/` (adaptive timer, result binding, ranking and
@@ -519,8 +522,8 @@ the real chip.
 - `OFFLOAD` defaults to `--offload-arch=gfx11-generic`, the target of the
   `custom_kernels_gfx11-generic.dll` every gfx115x part runs, and the kernels
   build at `-O2` like that DLL, so a test measures the code that ships.
-  For gfx1170 pass `OFFLOAD=--offload-arch=gfx1170` (the release target
-  for it). A chip target such as
+  For gfx1170 or gfx1171 pass `OFFLOAD=--offload-arch=gfx1170` or
+  `--offload-arch=gfx1171`. A chip target such as
   `OFFLOAD=--offload-arch=gfx1151` still works and uses that chip's table.
 - The LUTs are per chip (`lut/gfx1151.fb`, ...), so for a `gfx*-generic`
   target `LUT_ARCH` defaults to the GPU of the machine that builds, read with
