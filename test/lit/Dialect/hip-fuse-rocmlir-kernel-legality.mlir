@@ -113,3 +113,30 @@ func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf32>,
       outs(%we : tensor<1x16x4x4xf32>) : tensor<1x16x4x4xf32>
   return %r : tensor<1x16x4x4xf32>
 }
+
+// -----
+
+// Outside any anchor, a u8 Clip (Max, then Min) outlines as an elementwise
+// kernel of its own: HipToTosa computes both in i32, and the HIP path has no
+// u8 Max or Min to fall back to.
+
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
+// CHECK-SAME: rock.elementwise
+// CHECK: hip.max
+// CHECK: hip.min
+// CHECK-LABEL: func.func @main_graph
+// CHECK-NOT: hip.max
+// CHECK: hip.rocmlir
+// CHECK-NOT: hip.min
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x1x16x16xui8>)
+    -> tensor<1x1x16x16xui8> {
+  %lo = hip.constant {value = dense<100> : tensor<ui8>} : tensor<ui8>
+  %hi = hip.constant {value = dense<200> : tensor<ui8>} : tensor<ui8>
+  %me = tensor.empty() : tensor<1x1x16x16xui8>
+  %m = hip.max(%ctx) ins(%x, %lo : tensor<1x1x16x16xui8>, tensor<ui8>)
+      outs(%me : tensor<1x1x16x16xui8>) : tensor<1x1x16x16xui8>
+  %ne = tensor.empty() : tensor<1x1x16x16xui8>
+  %n = hip.min(%ctx) ins(%m, %hi : tensor<1x1x16x16xui8>, tensor<ui8>)
+      outs(%ne : tensor<1x1x16x16xui8>) : tensor<1x1x16x16xui8>
+  return %n : tensor<1x1x16x16xui8>
+}

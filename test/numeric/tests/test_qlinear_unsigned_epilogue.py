@@ -109,3 +109,19 @@ class TestUnsignedAfterQLinearConv:
     def test_equal(self, model_runner):
         node = helper.make_node("Equal", ["y", "c"], ["z"])
         _run(model_runner, [node], [_scalar("c", 200, np.uint8)], TensorProto.BOOL)
+
+
+class TestUnsignedWithoutConv:
+    """A u8 Clip with no conv runs as a rocMLIR elementwise kernel of its own."""
+
+    @_ROCMLIR_ONLY
+    def test_clip(self, model_runner):
+        model = make_model_from_nodes(
+            [helper.make_node("Clip", ["x", "lo", "hi"], ["z"])],
+            [_tensor("x", TensorProto.UINT8)],
+            [_tensor("z", TensorProto.UINT8)],
+            initializers=[_scalar("lo", 100, np.uint8), _scalar("hi", 200, np.uint8)],
+            opset=13,
+        )
+        actual, expected = model_runner.run_sample(model, [_X])
+        compare_outputs(actual, expected, atol=0, rtol=0)

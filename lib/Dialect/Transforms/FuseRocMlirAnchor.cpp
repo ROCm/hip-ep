@@ -1083,7 +1083,9 @@ private:
 
   // A module outlines alone only when it saves a launch. A static reshape is a
   // free view on the host, so the module needs two other ops, and each op must
-  // lower to TOSA outside an anchor kernel. rocMLIR's elementwise pipeline
+  // lower inside a rocMLIR kernel (isTosaLowerableInKernel, the rule the
+  // grouping uses): a u8 Max or Min, for one, has no HIP kernel to fall back
+  // to. rocMLIR's elementwise pipeline
   // cannot store a result that only transposes a kernel argument (through
   // reshapes) next to other results; such a module stays on the host.
   bool outlinesAlone(RocMlirElementwiseOp module) const {
@@ -1096,7 +1098,7 @@ private:
         return false;
       if (isa<tensor::EmptyOp>(op) || isTosaLowerableReshape(&op))
         continue;
-      if (!isTosaExpressiblePointwiseOp(&op) && !isTosaLowerableQdq(&op))
+      if (!isTosaLowerableInKernel(&op) && !isTosaLowerableQdq(&op))
         return false;
       ++launches;
     }
