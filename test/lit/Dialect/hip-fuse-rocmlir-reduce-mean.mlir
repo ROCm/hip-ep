@@ -1,8 +1,9 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-// hip.reduce_mean is the same rock.reduce kernel as a sum. HipToTosa expands
-// it to a multiply by 1/N in front of tosa.reduce_sum.
+// An f32 hip.reduce_mean is the same rock.reduce kernel as a sum. HipToTosa
+// expands it to a multiply by 1/N in front of tosa.reduce_sum. An f16 mean
+// stays a HIP op and is covered in hip-fuse-rocmlir-reduce.mlir.
 
 // RUN: hip-mlir-opt --hip-rocmlir-prepare-quant \
 // RUN:   --hip-fuse-rocmlir-elementwise --hip-fuse-rocmlir-anchor %s \

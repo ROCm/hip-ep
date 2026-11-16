@@ -45,9 +45,12 @@ enum class Decomposition {
   Reduce
 };
 
-// A standalone rocMLIR reduce is a sum over the last axis. hip.reduce_mean
-// lowers to a scale by 1/N in front of that sum, so it is the same kernel.
-// keepdims=0 inserts a reshape after the sum, which the reduce pipeline
+// A standalone rocMLIR reduce is a sum over the last axis of an f16 or f32
+// tensor. hip.reduce_mean lowers to a scale by 1/N in that same type and then
+// the sum. f16 cannot hold a large extent (65536 becomes infinity) and flushes
+// small inputs when they are scaled, while the HIP kernel accumulates the mean
+// in f32, so an f16 mean stays a HIP op. An f32 mean is the same kernel as a
+// sum. keepdims=0 inserts a reshape after the sum, which the reduce pipeline
 // rejects, so that form stays a HIP op.
 template <typename ReduceOp> bool isLastAxisFloatReduce(ReduceOp reduce) {
   auto dataType = dyn_cast<RankedTensorType>(reduce.getData().getType());
@@ -71,8 +74,12 @@ template <typename ReduceOp> bool isLastAxisFloatReduce(ReduceOp reduce) {
 bool isLastAxisFloatReduce(Operation *op) {
   if (auto sum = dyn_cast<ReduceSumOp>(op))
     return isLastAxisFloatReduce(sum);
-  if (auto mean = dyn_cast<ReduceMeanOp>(op))
+  if (auto mean = dyn_cast<ReduceMeanOp>(op)) {
+    auto dataType = dyn_cast<RankedTensorType>(mean.getData().getType());
+    if (!dataType || !dataType.getElementType().isF32())
+      return false;
     return isLastAxisFloatReduce(mean);
+  }
   return false;
 }
 
@@ -323,15 +330,22 @@ bool KernelRegion::takeContext() {
 // ABI. Clone only inline constants, and for a quantized anchor the dequantizes
 // and reciprocals of them its epilogue reads: a dynamic Clip bound remains an
 // argument.
-// The axes of a reduce are a compile-time constant, often tensor<1xi64>. An
-// i64 kernel argument is rejected, so the constant is cloned into the body.
+// The axes of a reduce are a compile-time constant, often one tensor<1xi64>
+// shared by every reduce in the function. An i64 kernel argument is rejected,
+// so each kernel clones that constant. outline keeps the original while
+// another reduce still reads it.
 bool isReduceAxesConstant(Operation *anchor, Value operand) {
-  if (!isa<ReduceSumOp, ReduceMeanOp>(anchor))
+  Value axes;
+  if (auto sum = dyn_cast<ReduceSumOp>(anchor))
+    axes = sum.getAxes();
+  else if (auto mean = dyn_cast<ReduceMeanOp>(anchor))
+    axes = mean.getAxes();
+  else
+    return false;
+  if (operand != axes)
     return false;
   Operation *def = operand.getDefiningOp();
-  if (!def || !def->hasOneUse())
-    return false;
-  return isa<arith::ConstantOp>(def) || isa<ConstantOp>(def);
+  return def && (isa<arith::ConstantOp>(def) || isa<ConstantOp>(def));
 }
 
 void KernelRegion::cloneInlineScalars() {
