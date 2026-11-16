@@ -71,11 +71,9 @@ module {
         -> (tensor<1x1x2048xf16>, tensor<1x8x128x128xf16>,
             tensor<1x8x128x128xf16>)
 
-    // Logical total = mask kv extent (127 past + 1 current = 128); present
-    // buffer = max(past extent, logical); seqlens_k = logical - 1.
-    // CHECK: tensor.dim %{{.*}}, %c2
+    // Present seq is static (128), so max(past extent, logical) has no user and
+    // is dropped. seqlens_k is still the mask kv extent (dim 3) minus 1.
     // CHECK: tensor.dim %{{.*}}, %c3
-    // CHECK: arith.maxui
     // CHECK: arith.subi
     // CHECK: tensor.from_elements %{{.*}} : tensor<1xi32>
     // CHECK: tensor.empty() : tensor<1x1x2048xf16>
