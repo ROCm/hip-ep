@@ -623,6 +623,12 @@ def Hip_RocMlirOp : Hip_DpsOp_AutoReify<"rocmlir", [AttrSizedOperandSegments]> {
     values that are read outside it, such as the anchor that feeds both its
     epilogue and a residual. The compiled kernel takes the data pointers of
     `ins` and then of `outs`, in operand order.
+
+    `prefill` lists the kernel arguments to fill before every launch, as
+    (argument index, bytes per element, element bit pattern) triples. The
+    bytes per element must equal the width of the argument's element type. A
+    split-K kernel adds its partial sums into its output with atomics, so
+    rocMLIR asks for that output to start at 0.
   }];
   let arguments = (ins
     FlatSymbolRefAttr:$kernel,
@@ -631,7 +637,8 @@ def Hip_RocMlirOp : Hip_DpsOp_AutoReify<"rocmlir", [AttrSizedOperandSegments]> {
     Variadic<Hip_TensorOrMemRef>:$outputs,
     DefaultValuedAttr<StrAttr, "\"\"">:$kernel_binary,
     DefaultValuedAttr<I64Attr, "0">:$grid_size,
-    DefaultValuedAttr<I64Attr, "0">:$block_size
+    DefaultValuedAttr<I64Attr, "0">:$block_size,
+    DefaultValuedAttr<DenseI64ArrayAttr, "{}">:$prefill
   );
 
   let assemblyFormat = [{

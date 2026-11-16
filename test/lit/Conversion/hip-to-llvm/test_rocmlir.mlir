@@ -34,4 +34,80 @@ module {
         {block_size = 128 : i64, grid_size = 4 : i64, kernel_binary = "ELF"}
     return
   }
+
+  // A split-K kernel accumulates into its output, so rocMLIR asks for it to
+  // start at 0: the fill of the 1x4x4x4 i32 output (64 elements, 4 bytes,
+  // pattern 0) is on the stream before the launch.
+  // CHECK-LABEL: llvm.func @rocmlir_prefill
+  // CHECK-SAME: (%[[CTX:arg0]]: !llvm.ptr,
+  func.func @rocmlir_prefill(
+      %ctx: !hip.context,
+      %x: memref<1x8x4x4xi8, 1>,
+      %w: memref<4x8x3x3xi8, 1>,
+      %y: memref<1x4x4x4xi32, 1>) {
+    // CHECK: llvm.addrspacecast
+    // CHECK: llvm.addrspacecast
+    // CHECK: %[[OUT:.*]] = llvm.addrspacecast
+    // CHECK-DAG: %[[COUNT:.*]] = llvm.mlir.constant(64 : i64) : i64
+    // CHECK-DAG: %[[BYTES:.*]] = llvm.mlir.constant(4 : i64) : i64
+    // CHECK-DAG: %[[ZERO:.*]] = llvm.mlir.constant(0 : i64) : i64
+    // CHECK: llvm.call @wrap_rocmlir_prefill(%[[CTX]], %[[OUT]], %[[COUNT]], %[[BYTES]], %[[ZERO]])
+    // CHECK-NOT: llvm.call
+    // CHECK: llvm.call @wrap_rocmlir(
+    hip.rocmlir(%ctx) @rocMlir1 ins(%x, %w : memref<1x8x4x4xi8, 1>,
+                                             memref<4x8x3x3xi8, 1>)
+        outs(%y : memref<1x4x4x4xi32, 1>)
+        {block_size = 128 : i64, grid_size = 4 : i64, kernel_binary = "ELF",
+         prefill = array<i64: 2, 4, 0>}
+    return
+  }
+
+  // The fill writes the element width and bit pattern from the attribute: 24
+  // f16 elements of 1.0 (0x3C00), and 32 i8 elements of 0xFF.
+  // CHECK-LABEL: llvm.func @rocmlir_prefill_f16
+  func.func @rocmlir_prefill_f16(%ctx: !hip.context, %x: memref<8xi8, 1>,
+                                 %y: memref<3x8xf16, 1>) {
+    // CHECK: llvm.alloca
+    // CHECK: %[[COUNT:.*]] = llvm.mlir.constant(24 : i64) : i64
+    // CHECK-NEXT: %[[BYTES:.*]] = llvm.mlir.constant(2 : i64) : i64
+    // CHECK-NEXT: %[[ONE:.*]] = llvm.mlir.constant(15360 : i64) : i64
+    // CHECK-NEXT: llvm.call @wrap_rocmlir_prefill(%{{.*}}, %{{.*}}, %[[COUNT]], %[[BYTES]], %[[ONE]])
+    hip.rocmlir(%ctx) @rocMlir1 ins(%x : memref<8xi8, 1>)
+        outs(%y : memref<3x8xf16, 1>)
+        {block_size = 64 : i64, grid_size = 1 : i64, kernel_binary = "ELF",
+         prefill = array<i64: 1, 2, 15360>}
+    return
+  }
+
+  // CHECK-LABEL: llvm.func @rocmlir_prefill_i8
+  func.func @rocmlir_prefill_i8(%ctx: !hip.context, %x: memref<8xf32, 1>,
+                                %y: memref<32xi8, 1>) {
+    // CHECK: llvm.alloca
+    // CHECK: %[[COUNT:.*]] = llvm.mlir.constant(32 : i64) : i64
+    // CHECK-NEXT: %[[BYTES:.*]] = llvm.mlir.constant(1 : i64) : i64
+    // CHECK-NEXT: %[[FF:.*]] = llvm.mlir.constant(255 : i64) : i64
+    // CHECK-NEXT: llvm.call @wrap_rocmlir_prefill(%{{.*}}, %{{.*}}, %[[COUNT]], %[[BYTES]], %[[FF]])
+    hip.rocmlir(%ctx) @rocMlir1 ins(%x : memref<8xf32, 1>)
+        outs(%y : memref<32xi8, 1>)
+        {block_size = 64 : i64, grid_size = 1 : i64, kernel_binary = "ELF",
+         prefill = array<i64: 1, 1, 255>}
+    return
+  }
+
+  // An empty output is still pre-filled with a count of 0; the runtime treats
+  // that as a no-op, whatever the buffer pointer is.
+  // CHECK-LABEL: llvm.func @rocmlir_prefill_empty
+  func.func @rocmlir_prefill_empty(%ctx: !hip.context, %x: memref<8xi8, 1>,
+                                   %y: memref<0x4xi32, 1>) {
+    // CHECK: llvm.alloca
+    // CHECK: %[[COUNT:.*]] = llvm.mlir.constant(0 : i64) : i64
+    // CHECK-NEXT: %[[BYTES:.*]] = llvm.mlir.constant(4 : i64) : i64
+    // CHECK-NEXT: %[[ZERO:.*]] = llvm.mlir.constant(0 : i64) : i64
+    // CHECK-NEXT: llvm.call @wrap_rocmlir_prefill(%{{.*}}, %{{.*}}, %[[COUNT]], %[[BYTES]], %[[ZERO]])
+    hip.rocmlir(%ctx) @rocMlir1 ins(%x : memref<8xi8, 1>)
+        outs(%y : memref<0x4xi32, 1>)
+        {block_size = 64 : i64, grid_size = 1 : i64, kernel_binary = "ELF",
+         prefill = array<i64: 1, 4, 0>}
+    return
+  }
 }
