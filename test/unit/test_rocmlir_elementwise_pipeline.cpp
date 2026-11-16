@@ -352,7 +352,8 @@ int main() {
   mlir::OwningOpRef<mlir::ModuleOp> reduceEmbedded = reduceGraph->clone();
   mlir::OwningOpRef<mlir::ModuleOp> reduceTosa =
       mlir::hip::takeRocMlirKernelsAsTosaModule(*reduceGraph, "gfx1151");
-  check(static_cast<bool>(reduceTosa), "HIP-to-TOSA converts the reduce kernel");
+  check(static_cast<bool>(reduceTosa),
+        "HIP-to-TOSA converts the reduce kernel");
   if (!reduceTosa)
     return 1;
   auto tosaReduce = reduceTosa->lookupSymbol<mlir::func::FuncOp>("rocMlir0");
@@ -362,8 +363,8 @@ int main() {
   compileKernel(*reduceTosa, "rocMlir0", Marker::Reduce, "reduce kernel");
 
   reasons.clear();
-  if (mlir::failed(mlir::hip::compileAndEmbedRocMlirKernels(*reduceEmbedded,
-                                                           options))) {
+  if (mlir::failed(
+          mlir::hip::compileAndEmbedRocMlirKernels(*reduceEmbedded, options))) {
     llvm::errs() << "compileAndEmbedRocMlirKernels failed for the reduce\n";
     return 1;
   }
@@ -400,8 +401,8 @@ int main() {
         "a non-last-axis reduce runs its hip op");
   check(reasons.size() == 1 && reasons[0] != "folded",
         "the failed reduce is reported with its failed stage");
-  check(mlir::failed(mlir::hip::compileAndEmbedRocMlirKernels(*badReduceStrict,
-                                                             strict)),
+  check(mlir::failed(
+            mlir::hip::compileAndEmbedRocMlirKernels(*badReduceStrict, strict)),
         "strict: a non-last-axis reduce fails the module");
 
   if (g_failures) {
