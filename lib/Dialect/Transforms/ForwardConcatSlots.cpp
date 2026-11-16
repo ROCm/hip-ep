@@ -47,6 +47,8 @@ namespace hip {
 
 namespace {
 
+using Span = std::pair<int64_t, int64_t>;
+
 // A packed row-major walk of `type` hits consecutive addresses. A size-1
 // dimension may carry the parent's stride; every other stride must be the
 // product of the sizes after it. That is the batch-1 channel slot, and any
@@ -88,31 +90,8 @@ static bool definedFrom(Value value, Value root) {
   return false;
 }
 
-// True when every use writes through a subview (or is a dealloc). `ignored`
-// is the full-buffer copy about to be erased; its source use does not count.
-static bool isWriteOnlyView(Value value, Operation *ignored,
-                            DenseSet<Value> &seen) {
-  if (!seen.insert(value).second)
-    return true;
-  for (OpOperand &use : value.getUses()) {
-    Operation *owner = use.getOwner();
-    if (owner == ignored)
-      continue;
-    if (isa<memref::DeallocOp>(owner))
-      continue;
-    if (auto copy = dyn_cast<memref::CopyOp>(owner)) {
-      if (copy.getTarget() == value)
-        continue;
-      return false;
-    }
-    if (auto sub = dyn_cast<memref::SubViewOp>(owner)) {
-      if (sub.getSource() == value &&
-          isWriteOnlyView(sub.getResult(), ignored, seen))
-        continue;
-    }
-    return false;
-  }
-  return true;
+static bool overlaps(Span a, Span b) {
+  return a.first < b.second && b.first < a.second;
 }
 
 // True when `use` writes `value` (a DPS init, the target of a copy, or a
@@ -133,35 +112,42 @@ static bool writesValue(OpOperand &use, Value value) {
   return false;
 }
 
-// True when `base` is written only through a strict view, which is a concat
-// filling its slots. A write to the whole buffer would clobber a slot that
-// the aliased readers still expect to hold the source.
-static bool onlySlotWrites(Value value, Value base, DenseSet<Value> &seen) {
-  if (!seen.insert(value).second)
+static bool isViewOf(Operation *op, Value value) {
+  auto view = dyn_cast<ViewLikeOpInterface>(op);
+  return view && view.getViewSource() == value;
+}
+
+// False only when `use` provably leaves the bytes of its value unchanged.
+// A view is not a write; its own uses are visited separately.
+static bool mayWrite(OpOperand &use) {
+  Value value = use.get();
+  Operation *owner = use.getOwner();
+  if (writesValue(use, value))
     return true;
+  if (isViewOf(owner, value) ||
+      isa<memref::DeallocOp, func::ReturnOp, memref::LoadOp, memref::DimOp,
+          memref::CopyOp, DestinationStyleOpInterface>(owner))
+    return false;
+  auto effects = dyn_cast<MemoryEffectOpInterface>(owner);
+  return !effects ||
+         effects.getEffectOnValue<MemoryEffects::Write>(value).has_value();
+}
+
+// Every use of `value` and of every view derived from it.
+static void collectAliasUses(Value value, SmallVectorImpl<OpOperand *> &uses) {
   for (OpOperand &use : value.getUses()) {
-    Operation *owner = use.getOwner();
-    if (isa<memref::DeallocOp, func::ReturnOp>(owner))
-      continue;
-    if (auto view = dyn_cast<ViewLikeOpInterface>(owner);
-        view && view.getViewSource() == value) {
-      for (Value result : owner->getResults())
-        if (!onlySlotWrites(result, base, seen))
-          return false;
-      continue;
-    }
-    if (writesValue(use, value)) {
-      if (value == base)
-        return false;
-      continue;
-    }
-    if (isa<memref::CopyOp, memref::LoadOp, DestinationStyleOpInterface>(owner))
-      continue;
-    auto effects = dyn_cast<MemoryEffectOpInterface>(owner);
-    if (!effects || effects.getEffectOnValue<MemoryEffects::Write>(value))
-      return false;
+    uses.push_back(&use);
+    if (isViewOf(use.getOwner(), value))
+      for (Value result : use.getOwner()->getResults())
+        collectAliasUses(result, uses);
   }
-  return true;
+}
+
+// The buffer `value` views, through any view op.
+static Value viewRoot(Value value) {
+  while (auto view = value.getDefiningOp<ViewLikeOpInterface>())
+    value = view.getViewSource();
+  return value;
 }
 
 static void eraseDeallocs(Value value) {
@@ -171,63 +157,6 @@ static void eraseDeallocs(Value value) {
       deallocs.push_back(use.getOwner());
   for (Operation *op : deallocs)
     op->erase();
-}
-
-// Replace a concat buffer that is copied wholesale into a packed prefix.
-// Subviews of the old buffer are rebuilt against the prefix so their result
-// types carry the outer strides; swapping the source operand would leave the
-// old type in place and fail verification.
-static bool aliasPrefix(memref::CopyOp copy, IRRewriter &rewriter) {
-  auto alloc = copy.getSource().getDefiningOp<memref::AllocOp>();
-  auto dest = copy.getTarget().getDefiningOp<memref::SubViewOp>();
-  if (!alloc || !dest)
-    return false;
-  auto srcType = cast<MemRefType>(alloc.getType());
-  auto destType = cast<MemRefType>(dest.getType());
-  if (!sameShape(srcType, destType) || !isPackedSlot(destType))
-    return false;
-  if (definedFrom(dest.getResult(), alloc.getResult()))
-    return false;
-  DenseSet<Value> seen;
-  if (!isWriteOnlyView(alloc.getResult(), copy, seen))
-    return false;
-
-  SmallVector<memref::SubViewOp> subs;
-  for (OpOperand &use : alloc.getResult().getUses()) {
-    auto sub = dyn_cast<memref::SubViewOp>(use.getOwner());
-    if (sub && sub.getSource() == alloc.getResult())
-      subs.push_back(sub);
-  }
-  for (memref::SubViewOp sub : subs) {
-    // The prefix is defined at the outer copy, which may be after the slot
-    // subview. Rebuild the slot there so the prefix dominates it.
-    rewriter.setInsertionPointAfter(dest);
-    auto rebuilt = memref::SubViewOp::create(
-        rewriter, sub.getLoc(), dest.getResult(), sub.getMixedOffsets(),
-        sub.getMixedSizes(), sub.getMixedStrides());
-    Value slot = rebuilt.getResult();
-    // A full view of the prefix is the prefix. Drop the extra subview.
-    if (rebuilt.getType() == dest.getType()) {
-      slot = dest.getResult();
-      rewriter.eraseOp(rebuilt);
-    }
-    sub.getResult().replaceAllUsesWith(slot);
-    // A slot copy can sit between the old subview and the prefix. It now
-    // reads the rebuilt slot, so it has to follow that slot.
-    if (Operation *slotOp = slot.getDefiningOp()) {
-      SmallVector<Operation *> users(slotOp->getUsers());
-      for (Operation *user : users)
-        if (user->getBlock() == slotOp->getBlock() &&
-            user->isBeforeInBlock(slotOp))
-          user->moveAfter(slotOp);
-    }
-    rewriter.eraseOp(sub);
-  }
-
-  eraseDeallocs(alloc.getResult());
-  copy.erase();
-  alloc.erase();
-  return true;
 }
 
 // The buffer under a chain of subviews and packed views, with the element
@@ -260,6 +189,189 @@ static std::optional<std::pair<Value, int64_t>> resolveRoot(Value value) {
     }
     return std::make_pair(value, offset);
   }
+}
+
+// The elements of `root` that `value` can reach: the first one and one past
+// the last, which for a strided view bounds the gaps as well.
+static std::optional<Span> spanIn(Value value, Value root) {
+  auto resolved = resolveRoot(value);
+  auto type = dyn_cast<MemRefType>(value.getType());
+  if (!resolved || resolved->first != root || !type || !type.hasStaticShape())
+    return std::nullopt;
+  int64_t typeOffset = 0;
+  SmallVector<int64_t, 6> strides;
+  if (failed(type.getStridesAndOffset(strides, typeOffset)))
+    return std::nullopt;
+  int64_t begin = resolved->second;
+  int64_t extent = 1;
+  for (auto [size, stride] : llvm::zip(type.getShape(), strides)) {
+    if (size == 0)
+      return Span{begin, begin};
+    if (ShapedType::isDynamic(stride))
+      return std::nullopt;
+    extent += (size - 1) * stride;
+  }
+  return Span{begin, begin + extent};
+}
+
+struct Write {
+  Operation *op;
+  Span span;
+};
+
+// Every op that may write `root`, through any view, with the elements it can
+// reach. Fails when a write goes through a view whose span is unknown.
+static bool collectWrites(Value root, SmallVectorImpl<Write> &writes) {
+  SmallVector<OpOperand *> uses;
+  collectAliasUses(root, uses);
+  for (OpOperand *use : uses) {
+    if (!mayWrite(*use))
+      continue;
+    std::optional<Span> span = spanIn(use->get(), root);
+    if (!span)
+      return false;
+    writes.push_back({use->getOwner(), *span});
+  }
+  return true;
+}
+
+// True when anything may write the buffer under `value`, through any alias,
+// between `begin` and `end`. Writes it cannot place count as in between.
+static bool writtenBetween(Value value, Operation *begin, Operation *end) {
+  Block *block = begin->getBlock();
+  SmallVector<OpOperand *> uses;
+  collectAliasUses(viewRoot(value), uses);
+  for (OpOperand *use : uses) {
+    if (!mayWrite(*use))
+      continue;
+    Operation *op = block->findAncestorOpInBlock(*use->getOwner());
+    if (!op || (begin->isBeforeInBlock(op) && op->isBeforeInBlock(end)))
+      return true;
+  }
+  return false;
+}
+
+// The last op in `block` that uses `value` or a view of it.
+static Operation *lastUser(Value value, Block *block, Operation *latest) {
+  for (Operation *user : value.getUsers()) {
+    Operation *op = block->findAncestorOpInBlock(*user);
+    if (op && (!latest || latest->isBeforeInBlock(op)))
+      latest = op;
+    if (isa<ViewLikeOpInterface>(user))
+      for (Value result : user->getResults())
+        latest = lastUser(result, block, latest);
+  }
+  return latest;
+}
+
+// Replace a concat buffer that is copied wholesale into a packed prefix.
+// The buffer must only be filled, through its own slot subviews, before that
+// copy. The prefix view moves above the first fill and each slot is rebuilt
+// against it, so the fills keep their place and order; swapping the source
+// operand would leave the old subview type in place and fail verification.
+static bool aliasPrefix(memref::CopyOp copy, IRRewriter &rewriter) {
+  auto alloc = copy.getSource().getDefiningOp<memref::AllocOp>();
+  auto dest = copy.getTarget().getDefiningOp<memref::SubViewOp>();
+  if (!alloc || !dest || !dest->hasOneUse())
+    return false;
+  Block *block = copy->getBlock();
+  if (alloc->getBlock() != block || dest->getBlock() != block)
+    return false;
+  auto srcType = cast<MemRefType>(alloc.getType());
+  auto destType = cast<MemRefType>(dest.getType());
+  if (!sameShape(srcType, destType) || !isPackedSlot(destType))
+    return false;
+  if (definedFrom(dest.getResult(), alloc.getResult()))
+    return false;
+
+  SmallVector<memref::SubViewOp> subs;
+  Operation *earliest = nullptr;
+  for (OpOperand &use : alloc.getResult().getUses()) {
+    Operation *owner = use.getOwner();
+    if (owner == copy || isa<memref::DeallocOp>(owner))
+      continue;
+    auto sub = dyn_cast<memref::SubViewOp>(owner);
+    if (!sub || sub->getBlock() != block)
+      return false;
+    for (OpOperand &subUse : sub.getResult().getUses()) {
+      auto fill = dyn_cast<memref::CopyOp>(subUse.getOwner());
+      if (!fill || fill.getTarget() != sub.getResult() ||
+          fill->getBlock() != block || !fill->isBeforeInBlock(copy))
+        return false;
+    }
+    subs.push_back(sub);
+    if (!earliest || sub->isBeforeInBlock(earliest))
+      earliest = sub;
+  }
+  if (!earliest)
+    return false;
+
+  // The fills now land in the outer buffer before the copy would have, so
+  // nothing else may touch the prefix until then.
+  auto root = resolveRoot(dest.getResult());
+  if (!root)
+    return false;
+  std::optional<Span> prefix = spanIn(dest.getResult(), root->first);
+  if (!prefix)
+    return false;
+  SmallVector<OpOperand *> outerUses;
+  collectAliasUses(root->first, outerUses);
+  for (OpOperand *use : outerUses) {
+    Operation *owner = use->getOwner();
+    if (owner == copy || isViewOf(owner, use->get()) ||
+        isa<memref::DeallocOp, func::ReturnOp, memref::DimOp>(owner))
+      continue;
+    Operation *op = block->findAncestorOpInBlock(*owner);
+    if (!op)
+      return false;
+    if (!op->isBeforeInBlock(copy))
+      continue;
+    std::optional<Span> span = spanIn(use->get(), root->first);
+    if (!span || overlaps(*span, *prefix))
+      return false;
+  }
+
+  // The prefix has to dominate the first fill. Its source may be the outer
+  // concat buffer, which moves up with it.
+  SmallVector<Operation *> hoist;
+  for (Value operand : dest->getOperands()) {
+    Operation *def = operand.getDefiningOp();
+    if (!def || def->getBlock() != block || def->isBeforeInBlock(earliest))
+      continue;
+    if (!isa<memref::AllocOp, AllocOutputOp>(def))
+      return false;
+    for (Value v : def->getOperands()) {
+      Operation *inner = v.getDefiningOp();
+      if (inner && inner->getBlock() == block &&
+          !inner->isBeforeInBlock(earliest))
+        return false;
+    }
+    hoist.push_back(def);
+  }
+  for (Operation *op : hoist)
+    op->moveBefore(earliest);
+  if (!dest->isBeforeInBlock(earliest))
+    dest->moveBefore(earliest);
+
+  for (memref::SubViewOp sub : subs) {
+    rewriter.setInsertionPoint(sub);
+    auto rebuilt = memref::SubViewOp::create(
+        rewriter, sub.getLoc(), dest.getResult(), sub.getMixedOffsets(),
+        sub.getMixedSizes(), sub.getMixedStrides());
+    Value slot = rebuilt.getResult();
+    // A full view of the prefix is the prefix. Drop the extra subview.
+    if (rebuilt.getType() == dest.getType()) {
+      slot = dest.getResult();
+      rewriter.eraseOp(rebuilt);
+    }
+    sub.getResult().replaceAllUsesWith(slot);
+    rewriter.eraseOp(sub);
+  }
+
+  eraseDeallocs(alloc.getResult());
+  copy.erase();
+  alloc.erase();
+  return true;
 }
 
 struct Slot {
@@ -297,32 +409,6 @@ static bool collectSlots(Value value, Block *block,
   return true;
 }
 
-// The last op in `block` that uses `value` or a view of it.
-static Operation *lastUser(Value value, Block *block, Operation *latest) {
-  for (Operation *user : value.getUsers()) {
-    Operation *op = block->findAncestorOpInBlock(*user);
-    if (op && (!latest || latest->isBeforeInBlock(op)))
-      latest = op;
-    if (isa<ViewLikeOpInterface>(user))
-      for (Value result : user->getResults())
-        latest = lastUser(result, block, latest);
-  }
-  return latest;
-}
-
-static bool writtenBetween(Value value, Operation *begin, Operation *end) {
-  for (OpOperand &use : value.getUses()) {
-    Operation *owner = use.getOwner();
-    if (!writesValue(use, value))
-      continue;
-    if (owner->getBlock() != begin->getBlock())
-      return true;
-    if (begin->isBeforeInBlock(owner) && owner->isBeforeInBlock(end))
-      return true;
-  }
-  return false;
-}
-
 // A dense block concatenates every earlier output, so each concat repeats
 // the previous one's inputs at the same offsets. Such a concat becomes a
 // prefix of the larger one, whose duplicate copies go away; chained, the
@@ -350,8 +436,11 @@ static bool foldIntoLargerConcat(memref::AllocOp alloc, IRRewriter &rewriter) {
   int64_t smallElems = smallType.getNumElements();
   if (covered != smallElems)
     return false;
-  DenseSet<Value> seenSmall;
-  if (!onlySlotWrites(small, small, seenSmall))
+  // The slot copies are the only writes, so the buffer holds exactly what
+  // they copied.
+  SmallVector<Write> smallWrites;
+  if (!collectWrites(small, smallWrites) ||
+      smallWrites.size() != smallSlots.size())
     return false;
 
   Value first = smallSlots.front().copy.getSource();
@@ -381,6 +470,7 @@ static bool foldIntoLargerConcat(memref::AllocOp alloc, IRRewriter &rewriter) {
     // source and span, with the source unchanged between the two copies.
     // Both then land in the same bytes, so the later copy goes away.
     SmallVector<memref::CopyOp> duplicates;
+    DenseSet<Operation *> matched;
     bool matches = true;
     for (Slot &slot : largeSlots) {
       if (slot.offset >= smallElems)
@@ -401,11 +491,16 @@ static bool foldIntoLargerConcat(memref::AllocOp alloc, IRRewriter &rewriter) {
         break;
       }
       duplicates.push_back(later);
+      matched.insert(slot.copy);
     }
     if (!matches || duplicates.size() != smallSlots.size())
       continue;
-    DenseSet<Value> seenLarge;
-    if (!onlySlotWrites(large, large, seenLarge))
+    // Nothing but those repeated copies may write the prefix.
+    SmallVector<Write> largeWrites;
+    if (!collectWrites(large, largeWrites) ||
+        llvm::any_of(largeWrites, [&](const Write &write) {
+          return write.span.first < smallElems && !matched.contains(write.op);
+        }))
       continue;
     bool dominates = llvm::all_of(largeOp->getOperands(), [&](Value v) {
       Operation *def = v.getDefiningOp();
@@ -414,7 +509,6 @@ static bool foldIntoLargerConcat(memref::AllocOp alloc, IRRewriter &rewriter) {
     if (!dominates)
       continue;
 
-    Operation *latest = lastUser(small, block, nullptr);
     if (!largeOp->isBeforeInBlock(alloc))
       largeOp->moveBefore(alloc);
     eraseDeallocs(small);
@@ -426,6 +520,8 @@ static bool foldIntoLargerConcat(memref::AllocOp alloc, IRRewriter &rewriter) {
     for (memref::CopyOp copy : duplicates)
       copy.erase();
     alloc.erase();
+    // Readers of the old buffer can sit after the large buffer's dealloc.
+    Operation *latest = lastUser(view.getResult(), block, nullptr);
     for (Operation *user : llvm::to_vector(large.getUsers()))
       if (auto dealloc = dyn_cast<memref::DeallocOp>(user))
         if (latest && dealloc->isBeforeInBlock(latest))
@@ -467,28 +563,36 @@ static bool aliasSlot(memref::CopyOp copy, IRRewriter &rewriter) {
     return false;
   if (baseType.getElementType() != srcType.getElementType())
     return false;
-  DenseSet<Value> seen;
-  if (!onlySlotWrites(base, base, seen))
-    return false;
 
   int64_t slotElems = srcType.getNumElements();
   int64_t baseElems = baseType.getNumElements();
   if (elementOffset < 0 || slotElems > baseElems - elementOffset)
     return false;
+  // Any other write into the slot would land on the aliased source.
+  Span slotSpan{elementOffset, elementOffset + slotElems};
+  SmallVector<Write> baseWrites;
+  if (!collectWrites(base, baseWrites) ||
+      llvm::any_of(baseWrites, [&](const Write &write) {
+        return write.op != copy && overlaps(write.span, slotSpan);
+      }))
+    return false;
 
+  // Every use of the private buffer, through any view, stays in this block
+  // and is not returned. A write after the copy would now land in the concat
+  // result.
   Block *block = alloc->getBlock();
   bool sawWriter = false;
   Operation *earliest = nullptr;
   Operation *latest = nullptr;
-  for (OpOperand &use : alloc.getResult().getUses()) {
-    Operation *owner = use.getOwner();
+  SmallVector<OpOperand *> uses;
+  collectAliasUses(alloc.getResult(), uses);
+  for (OpOperand *use : uses) {
+    Operation *owner = use->getOwner();
     if (owner == copy || isa<memref::DeallocOp>(owner))
       continue;
-    // Returning the private buffer would alias it with the concat result.
     if (isa<func::ReturnOp>(owner) || owner->getBlock() != block)
       return false;
-    // A write after the copy would now land in the concat result.
-    if (writesValue(use, alloc.getResult())) {
+    if (mayWrite(*use)) {
       if (!owner->isBeforeInBlock(copy))
         return false;
       sawWriter = true;

@@ -397,6 +397,7 @@ def ForwardConcatSlotsPass : Pass<"hip-forward-concat-slots", "mlir::func::FuncO
   }];
   let dependentDialects = [
     "mlir::arith::ArithDialect",
+    "mlir::hip::HipDialect",
     "mlir::memref::MemRefDialect"
   ];
 }

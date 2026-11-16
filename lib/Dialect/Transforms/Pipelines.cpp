@@ -297,14 +297,6 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   pm.addPass(createCSEPass());
   pm.addPass(createCanonicalizerPass());
 
-  // 5.0. Drop the memref.copy that bufferized concat inserts for a packed
-  //      slot. The producer and every other reader of that buffer are
-  //      retargeted at an identity hip.packed_view of the slot, so a skip
-  //      connection reads the concat buffer. Chained concats become a prefix
-  //      view of the outer buffer. Must run before hip-optimize-memrefs so the
-  //      private output alloc is erased instead of being pooled.
-  pm.addNestedPass<func::FuncOp>(mlir::hip::createForwardConcatSlotsPass());
-
   // 5a. Convert any memref-level `linalg.*` (today only the rank-0
   //     `linalg.fill` that `ConstantOfShapeAsScalar` emits for a
   //     `ConstantOfShape -> Where` fill-value buffer) to `scf` loops +
@@ -332,6 +324,16 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   // every function shares the one scratch buffer, so slots are laid out
   // across the module.
   pm.addPass(mlir::hip::createMaterializeHostScalarsPass());
+
+  // 5c. Drop the memref.copy that bufferized concat inserts for a packed
+  //     slot. The producer and every other reader of that buffer are
+  //     retargeted at an identity hip.packed_view of the slot, so a skip
+  //     connection reads the concat buffer. Chained concats become a prefix
+  //     view of the outer buffer, and a dense block shares one buffer. Runs
+  //     after host-scalar placement, which cannot see a host store through a
+  //     packed view, and before hip-optimize-memrefs so the private alloc is
+  //     erased instead of being pooled.
+  pm.addNestedPass<func::FuncOp>(mlir::hip::createForwardConcatSlotsPass());
 
   // 6. Reuse compatible buffers after host-scalar placement.
   pm.addNestedPass<func::FuncOp>(mlir::hip::createOptimizeMemRefsPass());

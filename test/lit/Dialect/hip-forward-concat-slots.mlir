@@ -345,3 +345,138 @@ func.func @prefix_source_changes_stays(
   memref.copy %y, %cat2_y : memref<1x1x2x2xf32, strided<[12, 4, 2, 1]>> to memref<1x1x2x2xf32, strided<[16, 4, 2, 1], offset: 12>>
   return %out1, %cat2 : memref<1x3x2x2xf32>, memref<1x4x2x2xf32>
 }
+
+// -----
+
+// The inner slot is filled again after the inner buffer is copied out. The
+// outer prefix holds the first fill, so neither the prefix copy nor the
+// slot fills are forwarded.
+
+// CHECK-LABEL: func.func @prefix_refilled_after_copy_stays
+// CHECK-NOT: hip.packed_view
+// CHECK: memref.copy %{{.*}}, %{{.*}} : memref<1x4x2x2xf32> to memref<1x4x2x2xf32, strided<[32, 4, 2, 1]>>
+func.func @prefix_refilled_after_copy_stays(
+    %a: memref<1x4x2x2xf32>, %b: memref<1x4x2x2xf32>) -> memref<1x8x2x2xf32> {
+  %outer = memref.alloc() : memref<1x8x2x2xf32>
+  %inner = memref.alloc() : memref<1x4x2x2xf32>
+  %full = memref.subview %inner[0, 0, 0, 0] [1, 4, 2, 2] [1, 1, 1, 1]
+      : memref<1x4x2x2xf32> to memref<1x4x2x2xf32, strided<[16, 4, 2, 1]>>
+  memref.copy %a, %full : memref<1x4x2x2xf32> to memref<1x4x2x2xf32, strided<[16, 4, 2, 1]>>
+  %prefix = memref.subview %outer[0, 0, 0, 0] [1, 4, 2, 2] [1, 1, 1, 1]
+      : memref<1x8x2x2xf32> to memref<1x4x2x2xf32, strided<[32, 4, 2, 1]>>
+  memref.copy %inner, %prefix : memref<1x4x2x2xf32> to memref<1x4x2x2xf32, strided<[32, 4, 2, 1]>>
+  memref.copy %b, %full : memref<1x4x2x2xf32> to memref<1x4x2x2xf32, strided<[16, 4, 2, 1]>>
+  return %outer : memref<1x8x2x2xf32>
+}
+
+// -----
+
+// The inner buffer is filled by a direct copy, not through a slot subview.
+// It is not rewritten as a prefix; the copy that fills it writes the outer
+// slot instead.
+
+// CHECK-LABEL: func.func @prefix_direct_fill
+// CHECK: %[[OUTER:.*]] = memref.alloc() : memref<1x8x2x2xf32>
+// CHECK: %[[VIEW:.*]] = hip.packed_view %[[OUTER]][%{{.*}}] : memref<1x8x2x2xf32> to memref<1x4x2x2xf32>
+// CHECK: memref.copy %{{.*}}, %[[VIEW]] : memref<1x4x2x2xf32> to memref<1x4x2x2xf32>
+// CHECK-NOT: memref.copy
+func.func @prefix_direct_fill(%a: memref<1x4x2x2xf32>) -> memref<1x8x2x2xf32> {
+  %outer = memref.alloc() : memref<1x8x2x2xf32>
+  %inner = memref.alloc() : memref<1x4x2x2xf32>
+  memref.copy %a, %inner : memref<1x4x2x2xf32> to memref<1x4x2x2xf32>
+  %prefix = memref.subview %outer[0, 0, 0, 0] [1, 4, 2, 2] [1, 1, 1, 1]
+      : memref<1x8x2x2xf32> to memref<1x4x2x2xf32, strided<[32, 4, 2, 1]>>
+  memref.copy %inner, %prefix : memref<1x4x2x2xf32> to memref<1x4x2x2xf32, strided<[32, 4, 2, 1]>>
+  return %outer : memref<1x8x2x2xf32>
+}
+
+// -----
+
+// Another write lands on part of the slot through an overlapping view.
+// Aliasing would hand the skip reader the overwritten values.
+
+// CHECK-LABEL: func.func @slot_overlap_write_stays
+// CHECK-NOT: hip.packed_view
+// CHECK: memref.copy
+func.func @slot_overlap_write_stays(
+    %ctx: !hip.context, %in: memref<1x4x2x2xf32>)
+    -> (memref<1x8x2x2xf32>, memref<1x4x2x2xf32>) {
+  %cat = memref.alloc() : memref<1x8x2x2xf32>
+  %out = memref.alloc() : memref<1x4x2x2xf32>
+  hip.add(%ctx) ins(%in, %in : memref<1x4x2x2xf32>, memref<1x4x2x2xf32>)
+      outs(%out : memref<1x4x2x2xf32>)
+  %slot = memref.subview %cat[0, 0, 0, 0] [1, 4, 2, 2] [1, 1, 1, 1]
+      : memref<1x8x2x2xf32> to memref<1x4x2x2xf32, strided<[32, 4, 2, 1]>>
+  memref.copy %out, %slot : memref<1x4x2x2xf32> to memref<1x4x2x2xf32, strided<[32, 4, 2, 1]>>
+  %mid = memref.subview %cat[0, 2, 0, 0] [1, 4, 2, 2] [1, 1, 1, 1]
+      : memref<1x8x2x2xf32> to memref<1x4x2x2xf32, strided<[32, 4, 2, 1], offset: 8>>
+  memref.copy %in, %mid : memref<1x4x2x2xf32> to memref<1x4x2x2xf32, strided<[32, 4, 2, 1], offset: 8>>
+  %sum = memref.alloc() : memref<1x4x2x2xf32>
+  hip.add(%ctx) ins(%out, %out : memref<1x4x2x2xf32>, memref<1x4x2x2xf32>)
+      outs(%sum : memref<1x4x2x2xf32>)
+  return %cat, %sum : memref<1x8x2x2xf32>, memref<1x4x2x2xf32>
+}
+
+// -----
+
+// Half of the source is written again, through a subview, after the copy.
+// Aliasing would move that write into the concat result.
+
+// CHECK-LABEL: func.func @source_view_rewritten_stays
+// CHECK-NOT: hip.packed_view
+// CHECK: memref.copy
+func.func @source_view_rewritten_stays(
+    %ctx: !hip.context, %in: memref<1x4x2x2xf32>, %half_in: memref<1x2x2x2xf32>)
+    -> (memref<1x8x2x2xf32>, memref<1x4x2x2xf32>) {
+  %cat = memref.alloc() : memref<1x8x2x2xf32>
+  %out = memref.alloc() : memref<1x4x2x2xf32>
+  hip.add(%ctx) ins(%in, %in : memref<1x4x2x2xf32>, memref<1x4x2x2xf32>)
+      outs(%out : memref<1x4x2x2xf32>)
+  %slot = memref.subview %cat[0, 0, 0, 0] [1, 4, 2, 2] [1, 1, 1, 1]
+      : memref<1x8x2x2xf32> to memref<1x4x2x2xf32, strided<[32, 4, 2, 1]>>
+  memref.copy %out, %slot : memref<1x4x2x2xf32> to memref<1x4x2x2xf32, strided<[32, 4, 2, 1]>>
+  %half = memref.subview %out[0, 0, 0, 0] [1, 2, 2, 2] [1, 1, 1, 1]
+      : memref<1x4x2x2xf32> to memref<1x2x2x2xf32, strided<[16, 4, 2, 1]>>
+  memref.copy %half_in, %half : memref<1x2x2x2xf32> to memref<1x2x2x2xf32, strided<[16, 4, 2, 1]>>
+  %sum = memref.alloc() : memref<1x4x2x2xf32>
+  hip.add(%ctx) ins(%out, %out : memref<1x4x2x2xf32>, memref<1x4x2x2xf32>)
+      outs(%sum : memref<1x4x2x2xf32>)
+  return %cat, %sum : memref<1x8x2x2xf32>, memref<1x4x2x2xf32>
+}
+
+// -----
+
+// The shared input is written through a subview between the two concats, so
+// the larger concat needs the new values and the smaller one keeps its own
+// buffer.
+
+// CHECK-LABEL: func.func @dense_source_view_rewritten_stays
+// CHECK: %[[CAT1:.*]] = memref.alloc() : memref<1x2x2x2xf32>
+// CHECK: memref.copy %{{.*}}, %{{.*}} : memref<1x2x2x2xf32> to memref<1x2x2x2xf32, strided<[8, 4, 2, 1]>>
+// CHECK: hip.add(%{{.*}}) ins(%[[CAT1]], %[[CAT1]]
+func.func @dense_source_view_rewritten_stays(
+    %ctx: !hip.context, %in: memref<1x2x2x2xf32>, %y: memref<1x1x2x2xf32>,
+    %h: memref<1x1x2x2xf32>)
+    -> (memref<1x2x2x2xf32>, memref<1x3x2x2xf32>) {
+  %x = memref.alloc() : memref<1x2x2x2xf32>
+  hip.rocmlir(%ctx) @kern ins(%in : memref<1x2x2x2xf32>)
+      outs(%x : memref<1x2x2x2xf32>)
+  %cat1 = memref.alloc() : memref<1x2x2x2xf32>
+  %cat1_x = memref.subview %cat1[0, 0, 0, 0] [1, 2, 2, 2] [1, 1, 1, 1]
+      : memref<1x2x2x2xf32> to memref<1x2x2x2xf32, strided<[8, 4, 2, 1]>>
+  memref.copy %x, %cat1_x : memref<1x2x2x2xf32> to memref<1x2x2x2xf32, strided<[8, 4, 2, 1]>>
+  %r1 = memref.alloc() : memref<1x2x2x2xf32>
+  hip.add(%ctx) ins(%cat1, %cat1 : memref<1x2x2x2xf32>, memref<1x2x2x2xf32>)
+      outs(%r1 : memref<1x2x2x2xf32>)
+  %x_head = memref.subview %x[0, 0, 0, 0] [1, 1, 2, 2] [1, 1, 1, 1]
+      : memref<1x2x2x2xf32> to memref<1x1x2x2xf32, strided<[8, 4, 2, 1]>>
+  memref.copy %h, %x_head : memref<1x1x2x2xf32> to memref<1x1x2x2xf32, strided<[8, 4, 2, 1]>>
+  %cat2 = memref.alloc() : memref<1x3x2x2xf32>
+  %cat2_x = memref.subview %cat2[0, 0, 0, 0] [1, 2, 2, 2] [1, 1, 1, 1]
+      : memref<1x3x2x2xf32> to memref<1x2x2x2xf32, strided<[12, 4, 2, 1]>>
+  memref.copy %x, %cat2_x : memref<1x2x2x2xf32> to memref<1x2x2x2xf32, strided<[12, 4, 2, 1]>>
+  %cat2_y = memref.subview %cat2[0, 2, 0, 0] [1, 1, 2, 2] [1, 1, 1, 1]
+      : memref<1x3x2x2xf32> to memref<1x1x2x2xf32, strided<[12, 4, 2, 1], offset: 8>>
+  memref.copy %y, %cat2_y : memref<1x1x2x2xf32> to memref<1x1x2x2xf32, strided<[12, 4, 2, 1], offset: 8>>
+  return %r1, %cat2 : memref<1x2x2x2xf32>, memref<1x3x2x2xf32>
+}

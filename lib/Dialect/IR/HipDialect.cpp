@@ -122,7 +122,11 @@ LogicalResult PackedViewOp::verify() {
       sourceType.getMemorySpace() != resultType.getMemorySpace())
     return emitOpError(
         "source and result element type and memory space must match");
-  if (sourceType.hasStaticShape() && resultType.hasStaticShape()) {
+  // No operands carry result extents, so the lowering can only build a
+  // static descriptor.
+  if (!resultType.hasStaticShape())
+    return emitOpError("requires a statically shaped result");
+  if (sourceType.hasStaticShape()) {
     if (auto offset = getConstantIntValue(getElementOffset())) {
       int64_t end = *offset + resultType.getNumElements();
       if (*offset < 0 || end > sourceType.getNumElements())
