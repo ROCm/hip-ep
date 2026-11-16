@@ -587,6 +587,11 @@ RocMlirOp outline(const KernelParts &parts, bool elementwise,
                            llvm::map_to_vector(results, [&](Value v) {
                              return mapping.lookup(v);
                            }));
+    // A cloned module can read a rank-0 operand that the signature promoted
+    // to tensor<1xT> while its block argument is still tensor<T>. Inlining
+    // ends that: the body's ops then read the tensor<1xT> argument, which
+    // they broadcast. A rank-0 result never joins a module (getRole), and a
+    // quantize or dequantize takes a one-element scale as per-tensor.
     SmallVector<RocMlirElementwiseOp> modules(
         body->getOps<RocMlirElementwiseOp>());
     for (RocMlirElementwiseOp module : modules)

@@ -248,6 +248,70 @@ func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf16>,
 
 // -----
 
+// A runtime scalar that an elementwise module reads crosses the boundary as
+// tensor<1xT> too. The module's rank-0 block argument goes away when the
+// module is inlined into the kernel, and the mul broadcasts the tensor<1xT>.
+
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
+// CHECK-SAME: %[[KS:[a-z0-9_]+]]: tensor<1xf16>) -> tensor<1x16x4x4xf16>
+// CHECK: hip.mul({{.*}}) ins(%{{.*}}, %[[KS]] : tensor<1x16x4x4xf16>, tensor<1xf16>)
+// CHECK: hip.sigmoid
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK: %[[RS:.*]] = tensor.reshape
+// CHECK-SAME: (tensor<f16>, tensor<1xindex>) -> tensor<1xf16>
+// CHECK: hip.rocmlir
+// CHECK-SAME: %[[RS]] : {{.*}}tensor<1xf16>) outs
+func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf16>,
+                      %w: tensor<16x8x3x3xf16>, %b: tensor<16xf16>,
+                      %s: tensor<f16>) -> tensor<1x16x4x4xf16> {
+  %e = tensor.empty() : tensor<1x16x4x4xf16>
+  %c = hip.conv(%ctx) ins(%in, %w, %b : tensor<1x8x4x4xf16>,
+                                        tensor<16x8x3x3xf16>, tensor<16xf16>)
+      outs(%e : tensor<1x16x4x4xf16>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [3, 3],
+       pads = [1, 1, 1, 1], strides = [1, 1]} : tensor<1x16x4x4xf16>
+  %me = tensor.empty() : tensor<1x16x4x4xf16>
+  %m = hip.mul(%ctx) ins(%c, %s : tensor<1x16x4x4xf16>, tensor<f16>)
+      outs(%me : tensor<1x16x4x4xf16>) -> tensor<1x16x4x4xf16>
+  %se = tensor.empty() : tensor<1x16x4x4xf16>
+  %r = hip.sigmoid(%ctx) ins(%m : tensor<1x16x4x4xf16>)
+      outs(%se : tensor<1x16x4x4xf16>) : tensor<1x16x4x4xf16>
+  return %r : tensor<1x16x4x4xf16>
+}
+
+// -----
+
+// A runtime quantize scale crosses as tensor<1xf32>, which the quantize takes
+// as its per-tensor scale.
+
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
+// CHECK-SAME: %[[KS:[a-z0-9_]+]]: tensor<1xf32>) -> tensor<1x16x4x4xi8>
+// CHECK: hip.quantize_linear({{.*}}) ins(%{{.*}}, %[[KS]] : tensor<1x16x4x4xf32>, tensor<1xf32>)
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK: hip.rocmlir
+// CHECK-SAME: tensor<1xf32>) outs
+func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf32>,
+                      %w: tensor<16x8x3x3xf32>, %b: tensor<16xf32>,
+                      %s: tensor<f32>) -> tensor<1x16x4x4xi8> {
+  %e = tensor.empty() : tensor<1x16x4x4xf32>
+  %c = hip.conv(%ctx) ins(%in, %w, %b : tensor<1x8x4x4xf32>,
+                                        tensor<16x8x3x3xf32>, tensor<16xf32>)
+      outs(%e : tensor<1x16x4x4xf32>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [3, 3],
+       pads = [1, 1, 1, 1], strides = [1, 1]} : tensor<1x16x4x4xf32>
+  %z = hip.constant {value = dense<0> : tensor<i8>} : tensor<i8>
+  %qe = tensor.empty() : tensor<1x16x4x4xi8>
+  %q = hip.quantize_linear(%ctx) ins(%c, %s : tensor<1x16x4x4xf32>, tensor<f32>)
+         zero_point(%z : tensor<i8>) outs(%qe : tensor<1x16x4x4xi8>)
+         {axis = 1 : i64, block_size = 0 : i64, precision = 0 : i64,
+          saturate = 1 : i64} : tensor<1x16x4x4xi8>
+  return %q : tensor<1x16x4x4xi8>
+}
+
+// -----
+
 // ONNX BOOL is ui8 outside the kernel. A ui8 value used specifically as a
 // Where condition becomes signless i8 in the private rocMLIR kernel ABI, so
 // its byte storage can feed rocMLIR arithmetic without a conversion op.
