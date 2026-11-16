@@ -114,7 +114,7 @@ class TestTranspose:
 
         model = _make_transpose_model(shape, perm, dtype)
         actual, expected = model_runner.run_sample(model, [x])
-        compare_outputs(actual, expected, atol=0)
+        compare_outputs(actual, expected, atol=0, rtol=0)
 
     # ------------------------------------------------------------------
     # General permutations (no 2-D reduction)
