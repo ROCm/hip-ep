@@ -54,7 +54,7 @@ class TableTests(unittest.TestCase):
         return result
 
     def test_full_existing_tables_roundtrip(self):
-        for op in ('matmul_nbits', 'gqa'):
+        for op in ('matmul_nbits', 'gqa', 'gemm'):
             source = AUTOTUNE / op / 'lut/gfx1151.json'
             doc = table.read_table(source)
             csv_path = self.root / (op + '.csv')
@@ -81,7 +81,7 @@ class TableTests(unittest.TestCase):
             print(f'ROUNDTRIP {op}: {len(points)} representable, {len(seed["skipped"])} skipped, full JSON equality PASS')
 
     def test_sampling_filters_and_keys(self):
-        for op in ('matmul_nbits', 'gqa'):
+        for op in ('matmul_nbits', 'gqa', 'gemm'):
             source = AUTOTUNE / op / 'lut/gfx1151.json'
             outputs = [self.root / (op + str(i) + '.csv') for i in range(2)]
             for out in outputs:
@@ -98,7 +98,7 @@ class TableTests(unittest.TestCase):
             self.assertEqual({r['shape'] for r in rank.read_csv(out)}, {points[0]['shape']})
             self.cli(op, 'rank-seed', '--from-lut', source, '--rank-phase', 'decode', '--dtype', 'fp16', '--sample', 4, '--out', out)
             selected = json.loads(out.with_suffix('.seed.json').read_text())['selected']
-            self.assertTrue(all(p['point']['phase'] == 'Decode' for p in selected))
+            self.assertTrue(all(p['point']['phase'] in ('GemvNt', 'GemvNn') if op == 'gemm' else p['point']['phase'] == 'Decode' for p in selected))
 
     def test_catalog_default_dedup_and_append(self):
         source = AUTOTUNE / 'gqa/lut/gfx1151.json'
@@ -111,6 +111,25 @@ class TableTests(unittest.TestCase):
         out = self.root / 'candidates.csv'
         self.cli('gqa', 'rank-seed', '--from-lut', source, '--keys', keys, '--with-catalog', '--catalog', log, '--out', out)
         self.assertEqual([r['config'] for r in rank.read_csv(out)], ['default', 'id=2'])
+
+    def test_gemm_catalog_and_reference_aliases(self):
+        source = AUTOTUNE / 'gemm/lut/gfx1151.json'
+        point = table.inventory('gemm', table.read_table(source))[0][0]
+        keys = self.root / 'keys.txt'
+        keys.write_text(point['key'] + '\n')
+        log = self.root / 'catalog.log'
+        catalog = dict(leaf=point['leaf'], shape=point['shape'], default='canonical',
+                       configs=[dict(request='id=0', final='canonical', geometry=point['old_config']),
+                                dict(request='id=1', final='other', geometry='other')])
+        log.write_text('UT_CANDIDATES ' + json.dumps(catalog) + '\n')
+        output = self.root / 'seed.csv'
+        self.cli('gemm', 'rank-seed', '--from-lut', source, '--keys', keys, '--with-catalog', '--catalog', log, '--out', output)
+        self.assertEqual([r['config'] for r in rank.read_csv(output)], ['default', 'id=1'])
+        evidence = self.root / 'rank.log'
+        evidence.write_text('UT_RANK ' + json.dumps(synthetic(point)) + '\n')
+        reference = self.root / 'reference.csv'
+        self.cli('gemm', 'rank-reference-candidates', '--catalog', log, '--rank-log', evidence, '--out', reference)
+        self.assertEqual([r['config'] for r in rank.read_csv(reference)], ['default', 'id=0'])
 
     def test_invalid_and_unsupported_inputs(self):
         source = AUTOTUNE / 'matmul_nbits/lut/gfx1151.json'
@@ -133,7 +152,7 @@ class TableTests(unittest.TestCase):
             rank.evidence([log])
 
     def test_preserves_duplicate_config_index_and_fields(self):
-        for op in ('matmul_nbits', 'gqa'):
+        for op in ('matmul_nbits', 'gqa', 'gemm'):
             doc = table.read_table(AUTOTUNE / op / 'lut/gfx1151.json')
             p = copy.deepcopy(table.inventory(op, doc)[0][0]['point'])
             doc['configs'].append(copy.deepcopy(doc['configs'][p['config']]))
@@ -175,8 +194,10 @@ class TableTests(unittest.TestCase):
     def test_native_geometry_resolution_and_default_dedup(self):
         source = self.root / 'inputs.cpp'
         source.write_text(r'''
+#define HIPDNN_UT_RANK_GEMM_ADAPTER
 #define HIPDNN_UT_RANK_NBITS_ADAPTER
 #define HIPDNN_UT_RANK_GQA_ADAPTER
+#include "ut_gemm_rank_input.h"
 #include "ut_matmul_nbits_rank_input.h"
 #include "ut_gqa_rank_input.h"
 #include <cassert>
@@ -193,7 +214,30 @@ extern "C" int hipdnn_ut_gqa_config(const UtGqaShape*, int id, UtGqaConfig* c) {
   if (id < 0 || id > 1) return -1;
   *c=UtGqaConfig{}; c->bkv=16; c->splits=id ? 8 : 10; return 0;
 }
+extern "C" int hipdnn_ut_gemm_config_count(const UtGemmShape*) { return 3; }
+extern "C" int hipdnn_ut_gemm_config(const UtGemmShape*, int id, UtGemmConfig* c) {
+  if (id > 2) return -1;
+  const int selected = id < 0 ? 0 : id;
+  *c = {selected, "geometry" + std::to_string(selected), selected == 2 ? "different" : "same"};
+  return 0;
+}
+extern "C" int hipdnn_ut_gemm_select(const UtGemmShape*, const UtGemmConfig*) { return 0; }
 int main() {
+  const auto shape = gemmRankShape("M16_N32_K64_ta0_tb1_bias_crows16_ccols1", 3);
+  assert(shape.m == 16 && shape.dtype == 3 && shape.beta == 1 && shape.crows == 16 && shape.ccols == 1);
+  for (const auto& bad_shape : {"M0_N32_K64_ta0_tb1", "M16_N32_K64_ta2_tb1", "M16_N32_K64_ta0_tb1_extra1",
+      "M16_N32_K64_ta0_tb1_bias2", "M16_N32_K64_ta0_tb1_crows16", "M16_N32_K64_ta0_tb1_bias_crows2_ccols1"}) {
+    bool bad = false; try { gemmRankShape(bad_shape, 0); } catch(const std::invalid_argument&) { bad = true; }
+    assert(bad);
+  }
+  auto gemm = gemmRankOptions(shape, RankRow{"", {"default", "id=1", "id=2", "geometry2"}, false}, [] {return 0.;});
+  assert(gemm.configs.size() == 2 && gemm.configs[0] == "geometry0" && gemm.configs[1] == "geometry2");
+  assert(gemm.requests[0] == (std::vector<std::string>{"geometry0", "geometry1", "id=1"}));
+  assert(gemm.requests[1] == (std::vector<std::string>{"geometry2", "id=2"}));
+  assert(gemm.final_launches == (std::vector<std::string>{"same", "different"}));
+  gemm.select(1); assert(gemm.validate(0) == 0.);
+  bool gemm_bad = false; try { gemmRankOptions(shape, RankRow{"", {"id=1"}, false}, [] {return 0.;}); }
+  catch(const std::invalid_argument&) {gemm_bad = true;} assert(gemm_bad);
   UtNbitsShape ns{16,32,256,4,128,0,2}; UtNbitsConfig nc;
   hipdnn_ut_nbits_config(&ns,-1,&nc);
   auto no=nbitsRankOptions(ns,RankRow{"",{"default",nbitsConfigString(nc)},false}, [] {return 0.;});
@@ -212,6 +256,56 @@ int main() {
         binary = self.root / 'inputs'
         subprocess.run([os.environ.get('CXX', 'c++'), '-std=c++17', '-Wall', '-Wextra', '-Werror', '-I', str(HERE), str(source), '-o', str(binary)], check=True)
         subprocess.run([str(binary)], check=True)
+
+    def test_gemm_alias_report_and_preservation(self):
+        source = AUTOTUNE / 'gemm/lut/gfx1151.json'
+        doc = table.read_table(source)
+        point = table.inventory('gemm', doc)[0][0]
+        record = synthetic(point)
+        record['candidates'][1].update(config=record['candidates'][0]['config'] + ';alias=1',
+                                       requests=[point['old_config']], final_launch='actual old')
+        record['candidates'][0]['final_launch'] = 'actual default'
+        log = self.root / 'aliases.log'
+        log.write_text('UT_RANK ' + json.dumps(record) + '\n')
+        self.assertEqual(len(rank.evidence([log])), 1)
+        output = self.root / 'alias-built.json'
+        self.cli('gemm', 'rank-build', '--base', source, '--rank-log', log, '--out', output)
+        self.assertEqual(table.read_table(output), doc)
+        report = self.root / 'alias-report.csv'
+        self.cli('gemm', 'rank-report', '--from-lut', source, '--rank-log', log, '--out', report)
+        with report.open() as f:
+            row = next(csv.DictReader(f))
+        self.assertEqual(row['changed'], 'False')
+        self.assertEqual(row['old_status'], 'measured_final')
+        self.assertEqual(float(row['winner_over_old']), 1.)
+        self.assertEqual(float(row['old_over_default']), .9)
+        record['candidates'][0]['requests'] = [point['old_config']]
+        log.write_text('UT_RANK ' + json.dumps(record) + '\n')
+        with self.assertRaisesRegex(ValueError, 'ambiguous'):
+            rank.evidence([log])
+
+    def test_gemm_skipped_and_bf16_filter(self):
+        source = AUTOTUNE / 'gemm/lut/gfx1151.json'
+        doc = table.read_table(source)
+        rows, skipped = table.inventory('gemm', doc)
+        self.assertEqual((len(rows), len(skipped)), (1254, 0))
+        for change, reason in ((dict(wts_dtype='F32'), 'mixed'), (dict(act_dtype='F64'), 'dtype'),
+                               (dict(phase='Any'), 'phase'), (dict(m=2), 'phase')):
+            modified = copy.deepcopy(doc)
+            modified['points'] = [{**doc['points'][0], **change}]
+            points, skipped = table.inventory('gemm', modified)
+            self.assertFalse(points)
+            self.assertIn(reason, skipped[0]['reason'])
+        output = self.root / 'bf16.csv'
+        self.cli('gemm', 'rank-seed', '--from-lut', source, '--dtype', 'bf16', '--sample', 20, '--seed', 111616, '--out', output)
+        self.assertEqual(len({r['shape'] for r in rank.read_csv(output)}), 20)
+        self.assertTrue(all('_Wbf16_' in r['leaf'] for r in rank.read_csv(output)))
+        record = synthetic(rows[0])
+        record['candidates'][record['selected']]['config'] = 'route=default'
+        table.update_points('gemm', doc, [record])
+        self.assertEqual(doc, table.read_table(source))
+        self.cli('gemm', 'rank-seed', '--from-lut', source.with_suffix('.fb'), '--out', output, success=False)
+        self.cli('gemm', 'rank-seed', '--from-lut', source, '--out', source, success=False)
 
     def test_gpu_admission_boundary(self):
         source = self.root / 'phase.cpp'

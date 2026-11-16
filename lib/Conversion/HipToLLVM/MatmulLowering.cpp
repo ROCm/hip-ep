@@ -9,11 +9,10 @@ namespace mlir {
 namespace hip {
 namespace {
 
-// ===== hipBLASLt ops =========================================================
+// ===== Dense custom GEMM ops =================================================
 
-// hip.hipblaslt.matmul(handle) ins(A, B) outs(C)
-//   -> hip_hipblaslt_matmul(handle, A, B, C, rankA, rankB, batch, M, K, N)
-// Rank-generic: batch from A if 3D, B broadcast if rankB < rankA.
+// hip.matmul lowers to the custom dense GEMM wrappers. The historical
+// flat-batch symbol is retained for compatible serialized runtime calls.
 struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -58,14 +57,15 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
     Value M = (ARank >= 2) ? (transA ? ADesc.size(rewriter, loc, ARank - 1)
                                      : ADesc.size(rewriter, loc, ARank - 2))
                            : createI64Const(1);
-    Value K = transA ? ADesc.size(rewriter, loc, ARank - 2)
-                     : ADesc.size(rewriter, loc, ARank - 1);
-    Value N = transB ? BDesc.size(rewriter, loc, BRank - 2)
-                     : BDesc.size(rewriter, loc, BRank - 1);
+    Value K = transA && ARank >= 2 ? ADesc.size(rewriter, loc, ARank - 2)
+                                   : ADesc.size(rewriter, loc, ARank - 1);
+    Value N = BRank == 1 ? createI64Const(1)
+              : transB   ? BDesc.size(rewriter, loc, BRank - 2)
+                         : BDesc.size(rewriter, loc, BRank - 1);
 
     // Compute batch count from leading dimensions of A
     Value batchCount;
-    if (ARank == 2) {
+    if (ARank <= 2) {
       batchCount = createI64Const(1);
     } else {
       batchCount = ADesc.size(rewriter, loc, 0);
@@ -77,10 +77,12 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
 
     // Compute element size in bytes
     unsigned elemBits = AType.getElementType().getIntOrFloatBitWidth();
-    Value elemSize = createI64Const(elemBits / 8);
+    Value elemSize = createI64Const(AType.getElementType().isBF16()
+                                        ? -2
+                                        : static_cast<int64_t>(elemBits / 8));
 
-    // b_batch_stride: the per-batch stride (in elements) for hipBLASLt's
-    // STRIDED_BATCH_OFFSET on layA when batch_count > 1. Two distinct B
+    // b_batch_stride: the per-batch stride in elements for the retained flat
+    // runtime ABI when batch_count > 1. Two distinct B
     // memref shapes both reach this site with batch_count > 1 and need
     // DIFFERENT strides:
     //   * Rank-2 broadcast weight `[K, N]` → one matrix shared across all
@@ -97,7 +99,7 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
     // Leading-dim product is computed at compile time when all leading dims
     // are static (the common case for shipping models). When any leading dim
     // is dynamic we emit a runtime `select` over the leading-product so the
-    // descriptor cache picks the right pre-built layout per call.
+    // flat wrapper uses the right source matrix per call.
     //
     // Before:
     //   hip.matmul ins(%A, %B : memref<2x128x4096xf16>,
@@ -106,7 +108,7 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
     //   %stride = llvm.mlir.constant(0 : i64) : i64   // leading product is 1
     //   llvm.call @wrap_hipblasLtMatmul(..., %stride) : (...) -> i32
     Value bBatchStride;
-    if (BRank == 2) {
+    if (BRank <= 2) {
       bBatchStride = createI64Const(0);
     } else {
       bool allLeadingStatic = true;
@@ -162,6 +164,68 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
     }
 
     // Runtime signature:
+    if (!isa<FloatType>(AType.getElementType()))
+      return op.emitError("custom MatMul requires a floating dtype");
+
+    // Keep the compact historical ABI for a tight A batch and a B batch that
+    // is either identical or fully broadcast. General leading-axis broadcast
+    // needs the actual per-axis dimensions; a single flat stride loses them.
+    const int64_t aBatchRank = std::max<int64_t>(ARank - 2, 0);
+    const int64_t bBatchRank = std::max<int64_t>(BRank - 2, 0);
+    const int64_t batchRank = std::max(aBatchRank, bBatchRank);
+    bool bBroadcast = true, identicalBatches = true;
+    for (int64_t axis = 0; axis < batchRank; ++axis) {
+      const int64_t ai = axis - (batchRank - aBatchRank);
+      const int64_t bi = axis - (batchRank - bBatchRank);
+      const int64_t ad = ai < 0 ? 1 : AType.getDimSize(ai);
+      const int64_t bd = bi < 0 ? 1 : BType.getDimSize(bi);
+      bBroadcast &= bd == 1;
+      identicalBatches &=
+          ad != ShapedType::kDynamic && bd != ShapedType::kDynamic && ad == bd;
+    }
+    const bool generalBroadcast = !bBroadcast && !identicalBatches;
+    if (generalBroadcast) {
+      auto emitBatchDims = [&](MemRefDescriptor &desc, int64_t rank) -> Value {
+        auto arrayType =
+            LLVM::LLVMArrayType::get(i64Type, std::max<int64_t>(rank, 1));
+        Value array = LLVM::AllocaOp::create(rewriter, loc, ptrType, arrayType,
+                                             createI64Const(1), 8);
+        for (int64_t i = 0; i < rank; ++i) {
+          Value address = LLVM::GEPOp::create(rewriter, loc, ptrType, i64Type,
+                                              array, createI64Const(i));
+          LLVM::StoreOp::create(rewriter, loc, desc.size(rewriter, loc, i),
+                                address);
+        }
+        return array;
+      };
+      SmallVector<Type, 15> types = {ptrType, i32Type, ptrType, ptrType,
+                                     ptrType, i64Type, i64Type, i64Type,
+                                     i64Type, i64Type, i64Type, i64Type,
+                                     ptrType, i64Type, ptrType};
+      auto function = LLVM::lookupOrCreateFn(
+          rewriter, module, "wrap_matmul_broadcast", types, i32Type);
+      if (failed(function))
+        return failure();
+      SmallVector<Value, 15> values = {statePtr,
+                                       getOpStateSlotValue(op, rewriter, loc),
+                                       APtr,
+                                       BPtr,
+                                       outputPtr,
+                                       M,
+                                       N,
+                                       K,
+                                       elemSize,
+                                       createI64Const(transA),
+                                       createI64Const(transB),
+                                       createI64Const(aBatchRank),
+                                       emitBatchDims(ADesc, aBatchRank),
+                                       createI64Const(bBatchRank),
+                                       emitBatchDims(BDesc, bBatchRank)};
+      LLVM::CallOp::create(rewriter, loc, *function, values);
+      rewriter.eraseOp(op);
+      return success();
+    }
+
     // int wrap_hipblasLtMatmul(RuntimeState* state,
     //                          const void* A, const void* B, void* output,
     //                          int64_t M, int64_t N, int64_t K,
