@@ -14,6 +14,7 @@
 
 #include <llvm/ADT/SetVector.h>
 
+#include <cmath>
 #include <cstdint>
 #include <optional>
 
@@ -55,6 +56,11 @@ std::optional<QuantParams> getParams(Value scale, Value zeroPoint, Type type) {
   // value to one float, or q divides by zero.
   APFloat scaleValue = *scaleAttr.getValues<APFloat>().begin();
   if (!scaleValue.isNormal())
+    return std::nullopt;
+  // A normal scale so large that (a - zp) * scale overflows to infinity for
+  // |a - zp| < 2^16 also breaks it. A tiny normal scale cannot underflow,
+  // because a nonzero |a - zp| is at least 1.
+  if (!std::isfinite(std::fabs(scaleValue.convertToFloat()) * 65536.0f))
     return std::nullopt;
   int64_t zp = 0;
   if (zeroPoint) {
