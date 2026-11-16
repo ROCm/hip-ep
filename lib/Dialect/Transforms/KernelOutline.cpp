@@ -52,6 +52,8 @@ bool isStaticTensor(Value v) {
 
 static constexpr unsigned kMaxKernelIntegerWidth = 32;
 
+// RocMlirElementwiseOp::verify (HipDialect.cpp) checks the same rule; keep
+// the two in step.
 bool isKernelIOType(Type type) {
   Type element = getElementTypeOrSelf(type);
   if (auto intType = dyn_cast<IntegerType>(element))

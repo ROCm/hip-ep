@@ -125,10 +125,17 @@ LogicalResult AllocOutputOp::verify() {
 //===----------------------------------------------------------------------===//
 
 // rock.blockwise_load and rock.blockwise_store take integers of at most 32
-// bits, so a wider integer tensor cannot cross a kernel boundary.
+// bits, so a wider integer tensor cannot cross a kernel boundary, and of the
+// float types only f16, bf16 and f32 can. This is the rule of
+// isKernelIOType in lib/Dialect/Transforms/KernelOutline.cpp; keep the two in
+// step.
 static bool isRocMlirKernelIOType(RankedTensorType type) {
-  auto intType = dyn_cast<IntegerType>(type.getElementType());
-  return type.hasStaticShape() && (!intType || intType.getWidth() <= 32);
+  if (!type.hasStaticShape())
+    return false;
+  Type element = type.getElementType();
+  if (auto intType = dyn_cast<IntegerType>(element))
+    return intType.getWidth() <= 32;
+  return element.isF16() || element.isBF16() || element.isF32();
 }
 
 LogicalResult RocMlirElementwiseOp::verify() {
@@ -146,14 +153,16 @@ LogicalResult RocMlirElementwiseOp::verify() {
     if (!isRocMlirKernelIOType(cast<RankedTensorType>(input.getType())))
       return emitOpError("input type ")
              << input.getType()
-             << " is not static or has an integer wider than 32 bits";
+             << " is not a kernel type (static, and f16, bf16, f32 or an "
+                "integer of at most 32 bits)";
   }
   for (Type type : getResultTypes()) {
     auto tensorType = cast<RankedTensorType>(type);
     if (!isRocMlirKernelIOType(tensorType) || tensorType.getRank() == 0)
       return emitOpError("result type ")
              << type
-             << " is rank 0, not static, or has an integer wider than 32 bits";
+             << " is rank 0 or not a kernel type (static, and f16, bf16, f32 "
+                "or an integer of at most 32 bits)";
   }
   auto yield = cast<YieldOp>(body.getTerminator());
   if (yield.getValues().getTypes() != getResultTypes())
