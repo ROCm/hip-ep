@@ -11,7 +11,7 @@
 //
 // Type coverage restricted to FP16 + INT32 + INT64 to match what
 // vision.onnx actually exercises (plus FP32 as a free side benefit of
-// the C++ template instantiation).
+// the C++ template instantiation), and BF16 for bf16 LLMs.
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
@@ -24,6 +24,8 @@ static int neg_hipdnn_to_hip_dtype(int64_t hipdnn_type) {
   switch (hipdnn_type) {
   case HIPDNN_EP_DATATYPE_HALF:
     return HIP_DTYPE_FLOAT16;
+  case HIPDNN_EP_DATATYPE_BFLOAT16:
+    return HIP_DTYPE_BFLOAT16;
   case HIPDNN_EP_DATATYPE_FLOAT:
     return HIP_DTYPE_FLOAT32;
   case HIPDNN_EP_DATATYPE_INT32:
@@ -59,7 +61,7 @@ int wrap_neg(RuntimeState *state, void *input, void *output,
   if (hip_dtype < 0) {
     fprintf(stderr,
             "[REAL] wrap_neg: unsupported data_type=%s(%lld) "
-            "(supported: f16, f32, i32, i64)\n",
+            "(supported: f16, bf16, f32, i32, i64)\n",
             hipdnn_ep_datatype_name(data_type), (long long)data_type);
     return -1;
   }

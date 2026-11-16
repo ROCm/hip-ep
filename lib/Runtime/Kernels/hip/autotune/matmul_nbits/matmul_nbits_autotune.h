@@ -41,6 +41,7 @@ enum class Source : uint8_t {
   Exact = 1,     // a measured point with this exact (M, N, K)
   Nearest = 2,   // the closest measured point in log space
   Fallback = 3,  // phase + bits only; the group had no usable point
+  Interval = 4,  // explicit (m_lo, m_hi] override for a literal K/N key
 };
 
 /* Which kernel is being configured. Decode and DecodeDp4a both index
@@ -127,6 +128,8 @@ struct Stats {
   uint32_t points = 0;
   uint32_t invalid_points = 0;    // malformed key or a dangling config index
   uint32_t rejected_answers = 0;  // validator said the geometry is not live
+  uint32_t intervals = 0;
+  uint32_t invalid_intervals = 0;
 };
 
 Stats stats();

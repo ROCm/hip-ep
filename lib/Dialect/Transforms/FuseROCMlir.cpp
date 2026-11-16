@@ -155,24 +155,9 @@ public:
     }
     operands = std::move(kernelOperands);
 
-    // A bitsandbytes dequant that feeds only this anchor belongs in the same
-    // rock kernel. HipToTosa turns it into a nibble lookup and a multiply, and
-    // the matmul into tosa.matmul. A dynamic activation never reaches this
-    // pattern, so that case stays a HIP dequant plus hipBLASLt.
-    SmallVector<Value> dequantResults;
-    for (Value operand : operands) {
-      auto dequant = operand.getDefiningOp<DequantBnb4Op>();
-      if (!dequant || !dequant->hasOneUse())
-        continue;
-      dequantResults.push_back(operand);
-    }
-    for (Value value : dequantResults) {
-      auto dequant = value.getDefiningOp<DequantBnb4Op>();
-      ops.insert(dequant);
-      operands.remove(value);
-      operands.insert(dequant.getPacked());
-      operands.insert(dequant.getAbsmax());
-    }
+    // hip.dequant_bnb4 stays outside the kernel. Absorbing it makes HipToTosa
+    // emit a tosa.gather of the codebook over every weight element, which
+    // rocMLIR marks illegal. The matmul sees the dequantized f32 weight.
 
     // MatMulNBits reaches this anchor already split into unpack_int4 and a
     // blocked dequantize_linear feeding hip.matmul {transB = 1}. Both belong
