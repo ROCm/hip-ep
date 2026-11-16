@@ -115,71 +115,33 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   int64_t k_blocks_fc2 = (inter_size + block_size - 1) / block_size;
   int64_t routed_rows = num_tokens * k;
 
-  // Grouped prefill: fc1/fc2 run over device-built row-tile lists, one launch
-  // per tile class, instead of the ragged persistent GEMM. Experts are tiled
-  // by row count: up to 16, 32 and 64 rows as one direct-B small-M tile of
-  // that height, and above kGroupedTallRows the LDS-staged WMMA tile, which
-  // reads the expert's weights once per 128 rows at full Matrix Core rate
-  // (symmetric weights only; zero-point experts keep 64-row direct-B tiles).
-  // gfx1151, gpt-oss-120b routing of a 2k prompt in 512-token chunks: 11.8 vs
-  // 24.4 ms per layer for the 16/32-row classes over the ragged GEMM. Shapes
-  // the small-M kernel cannot run use the ragged GEMM; a class its kernel
-  // cannot run folds into the class below.
-  constexpr int64_t kGroupedTallRows = 64;
-  // Each class is one launch even when empty, since the host does not see the
-  // expert counts, and a taller tile only pays off once it is mostly full or
-  // saves enough weight reads. So the 64- and 128-row classes run only above
-  // an average of kGroupedTallMinAvgRows routed rows per expert, and for
-  // experts whose fc1 weights are under kGroupedSmallExpertBytes only above
-  // kGroupedTallMinAvgRowsSmall; otherwise those experts stay in the 32-row
-  // class.
-  constexpr int64_t kGroupedTallMinAvgRows = 16;
-  constexpr int64_t kGroupedTallMinAvgRowsSmall = 64;
-  constexpr int64_t kGroupedSmallExpertBytes = int64_t{3} << 19;
-  const int64_t fc1_expert_bytes =
-      fusion_inter * hidden_size * expert_weight_bits / 8;
-  const int64_t min_avg_rows = fc1_expert_bytes < kGroupedSmallExpertBytes
-                                   ? kGroupedTallMinAvgRowsSmall
-                                   : kGroupedTallMinAvgRows;
-  const bool many_rows = routed_rows > min_avg_rows * num_experts;
-  auto grouped_fits = [&](int64_t tile_rows) {
-    return hip_matmul_nbits_wmma_smallm_grouped_supported(
-               -1, tile_rows, fusion_inter, hidden_size, expert_weight_bits,
-               block_size, elem_size) &&
-           hip_matmul_nbits_wmma_smallm_grouped_supported(
-               -1, tile_rows, hidden_size, inter_size, expert_weight_bits,
-               block_size, elem_size);
-  };
+  // Grouped prefill: fc1/fc2 run over a device-built row-tile list instead of
+  // the ragged persistent GEMM. Every expert is split into 16-row direct-B
+  // small-M tiles: the one-row-tile (TM=1) config keeps its B prefetch and
+  // accumulators in registers, while the taller small-M tiles and the
+  // LDS-staged tile spill to scratch and run slower per row even on experts
+  // with hundreds of rows. Shapes the small-M kernel cannot run use the
+  // ragged GEMM.
+  constexpr int64_t kGroupedTileRows = 16;
   // The row-tile builder stages (classes + 1) ints per expert in 64 KB of LDS.
   const bool grouped =
-      num_tokens > 1 && grouped_fits(16) && grouped_fits(32) &&
+      num_tokens > 1 &&
+      hip_matmul_nbits_wmma_smallm_grouped_supported(
+          -1, kGroupedTileRows, fusion_inter, hidden_size, expert_weight_bits,
+          block_size, elem_size) &&
+      hip_matmul_nbits_wmma_smallm_grouped_supported(
+          -1, kGroupedTileRows, hidden_size, inter_size, expert_weight_bits,
+          block_size, elem_size) &&
       (HIP_QMOE_MAX_ROW_TILE_CLASSES + 1) * num_experts * 4 <= 65536;
-  const bool wide = grouped && many_rows && grouped_fits(64);
-  const bool tall =
-      grouped && many_rows && !fc1_zero_points && !fc2_zero_points &&
-      hip_matmul_nbits_wmma_tiled_grouped_supported(fusion_inter, hidden_size,
-                                                    expert_weight_bits,
-                                                    block_size, elem_size) &&
-      hip_matmul_nbits_wmma_tiled_grouped_supported(
-          hidden_size, inter_size, expert_weight_bits, block_size, elem_size);
-  // Tile classes: (lo, hi] expert row counts (hi < 0: unbounded), tile height
-  // and whether the class runs the LDS-staged tile.
+  // Tile classes: (lo, hi] expert row counts (hi < 0: unbounded) and tile
+  // height.
   struct TileClass {
     int64_t lo, hi, rows;
-    bool tiled;
   };
   TileClass tile_classes[HIP_QMOE_MAX_ROW_TILE_CLASSES];
   int num_tile_classes = 0;
-  if (grouped) {
-    const int64_t tall_lo = tall ? kGroupedTallRows : -1;
-    tile_classes[num_tile_classes++] = {0, 16, 16, false};
-    tile_classes[num_tile_classes++] = {16, wide ? 32 : tall_lo, 32, false};
-    if (wide)
-      tile_classes[num_tile_classes++] = {32, tall_lo, 64, false};
-    if (tall)
-      tile_classes[num_tile_classes++] = {
-          kGroupedTallRows, -1, HIP_MATMUL_NBITS_TILED_GROUPED_ROWS, true};
-  }
+  if (grouped)
+    tile_classes[num_tile_classes++] = {0, -1, kGroupedTileRows};
   // List capacities (see hip_qmoe_build_row_tile_classes).
   int64_t max_class_tiles[HIP_QMOE_MAX_ROW_TILE_CLASSES] = {};
   for (int c = 0; c < num_tile_classes; c++) {
@@ -517,19 +479,11 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
                             const void *s, const void *zp, const void *b,
                             void *out, int64_t n, int64_t kdim) -> int {
         for (int c = 0; c < num_tile_classes; c++) {
-          const TileClass &tc = tile_classes[c];
-          const int rc =
-              tc.tiled
-                  ? hip_matmul_nbits_wmma_tiled_grouped(
-                        stream, a, a_row_ids, w, s, b, d_expert_offsets,
-                        d_tile_lists[c], d_num_tiles + c, out,
-                        max_class_tiles[c], n, kdim, expert_weight_bits,
-                        block_size, elem_size)
-                  : hip_matmul_nbits_wmma_smallm_grouped(
-                        stream, -1, a, a_row_ids, w, s, zp, /*zp_packed_u4=*/1,
-                        b, d_expert_offsets, d_tile_lists[c], d_num_tiles + c,
-                        out, max_class_tiles[c], tc.rows, n, kdim,
-                        expert_weight_bits, block_size, elem_size);
+          const int rc = hip_matmul_nbits_wmma_smallm_grouped(
+              stream, -1, a, a_row_ids, w, s, zp, /*zp_packed_u4=*/1, b,
+              d_expert_offsets, d_tile_lists[c], d_num_tiles + c, out,
+              max_class_tiles[c], tile_classes[c].rows, n, kdim,
+              expert_weight_bits, block_size, elem_size);
           if (rc != 0)
             return rc;
         }

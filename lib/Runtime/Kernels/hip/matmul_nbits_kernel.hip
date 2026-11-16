@@ -4682,14 +4682,13 @@ struct SmallMWmmaConfig {
 };
 
 // tm x 16 rows and tn x 16 columns per workgroup, CPW chunks of 32 k per wave,
-// DB / DA chunks of B / A in flight per wave. The first three are the defaults
-// for M <= 16, M <= 32 and larger; configs 3 and 4 (CPW 10) and the last two
-// (CPW 16) replace the first two at the K values listed in
-// smallMWmmaDefaultConfig; config 5 is an alternative for sweeps.
+// DB / DA chunks of B / A in flight per wave. Config 8 is the default for
+// M <= 16 and configs 1 and 2 for M <= 32 and larger (see
+// smallMWmmaDefaultConfig); the others are alternatives for sweeps.
 static constexpr SmallMWmmaConfig kSmallMWmmaConfigs[] = {
     {1, 1, 18, 18, 2}, {2, 1, 18, 18, 1}, {4, 1, 10, 10, 1},
     {1, 1, 10, 10, 2}, {2, 1, 10, 10, 1}, {4, 1, 6, 6, 1},
-    {1, 1, 16, 16, 2}, {2, 1, 16, 16, 1},
+    {1, 1, 16, 16, 2}, {2, 1, 16, 16, 1}, {1, 1, 10, 10, 1},
 };
 static constexpr int kNumSmallMWmmaConfigs =
     static_cast<int>(sizeof(kSmallMWmmaConfigs) / sizeof(kSmallMWmmaConfigs[0]));
@@ -4957,19 +4956,15 @@ void MatMulNBitsWMMA_SmallM_Grouped(
         num_groups_k, C + off * N, N, GATHER ? a_row_ids + off : nullptr);
 }
 
-// Config chosen by tile height when the caller passes cfg < 0. Picked from a
-// sweep on gfx1151 with the gpt-oss expert shapes (fc1 N=5760 / fc2 N=2880,
-// K=2880, block 32). The CPW 16 variants are used only at the K values where
-// they were measured faster than CPW 18 (gfx1151, grouped expert GEMMs at
-// block 128, 16- and 32-row tiles: 9-14% at K=512, 1024, 2048 and 3072). At
-// the Qwen3.8-Flash-Next expert shapes (block 32, 512 experts, top 10) CPW 16
-// at K=2560 and CPW 10 at K=640 make a 512-token QMoE prefill 25% faster on
-// gfx1151. Every other K keeps the CPW 18 default.
+// Config chosen by tile height when the caller passes cfg < 0. 16-row tiles
+// take CPW 10 with one A chunk in flight at every K: it is the only config
+// that keeps its B prefetch out of scratch. Taller tiles keep their earlier
+// CPW 16 / CPW 10 choices at the K values listed below.
 static int smallMWmmaDefaultConfig(int64_t M, int64_t K) {
     const bool cpw16 =
         K == 512 || K == 1024 || K == 2048 || K == 2560 || K == 3072;
     const bool cpw10 = K == 640;
-    if (M <= 16) return cpw16 ? 6 : cpw10 ? 3 : 0;
+    if (M <= 16) return 8;
     if (M <= 32) return cpw16 ? 7 : cpw10 ? 4 : 1;
     return 2;
 }
@@ -5021,7 +5016,7 @@ extern "C" int hip_matmul_nbits_wmma_smallm_grouped_supported(
 #define SMALLM_WMMA_CASES(X)                                                  \
     X(0, 1, 1, 18, 18, 2) X(1, 2, 1, 18, 18, 1) X(2, 4, 1, 10, 10, 1)         \
     X(3, 1, 1, 10, 10, 2) X(4, 2, 1, 10, 10, 1) X(5, 4, 1, 6, 6, 1)          \
-    X(6, 1, 1, 16, 16, 2) X(7, 2, 1, 16, 16, 1)
+    X(6, 1, 1, 16, 16, 2) X(7, 2, 1, 16, 16, 1) X(8, 1, 1, 10, 10, 1)
 
 extern "C" int hip_matmul_nbits_wmma_smallm_grouped(
     void* stream, int cfg, const void* A, const void* a_row_ids,

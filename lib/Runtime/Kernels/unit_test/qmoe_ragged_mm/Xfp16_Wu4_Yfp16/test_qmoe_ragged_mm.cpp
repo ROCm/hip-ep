@@ -1205,13 +1205,14 @@ bool run_grouped_partial_block_case(hipStream_t stream) {
 
 // The grouped GEMM with an explicit config at a K that takes several waves of
 // K chunks: cfg 0/1 run 18 chunks per wave (a guarded last wave here), cfg 6/7
-// run 16 (even waves). cfg 0/6 take 16-row tiles, cfg 1/7 32-row tiles.
+// run 16 (even waves), cfg 8 runs 10. cfg 0/6/8 take 16-row tiles, cfg 1/7
+// 32-row tiles.
 // gather reads the grouped rows from a shorter token matrix through row ids.
 bool run_grouped_cpw_case(hipStream_t stream, int cfg, int k, bool gather) {
   constexpr int experts = 3;
   constexpr int n = 64;
   constexpr int block_size = 128;
-  const int tile_rows = (cfg == 0 || cfg == 6) ? 16 : 32;
+  const int tile_rows = (cfg == 0 || cfg == 6 || cfg == 8) ? 16 : 32;
   const std::vector<int32_t> expert_rows =
       tile_rows == 16 ? std::vector<int32_t>{5, 16, 11}
                       : std::vector<int32_t>{20, 32, 7};
@@ -2011,7 +2012,7 @@ static int runMain(int argc, char** argv) {
   all_pass = run_reduce_scaled_case(stream, 36) && all_pass;
   all_pass = run_grouped_partial_block_case(stream) && all_pass;
   // K=1024 is 2 waves of 16 chunks, K=3072 is 6; the K=3072 runs gather A.
-  for (int cfg : {0, 6, 1, 7})
+  for (int cfg : {0, 6, 8, 1, 7})
     for (int k : {1024, 3072})
       all_pass = run_grouped_cpw_case(stream, cfg, k, k == 3072) && all_pass;
   all_pass = run_row_tile_classes_case(stream) && all_pass;
