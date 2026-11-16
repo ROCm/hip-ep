@@ -276,6 +276,14 @@ left after the outline fails the pass. `convert-hip-to-tosa` then makes the
 unsigned integers in the kernel signless, because rocMLIR takes only signless
 types, and its `unsigned_cast` custom op keeps the unsigned meaning.
 
+That relabel is valid only when each op of the kernel keeps an unsigned
+value's meaning (`isSignlessSafeUnderUnsigned`): views, casts, quantizes,
+dequantizes, the quantized anchors, a ui8 Where condition, and a u8 or u16
+Max, Min, Equal or Less, which `convert-hip-to-tosa` computes in i32. A conv or gemm
+kernel that rocMLIR rejects fails the compile, so the anchor fusion takes no
+other op that reads or writes an unsigned value; such an op stays a HIP op
+after the kernel.
+
 ### Gemm-elementwise-gemm
 
 After the outline, two matmul or gemm kernels merge into one

@@ -167,6 +167,16 @@ bool isSplitKEpilogueOp(Operation &op, const DenseSet<Value> &fromKernel) {
   return false;
 }
 
+// Whether every op of `module` keeps an unsigned value's meaning when
+// HipToTosa relabels the kernel to signless. Otherwise rocMLIR rejects the
+// kernel; an elementwise kernel then runs as HIP ops, but a conv or gemm
+// kernel has no such fallback and fails the compile.
+bool keepsUnsignedMeaning(RocMlirElementwiseOp module) {
+  return llvm::all_of(
+      module.getBody().front().without_terminator(),
+      [](Operation &op) { return isSignlessSafeUnderUnsigned(&op); });
+}
+
 bool holdsQdq(RocMlirElementwiseOp module) {
   return llvm::any_of(module.getBody().front(), [](Operation &op) {
     return isa<DequantizeLinearOp, QuantizeLinearOp>(op);
@@ -358,8 +368,12 @@ void KernelRegion::absorbInputProducers(
     bool lonePrologueOp =
         allowPointwise && isFusablePrologue(producer) && inputs.size() == 1 &&
         !(keepQdqOut && isa<DequantizeLinearOp, QuantizeLinearOp>(producer));
-    bool absorb = prologue.contains(producer) || allowsInputView(producer) ||
-                  lonePrologueOp;
+    auto module = dyn_cast<RocMlirElementwiseOp>(producer);
+    bool keepsMeaning = module ? keepsUnsignedMeaning(module)
+                               : isSignlessSafeUnderUnsigned(producer);
+    bool absorb = (prologue.contains(producer) || allowsInputView(producer) ||
+                   lonePrologueOp) &&
+                  keepsMeaning;
     if (!absorb || !llvm::all_of(inputs, isStaticTensor) ||
         !llvm::all_of(inputs, isKernelIOValue))
       continue;
@@ -666,6 +680,8 @@ private:
     auto inKernel = [&](Operation *op) {
       return op && (kernel.contains(op) || llvm::is_contained(path, op));
     };
+    if (!keepsUnsignedMeaning(module))
+      return false;
     Block &body = module.getBody().front();
     DenseSet<Value> fromKernel;
     for (auto [input, argument] :
@@ -746,7 +762,8 @@ private:
   bool canTakeView(Operation *view, const SetVector<Operation *> &kernel,
                    ArrayRef<Operation *> path) const {
     if (!isa<DestinationStyleOpInterface>(view) || !allowsForwardView(view) ||
-        view->getNumResults() != 1 || !isKernelIOValue(view->getResult(0)))
+        view->getNumResults() != 1 || !isKernelIOValue(view->getResult(0)) ||
+        !isSignlessSafeUnderUnsigned(view))
       return false;
     std::optional<SmallVector<Value>> inputs = getDataInputs(view, Value());
     auto fromKernel = [&](Value v) {
@@ -829,6 +846,8 @@ private:
         if (!onlyReadByKernel)
           continue;
         if (auto module = dyn_cast<RocMlirElementwiseOp>(producer)) {
+          if (!keepsUnsignedMeaning(module))
+            continue;
           SmallVector<Value> inputs =
               llvm::filter_to_vector(module.getInputs(), [](Value v) {
                 return !isInlineScalarConstant(v);
@@ -1066,6 +1085,10 @@ private:
     Block &body = module.getBody().front();
     int launches = 0;
     for (Operation &op : body.without_terminator()) {
+      // rocMLIR would reject the kernel; skip the attempt, since the ops run
+      // as HIP ops either way.
+      if (!isSignlessSafeUnderUnsigned(&op))
+        return false;
       if (isa<tensor::EmptyOp>(op) || isTosaLowerableReshape(&op))
         continue;
       if (!isTosaExpressiblePointwiseOp(&op) && !isTosaLowerableQdq(&op))
