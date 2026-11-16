@@ -25,6 +25,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
@@ -32,7 +33,11 @@
 #include "mlir/Interfaces/ViewLikeInterface.h"
 
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
+
+#include <optional>
+#include <utility>
 
 namespace mlir {
 namespace hip {
@@ -225,14 +230,209 @@ static bool aliasPrefix(memref::CopyOp copy, IRRewriter &rewriter) {
   return true;
 }
 
-// The identity allocation a slot is carved out of. Subviews keep the parent's
-// aligned pointer and accumulate the offset, so the slot type's offset is the
-// element index from this root.
-static Value slotRoot(memref::SubViewOp slot) {
-  Value base = slot.getSource();
-  while (auto sub = base.getDefiningOp<memref::SubViewOp>())
-    base = sub.getSource();
-  return base;
+// The buffer under a chain of subviews and packed views, with the element
+// offset of `value` from its first element. A subview's type offset already
+// counts every subview below it, so only packed views add on top.
+static std::optional<std::pair<Value, int64_t>> resolveRoot(Value value) {
+  int64_t offset = 0;
+  while (true) {
+    if (auto sub = value.getDefiningOp<memref::SubViewOp>()) {
+      int64_t subOffset = 0;
+      SmallVector<int64_t, 6> strides;
+      if (failed(cast<MemRefType>(sub.getType())
+                     .getStridesAndOffset(strides, subOffset)) ||
+          ShapedType::isDynamic(subOffset))
+        return std::nullopt;
+      offset += subOffset;
+      value = sub.getSource();
+      while (auto inner = value.getDefiningOp<memref::SubViewOp>())
+        value = inner.getSource();
+      continue;
+    }
+    if (auto view = value.getDefiningOp<PackedViewOp>()) {
+      std::optional<int64_t> shift =
+          getConstantIntValue(view.getElementOffset());
+      if (!shift)
+        return std::nullopt;
+      offset += *shift;
+      value = view.getSource();
+      continue;
+    }
+    return std::make_pair(value, offset);
+  }
+}
+
+struct Slot {
+  memref::CopyOp copy;
+  int64_t offset;
+  int64_t size;
+};
+
+// Copies into packed spans of `value`, reached through subviews and packed
+// views. Fails on a copy that is not a packed span in `block`.
+static bool collectSlots(Value value, Block *block,
+                         SmallVectorImpl<Slot> &slots) {
+  for (OpOperand &use : value.getUses()) {
+    Operation *owner = use.getOwner();
+    if (auto sub = dyn_cast<memref::SubViewOp>(owner)) {
+      if (!collectSlots(sub.getResult(), block, slots))
+        return false;
+      continue;
+    }
+    if (auto view = dyn_cast<PackedViewOp>(owner)) {
+      if (view.getSource() == value &&
+          !collectSlots(view.getResult(), block, slots))
+        return false;
+      continue;
+    }
+    auto copy = dyn_cast<memref::CopyOp>(owner);
+    if (!copy || copy.getTarget() != value)
+      continue;
+    auto type = cast<MemRefType>(value.getType());
+    auto root = resolveRoot(value);
+    if (copy->getBlock() != block || !root || !isPackedSlot(type))
+      return false;
+    slots.push_back({copy, root->second, type.getNumElements()});
+  }
+  return true;
+}
+
+// The last op in `block` that uses `value` or a view of it.
+static Operation *lastUser(Value value, Block *block, Operation *latest) {
+  for (Operation *user : value.getUsers()) {
+    Operation *op = block->findAncestorOpInBlock(*user);
+    if (op && (!latest || latest->isBeforeInBlock(op)))
+      latest = op;
+    if (isa<ViewLikeOpInterface>(user))
+      for (Value result : user->getResults())
+        latest = lastUser(result, block, latest);
+  }
+  return latest;
+}
+
+static bool writtenBetween(Value value, Operation *begin, Operation *end) {
+  for (OpOperand &use : value.getUses()) {
+    Operation *owner = use.getOwner();
+    if (!writesValue(use, value))
+      continue;
+    if (owner->getBlock() != begin->getBlock())
+      return true;
+    if (begin->isBeforeInBlock(owner) && owner->isBeforeInBlock(end))
+      return true;
+  }
+  return false;
+}
+
+// A dense block concatenates every earlier output, so each concat repeats
+// the previous one's inputs at the same offsets. Such a concat becomes a
+// prefix of the larger one, whose duplicate copies go away; chained, the
+// whole block shares one buffer and each input is copied once.
+static bool foldIntoLargerConcat(memref::AllocOp alloc, IRRewriter &rewriter) {
+  Value small = alloc.getResult();
+  auto smallType = cast<MemRefType>(small.getType());
+  if (!smallType.hasStaticShape() || !smallType.getLayout().isIdentity())
+    return false;
+  Block *block = alloc->getBlock();
+  for (Operation *user : small.getUsers())
+    if (isa<func::ReturnOp>(user))
+      return false;
+  SmallVector<Slot> smallSlots;
+  if (!collectSlots(small, block, smallSlots) || smallSlots.empty())
+    return false;
+  llvm::sort(smallSlots,
+             [](const Slot &a, const Slot &b) { return a.offset < b.offset; });
+  int64_t covered = 0;
+  for (const Slot &slot : smallSlots) {
+    if (slot.offset != covered)
+      return false;
+    covered += slot.size;
+  }
+  int64_t smallElems = smallType.getNumElements();
+  if (covered != smallElems)
+    return false;
+  DenseSet<Value> seenSmall;
+  if (!onlySlotWrites(small, small, seenSmall))
+    return false;
+
+  Value first = smallSlots.front().copy.getSource();
+  for (Operation *user : first.getUsers()) {
+    auto other = dyn_cast<memref::CopyOp>(user);
+    if (!other || other == smallSlots.front().copy ||
+        other.getSource() != first)
+      continue;
+    auto root = resolveRoot(other.getTarget());
+    if (!root || root->first == small)
+      continue;
+    Value large = root->first;
+    auto largeType = dyn_cast<MemRefType>(large.getType());
+    Operation *largeOp = large.getDefiningOp();
+    if (!largeType || !largeType.hasStaticShape() ||
+        !largeType.getLayout().isIdentity() || !largeOp ||
+        largeOp->getBlock() != block ||
+        !isa<memref::AllocOp, AllocOutputOp>(largeOp) ||
+        largeType.getElementType() != smallType.getElementType() ||
+        largeType.getNumElements() < smallElems)
+      continue;
+    SmallVector<Slot> largeSlots;
+    if (!collectSlots(large, block, largeSlots))
+      continue;
+
+    // Every large slot inside the prefix repeats a small slot: the same
+    // source and span, with the source unchanged between the two copies.
+    // Both then land in the same bytes, so the later copy goes away.
+    SmallVector<memref::CopyOp> duplicates;
+    bool matches = true;
+    for (Slot &slot : largeSlots) {
+      if (slot.offset >= smallElems)
+        continue;
+      auto it = llvm::find_if(smallSlots, [&](Slot &s) {
+        return s.offset == slot.offset && s.size == slot.size &&
+               s.copy.getSource() == slot.copy.getSource();
+      });
+      if (it == smallSlots.end() || it->copy == slot.copy) {
+        matches = false;
+        break;
+      }
+      memref::CopyOp earlier = it->copy, later = slot.copy;
+      if (later->isBeforeInBlock(earlier))
+        std::swap(earlier, later);
+      if (writtenBetween(slot.copy.getSource(), earlier, later)) {
+        matches = false;
+        break;
+      }
+      duplicates.push_back(later);
+    }
+    if (!matches || duplicates.size() != smallSlots.size())
+      continue;
+    DenseSet<Value> seenLarge;
+    if (!onlySlotWrites(large, large, seenLarge))
+      continue;
+    bool dominates = llvm::all_of(largeOp->getOperands(), [&](Value v) {
+      Operation *def = v.getDefiningOp();
+      return !def || (def->getBlock() == block && def->isBeforeInBlock(alloc));
+    });
+    if (!dominates)
+      continue;
+
+    Operation *latest = lastUser(small, block, nullptr);
+    if (!largeOp->isBeforeInBlock(alloc))
+      largeOp->moveBefore(alloc);
+    eraseDeallocs(small);
+    rewriter.setInsertionPoint(alloc);
+    Value zero = arith::ConstantIndexOp::create(rewriter, alloc.getLoc(), 0);
+    auto view =
+        PackedViewOp::create(rewriter, alloc.getLoc(), smallType, large, zero);
+    small.replaceAllUsesWith(view.getResult());
+    for (memref::CopyOp copy : duplicates)
+      copy.erase();
+    alloc.erase();
+    for (Operation *user : llvm::to_vector(large.getUsers()))
+      if (auto dealloc = dyn_cast<memref::DeallocOp>(user))
+        if (latest && dealloc->isBeforeInBlock(latest))
+          dealloc->moveAfter(latest);
+    return true;
+  }
+  return false;
 }
 
 // Point every user of the copied alloc at an identity view of the packed
@@ -252,7 +452,11 @@ static bool aliasSlot(memref::CopyOp copy, IRRewriter &rewriter) {
   if (definedFrom(slot.getResult(), alloc.getResult()))
     return false;
 
-  Value base = slotRoot(slot);
+  auto root = resolveRoot(slot.getResult());
+  if (!root)
+    return false;
+  Value base = root->first;
+  int64_t elementOffset = root->second;
   auto baseType = dyn_cast<MemRefType>(base.getType());
   Operation *baseOp = base.getDefiningOp();
   if (!baseType || !baseType.hasStaticShape() ||
@@ -267,11 +471,6 @@ static bool aliasSlot(memref::CopyOp copy, IRRewriter &rewriter) {
   if (!onlySlotWrites(base, base, seen))
     return false;
 
-  int64_t elementOffset = 0;
-  SmallVector<int64_t, 6> strides;
-  if (failed(slotType.getStridesAndOffset(strides, elementOffset)) ||
-      ShapedType::isDynamic(elementOffset))
-    return false;
   int64_t slotElems = srcType.getNumElements();
   int64_t baseElems = baseType.getNumElements();
   if (elementOffset < 0 || slotElems > baseElems - elementOffset)
@@ -363,6 +562,19 @@ struct ForwardConcatSlotsPass
       for (memref::CopyOp copy : copies) {
         if (aliasPrefix(copy, rewriter)) {
           aliased = true;
+          break;
+        }
+      }
+    }
+
+    bool folded = true;
+    while (folded) {
+      folded = false;
+      SmallVector<memref::AllocOp> allocs;
+      func.walk([&](memref::AllocOp alloc) { allocs.push_back(alloc); });
+      for (memref::AllocOp alloc : allocs) {
+        if (foldIntoLargerConcat(alloc, rewriter)) {
+          folded = true;
           break;
         }
       }

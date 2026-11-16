@@ -245,3 +245,103 @@ func.func @source_rewritten_stays(
       outs(%sum : memref<1x4x2x2xf32>)
   return %cat, %sum : memref<1x8x2x2xf32>, memref<1x4x2x2xf32>
 }
+
+// -----
+
+// A dense block: each concat repeats the previous one's inputs and appends
+// one more. Every concat is a prefix of the last one, so the block shares
+// one buffer and every input is written into it once.
+// cat1 = [x, c1]         [1, 3, 2, 2]
+// cat2 = [x, c1, c2]     [1, 4, 2, 2]
+// cat3 = [x, c1, c2, c3] [1, 5, 2, 2]
+
+// CHECK-LABEL: func.func @dense_block_one_buffer
+// CHECK-NOT: memref.alloc() : memref<1x3x2x2xf32>
+// CHECK-NOT: memref.alloc() : memref<1x4x2x2xf32>
+// CHECK: %[[CAT:.*]] = memref.alloc() : memref<1x5x2x2xf32>
+// CHECK-NOT: memref.alloc() : memref<1x{{[34]}}x2x2xf32>
+// CHECK-NOT: memref.copy
+// CHECK: return %[[CAT]]
+func.func @dense_block_one_buffer(
+    %ctx: !hip.context, %in: memref<1x2x2x2xf32>) -> memref<1x5x2x2xf32> {
+  %x = memref.alloc() : memref<1x2x2x2xf32>
+  hip.rocmlir(%ctx) @kern ins(%in : memref<1x2x2x2xf32>)
+      outs(%x : memref<1x2x2x2xf32>)
+  %c1 = memref.alloc() : memref<1x1x2x2xf32>
+  hip.rocmlir(%ctx) @kern ins(%x : memref<1x2x2x2xf32>)
+      outs(%c1 : memref<1x1x2x2xf32>)
+  %cat1 = memref.alloc() : memref<1x3x2x2xf32>
+  %cat1_x = memref.subview %cat1[0, 0, 0, 0] [1, 2, 2, 2] [1, 1, 1, 1]
+      : memref<1x3x2x2xf32> to memref<1x2x2x2xf32, strided<[12, 4, 2, 1]>>
+  memref.copy %x, %cat1_x : memref<1x2x2x2xf32> to memref<1x2x2x2xf32, strided<[12, 4, 2, 1]>>
+  %cat1_c1 = memref.subview %cat1[0, 2, 0, 0] [1, 1, 2, 2] [1, 1, 1, 1]
+      : memref<1x3x2x2xf32> to memref<1x1x2x2xf32, strided<[12, 4, 2, 1], offset: 8>>
+  memref.copy %c1, %cat1_c1 : memref<1x1x2x2xf32> to memref<1x1x2x2xf32, strided<[12, 4, 2, 1], offset: 8>>
+  %c2 = memref.alloc() : memref<1x1x2x2xf32>
+  hip.rocmlir(%ctx) @kern ins(%cat1 : memref<1x3x2x2xf32>)
+      outs(%c2 : memref<1x1x2x2xf32>)
+  %cat2 = memref.alloc() : memref<1x4x2x2xf32>
+  %cat2_x = memref.subview %cat2[0, 0, 0, 0] [1, 2, 2, 2] [1, 1, 1, 1]
+      : memref<1x4x2x2xf32> to memref<1x2x2x2xf32, strided<[16, 4, 2, 1]>>
+  memref.copy %x, %cat2_x : memref<1x2x2x2xf32> to memref<1x2x2x2xf32, strided<[16, 4, 2, 1]>>
+  %cat2_c1 = memref.subview %cat2[0, 2, 0, 0] [1, 1, 2, 2] [1, 1, 1, 1]
+      : memref<1x4x2x2xf32> to memref<1x1x2x2xf32, strided<[16, 4, 2, 1], offset: 8>>
+  memref.copy %c1, %cat2_c1 : memref<1x1x2x2xf32> to memref<1x1x2x2xf32, strided<[16, 4, 2, 1], offset: 8>>
+  %cat2_c2 = memref.subview %cat2[0, 3, 0, 0] [1, 1, 2, 2] [1, 1, 1, 1]
+      : memref<1x4x2x2xf32> to memref<1x1x2x2xf32, strided<[16, 4, 2, 1], offset: 12>>
+  memref.copy %c2, %cat2_c2 : memref<1x1x2x2xf32> to memref<1x1x2x2xf32, strided<[16, 4, 2, 1], offset: 12>>
+  %c3 = memref.alloc() : memref<1x1x2x2xf32>
+  hip.rocmlir(%ctx) @kern ins(%cat2 : memref<1x4x2x2xf32>)
+      outs(%c3 : memref<1x1x2x2xf32>)
+  %cat3 = memref.alloc() : memref<1x5x2x2xf32>
+  %cat3_x = memref.subview %cat3[0, 0, 0, 0] [1, 2, 2, 2] [1, 1, 1, 1]
+      : memref<1x5x2x2xf32> to memref<1x2x2x2xf32, strided<[20, 4, 2, 1]>>
+  memref.copy %x, %cat3_x : memref<1x2x2x2xf32> to memref<1x2x2x2xf32, strided<[20, 4, 2, 1]>>
+  %cat3_c1 = memref.subview %cat3[0, 2, 0, 0] [1, 1, 2, 2] [1, 1, 1, 1]
+      : memref<1x5x2x2xf32> to memref<1x1x2x2xf32, strided<[20, 4, 2, 1], offset: 8>>
+  memref.copy %c1, %cat3_c1 : memref<1x1x2x2xf32> to memref<1x1x2x2xf32, strided<[20, 4, 2, 1], offset: 8>>
+  %cat3_c2 = memref.subview %cat3[0, 3, 0, 0] [1, 1, 2, 2] [1, 1, 1, 1]
+      : memref<1x5x2x2xf32> to memref<1x1x2x2xf32, strided<[20, 4, 2, 1], offset: 12>>
+  memref.copy %c2, %cat3_c2 : memref<1x1x2x2xf32> to memref<1x1x2x2xf32, strided<[20, 4, 2, 1], offset: 12>>
+  %cat3_c3 = memref.subview %cat3[0, 4, 0, 0] [1, 1, 2, 2] [1, 1, 1, 1]
+      : memref<1x5x2x2xf32> to memref<1x1x2x2xf32, strided<[20, 4, 2, 1], offset: 16>>
+  memref.copy %c3, %cat3_c3 : memref<1x1x2x2xf32> to memref<1x1x2x2xf32, strided<[20, 4, 2, 1], offset: 16>>
+  return %cat3 : memref<1x5x2x2xf32>
+}
+
+// -----
+
+// The source changes between the two concats, so the prefix would hold the
+// old value where the larger concat needs the new one. Both buffers stay.
+
+// CHECK-LABEL: func.func @prefix_source_changes_stays
+// CHECK-DAG: memref.alloc() : memref<1x4x2x2xf32>
+// CHECK-DAG: %[[CAT1:.*]] = memref.alloc() : memref<1x3x2x2xf32>
+// CHECK: memref.copy %{{.*}}, %{{.*}} : memref<1x3x2x2xf32> to memref<1x3x2x2xf32, strided<[12, 4, 2, 1]>>
+// CHECK: hip.add(%{{.*}}) ins(%[[CAT1]], %[[CAT1]]
+func.func @prefix_source_changes_stays(
+    %ctx: !hip.context, %in: memref<1x3x2x2xf32>)
+    -> (memref<1x3x2x2xf32>, memref<1x4x2x2xf32>) {
+  %x = memref.alloc() : memref<1x3x2x2xf32>
+  hip.rocmlir(%ctx) @kern ins(%in : memref<1x3x2x2xf32>)
+      outs(%x : memref<1x3x2x2xf32>)
+  %cat1 = memref.alloc() : memref<1x3x2x2xf32>
+  %cat1_x = memref.subview %cat1[0, 0, 0, 0] [1, 3, 2, 2] [1, 1, 1, 1]
+      : memref<1x3x2x2xf32> to memref<1x3x2x2xf32, strided<[12, 4, 2, 1]>>
+  memref.copy %x, %cat1_x : memref<1x3x2x2xf32> to memref<1x3x2x2xf32, strided<[12, 4, 2, 1]>>
+  %out1 = memref.alloc() : memref<1x3x2x2xf32>
+  hip.add(%ctx) ins(%cat1, %cat1 : memref<1x3x2x2xf32>, memref<1x3x2x2xf32>)
+      outs(%out1 : memref<1x3x2x2xf32>)
+  hip.rocmlir(%ctx) @kern ins(%in : memref<1x3x2x2xf32>)
+      outs(%x : memref<1x3x2x2xf32>)
+  %cat2 = memref.alloc() : memref<1x4x2x2xf32>
+  %cat2_x = memref.subview %cat2[0, 0, 0, 0] [1, 3, 2, 2] [1, 1, 1, 1]
+      : memref<1x4x2x2xf32> to memref<1x3x2x2xf32, strided<[16, 4, 2, 1]>>
+  memref.copy %x, %cat2_x : memref<1x3x2x2xf32> to memref<1x3x2x2xf32, strided<[16, 4, 2, 1]>>
+  %cat2_y = memref.subview %cat2[0, 3, 0, 0] [1, 1, 2, 2] [1, 1, 1, 1]
+      : memref<1x4x2x2xf32> to memref<1x1x2x2xf32, strided<[16, 4, 2, 1], offset: 12>>
+  %y = memref.subview %in[0, 0, 0, 0] [1, 1, 2, 2] [1, 1, 1, 1]
+      : memref<1x3x2x2xf32> to memref<1x1x2x2xf32, strided<[12, 4, 2, 1]>>
+  memref.copy %y, %cat2_y : memref<1x1x2x2xf32, strided<[12, 4, 2, 1]>> to memref<1x1x2x2xf32, strided<[16, 4, 2, 1], offset: 12>>
+  return %out1, %cat2 : memref<1x3x2x2xf32>, memref<1x4x2x2xf32>
+}
