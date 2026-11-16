@@ -36,8 +36,9 @@ bool isTosaLowerableQdq(Operation *op);
 
 // True when `op` touches no unsigned integer, or when its TOSA form keeps an
 // unsigned value's meaning after the kernel is relabeled to signless (views,
-// casts, quantize and dequantize, the quantized anchors, and an 8- or 16-bit
-// unsigned max or min). Any other op on an unsigned value stops the relabel,
+// casts, quantize and dequantize, the quantized anchors, a ui8 Where
+// condition, and an 8- or 16-bit unsigned max, min, equal or less, which
+// compute in i32). Any other op on an unsigned value stops the relabel,
 // and rocMLIR then rejects the kernel. A conv or gemm kernel has no HIP
 // fallback, so the fusion keeps such an op out of it.
 bool isSignlessSafeUnderUnsigned(Operation *op);

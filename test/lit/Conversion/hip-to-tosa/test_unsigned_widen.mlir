@@ -1,10 +1,11 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-// An 8- or 16-bit unsigned max or min is computed in i32: unsigned_cast
-// widens both operands, the i32 op orders them as unsigned values, and
-// unsigned_cast narrows the result back. Every op then keeps its meaning when
-// the kernel is relabeled to signless, so the kernel reaches rocMLIR as i8.
+// An 8- or 16-bit unsigned max, min, equal or less is computed in i32:
+// unsigned_cast widens both operands, and the i32 op orders them as unsigned
+// values. A max or min narrows its result back with unsigned_cast; a
+// comparison already gives i1. Every op then keeps its meaning when the kernel
+// is relabeled to signless, so the kernel reaches rocMLIR as i8.
 
 // RUN: hip-mlir-opt --convert-hip-to-tosa %s | FileCheck %s
 
@@ -102,4 +103,38 @@ func.func @i8_max_unchanged(%a: tensor<4xi8>, %b: tensor<4xi8>) -> tensor<4xi8>
   %r = hip.max(%ctx) ins(%a, %b : tensor<4xi8>, tensor<4xi8>)
          outs(%init : tensor<4xi8>) : tensor<4xi8>
   return %r : tensor<4xi8>
+}
+
+// A ui8 less compares in i32 with its operands swapped, so 200 < 100 stays
+// false.
+// CHECK-LABEL: func.func @ui8_less
+// CHECK-SAME: (%[[A:.*]]: tensor<2x8xi8>) -> tensor<2x8xi1>
+// CHECK-DAG: %[[AW:.*]] = tosa.custom %[[A]] {{.*}}operator_name = "unsigned_cast"{{.*}} -> tensor<2x8xi32>
+// CHECK-DAG: %[[CW:.*]] = tosa.custom %{{.*}} {{.*}}operator_name = "unsigned_cast"{{.*}} -> tensor<1x1xi32>
+// CHECK: %[[L:.*]] = tosa.greater %[[CW]], %[[AW]] : (tensor<1x1xi32>, tensor<2x8xi32>) -> tensor<2x8xi1>
+// CHECK: return %[[L]]
+// CHECK-NOT: ui8
+func.func @ui8_less(%a: tensor<2x8xui8>) -> tensor<2x8xi1>
+    attributes {rock.kernel} {
+  %ctx = ub.poison : !hip.context
+  %c = hip.constant {value = dense<100> : tensor<ui8>} : tensor<ui8>
+  %init = tensor.empty() : tensor<2x8xi1>
+  %r = hip.less(%ctx) ins(%a, %c : tensor<2x8xui8>, tensor<ui8>)
+         outs(%init : tensor<2x8xi1>) : tensor<2x8xi1>
+  return %r : tensor<2x8xi1>
+}
+
+// CHECK-LABEL: func.func @ui16_equal
+// CHECK-SAME: (%[[A:.*]]: tensor<2x8xi16>, %[[B:.*]]: tensor<2x8xi16>) -> tensor<2x8xi1>
+// CHECK-DAG: %[[AW:.*]] = tosa.custom %[[A]] {{.*}}operator_name = "unsigned_cast"{{.*}} -> tensor<2x8xi32>
+// CHECK-DAG: %[[BW:.*]] = tosa.custom %[[B]] {{.*}}operator_name = "unsigned_cast"{{.*}} -> tensor<2x8xi32>
+// CHECK: %[[E:.*]] = tosa.equal %[[AW]], %[[BW]] : (tensor<2x8xi32>, tensor<2x8xi32>) -> tensor<2x8xi1>
+// CHECK: return %[[E]]
+func.func @ui16_equal(%a: tensor<2x8xui16>, %b: tensor<2x8xui16>)
+    -> tensor<2x8xi1> attributes {rock.kernel} {
+  %ctx = ub.poison : !hip.context
+  %init = tensor.empty() : tensor<2x8xi1>
+  %r = hip.equal(%ctx) ins(%a, %b : tensor<2x8xui16>, tensor<2x8xui16>)
+         outs(%init : tensor<2x8xi1>) : tensor<2x8xi1>
+  return %r : tensor<2x8xi1>
 }

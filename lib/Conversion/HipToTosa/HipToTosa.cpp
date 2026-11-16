@@ -1164,9 +1164,12 @@ static bool isTosaExpressibleInt(Type elementType) {
 // shape, an operand it never looks at -- reintroduces the same abort it exists
 // to prevent, so each one below mirrors its pattern's preconditions rather
 // than approximating them.
+// A ui8 or ui16 operand compares in i32, where both widen without a sign; see
+// ComparisonConverter.
 static bool isTosaExpressibleCompareOperand(Type elementType) {
   return isTosaExpressibleFloat(elementType) ||
-         isTosaExpressibleInt(elementType);
+         isTosaExpressibleInt(elementType) ||
+         elementType.isUnsignedInteger(8) || elementType.isUnsignedInteger(16);
 }
 
 // Shared operand precondition for the elementwise patterns: a static ranked
@@ -1304,10 +1307,10 @@ struct ComparisonConverter final : public OpConversionPattern<HipOpTy> {
         lhsType.getElementType() != rhsType.getElementType())
       return rewriter.notifyMatchFailure(op, "operand element types differ");
     // Matching operand types alone do not make a TOSA comparison lowerable;
-    // the compared type still has to be one TOSA can carry. Unsigned integers
-    // are excluded rather than passed through: ONNX Equal/Less accept
-    // ui8/ui16/ui32/ui64 and OnnxToHip preserves them, but TOSA integers are
-    // signless, so a ui8 255 would compare as -1.
+    // the compared type still has to be one TOSA can carry. ONNX Equal/Less
+    // accept ui8/ui16/ui32/ui64 and OnnxToHip preserves them, but TOSA
+    // integers are signless, so a ui8 255 compared as is would read as -1.
+    // ui8 and ui16 compare in i32 below; ui32 and ui64 stay hip ops.
     Type operandElemType = lhsType.getElementType();
     if (!isTosaExpressibleCompareOperand(operandElemType))
       return rewriter.notifyMatchFailure(
@@ -1322,6 +1325,11 @@ struct ComparisonConverter final : public OpConversionPattern<HipOpTy> {
         !isTosaCompatibleOperand(rhs, operandShaped))
       return rewriter.notifyMatchFailure(op, "operands not tosa-broadcastable");
 
+    if (operandElemType.isUnsignedInteger()) {
+      Type i32 = rewriter.getI32Type();
+      lhs = emitTosaCast(rewriter, op.getLoc(), lhs, i32);
+      rhs = emitTosaCast(rewriter, op.getLoc(), rhs, i32);
+    }
     if constexpr (SwapOperands)
       std::swap(lhs, rhs);
     rewriter.replaceOpWithNewOp<TosaOpTy>(op, resultType, lhs, rhs);
@@ -8883,6 +8891,18 @@ bool isSignlessSafeUnderUnsigned(Operation *op) {
   if (isa<MaxOp, MinOp>(op)) {
     Type element = getElementTypeOrSelf(op->getResult(0).getType());
     return element.isUnsignedInteger(8) || element.isUnsignedInteger(16);
+  }
+  // A ui8 or ui16 comparison compares in i32 (ComparisonConverter).
+  std::optional<std::pair<Value, Value>> compared;
+  if (auto equal = dyn_cast<EqualOp>(op))
+    compared = {equal.getLhs(), equal.getRhs()};
+  else if (auto less = dyn_cast<LessOp>(op))
+    compared = {less.getLhs(), less.getRhs()};
+  if (compared) {
+    Type element = getElementTypeOrSelf(compared->first.getType());
+    return element == getElementTypeOrSelf(compared->second.getType()) &&
+           (element.isUnsignedInteger(8) || element.isUnsignedInteger(16)) &&
+           llvm::none_of(op->getResultTypes(), isUnsigned);
   }
   // A ui8 Where condition is ONNX BOOL. The rocMLIR outline views it as i8,
   // and WhereConverter tests it against zero, which does not depend on
