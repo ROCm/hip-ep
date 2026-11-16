@@ -75,6 +75,13 @@ module {
     %result = "onnx.Unsqueeze"(%data, %axes) : (tensor<?x?x128xf16>, tensor<1xi64>) -> tensor<?x?x128x1xf16>
     return %result : tensor<?x?x128x1xf16>
   }
+
+  // --- Static output extents over dynamic input dims (MaskRCNN mask head) ---
+  // The copied dims are refined onto the input before expand_shape.
+  func.func @test_unsqueeze_refines_input(%data: tensor<?x?x?xf32>) -> tensor<?x1x28x28xf32> {
+    %result = "onnx.Unsqueeze"(%data) {axes = [1]} : (tensor<?x?x?xf32>) -> tensor<?x1x28x28xf32>
+    return %result : tensor<?x1x28x28xf32>
+  }
 }
 
 // CHECK-LABEL: func.func @test_unsqueeze_front
@@ -111,3 +118,9 @@ module {
 // CHECK-NOT: onnx.Unsqueeze
 // CHECK: %[[RESULT:.*]] = tensor.expand_shape %{{.*}} {{\[\[}}0], [1], [2, 3]] output_shape [%{{.*}}, %{{.*}}, 128, 1] : tensor<?x?x128xf16> into tensor<?x?x128x1xf16>
 // CHECK: return %[[RESULT]] : tensor<?x?x128x1xf16>
+
+// CHECK-LABEL: func.func @test_unsqueeze_refines_input
+// CHECK-NOT: onnx.Unsqueeze
+// CHECK: %[[CAST:.*]] = tensor.cast %{{.*}} : tensor<?x?x?xf32> to tensor<?x28x28xf32>
+// CHECK: %[[RESULT:.*]] = tensor.expand_shape %[[CAST]] {{.*}} output_shape [%{{.*}}, 1, 28, 28] : tensor<?x28x28xf32> into tensor<?x1x28x28xf32>
+// CHECK: return %[[RESULT]] : tensor<?x1x28x28xf32>

@@ -11,12 +11,22 @@ This directory contains LLVM Integrated Tester (LIT) tests for MLIR passes in th
 ```
 test/lit/
 ├── Conversion/          # Dialect conversion passes
-│   ├── onnx-to-hip/    # ONNX → HIP lowering tests
-│   └── hip-to-llvm/    # HIP → LLVM lowering tests
+│   ├── onnx-to-hip/     # ONNX → HIP lowering tests
+│   ├── onnx-to-hipdnn/  # ONNX → hipDNN lowering tests (opt-in path)
+│   ├── onnx-to-hipsr/   # ONNX → HIPSR lowering tests (opt-in path)
+│   ├── hip-to-llvm/     # HIP → LLVM lowering tests
+│   ├── hip-to-tosa/     # HIP → TOSA lowering tests
+│   └── hipsr-to-llvm/   # HIPSR → LLVM lowering tests (opt-in path)
+├── Dialect/             # Dialect verifiers, folders, shape inference
 ├── Transforms/          # MLIR transformation passes
-│   ├── BufferDeallocation/  # Automatic memory management tests
-│   └── GenerateInterface/   # C-ABI wrapper generation tests
-└── Integration/         # Multi-pass pipeline tests
+│   ├── AssignOpStateSlots/   # Op-state slot assignment
+│   ├── GenerateInterface/    # C-ABI wrapper generation
+│   ├── GenerateOpStateInit/  # Op-state init function generation
+│   └── HipFusionTransform/   # HIP op fusion
+├── Pipeline/            # Multi-pass pipeline tests
+├── Plugin/              # Compiler plugin tests
+├── e2e/                 # Models also compiled and run by the E2E suite
+└── Inputs/              # Shared inputs for split/included tests
 ```
 
 ## How LIT Config Works
@@ -60,10 +70,10 @@ llvm-lit -v $BUILD/test/lit/
 llvm-lit -v $BUILD/test/lit/Conversion/onnx-to-hip/
 
 # Single test — use --filter (regex on test path), not a source file path
-llvm-lit -v $BUILD/test/lit/ --filter test_gemm_basic
+llvm-lit -v $BUILD/test/lit/ --filter onnx-to-hip/test_gemm
 
 # See full tool output (not just pass/fail summary)
-llvm-lit -v --show-all $BUILD/test/lit/ --filter test_gemm_basic
+llvm-lit -v --show-all $BUILD/test/lit/ --filter onnx-to-hip/test_gemm
 ```
 
 ### Via CTest
@@ -129,65 +139,32 @@ module {
 
 ### Example: Testing ONNX → HIP Conversion
 
+Abridged from `Conversion/onnx-to-hip/test_relu.mlir`:
+
 ```mlir
-// Test ONNX ReLU → HIP ReLU lowering
-// RUN: hip-mlir-opt %s --convert-onnx-to-hip | FileCheck %s
+// RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
 
 module {
-  func.func @test_relu(%ctx: !hip.context, %input: memref<10xf32>) -> memref<10xf32> {
-    // CHECK-LABEL: func.func @test_relu
-    // CHECK-SAME: %[[CTX:.*]]: !hip.context
-    // CHECK-SAME: %[[INPUT:.*]]: memref<10xf32>
-
-    %output = "onnx.Relu"(%input) : (memref<10xf32>) -> memref<10xf32>
-
-    // CHECK: %[[OUT:.*]] = hip.relu(%[[CTX]], %[[INPUT]])
-    // CHECK-SAME: : (!hip.context, memref<10xf32>) -> memref<10xf32>
-
-    return %output : memref<10xf32>
+  func.func @relu_static_f32(%x: tensor<3x4xf32>) -> tensor<3x4xf32> {
+    %y = "onnx.Relu"(%x) : (tensor<3x4xf32>) -> tensor<3x4xf32>
+    return %y : tensor<3x4xf32>
   }
+
+  // CHECK-LABEL: func.func @relu_static_f32
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[X:.*]]: tensor<3x4xf32>)
+  // CHECK-NOT: onnx.Relu
+  // CHECK: hip.max(%[[CTX]]) ins(%[[X]]
 }
 ```
 
-### Example: Testing Buffer Deallocation
+### Example: Testing Multi-Pass Pipelines
+
+Chain passes on the RUN line, or use a registered pipeline such as
+`--onnx-to-hip-pipeline` or `--hip-to-llvm-pipeline`. See `Pipeline/` and
+`Transforms/GenerateInterface/` for real examples, e.g.:
 
 ```mlir
-// Test automatic hip.free insertion
-// RUN: hip-mlir-opt %s --bufferization-buffer-deallocation | FileCheck %s
-
-module {
-  func.func @test_alloc(%ctx: !hip.context) -> i32 {
-    // CHECK-LABEL: func.func @test_alloc
-
-    // CHECK: %[[BUF:.*]] = hip.alloc
-    %buf = hip.alloc(%ctx) : memref<10xf32, 1>
-
-    // CHECK: hip.free(%{{.*}}, %[[BUF]])
-
-    %c0 = arith.constant 0 : i32
-    return %c0 : i32
-  }
-}
-```
-
-### Example: Testing Multi-Pass Pipeline
-
-```mlir
-// Test ONNX → HIP → LLVM pipeline
-// RUN: hip-mlir-opt %s --convert-onnx-to-hip --convert-hip-to-llvm | FileCheck %s
-
-module {
-  func.func @pipeline(%ctx: !hip.context, %in: memref<10xf32>) {
-    // CHECK-LABEL: llvm.func @pipeline
-
-    %out = "onnx.Relu"(%in) : (memref<10xf32>) -> memref<10xf32>
-
-    // Should see LLVM runtime call after full pipeline
-    // CHECK: llvm.call @wrap_elementwise
-
-    return
-  }
-}
+// RUN: hip-mlir-opt --hip-pool-allocs --convert-hip-to-llvm %s | FileCheck %s
 ```
 
 ## Test Categories
@@ -196,37 +173,27 @@ module {
 
 Test dialect conversion passes that lower operations from one dialect to another.
 
-**onnx-to-hip/**:
-- Conv lowering (basic, strided, grouped)
-- GEMM lowering
-- Activation operations (ReLU, etc.)
-- Constant handling
-
-**hip-to-llvm/**:
-- Memory operations (alloc, free, handle lifecycle)
-- Conv LLVM lowering
-- GEMM LLVM lowering
+- **onnx-to-hip/**: ONNX op lowering into the HIP dialect (default path).
+- **onnx-to-hipdnn/**, **onnx-to-hipsr/**: the opt-in hipDNN (used when a
+  hipDNN handle is available) and HIPSR (`HIPDNN_EP_HIPSR=1`) paths.
+- **hip-to-llvm/**, **hipsr-to-llvm/**: lowering to the LLVM dialect
+  (HIP ops become `llvm.call @wrap_*` runtime calls).
+- **hip-to-tosa/**: HIP → TOSA lowering.
 
 ### Transform Tests (`Transforms/`)
 
 Test MLIR transformation passes that optimize or augment IR.
 
-**BufferDeallocation/**:
-- Automatic `hip.free` insertion
-- Ownership tracking (function args vs local allocations)
-- Multi-buffer management
+- **AssignOpStateSlots/**, **GenerateOpStateInit/**: per-op runtime state
+  slots and their init function.
+- **GenerateInterface/**: C-ABI wrapper generation for ONNX Runtime
+  integration.
+- **HipFusionTransform/**: HIP op fusion.
 
-**GenerateInterface/**:
-- C-ABI wrapper generation for ONNX Runtime integration
-- Pointer-to-memref conversion
+### Pipeline and Plugin Tests (`Pipeline/`, `Plugin/`)
 
-### Integration Tests (`Integration/`)
-
-Test complete compilation pipelines with multiple passes.
-
-- ONNX → HIP → LLVM full pipeline
-- Buffer management in multi-pass scenarios
-- Complex operation sequences
+Multi-pass pipelines (constant externalization, alloc pooling, module
+metadata, pipeline overrides) and compiler plugin hooks.
 
 ## Common Passes
 
@@ -234,7 +201,6 @@ Test complete compilation pipelines with multiple passes.
 |-----------|---------|---------|
 | `--convert-onnx-to-hip` | Lower ONNX ops to HIP dialect | `onnx.Conv` → `hip.conv` |
 | `--convert-hip-to-llvm` | Lower HIP ops to LLVM calls | `hip.conv` → `llvm.call @wrap_conv` |
-| `--bufferization-buffer-deallocation` | Insert automatic buffer cleanup | `hip.alloc` → `hip.alloc` + `hip.free` |
 | `--generate-interface` | Generate C-ABI wrappers | `func.func @f` → `llvm.func @f_cabi` |
 
 ## Tips for Writing Tests

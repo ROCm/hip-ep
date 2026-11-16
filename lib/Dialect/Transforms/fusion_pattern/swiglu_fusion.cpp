@@ -41,12 +41,16 @@
 
 #include "hip/Dialect/IR/HipDialect.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 
 #include "llvm/ADT/Sequence.h"
+#include "llvm/ADT/SmallPtrSet.h"
 
 namespace hip {
 namespace fusion_transform {
@@ -159,43 +163,122 @@ std::optional<Extent> stepProjection(mlir::Operation *op, int64_t outDim) {
   return std::nullopt;
 }
 
-// The walk follows tensor.cast and one projection. hip-infer-shapes inserts
-// a cast on the projection result and may leave one on its activation, which
-// is three steps; the fourth covers a second cast on either side. Anything
-// longer is not this pattern, so the walk declines instead of scanning it.
-constexpr int kMaxExtentHops = 4;
+// Follow casts, projections and explicit destination extents through the
+// gated-normalization graph. Keep the walk bounded; unsupported or cyclic
+// provenance must decline rather than assume equal dynamic dimensions.
+constexpr int kMaxExtentHops = 32;
 
-std::optional<Extent> traceExtent(mlir::Value value, int64_t dim) {
+// A declared size is either a constant, an existing tensor dimension, or an
+// identical scalar SSA value. No arithmetic equivalence is assumed.
+std::optional<Extent> shapeSizeExtent(mlir::OpFoldResult size) {
+  if (auto constant = mlir::getConstantIntValue(size))
+    return Extent{true, *constant, {}, 0};
+  auto value = mlir::dyn_cast<mlir::Value>(size);
+  if (!value)
+    return std::nullopt;
+  for (int hop = 0; hop < kMaxExtentHops; ++hop) {
+    if (auto cast = value.getDefiningOp<mlir::arith::IndexCastOp>()) {
+      // Only peel the 64-bit index/integer bridge used by shape reification.
+      // A narrower integer can truncate an extent and is not equivalent.
+      auto integer = mlir::dyn_cast<mlir::IntegerType>(
+          cast.getIn().getType().isIndex() ? cast.getType()
+                                           : cast.getIn().getType());
+      if (integer && integer.getWidth() == 64) {
+        value = cast.getIn();
+        continue;
+      }
+    }
+    if (auto query = value.getDefiningOp<mlir::tensor::DimOp>())
+      if (auto index = query.getConstantIndex())
+        return Extent{false, 0, query.getSource(), *index};
+    return Extent{false, 0, value, -1};
+  }
+  return std::nullopt;
+}
+
+// Keep every proven anchor, so two branches can meet at a local shared input
+// without having to reach the beginning of an arbitrarily deep residual graph.
+llvm::SmallVector<Extent> traceExtents(mlir::Value value, int64_t dim) {
+  llvm::SmallVector<Extent> extents;
   mlir::Value current = value;
   int64_t axis = dim;
   for (int hop = 0; hop < kMaxExtentHops; ++hop) {
     auto type = mlir::dyn_cast<mlir::RankedTensorType>(current.getType());
     if (!type || axis < 0 || axis >= type.getRank())
-      return std::nullopt;
-    if (!type.isDynamicDim(static_cast<unsigned>(axis)))
-      return Extent{true, type.getDimSize(static_cast<unsigned>(axis)), {}, 0};
-
+      break;
+    if (!type.isDynamicDim(static_cast<unsigned>(axis))) {
+      extents.push_back(Extent{true, type.getDimSize(axis), {}, 0});
+      break;
+    }
+    extents.push_back(Extent{false, 0, current, axis});
     mlir::Operation *def = current.getDefiningOp();
     if (!def)
-      return Extent{false, 0, current, axis};
-    if (auto castOp = mlir::dyn_cast<mlir::tensor::CastOp>(def)) {
-      current = castOp.getSource();
+      break;
+    if (auto cast = mlir::dyn_cast<mlir::tensor::CastOp>(def)) {
+      current = cast.getSource();
+      continue;
+    }
+    if (auto cast = mlir::dyn_cast<mlir::hip::CastOp>(def)) {
+      current = cast.getInput();
       continue;
     }
     if (std::optional<Extent> stepped = stepProjection(def, axis)) {
-      if (stepped->isStatic)
-        return *stepped;
+      if (stepped->isStatic) {
+        extents.push_back(*stepped);
+        break;
+      }
       current = stepped->value;
       axis = stepped->dim;
       continue;
     }
-    return Extent{false, 0, current, axis};
+    if (auto dps = mlir::dyn_cast<mlir::DestinationStyleOpInterface>(def)) {
+      if (auto result = mlir::dyn_cast<mlir::OpResult>(current)) {
+        current = dps.getTiedOpOperand(result)->get();
+        continue;
+      }
+    }
+    if (auto collapse = mlir::dyn_cast<mlir::tensor::CollapseShapeOp>(def)) {
+      auto groups = collapse.getReassociationIndices();
+      // A singleton reassociation preserves this axis. Merged dynamic axes
+      // require a product proof and are deliberately left unsupported.
+      if (groups[axis].size() != 1)
+        break;
+      current = collapse.getSrc();
+      axis = groups[axis].front();
+      continue;
+    }
+    std::optional<Extent> sizeExtent;
+    if (auto expand = mlir::dyn_cast<mlir::tensor::ExpandShapeOp>(def)) {
+      sizeExtent = shapeSizeExtent(expand.getMixedOutputShape()[axis]);
+    } else if (auto slice = mlir::dyn_cast<mlir::tensor::ExtractSliceOp>(def)) {
+      auto sourceType =
+          mlir::dyn_cast<mlir::RankedTensorType>(slice.getSource().getType());
+      // Restrict to rank-preserving slices; their explicit sizes describe
+      // each output axis directly, independently of offsets and data values.
+      if (!sourceType || sourceType.getRank() != type.getRank())
+        break;
+      sizeExtent = shapeSizeExtent(slice.getMixedSizes()[axis]);
+    } else if (auto empty = mlir::dyn_cast<mlir::tensor::EmptyOp>(def)) {
+      unsigned dynamicIndex = 0;
+      for (int64_t i = 0; i < axis; ++i)
+        dynamicIndex += type.isDynamicDim(i);
+      sizeExtent = shapeSizeExtent(empty.getDynamicSizes()[dynamicIndex]);
+    }
+    if (!sizeExtent)
+      break;
+    if (sizeExtent->isStatic || sizeExtent->dim == -1) {
+      extents.push_back(*sizeExtent);
+      break;
+    }
+    current = sizeExtent->value;
+    axis = sizeExtent->dim;
   }
-  return std::nullopt;
+  return extents;
 }
 
-// True when every dynamic axis of both tensors is the same runtime extent.
-// Static axes are already settled by type equality.
+// True when each dynamic axis has a common, proven runtime extent. Static
+// axes are settled by type equality; equal type spelling alone proves no
+// equality between independent dynamic arguments.
 bool sameRuntimeShape(mlir::Value lhs, mlir::Value rhs) {
   auto lhsType = mlir::dyn_cast<mlir::RankedTensorType>(lhs.getType());
   auto rhsType = mlir::dyn_cast<mlir::RankedTensorType>(rhs.getType());
@@ -204,9 +287,13 @@ bool sameRuntimeShape(mlir::Value lhs, mlir::Value rhs) {
   for (int64_t dim : llvm::seq<int64_t>(0, lhsType.getRank())) {
     if (!lhsType.isDynamicDim(static_cast<unsigned>(dim)))
       continue;
-    std::optional<Extent> lhsExtent = traceExtent(lhs, dim);
-    std::optional<Extent> rhsExtent = traceExtent(rhs, dim);
-    if (!lhsExtent || !rhsExtent || !(*lhsExtent == *rhsExtent))
+    auto left = traceExtents(lhs, dim);
+    auto right = traceExtents(rhs, dim);
+    bool equal = false;
+    for (const auto &l : left)
+      for (const auto &r : right)
+        equal |= l == r;
+    if (!equal)
       return false;
   }
   return true;
@@ -305,11 +392,74 @@ struct SwigluFusion : public mlir::OpRewritePattern<mlir::hip::MulOp> {
   }
 };
 
+// Cast-to-f32(gate/up) -> f32 SwiGLU -> cast-to-f16. The f32 operation
+// establishes the intermediate rounding contract; the promoted kernel keeps
+// that contract while reading and writing only the original half buffers.
+struct PromotedSwigluFusion : public mlir::OpRewritePattern<mlir::hip::CastOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::hip::CastOp outputCast,
+                  mlir::PatternRewriter &rewriter) const override {
+    auto swiglu = outputCast.getInput().getDefiningOp<mlir::hip::SwigluOp>();
+    if (!swiglu || swiglu.getPromoteActivation())
+      return mlir::failure();
+    auto gateCast = swiglu.getGate().getDefiningOp<mlir::hip::CastOp>();
+    auto upCast = swiglu.getUp().getDefiningOp<mlir::hip::CastOp>();
+    if (!gateCast || !upCast || gateCast == upCast)
+      return mlir::failure();
+    auto gateType =
+        mlir::dyn_cast<mlir::RankedTensorType>(gateCast.getInput().getType());
+    auto upType =
+        mlir::dyn_cast<mlir::RankedTensorType>(upCast.getInput().getType());
+    auto outputType = mlir::dyn_cast<mlir::RankedTensorType>(
+        outputCast.getResult(0).getType());
+    auto floatType =
+        mlir::dyn_cast<mlir::RankedTensorType>(swiglu.getResult(0).getType());
+    if (!gateType || !floatType || !gateType.getElementType().isF16() ||
+        !floatType.getElementType().isF32() || gateType != upType ||
+        gateType != outputType || floatType.getShape() != gateType.getShape() ||
+        swiglu.getGate().getType() != floatType ||
+        swiglu.getUp().getType() != floatType)
+      return mlir::failure();
+    if (outputCast.getCtx() != swiglu.getCtx() ||
+        gateCast.getCtx() != swiglu.getCtx() ||
+        upCast.getCtx() != swiglu.getCtx() ||
+        !hasSingleValueUse(swiglu.getResult(0), outputCast) ||
+        !hasSingleValueUse(gateCast.getResult(0), swiglu) ||
+        !hasSingleValueUse(upCast.getResult(0), swiglu))
+      return mlir::failure();
+
+    // SwiGLU itself has a no-broadcast shape contract. The standard fusion
+    // above proves it before creating the f32 operation.
+    llvm::SmallVector<mlir::Operation *> initDefs{
+        swiglu.getOutput().getDefiningOp(),
+        gateCast.getOutput().getDefiningOp(),
+        upCast.getOutput().getDefiningOp()};
+    retargetShapeQueries(rewriter, swiglu.getResult(0), gateCast.getInput());
+    retargetShapeQueries(rewriter, gateCast.getResult(0), gateCast.getInput());
+    retargetShapeQueries(rewriter, upCast.getResult(0), upCast.getInput());
+    auto promoted = mlir::hip::SwigluOp::create(
+        rewriter, outputCast.getLoc(), outputType, outputCast.getCtx(),
+        gateCast.getInput(), upCast.getInput(), outputCast.getOutput(), true);
+    rewriter.replaceOp(outputCast, promoted.getResult(0));
+    rewriter.eraseOp(swiglu);
+    rewriter.eraseOp(gateCast);
+    rewriter.eraseOp(upCast);
+    llvm::SmallPtrSet<mlir::Operation *, 4> erased;
+    for (mlir::Operation *def : initDefs)
+      if (def && erased.insert(def).second && mlir::isOpTriviallyDead(def))
+        rewriter.eraseOp(def);
+    return mlir::success();
+  }
+};
+
 } // namespace
 
 void populateSwigluFusionPattern(mlir::RewritePatternSet &patterns,
                                  mlir::PatternBenefit benefit) {
-  patterns.add<SwigluFusion>(patterns.getContext(), benefit);
+  patterns.add<SwigluFusion, PromotedSwigluFusion>(patterns.getContext(),
+                                                   benefit);
 }
 
 } // namespace fusion_transform

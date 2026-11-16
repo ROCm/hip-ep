@@ -25,8 +25,9 @@ namespace {
 // A window axis whose extents match is copied.  Dynamic prefix dims and
 // dynamic window dims are read from the memref descriptor.  The kernel
 // recovers per-axis scale from those extents, unless the op carries
-// `scales`; then the window's scales go to wrap_resize_scaled (0 for an
-// unused window slot, which keeps the extent ratio).
+// `scales` or `runtime_scales`; then the window's scales go to
+// wrap_resize_scaled (0 for an unused window slot, which keeps the extent
+// ratio).
 //
 // Runtime ABI:
 //   wrap_resize(state, input, output,
@@ -89,12 +90,11 @@ struct ResizeOpLowering : public ConvertOpToLLVMPattern<ResizeOp> {
                      dataType == HIPDNN_EP_DATATYPE_HALF ||
                      dataType == HIPDNN_EP_DATATYPE_BFLOAT16 ||
                      dataType == HIPDNN_EP_DATATYPE_DOUBLE;
-    bool nearestInt8 =
-        op.getMode() == 0 && (dataType == HIPDNN_EP_DATATYPE_INT8 ||
-                              dataType == HIPDNN_EP_DATATYPE_UINT8);
-    if (!floatType && !nearestInt8)
+    bool int8Type = dataType == HIPDNN_EP_DATATYPE_INT8 ||
+                    dataType == HIPDNN_EP_DATATYPE_UINT8;
+    if (!floatType && !int8Type)
       return rewriter.notifyMatchFailure(
-          op, "Resize: float types, or int8/uint8 nearest");
+          op, "Resize: float, int8, or uint8 element type");
 
     Value statePtr = adaptor.getCtx();
     Value inputPtr =
@@ -158,7 +158,20 @@ struct ResizeOpLowering : public ConvertOpToLLVMPattern<ResizeOp> {
     addI64(nearest);
 
     const char *callee = kWrapResize;
-    if (ArrayAttr scales = op.getScalesAttr()) {
+    ValueRange runtimeScales = adaptor.getRuntimeScales();
+    if (!runtimeScales.empty()) {
+      if (static_cast<int64_t>(runtimeScales.size()) != launch->spatialRank)
+        return rewriter.notifyMatchFailure(
+            op, "runtime_scales length != spatial_rank");
+      Type f64Type = rewriter.getF64Type();
+      Value unused = LLVM::ConstantOp::create(rewriter, loc, f64Type,
+                                              rewriter.getF64FloatAttr(0.0));
+      for (int64_t i : llvm::seq<int64_t>(3)) {
+        paramTypes.push_back(f64Type);
+        args.push_back(i < launch->spatialRank ? runtimeScales[i] : unused);
+      }
+      callee = kWrapResizeScaled;
+    } else if (ArrayAttr scales = op.getScalesAttr()) {
       if (static_cast<int64_t>(scales.size()) != outputType.getRank())
         return rewriter.notifyMatchFailure(op, "scales length != rank");
       Type f64Type = rewriter.getF64Type();

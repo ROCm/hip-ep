@@ -2,6 +2,18 @@
 
 This folder contains the source for standalone HIP kernel unit tests.
 
+MatMulNBits, GQA decode/prefill and ragged W4 MatMul use the shared
+[adaptive timing policy](common/README.md). `--timing standard` (default)
+ends a measurement at 1,000 calls or one second of GPU time, whichever comes
+first, when its five groups agree within 3%, and otherwise at one second and ten
+calls; `--timing confirm` (10,000 calls / ten seconds, 1%) is for formal
+performance numbers; `--timing screen` (100 calls / 0.1 s) is the short
+LUT-ranking mode. Correctness checks are identical in all three. Policy, actual iterations, runtime identity
+and dispersion are emitted as `UT_TIMING` JSON records.
+
+The same leaves refresh LUT tables; see
+[Refreshing a LUT with the UT leaves](#refreshing-a-lut-with-the-ut-leaves).
+
 There are two ways to build and run them:
 
 - **Standalone development**: `make test` in this directory (see "Uniform make
@@ -69,6 +81,7 @@ prefix gets one `kernel-tests/<arch>/`, named exactly like that entry's
     hipdnn-kernel-ut-gather-block-quantized-xi64-wu4-yfp16.exe
     hipdnn-kernel-ut-gather-block-quantized-xi64-wu8-yfp16.exe
     hipdnn-kernel-ut-gather-block-quantized-xi64-wfp8-yfp16.exe
+    hipdnn-kernel-ut-cast-xany-yany-bf16.exe
 ```
 
 ### Run (on a machine with a supported AMD GPU)
@@ -90,7 +103,7 @@ controller from that `bin` directory:
 | `--mode` | `lookup`, `autotune` | `lookup` | `lookup` uses the tables embedded in `custom_kernels_<arch>.dll` and falls through to autotune on a miss, like production. `autotune` bypasses the tables (production's `online` mode). |
 | `--coverage` | `1`, `2`, `3` | `3` | Shape tier; see "Shape coverage". `1` suits a per-PR job, `3` a nightly one. |
 
-The controller runs the 16 leaves serially, with `bin` as the working
+The controller runs the 17 leaves serially, with `bin` as the working
 directory so every leaf finds `custom_kernels_<arch>.dll`. It prints one
 `[<op>/<leaf>] PASS|FAIL (<ms> ms)` line per leaf and finally
 `Combined report: <path>`.
@@ -193,7 +206,7 @@ Concretely:
   never drops a categorical situation.
 
 A tier3 (default) run of one leaf is on the order of tens to ~150 cases, and
-the whole 16-leaf suite at tier3 is budgeted at **up to ~30 min total**
+the whole 17-leaf suite at tier3 is budgeted at **up to ~30 min total**
 (measured ~20-25 min in practice) — this is intentionally wider than a
 "finishes in a minute" smoke test, because the shape axis (M=1 vs M>1,
 multiple K/N/seq scenarios) needs real coverage too, not just the categorical
@@ -258,15 +271,95 @@ unit_test/
   gqa/prefill/Xfp16_Wi8_Yfp16/
   qmoe_ragged_mm/Xfp16_Wu4_Yfp16/
   gather_block_quantized/Xi64_W{u4,u8,fp8}_Yfp16/
+  cast/Xany_Yany_bf16/
 ```
 
 `unit_test/` holds one directory per op and nothing else besides the four
-files above. The offline autotune LUT sweep tools (not UTs) live under
-`hip/autotune/<op>/tools/` next to each op's real resolver — e.g.
-`hip/autotune/gqa/tools/`, `hip/autotune/matmul_nbits/tools/`. Kernel
+files above. LUT refreshes run through these leaves (see below); the older
+offline sweep tools under `hip/autotune/<op>/tools/` remain only to reproduce
+historical logs. Kernel
 compile-time guards, which run no kernel and need no GPU (e.g.
 `LdsBarrierArchGate`), live in the repository's `test/kernel_guards/` with
 the other GPU-free CTest suites.
+
+## Refreshing a LUT with the UT leaves
+
+LUT tables are refreshed with these leaves rather than a separate sweep
+harness, so a table and the unit tests are measured by the same timer. The eight
+MatMulNBits leaves and four GQA decode/prefill leaves support it; other ops keep
+their previous tools until they are migrated.
+
+A refresh does not choose a timing preset. For each shape the ranking mode:
+
+1. checks every candidate config, always including the no-LUT default, against
+   the leaf's CPU reference;
+2. measures every candidate once with `screen`;
+3. measures the candidates within 5% of the fastest (at most four) plus the
+   default, interleaved, at `standard` goals;
+4. repeats that round at `confirm` goals only when the decision is close or
+   unclear: a winner near the 2% entry line, a winner and runner-up that
+   overlap, a nonconverged finalist, or a shape marked `priority=1`;
+5. stores the winner only when it is not the default and its median ratio to
+   the default is below 0.98; otherwise the default-equivalent entry stays.
+
+Near-tied finalists can swap between runs; that costs little and is expected.
+Rules, the `UT_RANK` record and gfx1151 results are in
+[common/README.md](common/README.md#native-lut-ranking-ut-rank-v3).
+
+To refresh `<op>` (`matmul_nbits` or `gqa`) from its existing JSON table:
+
+1. From `hip/autotune/<op>/`, generate default + old-table candidates:
+
+   ```sh
+   python scripts/update_lut.py rank-seed --from-lut lut/gfx1151.json --out <private>/candidates.csv
+   ```
+
+   The command writes the candidate CSV, `.seed.json` identities and a
+   `.skipped.json` list with reasons. Only JSON input is supported; FB is
+   compiled from JSON. `--sample 20 --seed 111313` selects reproducible points;
+   `--leaf`, `--dtype`, `--rank-phase decode|prefill`, and `--keys` filter them.
+   Choose `--activation fp16|fp32` for MatMulNBits or
+   `--prefill-kv fp16|int8` for GQA prefill at both seed and import/report steps.
+   These dimensions are absent from the respective schema keys.
+2. Build each selected leaf with
+   `make build RANK=1 BUILD_DIR=out_rank HIP_SDK=<sdk>`. On Windows, add
+   `ADLX_INCLUDE=<ADLX SDK Include directory>` for GPU clock diagnostics.
+3. Run the leaves, inspect the point report, and build a private table:
+
+   ```sh
+   python scripts/update_lut.py rank-measure --candidates <private>/candidates.csv --leaf-root <checkout>/lib/Runtime/Kernels/unit_test --out <private>/rank.log
+   python scripts/update_lut.py rank-report --rank-log <private>/rank.log --from-lut lut/gfx1151.json --out <private>/report.csv --md <private>/report.md <op options>
+   python scripts/update_lut.py rank-build --rank-log <private>/rank.log --base lut/gfx1151.json --out <private>/candidate.json <op options>
+   python scripts/update_lut.py compile --out <private>/candidate.json --fb-out <private>/candidate.fb --flatc <flatc>
+   ```
+
+   `<op options>` is `--activation fp16|fp32` for MatMulNBits and
+   `--prefill-kv fp16|int8` for GQA prefill. `rank-measure` runs one native
+   process at a time and accepts `--launcher-json` for the host's execution
+   lease wrapper. `rank-report` validates `UT_RANK` and reports the old/default/
+   winner ratios, effective selection changes, retests, exclusions and costs.
+   `rank-build` preserves weights, fallback/config indices, point order and
+   unrelated fields; unchanged selections retain their exact original index.
+4. Review the private JSON/FB before a separately authorized installation.
+
+The old table geometry is resolved against the leaf's current production
+launch descriptors; its config index is never used as a native ID. The leaf
+resolves its actual no-LUT default and deduplicates old=default before measuring.
+To include all legal configs, run `rank-catalog --candidates <private>/candidates.csv`
+with the same `--leaf-root` and `--out <private>/catalog.log`, then repeat
+`rank-seed ... --with-catalog --catalog <private>/catalog.log`. Catalog expansion
+is optional; ordinary existing-table refresh compares only default and old.
+
+For shapes absent from the old table, a hand-written CSV with
+`leaf,shape,priority,config` and one `default` row per shape remains supported.
+Use `rank-catalog` and `rank-candidates --candidates <seed.csv> --catalog <catalog.log>`
+to expand it. The host contract tests run through `make -C common test`, or
+`python3 common/test_ut_lut_from_table.py`: both existing gfx1151 tables are
+reconstructed from synthetic old-config winners with full parsed JSON equality,
+including skipped points, weights, fallback/config indices and array order.
+
+Each op's details are in [hip/autotune/matmul_nbits/README.md](../hip/autotune/matmul_nbits/README.md#refresh-through-native-ut-ranking)
+and [hip/autotune/gqa/README.md](../hip/autotune/gqa/README.md#refresh-through-native-ut-ranking).
 
 ## Adding an op or dtype leaf
 
@@ -378,6 +471,11 @@ COVERAGE=N` (any leaf, or the top-level aggregator) builds and runs it.
   `{16,32,64,128}`, `{1,16,2048}` indices). Every index list includes the first
   and last rows, negative and out-of-range indices. Outputs are compared
   bit-exactly with the CPU reference.
+- **cast** (one leaf, `Xany_Yany_bf16`, for every cast with bf16 on one side;
+  see its README for why it is not one leaf per pair): bf16 <-> {f32, f16,
+  f64, i64, i32, i16, i8, u8} and three unsupported pairs, on sizes COVERAGE
+  thins (tier1 = 2 sizes, tier2 = 3, tier3 = 4, up to ~1M elements). Outputs
+  are compared bit-exactly with a CPU reference.
 
 A new op's test cpp should follow whichever of the above shapes fit it best:
 if the kernel's dispatch paths are better covered by a small hand-picked
@@ -617,3 +715,15 @@ overall `PASS`/`FAIL`.
 
 Each leaf inlines its own ~30-line `CsvWriter`/`CsvRow` (no shared header) —
 see the top of any `test_<op>.cpp`.
+
+## QMoE model-shape profiling
+
+`qmoe/Xfp16_Wu4_Yfp16` measures the actual production QMoE wrapper, including
+top-k routing, decode/grouped expert work, activation and reduction, for
+FP16/packed uint4 fused-SwiGLU softmax-routing signatures. It accepts one
+model shape via `make test_custom ARGS="--tokens 1 --hidden 128 --inter 128
+--experts 4 --topk 2 --block-size 32 --fc1-bias 0 --fc2-bias 0
+--zero-points 0 --normalize 1 --router-weights 0" TIMING=screen`.
+The existing `qmoe_ragged_mm` leaf remains a separate primitive test; its
+timing does not stand for an entire QMoE model node. See the full-wrapper
+leaf README for supported attributes, coverage tiers and timing presets.

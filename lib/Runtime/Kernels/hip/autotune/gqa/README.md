@@ -211,3 +211,73 @@ fallbacks are runnable. It compiles the same `gqa_autotune.cpp` that ships in
 | `HIPDNN_GQA_AUTOTUNE_MODE=lookup\|online` | `lookup` (default) resolves from the table; `online` bypasses it and benchmarks on the GPU (the pre-table path, kept for A/B). Read once per session in `hip_gqa_autotune_create()`. Mirrors matmul_nbits' `HIPDNN_MATMUL_AUTOTUNE_MODE`. |
 | `HIPDNN_GQA_LUT_LOG=1` | logs the table load (`loaded N points ...`) and each shape's resolution — `exact`/`nearest` (with the distance), or `fallback`/`heuristic` — so a run's coverage is visible from this one switch. Each distinct line is printed once per process (resolve runs per token, so this dedup keeps a served model from flooding). Mirrors `HIPDNN_MATMUL_LUT_LOG`. Verification only — do not benchmark with it on. |
 | `HIPDNN_GQA_AUTOTUNE_LOG=1` | in `gqa_kernel.hip`, logs the config the kernel actually launched (in both `lookup` and `online` modes), so an `online` run can be diffed against the shipped table. Mirrors `HIPDNN_MATMUL_AUTOTUNE_LOG`: setting it alone prints **only** these autotune lines (not the rest of the debug firehose), while `HIPDNN_EP_DEBUG=1` also pulls them in as part of the full `[custom_kernels]` output. |
+
+
+## Refresh through native UT ranking
+
+Use the existing UT leaves with `RANK=1`, following
+[the common ranking contract](../../../unit_test/common/README.md#native-lut-ranking-ut-rank-v3).
+New refreshes use the UT timer and `UT_RANK` evidence; the common README
+reports the gfx1151 decision loss. The previous sweep commands remain only for
+reproducing historical logs. These commands write private outputs; installing
+a refreshed table is a separate, reviewed step.
+
+Start from the existing JSON table. From this operator's autotune directory:
+
+```sh
+python scripts/update_lut.py rank-seed --from-lut lut/gfx1151.json --prefill-kv fp16 --out /private/candidates.csv
+python scripts/update_lut.py rank-measure --candidates /private/candidates.csv --leaf-root /checkout/lib/Runtime/Kernels/unit_test --out /private/rank.log
+python scripts/update_lut.py rank-report --rank-log /private/rank.log --from-lut lut/gfx1151.json --prefill-kv fp16 --out /private/report.csv --md /private/report.md
+python scripts/update_lut.py rank-build --rank-log /private/rank.log --base lut/gfx1151.json --prefill-kv fp16 --out /private/candidate.json
+python scripts/update_lut.py compile --out /private/candidate.json --fb-out /private/candidate.fb --flatc /tools/flatc
+```
+
+`rank-seed` writes default + old config geometry per selected point. The native
+leaf resolves the no-LUT default and deduplicates equal final launches.
+`.seed.json` retains the original keys, and `.skipped.json` explains every
+unsupported, filtered or unsampled point. FB input is unsupported. Options:
+`--sample 20 --seed 111313`, `--leaf <names>`, `--dtype <types>`,
+`--rank-phase decode|prefill|both`, `--priority`, and `--keys <file>` (one JSON
+key array from `.seed.json` per line). The policy shown above must also be used
+at the report and import steps because the table omits that input dimension.
+
+Optional catalog expansion: run `rank-catalog --candidates /private/candidates.csv
+--leaf-root /checkout/lib/Runtime/Kernels/unit_test --out /private/catalog.log`,
+then repeat `rank-seed ... --with-catalog --catalog /private/catalog.log`.
+Default + old is the usual comparison; all legal configs are appended only
+when requested. Hand-written `leaf,shape,priority,config` CSVs remain useful
+for new shapes; expand them with `rank-catalog` then `rank-candidates`.
+
+Reports use the native final winner/default ratio and the latest shared phase
+for ratios involving old config, named in `old_ratio_phase`. An unavailable
+comparison is explicit. `changed` describes the effective table selection;
+`winner_unresolved` is diagnostic. GPU phase and pilot totals are distinct;
+rank wall excludes native CPU reference and launcher/resource waits.
+`python3 ../../../unit_test/common/test_ut_lut_from_table.py` checks full JSON
+roundtrip, skipped/filtered/sampled inputs, native default dedup and reports.
+
+Pass `--launcher-json '["python", "/private/lease_exec.py"]'` to `rank-measure`
+when the host uses a lease wrapper. Catalog enumeration is CPU metadata and
+does not require a GPU execution lease. The wrapper runs one native process
+at a time, waits through its actual exit and releases its own lease after GPU
+drain. Set the SDK runtime PATH as for the leaf Makefile. The tool adds no timer
+or numeric sampling controls; its log retains complete native stdout/stderr and
+nonzero leaf exits stop the command.
+
+For validation, `rank-reference-candidates --catalog <log> --rank-log <log>
+--out <csv>` selects the final top three plus the frozen default. Then use
+`rank-measure --reference` for independent sequential confirm. Routine refresh
+imports accepted ranking evidence once instead of repeating every candidate.
+
+`rank-build` requires an explicit private output outside `lut/`, preserves base
+weights/config indices/fallbacks and unrelated points, and replaces only measured
+keys. A winner that does not beat the default by >2% stores its
+default-equivalent answer;
+deleting its point could otherwise select a nearby nondefault point. Duplicate
+or malformed evidence, CPU failures and inconsistent groups are rejected.
+
+Decode retains `kv_dtype=Fp16|Int8`. Production prefill dequantizes first and
+looks up an Fp16 key, including INT8 input; choose exactly one complete-call
+prefill policy with `--prefill-kv fp16|int8`. Mixing those records at one schema
+key is rejected. Native past/window fields map to effective KV length; sink and
+smooth affect the measured entry but are not separate schema categories.

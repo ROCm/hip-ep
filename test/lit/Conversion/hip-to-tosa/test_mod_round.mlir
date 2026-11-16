@@ -101,6 +101,23 @@ func.func @round_f32(%ctx: !hip.context, %x: tensor<4xf32>,
 
 // -----
 
+// A one-element vector into a scalar is reshaped, then the same expansion
+// runs at the result type.
+// CHECK-LABEL: func.func @round_unit_to_scalar
+// CHECK: %[[X:.*]] = tosa.reshape %arg1
+// CHECK: tosa.floor %[[X]]
+// CHECK: tosa.select
+// CHECK-NOT: hip.round
+func.func @round_unit_to_scalar(%ctx: !hip.context, %x: tensor<1xf32>,
+                                %init: tensor<f32>) -> tensor<f32>
+    attributes {rock.kernel} {
+  %r = hip.round(%ctx) ins(%x : tensor<1xf32>)
+                       outs(%init : tensor<f32>) : tensor<f32>
+  return %r : tensor<f32>
+}
+
+// -----
+
 // Nothing in the expansion is f32-specific; the constants take the operand's
 // own element type.
 // CHECK-LABEL: func.func @round_f16
@@ -320,6 +337,19 @@ func.func @round_int(%ctx: !hip.context, %x: tensor<4xi32>,
   %r = hip.round(%ctx) ins(%x : tensor<4xi32>)
                        outs(%init : tensor<4xi32>) : tensor<4xi32>
   return %r : tensor<4xi32>
+}
+
+// -----
+
+// A length-4 vector is not a scalar. The input stays a different type from
+// the result, so the expansion is not built.
+func.func @round_nonunit_to_scalar(%ctx: !hip.context, %x: tensor<4xf32>,
+                                   %init: tensor<f32>) -> tensor<f32>
+    attributes {rock.kernel} {
+  // expected-error @+1 {{failed to legalize operation 'hip.round'}}
+  %r = hip.round(%ctx) ins(%x : tensor<4xf32>)
+                       outs(%init : tensor<f32>) : tensor<f32>
+  return %r : tensor<f32>
 }
 
 // -----

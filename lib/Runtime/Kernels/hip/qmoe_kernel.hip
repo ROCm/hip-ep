@@ -19,7 +19,9 @@
 #include <unordered_map>
 
 static constexpr int kBlock = 256;
-static constexpr int kMaxK = 16;
+static constexpr int kMaxK = 32;
+static_assert(kMaxK <= 32, "topk_routing_wave_kernel keeps selected expert i "
+                           "in lane i of a 32-lane group");
 // topk_routing runs one block per token with this many threads; per-expert exp
 // values are staged in dynamic shared memory sized num_experts at launch, so
 // there is no compile-time cap on the expert count.
@@ -238,23 +240,208 @@ __global__ void topk_routing_wave_kernel(
 }
 
 // ---------------------------------------------------------------------------
+// Sigmoid + correction-bias routing over fp32 logits: the experts are the
+// top-k of sigmoid(logit) + bias in descending order, ties to the lower index
+// (ONNX TopK), and each weight is its unbiased sigmoid score, divided by the
+// sum over the k selected when `normalize`, times `scale`, rounded once to
+// fp16. Same output layout as topk_routing_kernel. A NaN score sorts last.
+// ---------------------------------------------------------------------------
+__global__ void qmoe_sigmoid_bias_route_kernel(
+    const float* __restrict__ logits,
+    const float* __restrict__ correction_bias,
+    int32_t* __restrict__ expert_indices,
+    __half* __restrict__ expert_weights,
+    int64_t num_tokens,
+    int64_t num_experts,
+    int64_t k,
+    int64_t normalize,
+    float scale) {
+  const int token = static_cast<int>(blockIdx.x);
+  if (token >= num_tokens) return;
+
+  const float* row = logits + static_cast<int64_t>(token) * num_experts;
+  const int tid = static_cast<int>(threadIdx.x);
+  const int nthreads = static_cast<int>(blockDim.x);
+  const int ik = static_cast<int>(k < kMaxK ? k : kMaxK);
+  const int ne = static_cast<int>(num_experts);
+
+  extern __shared__ float s_dyn[];
+  float* s_prob = s_dyn;                                 // [ne] sigmoid
+  float* s_sel = s_dyn + ne;                             // [ne] sigmoid + bias
+  int* s_taken = reinterpret_cast<int*>(s_dyn + 2 * ne); // [ne]
+  __shared__ float s_red[kRoutingBlock];
+  __shared__ int s_idx[kRoutingBlock];
+  __shared__ float s_w[kMaxK];
+
+  for (int e = tid; e < ne; e += nthreads) {
+    const float p = 1.0f / (1.0f + expf(-row[e]));
+    const float sel = p + correction_bias[e];
+    s_prob[e] = p;
+    s_sel[e] = sel == sel ? sel : -INFINITY;
+    s_taken[e] = 0;
+  }
+  __syncthreads();
+
+  for (int i = 0; i < ik; i++) {
+    float bv = -INFINITY;
+    int bi = ne;
+    for (int e = tid; e < ne; e += nthreads) {
+      const float v = s_sel[e];
+      if (!s_taken[e] && (v > bv || (v == bv && e < bi))) {
+        bv = v;
+        bi = e;
+      }
+    }
+    s_red[tid] = bv;
+    s_idx[tid] = bi;
+    __syncthreads();
+    for (int s = nthreads / 2; s > 0; s >>= 1) {
+      if (tid < s) {
+        const float ov = s_red[tid + s];
+        const int oi = s_idx[tid + s];
+        if (oi < ne && (s_idx[tid] >= ne || ov > s_red[tid] ||
+                        (ov == s_red[tid] && oi < s_idx[tid]))) {
+          s_red[tid] = ov;
+          s_idx[tid] = oi;
+        }
+      }
+      __syncthreads();
+    }
+    if (tid == 0) {
+      const int win = s_idx[0];
+      expert_indices[static_cast<int64_t>(token) * k + i] = win;
+      s_w[i] = s_prob[win];
+      s_taken[win] = 1;
+    }
+    __syncthreads();
+  }
+
+  if (tid == 0) {
+    float sum = 0.0f;
+    for (int i = 0; i < ik; i++) sum += s_w[i];
+    for (int i = 0; i < ik; i++) {
+      const float w = normalize ? s_w[i] / sum : s_w[i];
+      expert_weights[static_cast<int64_t>(token) * k + i] =
+          static_cast<__half>(w * scale);
+    }
+  }
+}
+
+// Same contract as qmoe_sigmoid_bias_route_kernel for num_experts <= 32 * EPL
+// and k <= 32, laid out like topk_routing_wave_kernel: one 32-lane group per
+// token keeps EPL experts per lane in registers and reduces with shuffles.
+// Selected experts are tracked in a bitmask rather than by overwriting the
+// score, because a NaN score is stored as -inf and must stay selectable.
+template <int EPL>
+__global__ void qmoe_sigmoid_bias_route_wave_kernel(
+    const float* __restrict__ logits,
+    const float* __restrict__ correction_bias,
+    int32_t* __restrict__ expert_indices,
+    __half* __restrict__ expert_weights,
+    int num_experts, int k, int normalize, float scale) {
+  const int token = static_cast<int>(blockIdx.x);
+  const int lane = static_cast<int>(threadIdx.x);
+  const int ne = num_experts;
+  const float* row = logits + static_cast<int64_t>(token) * ne;
+
+  float prob[EPL], sel[EPL];
+  unsigned live = 0;
+#pragma unroll
+  for (int j = 0; j < EPL; j++) {
+    const int e = lane + 32 * j;
+    prob[j] = 0.0f;
+    sel[j] = -INFINITY;
+    if (e < ne) {
+      const float p = 1.0f / (1.0f + expf(-row[e]));
+      const float s = p + correction_bias[e];
+      prob[j] = p;
+      sel[j] = s == s ? s : -INFINITY;
+      live |= 1u << j;
+    }
+  }
+
+  // k rounds of argmax with ties to the lower expert index. Each lane scans
+  // its experts in ascending index order; bi == ne marks "nothing left".
+  float my_w = 0.0f, sum = 0.0f;
+  int my_idx = 0;
+  for (int i = 0; i < k; i++) {
+    float bv = -INFINITY, bp = 0.0f;
+    int bi = ne;
+#pragma unroll
+    for (int j = 0; j < EPL; j++) {
+      if ((live >> j & 1u) && (bi == ne || sel[j] > bv)) {
+        bv = sel[j];
+        bp = prob[j];
+        bi = lane + 32 * j;
+      }
+    }
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1) {
+      const float ov = __shfl_xor(bv, off);
+      const float op = __shfl_xor(bp, off);
+      const int oi = __shfl_xor(bi, off);
+      if (oi < ne &&
+          (bi >= ne || ov > bv || (ov == bv && oi < bi))) {
+        bv = ov;
+        bp = op;
+        bi = oi;
+      }
+    }
+#pragma unroll
+    for (int j = 0; j < EPL; j++)
+      if (bi == lane + 32 * j) live &= ~(1u << j);
+    sum += bp;
+    if (lane == i) {
+      my_w = bp;
+      my_idx = bi;
+    }
+  }
+
+  if (lane < k) {
+    const float w = normalize ? my_w / sum : my_w;
+    expert_indices[static_cast<int64_t>(token) * k + lane] = my_idx;
+    expert_weights[static_cast<int64_t>(token) * k + lane] =
+        static_cast<__half>(w * scale);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Gather (fp16 only): collect rows by index.
 // output[i, :] = input[token_ids[i], :]
 // ---------------------------------------------------------------------------
+template <int kVec>
+struct alignas(2 * kVec) HalfVec {
+  __half h[kVec];
+};
+
+// Vector width for kernels that move fp16 rows: 8 when every row and base
+// pointer allows 16-byte accesses, else 1.
+static int half_vec_width(int64_t width, const void* a, const void* b) {
+  return width % 8 == 0 &&
+                 ((reinterpret_cast<uintptr_t>(a) |
+                   reinterpret_cast<uintptr_t>(b)) & 15) == 0
+             ? 8
+             : 1;
+}
+
+template <int kVec>
 __global__ void gather_tokens_kernel(
     const __half* __restrict__ input,
     __half* __restrict__ gathered,
     const int32_t* __restrict__ token_ids,
     int64_t width,
     int64_t count) {
+  using Vec = HalfVec<kVec>;
+  const int64_t vec_width = width / kVec;
   int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (idx >= count * width) return;
+  if (idx >= count * vec_width) return;
 
-  int64_t row = idx / width;
-  int64_t col = idx % width;
+  int64_t row = idx / vec_width;
+  int64_t col = idx - row * vec_width;
   int64_t src_row = static_cast<int64_t>(token_ids[row]);
 
-  gathered[idx] = input[src_row * width + col];
+  reinterpret_cast<Vec*>(gathered)[idx] =
+      reinterpret_cast<const Vec*>(input)[src_row * vec_width + col];
 }
 
 // ---------------------------------------------------------------------------
@@ -282,29 +469,90 @@ __global__ void add_bias_kernel(
 //   G = min(gate, limit)
 //   L = clamp(linear, -limit, limit)
 //   out = G * sigmoid(alpha * G) * (L + beta)
+//
+// The product can leave the fp16 range while gate/linear fit (an activation
+// of ~8e5 from inputs of ~1e3). Each row is therefore computed in fp32 and
+// stored as out / s, s a power of two (exact) that brings the row's largest
+// |out| to at most kSwigluRowMax; row_scale[row] = s and the routed-pair
+// reduce multiplies it back in, since fc2 is linear in its input row. The
+// bound leaves fc2's fp16 output room above it. s is 1 for every row already
+// within the bound, so those rows are stored exactly as before. With
+// row_scale null no row is scaled.
 // ---------------------------------------------------------------------------
-__global__ void swiglu_kernel(
+// One block per row; each thread produces kVec contiguous outputs from
+// 2 * kVec interleaved inputs (inter_size % kVec == 0).
+constexpr float kSwigluRowMax = 1024.0f;
+constexpr int kSwigluBlock = 256;
+
+__device__ __forceinline__ float swiglu_value(float g, float l, float alpha,
+                                              float beta, float limit) {
+  const float G = fminf(g, limit);
+  const float L = fmaxf(fminf(l, limit), -limit);
+  const float sigmoid_val = 1.0f / (1.0f + expf(-alpha * G));
+  return G * sigmoid_val * (L + beta);
+}
+
+template <int kVec>
+__global__ void __launch_bounds__(kSwigluBlock) swiglu_kernel(
     const __half* __restrict__ input,
     __half* __restrict__ output,
-    int64_t n,
+    float* __restrict__ row_scale,
     int64_t inter_size,
     float alpha,
     float beta,
     float limit) {
-  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (idx >= n * inter_size) return;
+  using In = HalfVec<2 * kVec>;
+  using Out = HalfVec<kVec>;
+  const int64_t row = blockIdx.x;
+  const int tid = threadIdx.x;
+  const int64_t vec_cols = inter_size / kVec;
+  const In* in = reinterpret_cast<const In*>(input + row * 2 * inter_size);
+  Out* out = reinterpret_cast<Out*>(output + row * inter_size);
 
-  int64_t row = idx / inter_size;
-  int64_t col = idx % inter_size;
+  float inv_scale = 1.0f;
+  if (row_scale) {
+    float local_max = 0.0f;
+    for (int64_t c = tid; c < vec_cols; c += kSwigluBlock) {
+      const In v = in[c];
+#pragma unroll
+      for (int j = 0; j < kVec; ++j)
+        local_max = fmaxf(
+            local_max, fabsf(swiglu_value(static_cast<float>(v.h[2 * j]),
+                                          static_cast<float>(v.h[2 * j + 1]),
+                                          alpha, beta, limit)));
+    }
+    constexpr int WARP_SIZE = HIPDNN_WAVE_SIZE;
+    constexpr int NUM_WARPS = kSwigluBlock / WARP_SIZE;
+    for (int off = WARP_SIZE >> 1; off > 0; off >>= 1)
+      local_max = fmaxf(local_max, __shfl_down(local_max, off));
+    __shared__ float smax[NUM_WARPS];
+    if ((tid & (WARP_SIZE - 1)) == 0)
+      smax[tid / WARP_SIZE] = local_max;
+    __syncthreads();
+    float row_max = 0.0f;
+#pragma unroll
+    for (int i = 0; i < NUM_WARPS; i++)
+      row_max = fmaxf(row_max, smax[i]);
+    float scale = 1.0f;
+    if (row_max > kSwigluRowMax && isfinite(row_max))
+      scale = exp2f(ceilf(log2f(row_max / kSwigluRowMax)));
+    inv_scale = 1.0f / scale;
+    if (tid == 0)
+      row_scale[row] = scale;
+  }
 
-  float g = static_cast<float>(input[row * 2 * inter_size + 2 * col]);
-  float l = static_cast<float>(input[row * 2 * inter_size + 2 * col + 1]);
-
-  float G = fminf(g, limit);
-  float L = fmaxf(fminf(l, limit), -limit);
-
-  float sigmoid_val = 1.0f / (1.0f + expf(-alpha * G));
-  output[idx] = static_cast<__half>(G * sigmoid_val * (L + beta));
+  for (int64_t c = tid; c < vec_cols; c += kSwigluBlock) {
+    const In v = in[c];
+    Out o;
+#pragma unroll
+    for (int j = 0; j < kVec; ++j)
+      o.h[j] = static_cast<__half>(
+          swiglu_value(static_cast<float>(v.h[2 * j]),
+                       static_cast<float>(v.h[2 * j + 1]), alpha, beta,
+                       limit) *
+          inv_scale);
+    out[c] = o;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -352,13 +600,18 @@ __global__ void scatter_add_kernel(
 //   sorted_token_ids [num_tokens * k]   int32 — token ids grouped by expert
 //   sorted_weights   [num_tokens * k]   fp16  — weights aligned with sorted ids
 //
-// One block, one thread per expert. num_experts is small in practice (32 for
-// gpt-oss-20b); each thread does num_tokens*k cheap comparisons. Two passes
-// (count + scatter) guarantee deterministic in-expert ordering identical to
-// the host version (token-major), which keeps numerical reproducibility for
-// the downstream weighted scatter_add.
+// One block per expert. Every block builds the whole expert histogram in LDS,
+// so block e derives its own offset (pairs routed below e) and row-group base
+// without a second launch or a grid-wide barrier. The in-expert order is the
+// host loop's token-major pair order, which keeps the downstream reductions
+// reproducible: threads own contiguous pair slices, and an exclusive scan of
+// their match counts places each thread's writes in ascending pair order.
+// Pairs naming no expert in [0, num_experts) are dropped, and the unused tail
+// of sorted_token_ids is zeroed so fixed-size gathers stay in bounds.
 // ---------------------------------------------------------------------------
-__global__ void bucket_tokens_kernel(
+static constexpr int kBucketBlock = 256;
+
+__global__ void __launch_bounds__(kBucketBlock) bucket_tokens_kernel(
     const int32_t* __restrict__ expert_indices,
     const __half* __restrict__ expert_weights,
     int32_t* __restrict__ expert_counts,
@@ -374,76 +627,99 @@ __global__ void bucket_tokens_kernel(
     int k,
     int num_experts,
     int row_group_size) {
-  int eid = static_cast<int>(threadIdx.x);
-  const bool active = eid < num_experts;
+  extern __shared__ int32_t s_hist[];  // [num_experts]
+  __shared__ int32_t s_scan[kBucketBlock];
+  __shared__ int32_t s_below[kBucketBlock];
+  __shared__ int32_t s_groups_below[kBucketBlock];
 
-  // Pass 1: count occurrences of this eid across all (token, slot) pairs.
-  int local_count = 0;
-  int total_pairs = num_tokens * k;
-  if (active) {
-    for (int i = 0; i < total_pairs; i++) {
-      if (expert_indices[i] == eid) local_count++;
-    }
-    expert_counts[eid] = local_count;
-  }
-
+  const int e = static_cast<int>(blockIdx.x);
+  const int tid = static_cast<int>(threadIdx.x);
+  const int total_pairs = num_tokens * k;
+  for (int x = tid; x < num_experts; x += kBucketBlock) s_hist[x] = 0;
   __syncthreads();
 
-  // Pass 2: serial prefix sum on a single thread. num_experts is small (~32)
-  // so a parallel scan would cost more in __syncthreads + LDS than it saves.
-  if (eid == 0) {
-    int sum = 0;
-    expert_offsets[0] = 0;
-    for (int e = 0; e < num_experts; e++) {
-      sum += expert_counts[e];
-      expert_offsets[e + 1] = sum;
+  const int chunk = (total_pairs + kBucketBlock - 1) / kBucketBlock;
+  const int lo = min(tid * chunk, total_pairs);
+  const int hi = min(lo + chunk, total_pairs);
+  int mine = 0;
+  for (int i = lo; i < hi; ++i) {
+    const int x = expert_indices[i];
+    if (x >= 0 && x < num_experts) {
+      atomicAdd(&s_hist[x], 1);
+      mine += x == e;
+    }
+  }
+  s_scan[tid] = mine;
+  __syncthreads();
+
+  const bool emit_groups =
+      row_groups && row_group_count && fc1_queue_head && fc2_queue_head;
+  int below = 0;
+  int groups_below = 0;
+  for (int x = tid; x < e; x += kBucketBlock) {
+    const int c = s_hist[x];
+    below += c;
+    if (emit_groups) groups_below += (c + row_group_size - 1) / row_group_size;
+  }
+  s_below[tid] = below;
+  s_groups_below[tid] = groups_below;
+  __syncthreads();
+  for (int off = kBucketBlock / 2; off > 0; off >>= 1) {
+    if (tid < off) {
+      s_below[tid] += s_below[tid + off];
+      s_groups_below[tid] += s_groups_below[tid + off];
+    }
+    __syncthreads();
+  }
+  for (int off = 1; off < kBucketBlock; off <<= 1) {
+    const int v = tid >= off ? s_scan[tid - off] : 0;
+    __syncthreads();
+    s_scan[tid] += v;
+    __syncthreads();
+  }
+
+  const int offset = s_below[0];
+  const int count = s_hist[e];
+  int w = offset + s_scan[tid] - mine;
+  for (int i = lo; i < hi && w < offset + s_scan[tid]; ++i) {
+    if (expert_indices[i] == e) {
+      sorted_token_ids[w] = i / k;
+      sorted_weights[w] = expert_weights[i];
+      if (pair_to_sorted) pair_to_sorted[i] = w;
+      ++w;
     }
   }
 
-  __syncthreads();
-
-  // Pass 3: scatter (token_id, weight) pairs into the sorted layout.
-  // Iterate (t, s) in the same order as the host loop being replaced so the
-  // per-expert ordering is bit-identical (matters for scatter_add reductions).
-  if (active) {
-    int write_pos = expert_offsets[eid];
-    for (int t = 0; t < num_tokens; t++) {
-      for (int s = 0; s < k; s++) {
-        int idx = t * k + s;
-        if (expert_indices[idx] == eid) {
-          sorted_token_ids[write_pos] = t;
-          sorted_weights[write_pos] = expert_weights[idx];
-          if (pair_to_sorted) pair_to_sorted[idx] = write_pos;
-          write_pos++;
-        }
-      }
-    }
+  const bool last = e == num_experts - 1;
+  if (tid == 0) {
+    expert_counts[e] = count;
+    expert_offsets[e] = offset;
+    if (last) expert_offsets[num_experts] = offset + count;
   }
-
-  __syncthreads();
+  if (last) {
+    for (int i = offset + count + tid; i < total_pairs; i += kBucketBlock)
+      sorted_token_ids[i] = 0;
+  }
 
   // The ragged path additionally emits adaptive row groups and resets both
   // persistent work queues. Descriptors are
   // {expert,row_begin,row_count,reserved}; the ragged MatMul selects its
   // stage-specific task kind so FC1 and FC2 are not coupled here.
-  if (eid == 0 && row_groups && row_group_count && fc1_queue_head &&
-      fc2_queue_head) {
-    int group = 0;
-    for (int expert = 0; expert < num_experts; ++expert) {
-      const int begin = expert_offsets[expert];
-      const int end = expert_offsets[expert + 1];
-      for (int row = begin; row < end; row += row_group_size) {
-        const int rows = min(row_group_size, end - row);
-        row_groups[group * 4 + 0] = expert;
-        row_groups[group * 4 + 1] = row;
-        row_groups[group * 4 + 2] = rows;
-        row_groups[group * 4 + 3] = 0;
-        ++group;
-      }
+  if (emit_groups) {
+    const int base = s_groups_below[0];
+    const int groups = (count + row_group_size - 1) / row_group_size;
+    for (int g = tid; g < groups; g += kBucketBlock) {
+      int32_t* d = row_groups + 4 * (base + g);
+      d[0] = e;
+      d[1] = offset + g * row_group_size;
+      d[2] = min(row_group_size, count - g * row_group_size);
+      d[3] = 0;
     }
-    *row_group_count = group;
-    *fc1_queue_head = 0;
-    *fc2_queue_head = 0;
+    if (last && tid == 0) *row_group_count = base + groups;
+    if (e == 0 && tid == 0) {
+      *fc1_queue_head = 0;
+      *fc2_queue_head = 0;
+    }
   }
 }
 
@@ -474,8 +750,15 @@ extern "C" int hip_qmoe_topk_routing(
             (long long)element_size_bytes);
     return -1;
   }
+  if (k > kMaxK) {
+    fprintf(stderr,
+            "[custom_kernels] hip_qmoe_topk_routing: k=%lld > %d not "
+            "supported\n",
+            (long long)k, kMaxK);
+    return -1;
+  }
   (void)hipGetLastError();
-  if (num_experts <= 256 && k <= kMaxK && k <= num_experts) {
+  if (num_experts <= 256 && k <= num_experts) {
     // One 32-lane group per token, up to 8 experts per lane. With
     // k > num_experts the argmax would pick padding lanes, whose indices lie
     // past num_experts; the block kernel keeps every index in range.
@@ -519,6 +802,66 @@ extern "C" int hip_qmoe_topk_routing(
   return static_cast<int>(err);
 }
 
+extern "C" int hip_qmoe_sigmoid_bias_routing(
+    void* stream,
+    const void* logits,
+    const void* correction_bias,
+    void* expert_indices,
+    void* expert_weights,
+    int64_t num_tokens,
+    int64_t num_experts,
+    int64_t k,
+    int64_t normalize,
+    float scale,
+    int64_t element_size_bytes) {
+  if (num_tokens <= 0) return 0;
+  if (element_size_bytes != 2 || !logits || !correction_bias || k <= 0 ||
+      k > kMaxK || k > num_experts) {
+    fprintf(stderr,
+            "[custom_kernels] hip_qmoe_sigmoid_bias_routing: unsupported "
+            "element_size=%lld k=%lld experts=%lld\n",
+            (long long)element_size_bytes, (long long)k,
+            (long long)num_experts);
+    return -1;
+  }
+  hipStream_t s = static_cast<hipStream_t>(stream);
+  const auto* lg = static_cast<const float*>(logits);
+  const auto* cb = static_cast<const float*>(correction_bias);
+  auto* idx = static_cast<int32_t*>(expert_indices);
+  auto* w = static_cast<__half*>(expert_weights);
+  (void)hipGetLastError();
+  if (num_experts <= 256) {
+    const dim3 grid(static_cast<unsigned>(num_tokens)), block(32);
+    const int ne = static_cast<int>(num_experts), ik = static_cast<int>(k);
+    const int nz = normalize ? 1 : 0;
+    if (num_experts <= 32)
+      hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_sigmoid_bias_route_wave_kernel<1>),
+                         grid, block, 0, s, lg, cb, idx, w, ne, ik, nz, scale);
+    else if (num_experts <= 64)
+      hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_sigmoid_bias_route_wave_kernel<2>),
+                         grid, block, 0, s, lg, cb, idx, w, ne, ik, nz, scale);
+    else if (num_experts <= 128)
+      hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_sigmoid_bias_route_wave_kernel<4>),
+                         grid, block, 0, s, lg, cb, idx, w, ne, ik, nz, scale);
+    else
+      hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_sigmoid_bias_route_wave_kernel<8>),
+                         grid, block, 0, s, lg, cb, idx, w, ne, ik, nz, scale);
+  } else {
+    // s_prob, s_sel and s_taken, one 4-byte slot per expert each.
+    const size_t shmem = 3 * static_cast<size_t>(num_experts) * sizeof(float);
+    hipLaunchKernelGGL(qmoe_sigmoid_bias_route_kernel,
+                       dim3(static_cast<unsigned>(num_tokens)),
+                       dim3(kRoutingBlock), shmem, s, lg, cb, idx, w,
+                       num_tokens, num_experts, k, normalize, scale);
+  }
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess)
+    fprintf(stderr,
+            "[custom_kernels] hip_qmoe_sigmoid_bias_routing failed: %s\n",
+            hipGetErrorString(err));
+  return static_cast<int>(err);
+}
+
 extern "C" int hip_qmoe_gather_tokens(
     void* stream,
     const void* input,
@@ -542,10 +885,21 @@ extern "C" int hip_qmoe_gather_tokens(
     return -1;
   }
 
-  hipLaunchKernelGGL(gather_tokens_kernel, dim3(grid), dim3(kBlock),
-                     0, s, static_cast<const __half*>(input),
-                     static_cast<__half*>(gathered),
-                     static_cast<const int32_t*>(token_ids), width, count);
+  (void)hipGetLastError();
+  if (half_vec_width(width, input, gathered) == 8) {
+    const int64_t vec_total = total / 8;
+    hipLaunchKernelGGL(gather_tokens_kernel<8>,
+                       dim3(static_cast<unsigned>((vec_total + kBlock - 1) /
+                                                  kBlock)),
+                       dim3(kBlock), 0, s, static_cast<const __half*>(input),
+                       static_cast<__half*>(gathered),
+                       static_cast<const int32_t*>(token_ids), width, count);
+  } else {
+    hipLaunchKernelGGL(gather_tokens_kernel<1>, dim3(grid), dim3(kBlock), 0, s,
+                       static_cast<const __half*>(input),
+                       static_cast<__half*>(gathered),
+                       static_cast<const int32_t*>(token_ids), width, count);
+  }
 
   hipError_t err = hipGetLastError();
   if (err != hipSuccess)
@@ -591,6 +945,7 @@ extern "C" int hip_qmoe_swiglu(
     void* stream,
     const void* input,
     void* output,
+    void* row_scale,
     int64_t n,
     int64_t inter_size,
     float alpha,
@@ -600,8 +955,6 @@ extern "C" int hip_qmoe_swiglu(
   if (n <= 0 || inter_size <= 0) return 0;
 
   hipStream_t s = static_cast<hipStream_t>(stream);
-  int64_t total = n * inter_size;
-  int grid = static_cast<int>((total + kBlock - 1) / kBlock);
 
   // fp16 only — see hip_qmoe_topk_routing for rationale.
   if (element_size_bytes != 2) {
@@ -612,10 +965,25 @@ extern "C" int hip_qmoe_swiglu(
     return -1;
   }
 
-  hipLaunchKernelGGL(swiglu_kernel, dim3(grid), dim3(kBlock), 0, s,
-                     static_cast<const __half*>(input),
-                     static_cast<__half*>(output), n, inter_size, alpha,
-                     beta, limit);
+  (void)hipGetLastError();
+  // Four outputs per thread: a 16-byte load of interleaved gate/up pairs.
+  // Rows keep that alignment since their strides are multiples of 16 / 8 bytes.
+  const dim3 grid(static_cast<unsigned>(n));
+  if (inter_size % 4 == 0 &&
+      ((reinterpret_cast<uintptr_t>(input) & 15) |
+       (reinterpret_cast<uintptr_t>(output) & 7)) == 0) {
+    hipLaunchKernelGGL(swiglu_kernel<4>, grid, dim3(kSwigluBlock), 0, s,
+                       static_cast<const __half*>(input),
+                       static_cast<__half*>(output),
+                       static_cast<float*>(row_scale), inter_size, alpha,
+                       beta, limit);
+  } else {
+    hipLaunchKernelGGL(swiglu_kernel<1>, grid, dim3(kSwigluBlock), 0, s,
+                       static_cast<const __half*>(input),
+                       static_cast<__half*>(output),
+                       static_cast<float*>(row_scale), inter_size, alpha,
+                       beta, limit);
+  }
 
   hipError_t err = hipGetLastError();
   if (err != hipSuccess)
@@ -686,18 +1054,17 @@ extern "C" int hip_qmoe_bucket_tokens(
     return -1;
   }
 
-  // One block, one thread per expert. Block dim must be a multiple of the
-  // wave size (32 on RDNA3) and <= 1024 (max block size). gpt-oss-20b has 32.
+  // One block per expert, each holding a num_experts-entry LDS histogram.
   if (num_experts > 1024) {
     fprintf(stderr,
             "[custom_kernels] hip_qmoe_bucket_tokens: num_experts=%lld > 1024 "
-            "not supported (would exceed max block size)\n",
+            "not supported\n",
             (long long)num_experts);
     return -1;
   }
-  int block_dim = static_cast<int>(((num_experts + 31) / 32) * 32);
-
-  hipLaunchKernelGGL(bucket_tokens_kernel, dim3(1), dim3(block_dim), 0, s,
+  (void)hipGetLastError();
+  hipLaunchKernelGGL(bucket_tokens_kernel, dim3(static_cast<unsigned>(num_experts)),
+                     dim3(kBucketBlock), num_experts * sizeof(int32_t), s,
                      static_cast<const int32_t*>(expert_indices),
                      static_cast<const __half*>(expert_weights),
                      static_cast<int32_t*>(expert_counts),
@@ -751,9 +1118,10 @@ extern "C" int hip_qmoe_bucket_tokens_ragged(
   }
 
   hipStream_t s = static_cast<hipStream_t>(stream);
-  const int block_dim = static_cast<int>(((num_experts + 31) / 32) * 32);
+  (void)hipGetLastError();
   hipLaunchKernelGGL(
-      bucket_tokens_kernel, dim3(1), dim3(block_dim), 0, s,
+      bucket_tokens_kernel, dim3(static_cast<unsigned>(num_experts)),
+      dim3(kBucketBlock), num_experts * sizeof(int32_t), s,
       static_cast<const int32_t*>(expert_indices),
       static_cast<const __half*>(expert_weights),
       static_cast<int32_t*>(expert_counts),
@@ -776,70 +1144,101 @@ extern "C" int hip_qmoe_bucket_tokens_ragged(
 }
 
 // ---------------------------------------------------------------------------
-// Device-side row tiles for the grouped expert GEMM. Experts with
-// 0 < count <= split_rows get tiles of rows_small rows, larger ones tiles of
-// rows_big, each as (expert, row0, rows) in ascending expert order. Counts are
-// staged in LDS so the serial scan on thread 0 never waits on global memory.
+// Device-side row tiles for the grouped expert GEMMs. Class c takes the
+// experts with lo[c] < count <= hi[c] (hi[c] < 0: no upper bound) and cuts
+// each into tiles of rows[c] rows, written as (expert, row0, rows) in
+// ascending expert order. Classes may overlap, so one launch can tile the
+// same experts at two heights for two GEMMs. Counts are staged in LDS, and
+// thread c runs class c's serial scan so the classes scan concurrently.
 // ---------------------------------------------------------------------------
+static constexpr int kMaxRowTileClasses = HIP_QMOE_MAX_ROW_TILE_CLASSES;
+
+struct RowTileClasses {
+  int n;
+  int lo[kMaxRowTileClasses];
+  int hi[kMaxRowTileClasses];
+  int rows[kMaxRowTileClasses];
+  int32_t* tiles[kMaxRowTileClasses];
+  int32_t* num[kMaxRowTileClasses];
+};
+
+__device__ __forceinline__ bool row_tile_class_has(const RowTileClasses& rc,
+                                                   int cls, int count) {
+  return count > rc.lo[cls] && (rc.hi[cls] < 0 || count <= rc.hi[cls]);
+}
+
 __global__ void qmoe_build_row_tiles_kernel(
-    const int32_t* __restrict__ expert_counts, int num_experts, int split_rows,
-    int rows_small, int rows_big, int32_t* __restrict__ tiles_small,
-    int32_t* __restrict__ num_small, int32_t* __restrict__ tiles_big,
-    int32_t* __restrict__ num_big) {
-  extern __shared__ int32_t tile_base[];  // [2][num_experts]
+    const int32_t* __restrict__ expert_counts, int num_experts,
+    RowTileClasses rc) {
+  extern __shared__ int32_t tile_base[];  // [rc.n][num_experts], then counts
+  int32_t* counts = tile_base + rc.n * num_experts;
   for (int e = threadIdx.x; e < num_experts; e += blockDim.x) {
     const int c = expert_counts[e];
-    tile_base[e] = (c > 0 && c <= split_rows) ? (c + rows_small - 1) / rows_small : 0;
-    tile_base[num_experts + e] = c > split_rows ? (c + rows_big - 1) / rows_big : 0;
+    counts[e] = c;
+    for (int cls = 0; cls < rc.n; cls++)
+      tile_base[cls * num_experts + e] =
+          row_tile_class_has(rc, cls, c) ? (c + rc.rows[cls] - 1) / rc.rows[cls]
+                                         : 0;
   }
   __syncthreads();
-  if (threadIdx.x == 0) {
-    int s = 0, b = 0;
+  if (static_cast<int>(threadIdx.x) < rc.n) {
+    int32_t* base = tile_base + threadIdx.x * num_experts;
+    int total = 0;
     for (int e = 0; e < num_experts; e++) {
-      const int ns = tile_base[e], nb = tile_base[num_experts + e];
-      tile_base[e] = s;
-      tile_base[num_experts + e] = b;
-      s += ns;
-      b += nb;
+      const int nt = base[e];
+      base[e] = total;
+      total += nt;
     }
-    *num_small = s;
-    *num_big = b;
+    *rc.num[threadIdx.x] = total;
   }
   __syncthreads();
   for (int e = threadIdx.x; e < num_experts; e += blockDim.x) {
-    const int c = expert_counts[e];
-    if (c <= 0) continue;
-    const bool small = c <= split_rows;
-    const int rows = small ? rows_small : rows_big;
-    int32_t* out = (small ? tiles_small : tiles_big) +
-                   3 * tile_base[(small ? 0 : num_experts) + e];
-    for (int r0 = 0; r0 < c; r0 += rows, out += 3) {
-      out[0] = e;
-      out[1] = r0;
-      out[2] = min(rows, c - r0);
+    const int c = counts[e];
+    for (int cls = 0; cls < rc.n; cls++) {
+      if (!row_tile_class_has(rc, cls, c)) continue;
+      const int rows = rc.rows[cls];
+      int32_t* out = rc.tiles[cls] + 3 * tile_base[cls * num_experts + e];
+      for (int r0 = 0; r0 < c; r0 += rows, out += 3) {
+        out[0] = e;
+        out[1] = r0;
+        out[2] = min(rows, c - r0);
+      }
     }
   }
 }
 
-extern "C" int hip_qmoe_build_row_tiles(
+extern "C" int hip_qmoe_build_row_tile_classes(
     void* stream, const void* expert_counts, int64_t num_experts,
-    int64_t split_rows, int64_t rows_small, int64_t rows_big, void* tiles_small,
-    void* num_small, void* tiles_big, void* num_big) {
-  if (num_experts <= 0 || split_rows < 0 || rows_small <= 0 || rows_big <= 0)
+    int64_t num_classes, const int64_t* lo, const int64_t* hi,
+    const int64_t* rows, void* const* tiles, void* num_tiles) {
+  if (num_experts <= 0 || num_classes <= 0 ||
+      num_classes > kMaxRowTileClasses || !lo || !hi || !rows || !tiles ||
+      !num_tiles)
     return -1;
+  RowTileClasses rc{};
+  rc.n = static_cast<int>(num_classes);
+  for (int c = 0; c < rc.n; c++) {
+    if (lo[c] < 0 || rows[c] <= 0 || (hi[c] >= 0 && hi[c] <= lo[c]) ||
+        !tiles[c])
+      return -1;
+    rc.lo[c] = static_cast<int>(lo[c]);
+    rc.hi[c] = static_cast<int>(hi[c]);
+    rc.rows[c] = static_cast<int>(rows[c]);
+    rc.tiles[c] = static_cast<int32_t*>(tiles[c]);
+    rc.num[c] = static_cast<int32_t*>(num_tiles) + c;
+  }
   hipStream_t s = static_cast<hipStream_t>(stream);
-  const size_t shmem = 2 * static_cast<size_t>(num_experts) * sizeof(int32_t);
+  const size_t shmem =
+      (num_classes + 1) * static_cast<size_t>(num_experts) * sizeof(int32_t);
+  if (shmem > 65536) return -1;
+  (void)hipGetLastError();
   hipLaunchKernelGGL(qmoe_build_row_tiles_kernel, dim3(1), dim3(kBlock), shmem,
                      s, static_cast<const int32_t*>(expert_counts),
-                     static_cast<int>(num_experts), static_cast<int>(split_rows),
-                     static_cast<int>(rows_small), static_cast<int>(rows_big),
-                     static_cast<int32_t*>(tiles_small),
-                     static_cast<int32_t*>(num_small),
-                     static_cast<int32_t*>(tiles_big),
-                     static_cast<int32_t*>(num_big));
+                     static_cast<int>(num_experts), rc);
   hipError_t err = hipGetLastError();
   if (err != hipSuccess)
-    fprintf(stderr, "[custom_kernels] hip_qmoe_build_row_tiles failed: %s\n",
+    fprintf(stderr,
+            "[custom_kernels] hip_qmoe_build_row_tile_classes failed: %s\n",
             hipGetErrorString(err));
   return static_cast<int>(err);
 }
@@ -878,7 +1277,7 @@ __global__ void qmoe_decode_fc1_kernel(
     const __half*  __restrict__ fc1_s,           // [E, fusion_inter, n_blk_in]
     const uint8_t* __restrict__ fc1_zp_packed,   // [E, fusion_inter, packed blocks] or null
     const __half*  __restrict__ fc1_b,           // [E, fusion_inter] or null
-    __half*        __restrict__ act_out,         // [k, inter]
+    float*         __restrict__ act_out,         // [k, inter]
     int hidden,
     int fusion_inter,
     int n_blk_in,
@@ -1048,8 +1447,7 @@ __global__ void qmoe_decode_fc1_kernel(
           float G = fminf(g, swiglu_limit);
           float L = fmaxf(fminf(l, swiglu_limit), -swiglu_limit);
           float sig = 1.0f / (1.0f + expf(-swiglu_alpha * G));
-          act_out[slot * inter + sw_base + p] =
-              static_cast<__half>(G * sig * (L + swiglu_beta));
+          act_out[slot * inter + sw_base + p] = G * sig * (L + swiglu_beta);
         }
       }
     }
@@ -1085,8 +1483,7 @@ __global__ void qmoe_decode_fc1_kernel(
             float G = fminf(g, swiglu_limit);
             float L = fmaxf(fminf(l, swiglu_limit), -swiglu_limit);
             float sig = 1.0f / (1.0f + expf(-swiglu_alpha * G));
-            act_out[slot * inter + sw_base + p] =
-                static_cast<__half>(G * sig * (L + swiglu_beta));
+            act_out[slot * inter + sw_base + p] = G * sig * (L + swiglu_beta);
           }
         }
       }
@@ -1098,14 +1495,14 @@ __global__ void qmoe_decode_fc1_kernel(
 // weight so the reduce kernel is a pure sum). Per (slot, output-tile).
 template <int BLOCK_SIZE, int TILE_N>
 __global__ void qmoe_decode_fc2_kernel(
-    const __half*  __restrict__ act_out,         // [k, inter]
+    const float*   __restrict__ act_out,         // [k, inter]
     const int32_t* __restrict__ expert_indices,  // [k]
     const __half*  __restrict__ expert_weights,  // [k]
     const uint8_t* __restrict__ fc2_w,           // [E, hidden, inter/2]
     const __half*  __restrict__ fc2_s,           // [E, hidden, n_blk_mid]
     const uint8_t* __restrict__ fc2_zp_packed,   // [E, hidden, ceil(n_blk_mid/2)] or null
     const __half*  __restrict__ fc2_b,           // [E, hidden] or null
-    __half*        __restrict__ slot_buf,        // [k, hidden]
+    float*         __restrict__ slot_buf,        // [k, hidden]
     int inter,
     int hidden,
     int n_blk_mid,
@@ -1120,7 +1517,7 @@ __global__ void qmoe_decode_fc2_kernel(
   // block (threads stride uniquely through K-tiles); LDS would just add a
   // __syncthreads + duplicated traffic. The 5760-byte slot activation is
   // shared across the (hidden/TILE_N) blocks of this slot via L2/MALL cache.
-  const __half* a_in = act_out + slot * inter;
+  const float* a_in = act_out + slot * inter;
 
   const size_t  W_row_bytes = (static_cast<size_t>(inter) * static_cast<size_t>(bits)) / 8;
   const uint8_t* W = fc2_w + static_cast<size_t>(E) * hidden * W_row_bytes;
@@ -1248,7 +1645,7 @@ __global__ void qmoe_decode_fc2_kernel(
         if (n < hidden) {
           float v = partial[t];
           if (Bv) v += static_cast<float>(Bv[n]);
-          slot_buf[slot * hidden + n] = static_cast<__half>(wt * v);
+          slot_buf[slot * hidden + n] = wt * v;
         }
       }
     }
@@ -1270,7 +1667,7 @@ __global__ void qmoe_decode_fc2_kernel(
           int n = n_base + t;
           if (n < hidden) {
             if (Bv) v += static_cast<float>(Bv[n]);
-            slot_buf[slot * hidden + n] = static_cast<__half>(wt * v);
+            slot_buf[slot * hidden + n] = wt * v;
           }
         }
       }
@@ -1280,7 +1677,7 @@ __global__ void qmoe_decode_fc2_kernel(
 
 // Reduce: output[n] = sum over slot of slot_buf[slot, n]. Pure sum.
 __global__ void qmoe_decode_reduce_kernel(
-    const __half* __restrict__ slot_buf,  // [tokens, k, hidden]
+    const float*  __restrict__ slot_buf,  // [tokens, k, hidden]
     __half*       __restrict__ output,    // [tokens, hidden]
     int hidden,
     int k) {
@@ -1291,7 +1688,7 @@ __global__ void qmoe_decode_reduce_kernel(
   float acc = 0.0f;
   #pragma unroll 4
   for (int s = 0; s < k; s++) {
-    acc += static_cast<float>(slot_buf[s * hidden + n]);
+    acc += slot_buf[s * hidden + n];
   }
   output[n] = static_cast<__half>(acc);
 }
@@ -1328,7 +1725,7 @@ static hipError_t launch_qmoe_fc1(
                      static_cast<const __half*>(fc1_scales),
                      static_cast<const uint8_t*>(fc1_zero_points),
                      static_cast<const __half*>(fc1_bias),
-                     static_cast<__half*>(act_out), hidden_size, fusion_inter,
+                     static_cast<float*>(act_out), hidden_size, fusion_inter,
                      n_blk_in, block_size, bits, swiglu_alpha, swiglu_beta,
                      swiglu_limit);
   return hipGetLastError();
@@ -1343,14 +1740,14 @@ static hipError_t launch_qmoe_fc2(
   dim3 grid(static_cast<unsigned>((hidden_size + TN - 1) / TN),
             static_cast<unsigned>(k));
   hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_decode_fc2_kernel<BS, TN>), grid,
-                     dim3(BS), 0, s, static_cast<const __half*>(act_out),
+                     dim3(BS), 0, s, static_cast<const float*>(act_out),
                      static_cast<const int32_t*>(expert_indices),
                      static_cast<const __half*>(expert_weights),
                      static_cast<const uint8_t*>(fc2_weights),
                      static_cast<const __half*>(fc2_scales),
                      static_cast<const uint8_t*>(fc2_zero_points),
                      static_cast<const __half*>(fc2_bias),
-                     static_cast<__half*>(slot_buf), inter_size, hidden_size,
+                     static_cast<float*>(slot_buf), inter_size, hidden_size,
                      n_blk_mid, block_size, bits);
   return hipGetLastError();
 }
@@ -1644,7 +2041,7 @@ extern "C" int hip_qmoe_decode_fused(
   {
     int grid = static_cast<int>((hidden_size + kBlock - 1) / kBlock);
     hipLaunchKernelGGL(qmoe_decode_reduce_kernel, dim3(grid), dim3(kBlock), 0, s,
-                       static_cast<const __half*>(slot_buf),
+                       static_cast<const float*>(slot_buf),
                        static_cast<__half*>(output),
                        static_cast<int>(hidden_size), static_cast<int>(k));
     hipError_t e = hipGetLastError();
@@ -1685,9 +2082,10 @@ extern "C" int hip_qmoe_decode_fused(
 // grid = (n_blk groups, rows); row r activation = A + r*row_len, quantized
 // into a_qb + r*row_len (int8) with per-group scale a_scale[r*n_blk + grp].
 // Requires row_len % 8 == 0 (guaranteed: block_size is a power of two >= 32).
-template <int BLOCK_SIZE>
+// TIn is __half for the fc1 input and float for the fc2 slot activations.
+template <int BLOCK_SIZE, typename TIn>
 __global__ void qmoe_quant_act_i8_kernel(
-    const __half* __restrict__ A,
+    const TIn*    __restrict__ A,
     int8_t*       __restrict__ a_qb,
     float*        __restrict__ a_scale,
     int row_len, int block_size, int n_blk) {
@@ -1696,7 +2094,7 @@ __global__ void qmoe_quant_act_i8_kernel(
   const int tid = threadIdx.x;
   const int g0  = grp * block_size;
   const int g1  = min(g0 + block_size, row_len);
-  const __half* Arow = A + static_cast<size_t>(row) * row_len;
+  const TIn* Arow = A + static_cast<size_t>(row) * row_len;
   int8_t*       qrow = a_qb + static_cast<size_t>(row) * row_len;
 
   float local_max = 0.0f;
@@ -1752,7 +2150,7 @@ __global__ void qmoe_decode_fc1_dp4a_kernel(
     const __half*  __restrict__ fc1_s,           // [E, fusion_inter, n_blk_in]
     const uint8_t* __restrict__ fc1_zp_packed,   // [E, fusion_inter, ceil/2] or null
     const __half*  __restrict__ fc1_b,           // [E, fusion_inter] or null
-    __half*        __restrict__ act_out,         // [k, inter]
+    float*         __restrict__ act_out,         // [k, inter]
     int hidden, int fusion_inter, int n_blk_in, int block_size,
     float swiglu_alpha, float swiglu_beta, float swiglu_limit,
     int k_per_tok) {
@@ -1866,8 +2264,7 @@ __global__ void qmoe_decode_fc1_dp4a_kernel(
           float G = fminf(g, swiglu_limit);
           float L = fmaxf(fminf(l, swiglu_limit), -swiglu_limit);
           float sig = 1.0f / (1.0f + expf(-swiglu_alpha * G));
-          act_out[slot * inter + sw_base + p] =
-              static_cast<__half>(G * sig * (L + swiglu_beta));
+          act_out[slot * inter + sw_base + p] = G * sig * (L + swiglu_beta);
         }
       }
     }
@@ -1900,8 +2297,7 @@ __global__ void qmoe_decode_fc1_dp4a_kernel(
             float G = fminf(g, swiglu_limit);
             float L = fmaxf(fminf(l, swiglu_limit), -swiglu_limit);
             float sig = 1.0f / (1.0f + expf(-swiglu_alpha * G));
-            act_out[slot * inter + sw_base + p] =
-                static_cast<__half>(G * sig * (L + swiglu_beta));
+            act_out[slot * inter + sw_base + p] = G * sig * (L + swiglu_beta);
           }
         }
       }
@@ -1921,7 +2317,7 @@ __global__ void qmoe_decode_fc2_dp4a_kernel(
     const __half*  __restrict__ fc2_s,           // [E, hidden, n_blk_mid]
     const uint8_t* __restrict__ fc2_zp_packed,   // [E, hidden, ceil/2] or null
     const __half*  __restrict__ fc2_b,           // [E, hidden] or null
-    __half*        __restrict__ slot_buf,        // [k, hidden]
+    float*         __restrict__ slot_buf,        // [k, hidden]
     int inter, int hidden, int n_blk_mid, int block_size) {
   const int n_base = blockIdx.x * TILE_N;
   const int slot   = blockIdx.y;
@@ -2022,7 +2418,7 @@ __global__ void qmoe_decode_fc2_dp4a_kernel(
         if (n < hidden) {
           float v = partial[t];
           if (Bv) v += static_cast<float>(Bv[n]);
-          slot_buf[slot * hidden + n] = static_cast<__half>(wt * v);
+          slot_buf[slot * hidden + n] = wt * v;
         }
       }
     }
@@ -2044,7 +2440,7 @@ __global__ void qmoe_decode_fc2_dp4a_kernel(
           int n = n_base + t;
           if (n < hidden) {
             if (Bv) v += static_cast<float>(Bv[n]);
-            slot_buf[slot * hidden + n] = static_cast<__half>(wt * v);
+            slot_buf[slot * hidden + n] = wt * v;
           }
         }
       }
@@ -2069,7 +2465,7 @@ static hipError_t launch_qmoe_fc1_dp4a(
                      static_cast<const __half*>(fc1_scales),
                      static_cast<const uint8_t*>(fc1_zero_points),
                      static_cast<const __half*>(fc1_bias),
-                     static_cast<__half*>(act_out), hidden_size, fusion_inter,
+                     static_cast<float*>(act_out), hidden_size, fusion_inter,
                      n_blk_in, block_size, swiglu_alpha, swiglu_beta,
                      swiglu_limit, k_per_tok);
   return hipGetLastError();
@@ -2093,7 +2489,7 @@ static hipError_t launch_qmoe_fc2_dp4a(
                      static_cast<const __half*>(fc2_scales),
                      static_cast<const uint8_t*>(fc2_zero_points),
                      static_cast<const __half*>(fc2_bias),
-                     static_cast<__half*>(slot_buf), inter_size, hidden_size,
+                     static_cast<float*>(slot_buf), inter_size, hidden_size,
                      n_blk_mid, block_size);
   return hipGetLastError();
 }
@@ -2199,8 +2595,8 @@ extern "C" int hip_qmoe_decode_fused_dp4a(
   // Quantize each token's [hidden] input once (grid = n_blk_in groups x T rows).
   {
     dim3 grid(static_cast<unsigned>(n_blk_in), static_cast<unsigned>(T));
-    hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_quant_act_i8_kernel<128>), grid,
-                       dim3(128), 0, s, static_cast<const __half*>(input),
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_quant_act_i8_kernel<128, __half>),
+                       grid, dim3(128), 0, s, static_cast<const __half*>(input),
                        static_cast<int8_t*>(a_qb_in),
                        static_cast<float*>(a_scale_in),
                        static_cast<int>(hidden_size),
@@ -2248,8 +2644,8 @@ extern "C" int hip_qmoe_decode_fused_dp4a(
   // Quantize the T*k [inter] expert-slot activations (grid = n_blk_mid x slots).
   {
     dim3 grid(static_cast<unsigned>(n_blk_mid), static_cast<unsigned>(slots));
-    hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_quant_act_i8_kernel<128>), grid,
-                       dim3(128), 0, s, static_cast<const __half*>(act_out),
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_quant_act_i8_kernel<128, float>),
+                       grid, dim3(128), 0, s, static_cast<const float*>(act_out),
                        static_cast<int8_t*>(a_qb_mid),
                        static_cast<float*>(a_scale_mid),
                        static_cast<int>(inter_size),
@@ -2298,7 +2694,7 @@ extern "C" int hip_qmoe_decode_fused_dp4a(
     int grid = static_cast<int>((hidden_size + kBlock - 1) / kBlock);
     hipLaunchKernelGGL(qmoe_decode_reduce_kernel,
                        dim3(grid, static_cast<unsigned>(T)), dim3(kBlock), 0, s,
-                       static_cast<const __half*>(slot_buf),
+                       static_cast<const float*>(slot_buf),
                        static_cast<__half*>(output),
                        static_cast<int>(hidden_size), static_cast<int>(k));
     hipError_t e = hipGetLastError();

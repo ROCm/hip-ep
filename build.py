@@ -10,7 +10,7 @@ update_submodules, --config/--cmake_generator/--cmake_extra_defines/
 --skip_submodule_sync conventions) but deliberately plain: it ensures
 submodules, sets up the platform compiler environment, picks the GPU arch, runs
 the cmake configure/build/install for this project's artifacts -- the MorphiZen
-EP shared library (libonnxruntime_morphizen_ep.so / .dll) plus the HIP MLIR
+EP shared library (libhipgpu.so / hipgpu.dll) plus the HIP MLIR
 tools -- and (on Linux) bundles the runtime .so into a self-contained install/.
 
 All C++ dependency *acquisition* is delegated to cmake/deps.cmake: LLVM/MLIR/LLD
@@ -361,7 +361,8 @@ def build_targets(args, build_dir):
 def run_tests(args, build_dir):
     """Run the GPU-free test suites (no device needed, so they run on the build
     machine in every CI job): the MLIR LIT pass-verification suite plus the
-    compiler-plugin registrar and output-allocator ctest unit tests."""
+    compiler-plugin registrar, output-allocator, runtime-lowering contract and
+    MatMulNBits LUT ctest unit tests."""
     step("Test (check-hip-mlir-lit)")
     run_subprocess(
         [
@@ -386,7 +387,8 @@ def run_tests(args, build_dir):
             "-C",
             args.config,
             "-R",
-            "StaticPlugins|OutputAllocator|LdsBarrierArchGate|AdaptiveBenchmark",
+            "StaticPlugins|OutputAllocator|LdsBarrierArchGate|AdaptiveBenchmark"
+            "|RuntimeLoweringContractsUnit|MatMulNBitsAutotune",
             "--output-on-failure",
         ]
     )

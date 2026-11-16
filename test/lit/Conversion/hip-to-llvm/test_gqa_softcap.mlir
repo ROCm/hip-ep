@@ -32,7 +32,7 @@ module {
 }
 
 // CHECK-LABEL: llvm.func @softcap_f16
-// CHECK: llvm.call @wrap_group_query_attention(
+// CHECK: llvm.call @wrap_group_query_attention_host_length(
 
 // -----
 
@@ -63,4 +63,4 @@ module {
 }
 
 // CHECK-LABEL: llvm.func @softcap_f32
-// CHECK: llvm.call @wrap_group_query_attention(
+// CHECK: llvm.call @wrap_group_query_attention_host_length(

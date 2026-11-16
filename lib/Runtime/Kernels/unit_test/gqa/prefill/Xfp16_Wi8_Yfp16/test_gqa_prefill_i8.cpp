@@ -30,6 +30,8 @@
 // ============================================================
 
 #include <hip/hip_runtime.h>
+#include "../../../common/hip_adaptive_timing.h"
+#include "../../../common/ut_gqa_rank_input.h"
 #include <hip/hip_fp16.h>
 
 #include <algorithm>
@@ -88,6 +90,7 @@ class CsvWriter {
   }
   ~CsvWriter() { if (f_) std::fclose(f_); }
   void write(const CsvRow& r) {
+    timing::emitCsvBinding(r.shape, r.config, r.verdict, r.rel_l2, r.time_ms);
     if (!f_) return;
     std::fprintf(f_, "%s,%s,%s,%s,%s,%s,%.6f,%.6e,%s\n",
                  env_or("HIPDNN_RESULTS_OP", "gqa"),
@@ -305,43 +308,16 @@ inline int* holdReleaseFlag() {
   return flag;
 }
 
-// Mean milliseconds per launch over `iters` back-to-back launches on `stream`,
-// launch(c) reading copy c. Untimed launches over the rotation go first, until
-// kColdSettleBytes have been read.
+// The shared UT policy selects the actual call count from a device pilot.
+// launch(c) invokes the complete op with operand copy c.
 template <class Launch>
-double rotatedMeanMs(hipStream_t stream, int iters, const ColdKvCopies& copies,
-                     Launch&& launch) {
-  const int n = copies.count();
-  int turn = 0;
-  if (n > 1) {
-    const size_t settle = std::min<size_t>(
-        n, (kColdSettleBytes + copies.bytes() - 1) / copies.bytes());
-    for (size_t i = 0; i < settle; ++i) launch(turn++ % n);
-  }
-  // Drained, so the hold below holds the timed launches rather than being
-  // released while earlier launches are still queued ahead of it.
-  (void)hipStreamSynchronize(stream);
-  volatile int* release = holdReleaseFlag();
-  void* release_dev = nullptr;
-  if (release &&
-      hipHostGetDevicePointer(&release_dev, const_cast<int*>(release), 0) ==
-          hipSuccess) {
-    *release = 0;
-    holdStreamKernel<<<1, 1, 0, stream>>>(static_cast<const int*>(release_dev));
-  }
-  hipEvent_t start, stop;
-  (void)hipEventCreate(&start);
-  (void)hipEventCreate(&stop);
-  (void)hipEventRecord(start, stream);
-  for (int i = 0; i < iters; ++i) launch(turn++ % n);
-  (void)hipEventRecord(stop, stream);
-  if (release) *release = 1;
-  (void)hipEventSynchronize(stop);
-  float ms = 0.0f;
-  (void)hipEventElapsedTime(&ms, start, stop);
-  (void)hipEventDestroy(start);
-  (void)hipEventDestroy(stop);
-  return iters > 0 ? ms / iters : 0.0;
+double rotatedMeanMs(hipStream_t stream, int /*legacy_iters*/, const ColdKvCopies& copies,
+                     Launch&& launch, const char* complete_entry = nullptr,
+                     const timing::RankOptions* ranking = nullptr) {
+  return timing::adaptiveRotatedMeanMs(
+      stream, copies, launch, holdReleaseFlag(),
+      [&](const int* flag) { holdStreamKernel<<<1, 1, 0, stream>>>(flag); },
+      warmTiming(), kColdSettleBytes, "gqa_prefill_xfp16_wi8_yfp16", complete_entry, timing::NoPreparation{}, ranking);
 }
 }  // namespace hipdnn_ep_test
 
@@ -368,7 +344,8 @@ extern "C" int hip_gqa_flash_prefill_v3_configured(
     void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
     int past_len, float scale, int local_window_size, const void* head_sink,
     int num_heads, int smooth_softmax,
-    int hb, int qw, int mt, int bkv, int nd);
+    int hb, int qw, int mt, int bkv, int nd,
+    const void* key_bias, int key_bias_stride);
 
 // Mirrors real/gqa.cpp: v8x at d256, v6x otherwise.
 static hipdnn_ep::GqaPrefillVariant prefill_variant(int d) {
@@ -393,6 +370,12 @@ extern "C" int hip_gqa_flash_prefill_v2(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
     void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
     int past_len, float scale);
+extern "C" int hip_gqa_flash_prefill(
+    void* stream, const void* Q, const void* Kcache, const void* Vcache,
+    void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
+    int past_len, float scale, int local_window_size, const void* head_sink,
+    int num_heads, int smooth_softmax, const void* key_bias,
+    int key_bias_stride);
 
 #define HIP_CHECK(expr)                                                        \
   do {                                                                         \
@@ -404,13 +387,36 @@ extern "C" int hip_gqa_flash_prefill_v2(
     }                                                                          \
   } while (0)
 
-struct Case { const char* name; int B, H, G, D, sq; };
+struct Case {
+  const char* name;
+  int B, H, G, D, sq;
+  // > 0: a key_bias row per batch marks batch b's first b*pad keys as left
+  // padding. The first query rows of a padded batch then have no real key;
+  // their output is unspecified, so only rows with a real key are compared,
+  // and every output must be finite.
+  int pad = 0;
+  float pad_value = -INFINITY;
+};
 
 // results.csv shape: the parameters that tell any two cases apart.
 static std::string case_shape(const Case& c) {
-  return "B" + std::to_string(c.B) + "_H" + std::to_string(c.H) + "_G" +
-         std::to_string(c.G) + "_D" + std::to_string(c.D) + "_sq" +
-         std::to_string(c.sq);
+  std::string s = "B" + std::to_string(c.B) + "_H" + std::to_string(c.H) +
+                  "_G" + std::to_string(c.G) + "_D" + std::to_string(c.D) +
+                  "_sq" + std::to_string(c.sq);
+  if (c.pad > 0) s += "_lpad" + std::to_string(c.pad);
+  if (c.pad > 0 && std::isinf(c.pad_value)) s += "_ninf";
+  return s;
+}
+
+// key_bias rows [B, sq]: 0 for a real key, pad_value for padding. Empty when
+// the case has no padding.
+static std::vector<float> make_key_bias(const Case& c) {
+  if (c.pad <= 0) return {};
+  std::vector<float> kb((size_t)c.B * c.sq, 0.0f);
+  for (int b = 0; b < c.B; ++b)
+    for (int k = 0; k < std::min(c.sq, b * c.pad); ++k)
+      kb[(size_t)b * c.sq + k] = c.pad_value;
+  return kb;
 }
 
 // Runs `body(b, hq)` for every (batch, query-head) pair, threaded across
@@ -447,6 +453,7 @@ static void cpu_reference_i8(const std::vector<float>& Q,
                              const std::vector<int8_t>& V_i8,
                              const std::vector<float>& kscale,
                              const std::vector<float>& vscale,
+                             const std::vector<float>& kb,  // [B,sq] or empty
                              std::vector<float>& O, int B, int H, int G, int D,
                              int sq, int max_seq, float scale) {
   const int HPG = H / G;
@@ -462,7 +469,7 @@ static void cpu_reference_i8(const std::vector<float>& Q,
           const int8_t* kp = &K_i8[((size_t)(b * G + hkv) * max_seq + k) * D];
           float dot = 0.0f;
           for (int e = 0; e < D; ++e) dot += q[e] * ((float)kp[e] * ks[e]);
-          s[k] = dot * scale;
+          s[k] = dot * scale + (kb.empty() ? 0.0f : kb[(size_t)b * sq + k]);
           if (s[k] > m) m = s[k];
         }
         float l = 0.0f;
@@ -482,7 +489,9 @@ static void cpu_reference_i8(const std::vector<float>& Q,
 // CPU fp32 causal GQA over the original fp16 (as fp32) BNSD K/V (quant-error ref).
 static void cpu_reference_fp16(const std::vector<float>& Q,
                                const std::vector<float>& K,
-                               const std::vector<float>& V, std::vector<float>& O,
+                               const std::vector<float>& V,
+                               const std::vector<float>& kb,
+                               std::vector<float>& O,
                                int B, int H, int G, int D, int sq, int max_seq,
                                float scale) {
   const int HPG = H / G;
@@ -496,7 +505,7 @@ static void cpu_reference_fp16(const std::vector<float>& Q,
           const float* kp = &K[((size_t)(b * G + hkv) * max_seq + k) * D];
           float dot = 0.0f;
           for (int e = 0; e < D; ++e) dot += q[e] * kp[e];
-          s[k] = dot * scale;
+          s[k] = dot * scale + (kb.empty() ? 0.0f : kb[(size_t)b * sq + k]);
           if (s[k] > m) m = s[k];
         }
         float l = 0.0f;
@@ -529,7 +538,17 @@ struct Result {
   bool pass;
 };
 
-static Result run_case(const Case& c, int iters, unsigned seed) {
+static Result run_case(const Case& c, int iters, unsigned seed, const hipdnn_ep_test::timing::RankRow* rank_row = nullptr) {
+  hipdnn_ep_test::timing::CaseScope timing_case("gqa/prefill/Xfp16_Wi8_Yfp16", case_shape(c), "hip_gqa_flash_prefill");
+  const UtGqaShape rank_shape{c.B, c.H, c.G, c.D, c.sq, c.sq, 0, 1, 64};
+  if (rank_row && std::getenv("HIPDNN_UT_RANK_CATALOG")) {
+#ifdef HIPDNN_UT_RANK_GQA_ADAPTER
+    hipdnn_ep_test::timing::printGqaCatalog(rank_shape);
+    Result result{}; result.c = c; result.pass = true; return result;
+#else
+    throw std::runtime_error("UT rank: GQA catalog requires standalone RANK=1 build");
+#endif
+  }
   const int B = c.B, H = c.H, G = c.G, D = c.D, sq = c.sq;
   const int max_seq = sq, past_len = 0, skv = sq;
   const float scale = 1.0f / std::sqrt((float)D);
@@ -616,9 +635,65 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
   std::vector<int8_t> K_i8(kn), V_i8(kn);
   HIP_CHECK(hipMemcpy(K_i8.data(), dK8, kn, hipMemcpyDeviceToHost));
   HIP_CHECK(hipMemcpy(V_i8.data(), dV8, kn, hipMemcpyDeviceToHost));
+  const std::vector<float> Kb = make_key_bias(c);
   std::vector<float> ref_i8(qn), ref_fp16(qn);
-  cpu_reference_i8(Qf, K_i8, V_i8, kscale, vscale, ref_i8, B, H, G, D, sq, max_seq, scale);
-  cpu_reference_fp16(Qf, Kf_bnsd, Vf_bnsd, ref_fp16, B, H, G, D, sq, max_seq, scale);
+  cpu_reference_i8(Qf, K_i8, V_i8, kscale, vscale, Kb, ref_i8, B, H, G, D, sq, max_seq, scale);
+  cpu_reference_fp16(Qf, Kf_bnsd, Vf_bnsd, Kb, ref_fp16, B, H, G, D, sq, max_seq, scale);
+  __half* dKb = nullptr;
+  if (!Kb.empty()) {
+    std::vector<__half> Kbh(Kb.size());
+    for (size_t i = 0; i < Kb.size(); ++i) Kbh[i] = __float2half(Kb[i]);
+    HIP_CHECK(hipMalloc(&dKb, Kbh.size() * sizeof(__half)));
+    HIP_CHECK(hipMemcpy(dKb, Kbh.data(), Kbh.size() * sizeof(__half),
+                        hipMemcpyHostToDevice));
+  }
+  const int kb_stride = B > 1 ? skv : 0;
+  // Only the unified entry takes a key bias.
+  auto prefill = [&](const void* k, const void* v, void* o, int kv_rows) {
+    if (dKb)
+      return hip_gqa_flash_prefill(nullptr, dQ, k, v, o, B, H, G, sq, skv, D,
+                                   kv_rows, past_len, scale, -1, nullptr, H, 0,
+                                   dKb, kb_stride);
+    return hip_gqa_flash_prefill_v2(nullptr, dQ, k, v, o, B, H, G, sq, skv, D,
+                                    kv_rows, past_len, scale);
+  };
+
+  if (rank_row) {
+#ifndef HIPDNN_UT_RANK_GQA_ADAPTER
+    throw std::runtime_error("UT rank: GQA requires standalone RANK=1 build");
+#else
+    const hipdnn_ep_test::ColdKvCopies rank_kv(dK8, dV8, B * G, max_seq,
+        static_cast<size_t>(D), 0, skv);
+    UtGqaConfig selected;
+    auto choose = [&](const UtGqaConfig& config) { selected = config; };
+    auto rank_launch = [&](const void* k, const void* v, int rows) -> int {
+      int rc = hip_gqa_dequant_kv_i8_to_fp16(nullptr, k, dKf16, dKsc, B, sq, G, D, rows, max_seq);
+      if (rc) return rc;
+      rc = hip_gqa_dequant_kv_i8_to_fp16(nullptr, v, dVf16, dVsc, B, sq, G, D, rows, max_seq);
+      if (rc) return rc;
+      return hip_gqa_flash_prefill_v3_configured(nullptr, dQ, dKf16, dVf16, dO8,
+        B, H, G, sq, skv, D, max_seq, past_len, scale, -1, nullptr, H, 0,
+        selected.hb, selected.qw, selected.mt, selected.bkv, selected.nd, dKb, kb_stride);
+    };
+    auto validate = [&]() {
+      if (rank_launch(dK8, dV8, max_seq)) throw std::runtime_error("UT rank: GQA candidate launch failed");
+      HIP_CHECK(hipDeviceSynchronize());
+      std::vector<__half> raw(qn);
+      HIP_CHECK(hipMemcpy(raw.data(), dO8, raw.size() * sizeof(__half), hipMemcpyDeviceToHost));
+      std::vector<float> output(raw.size());
+      for (size_t i = 0; i < raw.size(); ++i) output[i] = __half2float(raw[i]);
+      const double error = rel_l2(output, ref_i8);
+      if (!(error < 2e-2)) throw std::runtime_error("UT rank: GQA candidate CPU reference FAIL");
+      return error;
+    };
+    const auto options = hipdnn_ep_test::timing::gqaRankOptions(rank_shape, *rank_row, choose, validate);
+    hipdnn_ep_test::rotatedMeanMs(nullptr, 0, rank_kv, [&](int i) {
+      return rank_launch(rank_kv.k(i), rank_kv.v(i), rank_kv.rows());
+    }, "dequant_KV+hip_gqa_flash_prefill_v3_configured", &options);
+    hipFree(dQ); hipFree(dKbshd); hipFree(dVbshd); hipFree(dK8); hipFree(dV8); hipFree(dKf16); hipFree(dVf16); hipFree(dKbnsd); hipFree(dVbnsd); hipFree(dKsc); hipFree(dVsc); hipFree(dO8); hipFree(dO16); hipFree(dKb);
+    Result result{}; result.c = c; result.pass = true; return result;
+#endif
+  }
 
   // Step 2+3: dequant once -> fp16 prefill (the runtime int8 prefill path).
   // The prefill is dispatched the way real/gqa.cpp does: in lookup mode resolve
@@ -647,20 +722,22 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
     hip_gqa_autotune_destroy(policy);
   }
 #endif
-  auto run_int8_path = [&](const void* k8, const void* v8, int kv_rows) {
-    hip_gqa_dequant_kv_i8_to_fp16(nullptr, k8, dKf16, dKsc, B, sq, G, D, kv_rows, max_seq);
-    hip_gqa_dequant_kv_i8_to_fp16(nullptr, v8, dVf16, dVsc, B, sq, G, D, kv_rows, max_seq);
+  auto run_int8_path = [&](const void* k8, const void* v8, int kv_rows) -> int {
+    int status = hip_gqa_dequant_kv_i8_to_fp16(nullptr, k8, dKf16, dKsc, B, sq, G, D, kv_rows, max_seq);
+    if (status) return status;
+    status = hip_gqa_dequant_kv_i8_to_fp16(nullptr, v8, dVf16, dVsc, B, sq, G, D, kv_rows, max_seq);
+    if (status) return status;
 #ifdef HIPDNN_LUT_LINKED_EXTERNALLY
     if (!lookup_config.empty()) {
-      hip_gqa_flash_prefill_v3_configured(
+      return hip_gqa_flash_prefill_v3_configured(
           nullptr, dQ, dKf16, dVf16, dO8, B, H, G, sq, skv, D, max_seq,
           past_len, scale, /*local_window_size=*/-1, /*head_sink=*/nullptr, H,
           /*smooth_softmax=*/0, selected_config.hb, selected_config.qw,
-          selected_config.mt, selected_config.bkv, selected_config.nd);
-      return;
+          selected_config.mt, selected_config.bkv, selected_config.nd,
+          dKb, kb_stride);
     }
 #endif
-    hip_gqa_flash_prefill_v2(nullptr, dQ, dKf16, dVf16, dO8, B, H, G, sq, skv, D, max_seq, past_len, scale);
+    return prefill(dKf16, dVf16, dO8, max_seq);
   };
   // Every launch in this function runs inside a capture window: the op's
   // [gqa-cfg] diagnostic latches its enable flag on the first read, so it has
@@ -678,7 +755,7 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
 
   // fp16 baseline prefill.
   auto run_fp16 = [&](const void* k, const void* v, int kv_rows) {
-    hip_gqa_flash_prefill_v2(nullptr, dQ, k, v, dO16, B, H, G, sq, skv, D, kv_rows, past_len, scale);
+    return prefill(k, v, dO16, kv_rows);
   };
   hipdnn_ep_test::captureLogLines(
       "HIPDNN_GQA_AUTOTUNE_LOG", "_cfg_capture.tmp", [&]() {
@@ -695,10 +772,10 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
       dKbnsd, dVbnsd, B * G, max_seq, static_cast<size_t>(D) * sizeof(__half),
       0, skv);
   auto bench = [&](const hipdnn_ep_test::ColdKvCopies& kv,
-                   auto&& fn) -> double {
+                   auto&& fn, const char* complete_entry) -> double {
     for (int w = 0; w < 5; ++w) fn(0);
     HIP_CHECK(hipDeviceSynchronize());
-    return hipdnn_ep_test::rotatedMeanMs(nullptr, iters, kv, fn);
+    return hipdnn_ep_test::rotatedMeanMs(nullptr, iters, kv, fn, complete_entry);
   };
   // The op names the config it dispatched in its own [gqa-cfg] diagnostic;
   // capture it so results.csv records what ran instead of a placeholder. The
@@ -711,8 +788,11 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
         "HIPDNN_GQA_AUTOTUNE_LOG", "_cfg_capture.tmp",
         [&]() {
           ms_int8 = bench(kv8, [&](int i) {
-            run_int8_path(kv8.k(i), kv8.v(i), kv8.rows());
-          });
+            return run_int8_path(kv8.k(i), kv8.v(i), kv8.rows());
+          }, lookup_config.empty()
+                 ? (dKb ? "dequant_KV+hip_gqa_flash_prefill"
+                        : "dequant_KV+hip_gqa_flash_prefill_v2")
+                 : "dequant_KV+hip_gqa_flash_prefill_v3_configured");
         });
     for (const std::string& line : lines) {
       const size_t knobs = line.find("-> ");
@@ -726,19 +806,33 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
                                   "_cfg_capture.tmp",
                                   [&]() {
                                     ms_fp16 = bench(kv16, [&](int i) {
-                                      run_fp16(kv16.k(i), kv16.v(i),
-                                               kv16.rows());
-                                    });
+                                      return run_fp16(kv16.k(i), kv16.v(i),
+                                                      kv16.rows());
+                                    }, dKb ? "hip_gqa_flash_prefill" : "hip_gqa_flash_prefill_v2");
                                   });
   double ms_deq = bench(kv8, [&](int i) {
-    hip_gqa_dequant_kv_i8_to_fp16(nullptr, kv8.k(i), dKf16, dKsc, B, sq, G, D, kv8.rows(), max_seq);
-    hip_gqa_dequant_kv_i8_to_fp16(nullptr, kv8.v(i), dVf16, dVsc, B, sq, G, D, kv8.rows(), max_seq);
-  });
+    const int status = hip_gqa_dequant_kv_i8_to_fp16(nullptr, kv8.k(i), dKf16, dKsc, B, sq, G, D, kv8.rows(), max_seq);
+    if (status) return status;
+    return hip_gqa_dequant_kv_i8_to_fp16(nullptr, kv8.v(i), dVf16, dVsc, B, sq, G, D, kv8.rows(), max_seq);
+  }, "hip_gqa_dequant_kv_i8_to_fp16(K,V)");
+
+  // Compare the query rows that have a real key: row i of batch b sees keys
+  // 0..i, of which the first b*pad are padding.
+  bool finite = true;
+  for (float x : O_path) finite = finite && std::isfinite(x);
+  std::vector<float> cmp_path, cmp_i8, cmp_fp16;
+  for (int b = 0; b < B; ++b)
+    for (int i = std::min(sq, b * c.pad); i < sq; ++i) {
+      const size_t row = (size_t)(b * sq + i) * H * D, n = (size_t)H * D;
+      cmp_path.insert(cmp_path.end(), O_path.begin() + row, O_path.begin() + row + n);
+      cmp_i8.insert(cmp_i8.end(), ref_i8.begin() + row, ref_i8.begin() + row + n);
+      cmp_fp16.insert(cmp_fp16.end(), ref_fp16.begin() + row, ref_fp16.begin() + row + n);
+    }
 
   Result r;
   r.c = c;
-  r.relL2_path_vs_i8ref = rel_l2(O_path, ref_i8);
-  r.relL2_i8_vs_fp16 = rel_l2(ref_i8, ref_fp16);
+  r.relL2_path_vs_i8ref = finite ? rel_l2(cmp_path, cmp_i8) : INFINITY;
+  r.relL2_i8_vs_fp16 = rel_l2(cmp_i8, cmp_fp16);
   r.ms_fp16 = ms_fp16; r.ms_int8 = ms_int8; r.ms_dequant = ms_deq;
   r.pass = r.relL2_path_vs_i8ref < 2e-2;
 
@@ -765,6 +859,7 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
   hipFree(dQ); hipFree(dKbshd); hipFree(dVbshd); hipFree(dK8); hipFree(dV8);
   hipFree(dKf16); hipFree(dVf16); hipFree(dKbnsd); hipFree(dVbnsd);
   hipFree(dKsc); hipFree(dVsc); hipFree(dO8); hipFree(dO16);
+  if (dKb) hipFree(dKb);
   return r;
 }
 
@@ -820,12 +915,32 @@ static void write_markdown(const char* path, const char* dev, int cus,
   fprintf(f, "- Contrast the earlier per-fragment int8 prefill kernel (~0.6x, i.e. "
              "~1.6x slower): dequantizing once instead of per fragment recovers the "
              "full fp16 throughput.\n");
-  fprintf(f, "\n_Reproduce:_ `test_gqa_prefill_i8.exe --all --iters 200 --md <this file>`\n");
+  fprintf(f, "\n_Reproduce:_ `test_gqa_prefill_i8.exe --all --md <this file>`\n");
   fclose(f);
   printf("\n[markdown] wrote %s\n", path);
 }
 
 int main(int argc, char** argv) {
+  if (hipdnn_ep_test::timing::rankRequested()) {
+    try {
+      const auto rows = hipdnn_ep_test::timing::readRankRows("gqa/prefill/Xfp16_Wi8_Yfp16");
+      for (size_t i = 0; i < rows.size(); ++i) {
+        const auto fields = hipdnn_ep_test::timing::rankShapeFields(rows[i].shape);
+        auto value = [&](const char* name, int fallback = 0) {
+          const auto it = fields.find(name); return it == fields.end() ? fallback : it->second;
+        };
+        Case c{"rank", value("B"), value("H"), value("G"), value("D"), value("sq"), 0};
+        if (c.B <= 0 || c.H <= 0 || c.G <= 0 || c.H % c.G || c.D <= 0 ||
+            case_shape(c) != rows[i].shape)
+          throw std::invalid_argument("UT rank: malformed or unsupported GQA shape");
+        if (!run_case(c, 0, 1234u + static_cast<unsigned>(i), &rows[i]).pass) return 1;
+      }
+      HIP_CHECK(hipDeviceSynchronize()); return 0;
+    } catch (const std::exception& error) {
+      std::fprintf(stderr, "UT rank: %s\n", error.what()); return 1;
+    }
+  }
+  hipdnn_ep_test::timing::printTimingMode();
   setvbuf(stdout, nullptr, _IONBF, 0);
   int iters = 200; unsigned seed = 1234; bool all = false; const char* md = nullptr;
   Case single = {"custom", 1, 40, 10, 128, 2048}; bool have_single = false;
@@ -844,7 +959,7 @@ int main(int argc, char** argv) {
 
   int dev = 0; HIP_CHECK(hipGetDevice(&dev));
   hipDeviceProp_t prop; HIP_CHECK(hipGetDeviceProperties(&prop, dev));
-  printf("Device: %s (%d CUs)  iters=%d\n\n", prop.name, prop.multiProcessorCount, iters);
+  printf("Device: %s (%d CUs)  legacy_iters=%d (ignored; adaptive UT_TIMING counts)\n\n", prop.name, prop.multiProcessorCount, iters);
 
   std::vector<Result> results; int fails = 0;
   if (all || !have_single) {
@@ -878,9 +993,15 @@ int main(int argc, char** argv) {
     for (const auto& s : shapes)
       for (size_t li = 0; li < n_sqs; ++li)
         full_cases.push_back({s.name, 1, s.H, s.G, s.D, sqs[li]});
-    printf("coverage=%d -> running %zu typical length(s) x 9 categorical "
+    // -inf left padding (key bias runs at d128 only): batch 1's first KV
+    // tiles are fully masked.
+    for (size_t li = 0; li < n_sqs; ++li)
+      full_cases.push_back({"lpad-llama-3.1-8b", 2, 32, 8, 128, sqs[li],
+                            sqs[li] / 4 + 1});
+    printf("coverage=%d -> running %zu typical length(s) x %zu categorical "
            "case(s) = %zu gqa_prefill_i8 cases\n",
-           coverage_tier, n_sqs, full_cases.size());
+           coverage_tier, n_sqs, full_cases.size() / n_sqs,
+           full_cases.size());
 
     for (const Case& fc : full_cases)
       results.push_back(run_case(fc, iters, seed));

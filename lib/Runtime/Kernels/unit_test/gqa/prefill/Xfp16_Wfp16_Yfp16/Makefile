@@ -31,11 +31,18 @@ endif
 OFFLOAD  ?= --offload-arch=gfx11-generic
 HIP_SDK  ?= $(HIP_PATH)
 MODE     ?= lookup
+RANK     ?= 0
+ifeq ($(RANK),1)
+    override MODE := autotune
+endif
 COVERAGE ?= 3
 
 ifeq ($(HIP_SDK),)
     $(error pass HIP_SDK=<HIP SDK root>)
 endif
+
+# Named UT preset; numeric sampling belongs to common/hip_adaptive_timing.h.
+TIMING ?= standard
 
 # ---- Paths ----
 
@@ -79,6 +86,10 @@ FLATBUFFERS_INC ?=
 
 KERNEL_FLAGS := -O2 -std=c++17 -x hip -ffp-contract=fast
 CXXFLAGS     := -O3 -std=c++17 -Wno-c23-extensions
+GPU_PHASE_HEADER ?=
+ifneq ($(GPU_PHASE_HEADER),)
+    CXXFLAGS += -include $(GPU_PHASE_HEADER) -DHIPDNN_UT_GPU_PHASE_LINKED=1
+endif
 INCLUDES     := -I$(INCLUDE_DIR)
 
 # ---- Test parameters (test_custom) ----
@@ -91,18 +102,24 @@ D      ?= 128
 SQ     ?= 512
 PAST   ?= 0
 WINDOW ?= 0
+MAX_SEQ ?=
+SCALE   ?=
+ND      ?=
+HB      ?=
+BKV     ?=
+CASE_ARGS = $(if $(MAX_SEQ),--max-seq $(MAX_SEQ)) $(if $(SCALE),--scale $(SCALE)) $(if $(ND),--nd $(ND) --hb $(HB) --bkv $(BKV))
 
 # ---- OS-specific: run command + clean ----
 
 ifeq ($(DETECTED_OS),Windows)
     HIP_SDK_WIN := $(subst /,\,$(HIP_SDK))
-    RUN_CMD     = set "PATH=$(HIP_SDK_WIN)\bin;%PATH%" && set "HIPDNN_GQA_AUTOTUNE_MODE=$(KERNEL_MODE)" && set "HIPDNN_RESULTS_CSV=$(subst /,\,$(RESULTS_CSV))" && set "HIPDNN_RESULTS_OP=gqa" && set "HIPDNN_RESULTS_LEAF=prefill/Xfp16_Wfp16_Yfp16" && set "HIPDNN_RESULTS_ARCH=$(ARCH)" && set "HIPDNN_RESULTS_MODE=$(MODE_RESOLVED)" && $(subst /,\,.\$(1))
+    RUN_CMD     = set "PATH=$(HIP_SDK_WIN)\bin;%PATH%" && set "HIPDNN_UT_TIMING=$(TIMING)" && set "HIPDNN_GQA_AUTOTUNE_MODE=$(KERNEL_MODE)" && set "HIPDNN_RESULTS_CSV=$(subst /,\,$(RESULTS_CSV))" && set "HIPDNN_RESULTS_OP=gqa" && set "HIPDNN_RESULTS_LEAF=prefill/Xfp16_Wfp16_Yfp16" && set "HIPDNN_RESULTS_ARCH=$(ARCH)" && set "HIPDNN_RESULTS_MODE=$(MODE_RESOLVED)" && $(subst /,\,.\$(1))
     define DO_CLEAN
 	if exist $(BUILD_DIR) rmdir /s /q $(BUILD_DIR)
     endef
 else
     HIP_SDK_WIN := $(shell wslpath -w "$(HIP_SDK)")
-    RUN_CMD     = cmd.exe /c "set PATH=$(HIP_SDK_WIN)\bin;%PATH% && set HIPDNN_GQA_AUTOTUNE_MODE=$(KERNEL_MODE) && set HIPDNN_RESULTS_CSV=$(RESULTS_CSV) && set HIPDNN_RESULTS_OP=gqa && set HIPDNN_RESULTS_LEAF=prefill/Xfp16_Wfp16_Yfp16 && set HIPDNN_RESULTS_ARCH=$(ARCH) && set HIPDNN_RESULTS_MODE=$(MODE_RESOLVED) && %CD%\$(1)"
+    RUN_CMD     = cmd.exe /c "set PATH=$(HIP_SDK_WIN)\bin;%PATH% && set HIPDNN_UT_TIMING=$(TIMING) && set HIPDNN_GQA_AUTOTUNE_MODE=$(KERNEL_MODE) && set HIPDNN_RESULTS_CSV=$(RESULTS_CSV) && set HIPDNN_RESULTS_OP=gqa && set HIPDNN_RESULTS_LEAF=prefill/Xfp16_Wfp16_Yfp16 && set HIPDNN_RESULTS_ARCH=$(ARCH) && set HIPDNN_RESULTS_MODE=$(MODE_RESOLVED) && %CD%\$(1)"
     define DO_CLEAN
 	rm -rf $(BUILD_DIR)
     endef
@@ -167,9 +184,36 @@ else
     LUT_HEADER_DEP      :=
 endif
 
+# Ranking links the existing resolver with a private empty payload and the
+# production candidate catalog. No installed LUT is embedded or modified.
+ifeq ($(RANK),1)
+    KERNEL_MODE := lookup
+    KERNEL_HIP := ../../../common/gqa_rank_adapter.hip
+    TEST_DEFINES := -DHIPDNN_UT_RANK_GQA_ADAPTER=1
+    LUT_EXTRA_INCLUDES := -I$(AUTOTUNE_DIR) -I$(GEN_DIR) -I$(FLATBUFFERS_INC)
+    LUT_OBJS := $(AUTOTUNE_OBJ)
+endif
+ifneq ($(ADLX_INCLUDE),)
+    INCLUDES += -I$(ADLX_INCLUDE)
+endif
+
+# Explicit same-source/flags adapter reuse for standalone ranking only.
+RANK_KERNEL_OBJ ?=
+ifneq ($(RANK_KERNEL_OBJ),)
+    ifneq ($(RANK),1)
+        $(error RANK_KERNEL_OBJ requires RANK=1)
+    endif
+    KERNEL_OBJ := $(RANK_KERNEL_OBJ)
+    ifeq ($(wildcard $(RANK_KERNEL_OBJ)),)
+        $(error RANK_KERNEL_OBJ must name an existing matching object)
+    endif
+endif
+
 $(TARGET): FORCE mode_info $(LUT_OBJS) $(LUT_HEADER_DEP) | $(BUILD_DIR)
 	$(HIPCC) -c $(CXXFLAGS) $(OFFLOAD) $(TEST_DEFINES) $(INCLUDES) $(LUT_EXTRA_INCLUDES) -x hip test_gqa_prefill.cpp -o $(TEST_OBJ)
+ifeq ($(RANK_KERNEL_OBJ),)
 	$(HIPCC) -c $(KERNEL_FLAGS) $(OFFLOAD) $(INCLUDES) $(KERNEL_HIP) -o $(KERNEL_OBJ)
+endif
 	$(HIPCC) $(OFFLOAD) $(TEST_OBJ) $(KERNEL_OBJ) $(LUT_OBJS) -o $(TARGET)
 
 mode_info:
@@ -212,7 +256,7 @@ test_custom: $(TARGET)
 ifeq ($(CSV_FRESH),1)
 	@$(RESET_RESULTS_CSV)
 endif
-	$(call RUN_CMD,$(TARGET)) --b $(B) --h $(H) --g $(G) --d $(D) --sq $(SQ) --past $(PAST) --window $(WINDOW) --iters $(ITERS)
+	$(call RUN_CMD,$(TARGET)) --b $(B) --h $(H) --g $(G) --d $(D) --sq $(SQ) --past $(PAST) --window $(WINDOW) --iters $(ITERS) $(CASE_ARGS)
 
 # Build only. The unit_test/ aggregator passes PKG_DIR and PKG_NAME to collect the
 # exe into its hipdnn-kernel-ut package layout.
