@@ -93,4 +93,21 @@ module {
          prefill = array<i64: 1, 1, 255>}
     return
   }
+
+  // An empty output is still pre-filled with a count of 0; the runtime treats
+  // that as a no-op, whatever the buffer pointer is.
+  // CHECK-LABEL: llvm.func @rocmlir_prefill_empty
+  func.func @rocmlir_prefill_empty(%ctx: !hip.context, %x: memref<8xi8, 1>,
+                                   %y: memref<0x4xi32, 1>) {
+    // CHECK: llvm.alloca
+    // CHECK: %[[COUNT:.*]] = llvm.mlir.constant(0 : i64) : i64
+    // CHECK-NEXT: %[[BYTES:.*]] = llvm.mlir.constant(4 : i64) : i64
+    // CHECK-NEXT: %[[ZERO:.*]] = llvm.mlir.constant(0 : i64) : i64
+    // CHECK-NEXT: llvm.call @wrap_rocmlir_prefill(%{{.*}}, %{{.*}}, %[[COUNT]], %[[BYTES]], %[[ZERO]])
+    hip.rocmlir(%ctx) @rocMlir1 ins(%x : memref<8xi8, 1>)
+        outs(%y : memref<0x4xi32, 1>)
+        {block_size = 64 : i64, grid_size = 1 : i64, kernel_binary = "ELF",
+         prefill = array<i64: 1, 4, 0>}
+    return
+  }
 }

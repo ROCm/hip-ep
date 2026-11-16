@@ -81,8 +81,21 @@ int wrap_rocmlir_prefill(RuntimeState *state, void *buffer, int64_t count,
       hipdnn_ep_state_set_error_flag(state, status);
     return status;
   };
-  if (!state || !buffer || count < 0) {
+  if (!state || count < 0) {
     fprintf(stderr, "Invalid arguments in wrap_rocmlir_prefill\n");
+    return finish(-1);
+  }
+  if (element_bytes != 1 && element_bytes != 2 && element_bytes != 4) {
+    fprintf(stderr, "wrap_rocmlir_prefill: unsupported element size %lld\n",
+            (long long)element_bytes);
+    return finish(-1);
+  }
+  // An empty tensor may carry a null pointer, as in the other wrappers: filling
+  // nothing is a no-op, while a null buffer with elements is an error.
+  if (count == 0)
+    return 0;
+  if (!buffer) {
+    fprintf(stderr, "wrap_rocmlir_prefill: null buffer\n");
     return finish(-1);
   }
   hipStream_t stream =
