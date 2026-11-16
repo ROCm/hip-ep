@@ -6,8 +6,9 @@
 // Benchmarked perfConfig selection for the rocMLIR offload path.
 //
 // Without this, `compileAndEmbedRocMlirKernels` falls back to
-// `compileRocMlirDefaultPerfConfig`, which takes position 0 of the tuning
-// space. That is not an arbitrary pick -- rocMLIR orders the space so the
+// `compileRocMlirDefaultPerfConfig`, which takes the first config of the
+// tuning space that compiles, moving past ones rocMLIR rejects as not
+// applicable. That is not an arbitrary pick -- rocMLIR orders the space so the
 // first *conservatively applicable* config leads, and prepends a safe default
 // when no table entry qualifies -- but it is chosen for LDS-budget safety
 // rather than speed, so a problem the per-arch table does not cover can land

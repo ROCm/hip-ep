@@ -17,6 +17,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/Diagnostics.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/Passes.h"
 
@@ -331,23 +332,61 @@ bool runRocMlirHighLevelPipeline(ModuleOp kernelModule) {
 
 bool compileRocMlirDefaultPerfConfig(ModuleOp kernelModule, StringRef arch,
                                      CompiledKernel &out) {
-  // Affix a perfConfig to the gemm op (the `perf_config` string attr). Take
-  // the first entry enumerated from the tuning search space; autotuning
-  // callers substitute their own compileOne instead, which is why this is not
-  // folded into the backend call.
-  llvm::SmallString<1024> perfConfig; // ROCMLIR_TUNING_PARAM_STRING_BUFSZ
+  // Affix a perfConfig to the gemm op (the `perf_config` string attr), taking
+  // entries of the tuning search space in order; autotuning callers substitute
+  // their own compileOne instead, which is why this is not folded into the
+  // backend call. Entry 0 is conservatively applicable for most problems but
+  // not all: a very large GEMM can give it a launch over the dispatch packet's
+  // work-item limit. rocMLIR marks such a config `rock.not_applicable`, so try
+  // the next one; any other failure is a real lowering error and stops here.
   std::unique_ptr<rock::TuningParamSet> space(rock::createTunableParamSpace(
       kernelModule, rock::TuningParamSetKind::Full));
   if (!space || space->tuningRange.empty())
     return false;
-  rock::ParamEntry entry;
-  if (!rock::tuningGetParam(space.get(), /*pos=*/0, &entry))
-    return false;
-  entry.param.getPerfConfigStr(perfConfig);
-  if (!rock::tuningSetStr(kernelModule, perfConfig))
-    return false;
 
-  return compileRocMlirBackend(kernelModule, arch, perfConfig, out);
+  // A rejected config's diagnostics would read as a failed compile even when a
+  // later config succeeds, so hold each attempt's back and replay only those of
+  // the attempt that decides the outcome. Whole diagnostics are kept so the
+  // replay carries their notes (e.g. the failing op) and severity unchanged; a
+  // Diagnostic owns its strings, and everything else it refers to lives in the
+  // context.
+  MLIRContext *ctx = kernelModule.getContext();
+  SmallVector<Diagnostic> captured;
+  auto replayCaptured = [&] {
+    for (Diagnostic &diag : captured)
+      ctx->getDiagEngine().emit(std::move(diag));
+    captured.clear();
+  };
+
+  for (rock::RockTuningParamAttrInterface tuningAttr : space->tuningRange) {
+    llvm::SmallString<1024> perfConfig; // ROCMLIR_TUNING_PARAM_STRING_BUFSZ
+    tuningAttr.getPerfConfigStr(perfConfig);
+
+    // The backend pipeline rewrites the module in place, so each attempt
+    // needs an untouched copy of the rock-form kernel.
+    OwningOpRef<ModuleOp> attempt = kernelModule.clone();
+    ModuleOp attemptOp = attempt.get();
+    captured.clear();
+    bool compiled;
+    {
+      ScopedDiagnosticHandler capture(ctx, [&](Diagnostic &diag) {
+        captured.push_back(std::move(diag));
+        return success();
+      });
+      compiled = rock::tuningSetStr(attemptOp, perfConfig) &&
+                 compileRocMlirBackend(attemptOp, arch, perfConfig, out);
+    }
+    if (compiled) {
+      replayCaptured();
+      return true;
+    }
+    if (!attemptOp->hasAttr(rock::NotApplicableAttr::getMnemonic())) {
+      replayCaptured();
+      return false;
+    }
+  }
+  replayCaptured();
+  return false;
 }
 
 bool runRocMlirOnKernel(ModuleOp kernelModule, StringRef arch,
