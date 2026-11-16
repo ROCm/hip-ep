@@ -232,8 +232,12 @@ describes the file for callers. The entry has:
   driver: `name`, `flag` (or `positional` with `format`), `make` (the
   `make test_custom` variable, or `null` with a reason in `description`),
   `type`, `choices` when restricted, `required`, `exe_default`,
-  `make_default` and `description`; plus `constraints`, `example_exe` and
-  `example_make`.
+  `make_default` and `description`; plus `constraints` in words and a
+  `checks` expression for each one a script can test.
+- `examples`: at least one custom case by parameter `values`, a real model
+  shape that finishes in seconds. Before delivery,
+  `python common/ut_interface.py verify --bin <package bin> --leaf <leaf>`
+  passes on a GPU.
 - `diagnostic_flags` and the leaf's own `env` variables, if any.
 - `gaps: []`. Only leaves that predate this standard may list gaps, and only
   those already frozen in `common/test_ut_interface.py`.
@@ -242,8 +246,8 @@ The `kernel-ut-interface` pre-commit hook, which CI's pre-commit job runs on
 every pull request, and `make -C common test` run
 `common/test_ut_interface.py`. It fails when a registered leaf has no entry,
 an entry names a flag the driver does not parse or a Make variable or default
-the Makefile does not define, a capability disagrees with the source, or a
-leaf gains a gap. Change the file in the same commit as any leaf flag, Make
+the Makefile does not define, a capability disagrees with the source, an
+example breaks its own parameters or checks, or a leaf gains a gap. Change the file in the same commit as any leaf flag, Make
 variable or registration.
 
 ## Adding an op or dtype leaf

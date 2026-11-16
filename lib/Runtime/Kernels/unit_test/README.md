@@ -107,6 +107,8 @@ controller from that `bin` directory:
 | `--arch` | `gfxNNNN`, `gfx11-generic`, ... | detected from GPU 0 | Which `kernel-tests/<arch>/` to run. Picked by the same rule the EP uses to load `custom_kernels_<arch>.dll` (`genericTargetFor()` in `backend-mlir-compiler/custom-op-mlir/src/LlvmIrJit.cpp`): the ISA's own directory first, then its generic target's. So on the CI package a gfx1151 runs `kernel-tests/gfx11-generic/` and a gfx1170 runs `kernel-tests/gfx1170/`, the same DLLs the EP loads there. `gfx1170` is not a `gfx11-generic` member. |
 | `--mode` | `lookup`, `autotune` | `lookup` | `lookup` uses the tables embedded in `custom_kernels_<arch>.dll` and falls through to autotune on a miss, like production. `autotune` bypasses the tables (production's `online` mode). |
 | `--coverage` | `1`, `2`, `3` | `3` | Shape tier; see [Shape coverage](GUIDELINES.md#shape-coverage-3-tiers). `1` suits a per-PR job, `3` a nightly one. |
+| `--timing` | `screen`, `standard`, `confirm` | `standard` | Timing preset of the shared timer (`HIPDNN_UT_TIMING`); `confirm` for formal numbers. |
+| `--leaf` | `<op>/<leaf>`, e.g. `gqa/prefill/Xfp16_Wfp16_Yfp16` | every leaf | Run only this leaf. After `--`, the rest of the command line goes to it instead of `--coverage`; see [External invocation](#external-invocation-ut_interfacejson). |
 
 The controller runs the 17 leaves serially, with `bin` as the working
 directory so every leaf finds `custom_kernels_<arch>.dll`. It prints one
@@ -141,16 +143,18 @@ with `shape=suite`, `config=suite-total` and that leaf's `PASS`/`FAIL` in
 `verdict`. A failing CI job is diagnosed from this file: filter
 `verdict == FAIL`.
 
-To run a single leaf by hand, also start it from `bin`:
+To run a single leaf, name it with `--leaf`; after `--` it receives the
+given arguments instead of `--coverage`:
 
 ```
-.\kernel-tests\gfx11-generic\hipdnn-kernel-ut-matmul-nbits-xfp16-wu4-yfp16.exe --coverage 1
+.\hipdnn-kernel-ut.exe --leaf matmul_nbits/Xfp16_Wu4_Yfp16 --coverage 1
+.\hipdnn-kernel-ut.exe --leaf matmul_nbits/Xfp16_Wu4_Yfp16 -- 1x2880x5120 --group-size 32
 ```
 
-A leaf started this way does not get the controller's DLL search path, so it
-loads the driver's HIP runtime from System32, and its `config` column can read
-`unlogged` because it cannot capture the kernels' diagnostics. Run the suite
-through the controller to test the package's runtime and record every config.
+A leaf executable started directly from `bin` also runs, but it does not get
+the controller's DLL search path, so it loads the driver's HIP runtime from
+System32, and its `config` column can read `unlogged` because it cannot capture
+the kernels' diagnostics.
 
 When `BUILD_TESTING` is on, each leaf is also registered with CTest under the
 labels `gpu;kernel-ut;<arch>` (run from the build tree, e.g.
@@ -192,7 +196,7 @@ covers building, running and refreshing LUTs.
 unit_test/
   README.md
   GUIDELINES.md              # rules every leaf follows
-  ut_interface.json          # inputs of the controller and every leaf
+  ut_interface.json          # inputs of the controller and every leaf (common/ut_interface.py runs them)
   CMakeLists.txt             # package targets and install rules
   kernel_ut_main.cpp         # hipdnn-kernel-ut.exe controller
   Makefile                   # local suite: build every leaf, run hipdnn-kernel-ut.exe
@@ -300,12 +304,43 @@ and [hip/autotune/gqa/README.md](../hip/autotune/gqa/README.md#refresh-through-n
 ## External invocation (`ut_interface.json`)
 
 [`ut_interface.json`](ut_interface.json) lists every input an external caller
-(CI, an agent or a script) passes to run these tests. The package installs it
-as `bin/kernel-tests/ut_interface.json`.
+(CI, an agent, a script or a colleague) passes to run these tests, and
+[`common/ut_interface.py`](common/ut_interface.py) turns parameter values into
+commands and runs them. The package installs both in `bin/kernel-tests/`.
 
-- `controller`: the `hipdnn-kernel-ut.exe` flags (`--arch`, `--mode`,
-  `--coverage`, `--timing`), the command and environment it gives each leaf,
-  its exit codes and outputs.
+Run one case through the controller, from `bin`, so the leaf gets the
+package's HIP runtime, environment, stderr capture and `out/results.csv` rows;
+a leaf executable started directly does not (see "Run" above):
+
+```bat
+cd <install>\bin
+hipdnn-kernel-ut.exe --leaf gqa/prefill/Xfp16_Wfp16_Yfp16 --timing standard -- --b 1 --h 32 --g 8 --d 128 --sq 512 --past 1024 --max-seq 4096
+```
+
+The tool (Python 3.8+, standard library only) builds those arguments from
+parameter names and checks them before anything runs:
+
+```bat
+python kernel-tests\ut_interface.py list
+python kernel-tests\ut_interface.py show qmoe/Xfp16_Wu4_Yfp16
+python kernel-tests\ut_interface.py command qmoe/Xfp16_Wu4_Yfp16 tokens=1 hidden=2048 inter=768 experts=128 topk=8 block_size=32
+python kernel-tests\ut_interface.py run qmoe/Xfp16_Wu4_Yfp16 --bin . tokens=1 hidden=2048 inter=768 experts=128 topk=8 block_size=32
+python kernel-tests\ut_interface.py verify --bin .
+```
+
+`list` shows every leaf's parameters, `show` one leaf's flags, defaults,
+constraints and examples. `command` prints the package command and, when every
+given parameter has a Make variable, the `make test_custom` command of the
+source tree. `run` executes the case and prints its `results.csv` rows.
+`verify` runs every example in the file (default `--timing screen`) and prints
+`PASS` or `FAIL` per example; it exits 0 only when all pass. `run` and
+`verify` replace `bin/out/results.csv` like any controller run.
+
+The file's fields:
+
+- `tool` and `controller`: the commands above; the controller flags
+  (`--leaf`, `--arch`, `--mode`, `--coverage`, `--timing`, `--`), what it
+  passes to each leaf, its exit codes and outputs.
 - `common`: the Make and environment variables every leaf shares. `COVERAGE`
   (`--coverage`, `HIPDNN_UT_COVERAGE`) selects the shape tier, `TIMING`
   (`HIPDNN_UT_TIMING`) the timing preset, `MODE` with
@@ -316,32 +351,25 @@ as `bin/kernel-tests/ut_interface.json`.
   `source`, `capabilities` (`coverage`, `timing` = `shared` or `none`,
   `mode` = `lookup` or `label_only`, `rank`), the `suite` arguments and
   `custom`, the leaf's single-case interface:
-  - `selected_by`: what switches the executable from the suite to one case.
-  - `params[]`: every op input of that case. `flag` is the executable
-    argument (`positional` with a `format` when it has none), `make` the
-    `make test_custom` variable (`null` when only the executable accepts it;
-    `make_args` names a raw `ARGS=` instead), plus `type`, `choices`,
-    `required` and `description`. `exe_default` and `make_default` can differ:
-    an omitted flag takes `exe_default`, an omitted Make variable
-    `make_default`.
-  - `constraints`, `example_exe` and `example_make`.
+  - `selected_by`: what switches the leaf from the suite to one case.
+  - `params[]`: every op input of that case. `name` is what the tool takes;
+    `flag` is the leaf argument (`positional` with a `format` when it has
+    none) and `make` the `make test_custom` variable (`null` when only the
+    executable accepts it; `make_args` names a raw `ARGS=` instead), plus
+    `type`, `choices`, `required` and `description`. `exe_default` and
+    `make_default` can differ: an omitted flag takes `exe_default`, an
+    omitted Make variable `make_default`.
+  - `constraints` in words, and `checks`: Python expressions over parameter
+    names (plus `M`, `K`, `N` of an `MxKxN` shape and `min`) that the tool
+    evaluates on the given values, or `exe_default`, before running.
+- `examples[]`: named runnable cases, `values` (parameter name to value) for a
+  custom case or `coverage` for a suite run; real model shapes that finish in
+  seconds.
 - `diagnostic_flags` and a leaf's own `env` do not change the op inputs.
-- `gaps`: required capabilities a leaf that predates this standard still
-  lacks (`custom_shape`, `coverage`, `shared_timer`, `results_csv`,
-  `make_api`, `arch_default`). `custom: null` means the leaf cannot run a
-  caller-chosen shape.
-
-A packaged leaf started on its own does not get the controller's DLL search
-path or environment (see "Run" above). Set the timing preset, and for a
-MatMulNBits, GQA or QMoE leaf `HIPDNN_KERNEL_UT_MODE` with the matching
-`HIPDNN_<OP>_AUTOTUNE_MODE`; `HIPDNN_RESULTS_CSV` adds its rows to a CSV:
-
-```bat
-set HIPDNN_UT_TIMING=confirm
-set HIPDNN_KERNEL_UT_MODE=lookup
-set HIPDNN_GQA_AUTOTUNE_MODE=lookup
-kernel-tests\gfx11-generic\hipdnn-kernel-ut-gqa-prefill-xfp16-wfp16-yfp16.exe --b 1 --h 32 --g 8 --d 128 --sq 512 --past 1024 --max-seq 4096
-```
+- `gaps`: required capabilities a leaf that predates the
+  [guidelines](GUIDELINES.md) still lacks (`custom_shape`, `coverage`,
+  `shared_timer`, `results_csv`, `make_api`, `arch_default`). `custom: null`
+  means the leaf cannot run a caller-chosen shape; its example runs the suite.
 
 Every leaf must have an entry; its required fields are in
 [GUIDELINES.md](GUIDELINES.md#required-entry-for-every-new-leaf).

@@ -1,18 +1,35 @@
 {
   "schema": "hipdnn-kernel-ut-interface/v1",
-  "description": "Inputs an external caller passes to run the kernel unit tests: the packaged controller, the options every leaf shares, and each leaf's custom-case parameters. unit_test/README.md \"External invocation\" explains the fields; common/test_ut_interface.py checks this file against kernel_ut_main.cpp, the leaf Makefiles and the leaf sources.",
+  "description": "Inputs an external caller passes to run the kernel unit tests: the packaged controller, the options every leaf shares, and each leaf's custom-case parameters with runnable examples. unit_test/README.md \"External invocation\" explains the fields; common/ut_interface.py turns parameter values into commands and runs them; common/test_ut_interface.py checks this file against kernel_ut_main.cpp, the leaf Makefiles and the leaf sources.",
+  "tool": {
+    "path": "bin/kernel-tests/ut_interface.py (source: unit_test/common/ut_interface.py)",
+    "commands": {
+      "list": "every leaf with its custom parameters",
+      "show <leaf>": "parameter table, constraints and examples of one leaf",
+      "command <leaf> [name=value ...]": "the controller and make commands for those parameter values",
+      "run <leaf> --bin <bin> [name=value ...]": "run that case through the controller and print its results.csv rows",
+      "verify --bin <bin>": "run every example below through the controller and report PASS/FAIL"
+    }
+  },
   "controller": {
     "executable": "bin/hipdnn-kernel-ut.exe",
     "args": [
+      {"flag": "--leaf", "type": "string", "default": "every leaf", "description": "Run only this leaf (<op>/<leaf>, the `leaf` field below). Gets the same DLL search path, environment, stderr capture and results.csv as the suite."},
       {"flag": "--arch", "type": "string", "default": "detected from GPU 0", "description": "Selects bin/kernel-tests/<arch>/ with the EP's DLL rule: the ISA's own directory first, then its generic target's (gfx115x -> gfx11-generic)."},
       {"flag": "--mode", "type": "enum", "choices": ["lookup", "autotune"], "default": "lookup", "description": "lookup resolves configs from the tables embedded in custom_kernels_<arch>.dll and falls through to autotune on a miss; autotune bypasses the tables."},
       {"flag": "--coverage", "type": "enum", "choices": [1, 2, 3], "default": 3, "description": "Shape-coverage tier passed to every leaf as --coverage <N>."},
-      {"flag": "--timing", "type": "enum", "choices": ["screen", "standard", "confirm"], "default": "standard", "env": "HIPDNN_UT_TIMING", "description": "Timing preset passed to every leaf through HIPDNN_UT_TIMING. confirm is the formal measurement."}
+      {"flag": "--timing", "type": "enum", "choices": ["screen", "standard", "confirm"], "default": "standard", "env": "HIPDNN_UT_TIMING", "description": "Timing preset passed to every leaf through HIPDNN_UT_TIMING. confirm is the formal measurement."},
+      {"flag": "--", "type": "separator", "description": "With --leaf: every following argument goes to the leaf unchanged instead of --coverage <N>. Build them from the leaf's custom.params (common/ut_interface.py command does)."}
     ],
-    "leaf_command": "<bin>/kernel-tests/<arch>/<package_executable> --coverage <N>",
+    "leaf_command": "<bin>/kernel-tests/<arch>/<package_executable> --coverage <N>, or the arguments after -- when --leaf is given",
     "leaf_environment": ["HIPDNN_UT_TIMING", "HIPDNN_RESULTS_CSV", "HIPDNN_RESULTS_ARCH", "HIPDNN_RESULTS_OP", "HIPDNN_RESULTS_LEAF", "HIPDNN_RESULTS_MODE", "HIPDNN_KERNEL_UT_MODE", "HIPDNN_MATMUL_AUTOTUNE_MODE", "HIPDNN_GQA_AUTOTUNE_MODE", "HIPDNN_KERNEL_UT_STDERR"],
-    "exit_codes": {"0": "Every leaf passed.", "1": "At least one leaf failed or could not be launched.", "2": "Bad argument, no GPU detected, or no packaged tests for that arch."},
-    "outputs": ["bin/out/results.csv (one row per case and one shape=suite row per leaf)", "bin/out/<executable stem>.stderr.log for a failed leaf"]
+    "exit_codes": {
+      "0": "Every leaf passed.",
+      "1": "At least one leaf failed or could not be launched.",
+      "2": "Bad argument, no GPU detected, or no packaged tests for that arch."
+    },
+    "outputs": ["bin/out/results.csv (one row per case and one shape=suite row per leaf)", "bin/out/<executable stem>.stderr.log for a failed leaf"],
+    "run_one_case": "cd <bin> && hipdnn-kernel-ut.exe --leaf <leaf> [--timing screen|standard|confirm] [--mode lookup|autotune] -- <leaf arguments>"
   },
   "common": {
     "make": [
@@ -51,9 +68,20 @@
       "leaf": "gqa/ring/Xfp16_Wfp16_Yfp16",
       "package_executable": "hipdnn-kernel-ut-gqa-ring-xfp16-wfp16-yfp16.exe",
       "source": "test_gqa_ring.cpp",
-      "capabilities": {"coverage": true, "timing": "none", "mode": "label_only", "rank": false},
-      "suite": {"args": ["--coverage"], "coverage_default": "HIPDNN_UT_COVERAGE, else 1"},
+      "capabilities": {
+        "coverage": true,
+        "timing": "none",
+        "mode": "label_only",
+        "rank": false
+      },
+      "suite": {
+        "args": ["--coverage"],
+        "coverage_default": "HIPDNN_UT_COVERAGE, else 1"
+      },
       "custom": null,
+      "examples": [
+        {"name": "suite_tier1", "coverage": 1}
+      ],
       "devices": ["gfx1151"],
       "gaps": ["custom_shape", "shared_timer", "make_api"]
     },
@@ -61,44 +89,70 @@
       "leaf": "matmul_nbits/Xfp16_Wu2_Yfp16",
       "package_executable": "hipdnn-kernel-ut-matmul-nbits-xfp16-wu2-yfp16.exe",
       "source": "test_matmul_nbits_u2.cpp",
-      "capabilities": {"coverage": true, "timing": "shared", "mode": "lookup", "rank": true},
-      "suite": {"args": ["--coverage"], "coverage_default": "HIPDNN_UT_COVERAGE, else 3"},
+      "capabilities": {
+        "coverage": true,
+        "timing": "shared",
+        "mode": "lookup",
+        "rank": true
+      },
+      "suite": {
+        "args": ["--coverage"],
+        "coverage_default": "HIPDNN_UT_COVERAGE, else 3"
+      },
       "custom": {
         "selected_by": "a positional MxKxN argument",
         "params": [
           {"name": "shape", "positional": true, "format": "MxKxN", "make": "SIZE", "make_default": "128x2880x5120", "required": true, "description": "M activation rows, K reduction, N output columns."},
           {"name": "group_size", "flag": "--group-size", "make": "GS", "type": "int", "exe_default": 128, "make_default": 128, "description": "Quantization block size along K."},
           {"name": "no_zero_points", "flag": "--no-zeros", "make": "NO_ZEROS", "type": "bool", "exe_default": false, "make_default": "", "description": "Omit zero points (make: NO_ZEROS=1)."}
-        ],
-        "example_exe": "hipdnn-kernel-ut-matmul-nbits-xfp16-wu2-yfp16.exe 1x2880x5120 --group-size 32",
-        "example_make": "make test_custom HIP_SDK=<sdk> SIZE=1x2880x5120 GS=32"
+        ]
       },
+      "examples": [
+        {"name": "decode", "values": {"shape": "1x2880x5120", "group_size": 32}}
+      ],
       "gaps": []
     },
     {
       "leaf": "matmul_nbits/Xfp16_Wu3_Yfp16",
       "package_executable": "hipdnn-kernel-ut-matmul-nbits-xfp16-wu3-yfp16.exe",
       "source": "test_matmul_nbits_u3.cpp",
-      "capabilities": {"coverage": true, "timing": "shared", "mode": "lookup", "rank": true},
-      "suite": {"args": ["--coverage"], "coverage_default": "HIPDNN_UT_COVERAGE, else 3"},
+      "capabilities": {
+        "coverage": true,
+        "timing": "shared",
+        "mode": "lookup",
+        "rank": true
+      },
+      "suite": {
+        "args": ["--coverage"],
+        "coverage_default": "HIPDNN_UT_COVERAGE, else 3"
+      },
       "custom": {
         "selected_by": "a positional MxKxN argument",
         "params": [
           {"name": "shape", "positional": true, "format": "MxKxN", "make": "SIZE", "make_default": "128x2880x5120", "required": true, "description": "M activation rows, K reduction, N output columns."},
           {"name": "group_size", "flag": "--group-size", "make": "GS", "type": "int", "exe_default": 128, "make_default": 128, "description": "Quantization block size along K."},
           {"name": "no_zero_points", "flag": "--no-zeros", "make": "NO_ZEROS", "type": "bool", "exe_default": false, "make_default": "", "description": "Omit zero points (make: NO_ZEROS=1)."}
-        ],
-        "example_exe": "hipdnn-kernel-ut-matmul-nbits-xfp16-wu3-yfp16.exe 1x2880x5120 --group-size 32",
-        "example_make": "make test_custom HIP_SDK=<sdk> SIZE=1x2880x5120 GS=32"
+        ]
       },
+      "examples": [
+        {"name": "decode", "values": {"shape": "1x2880x5120", "group_size": 32}}
+      ],
       "gaps": []
     },
     {
       "leaf": "matmul_nbits/Xfp16_Wu4_Yfp16",
       "package_executable": "hipdnn-kernel-ut-matmul-nbits-xfp16-wu4-yfp16.exe",
       "source": "test_matmul_nbits.cpp",
-      "capabilities": {"coverage": true, "timing": "shared", "mode": "lookup", "rank": true},
-      "suite": {"args": ["--coverage"], "coverage_default": "HIPDNN_UT_COVERAGE, else 3"},
+      "capabilities": {
+        "coverage": true,
+        "timing": "shared",
+        "mode": "lookup",
+        "rank": true
+      },
+      "suite": {
+        "args": ["--coverage"],
+        "coverage_default": "HIPDNN_UT_COVERAGE, else 3"
+      },
       "custom": {
         "selected_by": "a positional MxKxN argument; the other single-case flags require it",
         "params": [
@@ -111,9 +165,13 @@
           {"name": "b_row_bytes", "flag": "--b-row-bytes", "make": null, "type": "int", "description": "Padded weight row pitch; must equal K/2+128 and selects padrow."}
         ],
         "constraints": ["K and group size are even", "dp4a: M=1..7, K%32==0, K%group_size==0, no zero points or u8 zero points", "padrow: M>=2, K%32==0, K%group_size==0"],
-        "example_exe": "hipdnn-kernel-ut-matmul-nbits-xfp16-wu4-yfp16.exe 1x640x2560 --group-size 32 --no-zeros --dp4a",
-        "example_make": "make test_custom HIP_SDK=<sdk> SIZE=128x2880x5120 GS=128"
+        "checks": ["K % 2 == 0 and group_size % 2 == 0", "not (dp4a or route == 'dp4a') or (M <= 7 and K % 32 == 0 and K % group_size == 0 and (no_zero_points or zero_point_type == 'u8'))", "b_row_bytes == K // 2 + 128 and M >= 2 and K % 32 == 0 and K % group_size == 0", "not (route == 'padrow') or (M >= 2 and K % 32 == 0 and K % group_size == 0)"]
       },
+      "examples": [
+        {"name": "prefill", "values": {"shape": "128x2880x5120", "group_size": 128}},
+        {"name": "dp4a_decode", "values": {"shape": "1x640x2560", "group_size": 32, "no_zero_points": true, "dp4a": true}},
+        {"name": "padded_rows", "values": {"shape": "68x6144x2560", "group_size": 32, "no_zero_points": true, "b_row_bytes": 3200}}
+      ],
       "diagnostic_flags": [
         {"flag": "--list-configs", "description": "Print the WMMA and GEMV config inventory."},
         {"flag": "--help", "description": "Print usage."}
@@ -129,62 +187,97 @@
       "leaf": "matmul_nbits/Xfp16_Wi8_Yfp16",
       "package_executable": "hipdnn-kernel-ut-matmul-nbits-xfp16-wi8-yfp16.exe",
       "source": "test_matmul_nbits_i8.cpp",
-      "capabilities": {"coverage": true, "timing": "shared", "mode": "lookup", "rank": true},
-      "suite": {"args": ["--coverage"], "coverage_default": "HIPDNN_UT_COVERAGE, else 3"},
+      "capabilities": {
+        "coverage": true,
+        "timing": "shared",
+        "mode": "lookup",
+        "rank": true
+      },
+      "suite": {
+        "args": ["--coverage"],
+        "coverage_default": "HIPDNN_UT_COVERAGE, else 3"
+      },
       "custom": {
         "selected_by": "a positional MxKxN argument",
         "params": [
           {"name": "shape", "positional": true, "format": "MxKxN", "make": "SIZE", "make_default": "128x2880x5120", "required": true, "description": "M activation rows, K reduction, N output columns."},
           {"name": "group_size", "flag": "--group-size", "make": "GS", "type": "int", "exe_default": 128, "make_default": 128, "description": "Quantization block size along K."},
           {"name": "no_zero_points", "flag": "--no-zeros", "make": "NO_ZEROS", "type": "bool", "exe_default": false, "make_default": "", "description": "Omit zero points (make: NO_ZEROS=1)."}
-        ],
-        "example_exe": "hipdnn-kernel-ut-matmul-nbits-xfp16-wi8-yfp16.exe 1x2880x5120 --group-size 32",
-        "example_make": "make test_custom HIP_SDK=<sdk> SIZE=1x2880x5120 GS=32"
+        ]
       },
+      "examples": [
+        {"name": "decode", "values": {"shape": "1x2880x5120", "group_size": 32}}
+      ],
       "gaps": []
     },
     {
       "leaf": "matmul_nbits/Xfp32_Wu2_Yfp32",
       "package_executable": "hipdnn-kernel-ut-matmul-nbits-xfp32-wu2-yfp32.exe",
       "source": "test_matmul_nbits_u2.cpp",
-      "capabilities": {"coverage": true, "timing": "shared", "mode": "lookup", "rank": true},
-      "suite": {"args": ["--coverage"], "coverage_default": "HIPDNN_UT_COVERAGE, else 3"},
+      "capabilities": {
+        "coverage": true,
+        "timing": "shared",
+        "mode": "lookup",
+        "rank": true
+      },
+      "suite": {
+        "args": ["--coverage"],
+        "coverage_default": "HIPDNN_UT_COVERAGE, else 3"
+      },
       "custom": {
         "selected_by": "a positional MxKxN argument",
         "params": [
           {"name": "shape", "positional": true, "format": "MxKxN", "make": "SIZE", "make_default": "128x2880x5120", "required": true, "description": "M activation rows, K reduction, N output columns."},
           {"name": "group_size", "flag": "--group-size", "make": "GS", "type": "int", "exe_default": 128, "make_default": 128, "description": "Quantization block size along K."},
           {"name": "no_zero_points", "flag": "--no-zeros", "make": "NO_ZEROS", "type": "bool", "exe_default": false, "make_default": "", "description": "Omit zero points (make: NO_ZEROS=1)."}
-        ],
-        "example_exe": "hipdnn-kernel-ut-matmul-nbits-xfp32-wu2-yfp32.exe 1x2880x5120 --group-size 32",
-        "example_make": "make test_custom HIP_SDK=<sdk> SIZE=1x2880x5120 GS=32"
+        ]
       },
+      "examples": [
+        {"name": "decode", "values": {"shape": "1x2880x5120", "group_size": 32}}
+      ],
       "gaps": []
     },
     {
       "leaf": "matmul_nbits/Xfp32_Wu3_Yfp32",
       "package_executable": "hipdnn-kernel-ut-matmul-nbits-xfp32-wu3-yfp32.exe",
       "source": "test_matmul_nbits_u3.cpp",
-      "capabilities": {"coverage": true, "timing": "shared", "mode": "lookup", "rank": true},
-      "suite": {"args": ["--coverage"], "coverage_default": "HIPDNN_UT_COVERAGE, else 3"},
+      "capabilities": {
+        "coverage": true,
+        "timing": "shared",
+        "mode": "lookup",
+        "rank": true
+      },
+      "suite": {
+        "args": ["--coverage"],
+        "coverage_default": "HIPDNN_UT_COVERAGE, else 3"
+      },
       "custom": {
         "selected_by": "a positional MxKxN argument",
         "params": [
           {"name": "shape", "positional": true, "format": "MxKxN", "make": "SIZE", "make_default": "128x2880x5120", "required": true, "description": "M activation rows, K reduction, N output columns."},
           {"name": "group_size", "flag": "--group-size", "make": "GS", "type": "int", "exe_default": 128, "make_default": 128, "description": "Quantization block size along K."},
           {"name": "no_zero_points", "flag": "--no-zeros", "make": "NO_ZEROS", "type": "bool", "exe_default": false, "make_default": "", "description": "Omit zero points (make: NO_ZEROS=1)."}
-        ],
-        "example_exe": "hipdnn-kernel-ut-matmul-nbits-xfp32-wu3-yfp32.exe 1x2880x5120 --group-size 32",
-        "example_make": "make test_custom HIP_SDK=<sdk> SIZE=1x2880x5120 GS=32"
+        ]
       },
+      "examples": [
+        {"name": "decode", "values": {"shape": "1x2880x5120", "group_size": 32}}
+      ],
       "gaps": []
     },
     {
       "leaf": "matmul_nbits/Xfp32_Wu4_Yfp32",
       "package_executable": "hipdnn-kernel-ut-matmul-nbits-xfp32-wu4-yfp32.exe",
       "source": "test_matmul_nbits.cpp",
-      "capabilities": {"coverage": true, "timing": "shared", "mode": "lookup", "rank": true},
-      "suite": {"args": ["--coverage"], "coverage_default": "HIPDNN_UT_COVERAGE, else 3"},
+      "capabilities": {
+        "coverage": true,
+        "timing": "shared",
+        "mode": "lookup",
+        "rank": true
+      },
+      "suite": {
+        "args": ["--coverage"],
+        "coverage_default": "HIPDNN_UT_COVERAGE, else 3"
+      },
       "custom": {
         "selected_by": "a positional MxKxN argument; the other single-case flags require it",
         "params": [
@@ -195,9 +288,11 @@
           {"name": "route", "flag": "--route", "make": null, "type": "enum", "choices": ["nbits"], "exe_default": "nbits", "description": "dp4a and padrow are FP16-only and are rejected here."}
         ],
         "constraints": ["K and group size are even"],
-        "example_exe": "hipdnn-kernel-ut-matmul-nbits-xfp32-wu4-yfp32.exe 1x2880x5120 --group-size 32",
-        "example_make": "make test_custom HIP_SDK=<sdk> SIZE=1x2880x5120 GS=32"
+        "checks": ["K % 2 == 0 and group_size % 2 == 0", "route == 'nbits'"]
       },
+      "examples": [
+        {"name": "prefill_no_zero_points", "values": {"shape": "128x2880x5120", "group_size": 128, "no_zero_points": true}}
+      ],
       "diagnostic_flags": [
         {"flag": "--help", "description": "Print usage."}
       ],
@@ -207,26 +302,43 @@
       "leaf": "matmul_nbits/Xfp32_Wi8_Yfp32",
       "package_executable": "hipdnn-kernel-ut-matmul-nbits-xfp32-wi8-yfp32.exe",
       "source": "test_matmul_nbits_i8.cpp",
-      "capabilities": {"coverage": true, "timing": "shared", "mode": "lookup", "rank": true},
-      "suite": {"args": ["--coverage"], "coverage_default": "HIPDNN_UT_COVERAGE, else 3"},
+      "capabilities": {
+        "coverage": true,
+        "timing": "shared",
+        "mode": "lookup",
+        "rank": true
+      },
+      "suite": {
+        "args": ["--coverage"],
+        "coverage_default": "HIPDNN_UT_COVERAGE, else 3"
+      },
       "custom": {
         "selected_by": "a positional MxKxN argument",
         "params": [
           {"name": "shape", "positional": true, "format": "MxKxN", "make": "SIZE", "make_default": "128x2880x5120", "required": true, "description": "M activation rows, K reduction, N output columns."},
           {"name": "group_size", "flag": "--group-size", "make": "GS", "type": "int", "exe_default": 128, "make_default": 128, "description": "Quantization block size along K."},
           {"name": "no_zero_points", "flag": "--no-zeros", "make": "NO_ZEROS", "type": "bool", "exe_default": false, "make_default": "", "description": "Omit zero points (make: NO_ZEROS=1)."}
-        ],
-        "example_exe": "hipdnn-kernel-ut-matmul-nbits-xfp32-wi8-yfp32.exe 1x2880x5120 --group-size 32",
-        "example_make": "make test_custom HIP_SDK=<sdk> SIZE=1x2880x5120 GS=32"
+        ]
       },
+      "examples": [
+        {"name": "decode", "values": {"shape": "1x2880x5120", "group_size": 32}}
+      ],
       "gaps": []
     },
     {
       "leaf": "gqa/decode/Xfp16_Wfp16_Yfp16",
       "package_executable": "hipdnn-kernel-ut-gqa-decode-xfp16-wfp16-yfp16.exe",
       "source": "test_gqa_decode.cpp",
-      "capabilities": {"coverage": true, "timing": "shared", "mode": "lookup", "rank": true},
-      "suite": {"args": ["--coverage"], "coverage_default": "HIPDNN_UT_COVERAGE, else 3"},
+      "capabilities": {
+        "coverage": true,
+        "timing": "shared",
+        "mode": "lookup",
+        "rank": true
+      },
+      "suite": {
+        "args": ["--coverage"],
+        "coverage_default": "HIPDNN_UT_COVERAGE, else 3"
+      },
       "custom": {
         "selected_by": "any shape flag; --all still runs the suite",
         "params": [
@@ -241,9 +353,12 @@
           {"name": "smooth_softmax", "flag": "--smooth", "make": null, "type": "int", "exe_default": 0, "description": "1 uses smooth softmax (no explicit sink)."},
           {"name": "pad", "flag": "--pad", "make": null, "type": "int", "exe_default": 0, "description": ">0: key_bias marks batch b's first b*pad keys as left padding."}
         ],
-        "example_exe": "hipdnn-kernel-ut-gqa-decode-xfp16-wfp16-yfp16.exe --b 1 --h 64 --g 8 --d 64 --max-seq 4096 --total 2048 --window 128 --sink 1",
-        "example_make": "make test_custom HIP_SDK=<sdk> B=1 H=32 G=8 D=128 MAX_SEQ=4096 TOTAL=2048"
+        "checks": ["num_heads % kv_num_heads == 0", "total_seq <= max_seq"]
       },
+      "examples": [
+        {"name": "llama31_8b", "values": {"batch": 1, "num_heads": 32, "kv_num_heads": 8, "head_dim": 128, "max_seq": 4096, "total_seq": 2048}},
+        {"name": "gpt_oss_20b_window_sink", "values": {"batch": 1, "num_heads": 64, "kv_num_heads": 8, "head_dim": 64, "max_seq": 4096, "total_seq": 2048, "window": 128, "head_sink": 1}}
+      ],
       "diagnostic_flags": [
         {"flag": "--all", "description": "Run the suite even when shape flags are given."},
         {"flag": "--only", "description": "<substring>: run only suite cases whose name contains it."},
@@ -260,8 +375,16 @@
       "leaf": "gqa/decode/Xfp16_Wi8_Yfp16",
       "package_executable": "hipdnn-kernel-ut-gqa-decode-xfp16-wi8-yfp16.exe",
       "source": "test_gqa_decode_i8.cpp",
-      "capabilities": {"coverage": true, "timing": "shared", "mode": "lookup", "rank": true},
-      "suite": {"args": ["--coverage"], "coverage_default": "HIPDNN_UT_COVERAGE, else 3"},
+      "capabilities": {
+        "coverage": true,
+        "timing": "shared",
+        "mode": "lookup",
+        "rank": true
+      },
+      "suite": {
+        "args": ["--coverage"],
+        "coverage_default": "HIPDNN_UT_COVERAGE, else 3"
+      },
       "custom": {
         "selected_by": "any shape flag; --all still runs the suite",
         "params": [
@@ -272,9 +395,11 @@
           {"name": "max_seq", "flag": "--max-seq", "make": "MAX_SEQ", "type": "int", "exe_default": 8192, "make_default": 4096, "description": "KV cache capacity."},
           {"name": "total_seq", "flag": "--total", "make": "TOTAL", "type": "int", "exe_default": 8192, "make_default": 2048, "description": "Effective KV length; at most max_seq."}
         ],
-        "example_exe": "hipdnn-kernel-ut-gqa-decode-xfp16-wi8-yfp16.exe --b 1 --h 32 --g 8 --d 128 --max-seq 4096 --total 2048",
-        "example_make": "make test_custom HIP_SDK=<sdk> B=1 H=32 G=8 D=128 MAX_SEQ=4096 TOTAL=2048"
+        "checks": ["num_heads % kv_num_heads == 0", "total_seq <= max_seq"]
       },
+      "examples": [
+        {"name": "llama31_8b", "values": {"batch": 1, "num_heads": 32, "kv_num_heads": 8, "head_dim": 128, "max_seq": 4096, "total_seq": 2048}}
+      ],
       "diagnostic_flags": [
         {"flag": "--all", "description": "Run the suite even when shape flags are given."},
         {"flag": "--md", "description": "<path>: also write a Markdown table."},
@@ -287,8 +412,16 @@
       "leaf": "gqa/prefill/Xfp16_Wfp16_Yfp16",
       "package_executable": "hipdnn-kernel-ut-gqa-prefill-xfp16-wfp16-yfp16.exe",
       "source": "test_gqa_prefill.cpp",
-      "capabilities": {"coverage": true, "timing": "shared", "mode": "lookup", "rank": true},
-      "suite": {"args": ["--coverage"], "coverage_default": "HIPDNN_UT_COVERAGE, else 3"},
+      "capabilities": {
+        "coverage": true,
+        "timing": "shared",
+        "mode": "lookup",
+        "rank": true
+      },
+      "suite": {
+        "args": ["--coverage"],
+        "coverage_default": "HIPDNN_UT_COVERAGE, else 3"
+      },
       "custom": {
         "selected_by": "any shape flag",
         "params": [
@@ -306,9 +439,11 @@
           {"name": "bkv", "flag": "--bkv", "make": "BKV", "type": "int", "description": "Configured v8x entry: KV tile."},
           {"name": "pad", "flag": "--pad", "make": null, "type": "int", "exe_default": 0, "description": ">0: key_bias masks b*pad keys of batch b (right padding)."}
         ],
-        "example_exe": "hipdnn-kernel-ut-gqa-prefill-xfp16-wfp16-yfp16.exe --b 1 --h 32 --g 8 --d 128 --sq 512 --past 1024 --max-seq 4096",
-        "example_make": "make test_custom HIP_SDK=<sdk> B=1 H=32 G=8 D=128 SQ=512 PAST=1024 MAX_SEQ=4096"
+        "checks": ["num_heads % kv_num_heads == 0", "max_seq >= past + seq_q", "scale >= 0"]
       },
+      "examples": [
+        {"name": "llama31_8b_with_past", "values": {"batch": 1, "num_heads": 32, "kv_num_heads": 8, "head_dim": 128, "seq_q": 512, "past": 1024, "max_seq": 4096}}
+      ],
       "diagnostic_flags": [
         {"flag": "--iters", "description": "Legacy; ignored by the shared timer."}
       ],
@@ -318,8 +453,16 @@
       "leaf": "gqa/prefill/Xfp16_Wi8_Yfp16",
       "package_executable": "hipdnn-kernel-ut-gqa-prefill-xfp16-wi8-yfp16.exe",
       "source": "test_gqa_prefill_i8.cpp",
-      "capabilities": {"coverage": true, "timing": "shared", "mode": "lookup", "rank": true},
-      "suite": {"args": ["--coverage"], "coverage_default": "HIPDNN_UT_COVERAGE, else 3"},
+      "capabilities": {
+        "coverage": true,
+        "timing": "shared",
+        "mode": "lookup",
+        "rank": true
+      },
+      "suite": {
+        "args": ["--coverage"],
+        "coverage_default": "HIPDNN_UT_COVERAGE, else 3"
+      },
       "custom": {
         "selected_by": "any shape flag; --all still runs the suite",
         "params": [
@@ -328,9 +471,11 @@
           {"name": "head_dim", "flag": "--d", "make": "D", "type": "int", "exe_default": 128, "make_default": 128, "description": "Head dimension."},
           {"name": "seq_q", "flag": "--sq", "make": "SQ", "type": "int", "exe_default": 2048, "make_default": 512, "description": "Prompt tokens (no past)."}
         ],
-        "example_exe": "hipdnn-kernel-ut-gqa-prefill-xfp16-wi8-yfp16.exe --h 32 --g 8 --d 128 --sq 512",
-        "example_make": "make test_custom HIP_SDK=<sdk> H=32 G=8 D=128 SQ=512"
+        "checks": ["num_heads % kv_num_heads == 0"]
       },
+      "examples": [
+        {"name": "llama31_8b", "values": {"num_heads": 32, "kv_num_heads": 8, "head_dim": 128, "seq_q": 512}}
+      ],
       "diagnostic_flags": [
         {"flag": "--all", "description": "Run the suite even when shape flags are given."},
         {"flag": "--md", "description": "<path>: also write a Markdown table."},
@@ -343,8 +488,16 @@
       "leaf": "qmoe/Xfp16_Wu4_Yfp16",
       "package_executable": "hipdnn-kernel-ut-qmoe-xfp16-wu4-yfp16.exe",
       "source": "test_qmoe.cpp",
-      "capabilities": {"coverage": true, "timing": "shared", "mode": "lookup", "rank": false},
-      "suite": {"args": ["--coverage"], "coverage_default": "HIPDNN_UT_COVERAGE, else 3"},
+      "capabilities": {
+        "coverage": true,
+        "timing": "shared",
+        "mode": "lookup",
+        "rank": false
+      },
+      "suite": {
+        "args": ["--coverage"],
+        "coverage_default": "HIPDNN_UT_COVERAGE, else 3"
+      },
       "custom": {
         "selected_by": "any argument other than --iters and --coverage; the six geometry flags are then required",
         "make_args": "ARGS",
@@ -366,9 +519,11 @@
           {"name": "limit", "flag": "--limit", "type": "float", "exe_default": "inf", "description": "SwiGLU clamp, > 0."}
         ],
         "constraints": ["expert weights <= 8 GiB", "unknown, duplicate, incomplete or unsupported arguments exit 2"],
-        "example_exe": "hipdnn-kernel-ut-qmoe-xfp16-wu4-yfp16.exe --tokens 1 --hidden 3072 --inter 1024 --experts 256 --topk 8 --block-size 32",
-        "example_make": "make test_custom HIP_SDK=<sdk> ARGS=\"--tokens 1 --hidden 3072 --inter 1024 --experts 256 --topk 8 --block-size 32\""
+        "checks": ["hidden % 32 == 0 and hidden <= 16384 and inter % 32 == 0 and inter <= 16384", "1 <= experts <= 1024 and 1 <= topk <= min(experts, 32)", "32 <= block_size <= 1024 and block_size & (block_size - 1) == 0", "hidden % block_size == 0 and inter % block_size == 0", "experts * hidden * inter * 3 // 2 <= 8 * 1024 ** 3", "limit > 0"]
       },
+      "examples": [
+        {"name": "qwen3_30b_a3b_decode", "values": {"tokens": 1, "hidden": 2048, "inter": 768, "experts": 128, "topk": 8, "block_size": 32, "fc1_bias": 0, "fc2_bias": 0}}
+      ],
       "diagnostic_flags": [
         {"flag": "--iters", "description": "Legacy (1..100000); ignored by the shared timer."}
       ],
@@ -381,9 +536,20 @@
       "leaf": "qmoe_ragged_mm/Xfp16_Wu4_Yfp16",
       "package_executable": "hipdnn-kernel-ut-qmoe-ragged-mm-xfp16-wu4-yfp16.exe",
       "source": "test_qmoe_ragged_mm.cpp",
-      "capabilities": {"coverage": true, "timing": "shared", "mode": "label_only", "rank": false},
-      "suite": {"args": ["--coverage"], "coverage_default": "3"},
+      "capabilities": {
+        "coverage": true,
+        "timing": "shared",
+        "mode": "label_only",
+        "rank": false
+      },
+      "suite": {
+        "args": ["--coverage"],
+        "coverage_default": "3"
+      },
       "custom": null,
+      "examples": [
+        {"name": "suite_tier1", "coverage": 1}
+      ],
       "diagnostic_flags": [
         {"flag": "--launcher-grid-only", "description": "Run only the launcher-grid case."}
       ],
@@ -400,45 +566,100 @@
       "leaf": "qmoe_ragged_mm/Xfp16_Wu2_Yfp16",
       "package_executable": "hipdnn-kernel-ut-qmoe-ragged-mm-xfp16-wu2-yfp16.exe",
       "source": "test_qmoe_ragged_mm_u2.cpp",
-      "capabilities": {"coverage": false, "timing": "none", "mode": "label_only", "rank": false},
-      "suite": {"args": [], "coverage_default": "ignored"},
+      "capabilities": {
+        "coverage": false,
+        "timing": "none",
+        "mode": "label_only",
+        "rank": false
+      },
+      "suite": {
+        "args": [],
+        "coverage_default": "ignored"
+      },
       "custom": null,
+      "examples": [
+        {"name": "suite_tier1", "coverage": 1}
+      ],
       "gaps": ["custom_shape", "coverage", "shared_timer", "results_csv", "make_api"]
     },
     {
       "leaf": "gather_block_quantized/Xi64_Wu4_Yfp16",
       "package_executable": "hipdnn-kernel-ut-gather-block-quantized-xi64-wu4-yfp16.exe",
       "source": "test_gather_block_quantized_u4.cpp",
-      "capabilities": {"coverage": true, "timing": "none", "mode": "label_only", "rank": false},
-      "suite": {"args": ["--coverage"], "coverage_default": "3"},
+      "capabilities": {
+        "coverage": true,
+        "timing": "none",
+        "mode": "label_only",
+        "rank": false
+      },
+      "suite": {
+        "args": ["--coverage"],
+        "coverage_default": "3"
+      },
       "custom": null,
+      "examples": [
+        {"name": "suite_tier1", "coverage": 1}
+      ],
       "gaps": ["custom_shape", "shared_timer", "arch_default"]
     },
     {
       "leaf": "gather_block_quantized/Xi64_Wu8_Yfp16",
       "package_executable": "hipdnn-kernel-ut-gather-block-quantized-xi64-wu8-yfp16.exe",
       "source": "test_gather_block_quantized_u8.cpp",
-      "capabilities": {"coverage": true, "timing": "none", "mode": "label_only", "rank": false},
-      "suite": {"args": ["--coverage"], "coverage_default": "3"},
+      "capabilities": {
+        "coverage": true,
+        "timing": "none",
+        "mode": "label_only",
+        "rank": false
+      },
+      "suite": {
+        "args": ["--coverage"],
+        "coverage_default": "3"
+      },
       "custom": null,
+      "examples": [
+        {"name": "suite_tier1", "coverage": 1}
+      ],
       "gaps": ["custom_shape", "shared_timer", "arch_default"]
     },
     {
       "leaf": "gather_block_quantized/Xi64_Wfp8_Yfp16",
       "package_executable": "hipdnn-kernel-ut-gather-block-quantized-xi64-wfp8-yfp16.exe",
       "source": "test_gather_block_quantized_fp8.cpp",
-      "capabilities": {"coverage": true, "timing": "none", "mode": "label_only", "rank": false},
-      "suite": {"args": ["--coverage"], "coverage_default": "3"},
+      "capabilities": {
+        "coverage": true,
+        "timing": "none",
+        "mode": "label_only",
+        "rank": false
+      },
+      "suite": {
+        "args": ["--coverage"],
+        "coverage_default": "3"
+      },
       "custom": null,
+      "examples": [
+        {"name": "suite_tier1", "coverage": 1}
+      ],
       "gaps": ["custom_shape", "shared_timer", "arch_default"]
     },
     {
       "leaf": "cast/Xany_Yany_bf16",
       "package_executable": "hipdnn-kernel-ut-cast-xany-yany-bf16.exe",
       "source": "test_cast.cpp",
-      "capabilities": {"coverage": true, "timing": "none", "mode": "label_only", "rank": false},
-      "suite": {"args": ["--coverage"], "coverage_default": "HIPDNN_UT_COVERAGE, else 3"},
+      "capabilities": {
+        "coverage": true,
+        "timing": "none",
+        "mode": "label_only",
+        "rank": false
+      },
+      "suite": {
+        "args": ["--coverage"],
+        "coverage_default": "HIPDNN_UT_COVERAGE, else 3"
+      },
       "custom": null,
+      "examples": [
+        {"name": "suite_tier1", "coverage": 1}
+      ],
       "gaps": ["custom_shape", "shared_timer", "arch_default"]
     }
   ]

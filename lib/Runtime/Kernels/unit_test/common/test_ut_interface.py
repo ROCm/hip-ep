@@ -6,6 +6,9 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import ut_interface as tool  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[1]
 GAPS = {'custom_shape', 'coverage', 'shared_timer', 'results_csv', 'make_api', 'arch_default'}
 # Leaves that predate the required-capability standard. Their gaps may shrink;
@@ -64,6 +67,29 @@ def check(doc):
         for env in leaf.get('env', []):
             if env['name'] not in source:
                 fail(f'{where} {env["name"]} is not read by {leaf["source"]}')
+        examples = leaf.get('examples', [])
+        if not examples:
+            fail(f'{where} no examples')
+        for example in examples:
+            if 'values' in example:
+                try:
+                    tool.leaf_arguments(leaf, example['values'])
+                except ValueError as error:
+                    fail(f'{where} example {example.get("name")}: {error}')
+            elif example.get('coverage') not in (1, 2, 3):
+                fail(f'{where} example {example.get("name")} has neither values nor coverage 1|2|3')
+        if params and not any('values' in example for example in examples):
+            fail(f'{where} no custom-case example')
+        if custom:
+            known = tool.check_names(custom)
+            for check in custom.get('checks', []):
+                names = set(re.findall(r'[A-Za-z_]\w*', re.sub(r"'[^']*'", '', check))) - {'and', 'or', 'not'}
+                if not names <= known:
+                    fail(f'{where} check uses unknown names {sorted(names - known)}: {check}')
+                try:
+                    compile(check, 'check', 'eval')
+                except SyntaxError:
+                    fail(f'{where} check is not an expression: {check}')
         caps = leaf['capabilities']
         if (caps['timing'] == 'shared') != ('adaptiveRotatedMeanMs' in source):
             fail(f'{where} timing capability does not match the source')
