@@ -9490,7 +9490,7 @@ extern "C" int hip_matmul_nbits_ex(
     b_row_bytes = 0;
     const bool wmma_reads = batch_count == 1 && M >= wmmaMinM() &&
                             (element_size_bytes == 2 || element_size_bytes == 4) &&
-                            hipdnn_device_has_wmma() && !hipdnn_device_is_wave64();
+                            hip_matmul_nbits_u4_wmma_ext_device() != 0;
     if (!wmma_reads) {
       B = hip_matmul_nbits_u4_unlayout_scratch(stream, B, static_cast<int>(N),
                                                static_cast<int>(K),

@@ -42,6 +42,7 @@ struct GpuPhase { void begin() {} void finish(bool = false) {} void timingBegin(
 #endif
 
 #include <hip/hip_fp16.h>
+#include "hip_arch_compat.h"
 #include "hip_custom_kernels.h"
 
 #ifndef HIPDNN_KERNEL_UT_LINKS_SHARED_KERNELS
