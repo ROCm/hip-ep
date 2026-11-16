@@ -2,7 +2,7 @@
 
 `ut_timing_policy.h` owns policy `ut-adaptive-v3`.
 `hip_adaptive_timing.h` applies it to the existing complete-op UT callback.
-MatMulNBits, GQA decode/prefill and ragged W4 MatMul use this implementation.
+GEMM, MatMulNBits, GQA decode/prefill and ragged W4 MatMul use this implementation.
 Operators with other timing implementations are not qualified by this change.
 
 Run the packaged tests with `hipdnn-kernel-ut.exe [--timing screen|standard|confirm]`,
@@ -134,7 +134,7 @@ sequential reference found a config 5.7% faster. Group interleaving still
 leaves repeatable schedule differences for a few candidates. ADLX on this APU
 exposes no manual clock, power or preset tuning, so clocks cannot be pinned.
 
-Build the eight MatMulNBits or four GQA leaves with their existing Makefiles:
+Build the three GEMM, eight MatMulNBits or four GQA leaves with their existing Makefiles:
 `make build RANK=1 BUILD_DIR=out_rank HIP_SDK=<sdk>`. This standalone variant
 uses the unchanged production kernel TU and an empty LUT. It exposes the
 existing configuration descriptors to the UT; ordinary builds keep their usual
@@ -154,8 +154,15 @@ matmul_nbits/Xfp16_Wu4_Yfp16,M16_N2048_K2560_gs128,0,id=12
 Repeated leaf/shape rows form one candidate set. `default` is mandatory and is
 captured from the actual no-LUT final selection, then placed at index zero.
 Final launches are deduplicated before correctness checks or timing. Config IDs
-come from `HIPDNN_UT_RANK_CATALOG=1`, not from a separate sweep driver. Supported
-shape strings are the native leaves' strings: MatMulNBits `M_N_K_gs` with an
+come from `HIPDNN_UT_RANK_CATALOG=1`, not from a separate sweep driver.
+GEMM includes its production TU in a standalone host adapter and selects through
+its existing lookup-first cache. Its default keeps the actual no-LUT resolver;
+recorded final launches include the expanded template, grid/block, shared bytes
+and nonpointer runtime arguments. Geometry aliases remain in optional
+`candidates[].requests` metadata, with the full `final_launch` descriptor, so
+old table selections survive deduplication and report comparisons. Supported
+shape strings are the native leaves' strings: GEMM `M_N_K_ta_tb`, optionally
+`_bias` (row C, alpha=beta=1), or `_bias_crows<M>_ccols1` (column C); MatMulNBits `M_N_K_gs` with an
 optional `_noz`; GQA `B_H_G_D_len` for decode or `B_H_G_D_sq` for prefill. FP16
 GQA also accepts its native window/sink/smooth fields. FP16 prefill requires
 `_past<length>`, including `_past0`; INT8 prefill has no past suffix. Ranking
@@ -201,7 +208,7 @@ and wall costs, and optional frequency. Existing `UT_TIMING` and
 
 `HIPDNN_UT_RANK_REFERENCE=1` measures supplied candidates independently and
 sequentially with confirm. Its winner uses absolute median times because its
-groups do not share a drift history. The tooling freezes a MatMulNBits default
+groups do not share a drift history. The tooling freezes a GEMM or MatMulNBits default
 with `default;id=<original ID>`; it does not let a second runtime tune redefine
 the reference default. Its index-matched group ratios are diagnostic because
 sequential groups do not share a drift history; the decision uses absolute
@@ -244,12 +251,12 @@ winner/default decision always comes from the final phase. Headers, weights,
 fallbacks, config indices, point order and unrelated fields survive rank-build.
 
 `make test` includes `test_ut_lut_from_table.py` (host-only, Python and C++
-compiler): every representable point in both gfx1151 JSONs is seeded, backed by
+compiler): every representable point in all three gfx1151 JSONs is seeded, backed by
 synthetic validated old-config-winner evidence, and imported with full parsed
 JSON equality. It also checks filtering/sampling/skips, report decisions,
 geometry resolution and default deduplication.
 
-The FP16 W4 MatMulNBits and FP16 KV GQA decode/prefill leaves support an
+The three GEMM, FP16 W4 MatMulNBits and FP16 KV GQA decode/prefill leaves support an
 optional launcher handshake, `HIPDNN_UT_GPU_ADMISSION=<private-prefix>`.
 After CPU input/reference preparation, case N writes `<prefix>.N.request`
 and waits for `.grant` before device allocation/work. After device cleanup

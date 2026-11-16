@@ -6,8 +6,17 @@
  * Timing uses unit_test/common adaptive complete-call policy
  * (--timing screen|standard|confirm via HIPDNN_UT_TIMING).
  */
+#include "../../common/ut_gpu_execution_scope.h"
 #include <hip/hip_runtime.h>
 #include "../../common/hip_adaptive_timing.h"
+#include "../../common/ut_gemm_rank_input.h"
+#ifdef HIPDNN_UT_GPU_PHASE_HEADER
+#include HIPDNN_UT_GPU_PHASE_HEADER
+#elif !defined(HIPDNN_UT_GPU_PHASE_LINKED)
+namespace hipdnn_ep_test {
+struct GpuPhase { void begin() {} void finish(bool = false) {} void timingBegin() {} void timingEnd() {} };
+}
+#endif
 
 #include "hip_custom_kernels.h"
 #include "gemm_autotune.h"
@@ -39,6 +48,7 @@ extern "C" const size_t kGemmLutData_size = sizeof(kGemmLutData);
 #include <cstring>
 #include <fstream>
 #include <map>
+#include <memory>
 #include <random>
 #include <string>
 #include <thread>
@@ -206,11 +216,12 @@ inline int* holdReleaseFlag() {
 
 template <class Launch>
 double rotatedMeanMs(hipStream_t stream, int /*legacy_iters*/,
-                     const ColdCopies& copies, Launch&& launch) {
+                     const ColdCopies& copies, Launch&& launch,
+                     const timing::RankOptions* ranking = nullptr) {
   return timing::adaptiveRotatedMeanMs(
       stream, copies, launch, holdReleaseFlag(),
       [&](const int* flag) { holdStreamKernel<<<1, 1, 0, stream>>>(flag); },
-      warmTiming(), kColdSettleBytes, "gemm_fp32");
+      warmTiming(), kColdSettleBytes, "gemm_fp32", "hip_gemm", timing::NoPreparation{}, ranking);
 }
 }  // namespace hipdnn_ep_test
 
@@ -336,7 +347,32 @@ struct Case {
   const char* phase;
 };
 
-static int runCase(const Case& test) {
+static int runCase(const Case& test, const hipdnn_ep_test::timing::RankRow* rank_row = nullptr) {
+  char shape_buf[192];
+  std::snprintf(shape_buf, sizeof(shape_buf), "M%d_N%d_K%d_ta%d_tb%d%s", test.m,
+                test.n, test.k, test.ta, test.tb, test.beta != 0.0f ? "_bias" : "");
+  const std::string shape = rank_row ? rank_row->shape : shape_buf;
+  hipdnn_ep_test::timing::CaseScope timing_case(
+      (std::string("gemm/") + kLeafName).c_str(), shape.c_str(), "hip_gemm");
+  const UtGemmShape rank_shape{test.m, test.n, test.k, test.ta, test.tb, kGemmDtype,
+                               test.c0, test.c1, test.alpha, test.beta};
+  if (rank_row && std::getenv("HIPDNN_UT_RANK_CATALOG")) {
+#ifdef HIPDNN_UT_RANK_GEMM_ADAPTER
+    hipdnn_ep_test::timing::printGemmCatalog(rank_shape);
+    return 0;
+#else
+    throw std::runtime_error("UT rank: GEMM catalog requires standalone RANK=1 build");
+#endif
+  }
+#ifdef HIPDNN_UT_RANK_GEMM_ADAPTER
+  std::unique_ptr<hipdnn_ep_test::timing::RankOptions> ranking;
+  if (rank_row)
+    ranking = std::make_unique<hipdnn_ep_test::timing::RankOptions>(
+        hipdnn_ep_test::timing::gemmRankOptions(rank_shape, *rank_row, [] { return 0.0; }));
+#else
+  if (rank_row) throw std::runtime_error("UT rank: GEMM requires standalone RANK=1 build");
+#endif
+  // Config metadata and the CPU reference are prepared before GPU admission.
   const size_t aCount = test.ta ? static_cast<size_t>(test.k) * test.m
                                 : static_cast<size_t>(test.m) * test.k;
   const size_t bCount = test.tb ? static_cast<size_t>(test.n) * test.k
@@ -358,8 +394,23 @@ static int runCase(const Case& test) {
   for (size_t i = 0; i < bCount; ++i) b[i] = fromFloat(bf[i]);
   for (size_t i = 0; i < cCount; ++i) c[i] = fromFloat(cf[i]);
 
+  hipdnn_ep_test::GpuExecutionScope gpu_execution([] {
+    if (hipDeviceSynchronize() != hipSuccess) throw std::runtime_error("GEMM device synchronization failed");
+  });
+  hipdnn_ep_test::GpuPhase gpu_phase;
+  gpu_phase.begin();
   void *da = nullptr, *db = nullptr, *dc = nullptr, *dy = nullptr;
   hipStream_t stream = nullptr;
+  auto cleanup = [&](void*) {
+    if (stream) (void)hipStreamSynchronize(stream);
+    if (da) (void)hipFree(da);
+    if (db) (void)hipFree(db);
+    if (dc) (void)hipFree(dc);
+    if (dy) (void)hipFree(dy);
+    if (stream) (void)hipStreamDestroy(stream);
+    gpu_phase.finish(true);
+  };
+  const std::unique_ptr<void, decltype(cleanup)> device_owner(reinterpret_cast<void*>(1), cleanup);
   HIP_CHECK(hipStreamCreate(&stream));
   HIP_CHECK(hipMalloc(&da, aCount * sizeof(Elem)));
   HIP_CHECK(hipMalloc(&db, bCount * sizeof(Elem)));
@@ -370,19 +421,12 @@ static int runCase(const Case& test) {
   if (cCount)
     HIP_CHECK(hipMemcpy(dc, c.data(), cCount * sizeof(Elem), hipMemcpyHostToDevice));
 
-  char shape_buf[96];
-  std::snprintf(shape_buf, sizeof(shape_buf), "M%d_N%d_K%d_ta%d_tb%d%s", test.m,
-                test.n, test.k, test.ta, test.tb,
-                test.beta != 0.0f ? "_bias" : "");
-  hipdnn_ep_test::timing::CaseScope timing_case(
-      (std::string("gemm/") + kLeafName).c_str(), shape_buf, "hip_gemm");
-
   char tune_key[64];
   std::snprintf(tune_key, sizeof(tune_key), "%dx%dx%d_ta%d_tb%d_d%d", test.m,
                 test.n, test.k, test.ta, test.tb, kGemmDtype);
 
   int status = 0;
-  const std::string selected_config = capture_selected_config(tune_key, [&] {
+  auto warm_launch = [&] {
     for (int w = 0; w < 3; ++w) {
       status = hip_gemm(stream, da, db, dc, dy, test.m, test.n, test.k,
                         test.alpha, test.beta, test.ta, test.tb, kGemmDtype,
@@ -390,7 +434,44 @@ static int runCase(const Case& test) {
       if (status != 0) return;
     }
     if (hipStreamSynchronize(stream) != hipSuccess) status = 1;
-  });
+  };
+  std::string selected_config;
+  if (rank_row) warm_launch();
+  else selected_config = capture_selected_config(tune_key, warm_launch);
+
+  if (rank_row) {
+#ifndef HIPDNN_UT_RANK_GEMM_ADAPTER
+    throw std::runtime_error("UT rank: GEMM requires standalone RANK=1 build");
+#else
+    if (status != 0) throw std::runtime_error("UT rank: GEMM default launch failed");
+    const hipdnn_ep_test::ColdCopies weights({{db, bCount * sizeof(Elem)}});
+    auto validate = [&]() {
+      if (hip_gemm(stream, da, db, dc, dy, test.m, test.n, test.k, test.alpha,
+                   test.beta, test.ta, test.tb, kGemmDtype, test.c0, test.c1) != 0 ||
+          hipStreamSynchronize(stream) != hipSuccess ||
+          hipMemcpy(y.data(), dy, yCount * sizeof(Elem), hipMemcpyDeviceToHost) != hipSuccess)
+        throw std::runtime_error("UT rank: GEMM candidate launch/readback failed");
+      double ssd = 0.0, ssr = 0.0;
+      for (size_t i = 0; i < yCount; ++i) {
+        const double got = toFloat(y[i]), ref = reference[i], error = std::abs(got - ref);
+        if (!std::isfinite(got) || !std::isfinite(ref) || error / std::max(1.0, std::abs(ref)) > kTolerance)
+          throw std::runtime_error("UT rank: GEMM candidate CPU reference FAIL");
+        ssd += error * error; ssr += ref * ref;
+      }
+      return ssr > 0.0 ? std::sqrt(ssd / ssr) : std::sqrt(ssd);
+    };
+    ranking->validate = [select = ranking->select, validate](size_t candidate) {
+      select(candidate); return validate();
+    };
+    gpu_phase.timingBegin();
+    hipdnn_ep_test::rotatedMeanMs(stream, 0, weights, [&](int i) {
+      return hip_gemm(stream, da, weights.part(i, 0), dc, dy, test.m, test.n,
+                       test.k, test.alpha, test.beta, test.ta, test.tb, kGemmDtype, test.c0, test.c1);
+    }, ranking.get());
+    gpu_phase.timingEnd();
+    return 0;
+#endif
+  }
 
   double avg_ms = 0.0;
   double worst = 0.0;
@@ -405,7 +486,7 @@ static int runCase(const Case& test) {
       const double error = std::abs(got - ref);
       const double relative = error / std::max(1.0, std::abs(ref));
       worst = std::max(worst, relative);
-      if (relative > kTolerance) ++bad;
+      if (!std::isfinite(got) || !std::isfinite(ref) || relative > kTolerance) ++bad;
       ssd += error * error;
       ssr += ref * ref;
     }
@@ -413,6 +494,7 @@ static int runCase(const Case& test) {
 
     // Weight side is B; rotate it the way consecutive layers read DRAM.
     const hipdnn_ep_test::ColdCopies weights({{db, bCount * sizeof(Elem)}});
+    gpu_phase.timingBegin();
     avg_ms = hipdnn_ep_test::rotatedMeanMs(
         stream, /*legacy*/ 20, weights, [&](int i) {
           return hip_gemm(stream, da, weights.part(i, 0), dc, dy, test.m, test.n,
@@ -420,6 +502,7 @@ static int runCase(const Case& test) {
                           kGemmDtype, test.c0, test.c1);
         });
 
+    gpu_phase.timingEnd();
     const bool pass = bad == 0;
     std::printf(
         "%s %s M=%d N=%d K=%d ta=%d tb=%d bias=%d dtype=%d max_rel=%.4g "
@@ -430,32 +513,35 @@ static int runCase(const Case& test) {
 
     hipdnn_ep_test::CsvWriter csv;
     hipdnn_ep_test::CsvRow row;
-    row.shape = shape_buf;
+    row.shape = shape;
     row.config = selected_config;
     row.time_ms = avg_ms;
     row.rel_l2 = rel_l2;
     row.verdict = pass ? "PASS" : "FAIL";
     csv.write(row);
 
-    hipFree(da);
-    hipFree(db);
-    hipFree(dy);
-    if (dc) hipFree(dc);
-    hipStreamDestroy(stream);
     return pass ? 0 : 1;
   }
 
   std::fprintf(stderr, "%s %s hip_gemm rc=%d\n", kDtypeName, test.phase, status);
-  hipFree(da);
-  hipFree(db);
-  hipFree(dy);
-  if (dc) hipFree(dc);
-  hipStreamDestroy(stream);
   return 1;
 }
 
 int main(int argc, char** argv) {
   hipdnn_ep_test::timing::printTimingMode();
+  if (hipdnn_ep_test::timing::rankRequested()) {
+    try {
+      for (const auto& row : hipdnn_ep_test::timing::readRankRows(std::string("gemm/") + kLeafName)) {
+        const auto s = hipdnn_ep_test::timing::gemmRankShape(row.shape, kGemmDtype);
+        const Case test{s.m, s.n, s.k, s.ta, s.tb, s.crows, s.ccols, s.alpha, s.beta, "rank"};
+        if (runCase(test, &row)) return 1;
+      }
+      return 0;
+    } catch (const std::exception& error) {
+      std::fprintf(stderr, "GEMM UT rank: %s\n", error.what());
+      return 1;
+    }
+  }
   static const Case cases[] = {
       {1, 2048, 2048, 0, 1, 1, 2048, 1.0f, 0.0f, "GemvNt"},
       {1, 4096, 4096, 0, 0, 1, 4096, 1.0f, 0.25f, "GemvNn-bias"},
@@ -489,23 +575,47 @@ int main(int argc, char** argv) {
       {64, 4096, 14336, 0, 0, 1, 4096, 1.0f, 0.25f, "TiledFma-Nn-bias"},
   };
 
+  int m = 128, n = 512, k = 256, ta = 0, tb = 1;
+  bool customRequested = false;
   std::vector<int> positional;
   for (int i = 1; i < argc; ++i) {
-    if (std::strcmp(argv[i], "--coverage") == 0) {
-      ++i;
+    if (std::strcmp(argv[i], "--coverage") == 0 ||
+        std::strcmp(argv[i], "--timing") == 0) {
+      if (++i == argc) return 2;
       continue;
     }
-    if (std::strcmp(argv[i], "--timing") == 0) {
-      ++i;
-      continue;
+    int* target = nullptr;
+    if (std::strcmp(argv[i], "--m") == 0) target = &m;
+    else if (std::strcmp(argv[i], "--n") == 0) target = &n;
+    else if (std::strcmp(argv[i], "--k") == 0) target = &k;
+    else if (std::strcmp(argv[i], "--ta") == 0) target = &ta;
+    else if (std::strcmp(argv[i], "--tb") == 0) target = &tb;
+    if (target) {
+      if (++i == argc) return 2;
+      *target = std::atoi(argv[i]);
+      customRequested = true;
+    } else {
+      if (argv[i][0] == '-') {
+        std::fprintf(stderr, "unknown GEMM argument: %s\n", argv[i]);
+        return 2;
+      }
+      positional.push_back(std::atoi(argv[i]));
     }
-    positional.push_back(std::atoi(argv[i]));
   }
-  if (positional.size() >= 5) {
-    const int ta = positional[3], tb = positional[4];
-    const Case custom{positional[0], positional[1], positional[2], ta, tb,
-                       ta ? positional[0] : 1, ta ? 1 : positional[1], 1.0f, 0.0f,
-                       "custom"};
+  if (!positional.empty()) {
+    if (customRequested || positional.size() != 5) return 2;
+    m = positional[0]; n = positional[1]; k = positional[2];
+    ta = positional[3]; tb = positional[4];
+    customRequested = true;
+  }
+  if (customRequested) {
+    if (m <= 0 || n <= 0 || k <= 0 || (ta != 0 && ta != 1) ||
+        (tb != 0 && tb != 1)) {
+      std::fprintf(stderr, "GEMM requires positive M/N/K and TA/TB in {0,1}\n");
+      return 2;
+    }
+    const Case custom{m, n, k, ta, tb, ta ? m : 1, ta ? 1 : n,
+                      1.0f, 0.0f, "custom"};
     return runCase(custom);
   }
 

@@ -78,9 +78,14 @@ def reference_candidates(args, installed):
         writer.writeheader()
         for record in ranked:
             final_to_request = {c['final']: c['request'] for c in catalog[record['leaf'], record['shape']]['configs']}
+            if record['leaf'].startswith('gemm/'):
+                # Supplied old geometries may be a later alias of the
+                # catalog's canonical final launch. Both resolve to an ID.
+                final_to_request.update({c['geometry']: c['request'] for c in
+                                         catalog[record['leaf'], record['shape']]['configs']})
             baseline = record['candidates'][0]['config']
             default = 'default'
-            if record['leaf'].startswith('matmul_nbits/') and baseline in final_to_request:
+            if record['leaf'].startswith(('matmul_nbits/', 'gemm/')) and baseline in final_to_request:
                 default += ';' + final_to_request[baseline]
             row = dict(leaf=record['leaf'], shape=record['shape'], priority='0')
             writer.writerow({**row, 'config': default})
@@ -132,6 +137,19 @@ def evidence(paths):
                 r.get('sequential_reference') or r.get('diagnostic') or r.get('default') != 0:
             raise ValueError('unsupported ranking evidence')
         configs = r['candidates']
+        aliases = {}
+        for i, candidate in enumerate(configs):
+            requests = candidate.get('requests', [])
+            if not isinstance(requests, list) or any(not isinstance(v, str) or not v for v in requests):
+                raise ValueError('invalid candidate request aliases')
+            for request in [candidate['config'], *requests]:
+                if request in aliases and aliases[request] != i:
+                    raise ValueError('ambiguous candidate request alias')
+                aliases[request] = i
+        launches = [c['final_launch'] for c in configs if 'final_launch' in c]
+        if launches and (len(launches) != len(configs) or any(not isinstance(v, str) or not v for v in launches) or
+                         len(set(launches)) != len(launches)):
+            raise ValueError('invalid or duplicate final launch descriptors')
         if not configs or any(c.get('cpu_correct') is not True or
                               not math.isfinite(c['rel_l2']) for c in configs):
             raise ValueError('candidate CPU check absent or failed')
