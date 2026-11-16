@@ -21,6 +21,10 @@ inline constexpr const char* kRankVersion = "ut-rank-v3";
 // clamp/implementation normalization. The default is always index zero.
 struct RankOptions {
   std::vector<std::string> configs;
+  // Optional op-specific aliases after final-launch normalization. These are
+  // evidence metadata only and do not participate in the ranking policy.
+  std::vector<std::vector<std::string>> requests;
+  std::vector<std::string> final_launches;
   std::function<void(size_t)> select;
   // Execute the selected candidate and check it against the owning CPU
   // reference before any timing. Return relL2; throw on failure.
@@ -64,9 +68,19 @@ inline void printRank(const RankOptions& options, const std::vector<double>& rel
               jsonString(currentCase.shape).c_str(),
               jsonString(std::getenv("HIPDNN_UT_EVIDENCE_BINDING") ?
                   std::getenv("HIPDNN_UT_EVIDENCE_BINDING") : "").c_str());
-  for (size_t i = 0; i < options.configs.size(); ++i)
-    std::printf("%s{\"config\":%s,\"cpu_correct\":true,\"rel_l2\":%.17g}",
+  for (size_t i = 0; i < options.configs.size(); ++i) {
+    std::printf("%s{\"config\":%s,\"cpu_correct\":true,\"rel_l2\":%.17g",
                 i ? "," : "", jsonString(options.configs[i]).c_str(), rel_l2[i]);
+    if (!options.requests.empty()) {
+      std::printf(",\"requests\":[");
+      for (size_t j = 0; j < options.requests.at(i).size(); ++j)
+        std::printf("%s%s", j ? "," : "", jsonString(options.requests[i][j]).c_str());
+      std::printf("]");
+    }
+    if (!options.final_launches.empty())
+      std::printf(",\"final_launch\":%s", jsonString(options.final_launches.at(i)).c_str());
+    std::printf("}");
+  }
   std::printf("],\"phases\":[");
   for (size_t phase_index = 0; phase_index < phases.size(); ++phase_index) {
     const auto& phase = phases[phase_index];

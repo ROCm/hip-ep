@@ -20,6 +20,10 @@ endif
 OFFLOAD  ?= --offload-arch=gfx11-generic
 HIP_SDK  ?= $(HIP_PATH)
 MODE     ?= lookup
+RANK     ?= 0
+ifeq ($(RANK),1)
+    override MODE := autotune
+endif
 COVERAGE ?= 3
 TIMING   ?= standard
 
@@ -59,7 +63,19 @@ FLATBUFFERS_INC ?=
 
 KERNEL_FLAGS := -O2 -std=c++17 -x hip -ffp-contract=fast
 CXXFLAGS     := -O3 -std=c++17 -Wno-c23-extensions
+GPU_PHASE_HEADER ?=
+ifneq ($(GPU_PHASE_HEADER),)
+    CXXFLAGS += -include $(GPU_PHASE_HEADER) -DHIPDNN_UT_GPU_PHASE_LINKED=1
+endif
 INCLUDES     := -I$(INCLUDE_DIR) -I$(AUTOTUNE_DIR)
+ifeq ($(RANK),1)
+    KERNEL_MODE := lookup
+    KERNEL_HIP := ../../common/gemm_rank_adapter.hip
+    INCLUDES += -DHIPDNN_UT_RANK_GEMM_ADAPTER=1
+endif
+ifneq ($(ADLX_INCLUDE),)
+    INCLUDES += -I$(ADLX_INCLUDE)
+endif
 
 M    ?= 128
 N    ?= 512
@@ -128,9 +144,22 @@ else
     LUT_HEADER_DEP     :=
 endif
 
+RANK_KERNEL_OBJ ?=
+ifneq ($(RANK_KERNEL_OBJ),)
+    ifneq ($(RANK),1)
+        $(error RANK_KERNEL_OBJ requires RANK=1)
+    endif
+    KERNEL_OBJ := $(RANK_KERNEL_OBJ)
+    ifeq ($(wildcard $(RANK_KERNEL_OBJ)),)
+        $(error RANK_KERNEL_OBJ must name an existing matching object)
+    endif
+endif
+
 direct: FORCE mode_info $(LUT_OBJS) $(LUT_HEADER_DEP) | $(BUILD_DIR)
 	$(HIPCC) -c $(CXXFLAGS) $(OFFLOAD) $(TEST_DEFINES) $(INCLUDES) $(LUT_EXTRA_INCLUDES) -x hip test_gemm.cpp -o $(TEST_OBJ)
+ifeq ($(RANK_KERNEL_OBJ),)
 	$(HIPCC) -c $(KERNEL_FLAGS) $(OFFLOAD) $(INCLUDES) $(KERNEL_HIP) -o $(KERNEL_OBJ)
+endif
 	$(HIPCC) $(OFFLOAD) $(TEST_OBJ) $(KERNEL_OBJ) $(LUT_OBJS) -o $(TARGET_DIRECT)
 
 mode_info:

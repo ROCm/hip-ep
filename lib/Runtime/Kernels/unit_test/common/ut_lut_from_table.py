@@ -11,10 +11,11 @@ import ut_rank_tools as rank
 
 NBITS_KEY = ('phase', 'bits', 'group_size', 'zero_point', 'row_stride', 'm', 'n', 'k')
 GQA_KEY = ('phase', 'head_dim', 'kv_dtype', 'num_heads', 'kv_num_heads', 'batch', 'seq_q', 'seq_kv')
+GEMM_KEY = ('phase', 'act_dtype', 'wts_dtype', 'out_dtype', 'trans_b', 'm', 'n', 'k')
 
 
 def key_fields(op):
-    return NBITS_KEY if op == 'matmul_nbits' else GQA_KEY
+    return {'matmul_nbits': NBITS_KEY, 'gqa': GQA_KEY, 'gemm': GEMM_KEY}[op]
 
 
 def table_key(op, point):
@@ -33,6 +34,11 @@ def config_values(text):
 
 def native_config(op, doc, point):
     c = doc['configs'][point['config']]
+    if op == 'gemm':
+        route = {'Wmma': 'wmma', 'GemvNt': 'gemv_nt', 'GemvNn': 'gemv_nn', 'TiledFma': 'tiled_fma'}[point['phase']]
+        return config_text(dict(route=route, bm=c['bm16'] * 16, bn=c['bn16'] * 16,
+                                swizzle=c['swizzle'], wt_m=c['wt_m'], wt_n=c['wt_n'], bk=c['bk'],
+                                split_k=c['split_k'], threads=c['threads'], tile_n=c['tile_n']))
     if op == 'gqa':
         return config_text(dict(wmma=c['use_wmma'], splits=point['splits'],
                                 **{k: c[k] for k in ('bkv', 'hb', 'qw', 'mt', 'nd')}))
@@ -47,7 +53,27 @@ def native_config(op, doc, point):
 
 def point_input(op, doc, point, activation='fp16', prefill_kv='fp16'):
     """Lossless schema key mapping. Unsupported semantic classes are explicit."""
-    if op == 'matmul_nbits':
+    if op == 'gemm':
+        dtype = {'F16': 'fp16', 'BF16': 'bf16', 'F32': 'fp32'}.get(point['act_dtype'])
+        if dtype is None:
+            raise ValueError('GEMM dtype is not covered by these leaves')
+        if point['act_dtype'] != point['wts_dtype'] or point['act_dtype'] != point['out_dtype']:
+            raise ValueError('mixed GEMM dtypes are not expressible by the leaf')
+        m, n, k = (point[x] for x in ('m', 'n', 'k'))
+        tb = {'NN': 0, 'NT': 1}.get(point['trans_b'])
+        phase = point['phase']
+        kind = {'Wmma': 'Wmma', 'GemvNt': 'Gemv', 'GemvNn': 'Gemv', 'TiledFma': 'TiledFma'}.get(phase)
+        if tb is None or kind is None:
+            raise ValueError('unsupported GEMM phase/transpose category')
+        if not 0 <= point['config'] < len(doc['configs']) or doc['configs'][point['config']]['kind'] != kind:
+            raise ValueError('GEMM phase/config kind mismatch')
+        if (phase in ('GemvNt', 'GemvNn') and (m != 1 or tb != int(phase == 'GemvNt'))) or \
+                (phase == 'Wmma' and (m < 16 or dtype == 'fp32')) or \
+                (phase == 'TiledFma' and (m < 16 or dtype != 'fp32')):
+            raise ValueError('GEMM table phase differs from the wave32 leaf lookup route')
+        leaf = f'gemm/X{dtype}_W{dtype}_Y{dtype}'
+        shape = f'M{m}_N{n}_K{k}_ta0_tb{tb}'
+    elif op == 'matmul_nbits':
         bits = {'B2': 'u2', 'B3': 'u3', 'B4': 'u4', 'B8': 'i8'}.get(point['bits'])
         if bits is None or point['group_size'] not in ('G16', 'G32', 'G64', 'G128', 'G256', 'G512'):
             raise ValueError('unsupported bits/group_size category')
@@ -92,7 +118,7 @@ def point_input(op, doc, point, activation='fp16', prefill_kv='fp16'):
         shape = f'B{b}_H{h}_G{g}_D{d}_len{skv}' if decode else f'B{b}_H{h}_G{g}_D{d}_sq{sq}' + (f'_past{skv - sq}' if kv == 'fp16' else '')
         if decode and not 1 <= point['splits'] <= 64 or not decode and point['splits'] != 0:
             raise ValueError('splits outside the configured leaf range')
-    if any(point[k] <= 0 for k in (('m', 'n', 'k') if op == 'matmul_nbits' else ('batch', 'num_heads', 'kv_num_heads', 'seq_q', 'seq_kv'))):
+    if any(point[k] <= 0 for k in (('m', 'n', 'k') if op in ('matmul_nbits', 'gemm') else ('batch', 'num_heads', 'kv_num_heads', 'seq_q', 'seq_kv'))):
         raise ValueError('nonpositive dimensions')
     return dict(key=table_key(op, point), leaf=leaf, shape=shape,
                 old_config=native_config(op, doc, point), point=point)
@@ -137,10 +163,11 @@ def seed(args, installed):
             reason = 'not selected by --keys'
         if args.leaf and p['leaf'] not in args.leaf:
             reason = 'filtered leaf'
-        dtype = getattr(args, 'activation', 'fp16') if args.op == 'matmul_nbits' else ('int8' if '_Wi8_' in p['leaf'] else 'fp16')
+        dtype = p['leaf'].split('/X')[1].split('_')[0] if args.op == 'gemm' else \
+            getattr(args, 'activation', 'fp16') if args.op == 'matmul_nbits' else ('int8' if '_Wi8_' in p['leaf'] else 'fp16')
         if args.dtype and dtype not in args.dtype:
             reason = 'filtered dtype'
-        phase = 'decode' if ('/decode/' in p['leaf'] or p['point']['phase'] == 'Decode') else 'prefill'
+        phase = 'decode' if ('/decode/' in p['leaf'] or p['point']['phase'] in ('Decode', 'GemvNt', 'GemvNn')) else 'prefill'
         if args.rank_phase != 'both' and phase != args.rank_phase:
             reason = 'filtered phase'
         if reason:
@@ -166,11 +193,13 @@ def seed(args, installed):
         c = catalog.get((p['leaf'], p['shape']))
         if args.with_catalog and c is None:
             raise ValueError('catalog omits ' + p['shape'])
+        aliases = {cfg.get('geometry', cfg['final']): cfg['final'] for cfg in c['configs']} if c else {}
         baseline = c.get('default') if c else None
+        old_final = aliases.get(p['old_config'], p['old_config'])
         configs = ['default']
-        if p['old_config'] != baseline:
+        if old_final != baseline:
             configs.append(p['old_config'])
-        identities = {p['old_config'], baseline}
+        identities = {old_final, baseline}
         for cfg in c['configs'] if c else []:
             if cfg['final'] not in identities:
                 identities.add(cfg['final'])
@@ -189,6 +218,18 @@ def seed(args, installed):
 
 def record_point(op, record):
     d = rank.fields(record['shape'])
+    if op == 'gemm':
+        if d.get('ta') != 0 or d.get('bias') or d['M'] < 1 or d['N'] < 1 or d['K'] < 1:
+            raise ValueError('GEMM transpose-A/bias/degenerate request has no table key')
+        dtype = record['leaf'].split('/X')[1].split('_')[0]
+        enum = {'fp16': 'F16', 'bf16': 'BF16', 'fp32': 'F32'}.get(dtype)
+        if enum is None or record['leaf'] != f'gemm/X{dtype}_W{dtype}_Y{dtype}' or d.get('tb') not in (0, 1):
+            raise ValueError('unsupported GEMM leaf/transpose')
+        if d['M'] != 1 and d['M'] < 16:
+            raise ValueError('multirow small-M GEMM has no table key')
+        phase = ('GemvNt' if d['tb'] else 'GemvNn') if d['M'] == 1 else 'TiledFma' if dtype == 'fp32' else 'Wmma'
+        return dict(phase=phase, act_dtype=enum, wts_dtype=enum, out_dtype=enum,
+                    trans_b='NT' if d['tb'] else 'NN', m=d['M'], n=d['N'], k=d['K'])
     if op == 'matmul_nbits':
         # The leaf has no dp4a/padded route. A singleton gemv_m/naive stays skipped.
         c = config_values(record['candidates'][record.get('selected', record['winner'])]['config'])
@@ -223,10 +264,23 @@ def update_points(op, doc, records):
         text = record['candidates'][chosen]['config']
         old = by_key.get(key)
         # Identical selections keep the exact existing index and other fields.
-        if old is not None and native_config(op, doc, old) == text:
+        aliases = record['candidates'][chosen].get('requests', [])
+        if old is not None and native_config(op, doc, old) in [text, *aliases]:
             continue
         c = config_values(text)
-        if op == 'gqa':
+        if op == 'gemm':
+            expected = {'Wmma': 'wmma', 'GemvNt': 'gemv_nt', 'GemvNn': 'gemv_nn', 'TiledFma': 'tiled_fma'}[p['phase']]
+            if c['route'] != expected:
+                skipped.append(dict(leaf=record['leaf'], shape=record['shape'], reason='GEMM selected default has no table geometry'))
+                continue
+            if c['bm'] % 16 or c['bn'] % 16:
+                raise ValueError('GEMM tile geometry is not representable in bm16/bn16')
+            config = dict(kind='Wmma' if c['route'] == 'wmma' else 'TiledFma' if c['route'] == 'tiled_fma' else 'Gemv',
+                          bm16=c['bm'] // 16, bn16=c['bn'] // 16, swizzle=c['swizzle'],
+                          wt_m=c['wt_m'], wt_n=c['wt_n'], bk=c['bk'], split_k=c['split_k'],
+                          threads=c['threads'], tile_n=c['tile_n'])
+            pool = doc['configs']
+        elif op == 'gqa':
             config = dict(kind='Decode' if p['phase'] == 'Decode' else 'Prefill', use_wmma=c['wmma'],
                           **{k: c[k] for k in ('bkv', 'hb', 'qw', 'mt', 'nd')})
             p['splits'] = c['splits']
@@ -273,7 +327,7 @@ def report(args, installed):
         final = r['phases'][-1]
         measurements = {m['candidate']: m for m in final['measurements']}
         winner, default = r['candidates'][r['winner']]['config'], r['candidates'][0]['config']
-        old_id = next((i for i, c in enumerate(r['candidates']) if c['config'] == p['old_config']), None)
+        old_id = next((i for i, c in enumerate(r['candidates']) if p['old_config'] in [c['config'], *c.get('requests', [])]), None)
         old = measurements.get(old_id)
         win = measurements[r['winner']]
         ratio = lambda a, b: statistics.median(x / y for x, y in zip(a['group_means_ms'], b['group_means_ms']))
@@ -291,11 +345,17 @@ def report(args, installed):
                          winner_over_old=ratio(common[1][r['winner']], common[1][old_id]) if common else '',
                          old_over_default=ratio(common[1][old_id], common[1][0]) if common else '', old_ratio_phase=common[0] if common else '',
                          old_status='measured_final' if old else 'excluded' if old_id in excluded else 'not_in_final_phase',
-                         changed=selected != p['old_config'], insert_nondefault=r['insert_nondefault'], retested=any(phase['name'] == 'confirm' for phase in r['phases']),
+                         changed=p['old_config'] not in [selected, *r['candidates'][r['winner'] if r['insert_nondefault'] else 0].get('requests', [])],
+                         insert_nondefault=r['insert_nondefault'], retested=any(phase['name'] == 'confirm' for phase in r['phases']),
                          decision_status=r['decision_status'], excluded=json.dumps(sorted(excluded)),
                          screen_gpu_ms=phases.get('screen', 0), standard_gpu_ms=phases.get('standard', 0), confirm_gpu_ms=phases.get('confirm', 0),
                          gpu_ms=sum(phases.values()), pilot_gpu_ms=sum(phase.get('pilot_ms', 0) for phase in r['phases']),
                          wall_ms=r.get('wall_ms', ''), old_index=p['point']['config']))
+    if args.op == 'gemm':
+        for row in rows:
+            route = config_values(row['selected'])['route']
+            row['import_status'] = 'retained_unrepresentable_default' if route == 'default' else 'representable'
+            row['imported_change'] = row['changed'] and row['import_status'] == 'representable'
     with output.open('w', newline='', encoding='utf-8') as f:
         writer = csv.DictWriter(f, list(rows[0]))
         writer.writeheader()
@@ -311,6 +371,9 @@ def report(args, installed):
                    winner_unresolved_fraction=sum(r['decision_status'] == 'winner_unresolved' for r in rows) / len(rows),
                    skipped=len(unsupported), unmeasured=len(points) - len(measured),
                    gpu_ms=sum(r['gpu_ms'] for r in rows), wall_ms=sum(r['wall_ms'] for r in rows if r['wall_ms'] != ''))
+    if args.op == 'gemm':
+        summary['imported_changes'] = sum(r['imported_change'] for r in rows)
+        summary['retained_unrepresentable_default'] = sum(r['import_status'] != 'representable' for r in rows)
     output.with_suffix('.summary.json').write_text(json.dumps(summary, indent=2) + '\n')
     if args.md:
         md = rank.private_path(args.md, installed)
@@ -322,7 +385,7 @@ def report(args, installed):
 def add_arguments(ap):
     ap.add_argument('--from-lut', help='existing JSON table (FB input is unsupported)')
     ap.add_argument('--leaf', nargs='+', help='rank-seed: exact leaf names')
-    ap.add_argument('--dtype', nargs='+', choices=['fp16', 'fp32', 'int8'], help='rank-seed: activation (nbits) or KV input (GQA)')
+    ap.add_argument('--dtype', nargs='+', choices=['fp16', 'bf16', 'fp32', 'int8'], help='rank-seed: activation (nbits), uniform GEMM dtype or KV input (GQA)')
     ap.add_argument('--rank-phase', choices=['decode', 'prefill', 'both'], default='both')
     ap.add_argument('--keys', help='one JSON key array per line (see *.seed.json)')
     ap.add_argument('--sample', type=int, help='reproducibly select N eligible points')

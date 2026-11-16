@@ -237,6 +237,7 @@ Examples:
 
 | Leaf | What it is |
 |---|---|
+| `gemm/Xfp16_Wfp16_Yfp16` | A/B/Y fp16 (likewise bf16 and fp32) |
 | `matmul_nbits/Xfp16_Wu4_Yfp16` | A fp16, B uint4, C fp16 |
 | `matmul_nbits/Xfp16_Wu2_Yfp16` | bits=2 |
 | `matmul_nbits/Xfp16_Wu3_Yfp16` | bits=3 |
@@ -261,6 +262,9 @@ unit_test/
   CMakeLists.txt             # package targets and install rules
   kernel_ut_main.cpp         # hipdnn-kernel-ut.exe controller
   Makefile                   # local suite: build every leaf, run hipdnn-kernel-ut.exe
+  gemm/Xfp16_Wfp16_Yfp16/
+  gemm/Xbf16_Wbf16_Ybf16/
+  gemm/Xfp32_Wfp32_Yfp32/
   matmul_nbits/Xfp16_Wu{2,3,4}_Yfp16/
   matmul_nbits/Xfp16_Wi8_Yfp16/
   matmul_nbits/Xfp32_Wu{2,3,4}_Yfp32/
@@ -285,8 +289,8 @@ the other GPU-free CTest suites.
 ## Refreshing a LUT with the UT leaves
 
 LUT tables are refreshed with these leaves rather than a separate sweep
-harness, so a table and the unit tests are measured by the same timer. The eight
-MatMulNBits leaves and four GQA decode/prefill leaves support it; other ops keep
+harness, so a table and the unit tests are measured by the same timer. The three
+GEMM leaves, eight MatMulNBits leaves and four GQA decode/prefill leaves support it; other ops keep
 their previous tools until they are migrated.
 
 A refresh does not choose a timing preset. For each shape the ranking mode:
@@ -306,7 +310,7 @@ Near-tied finalists can swap between runs; that costs little and is expected.
 Rules, the `UT_RANK` record and gfx1151 results are in
 [common/README.md](common/README.md#native-lut-ranking-ut-rank-v3).
 
-To refresh `<op>` (`matmul_nbits` or `gqa`) from its existing JSON table:
+To refresh `<op>` (`gemm`, `matmul_nbits` or `gqa`) from its existing JSON table:
 
 1. From `hip/autotune/<op>/`, generate default + old-table candidates:
 
@@ -320,7 +324,9 @@ To refresh `<op>` (`matmul_nbits` or `gqa`) from its existing JSON table:
    `--leaf`, `--dtype`, `--rank-phase decode|prefill`, and `--keys` filter them.
    Choose `--activation fp16|fp32` for MatMulNBits or
    `--prefill-kv fp16|int8` for GQA prefill at both seed and import/report steps.
-   These dimensions are absent from the respective schema keys.
+   These dimensions are absent from the respective schema keys. GEMM stores its
+   dtype triplet: `--dtype fp16|bf16|fp32` filters the matching uniform-dtype leaf;
+   it needs no activation/KV option at report/build.
 2. Build each selected leaf with
    `make build RANK=1 BUILD_DIR=out_rank HIP_SDK=<sdk>`. On Windows, add
    `ADLX_INCLUDE=<ADLX SDK Include directory>` for GPU clock diagnostics.
@@ -334,7 +340,7 @@ To refresh `<op>` (`matmul_nbits` or `gqa`) from its existing JSON table:
    ```
 
    `<op options>` is `--activation fp16|fp32` for MatMulNBits and
-   `--prefill-kv fp16|int8` for GQA prefill. `rank-measure` runs one native
+   `--prefill-kv fp16|int8` for GQA prefill; GEMM needs no extra option. `rank-measure` runs one native
    process at a time and accepts `--launcher-json` for the host's execution
    lease wrapper. `rank-report` validates `UT_RANK` and reports the old/default/
    winner ratios, effective selection changes, retests, exclusions and costs.
@@ -354,11 +360,22 @@ For shapes absent from the old table, a hand-written CSV with
 `leaf,shape,priority,config` and one `default` row per shape remains supported.
 Use `rank-catalog` and `rank-candidates --candidates <seed.csv> --catalog <catalog.log>`
 to expand it. The host contract tests run through `make -C common test`, or
-`python3 common/test_ut_lut_from_table.py`: both existing gfx1151 tables are
+`python3 common/test_ut_lut_from_table.py`: all three existing gfx1151 tables are
 reconstructed from synthetic old-config winners with full parsed JSON equality,
 including skipped points, weights, fallback/config indices and array order.
 
-Each op's details are in [hip/autotune/matmul_nbits/README.md](../hip/autotune/matmul_nbits/README.md#refresh-through-native-ut-ranking)
+GEMM shapes use `M16_N512_K256_ta0_tb1`, optionally `_bias` for row bias;
+`_bias_crows16_ccols1` selects column bias. Table keys have no bias/transpose-A
+field, so those ranking requests have no importable table key. The current
+wave32 leaves cover uniform F16/BF16/F32: WMMA, both one-row GEMVs and F32 FMA
+tiles. Unsupported dtypes, mixed triplets, phases and geometry are explicitly
+skipped. GEMM deduplicates the actual expanded kernel, grid, block and runtime
+arguments after all production launch remaps. `UT_RANK` retains geometry aliases
+in `candidates[].requests` and the full descriptor in `final_launch`; reports
+use aliases when an old stored geometry launches the same candidate as default.
+
+Each op's details are in [hip/autotune/gemm/README.md](../hip/autotune/gemm/README.md#refresh-through-native-ut-ranking),
+[hip/autotune/matmul_nbits/README.md](../hip/autotune/matmul_nbits/README.md#refresh-through-native-ut-ranking)
 and [hip/autotune/gqa/README.md](../hip/autotune/gqa/README.md#refresh-through-native-ut-ranking).
 
 ## Adding an op or dtype leaf

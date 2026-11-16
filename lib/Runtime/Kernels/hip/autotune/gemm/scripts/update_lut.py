@@ -523,7 +523,7 @@ def cmd_compact(args) -> int:
 # ---------------------------------------------------------------------------
 
 def cmd_compile(args) -> int:
-    lut_json = LUT_DIR / f"{args.arch}.json"
+    lut_json = Path(args.out) if args.out else LUT_DIR / f"{args.arch}.json"
     if not lut_json.exists():
         print(f"[compile] no {lut_json}; run build first", file=sys.stderr)
         return 1
@@ -538,7 +538,8 @@ def cmd_compile(args) -> int:
         if not produced:
             print("[compile] flatc produced nothing", file=sys.stderr)
             return 1
-        dst = LUT_DIR / f"{args.arch}.fb"
+        dst = Path(args.fb_out) if args.fb_out else lut_json.with_suffix(".fb")
+        dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(produced[0], dst)
     # Only the .fb is committed; CMake embeds its bytes into the
     # custom_kernels DLL at configure time (file(READ ... HEX)) -- R7: a
@@ -548,10 +549,54 @@ def cmd_compile(args) -> int:
     return 0
 
 
+# The owning shared tools contain no timer; ranking stays in the native leaf.
+sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "unit_test/common"))
+import ut_rank_tools
+import ut_lut_from_table
+
+
+def check_rank_table(doc):
+    if doc.get("schema_version") != SCHEMA_VERSION or doc.get("kernel_abi") != KERNEL_ABI:
+        raise ValueError("unsupported GEMM schema/kernel ABI")
+    if len(doc["configs"]) > 256:
+        raise ValueError("GEMM config index exceeds uint8")
+    for c in doc["configs"]:
+        if c["kind"] not in ("Wmma", "Gemv", "TiledFma"):
+            raise ValueError("unsupported GEMM config kind")
+        for field in ("bm16", "bn16", "swizzle", "wt_m", "wt_n", "bk", "split_k", "tile_n"):
+            if not isinstance(c[field], int) or not 0 <= c[field] <= 255:
+                raise ValueError("GEMM geometry field exceeds uint8: " + field)
+        if not isinstance(c["threads"], int) or not 0 <= c["threads"] <= 65535:
+            raise ValueError("GEMM threads exceeds uint16")
+    for p in [*doc["points"], *doc.get("fallbacks", [])]:
+        if not isinstance(p["config"], int) or not 0 <= p["config"] < len(doc["configs"]):
+            raise ValueError("GEMM config index outside pool")
+    for p in doc["points"]:
+        if not 0 < p["m"] <= 65535 or not 0 < p["k"] <= 65535 or not 0 < p["n"] <= 2**32 - 1:
+            raise ValueError("GEMM dimensions outside schema range")
+    # Reject ambiguity while retaining explicitly unsupported semantic points.
+    ut_lut_from_table.inventory("gemm", doc)
+
+
+def cmd_rank_build(args):
+    doc = ut_lut_from_table.read_table(args.base or args.from_lut)
+    check_rank_table(doc)
+    records = ut_rank_tools.evidence(args.rank_log)
+    if any(not r["leaf"].startswith("gemm/") for r in records):
+        raise ValueError("rank-build expects GEMM leaf evidence")
+    summary = ut_lut_from_table.update_points(args.op, doc, records)
+    check_rank_table(doc)
+    output = ut_rank_tools.private_path(args.out, LUT_DIR)
+    output.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    output.with_suffix(".rank-report.json").write_text(json.dumps(summary, indent=2) + "\n")
+    print("rank table:", output, "updated:", summary["updated"], "skipped:", len(summary["skipped"]))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("command",
-                    choices=["measure", "build", "compact", "compile", "all"])
+                    choices=["measure", "build", "compact", "compile", "all", "rank-catalog", "rank-candidates",
+                             "rank-seed", "rank-measure", "rank-report", "rank-build", "rank-reference-candidates"])
     ap.add_argument("--arch", default="gfx1151")
     ap.add_argument("--sweep", default="gemm_sweep.exe",
                     help="path to the built gemm_autotune_sweep binary")
@@ -586,7 +631,14 @@ def main() -> int:
     ap.add_argument("--bf16-aliases-f16", action="store_true",
                     help="set only after Stage C's measured verdict (plan.md "
                          "§5 Stage C) -- do not guess this")
+    ap.add_argument("--fb-out", help="compiled FB output (defaults to the JSON basename)")
+    ut_rank_tools.add_arguments(ap)
+    ut_lut_from_table.add_arguments(ap)
     args = ap.parse_args()
+    args.op = "gemm"
+    if args.command.startswith("rank-"):
+        ut_rank_tools.dispatch(args, LUT_DIR, cmd_rank_build)
+        return 0
 
     if args.command in ("measure", "all"):
         rc = cmd_measure(args)

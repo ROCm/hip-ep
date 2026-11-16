@@ -10,6 +10,66 @@ schema v2 shares its dtype vocabulary with every other op via `../common/`.
 The installed format is v3: point and fallback config indices are `uint8`,
 with fewer than 256 distinct configs; the current table contains 62.
 
+## Refresh through native UT ranking
+
+The three `unit_test/gemm/X{fp16,bf16,fp32}_W*_Y*` leaves implement native
+`ut-rank-v3` with the shared adaptive timer. Build with
+`make build RANK=1 BUILD_DIR=out_rank HIP_SDK=<sdk>`; optional
+`ADLX_INCLUDE=<ADLX Include>` enables telemetry. The standalone adapter compiles
+the production TU, uses an empty LUT and lookup policy, and switches the existing
+lookup-first cache between legal descriptor IDs and the genuine default.
+`RANK_KERNEL_OBJ=<matching object>` permits sharing that adapter across the three
+leaves after verifying the complete source/include/compiler/flags closure.
+
+From this directory, an existing JSON refresh is:
+
+```sh
+python scripts/update_lut.py rank-seed --from-lut lut/gfx1151.json --dtype fp16 bf16 --out <private>/candidates.csv
+python scripts/update_lut.py rank-measure --candidates <private>/candidates.csv --leaf-root <checkout>/lib/Runtime/Kernels/unit_test --out <private>/rank.log
+python scripts/update_lut.py rank-report --from-lut lut/gfx1151.json --rank-log <private>/rank.log --out <private>/report.csv --md <private>/report.md
+python scripts/update_lut.py rank-build --base lut/gfx1151.json --rank-log <private>/rank.log --out <private>/candidate.json
+python scripts/update_lut.py compile --out <private>/candidate.json --fb-out <private>/candidate.fb --flatc <flatc>
+```
+
+`rank-seed` accepts JSON only, records all selected keys and skipped reasons,
+and starts with default + old geometry. `--sample N --seed S`, `--leaf`,
+`--dtype fp16|bf16|fp32`, `--rank-phase decode|prefill` and `--keys` bound scope.
+`rank-catalog` enumerates legal production configs; optionally append them with
+`rank-seed --with-catalog --catalog <catalog.log>`. Hand-written default rows
+plus `rank-catalog`/`rank-candidates` cover new shapes, including F32 shapes
+absent from the installed table. `rank-reference-candidates` with a catalog
+produces the independent top-three + default reference input.
+
+The key includes phase, the complete dtype triplet, transpose-B and M/N/K.
+Uniform F16/BF16/F32 map to their matching leaf. The wave32 table mappings cover
+WMMA at M>=16, one-row NT/NN GEMV and F32 FMA tiles. Mixed dtypes, unsupported
+phases/types and incompatible phase/config kinds are skipped. Native shape
+strings are `M16_N512_K256_ta0_tb1`; `_bias` adds row C with alpha=beta=1,
+and `_bias_crows16_ccols1` selects column C. Transpose-A, multirow small-M and
+bias requests can rank their native default but have no importable table key.
+
+JSON pool indices are never native IDs. Final launches are deduplicated after
+production remaps using the expanded kernel/grid/block/shared bytes/runtime
+arguments. Pointer addresses are excluded so rotating B retains identity.
+Optional `UT_RANK` candidate `requests` aliases keep the old table geometry
+associated with an equivalent final launch; `final_launch` preserves that
+descriptor. Ranking uses the unchanged screen/standard/confirm rules and CPU
+checks every deduplicated candidate before timing. An unrepresentable selected
+default remains an explicit import skip and preserves the old point.
+
+`rank-build` changes only accepted measured keys, preserves exact unchanged
+config indices, point order, weights, fallbacks and unrelated fields, and writes
+only outside the installed LUT directory. Reports use paired complete-call
+groups and name the shared phase for old/winner ratios. Full existing JSON
+roundtrip is part of `make -C unit_test/common test`; it proves structural
+preservation. Review private JSON/FB before separately authorizing installation.
+
+Execution uses a foreground host lease wrapper (`--launcher-json`), optionally
+with `HIPDNN_UT_GPU_ADMISSION` to acquire after CPU reference preparation and
+release after device cleanup/synchronization. Build, catalog, reference
+preparation, reports and transfer hold no GPU lease. See
+[the shared rank contract](../../../unit_test/common/README.md#native-lut-ranking-ut-rank-v3).
+
 ## Schema v3: explicit dtypes, compact config indices, four phases
 
 v1 keyed a point on `type_bytes` (2/4/8) -- an element-size proxy that cannot
