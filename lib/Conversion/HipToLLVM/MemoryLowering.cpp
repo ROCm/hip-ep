@@ -972,10 +972,9 @@ struct PackedViewOpLowering : public ConvertOpToLLVMPattern<PackedViewOp> {
     Value baseOffset = source.offset(rewriter, loc);
     Value shift = LLVM::AddOp::create(rewriter, loc, baseOffset,
                                       adaptor.getElementOffset());
-    Value dataPtr =
-        LLVM::GEPOp::create(rewriter, loc, aligned.getType(), llvmElemTy,
-                            aligned, shift)
-            .getResult();
+    Value dataPtr = LLVM::GEPOp::create(rewriter, loc, aligned.getType(),
+                                        llvmElemTy, aligned, shift)
+                        .getResult();
 
     SmallVector<Value, 4> sizes;
     SmallVector<Value, 4> strides;

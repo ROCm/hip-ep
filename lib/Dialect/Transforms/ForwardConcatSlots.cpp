@@ -34,7 +34,6 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 
-
 namespace mlir {
 namespace hip {
 
@@ -151,8 +150,7 @@ static bool onlySlotWrites(Value value, Value base, DenseSet<Value> &seen) {
         return false;
       continue;
     }
-    if (isa<memref::CopyOp, memref::LoadOp, DestinationStyleOpInterface>(
-            owner))
+    if (isa<memref::CopyOp, memref::LoadOp, DestinationStyleOpInterface>(owner))
       continue;
     auto effects = dyn_cast<MemoryEffectOpInterface>(owner);
     if (!effects || effects.getEffectOnValue<MemoryEffects::Write>(value))

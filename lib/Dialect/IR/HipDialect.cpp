@@ -115,11 +115,13 @@ LogicalResult PackedViewOp::verify() {
   auto resultType = dyn_cast<MemRefType>(getResult().getType());
   if (!sourceType || !resultType)
     return emitOpError("requires ranked memref source and result");
-  if (!sourceType.getLayout().isIdentity() || !resultType.getLayout().isIdentity())
+  if (!sourceType.getLayout().isIdentity() ||
+      !resultType.getLayout().isIdentity())
     return emitOpError("requires identity layout on the source and the result");
   if (sourceType.getElementType() != resultType.getElementType() ||
       sourceType.getMemorySpace() != resultType.getMemorySpace())
-    return emitOpError("source and result element type and memory space must match");
+    return emitOpError(
+        "source and result element type and memory space must match");
   if (sourceType.hasStaticShape() && resultType.hasStaticShape()) {
     if (auto offset = getConstantIntValue(getElementOffset())) {
       int64_t end = *offset + resultType.getNumElements();
