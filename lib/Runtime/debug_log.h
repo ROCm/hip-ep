@@ -38,7 +38,8 @@ inline bool hipdnn_ep_matmul_dp4a_u8_enabled() {
   return enabled;
 }
 
-// 2-bit QMoE experts on the W2A8 dp4a fused decode (needs the dp4a path on too).
+// 2-bit QMoE experts on the W2A8 dp4a fused decode (needs the dp4a path on
+// too).
 inline bool hipdnn_ep_qmoe_dp4a_u2_enabled() {
   static const bool enabled =
       hipdnn_ep::env_enabled_default_on("HIPDNN_EP_QMOE_DP4A_U2");
