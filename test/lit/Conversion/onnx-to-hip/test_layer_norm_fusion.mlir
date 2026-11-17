@@ -115,4 +115,42 @@ module {
   // CHECK-NOT: hip.layer_norm
   // CHECK: hip.reduce_mean
   // CHECK: return
+
+  // A ui8 epsilon constant zero-extends when cast to f32.
+  func.func @ui8_epsilon_zero_extends(%x: tensor<2x8xf32>, %g: tensor<8xf32>) -> tensor<2x8xf32> {
+    %c = "onnx.Constant"() {value = dense<255> : tensor<ui8>} : () -> tensor<ui8>
+    %eps = "onnx.Cast"(%c) {saturate = 1 : si64, to = f32} : (tensor<ui8>) -> tensor<f32>
+    %mean = "onnx.ReduceMean"(%x) {axes = [1], keepdims = 1 : si64} : (tensor<2x8xf32>) -> tensor<2x1xf32>
+    %d = "onnx.Sub"(%x, %mean) : (tensor<2x8xf32>, tensor<2x1xf32>) -> tensor<2x8xf32>
+    %sq = "onnx.Mul"(%d, %d) : (tensor<2x8xf32>, tensor<2x8xf32>) -> tensor<2x8xf32>
+    %var = "onnx.ReduceMean"(%sq) {axes = [1], keepdims = 1 : si64} : (tensor<2x8xf32>) -> tensor<2x1xf32>
+    %ve = "onnx.Add"(%var, %eps) : (tensor<2x1xf32>, tensor<f32>) -> tensor<2x1xf32>
+    %s = "onnx.Sqrt"(%ve) : (tensor<2x1xf32>) -> tensor<2x1xf32>
+    %n = "onnx.Div"(%d, %s) : (tensor<2x8xf32>, tensor<2x1xf32>) -> tensor<2x8xf32>
+    %y = "onnx.Mul"(%n, %g) : (tensor<2x8xf32>, tensor<8xf32>) -> tensor<2x8xf32>
+    return %y : tensor<2x8xf32>
+  }
+
+  // CHECK-LABEL: func.func @ui8_epsilon_zero_extends
+  // CHECK: hip.layer_norm
+  // CHECK-SAME: epsilon = 2.550000e+02 : f32
+
+  // A i1 epsilon constant zero-extends when cast to f32.
+  func.func @i1_epsilon_zero_extends(%x: tensor<2x8xf32>, %g: tensor<8xf32>) -> tensor<2x8xf32> {
+    %c = "onnx.Constant"() {value = dense<true> : tensor<i1>} : () -> tensor<i1>
+    %eps = "onnx.Cast"(%c) {saturate = 1 : si64, to = f32} : (tensor<i1>) -> tensor<f32>
+    %mean = "onnx.ReduceMean"(%x) {axes = [1], keepdims = 1 : si64} : (tensor<2x8xf32>) -> tensor<2x1xf32>
+    %d = "onnx.Sub"(%x, %mean) : (tensor<2x8xf32>, tensor<2x1xf32>) -> tensor<2x8xf32>
+    %sq = "onnx.Mul"(%d, %d) : (tensor<2x8xf32>, tensor<2x8xf32>) -> tensor<2x8xf32>
+    %var = "onnx.ReduceMean"(%sq) {axes = [1], keepdims = 1 : si64} : (tensor<2x8xf32>) -> tensor<2x1xf32>
+    %ve = "onnx.Add"(%var, %eps) : (tensor<2x1xf32>, tensor<f32>) -> tensor<2x1xf32>
+    %s = "onnx.Sqrt"(%ve) : (tensor<2x1xf32>) -> tensor<2x1xf32>
+    %n = "onnx.Div"(%d, %s) : (tensor<2x8xf32>, tensor<2x1xf32>) -> tensor<2x8xf32>
+    %y = "onnx.Mul"(%n, %g) : (tensor<2x8xf32>, tensor<8xf32>) -> tensor<2x8xf32>
+    return %y : tensor<2x8xf32>
+  }
+
+  // CHECK-LABEL: func.func @i1_epsilon_zero_extends
+  // CHECK: hip.layer_norm
+  // CHECK-SAME: epsilon = 1.000000e+00 : f32
 }

@@ -556,6 +556,19 @@ class TestLayerNormalization:
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=1e-5, rtol=1e-5)
 
+    def test_layer_norm_fp32_large_offset(self, model_runner):
+        """Rows with variance far below mean^2 (e.g. [10000, 10001]) must use a
+        centered variance; E[x^2] - mean^2 cancels to 0 in fp32 and scales the
+        outputs by rsqrt(epsilon)."""
+        input_shape = [4, 2]
+        model = _make_layer_norm_model(input_shape, np.float32, with_bias=True)
+        x = np.array(
+            [[10000, 10001], [-10000, -10001], [4096, 4097], [1e5, 1e5 + 2]],
+            dtype=np.float32,
+        )
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=1e-3, rtol=1e-3)
+
     @pytest.mark.parametrize("num_patches", [256, 1024])
     def test_layer_norm_qwen35b_vision_shape(self, model_runner, num_patches):
         """LN exactly as it appears 55x in Qwen3.5-35B vision.onnx:
