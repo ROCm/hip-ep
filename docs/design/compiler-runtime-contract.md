@@ -95,6 +95,14 @@ fastest within 4x of the best (see `include/hip/Compiler/AdaptiveBenchmark.h`).
 `simple` gives every candidate 20 warmup and 100 timed launches. Benchmark
 inputs hold generated data (floats in [-1, 1), small integers), not zeros.
 
+The search leaves out split-K perfConfigs unless `HIPDNN_EP_ROCMLIR_SPLITK` is
+on. A split-K kernel adds partial sums into a zero-filled output with atomics,
+and the candidate timing runs on separate buffers, so it cannot see how fast
+those atomics are where the graph places the output. A kernel whose search
+space holds only split-K perfConfigs still searches them. Like
+`HIPDNN_EP_ROCMLIR_AUTOTUNE_BENCH`, the variable only narrows the search and is
+not part of the suffix.
+
 ---
 
 ## Schema: Single Source of Truth
