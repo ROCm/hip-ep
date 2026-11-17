@@ -17,9 +17,11 @@
 //                     outs(%e1 : tensor<1x196x1536xT4>) : tensor<...xT4>
 //
 // The op keeps A's shape: the leading dims fold into the rows at lowering, as
-// they do for a batched matmul, so no reshape appears in the IR. That fold is
-// only a view when A's rows are outermost, hence transA = 0 for rank > 2, and
-// the bias needs a rank-2 weight (hip.matmul's verifier states the same).
+// they do for a batched matmul, so no reshape appears in the IR. Float and
+// quantized chains fuse alike; whether a kernel exists is not checked here.
+// That fold is only a view when A's rows are outermost, hence transA = 0 for
+// rank > 2, and the bias needs a rank-2 weight (hip.matmul's verifier states
+// the same).
 //
 // The matmul result must have the add as its only use, and the add must read
 // it directly: a quantized chain whose matmul and add disagree on the
@@ -94,10 +96,12 @@ private:
       return failure();
     if (aType.getRank() > 2 && matmul.getTransA() != 0)
       return failure();
-    if (!supportsMatmulWithBias(aType.getElementType(), bType.getElementType(),
-                                biasType.getElementType(),
-                                yType.getElementType()))
-      return rewriter.notifyMatchFailure(add, "no kernel for this matmul");
+    // Structure only, no kernel check. A float chain must be one element type;
+    // quantized types differ per tensor by design.
+    Type yElem = yType.getElementType();
+    if (!isQuantized(yElem) && (matmulType.getElementType() != yElem ||
+                                biasType.getElementType() != yElem))
+      return rewriter.notifyMatchFailure(add, "mixed float element types");
 
     // A [1, N] bias is the rank-1 [N] row the op takes.
     Value bias1d = bias;

@@ -1292,8 +1292,7 @@ LogicalResult MatmulOp::verify() {
   if (getBias())
     operands.push_back(getBias());
   operands.push_back(getOutput());
-  if (failed(verifyDpsComputeOp(*this, operands, /*numInits=*/1)) ||
-      failed(verifyQuantTypes(*this, operands)))
+  if (failed(verifyDpsComputeOp(*this, operands, /*numInits=*/1)))
     return failure();
 
   if (getBias()) {
@@ -1318,6 +1317,15 @@ LogicalResult MatmulOp::verify() {
         detail::getShapeOf(getA()), detail::getShapeOf(getB()),
         [&]() { return this->emitOpError(); }, getTransA(), getTransB());
   });
+}
+
+Value MatmulOp::generateOpStateInit(OpBuilder &builder, Location loc,
+                                    Value statePtr, int32_t slot) {
+  // Must match the kernel the lowering picks: wrap_gemm reads a GemmState.
+  StringRef ctor = getBias() && !isQuantizedOp(*this)
+                       ? "hipdnn_ep_op_state_construct_gemm"
+                       : "hipdnn_ep_op_state_construct_matmul";
+  return emitOpStateConstruct(builder, loc, statePtr, slot, ctor, {});
 }
 
 // `MatmulOp::reifyResultShapes` lives in
@@ -2307,10 +2315,8 @@ void AddOp::getEffects(
 }
 
 LogicalResult AddOp::verify() {
-  if (failed(verifyDpsComputeOp(*this, {getLhs(), getRhs(), getOutput()},
-                                /*numInits=*/1)))
-    return failure();
-  return verifyQuantTypes(*this, {getLhs(), getRhs(), getOutput()});
+  return verifyDpsComputeOp(*this, {getLhs(), getRhs(), getOutput()},
+                            /*numInits=*/1);
 }
 
 ParseResult AddOp::parse(OpAsmParser &parser, OperationState &result) {
@@ -3455,14 +3461,6 @@ LogicalResult NGramHashMappingOp::verify() {
 //===----------------------------------------------------------------------===//
 
 MutableOperandRange GemmOp::getDpsInitsMutable() { return getOutputMutable(); }
-
-LogicalResult GemmOp::verify() {
-  SmallVector<Value> operands = {getInputA(), getInputB()};
-  if (getInputC())
-    operands.push_back(getInputC());
-  operands.push_back(getOutput());
-  return verifyQuantTypes(*this, operands);
-}
 
 void GemmOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>

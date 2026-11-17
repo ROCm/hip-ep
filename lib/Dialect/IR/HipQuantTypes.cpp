@@ -7,7 +7,6 @@
 #include "hip/Dialect/IR/HipDialect.h"
 
 #include "llvm/ADT/STLExtras.h"
-#include "llvm/ADT/TypeSwitch.h"
 
 using namespace mlir;
 using namespace mlir::hip;
@@ -68,30 +67,11 @@ static bool supportsQMatmul(TypeRange inputs, Type result, bool allowBias) {
   return numInputs == 2 || isUniformOfWidth(inputs[2], {8, 16, 32});
 }
 
-bool mlir::hip::supportsMatmulWithBias(Type a, Type b, Type bias, Type result) {
-  return isa<quant::QuantizedType>(result) &&
-         supportsQMatmul({a, b, bias}, result, /*allowBias=*/true);
-}
-
 bool mlir::hip::supportsQuantTypes(Operation *op, TypeRange inputElementTypes,
                                    Type resultElementType) {
-  return llvm::TypeSwitch<Operation *, bool>(op)
-      .Case<AddOp>([&](auto) {
-        return supportsQElementwise(inputElementTypes, resultElementType);
-      })
-      .Case<MatmulOp>([&](auto) {
-        return supportsQMatmul(inputElementTypes, resultElementType,
-                               /*allowBias=*/true);
-      })
-      .Case<GemmOp>([&](auto) {
-        return supportsQMatmul(inputElementTypes, resultElementType,
-                               /*allowBias=*/true);
-      })
-      .Default([](Operation *) { return false; });
-}
-
-bool mlir::hip::isQuantCapable(Operation *op) {
-  return isa<AddOp, MatmulOp, GemmOp>(op);
+  auto quantOp = dyn_cast<HipQuantCapableOpInterface>(op);
+  return quantOp &&
+         quantOp.supportsQuantTypes(inputElementTypes, resultElementType);
 }
 
 bool mlir::hip::isQuantizedOp(Operation *op) {
@@ -105,16 +85,13 @@ bool mlir::hip::isQuantizedOp(Operation *op) {
 
 SmallVector<quant::UniformQuantizedType, 3>
 mlir::hip::getQuantElementTypes(Operation *op) {
-  SmallVector<Type, 3> types;
+  SmallVector<Type, 4> types;
   if (auto attr = op->getAttrOfType<ArrayAttr>("quant_types")) {
     for (auto typeAttr : attr.getAsRange<TypeAttr>())
       types.push_back(typeAttr.getValue());
-  } else if (auto dps = dyn_cast<DestinationStyleOpInterface>(op)) {
-    for (Value operand : dps.getDpsInputs())
-      if (isa<ShapedType>(operand.getType()))
-        types.push_back(getElementTypeOrSelf(operand.getType()));
-    for (Value init : dps.getDpsInits())
-      types.push_back(getElementTypeOrSelf(init.getType()));
+  } else if (auto quantOp = dyn_cast<HipQuantCapableOpInterface>(op)) {
+    for (Value value : quantOp.getQuantOperands())
+      types.push_back(getElementTypeOrSelf(value.getType()));
   }
 
   SmallVector<quant::UniformQuantizedType, 3> result;
@@ -167,6 +144,46 @@ LogicalResult mlir::hip::verifyQuantTypes(Operation *op, ValueRange operands) {
              << typeAttr.getValue();
   }
   return success();
+}
+
+//===----------------------------------------------------------------------===//
+// HipQuantCapableOpInterface
+//===----------------------------------------------------------------------===//
+
+namespace mlir::hip {
+#include "hip/Dialect/IR/HipQuantCapableOpInterface.cpp.inc"
+} // namespace mlir::hip
+
+SmallVector<Value> AddOp::getQuantOperands() {
+  return {getLhs(), getRhs(), getOutput()};
+}
+
+bool AddOp::supportsQuantTypes(TypeRange inputs, Type result) {
+  return supportsQElementwise(inputs, result);
+}
+
+SmallVector<Value> MatmulOp::getQuantOperands() {
+  SmallVector<Value> operands = {getA(), getB()};
+  if (getBias())
+    operands.push_back(getBias());
+  operands.push_back(getOutput());
+  return operands;
+}
+
+bool MatmulOp::supportsQuantTypes(TypeRange inputs, Type result) {
+  return supportsQMatmul(inputs, result, /*allowBias=*/true);
+}
+
+SmallVector<Value> GemmOp::getQuantOperands() {
+  SmallVector<Value> operands = {getInputA(), getInputB()};
+  if (getInputC())
+    operands.push_back(getInputC());
+  operands.push_back(getOutput());
+  return operands;
+}
+
+bool GemmOp::supportsQuantTypes(TypeRange inputs, Type result) {
+  return supportsQMatmul(inputs, result, /*allowBias=*/true);
 }
 
 //===----------------------------------------------------------------------===//

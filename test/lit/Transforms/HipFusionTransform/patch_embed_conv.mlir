@@ -77,7 +77,7 @@ func.func @qconv_wins_on_benefit(%ctx: !hip.context,
 // CHECK-LABEL: func.func @patch_embed_takes_over_without_qdq
 // CHECK-NOT:     hip.qconv
 // CHECK-NOT:     hip.conv
-// CHECK:         hip.gemm
+// CHECK:         hip.matmul
 func.func @patch_embed_takes_over_without_qdq(%ctx: !hip.context,
                                               %x: tensor<1x8x1x1xf32>,
                                               %w: tensor<4x8x1x1xf32>) -> tensor<1x4x1x1xf32> {

@@ -27,6 +27,7 @@ add_dependencies(HipDialectIR
   HipTypesIncGen
   HipDpsOpInterfaceIncGen
   HipOpStateInterfaceIncGen
+  HipQuantCapableOpInterfaceIncGen
   RuntimeAccessOpInterfaceIncGen
   HipElementMoveInterfaceIncGen
   HipOpsIncGen

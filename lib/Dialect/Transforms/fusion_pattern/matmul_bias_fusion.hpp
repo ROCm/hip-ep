@@ -9,10 +9,8 @@
 //   %m = hip.matmul(%ctx) ins(%a, %w)
 //   %y = hip.add(%ctx) ins(%m, %bias)        (either operand order)
 //
-// into one hip.matmul with the bias operand. The pattern reads only element
-// types: a float chain and a chain of quant-typed tensors take the same path,
-// and whether the fused op has a kernel is hip::supportsMatmulWithBias's
-// answer (quantized types only today).
+// into one hip.matmul with the bias operand. Float and quant-typed chains take
+// the same path; the pattern checks structure only, not kernel availability.
 //
 // For quantized types the intermediate matmul result's quantization is dropped:
 // the fused kernel accumulates, adds the bias and quantizes once.

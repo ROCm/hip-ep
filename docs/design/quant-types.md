@@ -10,7 +10,7 @@ op. So there is one `hip.add` for QDQ and float models, and a fusion written
 against `hip.add` applies to both. The types, not the op name, select the
 kernel and decide whether the kernel dequantizes/quantizes.
 
-Status: `hip.add`, `hip.matmul` and `hip.gemm`. `hip.qmul`, `hip.qconv`, ...
+Status: `hip.add`, `hip.matmul` and `hip.gemm` (`HipQuantCapableOpInterface`). `hip.qmul`, `hip.qconv`, ...
 still use the Q-specific ops and their PDLL fusions, as do the cases below that
 types cannot carry.
 
@@ -65,6 +65,20 @@ QGemmFusion.pdll), because it is not expressible as a per-tensor type:
 
 Matmul + bias Add is not fused into a gemm yet.
 
+## Quant-capable ops
+
+An op opts in through `HipQuantCapableOpInterface`
+(`include/hip/Dialect/IR/HipQuantCapableOpInterface.td`):
+
+- `getQuantOperands()` lists the tensors that carry the quantization, in
+  `quant_types` order (data inputs, optional ones only when present, then the
+  output). The interface verifier checks all-or-none quantization and, after
+  legalization, that `quant_types` matches the storage types.
+- `supportsQuantTypes(inputs, result)` is the op's kernel capability.
+
+`hip-legalize-quant-types` and lowering only go through the interface, so
+moving another op over means implementing these two methods.
+
 ## Kernel capability
 
 `hip::supportsQuantTypes(op, inputTypes, resultType)`
@@ -82,6 +96,16 @@ same `wrap_qmatmul` / `wrap_qgemm` as `hip.qmatmul` / `hip.qgemm`, so the
 kernel contract is unchanged. For `hip.matmul` / `hip.gemm`: per-tensor, A and the
 result 8 or 16 bit, B 8 bit, and gemm's bias C 8, 16 or 32 bit.
 
+## Gemm (`gemm_to_matmul.cpp`)
+
+A `hip.gemm` that is a plain matmul plus a row bias (alpha = 1; no C, or
+beta = 1 with a `[N]` / `[1, N]` C) becomes `hip.matmul` (with its bias), so
+fusions and quant types are written against one op. Other gemms stay
+`hip.gemm` and keep their own Q/DQ folds. A weight with per-channel or packed
+4-bit Q/DQ also keeps `hip.gemm`, since only `QGemmFusion.pdll` handles those.
+The rewrite is type-agnostic, so its order against the Q/DQ folds does not
+matter (`HipMatmulBiasQdqToQuantTypes` covers the converted form).
+
 ## Matmul + bias (`matmul_bias_fusion.cpp`)
 
 `hip.matmul` followed by a row-bias `hip.add` becomes one `hip.matmul` with an
@@ -94,25 +118,19 @@ bias is collapsed to `[N]`):
 ```
 
 The op keeps A's shape; its leading dims fold into the rows at lowering (a
-view, as for a batched matmul), so there is no reshape and no `hip.gemm` in
-the IR. That needs a rank-2 weight and `transA = 0` for rank > 2 A, which
-the op verifier enforces. Dynamic extents are fine.
+view, as for a batched matmul), so there is no reshape in the IR. That needs a
+rank-2 weight and `transA = 0` for rank > 2 A, which the op verifier enforces.
+Dynamic extents are fine.
 
-The pattern never asks whether the chain is quantized: it asks
-`hip::supportsMatmulWithBias` for the element types. Per-tensor quant types
-the quantized gemm kernel takes: yes (lowering calls `wrap_qgemm`). Float: no
-fused kernel yet, so a float chain is left as matmul + add and a float matmul
-with a bias fails to lower rather than dropping the bias.
+The pattern checks structure only, not kernels: float and quant-typed chains
+fuse alike. A float chain must use one element type throughout. Lowering: a
+quantized matmul with a bias calls `wrap_qgemm`, a float one `wrap_gemm`
+(hipBLASLt bias epilogue, with a `GemmState` op state).
 
 - **Intermediate quantization is dropped.** A QDQ model has a Q/DQ between the
   matmul and the bias add; the fused kernel accumulates, adds the bias and
-  quantizes once. The result is not bit-identical to the unfused chain (the
-  intermediate rounding is gone) and is more accurate.
-- The Q/DQ must first fold into types (the add and matmul folds above), and
-  the matmul and add must agree on the intermediate quant type, i.e. no
-  requantization between them.
-- Not covered: `transA` with rank > 2, and an add the quantized add kernel
-  rejects (e.g. an int32 bias against a 16-bit matmul result), which never
-  becomes a typed add.
-- `hip.gemm` still exists for ONNX Gemm; folding it into `hip.matmul` is
-  future work.
+  quantizes once. The result is not bit-identical to the unfused chain.
+- The Q/DQ must first fold into types, and the matmul and add must agree on the
+  intermediate quant type, i.e. no requantization between them.
+- Not covered: `transA` with rank > 2, and an add whose Q/DQ do not fold (e.g.
+  an int32 bias against a 16-bit matmul result).

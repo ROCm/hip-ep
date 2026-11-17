@@ -2,9 +2,9 @@
 // Licensed under the MIT License.
 
 // hip.matmul + row-bias hip.add -> hip.matmul with a bias operand. The pattern
-// reads only element types and shapes, so it does not care how the chain was
-// quantized; the capability check says whether a kernel exists (quantized types
-// only today).
+// checks structure only (shapes, single use, one float type for a float
+// chain), so float and quant-typed chains fuse alike and kernel availability
+// is not its concern.
 
 // RUN: hip-mlir-opt --hip-fusion-transform --split-input-file %s | FileCheck %s
 
@@ -144,13 +144,12 @@ func.func @rank2_trans_a(%ctx: !hip.context, %a: tensor<8x4x!quant.uniform<u16:f
 
 // -----
 
-// A 16-bit weight has no kernel (only A is split into byte planes), so the
-// capability check declines.
+// No kernel takes a 16-bit weight today; the fusion does not care.
 
-// CHECK-LABEL: func.func @w16_declined
-// CHECK:         hip.matmul
-// CHECK:         hip.add
-func.func @w16_declined(%ctx: !hip.context, %a: tensor<4x8x!quant.uniform<u16:f32, 0.25:32768>>, %w: tensor<8x6x!quant.uniform<u16:f32, 0.125:32768>>, %bias: tensor<6x!quant.uniform<u16:f32, 0.0625:32768>>)
+// CHECK-LABEL: func.func @w16_no_kernel_check
+// CHECK:         hip.matmul(%{{.*}}) ins(%{{.*}}, %{{.*}}, %{{.*}} :
+// CHECK-NOT:     hip.add
+func.func @w16_no_kernel_check(%ctx: !hip.context, %a: tensor<4x8x!quant.uniform<u16:f32, 0.25:32768>>, %w: tensor<8x6x!quant.uniform<u16:f32, 0.125:32768>>, %bias: tensor<6x!quant.uniform<u16:f32, 0.0625:32768>>)
     -> tensor<4x6x!quant.uniform<u16:f32, 1.0:32768>> {
   %e0 = tensor.empty() : tensor<4x6x!quant.uniform<u16:f32, 0.5:32768>>
   %m = hip.matmul(%ctx) ins(%a, %w : tensor<4x8x!quant.uniform<u16:f32, 0.25:32768>>, tensor<8x6x!quant.uniform<u16:f32, 0.125:32768>>)
@@ -163,19 +162,38 @@ func.func @w16_declined(%ctx: !hip.context, %a: tensor<4x8x!quant.uniform<u16:f3
 
 // -----
 
-// A float chain has no fused kernel yet, so it is left alone.
+// A float chain fuses the same way.
 
-// CHECK-LABEL: func.func @float_unfused
-// CHECK:         hip.matmul
-// CHECK:         hip.add
-func.func @float_unfused(%ctx: !hip.context, %a: tensor<4x8xf16>,
-                         %w: tensor<8x6xf16>, %bias: tensor<6xf16>)
+// CHECK-LABEL: func.func @float_fused
+// CHECK:         hip.matmul(%{{.*}}) ins(%{{.*}}, %{{.*}}, %{{.*}} : tensor<4x8xf16>, tensor<8x6xf16>, tensor<6xf16>) outs(%{{.*}} : tensor<4x6xf16>) : tensor<4x6xf16>
+// CHECK-NOT:     hip.add
+func.func @float_fused(%ctx: !hip.context, %a: tensor<4x8xf16>,
+                       %w: tensor<8x6xf16>, %bias: tensor<6xf16>)
     -> tensor<4x6xf16> {
   %e0 = tensor.empty() : tensor<4x6xf16>
   %m = hip.matmul(%ctx) ins(%a, %w : tensor<4x8xf16>, tensor<8x6xf16>)
       outs(%e0 : tensor<4x6xf16>) : tensor<4x6xf16>
   %e1 = tensor.empty() : tensor<4x6xf16>
   %y = hip.add(%ctx) ins(%m, %bias : tensor<4x6xf16>, tensor<6xf16>)
+      outs(%e1 : tensor<4x6xf16>) -> tensor<4x6xf16>
+  return %y : tensor<4x6xf16>
+}
+
+// -----
+
+// A float bias of another precision has no single meaning on the fused op.
+
+// CHECK-LABEL: func.func @mixed_float_types
+// CHECK:         hip.matmul
+// CHECK:         hip.add
+func.func @mixed_float_types(%ctx: !hip.context, %a: tensor<4x8xf16>,
+                             %w: tensor<8x6xf16>, %bias: tensor<6xf32>)
+    -> tensor<4x6xf16> {
+  %e0 = tensor.empty() : tensor<4x6xf16>
+  %m = hip.matmul(%ctx) ins(%a, %w : tensor<4x8xf16>, tensor<8x6xf16>)
+      outs(%e0 : tensor<4x6xf16>) : tensor<4x6xf16>
+  %e1 = tensor.empty() : tensor<4x6xf16>
+  %y = hip.add(%ctx) ins(%m, %bias : tensor<4x6xf16>, tensor<6xf32>)
       outs(%e1 : tensor<4x6xf16>) -> tensor<4x6xf16>
   return %y : tensor<4x6xf16>
 }

@@ -10,6 +10,7 @@ include "hip/Dialect/IR/HipDialect.td"
 include "hip/Dialect/IR/HipDpsOpInterface.td"
 include "hip/Dialect/IR/HipOpStateInterface.td"
 include "hip/Dialect/IR/HipElementMoveInterface.td"
+include "hip/Dialect/IR/HipQuantCapableOpInterface.td"
 include "hip/Dialect/IR/HipTypes.td"
 include "mlir/Interfaces/DestinationStyleOpInterface.td"
 include "mlir/Interfaces/InferTypeOpInterface.td"
@@ -794,7 +795,8 @@ def Hip_ConvTransposeOp : Hip_DpsOp_AutoReify<
 
 // Matmul reifies shapes from input dimensions in HipReifyResultShapesImpl.cpp.
 // The generated type inference reads the destination type.
-def Hip_MatmulOp : Hip_DpsOp_WithInfer<"matmul", "Output", [OpStateOpInterface]> {
+def Hip_MatmulOp : Hip_DpsOp_WithInfer<"matmul", "Output",
+    [OpStateOpInterface, DeclareOpInterfaceMethods<HipQuantCapableOpInterface>]> {
   let summary = "Matrix multiplication (supports batched N-D x N-D)";
   let description = [{
     Performs matrix multiplication: output = A @ B
@@ -881,18 +883,15 @@ def Hip_MatmulOp : Hip_DpsOp_WithInfer<"matmul", "Output", [OpStateOpInterface]>
     attr-dict (`:` type($result_tensors)^)?
   }];
 
-  // OpStateOpInterface: construct this matmul instance's per-session state
-  // (MatmulState), which holds a shared_ptr to the device-wide hipBLASLt algo
-  // table. No compile-time params — the table fills lazily per call. The
-  // construct fn stores the state into op_states[slot] itself.
+  // OpStateOpInterface: construct this matmul instance's per-session state,
+  // which holds a shared_ptr to the device-wide hipBLASLt algo table. No
+  // compile-time params — the table fills lazily per call. A float matmul with
+  // a bias lowers to wrap_gemm and so needs a GemmState instead of a
+  // MatmulState (HipDialect.cpp).
   let extraClassDeclaration = [{
     ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
                                       ::mlir::Location loc,
-                                      ::mlir::Value statePtr, int32_t slot) {
-      return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr, slot, "hipdnn_ep_op_state_construct_matmul",
-          {});
-    }
+                                      ::mlir::Value statePtr, int32_t slot);
   }];
 
   let hasVerifier = 1;
@@ -2174,7 +2173,8 @@ def Hip_StorageCastOp : Hip_Op<"storage_cast", [Pure]> {
 
 def Hip_AddOp : Hip_DpsOp_Broadcast<"add", /*operandGetters=*/["Lhs", "Rhs"],
                                     /*outsAccessor=*/"Output",
-                                    /*traits=*/[OpStateOpInterface]> {
+                                    /*traits=*/[OpStateOpInterface,
+                                                DeclareOpInterfaceMethods<HipQuantCapableOpInterface>]> {
   let summary = "Elementwise addition, float or quantized by type";
 
   // OpStateOpInterface: shared OpTensorState (see hip.mul).
@@ -5121,7 +5121,8 @@ def Hip_SparseAttentionIndexerOp : Hip_DpsOp_AutoReify<"sparse_attention_indexer
   let hasVerifier = 1;
 }
 
-def Hip_GemmOp : Hip_DpsOp_WithInfer<"gemm", "Output", [OpStateOpInterface]> {
+def Hip_GemmOp : Hip_DpsOp_WithInfer<"gemm", "Output",
+    [OpStateOpInterface, DeclareOpInterfaceMethods<HipQuantCapableOpInterface>]> {
   let summary = "General matrix multiplication (ONNX Gemm)";
   let description = [{
     Computes Y = alpha * A' * B' + beta * C, where:
@@ -5157,7 +5158,6 @@ def Hip_GemmOp : Hip_DpsOp_WithInfer<"gemm", "Output", [OpStateOpInterface]> {
     // Element types of [A, B, (C), output]; see hip.matmul.
     OptionalAttr<TypeArrayAttr>:$quant_types
   );
-  let hasVerifier = 1;
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(`
         $input_a `,` $input_b (`,` $input_c^)?

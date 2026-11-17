@@ -71,15 +71,16 @@ func.func @qgemm(%ctx: !hip.context,
 
 // -----
 
-// The bias-free form has no C, so only A, B and the result carry quant types. A
-// ui8 activation also exercises the unsigned zero-point read.
+// The bias-free gemm is a plain matmul, so it becomes hip.matmul and only A, B
+// and the result carry quant types. A ui8 activation also exercises the
+// unsigned zero-point read.
 // CHECK-LABEL: func.func @qgemm_no_bias
 // CHECK-SAME:  (%[[CTX:.*]]: !hip.context, %[[A:.*]]: tensor<16x64xui8>, %[[B:.*]]: tensor<64x8xi8>) -> tensor<16x8xui8> {
 // CHECK-NEXT:    %[[QA:.*]] = hip.storage_cast %[[A]] : tensor<16x64xui8> to tensor<16x64x!quant.uniform<u8:f32, 5.000000e-01:128>>
 // CHECK-NEXT:    %[[QB:.*]] = hip.storage_cast %[[B]] : tensor<64x8xi8> to tensor<64x8x!quant.uniform<i8:f32, 2.500000e-01:-3>>
 // CHECK-NEXT:    %[[INIT:.*]] = tensor.empty() : tensor<16x8x!quant.uniform<u8:f32, 1.250000e-01:200>>
-// CHECK-NEXT:    %[[GEMM:.*]] = hip.gemm(%[[CTX]]) ins(%[[QA]], %[[QB]] : {{.*}}) outs(%[[INIT]] : tensor<16x8x!quant.uniform<u8:f32, 1.250000e-01:200>>) : tensor<16x8x!quant.uniform<u8:f32, 1.250000e-01:200>>
-// CHECK-NEXT:    %[[OUT:.*]] = hip.storage_cast %[[GEMM]] : tensor<16x8x!quant.uniform<u8:f32, 1.250000e-01:200>> to tensor<16x8xui8>
+// CHECK-NEXT:    %[[MM:.*]] = hip.matmul(%[[CTX]]) ins(%[[QA]], %[[QB]] : {{.*}}) outs(%[[INIT]] : tensor<16x8x!quant.uniform<u8:f32, 1.250000e-01:200>>) : tensor<16x8x!quant.uniform<u8:f32, 1.250000e-01:200>>
+// CHECK-NEXT:    %[[OUT:.*]] = hip.storage_cast %[[MM]] : tensor<16x8x!quant.uniform<u8:f32, 1.250000e-01:200>> to tensor<16x8xui8>
 // CHECK-NEXT:    return %[[OUT]] : tensor<16x8xui8>
 // CHECK-NEXT:  }
 func.func @qgemm_no_bias(%ctx: !hip.context,
@@ -260,7 +261,7 @@ func.func @qgemm_per_channel_w8_no_bias(%ctx: !hip.context,
 
 // CHECK-LABEL: func.func @qgemm_int32_bias
 // CHECK:         hip.storage_cast %{{.*}} : tensor<16xi32> to tensor<16x!quant.uniform<i32:f32, 3.125000e-02>>
-// CHECK:         hip.gemm(%{{.*}}) ins({{.*}}) outs({{.*}}) {transB = 1 : i64}
+// CHECK:         hip.matmul(%{{.*}}) ins({{.*}}) outs({{.*}}) {transB = 1 : i64}
 // CHECK-NOT:     hip.quantize_linear
 func.func @qgemm_int32_bias(%ctx: !hip.context, %a: tensor<8x32xi8>,
                             %b: tensor<16x32xi8>, %c: tensor<16xi32>)
@@ -331,9 +332,10 @@ func.func @qgemm_per_tensor_w4(%ctx: !hip.context, %a: tensor<8x32xi8>,
 // -----
 
 // An int32 bias, as an ONNX quantizer emits it, keeps its 32-bit storage type.
+// alpha = beta = 1 with a row bias is a matmul with a bias.
 
 // CHECK-LABEL: func.func @gemm_int32_bias
-// CHECK:         hip.gemm(%{{.*}}) ins(%{{.*}}, %{{.*}}, %{{.*}} : tensor<4x8x!quant.uniform<i8:f32, 5.000000e-01:-1>>, tensor<8x6x!quant.uniform<i8:f32, 2.500000e-01>>, tensor<6x!quant.uniform<i32:f32, 1.250000e-01>>) outs(%{{.*}} : tensor<4x6x!quant.uniform<i8:f32, 1.000000e+00:2>>) : tensor<4x6x!quant.uniform<i8:f32, 1.000000e+00:2>>
+// CHECK:         hip.matmul(%{{.*}}) ins(%{{.*}}, %{{.*}}, %{{.*}} : tensor<4x8x!quant.uniform<i8:f32, 5.000000e-01:-1>>, tensor<8x6x!quant.uniform<i8:f32, 2.500000e-01>>, tensor<6x!quant.uniform<i32:f32, 1.250000e-01>>) outs(%{{.*}} : tensor<4x6x!quant.uniform<i8:f32, 1.000000e+00:2>>) : tensor<4x6x!quant.uniform<i8:f32, 1.000000e+00:2>>
 func.func @gemm_int32_bias(%ctx: !hip.context, %a: tensor<4x8xi8>,
                            %b: tensor<8x6xi8>, %c: tensor<6xi32>) -> tensor<4x6xi8> {
   %sa = hip.constant {value = dense<0.5> : tensor<f32>} : tensor<f32>

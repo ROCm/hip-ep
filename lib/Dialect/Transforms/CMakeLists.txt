@@ -25,6 +25,7 @@ add_library(HipDialectTransforms STATIC
   # Native C++ rewrites driven by hip-fusion-transform alongside the PDLL
   # ones. Each is a .hpp/.cpp pair so that HipFusionTransform.cpp, which
   # instantiates the driver, only ever sees their populate declarations.
+  fusion_pattern/gemm_to_matmul.cpp
   fusion_pattern/linear_attention_group_fold.cpp
   fusion_pattern/matmul_bias_fusion.cpp
   fusion_pattern/patch_embed_conv_to_gemm.cpp

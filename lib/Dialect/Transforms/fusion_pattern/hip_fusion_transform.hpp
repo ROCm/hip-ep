@@ -31,6 +31,7 @@
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/IR/HipQuantTypes.h"
 
+#include "gemm_to_matmul.hpp"
 #include "linear_attention_group_fold.hpp"
 #include "matmul_bias_fusion.hpp"
 #include "patch_embed_conv_to_gemm.hpp"
@@ -965,6 +966,11 @@ constexpr unsigned kSwigluFusionBenefit = 2;
 /// to produce the typed add this pattern reads.
 constexpr unsigned kMatmulBiasFusionBenefit = 3;
 
+/// The only pattern rooted at `hip.gemm`. The per-channel and packed 4-bit
+/// QGemm patterns it must not pre-empt are excluded by its own check, not by
+/// benefit (they root at `hip.quantize_linear`).
+constexpr unsigned kGemmToMatmulBenefit = 1;
+
 /// The only pattern rooted at `hip.linear_attention`.
 constexpr unsigned kLinearAttentionGroupFoldBenefit = 1;
 
@@ -983,6 +989,8 @@ inline mlir::LogicalResult run(mlir::ModuleOp module,
       patterns, mlir::PatternBenefit(kPatchEmbedConvToGemmBenefit));
   populateSwigluFusionPattern(patterns,
                               mlir::PatternBenefit(kSwigluFusionBenefit));
+  populateGemmToMatmulPattern(patterns,
+                              mlir::PatternBenefit(kGemmToMatmulBenefit));
   populateMatmulBiasFusionPattern(
       patterns, mlir::PatternBenefit(kMatmulBiasFusionBenefit));
   populateLinearAttentionGroupFoldPattern(

@@ -23,6 +23,14 @@
 #define GET_TYPEDEF_CLASSES
 #include "hip/Dialect/IR/HipTypes.h.inc"
 
+// Generated header for `HipQuantCapableOpInterface`. Must precede
+// HipOps.h.inc; its verifier calls verifyQuantTypes (HipQuantTypes.cpp).
+namespace mlir::hip {
+::llvm::LogicalResult verifyQuantTypes(::mlir::Operation *op,
+                                       ::mlir::ValueRange operands);
+} // namespace mlir::hip
+#include "hip/Dialect/IR/HipQuantCapableOpInterface.h.inc"
+
 // Generated header for the `HipDpsOp` C++ interface class (TableGen def
 // `HipDpsOpInterface`). Must precede HipOps.h.inc — every Hip_DpsOp's
 // generated declaration references `HipDpsOp::Trait`.

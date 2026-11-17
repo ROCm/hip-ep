@@ -71,6 +71,42 @@ Pattern HipMatmulQdqToQuantTypes with benefit(10) {
   };
 }
 
+// A matmul with a bias (from GemmToMatmul) folds like a gemm with C.
+Pattern HipMatmulBiasQdqToQuantTypes with benefit(10) {
+  let dq_a = op<hip.dequantize_linear>(ctx: Value, a: Value, _: ValueRange);
+  let dq_b = op<hip.dequantize_linear>(ctx, b: Value, _: ValueRange);
+  let dq_c = op<hip.dequantize_linear>(ctx, c: Value, _: ValueRange);
+  let matmul = op<hip.matmul>(ctx, dq_a.0, dq_b.0, dq_c.0, matmul_init: Value);
+  let q = op<hip.quantize_linear>(ctx, matmul.0, _: ValueRange)
+      -> (output_type: Type);
+
+  SupportsQuantTypesWithBias(matmul, dq_a, dq_b, dq_c, q);
+  HasSingleUseResult(matmul);
+
+  rewrite q with {
+    let a_type = GetQuantTensorType(dq_a);
+    let b_type = GetQuantTensorType(dq_b);
+    let c_type = GetQuantTensorType(dq_c);
+    let out_type = GetQuantTensorType(q);
+    let trans_a_attr =
+        ExtractHipIntAttr(matmul, attr<"\"transA\"">, attr<"0 : i64">);
+    let trans_b_attr =
+        ExtractHipIntAttr(matmul, attr<"\"transB\"">, attr<"0 : i64">);
+
+    let a_q = op<hip.storage_cast>(a) -> (a_type);
+    let b_q = op<hip.storage_cast>(b) -> (b_type);
+    let c_q = op<hip.storage_cast>(c) -> (c_type);
+    let init = BuildInit(out_type, matmul_init);
+    let qmatmul = op<hip.matmul>(ctx, a_q, b_q, c_q, init) {
+      transA = trans_a_attr,
+      transB = trans_b_attr
+    } -> (out_type);
+    let out = op<hip.storage_cast>(qmatmul) -> (output_type);
+    replace q with out;
+  };
+}
+
+// Gemms GemmToMatmul keeps (alpha or beta != 1, a non-row C).
 Pattern HipGemmQdqToQuantTypes with benefit(10) {
   let dq_a = op<hip.dequantize_linear>(ctx: Value, a: Value, _: ValueRange);
   let dq_b = op<hip.dequantize_linear>(ctx, b: Value, _: ValueRange);

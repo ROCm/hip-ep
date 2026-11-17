@@ -33,6 +33,13 @@ mlir_tablegen(HipOpStateInterface.h.inc -gen-op-interface-decls)
 mlir_tablegen(HipOpStateInterface.cpp.inc -gen-op-interface-defs)
 add_public_tablegen_target(HipOpStateInterfaceIncGen)
 
+# HipQuantCapableOpInterface: ops quantized or not by their element types.
+# Pairs with lib/Dialect/IR/HipQuantTypes.cpp, which includes the `.cpp.inc`.
+set(LLVM_TARGET_DEFINITIONS HipQuantCapableOpInterface.td)
+mlir_tablegen(HipQuantCapableOpInterface.h.inc -gen-op-interface-decls)
+mlir_tablegen(HipQuantCapableOpInterface.cpp.inc -gen-op-interface-defs)
+add_public_tablegen_target(HipQuantCapableOpInterfaceIncGen)
+
 set(LLVM_TARGET_DEFINITIONS RuntimeAccessOpInterface.td)
 mlir_tablegen(RuntimeAccessOpInterface.h.inc -gen-op-interface-decls)
 mlir_tablegen(RuntimeAccessOpInterface.cpp.inc -gen-op-interface-defs)

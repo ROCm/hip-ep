@@ -33,31 +33,31 @@ struct LegalizeQuantTypesPass
 
     // 1. Record the element types on each quant-capable op, float or
     //    quantized, so lowering reads one place to pick the kernel.
-    WalkResult result = func.walk([&](DestinationStyleOpInterface dps) {
-      Operation *op = dps.getOperation();
-      bool quantized = hasQuantizedType(op);
-      if (!quantized && !isQuantCapable(op))
+    WalkResult result = func.walk([&](Operation *op) {
+      auto quantOp = dyn_cast<HipQuantCapableOpInterface>(op);
+      if (!quantOp) {
+        if (!isa<StorageCastOp>(op) &&
+            llvm::isa<DestinationStyleOpInterface>(op) &&
+            hasQuantizedType(op)) {
+          op->emitOpError("has quantized types but is not quant-capable");
+          return WalkResult::interrupt();
+        }
         return WalkResult::advance();
+      }
       // Already legalized: the tensors no longer carry the quant types.
       if (op->hasAttr("quant_types"))
         return WalkResult::advance();
 
-      if (dps.getNumDpsInits() != 1) {
-        op->emitOpError("quantized op must have one init");
-        return WalkResult::interrupt();
-      }
-      SmallVector<Type> inputs, attrTypes;
-      for (Value value : dps.getDpsInputs())
-        if (isa<ShapedType>(value.getType()))
-          inputs.push_back(getElementTypeOrSelf(value.getType()));
-      Type output = getElementTypeOrSelf(dps.getDpsInits()[0].getType());
-      if (quantized && !supportsQuantTypes(op, inputs, output)) {
+      SmallVector<Type> types;
+      for (Value value : quantOp.getQuantOperands())
+        types.push_back(getElementTypeOrSelf(value.getType()));
+      if (hasQuantizedType(op) &&
+          !quantOp.supportsQuantTypes(ArrayRef(types).drop_back(),
+                                      types.back())) {
         op->emitOpError("has no kernel for its quantized types");
         return WalkResult::interrupt();
       }
-      attrTypes.append(inputs);
-      attrTypes.push_back(output);
-      op->setAttr("quant_types", builder.getTypeArrayAttr(attrTypes));
+      op->setAttr("quant_types", builder.getTypeArrayAttr(types));
       return WalkResult::advance();
     });
     if (result.wasInterrupted())
