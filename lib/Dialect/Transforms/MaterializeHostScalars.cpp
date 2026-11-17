@@ -261,11 +261,14 @@ collectAliasUses(Value buffer,
 /// memref.copy lowers to an async hipMemcpy and hip ops are async kernels, so
 /// a later memref.load reads the scratch before they land. Hip users count as
 /// writers whatever their operand role; a needless sync only costs time.
+/// Ordering is only proven within the allocation's block; a writer or load
+/// outside it is assumed to be ordered write-first.
 static SmallVector<memref::LoadOp>
 findLoadsAfterAsyncWrites(memref::AllocOp allocOp) {
   SmallVector<std::pair<Operation *, Value>> uses;
   collectAliasUses(allocOp.getResult(), uses);
   Block *block = allocOp->getBlock();
+  // Each writer's ancestor in `block`, or null when it lies outside it.
   SmallVector<Operation *> writers;
   for (auto [user, val] : uses) {
     auto copy = dyn_cast<memref::CopyOp>(user);
@@ -273,19 +276,16 @@ findLoadsAfterAsyncWrites(memref::AllocOp allocOp) {
                  user->getDialect()->getNamespace() == "hip" &&
                  !isa<ReadbackScalarOp, ReadbackDimOp>(user);
     if ((copy && copy.getTarget() == val) || isHip)
-      if (Operation *a = block->findAncestorOpInBlock(*user))
-        writers.push_back(a);
+      writers.push_back(block->findAncestorOpInBlock(*user));
   }
   SmallVector<memref::LoadOp> loads;
   for (auto [user, val] : uses) {
     auto load = dyn_cast<memref::LoadOp>(user);
-    if (!load || !isa<IntegerType, FloatType>(load.getType()))
+    if (!load || !isa<IntegerType, FloatType, IndexType>(load.getType()))
       continue;
     Operation *at = block->findAncestorOpInBlock(*load);
-    if (!at)
-      continue;
     if (llvm::any_of(writers, [&](Operation *w) {
-          return w == at || w->isBeforeInBlock(at);
+          return !w || !at || w == at || w->isBeforeInBlock(at);
         }))
       loads.push_back(load);
   }

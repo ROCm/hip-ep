@@ -63,3 +63,45 @@ func.func @load_before_write(%ctx: !hip.context, %x: memref<1xi64>,
       outs(%out : memref<1xi64>)
   return %v : i64
 }
+
+// -----
+
+// An index load through a view of an async-copied byte buffer must wait too.
+// CHECK-LABEL: func.func @index_load_through_view
+// CHECK: memref.copy
+// CHECK: %[[N:.*]] = memref.view %{{.*}} to memref<1xindex>
+// CHECK: %[[ELEM:.*]] = memref.subview %[[N]][%{{.*}}] [1] [1]
+// CHECK: %[[SCALAR:.*]] = memref.collapse_shape %[[ELEM]] []
+// CHECK: %[[V:.*]] = hip.readback_scalar(%{{.*}}, %[[SCALAR]] {{.*}} -> index
+// CHECK-NOT: memref.load
+// CHECK: return %[[V]]
+func.func @index_load_through_view(%ctx: !hip.context, %src: memref<8xi8>)
+    -> index {
+  %c0 = arith.constant 0 : index
+  %buf = memref.alloc() : memref<8xi8>
+  memref.copy %src, %buf : memref<8xi8> to memref<8xi8>
+  %n = memref.view %buf[%c0][] : memref<8xi8> to memref<1xindex>
+  %v = memref.load %n[%c0] : memref<1xindex>
+  return %v : index
+}
+
+// -----
+
+// Block order does not prove a load in a successor block runs before the
+// copy lands. Synchronize it.
+// CHECK-LABEL: func.func @load_in_successor
+// CHECK: memref.copy
+// CHECK: cf.br ^bb1
+// CHECK: ^bb1:
+// CHECK: %[[V:.*]] = hip.readback_scalar
+// CHECK-NOT: memref.load
+// CHECK: return %[[V]]
+func.func @load_in_successor(%ctx: !hip.context, %src: memref<1xi64>) -> i64 {
+  %c0 = arith.constant 0 : index
+  %a = memref.alloc() : memref<1xi64>
+  memref.copy %src, %a : memref<1xi64> to memref<1xi64>
+  cf.br ^bb1
+^bb1:
+  %v = memref.load %a[%c0] : memref<1xi64>
+  return %v : i64
+}
