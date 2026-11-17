@@ -140,6 +140,7 @@ the selected perfConfig string are printed only with `--verbose`.
 | `convert-onnx-to-hip` | module | Pattern-match ONNX ops by name → HIP dialect; lower both constant sweeps to policy-neutral `hip.constant`; legalize GatherBlockQuantized (INT4 packing, unsigned, quantize_axis). Pre-lowering folds run first on ONNX IR, among them the `onnx.Attention` mask fold (sliding window and key-padding bias, `AttentionWindowFold.cpp`) and the sigmoid + correction-bias QMoE routing fold (`QMoEConversion.cpp`). |
 | `hip-fold-batchnorm` | func.func | Fold an inference `hip.batch_norm` with constant parameters into the filter and bias of the `hip.conv` producing it, directly or through a `hip.add` of two convs (the shift goes into one bias). Every intermediate result must have the batch norm as its only consumer. Reads inline and file-backed constants only; a batch norm over memory-address-backed weights is left in place. |
 | `hip-externalize-constants` | module | Validate explicit serialization order, append unordered carriers deterministically, plan/serialize, then replace `hip.constant` using the existing inline/full/streaming/hybrid metadata contract. Direct threshold default: 0. |
+| `hip-fold-constant-extracts` | func.func | Resolve constant-index `tensor.extract` of vectors assembled with `tensor.insert_slice` (ONNX shape vectors) to the `from_elements` operand or integer constant element they read. |
 | `hip-infer-shapes` | module | Refine `?` dims on HIP DPS result types via `ReifyRankedShapedTypeOpInterface`. |
 | `hip-fusion-transform` | module | HIP-to-HIP rewriting at unrestricted arity (one op → many, many → one, or subgraph → subgraph). The patterns live in `lib/Dialect/Transforms/fusion_pattern/` — PDLL files compiled into the library, plus native C++ for rewrites whose shape depends on the matched op's rank — and share one `RewritePatternSet`. |
 | `hip-split-duplicate-dps-inits` | func.func | De-alias DPS init operands that CSE merged onto one `tensor.empty`, so an op that reads back its own outputs (e.g. `hip.gqa` present K/V) does not share a buffer (pre-bufferize). |
@@ -165,29 +166,38 @@ the selected perfConfig string are printed only with `--verbose`.
 Anchored on `func.func`, so the textual form needs `func.func(...)`. These run
 against HIP **tensor** IR (before bufferization) and are reached through
 `rocmlir-pipeline`. `hip-decompose-conv-transpose` also runs in the default
-ONNX-to-HIP tail; the other two do not.
+ONNX-to-HIP tail; the others do not. The fusion design is in
+[docs/design/rocmlir-fusion.md](design/rocmlir-fusion.md).
 
 | Name | Anchor | One-liner |
 |---|---|---|
 | `hip-decompose-conv-transpose` | func.func | Rewrite `hip.conv_transpose` into one stride-1 `hip.conv` per stride residue (MIOpen backward-data v4r1), reassembled with `tensor.insert_slice`. Reads the filter from an inline or file-backed `hip.constant`. Rank-3 inputs expand to a unit-height rank-4 conv so dynamic batch and width stay legal. Leaves unsupported cases (grouped, dilated, rank-4 dynamic, non-constant, memory-address-backed or non-f16/bf16/f32 weights, stride > kernel, > 64 residues) for the MIOpen path. Also runs in the ONNX-to-HIP tail, before shape inference. |
-| `hip-fuse-rocmlir` | func.func | Outline rocMLIR-eligible op groups into `rock.kernel` funcs around a gemm/convolution/attention anchor. |
+| `hip-rocmlir-prepare-quant` | func.func | Split each static 4-bit `hip.matmul_nbits` into unpack, blocked dequantize and `hip.matmul`, then sink each per-tensor `hip.quantize_linear` back through element-move ops to its dequantizes, then rebias each ui8 tree that reaches an integer anchor to i8. |
+| `hip-fuse-rocmlir-elementwise` | func.func | Group the pointwise ops, transposes, static reshapes and per-tensor quantizes and dequantizes into `hip.rocmlir_elementwise` modules that an anchor can take whole. |
+| `hip-fuse-rocmlir-anchor` | func.func | Plan an epilogue and a prologue of modules for each conv, matmul and gemm anchor, and outline each plan into a `rock.kernel` function (stamped with `rock.arch` from the `arch` option when set) behind `hip.rocmlir`. A module that no plan takes and that saves a launch becomes a `rock.elementwise` kernel; the other modules are inlined. Decomposes the QLinear ops and dequantized convs that become integer anchors, then merges gemm-elementwise-gemm pairs. |
+| `hip-inline-rocmlir-elementwise` | func.func | Put the body of each `hip.rocmlir_elementwise` back in its block. For tests and replays. |
+| `hip-rocmlir-fusion-report` | module | Append one JSON line for each kernel and host function to the `report` file. |
 | `convert-hip-to-tosa` | func.func | Lower the outlined kernel bodies from HIP ops to TOSA. |
 
-Order matters: `hip-decompose-conv-transpose` must run **before**
-`hip-fuse-rocmlir`, because rocMLIR has no transposed-convolution anchor and
-would otherwise refuse to outline the op at all. The registered pipeline runs
+Order matters: `hip-decompose-conv-transpose` must run **before** the fusion,
+because rocMLIR has no transposed-convolution anchor and would otherwise refuse
+to outline the op at all. `hip-rocmlir-prepare-quant` fixes the quantize trees
+before the elementwise pass groups them, and the anchor pass plans its kernels
+on those modules. The registered pipeline runs
 
 ```
 func.func(hip-decompose-conv-transpose)
-func.func(hip-fuse-rocmlir)
+func.func(hip-rocmlir-prepare-quant)
+func.func(hip-fuse-rocmlir-elementwise)
+func.func(hip-fuse-rocmlir-anchor)
 duplicate-function-elimination
 func.func(convert-hip-to-tosa)
 canonicalize
 ```
 
 The decomposition emits its residues already folded — the sub-filters are
-computed at pass time — so it needs no canonicalize of its own before the fuse
-pass, and none runs there.
+computed at pass time — so it needs no canonicalize of its own before the fusion
+passes, and none runs there.
 
 > The `hipsr-*` family and `convert-onnx-to-hipsr` are registered but not yet
 > tabulated here.
@@ -196,7 +206,7 @@ pass, and none runs there.
 
 | Name | Anchor | One-liner |
 |---|---|---|
-| `canonicalize` | any | Standard canonicalization. |
+| `canonicalize` | any | Standard canonicalization. The `hip.cast` patterns also fold an exact float widening, a chain of single-use element-move ops and the narrowing back into the chain on the narrow type (see [docs/design/element-move-interface.md](design/element-move-interface.md)). |
 | `cse` | any | Common-subexpression elimination. |
 | `one-shot-bufferize` | module | Tensor → memref bufferization (function boundaries, identity layout); `HIPDNN_EP_BUFFERIZE_COPY_BEFORE_WRITE=1` enables the huge-graph copy-before-write escape hatch. |
 | `buffer-deallocation-pipeline` | module | Ownership-based buffer deallocation; available to custom pipelines and characterization tests, but omitted from the built-in pipeline. |
@@ -247,6 +257,7 @@ ONNX → HIP  (buildOnnxToHipPipeline)
   func.func(hip-decompose-conv-transpose)  (rank-3 -> rank-4 hip.conv before
                                            the MIOpen lowering; rocmlir-pipeline
                                            runs the same pass in its own head)
+  func.func(hip-fold-constant-extracts)
   hip-infer-shapes
   hip-fusion-transform               (must precede externalization: its patterns
                                       read hip.constant payloads)

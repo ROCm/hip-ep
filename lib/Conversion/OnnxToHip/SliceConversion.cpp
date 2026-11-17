@@ -54,17 +54,18 @@ namespace {
 // `ends - starts` is host arithmetic over `onnx.Shape` entries, so the true
 // extent is computable without any device readback.
 //
-// The one extent that must NOT shrink is zero. The extent here is also the
-// allocation, and one consumer depends on that allocation being the upper
-// bound: FixLoopAccumulatorOffset.cpp rewrites a growing-Concat accumulator in
-// an outlined `hip.loop` body and, as its header states, "assumes ... v_init is
-// pre-sized to full capacity (the canonical `Slice(x, k, k, axis) -> Loop`
-// pattern)". `Slice(x, k, k, axis)` is the ONNX empty-tensor idiom used to seed
-// such an accumulator; its exact extent is 0, and a zero-capacity init leaves
-// the loop appending chunks into nothing -- on Qwen3.6-VL's windowed attention
+// The one extent that must NOT shrink is zero, and only when this result is
+// the allocation a loop appends into. FixLoopAccumulatorOffset.cpp rewrites a
+// growing-Concat accumulator in an outlined `hip.loop` body and, as its header
+// states, "assumes ... v_init is pre-sized to full capacity (the canonical
+// `Slice(x, k, k, axis) -> Loop` pattern)". A zero-capacity init leaves the
+// loop appending chunks into nothing -- on Qwen3.6-VL's windowed attention
 // that surfaced as `memrefCopy(rank-2 strided) failed: invalid pitch argument`,
-// because the append subview's destination pitch was 0. So an extent that
-// evaluates to zero falls back to the data dim; see buildAllocCapacity.
+// because the append subview's destination pitch was 0. A ranked result is
+// that allocation, so a zero length falls back to the data dim; see
+// buildAllocCapacity. An unranked result is never a seed: `hip.loop` requires
+// a ranked v_init, and loop outlining runs before this conversion. Consumers
+// have no other shape for it, so it always gets its exact length.
 
 /// Return the dense-elements attribute backing \p value if it can be
 /// determined at compile time. Recognizes arith constants, inspectable
@@ -336,6 +337,37 @@ static mlir::Value buildAllocCapacity(mlir::OpBuilder &b, mlir::Location loc,
   return mlir::arith::SelectOp::create(b, loc, isEmpty, dim, len);
 }
 
+/// Result type of an ONNX Slice. The importer leaves it unranked
+/// (`tensor<*xT>`) when it could not infer the shape, as in a TF
+/// `tf.slice(begin, size)` export inside a loop body. Slice never changes the
+/// rank. An axis it does not slice keeps the data dim, and a sliced axis is
+/// dynamic. When \p axes is null every axis may be sliced.
+///
+/// Nothing downstream checks an inferred dynamic extent against the slice, so
+/// a caller must give each sliced axis its exact length: SliceDecompose takes
+/// the static sizes it computed, and SliceToHip reads unresolved bounds back.
+static mlir::RankedTensorType
+inferSliceResultType(mlir::Operation *op, mlir::RankedTensorType dataType,
+                     const llvm::SmallVectorImpl<int64_t> *axes) {
+  if (auto ranked =
+          mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType()))
+    return ranked;
+  int64_t rank = dataType.getRank();
+  llvm::SmallVector<int64_t> shape(rank, mlir::ShapedType::kDynamic);
+  if (axes) {
+    llvm::SmallVector<bool> sliced(rank, false);
+    for (int64_t a : *axes) {
+      int64_t axis = a < 0 ? a + rank : a;
+      if (axis >= 0 && axis < rank)
+        sliced[axis] = true;
+    }
+    for (int64_t i = 0; i < rank; ++i)
+      if (!sliced[i])
+        shape[i] = dataType.getDimSize(i);
+  }
+  return mlir::RankedTensorType::get(shape, dataType.getElementType());
+}
+
 struct SliceDecompose : public mlir::RewritePattern {
   SliceDecompose(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Slice", /*benefit=*/2, ctx) {}
@@ -349,10 +381,8 @@ struct SliceDecompose : public mlir::RewritePattern {
 
     mlir::Value data = op->getOperand(0);
     auto dataType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
-    auto outType =
-        mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
-    if (!dataType || !outType)
-      return rewriter.notifyMatchFailure(op, "expected ranked tensor types");
+    if (!dataType)
+      return rewriter.notifyMatchFailure(op, "expected ranked data");
 
     int64_t rank = dataType.getRank();
 
@@ -377,8 +407,9 @@ struct SliceDecompose : public mlir::RewritePattern {
         axesVec.assign(attr.asArrayRef().begin(), attr.asArrayRef().end());
       }
     }
+    // ONNX: omitted axes are the leading len(starts) axes, not every axis.
     if (axesVec.empty())
-      for (int64_t i : llvm::seq<int64_t>(rank))
+      for (int64_t i : llvm::seq<int64_t>(startsVec.size()))
         axesVec.push_back(i);
 
     llvm::SmallVector<int64_t> stepsVec;
@@ -396,6 +427,9 @@ struct SliceDecompose : public mlir::RewritePattern {
     }
     if (stepsVec.empty())
       stepsVec.assign(axesVec.size(), 1);
+
+    mlir::RankedTensorType outType =
+        inferSliceResultType(op, dataType, &axesVec);
 
     if (axesVec.size() != startsVec.size() ||
         axesVec.size() != endsVec.size() || axesVec.size() != stepsVec.size())
@@ -497,6 +531,18 @@ struct SliceDecompose : public mlir::RewritePattern {
       strides[axis] = rewriter.getIndexAttr(step);
     }
 
+    // An unranked result has no declared shape to match, so it takes the sizes
+    // computed above. Keeping the inferred dynamic dims would declare `?` for
+    // a static extract_slice size, which fails verification.
+    if (!mlir::isa<mlir::RankedTensorType>(op->getResult(0).getType())) {
+      llvm::SmallVector<int64_t> shape;
+      for (mlir::OpFoldResult size : sizes) {
+        std::optional<int64_t> c = mlir::getConstantIntValue(size);
+        shape.push_back(c ? *c : mlir::ShapedType::kDynamic);
+      }
+      outType = mlir::RankedTensorType::get(shape, outType.getElementType());
+    }
+
     // Sanity check (only meaningful for static output dims): computed
     // sizes must match the IR-inferred output type. If they diverge we
     // have an unsupported corner case and should fall through to the
@@ -541,6 +587,60 @@ struct SliceDecompose : public mlir::RewritePattern {
   }
 };
 
+/// Per-data-axis start and step of a Slice whose parameters are compile-time
+/// constants over a static input, resolved with the ONNX negative-index and
+/// clamping rules that `wrap_slice` applies at run time. Returns std::nullopt
+/// unless every resolved extent equals the static result shape, so a result
+/// that is over-allocated (the `Slice(x, k, k, axis)` accumulator seed) keeps
+/// the runtime path.
+static std::optional<
+    std::pair<llvm::SmallVector<int64_t>, llvm::SmallVector<int64_t>>>
+resolveStaticSlice(mlir::RankedTensorType dataType,
+                   mlir::RankedTensorType resultType,
+                   llvm::ArrayRef<int64_t> startsVec,
+                   llvm::ArrayRef<int64_t> endsVec,
+                   llvm::ArrayRef<int64_t> axesVec,
+                   llvm::ArrayRef<int64_t> stepsVec) {
+  if (!dataType.hasStaticShape() || !resultType.hasStaticShape() ||
+      dataType.getRank() != resultType.getRank())
+    return std::nullopt;
+  const size_t k = axesVec.size();
+  if (startsVec.size() != k || endsVec.size() != k || stepsVec.size() != k)
+    return std::nullopt;
+  const int64_t rank = dataType.getRank();
+  llvm::SmallVector<int64_t> starts(rank, 0), steps(rank, 1);
+  llvm::SmallVector<int64_t> extents(dataType.getShape());
+  llvm::SmallSet<int64_t, 8> seen;
+  for (size_t i = 0; i < k; ++i) {
+    int64_t axis = axesVec[i] < 0 ? axesVec[i] + rank : axesVec[i];
+    if (axis < 0 || axis >= rank || !seen.insert(axis).second)
+      return std::nullopt;
+    const int64_t dim = dataType.getDimSize(axis);
+    const int64_t step = stepsVec[i];
+    // An empty sliced axis has no in-range start for a negative step; the
+    // runtime path handles empty inputs.
+    if (step == 0 || dim == 0)
+      return std::nullopt;
+    int64_t start = startsVec[i] < 0 ? startsVec[i] + dim : startsVec[i];
+    int64_t end = endsVec[i] < 0 ? endsVec[i] + dim : endsVec[i];
+    if (step > 0) {
+      start = std::clamp<int64_t>(start, 0, dim);
+      end = std::clamp<int64_t>(end, 0, dim);
+    } else {
+      start = std::clamp<int64_t>(start, 0, dim - 1);
+      end = std::clamp<int64_t>(end, -1, dim - 1);
+    }
+    const int64_t extent = step > 0 ? (end - start + step - 1) / step
+                                    : (end - start + step + 1) / step;
+    starts[axis] = start;
+    steps[axis] = step;
+    extents[axis] = std::max<int64_t>(extent, 0);
+  }
+  if (llvm::ArrayRef<int64_t>(extents) != resultType.getShape())
+    return std::nullopt;
+  return std::make_pair(std::move(starts), std::move(steps));
+}
+
 struct SliceToHip : public mlir::RewritePattern {
   SliceToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Slice", /*benefit=*/1, ctx) {}
@@ -568,12 +668,9 @@ struct SliceToHip : public mlir::RewritePattern {
                             ? normaliseOptional(op->getOperand(4))
                             : mlir::Value();
 
-    auto resultType =
-        mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
-    if (!resultType)
-      return rewriter.notifyMatchFailure(op, "result must be ranked tensor");
-
-    auto dataType = mlir::cast<mlir::RankedTensorType>(data.getType());
+    auto dataType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
+    if (!dataType)
+      return rewriter.notifyMatchFailure(op, "data must be ranked tensor");
 
     // Which axes are sliced, and with what step. Both must be known to compute
     // an extent; a non-constant axes/steps operand leaves every dim on the
@@ -583,9 +680,19 @@ struct SliceToHip : public mlir::RewritePattern {
     if (axes)
       haveAxes = mlir::succeeded(
           extractSliceParamVector(op, "hipdnn.slice_axes", axes, axesVec));
-    if (haveAxes && axesVec.empty())
-      for (int64_t i : llvm::seq<int64_t>(dataType.getRank()))
-        axesVec.push_back(i);
+    // ONNX: omitted axes are the leading len(starts) axes, not every axis, so
+    // the default needs a static starts length.
+    if (haveAxes && axesVec.empty()) {
+      auto startsType =
+          mlir::dyn_cast<mlir::RankedTensorType>(starts.getType());
+      if (startsType && startsType.getRank() == 1 &&
+          !startsType.isDynamicDim(0) &&
+          startsType.getDimSize(0) <= dataType.getRank())
+        for (int64_t i : llvm::seq<int64_t>(startsType.getDimSize(0)))
+          axesVec.push_back(i);
+      else
+        haveAxes = false;
+    }
     if (steps && haveAxes)
       haveAxes = mlir::succeeded(
           extractSliceParamVector(op, "hipdnn.slice_steps", steps, stepsVec));
@@ -593,6 +700,76 @@ struct SliceToHip : public mlir::RewritePattern {
       stepsVec.assign(axesVec.size(), 1);
     if (stepsVec.size() != axesVec.size())
       haveAxes = false;
+
+    // An unranked result gets its shape here, so the over-sized fallback below
+    // would not just cost performance: it would be the only shape consumers
+    // see, with a zero-filled tail. Every sliced axis needs an exact extent,
+    // read back from the device when host arithmetic cannot resolve it.
+    bool exactExtent =
+        !mlir::isa<mlir::RankedTensorType>(op->getResult(0).getType());
+    if (exactExtent) {
+      if (!haveAxes)
+        return rewriter.notifyMatchFailure(
+            op, "unranked result needs constant axes and steps");
+      if (llvm::any_of(stepsVec, [](int64_t s) { return s <= 0; }))
+        return rewriter.notifyMatchFailure(
+            op, "unranked result needs positive steps");
+      int64_t numAxes = axesVec.size();
+      auto isBoundVector = [numAxes](mlir::Value v) {
+        auto t = mlir::dyn_cast<mlir::RankedTensorType>(v.getType());
+        return t && t.getRank() == 1 && t.getDimSize(0) == numAxes &&
+               t.getElementType().isSignlessInteger();
+      };
+      if (!isBoundVector(starts) || !isBoundVector(ends))
+        return rewriter.notifyMatchFailure(
+            op, "unranked result needs integer starts and ends with one "
+                "entry per axis");
+    }
+    auto boundToHost = [&](mlir::Value bound, int64_t k) -> mlir::Value {
+      mlir::Value host = resolveHostIndex(rewriter, loc, bound, k, 0);
+      if (host || !exactExtent)
+        return host;
+      mlir::Value raw =
+          readbackShapeEntryToHost(rewriter, loc, context, bound, k);
+      return mlir::arith::IndexCastOp::create(rewriter, loc,
+                                              rewriter.getIndexType(), raw);
+    };
+
+    mlir::RankedTensorType resultType =
+        inferSliceResultType(op, dataType, haveAxes ? &axesVec : nullptr);
+
+    auto dataDim = [&](int64_t i) -> mlir::Value {
+      if (dataType.isDynamicDim(i))
+        return mlir::tensor::DimOp::create(rewriter, loc, data, i).getResult();
+      return mlir::arith::ConstantIndexOp::create(rewriter, loc,
+                                                  dataType.getDimSize(i))
+          .getResult();
+    };
+
+    // With one `Value` for both bounds and positive steps, every sliced axis
+    // is empty at compile time. There is nothing to copy, so the result is a
+    // bare tensor.empty and no hip.slice runs.
+    if (exactExtent && starts == ends) {
+      int64_t rank = dataType.getRank();
+      llvm::SmallVector<bool> sliced(rank, false);
+      for (int64_t a : axesVec) {
+        int64_t axis = a < 0 ? a + rank : a;
+        if (axis >= 0 && axis < rank)
+          sliced[axis] = true;
+      }
+      llvm::SmallVector<mlir::Value> sizes;
+      for (int64_t i = 0; i < resultType.getRank(); ++i) {
+        if (!resultType.isDynamicDim(i))
+          continue;
+        sizes.push_back(
+            sliced[i] ? mlir::arith::ConstantIndexOp::create(rewriter, loc, 0)
+                            .getResult()
+                      : dataDim(i));
+      }
+      rewriter.replaceOpWithNewOp<mlir::tensor::EmptyOp>(
+          op, resultType.getShape(), resultType.getElementType(), sizes);
+      return mlir::success();
+    }
 
     // Compute each dynamic output dim from the slice bounds where possible;
     // see the file header for why the data dim is not an acceptable substitute.
@@ -611,22 +788,24 @@ struct SliceToHip : public mlir::RewritePattern {
     // it is available. If a model does land here, revisit it -- the cost is
     // lower than it looks. Hence the debug line below: the fallback is a known
     // performance cliff, and it should be findable without an RGP capture.
+    //
+    // An unranked result separates capacity from the reported shape. A runtime
+    // length that can be zero still allocates the data dim, and an
+    // extract_slice of the exact length is what consumers see.
     llvm::SmallVector<mlir::Value> dynSizes;
+    llvm::SmallVector<mlir::OpFoldResult> exactSizes;
+    bool needsExactView = false;
     for (int64_t i = 0; i < resultType.getRank(); ++i) {
-      if (!resultType.isDynamicDim(i))
+      if (!resultType.isDynamicDim(i)) {
+        exactSizes.push_back(rewriter.getIndexAttr(resultType.getDimSize(i)));
         continue;
+      }
       if (i >= dataType.getRank())
         return rewriter.notifyMatchFailure(
             op, "result rank exceeds data rank — invalid Slice");
 
-      mlir::Value dim =
-          dataType.isDynamicDim(i)
-              ? mlir::tensor::DimOp::create(rewriter, loc, data, i).getResult()
-              : mlir::arith::ConstantIndexOp::create(rewriter, loc,
-                                                     dataType.getDimSize(i))
-                    .getResult();
-
-      mlir::Value extent;
+      mlir::Value dim = dataDim(i);
+      mlir::Value extent, exact;
       // An axis `axes` does not name is not sliced at all, so the data dim is
       // its exact extent rather than a fallback. Only an axis this op really
       // slices can land on the upper bound, so only that is worth reporting --
@@ -645,17 +824,18 @@ struct SliceToHip : public mlir::RewritePattern {
           // One `Value` for both bounds is `Slice(x, k, k, axis)` spelled the
           // way exporters emit it, so the length is zero without resolving
           // anything. Take the data dim directly rather than emitting the
-          // arithmetic and the select that would fold back to it.
+          // arithmetic and the select that would fold back to it. Only a
+          // ranked result gets here; the unranked case returned above.
           if (starts == ends) {
             emptyAccumulatorSeed = true;
             break;
           }
-          mlir::Value s = resolveHostIndex(rewriter, loc, starts, k, 0);
-          mlir::Value e = resolveHostIndex(rewriter, loc, ends, k, 0);
-          if (s && e)
-            extent = buildAllocCapacity(
-                rewriter, loc, dim,
-                buildSliceExtent(rewriter, loc, dim, s, e, stepsVec[k]));
+          mlir::Value s = boundToHost(starts, k);
+          mlir::Value e = boundToHost(ends, k);
+          if (s && e) {
+            exact = buildSliceExtent(rewriter, loc, dim, s, e, stepsVec[k]);
+            extent = buildAllocCapacity(rewriter, loc, dim, exact);
+          }
           break;
         }
       }
@@ -667,14 +847,41 @@ struct SliceToHip : public mlir::RewritePattern {
                       "bound rather than the slice length -- "
                    << *op << "\n");
       dynSizes.push_back(extent ? extent : dim);
+      exactSizes.push_back(exact ? exact : (extent ? extent : dim));
+      needsExactView |= exactExtent && exact;
     }
     mlir::Value init =
         mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
                                       resultType.getElementType(), dynSizes);
 
-    auto hipOp = mlir::hip::SliceOp::create(rewriter, loc, context, data,
-                                            starts, ends, axes, steps, init);
-    rewriter.replaceOp(op, hipOp->getResult(0));
+    auto hipOp = mlir::hip::SliceOp::create(
+        rewriter, loc, context, data, starts, ends, axes, steps, init,
+        /*static_starts=*/nullptr, /*static_steps=*/nullptr);
+    llvm::SmallVector<int64_t> startsVec, endsVec;
+    if (haveAxes &&
+        mlir::succeeded(extractSliceParamVector(op, "hipdnn.slice_starts",
+                                                starts, startsVec)) &&
+        mlir::succeeded(
+            extractSliceParamVector(op, "hipdnn.slice_ends", ends, endsVec))) {
+      if (auto resolved = resolveStaticSlice(dataType, resultType, startsVec,
+                                             endsVec, axesVec, stepsVec)) {
+        hipOp.setStaticStartsAttr(
+            rewriter.getDenseI64ArrayAttr(resolved->first));
+        hipOp.setStaticStepsAttr(
+            rewriter.getDenseI64ArrayAttr(resolved->second));
+      }
+    }
+    mlir::Value result = hipOp->getResult(0);
+    if (needsExactView) {
+      int64_t rank = resultType.getRank();
+      llvm::SmallVector<mlir::OpFoldResult> offsets(rank,
+                                                    rewriter.getIndexAttr(0));
+      llvm::SmallVector<mlir::OpFoldResult> strides(rank,
+                                                    rewriter.getIndexAttr(1));
+      result = mlir::tensor::ExtractSliceOp::create(
+          rewriter, loc, resultType, result, offsets, exactSizes, strides);
+    }
+    rewriter.replaceOp(op, result);
     return mlir::success();
   }
 };

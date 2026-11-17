@@ -19,7 +19,9 @@
 #include <unordered_map>
 
 static constexpr int kBlock = 256;
-static constexpr int kMaxK = 16;
+static constexpr int kMaxK = 32;
+static_assert(kMaxK <= 32, "topk_routing_wave_kernel keeps selected expert i "
+                           "in lane i of a 32-lane group");
 // topk_routing runs one block per token with this many threads; per-expert exp
 // values are staged in dynamic shared memory sized num_experts at launch, so
 // there is no compile-time cap on the expert count.
@@ -748,8 +750,15 @@ extern "C" int hip_qmoe_topk_routing(
             (long long)element_size_bytes);
     return -1;
   }
+  if (k > kMaxK) {
+    fprintf(stderr,
+            "[custom_kernels] hip_qmoe_topk_routing: k=%lld > %d not "
+            "supported\n",
+            (long long)k, kMaxK);
+    return -1;
+  }
   (void)hipGetLastError();
-  if (num_experts <= 256 && k <= kMaxK && k <= num_experts) {
+  if (num_experts <= 256 && k <= num_experts) {
     // One 32-lane group per token, up to 8 experts per lane. With
     // k > num_experts the argmax would pick padding lanes, whose indices lie
     // past num_experts; the block kernel keeps every index in range.
@@ -1135,71 +1144,101 @@ extern "C" int hip_qmoe_bucket_tokens_ragged(
 }
 
 // ---------------------------------------------------------------------------
-// Device-side row tiles for the grouped expert GEMM. Experts with
-// 0 < count <= split_rows get tiles of rows_small rows, larger ones tiles of
-// rows_big, each as (expert, row0, rows) in ascending expert order. Counts are
-// staged in LDS so the serial scan on thread 0 never waits on global memory.
+// Device-side row tiles for the grouped expert GEMMs. Class c takes the
+// experts with lo[c] < count <= hi[c] (hi[c] < 0: no upper bound) and cuts
+// each into tiles of rows[c] rows, written as (expert, row0, rows) in
+// ascending expert order. Classes may overlap, so one launch can tile the
+// same experts at two heights for two GEMMs. Counts are staged in LDS, and
+// thread c runs class c's serial scan so the classes scan concurrently.
 // ---------------------------------------------------------------------------
+static constexpr int kMaxRowTileClasses = HIP_QMOE_MAX_ROW_TILE_CLASSES;
+
+struct RowTileClasses {
+  int n;
+  int lo[kMaxRowTileClasses];
+  int hi[kMaxRowTileClasses];
+  int rows[kMaxRowTileClasses];
+  int32_t* tiles[kMaxRowTileClasses];
+  int32_t* num[kMaxRowTileClasses];
+};
+
+__device__ __forceinline__ bool row_tile_class_has(const RowTileClasses& rc,
+                                                   int cls, int count) {
+  return count > rc.lo[cls] && (rc.hi[cls] < 0 || count <= rc.hi[cls]);
+}
+
 __global__ void qmoe_build_row_tiles_kernel(
-    const int32_t* __restrict__ expert_counts, int num_experts, int split_rows,
-    int rows_small, int rows_big, int32_t* __restrict__ tiles_small,
-    int32_t* __restrict__ num_small, int32_t* __restrict__ tiles_big,
-    int32_t* __restrict__ num_big) {
-  extern __shared__ int32_t tile_base[];  // [2][num_experts]
+    const int32_t* __restrict__ expert_counts, int num_experts,
+    RowTileClasses rc) {
+  extern __shared__ int32_t tile_base[];  // [rc.n][num_experts], then counts
+  int32_t* counts = tile_base + rc.n * num_experts;
   for (int e = threadIdx.x; e < num_experts; e += blockDim.x) {
     const int c = expert_counts[e];
-    tile_base[e] = (c > 0 && c <= split_rows) ? (c + rows_small - 1) / rows_small : 0;
-    tile_base[num_experts + e] = c > split_rows ? (c + rows_big - 1) / rows_big : 0;
+    counts[e] = c;
+    for (int cls = 0; cls < rc.n; cls++)
+      tile_base[cls * num_experts + e] =
+          row_tile_class_has(rc, cls, c) ? (c + rc.rows[cls] - 1) / rc.rows[cls]
+                                         : 0;
   }
   __syncthreads();
-  if (threadIdx.x == 0) {
-    int s = 0, b = 0;
+  if (static_cast<int>(threadIdx.x) < rc.n) {
+    int32_t* base = tile_base + threadIdx.x * num_experts;
+    int total = 0;
     for (int e = 0; e < num_experts; e++) {
-      const int ns = tile_base[e], nb = tile_base[num_experts + e];
-      tile_base[e] = s;
-      tile_base[num_experts + e] = b;
-      s += ns;
-      b += nb;
+      const int nt = base[e];
+      base[e] = total;
+      total += nt;
     }
-    *num_small = s;
-    *num_big = b;
+    *rc.num[threadIdx.x] = total;
   }
   __syncthreads();
   for (int e = threadIdx.x; e < num_experts; e += blockDim.x) {
-    const int c = expert_counts[e];
-    if (c <= 0) continue;
-    const bool small = c <= split_rows;
-    const int rows = small ? rows_small : rows_big;
-    int32_t* out = (small ? tiles_small : tiles_big) +
-                   3 * tile_base[(small ? 0 : num_experts) + e];
-    for (int r0 = 0; r0 < c; r0 += rows, out += 3) {
-      out[0] = e;
-      out[1] = r0;
-      out[2] = min(rows, c - r0);
+    const int c = counts[e];
+    for (int cls = 0; cls < rc.n; cls++) {
+      if (!row_tile_class_has(rc, cls, c)) continue;
+      const int rows = rc.rows[cls];
+      int32_t* out = rc.tiles[cls] + 3 * tile_base[cls * num_experts + e];
+      for (int r0 = 0; r0 < c; r0 += rows, out += 3) {
+        out[0] = e;
+        out[1] = r0;
+        out[2] = min(rows, c - r0);
+      }
     }
   }
 }
 
-extern "C" int hip_qmoe_build_row_tiles(
+extern "C" int hip_qmoe_build_row_tile_classes(
     void* stream, const void* expert_counts, int64_t num_experts,
-    int64_t split_rows, int64_t rows_small, int64_t rows_big, void* tiles_small,
-    void* num_small, void* tiles_big, void* num_big) {
-  if (num_experts <= 0 || split_rows < 0 || rows_small <= 0 || rows_big <= 0)
+    int64_t num_classes, const int64_t* lo, const int64_t* hi,
+    const int64_t* rows, void* const* tiles, void* num_tiles) {
+  if (num_experts <= 0 || num_classes <= 0 ||
+      num_classes > kMaxRowTileClasses || !lo || !hi || !rows || !tiles ||
+      !num_tiles)
     return -1;
+  RowTileClasses rc{};
+  rc.n = static_cast<int>(num_classes);
+  for (int c = 0; c < rc.n; c++) {
+    if (lo[c] < 0 || rows[c] <= 0 || (hi[c] >= 0 && hi[c] <= lo[c]) ||
+        !tiles[c])
+      return -1;
+    rc.lo[c] = static_cast<int>(lo[c]);
+    rc.hi[c] = static_cast<int>(hi[c]);
+    rc.rows[c] = static_cast<int>(rows[c]);
+    rc.tiles[c] = static_cast<int32_t*>(tiles[c]);
+    rc.num[c] = static_cast<int32_t*>(num_tiles) + c;
+  }
   hipStream_t s = static_cast<hipStream_t>(stream);
-  const size_t shmem = 2 * static_cast<size_t>(num_experts) * sizeof(int32_t);
+  const size_t shmem =
+      (num_classes + 1) * static_cast<size_t>(num_experts) * sizeof(int32_t);
+  if (shmem > 65536) return -1;
   (void)hipGetLastError();
   hipLaunchKernelGGL(qmoe_build_row_tiles_kernel, dim3(1), dim3(kBlock), shmem,
                      s, static_cast<const int32_t*>(expert_counts),
-                     static_cast<int>(num_experts), static_cast<int>(split_rows),
-                     static_cast<int>(rows_small), static_cast<int>(rows_big),
-                     static_cast<int32_t*>(tiles_small),
-                     static_cast<int32_t*>(num_small),
-                     static_cast<int32_t*>(tiles_big),
-                     static_cast<int32_t*>(num_big));
+                     static_cast<int>(num_experts), rc);
   hipError_t err = hipGetLastError();
   if (err != hipSuccess)
-    fprintf(stderr, "[custom_kernels] hip_qmoe_build_row_tiles failed: %s\n",
+    fprintf(stderr,
+            "[custom_kernels] hip_qmoe_build_row_tile_classes failed: %s\n",
             hipGetErrorString(err));
   return static_cast<int>(err);
 }
@@ -2409,6 +2448,137 @@ __global__ void qmoe_decode_fc2_dp4a_kernel(
   }
 }
 
+// Partial dp4a dot products of TN consecutive rows of one expert against one
+// quantized activation row, for lane `sl` of an LPR-lane segment, reduced
+// across the segment (lane 0 holds the row sums).
+template <int TN, int LPR>
+__device__ __forceinline__ void qmoe_dp4a_segment_rows(
+    const int8_t* __restrict__ aq, const float* __restrict__ as,
+    const uint8_t* __restrict__ W, const __half* __restrict__ S,
+    const uint8_t* __restrict__ Z, int row0, int N, int K, int n_blk,
+    int bs_shift, int sl, float (&part)[TN]) {
+  const size_t row_bytes = static_cast<size_t>(K) / 2;
+  const int zp_stride = (n_blk + 1) / 2;
+  const uint8_t* Wr[TN];
+  const __half*  Sr[TN];
+  const uint8_t* Zr[TN];
+#pragma unroll
+  for (int t = 0; t < TN; t++) {
+    const int n  = row0 + t;
+    const int sn = (n < N) ? n : 0;
+    Wr[t] = W + static_cast<size_t>(sn) * row_bytes;
+    Sr[t] = S + static_cast<size_t>(sn) * n_blk;
+    Zr[t] = Z ? Z + static_cast<size_t>(sn) * zp_stride : nullptr;
+    part[t] = 0.0f;
+  }
+  const int num_u = K / 32;
+  for (int u = sl; u < num_u; u += LPR) {
+    const int grp = (u * 32) >> bs_shift;
+    const float a_sc = as[grp];
+    const int8_t* ap = aq + static_cast<size_t>(u) * 32;
+    int a_lo[4], a_hi[4];
+    int a_sum = 0;
+#pragma unroll
+    for (int j = 0; j < 4; j++) {
+      a_lo[j] = *reinterpret_cast<const int*>(ap + j * 8);
+      a_hi[j] = *reinterpret_cast<const int*>(ap + j * 8 + 4);
+      a_sum = hipdnn_sudot4(a_lo[j], 0x01010101, a_sum);
+      a_sum = hipdnn_sudot4(a_hi[j], 0x01010101, a_sum);
+    }
+#pragma unroll
+    for (int t = 0; t < TN; t++) {
+      const uint4 b = *reinterpret_cast<const uint4*>(Wr[t] + static_cast<size_t>(u) * 16);
+      const unsigned comp[4] = {b.x, b.y, b.z, b.w};
+      int dot = 0;
+#pragma unroll
+      for (int j = 0; j < 4; j++) {
+        dot = hipdnn_sudot4(a_lo[j], static_cast<int>(comp[j] & 0x0F0F0F0Fu), dot);
+        dot = hipdnn_sudot4(a_hi[j], static_cast<int>((comp[j] >> 4) & 0x0F0F0F0Fu), dot);
+      }
+      const float sv = static_cast<float>(Sr[t][grp]);
+      int zv = 8;
+      if (Zr[t]) {
+        const uint8_t zb = Zr[t][grp >> 1];
+        zv = static_cast<int>((grp & 1) ? (zb >> 4) : (zb & 0x0F));
+      }
+      part[t] += a_sc * sv * static_cast<float>(dot - a_sum * zv);
+    }
+  }
+#pragma unroll
+  for (int t = 0; t < TN; t++)
+    for (int off = LPR >> 1; off > 0; off >>= 1)
+      part[t] += __shfl_down(part[t], off, LPR);
+}
+
+// FC2 (dp4a) fused with the k-slot reduction. A block owns TN output rows of
+// one token (blockIdx.y); its BS/LPR segments of LPR lanes (LPR <= 32, so a
+// segment never spans waves) split that token's k expert slots, each segment
+// walking K = inter in LPR-unit strides, and the segments sum wt * (dot + b)
+// through LDS before one fp16 store per row. Against fc2_dp4a + reduce this
+// drops the fp32 slot_buf round trip and one launch. The per-slot math
+// matches qmoe_decode_fc2_dp4a_kernel.
+template <int BS, int TN, int LPR>
+__global__ void __launch_bounds__(BS) qmoe_decode_fc2_reduce_dp4a_kernel(
+    const int8_t*  __restrict__ a_qb,            // [T*k, inter] deinterleaved int8
+    const float*   __restrict__ a_scale,         // [T*k, n_blk_mid]
+    const int32_t* __restrict__ expert_indices,  // [T*k]
+    const __half*  __restrict__ expert_weights,  // [T*k]
+    const uint8_t* __restrict__ fc2_w,           // [E, hidden, inter/2]
+    const __half*  __restrict__ fc2_s,           // [E, hidden, n_blk_mid]
+    const uint8_t* __restrict__ fc2_zp_packed,   // [E, hidden, ceil/2] or null
+    const __half*  __restrict__ fc2_b,           // [E, hidden] or null
+    __half*        __restrict__ output,          // [T, hidden]
+    int inter, int hidden, int n_blk_mid, int block_size, int k) {
+  static_assert(LPR == 16 || LPR == 32, "segment is 16 or 32 lanes");
+  static_assert(BS % LPR == 0, "block is whole segments");
+  constexpr int NSEG = BS / LPR;
+  const int tid  = threadIdx.x;
+  const int seg  = tid / LPR;
+  const int sl   = tid % LPR;
+  const int tok  = blockIdx.y;
+  const int row0 = blockIdx.x * TN;
+  const int bs_shift = __builtin_ctz(static_cast<unsigned>(block_size));
+  const size_t expert_w = static_cast<size_t>(hidden) * (inter / 2);
+  const size_t expert_s = static_cast<size_t>(hidden) * n_blk_mid;
+  const size_t expert_z = static_cast<size_t>(hidden) * ((n_blk_mid + 1) / 2);
+
+  float acc[TN];
+#pragma unroll
+  for (int t = 0; t < TN; t++) acc[t] = 0.0f;
+  for (int j = seg; j < k; j += NSEG) {
+    const int slot = tok * k + j;
+    const int E = expert_indices[slot];
+    float part[TN];
+    qmoe_dp4a_segment_rows<TN, LPR>(
+        a_qb + static_cast<size_t>(slot) * inter,
+        a_scale + static_cast<size_t>(slot) * n_blk_mid, fc2_w + E * expert_w,
+        fc2_s + E * expert_s, fc2_zp_packed ? fc2_zp_packed + E * expert_z : nullptr,
+        row0, hidden, inter, n_blk_mid, bs_shift, sl, part);
+    if (sl == 0) {
+      const float wt = static_cast<float>(expert_weights[slot]);
+#pragma unroll
+      for (int t = 0; t < TN; t++) {
+        const int n = row0 + t;
+        float v = part[t];
+        if (fc2_b && n < hidden) v += static_cast<float>(fc2_b[static_cast<size_t>(E) * hidden + n]);
+        acc[t] += wt * v;
+      }
+    }
+  }
+  __shared__ float seg_sums[NSEG * TN];
+  if (sl == 0) {
+#pragma unroll
+    for (int t = 0; t < TN; t++) seg_sums[seg * TN + t] = acc[t];
+  }
+  __syncthreads();
+  if (tid < TN && row0 + tid < hidden) {
+    float v = 0.0f;
+#pragma unroll
+    for (int g = 0; g < NSEG; g++) v += seg_sums[g * TN + tid];
+    output[static_cast<size_t>(tok) * hidden + row0 + tid] = static_cast<__half>(v);
+  }
+}
+
 template <int BS, int TN>
 static hipError_t launch_qmoe_fc1_dp4a(
     hipStream_t s, int k, int fusion_inter, const void* a_qb,
@@ -2495,6 +2665,30 @@ static hipError_t dispatch_qmoe_fc2_dp4a(
       n_blk_mid, block_size);
 }
 
+template <int BS, int TN, int LPR>
+static hipError_t launch_qmoe_fc2_reduce_dp4a(
+    hipStream_t s, int tokens, int k, const void* a_qb, const void* a_scale,
+    const void* expert_indices, const void* expert_weights,
+    const void* fc2_weights, const void* fc2_scales,
+    const void* fc2_zero_points, const void* fc2_bias, void* output,
+    int inter_size, int hidden_size, int n_blk_mid, int block_size) {
+  dim3 grid(static_cast<unsigned>((hidden_size + TN - 1) / TN),
+            static_cast<unsigned>(tokens));
+  (void)hipGetLastError();
+  hipLaunchKernelGGL(
+      HIP_KERNEL_NAME(qmoe_decode_fc2_reduce_dp4a_kernel<BS, TN, LPR>), grid,
+      dim3(BS), 0, s, static_cast<const int8_t*>(a_qb),
+      static_cast<const float*>(a_scale),
+      static_cast<const int32_t*>(expert_indices),
+      static_cast<const __half*>(expert_weights),
+      static_cast<const uint8_t*>(fc2_weights),
+      static_cast<const __half*>(fc2_scales),
+      static_cast<const uint8_t*>(fc2_zero_points),
+      static_cast<const __half*>(fc2_bias), static_cast<__half*>(output),
+      inter_size, hidden_size, n_blk_mid, block_size, k);
+  return hipGetLastError();
+}
+
 // Separate online-autotune state for the dp4a kernels (their per-config
 // ranking differs from the fp path; sharing keys would cross-contaminate).
 static std::unordered_map<uint64_t, QmoeTuneState> g_qmoe_fc1_dp4a_state;
@@ -2570,14 +2764,22 @@ extern "C" int hip_qmoe_decode_fused_dp4a(
     }
   }
 
-  // FC1 + SwiGLU (dp4a), online-autotuned. N=fusion_inter, K=hidden.
+  // Single-token calls run fixed configs: FC1 (128, 4) and the fused
+  // FC2 + reduce kernel (128, 2, 32), the fastest or tied for fastest
+  // in-model on the shapes measured. They skip the online tuner, which times
+  // one call per sample and in-model locked FC1/FC2 configs that were slower
+  // in steady state. Multi-token calls keep the online tuner.
+  const bool single = (T == 1);
+
+  // FC1 + SwiGLU (dp4a). N=fusion_inter, K=hidden.
   int s1 = -1;
   const uint64_t key1 =
       qmoe_cfg_key(fusion_inter, static_cast<int>(hidden_size),
                    4,
                    static_cast<int>(block_size), fc1_zero_points != nullptr) ^
       burst_key;
-  const QmoeCfg c1 = qmoe_tune_pick(g_qmoe_fc1_dp4a_state, key1, &s1);
+  const QmoeCfg c1 = single ? QmoeCfg{128, 4}
+                            : qmoe_tune_pick(g_qmoe_fc1_dp4a_state, key1, &s1);
   {
     hipEvent_t me0 = nullptr, me1 = nullptr;
     if (s1 >= 0) { hipEventCreate(&me0); hipEventCreate(&me1); hipEventRecord(me0, s); }
@@ -2617,6 +2819,20 @@ extern "C" int hip_qmoe_decode_fused_dp4a(
               hipGetErrorString(e));
       return static_cast<int>(e);
     }
+  }
+
+  if (single) {
+    hipError_t e = launch_qmoe_fc2_reduce_dp4a<128, 2, 32>(
+        s, T, static_cast<int>(k), a_qb_mid, a_scale_mid, expert_indices,
+        expert_weights, fc2_weights, fc2_scales, fc2_zero_points, fc2_bias,
+        output, static_cast<int>(inter_size), static_cast<int>(hidden_size),
+        n_blk_mid, static_cast<int>(block_size));
+    if (e != hipSuccess) {
+      fprintf(stderr, "[custom_kernels] qmoe_decode_fc2_reduce_dp4a failed: %s\n",
+              hipGetErrorString(e));
+      return static_cast<int>(e);
+    }
+    return 0;
   }
 
   // FC2 (dp4a) + routing-weighted write, online-autotuned. N=hidden, K=inter.

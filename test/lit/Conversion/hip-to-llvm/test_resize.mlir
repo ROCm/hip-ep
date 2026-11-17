@@ -199,4 +199,24 @@ module {
     // CHECK: llvm.call @wrap_resize_scaled
     return
   }
+
+  // Test 10: runtime window scales are passed through in window order; the
+  // unused third slot is 0.
+  func.func @resize_runtime_scales_f32(
+      %ctx: !hip.context, %sh: f64, %sw: f64,
+      %x: memref<1x256x?x?xf32, 1>,
+      %y: memref<1x256x?x?xf32, 1>) {
+    // CHECK-LABEL: llvm.func @resize_runtime_scales_f32
+    // CHECK-SAME: %[[SH:[^:]+]]: f64, %[[SW:[^:]+]]: f64
+    hip.resize(%ctx) ins(%x : memref<1x256x?x?xf32, 1>)
+                     scales(%sh, %sw : f64, f64)
+                     outs(%y : memref<1x256x?x?xf32, 1>)
+                     {mode = 0, coord_transform = 0, nearest_mode = 0,
+                      prefix_count = 2, spatial_rank = 2}
+    // CHECK: %[[ZERO:.*]] = llvm.mlir.constant(0.000000e+00 : f64) : f64
+    // CHECK: llvm.call @wrap_resize_scaled(
+    // CHECK-SAME: %[[SH]], %[[SW]], %[[ZERO]])
+    // CHECK-NOT: hip.resize
+    return
+  }
 }

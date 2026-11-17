@@ -19,20 +19,18 @@
 
 #include <cstdio>
 
+// The kernel only copies elements, so every element type reuses the integer
+// instantiation of the same width.
 static int expand_hipdnn_to_hip_dtype(int64_t hipdnn_type) {
-  switch (hipdnn_type) {
-  case HIPDNN_EP_DATATYPE_HALF:
-    return HIP_DTYPE_FLOAT16;
-  case HIPDNN_EP_DATATYPE_FLOAT:
-    return HIP_DTYPE_FLOAT32;
-  case HIPDNN_EP_DATATYPE_INT32:
-    return HIP_DTYPE_INT32;
-  case HIPDNN_EP_DATATYPE_INT64:
-    return HIP_DTYPE_INT64;
-  // Equal→Expand on embedding masks uses ui8; broadcast is bitwise-identical
-  // to i8 (no arithmetic), so reuse the int8 kernel instantiation.
-  case HIPDNN_EP_DATATYPE_UINT8:
+  switch (hipdnn_ep_datatype_size(hipdnn_type)) {
+  case 1:
     return HIP_DTYPE_INT8;
+  case 2:
+    return HIP_DTYPE_INT16;
+  case 4:
+    return HIP_DTYPE_INT32;
+  case 8:
+    return HIP_DTYPE_INT64;
   default:
     return -1;
   }
@@ -70,7 +68,7 @@ int wrap_expand(RuntimeState *state, void *input, void *shape, void *output,
   if (hip_dtype < 0) {
     fprintf(stderr,
             "[REAL] wrap_expand: unsupported data_type=%s(%lld) "
-            "(supported: f16, f32, i32, i64)\n",
+            "(supported element sizes: 1, 2, 4, 8 bytes)\n",
             hipdnn_ep_datatype_name(data_type), (long long)data_type);
     return -1;
   }
