@@ -61,6 +61,59 @@ Each CoreLib model library (`ryzenai_corelib_model_<name>.dll`) must sit beside
 kernels are linked into its library, so no kernel store is needed. XRT
 normally comes from the NPU driver.
 
+### Matching the CoreLib version on the target machine
+
+Because `hipgpu.dll` and `ryzenai_corelib.dll` must be built against the same
+CoreLib headers (see version compatibility note in the reviewer notes), find
+the CoreLib version already deployed on the target machine before building:
+
+```bat
+ryzenai_corelib.dll --version        rem if the DLL exposes a CLI
+```
+
+or inspect the DLL directly:
+
+```bat
+powershell -command "(Get-Item ryzenai_corelib.dll).VersionInfo.ProductVersion"
+```
+
+Then check out the matching tag in the `ryzenai-corelib` repo, set
+`RYZENAICORELIB_ROOT` to its install tree, and build.
+
+### Rebuilding hipgpu.dll after a CoreLib version change
+
+A CoreLib version bump requires only `hipgpu.dll` to be rebuilt — not a full
+hip-ep build. The `hipdnn-ep-corelib` static library embeds the version at
+compile time; touching its source forces the recompile:
+
+```bat
+rem 1. Save the previous hipgpu.dll under a versioned name
+copy "install-corelib-gfx1170\bin\hipgpu.dll" ^
+     "install-corelib-gfx1170\bin\hipgpu-corelib-0.90.1.dll"
+
+rem 2. Force recompile of ryzenaicorelib_model.cpp against the new headers
+copy /b hip-ep\lib\Runtime\real\ryzenaicorelib_model.cpp +,,
+
+rem 3. Find the hipgpu.dll CMake target name (changes with git commit hash)
+cmake --build build\hip-ep-corelib-gfx1170 --config Release ^
+      --target help 2>&1 | findstr MORPHIZEN_EP_TARGET
+
+rem 4. Rebuild only hipgpu.dll
+cmake --build build\hip-ep-corelib-gfx1170 --config Release --parallel 8 ^
+      --target morphizen-core-dynamic-<hash from step 3>
+
+rem 5. Install
+cmake --install build\hip-ep-corelib-gfx1170 --config Release
+```
+
+If `RYZENAICORELIB_ROOT` itself changed (the new version is in a different
+directory), reconfigure before step 4:
+
+```bat
+cmake -S hip-ep -B build\hip-ep-corelib-gfx1170 ^
+      -DRYZENAICORELIB_ROOT=<new-path>
+```
+
 ## How a model is matched
 
 The level-1 pass (`backend-mlir-compiler/level-1-pass/src/pass_main.cpp`) takes
