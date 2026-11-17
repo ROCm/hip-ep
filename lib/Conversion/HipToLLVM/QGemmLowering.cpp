@@ -258,11 +258,13 @@ struct QGemmLowering : public ConvertOpToLLVMPattern<OpTy> {
     // are the logical extents either way, and the kernel gets the flags so it
     // can pick the matching load stride.
     Value M, K;
-    if (spec->foldLeadingDims) {
-      int64_t aRank = AType.getRank();
-      if (BType.getRank() != 2 || (aRank > 2 && transA))
-        return rewriter.notifyMatchFailure(
-            op, "bias needs a rank-2 B and transA = 0 for rank > 2 A");
+    int64_t aRank = AType.getRank();
+    if (spec->foldLeadingDims &&
+        (BType.getRank() != 2 || (aRank > 2 && transA)))
+      return rewriter.notifyMatchFailure(
+          op, "bias needs a rank-2 B and transA = 0 for rank > 2 A");
+    // A rank-2 A has nothing to fold and takes the transA-aware path below.
+    if (spec->foldLeadingDims && aRank > 2) {
       M = getMemRefDimSize(AType, 0, spec->a, rewriter, loc);
       for (int64_t i : llvm::seq<int64_t>(1, aRank - 1))
         M = LLVM::MulOp::create(

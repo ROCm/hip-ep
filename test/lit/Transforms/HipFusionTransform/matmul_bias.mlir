@@ -124,6 +124,26 @@ func.func @rank3_trans_a(%ctx: !hip.context, %a: tensor<2x8x4x!quant.uniform<u16
 
 // -----
 
+// A rank-2 A with transA has no leading dims to fold, so it fuses; the lowering
+// reads M and K through transA.
+
+// CHECK-LABEL: func.func @rank2_trans_a
+// CHECK:         hip.matmul(%{{.*}}) ins(%{{.*}}, %{{.*}}, %{{.*}} : tensor<8x4x{{.*}}>, tensor<8x6x{{.*}}>, tensor<6x{{.*}}>) outs(%{{.*}} : tensor<4x6x{{.*}}>) {transA = 1 : i64}
+// CHECK-NOT:     hip.add
+func.func @rank2_trans_a(%ctx: !hip.context, %a: tensor<8x4x!quant.uniform<u16:f32, 0.25:32768>>,
+                         %w: tensor<8x6x!quant.uniform<i8:f32, 0.125:3>>, %bias: tensor<6x!quant.uniform<u16:f32, 0.0625:32768>>)
+    -> tensor<4x6x!quant.uniform<u16:f32, 1.0:32768>> {
+  %e0 = tensor.empty() : tensor<4x6x!quant.uniform<u16:f32, 0.5:32768>>
+  %m = hip.matmul(%ctx) ins(%a, %w : tensor<8x4x!quant.uniform<u16:f32, 0.25:32768>>, tensor<8x6x!quant.uniform<i8:f32, 0.125:3>>)
+      outs(%e0 : tensor<4x6x!quant.uniform<u16:f32, 0.5:32768>>) {transA = 1 : i64} : tensor<4x6x!quant.uniform<u16:f32, 0.5:32768>>
+  %e1 = tensor.empty() : tensor<4x6x!quant.uniform<u16:f32, 1.0:32768>>
+  %y = hip.add(%ctx) ins(%m, %bias : tensor<4x6x!quant.uniform<u16:f32, 0.5:32768>>, tensor<6x!quant.uniform<u16:f32, 0.0625:32768>>)
+      outs(%e1 : tensor<4x6x!quant.uniform<u16:f32, 1.0:32768>>) -> tensor<4x6x!quant.uniform<u16:f32, 1.0:32768>>
+  return %y : tensor<4x6x!quant.uniform<u16:f32, 1.0:32768>>
+}
+
+// -----
+
 // A 16-bit weight has no kernel (only A is split into byte planes), so the
 // capability check declines.
 

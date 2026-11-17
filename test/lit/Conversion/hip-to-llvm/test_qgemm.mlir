@@ -247,4 +247,31 @@ module {
                         !quant.uniform<i8:f32, 5.000000e-01:7>]}
     return
   }
+
+  // ===== hip.matmul with a bias, rank-2 A and transA =====
+  //
+  // A is [K, M] = [128, 64]. A rank-2 A has no leading dims to fold, so M and K
+  // must come from the transA-aware dims: M = 64, K = 128 (not the other way
+  // round). Call order is M, N, K.
+  //
+  // CHECK-LABEL: llvm.func @test_matmul_bias_trans_a(
+  // CHECK-DAG:  %[[M:.*]] = llvm.mlir.constant(64 : i64) : i64
+  // CHECK-DAG:  %[[K:.*]] = llvm.mlir.constant(128 : i64) : i64
+  // CHECK:      llvm.call @wrap_qgemm(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %[[M]], %{{.*}}, %[[K]],
+  func.func @test_matmul_bias_trans_a(%ctx: !hip.context,
+                                      %A: memref<128x64xi8, 1>,
+                                      %B: memref<128x32xi8, 1>,
+                                      %C: memref<32xi32, 1>,
+                                      %Y: memref<64x32xi8, 1>) {
+    hip.matmul(%ctx)
+        ins(%A, %B, %C : memref<128x64xi8, 1>, memref<128x32xi8, 1>,
+                         memref<32xi32, 1>)
+        outs(%Y : memref<64x32xi8, 1>)
+        {transA = 1 : i64,
+         quant_types = [!quant.uniform<i8:f32, 2.500000e-01:-5>,
+                        !quant.uniform<i8:f32, 1.250000e-01:3>,
+                        !quant.uniform<i32:f32, 3.125000e-02:-2>,
+                        !quant.uniform<i8:f32, 5.000000e-01:7>]}
+    return
+  }
 }
