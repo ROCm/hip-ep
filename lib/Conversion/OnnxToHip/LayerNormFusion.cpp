@@ -83,9 +83,12 @@ static std::optional<double> getScalarFloatConstant(mlir::Value v) {
     return std::nullopt;
   if (mlir::isa<mlir::FloatType>(dense.getElementType()))
     return (*dense.getValues<llvm::APFloat>().begin()).convertToDouble();
-  if (mlir::isa<mlir::IntegerType>(dense.getElementType()))
-    return static_cast<double>(
-        (*dense.getValues<llvm::APInt>().begin()).getSExtValue());
+  // Unsigned and boolean constants zero-extend (ui8 255 is 255, i1 true is 1);
+  // only signed and signless integers sign-extend.
+  if (auto intType = mlir::dyn_cast<mlir::IntegerType>(dense.getElementType()))
+    return (*dense.getValues<llvm::APInt>().begin())
+        .roundToDouble(/*isSigned=*/!intType.isUnsigned() &&
+                       intType.getWidth() != 1);
   return std::nullopt;
 }
 
