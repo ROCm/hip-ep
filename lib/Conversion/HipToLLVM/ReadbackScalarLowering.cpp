@@ -5,6 +5,8 @@
 
 #include "HipToLLVMUtils.h"
 
+#include "llvm/Support/MathExtras.h"
+
 namespace mlir {
 namespace hip {
 namespace {
@@ -86,12 +88,13 @@ struct ReadbackScalarOpLowering
     if (!scalarPtr)
       return rewriter.notifyMatchFailure(op, "failed to compute scalar ptr");
 
-    // Host stack slot for the read-back value.
+    // Host stack slot for the read-back value. Align it like the element's
+    // ABI: the byte count of a padded type such as i48 is not a power of two.
     Value one = LLVM::ConstantOp::create(rewriter, loc, i64Type,
                                          rewriter.getI64IntegerAttr(1));
-    Value hostSlot =
-        LLVM::AllocaOp::create(rewriter, loc, ptrType, slotType, one,
-                               /*alignment=*/static_cast<unsigned>(numBytes));
+    unsigned alignment = static_cast<unsigned>(llvm::PowerOf2Ceil(numBytes));
+    Value hostSlot = LLVM::AllocaOp::create(rewriter, loc, ptrType, slotType,
+                                            one, alignment);
 
     // void hipdnn_ep_readback_scalar(RuntimeState*, void* host_dst,
     //                                const void* device_scalar, int64_t nbytes)
