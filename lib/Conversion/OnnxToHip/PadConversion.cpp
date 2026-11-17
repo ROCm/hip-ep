@@ -246,7 +246,9 @@ static mlir::TypedAttr getStaticConstantValue(mlir::Value constantValue,
                                               mlir::Type elemType) {
   auto dense = getCompileTimeConstantTensor(constantValue);
   if (!dense || dense.getNumElements() != 1 ||
-      dense.getElementType() != elemType)
+      dense.getElementType() != elemType ||
+      !(elemType.isF16() || elemType.isF32() ||
+        elemType.isSignlessInteger(32) || elemType.isSignlessInteger(64)))
     return nullptr;
   return mlir::dyn_cast<mlir::TypedAttr>(*dense.value_begin<mlir::Attribute>());
 }
