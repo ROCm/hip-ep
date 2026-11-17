@@ -581,6 +581,49 @@ class TestSlice:
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=0)
 
+    # Constant negative-step slices over static inputs are resolved at compile
+    # time (ONNX negative-index and clamping rules) and passed to the kernel
+    # from host memory.
+    @pytest.mark.parametrize(
+        "dtype,shape,starts,ends,axes,steps,out_shape",
+        [
+            # Flip of the innermost axis with the INT64 end sentinel.
+            (np.float32, [4, 6], [-1], [-(2**63) + 1], [1], [-1], [4, 6]),
+            (np.float16, [1, 3, 4, 5], [-1], [-(2**63)], [3], [-1], [1, 3, 4, 5]),
+            # Flip of an outer axis, addressed with a negative axis.
+            (np.float32, [2, 3, 4], [-1], [-(2**63)], [-3], [-1], [2, 3, 4]),
+            # step -3 from the last element: 9, 6, 3, 0.
+            (np.int64, [10], [9], [-(2**63)], [0], [-3], [4]),
+            # Negative start, step -2, stopping before index 1: 6, 4, 2.
+            (np.float16, [3, 8], [-2], [1], [1], [-2], [3, 3]),
+            # A start past the end clamps to the last element.
+            (np.float16, [6], [100], [-100], [0], [-1], [6]),
+            # Two axes with mixed signs: rows 4..1, columns 1 and 3.
+            (np.int32, [5, 6], [4, 1], [0, 5], [0, 1], [-1, 2], [4, 2]),
+        ],
+    )
+    def test_slice_negative_step_static(
+        self, model_runner, dtype, shape, starts, ends, axes, steps, out_shape
+    ):
+        model, _ = _make_slice_model(
+            dtype,
+            shape,
+            starts,
+            ends,
+            axes,
+            steps,
+            out_shape,
+            constant_indices=True,
+        )
+        rng = np.random.default_rng(505)
+        if np.issubdtype(dtype, np.integer):
+            x = rng.integers(-50, 50, shape, dtype=dtype)
+        else:
+            x = rng.uniform(-2.0, 2.0, shape).astype(dtype)
+        actual, expected = model_runner.run_sample(model, [x])
+        assert actual[0].shape == tuple(out_shape)
+        compare_outputs(actual, expected, atol=0)
+
     def test_slice_negative_indices(self, model_runner):
         """Negative start/end with positive step -- runtime path, fp16."""
         # Slice [-3, -1) of a [6] vector with step 1 -> elements 3..4
