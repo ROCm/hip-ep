@@ -21,6 +21,10 @@
 //             : memref<?xi8> to memref<1xi32>
 //         memref.store %n, %a[%c0] : memref<1xi32>
 //
+// A host load placed after a memref.copy into the buffer or a HIP op using it
+// becomes a stream-synchronized hip.readback_scalar. Both run asynchronously,
+// so a plain load could read the slot before they land.
+//
 // Limits: at most 16 elements; context in argument zero; no unknown consumers.
 // Float buffers need a HIP consumer. This bounded rule does not make all host
 // accesses safe. Larger and unsupported allocations need separate handling.
@@ -240,6 +244,73 @@ static DenseElementsAttr getHostConstantCandidate(memref::GetGlobalOp op) {
   return init;
 }
 
+/// Appends every (user, aliased value) pair reaching \p buffer, directly or
+/// through views of it.
+static void
+collectAliasUses(Value buffer,
+                 SmallVectorImpl<std::pair<Operation *, Value>> &uses) {
+  for (Operation *user : buffer.getUsers()) {
+    uses.push_back({user, buffer});
+    if (auto view = dyn_cast<ViewLikeOpInterface>(user))
+      if (view.getViewSource() == buffer)
+        collectAliasUses(view->getResult(0), uses);
+  }
+}
+
+/// Host loads from \p allocOp that may run before queued GPU work writing it.
+/// memref.copy lowers to an async hipMemcpy and hip ops are async kernels, so
+/// a later memref.load reads the scratch before they land. Hip users count as
+/// writers whatever their operand role; a needless sync only costs time.
+static SmallVector<memref::LoadOp>
+findLoadsAfterAsyncWrites(memref::AllocOp allocOp) {
+  SmallVector<std::pair<Operation *, Value>> uses;
+  collectAliasUses(allocOp.getResult(), uses);
+  Block *block = allocOp->getBlock();
+  SmallVector<Operation *> writers;
+  for (auto [user, val] : uses) {
+    auto copy = dyn_cast<memref::CopyOp>(user);
+    bool isHip = user->getDialect() &&
+                 user->getDialect()->getNamespace() == "hip" &&
+                 !isa<ReadbackScalarOp, ReadbackDimOp>(user);
+    if ((copy && copy.getTarget() == val) || isHip)
+      if (Operation *a = block->findAncestorOpInBlock(*user))
+        writers.push_back(a);
+  }
+  SmallVector<memref::LoadOp> loads;
+  for (auto [user, val] : uses) {
+    auto load = dyn_cast<memref::LoadOp>(user);
+    if (!load || !isa<IntegerType, FloatType>(load.getType()))
+      continue;
+    Operation *at = block->findAncestorOpInBlock(*load);
+    if (!at)
+      continue;
+    if (llvm::any_of(writers, [&](Operation *w) {
+          return w == at || w->isBeforeInBlock(at);
+        }))
+      loads.push_back(load);
+  }
+  return loads;
+}
+
+/// Replaces \p load with a stream-synchronized hip.readback_scalar of the same
+/// element.
+static void rewriteAsReadback(memref::LoadOp load, Value ctx) {
+  OpBuilder b(load);
+  Location loc = load.getLoc();
+  Value src = load.getMemRef();
+  int64_t rank = load.getMemRefType().getRank();
+  if (rank > 0) {
+    SmallVector<OpFoldResult> offsets(load.getIndices());
+    SmallVector<OpFoldResult> ones(rank, b.getIndexAttr(1));
+    Value elem = memref::SubViewOp::create(b, loc, src, offsets, ones, ones);
+    src = memref::CollapseShapeOp::create(b, loc, elem,
+                                          ArrayRef<ReassociationIndices>{});
+  }
+  Value v = ReadbackScalarOp::create(b, loc, load.getType(), ctx, src);
+  load.replaceAllUsesWith(v);
+  load.erase();
+}
+
 /// Bytes \p type occupies in scratch, matching the default layout used by
 /// HIP-to-LLVM, including element padding.
 static int64_t scratchBytes(MemRefType type) {
@@ -307,6 +378,9 @@ static void materialize(FunctionScratch &plan, int64_t total) {
 
   // The runtime owns scratch. Replace allocations and erase their deallocs.
   for (auto [allocOp, offset] : llvm::zip(candidates, offsets)) {
+    for (memref::LoadOp load : findLoadsAfterAsyncWrites(allocOp))
+      rewriteAsReadback(load, ctx);
+
     builder.setInsertionPoint(allocOp);
     Value offsetVal =
         arith::ConstantIndexOp::create(builder, allocOp.getLoc(), offset);
