@@ -10,8 +10,9 @@ op. So there is one `hip.add` for QDQ and float models, and a fusion written
 against `hip.add` applies to both. The types, not the op name, select the
 kernel and decide whether the kernel dequantizes/quantizes.
 
-Status: `hip.add` only. `hip.qmul`, `hip.qmatmul`, ... still use the
-Q-specific ops and their PDLL fusions.
+Status: `hip.add`, `hip.matmul` and `hip.gemm`. `hip.qmul`, `hip.qconv`, ...
+still use the Q-specific ops and their PDLL fusions, as do the cases below that
+types cannot carry.
 
 ## IR
 
@@ -46,10 +47,37 @@ Q-specific ops and their PDLL fusions.
 | Legalize | `hip-legalize-quant-types`, before bufferization | Memrefs cannot hold quant types: the [lhs, rhs, output] element types of every add move into its `quant_types` attribute, quantized tensors become storage integers, casts disappear. |
 | Lower | `convert-hip-to-llvm` | quantized `quant_types` → `wrap_qelementwise` (scales/zero points from the types); otherwise `wrap_elementwise`. |
 
+## Matmul and gemm
+
+Same fold, same attribute: `hip.matmul` and `hip.gemm` are quantized by their
+element types, and `quant_types` holds [A, B, (C), output] after legalization.
+`hip.gemm` keeps `alpha`, `beta`, `transA` and `transB` as attributes. Lowering
+calls the existing `wrap_qmatmul` / `wrap_qgemm` with the same arguments the
+attribute forms (`hip.qmatmul`, `hip.qgemm`) produce, so the kernels are
+unchanged.
+
+What stays on `hip.qmatmul` / `hip.qgemm` (QMatMulFusion.pdll,
+QGemmFusion.pdll), because it is not expressible as a per-tensor type:
+
+- per-column weights: their scales and zero points are file-backed constants,
+  not type parameters;
+- packed 4-bit weights: two values per byte, not one per element.
+
+Matmul + bias Add is not fused into a gemm yet.
+
 ## Kernel capability
 
 `hip::supportsQuantTypes(op, inputTypes, resultType)`
 (`lib/Dialect/IR/HipQuantTypes.cpp`) is the one place that says which quant
 types an op has a kernel for. The fusion and the legalize pass both use it.
-For `hip.add`: per-tensor, one storage type for lhs, rhs and output
-(i8/ui8/i16/ui16/i32).
+- `hip.add`: per-tensor, one storage type for lhs, rhs and output
+  (i8/ui8/i16/ui16/i32).
+- `hip.matmul`: per-tensor; A and result 8/16-bit, B 8-bit (the kernel splits
+  only A into byte planes).
+- `hip.gemm`: as matmul, plus an optional bias C of 8/16/32 bit. `alpha`,
+  `beta`, `transA` and `transB` stay attributes.
+
+Lowering reads the scales and zero points from `quant_types` and calls the
+same `wrap_qmatmul` / `wrap_qgemm` as `hip.qmatmul` / `hip.qgemm`, so the
+kernel contract is unchanged. For `hip.matmul` / `hip.gemm`: per-tensor, A and the
+result 8 or 16 bit, B 8 bit, and gemm's bias C 8, 16 or 32 bit.

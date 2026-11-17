@@ -1289,7 +1289,8 @@ LogicalResult MatmulOp::verify() {
   // result-count parity); failures here also rule out bogus operand types,
   // so the matmul shape check below can rely on detail::getShapeOf().
   if (failed(verifyDpsComputeOp(*this, {getA(), getB(), getOutput()},
-                                /*numInits=*/1)))
+                                /*numInits=*/1)) ||
+      failed(verifyQuantTypes(*this, {getA(), getB(), getOutput()})))
     return failure();
 
   return mlir::hip::verifyHipOpShape(*this, [&] {
@@ -3434,6 +3435,14 @@ LogicalResult NGramHashMappingOp::verify() {
 //===----------------------------------------------------------------------===//
 
 MutableOperandRange GemmOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+LogicalResult GemmOp::verify() {
+  SmallVector<Value> operands = {getInputA(), getInputB()};
+  if (getInputC())
+    operands.push_back(getInputC());
+  operands.push_back(getOutput());
+  return verifyQuantTypes(*this, operands);
+}
 
 void GemmOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>

@@ -5,6 +5,8 @@
 
 #include "HipToLLVMUtils.h"
 
+#include "hip/Dialect/IR/HipQuantTypes.h"
+
 namespace mlir {
 namespace hip {
 namespace {
@@ -20,6 +22,9 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
   LogicalResult
   matchAndRewrite(MatmulOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    // Quantized matmuls lower to wrap_qmatmul (QMatMulLowering.cpp).
+    if (isQuantizedOp(op))
+      return rewriter.notifyMatchFailure(op, "quantized; not a float kernel");
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type ptrType = getPtrType();

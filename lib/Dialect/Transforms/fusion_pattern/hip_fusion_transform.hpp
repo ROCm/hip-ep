@@ -338,6 +338,17 @@ hasSameHipQdqElementType(mlir::PatternRewriter &, mlir::PDLResultList &,
   return mlir::success();
 }
 
+/// dq is a dequantize whose input is a packed 4-bit value
+inline mlir::LogicalResult
+isHipPackedInt4Dequantize(mlir::PatternRewriter &, mlir::PDLResultList &,
+                          llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 1)
+    return mlir::failure();
+  auto dq = mlir::dyn_cast_or_null<mlir::hip::DequantizeLinearOp>(
+      args[0].dyn_cast<mlir::Operation *>());
+  return mlir::success(dq && dq->hasAttr("packed_int4"));
+}
+
 /// every Q/DQ has a per-tensor quant type, and op has a kernel for them
 inline mlir::LogicalResult
 supportsQuantTypes(mlir::PatternRewriter &, mlir::PDLResultList &,
@@ -903,6 +914,10 @@ inline void registerNativeHelpers(mlir::PDLPatternModule &pdlPatterns) {
   pdlPatterns.registerConstraintFunction("SupportsQuantTypes",
                                          supportsQuantTypes);
   pdlPatterns.registerRewriteFunction("GetQuantTensorType", getQuantTensorType);
+  pdlPatterns.registerConstraintFunction("SupportsQuantTypesWithBias",
+                                         supportsQuantTypes);
+  pdlPatterns.registerConstraintFunction("IsHipPackedInt4Dequantize",
+                                         isHipPackedInt4Dequantize);
   pdlPatterns.registerConstraintFunction("IsHipFusableQConvGeometry",
                                          isHipFusableQConvGeometry);
   pdlPatterns.registerConstraintFunction("IsHipPerAxisQuantizedWeight",

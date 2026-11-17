@@ -5,6 +5,8 @@
 
 #include "HipToLLVMUtils.h"
 
+#include "hip/Dialect/IR/HipQuantTypes.h"
+
 namespace mlir {
 namespace hip {
 namespace {
@@ -17,6 +19,9 @@ struct GemmOpLowering : public ConvertOpToLLVMPattern<GemmOp> {
   LogicalResult
   matchAndRewrite(GemmOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    // Quantized gemms lower to wrap_qgemm (QGemmLowering.cpp).
+    if (isQuantizedOp(op))
+      return rewriter.notifyMatchFailure(op, "quantized; not a float kernel");
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type ptrType = getPtrType();

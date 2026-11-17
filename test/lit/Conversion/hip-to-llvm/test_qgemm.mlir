@@ -150,4 +150,71 @@ module {
          transB = 1 : i64}
     return
   }
+
+  // ===== hip.gemm with quant types =====
+  //
+  // The per-tensor case above, with the same numbers carried as element types
+  // instead of attributes. It must lower to the identical wrap_qgemm call.
+  //
+  // CHECK-LABEL: llvm.func @test_gemm_quant_types_per_tensor(
+  // CHECK:      %[[CDIM0:.*]] = llvm.mlir.constant(1 : i64) : i64
+  // CHECK-NEXT: %[[CDIM1:.*]] = llvm.mlir.constant(32 : i64) : i64
+  // CHECK-NEXT: %[[M:.*]] = llvm.mlir.constant(64 : i64) : i64
+  // CHECK-NEXT: %[[K:.*]] = llvm.mlir.constant(128 : i64) : i64
+  // CHECK-NEXT: %[[N:.*]] = llvm.mlir.constant(32 : i64) : i64
+  // CHECK-NEXT: llvm.extractvalue %[[ADESC:.*]][1]
+  // CHECK-NEXT: %[[APTR:.*]] = llvm.addrspacecast
+  // CHECK-NEXT: llvm.extractvalue %[[BDESC:.*]][1]
+  // CHECK-NEXT: %[[BPTR:.*]] = llvm.addrspacecast
+  // CHECK-NEXT: llvm.extractvalue %[[CDESC:.*]][1]
+  // CHECK-NEXT: %[[CPTR:.*]] = llvm.addrspacecast
+  // CHECK-NEXT: %[[BSPTR:.*]] = llvm.mlir.zero : !llvm.ptr
+  // CHECK-NEXT: %[[BZPTR:.*]] = llvm.mlir.zero : !llvm.ptr
+  // CHECK-NEXT: llvm.extractvalue %[[YDESC:.*]][1]
+  // CHECK-NEXT: %[[YPTR:.*]] = llvm.addrspacecast
+  // CHECK-NEXT: %[[TRANSA:.*]] = llvm.mlir.constant(0 : i64) : i64
+  // CHECK-NEXT: %[[TRANSB:.*]] = llvm.mlir.constant(1 : i64) : i64
+  // CHECK-NEXT: %[[ADT:.*]] = llvm.mlir.constant(5 : i64) : i64
+  // CHECK-NEXT: %[[BDT:.*]] = llvm.mlir.constant(5 : i64) : i64
+  // CHECK-NEXT: %[[CDT:.*]] = llvm.mlir.constant(3 : i64) : i64
+  // CHECK-NEXT: %[[YDT:.*]] = llvm.mlir.constant(5 : i64) : i64
+  // CHECK-NEXT: %[[BBITS:.*]] = llvm.mlir.constant(8 : i64) : i64
+  // CHECK-NEXT: %[[MAB:.*]] = llvm.mlir.constant(1.250000e-01 : f32) : f32
+  // CHECK-NEXT: %[[MC:.*]] = llvm.mlir.constant(3.125000e-02 : f32) : f32
+  // CHECK-NEXT: %[[AZP:.*]] = llvm.mlir.constant(-5 : i64) : i64
+  // CHECK-NEXT: %[[BZP:.*]] = llvm.mlir.constant(3 : i64) : i64
+  // CHECK-NEXT: %[[CZP:.*]] = llvm.mlir.constant(-2 : i64) : i64
+  // CHECK-NEXT: %[[YZP:.*]] = llvm.mlir.constant(7 : i64) : i64
+  // CHECK-NEXT: llvm.call @wrap_qgemm(%{{.*}}, %[[APTR]], %[[BPTR]], %[[CPTR]], %[[BSPTR]], %[[BZPTR]], %[[YPTR]], %[[M]], %[[N]], %[[K]], %[[TRANSA]], %[[TRANSB]], %[[ADT]], %[[BDT]], %[[CDT]], %[[YDT]], %[[BBITS]], %[[CDIM0]], %[[CDIM1]], %[[MAB]], %[[MC]], %[[AZP]], %[[BZP]], %[[CZP]], %[[YZP]]) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32, i64, i64, i64, i64) -> i32
+  func.func @test_gemm_quant_types_per_tensor(%ctx: !hip.context,
+                                   %A: memref<64x128xi8, 1>,
+                                   %B: memref<32x128xi8, 1>,
+                                   %C: memref<32xi32, 1>,
+                                   %Y: memref<64x32xi8, 1>) {
+    hip.gemm(%ctx)
+        ins(%A, %B, %C : memref<64x128xi8, 1>, memref<32x128xi8, 1>,
+                         memref<32xi32, 1>)
+        outs(%Y : memref<64x32xi8, 1>)
+        {quant_types = [!quant.uniform<i8:f32, 2.500000e-01:-5>,
+                        !quant.uniform<i8:f32, 1.250000e-01:3>,
+                        !quant.uniform<i32:f32, 3.125000e-02:-2>,
+                        !quant.uniform<i8:f32, 5.000000e-01:7>],
+         alpha = 2.000000e+00 : f32, beta = 5.000000e-01 : f32,
+         transA = 0 : i64, transB = 1 : i64}
+    return
+  }
+
+  // ===== Non-quantized quant_types stay on the float kernel =====
+  //
+  // CHECK-LABEL: llvm.func @test_gemm_f32_quant_types(
+  // CHECK-NOT:  @wrap_qgemm
+  // CHECK:      llvm.call @wrap_gemm
+  func.func @test_gemm_f32_quant_types(%ctx: !hip.context,
+                                       %A: memref<64x128xf32, 1>,
+                                       %B: memref<128x32xf32, 1>,
+                                       %Y: memref<64x32xf32, 1>) {
+    hip.gemm(%ctx) ins(%A, %B : memref<64x128xf32, 1>, memref<128x32xf32, 1>)
+        outs(%Y : memref<64x32xf32, 1>) {quant_types = [f32, f32, f32]}
+    return
+  }
 }

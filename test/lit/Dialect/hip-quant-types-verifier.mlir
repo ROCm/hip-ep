@@ -88,3 +88,61 @@ func.func @entries_mixed(%ctx: !hip.context, %a: memref<8xui16>, %out: memref<8x
       {quant_types = [!quant.uniform<u16:f32, 0.5>, ui16, !quant.uniform<u16:f32, 0.5>]}
   return
 }
+
+// -----
+
+func.func @matmul_mixed(%ctx: !hip.context, %a: tensor<4x4x!quant.uniform<i8:f32, 0.5>>,
+                        %b: tensor<4x4xf32>) -> tensor<4x4xf32> {
+  %e = tensor.empty() : tensor<4x4xf32>
+  // expected-error @+1 {{operands must be all quantized or all non-quantized}}
+  %m = hip.matmul(%ctx) ins(%a, %b : tensor<4x4x!quant.uniform<i8:f32, 0.5>>, tensor<4x4xf32>)
+      outs(%e : tensor<4x4xf32>) : tensor<4x4xf32>
+  return %m : tensor<4x4xf32>
+}
+
+// -----
+
+func.func @gemm_count(%ctx: !hip.context, %a: memref<4x4xi8>, %b: memref<4x4xi8>,
+                      %c: memref<4xi32>, %out: memref<4x4xi8>) {
+  // expected-error @+1 {{'quant_types' expects 4 entries, got 3}}
+  hip.gemm(%ctx) ins(%a, %b, %c : memref<4x4xi8>, memref<4x4xi8>, memref<4xi32>)
+      outs(%out : memref<4x4xi8>)
+      {quant_types = [!quant.uniform<i8:f32, 0.5>, !quant.uniform<i8:f32, 0.5>, !quant.uniform<i8:f32, 0.5>]}
+  return
+}
+
+// -----
+
+func.func @matmul_mixed(%ctx: !hip.context, %a: tensor<4x8x!quant.uniform<i8:f32, 0.5>>,
+                        %b: tensor<8x6xf32>) -> tensor<4x6xf32> {
+  %e = tensor.empty() : tensor<4x6xf32>
+  // expected-error @+1 {{operands must be all quantized or all non-quantized}}
+  %m = hip.matmul(%ctx) ins(%a, %b : tensor<4x8x!quant.uniform<i8:f32, 0.5>>, tensor<8x6xf32>)
+      outs(%e : tensor<4x6xf32>) : tensor<4x6xf32>
+  return %m : tensor<4x6xf32>
+}
+
+// -----
+
+// The bias counts as an operand: a float C with quantized A and B is mixed.
+
+func.func @gemm_mixed_bias(%ctx: !hip.context, %a: tensor<4x8x!quant.uniform<i8:f32, 0.5>>,
+                           %b: tensor<8x6x!quant.uniform<i8:f32, 0.5>>, %c: tensor<6xf32>)
+    -> tensor<4x6x!quant.uniform<i8:f32, 0.5>> {
+  %e = tensor.empty() : tensor<4x6x!quant.uniform<i8:f32, 0.5>>
+  // expected-error @+1 {{operands must be all quantized or all non-quantized}}
+  %g = hip.gemm(%ctx) ins(%a, %b, %c : tensor<4x8x!quant.uniform<i8:f32, 0.5>>, tensor<8x6x!quant.uniform<i8:f32, 0.5>>, tensor<6xf32>)
+      outs(%e : tensor<4x6x!quant.uniform<i8:f32, 0.5>>) : tensor<4x6x!quant.uniform<i8:f32, 0.5>>
+  return %g : tensor<4x6x!quant.uniform<i8:f32, 0.5>>
+}
+
+// -----
+
+func.func @gemm_attr_count(%ctx: !hip.context, %a: memref<4x8xi8>, %b: memref<8x6xi8>,
+                           %c: memref<6xi32>, %out: memref<4x6xi8>) {
+  // expected-error @+1 {{'quant_types' expects 4 entries, got 3}}
+  hip.gemm(%ctx) ins(%a, %b, %c : memref<4x8xi8>, memref<8x6xi8>, memref<6xi32>)
+      outs(%out : memref<4x6xi8>)
+      {quant_types = [!quant.uniform<i8:f32, 0.5>, !quant.uniform<i8:f32, 0.5>, !quant.uniform<i8:f32, 0.5>]}
+  return
+}

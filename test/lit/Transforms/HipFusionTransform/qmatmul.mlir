@@ -3,12 +3,15 @@
 
 // RUN: hip-mlir-opt --hip-fusion-transform --split-input-file %s | FileCheck %s
 
-// Per-tensor B: both weight quantization parameters fold into attributes.
+// Per-tensor B: the Q/DQ fold into the matmul's element types.
 // CHECK-LABEL: func.func @qmatmul
 // CHECK-SAME:  (%[[CTX:.*]]: !hip.context, %[[A:.*]]: tensor<64x128xi8>, %[[B:.*]]: tensor<128x32xi8>) -> tensor<64x32xi8> {
-// CHECK-NEXT:    %[[INIT:.*]] = tensor.empty() : tensor<64x32xi8>
-// CHECK-NEXT:    %[[QMM:.*]] = hip.qmatmul(%[[CTX]]) ins(%[[A]], %[[B]] : tensor<64x128xi8>, tensor<128x32xi8>) outs(%[[INIT]] : tensor<64x32xi8>) {A_scale = 2.500000e-01 : f32, A_zero_point = -5 : i64, B_scale = 1.250000e-01 : f32, B_zero_point = 3 : i64, Y_scale = 5.000000e-01 : f32, Y_zero_point = 7 : i64} : tensor<64x32xi8>
-// CHECK-NEXT:    return %[[QMM]] : tensor<64x32xi8>
+// CHECK-NEXT:    %[[QA:.*]] = hip.storage_cast %[[A]] : tensor<64x128xi8> to tensor<64x128x!quant.uniform<i8:f32, 2.500000e-01:-5>>
+// CHECK-NEXT:    %[[QB:.*]] = hip.storage_cast %[[B]] : tensor<128x32xi8> to tensor<128x32x!quant.uniform<i8:f32, 1.250000e-01:3>>
+// CHECK-NEXT:    %[[INIT:.*]] = tensor.empty() : tensor<64x32x!quant.uniform<i8:f32, 5.000000e-01:7>>
+// CHECK-NEXT:    %[[MM:.*]] = hip.matmul(%[[CTX]]) ins(%[[QA]], %[[QB]] : tensor<64x128x!quant.uniform<i8:f32, 2.500000e-01:-5>>, tensor<128x32x!quant.uniform<i8:f32, 1.250000e-01:3>>) outs(%[[INIT]] : tensor<64x32x!quant.uniform<i8:f32, 5.000000e-01:7>>) : tensor<64x32x!quant.uniform<i8:f32, 5.000000e-01:7>>
+// CHECK-NEXT:    %[[OUT:.*]] = hip.storage_cast %[[MM]] : tensor<64x32x!quant.uniform<i8:f32, 5.000000e-01:7>> to tensor<64x32xi8>
+// CHECK-NEXT:    return %[[OUT]] : tensor<64x32xi8>
 // CHECK-NEXT:  }
 func.func @qmatmul(%ctx: !hip.context,
                    %a: tensor<64x128xi8>,
@@ -157,4 +160,180 @@ func.func @qmatmul_w8_per_column(%ctx: !hip.context,
        saturate = 1 : i64} : tensor<4x6xui16>
 
   return %q : tensor<4x6xui16>
+}
+
+// -----
+
+// transA / transB stay attributes of the typed matmul.
+
+// CHECK-LABEL: func.func @qmatmul_trans
+// CHECK:         hip.matmul(%{{.*}}) ins({{.*}}) outs({{.*}}) {transA = 1 : i64, transB = 1 : i64}
+// CHECK-NOT:     hip.quantize_linear
+func.func @qmatmul_trans(%ctx: !hip.context, %a: tensor<128x64xi8>,
+                         %b: tensor<32x128xi8>) -> tensor<64x32xi8> {
+  %s = hip.constant {value = dense<0.25> : tensor<f32>} : tensor<f32>
+  %zp = hip.constant {value = dense<0> : tensor<i8>} : tensor<i8>
+  %e0 = tensor.empty() : tensor<128x64xf32>
+  %dq_a = hip.dequantize_linear(%ctx) ins(%a, %s : tensor<128x64xi8>, tensor<f32>)
+      zero_point(%zp : tensor<i8>) outs(%e0 : tensor<128x64xf32>)
+      {axis = 1 : i64, block_size = 0 : i64} : tensor<128x64xf32>
+  %e1 = tensor.empty() : tensor<32x128xf32>
+  %dq_b = hip.dequantize_linear(%ctx) ins(%b, %s : tensor<32x128xi8>, tensor<f32>)
+      zero_point(%zp : tensor<i8>) outs(%e1 : tensor<32x128xf32>)
+      {axis = 1 : i64, block_size = 0 : i64} : tensor<32x128xf32>
+  %e2 = tensor.empty() : tensor<64x32xf32>
+  %mm = hip.matmul(%ctx) ins(%dq_a, %dq_b : tensor<128x64xf32>, tensor<32x128xf32>)
+      outs(%e2 : tensor<64x32xf32>) {transA = 1 : i64, transB = 1 : i64}
+      : tensor<64x32xf32>
+  %e3 = tensor.empty() : tensor<64x32xi8>
+  %q = hip.quantize_linear(%ctx) ins(%mm, %s : tensor<64x32xf32>, tensor<f32>)
+      zero_point(%zp : tensor<i8>) outs(%e3 : tensor<64x32xi8>)
+      {axis = 1 : i64, block_size = 0 : i64, precision = 0 : i64,
+       saturate = 1 : i64} : tensor<64x32xi8>
+  return %q : tensor<64x32xi8>
+}
+
+// -----
+
+// The matmul kernel splits only A into byte planes, so a 16-bit B has no
+// kernel: the chain stays unfused rather than becoming a typed matmul that
+// hip-legalize-quant-types would reject.
+
+// CHECK-LABEL: func.func @qmatmul_b16_no_kernel
+// CHECK-NOT:     hip.storage_cast
+// CHECK:         hip.matmul
+// CHECK:         hip.quantize_linear
+func.func @qmatmul_b16_no_kernel(%ctx: !hip.context, %a: tensor<8x8xui16>,
+                                 %b: tensor<8x8xui16>) -> tensor<8x8xui16> {
+  %s = hip.constant {value = dense<0.25> : tensor<f32>} : tensor<f32>
+  %zp = hip.constant {value = dense<32768> : tensor<ui16>} : tensor<ui16>
+  %e0 = tensor.empty() : tensor<8x8xf32>
+  %dq_a = hip.dequantize_linear(%ctx) ins(%a, %s : tensor<8x8xui16>, tensor<f32>)
+      zero_point(%zp : tensor<ui16>) outs(%e0 : tensor<8x8xf32>)
+      {axis = 1 : i64, block_size = 0 : i64} : tensor<8x8xf32>
+  %e1 = tensor.empty() : tensor<8x8xf32>
+  %dq_b = hip.dequantize_linear(%ctx) ins(%b, %s : tensor<8x8xui16>, tensor<f32>)
+      zero_point(%zp : tensor<ui16>) outs(%e1 : tensor<8x8xf32>)
+      {axis = 1 : i64, block_size = 0 : i64} : tensor<8x8xf32>
+  %e2 = tensor.empty() : tensor<8x8xf32>
+  %mm = hip.matmul(%ctx) ins(%dq_a, %dq_b : tensor<8x8xf32>, tensor<8x8xf32>)
+      outs(%e2 : tensor<8x8xf32>) : tensor<8x8xf32>
+  %e3 = tensor.empty() : tensor<8x8xui16>
+  %q = hip.quantize_linear(%ctx) ins(%mm, %s : tensor<8x8xf32>, tensor<f32>)
+      zero_point(%zp : tensor<ui16>) outs(%e3 : tensor<8x8xui16>)
+      {axis = 1 : i64, block_size = 0 : i64, precision = 0 : i64,
+       saturate = 1 : i64} : tensor<8x8xui16>
+  return %q : tensor<8x8xui16>
+}
+
+// -----
+
+// A float matmul is untouched.
+
+// CHECK-LABEL: func.func @matmul_float
+// CHECK-NEXT:    tensor.empty() : tensor<8x8xf32>
+// CHECK-NEXT:    hip.matmul(%{{.*}}) ins(%{{.*}}, %{{.*}} : tensor<8x8xf32>, tensor<8x8xf32>) outs(%{{.*}} : tensor<8x8xf32>) : tensor<8x8xf32>
+// CHECK-NEXT:    return
+func.func @matmul_float(%ctx: !hip.context, %a: tensor<8x8xf32>,
+                        %b: tensor<8x8xf32>) -> tensor<8x8xf32> {
+  %e = tensor.empty() : tensor<8x8xf32>
+  %mm = hip.matmul(%ctx) ins(%a, %b : tensor<8x8xf32>, tensor<8x8xf32>)
+      outs(%e : tensor<8x8xf32>) : tensor<8x8xf32>
+  return %mm : tensor<8x8xf32>
+}
+
+// -----
+
+// A16W8 with transB: the 16-bit activation and the transpose flag carry over,
+// and the storage types differ per operand.
+
+// CHECK-LABEL: func.func @matmul_a16w8_trans_b
+// CHECK:         hip.matmul(%{{.*}}) ins(%{{.*}}, %{{.*}} : tensor<4x8x!quant.uniform<u16:f32, 2.500000e-01:32768>>, tensor<6x8x!quant.uniform<i8:f32, 1.250000e-01:3>>) outs(%{{.*}} : tensor<4x6x!quant.uniform<u16:f32, 5.000000e-01:32768>>) {transB = 1 : i64}
+// CHECK-NOT:     hip.quantize_linear
+// CHECK-NOT:     hip.dequantize_linear
+func.func @matmul_a16w8_trans_b(%ctx: !hip.context, %a: tensor<4x8xui16>,
+                                %b: tensor<6x8xi8>) -> tensor<4x6xui16> {
+  %sa = hip.constant {value = dense<0.25> : tensor<f32>} : tensor<f32>
+  %za = hip.constant {value = dense<32768> : tensor<ui16>} : tensor<ui16>
+  %sb = hip.constant {value = dense<0.125> : tensor<f32>} : tensor<f32>
+  %zb = hip.constant {value = dense<3> : tensor<i8>} : tensor<i8>
+  %sy = hip.constant {value = dense<0.5> : tensor<f32>} : tensor<f32>
+  %zy = hip.constant {value = dense<32768> : tensor<ui16>} : tensor<ui16>
+  %da_e = tensor.empty() : tensor<4x8xf32>
+  %da = hip.dequantize_linear(%ctx)
+      ins(%a, %sa : tensor<4x8xui16>, tensor<f32>)
+      zero_point(%za : tensor<ui16>)
+      outs(%da_e : tensor<4x8xf32>)
+      {axis = 1 : i64, block_size = 0 : i64} : tensor<4x8xf32>
+  %db_e = tensor.empty() : tensor<6x8xf32>
+  %db = hip.dequantize_linear(%ctx)
+      ins(%b, %sb : tensor<6x8xi8>, tensor<f32>)
+      zero_point(%zb : tensor<i8>)
+      outs(%db_e : tensor<6x8xf32>)
+      {axis = 1 : i64, block_size = 0 : i64} : tensor<6x8xf32>
+  %e = tensor.empty() : tensor<4x6xf32>
+  %mm = hip.matmul(%ctx) ins(%da, %db : tensor<4x8xf32>, tensor<6x8xf32>)
+      outs(%e : tensor<4x6xf32>) {transB = 1 : i64} : tensor<4x6xf32>
+  %o = tensor.empty() : tensor<4x6xui16>
+  %q = hip.quantize_linear(%ctx) ins(%mm, %sy : tensor<4x6xf32>, tensor<f32>)
+      zero_point(%zy : tensor<ui16>) outs(%o : tensor<4x6xui16>)
+      {axis = 1 : i64, block_size = 0 : i64, precision = 0 : i64,
+       saturate = 1 : i64} : tensor<4x6xui16>
+  return %q : tensor<4x6xui16>
+}
+
+// -----
+
+// A 16-bit weight has no kernel (only A is split into byte planes): the chain
+// stays dequantize, matmul, quantize.
+
+// CHECK-LABEL: func.func @matmul_w16_unfused
+// CHECK-NOT:     hip.storage_cast
+// CHECK:         hip.matmul
+// CHECK:         hip.quantize_linear
+func.func @matmul_w16_unfused(%ctx: !hip.context, %a: tensor<4x8xui16>,
+                              %b: tensor<8x6xui16>) -> tensor<4x6xui16> {
+  %sa = hip.constant {value = dense<0.25> : tensor<f32>} : tensor<f32>
+  %za = hip.constant {value = dense<32768> : tensor<ui16>} : tensor<ui16>
+  %sb = hip.constant {value = dense<0.125> : tensor<f32>} : tensor<f32>
+  %zb = hip.constant {value = dense<32768> : tensor<ui16>} : tensor<ui16>
+  %sy = hip.constant {value = dense<0.5> : tensor<f32>} : tensor<f32>
+  %zy = hip.constant {value = dense<32768> : tensor<ui16>} : tensor<ui16>
+  %da_e = tensor.empty() : tensor<4x8xf32>
+  %da = hip.dequantize_linear(%ctx)
+      ins(%a, %sa : tensor<4x8xui16>, tensor<f32>)
+      zero_point(%za : tensor<ui16>)
+      outs(%da_e : tensor<4x8xf32>)
+      {axis = 1 : i64, block_size = 0 : i64} : tensor<4x8xf32>
+  %db_e = tensor.empty() : tensor<8x6xf32>
+  %db = hip.dequantize_linear(%ctx)
+      ins(%b, %sb : tensor<8x6xui16>, tensor<f32>)
+      zero_point(%zb : tensor<ui16>)
+      outs(%db_e : tensor<8x6xf32>)
+      {axis = 1 : i64, block_size = 0 : i64} : tensor<8x6xf32>
+  %e = tensor.empty() : tensor<4x6xf32>
+  %mm = hip.matmul(%ctx) ins(%da, %db : tensor<4x8xf32>, tensor<8x6xf32>)
+      outs(%e : tensor<4x6xf32>) : tensor<4x6xf32>
+  %o = tensor.empty() : tensor<4x6xui16>
+  %q = hip.quantize_linear(%ctx) ins(%mm, %sy : tensor<4x6xf32>, tensor<f32>)
+      zero_point(%zy : tensor<ui16>) outs(%o : tensor<4x6xui16>)
+      {axis = 1 : i64, block_size = 0 : i64, precision = 0 : i64,
+       saturate = 1 : i64} : tensor<4x6xui16>
+  return %q : tensor<4x6xui16>
+}
+
+// -----
+
+// A float matmul is the same op with float types; nothing to fold.
+
+// CHECK-LABEL: func.func @matmul_float
+// CHECK-NEXT:    tensor.empty() : tensor<4x6xf32>
+// CHECK-NEXT:    hip.matmul(%{{.*}}) ins(%{{.*}}, %{{.*}} : tensor<4x8xf32>, tensor<8x6xf32>) outs(%{{.*}} : tensor<4x6xf32>) : tensor<4x6xf32>
+// CHECK-NEXT:    return
+func.func @matmul_float(%ctx: !hip.context, %a: tensor<4x8xf32>,
+                        %b: tensor<8x6xf32>) -> tensor<4x6xf32> {
+  %e = tensor.empty() : tensor<4x6xf32>
+  %mm = hip.matmul(%ctx) ins(%a, %b : tensor<4x8xf32>, tensor<8x6xf32>)
+      outs(%e : tensor<4x6xf32>) : tensor<4x6xf32>
+  return %mm : tensor<4x6xf32>
 }

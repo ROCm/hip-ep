@@ -5,6 +5,8 @@
 
 #include "HipToLLVMUtils.h"
 
+#include "hip/Dialect/IR/HipQuantTypes.h"
+
 namespace mlir {
 namespace hip {
 namespace {
@@ -28,15 +30,85 @@ namespace {
 // because the runtime selects on `B_scales != null`, and a slot whose meaning
 // depended on another argument would be the kind of thing that silently keeps
 // working with the wrong value.
-struct QMatMulOpLowering : public ConvertOpToLLVMPattern<QMatMulOp> {
-  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+//
+// The same call serves a quantized hip.matmul, whose scales and zero points
+// come from `quant_types` instead of attributes (per-tensor only).
+
+// Everything wrap_qmatmul needs, from either form.
+struct QMatMulSpec {
+  Value a, b, y, bScales, bZeroPoints; // converted operands
+  MemRefType aType, bType, yType;
+  float aScale, yScale;
+  std::optional<float> bScale; // absent for a per-column B
+  int64_t aZp, bZp, yZp, transA, transB, bBits;
+};
+
+static std::optional<QMatMulSpec> getSpec(QMatMulOp op,
+                                          QMatMulOp::Adaptor adaptor) {
+  QMatMulSpec spec;
+  spec.a = adaptor.getA();
+  spec.b = adaptor.getB();
+  spec.y = adaptor.getY();
+  spec.bScales = adaptor.getBScales();
+  spec.bZeroPoints = adaptor.getBZeroPoints();
+  spec.aType = cast<MemRefType>(op.getA().getType());
+  spec.bType = cast<MemRefType>(op.getB().getType());
+  spec.yType = cast<MemRefType>(op.getY().getType());
+  spec.aScale = op.getAScale().convertToFloat();
+  spec.yScale = op.getYScale().convertToFloat();
+  if (op.getBScale())
+    spec.bScale = op.getBScale()->convertToFloat();
+  spec.aZp = op.getAZeroPoint();
+  spec.bZp = op.getBZeroPoint().value_or(0);
+  spec.yZp = op.getYZeroPoint();
+  spec.transA = op.getTransA();
+  spec.transB = op.getTransB();
+  // 8-bit is the STORAGE width. A packed 4-bit B keeps an 8-bit element type
+  // and its logical element count, so the value width cannot be read off the
+  // type and travels as `b_bits` instead -- the same split as weight_bits on
+  // hip.qconv and resolveQuantBits in QdqLowering.cpp.
+  spec.bBits = op.getPackedInt4() ? 4 : 8;
+  return spec;
+}
+
+static std::optional<QMatMulSpec> getSpec(MatmulOp op,
+                                          MatmulOp::Adaptor adaptor) {
+  auto types = getQuantElementTypes(op);
+  if (types.size() != 3)
+    return std::nullopt;
+  QMatMulSpec spec;
+  spec.a = adaptor.getA();
+  spec.b = adaptor.getB();
+  spec.y = adaptor.getOutput();
+  spec.aType = cast<MemRefType>(op.getA().getType());
+  spec.bType = cast<MemRefType>(op.getB().getType());
+  spec.yType = cast<MemRefType>(op.getOutput().getType());
+  spec.aScale = static_cast<float>(types[0].getScale());
+  spec.bScale = static_cast<float>(types[1].getScale());
+  spec.yScale = static_cast<float>(types[2].getScale());
+  spec.aZp = types[0].getZeroPoint();
+  spec.bZp = types[1].getZeroPoint();
+  spec.yZp = types[2].getZeroPoint();
+  spec.transA = op.getTransA();
+  spec.transB = op.getTransB();
+  spec.bBits = 8;
+  return spec;
+}
+
+template <typename OpTy>
+struct QMatMulLowering : public ConvertOpToLLVMPattern<OpTy> {
+  using ConvertOpToLLVMPattern<OpTy>::ConvertOpToLLVMPattern;
 
   LogicalResult
-  matchAndRewrite(QMatMulOp op, OpAdaptor adaptor,
+  matchAndRewrite(OpTy op, typename OpTy::Adaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    std::optional<QMatMulSpec> spec = getSpec(op, adaptor);
+    if (!spec)
+      return rewriter.notifyMatchFailure(op, "not quantized");
+
     Location loc = op.getLoc();
-    ModuleOp module = op->getParentOfType<ModuleOp>();
-    Type ptrType = getPtrType();
+    ModuleOp module = op->template getParentOfType<ModuleOp>();
+    Type ptrType = this->getPtrType();
     Type i32Type = rewriter.getI32Type();
     Type i64Type = rewriter.getI64Type();
     Type f32Type = rewriter.getF32Type();
@@ -46,9 +118,9 @@ struct QMatMulOpLowering : public ConvertOpToLLVMPattern<QMatMulOp> {
                                       rewriter.getI64IntegerAttr(value));
     };
 
-    auto AType = cast<MemRefType>(op.getA().getType());
-    auto BType = cast<MemRefType>(op.getB().getType());
-    auto YType = cast<MemRefType>(op.getY().getType());
+    MemRefType AType = spec->aType;
+    MemRefType BType = spec->bType;
+    MemRefType YType = spec->yType;
 
     // A and Y may be 8- or 16-bit; B must be 8-bit. The kernel handles a 16-bit
     // A by splitting it into two bytes and running one 8-bit dot per byte, and
@@ -60,34 +132,30 @@ struct QMatMulOpLowering : public ConvertOpToLLVMPattern<QMatMulOp> {
         return rewriter.notifyMatchFailure(
             op, "expected 8- or 16-bit A and Y element types");
     }
-    // 8-bit is the STORAGE width. A packed 4-bit B keeps an 8-bit element type
-    // and its logical element count, so the value width cannot be read off the
-    // type and travels as `b_bits` instead -- the same split as weight_bits on
-    // hip.qconv and resolveQuantBits in QdqLowering.cpp.
     if (!BType.getElementType().isInteger(8))
       return rewriter.notifyMatchFailure(op, "expected 8-bit B storage");
-    int64_t bBits = op.getPackedInt4() ? 4 : 8;
+    int64_t bBits = spec->bBits;
     int64_t aDataType = getHipdnnDataType(AType.getElementType());
     int64_t bDataType = getHipdnnDataType(BType.getElementType());
     int64_t yDataType = getHipdnnDataType(YType.getElementType());
 
-    float yScale = op.getYScale().convertToFloat();
+    float yScale = spec->yScale;
     if (yScale == 0.0f)
       return rewriter.notifyMatchFailure(op, "Y_scale must be non-zero");
 
-    double aScale = static_cast<double>(op.getAScale().convertToFloat());
+    double aScale = static_cast<double>(spec->aScale);
     float mScale = 0.0f;
     float ayRatio = 0.0f;
-    if (op.getBScales()) {
+    if (spec->bScales) {
       // per channel B scale
       ayRatio = static_cast<float>(aScale / static_cast<double>(yScale));
     } else {
-      if (!op.getBScale())
+      if (!spec->bScale)
         return rewriter.notifyMatchFailure(
             op, "per-tensor B requires the B_scale attribute");
-      mScale = static_cast<float>(
-          (aScale * static_cast<double>(op.getBScale()->convertToFloat())) /
-          static_cast<double>(yScale));
+      mScale =
+          static_cast<float>((aScale * static_cast<double>(*spec->bScale)) /
+                             static_cast<double>(yScale));
     }
     Value mScaleValue = LLVM::ConstantOp::create(
         rewriter, loc, f32Type, rewriter.getF32FloatAttr(mScale));
@@ -96,10 +164,10 @@ struct QMatMulOpLowering : public ConvertOpToLLVMPattern<QMatMulOp> {
 
     int64_t ARank = AType.getRank();
     int64_t BRank = BType.getRank();
-    int64_t transA = op.getTransA();
-    int64_t transB = op.getTransB();
-    MemRefDescriptor ADesc(adaptor.getA());
-    MemRefDescriptor BDesc(adaptor.getB());
+    int64_t transA = spec->transA;
+    int64_t transB = spec->transB;
+    MemRefDescriptor ADesc(spec->a);
+    MemRefDescriptor BDesc(spec->b);
 
     // A: [..., M, K] or [..., K, M] when transA; B: [..., K, N] or [..., N, K]
     // when transB. M/N/K are the logical extents either way, and the kernel
@@ -211,21 +279,19 @@ struct QMatMulOpLowering : public ConvertOpToLLVMPattern<QMatMulOp> {
       return failure();
 
     SmallVector<Value, 22> args = {
-        adaptor.getCtx(),
-        extractContiguousMemRefPtr(adaptor.getA(), rewriter, loc),
-        extractContiguousMemRefPtr(adaptor.getB(), rewriter, loc),
-        extractContiguousMemRefPtr(adaptor.getY(), rewriter, loc),
-        extractOptionalMemRefPtr(adaptor.getBScales(), rewriter, loc),
-        extractOptionalMemRefPtr(adaptor.getBZeroPoints(), rewriter, loc), M, N,
-        K, batchCount, bBatchStride, createI64Const(transA),
+        adaptor.getCtx(), extractContiguousMemRefPtr(spec->a, rewriter, loc),
+        extractContiguousMemRefPtr(spec->b, rewriter, loc),
+        extractContiguousMemRefPtr(spec->y, rewriter, loc),
+        extractOptionalMemRefPtr(spec->bScales, rewriter, loc),
+        extractOptionalMemRefPtr(spec->bZeroPoints, rewriter, loc), M, N, K,
+        batchCount, bBatchStride, createI64Const(transA),
         createI64Const(transB), createI64Const(aDataType),
         createI64Const(bDataType), createI64Const(yDataType),
         createI64Const(bBits), mScaleValue, ayRatioValue,
-        createI64Const(op.getAZeroPoint()),
+        createI64Const(spec->aZp),
         // Unused in the per-column form, where the zero points are the
         // B_zero_points array the kernel indexes by column.
-        createI64Const(op.getBZeroPoint().value_or(0)),
-        createI64Const(op.getYZeroPoint())};
+        createI64Const(spec->bZp), createI64Const(spec->yZp)};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
@@ -237,7 +303,8 @@ struct QMatMulOpLowering : public ConvertOpToLLVMPattern<QMatMulOp> {
 
 void populateQMatMulLoweringPatterns(const LLVMTypeConverter &converter,
                                      RewritePatternSet &patterns) {
-  patterns.add<QMatMulOpLowering>(converter);
+  patterns.add<QMatMulLowering<QMatMulOp>, QMatMulLowering<MatmulOp>>(
+      converter);
 }
 
 } // namespace hip

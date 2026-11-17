@@ -35,3 +35,112 @@ Pattern HipAddQdqToQuantTypes with benefit(10) {
     replace q with out;
   };
 }
+
+// Gemm and matmul fold the same way. Only per-tensor Q/DQ become types: a
+// per-column weight has file-backed scales that cannot be type parameters, and
+// a packed 4-bit weight is not one value per element; both stay on
+// QMatMulFusion.pdll / QGemmFusion.pdll.
+Pattern HipMatmulQdqToQuantTypes with benefit(10) {
+  let dq_a = op<hip.dequantize_linear>(ctx: Value, a: Value, _: ValueRange);
+  let dq_b = op<hip.dequantize_linear>(ctx, b: Value, _: ValueRange);
+  let matmul = op<hip.matmul>(ctx, dq_a.0, dq_b.0, matmul_init: Value);
+  let q = op<hip.quantize_linear>(ctx, matmul.0, _: ValueRange)
+      -> (output_type: Type);
+
+  SupportsQuantTypes(matmul, dq_a, dq_b, q);
+  HasSingleUseResult(matmul);
+
+  rewrite q with {
+    let a_type = GetQuantTensorType(dq_a);
+    let b_type = GetQuantTensorType(dq_b);
+    let out_type = GetQuantTensorType(q);
+    let trans_a_attr =
+        ExtractHipIntAttr(matmul, attr<"\"transA\"">, attr<"0 : i64">);
+    let trans_b_attr =
+        ExtractHipIntAttr(matmul, attr<"\"transB\"">, attr<"0 : i64">);
+
+    let a_q = op<hip.storage_cast>(a) -> (a_type);
+    let b_q = op<hip.storage_cast>(b) -> (b_type);
+    let init = BuildInit(out_type, matmul_init);
+    let qmatmul = op<hip.matmul>(ctx, a_q, b_q, init) {
+      transA = trans_a_attr,
+      transB = trans_b_attr
+    } -> (out_type);
+    let out = op<hip.storage_cast>(qmatmul) -> (output_type);
+    replace q with out;
+  };
+}
+
+Pattern HipGemmQdqToQuantTypes with benefit(10) {
+  let dq_a = op<hip.dequantize_linear>(ctx: Value, a: Value, _: ValueRange);
+  let dq_b = op<hip.dequantize_linear>(ctx, b: Value, _: ValueRange);
+  let dq_c = op<hip.dequantize_linear>(ctx, c: Value, _: ValueRange);
+  let gemm = op<hip.gemm>(ctx, dq_a.0, dq_b.0, dq_c.0, gemm_init: Value);
+  let q = op<hip.quantize_linear>(ctx, gemm.0, _: ValueRange)
+      -> (output_type: Type);
+
+  SupportsQuantTypesWithBias(gemm, dq_a, dq_b, dq_c, q);
+  HasSingleUseResult(gemm);
+
+  rewrite q with {
+    let a_type = GetQuantTensorType(dq_a);
+    let b_type = GetQuantTensorType(dq_b);
+    let c_type = GetQuantTensorType(dq_c);
+    let out_type = GetQuantTensorType(q);
+    let alpha_attr =
+        ExtractHipFloatAttr(gemm, attr<"\"alpha\"">, attr<"1.0 : f32">);
+    let beta_attr =
+        ExtractHipFloatAttr(gemm, attr<"\"beta\"">, attr<"1.0 : f32">);
+    let trans_a_attr =
+        ExtractHipIntAttr(gemm, attr<"\"transA\"">, attr<"0 : i64">);
+    let trans_b_attr =
+        ExtractHipIntAttr(gemm, attr<"\"transB\"">, attr<"0 : i64">);
+
+    let a_q = op<hip.storage_cast>(a) -> (a_type);
+    let b_q = op<hip.storage_cast>(b) -> (b_type);
+    let c_q = op<hip.storage_cast>(c) -> (c_type);
+    let init = BuildInit(out_type, gemm_init);
+    let qgemm = op<hip.gemm>(ctx, a_q, b_q, c_q, init) {
+      alpha = alpha_attr,
+      beta = beta_attr,
+      transA = trans_a_attr,
+      transB = trans_b_attr
+    } -> (out_type);
+    let out = op<hip.storage_cast>(qgemm) -> (output_type);
+    replace q with out;
+  };
+}
+
+Pattern HipGemmNoBiasQdqToQuantTypes with benefit(10) {
+  let dq_a = op<hip.dequantize_linear>(ctx: Value, a: Value, _: ValueRange);
+  let dq_b = op<hip.dequantize_linear>(ctx, b: Value, _: ValueRange);
+  let gemm = op<hip.gemm>(ctx, dq_a.0, dq_b.0, gemm_init: Value);
+  let q = op<hip.quantize_linear>(ctx, gemm.0, _: ValueRange)
+      -> (output_type: Type);
+
+  SupportsQuantTypes(gemm, dq_a, dq_b, q);
+  HasSingleUseResult(gemm);
+
+  rewrite q with {
+    let a_type = GetQuantTensorType(dq_a);
+    let b_type = GetQuantTensorType(dq_b);
+    let out_type = GetQuantTensorType(q);
+    let alpha_attr =
+        ExtractHipFloatAttr(gemm, attr<"\"alpha\"">, attr<"1.0 : f32">);
+    let trans_a_attr =
+        ExtractHipIntAttr(gemm, attr<"\"transA\"">, attr<"0 : i64">);
+    let trans_b_attr =
+        ExtractHipIntAttr(gemm, attr<"\"transB\"">, attr<"0 : i64">);
+
+    let a_q = op<hip.storage_cast>(a) -> (a_type);
+    let b_q = op<hip.storage_cast>(b) -> (b_type);
+    let init = BuildInit(out_type, gemm_init);
+    let qgemm = op<hip.gemm>(ctx, a_q, b_q, init) {
+      alpha = alpha_attr,
+      transA = trans_a_attr,
+      transB = trans_b_attr
+    } -> (out_type);
+    let out = op<hip.storage_cast>(qgemm) -> (output_type);
+    replace q with out;
+  };
+}

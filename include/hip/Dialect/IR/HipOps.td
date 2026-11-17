@@ -820,6 +820,12 @@ def Hip_MatmulOp : Hip_DpsOp_WithInfer<"matmul", "Output", [OpStateOpInterface]>
     unset they default to 0 (standard onnx.MatMul layout: A [...,M,K],
     B [...,K,N]).
 
+    The element types decide the kernel, as for `hip.add`: float tensors run
+    the float kernel, `!quant.uniform` tensors (per-tensor scales, A 8/16-bit,
+    B 8-bit, result 8/16-bit) mean dequantize inputs and quantize the output.
+    After hip-legalize-quant-types the element types of [A, B, output] are in
+    `quant_types` and the tensors are storage integers.
+
     Example (2D):
     ```mlir
     hip.matmul(%ctx) ins(%A, %B : memref<128x4096xf32, 1>,
@@ -841,8 +847,24 @@ def Hip_MatmulOp : Hip_DpsOp_WithInfer<"matmul", "Output", [OpStateOpInterface]>
     Hip_TensorOrMemRef:$B,
     Hip_TensorOrMemRef:$output,
     DefaultValuedAttr<I64Attr, "0">:$transA,
-    DefaultValuedAttr<I64Attr, "0">:$transB
+    DefaultValuedAttr<I64Attr, "0">:$transB,
+    OptionalAttr<TypeArrayAttr>:$quant_types
   );
+
+  // Float builders; `quant_types` is only set by hip-legalize-quant-types.
+  let builders = [
+    OpBuilder<(ins "::mlir::TypeRange":$result_tensors, "::mlir::Value":$ctx,
+                   "::mlir::Value":$A, "::mlir::Value":$B,
+                   "::mlir::Value":$output), [{
+      build($_builder, $_state, result_tensors, ctx, A, B, output,
+            ::mlir::IntegerAttr(), ::mlir::IntegerAttr(), ::mlir::ArrayAttr());
+    }]>,
+    OpBuilder<(ins "::mlir::Value":$ctx, "::mlir::Value":$A,
+                   "::mlir::Value":$B, "::mlir::Value":$output), [{
+      build($_builder, $_state, ctx, A, B, output, ::mlir::IntegerAttr(),
+            ::mlir::IntegerAttr(), ::mlir::ArrayAttr());
+    }]>
+  ];
 
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(` $A `,` $B `:` type($A) `,` type($B) `)`
@@ -5122,8 +5144,11 @@ def Hip_GemmOp : Hip_DpsOp_WithInfer<"gemm", "Output", [OpStateOpInterface]> {
     DefaultValuedAttr<F32Attr, "1.0">:$alpha,
     DefaultValuedAttr<F32Attr, "1.0">:$beta,
     DefaultValuedAttr<I64Attr, "0">:$transA,
-    DefaultValuedAttr<I64Attr, "0">:$transB
+    DefaultValuedAttr<I64Attr, "0">:$transB,
+    // Element types of [A, B, (C), output]; see hip.matmul.
+    OptionalAttr<TypeArrayAttr>:$quant_types
   );
+  let hasVerifier = 1;
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(`
         $input_a `,` $input_b (`,` $input_c^)?

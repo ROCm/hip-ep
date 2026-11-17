@@ -354,12 +354,12 @@ def LegalizeQuantTypesPass
   let summary = "Move quantized element types into op attributes before "
                 "bufferization";
   let description = [{
-    Memrefs cannot hold `!quant.uniform` element types. For every op whose
-    tensors are quantized, this pass records the [inputs..., output] element
-    types in the op's `quant_types` attribute and retypes all quantized
-    tensors to their hip storage integers (`uiN` / signless `iN`). The
-    now-identity `hip.storage_cast`s are removed. Lowering reads
-    `quant_types` to pick the quantized kernel.
+    Memrefs cannot hold `!quant.uniform` element types. For every quant-capable
+    op (`hip.add`, `hip.matmul`, `hip.gemm`), quantized or not, this pass records
+    the [inputs..., output] element types in the op's `quant_types` attribute,
+    and retypes all quantized tensors to their hip storage integers (`uiN` /
+    signless `iN`). The now-identity `hip.storage_cast`s are removed. Lowering
+    reads `quant_types` to pick the quantized or the float kernel.
 
     Fails if a quantized op has no kernel for its types or if any quantized
     type remains.

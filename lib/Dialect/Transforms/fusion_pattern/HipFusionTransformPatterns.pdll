@@ -52,6 +52,8 @@ Constraint IsHipPerChannelQuantizedWeight(dq: Op, consumer: Op);
 // quant type and that a kernel exists for op with them; GetQuantTensorType
 // returns the Q/DQ's integer-side tensor type with that quant element type.
 Constraint SupportsQuantTypes(op: Op, lhs: Op, rhs: Op, out: Op);
+Constraint SupportsQuantTypesWithBias(op: Op, a: Op, b: Op, c: Op, out: Op);
+Constraint IsHipPackedInt4Dequantize(dq: Op);
 Rewrite GetQuantTensorType(qdq: Op) -> Type;
 
 // Compute-op geometry.

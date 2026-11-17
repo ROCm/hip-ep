@@ -49,16 +49,45 @@ static bool supportsQElementwise(TypeRange inputs, Type result) {
   });
 }
 
+// wrap_qmatmul / wrap_qgemm: per-tensor scales. A and the result are 8 or 16
+// bit, B is 8 bit (the kernel splits only A into byte planes), and gemm's bias
+// C may also be 32 bit (the int32 an ONNX quantizer emits).
+static bool isUniformOfWidth(Type type, ArrayRef<unsigned> widths) {
+  auto quantType = dyn_cast<quant::UniformQuantizedType>(type);
+  return quantType &&
+         llvm::is_contained(widths, quantType.getStorageTypeIntegralWidth());
+}
+
+static bool supportsQMatmul(TypeRange inputs, Type result, bool allowBias) {
+  size_t numInputs = inputs.size();
+  if (numInputs < 2 || numInputs > (allowBias ? 3u : 2u))
+    return false;
+  if (!isUniformOfWidth(inputs[0], {8, 16}) ||
+      !isUniformOfWidth(inputs[1], {8}) || !isUniformOfWidth(result, {8, 16}))
+    return false;
+  return numInputs == 2 || isUniformOfWidth(inputs[2], {8, 16, 32});
+}
+
 bool mlir::hip::supportsQuantTypes(Operation *op, TypeRange inputElementTypes,
                                    Type resultElementType) {
   return llvm::TypeSwitch<Operation *, bool>(op)
       .Case<AddOp>([&](auto) {
         return supportsQElementwise(inputElementTypes, resultElementType);
       })
+      .Case<MatmulOp>([&](auto) {
+        return supportsQMatmul(inputElementTypes, resultElementType,
+                               /*allowBias=*/false);
+      })
+      .Case<GemmOp>([&](auto) {
+        return supportsQMatmul(inputElementTypes, resultElementType,
+                               /*allowBias=*/true);
+      })
       .Default([](Operation *) { return false; });
 }
 
-bool mlir::hip::isQuantCapable(Operation *op) { return isa<AddOp>(op); }
+bool mlir::hip::isQuantCapable(Operation *op) {
+  return isa<AddOp, MatmulOp, GemmOp>(op);
+}
 
 bool mlir::hip::isQuantizedOp(Operation *op) {
   if (auto attr = op->getAttrOfType<ArrayAttr>("quant_types"))

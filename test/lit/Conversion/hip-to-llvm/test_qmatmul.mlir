@@ -177,4 +177,67 @@ module {
          B_quant_axis = 1 : i64}
     return
   }
+
+  // ===== hip.matmul with quant types =====
+  //
+  // The per-tensor case above, with the same numbers carried as element types
+  // instead of attributes. It must lower to the identical wrap_qmatmul call:
+  // the kernel contract does not change, only where the parameters come from.
+  //
+  // CHECK-LABEL: llvm.func @test_matmul_quant_types_per_tensor(
+  // CHECK:      %[[MSCALE:.*]] = llvm.mlir.constant(6.250000e-02 : f32) : f32
+  // CHECK-NEXT: %[[AYRATIO:.*]] = llvm.mlir.constant(0.000000e+00 : f32) : f32
+  // CHECK-NEXT: %[[M:.*]] = llvm.extractvalue %[[ADESC:.*]][3, 1]
+  // CHECK-NEXT: %[[K:.*]] = llvm.extractvalue %[[ADESC]][3, 2]
+  // CHECK-NEXT: %[[N:.*]] = llvm.extractvalue %[[BDESC:.*]][3, 1]
+  // CHECK-NEXT: %[[BATCH:.*]] = llvm.extractvalue %[[ADESC]][3, 0]
+  // CHECK-NEXT: %[[STRIDE:.*]] = llvm.mul %[[K]], %[[N]] : i64
+  // CHECK-NEXT: llvm.extractvalue %[[ADESC]][1]
+  // CHECK-NEXT: %[[APTR:.*]] = llvm.addrspacecast
+  // CHECK-NEXT: llvm.extractvalue %[[BDESC]][1]
+  // CHECK-NEXT: %[[BPTR:.*]] = llvm.addrspacecast
+  // CHECK-NEXT: llvm.extractvalue %[[YDESC:.*]][1]
+  // CHECK-NEXT: %[[YPTR:.*]] = llvm.addrspacecast
+  // CHECK-NEXT: %[[BSNULL:.*]] = llvm.mlir.zero : !llvm.ptr
+  // CHECK-NEXT: %[[BZNULL:.*]] = llvm.mlir.zero : !llvm.ptr
+  // CHECK-NEXT: %[[TRANSA:.*]] = llvm.mlir.constant(0 : i64) : i64
+  // CHECK-NEXT: %[[TRANSB:.*]] = llvm.mlir.constant(1 : i64) : i64
+  // CHECK-NEXT: %[[ADT:.*]] = llvm.mlir.constant(9 : i64) : i64
+  // CHECK-NEXT: %[[BDT:.*]] = llvm.mlir.constant(5 : i64) : i64
+  // CHECK-NEXT: %[[YDT:.*]] = llvm.mlir.constant(9 : i64) : i64
+  // CHECK-NEXT: %[[BBITS:.*]] = llvm.mlir.constant(8 : i64) : i64
+  // CHECK-NEXT: %[[AZP:.*]] = llvm.mlir.constant(32768 : i64) : i64
+  // CHECK-NEXT: %[[BZP:.*]] = llvm.mlir.constant(3 : i64) : i64
+  // CHECK-NEXT: %[[YZP:.*]] = llvm.mlir.constant(32768 : i64) : i64
+  // CHECK-NEXT: llvm.call @wrap_qmatmul(%{{.*}}, %[[APTR]], %[[BPTR]], %[[YPTR]], %[[BSNULL]], %[[BZNULL]], %[[M]], %[[N]], %[[K]], %[[BATCH]], %[[STRIDE]], %[[TRANSA]], %[[TRANSB]], %[[ADT]], %[[BDT]], %[[YDT]], %[[BBITS]], %[[MSCALE]], %[[AYRATIO]], %[[AZP]], %[[BZP]], %[[YZP]]) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32, i64, i64, i64) -> i32
+  func.func @test_matmul_quant_types_per_tensor(%ctx: !hip.context,
+                                     %A: memref<2x64x128xui16, 1>,
+                                     %B: memref<2x32x128xi8, 1>,
+                                     %Y: memref<2x64x32xui16, 1>) {
+    hip.matmul(%ctx)
+        ins(%A, %B : memref<2x64x128xui16, 1>, memref<2x32x128xi8, 1>)
+        outs(%Y : memref<2x64x32xui16, 1>)
+        {quant_types = [!quant.uniform<u16:f32, 2.500000e-01:32768>,
+                        !quant.uniform<i8:f32, 1.250000e-01:3>,
+                        !quant.uniform<u16:f32, 5.000000e-01:32768>],
+         transA = 0 : i64, transB = 1 : i64}
+    return
+  }
+
+  // ===== Non-quantized quant_types stay on the float kernel =====
+  //
+  // hip-legalize-quant-types gives every matmul `quant_types`; only quantized
+  // entries select wrap_qmatmul.
+  //
+  // CHECK-LABEL: llvm.func @test_matmul_f32_quant_types(
+  // CHECK-NOT:  @wrap_qmatmul
+  // CHECK:      llvm.call @wrap_hipblasLtMatmul
+  func.func @test_matmul_f32_quant_types(%ctx: !hip.context,
+                                         %A: memref<64x128xf32, 1>,
+                                         %B: memref<128x32xf32, 1>,
+                                         %Y: memref<64x32xf32, 1>) {
+    hip.matmul(%ctx) ins(%A, %B : memref<64x128xf32, 1>, memref<128x32xf32, 1>)
+        outs(%Y : memref<64x32xf32, 1>) {quant_types = [f32, f32, f32]}
+    return
+  }
 }
