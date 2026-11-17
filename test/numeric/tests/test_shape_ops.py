@@ -412,14 +412,13 @@ class TestGatherND:
 # ---------------------------------------------------------------------------
 #
 # The graph-constant + positive-stride case is folded to
-# `tensor.extract_slice` upstream; this test exercises the runtime fallback
-# kernel by:
-#   (a) feeding `starts` / `ends` as *graph inputs* (non-constant) -- forces
-#       the runtime D2H + host-side resolution path, OR
-#   (b) using negative steps -- the fold rejects this case so it falls
-#       through to the runtime kernel as well.
-#
-# Both paths run the same `hip_slice` kernel.
+# `tensor.extract_slice` upstream. The other cases run the `hip_slice` kernel
+# through one of two paths:
+#   (a) parameters fed as *graph inputs* (non-constant) take the runtime path:
+#       D2H readback and host-side resolution in wrap_slice;
+#   (b) constant negative steps over a static input are resolved at compile
+#       time and passed from host memory (wrap_slice_static), with no
+#       readback.
 
 
 def _make_slice_model(
@@ -435,11 +434,10 @@ def _make_slice_model(
 ):
     """Build a Slice model.
 
-    If ``constant_indices`` is True, starts/ends/axes/steps become initializers
-    -- but the runtime still sees them as non-constant if any step is
-    negative (the compile-time fold only handles positive steps). If
-    ``constant_indices`` is False they become graph inputs, guaranteeing the
-    runtime kernel path.
+    If ``constant_indices`` is True, starts/ends/axes/steps become
+    initializers: positive steps fold to an extract_slice, and negative steps
+    take the compile-time (wrap_slice_static) path. If ``constant_indices`` is
+    False they become graph inputs, guaranteeing the runtime readback path.
     """
     tp = np_to_onnx_type(dtype)
     index_tp = np_to_onnx_type(index_dtype)
@@ -538,9 +536,8 @@ class TestSlice:
     @pytest.mark.parametrize(
         "dtype,shape,starts,ends,axes,steps,out_shape",
         [
-            # Negative step: reverses elements along axis 0. The compile-time
-            # fold rejects negative steps -> goes through the runtime kernel
-            # even with constant indices.
+            # Negative step: reverses elements along axis 0. Constant indices
+            # resolve at compile time, so these take the wrap_slice_static path.
             #
             # Note on the negative-end sentinel:
             #   ONNX Slice spec normalises `end += dim` for any end < 0,
@@ -562,7 +559,7 @@ class TestSlice:
     def test_slice_negative_step(
         self, model_runner, dtype, shape, starts, ends, axes, steps, out_shape
     ):
-        """Negative step ALWAYS goes through the runtime kernel."""
+        """Constant negative steps take the compile-time path."""
         model, _ = _make_slice_model(
             dtype,
             shape,
@@ -579,6 +576,47 @@ class TestSlice:
         else:
             x = rng.uniform(-2.0, 2.0, shape).astype(dtype)
         actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0)
+
+    @pytest.mark.parametrize(
+        "dtype,shape,starts,ends,axes,steps,out_shape",
+        [
+            # Negative start, step -2, stopping before index 1: 6, 4, 2.
+            (np.float16, [3, 8], [-2], [1], [1], [-2], [3, 3]),
+            # A start past the end clamps to the last element; step -3 gives
+            # 9, 6, 3, 0.
+            (np.int64, [10], [100], [-100], [0], [-3], [4]),
+            # Two axes with mixed signs: rows 4..1, columns 1 and 3.
+            (np.int32, [5, 6], [4, 1], [0, 5], [0, 1], [-1, 2], [4, 2]),
+        ],
+    )
+    def test_slice_negative_step_runtime(
+        self, model_runner, dtype, shape, starts, ends, axes, steps, out_shape
+    ):
+        """Negative steps fed as graph inputs keep the runtime readback path."""
+        model, _ = _make_slice_model(
+            dtype,
+            shape,
+            starts,
+            ends,
+            axes,
+            steps,
+            out_shape,
+            constant_indices=False,
+        )
+        rng = np.random.default_rng(506)
+        if np.issubdtype(dtype, np.integer):
+            x = rng.integers(-50, 50, shape, dtype=dtype)
+        else:
+            x = rng.uniform(-2.0, 2.0, shape).astype(dtype)
+        feeds = [
+            x,
+            np.array(starts, dtype=np.int64),
+            np.array(ends, dtype=np.int64),
+            np.array(axes, dtype=np.int64),
+            np.array(steps, dtype=np.int64),
+        ]
+        actual, expected = model_runner.run_sample(model, feeds)
         compare_outputs(actual, expected, atol=0)
 
     # Constant negative-step slices over static inputs are resolved at compile
