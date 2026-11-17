@@ -8586,12 +8586,14 @@ static void realizeBlockedInt4Arguments(func::FuncOp func) {
   }
 }
 
-// The anchor pass leaves the packed-int4 dequantize of a 1x1 convolution's
-// weights in its kernel, reading a kernel argument that holds two signed
-// values per byte at the logical shape. Retype that argument to signless i4,
-// with the same bytes, and drop packed_int4: the dequantize then casts i4 to
-// float (sitofp), and rocMLIR's 4-bit legalization extracts the nibbles, low
-// nibble first, as the HIP kernel reads them.
+// The anchor pass leaves the packed-int4 dequantize of an anchor's weights in
+// its kernel, reading a kernel argument that holds two values per byte at the
+// logical shape. Retype that argument to 4 bits with the same bytes, signless
+// for INT4 and unsigned for UINT4, and drop packed_int4: the dequantize then
+// casts i4 to float (sitofp) or ui4 to float (rocMLIR's unsigned_cast, which
+// makeUnsignedIntegersSignless later keeps on a signless i4), and rocMLIR's
+// 4-bit legalization extracts the nibbles, low nibble first, as the HIP kernel
+// reads them.
 static void realizePackedInt4Arguments(func::FuncOp func) {
   SmallVector<DequantizeLinearOp> dequants;
   func.walk([&](DequantizeLinearOp op) {
@@ -8603,9 +8605,12 @@ static void realizePackedInt4Arguments(func::FuncOp func) {
     if (!arg || arg.getOwner() != &func.front() || !arg.hasOneUse())
       continue;
     auto type = dyn_cast<RankedTensorType>(arg.getType());
-    if (!type || !type.getElementType().isSignlessInteger(8))
+    if (!type || (!type.getElementType().isSignlessInteger(8) &&
+                  !type.getElementType().isUnsignedInteger(8)))
       continue;
-    auto i4Type = type.clone(IntegerType::get(func.getContext(), 4));
+    auto i4Type = type.clone(IntegerType::get(
+        func.getContext(), 4,
+        cast<IntegerType>(type.getElementType()).getSignedness()));
     arg.setType(i4Type);
     SmallVector<Type> inputs(func.getFunctionType().getInputs());
     inputs[arg.getArgNumber()] = i4Type;
