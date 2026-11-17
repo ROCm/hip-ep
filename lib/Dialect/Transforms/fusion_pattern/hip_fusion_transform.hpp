@@ -33,7 +33,6 @@
 
 #include "gemm_to_matmul.hpp"
 #include "linear_attention_group_fold.hpp"
-#include "matmul_bias_fusion.hpp"
 #include "patch_embed_conv_to_gemm.hpp"
 #include "swiglu_fusion.hpp"
 
@@ -367,6 +366,73 @@ supportsQuantTypes(mlir::PatternRewriter &, mlir::PDLResultList &,
   return mlir::success(mlir::hip::supportsQuantTypes(
       args[0].dyn_cast<mlir::Operation *>(), llvm::ArrayRef(types).drop_back(),
       types.back()));
+}
+
+/// lhs and rhs are ranked tensors of the same shape
+inline mlir::LogicalResult hasSameShape(mlir::PatternRewriter &,
+                                        mlir::PDLResultList &,
+                                        llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 2)
+    return mlir::failure();
+  auto lhs = mlir::dyn_cast<mlir::RankedTensorType>(
+      args[0].cast<mlir::Value>().getType());
+  auto rhs = mlir::dyn_cast<mlir::RankedTensorType>(
+      args[1].cast<mlir::Value>().getType());
+  return mlir::success(lhs && rhs && lhs.getShape() == rhs.getShape());
+}
+
+/// bias broadcasts over every row of an [..., N] result: static, N along its
+/// last dim and 1 everywhere else
+inline mlir::LogicalResult isRowBias(mlir::PatternRewriter &,
+                                     mlir::PDLResultList &,
+                                     llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 2)
+    return mlir::failure();
+  auto bias = mlir::dyn_cast<mlir::RankedTensorType>(
+      args[0].cast<mlir::Value>().getType());
+  auto result = mlir::dyn_cast<mlir::RankedTensorType>(
+      args[1].cast<mlir::Value>().getType());
+  if (!bias || !result || result.getRank() == 0)
+    return mlir::failure();
+  int64_t n = result.getShape().back();
+  return mlir::success(bias.hasStaticShape() && bias.getRank() >= 1 &&
+                       bias.getRank() <= result.getRank() &&
+                       bias.getShape().back() == n &&
+                       llvm::all_of(bias.getShape().drop_back(),
+                                    [](int64_t dim) { return dim == 1; }));
+}
+
+/// matmul meets hip.matmul's bias rules: rank-2 B, rank >= 2 A, and transA = 0
+/// when A has rank > 2
+inline mlir::LogicalResult
+canTakeMatmulBias(mlir::PatternRewriter &, mlir::PDLResultList &,
+                  llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 1)
+    return mlir::failure();
+  auto matmul = mlir::dyn_cast_or_null<mlir::hip::MatmulOp>(
+      args[0].cast<mlir::Operation *>());
+  if (!matmul)
+    return mlir::failure();
+  auto a = mlir::dyn_cast<mlir::RankedTensorType>(matmul.getA().getType());
+  auto b = mlir::dyn_cast<mlir::RankedTensorType>(matmul.getB().getType());
+  return mlir::success(a && b && b.getRank() == 2 && a.getRank() >= 2 &&
+                       (a.getRank() == 2 || matmul.getTransA() == 0));
+}
+
+/// the last value is quantized, or all values share one element type
+inline mlir::LogicalResult
+isQuantizedOrSameElementType(mlir::PatternRewriter &, mlir::PDLResultList &,
+                             llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.empty())
+    return mlir::failure();
+  mlir::Type last =
+      mlir::getElementTypeOrSelf(args.back().cast<mlir::Value>().getType());
+  if (mlir::hip::isQuantized(last))
+    return mlir::success();
+  return mlir::success(llvm::all_of(args, [&](const mlir::PDLValue &arg) {
+    return mlir::getElementTypeOrSelf(arg.cast<mlir::Value>().getType()) ==
+           last;
+  }));
 }
 
 /// rms computes an L2 normalization over the trailing axis
@@ -745,6 +811,23 @@ getQuantTensorType(mlir::PatternRewriter &, mlir::PDLResultList &results,
   return mlir::success();
 }
 
+/// bias as the rank-1 [N] row hip.matmul takes: unchanged, or [1, ..., 1, N]
+/// collapsed
+inline mlir::LogicalResult toRowBias(mlir::PatternRewriter &rewriter,
+                                     mlir::PDLResultList &results,
+                                     llvm::ArrayRef<mlir::PDLValue> args) {
+  // Guarded by IsRowBias, so the cast holds.
+  mlir::Value bias = args[0].cast<mlir::Value>();
+  auto type = mlir::cast<mlir::RankedTensorType>(bias.getType());
+  if (type.getRank() > 1)
+    bias = mlir::tensor::CollapseShapeOp::create(
+        rewriter, bias.getLoc(), bias,
+        llvm::SmallVector<mlir::ReassociationIndices>{
+            llvm::to_vector(llvm::seq<int64_t>(0, type.getRank()))});
+  results.push_back(bias);
+  return mlir::success();
+}
+
 /// a copy of layout reading dq's quantized input and producing q's result type
 inline mlir::LogicalResult
 createRequantizedLayoutOp(mlir::PatternRewriter &rewriter,
@@ -920,6 +1003,13 @@ inline void registerNativeHelpers(mlir::PDLPatternModule &pdlPatterns) {
                                          supportsQuantTypes);
   pdlPatterns.registerConstraintFunction("IsHipPackedInt4Dequantize",
                                          isHipPackedInt4Dequantize);
+  pdlPatterns.registerConstraintFunction("HasSameShape", hasSameShape);
+  pdlPatterns.registerConstraintFunction("IsRowBias", isRowBias);
+  pdlPatterns.registerConstraintFunction("CanTakeMatmulBias",
+                                         canTakeMatmulBias);
+  pdlPatterns.registerConstraintFunction("IsQuantizedOrSameElementType",
+                                         isQuantizedOrSameElementType);
+  pdlPatterns.registerRewriteFunction("ToRowBias", toRowBias);
   pdlPatterns.registerConstraintFunction("IsHipFusableQConvGeometry",
                                          isHipFusableQConvGeometry);
   pdlPatterns.registerConstraintFunction("IsHipPerAxisQuantizedWeight",
@@ -961,11 +1051,6 @@ constexpr unsigned kPatchEmbedConvToGemmBenefit = 5;
 /// consumes it.
 constexpr unsigned kSwigluFusionBenefit = 2;
 
-/// Rooted at `hip.add`; the quant-type folds root at `hip.quantize_linear`, so
-/// the two never compete for a match. The fold runs first only because it has
-/// to produce the typed add this pattern reads.
-constexpr unsigned kMatmulBiasFusionBenefit = 3;
-
 /// The only pattern rooted at `hip.gemm`. The per-channel and packed 4-bit
 /// QGemm patterns it must not pre-empt are excluded by its own check, not by
 /// benefit (they root at `hip.quantize_linear`).
@@ -991,8 +1076,6 @@ inline mlir::LogicalResult run(mlir::ModuleOp module,
                               mlir::PatternBenefit(kSwigluFusionBenefit));
   populateGemmToMatmulPattern(patterns,
                               mlir::PatternBenefit(kGemmToMatmulBenefit));
-  populateMatmulBiasFusionPattern(
-      patterns, mlir::PatternBenefit(kMatmulBiasFusionBenefit));
   populateLinearAttentionGroupFoldPattern(
       patterns, mlir::PatternBenefit(kLinearAttentionGroupFoldBenefit));
 

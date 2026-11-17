@@ -56,6 +56,13 @@ Constraint SupportsQuantTypesWithBias(op: Op, a: Op, b: Op, c: Op, out: Op);
 Constraint IsHipPackedInt4Dequantize(dq: Op);
 Rewrite GetQuantTensorType(qdq: Op) -> Type;
 
+// Matmul + bias (MatmulBiasFusion.pdll).
+Constraint HasSameShape(lhs: Value, rhs: Value);
+Constraint IsRowBias(bias: Value, result: Value);
+Constraint CanTakeMatmulBias(matmul: Op);
+Constraint IsQuantizedOrSameElementType(a: Value, b: Value, c: Value);
+Rewrite ToRowBias(bias: Value) -> Value;
+
 // Compute-op geometry.
 Constraint IsHipFusableQConvGeometry(conv: Op);
 Constraint IsHipL2EquivalentRmsNorm(rms: Op);
@@ -72,6 +79,7 @@ Constraint CanRequantizeLayoutOp(layout: Op, resultType: Type);
 Rewrite CreateRequantizedLayoutOp(dq: Op, layout: Op, q: Op) -> Value;
 
 #include "QdqToQuantTypes.pdll"
+#include "MatmulBiasFusion.pdll"
 #include "QMulFusion.pdll"
 #include "QMatMulFusion.pdll"
 #include "QGemmFusion.pdll"

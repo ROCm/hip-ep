@@ -1,0 +1,69 @@
+//===- MatmulBiasFusion.pdll ----------------------------------------------===//
+//
+// hip.matmul + row-bias hip.add -> hip.matmul with the bias operand:
+//
+//   %m = hip.matmul(%ctx) ins(%a, %w) outs(%e0)
+//   %y = hip.add(%ctx) ins(%m, %bias) outs(%e1)       (either operand order)
+//   ->
+//   %y = hip.matmul(%ctx) ins(%a, %w, %bias) outs(%e1)
+//
+// Structure only: float and quant-typed chains fuse alike, and whether a kernel
+// exists is not checked. For quantized types the matmul result's own
+// quantization is dropped; the fused op quantizes once.
+//
+// Included by HipFusionTransformPatterns.pdll, which declares the native
+// helpers used below. Not compilable on its own.
+//===----------------------------------------------------------------------===//
+
+// The add reads the plain matmul's only result and adds a row bias.
+Constraint CanFuseMatmulBias(matmul: Op, bias: Value, add: Op) {
+  HasSingleUseResult(matmul);
+  // A rank-2 weight, and transA = 0 for a rank > 2 A (hip.matmul's verifier).
+  CanTakeMatmulBias(matmul);
+  // The add must not broadcast the matmul result.
+  HasSameShape(matmul.0, add.0);
+  IsRowBias(bias, add.0);
+  // A float chain is one element type; quantized types differ by design.
+  IsQuantizedOrSameElementType(matmul.0, bias, add.0);
+}
+
+// The add's init already has the fused result's type and dynamic extents.
+Rewrite FuseMatmulBias(matmul: Op, ctx: Value, a: Value, b: Value,
+                       bias: Value, init: Value, out_type: Type) -> Op {
+  let trans_a = ExtractHipIntAttr(matmul, attr<"\"transA\"">, attr<"0 : i64">);
+  let trans_b = ExtractHipIntAttr(matmul, attr<"\"transB\"">, attr<"0 : i64">);
+  let row_bias = ToRowBias(bias);
+  return op<hip.matmul>(ctx, a, b, row_bias, init) {
+    transA = trans_a,
+    transB = trans_b
+  } -> (out_type);
+}
+
+// Four operands: ctx, A, B, init -- a matmul that already has a bias is not
+// fused twice.
+Pattern HipMatmulBiasFusionLhs with benefit(3) {
+  let matmul = op<hip.matmul>(ctx: Value, a: Value, b: Value, _: Value);
+  let add = op<hip.add>(ctx, matmul.0, bias: Value, init: Value)
+      -> (out_type: Type);
+  CanFuseMatmulBias(matmul, bias, add);
+
+  rewrite add with {
+    let fused = FuseMatmulBias(matmul, ctx, a, b, bias, init, out_type);
+    replace add with fused;
+    erase matmul;
+  };
+}
+
+// Addition commutes: the same with the matmul on the right.
+Pattern HipMatmulBiasFusionRhs with benefit(3) {
+  let matmul = op<hip.matmul>(ctx: Value, a: Value, b: Value, _: Value);
+  let add = op<hip.add>(ctx, bias: Value, matmul.0, init: Value)
+      -> (out_type: Type);
+  CanFuseMatmulBias(matmul, bias, add);
+
+  rewrite add with {
+    let fused = FuseMatmulBias(matmul, ctx, a, b, bias, init, out_type);
+    replace add with fused;
+    erase matmul;
+  };
+}
