@@ -57,6 +57,9 @@ struct QGemmSpec {
   MemRefType cType; // null without a bias
   float alpha, beta, aScale, bScale, cScale, yScale;
   int64_t aZp, bZp, cZp, yZp, transA, transB, bBits;
+  // A is [..., M, K] with transA == 0: its leading dims fold into the rows, so
+  // the kernel sees [prod(leading) * M, K]. Set for a hip.matmul with a bias.
+  bool foldLeadingDims = false;
 };
 
 static std::optional<QGemmSpec> getSpec(QGemmOp op, QGemmOp::Adaptor adaptor) {
@@ -116,6 +119,39 @@ static std::optional<QGemmSpec> getSpec(GemmOp op, GemmOp::Adaptor adaptor) {
   spec.transA = op.getTransA();
   spec.transB = op.getTransB();
   spec.bBits = 8;
+  return spec;
+}
+
+// A hip.matmul with a bias is a gemm over [rows, K] x [K, N] + [N]; its quant
+// types carry [A, B, bias, output].
+static std::optional<QGemmSpec> getSpec(MatmulOp op,
+                                        MatmulOp::Adaptor adaptor) {
+  auto types = getQuantElementTypes(op);
+  if (!op.getBias() || types.size() != 4)
+    return std::nullopt;
+  QGemmSpec spec;
+  spec.a = adaptor.getA();
+  spec.b = adaptor.getB();
+  spec.c = adaptor.getBias();
+  spec.y = adaptor.getOutput();
+  spec.aType = cast<MemRefType>(op.getA().getType());
+  spec.bType = cast<MemRefType>(op.getB().getType());
+  spec.yType = cast<MemRefType>(op.getOutput().getType());
+  spec.cType = cast<MemRefType>(op.getBias().getType());
+  spec.alpha = 1.0f;
+  spec.beta = 1.0f;
+  spec.aScale = static_cast<float>(types[0].getScale());
+  spec.bScale = static_cast<float>(types[1].getScale());
+  spec.cScale = static_cast<float>(types[2].getScale());
+  spec.yScale = static_cast<float>(types[3].getScale());
+  spec.aZp = types[0].getZeroPoint();
+  spec.bZp = types[1].getZeroPoint();
+  spec.cZp = types[2].getZeroPoint();
+  spec.yZp = types[3].getZeroPoint();
+  spec.transA = op.getTransA();
+  spec.transB = op.getTransB();
+  spec.bBits = 8;
+  spec.foldLeadingDims = true;
   return spec;
 }
 
@@ -221,8 +257,22 @@ struct QGemmLowering : public ConvertOpToLLVMPattern<OpTy> {
     // A: [M, K] or [K, M] when transA; B: [K, N] or [N, K] when transB. M/N/K
     // are the logical extents either way, and the kernel gets the flags so it
     // can pick the matching load stride.
-    Value M = getMemRefDimSize(AType, transA ? 1 : 0, spec->a, rewriter, loc);
-    Value K = getMemRefDimSize(AType, transA ? 0 : 1, spec->a, rewriter, loc);
+    Value M, K;
+    if (spec->foldLeadingDims) {
+      int64_t aRank = AType.getRank();
+      if (BType.getRank() != 2 || (aRank > 2 && transA))
+        return rewriter.notifyMatchFailure(
+            op, "bias needs a rank-2 B and transA = 0 for rank > 2 A");
+      M = getMemRefDimSize(AType, 0, spec->a, rewriter, loc);
+      for (int64_t i : llvm::seq<int64_t>(1, aRank - 1))
+        M = LLVM::MulOp::create(
+            rewriter, loc, M,
+            getMemRefDimSize(AType, i, spec->a, rewriter, loc));
+      K = getMemRefDimSize(AType, aRank - 1, spec->a, rewriter, loc);
+    } else {
+      M = getMemRefDimSize(AType, transA ? 1 : 0, spec->a, rewriter, loc);
+      K = getMemRefDimSize(AType, transA ? 0 : 1, spec->a, rewriter, loc);
+    }
     Value N = getMemRefDimSize(BType, transB ? 0 : 1, spec->b, rewriter, loc);
 
     // Runtime signature:
@@ -307,7 +357,8 @@ struct QGemmLowering : public ConvertOpToLLVMPattern<OpTy> {
 
 void populateQGemmLoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns) {
-  patterns.add<QGemmLowering<QGemmOp>, QGemmLowering<GemmOp>>(converter);
+  patterns.add<QGemmLowering<QGemmOp>, QGemmLowering<GemmOp>,
+               QGemmLowering<MatmulOp>>(converter);
 }
 
 } // namespace hip

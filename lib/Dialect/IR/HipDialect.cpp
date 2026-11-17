@@ -1288,10 +1288,30 @@ LogicalResult MatmulOp::verify() {
   // First the cross-cutting DPS contract (all-tensor-or-all-memref +
   // result-count parity); failures here also rule out bogus operand types,
   // so the matmul shape check below can rely on detail::getShapeOf().
-  if (failed(verifyDpsComputeOp(*this, {getA(), getB(), getOutput()},
-                                /*numInits=*/1)) ||
-      failed(verifyQuantTypes(*this, {getA(), getB(), getOutput()})))
+  SmallVector<Value> operands = {getA(), getB()};
+  if (getBias())
+    operands.push_back(getBias());
+  operands.push_back(getOutput());
+  if (failed(verifyDpsComputeOp(*this, operands, /*numInits=*/1)) ||
+      failed(verifyQuantTypes(*this, operands)))
     return failure();
+
+  if (getBias()) {
+    auto aType = cast<ShapedType>(getA().getType());
+    auto bType = cast<ShapedType>(getB().getType());
+    auto biasType = cast<ShapedType>(getBias().getType());
+    if (bType.getRank() != 2)
+      return emitOpError("bias requires a rank-2 B");
+    if (aType.getRank() > 2 && getTransA() != 0)
+      return emitOpError("bias with a rank > 2 A requires transA = 0");
+    if (biasType.getRank() != 1)
+      return emitOpError("bias must be rank 1");
+    int64_t n = bType.getDimSize(getTransB() != 0 ? 0 : 1);
+    if (!ShapedType::isDynamic(n) && !biasType.isDynamicDim(0) &&
+        biasType.getDimSize(0) != n)
+      return emitOpError("bias length ")
+             << biasType.getDimSize(0) << " does not match N = " << n;
+  }
 
   return mlir::hip::verifyHipOpShape(*this, [&] {
     return mlir::hip::inferMatmulShape(

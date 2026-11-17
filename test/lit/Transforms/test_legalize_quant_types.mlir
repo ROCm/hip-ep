@@ -258,3 +258,21 @@ func.func @matmul_no_kernel(%ctx: !hip.context, %a: tensor<4x8xui16>,
   %r = hip.storage_cast %m : tensor<4x6x!quant.uniform<u16:f32, 0.5>> to tensor<4x6xui16>
   return %r : tensor<4x6xui16>
 }
+
+// -----
+
+// A matmul with a bias records [A, B, bias, output].
+
+// CHECK-LABEL: func.func @quantized_matmul_bias
+// CHECK:         hip.matmul(%{{.*}}) ins(%{{.*}}, %{{.*}}, %{{.*}} : tensor<4x8xui16>, tensor<8x6xi8>, tensor<6xui16>) outs(%{{.*}} : tensor<4x6xui16>) {quant_types = [!quant.uniform<u16:f32, 2.500000e-01:32768>, !quant.uniform<i8:f32, 1.250000e-01:3>, !quant.uniform<u16:f32, 6.250000e-02:32768>, !quant.uniform<u16:f32, 1.000000e+00:32768>]} : tensor<4x6xui16>
+func.func @quantized_matmul_bias(%ctx: !hip.context, %a: tensor<4x8xui16>,
+                                 %w: tensor<8x6xi8>, %bias: tensor<6xui16>) -> tensor<4x6xui16> {
+  %qa = hip.storage_cast %a : tensor<4x8xui16> to tensor<4x8x!quant.uniform<u16:f32, 0.25:32768>>
+  %qw = hip.storage_cast %w : tensor<8x6xi8> to tensor<8x6x!quant.uniform<i8:f32, 0.125:3>>
+  %qb = hip.storage_cast %bias : tensor<6xui16> to tensor<6x!quant.uniform<u16:f32, 0.0625:32768>>
+  %e = tensor.empty() : tensor<4x6x!quant.uniform<u16:f32, 1.0:32768>>
+  %m = hip.matmul(%ctx) ins(%qa, %qw, %qb : tensor<4x8x!quant.uniform<u16:f32, 0.25:32768>>, tensor<8x6x!quant.uniform<i8:f32, 0.125:3>>, tensor<6x!quant.uniform<u16:f32, 0.0625:32768>>)
+      outs(%e : tensor<4x6x!quant.uniform<u16:f32, 1.0:32768>>) : tensor<4x6x!quant.uniform<u16:f32, 1.0:32768>>
+  %r = hip.storage_cast %m : tensor<4x6x!quant.uniform<u16:f32, 1.0:32768>> to tensor<4x6xui16>
+  return %r : tensor<4x6xui16>
+}

@@ -217,4 +217,34 @@ module {
         outs(%Y : memref<64x32xf32, 1>) {quant_types = [f32, f32, f32]}
     return
   }
+
+  // ===== hip.matmul with a bias and quant types =====
+  //
+  // A is [2, 64, 128]: with a rank-2 weight and transA = 0 the leading dims
+  // fold into the rows, so the kernel sees M = 2 * 64 = 128. Everything else is
+  // the same wrap_qgemm call (bias C of 32-bit, alpha = beta = 1):
+  //   M_ab = 0.25 * 0.125 / 0.5   = 0.0625
+  //   M_c  = 0.03125 / 0.5        = 0.0625
+  //
+  // CHECK-LABEL: llvm.func @test_matmul_bias_quant_types(
+  // CHECK:      llvm.mlir.constant(2 : i64) : i64
+  // CHECK:      %[[ROWS:.*]] = llvm.mul %{{.*}}, %{{.*}} : i64
+  // CHECK:      llvm.mlir.constant(6.250000e-02 : f32) : f32
+  // CHECK:      llvm.mlir.constant(6.250000e-02 : f32) : f32
+  // CHECK:      llvm.call @wrap_qgemm(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %[[ROWS]], %{{.*}}, %{{.*}}, {{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32, i64, i64, i64, i64) -> i32
+  func.func @test_matmul_bias_quant_types(%ctx: !hip.context,
+                                          %A: memref<2x64x128xi8, 1>,
+                                          %B: memref<128x32xi8, 1>,
+                                          %C: memref<32xi32, 1>,
+                                          %Y: memref<2x64x32xi8, 1>) {
+    hip.matmul(%ctx)
+        ins(%A, %B, %C : memref<2x64x128xi8, 1>, memref<128x32xi8, 1>,
+                         memref<32xi32, 1>)
+        outs(%Y : memref<2x64x32xi8, 1>)
+        {quant_types = [!quant.uniform<i8:f32, 2.500000e-01:-5>,
+                        !quant.uniform<i8:f32, 1.250000e-01:3>,
+                        !quant.uniform<i32:f32, 3.125000e-02:-2>,
+                        !quant.uniform<i8:f32, 5.000000e-01:7>]}
+    return
+  }
 }

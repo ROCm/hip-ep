@@ -146,3 +146,43 @@ func.func @gemm_attr_count(%ctx: !hip.context, %a: memref<4x8xi8>, %b: memref<8x
       {quant_types = [!quant.uniform<i8:f32, 0.5>, !quant.uniform<i8:f32, 0.5>, !quant.uniform<i8:f32, 0.5>]}
   return
 }
+
+// -----
+
+func.func @matmul_bias_rank2(%ctx: !hip.context, %a: memref<4x8xf32>, %b: memref<8x6xf32>,
+                             %bias: memref<4x6xf32>, %out: memref<4x6xf32>) {
+  // expected-error @+1 {{bias must be rank 1}}
+  hip.matmul(%ctx) ins(%a, %b, %bias : memref<4x8xf32>, memref<8x6xf32>, memref<4x6xf32>)
+      outs(%out : memref<4x6xf32>)
+  return
+}
+
+// -----
+
+func.func @matmul_bias_length(%ctx: !hip.context, %a: memref<4x8xf32>, %b: memref<8x6xf32>,
+                              %bias: memref<5xf32>, %out: memref<4x6xf32>) {
+  // expected-error @+1 {{bias length 5 does not match N = 6}}
+  hip.matmul(%ctx) ins(%a, %b, %bias : memref<4x8xf32>, memref<8x6xf32>, memref<5xf32>)
+      outs(%out : memref<4x6xf32>)
+  return
+}
+
+// -----
+
+func.func @matmul_bias_rank3_weight(%ctx: !hip.context, %a: memref<2x4x8xf32>, %b: memref<2x8x6xf32>,
+                                    %bias: memref<6xf32>, %out: memref<2x4x6xf32>) {
+  // expected-error @+1 {{bias requires a rank-2 B}}
+  hip.matmul(%ctx) ins(%a, %b, %bias : memref<2x4x8xf32>, memref<2x8x6xf32>, memref<6xf32>)
+      outs(%out : memref<2x4x6xf32>)
+  return
+}
+
+// -----
+
+func.func @matmul_bias_trans_a(%ctx: !hip.context, %a: memref<2x8x4xf32>, %b: memref<8x6xf32>,
+                               %bias: memref<6xf32>, %out: memref<2x4x6xf32>) {
+  // expected-error @+1 {{bias with a rank > 2 A requires transA = 0}}
+  hip.matmul(%ctx) ins(%a, %b, %bias : memref<2x8x4xf32>, memref<8x6xf32>, memref<6xf32>)
+      outs(%out : memref<2x4x6xf32>) {transA = 1 : i64}
+  return
+}

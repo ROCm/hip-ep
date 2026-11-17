@@ -823,8 +823,13 @@ def Hip_MatmulOp : Hip_DpsOp_WithInfer<"matmul", "Output", [OpStateOpInterface]>
     The element types decide the kernel, as for `hip.add`: float tensors run
     the float kernel, `!quant.uniform` tensors (per-tensor scales, A 8/16-bit,
     B 8-bit, result 8/16-bit) mean dequantize inputs and quantize the output.
-    After hip-legalize-quant-types the element types of [A, B, output] are in
-    `quant_types` and the tensors are storage integers.
+    After hip-legalize-quant-types the element types of [A, B, (bias), output]
+    are in `quant_types` and the tensors are storage integers.
+
+    The optional `bias` is a rank-1 `[N]` row bias added to every row of the
+    result (`output = A @ B + bias`). It requires a rank-2 B, and transA = 0
+    when A has rank > 2 (the leading dims then fold into the rows). Only
+    quantized types have a kernel for it today.
 
     Example (2D):
     ```mlir
@@ -845,6 +850,7 @@ def Hip_MatmulOp : Hip_DpsOp_WithInfer<"matmul", "Output", [OpStateOpInterface]>
     Hip_ContextType:$ctx,
     Hip_TensorOrMemRef:$A,
     Hip_TensorOrMemRef:$B,
+    Optional<Hip_TensorOrMemRef>:$bias,
     Hip_TensorOrMemRef:$output,
     DefaultValuedAttr<I64Attr, "0">:$transA,
     DefaultValuedAttr<I64Attr, "0">:$transB,
@@ -856,18 +862,21 @@ def Hip_MatmulOp : Hip_DpsOp_WithInfer<"matmul", "Output", [OpStateOpInterface]>
     OpBuilder<(ins "::mlir::TypeRange":$result_tensors, "::mlir::Value":$ctx,
                    "::mlir::Value":$A, "::mlir::Value":$B,
                    "::mlir::Value":$output), [{
-      build($_builder, $_state, result_tensors, ctx, A, B, output,
-            ::mlir::IntegerAttr(), ::mlir::IntegerAttr(), ::mlir::ArrayAttr());
+      build($_builder, $_state, result_tensors, ctx, A, B, ::mlir::Value(),
+            output, ::mlir::IntegerAttr(), ::mlir::IntegerAttr(),
+            ::mlir::ArrayAttr());
     }]>,
     OpBuilder<(ins "::mlir::Value":$ctx, "::mlir::Value":$A,
                    "::mlir::Value":$B, "::mlir::Value":$output), [{
-      build($_builder, $_state, ctx, A, B, output, ::mlir::IntegerAttr(),
-            ::mlir::IntegerAttr(), ::mlir::ArrayAttr());
+      build($_builder, $_state, ctx, A, B, ::mlir::Value(), output,
+            ::mlir::IntegerAttr(), ::mlir::IntegerAttr(),
+            ::mlir::ArrayAttr());
     }]>
   ];
 
   let assemblyFormat = [{
-    `(` $ctx `)` `ins` `(` $A `,` $B `:` type($A) `,` type($B) `)`
+    `(` $ctx `)` `ins` `(` $A `,` $B (`,` $bias^)?
+        `:` type($A) `,` type($B) (`,` type($bias)^)? `)`
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];

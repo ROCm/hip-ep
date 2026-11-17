@@ -35,6 +35,12 @@ bool isQuantized(Type type);
 bool supportsQuantTypes(Operation *op, TypeRange inputElementTypes,
                         Type resultElementType);
 
+/// True if hip.matmul with a row bias has a kernel for these element types.
+/// Only per-tensor quantized types do today (the quantized gemm kernel); a
+/// float matmul + bias has no fused kernel. Used by fusions that create the
+/// op before it exists to ask.
+bool supportsMatmulWithBias(Type a, Type b, Type bias, Type result);
+
 /// True if `op` can carry quant types, i.e. it is the generic op that is
 /// quantized or not depending on them. Such ops get `quant_types` on every
 /// instance in hip-legalize-quant-types, float or quantized.

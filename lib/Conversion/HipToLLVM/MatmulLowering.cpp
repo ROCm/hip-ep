@@ -25,6 +25,8 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
     // Quantized matmuls lower to wrap_qmatmul (QMatMulLowering.cpp).
     if (isQuantizedOp(op))
       return rewriter.notifyMatchFailure(op, "quantized; not a float kernel");
+    if (op.getBias())
+      return rewriter.notifyMatchFailure(op, "no float kernel with a bias");
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type ptrType = getPtrType();

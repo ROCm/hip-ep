@@ -73,8 +73,10 @@ static std::optional<QMatMulSpec> getSpec(QMatMulOp op,
 
 static std::optional<QMatMulSpec> getSpec(MatmulOp op,
                                           MatmulOp::Adaptor adaptor) {
+  // With a bias the same quant types lower through wrap_qgemm
+  // (QGemmLowering.cpp).
   auto types = getQuantElementTypes(op);
-  if (types.size() != 3)
+  if (op.getBias() || types.size() != 3)
     return std::nullopt;
   QMatMulSpec spec;
   spec.a = adaptor.getA();

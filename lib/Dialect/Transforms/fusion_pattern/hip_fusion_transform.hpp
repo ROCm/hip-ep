@@ -32,6 +32,7 @@
 #include "hip/Dialect/IR/HipQuantTypes.h"
 
 #include "linear_attention_group_fold.hpp"
+#include "matmul_bias_fusion.hpp"
 #include "patch_embed_conv_to_gemm.hpp"
 #include "swiglu_fusion.hpp"
 
@@ -959,6 +960,11 @@ constexpr unsigned kPatchEmbedConvToGemmBenefit = 5;
 /// consumes it.
 constexpr unsigned kSwigluFusionBenefit = 2;
 
+/// Rooted at `hip.add`; the quant-type folds root at `hip.quantize_linear`, so
+/// the two never compete for a match. The fold runs first only because it has
+/// to produce the typed add this pattern reads.
+constexpr unsigned kMatmulBiasFusionBenefit = 3;
+
 /// The only pattern rooted at `hip.linear_attention`.
 constexpr unsigned kLinearAttentionGroupFoldBenefit = 1;
 
@@ -977,6 +983,8 @@ inline mlir::LogicalResult run(mlir::ModuleOp module,
       patterns, mlir::PatternBenefit(kPatchEmbedConvToGemmBenefit));
   populateSwigluFusionPattern(patterns,
                               mlir::PatternBenefit(kSwigluFusionBenefit));
+  populateMatmulBiasFusionPattern(
+      patterns, mlir::PatternBenefit(kMatmulBiasFusionBenefit));
   populateLinearAttentionGroupFoldPattern(
       patterns, mlir::PatternBenefit(kLinearAttentionGroupFoldBenefit));
 
