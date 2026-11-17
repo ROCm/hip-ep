@@ -264,3 +264,45 @@ func.func @qdq_chain(%ctx: !hip.context, %a: tensor<4x8xui16>,
        saturate = 1 : i64} : tensor<4x6xui16>
   return %qy : tensor<4x6xui16>
 }
+
+// -----
+
+// The common ONNX form: an int32 bias at A_scale * W_scale. The add (u16 + i32
+// -> u16) has no elementwise kernel, but its Q/DQ fold anyway, so the bias
+// fusion sees a typed add and produces one matmul with the int32 bias.
+
+// CHECK-LABEL: func.func @qdq_chain_int32_bias
+// CHECK-NOT:     hip.quantize_linear
+// CHECK-NOT:     hip.dequantize_linear
+// CHECK-NOT:     hip.add
+// CHECK:         hip.matmul(%{{.*}}) ins(%{{.*}}, %{{.*}}, %{{.*}} : tensor<4x8x!quant.uniform<u16:f32, 2.500000e-01:32768>>, tensor<8x6x!quant.uniform<i8:f32, 1.250000e-01>>, tensor<6x!quant.uniform<i32:f32, 3.125000e-02>>) outs(%{{.*}} : tensor<4x6x!quant.uniform<u16:f32, 1.000000e+00:32768>>)
+func.func @qdq_chain_int32_bias(%ctx: !hip.context, %a: tensor<4x8xui16>,
+                             %w: tensor<8x6xi8>, %bias: tensor<6xi32>) -> tensor<4x6xui16> {
+  %sa = hip.constant {value = dense<0.25> : tensor<f32>} : tensor<f32>
+  %za = hip.constant {value = dense<32768> : tensor<ui16>} : tensor<ui16>
+  %sw = hip.constant {value = dense<0.125> : tensor<f32>} : tensor<f32>
+  %zw = hip.constant {value = dense<0> : tensor<i8>} : tensor<i8>
+  %sm = hip.constant {value = dense<0.5> : tensor<f32>} : tensor<f32>
+  %zm = hip.constant {value = dense<32768> : tensor<ui16>} : tensor<ui16>
+  %sb = hip.constant {value = dense<0.03125> : tensor<f32>} : tensor<f32>
+  %zb = hip.constant {value = dense<0> : tensor<i32>} : tensor<i32>
+  %sy = hip.constant {value = dense<1.0> : tensor<f32>} : tensor<f32>
+  %zy = hip.constant {value = dense<32768> : tensor<ui16>} : tensor<ui16>
+  %e0 = tensor.empty() : tensor<4x8xf32>
+  %da = hip.dequantize_linear(%ctx) ins(%a, %sa : tensor<4x8xui16>, tensor<f32>) zero_point(%za : tensor<ui16>) outs(%e0 : tensor<4x8xf32>) {axis = 1 : i64, block_size = 0 : i64} : tensor<4x8xf32>
+  %e1 = tensor.empty() : tensor<8x6xf32>
+  %dw = hip.dequantize_linear(%ctx) ins(%w, %sw : tensor<8x6xi8>, tensor<f32>) zero_point(%zw : tensor<i8>) outs(%e1 : tensor<8x6xf32>) {axis = 1 : i64, block_size = 0 : i64} : tensor<8x6xf32>
+  %e2 = tensor.empty() : tensor<4x6xf32>
+  %m = hip.matmul(%ctx) ins(%da, %dw : tensor<4x8xf32>, tensor<8x6xf32>) outs(%e2 : tensor<4x6xf32>) : tensor<4x6xf32>
+  %e3 = tensor.empty() : tensor<4x6xui16>
+  %qm = hip.quantize_linear(%ctx) ins(%m, %sm : tensor<4x6xf32>, tensor<f32>) zero_point(%zm : tensor<ui16>) outs(%e3 : tensor<4x6xui16>) {axis = 1 : i64, block_size = 0 : i64, precision = 0 : i64, saturate = 1 : i64} : tensor<4x6xui16>
+  %e4 = tensor.empty() : tensor<4x6xf32>
+  %dm = hip.dequantize_linear(%ctx) ins(%qm, %sm : tensor<4x6xui16>, tensor<f32>) zero_point(%zm : tensor<ui16>) outs(%e4 : tensor<4x6xf32>) {axis = 1 : i64, block_size = 0 : i64} : tensor<4x6xf32>
+  %e5 = tensor.empty() : tensor<6xf32>
+  %db = hip.dequantize_linear(%ctx) ins(%bias, %sb : tensor<6xi32>, tensor<f32>) zero_point(%zb : tensor<i32>) outs(%e5 : tensor<6xf32>) {axis = 0 : i64, block_size = 0 : i64} : tensor<6xf32>
+  %e6 = tensor.empty() : tensor<4x6xf32>
+  %s = hip.add(%ctx) ins(%dm, %db : tensor<4x6xf32>, tensor<6xf32>) outs(%e6 : tensor<4x6xf32>) -> tensor<4x6xf32>
+  %e7 = tensor.empty() : tensor<4x6xui16>
+  %y = hip.quantize_linear(%ctx) ins(%s, %sy : tensor<4x6xf32>, tensor<f32>) zero_point(%zy : tensor<ui16>) outs(%e7 : tensor<4x6xui16>) {axis = 1 : i64, block_size = 0 : i64, precision = 0 : i64, saturate = 1 : i64} : tensor<4x6xui16>
+  return %y : tensor<4x6xui16>
+}

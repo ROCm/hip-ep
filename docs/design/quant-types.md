@@ -42,7 +42,7 @@ types cannot carry.
 
 | Step | Where | What |
 |---|---|---|
-| Fold Q/DQ into types | `hip-fusion-transform`, `fusion_pattern/QdqToQuantTypes.pdll` | DQ, DQ → `hip.add` → Q becomes a quant-typed `hip.add` when every Q/DQ has a per-tensor type (splat constant scale, readable zero point) and a kernel takes the combination. |
+| Fold Q/DQ into types | `hip-fusion-transform`, `fusion_pattern/QdqToQuantTypes.pdll` | DQ → op → Q becomes the quant-typed op when every Q/DQ has a per-tensor type (splat constant scale, readable zero point, integer storage, not packed). Kernels are not checked here. |
 | Quant-type-agnostic fusions | `hip-fusion-transform`, native patterns in `fusion_pattern/` | Read element types only, so float and quant-typed chains share them. See below. |
 | Legalize | `hip-legalize-quant-types`, before bufferization | Memrefs cannot hold quant types: the [lhs, rhs, output] element types of every add move into its `quant_types` attribute, quantized tensors become storage integers, casts disappear. |
 | Lower | `convert-hip-to-llvm` | quantized `quant_types` → `wrap_qelementwise` (scales/zero points from the types); otherwise `wrap_elementwise`. |
@@ -134,3 +134,23 @@ quantized matmul with a bias calls `wrap_qgemm`, a float one `wrap_gemm`
   intermediate quant type, i.e. no requantization between them.
 - Not covered: `transA` with rank > 2, and an add whose Q/DQ do not fold (e.g.
   an int32 bias against a 16-bit matmul result).
+
+## Known gaps
+
+**The Q/DQ folds do not check kernels (temporary).** A fold fires whenever
+every Q/DQ has a per-tensor quant type, so that later fusions are not blocked
+by a kernel that only the unfused op would need. Example: an int32-bias
+MatMul + Add, whose add (u16 + i32 -> u16) has no elementwise kernel but is
+fused into `hip.matmul(a, w, bias)`, which has one.
+
+The kernel question is asked once, in `hip-legalize-quant-types`, and a typed op
+without a kernel is a compile error there (no fallback to DQ -> op -> Q). Known
+cases that hit it today:
+
+- **PSI:** its 48 attention matmuls are A16W16 (`u16 x u16 -> u16`); the
+  quantized matmul kernel takes 8-bit B only. PSI does not compile until an
+  A16W16 quantized matmul kernel exists.
+- A mixed-width add that is not fused away (e.g. u16 + i8 -> u16).
+- A matmul with a 16-bit weight.
+
+Revisit once the missing kernels exist or the fallback policy is decided.

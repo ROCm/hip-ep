@@ -361,7 +361,8 @@ def LegalizeQuantTypesPass
     signless `iN`). The now-identity `hip.storage_cast`s are removed. Lowering
     reads `quant_types` to pick the quantized or the float kernel.
 
-    Fails if a quantized op has no kernel for its types or if any quantized
+    Fails if a quantized op has no kernel for its types (the Q/DQ folds do not
+    check kernels; there is no fallback to DQ -> op -> Q) or if any quantized
     type remains.
   }];
 }

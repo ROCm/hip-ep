@@ -4,6 +4,12 @@
 // same op as in a float model, only with `!quant.uniform` types, so later
 // fusions are written once for both. The types select the kernel at lowering.
 //
+// The folds check only that each Q/DQ is a per-tensor quant type, not that a
+// kernel takes the combination: whether one exists is decided after fusion,
+// so a fold whose op is later fused (e.g. an int32-bias add into a matmul) is
+// not blocked. A typed op left without a kernel fails in
+// hip-legalize-quant-types (see "Known gaps" in docs/design/quant-types.md).
+//
 // Included by HipFusionTransformPatterns.pdll, which declares the native
 // helpers used below. Not compilable on its own.
 //===----------------------------------------------------------------------===//
@@ -17,8 +23,10 @@ Pattern HipAddQdqToQuantTypes with benefit(10) {
   let q = op<hip.quantize_linear>(ctx, add.0, _: ValueRange)
       -> (output_type: Type);
 
-  // Each Q/DQ has a per-tensor quant type and a kernel takes the combination.
-  SupportsQuantTypes(add, dq_lhs, dq_rhs, q);
+  // Each Q/DQ has a per-tensor quant type.
+  HasQuantType(dq_lhs);
+  HasQuantType(dq_rhs);
+  HasQuantType(q);
   // A second user of the float sum would keep the float add alive.
   HasSingleUseResult(add);
 
@@ -47,7 +55,9 @@ Pattern HipMatmulQdqToQuantTypes with benefit(10) {
   let q = op<hip.quantize_linear>(ctx, matmul.0, _: ValueRange)
       -> (output_type: Type);
 
-  SupportsQuantTypes(matmul, dq_a, dq_b, q);
+  HasQuantType(dq_a);
+  HasQuantType(dq_b);
+  HasQuantType(q);
   HasSingleUseResult(matmul);
 
   rewrite q with {
@@ -80,7 +90,10 @@ Pattern HipMatmulBiasQdqToQuantTypes with benefit(10) {
   let q = op<hip.quantize_linear>(ctx, matmul.0, _: ValueRange)
       -> (output_type: Type);
 
-  SupportsQuantTypesWithBias(matmul, dq_a, dq_b, dq_c, q);
+  HasQuantType(dq_a);
+  HasQuantType(dq_b);
+  HasQuantType(dq_c);
+  HasQuantType(q);
   HasSingleUseResult(matmul);
 
   rewrite q with {
@@ -115,7 +128,10 @@ Pattern HipGemmQdqToQuantTypes with benefit(10) {
   let q = op<hip.quantize_linear>(ctx, gemm.0, _: ValueRange)
       -> (output_type: Type);
 
-  SupportsQuantTypesWithBias(gemm, dq_a, dq_b, dq_c, q);
+  HasQuantType(dq_a);
+  HasQuantType(dq_b);
+  HasQuantType(dq_c);
+  HasQuantType(q);
   HasSingleUseResult(gemm);
 
   rewrite q with {
@@ -154,7 +170,9 @@ Pattern HipGemmNoBiasQdqToQuantTypes with benefit(10) {
   let q = op<hip.quantize_linear>(ctx, gemm.0, _: ValueRange)
       -> (output_type: Type);
 
-  SupportsQuantTypes(gemm, dq_a, dq_b, q);
+  HasQuantType(dq_a);
+  HasQuantType(dq_b);
+  HasQuantType(q);
   HasSingleUseResult(gemm);
 
   rewrite q with {

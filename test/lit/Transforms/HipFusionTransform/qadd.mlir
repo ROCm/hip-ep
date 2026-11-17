@@ -57,14 +57,14 @@ func.func @qadd(%ctx: !hip.context,
 
 // -----
 
-// The quantized add kernel reads both operands at the result's element type,
-// so a uint16 activation plus an int8 constant has no kernel and stays an
-// unfused dequantize, add, quantize chain.
+// The folds do not check kernels: a uint16 activation plus an int8 constant
+// folds into types even though no elementwise kernel takes mixed widths (it
+// would fail later, in hip-legalize-quant-types, unless fused away).
 
 // CHECK-LABEL: func.func @qadd_mixed_types
-// CHECK-NOT:     hip.storage_cast
-// CHECK:         hip.add
-// CHECK:         hip.quantize_linear
+// CHECK:         hip.add(%{{.*}}) ins(%{{.*}}, %{{.*}} : tensor<1x128x32x!quant.uniform<u16:f32, 2.500000e-01:32768>>, tensor<1x128x32x!quant.uniform<i8:f32, 5.000000e-01>>) outs(%{{.*}} : tensor<1x128x32x!quant.uniform<u16:f32, 1.250000e-01:32768>>)
+// CHECK-NOT:     hip.quantize_linear
+// CHECK-NOT:     hip.dequantize_linear
 func.func @qadd_mixed_types(%ctx: !hip.context,
                             %lhs: tensor<1x128x32xui16>,
                             %rhs: tensor<1x128x32xi8>) -> tensor<1x128x32xui16> {

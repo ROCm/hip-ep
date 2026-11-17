@@ -350,22 +350,15 @@ isHipPackedInt4Dequantize(mlir::PatternRewriter &, mlir::PDLResultList &,
   return mlir::success(dq && dq->hasAttr("packed_int4"));
 }
 
-/// every Q/DQ has a per-tensor quant type, and op has a kernel for them
-inline mlir::LogicalResult
-supportsQuantTypes(mlir::PatternRewriter &, mlir::PDLResultList &,
-                   llvm::ArrayRef<mlir::PDLValue> args) {
-  if (args.size() < 2)
+/// qdq has a per-tensor quant type. Kernel availability is not checked here
+/// (see QdqToQuantTypes.pdll).
+inline mlir::LogicalResult hasQuantType(mlir::PatternRewriter &,
+                                        mlir::PDLResultList &,
+                                        llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 1)
     return mlir::failure();
-  llvm::SmallVector<mlir::Type> types;
-  for (const mlir::PDLValue &arg : args.drop_front()) {
-    auto type = getHipQdqQuantType(arg.dyn_cast<mlir::Operation *>());
-    if (!type)
-      return mlir::failure();
-    types.push_back(type);
-  }
-  return mlir::success(mlir::hip::supportsQuantTypes(
-      args[0].dyn_cast<mlir::Operation *>(), llvm::ArrayRef(types).drop_back(),
-      types.back()));
+  return mlir::success(static_cast<bool>(
+      getHipQdqQuantType(args[0].dyn_cast<mlir::Operation *>())));
 }
 
 /// lhs and rhs are ranked tensors of the same shape
@@ -799,7 +792,7 @@ inline mlir::LogicalResult buildInit(mlir::PatternRewriter &rewriter,
 inline mlir::LogicalResult
 getQuantTensorType(mlir::PatternRewriter &, mlir::PDLResultList &results,
                    llvm::ArrayRef<mlir::PDLValue> args) {
-  // Guarded by SupportsQuantTypes, so the type exists.
+  // Guarded by HasQuantType, so the type exists.
   auto *op = args[0].dyn_cast<mlir::Operation *>();
   mlir::Value intSide =
       mlir::isa<mlir::hip::QuantizeLinearOp>(op)
@@ -996,11 +989,8 @@ inline void registerNativeHelpers(mlir::PDLPatternModule &pdlPatterns) {
                                          isHipQdqUnsignedQuantized);
   pdlPatterns.registerConstraintFunction("HasSameHipQdqElementType",
                                          hasSameHipQdqElementType);
-  pdlPatterns.registerConstraintFunction("SupportsQuantTypes",
-                                         supportsQuantTypes);
+  pdlPatterns.registerConstraintFunction("HasQuantType", hasQuantType);
   pdlPatterns.registerRewriteFunction("GetQuantTensorType", getQuantTensorType);
-  pdlPatterns.registerConstraintFunction("SupportsQuantTypesWithBias",
-                                         supportsQuantTypes);
   pdlPatterns.registerConstraintFunction("IsHipPackedInt4Dequantize",
                                          isHipPackedInt4Dequantize);
   pdlPatterns.registerConstraintFunction("HasSameShape", hasSameShape);

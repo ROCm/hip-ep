@@ -54,7 +54,13 @@ struct LegalizeQuantTypesPass
       if (hasQuantizedType(op) &&
           !quantOp.supportsQuantTypes(ArrayRef(types).drop_back(),
                                       types.back())) {
-        op->emitOpError("has no kernel for its quantized types");
+        // Known gap: the Q/DQ folds do not check kernels, so a typed op that
+        // was not fused into one with a kernel ends here (docs/design/
+        // quant-types.md, "Known gaps"). No fallback to DQ -> op -> Q.
+        InFlightDiagnostic diag =
+            op->emitOpError("has no kernel for its quantized types (");
+        llvm::interleaveComma(ArrayRef(types).drop_back(), diag);
+        diag << " -> " << types.back() << ")";
         return WalkResult::interrupt();
       }
       op->setAttr("quant_types", builder.getTypeArrayAttr(types));

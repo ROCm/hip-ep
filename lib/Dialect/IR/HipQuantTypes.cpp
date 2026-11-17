@@ -67,13 +67,6 @@ static bool supportsQMatmul(TypeRange inputs, Type result, bool allowBias) {
   return numInputs == 2 || isUniformOfWidth(inputs[2], {8, 16, 32});
 }
 
-bool mlir::hip::supportsQuantTypes(Operation *op, TypeRange inputElementTypes,
-                                   Type resultElementType) {
-  auto quantOp = dyn_cast<HipQuantCapableOpInterface>(op);
-  return quantOp &&
-         quantOp.supportsQuantTypes(inputElementTypes, resultElementType);
-}
-
 bool mlir::hip::isQuantizedOp(Operation *op) {
   if (auto attr = op->getAttrOfType<ArrayAttr>("quant_types"))
     return llvm::any_of(attr.getAsRange<TypeAttr>(), [](TypeAttr type) {

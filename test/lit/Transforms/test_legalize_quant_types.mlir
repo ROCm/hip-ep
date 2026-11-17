@@ -80,7 +80,7 @@ func.func @no_kernel(%ctx: !hip.context, %a: tensor<8xui16>,
   %qa = hip.storage_cast %a : tensor<8xui16> to tensor<8x!quant.uniform<u16:f32, 0.25>>
   %qb = hip.storage_cast %b : tensor<8xui8> to tensor<8x!quant.uniform<u8:f32, 0.5>>
   %e = tensor.empty() : tensor<8x!quant.uniform<u16:f32, 0.125>>
-  // expected-error @+1 {{has no kernel for its quantized types}}
+  // expected-error @+1 {{has no kernel for its quantized types ('!quant.uniform<u16:f32, 2.500000e-01>', '!quant.uniform<u8:f32, 5.000000e-01>' -> '!quant.uniform<u16:f32, 1.250000e-01>')}}
   %s = hip.add(%ctx) ins(%qa, %qb : tensor<8x!quant.uniform<u16:f32, 0.25>>,
                                     tensor<8x!quant.uniform<u8:f32, 0.5>>)
       outs(%e : tensor<8x!quant.uniform<u16:f32, 0.125>>)

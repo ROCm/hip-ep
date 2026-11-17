@@ -195,39 +195,6 @@ func.func @qmatmul_trans(%ctx: !hip.context, %a: tensor<128x64xi8>,
 
 // -----
 
-// The matmul kernel splits only A into byte planes, so a 16-bit B has no
-// kernel: the chain stays unfused rather than becoming a typed matmul that
-// hip-legalize-quant-types would reject.
-
-// CHECK-LABEL: func.func @qmatmul_b16_no_kernel
-// CHECK-NOT:     hip.storage_cast
-// CHECK:         hip.matmul
-// CHECK:         hip.quantize_linear
-func.func @qmatmul_b16_no_kernel(%ctx: !hip.context, %a: tensor<8x8xui16>,
-                                 %b: tensor<8x8xui16>) -> tensor<8x8xui16> {
-  %s = hip.constant {value = dense<0.25> : tensor<f32>} : tensor<f32>
-  %zp = hip.constant {value = dense<32768> : tensor<ui16>} : tensor<ui16>
-  %e0 = tensor.empty() : tensor<8x8xf32>
-  %dq_a = hip.dequantize_linear(%ctx) ins(%a, %s : tensor<8x8xui16>, tensor<f32>)
-      zero_point(%zp : tensor<ui16>) outs(%e0 : tensor<8x8xf32>)
-      {axis = 1 : i64, block_size = 0 : i64} : tensor<8x8xf32>
-  %e1 = tensor.empty() : tensor<8x8xf32>
-  %dq_b = hip.dequantize_linear(%ctx) ins(%b, %s : tensor<8x8xui16>, tensor<f32>)
-      zero_point(%zp : tensor<ui16>) outs(%e1 : tensor<8x8xf32>)
-      {axis = 1 : i64, block_size = 0 : i64} : tensor<8x8xf32>
-  %e2 = tensor.empty() : tensor<8x8xf32>
-  %mm = hip.matmul(%ctx) ins(%dq_a, %dq_b : tensor<8x8xf32>, tensor<8x8xf32>)
-      outs(%e2 : tensor<8x8xf32>) : tensor<8x8xf32>
-  %e3 = tensor.empty() : tensor<8x8xui16>
-  %q = hip.quantize_linear(%ctx) ins(%mm, %s : tensor<8x8xf32>, tensor<f32>)
-      zero_point(%zp : tensor<ui16>) outs(%e3 : tensor<8x8xui16>)
-      {axis = 1 : i64, block_size = 0 : i64, precision = 0 : i64,
-       saturate = 1 : i64} : tensor<8x8xui16>
-  return %q : tensor<8x8xui16>
-}
-
-// -----
-
 // A float matmul is untouched.
 
 // CHECK-LABEL: func.func @matmul_float
@@ -284,14 +251,14 @@ func.func @matmul_a16w8_trans_b(%ctx: !hip.context, %a: tensor<4x8xui16>,
 
 // -----
 
-// A 16-bit weight has no kernel (only A is split into byte planes): the chain
-// stays dequantize, matmul, quantize.
+// The folds do not check kernels: a 16-bit weight (A16W16, as in attention)
+// folds even though the quantized matmul kernel takes 8-bit B only.
 
-// CHECK-LABEL: func.func @matmul_w16_unfused
-// CHECK-NOT:     hip.storage_cast
-// CHECK:         hip.matmul
-// CHECK:         hip.quantize_linear
-func.func @matmul_w16_unfused(%ctx: !hip.context, %a: tensor<4x8xui16>,
+// CHECK-LABEL: func.func @matmul_w16_no_kernel_check
+// CHECK:         hip.matmul(%{{.*}}) ins(%{{.*}}, %{{.*}} : tensor<4x8x!quant.uniform<u16:f32, 2.500000e-01:32768>>, tensor<8x6x!quant.uniform<u16:f32, 1.250000e-01:32768>>)
+// CHECK-NOT:     hip.quantize_linear
+// CHECK-NOT:     hip.dequantize_linear
+func.func @matmul_w16_no_kernel_check(%ctx: !hip.context, %a: tensor<4x8xui16>,
                               %b: tensor<8x6xui16>) -> tensor<4x6xui16> {
   %sa = hip.constant {value = dense<0.25> : tensor<f32>} : tensor<f32>
   %za = hip.constant {value = dense<32768> : tensor<ui16>} : tensor<ui16>

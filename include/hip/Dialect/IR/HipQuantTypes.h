@@ -30,11 +30,6 @@ Type toHipStorageType(Type type);
 /// True if the shaped or scalar `type` has a quantized element type.
 bool isQuantized(Type type);
 
-/// True if `op` is a HipQuantCapableOpInterface op with a kernel for these
-/// quantized element types (inputs in getQuantOperands order, then result).
-bool supportsQuantTypes(Operation *op, TypeRange inputElementTypes,
-                        Type resultElementType);
-
 /// True if `op` is quantized by its quant types: its `quant_types` entries
 /// after hip-legalize-quant-types, its tensor element types before.
 bool isQuantizedOp(Operation *op);

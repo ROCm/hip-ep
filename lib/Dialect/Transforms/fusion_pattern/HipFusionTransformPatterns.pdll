@@ -48,11 +48,10 @@ Constraint IsHipPerAxisQuantizedWeight(dq: Op, rank: Attr, axis: Attr,
                                        packedInt4: Attr);
 Constraint IsHipPerChannelQuantizedWeight(dq: Op, consumer: Op);
 
-// Quant types: SupportsQuantTypes checks that every Q/DQ has a per-tensor
-// quant type and that a kernel exists for op with them; GetQuantTensorType
-// returns the Q/DQ's integer-side tensor type with that quant element type.
-Constraint SupportsQuantTypes(op: Op, lhs: Op, rhs: Op, out: Op);
-Constraint SupportsQuantTypesWithBias(op: Op, a: Op, b: Op, c: Op, out: Op);
+// Quant types: HasQuantType checks that a Q/DQ has a per-tensor quant type
+// (constant splat scale, readable zero point, integer storage, not packed);
+// GetQuantTensorType returns the Q/DQ's integer-side tensor type with it.
+Constraint HasQuantType(qdq: Op);
 Constraint IsHipPackedInt4Dequantize(dq: Op);
 Rewrite GetQuantTensorType(qdq: Op) -> Type;
 
