@@ -99,14 +99,6 @@ mlir::Value otherThanConstant(BinaryOp op, double expected) {
   return lhsConst ? op.getRhs() : op.getLhs();
 }
 
-/// The op that defines `value` when it is an `OpTy` whose only value use is
-/// `consumer`.
-template <typename OpTy>
-OpTy singleUseDef(mlir::Value value, mlir::Operation *consumer) {
-  auto op = value.getDefiningOp<OpTy>();
-  return op && hasSingleValueUse(value, consumer) ? op : OpTy();
-}
-
 struct Chain {
   mlir::Value x;
   mlir::StringRef approximate;
