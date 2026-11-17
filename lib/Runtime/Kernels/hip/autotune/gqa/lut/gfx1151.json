@@ -2090,6 +2090,7 @@
   {"batch": 1, "config": 29, "head_dim": "D256", "kv_dtype": "Fp16", "kv_num_heads": 16, "num_heads": 16, "phase": "PrefillV8x", "seq_kv": 65536, "seq_q": 256, "splits": 0},
   {"batch": 1, "config": 27, "head_dim": "D256", "kv_dtype": "Fp16", "kv_num_heads": 4, "num_heads": 20, "phase": "PrefillV8x", "seq_kv": 128, "seq_q": 128, "splits": 0},
   {"batch": 1, "config": 29, "head_dim": "D256", "kv_dtype": "Fp16", "kv_num_heads": 4, "num_heads": 20, "phase": "PrefillV8x", "seq_kv": 65536, "seq_q": 4096, "splits": 0},
+  {"batch": 1, "config": 20, "head_dim": "D256", "kv_dtype": "Fp16", "kv_num_heads": 2, "num_heads": 24, "phase": "PrefillV8x", "seq_kv": 512, "seq_q": 512, "splits": 0},
   {"batch": 1, "config": 20, "head_dim": "D256", "kv_dtype": "Fp16", "kv_num_heads": 3, "num_heads": 24, "phase": "PrefillV8x", "seq_kv": 128, "seq_q": 128, "splits": 0},
   {"batch": 1, "config": 19, "head_dim": "D256", "kv_dtype": "Fp16", "kv_num_heads": 3, "num_heads": 24, "phase": "PrefillV8x", "seq_kv": 65536, "seq_q": 128, "splits": 0},
   {"batch": 1, "config": 22, "head_dim": "D256", "kv_dtype": "Fp16", "kv_num_heads": 3, "num_heads": 24, "phase": "PrefillV8x", "seq_kv": 65536, "seq_q": 256, "splits": 0},

@@ -235,8 +235,9 @@ def _make_pad_model(
     pads: list[int],
     mode: str,
     constant_value=None,
+    axes: list[int] | None = None,
 ):
-    """ONNX-18 Pad: data, pads, constant_value? (axes omitted)."""
+    """ONNX-18 Pad: data, pads, constant_value?, axes?."""
     tp = np_to_onnx_type(dtype)
     X = helper.make_tensor_value_info("X", tp, list(input_shape))
     pads_init = numpy_helper.from_array(np.array(pads, dtype=np.int64), name="pads")
@@ -251,10 +252,25 @@ def _make_pad_model(
         input_names.append("constant_value")
 
     rank = len(input_shape)
+    if axes is not None:
+        if constant_value is None:
+            input_names.append("")
+        initializers.append(
+            numpy_helper.from_array(np.array(axes, dtype=np.int64), name="axes")
+        )
+        input_names.append("axes")
+        full = [0] * (2 * rank)
+        for slot, axis in enumerate(axes):
+            a = axis % rank
+            full[a] = pads[slot]
+            full[a + rank] = pads[slot + len(axes)]
+        pads = full
     out_shape = [input_shape[i] + pads[i] + pads[i + rank] for i in range(rank)]
     Y = helper.make_tensor_value_info("Y", tp, out_shape)
     node = helper.make_node("Pad", input_names, ["Y"], mode=mode)
-    return make_model_from_nodes([node], [X], [Y], initializers=initializers)
+    return make_model_from_nodes(
+        [node], [X], [Y], initializers=initializers, opset=18 if axes else 17
+    )
 
 
 class TestPad:
@@ -322,6 +338,72 @@ class TestPad:
         model = _make_pad_model(np.float16, shape, pads, mode=mode)
         rng = np.random.default_rng(404)
         x = rng.uniform(-2.0, 2.0, shape).astype(np.float16)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0)
+
+    # Constant pads and fill values are resolved at compile time and passed
+    # to the kernel from host memory; these cover each supported element type
+    # with a non-zero fill.
+    @pytest.mark.parametrize(
+        "dtype,cval",
+        [
+            (np.float32, 2.5),
+            (np.float16, -1.25),
+            (np.int32, -3),
+            (np.int64, 7),
+        ],
+    )
+    def test_pad_constant_fill_nchw(self, model_runner, dtype, cval):
+        shape = [1, 3, 5, 6]
+        pads = [0, 0, 2, 1, 0, 0, 1, 3]
+        model = _make_pad_model(
+            dtype, shape, pads, mode="constant", constant_value=cval
+        )
+        rng = np.random.default_rng(405)
+        if np.issubdtype(dtype, np.integer):
+            x = rng.integers(-10, 10, shape, dtype=dtype)
+        else:
+            x = rng.uniform(-2.0, 2.0, shape).astype(dtype)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0)
+
+    @pytest.mark.parametrize("mode", ["constant", "reflect", "edge", "wrap"])
+    @pytest.mark.parametrize("dtype", [np.float32, np.float16])
+    def test_pad_modes_nchw(self, model_runner, mode, dtype):
+        shape = [2, 3, 5, 6]
+        pads = [0, 0, 2, 3, 0, 0, 1, 2]
+        model = _make_pad_model(dtype, shape, pads, mode=mode)
+        rng = np.random.default_rng(406)
+        x = rng.uniform(-2.0, 2.0, shape).astype(dtype)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0)
+
+    @pytest.mark.parametrize(
+        "axes,pads,mode,cval",
+        [
+            ([2, 3], [1, 2, 2, 1], "reflect", None),
+            ([-1], [2, 3], "constant", 3.0),
+            ([3, 1], [1, 0, 2, 1], "edge", None),
+        ],
+    )
+    def test_pad_axes(self, model_runner, axes, pads, mode, cval):
+        shape = [1, 2, 5, 6]
+        model = _make_pad_model(
+            np.float32, shape, pads, mode=mode, constant_value=cval, axes=axes
+        )
+        rng = np.random.default_rng(407)
+        x = rng.uniform(-2.0, 2.0, shape).astype(np.float32)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0)
+
+    @pytest.mark.parametrize("mode", ["constant", "edge"])
+    def test_pad_negative_crops(self, model_runner, mode):
+        """A negative pad removes elements from that side."""
+        shape = [1, 2, 6, 7]
+        pads = [0, 0, -1, 2, 0, 0, 1, -3]
+        model = _make_pad_model(np.float32, shape, pads, mode=mode)
+        rng = np.random.default_rng(408)
+        x = rng.uniform(-2.0, 2.0, shape).astype(np.float32)
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=0)
 

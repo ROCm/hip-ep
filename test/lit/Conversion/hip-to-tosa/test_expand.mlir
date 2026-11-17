@@ -111,7 +111,7 @@ func.func @expand_integer(%ctx: !hip.context, %x: tensor<1x5xi32>,
 // -----
 
 //===----------------------------------------------------------------------===//
-// A broadcast feeding an anchor, in the shape hip-fuse-rocmlir produces.
+// A broadcast feeding an anchor, in the shape the rocMLIR fusion produces.
 //===----------------------------------------------------------------------===//
 
 // The point of converting the expand at all: a bias broadcast up to the matmul

@@ -2691,7 +2691,8 @@
 "_Z27qmoe_decode_fc2_dp4a_kernelILi32ELi8EEvPKaPKfPKiPK6__halfPKhS8_SA_S8_PS6_iiii":[76,0,0,16,1114,0,0],
 "_Z27qmoe_decode_fc2_dp4a_kernelILi64ELi16EEvPKaPKfPKiPK6__halfPKhS8_SA_S8_PS6_iiii":[143,68,0,10,2598,16,64],
 "_Z27qmoe_decode_fc2_dp4a_kernelILi64ELi4EEvPKaPKfPKiPK6__halfPKhS8_SA_S8_PS6_iiii":[49,0,0,16,729,4,16],
-"_Z27qmoe_decode_fc2_dp4a_kernelILi64ELi8EEvPKaPKfPKiPK6__halfPKhS8_SA_S8_PS6_iiii":[76,0,0,16,1283,8,32]
+"_Z27qmoe_decode_fc2_dp4a_kernelILi64ELi8EEvPKaPKfPKiPK6__halfPKhS8_SA_S8_PS6_iiii":[76,0,0,16,1283,8,32],
+"_Z34qmoe_decode_fc2_reduce_dp4a_kernelILi128ELi2ELi32EEvPKaPKfPKiPK6__halfPKhS8_SA_S8_PS6_iiiii":[59,0,0,16,429,2,16]
 },
 "qmoe_ragged_mm_kernel":{
 "_ZN12_GLOBAL__N_131qmoe_reduce_sorted_pairs_kernelEPK6__halfPKiS4_S2_PS0_xxi":[17,0,0,16,292,0,0],
