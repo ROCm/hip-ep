@@ -318,11 +318,21 @@ private:
   /// The integer `v` folds to. Rebuilt scalars are cloned without folding, so
   /// a constant can arrive as arith on constants (a cast chain, a
   /// `from_elements` of `trunci(addi(...))`); each op's own folder evaluates
-  /// it at the op's width.
+  /// it at the op's width. Successful folds are memoized so a shared
+  /// subexpression is evaluated once rather than once per use.
   std::optional<APInt> foldedConstant(Value v, unsigned depth) {
     APInt c;
     if (matchPattern(v, m_ConstantInt(&c)))
       return c;
+    if (auto it = folds.find(v); it != folds.end())
+      return it->second;
+    std::optional<APInt> result = computeFoldedConstant(v, depth);
+    if (result)
+      folds[v] = *result;
+    return result;
+  }
+
+  std::optional<APInt> computeFoldedConstant(Value v, unsigned depth) {
     Operation *def = v.getDefiningOp();
     if (!def || depth > kMaxDepth || def->getNumResults() != 1 ||
         !isa<arith::ArithDialect>(def->getDialect()))
@@ -620,6 +630,7 @@ private:
   llvm::DenseMap<std::pair<Value, int64_t>, Value> dims;
   llvm::DenseMap<Value, Value> scalars;
   llvm::DenseMap<std::pair<Value, int64_t>, Value> elements;
+  llvm::DenseMap<Value, APInt> folds;
 };
 
 static FailureOr<Value> resolveBranchDim(OpBuilder &b, IfResultDimOp op,
