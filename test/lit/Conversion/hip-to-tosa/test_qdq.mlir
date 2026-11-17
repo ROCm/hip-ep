@@ -293,3 +293,24 @@ func.func @dequantize_packed_int4_argument(%w: tensor<32x16x1x1xi8>,
       : tensor<32x16x1x1xf32>
   return %r : tensor<32x16x1x1xf32>
 }
+
+// -----
+
+// UINT4 weights (ui8 storage): the argument becomes ui4, so the cast to float
+// is rocMLIR's zero-extending unsigned_cast, and the kernel then ends signless.
+// CHECK-LABEL: func.func @dequantize_packed_uint4_argument
+// CHECK-SAME: %arg0: tensor<64x32xi4>
+// CHECK: tosa.custom %arg0 {{.*}}operator_name = "unsigned_cast"{{.*}} : (tensor<64x32xi4>) -> tensor<64x32xf32>
+// CHECK-NOT: packed_int4
+func.func @dequantize_packed_uint4_argument(%w: tensor<64x32xui8>,
+                                            %init: tensor<64x32xf32>)
+    -> tensor<64x32xf32> attributes {rock.kernel} {
+  %ctx = ub.poison : !hip.context
+  %one = hip.constant {value = dense<1.000000e+00> : tensor<f32>} : tensor<f32>
+  %r = hip.dequantize_linear(%ctx) ins(%w, %one : tensor<64x32xui8>,
+                                                 tensor<f32>)
+      outs(%init : tensor<64x32xf32>)
+      {axis = 1 : i64, block_size = 0 : i64, packed_int4}
+      : tensor<64x32xf32>
+  return %r : tensor<64x32xf32>
+}

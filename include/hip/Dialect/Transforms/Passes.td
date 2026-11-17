@@ -266,10 +266,12 @@ def FuseRocMlirAnchorPass
                "gemm-elementwise-gemm kernel must read a listed type; an "
                "empty list merges no pair.">,
     Option<"int4Weights", "int4-weights", "bool", /*default=*/"false",
-           "Take the packed-int4 weight dequantize of a 1x1 convolution into "
-           "its kernel, which then reads the 4-bit weights. rocMLIR packs an "
-           "i4 filter under only some perfConfigs, so this needs autotuning, "
-           "which skips the ones that fail.">
+           "Take the packed-int4 weight dequantize of a 1x1 convolution, or "
+           "of the B operand of a matmul or gemm (per column or blocked along "
+           "K, signed or unsigned), into its kernel, which then reads the "
+           "4-bit weights. rocMLIR packs an i4 operand under only some "
+           "perfConfigs, so this needs autotuning, which skips the ones that "
+           "fail.">
   ];
   let dependentDialects = [
     "mlir::arith::ArithDialect",

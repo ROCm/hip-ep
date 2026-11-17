@@ -42,7 +42,7 @@ enum class Decomposition {
   QLinearConv,
   QLinearMatMul,
   DequantizedConv,
-  Int4FilterConv
+  Int4Weights
 };
 
 void sortByBlockOrder(SmallVectorImpl<Operation *> &ops) {
@@ -56,37 +56,70 @@ bool allEqual(ArrayAttr values, int64_t expected) {
   });
 }
 
-// The filter dequantize of a 1x1 convolution that the kernel can read as
-// 4-bit weights: packed signed int4 (signless i8 storage) of a constant or an
-// argument, with a scale and zero point per tensor or per output channel.
-// Two nibbles share a byte along the input channels, so their count is even.
-DequantizeLinearOp getInt4Filter(ConvOp conv) {
-  auto dq = conv.getWeights().getDefiningOp<DequantizeLinearOp>();
-  if (!dq || !dq->hasOneUse() || !dq.getPackedInt4() ||
-      dq.getBlockSize() != 0 || conv.getGroup() != 1 ||
-      !allEqual(conv.getKernelShape(), 1) || !allEqual(conv.getStrides(), 1) ||
-      !allEqual(conv.getPads(), 0) || !allEqual(conv.getDilations(), 1))
+// The weights operand that an anchor's kernel can read as packed int4: the
+// filter of a 1x1 convolution, or the B operand [K, N] of a matmul or gemm
+// that does not transpose it.
+OpOperand *getWeightOperand(Operation *anchor) {
+  if (auto conv = dyn_cast<ConvOp>(anchor)) {
+    if (conv.getGroup() != 1 || !allEqual(conv.getKernelShape(), 1) ||
+        !allEqual(conv.getStrides(), 1) || !allEqual(conv.getPads(), 0) ||
+        !allEqual(conv.getDilations(), 1))
+      return nullptr;
+    return &conv.getWeightsMutable();
+  }
+  if (auto matmul = dyn_cast<MatmulOp>(anchor))
+    return matmul.getTransB() == 0 ? &matmul.getBMutable() : nullptr;
+  if (auto gemm = dyn_cast<GemmOp>(anchor))
+    return gemm.getTransB() == 0 ? &gemm.getInputBMutable() : nullptr;
+  return nullptr;
+}
+
+// The weights dequantize that the kernel can read as 4-bit values: packed
+// INT4 (signless i8 storage) or UINT4 (ui8 storage) of a constant or an
+// argument. Its scale and zero point are per tensor, per output channel (a
+// filter's axis 0, B's axis 1), or, for B, per block of K along axis 0. Two
+// nibbles share a byte along the innermost dimension, so that extent is even.
+DequantizeLinearOp getInt4Weights(Operation *anchor) {
+  OpOperand *operand = getWeightOperand(anchor);
+  if (!operand)
     return nullptr;
+  auto dq = operand->get().getDefiningOp<DequantizeLinearOp>();
+  if (!dq || !dq->hasOneUse() || !dq.getPackedInt4())
+    return nullptr;
+  bool filter = isa<ConvOp>(anchor);
   auto weightType = dyn_cast<RankedTensorType>(dq.getResult(0).getType());
   auto inputType = dyn_cast<RankedTensorType>(dq.getInput().getType());
   if (!weightType || !inputType || !weightType.hasStaticShape() ||
-      weightType.getRank() != 4 || weightType.getDimSize(1) % 2 != 0 ||
-      !isa<FloatType>(weightType.getElementType()) ||
-      !inputType.getElementType().isSignlessInteger(8))
+      weightType.getRank() != (filter ? 4 : 2) ||
+      weightType.getDimSize(1) % 2 != 0 ||
+      !isa<FloatType>(weightType.getElementType()))
     return nullptr;
-  int64_t channels = weightType.getDimSize(0);
+  Type storage = inputType.getElementType();
+  if (!storage.isSignlessInteger(8) && !storage.isUnsignedInteger(8))
+    return nullptr;
+  int64_t channelAxis = filter ? 0 : 1;
+  int64_t channels = weightType.getDimSize(channelAxis);
+  int64_t blockSize = dq.getBlockSize();
+  SmallVector<int64_t> blockedShape;
+  if (blockSize != 0) {
+    int64_t depth = weightType.getDimSize(0);
+    if (filter || dq.getAxis() != 0 || blockSize < 0 || depth % blockSize != 0)
+      return nullptr;
+    blockedShape = {depth / blockSize, channels};
+  }
   auto isParam = [&](Value value, Type elementType) {
     auto type = dyn_cast<RankedTensorType>(value.getType());
     if (!type || !type.hasStaticShape() || type.getElementType() != elementType)
       return false;
+    if (blockSize != 0)
+      return type.getShape() == ArrayRef<int64_t>(blockedShape);
     return type.getNumElements() == 1 ||
            (type.getRank() == 1 && type.getDimSize(0) == channels &&
-            dq.getAxis() == 0);
+            dq.getAxis() == channelAxis);
   };
   if (!isParam(dq.getScale(), weightType.getElementType()))
     return nullptr;
-  if (Value zp = dq.getZeroPoint();
-      zp && !isParam(zp, inputType.getElementType()))
+  if (Value zp = dq.getZeroPoint(); zp && !isParam(zp, storage))
     return nullptr;
   Value weights = dq.getInput();
   if (!weights.getDefiningOp<ConstantOp>() && !isa<BlockArgument>(weights))
@@ -98,8 +131,8 @@ DequantizeLinearOp getInt4Filter(ConvOp conv) {
 // matmul or convolution has an exact HIP kernel; outlining it asks rocMLIR to
 // compile a non-quantized integer tosa op, which this pipeline does not
 // establish. The i32 accumulator of a quantized anchor is its init, not an
-// input. With `int4Weights`, a float convolution of packed-int4 weights takes
-// their dequantize into its kernel.
+// input. With `int4Weights`, a float convolution, matmul or gemm of packed-int4
+// weights takes their dequantize into its kernel.
 std::optional<Decomposition> getAnchorKind(Operation *op, bool int4Weights) {
   if (auto conv = dyn_cast<QLinearConvOp>(op))
     return conv->getNumResults() == 1 && planQLinearConv(conv)
@@ -123,9 +156,8 @@ std::optional<Decomposition> getAnchorKind(Operation *op, bool int4Weights) {
     if (auto type = dyn_cast<TensorType>(operand.getType());
         type && !type.hasStaticShape())
       return std::nullopt;
-  if (auto conv = dyn_cast<ConvOp>(op);
-      int4Weights && conv && getInt4Filter(conv))
-    return Decomposition::Int4FilterConv;
+  if (int4Weights && getInt4Weights(op))
+    return Decomposition::Int4Weights;
   return Decomposition::None;
 }
 
@@ -1125,23 +1157,28 @@ SmallVector<Operation *> getChain(Operation *anchor,
   return chain;
 }
 
-// Splits the packed-int4 filter dequantize of a planned convolution into the
-// ops its kernel takes, which read the 4-bit weights, and returns them:
+// Splits the packed-int4 weights dequantize of a planned anchor into the ops
+// its kernel takes, which read the 4-bit weights, and returns them:
 //
 //   (dequantize(w, 1) - dequantize(zp, 1)) * scale
 //
 // The zero point is dequantized outside the kernel, once per inference: it is
-// broadcast over the filter, and rocMLIR cannot pack an i4 value that a
+// broadcast over the weights, and rocMLIR cannot pack an i4 value that a
 // broadcast reads. Both differences are of small integers, so the result is
-// exactly the one rounding of (w - zp) * scale.
-SmallVector<Operation *> rewriteInt4Filter(ConvOp conv,
-                                           RewriterBase &rewriter) {
-  DequantizeLinearOp dq = getInt4Filter(conv);
+// exactly the one rounding of (w - zp) * scale. Blocked weights [K, N] are
+// viewed as [K / bs, bs, N] for the broadcast of the [K / bs, N] parameters
+// and viewed back; the dequantize itself is per element.
+SmallVector<Operation *> rewriteInt4Weights(Operation *anchor,
+                                            RewriterBase &rewriter) {
+  DequantizeLinearOp dq = getInt4Weights(anchor);
+  OpOperand *operand = getWeightOperand(anchor);
   Location loc = dq.getLoc();
-  Value ctx = conv.getCtx();
+  Value ctx = anchor->getOperand(0);
   auto weightType = cast<RankedTensorType>(dq.getResult(0).getType());
   Type elementType = weightType.getElementType();
-  int64_t channels = weightType.getDimSize(0);
+  bool filter = isa<ConvOp>(anchor);
+  int64_t blockSize = dq.getBlockSize();
+  int64_t channels = weightType.getDimSize(filter ? 0 : 1);
   rewriter.setInsertionPoint(dq);
   auto scalarType = RankedTensorType::get({}, elementType);
   Value one =
@@ -1152,41 +1189,72 @@ SmallVector<Operation *> rewriteInt4Filter(ConvOp conv,
     auto op = DequantizeLinearOp::create(
         rewriter, loc, TypeRange{type}, ctx, input, one, Value(),
         emitTensorEmpty(rewriter, loc, type), dq.getAxisAttr(),
-        dq.getBlockSizeAttr());
+        rewriter.getI64IntegerAttr(0));
     op.setPackedInt4(true);
     return op;
   };
-  // A per-channel parameter [C] broadcasts over the filter as [C, 1, 1, 1].
-  auto perChannel = [&](Value value) -> Value {
+
+  // The shape the arithmetic runs in, and how a parameter broadcasts into
+  // it: a filter's [C] as [C, 1, 1, 1], B's [N] as [1, N], and B's blocked
+  // [K / bs, N] as [K / bs, 1, N].
+  RankedTensorType computeType = weightType;
+  if (blockSize != 0) {
+    int64_t depth = weightType.getDimSize(0);
+    computeType = RankedTensorType::get(
+        {depth / blockSize, blockSize, channels}, elementType);
+  }
+  auto broadcastable = [&](Value value) -> Value {
     auto type = cast<RankedTensorType>(value.getType());
+    if (blockSize != 0) {
+      auto expanded = RankedTensorType::get({type.getDimSize(0), 1, channels},
+                                            type.getElementType());
+      return tensor::ExpandShapeOp::create(
+          rewriter, loc, expanded, value,
+          SmallVector<ReassociationIndices>{{0}, {1, 2}});
+    }
     if (type.getRank() != 1 || type.getDimSize(0) != channels || channels == 1)
       return value;
-    auto expanded =
-        RankedTensorType::get({channels, 1, 1, 1}, type.getElementType());
+    SmallVector<int64_t> shape(computeType.getRank(), 1);
+    shape[filter ? 0 : 1] = channels;
+    SmallVector<ReassociationIndices> groups = {
+        llvm::to_vector(llvm::seq<int64_t>(computeType.getRank()))};
     return tensor::ExpandShapeOp::create(
-        rewriter, loc, expanded, value,
-        SmallVector<ReassociationIndices>{{0, 1, 2, 3}});
+        rewriter, loc, RankedTensorType::get(shape, type.getElementType()),
+        value, groups);
   };
+  SmallVector<ReassociationIndices> blockGroups = {{0, 1}, {2}};
 
   SmallVector<Operation *> kernelOps;
   DequantizeLinearOp weights = dequantize(dq.getInput(), weightType);
   kernelOps.push_back(weights);
-  Value filter = weights.getResult(0);
+  Value value = weights.getResult(0);
+  if (blockSize != 0) {
+    auto view = tensor::ExpandShapeOp::create(rewriter, loc, computeType, value,
+                                              blockGroups);
+    kernelOps.push_back(view);
+    value = view.getResult();
+  }
   if (Value zp = dq.getZeroPoint()) {
     auto zpType = cast<RankedTensorType>(zp.getType()).clone(elementType);
     Value zpFloat = dequantize(zp, zpType).getResult(0);
-    auto sub = SubOp::create(rewriter, loc, TypeRange{weightType}, ctx, filter,
-                             perChannel(zpFloat),
-                             emitTensorEmpty(rewriter, loc, weightType));
+    auto sub = SubOp::create(rewriter, loc, TypeRange{computeType}, ctx, value,
+                             broadcastable(zpFloat),
+                             emitTensorEmpty(rewriter, loc, computeType));
     kernelOps.push_back(sub);
-    filter = sub.getResult(0);
+    value = sub.getResult(0);
   }
-  auto mul = MulOp::create(rewriter, loc, TypeRange{weightType}, ctx, filter,
-                           perChannel(dq.getScale()),
-                           emitTensorEmpty(rewriter, loc, weightType));
+  auto mul = MulOp::create(rewriter, loc, TypeRange{computeType}, ctx, value,
+                           broadcastable(dq.getScale()),
+                           emitTensorEmpty(rewriter, loc, computeType));
   kernelOps.push_back(mul);
-  rewriter.modifyOpInPlace(
-      conv, [&] { conv.getWeightsMutable().assign(mul.getResult(0)); });
+  value = mul.getResult(0);
+  if (blockSize != 0) {
+    auto back = tensor::CollapseShapeOp::create(rewriter, loc, weightType,
+                                                value, blockGroups);
+    kernelOps.push_back(back);
+    value = back.getResult();
+  }
+  rewriter.modifyOpInPlace(anchor, [&] { operand->set(value); });
   rewriter.eraseOp(dq);
   return kernelOps;
 }
@@ -1324,7 +1392,7 @@ public:
 private:
   // A plan is checked on the IR as it is when its turn comes, since an
   // earlier kernel may have moved its readers. A QLinear op or a convolution
-  // of dequantizes is decomposed, and an int4 filter split, only after that
+  // of dequantizes is decomposed, and int4 weights split, only after that
   // check passes, so a declined op keeps its HIP kernels. Without the prologue
   // modules a plan may still outline; they are then inlined back with the other
   // leftovers.
@@ -1353,9 +1421,8 @@ private:
     }
 
     SmallVector<Operation *> chain;
-    if (plan.kind == Decomposition::Int4FilterConv) {
-      plan.prologue.insert_range(
-          rewriteInt4Filter(cast<ConvOp>(plan.anchor), rewriter));
+    if (plan.kind == Decomposition::Int4Weights) {
+      plan.prologue.insert_range(rewriteInt4Weights(plan.anchor, rewriter));
       chain = getChain(plan.anchor, plan.epilogue);
     } else if (plan.kind == Decomposition::None) {
       chain = getChain(plan.anchor, plan.epilogue);
