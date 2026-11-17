@@ -121,3 +121,9 @@ DLLs used for qualification. Put both qualified DLLs beside a copied executable
 so its runtime selection is reproduced. A rebuilt executable needs complete
 code/input/entry retention evidence or fresh ranking; an unchanged kernel ISA
 alone does not qualify old measurements for a new table build.
+
+The model-shape CLI also accepts `--route nbits|dp4a|padrow` and
+`--zp-type fp16|u8`. The main-branch `--dp4a` and `--b-row-bytes K/2+128`
+spellings remain available; conflicting route selections are rejected.
+`--list-configs` and pinned WMMA/DP4A configuration environment variables
+remain supported. Environment pinning cannot be combined with LUT ranking.
