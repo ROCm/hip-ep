@@ -588,6 +588,19 @@ class TestLayerNormalization:
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=5e-3, rtol=1e-3)
 
+    def test_layer_norm_large_magnitude_fp32(self, model_runner):
+        """Rows whose plain sum of squares is finite but near the fp32 limit.
+
+        Squaring x - x[0] overflows for x = [1e19, -1e19] (the second shifted
+        value is -2e19), which would zero both outputs instead of giving about
+        +-1 times scale.
+        """
+        input_shape = [2, 2]
+        model = _make_layer_norm_model(input_shape, np.float32, with_bias=True)
+        x = np.array([[1e19, -1e19], [-1e19, 1e19]], dtype=np.float32)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=1e-5, rtol=1e-5)
+
     @pytest.mark.parametrize("num_patches", [256, 1024])
     def test_layer_norm_qwen35b_vision_shape(self, model_runner, num_patches):
         """LN exactly as it appears 55x in Qwen3.5-35B vision.onnx:
