@@ -8,6 +8,7 @@ add_library(HipDialectIR STATIC
   HipConstantData.cpp
   HipDialect.cpp
   HipDpsOpInterface.cpp
+  HipElementMoveInterface.cpp
   HipOpStateInterface.cpp
   RuntimeAccessOpInterface.cpp
   HipReadbackCanonicalize.cpp
@@ -25,6 +26,7 @@ add_dependencies(HipDialectIR
   HipDpsOpInterfaceIncGen
   HipOpStateInterfaceIncGen
   RuntimeAccessOpInterfaceIncGen
+  HipElementMoveInterfaceIncGen
   HipOpsIncGen
 )
 

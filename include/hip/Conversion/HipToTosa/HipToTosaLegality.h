@@ -4,7 +4,7 @@
  */
 
 // The view-op and QDQ rules convert-hip-to-tosa applies, exported for passes
-// that decide what reaches it. hip-fuse-rocmlir outlines subgraphs that must
+// that decide what reaches it. The rocMLIR fusion outlines subgraphs that must
 // lower to TOSA in full; keying its view absorption on these same predicates
 // keeps it from pulling in an op the lowering would then refuse.
 //
@@ -33,6 +33,13 @@ bool isTosaLowerableExpand(ExpandOp op);
 // A static per-tensor or per-axis hip.quantize_linear (saturating) or
 // hip.dequantize_linear. False for any other op.
 bool isTosaLowerableQdq(Operation *op);
+
+// A pointwise op that convert-hip-to-tosa lowers inside a rocMLIR kernel:
+// one that isTosaExpressiblePointwiseOp accepts, a cast to or from any
+// integer or float, an 8- or 16-bit unsigned max, min, equal or less, or a
+// Where on a byte mask. The rocMLIR fusion takes no other pointwise op; one
+// left as a hip op inside a conv or gemm kernel would fail its compile.
+bool isTosaLowerableInKernel(Operation *op);
 
 // True when `op` touches no unsigned integer, or when its TOSA form keeps an
 // unsigned value's meaning after the kernel is relabeled to signless (views,
