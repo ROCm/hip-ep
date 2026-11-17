@@ -313,13 +313,24 @@ static mlir::Value resolveHostIndex(mlir::OpBuilder &b, mlir::Location loc,
 
   mlir::Value lhs = def->getOperand(lhsPos);
   mlir::Value rhs = def->getOperand(lhsPos + 1);
-  // A rank-0 or single-element operand is broadcast against the other.
-  auto elemIdx = [&](mlir::Value operand) -> int64_t {
+  // Flat indexing is valid only for scalars or statically identical shapes.
+  // Other broadcast layouts need coordinate mapping; leave them to readback.
+  auto elemIdx = [&](mlir::Value operand) -> std::optional<int64_t> {
     auto t = mlir::dyn_cast<mlir::RankedTensorType>(operand.getType());
-    return (t && t.hasStaticShape() && t.getNumElements() == 1) ? 0 : idx;
+    if (!t || !t.hasStaticShape())
+      return std::nullopt;
+    if (t.getNumElements() == 1)
+      return 0;
+    if (vType.hasStaticShape() && t.getShape() == vType.getShape())
+      return idx;
+    return std::nullopt;
   };
-  mlir::Value l = resolveHostIndex(b, loc, lhs, elemIdx(lhs), depth + 1);
-  mlir::Value r = resolveHostIndex(b, loc, rhs, elemIdx(rhs), depth + 1);
+  auto lhsIdx = elemIdx(lhs);
+  auto rhsIdx = elemIdx(rhs);
+  if (!lhsIdx || !rhsIdx)
+    return {};
+  mlir::Value l = resolveHostIndex(b, loc, lhs, *lhsIdx, depth + 1);
+  mlir::Value r = resolveHostIndex(b, loc, rhs, *rhsIdx, depth + 1);
   if (!l || !r)
     return {};
 

@@ -748,4 +748,68 @@ module {
     // CHECK: hip.slice
     return %r : tensor<?x?xf32>
   }
+
+  // Test 30: flattening Add([[a], [b]], [[10, 20]]) must not reuse flat
+  // indices for the broadcast operands. In particular, end[1] is a + 20,
+  // not b + 20. Use device readback when host coordinate mapping is absent.
+  func.func @test_slice_native_broadcast_bound_readback(
+      %input: tensor<?x?x?x?xf32>, %shape_source: tensor<?x?xf32>)
+      -> tensor<?x?x?x?xf32> {
+    // CHECK-LABEL: func.func @test_slice_native_broadcast_bound_readback
+    %zero = arith.constant dense<0> : tensor<4xi64>
+    %axes = arith.constant dense<[0, 1, 2, 3]> : tensor<4xi64>
+    %column_shape = arith.constant dense<[2, 1]> : tensor<2xi64>
+    %flat_shape = arith.constant dense<[4]> : tensor<1xi64>
+    %offsets = arith.constant dense<[[10, 20]]> : tensor<1x2xi64>
+    %shape = "onnx.Shape"(%shape_source)
+        : (tensor<?x?xf32>) -> tensor<2xi64>
+    %column = "onnx.Reshape"(%shape, %column_shape)
+        : (tensor<2xi64>, tensor<2xi64>) -> tensor<2x1xi64>
+    %sum = "onnx.Add"(%column, %offsets)
+        : (tensor<2x1xi64>, tensor<1x2xi64>) -> tensor<2x2xi64>
+    %ends = "onnx.Reshape"(%sum, %flat_shape)
+        : (tensor<2x2xi64>, tensor<1xi64>) -> tensor<4xi64>
+    %s = "onnx.Slice"(%input, %zero, %ends, %axes)
+        : (tensor<?x?x?x?xf32>, tensor<4xi64>, tensor<4xi64>,
+           tensor<4xi64>) -> tensor<*xf32>
+    %r = "onnx.Identity"(%s) : (tensor<*xf32>) -> tensor<?x?x?x?xf32>
+
+    // CHECK-COUNT-4: hip.readback_scalar
+    // CHECK-NOT: hip.readback_scalar
+    // CHECK: hip.slice
+    return %r : tensor<?x?x?x?xf32>
+  }
+
+  // Test 31: the same broadcast in its post-conversion spelling.
+  func.func @test_slice_native_lowered_broadcast_bound_readback(
+      %ctx: !hip.context, %input: tensor<?x?x?x?xf32>,
+      %shape_source: tensor<?x?xf32>) -> tensor<?x?x?x?xf32> {
+    // CHECK-LABEL: func.func @test_slice_native_lowered_broadcast_bound_readback
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %zero = arith.constant dense<0> : tensor<4xi64>
+    %axes = arith.constant dense<[0, 1, 2, 3]> : tensor<4xi64>
+    %offsets = arith.constant dense<[[10, 20]]> : tensor<1x2xi64>
+    %a_dim = tensor.dim %shape_source, %c0 : tensor<?x?xf32>
+    %b_dim = tensor.dim %shape_source, %c1 : tensor<?x?xf32>
+    %a = arith.index_cast %a_dim : index to i64
+    %b = arith.index_cast %b_dim : index to i64
+    %shape = tensor.from_elements %a, %b : tensor<2xi64>
+    %column = tensor.expand_shape %shape [[0, 1]] output_shape [2, 1]
+        : tensor<2xi64> into tensor<2x1xi64>
+    %init = tensor.empty() : tensor<2x2xi64>
+    %sum = hip.add(%ctx) ins(%column, %offsets : tensor<2x1xi64>, tensor<1x2xi64>)
+        outs(%init : tensor<2x2xi64>) -> tensor<2x2xi64>
+    %ends = tensor.collapse_shape %sum [[0, 1]]
+        : tensor<2x2xi64> into tensor<4xi64>
+    %s = "onnx.Slice"(%input, %zero, %ends, %axes)
+        : (tensor<?x?x?x?xf32>, tensor<4xi64>, tensor<4xi64>,
+           tensor<4xi64>) -> tensor<*xf32>
+    %r = "onnx.Identity"(%s) : (tensor<*xf32>) -> tensor<?x?x?x?xf32>
+
+    // CHECK-COUNT-4: hip.readback_scalar
+    // CHECK-NOT: hip.readback_scalar
+    // CHECK: hip.slice
+    return %r : tensor<?x?x?x?xf32>
+  }
 }
