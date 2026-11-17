@@ -323,6 +323,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/skip_simplified_layer_norm.cpp runtime_skip_simplified_layer_norm.bc)
     compile_to_bitcode(real/rotary_embedding.cpp runtime_rotary_embedding.bc)
     compile_to_bitcode(real/gqa.cpp runtime_gqa.bc)
+    compile_to_bitcode(real/mla.cpp runtime_mla.bc)
     compile_to_bitcode(real/cast.cpp runtime_cast.bc)
     compile_to_bitcode(real/range.cpp runtime_range.bc)
     compile_to_bitcode(real/gather.cpp runtime_gather.bc)
@@ -386,6 +387,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/mod.cpp runtime_mod.bc)
     compile_to_bitcode(real/slice.cpp runtime_slice.bc)
     compile_to_bitcode(real/scatter_nd.cpp runtime_scatter_nd.bc)
+    compile_to_bitcode(real/tensor_scatter.cpp runtime_tensor_scatter.bc)
     compile_to_bitcode(real/multi_head_attention.cpp runtime_multi_head_attention.bc)
     compile_to_bitcode(real/nonzero.cpp runtime_nonzero.bc)
     compile_to_bitcode(real/non_max_suppression.cpp runtime_non_max_suppression.bc)
@@ -434,6 +436,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_skip_simplified_layer_norm.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_rotary_embedding.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_gqa.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_mla.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_cast.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_range.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_gather.bc
@@ -493,6 +496,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_mod.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_slice.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_scatter_nd.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_tensor_scatter.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_multi_head_attention.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_nonzero.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_non_max_suppression.bc

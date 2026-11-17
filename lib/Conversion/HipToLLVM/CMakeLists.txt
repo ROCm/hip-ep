@@ -33,6 +33,8 @@ add_library(HipToLLVM STATIC
   TransposeLowering.cpp
   RopeLowering.cpp
   GqaLowering.cpp
+  MlaAttentionLowering.cpp
+  KvAttentionLowering.cpp
   MultiHeadAttentionLowering.cpp
   MatMulNBitsLowering.cpp
   DequantBnb4Lowering.cpp
@@ -63,6 +65,7 @@ add_library(HipToLLVM STATIC
   ModLowering.cpp
   SliceLowering.cpp
   ScatterNDLowering.cpp
+  TensorScatterLowering.cpp
   NonZeroLowering.cpp
   NonMaxSuppressionLowering.cpp
   ReadbackDimLowering.cpp

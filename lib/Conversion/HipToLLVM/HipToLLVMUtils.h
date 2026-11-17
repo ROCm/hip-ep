@@ -130,6 +130,8 @@ inline constexpr const char *kWrapGQAHostLength =
     "wrap_group_query_attention_host_length";
 inline constexpr const char *kWrapGQARingF16 =
     "wrap_group_query_attention_ring_f16";
+inline constexpr const char *kWrapMlaAttention = "wrap_mla_attention";
+inline constexpr const char *kWrapKvAttention = "wrap_kv_attention";
 inline constexpr const char *kWrapMultiHeadAttention =
     "wrap_multi_head_attention";
 inline constexpr const char *kWrapMatMulNBits = "wrap_matmul_nbits";
@@ -191,6 +193,7 @@ inline constexpr const char *kWrapSign = "wrap_sign";
 inline constexpr const char *kWrapMod = "wrap_mod";
 inline constexpr const char *kWrapSlice = "wrap_slice_typed";
 inline constexpr const char *kWrapScatterND = "wrap_scatter_nd";
+inline constexpr const char *kWrapTensorScatter = "wrap_tensor_scatter";
 inline constexpr const char *kWrapNonZero = "wrap_nonzero";
 inline constexpr const char *kWrapNonMaxSuppression =
     "wrap_non_max_suppression";
@@ -531,6 +534,10 @@ void populateRopeLoweringPatterns(const LLVMTypeConverter &converter,
 void populateGqaLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns,
     const DenseMap<Operation *, Value> &hostScalars);
+void populateMlaAttentionLoweringPatterns(const LLVMTypeConverter &converter,
+                                          RewritePatternSet &patterns);
+void populateKvAttentionLoweringPatterns(const LLVMTypeConverter &converter,
+                                         RewritePatternSet &patterns);
 void populateMultiHeadAttentionLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns);
 void populateMatMulNBitsLoweringPatterns(const LLVMTypeConverter &converter,
@@ -591,6 +598,8 @@ void populateSliceLoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);
 void populateScatterNDLoweringPatterns(const LLVMTypeConverter &converter,
                                        RewritePatternSet &patterns);
+void populateTensorScatterLoweringPatterns(const LLVMTypeConverter &converter,
+                                           RewritePatternSet &patterns);
 void populateNonZeroLoweringPatterns(const LLVMTypeConverter &converter,
                                      RewritePatternSet &patterns);
 void populateNonMaxSuppressionLoweringPatterns(

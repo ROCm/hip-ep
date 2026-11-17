@@ -108,6 +108,7 @@ add_library(OnnxToHip STATIC
   ConstantOfShapeConversion.cpp
   SliceConversion.cpp
   ScatterNDConversion.cpp
+  TensorScatterConversion.cpp
   IdentityConversion.cpp
   OrConversion.cpp
   AndConversion.cpp

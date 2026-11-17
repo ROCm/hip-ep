@@ -9,6 +9,9 @@
 #include "mlir/IR/BuiltinTypes.h"
 
 #include "llvm/ADT/APInt.h"
+#include "llvm/ADT/STLFunctionalExtras.h"
+
+#include <cmath>
 
 namespace mlir {
 namespace hip {
@@ -58,8 +61,13 @@ namespace {
 /// silently miscompiled (see the guards below).
 ///
 /// Not yet supported (rejected with a clear message): the 4th qk_matmul_output
-/// result, the opset-24 nonpad_kv_seqlen external-cache input, and boolean
-/// attn_mask (the runtime's attention_bias is additive-float only).
+/// result and boolean attn_mask (the runtime's attention_bias is additive-float
+/// only).
+///
+/// The opset-24 nonpad_kv_seqlen input makes K/V a buffer whose first
+/// nonpad_kv_seqlen[b] rows are valid. That form becomes hip.kv_attention
+/// instead (see lowerNonpadAttention): hip.gqa appends K/V to a past cache,
+/// which this form has no use for.
 ///
 /// Mask-extent assumption: the additive mask is passed to the runtime verbatim;
 /// its batch/head dims broadcast (extent 1 -> all), but its q/kv extents must
@@ -101,6 +109,105 @@ struct OnnxAttentionToHip : public mlir::RewritePattern {
                   mlir::PatternRewriter &rewriter) const override;
 };
 
+/// onnx.Attention(%q, %k, %v, none, none, none, %nonpad) {is_causal = 1}
+///   -> hip.kv_attention(%ctx) ins(%q3, %k4, %v4) kv_seqlen(%nonpad)
+///
+/// Query row i attends to keys j <= i + nonpad[b] - S among the first
+/// nonpad[b], which is hip.kv_attention's causal contract. Rank-3 K/V
+/// [B, T, G * d] are reshaped to [B, T, G, d] and transposed to BNSH; rank-4
+/// K/V are BNSH already. A rank-4 query is flattened to BSHD and the output
+/// mapped back. Masks, past inputs, is_causal = 0, softcap and present
+/// outputs with uses are not part of this contract and are rejected.
+mlir::LogicalResult lowerNonpadAttention(
+    mlir::Operation *op, mlir::PatternRewriter &rewriter, mlir::Value context,
+    mlir::Value kvSeqlen, int64_t qNumHeads, int64_t kvNumHeads,
+    int64_t isCausal, float softcap, mlir::Value attnMask, mlir::Value pastKey,
+    llvm::function_ref<mlir::FailureOr<mlir::Value>(mlir::Value)> bnsdToBshd,
+    llvm::function_ref<mlir::Value(mlir::Value, mlir::RankedTensorType)>
+        bshdToBnsd) {
+  mlir::Location loc = op->getLoc();
+  if (attnMask || pastKey)
+    return rewriter.notifyMatchFailure(
+        op, "nonpad_kv_seqlen with attn_mask or past KV not supported");
+  if (isCausal != 1)
+    return rewriter.notifyMatchFailure(
+        op, "nonpad_kv_seqlen without is_causal not supported");
+  if (softcap != 0.0f)
+    return rewriter.notifyMatchFailure(
+        op, "nonpad_kv_seqlen with softcap not supported");
+  for (unsigned i = 1; i < op->getNumResults(); ++i)
+    if (!op->getResult(i).use_empty())
+      return rewriter.notifyMatchFailure(
+          op, "nonpad_kv_seqlen with used present outputs not supported");
+  auto lengthsType = mlir::dyn_cast<mlir::RankedTensorType>(kvSeqlen.getType());
+  if (!lengthsType || lengthsType.getRank() != 1 ||
+      !lengthsType.getElementType().isInteger(64))
+    return rewriter.notifyMatchFailure(op, "nonpad_kv_seqlen must be [B] "
+                                           "int64");
+
+  mlir::Value query = op->getOperand(0);
+  auto queryType = mlir::cast<mlir::RankedTensorType>(query.getType());
+  const bool rank4 = queryType.getRank() == 4;
+
+  // [B, T, G * d] -> [B, G, T, d]; rank-4 K/V pass through.
+  auto toBnsh = [&](mlir::Value v) -> mlir::FailureOr<mlir::Value> {
+    auto t = mlir::cast<mlir::RankedTensorType>(v.getType());
+    if (rank4)
+      return t.isDynamicDim(3) ? mlir::FailureOr<mlir::Value>(mlir::failure())
+                               : mlir::FailureOr<mlir::Value>(v);
+    if (t.isDynamicDim(2) || t.getDimSize(2) % kvNumHeads != 0)
+      return mlir::failure();
+    auto bnsh = mlir::RankedTensorType::get({t.getDimSize(0), kvNumHeads,
+                                             t.getDimSize(1),
+                                             t.getDimSize(2) / kvNumHeads},
+                                            t.getElementType());
+    return bshdToBnsd(v, bnsh);
+  };
+  mlir::FailureOr<mlir::Value> key = toBnsh(op->getOperand(1));
+  mlir::FailureOr<mlir::Value> value = toBnsh(op->getOperand(2));
+  if (mlir::failed(key) || mlir::failed(value))
+    return rewriter.notifyMatchFailure(op, "K/V head dims must be static and "
+                                           "split into kv_num_heads");
+  mlir::Value q3 = query;
+  if (rank4) {
+    mlir::FailureOr<mlir::Value> flat = bnsdToBshd(query);
+    if (mlir::failed(flat))
+      return mlir::failure();
+    q3 = *flat;
+  }
+
+  const int64_t dk =
+      mlir::cast<mlir::RankedTensorType>(key->getType()).getDimSize(3);
+  float scale = 1.0f / std::sqrt(static_cast<float>(dk));
+  if (auto attr = op->getAttrOfType<mlir::FloatAttr>("scale"))
+    if (attr.getValueAsDouble() != 0.0)
+      scale = static_cast<float>(attr.getValueAsDouble());
+
+  auto resultType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  mlir::RankedTensorType outType = resultType;
+  if (rank4) {
+    if (resultType.isDynamicDim(1) || resultType.isDynamicDim(3))
+      return rewriter.notifyMatchFailure(
+          op, "rank-4 attention requires static num_heads and head_dim");
+    outType = mlir::RankedTensorType::get(
+        {resultType.getDimSize(0), resultType.getDimSize(2),
+         resultType.getDimSize(1) * resultType.getDimSize(3)},
+        resultType.getElementType());
+  }
+  mlir::Value init = createEmptyTensor(rewriter, loc, outType, q3);
+  auto attn = mlir::hip::KvAttentionOp::create(
+      rewriter, loc, context, q3, *key, *value, kvSeqlen, init,
+      rewriter.getI64IntegerAttr(qNumHeads),
+      rewriter.getI64IntegerAttr(kvNumHeads), rewriter.getF32FloatAttr(scale));
+  mlir::Value out = attn->getResult(0);
+  if (rank4)
+    out = bshdToBnsd(out, resultType);
+  rewriter.replaceAllUsesWith(op->getResult(0), out);
+  rewriter.eraseOp(op);
+  return mlir::success();
+}
+
 mlir::LogicalResult
 OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
                                     mlir::PatternRewriter &rewriter) const {
@@ -116,9 +223,9 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
     return v && !mlir::isa<mlir::NoneType>(v.getType());
   };
 
-  if (numOps == 7 && isLive(op->getOperand(6)))
-    return rewriter.notifyMatchFailure(
-        op, "nonpad_kv_seqlen (external-cache mode) not supported yet");
+  mlir::Value nonpadKvSeqlen = numOps == 7 && isLive(op->getOperand(6))
+                                   ? op->getOperand(6)
+                                   : mlir::Value();
 
   mlir::Value query = op->getOperand(0);
   mlir::Value key = op->getOperand(1);
@@ -333,6 +440,11 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
                                        rewriter.getI64ArrayAttr({0, 2, 1, 3}));
     return transOp->getResult(0);
   };
+
+  if (nonpadKvSeqlen)
+    return lowerNonpadAttention(op, rewriter, context, nonpadKvSeqlen,
+                                qNumHeads, kvNumHeads, isCausal, softcap,
+                                attnMask, pastKey, bnsdToBshd, bshdToBnsd);
 
   // Flatten rank-4 Q/K/V to the rank-3 BSHD layout the runtime consumes.
   mlir::Value q3 = query, k3 = key, v3 = value;

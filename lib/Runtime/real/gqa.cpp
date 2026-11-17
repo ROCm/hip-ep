@@ -57,6 +57,7 @@
 #include "cache_utils.h"
 #include "error_check_macros.h"
 #include "gqa_autotune.h"
+#include "gqa_fused.h"
 #include "hip_arch_compat.h"
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
@@ -188,6 +189,9 @@ static constexpr int kFlashDecodeMaxSplits = 64;
 static inline bool flash_decode_geometry_ok(int64_t H, int64_t G, int64_t d) {
   if (G <= 0)
     return false;
+  // Absorbed multi-head latent attention (gqa_flash_decode_wide_kernel).
+  if (d == 320 && H == 32 * G)
+    return true;
   if (d != 64 && d != 96 && d != 128 && d != 256)
     return false;
   int64_t hpg = H / G;
@@ -493,10 +497,21 @@ static int gqa_forward_fused(
     std::optional<int32_t> host_length = std::nullopt,
     // [key_bias_batch, key_bias_len] fp16 per-key additive bias, or null.
     const void *key_bias = nullptr, int64_t key_bias_batch = 0,
-    int64_t key_bias_len = 0) {
+    int64_t key_bias_len = 0, bool reuse_past_kv = false) {
   // One row per batch entry, or one row shared by all of them.
   const int key_bias_stride =
       key_bias && key_bias_batch > 1 ? static_cast<int>(key_bias_len) : 0;
+
+  // reuse_past_kv: attend over the given fp16 past (stride past_buf_seq) with
+  // no new key/value to append, no rope and no present to fill.
+  if (reuse_past_kv) {
+    if (kv_format != KvCacheFormat::Fp16 || key || value || present_key ||
+        present_value || (do_rotary && cos_cache && sin_cache))
+      return -1;
+    present_key = const_cast<void *>(past_key);
+    present_value = const_cast<void *>(past_value);
+    skv = past_buf_seq;
+  }
 
   // Any non-fp16 cache reads/writes quantized bytes on the concat/append/decode
   // path; the specific scheme is carried by kv_format (extensible to INT4/FP8).
@@ -504,7 +519,7 @@ static int gqa_forward_fused(
   const int64_t present_seq = skv; // present_key buffer stride (may be max_seq)
   const size_t elem_sz = 2;        // fp16 only on the fused path
   const bool need_rope = do_rotary && cos_cache && sin_cache;
-  const bool packed_qkv = (!key && !value);
+  const bool packed_qkv = (!key && !value) && !reuse_past_kv;
 
   // B==1 pre-read (cached per Compute) feeds host past_len where needed.
   const int32_t seqlens_k_pre =
@@ -568,8 +583,8 @@ static int gqa_forward_fused(
     if (!flash_decode_geometry_ok(H, G, d)) {
       fprintf(stderr,
               "gqa_forward_fused (decode): unsupported geometry H=%lld G=%lld "
-              "d=%lld (HpG must be 1/2/3/4/5/6/8/16 and d 64/96/128/256, or "
-              "HpG 9 at d 128)\n",
+              "d=%lld (HpG must be 1/2/3/4/5/6/8/16 and d 64/96/128/256, "
+              "HpG 9 at d 128, or HpG 32 at d 320)\n",
               (long long)H, (long long)G, (long long)d);
       return -1;
     }
@@ -659,7 +674,7 @@ static int gqa_forward_fused(
     // append. update_kv_cache dispatches on kv_format internally. On a
     // sliding-window layer the prefix below the window is never read again,
     // so it is not copied.
-    if (!fused_copy &&
+    if (!fused_copy && !reuse_past_kv &&
         update_kv_cache(
             stream, past_key, past_value, kSrc, vSrc, present_key,
             present_value, static_cast<int>(B), static_cast<int>(past_len),
@@ -673,6 +688,14 @@ static int gqa_forward_fused(
     {
       char *ws = static_cast<char *>(hipdnn_ep_state_get_workspace(state));
       void *partials = ws + off_partials;
+      // One tensor feeding both key and value (absorbed latent attention)
+      // fills both caches with the same rows, so decode can read V from the
+      // K cache; the kernels take Vcache == Kcache as that signal. Rope or a
+      // quantized cache would make the two caches differ.
+      const void *decode_v_cache =
+          (key != nullptr && key == value && !need_rope && !kv_quantized)
+              ? present_key
+              : present_value;
       // Decode is bandwidth-bound: a quantized cache is read directly (e.g.
       // int8 halves the DRAM traffic). One entry serves every format --
       // kv_dtype selects the code path inside the kernel; scales feed dequant.
@@ -698,7 +721,7 @@ static int gqa_forward_fused(
                           static_cast<int>(key_bias != nullptr));
       } else if (online_tune) {
         drc = hip_gqa_flash_decode(
-            stream, qSrc, present_key, present_value, output, partials,
+            stream, qSrc, present_key, decode_v_cache, output, partials,
             static_cast<int>(B), static_cast<int>(H), static_cast<int>(G),
             static_cast<int>(d), static_cast<int>(skv),
             static_cast<int>(present_seq), kFlashDecodeMaxSplits, scale,
@@ -728,7 +751,7 @@ static int gqa_forward_fused(
         hip_gqa_autotune_resolve_decode(state->gqa_autotune_policy, &request,
                                         &selected);
         drc = hip_gqa_flash_decode_configured(
-            stream, qSrc, present_key, present_value, output, partials,
+            stream, qSrc, present_key, decode_v_cache, output, partials,
             static_cast<int>(B), static_cast<int>(H), static_cast<int>(G),
             static_cast<int>(d), effective_skv, static_cast<int>(present_seq),
             kFlashDecodeMaxSplits, scale, seqlens_k_ptr,
@@ -875,7 +898,7 @@ static int gqa_forward_fused(
     kSrc = d_Kroped; // V is never RoPE'd.
   }
 
-  if (present_key && present_value) {
+  if (present_key && present_value && !reuse_past_kv) {
     // Quantized cache: quantize-and-append/concat; fp16: plain. update_kv_cache
     // dispatches on kv_format internally. The windowed v6x prefill starts at
     // the tile holding past_len - window + 1, which window_copy_lo covers.
@@ -3367,6 +3390,102 @@ int wrap_group_query_attention_host_length(
             "(rc=%d)\n",
             rc);
   return rc;
+}
+
+int gqa_fused_attend_past(RuntimeState *state, hipStream_t stream,
+                          const void *query, const void *past_key,
+                          const void *past_value, const void *seqlens_k,
+                          void *output, int64_t B, int64_t sq,
+                          int64_t past_buf_seq, int64_t H, int64_t G, int64_t d,
+                          float scale) {
+  const bool geometry_ok = sq == 1
+                               ? flash_decode_geometry_ok(H, G, d)
+                               : (d == 64 || d == 96 || d == 128 || d == 256);
+  if (!geometry_ok || hipdnn_device_is_wave64() || sq > past_buf_seq) {
+    fprintf(stderr,
+            "gqa_fused_attend_past: no fused kernel for sq=%lld cache=%lld "
+            "H=%lld G=%lld d=%lld wave64=%d\n",
+            (long long)sq, (long long)past_buf_seq, (long long)H, (long long)G,
+            (long long)d, static_cast<int>(hipdnn_device_is_wave64()));
+    return -1;
+  }
+  return gqa_forward_fused(state, stream, query, nullptr, nullptr, past_key,
+                           past_value, seqlens_k, nullptr, nullptr, output,
+                           nullptr, nullptr, B, sq, /*skv=*/0, past_buf_seq, H,
+                           G, d, scale, /*do_rotary=*/0, nullptr, nullptr,
+                           KvCacheFormat::Fp16, nullptr, false, -1,
+                           /*host_length=*/std::nullopt, /*key_bias=*/nullptr,
+                           /*key_bias_batch=*/0, /*key_bias_len=*/0,
+                           /*reuse_past_kv=*/true);
+}
+
+int32_t gqa_read_seqlens_k(RuntimeState *state, hipStream_t stream,
+                           const void *seqlens_k, int64_t B) {
+  return read_seqlens_k_for_dispatch(stream, seqlens_k, B, state,
+                                     /*host_length=*/std::nullopt);
+}
+
+const void *gqa_seqlens_from_lengths(RuntimeState *state, hipStream_t stream,
+                                     const void *kv_seqlen, int64_t B) {
+  if (B > state->kv_seqlens_cap) {
+    if (state->kv_seqlens &&
+        hipdnn_ep_state_device_free(state, state->kv_seqlens) != hipSuccess)
+      return nullptr;
+    state->kv_seqlens = nullptr;
+    state->kv_seqlens_cap = 0;
+    const int64_t cap = (B + 63) / 64 * 64;
+    if (hipdnn_ep_state_device_alloc(state, &state->kv_seqlens,
+                                     static_cast<size_t>(cap) *
+                                         sizeof(int32_t)) != hipSuccess)
+      return nullptr;
+    state->kv_seqlens_cap = cap;
+  }
+  if (hip_lengths_to_seqlens_k(stream, static_cast<const int64_t *>(kv_seqlen),
+                               static_cast<int32_t *>(state->kv_seqlens),
+                               B) != 0)
+    return nullptr;
+  return state->kv_seqlens;
+}
+
+int wrap_kv_attention(RuntimeState *state, void *query, void *key, void *value,
+                      void *kv_seqlen, void *output, int64_t num_heads,
+                      int64_t kv_num_heads, float scale, int64_t batch,
+                      int64_t seq_len_q, int64_t kv_rows, int64_t key_dim,
+                      int64_t value_dim) {
+  OP_PROFILE(
+      "kv_attention",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "b=%lld,sq=%lld,t=%lld", (long long)batch,
+                 (long long)seq_len_q, (long long)kv_rows);
+        return std::string(b);
+      },
+      state);
+  if (!state || !query || !key || !value || !output) {
+    fprintf(stderr, "wrap_kv_attention: null state or argument\n");
+    return -1;
+  }
+  if (batch <= 0 || seq_len_q <= 0)
+    return 0;
+  if (key_dim != value_dim) {
+    fprintf(stderr,
+            "wrap_kv_attention: key and value head dims differ (%lld vs "
+            "%lld); the fused kernels need one head dim\n",
+            (long long)key_dim, (long long)value_dim);
+    return -1;
+  }
+  auto stream = static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
+  if (!stream)
+    return -1;
+  const void *seqlens = nullptr;
+  if (kv_seqlen) {
+    seqlens = gqa_seqlens_from_lengths(state, stream, kv_seqlen, batch);
+    if (!seqlens)
+      return -1;
+  }
+  return gqa_fused_attend_past(state, stream, query, key, value, seqlens,
+                               output, batch, seq_len_q, kv_rows, num_heads,
+                               kv_num_heads, key_dim, scale);
 }
 
 // The pointer ABI does not encode dtype: only compiler-proven FP16 operands
