@@ -112,3 +112,39 @@ class TestMatMul:
 
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=1e-3)
+
+
+def _make_f64_matmul_model(input_shape: list[int], weight_shape: list[int]):
+    """Build a MatMul ONNX model with f64 input X and constant f64 weight W."""
+    X = helper.make_tensor_value_info("X", TensorProto.DOUBLE, input_shape)
+    output_shape = input_shape[:-1] + [weight_shape[-1]]
+    Y = helper.make_tensor_value_info("Y", TensorProto.DOUBLE, output_shape)
+    node = helper.make_node("MatMul", ["X", "W"], ["Y"])
+
+    rng = np.random.default_rng(7)
+    w_data = rng.uniform(-0.5, 0.5, weight_shape).astype(np.float64)
+    w_init = numpy_helper.from_array(w_data, name="W")
+    return make_model_from_nodes([node], [X], [Y], initializers=[w_init])
+
+
+class TestMatMulF64:
+    @pytest.mark.parametrize(
+        "input_shape,weight_shape",
+        [
+            ([2, 4], [4, 3]),
+            ([2, 2, 4], [2, 4, 3]),
+        ],
+    )
+    def test_matmul_f64(self, model_runner, input_shape, weight_shape):
+        """f64 MatMul, including a batched weight. hipBLASLt uses HIP_R_64F."""
+        model = _make_f64_matmul_model(input_shape, weight_shape)
+
+        rng = np.random.default_rng(11)
+        x = rng.uniform(-1, 1, input_shape).astype(np.float64)
+
+        actual, expected = model_runner.run_sample(
+            model,
+            [x],
+            reference="cpu",
+        )
+        compare_outputs(actual, expected, atol=1e-6)

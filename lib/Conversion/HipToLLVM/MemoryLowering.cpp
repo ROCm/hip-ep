@@ -12,6 +12,10 @@
 #include "mlir/IR/BuiltinTypeInterfaces.h"
 #include "mlir/IR/BuiltinTypes.h"
 
+#include "llvm/ADT/STLExtras.h"
+
+#include <limits>
+
 namespace mlir {
 namespace hip {
 namespace {
@@ -309,14 +313,18 @@ struct AllocOutputOpLowering : public ConvertOpToLLVMPattern<AllocOutputOp> {
                              rewriter, internalSizes, strides, sizeBytes, true);
 
     // Runtime callback shape: the ONNX / func.return output shape when it
-    // differs from the internal memref rank. hip-use-output-allocator stamps
-    // `hipdnn.abi_shape` (external shape) + `hipdnn.abi_groups`:
+    // differs from the internal memref. hip-use-output-allocator stamps
+    // `hipdnn.abi_shape` (external shape) and, when the rank changes,
+    // `hipdnn.abi_groups`:
     //   * collapse (internal rank > external): groups[e] = # internal dims
     //     folded into external dim e; dynamic external dims = product of those
     //     internal sizes.
     //   * expand (internal rank < external): groups[i] = # external dims
     //     expanded from internal dim i; each dynamic external dim in that
     //     group takes the corresponding internal size (static dims from attr).
+    // A fully static abi_shape is the callback shape on its own. That is how a
+    // same-rank reassociation (`{90,160,16,4}` stored, `{1,90,160,64}`
+    // returned) is reported: the rank is unchanged, so there are no groups.
     // Absent / malformed attrs -> internal rank/sizes verbatim.
     auto abiShapeAttr = op->getAttrOfType<DenseI64ArrayAttr>(kAbiShapeAttrName);
     auto abiGroupsAttr =
@@ -324,7 +332,39 @@ struct AllocOutputOpLowering : public ConvertOpToLLVMPattern<AllocOutputOp> {
 
     SmallVector<Value, 4> callbackSizes;
     int64_t callbackRank = rank;
-    if (abiShapeAttr && abiGroupsAttr) {
+    bool reportedStaticAbiShape = false;
+    bool abiShapeIsStatic =
+        abiShapeAttr &&
+        llvm::none_of(abiShapeAttr.asArrayRef(),
+                      [](int64_t dim) { return ShapedType::isDynamic(dim); });
+    // A fully static abi_shape is the callback shape only when it describes
+    // the same elements as the internal buffer and no groups are rewriting
+    // the rank. A stale shape such as [1, 2] on memref<4x4xf32> would ask
+    // the allocator for 2 elements while the compute writes 16. Groups mean
+    // a rank change, which the path below already checks.
+    int64_t abiElems = 1;
+    bool abiElemsOk = abiShapeIsStatic;
+    if (abiShapeIsStatic) {
+      for (int64_t dim : abiShapeAttr.asArrayRef()) {
+        if (dim < 0 ||
+            (dim > 0 && abiElems > std::numeric_limits<int64_t>::max() / dim)) {
+          abiElemsOk = false;
+          break;
+        }
+        abiElems *= dim;
+      }
+    }
+    bool useStaticAbiShape = abiShapeIsStatic && !abiGroupsAttr &&
+                             memRefType.hasStaticShape() && abiElemsOk &&
+                             abiElems == memRefType.getNumElements();
+    if (useStaticAbiShape) {
+      ArrayRef<int64_t> abiShape = abiShapeAttr.asArrayRef();
+      callbackRank = static_cast<int64_t>(abiShape.size());
+      for (int64_t dim : abiShape)
+        callbackSizes.push_back(LLVM::ConstantOp::create(
+            rewriter, loc, i64Type, rewriter.getI64IntegerAttr(dim)));
+      reportedStaticAbiShape = true;
+    } else if (abiShapeAttr && abiGroupsAttr) {
       ArrayRef<int64_t> abiShape = abiShapeAttr.asArrayRef();
       ArrayRef<int64_t> abiGroups = abiGroupsAttr.asArrayRef();
       int64_t extRank = static_cast<int64_t>(abiShape.size());
@@ -400,7 +440,7 @@ struct AllocOutputOpLowering : public ConvertOpToLLVMPattern<AllocOutputOp> {
       if (!ok)
         callbackSizes.clear();
     }
-    if (callbackSizes.empty()) {
+    if (callbackSizes.empty() && !reportedStaticAbiShape) {
       callbackSizes.assign(internalSizes.begin(), internalSizes.end());
       callbackRank = rank;
     }
