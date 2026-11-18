@@ -17,7 +17,8 @@ module {
         outs(%values, %indices : memref<3x2xf32, 1>, memref<3x2xi64, 1>)
         {axis = 1 : i64, largest = true, sorted = true}
 
-    // CHECK: llvm.call @wrap_top_k({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, !llvm.ptr, i64, i64) -> i32
+    // K is the static values extent along the axis, not a read of %k.
+    // CHECK: llvm.call @wrap_top_k_host_k({{.*}}) : (!llvm.ptr, !llvm.ptr, i64, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, !llvm.ptr, i64, i64) -> i32
     return
   }
 
@@ -34,10 +35,12 @@ module {
         outs(%values, %indices : memref<?x?xf16, 1>, memref<?x?xi64, 1>)
         {axis = 1 : i64, largest = true, sorted = true}
 
+    // A dynamic K is the values descriptor's size along the axis.
+    // CHECK: [[K:%[0-9]+]] = llvm.extractvalue %{{.*}}[3, 1]
     // CHECK: llvm.extractvalue %{{.*}}[3, 0]
     // CHECK: llvm.extractvalue %{{.*}}[3, 1]
     // CHECK: llvm.mul
-    // CHECK: llvm.call @wrap_top_k({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, !llvm.ptr, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_top_k_host_k(%{{[^,]+}}, %{{[^,]+}}, [[K]], {{.*}}) : (!llvm.ptr, !llvm.ptr, i64, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, !llvm.ptr, i64, i64) -> i32
     return
   }
 
@@ -56,8 +59,9 @@ module {
 
     // HIPDNN_EP_DATATYPE_BFLOAT16 = 2. The runtime rejects dtypes the kernel
     // does not implement.
+    // CHECK: [[K:%[0-9]+]] = llvm.mlir.constant(4 : i64) : i64
     // CHECK: [[DT:%[0-9]+]] = llvm.mlir.constant(2 : i64) : i64
-    // CHECK-NEXT: llvm.call @wrap_top_k({{.*}}, [[DT]]) :
+    // CHECK-NEXT: llvm.call @wrap_top_k_host_k(%{{[^,]+}}, %{{[^,]+}}, [[K]], {{.*}}, [[DT]]) :
     return
   }
 }

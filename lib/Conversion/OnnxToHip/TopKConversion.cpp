@@ -10,9 +10,9 @@ namespace mlir {
 namespace hip {
 namespace {
 
-// The result extent along `axis` is the value of K, so it must not be derived
-// from K's shape. `k` is rank 0 or rank 1; ONNX requires a rank-1 K to hold one
-// element.
+// The result extent along `axis` is the value of K. hip.top_k's lowering passes
+// that extent to the runtime as K, so it must not be derived from K's shape.
+// `k` is rank 0 or rank 1; ONNX requires a rank-1 K to hold one element.
 static mlir::Value getTopKAxisExtent(mlir::PatternRewriter &rewriter,
                                      mlir::Location loc, mlir::Value ctx,
                                      mlir::Value k) {

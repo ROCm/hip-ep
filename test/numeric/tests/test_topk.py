@@ -5,11 +5,11 @@
 
 """Tests for the ONNX TopK op (values + indices outputs).
 
-K is supplied as a constant initializer so the ONNX shape-inference resolves
-the output extent (k) statically -- the runtime still reads k from the K
-buffer at run time (real/top_k.cpp does a D2H copy of k), so the GPU kernel is
-exercised. The runtime-K cases feed K as a graph input, so the output extent
-is sized from K's value at run time. `largest` and `sorted` are both covered.
+Most cases supply K as a constant initializer, so ONNX shape inference
+resolves the output extent statically and the runtime receives K as that
+extent. The runtime-K cases feed K as a graph input: the compiler reads K back
+once to size the outputs and passes the same extent to the kernel.
+`largest` and `sorted` are both covered.
 
 Outputs are compared bit-exact against the ORT CPU reference (atol=0).
 K above 256 runs on the GPU for full contiguous last-axis sorts and on the host

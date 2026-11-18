@@ -12,14 +12,12 @@ def RuntimeAccessOpInterface : OpInterface<"RuntimeAccessOpInterface"> {
   let cppNamespace = "::mlir::hip";
   let description = [{
     Backend-provided access guarantees. Payload accesses use the context
-    stream; host reads use an ordered copy and wait, except for the operand
-    returned by getEarlyHostRead. This does not make the op a completion barrier.
-    MemoryEffectOpInterface describes which operands are read or written.
-    Alternative lowerings must preserve these guarantees to use this interface.
+    stream; host reads use an ordered copy and wait. This does not make the op
+    a completion barrier. MemoryEffectOpInterface describes which operands are
+    read or written. Alternative lowerings must preserve these guarantees to
+    use this interface.
   }];
   let methods = [
-    InterfaceMethod<"Return the operand read on the host before waiting, or null.",
-                    "::mlir::Value", "getEarlyHostRead">,
     InterfaceMethod<"Whether read-only inputs support host-mapped storage.",
                     "bool", "supportsHostMappedInputs">
   ];
