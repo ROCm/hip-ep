@@ -113,9 +113,9 @@ applyAffine(typename Tr::Compute d, typename Tr::Compute a,
 }
 
 // Chan et al. merge of (count, mean, M2) running statistics.
-template <typename A>
-__device__ inline void chanMerge(int64_t &n, A &mean, A &m2, int64_t nb,
-                                 A meanb, A m2b) {
+template <typename Mean, typename A>
+__device__ inline void chanMerge(int64_t &n, Mean &mean, A &m2, int64_t nb,
+                                 Mean meanb, A m2b) {
   if (nb == 0)
     return;
   if (n == 0) {
@@ -125,9 +125,10 @@ __device__ inline void chanMerge(int64_t &n, A &mean, A &m2, int64_t nb,
     return;
   }
   int64_t total = n + nb;
-  A delta = meanb - mean;
+  Mean meanDelta = meanb - mean;
+  A delta = static_cast<A>(meanDelta);
   A fb = A(nb) / A(total);
-  mean += delta * fb;
+  mean += meanDelta * (Mean(nb) / Mean(total));
   m2 += m2b + delta * delta * A(n) * fb;
   n = total;
 }
@@ -142,7 +143,7 @@ __device__ inline void chanMerge(int64_t &n, A &mean, A &m2, int64_t nb,
 template <typename A> struct WelfordAcc {
   int64_t count = 0;
   A shift = A(0);
-  A mean = A(0); // relative to shift
+  double mean = 0; // relative to shift
   A m2 = A(0);
 
   template <int V> __device__ inline void add(const A (&v)[V]) {
@@ -162,9 +163,11 @@ template <typename A> struct WelfordAcc {
       const A e = d[k] - vm;
       q += e * e;
     }
-    chanMerge(count, mean, m2, int64_t(V), vm, q);
+    chanMerge(count, mean, m2, int64_t(V), static_cast<double>(vm), q);
   }
-  __device__ inline A absoluteMean() const { return shift + mean; }
+  __device__ inline A absoluteMean() const {
+    return static_cast<A>(static_cast<double>(shift) + mean);
+  }
 };
 
 // Deterministic tree merge of per-thread (count, mean, M2) in shared memory.
