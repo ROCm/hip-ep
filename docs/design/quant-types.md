@@ -43,7 +43,7 @@ types cannot carry.
 | Step | Where | What |
 |---|---|---|
 | Fold Q/DQ into types | `hip-fusion-transform`, `fusion_pattern/QdqToQuantTypes.pdll` | DQ → op → Q becomes the quant-typed op when every Q/DQ has a per-tensor type (splat constant scale, readable zero point, integer storage, not packed). Kernels are not checked here. |
-| Quant-type-agnostic fusions | `hip-fusion-transform`, native patterns in `fusion_pattern/` | Read element types only, so float and quant-typed chains share them. See below. |
+| Quant-type-agnostic fusions | `hip-fusion-transform`, PDLL in `fusion_pattern/` (`MatmulBiasFusion.pdll`) and native `gemm_to_matmul.cpp` | Read element types only, so float and quant-typed chains share them. See below. |
 | Legalize | `hip-legalize-quant-types`, before bufferization | Memrefs cannot hold quant types: the [lhs, rhs, output] element types of every add move into its `quant_types` attribute, quantized tensors become storage integers, casts disappear. |
 | Lower | `convert-hip-to-llvm` | quantized `quant_types` → `wrap_qelementwise` (scales/zero points from the types); otherwise `wrap_elementwise`. |
 
@@ -81,20 +81,20 @@ moving another op over means implementing these two methods.
 
 ## Kernel capability
 
-`hip::supportsQuantTypes(op, inputTypes, resultType)`
-(`lib/Dialect/IR/HipQuantTypes.cpp`) is the one place that says which quant
-types an op has a kernel for. The fusion and the legalize pass both use it.
+Each op's `supportsQuantTypes` (`lib/Dialect/IR/HipQuantTypes.cpp`) says which
+quant types it has a kernel for. Only `hip-legalize-quant-types` asks it; the
+folds and fusions do not (see "Known gaps").
+
 - `hip.add`: per-tensor, one storage type for lhs, rhs and output
   (i8/ui8/i16/ui16/i32).
 - `hip.matmul`: per-tensor; A and result 8/16-bit, B 8-bit (the kernel splits
-  only A into byte planes).
-- `hip.gemm`: as matmul, plus an optional bias C of 8/16/32 bit. `alpha`,
-  `beta`, `transA` and `transB` stay attributes.
+  only A into byte planes), optional bias 8/16/32-bit.
+- `hip.gemm`: as matmul, with C as the bias. `alpha`, `beta`, `transA` and
+  `transB` stay attributes.
 
 Lowering reads the scales and zero points from `quant_types` and calls the
-same `wrap_qmatmul` / `wrap_qgemm` as `hip.qmatmul` / `hip.qgemm`, so the
-kernel contract is unchanged. For `hip.matmul` / `hip.gemm`: per-tensor, A and the
-result 8 or 16 bit, B 8 bit, and gemm's bias C 8, 16 or 32 bit.
+same `wrap_qelementwise` / `wrap_qmatmul` / `wrap_qgemm` as the Q-specific ops,
+so the kernel contract is unchanged.
 
 ## Gemm (`gemm_to_matmul.cpp`)
 
@@ -106,7 +106,7 @@ fusions and quant types are written against one op. Other gemms stay
 The rewrite is type-agnostic, so its order against the Q/DQ folds does not
 matter (`HipMatmulBiasQdqToQuantTypes` covers the converted form).
 
-## Matmul + bias (`matmul_bias_fusion.cpp`)
+## Matmul + bias (`MatmulBiasFusion.pdll`)
 
 `hip.matmul` followed by a row-bias `hip.add` becomes one `hip.matmul` with an
 optional `bias` operand (rank-1 `[N]`; either add operand order; a `[1, N]`

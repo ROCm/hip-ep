@@ -245,7 +245,6 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     SizeOp::attachInterface<HipDstBufferizableModel<SizeOp>>(*ctx);
     LoopOp::attachInterface<HipDstBufferizableModel<LoopOp>>(*ctx);
     ScanOp::attachInterface<HipDstBufferizableModel<ScanOp>>(*ctx);
-    QAddOp::attachInterface<HipDstBufferizableModel<QAddOp>>(*ctx);
     QMulOp::attachInterface<HipDstBufferizableModel<QMulOp>>(*ctx);
     QMatMulOp::attachInterface<HipDstBufferizableModel<QMatMulOp>>(*ctx);
     QGemmOp::attachInterface<HipDstBufferizableModel<QGemmOp>>(*ctx);

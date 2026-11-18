@@ -78,7 +78,7 @@ It collects each connected set of static ui8 values:
   point, and the data operand of the QLinear anchors.
 
 If any value has another producer or reader (a function argument, a return,
-`hip.qadd`, a pool), or if no reader feeds an integer anchor, the set keeps
+`hip.qmul`, a pool), or if no reader feeds an integer anchor, the set keeps
 ui8. Otherwise every value becomes i8 and every zero point in the set drops by
 128. The QLinear and dequantized-conv planners compute the same correction
 `x_zp - offset` for both types, so the integer math does not change.

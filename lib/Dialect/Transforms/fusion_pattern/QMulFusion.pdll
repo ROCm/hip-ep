@@ -7,8 +7,8 @@
 //===----------------------------------------------------------------------===//
 
 Pattern HipQMul with benefit(10) {
-  // Same chain shape as QAddFusion.pdll, which explains the single `ctx`
-  // binding and the trailing ValueRange that absorbs the optional zero point.
+  // A single `ctx` binding ties the chain to one context; the trailing
+  // ValueRange absorbs the optional zero point.
   let dq_lhs = op<hip.dequantize_linear>(ctx: Value, lhs: Value,
                                          lhs_scale: Value,
                                          lhs_tail: ValueRange);
