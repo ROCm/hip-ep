@@ -369,6 +369,9 @@ int main(int argc, char **argv) {
   fuseOpts.gemmGemmAccelTypes.assign(accelTypes.begin(), accelTypes.end());
   fuseOpts.standaloneElementwise =
       !hip_env_is_on("HIPDNN_EP_ROCMLIR_NO_STANDALONE_ELEMENTWISE");
+  // As in CompilerDriver: an i4 filter compiles only under some perfConfigs,
+  // which autotuning finds.
+  fuseOpts.int4Weights = autotuneEnabled && HIP_ROCMLIR_AUTOTUNE;
   mlir::hip::addRocMlirFusionPasses(pm, fuseOpts);
 
   if (mlir::failed(pm.run(*module))) {
