@@ -323,13 +323,16 @@ else()
   # project; the repository root is not itself a buildable CMake project.
   # DEP_HASH_llvm_project is a commit. A shallow clone cannot check out a
   # commit and a full clone of llvm-project is far larger, so fetch the GitHub
-  # source archive of that commit instead. rocmlirTriton, when enabled, is
-  # populated below and reuses this build; it is not cloned here.
+  # source archive of that commit instead. The archive's files carry commit
+  # times, so extract with the current time: otherwise a bump to an older
+  # commit leaves sources older than their objects and they are not rebuilt.
+  # rocmlirTriton, when enabled, is populated below and reuses this build; it
+  # is not cloned here.
   string(REGEX REPLACE "\\.git$" "" _llvm_repo_url "${DEP_URL_llvm_project}")
   message(STATUS "LLVM/MLIR not found; building from ${_llvm_repo_url} commit ${DEP_HASH_llvm_project}")
   FetchContent_Declare(llvm-project
     URL "${_llvm_repo_url}/archive/${DEP_HASH_llvm_project}.tar.gz"
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    DOWNLOAD_EXTRACT_TIMESTAMP FALSE
     SOURCE_SUBDIR llvm
     EXCLUDE_FROM_ALL)
   # Build the in-tree LLVM/MLIR/clang with hidden ELF visibility (source
