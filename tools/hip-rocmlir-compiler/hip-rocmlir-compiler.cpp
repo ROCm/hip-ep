@@ -30,6 +30,7 @@
 #include "hip/InitAllPasses.h"
 #include "hip/Support/DiskFileSystem.h"
 #include "hip/Target/LLVM/LLVMBackend.h"
+#include "hip/debug_log.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Func/Transforms/Passes.h"
@@ -366,6 +367,8 @@ int main(int argc, char **argv) {
   std::vector<std::string> accelTypes =
       mlir::hip::getRocMlirGemmAccelTypes(*module->getContext(), arch);
   fuseOpts.gemmGemmAccelTypes.assign(accelTypes.begin(), accelTypes.end());
+  fuseOpts.standaloneElementwise =
+      !hip_env_is_on("HIPDNN_EP_ROCMLIR_NO_STANDALONE_ELEMENTWISE");
   mlir::hip::addRocMlirFusionPasses(pm, fuseOpts);
 
   if (mlir::failed(pm.run(*module))) {
