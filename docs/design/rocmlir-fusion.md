@@ -224,7 +224,7 @@ reshapes in `main_graph` share one shape constant.
 ### Elementwise kernels
 
 After the plans outline, each module that is still in `main_graph` becomes a
-`rock.kernel` function with the `rock.elementwise` attribute, behind
+`rock.kernel` function with the `rock.nongemm` attribute, behind
 `hip.rocmlir`, when these conditions are true:
 
 - Every module op, other than a `tensor.empty` and a static reshape, is a
@@ -237,15 +237,19 @@ After the plans outline, each module that is still in `main_graph` becomes a
   result next to the other results of the kernel.
 
 The inline scalar constants that the module reads are cloned into the kernel.
-Any other module is inlined back. The rocMLIR compile does not autotune an
-elementwise kernel, and outside strict mode a kernel that fails to compile
-falls back to its HIP ops.
+Any other module is inlined back. The compile selects `buildNonGemmPipeline`
+and does not autotune an elementwise kernel. Outside strict mode a kernel
+that fails to compile falls back to its HIP ops. The nongemm lowering takes
+exactly one `rock.store`, so a kernel with more than one result always
+falls back, and it fails the module in strict mode.
 
 ### Reduce kernels
 
 A last-axis `hip.reduce_sum` of a static f16 or f32 tensor, and a last-axis
 f32 `hip.reduce_mean`, are prologue-only anchors when `keepdims` is 1 and
-exactly one axis is reduced. The outlined function carries `rock.reduce`.
+exactly one axis is reduced. The outlined function carries `rock.nongemm`,
+like an elementwise kernel; the `rock.reduce` op that HipToTosa and the
+high-level pipeline produce is what selects the reduce schedule.
 HipToTosa turns the mean into a multiply by `1/N` and then `tosa.reduce_sum`.
 An f16 mean stays a HIP op: that scale runs in f16, which overflows a large
 extent and flushes small inputs, while the HIP kernel accumulates in f32.
@@ -256,7 +260,7 @@ The axes operand is a compile-time i64 constant. The outline clones it into
 the kernel, including when several reduces share one constant, because an
 i64 value is not a legal kernel argument.
 
-The compile selects `buildReducePipeline` and passes the chip arch, which
+The compile selects `buildNonGemmPipeline` and passes the chip arch, which
 the lowering reads for the wave size. There is no gemm tuning space. Outside
 strict mode a reduce that fails to lower or compile runs as its HIP op, as
 an elementwise kernel does. A conv or gemm that fails still fails the module.
