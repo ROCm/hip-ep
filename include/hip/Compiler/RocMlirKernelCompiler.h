@@ -107,9 +107,10 @@ bool runRocMlirHighLevelPipeline(ModuleOp kernelModule);
 
 // Compile with the first perfConfig of the tuning search space that rocMLIR
 // does not reject as not applicable (for example a launch over the dispatch
-// work-item limit), without benchmarking. Expects `kernelModule` to already be
-// in rock form; it is left unmodified. This is what a caller gets when it
-// supplies no `compileOne`.
+// work-item limit), without benchmarking. Each config that fails gets a
+// warning on stderr. Expects `kernelModule` to already be in rock form; it is
+// left unmodified. This is what a caller gets when it supplies no
+// `compileOne`.
 bool compileRocMlirDefaultPerfConfig(ModuleOp kernelModule, StringRef arch,
                                      CompiledKernel &out);
 

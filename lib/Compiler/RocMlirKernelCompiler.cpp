@@ -339,17 +339,24 @@ bool compileRocMlirDefaultPerfConfig(ModuleOp kernelModule, StringRef arch,
   // not all: a very large GEMM can give it a launch over the dispatch packet's
   // work-item limit. rocMLIR marks such a config `rock.not_applicable`, so try
   // the next one; any other failure is a real lowering error and stops here.
+  // Every failed config gets a warning on stderr.
   std::unique_ptr<rock::TuningParamSet> space(rock::createTunableParamSpace(
       kernelModule, rock::TuningParamSetKind::Full));
   if (!space || space->tuningRange.empty())
     return false;
 
+  StringRef kernelName = "<unnamed>";
+  for (auto func : kernelModule.getOps<func::FuncOp>()) {
+    kernelName = func.getSymName();
+    break;
+  }
+
   // A rejected config's diagnostics would read as a failed compile even when a
   // later config succeeds, so hold each attempt's back and replay only those of
-  // the attempt that decides the outcome. Whole diagnostics are kept so the
-  // replay carries their notes (e.g. the failing op) and severity unchanged; a
-  // Diagnostic owns its strings, and everything else it refers to lives in the
-  // context.
+  // the attempt that decides the outcome; a skipped config's warning carries
+  // its first error instead. Whole diagnostics are kept so the replay carries
+  // their notes (e.g. the failing op) and severity unchanged; a Diagnostic owns
+  // its strings, and everything else it refers to lives in the context.
   MLIRContext *ctx = kernelModule.getContext();
   SmallVector<Diagnostic> captured;
   auto replayCaptured = [&] {
@@ -358,7 +365,8 @@ bool compileRocMlirDefaultPerfConfig(ModuleOp kernelModule, StringRef arch,
     captured.clear();
   };
 
-  for (rock::RockTuningParamAttrInterface tuningAttr : space->tuningRange) {
+  const size_t numConfigs = space->tuningRange.size();
+  for (auto [index, tuningAttr] : llvm::enumerate(space->tuningRange)) {
     llvm::SmallString<1024> perfConfig; // ROCMLIR_TUNING_PARAM_STRING_BUFSZ
     tuningAttr.getPerfConfigStr(perfConfig);
 
@@ -380,12 +388,26 @@ bool compileRocMlirDefaultPerfConfig(ModuleOp kernelModule, StringRef arch,
       replayCaptured();
       return true;
     }
-    if (!attemptOp->hasAttr(rock::NotApplicableAttr::getMnemonic())) {
-      replayCaptured();
-      return false;
+
+    bool notApplicable =
+        attemptOp->hasAttr(rock::NotApplicableAttr::getMnemonic());
+    bool tryNext = notApplicable && index + 1 < numConfigs;
+    llvm::errs() << "warning: rocMLIR perfConfig '" << perfConfig
+                 << "' failed to compile for '" << kernelName << "' ("
+                 << (index + 1) << " of " << numConfigs << ")";
+    if (tryNext) {
+      auto firstError = llvm::find_if(captured, [](const Diagnostic &diag) {
+        return diag.getSeverity() == DiagnosticSeverity::Error;
+      });
+      if (firstError != captured.end())
+        llvm::errs() << ": " << firstError->str();
+      llvm::errs() << "; trying the next perfConfig\n";
+      continue;
     }
+    llvm::errs() << "\n";
+    replayCaptured();
+    return false;
   }
-  replayCaptured();
   return false;
 }
 
