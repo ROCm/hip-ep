@@ -46,12 +46,19 @@ env:
   SCCACHE_CACHE_SIZE: "200M"
 
 jobs:
+  build_required:
+    uses: ./.github/workflows/build-required.yml
+
   # LLVM and ONNX Runtime finish in this job so their caches are saved before
   # the six-hour runner limit. The hip-ep link is the next job and gets its
   # own budget. A single job built both, then died while linking and never
   # stored the LLVM prefix.
   deps-linux-rmt:
-    # No draft-PR gate: the cache-priming strategy needs every PR push.
+    needs: build_required
+    if: needs.build_required.outputs.run == 'true'
+    # No draft-PR gate: cache priming needs every code change, including
+    # drafts. build-required.yml skips this job for a documentation or
+    # Jekyll diff on a pull request or merge group. Pushes always build.
     runs-on: ubuntu-latest
     continue-on-error: true
     outputs:

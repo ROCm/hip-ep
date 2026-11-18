@@ -43,7 +43,7 @@ LUT_DIR = ROOT / "lut"
 DATA_DIR = ROOT / "scripts" / "data"
 SHAPES = ROOT / "shapes" / "oga_models_bits4.csv"
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 KERNEL_ABI = "matmul_nbits-v1"
 
 GROUP_SIZES = {16: "G16", 32: "G32", 64: "G64", 128: "G128", 256: "G256",
@@ -593,9 +593,23 @@ def check_table(t: dict) -> None:
         errors.append(f"{len(configs)} configs exceed the ubyte config index")
 
     def kind_of(i):
-        return configs[i].get("kind") if 0 <= i < len(configs) else None
+        return configs[i].get("kind") if type(i) is int and 0 <= i < len(configs) else None
 
-    for name in ("points", "fallbacks"):
+    if t.get("kernel_abi") != KERNEL_ABI:
+        errors.append("kernel_abi mismatch")
+    if not isinstance(t.get("gpu_arch"), str) or not re.fullmatch(r"gfx[0-9a-f]+", t["gpu_arch"]):
+        errors.append("invalid gpu_arch")
+    version = t.get("schema_version", 4)
+    if version not in (4, SCHEMA_VERSION):
+        errors.append(f"unsupported schema_version {version}")
+    if t.get("m_intervals") and version != SCHEMA_VERSION:
+        errors.append("m_intervals require explicit schema_version 5")
+    for weight in ("weight_m", "weight_n", "weight_k"):
+        value = t.get(weight, 1.0)
+        if not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+            errors.append(f"invalid {weight}: {value}")
+
+    for name in ("points", "fallbacks", "m_intervals"):
         for r in t.get(name, []):
             phase, i = r.get("phase"), r.get("config", -1)
             if phase not in PHASES:
@@ -604,7 +618,7 @@ def check_table(t: dict) -> None:
             want = "Wmma" if phase == "Prefill" else "Gemv"
             if kind_of(i) != want:
                 errors.append(f"{name}: config {i} is not a {want} config: {r}")
-            if name == "points":
+            if name in ("points", "m_intervals"):
                 stride = r.get("row_stride")
                 if (phase == "Prefill") != (stride in STRIDES) or \
                         (phase != "Prefill" and stride != "Any"):
@@ -612,6 +626,30 @@ def check_table(t: dict) -> None:
                 if r.get("group_size") not in GROUP_SIZES.values() or \
                         r.get("zero_point") not in ZERO_POINTS:
                     errors.append(f"points: unknown group size or zero point: {r}")
+                if r.get("bits") not in ("B4", "B8", "B3", "B2"):
+                    errors.append(f"{name}: unknown bits: {r}")
+                for dim, maximum in (("n", 0xffffffff), ("k", 65535)):
+                    value = r.get(dim)
+                    if type(value) is not int or not 0 < value <= maximum:
+                        errors.append(f"{name}: invalid {dim}: {r}")
+                if name == "points":
+                    if type(r.get("m")) is not int or not 0 < r["m"] <= 65535:
+                        errors.append(f"points: invalid m: {r}")
+                else:
+                    lo, hi = r.get("m_lo"), r.get("m_hi")
+                    if type(lo) is not int or type(hi) is not int or not 0 <= lo < hi <= 65535:
+                        errors.append(f"m_intervals: invalid bounds: {r}")
+    ranges = {}
+    for r in t.get("m_intervals", []):
+        key = tuple(r.get(k) for k in
+                    ("phase", "bits", "group_size", "zero_point", "row_stride", "k", "n"))
+        lo, hi = r.get("m_lo"), r.get("m_hi")
+        if type(lo) is not int or type(hi) is not int or not 0 <= lo < hi <= 65535:
+            continue
+        for old in ranges.setdefault(key, []):
+            if max(lo, old[0]) < min(hi, old[1]):
+                errors.append(f"m_intervals: overlapping ranges for {key}: {old}, {(lo, hi)}")
+        ranges[key].append((lo, hi))
     compiled = compiled_extended_entries()
     seen = set()
     for e in t.get("extended_configs", []):
@@ -638,6 +676,36 @@ def with_extended(configs, extended):
     for e in extended or []:
         configs[e["config"]].update(ext=1, variant=e["variant"])
     return configs
+
+
+def apply_m_intervals(args, doc, pool):
+    """Import explicit overrides by full config geometry, preserving pool indices.
+
+    Each JSON row's config may be a concrete config dict (including ext/variant)
+    or an index into this pool. Existing rows with the same full key and bounds
+    are replaced explicitly; other overlaps are rejected by check_table.
+    """
+    path = getattr(args, "m_intervals", None)
+    if not path:
+        return
+    incoming = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(incoming, list):
+        raise LutError("--m-intervals expects a JSON list")
+    ranges = list(doc.get("m_intervals", []))
+    fields = ("phase", "bits", "group_size", "zero_point", "row_stride", "k", "n", "m_lo", "m_hi")
+    for value in incoming:
+        r = dict(value)
+        config = r.get("config")
+        if isinstance(config, dict):
+            key = _answer_of(config)
+            r["config"] = next((i for i, c in enumerate(pool) if _answer_of(c) == key), len(pool))
+            if r["config"] == len(pool):
+                pool.append(config_entry(key))
+        match = tuple(r.get(k) for k in fields)
+        ranges = [old for old in ranges if tuple(old.get(k) for k in fields) != match]
+        ranges.append(r)
+    doc["m_intervals"] = ranges
+    doc["schema_version"] = SCHEMA_VERSION
 
 
 def write_lut_json(out: Path, doc: dict, configs, fallbacks, points) -> None:
@@ -688,9 +756,16 @@ def cmd_merge(args) -> int:
     made Nemotron-3.5-Lightning (all G64) 3% slower in-model. With the flag it
     follows the same --min-gain rule on its geomean slowdown.
     """
-    readings = load_readings(args)
-    if readings is None:
-        return 1
+    if getattr(args, "intervals_only", False):
+        if not args.m_intervals:
+            raise LutError("--intervals-only requires --m-intervals")
+        # Explicit range imports need no point readings. Keeping this set empty
+        # preserves every existing point and fallback through the normal merge.
+        readings = []
+    else:
+        readings = load_readings(args)
+        if readings is None:
+            return 1
     phase = args.phase
     measured = {k: v for k, v in collate(readings).items() if k[0][0] == phase}
     print(f"[merge] {len(measured)} measured {phase} points")
@@ -771,6 +846,7 @@ def cmd_merge(args) -> int:
     doc = {k: v for k, v in old.items()
            if k not in ("configs", "fallbacks", "points", "extended_configs")}
     out = args.json_out
+    apply_m_intervals(args, doc, new_pool)
     write_lut_json(out, doc, new_pool, fallback_rows, point_rows)
     print(f"[merge] {len(changes)} {phase} rows changed, {kept_ties} kept as "
           f"within {args.min_gain:.0%}, {len(point_rows)} points total -> {out}")
@@ -803,6 +879,8 @@ def cmd_merge(args) -> int:
 
 
 def cmd_build(args) -> int:
+    if getattr(args, "intervals_only", False) and not args.merge_existing:
+        raise LutError("--intervals-only requires --merge-existing")
     if args.merge_existing:
         return cmd_merge(args)
     readings = load_readings(args)
@@ -868,8 +946,21 @@ def cmd_build(args) -> int:
         "weight_n": weights[1],
         "weight_k": weights[2],
     }
-    LUT_DIR.mkdir(parents=True, exist_ok=True)
+    # A full rebuild re-interns old range geometries instead of keeping stale
+    # numeric pool references. Scoped updates use --merge-existing and retain
+    # all old points, configs, weights, fallbacks and other phases verbatim.
     out = args.json_out
+    if out.exists():
+        old = json.loads(out.read_text(encoding="utf-8"))
+        check_table(old)
+        old_pool = with_extended(old["configs"], old.get("extended_configs"))
+        doc["m_intervals"] = []
+        for r in old.get("m_intervals", []):
+            doc["m_intervals"].append({**r, "config": config_index(_answer_of(old_pool[r["config"]]))})
+        if not doc["m_intervals"]:
+            del doc["m_intervals"]
+    apply_m_intervals(args, doc, pool)
+    LUT_DIR.mkdir(parents=True, exist_ok=True)
     write_lut_json(out, doc, pool, fallback_rows, point_rows)
 
     groups = len({(r["phase"], r["group_size"], r["zero_point"],
@@ -965,6 +1056,10 @@ def main() -> int:
                     help="build --merge-existing: also move the phase fallback; "
                          "it serves only unmeasured group sizes, so check those "
                          "in-model first")
+    ap.add_argument("--m-intervals", default=None,
+                    help="build: JSON list of explicit (m_lo,m_hi] overrides; config is full geometry or pool index")
+    ap.add_argument("--intervals-only", action="store_true",
+                    help="build --merge-existing: import --m-intervals while preserving all point records and fallbacks")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
     # One set of paths for every step, so `all --out X` compiles X.

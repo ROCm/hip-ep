@@ -171,8 +171,8 @@ template <typename T, int VEC> struct alignas(sizeof(T) * VEC) VecOf {
 
 // grid.x * blockDim.x and grid.y * blockDim.y must each fit in 32 bits, so
 // the host caps both grid dimensions and the kernels loop over rows and over
-// the lanes of a long row. The loop counters are 64-bit: the step past the
-// last row or lane can exceed INT32_MAX when rows or lanes is close to it.
+// the lanes of a long row. The loop counters are 64-bit: rows and lanes may be
+// as large as INT32_MAX, and adding a stride to the last one must not wrap.
 __device__ inline void decode_row(const RowShape& s, int row, int& nc, int& od,
                                   int& oh) {
   oh = row % s.out_h;
@@ -437,6 +437,11 @@ __global__ void resize_linear_passthrough_kernel(const T* __restrict__ input,
   }
 }
 
+// a * b into out; false when the product overflows int64.
+static bool checked_mul(int64_t a, int64_t b, int64_t& out) {
+  return !__builtin_mul_overflow(a, b, &out);
+}
+
 // Moves the unused trailing axes of a rank-r window to the front, so
 // (d0, .., d_{r-1}, 1, ..) becomes (1, .., d0, .., d_{r-1}) with W last.
 static bool make_row_shape(int spatial_rank, int64_t N, int64_t C,
@@ -452,7 +457,10 @@ static bool make_row_shape(int spatial_rank, int64_t N, int64_t C,
     if (din[i] > INT32_MAX || dout[i] > INT32_MAX)
       return false;
   }
-  int64_t rows = N * C * dout[0] * dout[1];
+  int64_t rows = 1;
+  for (int64_t extent : {N, C, dout[0], dout[1]})
+    if (!checked_mul(rows, extent, rows))
+      return false;
   if (rows > INT32_MAX)
     return false;
   s = {static_cast<int>(din[0]),  static_cast<int>(din[1]),
@@ -659,7 +667,16 @@ static int launch_rows(hipStream_t stream, const void* input, void* output,
                        int64_t out0, int64_t out1, int64_t out2,
                        int coord_transform, int nearest_mode,
                        float s0, float s1, float s2) {
-  if (N * C * out0 * out1 * out2 <= 0) return 0;
+  int64_t elements = 1;
+  for (int64_t extent : {N, C, out0, out1, out2}) {
+    if (!checked_mul(elements, extent, elements)) {
+      fprintf(stderr,
+              "[custom_kernels] hip_resize: the output element count overflows "
+              "int64\n");
+      return -1;
+    }
+  }
+  if (elements <= 0) return 0;
   const int64_t in[3] = {in0, in1, in2};
   const int64_t out[3] = {out0, out1, out2};
   const float scales[3] = {s0, s1, s2};
@@ -672,7 +689,8 @@ static int launch_rows(hipStream_t stream, const void* input, void* output,
   RowShape s;
   if (!make_row_shape(spatial_rank, N, C, in, out, scales, vec, s)) {
     fprintf(stderr,
-            "[custom_kernels] hip_resize: extents exceed the int range\n");
+            "[custom_kernels] hip_resize: an extent or the output row count "
+            "N*C*D*H exceeds INT32_MAX\n");
     return -1;
   }
   const T* x = static_cast<const T*>(input);
