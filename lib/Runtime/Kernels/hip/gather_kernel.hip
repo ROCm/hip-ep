@@ -199,6 +199,12 @@ extern "C" int hip_gather(
   }
 
   switch (element_size_bytes) {
+    case 1:
+      launch_gather<uint8_t>(grid_size, kBlockSize, hip_stream, data, indices,
+                             output, outer_size, axis_size, inner_size,
+                             indices_num_elements, output_num_elements,
+                             indices_element_size_bytes);
+      break;
     case 2:
       launch_gather<uint16_t>(grid_size, kBlockSize, hip_stream, data, indices,
                               output, outer_size, axis_size, inner_size,

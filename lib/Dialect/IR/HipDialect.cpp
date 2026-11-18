@@ -2448,6 +2448,22 @@ void ResizeOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
+LogicalResult ResizeOp::verify() {
+  if (getRuntimeScales().empty())
+    return success();
+  // Runtime scales are indexed by window axis, so the launch split cannot be
+  // replanned from compile-time scales during lowering.
+  if (getScalesAttr())
+    return emitOpError("runtime_scales and scales are mutually exclusive");
+  auto spatialAttr = (*this)->getAttrOfType<IntegerAttr>("spatial_rank");
+  if (!spatialAttr || !(*this)->hasAttr("prefix_count"))
+    return emitOpError("runtime_scales requires prefix_count and spatial_rank");
+  if (static_cast<int64_t>(getRuntimeScales().size()) != spatialAttr.getInt())
+    return emitOpError("expected one runtime scale per window axis (")
+           << spatialAttr.getInt() << "), got " << getRuntimeScales().size();
+  return success();
+}
+
 //===----------------------------------------------------------------------===//
 // GridSampleOp: ins(input, grid), outs(output)
 //===----------------------------------------------------------------------===//
@@ -2497,6 +2513,76 @@ LogicalResult GridSampleOp::verify() {
   int64_t align = getAlignCorners();
   if (align != 0 && align != 1)
     return emitOpError("align_corners must be 0 or 1, got ") << align;
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// RoiAlignOp: ins(input, rois, batch_indices), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange RoiAlignOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void RoiAlignOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult RoiAlignOp::verify() {
+  SmallVector<Value> dataOperands{getInput(), getRois(), getBatchIndices(),
+                                  getOutput()};
+  if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/1)))
+    return failure();
+
+  auto inputShape = detail::getShapeOf(getInput());
+  auto roisShape = detail::getShapeOf(getRois());
+  auto indicesShape = detail::getShapeOf(getBatchIndices());
+  auto outputShape = detail::getShapeOf(getOutput());
+  if (inputShape.size() != 4)
+    return emitOpError("expected 4-D input (N, C, H, W)");
+  if (roisShape.size() != 2 ||
+      (!ShapedType::isDynamic(roisShape[1]) && roisShape[1] != 4))
+    return emitOpError("expected rois of shape (num_rois, 4)");
+  if (indicesShape.size() != 1)
+    return emitOpError("expected 1-D batch_indices (num_rois)");
+  if (outputShape.size() != 4)
+    return emitOpError(
+        "expected 4-D output (num_rois, C, output_height, output_width)");
+
+  Type elemTy = getElementTypeOrSelf(getInput().getType());
+  if (getElementTypeOrSelf(getRois().getType()) != elemTy ||
+      getElementTypeOrSelf(getOutput().getType()) != elemTy)
+    return emitOpError("input, rois and output must share an element type");
+  if (!getElementTypeOrSelf(getBatchIndices().getType()).isInteger(64))
+    return emitOpError("batch_indices must be i64");
+
+  int64_t mode = getMode();
+  if (mode != 0 && mode != 1)
+    return emitOpError("mode must be 0 (avg) or 1 (max), got ") << mode;
+  if (getOutputHeight() < 1 || getOutputWidth() < 1)
+    return emitOpError("output_height and output_width must be >= 1");
+  if (getSamplingRatio() < 0)
+    return emitOpError("sampling_ratio must be >= 0");
+  int64_t halfPixel = getHalfPixel();
+  if (halfPixel != 0 && halfPixel != 1)
+    return emitOpError("half_pixel must be 0 or 1, got ") << halfPixel;
+
+  auto checkDim = [&](int64_t outDim, int64_t expected,
+                      StringRef what) -> LogicalResult {
+    if (ShapedType::isDynamic(outDim) || ShapedType::isDynamic(expected) ||
+        outDim == expected)
+      return success();
+    return emitOpError("output ")
+           << what << " " << outDim << " does not match expected " << expected;
+  };
+  if (failed(checkDim(outputShape[0], roisShape[0], "num_rois")) ||
+      failed(checkDim(outputShape[0], indicesShape[0], "num_rois")) ||
+      failed(checkDim(outputShape[1], inputShape[1], "channels")) ||
+      failed(checkDim(outputShape[2], getOutputHeight(), "height")) ||
+      failed(checkDim(outputShape[3], getOutputWidth(), "width")))
+    return failure();
   return success();
 }
 
@@ -2680,6 +2766,39 @@ void MatMulNBitsOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+MutableOperandRange UnpackInt4Op::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void UnpackInt4Op::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult UnpackInt4Op::verify() {
+  if (failed(verifyDpsComputeOp(*this, {getPacked(), getOutput()},
+                                /*numInits=*/1)))
+    return failure();
+
+  auto packedType = cast<ShapedType>(getPacked().getType());
+  auto outputType = cast<ShapedType>(getOutput().getType());
+  if (!packedType.getElementType().isUnsignedInteger(8) ||
+      !outputType.getElementType().isUnsignedInteger(8))
+    return emitOpError("packed input and output must be ui8");
+  if (!packedType.hasStaticShape() || !outputType.hasStaticShape())
+    return emitOpError("packed input and output must have static shapes");
+  if (packedType.getRank() < 1 || packedType.getRank() != outputType.getRank())
+    return emitOpError("packed input and output ranks must match");
+  if (packedType.getShape().drop_back() != outputType.getShape().drop_back())
+    return emitOpError("only the last dimension changes when unpacking int4");
+  int64_t packedK = packedType.getShape().back();
+  int64_t unpackedK = outputType.getShape().back();
+  if (packedK <= 0 || unpackedK != packedK * 2)
+    return emitOpError("last dimension must double");
+  return success();
 }
 
 MutableOperandRange DequantBnb4Op::getDpsInitsMutable() {

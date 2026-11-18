@@ -90,6 +90,29 @@ static Value reshapeTo(Value input, ArrayRef<int64_t> shape,
                                  type.clone(shape), input, shapeConst);
 }
 
+// Rank 0 counts: every dimension it has is 1. tensor<1xf32> and tensor<f32>
+// are the same one value spelled at different ranks.
+static bool isUnitTensor(RankedTensorType type) {
+  return type && type.hasStaticShape() &&
+         llvm::all_of(type.getShape(), [](int64_t dim) { return dim == 1; });
+}
+
+// Quantized scales arrive as tensor<1xf32> into a rank-0 tensor<f32>.
+// EqualizeRanks only prepends 1s onto the shorter operand, so it cannot
+// squeeze the vector down to the scalar result. A unit tensor with the same
+// element count is that scalar, and tosa.reshape spells it at the result rank.
+static Value reshapeUnitToResult(Value operand, RankedTensorType resultType,
+                                 ConversionPatternRewriter &rewriter) {
+  auto type = dyn_cast<RankedTensorType>(operand.getType());
+  if (!isUnitTensor(type) || !isUnitTensor(resultType))
+    return operand;
+  if (type.getElementType() != resultType.getElementType() ||
+      type.getShape() == resultType.getShape() ||
+      type.getNumElements() != resultType.getNumElements())
+    return operand;
+  return reshapeTo(operand, resultType.getShape(), rewriter);
+}
+
 static Value transposeTo(Value input, ArrayRef<int64_t> shape,
                          ArrayRef<int32_t> permutation,
                          ConversionPatternRewriter &rewriter, Location loc) {
@@ -846,8 +869,10 @@ struct BinaryConverter final : public OpConversionPattern<HipOpTy> {
     // while TOSA requires both operands to already carry the result's rank and
     // broadcasts size-1 dimensions only. EqualizeRanks reshapes the shorter
     // operand by prepending 1s; the TOSA op then broadcasts those dimensions.
-    Value lhs = adaptor.getLhs();
-    Value rhs = adaptor.getRhs();
+    // A unit tensor written at the result's rank is squeezed first, because
+    // EqualizeRanks cannot drop a size-1 dimension.
+    Value lhs = reshapeUnitToResult(adaptor.getLhs(), resultType, rewriter);
+    Value rhs = reshapeUnitToResult(adaptor.getRhs(), resultType, rewriter);
     if (failed(tosa::EqualizeRanks(rewriter, op.getLoc(), lhs, rhs)))
       return rewriter.notifyMatchFailure(op, "operand ranks not equalizable");
     // Re-check after equalization so a dimension that still cannot broadcast is
@@ -2550,6 +2575,13 @@ struct CastConverter final : public OpConversionPattern<CastOp> {
   }
 };
 
+// Defined below, once the block-broadcast helper exists. block_size != 0 is
+// the MatMulNBits weight dequant: scale and zero point are one value per
+// block along K, not a per-tensor or per-axis multiplier.
+LogicalResult lowerBlockedDequantize(DequantizeLinearOp op, Value input,
+                                     Value scale, Value zeroPoint,
+                                     ConversionPatternRewriter &rewriter);
+
 // y = (x - zp) * scale.
 struct DequantizeLinearConverter final
     : public OpConversionPattern<DequantizeLinearOp> {
@@ -2558,6 +2590,9 @@ struct DequantizeLinearConverter final
   LogicalResult
   matchAndRewrite(DequantizeLinearOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    if (op.getBlockSize() != 0)
+      return lowerBlockedDequantize(op, adaptor.getInput(), adaptor.getScale(),
+                                    adaptor.getZeroPoint(), rewriter);
     RankedTensorType resultType;
     Value input, scale, zp;
     if (failed(matchQdqCommon(op, adaptor.getInput(), adaptor.getScale(),
@@ -3706,7 +3741,7 @@ struct RoundConverter final : public OpConversionPattern<RoundOp> {
     auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
     if (!resultType || !resultType.hasStaticShape())
       return rewriter.notifyMatchFailure(op, "expected a static ranked tensor");
-    Value x = adaptor.getX();
+    Value x = reshapeUnitToResult(adaptor.getX(), resultType, rewriter);
     if (x.getType() != resultType)
       return rewriter.notifyMatchFailure(
           op, "operand and result types must match exactly");
@@ -4384,7 +4419,8 @@ planResizeAxis(int64_t inExtent, int64_t outExtent, int64_t coordTransform) {
 // the result scaled by scale_y_n * scale_x_n for a following rescale to undo,
 // and this pass emits no such rescale. ONNX Resize on a real model is float.
 static bool isTosaExpressibleResize(hip::ResizeOp op) {
-  if (op->getNumResults() != 1)
+  // tosa.resize takes its scale as a compile-time constant.
+  if (op->getNumResults() != 1 || !op.getRuntimeScales().empty())
     return false;
 
   auto inputType = dyn_cast<RankedTensorType>(op.getInput().getType());
@@ -5703,6 +5739,102 @@ Value broadcastBlocksAlongK(Value perBlock, int64_t n, int64_t k,
   return sliceLastDimTo(x, k, rewriter, loc);
 }
 
+// (cast(x) - broadcast(zp)) * broadcast(scale), with one scale and zero point
+// per block along K. Absent zero point means no subtract: the MatMulNBits
+// decompose supplies the default of 8 as a real operand.
+LogicalResult lowerBlockedDequantize(DequantizeLinearOp op, Value input,
+                                     Value scale, Value zeroPoint,
+                                     ConversionPatternRewriter &rewriter) {
+  if (op.getPackedInt4())
+    return rewriter.notifyMatchFailure(op, "packed_int4 is not tosa");
+  if (op.getNumResults() != 1)
+    return rewriter.notifyMatchFailure(op, "expected tensor mode");
+
+  auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+  auto inputType = dyn_cast<RankedTensorType>(input.getType());
+  auto scaleType = dyn_cast<RankedTensorType>(scale.getType());
+  if (!resultType || !resultType.hasStaticShape() || !inputType ||
+      !inputType.hasStaticShape() || !scaleType || !scaleType.hasStaticShape())
+    return rewriter.notifyMatchFailure(op,
+                                       "blocked dequant shapes must be static");
+  if (inputType.getShape() != resultType.getShape())
+    return rewriter.notifyMatchFailure(
+        op, "blocked dequant cannot change the shape");
+  if (!isa<FloatType>(resultType.getElementType()))
+    return rewriter.notifyMatchFailure(op,
+                                       "blocked dequant result must be float");
+  if (!isa<IntegerType>(inputType.getElementType()))
+    return rewriter.notifyMatchFailure(op,
+                                       "blocked dequant input must be integer");
+  if (!isa<FloatType>(scaleType.getElementType()))
+    return rewriter.notifyMatchFailure(op,
+                                       "blocked dequant scale must be float");
+  if (resultType.getRank() != 2)
+    return rewriter.notifyMatchFailure(op, "blocked dequant is rank 2 [N, K]");
+
+  int64_t axis = op.getAxis();
+  if (axis < 0)
+    axis += resultType.getRank();
+  if (axis != resultType.getRank() - 1)
+    return rewriter.notifyMatchFailure(op, "blocked dequant axis must be K");
+
+  int64_t n = resultType.getDimSize(0);
+  int64_t k = resultType.getDimSize(1);
+  int64_t blockSize = op.getBlockSize();
+  if (blockSize < 16 || (blockSize & (blockSize - 1)) != 0)
+    return rewriter.notifyMatchFailure(
+        op, "block_size must be a power of 2 and >= 16");
+  if (k <= 0 || k % blockSize != 0)
+    return rewriter.notifyMatchFailure(op, "K must be divisible by block_size");
+  int64_t kBlocks = k / blockSize;
+  if (n < 0 || scaleType.getNumElements() != n * kBlocks)
+    return rewriter.notifyMatchFailure(op, "scales must have N * k_blocks");
+
+  Location loc = op.getLoc();
+  Type computeElem = resultType.getElementType();
+  // Keep the K-block dimension explicit through dequantization so TOSA
+  // broadcasts the trailing extent-1 scale and zero point. Expanding those
+  // operands with tosa.tile leaves an op rocMLIR cannot legalize.
+  auto blockResultType =
+      RankedTensorType::get({n, kBlocks, blockSize}, computeElem);
+  Value blocks = reshapeTo(input, blockResultType.getShape(), rewriter);
+  Value scales = reshapeTo(scale, {n, kBlocks, 1}, rewriter);
+  scales = emitTosaCast(rewriter, loc, scales, computeElem);
+
+  // Signless i4 is what arith.uitofp accepts. A plain tosa.cast of that type
+  // lowers to a signed conversion, which turns nibbles 8..15 negative.
+  // unsigned_cast lowers to uitofp and keeps the MatMulNBits values unsigned.
+  Value shifted;
+  if (cast<RankedTensorType>(blocks.getType()).getElementType().isInteger(4)) {
+    auto castType = RankedTensorType::get(
+        cast<RankedTensorType>(blocks.getType()).getShape(), computeElem);
+    shifted = tosa::CustomOp::create(rewriter, loc, castType, kRockUnsignedCast,
+                                     kRockCustomOpDomain, "", blocks)
+                  .getResult(0);
+  } else {
+    shifted = emitTosaCast(rewriter, loc, blocks, computeElem);
+  }
+  if (zeroPoint) {
+    auto zpType = dyn_cast<RankedTensorType>(zeroPoint.getType());
+    if (!zpType || !zpType.hasStaticShape())
+      return rewriter.notifyMatchFailure(op, "zero point must be static");
+    if (!isa<FloatType>(zpType.getElementType()) &&
+        !isa<IntegerType>(zpType.getElementType()))
+      return rewriter.notifyMatchFailure(op, "unsupported zero point type");
+    if (zpType.getNumElements() != n * kBlocks)
+      return rewriter.notifyMatchFailure(op,
+                                         "zero point must have N * k_blocks");
+    Value zp = reshapeTo(zeroPoint, {n, kBlocks, 1}, rewriter);
+    zp = emitTosaCast(rewriter, loc, zp, computeElem);
+    shifted = tosa::SubOp::create(rewriter, loc, blockResultType, shifted, zp);
+  }
+  Value dequantized =
+      emitTosaMul(rewriter, loc, shifted, scales, blockResultType);
+  rewriter.replaceOp(op,
+                     reshapeTo(dequantized, resultType.getShape(), rewriter));
+  return success();
+}
+
 Value emitUnbatchedMatmul(Value a, Value b, RankedTensorType resultType,
                           ConversionPatternRewriter &rewriter, Location loc) {
   auto aType = cast<RankedTensorType>(a.getType());
@@ -5844,6 +5976,37 @@ struct MatMulNBitsConverter final
     }
 
     rewriter.replaceOp(op, y);
+    return success();
+  }
+};
+
+// hip.unpack_int4 -> nibble extract, low nibble first, cast back to ui8.
+struct UnpackInt4Converter final : public OpConversionPattern<UnpackInt4Op> {
+  using OpConversionPattern<UnpackInt4Op>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(UnpackInt4Op op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (op.getNumResults() != 1)
+      return rewriter.notifyMatchFailure(op, "expected tensor mode");
+    auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    auto packedType = dyn_cast<RankedTensorType>(adaptor.getPacked().getType());
+    if (!resultType || !resultType.hasStaticShape() || !packedType ||
+        !packedType.hasStaticShape())
+      return rewriter.notifyMatchFailure(op, "expected static ranked tensors");
+    if (!packedType.getElementType().isUnsignedInteger(8) ||
+        !resultType.getElementType().isUnsignedInteger(8))
+      return rewriter.notifyMatchFailure(op, "unpack_int4 is ui8");
+    if (packedType.getRank() != resultType.getRank() ||
+        packedType.getShape().drop_back() !=
+            resultType.getShape().drop_back() ||
+        resultType.getShape().back() != packedType.getShape().back() * 2)
+      return rewriter.notifyMatchFailure(op, "last dimension must double");
+
+    Location loc = op.getLoc();
+    Value unpacked = unpackInt4LastDim(adaptor.getPacked(), rewriter, loc);
+    rewriter.replaceOp(
+        op, emitTosaCast(rewriter, loc, unpacked, resultType.getElementType()));
     return success();
   }
 };
@@ -8109,11 +8272,74 @@ struct QMoEConverter final : public OpConversionPattern<hip::QMoEOp> {
   }
 };
 
+// True when `logical` is the low-nibble-first expansion of `packed`.
+static bool isLowNibblePackedUi8(RankedTensorType packed,
+                                 RankedTensorType logical) {
+  if (!packed || !logical || !packed.hasStaticShape() ||
+      !logical.hasStaticShape())
+    return false;
+  if (!packed.getElementType().isUnsignedInteger(8) ||
+      !logical.getElementType().isUnsignedInteger(8))
+    return false;
+  if (packed.getRank() == 0 || packed.getRank() != logical.getRank())
+    return false;
+  if (packed.getShape().drop_back() != logical.getShape().drop_back())
+    return false;
+  return logical.getShape().back() == packed.getShape().back() * 2;
+}
+
+// A blocked MatMulNBits unpack materializes ui8 before the GEMM. rocMLIR then
+// cannot tell that B is int4 and rejects the kernel. When the packed bytes
+// are the kernel argument and the only consumer is a blocked dequant, retarget
+// that argument to logical signless i4 at the unpacked shape. The byte buffer
+// is unchanged; rocMLIR's 4-bit legalization extracts the nibbles, matching
+// migraphx-realize-int4. The element type is signless because arith.uitofp,
+// which the unsigned cast lowers to, rejects an unsigned integer operand.
+// uitofp still reads the nibbles as unsigned values.
+static void realizeBlockedInt4Arguments(func::FuncOp func) {
+  SmallVector<UnpackInt4Op> unpacks;
+  func.walk([&](UnpackInt4Op op) { unpacks.push_back(op); });
+  for (UnpackInt4Op unpack : unpacks) {
+    if (unpack.getNumResults() != 1 || !unpack.getResult(0).hasOneUse())
+      continue;
+    Value packed = unpack.getPacked();
+    if (!packed.hasOneUse())
+      continue;
+    auto logicalUi8 = dyn_cast<RankedTensorType>(unpack.getResult(0).getType());
+    auto packedType = dyn_cast<RankedTensorType>(packed.getType());
+    auto arg = dyn_cast<BlockArgument>(packed);
+    if (!arg || arg.getOwner() != &func.front())
+      continue;
+    if (!isLowNibblePackedUi8(packedType, logicalUi8))
+      continue;
+    auto dequant =
+        dyn_cast<DequantizeLinearOp>(*unpack.getResult(0).getUsers().begin());
+    if (!dequant || dequant.getBlockSize() == 0 || dequant.getPackedInt4())
+      continue;
+    if (dequant.getInput() != unpack.getResult(0))
+      continue;
+
+    auto i4 = IntegerType::get(func.getContext(), 4,
+                               IntegerType::SignednessSemantics::Signless);
+    auto logicalI4 = RankedTensorType::get(logicalUi8.getShape(), i4);
+    arg.setType(logicalI4);
+    FunctionType fnType = func.getFunctionType();
+    SmallVector<Type> inputs(fnType.getInputs());
+    inputs[arg.getArgNumber()] = logicalI4;
+    func.setFunctionType(
+        FunctionType::get(func.getContext(), inputs, fnType.getResults()));
+    dequant.getInputMutable().set(arg);
+    unpack.erase();
+  }
+}
+
 class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
   void runOnOperation() override {
     auto funcOp = getOperation();
     if (!funcOp->hasAttr("rock.kernel"))
       return;
+
+    realizeBlockedInt4Arguments(funcOp);
 
     MLIRContext *ctx = &getContext();
 
@@ -8140,10 +8366,11 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         LogOp, SinOp, CosOp, TanhOp, ErfOp, SigmoidOp, ReciprocalOp, SqrtOp,
         SoftplusOp, GeluOp, BiasGeluOp, FastGeluOp, SiluOp, SwishOp, WhereOp,
         LeakyReluOp, MiopenSoftmaxOp, ReduceSumOp, ReduceMeanOp, CastOp,
-        QuantizeLinearOp, DequantizeLinearOp, MatMulNBitsOp, DequantBnb4Op,
-        GatherOp, GatherElementsOp, GatherNDOp, GridSampleOp, SizeOp, OneHotOp,
-        RangeOp, RopeOp, GqaOp, MultiHeadAttentionOp, IfOp, LoopOp, RoundOp,
-        ModOp, AtanOp, RmsNormOp, LayerNormOp, InstanceNormOp, SkipRmsNormOp>();
+        QuantizeLinearOp, DequantizeLinearOp, MatMulNBitsOp, UnpackInt4Op,
+        DequantBnb4Op, GatherOp, GatherElementsOp, GatherNDOp, GridSampleOp,
+        SizeOp, OneHotOp, RangeOp, RopeOp, GqaOp, MultiHeadAttentionOp, IfOp,
+        LoopOp, RoundOp, ModOp, AtanOp, RmsNormOp, LayerNormOp, InstanceNormOp,
+        SkipRmsNormOp>();
     // tosa.matmul (and other tosa ops) are not destination-passing, so
     // MatMulConverter drops each hip op's DPS `outs` operand. The
     // `tensor.empty` that fed it is then dead, but a full conversion still
@@ -8298,10 +8525,11 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         ReduceConverter<ReduceProdOp, tosa::ReduceProductOp>,
         ReduceMeanConverter, ReduceL2Converter, CastConverter,
         DequantizeLinearConverter, QuantizeLinearConverter,
-        MatMulNBitsConverter, DequantBnb4Converter, GatherConverter,
-        GatherElementsConverter, GatherNDConverter, ScatterElementsConverter,
-        ScatterNDConverter, GatherBlockQuantizedConverter, TopKConverter,
-        QMoEConverter, GridSampleConverter, SizeConverter, TensorConstConverter,
+        MatMulNBitsConverter, UnpackInt4Converter, DequantBnb4Converter,
+        GatherConverter, GatherElementsConverter, GatherNDConverter,
+        ScatterElementsConverter, ScatterNDConverter,
+        GatherBlockQuantizedConverter, TopKConverter, QMoEConverter,
+        GridSampleConverter, SizeConverter, TensorConstConverter,
         FromElementsConverter, SplatConverter, OneHotConverter, RangeConverter,
         RopeConverter, GqaConverter, MhaConverter, CumSumConverter, IfConverter,
         LoopConverter, RmsNormConverter, LayerNormConverter,

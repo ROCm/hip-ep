@@ -41,8 +41,15 @@ env:
   SCCACHE_CACHE_SIZE: "200M"
 
 jobs:
+  build_required:
+    uses: ./.github/workflows/build-required.yml
+
   build-linux:
-    # No draft-PR gate: the cache-priming strategy needs every PR push.
+    needs: build_required
+    if: needs.build_required.outputs.run == 'true'
+    # No draft-PR gate: cache priming needs every code change, including
+    # drafts. build-required.yml skips this job for a documentation or
+    # Jekyll diff on a pull request or merge group. Pushes always build.
     runs-on: ubuntu-latest
     steps:
       # MorphiZen is vendored in-tree as a git subtree under morphizen,
