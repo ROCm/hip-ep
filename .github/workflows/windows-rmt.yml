@@ -50,8 +50,8 @@ jobs:
       SCCACHE_CACHE_SIZE: "200M"
       ONNXRUNTIME_VERSION: "1.31.0"
       ONNXRUNTIME_PR_PATCHES: ""
-      OGA_VERSION: "0.19.0"
-      OGA_PR_PATCHES: "2875"
+      OGA_REF: "580ee41dd317ea52d326d94e1aaacf320b389e4e"
+      OGA_PR_PATCHES: ""
       AMDGPU_EP_REF: "f3dccce2a142567da050da1032617fb39db4086a"
       AMDGPU_PR_PATCHES: ""
 
@@ -99,7 +99,7 @@ jobs:
             AMD_KEY="windows-amdgpu-${EP_REF:0:7}-amdpr${AMDPR_KEY}-deps${DEPS_HASH}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}"
           fi
           if [ -z "$OGA_KEY" ]; then
-            OGA_KEY="windows-oga-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}"
+            OGA_KEY="windows-oga-${{ env.OGA_REF }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}"
           fi
           echo "ort=$ORT_KEY" >> "$GITHUB_OUTPUT"
           echo "amdgpu=$AMD_KEY" >> "$GITHUB_OUTPUT"
@@ -393,6 +393,8 @@ jobs:
           cp "${{ runner.workspace }}/oga-artifacts/onnxruntime-genai.dll" staging/bin/
           cp "${{ runner.workspace }}/oga-artifacts/model_mm.exe" staging/bin/
           cp "${{ runner.workspace }}/oga-artifacts/benchmark_multimodal.py" staging/bin/
+          cp "${{ runner.workspace }}/oga-artifacts/engine_benchmark.exe" staging/bin/
+          cp "${{ runner.workspace }}/oga-artifacts/versions.json" staging/bin/
 
           # ---------------------------------------------------------------
           # Python wheels (ORT + OGA cp314) bundled into the artifact under
