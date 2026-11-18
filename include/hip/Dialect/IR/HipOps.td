@@ -4322,7 +4322,8 @@ def Hip_GqaOp : Hip_DpsOp_AutoReify<"gqa", [AttrSizedOperandSegments, OpStateOpI
 // plumbing with a stub runtime (wrap_paged_attention). Full CUDA-style
 // paged KV attention is not implemented in this EP yet.
 
-def Hip_PagedAttentionOp : Hip_DpsOp<"paged_attention", [AttrSizedOperandSegments]> {
+def Hip_PagedAttentionOp : Hip_DpsOp_AutoReify<"paged_attention",
+    [AttrSizedOperandSegments]> {
   let summary = "PagedAttention (com.microsoft) — stub runtime";
   let description = [{
     Maps `onnx.Custom` with `function_name = "PagedAttention"` and domain

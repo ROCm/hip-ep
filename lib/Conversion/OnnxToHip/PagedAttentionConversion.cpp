@@ -5,6 +5,8 @@
 
 #include "OnnxToHipUtils.h"
 
+#include <cmath>
+
 namespace mlir {
 namespace hip {
 namespace {
