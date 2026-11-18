@@ -206,6 +206,16 @@ take its argument slot, so the kernel signature keeps the operand order of the
 anchor. View absorption uses the legality of HIP-to-TOSA
 (`HipToTosaLegality.h`), so an absorbed view always lowers.
 
+A static integer nearest upsample whose only user is a `hip.conv` input is
+absorbed the same way when it is a repeated read: nearest mode, asymmetric
+coordinates, floor rounding (or `round_prefer_floor` with every ratio at most
+2), static rank 4 or 5, growth only on spatial axes, and an exact integer
+`scales` attribute when one is present. The kernel argument becomes the
+smaller input, and the outline rebuilds `tensor.expand_shape`, `hip.expand`,
+and `tensor.collapse_shape` so rocMLIR folds the repeat into the convolution.
+The `hip.resize` and a `tensor.empty` destination are then erased. Any other
+resize stays a HIP kernel.
+
 The weight of a split `hip.matmul_nbits` goes in too: a single-use blocked
 dequantize of a single-use `hip.unpack_int4`. The packed bytes, the scales
 and a file- or memory-backed zero point are kernel arguments; an inline zero
