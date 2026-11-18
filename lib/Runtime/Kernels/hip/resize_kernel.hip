@@ -122,29 +122,29 @@ __device__ inline int nearest_round(float x, int nearest_mode) {
   }
 }
 
-__device__ inline int clamp_index(int i, int dim) {
+__device__ inline int64_t clamp_index(int64_t i, int dim) {
   return i < 0 ? 0 : (i >= dim ? dim - 1 : i);
 }
 
 __device__ inline int nearest_index(int o, int out_dim, int in_dim,
                                     int coord_transform, int nearest_mode,
                                     float scale) {
-  return clamp_index(
+  return static_cast<int>(clamp_index(
       nearest_round(coord_to_input(o, out_dim, in_dim, coord_transform, scale),
                     nearest_mode),
-      in_dim);
+      in_dim));
 }
 
 struct LinearTap {
-  int lo;
-  int hi;
+  int64_t lo;
+  int64_t hi;
   float t;
 };
 
 __device__ inline LinearTap linear_tap(int o, int out_dim, int in_dim,
                                        int coord_transform, float scale) {
   float x = coord_to_input(o, out_dim, in_dim, coord_transform, scale);
-  int lo = static_cast<int>(floorf(x));
+  int64_t lo = static_cast<int64_t>(floorf(x));
   return {clamp_index(lo, in_dim), clamp_index(lo + 1, in_dim),
           x - static_cast<float>(lo)};
 }
