@@ -279,6 +279,21 @@ class TestGroupNorm:
         )
         compare_outputs(actual, expected, atol=2e-4, rtol=2e-4)
 
+    def test_group_norm_outlier_first_partial_mean(self, model_runner):
+        shape = [1, 32, 128, 128]
+        groups = 32
+        seed = zlib.crc32(b"group_norm_outlier_first_partial_mean")
+        model = _group_norm_model(shape, groups, 0, 0, np.float32, seed)
+        reference = _reference_model(
+            shape, groups, 0, 0, np.float32, seed, compute=np.float64
+        )
+        x = np.zeros(shape, dtype=np.float32)
+        x[0, 0, 0, 0] = 1e8
+        actual, expected = model_runner.run_sample(
+            model, [x], reference_model=reference
+        )
+        compare_outputs(actual, expected, atol=2e-4, rtol=2e-4)
+
     # ONNX GroupNormalization-21 lowers to the same kernel, NCHW.
     @pytest.mark.parametrize(
         "case",
