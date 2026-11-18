@@ -778,6 +778,18 @@ class TestInstanceNormalization:
         )
         compare_outputs(actual, expected, atol=2e-4, rtol=2e-4)
 
+    def test_instance_norm_extreme_first_value(self, model_runner):
+        input_shape = [1, 1, 4096]
+        model = _make_instance_norm_model(input_shape, np.float32)
+        x = np.zeros(input_shape, dtype=np.float32)
+        x.flat[0] = 1e8
+        actual, expected = model_runner.run_sample(
+            model,
+            [x],
+            reference_model=_fp64_instance_norm_reference(model, input_shape),
+        )
+        compare_outputs(actual, expected, atol=1e-7, rtol=1e-5)
+
 
 def _make_batch_norm_model(input_shape: list[int], dtype=np.float32):
     """Build an inference ONNX BatchNormalization model.
