@@ -10,8 +10,11 @@ The cases cover the three pool kernels by shape:
 * 2x2 / 3x3 windows: the small-window kernel. 2x2 stride-2 pools that tile
   the input exactly take its vectorized path (fp16 needs W % 8 == 0, fp32
   W % 4 == 0); unaligned widths, odd heights, ceil mode and padding take the
-  generic path.
-* Windows of 64 or more taps: the wide kernel, 32 lanes per output.
+  generic path. The tail cases have an output width that is not a multiple
+  of the outputs one thread writes, across several planes.
+* Windows of 64 or more taps: the wide kernel, 32 lanes per output. The
+  extra cases exercise the k2 carry (3-D 5x5x5), a 1x64 window whose step0
+  is 0, dilation, count_include_pad, LpPool, and fp16.
 * Everything else, and MaxPool with argmax indices: the one-thread-per-output
   kernel.
 """
@@ -89,6 +92,10 @@ SMALL_CASES = [
         dict(kernel_shape=[3, 3], strides=[2, 2], pads=[1, 1, 1, 1]),
     ),
     ("MaxPool", [1, 7, 27, 29], dict(kernel_shape=[3, 3], strides=[2, 2], ceil_mode=1)),
+    # OW = 9, and the 2x2 kernel writes V = 2 outputs per thread.
+    ("AveragePool", [2, 3, 8, 10], dict(kernel_shape=[2, 2], strides=[1, 1])),
+    # OW = 7, and the 3x3 stride-2 kernel also writes V = 2.
+    ("MaxPool", [2, 4, 15, 16], dict(kernel_shape=[3, 3], strides=[2, 2])),
 ]
 SMALL_IDS = [
     "avg2x2_vec",
@@ -100,6 +107,8 @@ SMALL_IDS = [
     "avg3x3_s1_pad",
     "max3x3_s2_pad",
     "max3x3_ceil",
+    "avg2x2_ow_tail",
+    "max3x3_ow_tail",
 ]
 
 WIDE_CASES = [
@@ -114,8 +123,41 @@ WIDE_CASES = [
         [2, 5, 40, 40],
         dict(kernel_shape=[8, 8], strides=[4, 4], pads=[2, 2, 2, 2]),
     ),
+    # k = (5, 5, 5) decomposes 32 as step (1, 1, 2), so the k2 carry runs.
+    (
+        "AveragePool",
+        [1, 2, 8, 8, 8],
+        dict(kernel_shape=[5, 5, 5], strides=[2, 2, 2]),
+    ),
+    # k1 * k2 = 64, so step0 is 0 and the position advances along the width.
+    ("MaxPool", [1, 2, 4, 80], dict(kernel_shape=[1, 64], strides=[1, 1])),
+    (
+        "AveragePool",
+        [1, 2, 20, 20],
+        dict(kernel_shape=[8, 8], strides=[4, 4], dilations=[2, 2]),
+    ),
+    (
+        "AveragePool",
+        [1, 2, 20, 20],
+        dict(
+            kernel_shape=[8, 8],
+            strides=[8, 8],
+            pads=[2, 2, 2, 2],
+            count_include_pad=1,
+        ),
+    ),
+    ("LpPool", [1, 2, 16, 16], dict(kernel_shape=[8, 8], strides=[8, 8], p=2)),
 ]
-WIDE_IDS = ["avg32x32", "avg9x9_pad", "max8x8_pad"]
+WIDE_IDS = [
+    "avg32x32",
+    "avg9x9_pad",
+    "max8x8_pad",
+    "avg5x5x5",
+    "max1x64",
+    "avg8x8_dil2",
+    "avg8x8_pad_include",
+    "lp8x8",
+]
 
 
 class TestPool:
@@ -136,6 +178,17 @@ class TestPool:
         model = _make_pool_model(op, shape, np.float32, attrs)
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=1e-5, rtol=1e-4)
+
+    def test_pool_wide_window_fp16(self, model_runner):
+        """fp16 wide window. The kernel accumulates in fp32, so the tolerance
+        covers a reference that sums in fp16."""
+        shape = [1, 2, 16, 16]
+        attrs = dict(kernel_shape=[8, 8], strides=[8, 8])
+        rng = np.random.default_rng(65)
+        x = rng.uniform(-3, 3, shape).astype(np.float16)
+        model = _make_pool_model("AveragePool", shape, np.float16, attrs)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=2e-2, rtol=2e-2)
 
     def test_maxpool_with_indices(self, model_runner):
         """Argmax indices keep the one-thread-per-output kernel."""

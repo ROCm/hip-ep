@@ -416,6 +416,9 @@ static bool trySmallPool(hipStream_t stream, const void* input, void* output,
       return false;
     if (k0 != k1 || (k0 != 2 && k0 != 3) || s0 != s1 || s0 < 1) return false;
     if (p0 < 0 || p1 < 0 || p0 >= k0 || p1 >= k1) return false;
+    // A zero extent has no element 0 for the masked load below. pool_kernel
+    // skips those taps before loading.
+    if (in0 <= 0 || in1 <= 0) return false;
     const int64_t planes = N * C;
     if (planes * in0 * in1 > INT32_MAX || planes * out0 * out1 > INT32_MAX ||
         out0 * s0 + k0 > INT32_MAX || out1 * s1 + k1 > INT32_MAX)
@@ -484,7 +487,10 @@ static int launch(hipStream_t stream, const void* input, void* output,
         return false;
     return true;
   };
+  // A zero extent has no element 0 for the wide kernel's masked load.
+  // pool_kernel skips those taps before loading.
   if (!indices && k0 * k1 * k2 >= kWideMinWindow &&
+      in0 > 0 && in1 > 0 && in2 > 0 &&
       fits({total * kWideGroup + block, in0 * in1 * in2, N * C * in0 * in1 * in2,
             k0 * k1 * k2 + kWideGroup, out0 * s0 + k0 * d0, out1 * s1 + k1 * d1,
             out2 * s2 + k2 * d2, p0, p1, p2})) {
