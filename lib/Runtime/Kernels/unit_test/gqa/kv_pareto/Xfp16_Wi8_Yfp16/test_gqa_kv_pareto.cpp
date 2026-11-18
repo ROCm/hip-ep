@@ -15,12 +15,17 @@
 // GQA call matches an FP64 causal reference over the dequantized packed
 // history plus the direct FP16 new K/V; afterwards the whole cache buffer is
 // byte-exact (new rows encoded, history and unused rows untouched).
+#include "../../../common/hip_adaptive_timing.h"
 #include "gqa_autotune.h"
 #include "hip_custom_kernels.h"
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
+#include <cerrno>
+#include <climits>
+#include <fstream>
+#include <functional>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -32,6 +37,7 @@
 #include <vector>
 
 namespace {
+namespace timing = hipdnn_ep_test::timing;
 constexpr int D = 256, G = 4, GROUPS = 8;
 constexpr size_t ROW_BYTES = HIP_EP_KV_PARETO_K8V8_WIDTH * 2; // 280
 
@@ -136,20 +142,92 @@ size_t mismatches(const std::vector<uint8_t>& a, const std::vector<uint8_t>& b) 
   return n;
 }
 
-void record(const std::string& shape, double ms, double rel, bool passed) {
+// Repeated calls use one operand/cache allocation. New rows are encoded
+// idempotently, so past and unused rows stay unchanged. These correctness UT
+// timings are explicitly warm-cache measurements, not model DRAM throughput.
+struct WarmOperands {
+  size_t operand_bytes;
+  int count() const { return 1; }
+  size_t bytes() const { return operand_bytes; }
+};
+
+__global__ void holdStreamKernel(const volatile int* release) {
+  for (int spin = 0; spin < (1 << 16) && *release == 0; ++spin)
+    __builtin_amdgcn_s_sleep(127);
+}
+
+struct StreamGate {
+  int* release = nullptr;
+  StreamGate() {
+    check(hipHostMalloc(reinterpret_cast<void**>(&release), sizeof(int),
+                        hipHostMallocMapped | hipHostMallocCoherent));
+  }
+  ~StreamGate() { if (release) (void)hipHostFree(release); }
+  StreamGate(const StreamGate&) = delete;
+  StreamGate& operator=(const StreamGate&) = delete;
+};
+
+template <class Launch>
+double measure(const Launch& launch, size_t operand_bytes, const char* entry) {
+  StreamGate gate;
+  return timing::adaptiveRotatedMeanMs(
+      nullptr, WarmOperands{operand_bytes}, launch, gate.release,
+      [](const int* flag) { holdStreamKernel<<<1, 1>>>(flag); },
+      true, 0, entry, entry);
+}
+
+void record(const std::string& shape, double ms, double rel, bool passed,
+            const std::string& config = "fixed:k8v8_g32_planar_v1") {
+  timing::emitCsvBinding(shape, config, passed ? "PASS" : "FAIL", rel, ms);
   if (const char* path = std::getenv("HIPDNN_RESULTS_CSV")) {
+    bool header = true;
+    if (FILE* probe = std::fopen(path, "rb")) {
+      std::fseek(probe, 0, SEEK_END);
+      header = std::ftell(probe) == 0;
+      std::fclose(probe);
+    }
     FILE* f = std::fopen(path, "a");
     if (!f) throw std::runtime_error("cannot append kernel test results");
-    std::fprintf(f, "gqa/kv_pareto,Xfp16_Wi8_Yfp16,%s,%s,%s,k8v8_g32,%.6f,%.6e,%s\n",
+    if (header) std::fprintf(f, "op,leaf,arch,mode,shape,config,time_ms,relL2,verdict\n");
+    std::fprintf(f, "gqa/kv_pareto,Xfp16_Wi8_Yfp16,%s,%s,%s,%s,%.6f,%.6e,%s\n",
                  env("HIPDNN_RESULTS_ARCH", "gfx1151"), env("HIPDNN_RESULTS_MODE", "lookup"),
-                 shape.c_str(), ms, rel, passed ? "PASS" : "FAIL");
+                 shape.c_str(), config.c_str(), ms, rel, passed ? "PASS" : "FAIL");
     std::fclose(f);
   }
 }
 
+// Online prefill reports its actual selected configuration through the
+// production [gqa-cfg] diagnostic. The controller and Makefile capture stderr
+// from process startup, including the Windows kernel DLL's static CRT.
+std::string online_config(const std::function<int()>& launch) {
+  const char* path = std::getenv("HIPDNN_KERNEL_UT_STDERR");
+  if (!path || !path[0])
+    throw std::runtime_error("online prefill needs stderr capture: use the packaged controller or make test_custom MODE=autotune");
+  std::fflush(stderr);
+  std::streamoff offset = 0;
+  { std::ifstream before(path, std::ios::binary | std::ios::ate);
+    if (before) offset = before.tellg(); }
+  if (launch() != 0) throw std::runtime_error("online prefill launch failed");
+  check(hipDeviceSynchronize());
+  std::fflush(stderr);
+  std::ifstream log(path, std::ios::binary);
+  log.seekg(offset);
+  std::string config;
+  for (std::string line; std::getline(log, line);) {
+    const size_t knobs = line.find("-> ");
+    if (line.find("[gqa-cfg]") != std::string::npos && knobs != std::string::npos) {
+      if (!line.empty() && line.back() == '\r') line.pop_back();
+      config = "autotune:" + line.substr(knobs + 3);
+    }
+  }
+  if (config.empty()) throw std::runtime_error("online prefill did not report its dispatched configuration");
+  return config;
+}
+
 // Prefill launch config resolved exactly as real/gqa.cpp does (offline LUT or
 // heuristic); online mode lets the kernel tune itself (nullptr).
-const int* prefill_config(int heads, int nq, int total, int (&config)[5]) {
+const int* prefill_config(int heads, int nq, int total, int (&config)[5],
+                          std::string& identity) {
   static void* policy = hip_gqa_autotune_create(nullptr);
   if (!policy || hip_gqa_autotune_mode(policy) ==
                      static_cast<int>(hipdnn_ep::GqaAutotuneMode::Online))
@@ -163,11 +241,19 @@ const int* prefill_config(int heads, int nq, int total, int (&config)[5]) {
   config[2] = selected.config.mt;
   config[3] = selected.config.bkv;
   config[4] = selected.config.nd;
+  identity = "lookup:hb=" + std::to_string(config[0]) + " qw=" + std::to_string(config[1]) +
+             " mt=" + std::to_string(config[2]) + " bkv=" + std::to_string(config[3]) +
+             " nd=" + std::to_string(config[4]) + " (" +
+             hipdnn_ep::gqa_tune_source_name(selected.source) + ")";
   return config;
 }
 
 // Encode rows [start, start + count) and compare the whole buffer.
 bool encode_case(int count, int start, int capacity) {
+  const std::string shape = "encode_n" + std::to_string(count) + "_at" + std::to_string(start) +
+                            "_cap" + std::to_string(capacity);
+  timing::CaseScope timing_case("gqa/kv_pareto/Xfp16_Wi8_Yfp16", shape,
+                                "hip_kv_pareto_k8v8_encode");
   std::mt19937 rng(17 + count + start);
   std::normal_distribution<float> normal(0.f, 1.f);
   std::vector<__half> k(size_t(count) * G * D), v(k.size());
@@ -186,6 +272,10 @@ bool encode_case(int count, int start, int capacity) {
                                 count, capacity) != 0)
     throw std::runtime_error("encode launch failed");
   check(hipDeviceSynchronize());
+  const double ms = measure([&](int) {
+    return hip_kv_pareto_k8v8_encode(nullptr, dk.data, dv.data, kc.data, vc.data,
+                                    start, count, capacity);
+  }, k.size() * 4 + cache_bytes * 2, "hip_kv_pareto_k8v8_encode");
   for (int t = 0; t < count; ++t)
     for (int g = 0; g < G; ++g) {
       want_k.encode(g, start + t, &k[(size_t(t) * G + g) * D]);
@@ -198,21 +288,27 @@ bool encode_case(int count, int start, int capacity) {
   check(hipMemcpy(got.data(), vc.data, cache_bytes, hipMemcpyDeviceToHost));
   bad += mismatches(got, want_v.bytes);
   const bool passed = bad == 0;
-  const std::string shape = "encode_n" + std::to_string(count) + "_at" + std::to_string(start) +
-                            "_cap" + std::to_string(capacity);
   std::printf("KV-Pareto %s: %s (%zu mismatched bytes)\n", shape.c_str(),
               passed ? "PASS" : "FAIL", bad);
-  record(shape, 0.0, double(bad), passed);
+  record(shape, ms, double(bad), passed);
   return passed;
 }
 
 // One hip_kv_pareto_k8v8_gqa call: nq new tokens after `past` packed rows.
 // Reference rows: all of them for short queries, else first/middle/last.
-bool gqa_case(int heads, int nq, int past) {
+bool gqa_case(int heads, int nq, int past, int requested_capacity = -1,
+              unsigned seed = 0, float scale = 0.0625f) {
   // Spare capacity checks that unused rows stay untouched (capped at the limit).
   const int hpg = heads / G, total = past + nq,
-            capacity = std::min(total + 37, HIP_EP_KV_PARETO_MAX_CAPACITY);
-  std::mt19937 rng(911 + heads * 7 + nq * 131 + past);
+            capacity = requested_capacity > 0 ? requested_capacity :
+                std::min(total + 37, HIP_EP_KV_PARETO_MAX_CAPACITY);
+  if (seed == 0) seed = 911 + heads * 7 + nq * 131 + past;
+  const std::string shape = "h" + std::to_string(heads) + "_q" + std::to_string(nq) +
+                            "_past" + std::to_string(past) + "_cap" + std::to_string(capacity) +
+                            "_seed" + std::to_string(seed) + "_scale" + std::to_string(scale);
+  timing::CaseScope timing_case("gqa/kv_pareto/Xfp16_Wi8_Yfp16", shape,
+                                "hip_kv_pareto_k8v8_gqa");
+  std::mt19937 rng(seed);
   std::normal_distribution<float> normal(0.f, 1.f);
   HostCache k_cache(capacity), v_cache(capacity);
   fill_history(k_cache, past, rng);
@@ -234,26 +330,26 @@ bool gqa_case(int heads, int nq, int past) {
   check(hipMemcpy(vc.data, v_cache.bytes.data(), cache_bytes, hipMemcpyHostToDevice));
   check(hipMemset(dout.data, 0xff, qbytes));
   int config[5];
-  const int* tuned = nq > 1 || past == 0 ? prefill_config(heads, nq, total, config) : nullptr;
+  std::string identity = "fixed:k8v8_g32_planar_v1";
+  const int* tuned = nq > 1 || past == 0 ? prefill_config(heads, nq, total, config, identity) : nullptr;
   if (hip_kv_pareto_k8v8_gqa(nullptr, dq.data, dk.data, dv.data, kc.data, vc.data,
-                             dout.data, heads, nq, past, capacity, 0.0625f,
+                             dout.data, heads, nq, past, capacity, scale,
                              workspace.data, scratch - 1, tuned) == 0)
     throw std::runtime_error("undersized workspace accepted");
 
-  hipEvent_t start, stop;
-  check(hipEventCreate(&start));
-  check(hipEventCreate(&stop));
-  check(hipEventRecord(start));
-  const int rc = hip_kv_pareto_k8v8_gqa(nullptr, dq.data, dk.data, dv.data, kc.data,
-                                        vc.data, dout.data, heads, nq, past, capacity,
-                                        0.0625f, workspace.data, scratch, tuned);
-  check(hipEventRecord(stop));
-  check(hipEventSynchronize(stop));
-  float ms = 0.f;
-  check(hipEventElapsedTime(&ms, start, stop));
-  check(hipEventDestroy(start));
-  check(hipEventDestroy(stop));
-  if (rc != 0) throw std::runtime_error("hip_kv_pareto_k8v8_gqa failed");
+  auto launch = [&](int) {
+    return hip_kv_pareto_k8v8_gqa(nullptr, dq.data, dk.data, dv.data, kc.data,
+                                 vc.data, dout.data, heads, nq, past, capacity,
+                                 scale, workspace.data, scratch, tuned);
+  };
+  if ((nq > 1 || past == 0) && !tuned)
+    identity = online_config([&] { return launch(0); });
+  else {
+    if (launch(0) != 0) throw std::runtime_error("hip_kv_pareto_k8v8_gqa failed");
+    check(hipDeviceSynchronize());
+  }
+  const double ms = measure(launch, qbytes + 2 * kvbytes + 2 * cache_bytes,
+                            "hip_kv_pareto_k8v8_gqa");
   std::vector<__half> actual(q.size());
   check(hipMemcpy(actual.data(), dout.data, qbytes, hipMemcpyDeviceToHost));
 
@@ -282,7 +378,7 @@ bool gqa_case(int heads, int nq, int past) {
           const __half* krow = &k[(size_t(s - past) * G + g) * D];
           for (int d = 0; d < D; ++d) dot += double(__half2float(qrow[d])) * __half2float(krow[d]);
         }
-        scores[s] = dot * 0.0625;
+        scores[s] = dot * double(scale);
         maximum = std::max(maximum, scores[s]);
       }
       double denominator = 0;
@@ -325,12 +421,10 @@ bool gqa_case(int heads, int nq, int past) {
   bad += mismatches(got, v_cache.bytes);
   passed &= bad == 0;
 
-  const std::string shape = "h" + std::to_string(heads) + "_q" + std::to_string(nq) +
-                            "_past" + std::to_string(past);
   std::printf("KV-Pareto %s %s: %s (%.4f ms; worst-row relL2 %.3g; cache mismatches %zu)\n",
               nq == 1 && past > 0 ? "decode" : "prefill", shape.c_str(),
               passed ? "PASS" : "FAIL", ms, rel, bad);
-  record(shape, ms, rel, passed);
+  record(shape, ms, rel, passed, identity);
   return passed;
 }
 
@@ -354,19 +448,75 @@ bool contract_case() {
 } // namespace
 
 int main(int argc, char** argv) {
-  int coverage = std::atoi(env("HIPDNN_UT_COVERAGE", "1"));
-  for (int i = 1; i < argc; ++i) {
-    if (std::strcmp(argv[i], "--coverage") == 0 && i + 1 < argc)
-      coverage = std::atoi(argv[++i]);
-    else
-      return 2;
-  }
-  if (coverage < 1 || coverage > 3) return 2;
+  int coverage = 1;
+  int batch = 1, heads = 24, kv_heads = 4, dim = 256, nq = 17, past = 129, capacity = 4096;
+  unsigned seed = 1234;
+  float scale = 0.0625f;
+  bool custom = false;
+  auto integer = [](const char* text) {
+    char* end = nullptr;
+    errno = 0;
+    const long value = std::strtol(text, &end, 10);
+    if (errno || end == text || *end || value < 0 || value > INT_MAX)
+      throw std::invalid_argument("expected a nonnegative integer within INT_MAX");
+    return int(value);
+  };
   try {
+    coverage = integer(env("HIPDNN_UT_COVERAGE", "1"));
+    for (int i = 1; i < argc; ++i) {
+      const std::string flag = argv[i];
+      if (flag == "--help") {
+        std::printf("Usage: test_gqa_kv_pareto [--coverage 1|2|3] or "
+                    "[--batch 1 --heads 16|24 --kv-heads 4 --head-dim 256 "
+                    "--new-tokens N --past N --capacity N --seed N --scale F]\n");
+        return 0;
+      }
+      if (i + 1 >= argc) throw std::invalid_argument("missing option value");
+      const char* value = argv[++i];
+      if (flag == "--coverage") coverage = integer(value);
+      else {
+        custom = true;
+        if (flag == "--batch") batch = integer(value);
+        else if (flag == "--heads") heads = integer(value);
+        else if (flag == "--kv-heads") kv_heads = integer(value);
+        else if (flag == "--head-dim") dim = integer(value);
+        else if (flag == "--new-tokens") nq = integer(value);
+        else if (flag == "--past") past = integer(value);
+        else if (flag == "--capacity") capacity = integer(value);
+        else if (flag == "--seed") seed = integer(value);
+        else if (flag == "--scale") {
+          char* end = nullptr;
+          errno = 0;
+          scale = std::strtof(value, &end);
+          if (errno || end == value || *end || !std::isfinite(scale) || scale <= 0)
+            throw std::invalid_argument("scale must be finite and positive");
+        } else throw std::invalid_argument("unrecognized option: " + flag);
+      }
+    }
+    if (coverage < 1 || coverage > 3) throw std::invalid_argument("coverage must be 1, 2 or 3");
+    if (custom && (batch != 1 || (heads != 16 && heads != 24) || kv_heads != G || dim != D ||
+                   nq < 1 || nq > HIP_EP_KV_PARETO_MAX_NEW_TOKENS ||
+                   capacity < 1 || capacity > HIP_EP_KV_PARETO_MAX_CAPACITY ||
+                   int64_t(past) + nq > capacity || seed == 0))
+      throw std::invalid_argument("unsupported KV-Pareto geometry, cache capacity or seed");
+#ifdef _WIN32
+    _putenv_s("HIPDNN_GQA_AUTOTUNE_LOG", "1");
+#else
+    if (setenv("HIPDNN_GQA_AUTOTUNE_LOG", "1", 1) != 0)
+      throw std::runtime_error("cannot enable production GQA config diagnostics");
+#endif
+    hipDeviceProp_t props{};
+    check(hipGetDeviceProperties(&props, 0));
+    const std::string arch = std::string(props.gcnArchName).substr(0, std::string(props.gcnArchName).find(':'));
+    if (arch != "gfx1151") {
+      std::printf("KV-Pareto SKIP: device %s is unsupported (requires gfx1151)\n", arch.c_str());
+      return 0;
+    }
     if (!hip_kv_pareto_device_supported())
-      throw std::runtime_error(
-          "KV-Pareto kernel test requires a gfx1151 device and a kernel library built "
-          "with HIP_EP_ENABLE_KV_PARETO=ON");
+      throw std::runtime_error("KV-Pareto kernel library must be built with HIP_EP_ENABLE_KV_PARETO=ON");
+    timing::printTimingMode();
+    if (custom) return gqa_case(heads, nq, past, capacity, seed, scale) ? 0 : 1;
+    std::printf("KV-Pareto coverage=%d, H16/H24, B1/G4/D256, warm-cache correctness timings\n", coverage);
     bool passed = contract_case();
     passed &= encode_case(1, 0, 8);
     passed &= encode_case(37, 5, 64);

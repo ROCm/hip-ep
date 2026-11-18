@@ -119,10 +119,11 @@ At 64K, model decode speedup is **1.16× (+16.3%) versus No Ring / 1.12× (+12.3
 
 ## Test plan
 
-Measured package: `cd6d2871`, based on main `fc443726`. Refreshed feature/test source matches that package. Subsequent changes cover documentation and attribution.
+Measured package: `cd6d2871`, based on main `fc443726`. The branch now merges main `c56497b2` and updates the kernel-test interface. Production GQA and KV-Pareto kernels are unchanged from the measured build. These interface checks use the preserved package and do not replace the performance campaign.
 
 - **Build:** fresh compiler/runtime/gfx1151 package, all eight Ring/TurboQuant/KV-Pareto runtime syntax combinations and repository hooks passed.
 - **Kernel:** 27 checks passed for exact encoding, contracts/rejections, H16/H24 prefill/append and decode numerics.
+- **UT interface:** all manual pre-commit hooks passed. The updated driver passed 27 tier-1 checks, custom decode/append examples and online prefill with shared timing. Seven invalid custom inputs were rejected.
 - **Operator:** KV-Pareto enabled **9 passed / 1 intentional skip**, also with Ring enabled. Default **1 passed / 9 intentional skips**. Covers shared GPU caches, alternating append/decode, exact payload/scale/zero-point bytes and invalid width/options/alias requests.
 - **Shared GQA:** **12 Ring geometry/fallback/shared-cache, 2 host-length and 4 dense key-bias prefill tests passed** with both runtime flags enabled. Includes FP16/FP32 layer lengths and full/sliding attention with left/right padding.
 - **Compiler/runtime:** 3 packed-width/dtype/host-length LIT cases and 4 CTests passed: OutputAllocatorUnitTest, StaticPlugins, RuntimeLoweringContractsUnit and LdsBarrierArchGate.

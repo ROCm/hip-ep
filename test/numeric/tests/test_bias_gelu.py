@@ -8,6 +8,9 @@
 BiasGelu : output = Gelu_erf(data + broadcast(bias))
 FastGelu : output = Gelu_tanh(input + broadcast(bias))   (bias optional)
 
+It also covers GELU written out as primitive ops (Mul/Add/Div/Pow/Tanh/Erf),
+which the compiler fuses back into one hip.gelu.
+
 `bias` is a 1-D vector broadcast over the last dim of the activation. The
 runtime kernels (lib/Runtime/real/{bias_gelu,fast_gelu}.cpp) support
 f16/f32/bf16/f64, but ORT's CPU contrib kernels for both ops are
@@ -24,7 +27,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from onnx import helper
+from onnx import helper, numpy_helper
 
 from framework.comparator import compare_outputs
 from framework.onnx_utils import make_model_from_nodes, np_to_onnx_type
@@ -108,4 +111,55 @@ class TestFastGelu:
         x = rng.uniform(-3.0, 3.0, shape).astype(np.float32)
         bias = rng.uniform(-1.0, 1.0, [HIDDEN]).astype(np.float32)
         actual, expected = model_runner.run_sample(model, [x, bias])
+        compare_outputs(actual, expected, atol=1e-4, rtol=1e-3)
+
+
+def _const(name: str, value: float):
+    return numpy_helper.from_array(np.array(value, dtype=np.float32), name)
+
+
+def _make_primitive_gelu_model(form: str, shape: list[int]):
+    """GELU spelled as primitive ops; `form` is 'tanh' or 'erf'."""
+    tp = np_to_onnx_type(np.float32)
+    X = helper.make_tensor_value_info("X", tp, list(shape))
+    Y = helper.make_tensor_value_info("Y", tp, list(shape))
+    if form == "tanh":
+        consts = {
+            "half": 0.5,
+            "one": 1.0,
+            "cube": 3.0,
+            "k": 0.044715,
+            "c": 0.7978845608028654,
+        }
+        nodes = [
+            helper.make_node("Mul", ["X", "half"], ["h"]),
+            helper.make_node("Pow", ["X", "cube"], ["x3"]),
+            helper.make_node("Mul", ["x3", "k"], ["kx3"]),
+            helper.make_node("Add", ["X", "kx3"], ["s"]),
+            helper.make_node("Mul", ["s", "c"], ["t"]),
+            helper.make_node("Tanh", ["t"], ["th"]),
+            helper.make_node("Add", ["th", "one"], ["p"]),
+            helper.make_node("Mul", ["h", "p"], ["Y"]),
+        ]
+    else:
+        consts = {"half": 0.5, "one": 1.0, "sqrt2": 1.4142135623730951}
+        nodes = [
+            helper.make_node("Mul", ["X", "half"], ["h"]),
+            helper.make_node("Div", ["X", "sqrt2"], ["d"]),
+            helper.make_node("Erf", ["d"], ["e"]),
+            helper.make_node("Add", ["e", "one"], ["p"]),
+            helper.make_node("Mul", ["h", "p"], ["Y"]),
+        ]
+    inits = [_const(n, v) for n, v in consts.items()]
+    return make_model_from_nodes(nodes, [X], [Y], initializers=inits)
+
+
+class TestPrimitiveGeluChain:
+    @pytest.mark.parametrize("form", ["tanh", "erf"])
+    @pytest.mark.parametrize("shape", [[2, 16], [1, 128, HIDDEN]])
+    def test_primitive_gelu(self, model_runner, form, shape):
+        model = _make_primitive_gelu_model(form, shape)
+        rng = np.random.default_rng(307)
+        x = rng.uniform(-4.0, 4.0, shape).astype(np.float32)
+        actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=1e-4, rtol=1e-3)
