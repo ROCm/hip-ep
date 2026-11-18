@@ -253,3 +253,50 @@ For each model the CoreLib session's report counted 639 forwards on the NPU: 4 p
   `encode_image`, drafting) are not used.
 - Only where CoreLib's models run (AIE4 with CoreLib 0.90.1 or later);
   elsewhere the model compiles for the GPU.
+
+## Quick reference: CoreLib API surface used by hip-ep
+
+All symbols are loaded at runtime by name from `ryzenai_corelib.dll`
+(`lib/Runtime/real/ryzenaicorelib_model.cpp`); none are linked at build time.
+
+### Functions
+
+| Function | Signature | Purpose |
+|---|---|---|
+| `ryzenai_corelib_get_version` | `(uint32_t* major, uint32_t* minor, uint32_t* patch) → void` | Read DLL version; checked before any other call |
+| `ryzenai_corelib_cleanup` | `() → void` | Release all CoreLib resources; called when the last session is destroyed |
+| `ryzenai_corelib_has_feature` | `(ryzenai_corelib_feature) → bool` | Check capability; hip-ep tests `ryzenai_corelib_feature_npu_aiem` |
+| `ryzenai_corelib_get_last_error_message` | `() → const char*` | Human-readable error from the last failed call |
+| `ryzenai_corelib_object_release` | `(ryzenai_corelib_object_ptr) → void` | Release a model or session handle |
+| `ryzenai_corelib_create_model_from_path` | `(const char* name, const char* path, ryzenai_corelib_model_ptr* out) → ryzenai_corelib_status` | Load a named model library and offer it the ONNX file |
+| `ryzenai_corelib_model_create_session` | `(ryzenai_corelib_model_ptr, const ryzenai_corelib_model_session_options*, ryzenai_corelib_model_session_ptr* out) → ryzenai_corelib_status` | Create an inference session |
+| `ryzenai_corelib_model_get_metadata` | `(ryzenai_corelib_model_session_ptr, ryzenai_corelib_model_metadata*) → ryzenai_corelib_status` | Read vocab size, layer count, hidden size, context length |
+| `ryzenai_corelib_model_get_method` | `(ryzenai_corelib_model_session_ptr, size_t index, ryzenai_corelib_model_method_info*) → ryzenai_corelib_status` | Read forward method's input names, types and flags |
+| `ryzenai_corelib_model_run` | `(ryzenai_corelib_model_session_ptr, const char* method, ryzenai_corelib_model_value* inputs, size_t n_in, ryzenai_corelib_model_value* outputs, size_t n_out, uint32_t flags) → ryzenai_corelib_status` | Run one forward pass |
+
+### Types
+
+| Type | Kind | Fields used by hip-ep |
+|---|---|---|
+| `ryzenai_corelib_model_ptr` | Opaque handle | Passed to `create_session`, `object_release` |
+| `ryzenai_corelib_model_session_ptr` | Opaque handle | Passed to `get_metadata`, `get_method`, `model_run`, `object_release` |
+| `ryzenai_corelib_object_ptr` | Opaque base handle | Passed to `object_release` |
+| `ryzenai_corelib_model_session_options` | Struct | `size`, `max_sequence_length`, `enabled_backends` |
+| `ryzenai_corelib_model_metadata` | Struct | `size`, `vocab_size`, `layer_count`, `hidden_size`, `context_length` |
+| `ryzenai_corelib_model_method_info` | Struct | `input_count`, `inputs[]` (array of `ryzenai_corelib_model_value_info`) |
+| `ryzenai_corelib_model_value_info` | Struct | `name`, `data_type`, `accepted_types`, `flags`, `dims` |
+| `ryzenai_corelib_model_value` | Struct | `size`, `name`, `data_type`, `rank`, `dims`, `data`, `capacity` |
+| `ryzenai_corelib_status` | Enum | hip-ep checks for `ryzenai_corelib_status_success` |
+| `ryzenai_corelib_data_type` | Enum | `int32`, `int64`, `fp16`, `fp32` variants used |
+| `ryzenai_corelib_feature` | Enum | hip-ep tests `ryzenai_corelib_feature_npu_aiem` |
+
+### Constants and macros
+
+| Symbol | Source | Use |
+|---|---|---|
+| `RYZENAI_CORELIB_VERSION_MAJOR/MINOR/PATCH` | `base.h` | Compile-time version; compared against `get_version` at runtime |
+| `RYZENAI_CORELIB_MODEL_MAX_DIMS` | `model.h` | Array size for `dims` in value structs |
+| `RYZENAI_CORELIB_MODEL_VALUE_OPTIONAL` | `model.h` | Flag on `value_info.flags`; optional inputs may be absent from the graph |
+| `RYZENAI_CORELIB_DATA_TYPE_BIT(type)` | `model.h` | Bitmask helper; tests whether a type is in `value_info.accepted_types` |
+| `ryzenai_corelib_backend_npu` | `base.h` | Backend flag; set in `session_options.enabled_backends` |
+| `ryzenai_corelib_backend_cpu` | `base.h` | Backend flag; set alongside NPU (token pick and gathers run on CPU) |
