@@ -586,6 +586,7 @@ void mlir::hip::buildRocMlirFusionPipeline(
   fuseOptions.gemmGemmAccelTypes.assign(options.gemmGemmAccelTypes.begin(),
                                         options.gemmGemmAccelTypes.end());
   fuseOptions.standaloneElementwise = options.standaloneElementwise;
+  fuseOptions.attention = options.attention;
   addRocMlirFusionPasses(pm, fuseOptions, options.report);
 }
 
