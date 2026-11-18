@@ -494,7 +494,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<4x8xi64>,
 // with the cast that feeds it becomes an elementwise kernel.
 
 // CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
-// CHECK-SAME: attributes {rock.elementwise, rock.kernel}
+// CHECK-SAME: attributes {rock.kernel, rock.nongemm}
 // CHECK: %[[CAST:.*]] = hip.cast
 // CHECK: hip.transpose({{.*}}) ins(%[[CAST]]
 // CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}

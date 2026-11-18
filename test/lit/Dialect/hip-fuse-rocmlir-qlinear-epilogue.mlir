@@ -231,7 +231,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x2x4x4xui8>)
 // dequantize, the mul and the quantize become an elementwise kernel.
 
 // CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
-// CHECK-SAME: attributes {rock.elementwise, rock.kernel}
+// CHECK-SAME: attributes {rock.kernel, rock.nongemm}
 // CHECK: hip.dequantize_linear
 // CHECK: hip.mul
 // CHECK: hip.quantize_linear

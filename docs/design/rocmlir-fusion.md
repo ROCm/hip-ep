@@ -4,9 +4,9 @@ Licensed under the MIT License.
 -->
 # rocMLIR kernel fusion
 
-The rocMLIR path outlines each convolution, matmul and gemm of `main_graph`,
-together with the pointwise ops and views around it, into one `rock.kernel`
-function. `main_graph` calls the kernel through `hip.rocmlir`, and
+The rocMLIR path outlines each convolution, matmul, gemm, and eligible
+reduction of `main_graph`, together with the pointwise ops and views around
+it, into one `rock.kernel` function. `main_graph` calls the kernel through `hip.rocmlir`, and
 `convert-hip-to-tosa` lowers the kernel body for the rocMLIR compiler. This
 document describes how the fusion chooses the ops of each kernel.
 
@@ -116,16 +116,19 @@ take a module whole:
 ## hip-fuse-rocmlir-anchor
 
 The anchors are `hip.conv`, `hip.matmul`, `hip.gemm`, a `hip.qlinear_conv`
-and a `hip.qlinear_matmul` that can become integer anchors, and a `hip.conv`
-of dequantizes. An anchor has static shapes and no i32 input. The pass makes
-a plan for every anchor first, and then outlines the plans.
+and a `hip.qlinear_matmul` that can become integer anchors, a `hip.conv`
+of dequantizes, and a last-axis `hip.reduce_sum` or f32 `hip.reduce_mean`.
+An anchor has static shapes and no i32 input. The pass makes a plan for
+every anchor first, and then outlines the plans.
 
 ### Epilogue
 
 The pass plans the epilogues of all anchors in block order. Thus a module
 that one anchor takes is not available to a later anchor, and an epilogue
-takes precedence over a prologue. An anchor takes a module that reads its
-kernel when these conditions are true:
+takes precedence over a prologue. A reduce anchor takes no epilogue: the
+reduce pipeline stores the reduced value, and a pointwise module that reads
+it stays a later elementwise kernel. Any other anchor takes a module that
+reads its kernel when these conditions are true:
 
 - Every value that the module computes from a kernel value keeps the shape of
   that value. A transpose and a static reshape are allowed, because rocMLIR
@@ -177,8 +180,9 @@ input ops. A wide 1x1 conv of a dequantized uint16 activation (8192 output
 columns, about 64 reloads) thus keeps the dequantize outside. The activation
 operands are the conv input and the matmul and gemm A and B operands, not the
 conv filter or the gemm C operand. For a conv of dequantizes they are the
-integer input and weights. The search continues through the input views and
-the producer modules of each module input.
+integer input and weights. A reduce's only prologue root is its data operand.
+The search continues through the input views and the producer modules of
+each module input.
 
 A module that no plan takes and that is a valid elementwise kernel (see
 [Elementwise kernels](#elementwise-kernels)) stays whole. Every other module
@@ -220,7 +224,7 @@ reshapes in `main_graph` share one shape constant.
 ### Elementwise kernels
 
 After the plans outline, each module that is still in `main_graph` becomes a
-`rock.kernel` function with the `rock.elementwise` attribute, behind
+`rock.kernel` function with the `rock.nongemm` attribute, behind
 `hip.rocmlir`, when these conditions are true:
 
 - Every module op, other than a `tensor.empty` and a static reshape, is a
@@ -233,9 +237,33 @@ After the plans outline, each module that is still in `main_graph` becomes a
   result next to the other results of the kernel.
 
 The inline scalar constants that the module reads are cloned into the kernel.
-Any other module is inlined back. The rocMLIR compile does not autotune an
-elementwise kernel, and outside strict mode a kernel that fails to compile
-falls back to its HIP ops.
+Any other module is inlined back. The compile selects `buildNonGemmPipeline`
+and does not autotune an elementwise kernel. Outside strict mode a kernel
+that fails to compile falls back to its HIP ops. The nongemm lowering takes
+exactly one `rock.store`, so a kernel with more than one result always
+falls back, and it fails the module in strict mode.
+
+### Reduce kernels
+
+A last-axis `hip.reduce_sum` of a static f16 or f32 tensor, and a last-axis
+f32 `hip.reduce_mean`, are prologue-only anchors when `keepdims` is 1 and
+exactly one axis is reduced. The outlined function carries `rock.nongemm`,
+like an elementwise kernel; the `rock.reduce` op that HipToTosa and the
+high-level pipeline produce is what selects the reduce schedule.
+HipToTosa turns the mean into a multiply by `1/N` and then `tosa.reduce_sum`.
+An f16 mean stays a HIP op: that scale runs in f16, which overflows a large
+extent and flushes small inputs, while the HIP kernel accumulates in f32.
+`hip.reduce_max`, `hip.reduce_min`, `hip.reduce_l2`, a non-last axis, and
+`keepdims = 0` stay HIP ops.
+
+The axes operand is a compile-time i64 constant. The outline clones it into
+the kernel, including when several reduces share one constant, because an
+i64 value is not a legal kernel argument.
+
+The compile selects `buildNonGemmPipeline` and passes the chip arch, which
+the lowering reads for the wave size. There is no gemm tuning space. Outside
+strict mode a reduce that fails to lower or compile runs as its HIP op, as
+an elementwise kernel does. A conv or gemm that fails still fails the module.
 
 ### Integer anchors
 

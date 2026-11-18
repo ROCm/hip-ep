@@ -121,7 +121,7 @@ func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf32>,
 // u8 Max or Min to fall back to.
 
 // CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
-// CHECK-SAME: rock.elementwise
+// CHECK-SAME: rock.nongemm
 // CHECK: hip.max
 // CHECK: hip.min
 // CHECK-LABEL: func.func @main_graph

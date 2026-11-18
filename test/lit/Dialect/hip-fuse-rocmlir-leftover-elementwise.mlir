@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-// A pointwise module that no anchor kernel takes becomes a rock.elementwise
+// A pointwise module that no anchor kernel takes becomes a rock.nongemm
 // kernel when it saves a launch. The second hip-mlir-opt re-parses and
 // re-verifies each module.
 
@@ -13,7 +13,7 @@
 
 // CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: (%[[X:.*]]: tensor<4x8xf16>, %[[Y:.*]]: tensor<4x8xf16>) -> tensor<4x8xf16>
-// CHECK-SAME: attributes {rock.elementwise, rock.kernel}
+// CHECK-SAME: attributes {rock.kernel, rock.nongemm}
 // CHECK: %[[ZERO:.*]] = hip.constant
 // CHECK: %[[A:.*]] = hip.add({{.*}}) ins(%[[X]], %[[Y]] :
 // CHECK: %[[M:.*]] = hip.max({{.*}}) ins(%[[A]], %[[ZERO]] :
@@ -61,7 +61,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<4x8xf16>)
 // returns its result, becomes its own kernel after the conv kernel.
 
 // CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
-// CHECK-SAME: attributes {rock.elementwise, rock.kernel}
+// CHECK-SAME: attributes {rock.kernel, rock.nongemm}
 // CHECK: %[[N:.*]] = hip.neg
 // CHECK: %[[S:.*]] = hip.sigmoid({{.*}}) ins(%[[N]] :
 // CHECK: return %[[S]]
