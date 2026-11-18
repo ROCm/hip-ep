@@ -139,8 +139,8 @@ struct PagedAttentionOpLowering
 
 } // namespace
 
-void mlir::hip::populatePagedAttentionLoweringPatterns(
-    const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
+void populatePagedAttentionLoweringPatterns(const LLVMTypeConverter &converter,
+                                            RewritePatternSet &patterns) {
   patterns.add<PagedAttentionOpLowering>(converter);
 }
 

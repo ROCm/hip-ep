@@ -228,8 +228,8 @@ PagedAttentionToHip::matchAndRewrite(mlir::Operation *op,
 
 } // namespace
 
-void mlir::hip::populatePagedAttentionConversionPatterns(
-    RewritePatternSet &patterns, MLIRContext *ctx) {
+void populatePagedAttentionConversionPatterns(RewritePatternSet &patterns,
+                                              MLIRContext *ctx) {
   patterns.add<PagedAttentionToHip>(ctx);
 }
 
