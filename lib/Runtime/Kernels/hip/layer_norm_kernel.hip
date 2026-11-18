@@ -12,17 +12,10 @@
  *         (outer = input_num_elements / scale_num_elements,
  *          norm_size = scale_num_elements).
  *
- * Algorithm: one block per row, two passes over the row in FP32.
- *   Pass A: sum d = x - x[0] and d^2, reduced together in one block tree.
- *           mean = x[0] + E[d] and var = E[d^2] - E[d]^2. The shift keeps
- *           the sums at the scale of the spread rather than of |mean|, so
- *           the difference does not cancel the way E[x^2] - mean^2 does when
- *           |mean| >> stddev, and a row without spread has a variance of
- *           exactly 0.
- *   Pass B: write y in the input dtype.
- * One paired reduction, not a mean reduction followed by a deviation pass:
- * on rows of a few hundred to a few thousand elements the block reductions,
- * not the reads, set the kernel's time.
+ * Algorithm: one block per row, Welford accumulation in FP32, and a fixed
+ * tree merge of per-thread statistics. This avoids reconstructing the mean
+ * from a potentially distant shift and computes variance without subtracting
+ * two large, nearly equal moments.
  *
  * Source: onnxruntime/core/providers/cuda/nn/layer_norm_impl.cu @ v1.22.2
  *         (structurally; we keep the simpler "small N" branch -- one
@@ -59,16 +52,34 @@ __device__ inline __half store_from_float<__half>(float v) {
   return __float2half(v);
 }
 
-// Every thread of the block gets the sums of `v` over the block, added in a
-// fixed tree order.
-__device__ inline float2 block_sum2(float2 v, float2 *s_reduce) {
-  s_reduce[threadIdx.x] = v;
+struct LayerNormPartial {
+  float mean;
+  float m2;
+  float count;
+};
+
+__device__ inline LayerNormPartial
+merge_layer_norm_partials(LayerNormPartial a, LayerNormPartial b) {
+  if (a.count == 0.0f)
+    return b;
+  if (b.count == 0.0f)
+    return a;
+  float count = a.count + b.count;
+  float delta = b.mean - a.mean;
+  return {a.mean + delta * (b.count / count),
+          a.m2 + b.m2 + delta * delta * (a.count * b.count / count), count};
+}
+
+// Merge per-thread Welford statistics in a fixed tree order.
+__device__ inline LayerNormPartial
+block_merge_layer_norm_partials(LayerNormPartial partial,
+                               LayerNormPartial *s_reduce) {
+  s_reduce[threadIdx.x] = partial;
   __syncthreads();
   for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-    if (threadIdx.x < stride) {
-      s_reduce[threadIdx.x].x += s_reduce[threadIdx.x + stride].x;
-      s_reduce[threadIdx.x].y += s_reduce[threadIdx.x + stride].y;
-    }
+    if (threadIdx.x < stride)
+      s_reduce[threadIdx.x] = merge_layer_norm_partials(
+          s_reduce[threadIdx.x], s_reduce[threadIdx.x + stride]);
     __syncthreads();
   }
   return s_reduce[0];
@@ -92,22 +103,23 @@ __global__ void hip_layer_norm_kernel(const T_IN *__restrict__ input,
   const T_IN *x_row = input + row * norm_size;
   T_IN *y_row = output + row * norm_size;
 
-  __shared__ float2 s_reduce[kLayerNormBlockSize];
+  __shared__ LayerNormPartial s_reduce[kLayerNormBlockSize];
   const float count = static_cast<float>(norm_size);
 
-  // Pass A: sums of d = x - x[0] and d^2 in one read.
-  const float shift = load_as_float<T_IN, T_SCALE>(x_row);
-  float2 local = {0.0f, 0.0f};
+  // Pass A: per-thread Welford accumulation followed by a Chan merge.
+  LayerNormPartial local = {0.0f, 0.0f, 0.0f};
   for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
-    float d = load_as_float<T_IN, T_SCALE>(x_row + i) - shift;
-    local.x += d;
-    local.y += d * d;
+    float value = load_as_float<T_IN, T_SCALE>(x_row + i);
+    ++local.count;
+    float delta = value - local.mean;
+    local.mean += delta / local.count;
+    local.m2 += delta * (value - local.mean);
   }
-  const float2 sums = block_sum2(local, s_reduce);
-  const float mean_d = sums.x / count;
-  const float mean = shift + mean_d;
+  const LayerNormPartial stats =
+      block_merge_layer_norm_partials(local, s_reduce);
+  const float mean = stats.mean;
   // Rounding can take the difference just below 0; a NaN stays NaN.
-  float var = sums.y / count - mean_d * mean_d;
+  float var = stats.m2 / count;
   var = var < 0.0f ? 0.0f : var;
   const float inv_std = rsqrtf(var + epsilon);
   if (threadIdx.x == 0) {
