@@ -607,6 +607,18 @@ class TestLayerNormalization:
         )
         compare_outputs(actual, expected, atol=2e-4, rtol=2e-4)
 
+    def test_layer_norm_first_element_outlier(self, model_runner):
+        input_shape = [1, 256]
+        model = _make_layer_norm_model(input_shape, np.float32, with_bias=True)
+        x = np.zeros(input_shape, dtype=np.float32)
+        x[0, 0] = 1e8
+        actual, expected = model_runner.run_sample(
+            model,
+            [x],
+            reference_model=_fp64_layer_norm_reference(model, input_shape),
+        )
+        compare_outputs(actual, expected, atol=2e-4, rtol=2e-4)
+
 
 def _fp64_layer_norm_reference(model, input_shape: list[int]):
     """*model*'s fp32 last-axis LayerNormalization recomputed in fp64 from
