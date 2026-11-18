@@ -16,7 +16,8 @@
  *   finalize: one block per (n, group) merges its partials in a fixed order
  *             (Chan's parallel variance) into (mean, inv_std).
  *   apply:    a second, vectorized read that normalizes, applies gamma/beta
- *             and the optional SiLU.
+ *             and the optional SiLU. The grid is one vector per thread.
+ *             Channels-last keeps the statistics grid for a short pixel walk.
  *
  * Every stage carries a mean and a sum of squared deviations (M2), never a
  * raw sum of squares, so the variance does not cancel when |mean| >> stddev.
@@ -374,15 +375,16 @@ __global__ void __launch_bounds__(kBlock)
   }
 }
 
-// Same tiling as gn_stats_nhwc; each thread owns V fixed channels, so the
-// affine terms are loaded once.
+// Channels-last apply on the stats grid. Each thread owns V channels and walks
+// its pixel rows. Scale and bias stay live across that walk. Short walks use
+// this; long walks use gn_apply_nhwc instead.
 template <typename T, int V>
 __global__ void __launch_bounds__(kBlock)
-    gn_apply_nhwc(const T *__restrict__ x, const T *__restrict__ scale,
-                  const T *__restrict__ bias, T *__restrict__ y,
-                  const typename GroupNormTraits<T>::Compute *__restrict__ stats,
-                  int64_t channels, int64_t spatial, int64_t groups,
-                  NhwcTile t, int activation) {
+    gn_apply_nhwc_tiled(const T *__restrict__ x, const T *__restrict__ scale,
+                        const T *__restrict__ bias, T *__restrict__ y,
+                        const typename GroupNormTraits<T>::Compute *__restrict__ stats,
+                        int64_t channels, int64_t spatial, int64_t groups,
+                        NhwcTile t, int activation) {
   using Tr = GroupNormTraits<T>;
   using A = typename Tr::Compute;
   const NhwcLane l = nhwcLane<V>(t, groups);
@@ -417,39 +419,121 @@ __global__ void __launch_bounds__(kBlock)
   }
 }
 
-// Channels-first apply. Grid x = n * C + c (one contiguous row of spatial
-// elements), y = chunk of that row.
-template <typename T, int V>
+// Channels-last apply: one V-wide vector per thread. A vector is V consecutive
+// channels, so it stays inside one group, and the threads of one row read
+// consecutive channels of one pixel. The stats grid is sized for the
+// reduction; reusing it on a long spatial axis made every thread loop over
+// dozens of pixels. This grid is one row of `ty` pixels per block, and it is
+// used only for those long walks. kStride covers a row count that does not
+// fit in the device grid.
+template <typename T, int V, bool kStride>
 __global__ void __launch_bounds__(kBlock)
-    gn_apply_nchw(const T *__restrict__ x, const T *__restrict__ scale,
+    gn_apply_nhwc(const T *__restrict__ x, const T *__restrict__ scale,
                   const T *__restrict__ bias, T *__restrict__ y,
                   const typename GroupNormTraits<T>::Compute *__restrict__ stats,
-                  int64_t channels, int64_t spatial, int64_t groups,
-                  int channelsPerGroup, int64_t chunk, int activation) {
+                  int64_t channels, int64_t spatial, int64_t groups, NhwcTile t,
+                  int64_t applyRows, int activation) {
   using Tr = GroupNormTraits<T>;
   using A = typename Tr::Compute;
-  const int64_t row = blockIdx.x;
-  const int64_t n = row / channels;
-  const int64_t c = row - n * channels;
-  const int64_t ng = n * groups + c / channelsPerGroup;
-  const A mean = stats[ng * 2];
-  const A a = Tr::load(scale[c]) * stats[ng * 2 + 1];
-  const A b = Tr::load(bias[c]);
+  const NhwcLane l = nhwcLane<V>(t, groups);
+  if (!l.active)
+    return;
 
-  const int64_t start = int64_t(blockIdx.y) * chunk;
-  const int64_t end = std::min(spatial, start + chunk);
-  const T *src = x + row * spatial;
-  T *dst = y + row * spatial;
-  for (int64_t i = start + int64_t(threadIdx.x) * V; i < end;
-       i += int64_t(blockDim.x) * V) {
-    GnVec<T, V> v = *reinterpret_cast<const GnVec<T, V> *>(src + i);
+  const int64_t c0 = l.c0;
+  const int64_t ng = l.n * groups + c0 / t.channelsPerGroup;
+  const A mean = stats[ng * 2];
+  const A invStd = stats[ng * 2 + 1];
+  A a[V], b[V];
+#pragma unroll
+  for (int k = 0; k < V; ++k) {
+    a[k] = Tr::load(scale[c0 + k]) * invStd;
+    b[k] = Tr::load(bias[c0 + k]);
+  }
+
+  const int64_t rows = kStride ? applyRows : int64_t(blockIdx.y) + 1;
+  const int64_t step = kStride ? int64_t(gridDim.y) : int64_t(1);
+  for (int64_t row = int64_t(blockIdx.y); row < rows; row += step) {
+    const int64_t px = row * l.ty + l.ly;
+    if (px >= spatial)
+      continue;
+    const int64_t offset = (l.n * spatial + px) * channels + c0;
+    GnVec<T, V> v = *reinterpret_cast<const GnVec<T, V> *>(x + offset);
     GnVec<T, V> o;
 #pragma unroll
     for (int k = 0; k < V; ++k)
       o.v[k] = Tr::store(
-          applyAffine<Tr>(Tr::load(v.v[k]) - mean, a, b, activation));
-    *reinterpret_cast<GnVec<T, V> *>(dst + i) = o;
+          applyAffine<Tr>(Tr::load(v.v[k]) - mean, a[k], b[k], activation));
+    *reinterpret_cast<GnVec<T, V> *>(y + offset) = o;
   }
+}
+
+template <typename Tr, typename IndexT>
+struct GnRowAffine {
+  typename Tr::Compute mean, a, b;
+};
+
+template <typename Tr, typename T, typename IndexT>
+__device__ inline GnRowAffine<Tr, IndexT>
+gnRowAffine(IndexT row, const T *__restrict__ scale, const T *__restrict__ bias,
+            const typename Tr::Compute *__restrict__ stats, IndexT channels,
+            IndexT groups, IndexT channelsPerGroup) {
+  const IndexT n = row / channels;
+  const IndexT c = row - n * channels;
+  const IndexT ng = n * groups + c / channelsPerGroup;
+  return {stats[ng * 2], Tr::load(scale[c]) * stats[ng * 2 + 1],
+          Tr::load(bias[c])};
+}
+
+// Channels-first apply: one flat elementwise pass over the N * C * spatial
+// values, one V-wide vector per thread and one block per blockDim.x vectors.
+// spatial is a multiple of V, so a vector never straddles two (n, c) rows.
+// Sizing the grid by the tensor, rather than by rows times chunks, leaves only
+// the hardware's own scheduling tail; looping several vectors per thread was
+// slower on DRAM-bound shapes. When a row holds at least one block of vectors,
+// a block touches at most two rows; their coefficients come from block-uniform
+// indices, so each wave loads them once. IndexT is 32-bit when the vector
+// count and the grid fit.
+template <typename T, int V, typename IndexT>
+__global__ void __launch_bounds__(kBlock)
+    gn_apply_nchw(const T *__restrict__ x, const T *__restrict__ scale,
+                  const T *__restrict__ bias, T *__restrict__ y,
+                  const typename GroupNormTraits<T>::Compute *__restrict__ stats,
+                  IndexT rowVecs, IndexT totalVecs, IndexT channels,
+                  IndexT groups, IndexT channelsPerGroup, int activation) {
+  using Tr = GroupNormTraits<T>;
+  using Vec = GnVec<T, V>;
+  const IndexT first = IndexT(blockIdx.x) * blockDim.x;
+  const IndexT i = first + threadIdx.x;
+
+  GnRowAffine<Tr, IndexT> k;
+  if (rowVecs >= blockDim.x) {
+    const IndexT r0 = first / rowVecs;
+    const IndexT rows = totalVecs / rowVecs;
+    const GnRowAffine<Tr, IndexT> k0 = gnRowAffine<Tr>(
+        r0, scale, bias, stats, channels, groups, channelsPerGroup);
+    k = k0;
+    if (r0 + 1 < rows && first + blockDim.x > (r0 + 1) * rowVecs) {
+      const GnRowAffine<Tr, IndexT> k1 = gnRowAffine<Tr>(
+          r0 + 1, scale, bias, stats, channels, groups, channelsPerGroup);
+      if (i >= (r0 + 1) * rowVecs)
+        k = k1;
+    }
+  } else {
+    if (i >= totalVecs)
+      return;
+    k = gnRowAffine<Tr>(i / rowVecs, scale, bias, stats, channels, groups,
+                        channelsPerGroup);
+  }
+  if (i >= totalVecs)
+    return;
+
+  const Vec v = reinterpret_cast<const Vec *>(x)[i];
+  Vec o;
+#pragma unroll
+  for (int e = 0; e < V; ++e)
+    o.v[e] = Tr::store(
+        applyAffine<Tr>(Tr::load(v.v[e]) - k.mean, k.a, k.b, activation));
+  reinterpret_cast<Vec *>(y)[i] = o;
 }
 
 template <typename A> __device__ inline A blockSum(A *sBuf, A v) {
@@ -601,8 +685,8 @@ struct Plan {
   NhwcTile tile{};
   // channels_first tiling
   int64_t statsChunk = 0;
-  int applyChunks = 0;
-  int64_t applyChunk = 0;
+  int64_t applyBlocks = 0;
+  bool apply32 = false; // the flat apply indexes in 32 bits
 
   int slotsPerGroup() const {
     return partials * (tile.subBlocks > 0 ? tile.subBlocks : 1);
@@ -682,12 +766,9 @@ hipError_t makePlan(int64_t n, int64_t c, int64_t spatial, int64_t groups,
     partials = ceilDiv(targetBlocks, base);
     partials = std::min(
         partials, ceilDiv(groupSize, int64_t(kBlock) * vec * kMinVectorsPerThread));
-    int64_t rowChunks = ceilDiv(targetBlocks, n * c);
-    rowChunks = std::min(
-        rowChunks, ceilDiv(spatial, int64_t(kBlock) * vec * kMinVectorsPerThread));
-    rowChunks = std::max<int64_t>(1, rowChunks);
-    plan.applyChunk = ceilDiv(ceilDiv(spatial, rowChunks), vec) * vec;
-    plan.applyChunks = static_cast<int>(ceilDiv(spatial, plan.applyChunk));
+    const int64_t totalVecs = n * c * (spatial / vec);
+    plan.applyBlocks = ceilDiv(totalVecs, kBlock);
+    plan.apply32 = plan.applyBlocks * kBlock <= int64_t(UINT32_MAX);
   }
   partials = std::max<int64_t>(1, std::min(partials, maxPartials));
   layoutPartials(plan, partials, spatial, groupSize, channelsLast);
@@ -755,9 +836,41 @@ void launchSplit(hipStream_t stream, const T *x, const T *scale, const T *bias,
     hipLaunchKernelGGL(HIP_KERNEL_NAME(gn_finalize<A>),
                        dim3(static_cast<unsigned>(ng)), block, 0, stream,
                        parts, slots, epsilon);
-    hipLaunchKernelGGL(HIP_KERNEL_NAME(gn_apply_nhwc<T, V>), grid, tile, 0,
-                       stream, x, scale, bias, y, parts.stats, c, spatial,
-                       groups, t, activation);
+    // One vector per thread wins once a thread would otherwise walk more than
+    // a few dozen pixels. Shorter walks keep the tiled kernel: a flat grid
+    // there spends more on launch and on reloading scale and bias.
+    constexpr int kFlatMinIters = 32;
+    if (t.pixelsPerBlock <= int64_t(ty) * kFlatMinIters) {
+      hipLaunchKernelGGL(HIP_KERNEL_NAME(gn_apply_nhwc_tiled<T, V>), grid, tile,
+                         0, stream, x, scale, bias, y, parts.stats, c, spatial,
+                         groups, t, activation);
+    } else {
+      const auto gridCap = []() {
+        int dev = 0, maxGridY = 0;
+        if (hipGetDevice(&dev) != hipSuccess ||
+            hipDeviceGetAttribute(&maxGridY, hipDeviceAttributeMaxGridDimY,
+                                  dev) != hipSuccess ||
+            maxGridY <= 0)
+          return int64_t(65535);
+        return int64_t(maxGridY);
+      }();
+      const int64_t applyRows = ceilDiv(spatial, ty);
+      const int64_t applyX = n * t.channelBlocks;
+      if (applyRows <= gridCap && applyX <= int64_t(UINT32_MAX)) {
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(gn_apply_nhwc<T, V, false>),
+                           dim3(static_cast<unsigned>(applyX),
+                                static_cast<unsigned>(applyRows)),
+                           tile, 0, stream, x, scale, bias, y, parts.stats, c,
+                           spatial, groups, t, applyRows, activation);
+      } else {
+        const int64_t rows = std::min(applyRows, gridCap);
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(gn_apply_nhwc<T, V, true>),
+                           dim3(static_cast<unsigned>(applyX),
+                                static_cast<unsigned>(rows)),
+                           tile, 0, stream, x, scale, bias, y, parts.stats, c,
+                           spatial, groups, t, applyRows, activation);
+      }
+    }
   } else {
     const dim3 statsGrid(static_cast<unsigned>(ng),
                          static_cast<unsigned>(plan.partials));
@@ -767,11 +880,21 @@ void launchSplit(hipStream_t stream, const T *x, const T *scale, const T *bias,
     hipLaunchKernelGGL(HIP_KERNEL_NAME(gn_finalize<A>),
                        dim3(static_cast<unsigned>(ng)), block, 0, stream,
                        parts, slots, epsilon);
-    const dim3 applyGrid(static_cast<unsigned>(n * c),
-                         static_cast<unsigned>(plan.applyChunks));
-    hipLaunchKernelGGL(HIP_KERNEL_NAME(gn_apply_nchw<T, V>), applyGrid, block,
-                       0, stream, x, scale, bias, y, parts.stats, c, spatial,
-                       groups, cpg, plan.applyChunk, activation);
+    const dim3 applyGrid(static_cast<unsigned>(plan.applyBlocks));
+    const int64_t rowVecs = spatial / V;
+    const int64_t totalVecs = n * c * rowVecs;
+    if (plan.apply32)
+      hipLaunchKernelGGL(HIP_KERNEL_NAME(gn_apply_nchw<T, V, uint32_t>),
+                         applyGrid, block, 0, stream, x, scale, bias, y,
+                         parts.stats, uint32_t(rowVecs), uint32_t(totalVecs),
+                         uint32_t(c), uint32_t(groups), uint32_t(cpg),
+                         activation);
+    else
+      hipLaunchKernelGGL(HIP_KERNEL_NAME(gn_apply_nchw<T, V, uint64_t>),
+                         applyGrid, block, 0, stream, x, scale, bias, y,
+                         parts.stats, uint64_t(rowVecs), uint64_t(totalVecs),
+                         uint64_t(c), uint64_t(groups), uint64_t(cpg),
+                         activation);
   }
 }
 
