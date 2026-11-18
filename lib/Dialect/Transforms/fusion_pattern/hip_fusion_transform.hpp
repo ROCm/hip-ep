@@ -34,7 +34,6 @@
 #include "linear_attention_group_fold.hpp"
 #include "patch_embed_conv_to_gemm.hpp"
 #include "swiglu_fusion.hpp"
-#include "transpose_round_trip.hpp"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/PDL/IR/PDL.h"
@@ -885,7 +884,6 @@ inline mlir::LogicalResult run(mlir::ModuleOp module,
   populateGeluFusionPattern(patterns, mlir::PatternBenefit(kGeluFusionBenefit));
   populateLinearAttentionGroupFoldPattern(
       patterns, mlir::PatternBenefit(kLinearAttentionGroupFoldBenefit));
-  populateTransposeRoundTripPattern(patterns);
 
   // pdl patterns here
   if (pdlBuffer.getBufferSize() != 0) {
