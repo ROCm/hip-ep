@@ -112,3 +112,36 @@ class TestMatMul:
 
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=1e-3)
+
+    @pytest.mark.parametrize("batch", [1, 2, 3])
+    @pytest.mark.parametrize("group", [5, 7])
+    def test_matmul_dynamic_rows_returned_as_batch(self, model_runner, batch, group):
+        """A dynamic [rows, N] matmul result returned as [rows / group, group, N].
+
+        The output is a view of the matmul buffer through an expand with one
+        dynamic dim beside a static one, so the output allocator must be told
+        rows / group, not rows.
+        """
+        k, n = 16, 8
+        tp = TensorProto.FLOAT16
+        X = helper.make_tensor_value_info("X", tp, ["rows", k])
+        Y = helper.make_tensor_value_info("Y", tp, ["batch", group, n])
+        rng = np.random.default_rng(321)
+        w = numpy_helper.from_array(
+            rng.uniform(-0.5, 0.5, [k, n]).astype(np.float16), name="W"
+        )
+        shape = numpy_helper.from_array(np.array([-1, group, n], np.int64), name="S")
+        model = make_model_from_nodes(
+            [
+                helper.make_node("MatMul", ["X", "W"], ["M"]),
+                helper.make_node("Reshape", ["M", "S"], ["Y"]),
+            ],
+            [X],
+            [Y],
+            initializers=[w, shape],
+        )
+
+        x = rng.uniform(-1, 1, [batch * group, k]).astype(np.float16)
+        actual, expected = model_runner.run_sample(model, [x], reference="cpu")
+        assert actual[0].shape == (batch, group, n)
+        compare_outputs(actual, expected, atol=1e-3)

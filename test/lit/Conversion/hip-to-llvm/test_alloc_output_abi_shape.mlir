@@ -108,3 +108,23 @@ func.func @static_reshape_chain(%ctx: !hip.context) -> memref<1x1x1x256xf32> {
       : memref<256xf32> into memref<1x1x1x256xf32>
   return %ret : memref<1x1x1x256xf32>
 }
+
+// A dynamic external dim beside a static one in the same group (a batched
+// linear [B*5, 7] returned as [B, 5, 7]): the callback gets internal / 5, not
+// the internal row count.
+// STAMP-LABEL: func.func @expand_batch_rows
+// STAMP:       hip.alloc_output
+// STAMP-SAME:    hipdnn.abi_groups = array<i64: 2, 1>
+// STAMP-SAME:    hipdnn.abi_shape = array<i64: -9223372036854775808, 5, 7>
+//
+// DECOMP-LABEL: llvm.func @expand_batch_rows
+// DECOMP:       %[[FIVE:.*]] = llvm.mlir.constant(5 : i64) : i64
+// DECOMP:       %[[B:.*]] = llvm.sdiv %{{.*}}, %[[FIVE]] : i64
+// DECOMP:       llvm.alloca %{{.*}} x !llvm.array<3 x i64>
+// DECOMP:       llvm.store %[[B]], %{{.*}} : i64, !llvm.ptr
+func.func @expand_batch_rows(%ctx: !hip.context, %rows: index, %b: index) -> memref<?x5x7xf16> {
+  %out = memref.alloc(%rows) : memref<?x7xf16>
+  %ret = memref.expand_shape %out [[0, 1], [2]] output_shape [%b, 5, 7]
+      : memref<?x7xf16> into memref<?x5x7xf16>
+  return %ret : memref<?x5x7xf16>
+}
