@@ -168,8 +168,9 @@ takes `depth` from `output_shape[axis]`. The ONNX-to-HIP conversion reads
 such a scalar back once, only when the extent is dynamic.
 
 Small device-side operands that only parameterize a kernel are read inside
-the kernel rather than copied to the host: OneHot's `[off, on]` values never
-reach the host.
+the kernel rather than copied to the host: OneHot's `[off, on]` values and
+Compress's selected count (written by its scan kernel) never reach the host.
+The Compress gather kernels are sized for the allocated output extent.
 
 **Gotcha**: when a future op gets added, the lowering must pass shapes
 through, otherwise the runtime is forced into a per-call D2H. The
