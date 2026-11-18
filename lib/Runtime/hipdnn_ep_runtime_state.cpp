@@ -1779,7 +1779,7 @@ int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size) {
         stderr,
         "hipdnn_ep_state_ensure_workspace: hipMalloc failed for %zu bytes\n",
         alloc_size);
-    std::abort();
+    return -1;
   }
 
   state->workspace_size = alloc_size;
