@@ -92,16 +92,17 @@ The perfConfig a kernel was tuned to is baked into its code object, so a tuned
 and an untuned artifact are not interchangeable even on the same GPU.
 `HIPDNN_EP_ROCMLIR_NO_STANDALONE_ELEMENTWISE` adds a `+no-standalone-ew` suffix
 after that, because it changes which ops run as rocMLIR kernels
-(`gfx1151+autotune=quick+no-standalone-ew`).
+(`gfx1151+autotune=quick+no-standalone-ew`). A `+no-attention` suffix follows
+when `HIPDNN_EP_ROCMLIR_NO_ATTENTION` kept attention unfused; whether attention
+was fused is baked into the code objects the same way.
 
 The model cache / EPContext identity is derived from the graph alone, so the EP
 refuses to load an artifact whose recorded value differs from the current one;
-delete the cache and recompile after changing GPUs, or toggling either
-`HIPDNN_EP_ROCMLIR`,
-`HIP_ROCMLIR_SKIP_BENCHMARKING`, or
-`HIPDNN_EP_ROCMLIR_AUTOTUNE`. Compilation fails outright
-if autotune is on but no HIP device could be reached, so the suffix never
-claims tuning that did not happen.
+delete the cache and recompile after changing GPUs, or toggling
+`HIPDNN_EP_ROCMLIR`, `HIP_ROCMLIR_SKIP_BENCHMARKING`,
+`HIPDNN_EP_ROCMLIR_AUTOTUNE`, or `HIPDNN_EP_ROCMLIR_NO_ATTENTION`. Compilation
+fails outright if autotune is on but no HIP device could be reached, so the
+suffix never claims tuning that did not happen.
 
 `HIPDNN_EP_ROCMLIR_AUTOTUNE_BENCH` selects how candidates are timed and is not
 part of the suffix: both modes search the same space and record the same kind

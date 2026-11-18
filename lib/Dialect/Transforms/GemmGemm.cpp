@@ -255,8 +255,14 @@ static void mergeKernels(RocMlirOp first, RocMlirOp second, unsigned index,
           empty && empty->use_empty())
         empty->erase();
   }
-  firstKernel->erase();
-  secondKernel->erase();
+  // Other dispatches may still call either kernel, and both dispatches may
+  // share one.
+  SmallVector<func::FuncOp, 2> kernels{firstKernel};
+  if (secondKernel != firstKernel)
+    kernels.push_back(secondKernel);
+  for (func::FuncOp kernel : kernels)
+    if (SymbolTable::symbolKnownUseEmpty(kernel, module))
+      kernel->erase();
 }
 
 // Gemm-pointwise-gemm: merge two outlined kernels when the first kernel's
