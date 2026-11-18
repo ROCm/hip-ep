@@ -36,6 +36,9 @@ endif()
 #     tablegen DEPENDS and propagate rock/Triton INTERFACE include dirs so
 #     out-of-tree consumers (hip-rocmlir-compiler) build without a downstream
 #     tablegen collector or include-dir export.
+#   - rocmlirTriton-amd-codegen-llvm-commit.patch: fetch the triton_amd_codegen
+#     LLVM archive by any ref, so deps.txt amd_codegen_llvm can pin a commit
+#     instead of following the branch tip.
 #
 # We do NOT use FetchContent's PATCH_COMMAND: its populate sub-build re-runs the
 # patch step on every reconfigure (not just on first clone), and `git apply` is
@@ -52,7 +55,8 @@ endif()
 # applied and we skip; otherwise we (re)apply the series from a pristine tree.
 set(_rocmlirtriton_patches
     "${CMAKE_CURRENT_LIST_DIR}/rocmlirTriton-use-external-LLVM.patch"
-    "${CMAKE_CURRENT_LIST_DIR}/rocmlirTriton-fix-header-dependencies.patch")
+    "${CMAKE_CURRENT_LIST_DIR}/rocmlirTriton-fix-header-dependencies.patch"
+    "${CMAKE_CURRENT_LIST_DIR}/rocmlirTriton-amd-codegen-llvm-commit.patch")
 set(_rocmlirtriton_patches_abs "")
 foreach(_p IN LISTS _rocmlirtriton_patches)
   get_filename_component(_p "${_p}" ABSOLUTE)
@@ -243,8 +247,8 @@ set(BUILD_SHARED_LIBS ${_saved_bsl_cpptrace})
 #   unset, so the standard LLVM_*/MLIR_* consumer variables come from the
 #   package configs.
 # Tier 2 (fallback): build LLVM/MLIR/LLD from source as a FetchContent
-#   subdirectory. Both ENABLE_ROCMLIRTRITON settings clone deps.txt llvm_project
-#   (ROCm/llvm-project at the rmt-core branch tip). rocmlirTriton is cloned only
+#   subdirectory. Both ENABLE_ROCMLIRTRITON settings fetch deps.txt llvm_project
+#   (ROCm/llvm-project at a pinned rmt-core commit). rocmlirTriton is cloned only
 #   when RMT is on, and only for the Rock/Triton sources; its vendored
 #   external/llvm-project is not built. No rocMLIR/Triton targets are built in
 #   this step. The build tree has no consumable package config during
@@ -317,14 +321,15 @@ else()
   # it and relies on first-populated-wins, and _deps/llvm-project-build is
   # referenced by name downstream. SOURCE_SUBDIR llvm selects the LLVM cmake
   # project; the repository root is not itself a buildable CMake project.
-  # DEP_HASH_llvm_project is a branch name, so the clone and later update step
-  # follow that branch's tip. rocmlirTriton, when enabled, is populated below
-  # and reuses this build; it is not cloned here.
-  message(STATUS "LLVM/MLIR not found; building from ${DEP_URL_llvm_project} branch ${DEP_HASH_llvm_project}")
+  # DEP_HASH_llvm_project is a commit. A shallow clone cannot check out a
+  # commit and a full clone of llvm-project is far larger, so fetch the GitHub
+  # source archive of that commit instead. rocmlirTriton, when enabled, is
+  # populated below and reuses this build; it is not cloned here.
+  string(REGEX REPLACE "\\.git$" "" _llvm_repo_url "${DEP_URL_llvm_project}")
+  message(STATUS "LLVM/MLIR not found; building from ${_llvm_repo_url} commit ${DEP_HASH_llvm_project}")
   FetchContent_Declare(llvm-project
-    GIT_REPOSITORY ${DEP_URL_llvm_project}
-    GIT_TAG ${DEP_HASH_llvm_project}
-    GIT_SHALLOW TRUE
+    URL "${_llvm_repo_url}/archive/${DEP_HASH_llvm_project}.tar.gz"
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     SOURCE_SUBDIR llvm
     EXCLUDE_FROM_ALL)
   # Build the in-tree LLVM/MLIR/clang with hidden ELF visibility (source
@@ -406,7 +411,7 @@ endif()
 # sets up the MLIR CMake module path and includes (TableGen/AddMLIR/AddLLVM),
 # so it does not need the top-level module setup that runs later.
 #
-# LLVM is the rmt-core clone above, so this block is what clones rocmlirTriton.
+# LLVM is the rmt-core fetch above, so this block is what clones rocmlirTriton.
 # SOURCE_SUBDIR external makes MakeAvailable clone and patch without
 # configuring rocMLIR/Triton. add_subdirectory then configures the targets.
 # The SOURCE_DIR guard skips the patch on a reconfigure once the checkout
@@ -470,6 +475,15 @@ if(ENABLE_ROCMLIRTRITON)
   endif()
 
   set(ROCM_PATH "${THEROCK_DIST}")
+
+  # rocmlirTriton builds a second, AMDGPU-only LLVM for triton_amd_codegen and
+  # defaults it to a branch tip. FORCE so an existing cache picks up a bump.
+  set(ROCMLIR_AMD_CODEGEN_LLVM_GIT_REPOSITORY "${DEP_URL_amd_codegen_llvm}"
+      CACHE STRING "" FORCE)
+  set(ROCMLIR_AMD_CODEGEN_LLVM_GIT_BRANCH "${DEP_HASH_amd_codegen_llvm}"
+      CACHE STRING "" FORCE)
+  set(ROCMLIR_AMD_CODEGEN_LLVM_REVISION "${DEP_HASH_amd_codegen_llvm}"
+      CACHE STRING "" FORCE)
 
   # rocMLIR's mlir/CMakeLists.txt sets LLVM_ENABLE_WERROR before including
   # HandleLLVMOptions, so every diagnostic in its tree is fatal, and it layers
