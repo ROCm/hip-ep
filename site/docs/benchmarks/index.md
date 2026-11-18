@@ -61,10 +61,10 @@ TTFT is primarily affected by prefill and therefore increases with prompt
 length. TPS measures decode throughput after the first token.
 
 {% comment %}
-Version-bound claim, re-checked at each release bump. Carried from v0.4.0 to
-v0.5.1 on a static check of the shipped EP: it exposes the same caching-related
-provider options it did before and gained no on-disk artifact store, so the
-default has not moved. The same claim appears three times on
+Version-bound claim, re-checked at each release bump. Carried from v0.4.0
+through v0.5.3 on a static check of the shipped EP: it exposes the same
+caching-related provider options it did before and gained no on-disk artifact
+store, so the default has not moved. The same claim appears three times on
 docs/get-started/binary-package.md, which carries the fuller note and the
 re-test to run. If it falls there, it falls here too.
 {% endcomment %}
