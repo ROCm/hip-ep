@@ -237,7 +237,7 @@ vlm:
     name: Qwen3.5 122B-A10B
     hf: Qwen/Qwen3.5-122B-A10B
     params: 122B total, 10B active
-    arch: Hybrid Gated DeltaNet + sparse mixture of experts + vision encoder
+    arch: Sparse mixture of experts + vision encoder
     task: Image understanding, text generation
     precision: int4 text decoder, group 32; fp16 vision encoder
     quant: int4
