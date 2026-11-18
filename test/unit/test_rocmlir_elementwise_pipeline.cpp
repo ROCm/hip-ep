@@ -160,8 +160,8 @@ func.func @main_graph(%ctx: !hip.context, %data: tensor<8x16xf32>)
 }
 )mlir";
 
-// rock-lower-nongemm-to-blockwise only reduces a contiguous axis, so this
-// kernel fails in the backend and runs as hip.reduce_sum outside strict mode.
+// rock-lower-nongemm-to-blockwise only accepts the last axis, so this kernel
+// fails in the backend and runs as hip.reduce_sum outside strict mode.
 constexpr llvm::StringLiteral kReduceUncompilable = R"mlir(
 func.func @rocMlir0(%data: tensor<8x16xf32>) -> tensor<1x16xf32>
     attributes {rock.arch = "gfx1151", rock.kernel, rock.nongemm} {
