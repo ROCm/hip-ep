@@ -193,6 +193,9 @@ std::string rocMlirArtifactTarget() {
       if (!lut.empty())
         target += "+lut=" + lut;
     }
+    // Whether attention was fused is baked into the kernels the same way.
+    if (!target.empty() && hip_env_is_on("HIPDNN_EP_ROCMLIR_NO_ATTENTION"))
+      target += "+no-attention";
     return target;
   }
 #endif

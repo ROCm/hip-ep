@@ -93,15 +93,17 @@ That tool writes LLVM bitcode; it does not stamp `Metadata.rocmlir_arch`.
 The perfConfig a kernel was tuned to is baked into its code object, so a tuned
 and an untuned artifact are not interchangeable even on the same GPU. Two
 provider artifacts whose shipped LUT bytes differ are not interchangeable
-either: the `+lut=` fingerprint makes the load check fail.
+either: the `+lut=` fingerprint makes the load check fail. A `+no-attention`
+suffix follows when `HIPDNN_EP_ROCMLIR_NO_ATTENTION` kept attention unfused;
+whether attention was fused is baked into the code objects the same way.
 
 The model cache / EPContext identity is derived from the graph alone, so the EP
 refuses to load an artifact whose recorded value differs from the current one;
 delete the cache and recompile after changing GPUs, replacing a shipped LUT,
-or toggling either `HIPDNN_EP_ROCMLIR`, `HIP_ROCMLIR_SKIP_BENCHMARKING`, or
-`HIPDNN_EP_ROCMLIR_AUTOTUNE`. Compilation fails outright
-if autotune is on but no HIP device could be reached, so the suffix never
-claims tuning that did not happen.
+or toggling `HIPDNN_EP_ROCMLIR`, `HIP_ROCMLIR_SKIP_BENCHMARKING`,
+`HIPDNN_EP_ROCMLIR_AUTOTUNE`, or `HIPDNN_EP_ROCMLIR_NO_ATTENTION`. Compilation
+fails outright if autotune is on but no HIP device could be reached, so the
+suffix never claims tuning that did not happen.
 
 `HIPDNN_EP_ROCMLIR_AUTOTUNE_BENCH` selects how candidates are timed and is not
 part of the suffix: both modes search the same space and record the same kind
