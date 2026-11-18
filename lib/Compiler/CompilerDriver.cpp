@@ -141,6 +141,9 @@ std::string rocMlirArtifactTarget() {
     mlir::hip::AutotuneSpace space;
     if (!target.empty() && mlir::hip::rocMlirAutotuneFromEnv(space))
       target += std::string("+autotune=") + mlir::hip::autotuneSpaceName(space);
+    // Whether attention was fused is baked into the kernels the same way.
+    if (!target.empty() && hip_env_is_on("HIPDNN_EP_ROCMLIR_NO_ATTENTION"))
+      target += "+no-attention";
     return target;
   }
 #endif
