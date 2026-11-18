@@ -884,6 +884,14 @@ int wrap_rocmlir(RuntimeState *state, const char *kernel_binary,
                  char *func_name, int64_t block_size, int64_t grid_size,
                  void *kernargs, size_t size);
 
+// Fills `count` elements of `element_bytes` (1, 2 or 4) at `buffer` with the
+// low bits of `pattern`, on the state's stream. The generated IR calls it
+// before wrap_rocmlir for each kernel argument that rocMLIR marks
+// `rock.prefill`, such as the output of a split-K kernel, which the kernel
+// accumulates into.
+int wrap_rocmlir_prefill(RuntimeState *state, void *buffer, int64_t count,
+                         int64_t element_bytes, uint64_t pattern);
+
 // GroupQueryAttention operation wrapper (Full MS spec)
 // Called by generated IR for onnx.Custom(GroupQueryAttention) lowering
 // GQA runtime wrapper following the complete Microsoft ONNX Runtime
@@ -2229,6 +2237,15 @@ int wrap_pad(RuntimeState *state, void *data, void *pads, void *constant_value,
              int64_t output_rank, int64_t pads_num_elements,
              int64_t axes_num_elements, int64_t data_type, int64_t mode_id);
 
+// Pad with compile-time pads: `lower_pads` is a host array holding the begin
+// pad of every axis (length `rank`). Never reads device memory or syncs the
+// stream. Modes as in wrap_pad. `constant_value` is a host pointer to the fill
+// value (one element of `data_type`) for constant mode, or null for zero.
+int wrap_pad_static(RuntimeState *state, void *data, void *output,
+                    const int64_t *data_shape, const int64_t *output_shape,
+                    const int64_t *lower_pads, int64_t rank, int64_t data_type,
+                    int64_t mode_id, const void *constant_value);
+
 // Tile operation wrapper.
 // repeats: int64 1-D tensor of length `data_rank`.
 int wrap_tile(RuntimeState *state, void *input, void *repeats, void *output,
@@ -2311,6 +2328,13 @@ int wrap_slice_typed(RuntimeState *state, void *data, void *starts, void *ends,
                      int64_t starts_num_elements, int64_t axes_num_elements,
                      int64_t steps_num_elements, int64_t data_type,
                      int64_t index_type);
+// Slice with compile-time parameters: `starts` and `steps` are host arrays of
+// length `rank` holding the resolved start and step of every axis, and
+// `output_shape` is exact. Never reads device memory or syncs the stream.
+int wrap_slice_static(RuntimeState *state, void *data, void *output,
+                      const int64_t *data_shape, const int64_t *output_shape,
+                      const int64_t *starts, const int64_t *steps, int64_t rank,
+                      int64_t data_type);
 
 // ScatterND: output = copy(data), then output[indices[i]] (reduction)
 // updates[i].

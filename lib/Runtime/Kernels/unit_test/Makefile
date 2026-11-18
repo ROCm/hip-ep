@@ -29,6 +29,7 @@ OFFLOAD  ?= --offload-arch=gfx11-generic
 HIP_SDK  ?=
 MODE     ?= lookup
 COVERAGE ?= 3
+TIMING   ?= standard
 
 ifeq ($(HIP_SDK),)
     $(error pass HIP_SDK=<HIP SDK root>)
@@ -44,6 +45,7 @@ LEAVES := cast/Xany_Yany_bf16 \
 	matmul_nbits/Xfp16_Wu4_Yfp16 matmul_nbits/Xfp16_Wi8_Yfp16 \
 	matmul_nbits/Xfp32_Wu2_Yfp32 matmul_nbits/Xfp32_Wu3_Yfp32 \
 	matmul_nbits/Xfp32_Wu4_Yfp32 matmul_nbits/Xfp32_Wi8_Yfp32 \
+	qmoe/Xfp16_Wu4_Yfp16 \
 	qmoe_ragged_mm/Xfp16_Wu4_Yfp16
 
 ARCH  := $(patsubst --offload-arch=%,%,$(OFFLOAD))
@@ -72,7 +74,7 @@ CLEAN_LEAVES := $(addprefix clean/,$(LEAVES))
 .PHONY: test build clean $(LEAVES) $(CLEAN_LEAVES)
 
 test: build
-	$(call RUN_UT,--mode $(MODE) --coverage $(COVERAGE))
+	$(call RUN_UT,--mode $(MODE) --coverage $(COVERAGE) --timing $(TIMING))
 
 build: $(LEAVES) $(PKG)/hipdnn-kernel-ut.exe
 

@@ -483,6 +483,20 @@ int wrap_matmul_i32(RuntimeState *state, const void *A, const void *B,
   return 0;
 }
 
+// Pre-fill for a hip.rocmlir argument. The mock has no device buffer to fill.
+int wrap_rocmlir_prefill(RuntimeState *state, void *buffer, int64_t count,
+                         int64_t element_bytes, uint64_t pattern) {
+  (void)buffer;
+  (void)pattern;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_rocmlir_prefill\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_rocmlir_prefill(count=%lld, element_bytes=%lld)\n",
+             (long long)count, (long long)element_bytes);
+  return 0;
+}
+
 // RocMLIR dispatch (hip.rocmlir). Empty for now: the generated IR builds the
 // kernargs buffer and passes the embedded GPU binary + launch geometry, but
 // this wrapper does not yet load the module or launch the kernel.
@@ -2909,6 +2923,22 @@ int wrap_pad(RuntimeState *state, void *data, void *pads, void *constant_value,
   return 0;
 }
 
+int wrap_pad_static(RuntimeState *state, void *data, void *output,
+                    const int64_t *data_shape, const int64_t *output_shape,
+                    const int64_t *lower_pads, int64_t rank, int64_t data_type,
+                    int64_t mode_id, const void *constant_value) {
+  (void)constant_value;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_pad_static\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_pad_static(rank=%lld, data_type=%s(%lld), "
+             "mode=%lld)\n",
+             (long long)rank, hipdnn_ep_datatype_name(data_type),
+             (long long)data_type, (long long)mode_id);
+  return 0;
+}
+
 int wrap_tile(RuntimeState *state, void *input, void *repeats, void *output,
               const int64_t *input_shape, int64_t input_rank,
               const int64_t *output_shape, int64_t output_rank,
@@ -3019,6 +3049,26 @@ int wrap_slice_typed(RuntimeState *state, void *data, void *starts, void *ends,
              (long long)starts_num_elements, (long long)axes_num_elements,
              axes ? "yes" : "null", (long long)steps_num_elements,
              steps ? "yes" : "null", hipdnn_ep_datatype_name(data_type),
+             (long long)data_type);
+  return 0;
+}
+
+int wrap_slice_static(RuntimeState *state, void *data, void *output,
+                      const int64_t *data_shape, const int64_t *output_shape,
+                      const int64_t *starts, const int64_t *steps, int64_t rank,
+                      int64_t data_type) {
+  (void)data;
+  (void)output;
+  (void)data_shape;
+  (void)output_shape;
+  (void)starts;
+  (void)steps;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_slice_static\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_slice_static(rank=%lld, data_type=%s(%lld))\n",
+             (long long)rank, hipdnn_ep_datatype_name(data_type),
              (long long)data_type);
   return 0;
 }
