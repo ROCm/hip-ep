@@ -640,10 +640,10 @@ RocMlirOp outline(const KernelParts &parts, RocMlirOutline kind,
         rewriter, loc,
         rocMlirKernelName(parentModule, ops.getArrayRef(), counter), funcType);
     kernel->setAttr("rock.kernel", rewriter.getUnitAttr());
-    if (kind == RocMlirOutline::Elementwise)
-      kernel->setAttr("rock.elementwise", rewriter.getUnitAttr());
-    else if (kind == RocMlirOutline::Reduce)
-      kernel->setAttr("rock.reduce", rewriter.getUnitAttr());
+    // rocMLIR lowers both through its nongemm pipeline, which tells a
+    // reduction from a map by the rock.reduce op in the converted body.
+    if (kind == RocMlirOutline::Elementwise || kind == RocMlirOutline::Reduce)
+      kernel->setAttr("rock.nongemm", rewriter.getUnitAttr());
     if (!arch.empty())
       kernel->setAttr("rock.arch", rewriter.getStringAttr(arch));
     Block *body = kernel.addEntryBlock();
@@ -1164,7 +1164,7 @@ private:
   // free view on the host, so the module needs two other ops, and each op must
   // lower inside a rocMLIR kernel (isTosaLowerableInKernel, the rule the
   // grouping uses): a u8 Max or Min, for one, has no HIP kernel to fall back
-  // to. rocMLIR's elementwise pipeline
+  // to. rocMLIR's nongemm pipeline
   // cannot store a result that only transposes a kernel argument (through
   // reshapes) next to other results; such a module stays on the host.
   bool outlinesAlone(RocMlirElementwiseOp module) const {

@@ -3,16 +3,17 @@
  * Licensed under the MIT License.
  */
 
-// Elementwise, reduce, and anchor pipeline selection, compiled for gfx1151
-// without a GPU. The first module holds two outlined kernels: a conv + add
-// chain and a mul + add chain that carries rock.elementwise. A second module
-// holds a last-axis sum that carries rock.reduce. Each marker has to survive
-// HIP-to-TOSA and the rock high-level pipeline, because rocMLIR picks
-// buildElementwisePipeline or buildReducePipeline by it. The kernels then
-// compile with the default compile; the pointwise and reduce kernels have no
-// perfConfig. A marked kernel whose computation folds away, or that rocMLIR
-// cannot compile, goes back to its hip ops; with strictElementwise only the
-// folded one does. A reduce over a non-last axis fails the same way.
+// Nongemm and anchor pipeline selection, compiled for gfx1151 without a GPU.
+// The first module holds two outlined kernels: a conv + add chain and a
+// mul + add chain that carries rock.nongemm. A second module holds a last-axis
+// sum that also carries rock.nongemm. The marker has to survive HIP-to-TOSA
+// and the rock high-level pipeline, because the compile picks
+// buildNonGemmPipeline by it; that pipeline then tells the sum from the map by
+// its rock.reduce op. The kernels compile with the default compile; the
+// nongemm kernels have no perfConfig. A marked kernel whose computation folds
+// away, or that rocMLIR cannot compile, goes back to its hip ops; with
+// strictElementwise only the folded one does. A reduce over a non-last axis
+// and a map with two results fail the same way.
 
 #include "hip/Compiler/RocMlirKernelCompiler.h"
 #include "hip/Dialect/IR/HipDialect.h"
@@ -62,7 +63,7 @@ func.func @rocMlir0(%in: tensor<1x8x8x8xf16>, %w: tensor<16x8x3x3xf16>,
 
 func.func @rocMlir1(%x: tensor<1x16x8x8xf16>, %y: tensor<1x16x8x8xf16>,
                     %z: tensor<1x16x8x8xf16>) -> tensor<1x16x8x8xf16>
-    attributes {rock.arch = "gfx1151", rock.elementwise, rock.kernel} {
+    attributes {rock.arch = "gfx1151", rock.kernel, rock.nongemm} {
   %ctx = ub.poison : !hip.context
   %em = tensor.empty() : tensor<1x16x8x8xf16>
   %m = hip.mul(%ctx) ins(%x, %y : tensor<1x16x8x8xf16>, tensor<1x16x8x8xf16>)
@@ -95,7 +96,7 @@ func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x8x8xf16>,
 // hip.max(%x, %x) is %x: the kernel has nothing left to compute once lowered.
 constexpr llvm::StringLiteral kFolded = R"mlir(
 func.func @rocMlir0(%x: tensor<1x16x8x8xf16>) -> tensor<1x16x8x8xf16>
-    attributes {rock.arch = "gfx1151", rock.elementwise, rock.kernel} {
+    attributes {rock.arch = "gfx1151", rock.kernel, rock.nongemm} {
   %ctx = ub.poison : !hip.context
   %e = tensor.empty() : tensor<1x16x8x8xf16>
   %r = hip.max(%ctx) ins(%x, %x : tensor<1x16x8x8xf16>, tensor<1x16x8x8xf16>)
@@ -117,7 +118,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x16x8x8xf16>)
 constexpr llvm::StringLiteral kUncompilable = R"mlir(
 func.func @rocMlir0(%x: tensor<1x16x8x8xi64>, %y: tensor<1x16x8x8xi64>)
     -> tensor<1x16x8x8xi64>
-    attributes {rock.arch = "gfx1151", rock.elementwise, rock.kernel} {
+    attributes {rock.arch = "gfx1151", rock.kernel, rock.nongemm} {
   %ctx = ub.poison : !hip.context
   %e = tensor.empty() : tensor<1x16x8x8xi64>
   %r = hip.add(%ctx) ins(%x, %y : tensor<1x16x8x8xi64>, tensor<1x16x8x8xi64>)
@@ -135,11 +136,11 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x16x8x8xi64>,
 }
 )mlir";
 
-// A last-axis sum. buildReducePipeline compiles it once, with no perfConfig,
+// A last-axis sum. buildNonGemmPipeline compiles it once, with no perfConfig,
 // and the block is four waves.
 constexpr llvm::StringLiteral kReduce = R"mlir(
 func.func @rocMlir0(%data: tensor<8x16xf32>) -> tensor<8x1xf32>
-    attributes {rock.arch = "gfx1151", rock.kernel, rock.reduce} {
+    attributes {rock.arch = "gfx1151", rock.kernel, rock.nongemm} {
   %ctx = ub.poison : !hip.context
   %axes = hip.constant {value = dense<1> : tensor<i64>} : tensor<i64>
   %e = tensor.empty() : tensor<8x1xf32>
@@ -159,11 +160,11 @@ func.func @main_graph(%ctx: !hip.context, %data: tensor<8x16xf32>)
 }
 )mlir";
 
-// rock-lower-reduce-to-blockwise only accepts the last axis, so this kernel
-// fails in the backend and runs as hip.reduce_sum outside strict mode.
+// rock-lower-nongemm-to-blockwise only reduces a contiguous axis, so this
+// kernel fails in the backend and runs as hip.reduce_sum outside strict mode.
 constexpr llvm::StringLiteral kReduceUncompilable = R"mlir(
 func.func @rocMlir0(%data: tensor<8x16xf32>) -> tensor<1x16xf32>
-    attributes {rock.arch = "gfx1151", rock.kernel, rock.reduce} {
+    attributes {rock.arch = "gfx1151", rock.kernel, rock.nongemm} {
   %ctx = ub.poison : !hip.context
   %axes = hip.constant {value = dense<0> : tensor<i64>} : tensor<i64>
   %e = tensor.empty() : tensor<1x16xf32>
@@ -183,6 +184,36 @@ func.func @main_graph(%ctx: !hip.context, %data: tensor<8x16xf32>)
 }
 )mlir";
 
+// A map with two results. The nongemm lowering takes exactly one rock.store,
+// so this kernel fails in the backend and runs as its hip ops outside strict
+// mode.
+constexpr llvm::StringLiteral kTwoResults = R"mlir(
+func.func @rocMlir0(%x: tensor<1x16x8x8xf16>, %y: tensor<1x16x8x8xf16>)
+    -> (tensor<1x16x8x8xf16>, tensor<1x16x8x8xf16>)
+    attributes {rock.arch = "gfx1151", rock.kernel, rock.nongemm} {
+  %ctx = ub.poison : !hip.context
+  %em = tensor.empty() : tensor<1x16x8x8xf16>
+  %m = hip.mul(%ctx) ins(%x, %y : tensor<1x16x8x8xf16>, tensor<1x16x8x8xf16>)
+      outs(%em : tensor<1x16x8x8xf16>) -> tensor<1x16x8x8xf16>
+  %ea = tensor.empty() : tensor<1x16x8x8xf16>
+  %a = hip.add(%ctx) ins(%m, %y : tensor<1x16x8x8xf16>, tensor<1x16x8x8xf16>)
+      outs(%ea : tensor<1x16x8x8xf16>) -> tensor<1x16x8x8xf16>
+  return %m, %a : tensor<1x16x8x8xf16>, tensor<1x16x8x8xf16>
+}
+
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x16x8x8xf16>,
+                      %y: tensor<1x16x8x8xf16>)
+    -> (tensor<1x16x8x8xf16>, tensor<1x16x8x8xf16>) {
+  %e0 = tensor.empty() : tensor<1x16x8x8xf16>
+  %e1 = tensor.empty() : tensor<1x16x8x8xf16>
+  %r:2 = hip.rocmlir(%ctx) @rocMlir0
+      ins(%x, %y : tensor<1x16x8x8xf16>, tensor<1x16x8x8xf16>)
+      outs(%e0, %e1 : tensor<1x16x8x8xf16>, tensor<1x16x8x8xf16>)
+      : tensor<1x16x8x8xf16>, tensor<1x16x8x8xf16>
+  return %r#0, %r#1 : tensor<1x16x8x8xf16>, tensor<1x16x8x8xf16>
+}
+)mlir";
+
 // The dispatches and the hip ops of type OpT left in `module`.
 template <typename OpT> std::pair<int, int> countOps(mlir::ModuleOp module) {
   int dispatches = 0;
@@ -196,7 +227,7 @@ template <typename OpT> std::pair<int, int> countOps(mlir::ModuleOp module) {
   return {dispatches, hipOps};
 }
 
-enum class Marker { Anchor, Elementwise, Reduce };
+enum class Marker { Anchor, Map, Reduce };
 
 // High-level pipeline then default compile, on the kernel `name` taken out of
 // the TOSA module.
@@ -209,29 +240,24 @@ void compileKernel(mlir::ModuleOp tosaKernels, llvm::StringRef name,
     return;
   check(mlir::hip::runRocMlirHighLevelPipeline(*single),
         (what + ": high-level pipeline").str());
-  bool elementwise = mlir::hip::isRocMlirElementwiseKernelModule(*single);
-  bool reduce = mlir::hip::isRocMlirReduceKernelModule(*single);
-  check(elementwise == (marker == Marker::Elementwise),
-        (what + (marker == Marker::Elementwise
-                     ? ": elementwise marker survives high-level"
-                     : ": no elementwise marker after high-level"))
+  bool nongemm = mlir::hip::isRocMlirNonGemmKernelModule(*single);
+  check(nongemm == (marker != Marker::Anchor),
+        (what + (marker != Marker::Anchor
+                     ? ": nongemm marker survives high-level"
+                     : ": no nongemm marker after high-level"))
             .str());
-  check(reduce == (marker == Marker::Reduce),
+  bool sawReduce = false;
+  single->walk([&](mlir::Operation *op) {
+    if (op->getName().getStringRef() == "rock.reduce")
+      sawReduce = true;
+  });
+  check(sawReduce == (marker == Marker::Reduce),
         (what + (marker == Marker::Reduce
-                     ? ": reduce marker survives high-level"
-                     : ": no reduce marker after high-level"))
+                     ? ": high-level lowering emits rock.reduce"
+                     : ": high-level lowering emits no rock.reduce"))
             .str());
-  if (marker == Marker::Reduce) {
-    bool sawReduce = false;
-    single->walk([&](mlir::Operation *op) {
-      if (op->getName().getStringRef() == "rock.reduce")
-        sawReduce = true;
-    });
-    check(sawReduce, (what + ": high-level lowering emits rock.reduce").str());
-  } else {
-    check(mlir::hip::hasRocMlirComputation(*single),
-          (what + ": has computation after high-level").str());
-  }
+  check(mlir::hip::hasRocMlirComputation(*single),
+        (what + ": has computation after high-level").str());
   mlir::hip::CompiledKernel out;
   bool ok = mlir::hip::compileRocMlirDefaultPerfConfig(*single, "gfx1151", out);
   check(ok && !out.binary.empty() && out.gridSize > 0 && out.blockSize > 0,
@@ -269,14 +295,13 @@ int main() {
   auto tosaAnchor = tosaKernels->lookupSymbol<mlir::func::FuncOp>(anchorName);
   auto tosaPointwise =
       tosaKernels->lookupSymbol<mlir::func::FuncOp>(pointwiseName);
-  check(tosaAnchor && !tosaAnchor->hasAttr("rock.elementwise"),
+  check(tosaAnchor && !tosaAnchor->hasAttr("rock.nongemm"),
         "conv kernel has no marker after HIP-to-TOSA");
-  check(tosaPointwise && tosaPointwise->hasAttr("rock.elementwise"),
+  check(tosaPointwise && tosaPointwise->hasAttr("rock.nongemm"),
         "marker survives HIP-to-TOSA");
 
   compileKernel(*tosaKernels, anchorName, Marker::Anchor, "conv kernel");
-  compileKernel(*tosaKernels, pointwiseName, Marker::Elementwise,
-                "pointwise kernel");
+  compileKernel(*tosaKernels, pointwiseName, Marker::Map, "pointwise kernel");
 
   // The same graph through the EP's entry point with the default compile.
   llvm::SmallVector<std::string> reasons;
@@ -342,7 +367,7 @@ int main() {
             *uncompilableStrict, strict)),
         "strict: a kernel rocMLIR cannot compile fails the module");
 
-  // A last-axis sum selects the reduce pipeline and embeds a binary.
+  // A last-axis sum selects the nongemm pipeline and embeds a binary.
   mlir::OwningOpRef<mlir::ModuleOp> reduceGraph =
       mlir::parseSourceString<mlir::ModuleOp>(kReduce, &context);
   if (!reduceGraph) {
@@ -357,9 +382,8 @@ int main() {
   if (!reduceTosa)
     return 1;
   auto tosaReduce = reduceTosa->lookupSymbol<mlir::func::FuncOp>("rocMlir0");
-  check(tosaReduce && tosaReduce->hasAttr("rock.reduce") &&
-            !tosaReduce->hasAttr("rock.elementwise"),
-        "reduce marker survives HIP-to-TOSA");
+  check(tosaReduce && tosaReduce->hasAttr("rock.nongemm"),
+        "reduce kernel keeps its nongemm marker after HIP-to-TOSA");
   compileKernel(*reduceTosa, "rocMlir0", Marker::Reduce, "reduce kernel");
 
   reasons.clear();
@@ -384,7 +408,7 @@ int main() {
         "the compiled reduce keeps its dispatch and drops the hip op");
   check(reasons.empty(), "the reduce kernel did not fall back");
 
-  // A non-last-axis sum marked rock.reduce fails to compile and runs as HIP,
+  // A non-last-axis sum marked rock.nongemm fails to compile and runs as HIP,
   // except in strict mode.
   mlir::OwningOpRef<mlir::ModuleOp> badReduce =
       mlir::parseSourceString<mlir::ModuleOp>(kReduceUncompilable, &context);
@@ -405,10 +429,32 @@ int main() {
             mlir::hip::compileAndEmbedRocMlirKernels(*badReduceStrict, strict)),
         "strict: a non-last-axis reduce fails the module");
 
+  // A map with two results fails the nongemm lowering and runs as HIP, except
+  // in strict mode.
+  mlir::OwningOpRef<mlir::ModuleOp> twoResults =
+      mlir::parseSourceString<mlir::ModuleOp>(kTwoResults, &context);
+  if (!twoResults) {
+    llvm::errs() << "failed to parse the two-result module\n";
+    return 1;
+  }
+  mlir::OwningOpRef<mlir::ModuleOp> twoResultsStrict = twoResults->clone();
+  reasons.clear();
+  check(mlir::succeeded(
+            mlir::hip::compileAndEmbedRocMlirKernels(*twoResults, options)),
+        "a two-result map does not fail the module");
+  check(countOps<mlir::hip::AddOp>(*twoResults) == std::make_pair(0, 1) &&
+            countOps<mlir::hip::MulOp>(*twoResults) == std::make_pair(0, 1),
+        "a two-result map runs its hip ops");
+  check(reasons.size() == 1 && reasons[0] != "folded",
+        "the two-result map is reported with its failed stage");
+  check(mlir::failed(mlir::hip::compileAndEmbedRocMlirKernels(*twoResultsStrict,
+                                                              strict)),
+        "strict: a two-result map fails the module");
+
   if (g_failures) {
     llvm::errs() << g_failures << " check(s) failed\n";
     return 1;
   }
-  llvm::outs() << "rocmlir elementwise pipeline selection passed\n";
+  llvm::outs() << "rocmlir nongemm pipeline selection passed\n";
   return 0;
 }

@@ -887,11 +887,10 @@ bool RocMlirAutotuner::Impl::autotuneKernel(ModuleOp module,
   }
   ensureDialectsLoaded();
 
-  // An elementwise or reduce kernel has no tuning space or perfConfig, so
-  // there is nothing to search or cache: it compiles once with an empty
-  // perfConfig. The reduce tile stays the one rocmlir records.
-  if (isRocMlirElementwiseKernelModule(module) ||
-      isRocMlirReduceKernelModule(module)) {
+  // A nongemm kernel has no tuning space or perfConfig, so there is nothing
+  // to search or cache: it compiles once with an empty perfConfig. The tile
+  // stays the one rocMLIR records on rock.nongemm_params.
+  if (isRocMlirNonGemmKernelModule(module)) {
     if (deferCacheHits) {
       DeferredCacheHit hit;
       hit.kernelName = kernelName.str();

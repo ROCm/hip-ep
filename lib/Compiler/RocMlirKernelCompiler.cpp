@@ -103,16 +103,14 @@ int64_t perfConfigField(StringRef perf, StringRef name, int64_t fallback) {
 // perfConfig, read straight out of the string rather than re-defaulted
 // (perfConfig field `numWaves` is the backend's `numWarps`); a missing field
 // falls back to the rock default and kKnobDefault (-1) leaves a bool knob at
-// its arch default. An elementwise or reduce kernel has no perfConfig, so it
-// gets the defaults throughout.
-enum class RocMlirBackendKind { Kernel, Elementwise, Reduce };
+// its arch default. A nongemm kernel has no perfConfig, so it gets the
+// defaults throughout.
+enum class RocMlirBackendKind { Kernel, NonGemm };
 
 RocMlirBackendKind rocMlirBackendKind(ModuleOp kernelModule) {
-  if (isRocMlirReduceKernelModule(kernelModule))
-    return RocMlirBackendKind::Reduce;
-  if (isRocMlirElementwiseKernelModule(kernelModule))
-    return RocMlirBackendKind::Elementwise;
-  return RocMlirBackendKind::Kernel;
+  return isRocMlirNonGemmKernelModule(kernelModule)
+             ? RocMlirBackendKind::NonGemm
+             : RocMlirBackendKind::Kernel;
 }
 
 bool buildBackendPipelineFor(OpPassManager &pm, StringRef arch,
@@ -121,22 +119,25 @@ bool buildBackendPipelineFor(OpPassManager &pm, StringRef arch,
   if (arch.empty() || failed(devName.parse(arch)))
     return false;
 
+  bool nongemm = kind == RocMlirBackendKind::NonGemm;
   rock::KernelOptions kOpts;
-  if (kind == RocMlirBackendKind::Elementwise)
-    rock::buildElementwisePipeline(pm, kOpts);
-  else if (kind == RocMlirBackendKind::Reduce) {
-    // rock-lower-reduce-to-blockwise reads this to get the wave size.
+  if (nongemm) {
+    // rock-lower-nongemm-to-blockwise reads this to get the wave size.
     kOpts.arch = devName.getChip().str();
-    rock::buildReducePipeline(pm, kOpts);
-  } else
+    rock::buildNonGemmPipeline(pm, kOpts);
+  } else {
     rock::buildKernelPipeline(pm, kOpts);
+  }
 
+  // The nongemm tile is chosen for 4 waves and 2 stages (rocMLIR's
+  // kNonGemmNumWaves and kNonGemmNumStages); nothing carries
+  // rock.nongemm_params into the Triton options, so the defaults must match.
   rock::TritonOptions tOpts;
   tOpts.arch = devName.getChip().str();
   tOpts.numWarps = static_cast<int>(perfConfigField(perfConfig, "numWaves", 4));
   tOpts.numCTAs = static_cast<int>(perfConfigField(perfConfig, "numCTAs", 1));
-  tOpts.numStages =
-      static_cast<int>(perfConfigField(perfConfig, "numStages", 1));
+  tOpts.numStages = static_cast<int>(
+      perfConfigField(perfConfig, "numStages", nongemm ? 2 : 1));
   tOpts.matrixInstrNonkdim =
       static_cast<int>(perfConfigField(perfConfig, "matrixInstrNonkdim", 0));
   tOpts.kpack = static_cast<int>(perfConfigField(perfConfig, "kpack", 1));
@@ -344,25 +345,20 @@ void inlineRocMlirKernel(ModuleOp module, func::FuncOp hipKernel) {
 
 } // namespace
 
-bool isRocMlirElementwiseKernelModule(ModuleOp kernelModule) {
+bool isRocMlirNonGemmKernelModule(ModuleOp kernelModule) {
   return llvm::any_of(kernelModule.getOps<func::FuncOp>(), [](func::FuncOp f) {
-    return f->hasAttr("rock.kernel") && f->hasAttr("rock.elementwise");
-  });
-}
-
-bool isRocMlirReduceKernelModule(ModuleOp kernelModule) {
-  return llvm::any_of(kernelModule.getOps<func::FuncOp>(), [](func::FuncOp f) {
-    return f->hasAttr("rock.kernel") && f->hasAttr("rock.reduce");
+    return f->hasAttr("rock.kernel") && f->hasAttr("rock.nongemm");
   });
 }
 
 bool hasRocMlirComputation(ModuleOp kernelModule) {
-  bool elementwise = isRocMlirElementwiseKernelModule(kernelModule);
+  bool nongemm = isRocMlirNonGemmKernelModule(kernelModule);
   WalkResult found = kernelModule.walk([&](Operation *op) {
     bool gemm =
         isa<rock::RockGemmWrapperInterface, rock::RockGemmGemmWrapperInterface>(
             op);
-    bool computes = gemm || (elementwise && rock::isFusionOp(op));
+    bool computes =
+        gemm || (nongemm && (rock::isFusionOp(op) || isa<rock::ReduceOp>(op)));
     return computes ? WalkResult::interrupt() : WalkResult::advance();
   });
   return found.wasInterrupted();
@@ -522,16 +518,14 @@ bool runRocMlirHighLevelPipeline(ModuleOp kernelModule) {
 
 bool compileRocMlirDefaultPerfConfig(ModuleOp kernelModule, StringRef arch,
                                      CompiledKernel &out) {
-  // Only an elementwise kernel can fold away to nothing rocMLIR can compile.
-  // A reduce kernel has no gemm tuning space either: rocmlir records its tile
-  // on rock.reduce_params. A conv or gemm keeps the tuning-space path below.
-  if (isRocMlirElementwiseKernelModule(kernelModule)) {
+  // A nongemm kernel has no tuning space: rocMLIR picks its tile and records
+  // it on rock.nongemm_params. A map can fold away to nothing rocMLIR can
+  // compile. A conv or gemm keeps the tuning-space path below.
+  if (isRocMlirNonGemmKernelModule(kernelModule)) {
     if (!hasRocMlirComputation(kernelModule))
       return false;
     return compileRocMlirBackend(kernelModule, arch, /*perfConfig=*/"", out);
   }
-  if (isRocMlirReduceKernelModule(kernelModule))
-    return compileRocMlirBackend(kernelModule, arch, /*perfConfig=*/"", out);
 
   // Affix a perfConfig to the gemm op (the `perf_config` string attr). Take
   // the first entry enumerated from the tuning search space; autotuning
@@ -581,25 +575,23 @@ compileAndEmbedRocMlirKernels(ModuleOp module,
   if (kernelNames.empty())
     return success();
 
-  // Pristine HIP bodies of elementwise and reduce kernels. A conv or gemm that
-  // rocMLIR cannot compile still fails the module. An elementwise kernel can
-  // fold away (hip.max(%x, %x)) or fail in the backend (an i64 chain:
-  // rock.blockwise_load/store stop at 32-bit integers); a reduce kernel can
-  // fail the same way when the body is not a last-axis sum. Those kernels run
-  // as their hip ops. With `strictElementwise`, only a kernel that folds away
-  // does.
+  // Pristine HIP bodies of nongemm kernels. A conv or gemm that rocMLIR cannot
+  // compile still fails the module. A nongemm kernel can fold away
+  // (hip.max(%x, %x)) or fail in the backend: an i64 chain
+  // (rock.blockwise_load/store stop at 32-bit integers), a sum that is not
+  // over the last axis, or a map with more than one result (the nongemm
+  // lowering takes exactly one rock.store). Those kernels run as their hip
+  // ops. With `strictElementwise`, only a kernel that folds away does.
   OwningOpRef<ModuleOp> hipKernels = ModuleOp::create(module.getLoc());
   for (auto func : module.getOps<func::FuncOp>())
     if (func->hasAttr("rock.kernel"))
       hipKernels->push_back(func.clone());
-  auto elementwiseKernel = [&](StringRef name) {
+  auto nongemmKernel = [&](StringRef name) {
     auto func = hipKernels->lookupSymbol<func::FuncOp>(name);
-    return func && func->hasAttr("rock.elementwise");
+    return func && func->hasAttr("rock.nongemm");
   };
   auto canFallBack = [&](StringRef name) {
-    auto func = hipKernels->lookupSymbol<func::FuncOp>(name);
-    bool reducible = func && func->hasAttr("rock.reduce");
-    return !options.strictElementwise && (elementwiseKernel(name) || reducible);
+    return !options.strictElementwise && nongemmKernel(name);
   };
   llvm::StringSet<> onHipPath;
   auto runOnHipPath = [&](StringRef name, StringRef reason) {
@@ -656,7 +648,7 @@ compileAndEmbedRocMlirKernels(ModuleOp module,
       continue;
     }
 
-    if (elementwiseKernel(name) && !hasRocMlirComputation(*single)) {
+    if (nongemmKernel(name) && !hasRocMlirComputation(*single)) {
       if (options.log)
         *options.log << options.logPrefix << " kernel '" << name
                      << "' has no computation left after lowering; running "

@@ -132,7 +132,7 @@ set_target_properties(test-adaptive-benchmark PROPERTIES
   FOLDER "mlir/Test/Compiler"
 )
 
-# GPU-free check that rock.elementwise selects the elementwise pipeline.
+# GPU-free check that rock.nongemm selects the nongemm pipeline.
 if(ENABLE_ROCMLIRTRITON)
   if(CMAKE_LINK_GROUP_USING_RESCAN_SUPPORTED)
     set(_rocmlir_link_closure "$<LINK_GROUP:RESCAN,${HIPDNN_ROCMLIR_LINK_LIBS}>")

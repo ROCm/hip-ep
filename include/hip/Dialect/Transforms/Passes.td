@@ -250,7 +250,7 @@ def FuseRocMlirAnchorPass
     QLinearConv, a QLinearMatMul and a convolution of dequantizes become
     integer anchors only when their kernel outlines; a declined op keeps its
     HIP kernel. A module that no anchor takes and that saves a launch stays
-    whole and becomes a rock.elementwise kernel. After the outline, a
+    whole and becomes a rock.nongemm kernel. After the outline, a
     matmul or gemm kernel whose only result feeds the A operand of the next
     gemm merges into it when the gemm-elementwise-gemm shape gates pass.
     Only main_graph is changed. Run hip-rocmlir-prepare-quant and

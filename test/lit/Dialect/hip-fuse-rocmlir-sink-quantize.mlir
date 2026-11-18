@@ -282,7 +282,7 @@ func.func @main_graph(%ctx: !hip.context, %a: tensor<1x4x4x4xui8>)
 // The float transpose result has a second reader, so the quantize stays.
 
 // CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
-// CHECK-SAME: attributes {rock.elementwise, rock.kernel}
+// CHECK-SAME: attributes {rock.kernel, rock.nongemm}
 // CHECK: hip.dequantize_linear
 // CHECK: %[[T:.*]] = hip.transpose(%{{.*}}) ins(%{{.*}} : tensor<1x4x4x8xf32>)
 // CHECK: %[[Y:.*]] = hip.quantize_linear(%{{.*}}) ins(%[[T]],
@@ -315,7 +315,7 @@ func.func @main_graph(%ctx: !hip.context, %a: tensor<1x4x4x8xui8>)
 // A per-axis quantize does not commute with a transpose of its axis.
 
 // CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
-// CHECK-SAME: attributes {rock.elementwise, rock.kernel}
+// CHECK-SAME: attributes {rock.kernel, rock.nongemm}
 // CHECK: hip.dequantize_linear
 // CHECK: hip.transpose(%{{.*}}) ins(%{{.*}} : tensor<1x4x4x8xf32>)
 // CHECK: hip.quantize_linear(%{{.*}}) ins(%{{.*}} : tensor<1x8x4x4xf32>, tensor<8xf32>)
@@ -349,7 +349,7 @@ func.func @main_graph(%ctx: !hip.context, %a: tensor<1x4x4x8xui8>)
 
 // CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: (%[[A:[^:]*]]: tensor<1x4x4x8xi8>)
-// CHECK-SAME: attributes {rock.elementwise, rock.kernel}
+// CHECK-SAME: attributes {rock.kernel, rock.nongemm}
 // CHECK: %[[D:.*]] = hip.dequantize_linear(%{{.*}}) ins(%[[A]],
 // CHECK: %[[Q:.*]] = hip.quantize_linear(%{{.*}}) ins(%[[D]], {{.*}} : tensor<1x4x4x8xui8>
 // CHECK: return %[[Q]]

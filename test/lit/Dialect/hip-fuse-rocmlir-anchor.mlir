@@ -74,7 +74,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<4x16xf16>,
 // A module with no anchor that saves a launch becomes an elementwise kernel.
 
 // CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
-// CHECK-SAME: attributes {rock.elementwise, rock.kernel}
+// CHECK-SAME: attributes {rock.kernel, rock.nongemm}
 // CHECK: %[[A:.*]] = hip.add
 // CHECK: %[[M:.*]] = hip.mul({{.*}}) ins(%[[A]], %[[A]] :
 // CHECK: return %[[M]]
@@ -100,7 +100,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<4x16xf16>,
 // outside the conv kernel and becomes an elementwise kernel of its own.
 
 // CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
-// CHECK-SAME: attributes {rock.elementwise, rock.kernel}
+// CHECK-SAME: attributes {rock.kernel, rock.nongemm}
 // CHECK: %[[A:.*]] = hip.add
 // CHECK: %[[M:.*]] = hip.mul({{.*}}) ins(%[[A]], %[[A]] :
 // CHECK: return %[[M]]
@@ -171,7 +171,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf16>,
 // stays its own kernel and computes the add and the max once.
 
 // CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
-// CHECK-SAME: rock.elementwise
+// CHECK-SAME: rock.nongemm
 // CHECK: hip.add
 // CHECK: hip.max
 // CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}

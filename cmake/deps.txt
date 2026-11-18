@@ -17,8 +17,10 @@ onnxruntime;https://github.com/microsoft/onnxruntime/releases/download;1.31.0
 ## name, so the checkout follows that branch's tip rather than a frozen commit.
 llvm_project;https://github.com/ROCm/llvm-project.git;rmt-core-2026-10-19
 ## rocmlirTriton pin. Used only when ENABLE_ROCMLIRTRITON=ON, and only for the
-## Rock/Triton sources. LLVM still comes from llvm_project above.
-rocmlirtriton;https://github.com/ROCm/rocmlirTriton.git;32481957048683dc12a1a75f8a502599c0bb844b
+## Rock/Triton sources. LLVM still comes from llvm_project above. The commit is
+## the head of the open ROCm/rocmlirTriton#591 (rock.nongemm kernels); re-pin to
+## its merge commit on develop once it lands.
+rocmlirtriton;https://github.com/ROCm/rocmlirTriton.git;a3b9a4a0c8c86bbe44b736c6363458012858c0e4
 protobuf;https://github.com/protocolbuffers/protobuf.git;v34.0
 flatbuffers;https://github.com/google/flatbuffers.git;v25.12.19
 ##

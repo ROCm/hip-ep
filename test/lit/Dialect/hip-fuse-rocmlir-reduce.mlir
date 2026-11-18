@@ -2,17 +2,17 @@
 // Licensed under the MIT License.
 
 // A last-axis hip.reduce_sum, or an f32 hip.reduce_mean, is a prologue-only
-// rocMLIR anchor. Pointwise ops in front of it join the rock.reduce kernel.
-// Pointwise ops after it stay an elementwise kernel. An f16 mean stays a HIP
-// op: its 1/N scale is done in f16. Anything else the reduce pipeline cannot
-// lower stays a HIP op.
+// rocMLIR anchor. Pointwise ops in front of it join its rock.nongemm kernel.
+// Pointwise ops after it stay a separate rock.nongemm kernel. An f16 mean
+// stays a HIP op: its 1/N scale is done in f16. Anything else rocMLIR's
+// nongemm pipeline cannot reduce stays a HIP op.
 
 // RUN: hip-mlir-opt --split-input-file --hip-rocmlir-prepare-quant \
 // RUN:   --hip-fuse-rocmlir-elementwise --hip-fuse-rocmlir-anchor %s \
 // RUN:   | hip-mlir-opt --split-input-file | FileCheck %s
 
 // CHECK-LABEL: func.func @mlir_reduce_sum_0
-// CHECK-SAME: attributes {rock.kernel, rock.reduce}
+// CHECK-SAME: attributes {rock.kernel, rock.nongemm}
 // CHECK: hip.reduce_sum
 // CHECK-LABEL: func.func @main_graph
 // CHECK: hip.rocmlir
@@ -31,7 +31,7 @@ func.func @main_graph(%ctx: !hip.context, %data: tensor<8x16xf32>) -> tensor<8x1
 // -----
 
 // CHECK-LABEL: func.func @mlir_neg_reduce_sum_0
-// CHECK-SAME: attributes {rock.kernel, rock.reduce}
+// CHECK-SAME: attributes {rock.kernel, rock.nongemm}
 // CHECK: hip.neg
 // CHECK: hip.reduce_sum
 // CHECK-LABEL: func.func @main_graph
@@ -56,11 +56,11 @@ func.func @main_graph(%ctx: !hip.context, %data: tensor<8x16xf32>) -> tensor<8x1
 
 // The trailing pointwise kernel is printed ahead of the reduce kernel.
 // CHECK-LABEL: func.func @mlir_neg_abs_1
-// CHECK-SAME: attributes {rock.elementwise, rock.kernel}
+// CHECK-SAME: attributes {rock.kernel, rock.nongemm}
 // CHECK: hip.neg
 // CHECK: hip.abs
 // CHECK-LABEL: func.func @mlir_reduce_sum_0
-// CHECK-SAME: attributes {rock.kernel, rock.reduce}
+// CHECK-SAME: attributes {rock.kernel, rock.nongemm}
 // CHECK-NOT: hip.neg
 // CHECK-LABEL: func.func @main_graph
 // CHECK: hip.rocmlir
@@ -87,7 +87,7 @@ func.func @main_graph(%ctx: !hip.context, %data: tensor<8x16xf32>) -> tensor<8x1
 // -----
 
 // CHECK-LABEL: func.func @mlir_reduce_mean_0
-// CHECK-SAME: attributes {rock.kernel, rock.reduce}
+// CHECK-SAME: attributes {rock.kernel, rock.nongemm}
 // CHECK: hip.reduce_mean
 // CHECK-LABEL: func.func @main_graph
 // CHECK: hip.rocmlir
@@ -105,7 +105,7 @@ func.func @main_graph(%ctx: !hip.context, %data: tensor<8x16xf32>) -> tensor<8x1
 
 // -----
 
-// CHECK-NOT: rock.reduce
+// CHECK-NOT: rock.nongemm
 // CHECK-LABEL: func.func @main_graph
 // CHECK: hip.reduce_max
 
@@ -121,7 +121,7 @@ func.func @main_graph(%ctx: !hip.context, %data: tensor<8x16xf32>) -> tensor<8x1
 
 // -----
 
-// CHECK-NOT: rock.reduce
+// CHECK-NOT: rock.nongemm
 // CHECK-LABEL: func.func @main_graph
 // CHECK: hip.reduce_sum
 
@@ -137,7 +137,7 @@ func.func @main_graph(%ctx: !hip.context, %data: tensor<8x16xf32>) -> tensor<1x1
 
 // -----
 
-// CHECK-NOT: rock.reduce
+// CHECK-NOT: rock.nongemm
 // CHECK-LABEL: func.func @main_graph
 // CHECK: hip.reduce_mean
 
@@ -156,11 +156,11 @@ func.func @main_graph(%ctx: !hip.context, %data: tensor<8x16xf16>) -> tensor<8x1
 // The later reduction is outlined first, so it is mlir_reduce_sum_0 and prints
 // second. Each kernel clones the shared axes constant; it is not an argument.
 // CHECK-LABEL: func.func @mlir_reduce_sum_1(%{{[^:]*}}: tensor<8x16xf32>)
-// CHECK-SAME: attributes {rock.kernel, rock.reduce}
+// CHECK-SAME: attributes {rock.kernel, rock.nongemm}
 // CHECK: arith.constant
 // CHECK: hip.reduce_sum
 // CHECK-LABEL: func.func @mlir_reduce_sum_0(%{{[^:]*}}: tensor<4x16xf32>)
-// CHECK-SAME: attributes {rock.kernel, rock.reduce}
+// CHECK-SAME: attributes {rock.kernel, rock.nongemm}
 // CHECK: arith.constant
 // CHECK: hip.reduce_sum
 // CHECK-LABEL: func.func @main_graph
