@@ -50,6 +50,7 @@ add_library(HipDialectTransforms STATIC
   KernelOutline.cpp
   LoopBodyToOutParams.cpp
   LowerAllocs.cpp
+  HoistPointwiseOverViews.cpp
   MaterializeHostScalars.cpp
   OptimizeMemRefs.cpp
   Pipelines.cpp
