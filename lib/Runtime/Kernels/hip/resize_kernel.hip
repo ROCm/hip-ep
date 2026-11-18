@@ -239,72 +239,23 @@ __device__ inline float lerp_w(const T* row, const LinearTap& w) {
   return to_float<T>(row[w.lo]) * (1.0f - w.t) + to_float<T>(row[w.hi]) * w.t;
 }
 
-// The unused front axes (D below rank 3, H below rank 2) map to index 0 with
-// weight 0, so the kernel skips them instead of blending a sample with itself.
-template <typename T, int VEC>
-__global__ void resize_linear_rows_kernel(const T* __restrict__ input,
-                                          T* __restrict__ output, RowShape s,
-                                          int spatial_rank,
-                                          int coord_transform) {
-  const int64_t plane = static_cast<int64_t>(s.in_h) * s.in_w;
-  // The W taps depend only on the lane, so a thread computes them once and
-  // reuses them for each of its rows.
-  for (int64_t lane = first_lane(); lane < s.lanes; lane += lane_stride()) {
-    int w0 = static_cast<int>(lane) * VEC;
-    LinearTap tws[VEC];
-#pragma unroll
-    for (int k = 0; k < VEC; ++k)
-      tws[k] = linear_tap(w0 + k, s.out_w, s.in_w, coord_transform, s.s_w);
-    for (int64_t row = first_row(); row < s.rows; row += row_stride()) {
-      int nc, od, oh;
-      decode_row(s, static_cast<int>(row), nc, od, oh);
-      LinearTap td = {0, 0, 0.0f};
-      LinearTap th = {0, 0, 0.0f};
-      if (spatial_rank >= 3)
-        td = linear_tap(od, s.out_d, s.in_d, coord_transform, s.s_d);
-      if (spatial_rank >= 2)
-        th = linear_tap(oh, s.out_h, s.in_h, coord_transform, s.s_h);
-
-      const T* base = input + static_cast<int64_t>(nc) * s.in_d * plane;
-      const T* r00 =
-          base + td.lo * plane + static_cast<int64_t>(th.lo) * s.in_w;
-      const T* r01 =
-          base + td.lo * plane + static_cast<int64_t>(th.hi) * s.in_w;
-      const T* r10 =
-          base + td.hi * plane + static_cast<int64_t>(th.lo) * s.in_w;
-      const T* r11 =
-          base + td.hi * plane + static_cast<int64_t>(th.hi) * s.in_w;
-
-      T* dst = output + static_cast<int64_t>(row) * s.out_w;
-      VecOf<T, VEC> out;
-#pragma unroll
-      for (int k = 0; k < VEC; ++k) {
-#pragma clang fp contract(off)
-        const LinearTap& tw = tws[k];
-        float v = lerp_w(r00, tw);
-        if (spatial_rank >= 2) {
-          v = v * (1.0f - th.t) + lerp_w(r01, tw) * th.t;
-          if (spatial_rank >= 3) {
-            float v1 =
-                lerp_w(r10, tw) * (1.0f - th.t) + lerp_w(r11, tw) * th.t;
-            v = v * (1.0f - td.t) + v1 * td.t;
-          }
-        }
-        out.v[k] = from_float<T>(v);
-      }
-      *reinterpret_cast<VecOf<T, VEC>*>(dst + w0) = out;
-    }
-  }
-}
-
-// Linear resampling with the innermost axis resized, on one flat index over
-// (row group, lane), so a block of 256 threads is fully used whatever the row
-// length (the 2-D row/lane block
-// rounds the lane count up to a power of two, which leaves a third of a block
-// idle on 21 * 2^k wide rows), and the coordinate transform is a template
-// parameter rather than a per-tap switch. The host passes each axis's
-// effective scale and, when the scale is a power of two, its reciprocal: the
-// multiply is then exact, so the result matches the division bit for bit.
+// Linear resampling with the innermost axis resized runs on one flat index
+// over (row group, lane slot), with the coordinate transform a template
+// parameter rather than a per-tap switch. A row has `lane_slots` slots, of
+// which the first s.lanes write. The host picks the layout (see
+// launch_linear_flat): when every axis grows or keeps its extent, slots equal
+// lanes, so rows pack back to back and a block has no idle threads; when an
+// axis shrinks, slots round up to a power of two (a multiple of 256 past 256)
+// so waves and blocks stay on whole rows. A thread's rows are `row_step`
+// apart: consecutive rows when the output grows, so they share input rows in
+// cache, or one row group apart when it shrinks, so concurrently running waves
+// read adjacent input rows.
+//
+// The host passes each axis's effective scale and, when the scale is a power
+// of two, its reciprocal: the multiply is then exact, so the result matches
+// the division bit for bit. The unused front axes (D below rank 3, H below
+// rank 2) map to index 0 with weight 0, so the kernel skips them instead of
+// blending a sample with itself.
 struct LinearAxes {
   float scale[3]; // d, h, w
   float inv[3];   // 1 / scale when that is exact, else 0
@@ -340,25 +291,32 @@ template <typename T, int VEC, int kCT>
 __global__ void __launch_bounds__(256)
 resize_linear_flat_kernel(const T* __restrict__ input, T* __restrict__ output,
                           RowShape s, int spatial_rank, LinearAxes ax,
-                          int rows_per_thread, uint32_t items) {
+                          uint32_t lane_slots, int rows_per_thread,
+                          int row_step, uint32_t items) {
   const int64_t plane = static_cast<int64_t>(s.in_h) * s.in_w;
   const uint32_t stride = gridDim.x * blockDim.x;
   for (uint32_t g = blockIdx.x * blockDim.x + threadIdx.x; g < items;
        g += stride) {
-    const int lane = static_cast<int>(g % static_cast<uint32_t>(s.lanes));
-    const int group = static_cast<int>(g / static_cast<uint32_t>(s.lanes));
+    const int lane = static_cast<int>(g % lane_slots);
+    const int group = static_cast<int>(g / lane_slots);
+    if (lane >= s.lanes) continue;
     const int w0 = lane * VEC;
     LinearTap tws[VEC];
 #pragma unroll
     for (int k = 0; k < VEC; ++k)
       tws[k] = linear_tap_ct<kCT>(w0 + k, s.out_w, s.in_w, ax.scale[2],
                                   ax.inv[2]);
-    const int row_end = static_cast<int>(
-        min(static_cast<int64_t>(s.rows),
-            static_cast<int64_t>(group + 1) * rows_per_thread));
-    for (int row = group * rows_per_thread; row < row_end; ++row) {
+    // Unsigned: the step past the last row can exceed INT32_MAX.
+    const unsigned rows = static_cast<unsigned>(s.rows);
+    unsigned row = static_cast<unsigned>(group);
+    unsigned row_end = rows;
+    if (row_step == 1) {
+      row *= static_cast<unsigned>(rows_per_thread);
+      row_end = min(rows, row + static_cast<unsigned>(rows_per_thread));
+    }
+    for (; row < row_end; row += static_cast<unsigned>(row_step)) {
       int nc, od, oh;
-      decode_row(s, row, nc, od, oh);
+      decode_row(s, static_cast<int>(row), nc, od, oh);
       LinearTap td = {0, 0, 0.0f};
       LinearTap th = {0, 0, 0.0f};
       if (spatial_rank >= 3)
@@ -429,7 +387,7 @@ __global__ void resize_nearest_passthrough_kernel(const T* __restrict__ input,
   }
 }
 
-// Blends H, then D, in the same f32 order as resize_linear_rows_kernel; the
+// Blends H, then D, in the same f32 order as resize_linear_flat_kernel; the
 // skipped innermost blend has weight 0 there.
 template <typename T, int VEC>
 __global__ void resize_linear_passthrough_kernel(const T* __restrict__ input,
@@ -516,9 +474,9 @@ static bool make_row_shape(int spatial_rank, int64_t N, int64_t C,
 // below wave width, so adjacent rows, which are adjacent in memory, share a
 // wave instead of leaving its threads idle.
 //
-// The resampling kernels reuse a lane's W taps across its rows, so when there
-// are rows to spare each thread takes up to kRowsPerThread of them while the
-// launch keeps at least kMinRowBlocks blocks to fill the GPU.
+// The nearest row kernel reuses a lane's W samples across its rows, so when
+// there are rows to spare each thread takes up to kRowsPerThread of them while
+// the launch keeps at least kMinRowBlocks blocks to fill the GPU.
 constexpr unsigned kRowsPerThread = 4;
 constexpr unsigned kMinRowBlocks = 512;
 
@@ -561,11 +519,14 @@ static int pick_vec(int64_t out_w, const void* output, const void* input) {
 }
 
 // Launches the <T, VEC> instantiation that matches `vec`, a power of two up
-// to 16 bytes.
+// to 16 bytes. A linear resize of the innermost axis goes through
+// launch_linear_flat instead.
 template <typename T, bool kLinear, bool kPassthrough, int VEC>
 static void launch_vec(int vec, dim3 grid, dim3 block, hipStream_t stream,
                        const T* x, T* y, const RowShape& s, int spatial_rank,
                        int coord_transform, int nearest_mode) {
+  static_assert(kPassthrough || !kLinear,
+                "linear row resampling uses resize_linear_flat_kernel");
   if constexpr (VEC > 1) {
     if (vec != VEC) {
       launch_vec<T, kLinear, kPassthrough, VEC / 2>(
@@ -574,14 +535,10 @@ static void launch_vec(int vec, dim3 grid, dim3 block, hipStream_t stream,
       return;
     }
   }
-  if constexpr (kLinear && kPassthrough)
+  if constexpr (kLinear)
     hipLaunchKernelGGL(
         HIP_KERNEL_NAME(resize_linear_passthrough_kernel<T, VEC>), grid, block,
         0, stream, x, y, s, spatial_rank, coord_transform);
-  else if constexpr (kLinear)
-    hipLaunchKernelGGL(HIP_KERNEL_NAME(resize_linear_rows_kernel<T, VEC>),
-                       grid, block, 0, stream, x, y, s, spatial_rank,
-                       coord_transform);
   else if constexpr (kPassthrough)
     hipLaunchKernelGGL(
         HIP_KERNEL_NAME(resize_nearest_passthrough_kernel<T, VEC>), grid,
@@ -606,79 +563,92 @@ static void linear_axis(int out_dim, int in_dim, float onnx_scale, float& scale,
             : 0.0f;
 }
 
+struct FlatLaunch {
+  dim3 grid;
+  uint32_t lane_slots;
+  int rows_per_thread;
+  int row_step;
+  uint32_t items;
+};
+
+#define HIP_RESIZE_LAUNCH_FLAT(CT)                                            \
+  hipLaunchKernelGGL(HIP_KERNEL_NAME(resize_linear_flat_kernel<T, VEC, CT>), \
+                     f.grid, dim3(256), 0, stream, x, y, s, spatial_rank, ax, \
+                     f.lane_slots, f.rows_per_thread, f.row_step, f.items)
+
 template <typename T, int VEC>
-static void launch_linear_flat_vec(int vec, int coord_transform, dim3 grid,
+static void launch_linear_flat_vec(int vec, int coord_transform,
                                    hipStream_t stream, const T* x, T* y,
                                    const RowShape& s, int spatial_rank,
-                                   const LinearAxes& ax, int rows_per_thread,
-                                   uint32_t items) {
+                                   const LinearAxes& ax, const FlatLaunch& f) {
   if constexpr (VEC > 1) {
     if (vec != VEC) {
-      launch_linear_flat_vec<T, VEC / 2>(vec, coord_transform, grid, stream,
-                                         x, y, s, spatial_rank, ax,
-                                         rows_per_thread, items);
+      launch_linear_flat_vec<T, VEC / 2>(vec, coord_transform, stream, x, y, s,
+                                         spatial_rank, ax, f);
       return;
     }
   }
   switch (coord_transform) {
-    case 0:
-      hipLaunchKernelGGL(HIP_KERNEL_NAME(resize_linear_flat_kernel<T, VEC, 0>),
-                         grid, dim3(256), 0, stream, x, y, s, spatial_rank, ax,
-                         rows_per_thread, items);
-      break;
-    case 1:
-      hipLaunchKernelGGL(HIP_KERNEL_NAME(resize_linear_flat_kernel<T, VEC, 1>),
-                         grid, dim3(256), 0, stream, x, y, s, spatial_rank, ax,
-                         rows_per_thread, items);
-      break;
-    case 2:
-      hipLaunchKernelGGL(HIP_KERNEL_NAME(resize_linear_flat_kernel<T, VEC, 2>),
-                         grid, dim3(256), 0, stream, x, y, s, spatial_rank, ax,
-                         rows_per_thread, items);
-      break;
-    default:
-      hipLaunchKernelGGL(HIP_KERNEL_NAME(resize_linear_flat_kernel<T, VEC, 3>),
-                         grid, dim3(256), 0, stream, x, y, s, spatial_rank, ax,
-                         rows_per_thread, items);
-      break;
+    case 0: HIP_RESIZE_LAUNCH_FLAT(0); break;
+    case 1: HIP_RESIZE_LAUNCH_FLAT(1); break;
+    case 2: HIP_RESIZE_LAUNCH_FLAT(2); break;
+    default: HIP_RESIZE_LAUNCH_FLAT(3); break;
   }
 }
 
-// Returns false (nothing launched) for a downsampled axis, when the flat index
-// would not fit 32 bits, or when the coordinate transform has no template
-// instantiation. A downsample reads two input rows per output row and keeps
-// the row/lane kernel, whose strided rows suit that access pattern better.
+#undef HIP_RESIZE_LAUNCH_FLAT
+
+// When every axis grows or keeps its extent, the slots of a row equal its
+// lanes, so rows pack back to back, and a thread takes consecutive rows, which
+// read the same input rows from cache. When an axis shrinks, every output row
+// reads input rows no other row reads and the kernel is bound by memory
+// bandwidth: slots round up to a power of two, or past 256 to a multiple of
+// 256, so each wave and block stays on whole rows, and a thread's rows are one
+// row group apart, so concurrently running waves read adjacent input rows.
+// Up to kRowsPerThread rows share a lane's W taps while the launch keeps at
+// least kMinRowBlocks blocks of 256 threads; a larger tensor takes more rows
+// per thread to keep the flat index within 32 bits. Returns false for a
+// coordinate transform with no template instantiation.
 template <typename T>
-static bool launch_linear_flat(hipStream_t stream, const void* input,
-                               void* output, const RowShape& s,
-                               int spatial_rank, int vec, int coord_transform) {
+static bool launch_linear_flat(hipStream_t stream, const T* input, T* output,
+                               const RowShape& s, int spatial_rank, int vec,
+                               int coord_transform) {
   if (coord_transform < 0 || coord_transform > 3) return false;
-  if (s.out_d < s.in_d || s.out_h < s.in_h || s.out_w < s.in_w) return false;
   LinearAxes ax;
   linear_axis(s.out_d, s.in_d, s.s_d, ax.scale[0], ax.inv[0]);
   linear_axis(s.out_h, s.in_h, s.s_h, ax.scale[1], ax.inv[1]);
   linear_axis(s.out_w, s.in_w, s.s_w, ax.scale[2], ax.inv[2]);
-  // Up to kRowsPerThread rows share a lane's W taps, while the launch keeps
-  // at least kMinRowBlocks blocks of 256 threads.
-  const int64_t lanes = s.lanes;
-  auto groups = [&](int rpt) {
-    return (static_cast<int64_t>(s.rows) + rpt - 1) / rpt;
-  };
-  int rows_per_thread = static_cast<int>(kRowsPerThread);
-  while (rows_per_thread > 1 &&
-         lanes * groups(rows_per_thread) <
-             static_cast<int64_t>(kMinRowBlocks) * 256)
-    rows_per_thread /= 2;
-  const int64_t items = lanes * groups(rows_per_thread);
-  if (items <= 0 || items > INT32_MAX) return false;
+  const bool shrinks =
+      s.out_d < s.in_d || s.out_h < s.in_h || s.out_w < s.in_w;
+  int64_t slots = s.lanes;
+  if (shrinks) {
+    int64_t p = 1;
+    while (p < s.lanes && p < 256) p *= 2;
+    p = (s.lanes + p - 1) / p * p;
+    if (p <= INT32_MAX) slots = p;
+  }
+  const int64_t rows = s.rows;
+  const int64_t min_items = static_cast<int64_t>(kMinRowBlocks) * 256;
+  int64_t groups = (rows + kRowsPerThread - 1) / kRowsPerThread;
+  if (slots * groups < min_items) {
+    const int64_t want = (min_items + slots - 1) / slots;
+    groups = want < rows ? want : rows;
+  }
+  while (slots * groups > INT32_MAX) groups = (groups + 1) / 2;
+  const int64_t rpt = (rows + groups - 1) / groups;
+  const int64_t items = slots * groups;
   const int64_t blocks = (items + 255) / 256;
-  const dim3 grid(static_cast<unsigned>(blocks < HIP_RESIZE_MAX_GRID * 64ll
-                                            ? blocks
-                                            : HIP_RESIZE_MAX_GRID * 64ll));
-  launch_linear_flat_vec<T, 16 / sizeof(T)>(
-      vec, coord_transform, grid, stream, static_cast<const T*>(input),
-      static_cast<T*>(output), s, spatial_rank, ax, rows_per_thread,
-      static_cast<uint32_t>(items));
+  FlatLaunch f;
+  f.grid = dim3(static_cast<unsigned>(blocks < HIP_RESIZE_MAX_GRID * 64ll
+                                          ? blocks
+                                          : HIP_RESIZE_MAX_GRID * 64ll));
+  f.lane_slots = static_cast<uint32_t>(slots);
+  f.rows_per_thread = static_cast<int>(rpt);
+  f.row_step = shrinks && groups > 1 ? static_cast<int>(groups) : 1;
+  f.items = static_cast<uint32_t>(items);
+  launch_linear_flat_vec<T, 16 / sizeof(T)>(vec, coord_transform, stream,
+                                            input, output, s, spatial_rank,
+                                            ax, f);
   return true;
 }
 
@@ -705,24 +675,29 @@ static int launch_rows(hipStream_t stream, const void* input, void* output,
             "[custom_kernels] hip_resize: extents exceed the int range\n");
     return -1;
   }
+  const T* x = static_cast<const T*>(input);
+  T* y = static_cast<T*>(output);
   dim3 grid, block;
   row_launch_config(s, !passthrough, grid, block);
 
   (void)hipGetLastError();
-  if (kLinear && !passthrough &&
-      launch_linear_flat<T>(stream, input, output, s, spatial_rank, vec,
-                            coord_transform)) {
-    // launched; fall through to the error check
-  } else if (passthrough)
+  if (passthrough) {
     launch_vec<T, kLinear, true, 16 / sizeof(T)>(
-        vec, grid, block, stream, static_cast<const T*>(input),
-        static_cast<T*>(output), s, spatial_rank, coord_transform,
+        vec, grid, block, stream, x, y, s, spatial_rank, coord_transform,
         nearest_mode);
-  else
-    launch_vec<T, kLinear, false, 16 / sizeof(T)>(
-        vec, grid, block, stream, static_cast<const T*>(input),
-        static_cast<T*>(output), s, spatial_rank, coord_transform,
+  } else if constexpr (kLinear) {
+    if (!launch_linear_flat<T>(stream, x, y, s, spatial_rank, vec,
+                               coord_transform)) {
+      fprintf(stderr,
+              "[custom_kernels] hip_resize: bad coord_transform=%d\n",
+              coord_transform);
+      return -1;
+    }
+  } else {
+    launch_vec<T, false, false, 16 / sizeof(T)>(
+        vec, grid, block, stream, x, y, s, spatial_rank, coord_transform,
         nearest_mode);
+  }
   hipError_t err = hipGetLastError();
   if (err != hipSuccess) {
     fprintf(stderr, "[custom_kernels] hip_resize launch failed: %s\n",
