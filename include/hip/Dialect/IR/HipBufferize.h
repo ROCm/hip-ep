@@ -126,6 +126,8 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     MiopenSoftmaxOp::attachInterface<HipDstBufferizableModel<MiopenSoftmaxOp>>(
         *ctx);
     TransposeOp::attachInterface<HipDstBufferizableModel<TransposeOp>>(*ctx);
+    ReverseOp::attachInterface<HipDstBufferizableModel<ReverseOp>>(*ctx);
+    ConcatOp::attachInterface<HipDstBufferizableModel<ConcatOp>>(*ctx);
     GatherOp::attachInterface<HipDstBufferizableModel<GatherOp>>(*ctx);
     GatherElementsOp::attachInterface<
         HipDstBufferizableModel<GatherElementsOp>>(*ctx);

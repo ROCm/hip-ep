@@ -445,6 +445,9 @@ def PromoteStridedHipOperandsPass
     memref.dealloc %tmp : memref<...identity-layout...>
     ```
 
+    `hip.reverse` is skipped: its lowering reads the input through the memref
+    descriptor, so promoting it would only add a copy.
+
     DPS-init operands are intentionally left untouched because promoting a
     write target requires copy-back and must preserve read-before-write
     semantics. The production pipeline normally supplies identity-layout inits

@@ -5,11 +5,11 @@
 
 // Slice (ONNX-13+) -- non-constant indices / negative-step fallback.
 //
-// The compile-time-constant + positive-stride case is folded upstream to
-// `tensor.extract_slice` (see lib/Conversion/OnnxToHip/SliceConversion.cpp
-// ::SliceDecompose), so this entry point only fires for slices whose
-// `starts` / `ends` / `axes` / `steps` are not graph-constant (or that
-// use negative steps).
+// Compile-time-constant slices are folded upstream to `tensor.extract_slice`,
+// plus `hip.reverse` for a negative step (see
+// lib/Conversion/OnnxToHip/SliceConversion.cpp::SliceDecompose), so this entry
+// point only fires for slices whose `starts` / `ends` / `axes` / `steps` are
+// not graph-constant, or that take a negative step on a dynamic axis.
 //
 // Per ONNX-13+ Slice spec:
 //

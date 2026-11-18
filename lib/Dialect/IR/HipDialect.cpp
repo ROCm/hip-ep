@@ -2384,6 +2384,107 @@ LogicalResult TransposeOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// ReverseOp: ins(input), outs(output), attrs: axes
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ReverseOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void ReverseOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult ReverseOp::verify() {
+  if (failed(
+          verifyDpsComputeOp(*this, {getInput(), getOutput()}, /*numInits=*/1)))
+    return failure();
+
+  auto inputType = cast<ShapedType>(getInput().getType());
+  auto outputType = cast<ShapedType>(getOutput().getType());
+  if (inputType.getElementType() != outputType.getElementType())
+    return emitOpError("input and output element types must match");
+  if (inputType.getRank() != outputType.getRank())
+    return emitOpError("input and output ranks must match");
+  for (int64_t d : llvm::seq<int64_t>(inputType.getRank()))
+    if (!inputType.isDynamicDim(d) && !outputType.isDynamicDim(d) &&
+        inputType.getDimSize(d) != outputType.getDimSize(d))
+      return emitOpError("input and output shapes must match");
+
+  llvm::SmallVector<bool> seen(inputType.getRank(), false);
+  for (Attribute a : getAxes()) {
+    auto intAttr = dyn_cast<IntegerAttr>(a);
+    if (!intAttr)
+      return emitOpError("axes must be a list of integers");
+    int64_t axis = intAttr.getInt();
+    if (axis < 0 || axis >= inputType.getRank())
+      return emitOpError("axis ") << axis << " is out of range";
+    if (seen[axis])
+      return emitOpError("duplicate axis ") << axis;
+    seen[axis] = true;
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// ConcatOp: ins(inputs...), outs(output), attrs: axis
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ConcatOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void ConcatOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult ConcatOp::verify() {
+  if (getInputs().empty())
+    return emitOpError("expected at least one input");
+  llvm::SmallVector<Value> data(getInputs().begin(), getInputs().end());
+  data.push_back(getOutput());
+  if (failed(verifyDpsComputeOp(*this, data, /*numInits=*/1)))
+    return failure();
+
+  auto outputType = cast<ShapedType>(getOutput().getType());
+  int64_t rank = outputType.getRank();
+  int64_t axis = getAxis();
+  if (axis < 0 || axis >= rank)
+    return emitOpError("axis ") << axis << " is out of range";
+
+  int64_t axisSum = 0;
+  bool axisStatic = true;
+  for (Value input : getInputs()) {
+    auto inputType = cast<ShapedType>(input.getType());
+    if (inputType.getElementType() != outputType.getElementType())
+      return emitOpError("input and output element types must match");
+    if (inputType.getRank() != rank)
+      return emitOpError("input and output ranks must match");
+    for (int64_t d : llvm::seq<int64_t>(rank)) {
+      if (d == axis || inputType.isDynamicDim(d) || outputType.isDynamicDim(d))
+        continue;
+      if (inputType.getDimSize(d) != outputType.getDimSize(d))
+        return emitOpError("input dim ")
+               << d << " does not match the output off the concat axis";
+    }
+    if (inputType.isDynamicDim(axis))
+      axisStatic = false;
+    else
+      axisSum += inputType.getDimSize(axis);
+  }
+  if (axisStatic && !outputType.isDynamicDim(axis) &&
+      axisSum != outputType.getDimSize(axis))
+    return emitOpError("output axis extent ")
+           << outputType.getDimSize(axis)
+           << " is not the sum of the input extents (" << axisSum << ")";
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // GatherOp: ins(indices, table), outs(output)
 //===----------------------------------------------------------------------===//
 

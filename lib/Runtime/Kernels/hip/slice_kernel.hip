@@ -4,11 +4,11 @@
  *
  * Slice (non-constant-indices / negative-step fallback).
  *
- * The compile-time-constant + positive-stride case is folded to
- * `tensor.extract_slice` upstream of the runtime (see
+ * Compile-time-constant slices are folded to `tensor.extract_slice` (plus
+ * `hip.reverse` for a negative step) upstream of the runtime (see
  * lib/Conversion/OnnxToHip/SliceConversion.cpp::SliceDecompose), so this
  * kernel only services slices whose `starts` / `ends` / `axes` / `steps`
- * are NOT graph-constant, or that have negative steps.
+ * are NOT graph-constant, or that take a negative step on a dynamic axis.
  *
  * The host wrapper does the heavy lifting:
  *   - D2H of the index tensors (typically tiny: a few int64s).

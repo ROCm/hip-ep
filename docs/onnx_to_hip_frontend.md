@@ -183,7 +183,7 @@ runtime coverage.
 
 | ONNX | HIP | Backend |
 |---|---|---|
-| `Concat` | `tensor.empty` + `tensor.insert_slice` | bufferizes to destination subviews and copies |
+| `Concat` | `hip.concat` or `tensor.empty` + `tensor.insert_slice` | static concats with more than one row before the axis and at least 4096 output elements are one `hip.concat` launch; others bufferize to destination subviews and copies |
 
 ### Zero-cost Metadata Ops (no kernel needed)
 
