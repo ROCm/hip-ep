@@ -129,12 +129,12 @@ extern "C" int8_t hipdnn_ep_op_state_construct_gemm(RuntimeState *state,
 }
 
 // =============================================================================
-// Broadcast helper: write beta * broadcast(C) into output[M, N]
+// Broadcast helper: write broadcast(C) into output[M, N]
 // =============================================================================
 // C is [cDim0, cDim1] and must be unidirectional-broadcastable to [M, N]:
-// each cDim is 1 or equals the corresponding output extent. After this,
-// hipblasLtMatmul accumulates with effective_beta=1.0:
-//   output = alpha * A * B + 1.0 * output  (= alpha*A*B + beta*C_broadcast)
+// each cDim is 1 or equals the corresponding output extent. hipblasLtMatmul
+// then applies beta in place:
+//   output = alpha * A * B + beta * output  (= alpha*A*B + beta*C_broadcast)
 //
 // Device copies double a filled prefix (rows or columns) so a scalar, a
 // row, or a column becomes a full [M, N] buffer without a library op.
@@ -145,116 +145,6 @@ static size_t gemmElemSize(int64_t typeCode) {
   if (typeCode == kTypeFloat32)
     return 4;
   return 2;
-}
-
-static float f16ToFloat(uint16_t h) {
-  const uint32_t sign = (static_cast<uint32_t>(h & 0x8000u) << 16);
-  const uint32_t exp = (h >> 10) & 0x1fu;
-  uint32_t mant = h & 0x3ffu;
-  uint32_t bits;
-  if (exp == 0) {
-    if (mant == 0) {
-      bits = sign;
-    } else {
-      int32_t e = 127 - 15 + 1;
-      while ((mant & 0x400u) == 0) {
-        mant <<= 1;
-        --e;
-      }
-      mant &= 0x3ffu;
-      bits = sign | (static_cast<uint32_t>(e) << 23) | (mant << 13);
-    }
-  } else if (exp == 31) {
-    bits = sign | 0x7f800000u | (mant << 13);
-  } else {
-    bits = sign | ((exp + (127 - 15)) << 23) | (mant << 13);
-  }
-  float value;
-  std::memcpy(&value, &bits, sizeof(value));
-  return value;
-}
-
-static uint16_t floatToF16(float value) {
-  uint32_t bits;
-  std::memcpy(&bits, &value, sizeof(bits));
-  const uint32_t sign = (bits >> 16) & 0x8000u;
-  const uint32_t absBits = bits & 0x7fffffffu;
-  if (absBits > 0x7f800000u)
-    return static_cast<uint16_t>(sign | 0x7e00u | ((absBits >> 13) & 0x3ffu));
-  int32_t exp = static_cast<int32_t>((bits >> 23) & 0xffu) - 127;
-  uint32_t mant = bits & 0x7fffffu;
-  if (exp > 15)
-    return static_cast<uint16_t>(sign | 0x7c00u);
-  if (exp >= -14) {
-    uint32_t half = (static_cast<uint32_t>(exp + 15) << 10) | (mant >> 13);
-    const uint32_t remainder = mant & 0x1fffu;
-    if (remainder > 0x1000u || (remainder == 0x1000u && (half & 1u)))
-      ++half;
-    return static_cast<uint16_t>(sign | half);
-  }
-  if (exp < -24)
-    return static_cast<uint16_t>(sign);
-  mant |= 0x800000u;
-  const int shift = -14 - exp;
-  uint32_t half = mant >> (13 + shift);
-  const uint32_t halfBit = 1u << (12 + shift);
-  const uint32_t rem = mant & ((1u << (13 + shift)) - 1u);
-  if ((rem & halfBit) && ((rem & (halfBit - 1u)) || (half & 1u)))
-    ++half;
-  return static_cast<uint16_t>(sign | half);
-}
-
-static float bf16ToFloat(uint16_t value) {
-  const uint32_t bits = static_cast<uint32_t>(value) << 16;
-  float out;
-  std::memcpy(&out, &bits, sizeof(out));
-  return out;
-}
-
-static uint16_t floatToBf16(float value) {
-  uint32_t bits;
-  std::memcpy(&bits, &value, sizeof(bits));
-  bits += 0x7fffu + ((bits >> 16) & 1u);
-  return static_cast<uint16_t>(bits >> 16);
-}
-
-static void scaleHostC(unsigned char *data, size_t count, size_t elemSize,
-                       int64_t typeCode, float beta) {
-  for (size_t i = 0; i < count; ++i) {
-    unsigned char *elem = data + i * elemSize;
-    switch (typeCode) {
-    case kTypeFloat32: {
-      float value;
-      std::memcpy(&value, elem, sizeof(value));
-      value *= beta;
-      std::memcpy(elem, &value, sizeof(value));
-      break;
-    }
-    case kTypeFloat64: {
-      double value;
-      std::memcpy(&value, elem, sizeof(value));
-      value *= static_cast<double>(beta);
-      std::memcpy(elem, &value, sizeof(value));
-      break;
-    }
-    case kTypeFloat16: {
-      uint16_t bits;
-      std::memcpy(&bits, elem, sizeof(bits));
-      bits = floatToF16(f16ToFloat(bits) * beta);
-      std::memcpy(elem, &bits, sizeof(bits));
-      break;
-    }
-    case kTypeBFloat16: {
-      uint16_t bits;
-      std::memcpy(&bits, elem, sizeof(bits));
-      bits = floatToBf16(bf16ToFloat(bits) * beta);
-      std::memcpy(elem, &bits, sizeof(bits));
-      break;
-    }
-    default:
-      break;
-    }
-  }
 }
 
 static int expandFilledPrefix(void *dst, size_t blockBytes, size_t count,
@@ -302,7 +192,7 @@ static int expandFilledColumns(void *output, size_t elemSize, int64_t M,
 
 static int writeBroadcastC(RuntimeState *state, const void *C, void *output,
                            int64_t M, int64_t N, int64_t cDim0, int64_t cDim1,
-                           float beta, int64_t typeCode) {
+                           int64_t typeCode) {
   hipStream_t stream =
       static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
   if (!stream) {
@@ -323,58 +213,19 @@ static int writeBroadcastC(RuntimeState *state, const void *C, void *output,
       static_cast<size_t>(M) * static_cast<size_t>(N) * elemSize;
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_gemm: writeBroadcastC C[%lld,%lld] -> "
-                    "[%lld,%lld], beta=%f\n",
+                    "[%lld,%lld]\n",
                     (long long)cDim0, (long long)cDim1, (long long)M,
-                    (long long)N, beta);
-
-  if (beta == 0.0f) {
-    hipError_t err = hipMemsetAsync(output, 0, outBytes, stream);
-    if (err != hipSuccess) {
-      fprintf(stderr, "wrap_gemm: writeBroadcastC hipMemsetAsync failed (%s)\n",
-              hipGetErrorString(err));
-      return -1;
-    }
-    return 0;
-  }
-
-  const void *src = C;
-  hipMemcpyKind kind = hipMemcpyDeviceToDevice;
-  std::vector<unsigned char> host;
-  if (beta != 1.0f) {
-    const size_t count =
-        static_cast<size_t>(cDim0) * static_cast<size_t>(cDim1);
-    const size_t srcBytes = count * elemSize;
-    host.resize(srcBytes);
-    hipError_t err = hipMemcpy(host.data(), C, srcBytes, hipMemcpyDeviceToHost);
-    if (err != hipSuccess) {
-      fprintf(stderr, "wrap_gemm: writeBroadcastC D2H failed (%s)\n",
-              hipGetErrorString(err));
-      return -1;
-    }
-    scaleHostC(host.data(), count, elemSize, typeCode, beta);
-    src = host.data();
-    kind = hipMemcpyHostToDevice;
-  }
+                    (long long)N);
 
   const bool broadcastRows = (cDim0 == 1);
   const bool broadcastCols = (cDim1 == 1);
   hipError_t err;
-  const bool fromHost = (kind == hipMemcpyHostToDevice);
   auto copySeed = [&](void *dst, const void *s, size_t bytes) -> hipError_t {
-    if (fromHost)
-      return hipMemcpy(dst, s, bytes, kind);
-    return hipMemcpyAsync(dst, s, bytes, kind, stream);
-  };
-  auto copySeed2D = [&](void *dst, size_t dpitch, const void *s, size_t spitch,
-                        size_t width, size_t height) -> hipError_t {
-    if (fromHost)
-      return hipMemcpy2D(dst, dpitch, s, spitch, width, height, kind);
-    return hipMemcpy2DAsync(dst, dpitch, s, spitch, width, height, kind,
-                            stream);
+    return hipMemcpyAsync(dst, s, bytes, hipMemcpyDeviceToDevice, stream);
   };
 
   if (broadcastRows && broadcastCols) {
-    err = copySeed(output, src, elemSize);
+    err = copySeed(output, C, elemSize);
     if (err != hipSuccess) {
       fprintf(stderr, "wrap_gemm: writeBroadcastC scalar copy failed (%s)\n",
               hipGetErrorString(err));
@@ -390,7 +241,7 @@ static int writeBroadcastC(RuntimeState *state, const void *C, void *output,
   }
   if (broadcastRows) {
     const size_t rowBytes = static_cast<size_t>(N) * elemSize;
-    err = copySeed(output, src, rowBytes);
+    err = copySeed(output, C, rowBytes);
     if (err != hipSuccess) {
       fprintf(stderr, "wrap_gemm: writeBroadcastC row copy failed (%s)\n",
               hipGetErrorString(err));
@@ -400,8 +251,9 @@ static int writeBroadcastC(RuntimeState *state, const void *C, void *output,
   }
   if (broadcastCols) {
     const size_t pitch = static_cast<size_t>(N) * elemSize;
-    err = copySeed2D(output, pitch, src, elemSize, elemSize,
-                     static_cast<size_t>(M));
+    err = hipMemcpy2DAsync(output, pitch, C, elemSize, elemSize,
+                           static_cast<size_t>(M), hipMemcpyDeviceToDevice,
+                           stream);
     if (err != hipSuccess) {
       fprintf(stderr, "wrap_gemm: writeBroadcastC col copy failed (%s)\n",
               hipGetErrorString(err));
@@ -410,7 +262,7 @@ static int writeBroadcastC(RuntimeState *state, const void *C, void *output,
     return expandFilledColumns(output, elemSize, M, N, stream);
   }
 
-  err = copySeed(output, src, outBytes);
+  err = copySeed(output, C, outBytes);
   if (err != hipSuccess) {
     fprintf(stderr, "wrap_gemm: writeBroadcastC full copy failed (%s)\n",
             hipGetErrorString(err));
@@ -715,9 +567,10 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
 
   // Determine if C needs broadcasting.
   // When C is [M, N], hipblasLtMatmul handles it directly (single-pass).
-  // Otherwise, write beta*C into output first, then let hipblasLtMatmul
-  // accumulate with effective_beta=1.0 on top of it.
-  bool needsBroadcast = C && !(cDim0 == M && cDim1 == N) && !use_bias_epilogue;
+  // Otherwise, write broadcast(C) into output first, then let hipblasLtMatmul
+  // apply beta to it in place. beta == 0 ignores C, as when C is absent.
+  bool needsBroadcast =
+      C && beta != 0.0f && !(cDim0 == M && cDim1 == N) && !use_bias_epilogue;
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_gemm: M=%lld, N=%lld, K=%lld, transA=%lld, "
                     "transB=%lld, alpha=%f, beta=%f, typeCode=%lld, C=%p, "
@@ -726,32 +579,33 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
                     (long long)transB, alpha, beta, (long long)typeCode, C,
                     (long long)cDim0, (long long)cDim1, (int)needsBroadcast);
 
-  // Pre-broadcast: write beta * C_broadcast into output before matmul.
+  // Pre-broadcast: write C_broadcast into output before matmul.
   if (needsBroadcast) {
     int bc_result =
-        writeBroadcastC(state, C, output, M, N, cDim0, cDim1, beta, typeCode);
+        writeBroadcastC(state, C, output, M, N, cDim0, cDim1, typeCode);
     if (bc_result != 0)
       return bc_result;
   }
 
   // Select effective beta and C pointer for hipblasLtMatmul.
-  //   C absent:     beta=0, C_ptr=output (placeholder, content irrelevant)
+  //   C absent or beta == 0 with a broadcast C:
+  //                 beta=0, C_ptr=output (placeholder, content irrelevant)
   //   C is [M,N]:   beta=beta, C_ptr=C  (direct single-pass, no broadcast)
-  //   C broadcast:  beta=1.0, C_ptr=output (already holds beta*C_broadcast)
+  //   C broadcast:  beta=beta, C_ptr=output (already holds C_broadcast)
   float effective_beta;
   const void *effective_C;
   if (use_bias_epilogue) {
     // Bias applied in the matmul epilogue; D written fresh (no C read).
     effective_beta = 0.0f;
     effective_C = output;
-  } else if (!C) {
+  } else if (!C || (beta == 0.0f && !(cDim0 == M && cDim1 == N))) {
     effective_beta = 0.0f;
     effective_C = output;
   } else if (!needsBroadcast) {
     effective_beta = beta;
     effective_C = C;
   } else {
-    effective_beta = 1.0f;
+    effective_beta = beta;
     effective_C = output;
   }
 
