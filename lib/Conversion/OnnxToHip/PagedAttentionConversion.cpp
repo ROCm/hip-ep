@@ -40,9 +40,11 @@ PagedAttentionToHip::matchAndRewrite(mlir::Operation *op,
 
   mlir::Location loc = op->getLoc();
   size_t numOps = op->getNumOperands();
-  if (numOps < 8 || numOps > 10)
-    return rewriter.notifyMatchFailure(op,
-                                       "PagedAttention expects 8-10 operands");
+  // Inputs 0-9 are the base contract. 10-15 are optional features this
+  // lowering does not compute. 16 is attention_metadata, accepted and ignored.
+  if (numOps < 8 || numOps > 17)
+    return rewriter.notifyMatchFailure(
+        op, "PagedAttention expects between 8 and 17 operands");
 
   auto getOptionalOperand = [&](size_t idx) -> mlir::Value {
     if (idx >= numOps)
@@ -53,9 +55,18 @@ PagedAttentionToHip::matchAndRewrite(mlir::Operation *op,
     return val;
   };
 
+  for (size_t idx = 10; idx < numOps && idx < 16; ++idx) {
+    if (getOptionalOperand(idx))
+      return rewriter.notifyMatchFailure(
+          op, "PagedAttention optional input is not supported");
+  }
+
   mlir::Value query = op->getOperand(0);
   mlir::Value key = getOptionalOperand(1);
   mlir::Value value = getOptionalOperand(2);
+  if (!key || !value)
+    return rewriter.notifyMatchFailure(
+        op, "PagedAttention requires separate key and value");
   mlir::Value keyCache = op->getOperand(3);
   mlir::Value valueCache = op->getOperand(4);
   mlir::Value cumSeq = op->getOperand(5);
@@ -63,6 +74,10 @@ PagedAttentionToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value blockTable = op->getOperand(7);
   mlir::Value cosCache = numOps > 8 ? getOptionalOperand(8) : nullptr;
   mlir::Value sinCache = numOps > 9 ? getOptionalOperand(9) : nullptr;
+  // Kept as an operand so the graph input stays live. The kernel does not read
+  // it.
+  mlir::Value attentionMetadata =
+      numOps > 16 ? getOptionalOperand(16) : nullptr;
 
   size_t numResults = op->getNumResults();
   if (numResults < 1 || numResults > 3)
@@ -120,16 +135,25 @@ PagedAttentionToHip::matchAndRewrite(mlir::Operation *op,
   auto rotaryInterleavedAttr = getI64Attr("rotary_interleaved", 0);
   auto localWindowSizeAttr = getI64Attr("local_window_size", -1);
   auto softcapAttr = getFloatAttr("softcap", 0.0f);
+  auto isCausalAttr = getI64Attr("is_causal", 1);
+  if (doRotaryAttr.getInt() != 0 || localWindowSizeAttr.getInt() != -1 ||
+      softcapAttr.getValueAsDouble() != 0.0 || isCausalAttr.getInt() != 1)
+    return rewriter.notifyMatchFailure(
+        op, "PagedAttention variant is not supported");
+  if (kvNumHeadsAttr.getInt() <= 0 ||
+      numHeadsAttr.getInt() % kvNumHeadsAttr.getInt() != 0)
+    return rewriter.notifyMatchFailure(
+        op, "num_heads must be divisible by kv_num_heads");
 
   mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, query);
   mlir::Value keyCacheOutInit = nullptr;
   mlir::Value valueCacheOutInit = nullptr;
+  // present cache aliases the past cache. A fresh tensor would be a second
+  // buffer.
   if (keyCacheOutType)
-    keyCacheOutInit =
-        createEmptyTensor(rewriter, loc, keyCacheOutType, keyCache);
+    keyCacheOutInit = keyCache;
   if (valueCacheOutType)
-    valueCacheOutInit =
-        createEmptyTensor(rewriter, loc, valueCacheOutType, valueCache);
+    valueCacheOutInit = valueCache;
 
   mlir::SmallVector<mlir::Type> resultTypes;
   resultTypes.push_back(outputType);
@@ -154,6 +178,8 @@ PagedAttentionToHip::matchAndRewrite(mlir::Operation *op,
     operands.push_back(cosCache);
   if (sinCache)
     operands.push_back(sinCache);
+  if (attentionMetadata)
+    operands.push_back(attentionMetadata);
   operands.push_back(outputInit);
   if (keyCacheOutInit)
     operands.push_back(keyCacheOutInit);
@@ -183,6 +209,7 @@ PagedAttentionToHip::matchAndRewrite(mlir::Operation *op,
   segmentSizes.push_back(1); // block_table
   segmentSizes.push_back(cosCache ? 1 : 0);
   segmentSizes.push_back(sinCache ? 1 : 0);
+  segmentSizes.push_back(attentionMetadata ? 1 : 0);
   segmentSizes.push_back(1); // output
   segmentSizes.push_back(keyCacheOutInit ? 1 : 0);
   segmentSizes.push_back(valueCacheOutInit ? 1 : 0);

@@ -402,6 +402,28 @@ int wrap_causal_conv_with_state(
   return 0;
 }
 
+int wrap_varlen_causal_conv_with_state(
+    RuntimeState *state, const void *input, const void *weight,
+    const void *cumulative_sequence_length, const void *bias,
+    const void *initial_state, void *output, void *present_state,
+    int64_t total_tokens, int64_t channels, int64_t batch, int64_t kernel_size,
+    int64_t dilation, int64_t state_len, int64_t activation,
+    int64_t element_size_bytes) {
+  if (!state || !input || !weight || !cumulative_sequence_length ||
+      !initial_state || !output || !present_state)
+    return -1;
+  (void)bias;
+  (void)total_tokens;
+  (void)channels;
+  (void)batch;
+  (void)kernel_size;
+  (void)dilation;
+  (void)state_len;
+  (void)activation;
+  (void)element_size_bytes;
+  return 0;
+}
+
 int wrap_hipblasLtGemm(void *handle, void *stream, int64_t m, int64_t n,
                        int64_t k, const void *alpha, const void *A,
                        const void *B, const void *beta, void *C) {
@@ -694,7 +716,14 @@ int wrap_paged_attention(RuntimeState *state, void *query, void *key,
                          int64_t kv_num_heads, int64_t do_rotary,
                          int64_t rotary_interleaved, int64_t local_window_size,
                          float scale, float softcap, int64_t num_tokens,
-                         int64_t query_dim1, int64_t element_size_bytes) {
+                         int64_t query_dim1, int64_t element_size_bytes,
+                         int64_t batch, int64_t num_blocks, int64_t block_size,
+                         int64_t head_size, int64_t max_blocks) {
+  (void)batch;
+  (void)num_blocks;
+  (void)block_size;
+  (void)head_size;
+  (void)max_blocks;
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_paged_attention\n");
     return -1;
@@ -772,6 +801,28 @@ int wrap_linear_attention(RuntimeState *state, const void *query,
              past_state ? "yes" : "null", decay ? "yes" : "null",
              beta ? "yes" : "null");
 
+  return 0;
+}
+
+int wrap_varlen_gated_delta_net(
+    RuntimeState *state, const void *qkv, const float *decay, const float *beta,
+    const void *cumulative_sequence_length, const float *initial_state,
+    const float *a_log, const float *dt_bias, void *output, float *final_state,
+    int64_t total_tokens, int64_t batch, int64_t num_heads_qk,
+    int64_t num_heads_v, int64_t head_size_qk, int64_t head_size_v, float scale,
+    int64_t element_size_bytes) {
+  if (!state || !qkv || !decay || !beta || !cumulative_sequence_length ||
+      !initial_state || !a_log || !dt_bias || !output || !final_state) {
+    fprintf(stderr,
+            "Invalid required argument in wrap_varlen_gated_delta_net\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_varlen_gated_delta_net(T=%lld, B=%lld, Hqk=%lld, "
+             "Hv=%lld, dk=%lld, dv=%lld, scale=%f, elem=%lld)\n",
+             (long long)total_tokens, (long long)batch, (long long)num_heads_qk,
+             (long long)num_heads_v, (long long)head_size_qk,
+             (long long)head_size_v, (double)scale,
+             (long long)element_size_bytes);
   return 0;
 }
 

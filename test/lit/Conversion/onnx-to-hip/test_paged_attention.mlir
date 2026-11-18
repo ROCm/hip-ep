@@ -43,6 +43,43 @@ module {
     return %0 : tensor<4x128xf16>
   }
 
+  func.func @test_attention_metadata_and_cache_outs(
+      %query: tensor<?x128xf16>,
+      %key: tensor<?x32xf16>,
+      %value: tensor<?x32xf16>,
+      %key_cache: tensor<8x16x2x16xf16>,
+      %value_cache: tensor<8x16x2x16xf16>,
+      %cum_seq: tensor<?xi32>,
+      %past_seqlens: tensor<?xi32>,
+      %block_table: tensor<?x8xi32>,
+      %metadata: tensor<3xi32>)
+      -> (tensor<?x128xf16>, tensor<8x16x2x16xf16>, tensor<8x16x2x16xf16>) {
+
+    %none = "onnx.NoValue"() {value} : () -> none
+
+    // CHECK-LABEL: func.func @test_attention_metadata_and_cache_outs
+    %0:3 = "onnx.Custom"(%query, %key, %value, %key_cache, %value_cache,
+                          %cum_seq, %past_seqlens, %block_table,
+                          %none, %none, %none, %none, %none, %none, %none,
+                          %none, %metadata)
+        <{function_name = "PagedAttention"}>
+        {domain_name = "com.microsoft",
+         num_heads = 4 : si64,
+         kv_num_heads = 2 : si64}
+        : (tensor<?x128xf16>, tensor<?x32xf16>, tensor<?x32xf16>,
+           tensor<8x16x2x16xf16>, tensor<8x16x2x16xf16>, tensor<?xi32>,
+           tensor<?xi32>, tensor<?x8xi32>, none, none, none, none, none,
+           none, none, none, tensor<3xi32>)
+        -> (tensor<?x128xf16>, tensor<8x16x2x16xf16>, tensor<8x16x2x16xf16>)
+
+    // The metadata operand is an input, so the DPS inits start after it.
+    // CHECK-NOT: onnx.Custom
+    // CHECK: hip.paged_attention(%{{.*}}) ins(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}} : {{.*}}tensor<3xi32>) outs(
+
+    return %0#0, %0#1, %0#2
+        : tensor<?x128xf16>, tensor<8x16x2x16xf16>, tensor<8x16x2x16xf16>
+  }
+
   func.func @test_dynamic_packed(
       %query: tensor<?x128xf16>,
       %key_cache: tensor<8x16x2x16xf16>,
@@ -65,10 +102,9 @@ module {
            tensor<1x8xi32>)
         -> tensor<?x128xf16>
 
-    // CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
-    // CHECK: tensor.dim {{.*}} : tensor<?x128xf16>
-    // CHECK: tensor.empty({{.*}}) : tensor<?x128xf16>
-    // CHECK: hip.paged_attention
+    // Separate key and value are required. The node stays unconverted.
+    // CHECK: onnx.Custom
+    // CHECK-NOT: hip.paged_attention
 
     return %0 : tensor<?x128xf16>
   }

@@ -78,14 +78,34 @@ struct PagedAttentionOpLowering
     Value elemSizeBytes =
         createI64Const(queryTy.getElementType().getIntOrFloatBitWidth() / 8);
 
+    auto dimAt = [&](MemRefType type, MemRefDescriptor descriptor,
+                     unsigned index) -> Value {
+      if (type.isDynamicDim(index))
+        return descriptor.size(rewriter, loc, index);
+      return createI64Const(type.getDimSize(index));
+    };
+    auto cacheTy = cast<MemRefType>(op.getKeyCache().getType());
+    MemRefDescriptor cacheDesc(adaptor.getKeyCache());
+    auto pastTy = cast<MemRefType>(op.getPastSeqlens().getType());
+    MemRefDescriptor pastDesc(adaptor.getPastSeqlens());
+    auto tableTy = cast<MemRefType>(op.getBlockTable().getType());
+    MemRefDescriptor tableDesc(adaptor.getBlockTable());
+    Value batch = dimAt(pastTy, pastDesc, 0);
+    Value numBlocks = dimAt(cacheTy, cacheDesc, 0);
+    Value blockSize = dimAt(cacheTy, cacheDesc, 1);
+    Value headSize = dimAt(cacheTy, cacheDesc, 3);
+    Value maxBlocks = dimAt(tableTy, tableDesc, 1);
+
     SmallVector<Type, 32> paramTypes = {
         ptrType, // state
-        ptrType, ptrType, ptrType, ptrType, ptrType,
-        ptrType, ptrType, ptrType, ptrType, ptrType, // query..sin (10)
+        ptrType, ptrType, ptrType, ptrType, ptrType, ptrType,
+        ptrType, ptrType, ptrType, ptrType,          // query..sin (10)
         ptrType, ptrType, ptrType,                   // outputs
         i64Type, i64Type, i64Type, i64Type, i64Type, // attrs i64
         f32Type, f32Type,                            // scale, softcap
-        i64Type, i64Type, i64Type                    // shape
+        i64Type, i64Type, i64Type, // num_tokens, query_dim1, elem
+        i64Type, i64Type, i64Type, i64Type, i64Type // batch, blocks, block,
+                                                    // head, cols
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
@@ -106,6 +126,9 @@ struct PagedAttentionOpLowering
         localWindowSize, scale,
         softcap,         numTokens,
         queryDim1,       elemSizeBytes,
+        batch,           numBlocks,
+        blockSize,       headSize,
+        maxBlocks,
     };
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);

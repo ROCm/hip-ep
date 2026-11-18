@@ -79,9 +79,8 @@ GatedDeltaNetToHip::matchAndRewrite(mlir::Operation *op,
   if (getOptionalOperand(1) || getOptionalOperand(2)) {
     return rewriter.notifyMatchFailure(op, "only packed QKV is supported");
   }
-  if (getOptionalOperand(3)) {
-    return rewriter.notifyMatchFailure(op, "cu_seqlens is not supported");
-  }
+  mlir::Value cuSeqlens = getOptionalOperand(3);
+  const bool varlen = static_cast<bool>(cuSeqlens);
   if (getOptionalOperand(9) || getOptionalOperand(10)) {
     return rewriter.notifyMatchFailure(
         op, "capture_count / state_update_active are not supported");
@@ -100,10 +99,22 @@ GatedDeltaNetToHip::matchAndRewrite(mlir::Operation *op,
     return rewriter.notifyMatchFailure(op, "GatedDeltaNet expects 2 results");
   }
 
+  // Ragged packing carries the request boundaries in cu_seqlens and a single
+  // token axis; the uniform form keeps an explicit [B, L] pair.
+  const int64_t qkvRank = varlen ? 2 : 3;
   auto qkvType = mlir::dyn_cast<mlir::RankedTensorType>(qkv.getType());
-  if (!qkvType || qkvType.getRank() != 3 || qkvType.isDynamicDim(2)) {
+  if (!qkvType || qkvType.getRank() != qkvRank ||
+      qkvType.isDynamicDim(qkvRank - 1)) {
     return rewriter.notifyMatchFailure(
-        op, "query must be packed rank 3 with static last dim");
+        op, varlen ? "ragged query must be packed rank 2 with static last dim"
+                   : "query must be packed rank 3 with static last dim");
+  }
+  if (varlen) {
+    auto cuType = mlir::dyn_cast<mlir::RankedTensorType>(cuSeqlens.getType());
+    if (!cuType || cuType.getRank() != 1 ||
+        !cuType.getElementType().isInteger(32)) {
+      return rewriter.notifyMatchFailure(op, "cu_seqlens must be i32 rank 1");
+    }
   }
   mlir::Type elem = qkvType.getElementType();
   if (!elem.isF16() && !elem.isF32()) {
@@ -121,7 +132,7 @@ GatedDeltaNetToHip::matchAndRewrite(mlir::Operation *op,
                                        "initial_state dims 1-3 must be static");
   }
 
-  const int64_t packed = qkvType.getDimSize(2);
+  const int64_t packed = qkvType.getDimSize(qkvRank - 1);
   const int64_t numHeadsV = stateType.getDimSize(1);
   const int64_t headSizeV = stateType.getDimSize(2);
   const int64_t headSizeQk = stateType.getDimSize(3);
@@ -157,17 +168,27 @@ GatedDeltaNetToHip::matchAndRewrite(mlir::Operation *op,
   };
   constexpr int64_t kAny = mlir::ShapedType::kDynamic;
   mlir::Type f32 = rewriter.getF32Type();
-  const int64_t batch = qkvType.getDimSize(0);
-  const int64_t seq = qkvType.getDimSize(1);
+  const int64_t batch = varlen ? kAny : qkvType.getDimSize(0);
+  const int64_t seq = qkvType.getDimSize(varlen ? 0 : 1);
   if (!matches(initialState, f32, {batch, kAny, kAny, kAny})) {
     return rewriter.notifyMatchFailure(op,
                                        "initial_state batch mismatches query");
   }
-  if (!matches(decay, f32, {batch, seq, numHeadsV})) {
-    return rewriter.notifyMatchFailure(op, "decay must be f32 [B, L, Hv]");
+  llvm::SmallVector<int64_t, 3> gateShape;
+  if (!varlen) {
+    gateShape.push_back(batch);
   }
-  if (!matches(beta, f32, {batch, seq, numHeadsV})) {
-    return rewriter.notifyMatchFailure(op, "beta must be f32 [B, L, Hv]");
+  gateShape.push_back(seq);
+  gateShape.push_back(numHeadsV);
+  if (!matches(decay, f32, gateShape)) {
+    return rewriter.notifyMatchFailure(op,
+                                       varlen ? "decay must be f32 [T, Hv]"
+                                              : "decay must be f32 [B, L, Hv]");
+  }
+  if (!matches(beta, f32, gateShape)) {
+    return rewriter.notifyMatchFailure(op, varlen
+                                               ? "beta must be f32 [T, Hv]"
+                                               : "beta must be f32 [B, L, Hv]");
   }
   if (!matches(aLog, f32, {numHeadsV})) {
     return rewriter.notifyMatchFailure(op, "a_log must be f32 [Hv]");
@@ -176,13 +197,21 @@ GatedDeltaNetToHip::matchAndRewrite(mlir::Operation *op,
     return rewriter.notifyMatchFailure(op, "dt_bias must be f32 [Hv]");
   }
 
+  llvm::SmallVector<int64_t, 4> outputShape;
+  if (!varlen) {
+    outputShape.push_back(batch);
+  }
+  outputShape.push_back(seq);
+  outputShape.push_back(numHeadsV);
+  outputShape.push_back(headSizeV);
   auto outputType =
       mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  if (!outputType ||
-      !matches(op->getResult(0), elem, {batch, seq, numHeadsV, headSizeV}) ||
-      outputType.isDynamicDim(2) || outputType.isDynamicDim(3)) {
+  if (!outputType || !matches(op->getResult(0), elem, outputShape) ||
+      outputType.isDynamicDim(outputType.getRank() - 1) ||
+      outputType.isDynamicDim(outputType.getRank() - 2)) {
     return rewriter.notifyMatchFailure(
-        op, "output must be [B, L, Hv, dv] with static Hv, dv");
+        op, "output must be [B, L, Hv, dv] ([T, Hv, dv] when ragged) with "
+            "static Hv, dv");
   }
   auto finalType =
       mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(1).getType());
@@ -205,9 +234,15 @@ GatedDeltaNetToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value finalInit =
       createEmptyTensor(rewriter, loc, finalType, initialState);
 
-  auto state = mlir::OperationState(loc, "hip.gated_delta_net");
-  state.addOperands({*ctxOrFailure, qkv, decay, beta, initialState, aLog,
-                     dtBias, outputInit, finalInit});
+  auto state = mlir::OperationState(loc, varlen ? "hip.varlen_gated_delta_net"
+                                                : "hip.gated_delta_net");
+  if (varlen) {
+    state.addOperands({*ctxOrFailure, qkv, decay, beta, cuSeqlens, initialState,
+                       aLog, dtBias, outputInit, finalInit});
+  } else {
+    state.addOperands({*ctxOrFailure, qkv, decay, beta, initialState, aLog,
+                       dtBias, outputInit, finalInit});
+  }
   state.addTypes({outputType, finalType});
   state.addAttribute("scale", rewriter.getF32FloatAttr(scale));
   mlir::Operation *hipOp = rewriter.create(state);
