@@ -8,7 +8,8 @@
 K is supplied as a constant initializer so the ONNX shape-inference resolves
 the output extent (k) statically -- the runtime still reads k from the K
 buffer at run time (real/top_k.cpp does a D2H copy of k), so the GPU kernel is
-exercised. `largest` and `sorted` are both covered.
+exercised. The runtime-K cases feed K as a graph input, so the output extent
+is sized from K's value at run time. `largest` and `sorted` are both covered.
 
 Outputs are compared bit-exact against the ORT CPU reference (atol=0).
 K above 256 runs on the GPU for full contiguous last-axis sorts and on the host
@@ -53,6 +54,23 @@ def _make_topk_model(
     return make_model_from_nodes([node], [X], [values, indices], initializers=[k_init])
 
 
+def _make_topk_runtime_k_model(x_shape: list[int], axis: int, largest: int):
+    out_shape: list[int | str] = list(x_shape)
+    out_shape[axis] = "k"
+    X = helper.make_tensor_value_info("x", np_to_onnx_type(np.float32), x_shape)
+    K = helper.make_tensor_value_info("k", np_to_onnx_type(np.int64), [1])
+    values = helper.make_tensor_value_info(
+        "values", np_to_onnx_type(np.float32), out_shape
+    )
+    indices = helper.make_tensor_value_info(
+        "indices", np_to_onnx_type(np.int64), out_shape
+    )
+    node = helper.make_node(
+        "TopK", ["x", "k"], ["values", "indices"], axis=axis, largest=largest
+    )
+    return make_model_from_nodes([node], [X, K], [values, indices])
+
+
 def _distinct_rows(rng, rows: int, cols: int) -> np.ndarray:
     """Each row is a shuffled arange -> globally distinct within a row, so
     TopK has no ties to break."""
@@ -74,6 +92,25 @@ class TestTopK:
         rng = np.random.default_rng(601)
         x = _distinct_rows(rng, x_shape[0], x_shape[1])
         actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0)
+
+    @pytest.mark.parametrize("largest", [1, 0])
+    @pytest.mark.parametrize("k", [1, 5, 300])
+    def test_topk_runtime_k(self, model_runner, k, largest):
+        """K is a graph input, so the output extent is known only at run time.
+
+        K = 300 on a non-last axis takes the host path.
+        """
+        axis = 0 if k > 256 else 1
+        x_shape = [400, 3] if axis == 0 else [3, 40]
+        model = _make_topk_runtime_k_model(x_shape, axis=axis, largest=largest)
+        rng = np.random.default_rng(606)
+        x = _distinct_rows(rng, x_shape[1 - axis], x_shape[axis])
+        if axis == 0:
+            x = np.ascontiguousarray(x.T)
+        actual, expected = model_runner.run_sample(
+            model, [x, np.array([k], dtype=np.int64)]
+        )
         compare_outputs(actual, expected, atol=0)
 
     def test_topk_large_full_sort_f16(self, model_runner):

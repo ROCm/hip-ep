@@ -10,56 +10,40 @@ namespace mlir {
 namespace hip {
 namespace {
 
+// The result extent along `axis` is the value of K, so it must not be derived
+// from K's shape. `k` is rank 0 or rank 1; ONNX requires a rank-1 K to hold one
+// element.
 static mlir::Value getTopKAxisExtent(mlir::PatternRewriter &rewriter,
                                      mlir::Location loc, mlir::Value ctx,
-                                     mlir::Value k, int64_t axis,
-                                     mlir::RankedTensorType resultType) {
-  if (!resultType.isDynamicDim(axis)) {
-    return mlir::arith::ConstantIndexOp::create(rewriter, loc,
-                                                resultType.getDimSize(axis));
-  }
-
+                                     mlir::Value k) {
   auto kType = mlir::cast<mlir::RankedTensorType>(k.getType());
+  mlir::Value kScalar;
   if (kType.getRank() == 0) {
-    mlir::Value kScalar = readbackScalarToHost(rewriter, loc, ctx, k);
-    return mlir::arith::IndexCastOp::create(rewriter, loc,
-                                            rewriter.getIndexType(), kScalar);
+    kScalar = readbackScalarToHost(rewriter, loc, ctx, k);
+  } else if (kType.hasStaticShape() && kType.getDimSize(0) == 1) {
+    mlir::Value collapsed = mlir::tensor::CollapseShapeOp::create(
+        rewriter, loc, k, mlir::ReassociationIndices{{0}});
+    kScalar = readbackScalarToHost(rewriter, loc, ctx, collapsed);
+  } else {
+    kScalar = readbackShapeEntryToHost(rewriter, loc, ctx, k, 0);
   }
-
-  if (kType.getRank() == 1) {
-    if (kType.hasStaticShape() && kType.getDimSize(0) == 1) {
-      mlir::Value collapsed = mlir::tensor::CollapseShapeOp::create(
-          rewriter, loc, k, mlir::ReassociationIndices{{0}});
-      mlir::Value kScalar = readbackScalarToHost(rewriter, loc, ctx, collapsed);
-      return mlir::arith::IndexCastOp::create(rewriter, loc,
-                                              rewriter.getIndexType(), kScalar);
-    }
-    mlir::Value c0 = rewriter.create<mlir::arith::ConstantIndexOp>(loc, 0);
-    return mlir::tensor::DimOp::create(rewriter, loc, k, c0);
-  }
-
-  return mlir::Value{};
+  return mlir::arith::IndexCastOp::create(rewriter, loc,
+                                          rewriter.getIndexType(), kScalar);
 }
 
 static mlir::Value createTopKEmpty(mlir::PatternRewriter &rewriter,
                                    mlir::Location loc,
                                    mlir::RankedTensorType resultType,
-                                   mlir::Value source, mlir::Value ctx,
-                                   mlir::Value k, int64_t axis) {
+                                   mlir::Value source, mlir::Value axisExtent,
+                                   int64_t axis) {
   llvm::SmallVector<mlir::Value> dynSizes;
   for (int64_t i : llvm::seq<int64_t>(0, resultType.getRank())) {
     if (!resultType.isDynamicDim(i))
       continue;
-    if (i == axis) {
-      mlir::Value axisExtent =
-          getTopKAxisExtent(rewriter, loc, ctx, k, axis, resultType);
-      if (!axisExtent)
-        return mlir::Value{};
+    if (i == axis)
       dynSizes.push_back(axisExtent);
-    } else {
-      mlir::Value dim = mlir::tensor::DimOp::create(rewriter, loc, source, i);
-      dynSizes.push_back(dim);
-    }
+    else
+      dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc, source, i));
   }
 
   return mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
@@ -141,16 +125,23 @@ TopKToHip::matchAndRewrite(mlir::Operation *op,
   if (!valuesType || !indicesType)
     return rewriter.notifyMatchFailure(op,
                                        "TopK results must be ranked tensors");
+  if (axis < 0 || axis >= xType.getRank() ||
+      valuesType.getRank() != xType.getRank() ||
+      indicesType.getRank() != xType.getRank())
+    return rewriter.notifyMatchFailure(op, "TopK result rank or axis mismatch");
+  auto kType = mlir::dyn_cast<mlir::RankedTensorType>(k.getType());
+  if (!kType || kType.getRank() > 1)
+    return rewriter.notifyMatchFailure(op,
+                                       "K must be a rank-0 or rank-1 tensor");
+
+  mlir::Value axisExtent;
+  if (valuesType.isDynamicDim(axis) || indicesType.isDynamicDim(axis))
+    axisExtent = getTopKAxisExtent(rewriter, loc, context, k);
 
   mlir::Value valuesInit =
-      createTopKEmpty(rewriter, loc, valuesType, x, context, k, axis);
-  if (!valuesInit)
-    return rewriter.notifyMatchFailure(op, "failed to build values init");
-
+      createTopKEmpty(rewriter, loc, valuesType, x, axisExtent, axis);
   mlir::Value indicesInit =
-      createTopKEmpty(rewriter, loc, indicesType, x, context, k, axis);
-  if (!indicesInit)
-    return rewriter.notifyMatchFailure(op, "failed to build indices init");
+      createTopKEmpty(rewriter, loc, indicesType, x, axisExtent, axis);
 
   // hip.top_k is multi-result and does not use the single-result inference
   // family, so pass explicit result types.

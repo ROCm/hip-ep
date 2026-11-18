@@ -44,12 +44,35 @@ module {
 
   // CHECK-LABEL: func.func @topk_dynamic
   // CHECK-SAME: (%[[CTX3:.*]]: !hip.context, %[[X3:.*]]: tensor<?x?xf32>, %[[K3:.*]]: tensor<1xi64>)
+  // Both results share one readback of K.
   // CHECK: %[[C0:.*]] = arith.constant 0 : index
-  // CHECK: %{{.*}} = tensor.dim %[[X3]], %[[C0]] : tensor<?x?xf32>
-  // CHECK: hip.readback_scalar(%[[CTX3]], %{{.*}} : tensor<1xi64>) -> i64
-  // CHECK: tensor.empty({{.*}}, {{.*}}) : tensor<?x?xf32>
-  // CHECK: tensor.empty({{.*}}, {{.*}}) : tensor<?x?xi64>
+  // CHECK: %[[KV:.*]] = hip.readback_scalar(%[[CTX3]], %{{.*}} : tensor<1xi64>) -> i64
+  // CHECK: %[[KI:.*]] = arith.index_cast %[[KV]] : i64 to index
+  // CHECK-NOT: hip.readback_scalar
+  // CHECK: %[[D0:.*]] = tensor.dim %[[X3]], %[[C0]] : tensor<?x?xf32>
+  // CHECK: tensor.empty(%[[D0]], %[[KI]]) : tensor<?x?xf32>
+  // CHECK-NOT: hip.readback_scalar
+  // CHECK: tensor.empty({{.*}}, %[[KI]]) : tensor<?x?xi64>
   // CHECK: hip.top_k(%[[CTX3]]) ins(%[[X3]], %[[K3]] : tensor<?x?xf32>, tensor<1xi64>) outs({{.*}}, {{.*}} : tensor<?x?xf32>, tensor<?x?xi64>) {axis = 1 : i64} : tensor<?x?xf32>, tensor<?x?xi64>
+
+  // A dynamically sized K still holds one element. The axis extent is its
+  // value, not its length.
+  func.func @topk_dynamic_k_length(
+      %x: tensor<2x9xf32>, %k: tensor<?xi64>) -> (tensor<2x?xf32>, tensor<2x?xi64>) {
+    %values, %indices = "onnx.TopK"(%x, %k) {axis = 1 : si64}
+        : (tensor<2x9xf32>, tensor<?xi64>) -> (tensor<2x?xf32>, tensor<2x?xi64>)
+    return %values, %indices : tensor<2x?xf32>, tensor<2x?xi64>
+  }
+
+  // CHECK-LABEL: func.func @topk_dynamic_k_length
+  // CHECK-SAME: (%[[CTX4:.*]]: !hip.context, %[[X4:.*]]: tensor<2x9xf32>, %[[K4:.*]]: tensor<?xi64>)
+  // CHECK-NOT: tensor.dim %[[K4]]
+  // CHECK: %[[KV4:.*]] = hip.readback_scalar(%[[CTX4]], %{{.*}} : tensor<i64>) -> i64
+  // CHECK: %[[KI4:.*]] = arith.index_cast %[[KV4]] : i64 to index
+  // CHECK-NOT: tensor.dim %[[K4]]
+  // CHECK: tensor.empty(%[[KI4]]) : tensor<2x?xf32>
+  // CHECK: tensor.empty(%[[KI4]]) : tensor<2x?xi64>
+  // CHECK: hip.top_k(%[[CTX4]]) ins(%[[X4]], %[[K4]] : tensor<2x9xf32>, tensor<?xi64>)
 
   // largest/sorted arrive as si64 from the ONNX importer; 0 must reach hip.top_k.
   func.func @topk_smallest_unsorted(
