@@ -1364,6 +1364,8 @@ HIP_KERNEL_API int hip_mha_flash_prefill(
  * process-wide map (matmul_nbits-style), and reuses it on later calls.
  * Env overrides skip autotune: HIPDNN_GQA_DECODE_SCALAR / _WMMA (impl),
  * HIPDNN_GQA_DECODE_SPLITS=N (count), HIPDNN_GQA_DECODE_NOAUTOTUNE=1 (fixed).
+ * Each override is read once, on first use in the process, and then stays
+ * fixed; changing it mid-process has no effect.
  *
  * seqlens_k: optional device pointer [B] int32. When non-null, total_seq
  * = seqlens_k[b]+1 is read on-device (no host sync).

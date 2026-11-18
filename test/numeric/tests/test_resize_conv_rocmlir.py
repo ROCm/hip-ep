@@ -5,7 +5,7 @@
 
 """Nearest integer upsample feeding a convolution, with rocMLIR forced on.
 
---hip-fuse-rocmlir absorbs the resize into the rocMLIR convolution as an
+hip-fuse-rocmlir-anchor absorbs the resize into the rocMLIR convolution as an
 expand_shape -> hip.expand -> collapse_shape view, so no resize kernel runs.
 The reference is ONNX Runtime's CPU EP running the unfused Resize then Conv.
 The 3D case builds a rank-8 view and the 2D case a rank-6 view.
@@ -120,7 +120,7 @@ def _assert_resize_absorbed(dump_dir: Path) -> None:
             "HIPDNN_EP_IR_DUMP_PATH produced no IR, so the rocMLIR rewrite was not confirmed"
         )
     ir = "\n".join(path.read_text(encoding="utf-8", errors="replace") for path in dumps)
-    # The tail dump starts after fuse-rocmlir. An absorbed upsample is a
+    # The tail dump starts after rocMLIR fusion. An absorbed upsample is a
     # hip.rocmlir dispatch (later wrap_rocmlir) and no resize op.
     if "hip.rocmlir" not in ir and "wrap_rocmlir" not in ir:
         pytest.fail(

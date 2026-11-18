@@ -27,6 +27,43 @@ static constexpr int GQA_THREADS = 256;
 static constexpr int WAVE_SIZE = HIPDNN_WAVE_SIZE;
 static constexpr float LOG2E = 1.4426950408889634f;
 
+// Environment overrides are read once and latched: a getenv per decode call
+// would serialize every token through the CRT environment lock.
+static int readEnvInt(const char* name) {
+  const char* e = getenv(name);
+  return e != nullptr ? atoi(e) : 0;
+}
+
+static bool envGqaDecodeScalar() {
+  static const bool enabled = readEnvInt("HIPDNN_GQA_DECODE_SCALAR") != 0;
+  return enabled;
+}
+
+static bool envGqaDecodeWmma() {
+  static const bool enabled = readEnvInt("HIPDNN_GQA_DECODE_WMMA") != 0;
+  return enabled;
+}
+
+static int envGqaDecodeSplits() {
+  static const int value = readEnvInt("HIPDNN_GQA_DECODE_SPLITS");
+  return value;
+}
+
+static int envGqaDecodeBkv() {
+  static const int value = readEnvInt("HIPDNN_GQA_DECODE_BKV");
+  return value;
+}
+
+static bool envGqaDecodeNoAutotune() {
+  static const bool enabled = readEnvInt("HIPDNN_GQA_DECODE_NOAUTOTUNE") != 0;
+  return enabled;
+}
+
+static bool envPrefillTuneDebug() {
+  static const bool enabled = getenv("HIPDNN_PREFILL_TUNE_DEBUG") != nullptr;
+  return enabled;
+}
+
 // Element-size dispatch helper for the pure data-movement kernels (transpose,
 // kv-cache append/concat, kv-expand, split-qkv). These kernels only copy bytes
 // of the element type, so templating them on T and selecting __half (2 bytes)
@@ -3429,16 +3466,15 @@ static int runGqaFlashDecode(
     cfg = FlashDecodeCfg{configured_use_wmma != 0, configured_splits,
                          configured_bkv};
   }
-  if (const char* e = getenv("HIPDNN_GQA_DECODE_SCALAR")) { if (atoi(e) != 0) { cfg.use_wmma = false; forced = true; } }
-  if (const char* e = getenv("HIPDNN_GQA_DECODE_WMMA"))   { if (atoi(e) != 0) { cfg.use_wmma = true;  forced = true; } }
-  if (const char* e = getenv("HIPDNN_GQA_DECODE_SPLITS")) {
-    int v = atoi(e); if (v >= 1) { cfg.splits = v > cap ? cap : v; forced = true; }
+  if (envGqaDecodeScalar()) { cfg.use_wmma = false; forced = true; }
+  if (envGqaDecodeWmma())   { cfg.use_wmma = true;  forced = true; }
+  if (const int v = envGqaDecodeSplits(); v >= 1) {
+    cfg.splits = v > cap ? cap : v; forced = true;
   }
-  if (const char* e = getenv("HIPDNN_GQA_DECODE_BKV")) {
-    int v = atoi(e); if (v == 16 || v == 32) { cfg.bkv = v; forced = true; }
+  if (const int v = envGqaDecodeBkv(); v == 16 || v == 32) {
+    cfg.bkv = v; forced = true;
   }
-  bool no_autotune = false;
-  if (const char* e = getenv("HIPDNN_GQA_DECODE_NOAUTOTUNE")) no_autotune = (atoi(e) != 0);
+  const bool no_autotune = envGqaDecodeNoAutotune();
 
   // INT8 path: cache is int8, scales are per-channel fp32. Autotune keeps its
   // own cache/mutex (identical geometry, but the int8 kernels time differently).
@@ -3576,10 +3612,8 @@ extern "C" int hip_gqa_flash_decode_fused_copy(
                                                : kFlashDecodeMaxSplits;
   if (splits <= 0 && cap >= 1)
     splits = flashDecodeFusedCopySplits(B, G, past_len + 1, cap);
-  if (const char* e = getenv("HIPDNN_GQA_DECODE_SPLITS")) {
-    const int v = atoi(e);
-    if (v >= 1) splits = v > cap ? cap : v;
-  }
+  if (const int v = envGqaDecodeSplits(); v >= 1)
+    splits = v > cap ? cap : v;
   auto aligned = [](const void* p) {
     return (reinterpret_cast<uintptr_t>(p) & 15) == 0;
   };
@@ -5024,7 +5058,7 @@ static int tunePrefillCandidates(hipStream_t stream, int nc, LaunchFn&& launch,
     (void)hipEventDestroy(ev0);
     (void)hipEventDestroy(ev1);
 
-    if (getenv("HIPDNN_PREFILL_TUNE_DEBUG")) {
+    if (envPrefillTuneDebug()) {
         for (int i = 0; i < nc; ++i)
             fprintf(stderr, "[prefill-tune] d=%d sq=%d skv=%d %-26s : %.5f ms/call\n",
                     d, sq, skv, name(i).c_str(), best_ms[i]);
