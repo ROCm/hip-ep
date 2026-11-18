@@ -383,7 +383,9 @@ int main(int argc, char **argv) {
     pm.addPass(mlir::hip::createOnnxScanOutlinePass());
     pm.addPass(mlir::hip::createOnnxIfOutlinePass());
     pm.addPass(mlir::hip::createInferLoopBodyShapesPass());
-    pm.addPass(mlir::hip::createConvertOnnxToHipPass());
+    mlir::hip::ConvertOnnxToHipPassOptions options;
+    options.convIntegerQuantConv = true;
+    pm.addPass(mlir::hip::createConvertOnnxToHipPass(options));
   }
   // rocMLIR has no transposed-convolution anchor, so split conv_transpose into
   // plain convolutions before the rocMLIR fusion outlines a kernel around it.

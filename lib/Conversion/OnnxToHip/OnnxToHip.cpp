@@ -252,7 +252,8 @@ struct UnrankedOpGuard : public mlir::RewritePattern {
 } // namespace
 
 static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
-                                             mlir::MLIRContext *ctx) {
+                                             mlir::MLIRContext *ctx,
+                                             bool convIntegerQuantConv) {
   mlir::RewritePatternSet patterns(ctx);
   populateMatMulConversionPatterns(patterns, ctx);
   populateEinsumConversionPatterns(patterns, ctx);
@@ -363,7 +364,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateSpaceToDepthConversionPatterns(patterns, ctx);
   populateQdqConversionPatterns(patterns, ctx);
   populateDynamicQuantizeLinearConversionPatterns(patterns, ctx);
-  populateConvIntegerConversionPatterns(patterns, ctx);
+  populateConvIntegerConversionPatterns(patterns, ctx, convIntegerQuantConv);
   populateMatMulIntegerConversionPatterns(patterns, ctx);
 
   for (std::unique_ptr<mlir::RewritePattern> &pattern :
@@ -694,7 +695,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
     if (mlir::failed(lowerOnnxConstants(funcOp, constantOrder)))
       return signalPassFailure();
     lowerOnnxReturns(funcOp);
-    if (mlir::failed(convertComputeOps(funcOp, ctx)))
+    if (mlir::failed(convertComputeOps(funcOp, ctx, convIntegerQuantConv)))
       return signalPassFailure();
     // Phase 2: lower any `onnx.Constant` ops SYNTHESIZED during
     // convertComputeOps. Some ONNX->HIP patterns introduce a fresh literal as
