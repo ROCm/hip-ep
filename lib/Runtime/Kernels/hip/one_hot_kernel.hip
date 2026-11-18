@@ -27,19 +27,21 @@ struct OneHotGeom {
   int64_t ostride[kMaxRank];
 };
 
+// `values` is the device [off_value, on_value] pair.
 template <typename T>
 __global__ void one_hot_fill_kernel(T *__restrict__ output, int64_t num_elements,
-                                    T off_value) {
+                                    const T *__restrict__ values) {
   int64_t tid =
       static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (tid >= num_elements)
     return;
-  output[tid] = off_value;
+  output[tid] = values[0];
 }
 
 template <typename T, typename IdxT>
 __global__ void one_hot_scatter_kernel(const IdxT *__restrict__ indices,
-                                       T on_value, T *__restrict__ output,
+                                       const T *__restrict__ values,
+                                       T *__restrict__ output,
                                        int64_t num_indices, OneHotGeom geom) {
   int64_t tid =
       static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -69,7 +71,7 @@ __global__ void one_hot_scatter_kernel(const IdxT *__restrict__ indices,
       return;
     offset += c * geom.ostride[d];
   }
-  output[offset] = on_value;
+  output[offset] = values[1];
 }
 
 template <typename T, typename IdxT>
@@ -81,22 +83,17 @@ static int launch_one_hot(void *stream, const void *indices, const void *values,
                           int64_t num_output_elements) {
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
   constexpr int kBlockSize = 256;
-
-  T host_values[2] = {};
-  hipMemcpyAsync(host_values, values, 2 * sizeof(T), hipMemcpyDeviceToHost,
-                 hip_stream);
-  hipError_t err = hipStreamSynchronize(hip_stream);
-  if (err != hipSuccess)
-    return static_cast<int>(err);
-  T off_value = host_values[0];
-  T on_value = host_values[1];
+  const T *device_values = static_cast<const T *>(values);
+  hipError_t err = hipSuccess;
 
   if (num_output_elements > 0) {
     int fill_grid = static_cast<int>(
         (num_output_elements + kBlockSize - 1) / kBlockSize);
+    (void)hipGetLastError();
     hipLaunchKernelGGL(HIP_KERNEL_NAME(one_hot_fill_kernel<T>),
                      dim3(fill_grid), dim3(kBlockSize), 0, hip_stream,
-                     static_cast<T *>(output), num_output_elements, off_value);
+                     static_cast<T *>(output), num_output_elements,
+                     device_values);
     err = hipGetLastError();
     if (err != hipSuccess)
       return static_cast<int>(err);
@@ -120,9 +117,10 @@ static int launch_one_hot(void *stream, const void *indices, const void *values,
 
   int scatter_grid =
       static_cast<int>((num_indices + kBlockSize - 1) / kBlockSize);
+  (void)hipGetLastError();
   hipLaunchKernelGGL(HIP_KERNEL_NAME(one_hot_scatter_kernel<T, IdxT>),
                    dim3(scatter_grid), dim3(kBlockSize), 0, hip_stream,
-                   static_cast<const IdxT *>(indices), on_value,
+                   static_cast<const IdxT *>(indices), device_values,
                    static_cast<T *>(output), num_indices, geom);
   err = hipGetLastError();
   if (err != hipSuccess) {
