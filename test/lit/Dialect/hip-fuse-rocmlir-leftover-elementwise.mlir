@@ -484,3 +484,114 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x8x8xf16>,
       outs(%le : tensor<1x8x4x4xf16>) {alpha = 1.000000e-01 : f64} : tensor<1x8x4x4xf16>
   return %l : tensor<1x8x4x4xf16>
 }
+
+// -----
+
+// After the peel, one i8 Max would be left to run as a HIP op, and the HIP
+// elementwise kernels do not cover i8. The transpose stays in the kernel.
+
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
+// CHECK-SAME: attributes {rock.elementwise, rock.kernel}
+// CHECK: hip.max
+// CHECK: hip.transpose
+// CHECK-LABEL: func.func @main_graph
+// CHECK-NOT: hip.transpose
+// CHECK: hip.rocmlir({{.*}}) @mlir_{{[a-z0-9_]+}}
+
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x4x32x32xi8>,
+                      %y: tensor<1x4x32x32xi8>) -> tensor<1x32x4x32xi8> {
+  %me = tensor.empty() : tensor<1x4x32x32xi8>
+  %m = hip.max(%ctx) ins(%x, %y : tensor<1x4x32x32xi8>, tensor<1x4x32x32xi8>)
+      outs(%me : tensor<1x4x32x32xi8>) : tensor<1x4x32x32xi8>
+  %te = tensor.empty() : tensor<1x32x4x32xi8>
+  %t = hip.transpose(%ctx) ins(%m : tensor<1x4x32x32xi8>)
+      outs(%te : tensor<1x32x4x32xi8>) {perm = [0, 3, 1, 2]} : tensor<1x32x4x32xi8>
+  return %t : tensor<1x32x4x32xi8>
+}
+
+// -----
+
+// The HIP transpose copies whole bytes, so a transpose of an i1 mask stays in
+// the kernel.
+
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
+// CHECK-SAME: attributes {rock.elementwise, rock.kernel}
+// CHECK: hip.less
+// CHECK: hip.not
+// CHECK: hip.transpose
+// CHECK-LABEL: func.func @main_graph
+// CHECK-NOT: hip.transpose
+// CHECK: hip.rocmlir({{.*}}) @mlir_{{[a-z0-9_]+}}
+
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x32x64xf16>,
+                      %y: tensor<1x32x64xf16>) -> tensor<1x64x32xi1> {
+  %le = tensor.empty() : tensor<1x32x64xi1>
+  %l = hip.less(%ctx) ins(%x, %y : tensor<1x32x64xf16>, tensor<1x32x64xf16>)
+      outs(%le : tensor<1x32x64xi1>) : tensor<1x32x64xi1>
+  %ne = tensor.empty() : tensor<1x32x64xi1>
+  %n = hip.not(%ctx) ins(%l : tensor<1x32x64xi1>)
+      outs(%ne : tensor<1x32x64xi1>) : tensor<1x32x64xi1>
+  %te = tensor.empty() : tensor<1x64x32xi1>
+  %t = hip.transpose(%ctx) ins(%n : tensor<1x32x64xi1>)
+      outs(%te : tensor<1x64x32xi1>) {perm = [0, 2, 1]} : tensor<1x64x32xi1>
+  return %t : tensor<1x64x32xi1>
+}
+
+// -----
+
+// A ui8 Where condition is an i8 kernel argument only when the kernel reads it
+// directly, so a crop of the condition stays outside.
+
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
+// CHECK-SAME: tensor<1x8x8x8xi8>
+// CHECK-SAME: attributes {rock.elementwise, rock.kernel}
+// CHECK-NOT: tensor.extract_slice
+// CHECK: hip.where
+// CHECK: hip.neg
+// CHECK-LABEL: func.func @main_graph
+// CHECK: %[[S:.*]] = tensor.extract_slice
+// CHECK: hip.rocmlir({{.*}}) @mlir_{{[a-z0-9_]+}} ins(%[[S]],
+
+func.func @main_graph(%ctx: !hip.context, %c: tensor<1x8x10x10xui8>,
+                      %x: tensor<1x8x8x8xf16>, %y: tensor<1x8x8x8xf16>)
+    -> tensor<1x8x8x8xf16> {
+  %s = tensor.extract_slice %c[0, 0, 1, 1] [1, 8, 8, 8] [1, 1, 1, 1]
+      : tensor<1x8x10x10xui8> to tensor<1x8x8x8xui8>
+  %we = tensor.empty() : tensor<1x8x8x8xf16>
+  %w = hip.where(%ctx) ins(%s, %x, %y : tensor<1x8x8x8xui8>,
+                       tensor<1x8x8x8xf16>, tensor<1x8x8x8xf16>)
+      outs(%we : tensor<1x8x8x8xf16>) : tensor<1x8x8x8xf16>
+  %ne = tensor.empty() : tensor<1x8x8x8xf16>
+  %n = hip.neg(%ctx) ins(%w : tensor<1x8x8x8xf16>)
+      outs(%ne : tensor<1x8x8x8xf16>) : tensor<1x8x8x8xf16>
+  return %n : tensor<1x8x8x8xf16>
+}
+
+// -----
+
+// A crop with SSA offsets would read them as kernel arguments, where they are
+// no longer constants, so it stays outside and the kernel reads its result.
+
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
+// CHECK-SAME: (%{{.*}}: tensor<1x8x8x8xf16>, %{{.*}}: tensor<1x8x1x1xf16>)
+// CHECK-NOT: tensor.extract_slice
+// CHECK: hip.add
+// CHECK: hip.leaky_relu
+// CHECK-LABEL: func.func @main_graph
+// CHECK: %[[S:.*]] = tensor.extract_slice
+// CHECK: hip.rocmlir({{.*}}) @mlir_{{[a-z0-9_]+}} ins(%[[S]],
+
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x10x10xf16>,
+                      %b: tensor<1x8x1x1xf16>) -> tensor<1x8x8x8xf16> {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %s = tensor.extract_slice %x[%c0, %c0, %c1, %c1] [1, 8, 8, 8] [1, 1, 1, 1]
+      : tensor<1x8x10x10xf16> to tensor<1x8x8x8xf16>
+  %ae = tensor.empty() : tensor<1x8x8x8xf16>
+  %a = hip.add(%ctx) ins(%s, %b : tensor<1x8x8x8xf16>, tensor<1x8x1x1xf16>)
+      outs(%ae : tensor<1x8x8x8xf16>) -> tensor<1x8x8x8xf16>
+  %le = tensor.empty() : tensor<1x8x8x8xf16>
+  %l = hip.leaky_relu(%ctx) ins(%a : tensor<1x8x8x8xf16>)
+      outs(%le : tensor<1x8x8x8xf16>) {alpha = 1.000000e-01 : f64} : tensor<1x8x8x8xf16>
+  return %l : tensor<1x8x8x8xf16>
+}
