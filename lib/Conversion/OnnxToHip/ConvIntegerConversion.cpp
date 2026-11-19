@@ -37,11 +37,16 @@
 //     %y = hip.cast %acc to i32
 //
 //   After, only when convert-onnx-to-hip is given conv-integer-quant-conv
-//   (the rocMLIR pipeline) and every dimension is static:
+//   (the rocMLIR pipeline), every dimension is static, and the op is in
+//   the entry block of @main_graph:
 //     hip.quant_conv of the int8 operands, plus one hip.quant_conv per
-//     non-zero zero point. uint8 is rebased to int8 by subtracting 128.
-//     A dynamic batch stays on hip.conv: an unoutlined hip.quant_conv has
-//     no lowering.
+//     zero point that is not the rebase offset. uint8 is rebased to int8
+//     by subtracting 128. An omitted uint8 zero point is numeric 0, which
+//     rebases to -128, so it is materialized and still corrected.
+//     Anywhere else, including an outlined Loop/Scan/If body, and a
+//     dynamic batch stay on hip.conv: FuseRocMlirAnchorPass only outlines
+//     anchors in @main_graph's entry block, and an unoutlined
+//     hip.quant_conv has no lowering.
 //
 //===----------------------------------------------------------------------===//
 
@@ -247,6 +252,34 @@ static mlir::Value broadcastTo(mlir::PatternRewriter &rewriter,
       ->getResult(0);
 }
 
+/// An omitted uint8 zero point is 0. After the operand is rebased by -128
+/// that 0 is -128, so the correction convolution is required. A signed
+/// operand's omitted zero point is already 0 in the type hip.quant_conv uses.
+static mlir::Value
+materializeOmittedUnsignedZeroPoint(mlir::PatternRewriter &rewriter,
+                                    mlir::Location loc, mlir::Value data,
+                                    mlir::Value zp) {
+  if (zp)
+    return zp;
+  auto elem =
+      mlir::cast<mlir::RankedTensorType>(data.getType()).getElementType();
+  if (!elem.isUnsignedInteger(8))
+    return {};
+  auto zpType = mlir::RankedTensorType::get({}, elem);
+  return mlir::hip::ConstantOp::create(
+      rewriter, loc, zpType,
+      mlir::DenseElementsAttr::get(zpType, rewriter.getIntegerAttr(elem, 0)));
+}
+
+/// FuseRocMlirAnchorPass outlines anchors only from @main_graph's entry
+/// block. A hip.quant_conv left in any other function, including an outlined
+/// Loop, Scan, or If body, has no lowering.
+static bool inMainGraphEntry(mlir::Operation *op) {
+  auto func = op->getParentOfType<mlir::func::FuncOp>();
+  return func && func.getSymName() == "main_graph" && !func.getBody().empty() &&
+         op->getBlock() == &func.getBody().front();
+}
+
 /// Static ConvInteger as int8 hip.quant_conv. Returns failure when the conv
 /// cannot be formed, and the caller keeps the cast/sub/hip.conv lowering.
 static mlir::LogicalResult tryLowerQuantConv(
@@ -256,7 +289,7 @@ static mlir::LogicalResult tryLowerQuantConv(
     bool is1D, llvm::ArrayRef<int64_t> kernelShapeIn,
     llvm::ArrayRef<int64_t> stridesIn, llvm::ArrayRef<int64_t> dilationsIn,
     llvm::ArrayRef<int64_t> padsIn, int64_t group) {
-  if (inputType.isDynamicDim(0))
+  if (!inMainGraphEntry(op) || inputType.isDynamicDim(0))
     return mlir::failure();
   for (int64_t pad : padsIn) {
     if (pad < 0)
@@ -291,6 +324,14 @@ static mlir::LogicalResult tryLowerQuantConv(
     };
     input = expand(input);
     weight = expand(weight);
+    // A full-rank weight zero point, such as [M, 1, 1] over [M, C, K], has
+    // to gain the same inserted 1. Left at rank 3, alignZeroPoint sees a
+    // rank mismatch with the rank-4 weight and reshapes it to a scalar.
+    if (wZp) {
+      auto zpType = mlir::dyn_cast<mlir::RankedTensorType>(wZp.getType());
+      if (zpType && zpType.getRank() == 3)
+        wZp = expand(wZp);
+    }
     inputType = mlir::cast<mlir::RankedTensorType>(input.getType());
     weightType = mlir::cast<mlir::RankedTensorType>(weight.getType());
     llvm::SmallVector<int64_t> outShape(resultType.getShape());
@@ -299,6 +340,8 @@ static mlir::LogicalResult tryLowerQuantConv(
         mlir::RankedTensorType::get(outShape, resultType.getElementType());
   }
 
+  xZp = materializeOmittedUnsignedZeroPoint(rewriter, loc, input, xZp);
+  wZp = materializeOmittedUnsignedZeroPoint(rewriter, loc, weight, wZp);
   input = toSigned8(rewriter, loc, context, input);
   weight = toSigned8(rewriter, loc, context, weight);
   if (!input || !weight)
