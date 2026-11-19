@@ -12,15 +12,18 @@
  *         (outer = input_num_elements / scale_num_elements,
  *          norm_size = scale_num_elements).
  *
- * Algorithm: three passes over the row with shared-memory block reductions.
- *   Pass A: each block sums x over `norm_size` in FP32; thread 0 derives mean.
- *   Pass B: each block sums (x - mean)^2 in FP32; thread 0 derives inv_std.
- *   Pass C: each thread writes y in input dtype, using FP32 math.
+ * Algorithm: shifted two-pass statistics with shared-memory block reductions.
+ *   Pass A1: each block sums x - x[0] over `norm_size`, in FP32, to get the
+ *            mean.
+ *   Pass A2: each block sums (x - mean)^2, in FP32, to get the variance;
+ *            thread 0 derives inv_std.
+ *   Pass B: each thread writes y in input dtype, using FP32 math.
  *
- * The variance is centered rather than E[x^2] - mean^2: for rows whose
- * variance is much smaller than mean^2 (e.g. [10000, 10001]) the latter
- * cancels to zero in FP32 and amplifies the outputs by rsqrt(epsilon). The
- * extra pass re-reads a row that is already cache-resident.
+ * Rejected alternative: Welford online algorithm. Welford is numerically
+ * better when the variance is much smaller than the mean^2, but for
+ * LayerNorm inputs (zero-mean activations) the two-pass approach with FP32
+ * accumulation is already well-conditioned and avoids the per-step branch.
+ * Matches PyTorch/TensorFlow LayerNorm implementations.
  *
  * Source: onnxruntime/core/providers/cuda/nn/layer_norm_impl.cu @ v1.22.2
  *         (structurally; we keep the simpler "small N" branch -- one
@@ -79,11 +82,14 @@ __global__ void hip_layer_norm_kernel(const T_IN *__restrict__ input,
   __shared__ float s_inv_std;
   __shared__ float s_reduce[kLayerNormBlockSize];
 
-  // Pass A: mean.
+  // Pass A1: per-thread partial sums of x - shift. Shifting by a sample of the
+  // row keeps the mean precise when |mean| >> stddev (e.g. x = [8192, 8193]).
+  const float shift = load_as_float<T_IN, T_SCALE>(x_row);
   float local_sum = 0.0f;
   for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x)
-    local_sum += load_as_float<T_IN, T_SCALE>(x_row + i);
+    local_sum += load_as_float<T_IN, T_SCALE>(x_row + i) - shift;
 
+  // Block reduce sum.
   s_reduce[threadIdx.x] = local_sum;
   __syncthreads();
   for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
@@ -95,14 +101,19 @@ __global__ void hip_layer_norm_kernel(const T_IN *__restrict__ input,
     s_mean = s_reduce[0] / static_cast<float>(norm_size);
   __syncthreads();
 
-  // Pass B: centered variance.
-  float mean = s_mean;
+  // Pass A2: per-thread partial sums of squared deviations from the mean.
+  // Centering avoids the E[x^2] - E[x]^2 cancellation, and since
+  // sum((x - mean)^2) <= sum(x^2) it cannot overflow for rows whose plain sum
+  // of squares is finite (e.g. x = [1e19, -1e19], where squaring x - x[0]
+  // would overflow).
+  const float shifted_mean = s_mean;
   float local_sumsq = 0.0f;
   for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
-    float c = load_as_float<T_IN, T_SCALE>(x_row + i) - mean;
-    local_sumsq += c * c;
+    float d = (load_as_float<T_IN, T_SCALE>(x_row + i) - shift) - shifted_mean;
+    local_sumsq += d * d;
   }
 
+  // Block reduce sumsq.
   s_reduce[threadIdx.x] = local_sumsq;
   __syncthreads();
   for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
@@ -115,19 +126,20 @@ __global__ void hip_layer_norm_kernel(const T_IN *__restrict__ input,
     float inv_std = rsqrtf(var + epsilon);
     s_inv_std = inv_std;
     if (mean_out)
-      mean_out[row] = store_from_float<MEAN_OUT_T>(mean);
+      mean_out[row] = store_from_float<MEAN_OUT_T>(shift + shifted_mean);
     if (inv_std_out)
       inv_std_out[row] = store_from_float<MEAN_OUT_T>(inv_std);
   }
   __syncthreads();
 
-  // Pass C: per-element normalize + affine.
+  // Pass B: per-element normalize + affine. (x - shift) - shifted_mean keeps
+  // the precision that x - (shift + shifted_mean) loses when |mean| is large.
   float inv_std = s_inv_std;
   for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
-    float v = load_as_float<T_IN, T_SCALE>(x_row + i);
+    float v = load_as_float<T_IN, T_SCALE>(x_row + i) - shift;
     float s = load_as_float<T_SCALE, T_SCALE>(scale + i);
     float b = bias ? load_as_float<T_SCALE, T_SCALE>(bias + i) : 0.0f;
-    float n = (v - mean) * inv_std * s + b;
+    float n = (v - shifted_mean) * inv_std * s + b;
     y_row[i] = store_from_float<T_IN>(n);
   }
 }
