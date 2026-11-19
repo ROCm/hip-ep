@@ -7,7 +7,7 @@
 
 `TestMod` in test_binary_elementwise.py builds a bare `Mod`, which leaves the
 op on the runtime's own kernel (`wrap_mod`). Behind a MatMul it takes a
-different route entirely: FuseROCMlir outlines the chain into a `rock.kernel`
+different route entirely: the rocMLIR fusion outlines the chain into a `rock.kernel`
 function, hip-to-tosa rewrites the op into TOSA inside it, and rocMLIR
 compiles the result. The two paths run different arithmetic for the same
 graph, so the standalone test says nothing about the fused one.
@@ -24,7 +24,7 @@ the emitted graph.
 
 Reaching the fused path needs a cast. `hip.mod` accepts signless i32 and i64
 only, and every fusion anchor (matmul, conv, gemm) is floating point, so the
-graph here is MatMul -> Cast -> Mod. Cast is on FuseROCMlir's pointwise list
+graph here is MatMul -> Cast -> Mod. Cast is on the rocMLIR fusion's pointwise list
 too, so all three are outlined into a single kernel.
 """
 
