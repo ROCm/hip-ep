@@ -153,6 +153,101 @@ func.func @batch_norm_without_scale_and_bias(%ctx: !hip.context, %x: !full,
   return %y : !full
 }
 
+// With a scale but no bias, the bias becomes a constant of zeros.
+
+// CHECK-LABEL: func.func @batch_norm_without_bias
+// CHECK-SAME:  (%[[CTX:.*]]: !hip.context, %[[X:.*]]: tensor<1x4x2x2xf32>, %[[MEAN:.*]]: tensor<4xf32>, %[[VAR:.*]]: tensor<4xf32>, %[[SCALE:.*]]: tensor<4xf32>)
+// CHECK:         %[[ZEROS:.*]] = hip.constant {{.*}}dense<0.000000e+00> : tensor<4xf32>
+// CHECK:         hip.batch_norm(%[[CTX]]) ins(%[[X]], %[[SCALE]], %[[ZEROS]], %[[MEAN]], %[[VAR]] :
+// CHECK-NOT:     hip.{{sub|mul|add}}
+// CHECK:         return
+func.func @batch_norm_without_bias(%ctx: !hip.context, %x: !full, %mean: !vec,
+                                   %var: !vec, %scale: !vec) -> !full {
+  %eps = hip.constant {value = dense<1.0e-5> : tensor<f32>} : tensor<f32>
+  %e0 = tensor.empty() : !vec
+  %vpe = hip.add(%ctx) ins(%var, %eps : !vec, tensor<f32>) outs(%e0 : !vec) -> !vec
+  %e1 = tensor.empty() : !vec
+  %sd = hip.sqrt(%ctx) ins(%vpe : !vec) outs(%e1 : !vec) : !vec
+  %e2 = tensor.empty() : !vec
+  %inv = hip.reciprocal(%ctx) ins(%sd : !vec) outs(%e2 : !vec) : !vec
+
+  %mean_v = tensor.expand_shape %mean [[0, 1, 2]] output_shape [4, 1, 1] : !vec into !view
+  %inv_v = tensor.expand_shape %inv [[0, 1, 2]] output_shape [4, 1, 1] : !vec into !view
+  %scale_v = tensor.expand_shape %scale [[0, 1, 2]] output_shape [4, 1, 1] : !vec into !view
+
+  %e3 = tensor.empty() : !full
+  %c = hip.sub(%ctx) ins(%x, %mean_v : !full, !view) outs(%e3 : !full) : !full
+  %e4 = tensor.empty() : !full
+  %n = hip.mul(%ctx) ins(%c, %inv_v : !full, !view) outs(%e4 : !full) -> !full
+  %e5 = tensor.empty() : !full
+  %y = hip.mul(%ctx) ins(%n, %scale_v : !full, !view) outs(%e5 : !full) -> !full
+  return %y : !full
+}
+
+// With a bias but no scale, the scale becomes a constant of ones.
+
+// CHECK-LABEL: func.func @batch_norm_without_scale
+// CHECK-SAME:  (%[[CTX:.*]]: !hip.context, %[[X:.*]]: tensor<1x4x2x2xf32>, %[[MEAN:.*]]: tensor<4xf32>, %[[VAR:.*]]: tensor<4xf32>, %[[BIAS:.*]]: tensor<4xf32>)
+// CHECK:         %[[ONES:.*]] = hip.constant {{.*}}dense<1.000000e+00> : tensor<4xf32>
+// CHECK:         hip.batch_norm(%[[CTX]]) ins(%[[X]], %[[ONES]], %[[BIAS]], %[[MEAN]], %[[VAR]] :
+// CHECK-NOT:     hip.{{sub|mul|add}}
+// CHECK:         return
+func.func @batch_norm_without_scale(%ctx: !hip.context, %x: !full, %mean: !vec,
+                                    %var: !vec, %bias: !vec) -> !full {
+  %eps = hip.constant {value = dense<1.0e-5> : tensor<f32>} : tensor<f32>
+  %e0 = tensor.empty() : !vec
+  %vpe = hip.add(%ctx) ins(%var, %eps : !vec, tensor<f32>) outs(%e0 : !vec) -> !vec
+  %e1 = tensor.empty() : !vec
+  %sd = hip.sqrt(%ctx) ins(%vpe : !vec) outs(%e1 : !vec) : !vec
+  %e2 = tensor.empty() : !vec
+  %inv = hip.reciprocal(%ctx) ins(%sd : !vec) outs(%e2 : !vec) : !vec
+
+  %mean_v = tensor.expand_shape %mean [[0, 1, 2]] output_shape [4, 1, 1] : !vec into !view
+  %inv_v = tensor.expand_shape %inv [[0, 1, 2]] output_shape [4, 1, 1] : !vec into !view
+  %bias_v = tensor.expand_shape %bias [[0, 1, 2]] output_shape [4, 1, 1] : !vec into !view
+
+  %e3 = tensor.empty() : !full
+  %c = hip.sub(%ctx) ins(%x, %mean_v : !full, !view) outs(%e3 : !full) : !full
+  %e4 = tensor.empty() : !full
+  %n = hip.mul(%ctx) ins(%c, %inv_v : !full, !view) outs(%e4 : !full) -> !full
+  %e5 = tensor.empty() : !full
+  %y = hip.add(%ctx) ins(%n, %bias_v : !full, !view) outs(%e5 : !full) -> !full
+  return %y : !full
+}
+
+// A view may have the full rank, [1, C, 1, 1], instead of [C, 1, 1].
+
+// CHECK-LABEL: func.func @batch_norm_full_rank_views
+// CHECK-SAME:  (%[[CTX:.*]]: !hip.context, %[[X:.*]]: tensor<1x4x2x2xf32>, %[[MEAN:.*]]: tensor<4xf32>, %[[VAR:.*]]: tensor<4xf32>, %[[SCALE:.*]]: tensor<4xf32>, %[[BIAS:.*]]: tensor<4xf32>)
+// CHECK:         hip.batch_norm(%[[CTX]]) ins(%[[X]], %[[SCALE]], %[[BIAS]], %[[MEAN]], %[[VAR]] :
+// CHECK-NOT:     hip.{{sub|mul|add}}
+// CHECK:         return
+func.func @batch_norm_full_rank_views(%ctx: !hip.context, %x: !full, %mean: !vec,
+                                      %var: !vec, %scale: !vec, %bias: !vec) -> !full {
+  %eps = hip.constant {value = dense<1.0e-5> : tensor<f32>} : tensor<f32>
+  %e0 = tensor.empty() : !vec
+  %vpe = hip.add(%ctx) ins(%var, %eps : !vec, tensor<f32>) outs(%e0 : !vec) -> !vec
+  %e1 = tensor.empty() : !vec
+  %sd = hip.sqrt(%ctx) ins(%vpe : !vec) outs(%e1 : !vec) : !vec
+  %e2 = tensor.empty() : !vec
+  %inv = hip.reciprocal(%ctx) ins(%sd : !vec) outs(%e2 : !vec) : !vec
+
+  %mean_v = tensor.expand_shape %mean [[0, 1, 2, 3]] output_shape [1, 4, 1, 1] : !vec into tensor<1x4x1x1xf32>
+  %inv_v = tensor.expand_shape %inv [[0, 1, 2, 3]] output_shape [1, 4, 1, 1] : !vec into tensor<1x4x1x1xf32>
+  %scale_v = tensor.expand_shape %scale [[0, 1, 2, 3]] output_shape [1, 4, 1, 1] : !vec into tensor<1x4x1x1xf32>
+  %bias_v = tensor.expand_shape %bias [[0, 1, 2, 3]] output_shape [1, 4, 1, 1] : !vec into tensor<1x4x1x1xf32>
+
+  %e3 = tensor.empty() : !full
+  %c = hip.sub(%ctx) ins(%x, %mean_v : !full, tensor<1x4x1x1xf32>) outs(%e3 : !full) : !full
+  %e4 = tensor.empty() : !full
+  %n = hip.mul(%ctx) ins(%c, %inv_v : !full, tensor<1x4x1x1xf32>) outs(%e4 : !full) -> !full
+  %e5 = tensor.empty() : !full
+  %s = hip.mul(%ctx) ins(%n, %scale_v : !full, tensor<1x4x1x1xf32>) outs(%e5 : !full) -> !full
+  %e6 = tensor.empty() : !full
+  %y = hip.add(%ctx) ins(%s, %bias_v : !full, tensor<1x4x1x1xf32>) outs(%e6 : !full) -> !full
+  return %y : !full
+}
+
 // The normalization may divide by sqrt(variance + epsilon). A frontend that
 // does not rewrite division may emit it.
 
