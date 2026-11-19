@@ -421,9 +421,12 @@ static bool try_corelib_model(IPass &self, Graph &graph) {
     // noise for utility graphs (embeddings, vision encoders) in multi-graph
     // models that also happen to have the option set.
     const bool looks_like_decoder =
-        std::any_of(sig.inputs.begin(), sig.inputs.end(), [](const std::string &n) {
-          return n == "attention_mask" || n.rfind("past_key_values.", 0) == 0;
-        }) || sig.vocab_size > 0;
+        std::any_of(sig.inputs.begin(), sig.inputs.end(),
+                    [](const std::string &n) {
+                      return n == "attention_mask" ||
+                             n.rfind("past_key_values.", 0) == 0;
+                    }) ||
+        sig.vocab_size > 0;
     if (looks_like_decoder)
       fprintf(stderr,
               "[corelib] model: use_ryzenai_corelib_model is set but the graph "
