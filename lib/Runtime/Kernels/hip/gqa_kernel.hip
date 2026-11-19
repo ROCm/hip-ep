@@ -3010,9 +3010,10 @@ static inline void launchFlashDecodeConfig(
       case 5:  LAUNCH_SCALAR(5);  break;
       case 6:  LAUNCH_SCALAR(6);  break;
       case 8:  LAUNCH_SCALAR(8);  break;
-      // HpG=9 exists only at d=128 (72:8 sliding-window layers); the other
-      // widths would add instantiations nothing reaches.
+      // HpG=9 and 12 exist only at d=128 (72:8 and 96:8 sliding-window
+      // layers); the other widths would add instantiations nothing reaches.
       case 9:  if (d == 128) LAUNCH_SCALAR_D(128, 9); break;
+      case 12: if (d == 128) LAUNCH_SCALAR_D(128, 12); break;
       case 16: LAUNCH_SCALAR(16); break;
       default: break;  // unsupported HpG is rejected in hip_gqa_flash_decode
     }
@@ -3385,11 +3386,11 @@ static int runGqaFlashDecode(
   // Scalar decode is templated for these HpG (GQA + MHA); WMMA is layered on
   // top where flash_decode_wmma_supported() says so. Anything else is rejected.
   if ((hpg != 1 && hpg != 2 && hpg != 3 && hpg != 4 && hpg != 5 && hpg != 6 &&
-       hpg != 8 && hpg != 9 && hpg != 16) ||
-      (hpg == 9 && d != 128)) {
+       hpg != 8 && hpg != 9 && hpg != 12 && hpg != 16) ||
+      ((hpg == 9 || hpg == 12) && d != 128)) {
     fprintf(stderr,
             "hip_gqa_flash_decode: unsupported HPG=%d (must be "
-            "1/2/3/4/5/6/8/16, or 9 at d=128; H=%d, G=%d, d=%d)\n",
+            "1/2/3/4/5/6/8/16, or 9/12 at d=128; H=%d, G=%d, d=%d)\n",
             hpg, H, G, d);
     return -1;
   }
