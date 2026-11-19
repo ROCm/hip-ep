@@ -17,15 +17,32 @@
 //
 //   ->  %y = onnx.LayerNormalization(%x, %gamma, %beta) {axis = -1, epsilon}
 //
+// The normalization step may also be spelled as a multiply by the inverse
+// standard deviation, with %a = onnx.Add(%var, %eps):
+//
+//   %n = onnx.Mul(%d, onnx.Reciprocal(onnx.Sqrt(%a)))
+//   %n = onnx.Mul(%d, onnx.Pow(%a, -0.5))
+//   %n = onnx.Mul(%d, onnx.Div(1.0, onnx.Sqrt(%a)))
+//   %n = onnx.Div(%d, onnx.Pow(%a, 0.5))
+//
+// The pre-lowering Pow decomposition may already have rewritten Pow(%a, -0.5)
+// to Reciprocal(Sqrt(%a)) and Pow(%a, 0.5) to Sqrt(%a); both are accepted.
+// The affine tail is optional: with no per-channel Mul the norm is emitted
+// with a constant scale of ones and the original users keep consuming %n.
+//
+// A residual Add feeding %x is folded later, when onnx.LayerNormalization is
+// lowered (see ResidualLayerNormToHip in NormConversion.cpp).
+//
 // Evaluated op by op in fp16 the squared deviations overflow to inf once
 // |x - mean| exceeds ~256 (SmolVLM's post_layernorm input reaches ~460), and
 // those rows normalize to 0. hip.layer_norm accumulates in fp32, matching the
 // fused LayerNormalization that ORT's CPU provider runs for the same graph.
 //
-// Rooted on onnx.Div; runs with the other pre-lowering fusions, before
-// `lowerOnnxConstants`, so epsilon / exponent / axes are still onnx.Constant.
-// Benefit 2 so it wins over the broadcasting Div -> Mul(Reciprocal) rewrite
-// rooted on the same op.
+// Rooted on onnx.Div and onnx.Mul; runs with the other pre-lowering fusions,
+// before `lowerOnnxConstants`, so epsilon / exponent / axes are still
+// onnx.Constant. Benefit 2 so the Div root wins over the broadcasting
+// Div -> Mul(Reciprocal) rewrite rooted on the same op (the Mul root would
+// still catch the rewritten form).
 //
 //===----------------------------------------------------------------------===//
 
@@ -138,6 +155,178 @@ static bool isPerChannel(mlir::Value v, int64_t dim) {
   return t && t.getRank() == 1 && !t.isDynamicDim(0) && t.getDimSize(0) == dim;
 }
 
+/// \p v is sqrt(a), spelled Sqrt(a) or Pow(a, 0.5). Returns a and appends
+/// the matched op to \p chain.
+static mlir::Value matchStd(mlir::Value v,
+                            llvm::SmallVectorImpl<mlir::Operation *> &chain) {
+  if (mlir::Operation *op = defOpNamed(v, "onnx.Sqrt")) {
+    chain.push_back(op);
+    return op->getOperand(0);
+  }
+  if (mlir::Operation *op = defOpNamed(v, "onnx.Pow")) {
+    if (getScalarFloatConstant(op->getOperand(1)) == 0.5) {
+      chain.push_back(op);
+      return op->getOperand(0);
+    }
+  }
+  return nullptr;
+}
+
+/// \p v is 1 / sqrt(a), spelled Pow(a, -0.5), Reciprocal(sqrt(a)) or
+/// Div(1, sqrt(a)). Returns a and appends the matched ops to \p chain,
+/// producers first.
+static mlir::Value
+matchInvStd(mlir::Value v, llvm::SmallVectorImpl<mlir::Operation *> &chain) {
+  if (mlir::Operation *op = defOpNamed(v, "onnx.Pow")) {
+    if (getScalarFloatConstant(op->getOperand(1)) == -0.5) {
+      chain.push_back(op);
+      return op->getOperand(0);
+    }
+    return nullptr;
+  }
+  mlir::Operation *op = defOpNamed(v, "onnx.Reciprocal");
+  mlir::Value s;
+  if (op) {
+    s = op->getOperand(0);
+  } else if ((op = defOpNamed(v, "onnx.Div"))) {
+    if (op->getNumOperands() != 2 ||
+        getScalarFloatConstant(op->getOperand(0)) != 1.0)
+      return nullptr;
+    s = op->getOperand(1);
+  } else {
+    return nullptr;
+  }
+  mlir::Value a = matchStd(s, chain);
+  if (a)
+    chain.push_back(op);
+  return a;
+}
+
+/// Folds `n = (x - mean(x)) * rsqrt(mean((x - mean(x))^2) + eps)` plus an
+/// optional per-channel affine tail into onnx.LayerNormalization. \p root
+/// produces n from \p d = x - mean(x) and \p a = var + eps; \p chain holds
+/// the ops between \p a and \p root.
+static mlir::LogicalResult
+fuseLayerNorm(mlir::Operation *root, mlir::Value d, mlir::Value a,
+              llvm::SmallVectorImpl<mlir::Operation *> &chain,
+              mlir::PatternRewriter &rewriter) {
+  mlir::Operation *epsAdd = defOpNamed(a, "onnx.Add");
+  if (!epsAdd || epsAdd->getNumOperands() != 2)
+    return rewriter.notifyMatchFailure(root, "sqrt input not Add");
+  mlir::Value var;
+  std::optional<double> eps;
+  for (int i = 0; i < 2 && !eps; ++i) {
+    eps = getScalarFloatConstant(epsAdd->getOperand(i));
+    var = epsAdd->getOperand(1 - i);
+  }
+  if (!eps)
+    return rewriter.notifyMatchFailure(root, "epsilon not a scalar const");
+
+  mlir::Operation *subOp = defOpNamed(d, "onnx.Sub");
+  if (!subOp)
+    return rewriter.notifyMatchFailure(root, "numerator not Sub");
+  mlir::Value x = subOp->getOperand(0);
+  auto xType = mlir::dyn_cast<mlir::RankedTensorType>(x.getType());
+  if (!xType || xType.getRank() < 1 ||
+      !mlir::isa<mlir::FloatType>(xType.getElementType()) ||
+      xType.isDynamicDim(xType.getRank() - 1) ||
+      xType != root->getResult(0).getType())
+    return rewriter.notifyMatchFailure(root, "x type");
+  int64_t rank = xType.getRank();
+
+  mlir::Operation *meanOp = subOp->getOperand(1).getDefiningOp();
+  if (!isLastAxisMean(meanOp, rank) || meanOp->getOperand(0) != x)
+    return rewriter.notifyMatchFailure(root, "mean not ReduceMean(x, -1)");
+
+  mlir::Operation *varOp = var.getDefiningOp();
+  if (!isLastAxisMean(varOp, rank))
+    return rewriter.notifyMatchFailure(root, "var not ReduceMean(.., -1)");
+  mlir::Operation *sqOp = varOp->getOperand(0).getDefiningOp();
+  bool isSquare = false;
+  if (sqOp && sqOp->getName().getStringRef() == "onnx.Pow")
+    isSquare = sqOp->getOperand(0) == d &&
+               getScalarFloatConstant(sqOp->getOperand(1)) == 2.0;
+  else if (sqOp && sqOp->getName().getStringRef() == "onnx.Mul")
+    isSquare = sqOp->getOperand(0) == d && sqOp->getOperand(1) == d;
+  if (!isSquare)
+    return rewriter.notifyMatchFailure(root, "var input not (x-mean)^2");
+
+  // Optional affine tail: Mul(n, gamma) then optional Add(., beta).
+  int64_t dim = xType.getDimSize(rank - 1);
+  mlir::Value n = root->getResult(0);
+  mlir::Operation *mulOp = nullptr;
+  mlir::Operation *last = root;
+  mlir::Value gamma, beta;
+  if (n.hasOneUse()) {
+    mlir::Operation *user = *n.getUsers().begin();
+    if (user->getName().getStringRef() == "onnx.Mul") {
+      mlir::Value g = otherOperand(user, n);
+      if (g && isPerChannel(g, dim) && user->getResult(0).getType() == xType) {
+        mulOp = user;
+        gamma = g;
+        last = mulOp;
+      }
+    }
+  }
+  if (mulOp && mulOp->getResult(0).hasOneUse()) {
+    mlir::Operation *addOp = *mulOp->getResult(0).getUsers().begin();
+    if (addOp->getName().getStringRef() == "onnx.Add") {
+      mlir::Value b = otherOperand(addOp, mulOp->getResult(0));
+      if (b && isPerChannel(b, dim) && addOp->getResult(0).getType() == xType) {
+        beta = b;
+        last = addOp;
+      }
+    }
+  }
+
+  rewriter.setInsertionPoint(last);
+  if (!gamma) {
+    auto elemType = mlir::cast<mlir::FloatType>(xType.getElementType());
+    auto gammaType = mlir::RankedTensorType::get({dim}, elemType);
+    llvm::APFloat one = llvm::APFloat::getOne(elemType.getFloatSemantics());
+    mlir::OperationState cst(last->getLoc(), "onnx.Constant");
+    cst.addAttribute("value",
+                     mlir::DenseElementsAttr::get(
+                         gammaType, llvm::ArrayRef<llvm::APFloat>(one)));
+    cst.addTypes(gammaType);
+    gamma = rewriter.create(cst)->getResult(0);
+  }
+
+  mlir::OperationState state(last->getLoc(), "onnx.LayerNormalization");
+  state.addOperands({x, gamma});
+  if (beta)
+    state.addOperands(beta);
+  state.addTypes(xType);
+  auto si64 = rewriter.getIntegerType(64, /*isSigned=*/true);
+  state.addAttribute("axis", rewriter.getIntegerAttr(si64, -1));
+  state.addAttribute("epsilon",
+                     rewriter.getF32FloatAttr(static_cast<float>(*eps)));
+  state.addAttribute("stash_type", rewriter.getIntegerAttr(si64, 1));
+  for (llvm::StringRef name : {"node.outputs", "onnx_node_name"})
+    if (mlir::Attribute attr = last->getAttr(name))
+      state.addAttribute(name, attr);
+  mlir::Operation *ln = rewriter.create(state);
+  rewriter.replaceOp(last, ln->getResult(0));
+
+  // Users before producers, so each erase can free the next op's operands.
+  llvm::SmallVector<mlir::Operation *> dead;
+  if (mulOp && mulOp != last)
+    dead.push_back(mulOp);
+  if (root != last)
+    dead.push_back(root);
+  dead.append(chain.rbegin(), chain.rend());
+  dead.append({epsAdd, varOp, sqOp, subOp, meanOp});
+  for (mlir::Operation *op : dead)
+    if (op->use_empty())
+      rewriter.eraseOp(op);
+
+  LLVM_DEBUG(llvm::dbgs() << "[" DEBUG_TYPE "] fused at " << ln->getLoc()
+                          << "\n");
+  ++NumLayerNormFused;
+  return mlir::success();
+}
+
+/// n = Div(d, sqrt(var + eps)).
 struct DecomposedLayerNormToLayerNorm : public mlir::RewritePattern {
   DecomposedLayerNormToLayerNorm(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Div", /*benefit=*/2, ctx) {}
@@ -147,104 +336,34 @@ struct DecomposedLayerNormToLayerNorm : public mlir::RewritePattern {
                   mlir::PatternRewriter &rewriter) const override {
     if (divOp->getNumOperands() != 2)
       return rewriter.notifyMatchFailure(divOp, "div.arity");
-    mlir::Value d = divOp->getOperand(0);
+    llvm::SmallVector<mlir::Operation *> chain;
+    mlir::Value a = matchStd(divOp->getOperand(1), chain);
+    if (!a)
+      return rewriter.notifyMatchFailure(divOp, "denominator not sqrt");
+    return fuseLayerNorm(divOp, divOp->getOperand(0), a, chain, rewriter);
+  }
+};
 
-    mlir::Operation *sqrtOp = defOpNamed(divOp->getOperand(1), "onnx.Sqrt");
-    if (!sqrtOp)
-      return rewriter.notifyMatchFailure(divOp, "denominator not Sqrt");
-    mlir::Operation *epsAdd = defOpNamed(sqrtOp->getOperand(0), "onnx.Add");
-    if (!epsAdd || epsAdd->getNumOperands() != 2)
-      return rewriter.notifyMatchFailure(divOp, "sqrt input not Add");
-    mlir::Value var;
-    std::optional<double> eps;
-    for (int i = 0; i < 2 && !eps; ++i) {
-      eps = getScalarFloatConstant(epsAdd->getOperand(i));
-      var = epsAdd->getOperand(1 - i);
+/// n = Mul(d, 1 / sqrt(var + eps)), either operand order.
+struct DecomposedLayerNormMulToLayerNorm : public mlir::RewritePattern {
+  DecomposedLayerNormMulToLayerNorm(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Mul", /*benefit=*/2, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *mulOp,
+                  mlir::PatternRewriter &rewriter) const override {
+    if (mulOp->getNumOperands() != 2)
+      return rewriter.notifyMatchFailure(mulOp, "mul.arity");
+    for (int i = 0; i < 2; ++i) {
+      mlir::Value d = mulOp->getOperand(i);
+      if (!defOpNamed(d, "onnx.Sub"))
+        continue;
+      llvm::SmallVector<mlir::Operation *> chain;
+      mlir::Value a = matchInvStd(mulOp->getOperand(1 - i), chain);
+      if (a)
+        return fuseLayerNorm(mulOp, d, a, chain, rewriter);
     }
-    if (!eps)
-      return rewriter.notifyMatchFailure(divOp, "epsilon not a scalar const");
-
-    mlir::Operation *subOp = defOpNamed(d, "onnx.Sub");
-    if (!subOp)
-      return rewriter.notifyMatchFailure(divOp, "numerator not Sub");
-    mlir::Value x = subOp->getOperand(0);
-    auto xType = mlir::dyn_cast<mlir::RankedTensorType>(x.getType());
-    if (!xType || xType.getRank() < 1 ||
-        !mlir::isa<mlir::FloatType>(xType.getElementType()) ||
-        xType.isDynamicDim(xType.getRank() - 1) ||
-        xType != divOp->getResult(0).getType())
-      return rewriter.notifyMatchFailure(divOp, "x type");
-    int64_t rank = xType.getRank();
-
-    mlir::Operation *meanOp = subOp->getOperand(1).getDefiningOp();
-    if (!isLastAxisMean(meanOp, rank) || meanOp->getOperand(0) != x)
-      return rewriter.notifyMatchFailure(divOp, "mean not ReduceMean(x, -1)");
-
-    mlir::Operation *varOp = var.getDefiningOp();
-    if (!isLastAxisMean(varOp, rank))
-      return rewriter.notifyMatchFailure(divOp, "var not ReduceMean(.., -1)");
-    mlir::Operation *sqOp = varOp->getOperand(0).getDefiningOp();
-    bool isSquare = false;
-    if (sqOp && sqOp->getName().getStringRef() == "onnx.Pow")
-      isSquare = sqOp->getOperand(0) == d &&
-                 getScalarFloatConstant(sqOp->getOperand(1)) == 2.0;
-    else if (sqOp && sqOp->getName().getStringRef() == "onnx.Mul")
-      isSquare = sqOp->getOperand(0) == d && sqOp->getOperand(1) == d;
-    if (!isSquare)
-      return rewriter.notifyMatchFailure(divOp, "var input not (x-mean)^2");
-
-    // Affine tail: Mul(n, gamma) then optional Add(., beta).
-    int64_t dim = xType.getDimSize(rank - 1);
-    mlir::Value n = divOp->getResult(0);
-    if (!n.hasOneUse())
-      return rewriter.notifyMatchFailure(divOp, "normalized has many uses");
-    mlir::Operation *mulOp = *n.getUsers().begin();
-    if (mulOp->getName().getStringRef() != "onnx.Mul")
-      return rewriter.notifyMatchFailure(divOp, "no scale Mul");
-    mlir::Value gamma = otherOperand(mulOp, n);
-    if (!gamma || !isPerChannel(gamma, dim) ||
-        mulOp->getResult(0).getType() != xType)
-      return rewriter.notifyMatchFailure(divOp, "scale not per-channel");
-    mlir::Operation *last = mulOp;
-    mlir::Value beta;
-    if (mulOp->getResult(0).hasOneUse()) {
-      mlir::Operation *addOp = *mulOp->getResult(0).getUsers().begin();
-      if (addOp->getName().getStringRef() == "onnx.Add") {
-        mlir::Value b = otherOperand(addOp, mulOp->getResult(0));
-        if (b && isPerChannel(b, dim) &&
-            addOp->getResult(0).getType() == xType) {
-          beta = b;
-          last = addOp;
-        }
-      }
-    }
-
-    mlir::OperationState state(last->getLoc(), "onnx.LayerNormalization");
-    state.addOperands({x, gamma});
-    if (beta)
-      state.addOperands(beta);
-    state.addTypes(xType);
-    auto si64 = rewriter.getIntegerType(64, /*isSigned=*/true);
-    state.addAttribute("axis", rewriter.getIntegerAttr(si64, -1));
-    state.addAttribute("epsilon",
-                       rewriter.getF32FloatAttr(static_cast<float>(*eps)));
-    state.addAttribute("stash_type", rewriter.getIntegerAttr(si64, 1));
-    for (llvm::StringRef name : {"node.outputs", "onnx_node_name"})
-      if (mlir::Attribute a = last->getAttr(name))
-        state.addAttribute(name, a);
-    rewriter.setInsertionPoint(last);
-    mlir::Operation *ln = rewriter.create(state);
-    rewriter.replaceOp(last, ln->getResult(0));
-
-    for (mlir::Operation *op :
-         {mulOp, divOp, sqrtOp, epsAdd, varOp, sqOp, subOp, meanOp})
-      if (op != last && op->use_empty())
-        rewriter.eraseOp(op);
-
-    LLVM_DEBUG(llvm::dbgs()
-               << "[" DEBUG_TYPE "] fused at " << ln->getLoc() << "\n");
-    ++NumLayerNormFused;
-    return mlir::success();
+    return rewriter.notifyMatchFailure(mulOp, "not (x - mean) * rsqrt");
   }
 };
 
@@ -252,7 +371,9 @@ struct DecomposedLayerNormToLayerNorm : public mlir::RewritePattern {
 
 void populateLayerNormFusionPatterns(mlir::RewritePatternSet &patterns,
                                      mlir::MLIRContext *ctx) {
-  patterns.add<DecomposedLayerNormToLayerNorm>(ctx);
+  patterns
+      .add<DecomposedLayerNormToLayerNorm, DecomposedLayerNormMulToLayerNorm>(
+          ctx);
 }
 
 } // namespace hip
