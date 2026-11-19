@@ -153,7 +153,7 @@ then fail downstream. Emit `tosa.bitwise_and` / `bitwise_or` / `bitwise_not` on
 
 HIP ops are destination-passing style: they carry a `!hip.context` and an `outs`
 buffer. Drop both — the result type already encodes the destination. After
-`hip-fuse-rocmlir` the context is a `ub.poison` value.
+the rocMLIR fusion, the context is a `ub.poison` value.
 
 The pass uses the dialect conversion driver, so patterns are
 `OpConversionPattern`s that read operands off the `adaptor`. `BinaryConverter`
@@ -190,7 +190,7 @@ For the same reason every op the kernel contains must be marked legal:
 `applyFullConversion` treats an op with *no registered legality* as illegal, so
 an unlisted dialect fails the pass even when no pattern touches it and even when
 the op has no uses. The target lists the `tosa` and `func` dialects plus
-`ub::PoisonOp`, which is needed because `hip-fuse-rocmlir` maps the
+`ub::PoisonOp`, which is needed because the rocMLIR fusion maps the
 `!hip.context` to a `ub.poison` inside the outlined kernel. Extend that legality
 set if a new op's lowering introduces another dialect (e.g. `arith` for a
 materialized constant).
@@ -218,7 +218,7 @@ cmd /c "`"$vc`" >nul 2>&1 && set" | ForEach-Object {
 
 Two gates control whether the pass does anything:
 - `convert-hip-to-tosa` early-returns unless the function has `rock.kernel`.
-- `hip-fuse-rocmlir` only runs on a function named `main_graph`, and only
+- The rocMLIR fusion only runs on a function named `main_graph`, and only
   outlines `hip.conv` / `hip.gemm` anchors plus their pointwise consumers.
 
 So test the pattern directly on a pre-stamped function:
@@ -227,7 +227,7 @@ So test the pattern directly on a pre-stamped function:
 ../build/hip-ep/bin/hip-mlir-opt --convert-hip-to-tosa test.mlir
 ```
 
-Do not try to validate via the full flow. `--hip-fuse-rocmlir` segfaults on a
+Do not try to validate via the full flow. `--hip-rocmlir-fusion` segfaults on a
 hand-written `main_graph` with a `hip.gemm` anchor even with
 `convert-hip-to-tosa` out of the pipeline, so `--rocmlir-pipeline` cannot
 currently confirm a pattern. Verify with `--convert-hip-to-tosa` alone.

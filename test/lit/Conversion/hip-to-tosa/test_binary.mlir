@@ -194,6 +194,20 @@ func.func @mul_scalar_operand(%ctx: !hip.context, %x: tensor<1x64x112x112xf16>,
   return %r : tensor<1x64x112x112xf16>
 }
 
+// The other direction: a one-element vector into a scalar. EqualizeRanks only
+// prepends 1s, so the vector is reshaped onto the result before tosa.mul.
+// CHECK-LABEL: func.func @mul_unit_to_scalar
+// CHECK: tosa.reshape %arg1
+// CHECK: tosa.mul
+// CHECK-NOT: hip.mul
+func.func @mul_unit_to_scalar(%ctx: !hip.context, %x: tensor<1xf32>,
+                              %y: tensor<f32>, %init: tensor<f32>)
+    -> tensor<f32> attributes {rock.kernel} {
+  %r = hip.mul(%ctx) ins(%x, %y : tensor<1xf32>, tensor<f32>)
+                     outs(%init : tensor<f32>) -> tensor<f32>
+  return %r : tensor<f32>
+}
+
 //===----------------------------------------------------------------------===//
 // The rock.kernel guard, which is a property of the pass rather than of any
 // one op.
@@ -243,6 +257,18 @@ func.func @incompatible_broadcast(%ctx: !hip.context,
                      outs(%init : tensor<1x64x112x112xf16>)
                      -> tensor<1x64x112x112xf16>
   return %r : tensor<1x64x112x112xf16>
+}
+
+// -----
+
+// A length-4 vector is not a scalar spelled with a size-1 dimension.
+func.func @mul_nonunit_to_scalar(%ctx: !hip.context, %x: tensor<4xf32>,
+                                 %y: tensor<f32>, %init: tensor<f32>)
+    -> tensor<f32> attributes {rock.kernel} {
+  // expected-error @+1 {{failed to legalize operation 'hip.mul'}}
+  %r = hip.mul(%ctx) ins(%x, %y : tensor<4xf32>, tensor<f32>)
+                     outs(%init : tensor<f32>) -> tensor<f32>
+  return %r : tensor<f32>
 }
 
 // -----
