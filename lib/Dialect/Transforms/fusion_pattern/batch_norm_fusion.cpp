@@ -183,7 +183,9 @@ bool matchStandardDeviation(mlir::Value value, mlir::RankedTensorType data,
 }
 
 /// `inverse` is 1 / sqrt(variance + epsilon), as reciprocal(sqrt(...)), as
-/// pow(sqrt(...), -1), or as pow(variance + epsilon, -0.5).
+/// pow(sqrt(...), -1), or as pow(variance + epsilon, -0.5). The ONNX converter
+/// rewrites these exponents before a hip.pow exists, but other frontends, such
+/// as Torch-MLIR, may still emit them.
 bool matchInverseStandardDeviation(mlir::Value inverse,
                                    mlir::RankedTensorType data, Chain &chain) {
   if (auto reciprocal = inverse.getDefiningOp<mlir::hip::ReciprocalOp>())
