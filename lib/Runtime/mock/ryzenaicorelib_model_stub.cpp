@@ -8,6 +8,11 @@
 
 #include "corelib_model.h"
 
+// Searchable with: strings hipgpu.dll | findstr HIPDNN_EP_CORELIB_VERSION
+// "stub" means this DLL was built without RyzenAI CoreLib headers.
+static const char kCorelibBuildVersion[] = "HIPDNN_EP_CORELIB_VERSION=stub";
+static const char *const kCorelibBuildVersionPtr = kCorelibBuildVersion;
+
 namespace hipdnn_ep::corelib {
 
 namespace {
