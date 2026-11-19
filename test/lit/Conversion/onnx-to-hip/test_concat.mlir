@@ -186,4 +186,18 @@ module {
 
     return %r : tensor<1x128x64xf32>
   }
+
+  // Test 10: a bool multi-row concat is one hip.concat; i1 is one byte per
+  // element in device memory.
+  func.func @test_concat_bool_rows(%a: tensor<64x64x1xi1>,
+                                   %b: tensor<64x64x1xi1>) -> tensor<64x64x2xi1> {
+    // CHECK-LABEL: func.func @test_concat_bool_rows
+    %r = "onnx.Concat"(%a, %b) {axis = 2 : si64}
+        : (tensor<64x64x1xi1>, tensor<64x64x1xi1>) -> tensor<64x64x2xi1>
+
+    // CHECK-NOT: tensor.insert_slice
+    // CHECK: hip.concat(%{{.*}}) ins(%{{.*}}, %{{.*}} : tensor<64x64x1xi1>, tensor<64x64x1xi1>) outs(%{{.*}} : tensor<64x64x2xi1>) {axis = 2 : i64}
+
+    return %r : tensor<64x64x2xi1>
+  }
 }

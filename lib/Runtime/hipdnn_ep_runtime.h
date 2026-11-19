@@ -962,8 +962,33 @@ int wrap_group_query_attention_host_length(
     // window masks; null when absent. key_bias_len must cover seq_len_kv.
     void *key_bias, int64_t key_bias_batch, int64_t key_bias_len);
 
-// Compiler-selected entry for proven FP16 Ring candidates. Other shapes and
-// devices fall back to GQA with the same optional host-length contract.
+// Physical-width ABI with compiler-proven FP16 tensor types and the same
+// optional host-length contract as dense GQA.
+int wrap_group_query_attention_v5(
+    RuntimeState *state, int op_state_slot,
+    // Inputs 1-7 (core GQA)
+    void *query, void *key, void *value, void *past_key, void *past_value,
+    void *seqlens_k, void *total_seq_len,
+    // Inputs 8-10 (RoPE)
+    void *cos_cache, void *sin_cache, void *position_ids,
+    // Inputs 11-14 (advanced features)
+    void *attention_bias, void *head_sink, void *k_scale, void *v_scale,
+    // Outputs
+    void *output, void *present_key, void *present_value, void *output_qk,
+    // Attributes (13)
+    int64_t num_heads, int64_t kv_num_heads, float scale, int64_t do_rotary,
+    int64_t rotary_interleaved, float softcap, int64_t local_window_size,
+    int64_t smooth_softmax, int64_t qk_output, int64_t k_quant_type,
+    int64_t v_quant_type, int64_t kv_cache_bit_width, int32_t no_causal,
+    // Shape values (6)
+    int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
+    int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
+    int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
+    int64_t seq_len_new_kv, int32_t has_host_length, int32_t host_length_value,
+    void *key_bias, int64_t key_bias_batch, int64_t key_bias_len,
+    int64_t past_key_width, int64_t past_value_width, int64_t present_key_width,
+    int64_t present_value_width, int32_t fp16_tensors);
+
 int wrap_group_query_attention_ring_f16(
     RuntimeState *state, int op_state_slot,
     // Inputs 1-7 (core GQA)
@@ -2255,6 +2280,15 @@ int wrap_pad(RuntimeState *state, void *data, void *pads, void *constant_value,
              int64_t output_rank, int64_t pads_num_elements,
              int64_t axes_num_elements, int64_t data_type, int64_t mode_id);
 
+// Pad with compile-time pads: `lower_pads` is a host array holding the begin
+// pad of every axis (length `rank`). Never reads device memory or syncs the
+// stream. Modes as in wrap_pad. `constant_value` is a host pointer to the fill
+// value (one element of `data_type`) for constant mode, or null for zero.
+int wrap_pad_static(RuntimeState *state, void *data, void *output,
+                    const int64_t *data_shape, const int64_t *output_shape,
+                    const int64_t *lower_pads, int64_t rank, int64_t data_type,
+                    int64_t mode_id, const void *constant_value);
+
 // Tile operation wrapper.
 // repeats: int64 1-D tensor of length `data_rank`.
 int wrap_tile(RuntimeState *state, void *input, void *repeats, void *output,
@@ -2337,6 +2371,13 @@ int wrap_slice_typed(RuntimeState *state, void *data, void *starts, void *ends,
                      int64_t starts_num_elements, int64_t axes_num_elements,
                      int64_t steps_num_elements, int64_t data_type,
                      int64_t index_type);
+// Slice with compile-time parameters: `starts` and `steps` are host arrays of
+// length `rank` holding the resolved start and step of every axis, and
+// `output_shape` is exact. Never reads device memory or syncs the stream.
+int wrap_slice_static(RuntimeState *state, void *data, void *output,
+                      const int64_t *data_shape, const int64_t *output_shape,
+                      const int64_t *starts, const int64_t *steps, int64_t rank,
+                      int64_t data_type);
 
 // ScatterND: output = copy(data), then output[indices[i]] (reduction)
 // updates[i].

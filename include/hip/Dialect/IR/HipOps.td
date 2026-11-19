@@ -14,6 +14,7 @@ include "hip/Dialect/IR/HipTypes.td"
 include "mlir/Interfaces/DestinationStyleOpInterface.td"
 include "mlir/Interfaces/InferTypeOpInterface.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
+include "mlir/Interfaces/ViewLikeInterface.td"
 include "mlir/IR/OpBase.td"
 include "mlir/IR/SymbolInterfaces.td"
 
@@ -243,6 +244,38 @@ def Hip_GetHostScratchOp : Hip_Op<"get_host_scratch",
   let arguments = (ins Hip_ContextType:$ctx, Index:$scratch_size);
   let results = (outs AnyMemRef:$scratch);
   let assemblyFormat = "`(` $ctx `,` $scratch_size `)` attr-dict `:` type($scratch)";
+}
+
+// An identity memref covering a contiguous run of elements of another memref.
+// memref.view can only do this from a flat i8 buffer, and memref.reinterpret_cast
+// cannot change the element type, so the packed concat-slot rewrite needs its
+// own op. The lowering shifts the aligned pointer and stores a zero descriptor
+// offset, which is the pointer every HIP lowering already loads.
+def Hip_PackedViewOp : Hip_Op<"packed_view", [
+    Pure,
+    DeclareOpInterfaceMethods<ViewLikeOpInterface, ["getViewSource"]>
+  ]> {
+  let summary = "Identity memref for a contiguous span of another memref";
+  let description = [{
+    Names `result`, an identity-layout memref, as the contiguous elements of
+    `source` beginning at `element_offset` (counted in elements). `source`
+    must be identity layout, and both memrefs share an element type and a
+    memory space. The result's aligned pointer is the first element of the
+    span, so a lowering that loads only that pointer addresses the span.
+
+    Example:
+    ```mlir
+    %slot = hip.packed_view %cat[%c16]
+        : memref<1x8x2x2xf32> to memref<1x4x2x2xf32>
+    ```
+  }];
+  let arguments = (ins AnyMemRef:$source, Index:$element_offset);
+  let results = (outs AnyMemRef:$result);
+  let assemblyFormat = [{
+    $source `[` $element_offset `]` attr-dict
+    `:` type($source) `to` type($result)
+  }];
+  let hasVerifier = 1;
 }
 
 def Hip_AllocOutputOp : Hip_Op<"alloc_output",
@@ -3810,6 +3843,10 @@ def Hip_CastOp : Hip_DpsOp_AutoReifyInfer<"cast"> {
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+
+  // Folds a widening and narrowing cast pair around ops that only move
+  // elements. See lib/Dialect/IR/HipCastCanonicalize.cpp.
+  let hasCanonicalizer = 1;
 }
 
 def Hip_ReduceSumOp : Hip_DpsOp_Reduction<"reduce_sum"> {
@@ -5213,6 +5250,16 @@ def Hip_PadOp : Hip_DpsOp_WithInfer<"pad", "Output", [AttrSizedOperandSegments]>
     The `mode` attribute is one of `"constant"`, `"reflect"`, `"edge"`,
     `"wrap"`.
 
+    `static_lower_pads`, when present, holds the compile-time begin pad of
+    every data axis (length = data rank). The lowering then passes the pads
+    from host memory and never reads `pads`/`axes`, which avoids a
+    device-to-host copy and stream synchronization per call. It is only set
+    when no runtime `constant_value` read is needed either.
+
+    `static_constant_value`, when present alongside `static_lower_pads`, is
+    the compile-time fill value of a constant-mode pad, typed as the data
+    element. The lowering passes it from host memory as well.
+
     Uses destination-passing style: output buffer is provided as argument.
 
     Example:
@@ -5231,7 +5278,9 @@ def Hip_PadOp : Hip_DpsOp_WithInfer<"pad", "Output", [AttrSizedOperandSegments]>
     Optional<Hip_TensorOrMemRef>:$constant_value,
     Optional<Hip_TensorOrMemRef>:$axes,
     Hip_TensorOrMemRef:$output,
-    DefaultValuedAttr<StrAttr, "\"constant\"">:$mode
+    DefaultValuedAttr<StrAttr, "\"constant\"">:$mode,
+    OptionalAttr<DenseI64ArrayAttr>:$static_lower_pads,
+    OptionalAttr<AnyAttr>:$static_constant_value
   );
 
   let assemblyFormat = [{
@@ -5446,6 +5495,14 @@ def Hip_SliceOp : Hip_DpsOp_WithInfer<"slice", "Output", [AttrSizedOperandSegmen
     runtime call. This op exists only to give the fallback path a stable
     DPS-shaped representation to bufferize and lower from.
 
+    `static_starts` and `static_steps`, when present, hold the resolved
+    start and step of every data axis (length = data rank; an axis that is not
+    sliced has start 0 and step 1), computed at compile time from constant
+    `starts`/`ends`/`axes`/`steps` over static extents. The output shape is
+    then exact, and the lowering passes them from host memory instead of
+    having the runtime read the index tensors back and synchronize the stream.
+    The usual case is a constant negative-step slice (a flip).
+
     Uses destination-passing style: output buffer is provided as argument.
 
     Example:
@@ -5466,7 +5523,9 @@ def Hip_SliceOp : Hip_DpsOp_WithInfer<"slice", "Output", [AttrSizedOperandSegmen
     Hip_TensorOrMemRef:$ends,
     Optional<Hip_TensorOrMemRef>:$axes,
     Optional<Hip_TensorOrMemRef>:$steps,
-    Hip_TensorOrMemRef:$output
+    Hip_TensorOrMemRef:$output,
+    OptionalAttr<DenseI64ArrayAttr>:$static_starts,
+    OptionalAttr<DenseI64ArrayAttr>:$static_steps
   );
 
   let assemblyFormat = [{

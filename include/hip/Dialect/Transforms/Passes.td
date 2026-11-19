@@ -369,6 +369,40 @@ def FoldBatchNormPass
   }];
 }
 
+def ForwardConcatSlotsPass : Pass<"hip-forward-concat-slots", "mlir::func::FuncOp"> {
+  let summary = "Write a packed concat slot in place and share it with its readers";
+  let description = [{
+    A bufferized concat is one `memref.copy` per input into a `memref.subview`
+    of the concat buffer. When the slot is a packed row-major span (    batch-1
+    channel concat, or any concat whose slice has no gaps) and the source is
+    a private alloc that something writes, the pass builds an identity
+    `hip.packed_view` of that span, retargets the writer and every other reader
+    at it, and erases the copy and the private alloc. A skip connection then
+    reads the concat buffer instead of keeping its own copy. A buffer copied
+    into two concats is aliased into the first one; the second copy stays.
+
+    A concat buffer whose only uses are those slot writes plus one copy of the
+    whole buffer into a packed prefix of another buffer is replaced by that
+    prefix, so a chain of concats does not copy the growing tensor.
+
+    A concat buffer filled entirely by slot copies, whose inputs a later
+    concat copies again at the same offsets (a dense block), becomes a
+    `hip.packed_view` prefix of the later buffer and the repeated copies go
+    away. Chained, a dense block shares one buffer and each input lands in it
+    once.
+
+    A strided slot (batch greater than 1 on a middle axis, or a concat of
+    rows) is left on `memref.copy`: a dense store from the slot pointer would
+    write the wrong addresses. So is a slot whose byte offset is not a
+    multiple of 16: rocMLIR kernels declare their pointers 16-byte aligned.
+  }];
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::hip::HipDialect",
+    "mlir::memref::MemRefDialect"
+  ];
+}
+
 def PromoteStridedHipOperandsPass
     : Pass<"hip-promote-strided-operands", "mlir::func::FuncOp"> {
   let summary = "Materialize identity-layout temporaries for DPS-input memrefs "

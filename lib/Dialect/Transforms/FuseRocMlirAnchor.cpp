@@ -183,6 +183,116 @@ bool holdsQdq(RocMlirElementwiseOp module) {
   });
 }
 
+// A static integer nearest upsample is a repeated read of the input: with
+// asymmetric coordinates and floor rounding, output o copies input o / scale.
+// round_prefer_floor matches that repeat only for scales 1 and 2, because a
+// larger scale rounds some samples in the block to the next input pixel.
+// rocMLIR convolution is 2D or 3D, and only spatial axes may grow. ResizeLayout
+// rejects a resized N, and a resized C on a 5-D input, so a growth there must
+// keep failing in hip.resize rather than start working through this view.
+bool isNearestRepeatResize(ResizeOp resize) {
+  if (!resize.getRuntimeScales().empty())
+    return false;
+  if (resize.getMode() != 0 || resize.getCoordTransform() != 1)
+    return false;
+  int64_t nearest = resize.getNearestMode();
+  if (nearest != 0 && nearest != 2)
+    return false;
+
+  auto inType = dyn_cast<RankedTensorType>(resize.getInput().getType());
+  auto outType = dyn_cast<RankedTensorType>(resize.getResult(0).getType());
+  if (!inType || !outType || !inType.hasStaticShape() ||
+      !outType.hasStaticShape() || inType.getRank() != outType.getRank())
+    return false;
+  if (inType.getRank() != 4 && inType.getRank() != 5)
+    return false;
+
+  bool grew = false;
+  SmallVector<int64_t> ratios;
+  ratios.reserve(inType.getRank());
+  for (auto [axis, dims] :
+       llvm::enumerate(llvm::zip(inType.getShape(), outType.getShape()))) {
+    auto [inDim, outDim] = dims;
+    if (inDim <= 0 || outDim < inDim || outDim % inDim != 0)
+      return false;
+    int64_t ratio = outDim / inDim;
+    if (axis < 2 && ratio != 1)
+      return false;
+    if (ratio > 1)
+      grew = true;
+    if (nearest == 0 && ratio > 2)
+      return false;
+    ratios.push_back(ratio);
+  }
+  if (!grew)
+    return false;
+
+  // The runtime samples with the attribute scale, not out/in. A near-integer
+  // value such as 2.0000004 for an 8 -> 16 resize still grows by 2, but
+  // floor(o / scale) disagrees with the repeat view's o / 2, so reject it.
+  if (ArrayAttr scales = resize.getScalesAttr()) {
+    if (static_cast<int64_t>(scales.size()) != inType.getRank())
+      return false;
+    for (auto [attr, ratio] : llvm::zip(scales.getValue(), ratios)) {
+      double scale = cast<FloatAttr>(attr).getValueAsDouble();
+      if (scale != static_cast<double>(ratio))
+        return false;
+    }
+  }
+  return true;
+}
+
+// [N, C, H, W] -> [N, C, H, 1, W, 1] -> broadcast the new axes to the integer
+// scale -> [N, C, H*scale, W*scale]. Axes with scale 1 are left unchanged.
+Value buildNearestRepeatView(RewriterBase &rewriter, Location loc,
+                             Value context, Value input, Type resultType) {
+  auto inType = cast<RankedTensorType>(input.getType());
+  auto outType = cast<RankedTensorType>(resultType);
+  ArrayRef<int64_t> inShape = inType.getShape();
+  ArrayRef<int64_t> outShape = outType.getShape();
+
+  SmallVector<int64_t> splitShape;
+  SmallVector<int64_t> broadcastShape;
+  SmallVector<ReassociationIndices> reassoc;
+  int64_t axis = 0;
+  for (int64_t i = 0, rank = inType.getRank(); i < rank; ++i) {
+    int64_t scale = outShape[i] / inShape[i];
+    ReassociationIndices group;
+    group.push_back(axis++);
+    splitShape.push_back(inShape[i]);
+    broadcastShape.push_back(inShape[i]);
+    if (scale > 1) {
+      group.push_back(axis++);
+      splitShape.push_back(1);
+      broadcastShape.push_back(scale);
+    }
+    reassoc.push_back(std::move(group));
+  }
+
+  Type elemType = inType.getElementType();
+  auto splitType = RankedTensorType::get(splitShape, elemType);
+  SmallVector<OpFoldResult> splitFolds;
+  for (int64_t dim : splitShape)
+    splitFolds.push_back(rewriter.getIndexAttr(dim));
+  Value split = tensor::ExpandShapeOp::create(rewriter, loc, splitType, input,
+                                              reassoc, splitFolds);
+
+  if (splitShape == broadcastShape)
+    return tensor::CollapseShapeOp::create(rewriter, loc, outType, split,
+                                           reassoc);
+
+  auto shapeType = RankedTensorType::get(
+      {static_cast<int64_t>(broadcastShape.size())}, rewriter.getI64Type());
+  Value shape = arith::ConstantOp::create(
+      rewriter, loc, shapeType,
+      DenseIntElementsAttr::get(shapeType, broadcastShape));
+  Value init = tensor::EmptyOp::create(rewriter, loc, broadcastShape, elemType);
+  Value expanded = ExpandOp::create(rewriter, loc, context, split, shape, init)
+                       ->getResult(0);
+  return tensor::CollapseShapeOp::create(rewriter, loc, outType, expanded,
+                                         reassoc);
+}
+
 // One kernel: an anchor and the modules it takes.
 struct KernelPlan {
   Operation *anchor;
@@ -211,6 +321,7 @@ public:
   Value getContext() const { return context; }
   SetVector<Value> &getOperands() { return operands; }
   SetVector<Operation *> &getOps() { return ops; }
+  ArrayRef<ResizeOp> getNearestUpsamples() const { return nearestUpsamples; }
 
   void setChain(ArrayRef<Operation *> chain);
   // Returns why the region cannot be outlined, or null when it can; `moved`
@@ -223,6 +334,7 @@ private:
   void cloneInlineScalars();
   void absorbInt4Weights();
   void absorbInputProducers(ArrayRef<std::pair<Value, bool>> roots);
+  void absorbNearestUpsamples();
   void absorbOperandFreeProducers();
   void collectRemainingOperands();
   std::optional<SmallVector<Operation *>> readersToMove() const;
@@ -239,6 +351,9 @@ private:
   SetVector<Operation *> ops;
   // What the epilogue reads from outside: the residuals, biases, and scales.
   SmallVector<Value> epilogueInputs;
+  // Nearest upsamples rebuilt as a view inside the kernel. Their results stay
+  // operands of the anchor in main_graph and are mapped at clone time.
+  SmallVector<ResizeOp> nearestUpsamples;
 };
 
 // Each chain value read outside becomes a kernel result, in chain order.
@@ -411,6 +526,36 @@ void KernelRegion::absorbInputProducers(
   operands = std::move(ordered);
 }
 
+// A nearest integer upsample in front of this convolution is a view of the
+// smaller tensor. Pass that tensor in and rebuild the view inside the kernel;
+// leaving hip.resize outside would still write the expanded copy. Only the
+// convolution input is absorbed, and only when that resize has no other user.
+void KernelRegion::absorbNearestUpsamples() {
+  auto conv = dyn_cast<ConvOp>(anchor);
+  if (!conv)
+    return;
+  Value input = conv.getInput();
+  if (!operands.contains(input))
+    return;
+  auto resize = input.getDefiningOp<ResizeOp>();
+  if (!resize || !resize->hasOneUse() || !isNearestRepeatResize(resize))
+    return;
+  if (!llvm::all_of(resize->getUsers(),
+                    [&](Operation *user) { return ops.contains(user); }))
+    return;
+  Value root = resize.getInput();
+  if (!isStaticTensor(root) || !isKernelIOValue(root))
+    return;
+
+  SmallVector<Value> ordered(operands.begin(), operands.end());
+  for (Value &operand : ordered)
+    if (operand == input)
+      operand = root;
+  operands.clear();
+  operands.insert_range(ordered);
+  nearestUpsamples.push_back(resize);
+}
+
 // `ops` is cloned into an IsolatedFromAbove func, so every value it reads has
 // to resolve inside that func: a materialised destination, such as the
 // reshape of an empty that widens a 1-D convolution, travels with the ops that
@@ -434,9 +579,13 @@ void KernelRegion::absorbOperandFreeProducers() {
 }
 
 void KernelRegion::collectRemainingOperands() {
+  DenseSet<Value> rewritten;
+  for (ResizeOp resize : nearestUpsamples)
+    rewritten.insert(resize.getResult(0));
   for (Operation *op : ops)
     for (Value operand : op->getOperands())
-      if (operand != context && !ops.contains(operand.getDefiningOp()))
+      if (operand != context && !rewritten.contains(operand) &&
+          !ops.contains(operand.getDefiningOp()))
         operands.insert(operand);
   // Cloning follows this order, so a producer has to come before its reader.
   ops = topologicalSort(ops);
@@ -489,6 +638,7 @@ const char *KernelRegion::complete(ArrayRef<std::pair<Value, bool>> roots,
   cloneInlineScalars();
   absorbInt4Weights();
   absorbInputProducers(roots);
+  absorbNearestUpsamples();
   absorbOperandFreeProducers();
   collectRemainingOperands();
   if (!llvm::all_of(operands, isKernelIOValue) ||
@@ -541,6 +691,7 @@ struct KernelParts {
   const SetVector<Operation *> &ops;
   ArrayRef<Value> results;
   ArrayRef<Operation *> moved;
+  ArrayRef<ResizeOp> nearestUpsamples;
 };
 
 // `rankOneShape` is the shape operand of every rank-0 promotion in the block,
@@ -581,6 +732,12 @@ RocMlirOp outline(const KernelParts &parts, bool elementwise,
                 ub::PoisonOp::create(rewriter, loc, context.getType()));
     for (auto [index, operand] : llvm::enumerate(operands))
       mapping.map(operand, body->getArgument(index));
+    for (ResizeOp resize : parts.nearestUpsamples) {
+      Value viewed = buildNearestRepeatView(
+          rewriter, resize.getLoc(), mapping.lookup(context),
+          mapping.lookup(resize.getInput()), resize.getResult(0).getType());
+      mapping.map(resize.getResult(0), viewed);
+    }
     for (Operation *op : ops)
       rewriter.clone(*op, mapping);
     func::ReturnOp::create(rewriter, loc,
@@ -648,6 +805,19 @@ RocMlirOp outline(const KernelParts &parts, bool elementwise,
   for (Operation *op : llvm::reverse(ops))
     if (op->use_empty() && (!isa<ConstantOp>(op) || isOpTriviallyDead(op)))
       rewriter.eraseOp(op);
+  // A pointwise epilogue replaces the module, not the convolution. Drop those
+  // intermediates first so an absorbed resize is use_empty. Only a
+  // tensor.empty destination is safe to drop: a side-effecting producer of
+  // the outs() buffer must stay even when its result is unused.
+  for (ResizeOp resize : parts.nearestUpsamples) {
+    if (!resize->use_empty())
+      continue;
+    Value init = resize.getOutput();
+    rewriter.eraseOp(resize);
+    if (auto empty = init.getDefiningOp<tensor::EmptyOp>();
+        empty && empty->use_empty())
+      rewriter.eraseOp(empty);
+  }
   rewriteQuantizedBinaryOps(kernel);
   return dispatch;
 }
@@ -1076,7 +1246,8 @@ private:
                  "its kernel cannot be outlined: ")
              << reason;
     outline({region.getEnd(), region.getContext(), region.getOperands(),
-             region.getOps(), region.getResults(), moved},
+             region.getOps(), region.getResults(), moved,
+             region.getNearestUpsamples()},
             /*elementwise=*/false, rewriter, counter, arch, rankOneShape);
     return success();
   }
@@ -1133,7 +1304,7 @@ private:
     }
     ops.insert(module);
     SmallVector<Value> results(module.getResults());
-    outline({module, module.getCtx(), operands, ops, results, {}},
+    outline({module, module.getCtx(), operands, ops, results, {}, {}},
             /*elementwise=*/true, rewriter, counter, arch, rankOneShape);
   }
 

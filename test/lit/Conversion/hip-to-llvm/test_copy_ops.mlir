@@ -25,6 +25,16 @@ module {
     return
   }
 
+  // A bool buffer holds one byte per element, so elem_bytes is 1.
+  func.func @reverse_bool(
+      %ctx: !hip.context,
+      %input: memref<2x6xi1, 1>,
+      %output: memref<2x6xi1, 1>) {
+    hip.reverse(%ctx) ins(%input : memref<2x6xi1, 1>)
+                      outs(%output : memref<2x6xi1, 1>) {axes = [1]}
+    return
+  }
+
   // outer = 8 * 2, src_widths = [3, 5].
   func.func @concat_last_axis(
       %ctx: !hip.context,
@@ -48,6 +58,10 @@ module {
 
 // CHECK-LABEL: llvm.func @reverse_two_axes_f16
 // CHECK: llvm.getelementptr %{{.*}}[%{{.*}}] : (!llvm.ptr<1>, i64) -> !llvm.ptr<1>, f16
+// CHECK: llvm.call @wrap_strided_copy_nd({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, !llvm.ptr, !llvm.ptr, !llvm.ptr) -> i32
+
+// CHECK-LABEL: llvm.func @reverse_bool
+// CHECK: llvm.getelementptr %{{.*}}[%{{.*}}] : (!llvm.ptr<1>, i64) -> !llvm.ptr<1>, i1
 // CHECK: llvm.call @wrap_strided_copy_nd({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, !llvm.ptr, !llvm.ptr, !llvm.ptr) -> i32
 
 // CHECK-LABEL: llvm.func @concat_last_axis

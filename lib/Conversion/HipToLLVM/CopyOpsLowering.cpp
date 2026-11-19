@@ -34,7 +34,10 @@ Value buildI64Array(ConversionPatternRewriter &rewriter, Location loc,
   return array;
 }
 
+// Bool (i1) buffers hold one byte per element, as hip.alloc sizes them.
 std::optional<int64_t> elementBytes(Type elemType) {
+  if (elemType.isInteger(1))
+    return 1;
   if (!elemType.isIntOrFloat() || elemType.getIntOrFloatBitWidth() % 8 != 0)
     return std::nullopt;
   return elemType.getIntOrFloatBitWidth() / 8;

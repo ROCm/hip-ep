@@ -4,10 +4,10 @@
 // Verify the two ONNX Slice lowering paths:
 //
 //   1. SliceDecompose (preferred) — all slice params are compile-time
-//      constants with positive unit stride, so onnx.Slice is rewritten to
-//      a zero-cost tensor.extract_slice.
-//   2. SliceToHip (fallback) — non-constant indices or negative steps fall
-//      through to a native hip.slice op whose runtime is a stub today.
+//      constants over static sliced axes, so onnx.Slice is rewritten to a
+//      zero-cost tensor.extract_slice, plus hip.reverse for a negative step.
+//   2. SliceToHip (fallback) — non-constant indices, or a negative step on a
+//      dynamic axis, fall through to a native hip.slice op.
 
 // RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
 
@@ -138,8 +138,50 @@ module {
     // CHECK-NOT: onnx.Slice
     // CHECK: tensor.empty() : tensor<3xf32>
     // CHECK: hip.slice({{.*}}) ins({{.*}}, {{.*}}, {{.*}} : tensor<6xf32>, tensor<1xi64>, tensor<1xi64>)
+    // CHECK-NOT: static_starts
 
     return %r : tensor<3xf32>
+  }
+
+  // Test 4d: a constant flip with the INT64 end sentinel (clamped to -1)
+  // resolves at compile time to the full view plus hip.reverse, so no
+  // hip.slice is left to read parameters at run time.
+  func.func @test_slice_static_flip_sentinel(%input: tensor<4x6xf32>) -> tensor<4x6xf32> {
+    // CHECK-LABEL: func.func @test_slice_static_flip_sentinel
+    %starts = arith.constant dense<[-1]> : tensor<1xi64>
+    %ends   = arith.constant dense<[-9223372036854775807]> : tensor<1xi64>
+    %axes   = arith.constant dense<[1]> : tensor<1xi64>
+    %steps  = arith.constant dense<[-1]> : tensor<1xi64>
+    %r = "onnx.Slice"(%input, %starts, %ends, %axes, %steps)
+        : (tensor<4x6xf32>, tensor<1xi64>, tensor<1xi64>,
+           tensor<1xi64>, tensor<1xi64>) -> tensor<4x6xf32>
+
+    // CHECK-NOT: hip.slice
+    // CHECK: %[[VIEW:.*]] = tensor.extract_slice %{{.*}}[0, 0] [4, 6] [1, 1]
+    // CHECK: hip.reverse(%{{.*}}) ins(%[[VIEW]] : tensor<4x6xf32>) outs(%{{.*}} : tensor<4x6xf32>) {axes = [1]}
+
+    return %r : tensor<4x6xf32>
+  }
+
+  // Test 4e: a constant flip over an empty axis selects nothing, so the
+  // result is an empty tensor: no kernel and no runtime slice.
+  func.func @test_slice_flip_empty_axis(%input: tensor<4x0xf32>) -> tensor<4x0xf32> {
+    // CHECK-LABEL: func.func @test_slice_flip_empty_axis
+    %starts = arith.constant dense<[-1]> : tensor<1xi64>
+    %ends   = arith.constant dense<[-9223372036854775807]> : tensor<1xi64>
+    %axes   = arith.constant dense<[1]> : tensor<1xi64>
+    %steps  = arith.constant dense<[-1]> : tensor<1xi64>
+    %r = "onnx.Slice"(%input, %starts, %ends, %axes, %steps)
+        : (tensor<4x0xf32>, tensor<1xi64>, tensor<1xi64>,
+           tensor<1xi64>, tensor<1xi64>) -> tensor<4x0xf32>
+
+    // CHECK-NOT: hip.slice
+    // CHECK-NOT: hip.reverse
+    // CHECK: tensor.empty() : tensor<4x0xf32>
+    // CHECK-NOT: hip.slice
+    // CHECK-NOT: hip.reverse
+
+    return %r : tensor<4x0xf32>
   }
 
   // Test 5: non-constant starts (block argument) also falls back to the

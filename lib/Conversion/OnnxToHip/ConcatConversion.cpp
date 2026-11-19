@@ -294,7 +294,9 @@ struct ConcatToHip : public mlir::RewritePattern {
         resultType.getRank() == 0)
       return rewriter.notifyMatchFailure(op, "needs a static ranked result");
     mlir::Type elemType = resultType.getElementType();
-    if (!elemType.isIntOrFloat() || elemType.getIntOrFloatBitWidth() % 8 != 0)
+    // Bool (i1) buffers hold one byte per element, which the kernel copies.
+    if (!elemType.isIntOrFloat() ||
+        (!elemType.isInteger(1) && elemType.getIntOrFloatBitWidth() % 8 != 0))
       return rewriter.notifyMatchFailure(op, "unsupported element type");
 
     int64_t rank = resultType.getRank();
