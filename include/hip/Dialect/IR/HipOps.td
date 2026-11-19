@@ -1968,6 +1968,71 @@ def Hip_SkipRmsNormOp :
   let hasVerifier = 1;
 }
 
+def Hip_SkipLayerNormOp :
+    Hip_DpsOp_AutoReify<"skip_layer_norm", [AttrSizedOperandSegments]> {
+  let summary = "Fused residual add + layer normalization over the last axis";
+  let description = [{
+    Residual add fused with LayerNormalization over the last axis, in one
+    kernel (com.microsoft.SkipLayerNormalization, and a residual onnx.Add
+    feeding onnx.LayerNormalization):
+
+      input_skip_bias_sum = input + skip [+ bias]
+      output = (sum - mean(sum)) / sqrt(var(sum) + epsilon) * gamma [+ beta]
+
+    The sum is rounded to the element type before it is normalized, so the
+    result matches the unfused Add followed by LayerNormalization.
+
+    Inputs:
+      input  (required, T) - [..., hidden]
+      skip   (required, T) - same shape as input
+      gamma  (required, T) - [hidden]
+      beta   (optional, T) - [hidden]
+      bias   (optional, T) - [hidden], added to the sum before normalizing
+
+    DPS output buffers:
+      outputs[0] = output              (required, T)
+      outputs[1] = input_skip_bias_sum (optional, T)
+
+    Example:
+    ```mlir
+    hip.skip_layer_norm(%ctx)
+        ins(%input, %skip, %gamma : memref<1x128x768xf16, 1>,
+            memref<1x128x768xf16, 1>, memref<768xf16, 1>,
+            beta %beta : memref<768xf16, 1>)
+        outs(%output, %sum : memref<1x128x768xf16, 1>,
+                             memref<1x128x768xf16, 1>)
+        {epsilon = 1.0e-05 : f32}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$skip,
+    Hip_TensorOrMemRef:$gamma,
+    Optional<Hip_TensorOrMemRef>:$beta,
+    Optional<Hip_TensorOrMemRef>:$bias,
+
+    // DPS output buffers: [output] or [output, input_skip_bias_sum]
+    Variadic<Hip_TensorOrMemRef>:$outputs,
+
+    F32Attr:$epsilon
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $input `,` $skip `,` $gamma
+        `:` type($input) `,` type($skip) `,` type($gamma)
+        ( `,` `beta` $beta^ `:` type($beta) )?
+        ( `,` `bias` $bias^ `:` type($bias) )?
+    `)`
+    `outs` `(` $outputs `:` type($outputs) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  let hasVerifier = 1;
+}
+
 def Hip_RopeOp : Hip_DpsOp_WithInfer<"rope"> {
   let summary = "Rotary position embedding (RoPE)";
   let description = [{

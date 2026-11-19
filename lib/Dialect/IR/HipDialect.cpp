@@ -1576,6 +1576,37 @@ void SkipRmsNormOp::getEffects(
 LogicalResult SkipRmsNormOp::verify() { return success(); }
 
 //===----------------------------------------------------------------------===//
+// SkipLayerNormOp: ins(input, skip, gamma, [beta], [bias])
+//                  outs(output, [input_skip_bias_sum])
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange SkipLayerNormOp::getDpsInitsMutable() {
+  return getOutputsMutable();
+}
+
+void SkipLayerNormOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult SkipLayerNormOp::verify() {
+  unsigned numOutputs = getOutputs().size();
+  if (numOutputs < 1 || numOutputs > 2)
+    return emitOpError("expected 1 or 2 output buffers (output, "
+                       "[input_skip_bias_sum]), got ")
+           << numOutputs;
+  SmallVector<Value> dataOperands{getInput(), getSkip(), getGamma()};
+  if (Value b = getBeta())
+    dataOperands.push_back(b);
+  if (Value b = getBias())
+    dataOperands.push_back(b);
+  for (Value out : getOutputs())
+    dataOperands.push_back(out);
+  return verifyDpsComputeOp(*this, dataOperands, /*numInits=*/numOutputs);
+}
+
+//===----------------------------------------------------------------------===//
 // LayerNormOp: ins(input, scale, [bias]) outs(output, [mean, [inv_std]])
 //===----------------------------------------------------------------------===//
 
