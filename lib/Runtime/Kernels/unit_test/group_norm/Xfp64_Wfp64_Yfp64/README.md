@@ -8,15 +8,15 @@ or build hip-ep, ONNX Runtime, LLVM, or MLIR. `make` compiles
 generated in-process -- no python, no data files.
 
 ```
-make test        OFFLOAD=--offload-arch=%GFX% HIP_SDK=%HIP_SDK% [COVERAGE=1|2|3]
-make test_custom OFFLOAD=... HIP_SDK=... ARGS="--coverage 1"
+make test        HIP_SDK=%HIP_SDK% [OFFLOAD=--offload-arch=gfx11-generic] [COVERAGE=1|2|3] [TIMING=standard]
+make test_custom HIP_SDK=%HIP_SDK% ARGS="--n 1 --c 512 --spatial 9216 --groups 32 [--layout nchw|nhwc] [--silu 0|1] [--workspace split|none|small|misaligned]"
 make clean
 ```
 
 | Target | Meaning |
 |---|---|
 | `test` | Coverage-tiered sweep -- see "Shape coverage" below. |
-| `test_custom` | Runs the exe with `ARGS=` (e.g. `--coverage 1`). |
+| `test_custom` | Runs one given case through the same check and timer: `--n --c --spatial --groups` are required; `--layout` (default `nchw`), `--silu` (default 0) and `--workspace` (default `split`) are optional. Unknown, repeated, incomplete or unsupported arguments exit 2. |
 | `clean` | Removes `out/`. |
 
 ## What it checks
@@ -70,7 +70,11 @@ This kernel has no autotune table and no tuner: `MODE` is accepted for
 consistency with other leaves and only fills the `mode` column.
 
 Each case appends one row to `out/results.csv` (see `unit_test/README.md`),
-`shape` like `N2_C40_HW1000_G8`, `config` like `fp64:nhwc:split:silu1` and
-`time_ms` 0: the leaf checks correctness only.
+`shape` like `N2_C40_HW1000_G8` and `config` like
+`fixed:fp64:nhwc:split:offset:silu1` (the op has one fixed path). A case that
+passes is timed after its check with the shared timer
+(`common/hip_adaptive_timing.h`) on rotated copies of its inputs, and its row
+carries that `time_ms`; `TIMING` selects the timer preset.
 
-CI passes `OFFLOAD`/`HIP_SDK` explicitly; there is no personal default.
+`OFFLOAD` defaults to `--offload-arch=gfx11-generic` (gfx115x); pass
+`--offload-arch=gfx1170` or `gfx1171` for those chips.

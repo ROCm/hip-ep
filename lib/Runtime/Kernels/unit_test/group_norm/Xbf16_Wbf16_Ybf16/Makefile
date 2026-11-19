@@ -1,8 +1,9 @@
 # ============================================================
 # custom_kernels group_norm (bf16 input, scale, bias and output) Test
 #
-#   make test        OFFLOAD=--offload-arch=gfx1151 HIP_SDK=<sdk> [COVERAGE=1|2|3]
-#   make test_custom OFFLOAD=... HIP_SDK=... ARGS="--coverage 1"
+#   make test        HIP_SDK=<sdk> [OFFLOAD=--offload-arch=gfx11-generic] [COVERAGE=1|2|3] [TIMING=standard]
+#   make test_custom HIP_SDK=<sdk> ARGS="--n 1 --c 512 --spatial 9216 --groups 32 [--layout nchw|nhwc]
+#                    [--silu 0|1] [--workspace split|none|small|misaligned]"
 #   make clean
 #
 # The op has no autotune table and no tuner, so MODE is accepted for the
@@ -24,10 +25,11 @@ endif
 
 # ---- Required from CI / CLI ----
 
-OFFLOAD  ?= --offload-arch=gfx1151
+OFFLOAD  ?= --offload-arch=gfx11-generic
 HIP_SDK  ?= $(HIP_PATH)
 MODE     ?= lookup
 COVERAGE ?= 3
+TIMING ?= standard
 ARGS     ?=
 
 ifeq ($(HIP_SDK),)
@@ -56,13 +58,13 @@ INCLUDES     := -I$(INCLUDE_DIR)
 
 ifeq ($(DETECTED_OS),Windows)
     HIP_SDK_WIN := $(subst /,\,$(HIP_SDK))
-    RUN_CMD     = set "PATH=$(HIP_SDK_WIN)\bin;%PATH%" && set "HIPDNN_RESULTS_CSV=$(subst /,\,$(RESULTS_CSV))" && set "HIPDNN_RESULTS_OP=group_norm" && set "HIPDNN_RESULTS_LEAF=Xbf16_Wbf16_Ybf16" && set "HIPDNN_RESULTS_ARCH=$(ARCH)" && set "HIPDNN_RESULTS_MODE=$(MODE)" && $(subst /,\,.\$(1))
+    RUN_CMD     = set "PATH=$(HIP_SDK_WIN)\bin;%PATH%" && set "HIPDNN_RESULTS_CSV=$(subst /,\,$(RESULTS_CSV))" && set "HIPDNN_RESULTS_OP=group_norm" && set "HIPDNN_RESULTS_LEAF=Xbf16_Wbf16_Ybf16" && set "HIPDNN_RESULTS_ARCH=$(ARCH)" && set "HIPDNN_RESULTS_MODE=$(MODE)" && set "HIPDNN_UT_TIMING=$(TIMING)" && $(subst /,\,.\$(1))
     define DO_CLEAN
 	if exist $(BUILD_DIR) rmdir /s /q $(BUILD_DIR)
     endef
 else
     HIP_SDK_WIN := $(shell wslpath -w "$(HIP_SDK)")
-    RUN_CMD     = cmd.exe /c "set PATH=$(HIP_SDK_WIN)\bin;%PATH% && set HIPDNN_RESULTS_CSV=$(RESULTS_CSV) && set HIPDNN_RESULTS_OP=group_norm && set HIPDNN_RESULTS_LEAF=Xbf16_Wbf16_Ybf16 && set HIPDNN_RESULTS_ARCH=$(ARCH) && set HIPDNN_RESULTS_MODE=$(MODE) && %CD%\$(1)"
+    RUN_CMD     = cmd.exe /c "set PATH=$(HIP_SDK_WIN)\bin;%PATH% && set HIPDNN_RESULTS_CSV=$(RESULTS_CSV) && set HIPDNN_RESULTS_OP=group_norm && set HIPDNN_RESULTS_LEAF=Xbf16_Wbf16_Ybf16 && set HIPDNN_RESULTS_ARCH=$(ARCH) && set HIPDNN_RESULTS_MODE=$(MODE) && set HIPDNN_UT_TIMING=$(TIMING) && %CD%\$(1)"
     define DO_CLEAN
 	rm -rf $(BUILD_DIR)
     endef
@@ -104,8 +106,10 @@ test: direct
 	@$(RESET_RESULTS_CSV)
 	$(call RUN_CMD,$(TARGET_DIRECT)) --coverage $(COVERAGE)
 
-# Pass the exe's own flags through ARGS= (e.g. --coverage 1).
+# One explicit case through ARGS= (the exe's --n --c --spatial --groups and
+# optional --layout, --silu, --workspace), checked and timed like the suite.
 test_custom: direct
+	$(if $(strip $(ARGS)),,$(error test_custom requires one explicit case in ARGS))
 ifeq ($(CSV_FRESH),1)
 	@$(RESET_RESULTS_CSV)
 endif
