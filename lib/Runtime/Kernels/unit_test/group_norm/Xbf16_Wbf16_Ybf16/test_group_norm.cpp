@@ -10,9 +10,15 @@
  * workspace too small for the planned split (a shrunk split), with misaligned
  * tensors (scalar access), and twice with the same workspace to check that
  * the output is bitwise deterministic.
+ *
+ * Every case that passes is timed with the shared UT timer on rotated copies
+ * of its inputs. --n --c --spatial --groups (with optional --layout, --silu
+ * and --workspace) run one given case through the same check and timer.
  */
 
 #include "hip_custom_kernels.h"
+
+#include "../../common/hip_adaptive_timing.h"
 
 #include <hip/hip_bf16.h>
 #include <hip/hip_fp16.h>
@@ -24,6 +30,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <initializer_list>
 #include <iostream>
 #include <limits>
 #include <string>
@@ -44,6 +51,7 @@ namespace {
 
 // The one dtype of this leaf: input, scale, bias and output.
 using Elem = __hip_bfloat16;
+constexpr const char *kLeaf = "group_norm/Xbf16_Wbf16_Ybf16";
 
 constexpr int kGuardElements = 32;
 constexpr unsigned char kFillByte = 0x7f;
@@ -157,6 +165,118 @@ private:
   size_t bytes_ = 0;
 };
 
+// Shared UT timer. The timed launches read rotated copies of the inputs, so
+// that each copy has left the caches by its next read; HIPDNN_KERNEL_UT_WARM=1
+// times one copy back to back instead.
+constexpr size_t kColdRotationBytes = size_t(256) << 20;
+// Untimed reads before the timed launches, so that the copies' initial fill
+// has left the caches.
+constexpr size_t kColdSettleBytes = size_t(128) << 20;
+constexpr int kColdMaxCopies = 4096;
+
+bool warm_timing() {
+  const char *v = std::getenv("HIPDNN_KERNEL_UT_WARM");
+  return v && v[0] == '1';
+}
+
+// Copies of the buffers one launch reads. Copy 0 is the buffers themselves;
+// the others share one allocation.
+class ColdCopies {
+public:
+  struct Part {
+    const void *src;
+    size_t bytes;
+  };
+
+  explicit ColdCopies(std::initializer_list<Part> parts) : parts_(parts) {
+    size_t stride = 0;
+    for (const Part &p : parts_) {
+      offsets_.push_back(stride);
+      stride += (p.bytes + 255) & ~size_t(255);
+      bytes_ += p.bytes;
+    }
+    if (warm_timing() || bytes_ == 0)
+      return;
+    count_ = 1 + static_cast<int>(std::min<size_t>(
+                     kColdMaxCopies - 1,
+                     (kColdRotationBytes + bytes_ - 1) / bytes_));
+    stride_ = stride;
+    if (hipMalloc(&slab_, stride_ * (count_ - 1)) != hipSuccess) {
+      std::fprintf(stderr,
+                   "cold-cache copies do not fit; timing on warm caches\n");
+      slab_ = nullptr;
+      count_ = 1;
+      return;
+    }
+    for (size_t i = 0; i < parts_.size(); ++i)
+      if (parts_[i].bytes)
+        HIP_CHECK(hipMemcpy(part(1, i), parts_[i].src, parts_[i].bytes,
+                            hipMemcpyDeviceToDevice));
+    for (int filled = 1; filled < count_ - 1;) {
+      const int more = std::min(filled, count_ - 1 - filled);
+      HIP_CHECK(hipMemcpy(static_cast<char *>(slab_) + stride_ * filled, slab_,
+                          stride_ * more, hipMemcpyDeviceToDevice));
+      filled += more;
+    }
+  }
+  ~ColdCopies() {
+    if (slab_)
+      (void)hipFree(slab_);
+  }
+  ColdCopies(const ColdCopies &) = delete;
+  ColdCopies &operator=(const ColdCopies &) = delete;
+
+  int count() const { return count_; }
+  size_t bytes() const { return bytes_; }
+  // Part `i` of copy `c`.
+  char *part(int c, size_t i) const {
+    if (c == 0 || parts_[i].bytes == 0)
+      return static_cast<char *>(const_cast<void *>(parts_[i].src));
+    return static_cast<char *>(slab_) + stride_ * (c - 1) + offsets_[i];
+  }
+
+private:
+  std::vector<Part> parts_;
+  std::vector<size_t> offsets_;
+  size_t bytes_ = 0;
+  size_t stride_ = 0;
+  int count_ = 1;
+  void *slab_ = nullptr;
+};
+
+// Holds the stream until the host sets *release, so that every timed launch is
+// queued before the first one runs and the reading is the GPU's time rather
+// than the host's submission rate. Gives up after about 0.25 s in case the
+// queue cannot take all the launches.
+__global__ void hold_stream_kernel(const volatile int *release) {
+  for (int spin = 0; spin < (1 << 16) && *release == 0; ++spin)
+    __builtin_amdgcn_s_sleep(127);
+}
+
+// Host-mapped release flag for hold_stream_kernel, or null if unavailable.
+// Coherent, so the spinning kernel sees the host's write without a flush.
+int *hold_release_flag() {
+  static int *flag = [] {
+    void *p = nullptr;
+    return hipHostMalloc(&p, sizeof(int),
+                         hipHostMallocMapped | hipHostMallocCoherent) ==
+                   hipSuccess
+               ? static_cast<int *>(p)
+               : nullptr;
+  }();
+  return flag;
+}
+
+// Mean milliseconds of the complete op; launch(c) reads operand copy c.
+template <class Launch>
+double rotated_mean_ms(hipStream_t stream, const ColdCopies &copies,
+                       Launch &&launch) {
+  return hipdnn_ep_test::timing::adaptiveRotatedMeanMs(
+      stream, copies, launch, hold_release_flag(),
+      [&](const int *flag) { hold_stream_kernel<<<1, 1, 0, stream>>>(flag); },
+      warm_timing(), kColdSettleBytes, "group_norm", "hip_group_norm");
+}
+
 struct CsvRow {
   std::string shape, config;
   double time_ms = 0.0;
@@ -187,6 +307,8 @@ public:
       std::fclose(f_);
   }
   void write(const CsvRow &r) {
+    hipdnn_ep_test::timing::emitCsvBinding(r.shape, r.config, r.verdict,
+                                           r.rel_l2, r.time_ms);
     if (!f_)
       return;
     std::fprintf(f_, "%s,%s,%s,%s,%s,%s,%.6f,%.6e,%s\n",
@@ -341,15 +463,17 @@ std::string case_shape(const Shape &s) {
 
 template <typename T>
 bool run_case(const Shape &s, uint64_t seed, int channels_last,
-              WorkspaceMode mode, Inputs inputs, hipStream_t stream) {
+              WorkspaceMode mode, Inputs inputs, int activation,
+              hipStream_t stream) {
   using Info = TypeInfo<T>;
-  const int activation = static_cast<int>(seed & 1);
   const float epsilon = 1e-5f;
+  // The op has no tuned configurations: every row names the fixed path.
   char config[128];
-  std::snprintf(config, sizeof(config), "%s:%s:%s:%s:silu%d", Info::kName,
-                channels_last ? "nhwc" : "nchw", mode_name(mode),
+  std::snprintf(config, sizeof(config), "fixed:%s:%s:%s:%s:silu%d",
+                Info::kName, channels_last ? "nhwc" : "nchw", mode_name(mode),
                 inputs_name(inputs), activation);
   const std::string name = case_shape(s);
+  hipdnn_ep_test::timing::CaseScope timing_case(kLeaf, name, "hip_group_norm");
   ResultRow result(name, config);
 
   const int64_t elements = s.n * s.c * s.spatial;
@@ -502,6 +626,21 @@ bool run_case(const Shape &s, uint64_t seed, int channels_last,
               << " want=" << want[first_bad];
   std::cout << '\n';
   result.finish(rel_l2, pass);
+  // Timed after the check, so the timed launches never feed the comparison.
+  // The copies keep the skew of a misaligned case.
+  if (pass) {
+    ColdCopies copies({{d_x.get(), data_bytes + skew},
+                       {d_gamma.get(), s.c * sizeof(T)},
+                       {d_beta.get(), s.c * sizeof(T)}});
+    result.row.time_ms = rotated_mean_ms(stream, copies, [&](int copy) {
+      return hip_group_norm(stream, copies.part(copy, 0) + skew,
+                            copies.part(copy, 1), copies.part(copy, 2), y_ptr,
+                            s.n, s.c, s.spatial, s.groups, channels_last,
+                            activation, epsilon,
+                            ws_bytes ? d_ws.get() : nullptr, ws_bytes,
+                            Info::kDtype);
+    });
+  }
   return pass;
 }
 
@@ -509,6 +648,7 @@ template <typename T>
 bool run_dtype(const Shape &s, uint64_t seed, int coverage,
                hipStream_t stream) {
   bool ok = true;
+  const int activation = static_cast<int>(seed & 1);
   // The fallbacks walk the whole tensor per group; keep them to small shapes.
   const bool all_modes = s.min_coverage < 3 || coverage < 3;
   for (int channels_last : {1, 0}) {
@@ -516,20 +656,20 @@ bool run_dtype(const Shape &s, uint64_t seed, int coverage,
          {Inputs::kSmallOffset, Inputs::kLargeOffset, Inputs::kOutliers,
           Inputs::kWideRange, Inputs::kConstantGroup, Inputs::kNonFinite})
       ok = run_case<T>(s, seed, channels_last, WorkspaceMode::kFull, inputs,
-                       stream) &&
+                       activation, stream) &&
            ok;
     if (!all_modes)
       continue;
     for (WorkspaceMode mode : {WorkspaceMode::kNone, WorkspaceMode::kSmall,
                                WorkspaceMode::kMisaligned})
       ok = run_case<T>(s, seed, channels_last, mode, Inputs::kSmallOffset,
-                       stream) &&
+                       activation, stream) &&
            ok;
     // The fused fallback has its own variance and apply paths.
     for (Inputs inputs :
          {Inputs::kOutliers, Inputs::kConstantGroup, Inputs::kNonFinite})
       ok = run_case<T>(s, seed, channels_last, WorkspaceMode::kNone, inputs,
-                       stream) &&
+                       activation, stream) &&
            ok;
   }
   return ok;
@@ -650,33 +790,115 @@ template <typename T> bool run_large(int channels_last, hipStream_t stream) {
   return pass;
 }
 
-bool parse_options(int argc, char **argv, int *coverage, bool *large) {
+struct Options {
+  int coverage = 3;
+  bool large = false;
+  // One explicit case (make test_custom): --n --c --spatial --groups.
+  bool custom = false;
+  Shape shape = {0, 0, 0, 0, 1};
+  int channels_last = 0;
+  int activation = 0;
+  WorkspaceMode mode = WorkspaceMode::kFull;
+};
+
+void usage(const char *exe) {
+  std::cerr << "usage: " << exe << " [--coverage 1|2|3] [--large]\n"
+            << "       " << exe
+            << " --n N --c C --spatial HW --groups G [--layout nchw|nhwc]"
+               " [--silu 0|1] [--workspace split|none|small|misaligned]\n";
+}
+
+// Returns false on an unknown, repeated, incomplete or unsupported argument.
+bool parse_options(int argc, char **argv, Options *o) {
+  std::vector<std::string> seen;
+  int64_t *dims[] = {&o->shape.n, &o->shape.c, &o->shape.spatial,
+                     &o->shape.groups};
+  const char *dim_flags[] = {"--n", "--c", "--spatial", "--groups"};
+  bool have_dim[4] = {false, false, false, false};
   for (int i = 1; i < argc; ++i) {
     const std::string argument = argv[i];
-    if (argument == "--coverage" && i + 1 < argc) {
-      *coverage = std::atoi(argv[++i]);
-    } else if (argument == "--large") {
-      *large = true;
+    if (std::find(seen.begin(), seen.end(), argument) != seen.end())
+      return false;
+    seen.push_back(argument);
+    if (argument == "--large") {
+      o->large = true;
+      continue;
+    }
+    if (i + 1 >= argc)
+      return false;
+    const std::string value = argv[++i];
+    bool matched = false;
+    for (int d = 0; d < 4; ++d)
+      if (argument == dim_flags[d]) {
+        char *end = nullptr;
+        *dims[d] = std::strtoll(value.c_str(), &end, 10);
+        if (end == value.c_str() || *end != '\0')
+          return false;
+        have_dim[d] = matched = o->custom = true;
+      }
+    if (matched)
+      continue;
+    if (argument == "--coverage") {
+      o->coverage = std::atoi(value.c_str());
+    } else if (argument == "--layout") {
+      if (value != "nchw" && value != "nhwc")
+        return false;
+      o->channels_last = value == "nhwc";
+      o->custom = true;
+    } else if (argument == "--silu") {
+      if (value != "0" && value != "1")
+        return false;
+      o->activation = value == "1";
+      o->custom = true;
+    } else if (argument == "--workspace") {
+      if (value == "split")
+        o->mode = WorkspaceMode::kFull;
+      else if (value == "none")
+        o->mode = WorkspaceMode::kNone;
+      else if (value == "small")
+        o->mode = WorkspaceMode::kSmall;
+      else if (value == "misaligned")
+        o->mode = WorkspaceMode::kMisaligned;
+      else
+        return false;
+      o->custom = true;
     } else {
-      std::cerr << "usage: " << argv[0] << " [--coverage 1|2|3] [--large]\n";
       return false;
     }
   }
-  return *coverage >= 1 && *coverage <= 3;
+  if (o->coverage < 1 || o->coverage > 3)
+    return false;
+  if (!o->custom)
+    return true;
+  const Shape &s = o->shape;
+  return have_dim[0] && have_dim[1] && have_dim[2] && have_dim[3] &&
+         s.n >= 1 && s.c >= 1 && s.spatial >= 1 && s.groups >= 1 &&
+         s.c % s.groups == 0;
 }
 
 } // namespace
 
 int main(int argc, char **argv) {
-  int coverage = 3;
-  bool large = false;
-  if (!parse_options(argc, argv, &coverage, &large))
+  Options options;
+  if (!parse_options(argc, argv, &options)) {
+    usage(argv[0]);
     return 2;
+  }
+  const int coverage = options.coverage;
   std::cout << "group_norm " << TypeInfo<Elem>::kName
             << " coverage=" << coverage << '\n';
+  hipdnn_ep_test::timing::printTimingMode();
 
   hipStream_t stream = nullptr;
   HIP_CHECK(hipStreamCreate(&stream));
+  if (options.custom) {
+    const bool pass = run_case<Elem>(options.shape, 1, options.channels_last,
+                                     options.mode, Inputs::kSmallOffset,
+                                     options.activation, stream);
+    HIP_CHECK(hipStreamDestroy(stream));
+    std::cout << (pass ? "ALL PASS" : "SOME FAIL") << '\n';
+    return pass ? 0 : 1;
+  }
   bool all_pass = true;
   uint64_t seed = 0;
   for (const Shape &shape : kShapes) {
@@ -686,7 +908,7 @@ int main(int argc, char **argv) {
     all_pass = run_dtype<Elem>(shape, seed, coverage, stream) && all_pass;
   }
   all_pass = run_empty<Elem>(stream) && all_pass;
-  if (large)
+  if (options.large)
     for (int channels_last : {1, 0})
       all_pass = run_large<Elem>(channels_last, stream) && all_pass;
   HIP_CHECK(hipStreamDestroy(stream));
