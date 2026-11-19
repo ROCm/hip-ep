@@ -337,12 +337,13 @@ __global__ void __launch_bounds__(kMaxThreads)
   }
 }
 
-// The fallback for rows too long to cache in registers. Three passes over the
-// row, so the only pass that may read what an earlier pass wrote is the third,
-// and a thread there re-reads exactly the elements it wrote itself under the
-// same `tid`-strided loop. No thread ever reads another thread's slice, which
-// is what makes the source-aliases-destination case correct without a barrier
-// beyond the ones the reductions already impose.
+// The fallback for rows too long to cache in registers. Three passes read the
+// row; only the third writes. It recomputes each exponent from the input
+// rather than reading back a stored one, which would round it to T (fp16 or
+// bf16) before the normalization. A thread there reads each element just
+// before it writes it, under the same `tid`-strided loop, so no thread reads
+// another thread's slice, which is what makes the source-aliases-destination
+// case correct without a barrier beyond the ones the reductions impose.
 template <typename T>
 __global__ void softmax_row_2d_general_kernel(const T* in, T* out, int rows,
                                               int cols) {
@@ -364,19 +365,17 @@ __global__ void softmax_row_2d_general_kernel(const T* in, T* out, int rows,
   const float row_max =
       block_reduce_max_f(local_max, smem, tid, num_waves, num_waves);
 
-  // Pass 2: exp2f + sum.
+  // Pass 2: sum of exp2f.
   float local_sum = 0.0f;
-  for (int j = tid; j < cols; j += blockDim.x) {
-    float e = exp2f((SoftmaxIO<T>::load(in_row[j]) - row_max) * LOG2E);
-    out_row[j] = SoftmaxIO<T>::store(e);
-    local_sum += e;
-  }
+  for (int j = tid; j < cols; j += blockDim.x)
+    local_sum += exp2f((SoftmaxIO<T>::load(in_row[j]) - row_max) * LOG2E);
   const float inv =
       1.0f / block_reduce_sum_f(local_sum, smem, tid, num_waves, num_waves + 1);
 
-  // Pass 3: normalize.
+  // Pass 3: exp2f again, normalize, store.
   for (int j = tid; j < cols; j += blockDim.x)
-    out_row[j] = SoftmaxIO<T>::store(SoftmaxIO<T>::load(out_row[j]) * inv);
+    out_row[j] = SoftmaxIO<T>::store(
+        exp2f((SoftmaxIO<T>::load(in_row[j]) - row_max) * LOG2E) * inv);
 }
 
 // --- Host dispatch ------------------------------------------------------
