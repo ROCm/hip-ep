@@ -228,3 +228,15 @@ Qwen3.8-27B-fp16-ve-fp16-int4-k_quant-gs128-text-dml-onnx,5120,17408,4,128,1,128
 Qwen3.8-27B-fp16-ve-fp16-int4-k_quant-gs128-text-dml-onnx,5120,248320,4,128,1,1
 Qwen3.8-27B-fp16-ve-fp16-int4-k_quant-gs128-text-dml-onnx,6144,5120,4,128,1,64
 Qwen3.8-27B-fp16-ve-fp16-int4-k_quant-gs128-text-dml-onnx,17408,5120,4,128,1,64
+Step-3.5-Flash-fp16-experts-int2-int4-search-gs64-lmhead-int4-gs32-gqa-router-fp16-hipep,1280,4096,4,128,1,42
+Step-3.5-Flash-fp16-experts-int2-int4-search-gs64-lmhead-int4-gs32-gqa-router-fp16-hipep,4096,64,4,128,1,12
+Step-3.5-Flash-fp16-experts-int2-int4-search-gs64-lmhead-int4-gs32-gqa-router-fp16-hipep,4096,96,4,128,1,33
+Step-3.5-Flash-fp16-experts-int2-int4-search-gs64-lmhead-int4-gs32-gqa-router-fp16-hipep,4096,1024,4,128,1,90
+Step-3.5-Flash-fp16-experts-int2-int4-search-gs64-lmhead-int4-gs32-gqa-router-fp16-hipep,4096,1280,4,128,1,84
+Step-3.5-Flash-fp16-experts-int2-int4-search-gs64-lmhead-int4-gs32-gqa-router-fp16-hipep,4096,8192,4,128,1,12
+Step-3.5-Flash-fp16-experts-int2-int4-search-gs64-lmhead-int4-gs32-gqa-router-fp16-hipep,4096,11264,4,128,1,6
+Step-3.5-Flash-fp16-experts-int2-int4-search-gs64-lmhead-int4-gs32-gqa-router-fp16-hipep,4096,12288,4,128,1,33
+Step-3.5-Flash-fp16-experts-int2-int4-search-gs64-lmhead-int4-gs32-gqa-router-fp16-hipep,4096,128896,4,32,0,1
+Step-3.5-Flash-fp16-experts-int2-int4-search-gs64-lmhead-int4-gs32-gqa-router-fp16-hipep,8192,4096,4,128,1,12
+Step-3.5-Flash-fp16-experts-int2-int4-search-gs64-lmhead-int4-gs32-gqa-router-fp16-hipep,11264,4096,4,128,1,3
+Step-3.5-Flash-fp16-experts-int2-int4-search-gs64-lmhead-int4-gs32-gqa-router-fp16-hipep,12288,4096,4,128,1,33
