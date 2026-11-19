@@ -280,8 +280,14 @@ def FuseRocMlirAnchorPass
            "Merge a gemm kernel, the last-axis softmax of its result and the "
            "gemm kernel that reads the softmax into one attention kernel, "
            "when both gemms read a float type in gemm-gemm-accel-types (or "
-           "f32 with a score matrix over 32 MiB) and both head dims are at "
-           "most 256.">
+           "f32 with a score matrix larger than "
+           "attention-f32-min-score-bytes) and both head dims are at most "
+           "256.">,
+    Option<"attentionF32MinScoreBytes", "attention-f32-min-score-bytes",
+           "int64_t", /*default=*/"0",
+           "f32 attention merges only when its score matrix is larger than "
+           "this many bytes, normally the target's L2 cache size. 0 keeps "
+           "f32 attention unmerged.">
   ];
   let dependentDialects = [
     "mlir::arith::ArithDialect",

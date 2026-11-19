@@ -345,12 +345,14 @@ the A operand of the second gemm through pointwise ops and row-only reshapes
 
 ## Options
 
-The fusion rules have no switches. The two options describe the target.
+`attention` is the only switch. The other options describe the target.
 
 | Option | EP value | Effect |
 |---|---|---|
 | `arch=<gfx>` | detected | Stamps `rock.arch` on each kernel. |
-| `gemm-gemm-accel-types=<types>` | detected | The element types for the gemm-gemm gate. |
+| `gemm-gemm-accel-types=<types>` | detected | The element types for the gemm-gemm and attention gates. |
+| `attention=<bool>` | on, off with `HIPDNN_EP_ROCMLIR_NO_ATTENTION=1` | Merges gemm -> softmax -> gemm into one attention kernel. |
+| `attention-f32-min-score-bytes=<n>` | the device's L2 cache size | f32 attention merges only when its score matrix is larger than this; 0 never merges f32. |
 
 ## Tests and tools
 

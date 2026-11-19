@@ -315,27 +315,25 @@ static bool fuseGemmGemmPair(RocMlirOp second, int &counter,
   return false;
 }
 
-// rocMLIR's attention kernel keeps a head dimension of each gemm in LDS.
-// MIGraphX fuses attention up to the same limit.
+// rocMLIR's attention kernel keeps a head dimension of each gemm in LDS, up to
+// this size.
 static constexpr int64_t kMaxAttentionHeadDim = 256;
 
-// The last-level cache of the largest target (gfx1151's 32 MiB MALL). A score
-// matrix that fits stays in cache between the unfused kernels.
-static constexpr int64_t kAttentionCacheBytes = int64_t{32} << 20;
-
 // Both gemms read a floating-point type. With matrix acceleration fusing
-// always pays; without it (f32) the fused kernel is slower per flop, so it
-// pays only when the score matrix would otherwise spill out of the cache. A
-// BERT-large f32 block (9 MiB of scores) measured faster unfused.
+// always pays. Without it (f32) the fused kernel is slower per flop, so it
+// pays only when the score matrix is larger than `f32MinScoreBytes`, the
+// target's cache, and would otherwise go to memory between the unfused
+// kernels. A `f32MinScoreBytes` of 0 never fuses f32.
 static bool isAttentionSupported(Operation *anchor,
                                  ArrayRef<std::string> accelTypes,
-                                 int64_t scoreBytes) {
+                                 int64_t scoreBytes, int64_t f32MinScoreBytes) {
   Type elementType =
       getElementTypeOrSelf(getGemmAOperand(anchor).get().getType());
   if (!isa<FloatType>(elementType))
     return false;
   return isGemmGemmSupported(anchor, accelTypes) ||
-         (elementType.isF32() && scoreBytes > kAttentionCacheBytes);
+         (elementType.isF32() && f32MinScoreBytes > 0 &&
+          scoreBytes > f32MinScoreBytes);
 }
 
 // Attention: merge a gemm kernel, the last-axis softmax that reads its only
@@ -352,7 +350,8 @@ static bool isAttentionSupported(Operation *anchor,
 //   %y = hip.rocmlir @mlir_matmul_mul_miopen.softmax_matmul_2
 //       ins(%q, %k, %v) outs(%e2)
 static bool fuseAttentionTriple(RocMlirOp second, int &counter,
-                                ArrayRef<std::string> accelTypes) {
+                                ArrayRef<std::string> accelTypes,
+                                int64_t f32MinScoreBytes) {
   auto secondKernel = SymbolTable::lookupNearestSymbolFrom<func::FuncOp>(
       second, second.getKernelAttr());
   if (!secondKernel)
@@ -384,8 +383,10 @@ static bool fuseAttentionTriple(RocMlirOp second, int &counter,
         llvm::divideCeil(scoresType.getElementTypeBitWidth(), 8);
     Operation *firstAnchor = getSoleGemmAnchor(firstKernel);
     if (!firstAnchor || !endsInGemmPointwise(firstKernel, firstAnchor) ||
-        !isAttentionSupported(firstAnchor, accelTypes, scoreBytes) ||
-        !isAttentionSupported(secondAnchor, accelTypes, scoreBytes))
+        !isAttentionSupported(firstAnchor, accelTypes, scoreBytes,
+                              f32MinScoreBytes) ||
+        !isAttentionSupported(secondAnchor, accelTypes, scoreBytes,
+                              f32MinScoreBytes))
       continue;
     if (!feedsGemmA(secondKernel.getArgument(index), secondAnchor))
       continue;
@@ -415,12 +416,13 @@ static bool fuseAttentionTriple(RocMlirOp second, int &counter,
 }
 
 void fuseAttentionKernels(func::FuncOp funcOp, int &counter,
-                          ArrayRef<std::string> accelTypes) {
+                          ArrayRef<std::string> accelTypes,
+                          int64_t f32MinScoreBytes) {
   bool changed = true;
   while (changed) {
     changed = false;
     for (auto op : llvm::make_early_inc_range(funcOp.getOps<RocMlirOp>()))
-      if (fuseAttentionTriple(op, counter, accelTypes)) {
+      if (fuseAttentionTriple(op, counter, accelTypes, f32MinScoreBytes)) {
         changed = true;
         break;
       }

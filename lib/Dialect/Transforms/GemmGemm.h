@@ -22,9 +22,12 @@ void fuseGemmGemmKernels(func::FuncOp funcOp, int &counter,
 /// Merges each matmul or gemm rocMLIR kernel, the last-axis softmax that reads
 /// its only result, and the matmul or gemm kernel that reads the softmax as
 /// its A operand into one attention kernel. Both gemms must read a float type
-/// listed in `accelTypes` and have head dims of at most 256.
+/// listed in `accelTypes`, or f32 with a score matrix larger than
+/// `f32MinScoreBytes` (0 disables that case), and have head dims of at most
+/// 256.
 void fuseAttentionKernels(func::FuncOp funcOp, int &counter,
-                          ArrayRef<std::string> accelTypes);
+                          ArrayRef<std::string> accelTypes,
+                          int64_t f32MinScoreBytes);
 
 } // namespace mlir::hip
 
