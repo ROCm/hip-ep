@@ -1,0 +1,26 @@
+//===- TransposeRoundTrip.pdll --------------------------------------------===//
+//
+// Eliminate a pair of inverse hip.transpose ops on tensors.
+//
+// Included by HipFusionTransformPatterns.pdll, which declares the native
+// helpers used below. Not compilable on its own.
+//
+//   %a = hip.transpose(%ctx) ins(%x) outs(%tmp) {perm = [1, 2, 0]}
+//   %b = hip.transpose(%ctx) ins(%a) outs(%out) {perm = [2, 0, 1]}
+//
+// forwards %x to the users of %b. Tensor semantics make this legal; the
+// buffer form writes its destination and has no result to match, so it is
+// left alone. A remaining use of %a keeps the first transpose alive.
+//===----------------------------------------------------------------------===//
+
+Pattern HipTransposeRoundTrip with benefit(10) {
+  let inner = op<hip.transpose>(ctx: Value, input: Value, inner_init: Value);
+  // Reusing `ctx` pins both transposes to the same execution context.
+  let outer = op<hip.transpose>(ctx, inner.0, outer_init: Value);
+
+  IsInverseHipTransposePair(inner, outer);
+
+  rewrite outer with {
+    replace outer with input;
+  };
+}

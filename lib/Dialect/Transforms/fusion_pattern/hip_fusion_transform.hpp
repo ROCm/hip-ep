@@ -33,7 +33,6 @@
 #include "linear_attention_group_fold.hpp"
 #include "patch_embed_conv_to_gemm.hpp"
 #include "swiglu_fusion.hpp"
-#include "transpose_round_trip.hpp"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/PDL/IR/PDL.h"
@@ -433,6 +432,84 @@ isHipQdqIdentityRoundTrip(mlir::PatternRewriter &, mlir::PDLResultList &,
   // users, so the two have to be interchangeable rather than merely carry the
   // same element type.
   return mlir::success(dq.getInput().getType() == q.getOutput().getType());
+}
+
+/// outer undoes inner: both are tensor-form hip.transpose, the permutations
+/// are inverses of each other, and outer's result type is inner's input type
+///
+/// The permutations may be inverse without being self-inverse. Equal shapes
+/// do not imply inverse permutations, so the permutations are checked rather
+/// than the types. Buffer-form transposes have no result to forward and never
+/// reach here, because the pattern reads the result of inner.
+inline mlir::LogicalResult
+isInverseHipTransposePair(mlir::PatternRewriter &, mlir::PDLResultList &,
+                          llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 2)
+    return mlir::failure();
+  auto inner = mlir::dyn_cast_or_null<mlir::hip::TransposeOp>(
+      args[0].dyn_cast<mlir::Operation *>());
+  auto outer = mlir::dyn_cast_or_null<mlir::hip::TransposeOp>(
+      args[1].dyn_cast<mlir::Operation *>());
+  if (!inner || !outer || inner->getNumResults() != 1 ||
+      outer->getNumResults() != 1)
+    return mlir::failure();
+
+  auto inputType =
+      mlir::dyn_cast<mlir::RankedTensorType>(inner.getInput().getType());
+  auto middleType =
+      mlir::dyn_cast<mlir::RankedTensorType>(inner.getResult(0).getType());
+  // Equality, not compatibility: dropping a static refinement of an unknown
+  // input extent would change the type the users see.
+  if (!inputType || !middleType || inputType != outer.getResult(0).getType() ||
+      inputType.getElementType() != middleType.getElementType() ||
+      inputType.getRank() != middleType.getRank())
+    return mlir::failure();
+
+  mlir::ArrayAttr first = inner.getPerm();
+  mlir::ArrayAttr second = outer.getPerm();
+  int64_t rank = inputType.getRank();
+  if (first.size() != static_cast<size_t>(rank) ||
+      second.size() != static_cast<size_t>(rank))
+    return mlir::failure();
+  for (int64_t i : llvm::seq<int64_t>(0, rank)) {
+    int64_t firstAxis = mlir::cast<mlir::IntegerAttr>(first[i]).getInt();
+    int64_t secondAxis = mlir::cast<mlir::IntegerAttr>(second[i]).getInt();
+    if (firstAxis < 0 || firstAxis >= rank || secondAxis < 0 ||
+        secondAxis >= rank ||
+        inputType.getDimSize(firstAxis) != middleType.getDimSize(i) ||
+        mlir::cast<mlir::IntegerAttr>(first[secondAxis]).getInt() != i)
+      return mlir::failure();
+  }
+  return mlir::success();
+}
+
+/// op is one of the tensor reshape-class ops: pure metadata over a row-major
+/// buffer, so a chain of them keeps the element order of its source
+inline bool isTensorReshapeClassOp(mlir::Operation *op) {
+  return mlir::isa_and_nonnull<mlir::tensor::ReshapeOp,
+                               mlir::tensor::CollapseShapeOp,
+                               mlir::tensor::ExpandShapeOp>(op);
+}
+
+/// outer and inner are back-to-back tensor reshapes and outer lands on
+/// exactly the type inner started from
+///
+/// Reshapes never reorder elements, so such a pair is the identity. The type
+/// has to be fully static: with several dynamic extents an equal type does not
+/// pin the shape down, and tensor.reshape may take any shape of the same size.
+inline mlir::LogicalResult
+isReshapeRoundTrip(mlir::PatternRewriter &, mlir::PDLResultList &,
+                   llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 2)
+    return mlir::failure();
+  auto *inner = args[0].dyn_cast<mlir::Operation *>();
+  auto *outer = args[1].dyn_cast<mlir::Operation *>();
+  if (!isTensorReshapeClassOp(inner) || !isTensorReshapeClassOp(outer))
+    return mlir::failure();
+  auto sourceType =
+      mlir::dyn_cast<mlir::RankedTensorType>(inner->getOperand(0).getType());
+  return mlir::success(sourceType && sourceType.hasStaticShape() &&
+                       sourceType == outer->getResult(0).getType());
 }
 
 /// layout only moves or relabels elements, and a copy of it producing
@@ -839,6 +916,10 @@ inline void registerNativeHelpers(mlir::PDLPatternModule &pdlPatterns) {
                                          hasMatchingHipQdqParams);
   pdlPatterns.registerConstraintFunction("IsHipQdqIdentityRoundTrip",
                                          isHipQdqIdentityRoundTrip);
+  pdlPatterns.registerConstraintFunction("IsInverseHipTransposePair",
+                                         isInverseHipTransposePair);
+  pdlPatterns.registerConstraintFunction("IsReshapeRoundTrip",
+                                         isReshapeRoundTrip);
   pdlPatterns.registerConstraintFunction("CanRequantizeLayoutOp",
                                          canRequantizeLayoutOp);
   pdlPatterns.registerRewriteFunction("CreateRequantizedLayoutOp",
@@ -882,7 +963,6 @@ inline mlir::LogicalResult run(mlir::ModuleOp module,
                               mlir::PatternBenefit(kSwigluFusionBenefit));
   populateLinearAttentionGroupFoldPattern(
       patterns, mlir::PatternBenefit(kLinearAttentionGroupFoldBenefit));
-  populateTransposeRoundTripPattern(patterns);
 
   // pdl patterns here
   if (pdlBuffer.getBufferSize() != 0) {

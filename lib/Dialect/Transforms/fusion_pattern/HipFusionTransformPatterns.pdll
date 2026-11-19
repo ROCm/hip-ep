@@ -63,6 +63,10 @@ Constraint IsHipQdqIdentityRoundTrip(dq: Op, q: Op);
 Constraint CanRequantizeLayoutOp(layout: Op, resultType: Type);
 Rewrite CreateRequantizedLayoutOp(dq: Op, layout: Op, q: Op) -> Value;
 
+// Layout round-trip elimination.
+Constraint IsInverseHipTransposePair(inner: Op, outer: Op);
+Constraint IsReshapeRoundTrip(inner: Op, outer: Op);
+
 #include "QAddFusion.pdll"
 #include "QMulFusion.pdll"
 #include "QMatMulFusion.pdll"
@@ -71,3 +75,5 @@ Rewrite CreateRequantizedLayoutOp(dq: Op, layout: Op, q: Op) -> Value;
 #include "QSigmoidFusion.pdll"
 #include "QLpNormalizationFusion.pdll"
 #include "QdqRoundTrip.pdll"
+#include "TransposeRoundTrip.pdll"
+#include "ReshapeRoundTrip.pdll"

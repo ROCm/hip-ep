@@ -1,0 +1,27 @@
+//===- ReshapeRoundTrip.pdll ----------------------------------------------===//
+//
+// Eliminate back-to-back tensor reshapes that return to the source type.
+//
+// Included by HipFusionTransformPatterns.pdll, which declares the native
+// helpers used below. Not compilable on its own.
+//
+//   %a = tensor.expand_shape %x ...    : tensor<2x6xf32> -> tensor<2x2x3xf32>
+//   %b = tensor.collapse_shape %a ...  : tensor<2x2x3xf32> -> tensor<2x6xf32>
+//
+// forwards %x to the users of %b. Both ends are left unnamed so that any
+// pairing of tensor.reshape / collapse_shape / expand_shape is covered by one
+// pattern; IsReshapeRoundTrip holds the name list. Operand 0 of the tensor
+// ops is the data, so `ctx`-led hip ops never match here. The inner op
+// survives if it has other users.
+//===----------------------------------------------------------------------===//
+
+Pattern TensorReshapeRoundTrip with benefit(10) {
+  let inner = op<>(input: Value, inner_tail: ValueRange);
+  let outer = op<>(inner.0, outer_tail: ValueRange);
+
+  IsReshapeRoundTrip(inner, outer);
+
+  rewrite outer with {
+    replace outer with input;
+  };
+}
