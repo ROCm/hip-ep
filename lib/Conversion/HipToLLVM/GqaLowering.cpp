@@ -22,6 +22,15 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
   LogicalResult
   matchAndRewrite(GqaOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    // Every runtime RoPE kernel is half-rotated. Failing here keeps the
+    // model from compiling instead of failing each run.
+    if (op.getDoRotary() != 0 && op.getRotaryInterleaved() != 0)
+      return op.emitOpError(
+          "rotary_interleaved = 1 is not supported by the HIP runtime");
+    // The runtime clamps positions to the cache rows, read from dim 0.
+    if (op.getDoRotary() != 0 && op.getCosCache() &&
+        cast<MemRefType>(op.getCosCache().getType()).getRank() != 2)
+      return op.emitOpError("cos_cache must be rank 2 [max_position, D / 2]");
     const char *callee = kWrapGQAHostLength;
 #if HIP_EP_RING_ENABLED != 0
     // Prove the element types before lowering erases them. A two-byte element
@@ -251,6 +260,15 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
 
     Value elemSizeVal = createI64Const(elementSizeBytes);
 
+    // rotary_max_position: cos/sin rows. Positions are clamped into
+    // [0, rows) as RotaryEmbedding does, so position_ids beyond the cache
+    // cannot read past it.
+    Value rotaryMaxPositionVal = createI64Const(0);
+    if (op.getCosCache())
+      rotaryMaxPositionVal =
+          getMemRefDimSize(cast<MemRefType>(op.getCosCache().getType()), 0,
+                           adaptor.getCosCache(), rewriter, loc);
+
     // attention_bias broadcast extents: ONNX masks are often [B,1,S,T].
     Value attnBiasBatchVal = createI64Const(1);
     Value attnBiasNumHeadsVal = createI64Const(1);
@@ -341,7 +359,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         i64Type, // v_quant_type
         i64Type, // kv_cache_bit_width
         i32Type, // no_causal
-        // Shape info (10 values)
+        // Shape info (11 values)
         i64Type, // batch_size
         i64Type, // seq_len_q
         i64Type, // seq_len_kv
@@ -352,6 +370,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         i64Type, // attn_bias_num_heads
         i64Type, // kv_bnsd
         i64Type, // seq_len_new_kv
+        i64Type, // rotary_max_position
         i32Type, // has_host_length
         i32Type, // host_length_value
         // Key bias (3 values)
@@ -390,10 +409,10 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         numHeads, kvNumHeads, scale, doRotary, rotaryInterleaved, softcap,
         localWindowSize, smoothSoftmax, qkOutput, kQuantType, vQuantType,
         kvCacheBitWidth, noCausal,
-        // Shape info (10 values)
+        // Shape info (11 values)
         batchSizeVal, seqLenQVal, seqLenKVVal, pastBufSeqVal, headDimVal,
         elemSizeVal, attnBiasBatchVal, attnBiasNumHeadsVal, kvBnsdVal,
-        seqLenNewKVVal, hasHostLength, hostLength,
+        seqLenNewKVVal, rotaryMaxPositionVal, hasHostLength, hostLength,
         // Key bias (3 values)
         keyBiasPtr, keyBiasBatchVal, keyBiasLenVal};
 

@@ -1,4 +1,4 @@
-// RUN: hip-mlir-opt %s --hipdnn-pipeline | FileCheck %s
+// RUN: hip-mlir-opt %s --hipdnn-pipeline | FileCheck %s --implicit-check-not=wrap_rotary_embedding
 
 // Test single Llama-3.1-8B decode layer E2E pipeline (full-size)
 // This model covers the complete decode layer: Gather, LayerNorm, MatMul,
@@ -7,13 +7,16 @@
 // Verifies the complete hipdnn-pipeline:
 // 1. convert-onnx-to-hip: All ONNX ops → HIP ops
 // 2. canonicalize: Simplify redundant operations
-// 3. memory-pooling: Pool output buffer into single allocation
-// 4. convert-hip-to-llvm: HIP ops → LLVM runtime calls
-// 5. generate-interface: Create inference_init/compute/cleanup/metadata
+// 3. hip-fusion-transform: the Q/K RotaryEmbedding pair folds into the GQA
+//    call, so no standalone rope call survives
+// 4. memory-pooling: Pool output buffer into single allocation
+// 5. convert-hip-to-llvm: HIP ops → LLVM runtime calls
+// 6. generate-interface: Create inference_init/compute/cleanup/metadata
 
 // CHECK: module attributes {
 // CHECK-SAME: hipdnn.input_count = 5
 // CHECK-SAME: hipdnn.output_count = 4
+// CHECK: llvm.call @wrap_group_query_attention_host_length(
 // CHECK: llvm.func @inference_init
 // CHECK: llvm.func @inference_compute
 // CHECK: llvm.func @inference_cleanup

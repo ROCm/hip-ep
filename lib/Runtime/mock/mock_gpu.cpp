@@ -546,7 +546,10 @@ int wrap_group_query_attention_host_length(
     // it).
     int64_t kv_bnsd,
     // key/value sequence length (mock stub ignores it).
-    int64_t seq_len_new_kv, int32_t has_host_length, int32_t host_length_value,
+    int64_t seq_len_new_kv,
+    // cos/sin rows bounding RoPE positions (mock stub ignores it).
+    int64_t rotary_max_position, int32_t has_host_length,
+    int32_t host_length_value,
     // Per-key bias row [key_bias_batch, key_bias_len] (mock stub logs it).
     void *key_bias, int64_t key_bias_batch, int64_t key_bias_len) {
   if (!state) {
@@ -574,6 +577,7 @@ int wrap_group_query_attention_host_length(
   (void)attn_bias_num_heads;
   (void)kv_bnsd;
   (void)seq_len_new_kv;
+  (void)rotary_max_position;
   (void)has_host_length;
   (void)host_length_value;
 
@@ -619,8 +623,9 @@ int wrap_group_query_attention_ring_f16(
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
     int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
-    int64_t seq_len_new_kv, int32_t has_host_length, int32_t host_length_value,
-    void *key_bias, int64_t key_bias_batch, int64_t key_bias_len) {
+    int64_t seq_len_new_kv, int64_t rotary_max_position,
+    int32_t has_host_length, int32_t host_length_value, void *key_bias,
+    int64_t key_bias_batch, int64_t key_bias_len) {
   return wrap_group_query_attention_host_length(
       state, op_state_slot, query, key, value, past_key, past_value, seqlens_k,
       total_seq_len, cos_cache, sin_cache, position_ids, attention_bias,
@@ -629,8 +634,9 @@ int wrap_group_query_attention_ring_f16(
       softcap, local_window_size, smooth_softmax, qk_output, k_quant_type,
       v_quant_type, kv_cache_bit_width, no_causal, batch_size, seq_len_q,
       seq_len_kv, past_buf_seq, head_dim, element_size_bytes, attn_bias_batch,
-      attn_bias_num_heads, kv_bnsd, seq_len_new_kv, has_host_length,
-      host_length_value, key_bias, key_bias_batch, key_bias_len);
+      attn_bias_num_heads, kv_bnsd, seq_len_new_kv, rotary_max_position,
+      has_host_length, host_length_value, key_bias, key_bias_batch,
+      key_bias_len);
 }
 
 int wrap_group_query_attention_v5(
@@ -653,9 +659,10 @@ int wrap_group_query_attention_v5(
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
     int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
-    int64_t seq_len_new_kv, int32_t has_host_length, int32_t host_length_value,
-    void *key_bias, int64_t key_bias_batch, int64_t key_bias_len,
-    int64_t past_key_width, int64_t past_value_width, int64_t present_key_width,
+    int64_t seq_len_new_kv, int64_t rotary_max_position,
+    int32_t has_host_length, int32_t host_length_value, void *key_bias,
+    int64_t key_bias_batch, int64_t key_bias_len, int64_t past_key_width,
+    int64_t past_value_width, int64_t present_key_width,
     int64_t present_value_width, int32_t fp16_tensors) {
   (void)fp16_tensors;
   (void)past_key_width;
@@ -671,8 +678,9 @@ int wrap_group_query_attention_v5(
       softcap, local_window_size, smooth_softmax, qk_output, k_quant_type,
       v_quant_type, kv_cache_bit_width, no_causal, batch_size, seq_len_q,
       seq_len_kv, past_buf_seq, head_dim, element_size_bytes, attn_bias_batch,
-      attn_bias_num_heads, kv_bnsd, seq_len_new_kv, has_host_length,
-      host_length_value, key_bias, key_bias_batch, key_bias_len);
+      attn_bias_num_heads, kv_bnsd, seq_len_new_kv, rotary_max_position,
+      has_host_length, host_length_value, key_bias, key_bias_batch,
+      key_bias_len);
 }
 
 int wrap_multi_head_attention(
