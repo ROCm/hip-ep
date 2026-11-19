@@ -420,8 +420,8 @@ func.func @runtime_scale(%ctx: !hip.context, %a: tensor<8xui16>, %b: tensor<8xui
 
 // -----
 
-// hip.mul does not implement HipQuantCapableOpInterface yet, so it is left
-// for QMulFusion.pdll; an op joins this pass by implementing the interface.
+// hip.mul is deny-listed (it still reaches a kernel through QMulFusion.pdll), so
+// it has no HipQuantCapableOpInterface and is left alone.
 // CHECK-LABEL: func.func @mul_not_capable
 // CHECK:         hip.mul(%{{.*}}) ins(%{{.*}}, %{{.*}} : tensor<8xf32>, tensor<8xf32>)
 // CHECK-NOT:     hip.storage_cast
@@ -450,4 +450,85 @@ func.func @mul_not_capable(%ctx: !hip.context, %a: tensor<8xui16>, %b: tensor<8x
       {axis = 1 : i64, block_size = 0 : i64, precision = 0 : i64,
        saturate = 1 : i64} : tensor<8xui16>
   return %y : tensor<8xui16>
+}
+
+// -----
+
+// hip.gelu does not declare the interface; it gets it at dialect load.
+// CHECK-LABEL: func.func @gelu_attached
+// CHECK:         %[[QX:.*]] = hip.storage_cast %{{.*}} : tensor<8xui16> to tensor<8x!quant.uniform<u16:f32, 2.500000e-01:32768>>
+// CHECK:         %[[G:.*]] = hip.gelu(%{{.*}}) ins(%[[QX]] : tensor<8x!quant.uniform<u16:f32, 2.500000e-01:32768>>) outs(%{{.*}} : tensor<8x!quant.uniform<u16:f32, 5.000000e-01:32768>>)
+// CHECK-NEXT:    hip.storage_cast %[[G]] : tensor<8x!quant.uniform<u16:f32, 5.000000e-01:32768>> to tensor<8xui16>
+// CHECK-NOT:     hip.quantize_linear
+func.func @gelu_attached(%ctx: !hip.context, %a: tensor<8xui16>) -> tensor<8xui16> {
+  %sa = hip.constant {value = dense<0.25> : tensor<f32>} : tensor<f32>
+  %sy = hip.constant {value = dense<0.5> : tensor<f32>} : tensor<f32>
+  %z = hip.constant {value = dense<32768> : tensor<ui16>} : tensor<ui16>
+  %da_e = tensor.empty() : tensor<8xf32>
+  %da = hip.dequantize_linear(%ctx)
+      ins(%a, %sa : tensor<8xui16>, tensor<f32>)
+      zero_point(%z : tensor<ui16>)
+      outs(%da_e : tensor<8xf32>)
+      {axis = 1 : i64, block_size = 0 : i64} : tensor<8xf32>
+  %e = tensor.empty() : tensor<8xf32>
+  %g = hip.gelu(%ctx) ins(%da : tensor<8xf32>) outs(%e : tensor<8xf32>) : tensor<8xf32>
+  %y_e = tensor.empty() : tensor<8xui16>
+  %y = hip.quantize_linear(%ctx) ins(%g, %sy : tensor<8xf32>, tensor<f32>)
+      zero_point(%z : tensor<ui16>) outs(%y_e : tensor<8xui16>)
+      {axis = 1 : i64, block_size = 0 : i64, precision = 0 : i64,
+       saturate = 1 : i64} : tensor<8xui16>
+  return %y : tensor<8xui16>
+}
+
+// -----
+
+// Integer operands (gather indices) are never quantized: only the data folds.
+// CHECK-LABEL: func.func @gather_indices
+// CHECK-SAME:    %[[I:[^:]*]]: tensor<2xi64>
+// CHECK:         %[[QD:.*]] = hip.storage_cast %{{.*}} : tensor<3x4xui16> to tensor<3x4x!quant.uniform<u16:f32, 2.500000e-01:32768>>
+// CHECK:         %[[G:.*]] = hip.gather(%{{.*}}) ins(%[[QD]], %[[I]] : tensor<3x4x!quant.uniform<u16:f32, 2.500000e-01:32768>>, tensor<2xi64>) outs(%{{.*}} : tensor<2x4x!quant.uniform<u16:f32, 2.500000e-01:32768>>)
+// CHECK-NEXT:    hip.storage_cast %[[G]]
+// CHECK-NOT:     hip.quantize_linear
+func.func @gather_indices(%ctx: !hip.context, %d: tensor<3x4xui16>, %i: tensor<2xi64>) -> tensor<2x4xui16> {
+  %s = hip.constant {value = dense<0.25> : tensor<f32>} : tensor<f32>
+  %z = hip.constant {value = dense<32768> : tensor<ui16>} : tensor<ui16>
+  %dd_e = tensor.empty() : tensor<3x4xf32>
+  %dd = hip.dequantize_linear(%ctx)
+      ins(%d, %s : tensor<3x4xui16>, tensor<f32>)
+      zero_point(%z : tensor<ui16>)
+      outs(%dd_e : tensor<3x4xf32>)
+      {axis = 1 : i64, block_size = 0 : i64} : tensor<3x4xf32>
+  %e = tensor.empty() : tensor<2x4xf32>
+  %g = hip.gather(%ctx) ins(%dd, %i : tensor<3x4xf32>, tensor<2xi64>) outs(%e : tensor<2x4xf32>) {axis = 0 : i64} : tensor<2x4xf32>
+  %y_e = tensor.empty() : tensor<2x4xui16>
+  %y = hip.quantize_linear(%ctx) ins(%g, %s : tensor<2x4xf32>, tensor<f32>)
+      zero_point(%z : tensor<ui16>) outs(%y_e : tensor<2x4xui16>)
+      {axis = 1 : i64, block_size = 0 : i64, precision = 0 : i64,
+       saturate = 1 : i64} : tensor<2x4xui16>
+  return %y : tensor<2x4xui16>
+}
+
+// -----
+
+// Layout ops are deny-listed: QdqRoundTrip runs them on storage ints instead.
+// CHECK-LABEL: func.func @transpose_not_capable
+// CHECK:         hip.transpose(%{{.*}}) ins(%{{.*}} : tensor<2x4xf32>)
+// CHECK-NOT:     hip.storage_cast
+func.func @transpose_not_capable(%ctx: !hip.context, %a: tensor<2x4xui16>) -> tensor<4x2xui16> {
+  %s = hip.constant {value = dense<0.25> : tensor<f32>} : tensor<f32>
+  %z = hip.constant {value = dense<32768> : tensor<ui16>} : tensor<ui16>
+  %da_e = tensor.empty() : tensor<2x4xf32>
+  %da = hip.dequantize_linear(%ctx)
+      ins(%a, %s : tensor<2x4xui16>, tensor<f32>)
+      zero_point(%z : tensor<ui16>)
+      outs(%da_e : tensor<2x4xf32>)
+      {axis = 1 : i64, block_size = 0 : i64} : tensor<2x4xf32>
+  %e = tensor.empty() : tensor<4x2xf32>
+  %t = hip.transpose(%ctx) ins(%da : tensor<2x4xf32>) outs(%e : tensor<4x2xf32>) {perm = [1, 0]} : tensor<4x2xf32>
+  %y_e = tensor.empty() : tensor<4x2xui16>
+  %y = hip.quantize_linear(%ctx) ins(%t, %s : tensor<4x2xf32>, tensor<f32>)
+      zero_point(%z : tensor<ui16>) outs(%y_e : tensor<4x2xui16>)
+      {axis = 1 : i64, block_size = 0 : i64, precision = 0 : i64,
+       saturate = 1 : i64} : tensor<4x2xui16>
+  return %y : tensor<4x2xui16>
 }

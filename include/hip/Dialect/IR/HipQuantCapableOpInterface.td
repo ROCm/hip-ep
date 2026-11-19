@@ -10,7 +10,10 @@ include "mlir/IR/OpBase.td"
 
 // An op quantized or not by its element types (`!quant.uniform` vs float).
 // Front end only: every method is default-implemented, and kernel support is
-// the backend's (hasQuantKernel). See docs/design/quant-types.md.
+// the backend's (hasQuantKernel). DPS ops that do not declare it get it at
+// dialect load (attachQuantCapableInterface, with a deny-list); the verifier
+// below does not run for those, so hip-legalize-quant-types checks them.
+// See docs/design/quant-types.md.
 def HipQuantCapableOpInterface : OpInterface<"HipQuantCapableOpInterface"> {
   let cppNamespace = "::mlir::hip";
 
@@ -19,25 +22,11 @@ def HipQuantCapableOpInterface : OpInterface<"HipQuantCapableOpInterface"> {
       [{
         Tensors whose element types carry the quantization, in `quant_types`
         order: the shaped inputs (optional ones only when present), then the
-        output. Defaults to the DPS inputs and inits; override if an op has
-        shaped operands that are not quantized (e.g. indices).
+        output. Defaults to the DPS inputs and inits. Integer operands
+        (indices) are listed but never quantized.
       }],
       "::llvm::SmallVector<::mlir::Value>", "getQuantOperands", (ins), [{}], [{
-        ::mlir::Operation *op = $_op.getOperation();
-        ::llvm::SmallVector<::mlir::Value> operands;
-        auto shaped = [](::mlir::Value value) {
-          return ::llvm::isa<::mlir::ShapedType>(value.getType());
-        };
-        if (auto dps = ::llvm::dyn_cast<::mlir::DestinationStyleOpInterface>(op)) {
-          ::llvm::append_range(operands,
-                               ::llvm::make_filter_range(dps.getDpsInputs(), shaped));
-          ::llvm::append_range(operands, dps.getDpsInits());
-          return operands;
-        }
-        ::llvm::append_range(operands,
-                             ::llvm::make_filter_range(op->getOperands(), shaped));
-        ::llvm::append_range(operands, op->getResults());
-        return operands;
+        return ::mlir::hip::getDefaultQuantOperands($_op.getOperation());
       }]>,
 
     // Queries: read `quant_types` after legalization, tensor types before.
@@ -47,16 +36,8 @@ def HipQuantCapableOpInterface : OpInterface<"HipQuantCapableOpInterface"> {
         if quantized, else the float type.
       }],
       "::llvm::SmallVector<::mlir::Type>", "getOperandQuantTypes", (ins), [{}], [{
-        ::mlir::Operation *op = $_op.getOperation();
-        ::llvm::SmallVector<::mlir::Type> types;
-        if (auto attr = op->getAttrOfType<::mlir::ArrayAttr>("quant_types")) {
-          for (auto type : attr.getAsRange<::mlir::TypeAttr>())
-            types.push_back(type.getValue());
-          return types;
-        }
-        for (::mlir::Value value : $_op.getQuantOperands())
-          types.push_back(::mlir::getElementTypeOrSelf(value.getType()));
-        return types;
+        return ::mlir::hip::getDefaultOperandQuantTypes(
+            $_op.getOperation(), $_op.getQuantOperands());
       }]>,
     InterfaceMethod<"True if any quant operand is quantized.",
       "bool", "isQuantized", (ins), [{}], [{

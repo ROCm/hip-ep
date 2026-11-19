@@ -40,6 +40,7 @@ void HipDialect::initialize() {
 #define GET_OP_LIST
 #include "hip/Dialect/IR/HipOps.cpp.inc"
       >();
+  attachQuantCapableInterface(this);
 }
 
 #define GET_TYPEDEF_CLASSES

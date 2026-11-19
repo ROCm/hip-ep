@@ -83,13 +83,18 @@ struct LegalizeQuantTypesPass
       cast.erase();
     });
 
-    // Postcondition: nothing quantized reaches bufferization.
+    // Postcondition: nothing quantized reaches bufferization, and each
+    // `quant_types` is valid (attached interfaces skip the interface verifier).
     result = func.walk([&](Operation *op) {
-      if (!hasQuantizedType(op))
-        return WalkResult::advance();
-      op->emitOpError("still has a quantized type after "
-                      "hip-legalize-quant-types");
-      return WalkResult::interrupt();
+      if (hasQuantizedType(op)) {
+        op->emitOpError("still has a quantized type after "
+                        "hip-legalize-quant-types");
+        return WalkResult::interrupt();
+      }
+      auto quantOp = dyn_cast<HipQuantCapableOpInterface>(op);
+      if (quantOp && failed(verifyQuantTypes(op, quantOp.getQuantOperands())))
+        return WalkResult::interrupt();
+      return WalkResult::advance();
     });
     if (result.wasInterrupted())
       signalPassFailure();

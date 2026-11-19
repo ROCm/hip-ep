@@ -24,13 +24,10 @@
 #include "hip/Dialect/IR/HipTypes.h.inc"
 
 // Generated header for `HipQuantCapableOpInterface`. Must precede
-// HipOps.h.inc; its verifier and default methods need the decls below.
-#include "mlir/Dialect/Quant/IR/QuantTypes.h"
-#include "mlir/IR/TypeUtilities.h"
-namespace mlir::hip {
-::llvm::LogicalResult verifyQuantTypes(::mlir::Operation *op,
-                                       ::mlir::ValueRange operands);
-} // namespace mlir::hip
+// HipOps.h.inc; its verifier and default methods are in HipQuantTypes.h,
+// which must come first (separate block so include sorting keeps the order).
+#include "hip/Dialect/IR/HipQuantTypes.h"
+
 #include "hip/Dialect/IR/HipQuantCapableOpInterface.h.inc"
 
 // Generated header for the `HipDpsOp` C++ interface class (TableGen def

@@ -82,10 +82,11 @@ func.func @float_entry_mismatch(%ctx: !hip.context, %a: memref<8xf32>, %out: mem
 
 // -----
 
+// Quantized and float entries do not mix; integer entries (indices) may.
 func.func @entries_mixed(%ctx: !hip.context, %a: memref<8xui16>, %out: memref<8xui16>) {
   // expected-error @+1 {{'quant_types' must be all quantized or all non-quantized}}
   hip.add(%ctx) ins(%a, %a : memref<8xui16>, memref<8xui16>) outs(%out : memref<8xui16>)
-      {quant_types = [!quant.uniform<u16:f32, 0.5>, ui16, !quant.uniform<u16:f32, 0.5>]}
+      {quant_types = [!quant.uniform<u16:f32, 0.5>, f32, !quant.uniform<u16:f32, 0.5>]}
   return
 }
 

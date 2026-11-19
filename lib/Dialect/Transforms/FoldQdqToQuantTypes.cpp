@@ -15,9 +15,10 @@
 //   %s = <op>(%a, %b) outs(%init_q : quant)   // retyped in place
 //   %q = hip.storage_cast %s : quant to int
 //
-// One pattern for every op implementing HipQuantCapableOpInterface; the op is
-// retyped in place, so its attributes (transA/B, alpha/beta, ...) and optional
-// operands are untouched. Kernel availability is not checked here.
+// One pattern for every op implementing HipQuantCapableOpInterface (every hip
+// DPS op outside the deny-list in HipQuantTypes.cpp); the op is retyped in
+// place, so its attributes (transA/B, alpha/beta, ...) and optional operands
+// are untouched. Kernel availability is not checked here.
 
 #include "HipQdqUtils.h"
 
@@ -46,7 +47,8 @@ struct FoldQdqIntoQuantCapableOp
                                 PatternRewriter &rewriter) const override {
     Operation *op = quantOp;
     // Only tensor-mode ops that have not been legalized yet.
-    if (op->getNumResults() != 1 || op->hasAttr("quant_types"))
+    if (op->getNumResults() != 1 || op->getNumRegions() != 0 ||
+        op->hasAttr("quant_types"))
       return failure();
 
     // The result feeds exactly one Q with a per-tensor quant type.
@@ -64,13 +66,16 @@ struct FoldQdqIntoQuantCapableOp
             resultType.getShape())
       return failure();
 
-    // Every quantized input is a per-tensor DQ: all or none.
+    // Every non-integer input is a per-tensor DQ: all or none. Integer inputs
+    // (indices) are never quantized and stay as they are.
     SmallVector<Value> operands = quantOp.getQuantOperands();
     if (operands.size() < 2)
       return failure();
     Value init = operands.back();
     SmallVector<std::pair<DequantizeLinearOp, quant::UniformQuantizedType>> dqs;
     for (Value input : ArrayRef(operands).drop_back()) {
+      if (getElementTypeOrSelf(input).isIntOrIndex())
+        continue;
       auto dq = input.getDefiningOp<DequantizeLinearOp>();
       auto type = dq ? ::hip::fusion_transform::getHipQdqQuantType(dq)
                      : quant::UniformQuantizedType();
@@ -83,6 +88,8 @@ struct FoldQdqIntoQuantCapableOp
         return failure();
       dqs.emplace_back(dq, type);
     }
+    if (dqs.empty())
+      return failure();
 
     // Build the replacements before touching the op.
     DenseMap<Value, Value> replacement;

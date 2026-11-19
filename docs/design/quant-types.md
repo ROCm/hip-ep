@@ -10,9 +10,11 @@ op. So there is one `hip.add` for QDQ and float models, and a fusion written
 against `hip.add` applies to both. The types, not the op name, select the
 kernel and decide whether the kernel dequantizes/quantizes.
 
-Status: `hip.add`, `hip.matmul` and `hip.gemm` (`HipQuantCapableOpInterface`). `hip.qmul`, `hip.qconv`, ...
-still use the Q-specific ops and their PDLL fusions, as do the cases below that
-types cannot carry.
+Status: every hip DPS op is quant-capable (`HipQuantCapableOpInterface`) except
+a deny-list (see "Quant-capable ops"). Only `hip.add`, `hip.matmul` and
+`hip.gemm` have quantized kernels so far. `hip.mul` and `hip.sigmoid` stay on
+their Q-specific ops and PDLL fusions, as do the cases below that types cannot
+carry.
 
 The Q-specific PDLL fusions in `hip-fusion-transform` are unchanged from `main`,
 including `HipQAdd` and the per-tensor `HipQMatMul` / `HipQGemm`. In the
@@ -50,7 +52,7 @@ matmul and gemm into quant types, so those patterns only fire when
 |---|---|---|
 | Fold Q/DQ into types | `hip-fold-qdq-to-quant-types` (`FoldQdqToQuantTypes.cpp`), run just before `hip-fusion-transform` | DQ → op → Q becomes the quant-typed op when every Q/DQ has a per-tensor type (splat constant scale, readable zero point, integer storage, not packed). Kernels are not checked here. |
 | Quant-type-agnostic fusions | `hip-fusion-transform`, PDLL in `fusion_pattern/` (`MatmulBiasFusion.pdll`) and native `gemm_to_matmul.cpp` | Read element types only, so float and quant-typed chains share them. See below. |
-| Legalize | `hip-legalize-quant-types`, before bufferization | Memrefs cannot hold quant types: the [lhs, rhs, output] element types of every add move into its `quant_types` attribute, quantized tensors become storage integers, casts disappear. |
+| Legalize | `hip-legalize-quant-types`, before bufferization | Memrefs cannot hold quant types: the element types of every quant-capable op (float or quantized) move into its `quant_types` attribute, quantized tensors become storage integers, casts disappear. |
 | Lower | `convert-hip-to-llvm` | quantized `quant_types` → `wrap_qelementwise` (scales/zero points from the types); otherwise `wrap_elementwise`. |
 
 ## Matmul and gemm
@@ -73,20 +75,26 @@ Matmul + bias Add is not fused into a gemm yet.
 
 ## Quant-capable ops
 
-An op opts in through `HipQuantCapableOpInterface`
+Ops are quant-capable through `HipQuantCapableOpInterface`
 (`include/hip/Dialect/IR/HipQuantCapableOpInterface.td`). The interface is
 front end only: it says which tensors carry quantization and answers queries,
 never whether a kernel exists.
 
+- `hip.add`, `hip.matmul` and `hip.gemm` declare it in ODS.
+- Every other hip DPS op gets it when the dialect loads
+  (`attachQuantCapableInterface` in `HipQuantTypes.cpp`), except the
+  deny-list `kNotQuantCapable` there: Q/DQ and already-quantized ops,
+  `hip.mul` / `hip.sigmoid` (still on their Q kernels), layout ops (run on
+  storage ints by `QdqRoundTrip`), `hip.cast` and graph containers. Excluding
+  an op is an entry in that list.
 - `getQuantOperands()` lists the tensors that carry the quantization, in
   `quant_types` order (data inputs, optional ones only when present, then the
-  output). Default-implemented from the DPS inputs and inits; an op overrides
-  it only if it has shaped operands that are not quantized. The interface
-  verifier checks all-or-none quantization and, after legalization, that
-  `quant_types` matches the storage types.
-
-Every method is default-implemented, so moving another op over is one line in
-ODS: add `HipQuantCapableOpInterface` to its traits.
+  output): the DPS inputs and inits. Integer operands (indices) are listed
+  but never quantized.
+- The interface verifier checks all-or-none quantization and, after
+  legalization, that `quant_types` matches the storage types. It runs only on
+  the ops that declare the interface; `hip-legalize-quant-types` runs the
+  same check on the others.
 
 ### Asking an op about its quantization
 
@@ -103,7 +111,8 @@ default-implemented in the interface, so an op gets them for free:
 The answer does not depend on the stage: it is read from the tensor element
 types before `hip-legalize-quant-types` and from `quant_types` after.
 
-Call the methods directly on a concrete op (`AddOp`, `MatmulOp`, ...). For any
+Call the methods on `cast<HipQuantCapableOpInterface>(op)`, or directly on an
+op that declares the interface (`AddOp`, `MatmulOp`, `GemmOp`). For any
 `Operation *`, use `hip::isQuantizedOp(op)` / `hip::getOperandQuantTypes(op)`
 (`HipQuantTypes.h`), which also answer for ops without the interface.
 

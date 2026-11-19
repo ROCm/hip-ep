@@ -67,13 +67,20 @@ mlir::hip::getQuantElementTypes(Operation *op) {
   return result;
 }
 
+// Integer operands (indices) are never quantized, so all-or-none skips them.
+static bool isInteger(Type type) {
+  return getElementTypeOrSelf(type).isIntOrIndex();
+}
+
 LogicalResult mlir::hip::verifyQuantTypes(Operation *op, ValueRange operands) {
   auto attr = op->getAttrOfType<ArrayAttr>("quant_types");
   unsigned numQuantized = llvm::count_if(
       operands, [](Value value) { return isQuantized(value.getType()); });
 
   if (!attr) {
-    if (numQuantized != 0 && numQuantized != operands.size())
+    unsigned numQuantizable = llvm::count_if(
+        operands, [](Value value) { return !isInteger(value.getType()); });
+    if (numQuantized != 0 && numQuantized != numQuantizable)
       return op->emitOpError(
           "operands must be all quantized or all non-quantized");
     return success();
@@ -86,11 +93,12 @@ LogicalResult mlir::hip::verifyQuantTypes(Operation *op, ValueRange operands) {
     return op->emitOpError("'quant_types' expects ")
            << operands.size() << " entries, got " << attr.size();
 
-  size_t numQuantTypes =
-      llvm::count_if(attr.getAsRange<TypeAttr>(), [](TypeAttr type) {
-        return isa<quant::QuantizedType>(type.getValue());
-      });
-  if (numQuantTypes != 0 && numQuantTypes != attr.size())
+  auto entries = attr.getAsRange<TypeAttr>();
+  size_t numQuantTypes = llvm::count_if(
+      entries, [](TypeAttr type) { return isQuantized(type.getValue()); });
+  size_t numQuantizable = llvm::count_if(
+      entries, [](TypeAttr type) { return !isInteger(type.getValue()); });
+  if (numQuantTypes != 0 && numQuantTypes != numQuantizable)
     return op->emitOpError(
         "'quant_types' must be all quantized or all non-quantized");
 
@@ -116,6 +124,98 @@ LogicalResult mlir::hip::verifyQuantTypes(Operation *op, ValueRange operands) {
 namespace mlir::hip {
 #include "hip/Dialect/IR/HipQuantCapableOpInterface.cpp.inc"
 } // namespace mlir::hip
+
+SmallVector<Value> mlir::hip::getDefaultQuantOperands(Operation *op) {
+  SmallVector<Value> operands;
+  auto shaped = [](Value value) { return isa<ShapedType>(value.getType()); };
+  if (auto dps = dyn_cast<DestinationStyleOpInterface>(op)) {
+    llvm::append_range(operands,
+                       llvm::make_filter_range(dps.getDpsInputs(), shaped));
+    llvm::append_range(operands, dps.getDpsInits());
+    return operands;
+  }
+  llvm::append_range(operands,
+                     llvm::make_filter_range(op->getOperands(), shaped));
+  llvm::append_range(operands, op->getResults());
+  return operands;
+}
+
+SmallVector<Type>
+mlir::hip::getDefaultOperandQuantTypes(Operation *op,
+                                       ValueRange quantOperands) {
+  if (auto attr = op->getAttrOfType<ArrayAttr>("quant_types"))
+    return llvm::map_to_vector(attr.getAsRange<TypeAttr>(),
+                               [](TypeAttr type) { return type.getValue(); });
+  return llvm::map_to_vector(quantOperands, [](Value value) {
+    return getElementTypeOrSelf(value.getType());
+  });
+}
+
+namespace {
+
+/// The interface's defaults for ops that do not declare it.
+struct GenericQuantCapableModel
+    : HipQuantCapableOpInterface::FallbackModel<GenericQuantCapableModel> {
+  SmallVector<Value> getQuantOperands(Operation *op) const {
+    return getDefaultQuantOperands(op);
+  }
+  SmallVector<Type> getOperandQuantTypes(Operation *op) const {
+    return getDefaultOperandQuantTypes(op, getQuantOperands(op));
+  }
+  bool isQuantized(Operation *op) const {
+    return llvm::any_of(getOperandQuantTypes(op),
+                        [](Type type) { return hip::isQuantized(type); });
+  }
+  Type getInputQuantType(Operation *op, unsigned index) const {
+    SmallVector<Type> types = getOperandQuantTypes(op);
+    assert(index + 1 < types.size() && "not an input");
+    return types[index];
+  }
+  Type getResultQuantType(Operation *op) const {
+    return getOperandQuantTypes(op).back();
+  }
+  quant::UniformQuantizedType getUniformQuantType(Operation *op,
+                                                  unsigned index) const {
+    return dyn_cast<quant::UniformQuantizedType>(
+        getOperandQuantTypes(op)[index]);
+  }
+};
+
+// DPS ops that must not take quant types.
+constexpr llvm::StringLiteral kNotQuantCapable[] = {
+    // Q/DQ and ops that are already quantized.
+    "hip.quantize_linear", "hip.dequantize_linear", "hip.qadd", "hip.qmul",
+    "hip.qmatmul", "hip.qgemm", "hip.qconv", "hip.qsigmoid",
+    "hip.qlpnormalization", "hip.qlinear_conv", "hip.qlinear_matmul",
+    "hip.quant_conv", "hip.quant_matmul", "hip.matmul_nbits", "hip.qmoe",
+    "hip.qmoe_amd", "hip.dequant_bnb4", "hip.unpack_int4",
+    "hip.gather_block_quantized",
+    // Still reach a kernel through QMulFusion / QSigmoidFusion.
+    "hip.mul", "hip.sigmoid",
+    // Layout: run on storage ints (QdqRoundTrip), no requantization.
+    "hip.transpose", "hip.expand", "hip.slice", "hip.pad", "hip.tile",
+    // Element type conversion and graph containers.
+    "hip.cast", "hip.hipdnn_graph", "hip.rocmlir"};
+
+} // namespace
+
+void mlir::hip::attachQuantCapableInterface(Dialect *dialect) {
+  MLIRContext *ctx = dialect->getContext();
+  // A stale name would silently stop excluding its op.
+  assert(llvm::all_of(kNotQuantCapable,
+                      [&](StringRef name) {
+                        return RegisteredOperationName::lookup(name, ctx);
+                      }) &&
+         "unknown op in kNotQuantCapable");
+  for (RegisteredOperationName name :
+       ctx->getRegisteredOperationsByDialect(dialect->getNamespace())) {
+    if (!name.hasInterface<DestinationStyleOpInterface>() ||
+        name.hasInterface<HipQuantCapableOpInterface>() ||
+        llvm::is_contained(kNotQuantCapable, name.getStringRef()))
+      continue;
+    name.attachInterface<GenericQuantCapableModel>();
+  }
+}
 
 //===----------------------------------------------------------------------===//
 // StorageCastOp

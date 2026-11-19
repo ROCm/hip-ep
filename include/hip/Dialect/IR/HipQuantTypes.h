@@ -14,6 +14,7 @@
 
 #include "mlir/Dialect/Quant/IR/QuantTypes.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/Dialect.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/TypeRange.h"
 #include "mlir/IR/TypeUtilities.h"
@@ -44,10 +45,24 @@ SmallVector<Type> getOperandQuantTypes(Operation *op);
 /// empty unless every one is per-tensor quantized.
 SmallVector<quant::UniformQuantizedType, 3> getQuantElementTypes(Operation *op);
 
-/// HipQuantCapableOpInterface's verifier: `operands` are all quantized (no
-/// `quant_types`) or none are; then `quant_types` has one entry per operand,
-/// all quantized with matching storage types or all equal to the operand types.
+/// HipQuantCapableOpInterface's verifier: the non-integer `operands` are all
+/// quantized (no `quant_types`) or none are; then `quant_types` has one entry
+/// per operand, each quantized with a matching storage type or equal to the
+/// operand type. Integer operands (indices) are never quantized.
 LogicalResult verifyQuantTypes(Operation *op, ValueRange operands);
+
+/// Default getQuantOperands(): shaped DPS inputs, then the inits (non-DPS:
+/// shaped operands, then the results).
+SmallVector<Value> getDefaultQuantOperands(Operation *op);
+
+/// Default getOperandQuantTypes(): `quant_types` if set, else the element
+/// types of `quantOperands`.
+SmallVector<Type> getDefaultOperandQuantTypes(Operation *op,
+                                              ValueRange quantOperands);
+
+/// Attach HipQuantCapableOpInterface to every DPS op of `dialect` that does
+/// not declare it, except the deny-listed ones.
+void attachQuantCapableInterface(Dialect *dialect);
 
 } // namespace mlir::hip
 
