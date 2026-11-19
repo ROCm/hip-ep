@@ -36,6 +36,8 @@
 // 25. add_full_size_no_fold - a constant with values per pixel is not a bias
 // 26. add_runtime_no_fold   - a run-time operand stays an add
 // 27. add_two_users_no_fold - the bias-free result has another reader
+// 28. add_init_no_fold      - the result is the add's init, not an addend
+// 29. add_overflow_no_fold  - the summed f16 bias would overflow
 //
 // Cases 1-5 use a splat filter and so only pin structure. Cases 6, 7 and 15
 // use distinct per-tap values, which is what actually catches a wrong tap
@@ -802,6 +804,66 @@ module {
 
   // CHECK-LABEL: func.func @add_two_users_no_fold
   // CHECK: hip.conv({{.*}} tensor<8x1x1x1xf32>)
+  // CHECK: hip.add
+  // CHECK: return
+
+  // --------------------------------------------------------------------------
+  // 28. The result is only the add's init, which gives the output its shape;
+  //     the add's addends are the constant and %z.
+  // --------------------------------------------------------------------------
+  func.func @add_init_no_fold(%ctx: !hip.context, %x: tensor<1x1x4x4xf32>,
+                              %z: tensor<1x2x8x8xf32>) -> tensor<1x2x8x8xf32> {
+    %w = hip.constant {value = dense<1.000000e-02> : tensor<1x2x2x2xf32>}
+        : tensor<1x2x2x2xf32>
+    %c = hip.constant {value = dense<[[[[3.0]], [[4.0]]]]> : tensor<1x2x1x1xf32>}
+        : tensor<1x2x1x1xf32>
+    %init = tensor.empty() : tensor<1x2x8x8xf32>
+    %y = hip.conv_transpose(%ctx) ins(%x, %w : tensor<1x1x4x4xf32>,
+                                               tensor<1x2x2x2xf32>)
+        outs(%init : tensor<1x2x8x8xf32>)
+        {kernel_shape = [2, 2], strides = [2, 2], pads = [0, 0, 0, 0],
+         dilations = [1, 1], output_padding = [0, 0], group = 1 : i64}
+        : tensor<1x2x8x8xf32>
+    %a = hip.add(%ctx) ins(%c, %z : tensor<1x2x1x1xf32>, tensor<1x2x8x8xf32>)
+        outs(%y : tensor<1x2x8x8xf32>) -> tensor<1x2x8x8xf32>
+    return %a : tensor<1x2x8x8xf32>
+  }
+
+  // CHECK-LABEL: func.func @add_init_no_fold
+  // CHECK-SAME: %[[Z:[a-z0-9]+]]: tensor<1x2x8x8xf32>
+  // CHECK: hip.conv({{.*}} tensor<8x1x1x1xf32>)
+  // CHECK: hip.add({{.*}}) ins(%{{.*}}, %[[Z]] :
+  // CHECK: return
+
+  // --------------------------------------------------------------------------
+  // 29. The own bias and the added constant are each 65504, the largest f16.
+  //     Their sum is infinite in f16, while y + b + c can stay finite.
+  // --------------------------------------------------------------------------
+  func.func @add_overflow_no_fold(%ctx: !hip.context, %x: tensor<1x1x4x4xf16>)
+      -> tensor<1x2x8x8xf16> {
+    %w = hip.constant {value = dense<1.000000e+00> : tensor<1x2x2x2xf16>}
+        : tensor<1x2x2x2xf16>
+    %b = hip.constant {value = dense<6.550400e+04> : tensor<2xf16>}
+        : tensor<2xf16>
+    %c = hip.constant {value = dense<6.550400e+04> : tensor<1x2x1x1xf16>}
+        : tensor<1x2x1x1xf16>
+    %init = tensor.empty() : tensor<1x2x8x8xf16>
+    %y = hip.conv_transpose(%ctx) ins(%x, %w, %b : tensor<1x1x4x4xf16>,
+                                                   tensor<1x2x2x2xf16>,
+                                                   tensor<2xf16>)
+        outs(%init : tensor<1x2x8x8xf16>)
+        {kernel_shape = [2, 2], strides = [2, 2], pads = [0, 0, 0, 0],
+         dilations = [1, 1], output_padding = [0, 0], group = 1 : i64}
+        : tensor<1x2x8x8xf16>
+    %ae = tensor.empty() : tensor<1x2x8x8xf16>
+    %a = hip.add(%ctx) ins(%y, %c : tensor<1x2x8x8xf16>, tensor<1x2x1x1xf16>)
+        outs(%ae : tensor<1x2x8x8xf16>) -> tensor<1x2x8x8xf16>
+    return %a : tensor<1x2x8x8xf16>
+  }
+
+  // CHECK-LABEL: func.func @add_overflow_no_fold
+  // CHECK-NOT: 0x7C00
+  // CHECK: hip.conv({{.*}} tensor<8x1x1x1xf16>, tensor<8xf16>)
   // CHECK: hip.add
   // CHECK: return
 }

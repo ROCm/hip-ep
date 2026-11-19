@@ -182,8 +182,10 @@ def HoistPointwiseOverViewsPass
   let summary = "Move pointwise ops above the views that follow an anchor";
   let description = [{
     A pointwise op that HIP-to-TOSA converts, whose other inputs are constant
-    scalars, maps each element of its one tensor input on its own, so it
-    commutes with ops that only move elements. When that input is a chain of
+    scalars and whose result type is that of its one tensor input, maps each
+    element of that input on its own, so it commutes with ops that only move
+    elements. The pass looks only at the top-level block of main_graph, the
+    block that the anchor fusion plans. When that input is a chain of
     single-use element-move ops (reshapes, transposes, slices) over the
     single-use result of a gemm or convolution anchor, the op is rebuilt on
     the anchor's result and the chain is replayed after it. The anchor fusion

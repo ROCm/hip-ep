@@ -492,8 +492,11 @@ DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
   AddOp channelAdd;
   SmallVector<APFloat> foldedBias;
   if (Value out = op.getResult(0); out.hasOneUse()) {
+    // The single use has to be an addend; as the add's init the result would
+    // only give the output its shape.
     auto add = dyn_cast<AddOp>(*out.user_begin());
-    if (add && add->getNumResults() == 1 &&
+    if (add && (add.getLhs() == out || add.getRhs() == out) &&
+        add->getNumResults() == 1 &&
         add->getResult(0).getType() == resultType) {
       Value other = add.getLhs() == out ? add.getRhs() : add.getLhs();
       FailureOr<SmallVector<APFloat>> added =
@@ -508,11 +511,18 @@ DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
                                          cast<RankedTensorType>(bias.getType()))
                       : FailureOr<DenseElementsAttr>(failure());
         if (succeeded(own)) {
-          channelAdd = add;
-          foldedBias.assign(own->getValues<APFloat>().begin(),
-                            own->getValues<APFloat>().end());
-          for (auto [sum, extra] : llvm::zip_equal(foldedBias, *added))
-            sum.add(extra, APFloat::rmNearestTiesToEven);
+          SmallVector<APFloat> sums(own->getValues<APFloat>().begin(),
+                                    own->getValues<APFloat>().end());
+          // A sum past the type's range would make the bias infinite where
+          // the two adds stay finite, so such an add stays unfused.
+          bool overflows = false;
+          for (auto [sum, extra] : llvm::zip_equal(sums, *added))
+            overflows |= (sum.add(extra, APFloat::rmNearestTiesToEven) &
+                          APFloat::opOverflow) != 0;
+          if (!overflows) {
+            channelAdd = add;
+            foldedBias = std::move(sums);
+          }
         }
       }
     }

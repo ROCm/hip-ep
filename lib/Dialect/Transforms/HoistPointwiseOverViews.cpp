@@ -9,6 +9,7 @@
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
+#include <llvm/ADT/SetVector.h>
 #include <mlir/Dialect/Func/IR/FuncOps.h>
 #include <mlir/Dialect/Tensor/IR/Tensor.h>
 #include <mlir/IR/PatternMatch.h>
@@ -74,9 +75,10 @@ Operation *hoist(RewriterBase &rewriter, Operation *op,
   if (!dps || dps.getNumDpsInits() != 1 || !resultType ||
       !resultType.hasStaticShape())
     return nullptr;
+  // The chain is replayed in the op's result type; a cast or comparison would
+  // give its moves an element type whose lowering nothing has checked.
   OpOperand *data = getDataOperand(dps);
-  if (!data || cast<RankedTensorType>(data->get().getType()).getShape() !=
-                   resultType.getShape())
+  if (!data || data->get().getType() != resultType)
     return nullptr;
 
   // From the op's input back to the anchor's result.
@@ -103,10 +105,14 @@ Operation *hoist(RewriterBase &rewriter, Operation *op,
               (kMaxExtraDenominator + kMaxExtraNumerator))
     return nullptr;
 
-  SmallVector<Value> deadInits{dps.getDpsInits().front()};
+  // A set: after CSE, the op and a move can share one tensor.empty init.
+  llvm::SmallSetVector<Value, 4> deadInits;
+  deadInits.insert(dps.getDpsInits().front());
   for (ElementMoveOpInterface move : chain)
-    if (auto moveDps = dyn_cast<DestinationStyleOpInterface>(*move))
-      llvm::append_range(deadInits, moveDps.getDpsInits());
+    if (auto moveDps = dyn_cast<DestinationStyleOpInterface>(*move)) {
+      ValueRange inits = moveDps.getDpsInits();
+      deadInits.insert(inits.begin(), inits.end());
+    }
 
   rewriter.setInsertionPoint(op);
   Type elementType = resultType.getElementType();
@@ -140,13 +146,17 @@ struct HoistPointwiseOverViewsPass
   }
 
   void runOnOperation() override {
+    // The anchor fusion plans only the top-level block of main_graph; a hoist
+    // anywhere else gains no epilogue and only computes the dropped elements.
+    func::FuncOp funcOp = getOperation();
+    if (funcOp.getSymName() != "main_graph" || funcOp.isExternal())
+      return;
     // Program order, so a second pointwise op after a hoisted one finds the
     // replayed chain under it.
     SmallVector<Operation *> candidates;
-    getOperation().walk([&](Operation *op) {
-      if (isFusablePointwise(op))
-        candidates.push_back(op);
-    });
+    for (Operation &op : funcOp.getBody().front())
+      if (isFusablePointwise(&op))
+        candidates.push_back(&op);
     IRRewriter rewriter(&getContext());
     DenseSet<Operation *> hoisted;
     for (Operation *op : candidates)

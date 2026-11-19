@@ -16,6 +16,9 @@
 // 4. The crop has a second user: stays.
 // 5. The crop keeps too little of the grid: stays.
 // 6. The views start at a function argument, not an anchor: stays.
+// 7. A cast would replay the views in another element type: stays.
+// 8. The op and the transpose share one tensor.empty init: moved.
+// 9. A function other than main_graph, which the fusion does not plan: stays.
 // ============================================================================
 
 // RUN: hip-mlir-opt --split-input-file --hip-hoist-pointwise-over-views %s \
@@ -72,7 +75,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x8x8xf16>)
 
 // -----
 
-// CHECK-LABEL: func.func @scalar_then_unary
+// CHECK-LABEL: func.func @main_graph
 // CHECK: %[[C:.*]] = hip.conv
 // CHECK: %[[M:.*]] = hip.max({{.*}}) ins(%[[C]], %{{.*}} : tensor<1x32x9x9xf16>, tensor<f16>)
 // CHECK: %[[L:.*]] = hip.leaky_relu({{.*}}) ins(%[[M]] : tensor<1x32x9x9xf16>)
@@ -80,7 +83,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x8x8xf16>)
 // CHECK-NOT: hip.max
 // CHECK-NOT: hip.leaky_relu
 // CHECK: return
-func.func @scalar_then_unary(%ctx: !hip.context, %x: tensor<1x8x8x8xf16>)
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x8x8xf16>)
     -> tensor<1x8x16x16xf16> {
   %w = hip.constant {value = dense<1.000000e+00> : tensor<32x8x2x2xf16>}
       : tensor<32x8x2x2xf16>
@@ -113,10 +116,10 @@ func.func @scalar_then_unary(%ctx: !hip.context, %x: tensor<1x8x8x8xf16>)
 
 // -----
 
-// CHECK-LABEL: func.func @per_channel_add
+// CHECK-LABEL: func.func @main_graph
 // CHECK: tensor.extract_slice
 // CHECK: hip.add
-func.func @per_channel_add(%ctx: !hip.context, %x: tensor<1x8x8x8xf16>,
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x8x8xf16>,
                            %b: tensor<1x8x1x1xf16>) -> tensor<1x8x16x16xf16> {
   %w = hip.constant {value = dense<1.000000e+00> : tensor<32x8x2x2xf16>}
       : tensor<32x8x2x2xf16>
@@ -144,10 +147,10 @@ func.func @per_channel_add(%ctx: !hip.context, %x: tensor<1x8x8x8xf16>,
 
 // -----
 
-// CHECK-LABEL: func.func @second_user
+// CHECK-LABEL: func.func @main_graph
 // CHECK: tensor.extract_slice
 // CHECK: hip.leaky_relu
-func.func @second_user(%ctx: !hip.context, %x: tensor<1x8x8x8xf16>)
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x8x8xf16>)
     -> (tensor<1x8x16x16xf16>, tensor<1x8x16x16xf16>) {
   %w = hip.constant {value = dense<1.000000e+00> : tensor<32x8x2x2xf16>}
       : tensor<32x8x2x2xf16>
@@ -176,10 +179,10 @@ func.func @second_user(%ctx: !hip.context, %x: tensor<1x8x8x8xf16>)
 
 // -----
 
-// CHECK-LABEL: func.func @small_crop
+// CHECK-LABEL: func.func @main_graph
 // CHECK: tensor.extract_slice
 // CHECK: hip.leaky_relu({{.*}}) ins(%{{.*}} : tensor<1x8x8x8xf16>)
-func.func @small_crop(%ctx: !hip.context, %x: tensor<1x8x8x8xf16>)
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x8x8xf16>)
     -> tensor<1x8x8x8xf16> {
   %w = hip.constant {value = dense<1.000000e+00> : tensor<32x8x2x2xf16>}
       : tensor<32x8x2x2xf16>
@@ -208,10 +211,10 @@ func.func @small_crop(%ctx: !hip.context, %x: tensor<1x8x8x8xf16>)
 
 // -----
 
-// CHECK-LABEL: func.func @no_anchor
+// CHECK-LABEL: func.func @main_graph
 // CHECK: hip.transpose
 // CHECK: hip.leaky_relu({{.*}}) ins(%{{.*}} : tensor<1x8x16x16xf16>)
-func.func @no_anchor(%ctx: !hip.context, %x: tensor<1x16x8x16xf16>)
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x16x8x16xf16>)
     -> tensor<1x8x16x16xf16> {
   %te = tensor.empty() : tensor<1x8x16x16xf16>
   %t = hip.transpose(%ctx) ins(%x : tensor<1x16x8x16xf16>)
@@ -222,4 +225,80 @@ func.func @no_anchor(%ctx: !hip.context, %x: tensor<1x16x8x16xf16>)
       outs(%le : tensor<1x8x16x16xf16>) {alpha = 1.000000e-01 : f64}
       : tensor<1x8x16x16xf16>
   return %l : tensor<1x8x16x16xf16>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK: hip.transpose
+// CHECK: hip.cast({{.*}}) ins(%{{.*}} : tensor<1x32x9x9xf16>)
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x8x8xf16>)
+    -> tensor<1x32x9x9xf32> {
+  %w = hip.constant {value = dense<1.000000e+00> : tensor<32x8x2x2xf16>}
+      : tensor<32x8x2x2xf16>
+  %e = tensor.empty() : tensor<1x32x9x9xf16>
+  %c = hip.conv(%ctx) ins(%x, %w : tensor<1x8x8x8xf16>, tensor<32x8x2x2xf16>)
+      outs(%e : tensor<1x32x9x9xf16>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [2, 2],
+       pads = [1, 1, 1, 1], strides = [1, 1]} : tensor<1x32x9x9xf16>
+  %te = tensor.empty() : tensor<1x32x9x9xf16>
+  %t = hip.transpose(%ctx) ins(%c : tensor<1x32x9x9xf16>)
+      outs(%te : tensor<1x32x9x9xf16>) {perm = [0, 1, 3, 2]}
+      : tensor<1x32x9x9xf16>
+  %fe = tensor.empty() : tensor<1x32x9x9xf32>
+  %f = hip.cast(%ctx) ins(%t : tensor<1x32x9x9xf16>)
+      outs(%fe : tensor<1x32x9x9xf32>) {to = 1 : i64} : tensor<1x32x9x9xf32>
+  return %f : tensor<1x32x9x9xf32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK: %[[C:.*]] = hip.conv
+// CHECK: %[[L:.*]] = hip.leaky_relu({{.*}}) ins(%[[C]] :
+// CHECK: %[[T:.*]] = hip.transpose({{.*}}) ins(%[[L]] :
+// CHECK: return %[[T]]
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x8x8xf16>)
+    -> tensor<1x32x9x9xf16> {
+  %w = hip.constant {value = dense<1.000000e+00> : tensor<32x8x2x2xf16>}
+      : tensor<32x8x2x2xf16>
+  %e = tensor.empty() : tensor<1x32x9x9xf16>
+  %c = hip.conv(%ctx) ins(%x, %w : tensor<1x8x8x8xf16>, tensor<32x8x2x2xf16>)
+      outs(%e : tensor<1x32x9x9xf16>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [2, 2],
+       pads = [1, 1, 1, 1], strides = [1, 1]} : tensor<1x32x9x9xf16>
+  %se = tensor.empty() : tensor<1x32x9x9xf16>
+  %t = hip.transpose(%ctx) ins(%c : tensor<1x32x9x9xf16>)
+      outs(%se : tensor<1x32x9x9xf16>) {perm = [0, 1, 3, 2]}
+      : tensor<1x32x9x9xf16>
+  %l = hip.leaky_relu(%ctx) ins(%t : tensor<1x32x9x9xf16>)
+      outs(%se : tensor<1x32x9x9xf16>) {alpha = 1.000000e-01 : f64}
+      : tensor<1x32x9x9xf16>
+  return %l : tensor<1x32x9x9xf16>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @outlined
+// CHECK: hip.transpose
+// CHECK: hip.leaky_relu({{.*}}) ins(%{{.*}} : tensor<1x32x9x9xf16>)
+// CHECK-NEXT: return
+func.func @outlined(%ctx: !hip.context, %x: tensor<1x8x8x8xf16>)
+    -> tensor<1x32x9x9xf16> {
+  %w = hip.constant {value = dense<1.000000e+00> : tensor<32x8x2x2xf16>}
+      : tensor<32x8x2x2xf16>
+  %e = tensor.empty() : tensor<1x32x9x9xf16>
+  %c = hip.conv(%ctx) ins(%x, %w : tensor<1x8x8x8xf16>, tensor<32x8x2x2xf16>)
+      outs(%e : tensor<1x32x9x9xf16>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [2, 2],
+       pads = [1, 1, 1, 1], strides = [1, 1]} : tensor<1x32x9x9xf16>
+  %te = tensor.empty() : tensor<1x32x9x9xf16>
+  %t = hip.transpose(%ctx) ins(%c : tensor<1x32x9x9xf16>)
+      outs(%te : tensor<1x32x9x9xf16>) {perm = [0, 1, 3, 2]}
+      : tensor<1x32x9x9xf16>
+  %le = tensor.empty() : tensor<1x32x9x9xf16>
+  %l = hip.leaky_relu(%ctx) ins(%t : tensor<1x32x9x9xf16>)
+      outs(%le : tensor<1x32x9x9xf16>) {alpha = 1.000000e-01 : f64}
+      : tensor<1x32x9x9xf16>
+  return %l : tensor<1x32x9x9xf16>
 }
