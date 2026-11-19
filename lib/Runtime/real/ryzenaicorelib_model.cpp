@@ -23,12 +23,11 @@
 #define HIPDNN_EP_STR_(x) #x
 #define HIPDNN_EP_STR(x) HIPDNN_EP_STR_(x)
 static const char kCorelibBuildVersion[] =
-    "HIPDNN_EP_CORELIB_VERSION=" HIPDNN_EP_STR(RYZENAI_CORELIB_VERSION_MAJOR)
-    "." HIPDNN_EP_STR(RYZENAI_CORELIB_VERSION_MINOR)
-    "." HIPDNN_EP_STR(RYZENAI_CORELIB_VERSION_PATCH);
+    "HIPDNN_EP_CORELIB_VERSION=" HIPDNN_EP_STR(RYZENAI_CORELIB_VERSION_MAJOR) "." HIPDNN_EP_STR(
+        RYZENAI_CORELIB_VERSION_MINOR) "." HIPDNN_EP_STR(RYZENAI_CORELIB_VERSION_PATCH);
 #undef HIPDNN_EP_STR_
 #undef HIPDNN_EP_STR
-// Suppress unused-variable warning; the string exists to be found in the binary.
+// Keeps the string in the binary; suppresses unused-variable warning.
 static const char *const kCorelibBuildVersionPtr = kCorelibBuildVersion;
 
 #include <algorithm>
