@@ -855,11 +855,22 @@ inline void registerNativeHelpers(mlir::PDLPatternModule &pdlPatterns) {
 /// rather than at the `hip.quantize_linear` it replaces.
 constexpr unsigned kPatchEmbedConvToGemmBenefit = 5;
 
-/// The SwiGLU fusion is the only pattern in this set rooted at `hip.mul`, so
-/// this benefit is never ranked against another pattern. `HipQMul` also
+/// The SwiGLU and GeGLU fusions are the only patterns in this set rooted at
+/// `hip.mul`, and they need disjoint producers (`hip.sigmoid` vs `hip.gelu`),
+/// so this benefit is never ranked against another pattern. `HipQMul` also
 /// matches a `hip.mul`, but it roots at the `hip.quantize_linear` that
 /// consumes it.
 constexpr unsigned kSwigluFusionBenefit = 2;
+
+/// The RMS norm residual fusion is the only C++ pattern rooted at `hip.add`.
+/// `HipQAdd` also matches a `hip.add`, of two `hip.dequantize_linear`
+/// results, and roots at the `hip.quantize_linear` that consumes it.
+constexpr unsigned kRmsNormAddFusionBenefit = 2;
+
+/// Rooted at the closing `hip.cast`, as the promoted SwiGLU fusion is; that
+/// one needs a `hip.swiglu` producer and this one a `hip.mul`, so the two are
+/// never ranked against each other.
+constexpr unsigned kUnscaledRmsNormFusionBenefit = 2;
 
 /// The only pattern rooted at `hip.linear_attention`.
 constexpr unsigned kLinearAttentionGroupFoldBenefit = 1;
@@ -879,6 +890,12 @@ inline mlir::LogicalResult run(mlir::ModuleOp module,
       patterns, mlir::PatternBenefit(kPatchEmbedConvToGemmBenefit));
   populateSwigluFusionPattern(patterns,
                               mlir::PatternBenefit(kSwigluFusionBenefit));
+  populateGegluFusionPattern(patterns,
+                             mlir::PatternBenefit(kSwigluFusionBenefit));
+  populateRmsNormAddFusionPattern(
+      patterns, mlir::PatternBenefit(kRmsNormAddFusionBenefit));
+  populateUnscaledRmsNormFusionPattern(
+      patterns, mlir::PatternBenefit(kUnscaledRmsNormFusionBenefit));
   populateLinearAttentionGroupFoldPattern(
       patterns, mlir::PatternBenefit(kLinearAttentionGroupFoldBenefit));
 

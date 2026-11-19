@@ -234,3 +234,130 @@ extern "C" int hip_elementwise_gelu(void *stream, const void *input,
   }
   return static_cast<int>(err);
 }
+
+//===----------------------------------------------------------------------===//
+// Fused GeGLU: output = gelu(gate) * up
+//===----------------------------------------------------------------------===//
+
+// gelu(gate) is rounded to T before the multiply, as the hip.gelu output
+// tensor it replaces is, so the result matches the unfused pair.
+template <typename T>
+__device__ __forceinline__ T compute_geglu(T gate, T up, int64_t approximate) {
+  using Traits = GeluTraits<T>;
+  return Traits::store(Traits::load(compute_gelu<T>(gate, approximate)) *
+                       Traits::load(up));
+}
+
+template <typename T>
+__global__ void geglu_kernel(const T *__restrict__ gate,
+                             const T *__restrict__ up, T *__restrict__ output,
+                             int64_t num_elements, int64_t approximate) {
+  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements)
+    output[idx] = compute_geglu<T>(gate[idx], up[idx], approximate);
+}
+
+// 16 bytes per thread: a decode GeGLU is a few dozen KiB, which scalar half
+// loads do not stream at full bandwidth.
+template <typename T, int V> union GegluVec {
+  static_assert(sizeof(T) * V == sizeof(uint4),
+                "GegluVec covers one 16-byte load");
+  uint4 raw;
+  T elements[V];
+};
+
+template <typename T, int V>
+__global__ void geglu_vec_kernel(const T *__restrict__ gate,
+                                 const T *__restrict__ up,
+                                 T *__restrict__ output, int64_t num_vectors,
+                                 int64_t approximate) {
+  int64_t vec = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (vec >= num_vectors)
+    return;
+  const int64_t base = vec * V;
+  GegluVec<T, V> g, u, out;
+  g.raw = *reinterpret_cast<const uint4 *>(gate + base);
+  u.raw = *reinterpret_cast<const uint4 *>(up + base);
+#pragma unroll
+  for (int i = 0; i < V; ++i)
+    out.elements[i] = compute_geglu<T>(g.elements[i], u.elements[i], approximate);
+  *reinterpret_cast<uint4 *>(output + base) = out.raw;
+}
+
+// Below this many elements the vector path leaves most CUs idle: a decode
+// GeGLU of 10240 halves is 5 workgroups of 8 serial tanh per lane, slower
+// than one lane per element.
+constexpr int64_t kGegluVectorMinElements = int64_t{1} << 20;
+
+// Vector path for large tensors whose buffers are 16-byte aligned and whose
+// length fills whole vectors; otherwise the scalar kernel computes every
+// element.
+template <typename T, int V>
+static void launch_geglu(hipStream_t stream, const void *gate, const void *up,
+                         void *output, int64_t num_elements,
+                         int64_t approximate) {
+  constexpr int kBlockSize = 256;
+  if constexpr (V > 1) {
+    auto aligned = [](const void *p) {
+      return reinterpret_cast<uintptr_t>(p) % sizeof(uint4) == 0;
+    };
+    if (num_elements >= kGegluVectorMinElements && num_elements % V == 0 &&
+        aligned(gate) && aligned(up) && aligned(output)) {
+      const int64_t num_vectors = num_elements / V;
+      const int grid =
+          static_cast<int>((num_vectors + kBlockSize - 1) / kBlockSize);
+      hipLaunchKernelGGL((geglu_vec_kernel<T, V>), dim3(grid),
+                         dim3(kBlockSize), 0, stream,
+                         static_cast<const T *>(gate),
+                         static_cast<const T *>(up), static_cast<T *>(output),
+                         num_vectors, approximate);
+      return;
+    }
+  }
+  const int grid =
+      static_cast<int>((num_elements + kBlockSize - 1) / kBlockSize);
+  hipLaunchKernelGGL((geglu_kernel<T>), dim3(grid), dim3(kBlockSize), 0,
+                     stream, static_cast<const T *>(gate),
+                     static_cast<const T *>(up), static_cast<T *>(output),
+                     num_elements, approximate);
+}
+
+extern "C" int hip_geglu(void *stream, const void *gate, const void *up,
+                         void *output, int64_t num_elements, int hip_dtype,
+                         int64_t approximate) {
+  if (num_elements <= 0)
+    return 0;
+  hipStream_t hip_stream = static_cast<hipStream_t>(stream);
+  // Clear a stale launch error so the returned status belongs to this launch.
+  (void)hipGetLastError();
+  switch (hip_dtype) {
+  case HIP_DTYPE_FLOAT16:
+    launch_geglu<__half, 8>(hip_stream, gate, up, output, num_elements,
+                            approximate);
+    break;
+  case HIP_DTYPE_FLOAT32:
+    launch_geglu<float, 4>(hip_stream, gate, up, output, num_elements,
+                           approximate);
+    break;
+  case HIP_DTYPE_BFLOAT16:
+    launch_geglu<__hip_bfloat16, 1>(hip_stream, gate, up, output, num_elements,
+                                    approximate);
+    break;
+  case HIP_DTYPE_FLOAT64:
+    launch_geglu<double, 1>(hip_stream, gate, up, output, num_elements,
+                            approximate);
+    break;
+  default:
+    fprintf(stderr, "[custom_kernels] hip_geglu: unsupported dtype=%d\n",
+            hip_dtype);
+    return -1;
+  }
+  CUSTOM_KERNELS_DEBUG_LOG(
+      "[custom_kernels] hip_geglu: dtype=%d, num=%lld, approximate=%lld\n",
+      hip_dtype, (long long)num_elements, (long long)approximate);
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess)
+    fprintf(stderr, "[custom_kernels] hip_geglu launch failed: %s\n",
+            hipGetErrorString(err));
+  return static_cast<int>(err);
+}

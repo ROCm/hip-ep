@@ -1405,6 +1405,10 @@ void matmul_nbits_gemv_dp4a_kernel(
     const int64_t m0     = static_cast<int64_t>(blockIdx.y) * TILE_M;
     const int     tid    = threadIdx.x;
     const int64_t k_blocks = (K + block_size - 1) / block_size;
+    // zp is the ONNX nibble packing, two groups per byte with the even group
+    // in the low nibble. Unpacking it to a byte per group would add 1/64 of a
+    // byte per weight to a read-bound kernel.
+    const int64_t zp_row_bytes = (k_blocks + 1) / 2;
     const int     bs_shift =
         __builtin_ctzll(static_cast<unsigned long long>(block_size));
     const bool has_zp = (zp != nullptr);
@@ -1504,9 +1508,16 @@ void matmul_nbits_gemv_dp4a_kernel(
                 }
             }
             const float sv = static_cast<float>(s_ptr(tn)[grp]);
-            const int   zv = has_zp
-                                 ? static_cast<int>(zp[col_idx(tn) * k_blocks + grp])
-                                 : 8;
+            // Only the byte is chosen under has_zp (0x88 holds the default 8
+            // in both nibbles). With the nibble shift inside the conditional
+            // the backend waits for every outstanding load right after the
+            // zp load, so the next column's weight load is not issued until
+            // this column's loads return: ~25% slower at TILE_N >= 2 when
+            // each thread makes one pass over K.
+            const int zbyte = has_zp ? static_cast<int>(
+                                           zp[col_idx(tn) * zp_row_bytes + (grp >> 1)])
+                                     : 0x88;
+            const int zv = (zbyte >> ((grp & 1) << 2)) & 0xF;
 #pragma unroll
             for (int tm = 0; tm < TILE_M; tm++)
                 partial[tm][tn] += a_sc[tm] * sv *
@@ -2793,7 +2804,7 @@ static int tuneDp4aConfig(
     const GemvWeightRotation rot(
         stream, B, (size_t)N * k_blocks * (bs / 2),
         sc, (size_t)N * k_blocks * sizeof(__half),
-        zp, zp ? (size_t)N * k_blocks : 0);
+        zp, zp ? (size_t)N * ((k_blocks + 1) / 2) : 0);
 
     settleClock(ev0, ev1, stream, [&]{
         launchDp4aConfig(best_id, stream, a_qb, a_scale, B, sc, zp, bi, out,
@@ -3059,14 +3070,15 @@ static int getOrTuneDp4aMConfig(
 //   A          : fp16 activations [M, K] (row-major, batch==1)
 //   B          : packed int4 weights [N, K/2]
 //   scales     : fp16 [N, k_blocks]
-//   zp_u8      : pre-unpacked uint8 zero points [N, k_blocks] or nullptr (sym)
+//   zp_packed  : ONNX-packed 4-bit zero points [N, ceil(k_blocks/2)] (even
+//                group in the low nibble) or nullptr (sym)
 //   out        : fp16 [M, N]
 //   a_qb_scratch/a_scale_scratch : per-session scratch, caller-sized to
 //       >= M*K bytes and >= M*k_blocks floats respectively.
 // Returns hip status (hipSuccess on success). K must be a multiple of 32.
 extern "C" int hip_matmul_nbits_dp4a(
     void* stream_v,
-    const void* A, const void* B, const void* scales, const void* zp_u8,
+    const void* A, const void* B, const void* scales, const void* zp_packed,
     const void* bias, void* out,
     int64_t M, int64_t N, int64_t K, int64_t block_size,
     void* a_qb_scratch, void* a_scale_scratch)
@@ -3078,7 +3090,7 @@ extern "C" int hip_matmul_nbits_dp4a(
     const __half*  Ah   = static_cast<const __half*>(A);
     const uint8_t* Bp   = static_cast<const uint8_t*>(B);
     const __half*  sc   = static_cast<const __half*>(scales);
-    const uint8_t* zp   = static_cast<const uint8_t*>(zp_u8);
+    const uint8_t* zp   = static_cast<const uint8_t*>(zp_packed);
     const __half*  bi   = static_cast<const __half*>(bias);
     __half*        outp = static_cast<__half*>(out);
     int8_t*        a_qb = static_cast<int8_t*>(a_qb_scratch);

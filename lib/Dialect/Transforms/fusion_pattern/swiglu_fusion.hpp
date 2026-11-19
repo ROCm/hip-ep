@@ -29,5 +29,20 @@ namespace fusion_transform {
 void populateSwigluFusionPattern(mlir::RewritePatternSet &patterns,
                                  mlir::PatternBenefit benefit);
 
+// hip.rms_norm + residual hip.add to hip.rms_norm_add, under the same shape
+// contract.
+void populateRmsNormAddFusionPattern(mlir::RewritePatternSet &patterns,
+                                     mlir::PatternBenefit benefit);
+
+// hip.gelu + hip.mul to hip.geglu, under the same shape contract.
+void populateGegluFusionPattern(mlir::RewritePatternSet &patterns,
+                                mlir::PatternBenefit benefit);
+
+// An unscaled RMS norm written out in f32 primitives (cast, x*x, last-axis
+// mean, + eps, sqrt, reciprocal, multiply, cast back to f16) to hip.rms_norm
+// with a scale of ones.
+void populateUnscaledRmsNormFusionPattern(mlir::RewritePatternSet &patterns,
+                                          mlir::PatternBenefit benefit);
+
 } // namespace fusion_transform
 } // namespace hip

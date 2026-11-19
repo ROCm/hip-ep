@@ -597,6 +597,31 @@ class TestGroupQueryAttention:
         )
         compare_outputs(actual, expected, atol=1e-3)
 
+    @pytest.mark.parametrize("past_valid", [1, 200, 2047])
+    def test_gqa_decode_fixed_cache_head_dim_512(self, model_runner, past_valid):
+        """Single-token decode at head_dim 512, 8 query heads over 2 KV heads:
+        the widest row of the split-K flash decode kernel (16 elements per
+        lane). past_valid=2047 fills the 2048-slot cache."""
+        heads, kv_heads, head_dim, cache = 8, 2, 512, 2048
+        model = _make_gqa_fixed_cache_model(
+            1, 1, cache, heads * head_dim, kv_heads * head_dim, heads, kv_heads
+        )
+
+        rng = np.random.default_rng(48)
+        q = rng.uniform(-1, 1, [1, 1, heads * head_dim]).astype(np.float16)
+        k = rng.uniform(-1, 1, [1, 1, kv_heads * head_dim]).astype(np.float16)
+        v = rng.uniform(-1, 1, [1, 1, kv_heads * head_dim]).astype(np.float16)
+        pk = rng.uniform(-1, 1, [1, kv_heads, cache, head_dim]).astype(np.float16)
+        pv = rng.uniform(-1, 1, [1, kv_heads, cache, head_dim]).astype(np.float16)
+        seqlens = np.array([past_valid], dtype=np.int32)
+        total = np.array(cache, dtype=np.int32)
+
+        actual, expected = model_runner.run_sample(
+            model,
+            [q, k, v, pk, pv, seqlens, total],
+        )
+        compare_outputs(actual, expected, atol=1e-3)
+
     def test_gqa_decode_deep_cache_llama_shape(self, model_runner):
         """GQA single-token decode with a large KV cache (Llama-3.1-8B pattern).
 

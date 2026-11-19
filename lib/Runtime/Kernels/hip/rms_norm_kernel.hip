@@ -24,7 +24,9 @@
  *
  * The VEC2 template parameter selects a packed __half2 body. RMS norm is
  * memory-bound, so 2-wide loads/stores are the main lever; the launcher picks
- * it only when norm_size is even and every pointer is 4-byte aligned.
+ * it only when norm_size is even and every pointer is 4-byte aligned. Such
+ * rows of up to 16 half2 per thread run hip_rms_norm_row_kernel instead, which
+ * reads the row once and computes the same result.
  *
  * Structurally mirrors layer_norm_kernel.hip (same block size, same reduction
  * shape) minus the mean subtraction and the bias term.
@@ -50,6 +52,28 @@ __device__ inline float rms_load(const __half *p) { return __half2float(*p); }
 __device__ inline void rms_store(float *p, float v) { *p = v; }
 __device__ inline void rms_store(__half *p, float v) { *p = __float2half(v); }
 
+// hip.rms_norm_add stores residual + y, with y rounded to the storage type
+// first, as a separate elementwise add reads it. A null residual stores y.
+// __fadd_rn keeps the fp32 add from contracting into the normalization's
+// multiply. For fp16 the float sum of two halves rounds to the correctly
+// rounded fp16 sum, so it equals a fp16 add.
+__device__ inline void rms_store(float *p, float v, const float *r) {
+  *p = r ? __fadd_rn(v, *r) : v;
+}
+__device__ inline void rms_store(__half *p, float v, const __half *r) {
+  __half y = __float2half(v);
+  if (r)
+    y = __float2half(__half2float(y) + __half2float(*r));
+  *p = y;
+}
+__device__ inline __half2 rms_add_residual(__half2 y, const __half2 *r) {
+  if (!r)
+    return y;
+  const float2 a = __half22float2(y);
+  const float2 b = __half22float2(*r);
+  return __float22half2_rn(make_float2(a.x + b.x, a.y + b.y));
+}
+
 // Block-wide sum. Every thread supplies a partial; every thread gets the total.
 __device__ inline float rms_block_sum(float partial, float *s_reduce) {
   s_reduce[threadIdx.x] = partial;
@@ -64,19 +88,21 @@ __device__ inline float rms_block_sum(float partial, float *s_reduce) {
 
 // One block per row. blockDim.x == kRmsNormBlockSize.
 // VEC2 requires norm_size % 2 == 0 and 4-byte aligned rows; the launcher
-// guarantees both before selecting this instantiation.
+// guarantees both before selecting this instantiation. `residual`, when not
+// null, has the input's shape and is added to the output (rms_store).
 template <typename T, bool VEC2>
 __global__ void hip_rms_norm_kernel(const T *__restrict__ input,
                                     const T *__restrict__ scale,
-                                    T *__restrict__ output, int64_t outer,
-                                    int64_t norm_size, int64_t scale_rows,
-                                    float epsilon) {
+                                    T *__restrict__ output, const T *residual,
+                                    int64_t outer, int64_t norm_size,
+                                    int64_t scale_rows, float epsilon) {
   int64_t row = blockIdx.x;
   if (row >= outer)
     return;
 
   const T *x_row = input + row * norm_size;
   T *y_row = output + row * norm_size;
+  const T *r_row = residual ? residual + row * norm_size : nullptr;
   // A scale that spans several rows (grouped norm: scale [G, D] against input
   // [N, G, D] with axis = -1) tiles over the row index, and row-major order
   // makes the group the fastest-varying leading dim -- hence r % scale_rows.
@@ -112,6 +138,7 @@ __global__ void hip_rms_norm_kernel(const T *__restrict__ input,
     const int64_t norm_size2 = norm_size / 2;
     const __half2 *x2 = reinterpret_cast<const __half2 *>(x_row);
     const __half2 *g2 = reinterpret_cast<const __half2 *>(g_row);
+    const __half2 *r2 = reinterpret_cast<const __half2 *>(r_row);
     __half2 *y2 = reinterpret_cast<__half2 *>(y_row);
     for (int64_t i = threadIdx.x; i < norm_size2; i += blockDim.x) {
       float2 v = __half22float2(x2[i]);
@@ -119,13 +146,13 @@ __global__ void hip_rms_norm_kernel(const T *__restrict__ input,
       float2 r;
       r.x = v.x * inv_rms * g.x;
       r.y = v.y * inv_rms * g.y;
-      y2[i] = __float22half2_rn(r);
+      y2[i] = rms_add_residual(__float22half2_rn(r), r2 ? r2 + i : nullptr);
     }
   } else {
     for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
       float v = rms_load(x_row + i);
       float g = rms_load(g_row + i);
-      rms_store(y_row + i, v * inv_rms * g);
+      rms_store(y_row + i, v * inv_rms * g, r_row ? r_row + i : nullptr);
     }
   }
 }
@@ -138,7 +165,8 @@ template <int NORM>
 __global__ __launch_bounds__(256)
 void hip_rms_norm_narrow_kernel(const __half *__restrict__ input,
                                 const __half *__restrict__ scale,
-                                __half *__restrict__ output, int64_t outer,
+                                __half *__restrict__ output,
+                                const __half *residual, int64_t outer,
                                 int64_t scale_rows, float epsilon) {
   static_assert(NORM == 128 || NORM == 256, "narrow VEC2 reduction width");
   constexpr int kWave = 32;
@@ -153,6 +181,9 @@ void hip_rms_norm_narrow_kernel(const __half *__restrict__ input,
   const __half2 *g = reinterpret_cast<const __half2 *>(
       scale + (scale_rows == 1 ? 0 : row % scale_rows) * NORM);
   __half2 *y = reinterpret_cast<__half2 *>(output + row * NORM);
+  const __half2 *rr =
+      residual ? reinterpret_cast<const __half2 *>(residual + row * NORM)
+               : nullptr;
   float2 values[kPairsPerLane];
   float partial[kPairsPerLane];
 #pragma unroll
@@ -179,7 +210,91 @@ void hip_rms_norm_narrow_kernel(const __half *__restrict__ input,
     float2 result;
     result.x = values[i].x * inv_rms * gain.x;
     result.y = values[i].y * inv_rms * gain.y;
-    y[lane + i * kWave] = __float22half2_rn(result);
+    y[lane + i * kWave] = rms_add_residual(
+        __float22half2_rn(result), rr ? rr + lane + i * kWave : nullptr);
+  }
+}
+
+// One block per row, as hip_rms_norm_kernel<__half, true>, for rows of
+// PAIRS = ceil(norm_size / 2 / 256) half2 per thread. A single-row decode
+// norm is latency-bound: the two-pass kernel waits on the row twice and on
+// eight barriers in between. Here each thread loads its pairs and their gains
+// once, into registers; only the last pair can be past the row, so the others
+// are loaded unconditionally and issue together. After one barrier every wave
+// sums the 256 partials itself, in the original tree's order: the three
+// cross-wave levels (strides 128, 64, 32) from shared memory, the last five
+// with shuffles. Per-thread partials, that order and the output expression
+// are the two-pass kernel's, so the result is identical to it. A residual is
+// loaded with the row.
+template <int PAIRS>
+__global__ __launch_bounds__(kRmsNormBlockSize)
+void hip_rms_norm_row_kernel(const __half *__restrict__ input,
+                             const __half *__restrict__ scale,
+                             __half *__restrict__ output,
+                             const __half *residual, int64_t outer,
+                             int64_t norm_size, int64_t scale_rows,
+                             float epsilon) {
+  constexpr int kWave = 32;
+  const int64_t row = blockIdx.x;
+  if (row >= outer)
+    return;
+  const int64_t pairs = norm_size / 2;
+  const int tid = threadIdx.x;
+  const __half2 *x = reinterpret_cast<const __half2 *>(input + row * norm_size);
+  const __half2 *g = reinterpret_cast<const __half2 *>(
+      scale + (row % scale_rows) * norm_size);
+  __half2 *y = reinterpret_cast<__half2 *>(output + row * norm_size);
+  const __half2 *rr =
+      residual ? reinterpret_cast<const __half2 *>(residual + row * norm_size)
+               : nullptr;
+  auto in_row = [&](int j) __attribute__((always_inline)) {
+    return j < PAIRS - 1 ||
+           tid + static_cast<int64_t>(j) * kRmsNormBlockSize < pairs;
+  };
+
+  float2 values[PAIRS];
+  float2 gains[PAIRS];
+  __half2 resid[PAIRS];
+#pragma unroll
+  for (int j = 0; j < PAIRS; ++j) {
+    if (in_row(j)) {
+      const int64_t i = tid + static_cast<int64_t>(j) * kRmsNormBlockSize;
+      values[j] = __half22float2(x[i]);
+      gains[j] = __half22float2(g[i]);
+      if (rr)
+        resid[j] = rr[i];
+    }
+  }
+  float local_sumsq = 0.0f;
+#pragma unroll
+  for (int j = 0; j < PAIRS; ++j) {
+    if (in_row(j))
+      local_sumsq += values[j].x * values[j].x + values[j].y * values[j].y;
+  }
+
+  __shared__ float s_partial[kRmsNormBlockSize];
+  s_partial[tid] = local_sumsq;
+  __syncthreads();
+  const int l = tid % kWave;
+  float sumsq = ((s_partial[l] + s_partial[l + 128]) +
+                 (s_partial[l + 64] + s_partial[l + 192])) +
+                ((s_partial[l + 32] + s_partial[l + 160]) +
+                 (s_partial[l + 96] + s_partial[l + 224]));
+#pragma unroll
+  for (int offset = 16; offset > 0; offset >>= 1)
+    sumsq += __shfl_down(sumsq, offset, kWave);
+  sumsq = __shfl(sumsq, 0, kWave);
+  const float inv_rms = rsqrtf(sumsq / static_cast<float>(norm_size) + epsilon);
+
+#pragma unroll
+  for (int j = 0; j < PAIRS; ++j) {
+    if (in_row(j)) {
+      const int64_t i = tid + static_cast<int64_t>(j) * kRmsNormBlockSize;
+      float2 r;
+      r.x = values[j].x * inv_rms * gains[j].x;
+      r.y = values[j].y * inv_rms * gains[j].y;
+      y[i] = rms_add_residual(__float22half2_rn(r), rr ? &resid[j] : nullptr);
+    }
   }
 }
 
@@ -369,13 +484,15 @@ __global__ void hip_engram_gate_kernel(
 // Packed __half2 requires an even row and 4-byte aligned bases. Row starts stay
 // aligned across rows when norm_size is even, so checking the bases is enough.
 inline bool rms_can_vectorize(const void *input, const void *scale,
-                              const void *output, int64_t norm_size) {
+                              const void *output, int64_t norm_size,
+                              const void *residual = nullptr) {
   if (norm_size % 2 != 0)
     return false;
   auto aligned = [](const void *p) {
     return (reinterpret_cast<uintptr_t>(p) % 4) == 0;
   };
-  return aligned(input) && aligned(scale) && aligned(output);
+  return aligned(input) && aligned(scale) && aligned(output) &&
+         (residual == nullptr || aligned(residual));
 }
 
 } // namespace
@@ -405,9 +522,11 @@ static bool rms_narrow_enabled() {
   return supported;
 }
 
-extern "C" int hip_rms_norm(void *stream, const void *input, const void *scale,
-                            void *output, int64_t outer, int64_t norm_size,
-                            int64_t scale_rows, float epsilon, int hip_dtype) {
+extern "C" int hip_rms_norm_add(void *stream, const void *input,
+                                const void *scale, const void *residual,
+                                void *output, int64_t outer, int64_t norm_size,
+                                int64_t scale_rows, float epsilon,
+                                int hip_dtype) {
   if (outer <= 0 || norm_size <= 0)
     return 0;
   if (scale_rows <= 0) {
@@ -428,7 +547,7 @@ extern "C" int hip_rms_norm(void *stream, const void *input, const void *scale,
 
   const bool vec2 =
       (hip_dtype == HIP_DTYPE_FLOAT16) &&
-      rms_can_vectorize(input, scale, output, norm_size);
+      rms_can_vectorize(input, scale, output, norm_size, residual);
 
   CUSTOM_KERNELS_DEBUG_LOG(
       "[custom_kernels] hip_rms_norm: dtype=%d, outer=%lld, norm_size=%lld, "
@@ -452,36 +571,70 @@ extern "C" int hip_rms_norm(void *stream, const void *input, const void *scale,
                            narrow_grid, block, 0, hip_stream,
                            static_cast<const __half *>(input),
                            static_cast<const __half *>(scale),
-                           static_cast<__half *>(output), outer, scale_rows,
-                           epsilon);
+                           static_cast<__half *>(output),
+                           static_cast<const __half *>(residual), outer,
+                           scale_rows, epsilon);
       } else {
         hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_rms_norm_narrow_kernel<256>),
                            narrow_grid, block, 0, hip_stream,
                            static_cast<const __half *>(input),
                            static_cast<const __half *>(scale),
-                           static_cast<__half *>(output), outer, scale_rows,
-                           epsilon);
+                           static_cast<__half *>(output),
+                           static_cast<const __half *>(residual), outer,
+                           scale_rows, epsilon);
       }
+    } else if (vec2 && norm_size / 2 <= 16 * kRmsNormBlockSize) {
+      const int64_t per_thread =
+          (norm_size / 2 + kRmsNormBlockSize - 1) / kRmsNormBlockSize;
+#define RMS_ROW_CASE(P)                                                        \
+  hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_rms_norm_row_kernel<P>), grid, block, \
+                     0, hip_stream, static_cast<const __half *>(input),        \
+                     static_cast<const __half *>(scale),                       \
+                     static_cast<__half *>(output),                            \
+                     static_cast<const __half *>(residual), outer, norm_size,  \
+                     scale_rows, epsilon)
+      switch (per_thread) {
+      case 1: RMS_ROW_CASE(1); break;
+      case 2: RMS_ROW_CASE(2); break;
+      case 3: RMS_ROW_CASE(3); break;
+      case 4: RMS_ROW_CASE(4); break;
+      case 5: RMS_ROW_CASE(5); break;
+      case 6: RMS_ROW_CASE(6); break;
+      case 7: RMS_ROW_CASE(7); break;
+      case 8: RMS_ROW_CASE(8); break;
+      case 9: RMS_ROW_CASE(9); break;
+      case 10: RMS_ROW_CASE(10); break;
+      case 11: RMS_ROW_CASE(11); break;
+      case 12: RMS_ROW_CASE(12); break;
+      case 13: RMS_ROW_CASE(13); break;
+      case 14: RMS_ROW_CASE(14); break;
+      case 15: RMS_ROW_CASE(15); break;
+      default: RMS_ROW_CASE(16); break;
+      }
+#undef RMS_ROW_CASE
     } else if (vec2) {
       hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_rms_norm_kernel<__half, true>),
                          grid, block, 0, hip_stream,
                          static_cast<const __half *>(input),
                          static_cast<const __half *>(scale),
-                         static_cast<__half *>(output), outer, norm_size,
-                         scale_rows, epsilon);
+                         static_cast<__half *>(output),
+                         static_cast<const __half *>(residual), outer,
+                         norm_size, scale_rows, epsilon);
     } else {
       hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_rms_norm_kernel<__half, false>),
                          grid, block, 0, hip_stream,
                          static_cast<const __half *>(input),
                          static_cast<const __half *>(scale),
-                         static_cast<__half *>(output), outer, norm_size,
-                         scale_rows, epsilon);
+                         static_cast<__half *>(output),
+                         static_cast<const __half *>(residual), outer,
+                         norm_size, scale_rows, epsilon);
     }
   } else if (hip_dtype == HIP_DTYPE_FLOAT32) {
     hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_rms_norm_kernel<float, false>), grid,
                        block, 0, hip_stream, static_cast<const float *>(input),
                        static_cast<const float *>(scale),
-                       static_cast<float *>(output), outer, norm_size,
+                       static_cast<float *>(output),
+                       static_cast<const float *>(residual), outer, norm_size,
                        scale_rows, epsilon);
   } else {
     fprintf(stderr, "[custom_kernels] hip_rms_norm: unsupported dtype=%d\n",
@@ -497,6 +650,12 @@ extern "C" int hip_rms_norm(void *stream, const void *input, const void *scale,
   return static_cast<int>(err);
 }
 
+extern "C" int hip_rms_norm(void *stream, const void *input, const void *scale,
+                            void *output, int64_t outer, int64_t norm_size,
+                            int64_t scale_rows, float epsilon, int hip_dtype) {
+  return hip_rms_norm_add(stream, input, scale, nullptr, output, outer,
+                          norm_size, scale_rows, epsilon, hip_dtype);
+}
 extern "C" int hip_gated_rms_norm(void *stream, const void *input,
                                   const void *scale, const void *gate,
                                   void *output, int64_t outer,

@@ -32,6 +32,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | ScaledSiLU (`com.microsoft`) | Decomposed to Mul + Swish (alpha 1). f16/f32 |
 | GatedAdd (`com.microsoft`) | Decomposed to Mul + Add. f16/f32, rank 1-4 |
 | SwiGLU (`hip.sigmoid` followed by two `hip.mul`) | Fused by `hip-fusion-transform` into one custom HIP kernel when the tensors are identical f16/f32/bf16/f64, each dynamic axis traces to the same runtime extent, and the intermediates have no other value uses |
+| GeGLU (`hip.gelu` followed by `hip.mul`) | Fused by `hip-fusion-transform` into one custom HIP kernel (`hip.geglu`) under the same conditions as SwiGLU, for exact and tanh gelu. The kernel rounds gelu(gate) to the element type before the multiply, as the unfused pair does |
 | BiasGelu (`com.microsoft`) | Custom HIP kernel |
 | FastGelu (`com.microsoft`) | Custom HIP kernel |
 | Reciprocal | Custom HIP kernel |
@@ -96,6 +97,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | EmbedLayerNormalization (`com.microsoft`) | Decomposed to Gather + Add + LayerNormalization. f16/f32 tables, i32 indices. A missing position-id input uses `0 .. sequence-1` when the sequence length is static. `mask_index` is the count of ones along the sequence; with no mask it is zeros |
 | RMSNormalization | Custom HIP kernel |
 | SimplifiedLayerNormalization | Custom HIP kernel |
+| RMS norm followed by a residual add (`hip.rms_norm` then `hip.add`) | Fused by `hip-fusion-transform` into `hip.rms_norm_add` when the tensors are identical f16, each dynamic axis traces to the same runtime extent, and the norm result has no other value use. The kernel rounds the normalized value to f16 before the add, as the unfused pair does |
 | SkipSimplifiedLayerNormalization (`com.microsoft`) | Custom HIP kernel, add and norm fused |
 | BranchwiseRMSNorm (`com.microsoft`) | Lowered to RMSNormalization over the branch axis. f16/f32; the scale input is required |
 | GatedRMSNorm (`com.microsoft`) | Custom HIP kernel; silu, swish or sigmoid gate. f16/f32 |

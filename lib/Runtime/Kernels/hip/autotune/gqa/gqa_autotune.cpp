@@ -301,6 +301,12 @@ GqaPrefillConfig prefillHeuristic(const GqaPrefillRequest &request) {
                       ? std::max(1, request.num_heads / request.kv_num_heads)
                       : 1;
   if (request.variant == GqaPrefillVariant::V8x) {
+    // d512: four waves per head, which leaves each the d256 share of Q and O;
+    // its K/V tiles fit the LDS at BKV=16 only.
+    if (request.head_dim == 512) {
+      const int hb = hpg % 4 == 0 ? 4 : hpg % 2 == 0 ? 2 : 1;
+      return {/*hb=*/hb, /*qw=*/0, /*mt=*/0, /*bkv=*/16, /*nd=*/4};
+    }
     // Two waves per head, as many heads per block as divide the group; BKV=32
     // only pays off with 4 heads.
     const int hb = hpg % 4 == 0 ? 4 : hpg % 3 == 0 ? 3 : hpg % 2 == 0 ? 2 : 1;

@@ -54,7 +54,7 @@ extern "C" int hip_matmul_nbits_u4_wmma_stride(
 extern "C" void hip_matmul_nbits_u4_wmma_sweep_extended(int enable);
 extern "C" int hip_matmul_nbits_dp4a(
     void* stream_v, const void* A, const void* B, const void* scales,
-    const void* zp_u8, const void* bias, void* out,
+    const void* zp_packed, const void* bias, void* out,
     int64_t M, int64_t N, int64_t K, int64_t block_size,
     void* a_qb_scratch, void* a_scale_scratch);
 
@@ -271,7 +271,8 @@ int main(int argc, char** argv) {
     for (size_t i = 0; i < h_sc.size(); ++i)
       h_sc[i] = F2H(0.01f + 0.001f * float(i % 7));
     h_zpf.assign(h_sc.size(), F2H(8.0f));
-    h_zpu.assign(h_sc.size(), 8);
+    // dp4a reads the zero points packed two per byte, as MatMulNBits stores them.
+    h_zpu.assign(static_cast<size_t>(s.n) * ((ngk + 1) / 2), 0x88);
     h_b.assign(b_bytes, 0);
     for (size_t i = 0; i < h_b.size(); ++i) h_b[i] = uint8_t(i * 31);
 
@@ -292,7 +293,7 @@ int main(int argc, char** argv) {
     HIP_OK(hipMemcpy(buf.b, h_b.data(), b_bytes, hipMemcpyHostToDevice));
 
     const void* zp_f = s.zp ? (const void*)buf.zpf : nullptr;
-    const void* zp_u = s.zp ? (const void*)buf.zpu : nullptr;
+    const void* zp_p = s.zp ? (const void*)buf.zpu : nullptr;
 
     for (int m : ms) {
       // The marker is what update_lut.py keys the following autotune lines to.
@@ -311,7 +312,7 @@ int main(int argc, char** argv) {
           buf.grow(&buf.qs, &qs_have, static_cast<size_t>(ngk) * sizeof(float));
           std::fprintf(stderr, "#SHAPE path=dp4a M=1 N=%d K=%d gs=%d zp=%d\n",
                        s.n, s.k, s.gs, int(s.zp));
-          hip_matmul_nbits_dp4a(nullptr, buf.a, buf.b, buf.sc, zp_u, nullptr,
+          hip_matmul_nbits_dp4a(nullptr, buf.a, buf.b, buf.sc, zp_p, nullptr,
                                 buf.out, 1, s.n, s.k, s.gs, buf.qb, buf.qs);
           HIP_OK(hipDeviceSynchronize());
         }

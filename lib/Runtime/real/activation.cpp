@@ -414,3 +414,40 @@ int wrap_swiglu_promoted(RuntimeState *state, void *gate, void *up,
   return hip_swiglu_promoted(hipdnn_ep_state_get_stream(state), gate, up,
                              output, num_elements, HIP_DTYPE_FLOAT16);
 }
+
+int wrap_geglu(RuntimeState *state, void *gate, void *up, void *output,
+               int64_t num_elements, int64_t data_type, int64_t approximate) {
+  OP_PROFILE(
+      "geglu",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "n=%lld", (long long)num_elements);
+        return std::string(b);
+      },
+      state);
+  if (!state || !gate || !up || !output) {
+    fprintf(stderr, "[REAL] wrap_geglu: null argument\n");
+    return -1;
+  }
+
+  int hip_dtype = hipdnn_ep_to_hip_dtype_elementwise_unary(data_type);
+  if (hip_dtype < 0) {
+    fprintf(stderr, "[REAL] wrap_geglu: unsupported data_type %lld\n",
+            (long long)data_type);
+    return -1;
+  }
+
+  void *stream = hipdnn_ep_state_get_stream(state);
+  RUNTIME_DEBUG_LOG("[REAL] wrap_geglu: num_elements=%lld, "
+                    "data_type=%s(%lld), approximate=%lld\n",
+                    (long long)num_elements, hipdnn_ep_datatype_name(data_type),
+                    (long long)data_type, (long long)approximate);
+
+  int result =
+      hip_geglu(stream, gate, up, output, num_elements, hip_dtype, approximate);
+  if (result != 0) {
+    fprintf(stderr, "[REAL] wrap_geglu: kernel launch failed (%d)\n", result);
+    return -1;
+  }
+  return 0;
+}
