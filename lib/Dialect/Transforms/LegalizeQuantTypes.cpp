@@ -48,9 +48,8 @@ struct LegalizeQuantTypesPass
       if (op->hasAttr("quant_types"))
         return WalkResult::advance();
 
-      SmallVector<Type> types;
-      for (Value value : quantOp.getQuantOperands())
-        types.push_back(getElementTypeOrSelf(value.getType()));
+      // No `quant_types` yet, so these are the tensor element types.
+      SmallVector<Type> types = quantOp.getOperandQuantTypes();
       if (hasQuantizedType(op) &&
           !quantOp.supportsQuantTypes(ArrayRef(types).drop_back(),
                                       types.back())) {

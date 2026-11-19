@@ -30,20 +30,23 @@ Type toHipStorageType(Type type);
 /// True if the shaped or scalar `type` has a quantized element type.
 bool isQuantized(Type type);
 
-/// True if `op` is quantized by its quant types: its `quant_types` entries
-/// after hip-legalize-quant-types, its tensor element types before.
+// Interface queries for any Operation *; an op without the interface is
+// answered from its own element types.
+
+/// The interface's isQuantized(), else any quantized operand or result.
 bool isQuantizedOp(Operation *op);
 
-/// Per-tensor quantized element types of a quant-capable op, in
-/// getQuantOperands order: from its tensor types before
-/// hip-legalize-quant-types, from `quant_types` after. Empty for a float op.
+/// The interface's getOperandQuantTypes(), else the element types of the
+/// shaped operands, then the results.
+SmallVector<Type> getOperandQuantTypes(Operation *op);
+
+/// Per-tensor quant types of a quant-capable op (getQuantOperands order);
+/// empty unless every one is per-tensor quantized.
 SmallVector<quant::UniformQuantizedType, 3> getQuantElementTypes(Operation *op);
 
-/// Verifies `op`'s quant types (HipQuantCapableOpInterface's verifier): either
-/// all of `operands` are quantized tensors
-/// (and no `quant_types`), or none are and `quant_types` lists one element
-/// type per operand: all quantized with matching storage types, or all
-/// non-quantized and equal to the operand element types (a float op).
+/// HipQuantCapableOpInterface's verifier: `operands` are all quantized (no
+/// `quant_types`) or none are; then `quant_types` has one entry per operand,
+/// all quantized with matching storage types or all equal to the operand types.
 LogicalResult verifyQuantTypes(Operation *op, ValueRange operands);
 
 } // namespace mlir::hip

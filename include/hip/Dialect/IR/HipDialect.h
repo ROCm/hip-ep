@@ -24,7 +24,9 @@
 #include "hip/Dialect/IR/HipTypes.h.inc"
 
 // Generated header for `HipQuantCapableOpInterface`. Must precede
-// HipOps.h.inc; its verifier calls verifyQuantTypes (HipQuantTypes.cpp).
+// HipOps.h.inc; its verifier and default methods need the decls below.
+#include "mlir/Dialect/Quant/IR/QuantTypes.h"
+#include "mlir/IR/TypeUtilities.h"
 namespace mlir::hip {
 ::llvm::LogicalResult verifyQuantTypes(::mlir::Operation *op,
                                        ::mlir::ValueRange operands);

@@ -8,9 +8,9 @@
 
 include "mlir/IR/OpBase.td"
 
-// An op that is quantized or not by its element types: `!quant.uniform`
-// tensors mean it dequantizes its inputs and quantizes its output, float
-// tensors mean the float op. See docs/design/quant-types.md.
+// An op quantized or not by its element types (`!quant.uniform` vs float).
+// Ops implement getQuantOperands and supportsQuantTypes; the queries are
+// default-implemented. See docs/design/quant-types.md.
 def HipQuantCapableOpInterface : OpInterface<"HipQuantCapableOpInterface"> {
   let cppNamespace = "::mlir::hip";
 
@@ -29,7 +29,52 @@ def HipQuantCapableOpInterface : OpInterface<"HipQuantCapableOpInterface"> {
       }],
       "bool", "supportsQuantTypes",
       (ins "::mlir::TypeRange":$inputElementTypes,
-           "::mlir::Type":$resultElementType)>
+           "::mlir::Type":$resultElementType)>,
+
+    // Queries: read `quant_types` after legalization, tensor types before.
+    InterfaceMethod<
+      [{
+        Element type per quant operand (getQuantOperands order): a quant type
+        if quantized, else the float type.
+      }],
+      "::llvm::SmallVector<::mlir::Type>", "getOperandQuantTypes", (ins), [{}], [{
+        ::mlir::Operation *op = $_op.getOperation();
+        ::llvm::SmallVector<::mlir::Type> types;
+        if (auto attr = op->getAttrOfType<::mlir::ArrayAttr>("quant_types")) {
+          for (auto type : attr.getAsRange<::mlir::TypeAttr>())
+            types.push_back(type.getValue());
+          return types;
+        }
+        for (::mlir::Value value : $_op.getQuantOperands())
+          types.push_back(::mlir::getElementTypeOrSelf(value.getType()));
+        return types;
+      }]>,
+    InterfaceMethod<"True if any quant operand is quantized.",
+      "bool", "isQuantized", (ins), [{}], [{
+        return ::llvm::any_of($_op.getOperandQuantTypes(), [](::mlir::Type type) {
+          return ::llvm::isa<::mlir::quant::QuantizedType>(type);
+        });
+      }]>,
+    InterfaceMethod<"Element type of input `index` (getQuantOperands order).",
+      "::mlir::Type", "getInputQuantType", (ins "unsigned":$index), [{}], [{
+        ::llvm::SmallVector<::mlir::Type> types = $_op.getOperandQuantTypes();
+        assert(index + 1 < types.size() && "not an input");
+        return types[index];
+      }]>,
+    InterfaceMethod<"Element type of the result.",
+      "::mlir::Type", "getResultQuantType", (ins), [{}], [{
+        return $_op.getOperandQuantTypes().back();
+      }]>,
+    InterfaceMethod<
+      [{
+        Per-tensor quant type of quant operand `index` (the result is last);
+        null if float or per-axis.
+      }],
+      "::mlir::quant::UniformQuantizedType", "getUniformQuantType",
+      (ins "unsigned":$index), [{}], [{
+        return ::llvm::dyn_cast<::mlir::quant::UniformQuantizedType>(
+            $_op.getOperandQuantTypes()[index]);
+      }]>
   ];
 
   // All quantized or none; after legalization, `quant_types` matches the

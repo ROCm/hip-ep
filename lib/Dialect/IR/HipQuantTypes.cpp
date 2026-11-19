@@ -68,27 +68,32 @@ static bool supportsQMatmul(TypeRange inputs, Type result, bool allowBias) {
 }
 
 bool mlir::hip::isQuantizedOp(Operation *op) {
-  if (auto attr = op->getAttrOfType<ArrayAttr>("quant_types"))
-    return llvm::any_of(attr.getAsRange<TypeAttr>(), [](TypeAttr type) {
-      return isa<quant::QuantizedType>(type.getValue());
-    });
-  return llvm::any_of(op->getOperandTypes(),
-                      [](Type type) { return isQuantized(type); });
+  if (auto quantOp = dyn_cast<HipQuantCapableOpInterface>(op))
+    return quantOp.isQuantized();
+  auto quantized = [](Type type) { return isQuantized(type); };
+  return llvm::any_of(op->getOperandTypes(), quantized) ||
+         llvm::any_of(op->getResultTypes(), quantized);
+}
+
+SmallVector<Type> mlir::hip::getOperandQuantTypes(Operation *op) {
+  if (auto quantOp = dyn_cast<HipQuantCapableOpInterface>(op))
+    return quantOp.getOperandQuantTypes();
+  SmallVector<Type> types;
+  for (Value value : op->getOperands())
+    if (isa<ShapedType>(value.getType()))
+      types.push_back(getElementTypeOrSelf(value.getType()));
+  for (Type type : op->getResultTypes())
+    types.push_back(getElementTypeOrSelf(type));
+  return types;
 }
 
 SmallVector<quant::UniformQuantizedType, 3>
 mlir::hip::getQuantElementTypes(Operation *op) {
-  SmallVector<Type, 4> types;
-  if (auto attr = op->getAttrOfType<ArrayAttr>("quant_types")) {
-    for (auto typeAttr : attr.getAsRange<TypeAttr>())
-      types.push_back(typeAttr.getValue());
-  } else if (auto quantOp = dyn_cast<HipQuantCapableOpInterface>(op)) {
-    for (Value value : quantOp.getQuantOperands())
-      types.push_back(getElementTypeOrSelf(value.getType()));
-  }
-
+  auto quantOp = dyn_cast<HipQuantCapableOpInterface>(op);
+  if (!quantOp)
+    return {};
   SmallVector<quant::UniformQuantizedType, 3> result;
-  for (Type type : types) {
+  for (Type type : quantOp.getOperandQuantTypes()) {
     auto quantType = dyn_cast<quant::UniformQuantizedType>(type);
     if (!quantType)
       return {};

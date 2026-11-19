@@ -79,6 +79,25 @@ An op opts in through `HipQuantCapableOpInterface`
 `hip-legalize-quant-types` and lowering only go through the interface, so
 moving another op over means implementing these two methods.
 
+### Asking an op about its quantization
+
+Every implementing op can be asked, quantized or not. The queries are
+default-implemented in the interface, so an op gets them for free:
+
+| Method | Float add | Quantized add |
+|---|---|---|
+| `isQuantized()` | `false` | `true` |
+| `getOperandQuantTypes()` | `[f32, f32, f32]` | `[!quant.uniform<…>, …]` |
+| `getInputQuantType(i)` / `getResultQuantType()` | `f32` | `!quant.uniform<…>` |
+| `getUniformQuantType(i)` (scale, zero point) | null | the per-tensor type |
+
+The answer does not depend on the stage: it is read from the tensor element
+types before `hip-legalize-quant-types` and from `quant_types` after.
+
+Call the methods directly on a concrete op (`AddOp`, `MatmulOp`, ...). For any
+`Operation *`, use `hip::isQuantizedOp(op)` / `hip::getOperandQuantTypes(op)`
+(`HipQuantTypes.h`), which also answer for ops without the interface.
+
 ## Kernel capability
 
 Each op's `supportsQuantTypes` (`lib/Dialect/IR/HipQuantTypes.cpp`) says which
