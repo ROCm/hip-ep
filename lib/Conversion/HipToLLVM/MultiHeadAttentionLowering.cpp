@@ -20,6 +20,22 @@ struct MultiHeadAttentionOpLowering
   LogicalResult
   matchAndRewrite(MultiHeadAttentionOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    // wrap_multi_head_attention is told only the element size in bytes.
+    // bf16 is 2 bytes, and the runtime then dispatches the fp16 kernels.
+    auto isBf16 = [](Type type) {
+      if (auto shaped = dyn_cast<ShapedType>(type))
+        type = shaped.getElementType();
+      return type.isBF16();
+    };
+    bool bf16 = false;
+    for (Value v : op->getOperands())
+      bf16 = bf16 || isBf16(v.getType());
+    for (Value v : op->getResults())
+      bf16 = bf16 || isBf16(v.getType());
+    if (bf16)
+      return rewriter.notifyMatchFailure(op,
+                                         "bf16 would be reinterpreted as f16");
+
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type ptrType = getPtrType();
