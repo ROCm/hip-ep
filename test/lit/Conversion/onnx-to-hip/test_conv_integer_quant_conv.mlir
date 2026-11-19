@@ -17,7 +17,8 @@ module {
       %x1: tensor<1x1x4xi8>, %w1: tensor<2x1x2xi8>, %wz1: tensor<2x1x1xi8>,
       %xm: tensor<1x1x2x2xui8>, %wm: tensor<1x1x1x1xi8>) -> (
         tensor<1x1x2x2xi32>, tensor<1x1x2x2xi32>, tensor<?x1x2x2xi32>,
-        tensor<1x1x2x2xi32>, tensor<1x2x3xi32>, tensor<1x1x2x2xi32>) {
+        tensor<1x1x2x2xi32>, tensor<1x2x3xi32>, tensor<1x1x2x2xi32>,
+        tensor<1x1x2x2xsi32>) {
     %none = "onnx.NoValue"() {value} : () -> none
     %signed = "onnx.ConvInteger"(%x, %w) {
       kernel_shape = [1, 1], strides = [1, 1], dilations = [1, 1],
@@ -45,9 +46,15 @@ module {
       kernel_shape = [1, 1], strides = [1, 1], dilations = [1, 1],
       group = 1 : i64, auto_pad = "NOTSET"
     } : (tensor<1x1x2x2xui8>, tensor<1x1x1x1xi8>) -> tensor<1x1x2x2xi32>
-    return %signed, %omitted, %dynamic, %with_zp, %rank3_zp, %mixed :
+    %signed_i32 = "onnx.ConvInteger"(%x, %w) {
+      kernel_shape = [1, 1], strides = [1, 1], dilations = [1, 1],
+      group = 1 : i64, auto_pad = "NOTSET"
+    } : (tensor<1x1x2x2xi8>, tensor<1x1x1x1xi8>) -> tensor<1x1x2x2xsi32>
+    return %signed, %omitted, %dynamic, %with_zp, %rank3_zp, %mixed,
+           %signed_i32 :
         tensor<1x1x2x2xi32>, tensor<1x1x2x2xi32>, tensor<?x1x2x2xi32>,
-        tensor<1x1x2x2xi32>, tensor<1x2x3xi32>, tensor<1x1x2x2xi32>
+        tensor<1x1x2x2xi32>, tensor<1x2x3xi32>, tensor<1x1x2x2xi32>,
+        tensor<1x1x2x2xsi32>
   }
 
   // CHECK-LABEL: func.func @main_graph
@@ -89,6 +96,12 @@ module {
   // CHECK: hip.quant_conv
   // CHECK: hip.quant_conv
   // CHECK: hip.sub
+  // CHECK-NOT: hip.quant_conv
+
+  // hip.quant_conv only accepts a signless i32 result. An si32 ConvInteger
+  // stays on hip.conv and is cast back.
+  // CHECK: = hip.conv
+  // CHECK: tensor<1x1x2x2xsi32>
   // CHECK-NOT: hip.quant_conv
 
   func.func @conv_integer_not_in_main(

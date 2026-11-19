@@ -291,6 +291,11 @@ static mlir::LogicalResult tryLowerQuantConv(
     llvm::ArrayRef<int64_t> padsIn, int64_t group) {
   if (!inMainGraphEntry(op) || inputType.isDynamicDim(0))
     return mlir::failure();
+  // hip.quant_conv verifies a signless i32 accumulator. An explicitly signed
+  // si32 result is the same bits, and the cast/sub/hip.conv path already
+  // casts back to that type.
+  if (!resultType.getElementType().isSignlessInteger(32))
+    return mlir::failure();
   for (int64_t pad : padsIn) {
     if (pad < 0)
       return mlir::failure();
