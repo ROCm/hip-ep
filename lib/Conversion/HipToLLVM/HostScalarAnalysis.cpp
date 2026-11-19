@@ -201,7 +201,6 @@ private:
 struct Accesses {
   SmallVector<ByteRange> reads;
   SmallVector<ByteRange> writes;
-  SmallVector<ByteRange> earlyHostReads;
   bool host = false;
   bool readback = false;
   Value stored;
@@ -293,19 +292,6 @@ static LogicalResult summarize(Operation *op, Value ctx, ScratchRanges &ranges,
   auto contract = dyn_cast<RuntimeAccessOpInterface>(op);
   if (!contract || overrides.contains(op->getName()))
     return failure();
-  // Do not depend on default stream ordering for an early host read.
-  // Require an unchanged constant or a checked scratch read.
-  if (Value value = contract.getEarlyHostRead()) {
-    if (auto it = ranges.descriptors.find(value);
-        it != ranges.descriptors.end()) {
-      auto bytes = ranges.range(it->second);
-      if (!bytes)
-        return failure();
-      accesses.earlyHostReads.push_back(*bytes);
-    } else if (!value.getDefiningOp<GetConstantOp>()) {
-      return failure();
-    }
-  }
   if (op->getNumResults())
     return failure();
   auto effects = dyn_cast<MemoryEffectOpInterface>(op);
@@ -415,8 +401,6 @@ mlir::hip::collectHostScalarValues(ModuleOp module,
     // Only a retained scalar readback supplies a new value.
     if (bytes && isa<ReadbackScalarOp>(op) && !replacements.contains(&op))
       facts.push_back({*bytes, op.getResult(0)});
-    if (conflicts(event.earlyHostReads, pendingWrites))
-      return reject(&op, "early host read overlaps a pending device write");
     if (event.readback) {
       if (!replacements.contains(&op)) {
         pendingReads.clear();

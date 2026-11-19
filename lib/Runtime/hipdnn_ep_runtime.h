@@ -1285,6 +1285,14 @@ int wrap_gather_elements(RuntimeState *state, void *data, void *indices,
                          int64_t element_size_bytes,
                          int64_t indices_element_size_bytes);
 
+// TopK. New code calls wrap_top_k_host_k, whose `k` is the extent of `values`
+// along `axis`, so no device read of the K input is needed. The original entry
+// point is retained for cached bitcode; it reads K from the device and waits
+// for the stream.
+int wrap_top_k_host_k(RuntimeState *state, void *x, int64_t k, void *values,
+                      void *indices, int64_t axis, int64_t largest,
+                      int64_t sorted, int64_t rank, const int64_t *x_shape,
+                      int64_t num_elements, int64_t data_type);
 int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
                void *indices, int64_t axis, int64_t largest, int64_t sorted,
                int64_t rank, const int64_t *x_shape, int64_t num_elements,

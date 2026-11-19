@@ -1213,6 +1213,26 @@ int wrap_arg_max(RuntimeState *state, void *data, void *indices, int64_t axis,
   return 0;
 }
 
+int wrap_top_k_host_k(RuntimeState *state, void *x, int64_t k, void *values,
+                      void *indices, int64_t axis, int64_t largest,
+                      int64_t sorted, int64_t rank, const int64_t *x_shape,
+                      int64_t num_elements, int64_t data_type) {
+  (void)x;
+  (void)values;
+  (void)indices;
+  (void)x_shape;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_top_k_host_k\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_top_k_host_k(k=%lld, axis=%lld, largest=%lld, "
+             "sorted=%lld, rank=%lld, num_elements=%lld, data_type=%lld)\n",
+             (long long)k, (long long)axis, (long long)largest,
+             (long long)sorted, (long long)rank, (long long)num_elements,
+             (long long)data_type);
+  return 0;
+}
+
 int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
                void *indices, int64_t axis, int64_t largest, int64_t sorted,
                int64_t rank, const int64_t *x_shape, int64_t num_elements,

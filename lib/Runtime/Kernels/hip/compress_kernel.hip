@@ -83,26 +83,44 @@ __global__ void compress_scan_kernel(const uint8_t *__restrict__ condition,
   }
 }
 
+// The gather kernels are sized for the allocated output extent and read the
+// true count that compress_scan_kernel wrote, so the host never waits for it.
+// The destination holds `out_extent` slices along the selection axis; a count
+// above it only happens when the declared ONNX extent disagrees with the data
+// (the compiler sizes a dynamic extent from the same count via
+// hip.readback_dim), so clamp rather than corrupt memory.
+__device__ inline int64_t compress_selected_count(const int64_t *count,
+                                                  int64_t out_extent) {
+  int64_t n = *count;
+  return n < out_extent ? n : out_extent;
+}
+
 template <typename T>
 __global__ void compress_flatten_kernel(const T *__restrict__ input,
                                         const int64_t *__restrict__ selected,
-                                        int64_t selected_count, T *__restrict__ output) {
+                                        const int64_t *__restrict__ count,
+                                        int64_t out_extent,
+                                        T *__restrict__ output) {
   int64_t tid =
       static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (tid >= selected_count)
+  if (tid >= compress_selected_count(count, out_extent))
     return;
   output[tid] = input[selected[tid]];
 }
 
 template <typename T>
 __global__ void compress_axis_kernel(const T *__restrict__ input,
-                                   const int64_t *__restrict__ selected,
-                                   int64_t selected_count, T *__restrict__ output,
-                                   int64_t num_output, CompressAxisGeom geom) {
+                                     const int64_t *__restrict__ selected,
+                                     const int64_t *__restrict__ count,
+                                     T *__restrict__ output,
+                                     int64_t num_output,
+                                     CompressAxisGeom geom) {
   int64_t tid =
       static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (tid >= num_output)
     return;
+  int64_t selected_count =
+      compress_selected_count(count, geom.oshape[geom.axis]);
 
   int64_t coords[kMaxRank] = {0};
   int64_t rem = tid;
@@ -141,13 +159,24 @@ static int launch_compress(void *stream, const void *input, const void *conditio
                             sizeof(int64_t))
     return -1;
 
+  if (!flatten && (axis < 0 || axis >= output_rank || output_rank != input_rank))
+    return -1;
+
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
   constexpr int kBlockSize = 256;
+
+  int64_t out_extent = output_shape[flatten ? 0 : axis];
+  int64_t num_output = 1;
+  for (int64_t i = 0; i < output_rank; ++i)
+    num_output *= output_shape[i];
+  if (out_extent <= 0 || num_output <= 0)
+    return 0;
 
   int64_t *selected = static_cast<int64_t *>(workspace);
   auto *count_dev = reinterpret_cast<int64_t *>(
       static_cast<char *>(workspace) + condition_len * sizeof(int64_t));
 
+  (void)hipGetLastError();
   hipLaunchKernelGGL(compress_scan_kernel, dim3(1), dim3(kCompressScanBlock), 0,
                      hip_stream, static_cast<const uint8_t *>(condition),
                      condition_len, selected, count_dev);
@@ -158,58 +187,27 @@ static int launch_compress(void *stream, const void *input, const void *conditio
     return static_cast<int>(err);
   }
 
-  int64_t selected_count_host = 0;
-  err = hipMemcpyAsync(&selected_count_host, count_dev, sizeof(int64_t),
-                       hipMemcpyDeviceToHost, hip_stream);
-  if (err != hipSuccess)
-    return static_cast<int>(err);
-  err = hipStreamSynchronize(hip_stream);
-  if (err != hipSuccess)
-    return static_cast<int>(err);
-
-  int64_t selected_count = selected_count_host;
-  if (selected_count <= 0)
-    return 0;
-
-  // The destination is written densely with `selected_count` slices along the
-  // selection axis, so a runtime count above the extent the graph allocated
-  // would write past the buffer. That only happens when the declared ONNX
-  // extent disagrees with the data (the compiler sizes a dynamic extent from
-  // the same count via hip.readback_dim); clamp rather than corrupt memory.
-  int64_t out_extent = output_shape[flatten ? 0 : axis];
-  if (selected_count > out_extent)
-    selected_count = out_extent;
-
   if (flatten) {
-    int grid = static_cast<int>((selected_count + kBlockSize - 1) / kBlockSize);
+    int grid = static_cast<int>((out_extent + kBlockSize - 1) / kBlockSize);
     hipLaunchKernelGGL(HIP_KERNEL_NAME(compress_flatten_kernel<T>),
                      dim3(grid), dim3(kBlockSize), 0, hip_stream,
-                     static_cast<const T *>(input), selected, selected_count,
-                     static_cast<T *>(output));
+                     static_cast<const T *>(input), selected, count_dev,
+                     out_extent, static_cast<T *>(output));
   } else {
     CompressAxisGeom geom{};
     geom.axis = axis;
     geom.rank = input_rank;
     for (int64_t i = 0; i < output_rank; ++i)
       geom.oshape[i] = output_shape[i];
-    geom.oshape[axis] = selected_count;
     geom.istrides[input_rank - 1] = 1;
     for (int64_t i = input_rank - 2; i >= 0; --i)
       geom.istrides[i] = geom.istrides[i + 1] * input_shape[i + 1];
 
-    int64_t axis_output_numel = selected_count;
-    for (int64_t i = 0; i < output_rank; ++i) {
-      if (i == axis)
-        continue;
-      axis_output_numel *= geom.oshape[i];
-    }
-
-    int grid = static_cast<int>(
-        (axis_output_numel + kBlockSize - 1) / kBlockSize);
+    int grid = static_cast<int>((num_output + kBlockSize - 1) / kBlockSize);
     hipLaunchKernelGGL(HIP_KERNEL_NAME(compress_axis_kernel<T>),
                      dim3(grid), dim3(kBlockSize), 0, hip_stream,
-                     static_cast<const T *>(input), selected, selected_count,
-                     static_cast<T *>(output), axis_output_numel, geom);
+                     static_cast<const T *>(input), selected, count_dev,
+                     static_cast<T *>(output), num_output, geom);
   }
 
   err = hipGetLastError();

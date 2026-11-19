@@ -184,12 +184,19 @@ int host_top_k(hipStream_t stream, const void *x, void *values, void *indices,
   return 0;
 }
 
-} // namespace
+// main_graph drops the wrapper's return value, so a nonzero status must also
+// land in the device error flag that inference_compute reads after the stream
+// sync.
+int finish_top_k(RuntimeState *state, int status) {
+  if (status != 0 && state)
+    hipdnn_ep_state_set_error_flag(state, status);
+  return status;
+}
 
-int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
-               void *indices, int64_t axis, int64_t largest, int64_t sorted,
-               int64_t rank, const int64_t *x_shape, int64_t num_elements,
-               int64_t data_type) {
+int run_top_k(RuntimeState *state, void *x, int64_t k_val, void *values,
+              void *indices, int64_t axis, int64_t largest, int64_t sorted,
+              int64_t rank, const int64_t *x_shape, int64_t num_elements,
+              int64_t data_type) {
   OP_PROFILE(
       "top_k",
       [&] {
@@ -200,18 +207,7 @@ int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
       },
       state);
 
-  // main_graph drops this return value, so a nonzero status must also land in
-  // the device error flag that inference_compute reads after the stream sync.
-  auto finish = [&](int status) {
-    if (status != 0)
-      hipdnn_ep_state_set_error_flag(state, status);
-    return status;
-  };
-
-  if (!state || !x || !k || !values || !indices || !x_shape) {
-    RUNTIME_DEBUG_LOG("[REAL] wrap_top_k: null argument\n");
-    return finish(-1);
-  }
+  auto finish = [&](int status) { return finish_top_k(state, status); };
 
   int hip_dtype = top_k_hipdnn_to_hip_dtype(data_type);
   if (hip_dtype < 0) {
@@ -220,21 +216,7 @@ int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
     return finish(-1);
   }
 
-  int64_t k_val = 0;
   void *stream = hipdnn_ep_state_get_stream(state);
-  hipError_t err = hipMemcpy(&k_val, k, sizeof(int64_t), hipMemcpyDeviceToHost);
-  if (err != hipSuccess) {
-    fprintf(stderr, "[REAL] wrap_top_k: failed to read K: %s\n",
-            hipGetErrorString(err));
-    return finish(-1);
-  }
-  err = hipStreamSynchronize(static_cast<hipStream_t>(stream));
-  if (err != hipSuccess) {
-    fprintf(stderr, "[REAL] wrap_top_k: stream sync failed: %s\n",
-            hipGetErrorString(err));
-    return finish(-1);
-  }
-
   auto run_on_host = [&] {
     RUNTIME_DEBUG_LOG(
         "[REAL] wrap_top_k: axis=%lld, k=%lld, dtype=%s -> host\n",
@@ -270,4 +252,45 @@ int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
   return finish(hip_top_k(stream, x, values, indices, axis, largest, sorted,
                           rank, x_shape, k_val, hip_dtype, workspace,
                           workspace_bytes));
+}
+
+} // namespace
+
+int wrap_top_k_host_k(RuntimeState *state, void *x, int64_t k, void *values,
+                      void *indices, int64_t axis, int64_t largest,
+                      int64_t sorted, int64_t rank, const int64_t *x_shape,
+                      int64_t num_elements, int64_t data_type) {
+  if (!state || !x || !values || !indices || !x_shape || k < 0) {
+    RUNTIME_DEBUG_LOG("[REAL] wrap_top_k_host_k: invalid argument\n");
+    return finish_top_k(state, -1);
+  }
+  return run_top_k(state, x, k, values, indices, axis, largest, sorted, rank,
+                   x_shape, num_elements, data_type);
+}
+
+int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
+               void *indices, int64_t axis, int64_t largest, int64_t sorted,
+               int64_t rank, const int64_t *x_shape, int64_t num_elements,
+               int64_t data_type) {
+  if (!state || !x || !k || !values || !indices || !x_shape) {
+    RUNTIME_DEBUG_LOG("[REAL] wrap_top_k: null argument\n");
+    return finish_top_k(state, -1);
+  }
+
+  int64_t k_val = 0;
+  void *stream = hipdnn_ep_state_get_stream(state);
+  hipError_t err = hipMemcpy(&k_val, k, sizeof(int64_t), hipMemcpyDeviceToHost);
+  if (err != hipSuccess) {
+    fprintf(stderr, "[REAL] wrap_top_k: failed to read K: %s\n",
+            hipGetErrorString(err));
+    return finish_top_k(state, -1);
+  }
+  err = hipStreamSynchronize(static_cast<hipStream_t>(stream));
+  if (err != hipSuccess) {
+    fprintf(stderr, "[REAL] wrap_top_k: stream sync failed: %s\n",
+            hipGetErrorString(err));
+    return finish_top_k(state, -1);
+  }
+  return run_top_k(state, x, k_val, values, indices, axis, largest, sorted,
+                   rank, x_shape, num_elements, data_type);
 }

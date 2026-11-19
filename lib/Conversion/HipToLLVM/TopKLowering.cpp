@@ -33,14 +33,33 @@ static Value buildShapeArray(MemRefType type, Value memref, Location loc,
 }
 
 // hip.top_k(ctx, x, k, values, indices, axis, largest, sorted)
-//   -> wrap_top_k(state, x, k, values, indices, axis, largest, sorted, rank,
-//                 x_shape_ptr, num_elements, data_type)
+//   -> wrap_top_k_host_k(state, x, values.dim(axis), values, indices, axis,
+//                        largest, sorted, rank, x_shape_ptr, num_elements,
+//                        data_type)
+//
+// The `values` extent along `axis` is K: the ONNX-to-HIP conversion sizes it
+// from K, reading K back only when it is not a compile-time constant. Passing
+// that extent keeps the runtime from reading the K buffer again.
 struct TopKOpLowering : public ConvertOpToLLVMPattern<TopKOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult
   matchAndRewrite(TopKOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    auto xType = cast<MemRefType>(op.getX().getType());
+    auto valuesType = cast<MemRefType>(op.getValues().getType());
+    int rank = xType.getRank();
+    if (rank <= 0 || rank > 8)
+      return rewriter.notifyMatchFailure(op, "rank must be in [1, 8]");
+    if (valuesType.getRank() != rank)
+      return rewriter.notifyMatchFailure(op, "values rank must match x");
+
+    int64_t axisAttr = op.getAxis();
+    if (axisAttr < 0)
+      axisAttr += rank;
+    if (axisAttr < 0 || axisAttr >= rank)
+      return rewriter.notifyMatchFailure(op, "axis out of range");
+
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type ptrType = getPtrType();
@@ -54,24 +73,16 @@ struct TopKOpLowering : public ConvertOpToLLVMPattern<TopKOp> {
 
     Value statePtr = adaptor.getCtx();
     Value xPtr = extractContiguousMemRefPtr(adaptor.getX(), rewriter, loc);
-    Value kPtr = extractContiguousMemRefPtr(adaptor.getK(), rewriter, loc);
+    Value kVal = getMemRefDimSize(valuesType, axisAttr, adaptor.getValues(),
+                                  rewriter, loc);
     Value valuesPtr =
         extractContiguousMemRefPtr(adaptor.getValues(), rewriter, loc);
     Value indicesPtr =
         extractContiguousMemRefPtr(adaptor.getIndices(), rewriter, loc);
 
-    auto xType = cast<MemRefType>(op.getX().getType());
-    int rank = xType.getRank();
-    if (rank <= 0 || rank > 8)
-      return rewriter.notifyMatchFailure(op, "rank must be in [1, 8]");
-
     Value xShapeArr = buildShapeArray(xType, adaptor.getX(), loc, rewriter);
     Value numElements =
         computeNumElements(xType, adaptor.getX(), rewriter, loc);
-
-    int64_t axisAttr = op.getAxis();
-    if (axisAttr < 0)
-      axisAttr += rank;
 
     Value axisVal = createI64Const(axisAttr);
     Value rankVal = createI64Const(rank);
@@ -82,7 +93,7 @@ struct TopKOpLowering : public ConvertOpToLLVMPattern<TopKOp> {
         createI64Const(getHipdnnDataType(xType.getElementType()));
 
     SmallVector<Type, 12> paramTypes = {
-        ptrType, ptrType, ptrType, ptrType, ptrType, // state, x, k, values, idx
+        ptrType, ptrType, i64Type, ptrType, ptrType, // state, x, k, values, idx
         i64Type, i64Type, i64Type,                   // axis, largest, sorted
         i64Type, ptrType, i64Type, i64Type};         // rank, shape, num, dtype
 
@@ -91,7 +102,7 @@ struct TopKOpLowering : public ConvertOpToLLVMPattern<TopKOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value> args = {statePtr,   xPtr,      kPtr,        valuesPtr,
+    SmallVector<Value> args = {statePtr,   xPtr,      kVal,        valuesPtr,
                                indicesPtr, axisVal,   largestVal,  sortedVal,
                                rankVal,    xShapeArr, numElements, dataTypeVal};
 

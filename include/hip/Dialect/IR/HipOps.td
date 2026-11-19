@@ -2475,6 +2475,10 @@ def Hip_TopKOp : Hip_DpsOp<"top_k"> {
       values - same element type as x
       indices - int64
 
+    The `values` and `indices` extent along `axis` must equal the value of K.
+    The LLVM lowering passes that extent to the runtime as K and does not read
+    the `k` buffer.
+
     Example:
     ```mlir
     hip.top_k(%ctx)

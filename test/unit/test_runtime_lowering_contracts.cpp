@@ -129,7 +129,7 @@ int main() {
     }
     module->walk([&](CastOp op) {
       auto access = cast<RuntimeAccessOpInterface>(op.getOperation());
-      check(access.supportsHostMappedInputs() && !access.getEarlyHostRead(),
+      check(access.supportsHostMappedInputs(),
             "Cast retains its ordered mapped-input contract");
     });
 

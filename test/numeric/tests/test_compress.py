@@ -29,7 +29,10 @@ from framework.onnx_utils import make_model_from_nodes, np_to_onnx_type
 
 
 def _make_compress_model(
-    in_shape: list[int], cond_len: int, axis: int, out_shape: list[int | str]
+    in_shape: list[int],
+    cond_len: int,
+    axis: int | None,
+    out_shape: list[int | str],
 ):
     inp = helper.make_tensor_value_info(
         "input", np_to_onnx_type(np.float32), list(in_shape)
@@ -40,7 +43,8 @@ def _make_compress_model(
     out = helper.make_tensor_value_info(
         "output", np_to_onnx_type(np.float32), list(out_shape)
     )
-    node = helper.make_node("Compress", ["input", "condition"], ["output"], axis=axis)
+    attrs = {} if axis is None else {"axis": axis}
+    node = helper.make_node("Compress", ["input", "condition"], ["output"], **attrs)
     return make_model_from_nodes([node], [inp, cond], [out])
 
 
@@ -81,4 +85,27 @@ class TestCompress:
         x = rng.uniform(-5.0, 5.0, [cond_len, 5]).astype(np.float32)
         actual, expected = model_runner.run_sample(model, [x, condition])
         assert actual[0].shape == (int(condition.sum()), 5)
+        compare_outputs(actual, expected, atol=0)
+
+    def test_compress_axis1_dynamic_extent(self, model_runner):
+        """A dynamic extent on an inner axis keeps the output row-major."""
+        rows, cols = 3, 300
+        rng = np.random.default_rng(704)
+        condition = rng.random(cols) < 0.4
+        model = _make_compress_model([rows, cols], cols, 1, [rows, "kept"])
+        x = rng.uniform(-5.0, 5.0, [rows, cols]).astype(np.float32)
+        actual, expected = model_runner.run_sample(model, [x, condition])
+        assert actual[0].shape == (rows, int(condition.sum()))
+        compare_outputs(actual, expected, atol=0)
+
+    def test_compress_flatten_dynamic_extent(self, model_runner):
+        """Without an axis the input is flattened; a short condition leaves
+        the trailing elements unselected."""
+        in_shape, cond_len = [4, 6], 20
+        rng = np.random.default_rng(705)
+        condition = rng.random(cond_len) < 0.5
+        model = _make_compress_model(in_shape, cond_len, None, ["kept"])
+        x = rng.uniform(-5.0, 5.0, in_shape).astype(np.float32)
+        actual, expected = model_runner.run_sample(model, [x, condition])
+        assert actual[0].shape == (int(condition.sum()),)
         compare_outputs(actual, expected, atol=0)

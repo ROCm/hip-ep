@@ -162,7 +162,15 @@ Consequence: the GPU `shape` / `repeats` input tensors (when present)
 are **not** read by the runtime. We save a per-call D2H of the shape
 tensor that the ORT CUDA EP performs. The same pattern works for Tile
 (repeats[d] = output_shape[d] / input_shape[d]) and Expand (output_shape
-is the broadcast result).
+is the broadcast result). Scalar operands that only size the output follow
+it too: TopK receives K as the `values` extent along `axis`, and OneHot
+takes `depth` from `output_shape[axis]`. The ONNX-to-HIP conversion reads
+such a scalar back once, only when the extent is dynamic.
+
+Small device-side operands that only parameterize a kernel are read inside
+the kernel rather than copied to the host: OneHot's `[off, on]` values and
+Compress's selected count (written by its scan kernel) never reach the host.
+The Compress gather kernels are sized for the allocated output extent.
 
 **Gotcha**: when a future op gets added, the lowering must pass shapes
 through, otherwise the runtime is forced into a per-call D2H. The

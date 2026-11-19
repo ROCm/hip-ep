@@ -328,12 +328,14 @@ func.func @device_overwrite(%ctx: !hip.context, %n: i32,
 
 // -----
 
-// TopK reads K before its context wait. Keep the earlier explicit wait.
+// TopK takes K from its values extent and does not read K on the host. A
+// pending device write to K does not keep the earlier explicit wait.
 // CHECK-LABEL: llvm.func @topk_pending_k(
 // CHECK: llvm.call @wrap_cast
-// CHECK: llvm.call @hipdnn_ep_readback_scalar
-// CHECK: llvm.call @wrap_top_k
-// CHECK: llvm.return
+// CHECK-NOT: llvm.call @hipdnn_ep_readback
+// CHECK: llvm.call @wrap_top_k_host_k
+// CHECK-NOT: llvm.call @hipdnn_ep_readback
+// CHECK: llvm.return %arg1 : i32
 func.func @topk_pending_k(%ctx: !hip.context, %n: i32, %source: memref<1xi32>,
                         %data: memref<4xf32>, %values: memref<1xf32>,
                         %indices: memref<1xi64>) -> i32 {
@@ -358,7 +360,7 @@ func.func @topk_pending_k(%ctx: !hip.context, %n: i32, %source: memref<1xi32>,
 // CHECK-LABEL: llvm.func @topk_host_k(
 // CHECK: llvm.store %arg1,
 // CHECK-NOT: llvm.call @hipdnn_ep_readback
-// CHECK: llvm.call @wrap_top_k
+// CHECK: llvm.call @wrap_top_k_host_k
 // CHECK-NOT: llvm.call @hipdnn_ep_readback
 // CHECK: llvm.return %arg1 : i64
 func.func @topk_host_k(%ctx: !hip.context, %n: i64, %data: memref<4xf32>,
