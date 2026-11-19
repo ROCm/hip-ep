@@ -86,6 +86,23 @@ class TestSoftmax:
         x = _random_input([5, cols], dtype, seed=cols)
         _run_and_compare(model_runner, x)
 
+    @pytest.mark.parametrize("cols", [8193, 30000])
+    def test_fp16_fallback_rounds_once(self, model_runner, cols):
+        # The three-pass fallback keeps its exponents in fp32, so each fp16
+        # output is the exact softmax rounded once: within half an fp16 step,
+        # 2^-11 relative, or 2^-25 among the subnormals. A stored fp16
+        # exponent would round twice and miss this bound on many elements.
+        x = _random_input([5, cols], np.float16, seed=cols)
+        model = _make_softmax_model(list(x.shape), np.float16, -1)
+        actual = model_runner.backend.run(_persist(model_runner, model), [x])
+        compare_outputs(
+            [actual[0].astype(np.float64)],
+            [_softmax_ref(x)],
+            atol=1.05 * 2.0**-25,
+            rtol=1.2 * 2.0**-11,
+            cos_threshold=0.9999,
+        )
+
     # A skip, not an xfail: with bf16 typed as f32 the kernel reads and writes
     # twice the buffer sizes, which can fault or corrupt other allocations.
     @pytest.mark.skip(
