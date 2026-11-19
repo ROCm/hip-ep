@@ -111,6 +111,202 @@ int64_t flatIndex(ArrayRef<int64_t> shape, int64_t a, int64_t b, int64_t c,
   return ((a * shape[1] + b) * shape[2] + c) * shape[3] + d;
 }
 
+// Same three granularities as qdq_kernel.hip. A constant DequantizeLinear of
+// the filter is evaluated here so the residue split sees a hip.constant.
+constexpr int kQdqPerTensor = 0;
+constexpr int kQdqPerAxis = 1;
+constexpr int kQdqBlocked = 2;
+
+struct QdqIndex {
+  int mode = kQdqPerTensor;
+  int axis = 0;
+  int blockSize = 0;
+  int64_t inner = 1;
+  int64_t axisDim = 1;
+  SmallVector<int64_t> inShape;
+  SmallVector<int64_t> scaleShape;
+};
+
+int64_t qdqParamIndex(const QdqIndex &index, int64_t lin) {
+  if (index.mode == kQdqPerTensor)
+    return 0;
+  if (index.mode == kQdqPerAxis)
+    return (lin / index.inner) % index.axisDim;
+
+  SmallVector<int64_t> coord(index.inShape.size());
+  int64_t rem = lin;
+  for (int dim = static_cast<int>(index.inShape.size()) - 1; dim >= 0; --dim) {
+    coord[dim] = rem % index.inShape[dim];
+    rem /= index.inShape[dim];
+  }
+  int64_t scaleLin = 0;
+  for (auto [dim, coordOnDim] : llvm::enumerate(coord)) {
+    int64_t scaleCoord = static_cast<int>(dim) == index.axis
+                             ? coordOnDim / index.blockSize
+                             : coordOnDim;
+    scaleLin = scaleLin * index.scaleShape[dim] + scaleCoord;
+  }
+  return scaleLin;
+}
+
+FailureOr<QdqIndex> classifyQdq(ArrayRef<int64_t> inShape,
+                                ArrayRef<int64_t> scaleShape, int64_t axis,
+                                int64_t blockSize) {
+  int64_t scaleCount = 1;
+  for (int64_t extent : scaleShape)
+    scaleCount *= extent;
+  QdqIndex index;
+  index.inShape.assign(inShape.begin(), inShape.end());
+  index.scaleShape.assign(scaleShape.begin(), scaleShape.end());
+  index.blockSize = static_cast<int>(blockSize);
+  if (scaleCount == 1) {
+    index.mode = kQdqPerTensor;
+    return index;
+  }
+  int rank = static_cast<int>(inShape.size());
+  if (axis < 0)
+    axis += rank;
+  if (axis < 0 || axis >= rank || blockSize < 0)
+    return failure();
+  index.axis = static_cast<int>(axis);
+  if (blockSize > 0) {
+    if (scaleShape.size() != inShape.size())
+      return failure();
+    for (auto [dim, extent] : llvm::enumerate(inShape)) {
+      if (static_cast<int>(dim) == index.axis) {
+        if (scaleShape[dim] * blockSize < extent)
+          return failure();
+      } else if (scaleShape[dim] != extent) {
+        return failure();
+      }
+    }
+    index.mode = kQdqBlocked;
+    return index;
+  }
+  if (scaleShape.size() == 1 && scaleShape[0] == inShape[index.axis]) {
+    index.mode = kQdqPerAxis;
+    index.axisDim = inShape[index.axis];
+    for (int dim = index.axis + 1; dim < rank; ++dim)
+      index.inner *= inShape[dim];
+    return index;
+  }
+  return failure();
+}
+
+FailureOr<SmallVector<int64_t>> readIntConstant(Value value) {
+  auto constant = value.getDefiningOp<ConstantOp>();
+  auto type = dyn_cast<RankedTensorType>(value.getType());
+  auto intType = type ? dyn_cast<IntegerType>(type.getElementType()) : nullptr;
+  if (!constant || !type || !type.hasStaticShape() || !intType ||
+      intType.getWidth() > 32)
+    return failure();
+  FailureOr<DenseElementsAttr> data = readConstantData(constant, type);
+  if (failed(data))
+    return failure();
+  SmallVector<int64_t> values;
+  values.reserve(type.getNumElements());
+  bool isUnsigned = intType.isUnsigned();
+  for (const APInt &element : data->getValues<APInt>())
+    values.push_back(isUnsigned ? element.getZExtValue()
+                                : element.getSExtValue());
+  return values;
+}
+
+FailureOr<SmallVector<double>> readFloatConstant(Value value) {
+  auto constant = value.getDefiningOp<ConstantOp>();
+  auto type = dyn_cast<RankedTensorType>(value.getType());
+  if (!constant || !type || !type.hasStaticShape() ||
+      !isa<FloatType>(type.getElementType()))
+    return failure();
+  FailureOr<DenseElementsAttr> data = readConstantData(constant, type);
+  if (failed(data))
+    return failure();
+  SmallVector<double> values;
+  values.reserve(type.getNumElements());
+  for (const APFloat &element : data->getValues<APFloat>())
+    values.push_back(element.convertToDouble());
+  return values;
+}
+
+DenseElementsAttr floatElements(RankedTensorType type,
+                                ArrayRef<double> values) {
+  Type elementType = type.getElementType();
+  if (elementType.isF32()) {
+    SmallVector<float> narrowed(values.begin(), values.end());
+    return DenseElementsAttr::get(type, ArrayRef<float>(narrowed));
+  }
+  if (elementType.isF64())
+    return DenseElementsAttr::get(type, values);
+  const llvm::fltSemantics &semantics =
+      cast<FloatType>(elementType).getFloatSemantics();
+  SmallVector<APFloat> rounded;
+  rounded.reserve(values.size());
+  for (double value : values) {
+    APFloat converted(value);
+    bool losesInfo = false;
+    converted.convert(semantics, APFloat::rmNearestTiesToEven, &losesInfo);
+    rounded.push_back(converted);
+  }
+  return DenseElementsAttr::get(type, rounded);
+}
+
+/// A float hip.constant, or a DequantizeLinear of constants evaluated as
+/// `(q - zero_point) * scale`. Anything else stays on the MIOpen path.
+FailureOr<DenseElementsAttr> filterData(Value weight,
+                                        RankedTensorType weightType) {
+  if (auto constant = weight.getDefiningOp<ConstantOp>())
+    return readConstantData(constant, weightType);
+
+  auto dequant = weight.getDefiningOp<DequantizeLinearOp>();
+  if (!dequant || dequant.getPackedInt4())
+    return failure();
+  if (dequant.getResult(0).getType() != weightType)
+    return failure();
+  auto quantType = dyn_cast<RankedTensorType>(dequant.getInput().getType());
+  auto scaleType = dyn_cast<RankedTensorType>(dequant.getScale().getType());
+  if (!quantType || !scaleType || !quantType.hasStaticShape() ||
+      !scaleType.hasStaticShape() ||
+      quantType.getShape() != weightType.getShape())
+    return failure();
+
+  FailureOr<QdqIndex> index =
+      classifyQdq(quantType.getShape(), scaleType.getShape(), dequant.getAxis(),
+                  dequant.getBlockSize());
+  if (failed(index))
+    return failure();
+  FailureOr<SmallVector<int64_t>> quant = readIntConstant(dequant.getInput());
+  FailureOr<SmallVector<double>> scale = readFloatConstant(dequant.getScale());
+  if (failed(quant) || failed(scale))
+    return failure();
+
+  SmallVector<int64_t> zeroPoint;
+  if (Value zp = dequant.getZeroPoint()) {
+    FailureOr<SmallVector<int64_t>> zpValues = readIntConstant(zp);
+    if (failed(zpValues))
+      return failure();
+    zeroPoint = std::move(*zpValues);
+    if (zeroPoint.size() != 1 && zeroPoint.size() != scale->size())
+      return failure();
+  }
+
+  SmallVector<double> folded;
+  folded.reserve(quant->size());
+  for (auto [lin, q] : llvm::enumerate(*quant)) {
+    int64_t param = qdqParamIndex(*index, static_cast<int64_t>(lin));
+    if (param < 0 || static_cast<size_t>(param) >= scale->size())
+      return failure();
+    int64_t zp = 0;
+    if (!zeroPoint.empty()) {
+      size_t zpIndex = zeroPoint.size() == 1 ? 0 : static_cast<size_t>(param);
+      if (zpIndex >= zeroPoint.size())
+        return failure();
+      zp = zeroPoint[zpIndex];
+    }
+    folded.push_back(static_cast<double>(q - zp) * (*scale)[param]);
+  }
+  return floatElements(weightType, folded);
+}
+
 /// Decompose a 1-D transposed convolution through the same 2-D hip.conv path
 /// used by the general decomposition. The temporary height dimension is one:
 ///
@@ -143,13 +339,11 @@ static LogicalResult decompose1DConvTranspose(ConvTransposeOp op,
       weightType.getElementType() != elementType)
     return rewriter.notifyMatchFailure(op, "expected matching element types");
 
-  auto weightConst = op.getWeights().getDefiningOp<ConstantOp>();
-  if (!weightConst)
-    return rewriter.notifyMatchFailure(op, "weights are not a hip.constant");
   FailureOr<DenseElementsAttr> weightData =
-      readConstantData(weightConst, weightType);
+      filterData(op.getWeights(), weightType);
   if (failed(weightData))
-    return rewriter.notifyMatchFailure(op, "weights are not readable here");
+    return rewriter.notifyMatchFailure(op,
+                                       "weights are not a readable constant");
   SmallVector<APFloat> weightValues(weightData->getValues<APFloat>().begin(),
                                     weightData->getValues<APFloat>().end());
 
@@ -362,13 +556,11 @@ DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
   // file-backed range. Memory-address carriers are not resolved: this pattern
   // is equally reachable from textual pass invocation, where the address
   // would be dereferenced blind.
-  auto weightConst = op.getWeights().getDefiningOp<ConstantOp>();
-  if (!weightConst)
-    return rewriter.notifyMatchFailure(op, "weights are not a hip.constant");
   FailureOr<DenseElementsAttr> weightData =
-      readConstantData(weightConst, weightType);
+      filterData(op.getWeights(), weightType);
   if (failed(weightData))
-    return rewriter.notifyMatchFailure(op, "weights are not readable here");
+    return rewriter.notifyMatchFailure(op,
+                                       "weights are not a readable constant");
   DenseElementsAttr weightAttr = *weightData;
 
   SmallVector<int64_t> strides = getI64Values(op.getStridesAttr());
