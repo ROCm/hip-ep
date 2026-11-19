@@ -113,7 +113,8 @@ void dumpPreFusionIR(mlir::ModuleOp module,
   }
   os << "// hip-rocmlir-fusion: arch=" << fuseOpts.arch
      << " gemm-gemm-accel-types="
-     << llvm::join(fuseOpts.gemmGemmAccelTypes, ",") << "\n";
+     << llvm::join(fuseOpts.gemmGemmAccelTypes, ",")
+     << " attention=" << (fuseOpts.attention ? "true" : "false") << "\n";
   module->print(os);
 }
 #endif
@@ -140,6 +141,9 @@ std::string rocMlirArtifactTarget() {
     mlir::hip::AutotuneSpace space;
     if (!target.empty() && mlir::hip::rocMlirAutotuneFromEnv(space))
       target += std::string("+autotune=") + mlir::hip::autotuneSpaceName(space);
+    // Whether attention was fused is baked into the kernels the same way.
+    if (!target.empty() && hip_env_is_on("HIPDNN_EP_ROCMLIR_NO_ATTENTION"))
+      target += "+no-attention";
     return target;
   }
 #endif
@@ -468,6 +472,9 @@ bool CompilerDriver::runMLIRPasses(
       std::vector<std::string> accelTypes = mlir::hip::getRocMlirGemmAccelTypes(
           *module.getContext(), fuseOpts.arch);
       fuseOpts.gemmGemmAccelTypes.assign(accelTypes.begin(), accelTypes.end());
+      // HIPDNN_EP_ROCMLIR_NO_ATTENTION=1 keeps attention as two gemm kernels
+      // and a softmax, to compare the two paths.
+      fuseOpts.attention = !hip_env_is_on("HIPDNN_EP_ROCMLIR_NO_ATTENTION");
       if (mlir::failed(headPm.run(module))) {
         error_message = "ONNX->HIP passes before the rocMLIR fusion failed";
         return false;

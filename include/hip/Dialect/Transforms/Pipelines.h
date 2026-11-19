@@ -179,6 +179,11 @@ struct RocMlirFusionPipelineOptions
   ListOption<std::string> gemmGemmAccelTypes{
       *this, "gemm-gemm-accel-types",
       llvm::cl::desc("Gemm element types with matrix acceleration")};
+  Option<bool> attention{
+      *this, "attention",
+      llvm::cl::desc("Merge gemm -> softmax -> gemm into one attention "
+                     "kernel"),
+      llvm::cl::init(true)};
   Option<std::string> report{
       *this, "report",
       llvm::cl::desc("Append the fusion report records to this file"),

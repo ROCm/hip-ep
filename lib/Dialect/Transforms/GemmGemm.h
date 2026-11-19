@@ -19,6 +19,13 @@ namespace mlir::hip {
 void fuseGemmGemmKernels(func::FuncOp funcOp, int &counter,
                          ArrayRef<std::string> accelTypes);
 
+/// Merges each matmul or gemm rocMLIR kernel, the last-axis softmax that reads
+/// its only result, and the matmul or gemm kernel that reads the softmax as
+/// its A operand into one attention kernel. Both gemms must read a float type
+/// listed in `accelTypes` and have head dims of at most 256.
+void fuseAttentionKernels(func::FuncOp funcOp, int &counter,
+                          ArrayRef<std::string> accelTypes);
+
 } // namespace mlir::hip
 
 #endif // HIP_DIALECT_TRANSFORMS_GEMMGEMM_H
