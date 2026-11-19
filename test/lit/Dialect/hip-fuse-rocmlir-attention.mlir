@@ -4,15 +4,23 @@
 // Attention: a gemm kernel, the last-axis softmax of its only result and the
 // gemm kernel that reads the softmax as its A operand merge into one kernel,
 // which rocMLIR lowers to rock.attention. Both gemms must read a float type in
-// gemm-gemm-accel-types (or f32 with a score matrix over 32 MiB), and both
-// head dims must be at most 256.
+// gemm-gemm-accel-types (or f32 with a score matrix larger than
+// attention-f32-min-score-bytes, here a 2 MiB cache), and both head dims must
+// be at most 256.
 
 // RUN: hip-mlir-opt --split-input-file --hip-rocmlir-prepare-quant \
-// RUN:   --hip-fuse-rocmlir-elementwise --hip-fuse-rocmlir-anchor="arch=gfx1151 gemm-gemm-accel-types=f16,bf16" %s \
+// RUN:   --hip-fuse-rocmlir-elementwise --hip-fuse-rocmlir-anchor="gemm-gemm-accel-types=f16,bf16 attention-f32-min-score-bytes=2097152" %s \
 // RUN:   | FileCheck %s
 // RUN: hip-mlir-opt --split-input-file --hip-rocmlir-prepare-quant \
-// RUN:   --hip-fuse-rocmlir-elementwise --hip-fuse-rocmlir-anchor="arch=gfx1151 gemm-gemm-accel-types=f16,bf16 attention=false" %s \
+// RUN:   --hip-fuse-rocmlir-elementwise --hip-fuse-rocmlir-anchor="gemm-gemm-accel-types=f16,bf16 attention-f32-min-score-bytes=2097152 attention=false" %s \
 // RUN:   | FileCheck %s --check-prefix=OFF
+// RUN: hip-mlir-opt --split-input-file --hip-rocmlir-prepare-quant \
+// RUN:   --hip-fuse-rocmlir-elementwise --hip-fuse-rocmlir-anchor="gemm-gemm-accel-types=f16,bf16" %s \
+// RUN:   | FileCheck %s --check-prefix=NOF32
+
+// Without attention-f32-min-score-bytes only the f16 attention below merges.
+// NOF32: func.func @mlir_matmul_mul_miopen.softmax_matmul_
+// NOF32-NOT: func.func @{{.*}}softmax_matmul
 
 // Scaled f16 attention with BHSD inputs: one kernel runs matmul -> mul ->
 // softmax -> matmul and reads q, k and v.
@@ -58,7 +66,7 @@ func.func @main_graph(%ctx: !hip.context, %q: tensor<1x2x64x32xf16>,
 // -----
 
 // f32 has no matrix acceleration listed and its 32 KiB score matrix fits in
-// the cache, so the gemms and the softmax stay apart.
+// the 2 MiB cache, so the gemms and the softmax stay apart.
 
 // CHECK-LABEL: func.func @main_graph
 // CHECK: hip.rocmlir
@@ -81,9 +89,9 @@ func.func @main_graph(%ctx: !hip.context, %q: tensor<1x2x64x32xf32>,
 
 // -----
 
-// An f32 score matrix of 256 MiB would spill out of the cache between
-// unfused kernels, so f32 fuses too. Q is transposed by the matmul, so the
-// head dim is its second-to-last dimension.
+// An f32 score matrix of 256 MiB is larger than the 2 MiB cache and would go
+// to memory between unfused kernels, so f32 fuses too. Q is transposed by the
+// matmul, so the head dim is its second-to-last dimension.
 
 // CHECK-LABEL: func.func @main_graph
 // CHECK-NOT: hip.miopen.softmax

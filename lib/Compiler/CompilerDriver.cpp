@@ -118,7 +118,9 @@ void dumpPreFusionIR(mlir::ModuleOp module,
      << " standalone-elementwise="
      << (fuseOpts.standaloneElementwise ? "true" : "false")
      << " int4-weights=" << (fuseOpts.int4Weights ? "true" : "false")
-     << " attention=" << (fuseOpts.attention ? "true" : "false") << "\n";
+     << " attention=" << (fuseOpts.attention ? "true" : "false")
+     << " attention-f32-min-score-bytes=" << fuseOpts.attentionF32MinScoreBytes
+     << "\n";
   module->print(os);
 }
 #endif
@@ -493,6 +495,8 @@ bool CompilerDriver::runMLIRPasses(
       // HIPDNN_EP_ROCMLIR_NO_ATTENTION=1 keeps attention as two gemm kernels
       // and a softmax, to compare the two paths.
       fuseOpts.attention = !hip_env_is_on("HIPDNN_EP_ROCMLIR_NO_ATTENTION");
+      fuseOpts.attentionF32MinScoreBytes =
+          mlir::hip::resolveRocMlirL2CacheBytes();
       if (mlir::failed(headPm.run(module))) {
         error_message = "ONNX->HIP passes before the rocMLIR fusion failed";
         return false;
