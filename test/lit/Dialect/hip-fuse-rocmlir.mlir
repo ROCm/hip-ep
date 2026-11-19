@@ -1677,12 +1677,9 @@ func.func @main_graph(%ctx: !hip.context, %a: tensor<2x3xf64>,
 // An f32 matmul followed by an f64 cast. The matmul is outlined. The cast
 // stays in main_graph, because an f64 result is not a rocMLIR endpoint.
 
-// CHECK-LABEL: func.func @rocMlir
-// CHECK: hip.matmul
-// CHECK-NOT: hip.cast
-
 // CHECK-LABEL: func.func @main_graph
-// CHECK: hip.rocmlir
+// CHECK: hip.rocmlir(%{{.*}}) @mlir_matmul
+// CHECK-NOT: hip.matmul
 // CHECK: hip.cast
 // CHECK-SAME: tensor<2x4xf64>
 func.func @main_graph(%ctx: !hip.context, %a: tensor<2x3xf32>,
