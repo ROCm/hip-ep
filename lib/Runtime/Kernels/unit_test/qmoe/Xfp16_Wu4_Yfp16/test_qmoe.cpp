@@ -822,7 +822,8 @@ reference(const Case &c, const std::vector<uint16_t> &x,
           const std::vector<uint16_t> &logits, const std::vector<uint16_t> &rw,
           const Weight &w1, const Weight &w2, bool fused, bool dp4a,
           std::vector<int32_t> &selected,
-          std::vector<uint16_t> &selected_weights) {
+          std::vector<uint16_t> &selected_weights,
+          std::vector<double> &contribution_magnitude) {
   selected.resize(c.m * c.topk);
   selected_weights.resize(selected.size());
   std::vector<std::vector<int64_t>> expert_slots(c.experts);
@@ -918,13 +919,37 @@ reference(const Case &c, const std::vector<uint16_t> &x,
     }
   });
   std::vector<double> out(c.m * c.h);
-  for (int64_t token = 0; token < c.m; ++token)
+  contribution_magnitude.assign(out.size(), 0.0);
+  for (int64_t token = 0; token < c.m; ++token) {
+    std::vector<int64_t> order(c.topk);
+    std::iota(order.begin(), order.end(), 0);
+    if (!fused) {
+      // Prefill preserves the original host loop: ascending expert IDs,
+      // stable by routing slot, with an FP16 store after every contribution.
+      // Decode instead accumulates all contributions before the final store.
+      for (int64_t r = 1; r < c.topk; ++r) {
+        const int64_t slot = order[r];
+        int64_t j = r;
+        while (j > 0 && selected[token * c.topk + order[j - 1]] >
+                            selected[token * c.topk + slot]) {
+          order[j] = order[j - 1];
+          --j;
+        }
+        order[j] = slot;
+      }
+    }
     for (int64_t row = 0; row < c.h; ++row) {
       double sum = 0;
-      for (int64_t r = 0; r < c.topk; ++r)
-        sum += per_slot[(token * c.topk + r) * c.h + row];
+      for (int64_t r : order) {
+        const float term = per_slot[(token * c.topk + r) * c.h + row];
+        contribution_magnitude[token * c.h + row] += std::abs(term);
+        sum += term;
+        if (!fused)
+          sum = real(number<uint16_t>(sum));
+      }
       out[token * c.h + row] = real(number<uint16_t>(sum));
     }
+  }
   return out;
 }
 
@@ -970,8 +995,9 @@ static bool runCase(const Case &c, int iters, unsigned seed) {
         "QMoE UT prefill requires the production grouped WMMA surface");
   std::vector<int32_t> selected;
   std::vector<uint16_t> selected_weights;
+  std::vector<double> contribution_magnitude;
   const auto ref = reference(c, x, logits, rw, w1, w2, fused, dp4a, selected,
-                             selected_weights);
+                             selected_weights, contribution_magnitude);
   hipdnn_ep_test::GpuExecutionScope execution([] { HIP_CHECK(hipDeviceSynchronize()); });
   auto *dx = to_device(x);
   auto *dl = to_device(logits);
@@ -1025,13 +1051,30 @@ static bool runCase(const Case &c, int iters, unsigned seed) {
   const auto got = from_device(dy, ref.size());
   double error = 0, square = 0;
   bool correct = true;
+  size_t output_failures = 0, index_failures = 0, weight_failures = 0;
+  double max_output_error = 0, max_route_error = 0;
   for (size_t i = 0; i < ref.size(); ++i) {
     const double value = real(got[i]), delta = value - ref[i];
     error += delta * delta;
     square += ref[i] * ref[i];
-    if (!std::isfinite(value) ||
-        std::abs(delta) > 0.0005 + 0.005 * std::abs(ref[i]))
+    max_output_error = std::max(max_output_error, std::abs(delta));
+    // Cancellation can make the final sum tiny although its FP16 expert
+    // terms are not. Retain the existing accuracy limits, with a prefill-only
+    // floor of one relative FP16 ULP of the absolute contribution sum.
+    const double cancellation_floor =
+        fused ? 0.0 : std::ldexp(contribution_magnitude[i], -10);
+    const double tolerance =
+        std::max(0.0005 + 0.005 * std::abs(ref[i]), cancellation_floor);
+    if (!std::isfinite(value) || std::abs(delta) > tolerance) {
+      if (output_failures++ < 8)
+        std::fprintf(stderr,
+                     "QMOE_CHECK output token=%zu channel=%zu actual=%.9g "
+                     "reference=%.9g abs_error=%.9g tolerance=%.9g "
+                     "cancellation_floor=%.9g\n",
+                     i / c.h, i % c.h, value, ref[i], std::abs(delta), tolerance,
+                     cancellation_floor);
       correct = false;
+    }
   }
   // The production wrapper's first scratch views are its routing indices and
   // weights. Check all of them independently, in addition to the full output.
@@ -1043,13 +1086,36 @@ static bool runCase(const Case &c, int iters, unsigned seed) {
       reinterpret_cast<const uint16_t *>(
           static_cast<const char *>(state.scratch) + weights_offset),
       selected_weights.size());
-  if (indices != selected)
-    correct = false;
-  for (size_t i = 0; i < selected_weights.size(); ++i)
-    if (std::abs(real(route_weights[i]) - real(selected_weights[i])) > 0.001)
+  for (size_t i = 0; i < selected.size(); ++i)
+    if (indices[i] != selected[i]) {
+      if (index_failures++ < 8)
+        std::fprintf(stderr,
+                     "QMOE_CHECK expert token=%zu slot=%zu actual=%d reference=%d\n",
+                     i / c.topk, i % c.topk, indices[i], selected[i]);
       correct = false;
+    }
+  for (size_t i = 0; i < selected_weights.size(); ++i) {
+    const double delta = std::abs(real(route_weights[i]) - real(selected_weights[i]));
+    max_route_error = std::max(max_route_error, delta);
+    if (delta > 0.001) {
+      if (weight_failures++ < 8)
+        std::fprintf(stderr,
+                     "QMOE_CHECK route_weight token=%zu slot=%zu actual=%.9g "
+                     "reference=%.9g abs_error=%.9g tolerance=0.001\n",
+                     i / c.topk, i % c.topk, real(route_weights[i]),
+                     real(selected_weights[i]), delta);
+      correct = false;
+    }
+  }
   const double l2 = std::sqrt(error / std::max(square, 1e-30));
   correct &= l2 <= 0.005;
+  if (!correct)
+    std::fprintf(stderr,
+                 "QMOE_CHECK summary output_failures=%zu expert_failures=%zu "
+                 "route_weight_failures=%zu max_output_error=%.9g "
+                 "max_route_weight_error=%.9g rel_l2=%.9g rel_l2_limit=0.005\n",
+                 output_failures, index_failures, weight_failures,
+                 max_output_error, max_route_error, l2);
   const bool pass = passedTime(status, correct, ms);
   report("qmoe", shape,
          dp4a    ? "fixed:wrap_qmoe:dp4a"

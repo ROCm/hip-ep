@@ -33,8 +33,33 @@ quantization with nearest-even rounding and uint4 dot products. Prefill
 rounds dequantized weights, FC1, scaled SwiGLU and FC2 storage to FP16 at
 their actual boundaries. The reference uses independent double dot products,
 threaded over experts; it neither samples outputs nor calls a GPU reference.
-Each finite output must be within `0.0005 + 0.005*abs(reference)`, full
+The prefill reduction follows ascending expert ID (stable routing-slot order
+for ties), rounding the running sum to FP16 after every contribution, as the
+production sorted-pair reduction does. Decode retains its single final store.
+Each finite decode output must be within `0.0005 + 0.005*abs(reference)`, full
 relative L2 at most 0.005; routing weights tolerate one FP16 rounding unit.
+When a correctness check fails, stderr reports bounded QMOE_CHECK examples
+with token/channel or token/top-k-slot coordinates, actual/reference values and
+the applicable error limit. Its summary separates output, expert-index and routing-
+weight failures and includes maximum errors and aggregate relative L2. A small
+relative L2 alone does not establish a pass.
+
+For prefill, the per-element limit is
+max(0.0005 + 0.005*abs(reference), 2^-10*sum(abs(expert_contribution))).
+Each contribution includes its routing weight. The additional floor is one
+relative FP16 ULP of the contribution magnitude, so cancellation between experts
+does not turn normal intermediate FP16 rounding into an arbitrarily large
+relative error at a near-zero final output. This is a precision-policy change
+for cancellation; it does not change the absolute/relative coefficients or
+the full relative-L2 limit of 0.005, and it does not apply to decode.
+Expert indices and routing weights retain their separate checks.
+
+A targeted regression can be run with:
+```text
+make test_custom HIP_SDK=<sdk> MODE=lookup TIMING=standard ARGS="--tokens 128 --hidden 2880 --inter 2880 --experts 128 --topk 4 --block-size 32 --fc1-bias 1 --fc2-bias 1 --zero-points 1 --normalize 1 --router-weights 0 --routing-pattern balanced --alpha 1.7020000219345093 --beta 1 --limit 7"
+```
+Supply FLATC and FLATBUFFERS_INC as for the build command above.
+
 The default infinite SwiGLU limit is preserved; positive finite limits
 are also exercised. The default dispatch environment is consumed as in production. Inputs are
 synthetic and standalone source/runtime equivalence must be reported separately.
