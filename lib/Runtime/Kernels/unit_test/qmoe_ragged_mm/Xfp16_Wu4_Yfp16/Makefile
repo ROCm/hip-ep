@@ -15,7 +15,7 @@
 # `test` runs every categorical situation (routing x input layout x bias x
 # zero points, the GEMV / WMMA16 / WMMA64 row-count boundaries, the bucket
 # descriptors and the FC1 -> SwiGLU -> FC2 pipeline) on the shapes COVERAGE
-# selects (default 3; see unit_test/README.md "Shape coverage"). Inputs and
+# selects (default 3; see unit_test/GUIDELINES.md "Shape coverage"). Inputs and
 # the CPU reference are generated in-process -- no python, no data files.
 # ============================================================
 

@@ -460,7 +460,7 @@ static void genCase(int M, int K, int N, int gs, bool zero, bool fp32,
 
   // Threaded over N (each output column is independent) so the wider M/K/N
   // shapes in the coverage sweep (buildCases() below) stay inside the shared
-  // ~30 min tier3 budget across all UT leaves -- see unit_test/README.md
+  // ~30 min tier3 budget across all UT leaves -- see unit_test/GUIDELINES.md
   // "Shape coverage".
   std::vector<float> Cref(static_cast<size_t>(M) * N, 0.0f);
   auto refColumns = [&](int n0, int n1) {
