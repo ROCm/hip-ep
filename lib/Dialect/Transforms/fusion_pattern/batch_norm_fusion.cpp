@@ -230,6 +230,148 @@ bool matchNormalization(const Step &step, mlir::RankedTensorType data,
                       : matchInverseStandardDeviation(vector, data, chain);
 }
 
+/// Peels the bias off the end of the chain, so that the steps before it look
+/// the same with or without a bias.
+std::optional<mlir::Value>
+matchBias(mlir::hip::AddOp add, mlir::RankedTensorType data, Chain &chain) {
+  auto shifted = splitChannelOperand(add, data);
+  if (!shifted)
+    return std::nullopt;
+  chain.bias = skipExpandShapes(shifted->second);
+  return shifted->first;
+}
+
+/// The scale and the normalization may come in either order, so both are
+/// collected before deciding which is which. `root` is the first step when
+/// `rootIsStep`, else the bias add.
+llvm::SmallVector<Step, 2>
+collectScaleAndNormalizationSteps(mlir::Operation *root, bool rootIsStep,
+                                  mlir::Value current,
+                                  mlir::RankedTensorType data) {
+  llvm::SmallVector<Step, 2> steps;
+  mlir::Operation *consumer = root;
+  while (steps.size() < 2) {
+    mlir::Operation *op = nullptr;
+    if (rootIsStep && steps.empty())
+      op = root;
+    else if (mlir::Operation *def = current.getDefiningOp();
+             def && hasSingleValueUse(current, consumer))
+      op = def;
+    std::optional<Step> step = op ? asStep(op, data) : std::nullopt;
+    if (!step)
+      break;
+    steps.push_back(*step);
+    current = step->full;
+    consumer = op;
+  }
+  return steps;
+}
+
+/// x enters the chain only through this subtraction, so it also yields the
+/// input and the mean.
+mlir::hip::SubOp matchCentering(mlir::Value current, mlir::Operation *consumer,
+                                mlir::RankedTensorType data, Chain &chain) {
+  auto centered = singleUseDef<mlir::hip::SubOp>(current, consumer);
+  if (!centered || centered.getLhs().getType() != data ||
+      !isChannelView(centered.getRhs().getType(), data))
+    return nullptr;
+  chain.input = centered.getLhs();
+  chain.mean = skipExpandShapes(centered.getRhs());
+  return centered;
+}
+
+/// The math does not fix the order of scale and normalization, so each
+/// assignment is tried. Only a multiply can be the scale.
+bool assignScaleAndNormalization(llvm::ArrayRef<Step> steps,
+                                 mlir::RankedTensorType data, Chain &chain) {
+  // (scale step, normalizing step); a null scale step means the chain does not
+  // scale.
+  llvm::SmallVector<std::pair<const Step *, const Step *>, 2> roles;
+  if (steps.size() == 1) {
+    roles.emplace_back(nullptr, &steps[0]);
+  } else {
+    if (!steps[0].divides)
+      roles.emplace_back(&steps[0], &steps[1]);
+    if (!steps[1].divides)
+      roles.emplace_back(&steps[1], &steps[0]);
+  }
+  for (auto [scaleStep, normalizationStep] : roles) {
+    if (!matchNormalization(*normalizationStep, data, chain))
+      continue;
+    if (scaleStep)
+      chain.scale = skipExpandShapes(scaleStep->view);
+    return true;
+  }
+  return false;
+}
+
+/// Ops of another context, or ones that broadcast x itself, would change the
+/// result if fused.
+bool usesContextAndType(llvm::ArrayRef<mlir::Operation *> ops, mlir::Value ctx,
+                        mlir::RankedTensorType data) {
+  return llvm::all_of(ops, [&](mlir::Operation *op) {
+    // The HIP context is operand 0 of every HIP op.
+    return op->getOperand(0) == ctx && op->getResult(0).getType() == data;
+  });
+}
+
+/// The init tensors of the erased ops become dead with them. They are found
+/// before the rewrite, as an op that is not DPS must fail the match.
+std::optional<llvm::SmallVector<mlir::Operation *>>
+collectInitDefs(llvm::ArrayRef<mlir::Operation *> ops) {
+  llvm::SmallVector<mlir::Operation *> initDefs;
+  for (mlir::Operation *op : ops) {
+    auto dps = mlir::dyn_cast<mlir::DestinationStyleOpInterface>(op);
+    if (!dps)
+      return std::nullopt;
+    for (mlir::Value init : dps.getDpsInits())
+      if (mlir::Operation *def = init.getDefiningOp())
+        initDefs.push_back(def);
+  }
+  return initDefs;
+}
+
+/// Kept apart from the matching so that every check runs before the first IR
+/// change: a failed match must leave the IR unchanged.
+template <typename RootOp>
+void buildBatchNorm(mlir::PatternRewriter &rewriter, RootOp root,
+                    mlir::RankedTensorType data, const Chain &chain,
+                    llvm::ArrayRef<mlir::Operation *> initDefs) {
+  auto vectorType =
+      mlir::RankedTensorType::get({data.getDimSize(1)}, data.getElementType());
+  auto constantVector = [&](double value) -> mlir::Value {
+    mlir::Attribute element =
+        rewriter.getFloatAttr(data.getElementType(), value);
+    return mlir::hip::ConstantOp::create(
+        rewriter, root.getLoc(), vectorType,
+        mlir::DenseElementsAttr::get(vectorType,
+                                     llvm::ArrayRef<mlir::Attribute>{element}));
+  };
+
+  // hip.batch_norm carries epsilon as an f32 attribute, rounded from the type
+  // the graph added it in.
+  llvm::APFloat epsilon = *chain.epsilon;
+  bool losesInfo = false;
+  epsilon.convert(llvm::APFloat::IEEEsingle(),
+                  llvm::APFloat::rmNearestTiesToEven, &losesInfo);
+
+  for (mlir::Operation *op : chain.ops)
+    retargetShapeQueries(rewriter, op->getResult(0), chain.input);
+  mlir::Value scale = chain.scale ? chain.scale : constantVector(1.0);
+  mlir::Value bias = chain.bias ? chain.bias : constantVector(0.0);
+  auto batchNorm = mlir::hip::BatchNormOp::create(
+      rewriter, root.getLoc(), data, root.getCtx(), chain.input, scale, bias,
+      chain.mean, chain.variance, root.getOutput(),
+      rewriter.getFloatAttr(rewriter.getF32Type(), epsilon));
+  rewriter.replaceOp(root, batchNorm.getResult(0));
+  for (mlir::Operation *op : chain.ops)
+    rewriter.eraseOp(op);
+  llvm::SmallPtrSet<mlir::Operation *, 8> seen;
+  for (mlir::Operation *def : initDefs)
+    if (seen.insert(def).second && mlir::isOpTriviallyDead(def))
+      rewriter.eraseOp(def);
+}
+
 /// Matches the chain ending at a `hip.add` of the bias, or at the last
 /// `hip.mul` or `hip.div` when the chain has no bias.
 template <typename RootOp>
@@ -250,66 +392,25 @@ struct BatchNormFusion : public mlir::OpRewritePattern<RootOp> {
     if (feedsChannelOp(root, data))
       return rewriter.notifyMatchFailure(root, "not the end of the chain");
 
+    constexpr bool endsInBias = std::is_same_v<RootOp, mlir::hip::AddOp>;
     Chain chain;
     mlir::Value current = root->getResult(0);
-    mlir::Operation *consumer = root;
-    if constexpr (std::is_same_v<RootOp, mlir::hip::AddOp>) {
-      // root = (...) + bias, in either operand order.
-      auto shifted = splitChannelOperand(root, data);
+    if constexpr (endsInBias) {
+      std::optional<mlir::Value> shifted = matchBias(root, data, chain);
       if (!shifted)
         return rewriter.notifyMatchFailure(root, "no per-channel bias");
-      chain.bias = skipExpandShapes(shifted->second);
-      current = shifted->first;
+      current = *shifted;
     }
 
-    // One step normalizes, and a second, when present, multiplies by the
-    // scale; either may come first. The root is the first step unless the
-    // chain ends in the bias.
-    llvm::SmallVector<Step, 2> steps;
-    while (steps.size() < 2) {
-      mlir::Operation *op = nullptr;
-      if (!std::is_same_v<RootOp, mlir::hip::AddOp> && steps.empty())
-        op = root;
-      else if (mlir::Operation *def = current.getDefiningOp();
-               def && hasSingleValueUse(current, consumer))
-        op = def;
-      std::optional<Step> step = op ? asStep(op, data) : std::nullopt;
-      if (!step)
-        break;
-      steps.push_back(*step);
-      current = step->full;
-      consumer = op;
-    }
+    llvm::SmallVector<Step, 2> steps =
+        collectScaleAndNormalizationSteps(root, !endsInBias, current, data);
     if (steps.empty())
       return rewriter.notifyMatchFailure(root, "no multiply or divide");
-    auto centered = singleUseDef<mlir::hip::SubOp>(current, consumer);
-    if (!centered || centered.getLhs().getType() != data ||
-        !isChannelView(centered.getRhs().getType(), data))
+    mlir::hip::SubOp centered =
+        matchCentering(steps.back().full, steps.back().op, data, chain);
+    if (!centered)
       return rewriter.notifyMatchFailure(root, "no x - mean");
-    chain.input = centered.getLhs();
-    chain.mean = skipExpandShapes(centered.getRhs());
-
-    // (scale step, normalizing step); a null scale step means the chain does
-    // not scale. Only a multiply can be the scale.
-    llvm::SmallVector<std::pair<const Step *, const Step *>, 2> roles;
-    if (steps.size() == 1) {
-      roles.emplace_back(nullptr, &steps[0]);
-    } else {
-      if (!steps[0].divides)
-        roles.emplace_back(&steps[0], &steps[1]);
-      if (!steps[1].divides)
-        roles.emplace_back(&steps[1], &steps[0]);
-    }
-    bool matchedNormalization = false;
-    for (auto [scaleStep, normalizationStep] : roles) {
-      if (!matchNormalization(*normalizationStep, data, chain))
-        continue;
-      if (scaleStep)
-        chain.scale = skipExpandShapes(scaleStep->view);
-      matchedNormalization = true;
-      break;
-    }
-    if (!matchedNormalization)
+    if (!assignScaleAndNormalization(steps, data, chain))
       return rewriter.notifyMatchFailure(root,
                                          "no normalization by sqrt(var + eps)");
     for (mlir::Value parameter : {chain.mean, chain.scale, chain.bias})
@@ -320,58 +421,14 @@ struct BatchNormFusion : public mlir::OpRewritePattern<RootOp> {
       if (step.op != root.getOperation())
         chain.ops.push_back(step.op);
     chain.ops.push_back(centered);
-    for (mlir::Operation *op : chain.ops) {
-      // The HIP context is operand 0 of every HIP op.
-      if (op->getOperand(0) != root.getCtx() ||
-          op->getResult(0).getType() != data)
-        return rewriter.notifyMatchFailure(
-            root, "batch norm ops must share a context and the type of x");
-    }
+    if (!usesContextAndType(chain.ops, root.getCtx(), data))
+      return rewriter.notifyMatchFailure(
+          root, "batch norm ops must share a context and the type of x");
+    auto initDefs = collectInitDefs(chain.ops);
+    if (!initDefs)
+      return rewriter.notifyMatchFailure(root, "batch norm op is not DPS");
 
-    // Initial values that exist only to feed the erased ops.
-    llvm::SmallVector<mlir::Operation *> initDefs;
-    for (mlir::Operation *op : chain.ops) {
-      auto dps = mlir::dyn_cast<mlir::DestinationStyleOpInterface>(op);
-      if (!dps)
-        return rewriter.notifyMatchFailure(op, "batch norm op is not DPS");
-      for (mlir::Value init : dps.getDpsInits())
-        if (mlir::Operation *def = init.getDefiningOp())
-          initDefs.push_back(def);
-    }
-
-    auto vectorType = mlir::RankedTensorType::get({data.getDimSize(1)},
-                                                  data.getElementType());
-    auto constantVector = [&](double value) -> mlir::Value {
-      mlir::Attribute element =
-          rewriter.getFloatAttr(data.getElementType(), value);
-      return mlir::hip::ConstantOp::create(
-          rewriter, root.getLoc(), vectorType,
-          mlir::DenseElementsAttr::get(
-              vectorType, llvm::ArrayRef<mlir::Attribute>{element}));
-    };
-
-    // hip.batch_norm carries epsilon as an f32 attribute, rounded from the
-    // type the graph added it in.
-    llvm::APFloat epsilon = *chain.epsilon;
-    bool losesInfo = false;
-    epsilon.convert(llvm::APFloat::IEEEsingle(),
-                    llvm::APFloat::rmNearestTiesToEven, &losesInfo);
-
-    for (mlir::Operation *op : chain.ops)
-      retargetShapeQueries(rewriter, op->getResult(0), chain.input);
-    mlir::Value scale = chain.scale ? chain.scale : constantVector(1.0);
-    mlir::Value bias = chain.bias ? chain.bias : constantVector(0.0);
-    auto batchNorm = mlir::hip::BatchNormOp::create(
-        rewriter, root.getLoc(), data, root.getCtx(), chain.input, scale, bias,
-        chain.mean, chain.variance, root.getOutput(),
-        rewriter.getFloatAttr(rewriter.getF32Type(), epsilon));
-    rewriter.replaceOp(root, batchNorm.getResult(0));
-    for (mlir::Operation *op : chain.ops)
-      rewriter.eraseOp(op);
-    llvm::SmallPtrSet<mlir::Operation *, 8> seen;
-    for (mlir::Operation *def : initDefs)
-      if (seen.insert(def).second && mlir::isOpTriviallyDead(def))
-        rewriter.eraseOp(def);
+    buildBatchNorm(rewriter, root, data, chain, *initDefs);
     return mlir::success();
   }
 };
