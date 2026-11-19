@@ -48,10 +48,6 @@ Constraint IsHipPerAxisQuantizedWeight(dq: Op, rank: Attr, axis: Attr,
                                        packedInt4: Attr);
 Constraint IsHipPerChannelQuantizedWeight(dq: Op, consumer: Op);
 
-// A packed 4-bit dequantize: not one value per element, so QGemmFusion.pdll
-// (not the quant-type fold) handles it.
-Constraint IsHipPackedInt4Dequantize(dq: Op);
-
 // Matmul + bias (MatmulBiasFusion.pdll).
 Constraint HasSameShape(lhs: Value, rhs: Value);
 Constraint IsRowBias(bias: Value, result: Value);
@@ -74,6 +70,7 @@ Constraint IsHipQdqIdentityRoundTrip(dq: Op, q: Op);
 Constraint CanRequantizeLayoutOp(layout: Op, resultType: Type);
 Rewrite CreateRequantizedLayoutOp(dq: Op, layout: Op, q: Op) -> Value;
 
+#include "QAddFusion.pdll"
 #include "MatmulBiasFusion.pdll"
 #include "QMulFusion.pdll"
 #include "QMatMulFusion.pdll"

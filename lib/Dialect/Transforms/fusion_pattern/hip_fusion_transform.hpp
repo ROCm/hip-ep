@@ -215,17 +215,6 @@ hasSameHipQdqElementType(mlir::PatternRewriter &, mlir::PDLResultList &,
   return mlir::success();
 }
 
-/// dq is a dequantize whose input is a packed 4-bit value
-inline mlir::LogicalResult
-isHipPackedInt4Dequantize(mlir::PatternRewriter &, mlir::PDLResultList &,
-                          llvm::ArrayRef<mlir::PDLValue> args) {
-  if (args.size() != 1)
-    return mlir::failure();
-  auto dq = mlir::dyn_cast_or_null<mlir::hip::DequantizeLinearOp>(
-      args[0].dyn_cast<mlir::Operation *>());
-  return mlir::success(dq && dq->hasAttr("packed_int4"));
-}
-
 /// lhs and rhs are ranked tensors of the same shape
 inline mlir::LogicalResult hasSameShape(mlir::PatternRewriter &,
                                         mlir::PDLResultList &,
@@ -820,8 +809,6 @@ inline void registerNativeHelpers(mlir::PDLPatternModule &pdlPatterns) {
                                          isHipQdqUnsignedQuantized);
   pdlPatterns.registerConstraintFunction("HasSameHipQdqElementType",
                                          hasSameHipQdqElementType);
-  pdlPatterns.registerConstraintFunction("IsHipPackedInt4Dequantize",
-                                         isHipPackedInt4Dequantize);
   pdlPatterns.registerConstraintFunction("HasSameShape", hasSameShape);
   pdlPatterns.registerConstraintFunction("IsRowBias", isRowBias);
   pdlPatterns.registerConstraintFunction("CanTakeMatmulBias",

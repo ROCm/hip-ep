@@ -12,9 +12,9 @@
 //     %y = hip.matmul(%ctx) ins(%a, %w, %c : ...) outs(%e : tensor<64x32xT>)
 //                           {transB = 1 : i64}
 //
-// Type-agnostic: float and quant-typed gemms convert alike, so the order
-// against the Q/DQ folds does not matter. A weight with per-channel or packed
-// 4-bit Q/DQ keeps hip.gemm: only QGemmFusion.pdll handles those.
+// Type-agnostic: float and quant-typed gemms convert alike. A gemm still fed by
+// a DQ keeps hip.gemm for QGemmFusion.pdll; in the pipeline the quant-type
+// fold runs first, so only Q/DQ it leaves (per-channel, packed 4-bit) get here.
 //===----------------------------------------------------------------------===//
 
 #include "gemm_to_matmul.hpp"
@@ -32,18 +32,11 @@ namespace {
 using namespace mlir;
 using namespace mlir::hip;
 
-/// `w` is dequantized per channel or from packed 4-bit storage.
-bool isNonUniformWeight(Value w) {
-  auto dq = w.getDefiningOp<DequantizeLinearOp>();
-  if (!dq)
-    return false;
-  if (dq->hasAttr("packed_int4"))
-    return true;
-  auto scale = dq.getScale().getDefiningOp<ConstantOp>();
-  auto payload =
-      scale ? dyn_cast_or_null<DenseElementsAttr>(scale->getAttr("value"))
-            : DenseElementsAttr();
-  return !payload || !payload.isSplat();
+/// Some input of `gemm` is a DequantizeLinear result.
+bool hasDequantizedInput(GemmOp gemm) {
+  return llvm::any_of(gemm->getOperands(), [](Value value) {
+    return value.getDefiningOp<DequantizeLinearOp>() != nullptr;
+  });
 }
 
 struct GemmToMatmul : public OpRewritePattern<GemmOp> {
@@ -53,8 +46,8 @@ struct GemmToMatmul : public OpRewritePattern<GemmOp> {
                                 PatternRewriter &rewriter) const override {
     if (gemm->getNumResults() != 1 || !gemm.getAlpha().isExactlyValue(1.0))
       return failure();
-    if (isNonUniformWeight(gemm.getInputB()))
-      return rewriter.notifyMatchFailure(gemm, "per-channel or packed weight");
+    if (hasDequantizedInput(gemm))
+      return rewriter.notifyMatchFailure(gemm, "left to QGemmFusion.pdll");
 
     auto yType = cast<RankedTensorType>(gemm->getResult(0).getType());
     Value bias = gemm.getInputC();

@@ -12,7 +12,7 @@ namespace hip {
 namespace {
 
 // Shared lowering for quantized elementwise ops:
-//   hip.qmul, hip.add with `quant_types` / (future) qsub, qdiv
+//   hip.qadd, hip.qmul, hip.add with `quant_types` / (future) qsub, qdiv
 //     -> wrap_qelementwise(..., kind, ..., M_a, lhs_zp, M_b, rhs_zp, output_zp)
 //
 // The coefficient slots carry a kind-dependent folding of the scales:
@@ -27,7 +27,7 @@ struct QParams {
   int64_t lhsZp, rhsZp, outputZp;
 };
 
-// Scales and zero points from hip.qmul attributes.
+// Scales and zero points from hip.qadd / hip.qmul attributes.
 template <typename OpTy> std::optional<QParams> getQParams(OpTy op) {
   return QParams{op.getLhsScale().convertToFloat(),
                  op.getRhsScale().convertToFloat(),
@@ -162,6 +162,12 @@ struct QElementwiseLowering : public ConvertOpToLLVMPattern<OpTy> {
   }
 };
 
+struct QAddOpLowering
+    : public QElementwiseLowering<QAddOp,
+                                  HipdnnQElementwiseKind::kQElementwiseAdd> {
+  using QElementwiseLowering::QElementwiseLowering;
+};
+
 // hip.add whose `quant_types` mark it quantized.
 struct QuantizedAddOpLowering
     : public QElementwiseLowering<AddOp,
@@ -179,7 +185,8 @@ struct QMulOpLowering
 
 void populateQElementwiseLoweringPatterns(const LLVMTypeConverter &converter,
                                           RewritePatternSet &patterns) {
-  patterns.add<QMulOpLowering, QuantizedAddOpLowering>(converter);
+  patterns.add<QAddOpLowering, QMulOpLowering, QuantizedAddOpLowering>(
+      converter);
 }
 
 } // namespace hip

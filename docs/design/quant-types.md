@@ -14,6 +14,12 @@ Status: `hip.add`, `hip.matmul` and `hip.gemm` (`HipQuantCapableOpInterface`). `
 still use the Q-specific ops and their PDLL fusions, as do the cases below that
 types cannot carry.
 
+The Q-specific PDLL fusions in `hip-fusion-transform` are unchanged from `main`,
+including `HipQAdd` and the per-tensor `HipQMatMul` / `HipQGemm`. In the
+pipeline `hip-fold-qdq-to-quant-types` runs first and folds per-tensor add,
+matmul and gemm into quant types, so those patterns only fire when
+`hip-fusion-transform` runs alone.
+
 ## IR
 
 ```mlir

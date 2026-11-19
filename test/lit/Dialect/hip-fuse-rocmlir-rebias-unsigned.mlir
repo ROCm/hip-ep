@@ -286,13 +286,13 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x2x4x4xf32>)
 
 // -----
 
-// Declined: a hip.qmul also reads the quantized data.
+// Declined: a hip.qadd also reads the quantized data.
 
 // CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: %{{[^:]*}}: tensor<1x2x4x4xui8>
 // CHECK-LABEL: func.func @main_graph
 // CHECK: hip.quantize_linear{{.*}} : tensor<1x2x4x4xui8>
-// CHECK: hip.qmul(%{{.*}}) ins(%{{.*}}, %{{.*}} : tensor<1x2x4x4xui8>, tensor<1x2x4x4xui8>)
+// CHECK: hip.qadd(%{{.*}}) ins(%{{.*}}, %{{.*}} : tensor<1x2x4x4xui8>, tensor<1x2x4x4xui8>)
 func.func @main_graph(%ctx: !hip.context, %x: tensor<1x2x4x4xf32>)
     -> (tensor<1x2x4x4xf32>, tensor<1x2x4x4xui8>) {
   %s = hip.constant {value = dense<0.5> : tensor<f32>} : tensor<f32>
@@ -319,7 +319,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x2x4x4xf32>)
       {dilations = [1, 1], group = 1 : i64, kernel_shape = [3, 3],
        pads = [1, 1, 1, 1], strides = [1, 1]} : tensor<1x2x4x4xf32>
   %ae = tensor.empty() : tensor<1x2x4x4xui8>
-  %add = hip.qmul(%ctx) ins(%q, %q : tensor<1x2x4x4xui8>, tensor<1x2x4x4xui8>)
+  %add = hip.qadd(%ctx) ins(%q, %q : tensor<1x2x4x4xui8>, tensor<1x2x4x4xui8>)
            outs(%ae : tensor<1x2x4x4xui8>)
            {lhs_scale = 5.000000e-01 : f32, lhs_zp = 3 : i64,
             output_scale = 5.000000e-01 : f32, output_zp = 3 : i64,

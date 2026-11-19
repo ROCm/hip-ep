@@ -1,9 +1,6 @@
 //===- QGemmFusion.pdll ---------------------------------------------------===//
 //
-// HIP-to-HIP fusion of a dequantize/gemm/quantize chain into hip.qgemm, for the
-// cases quant types cannot carry. Per-tensor 8-bit B folds into quant types
-// (hip-fold-qdq-to-quant-types); the per-tensor patterns here only take a packed
-// 4-bit B, which is not one value per element.
+// HIP-to-HIP fusion of a dequantize/gemm/quantize chain into hip.qgemm.
 //
 // Included by HipFusionTransformPatterns.pdll, which declares the native
 // helpers used below. Not compilable on its own.
@@ -59,7 +56,6 @@ Pattern HipQGemm with benefit(10) {
   // c_scale = a_scale * b_scale.
   IsHipQdqQuantizedWidth(dq_a, attr<"[8, 16]">);
   IsHipQdqQuantizedWidth(dq_b, attr<"[8]">);
-  IsHipPackedInt4Dequantize(dq_b);
   IsHipQdqQuantizedWidth(dq_c, attr<"[8, 16, 32]">);
 
   // Five operands: hip.gemm is DPS and its C is present here, so the init
@@ -147,7 +143,6 @@ Pattern HipQGemmNoBias with benefit(10) {
 
   IsHipQdqQuantizedWidth(dq_a, attr<"[8, 16]">);
   IsHipQdqQuantizedWidth(dq_b, attr<"[8]">);
-  IsHipPackedInt4Dequantize(dq_b);
 
   let gemm = op<hip.gemm>(ctx, dq_a.0, dq_b.0, gemm_init: Value);
 
