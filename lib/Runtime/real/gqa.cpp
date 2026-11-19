@@ -221,12 +221,12 @@ static int32_t estimate_decode_seqlens_k(hipStream_t stream,
 static constexpr int kFlashDecodeMaxSplits = 64;
 
 // Geometry gate for the flash_decode kernel template instantiations. The scalar
-// decode kernel is templated for HpG in {1,2,3,4,5,6,8,16} and 9 at d=128 (so
-// it covers MHA and the common GQA ratios, incl. Qwen2.5-14B's 40:8=5 and the
-// Qwen3.6/3.8-27B 24:4=6) at d in {64,96,128,256} (d=96 covers Phi-3-mini
-// 32:32, d=256 Qwen3-family 16:4 heads); WMMA is layered on top inside the
-// kernel where it helps (d 64/128 only). Anything outside this set has no
-// decode kernel.
+// decode kernel is templated for HpG in {1,2,3,4,5,6,8,16}, and 9 and 12 at
+// d=128 (so it covers MHA and the common GQA ratios, incl. Qwen2.5-14B's 40:8=5
+// and the Qwen3.6/3.8-27B 24:4=6) at d in {64,96,128,256} (d=96 covers
+// Phi-3-mini 32:32, d=256 Qwen3-family 16:4 heads); WMMA is layered on top
+// inside the kernel where it helps (d 64/128 only). Anything outside this set
+// has no decode kernel.
 static inline bool flash_decode_geometry_ok(int64_t H, int64_t G, int64_t d) {
   if (G <= 0)
     return false;
@@ -235,8 +235,9 @@ static inline bool flash_decode_geometry_ok(int64_t H, int64_t G, int64_t d) {
   int64_t hpg = H / G;
   if (hpg * G != H)
     return false;
-  // HpG=9 is instantiated at d=128 only.
-  if (hpg == 9)
+  // HpG=9 (Laguna-S 72:8) and 12 (Step-3.5-Flash 96:8) sliding layers are
+  // instantiated at d=128 only.
+  if (hpg == 9 || hpg == 12)
     return d == 128;
   return hpg == 1 || hpg == 2 || hpg == 3 || hpg == 4 || hpg == 5 || hpg == 6 ||
          hpg == 8 || hpg == 16;
