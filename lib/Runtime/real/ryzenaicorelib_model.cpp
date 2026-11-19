@@ -18,6 +18,19 @@
 #include <ryzenai/corelib/base.h>
 #include <ryzenai/corelib/model.h>
 
+// Searchable with: strings hipgpu.dll | findstr HIPDNN_EP_CORELIB_VERSION
+// Reports the CoreLib headers this DLL was compiled against.
+#define HIPDNN_EP_STR_(x) #x
+#define HIPDNN_EP_STR(x) HIPDNN_EP_STR_(x)
+static const char kCorelibBuildVersion[] =
+    "HIPDNN_EP_CORELIB_VERSION=" HIPDNN_EP_STR(RYZENAI_CORELIB_VERSION_MAJOR)
+    "." HIPDNN_EP_STR(RYZENAI_CORELIB_VERSION_MINOR)
+    "." HIPDNN_EP_STR(RYZENAI_CORELIB_VERSION_PATCH);
+#undef HIPDNN_EP_STR_
+#undef HIPDNN_EP_STR
+// Suppress unused-variable warning; the string exists to be found in the binary.
+static const char *const kCorelibBuildVersionPtr = kCorelibBuildVersion;
+
 #include <algorithm>
 #include <cctype>
 #include <cstdint>

@@ -413,9 +413,25 @@ static GenaiConfig read_genai_config(const std::filesystem::path &model) {
 // are tried, so a CoreLib with new models needs no change.
 static bool try_corelib_model(IPass &self, Graph &graph) {
   PassContext *ctx = self.get_context().get();
-  hipdnn_ep::corelib::GraphSignature sig;
-  if (!use_corelib_model(ctx) || !is_genai_decoder(graph, &sig))
+  if (!use_corelib_model(ctx))
     return false;
+  hipdnn_ep::corelib::GraphSignature sig;
+  if (!is_genai_decoder(graph, &sig)) {
+    // Only log when the graph has at least one decoder-shaped input — avoids
+    // noise for utility graphs (embeddings, vision encoders) in multi-graph
+    // models that also happen to have the option set.
+    const bool looks_like_decoder =
+        std::any_of(sig.inputs.begin(), sig.inputs.end(), [](const std::string &n) {
+          return n == "attention_mask" || n.rfind("past_key_values.", 0) == 0;
+        }) || sig.vocab_size > 0;
+    if (looks_like_decoder)
+      fprintf(stderr,
+              "[corelib] model: use_ryzenai_corelib_model is set but the graph "
+              "is not an onnxruntime-genai decoder (need attention_mask, "
+              "past_key_values.*, logits with static vocab, present.*); "
+              "compiling it for the GPU\n");
+    return false;
+  }
   const std::filesystem::path model = ctx->get_model_path();
   if (model.empty()) {
     fprintf(stderr, "[corelib] model: no model file path (an in-memory "
