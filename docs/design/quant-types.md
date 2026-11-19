@@ -68,16 +68,19 @@ Matmul + bias Add is not fused into a gemm yet.
 ## Quant-capable ops
 
 An op opts in through `HipQuantCapableOpInterface`
-(`include/hip/Dialect/IR/HipQuantCapableOpInterface.td`):
+(`include/hip/Dialect/IR/HipQuantCapableOpInterface.td`). The interface is
+front end only: it says which tensors carry quantization and answers queries,
+never whether a kernel exists.
 
 - `getQuantOperands()` lists the tensors that carry the quantization, in
   `quant_types` order (data inputs, optional ones only when present, then the
-  output). The interface verifier checks all-or-none quantization and, after
-  legalization, that `quant_types` matches the storage types.
-- `supportsQuantTypes(inputs, result)` is the op's kernel capability.
+  output). Default-implemented from the DPS inputs and inits; an op overrides
+  it only if it has shaped operands that are not quantized. The interface
+  verifier checks all-or-none quantization and, after legalization, that
+  `quant_types` matches the storage types.
 
-`hip-legalize-quant-types` and lowering only go through the interface, so
-moving another op over means implementing these two methods.
+Every method is default-implemented, so moving another op over is one line in
+ODS: add `HipQuantCapableOpInterface` to its traits.
 
 ### Asking an op about its quantization
 
@@ -100,20 +103,21 @@ Call the methods directly on a concrete op (`AddOp`, `MatmulOp`, ...). For any
 
 ## Kernel capability
 
-Each op's `supportsQuantTypes` (`lib/Dialect/IR/HipQuantTypes.cpp`) says which
-quant types it has a kernel for. Only `hip-legalize-quant-types` asks it; the
-folds and fusions do not (see "Known gaps").
+Kernel support is backend knowledge, kept out of the ops: a table in
+`lib/Conversion/HipToLLVM/QuantKernels.cpp`, queried through
+`hip::hasQuantKernel(op, inputTypes, resultType)`
+(`include/hip/Conversion/HipToLLVM/QuantKernels.h`). Only
+`hip-legalize-quant-types` asks it; the folds and fusions do not (see "Known
+gaps"). Adding a quantized kernel means adding a table entry.
 
-- `hip.add`: per-tensor, one storage type for lhs, rhs and output
-  (i8/ui8/i16/ui16/i32).
-- `hip.matmul`: per-tensor; A and result 8/16-bit, B 8-bit (the kernel splits
-  only A into byte planes), optional bias 8/16/32-bit.
-- `hip.gemm`: as matmul, with C as the bias. `alpha`, `beta`, `transA` and
-  `transB` stay attributes.
+| Op | Kernel | Types |
+|---|---|---|
+| `hip.add` | `wrap_qelementwise` | per-tensor, one storage type for lhs, rhs and output (i8/ui8/i16/ui16/i32) |
+| `hip.matmul` | `wrap_qmatmul`, `wrap_qgemm` (bias) | per-tensor; A and result 8/16-bit, B 8-bit (only A is split into byte planes), optional bias 8/16/32-bit |
+| `hip.gemm` | `wrap_qgemm` | as matmul, with C as the bias; `alpha`, `beta`, `transA`, `transB` stay attributes |
 
 Lowering reads the scales and zero points from `quant_types` and calls the
-same `wrap_qelementwise` / `wrap_qmatmul` / `wrap_qgemm` as the Q-specific ops,
-so the kernel contract is unchanged.
+same kernels as the Q-specific ops, so the kernel contract is unchanged.
 
 ## Gemm (`gemm_to_matmul.cpp`)
 

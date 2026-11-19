@@ -6,6 +6,7 @@
 // hip-legalize-quant-types: quantized element types -> `quant_types` attribute
 // plus storage-integer tensors, so the IR can be bufferized.
 
+#include "hip/Conversion/HipToLLVM/QuantKernels.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/IR/HipQuantTypes.h"
 #include "hip/Dialect/Transforms/Passes.h"
@@ -51,8 +52,7 @@ struct LegalizeQuantTypesPass
       // No `quant_types` yet, so these are the tensor element types.
       SmallVector<Type> types = quantOp.getOperandQuantTypes();
       if (hasQuantizedType(op) &&
-          !quantOp.supportsQuantTypes(ArrayRef(types).drop_back(),
-                                      types.back())) {
+          !hasQuantKernel(op, ArrayRef(types).drop_back(), types.back())) {
         // Known gap: the Q/DQ folds do not check kernels, so a typed op that
         // was not fused into one with a kernel ends here (docs/design/
         // quant-types.md, "Known gaps"). No fallback to DQ -> op -> Q.

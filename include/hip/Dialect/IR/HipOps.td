@@ -796,7 +796,7 @@ def Hip_ConvTransposeOp : Hip_DpsOp_AutoReify<
 // Matmul reifies shapes from input dimensions in HipReifyResultShapesImpl.cpp.
 // The generated type inference reads the destination type.
 def Hip_MatmulOp : Hip_DpsOp_WithInfer<"matmul", "Output",
-    [OpStateOpInterface, DeclareOpInterfaceMethods<HipQuantCapableOpInterface>]> {
+    [OpStateOpInterface, HipQuantCapableOpInterface]> {
   let summary = "Matrix multiplication (supports batched N-D x N-D)";
   let description = [{
     Performs matrix multiplication: output = A @ B
@@ -2174,7 +2174,7 @@ def Hip_StorageCastOp : Hip_Op<"storage_cast", [Pure]> {
 def Hip_AddOp : Hip_DpsOp_Broadcast<"add", /*operandGetters=*/["Lhs", "Rhs"],
                                     /*outsAccessor=*/"Output",
                                     /*traits=*/[OpStateOpInterface,
-                                                DeclareOpInterfaceMethods<HipQuantCapableOpInterface>]> {
+                                                HipQuantCapableOpInterface]> {
   let summary = "Elementwise addition, float or quantized by type";
 
   // OpStateOpInterface: shared OpTensorState (see hip.mul).
@@ -5122,7 +5122,7 @@ def Hip_SparseAttentionIndexerOp : Hip_DpsOp_AutoReify<"sparse_attention_indexer
 }
 
 def Hip_GemmOp : Hip_DpsOp_WithInfer<"gemm", "Output",
-    [OpStateOpInterface, DeclareOpInterfaceMethods<HipQuantCapableOpInterface>]> {
+    [OpStateOpInterface, HipQuantCapableOpInterface]> {
   let summary = "General matrix multiplication (ONNX Gemm)";
   let description = [{
     Computes Y = alpha * A' * B' + beta * C, where:

@@ -9,8 +9,8 @@
 include "mlir/IR/OpBase.td"
 
 // An op quantized or not by its element types (`!quant.uniform` vs float).
-// Ops implement getQuantOperands and supportsQuantTypes; the queries are
-// default-implemented. See docs/design/quant-types.md.
+// Front end only: every method is default-implemented, and kernel support is
+// the backend's (hasQuantKernel). See docs/design/quant-types.md.
 def HipQuantCapableOpInterface : OpInterface<"HipQuantCapableOpInterface"> {
   let cppNamespace = "::mlir::hip";
 
@@ -18,18 +18,27 @@ def HipQuantCapableOpInterface : OpInterface<"HipQuantCapableOpInterface"> {
     InterfaceMethod<
       [{
         Tensors whose element types carry the quantization, in `quant_types`
-        order: the data inputs (optional ones only when present), then the
-        output.
+        order: the shaped inputs (optional ones only when present), then the
+        output. Defaults to the DPS inputs and inits; override if an op has
+        shaped operands that are not quantized (e.g. indices).
       }],
-      "::llvm::SmallVector<::mlir::Value>", "getQuantOperands">,
-    InterfaceMethod<
-      [{
-        True if a kernel takes these quantized element types (inputs in
-        getQuantOperands order, then the result).
-      }],
-      "bool", "supportsQuantTypes",
-      (ins "::mlir::TypeRange":$inputElementTypes,
-           "::mlir::Type":$resultElementType)>,
+      "::llvm::SmallVector<::mlir::Value>", "getQuantOperands", (ins), [{}], [{
+        ::mlir::Operation *op = $_op.getOperation();
+        ::llvm::SmallVector<::mlir::Value> operands;
+        auto shaped = [](::mlir::Value value) {
+          return ::llvm::isa<::mlir::ShapedType>(value.getType());
+        };
+        if (auto dps = ::llvm::dyn_cast<::mlir::DestinationStyleOpInterface>(op)) {
+          ::llvm::append_range(operands,
+                               ::llvm::make_filter_range(dps.getDpsInputs(), shaped));
+          ::llvm::append_range(operands, dps.getDpsInits());
+          return operands;
+        }
+        ::llvm::append_range(operands,
+                             ::llvm::make_filter_range(op->getOperands(), shaped));
+        ::llvm::append_range(operands, op->getResults());
+        return operands;
+      }]>,
 
     // Queries: read `quant_types` after legalization, tensor types before.
     InterfaceMethod<

@@ -64,6 +64,11 @@ func.func @matmul_bias(%ctx: !hip.context, %a: tensor<4x8x!qa>,
       outs(%e : tensor<4x6x!qy>) : tensor<4x6x!qy>
   return %m : tensor<4x6x!qy>
 }
+func.func @gemm_no_c(%ctx: !hip.context, %a: tensor<4x8xf16>, %b: tensor<8x6xf16>) -> tensor<4x6xf16> {
+  %e = tensor.empty() : tensor<4x6xf16>
+  %g = hip.gemm(%ctx) ins(%a, %b : tensor<4x8xf16>, tensor<8x6xf16>) outs(%e : tensor<4x6xf16>) : tensor<4x6xf16>
+  return %g : tensor<4x6xf16>
+}
 func.func @float_mul(%ctx: !hip.context, %a: tensor<8xf32>) -> tensor<8xf32> {
   %e = tensor.empty() : tensor<8xf32>
   %s = hip.mul(%ctx) ins(%a, %a : tensor<8xf32>, tensor<8xf32>) outs(%e : tensor<8xf32>) -> tensor<8xf32>
@@ -168,6 +173,21 @@ int main() {
           "matmul with bias: input 2 is the i32 bias");
     check(isUniform(matmul.getInputQuantType(1), 0.0625, 3),
           "matmul with bias: input 1 is the i8 weight");
+  }
+
+  // The default getQuantOperands skips !hip.context and an absent optional
+  // operand (here gemm's C).
+  {
+    auto gemm =
+        mlir::cast<mlir::hip::GemmOp>(findOp(*module, "gemm_no_c", "hip.gemm"));
+    llvm::SmallVector<mlir::Value> operands = gemm.getQuantOperands();
+    check(operands.size() == 3 && operands[0] == gemm.getInputA() &&
+              operands[1] == gemm.getInputB() &&
+              operands[2] == gemm.getOutput(),
+          "gemm without C: getQuantOperands() is [A, B, output]");
+    check(gemm.getOperandQuantTypes() ==
+              llvm::SmallVector<mlir::Type>{f16, f16, f16},
+          "gemm without C: getOperandQuantTypes() is [f16, f16, f16]");
   }
 
   // An op without the interface: no cast possible, free functions answer.

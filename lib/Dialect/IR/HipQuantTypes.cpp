@@ -32,41 +32,6 @@ Type mlir::hip::toHipStorageType(Type type) {
   return storage;
 }
 
-// wrap_qelementwise: per-tensor scales, one storage type for lhs, rhs and
-// output (i8/ui8/i16/ui16/i32).
-static bool supportsQElementwise(TypeRange inputs, Type result) {
-  auto out = dyn_cast<quant::UniformQuantizedType>(result);
-  if (!out || inputs.size() != 2)
-    return false;
-  IntegerType storage = getHipStorageType(out);
-  unsigned width = storage.getWidth();
-  if (width != 8 && width != 16 && !(width == 32 && storage.isSignless()))
-    return false;
-  return llvm::all_of(inputs, [&](Type type) {
-    auto in = dyn_cast<quant::UniformQuantizedType>(type);
-    return in && getHipStorageType(in) == storage;
-  });
-}
-
-// wrap_qmatmul / wrap_qgemm: per-tensor scales. A and the result are 8 or 16
-// bit, B is 8 bit (the kernel splits only A into byte planes), and gemm's bias
-// C may also be 32 bit (the int32 an ONNX quantizer emits).
-static bool isUniformOfWidth(Type type, ArrayRef<unsigned> widths) {
-  auto quantType = dyn_cast<quant::UniformQuantizedType>(type);
-  return quantType &&
-         llvm::is_contained(widths, quantType.getStorageTypeIntegralWidth());
-}
-
-static bool supportsQMatmul(TypeRange inputs, Type result, bool allowBias) {
-  size_t numInputs = inputs.size();
-  if (numInputs < 2 || numInputs > (allowBias ? 3u : 2u))
-    return false;
-  if (!isUniformOfWidth(inputs[0], {8, 16}) ||
-      !isUniformOfWidth(inputs[1], {8}) || !isUniformOfWidth(result, {8, 16}))
-    return false;
-  return numInputs == 2 || isUniformOfWidth(inputs[2], {8, 16, 32});
-}
-
 bool mlir::hip::isQuantizedOp(Operation *op) {
   if (auto quantOp = dyn_cast<HipQuantCapableOpInterface>(op))
     return quantOp.isQuantized();
@@ -151,38 +116,6 @@ LogicalResult mlir::hip::verifyQuantTypes(Operation *op, ValueRange operands) {
 namespace mlir::hip {
 #include "hip/Dialect/IR/HipQuantCapableOpInterface.cpp.inc"
 } // namespace mlir::hip
-
-SmallVector<Value> AddOp::getQuantOperands() {
-  return {getLhs(), getRhs(), getOutput()};
-}
-
-bool AddOp::supportsQuantTypes(TypeRange inputs, Type result) {
-  return supportsQElementwise(inputs, result);
-}
-
-SmallVector<Value> MatmulOp::getQuantOperands() {
-  SmallVector<Value> operands = {getA(), getB()};
-  if (getBias())
-    operands.push_back(getBias());
-  operands.push_back(getOutput());
-  return operands;
-}
-
-bool MatmulOp::supportsQuantTypes(TypeRange inputs, Type result) {
-  return supportsQMatmul(inputs, result, /*allowBias=*/true);
-}
-
-SmallVector<Value> GemmOp::getQuantOperands() {
-  SmallVector<Value> operands = {getInputA(), getInputB()};
-  if (getInputC())
-    operands.push_back(getInputC());
-  operands.push_back(getOutput());
-  return operands;
-}
-
-bool GemmOp::supportsQuantTypes(TypeRange inputs, Type result) {
-  return supportsQMatmul(inputs, result, /*allowBias=*/true);
-}
 
 //===----------------------------------------------------------------------===//
 // StorageCastOp
