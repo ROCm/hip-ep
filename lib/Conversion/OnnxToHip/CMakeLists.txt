@@ -57,6 +57,7 @@ add_library(OnnxToHip STATIC
   SliceShapeFold.cpp
   PackBroadcastTo4D.cpp
   AttentionWindowFold.cpp
+  DecomposedAttentionFusion.cpp
   ShapeConversion.cpp
   ReshapeConversion.cpp
   CausalConvWithStateConversion.cpp
