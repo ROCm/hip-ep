@@ -141,6 +141,27 @@ def _concat_output_model(dtype, c=4, spatial=16, seed=9):
     )
 
 
+def _misaligned_slot_model(dtype, c=4, lead=5, side=3, spatial=15, seed=19):
+    """concat([conv -> 5 ch, conv -> 3 ch]) on 15x15, with a skip reader.
+
+    The second slot starts 5 * 225 elements in: byte 2250 for fp16 and 4500
+    for fp32, neither a multiple of 16, so that input keeps its copy.
+    """
+    g = _Graph(dtype, seed)
+    first = g.conv("input", c, lead, relu=True)
+    second = g.conv("input", c, side)
+    cat = g.op("Concat", [first, second], axis=1)
+    y = g.conv(cat, lead + side, c)
+    skip = g.op("Add", [second, g.const(np.array(1.0, dtype=dtype))])
+    _rename_output(g, y, "output")
+    _rename_output(g, skip, "skip")
+    shape = [1, c, spatial, spatial]
+    return g.model(
+        [("input", shape)],
+        [("output", shape), ("skip", [1, side, spatial, spatial])],
+    )
+
+
 class TestConcatSlots:
     @pytest.mark.parametrize("dtype", _DTYPES, ids=["fp32", "fp16"])
     @pytest.mark.parametrize("batch", [1, 2], ids=["packed", "strided"])
@@ -166,6 +187,15 @@ class TestConcatSlots:
     def test_concat_is_output(self, model_runner, dtype):
         model = _concat_output_model(dtype)
         x = np.random.default_rng(17).uniform(-1, 1, [1, 4, 16, 16]).astype(dtype)
+        actual, expected = model_runner.run_sample(model, [x], reference="cpu")
+        tol = _TOL[dtype]
+        compare_outputs(actual, expected, atol=tol, rtol=tol, cos_threshold=0.9999)
+
+    @pytest.mark.parametrize("dtype", _DTYPES, ids=["fp32", "fp16"])
+    def test_misaligned_slot(self, model_runner, dtype):
+        """A slot off a 16-byte boundary keeps its copy."""
+        model = _misaligned_slot_model(dtype)
+        x = np.random.default_rng(23).uniform(-1, 1, [1, 4, 15, 15]).astype(dtype)
         actual, expected = model_runner.run_sample(model, [x], reference="cpu")
         tol = _TOL[dtype]
         compare_outputs(actual, expected, atol=tol, rtol=tol, cos_threshold=0.9999)

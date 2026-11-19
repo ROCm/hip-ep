@@ -480,3 +480,25 @@ func.func @dense_source_view_rewritten_stays(
   memref.copy %y, %cat2_y : memref<1x1x2x2xf32> to memref<1x1x2x2xf32, strided<[12, 4, 2, 1], offset: 8>>
   return %r1, %cat2 : memref<1x2x2x2xf32>, memref<1x3x2x2xf32>
 }
+
+// -----
+
+// The slot starts at channel 5 of a [1, 8, 3, 3] f16 buffer: element offset
+// 45, byte offset 90, off a 16-byte boundary. The kernel keeps its own output
+// and the copy stays.
+
+// CHECK-LABEL: func.func @misaligned_slot_stays
+// CHECK-NOT: hip.packed_view
+// CHECK: memref.copy
+func.func @misaligned_slot_stays(
+    %ctx: !hip.context, %in: memref<1x3x3x3xf16>, %w: memref<3x3x1x1xf16>,
+    %b: memref<3xf16>) -> memref<1x8x3x3xf16> {
+  %cat = memref.alloc() : memref<1x8x3x3xf16>
+  %out = memref.alloc() : memref<1x3x3x3xf16>
+  hip.rocmlir(%ctx) @kern ins(%in, %w, %b : memref<1x3x3x3xf16>,
+      memref<3x3x1x1xf16>, memref<3xf16>) outs(%out : memref<1x3x3x3xf16>)
+  %slot = memref.subview %cat[0, 5, 0, 0] [1, 3, 3, 3] [1, 1, 1, 1]
+      : memref<1x8x3x3xf16> to memref<1x3x3x3xf16, strided<[72, 9, 3, 1], offset: 45>>
+  memref.copy %out, %slot : memref<1x3x3x3xf16> to memref<1x3x3x3xf16, strided<[72, 9, 3, 1], offset: 45>>
+  return %cat : memref<1x8x3x3xf16>
+}

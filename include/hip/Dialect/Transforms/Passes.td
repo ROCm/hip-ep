@@ -393,7 +393,8 @@ def ForwardConcatSlotsPass : Pass<"hip-forward-concat-slots", "mlir::func::FuncO
 
     A strided slot (batch greater than 1 on a middle axis, or a concat of
     rows) is left on `memref.copy`: a dense store from the slot pointer would
-    write the wrong addresses.
+    write the wrong addresses. So is a slot whose byte offset is not a
+    multiple of 16: rocMLIR kernels declare their pointers 16-byte aligned.
   }];
   let dependentDialects = [
     "mlir::arith::ArithDialect",

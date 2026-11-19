@@ -563,6 +563,13 @@ static bool aliasSlot(memref::CopyOp copy, IRRewriter &rewriter) {
     return false;
   if (baseType.getElementType() != srcType.getElementType())
     return false;
+  // The slot pointer goes to the writer and every reader. rocMLIR kernels
+  // declare their pointers 16-byte aligned, and some HIP kernels pick a vector
+  // width from the element count alone, so a slot off a 16-byte boundary
+  // keeps its copy.
+  if (!srcType.getElementType().isIntOrFloat() ||
+      (elementOffset * srcType.getElementTypeBitWidth()) % (16 * 8) != 0)
+    return false;
 
   int64_t slotElems = srcType.getNumElements();
   int64_t baseElems = baseType.getNumElements();
