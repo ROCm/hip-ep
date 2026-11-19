@@ -1476,6 +1476,11 @@ private:
       int64_t last = static_cast<int64_t>(perm.size()) - 1;
       if (last <= 0 || cast<IntegerAttr>(perm[last]).getInt() == last)
         return false;
+      // The HIP transpose copies whole bytes, so a sub-byte element (an i1
+      // mask) stays in the kernel.
+      if (getElementTypeOrSelf(transpose.getInput().getType())
+              .getIntOrFloatBitWidth() < 8)
+        return false;
       return innermostAtLeast(transpose.getInput(), peelMinInputElements) &&
              innermostAtLeast(transpose->getResult(0), peelMinOutputElements);
     };
@@ -1553,16 +1558,30 @@ private:
     if (peel.empty())
       return module;
 
+    // A remainder that saves no launch is inlined and runs as HIP ops. The
+    // HIP elementwise kernels cover f16 and f32; other types (an i8 Max, for
+    // one) may have none, so such a module keeps its transposes instead.
+    auto hipElementType = [](Type type) {
+      auto shaped = dyn_cast<ShapedType>(type);
+      return !shaped || shaped.getElementType().isF16() ||
+             shaped.getElementType().isF32();
+    };
     SmallVector<Operation *> kept;
     bool computes = false;
+    bool hipTypes = true;
+    int launches = 0;
     for (Operation &op : body.without_terminator()) {
       if (isa<tensor::EmptyOp>(op) || peel.contains(&op))
         continue;
       kept.push_back(&op);
-      computes |= !isa<TransposeOp>(op) && !isTosaLowerableReshape(&op) &&
-                  !isLowerableSlice(&op);
+      if (isTosaLowerableReshape(&op) || isLowerableSlice(&op))
+        continue;
+      ++launches;
+      computes |= !isa<TransposeOp>(op);
+      hipTypes &= llvm::all_of(op.getOperandTypes(), hipElementType) &&
+                  llvm::all_of(op.getResultTypes(), hipElementType);
     }
-    if (!computes)
+    if (!computes || (launches < 2 && !hipTypes))
       return module;
 
     rewriter.setInsertionPoint(module);
@@ -1591,13 +1610,33 @@ private:
       auto intType = dyn_cast<IntegerType>(type.getElementType());
       return !intType || intType.getWidth() <= 32;
     };
+    // A slice with SSA offsets, sizes or strides would read them as block
+    // arguments in the module, where they are no longer constants.
+    auto staticSlice = [](Operation *op) {
+      auto slice = dyn_cast<tensor::ExtractSliceOp>(op);
+      return slice && isTosaLowerableSlice(slice) &&
+             slice.getOffsets().empty() && slice.getSizes().empty() &&
+             slice.getStrides().empty();
+    };
+    // getKernelArgumentType views a ui8 Where condition that is a kernel
+    // argument as i8; behind an absorbed view the condition stays ui8, which
+    // rocMLIR's signless arithmetic rejects.
+    auto feedsCondition = [&](unsigned index) {
+      BlockArgument argument = module.getBody().front().getArgument(index + 1);
+      return llvm::any_of(argument.getUsers(), [&](Operation *user) {
+        auto where = dyn_cast<WhereOp>(user);
+        return where && where.getCondition() == argument;
+      });
+    };
     SmallVector<std::pair<Value, SmallVector<Operation *>>> chains;
-    for (Value input : module.getInputs()) {
+    for (auto [index, input] : llvm::enumerate(module.getInputs())) {
+      if (feedsCondition(index))
+        continue;
       SmallVector<Operation *> chain;
       bool slices = false;
       Value source = input;
       while (Operation *def = source.getDefiningOp()) {
-        if (isLowerableSlice(def))
+        if (staticSlice(def))
           slices = true;
         else if (!isTosaLowerableReshape(def))
           break;

@@ -320,8 +320,12 @@ The peeled transposes are:
 - an input transpose, with the static reshapes before it, of a module input;
   the kernel reads the transposed tensor.
 
-The remaining ops form the module again, and the conditions above apply once
-more. A module with no compute op left keeps its transposes.
+The HIP transpose copies whole bytes, so a transpose of a sub-byte element (an
+`i1` mask) stays in the kernel. The remaining ops form the module again, and the
+conditions above apply once more. A module keeps its transposes when no compute
+op is left, or when the remaining ops would launch only once and run as HIP ops
+on a type other than f16 and f32, which the HIP elementwise kernels may not
+cover.
 
 A module input that comes from a chain of static, unit-stride slices and static
 reshapes, with at least one slice, would otherwise run as a strided copy before
@@ -329,6 +333,10 @@ the kernel; a crop of a pixel-shuffle output is the common case. The module gets
 its own copy of that chain and reads the chain's source, and rocMLIR folds the
 slice into the kernel's loads. Another reader of the slice keeps the original.
 A slice counts as a view, not a launch, when the module is checked again.
+A slice with SSA offsets, sizes or strides stays outside, since in the module
+those operands are kernel arguments, not constants. A chain that ends in a `ui8`
+Where condition also stays outside: the kernel views that argument as `i8` only
+when it reads the condition directly.
 
 The inline scalar constants that the module reads are cloned into the kernel.
 Any other module is inlined back. The rocMLIR compile does not autotune an
