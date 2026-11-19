@@ -372,7 +372,7 @@ pool_2x2_vec_kernel(const T* __restrict__ input, T* __restrict__ output,
     const float r =
         mode == kPoolMax
             ? fmaxf(fmaxf(fmaxf(-FLT_MAX, x0), x1), fmaxf(x2, x3))
-            : (x0 + x1 + x2 + x3) * 0.25f;
+            : (0.0f + x0 + x1 + x2 + x3) * 0.25f;
     res[v] = from_float<T>(r);
   }
   *reinterpret_cast<uint2*>(output + (static_cast<size_t>(nc) * s.OH + oh) * s.OW +
