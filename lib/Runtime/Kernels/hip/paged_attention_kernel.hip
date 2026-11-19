@@ -877,6 +877,182 @@ hipError_t dispatch_flash(hipStream_t stream, const FlashConfig &cfg,
 #undef PA_LAUNCH
 }
 
+// Decode-sized attention for head_size 256 on wave32 devices. A block owns HB
+// query heads of one KV group, so each K/V row is read once for all of them.
+// 16 lanes cover one position (16 contiguous dims each, two 16-byte loads per
+// row), which makes a wave work on two positions at once and keeps the score
+// reduction to four shuffle steps. Every 16-lane group runs its own online
+// softmax over the positions it visits and the groups are merged through
+// shared memory. As in paged_attention_fp16, `partials` selects a slice of
+// the context by blockIdx.z and defers the normalization to the reduce kernel.
+constexpr int kGroupedLanes = 16;
+constexpr int kGroupedDims = kFlashHeadSize / kGroupedLanes;
+constexpr int kGroupedThreads = 256;
+constexpr int kGroupedGroups = kGroupedThreads / kGroupedLanes;
+constexpr int kMaxGroupedHeads = 3;
+
+constexpr size_t grouped_smem_bytes(int hb) {
+  return (static_cast<size_t>(hb) * kGroupedGroups * kFlashHeadSize +
+          2 * static_cast<size_t>(hb) * kGroupedGroups) *
+         sizeof(float);
+}
+
+__device__ __forceinline__ void load_dims(const __half *src,
+                                          float (&out)[kGroupedDims]) {
+  const uint4 lo = reinterpret_cast<const uint4 *>(src)[0];
+  const uint4 hi = reinterpret_cast<const uint4 *>(src)[1];
+  const uint32_t words[8] = {lo.x, lo.y, lo.z, lo.w, hi.x, hi.y, hi.z, hi.w};
+#pragma unroll
+  for (int i = 0; i < 8; ++i) {
+    const float2 f = __half22float2(__builtin_bit_cast(__half2, words[i]));
+    out[2 * i] = f.x;
+    out[2 * i + 1] = f.y;
+  }
+}
+
+template <int HB>
+__global__ void __launch_bounds__(kGroupedThreads)
+    paged_decode_grouped(const __half *query, const __half *key_cache,
+                         const __half *value_cache, __half *output,
+                         float *partials, DeviceMeta meta, int batch,
+                         int num_heads, int kv_heads, int block_size,
+                         int max_blocks, int cache_slots, float scale,
+                         int chunk, int splits) {
+  constexpr int D = kFlashHeadSize;
+  extern __shared__ float grouped_smem[];
+  float *s_acc = grouped_smem;
+  float *s_max = s_acc + HB * kGroupedGroups * D;
+  float *s_denom = s_max + HB * kGroupedGroups;
+
+  const int token = blockIdx.x;
+  const int heads_per_kv = num_heads / kv_heads;
+  const int blocks_per_kv = heads_per_kv / HB;
+  const int kv_head = blockIdx.y / blocks_per_kv;
+  const int head0 = kv_head * heads_per_kv + (blockIdx.y % blocks_per_kv) * HB;
+  const int tid = threadIdx.x;
+  const int lane = tid % 32;
+  const int sub = lane / kGroupedLanes;
+  const int dim0 = (lane % kGroupedLanes) * kGroupedDims;
+  const int group = (tid / 32) * 2 + sub;
+
+  const int batch_index = find_batch(meta.cumulative, batch, token);
+  if (batch_index < 0) {
+    if (!partials) {
+#pragma unroll
+      for (int j = 0; j < HB; ++j)
+        output[(static_cast<int64_t>(token) * num_heads + head0 + j) * D + tid] =
+            __float2half(0.f);
+    }
+    return;
+  }
+  const int position =
+      meta.past[batch_index] + (token - meta.cumulative[batch_index]);
+  int first = 0;
+  int last = position;
+  if (partials) {
+    first = static_cast<int>(blockIdx.z) * chunk;
+    if (first > position)
+      return;
+    last = min(position, first + chunk - 1);
+  }
+
+  const int kv_width = kv_heads * D;
+  float q[HB][kGroupedDims];
+  float acc[HB][kGroupedDims];
+  float running_max[HB];
+  float running_denom[HB];
+#pragma unroll
+  for (int j = 0; j < HB; ++j) {
+    load_dims(query + (static_cast<int64_t>(token) * num_heads + head0 + j) * D +
+                  dim0,
+              q[j]);
+#pragma unroll
+    for (int i = 0; i < kGroupedDims; ++i) {
+      q[j][i] *= scale;
+      acc[j][i] = 0.f;
+    }
+    running_max[j] = -INFINITY;
+    running_denom[j] = 0.f;
+  }
+
+  for (int pos = first + group; pos <= last; pos += kGroupedGroups) {
+    const int slot = physical_slot(meta.block_table, max_blocks, block_size,
+                                   batch_index, pos);
+    if (slot < 0 || slot >= cache_slots)
+      continue;
+    const int64_t row = static_cast<int64_t>(slot) * kv_width + kv_head * D + dim0;
+    float k[kGroupedDims];
+    float v[kGroupedDims];
+    load_dims(key_cache + row, k);
+    load_dims(value_cache + row, v);
+#pragma unroll
+    for (int j = 0; j < HB; ++j) {
+      float score = 0.f;
+#pragma unroll
+      for (int i = 0; i < kGroupedDims; ++i)
+        score += q[j][i] * k[i];
+#pragma unroll
+      for (int offset = kGroupedLanes / 2; offset > 0; offset /= 2)
+        score += __shfl_xor(score, offset, kGroupedLanes);
+      const float new_max = fmaxf(running_max[j], score);
+      const float correction =
+          running_max[j] == -INFINITY ? 0.f : expf(running_max[j] - new_max);
+      const float weight = expf(score - new_max);
+      running_denom[j] = running_denom[j] * correction + weight;
+#pragma unroll
+      for (int i = 0; i < kGroupedDims; ++i)
+        acc[j][i] = acc[j][i] * correction + weight * v[i];
+      running_max[j] = new_max;
+    }
+  }
+
+#pragma unroll
+  for (int j = 0; j < HB; ++j) {
+    float *dst = s_acc + (j * kGroupedGroups + group) * D + dim0;
+#pragma unroll
+    for (int i = 0; i < kGroupedDims; ++i)
+      dst[i] = acc[j][i];
+    if (lane % kGroupedLanes == 0) {
+      s_max[j * kGroupedGroups + group] = running_max[j];
+      s_denom[j * kGroupedGroups + group] = running_denom[j];
+    }
+  }
+  __syncthreads();
+
+#pragma unroll
+  for (int j = 0; j < HB; ++j) {
+    float global_max = -INFINITY;
+    for (int g = 0; g < kGroupedGroups; ++g)
+      global_max = fmaxf(global_max, s_max[j * kGroupedGroups + g]);
+    float denom = 0.f;
+    float sum = 0.f;
+    if (global_max != -INFINITY) {
+      for (int g = 0; g < kGroupedGroups; ++g) {
+        const float m = s_max[j * kGroupedGroups + g];
+        if (m == -INFINITY)
+          continue;
+        const float f = expf(m - global_max);
+        denom += s_denom[j * kGroupedGroups + g] * f;
+        sum += s_acc[(j * kGroupedGroups + g) * D + tid] * f;
+      }
+    }
+    const int head = head0 + j;
+    if (partials) {
+      float *partial = partials +
+                       ((static_cast<int64_t>(token) * num_heads + head) * splits +
+                        blockIdx.z) * partial_stride(D);
+      if (tid == 0) {
+        partial[0] = global_max;
+        partial[1] = denom;
+      }
+      partial[2 + tid] = sum;
+    } else {
+      output[(static_cast<int64_t>(token) * num_heads + head) * D + tid] =
+          __float2half(denom > 0.f ? sum / denom : 0.f);
+    }
+  }
+}
+
 // A context is split across blocks in slices of at least this many positions.
 constexpr int kMinSplitChunk = 512;
 constexpr int kMaxSplits = 256;
@@ -912,16 +1088,44 @@ hipError_t launch_per_token(hipStream_t stream, const void *query,
     if (alloc != hipSuccess)
       return alloc;
   }
-  const dim3 grid(static_cast<unsigned>(num_tokens),
-                  static_cast<unsigned>(num_heads),
-                  partials ? static_cast<unsigned>(splits) : 1u);
-  hipLaunchKernelGGL(
-      paged_attention_fp16, grid, dim3(kAttentionThreads), shared_bytes, stream,
-      static_cast<const __half *>(query),
-      static_cast<const __half *>(key_cache),
-      static_cast<const __half *>(value_cache), static_cast<__half *>(output),
-      partials, meta, num_tokens, batch, num_heads, kv_heads, head_size,
-      block_size, max_blocks, cache_slots, scale, chunk, splits);
+  const unsigned z = partials ? static_cast<unsigned>(splits) : 1u;
+  const int heads_per_kv = num_heads / kv_heads;
+  int grouped_heads = 0;
+  if (head_size == kFlashHeadSize && device_has_wmma()) {
+    for (int hb = kMaxGroupedHeads; hb >= 1 && grouped_heads == 0; --hb)
+      if (heads_per_kv % hb == 0)
+        grouped_heads = hb;
+  }
+  if (grouped_heads > 0) {
+    const dim3 grid(static_cast<unsigned>(num_tokens),
+                    static_cast<unsigned>(kv_heads * (heads_per_kv / grouped_heads)),
+                    z);
+#define PA_LAUNCH_GROUPED(HB_)                                                 \
+  hipLaunchKernelGGL(                                                          \
+      paged_decode_grouped<HB_>, grid, dim3(kGroupedThreads),                  \
+      grouped_smem_bytes(HB_), stream, static_cast<const __half *>(query),     \
+      static_cast<const __half *>(key_cache),                                  \
+      static_cast<const __half *>(value_cache), static_cast<__half *>(output), \
+      partials, meta, batch, num_heads, kv_heads, block_size, max_blocks,      \
+      cache_slots, scale, chunk, splits)
+    if (grouped_heads == 3)
+      PA_LAUNCH_GROUPED(3);
+    else if (grouped_heads == 2)
+      PA_LAUNCH_GROUPED(2);
+    else
+      PA_LAUNCH_GROUPED(1);
+#undef PA_LAUNCH_GROUPED
+  } else {
+    const dim3 grid(static_cast<unsigned>(num_tokens),
+                    static_cast<unsigned>(num_heads), z);
+    hipLaunchKernelGGL(
+        paged_attention_fp16, grid, dim3(kAttentionThreads), shared_bytes,
+        stream, static_cast<const __half *>(query),
+        static_cast<const __half *>(key_cache),
+        static_cast<const __half *>(value_cache), static_cast<__half *>(output),
+        partials, meta, num_tokens, batch, num_heads, kv_heads, head_size,
+        block_size, max_blocks, cache_slots, scale, chunk, splits);
+  }
   hipError_t err = hipGetLastError();
   if (partials) {
     if (err == hipSuccess) {
