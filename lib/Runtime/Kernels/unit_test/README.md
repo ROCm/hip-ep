@@ -543,7 +543,7 @@ block size, indices shape) with `_compact`, `_zp` and `_signed` when set, or
 the fp8 scale granularity `_tensor` / `_row` / `_block`; its `config` is always
 `fixed:elementwise` and its `time_ms` 0.
 group_norm writes `N2_C40_HW1000_G8` (batch, channels, spatial, groups); its
-`config` is `<dtype>:<layout>:<workspace>:silu<0|1>` and its `time_ms` 0.
+`config` is `fixed:<dtype>:<layout>:<workspace>:<inputs>:silu<0|1>`.
 
 `time_ms` is the **mean per-launch** time of that case's timed launches (the
 leaf's fixed count of launches between two HIP events), not a total, and it is
