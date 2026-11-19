@@ -2,7 +2,7 @@
 //
 // HIP-to-HIP fusion of a dequantize/gemm/quantize chain into hip.qgemm, for the
 // cases quant types cannot carry. Per-tensor 8-bit B folds into quant types
-// (QdqToQuantTypes.pdll); the per-tensor patterns here only take a packed
+// (hip-fold-qdq-to-quant-types); the per-tensor patterns here only take a packed
 // 4-bit B, which is not one value per element.
 //
 // Included by HipFusionTransformPatterns.pdll, which declares the native

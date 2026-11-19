@@ -145,6 +145,7 @@ the selected perfConfig string are printed only with `--verbose`.
 | `hip-fusion-transform` | module | HIP-to-HIP rewriting at unrestricted arity (one op → many, many → one, or subgraph → subgraph). The patterns live in `lib/Dialect/Transforms/fusion_pattern/` — PDLL files compiled into the library, plus native C++ for rewrites whose shape depends on the matched op's rank — and share one `RewritePatternSet`. |
 | `hip-split-duplicate-dps-inits` | func.func | De-alias DPS init operands that CSE merged onto one `tensor.empty`, so an op that reads back its own outputs (e.g. `hip.gqa` present K/V) does not share a buffer (pre-bufferize). |
 | `hip-resolve-tensor-dims` | func.func | Fold `tensor.dim` of reshape chains into root-dim arithmetic (pre-bufferize). |
+| `hip-fold-qdq-to-quant-types` | func.func | Fold the Q/DQ around any quant-capable op (`HipQuantCapableOpInterface`: add, matmul, gemm) into `!quant.uniform` element types: `DQ(inputs) -> op -> Q` becomes the op on quant tensors, retyped in place with `hip.storage_cast` at the edges. Per-tensor Q/DQ only; no kernel check. Runs just before `hip-fusion-transform`. See [design/quant-types.md](design/quant-types.md). |
 | `hip-legalize-quant-types` | func.func | Record every `hip.add`, `hip.matmul` and `hip.gemm`'s element types in `quant_types` (quantized or not) and retype quantized tensors to storage integers, since memrefs cannot hold quant types (pre-bufferize). Lowering reads `quant_types` to pick the quantized kernel. See [design/quant-types.md](design/quant-types.md). |
 | `hip-loop-body-to-out-params` | module | Promote outlined loop bodies to the out-param ABI. |
 | `hip-use-output-allocator` | func.func | Rewrite returned `memref.alloc` → `hip.alloc_output` (graph outputs become EP/runtime-owned, not pooled or deallocated). |
@@ -260,6 +261,7 @@ ONNX → HIP  (buildOnnxToHipPipeline)
                                            runs the same pass in its own head)
   func.func(hip-fold-constant-extracts)
   hip-infer-shapes
+  func.func(hip-fold-qdq-to-quant-types)  (Q/DQ -> quant types, per-tensor)
   hip-fusion-transform               (must precede externalization: its patterns
                                       read hip.constant payloads)
   hip-externalize-constants

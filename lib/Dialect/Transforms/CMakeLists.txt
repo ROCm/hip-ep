@@ -36,6 +36,7 @@ add_library(HipDialectTransforms STATIC
   DecomposeMatMulNBits.cpp
   ExternalizeConstants.cpp
   FixLoopAccumulatorOffset.cpp
+  FoldQdqToQuantTypes.cpp
   FoldBatchNorm.cpp
   FoldConstantExtracts.cpp
   FuseRocMlirAnchor.cpp

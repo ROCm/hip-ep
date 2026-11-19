@@ -42,7 +42,7 @@ types cannot carry.
 
 | Step | Where | What |
 |---|---|---|
-| Fold Q/DQ into types | `hip-fusion-transform`, `fusion_pattern/QdqToQuantTypes.pdll` | DQ → op → Q becomes the quant-typed op when every Q/DQ has a per-tensor type (splat constant scale, readable zero point, integer storage, not packed). Kernels are not checked here. |
+| Fold Q/DQ into types | `hip-fold-qdq-to-quant-types` (`FoldQdqToQuantTypes.cpp`), run just before `hip-fusion-transform` | DQ → op → Q becomes the quant-typed op when every Q/DQ has a per-tensor type (splat constant scale, readable zero point, integer storage, not packed). Kernels are not checked here. |
 | Quant-type-agnostic fusions | `hip-fusion-transform`, PDLL in `fusion_pattern/` (`MatmulBiasFusion.pdll`) and native `gemm_to_matmul.cpp` | Read element types only, so float and quant-typed chains share them. See below. |
 | Legalize | `hip-legalize-quant-types`, before bufferization | Memrefs cannot hold quant types: the [lhs, rhs, output] element types of every add move into its `quant_types` attribute, quantized tensors become storage integers, casts disappear. |
 | Lower | `convert-hip-to-llvm` | quantized `quant_types` → `wrap_qelementwise` (scales/zero points from the types); otherwise `wrap_elementwise`. |
@@ -104,7 +104,7 @@ fusions and quant types are written against one op. Other gemms stay
 `hip.gemm` and keep their own Q/DQ folds. A weight with per-channel or packed
 4-bit Q/DQ also keeps `hip.gemm`, since only `QGemmFusion.pdll` handles those.
 The rewrite is type-agnostic, so its order against the Q/DQ folds does not
-matter (`HipMatmulBiasQdqToQuantTypes` covers the converted form).
+matter (the generic fold covers the converted form).
 
 ## Matmul + bias (`MatmulBiasFusion.pdll`)
 

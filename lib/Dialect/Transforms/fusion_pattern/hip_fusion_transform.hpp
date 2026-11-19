@@ -31,6 +31,7 @@
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/IR/HipQuantTypes.h"
 
+#include "../HipQdqUtils.h"
 #include "gemm_to_matmul.hpp"
 #include "linear_attention_group_fold.hpp"
 #include "patch_embed_conv_to_gemm.hpp"
@@ -61,131 +62,6 @@
 
 namespace hip {
 namespace fusion_transform {
-
-//===----------------------------------------------------------------------===//
-// IR readers
-//===----------------------------------------------------------------------===//
-
-/// value is const op and return value as DenseElementsAttr, if not return {}
-inline mlir::DenseElementsAttr tryHipConstantPayload(mlir::Value value) {
-  if (!value)
-    return {};
-  auto constOp =
-      mlir::dyn_cast_or_null<mlir::hip::ConstantOp>(value.getDefiningOp());
-  if (!constOp)
-    return {};
-  return mlir::dyn_cast_or_null<mlir::DenseElementsAttr>(
-      constOp->getAttr("value"));
-}
-
-/// value is a splat float constant and return it as float, if not return
-/// nullopt
-inline std::optional<float> tryHipSplatScale(mlir::Value value) {
-  mlir::DenseElementsAttr payload = tryHipConstantPayload(value);
-  // A non-splat scale is per-axis and has no single scalar equivalent.
-  if (!payload || !payload.isSplat())
-    return std::nullopt;
-  // getSplatValue<FloatAttr> asserts on a non-float payload, so the element
-  // type is what guards the read rather than a dyn_cast on its result.
-  if (!mlir::isa<mlir::FloatType>(payload.getElementType()))
-    return std::nullopt;
-  return static_cast<float>(
-      payload.getSplatValue<mlir::FloatAttr>().getValueAsDouble());
-}
-
-inline mlir::Value getQdqZeroPoint(mlir::Operation *op) {
-  // Read through the ODS accessor, not an operand index: the zero point is
-  // optional, and an absent one shifts the DPS init operand into its slot.
-  if (auto quantOp = mlir::dyn_cast_or_null<mlir::hip::QuantizeLinearOp>(op))
-    return quantOp.getZeroPoint();
-  if (auto dequantOp =
-          mlir::dyn_cast_or_null<mlir::hip::DequantizeLinearOp>(op))
-    return dequantOp.getZeroPoint();
-  return {};
-}
-
-inline mlir::IntegerType getQdqQuantizedElementType(mlir::Operation *op) {
-  mlir::Type type;
-  if (auto quantOp = mlir::dyn_cast_or_null<mlir::hip::QuantizeLinearOp>(op))
-    type = quantOp.getOutput().getType();
-  else if (auto dequantOp =
-               mlir::dyn_cast_or_null<mlir::hip::DequantizeLinearOp>(op))
-    type = dequantOp.getInput().getType();
-  auto shaped = mlir::dyn_cast_or_null<mlir::ShapedType>(type);
-  if (!shaped)
-    return {};
-  return mlir::dyn_cast<mlir::IntegerType>(shaped.getElementType());
-}
-
-/// op is a Q/DQ whose zero point is a splat constant and return it as int64,
-/// an absent operand returns absentValue, anything else nullopt
-inline std::optional<int64_t> tryHipQdqZeropoint(mlir::Operation *op,
-                                                 int64_t absentValue) {
-  if (!op)
-    return std::nullopt;
-  mlir::Value zeroPoint = getQdqZeroPoint(op);
-  // ONNX makes the operand optional and defines its absence as zero.
-  if (!zeroPoint)
-    return absentValue;
-  mlir::DenseElementsAttr payload = tryHipConstantPayload(zeroPoint);
-  if (!payload || !payload.isSplat())
-    return std::nullopt;
-  if (!mlir::isa<mlir::IntegerType>(payload.getElementType()))
-    return std::nullopt;
-  // The payload's own element type carries no signedness for the signless
-  // integers the importer produces, so the stored type of the quantized side
-  // is what decides how the raw bits are read.
-  auto intType = getQdqQuantizedElementType(op);
-  if (!intType)
-    return std::nullopt;
-  llvm::APInt raw = payload.getSplatValue<llvm::APInt>();
-  return intType.isUnsigned() ? static_cast<int64_t>(raw.getZExtValue())
-                              : raw.getSExtValue();
-}
-
-/// per-tensor quant type of a Q/DQ: splat scale, readable zero point and hip
-/// storage integer; null if not representable
-inline mlir::quant::UniformQuantizedType
-getHipQdqQuantType(mlir::Operation *op) {
-  mlir::Value scale, floatSide;
-  if (auto q = mlir::dyn_cast_or_null<mlir::hip::QuantizeLinearOp>(op)) {
-    scale = q.getScale();
-    floatSide = q.getInput();
-  } else if (auto dq =
-                 mlir::dyn_cast_or_null<mlir::hip::DequantizeLinearOp>(op)) {
-    scale = dq.getScale();
-    floatSide = dq.getResult(0);
-  } else {
-    return {};
-  }
-  // packed_int4 storage is not one value per element.
-  if (op->hasAttr("packed_int4"))
-    return {};
-
-  auto intType = getQdqQuantizedElementType(op);
-  auto expressed = mlir::dyn_cast<mlir::FloatType>(
-      mlir::getElementTypeOrSelf(floatSide.getType()));
-  std::optional<float> scaleValue = tryHipSplatScale(scale);
-  std::optional<int64_t> zeroPoint = tryHipQdqZeropoint(op, 0);
-  if (!intType || intType.isSigned() || intType.getWidth() > 32 || !expressed ||
-      !scaleValue || !zeroPoint || !std::isfinite(*scaleValue) ||
-      *scaleValue <= 0.0f)
-    return {};
-
-  bool isSigned = !intType.isUnsigned();
-  unsigned width = intType.getWidth();
-  int64_t min =
-      mlir::quant::QuantizedType::getDefaultMinimumForInteger(isSigned, width);
-  int64_t max =
-      mlir::quant::QuantizedType::getDefaultMaximumForInteger(isSigned, width);
-  if (*zeroPoint < min || *zeroPoint > max)
-    return {};
-
-  return mlir::quant::UniformQuantizedType::get(
-      isSigned ? mlir::quant::QuantizationFlags::Signed : 0,
-      mlir::IntegerType::get(op->getContext(), width), expressed, *scaleValue,
-      *zeroPoint, min, max);
-}
 
 /// op's `name` attribute as a signed int64, absentValue when it is missing,
 /// nullopt when it is present but not a 64-bit integer
@@ -348,17 +224,6 @@ isHipPackedInt4Dequantize(mlir::PatternRewriter &, mlir::PDLResultList &,
   auto dq = mlir::dyn_cast_or_null<mlir::hip::DequantizeLinearOp>(
       args[0].dyn_cast<mlir::Operation *>());
   return mlir::success(dq && dq->hasAttr("packed_int4"));
-}
-
-/// qdq has a per-tensor quant type. Kernel availability is not checked here
-/// (see QdqToQuantTypes.pdll).
-inline mlir::LogicalResult hasQuantType(mlir::PatternRewriter &,
-                                        mlir::PDLResultList &,
-                                        llvm::ArrayRef<mlir::PDLValue> args) {
-  if (args.size() != 1)
-    return mlir::failure();
-  return mlir::success(static_cast<bool>(
-      getHipQdqQuantType(args[0].dyn_cast<mlir::Operation *>())));
 }
 
 /// lhs and rhs are ranked tensors of the same shape
@@ -757,24 +622,6 @@ hasHipIntAttrEqual(mlir::PatternRewriter &, mlir::PDLResultList &,
 // Rewrite helpers
 //===----------------------------------------------------------------------===//
 
-/// a tensor.empty of resultType whose dynamic dims are read off shapeSource
-/// a tensor.empty of initType, sizing each dynamic dim from shapeSource
-inline mlir::Value buildInitValue(mlir::PatternRewriter &rewriter,
-                                  mlir::RankedTensorType initType,
-                                  mlir::Value shapeSource) {
-  mlir::Location loc = shapeSource.getLoc();
-
-  llvm::SmallVector<mlir::Value> dynSizes;
-  for (int64_t dim : llvm::seq<int64_t>(initType.getRank()))
-    if (initType.isDynamicDim(dim))
-      dynSizes.push_back(
-          mlir::tensor::DimOp::create(rewriter, loc, shapeSource, dim));
-
-  return mlir::tensor::EmptyOp::create(rewriter, loc, initType.getShape(),
-                                       initType.getElementType(), dynSizes)
-      .getResult();
-}
-
 inline mlir::LogicalResult buildInit(mlir::PatternRewriter &rewriter,
                                      mlir::PDLResultList &results,
                                      llvm::ArrayRef<mlir::PDLValue> args) {
@@ -785,22 +632,6 @@ inline mlir::LogicalResult buildInit(mlir::PatternRewriter &rewriter,
       rewriter,
       mlir::cast<mlir::RankedTensorType>(args[0].dyn_cast<mlir::Type>()),
       args[1].dyn_cast<mlir::Value>()));
-  return mlir::success();
-}
-
-/// the integer-side tensor type of a Q/DQ with its quant element type
-inline mlir::LogicalResult
-getQuantTensorType(mlir::PatternRewriter &, mlir::PDLResultList &results,
-                   llvm::ArrayRef<mlir::PDLValue> args) {
-  // Guarded by HasQuantType, so the type exists.
-  auto *op = args[0].dyn_cast<mlir::Operation *>();
-  mlir::Value intSide =
-      mlir::isa<mlir::hip::QuantizeLinearOp>(op)
-          ? op->getResult(0)
-          : mlir::cast<mlir::hip::DequantizeLinearOp>(op).getInput();
-  results.push_back(
-      mlir::Type(mlir::cast<mlir::RankedTensorType>(intSide.getType())
-                     .clone(getHipQdqQuantType(op))));
   return mlir::success();
 }
 
@@ -989,8 +820,6 @@ inline void registerNativeHelpers(mlir::PDLPatternModule &pdlPatterns) {
                                          isHipQdqUnsignedQuantized);
   pdlPatterns.registerConstraintFunction("HasSameHipQdqElementType",
                                          hasSameHipQdqElementType);
-  pdlPatterns.registerConstraintFunction("HasQuantType", hasQuantType);
-  pdlPatterns.registerRewriteFunction("GetQuantTensorType", getQuantTensorType);
   pdlPatterns.registerConstraintFunction("IsHipPackedInt4Dequantize",
                                          isHipPackedInt4Dequantize);
   pdlPatterns.registerConstraintFunction("HasSameShape", hasSameShape);

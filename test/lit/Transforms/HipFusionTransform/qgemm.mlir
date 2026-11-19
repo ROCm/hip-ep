@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-// RUN: hip-mlir-opt --hip-fusion-transform --split-input-file %s | FileCheck %s
+// RUN: hip-mlir-opt --hip-fold-qdq-to-quant-types --hip-fusion-transform --split-input-file %s | FileCheck %s
 
 // transB=1 reads B as [N, K], so Y is [64, 32]; the rank-1 C broadcasts along
 // M. The Q/DQ fold into the gemm's element types; alpha, beta and transB stay

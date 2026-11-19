@@ -5,11 +5,12 @@
 // QLinearGlobalAveragePool / QLinearAveragePool / QLinearLeakyRelu arrive as
 // onnx.Custom. They
 // decompose into
-// DequantizeLinear + the float op + QuantizeLinear, and --hip-fusion-transform
-// then folds per-tensor Add's Q/DQ into quant types and fuses Mul to hip.qmul.
+// DequantizeLinear + the float op + QuantizeLinear. --hip-fold-qdq-to-quant-types
+// then folds per-tensor Add's Q/DQ into quant types, and --hip-fusion-transform
+// fuses Mul to hip.qmul.
 // Absent zero points are onnx.NoValue and fuse as zp 0.
 
-// RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip --hip-fusion-transform %s | FileCheck %s
+// RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip --hip-fold-qdq-to-quant-types --hip-fusion-transform %s | FileCheck %s
 
 module {
   func.func @main_graph(%arg0: tensor<1x8xi8>) -> tensor<1x8xi8> {

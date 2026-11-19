@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-// RUN: hip-mlir-opt --hip-fusion-transform --split-input-file %s | FileCheck %s
+// RUN: hip-mlir-opt --hip-fold-qdq-to-quant-types --hip-fusion-transform --split-input-file %s | FileCheck %s
 
 // Q/DQ around hip.add fold into the add's element types: the same hip.add as in
 // a float model, quantized by type.

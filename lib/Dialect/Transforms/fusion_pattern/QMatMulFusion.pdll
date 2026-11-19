@@ -8,7 +8,7 @@
 // The B edge comes in three shapes that hip.qmatmul spells differently, so
 // each gets its own pattern:
 //
-//   per-tensor      folded into quant types (QdqToQuantTypes.pdll)
+//   per-tensor      folded into quant types (hip-fold-qdq-to-quant-types)
 //   per-column W4   scale and zero point stay operands, `packed_int4` marks
 //                   the value width
 //   per-column W8   they stay operands, no marker
@@ -25,7 +25,7 @@
 
 // ===== Per-tensor B =====
 //
-// Folded into quant types: see QdqToQuantTypes.pdll (HipMatmulQdqToQuantTypes).
+// Folded into quant types by hip-fold-qdq-to-quant-types.
 
 // ===== Per-output-column B, packed 4-bit =====
 //

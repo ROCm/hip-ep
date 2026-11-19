@@ -141,7 +141,11 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   //     the reference cases.
   pm.addPass(mlir::hip::createInferShapesPass());
 
-  // 1b*. HIP-to-HIP pattern rewriting, Such as Q/DQ fusion
+  // 1b*. Fold the Q/DQ around quant-capable ops into quant types, so the
+  //      fusions below see one op for QDQ and float models.
+  pm.addNestedPass<func::FuncOp>(mlir::hip::createFoldQdqToQuantTypesPass());
+
+  // 1b**. HIP-to-HIP pattern rewriting, Such as Q/DQ fusion
   pm.addPass(mlir::hip::createHipFusionTransformPass());
 
   // Apply constant storage policy only after HIP shape inference has consumed

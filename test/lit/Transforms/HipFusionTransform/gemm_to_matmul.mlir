@@ -4,7 +4,7 @@
 // hip.gemm that is a plain matmul plus a row bias becomes hip.matmul. Gemms
 // with alpha or beta != 1, or a C that is not a row bias, stay hip.gemm.
 
-// RUN: hip-mlir-opt --hip-fusion-transform --split-input-file %s | FileCheck %s
+// RUN: hip-mlir-opt --hip-fold-qdq-to-quant-types --hip-fusion-transform --split-input-file %s | FileCheck %s
 
 // CHECK-LABEL: func.func @row_bias
 // CHECK:         hip.matmul(%{{.*}}) ins(%{{.*}}, %{{.*}}, %{{.*}} : tensor<64x128xf16>, tensor<32x128xf16>, tensor<32xf16>) outs(%{{.*}} : tensor<64x32xf16>) {transB = 1 : i64} : tensor<64x32xf16>

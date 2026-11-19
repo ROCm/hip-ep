@@ -6,7 +6,7 @@
 // chain), so float and quant-typed chains fuse alike and kernel availability
 // is not its concern.
 
-// RUN: hip-mlir-opt --hip-fusion-transform --split-input-file %s | FileCheck %s
+// RUN: hip-mlir-opt --hip-fold-qdq-to-quant-types --hip-fusion-transform --split-input-file %s | FileCheck %s
 
 // The op keeps A's rank-3 shape: no reshape, no gemm.
 
