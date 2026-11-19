@@ -340,12 +340,14 @@ the A operand of the second gemm through pointwise ops and row-only reshapes
 
 ## Options
 
-The fusion rules have no switches. The two options describe the target.
+`arch` and `gemm-gemm-accel-types` describe the target. `int4-weights` is the
+only switch of the fusion rules.
 
 | Option | EP value | Effect |
 |---|---|---|
 | `arch=<gfx>` | detected | Stamps `rock.arch` on each kernel. |
 | `gemm-gemm-accel-types=<types>` | detected | The element types for the gemm-gemm gate. |
+| `int4-weights=<bool>` | on when rocMLIR autotuning is on | Takes packed-int4 weight dequantizes into the kernel. |
 
 ## Tests and tools
 

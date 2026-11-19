@@ -59,8 +59,9 @@ def _int4_weights(k, n, form, dtype):
         return np.repeat(p, block, axis=0) if block else p[None, :]
 
     zero = expand(zp) if with_zp else 0
-    weights = (q - zero) * expand(scale.astype(np.float64))
-    return node, inits, weights
+    # DequantizeLinear rounds its output to dtype before the MatMul reads it.
+    weights = ((q - zero) * expand(scale.astype(np.float64))).astype(dtype)
+    return node, inits, weights.astype(np.float64)
 
 
 def _model(m, k, n, form, dtype, bias):

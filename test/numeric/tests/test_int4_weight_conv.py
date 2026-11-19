@@ -27,19 +27,20 @@ _RNG = np.random.default_rng(11)
 def _int4_weights(cout, cin, with_zp):
     weights = _RNG.integers(-8, 8, size=(cout, cin, 1, 1), dtype=np.int8)
     scales = _RNG.uniform(0.002, 0.02, size=(cout,)).astype(np.float32)
-    zero_points = (
-        _RNG.integers(-8, 8, size=(cout,), dtype=np.int8)
-        if with_zp
-        else np.zeros((cout,), dtype=np.int8)
-    )
     inits = [
         helper.make_tensor(
             "w", TensorProto.INT4, [cout, cin, 1, 1], weights.ravel().tolist()
         ),
         numpy_helper.from_array(scales, "ws"),
-        helper.make_tensor("wz", TensorProto.INT4, [cout], zero_points.tolist()),
     ]
-    node = helper.make_node("DequantizeLinear", ["w", "ws", "wz"], ["wf"], axis=0)
+    inputs = ["w", "ws"]
+    if with_zp:
+        zero_points = _RNG.integers(-8, 8, size=(cout,), dtype=np.int8)
+        inits.append(
+            helper.make_tensor("wz", TensorProto.INT4, [cout], zero_points.tolist())
+        )
+        inputs.append("wz")
+    node = helper.make_node("DequantizeLinear", inputs, ["wf"], axis=0)
     return node, inits
 
 

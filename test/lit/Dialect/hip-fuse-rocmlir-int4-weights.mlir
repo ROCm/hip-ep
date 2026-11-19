@@ -11,6 +11,9 @@
 // RUN:   --hip-fuse-rocmlir-elementwise \
 // RUN:   --hip-fuse-rocmlir-anchor="int4-weights=true" %s \
 // RUN:   | hip-mlir-opt --split-input-file | FileCheck %s
+// RUN: hip-mlir-opt --split-input-file \
+// RUN:   --hip-rocmlir-fusion="int4-weights=true" %s \
+// RUN:   | hip-mlir-opt --split-input-file | FileCheck %s
 // RUN: hip-mlir-opt --split-input-file --hip-rocmlir-prepare-quant \
 // RUN:   --hip-fuse-rocmlir-elementwise --hip-fuse-rocmlir-anchor %s \
 // RUN:   | FileCheck %s --check-prefix=OFF
