@@ -10,6 +10,8 @@
 
 #include "llvm/ADT/APInt.h"
 
+#include <limits>
+
 namespace mlir {
 namespace hip {
 namespace {
@@ -373,20 +375,43 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
   // the runtime derives past_len = total_seq - sq). Ignored by the runtime on
   // the bidirectional no-past path (no_causal && no mask), but computed
   // uniformly here.
-  mlir::Value oneIdx =
-      mlir::arith::ConstantIndexOp::create(rewriter, loc, 1).getResult();
-  mlir::Value totalKvM1Idx =
-      mlir::arith::SubIOp::create(rewriter, loc, totalKvIdx, oneIdx)
-          .getResult();
-  mlir::Value seqlensKI32 =
-      mlir::arith::IndexCastOp::create(rewriter, loc, i32Ty, totalKvM1Idx);
-  // One entry per batch row: the runtime reads B of them. Only a static tiny
-  // host-written buffer is staged out of the GPU pool, so the value is written
-  // on the host as [1] and broadcast to [B] on the device.
+  //
+  // One entry per batch row: the runtime reads B of them. The value is built
+  // as [1] and broadcast to [B] on the device. A runtime value is written by
+  // the host into a small mapped buffer the device can read. A value known at
+  // compile time is a hip.constant instead: a folded tensor constant would be
+  // left in host-only read-only storage, which device kernels cannot read.
   const int64_t seqlensBatch = queryType.getDimSize(0);
-  mlir::Value seqlensK = mlir::tensor::FromElementsOp::create(
-      rewriter, loc, mlir::RankedTensorType::get({1}, i32Ty),
-      mlir::ValueRange{seqlensKI32});
+  auto seqlensType = mlir::RankedTensorType::get({1}, i32Ty);
+  const int64_t staticCurSeq =
+      mlir::cast<mlir::RankedTensorType>(k3.getType()).getDimSize(1);
+  const int64_t staticPastSeq =
+      pastKey
+          ? mlir::cast<mlir::RankedTensorType>(pastKey.getType()).getDimSize(2)
+          : 0;
+  const bool staticTotal =
+      staticCurSeq != kDyn && staticPastSeq != kDyn &&
+      staticPastSeq + staticCurSeq >= 1 &&
+      staticPastSeq + staticCurSeq - 1 <= std::numeric_limits<int32_t>::max();
+  mlir::Value seqlensK;
+  if (staticTotal) {
+    const int64_t total = staticPastSeq + staticCurSeq;
+    seqlensK = mlir::hip::ConstantOp::create(
+        rewriter, loc, seqlensType,
+        mlir::DenseElementsAttr::get(
+            seqlensType,
+            llvm::ArrayRef<int32_t>{static_cast<int32_t>(total - 1)}));
+  } else {
+    mlir::Value oneIdx =
+        mlir::arith::ConstantIndexOp::create(rewriter, loc, 1).getResult();
+    mlir::Value totalKvM1Idx =
+        mlir::arith::SubIOp::create(rewriter, loc, totalKvIdx, oneIdx)
+            .getResult();
+    mlir::Value seqlensKI32 =
+        mlir::arith::IndexCastOp::create(rewriter, loc, i32Ty, totalKvM1Idx);
+    seqlensK = mlir::tensor::FromElementsOp::create(
+        rewriter, loc, seqlensType, mlir::ValueRange{seqlensKI32});
+  }
   if (seqlensBatch != 1) {
     llvm::SmallVector<mlir::Value> seqlensDyn;
     mlir::Value batchIdx;
