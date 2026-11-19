@@ -452,8 +452,8 @@ bool CompilerDriver::runMLIRPasses(
         compiledGraphs_ =
             std::make_shared<llvm::StringMap<mlir::hip::OwnedGraph>>();
         mlir::hip::buildOnnxToHipPipelineHead(
-            headPm, static_cast<hipdnnHandle_t>(hipdnnHandle_),
-            compiledGraphs_, /*convIntegerQuantConv=*/true);
+            headPm, static_cast<hipdnnHandle_t>(hipdnnHandle_), compiledGraphs_,
+            /*convIntegerQuantConv=*/true);
       } else {
         mlir::hip::buildOnnxToHipPipelineHead(headPm, /*handle=*/nullptr, {},
                                               /*convIntegerQuantConv=*/true);

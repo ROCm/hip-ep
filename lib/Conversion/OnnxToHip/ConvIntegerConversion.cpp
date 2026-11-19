@@ -194,8 +194,8 @@ static bool rebasedZeroPointIsZero(mlir::Value zp) {
   if (!ui8 && !elem.isSignlessInteger(8))
     return false;
   for (const llvm::APInt &value : attr) {
-    const int64_t n = ui8 ? static_cast<int64_t>(value.getZExtValue())
-                          : value.getSExtValue();
+    const int64_t n =
+        ui8 ? static_cast<int64_t>(value.getZExtValue()) : value.getSExtValue();
     if (n != (ui8 ? 128 : 0))
       return false;
   }
@@ -219,8 +219,8 @@ static mlir::Value toSigned8(mlir::PatternRewriter &rewriter,
   }
   if (!type.getElementType().isUnsignedInteger(8))
     return {};
-  mlir::Value wide =
-      castTo(rewriter, loc, context, value, rewriter.getI32Type(), /*onnxTo=*/6);
+  mlir::Value wide = castTo(rewriter, loc, context, value,
+                            rewriter.getI32Type(), /*onnxTo=*/6);
   auto offsetType = mlir::RankedTensorType::get({}, rewriter.getI32Type());
   mlir::Value offset = mlir::hip::ConstantOp::create(
       rewriter, loc, offsetType,
@@ -282,11 +282,11 @@ static mlir::LogicalResult tryLowerQuantConv(
       auto srcType = mlir::cast<mlir::RankedTensorType>(value.getType());
       llvm::SmallVector<int64_t> shape(srcType.getShape());
       shape.insert(shape.end() - 1, 1);
-      auto rank4 =
-          mlir::RankedTensorType::get(shape, srcType.getElementType());
-      llvm::SmallVector<mlir::ReassociationIndices> reassoc = {{0}, {1}, {2, 3}};
+      auto rank4 = mlir::RankedTensorType::get(shape, srcType.getElementType());
+      llvm::SmallVector<mlir::ReassociationIndices> reassoc = {
+          {0}, {1}, {2, 3}};
       return mlir::tensor::ExpandShapeOp::create(rewriter, loc, rank4, value,
-                                                  reassoc)
+                                                 reassoc)
           .getResult();
     };
     input = expand(input);
@@ -295,7 +295,8 @@ static mlir::LogicalResult tryLowerQuantConv(
     weightType = mlir::cast<mlir::RankedTensorType>(weight.getType());
     llvm::SmallVector<int64_t> outShape(resultType.getShape());
     outShape.insert(outShape.end() - 1, 1);
-    resultType = mlir::RankedTensorType::get(outShape, resultType.getElementType());
+    resultType =
+        mlir::RankedTensorType::get(outShape, resultType.getElementType());
   }
 
   input = toSigned8(rewriter, loc, context, input);
@@ -355,11 +356,11 @@ static mlir::LogicalResult tryLowerQuantConv(
     llvm::SmallVector<int64_t> collapsed(
         mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType())
             .getShape());
-    auto collapsedType = mlir::RankedTensorType::get(
-        collapsed, resultType.getElementType());
+    auto collapsedType =
+        mlir::RankedTensorType::get(collapsed, resultType.getElementType());
     llvm::SmallVector<mlir::ReassociationIndices> reassoc = {{0}, {1}, {2, 3}};
     acc = mlir::tensor::CollapseShapeOp::create(rewriter, loc, collapsedType,
-                                                 acc, reassoc)
+                                                acc, reassoc)
               .getResult();
   }
   rewriter.replaceOp(op, acc);
