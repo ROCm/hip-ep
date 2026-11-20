@@ -113,6 +113,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for PR, formatting, AI-disclosure, and co
 - Plugin design and authoring: [docs/design/plugin-interface.md](docs/design/plugin-interface.md), [docs/plugin_authoring.md](docs/plugin_authoring.md)
 - Windows and Linux setup: [docs/quick_start.md](docs/quick_start.md), [docs/quick_start_linux.md](docs/quick_start_linux.md)
 - Remote workflow: [docs/remote-dev-workflow.md](docs/remote-dev-workflow.md)
+- Windows performance toolkit (benchmarks, A/B, trace shim, RGP decoding): [docs/design/perf-toolkit.md](docs/design/perf-toolkit.md), [tools/perf-harness/README.md](tools/perf-harness/README.md)
 
 ## Non-negotiable invariants
 

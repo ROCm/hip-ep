@@ -1,0 +1,344 @@
+{
+  "sources": [
+    "Laguna-XS-2.1 decode, gfx1151 (121-token prompt, 32 tokens)",
+    "Laguna-XS-2.1 16K-token prefill, gfx1151"
+  ],
+  "families": {
+    "_Z20MatMulNBitsWMMA_NoZPILi128ELi128ELi4ELi4ELi8ELb1ELi32EEviiiPKDF16_iPKhS1_S1_iiPDF16_iii": {
+      "op": "matmul_nbits",
+      "share": 1.0,
+      "ops": {
+        "matmul_nbits": 160
+      }
+    },
+    "_Z20MatMulNBitsWMMA_NoZPILi256ELi128ELi4ELi2ELi6ELb0ELi32EEviiiPKDF16_iPKhS1_S1_iiPDF16_iii": {
+      "op": "matmul_nbits",
+      "share": 1.0,
+      "ops": {
+        "matmul_nbits": 4800
+      }
+    },
+    "_Z20MatMulNBitsWMMA_NoZPILi256ELi128ELi4ELi2ELi6ELb1ELi32EEviiiPKDF16_iPKhS1_S1_iiPDF16_iii": {
+      "op": "matmul_nbits",
+      "share": 1.0,
+      "ops": {
+        "matmul_nbits": 160
+      }
+    },
+    "_Z21MatMulNBitsWMMAX_NoZPILi128ELi128ELi2ELi4ELb0ELi32ELi116EEviiiPKDF16_iPKhS1_S1_iiPDF16_iii": {
+      "op": "matmul_nbits",
+      "share": 1.0,
+      "ops": {
+        "matmul_nbits": 600
+      }
+    },
+    "_Z21MatMulNBitsWMMAX_NoZPILi128ELi128ELi2ELi4ELb0ELi64ELi124EEviiiPKDF16_iPKhS1_S1_iiPDF16_iii": {
+      "op": "matmul_nbits",
+      "share": 1.0,
+      "ops": {
+        "matmul_nbits": 9480
+      }
+    },
+    "_Z21MatMulNBitsWMMAX_NoZPILi128ELi128ELi2ELi4ELb1ELi32ELi116EEviiiPKDF16_iPKhS1_S1_iiPDF16_iii": {
+      "op": "matmul_nbits",
+      "share": 1.0,
+      "ops": {
+        "matmul_nbits": 20
+      }
+    },
+    "_Z21MatMulNBitsWMMAX_NoZPILi128ELi128ELi2ELi4ELb1ELi64ELi124EEviiiPKDF16_iPKhS1_S1_iiPDF16_iii": {
+      "op": "matmul_nbits",
+      "share": 1.0,
+      "ops": {
+        "matmul_nbits": 2816
+      }
+    },
+    "_Z21MatMulNBitsWMMAX_NoZPILi128ELi128ELi2ELi4ELb1ELi64ELi94EEviiiPKDF16_iPKhS1_S1_iiPDF16_iii": {
+      "op": "matmul_nbits",
+      "share": 1.0,
+      "ops": {
+        "matmul_nbits": 64
+      }
+    },
+    "_Z21MatMulNBitsWMMAX_NoZPILi128ELi256ELi2ELi4ELb0ELi32ELi92EEviiiPKDF16_iPKhS1_S1_iiPDF16_iii": {
+      "op": "matmul_nbits",
+      "share": 1.0,
+      "ops": {
+        "matmul_nbits": 1920
+      }
+    },
+    "_Z21MatMulNBitsWMMAX_NoZPILi128ELi256ELi2ELi4ELb1ELi32ELi92EEviiiPKDF16_iPKhS1_S1_iiPDF16_iii": {
+      "op": "matmul_nbits",
+      "share": 1.0,
+      "ops": {
+        "matmul_nbits": 64
+      }
+    },
+    "_Z23gqa_flash_decode_kernelILi128ELi6EL7KvDtype0ELb1ELb1EEvPK6__halfPKNSt11conditionalIXeqT1_LS0_1EEaS1_E4typeES8_PKfSA_PfiiifPKiiiS3_i19FlashDecodeCopyArgs": {
+      "op": "gqa",
+      "share": 1.0,
+      "ops": {
+        "gqa": 620
+      }
+    },
+    "_Z23gqa_flash_decode_kernelILi128ELi8EL7KvDtype0ELb1ELb0EEvPK6__halfPKNSt11conditionalIXeqT1_LS0_1EEaS1_E4typeES8_PKfSA_PfiiifPKiiiS3_i19FlashDecodeCopyArgs": {
+      "op": "gqa",
+      "share": 1.0,
+      "ops": {
+        "gqa": 1860
+      }
+    },
+    "_Z24MatMulNBitsWMMAX_NoZP_CUILi64ELi64ELi2ELi2ELb1ELi32ELi129EEviiiPKDF16_iPKhS1_S1_iiPDF16_iii": {
+      "op": "matmul_nbits",
+      "share": 1.0,
+      "ops": {
+        "matmul_nbits": 396
+      }
+    },
+    "_Z30MatMulNBitsWMMA_SmallM_GroupedILi1ELi1ELi16ELi16ELi2ELb1ELb0EEviiPKDF16_PKiPKhiS1_PKviiS1_S3_S3_S3_iiPDF16_": {
+      "op": "qmoe",
+      "share": 1.0,
+      "ops": {
+        "qmoe": 2496
+      }
+    },
+    "_Z30MatMulNBitsWMMA_SmallM_GroupedILi1ELi1ELi16ELi16ELi2ELb1ELb1EEviiPKDF16_PKiPKhiS1_PKviiS1_S3_S3_S3_iiPDF16_": {
+      "op": "qmoe",
+      "share": 1.0,
+      "ops": {
+        "qmoe": 2496
+      }
+    },
+    "_Z30MatMulNBitsWMMA_SmallM_GroupedILi2ELi1ELi16ELi16ELi1ELb1ELb0EEviiPKDF16_PKiPKhiS1_PKviiS1_S3_S3_S3_iiPDF16_": {
+      "op": "qmoe",
+      "share": 1.0,
+      "ops": {
+        "qmoe": 2496
+      }
+    },
+    "_Z30MatMulNBitsWMMA_SmallM_GroupedILi2ELi1ELi16ELi16ELi1ELb1ELb1EEviiPKDF16_PKiPKhiS1_PKviiS1_S3_S3_S3_iiPDF16_": {
+      "op": "qmoe",
+      "share": 1.0,
+      "ops": {
+        "qmoe": 2496
+      }
+    },
+    "_ZN12_GLOBAL__N_128gqa_flash_prefill_v6x_kernelILi1ELi32ELi128ELb0ELi1ELi4ELb1EEEvPKDF16_S2_S2_PDF16_iiiiiiifS2_iiiS2_i": {
+      "op": "gqa",
+      "share": 1.0,
+      "ops": {
+        "gqa": 640
+      }
+    },
+    "_ZN12_GLOBAL__N_128gqa_flash_prefill_v6x_kernelILi1ELi32ELi128ELb1ELi1ELi4ELb1EEEvPKDF16_S2_S2_PDF16_iiiiiiifS2_iiiS2_i": {
+      "op": "gqa",
+      "share": 1.0,
+      "ops": {
+        "gqa": 1620
+      }
+    },
+    "_ZN12_GLOBAL__N_128gqa_flash_prefill_v6x_kernelILi1ELi32ELi128ELb1ELi4ELi1ELb1EEEvPKDF16_S2_S2_PDF16_iiiiiiifS2_iiiS2_i": {
+      "op": "gqa",
+      "share": 1.0,
+      "ops": {
+        "gqa": 300
+      }
+    },
+    "bucket_tokens": {
+      "op": "qmoe",
+      "share": 1.0,
+      "ops": {
+        "qmoe": 2496
+      }
+    },
+    "cast_f16_to_f32": {
+      "op": "cast",
+      "share": 1.0,
+      "ops": {
+        "cast": 25074
+      }
+    },
+    "cast_f32_to_f16": {
+      "op": "cast",
+      "share": 1.0,
+      "ops": {
+        "cast": 15372
+      }
+    },
+    "cast_int_to_int": {
+      "op": "cast",
+      "share": 1.0,
+      "ops": {
+        "cast": 126
+      }
+    },
+    "ew_bcast4d_fast": {
+      "op": "elementwise",
+      "share": 1.0,
+      "ops": {
+        "elementwise": 19908
+      }
+    },
+    "expand": {
+      "op": "expand",
+      "share": 1.0,
+      "ops": {
+        "expand": 5040
+      }
+    },
+    "gather_rows_vec": {
+      "op": "gather",
+      "share": 1.0,
+      "ops": {
+        "gather": 756
+      }
+    },
+    "gemm": {
+      "op": "matmul",
+      "share": 1.0,
+      "ops": {
+        "matmul": 4914
+      }
+    },
+    "gqa_flash_decode_reduce": {
+      "op": "gqa",
+      "share": 1.0,
+      "ops": {
+        "gqa": 2480
+      }
+    },
+    "kv_cache_append_vec": {
+      "op": "gqa",
+      "share": 1.0,
+      "ops": {
+        "gqa": 320
+      }
+    },
+    "kv_cache_concat_vec": {
+      "op": "gqa",
+      "share": 1.0,
+      "ops": {
+        "gqa": 8520
+      }
+    },
+    "matmul_nbits_gemv_dp4a": {
+      "op": "matmul_nbits",
+      "share": 1.0,
+      "ops": {
+        "matmul_nbits": 19966
+      }
+    },
+    "matmul_nbits_quant_act_i8": {
+      "op": "matmul_nbits",
+      "share": 1.0,
+      "ops": {
+        "matmul_nbits": 19966
+      }
+    },
+    "qmoe_build_row_tiles": {
+      "op": "qmoe",
+      "share": 1.0,
+      "ops": {
+        "qmoe": 2496
+      }
+    },
+    "qmoe_decode_fc1_dp4a": {
+      "op": "qmoe",
+      "share": 1.0,
+      "ops": {
+        "qmoe": 2418
+      }
+    },
+    "qmoe_decode_fc2_reduce_dp4a": {
+      "op": "qmoe",
+      "share": 1.0,
+      "ops": {
+        "qmoe": 2418
+      }
+    },
+    "qmoe_quant_act_i8": {
+      "op": "qmoe",
+      "share": 1.0,
+      "ops": {
+        "qmoe": 4836
+      }
+    },
+    "qmoe_reduce_sorted_pairs": {
+      "op": "qmoe",
+      "share": 1.0,
+      "ops": {
+        "qmoe": 2496
+      }
+    },
+    "qmoe_sigmoid_bias_route_wave": {
+      "op": "qmoe",
+      "share": 1.0,
+      "ops": {
+        "qmoe": 4914
+      }
+    },
+    "rms_norm": {
+      "op": "layernorm",
+      "share": 1.0,
+      "ops": {
+        "layernorm": 5086
+      }
+    },
+    "rms_norm_narrow": {
+      "op": "layernorm",
+      "share": 1.0,
+      "ops": {
+        "layernorm": 5120
+      }
+    },
+    "rope_half_rotated": {
+      "op": "rotary_emb",
+      "share": 1.0,
+      "ops": {
+        "rotary_emb": 10080
+      }
+    },
+    "skip_rms_norm_row": {
+      "op": "skip_layernorm",
+      "share": 1.0,
+      "ops": {
+        "skip_layernorm": 10080
+      }
+    },
+    "softplus_f32": {
+      "op": "softplus",
+      "share": 1.0,
+      "ops": {
+        "softplus": 5040
+      }
+    },
+    "swiglu": {
+      "op": "qmoe",
+      "share": 1.0,
+      "ops": {
+        "qmoe": 2496
+      }
+    },
+    "swishKernel": {
+      "op": "swish",
+      "share": 1.0,
+      "ops": {
+        "swish": 5040
+      }
+    },
+    "u4_prepack_padrow": {
+      "op": "matmul_nbits",
+      "share": 1.0,
+      "ops": {
+        "matmul_nbits": 17984
+      }
+    },
+    "where_nd": {
+      "op": "where",
+      "share": 1.0,
+      "ops": {
+        "where": 126
+      }
+    }
+  }
+}

@@ -1,0 +1,7 @@
+numpy>=2.0
+# Kernel-name demangling when llvm-cxxfilt is not on PATH; the decoder's
+# reference outputs were produced with it.
+itanium_demangler>=1.1
+# Test-only: cross-checks the decoder's own ELF reader.
+pyelftools>=0.29
+pytest>=8
