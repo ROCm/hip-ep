@@ -115,13 +115,12 @@ plus the selected space) is searched; later kernels with that key compile only
 the winning perfConfig, together in a second pool, and are not benchmarked
 again. The compiled binary is not reused, because each outlined kernel has its
 own symbol. `--autotune[=quick|full|exhaustive]`
-overrides the search space. A tuning type skips the shipped problem-cache
-LUT. `--problem-cache` / `HIP_ROCMLIR_PROBLEM_CACHE` still takes priority over
+overrides the search space. A given tuning type skips the shipped
+problem-cache LUT; with none given, the shipped LUT is consulted before the
+search. `--problem-cache` / `HIP_ROCMLIR_PROBLEM_CACHE` still takes priority over
 the search and replaces the shipped table. A repeated problem in the same
 compile reuses the in-session winner, then a miss searches the selected space.
-A provider artifact records `+autotune=<space>` and no `+lut=` fingerprint,
-because the provider does not pass an external table and a tuning type skips
-the shipped LUT.
+A provider artifact records `+autotune=<space>` only.
 `--dump-problem-cache <file.json>` writes that JSON after autotune, one
 point per unique problem and one config per distinct perfConfig. The flag
 requires autotune; `HIP_ROCMLIR_SKIP_BENCHMARKING` does not produce a dump.

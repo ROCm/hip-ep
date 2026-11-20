@@ -77,8 +77,9 @@ which is empty when `HIPDNN_EP_ROCMLIR` was off, the arch with an
 `+autotune=<space>` suffix when rocMLIR benchmarked perfConfigs
 (`gfx1151+autotune=quick`, `gfx1151+autotune=full`), and the arch alone when
 `HIP_ROCMLIR_SKIP_BENCHMARKING` compiled the default perfConfig (`gfx1151`).
-There is no `+lut=` fingerprint: a tuning type skips the shipped
-`tools/problem-cache/lut/*.fb`. `hip-rocmlir-compiler` still honors
+There is no `+lut=` fingerprint. A provided `HIPDNN_EP_ROCMLIR_AUTOTUNE`
+skips the shipped `tools/problem-cache/lut/*.fb`; when it is unset, the shipped
+table is consulted before the search. `hip-rocmlir-compiler` still honors
 `--problem-cache` / `HIP_ROCMLIR_PROBLEM_CACHE` ahead of the search. The
 provider does not read `HIP_ROCMLIR_PROBLEM_CACHE`. `hip-rocmlir-compiler` and
 the ONNX Runtime provider both read the skip variable: unset or `0`
