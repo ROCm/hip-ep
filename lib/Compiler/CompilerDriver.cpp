@@ -126,6 +126,8 @@ void dumpPreFusionIR(mlir::ModuleOp module,
   os << "// hip-rocmlir-fusion: arch=" << fuseOpts.arch
      << " gemm-gemm-accel-types="
      << llvm::join(fuseOpts.gemmGemmAccelTypes, ",")
+     << " standalone-elementwise="
+     << (fuseOpts.standaloneElementwise ? "true" : "false")
      << " int4-weights=" << (fuseOpts.int4Weights ? "true" : "false") << "\n";
   module->print(os);
 }
@@ -193,6 +195,11 @@ std::string rocMlirArtifactTarget() {
       if (!lut.empty())
         target += "+lut=" + lut;
     }
+    // The same holds for the kernel plan: without standalone elementwise
+    // kernels the leftover modules run as HIP ops, a different artifact.
+    if (!target.empty() &&
+        hip_env_is_on("HIPDNN_EP_ROCMLIR_NO_STANDALONE_ELEMENTWISE"))
+      target += "+no-standalone-ew";
     return target;
   }
 #endif
@@ -521,6 +528,10 @@ bool CompilerDriver::runMLIRPasses(
       std::vector<std::string> accelTypes = mlir::hip::getRocMlirGemmAccelTypes(
           *module.getContext(), fuseOpts.arch);
       fuseOpts.gemmGemmAccelTypes.assign(accelTypes.begin(), accelTypes.end());
+      // HIPDNN_EP_ROCMLIR_NO_STANDALONE_ELEMENTWISE=1 runs every elementwise
+      // module that no anchor takes as HIP ops, to compare the two paths.
+      fuseOpts.standaloneElementwise =
+          !hip_env_is_on("HIPDNN_EP_ROCMLIR_NO_STANDALONE_ELEMENTWISE");
       // Autotuning skips the perfConfigs under which rocMLIR cannot pack an
       // i4 filter; the default perfConfig is one of them for f32.
       mlir::hip::AutotuneSpace int4Space;
