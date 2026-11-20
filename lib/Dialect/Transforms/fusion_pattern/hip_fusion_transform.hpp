@@ -30,6 +30,7 @@
 
 #include "hip/Dialect/IR/HipDialect.h"
 
+#include "fusion_utils.hpp"
 #include "gelu_fusion.hpp"
 #include "linear_attention_group_fold.hpp"
 #include "patch_embed_conv_to_gemm.hpp"
@@ -666,30 +667,16 @@ createRequantizedLayoutOp(mlir::PatternRewriter &rewriter,
   auto resultType =
       mlir::cast<mlir::RankedTensorType>(q->getResult(0).getType());
 
+  mlir::Value newInit;
+  if (auto dps = mlir::dyn_cast<mlir::DestinationStyleOpInterface>(layout))
+    newInit = buildInitValue(rewriter, resultType, dps.getDpsInits()[0]);
+
   // The dequantized float is the only operand whose meaning changes. Whatever
   // else the op carries describes the layout -- a permutation, a reassociation,
   // an output extent -- and the rewrite moves the same elements, so all of it
   // carries over untouched.
-  llvm::SmallVector<mlir::Value> operands(layout->getOperands());
-  for (mlir::Value &operand : operands)
-    if (operand == dq.getResult(0))
-      operand = dq.getInput();
-
-  // Done after the substitution above rather than folded into it: the init is
-  // never the dequantized value, so the two never touch the same operand.
-  if (auto dps = mlir::dyn_cast<mlir::DestinationStyleOpInterface>(layout)) {
-    mlir::OpOperand &init = dps.getDpsInitsMutable()[0];
-    operands[init.getOperandNumber()] =
-        buildInitValue(rewriter, resultType, init.get());
-  }
-
-  // Built generically because the mechanism is not tied to one op: the name,
-  // the attributes and the layout operands are all taken from the matched op.
-  mlir::OperationState state(layout->getLoc(), layout->getName());
-  state.addOperands(operands);
-  state.addTypes(resultType);
-  state.addAttributes(layout->getAttrs());
-  results.push_back(rewriter.create(state)->getResult(0));
+  results.push_back(rebuildOnInputValue(rewriter, layout, dq.getResult(0),
+                                        dq.getInput(), newInit, resultType));
   return mlir::success();
 }
 

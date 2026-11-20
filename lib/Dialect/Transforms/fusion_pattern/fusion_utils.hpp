@@ -14,8 +14,10 @@
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/Value.h"
+#include "mlir/Interfaces/DestinationStyleOpInterface.h"
 
 #include "llvm/ADT/APFloat.h"
+#include "llvm/ADT/SmallVector.h"
 
 #include <optional>
 
@@ -131,6 +133,35 @@ inline std::optional<double> getScalarFloatConstant(mlir::Value value) {
   result->convert(llvm::APFloat::IEEEdouble(),
                   llvm::APFloat::rmNearestTiesToEven, &lostInfo);
   return result->convertToDouble();
+}
+
+/// a copy of op reading newInput wherever op reads oldInput, writing into
+/// newInit if op has a DPS init, and producing resultType
+///
+/// Every other operand and every attribute carries over, so the copy computes
+/// the same thing on the new input. op must have a single result and at most
+/// one DPS init.
+inline mlir::Value
+rebuildOnInputValue(mlir::PatternRewriter &rewriter, mlir::Operation *op,
+                    mlir::Value oldInput, mlir::Value newInput,
+                    mlir::Value newInit, mlir::Type resultType) {
+  llvm::SmallVector<mlir::Value> operands(op->getOperands());
+  for (mlir::Value &operand : operands)
+    if (operand == oldInput)
+      operand = newInput;
+
+  // Done after the substitution above rather than folded into it: the init is
+  // never the replaced input, so the two never touch the same operand.
+  if (auto dps = mlir::dyn_cast<mlir::DestinationStyleOpInterface>(op))
+    operands[dps.getDpsInitsMutable()[0].getOperandNumber()] = newInit;
+
+  // Built generically because the mechanism is not tied to one op: the name,
+  // the attributes and the remaining operands are all taken from op.
+  mlir::OperationState state(op->getLoc(), op->getName());
+  state.addOperands(operands);
+  state.addTypes(resultType);
+  state.addAttributes(op->getAttrs());
+  return rewriter.create(state)->getResult(0);
 }
 
 } // namespace fusion_transform
