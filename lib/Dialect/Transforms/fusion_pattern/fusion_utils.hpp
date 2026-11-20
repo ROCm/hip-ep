@@ -44,6 +44,14 @@ inline bool hasSingleValueUse(mlir::Value value, mlir::Operation *consumer) {
   return seen == consumer;
 }
 
+/// The op that defines `value` when it is an `OpTy` whose only value use is
+/// `consumer`.
+template <typename OpTy>
+OpTy singleUseDef(mlir::Value value, mlir::Operation *consumer) {
+  auto op = value.getDefiningOp<OpTy>();
+  return op && hasSingleValueUse(value, consumer) ? op : OpTy();
+}
+
 inline std::optional<llvm::APFloat>
 singleFloatValue(mlir::DenseElementsAttr attr) {
   if (!attr || attr.getNumElements() != 1 ||
