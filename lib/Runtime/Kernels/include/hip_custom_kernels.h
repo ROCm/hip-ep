@@ -1233,6 +1233,19 @@ HIP_KERNEL_API int hip_softmax_row_2d_fp32(void* stream, const void* input, void
 HIP_KERNEL_API int hip_softmax_row_2d_inplace(void* stream, void* data, int rows, int cols);
 HIP_KERNEL_API int hip_softmax_row_2d_inplace_fp32(void* stream, void* data, int rows, int cols);
 
+/* Last-axis softmax over [outer, R, C] scores with the scale and an id mask
+ * applied on the way in:
+ *   out[o,r,c] = softmax_c(row_ids[r] == col_ids[c] ? x[o,r,c] * scale : fill)
+ * The scaled value is rounded to the element type first. An id vector of
+ * length 1 broadcasts; any other length must be R (row_ids) or C (col_ids).
+ * elem_size_bytes: 2 for fp16, 4 for fp32. `input` may equal `output`.
+ * Returns -1 on invalid arguments. */
+HIP_KERNEL_API int hip_softmax_row_scaled_masked(
+    void* stream, const void* input, void* output, const int64_t* row_ids,
+    int64_t row_ids_len, const int64_t* col_ids, int64_t col_ids_len,
+    int64_t outer, int64_t R, int64_t C, float scale, float fill,
+    int elem_size_bytes);
+
 /* Column-wise softmax: fp32 input -> fp16 output.
  * Reads fp32 Score matrix (no fp16 overflow/inf), writes fp16 probabilities.
  * input_batch_stride is in float elements, output_batch_stride in half elements. */
