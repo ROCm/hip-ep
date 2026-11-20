@@ -181,7 +181,9 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
 
     // Per-tensor element sizes: an fp32 residual can carry fp16 skip, gamma
     // and output (the Casts around the norm folded away), which takes the
-    // _mixed runtime entry. Bias shares skip's type.
+    // _mixed runtime entry. Bias shares skip's type. Quantized outputs are
+    // an fp16-only contract, so a mixed-dtype norm that also asks for them
+    // is rejected rather than dropping the copy.
     auto elemBytes = [](Value v) -> unsigned {
       return cast<MemRefType>(v.getType()).getElementTypeBitWidth() / 8;
     };
@@ -191,8 +193,13 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
     const unsigned sumBytes = op.getOutputs().size() > 1
                                   ? elemBytes(op.getOutputs()[1])
                                   : elementSizeBytes;
-    if (skipBytes != elementSizeBytes || gammaBytes != elementSizeBytes ||
-        outBytes != elementSizeBytes || sumBytes != elementSizeBytes) {
+    const bool mixed =
+        skipBytes != elementSizeBytes || gammaBytes != elementSizeBytes ||
+        outBytes != elementSizeBytes || sumBytes != elementSizeBytes;
+    if (mixed && !op.getQuantOutputs().empty())
+      return op.emitOpError(
+          "quant_outputs require uniform fp16 skip-rms-norm operands");
+    if (mixed) {
       auto i64Const = [&](unsigned v) -> Value {
         return LLVM::ConstantOp::create(rewriter, loc, i64Type,
                                         rewriter.getI64IntegerAttr(v));
@@ -226,7 +233,21 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
       return success();
     }
 
-    // Runtime function signature (11 params)
+    auto quantOutputs = adaptor.getQuantOutputs();
+    Value aQuantPtr =
+        quantOutputs.empty()
+            ? nullPtr
+            : extractContiguousMemRefPtr(quantOutputs[0], rewriter, loc);
+    Value aScalePtr =
+        quantOutputs.empty()
+            ? nullPtr
+            : extractContiguousMemRefPtr(quantOutputs[1], rewriter, loc);
+    Value quantBlockSizeVal = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type,
+        rewriter.getI64IntegerAttr(
+            quantOutputs.empty() ? 0 : op.getQuantBlockSize()));
+
+    // Runtime function signature (14 params)
     SmallVector<Type> paramTypes = {
         ptrType, // state
         ptrType, // input
@@ -238,7 +259,10 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
         i64Type, // input_num_elements
         i64Type, // gamma_num_elements
         i64Type, // element_size_bytes
-        f32Type  // epsilon
+        f32Type, // epsilon
+        ptrType, // a_quant (may be nullptr)
+        ptrType, // a_scale (may be nullptr)
+        i64Type  // quant_block_size
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp =
@@ -252,7 +276,8 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
                                biasPtr,          outputPtr,
                                skipOutputPtr,    inputNumElements,
                                gammaNumElements, elementSizeBytesVal,
-                               epsilonVal};
+                               epsilonVal,       aQuantPtr,
+                               aScalePtr,        quantBlockSizeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
