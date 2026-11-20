@@ -17,6 +17,10 @@
 #include <cstdio>
 #include <string>
 
+#if HIPDNN_EP_TRACE_SHIM
+#include "trace_shim.h"
+#endif
+
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -84,6 +88,11 @@ RoctxApi loadRoctxApi() {
 
   if (roctxVerbose())
     std::fprintf(stderr, "[hip-ep roctx] enabled: %s\n", library);
+#if HIPDNN_EP_TRACE_SHIM
+  if (roctxVerbose())
+    std::fprintf(stderr, "[hip-ep roctx] trace shim: %s\n",
+                 hipdnn_ep_trace_shim_active() ? "active" : "idle");
+#endif
   return api;
 }
 
