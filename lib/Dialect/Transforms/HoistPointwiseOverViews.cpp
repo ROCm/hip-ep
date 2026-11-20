@@ -80,6 +80,10 @@ Operation *hoist(RewriterBase &rewriter, Operation *op,
   OpOperand *data = getDataOperand(dps);
   if (!data || data->get().getType() != resultType)
     return nullptr;
+  // The hoisted op also computes the elements the crop drops; an integer
+  // divide there may divide by zero, which the original graph never did.
+  if (isa<DivOp, ModOp>(op) && isa<IntegerType>(resultType.getElementType()))
+    return nullptr;
 
   // From the op's input back to the anchor's result.
   SmallVector<ElementMoveOpInterface> chain;
@@ -103,6 +107,15 @@ Operation *hoist(RewriterBase &rewriter, Operation *op,
       rootType.getNumElements() * kMaxExtraDenominator >
           resultType.getNumElements() *
               (kMaxExtraDenominator + kMaxExtraNumerator))
+    return nullptr;
+  // A float Mod has no rocMLIR lowering, and its HIP lowering takes at most
+  // four axes, so it must not move onto a wider anchor result.
+  if (isa<ModOp>(op) && rootType.getRank() > 4)
+    return nullptr;
+  // An anchor that needs split-K takes only linear epilogue ops; any other op
+  // would stay a kernel of its own, now over the uncropped result.
+  if (isAnchorOp(anchor) && reliesOnSplitK(anchor) &&
+      !isSplitKEpilogueOp(*op, DenseSet<Value>{data->get()}))
     return nullptr;
 
   // A set: after CSE, the op and a move can share one tensor.empty init.

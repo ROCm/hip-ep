@@ -19,8 +19,10 @@ into the convolution's epilogue.
 The "add" bias is the exporters' form of a bias: a bias-free ConvTranspose,
 then Add(Reshape([1,1,1,M] -> [1,M,1,1])), folded into the convolution's bias.
 Like the filter, the fold reads only constants at or below the importer's
-inline threshold; run with `XLNX_ABI_2_0_CLONE_EXTERNAL_DATA_THRESHOLD`
-raised to exercise it, otherwise the same graphs check the unfolded path.
+inline threshold (127 bytes by default). The one- and two-channel rows stay
+below it; the other rows exercise the fold only with
+`XLNX_ABI_2_0_CLONE_EXTERNAL_DATA_THRESHOLD` raised, and otherwise check the
+unfolded path.
 """
 
 import numpy as np
@@ -163,6 +165,12 @@ class TestConvTranspose:
             # Zero-padded phases, and phases over the padding limit.
             (4, 8, 3, 2, 1, [7, 7], True, True),
             (4, 8, 5, 4, 0, [6, 6], True, False),
+            # One or two channels keep every filter at or below the default
+            # inline threshold, so the decomposition and the bias fold run
+            # without raising it: equal, zero-padded and separate phases.
+            (1, 1, 4, 2, 1, [8, 8], True, False),
+            (1, 2, 3, 2, 1, [7, 7], True, False),
+            (1, 1, 5, 4, 0, [6, 6], True, False),
         ],
     )
     def test_conv_transpose_bias_add(

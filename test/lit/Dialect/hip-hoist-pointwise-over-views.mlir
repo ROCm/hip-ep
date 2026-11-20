@@ -19,6 +19,10 @@
 // 7. A cast would replay the views in another element type: stays.
 // 8. The op and the transpose share one tensor.empty init: moved.
 // 9. A function other than main_graph, which the fusion does not plan: stays.
+// 10. A sigmoid over a crop of a matmul that needs split-K, which takes only
+//     linear epilogue ops: stays.
+// 11. An integer divide over a crop would also divide the dropped elements:
+//     stays.
 // ============================================================================
 
 // RUN: hip-mlir-opt --split-input-file --hip-hoist-pointwise-over-views %s \
@@ -301,4 +305,43 @@ func.func @outlined(%ctx: !hip.context, %x: tensor<1x8x8x8xf16>)
       outs(%le : tensor<1x32x9x9xf16>) {alpha = 1.000000e-01 : f64}
       : tensor<1x32x9x9xf16>
   return %l : tensor<1x32x9x9xf16>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK: %[[M:.*]] = hip.matmul
+// CHECK: %[[R:.*]] = tensor.extract_slice %[[M]]
+// CHECK: hip.sigmoid({{.*}}) ins(%[[R]] : tensor<256x32xf16>)
+func.func @main_graph(%ctx: !hip.context, %x: tensor<384x2048xf16>,
+                      %y: tensor<2048x32xf16>) -> tensor<256x32xf16> {
+  %e = tensor.empty() : tensor<384x32xf16>
+  %mm = hip.matmul(%ctx) ins(%x, %y : tensor<384x2048xf16>, tensor<2048x32xf16>)
+      outs(%e : tensor<384x32xf16>) : tensor<384x32xf16>
+  %r = tensor.extract_slice %mm[0, 0] [256, 32] [1, 1]
+      : tensor<384x32xf16> to tensor<256x32xf16>
+  %se = tensor.empty() : tensor<256x32xf16>
+  %s = hip.sigmoid(%ctx) ins(%r : tensor<256x32xf16>)
+      outs(%se : tensor<256x32xf16>) : tensor<256x32xf16>
+  return %s : tensor<256x32xf16>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK: %[[M:.*]] = hip.matmul
+// CHECK: %[[R:.*]] = tensor.extract_slice %[[M]]
+// CHECK: hip.div({{.*}}) ins(%{{.*}}, %[[R]] : tensor<i32>, tensor<2x4xi32>)
+func.func @main_graph(%ctx: !hip.context, %x: tensor<3x8xi32>,
+                      %y: tensor<8x4xi32>) -> tensor<2x4xi32> {
+  %e = tensor.empty() : tensor<3x4xi32>
+  %mm = hip.matmul(%ctx) ins(%x, %y : tensor<3x8xi32>, tensor<8x4xi32>)
+      outs(%e : tensor<3x4xi32>) : tensor<3x4xi32>
+  %r = tensor.extract_slice %mm[0, 0] [2, 4] [1, 1]
+      : tensor<3x4xi32> to tensor<2x4xi32>
+  %one = hip.constant {value = dense<1> : tensor<i32>} : tensor<i32>
+  %de = tensor.empty() : tensor<2x4xi32>
+  %d = hip.div(%ctx) ins(%one, %r : tensor<i32>, tensor<2x4xi32>)
+      outs(%de : tensor<2x4xi32>) : tensor<2x4xi32>
+  return %d : tensor<2x4xi32>
 }
