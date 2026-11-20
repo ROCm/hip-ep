@@ -1693,7 +1693,7 @@ LogicalResult BatchNormOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
-// GroupNormOp: ins(input, scale, bias), outs(output)
+// GroupNormOp: ins(input, scale, bias), residual(r)?, outs(output)
 //===----------------------------------------------------------------------===//
 
 MutableOperandRange GroupNormOp::getDpsInitsMutable() {
@@ -1707,10 +1707,22 @@ void GroupNormOp::getEffects(
 }
 
 LogicalResult GroupNormOp::verify() {
-  SmallVector<Value> dataOperands{getInput(), getScale(), getBias(),
-                                  getOutput()};
+  SmallVector<Value> dataOperands{getInput(), getScale(), getBias()};
+  if (getResidual())
+    dataOperands.push_back(getResidual());
+  dataOperands.push_back(getOutput());
   if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/1)))
     return failure();
+  // The kernel reads the residual with the output's offsets.
+  if (getResidual()) {
+    auto residualType = cast<ShapedType>(getResidual().getType());
+    auto inputType = cast<ShapedType>(getInput().getType());
+    if (residualType.getShape() != inputType.getShape() ||
+        residualType.getElementType() != inputType.getElementType())
+      return emitOpError("residual type ")
+             << residualType << " must match the input shape and element type "
+             << inputType;
+  }
 
   auto rankedShape = [](Type t) -> std::optional<int64_t> {
     if (auto tensor = dyn_cast<RankedTensorType>(t))
@@ -1733,8 +1745,9 @@ LogicalResult GroupNormOp::verify() {
            << (inputRank ? *inputRank : -1);
   if (getGroups() <= 0)
     return emitOpError("groups must be positive");
-  if (getActivation() != 0 && getActivation() != 1)
-    return emitOpError("activation must be 0 (none) or 1 (SiLU)");
+  if (getActivation() < 0 || getActivation() > 3)
+    return emitOpError("activation must be 0 (none), 1 (SiLU), 2 (ReLU) or "
+                       "3 (LeakyReLU)");
   if (getChannelsLast() != 0 && getChannelsLast() != 1)
     return emitOpError("channels_last must be 0 (NCHW) or 1 (NHWC)");
 

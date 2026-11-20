@@ -1589,25 +1589,30 @@ def Hip_BatchNormOp : Hip_DpsOp_AutoReifyInfer<"batch_norm"> {
 }
 
 def Hip_GroupNormOp : Hip_DpsOp_AutoReifyInfer<"group_norm"> {
-  let summary = "com.microsoft GroupNorm (per-group mean/var, optional SiLU)";
+  let summary = "Group normalization with a fused residual and activation";
   let description = [{
-    Group normalization from the `com.microsoft` contrib operator:
+    Group normalization (the `com.microsoft` GroupNorm contrib operator, and
+    InstanceNormalization with `groups` equal to C) with an optional
+    epilogue:
 
-      y = gamma * (x - mean) / sqrt(variance + epsilon) + beta
+      y = act(gamma * (x - mean) / sqrt(variance + epsilon) + beta + residual)
 
     Channels are split into `groups` equal groups. Mean and variance are
     computed over each (N, group) slice. `gamma` and `beta` are per-channel
     and length C. `channels_last` 0 is NCHW (channel axis 1); 1 is NHWC
-    (channel axis rank-1). `activation` 0 is none; 1 applies SiLU after the
-    affine transform.
+    (channel axis rank-1).
+
+    `residual`, when present, has the type of `input`. `activation` 0 is
+    none, 1 SiLU, 2 ReLU, 3 LeakyReLU with slope `alpha`.
 
     Example:
     ```mlir
     hip.group_norm(%ctx)
         ins(%input, %scale, %bias :
             memref<1x8x4x4xf32, 1>, memref<8xf32, 1>, memref<8xf32, 1>)
+        residual(%r : memref<1x8x4x4xf32, 1>)
         outs(%output : memref<1x8x4x4xf32, 1>)
-        {activation = 1 : i64, channels_last = 0 : i64,
+        {activation = 2 : i64, channels_last = 0 : i64,
          epsilon = 1.000000e-05 : f32, groups = 4 : i64}
     ```
   }];
@@ -1617,11 +1622,13 @@ def Hip_GroupNormOp : Hip_DpsOp_AutoReifyInfer<"group_norm"> {
     Hip_TensorOrMemRef:$input,
     Hip_TensorOrMemRef:$scale,
     Hip_TensorOrMemRef:$bias,
+    Optional<Hip_TensorOrMemRef>:$residual,
     Hip_TensorOrMemRef:$output,
     I64Attr:$groups,
     DefaultValuedAttr<I64Attr, "0">:$activation,
     DefaultValuedAttr<I64Attr, "1">:$channels_last,
-    DefaultValuedAttr<F32Attr, "1.000000e-05">:$epsilon
+    DefaultValuedAttr<F32Attr, "1.000000e-05">:$epsilon,
+    DefaultValuedAttr<F32Attr, "0.01">:$alpha
   );
 
   let assemblyFormat = [{
@@ -1629,6 +1636,7 @@ def Hip_GroupNormOp : Hip_DpsOp_AutoReifyInfer<"group_norm"> {
         $input `,` $scale `,` $bias `:`
         type($input) `,` type($scale) `,` type($bias)
     `)`
+    (`residual` `(` $residual^ `:` type($residual) `)`)?
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];

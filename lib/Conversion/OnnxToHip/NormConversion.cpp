@@ -23,6 +23,10 @@
 //   - onnx.InstanceNormalization                        -> hip.instance_norm
 //   - onnx.BatchNormalization (inference)               -> hip.batch_norm
 //   - onnx.Custom(GroupNorm, com.microsoft)             -> hip.group_norm
+//   - onnx.GroupNormalization (per-channel, opset 21)   -> hip.group_norm
+//   - Relu / LeakyRelu / Add over a single-use InstanceNormalization or
+//     GroupNorm                                         -> hip.group_norm
+//     with a fused activation and residual
 //===----------------------------------------------------------------------===//
 
 #include "OnnxToHipUtils.h"
@@ -1510,6 +1514,54 @@ BatchNormToHip::matchAndRewrite(mlir::Operation *op,
 }
 
 //===----------------------------------------------------------------------===//
+// hip.group_norm builders shared by the GroupNorm and epilogue patterns
+//===----------------------------------------------------------------------===//
+
+/// Operands and attributes of a hip.group_norm. `residual` is null when there
+/// is none.
+struct GroupNormParams {
+  mlir::Value input;
+  mlir::Value scale;
+  mlir::Value bias;
+  mlir::Value residual;
+  int64_t groups = 0;
+  int64_t activation = 0;
+  int64_t channelsLast = 0;
+  float epsilon = 1.0e-05f;
+  float alpha = 0.01f;
+};
+
+/// Activation codes of hip.group_norm.
+constexpr int64_t kGroupNormActNone = 0;
+constexpr int64_t kGroupNormActSilu = 1;
+constexpr int64_t kGroupNormActRelu = 2;
+constexpr int64_t kGroupNormActLeakyRelu = 3;
+
+float epsilonOf(mlir::Operation *op) {
+  llvm::APFloat value(1.0e-05f);
+  if (auto attr = op->getAttrOfType<mlir::FloatAttr>("epsilon"))
+    value = attr.getValue();
+  bool losesInfo = false;
+  value.convert(llvm::APFloat::IEEEsingle(), llvm::APFloat::rmNearestTiesToEven,
+                &losesInfo);
+  return value.convertToFloat();
+}
+
+mlir::Value createGroupNorm(mlir::PatternRewriter &rewriter, mlir::Location loc,
+                            mlir::Value context, const GroupNormParams &p,
+                            mlir::RankedTensorType outputType) {
+  mlir::Value outputInit =
+      createEmptyTensor(rewriter, loc, outputType, p.input);
+  auto hipOp = mlir::hip::GroupNormOp::create(
+      rewriter, loc, context, p.input, p.scale, p.bias, p.residual, outputInit,
+      rewriter.getI64IntegerAttr(p.groups),
+      rewriter.getI64IntegerAttr(p.activation),
+      rewriter.getI64IntegerAttr(p.channelsLast),
+      rewriter.getF32FloatAttr(p.epsilon), rewriter.getF32FloatAttr(p.alpha));
+  return hipOp->getResult(0);
+}
+
+//===----------------------------------------------------------------------===//
 // onnx.Custom(GroupNorm, com.microsoft) -> hip.group_norm
 //===----------------------------------------------------------------------===//
 
@@ -1523,107 +1575,403 @@ BatchNormToHip::matchAndRewrite(mlir::Operation *op,
 ///   mean/var are per (N, group). activation 1 applies SiLU after the affine
 ///   transform. channels_last 0 is NCHW (channel axis 1); 1 is NHWC (last
 ///   axis).
+mlir::LogicalResult matchMsGroupNorm(mlir::Operation *op, GroupNormParams &p,
+                                     const char *&why) {
+  auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
+  if (!funcNameAttr || funcNameAttr.getValue() != "GroupNorm")
+    return why = "not a GroupNorm operation", mlir::failure();
+
+  auto domainAttr = op->getAttrOfType<mlir::StringAttr>("domain_name");
+  if (!domainAttr || domainAttr.getValue() != "com.microsoft")
+    return why = "domain must be com.microsoft for GroupNorm", mlir::failure();
+
+  if (op->getNumOperands() != 3 || op->getNumResults() != 1)
+    return why = "GroupNorm expects 3 operands (X, gamma, beta) and 1 result",
+           mlir::failure();
+
+  auto groupsAttr = op->getAttrOfType<mlir::IntegerAttr>("groups");
+  if (!groupsAttr)
+    return why = "GroupNorm requires groups", mlir::failure();
+  p.groups = groupsAttr.getValue().getSExtValue();
+  if (p.groups <= 0)
+    return why = "GroupNorm groups must be positive", mlir::failure();
+
+  auto activationAttr = op->getAttrOfType<mlir::IntegerAttr>("activation");
+  if (!activationAttr)
+    return why = "GroupNorm requires activation", mlir::failure();
+  p.activation = activationAttr.getValue().getSExtValue();
+  if (p.activation != kGroupNormActNone && p.activation != kGroupNormActSilu)
+    return why = "GroupNorm activation must be 0 (none) or 1 (SiLU)",
+           mlir::failure();
+
+  p.channelsLast = 1;
+  if (auto channelsLastAttr =
+          op->getAttrOfType<mlir::IntegerAttr>("channels_last"))
+    p.channelsLast = channelsLastAttr.getValue().getSExtValue();
+  if (p.channelsLast != 0 && p.channelsLast != 1)
+    return why = "GroupNorm channels_last must be 0 (NCHW) or 1 (NHWC)",
+           mlir::failure();
+
+  p.input = op->getOperand(0);
+  p.scale = op->getOperand(1);
+  p.bias = op->getOperand(2);
+
+  auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(p.input.getType());
+  if (!inputType || inputType.getRank() < 3)
+    return why = "GroupNorm requires ranked input of rank >= 3",
+           mlir::failure();
+
+  auto scaleType = mlir::dyn_cast<mlir::RankedTensorType>(p.scale.getType());
+  auto biasType = mlir::dyn_cast<mlir::RankedTensorType>(p.bias.getType());
+  if (!scaleType || scaleType.getRank() != 1 || !biasType ||
+      biasType.getRank() != 1)
+    return why = "GroupNorm gamma and beta must be 1-D of length C",
+           mlir::failure();
+
+  int64_t channelAxis = p.channelsLast ? inputType.getRank() - 1 : 1;
+  if (!inputType.isDynamicDim(channelAxis)) {
+    int64_t channels = inputType.getDimSize(channelAxis);
+    if (channels % p.groups != 0)
+      return why = "GroupNorm channel extent is not divisible by groups",
+             mlir::failure();
+    if (scaleType.hasStaticShape() && scaleType.getDimSize(0) != channels)
+      return why = "GroupNorm gamma length must equal the channel extent",
+             mlir::failure();
+    if (biasType.hasStaticShape() && biasType.getDimSize(0) != channels)
+      return why = "GroupNorm beta length must equal the channel extent",
+             mlir::failure();
+  }
+  p.epsilon = epsilonOf(op);
+  return mlir::success();
+}
+
 struct GroupNormToHip : public mlir::RewritePattern {
   GroupNormToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
 
   mlir::LogicalResult
   matchAndRewrite(mlir::Operation *op,
-                  mlir::PatternRewriter &rewriter) const override;
+                  mlir::PatternRewriter &rewriter) const override {
+    GroupNormParams p;
+    const char *why = "";
+    if (mlir::failed(matchMsGroupNorm(op, p, why)))
+      return rewriter.notifyMatchFailure(op, why);
+    auto ctxOrFailure = getContextArg(op, rewriter);
+    if (mlir::failed(ctxOrFailure))
+      return rewriter.notifyMatchFailure(op, "missing context argument");
+    rewriter.replaceOp(op,
+                       createGroupNorm(rewriter, op->getLoc(), *ctxOrFailure, p,
+                                       mlir::cast<mlir::RankedTensorType>(
+                                           op->getResult(0).getType())));
+    return mlir::success();
+  }
 };
 
-mlir::LogicalResult
-GroupNormToHip::matchAndRewrite(mlir::Operation *op,
-                                mlir::PatternRewriter &rewriter) const {
-  auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
-  if (!funcNameAttr || funcNameAttr.getValue() != "GroupNorm")
-    return rewriter.notifyMatchFailure(op, "not a GroupNorm operation");
+//===----------------------------------------------------------------------===//
+// onnx.GroupNormalization -> hip.group_norm (NCHW, no activation)
+//===----------------------------------------------------------------------===//
 
-  auto domainAttr = op->getAttrOfType<mlir::StringAttr>("domain_name");
-  if (!domainAttr || domainAttr.getValue() != "com.microsoft")
-    return rewriter.notifyMatchFailure(
-        op, "domain must be com.microsoft for GroupNorm");
-
+/// ONNX GroupNormalization (schema 21):
+///   inputs:  X (N,C,D1,...,Dn), scale (C), bias (C)
+///   attrs:   num_groups (required), epsilon (default 1e-5), stash_type
+///   output:  same shape as X
+///
+///   y = scale * (x - mean) / sqrt(variance + epsilon) + bias
+///   mean/var are per (N, group) over the group's channels and D1..Dn.
+///
+/// Schema 18 took scale and bias per group, not per channel. A scale whose
+/// length is num_groups (or cannot be told apart from it) is that form and
+/// stays unconverted unless num_groups equals C, where both readings agree.
+/// hip.group_norm reduces in fp32 for fp16/bf16 and fp64 for f64, which
+/// meets or exceeds every stash_type.
+mlir::LogicalResult matchGroupNormalization(mlir::Operation *op,
+                                            GroupNormParams &p,
+                                            const char *&why) {
   if (op->getNumOperands() != 3 || op->getNumResults() != 1)
-    return rewriter.notifyMatchFailure(
-        op, "GroupNorm expects 3 operands (X, gamma, beta) and 1 result");
+    return why = "GroupNormalization expects 3 operands (X, scale, bias) and "
+                 "1 result",
+           mlir::failure();
 
-  auto groupsAttr = op->getAttrOfType<mlir::IntegerAttr>("groups");
+  auto groupsAttr = op->getAttrOfType<mlir::IntegerAttr>("num_groups");
   if (!groupsAttr)
-    return rewriter.notifyMatchFailure(op, "GroupNorm requires groups");
-  int64_t groups = groupsAttr.getValue().getSExtValue();
-  if (groups <= 0)
-    return rewriter.notifyMatchFailure(op, "GroupNorm groups must be positive");
+    return why = "GroupNormalization requires num_groups", mlir::failure();
+  p.groups = groupsAttr.getValue().getSExtValue();
+  if (p.groups <= 0)
+    return why = "GroupNormalization num_groups must be positive",
+           mlir::failure();
 
-  auto activationAttr = op->getAttrOfType<mlir::IntegerAttr>("activation");
-  if (!activationAttr)
-    return rewriter.notifyMatchFailure(op, "GroupNorm requires activation");
-  int64_t activation = activationAttr.getValue().getSExtValue();
-  if (activation != 0 && activation != 1)
-    return rewriter.notifyMatchFailure(
-        op, "GroupNorm activation must be 0 (none) or 1 (SiLU)");
-
-  int64_t channelsLast = 1;
-  if (auto channelsLastAttr =
-          op->getAttrOfType<mlir::IntegerAttr>("channels_last"))
-    channelsLast = channelsLastAttr.getValue().getSExtValue();
-  if (channelsLast != 0 && channelsLast != 1)
-    return rewriter.notifyMatchFailure(
-        op, "GroupNorm channels_last must be 0 (NCHW) or 1 (NHWC)");
-
-  auto ctxOrFailure = getContextArg(op, rewriter);
-  if (mlir::failed(ctxOrFailure))
-    return rewriter.notifyMatchFailure(op, "missing context argument");
-  mlir::Value context = *ctxOrFailure;
-
-  mlir::Location loc = op->getLoc();
-  mlir::Value input = op->getOperand(0);
-  mlir::Value scale = op->getOperand(1);
-  mlir::Value bias = op->getOperand(2);
-
-  auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
+  p.input = op->getOperand(0);
+  p.scale = op->getOperand(1);
+  p.bias = op->getOperand(2);
+  auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(p.input.getType());
   if (!inputType || inputType.getRank() < 3)
-    return rewriter.notifyMatchFailure(
-        op, "GroupNorm requires ranked input of rank >= 3");
+    return why = "GroupNormalization requires ranked input of rank >= 3",
+           mlir::failure();
 
-  auto scaleType = mlir::dyn_cast<mlir::RankedTensorType>(scale.getType());
-  auto biasType = mlir::dyn_cast<mlir::RankedTensorType>(bias.getType());
+  auto scaleType = mlir::dyn_cast<mlir::RankedTensorType>(p.scale.getType());
+  auto biasType = mlir::dyn_cast<mlir::RankedTensorType>(p.bias.getType());
   if (!scaleType || scaleType.getRank() != 1 || !biasType ||
-      biasType.getRank() != 1)
-    return rewriter.notifyMatchFailure(
-        op, "GroupNorm gamma and beta must be 1-D of length C");
-
-  int64_t channelAxis = channelsLast ? inputType.getRank() - 1 : 1;
-  if (!inputType.isDynamicDim(channelAxis)) {
-    int64_t channels = inputType.getDimSize(channelAxis);
-    if (channels % groups != 0)
-      return rewriter.notifyMatchFailure(
-          op, "GroupNorm channel extent is not divisible by groups");
-    if (scaleType.hasStaticShape() && scaleType.getDimSize(0) != channels)
-      return rewriter.notifyMatchFailure(
-          op, "GroupNorm gamma length must equal the channel extent");
-    if (biasType.hasStaticShape() && biasType.getDimSize(0) != channels)
-      return rewriter.notifyMatchFailure(
-          op, "GroupNorm beta length must equal the channel extent");
-  }
-
-  llvm::APFloat epsValue(1.0e-05f);
-  if (auto epsAttr = op->getAttrOfType<mlir::FloatAttr>("epsilon"))
-    epsValue = epsAttr.getValue();
+      biasType.getRank() != 1 ||
+      scaleType.getElementType() != inputType.getElementType() ||
+      biasType.getElementType() != inputType.getElementType())
+    return why = "GroupNormalization scale and bias must be 1-D with X's "
+                 "element type",
+           mlir::failure();
 
   auto outputType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, input);
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  if (!outputType || outputType.getElementType() != inputType.getElementType())
+    return why = "GroupNormalization requires a ranked result of X's element "
+                 "type",
+           mlir::failure();
 
-  auto hipOp = mlir::hip::GroupNormOp::create(
-      rewriter, loc, context, input, scale, bias, outputInit,
-      rewriter.getI64IntegerAttr(groups),
-      rewriter.getI64IntegerAttr(activation),
-      rewriter.getI64IntegerAttr(channelsLast),
-      rewriter.getF32FloatAttr(epsValue.convertToFloat()));
-  rewriter.replaceOp(op, hipOp->getResult(0));
+  // Per-channel affine (schema 21) is required: lengths must equal C. With a
+  // dynamic C nothing proves that, and the kernel would read past scale and
+  // bias when the runtime C is larger, so a dynamic C is rejected.
+  auto isChannelLength = [&](mlir::RankedTensorType type) {
+    if (type.isDynamicDim(0) || inputType.isDynamicDim(1))
+      return false;
+    return type.getDimSize(0) == inputType.getDimSize(1);
+  };
+  if (!isChannelLength(scaleType) || !isChannelLength(biasType))
+    return why = "GroupNormalization scale and bias must be per channel "
+                 "(schema 21); a per-group affine (schema 18) is not "
+                 "supported",
+           mlir::failure();
+  if (!inputType.isDynamicDim(1) && inputType.getDimSize(1) % p.groups != 0)
+    return why = "GroupNormalization channel extent is not divisible by "
+                 "num_groups",
+           mlir::failure();
+
+  p.activation = kGroupNormActNone;
+  p.channelsLast = 0;
+  p.epsilon = epsilonOf(op);
   return mlir::success();
 }
+
+struct GroupNormalizationToHip : public mlir::RewritePattern {
+  GroupNormalizationToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.GroupNormalization", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override {
+    GroupNormParams p;
+    const char *why = "";
+    if (mlir::failed(matchGroupNormalization(op, p, why)))
+      return rewriter.notifyMatchFailure(op, why);
+    auto ctxOrFailure = getContextArg(op, rewriter);
+    if (mlir::failed(ctxOrFailure))
+      return rewriter.notifyMatchFailure(op, "missing context argument");
+    rewriter.replaceOp(op,
+                       createGroupNorm(rewriter, op->getLoc(), *ctxOrFailure, p,
+                                       mlir::cast<mlir::RankedTensorType>(
+                                           op->getResult(0).getType())));
+    return mlir::success();
+  }
+};
+
+//===----------------------------------------------------------------------===//
+// Relu / LeakyRelu / Add over a norm -> hip.group_norm with an epilogue
+//===----------------------------------------------------------------------===//
+
+/// InstanceNormalization is GroupNorm with one channel per group. Only a
+/// static C can become `groups`.
+mlir::LogicalResult matchInstanceNormAsGroupNorm(mlir::Value input,
+                                                 mlir::Value scale,
+                                                 mlir::Value bias,
+                                                 GroupNormParams &p) {
+  auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
+  if (!inputType || inputType.getRank() < 3 || inputType.isDynamicDim(1))
+    return mlir::failure();
+  for (mlir::Value v : {scale, bias}) {
+    auto type = mlir::dyn_cast<mlir::RankedTensorType>(v.getType());
+    if (!type || type.getRank() != 1 ||
+        type.getElementType() != inputType.getElementType() ||
+        (!type.isDynamicDim(0) &&
+         type.getDimSize(0) != inputType.getDimSize(1)))
+      return mlir::failure();
+  }
+  p.input = input;
+  p.scale = scale;
+  p.bias = bias;
+  p.groups = inputType.getDimSize(1);
+  p.activation = kGroupNormActNone;
+  p.channelsLast = 0;
+  return mlir::success();
+}
+
+/// Reads the norm that defines \p value, in ONNX form (not yet converted) or
+/// HIP form (already converted), as hip.group_norm parameters.
+mlir::LogicalResult matchNormProducer(mlir::Value value, GroupNormParams &p) {
+  mlir::Operation *def = value.getDefiningOp();
+  if (!def || def->getNumResults() != 1)
+    return mlir::failure();
+  llvm::StringRef name = def->getName().getStringRef();
+  const char *why = "";
+  if (name == "onnx.InstanceNormalization") {
+    if (def->getNumOperands() != 3 ||
+        mlir::failed(matchInstanceNormAsGroupNorm(
+            def->getOperand(0), def->getOperand(1), def->getOperand(2), p)))
+      return mlir::failure();
+    p.epsilon = epsilonOf(def);
+    return mlir::success();
+  }
+  if (name == "onnx.GroupNormalization")
+    return matchGroupNormalization(def, p, why);
+  if (name == "onnx.Custom")
+    return matchMsGroupNorm(def, p, why);
+  if (auto in = mlir::dyn_cast<mlir::hip::InstanceNormOp>(def)) {
+    if (mlir::failed(matchInstanceNormAsGroupNorm(in.getInput(), in.getScale(),
+                                                  in.getBias(), p)))
+      return mlir::failure();
+    p.epsilon = in.getEpsilon().convertToFloat();
+    return mlir::success();
+  }
+  if (auto gn = mlir::dyn_cast<mlir::hip::GroupNormOp>(def)) {
+    if (!mlir::isa<mlir::RankedTensorType>(gn.getInput().getType()))
+      return mlir::failure();
+    p.input = gn.getInput();
+    p.scale = gn.getScale();
+    p.bias = gn.getBias();
+    p.residual = gn.getResidual();
+    p.groups = gn.getGroups();
+    p.activation = gn.getActivation();
+    p.channelsLast = gn.getChannelsLast();
+    p.epsilon = gn.getEpsilon().convertToFloat();
+    p.alpha = gn.getAlpha().convertToFloat();
+    return mlir::success();
+  }
+  return mlir::failure();
+}
+
+/// Folds the elementwise consumer of an InstanceNormalization or GroupNorm
+/// into the norm's apply pass, so the normalized tensor is never written and
+/// re-read:
+///
+///   y = act(scale * (x - mean) * inv_std + bias + residual)
+///
+/// Roots and what they fold:
+///   Relu(norm)            activation ReLU
+///   LeakyRelu(norm)       activation LeakyReLU(alpha)
+///   Add(norm, r)          residual r (either operand order)
+///   Relu(Add(norm, r))    residual r and activation ReLU
+///
+/// The norm (and the Add, when folded) must have no other user, the norm must
+/// not already carry an activation, and r must have exactly the norm's type
+/// (no broadcasting). The norm may still be in ONNX form or already be
+/// hip.instance_norm / hip.group_norm, because the greedy driver can visit
+/// either first. InstanceNormalization becomes hip.group_norm with
+/// groups = C.
+///
+/// Before:
+///   %n = "onnx.InstanceNormalization"(%x, %s, %b) {epsilon = 1e-5 : f32}
+///   %a = "onnx.Add"(%n, %r)
+///   %y = "onnx.Relu"(%a)
+/// After:
+///   %y = hip.group_norm(%ctx) ins(%x, %s, %b) residual(%r) outs(%init)
+///          {activation = 2, channels_last = 0, groups = C, epsilon = 1e-5}
+///
+/// The benefit is above the plain Relu, LeakyRelu and Add conversions so this
+/// pattern claims the consumer before it becomes a standalone elementwise op.
+struct NormEpilogueToHip : public mlir::RewritePattern {
+  NormEpilogueToHip(mlir::MLIRContext *ctx, llvm::StringRef rootName)
+      : RewritePattern(rootName, /*benefit=*/2, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override {
+    if (op->getNumResults() != 1)
+      return rewriter.notifyMatchFailure(op, "expected one result");
+    auto resultType =
+        mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+    if (!resultType)
+      return rewriter.notifyMatchFailure(op, "expected a ranked result");
+
+    GroupNormParams p;
+    mlir::Operation *norm = nullptr;
+    // An Add between the activation and the norm, folded and erased too.
+    mlir::Operation *innerAdd = nullptr;
+    if (op->getName().getStringRef() == "onnx.Add") {
+      norm = matchResidualAdd(op, resultType, p);
+    } else {
+      if (op->getNumOperands() != 1)
+        return rewriter.notifyMatchFailure(op, "expected one operand");
+      mlir::Value x = op->getOperand(0);
+      mlir::Operation *def = x.getDefiningOp();
+      if (def && def->getName().getStringRef() == "onnx.Add" && x.hasOneUse()) {
+        norm = matchResidualAdd(def, resultType, p);
+        if (norm)
+          innerAdd = def;
+      }
+      if (!norm)
+        norm = matchFusableNorm(x, resultType, p);
+      if (norm) {
+        if (op->getName().getStringRef() == "onnx.Relu") {
+          p.activation = kGroupNormActRelu;
+        } else {
+          p.activation = kGroupNormActLeakyRelu;
+          p.alpha = 0.01f;
+          if (auto attr = op->getAttrOfType<mlir::FloatAttr>("alpha"))
+            p.alpha = static_cast<float>(attr.getValueAsDouble());
+        }
+      }
+    }
+    if (!norm)
+      return rewriter.notifyMatchFailure(
+          op, "operand is not a single-use norm with a same-type residual");
+
+    auto ctxOrFailure = getContextArg(op, rewriter);
+    if (mlir::failed(ctxOrFailure))
+      return rewriter.notifyMatchFailure(op, "missing context argument");
+    mlir::Location loc = rewriter.getFusedLoc({norm->getLoc(), op->getLoc()});
+    rewriter.replaceOp(
+        op, createGroupNorm(rewriter, loc, *ctxOrFailure, p, resultType));
+    if (innerAdd)
+      rewriter.eraseOp(innerAdd);
+    rewriter.eraseOp(norm);
+    return mlir::success();
+  }
+
+private:
+  /// The norm defining \p value if it can take an epilogue and \p value has
+  /// exactly \p resultType.
+  static mlir::Operation *matchFusableNorm(mlir::Value value,
+                                           mlir::RankedTensorType resultType,
+                                           GroupNormParams &p) {
+    if (value.getType() != resultType || !value.hasOneUse())
+      return nullptr;
+    if (mlir::failed(matchNormProducer(value, p)) ||
+        p.activation != kGroupNormActNone)
+      return nullptr;
+    return value.getDefiningOp();
+  }
+
+  /// Add(norm, r) or Add(r, norm) with r of the norm's type: fills
+  /// p.residual and returns the norm.
+  static mlir::Operation *matchResidualAdd(mlir::Operation *add,
+                                           mlir::RankedTensorType resultType,
+                                           GroupNormParams &p) {
+    if (add->getNumOperands() != 2 || add->getNumResults() != 1 ||
+        add->getResult(0).getType() != resultType)
+      return nullptr;
+    for (unsigned i : {0u, 1u}) {
+      mlir::Value normValue = add->getOperand(i);
+      mlir::Value residual = add->getOperand(1 - i);
+      if (residual.getType() != resultType)
+        continue;
+      GroupNormParams candidate;
+      mlir::Operation *norm =
+          matchFusableNorm(normValue, resultType, candidate);
+      if (!norm || candidate.residual)
+        continue;
+      candidate.residual = residual;
+      p = candidate;
+      return norm;
+    }
+    return nullptr;
+  }
+};
 
 } // namespace
 
@@ -1633,7 +1981,9 @@ void populateNormConversionPatterns(RewritePatternSet &patterns,
                BranchwiseRMSNormToHip, GatedRMSNormToHip, EngramGateToHip,
                SkipSimplifiedLayerNormToHip, SkipLayerNormToHip,
                EmbedLayerNormToHip, LayerNormToHip, InstanceNormToHip,
-               BatchNormToHip, GroupNormToHip>(ctx);
+               BatchNormToHip, GroupNormToHip, GroupNormalizationToHip>(ctx);
+  for (llvm::StringRef root : {"onnx.Relu", "onnx.LeakyRelu", "onnx.Add"})
+    patterns.add<NormEpilogueToHip>(ctx, root);
 }
 
 } // namespace hip
