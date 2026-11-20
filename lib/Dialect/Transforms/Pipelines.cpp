@@ -382,7 +382,8 @@ void mlir::hip::buildOnnxToHipPipelineTail(
 
 void mlir::hip::buildOnnxToHipPipelineHead(OpPassManager &pm,
                                            hipdnnHandle_t handle,
-                                           CompiledGraphMap output_graphs) {
+                                           CompiledGraphMap output_graphs,
+                                           bool convIntegerQuantConv) {
   // Pre-lowering ONNX-dialect simplifications (currently: CastLike -> Cast
   // + drop dead type-donor function arguments). Pure ONNX dialect; runs
   // BEFORE hip-add-context-arg so it operates in the original ONNX
@@ -445,7 +446,13 @@ void mlir::hip::buildOnnxToHipPipelineHead(OpPassManager &pm,
     pm.addPass(createCompileHipDNNGraphsPass(handle, std::move(output_graphs)));
   }
 
-  pm.addPass(createConvertOnnxToHipPass());
+  if (convIntegerQuantConv) {
+    ConvertOnnxToHipPassOptions options;
+    options.convIntegerQuantConv = true;
+    pm.addPass(createConvertOnnxToHipPass(options));
+  } else {
+    pm.addPass(createConvertOnnxToHipPass());
+  }
 
   // Fold constant-parameter BatchNorm into the producing convolutions while
   // the conv -> add -> batch_norm chain is still as converted: this head is
