@@ -66,9 +66,10 @@ existing `--convert-hip-to-llvm` pipeline.
 | ONNX / ORT Contrib | HIP | Backend |
 |---|---|---|
 | `LayerNormalization` | `hip.layer_norm` | custom HIP kernel |
-| `InstanceNormalization` | `hip.instance_norm` | custom HIP kernel |
+| `InstanceNormalization` | `hip.instance_norm` | `instance_norm_kernel.hip`; long rows use `group_norm_kernel.hip` |
 | `BatchNormalization` | `hip.batch_norm` | custom HIP kernel; inference only |
 | `GroupNorm` (`com.microsoft`) | `hip.group_norm` | `group_norm_kernel.hip` |
+| `GroupNormalization` (opset 21) | `hip.group_norm` | `group_norm_kernel.hip`; NCHW, per-channel scale and bias only |
 | `RMSNormalization` | `hip.rms_norm` | `rms_norm_kernel.hip` |
 | `SimplifiedLayerNormalization` | `hip.rms_norm` | `rms_norm_kernel.hip` |
 | `GridSample` | `hip.grid_sample` | custom HIP kernel |
@@ -160,7 +161,7 @@ runtime coverage.
 
 | ONNX | HIP | Backend |
 |---|---|---|
-| `Softmax` | `hip.miopen.softmax` | `hip_miopen_softmax`, custom HIP kernel |
+| `Softmax` | `hip.miopen.softmax` | `hip_miopen_softmax`, custom HIP kernel. Last axis only (normalized `axis == rank-1`); a missing `axis` is accepted for rank 2 only, where the opset defaults agree. f16/f32; the kernel also takes bf16, but the MorphiZen importer maps ONNX BFLOAT16 to f32 today |
 
 ### Element-wise Tensor Ops
 

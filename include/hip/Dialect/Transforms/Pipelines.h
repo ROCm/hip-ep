@@ -179,6 +179,25 @@ struct RocMlirFusionPipelineOptions
   ListOption<std::string> gemmGemmAccelTypes{
       *this, "gemm-gemm-accel-types",
       llvm::cl::desc("Gemm element types with matrix acceleration")};
+  Option<bool> standaloneElementwise{
+      *this, "standalone-elementwise",
+      llvm::cl::desc("Outline unclaimed elementwise modules as rocMLIR "
+                     "kernels of their own"),
+      llvm::cl::init(true)};
+  Option<bool> int4Weights{
+      *this, "int4-weights",
+      llvm::cl::desc("Take packed-int4 weight dequantizes into the kernel"),
+      llvm::cl::init(false)};
+  Option<bool> attention{
+      *this, "attention",
+      llvm::cl::desc("Merge gemm -> softmax -> gemm into one attention "
+                     "kernel"),
+      llvm::cl::init(true)};
+  Option<int64_t> attentionF32MinScoreBytes{
+      *this, "attention-f32-min-score-bytes",
+      llvm::cl::desc("Smallest f32 score matrix, in bytes, that attention "
+                     "merges; 0 keeps f32 attention unmerged"),
+      llvm::cl::init(0)};
   Option<std::string> report{
       *this, "report",
       llvm::cl::desc("Append the fusion report records to this file"),

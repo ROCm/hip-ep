@@ -37,19 +37,103 @@ namespace mlir::hip {
 
 namespace {
 
-enum class Decomposition { None, QLinearConv, QLinearMatMul, DequantizedConv };
+enum class Decomposition {
+  None,
+  QLinearConv,
+  QLinearMatMul,
+  DequantizedConv,
+  Int4Weights
+};
 
 void sortByBlockOrder(SmallVectorImpl<Operation *> &ops) {
   llvm::sort(ops,
              [](Operation *a, Operation *b) { return a->isBeforeInBlock(b); });
 }
 
+bool allEqual(ArrayAttr values, int64_t expected) {
+  return llvm::all_of(values, [&](Attribute a) {
+    return cast<IntegerAttr>(a).getInt() == expected;
+  });
+}
+
+// The weights operand that an anchor's kernel can read as packed int4: the
+// filter of a 1x1 convolution, or the B operand [K, N] of a matmul or gemm
+// that does not transpose it.
+OpOperand *getWeightOperand(Operation *anchor) {
+  if (auto conv = dyn_cast<ConvOp>(anchor)) {
+    if (conv.getGroup() != 1 || !allEqual(conv.getKernelShape(), 1) ||
+        !allEqual(conv.getStrides(), 1) || !allEqual(conv.getPads(), 0) ||
+        !allEqual(conv.getDilations(), 1))
+      return nullptr;
+    return &conv.getWeightsMutable();
+  }
+  if (auto matmul = dyn_cast<MatmulOp>(anchor))
+    return matmul.getTransB() == 0 ? &matmul.getBMutable() : nullptr;
+  if (auto gemm = dyn_cast<GemmOp>(anchor))
+    return gemm.getTransB() == 0 ? &gemm.getInputBMutable() : nullptr;
+  return nullptr;
+}
+
+// The weights dequantize that the kernel can read as 4-bit values: packed
+// INT4 (signless i8 storage) or UINT4 (ui8 storage) of a constant or an
+// argument. Its scale and zero point are per tensor, per output channel (a
+// filter's axis 0, B's axis 1), or, for B, per block of K along axis 0. Two
+// nibbles share a byte along the innermost dimension, so that extent is even.
+DequantizeLinearOp getInt4Weights(Operation *anchor) {
+  OpOperand *operand = getWeightOperand(anchor);
+  if (!operand)
+    return nullptr;
+  auto dq = operand->get().getDefiningOp<DequantizeLinearOp>();
+  if (!dq || !dq->hasOneUse() || !dq.getPackedInt4())
+    return nullptr;
+  bool filter = isa<ConvOp>(anchor);
+  auto weightType = dyn_cast<RankedTensorType>(dq.getResult(0).getType());
+  auto inputType = dyn_cast<RankedTensorType>(dq.getInput().getType());
+  if (!weightType || !inputType || !weightType.hasStaticShape() ||
+      weightType.getRank() != (filter ? 4 : 2) ||
+      weightType.getDimSize(1) % 2 != 0 ||
+      !isa<FloatType>(weightType.getElementType()))
+    return nullptr;
+  Type storage = inputType.getElementType();
+  if (!storage.isSignlessInteger(8) && !storage.isUnsignedInteger(8))
+    return nullptr;
+  int64_t channelAxis = filter ? 0 : 1;
+  int64_t channels = weightType.getDimSize(channelAxis);
+  int64_t blockSize = dq.getBlockSize();
+  SmallVector<int64_t> blockedShape;
+  if (blockSize != 0) {
+    int64_t depth = weightType.getDimSize(0);
+    if (filter || dq.getAxis() != 0 || blockSize < 0 || depth % blockSize != 0)
+      return nullptr;
+    blockedShape = {depth / blockSize, channels};
+  }
+  auto isParam = [&](Value value, Type elementType) {
+    auto type = dyn_cast<RankedTensorType>(value.getType());
+    if (!type || !type.hasStaticShape() || type.getElementType() != elementType)
+      return false;
+    if (blockSize != 0)
+      return type.getShape() == ArrayRef<int64_t>(blockedShape);
+    return type.getNumElements() == 1 ||
+           (type.getRank() == 1 && type.getDimSize(0) == channels &&
+            dq.getAxis() == channelAxis);
+  };
+  if (!isParam(dq.getScale(), weightType.getElementType()))
+    return nullptr;
+  if (Value zp = dq.getZeroPoint(); zp && !isParam(zp, storage))
+    return nullptr;
+  Value weights = dq.getInput();
+  if (!weights.getDefiningOp<ConstantOp>() && !isa<BlockArgument>(weights))
+    return nullptr;
+  return dq;
+}
+
 // The anchors and how each becomes the op that rocMLIR compiles. An i32
 // matmul or convolution has an exact HIP kernel; outlining it asks rocMLIR to
 // compile a non-quantized integer tosa op, which this pipeline does not
 // establish. The i32 accumulator of a quantized anchor is its init, not an
-// input.
-std::optional<Decomposition> getAnchorKind(Operation *op) {
+// input. With `int4Weights`, a float convolution, matmul or gemm of packed-int4
+// weights takes their dequantize into its kernel.
+std::optional<Decomposition> getAnchorKind(Operation *op, bool int4Weights) {
   if (auto conv = dyn_cast<QLinearConvOp>(op))
     return conv->getNumResults() == 1 && planQLinearConv(conv)
                ? std::optional(Decomposition::QLinearConv)
@@ -72,6 +156,8 @@ std::optional<Decomposition> getAnchorKind(Operation *op) {
     if (auto type = dyn_cast<TensorType>(operand.getType());
         type && !type.hasStaticShape())
       return std::nullopt;
+  if (int4Weights && getInt4Weights(op))
+    return Decomposition::Int4Weights;
   return Decomposition::None;
 }
 
@@ -824,12 +910,13 @@ RocMlirOp outline(const KernelParts &parts, bool elementwise,
 
 class AnchorPlanner {
 public:
-  explicit AnchorPlanner(Block &block) : block(block) {}
+  AnchorPlanner(Block &block, bool int4Weights)
+      : block(block), int4Weights(int4Weights) {}
 
   SmallVector<KernelPlan> plan() {
     SmallVector<KernelPlan> plans;
     for (Operation &op : block)
-      if (std::optional<Decomposition> kind = getAnchorKind(&op))
+      if (std::optional<Decomposition> kind = getAnchorKind(&op, int4Weights))
         plans.push_back({&op, *kind, {}, {}});
     for (KernelPlan &plan : plans)
       planEpilogue(plan);
@@ -1057,6 +1144,7 @@ private:
   }
 
   Block &block;
+  bool int4Weights;
   DenseSet<Operation *> taken;
 };
 
@@ -1067,6 +1155,108 @@ SmallVector<Operation *> getChain(Operation *anchor,
   SmallVector<Operation *> chain = {anchor};
   llvm::append_range(chain, epilogue);
   return chain;
+}
+
+// Splits the packed-int4 weights dequantize of a planned anchor into the ops
+// its kernel takes, which read the 4-bit weights, and returns them:
+//
+//   (dequantize(w, 1) - dequantize(zp, 1)) * scale
+//
+// The zero point is dequantized outside the kernel, once per inference: it is
+// broadcast over the weights, and rocMLIR cannot pack an i4 value that a
+// broadcast reads. Both differences are of small integers, so the result is
+// exactly the one rounding of (w - zp) * scale. Blocked weights [K, N] are
+// viewed as [K / bs, bs, N] for the broadcast of the [K / bs, N] parameters
+// and viewed back; the dequantize itself is per element.
+SmallVector<Operation *> rewriteInt4Weights(Operation *anchor,
+                                            RewriterBase &rewriter) {
+  DequantizeLinearOp dq = getInt4Weights(anchor);
+  OpOperand *operand = getWeightOperand(anchor);
+  Location loc = dq.getLoc();
+  Value ctx = anchor->getOperand(0);
+  auto weightType = cast<RankedTensorType>(dq.getResult(0).getType());
+  Type elementType = weightType.getElementType();
+  bool filter = isa<ConvOp>(anchor);
+  int64_t blockSize = dq.getBlockSize();
+  int64_t channels = weightType.getDimSize(filter ? 0 : 1);
+  rewriter.setInsertionPoint(dq);
+  auto scalarType = RankedTensorType::get({}, elementType);
+  Value one =
+      emitConstant(rewriter, loc,
+                   DenseElementsAttr::get(
+                       scalarType, rewriter.getFloatAttr(elementType, 1.0)));
+  auto dequantize = [&](Value input, RankedTensorType type) {
+    auto op = DequantizeLinearOp::create(
+        rewriter, loc, TypeRange{type}, ctx, input, one, Value(),
+        emitTensorEmpty(rewriter, loc, type), dq.getAxisAttr(),
+        rewriter.getI64IntegerAttr(0));
+    op.setPackedInt4(true);
+    return op;
+  };
+
+  // The shape the arithmetic runs in, and how a parameter broadcasts into
+  // it: a filter's [C] as [C, 1, 1, 1], B's [N] as [1, N], and B's blocked
+  // [K / bs, N] as [K / bs, 1, N].
+  RankedTensorType computeType = weightType;
+  if (blockSize != 0) {
+    int64_t depth = weightType.getDimSize(0);
+    computeType = RankedTensorType::get(
+        {depth / blockSize, blockSize, channels}, elementType);
+  }
+  auto broadcastable = [&](Value value) -> Value {
+    auto type = cast<RankedTensorType>(value.getType());
+    if (blockSize != 0) {
+      auto expanded = RankedTensorType::get({type.getDimSize(0), 1, channels},
+                                            type.getElementType());
+      return tensor::ExpandShapeOp::create(
+          rewriter, loc, expanded, value,
+          SmallVector<ReassociationIndices>{{0}, {1, 2}});
+    }
+    if (type.getRank() != 1 || type.getDimSize(0) != channels || channels == 1)
+      return value;
+    SmallVector<int64_t> shape(computeType.getRank(), 1);
+    shape[filter ? 0 : 1] = channels;
+    SmallVector<ReassociationIndices> groups = {
+        llvm::to_vector(llvm::seq<int64_t>(computeType.getRank()))};
+    return tensor::ExpandShapeOp::create(
+        rewriter, loc, RankedTensorType::get(shape, type.getElementType()),
+        value, groups);
+  };
+  SmallVector<ReassociationIndices> blockGroups = {{0, 1}, {2}};
+
+  SmallVector<Operation *> kernelOps;
+  DequantizeLinearOp weights = dequantize(dq.getInput(), weightType);
+  kernelOps.push_back(weights);
+  Value value = weights.getResult(0);
+  if (blockSize != 0) {
+    auto view = tensor::ExpandShapeOp::create(rewriter, loc, computeType, value,
+                                              blockGroups);
+    kernelOps.push_back(view);
+    value = view.getResult();
+  }
+  if (Value zp = dq.getZeroPoint()) {
+    auto zpType = cast<RankedTensorType>(zp.getType()).clone(elementType);
+    Value zpFloat = dequantize(zp, zpType).getResult(0);
+    auto sub = SubOp::create(rewriter, loc, TypeRange{computeType}, ctx, value,
+                             broadcastable(zpFloat),
+                             emitTensorEmpty(rewriter, loc, computeType));
+    kernelOps.push_back(sub);
+    value = sub.getResult(0);
+  }
+  auto mul = MulOp::create(rewriter, loc, TypeRange{computeType}, ctx, value,
+                           broadcastable(dq.getScale()),
+                           emitTensorEmpty(rewriter, loc, computeType));
+  kernelOps.push_back(mul);
+  value = mul.getResult(0);
+  if (blockSize != 0) {
+    auto back = tensor::CollapseShapeOp::create(rewriter, loc, weightType,
+                                                value, blockGroups);
+    kernelOps.push_back(back);
+    value = back.getResult();
+  }
+  rewriter.modifyOpInPlace(anchor, [&] { operand->set(value); });
+  rewriter.eraseOp(dq);
+  return kernelOps;
 }
 
 // Replaces a planned QLinear op or convolution of dequantizes with the integer
@@ -1148,7 +1338,7 @@ public:
     if (funcOp.getSymName() != "main_graph" || funcOp.isExternal())
       return;
     Block &block = funcOp.getBody().front();
-    AnchorPlanner planner(block);
+    AnchorPlanner planner(block, int4Weights);
     SmallVector<KernelPlan> plans = planner.plan();
     claimed = &planner.getTaken();
     rankOneShape = Value();
@@ -1177,8 +1367,16 @@ public:
         block.getOps<RocMlirElementwiseOp>());
     for (RocMlirElementwiseOp module : leftover) {
       if (outlinesAlone(module)) {
-        outlineElementwise(module, rewriter, counter);
-        continue;
+        module = peelBoundaryTransposes(module, rewriter);
+        if (!module)
+          continue;
+        module = absorbInputViews(module, rewriter);
+        if (!module)
+          continue;
+        if (outlinesAlone(module)) {
+          outlineElementwise(module, rewriter, counter);
+          continue;
+        }
       }
       rewriter.setInsertionPoint(module);
       inlineRocMlirElementwise(module, rewriter);
@@ -1196,15 +1394,19 @@ public:
     });
     if (remaining.wasInterrupted())
       return signalPassFailure();
+    if (attention)
+      fuseAttentionKernels(funcOp, counter, gemmGemmAccelTypes,
+                           attentionF32MinScoreBytes);
     fuseGemmGemmKernels(funcOp, counter, gemmGemmAccelTypes);
   }
 
 private:
   // A plan is checked on the IR as it is when its turn comes, since an
   // earlier kernel may have moved its readers. A QLinear op or a convolution
-  // of dequantizes is decomposed only after that check passes, so a declined
-  // op keeps its HIP kernel. Without the prologue modules a plan may still
-  // outline; they are then inlined back with the other leftovers.
+  // of dequantizes is decomposed, and int4 weights split, only after that
+  // check passes, so a declined op keeps its HIP kernels. Without the prologue
+  // modules a plan may still outline; they are then inlined back with the other
+  // leftovers.
   LogicalResult outlinePlan(KernelPlan &plan, IRRewriter &rewriter,
                             int &counter) {
     bool keepQdqOut =
@@ -1230,7 +1432,10 @@ private:
     }
 
     SmallVector<Operation *> chain;
-    if (plan.kind == Decomposition::None) {
+    if (plan.kind == Decomposition::Int4Weights) {
+      plan.prologue.insert_range(rewriteInt4Weights(plan.anchor, rewriter));
+      chain = getChain(plan.anchor, plan.epilogue);
+    } else if (plan.kind == Decomposition::None) {
       chain = getChain(plan.anchor, plan.epilogue);
     } else {
       chain = decompose(plan, rewriter);
@@ -1260,6 +1465,8 @@ private:
   // cannot store a result that only transposes a kernel argument (through
   // reshapes) next to other results; such a module stays on the host.
   bool outlinesAlone(RocMlirElementwiseOp module) const {
+    if (!standaloneElementwise)
+      return false;
     Block &body = module.getBody().front();
     int launches = 0;
     for (Operation &op : body.without_terminator()) {
@@ -1267,7 +1474,8 @@ private:
       // as HIP ops either way.
       if (!isSignlessSafeUnderUnsigned(&op))
         return false;
-      if (isa<tensor::EmptyOp>(op) || isTosaLowerableReshape(&op))
+      if (isa<tensor::EmptyOp>(op) || isTosaLowerableReshape(&op) ||
+          isLowerableSlice(&op))
         continue;
       if (!isTosaLowerableInKernel(&op) && !isTosaLowerableQdq(&op))
         return false;
@@ -1290,6 +1498,233 @@ private:
     auto yield = cast<YieldOp>(body.getTerminator());
     return yield.getValues().size() == 1 ||
            llvm::none_of(yield.getValues(), movesArgument);
+  }
+
+  // rocMLIR tiles an elementwise kernel over its flattened output, so a
+  // transpose that moves the innermost dimension makes one side of the kernel
+  // access memory with a stride. Such a transpose at the edge of a module
+  // runs as a HIP transpose instead, and the kernel keeps the layout that it
+  // computes in. A peeled result transpose (with the reshapes around it) is
+  // one that only the module results read; a peeled input transpose reads a
+  // module input through reshapes. Returns the module that remains, or null
+  // when its ops could not form one again and stay as HIP ops.
+  RocMlirElementwiseOp peelBoundaryTransposes(RocMlirElementwiseOp module,
+                                              IRRewriter &rewriter) {
+    Block &body = module.getBody().front();
+    Operation *yield = body.getTerminator();
+    DenseSet<Value> yielded(yield->operand_begin(), yield->operand_end());
+    // When the innermost dimension of the input or of the output is small,
+    // the tile still reads or writes a few contiguous streams, and the kernel
+    // beats a separate HIP transpose. The crossover goes with the element
+    // count, the same for f16, f32 and i8.
+    auto innermostAtLeast = [](Value value, int64_t elements) {
+      int64_t size = cast<ShapedType>(value.getType()).getShape().back();
+      return !ShapedType::isDynamic(size) && size >= elements;
+    };
+    auto movesInnermost = [&](TransposeOp transpose) {
+      ArrayAttr perm = transpose.getPerm();
+      int64_t last = static_cast<int64_t>(perm.size()) - 1;
+      if (last <= 0 || cast<IntegerAttr>(perm[last]).getInt() == last)
+        return false;
+      // The HIP transpose copies whole bytes, so a sub-byte element (an i1
+      // mask) stays in the kernel.
+      if (getElementTypeOrSelf(transpose.getInput().getType())
+              .getIntOrFloatBitWidth() < 8)
+        return false;
+      return innermostAtLeast(transpose.getInput(), peelMinInputElements) &&
+             innermostAtLeast(transpose->getResult(0), peelMinOutputElements);
+    };
+    auto storable = [&](Value value) {
+      auto type = dyn_cast<RankedTensorType>(value.getType());
+      if (!type || !type.hasStaticShape() || type.getRank() == 0)
+        return false;
+      if (auto intType = dyn_cast<IntegerType>(type.getElementType());
+          intType && intType.getWidth() > 32)
+        return false;
+      return yielded.contains(value) ||
+             isa_and_nonnull<DestinationStyleOpInterface>(
+                 value.getDefiningOp());
+    };
+
+    DenseSet<Operation *> peel;
+    for (TransposeOp transpose :
+         llvm::make_early_inc_range(body.getOps<TransposeOp>())) {
+      if (!movesInnermost(transpose))
+        continue;
+      // The reshapes between the transpose and what it reads.
+      SmallVector<Operation *> above;
+      Value source = transpose.getInput();
+      while (Operation *def = source.getDefiningOp()) {
+        if (!isTosaLowerableReshape(def))
+          break;
+        above.push_back(def);
+        source = def->getOperand(0);
+      }
+      bool readsInput = isa<BlockArgument>(source);
+
+      // The reshapes between the transpose and the yield, when only the yield
+      // reads the chain.
+      SmallVector<Operation *> below;
+      bool onlyYielded = true;
+      for (Operation *op = transpose;;) {
+        if (!op->use_empty() && llvm::all_of(op->getUsers(), [&](Operation *u) {
+              return u == yield;
+            }))
+          break;
+        if (!op->hasOneUse() ||
+            !isTosaLowerableReshape(*op->getUsers().begin())) {
+          onlyYielded = false;
+          break;
+        }
+        op = *op->getUsers().begin();
+        below.push_back(op);
+      }
+
+      bool peelsResult = onlyYielded && (readsInput || storable(source));
+      if (!peelsResult && !readsInput)
+        continue;
+      // A reshape that another module op also reads stays in the module, so
+      // the transpose gets its own copy of the reshapes it reads through.
+      if (llvm::any_of(above, [](Operation *op) { return !op->hasOneUse(); })) {
+        rewriter.setInsertionPoint(transpose);
+        Value copy = source;
+        SmallVector<Operation *> copies;
+        for (Operation *reshape : llvm::reverse(above)) {
+          IRMapping mapping;
+          mapping.map(reshape->getOperand(0), copy);
+          Operation *clone = rewriter.clone(*reshape, mapping);
+          copies.push_back(clone);
+          copy = clone->getResult(0);
+        }
+        rewriter.modifyOpInPlace(
+            transpose, [&] { transpose.getInputMutable().assign(copy); });
+        above = std::move(copies);
+      }
+      peel.insert(transpose);
+      peel.insert_range(above);
+      if (peelsResult)
+        peel.insert_range(below);
+    }
+    if (peel.empty())
+      return module;
+
+    // A remainder that saves no launch is inlined and runs as HIP ops. The
+    // HIP elementwise kernels cover f16 and f32; other types (an i8 Max, for
+    // one) may have none, so such a module keeps its transposes instead.
+    auto hipElementType = [](Type type) {
+      auto shaped = dyn_cast<ShapedType>(type);
+      return !shaped || shaped.getElementType().isF16() ||
+             shaped.getElementType().isF32();
+    };
+    SmallVector<Operation *> kept;
+    bool computes = false;
+    bool hipTypes = true;
+    int launches = 0;
+    for (Operation &op : body.without_terminator()) {
+      if (isa<tensor::EmptyOp>(op) || peel.contains(&op))
+        continue;
+      kept.push_back(&op);
+      if (isTosaLowerableReshape(&op) || isLowerableSlice(&op))
+        continue;
+      ++launches;
+      computes |= !isa<TransposeOp>(op);
+      hipTypes &= llvm::all_of(op.getOperandTypes(), hipElementType) &&
+                  llvm::all_of(op.getResultTypes(), hipElementType);
+    }
+    if (!computes || (launches < 2 && !hipTypes))
+      return module;
+
+    rewriter.setInsertionPoint(module);
+    inlineRocMlirElementwise(module, rewriter);
+    return groupIntoRocMlirElementwise(kept, rewriter);
+  }
+
+  static bool isLowerableSlice(Operation *op) {
+    auto slice = dyn_cast<tensor::ExtractSliceOp>(op);
+    return slice && isTosaLowerableSlice(slice);
+  }
+
+  // A slice that a module reads would run as a strided copy before the kernel.
+  // rocMLIR folds a static slice into the kernel's loads, so each module input
+  // that comes from a chain of such slices and static reshapes gets its own
+  // copy of that chain in the module, which then reads the chain's source.
+  // Another reader of the slice keeps the original. Returns the module that
+  // remains, or null when its ops could not form one again and stay as HIP
+  // ops.
+  RocMlirElementwiseOp absorbInputViews(RocMlirElementwiseOp module,
+                                        IRRewriter &rewriter) {
+    auto loadable = [](Value value) {
+      auto type = dyn_cast<RankedTensorType>(value.getType());
+      if (!type || !type.hasStaticShape() || type.getRank() == 0)
+        return false;
+      auto intType = dyn_cast<IntegerType>(type.getElementType());
+      return !intType || intType.getWidth() <= 32;
+    };
+    // A slice with SSA offsets, sizes or strides would read them as block
+    // arguments in the module, where they are no longer constants.
+    auto staticSlice = [](Operation *op) {
+      auto slice = dyn_cast<tensor::ExtractSliceOp>(op);
+      return slice && isTosaLowerableSlice(slice) &&
+             slice.getOffsets().empty() && slice.getSizes().empty() &&
+             slice.getStrides().empty();
+    };
+    // getKernelArgumentType views a ui8 Where condition that is a kernel
+    // argument as i8; behind an absorbed view the condition stays ui8, which
+    // rocMLIR's signless arithmetic rejects.
+    auto feedsCondition = [&](unsigned index) {
+      BlockArgument argument = module.getBody().front().getArgument(index + 1);
+      return llvm::any_of(argument.getUsers(), [&](Operation *user) {
+        auto where = dyn_cast<WhereOp>(user);
+        return where && where.getCondition() == argument;
+      });
+    };
+    SmallVector<std::pair<Value, SmallVector<Operation *>>> chains;
+    for (auto [index, input] : llvm::enumerate(module.getInputs())) {
+      if (feedsCondition(index))
+        continue;
+      SmallVector<Operation *> chain;
+      bool slices = false;
+      Value source = input;
+      while (Operation *def = source.getDefiningOp()) {
+        if (staticSlice(def))
+          slices = true;
+        else if (!isTosaLowerableReshape(def))
+          break;
+        chain.push_back(def);
+        source = def->getOperand(0);
+      }
+      if (slices && loadable(source))
+        chains.push_back({input, std::move(chain)});
+    }
+    if (chains.empty())
+      return module;
+
+    Block &body = module.getBody().front();
+    SmallVector<Operation *> ops;
+    for (Operation &op : body.without_terminator())
+      if (!isa<tensor::EmptyOp>(op))
+        ops.push_back(&op);
+    DenseSet<Operation *> inBody(ops.begin(), ops.end());
+
+    rewriter.setInsertionPoint(module);
+    SmallVector<std::pair<Value, Value>> replacements;
+    for (auto &[input, chain] : chains) {
+      Value copy = chain.back()->getOperand(0);
+      for (Operation *view : llvm::reverse(chain)) {
+        IRMapping mapping;
+        mapping.map(view->getOperand(0), copy);
+        Operation *clone = rewriter.clone(*view, mapping);
+        ops.push_back(clone);
+        copy = clone->getResult(0);
+      }
+      replacements.push_back({input, copy});
+    }
+    inlineRocMlirElementwise(module, rewriter);
+    for (auto [input, copy] : replacements)
+      rewriter.replaceUsesWithIf(input, copy, [&](OpOperand &use) {
+        return inBody.contains(use.getOwner());
+      });
+    return groupIntoRocMlirElementwise(ops, rewriter);
   }
 
   void outlineElementwise(RocMlirElementwiseOp module, IRRewriter &rewriter,

@@ -177,6 +177,27 @@ def OptimizeMemRefsPass : Pass<"hip-optimize-memrefs", "mlir::func::FuncOp"> {
   ];
 }
 
+def HoistPointwiseOverViewsPass
+    : Pass<"hip-hoist-pointwise-over-views", "mlir::func::FuncOp"> {
+  let summary = "Move pointwise ops above the views that follow an anchor";
+  let description = [{
+    A pointwise op that HIP-to-TOSA converts, whose other inputs are constant
+    scalars and whose result type is that of its one tensor input, maps each
+    element of that input on its own, so it commutes with ops that only move
+    elements. The pass looks only at the top-level block of main_graph, the
+    block that the anchor fusion plans. When that input is a chain of
+    single-use element-move ops (reshapes, transposes, slices) over the
+    single-use result of a gemm or convolution anchor, the op is rebuilt on
+    the anchor's result and the chain is replayed after it. The anchor fusion
+    then takes the op into the kernel's epilogue instead of running it as a
+    kernel of its own behind a view it cannot absorb, such as the crop after
+    a decomposed ConvTranspose. The op then also computes the elements that
+    the chain drops, so the anchor's result may have at most 50% more
+    elements than the op's input.
+  }];
+  let dependentDialects = ["mlir::tensor::TensorDialect"];
+}
+
 def RocMlirPrepareQuantPass
     : Pass<"hip-rocmlir-prepare-quant", "mlir::func::FuncOp"> {
   let summary = "Prepare the quantize trees of main_graph for rocMLIR kernels";
@@ -258,7 +279,10 @@ def FuseRocMlirAnchorPass
     QLinearConv, a QLinearMatMul and a convolution of dequantizes become
     integer anchors only when their kernel outlines; a declined op keeps its
     HIP kernel. A module that no anchor takes and that saves a launch stays
-    whole and becomes a rock.elementwise kernel. After the outline, a
+    whole and becomes a rock.elementwise kernel. After the outline, a gemm
+    kernel whose only result is softmaxed over the last axis merges with that
+    softmax and the gemm kernel that reads it as its A operand into one
+    attention kernel. Then a
     matmul or gemm kernel whose only result feeds the A operand of the next
     gemm merges into it when the gemm-elementwise-gemm shape gates pass.
     Only main_graph is changed. Run hip-rocmlir-prepare-quant and
@@ -272,7 +296,41 @@ def FuseRocMlirAnchorPass
                "Gemm element types (as printed, e.g. f16) that have matrix "
                "acceleration on the target. Both gemms of a "
                "gemm-elementwise-gemm kernel must read a listed type; an "
-               "empty list merges no pair.">
+               "empty list merges no pair.">,
+    Option<"standaloneElementwise", "standalone-elementwise", "bool",
+           /*default=*/"true",
+           "Outline an elementwise module that no anchor takes as a rocMLIR "
+           "kernel of its own. False inlines every such module, so its ops "
+           "run as HIP kernels.">,
+    Option<"peelMinInputElements", "peel-min-input-elements", "int64_t",
+           /*default=*/"8",
+           "A transpose at the edge of a standalone elementwise module leaves "
+           "the kernel only when its input innermost dimension has at least "
+           "this many elements.">,
+    Option<"peelMinOutputElements", "peel-min-output-elements", "int64_t",
+           /*default=*/"32",
+           "A transpose at the edge of a standalone elementwise module leaves "
+           "the kernel only when its output innermost dimension has at least "
+           "this many elements.">,
+    Option<"int4Weights", "int4-weights", "bool", /*default=*/"false",
+           "Take the packed-int4 weight dequantize of a 1x1 convolution, or "
+           "of the B operand of a matmul or gemm (per column or blocked along "
+           "K, signed or unsigned), into its kernel, which then reads the "
+           "4-bit weights. rocMLIR packs an i4 operand under only some "
+           "perfConfigs, so this needs autotuning, which skips the ones that "
+           "fail.">,
+    Option<"attention", "attention", "bool", /*default=*/"true",
+           "Merge a gemm kernel, the last-axis softmax of its result and the "
+           "gemm kernel that reads the softmax into one attention kernel, "
+           "when both gemms read a float type in gemm-gemm-accel-types (or "
+           "f32 with a score matrix larger than "
+           "attention-f32-min-score-bytes) and both head dims are at most "
+           "256.">,
+    Option<"attentionF32MinScoreBytes", "attention-f32-min-score-bytes",
+           "int64_t", /*default=*/"0",
+           "f32 attention merges only when its score matrix is larger than "
+           "this many bytes, normally the target's L2 cache size. 0 keeps "
+           "f32 attention unmerged.">
   ];
   let dependentDialects = [
     "mlir::arith::ArithDialect",
@@ -342,8 +400,20 @@ def DecomposeConvTransposePass
     The per-residue tap selection, spatial flip, and channel swap apply only
     to the filter, so they are constant-folded into fresh `hip.constant`s
     rather than emitted as ops -- TOSA has no strided slice to lower a tap
-    stride to. Reassembly is one strided `tensor.insert_slice` per residue,
-    which bufferizes to a `memref.subview` plus a copy.
+    stride to. When every residue shares a kernel shape and padding, their
+    filters are stacked on the output-channel axis into one convolution whose
+    result is viewed as [N, S0, S1, M, Ht0, Ht1] and transposed to
+    [N, M, Ht0, S0, Ht1, S1] (DepthToSpace); the anchor fusion folds that
+    transpose into the convolution's store. Residues whose tap counts differ
+    are zero-padded to the largest count when the padded filters cost at most
+    twice the real taps, and then take the same path. A constant bias is tiled
+    once per residue into the wide convolution. A single-use `hip.add` of a
+    per-channel constant after the op (`Add(y, Reshape(b))`, the exporters'
+    form of a bias) folds into that bias the same way, so an activation
+    behind it can reach the convolution's epilogue instead of becoming a
+    prologue of the next convolution. The other residues stay on one
+    convolution each, with the bias, and one strided `tensor.insert_slice`
+    each, which bufferizes to a `memref.subview` plus a copy.
 
     Rank-4 inputs must be statically shaped. A rank-3 input is expanded to
     rank 4 with a unit height so dynamic batch and width stay legal; the

@@ -1082,13 +1082,24 @@ bool RocMlirAutotuner::Impl::autotuneKernel(ModuleOp module,
     return false;
   }
 
-  const unsigned numConfigs = space->tuningRange.size();
-  std::vector<CompiledCandidate> candidates(numConfigs);
-  for (auto [index, tuningAttr] : llvm::enumerate(space->tuningRange)) {
-    llvm::SmallString<1024> perfConfig;
-    tuningAttr.getPerfConfigStr(perfConfig);
-    candidates[index].perfConfig = perfConfig.str().str();
+  // A split-K candidate adds its partial sums into a zero-filled output with
+  // atomics. The timing runs on separate device buffers, so it does not see
+  // where the graph places that output, and the atomics can be much slower
+  // there. Like MIGraphX, search split-K only when asked to.
+  static const bool searchSplitK = hip_env_is_on("HIPDNN_EP_ROCMLIR_SPLITK");
+  std::vector<CompiledCandidate> candidates;
+  for (bool allowSplitK : {searchSplitK, true}) {
+    for (auto tuningAttr : space->tuningRange) {
+      if (!allowSplitK && tuningAttr.getSplitKFactor() > 1)
+        continue;
+      llvm::SmallString<1024> perfConfig;
+      tuningAttr.getPerfConfigStr(perfConfig);
+      candidates.emplace_back().perfConfig = perfConfig.str().str();
+    }
+    if (!candidates.empty())
+      break;
   }
+  const unsigned numConfigs = static_cast<unsigned>(candidates.size());
 
   // The fallback path (deferCacheHits == false) compiles this kernel on its
   // own. The normal path queues every candidate and returns; one pool compiles

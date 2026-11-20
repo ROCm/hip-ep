@@ -570,6 +570,7 @@ void mlir::hip::buildRocMlirPipeline(
 void mlir::hip::addRocMlirFusionPasses(
     OpPassManager &pm, const FuseRocMlirAnchorPassOptions &fuseOptions,
     llvm::StringRef reportPath) {
+  pm.addNestedPass<func::FuncOp>(createHoistPointwiseOverViewsPass());
   pm.addNestedPass<func::FuncOp>(createRocMlirPrepareQuantPass());
   pm.addNestedPass<func::FuncOp>(createFuseRocMlirElementwisePass());
   pm.addNestedPass<func::FuncOp>(createFuseRocMlirAnchorPass(fuseOptions));
@@ -587,6 +588,10 @@ void mlir::hip::buildRocMlirFusionPipeline(
   fuseOptions.arch = options.arch;
   fuseOptions.gemmGemmAccelTypes.assign(options.gemmGemmAccelTypes.begin(),
                                         options.gemmGemmAccelTypes.end());
+  fuseOptions.standaloneElementwise = options.standaloneElementwise;
+  fuseOptions.int4Weights = options.int4Weights;
+  fuseOptions.attention = options.attention;
+  fuseOptions.attentionF32MinScoreBytes = options.attentionF32MinScoreBytes;
   addRocMlirFusionPasses(pm, fuseOptions, options.report);
 }
 
