@@ -3096,6 +3096,13 @@ void matmul_nbits_gemv_dp4a_shortk_kernel(
 
     float partial = 0.0f;
     if (active) {
+        // The cold weight read is issued before the activation loads it would
+        // otherwise queue behind: 11.9 vs 12.9 us at K=320 N=10240, timed with
+        // the quant kernel ahead of each call as at decode.
+        const uint4 b =
+            *reinterpret_cast<const uint4*>(B + n * (K / 2) + idx * 16);
+        const float sv = static_cast<float>(scales[n * k_blocks + grp]);
+        const int zv = zp ? static_cast<int>(zp[n * k_blocks + grp]) : 8;
         const int8_t* aq = a_qb + idx * 32;
         int a_lo[4], a_hi[4], a_sum = 0;
 #pragma unroll
@@ -3105,8 +3112,6 @@ void matmul_nbits_gemv_dp4a_shortk_kernel(
             a_sum = hipdnn_sudot4(a_lo[j], 0x01010101, a_sum);
             a_sum = hipdnn_sudot4(a_hi[j], 0x01010101, a_sum);
         }
-        const uint4 b =
-            *reinterpret_cast<const uint4*>(B + n * (K / 2) + idx * 16);
         const unsigned comp[4] = {b.x, b.y, b.z, b.w};
         int dot = 0;
 #pragma unroll
@@ -3115,9 +3120,7 @@ void matmul_nbits_gemv_dp4a_shortk_kernel(
             dot = hipdnn_sudot4(a_hi[j],
                                 static_cast<int>((comp[j] >> 4) & 0x0F0F0F0Fu), dot);
         }
-        const int zv = zp ? static_cast<int>(zp[n * k_blocks + grp]) : 8;
-        partial = a_scale[grp] * static_cast<float>(scales[n * k_blocks + grp]) *
-                  static_cast<float>(dot - a_sum * zv);
+        partial = a_scale[grp] * sv * static_cast<float>(dot - a_sum * zv);
     }
 
     // A column's lanes are not a power-of-two group, so its sum is gathered
