@@ -97,12 +97,14 @@ either: the `+lut=` fingerprint makes the load check fail.
 `HIPDNN_EP_ROCMLIR_NO_STANDALONE_ELEMENTWISE` adds a `+no-standalone-ew` suffix
 after those, because it changes which ops run as rocMLIR kernels
 (`gfx1151+autotune=quick+lut=0123456789abcdef+no-standalone-ew`).
+`HIPDNN_EP_ROCMLIR_NO_ATTENTION` adds `+no-attention` last, because whether
+attention was fused is baked into the code objects too.
 
 The model cache / EPContext identity is derived from the graph alone, so the EP
 refuses to load an artifact whose recorded value differs from the current one;
 delete the cache and recompile after changing GPUs, replacing a shipped LUT,
-or toggling either `HIPDNN_EP_ROCMLIR`, `HIP_ROCMLIR_SKIP_BENCHMARKING`, or
-`HIPDNN_EP_ROCMLIR_AUTOTUNE`. Compilation fails outright
+or toggling `HIPDNN_EP_ROCMLIR`, `HIP_ROCMLIR_SKIP_BENCHMARKING`,
+`HIPDNN_EP_ROCMLIR_AUTOTUNE`, or `HIPDNN_EP_ROCMLIR_NO_ATTENTION`. Compilation fails outright
 if autotune is on but no HIP device could be reached, so the suffix never
 claims tuning that did not happen.
 

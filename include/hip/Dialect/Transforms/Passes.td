@@ -279,7 +279,10 @@ def FuseRocMlirAnchorPass
     QLinearConv, a QLinearMatMul and a convolution of dequantizes become
     integer anchors only when their kernel outlines; a declined op keeps its
     HIP kernel. A module that no anchor takes and that saves a launch stays
-    whole and becomes a rock.elementwise kernel. After the outline, a
+    whole and becomes a rock.elementwise kernel. After the outline, a gemm
+    kernel whose only result is softmaxed over the last axis merges with that
+    softmax and the gemm kernel that reads it as its A operand into one
+    attention kernel. Then a
     matmul or gemm kernel whose only result feeds the A operand of the next
     gemm merges into it when the gemm-elementwise-gemm shape gates pass.
     Only main_graph is changed. Run hip-rocmlir-prepare-quant and
@@ -315,7 +318,19 @@ def FuseRocMlirAnchorPass
            "K, signed or unsigned), into its kernel, which then reads the "
            "4-bit weights. rocMLIR packs an i4 operand under only some "
            "perfConfigs, so this needs autotuning, which skips the ones that "
-           "fail.">
+           "fail.">,
+    Option<"attention", "attention", "bool", /*default=*/"true",
+           "Merge a gemm kernel, the last-axis softmax of its result and the "
+           "gemm kernel that reads the softmax into one attention kernel, "
+           "when both gemms read a float type in gemm-gemm-accel-types (or "
+           "f32 with a score matrix larger than "
+           "attention-f32-min-score-bytes) and both head dims are at most "
+           "256.">,
+    Option<"attentionF32MinScoreBytes", "attention-f32-min-score-bytes",
+           "int64_t", /*default=*/"0",
+           "f32 attention merges only when its score matrix is larger than "
+           "this many bytes, normally the target's L2 cache size. 0 keeps "
+           "f32 attention unmerged.">
   ];
   let dependentDialects = [
     "mlir::arith::ArithDialect",
