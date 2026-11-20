@@ -39,8 +39,13 @@ inline bool isContiguousRowMajor(ArrayRef<int64_t> shape,
   return true;
 }
 
+/// Bytes one element of \p type occupies in device memory. Sub-byte element
+/// types (e.g. i1) take one whole byte each: kernels and the LLVM lowering
+/// index them per byte, so buffers are never bit-packed.
+int64_t getElementStorageBytes(MemRefType type);
+
 /// Byte size for a fully-static memref type; returns 0 when any dim is dynamic.
-/// Uses llvm::divideCeil to correctly handle sub-byte element types (e.g. i1).
+/// Equals numElements * getElementStorageBytes(type).
 int64_t getStaticByteSize(MemRefType type);
 
 /// Emit arith ops for: llvm::alignTo(value, alignment).

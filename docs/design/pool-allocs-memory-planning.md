@@ -180,6 +180,8 @@ staticFactor × product(dynamic dimension SSA values)
 
 where `staticFactor` is the element byte width multiplied by all static dimensions.
 
+Static and dynamic sizes round each element up to whole bytes. A sub-byte element such as `i1` takes one byte, because kernels and the LLVM lowering index it per byte; bit-packing the buffer would let a mask write run into the next live buffer.
+
 With `lifetime-only=true`, each allocation forms a group. The pass assigns a
 group to the first slab whose existing groups have no overlapping member
 lifetimes, or creates a new slab. Groups in a slab share its base. The slab

@@ -105,14 +105,14 @@ static bool lifetimesOverlap(const AllocInfo &a, const AllocInfo &b) {
 
 /// Compile-time byte coefficient: element bytes times all static dimensions.
 /// For dynamic memrefs, multiplying this coefficient by the ordered dynamic
-/// size operands yields the runtime byte size.
+/// size operands yields the runtime byte size. Element bytes are rounded per
+/// element (an i1 takes a whole byte), matching getStaticByteSize.
 static int64_t staticFactorBytes(MemRefType type) {
   int64_t staticElems = 1;
   for (int64_t dim : type.getShape())
     if (!ShapedType::isDynamic(dim))
       staticElems *= dim;
-  return static_cast<int64_t>(
-      llvm::divideCeil(staticElems * type.getElementTypeBitWidth(), 8));
+  return staticElems * getElementStorageBytes(type);
 }
 
 /// Max-load lower bound: the peak sum of `sizeOf` over members live at a single

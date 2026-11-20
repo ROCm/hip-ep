@@ -291,6 +291,57 @@ func.func @dynamic_metadata(
   return %alloc1 : memref<?x8xf32>
 }
 
+// ===== Sub-byte (i1) buffers take one byte per element =====
+//
+// Causal-mask pattern: hip.less writes an i1 mask that hip.where reads while
+// writing a bf16 result, so both buffers are live together. Kernels store an
+// i1 as one byte, so the 64x64 mask needs 4096 bytes, not 4096 bits (512 B).
+// bf16 result (8192 B) at offset 0, mask at 8192 -> pool 12288. Bit-packed
+// sizing gave 8704 and let the mask write run past the end of the pool.
+//
+// CHECK-LABEL: func.func @i1_mask_one_byte_per_element
+// CHECK:         %[[SIZE:.*]] = arith.constant 12288 : index
+// CHECK:         %[[POOL:.*]] = hip.get_pool(%{{.*}}, %[[SIZE]]) : memref<?xi8>
+// CHECK-DAG:     %[[OFF_OUT:.*]] = arith.constant 0 : index
+// CHECK-DAG:     %[[OFF_MASK:.*]] = arith.constant 8192 : index
+// CHECK:         memref.view %[[POOL]][%[[OFF_MASK]]][] : memref<?xi8> to memref<64x64xi1>
+// CHECK:         memref.view %[[POOL]][%[[OFF_OUT]]][] : memref<?xi8> to memref<64x64xbf16>
+// CHECK:         return
+func.func @i1_mask_one_byte_per_element(
+    %ctx: !hip.context,
+    %rows: memref<64x1xi64>, %cols: memref<1x64xi64>,
+    %x: memref<bf16>, %y: memref<bf16>) -> memref<64x64xbf16> {
+  %mask = memref.alloc() : memref<64x64xi1>
+  hip.less(%ctx) ins(%rows, %cols : memref<64x1xi64>, memref<1x64xi64>)
+                 outs(%mask : memref<64x64xi1>)
+  %out = memref.alloc() : memref<64x64xbf16>
+  hip.where(%ctx) ins(%mask, %x, %y : memref<64x64xi1>, memref<bf16>, memref<bf16>)
+                  outs(%out : memref<64x64xbf16>)
+  return %out : memref<64x64xbf16>
+}
+
+// Dynamic shapes take the same rule through the per-allocation byte factor:
+// a ?x64 i1 mask needs n * 64 bytes. Bit-packed sizing gave n * 8.
+//
+// CHECK-LABEL: func.func @i1_mask_dynamic_one_byte_per_element
+// CHECK:         %[[C64:.*]] = arith.constant 64 : index
+// CHECK-NEXT:    arith.muli %{{.*}}, %[[C64]] : index
+// CHECK:         hip.get_pool
+// CHECK:         memref.view %{{.*}} : memref<?xi8> to memref<?x64xi1>
+// CHECK:         return
+func.func @i1_mask_dynamic_one_byte_per_element(
+    %ctx: !hip.context, %n: index,
+    %rows: memref<?x1xi64>, %cols: memref<1x64xi64>,
+    %x: memref<bf16>, %y: memref<bf16>) -> memref<?x64xbf16> {
+  %mask = memref.alloc(%n) : memref<?x64xi1>
+  hip.less(%ctx) ins(%rows, %cols : memref<?x1xi64>, memref<1x64xi64>)
+                 outs(%mask : memref<?x64xi1>)
+  %out = memref.alloc(%n) : memref<?x64xbf16>
+  hip.where(%ctx) ins(%mask, %x, %y : memref<?x64xi1>, memref<bf16>, memref<bf16>)
+                  outs(%out : memref<?x64xbf16>)
+  return %out : memref<?x64xbf16>
+}
+
 // ===== Retired-hack matrix (one test per pattern that the prior =========
 // hoist design needed a dedicated helper for) ============================
 //
