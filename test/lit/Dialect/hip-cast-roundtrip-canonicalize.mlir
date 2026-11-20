@@ -78,21 +78,21 @@ func.func @linear_resize(%ctx: !hip.context, %x: tensor<1x2x4x4xf16>)
 
 // A narrowing inner cast rounds, so the round trip is not exact.
 // CHECK-LABEL: func.func @narrowing_inner
-// CHECK: hip.cast{{.*}}tensor<1x8xf32>) outs({{.*}}tensor<1x8xf16>)
-// CHECK: hip.transpose{{.*}}tensor<1x8xf16>
-// CHECK: hip.cast{{.*}}tensor<8x1xf16>) outs({{.*}}tensor<8x1xf32>)
-func.func @narrowing_inner(%ctx: !hip.context, %x: tensor<1x8xf32>)
-    -> tensor<8x1xf32> {
-  %we = tensor.empty() : tensor<1x8xf16>
-  %w = hip.cast(%ctx) ins(%x : tensor<1x8xf32>)
-      outs(%we : tensor<1x8xf16>) {to = 10 : i64} : tensor<1x8xf16>
-  %te = tensor.empty() : tensor<8x1xf16>
-  %t = hip.transpose(%ctx) ins(%w : tensor<1x8xf16>)
-      outs(%te : tensor<8x1xf16>) {perm = [1, 0]} : tensor<8x1xf16>
-  %ye = tensor.empty() : tensor<8x1xf32>
-  %y = hip.cast(%ctx) ins(%t : tensor<8x1xf16>)
-      outs(%ye : tensor<8x1xf32>) {to = 1 : i64} : tensor<8x1xf32>
-  return %y : tensor<8x1xf32>
+// CHECK: hip.cast{{.*}}tensor<2x8xf32>) outs({{.*}}tensor<2x8xf16>)
+// CHECK: hip.transpose{{.*}}tensor<2x8xf16>
+// CHECK: hip.cast{{.*}}tensor<8x2xf16>) outs({{.*}}tensor<8x2xf32>)
+func.func @narrowing_inner(%ctx: !hip.context, %x: tensor<2x8xf32>)
+    -> tensor<8x2xf32> {
+  %we = tensor.empty() : tensor<2x8xf16>
+  %w = hip.cast(%ctx) ins(%x : tensor<2x8xf32>)
+      outs(%we : tensor<2x8xf16>) {to = 10 : i64} : tensor<2x8xf16>
+  %te = tensor.empty() : tensor<8x2xf16>
+  %t = hip.transpose(%ctx) ins(%w : tensor<2x8xf16>)
+      outs(%te : tensor<8x2xf16>) {perm = [1, 0]} : tensor<8x2xf16>
+  %ye = tensor.empty() : tensor<8x2xf32>
+  %y = hip.cast(%ctx) ins(%t : tensor<8x2xf16>)
+      outs(%ye : tensor<8x2xf32>) {to = 1 : i64} : tensor<8x2xf32>
+  return %y : tensor<8x2xf32>
 }
 
 // The f32 resize result has another reader, so the f32 resize must stay.
@@ -119,39 +119,39 @@ func.func @multi_use(%ctx: !hip.context, %x: tensor<1x2x4x4xf16>)
 // The outer cast goes to bf16, not back to the f16 source.
 // CHECK-LABEL: func.func @other_outer_type
 // CHECK: hip.cast
-// CHECK: hip.transpose{{.*}}tensor<1x8xf32>
+// CHECK: hip.transpose{{.*}}tensor<2x8xf32>
 // CHECK: hip.cast
-func.func @other_outer_type(%ctx: !hip.context, %x: tensor<1x8xf16>)
-    -> tensor<8x1xbf16> {
-  %we = tensor.empty() : tensor<1x8xf32>
-  %w = hip.cast(%ctx) ins(%x : tensor<1x8xf16>)
-      outs(%we : tensor<1x8xf32>) {to = 1 : i64} : tensor<1x8xf32>
-  %te = tensor.empty() : tensor<8x1xf32>
-  %t = hip.transpose(%ctx) ins(%w : tensor<1x8xf32>)
-      outs(%te : tensor<8x1xf32>) {perm = [1, 0]} : tensor<8x1xf32>
-  %ye = tensor.empty() : tensor<8x1xbf16>
-  %y = hip.cast(%ctx) ins(%t : tensor<8x1xf32>)
-      outs(%ye : tensor<8x1xbf16>) {to = 16 : i64} : tensor<8x1xbf16>
-  return %y : tensor<8x1xbf16>
+func.func @other_outer_type(%ctx: !hip.context, %x: tensor<2x8xf16>)
+    -> tensor<8x2xbf16> {
+  %we = tensor.empty() : tensor<2x8xf32>
+  %w = hip.cast(%ctx) ins(%x : tensor<2x8xf16>)
+      outs(%we : tensor<2x8xf32>) {to = 1 : i64} : tensor<2x8xf32>
+  %te = tensor.empty() : tensor<8x2xf32>
+  %t = hip.transpose(%ctx) ins(%w : tensor<2x8xf32>)
+      outs(%te : tensor<8x2xf32>) {perm = [1, 0]} : tensor<8x2xf32>
+  %ye = tensor.empty() : tensor<8x2xbf16>
+  %y = hip.cast(%ctx) ins(%t : tensor<8x2xf32>)
+      outs(%ye : tensor<8x2xbf16>) {to = 16 : i64} : tensor<8x2xbf16>
+  return %y : tensor<8x2xbf16>
 }
 
 // An int to float widening is not a float widening.
 // CHECK-LABEL: func.func @int_source
 // CHECK: hip.cast
-// CHECK: hip.transpose{{.*}}tensor<1x8xf32>
+// CHECK: hip.transpose{{.*}}tensor<2x8xf32>
 // CHECK: hip.cast
-func.func @int_source(%ctx: !hip.context, %x: tensor<1x8xi16>)
-    -> tensor<8x1xi16> {
-  %we = tensor.empty() : tensor<1x8xf32>
-  %w = hip.cast(%ctx) ins(%x : tensor<1x8xi16>)
-      outs(%we : tensor<1x8xf32>) {to = 1 : i64} : tensor<1x8xf32>
-  %te = tensor.empty() : tensor<8x1xf32>
-  %t = hip.transpose(%ctx) ins(%w : tensor<1x8xf32>)
-      outs(%te : tensor<8x1xf32>) {perm = [1, 0]} : tensor<8x1xf32>
-  %ye = tensor.empty() : tensor<8x1xi16>
-  %y = hip.cast(%ctx) ins(%t : tensor<8x1xf32>)
-      outs(%ye : tensor<8x1xi16>) {to = 5 : i64} : tensor<8x1xi16>
-  return %y : tensor<8x1xi16>
+func.func @int_source(%ctx: !hip.context, %x: tensor<2x8xi16>)
+    -> tensor<8x2xi16> {
+  %we = tensor.empty() : tensor<2x8xf32>
+  %w = hip.cast(%ctx) ins(%x : tensor<2x8xi16>)
+      outs(%we : tensor<2x8xf32>) {to = 1 : i64} : tensor<2x8xf32>
+  %te = tensor.empty() : tensor<8x2xf32>
+  %t = hip.transpose(%ctx) ins(%w : tensor<2x8xf32>)
+      outs(%te : tensor<8x2xf32>) {perm = [1, 0]} : tensor<8x2xf32>
+  %ye = tensor.empty() : tensor<8x2xi16>
+  %y = hip.cast(%ctx) ins(%t : tensor<8x2xf32>)
+      outs(%ye : tensor<8x2xi16>) {to = 5 : i64} : tensor<8x2xi16>
+  return %y : tensor<8x2xi16>
 }
 
 // A dynamic dim stays: the rebuilt init would need its extent.
