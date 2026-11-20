@@ -111,6 +111,14 @@ CPU time measures wall-clock time from `OpProfileScope` construction to destruct
 
 Use the CPU column as a diagnostic: if an op that should be fully async shows >1ms CPU time, look for synchronization calls in its code path.
 
+### Family filter (`HIPDNN_EP_PERF_OPS`)
+
+`HIPDNN_EP_PERF_OPS=<op>[,<op>...]` turns the profiler on (it implies `HIPDNN_EP_PERF`) but times only the named `OP_PROFILE` families. Each selected call gets its own start and end marker instead of differencing against the previous op's marker, because the previous marker may belong to an unprofiled op whose GPU time would otherwise be charged to the selected one. The `[PERF]` table prints GPU milliseconds with three decimals in this mode, since a filtered run exists to measure a few families' per-step time precisely. Throughput from such a run is not valid. `tools/perf-harness` (`hipep_perf bench tps --perf-ops`) runs one process per family and feeds the result to its SQTT calibration.
+
+### Host timeline (`HIPDNN_EP_HOST_TIMELINE`)
+
+`HIPDNN_EP_HOST_TIMELINE=<prefix>` writes host timestamps without adding any synchronization, so it is usable during timed runs. The EP appends one row per Compute (entry, after input marshal, after `inference_compute`, exit) to `<prefix>.ep.<pid>.csv` from `MlirCustomOp`, and the runtime appends the entry and exit of every per-Compute stream sync to `<prefix>.sync.<pid>.csv` from `hipdnn_ep_stream_sync`. Both use the `op_profile_us_since_epoch` steady-clock axis, so they join into launch time versus sync wait per Compute. Rows are buffered and written in batches of 256 and at runtime teardown (`hipdnn_ep_state_cleanup`), because static destructors are not guaranteed to run in the JIT'd runtime. It is independent of `HIPDNN_EP_PERF`.
+
 ## File layout
 
 | File | Role |

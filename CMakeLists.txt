@@ -162,6 +162,17 @@ if(HIPDNN_EP_LOAD_KERNEL_DLLS AND NOT HIPDNN_EP_LINK_HIP_HOST)
     "(LlvmIrJit::detectCustomKernelArch needs hipGetDeviceProperties).")
 endif()
 
+# Profiling-only trace shim (lib/Runtime/trace_shim.cpp) for tools/perf-harness:
+# an in-process HIP activity tracer and ROCTx sink linked into the EP host DLL.
+# OFF leaves the EP DLL, runtime.bc and the custom-kernel DLLs untouched; never
+# turn it on for a build that is shipped or used for timed measurements.
+option(HIPDNN_EP_ENABLE_TRACE_SHIM
+  "Build the profiling-only trace shim into the EP host DLL (never for shipped builds)"
+  OFF)
+if(HIPDNN_EP_ENABLE_TRACE_SHIM AND BUILD_MOCK_RUNTIME)
+  message(FATAL_ERROR "HIPDNN_EP_ENABLE_TRACE_SHIM requires the real HIP runtime")
+endif()
+
 if(HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS)
   message(STATUS "Native artifacts: ON")
   add_compile_definitions(HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS=1)

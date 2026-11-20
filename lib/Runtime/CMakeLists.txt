@@ -601,6 +601,27 @@ target_include_directories(hipdnn-ep-tls PUBLIC
 # own copy of this lib.
 target_compile_definitions(hipdnn-ep-tls PRIVATE HIPDNN_EP_RT_NO_EXPORT)
 
+# Profiling-only trace shim (see the option in the top-level CMakeLists.txt).
+# It lives in this archive so the JIT host and native-model paths both carry
+# it, and roctx_shim.cpp references it so the linker keeps its object (and the
+# roctx* exports it defines). It reaches HIP only through GetProcAddress, so it
+# needs the headers but adds no link dependency.
+if(HIPDNN_EP_ENABLE_TRACE_SHIM)
+  if(NOT WIN32)
+    message(FATAL_ERROR "HIPDNN_EP_ENABLE_TRACE_SHIM is Windows-only")
+  endif()
+  target_sources(hipdnn-ep-tls PRIVATE trace_shim.cpp)
+  target_compile_definitions(hipdnn-ep-tls PRIVATE HIPDNN_EP_TRACE_SHIM=1
+                                                   __HIP_PLATFORM_AMD__)
+  if(TARGET hip::host)
+    target_include_directories(hipdnn-ep-tls PRIVATE
+        $<TARGET_PROPERTY:hip::host,INTERFACE_INCLUDE_DIRECTORIES>)
+  elseif(THEROCK_DIST)
+    target_include_directories(hipdnn-ep-tls PRIVATE ${THEROCK_DIST}/include)
+  endif()
+  message(STATUS "Trace shim: ON (profiling build; do not ship)")
+endif()
+
 # Install the static shim lib so NATIVE model DLLs can link it on a deploy
 # host that only has the packaged tree (no build dir). CompilerDriver bakes the
 # build-tree path into HIPDNN_EP_TLS_LIB_DIR, which does not exist on the GPU
