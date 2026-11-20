@@ -35,6 +35,7 @@ add_library(HipDialectTransforms STATIC
   DecomposeConvTranspose.cpp
   DecomposeMatMulNBits.cpp
   ExternalizeConstants.cpp
+  PadMatMulNBitsWeights.cpp
   FixLoopAccumulatorOffset.cpp
   FoldBatchNorm.cpp
   FoldConstantExtracts.cpp

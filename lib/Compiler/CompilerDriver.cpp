@@ -4,6 +4,7 @@
  */
 
 #include "hip/Compiler/CompilerDriver.h"
+#include "hip/Compiler/MatmulNBitsRowPads.h"
 #include "hip/Compiler/PluginRegistry.h"
 #include "hip/Compiler/RocMlirArtifactTarget.h"
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
@@ -608,6 +609,9 @@ bool CompilerDriver::runMLIRPasses(
     tailOpts.externalizeMinNumElements =
         mlir::hip::kDefaultExternalizeMinNumElements;
     tailOpts.skipConstantData = options.skip_constant_data;
+    const ::hip::compiler::MatmulNBitsRowPads rowPads =
+        ::hip::compiler::queryMatmulNBitsRowPads();
+    tailOpts.matmulNBitsRowPads = rowPads.entries;
     mlir::hip::buildOnnxToHipPipelineTail(pm, tailOpts, fileSystem_);
 
     mlir::hip::HipToLLVMPipelineOptions rocMlirLlvmOpts;
@@ -621,6 +625,9 @@ bool CompilerDriver::runMLIRPasses(
     onnxToHipOpts.externalizeMinNumElements =
         mlir::hip::kDefaultExternalizeMinNumElements;
     onnxToHipOpts.skipConstantData = options.skip_constant_data;
+    const ::hip::compiler::MatmulNBitsRowPads rowPads =
+        ::hip::compiler::queryMatmulNBitsRowPads();
+    onnxToHipOpts.matmulNBitsRowPads = rowPads.entries;
 
     if (hipdnnHandle_) {
       compiledGraphs_ =

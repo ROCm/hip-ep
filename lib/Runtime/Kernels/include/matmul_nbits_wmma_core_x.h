@@ -37,10 +37,24 @@
  * independently, and WT_N=4 is worth having -- a K-step then issues WT_M*WT_N=8
  * WMMA per (WT_M+WT_N)=6 fragment loads instead of 4 per 4, so the LDS reads per
  * Matrix Core op drop by a quarter. */
+/* LAYOUT_P is B's byte order in global memory (hip::MatmulNBitsWeightLayout,
+ * include/hip/matmul_nbits_weight_layout.h). 0 is rows b_row_bytes apart, dense
+ * or row-padded. 1 and 2 keep the dense size and address B from the byte
+ * offset kb = k_abs / 2 inside the dense row:
+ *   1  the 128-byte lines of row n are stored in XOR order, logical line l at
+ *      line l ^ f(n), f(n) = (n / R) % P, P the largest power of two dividing
+ *      the row's line count L and R = 64 / gcd(L, 64), so the rows of a tile
+ *      spread over all 64 cache sets with no pad;
+ *   2  512-byte blocks of 16 rows x 32 bytes (64 k values), [N/16][K/64][16][32]:
+ *      the 16 rows x 32 bytes one wave reads in a BK-64 step are four whole,
+ *      contiguous cache lines.
+ * A thread's load of one K step stays inside one 32-byte piece of its row, so
+ * either serves every tile the rows layout does. Everything for 1 and 2 sits in
+ * branches discarded at 0, so the rows kernels keep their code exactly. */
 template <int BM_T, int BN_T, int WT_M, int WT_N, bool USE_ZEROS,
           bool BOUNDS_CHECK, int BK_IN, int PGR_P = 1, int ADDR_P = 0,
           int PIPE_P = 0, int SCHED_P = 0, int EPI_P = 0, int XOR_P = 0,
-          bool GROUPED_P = false>
+          bool GROUPED_P = false, int LAYOUT_P = 0>
 __device__ __forceinline__
 void GemmFp16U4ImplX(
     int M, int N, int K,
@@ -442,6 +456,7 @@ void GemmFp16U4ImplX(
             }
         };
         auto issueB = [&]() __attribute__((always_inline)) {
+          if constexpr (LAYOUT_P == 0) {
 #pragma unroll
             for (int c = 0; c < B_NCH; c++) {
                 if (b_valid[c]) {
@@ -460,6 +475,61 @@ void GemmFp16U4ImplX(
                 }
                 if constexpr (!UADDR) b_src_u4[c] += BK_T >> 1;
             }
+          } else {
+            static_assert(LAYOUT_P == 1 || LAYOUT_P == 2, "B layout is 0, 1 or 2");
+            /* The byte offset kb = k_abs / 2 splits into the tile's offset ku (a
+             * multiple of BK/2, wave-uniform) and this thread's kt < BK/2, which
+             * occupy disjoint bits: kt never reaches the line bits the XOR changes
+             * (>= 7) or the block bits (>= 5). Only ku changes per K step; the
+             * rest is loop-invariant. */
+            const uint32_t rb = static_cast<uint32_t>(b_row_bytes ? b_row_bytes
+                                                                  : num_groups_k * (group_size >> 1));
+            const unsigned char* bd = static_cast<const unsigned char*>(B_data);
+            const uint32_t kt = static_cast<uint32_t>(b_k8) >> 1;
+            const uint32_t ku = static_cast<uint32_t>(k_abs - b_k8) >> 1;
+            const uint32_t blk_row = (rb >> 5) << 9;
+            const uint32_t L = (rb & 127u) ? 0u : rb >> 7;
+            const uint32_t P = L & (0u - L);
+            const uint32_t r_shift = P ? 6u - __builtin_ctz(P < 64u ? P : 64u) : 0u;
+            auto layoutSrc = [&](int c) __attribute__((always_inline)) -> const void* {
+                if constexpr (LAYOUT_P == 1) {
+                    const uint32_t n = static_cast<uint32_t>(b_n_g[c]);
+                    const uint32_t fx = P ? ((n >> r_shift) & (P - 1u)) << 7 : 0u;
+                    if constexpr (UADDR)
+                        return bd + static_cast<size_t>(col0) * rb +
+                               static_cast<size_t>(static_cast<uint32_t>(b_col[c]) * rb + kt + (ku ^ fx));
+                    else
+                        return bd + static_cast<size_t>(n) * rb + kt + (ku ^ fx);
+                } else {
+                    const uint32_t kp = ((ku & ~31u) << 4) | (ku & 31u);
+                    if constexpr (UADDR) {
+                        const uint32_t n = static_cast<uint32_t>(b_col[c]);
+                        return bd + static_cast<size_t>(col0 >> 4) * blk_row +
+                               static_cast<size_t>((n >> 4) * blk_row + ((n & 15u) << 5) + kt + kp);
+                    } else {
+                        const uint32_t n = static_cast<uint32_t>(b_n_g[c]);
+                        return bd + static_cast<size_t>(n >> 4) * blk_row + ((n & 15u) << 5) + kt + kp;
+                    }
+                }
+            };
+#pragma unroll
+            for (int c = 0; c < B_NCH; c++) {
+                if (b_valid[c]) {
+                    if constexpr (B_U32 == 1)
+                        pf_b4[S][c][0] = *reinterpret_cast<const uint32_t*>(layoutSrc(c));
+                    else if constexpr (B_U32 == 2)
+                        *reinterpret_cast<u32x2*>(pf_b4[S][c]) =
+                            *reinterpret_cast<const u32x2*>(layoutSrc(c));
+                    else if constexpr (B_U32 == 3) {
+                        *reinterpret_cast<u32x2*>(pf_b4[S][c]) =
+                            *reinterpret_cast<const u32x2*>(layoutSrc(c));
+                        pf_b4[S][c][2] = reinterpret_cast<const uint32_t*>(layoutSrc(c))[2];
+                    } else
+                        *reinterpret_cast<u32x4*>(pf_b4[S][c]) =
+                            *reinterpret_cast<const u32x4*>(layoutSrc(c));
+                }
+            }
+          }
         };
         /* PGR 2: the next step dequantizes this B first, and s_waitcnt vmcnt
          * counts loads in issue order, so B must be the oldest load in flight

@@ -4,15 +4,16 @@
 // ============================================================================
 // TEST PURPOSE:
 // Verify hip.matmul_nbits is correctly lowered to an LLVM call to
-// wrap_matmul_nbits runtime function.
+// wrap_matmul_nbits_ex runtime function.
 //
 // This test validates:
-// - Runtime call generation (hip.matmul_nbits → llvm.call @wrap_matmul_nbits)
+// - Runtime call generation (hip.matmul_nbits → llvm.call @wrap_matmul_nbits_ex)
 // - Pointer extraction for required operands (A, B, scales, output)
 // - Null pointer generation for absent optional operands (zero_points, g_idx, bias)
 // - Pointer extraction for present optional operands
 // - Dimension extraction from memref descriptors (M, batch_count)
-// - Attribute-to-constant lowering (N, K, bits, block_size, elem_size)
+// - Attribute-to-constant lowering (N, K, bits, block_size, elem_size,
+//   b_row_bytes, b_layout)
 // ============================================================================
 
 // RUN: hip-mlir-opt --assign-op-state-slots --convert-hip-to-llvm %s | FileCheck %s
@@ -36,14 +37,16 @@ module {
   }
 
   // CHECK-LABEL: llvm.func @test_matmul_nbits_basic
-  // CHECK: llvm.call @wrap_matmul_nbits({{.*}}) :
+  // CHECK: llvm.call @wrap_matmul_nbits_ex({{.*}}) :
   // CHECK-SAME: (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
-  // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64) -> i32
-  // Verify 17 parameters:
+  // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+  // Verify 20 parameters:
   // - 1 i32: op_state_slot (2nd arg; per-instance MatmulNbitsState; threaded by
   //          --assign-op-state-slots, replaces shared RuntimeState::zp_unpack_cache)
   // - 8 pointers: state, A, B, scales, zero_points(null), g_idx(null), bias(null), output
-  // - 8 i64: M=128, N=5120, K=2880, batch_count=1, bits=4, block_size=32, elem_size=2, zp_elem_size=0
+  // - 11 i64: M=128, N=5120, K=2880, batch_count=1, bits=4, block_size=32,
+  //           elem_size=2, zp_elem_size=0, scale_elem_size=2, b_row_bytes=0,
+  //           b_layout=0
 
   // ===== Test 2: MatMulNBits with zero_points =====
 
@@ -65,9 +68,9 @@ module {
   }
 
   // CHECK-LABEL: llvm.func @test_matmul_nbits_with_zp
-  // CHECK: llvm.call @wrap_matmul_nbits({{.*}}) :
+  // CHECK: llvm.call @wrap_matmul_nbits_ex({{.*}}) :
   // CHECK-SAME: (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
-  // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+  // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
 
   // ===== Test 3: 2D MatMulNBits (no batch dimension) =====
 
@@ -87,8 +90,52 @@ module {
   }
 
   // CHECK-LABEL: llvm.func @test_matmul_nbits_2d
-  // CHECK: llvm.call @wrap_matmul_nbits({{.*}}) :
+  // CHECK: llvm.call @wrap_matmul_nbits_ex({{.*}}) :
   // CHECK-SAME: (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
-  // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+  // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
   // M=128, batch_count=1 (2D: no batch dims)
+
+  // ===== Test 4: row-padded B (b_row_bytes) precedes b_layout =====
+
+  func.func @test_matmul_nbits_row_padded(%ctx: !hip.context,
+                                           %A: memref<128x4096xf16, 1>,
+                                           %B: memref<1024x32x64xui8, 1>,
+                                           %scales: memref<1024x32xf16, 1>,
+                                           %output: memref<128x1024xf16, 1>) {
+    hip.matmul_nbits(%ctx) ins(%A, %B, %scales :
+        memref<128x4096xf16, 1>, memref<1024x32x64xui8, 1>,
+        memref<1024x32xf16, 1>)
+        outs(%output : memref<128x1024xf16, 1>)
+        {K = 4096 : i64, N = 1024 : i64, bits = 4 : i64,
+         block_size = 128 : i64, accuracy_level = 4 : i64,
+         zp_elem_size = 0 : i64, b_row_bytes = 2176 : i64}
+    return
+  }
+
+  // CHECK-LABEL: llvm.func @test_matmul_nbits_row_padded
+  // CHECK: %[[PITCH:.*]] = llvm.mlir.constant(2176 : i64) : i64
+  // CHECK: %[[ROWS:.*]] = llvm.mlir.constant(0 : i64) : i64
+  // CHECK: llvm.call @wrap_matmul_nbits_ex({{.*}}, %[[PITCH]], %[[ROWS]]) :
+
+  // ===== Test 5: B in a weight layout (b_layout) is the last argument =====
+
+  func.func @test_matmul_nbits_blocked(%ctx: !hip.context,
+                                        %A: memref<1x4096xf16, 1>,
+                                        %B: memref<1024x2048xui8, 1>,
+                                        %scales: memref<1024x32xf16, 1>,
+                                        %output: memref<1x1024xf16, 1>) {
+    hip.matmul_nbits(%ctx) ins(%A, %B, %scales :
+        memref<1x4096xf16, 1>, memref<1024x2048xui8, 1>,
+        memref<1024x32xf16, 1>)
+        outs(%output : memref<1x1024xf16, 1>)
+        {K = 4096 : i64, N = 1024 : i64, bits = 4 : i64,
+         block_size = 128 : i64, accuracy_level = 4 : i64,
+         zp_elem_size = 0 : i64, b_row_bytes = 2048 : i64, b_layout = 2 : i64}
+    return
+  }
+
+  // CHECK-LABEL: llvm.func @test_matmul_nbits_blocked
+  // CHECK: %[[DENSE:.*]] = llvm.mlir.constant(2048 : i64) : i64
+  // CHECK: %[[BLOCKS:.*]] = llvm.mlir.constant(2 : i64) : i64
+  // CHECK: llvm.call @wrap_matmul_nbits_ex({{.*}}, %[[DENSE]], %[[BLOCKS]]) :
 }
