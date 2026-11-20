@@ -286,8 +286,22 @@ void GemmFp16U4Impl(
      * so that global loads overlap with Matrix Core WMMA execution.
      */
 
-    uint32_t pf_a[A_NCH][A_CH / 2];
-    [[maybe_unused]] uint32_t pf_b4[B_U32] = {};
+    /* Deep register prefetch (dense no-zero-point fused path): PF_D K-steps of
+     * global loads are kept in flight, one register stage per step, instead of
+     * one. The stage a step's data lives in is a compile-time constant because
+     * the K-loop below is unrolled PF_D times. */
+    constexpr bool kPipe = FUSED_DQ && !USE_ZEROS && !CHECK_K_TAIL;
+#ifdef HIPDNN_WMMA_PF_DEPTH
+    constexpr int  PF_D  = kPipe ? HIPDNN_WMMA_PF_DEPTH : 1;
+#else
+    // Three stages fit next to a 2x2 warp tile; the larger accumulators of
+    // the 2x4 / 4x2 / 4x4 tiles leave room for two (three spills at 4x4).
+    constexpr int  PF_D  = !kPipe ? 1 : ((WT_M * WT_N <= 4) ? 3 : 2);
+#endif
+
+    uint32_t pf_a[PF_D][A_NCH][A_CH / 2];
+    [[maybe_unused]] uint32_t pf_b4[PF_D][B_U32] = {};
+    [[maybe_unused]] uint32_t pf_s[PF_D] = {};
     [[maybe_unused]] u32x4    pf_bfp[B_U32] = {};
 
     /* Quant-group state.
@@ -347,7 +361,12 @@ void GemmFp16U4Impl(
         bias_pk = (uint32_t(b_bits) << 16) | b_bits;
     };
 
-    if constexpr (FUSED_DQ) {
+    // Quant groups are power-of-two sized (ONNX MatMulNBits block_size), so the
+    // pipelined path derives the group from k with a shift instead of tracking
+    // it across steps: that keeps the load issue branch-free.
+    const int gs_shift = __builtin_ctz(group_size > 0 ? group_size : 1);
+    const bool gs_pow2 = (group_size & (group_size - 1)) == 0;
+    if constexpr (FUSED_DQ && !kPipe) {
         if (b_valid) {
             grp_cur   = b_k8 / group_size;
             grp_k_end = (grp_cur + 1) * group_size;
@@ -355,7 +374,7 @@ void GemmFp16U4Impl(
         }
     }
 
-    auto issueLoads = [&](int k_abs) __attribute__((always_inline))
+    auto issueLoads = [&](int st, int k_abs) __attribute__((always_inline))
     {
 #pragma unroll
         for(int c = 0; c < A_NCH; c++)
@@ -366,17 +385,17 @@ void GemmFp16U4Impl(
             const bool full_k = CHECK_K_TAIL ? (a_k + A_CH <= K) : true;
             if (ok && full_k) {
                 if constexpr (A_CH == 8)
-                    *reinterpret_cast<u32x4*>(pf_a[c]) =
+                    *reinterpret_cast<u32x4*>(pf_a[st][c]) =
                         *reinterpret_cast<const u32x4*>(a_src[c]);
                 else
-                    *reinterpret_cast<u32x2*>(pf_a[c]) =
+                    *reinterpret_cast<u32x2*>(pf_a[st][c]) =
                         *reinterpret_cast<const u32x2*>(a_src[c]);
             } else {
 #pragma unroll
-                for (int e = 0; e < A_CH / 2; e++) pf_a[c][e] = 0;
+                for (int e = 0; e < A_CH / 2; e++) pf_a[st][c][e] = 0;
                 if constexpr (CHECK_K_TAIL) {
                     if (ok && a_k < K) {
-                        _Float16* tail = reinterpret_cast<_Float16*>(pf_a[c]);
+                        _Float16* tail = reinterpret_cast<_Float16*>(pf_a[st][c]);
 #pragma unroll
                         for (int e = 0; e < A_CH; e++)
                             if (a_k + e < K) tail[e] = a_src[c][e];
@@ -389,12 +408,12 @@ void GemmFp16U4Impl(
         if (b_valid) {
             if constexpr (FUSED_DQ) {
                 if constexpr (B_U32 == 1)
-                    pf_b4[0] = *reinterpret_cast<const uint32_t*>(b_src_u4);
+                    pf_b4[st][0] = *reinterpret_cast<const uint32_t*>(b_src_u4);
                 else if constexpr (B_U32 == 2)
-                    *reinterpret_cast<u32x2*>(pf_b4) =
+                    *reinterpret_cast<u32x2*>(pf_b4[st]) =
                         *reinterpret_cast<const u32x2*>(b_src_u4);
                 else
-                    *reinterpret_cast<u32x4*>(pf_b4) =
+                    *reinterpret_cast<u32x4*>(pf_b4[st]) =
                         *reinterpret_cast<const u32x4*>(b_src_u4);
                 b_src_u4 += BK_T >> 1;
                 // This thread's B_NPT nibbles are contiguous in k starting at a
@@ -404,7 +423,12 @@ void GemmFp16U4Impl(
                 // covers BK_T > group_size, where one K-step spans several
                 // groups: the 128x32 WT2x1 tile has BK_T=64 and would otherwise
                 // decode the upper half with a stale scale.
-                if (__builtin_expect(k_abs >= grp_k_end, 0)) {
+                if constexpr (kPipe) {
+                    const int grp = gs_pow2 ? (k_abs >> gs_shift) : (k_abs / group_size);
+                    const uint32_t s_bits =
+                        __builtin_bit_cast(uint16_t, s_src[grp]);
+                    pf_s[st] = (s_bits << 16) | s_bits;
+                } else if (__builtin_expect(k_abs >= grp_k_end, 0)) {
                     do {
                         grp_cur++;
                         grp_k_end += group_size;
@@ -421,7 +445,7 @@ void GemmFp16U4Impl(
                             const uint32_t keep =
                                 valid == 8 ? 0xffffffffu :
                                 (valid == 0 ? 0u : ((1u << (valid * 4)) - 1u));
-                            pf_b4[w] = (pf_b4[w] & keep) |
+                            pf_b4[st][w] = (pf_b4[st][w] & keep) |
                                         (zp_word & ~keep);
                         }
                     }
@@ -435,7 +459,7 @@ void GemmFp16U4Impl(
         }
     };
 
-    auto storeToShared = [&](int buf) __attribute__((always_inline))
+    auto storeToShared = [&](int buf, int st) __attribute__((always_inline))
     {
         if (b_valid) {
             if constexpr (FUSED_DQ) {
@@ -448,11 +472,15 @@ void GemmFp16U4Impl(
                  * 8 extracts + 8 v_cvt_f32_ubyte0 + 8 v_cvt_f16_f32 + 4 packs +
                  * 4 pk_fma for the arithmetic conversion the compiler generates
                  * from static_cast<_Float16>(unsigned). */
-                const half2v bias2 = __builtin_bit_cast(half2v, bias_pk);
-                const half2v scale2 = __builtin_bit_cast(half2v, s_pk);
+                half2v bias2 = __builtin_bit_cast(half2v, bias_pk);
+                half2v scale2 = __builtin_bit_cast(half2v, s_pk);
+                if constexpr (kPipe) {
+                    bias2 = half2v{(_Float16)-1032.0f, (_Float16)-1032.0f};
+                    scale2 = __builtin_bit_cast(half2v, pf_s[st]);
+                }
 #pragma unroll
                 for (int w = 0; w < B_U32; w++) {
-                    const uint32_t packed = pf_b4[w];
+                    const uint32_t packed = pf_b4[st][w];
                     const uint32_t lo = packed & 0x0F0F0F0Fu;         // q0 q2 q4 q6
                     const uint32_t hi = (packed >> 4) & 0x0F0F0F0Fu;  // q1 q3 q5 q7
                     u32x4 raw;
@@ -488,9 +516,9 @@ void GemmFp16U4Impl(
         {
             _Float16* dst = &smA[buf][a_row[c]][a_koff[c]];
             if constexpr (A_CH == 8)
-                *reinterpret_cast<u32x4*>(dst) = *reinterpret_cast<const u32x4*>(pf_a[c]);
+                *reinterpret_cast<u32x4*>(dst) = *reinterpret_cast<const u32x4*>(pf_a[st][c]);
             else
-                *reinterpret_cast<u32x2*>(dst) = *reinterpret_cast<const u32x2*>(pf_a[c]);
+                *reinterpret_cast<u32x2*>(dst) = *reinterpret_cast<const u32x2*>(pf_a[st][c]);
         }
     };
 
@@ -593,8 +621,46 @@ void GemmFp16U4Impl(
 
     // issueLoads takes this thread's absolute k, which is what the quant-group
     // tracking keys on; the source pointers advance themselves.
-    issueLoads(b_k8);
-    storeToShared(0);
+    if constexpr (kPipe) {
+        const int nt = (K + BK_T - 1) / BK_T;
+#pragma unroll
+        for (int j = 0; j < PF_D; j++)
+            if (j < nt) issueLoads(j, j * BK_T + b_k8);
+        storeToShared(0, 0);
+        HIPDNN_LDS_BARRIER();
+        int i0 = 0;
+        // Steady state: every iteration issues, computes and stores, with no
+        // data-dependent branch so the compiler's wait-count analysis can keep
+        // PF_D steps of loads in flight (a conditional issue forces vmcnt(0)).
+        for (; i0 + 2 * PF_D <= nt; i0 += PF_D) {
+#pragma unroll
+            for (int u = 0; u < PF_D; u++) {
+                const int i = i0 + u;
+                const int buf = i & 1;
+                issueLoads(u, (i + PF_D) * BK_T + b_k8);
+                computeWMMA(buf, 0, K_STEPS);
+                storeToShared(1 - buf, (u + 1) % PF_D);
+                HIPDNN_LDS_BARRIER();
+            }
+        }
+        for (; i0 < nt; i0 += PF_D) {
+#pragma unroll
+            for (int u = 0; u < PF_D; u++) {
+                const int i = i0 + u;
+                if (i < nt) {
+                    const int buf = i & 1;
+                    if (i + PF_D < nt) issueLoads(u, (i + PF_D) * BK_T + b_k8);
+                    computeWMMA(buf, 0, K_STEPS);
+                    if (i + 1 < nt) {
+                        storeToShared(1 - buf, (u + 1) % PF_D);
+                        HIPDNN_LDS_BARRIER();
+                    }
+                }
+            }
+        }
+    } else {
+    issueLoads(0, b_k8);
+    storeToShared(0, 0);
     HIPDNN_LDS_BARRIER();
 
     /* The store stays after the whole WMMA sequence.
@@ -609,13 +675,14 @@ void GemmFp16U4Impl(
     for(int t = BK_T; t < K; t += BK_T)
     {
         int nxt = 1 - buf;
-        issueLoads(t + b_k8);
+        issueLoads(0, t + b_k8);
         computeWMMA(buf, 0, K_STEPS);
-        storeToShared(nxt);
+        storeToShared(nxt, 0);
         HIPDNN_LDS_BARRIER();
         buf = nxt;
     }
     computeWMMA(buf, 0, K_STEPS);
+    }
 
 #pragma unroll
     for(int wm = 0; wm < WT_M; wm++)
