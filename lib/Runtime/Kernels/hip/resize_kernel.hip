@@ -132,6 +132,8 @@ __device__ inline int clamp_index(int i, int dim) {
   return i < 0 ? 0 : (i >= dim ? dim - 1 : i);
 }
 
+// The launcher keeps every window extent at or below kMaxSampledExtent, so the
+// input coordinate, and the int it rounds to, stay well inside int range.
 __device__ inline int nearest_index(int o, int out_dim, int in_dim,
                                     int coord_transform, int nearest_mode,
                                     float scale) {
@@ -442,6 +444,11 @@ static bool checked_mul(int64_t a, int64_t b, int64_t& out) {
   return !__builtin_mul_overflow(a, b, &out);
 }
 
+// A float input coordinate addresses every index only up to 2^24; beyond that
+// the sampled pixel would already be wrong. Rejecting larger window extents
+// also keeps the per-output tap math in int.
+constexpr int64_t kMaxSampledExtent = int64_t{1} << 24;
+
 // Moves the unused trailing axes of a rank-r window to the front, so
 // (d0, .., d_{r-1}, 1, ..) becomes (1, .., d0, .., d_{r-1}) with W last.
 static bool make_row_shape(int spatial_rank, int64_t N, int64_t C,
@@ -454,7 +461,7 @@ static bool make_row_shape(int spatial_rank, int64_t N, int64_t C,
     din[i] = i < shift ? 1 : in[i - shift];
     dout[i] = i < shift ? 1 : out[i - shift];
     sc[i] = i < shift ? 0.0f : scales[i - shift];
-    if (din[i] > INT32_MAX || dout[i] > INT32_MAX)
+    if (din[i] > kMaxSampledExtent || dout[i] > kMaxSampledExtent)
       return false;
   }
   int64_t rows = 1;
@@ -689,8 +696,8 @@ static int launch_rows(hipStream_t stream, const void* input, void* output,
   RowShape s;
   if (!make_row_shape(spatial_rank, N, C, in, out, scales, vec, s)) {
     fprintf(stderr,
-            "[custom_kernels] hip_resize: an extent or the output row count "
-            "N*C*D*H exceeds INT32_MAX\n");
+            "[custom_kernels] hip_resize: a window extent exceeds 2^24 or the "
+            "output row count N*C*D*H exceeds INT32_MAX\n");
     return -1;
   }
   const T* x = static_cast<const T*>(input);

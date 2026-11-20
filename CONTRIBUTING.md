@@ -20,6 +20,7 @@ The sections below describe the project-specific workflow.
 - Coordinate substantial work in a GitHub issue or discussion before implementation. This helps contributors avoid duplicate work and gives maintainers a chance to provide early design feedback.
 - Changes to public compiler/runtime ABIs, dialect semantics, artifact formats, or pipeline architecture should have a documented design discussion before implementation begins.
 - For compiler changes, read the [compiler pass guidelines](COMPILER_PASS_GUIDELINES.md).
+- For kernel unit tests, read the [kernel unit-test leaf guidelines](lib/Runtime/Kernels/unit_test/GUIDELINES.md).
 - Use the [Windows quick start](docs/quick_start.md) or [Linux quick start](docs/quick_start_linux.md) to prepare a development environment.
 
 ## Develop and validate

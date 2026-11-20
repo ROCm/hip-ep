@@ -6,6 +6,7 @@
 #define HIP_DIALECT_TRANSFORMS_PIPELINES_H
 
 #include "hip/Conversion/OnnxToHipDNN/Passes.h"
+#include "hip/Dialect/Transforms/Passes.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Pass/PassOptions.h"
 
@@ -83,7 +84,7 @@ struct HipToLLVMPipelineOptions
 /// extern-constant resolution) up to -- but not including -- the HIP-to-LLVM
 /// lowering. Exposed
 /// so tools that build a custom head (e.g. hip-rocmlir-compiler, which inserts
-/// fuse-rocmlir + a rocMLIR compile/embed step) can run the standard tail
+/// the rocMLIR fusion + a rocMLIR compile/embed step) can run the standard tail
 /// without duplicating its load-bearing pass ordering.
 void buildOnnxToHipPipelineTail(OpPassManager &pm,
                                 const OnnxToHipPipelineOptions &options,
@@ -156,6 +157,37 @@ struct HipdnnPipelineOptions
 /// Chains buildOnnxToHipPipeline and buildHipToLLVMPipeline.
 void buildHipdnnPipeline(OpPassManager &pm,
                          const HipdnnPipelineOptions &options);
+
+/// Add the rocMLIR kernel fusion to a module pass manager: the quantize
+/// preparation, the grouping of the pointwise ops of main_graph into
+/// hip.rocmlir_elementwise modules, the outline of each anchor with its
+/// modules into a rock.kernel function, then the merge of duplicate kernels.
+/// A non-empty reportPath
+/// appends the --hip-rocmlir-fusion-report records to that file. Every caller
+/// builds the fusion through this function so that the pass order and the
+/// options stay the same across tools.
+void addRocMlirFusionPasses(OpPassManager &pm,
+                            const FuseRocMlirAnchorPassOptions &fuseOptions,
+                            llvm::StringRef reportPath = "");
+
+struct RocMlirFusionPipelineOptions
+    : PassPipelineOptions<RocMlirFusionPipelineOptions> {
+  Option<std::string> arch{
+      *this, "arch",
+      llvm::cl::desc("Target GPU architecture stamped as rock.arch"),
+      llvm::cl::init("")};
+  ListOption<std::string> gemmGemmAccelTypes{
+      *this, "gemm-gemm-accel-types",
+      llvm::cl::desc("Gemm element types with matrix acceleration")};
+  Option<std::string> report{
+      *this, "report",
+      llvm::cl::desc("Append the fusion report records to this file"),
+      llvm::cl::init("")};
+};
+
+/// The rocMLIR fusion as one pipeline, for LIT and hip-mlir-opt.
+void buildRocMlirFusionPipeline(OpPassManager &pm,
+                                const RocMlirFusionPipelineOptions &options);
 
 struct RocMlirPipelineOptions : PassPipelineOptions<RocMlirPipelineOptions> {};
 

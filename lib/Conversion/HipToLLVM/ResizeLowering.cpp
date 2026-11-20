@@ -99,8 +99,13 @@ struct ResizeOpLowering : public ConvertOpToLLVMPattern<ResizeOp> {
     Value statePtr = adaptor.getCtx();
     Value inputPtr =
         extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc);
-    Value outputPtr =
-        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
+    // A packed concat slot is a subview: same base as the concat buffer, with
+    // a non-zero descriptor offset. The kernel writes densely from the pointer
+    // it is given, so that offset has to be applied here.
+    Value outputPtr = extractMemRefDataPtr(adaptor.getOutput(), outputType,
+                                           getTypeConverter(), rewriter, loc);
+    if (!outputPtr)
+      return rewriter.notifyMatchFailure(op, "resize output pointer");
 
     Value inputDesc = adaptor.getInput();
     Value outputDesc = adaptor.getOutput();
