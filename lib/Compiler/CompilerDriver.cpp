@@ -181,17 +181,21 @@ std::string rocMlirArtifactTarget() {
     std::string target = mlir::hip::resolveRocMlirArch();
     // Which perfConfig each kernel was tuned to is baked into the embedded
     // HSACO. Autotune runs unless HIP_ROCMLIR_SKIP_BENCHMARKING is set, so
-    // the target string records the space and the shipped LUT that supplied
-    // tiles before the search. An artifact built with the other setting, or
+    // the target string records the space. The quick space consults the
+    // shipped LUT before searching. quicktuning searches that same rocMLIR
+    // quick list without the LUT, and full and exhaustive bypass it too. An
+    // artifact built with the other setting, or a quick artifact built
     // against other LUT bytes, must not be reused: the cache is keyed on the
-    // graph alone. Skip-benchmarking does not consult the LUT, so it has no
-    // +lut= suffix.
+    // graph alone. Skip-benchmarking, quicktuning, and the wider spaces do
+    // not consult the LUT, so they have no +lut= suffix.
     mlir::hip::AutotuneSpace space;
     if (!target.empty() && mlir::hip::rocMlirAutotuneFromEnv(space)) {
       target += std::string("+autotune=") + mlir::hip::autotuneSpaceName(space);
-      const std::string lut = shippedProblemCacheFingerprint();
-      if (!lut.empty())
-        target += "+lut=" + lut;
+      if (space == mlir::hip::AutotuneSpace::Quick) {
+        const std::string lut = shippedProblemCacheFingerprint();
+        if (!lut.empty())
+          target += "+lut=" + lut;
+      }
     }
     return target;
   }
@@ -578,9 +582,10 @@ bool CompilerDriver::runMLIRPasses(
       mlir::hip::rocMlirAutotuneBenchmarkFromEnv(autotuneOpts.benchmark);
       autotuneOpts.log = embedOpts.log;
       autotuneOpts.logPrefix = "[CompilerDriver/rocmlir-autotune]";
-      // problemCachePath stays empty. The provider uses the shipped LUT only.
-      // --problem-cache and HIP_ROCMLIR_PROBLEM_CACHE are read by
-      // hip-rocmlir-compiler, which is what replaces that table.
+      // problemCachePath stays empty. The provider uses the shipped LUT only
+      // for the quick space. quicktuning, full, and exhaustive search without
+      // it. --problem-cache and HIP_ROCMLIR_PROBLEM_CACHE are read by
+      // hip-rocmlir-compiler, which replaces that table for a quick search.
       autotuner.emplace(embedOpts.arch, autotuneOpts);
       // Refuse rather than fall back to the default perfConfig. By this point
       // rocMlirArtifactTarget() has already stamped +autotune=<space> into the

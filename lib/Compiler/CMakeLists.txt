@@ -150,10 +150,13 @@ if(ENABLE_ROCMLIRTRITON)
       set(HIPDNN_EP_ROCMLIR_AUTOTUNE_AVAILABLE ON CACHE INTERNAL
           "RocMlirAutotune.cpp compiled its real implementation, not its stub")
       # Embed every checked-in tools/problem-cache/lut/<arch>.fb. The autotuner
-      # selects the blob whose gpu_arch matches the device and ignores the
-      # rest, so a table for another GPU never answers a lookup. An empty lut
-      # directory still builds: the registry count is 0 and every problem
-      # falls through to the in-process winner cache, then the tuning space.
+      # consults these only for the quick space. quicktuning searches that
+      # same list and bypasses the LUT; full and exhaustive bypass it and
+      # search their own space. Within quick, it selects the blob
+      # whose gpu_arch matches the device and ignores the rest, so a table for
+      # another GPU never answers a lookup. An empty lut directory still
+      # builds: the registry count is 0 and every problem falls through to the
+      # in-process winner cache, then the tuning space.
       file(GLOB _rocmlir_problem_cache_fbs CONFIGURE_DEPENDS
         "${CMAKE_SOURCE_DIR}/tools/problem-cache/lut/*.fb")
       list(SORT _rocmlir_problem_cache_fbs)
