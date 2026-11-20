@@ -104,9 +104,8 @@ does the same whenever `HIPDNN_EP_ROCMLIR` is on. Both honor
 `HIP_ROCMLIR_SKIP_BENCHMARKING`: unset or `0` benchmarks. A present empty
 value skips, and so does any other value, keeping rocMLIR's default perfConfig.
 Unset `HIPDNN_EP_ROCMLIR_AUTOTUNE`
-selects quick. `quick`, `quicktuning`, `full`, and `exhaustive` are the only
-accepted values; anything else warns and stays on quick. `quicktuning`
-searches the same rocMLIR quick list as `quick`. Every search config in the
+selects quick. `quick`, `full`, and `exhaustive` are the only accepted
+values; anything else warns and stays on quick. Every search config in the
 model is compiled in one pool (default: one job per hardware thread;
 `HIP_ROCMLIR_COMPILE_JOBS` overrides the width). GPU benchmarking stays serial,
 and it starts only after that pool finishes, so candidate timings do not
@@ -115,54 +114,22 @@ one compile, the first kernel for a rocMLIR problem key (`getTuningProblemStr`,
 plus the selected space) is searched; later kernels with that key compile only
 the winning perfConfig, together in a second pool, and are not benchmarked
 again. The compiled binary is not reused, because each outlined kernel has its
-own symbol. `--autotune[=quick|quicktuning|full|exhaustive]`
-overrides the search space. The problem-cache LUT is consulted only for
-quick (the default, including bare `--autotune` and an unset
-`HIPDNN_EP_ROCMLIR_AUTOTUNE`). `quicktuning`, `full`, and `exhaustive`
-bypass the shipped table and any `--problem-cache` file and search that
-space directly. `quicktuning` uses the rocMLIR quick list. For a
-quick search, each kernel consults the shipped rocMLIR LUT embedded from
-`tools/problem-cache/lut/<gpu_arch>.fb` (the JSON beside it is the reviewable
-source; `tools/problem-cache/problem_cache_to_fb.py` compiles it with
-`flatc --binary --strict-json`). Only a table whose `gpu_arch` matches the
-device is used. The ONNX Runtime provider leaves the external path empty, so
-a quick session consults that shipped table and, on a miss, benchmarks the
-quick space unless `HIP_ROCMLIR_SKIP_BENCHMARKING` is set. A provider
-artifact records FNV-1a of those shipped bytes as `+lut=<fingerprint>` on
-`Metadata.rocmlir_arch` only when the space is quick, so replacing a shipped
-LUT rejects a cached quick binary. `quicktuning`, `full`, and `exhaustive`
-omit `+lut=` because they do not read the table. A quicktuning artifact
-records `+autotune=quicktuning`. The external file is not part of that
-string. `hip-rocmlir-compiler --problem-cache <file.fb>` (or
-`HIP_ROCMLIR_PROBLEM_CACHE`, read only by that tool) replaces the shipped
-table on a quick search: the shipped table is not consulted, and a miss in
-the external file falls through to the in-process winner cache. The same
-flags with `quicktuning`, `full`, or `exhaustive` are ignored. That cache is checked before
-the selected tuning space. The file is the same kind of artifact as the
-MatMulNBits and GQA LUTs: a JSON document (`schema_version`, `gpu_arch`,
-`kernel_abi`, `weight_m/n/k`, `configs`, `points`, `fallbacks`).
-An identical problem string is compiled as stored. A miss takes the nearest
-`gemm:`/`attn:` tile of the same kernel kind. Conv groups on arch, conv kind,
-`-F`, layouts, stride, dilation, and the fusion suffix, then measures the
-implicit GEMM `M`, `N`, and `K`. Gemm groups on arch, datatype, output
-datatype, transposes, scaled-gemm flags, `-g`, and the fusion suffix, then
-measures `-m`, `-n`, and `-k`. Attention groups on arch, datatype, transposes,
-causal, LSE, split-KV, sliding window, head counts, head dims, scale/bias, and
-the fusion suffix, then measures `-seq_len_q` and `-seq_len_k`.
-GemmElementwiseGemm groups on arch, datatype, the four transposes, `-g`, and
-the fusion suffix, then measures `-m`, `-n`, `-k`, and `-gemmO` (the fourth
-axis uses `weight_n`). The weights are the table's `weight_m/n/k` (1, 1, 1
-until fitted). A borrowed tile must fit the query. A tile that fails to
-compile is skipped and the next nearest row is tried. When no legal row
-remains, a winner already recorded for this problem is compiled from the
-in-process cache. A miss there runs the selected tuning space.
+own symbol. `--autotune[=quick|full|exhaustive]`
+overrides the search space. A tuning type skips the shipped problem-cache
+LUT. `--problem-cache` / `HIP_ROCMLIR_PROBLEM_CACHE` still takes priority over
+the search and replaces the shipped table. A repeated problem in the same
+compile reuses the in-session winner, then a miss searches the selected space.
+A provider artifact records `+autotune=<space>` and no `+lut=` fingerprint,
+because the provider does not pass an external table and a tuning type skips
+the shipped LUT.
 `--dump-problem-cache <file.json>` writes that JSON after autotune, one
 point per unique problem and one config per distinct perfConfig. The flag
 requires autotune; `HIP_ROCMLIR_SKIP_BENCHMARKING` does not produce a dump.
 Set `HIP_ROCMLIR_SKIP_BENCHMARKING=1` (any present value other than `0`,
 including empty) to skip the GPU search and affix the first enumerated
-perfConfig. The problem cache is not consulted in that mode, and it is also
-not consulted for `quicktuning`, `full`, or `exhaustive`. The log names the space (`quick`, `quicktuning`, `full`, or `exhaustive`) and the
+perfConfig. The problem cache is not consulted in that mode. A tuning type
+also skips the shipped LUT; an external `--problem-cache` is still consulted
+first. The log names the space (`quick`, `full`, or `exhaustive`) and the
 number of configs in each pool. At the end it prints three wall times:
 perfConfig compile (pool wait, summed across the two pools), serial GPU
 benchmark, and HIP-to-LLVM lowering plus bitcode emit. Per-config timing and

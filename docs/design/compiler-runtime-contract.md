@@ -74,41 +74,26 @@ setup throws `std::runtime_error`. See [native-vs-ir-comparison.md](../native-vs
 `Metadata.rocmlir_arch` records what the embedded rocMLIR code objects were
 built for, not only the GPU arch: it is `hip::compiler::rocMlirArtifactTarget()`,
 which is empty when `HIPDNN_EP_ROCMLIR` was off, the arch with an
-`+autotune=<space>` suffix when rocMLIR benchmarked perfConfigs, plus
-`+lut=<fingerprint>` only for the quick space
-(`gfx1151+autotune=quick+lut=0123456789abcdef`,
-`gfx1151+autotune=quicktuning` when that space bypasses the LUT, or
-`gfx1151+autotune=full`), and the arch alone when
+`+autotune=<space>` suffix when rocMLIR benchmarked perfConfigs
+(`gfx1151+autotune=quick`, `gfx1151+autotune=full`), and the arch alone when
 `HIP_ROCMLIR_SKIP_BENCHMARKING` compiled the default perfConfig (`gfx1151`).
-The fingerprint is FNV-1a of the shipped `tools/problem-cache/lut/*.fb` bytes
-embedded in that build. It is omitted when benchmarking is skipped and when
-the space is `quicktuning`, `full`, or `exhaustive`, because those paths do
-not consult the table. `quicktuning` searches the rocMLIR quick list.
-`hip-rocmlir-compiler` and the ONNX Runtime provider both read that
-variable: unset or `0` benchmarks. A present empty value skips, and so does
-any other value. Autotune otherwise runs for a rocMLIR session. Unset
-`HIPDNN_EP_ROCMLIR_AUTOTUNE` selects `quick`. `quick`, `quicktuning`,
-`full`, and `exhaustive` are the only accepted values. `quicktuning` searches
-the rocMLIR quick list without the LUT. Anything else warns and stays on
-quick. Before benchmarking, a quick session applies the shipped
-`tools/problem-cache/lut/<gpu_arch>.fb` whose `gpu_arch` matches the device.
-`quicktuning`, `full`, and `exhaustive` skip that table and search their
-space. The provider does not read `HIP_ROCMLIR_PROBLEM_CACHE`.
-`hip-rocmlir-compiler` does, via that variable or `--problem-cache`, and on a
-quick search that file replaces the shipped table. The same file is ignored
-for `quicktuning`, `full`, and `exhaustive`.
+There is no `+lut=` fingerprint: a tuning type skips the shipped
+`tools/problem-cache/lut/*.fb`. `hip-rocmlir-compiler` still honors
+`--problem-cache` / `HIP_ROCMLIR_PROBLEM_CACHE` ahead of the search. The
+provider does not read `HIP_ROCMLIR_PROBLEM_CACHE`. `hip-rocmlir-compiler` and
+the ONNX Runtime provider both read the skip variable: unset or `0`
+benchmarks. A present empty value skips, and so does any other value. Autotune
+otherwise runs for a rocMLIR session. Unset `HIPDNN_EP_ROCMLIR_AUTOTUNE`
+selects `quick`. `quick`, `full`, and `exhaustive` are the only accepted
+values; anything else warns and stays on quick.
 That tool writes LLVM bitcode; it does not stamp `Metadata.rocmlir_arch`.
 The perfConfig a kernel was tuned to is baked into its code object, so a tuned
-and an untuned artifact are not interchangeable even on the same GPU. Two
-quick provider artifacts whose shipped LUT bytes differ are not interchangeable
-either: the `+lut=` fingerprint makes the load check fail. A `quicktuning`,
-`full`, or `exhaustive` artifact has no fingerprint, because that compile
-did not read the table.
+and an untuned artifact are not interchangeable even on the same GPU.
 
 The model cache / EPContext identity is derived from the graph alone, so the EP
 refuses to load an artifact whose recorded value differs from the current one;
-delete the cache and recompile after changing GPUs, replacing a shipped LUT
-while on quick, or toggling either `HIPDNN_EP_ROCMLIR`,
+delete the cache and recompile after changing GPUs, or toggling either
+`HIPDNN_EP_ROCMLIR`,
 `HIP_ROCMLIR_SKIP_BENCHMARKING`, or
 `HIPDNN_EP_ROCMLIR_AUTOTUNE`. Compilation fails outright
 if autotune is on but no HIP device could be reached, so the suffix never

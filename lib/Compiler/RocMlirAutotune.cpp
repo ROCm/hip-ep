@@ -76,8 +76,6 @@ const char *autotuneSpaceName(AutotuneSpace space) {
   switch (space) {
   case AutotuneSpace::Quick:
     return "quick";
-  case AutotuneSpace::QuickTuning:
-    return "quicktuning";
   case AutotuneSpace::Full:
     return "full";
   case AutotuneSpace::Exhaustive:
@@ -89,8 +87,6 @@ const char *autotuneSpaceName(AutotuneSpace space) {
 bool parseAutotuneSpace(StringRef name, AutotuneSpace &out) {
   if (name == "quick")
     out = AutotuneSpace::Quick;
-  else if (name == "quicktuning")
-    out = AutotuneSpace::QuickTuning;
   else if (name == "full")
     out = AutotuneSpace::Full;
   else if (name == "exhaustive")
@@ -125,8 +121,7 @@ bool rocMlirAutotuneFromEnv(AutotuneSpace &out) {
     return true;
   llvm::errs() << "warning: unknown HIPDNN_EP_ROCMLIR_AUTOTUNE='" << mode
                << "'; using quick. Set HIP_ROCMLIR_SKIP_BENCHMARKING=1 to "
-                  "skip benchmarking (expected quick, quicktuning, full, or "
-                  "exhaustive).\n";
+                  "skip benchmarking (expected quick, full, or exhaustive).\n";
   out = AutotuneSpace::Quick;
   return true;
 }
@@ -288,7 +283,6 @@ const HipRuntime &hipRuntime() {
 rock::TuningParamSetKind toRockKind(AutotuneSpace space) {
   switch (space) {
   case AutotuneSpace::Quick:
-  case AutotuneSpace::QuickTuning:
     return rock::TuningParamSetKind::Quick;
   case AutotuneSpace::Full:
     return rock::TuningParamSetKind::Full;
@@ -945,18 +939,16 @@ static const std::vector<ProblemCacheLut> &shippedProblemCaches() {
 }
 
 bool RocMlirAutotuner::Impl::problemCacheActive() const {
-  // Shipped and external tables are for the default quick space. quicktuning
-  // uses the same rocMLIR quick list but must search it, and full and
-  // exhaustive must search the space the user asked for.
-  if (options.space != AutotuneSpace::Quick)
-    return false;
-  return kRocmlirProblemCacheBlobCount != 0 ||
-         !options.problemCachePath.empty();
+  // A tuning type skips the shipped LUT. An external --problem-cache still
+  // takes priority over the search.
+  return !options.problemCachePath.empty();
 }
 
 std::optional<std::string> RocMlirAutotuner::Impl::lookupProblemCache(
     StringRef problem, const std::vector<std::string> &rejected) {
-  if (options.space != AutotuneSpace::Quick)
+  // A tuning type does not read the shipped table. Only an external path
+  // reaches the lookup below, and that file is checked before the search.
+  if (!problemCacheActive())
     return std::nullopt;
   const auto search =
       [&](const ProblemCacheLut &lut) -> std::optional<std::string> {
@@ -1024,18 +1016,12 @@ bool RocMlirAutotuner::Impl::autotuneKernel(ModuleOp module,
     return ok;
   }
 
-  // Look up before building the search space, and only for the quick space.
-  // quicktuning, full, and exhaustive bypass the shipped LUT and any
-  // --problem-cache file.
-  // problemCachePath is set only by hip-rocmlir-compiler; when it is set and
-  // the space is quick, that file is the only table. The in-process EP leaves
-  // it empty and uses the shipped lut/<arch>.fb. A miss then checks this
+  // An external --problem-cache is checked first. With no external table, a
+  // tuning type skips the shipped LUT. A repeated problem then checks this
   // compile's winner cache, then the selected tuning space.
   // A known winner is compiled in the second pool. A problem already queued
-  // waits for that pool
-  // once the search has been benchmarked. A tile that fails to compile is
-  // skipped and the next nearest row is tried. When none remain, the search
-  // runs.
+  // waits for that pool once the search has been benchmarked. A cached
+  // perfConfig that fails to compile is dropped and the search runs.
   llvm::SmallString<2048> problem;
   std::string cacheKey;
   if (succeeded(rock::getTuningProblemStr(module, problem))) {
@@ -1321,8 +1307,8 @@ const ProblemCacheLut &RocMlirAutotuner::Impl::loadedProblemCache() {
 // compares.
 static StringRef problemOfCacheKey(StringRef cacheKey) {
   auto split = cacheKey.split('\n');
-  if (split.first == "quick" || split.first == "quicktuning" ||
-      split.first == "full" || split.first == "exhaustive")
+  if (split.first == "quick" || split.first == "full" ||
+      split.first == "exhaustive")
     return split.second;
   return cacheKey;
 }
@@ -1416,18 +1402,11 @@ bool RocMlirAutotuner::Impl::dumpProblemCache(StringRef path) const {
 RocMlirAutotuner::RocMlirAutotuner(StringRef arch,
                                    const AutotuneOptions &options)
     : impl(std::make_unique<Impl>(arch, options)) {
-  // Once per compile. The EP leaves problemCachePath empty, so a wider space
-  // only notes the bypass when the caller asked for a log.
-  if (options.space != AutotuneSpace::Quick) {
-    if (!options.problemCachePath.empty())
-      llvm::errs() << "warning: problem cache '" << options.problemCachePath
-                   << "' ignored; the LUT is used only for quick autotune "
-                      "(quicktuning, full, and exhaustive bypass it)\n";
-    else if (options.log)
-      *options.log << options.logPrefix << " "
-                   << autotuneSpaceName(options.space)
-                   << " autotune bypasses the problem-cache LUT\n";
-  }
+  // Once per compile, and only when the caller asked for a log. An external
+  // table is used as given. With none, a tuning type skips the shipped LUT.
+  if (options.problemCachePath.empty() && options.log)
+    *options.log << options.logPrefix << " " << autotuneSpaceName(options.space)
+                 << " autotune skips the shipped problem-cache LUT\n";
   impl->usable = impl->checkDevice();
 }
 
