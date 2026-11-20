@@ -27,7 +27,8 @@ module {
 // CHECK: llvm.call @wrap_hipblasLtMatmul({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
 // Verify 11 parameters:
 // - 4 pointers: state, A, B, output
-// - 6 i64: M=128, N=1024, K=4096, batch_count=1, elem_size=2, b_batch_stride=0
+// - 6 i64: M=128, N=1024, K=4096, batch_count=1, data_type=1 (HALF),
+//   b_batch_stride=0
 //   (B is rank-2 [K, N] = broadcast weight → stride = 0, compile-time const)
 // - 1 i32: op_state_slot (-1 here — --assign-op-state-slots not run in this RUN)
 
@@ -95,3 +96,28 @@ module {
 // CHECK-NOT: llvm.select
 // CHECK: %[[STRIDE:.*]] = llvm.mlir.constant(0 : i64) : i64
 // CHECK: llvm.call @wrap_matmul_i32(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %[[STRIDE]]) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64) -> i32
+
+// ----- bf16 -------------------------------------------------------------------
+// bf16 and f16 are both 2 bytes, so the call must carry the element type
+// HIPDNN_EP_DATATYPE_BFLOAT16 (2), not a byte size. The CHECK-NEXT chain pins
+// the constant to the data_type slot (4th argument from the end).
+
+module {
+  func.func @test_matmul_bf16(%ctx: !hip.context,
+                               %A: memref<1x128x4096xbf16, 1>,
+                               %B: memref<4096x1024xbf16, 1>,
+                               %output: memref<1x128x1024xbf16, 1>) {
+    hip.matmul(%ctx)
+        ins(%A, %B : memref<1x128x4096xbf16, 1>, memref<4096x1024xbf16, 1>)
+        outs(%output : memref<1x128x1024xbf16, 1>)
+    return
+  }
+}
+
+// CHECK-LABEL: llvm.func @test_matmul_bf16
+// CHECK: %[[DT:.*]] = llvm.mlir.constant(2 : i64) : i64
+// CHECK-NEXT: llvm.mlir.constant(0 : i64) : i64
+// CHECK-NEXT: llvm.mlir.constant(-1 : i32) : i32
+// CHECK-NEXT: llvm.mlir.constant(0 : i64) : i64
+// CHECK-NEXT: llvm.mlir.constant(0 : i64) : i64
+// CHECK-NEXT: llvm.call @wrap_hipblasLtMatmul({{.*}}, %[[DT]], %{{[0-9]+}}, %{{[0-9]+}}, %{{[0-9]+}}) :
