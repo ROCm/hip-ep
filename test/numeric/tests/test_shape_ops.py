@@ -213,6 +213,21 @@ class TestExpand:
             (np.int64, [1, 1, 1], [2, 3, 4]),
             # Llama-style attention-mask expand: [1, 1, S] -> [1, H, S]
             (np.int32, [1, 1, 16], [1, 8, 16]),
+            # Per-channel broadcast; the innermost run is broadcast and a
+            # multiple of the vector width.
+            (np.float16, [1, 6, 1, 1], [1, 6, 136, 128]),
+            # Same pattern with an innermost run off the vector width.
+            (np.float16, [1, 6, 1, 1], [2, 6, 17, 3]),
+            # Middle broadcast with a contiguous, vectorisable innermost run.
+            (np.float32, [3, 1, 64], [3, 5, 64]),
+            # Middle broadcast with a short contiguous innermost run.
+            (np.float32, [3, 1, 6], [3, 5, 6]),
+            # Alternating broadcast and copied dims, 8-byte elements.
+            (np.int64, [4, 1, 3, 1, 2], [4, 3, 3, 5, 2]),
+            # Every dim collapses away.
+            (np.float16, [1, 1], [1, 1]),
+            # No broadcast at all: a plain copy.
+            (np.float16, [5, 8], [5, 8]),
         ],
     )
     def test_expand(self, model_runner, dtype, in_shape, out_shape):
