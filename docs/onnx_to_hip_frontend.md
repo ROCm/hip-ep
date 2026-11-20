@@ -95,11 +95,11 @@ A LayerNorm over the last axis written as primitives
 (`ReduceMean`, `Sub`, `Pow(., 2)` or `Mul(d, d)`, `ReduceMean`, `Add(eps)`,
 then `Div` by `Sqrt` / `Pow(., 0.5)` or `Mul` by `Reciprocal(Sqrt)` /
 `Pow(., -0.5)` / `Div(1, Sqrt)`, with an optional per-channel scale and bias)
-is folded into `LayerNormalization` before lowering
-(`LayerNormFusion.cpp`). With no per-channel scale the norm takes a constant
-scale of ones. A `LayerNormalization` over the last axis whose input is a
-same-shape `Add` becomes `hip.skip_layer_norm`, which also writes the sum
-when later ops read it.
+lowers to those HIP ops. `hip-fusion-transform` then folds the chain into
+`hip.layer_norm`, which accumulates in fp32. With no per-channel scale the
+norm takes a constant scale of ones. A last-axis `hip.layer_norm` whose input
+is a same-shape `hip.add` becomes `hip.skip_layer_norm`, which also writes
+the sum when later ops read it.
 
 `layer_norm_kernel.hip` normalizes each row with a group of threads (one wave
 up to 256 16-byte chunks, e.g. 2048 fp16 or 1024 fp32 elements) that keeps the

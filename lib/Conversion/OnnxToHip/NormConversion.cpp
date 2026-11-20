@@ -726,8 +726,8 @@ mlir::LogicalResult SkipSimplifiedLayerNormToHip::matchAndRewrite(
   return mlir::success();
 }
 
-//===----------------------------------------------------------------------===//
-// Residual add + LayerNorm -> hip.skip_layer_norm
+// Helpers for hip.skip_layer_norm. A same-shape residual Add in
+// front of LayerNormalization is folded later by hip-fusion-transform.
 //===----------------------------------------------------------------------===//
 
 /// True when hip.skip_layer_norm can take these operands: f16 or f32
@@ -784,100 +784,6 @@ createSkipLayerNorm(mlir::PatternRewriter &rewriter, mlir::Location loc,
           {1, 1, 1, 1, beta ? 1 : 0, bias ? 1 : 0, withSum ? 2 : 1}));
   return rewriter.create(state);
 }
-
-/// onnx.LayerNormalization over the last axis whose input is a same-shape
-/// residual Add -> hip.skip_layer_norm.
-///
-/// Before:
-///   %s = onnx.Add(%a, %b) : tensor<1x128x768xf16>
-///   %y = onnx.LayerNormalization(%s, %gamma, %beta) {axis = -1}
-///   ... = onnx.Add(%s, %c)            // a later residual consumer
-/// After:
-///   %y, %sum = hip.skip_layer_norm(%ctx) ins(%a, %b, %gamma, beta %beta)
-///   ... = onnx.Add(%sum, %c)
-///
-/// The Add's other users read the sum the kernel writes, so the separate Add
-/// launch and its extra pass over the activations disappear. Those users
-/// must come after the norm in the same block, where the fused op is placed.
-/// Benefit 2 so it runs before the plain LayerNormToHip.
-struct ResidualLayerNormToHip : public mlir::RewritePattern {
-  ResidualLayerNormToHip(mlir::MLIRContext *ctx)
-      : RewritePattern("onnx.LayerNormalization", /*benefit=*/2, ctx) {}
-
-  mlir::LogicalResult
-  matchAndRewrite(mlir::Operation *op,
-                  mlir::PatternRewriter &rewriter) const override {
-    if (op->getNumOperands() < 2 || op->getNumOperands() > 3)
-      return rewriter.notifyMatchFailure(op, "LayerNormalization arity");
-    for (unsigned i = 1; i < op->getNumResults(); ++i)
-      if (getOptionalResult(op, i) && !op->getResult(i).use_empty())
-        return rewriter.notifyMatchFailure(op, "mean / inv_std requested");
-
-    mlir::Value input = op->getOperand(0);
-    auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
-    if (!inputType || inputType.getRank() < 1)
-      return rewriter.notifyMatchFailure(op, "input not ranked");
-    int64_t axis = -1;
-    if (auto a = op->getAttrOfType<mlir::IntegerAttr>("axis"))
-      axis = a.getSInt();
-    if (axis != -1 && axis != inputType.getRank() - 1)
-      return rewriter.notifyMatchFailure(op, "not the last axis");
-
-    mlir::Operation *add = input.getDefiningOp();
-    if (!add || add->getNumResults() != 1)
-      return rewriter.notifyMatchFailure(op, "input not an Add");
-    mlir::Value lhs, rhs;
-    if (add->getName().getStringRef() == "onnx.Add" &&
-        add->getNumOperands() == 2) {
-      lhs = add->getOperand(0);
-      rhs = add->getOperand(1);
-    } else if (auto hipAdd = mlir::dyn_cast<mlir::hip::AddOp>(add)) {
-      lhs = hipAdd.getLhs();
-      rhs = hipAdd.getRhs();
-    } else {
-      return rewriter.notifyMatchFailure(op, "input not an Add");
-    }
-    if (lhs.getType() != inputType || rhs.getType() != inputType)
-      return rewriter.notifyMatchFailure(op, "Add broadcasts");
-
-    mlir::Value gamma = op->getOperand(1);
-    mlir::Value beta = getOptionalOperand(op, 2);
-    if (!canUseSkipLayerNorm(lhs, rhs, gamma, beta, /*bias=*/nullptr,
-                             op->getResult(0).getType()))
-      return rewriter.notifyMatchFailure(op, "unsupported types");
-
-    bool withSum = false;
-    for (mlir::Operation *user : add->getUsers()) {
-      if (user == op)
-        continue;
-      if (user->getBlock() != op->getBlock() || !op->isBeforeInBlock(user))
-        return rewriter.notifyMatchFailure(op, "sum used before the norm");
-      withSum = true;
-    }
-
-    auto ctxOrFailure = getContextArg(op, rewriter);
-    if (mlir::failed(ctxOrFailure))
-      return rewriter.notifyMatchFailure(op, "missing context argument");
-
-    llvm::APFloat epsValue(9.99999974E-6f);
-    if (auto a = op->getAttrOfType<mlir::FloatAttr>("epsilon"))
-      epsValue = a.getValue();
-
-    mlir::Operation *fused = createSkipLayerNorm(
-        rewriter, op->getLoc(), *ctxOrFailure, lhs, rhs, gamma, beta,
-        /*bias=*/nullptr, epsValue.convertToFloat(), withSum);
-
-    llvm::SmallVector<mlir::Value> replacements = {fused->getResult(0)};
-    for (unsigned i = 1; i < op->getNumResults(); ++i)
-      replacements.push_back(mlir::Value{});
-    rewriter.replaceOp(op, replacements);
-    if (withSum)
-      rewriter.replaceOp(add, fused->getResult(1));
-    else
-      rewriter.eraseOp(add);
-    return mlir::success();
-  }
-};
 
 //===----------------------------------------------------------------------===//
 // onnx.Custom(SkipLayerNormalization) -> hip.skip_layer_norm
@@ -1910,9 +1816,8 @@ void populateNormConversionPatterns(RewritePatternSet &patterns,
   patterns.add<SimplifiedLayerNormToHip, RMSNormalizationToHip,
                BranchwiseRMSNormToHip, GatedRMSNormToHip, EngramGateToHip,
                SkipSimplifiedLayerNormToHip, SkipLayerNormToHip,
-               EmbedLayerNormToHip, ResidualLayerNormToHip, LayerNormToHip,
-               InstanceNormToHip, BatchNormToHip, GroupNormToHip,
-               GroupNormalizationToHip>(ctx);
+               EmbedLayerNormToHip, LayerNormToHip, InstanceNormToHip,
+               BatchNormToHip, GroupNormToHip, GroupNormalizationToHip>(ctx);
 }
 
 } // namespace hip
