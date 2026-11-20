@@ -184,6 +184,10 @@ struct RocMlirFusionPipelineOptions
       llvm::cl::desc("Outline unclaimed elementwise modules as rocMLIR "
                      "kernels of their own"),
       llvm::cl::init(true)};
+  Option<bool> int4Weights{
+      *this, "int4-weights",
+      llvm::cl::desc("Take packed-int4 weight dequantizes into the kernel"),
+      llvm::cl::init(false)};
   Option<std::string> report{
       *this, "report",
       llvm::cl::desc("Append the fusion report records to this file"),

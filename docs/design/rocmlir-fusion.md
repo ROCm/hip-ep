@@ -254,6 +254,36 @@ argument as `i4` at the unpacked shape, with the same bytes, and rocMLIR
 extracts the nibbles. A `hip.dequant_bnb4` stays outside, because its
 codebook lookup lowers to a `tosa.gather` that rocMLIR rejects.
 
+With the `int4-weights` option, an anchor also takes the packed-int4
+dequantize of its weights when they come from a constant or an argument:
+
+- the filter of a 1x1 convolution (stride 1, no padding, one group), with a
+  scale and zero point per tensor or per output channel (axis 0) and an even
+  input-channel count;
+- the B operand `[K, N]` of a `hip.matmul` or `hip.gemm` that does not
+  transpose it, with a scale and zero point per tensor, per column (axis 1,
+  `[N]`), or per block of K (axis 0, `block_size`, `[K / bs, N]`, with K a
+  multiple of the block), and an even N.
+
+The weights are signed int4 (signless `i8` storage) or unsigned int4 (`ui8`
+storage); two nibbles share a byte along the innermost dimension. After the
+trial passes, the pass splits the dequantize into
+`(dequantize(w, 1) - dequantize(zp, 1)) * scale`. The kernel takes the
+dequantize of the weights, the subtract and the multiply; the zero-point
+dequantize runs once outside, because rocMLIR cannot pack an i4 value that a
+broadcast reads. For blocked weights the kernel views the dequantized `[K, N]`
+as `[K / bs, bs, N]`, broadcasts the `[K / bs, 1, N]` scale and zero point,
+and views the result back; the dequantize itself stays per element, so no i4
+value meets a broadcast. Both differences are of small integers, so the
+weights equal those of the original dequantize exactly. HIP-to-TOSA then types
+the packed argument as `i4` (from `i8`) or `ui4` (from `ui8`) with the same
+bytes, and the dequantize casts it with `sitofp` or with rocMLIR's
+zero-extending `unsigned_cast`; the signless rewrite later keeps the `ui4`
+argument as `i4`. rocMLIR packs an i4 operand under only some perfConfigs, and
+the default one is not among them for f32, so `CompilerDriver` and
+`hip-rocmlir-compiler` set the option only when they autotune, which skips the
+configurations that fail.
+
 A rank-0 kernel operand is reshaped to rank 1 at the dispatch, and all such
 reshapes in `main_graph` share one shape constant.
 
@@ -382,13 +412,14 @@ the A operand of the second gemm through pointwise ops and row-only reshapes
 ## Options
 
 `arch` and `gemm-gemm-accel-types` describe the target. `standalone-elementwise`
-is the only fusion switch.
+and `int4-weights` are the fusion switches.
 
 | Option | EP value | Effect |
 |---|---|---|
 | `arch=<gfx>` | detected | Stamps `rock.arch` on each kernel. |
 | `gemm-gemm-accel-types=<types>` | detected | The element types for the gemm-gemm gate. |
 | `standalone-elementwise=<bool>` | `true`; `false` with `HIPDNN_EP_ROCMLIR_NO_STANDALONE_ELEMENTWISE=1` | Outlines a module that no anchor takes as an elementwise kernel. |
+| `int4-weights=<bool>` | on when rocMLIR autotuning is on | Takes packed-int4 weight dequantizes into the kernel. |
 
 ## Tests and tools
 

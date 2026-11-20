@@ -127,7 +127,8 @@ void dumpPreFusionIR(mlir::ModuleOp module,
      << " gemm-gemm-accel-types="
      << llvm::join(fuseOpts.gemmGemmAccelTypes, ",")
      << " standalone-elementwise="
-     << (fuseOpts.standaloneElementwise ? "true" : "false") << "\n";
+     << (fuseOpts.standaloneElementwise ? "true" : "false")
+     << " int4-weights=" << (fuseOpts.int4Weights ? "true" : "false") << "\n";
   module->print(os);
 }
 #endif
@@ -531,6 +532,10 @@ bool CompilerDriver::runMLIRPasses(
       // module that no anchor takes as HIP ops, to compare the two paths.
       fuseOpts.standaloneElementwise =
           !hip_env_is_on("HIPDNN_EP_ROCMLIR_NO_STANDALONE_ELEMENTWISE");
+      // Autotuning skips the perfConfigs under which rocMLIR cannot pack an
+      // i4 filter; the default perfConfig is one of them for f32.
+      mlir::hip::AutotuneSpace int4Space;
+      fuseOpts.int4Weights = mlir::hip::rocMlirAutotuneFromEnv(int4Space);
       if (mlir::failed(headPm.run(module))) {
         error_message = "ONNX->HIP passes before the rocMLIR fusion failed";
         return false;
